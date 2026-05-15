@@ -602,6 +602,197 @@ void test_pqc_dsa() {
 }
 
 
+/* ---------------------------------------------------------------------------
+ * test_mldsa_context_binding
+ *
+ * Verifies that softhsm honors the FIPS 204 context string passed via
+ * CK_SIGN_ADDITIONAL_CONTEXT.context (PKCS#11 v3.2 §6.67.5). This is the
+ * foundation that pkcs11-provider's Composite-ML-DSA support
+ * (draft-ietf-lamps-pq-composite-sigs-19 §3.2) relies on: each composite
+ * profile binds an ML-DSA signature to its profile-specific signature
+ * label as `mldsa_ctx`.
+ *
+ * Without correct context handling at the softhsm core layer, every
+ * pkcs11-provider composite-sig signature would be invalid per draft-19
+ * even with a correct provider-side patch.
+ *
+ * Coverage:
+ *  1. Sign with ctx=A, verify with ctx=A   → PASS
+ *  2. Sign with ctx=A, verify with ctx=B   → FAIL (context binding works)
+ *  3. Sign with ctx=A, verify without ctx  → FAIL (binding enforced)
+ *  4. Sign twice with DETERMINISTIC_REQUIRED + same context → byte-identical
+ *     (FIPS 204 deterministic mode honored end-to-end)
+ *  5. Sign twice with HEDGE_PREFERRED + same context → non-identical
+ *     (hedge variant honored; this also confirms the hedgeVariant field
+ *      reaches softhsm via CK_SIGN_ADDITIONAL_CONTEXT)
+ * ------------------------------------------------------------------------- */
+void test_mldsa_context_binding() {
+    CK_OBJECT_CLASS pubClass = CKO_PUBLIC_KEY;
+    CK_OBJECT_CLASS privClass = CKO_PRIVATE_KEY;
+    CK_KEY_TYPE ktype = 0x0000004a; /* CKK_ML_DSA */
+    CK_BBOOL bTrue = CK_TRUE, bFalse = CK_FALSE;
+    CK_ULONG paramSet = 2; /* CKP_ML_DSA_65 */
+
+    CK_MECHANISM keygenMech = { CKM_ML_DSA_KEY_PAIR_GEN, NULL_PTR, 0 };
+    CK_ATTRIBUTE pubTmpl[] = {
+        { CKA_CLASS,         &pubClass,  sizeof(pubClass) },
+        { CKA_KEY_TYPE,      &ktype,     sizeof(ktype) },
+        { CKA_VERIFY,        &bTrue,     sizeof(bTrue) },
+        { CKA_PARAMETER_SET, &paramSet,  sizeof(paramSet) },
+        { CKA_TOKEN,         &bFalse,    sizeof(bFalse) }
+    };
+    CK_ATTRIBUTE privTmpl[] = {
+        { CKA_CLASS,         &privClass, sizeof(privClass) },
+        { CKA_KEY_TYPE,      &ktype,     sizeof(ktype) },
+        { CKA_SIGN,          &bTrue,     sizeof(bTrue) },
+        { CKA_PARAMETER_SET, &paramSet,  sizeof(paramSet) },
+        { CKA_TOKEN,         &bFalse,    sizeof(bFalse) }
+    };
+    CK_OBJECT_HANDLE hPub = 0, hPriv = 0;
+
+    CK_RV rv = fl->C_GenerateKeyPair(hSess, &keygenMech, pubTmpl, 5, privTmpl, 5,
+                                     &hPub, &hPriv);
+    if (rv != CKR_OK) {
+        record_result("DSA-CTX", "Setup_KeyGen_MLDSA65", "FAIL",
+                      "RV=" + std::to_string(rv));
+        return;
+    }
+    record_result("DSA-CTX", "Setup_KeyGen_MLDSA65", "PASS", "ML-DSA-65 keypair generated");
+
+    const CK_BYTE msg[] = "the quick brown fox jumps over the lazy dog";
+    const CK_ULONG msgLen = sizeof(msg) - 1;
+
+    CK_BYTE ctxA[] = "COMPSIG-MLDSA65-ECDSA-P256-SHA512";
+    CK_BYTE ctxB[] = "COMPSIG-MLDSA65-Ed25519-SHA512";
+
+    auto build_mech = [](CK_HEDGE_TYPE hedge, CK_BYTE *ctx_ptr, CK_ULONG ctx_len,
+                        CK_SIGN_ADDITIONAL_CONTEXT *params_out)
+        -> CK_MECHANISM {
+        params_out->hedgeVariant = hedge;
+        params_out->pContext = ctx_ptr;
+        params_out->ulContextLen = ctx_len;
+        CK_MECHANISM m;
+        m.mechanism = CKM_ML_DSA;
+        m.pParameter = (CK_VOID_PTR)params_out;
+        m.ulParameterLen = sizeof(*params_out);
+        return m;
+    };
+
+    auto sign_with = [&](CK_MECHANISM *signMech, CK_BYTE *sig, CK_ULONG *sigLen,
+                        const char *case_name) -> bool {
+        rv = fl->C_SignInit(hSess, signMech, hPriv);
+        if (rv != CKR_OK) {
+            record_result("DSA-CTX", std::string("SignInit_") + case_name,
+                          "FAIL", "RV=" + std::to_string(rv));
+            return false;
+        }
+        rv = fl->C_Sign(hSess, (CK_BYTE_PTR)msg, msgLen, sig, sigLen);
+        if (rv != CKR_OK) {
+            record_result("DSA-CTX", std::string("Sign_") + case_name, "FAIL",
+                          "RV=" + std::to_string(rv));
+            return false;
+        }
+        return true;
+    };
+
+    /* 1. Sign with ctx=A, verify with ctx=A → PASS */
+    CK_SIGN_ADDITIONAL_CONTEXT pA;
+    CK_MECHANISM mechSignA = build_mech(CKH_HEDGE_PREFERRED, ctxA,
+                                        sizeof(ctxA) - 1, &pA);
+    CK_BYTE sigA[5000];
+    CK_ULONG sigALen = sizeof(sigA);
+    if (sign_with(&mechSignA, sigA, &sigALen, "ctxA")) {
+        record_result("DSA-CTX", "Sign_ctxA", "PASS",
+                      "siglen=" + std::to_string(sigALen));
+        CK_SIGN_ADDITIONAL_CONTEXT pAv;
+        CK_MECHANISM mechVerifyA = build_mech(CKH_HEDGE_PREFERRED, ctxA,
+                                              sizeof(ctxA) - 1, &pAv);
+        rv = fl->C_VerifyInit(hSess, &mechVerifyA, hPub);
+        if (rv == CKR_OK) {
+            rv = fl->C_Verify(hSess, (CK_BYTE_PTR)msg, msgLen, sigA, sigALen);
+            record_result("DSA-CTX", "Verify_ctxA_matching",
+                          rv == CKR_OK ? "PASS" : "FAIL",
+                          "expected CKR_OK got RV=" + std::to_string(rv));
+        } else {
+            record_result("DSA-CTX", "VerifyInit_ctxA", "FAIL",
+                          "RV=" + std::to_string(rv));
+        }
+
+        /* 2. Verify same sig with ctx=B → must FAIL (context binding) */
+        CK_SIGN_ADDITIONAL_CONTEXT pBv;
+        CK_MECHANISM mechVerifyB = build_mech(CKH_HEDGE_PREFERRED, ctxB,
+                                              sizeof(ctxB) - 1, &pBv);
+        rv = fl->C_VerifyInit(hSess, &mechVerifyB, hPub);
+        if (rv == CKR_OK) {
+            rv = fl->C_Verify(hSess, (CK_BYTE_PTR)msg, msgLen, sigA, sigALen);
+            /* Expecting CKR_SIGNATURE_INVALID (0x000000C0) */
+            record_result("DSA-CTX", "Verify_ctxB_should_fail",
+                          rv != CKR_OK ? "PASS" : "FAIL",
+                          rv != CKR_OK
+                              ? "binding works; RV=" + std::to_string(rv)
+                              : "CONTEXT BINDING BROKEN: verified with wrong ctx");
+        } else {
+            record_result("DSA-CTX", "VerifyInit_ctxB", "FAIL",
+                          "RV=" + std::to_string(rv));
+        }
+
+        /* 3. Verify same sig with NO context → must FAIL */
+        CK_MECHANISM mechVerifyEmpty = { CKM_ML_DSA, NULL_PTR, 0 };
+        rv = fl->C_VerifyInit(hSess, &mechVerifyEmpty, hPub);
+        if (rv == CKR_OK) {
+            rv = fl->C_Verify(hSess, (CK_BYTE_PTR)msg, msgLen, sigA, sigALen);
+            record_result("DSA-CTX", "Verify_noctx_should_fail",
+                          rv != CKR_OK ? "PASS" : "FAIL",
+                          rv != CKR_OK
+                              ? "binding enforced; RV=" + std::to_string(rv)
+                              : "CONTEXT BINDING BROKEN: verified without ctx");
+        } else {
+            record_result("DSA-CTX", "VerifyInit_noctx", "FAIL",
+                          "RV=" + std::to_string(rv));
+        }
+    }
+
+    /* 4. Deterministic mode → same signature twice */
+    CK_SIGN_ADDITIONAL_CONTEXT pDet1, pDet2;
+    CK_MECHANISM mechDet1 = build_mech(CKH_DETERMINISTIC_REQUIRED, ctxA,
+                                       sizeof(ctxA) - 1, &pDet1);
+    CK_MECHANISM mechDet2 = build_mech(CKH_DETERMINISTIC_REQUIRED, ctxA,
+                                       sizeof(ctxA) - 1, &pDet2);
+    CK_BYTE sigD1[5000], sigD2[5000];
+    CK_ULONG sigD1Len = sizeof(sigD1), sigD2Len = sizeof(sigD2);
+    bool d1 = sign_with(&mechDet1, sigD1, &sigD1Len, "deterministic_1");
+    bool d2 = sign_with(&mechDet2, sigD2, &sigD2Len, "deterministic_2");
+    if (d1 && d2) {
+        bool identical = (sigD1Len == sigD2Len)
+                         && memcmp(sigD1, sigD2, sigD1Len) == 0;
+        record_result(
+            "DSA-CTX", "Deterministic_byte_equal", identical ? "PASS" : "FAIL",
+            identical
+                ? "deterministic mode produces identical signatures (FIPS 204)"
+                : "HEDGE BINDING BROKEN: deterministic mode produced different bytes");
+    }
+
+    /* 5. Hedged mode → signatures should differ (probabilistic) */
+    CK_SIGN_ADDITIONAL_CONTEXT pH1, pH2;
+    CK_MECHANISM mechHedge1 = build_mech(CKH_HEDGE_REQUIRED, ctxA,
+                                         sizeof(ctxA) - 1, &pH1);
+    CK_MECHANISM mechHedge2 = build_mech(CKH_HEDGE_REQUIRED, ctxA,
+                                         sizeof(ctxA) - 1, &pH2);
+    CK_BYTE sigH1[5000], sigH2[5000];
+    CK_ULONG sigH1Len = sizeof(sigH1), sigH2Len = sizeof(sigH2);
+    bool h1 = sign_with(&mechHedge1, sigH1, &sigH1Len, "hedge_1");
+    bool h2 = sign_with(&mechHedge2, sigH2, &sigH2Len, "hedge_2");
+    if (h1 && h2) {
+        bool different = (sigH1Len != sigH2Len)
+                         || memcmp(sigH1, sigH2, sigH1Len) != 0;
+        record_result(
+            "DSA-CTX", "Hedge_non_deterministic", different ? "PASS" : "FAIL",
+            different
+                ? "hedged mode produces distinct signatures (probabilistic)"
+                : "HEDGE BINDING WEAK: hedged mode produced identical bytes");
+    }
+}
+
 void test_multipart_signing() {
     CK_OBJECT_CLASS pubClass = CKO_PUBLIC_KEY;
     CK_OBJECT_CLASS privClass = CKO_PRIVATE_KEY;
@@ -2243,6 +2434,7 @@ int main(int argc, char** argv) {
     if (opt_category == "all" || opt_category == "attr") { refresh_session(); test_key_attributes(); }
     if (opt_category == "all" || opt_category == "pqc-kem") { refresh_session(); test_pqc_kem(); }
     if (opt_category == "all" || opt_category == "pqc-dsa") { refresh_session(); test_pqc_dsa(); }
+    if (opt_category == "all" || opt_category == "pqc-dsa") { refresh_session(); test_mldsa_context_binding(); }
     if (opt_category == "all" || opt_category == "pqc-dsa") { refresh_session(); test_multipart_signing(); }
     if (opt_category == "all" || opt_category == "classical") { refresh_session(); test_multipart_ecdsa(); }
     if (opt_category == "all" || opt_category == "classical") { refresh_session(); test_multipart_eddsa(); }
