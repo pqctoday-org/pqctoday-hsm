@@ -42,8 +42,25 @@ DISPATCH_MLDSA_FN(settable_ctx_params);
 static CK_RV p11prov_mldsa_set_mechanism(P11PROV_SIG_CTX *sigctx)
 {
     sigctx->mechanism.mechanism = CKM_ML_DSA;
-    sigctx->mechanism.pParameter = NULL;
-    sigctx->mechanism.ulParameterLen = 0;
+    /* If a FIPS 204 context string was supplied via
+     * OSSL_SIGNATURE_PARAM_CONTEXT_STRING (collected in mldsa_params.pContext)
+     * or a non-default hedge variant was selected, plumb the resulting
+     * CK_SIGN_ADDITIONAL_CONTEXT through the mechanism's pParameter so
+     * the underlying token actually sees it. Without this, softhsm and
+     * any other PKCS#11 v3.2 ML-DSA token sign without context — fine for
+     * pure ML-DSA in TLS 1.3 (no context needed) but broken for
+     * Composite-ML-DSA (draft-ietf-lamps-pq-composite-sigs-19 §3.2 step 4
+     * requires mldsa_ctx=Label) and any caller that explicitly sets a
+     * context. The sigctx->mldsa_params struct is a member of sigctx
+     * with the right lifetime for the duration of C_SignInit. */
+    if (sigctx->mldsa_params.pContext != NULL
+        && sigctx->mldsa_params.ulContextLen > 0) {
+        sigctx->mechanism.pParameter = &sigctx->mldsa_params;
+        sigctx->mechanism.ulParameterLen = sizeof(sigctx->mldsa_params);
+    } else {
+        sigctx->mechanism.pParameter = NULL;
+        sigctx->mechanism.ulParameterLen = 0;
+    }
     return CKR_OK;
 }
 
