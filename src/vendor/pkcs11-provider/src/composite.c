@@ -209,56 +209,291 @@ int p11prov_composite_build_mprime(
     return 1;
 }
 
-/* ---------------------------------------------------------------------------
- * Phase 3 of #59 — to be implemented in a follow-up commit. The functions
- * below are intentionally NOT YET wired into provider.c's dispatch tables;
- * adding them prematurely could cause OpenSSL to attempt loads/signs that
- * fail at runtime. The skeleton is here for design review; the actual code
- * lands when the integration tests in pqctoday-hub are ready to exercise
- * the full handshake path.
+/* ===========================================================================
+ *                            Keymgmt (phase 3a)
+ * ===========================================================================
  *
- * Implementation plan:
+ * A composite key is simply two P11PROV_OBJ pointers — one for the PQ
+ * subkey, one for the traditional subkey — plus a profile pointer telling
+ * us which composite OID this is. softhsm holds the actual key material
+ * for each subkey; we just orchestrate.
  *
- *   p11prov_composite_decoder_*
- *     Accept a custom PEM block:
- *       -----BEGIN PQCTODAY COMPOSITE KEY-----
- *       profile: <signature_label>
- *       pq:        <pkcs11: URI>
- *       classical: <pkcs11: URI>
- *       -----END PQCTODAY COMPOSITE KEY-----
- *     Parse the two URIs, load each subkey via existing p11prov store/load
- *     paths, return a composite key handle holding both.
+ * Application code (e.g. tls_simulation_hsm.c) builds a composite key
+ * programmatically via p11prov_composite_obj_new_from_subkeys, then hands
+ * it to OpenSSL via the load dispatch.
+ * ========================================================================= */
+
+struct p11prov_composite_obj {
+    P11PROV_CTX *provctx;
+    const struct p11prov_composite_profile *profile;
+    P11PROV_OBJ *pq_obj;
+    P11PROV_OBJ *classical_obj;
+};
+
+typedef struct p11prov_composite_obj P11PROV_COMPOSITE_OBJ;
+
+/* Build a composite key from two pre-loaded softhsm objects.
+ * Takes a reference on each subkey via p11prov_obj_ref; caller retains
+ * its own references on input.
+ * Returns NULL on alloc failure. */
+P11PROV_COMPOSITE_OBJ *p11prov_composite_obj_new_from_subkeys(
+    P11PROV_CTX *provctx,
+    const struct p11prov_composite_profile *profile,
+    P11PROV_OBJ *pq_obj,
+    P11PROV_OBJ *classical_obj)
+{
+    P11PROV_COMPOSITE_OBJ *obj;
+
+    if (provctx == NULL || profile == NULL || pq_obj == NULL
+        || classical_obj == NULL) {
+        return NULL;
+    }
+
+    obj = OPENSSL_zalloc(sizeof(*obj));
+    if (obj == NULL) {
+        return NULL;
+    }
+    obj->provctx = provctx;
+    obj->profile = profile;
+    obj->pq_obj = p11prov_obj_ref(pq_obj);
+    obj->classical_obj = p11prov_obj_ref(classical_obj);
+    if (obj->pq_obj == NULL || obj->classical_obj == NULL) {
+        p11prov_obj_free(obj->pq_obj);
+        p11prov_obj_free(obj->classical_obj);
+        OPENSSL_free(obj);
+        return NULL;
+    }
+    return obj;
+}
+
+/* OSSL_FUNC_KEYMGMT_NEW: empty key (no subkeys yet). The application
+ * builds populated composite keys via p11prov_composite_obj_new_from_subkeys
+ * and passes them via OSSL_FUNC_KEYMGMT_LOAD.
+ * Per-profile newctx is just NEW with the matching profile pointer cached
+ * in the caller. */
+static void *p11prov_composite_keymgmt_new_impl(
+    void *provctx,
+    const struct p11prov_composite_profile *profile)
+{
+    P11PROV_COMPOSITE_OBJ *obj = OPENSSL_zalloc(sizeof(*obj));
+    if (obj == NULL) {
+        return NULL;
+    }
+    obj->provctx = (P11PROV_CTX *)provctx;
+    obj->profile = profile;
+    return obj;
+}
+
+static void p11prov_composite_keymgmt_free(void *keydata)
+{
+    P11PROV_COMPOSITE_OBJ *obj = (P11PROV_COMPOSITE_OBJ *)keydata;
+    if (obj == NULL) {
+        return;
+    }
+    p11prov_obj_free(obj->pq_obj);
+    p11prov_obj_free(obj->classical_obj);
+    OPENSSL_free(obj);
+}
+
+/* OSSL_FUNC_KEYMGMT_LOAD takes (reference, reference_sz) where the
+ * reference is whatever the decoder produced. Our convention: the
+ * reference IS a pointer to a P11PROV_COMPOSITE_OBJ built by
+ * p11prov_composite_obj_new_from_subkeys. The keymgmt takes ownership. */
+static void *p11prov_composite_keymgmt_load(const void *reference,
+                                            size_t reference_sz)
+{
+    P11PROV_COMPOSITE_OBJ *obj;
+
+    if (reference == NULL || reference_sz != sizeof(obj)) {
+        return NULL;
+    }
+    obj = *(P11PROV_COMPOSITE_OBJ **)reference;
+    /* OSSL_FUNC_KEYMGMT_LOAD semantics: ownership transfers to keymgmt */
+    *(P11PROV_COMPOSITE_OBJ **)reference = NULL;
+    return obj;
+}
+
+/* OSSL_FUNC_KEYMGMT_HAS: keypair selection requires both subkeys; public
+ * selection requires both public keys present. softhsm publishes
+ * CKA_VALUE_LEN for ML-DSA pubkeys and the EC point for ECDSA, so as long
+ * as both objects exist, we report ready. */
+static int p11prov_composite_keymgmt_has(const void *keydata, int selection)
+{
+    const P11PROV_COMPOSITE_OBJ *obj = (const P11PROV_COMPOSITE_OBJ *)keydata;
+    if (obj == NULL) {
+        return 0;
+    }
+    if (selection & (OSSL_KEYMGMT_SELECT_PUBLIC_KEY
+                     | OSSL_KEYMGMT_SELECT_PRIVATE_KEY
+                     | OSSL_KEYMGMT_SELECT_KEYPAIR)) {
+        if (obj->pq_obj == NULL || obj->classical_obj == NULL) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/* OSSL_FUNC_KEYMGMT_MATCH: composite keys match when both their profiles
+ * agree and both subkey handles are the same softhsm object. */
+static int p11prov_composite_keymgmt_match(const void *keydata1,
+                                           const void *keydata2,
+                                           int selection)
+{
+    const P11PROV_COMPOSITE_OBJ *a = (const P11PROV_COMPOSITE_OBJ *)keydata1;
+    const P11PROV_COMPOSITE_OBJ *b = (const P11PROV_COMPOSITE_OBJ *)keydata2;
+
+    if (a == NULL || b == NULL) {
+        return 0;
+    }
+    if (a->profile != b->profile) {
+        return 0;
+    }
+    if (selection & (OSSL_KEYMGMT_SELECT_PUBLIC_KEY
+                     | OSSL_KEYMGMT_SELECT_PRIVATE_KEY
+                     | OSSL_KEYMGMT_SELECT_KEYPAIR)) {
+        if (a->pq_obj == NULL || b->pq_obj == NULL
+            || a->classical_obj == NULL || b->classical_obj == NULL) {
+            return 0;
+        }
+        if (p11prov_obj_get_handle(a->pq_obj)
+                != p11prov_obj_get_handle(b->pq_obj)
+            || p11prov_obj_get_handle(a->classical_obj)
+                   != p11prov_obj_get_handle(b->classical_obj)) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static const OSSL_PARAM *
+p11prov_composite_keymgmt_gettable_params(void *provctx)
+{
+    static const OSSL_PARAM params[] = {
+        OSSL_PARAM_int(OSSL_PKEY_PARAM_BITS, NULL),
+        OSSL_PARAM_int(OSSL_PKEY_PARAM_SECURITY_BITS, NULL),
+        OSSL_PARAM_int(OSSL_PKEY_PARAM_MAX_SIZE, NULL),
+        OSSL_PARAM_END,
+    };
+    (void)provctx;
+    return params;
+}
+
+static int p11prov_composite_keymgmt_get_params(void *keydata,
+                                                OSSL_PARAM params[])
+{
+    const P11PROV_COMPOSITE_OBJ *obj = (const P11PROV_COMPOSITE_OBJ *)keydata;
+    OSSL_PARAM *p;
+    int sec_bits;
+    int max_size;
+
+    if (obj == NULL || obj->profile == NULL) {
+        return 0;
+    }
+    switch (obj->profile->mldsa_param_set) {
+    case CKP_ML_DSA_44:
+        sec_bits = 128;
+        break;
+    case CKP_ML_DSA_65:
+        sec_bits = 192;
+        break;
+    case CKP_ML_DSA_87:
+        sec_bits = 256;
+        break;
+    default:
+        return 0;
+    }
+    /* Max composite signature size: PQ sig + maximum reasonable classical sig.
+     * RSA-2048-PSS = 256 bytes, ECDSA-P256 DER ≤ 72, ECDSA-P384 DER ≤ 104.
+     * Pick a safe upper bound for each profile. */
+    max_size = (int)obj->profile->mldsa_sig_bytes + 256;
+
+    if ((p = OSSL_PARAM_locate(params, OSSL_PKEY_PARAM_SECURITY_BITS)) != NULL
+        && !OSSL_PARAM_set_int(p, sec_bits)) {
+        return 0;
+    }
+    if ((p = OSSL_PARAM_locate(params, OSSL_PKEY_PARAM_BITS)) != NULL
+        && !OSSL_PARAM_set_int(p, sec_bits * 2)) {
+        return 0;
+    }
+    if ((p = OSSL_PARAM_locate(params, OSSL_PKEY_PARAM_MAX_SIZE)) != NULL
+        && !OSSL_PARAM_set_int(p, max_size)) {
+        return 0;
+    }
+    return 1;
+}
+
+/* Per-profile newctx wrappers — these are what OSSL_FUNC_KEYMGMT_NEW
+ * dispatches to. Each profile gets its own OSSL_DISPATCH array. */
+#define DEFINE_COMPOSITE_KEYMGMT_NEW(suffix, idx) \
+    static void *p11prov_composite_##suffix##_keymgmt_new(void *provctx) \
+    { \
+        return p11prov_composite_keymgmt_new_impl( \
+            provctx, &p11prov_composite_profiles[idx]); \
+    }
+
+DEFINE_COMPOSITE_KEYMGMT_NEW(mldsa44_rsa2048_pss, 0)
+DEFINE_COMPOSITE_KEYMGMT_NEW(mldsa65_ecdsa_p256, 1)
+DEFINE_COMPOSITE_KEYMGMT_NEW(mldsa87_ecdsa_p384, 2)
+#undef DEFINE_COMPOSITE_KEYMGMT_NEW
+
+#define COMPOSITE_KEYMGMT_DISPATCH(suffix) \
+    static const OSSL_DISPATCH \
+        p11prov_composite_##suffix##_keymgmt_functions[] = { \
+            { OSSL_FUNC_KEYMGMT_NEW, \
+              (void (*)(void))p11prov_composite_##suffix##_keymgmt_new }, \
+            { OSSL_FUNC_KEYMGMT_FREE, \
+              (void (*)(void))p11prov_composite_keymgmt_free }, \
+            { OSSL_FUNC_KEYMGMT_LOAD, \
+              (void (*)(void))p11prov_composite_keymgmt_load }, \
+            { OSSL_FUNC_KEYMGMT_HAS, \
+              (void (*)(void))p11prov_composite_keymgmt_has }, \
+            { OSSL_FUNC_KEYMGMT_MATCH, \
+              (void (*)(void))p11prov_composite_keymgmt_match }, \
+            { OSSL_FUNC_KEYMGMT_GET_PARAMS, \
+              (void (*)(void))p11prov_composite_keymgmt_get_params }, \
+            { OSSL_FUNC_KEYMGMT_GETTABLE_PARAMS, \
+              (void (*)(void))p11prov_composite_keymgmt_gettable_params }, \
+            { 0, NULL }, \
+        }
+
+COMPOSITE_KEYMGMT_DISPATCH(mldsa44_rsa2048_pss);
+COMPOSITE_KEYMGMT_DISPATCH(mldsa65_ecdsa_p256);
+COMPOSITE_KEYMGMT_DISPATCH(mldsa87_ecdsa_p384);
+#undef COMPOSITE_KEYMGMT_DISPATCH
+
+/* External dispatch tables consumed by provider.c's ADD_ALGO_EXT block.
+ * Naming follows the existing p11prov_<algo>_keymgmt_functions convention. */
+const OSSL_DISPATCH *
+p11prov_composite_mldsa44_rsa2048_pss_keymgmt_dispatch(void)
+{
+    return p11prov_composite_mldsa44_rsa2048_pss_keymgmt_functions;
+}
+const OSSL_DISPATCH *
+p11prov_composite_mldsa65_ecdsa_p256_keymgmt_dispatch(void)
+{
+    return p11prov_composite_mldsa65_ecdsa_p256_keymgmt_functions;
+}
+const OSSL_DISPATCH *
+p11prov_composite_mldsa87_ecdsa_p384_keymgmt_dispatch(void)
+{
+    return p11prov_composite_mldsa87_ecdsa_p384_keymgmt_functions;
+}
+
+/* ===========================================================================
+ * Signature dispatch (phase 3b) — to land in a follow-up commit.
  *
- *   p11prov_composite_keymgmt_*
- *     Hold two P11PROV_OBJ pointers (pq_key, classical_key).
- *     free() releases both via existing p11prov_obj_free.
- *     has() returns SELECT_KEYPAIR when both are present.
- *     match() compares by composite OID + both subkey URIs.
+ * The signature CTX will hold two underlying P11PROV_SIG_CTXs (one per
+ * subkey) plus an accumulating TBS buffer. At digest_sign_final time,
+ * compute M' via p11prov_composite_build_mprime, call p11prov_sig_operate
+ * on each underlying sigctx with M' as input, and concatenate the outputs.
  *
- *   p11prov_composite_sign_*
- *     digest_sign_init: stash TBS bytes
- *     digest_sign_final:
- *       1. Compute M' via p11prov_composite_build_mprime
- *       2. Set CK_ML_DSA_PARAMS.context = profile->signature_label,
- *          contextLen = strlen(signature_label)
- *       3. Call existing p11prov_sign_pkcs11(pq_key, &mldsa_mech, M') →
- *          softhsm C_Sign(CKM_ML_DSA) with context parameter
- *       4. Call existing p11prov_sign_pkcs11(classical_key, &classical_mech, M') →
- *          softhsm C_Sign(CKM_ECDSA / CKM_RSA_PKCS_PSS) without context
- *       5. Concatenate: out = mldsaSig || classicalSig (raw, no SEQUENCE)
+ * Per-profile underlying mechanisms:
+ *   MLDSA44+RSA2048-PSS-SHA256:  CKM_ML_DSA (ctx=Label) + CKM_SHA256_RSA_PKCS_PSS
+ *   MLDSA65+ECDSA-P256-SHA512:   CKM_ML_DSA (ctx=Label) + CKM_ECDSA_SHA512
+ *   MLDSA87+ECDSA-P384-SHA512:   CKM_ML_DSA (ctx=Label) + CKM_ECDSA_SHA512
  *
- *   p11prov_composite_verify_*
- *     Reverse of sign: split input at profile->mldsa_sig_bytes, verify each
- *     half via existing p11prov_verify_pkcs11, AND combine per draft-19 §3.3
- *     (must succeed only when BOTH halves verify).
- *
- *   p11prov_composite_<oid>_keymgmt_functions[] / signature_functions[] /
- *   decoder_functions[]
- *     One OSSL_DISPATCH array per composite OID, registered in provider.c's
- *     ADD_ALGO_EXT block (line 1486-1488 pattern).
- *
- * Until phase 3 lands, the provider continues to advertise the composite
- * sigalgs via tls.c (commit 59a2c26) but no composite key can be loaded
- * yet, so OpenSSL will never select these sigalgs in practice — they
- * appear in `openssl list` output only.
- * ------------------------------------------------------------------------- */
+ * The CKM_ML_DSA mechanism takes a CK_ML_DSA_PARAMS in pParameter with
+ * context=profile->signature_label, contextLen=strlen(signature_label).
+ * softhsm's OSSLMLDSA.cpp:339-344 reads this and forwards via
+ * OSSL_SIGNATURE_PARAM_CONTEXT_STRING to OpenSSL's EVP_DigestSign.
+ * ========================================================================= */
