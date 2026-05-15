@@ -216,6 +216,50 @@ int mldsa87_max_tls = 0;
 int mldsa87_min_dtls = -1;
 int mldsa87_max_dtls = -1;
 
+/* ------------------------------------------------------------------------
+ * Composite ML-DSA signature schemes per draft-ietf-lamps-pq-composite-sigs-19
+ *
+ * TLS 1.3 IANA code points for composite-sig are not yet allocated (the LAMPS
+ * draft is pre-RFC). We use values from the TLS reserved-private-use range
+ * (0xFE00-0xFFFF) until IANA allocates official ones; bump when the RFC ships.
+ *
+ * Composite OIDs are stable in draft-19 §6 under the PKIX alg arc 1.3.6.1.5.5.7.6.x.
+ *
+ * The actual sign/verify dispatch and key handling for these algorithms live
+ * in composite.c — this file only registers them as TLS sigalg capabilities
+ * so OpenSSL's TLS handshake code negotiates them.
+ * ------------------------------------------------------------------------ */
+
+#define mldsa44_rsa2048_pss_iana_name "mldsa44_rsa2048_pss_sha256"
+#define mldsa44_rsa2048_pss_name "ML-DSA-44-RSA2048-PSS-SHA256"
+#define mldsa44_rsa2048_pss_oid "1.3.6.1.5.5.7.6.37"
+unsigned int mldsa44_rsa2048_pss_code_point = 0xFEB0; /* private use; draft-19 */
+unsigned int mldsa44_rsa2048_pss_sec_bits = 128;
+int mldsa44_rsa2048_pss_min_tls = TLS1_3_VERSION;
+int mldsa44_rsa2048_pss_max_tls = 0;
+int mldsa44_rsa2048_pss_min_dtls = -1;
+int mldsa44_rsa2048_pss_max_dtls = -1;
+
+#define mldsa65_ecdsa_p256_iana_name "mldsa65_ecdsa_p256_sha512"
+#define mldsa65_ecdsa_p256_name "ML-DSA-65-ECDSA-P256-SHA512"
+#define mldsa65_ecdsa_p256_oid "1.3.6.1.5.5.7.6.45"
+unsigned int mldsa65_ecdsa_p256_code_point = 0xFEB1; /* private use; draft-19 */
+unsigned int mldsa65_ecdsa_p256_sec_bits = 192;
+int mldsa65_ecdsa_p256_min_tls = TLS1_3_VERSION;
+int mldsa65_ecdsa_p256_max_tls = 0;
+int mldsa65_ecdsa_p256_min_dtls = -1;
+int mldsa65_ecdsa_p256_max_dtls = -1;
+
+#define mldsa87_ecdsa_p384_iana_name "mldsa87_ecdsa_p384_sha512"
+#define mldsa87_ecdsa_p384_name "ML-DSA-87-ECDSA-P384-SHA512"
+#define mldsa87_ecdsa_p384_oid "1.3.6.1.5.5.7.6.49"
+unsigned int mldsa87_ecdsa_p384_code_point = 0xFEB2; /* private use; draft-19 */
+unsigned int mldsa87_ecdsa_p384_sec_bits = 256;
+int mldsa87_ecdsa_p384_min_tls = TLS1_3_VERSION;
+int mldsa87_ecdsa_p384_max_tls = 0;
+int mldsa87_ecdsa_p384_min_dtls = -1;
+int mldsa87_ecdsa_p384_max_dtls = -1;
+
 #define TLS_SIGALG_ENTRY(pre) \
     { OSSL_PARAM_utf8_string(OSSL_CAPABILITY_TLS_SIGALG_IANA_NAME, \
                              (void *)pre##_iana_name, \
@@ -243,6 +287,13 @@ struct {
     { "mldsa44", TLS_SIGALG_ENTRY(mldsa44) },
     { "mldsa65", TLS_SIGALG_ENTRY(mldsa65) },
     { "mldsa87", TLS_SIGALG_ENTRY(mldsa87) },
+    /* draft-ietf-lamps-pq-composite-sigs-19 — see composite.c for sign/verify */
+    { "mldsa44_rsa2048_pss_sha256",
+      TLS_SIGALG_ENTRY(mldsa44_rsa2048_pss) },
+    { "mldsa65_ecdsa_p256_sha512",
+      TLS_SIGALG_ENTRY(mldsa65_ecdsa_p256) },
+    { "mldsa87_ecdsa_p384_sha512",
+      TLS_SIGALG_ENTRY(mldsa87_ecdsa_p384) },
 #endif
 };
 
