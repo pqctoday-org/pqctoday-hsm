@@ -369,6 +369,77 @@ static int p11prov_composite_keymgmt_match(const void *keydata1,
     return 1;
 }
 
+/* OpenSSL-side handshake for handing an already-built composite key to
+ * EVP_PKEY_fromdata. Caller passes the P11PROV_COMPOSITE_OBJ pointer
+ * (returned by p11prov_composite_obj_new_from_subkeys) inside an
+ * OSSL_PARAM_OCTET_STRING with this name. The IMPORT dispatch consumes
+ * the reference (transfers ownership into the keydata) and the resulting
+ * EVP_PKEY can be passed to SSL_CTX_use_PrivateKey.
+ *
+ * The param name is namespaced under "pqctoday" so it never collides
+ * with stock OpenSSL OSSL_PARAM names. */
+#define P11PROV_COMPOSITE_PARAM_REFERENCE "pqctoday-composite-ref"
+
+static const OSSL_PARAM *
+p11prov_composite_keymgmt_import_types(int selection)
+{
+    static const OSSL_PARAM params[] = {
+        OSSL_PARAM_octet_string(P11PROV_COMPOSITE_PARAM_REFERENCE, NULL, 0),
+        OSSL_PARAM_END,
+    };
+    (void)selection;
+    return params;
+}
+
+static int p11prov_composite_keymgmt_import(void *keydata, int selection,
+                                            const OSSL_PARAM params[])
+{
+    P11PROV_COMPOSITE_OBJ *dst = (P11PROV_COMPOSITE_OBJ *)keydata;
+    const OSSL_PARAM *p;
+    P11PROV_COMPOSITE_OBJ *src;
+    size_t reflen;
+    (void)selection;
+
+    if (dst == NULL || params == NULL) {
+        return RET_OSSL_ERR;
+    }
+    p = OSSL_PARAM_locate_const(params, P11PROV_COMPOSITE_PARAM_REFERENCE);
+    if (p == NULL) {
+        return RET_OSSL_ERR;
+    }
+    if (p->data_type != OSSL_PARAM_OCTET_STRING
+        || p->data_size != sizeof(src)) {
+        return RET_OSSL_ERR;
+    }
+    /* Caller stored a pointer-sized blob holding our pointer. */
+    memcpy(&src, p->data, sizeof(src));
+    reflen = p->data_size;
+    (void)reflen;
+    if (src == NULL || src->profile == NULL || src->pq_obj == NULL
+        || src->classical_obj == NULL) {
+        return RET_OSSL_ERR;
+    }
+    /* The dst was created with the per-profile NEW that cached the profile.
+     * Confirm both sides agree before stealing the subkey refs. */
+    if (dst->profile != src->profile) {
+        return RET_OSSL_ERR;
+    }
+    /* Take ownership of the subkey refs. src is freed (without freeing the
+     * refs we just stole). */
+    if (dst->pq_obj != NULL) {
+        p11prov_obj_free(dst->pq_obj);
+    }
+    if (dst->classical_obj != NULL) {
+        p11prov_obj_free(dst->classical_obj);
+    }
+    dst->pq_obj = src->pq_obj;
+    dst->classical_obj = src->classical_obj;
+    src->pq_obj = NULL;
+    src->classical_obj = NULL;
+    OPENSSL_free(src);
+    return RET_OSSL_OK;
+}
+
 static const OSSL_PARAM *
 p11prov_composite_keymgmt_gettable_params(void *provctx)
 {
@@ -457,6 +528,10 @@ DEFINE_COMPOSITE_KEYMGMT_NEW(mldsa87_ecdsa_p384, 2)
               (void (*)(void))p11prov_composite_keymgmt_get_params }, \
             { OSSL_FUNC_KEYMGMT_GETTABLE_PARAMS, \
               (void (*)(void))p11prov_composite_keymgmt_gettable_params }, \
+            { OSSL_FUNC_KEYMGMT_IMPORT, \
+              (void (*)(void))p11prov_composite_keymgmt_import }, \
+            { OSSL_FUNC_KEYMGMT_IMPORT_TYPES, \
+              (void (*)(void))p11prov_composite_keymgmt_import_types }, \
             { 0, NULL }, \
         }
 
