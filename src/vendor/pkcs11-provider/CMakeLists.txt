@@ -10,6 +10,7 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/src 
 set(PROVIDER_SOURCES
     src/asymmetric_cipher.c
     src/cipher.c
+    src/composite.c
     src/debug.c
     src/decoder.c
     src/digests.c

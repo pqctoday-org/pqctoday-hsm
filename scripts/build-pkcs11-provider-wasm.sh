@@ -61,6 +61,7 @@ mkdir -p "$BUILD_DIR" "$INSTALL_LIB"
 SOURCES=(
     "asymmetric_cipher.c"
     "cipher.c"
+    "composite.c"
     "debug.c"
     "decoder.c"
     "digests.c"
