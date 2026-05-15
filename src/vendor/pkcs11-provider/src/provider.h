@@ -136,6 +136,31 @@
     "ML-DSA-87:MLDSA87:2.16.840.1.101.3.4.3.19:id-ml-dsa-87"
 #define P11PROV_DESCS_ML_DSA_87 "PKCS11 ML-DSA-87 implementation"
 
+/* Composite-ML-DSA signature profiles per draft-ietf-lamps-pq-composite-sigs-19.
+ * OIDs are stable in draft-19 §6; PKIX alg arc 1.3.6.1.5.5.7.6.{37,45,49}. */
+#define P11PROV_NAMES_COMPOSITE_MLDSA44_RSA2048_PSS \
+    "MLDSA44-RSA2048-PSS-SHA256:id-MLDSA44-RSA2048-PSS-SHA256:1.3.6.1.5.5.7.6.37"
+#define P11PROV_DESCS_COMPOSITE_MLDSA44_RSA2048_PSS \
+    "PKCS11 Composite ML-DSA-44 + RSA-2048-PSS-SHA256 (draft-lamps-19)"
+
+#define P11PROV_NAMES_COMPOSITE_MLDSA65_ECDSA_P256 \
+    "MLDSA65-ECDSA-P256-SHA512:id-MLDSA65-ECDSA-P256-SHA512:1.3.6.1.5.5.7.6.45"
+#define P11PROV_DESCS_COMPOSITE_MLDSA65_ECDSA_P256 \
+    "PKCS11 Composite ML-DSA-65 + ECDSA-P256-SHA512 (draft-lamps-19)"
+
+#define P11PROV_NAMES_COMPOSITE_MLDSA87_ECDSA_P384 \
+    "MLDSA87-ECDSA-P384-SHA512:id-MLDSA87-ECDSA-P384-SHA512:1.3.6.1.5.5.7.6.49"
+#define P11PROV_DESCS_COMPOSITE_MLDSA87_ECDSA_P384 \
+    "PKCS11 Composite ML-DSA-87 + ECDSA-P384-SHA512 (draft-lamps-19)"
+
+/* Composite keymgmt / signature dispatch tables defined in composite.c */
+extern const OSSL_DISPATCH p11prov_composite_mldsa44_rsa2048_pss_keymgmt_functions[];
+extern const OSSL_DISPATCH p11prov_composite_mldsa65_ecdsa_p256_keymgmt_functions[];
+extern const OSSL_DISPATCH p11prov_composite_mldsa87_ecdsa_p384_keymgmt_functions[];
+extern const OSSL_DISPATCH p11prov_composite_mldsa44_rsa2048_pss_sig_functions[];
+extern const OSSL_DISPATCH p11prov_composite_mldsa65_ecdsa_p256_sig_functions[];
+extern const OSSL_DISPATCH p11prov_composite_mldsa87_ecdsa_p384_sig_functions[];
+
 #define P11PROV_NAME_X25519 "X25519"
 #define P11PROV_NAMES_X25519 "X25519:1.3.101.110"
 #define P11PROV_DESCS_X25519 "PKCS11 X25519 Implementation"

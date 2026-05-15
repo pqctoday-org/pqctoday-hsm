@@ -36,8 +36,12 @@
  * ------------------------------------------------------------------------- */
 
 #include "provider.h"
+#include "sig/signature.h"
+#include "sig/internal.h"
 #include <openssl/evp.h>
 #include <openssl/sha.h>
+#include <openssl/core_names.h>
+#include <openssl/proverr.h>
 #include <string.h>
 
 /* Fixed Prefix per draft-19 §2.2: ASCII "CompositeAlgorithmSignatures2025" */
@@ -437,7 +441,7 @@ DEFINE_COMPOSITE_KEYMGMT_NEW(mldsa87_ecdsa_p384, 2)
 #undef DEFINE_COMPOSITE_KEYMGMT_NEW
 
 #define COMPOSITE_KEYMGMT_DISPATCH(suffix) \
-    static const OSSL_DISPATCH \
+    const OSSL_DISPATCH \
         p11prov_composite_##suffix##_keymgmt_functions[] = { \
             { OSSL_FUNC_KEYMGMT_NEW, \
               (void (*)(void))p11prov_composite_##suffix##_keymgmt_new }, \
@@ -480,20 +484,566 @@ p11prov_composite_mldsa87_ecdsa_p384_keymgmt_dispatch(void)
 }
 
 /* ===========================================================================
- * Signature dispatch (phase 3b) — to land in a follow-up commit.
+ *                       Signature dispatch (phase 3b)
+ * ===========================================================================
  *
- * The signature CTX will hold two underlying P11PROV_SIG_CTXs (one per
- * subkey) plus an accumulating TBS buffer. At digest_sign_final time,
- * compute M' via p11prov_composite_build_mprime, call p11prov_sig_operate
- * on each underlying sigctx with M' as input, and concatenate the outputs.
+ * A composite signature operation maintains two underlying P11PROV_SIG_CTX
+ * instances — one for the PQ half, one for the classical half — plus an
+ * accumulating buffer for the to-be-signed message. At digest_sign_final /
+ * digest_verify_final time, the orchestration:
+ *
+ *   1. Computes M' = Prefix || Label || len(ctx) || ctx || PH(accumulated_M)
+ *      via p11prov_composite_build_mprime.
+ *   2. Calls p11prov_sig_operate on each underlying sigctx with M' as the
+ *      input. The ML-DSA sub-sigctx carries mldsa_params.pContext = Label
+ *      (per draft-19 §3.2 mldsa_ctx=Label); the mldsa.c set_mechanism patch
+ *      forwards this through to CK_MECHANISM.pParameter so softhsm sees it.
+ *   3. Concatenates `mldsaSig || classicalSig` (draft-19 §4.3).
  *
  * Per-profile underlying mechanisms:
  *   MLDSA44+RSA2048-PSS-SHA256:  CKM_ML_DSA (ctx=Label) + CKM_SHA256_RSA_PKCS_PSS
  *   MLDSA65+ECDSA-P256-SHA512:   CKM_ML_DSA (ctx=Label) + CKM_ECDSA_SHA512
  *   MLDSA87+ECDSA-P384-SHA512:   CKM_ML_DSA (ctx=Label) + CKM_ECDSA_SHA512
  *
- * The CKM_ML_DSA mechanism takes a CK_ML_DSA_PARAMS in pParameter with
- * context=profile->signature_label, contextLen=strlen(signature_label).
- * softhsm's OSSLMLDSA.cpp:339-344 reads this and forwards via
- * OSSL_SIGNATURE_PARAM_CONTEXT_STRING to OpenSSL's EVP_DigestSign.
+ * RSA-PSS-SHA256 takes a CK_RSA_PKCS_PSS_PARAMS in mechanism.pParameter
+ * specifying the hash, MGF, and salt length (32 bytes per draft-19 §6).
  * ========================================================================= */
+
+#ifndef OSSL_SIGNATURE_PARAM_CONTEXT_STRING
+#define OSSL_SIGNATURE_PARAM_CONTEXT_STRING "context-string"
+#endif
+
+struct p11prov_composite_sig_ctx {
+    P11PROV_CTX *provctx;
+    const struct p11prov_composite_profile *profile;
+    CK_FLAGS operation; /* CKF_SIGN or CKF_VERIFY */
+
+    /* The composite key currently bound to this operation. We don't ref-bump
+     * it — sub-sigctxs hold their own refs on the individual subkeys via
+     * p11prov_sig_op_init -> p11prov_obj_ref. */
+    P11PROV_COMPOSITE_OBJ *composite_key;
+
+    /* Two underlying sigctxs, one per component. Lazily allocated in
+     * digest_sign_init / digest_verify_init. */
+    P11PROV_SIG_CTX *pq_sigctx;
+    P11PROV_SIG_CTX *classical_sigctx;
+
+    /* RSA-PSS mechanism parameters live inside the ctx so the pointer
+     * given to the token outlives C_SignInit. Used only for RSA-PSS
+     * profiles; left zeroed for ECDSA/EdDSA profiles. */
+    CK_RSA_PKCS_PSS_PARAMS classical_pss_params;
+
+    /* Accumulating buffer for digest_sign_update / digest_verify_update.
+     * The composite spec doesn't externalize the pre-hash, so we have
+     * to keep the full message until digest_*_final. For TLS handshake
+     * sizes this is well under 16 KB. */
+    unsigned char *tbs_buf;
+    size_t tbs_buf_len;
+    size_t tbs_buf_cap;
+
+    /* Application context (draft-19 §2.2 ctx parameter). Default empty.
+     * MUST be ≤ 255 bytes (single-byte length encoding). */
+    unsigned char *app_ctx;
+    size_t app_ctx_len;
+};
+
+typedef struct p11prov_composite_sig_ctx P11PROV_COMPOSITE_SIG_CTX;
+
+/* Per-profile newctx wrappers — one per OSSL_DISPATCH array. */
+static void *p11prov_composite_sig_newctx_impl(
+    void *provctx,
+    const struct p11prov_composite_profile *profile)
+{
+    P11PROV_COMPOSITE_SIG_CTX *ctx = OPENSSL_zalloc(sizeof(*ctx));
+    if (ctx == NULL) {
+        return NULL;
+    }
+    ctx->provctx = (P11PROV_CTX *)provctx;
+    ctx->profile = profile;
+    return ctx;
+}
+
+static void p11prov_composite_sig_freectx(void *vctx)
+{
+    P11PROV_COMPOSITE_SIG_CTX *ctx = (P11PROV_COMPOSITE_SIG_CTX *)vctx;
+    if (ctx == NULL) {
+        return;
+    }
+    /* p11prov_sig_freectx releases the per-sub-sigctx mldsa_params.pContext
+     * heap (via OPENSSL_clear_free in signature.c lines 228-229), the key
+     * ref, and the sigctx struct itself. */
+    p11prov_sig_freectx(ctx->pq_sigctx);
+    p11prov_sig_freectx(ctx->classical_sigctx);
+    OPENSSL_clear_free(ctx->tbs_buf, ctx->tbs_buf_cap);
+    OPENSSL_clear_free(ctx->app_ctx, ctx->app_ctx_len);
+    OPENSSL_clear_free(ctx, sizeof(*ctx));
+}
+
+/* Configure the ML-DSA sub-sigctx for this profile: paramset, ctx=Label, and
+ * the mechanism (set up directly so we don't depend on mldsa.c's static
+ * set_mechanism wrapper firing). Returns 1 on success, 0 on failure. */
+static int composite_setup_pq_sigctx(P11PROV_COMPOSITE_SIG_CTX *ctx)
+{
+    P11PROV_SIG_CTX *sc = ctx->pq_sigctx;
+    const size_t label_len = strlen(ctx->profile->signature_label);
+
+    sc->mldsa_paramset = ctx->profile->mldsa_param_set;
+
+    /* OPENSSL_memdup so this lifetime is independent of the profile table
+     * (read-only string literal). p11prov_sig_freectx will OPENSSL_clear_free
+     * it via signature.c:228-229. */
+    sc->mldsa_params.pContext = OPENSSL_memdup(
+        ctx->profile->signature_label, label_len);
+    if (sc->mldsa_params.pContext == NULL) {
+        return 0;
+    }
+    sc->mldsa_params.ulContextLen = label_len;
+    sc->mldsa_params.hedgeVariant = CKH_HEDGE_PREFERRED;
+
+    /* Configure the mechanism directly (CKM_ML_DSA + the params we just
+     * populated). The mldsa.c patch (commit 9cc52e6) does the same check
+     * but applies only when its own set_mechanism wrapper is called; we
+     * set the mechanism here so it's ready for p11prov_sig_operate's
+     * direct C_SignInit. */
+    sc->mechanism.mechanism = CKM_ML_DSA;
+    sc->mechanism.pParameter = &sc->mldsa_params;
+    sc->mechanism.ulParameterLen = sizeof(sc->mldsa_params);
+    return 1;
+}
+
+/* Configure the classical sub-sigctx for this profile. */
+static int composite_setup_classical_sigctx(P11PROV_COMPOSITE_SIG_CTX *ctx)
+{
+    P11PROV_SIG_CTX *sc = ctx->classical_sigctx;
+    CK_MECHANISM_TYPE classical_mech;
+
+    /* Profile → underlying CKM_* mechanism. The HSM-side hash makes M' →
+     * digest → sign atomic, so we pass M' as raw input. */
+    if (ctx->profile->pre_hash_nid == NID_sha512
+        && ctx->profile->mldsa_param_set == CKP_ML_DSA_65) {
+        classical_mech = CKM_ECDSA_SHA512; /* MLDSA65+ECDSA-P256-SHA512 */
+    } else if (ctx->profile->pre_hash_nid == NID_sha512
+               && ctx->profile->mldsa_param_set == CKP_ML_DSA_87) {
+        classical_mech = CKM_ECDSA_SHA512; /* MLDSA87+ECDSA-P384-SHA512 */
+    } else if (ctx->profile->pre_hash_nid == NID_sha256
+               && ctx->profile->mldsa_param_set == CKP_ML_DSA_44) {
+        classical_mech = CKM_SHA256_RSA_PKCS_PSS; /* MLDSA44+RSA2048-PSS-SHA256 */
+    } else {
+        return 0; /* unknown profile combination */
+    }
+
+    sc->mechanism.mechanism = classical_mech;
+
+    if (classical_mech == CKM_SHA256_RSA_PKCS_PSS) {
+        /* draft-19 §6 specifies RSASSA-PSS with SHA-256, MGF1-SHA-256,
+         * salt length = 32 bytes (= hash output). */
+        ctx->classical_pss_params.hashAlg = CKM_SHA256;
+        ctx->classical_pss_params.mgf = CKG_MGF1_SHA256;
+        ctx->classical_pss_params.sLen = 32;
+        sc->mechanism.pParameter = &ctx->classical_pss_params;
+        sc->mechanism.ulParameterLen = sizeof(ctx->classical_pss_params);
+    } else {
+        sc->mechanism.pParameter = NULL;
+        sc->mechanism.ulParameterLen = 0;
+    }
+    return 1;
+}
+
+/* Common init for digest_sign and digest_verify. operation = CKF_SIGN
+ * or CKF_VERIFY. */
+static int composite_digest_op_init(
+    void *vctx, void *keydata, const OSSL_PARAM params[], CK_FLAGS operation)
+{
+    P11PROV_COMPOSITE_SIG_CTX *ctx = (P11PROV_COMPOSITE_SIG_CTX *)vctx;
+    P11PROV_COMPOSITE_OBJ *key = (P11PROV_COMPOSITE_OBJ *)keydata;
+    CK_RV rv;
+
+    if (ctx == NULL || key == NULL) {
+        return RET_OSSL_ERR;
+    }
+    if (key->profile != ctx->profile) {
+        /* The composite key's profile MUST match the dispatch's profile —
+         * otherwise OpenSSL has wired up the wrong dispatch. */
+        return RET_OSSL_ERR;
+    }
+    if (key->pq_obj == NULL || key->classical_obj == NULL) {
+        return RET_OSSL_ERR;
+    }
+
+    ctx->operation = operation;
+    ctx->composite_key = key;
+
+    /* Allocate PQ sub-sigctx */
+    ctx->pq_sigctx = p11prov_sig_newctx(ctx->provctx, CKM_ML_DSA, NULL);
+    if (ctx->pq_sigctx == NULL) {
+        return RET_OSSL_ERR;
+    }
+    if (!composite_setup_pq_sigctx(ctx)) {
+        return RET_OSSL_ERR;
+    }
+    rv = p11prov_sig_op_init(ctx->pq_sigctx, key->pq_obj, operation, NULL);
+    if (rv != CKR_OK) {
+        return RET_OSSL_ERR;
+    }
+
+    /* Allocate classical sub-sigctx. mechtype passed to p11prov_sig_newctx
+     * is the family — set to actual mech via composite_setup_classical_sigctx. */
+    ctx->classical_sigctx = p11prov_sig_newctx(
+        ctx->provctx,
+        ctx->profile->pre_hash_nid == NID_sha256 ? CKM_RSA_PKCS_PSS : CKM_ECDSA,
+        NULL);
+    if (ctx->classical_sigctx == NULL) {
+        return RET_OSSL_ERR;
+    }
+    if (!composite_setup_classical_sigctx(ctx)) {
+        return RET_OSSL_ERR;
+    }
+    rv = p11prov_sig_op_init(ctx->classical_sigctx, key->classical_obj,
+                             operation, NULL);
+    if (rv != CKR_OK) {
+        return RET_OSSL_ERR;
+    }
+
+    /* Apply OpenSSL-side params (e.g. context-string for the composite
+     * application ctx) if provided. */
+    if (params != NULL) {
+        const OSSL_PARAM *p =
+            OSSL_PARAM_locate_const(params, OSSL_SIGNATURE_PARAM_CONTEXT_STRING);
+        if (p != NULL) {
+            size_t datalen;
+            OPENSSL_clear_free(ctx->app_ctx, ctx->app_ctx_len);
+            ctx->app_ctx = NULL;
+            ctx->app_ctx_len = 0;
+            if (!OSSL_PARAM_get_octet_string(p, (void **)&ctx->app_ctx, 0,
+                                             &datalen)) {
+                return RET_OSSL_ERR;
+            }
+            if (datalen > 255) {
+                /* draft-19 §2.2-3.6 — ctx is single-byte length */
+                OPENSSL_clear_free(ctx->app_ctx, datalen);
+                ctx->app_ctx = NULL;
+                return RET_OSSL_ERR;
+            }
+            ctx->app_ctx_len = datalen;
+        }
+    }
+    return RET_OSSL_OK;
+}
+
+static int p11prov_composite_digest_sign_init(
+    void *vctx, void *keydata, const OSSL_PARAM params[])
+{
+    return composite_digest_op_init(vctx, keydata, params, CKF_SIGN);
+}
+
+static int p11prov_composite_digest_verify_init(
+    void *vctx, void *keydata, const OSSL_PARAM params[])
+{
+    return composite_digest_op_init(vctx, keydata, params, CKF_VERIFY);
+}
+
+static int p11prov_composite_digest_op_update(
+    void *vctx, const unsigned char *data, size_t datalen)
+{
+    P11PROV_COMPOSITE_SIG_CTX *ctx = (P11PROV_COMPOSITE_SIG_CTX *)vctx;
+    size_t need;
+
+    if (ctx == NULL || data == NULL) {
+        return RET_OSSL_ERR;
+    }
+    if (datalen == 0) {
+        return RET_OSSL_OK;
+    }
+    need = ctx->tbs_buf_len + datalen;
+    if (need < ctx->tbs_buf_len) {
+        /* overflow */
+        return RET_OSSL_ERR;
+    }
+    if (need > ctx->tbs_buf_cap) {
+        size_t newcap = ctx->tbs_buf_cap == 0 ? 4096 : ctx->tbs_buf_cap;
+        while (newcap < need) {
+            if (newcap > SIZE_MAX / 2) {
+                return RET_OSSL_ERR;
+            }
+            newcap *= 2;
+        }
+        unsigned char *nb = OPENSSL_realloc(ctx->tbs_buf, newcap);
+        if (nb == NULL) {
+            return RET_OSSL_ERR;
+        }
+        ctx->tbs_buf = nb;
+        ctx->tbs_buf_cap = newcap;
+    }
+    memcpy(ctx->tbs_buf + ctx->tbs_buf_len, data, datalen);
+    ctx->tbs_buf_len += datalen;
+    return RET_OSSL_OK;
+}
+
+/* Build M' from the accumulated buffer + app_ctx and write it into an
+ * OPENSSL_malloc'd buffer. Caller must OPENSSL_free. */
+static int composite_compute_mprime(P11PROV_COMPOSITE_SIG_CTX *ctx,
+                                    unsigned char **out, size_t *outlen)
+{
+    /* Worst case: 32 prefix + 64 label + 1 lenctx + 255 ctx + 64 PH = 416. */
+    size_t cap = 32 + 80 + 1 + 255 + 64;
+    unsigned char *buf = OPENSSL_malloc(cap);
+    size_t sz = cap;
+
+    if (buf == NULL) {
+        return 0;
+    }
+    if (!p11prov_composite_build_mprime(ctx->profile, ctx->tbs_buf,
+                                        ctx->tbs_buf_len, ctx->app_ctx,
+                                        ctx->app_ctx_len, buf, &sz)) {
+        OPENSSL_clear_free(buf, cap);
+        return 0;
+    }
+    *out = buf;
+    *outlen = sz;
+    return 1;
+}
+
+static int p11prov_composite_digest_sign_final(
+    void *vctx, unsigned char *sig, size_t *siglen, size_t sigsize)
+{
+    P11PROV_COMPOSITE_SIG_CTX *ctx = (P11PROV_COMPOSITE_SIG_CTX *)vctx;
+    unsigned char *mprime = NULL;
+    size_t mprime_len = 0;
+    size_t total = 0;
+    size_t pq_sig_size;
+    size_t classical_sig_size;
+    size_t classical_sig_max;
+    int ret = RET_OSSL_ERR;
+    CK_RV rv;
+
+    if (ctx == NULL || siglen == NULL) {
+        goto out;
+    }
+
+    pq_sig_size = ctx->profile->mldsa_sig_bytes;
+    /* Classical max — RSA-2048 gives 256 bytes; ECDSA-P256 DER ≤ 72;
+     * ECDSA-P384 DER ≤ 104. Use 256 as a safe upper bound. */
+    classical_sig_max = 256;
+
+    if (sig == NULL) {
+        /* OpenSSL sizing query */
+        *siglen = pq_sig_size + classical_sig_max;
+        return RET_OSSL_OK;
+    }
+    if (sigsize < pq_sig_size + classical_sig_max) {
+        /* Not enough room for worst case; let caller try with bigger buf. */
+        *siglen = pq_sig_size + classical_sig_max;
+        goto out;
+    }
+
+    if (!composite_compute_mprime(ctx, &mprime, &mprime_len)) {
+        goto out;
+    }
+
+    /* Sign the PQ half — output starts at sig[0..pq_sig_size]. */
+    rv = p11prov_sig_operate(ctx->pq_sigctx, sig, &pq_sig_size, pq_sig_size,
+                             mprime, mprime_len);
+    if (rv != CKR_OK) {
+        goto out;
+    }
+    if (pq_sig_size != ctx->profile->mldsa_sig_bytes) {
+        /* FIPS 204 fixed-length contract violated — composite verify can't
+         * split the bytes correctly. */
+        goto out;
+    }
+
+    /* Sign the classical half — output starts at sig[pq_sig_size]. */
+    classical_sig_size = sigsize - pq_sig_size;
+    rv = p11prov_sig_operate(ctx->classical_sigctx, sig + pq_sig_size,
+                             &classical_sig_size, classical_sig_size, mprime,
+                             mprime_len);
+    if (rv != CKR_OK) {
+        goto out;
+    }
+
+    total = pq_sig_size + classical_sig_size;
+    *siglen = total;
+    ret = RET_OSSL_OK;
+
+out:
+    OPENSSL_clear_free(mprime, mprime_len);
+    return ret;
+}
+
+static int p11prov_composite_digest_verify_final(void *vctx,
+                                                 const unsigned char *sig,
+                                                 size_t siglen)
+{
+    P11PROV_COMPOSITE_SIG_CTX *ctx = (P11PROV_COMPOSITE_SIG_CTX *)vctx;
+    unsigned char *mprime = NULL;
+    size_t mprime_len = 0;
+    size_t pq_len;
+    size_t classical_len;
+    int ret = RET_OSSL_ERR;
+    CK_RV rv;
+
+    if (ctx == NULL || sig == NULL) {
+        goto out;
+    }
+    pq_len = ctx->profile->mldsa_sig_bytes;
+    if (siglen <= pq_len) {
+        /* draft-19 §4.3: PQ sig length is FIPS 204 fixed; anything ≤ that
+         * length means there's no classical component. */
+        goto out;
+    }
+    classical_len = siglen - pq_len;
+
+    if (!composite_compute_mprime(ctx, &mprime, &mprime_len)) {
+        goto out;
+    }
+
+    /* Verify PQ half. The PQ sub-sigctx was opened with operation = CKF_VERIFY
+     * by composite_digest_op_init; p11prov_sig_operate dispatches to
+     * p11prov_VerifyInit + C_Verify based on sigctx->operation. */
+    rv = p11prov_sig_operate(ctx->pq_sigctx, (unsigned char *)sig, &pq_len,
+                             pq_len, mprime, mprime_len);
+    if (rv != CKR_OK) {
+        goto out;
+    }
+    rv = p11prov_sig_operate(ctx->classical_sigctx,
+                             (unsigned char *)(sig + pq_len), &classical_len,
+                             classical_len, mprime, mprime_len);
+    if (rv != CKR_OK) {
+        goto out;
+    }
+
+    /* AND-combine per draft-19 §3.3 step 4: both halves must verify. */
+    ret = RET_OSSL_OK;
+
+out:
+    OPENSSL_clear_free(mprime, mprime_len);
+    return ret;
+}
+
+/* Settable / gettable ctx params. We accept OSSL_SIGNATURE_PARAM_CONTEXT_STRING
+ * (the application context per draft-19 §2.2) before init or via init params. */
+static const OSSL_PARAM *p11prov_composite_settable_ctx_params(
+    void *vctx, void *provctx)
+{
+    static const OSSL_PARAM params[] = {
+        OSSL_PARAM_octet_string(OSSL_SIGNATURE_PARAM_CONTEXT_STRING, NULL, 0),
+        OSSL_PARAM_END,
+    };
+    (void)vctx;
+    (void)provctx;
+    return params;
+}
+
+static const OSSL_PARAM *p11prov_composite_gettable_ctx_params(
+    void *vctx, void *provctx)
+{
+    static const OSSL_PARAM params[] = {
+        OSSL_PARAM_END,
+    };
+    (void)vctx;
+    (void)provctx;
+    return params;
+}
+
+static int p11prov_composite_set_ctx_params(void *vctx, const OSSL_PARAM params[])
+{
+    P11PROV_COMPOSITE_SIG_CTX *ctx = (P11PROV_COMPOSITE_SIG_CTX *)vctx;
+    const OSSL_PARAM *p;
+    size_t datalen;
+
+    if (ctx == NULL || params == NULL) {
+        return RET_OSSL_OK;
+    }
+    p = OSSL_PARAM_locate_const(params, OSSL_SIGNATURE_PARAM_CONTEXT_STRING);
+    if (p != NULL) {
+        OPENSSL_clear_free(ctx->app_ctx, ctx->app_ctx_len);
+        ctx->app_ctx = NULL;
+        ctx->app_ctx_len = 0;
+        if (!OSSL_PARAM_get_octet_string(p, (void **)&ctx->app_ctx, 0,
+                                         &datalen)) {
+            return RET_OSSL_ERR;
+        }
+        if (datalen > 255) {
+            OPENSSL_clear_free(ctx->app_ctx, datalen);
+            ctx->app_ctx = NULL;
+            return RET_OSSL_ERR;
+        }
+        ctx->app_ctx_len = datalen;
+    }
+    return RET_OSSL_OK;
+}
+
+static int p11prov_composite_get_ctx_params(void *vctx, OSSL_PARAM params[])
+{
+    (void)vctx;
+    (void)params;
+    return RET_OSSL_OK;
+}
+
+/* Per-profile newctx wrappers */
+#define DEFINE_COMPOSITE_SIG_NEW(suffix, idx) \
+    static void *p11prov_composite_##suffix##_sig_newctx(void *provctx, \
+                                                         const char *properties) \
+    { \
+        (void)properties; \
+        return p11prov_composite_sig_newctx_impl( \
+            provctx, &p11prov_composite_profiles[idx]); \
+    }
+
+DEFINE_COMPOSITE_SIG_NEW(mldsa44_rsa2048_pss, 0)
+DEFINE_COMPOSITE_SIG_NEW(mldsa65_ecdsa_p256, 1)
+DEFINE_COMPOSITE_SIG_NEW(mldsa87_ecdsa_p384, 2)
+#undef DEFINE_COMPOSITE_SIG_NEW
+
+/* Per-profile OSSL_DISPATCH tables for OSSL_OP_SIGNATURE */
+#define COMPOSITE_SIG_DISPATCH(suffix) \
+    const OSSL_DISPATCH \
+        p11prov_composite_##suffix##_sig_functions[] = { \
+            { OSSL_FUNC_SIGNATURE_NEWCTX, \
+              (void (*)(void))p11prov_composite_##suffix##_sig_newctx }, \
+            { OSSL_FUNC_SIGNATURE_FREECTX, \
+              (void (*)(void))p11prov_composite_sig_freectx }, \
+            { OSSL_FUNC_SIGNATURE_DIGEST_SIGN_INIT, \
+              (void (*)(void))p11prov_composite_digest_sign_init }, \
+            { OSSL_FUNC_SIGNATURE_DIGEST_SIGN_UPDATE, \
+              (void (*)(void))p11prov_composite_digest_op_update }, \
+            { OSSL_FUNC_SIGNATURE_DIGEST_SIGN_FINAL, \
+              (void (*)(void))p11prov_composite_digest_sign_final }, \
+            { OSSL_FUNC_SIGNATURE_DIGEST_VERIFY_INIT, \
+              (void (*)(void))p11prov_composite_digest_verify_init }, \
+            { OSSL_FUNC_SIGNATURE_DIGEST_VERIFY_UPDATE, \
+              (void (*)(void))p11prov_composite_digest_op_update }, \
+            { OSSL_FUNC_SIGNATURE_DIGEST_VERIFY_FINAL, \
+              (void (*)(void))p11prov_composite_digest_verify_final }, \
+            { OSSL_FUNC_SIGNATURE_SET_CTX_PARAMS, \
+              (void (*)(void))p11prov_composite_set_ctx_params }, \
+            { OSSL_FUNC_SIGNATURE_SETTABLE_CTX_PARAMS, \
+              (void (*)(void))p11prov_composite_settable_ctx_params }, \
+            { OSSL_FUNC_SIGNATURE_GET_CTX_PARAMS, \
+              (void (*)(void))p11prov_composite_get_ctx_params }, \
+            { OSSL_FUNC_SIGNATURE_GETTABLE_CTX_PARAMS, \
+              (void (*)(void))p11prov_composite_gettable_ctx_params }, \
+            { 0, NULL }, \
+        }
+
+COMPOSITE_SIG_DISPATCH(mldsa44_rsa2048_pss);
+COMPOSITE_SIG_DISPATCH(mldsa65_ecdsa_p256);
+COMPOSITE_SIG_DISPATCH(mldsa87_ecdsa_p384);
+#undef COMPOSITE_SIG_DISPATCH
+
+/* External accessors used by provider.c's ADD_ALGO_EXT block. */
+const OSSL_DISPATCH *
+p11prov_composite_mldsa44_rsa2048_pss_sig_dispatch(void)
+{
+    return p11prov_composite_mldsa44_rsa2048_pss_sig_functions;
+}
+const OSSL_DISPATCH *
+p11prov_composite_mldsa65_ecdsa_p256_sig_dispatch(void)
+{
+    return p11prov_composite_mldsa65_ecdsa_p256_sig_functions;
+}
+const OSSL_DISPATCH *
+p11prov_composite_mldsa87_ecdsa_p384_sig_dispatch(void)
+{
+    return p11prov_composite_mldsa87_ecdsa_p384_sig_functions;
+}

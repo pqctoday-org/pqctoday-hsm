@@ -1230,6 +1230,17 @@ static CK_RV operations_init(P11PROV_CTX *ctx)
                              p11prov_mldsa_65_signature_functions);
                 ADD_ALGO_EXT(ML_DSA_87, signature, prop,
                              p11prov_mldsa_87_signature_functions);
+                /* Composite-ML-DSA per draft-ietf-lamps-pq-composite-sigs-19.
+                 * Gated on CKM_ML_DSA — composite signatures use the same
+                 * underlying ML-DSA mechanism plus a classical algorithm
+                 * (CKM_ECDSA_SHA512 / CKM_SHA256_RSA_PKCS_PSS), which softhsm
+                 * already supports. */
+                ADD_ALGO_EXT(COMPOSITE_MLDSA44_RSA2048_PSS, signature, prop,
+                             p11prov_composite_mldsa44_rsa2048_pss_sig_functions);
+                ADD_ALGO_EXT(COMPOSITE_MLDSA65_ECDSA_P256, signature, prop,
+                             p11prov_composite_mldsa65_ecdsa_p256_sig_functions);
+                ADD_ALGO_EXT(COMPOSITE_MLDSA87_ECDSA_P384, signature, prop,
+                             p11prov_composite_mldsa87_ecdsa_p384_sig_functions);
                 UNCHECK_MECHS(CKM_ML_DSA_KEY_PAIR_GEN, CKM_ML_DSA);
                 break;
             case CKM_SLH_DSA:
@@ -1487,6 +1498,13 @@ static CK_RV static_operations_init(P11PROV_CTX *ctx)
     ADD_ALGO_EXT(ML_DSA_65, keymgmt, prop, p11prov_mldsa65_keymgmt_functions);
     ADD_ALGO_EXT(ML_DSA_87, keymgmt, prop, p11prov_mldsa87_keymgmt_functions);
     ADD_ALGO_EXT(ML_KEM, keymgmt, prop, p11prov_mlkem_keymgmt_functions);
+    /* Composite-ML-DSA per draft-ietf-lamps-pq-composite-sigs-19 */
+    ADD_ALGO_EXT(COMPOSITE_MLDSA44_RSA2048_PSS, keymgmt, prop,
+                 p11prov_composite_mldsa44_rsa2048_pss_keymgmt_functions);
+    ADD_ALGO_EXT(COMPOSITE_MLDSA65_ECDSA_P256, keymgmt, prop,
+                 p11prov_composite_mldsa65_ecdsa_p256_keymgmt_functions);
+    ADD_ALGO_EXT(COMPOSITE_MLDSA87_ECDSA_P384, keymgmt, prop,
+                 p11prov_composite_mldsa87_ecdsa_p384_keymgmt_functions);
     TERM_ALGO(keymgmt);
 
 #if SKEY_SUPPORT == 1
