@@ -42,19 +42,35 @@ DISPATCH_MLDSA_FN(settable_ctx_params);
 static CK_RV p11prov_mldsa_set_mechanism(P11PROV_SIG_CTX *sigctx)
 {
     sigctx->mechanism.mechanism = CKM_ML_DSA;
-    /* If a FIPS 204 context string was supplied via
-     * OSSL_SIGNATURE_PARAM_CONTEXT_STRING (collected in mldsa_params.pContext)
-     * or a non-default hedge variant was selected, plumb the resulting
-     * CK_SIGN_ADDITIONAL_CONTEXT through the mechanism's pParameter so
-     * the underlying token actually sees it. Without this, softhsm and
-     * any other PKCS#11 v3.2 ML-DSA token sign without context — fine for
-     * pure ML-DSA in TLS 1.3 (no context needed) but broken for
-     * Composite-ML-DSA (draft-ietf-lamps-pq-composite-sigs-19 §3.2 step 4
-     * requires mldsa_ctx=Label) and any caller that explicitly sets a
-     * context. The sigctx->mldsa_params struct is a member of sigctx
-     * with the right lifetime for the duration of C_SignInit. */
-    if (sigctx->mldsa_params.pContext != NULL
-        && sigctx->mldsa_params.ulContextLen > 0) {
+    /* Per PKCS#11 v3.2 §6.67.5, CKM_ML_DSA takes an OPTIONAL
+     * CK_SIGN_ADDITIONAL_CONTEXT parameter:
+     *
+     *   typedef struct CK_SIGN_ADDITIONAL_CONTEXT {
+     *     CK_HEDGE_TYPE  hedgeVariant;
+     *     CK_BYTE_PTR    pContext;
+     *     CK_ULONG       ulContextLen;
+     *   } CK_SIGN_ADDITIONAL_CONTEXT;
+     *
+     * "If no parameter is supplied the hedgeVariant will be
+     *  CKH_HEDGE_PREFERRED, ulContextLen will be zero and pContext will
+     *  be NULL."
+     *
+     * sigctx->mldsa_params is already typed CK_SIGN_ADDITIONAL_CONTEXT
+     * (internal.h:43); p11prov_mldsa_set_ctx_params() populates its
+     * fields from OSSL_SIGNATURE_PARAM_CONTEXT_STRING and
+     * OSSL_SIGNATURE_PARAM_DETERMINISTIC.
+     *
+     * Plumb the struct through pParameter whenever the caller has
+     * deviated from defaults — that is, set a context string OR
+     * requested a non-default hedge variant. Without this, the token
+     * (e.g. softhsm OSSLMLDSA.cpp:339-344) never sees either field and
+     * always signs hedged-without-context.
+     *
+     * The struct lives in the sigctx and outlives C_SignInit, so the
+     * pointer is safe. */
+    if ((sigctx->mldsa_params.pContext != NULL
+         && sigctx->mldsa_params.ulContextLen > 0)
+        || sigctx->mldsa_params.hedgeVariant != CKH_HEDGE_PREFERRED) {
         sigctx->mechanism.pParameter = &sigctx->mldsa_params;
         sigctx->mechanism.ulParameterLen = sizeof(sigctx->mldsa_params);
     } else {
