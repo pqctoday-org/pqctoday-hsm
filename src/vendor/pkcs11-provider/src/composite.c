@@ -36,6 +36,8 @@
  * ------------------------------------------------------------------------- */
 
 #include "provider.h"
+#include "composite.h"
+#include "store.h"
 #include "sig/signature.h"
 #include "sig/internal.h"
 #include <openssl/evp.h>
@@ -47,6 +49,8 @@
 #include <openssl/pem.h>
 #include <openssl/asn1.h>
 #include <openssl/objects.h>
+#include <openssl/encoder.h>
+#include <openssl/core_object.h>
 #include <string.h>
 
 /* Fixed Prefix per draft-19 §2.2: ASCII "CompositeAlgorithmSignatures2025" */
@@ -136,6 +140,64 @@ p11prov_composite_profile_by_oid(const char *oid)
         }
     }
     return NULL;
+}
+
+/* External accessors for profile fields needed by out-of-process callers
+ * (the cms_provider_init.c shim in pqctoday-hub) that drive composite
+ * sign/verify outside the OSSL_DISPATCH callback path. The struct itself
+ * stays private to composite.c; these are the documented surface. */
+size_t p11prov_composite_profile_mldsa_pk_bytes(
+    const struct p11prov_composite_profile *profile)
+{
+    return profile == NULL ? 0 : profile->mldsa_pk_bytes;
+}
+
+size_t p11prov_composite_profile_mldsa_sig_bytes(
+    const struct p11prov_composite_profile *profile)
+{
+    return profile == NULL ? 0 : profile->mldsa_sig_bytes;
+}
+
+int p11prov_composite_profile_pre_hash_nid(
+    const struct p11prov_composite_profile *profile)
+{
+    return profile == NULL ? 0 : profile->pre_hash_nid;
+}
+
+const char *p11prov_composite_profile_label(
+    const struct p11prov_composite_profile *profile)
+{
+    return profile == NULL ? NULL : profile->label;
+}
+
+const char *p11prov_composite_profile_signature_label(
+    const struct p11prov_composite_profile *profile)
+{
+    return profile == NULL ? NULL : profile->signature_label;
+}
+
+const char *p11prov_composite_profile_classical_alg_oid(
+    const struct p11prov_composite_profile *profile)
+{
+    return profile == NULL ? NULL : profile->classical_alg_oid;
+}
+
+int p11prov_composite_profile_mldsa_strength(
+    const struct p11prov_composite_profile *profile)
+{
+    if (profile == NULL) {
+        return 0;
+    }
+    switch (profile->mldsa_param_set) {
+    case CKP_ML_DSA_44:
+        return 44;
+    case CKP_ML_DSA_65:
+        return 65;
+    case CKP_ML_DSA_87:
+        return 87;
+    default:
+        return 0;
+    }
 }
 
 /* Compute the message representative M' per draft-19 §2.2:
@@ -1292,6 +1354,99 @@ static int composite_get_ecdsa_pubkey(P11PROV_OBJ *key,
     return RET_OSSL_OK;
 }
 
+/* RSA pubkey collector — softhsm exposes RSA public keys as a pair of
+ * OSSL_PARAM BIGNUMs (OSSL_PKEY_PARAM_RSA_N and OSSL_PKEY_PARAM_RSA_E)
+ * via p11prov_obj_export_public_key(..., CKK_RSA, ...). draft-19
+ * Appendix C wants the classical half encoded as a DER RSAPublicKey
+ * (PKCS#1 SEQUENCE { modulus INTEGER, publicExponent INTEGER }),
+ * NOT a full SubjectPublicKeyInfo. We build an in-memory EVP_PKEY from
+ * the modulus+exponent then ask the encoder for the "type-specific"
+ * DER form, which is exactly the PKCS#1 SEQUENCE we need. */
+struct composite_rsa_collect_ctx {
+    OSSL_LIB_CTX *libctx;
+    unsigned char *der_out;
+    size_t der_out_len;
+};
+
+static int composite_collect_rsa_pubkey(const OSSL_PARAM *params, void *arg)
+{
+    struct composite_rsa_collect_ctx *ctx =
+        (struct composite_rsa_collect_ctx *)arg;
+    EVP_PKEY *pkey = NULL;
+    EVP_PKEY_CTX *pctx = NULL;
+    OSSL_ENCODER_CTX *ectx = NULL;
+    int ret = RET_OSSL_ERR;
+
+    if (ctx == NULL || params == NULL) {
+        return RET_OSSL_ERR;
+    }
+
+    /* Confirm both N and E are present before invoking fromdata — the
+     * helper accepts other params too but PUB_KEY for RSA must include
+     * the modulus and the public exponent. */
+    if (OSSL_PARAM_locate_const(params, OSSL_PKEY_PARAM_RSA_N) == NULL
+        || OSSL_PARAM_locate_const(params, OSSL_PKEY_PARAM_RSA_E) == NULL) {
+        return RET_OSSL_ERR;
+    }
+
+    pctx = EVP_PKEY_CTX_new_from_name(ctx->libctx, "RSA", NULL);
+    if (pctx == NULL) {
+        goto done;
+    }
+    if (EVP_PKEY_fromdata_init(pctx) != 1) {
+        goto done;
+    }
+    /* fromdata accepts a non-const OSSL_PARAM[]; we pass the const array
+     * through as the helper does not mutate the entries. */
+    if (EVP_PKEY_fromdata(pctx, &pkey, EVP_PKEY_PUBLIC_KEY,
+                          (OSSL_PARAM *)params) != 1
+        || pkey == NULL) {
+        goto done;
+    }
+
+    /* "type-specific" structure emits a raw RSAPublicKey DER for RSA pkeys
+     * (per OpenSSL encoder semantics). This matches PKCS#1 RSAPublicKey
+     * as required by draft-19 Appendix C for the RSA classical half. */
+    ectx = OSSL_ENCODER_CTX_new_for_pkey(
+        pkey, EVP_PKEY_PUBLIC_KEY, "DER", "type-specific", NULL);
+    if (ectx == NULL) {
+        goto done;
+    }
+    if (OSSL_ENCODER_to_data(ectx, &ctx->der_out, &ctx->der_out_len) != 1) {
+        goto done;
+    }
+    ret = RET_OSSL_OK;
+
+done:
+    OSSL_ENCODER_CTX_free(ectx);
+    EVP_PKEY_free(pkey);
+    EVP_PKEY_CTX_free(pctx);
+    return ret;
+}
+
+static int composite_get_rsa_pubkey(P11PROV_OBJ *key, P11PROV_CTX *provctx,
+                                    unsigned char **out, size_t *out_len)
+{
+    struct composite_rsa_collect_ctx ctx = {
+        .libctx = p11prov_ctx_get_libctx(provctx),
+        .der_out = NULL,
+        .der_out_len = 0,
+    };
+    int ret = p11prov_obj_export_public_key(key, CKK_RSA, true, false,
+                                            composite_collect_rsa_pubkey,
+                                            &ctx);
+    if (ret != RET_OSSL_OK) {
+        OPENSSL_free(ctx.der_out);
+        return RET_OSSL_ERR;
+    }
+    if (ctx.der_out == NULL || ctx.der_out_len == 0) {
+        return RET_OSSL_ERR;
+    }
+    *out = ctx.der_out;
+    *out_len = ctx.der_out_len;
+    return RET_OSSL_OK;
+}
+
 /* Build the SubjectPublicKeyInfo for a composite key.
  *
  * Returns an X509_PUBKEY whose:
@@ -1326,16 +1481,25 @@ static X509_PUBKEY *p11prov_composite_pubkey_to_x509(
         goto done;
     }
 
-    /* Profile dispatch on classical algorithm. RSA-2048-PSS deferred. */
+    /* Profile dispatch on classical algorithm. ML-DSA-44 → RSA-2048-PSS
+     * uses a DER RSAPublicKey (PKCS#1) per draft-19 Appendix C; the
+     * ML-DSA-65 and ML-DSA-87 profiles both use ECDSA, encoded as the
+     * uncompressed X9.62 EC point (0x04 || X || Y). */
     if (key->profile->mldsa_param_set == CKP_ML_DSA_65
         || key->profile->mldsa_param_set == CKP_ML_DSA_87) {
         if (composite_get_ecdsa_pubkey(key->classical_obj, &classical_pk,
                                        &classical_pk_len) != RET_OSSL_OK) {
             goto done;
         }
+    } else if (key->profile->mldsa_param_set == CKP_ML_DSA_44) {
+        if (composite_get_rsa_pubkey(key->classical_obj, key->provctx,
+                                     &classical_pk,
+                                     &classical_pk_len) != RET_OSSL_OK) {
+            goto done;
+        }
     } else {
-        /* MLDSA44-RSA2048-PSS-SHA256: building DER RSAPublicKey from
-         * softhsm modulus/exponent is unimplemented for now. */
+        /* Unknown profile — every registered profile should fall into one
+         * of the branches above. */
         goto done;
     }
 
@@ -1493,3 +1657,143 @@ const OSSL_DISPATCH p11prov_composite_encoder_spki_pem_functions[] = {
       (void (*)(void))p11prov_composite_encoder_spki_pem_encode },
     { 0, NULL },
 };
+
+/* ===========================================================================
+ *  External bridge: build a composite EVP_PKEY from two pkcs11: URIs.
+ * ===========================================================================
+ *
+ * Designed for callers like cms_provider_init.c in pqctoday-hub that drive
+ * X509_sign / CMS_sign with a composite key. The openssl CLI cannot reach
+ * this path because the IMPORT mechanism uses a C pointer (see comment at
+ * P11PROV_COMPOSITE_PARAM_REFERENCE) — so we expose a one-shot helper.
+ *
+ * Steps:
+ *   1. p11prov_store_direct_fetch each URI; capture P11PROV_OBJ pointer
+ *      from the OSSL_OBJECT_PARAM_REFERENCE param the store dispatch emits.
+ *   2. p11prov_composite_obj_new_from_subkeys → P11PROV_COMPOSITE_OBJ
+ *      (takes its own refs on the two subkey objects).
+ *   3. EVP_PKEY_CTX_new_from_name(libctx, profile->label, ...) → fromdata
+ *      with the pqctoday-composite-ref IMPORT param holding the composite
+ *      object pointer. On success the IMPORT takes ownership of the
+ *      composite obj; on failure we free it.
+ *
+ * Returns a fresh EVP_PKEY that the caller owns (free with EVP_PKEY_free),
+ * or NULL on any failure with the OpenSSL error stack populated.
+ * ========================================================================= */
+
+struct composite_uri_loader_ctx {
+    P11PROV_OBJ *captured_obj;
+};
+
+static int composite_capture_object_ref(const OSSL_PARAM params[], void *arg)
+{
+    struct composite_uri_loader_ctx *ctx =
+        (struct composite_uri_loader_ctx *)arg;
+    const OSSL_PARAM *p;
+    P11PROV_OBJ *obj;
+
+    if (ctx == NULL || params == NULL) {
+        return RET_OSSL_ERR;
+    }
+    p = OSSL_PARAM_locate_const(params, OSSL_OBJECT_PARAM_REFERENCE);
+    if (p == NULL || p->data_type != OSSL_PARAM_OCTET_STRING) {
+        return RET_OSSL_ERR;
+    }
+    /* p->data IS the P11PROV_OBJ pointer (see store.c:411 +
+     * objects.c:725 — p11prov_obj_to_store_reference). Use the
+     * size-tagged unwrapper so the size mismatch is checked centrally. */
+    obj = p11prov_obj_from_reference(p->data, p->data_size);
+    if (obj == NULL) {
+        return RET_OSSL_ERR;
+    }
+    ctx->captured_obj = obj;
+    return RET_OSSL_OK;
+}
+
+/* Load a subkey by pkcs11: URI and return an owned reference.
+ * The store_direct_fetch path drops the original obj when it tears down,
+ * so we ref_no_cache to keep our copy alive past store close. */
+static P11PROV_OBJ *
+composite_load_subkey_by_uri(P11PROV_CTX *provctx, const char *uri)
+{
+    struct composite_uri_loader_ctx loader = { NULL };
+    int ret;
+    P11PROV_OBJ *owned = NULL;
+
+    ret = p11prov_store_direct_fetch(provctx, uri,
+                                     composite_capture_object_ref, &loader,
+                                     NULL, NULL);
+    if (ret != RET_OSSL_OK || loader.captured_obj == NULL) {
+        return NULL;
+    }
+    /* Take our own reference; the store ctx held the original. */
+    owned = p11prov_obj_ref(loader.captured_obj);
+    return owned;
+}
+
+EVP_PKEY *p11prov_composite_evp_pkey_from_uris(
+    P11PROV_CTX *provctx,
+    const struct p11prov_composite_profile *profile,
+    const char *pq_uri,
+    const char *classical_uri)
+{
+    P11PROV_OBJ *pq_obj = NULL;
+    P11PROV_OBJ *classical_obj = NULL;
+    P11PROV_COMPOSITE_OBJ *composite_obj = NULL;
+    EVP_PKEY *pkey = NULL;
+    EVP_PKEY_CTX *pctx = NULL;
+    OSSL_PARAM import_params[2];
+
+    if (provctx == NULL || profile == NULL || pq_uri == NULL
+        || classical_uri == NULL) {
+        return NULL;
+    }
+
+    pq_obj = composite_load_subkey_by_uri(provctx, pq_uri);
+    classical_obj = composite_load_subkey_by_uri(provctx, classical_uri);
+    if (pq_obj == NULL || classical_obj == NULL) {
+        goto done;
+    }
+
+    composite_obj = p11prov_composite_obj_new_from_subkeys(
+        provctx, profile, pq_obj, classical_obj);
+    if (composite_obj == NULL) {
+        goto done;
+    }
+
+    pctx = EVP_PKEY_CTX_new_from_name(
+        p11prov_ctx_get_libctx(provctx), profile->label, NULL);
+    if (pctx == NULL) {
+        goto done;
+    }
+    if (EVP_PKEY_fromdata_init(pctx) != 1) {
+        goto done;
+    }
+
+    import_params[0] = OSSL_PARAM_construct_octet_string(
+        P11PROV_COMPOSITE_PARAM_REFERENCE, &composite_obj,
+        sizeof(composite_obj));
+    import_params[1] = OSSL_PARAM_construct_end();
+
+    if (EVP_PKEY_fromdata(pctx, &pkey, EVP_PKEY_KEYPAIR, import_params) != 1) {
+        pkey = NULL;
+        goto done;
+    }
+    /* IMPORT took ownership on success — null our local handle so cleanup
+     * below does not double-free. */
+    composite_obj = NULL;
+
+done:
+    if (composite_obj != NULL) {
+        /* IMPORT failed before taking ownership — free the composite obj
+         * directly. p11prov_composite_obj_new_from_subkeys took refs on
+         * both subkeys; freeing the composite frees those refs too. */
+        p11prov_obj_free(composite_obj->pq_obj);
+        p11prov_obj_free(composite_obj->classical_obj);
+        OPENSSL_free(composite_obj);
+    }
+    p11prov_obj_free(pq_obj);
+    p11prov_obj_free(classical_obj);
+    EVP_PKEY_CTX_free(pctx);
+    return pkey;
+}
