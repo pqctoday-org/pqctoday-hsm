@@ -3,6 +3,9 @@ build/
 build-wasm/
 build-san/
 build-pqctoday/
+build_fresh/
+build-wasm-fresh/
+test-results/
 *.o
 *.a
 *.so
@@ -53,3 +56,4 @@ Makefile.in
 .vscode/
 .idea/
 rust/target/
+openmls-provider/target/
