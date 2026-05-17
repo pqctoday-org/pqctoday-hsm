@@ -1437,6 +1437,26 @@ static CK_RV static_operations_init(P11PROV_CTX *ctx)
     ADD_ALGO_EXT(ML_DSA_87, encoder,
                  DEFAULT_PROPERTY(",output=der,structure=SubjectPublicKeyInfo"),
                  p11prov_mldsa_encoder_spki_der_functions);
+    /* Composite-ML-DSA SPKI encoders (draft-lamps-19): X509_PUBKEY for
+     * the three composite OIDs in DER + PEM. */
+    ADD_ALGO_EXT(COMPOSITE_MLDSA44_RSA2048_PSS, encoder,
+                 DEFAULT_PROPERTY(",output=der,structure=SubjectPublicKeyInfo"),
+                 p11prov_composite_encoder_spki_der_functions);
+    ADD_ALGO_EXT(COMPOSITE_MLDSA44_RSA2048_PSS, encoder,
+                 DEFAULT_PROPERTY(",output=pem,structure=SubjectPublicKeyInfo"),
+                 p11prov_composite_encoder_spki_pem_functions);
+    ADD_ALGO_EXT(COMPOSITE_MLDSA65_ECDSA_P256, encoder,
+                 DEFAULT_PROPERTY(",output=der,structure=SubjectPublicKeyInfo"),
+                 p11prov_composite_encoder_spki_der_functions);
+    ADD_ALGO_EXT(COMPOSITE_MLDSA65_ECDSA_P256, encoder,
+                 DEFAULT_PROPERTY(",output=pem,structure=SubjectPublicKeyInfo"),
+                 p11prov_composite_encoder_spki_pem_functions);
+    ADD_ALGO_EXT(COMPOSITE_MLDSA87_ECDSA_P384, encoder,
+                 DEFAULT_PROPERTY(",output=der,structure=SubjectPublicKeyInfo"),
+                 p11prov_composite_encoder_spki_der_functions);
+    ADD_ALGO_EXT(COMPOSITE_MLDSA87_ECDSA_P384, encoder,
+                 DEFAULT_PROPERTY(",output=pem,structure=SubjectPublicKeyInfo"),
+                 p11prov_composite_encoder_spki_pem_functions);
     if (ctx->encode_pkey_as_pk11_uri) {
         ADD_ALGO_EXT(RSA, encoder,
                      DEFAULT_PROPERTY(",output=pem,structure=PrivateKeyInfo"),

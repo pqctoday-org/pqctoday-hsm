@@ -1,41 +1,70 @@
 # PKCS#11 v3.2 Compliance Report
 
-**Engine:** `./build_fresh/src/lib/libsofthsmv3.dylib`
+**Engine:** `./build/src/lib/libsofthsmv3.dylib`
 **Timestamp:** Generated automatically
 
 ## Summary
-- **Total PASS:** 35
-- **Total FAIL:** 0
+- **Total PASS:** 46
+- **Total FAIL:** 1
 - **Total SKIP:** 0
 
-### ChaCha20
+### Attributes
 
 | Test | Status | Details |
 |---|---|---|
-| C_CreateObject | ✅ PASS | Created CKK_CHACHA20 Secret Key |
-| C_Encrypt | ✅ PASS | Generated properly with 16 byte MAC tag |
+| ML_DSA_44_CKA_VALUE_Pub | ✅ PASS | §1.21 G-ATTR1 check |
+| ML_DSA_44_CKA_PUBLIC_KEY_INFO_Pub | ✅ PASS | SPKI exposed |
+| ML_DSA_44_CKA_PUBLIC_KEY_INFO_Priv | ✅ PASS | SPKI exposed on private |
+| ML_DSA_44_CKA_VERIFY | ✅ PASS |  |
+| ML_DSA_44_CKA_SIGN | ✅ PASS |  |
+| ML_DSA_65_CKA_VALUE_Pub | ✅ PASS | §1.21 G-ATTR1 check |
+| ML_DSA_65_CKA_PUBLIC_KEY_INFO_Pub | ✅ PASS | SPKI exposed |
+| ML_DSA_65_CKA_PUBLIC_KEY_INFO_Priv | ✅ PASS | SPKI exposed on private |
+| ML_DSA_65_CKA_VERIFY | ✅ PASS |  |
+| ML_DSA_65_CKA_SIGN | ✅ PASS |  |
+| ML_DSA_87_CKA_VALUE_Pub | ✅ PASS | §1.21 G-ATTR1 check |
+| ML_DSA_87_CKA_PUBLIC_KEY_INFO_Pub | ✅ PASS | SPKI exposed |
+| ML_DSA_87_CKA_PUBLIC_KEY_INFO_Priv | ✅ PASS | SPKI exposed on private |
+| ML_DSA_87_CKA_VERIFY | ✅ PASS |  |
+| ML_DSA_87_CKA_SIGN | ✅ PASS |  |
 
-### Classical
+### DSA
 
 | Test | Status | Details |
 |---|---|---|
-| Generate_RSA_2048 | ✅ PASS | RV=0 |
-| C_Sign_RSA_SHA256 | ✅ PASS | RV=0 |
+| Generate_ML_DSA_44 | ✅ PASS | Gen ML-DSA-44 |
+| C_Sign_44_Pure | ✅ PASS | RV=0 |
+| C_Verify_44_Pure | ✅ PASS | RV=0 |
+| C_Sign_44_PreHash_SHA512 | ✅ PASS | RV=0 |
+| C_Verify_44_PreHash_SHA512 | ✅ PASS | RV=0 |
+| C_Sign_44_PreHash_SHA3_512 | ✅ PASS | RV=0 |
+| C_Verify_44_PreHash_SHA3_512 | ✅ PASS | RV=0 |
+| Generate_ML_DSA_65 | ✅ PASS | Gen ML-DSA-65 |
+| C_Sign_65_Pure | ✅ PASS | RV=0 |
+| C_Verify_65_Pure | ✅ PASS | RV=0 |
+| C_Sign_65_PreHash_SHA512 | ✅ PASS | RV=0 |
+| C_Verify_65_PreHash_SHA512 | ✅ PASS | RV=0 |
+| C_Sign_65_PreHash_SHA3_512 | ✅ PASS | RV=0 |
+| C_Verify_65_PreHash_SHA3_512 | ✅ PASS | RV=0 |
+| Generate_ML_DSA_87 | ✅ PASS | Gen ML-DSA-87 |
+| C_Sign_87_Pure | ✅ PASS | RV=0 |
+| C_Verify_87_Pure | ✅ PASS | RV=0 |
+| C_Sign_87_PreHash_SHA512 | ✅ PASS | RV=0 |
+| C_Verify_87_PreHash_SHA512 | ✅ PASS | RV=0 |
+| C_Sign_87_PreHash_SHA3_512 | ✅ PASS | RV=0 |
+| C_Verify_87_PreHash_SHA3_512 | ✅ PASS | RV=0 |
 
-### ECDSA
+### DSA-CTX
 
 | Test | Status | Details |
 |---|---|---|
-| Generate_P256 | ✅ PASS | RV=0 |
-| Sign_P256 | ✅ PASS | RV=0 |
-| Generate_P521 | ✅ PASS | RV=0 |
-| Sign_P521 | ✅ PASS | RV=0 |
-| Generate_secp256k1 | ✅ PASS | RV=0 |
-| Sign_secp256k1 | ✅ PASS | RV=0 |
-| Generate_P256_SHA3_256 | ✅ PASS | RV=0 |
-| Sign_P256_SHA3_256 | ✅ PASS | RV=0 |
-| Generate_P521_SHA3_512 | ✅ PASS | RV=0 |
-| Sign_P521_SHA3_512 | ✅ PASS | RV=0 |
+| Setup_KeyGen_MLDSA65 | ✅ PASS | ML-DSA-65 keypair generated |
+| Sign_ctxA | ✅ PASS | siglen=3309 |
+| Verify_ctxA_matching | ✅ PASS | expected CKR_OK got RV=0 |
+| Verify_ctxB_should_fail | ✅ PASS | binding works; RV=192 |
+| Verify_noctx_should_fail | ✅ PASS | binding enforced; RV=192 |
+| Deterministic_byte_equal | ✅ PASS | deterministic mode produces identical signatures (FIPS 204) |
+| Hedge_non_deterministic | ✅ PASS | hedged mode produces distinct signatures (probabilistic) |
 
 ### Init
 
@@ -43,33 +72,11 @@
 |---|---|---|
 | TokenSetup | ✅ PASS | Initialized token and session |
 
-### MultiPart_ECDSA
+### MultiPart
 
 | Test | Status | Details |
 |---|---|---|
-| Setup_KeyGen | ✅ PASS | P-256 key pair generated |
-| C_SignInit | ✅ PASS | CKM_ECDSA_SHA256 — RV=0 |
-| C_SignUpdate_chunk1 | ✅ PASS | RV=0 |
-| C_SignUpdate_chunk2 | ✅ PASS | RV=0 |
-| C_SignFinal | ✅ PASS | SigLen=64 RV=0 |
-| C_VerifyInit | ✅ PASS | RV=0 |
-| C_VerifyUpdate_chunk1 | ✅ PASS | RV=0 |
-| C_VerifyUpdate_chunk2 | ✅ PASS | RV=0 |
-| C_VerifyFinal | ✅ PASS | PKCS#11 v3.2 §5.2 P-256 round-trip — RV=0 |
-| C_Verify_oneshot_xcheck | ✅ PASS | Multi-part sig matches one-shot verify — RV=0 |
-
-### MultiPart_EdDSA
-
-| Test | Status | Details |
-|---|---|---|
-| Setup_KeyGen | ✅ PASS | Ed25519 key pair generated |
-| C_SignInit | ✅ PASS | CKM_EDDSA — RV=0 |
-| C_SignUpdate_chunk1 | ✅ PASS | RV=0 |
-| C_SignUpdate_chunk2 | ✅ PASS | RV=0 |
-| C_SignFinal | ✅ PASS | SigLen=64 RV=0 |
-| C_VerifyInit | ✅ PASS | RV=0 |
-| C_VerifyUpdate_chunk1 | ✅ PASS | RV=0 |
-| C_VerifyUpdate_chunk2 | ✅ PASS | RV=0 |
-| C_VerifyFinal | ✅ PASS | PKCS#11 v3.2 §5.2 Ed25519 round-trip — RV=0 |
-| C_Verify_oneshot_xcheck | ✅ PASS | Multi-part sig matches one-shot verify — RV=0 |
+| Setup_KeyGen | ✅ PASS | ML-DSA-65 key pair generated |
+| C_SignInit | ✅ PASS | PKCS#11 v3.2 §5.2 — RV=0 |
+| C_SignUpdate_chunk1 | ❌ FAIL | RV=145 |
 

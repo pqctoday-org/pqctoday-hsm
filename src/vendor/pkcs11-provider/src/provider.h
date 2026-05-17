@@ -153,13 +153,17 @@
 #define P11PROV_DESCS_COMPOSITE_MLDSA87_ECDSA_P384 \
     "PKCS11 Composite ML-DSA-87 + ECDSA-P384-SHA512 (draft-lamps-19)"
 
-/* Composite keymgmt / signature dispatch tables defined in composite.c */
+/* Composite keymgmt / signature / encoder dispatch tables (composite.c) */
 extern const OSSL_DISPATCH p11prov_composite_mldsa44_rsa2048_pss_keymgmt_functions[];
 extern const OSSL_DISPATCH p11prov_composite_mldsa65_ecdsa_p256_keymgmt_functions[];
 extern const OSSL_DISPATCH p11prov_composite_mldsa87_ecdsa_p384_keymgmt_functions[];
 extern const OSSL_DISPATCH p11prov_composite_mldsa44_rsa2048_pss_sig_functions[];
 extern const OSSL_DISPATCH p11prov_composite_mldsa65_ecdsa_p256_sig_functions[];
 extern const OSSL_DISPATCH p11prov_composite_mldsa87_ecdsa_p384_sig_functions[];
+/* Single SPKI encoder per output format — keyed by the composite profile
+ * embedded in the keydata, so one table serves all three composite OIDs. */
+extern const OSSL_DISPATCH p11prov_composite_encoder_spki_der_functions[];
+extern const OSSL_DISPATCH p11prov_composite_encoder_spki_pem_functions[];
 
 #define P11PROV_NAME_X25519 "X25519"
 #define P11PROV_NAMES_X25519 "X25519:1.3.101.110"

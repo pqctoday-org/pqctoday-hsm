@@ -376,9 +376,11 @@ pub(crate) fn hash_message(message: &[u8], ph: &Ph, phm: &mut [u8; 64]) -> ([u8;
             // id-sha224 OID 2.16.840.1.101.3.4.2.4
             [0x06u8, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x04],
             {
-                use sha2::{Digest as _, Sha224};
+                use sha2::{Digest, Sha224};
                 let mut hasher = Sha224::new();
-                hasher.update(message);
+                // UFCS: under wasm32 `CoreWrapper<T>` also impls `Update`,
+                // which collides on `update()`. Pin the call to `Digest::update`.
+                <Sha224 as Digest>::update(&mut hasher, message);
                 phm[0..28].copy_from_slice(&hasher.finalize());
                 28
             },
@@ -387,9 +389,9 @@ pub(crate) fn hash_message(message: &[u8], ph: &Ph, phm: &mut [u8; 64]) -> ([u8;
             // id-sha384 OID 2.16.840.1.101.3.4.2.2
             [0x06u8, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x02],
             {
-                use sha2::{Digest as _, Sha384};
+                use sha2::{Digest, Sha384};
                 let mut hasher = Sha384::new();
-                hasher.update(message);
+                <Sha384 as Digest>::update(&mut hasher, message);
                 phm[0..48].copy_from_slice(&hasher.finalize());
                 48
             },
@@ -398,9 +400,9 @@ pub(crate) fn hash_message(message: &[u8], ph: &Ph, phm: &mut [u8; 64]) -> ([u8;
             // id-sha3-224 OID 2.16.840.1.101.3.4.2.7
             [0x06u8, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x07],
             {
-                use sha3::{Digest as _, Sha3_224};
+                use sha3::{Digest, Sha3_224};
                 let mut hasher = Sha3_224::new();
-                hasher.update(message);
+                <Sha3_224 as Digest>::update(&mut hasher, message);
                 phm[0..28].copy_from_slice(&hasher.finalize());
                 28
             },
@@ -409,9 +411,9 @@ pub(crate) fn hash_message(message: &[u8], ph: &Ph, phm: &mut [u8; 64]) -> ([u8;
             // id-sha3-256 OID 2.16.840.1.101.3.4.2.8
             [0x06u8, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x08],
             {
-                use sha3::{Digest as _, Sha3_256};
+                use sha3::{Digest, Sha3_256};
                 let mut hasher = Sha3_256::new();
-                hasher.update(message);
+                <Sha3_256 as Digest>::update(&mut hasher, message);
                 phm[0..32].copy_from_slice(&hasher.finalize());
                 32
             },
@@ -420,9 +422,9 @@ pub(crate) fn hash_message(message: &[u8], ph: &Ph, phm: &mut [u8; 64]) -> ([u8;
             // id-sha3-384 OID 2.16.840.1.101.3.4.2.9
             [0x06u8, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x09],
             {
-                use sha3::{Digest as _, Sha3_384};
+                use sha3::{Digest, Sha3_384};
                 let mut hasher = Sha3_384::new();
-                hasher.update(message);
+                <Sha3_384 as Digest>::update(&mut hasher, message);
                 phm[0..48].copy_from_slice(&hasher.finalize());
                 48
             },
@@ -431,9 +433,9 @@ pub(crate) fn hash_message(message: &[u8], ph: &Ph, phm: &mut [u8; 64]) -> ([u8;
             // id-sha3-512 OID 2.16.840.1.101.3.4.2.10 (0x0a)
             [0x06u8, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x0a],
             {
-                use sha3::{Digest as _, Sha3_512};
+                use sha3::{Digest, Sha3_512};
                 let mut hasher = Sha3_512::new();
-                hasher.update(message);
+                <Sha3_512 as Digest>::update(&mut hasher, message);
                 phm.copy_from_slice(&hasher.finalize());
                 64
             },

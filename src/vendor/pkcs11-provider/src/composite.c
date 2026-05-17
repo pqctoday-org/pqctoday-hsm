@@ -42,6 +42,11 @@
 #include <openssl/sha.h>
 #include <openssl/core_names.h>
 #include <openssl/proverr.h>
+#include <openssl/x509.h>
+#include <openssl/bio.h>
+#include <openssl/pem.h>
+#include <openssl/asn1.h>
+#include <openssl/objects.h>
 #include <string.h>
 
 /* Fixed Prefix per draft-19 §2.2: ASCII "CompositeAlgorithmSignatures2025" */
@@ -995,8 +1000,53 @@ out:
     return ret;
 }
 
+/* AlgorithmIdentifier DER for each composite profile, per draft-19 §3.1
+ * and Appendix A.2 (PARAMS ARE absent). Encoding:
+ *
+ *   SEQUENCE {              -- 0x30 len=0x0A
+ *       OBJECT IDENTIFIER   -- 0x06 len=0x08  2B 06 01 05 05 07 06 <arc>
+ *   }
+ *
+ * OIDs: 1.3.6.1.5.5.7.6.{37,45,49} → arc bytes 0x25, 0x2D, 0x31. */
+static const unsigned char der_composite_mldsa44_rsa2048_pss_alg_id[] = {
+    0x30, 0x0A, 0x06, 0x08, 0x2B, 0x06, 0x01, 0x05, 0x05, 0x07, 0x06, 0x25
+};
+static const unsigned char der_composite_mldsa65_ecdsa_p256_alg_id[] = {
+    0x30, 0x0A, 0x06, 0x08, 0x2B, 0x06, 0x01, 0x05, 0x05, 0x07, 0x06, 0x2D
+};
+static const unsigned char der_composite_mldsa87_ecdsa_p384_alg_id[] = {
+    0x30, 0x0A, 0x06, 0x08, 0x2B, 0x06, 0x01, 0x05, 0x05, 0x07, 0x06, 0x31
+};
+
+/* Map profile pointer → ALGORITHM_ID DER. Returns NULL/0 when unknown. */
+static void p11prov_composite_alg_id(
+    const struct p11prov_composite_profile *profile,
+    const unsigned char **out, size_t *out_len)
+{
+    if (profile == NULL) {
+        *out = NULL;
+        *out_len = 0;
+        return;
+    }
+    if (strcmp(profile->composite_oid, "1.3.6.1.5.5.7.6.37") == 0) {
+        *out = der_composite_mldsa44_rsa2048_pss_alg_id;
+        *out_len = sizeof(der_composite_mldsa44_rsa2048_pss_alg_id);
+    } else if (strcmp(profile->composite_oid, "1.3.6.1.5.5.7.6.45") == 0) {
+        *out = der_composite_mldsa65_ecdsa_p256_alg_id;
+        *out_len = sizeof(der_composite_mldsa65_ecdsa_p256_alg_id);
+    } else if (strcmp(profile->composite_oid, "1.3.6.1.5.5.7.6.49") == 0) {
+        *out = der_composite_mldsa87_ecdsa_p384_alg_id;
+        *out_len = sizeof(der_composite_mldsa87_ecdsa_p384_alg_id);
+    } else {
+        *out = NULL;
+        *out_len = 0;
+    }
+}
+
 /* Settable / gettable ctx params. We accept OSSL_SIGNATURE_PARAM_CONTEXT_STRING
- * (the application context per draft-19 §2.2) before init or via init params. */
+ * (the application context per draft-19 §2.2) and expose
+ * OSSL_SIGNATURE_PARAM_ALGORITHM_ID so X509_sign / ASN1_item_sign_ex can
+ * populate the cert's AlgorithmIdentifier with the composite OID. */
 static const OSSL_PARAM *p11prov_composite_settable_ctx_params(
     void *vctx, void *provctx)
 {
@@ -1013,6 +1063,7 @@ static const OSSL_PARAM *p11prov_composite_gettable_ctx_params(
     void *vctx, void *provctx)
 {
     static const OSSL_PARAM params[] = {
+        OSSL_PARAM_octet_string(OSSL_SIGNATURE_PARAM_ALGORITHM_ID, NULL, 0),
         OSSL_PARAM_END,
     };
     (void)vctx;
@@ -1050,8 +1101,27 @@ static int p11prov_composite_set_ctx_params(void *vctx, const OSSL_PARAM params[
 
 static int p11prov_composite_get_ctx_params(void *vctx, OSSL_PARAM params[])
 {
-    (void)vctx;
-    (void)params;
+    P11PROV_COMPOSITE_SIG_CTX *ctx = (P11PROV_COMPOSITE_SIG_CTX *)vctx;
+    OSSL_PARAM *p;
+
+    if (params == NULL) {
+        return RET_OSSL_OK;
+    }
+    p = OSSL_PARAM_locate(params, OSSL_SIGNATURE_PARAM_ALGORITHM_ID);
+    if (p != NULL) {
+        const unsigned char *alg_id_der;
+        size_t alg_id_len;
+        if (ctx == NULL) {
+            return RET_OSSL_ERR;
+        }
+        p11prov_composite_alg_id(ctx->profile, &alg_id_der, &alg_id_len);
+        if (alg_id_der == NULL || alg_id_len == 0) {
+            return RET_OSSL_ERR;
+        }
+        if (!OSSL_PARAM_set_octet_string(p, alg_id_der, alg_id_len)) {
+            return RET_OSSL_ERR;
+        }
+    }
     return RET_OSSL_OK;
 }
 
@@ -1122,3 +1192,304 @@ p11prov_composite_mldsa87_ecdsa_p384_sig_dispatch(void)
 {
     return p11prov_composite_mldsa87_ecdsa_p384_sig_functions;
 }
+
+/* ===========================================================================
+ *               SubjectPublicKeyInfo Encoder (phase 5c.4)
+ * ===========================================================================
+ *
+ * X509_PUBKEY_set / i2d_X509 routes through the encoder dispatch with
+ * structure="SubjectPublicKeyInfo" and the key's algorithm name. For each
+ * composite profile we expose DER + PEM encoders. The encoder:
+ *
+ *   1. Extracts raw mldsaPK octets from the PQ subkey (via existing
+ *      p11prov_obj_export_public_key on CKK_ML_DSA).
+ *   2. Extracts the traditional public key in the form mandated by
+ *      draft-19 Appendix C:
+ *        - ECDSA: uncompressed X9.62 EC point (0x04 || X || Y).
+ *        - RSA:   DER-encoded RSAPublicKey (deferred; not yet supported).
+ *   3. Concatenates per draft-19 §4.1: mldsaPK || tradPK.
+ *   4. Builds an X509_PUBKEY whose AlgorithmIdentifier is the composite
+ *      OID with PARAMS ABSENT, and whose subjectPublicKey BIT STRING
+ *      wraps the concat bytes.
+ *   5. Emits as DER (i2d_X509_PUBKEY_bio) or PEM (PEM_write_bio_X509_PUBKEY).
+ * ========================================================================= */
+
+/* Same shape as encoder.c's local p11prov_encoder_ctx — kept local to avoid
+ * cross-file linkage on what's just a single-field struct. */
+struct p11prov_composite_encoder_ctx {
+    P11PROV_CTX *provctx;
+};
+
+static void *p11prov_composite_encoder_newctx(void *provctx)
+{
+    struct p11prov_composite_encoder_ctx *ctx =
+        OPENSSL_zalloc(sizeof(*ctx));
+    if (ctx == NULL) {
+        return NULL;
+    }
+    ctx->provctx = (P11PROV_CTX *)provctx;
+    return ctx;
+}
+
+static void p11prov_composite_encoder_freectx(void *ctx)
+{
+    OPENSSL_free(ctx);
+}
+
+/* Callback used with p11prov_obj_export_public_key to collect raw
+ * ML-DSA public key bytes (OSSL_PKEY_PARAM_PUB_KEY). */
+struct composite_octet_buf {
+    unsigned char *octet;
+    size_t len;
+};
+
+static int composite_collect_pub_key(const OSSL_PARAM *params, void *arg)
+{
+    struct composite_octet_buf *buf = (struct composite_octet_buf *)arg;
+    const OSSL_PARAM *p = OSSL_PARAM_locate_const(params,
+                                                  OSSL_PKEY_PARAM_PUB_KEY);
+    if (p == NULL || p->data_type != OSSL_PARAM_OCTET_STRING) {
+        return RET_OSSL_ERR;
+    }
+    buf->octet = OPENSSL_memdup(p->data, p->data_size);
+    if (buf->octet == NULL) {
+        return RET_OSSL_ERR;
+    }
+    buf->len = p->data_size;
+    return RET_OSSL_OK;
+}
+
+/* Extract raw mldsaPK bytes from a softhsm ML-DSA public key object. */
+static int composite_get_mldsa_pubkey(P11PROV_OBJ *key,
+                                      unsigned char **out, size_t *out_len)
+{
+    struct composite_octet_buf buf = { 0 };
+    int ret = p11prov_obj_export_public_key(key, CKK_ML_DSA, true, false,
+                                            composite_collect_pub_key, &buf);
+    if (ret != RET_OSSL_OK) {
+        OPENSSL_clear_free(buf.octet, buf.len);
+        return RET_OSSL_ERR;
+    }
+    *out = buf.octet;
+    *out_len = buf.len;
+    return RET_OSSL_OK;
+}
+
+/* Extract uncompressed EC point bytes (0x04 || X || Y) from a softhsm
+ * EC public key object, per draft-19 Appendix C ECDSA encoding. */
+static int composite_get_ecdsa_pubkey(P11PROV_OBJ *key,
+                                      unsigned char **out, size_t *out_len)
+{
+    struct composite_octet_buf buf = { 0 };
+    int ret = p11prov_obj_export_public_key(key, CKK_EC, true, false,
+                                            composite_collect_pub_key, &buf);
+    if (ret != RET_OSSL_OK) {
+        OPENSSL_clear_free(buf.octet, buf.len);
+        return RET_OSSL_ERR;
+    }
+    *out = buf.octet;
+    *out_len = buf.len;
+    return RET_OSSL_OK;
+}
+
+/* Build the SubjectPublicKeyInfo for a composite key.
+ *
+ * Returns an X509_PUBKEY whose:
+ *   - AlgorithmIdentifier.algorithm = profile->composite_oid
+ *   - AlgorithmIdentifier.parameters = absent (V_ASN1_UNDEF)
+ *   - subjectPublicKey = BIT STRING wrapping (mldsaPK || classicalPK) */
+static X509_PUBKEY *p11prov_composite_pubkey_to_x509(
+    P11PROV_COMPOSITE_OBJ *key)
+{
+    unsigned char *mldsa_pk = NULL;
+    size_t mldsa_pk_len = 0;
+    unsigned char *classical_pk = NULL;
+    size_t classical_pk_len = 0;
+    unsigned char *concat = NULL;
+    size_t concat_len;
+    ASN1_OBJECT *composite_oid_obj = NULL;
+    X509_PUBKEY *pubkey = NULL;
+
+    if (key == NULL || key->profile == NULL || key->pq_obj == NULL
+        || key->classical_obj == NULL) {
+        return NULL;
+    }
+
+    if (composite_get_mldsa_pubkey(key->pq_obj, &mldsa_pk, &mldsa_pk_len)
+        != RET_OSSL_OK) {
+        goto done;
+    }
+    if (mldsa_pk_len != key->profile->mldsa_pk_bytes) {
+        /* ML-DSA pubkey length must match FIPS 204 Table 1 for the
+         * declared parameter set; otherwise the deserializer at the peer
+         * cannot split mldsaPK from tradPK. */
+        goto done;
+    }
+
+    /* Profile dispatch on classical algorithm. RSA-2048-PSS deferred. */
+    if (key->profile->mldsa_param_set == CKP_ML_DSA_65
+        || key->profile->mldsa_param_set == CKP_ML_DSA_87) {
+        if (composite_get_ecdsa_pubkey(key->classical_obj, &classical_pk,
+                                       &classical_pk_len) != RET_OSSL_OK) {
+            goto done;
+        }
+    } else {
+        /* MLDSA44-RSA2048-PSS-SHA256: building DER RSAPublicKey from
+         * softhsm modulus/exponent is unimplemented for now. */
+        goto done;
+    }
+
+    concat_len = mldsa_pk_len + classical_pk_len;
+    concat = OPENSSL_malloc(concat_len);
+    if (concat == NULL) {
+        goto done;
+    }
+    memcpy(concat, mldsa_pk, mldsa_pk_len);
+    memcpy(concat + mldsa_pk_len, classical_pk, classical_pk_len);
+
+    composite_oid_obj = OBJ_txt2obj(key->profile->composite_oid, 1);
+    if (composite_oid_obj == NULL) {
+        goto done;
+    }
+
+    pubkey = X509_PUBKEY_new();
+    if (pubkey == NULL) {
+        goto done;
+    }
+
+    /* X509_PUBKEY_set0_param takes ownership of the algorithm OBJ and
+     * subjectPublicKey bytes on success; clear locals so cleanup below
+     * does not double-free. */
+    if (X509_PUBKEY_set0_param(pubkey, composite_oid_obj, V_ASN1_UNDEF, NULL,
+                               concat, (int)concat_len) != RET_OSSL_OK) {
+        X509_PUBKEY_free(pubkey);
+        pubkey = NULL;
+        goto done;
+    }
+    composite_oid_obj = NULL;
+    concat = NULL;
+
+done:
+    OPENSSL_clear_free(mldsa_pk, mldsa_pk_len);
+    OPENSSL_clear_free(classical_pk, classical_pk_len);
+    OPENSSL_free(concat);
+    ASN1_OBJECT_free(composite_oid_obj);
+    return pubkey;
+}
+
+/* DOES_SELECTION: we only encode public-key material. */
+static int p11prov_composite_encoder_spki_does_selection(void *inctx,
+                                                         int selection)
+{
+    (void)inctx;
+    if (selection & OSSL_KEYMGMT_SELECT_PUBLIC_KEY) {
+        return RET_OSSL_OK;
+    }
+    return RET_OSSL_ERR;
+}
+
+/* SPKI DER ENCODE: serialize composite SubjectPublicKeyInfo as DER. */
+static int p11prov_composite_encoder_spki_der_encode(
+    void *inctx, OSSL_CORE_BIO *cbio, const void *inkey,
+    const OSSL_PARAM key_abstract[], int selection,
+    OSSL_PASSPHRASE_CALLBACK *cb, void *cbarg)
+{
+    struct p11prov_composite_encoder_ctx *ctx =
+        (struct p11prov_composite_encoder_ctx *)inctx;
+    P11PROV_COMPOSITE_OBJ *key = (P11PROV_COMPOSITE_OBJ *)inkey;
+    X509_PUBKEY *pubkey = NULL;
+    BIO *out = NULL;
+    int ret;
+    (void)key_abstract;
+    (void)cb;
+    (void)cbarg;
+
+    if (!(selection & OSSL_KEYMGMT_SELECT_PUBLIC_KEY)) {
+        return RET_OSSL_ERR;
+    }
+    if (key == NULL) {
+        return RET_OSSL_ERR;
+    }
+
+    pubkey = p11prov_composite_pubkey_to_x509(key);
+    if (pubkey == NULL) {
+        return RET_OSSL_ERR;
+    }
+
+    out = BIO_new_from_core_bio(p11prov_ctx_get_libctx(ctx->provctx), cbio);
+    if (out == NULL) {
+        X509_PUBKEY_free(pubkey);
+        return RET_OSSL_ERR;
+    }
+
+    ret = i2d_X509_PUBKEY_bio(out, pubkey);
+    X509_PUBKEY_free(pubkey);
+    BIO_free(out);
+    return ret > 0 ? RET_OSSL_OK : RET_OSSL_ERR;
+}
+
+/* SPKI PEM ENCODE: same as DER then PEM-wrap. */
+static int p11prov_composite_encoder_spki_pem_encode(
+    void *inctx, OSSL_CORE_BIO *cbio, const void *inkey,
+    const OSSL_PARAM key_abstract[], int selection,
+    OSSL_PASSPHRASE_CALLBACK *cb, void *cbarg)
+{
+    struct p11prov_composite_encoder_ctx *ctx =
+        (struct p11prov_composite_encoder_ctx *)inctx;
+    P11PROV_COMPOSITE_OBJ *key = (P11PROV_COMPOSITE_OBJ *)inkey;
+    X509_PUBKEY *pubkey = NULL;
+    BIO *out = NULL;
+    int ret;
+    (void)key_abstract;
+    (void)cb;
+    (void)cbarg;
+
+    if (!(selection & OSSL_KEYMGMT_SELECT_PUBLIC_KEY)) {
+        return RET_OSSL_ERR;
+    }
+    if (key == NULL) {
+        return RET_OSSL_ERR;
+    }
+
+    pubkey = p11prov_composite_pubkey_to_x509(key);
+    if (pubkey == NULL) {
+        return RET_OSSL_ERR;
+    }
+
+    out = BIO_new_from_core_bio(p11prov_ctx_get_libctx(ctx->provctx), cbio);
+    if (out == NULL) {
+        X509_PUBKEY_free(pubkey);
+        return RET_OSSL_ERR;
+    }
+
+    ret = PEM_write_bio_X509_PUBKEY(out, pubkey);
+    X509_PUBKEY_free(pubkey);
+    BIO_free(out);
+    return ret > 0 ? RET_OSSL_OK : RET_OSSL_ERR;
+}
+
+/* One DER dispatch table reused across all 3 profiles — profile is read
+ * from the keydata, not from the dispatch. Same for PEM. */
+const OSSL_DISPATCH p11prov_composite_encoder_spki_der_functions[] = {
+    { OSSL_FUNC_ENCODER_NEWCTX,
+      (void (*)(void))p11prov_composite_encoder_newctx },
+    { OSSL_FUNC_ENCODER_FREECTX,
+      (void (*)(void))p11prov_composite_encoder_freectx },
+    { OSSL_FUNC_ENCODER_DOES_SELECTION,
+      (void (*)(void))p11prov_composite_encoder_spki_does_selection },
+    { OSSL_FUNC_ENCODER_ENCODE,
+      (void (*)(void))p11prov_composite_encoder_spki_der_encode },
+    { 0, NULL },
+};
+
+const OSSL_DISPATCH p11prov_composite_encoder_spki_pem_functions[] = {
+    { OSSL_FUNC_ENCODER_NEWCTX,
+      (void (*)(void))p11prov_composite_encoder_newctx },
+    { OSSL_FUNC_ENCODER_FREECTX,
+      (void (*)(void))p11prov_composite_encoder_freectx },
+    { OSSL_FUNC_ENCODER_DOES_SELECTION,
+      (void (*)(void))p11prov_composite_encoder_spki_does_selection },
+    { OSSL_FUNC_ENCODER_ENCODE,
+      (void (*)(void))p11prov_composite_encoder_spki_pem_encode },
+    { 0, NULL },
+};

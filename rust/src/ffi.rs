@@ -27,7 +27,13 @@ use rand::rngs::OsRng;
 macro_rules! with_rng {
     ($rng:ident, $body:block) => {{
         let mut _acvp_rng_cell = crate::state::ACVP_RNG.with(|r| r.borrow_mut().take());
-        if let Some(ref mut $rng) = _acvp_rng_cell {
+        if let Some(ref mut _acvp) = _acvp_rng_cell {
+            // Re-bind through `let mut` so the LOCAL binding is mutable.
+            // Call sites use `&mut $rng` to pass to crypto crates; that
+            // requires the binding to be `mut`. The `ref mut` pattern alone
+            // makes the binding immutable (value mutable), which fails
+            // `&mut $rng` borrow-check on wasm32 (E0596).
+            let mut $rng = _acvp;
             let _with_rng_result = { $body };
             // Restore the (now-advanced) RNG back to thread-local state
             crate::state::ACVP_RNG.with(|r| {

@@ -1,78 +1,223 @@
 {
-    "ChaCha20": [
+    "Attributes": [
         {
-            "details": "Created CKK_CHACHA20 Secret Key",
+            "details": "§1.21 G-ATTR1 check",
             "status": "PASS",
-            "test": "C_CreateObject"
+            "test": "ML_DSA_44_CKA_VALUE_Pub"
         },
         {
-            "details": "Generated properly with 16 byte MAC tag",
+            "details": "SPKI exposed",
             "status": "PASS",
-            "test": "C_Encrypt"
+            "test": "ML_DSA_44_CKA_PUBLIC_KEY_INFO_Pub"
+        },
+        {
+            "details": "SPKI exposed on private",
+            "status": "PASS",
+            "test": "ML_DSA_44_CKA_PUBLIC_KEY_INFO_Priv"
+        },
+        {
+            "details": "",
+            "status": "PASS",
+            "test": "ML_DSA_44_CKA_VERIFY"
+        },
+        {
+            "details": "",
+            "status": "PASS",
+            "test": "ML_DSA_44_CKA_SIGN"
+        },
+        {
+            "details": "§1.21 G-ATTR1 check",
+            "status": "PASS",
+            "test": "ML_DSA_65_CKA_VALUE_Pub"
+        },
+        {
+            "details": "SPKI exposed",
+            "status": "PASS",
+            "test": "ML_DSA_65_CKA_PUBLIC_KEY_INFO_Pub"
+        },
+        {
+            "details": "SPKI exposed on private",
+            "status": "PASS",
+            "test": "ML_DSA_65_CKA_PUBLIC_KEY_INFO_Priv"
+        },
+        {
+            "details": "",
+            "status": "PASS",
+            "test": "ML_DSA_65_CKA_VERIFY"
+        },
+        {
+            "details": "",
+            "status": "PASS",
+            "test": "ML_DSA_65_CKA_SIGN"
+        },
+        {
+            "details": "§1.21 G-ATTR1 check",
+            "status": "PASS",
+            "test": "ML_DSA_87_CKA_VALUE_Pub"
+        },
+        {
+            "details": "SPKI exposed",
+            "status": "PASS",
+            "test": "ML_DSA_87_CKA_PUBLIC_KEY_INFO_Pub"
+        },
+        {
+            "details": "SPKI exposed on private",
+            "status": "PASS",
+            "test": "ML_DSA_87_CKA_PUBLIC_KEY_INFO_Priv"
+        },
+        {
+            "details": "",
+            "status": "PASS",
+            "test": "ML_DSA_87_CKA_VERIFY"
+        },
+        {
+            "details": "",
+            "status": "PASS",
+            "test": "ML_DSA_87_CKA_SIGN"
         }
     ],
-    "Classical": [
+    "DSA": [
         {
-            "details": "RV=0",
+            "details": "Gen ML-DSA-44",
             "status": "PASS",
-            "test": "Generate_RSA_2048"
+            "test": "Generate_ML_DSA_44"
         },
         {
             "details": "RV=0",
             "status": "PASS",
-            "test": "C_Sign_RSA_SHA256"
+            "test": "C_Sign_44_Pure"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_Verify_44_Pure"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_Sign_44_PreHash_SHA512"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_Verify_44_PreHash_SHA512"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_Sign_44_PreHash_SHA3_512"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_Verify_44_PreHash_SHA3_512"
+        },
+        {
+            "details": "Gen ML-DSA-65",
+            "status": "PASS",
+            "test": "Generate_ML_DSA_65"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_Sign_65_Pure"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_Verify_65_Pure"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_Sign_65_PreHash_SHA512"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_Verify_65_PreHash_SHA512"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_Sign_65_PreHash_SHA3_512"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_Verify_65_PreHash_SHA3_512"
+        },
+        {
+            "details": "Gen ML-DSA-87",
+            "status": "PASS",
+            "test": "Generate_ML_DSA_87"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_Sign_87_Pure"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_Verify_87_Pure"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_Sign_87_PreHash_SHA512"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_Verify_87_PreHash_SHA512"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_Sign_87_PreHash_SHA3_512"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_Verify_87_PreHash_SHA3_512"
         }
     ],
-    "ECDSA": [
+    "DSA-CTX": [
         {
-            "details": "RV=0",
+            "details": "ML-DSA-65 keypair generated",
             "status": "PASS",
-            "test": "Generate_P256"
+            "test": "Setup_KeyGen_MLDSA65"
         },
         {
-            "details": "RV=0",
+            "details": "siglen=3309",
             "status": "PASS",
-            "test": "Sign_P256"
+            "test": "Sign_ctxA"
         },
         {
-            "details": "RV=0",
+            "details": "expected CKR_OK got RV=0",
             "status": "PASS",
-            "test": "Generate_P521"
+            "test": "Verify_ctxA_matching"
         },
         {
-            "details": "RV=0",
+            "details": "binding works; RV=192",
             "status": "PASS",
-            "test": "Sign_P521"
+            "test": "Verify_ctxB_should_fail"
         },
         {
-            "details": "RV=0",
+            "details": "binding enforced; RV=192",
             "status": "PASS",
-            "test": "Generate_secp256k1"
+            "test": "Verify_noctx_should_fail"
         },
         {
-            "details": "RV=0",
+            "details": "deterministic mode produces identical signatures (FIPS 204)",
             "status": "PASS",
-            "test": "Sign_secp256k1"
+            "test": "Deterministic_byte_equal"
         },
         {
-            "details": "RV=0",
+            "details": "hedged mode produces distinct signatures (probabilistic)",
             "status": "PASS",
-            "test": "Generate_P256_SHA3_256"
-        },
-        {
-            "details": "RV=0",
-            "status": "PASS",
-            "test": "Sign_P256_SHA3_256"
-        },
-        {
-            "details": "RV=0",
-            "status": "PASS",
-            "test": "Generate_P521_SHA3_512"
-        },
-        {
-            "details": "RV=0",
-            "status": "PASS",
-            "test": "Sign_P521_SHA3_512"
+            "test": "Hedge_non_deterministic"
         }
     ],
     "Init": [
@@ -82,108 +227,21 @@
             "test": "TokenSetup"
         }
     ],
-    "MultiPart_ECDSA": [
+    "MultiPart": [
         {
-            "details": "P-256 key pair generated",
+            "details": "ML-DSA-65 key pair generated",
             "status": "PASS",
             "test": "Setup_KeyGen"
         },
         {
-            "details": "CKM_ECDSA_SHA256 — RV=0",
+            "details": "PKCS#11 v3.2 §5.2 — RV=0",
             "status": "PASS",
             "test": "C_SignInit"
         },
         {
-            "details": "RV=0",
-            "status": "PASS",
+            "details": "RV=145",
+            "status": "FAIL",
             "test": "C_SignUpdate_chunk1"
-        },
-        {
-            "details": "RV=0",
-            "status": "PASS",
-            "test": "C_SignUpdate_chunk2"
-        },
-        {
-            "details": "SigLen=64 RV=0",
-            "status": "PASS",
-            "test": "C_SignFinal"
-        },
-        {
-            "details": "RV=0",
-            "status": "PASS",
-            "test": "C_VerifyInit"
-        },
-        {
-            "details": "RV=0",
-            "status": "PASS",
-            "test": "C_VerifyUpdate_chunk1"
-        },
-        {
-            "details": "RV=0",
-            "status": "PASS",
-            "test": "C_VerifyUpdate_chunk2"
-        },
-        {
-            "details": "PKCS#11 v3.2 §5.2 P-256 round-trip — RV=0",
-            "status": "PASS",
-            "test": "C_VerifyFinal"
-        },
-        {
-            "details": "Multi-part sig matches one-shot verify — RV=0",
-            "status": "PASS",
-            "test": "C_Verify_oneshot_xcheck"
-        }
-    ],
-    "MultiPart_EdDSA": [
-        {
-            "details": "Ed25519 key pair generated",
-            "status": "PASS",
-            "test": "Setup_KeyGen"
-        },
-        {
-            "details": "CKM_EDDSA — RV=0",
-            "status": "PASS",
-            "test": "C_SignInit"
-        },
-        {
-            "details": "RV=0",
-            "status": "PASS",
-            "test": "C_SignUpdate_chunk1"
-        },
-        {
-            "details": "RV=0",
-            "status": "PASS",
-            "test": "C_SignUpdate_chunk2"
-        },
-        {
-            "details": "SigLen=64 RV=0",
-            "status": "PASS",
-            "test": "C_SignFinal"
-        },
-        {
-            "details": "RV=0",
-            "status": "PASS",
-            "test": "C_VerifyInit"
-        },
-        {
-            "details": "RV=0",
-            "status": "PASS",
-            "test": "C_VerifyUpdate_chunk1"
-        },
-        {
-            "details": "RV=0",
-            "status": "PASS",
-            "test": "C_VerifyUpdate_chunk2"
-        },
-        {
-            "details": "PKCS#11 v3.2 §5.2 Ed25519 round-trip — RV=0",
-            "status": "PASS",
-            "test": "C_VerifyFinal"
-        },
-        {
-            "details": "Multi-part sig matches one-shot verify — RV=0",
-            "status": "PASS",
-            "test": "C_Verify_oneshot_xcheck"
         }
     ]
 }

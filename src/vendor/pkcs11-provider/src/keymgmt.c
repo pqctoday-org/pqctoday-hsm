@@ -2518,6 +2518,14 @@ static int p11prov_mldsa_get_params(void *keydata, OSSL_PARAM params[])
             return ret;
         }
     }
+    p = OSSL_PARAM_locate(params, OSSL_PKEY_PARAM_MANDATORY_DIGEST);
+    if (p) {
+        /* ML-DSA is hash-internal (FIPS 204 §5.2) — no external digest. */
+        ret = OSSL_PARAM_set_utf8_string(p, "");
+        if (ret != RET_OSSL_OK) {
+            return ret;
+        }
+    }
     p = OSSL_PARAM_locate(params, OSSL_PKEY_PARAM_PUB_KEY);
     if (p) {
         CK_ATTRIBUTE *pub;
