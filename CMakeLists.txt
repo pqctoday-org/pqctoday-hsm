@@ -90,8 +90,8 @@ include(CompilerOptions)
 include(CompilerSanitizers)
 
 # Enforce minimum OpenSSL version after CompilerOptions resolved the library.
-if(OPENSSL_VERSION VERSION_LESS "3.6.0")
-    message(FATAL_ERROR "OpenSSL >= 3.6.0 is required (found ${OPENSSL_VERSION})")
+if(OPENSSL_VERSION VERSION_LESS "3.5.0")
+    message(FATAL_ERROR "OpenSSL >= 3.5.0 is required (found ${OPENSSL_VERSION})")
 endif()
 include(GenerateExportHeader)
 
