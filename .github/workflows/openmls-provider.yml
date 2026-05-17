@@ -1,0 +1,68 @@
+name: OpenMLS Provider (Rust)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'openmls-provider/**'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'openmls-provider/**'
+
+jobs:
+  rust:
+    name: Check / Test / Clippy (Ubuntu 24.04)
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo registry + build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            openmls-provider/target
+          key: ${{ runner.os }}-cargo-openmls-provider-${{ hashFiles('openmls-provider/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-openmls-provider-
+
+      - name: Install protoc (required by pqctoday-mls-grpc build.rs)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y protobuf-compiler
+
+      - name: cargo check
+        working-directory: openmls-provider
+        run: cargo check --workspace
+
+      - name: cargo test
+        working-directory: openmls-provider
+        env:
+          # softhsmv3 shared library is NOT available in CI — all PKCS#11
+          # integration tests detect the empty module path and skip gracefully.
+          PKCS11_MODULE: ''
+          RUST_LOG: warn
+        run: >
+          cargo test --workspace
+          --exclude pqctoday-mls-wasm-smoke
+          -- --test-threads=1
+
+      - name: Build interop binary
+        working-directory: openmls-provider
+        run: cargo build --release -p pqctoday-mls-grpc
+
+      - name: cargo clippy
+        working-directory: openmls-provider
+        run: >
+          cargo clippy --workspace
+          --exclude pqctoday-mls-wasm-smoke
+          -- -D warnings

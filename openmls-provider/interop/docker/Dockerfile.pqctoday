@@ -1,0 +1,106 @@
+# ── Stage 0: build OpenSSL 3.5 from source ───────────────────────────────────
+# debian:bookworm ships OpenSSL 3.0; softhsmv3 requires >= 3.5.0.
+FROM debian:bookworm AS openssl-builder
+
+ARG OPENSSL_VERSION=3.5.0
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        wget make perl ca-certificates g++ \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /ossl-src
+RUN wget -q "https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VERSION}/openssl-${OPENSSL_VERSION}.tar.gz" \
+    && tar xzf "openssl-${OPENSSL_VERSION}.tar.gz" \
+    && cd "openssl-${OPENSSL_VERSION}" \
+    && ./Configure --prefix=/usr/local/openssl \
+                   --openssldir=/usr/local/openssl/ssl \
+                   shared \
+    && make -j"$(nproc)" \
+    && make install_sw
+
+# ── Stage 1: build softhsmv3 PKCS#11 module ──────────────────────────────────
+# Build context: pqctoday-hsm/ root (one level above openmls-provider/)
+FROM debian:bookworm AS softhsm-builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        cmake make g++ pkg-config libsqlite3-dev python3 git \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=openssl-builder /usr/local/openssl /usr/local/openssl
+
+WORKDIR /src
+COPY CMakeLists.txt config.h.in.cmake softhsmv3.pc.in ./
+COPY cmake/ ./cmake/
+COPY src/ ./src/
+
+RUN cmake -S . -B build \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DWITH_OBJECTSTORE_BACKEND_DB=yes \
+        -DWITH_SQLITE3=ON \
+        -DBUILD_TESTS=OFF \
+        -DOPENSSL_ROOT_DIR=/usr/local/openssl \
+        -DOPENSSL_INCLUDE_DIR=/usr/local/openssl/include \
+    && cmake --build build --target softhsmv3 -j"$(nproc)"
+
+# ── Stage 2: build the pqctoday-mls-grpc binary ───────────────────────────────
+FROM rust:1.87-bookworm AS grpc-builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        pkg-config libsqlite3-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=openssl-builder /usr/local/openssl /usr/local/openssl
+
+ENV PKG_CONFIG_PATH=/usr/local/openssl/lib64/pkgconfig:/usr/local/openssl/lib/pkgconfig
+ENV OPENSSL_DIR=/usr/local/openssl
+RUN ldconfig /usr/local/openssl/lib64 /usr/local/openssl/lib 2>/dev/null; ldconfig
+
+# Place the .so at the standard path so the linker finds it at build time
+# and so the runtime stage can copy it from a fixed location.
+COPY --from=softhsm-builder /src/build/src/lib/libsofthsmv3.so \
+     /usr/local/lib/softhsm/libsofthsmv3.so
+RUN ldconfig
+
+WORKDIR /workspace
+
+# Copy the full openmls-provider workspace so path-deps resolve.
+COPY openmls-provider/ ./openmls-provider/
+# The Rust crate in openmls-provider/lib also needs the softhsmv3 Rust binding
+# (crate `softhsmrustv3`) which lives under rust/.
+COPY rust/ ./rust/
+
+WORKDIR /workspace/openmls-provider
+
+RUN cargo build --release -p pqctoday-mls-interop
+
+# ── Stage 3: runtime image ────────────────────────────────────────────────────
+FROM debian:bookworm-slim AS runtime
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libsqlite3-0 wget ca-certificates \
+    && GRPC_PROBE=v0.4.28 \
+    && ARCH="$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')" \
+    && wget -qO /bin/grpc_health_probe \
+       "https://github.com/grpc-ecosystem/grpc-health-probe/releases/download/${GRPC_PROBE}/grpc_health_probe-linux-${ARCH}" \
+    && chmod +x /bin/grpc_health_probe \
+    && apt-get purge -y wget ca-certificates \
+    && apt-get autoremove -y \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=openssl-builder /usr/local/openssl /usr/local/openssl
+COPY --from=softhsm-builder /src/build/src/lib/libsofthsmv3.so \
+     /usr/local/lib/softhsm/libsofthsmv3.so
+COPY --from=grpc-builder \
+     /workspace/openmls-provider/target/release/pqctoday-mls-grpc \
+     /usr/local/bin/pqctoday-mls-grpc
+
+RUN ldconfig /usr/local/openssl/lib64 /usr/local/openssl/lib /usr/local/openssl/lib/aarch64-linux-gnu 2>/dev/null; ldconfig
+
+# The server probes PKCS11_MODULE first; this points it straight at our .so
+# without relying on the relative-path heuristics in resolve_module().
+ENV PKCS11_MODULE=/usr/local/lib/softhsm/libsofthsmv3.so
+ENV LD_LIBRARY_PATH=/usr/local/openssl/lib:/usr/local/openssl/lib64
+
+EXPOSE 50053
+ENTRYPOINT ["/usr/local/bin/pqctoday-mls-grpc"]
+CMD ["--port", "50053"]

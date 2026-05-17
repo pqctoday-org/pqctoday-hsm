@@ -1,0 +1,37 @@
+# Build the openmls reference interop client.
+# Source: https://github.com/openmls/openmls/tree/main/interop_client
+#
+# Pin the commit via --build-arg OPENMLS_REF=<sha>.
+ARG OPENMLS_REF=main
+
+FROM rust:1.87-bookworm AS openmls-builder
+
+ARG OPENMLS_REF
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git libssl-dev pkg-config protobuf-compiler \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+RUN git clone --depth 1 https://github.com/openmls/openmls.git . \
+    && git checkout "${OPENMLS_REF}"
+
+RUN cargo build --release -p interop_client --bin interop_client
+
+FROM debian:bookworm-slim AS runtime
+RUN apt-get update && apt-get install -y --no-install-recommends libssl3 wget ca-certificates \
+    && GRPC_PROBE=v0.4.28 \
+    && ARCH="$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')" \
+    && wget -qO /bin/grpc_health_probe \
+       "https://github.com/grpc-ecosystem/grpc-health-probe/releases/download/${GRPC_PROBE}/grpc_health_probe-linux-${ARCH}" \
+    && chmod +x /bin/grpc_health_probe \
+    && apt-get purge -y wget ca-certificates \
+    && apt-get autoremove -y \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=openmls-builder /src/target/release/interop_client \
+     /usr/local/bin/openmls-interop
+
+EXPOSE 50051
+ENTRYPOINT ["/usr/local/bin/openmls-interop"]
+CMD ["--port", "50051"]

@@ -1,0 +1,115 @@
+# MLS interop harness — four implementations + IETF test runner
+#
+# Usage:
+#   cd pqctoday-hsm/openmls-provider/interop/docker
+#
+#   # Build all images (first run or after source changes):
+#   docker compose build
+#
+#   # Bring up gRPC servers only (background):
+#   docker compose up -d pqctoday openmls mls-rs
+#
+#   # Run a test scenario (pqctoday vs openmls, welcome+join):
+#   docker compose run --rm test-runner \
+#       -client pqctoday:50053 -client openmls:50051 \
+#       -config /configs/welcome_join.json
+#
+#   # Run the commit scenario (pqctoday vs mls-rs):
+#   docker compose run --rm test-runner \
+#       -client pqctoday:50053 -client mls-rs:50054 \
+#       -config /configs/commit.json
+#
+#   # Tear down:
+#   docker compose down
+#
+# Pairwise gate matrix:
+#   pqctoday vs openmls  → welcome_join  (gate)
+#   pqctoday vs openmls  → commit        (gate)
+#   pqctoday vs openmls  → external_join (gate)
+#   pqctoday vs mls-rs   → welcome_join  (gate)
+#   pqctoday vs mls-rs   → commit        (gate)
+#   pqctoday vs mls-rs   → external_join (best-effort)
+
+name: pqctoday-mls-interop
+
+services:
+
+  # ── Our implementation ───────────────────────────────────────────────────
+  pqctoday:
+    build:
+      # Context is the pqctoday-hsm repo root so both softhsmv3 C sources
+      # and the Rust workspace are available to the Dockerfile.
+      context: ../../..
+      dockerfile: openmls-provider/interop/docker/Dockerfile.pqctoday
+    ports:
+      - "50053:50053"
+    environment:
+      PKCS11_MODULE: /usr/local/lib/softhsm/libsofthsmv3.so
+      RUST_LOG: info
+    healthcheck:
+      test: ["CMD", "grpc_health_probe", "-addr=:50053"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ── openmls reference implementation ────────────────────────────────────
+  # Built from the openmls repo's interop_client crate.
+  # Source: https://github.com/openmls/openmls/tree/main/interop_client
+  # Note: openmls interop_client does not implement the gRPC health protocol,
+  # so we check raw TCP connectivity instead.
+  openmls:
+    build:
+      context: .
+      dockerfile: Dockerfile.openmls
+    ports:
+      - "50051:50051"
+    healthcheck:
+      # openmls interop_client doesn't implement the gRPC health protocol (exit 3 = reachable but no health svc).
+      # Accept exit 0 (healthy) or 3 (no health svc but reachable); fail only on exit 2 (connection refused).
+      test: ["CMD-SHELL", "grpc_health_probe -addr=:50051 2>/dev/null; EC=$$?; [ $$EC -eq 0 ] || [ $$EC -eq 3 ]"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ── AWS Wickr mls-rs implementation ─────────────────────────────────────
+  mls-rs:
+    build:
+      context: .
+      dockerfile: Dockerfile.mls-rs
+      args:
+        MLS_RS_REF: main
+    ports:
+      - "50054:50054"
+    healthcheck:
+      test: ["CMD-SHELL", "grpc_health_probe -addr=:50054 2>/dev/null; EC=$$?; [ $$EC -eq 0 ] || [ $$EC -eq 3 ]"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ── IETF MLS WG test runner ──────────────────────────────────────────────
+  # Source: https://github.com/mlswg/mls-implementations
+  # The test runner binary is built from Go source in that repo.
+  # Configs live in mlswg/mls-implementations/interop/configs/.
+  test-runner:
+    build:
+      context: .
+      dockerfile: Dockerfile.test-runner
+    depends_on:
+      pqctoday:
+        condition: service_healthy
+      openmls:
+        condition: service_healthy
+      mls-rs:
+        condition: service_healthy
+    # Override CMD per run:
+    #   docker compose run test-runner \
+    #       -client pqctoday:50053 -client openmls:50051 \
+    #       -config /configs/welcome_join.json
+    entrypoint: ["/usr/local/bin/mls-test-runner"]
+    profiles:
+      - testing
+    network_mode: service:pqctoday
+
+networks:
+  default:
+    name: pqctoday-mls-net

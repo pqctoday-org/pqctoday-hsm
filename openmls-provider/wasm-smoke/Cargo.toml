@@ -1,0 +1,19 @@
+[package]
+name = "pqctoday-mls-wasm-smoke"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Phase 5 proof-of-concept: drives softhsmrustv3 directly from wasm32 to prove the linkage works before the provider's full Pkcs11Backend trait refactor."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+# This crate is wasm32-only by design — every dep below is conditioned.
+# Building it for native targets is a no-op (empty rlib).
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+softhsmrustv3 = { path = "../../rust" }
+wasm-bindgen = "0.2"
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3"
+hex = "0.4"

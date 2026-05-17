@@ -1,0 +1,19 @@
+# pqctoday OpenMLS provider workspace
+#
+# Sibling integration to `rust/` (softhsmrustv3 engine) and `openpgp/`
+# (Sequoia-PGP CLI). Provides an OpenMLS `OpenMlsProvider` implementation
+# that routes the `OpenMlsCrypto` trait surface through PKCS#11 v3.2 against
+# softhsmv3 (or any conformant module).
+
+[workspace]
+resolver = "2"
+members = ["lib", "interop", "wasm-smoke"]
+
+# Mirror the patches from `pqctoday-hsm/rust/Cargo.toml` so the
+# `softhsmrustv3` path dep (used only by `wasm-smoke`) gets the same
+# Ph::SHA{224,384,3_*}/SHAKE256 variants it needs for PKCS#11 v3.2
+# §6.67.7 HashML-DSA + §6.69.7 HashSLH-DSA coverage. `[patch]` doesn't
+# propagate across workspaces, so we duplicate it here.
+[patch.crates-io]
+fips204 = { path = "../rust/fips204-patched" }
+fips205 = { path = "../rust/fips205-patched" }

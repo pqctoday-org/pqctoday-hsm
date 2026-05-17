@@ -1,0 +1,79 @@
+[package]
+name = "openmls_pqctoday_crypto"
+version = "0.1.0"
+edition = "2021"
+authors = ["pqctoday contributors"]
+license = "MIT"
+description = "OpenMLS crypto + rand provider backed by PKCS#11 v3.2 (softhsmv3 / pqctoday HSM)."
+repository = "https://github.com/pqctoday-org/pqctoday-hsm"
+readme = "../README.md"
+keywords = ["mls", "openmls", "pkcs11", "hsm", "pqc"]
+
+[lib]
+name = "openmls_pqctoday_crypto"
+path = "src/lib.rs"
+
+[dependencies]
+openmls_traits = "0.5"
+openmls_memory_storage = "0.5"
+
+# X25519 scalar-mult for HPKE DeriveKeyPair / ephemeral keypair generation.
+# Only used for the non-secret-protecting base-point arithmetic; the
+# Diffie-Hellman step itself runs inside the HSM via CKM_ECDH1_DERIVE.
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+
+# Fallback HPKE for non-X25519/HKDF-SHA256/AES-128-GCM suites. The MLS
+# baseline ciphersuite #1 (DhKem25519 + HkdfSha256 + AesGcm128) is now
+# served by the PKCS#11 path in src/hpke.rs.
+hpke-rs = { version = "0.6", features = ["hazmat", "serialization"] }
+hpke-rs-rust-crypto = "0.6"
+hpke-rs-crypto = "0.6"
+
+# Software AEAD for cipher suites the HSM doesn't natively support (e.g. ChaCha20Poly1305).
+chacha20poly1305 = "0.10"
+aes-gcm = "0.10"
+
+tls_codec = "0.4"
+thiserror = "2"
+zeroize = "1"
+log = "0.4"
+serde = { version = "1", features = ["derive"] }
+
+# `cryptoki` uses libloading + dlopen and doesn't compile to wasm32 by design
+# (browsers don't have a dynamic-loading model for PKCS#11 modules). Gated
+# to native targets only; the wasm32 backend talks to `softhsmrustv3`
+# directly as a Rust dependency — see `src/session.rs` for the dispatch.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+cryptoki = "0.10"
+
+# When compiling to wasm32, force `getrandom` to use the JS RNG (Crypto API
+# via web-sys). Transitive deps in the openmls / hpke-rs chain pull
+# `getrandom` v0.2; without the `js` feature their build fails on wasm32.
+# `softhsmrustv3` is the in-process PKCS#11 engine for the WasmPkcs11Backend;
+# it replaces the `cryptoki` dlopen path which is unavailable in WASM.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }
+softhsmrustv3 = { path = "../../rust" }
+
+[dev-dependencies]
+env_logger = "0.11"
+hex = "0.4"
+tempfile = "3"
+
+# Real openmls dependency — used by the `two_member_group` example to drive
+# a live MlsGroup lifecycle through our provider. Kept in dev-deps so
+# downstream users of the crate don't inherit the full openmls tree just
+# to depend on the provider.
+openmls = "0.8"
+openmls_basic_credential = "0.5"
+openmls_rust_crypto = "0.5"
+serde_json = "1"
+tls_codec = { version = "0.4", features = ["derive"] }
+
+[[example]]
+name = "two_member_group"
+path = "examples/two_member_group.rs"
+
+[[example]]
+name = "two_member_group_rustcrypto"
+path = "examples/two_member_group_rustcrypto.rs"

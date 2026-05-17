@@ -1,0 +1,44 @@
+# Build the IETF MLS WG test runner (Go).
+# Source: https://github.com/mlswg/mls-implementations
+#
+# The test runner drives pairwise scenarios across any two gRPC clients
+# that implement the mls_client.proto contract.
+ARG MLS_IMPL_REF=main
+
+FROM golang:1.22-bookworm AS runner-builder
+
+ARG MLS_IMPL_REF
+
+RUN apt-get update && apt-get install -y --no-install-recommends git protobuf-compiler \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install protoc Go plugins.
+RUN go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.33.0 \
+    && go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.3.0
+
+WORKDIR /src
+RUN git clone --depth 1 https://github.com/mlswg/mls-implementations.git . \
+    && git checkout "${MLS_IMPL_REF}"
+
+# Generate Go protobuf stubs that the test-runner imports.
+RUN protoc --go_out=. --go-grpc_out=. \
+           --go_opt=paths=source_relative \
+           --go-grpc_opt=paths=source_relative \
+           interop/proto/mls_client.proto
+
+RUN GOFLAGS=-mod=mod go build -o /usr/local/bin/mls-test-runner ./interop/test-runner \
+    || GOFLAGS=-mod=mod go build -o /usr/local/bin/mls-test-runner ./interop/runner \
+    || GOFLAGS=-mod=mod go build -o /usr/local/bin/mls-test-runner ./cmd/runner \
+    || GOFLAGS=-mod=mod go build -o /usr/local/bin/mls-test-runner .
+
+# Copy the bundled scenario configs into the image so callers can reference
+# them without a volume mount.
+RUN cp -r interop/configs /configs 2>/dev/null \
+    || cp -r configs /configs 2>/dev/null \
+    || mkdir /configs
+
+FROM debian:bookworm-slim AS runtime
+COPY --from=runner-builder /usr/local/bin/mls-test-runner /usr/local/bin/mls-test-runner
+COPY --from=runner-builder /configs /configs
+
+ENTRYPOINT ["/usr/local/bin/mls-test-runner"]

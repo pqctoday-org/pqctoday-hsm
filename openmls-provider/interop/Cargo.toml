@@ -1,0 +1,43 @@
+[package]
+name = "pqctoday-mls-interop"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "IETF mls-implementations gRPC interop client backed by openmls_pqctoday_crypto."
+
+[lib]
+name = "pqctoday_mls_interop"
+path = "src/lib.rs"
+
+[[bin]]
+name = "pqctoday-mls-grpc"
+path = "src/main.rs"
+
+[dependencies]
+openmls_pqctoday_crypto = { path = "../lib" }
+
+# IETF mls_client gRPC contract
+prost = "0.13"
+tonic = "0.12"
+tonic-health = "0.12"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
+
+# Shared with the parent crate so types stay in sync
+openmls = "0.8"
+openmls_traits = "0.5"
+
+# Talks to softhsm directly to initialise the per-server token.
+cryptoki = "0.10"
+tempfile = "3"
+
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[build-dependencies]
+tonic-build = "0.12"
+protoc-bin-vendored = "3"
+
+[dev-dependencies]
+tonic = "0.12"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "process", "io-util"] }

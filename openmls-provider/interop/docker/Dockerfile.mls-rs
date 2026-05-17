@@ -1,0 +1,61 @@
+# Multi-stage build for the AWS Wickr mls-rs interop client.
+#
+# mls-rs ships an IETF mls_client.proto-compatible gRPC server under
+# `mls_rs/mls-rs-ffi/src/grpc/` (added in the `grpc-interop` feature flag
+# introduced in awslabs/mls-rs PR #193).  If the upstream doesn't yet have
+# that binary on your pinned commit, see the fallback note at the bottom.
+#
+# Build context: none (fetches source from GitHub at build time).
+# Pin to a specific commit with --build-arg MLS_RS_REF=<sha>.
+ARG MLS_RS_REF=main
+
+FROM rust:1.87-bookworm AS mls-rs-builder
+
+ARG MLS_RS_REF
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git libssl-dev pkg-config protobuf-compiler \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+RUN git clone --depth 1 --branch "${MLS_RS_REF}" \
+        https://github.com/awslabs/mls-rs.git . \
+    || git clone --depth 1 \
+        https://github.com/awslabs/mls-rs.git . && git checkout "${MLS_RS_REF}"
+
+# Build the gRPC interop client (feature `grpc-interop` gates the binary).
+# If the feature or binary doesn't exist on the pinned ref, the build fails
+# loudly here rather than silently at docker-compose up time.
+RUN cargo build --release \
+        --features grpc-interop \
+        -p mls-rs \
+        --bin mls-rs-grpc \
+    || ( \
+        echo ""; \
+        echo "ERROR: 'mls-rs-grpc' binary not found on ref ${MLS_RS_REF}."; \
+        echo "Check https://github.com/awslabs/mls-rs for the interop binary."; \
+        echo "Fallback: implement the gRPC contract inside our own binary and"; \
+        echo "call mls-rs as a library — see interop/README.md §Fallbacks."; \
+        echo ""; \
+        exit 1; \
+    )
+
+# ── Runtime ───────────────────────────────────────────────────────────────────
+FROM debian:bookworm-slim AS runtime
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libssl3 wget ca-certificates \
+    && GRPC_PROBE=v0.4.28 \
+    && ARCH="$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')" \
+    && wget -qO /bin/grpc_health_probe \
+       "https://github.com/grpc-ecosystem/grpc-health-probe/releases/download/${GRPC_PROBE}/grpc_health_probe-linux-${ARCH}" \
+    && chmod +x /bin/grpc_health_probe \
+    && apt-get purge -y wget ca-certificates \
+    && apt-get autoremove -y \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=mls-rs-builder /src/target/release/mls-rs-grpc /usr/local/bin/mls-rs-grpc
+
+EXPOSE 50054
+ENTRYPOINT ["/usr/local/bin/mls-rs-grpc"]
+CMD ["--port", "50054"]
