@@ -164,6 +164,16 @@ extern const OSSL_DISPATCH p11prov_composite_mldsa87_ecdsa_p384_sig_functions[];
  * embedded in the keydata, so one table serves all three composite OIDs. */
 extern const OSSL_DISPATCH p11prov_composite_encoder_spki_der_functions[];
 extern const OSSL_DISPATCH p11prov_composite_encoder_spki_pem_functions[];
+/* Per-profile SPKI DER decoders — used by X509_get0_pubkey to round-trip
+ * cert SPKI bytes into a (software-mode) composite EVP_PKEY, so
+ * X509_check_private_key inside CMS_sign can match cert against signing
+ * key via the keymgmt MATCH function. */
+extern const OSSL_DISPATCH
+    p11prov_composite_mldsa44_rsa2048_pss_decoder_der_functions[];
+extern const OSSL_DISPATCH
+    p11prov_composite_mldsa65_ecdsa_p256_decoder_der_functions[];
+extern const OSSL_DISPATCH
+    p11prov_composite_mldsa87_ecdsa_p384_decoder_der_functions[];
 
 #define P11PROV_NAME_X25519 "X25519"
 #define P11PROV_NAMES_X25519 "X25519:1.3.101.110"

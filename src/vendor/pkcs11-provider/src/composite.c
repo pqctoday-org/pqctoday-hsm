@@ -38,6 +38,7 @@
 #include "provider.h"
 #include "composite.h"
 #include "store.h"
+#include "decoder.h"
 #include "sig/signature.h"
 #include "sig/internal.h"
 #include <openssl/evp.h>
@@ -299,8 +300,18 @@ int p11prov_composite_build_mprime(
 struct p11prov_composite_obj {
     P11PROV_CTX *provctx;
     const struct p11prov_composite_profile *profile;
+    /* TOKEN-RESIDENT mode: both subkey handles non-NULL, signing works
+     * via the composite signature dispatch + softhsm C_Sign. */
     P11PROV_OBJ *pq_obj;
     P11PROV_OBJ *classical_obj;
+    /* SOFTWARE-DECODED mode: produced by the SPKI decoder when OpenSSL
+     * extracts a cert's public key (X509_get0_pubkey path during
+     * X509_check_private_key from CMS_sign / chain validation). Holds
+     * the raw `mldsaPK || classicalPK` concat per draft-19 §4.1. No
+     * signing capability — used only for EVP_PKEY_eq comparison
+     * against a token-resident composite key with the same SPKI. */
+    unsigned char *spki_pub_bytes;
+    size_t spki_pub_len;
 };
 
 typedef struct p11prov_composite_obj P11PROV_COMPOSITE_OBJ;
@@ -365,6 +376,7 @@ static void p11prov_composite_keymgmt_free(void *keydata)
     }
     p11prov_obj_free(obj->pq_obj);
     p11prov_obj_free(obj->classical_obj);
+    OPENSSL_clear_free(obj->spki_pub_bytes, obj->spki_pub_len);
     OPENSSL_free(obj);
 }
 
@@ -389,31 +401,62 @@ static void *p11prov_composite_keymgmt_load(const void *reference,
 /* OSSL_FUNC_KEYMGMT_HAS: keypair selection requires both subkeys; public
  * selection requires both public keys present. softhsm publishes
  * CKA_VALUE_LEN for ML-DSA pubkeys and the EC point for ECDSA, so as long
- * as both objects exist, we report ready. */
+ * as both objects exist, we report ready.
+ *
+ * Software-decoded variant (spki_pub_bytes set) has public-key material
+ * only — return ready for PUBLIC selections but not PRIVATE / KEYPAIR.
+ * X509_check_private_key only asks for PUBLIC selection so this is enough
+ * for the cert/pkey-match path in CMS_sign. */
 static int p11prov_composite_keymgmt_has(const void *keydata, int selection)
 {
     const P11PROV_COMPOSITE_OBJ *obj = (const P11PROV_COMPOSITE_OBJ *)keydata;
     if (obj == NULL) {
         return 0;
     }
-    if (selection & (OSSL_KEYMGMT_SELECT_PUBLIC_KEY
-                     | OSSL_KEYMGMT_SELECT_PRIVATE_KEY
-                     | OSSL_KEYMGMT_SELECT_KEYPAIR)) {
-        if (obj->pq_obj == NULL || obj->classical_obj == NULL) {
-            return 0;
-        }
+    int want_priv = selection
+                    & (OSSL_KEYMGMT_SELECT_PRIVATE_KEY
+                       | OSSL_KEYMGMT_SELECT_KEYPAIR);
+    int want_pub = selection & OSSL_KEYMGMT_SELECT_PUBLIC_KEY;
+    int have_token = (obj->pq_obj != NULL && obj->classical_obj != NULL);
+    int have_software_pub = (obj->spki_pub_bytes != NULL
+                             && obj->spki_pub_len > 0);
+    if (want_priv && !have_token) {
+        return 0;
+    }
+    if (want_pub && !have_token && !have_software_pub) {
+        return 0;
     }
     return 1;
 }
 
-/* OSSL_FUNC_KEYMGMT_MATCH: composite keys match when both their profiles
- * agree and both subkey handles are the same softhsm object. */
+/* Forward decl — defined later, near the SPKI encoder. Materializes the
+ * raw `mldsaPK || classicalPK` concat bytes for either a token-resident
+ * or software-decoded composite obj, into a caller-owned buffer. */
+static int p11prov_composite_obj_get_pubkey_bytes(
+    P11PROV_COMPOSITE_OBJ *obj, unsigned char **out, size_t *out_len);
+
+/* OSSL_FUNC_KEYMGMT_MATCH: compare by PUBLIC KEY BYTES so that a
+ * token-resident composite key and a software-decoded composite key
+ * with byte-identical SPKIs compare equal.
+ *
+ * This is the critical fix for `X509_check_private_key` inside CMS_sign:
+ * OpenSSL extracts the signer cert's SPKI, decodes it (now via our new
+ * SPKI decoder) into a software composite EVP_PKEY, then calls
+ * EVP_PKEY_eq(cert_pkey, signing_pkey). Both have the same SPKI bytes,
+ * so we return 1. Previously we compared P11PROV_OBJ pointer identity,
+ * which always failed for token vs. software.
+ *
+ * For PRIVATE_KEY / KEYPAIR selections both sides must be token-resident
+ * (software variant has no priv material), so we additionally require
+ * the same softhsm handles in that case — keeping the old behavior for
+ * legitimate priv-key matches. */
 static int p11prov_composite_keymgmt_match(const void *keydata1,
                                            const void *keydata2,
                                            int selection)
 {
-    const P11PROV_COMPOSITE_OBJ *a = (const P11PROV_COMPOSITE_OBJ *)keydata1;
-    const P11PROV_COMPOSITE_OBJ *b = (const P11PROV_COMPOSITE_OBJ *)keydata2;
+    P11PROV_COMPOSITE_OBJ *a = (P11PROV_COMPOSITE_OBJ *)keydata1;
+    P11PROV_COMPOSITE_OBJ *b = (P11PROV_COMPOSITE_OBJ *)keydata2;
+    int ret = 0;
 
     if (a == NULL || b == NULL) {
         return 0;
@@ -421,9 +464,13 @@ static int p11prov_composite_keymgmt_match(const void *keydata1,
     if (a->profile != b->profile) {
         return 0;
     }
-    if (selection & (OSSL_KEYMGMT_SELECT_PUBLIC_KEY
-                     | OSSL_KEYMGMT_SELECT_PRIVATE_KEY
-                     | OSSL_KEYMGMT_SELECT_KEYPAIR)) {
+
+    int want_priv = selection
+                    & (OSSL_KEYMGMT_SELECT_PRIVATE_KEY
+                       | OSSL_KEYMGMT_SELECT_KEYPAIR);
+    if (want_priv) {
+        /* Priv-key match requires both sides token-resident with the
+         * same softhsm handles. */
         if (a->pq_obj == NULL || b->pq_obj == NULL
             || a->classical_obj == NULL || b->classical_obj == NULL) {
             return 0;
@@ -435,6 +482,31 @@ static int p11prov_composite_keymgmt_match(const void *keydata1,
             return 0;
         }
     }
+
+    int want_pub = selection & OSSL_KEYMGMT_SELECT_PUBLIC_KEY;
+    if (want_pub) {
+        unsigned char *a_bytes = NULL, *b_bytes = NULL;
+        size_t a_len = 0, b_len = 0;
+        if (p11prov_composite_obj_get_pubkey_bytes(a, &a_bytes, &a_len)
+                != RET_OSSL_OK
+            || p11prov_composite_obj_get_pubkey_bytes(b, &b_bytes, &b_len)
+                   != RET_OSSL_OK) {
+            goto pub_done;
+        }
+        if (a_len != b_len) {
+            goto pub_done;
+        }
+        if (memcmp(a_bytes, b_bytes, a_len) != 0) {
+            goto pub_done;
+        }
+        ret = 1;
+pub_done:
+        OPENSSL_clear_free(a_bytes, a_len);
+        OPENSSL_clear_free(b_bytes, b_len);
+        return ret;
+    }
+
+    /* No pub/priv selection bits set, profile matched — declare equal. */
     return 1;
 }
 
@@ -516,6 +588,15 @@ p11prov_composite_keymgmt_gettable_params(void *provctx)
         OSSL_PARAM_int(OSSL_PKEY_PARAM_BITS, NULL),
         OSSL_PARAM_int(OSSL_PKEY_PARAM_SECURITY_BITS, NULL),
         OSSL_PARAM_int(OSSL_PKEY_PARAM_MAX_SIZE, NULL),
+        /* X509_sign / ASN1_item_sign call EVP_PKEY_get_default_digest_name
+         * which queries this param. For composite, the pre-hash is internal
+         * to draft-19 §2.2 M' construction — no external digest needed. An
+         * empty string signals "hash-internal" to OpenSSL, which then uses
+         * mdname=NULL through the signature dispatch. Without exposing
+         * this param, OBJ_find_sigid_by_algs fails and X509_sign aborts
+         * before reaching our signature dispatch. Same fix as ML-DSA
+         * (see p11prov_mldsa_gettable_params in keymgmt.c). */
+        OSSL_PARAM_utf8_string(OSSL_PKEY_PARAM_MANDATORY_DIGEST, NULL, 0),
         OSSL_PARAM_END,
     };
     (void)provctx;
@@ -561,6 +642,13 @@ static int p11prov_composite_keymgmt_get_params(void *keydata,
     }
     if ((p = OSSL_PARAM_locate(params, OSSL_PKEY_PARAM_MAX_SIZE)) != NULL
         && !OSSL_PARAM_set_int(p, max_size)) {
+        return 0;
+    }
+    /* Composite is hash-internal per draft-19 §2.2 — see comment in
+     * p11prov_composite_keymgmt_gettable_params. Mirrors ML-DSA's pattern
+     * in p11prov_mldsa_get_params. */
+    if ((p = OSSL_PARAM_locate(params, OSSL_PKEY_PARAM_MANDATORY_DIGEST)) != NULL
+        && !OSSL_PARAM_set_utf8_string(p, "")) {
         return 0;
     }
     return 1;
@@ -698,12 +786,18 @@ static void *p11prov_composite_sig_newctx_impl(
     void *provctx,
     const struct p11prov_composite_profile *profile)
 {
+    fprintf(stderr,
+            "[composite-sig-newctx] FIRED provctx=%p profile=%s\n",
+            provctx,
+            profile ? profile->label : "(null)");
     P11PROV_COMPOSITE_SIG_CTX *ctx = OPENSSL_zalloc(sizeof(*ctx));
     if (ctx == NULL) {
+        fprintf(stderr, "[composite-sig-newctx] OPENSSL_zalloc FAILED\n");
         return NULL;
     }
     ctx->provctx = (P11PROV_CTX *)provctx;
     ctx->profile = profile;
+    fprintf(stderr, "[composite-sig-newctx] OK ctx=%p\n", (void *)ctx);
     return ctx;
 }
 
@@ -802,15 +896,21 @@ static int composite_digest_op_init(
     P11PROV_COMPOSITE_OBJ *key = (P11PROV_COMPOSITE_OBJ *)keydata;
     CK_RV rv;
 
+    fprintf(stderr, "[composite-sig-init] op=%lu ctx=%p key=%p\n",
+            operation, (void *)ctx, (void *)key);
     if (ctx == NULL || key == NULL) {
+        fprintf(stderr, "[composite-sig-init] NULL ctx or key\n");
         return RET_OSSL_ERR;
     }
     if (key->profile != ctx->profile) {
-        /* The composite key's profile MUST match the dispatch's profile —
-         * otherwise OpenSSL has wired up the wrong dispatch. */
+        fprintf(stderr, "[composite-sig-init] profile mismatch key=%p ctx=%p\n",
+                (void *)key->profile, (void *)ctx->profile);
         return RET_OSSL_ERR;
     }
     if (key->pq_obj == NULL || key->classical_obj == NULL) {
+        fprintf(stderr,
+                "[composite-sig-init] subkey missing pq=%p classical=%p\n",
+                (void *)key->pq_obj, (void *)key->classical_obj);
         return RET_OSSL_ERR;
     }
 
@@ -820,15 +920,19 @@ static int composite_digest_op_init(
     /* Allocate PQ sub-sigctx */
     ctx->pq_sigctx = p11prov_sig_newctx(ctx->provctx, CKM_ML_DSA, NULL);
     if (ctx->pq_sigctx == NULL) {
+        fprintf(stderr, "[composite-sig-init] PQ sig_newctx FAILED\n");
         return RET_OSSL_ERR;
     }
     if (!composite_setup_pq_sigctx(ctx)) {
+        fprintf(stderr, "[composite-sig-init] PQ setup_sigctx FAILED\n");
         return RET_OSSL_ERR;
     }
     rv = p11prov_sig_op_init(ctx->pq_sigctx, key->pq_obj, operation, NULL);
     if (rv != CKR_OK) {
+        fprintf(stderr, "[composite-sig-init] PQ sig_op_init rv=0x%lx\n", rv);
         return RET_OSSL_ERR;
     }
+    fprintf(stderr, "[composite-sig-init] PQ sub-sigctx ready\n");
 
     /* Allocate classical sub-sigctx. mechtype passed to p11prov_sig_newctx
      * is the family — set to actual mech via composite_setup_classical_sigctx. */
@@ -837,16 +941,20 @@ static int composite_digest_op_init(
         ctx->profile->pre_hash_nid == NID_sha256 ? CKM_RSA_PKCS_PSS : CKM_ECDSA,
         NULL);
     if (ctx->classical_sigctx == NULL) {
+        fprintf(stderr, "[composite-sig-init] classical sig_newctx FAILED\n");
         return RET_OSSL_ERR;
     }
     if (!composite_setup_classical_sigctx(ctx)) {
+        fprintf(stderr, "[composite-sig-init] classical setup_sigctx FAILED\n");
         return RET_OSSL_ERR;
     }
     rv = p11prov_sig_op_init(ctx->classical_sigctx, key->classical_obj,
                              operation, NULL);
     if (rv != CKR_OK) {
+        fprintf(stderr, "[composite-sig-init] classical sig_op_init rv=0x%lx\n", rv);
         return RET_OSSL_ERR;
     }
+    fprintf(stderr, "[composite-sig-init] classical sub-sigctx ready\n");
 
     /* Apply OpenSSL-side params (e.g. context-string for the composite
      * application ctx) if provided. */
@@ -874,15 +982,25 @@ static int composite_digest_op_init(
     return RET_OSSL_OK;
 }
 
+/* OSSL_FUNC_SIGNATURE_DIGEST_SIGN_INIT ABI signature is
+ *   (void *ctx, const char *mdname, void *provkey, const OSSL_PARAM params[])
+ * Composite is hash-internal per draft-19 §2.2 — the pre-hash is baked
+ * into M' construction — so we ignore mdname (it's typically NULL).
+ * Without the mdname parameter in our prototype, OpenSSL's 4-arg call
+ * landed mdname into our keydata slot and shifted everything else; the
+ * resulting bogus key pointer aborted before composite_digest_op_init
+ * could even fprintf. */
 static int p11prov_composite_digest_sign_init(
-    void *vctx, void *keydata, const OSSL_PARAM params[])
+    void *vctx, const char *mdname, void *keydata, const OSSL_PARAM params[])
 {
+    (void)mdname;
     return composite_digest_op_init(vctx, keydata, params, CKF_SIGN);
 }
 
 static int p11prov_composite_digest_verify_init(
-    void *vctx, void *keydata, const OSSL_PARAM params[])
+    void *vctx, const char *mdname, void *keydata, const OSSL_PARAM params[])
 {
+    (void)mdname;
     return composite_digest_op_init(vctx, keydata, params, CKF_VERIFY);
 }
 
@@ -1458,60 +1576,24 @@ static int composite_get_rsa_pubkey(P11PROV_OBJ *key, P11PROV_CTX *provctx,
 static X509_PUBKEY *p11prov_composite_pubkey_to_x509(
     P11PROV_COMPOSITE_OBJ *key)
 {
-    unsigned char *mldsa_pk = NULL;
-    size_t mldsa_pk_len = 0;
-    unsigned char *classical_pk = NULL;
-    size_t classical_pk_len = 0;
     unsigned char *concat = NULL;
-    size_t concat_len;
+    size_t concat_len = 0;
     ASN1_OBJECT *composite_oid_obj = NULL;
     X509_PUBKEY *pubkey = NULL;
 
-    if (key == NULL || key->profile == NULL || key->pq_obj == NULL
-        || key->classical_obj == NULL) {
+    if (key == NULL || key->profile == NULL) {
         return NULL;
     }
 
-    if (composite_get_mldsa_pubkey(key->pq_obj, &mldsa_pk, &mldsa_pk_len)
-        != RET_OSSL_OK) {
+    /* Unified path: works for token-resident AND software-decoded objs.
+     * Without this, the encoder failed on software-mode objs (no
+     * pq_obj/classical_obj) → X509_PUBKEY_set's encode-then-decode
+     * validation loop spun infinitely until the runtime aborted. */
+    if (p11prov_composite_obj_get_pubkey_bytes(key, &concat, &concat_len)
+            != RET_OSSL_OK
+        || concat == NULL || concat_len == 0) {
         goto done;
     }
-    if (mldsa_pk_len != key->profile->mldsa_pk_bytes) {
-        /* ML-DSA pubkey length must match FIPS 204 Table 1 for the
-         * declared parameter set; otherwise the deserializer at the peer
-         * cannot split mldsaPK from tradPK. */
-        goto done;
-    }
-
-    /* Profile dispatch on classical algorithm. ML-DSA-44 → RSA-2048-PSS
-     * uses a DER RSAPublicKey (PKCS#1) per draft-19 Appendix C; the
-     * ML-DSA-65 and ML-DSA-87 profiles both use ECDSA, encoded as the
-     * uncompressed X9.62 EC point (0x04 || X || Y). */
-    if (key->profile->mldsa_param_set == CKP_ML_DSA_65
-        || key->profile->mldsa_param_set == CKP_ML_DSA_87) {
-        if (composite_get_ecdsa_pubkey(key->classical_obj, &classical_pk,
-                                       &classical_pk_len) != RET_OSSL_OK) {
-            goto done;
-        }
-    } else if (key->profile->mldsa_param_set == CKP_ML_DSA_44) {
-        if (composite_get_rsa_pubkey(key->classical_obj, key->provctx,
-                                     &classical_pk,
-                                     &classical_pk_len) != RET_OSSL_OK) {
-            goto done;
-        }
-    } else {
-        /* Unknown profile — every registered profile should fall into one
-         * of the branches above. */
-        goto done;
-    }
-
-    concat_len = mldsa_pk_len + classical_pk_len;
-    concat = OPENSSL_malloc(concat_len);
-    if (concat == NULL) {
-        goto done;
-    }
-    memcpy(concat, mldsa_pk, mldsa_pk_len);
-    memcpy(concat + mldsa_pk_len, classical_pk, classical_pk_len);
 
     composite_oid_obj = OBJ_txt2obj(key->profile->composite_oid, 1);
     if (composite_oid_obj == NULL) {
@@ -1536,11 +1618,87 @@ static X509_PUBKEY *p11prov_composite_pubkey_to_x509(
     concat = NULL;
 
 done:
+    OPENSSL_clear_free(concat, concat_len);
+    ASN1_OBJECT_free(composite_oid_obj);
+    return pubkey;
+}
+
+/* Materialize raw `mldsaPK || classicalPK` concat bytes for either a
+ * token-resident or software-decoded composite obj. Caller frees with
+ * OPENSSL_clear_free. Returns RET_OSSL_OK on success.
+ *
+ * Token-resident path: extract pub material from softhsm via the
+ * existing per-half helpers and concat per draft-19 §4.1.
+ * Software-decoded path: copy the cached spki_pub_bytes. */
+static int p11prov_composite_obj_get_pubkey_bytes(
+    P11PROV_COMPOSITE_OBJ *obj, unsigned char **out, size_t *out_len)
+{
+    if (obj == NULL || out == NULL || out_len == NULL) {
+        return RET_OSSL_ERR;
+    }
+    *out = NULL;
+    *out_len = 0;
+
+    /* Software-decoded variant: just return a copy. */
+    if (obj->spki_pub_bytes != NULL && obj->spki_pub_len > 0) {
+        *out = OPENSSL_memdup(obj->spki_pub_bytes, obj->spki_pub_len);
+        if (*out == NULL) {
+            return RET_OSSL_ERR;
+        }
+        *out_len = obj->spki_pub_len;
+        return RET_OSSL_OK;
+    }
+
+    /* Token-resident: extract from each subkey. Mirrors the per-half
+     * extraction logic in p11prov_composite_pubkey_to_x509. */
+    if (obj->profile == NULL || obj->pq_obj == NULL
+        || obj->classical_obj == NULL) {
+        return RET_OSSL_ERR;
+    }
+    unsigned char *mldsa_pk = NULL, *classical_pk = NULL, *concat = NULL;
+    size_t mldsa_pk_len = 0, classical_pk_len = 0, concat_len;
+    int ret = RET_OSSL_ERR;
+
+    if (composite_get_mldsa_pubkey(obj->pq_obj, &mldsa_pk, &mldsa_pk_len)
+        != RET_OSSL_OK) {
+        goto done;
+    }
+    if (mldsa_pk_len != obj->profile->mldsa_pk_bytes) {
+        goto done;
+    }
+    if (obj->profile->mldsa_param_set == CKP_ML_DSA_65
+        || obj->profile->mldsa_param_set == CKP_ML_DSA_87) {
+        if (composite_get_ecdsa_pubkey(obj->classical_obj, &classical_pk,
+                                       &classical_pk_len) != RET_OSSL_OK) {
+            goto done;
+        }
+    } else if (obj->profile->mldsa_param_set == CKP_ML_DSA_44) {
+        if (composite_get_rsa_pubkey(obj->classical_obj, obj->provctx,
+                                     &classical_pk, &classical_pk_len)
+            != RET_OSSL_OK) {
+            goto done;
+        }
+    } else {
+        goto done;
+    }
+    concat_len = mldsa_pk_len + classical_pk_len;
+    concat = OPENSSL_malloc(concat_len);
+    if (concat == NULL) {
+        goto done;
+    }
+    memcpy(concat, mldsa_pk, mldsa_pk_len);
+    memcpy(concat + mldsa_pk_len, classical_pk, classical_pk_len);
+
+    *out = concat;
+    *out_len = concat_len;
+    concat = NULL; /* transferred to caller */
+    ret = RET_OSSL_OK;
+
+done:
     OPENSSL_clear_free(mldsa_pk, mldsa_pk_len);
     OPENSSL_clear_free(classical_pk, classical_pk_len);
     OPENSSL_free(concat);
-    ASN1_OBJECT_free(composite_oid_obj);
-    return pubkey;
+    return ret;
 }
 
 /* DOES_SELECTION: we only encode public-key material. */
@@ -1661,6 +1819,248 @@ const OSSL_DISPATCH p11prov_composite_encoder_spki_pem_functions[] = {
 };
 
 /* ===========================================================================
+ *           SubjectPublicKeyInfo DECODER (phase 5c.5)
+ * ===========================================================================
+ *
+ * Inverse of the SPKI encoder above. OpenSSL invokes this decoder during
+ * `X509_get0_pubkey(cert)` to materialize a provider-managed EVP_PKEY
+ * from a cert's SubjectPublicKeyInfo bytes. Without this, CMS_sign's
+ * internal `X509_check_private_key(cert, pkey)` fails with
+ * "digital envelope routines / decode error" because OpenSSL cannot
+ * round-trip the composite cert's pubkey through a decoder, and the
+ * subsequent EVP_PKEY_eq returns false → "private key does not match
+ * certificate" → "add signer error".
+ *
+ * The decoder produces a P11PROV_COMPOSITE_OBJ in *software* mode (no
+ * token handles, just the raw `mldsaPK || classicalPK` concat bytes
+ * cached in `spki_pub_bytes`). p11prov_composite_keymgmt_match compares
+ * by those bytes, so EVP_PKEY_eq(token_pkey, software_pkey) now returns
+ * true when both halves' pubkey material is byte-identical.
+ *
+ * Registered with property string
+ *   "provider=pkcs11,input=der,structure=SubjectPublicKeyInfo"
+ * and one OSSL_ALGORITHM entry per profile (so the decoder is found
+ * regardless of which composite OID the cert advertises).
+ * Reference: https://docs.openssl.org/3.5/man7/provider-decoder/
+ * ========================================================================= */
+
+struct p11prov_composite_decoder_ctx {
+    P11PROV_CTX *provctx;
+    const struct p11prov_composite_profile *profile;
+};
+
+static void *p11prov_composite_decoder_newctx_impl(
+    void *provctx, const struct p11prov_composite_profile *profile)
+{
+    struct p11prov_composite_decoder_ctx *ctx = OPENSSL_zalloc(sizeof(*ctx));
+    if (ctx == NULL) {
+        return NULL;
+    }
+    ctx->provctx = (P11PROV_CTX *)provctx;
+    ctx->profile = profile;
+    return ctx;
+}
+
+static void p11prov_composite_decoder_freectx(void *vctx)
+{
+    OPENSSL_free(vctx);
+}
+
+static int p11prov_composite_decoder_does_selection(void *provctx,
+                                                    int selection)
+{
+    (void)provctx;
+    /* We can only decode public-key material from SPKI. */
+    return (selection & OSSL_KEYMGMT_SELECT_PUBLIC_KEY) != 0;
+}
+
+/* Parse a DER SubjectPublicKeyInfo and produce a software-mode
+ * P11PROV_COMPOSITE_OBJ. Returns RET_OSSL_OK on success; on failure
+ * returns RET_OSSL_CARRY_ON_DECODING so OpenSSL can try other decoders
+ * (e.g. if the SPKI is for a different algorithm). */
+static int p11prov_composite_decode_spki(
+    const struct p11prov_composite_profile *profile,
+    P11PROV_CTX *provctx, const unsigned char *der, long der_len,
+    P11PROV_COMPOSITE_OBJ **out)
+{
+    const unsigned char *p = der;
+    X509_PUBKEY *xpubkey = NULL;
+    P11PROV_COMPOSITE_OBJ *obj = NULL;
+    int ret = RET_OSSL_CARRY_ON_DECODING;
+
+    *out = NULL;
+
+    xpubkey = d2i_X509_PUBKEY(NULL, &p, der_len);
+    if (xpubkey == NULL) {
+        /* Not a valid SPKI — let other decoders try. */
+        return RET_OSSL_CARRY_ON_DECODING;
+    }
+
+    /* Confirm the SPKI's AlgorithmIdentifier OID matches our profile. */
+    ASN1_OBJECT *algoid = NULL;
+    const unsigned char *bit_string_bytes = NULL;
+    int bit_string_len = 0;
+    if (X509_PUBKEY_get0_param(&algoid, &bit_string_bytes, &bit_string_len,
+                               NULL, xpubkey) != 1
+        || algoid == NULL || bit_string_bytes == NULL) {
+        goto done;
+    }
+    char oid_str[80] = { 0 };
+    if (OBJ_obj2txt(oid_str, sizeof(oid_str), algoid, 1) <= 0) {
+        goto done;
+    }
+    if (strcmp(oid_str, profile->composite_oid) != 0) {
+        /* SPKI is for a different algorithm — not us, let others try. */
+        goto done;
+    }
+
+    /* Validate length: SPKI BIT STRING must be at least mldsa_pk_bytes +
+     * 1 byte (minimum classical pub material). */
+    if ((size_t)bit_string_len <= profile->mldsa_pk_bytes) {
+        /* Malformed for this profile — fail decoding outright. */
+        ret = RET_OSSL_ERR;
+        goto done;
+    }
+
+    obj = OPENSSL_zalloc(sizeof(*obj));
+    if (obj == NULL) {
+        ret = RET_OSSL_ERR;
+        goto done;
+    }
+    obj->provctx = provctx;
+    obj->profile = profile;
+    obj->pq_obj = NULL;
+    obj->classical_obj = NULL;
+    obj->spki_pub_bytes = OPENSSL_memdup(bit_string_bytes,
+                                         (size_t)bit_string_len);
+    if (obj->spki_pub_bytes == NULL) {
+        OPENSSL_free(obj);
+        obj = NULL;
+        ret = RET_OSSL_ERR;
+        goto done;
+    }
+    obj->spki_pub_len = (size_t)bit_string_len;
+
+    *out = obj;
+    ret = RET_OSSL_OK;
+
+done:
+    X509_PUBKEY_free(xpubkey);
+    return ret;
+}
+
+static int p11prov_composite_decoder_decode(
+    void *inctx, OSSL_CORE_BIO *cin, int selection,
+    OSSL_CALLBACK *data_cb, void *data_cbarg,
+    OSSL_PASSPHRASE_CALLBACK *pw_cb, void *pw_cbarg)
+{
+    struct p11prov_composite_decoder_ctx *ctx =
+        (struct p11prov_composite_decoder_ctx *)inctx;
+    BIO *bin = NULL;
+    unsigned char *der = NULL;
+    long der_len = 0;
+    P11PROV_COMPOSITE_OBJ *obj = NULL;
+    int ret = RET_OSSL_CARRY_ON_DECODING;
+    (void)pw_cb;
+    (void)pw_cbarg;
+
+    fprintf(stderr,
+            "[composite-decoder] enter profile=%s selection=0x%x ctx=%p\n",
+            ctx && ctx->profile ? ctx->profile->label : "(null)",
+            selection, (void *)ctx);
+    if (ctx == NULL || ctx->profile == NULL) {
+        return RET_OSSL_CARRY_ON_DECODING;
+    }
+    if ((selection & OSSL_KEYMGMT_SELECT_PUBLIC_KEY) == 0) {
+        fprintf(stderr, "[composite-decoder] no PUBLIC_KEY in selection — carry-on\n");
+        return RET_OSSL_CARRY_ON_DECODING;
+    }
+
+    bin = BIO_new_from_core_bio(p11prov_ctx_get_libctx(ctx->provctx), cin);
+    if (bin == NULL) {
+        fprintf(stderr, "[composite-decoder] BIO_new_from_core_bio FAILED\n");
+        return RET_OSSL_CARRY_ON_DECODING;
+    }
+    der_len = BIO_get_mem_data(bin, &der);
+    fprintf(stderr, "[composite-decoder] BIO_get_mem_data der_len=%ld\n", der_len);
+    fflush(stderr);
+    if (der_len <= 0 || der == NULL) {
+        BIO_free(bin);
+        return RET_OSSL_CARRY_ON_DECODING;
+    }
+
+    fprintf(stderr, "[composite-decoder] about to call decode_spki\n");
+    fflush(stderr);
+    ret = p11prov_composite_decode_spki(ctx->profile, ctx->provctx,
+                                        der, der_len, &obj);
+    fprintf(stderr,
+            "[composite-decoder] decode_spki ret=%d obj=%p\n",
+            ret, (void *)obj);
+    fflush(stderr);
+    BIO_free(bin);
+    if (ret != RET_OSSL_OK || obj == NULL) {
+        return ret;
+    }
+
+    int object_type = OSSL_OBJECT_PKEY;
+    OSSL_PARAM params[4];
+    params[0] = OSSL_PARAM_construct_int(OSSL_OBJECT_PARAM_TYPE, &object_type);
+    params[1] = OSSL_PARAM_construct_utf8_string(OSSL_OBJECT_PARAM_DATA_TYPE,
+                                                 (char *)ctx->profile->label, 0);
+    params[2] = OSSL_PARAM_construct_octet_string(
+        OSSL_OBJECT_PARAM_REFERENCE, &obj, sizeof(obj));
+    params[3] = OSSL_PARAM_construct_end();
+    int cb_ret = data_cb(params, data_cbarg);
+    fprintf(stderr,
+            "[composite-decoder] data_cb returned %d, obj after cb=%p\n",
+            cb_ret, (void *)obj);
+    if (cb_ret != 1) {
+        if (obj != NULL) {
+            p11prov_composite_keymgmt_free(obj);
+        }
+        return RET_OSSL_ERR;
+    }
+    if (obj != NULL) {
+        p11prov_composite_keymgmt_free(obj);
+    }
+    return RET_OSSL_OK;
+}
+
+/* Per-profile newctx wrappers — same pattern as the keymgmt + signature
+ * dispatch tables: one newctx per profile so the static dispatch entry
+ * carries the right profile pointer with no separate alg-name lookup. */
+#define DEFINE_COMPOSITE_DECODER_NEW(suffix, idx) \
+    static void *p11prov_composite_##suffix##_decoder_newctx(void *provctx) \
+    { \
+        return p11prov_composite_decoder_newctx_impl( \
+            provctx, &p11prov_composite_profiles[idx]); \
+    }
+
+DEFINE_COMPOSITE_DECODER_NEW(mldsa44_rsa2048_pss, 0)
+DEFINE_COMPOSITE_DECODER_NEW(mldsa65_ecdsa_p256, 1)
+DEFINE_COMPOSITE_DECODER_NEW(mldsa87_ecdsa_p384, 2)
+#undef DEFINE_COMPOSITE_DECODER_NEW
+
+#define COMPOSITE_DECODER_DISPATCH(suffix) \
+    const OSSL_DISPATCH \
+        p11prov_composite_##suffix##_decoder_der_functions[] = { \
+            { OSSL_FUNC_DECODER_NEWCTX, \
+              (void (*)(void))p11prov_composite_##suffix##_decoder_newctx }, \
+            { OSSL_FUNC_DECODER_FREECTX, \
+              (void (*)(void))p11prov_composite_decoder_freectx }, \
+            { OSSL_FUNC_DECODER_DOES_SELECTION, \
+              (void (*)(void))p11prov_composite_decoder_does_selection }, \
+            { OSSL_FUNC_DECODER_DECODE, \
+              (void (*)(void))p11prov_composite_decoder_decode }, \
+            { 0, NULL }, \
+        }
+
+COMPOSITE_DECODER_DISPATCH(mldsa44_rsa2048_pss);
+COMPOSITE_DECODER_DISPATCH(mldsa65_ecdsa_p256);
+COMPOSITE_DECODER_DISPATCH(mldsa87_ecdsa_p384);
+#undef COMPOSITE_DECODER_DISPATCH
+
+/* ===========================================================================
  *  External bridge: build a composite EVP_PKEY from two pkcs11: URIs.
  * ===========================================================================
  *
@@ -1701,12 +2101,43 @@ static int composite_capture_object_ref(const OSSL_PARAM params[], void *arg)
     if (p == NULL || p->data_type != OSSL_PARAM_OCTET_STRING) {
         return RET_OSSL_ERR;
     }
-    /* p->data IS the P11PROV_OBJ pointer (see store.c:411 +
-     * objects.c:725 — p11prov_obj_to_store_reference). Use the
-     * size-tagged unwrapper so the size mismatch is checked centrally. */
+    /* p->data IS the P11PROV_OBJ pointer (see store.c +
+     * objects.c — p11prov_obj_to_store_reference). Use the size-tagged
+     * unwrapper so the size mismatch is checked centrally. */
     obj = p11prov_obj_from_reference(p->data, p->data_size);
     if (obj == NULL) {
         return RET_OSSL_ERR;
+    }
+    /* Take our own reference NOW — the store ctx tears down at the end
+     * of p11prov_store_direct_fetch and frees every obj in ctx->objects[].
+     * Without bumping refcnt here, captured_obj points to freed memory
+     * by the time we use it. p11prov_obj_ref returns the same pointer
+     * with refcnt bumped, or NULL if the obj was already invalid. */
+    obj = p11prov_obj_ref(obj);
+    if (obj == NULL) {
+        return RET_OSSL_ERR;
+    }
+    /* Composite signing needs the PRIVATE key for the C_Sign path.
+     * pkcs11-provider's p11prov_obj_from_handle automatically links the
+     * matching CKO_PUBLIC_KEY via obj->assoc_obj, so capturing the priv
+     * key gives access to both halves. Without this preference we'd
+     * capture whatever comes first (typically the pub key) and
+     * X509_sign would fail because pub keys can't sign. */
+    CK_OBJECT_CLASS class = p11prov_obj_get_class(obj);
+    if (class != CKO_PRIVATE_KEY) {
+        /* Not the priv key — only keep it as a fallback if we haven't
+         * seen the priv key yet. The priv key will overwrite if it
+         * arrives later. */
+        if (ctx->captured_obj != NULL) {
+            p11prov_obj_free(obj);
+            return RET_OSSL_OK;
+        }
+        ctx->captured_obj = obj;
+        return RET_OSSL_OK;
+    }
+    /* This IS the private key — replace any prior pub-only capture. */
+    if (ctx->captured_obj != NULL) {
+        p11prov_obj_free(ctx->captured_obj);
     }
     ctx->captured_obj = obj;
     return RET_OSSL_OK;
@@ -1733,6 +2164,36 @@ composite_load_subkey_by_uri(P11PROV_CTX *provctx, const char *uri)
     return owned;
 }
 
+/* Register the three LAMPS draft-19 composite OIDs with OpenSSL's OBJ
+ * database. OBJ_create is idempotent — returns the existing NID if the
+ * OID is already known, otherwise allocates a new one.
+ *
+ * NOTE: We do NOT call OBJ_add_sigid here. Per
+ * https://docs.openssl.org/master/man7/provider-signature/ and the
+ * `ASN1_item_sign_ctx` path in OpenSSL's `crypto/asn1/a_sign.c`,
+ * provider-managed signature algorithms (no legacy ameth) skip
+ * `OBJ_find_sigid_by_algs` entirely and instead query the signature
+ * ctx's `OSSL_SIGNATURE_PARAM_ALGORITHM_ID` to populate the cert's
+ * signatureAlgorithm. Our composite signature dispatch already exposes
+ * that via `p11prov_composite_get_ctx_params` (see below).
+ *
+ * OBJ_create is still useful so OpenSSL's name → NID lookup can resolve
+ * the OID for debugging / display purposes. */
+static void register_composite_oids(void)
+{
+    static const struct {
+        const char *oid;
+        const char *name;
+    } entries[] = {
+        { "1.3.6.1.5.5.7.6.37", "id-MLDSA44-RSA2048-PSS-SHA256" },
+        { "1.3.6.1.5.5.7.6.45", "id-MLDSA65-ECDSA-P256-SHA512" },
+        { "1.3.6.1.5.5.7.6.49", "id-MLDSA87-ECDSA-P384-SHA512" },
+    };
+    for (size_t i = 0; i < sizeof(entries) / sizeof(entries[0]); i++) {
+        OBJ_create(entries[i].oid, entries[i].name, entries[i].name);
+    }
+}
+
 EVP_PKEY *p11prov_composite_evp_pkey_from_uris(
     P11PROV_CTX *provctx,
     const struct p11prov_composite_profile *profile,
@@ -1745,6 +2206,10 @@ EVP_PKEY *p11prov_composite_evp_pkey_from_uris(
     EVP_PKEY *pkey = NULL;
     EVP_PKEY_CTX *pctx = NULL;
     OSSL_PARAM import_params[2];
+
+    /* Ensure OpenSSL knows about the composite OIDs before any
+     * EVP_PKEY_get_id / ASN1_item_sign_ex call walks the OBJ database. */
+    register_composite_oids();
 
     if (provctx == NULL || profile == NULL || pq_uri == NULL
         || classical_uri == NULL) {
@@ -1782,8 +2247,13 @@ EVP_PKEY *p11prov_composite_evp_pkey_from_uris(
     }
     fprintf(stderr, "[composite-bridge] composite obj built\n");
 
-    pctx = EVP_PKEY_CTX_new_from_name(
-        p11prov_ctx_get_libctx(provctx), profile->label, NULL);
+    /* Use the global default libctx (NULL) so EVP_PKEY_CTX_new_from_name
+     * sees BOTH the default provider (for RSA/EC primitives during
+     * fromdata setup) AND pkcs11-provider (where the composite keymgmt
+     * is registered). pkcs11-provider's own internal libctx
+     * (p11prov_ctx_get_libctx) only has pkcs11-provider — missing the
+     * default leads to keymgmt fetch failure. */
+    pctx = EVP_PKEY_CTX_new_from_name(NULL, profile->label, NULL);
     if (pctx == NULL) {
         fprintf(stderr, "[composite-bridge] EVP_PKEY_CTX_new_from_name "
                 "FAILED for label=%s\n", profile->label);

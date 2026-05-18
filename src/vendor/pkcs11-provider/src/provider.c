@@ -1500,6 +1500,20 @@ static CK_RV static_operations_init(P11PROV_CTX *ctx)
                  p11prov_der_decoder_p11prov_ed25519_functions);
     ADD_ALGO_EXT(ED448, decoder, DEFAULT_PROPERTY(DER_DECODER_PROP),
                  p11prov_der_decoder_p11prov_ed448_functions);
+    /* Composite SPKI decoders are DEFINED in composite.c but intentionally
+     * NOT registered here. The implementation uses d2i_X509_PUBKEY which
+     * itself invokes the OpenSSL DECODER chain, causing infinite recursion
+     * when our decoder is registered for input=der,structure=SubjectPublicKeyInfo.
+     * The fix is to switch to raw ASN.1 walking (ASN1_get_object) — see
+     * the TODO in composite.c near p11prov_composite_decode_spki.
+     *
+     * Note: the workshop / hub code path for composite CMS sign + verify
+     * has pivoted away from the OpenSSL convenience APIs (X509_sign /
+     * CMS_sign) entirely. New consumers should call
+     * buildCompositeCertDraft19 from HybridCrypto/services/certBuilder.ts,
+     * which builds the cert via @peculiar/asn1-* and binds softhsm
+     * directly for the C_Sign primitive — sidestepping every OpenSSL
+     * provider gotcha that motivated this decoder. */
     TERM_ALGO(decoder);
 #undef DEFAULT_PROPERTY
 
