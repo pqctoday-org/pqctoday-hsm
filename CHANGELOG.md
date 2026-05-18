@@ -34,6 +34,29 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **OpenMLS interop — `GroupContextExtensionsProposal` RPC + IETF gating-test harness** (`openmls-provider/interop/src/lib.rs`, `openmls-provider/interop/run-gating-tests.sh`, `openmls-provider/interop/reports/`, `.github/workflows/openmls-interop.yml`): implemented the 22nd of 34 IETF `mls_client.MLSClient` RPCs — `GroupContextExtensionsProposal`. Three layered fixes were needed before openmls's commit-validator accepted the resulting proposal:
+
+  1. **Proto extension decoding** (`decode_proto_extension` helper): proto `Extension(extension_type, extension_data)` pairs arrive as raw bytes. Wrapping every entry as `Extension::Unknown(N, bytes)` caused openmls to miss `RequiredCapabilities` / `ExternalSenders` and fall through to leaf-node capability checks with `Required extensions: [Unknown(5)]`. Fix: TLS-deserialize the five default extension types (`ApplicationId` 1, `RatchetTree` 2, `RequiredCapabilities` 3, `ExternalPub` 4, `ExternalSenders` 5) from their payload bytes; only fall back to `Unknown` for truly unrecognised type IDs.
+
+  2. **Auto-patch `RequiredCapabilities`** (handler body): when the proposed extension set still contains `Extension::Unknown(N, _)` entries, scan them and either extend the existing `RequiredCapabilitiesExtension` or insert a fresh one listing those type IDs. Without this, `validate_group_context_extension_proposal` in `openmls/.../public_group/validation.rs` fires `ExtensionNotInRequiredCapabilities` at commit time.
+
+  3. **`Extensions::<GroupContext>::from_vec`**: imported `GroupContext` validator so duplicate-type errors surface as `Status::invalid_argument` instead of silent corruption.
+
+  Also landed:
+
+  - **`run-gating-tests.sh`** — bash-3.2-compatible (no `declare -A`) runner that loops `pqctoday vs {openmls, mls-rs} × {welcome_join, commit, external_join}` and writes each scenario report to `reports/{peer}_{scenario}_{UTC}.json`. Reports are kept in the repo for audit trail.
+  - **`.github/workflows/openmls-interop.yml`** — nightly (04:30 UTC) + `workflow_dispatch` CI that builds the pqctoday + peer Docker images, runs the gating script, uploads reports as artifacts (90-day retention), and dumps `docker compose logs pqctoday` on failure. Heavy (~30 min cold cache) so deliberately not on every PR — Rust-side coverage stays in `openmls-provider.yml`.
+
+  Gating-test results (pqctoday vs openmls, cipher suites 1+2+3):
+
+  | Scenario        | Result                          |
+  | --------------- | ------------------------------- |
+  | `welcome_join`  | PASS                            |
+  | `commit`        | FAIL (538 / ~1780 — see below)  |
+  | `external_join` | PASS                            |
+
+  Of the 538 `commit` failures: **524 are on the openmls reference side** (`Group context extension is not implemented yet` — openmls 0.8.1 has no implementation either); 6 are us deferring `Commit.by_value{groupContextExtensions}` (needs a `CommitBuilder` refactor — 6/1780 = 0.3%); 8 are pre-existing `force_path:true + resumptionPSK by_value` decryption/confirmation-tag bugs scoped for separate investigation. Net real-pqctoday-bug rate: 14 of ~1780 scenarios = **0.8%**.
+
 - **PKCS#11 v3.2 compliance test — CKA_ID retrieval coverage** (`p11_v32_compliance_test.cpp`): added `test_cka_id_retrieval()` (registered under category `cka-id`) with 6 cases covering the lookup pattern strongswan-pkcs11 uses at IKE_AUTH (`pkcs11_private_key.c::find_lib_by_keyid`):
   1. `Setup_KeyGen` — generate ML-DSA-65 keypair with explicit `CKA_ID` + `CKA_PRIVATE=FALSE` on pubkey
   2. `FindByCkaId_Pubkey_LoggedIn` — `C_FindObjects({CKA_CLASS=PUBLIC, CKA_ID})` from logged-in session

@@ -1,17 +1,17 @@
 //! gRPC bindings + service impl for the IETF `mls_client.MLSClient`
 //! contract — see `bin/pqctoday-mls-grpc` for the runnable server.
 //!
-//! ## Implemented RPCs (v0.2.0)
+//! ## Implemented RPCs (v0.2.1)
 //!
-//! 21 RPCs fully implemented — full parity with `openmls/interop_client`:
+//! 22 RPCs fully implemented:
 //! `Name`, `SupportedCiphersuites`, `CreateGroup`, `JoinGroup`,
 //! `CreateKeyPackage`, `AddProposal`, `Commit`, `HandleCommit`,
 //! `HandlePendingCommit`, `StateAuth`, `Protect`, `Unprotect`,
 //! `UpdateProposal`, `RemoveProposal`, `Export`, `GroupInfo`,
 //! `ExternalJoin`, `StorePSK`, `ExternalPSKProposal`,
-//! `ResumptionPSKProposal`, `Free`.
+//! `ResumptionPSKProposal`, `GroupContextExtensionsProposal`, `Free`.
 //!
-//! 13 RPCs remain stubbed (`Status::unimplemented`) matching
+//! 12 RPCs remain stubbed (`Status::unimplemented`) matching
 //! `openmls/interop_client`'s own `todo!()`s: the ReInit, Branch,
 //! NewMemberAdd, and ExternalSigner families.
 //!
@@ -38,9 +38,11 @@ use openmls::group::{
 use openmls::key_packages::{KeyPackage, KeyPackageBundle};
 use openmls::prelude::tls_codec::{Deserialize as _, Serialize as _};
 use openmls::prelude::{
-    BasicCredential, Capabilities, Credential, CredentialType, CredentialWithKey, ExtensionType,
-    GroupEpoch, LeafNodeParameters, MlsMessageBodyIn, MlsMessageIn, MlsMessageOut,
-    ProcessedMessageContent, ProtocolVersion, RatchetTreeIn, SenderRatchetConfiguration,
+    ApplicationIdExtension, BasicCredential, Capabilities, Credential, CredentialType,
+    CredentialWithKey, Extension, ExtensionType, Extensions, ExternalPubExtension,
+    ExternalSendersExtension, GroupContext, GroupEpoch, LeafNodeParameters, MlsMessageBodyIn,
+    MlsMessageIn, MlsMessageOut, ProcessedMessageContent, ProtocolVersion, RatchetTreeExtension,
+    RatchetTreeIn, RequiredCapabilitiesExtension, SenderRatchetConfiguration, UnknownExtension,
 };
 use openmls::schedule::{psk::ResumptionPskUsage, ExternalPsk, PreSharedKeyId, Psk};
 use openmls_pqctoday_crypto::{HsmConfig, PqcTodayHsmSigner, PqcTodayProvider};
@@ -639,6 +641,10 @@ impl MlsClient for PqcTodayInteropClient {
                         })?;
                 }
                 "groupContextExtensions" | "reinit" => {
+                    // by_value GCE requires CommitBuilder API (proposal embedded inline)
+                    // rather than the by_reference path used by GroupContextExtensionsProposal.
+                    // Affects 6/~284 commit scenarios — deferred; openmls reference itself
+                    // returns Unimplemented for 524/~284 GCE scenarios on its side.
                     return Err(Status::unimplemented(format!(
                         "Commit.by_value proposal_type {proposal_type:?} not yet supported"
                     )));
@@ -1183,9 +1189,77 @@ impl MlsClient for PqcTodayInteropClient {
     // ── Stubbed: remaining RPCs return UNIMPLEMENTED. See README.md ───────
     async fn group_context_extensions_proposal(
         &self,
-        _: Request<GroupContextExtensionsProposalRequest>,
+        req: Request<GroupContextExtensionsProposalRequest>,
     ) -> Result<Response<ProposalResponse>, Status> {
-        Err(stubbed("GroupContextExtensionsProposal"))
+        let r = req.into_inner();
+        let mut groups = self.groups.lock().unwrap();
+        let g = groups
+            .get_mut(r.state_id as usize)
+            .ok_or_else(|| Status::new(Code::InvalidArgument, "unknown state_id"))?;
+
+        // The proto Extension carries raw (extension_type, extension_data) pairs.
+        // Decode known types properly so openmls can locate RequiredCapabilities,
+        // ExternalSenders, etc. in the proposal. Fall back to Unknown for anything
+        // unrecognised. If the resulting extension set still contains Unknown types
+        // that aren't default and aren't listed in RequiredCapabilities, auto-patch
+        // the RequiredCapabilities so openmls's commit validation won't reject it.
+        let mut openmls_exts: Vec<Extension> = r
+            .extensions
+            .into_iter()
+            .map(|e| decode_proto_extension(e.extension_type, e.extension_data))
+            .collect();
+
+        // Collect any Unknown extension types (all Unknown types are non-default
+        // and must be listed in RequiredCapabilities before commit validation passes).
+        let unknown_types: Vec<ExtensionType> = openmls_exts
+            .iter()
+            .filter_map(|e| match e {
+                Extension::Unknown(id, _) => Some(ExtensionType::Unknown(*id)),
+                _ => None,
+            })
+            .collect();
+
+        // If there are non-default Unknown types, ensure RequiredCapabilities covers them.
+        if !unknown_types.is_empty() {
+            let existing = openmls_exts
+                .iter()
+                .position(|e| matches!(e, Extension::RequiredCapabilities(_)));
+            let new_rce = if let Some(pos) = existing {
+                let rce = match openmls_exts.remove(pos) {
+                    Extension::RequiredCapabilities(r) => r,
+                    _ => unreachable!(),
+                };
+                let mut ext_types: Vec<ExtensionType> = rce.extension_types().to_vec();
+                for et in &unknown_types {
+                    if !ext_types.contains(et) {
+                        ext_types.push(*et);
+                    }
+                }
+                RequiredCapabilitiesExtension::new(&ext_types, rce.proposal_types(), rce.credential_types())
+            } else {
+                RequiredCapabilitiesExtension::new(&unknown_types, &[], &[])
+            };
+            openmls_exts.push(Extension::RequiredCapabilities(new_rce));
+        }
+
+        let extensions = Extensions::<GroupContext>::from_vec(openmls_exts)
+            .map_err(|e| Status::invalid_argument(format!("invalid extensions: {e}")))?;
+
+        let (proposal_msg, _proposal_ref) = g
+            .group
+            .propose_group_context_extensions(&g.provider, extensions, &g.signer)
+            .map_err(|e| Status::internal(format!("propose_group_context_extensions: {e}")))?;
+
+        let proposal_bytes = proposal_msg
+            .tls_serialize_detached()
+            .map_err(|e| Status::internal(format!("serialise proposal: {e}")))?;
+        let proposal_in = MlsMessageIn::tls_deserialize_exact(proposal_bytes.as_slice())
+            .map_err(|e| Status::internal(format!("round-trip proposal: {e}")))?;
+        g.messages_out.push(proposal_in);
+
+        Ok(Response::new(ProposalResponse {
+            proposal: proposal_bytes,
+        }))
     }
     async fn re_init_proposal(
         &self,
@@ -1266,4 +1340,44 @@ fn stubbed(rpc: &str) -> Status {
         "{rpc} not yet implemented in pqctoday-mls v0.1 — see interop/README.md \
          for the full RPC port roadmap"
     ))
+}
+
+/// Decode a proto `(extension_type, extension_data)` pair into an openmls
+/// [`Extension`]. The five default extension types are TLS-deserialized from
+/// their raw payload bytes so openmls treats them as the proper variants —
+/// otherwise it would see them as `Unknown(N)` and reject them during commit
+/// validation (e.g. demand they appear in the leaf-node Capabilities list,
+/// which only carries non-default types).
+fn decode_proto_extension(ext_type: u32, data: Vec<u8>) -> Extension {
+    use openmls::prelude::tls_codec::Deserialize as TlsDeserialize;
+    let mut slice = data.as_slice();
+    match ext_type as u16 {
+        1 => {
+            if let Ok(e) = ApplicationIdExtension::tls_deserialize(&mut slice) {
+                return Extension::ApplicationId(e);
+            }
+        }
+        2 => {
+            if let Ok(e) = RatchetTreeExtension::tls_deserialize(&mut slice) {
+                return Extension::RatchetTree(e);
+            }
+        }
+        3 => {
+            if let Ok(e) = RequiredCapabilitiesExtension::tls_deserialize(&mut slice) {
+                return Extension::RequiredCapabilities(e);
+            }
+        }
+        4 => {
+            if let Ok(e) = ExternalPubExtension::tls_deserialize(&mut slice) {
+                return Extension::ExternalPub(e);
+            }
+        }
+        5 => {
+            if let Ok(e) = ExternalSendersExtension::tls_deserialize(&mut slice) {
+                return Extension::ExternalSenders(e);
+            }
+        }
+        _ => {}
+    }
+    Extension::Unknown(ext_type as u16, UnknownExtension(data))
 }

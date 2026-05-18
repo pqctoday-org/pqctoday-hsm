@@ -1,0 +1,87 @@
+name: OpenMLS Interop (gating tests)
+
+# Cross-implementation MLS interop against the IETF MLS WG harness:
+#   pqctoday vs openmls reference (gating)
+#   pqctoday vs mls-rs (gating, best-effort)
+#
+# Heavy Docker build (~30 min cold cache) — runs nightly + on-demand only,
+# not on every PR. PR-level coverage is provided by the Rust check workflow.
+
+on:
+  schedule:
+    # 04:30 UTC nightly
+    - cron: '30 4 * * *'
+  workflow_dispatch:
+    inputs:
+      peer:
+        description: 'Peer to test against (openmls, mls-rs, or both)'
+        required: false
+        default: 'openmls'
+        type: choice
+        options:
+          - openmls
+          - mls-rs
+          - both
+
+jobs:
+  interop:
+    name: pqctoday vs ${{ matrix.peer }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        peer:
+          - openmls
+          - mls-rs
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build pqctoday + peer images
+        working-directory: openmls-provider/interop/docker
+        run: |
+          docker compose build pqctoday ${{ matrix.peer }}
+
+      - name: Start gRPC services
+        working-directory: openmls-provider/interop/docker
+        run: |
+          docker compose up -d pqctoday ${{ matrix.peer }}
+          # Wait for both health checks (max 2 min)
+          for i in $(seq 1 24); do
+            pq=$(docker inspect --format='{{.State.Health.Status}}' pqctoday-mls-interop-pqctoday-1 2>/dev/null || echo "starting")
+            pr=$(docker inspect --format='{{.State.Health.Status}}' pqctoday-mls-interop-${{ matrix.peer }}-1 2>/dev/null || echo "starting")
+            if [ "$pq" = "healthy" ] && [ "$pr" = "healthy" ]; then
+              echo "Both services healthy after ${i}*5s"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "Services did not become healthy in 2 min"
+          docker compose logs --tail=50
+          exit 1
+
+      - name: Run gating scenarios
+        working-directory: openmls-provider/interop
+        run: |
+          ./run-gating-tests.sh ${{ matrix.peer }}
+
+      - name: Upload JSON reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: interop-reports-${{ matrix.peer }}-${{ github.run_id }}
+          path: openmls-provider/interop/reports/*.json
+          retention-days: 90
+
+      - name: Show pqctoday server logs on failure
+        if: failure()
+        working-directory: openmls-provider/interop/docker
+        run: docker compose logs --tail=200 pqctoday
+
+      - name: Tear down
+        if: always()
+        working-directory: openmls-provider/interop/docker
+        run: docker compose down -v
