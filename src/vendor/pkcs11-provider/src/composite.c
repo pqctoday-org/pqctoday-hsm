@@ -51,6 +51,8 @@
 #include <openssl/objects.h>
 #include <openssl/encoder.h>
 #include <openssl/core_object.h>
+#include <openssl/err.h>
+#include <stdio.h>
 #include <string.h>
 
 /* Fixed Prefix per draft-19 §2.2: ASCII "CompositeAlgorithmSignatures2025" */
@@ -1746,27 +1748,51 @@ EVP_PKEY *p11prov_composite_evp_pkey_from_uris(
 
     if (provctx == NULL || profile == NULL || pq_uri == NULL
         || classical_uri == NULL) {
+        fprintf(stderr, "[composite-bridge] bad args: provctx=%p profile=%p "
+                "pq_uri=%p classical_uri=%p\n",
+                (void *)provctx, (const void *)profile,
+                (const void *)pq_uri, (const void *)classical_uri);
         return NULL;
     }
 
+    fprintf(stderr, "[composite-bridge] starting label=%s pq=%s cl=%s\n",
+            profile->label, pq_uri, classical_uri);
+
     pq_obj = composite_load_subkey_by_uri(provctx, pq_uri);
-    classical_obj = composite_load_subkey_by_uri(provctx, classical_uri);
-    if (pq_obj == NULL || classical_obj == NULL) {
+    if (pq_obj == NULL) {
+        fprintf(stderr, "[composite-bridge] PQ subkey load FAILED for %s\n",
+                pq_uri);
+        ERR_print_errors_fp(stderr);
         goto done;
     }
+    classical_obj = composite_load_subkey_by_uri(provctx, classical_uri);
+    if (classical_obj == NULL) {
+        fprintf(stderr, "[composite-bridge] classical subkey load FAILED for %s\n",
+                classical_uri);
+        ERR_print_errors_fp(stderr);
+        goto done;
+    }
+    fprintf(stderr, "[composite-bridge] both subkeys loaded\n");
 
     composite_obj = p11prov_composite_obj_new_from_subkeys(
         provctx, profile, pq_obj, classical_obj);
     if (composite_obj == NULL) {
+        fprintf(stderr, "[composite-bridge] obj_new_from_subkeys FAILED\n");
         goto done;
     }
+    fprintf(stderr, "[composite-bridge] composite obj built\n");
 
     pctx = EVP_PKEY_CTX_new_from_name(
         p11prov_ctx_get_libctx(provctx), profile->label, NULL);
     if (pctx == NULL) {
+        fprintf(stderr, "[composite-bridge] EVP_PKEY_CTX_new_from_name "
+                "FAILED for label=%s\n", profile->label);
+        ERR_print_errors_fp(stderr);
         goto done;
     }
     if (EVP_PKEY_fromdata_init(pctx) != 1) {
+        fprintf(stderr, "[composite-bridge] EVP_PKEY_fromdata_init FAILED\n");
+        ERR_print_errors_fp(stderr);
         goto done;
     }
 
@@ -1776,9 +1802,12 @@ EVP_PKEY *p11prov_composite_evp_pkey_from_uris(
     import_params[1] = OSSL_PARAM_construct_end();
 
     if (EVP_PKEY_fromdata(pctx, &pkey, EVP_PKEY_KEYPAIR, import_params) != 1) {
+        fprintf(stderr, "[composite-bridge] EVP_PKEY_fromdata FAILED\n");
+        ERR_print_errors_fp(stderr);
         pkey = NULL;
         goto done;
     }
+    fprintf(stderr, "[composite-bridge] composite EVP_PKEY built OK\n");
     /* IMPORT took ownership on success — null our local handle so cleanup
      * below does not double-free. */
     composite_obj = NULL;
