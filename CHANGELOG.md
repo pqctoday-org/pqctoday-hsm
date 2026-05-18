@@ -10,6 +10,32 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **softhsmrustv3 (WASM engine) — AES-GCM AAD authentication restored** (`rust/src/ffi.rs`). Critical correctness + security bug: AES-GCM in the Rust/WASM engine silently dropped the AAD parameter on both encrypt and decrypt — meaning every in-browser AES-GCM operation produced *unauthenticated* ciphertext (the tag was computed over empty AAD regardless of what the caller passed). The C++ engine (`src/lib/SoftHSM_cipher.cpp` + `src/lib/crypto/OSSLEVPSymmetricAlgorithm.cpp`) used by native softhsmv3.so/.dylib was unaffected.
+
+  Surfaced when `/learn/mls-group-messaging` Step 3 (AES-128-GCM application message demo in pqctoday-hub) reported `✗ AAD check did not throw — unexpected` against a perfectly correct test. Reproducer: encrypting identical plaintext+IV+key with three different AAD values produced byte-for-byte identical ciphertext+tag — proof that AAD was never folded into GHASH.
+
+  Compare the `CKM_CHACHA20_POLY1305` branch at ffi.rs:2789 which already used `Payload { msg: plaintext, aad: &aad }` correctly. The AES-GCM branch was half-finished — Init parsed only IV from `CK_GCM_PARAMS`, never read `pAAD` / `ulAADLen`, and `*gcm.add(4)` was treated as `tag_bits` even though that offset is `ulAADLen` (the real `ulTagBits` is at `*gcm.add(5)`).
+
+  Seven fix sites in `rust/src/ffi.rs`:
+
+  | Site | Bug → Fix |
+  | --- | --- |
+  | `C_EncryptInit` GCM branch (≈ line 2583) | Never read `pAAD` / `ulAADLen`; read `ulAADLen` into `tag_bits` slot. → Read `aad_ptr` from `*gcm.add(3)`, `aad_len` from `*gcm.add(4)`; move `tag_bits` to `*gcm.add(5)`; bump `ul_param_len` floor 20 → 24. |
+  | `C_Encrypt` GCM branch (≈ line 2696) | `cipher.encrypt(nonce, plaintext)` auto-coerced `&[u8]` → `Payload { msg, aad: &[] }`. → `cipher.encrypt(nonce, Payload { msg: plaintext, aad: &aad })` for both Aes128Gcm and Aes256Gcm. |
+  | Encrypt size-query re-insert (≈ line 2820) | Wiped AAD with `Vec::new()` between the dual-call PKCS#11 length-query pattern. → Preserve `aad` field. |
+  | `C_DecryptInit` GCM branch (≈ line 2854) | Same parsing bugs as `C_EncryptInit`. → Same fix. |
+  | `C_Decrypt` state extract (≈ line 2928) | Destructured ctx as `(mech_type, key_handle, iv, tag_bits)` — never pulled `aad`. → Added `aad` to the tuple. |
+  | `C_Decrypt` GCM branch (≈ line 2940) | `cipher.decrypt(nonce, ciphertext)` dropped AAD. → `cipher.decrypt(nonce, Payload { msg: ciphertext, aad: &aad })`. |
+  | Decrypt size-query re-insert (≈ line 3046) | Same wipe as encrypt. → Preserve `aad` field. |
+
+  Validation:
+
+  - WASM produces NIST GCM Test Case 4 byte-exact output now: ciphertext `522dc1f099567d07f47f37a32a84427d643a8cdcbfe5c0c97598a2bd2555d1aa8cb08e48590dbb3da7b08b1056828838c5f61e6393ba7a0abcc9f662` + tag `76fc6ece0f4e1768cddf8853bb2d551b` (per McGrew & Viega, "The Galois/Counter Mode of Operation (GCM)", also NIST SP 800-38D). The pqctoday-hub NIST KAT was previously self-pinned to the buggy tag `eb9f796c8d356fc31a8433884b696f4f` — fixed in pqctoday-hub at the same time.
+  - Two new regression-guard KATs added to pqctoday-hub: tag-divergence (changing AAD must change last 16 bytes) and AAD-tamper (decrypt with wrong AAD must throw). All 17 tests in `softhsm.kat.test.ts` pass.
+  - Rebuilt WASM bundle deployed into pqctoday-hub at `src/wasm/softhsmrustv3_bg.wasm` via `cargo build --target wasm32-unknown-unknown --release` + `wasm-bindgen --target bundler --no-typescript`. Custom `__wbg_get_memory()` shim re-added to `softhsmrustv3.js` / `softhsmrustv3_bg.js` per the post-build pattern in `feedback-wasm-bindgen-bundler-target`.
+
+  Notes for future audits: the previous NIST KAT in pqctoday-hub was effectively `assertEqual(buggyOutput, buggyOutput)` — the expected tag was a snapshot of this implementation's own output, not the actual NIST vector. Any future pinned KAT in this repo should be cross-checked against a second independent implementation (Node 24's native `crypto.createCipheriv('aes-256-gcm', ...)`, or the upstream NIST/RFC vector itself) before being committed, per [feedback-pqc-kat-harness](../../.claude/projects/-Users-ericamador-antigravity-pqctoday-hub/memory/feedback-pqc-kat-harness.md).
+
 - **strongSwan WASM — ML-DSA-65 dual-auth IKEv2 reaches `ESTABLISHED` end-to-end** (closes the WIP entry below). Resolves four chained root causes; fixing only one was insufficient.
 
   1. **Explicit private-key load via `BUILD_PKCS11_KEYID`** (`strongswan-wasm-shims/wasm_backend.c`): upstream `strongswan-pkcs11/pkcs11_creds.c:241` wires `create_private_enumerator = enumerator_create_empty` — meaning credmgr's `get_private_by_keyid` always returns NULL for PKCS#11 keys *unless* the private key was previously loaded via `lib->creds->create(BUILD_PKCS11_KEYID, ...)` and inserted into a `mem_cred` set. Real strongSwan deployments do this in stroke / vici / nm config plugins; the WASM build has none of those plugins. Fix: in `wasm_setup_config` (dual-auth branch) decode `WASM_LOCAL_KEYID` env hex to a `chunk_t`, call `lib->creds->create(CRED_PRIVATE_KEY, KEY_ANY, BUILD_PKCS11_KEYID, chunk, BUILD_END)`, register the result via `mem_cred->add_key` + `lib->credmgr->add_set`. Without this, IKE_AUTH always fails with `no private key found for '<keyid>'`.

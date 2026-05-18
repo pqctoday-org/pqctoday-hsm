@@ -2582,13 +2582,18 @@ pub fn C_EncryptInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
 
         let (iv, aad, tag_bits) = match mech_type {
             CKM_AES_GCM => {
-                if p_param.is_null() || ul_param_len < 20 {
+                // CK_GCM_PARAMS (24 bytes, WASM32):
+                //   pIv(u32 ptr)   + ulIvLen(u32)   + ulIvBits(u32)
+                //   pAAD(u32 ptr)  + ulAADLen(u32)  + ulTagBits(u32)
+                if p_param.is_null() || ul_param_len < 24 {
                     return CKR_ARGUMENTS_BAD;
                 }
                 let gcm = p_param as *const u32;
-                let iv_ptr = *gcm as usize as *const u8;
-                let iv_len = *gcm.add(1) as usize;
-                let tag_bits = *gcm.add(4);
+                let iv_ptr  = *gcm        as usize as *const u8;
+                let iv_len  = *gcm.add(1) as usize;
+                let aad_ptr = *gcm.add(3) as usize as *const u8;
+                let aad_len = *gcm.add(4) as usize;
+                let tag_bits = *gcm.add(5);
                 let iv = if !iv_ptr.is_null() && iv_len > 0 {
                     if iv_len != 12 {
                         return CKR_ARGUMENTS_BAD; // AES-GCM requires exactly 12-byte nonce
@@ -2597,7 +2602,12 @@ pub fn C_EncryptInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
                 } else {
                     vec![0u8; 12]
                 };
-                (iv, Vec::new(), tag_bits)
+                let aad = if !aad_ptr.is_null() && aad_len > 0 {
+                    std::slice::from_raw_parts(aad_ptr, aad_len).to_vec()
+                } else {
+                    Vec::new()
+                };
+                (iv, aad, tag_bits)
             }
             CKM_AES_CBC_PAD => {
                 if p_param.is_null() || ul_param_len < 16 {
@@ -2695,15 +2705,15 @@ pub fn C_Encrypt(
         let ct = match mech_type {
             CKM_AES_GCM => {
                 use aes_gcm::aead::generic_array::GenericArray;
-                use aes_gcm::{aead::Aead, Aes128Gcm, Aes256Gcm, KeyInit};
+                use aes_gcm::{aead::{Aead, Payload}, Aes128Gcm, Aes256Gcm, KeyInit};
                 let nonce = GenericArray::from_slice(&iv);
                 let result = match key_bytes.len() {
                     16 => match Aes128Gcm::new_from_slice(&key_bytes) {
-                        Ok(cipher) => cipher.encrypt(nonce, plaintext),
+                        Ok(cipher) => cipher.encrypt(nonce, Payload { msg: plaintext, aad: &aad }),
                         Err(_) => return CKR_KEY_TYPE_INCONSISTENT,
                     },
                     32 => match Aes256Gcm::new_from_slice(&key_bytes) {
-                        Ok(cipher) => cipher.encrypt(nonce, plaintext),
+                        Ok(cipher) => cipher.encrypt(nonce, Payload { msg: plaintext, aad: &aad }),
                         Err(_) => return CKR_KEY_TYPE_INCONSISTENT,
                     },
                     _ => return CKR_KEY_TYPE_INCONSISTENT,
@@ -2806,7 +2816,11 @@ pub fn C_Encrypt(
 
         if p_encrypted_data.is_null() {
             *pul_encrypted_data_len = ct.len() as u32;
-            // Re-insert state for size-query (per PKCS#11: operation not terminated)
+            // Re-insert state for size-query (per PKCS#11: operation not terminated).
+            // Preserve aad: the follow-up C_Encrypt call needs the same AAD bytes
+            // to recompute the tag identically — wiping it produces a tag
+            // mismatch on the next call (silent for GCM if encrypt is idempotent,
+            // visible as decrypt failure downstream).
             ENCRYPT_STATE.with(|s| {
                 s.borrow_mut().insert(
                     h_session,
@@ -2814,7 +2828,7 @@ pub fn C_Encrypt(
                         mech_type,
                         key_handle,
                         iv,
-                        aad: Vec::new(),
+                        aad,
                         tag_bits,
                     },
                 );
@@ -2853,13 +2867,18 @@ pub fn C_DecryptInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
 
         let (iv, aad, tag_bits) = match mech_type {
             CKM_AES_GCM => {
-                if p_param.is_null() || ul_param_len < 20 {
+                // CK_GCM_PARAMS (24 bytes, WASM32):
+                //   pIv(u32 ptr)   + ulIvLen(u32)   + ulIvBits(u32)
+                //   pAAD(u32 ptr)  + ulAADLen(u32)  + ulTagBits(u32)
+                if p_param.is_null() || ul_param_len < 24 {
                     return CKR_ARGUMENTS_BAD;
                 }
                 let gcm = p_param as *const u32;
-                let iv_ptr = *gcm as usize as *const u8;
-                let iv_len = *gcm.add(1) as usize;
-                let tag_bits = *gcm.add(4);
+                let iv_ptr  = *gcm        as usize as *const u8;
+                let iv_len  = *gcm.add(1) as usize;
+                let aad_ptr = *gcm.add(3) as usize as *const u8;
+                let aad_len = *gcm.add(4) as usize;
+                let tag_bits = *gcm.add(5);
                 let iv = if !iv_ptr.is_null() && iv_len > 0 {
                     if iv_len != 12 {
                         return CKR_ARGUMENTS_BAD; // AES-GCM requires exactly 12-byte nonce
@@ -2868,7 +2887,12 @@ pub fn C_DecryptInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
                 } else {
                     vec![0u8; 12]
                 };
-                (iv, Vec::new(), tag_bits)
+                let aad = if !aad_ptr.is_null() && aad_len > 0 {
+                    std::slice::from_raw_parts(aad_ptr, aad_len).to_vec()
+                } else {
+                    Vec::new()
+                };
+                (iv, aad, tag_bits)
             }
             CKM_AES_CBC_PAD => {
                 if p_param.is_null() || ul_param_len < 16 {
@@ -2925,8 +2949,8 @@ pub fn C_Decrypt(
 ) -> u32 {
     // Remove state on entry — consumed on all paths except null-buffer size query
     let ctx = DECRYPT_STATE.with(|s| s.borrow_mut().remove(&h_session));
-    let (mech_type, key_handle, iv, tag_bits) = match ctx {
-        Some(c) => (c.mech_type, c.key_handle, c.iv, c.tag_bits),
+    let (mech_type, key_handle, iv, aad, tag_bits) = match ctx {
+        Some(c) => (c.mech_type, c.key_handle, c.iv, c.aad, c.tag_bits),
         None => return CKR_OPERATION_NOT_INITIALIZED,
     };
     let key_bytes = match get_object_value(key_handle) {
@@ -2940,15 +2964,15 @@ pub fn C_Decrypt(
         let pt = match mech_type {
             CKM_AES_GCM => {
                 use aes_gcm::aead::generic_array::GenericArray;
-                use aes_gcm::{Aes128Gcm, Aes256Gcm, KeyInit, aead::Aead};
+                use aes_gcm::{Aes128Gcm, Aes256Gcm, KeyInit, aead::{Aead, Payload}};
                 let nonce = GenericArray::from_slice(&iv);
                 let result = match key_bytes.len() {
                     16 => match Aes128Gcm::new_from_slice(&key_bytes) {
-                        Ok(cipher) => cipher.decrypt(nonce, ciphertext),
+                        Ok(cipher) => cipher.decrypt(nonce, Payload { msg: ciphertext, aad: &aad }),
                         Err(_) => return CKR_KEY_TYPE_INCONSISTENT,
                     },
                     32 => match Aes256Gcm::new_from_slice(&key_bytes) {
-                        Ok(cipher) => cipher.decrypt(nonce, ciphertext),
+                        Ok(cipher) => cipher.decrypt(nonce, Payload { msg: ciphertext, aad: &aad }),
                         Err(_) => return CKR_KEY_TYPE_INCONSISTENT,
                     },
                     _ => return CKR_KEY_TYPE_INCONSISTENT,
@@ -3022,7 +3046,9 @@ pub fn C_Decrypt(
 
         if p_data.is_null() {
             *pul_data_len = pt.len() as u32;
-            // Re-insert state for size-query (per PKCS#11: operation not terminated)
+            // Re-insert state for size-query (per PKCS#11: operation not terminated).
+            // Preserve aad: the follow-up C_Decrypt call needs the same AAD bytes
+            // to verify the tag on the second pass.
             DECRYPT_STATE.with(|s| {
                 s.borrow_mut().insert(
                     h_session,
@@ -3030,7 +3056,7 @@ pub fn C_Decrypt(
                         mech_type,
                         key_handle,
                         iv,
-                        aad: Vec::new(),
+                        aad,
                         tag_bits,
                     },
                 );
