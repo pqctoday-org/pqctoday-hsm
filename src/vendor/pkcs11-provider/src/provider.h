@@ -190,6 +190,12 @@ extern const OSSL_DISPATCH
 #define P11PROV_NAMES_ML_KEM "ML-KEM:ML-KEM-512:ML-KEM-768:ML-KEM-1024"
 #define P11PROV_NAME_ML_KEM P11PROV_NAMES_ML_KEM
 #define P11PROV_DESCS_ML_KEM "PKCS11 ML-KEM Implementation"
+#define P11PROV_NAMES_ML_KEM_512 "ML-KEM-512:MLKEM512"
+#define P11PROV_DESCS_ML_KEM_512 "PKCS11 ML-KEM-512 Implementation"
+#define P11PROV_NAMES_ML_KEM_768 "ML-KEM-768:MLKEM768"
+#define P11PROV_DESCS_ML_KEM_768 "PKCS11 ML-KEM-768 Implementation"
+#define P11PROV_NAMES_ML_KEM_1024 "ML-KEM-1024:MLKEM1024"
+#define P11PROV_DESCS_ML_KEM_1024 "PKCS11 ML-KEM-1024 Implementation"
 
 #define P11PROV_NAMES_XMSS "XMSS"
 #define P11PROV_NAME_XMSS P11PROV_NAMES_XMSS
@@ -373,7 +379,13 @@ int p11prov_pop_error_to_mark(P11PROV_CTX *ctx);
 extern const OSSL_DISPATCH p11prov_slhdsa_signature_functions[];
 extern const OSSL_DISPATCH p11prov_xmss_signature_functions[];
 extern const OSSL_DISPATCH p11prov_mlkem_kem_functions[];
+extern const OSSL_DISPATCH p11prov_mlkem512_kem_functions[];
+extern const OSSL_DISPATCH p11prov_mlkem768_kem_functions[];
+extern const OSSL_DISPATCH p11prov_mlkem1024_kem_functions[];
 extern const OSSL_DISPATCH p11prov_mlkem_keymgmt_functions[];
+extern const OSSL_DISPATCH p11prov_mlkem512_keymgmt_functions[];
+extern const OSSL_DISPATCH p11prov_mlkem768_keymgmt_functions[];
+extern const OSSL_DISPATCH p11prov_mlkem1024_keymgmt_functions[];
 
 #include "interface.h"
 #include "objects.h"

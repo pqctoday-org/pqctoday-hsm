@@ -1111,6 +1111,87 @@ static CK_RV fetch_ec_key(P11PROV_CTX *ctx, P11PROV_SESSION *session,
 #define ML_DSA_65_PK_SIZE 1952
 #define ML_DSA_87_PK_SIZE 2592
 
+/* See FIPS-203, 7. Parameter Sets */
+#define ML_KEM_512_PK_SIZE  800
+#define ML_KEM_768_PK_SIZE  1184
+#define ML_KEM_1024_PK_SIZE 1568
+
+#define MLKEM_ATTRS_NUM (BASE_KEY_ATTRS_NUM + 1)
+static CK_RV fetch_mlkem_key(P11PROV_CTX *ctx, P11PROV_SESSION *session,
+                             CK_OBJECT_HANDLE object, P11PROV_OBJ *key)
+{
+    struct fetch_attrs attrs[MLKEM_ATTRS_NUM];
+    CK_ATTRIBUTE *value_attr;
+    int num;
+    CK_RV ret;
+
+    switch (key->data.key.param_set) {
+    case CKP_ML_KEM_512:
+    case CKP_ML_KEM_768:
+    case CKP_ML_KEM_1024:
+        break;
+    default:
+        ret = CKR_KEY_INDIGESTIBLE;
+        P11PROV_raise(key->ctx, ret, "Unknown ML-KEM param set: %lu",
+                      key->data.key.param_set);
+        return ret;
+    }
+
+    key->attrs = OPENSSL_zalloc(MLKEM_ATTRS_NUM * sizeof(CK_ATTRIBUTE));
+    if (key->attrs == NULL) {
+        return CKR_HOST_MEMORY;
+    }
+
+    num = 0;
+    if (key->class == CKO_PUBLIC_KEY) {
+        FA_SET_BUF_ALLOC(attrs, num, CKA_VALUE, true);
+    }
+    FA_SET_BUF_ALLOC(attrs, num, CKA_ID, false);
+    FA_SET_BUF_ALLOC(attrs, num, CKA_LABEL, false);
+
+    ret = p11prov_fetch_attributes(ctx, session, object, attrs, num);
+    if (ret != CKR_OK) {
+        p11prov_fetch_attrs_free(attrs, num);
+        return ret;
+    }
+
+    key->numattrs = 0;
+    p11prov_move_alloc_attrs(attrs, num, key->attrs, &key->numattrs);
+
+    switch (key->data.key.param_set) {
+    case CKP_ML_KEM_512:
+        key->data.key.size = ML_KEM_512_PK_SIZE;
+        break;
+    case CKP_ML_KEM_768:
+        key->data.key.size = ML_KEM_768_PK_SIZE;
+        break;
+    case CKP_ML_KEM_1024:
+        key->data.key.size = ML_KEM_1024_PK_SIZE;
+        break;
+    default:
+        return CKR_KEY_INDIGESTIBLE;
+    }
+
+    if (key->class == CKO_PUBLIC_KEY) {
+        value_attr = p11prov_obj_get_attr(key, CKA_VALUE);
+        if (!value_attr) {
+            P11PROV_raise(key->ctx, CKR_KEY_INDIGESTIBLE,
+                          "Missing public key value");
+            return CKR_KEY_INDIGESTIBLE;
+        }
+        if (value_attr->ulValueLen != key->data.key.size) {
+            P11PROV_raise(key->ctx, CKR_KEY_INDIGESTIBLE,
+                          "Unexpected ML-KEM public key length %lu (expected %lu)",
+                          value_attr->ulValueLen, key->data.key.size);
+            return CKR_KEY_INDIGESTIBLE;
+        }
+    }
+
+    key->data.key.bit_size = key->data.key.size * 8;
+
+    return CKR_OK;
+}
+
 #define MLDSA_ATTRS_NUM (BASE_KEY_ATTRS_NUM + 1)
 static CK_RV fetch_mldsa_key(P11PROV_CTX *ctx, P11PROV_SESSION *session,
                              CK_OBJECT_HANDLE object, P11PROV_OBJ *key)
@@ -1349,6 +1430,13 @@ CK_RV p11prov_obj_from_handle(P11PROV_CTX *ctx, P11PROV_SESSION *session,
             break;
         case CKK_ML_DSA:
             ret = fetch_mldsa_key(ctx, session, handle, obj);
+            if (ret != CKR_OK) {
+                p11prov_obj_free(obj);
+                return ret;
+            }
+            break;
+        case CKK_ML_KEM:
+            ret = fetch_mlkem_key(ctx, session, handle, obj);
             if (ret != CKR_OK) {
                 p11prov_obj_free(obj);
                 return ret;
@@ -2488,6 +2576,40 @@ static int p11prov_obj_export_public_mldsa_key(P11PROV_OBJ *obj,
     return ret;
 }
 
+#define MLKEM_PUB_ATTRS 1
+static int p11prov_obj_export_public_mlkem_key(P11PROV_OBJ *obj,
+                                               OSSL_CALLBACK *cb_fn,
+                                               void *cb_arg)
+{
+    CK_ATTRIBUTE attrs[MLKEM_PUB_ATTRS] = { { 0 } };
+    OSSL_PARAM params[MLKEM_PUB_ATTRS + 1];
+    CK_RV rv;
+    int ret, n = 0;
+
+    if (p11prov_obj_get_key_type(obj) != CKK_ML_KEM) {
+        return RET_OSSL_ERR;
+    }
+
+    attrs[0].type = CKA_VALUE;
+
+    rv = get_public_attrs(obj, attrs, MLKEM_PUB_ATTRS);
+    if (rv != CKR_OK) {
+        P11PROV_raise(obj->ctx, rv, "Failed to get public key attributes");
+        return RET_OSSL_ERR;
+    }
+
+    params[n++] = OSSL_PARAM_construct_octet_string(
+        OSSL_PKEY_PARAM_PUB_KEY, attrs[0].pValue, attrs[0].ulValueLen);
+    params[n++] = OSSL_PARAM_construct_end();
+
+    ret = cb_fn(params, cb_arg);
+
+    for (int i = 0; i < MLKEM_PUB_ATTRS; i++) {
+        OPENSSL_free(attrs[i].pValue);
+    }
+    return ret;
+}
+
 int p11prov_obj_export_public_key(P11PROV_OBJ *obj, CK_KEY_TYPE key_type,
                                   bool search_related, bool params_only,
                                   OSSL_CALLBACK *cb_fn, void *cb_arg)
@@ -2522,6 +2644,8 @@ int p11prov_obj_export_public_key(P11PROV_OBJ *obj, CK_KEY_TYPE key_type,
                                                 cb_arg);
     case CKK_ML_DSA:
         return p11prov_obj_export_public_mldsa_key(obj, cb_fn, cb_arg);
+    case CKK_ML_KEM:
+        return p11prov_obj_export_public_mlkem_key(obj, cb_fn, cb_arg);
     default:
         P11PROV_raise(obj->ctx, CKR_GENERAL_ERROR, "Unsupported key type");
         return RET_OSSL_ERR;
@@ -2867,6 +2991,7 @@ static int cmp_public_key_values(P11PROV_OBJ *pub_key1, P11PROV_OBJ *pub_key2)
         ret = cmp_attr(pub_key1, pub_key2, CKA_P11PROV_PUB_KEY);
         break;
     case CKK_ML_DSA:
+    case CKK_ML_KEM:
         ret = cmp_attr(pub_key1, pub_key2, CKA_VALUE);
         break;
     default:
@@ -3199,6 +3324,7 @@ int p11prov_obj_key_cmp(P11PROV_OBJ *key1, P11PROV_OBJ *key2, CK_KEY_TYPE type,
         break;
 
     case CKK_ML_DSA:
+    case CKK_ML_KEM:
         /* The parameter set maps to the specific key bit length that was
          * compared already. If the bit size matches, the param set matches. */
         if (cmp_type & OBJ_CMP_KEY_PRIVATE) {

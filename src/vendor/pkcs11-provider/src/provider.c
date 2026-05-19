@@ -1252,9 +1252,18 @@ static CK_RV operations_init(P11PROV_CTX *ctx)
                 break;
             case CKM_ML_KEM:
             case CKM_ML_KEM_KEY_PAIR_GEN:
-                // Scaffolding: Map ML-KEM KEM mappings to SoftHSMv3
-                ADD_ALGO_EXT(ML_KEM, kem, prop,
-                             p11prov_mlkem_kem_functions);
+                /* Register per-variant KEM entries so each variant name gets
+                 * its own namemap identity, matching the per-variant keymgmt
+                 * registrations below. The umbrella "ML-KEM:ML-KEM-512:..."
+                 * cannot be used alongside per-variant keymgmts because
+                 * OpenSSL's namemap rejects a name (e.g. "ML-KEM-768") being
+                 * assigned two different identities. */
+                ADD_ALGO_EXT(ML_KEM_512, kem, prop,
+                             p11prov_mlkem512_kem_functions);
+                ADD_ALGO_EXT(ML_KEM_768, kem, prop,
+                             p11prov_mlkem768_kem_functions);
+                ADD_ALGO_EXT(ML_KEM_1024, kem, prop,
+                             p11prov_mlkem1024_kem_functions);
                 UNCHECK_MECHS(CKM_ML_KEM_KEY_PAIR_GEN, CKM_ML_KEM);
                 break;
             case CKM_XMSS:
@@ -1531,7 +1540,9 @@ static CK_RV static_operations_init(P11PROV_CTX *ctx)
     ADD_ALGO_EXT(ML_DSA_44, keymgmt, prop, p11prov_mldsa44_keymgmt_functions);
     ADD_ALGO_EXT(ML_DSA_65, keymgmt, prop, p11prov_mldsa65_keymgmt_functions);
     ADD_ALGO_EXT(ML_DSA_87, keymgmt, prop, p11prov_mldsa87_keymgmt_functions);
-    ADD_ALGO_EXT(ML_KEM, keymgmt, prop, p11prov_mlkem_keymgmt_functions);
+    ADD_ALGO_EXT(ML_KEM_512, keymgmt, prop, p11prov_mlkem512_keymgmt_functions);
+    ADD_ALGO_EXT(ML_KEM_768, keymgmt, prop, p11prov_mlkem768_keymgmt_functions);
+    ADD_ALGO_EXT(ML_KEM_1024, keymgmt, prop, p11prov_mlkem1024_keymgmt_functions);
     /* Composite-ML-DSA per draft-ietf-lamps-pq-composite-sigs-19 */
     ADD_ALGO_EXT(COMPOSITE_MLDSA44_RSA2048_PSS, keymgmt, prop,
                  p11prov_composite_mldsa44_rsa2048_pss_keymgmt_functions);

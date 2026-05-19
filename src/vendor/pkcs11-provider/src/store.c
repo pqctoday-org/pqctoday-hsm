@@ -260,10 +260,6 @@ static int p11prov_store_load(void *pctx, OSSL_CALLBACK *object_cb,
         return RET_OSSL_ERR;
     }
 
-    fprintf(stderr,
-            "[p11prov-store-load] enter num_objs=%lu fetched=%lu alias=%s expect=%d\n",
-            ctx->num_objs, ctx->fetched, ctx->alias ? ctx->alias : "(null)",
-            ctx->expect);
     while (ctx->fetched < ctx->num_objs) {
         CK_OBJECT_CLASS class;
         obj = ctx->objects[ctx->fetched];
@@ -271,9 +267,6 @@ static int p11prov_store_load(void *pctx, OSSL_CALLBACK *object_cb,
 
         /* Supported search types in OSSL_STORE_SEARCH(3) */
         class = p11prov_obj_get_class(obj);
-        fprintf(stderr,
-                "[p11prov-store-load] obj[%lu] class=0x%lx\n",
-                ctx->fetched - 1, class);
         switch (class) {
         case CKO_CERTIFICATE:
             if (ctx->subject.type == CKA_SUBJECT) {
@@ -357,16 +350,9 @@ static int p11prov_store_load(void *pctx, OSSL_CALLBACK *object_cb,
                  * terminated, producing matches/misses that depend on
                  * heap garbage. Use length-aware memcmp instead. */
                 alias_len = strlen(ctx->alias);
-                fprintf(stderr,
-                        "[p11prov-store-load] alias-check alias=\"%s\" "
-                        "alias_len=%zu label=%p label_len=%lu\n",
-                        ctx->alias, alias_len, (void *)label,
-                        label ? label->ulValueLen : 0);
                 if (!label
                     || label->ulValueLen != alias_len
                     || memcmp(ctx->alias, label->pValue, alias_len) != 0) {
-                    fprintf(stderr,
-                            "[p11prov-store-load] alias MISMATCH — skipping obj\n");
                     /* no match, try next */
                     continue;
                 }
@@ -391,9 +377,6 @@ static int p11prov_store_load(void *pctx, OSSL_CALLBACK *object_cb,
     case CKO_PRIVATE_KEY:
         object_type = OSSL_OBJECT_PKEY;
         type = p11prov_obj_get_key_type(obj);
-        fprintf(stderr,
-                "[p11prov-store-load] emit prep: class=0x%lx key_type=0x%lx\n",
-                p11prov_obj_get_class(obj), type);
         switch (type) {
         case CKK_RSA:
             if (p11prov_obj_is_rsa_pss(obj)) {
@@ -419,7 +402,6 @@ static int p11prov_store_load(void *pctx, OSSL_CALLBACK *object_cb,
             break;
         case CKK_ML_DSA: {
             CK_ULONG ps = p11prov_obj_get_key_param_set(obj);
-            fprintf(stderr, "[p11prov-store-load] ML-DSA param_set=0x%lx\n", ps);
             switch (ps) {
             case CKP_ML_DSA_44:
                 data_type = (char *)MLDSA_44;
@@ -431,20 +413,13 @@ static int p11prov_store_load(void *pctx, OSSL_CALLBACK *object_cb,
                 data_type = (char *)MLDSA_87;
                 break;
             default:
-                fprintf(stderr, "[p11prov-store-load] ML-DSA UNKNOWN param_set rejecting\n");
                 return RET_OSSL_ERR;
             }
             break;
         }
-        case CKK_ML_KEM:
-            /* ML-KEM keymgmt is registered under the umbrella alias
-             * "ML-KEM:ML-KEM-512:ML-KEM-768:ML-KEM-1024" (see
-             * P11PROV_NAMES_ML_KEM in provider.h), so any of the per-paramset
-             * names resolves to p11prov_mlkem_keymgmt_functions. Without this
-             * case, OSSL_STORE iteration over a pkcs11: URI naming an ML-KEM
-             * key returns RET_OSSL_ERR via the default branch — which surfaces
-             * as "Could not find private key of key from <uri>" in apps/lib. */
-            switch (p11prov_obj_get_key_param_set(obj)) {
+        case CKK_ML_KEM: {
+            CK_ULONG ps = p11prov_obj_get_key_param_set(obj);
+            switch (ps) {
             case CKP_ML_KEM_512:
                 data_type = (char *)"ML-KEM-512";
                 break;
@@ -458,6 +433,7 @@ static int p11prov_store_load(void *pctx, OSSL_CALLBACK *object_cb,
                 return RET_OSSL_ERR;
             }
             break;
+        }
         default:
             return RET_OSSL_ERR;
         }
@@ -507,13 +483,7 @@ static int p11prov_store_load(void *pctx, OSSL_CALLBACK *object_cb,
     }
     params[3] = OSSL_PARAM_construct_end();
 
-    fprintf(stderr,
-            "[p11prov-store-load] emit: object_type=%d data_type=%s reference=%p ref_sz=%zu\n",
-            object_type, data_type ? data_type : "(null)", reference,
-            reference_sz);
-    int cb_rc = object_cb(params, object_cbarg);
-    fprintf(stderr, "[p11prov-store-load] callback returned rc=%d\n", cb_rc);
-    return cb_rc;
+    return object_cb(params, object_cbarg);
 }
 
 static int p11prov_store_eof(void *pctx)

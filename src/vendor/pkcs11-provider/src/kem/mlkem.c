@@ -10,6 +10,12 @@
 #define CKM_ML_KEM 0x00000017UL
 #endif
 
+/* CMS_RECIPINFO_KEM = 5 (openssl/cms.h). Defined here to avoid pulling in
+ * the full CMS header from inside a provider. */
+#ifndef CMS_RECIPINFO_KEM
+#define CMS_RECIPINFO_KEM 5
+#endif
+
 typedef struct p11prov_kem_ctx {
     P11PROV_CTX *provctx;
     P11PROV_OBJ *key;
@@ -247,6 +253,9 @@ static int p11prov_kem_decapsulate(void *ctx, unsigned char *out, size_t *outlen
     return 1;
 }
 
+/* Umbrella table kept for internal use; per-variant tables are what the
+ * provider registers so each variant name gets its own namemap identity and
+ * can be found by EVP_KEM_fetch(libctx, "ML-KEM-768", ...). */
 const OSSL_DISPATCH p11prov_mlkem_kem_functions[] = {
     { OSSL_FUNC_KEM_NEWCTX, (void (*)(void))p11prov_kem_newctx },
     { OSSL_FUNC_KEM_FREECTX, (void (*)(void))p11prov_kem_freectx },
@@ -257,6 +266,280 @@ const OSSL_DISPATCH p11prov_mlkem_kem_functions[] = {
     { 0, NULL },
 };
 
+const OSSL_DISPATCH p11prov_mlkem512_kem_functions[] = {
+    { OSSL_FUNC_KEM_NEWCTX, (void (*)(void))p11prov_kem_newctx },
+    { OSSL_FUNC_KEM_FREECTX, (void (*)(void))p11prov_kem_freectx },
+    { OSSL_FUNC_KEM_ENCAPSULATE_INIT, (void (*)(void))p11prov_kem_init },
+    { OSSL_FUNC_KEM_ENCAPSULATE, (void (*)(void))p11prov_kem_encapsulate },
+    { OSSL_FUNC_KEM_DECAPSULATE_INIT, (void (*)(void))p11prov_kem_init },
+    { OSSL_FUNC_KEM_DECAPSULATE, (void (*)(void))p11prov_kem_decapsulate },
+    { 0, NULL },
+};
+
+const OSSL_DISPATCH p11prov_mlkem768_kem_functions[] = {
+    { OSSL_FUNC_KEM_NEWCTX, (void (*)(void))p11prov_kem_newctx },
+    { OSSL_FUNC_KEM_FREECTX, (void (*)(void))p11prov_kem_freectx },
+    { OSSL_FUNC_KEM_ENCAPSULATE_INIT, (void (*)(void))p11prov_kem_init },
+    { OSSL_FUNC_KEM_ENCAPSULATE, (void (*)(void))p11prov_kem_encapsulate },
+    { OSSL_FUNC_KEM_DECAPSULATE_INIT, (void (*)(void))p11prov_kem_init },
+    { OSSL_FUNC_KEM_DECAPSULATE, (void (*)(void))p11prov_kem_decapsulate },
+    { 0, NULL },
+};
+
+const OSSL_DISPATCH p11prov_mlkem1024_kem_functions[] = {
+    { OSSL_FUNC_KEM_NEWCTX, (void (*)(void))p11prov_kem_newctx },
+    { OSSL_FUNC_KEM_FREECTX, (void (*)(void))p11prov_kem_freectx },
+    { OSSL_FUNC_KEM_ENCAPSULATE_INIT, (void (*)(void))p11prov_kem_init },
+    { OSSL_FUNC_KEM_ENCAPSULATE, (void (*)(void))p11prov_kem_encapsulate },
+    { OSSL_FUNC_KEM_DECAPSULATE_INIT, (void (*)(void))p11prov_kem_init },
+    { OSSL_FUNC_KEM_DECAPSULATE, (void (*)(void))p11prov_kem_decapsulate },
+    { 0, NULL },
+};
+
+/* ─── ML-KEM keymgmt (minimal — supports OSSL_STORE load + pkey -pubout) ──────
+ * Mirrors the ML-DSA pattern in keymgmt.c. Generation is performed via direct
+ * C_GenerateKeyPair in the hub's worker; this surface only needs to materialize
+ * objects loaded from OSSL_STORE and export the public key bytes.
+ * ML-KEM key sizes (FIPS 203): pub 800/1184/1568, ct 768/1088/1568 bytes.
+ */
+
+#ifndef OSSL_KEYMGMT_SELECT_PUBLIC_KEY
+#define OSSL_KEYMGMT_SELECT_PUBLIC_KEY 0x01
+#endif
+#ifndef OSSL_KEYMGMT_SELECT_PRIVATE_KEY
+#define OSSL_KEYMGMT_SELECT_PRIVATE_KEY 0x02
+#endif
+#ifndef ML_KEM_512_CT_SIZE
+#define ML_KEM_512_CT_SIZE 768
+#define ML_KEM_768_CT_SIZE 1088
+#define ML_KEM_1024_CT_SIZE 1568
+#endif
+
+static void *p11prov_mlkem_keymgmt_new_fn(void *provctx)
+{
+    P11PROV_CTX *ctx = (P11PROV_CTX *)provctx;
+    CK_RV ret = p11prov_ctx_status(ctx);
+    if (ret != CKR_OK) return NULL;
+    return p11prov_obj_new(provctx, CK_UNAVAILABLE_INFORMATION,
+                           CK_P11PROV_IMPORTED_HANDLE,
+                           CK_UNAVAILABLE_INFORMATION);
+}
+
+static void p11prov_mlkem_keymgmt_free_fn(void *key)
+{
+    p11prov_obj_free((P11PROV_OBJ *)key);
+}
+
+static void *p11prov_mlkem_keymgmt_load_fn(const void *reference, size_t sz)
+{
+    return p11prov_obj_from_typed_reference(reference, sz, CKK_ML_KEM);
+}
+
+static int p11prov_mlkem_keymgmt_has_fn(const void *keydata, int selection)
+{
+    P11PROV_OBJ *key = (P11PROV_OBJ *)keydata;
+    if (key == NULL) return RET_OSSL_ERR;
+    if (selection & OSSL_KEYMGMT_SELECT_PRIVATE_KEY) {
+        if (p11prov_obj_get_class(key) != CKO_PRIVATE_KEY) return RET_OSSL_ERR;
+    }
+    return RET_OSSL_OK;
+}
+
+static int p11prov_mlkem_keymgmt_match_fn(const void *kd1, const void *kd2,
+                                          int selection)
+{
+    P11PROV_OBJ *k1 = (P11PROV_OBJ *)kd1;
+    P11PROV_OBJ *k2 = (P11PROV_OBJ *)kd2;
+    int cmp_type = OBJ_CMP_KEY_TYPE;
+    if (k1 == k2) return RET_OSSL_OK;
+    if (selection & OSSL_KEYMGMT_SELECT_PUBLIC_KEY) cmp_type |= OBJ_CMP_KEY_PUBLIC;
+    if (selection & OSSL_KEYMGMT_SELECT_PRIVATE_KEY) cmp_type |= OBJ_CMP_KEY_PRIVATE;
+    return p11prov_obj_key_cmp(k1, k2, CKK_ML_KEM, cmp_type);
+}
+
+static int p11prov_mlkem_keymgmt_get_params_fn(void *keydata, OSSL_PARAM params[])
+{
+    P11PROV_OBJ *key = (P11PROV_OBJ *)keydata;
+    CK_ULONG param_set;
+    OSSL_PARAM *p;
+    int ret;
+
+    if (key == NULL) return RET_OSSL_ERR;
+    param_set = p11prov_obj_get_key_param_set(key);
+
+    p = OSSL_PARAM_locate(params, OSSL_PKEY_PARAM_BITS);
+    if (p) {
+        CK_ULONG bits = p11prov_obj_get_key_bit_size(key);
+        if (bits == 0) return RET_OSSL_ERR;
+        ret = OSSL_PARAM_set_int(p, bits);
+        if (ret != RET_OSSL_OK) return ret;
+    }
+    p = OSSL_PARAM_locate(params, OSSL_PKEY_PARAM_SECURITY_BITS);
+    if (p) {
+        int secbits = 0;
+        switch (param_set) {
+        case CKP_ML_KEM_512:  secbits = 128; break;
+        case CKP_ML_KEM_768:  secbits = 192; break;
+        case CKP_ML_KEM_1024: secbits = 256; break;
+        }
+        if (secbits == 0) return RET_OSSL_ERR;
+        ret = OSSL_PARAM_set_int(p, secbits);
+        if (ret != RET_OSSL_OK) return ret;
+    }
+    p = OSSL_PARAM_locate(params, OSSL_PKEY_PARAM_MAX_SIZE);
+    if (p) {
+        int ctsize = 0;
+        switch (param_set) {
+        case CKP_ML_KEM_512:  ctsize = ML_KEM_512_CT_SIZE; break;
+        case CKP_ML_KEM_768:  ctsize = ML_KEM_768_CT_SIZE; break;
+        case CKP_ML_KEM_1024: ctsize = ML_KEM_1024_CT_SIZE; break;
+        }
+        if (ctsize == 0) return RET_OSSL_ERR;
+        ret = OSSL_PARAM_set_int(p, ctsize);
+        if (ret != RET_OSSL_OK) return ret;
+    }
+    p = OSSL_PARAM_locate(params, OSSL_PKEY_PARAM_PUB_KEY);
+    if (p) {
+        CK_ATTRIBUTE *pub;
+        if (p->data_type != OSSL_PARAM_OCTET_STRING) return RET_OSSL_ERR;
+        pub = p11prov_obj_get_attr(key, CKA_VALUE);
+        if (!pub) return RET_OSSL_ERR;
+        p->return_size = pub->ulValueLen;
+        if (p->data) {
+            if (p->data_size < pub->ulValueLen) return RET_OSSL_ERR;
+            memcpy(p->data, pub->pValue, pub->ulValueLen);
+            p->data_size = pub->ulValueLen;
+        }
+    }
+    /* Tell OpenSSL's CMS layer that this key uses KEMRecipientInfo (RFC 9629).
+     * ossl_cms_pkey_get_ri_type() checks this param first; without it the
+     * heuristic fallback (EVP_PKEY_encapsulate_init on an HSM private key)
+     * fails and cms -decrypt reports "no matching recipient". */
+    p = OSSL_PARAM_locate(params, OSSL_PKEY_PARAM_CMS_RI_TYPE);
+    if (p) {
+        ret = OSSL_PARAM_set_int(p, CMS_RECIPINFO_KEM);
+        if (ret != RET_OSSL_OK) return ret;
+    }
+    return RET_OSSL_OK;
+}
+
+static const OSSL_PARAM *p11prov_mlkem_keymgmt_gettable_params_fn(void *provctx)
+{
+    static const OSSL_PARAM params[] = {
+        OSSL_PARAM_octet_string(OSSL_PKEY_PARAM_PUB_KEY, NULL, 0),
+        OSSL_PARAM_int(OSSL_PKEY_PARAM_BITS, NULL),
+        OSSL_PARAM_int(OSSL_PKEY_PARAM_SECURITY_BITS, NULL),
+        OSSL_PARAM_int(OSSL_PKEY_PARAM_MAX_SIZE, NULL),
+        OSSL_PARAM_int(OSSL_PKEY_PARAM_CMS_RI_TYPE, NULL),
+        OSSL_PARAM_END,
+    };
+    return params;
+}
+
+static int p11prov_mlkem_keymgmt_export_fn(void *keydata, int selection,
+                                           OSSL_CALLBACK *cb_fn, void *cb_arg)
+{
+    P11PROV_OBJ *key = (P11PROV_OBJ *)keydata;
+    P11PROV_CTX *ctx;
+    CK_OBJECT_CLASS class;
+
+    if (key == NULL) return RET_OSSL_ERR;
+    ctx = p11prov_obj_get_prov_ctx(key);
+    class = p11prov_obj_get_class(key);
+
+    if (p11prov_ctx_allow_export(ctx) & DISALLOW_EXPORT_PUBLIC) return RET_OSSL_ERR;
+
+    /* Only export public-key bytes when the object itself is a public key.
+     * Private-key objects have CKA_VALUE = private key bytes; calling
+     * p11prov_obj_export_public_key on them returns garbage, which breaks
+     * the cert↔key match in OpenSSL's cms -decrypt KEMRecipientInfo path. */
+    if (class == CKO_PUBLIC_KEY && (selection & OSSL_KEYMGMT_SELECT_PUBLIC_KEY)) {
+        return p11prov_obj_export_public_key(key, CKK_ML_KEM, true, false,
+                                             cb_fn, cb_arg);
+    }
+    return RET_OSSL_ERR;
+}
+
+static const OSSL_PARAM *p11prov_mlkem_keymgmt_export_types_fn(int selection)
+{
+    static const OSSL_PARAM types[] = {
+        OSSL_PARAM_octet_string(OSSL_PKEY_PARAM_PUB_KEY, NULL, 0),
+        OSSL_PARAM_END,
+    };
+    if (selection & OSSL_KEYMGMT_SELECT_PUBLIC_KEY) return types;
+    return NULL;
+}
+
+/* Shared keymgmt table (umbrella — kept for internal use).
+ * Per-variant aliases below are what OpenSSL's algorithm fetch machinery
+ * needs: each variant must be registered under its own name so that
+ * EVP_KEYMGMT_fetch(libctx, "ML-KEM-768", propq) and the
+ * evp_keymgmt_fetch_from_prov() fallback in store_result.c both find a
+ * pkcs11-provider keymgmt directly under the exact name "ML-KEM-768".
+ * The umbrella "ML-KEM:ML-KEM-512:ML-KEM-768:ML-KEM-1024" single entry
+ * does not satisfy the prov-constrained lookup used in the fallback loop. */
 const OSSL_DISPATCH p11prov_mlkem_keymgmt_functions[] = {
+    { OSSL_FUNC_KEYMGMT_NEW, (void (*)(void))p11prov_mlkem_keymgmt_new_fn },
+    { OSSL_FUNC_KEYMGMT_FREE, (void (*)(void))p11prov_mlkem_keymgmt_free_fn },
+    { OSSL_FUNC_KEYMGMT_LOAD, (void (*)(void))p11prov_mlkem_keymgmt_load_fn },
+    { OSSL_FUNC_KEYMGMT_HAS, (void (*)(void))p11prov_mlkem_keymgmt_has_fn },
+    { OSSL_FUNC_KEYMGMT_MATCH, (void (*)(void))p11prov_mlkem_keymgmt_match_fn },
+    { OSSL_FUNC_KEYMGMT_GET_PARAMS,
+      (void (*)(void))p11prov_mlkem_keymgmt_get_params_fn },
+    { OSSL_FUNC_KEYMGMT_GETTABLE_PARAMS,
+      (void (*)(void))p11prov_mlkem_keymgmt_gettable_params_fn },
+    { OSSL_FUNC_KEYMGMT_EXPORT, (void (*)(void))p11prov_mlkem_keymgmt_export_fn },
+    { OSSL_FUNC_KEYMGMT_EXPORT_TYPES,
+      (void (*)(void))p11prov_mlkem_keymgmt_export_types_fn },
+    { 0, NULL },
+};
+
+/* Per-variant aliases — same function pointers, separate symbols so each
+ * variant gets its own entry in the OpenSSL method store keyed by name. */
+const OSSL_DISPATCH p11prov_mlkem512_keymgmt_functions[] = {
+    { OSSL_FUNC_KEYMGMT_NEW, (void (*)(void))p11prov_mlkem_keymgmt_new_fn },
+    { OSSL_FUNC_KEYMGMT_FREE, (void (*)(void))p11prov_mlkem_keymgmt_free_fn },
+    { OSSL_FUNC_KEYMGMT_LOAD, (void (*)(void))p11prov_mlkem_keymgmt_load_fn },
+    { OSSL_FUNC_KEYMGMT_HAS, (void (*)(void))p11prov_mlkem_keymgmt_has_fn },
+    { OSSL_FUNC_KEYMGMT_MATCH, (void (*)(void))p11prov_mlkem_keymgmt_match_fn },
+    { OSSL_FUNC_KEYMGMT_GET_PARAMS,
+      (void (*)(void))p11prov_mlkem_keymgmt_get_params_fn },
+    { OSSL_FUNC_KEYMGMT_GETTABLE_PARAMS,
+      (void (*)(void))p11prov_mlkem_keymgmt_gettable_params_fn },
+    { OSSL_FUNC_KEYMGMT_EXPORT, (void (*)(void))p11prov_mlkem_keymgmt_export_fn },
+    { OSSL_FUNC_KEYMGMT_EXPORT_TYPES,
+      (void (*)(void))p11prov_mlkem_keymgmt_export_types_fn },
+    { 0, NULL },
+};
+
+const OSSL_DISPATCH p11prov_mlkem768_keymgmt_functions[] = {
+    { OSSL_FUNC_KEYMGMT_NEW, (void (*)(void))p11prov_mlkem_keymgmt_new_fn },
+    { OSSL_FUNC_KEYMGMT_FREE, (void (*)(void))p11prov_mlkem_keymgmt_free_fn },
+    { OSSL_FUNC_KEYMGMT_LOAD, (void (*)(void))p11prov_mlkem_keymgmt_load_fn },
+    { OSSL_FUNC_KEYMGMT_HAS, (void (*)(void))p11prov_mlkem_keymgmt_has_fn },
+    { OSSL_FUNC_KEYMGMT_MATCH, (void (*)(void))p11prov_mlkem_keymgmt_match_fn },
+    { OSSL_FUNC_KEYMGMT_GET_PARAMS,
+      (void (*)(void))p11prov_mlkem_keymgmt_get_params_fn },
+    { OSSL_FUNC_KEYMGMT_GETTABLE_PARAMS,
+      (void (*)(void))p11prov_mlkem_keymgmt_gettable_params_fn },
+    { OSSL_FUNC_KEYMGMT_EXPORT, (void (*)(void))p11prov_mlkem_keymgmt_export_fn },
+    { OSSL_FUNC_KEYMGMT_EXPORT_TYPES,
+      (void (*)(void))p11prov_mlkem_keymgmt_export_types_fn },
+    { 0, NULL },
+};
+
+const OSSL_DISPATCH p11prov_mlkem1024_keymgmt_functions[] = {
+    { OSSL_FUNC_KEYMGMT_NEW, (void (*)(void))p11prov_mlkem_keymgmt_new_fn },
+    { OSSL_FUNC_KEYMGMT_FREE, (void (*)(void))p11prov_mlkem_keymgmt_free_fn },
+    { OSSL_FUNC_KEYMGMT_LOAD, (void (*)(void))p11prov_mlkem_keymgmt_load_fn },
+    { OSSL_FUNC_KEYMGMT_HAS, (void (*)(void))p11prov_mlkem_keymgmt_has_fn },
+    { OSSL_FUNC_KEYMGMT_MATCH, (void (*)(void))p11prov_mlkem_keymgmt_match_fn },
+    { OSSL_FUNC_KEYMGMT_GET_PARAMS,
+      (void (*)(void))p11prov_mlkem_keymgmt_get_params_fn },
+    { OSSL_FUNC_KEYMGMT_GETTABLE_PARAMS,
+      (void (*)(void))p11prov_mlkem_keymgmt_gettable_params_fn },
+    { OSSL_FUNC_KEYMGMT_EXPORT, (void (*)(void))p11prov_mlkem_keymgmt_export_fn },
+    { OSSL_FUNC_KEYMGMT_EXPORT_TYPES,
+      (void (*)(void))p11prov_mlkem_keymgmt_export_types_fn },
     { 0, NULL },
 };
