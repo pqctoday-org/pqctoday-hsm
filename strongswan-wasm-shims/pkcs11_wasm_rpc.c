@@ -136,6 +136,18 @@ static CK_RV traced_C_GenerateKeyPair(CK_SESSION_HANDLE hSess,
                                       CK_OBJECT_HANDLE_PTR phPub,
                                       CK_OBJECT_HANDLE_PTR phPri)
 {
+#ifdef __EMSCRIPTEN__
+    /* Private keys default to CKA_PRIVATE=TRUE (PKCS#11 v3.2 §4.7), so
+     * C_GenerateKeyPair returns CKR_USER_NOT_LOGGED_IN if the session was
+     * opened without a prior C_Login.  Ensure we're authenticated here
+     * regardless of how the caller obtained the session handle.
+     * CKR_USER_ALREADY_LOGGED_IN is benign and expected on all calls after
+     * the first. */
+    static const CK_UTF8CHAR wasm_pin[] = {'1','2','3','4'};
+    CK_RV lrv = g_orig_fl->C_Login(hSess, CKU_USER,
+                                    (CK_UTF8CHAR_PTR)wasm_pin, sizeof(wasm_pin));
+    pkcs11_trace("C_Login[pre-keygen]", (uint32_t)hSess, 0, 0, 0, (int)lrv, 0, 0);
+#endif
     CK_RV rv = g_orig_fl->C_GenerateKeyPair(hSess, pMech, pPubT, ulPubC,
                                             pPriT, ulPriC, phPub, phPri);
     pkcs11_trace("C_GenerateKeyPair",
