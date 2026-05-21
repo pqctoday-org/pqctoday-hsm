@@ -49,16 +49,8 @@ int res_search(const char *dname, int class, int type,
     return res_query(dname, class, type, answer, anslen);
 }
 
-/* pthread_kill — strongSwan thread.c uses it for thread cancellation.
- * With `charon.threads = 1` in our config, no worker threads are spawned,
- * so this path is never taken at runtime.  Stub satisfies the linker. */
-#include <signal.h>
-#include <pthread.h>
-int pthread_kill(pthread_t thread, int sig) {
-    (void)thread; (void)sig;
-    errno = ESRCH;
-    return ESRCH;
-}
+/* pthread_kill provided by emscripten 5.0.7 libc — stub removed to avoid
+ * duplicate symbol at link time. */
 
 /* Reserved: add charon-specific stubs as we discover linker gaps in Phase 1.
  *

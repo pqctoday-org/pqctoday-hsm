@@ -90,6 +90,7 @@ echo "[v2] Installing WASM shims..."
 cp "$SHIMS_SRC"/charon_wasm_main.c  src/charon/
 cp "$SHIMS_SRC"/pkcs11_static.c     src/charon/
 cp "$SHIMS_SRC"/posix_stubs.c       src/charon/
+cp "$ROOT/strongswan-wasm-shims/pkcs11_wasm_rpc.c" src/charon/
 
 # ── Step 6: autoreconf ────────────────────────────────────────────────────────
 echo "[v2] Running autoreconf..."
@@ -170,6 +171,7 @@ emcc \
     "$SHIMS_SRC/charon_wasm_main.c" \
     "$SHIMS_SRC/pkcs11_static.c" \
     "$SHIMS_SRC/posix_stubs.c" \
+    "$ROOT/strongswan-wasm-shims/pkcs11_wasm_rpc.c" \
     "$LIBSTRONGSWAN" \
     "$SOFTHSM_WASM" \
     "$OPENSSL_WASM/lib/libcrypto.a" \
