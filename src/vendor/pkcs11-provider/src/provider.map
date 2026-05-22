@@ -1,6 +1,16 @@
 {
 	global:
 		OSSL_provider_init;
+		p11prov_composite_profile_by_oid;
+		p11prov_composite_evp_pkey_from_uris;
+		p11prov_composite_build_mprime;
+		p11prov_composite_profile_mldsa_pk_bytes;
+		p11prov_composite_profile_mldsa_sig_bytes;
+		p11prov_composite_profile_pre_hash_nid;
+		p11prov_composite_profile_label;
+		p11prov_composite_profile_signature_label;
+		p11prov_composite_profile_classical_alg_oid;
+		p11prov_composite_profile_mldsa_strength;
 	local:
 		*;
 };

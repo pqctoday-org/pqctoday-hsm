@@ -94,4 +94,12 @@ EVP_PKEY *p11prov_composite_evp_pkey_from_uris(
     const char *pq_uri,
     const char *classical_uri);
 
+/* Dispatch table getters — used by provider.c ADD_ALGO_EXT blocks. */
+const OSSL_DISPATCH *p11prov_composite_mldsa44_rsa2048_pss_keymgmt_dispatch(void);
+const OSSL_DISPATCH *p11prov_composite_mldsa65_ecdsa_p256_keymgmt_dispatch(void);
+const OSSL_DISPATCH *p11prov_composite_mldsa87_ecdsa_p384_keymgmt_dispatch(void);
+const OSSL_DISPATCH *p11prov_composite_mldsa44_rsa2048_pss_sig_dispatch(void);
+const OSSL_DISPATCH *p11prov_composite_mldsa65_ecdsa_p256_sig_dispatch(void);
+const OSSL_DISPATCH *p11prov_composite_mldsa87_ecdsa_p384_sig_dispatch(void);
+
 #endif /* P11PROV_COMPOSITE_H */

@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include "src/provider.h"
+#include "provider.h"
 #include <string.h>
 
 #ifndef CKM_ML_KEM

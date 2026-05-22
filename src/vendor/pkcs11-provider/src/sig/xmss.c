@@ -8,7 +8,7 @@
  */
 
 #include "provider.h"
-#include "src/keymgmt.h"
+#include "keymgmt.h"
 
 // TODO: Implement parsing for CKK_XMSS parameter sets and wrap PKCS#11 verify primitives
 const OSSL_DISPATCH p11prov_xmss_signature_functions[] = {
