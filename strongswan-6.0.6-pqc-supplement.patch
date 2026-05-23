@@ -1,0 +1,29 @@
+# strongSwan 6.0.5 PQC Supplement Patch
+# Applied after strongswan-6.0.5-pqc.patch. Fills gaps discovered during
+# sandbox validation.
+#
+# Fix #1 — pkcs1_plugin.c:
+#   Main patch adds PLUGIN_SDEPEND(PUBKEY, KEY_ML_DSA_*) entries (soft
+#   dependencies that say "pkcs1 prefers these exist") but NO
+#   PLUGIN_PROVIDE entries. The pem plugin is then the only registered
+#   builder for KEY_ML_DSA_* pubkeys — and pem expects PEM-wrapped files,
+#   not raw DER. Result: "file coded in unknown format, discarded" + x509
+#   parse fails on ML-DSA certs.
+#
+diff --git a/src/libstrongswan/plugins/pkcs1/pkcs1_plugin.c b/src/libstrongswan/plugins/pkcs1/pkcs1_plugin.c
+--- a/src/libstrongswan/plugins/pkcs1/pkcs1_plugin.c
++++ b/src/libstrongswan/plugins/pkcs1/pkcs1_plugin.c
+@@ -60,6 +60,12 @@ METHOD(plugin_t, get_features, int,
+ 				PLUGIN_SDEPEND(PUBKEY, KEY_ML_DSA_87),
+ 				PLUGIN_SDEPEND(PUBKEY, KEY_DSA),
+ 		PLUGIN_REGISTER(PUBKEY, pkcs1_public_key_load, FALSE),
+ 			PLUGIN_PROVIDE(PUBKEY, KEY_RSA),
++		PLUGIN_REGISTER(PUBKEY, pkcs1_public_key_load, FALSE),
++			PLUGIN_PROVIDE(PUBKEY, KEY_ML_DSA_44),
++		PLUGIN_REGISTER(PUBKEY, pkcs1_public_key_load, FALSE),
++			PLUGIN_PROVIDE(PUBKEY, KEY_ML_DSA_65),
++		PLUGIN_REGISTER(PUBKEY, pkcs1_public_key_load, FALSE),
++			PLUGIN_PROVIDE(PUBKEY, KEY_ML_DSA_87),
+ 	};
+ 	*features = f;
+ 	return countof(f);

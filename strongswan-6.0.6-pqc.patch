@@ -1,0 +1,882 @@
+# strongSwan 6.0.5 PQC Core Patch
+# Subset of strongswan/strongswan#2626 (ML-DSA FIPS 204) — minimal core changes only.
+# PKCS#11 plugin changes handled separately via `cp -r pqctoday-hsm/strongswan-pkcs11/` in build script.
+# Native ml_dsa plugin and non-pkcs11 backends intentionally excluded.
+#
+# Included files (relative to strongSwan source tree root):
+#   src/libstrongswan/asn1/asn1.c                              (ML-DSA OIDs in algorithmIdentifier)
+#   src/libstrongswan/asn1/oid.txt                             (new ML-DSA OID leaves)
+#   src/libstrongswan/credentials/auth_cfg.c                   (ML-DSA key tokens + schemes)
+#   src/libstrongswan/credentials/cred_encoding.h              (CRED_PART_PUB/PRIV_ASN1_DER)
+#   src/libstrongswan/credentials/keys/public_key.c            (key_type enum names, info_encode/decode, helpers)
+#   src/libstrongswan/credentials/keys/public_key.h            (KEY_ML_DSA_*, SIGN_ML_DSA_*, new API)
+#   src/libstrongswan/credentials/keys/signature_params.c      (pqc_params_create/free)
+#   src/libstrongswan/credentials/keys/signature_params.h      (pqc_params_t)
+#   src/libstrongswan/crypto/hashers/hasher.c                  (ML-DSA identity hash mapping)
+#   src/libstrongswan/plugins/pem/pem_encoder.c                (CRED_PART_PUB/PRIV_ASN1_DER paths)
+#   src/libstrongswan/plugins/pem/pem_plugin.c                 (ML-DSA PEM pub/priv registrations)
+#   src/libstrongswan/plugins/pkcs1/pkcs1_builder.c            (refactored parse_public_key via new helper)
+#   src/libstrongswan/plugins/pkcs1/pkcs1_plugin.c             (ML-DSA PUBKEY soft-deps)
+#   src/libstrongswan/plugins/pkcs8/pkcs8_builder.c            (ML-DSA OID → key type mapping)
+#   src/libstrongswan/plugins/pkcs8/pkcs8_plugin.c             (ML-DSA PRIVKEY providers)
+#
+diff --git a/src/libstrongswan/asn1/asn1.c b/src/libstrongswan/asn1/asn1.c
+index 866b3c85758..d7216f50e09 100644
+--- a/src/libstrongswan/asn1/asn1.c
++++ b/src/libstrongswan/asn1/asn1.c
+@@ -58,6 +58,9 @@ chunk_t asn1_algorithmIdentifier(int oid)
+ 		case OID_ECDSA_WITH_SHA512:
+ 		case OID_ED25519:
+ 		case OID_ED448:
++		case OID_ML_DSA_44:
++		case OID_ML_DSA_65:
++		case OID_ML_DSA_87:
+ 			parameters = chunk_empty;
+ 			break;
+ 		default:
+diff --git a/src/libstrongswan/asn1/oid.txt b/src/libstrongswan/asn1/oid.txt
+index c3509102276..7f55152f071 100644
+--- a/src/libstrongswan/asn1/oid.txt
++++ b/src/libstrongswan/asn1/oid.txt
+@@ -451,6 +451,12 @@
+                 0x0E         "id-rsassa-pkcs1v15-with-sha3-256"	OID_RSASSA_PKCS1V15_WITH_SHA3_256
+                 0x0F         "id-rsassa-pkcs1v15-with-sha3-384"	OID_RSASSA_PKCS1V15_WITH_SHA3_384
+                 0x10         "id-rsassa-pkcs1v15-with-sha3-512"	OID_RSASSA_PKCS1V15_WITH_SHA3_512
++                0x11         "id-ml-dsa-44" OID_ML_DSA_44
++                0x12         "id-ml-dsa-65" OID_ML_DSA_65
++                0x13         "id-ml-dsa-87" OID_ML_DSA_87
++                0x20         "id-hash-ml-dsa-44-with-sha512"
++                0x21         "id-hash-ml-dsa-65-with-sha512"
++                0x22         "id-hash-ml-dsa-87-with-sha512"
+         0x86                 ""
+           0xf8               ""
+             0x42             "netscape"
+diff --git a/src/libstrongswan/credentials/auth_cfg.c b/src/libstrongswan/credentials/auth_cfg.c
+index fb052ca90f8..184d4b835ae 100644
+--- a/src/libstrongswan/credentials/auth_cfg.c
++++ b/src/libstrongswan/credentials/auth_cfg.c
+@@ -615,21 +615,24 @@ METHOD(auth_cfg_t, add_pubkey_constraints, void,
+ 			signature_scheme_t scheme;
+ 			key_type_t key;
+ 		} schemes[] = {
+-			{ "md5",		SIGN_RSA_EMSA_PKCS1_MD5,		KEY_RSA,	 },
+-			{ "sha1",		SIGN_RSA_EMSA_PKCS1_SHA1,		KEY_RSA,	 },
+-			{ "sha224",		SIGN_RSA_EMSA_PKCS1_SHA2_224,	KEY_RSA,	 },
+-			{ "sha256",		SIGN_RSA_EMSA_PKCS1_SHA2_256,	KEY_RSA,	 },
+-			{ "sha384",		SIGN_RSA_EMSA_PKCS1_SHA2_384,	KEY_RSA,	 },
+-			{ "sha512",		SIGN_RSA_EMSA_PKCS1_SHA2_512,	KEY_RSA,	 },
+-			{ "sha1",		SIGN_ECDSA_WITH_SHA1_DER,		KEY_ECDSA,	 },
+-			{ "sha256",		SIGN_ECDSA_WITH_SHA256_DER,		KEY_ECDSA,	 },
+-			{ "sha384",		SIGN_ECDSA_WITH_SHA384_DER,		KEY_ECDSA,	 },
+-			{ "sha512",		SIGN_ECDSA_WITH_SHA512_DER,		KEY_ECDSA,	 },
+-			{ "sha256",		SIGN_ECDSA_256,					KEY_ECDSA,	 },
+-			{ "sha384",		SIGN_ECDSA_384,					KEY_ECDSA,	 },
+-			{ "sha512",		SIGN_ECDSA_521,					KEY_ECDSA,	 },
+-			{ "identity",	SIGN_ED25519,					KEY_ED25519, },
+-			{ "identity",	SIGN_ED448,						KEY_ED448,	 },
++			{ "md5",		SIGN_RSA_EMSA_PKCS1_MD5,		KEY_RSA,	   },
++			{ "sha1",		SIGN_RSA_EMSA_PKCS1_SHA1,		KEY_RSA,	   },
++			{ "sha224",		SIGN_RSA_EMSA_PKCS1_SHA2_224,	KEY_RSA,	   },
++			{ "sha256",		SIGN_RSA_EMSA_PKCS1_SHA2_256,	KEY_RSA,	   },
++			{ "sha384",		SIGN_RSA_EMSA_PKCS1_SHA2_384,	KEY_RSA,	   },
++			{ "sha512",		SIGN_RSA_EMSA_PKCS1_SHA2_512,	KEY_RSA,	   },
++			{ "sha1",		SIGN_ECDSA_WITH_SHA1_DER,		KEY_ECDSA,	   },
++			{ "sha256",		SIGN_ECDSA_WITH_SHA256_DER,		KEY_ECDSA,	   },
++			{ "sha384",		SIGN_ECDSA_WITH_SHA384_DER,		KEY_ECDSA,	   },
++			{ "sha512",		SIGN_ECDSA_WITH_SHA512_DER,		KEY_ECDSA,	   },
++			{ "sha256",		SIGN_ECDSA_256,					KEY_ECDSA,	   },
++			{ "sha384",		SIGN_ECDSA_384,					KEY_ECDSA,	   },
++			{ "sha512",		SIGN_ECDSA_521,					KEY_ECDSA,	   },
++			{ "identity",	SIGN_ED25519,					KEY_ED25519,   },
++			{ "identity",	SIGN_ED448,						KEY_ED448,	   },
++			{ "identity",	SIGN_ML_DSA_44,					KEY_ML_DSA_44, },
++			{ "identity",	SIGN_ML_DSA_65,					KEY_ML_DSA_65, },
++			{ "identity",	SIGN_ML_DSA_87,					KEY_ML_DSA_87, },
+ 		};
+
+ 		if (expected_strength != AUTH_RULE_MAX)
+@@ -678,6 +681,24 @@ METHOD(auth_cfg_t, add_pubkey_constraints, void,
+ 			expected_type = KEY_ED448;
+ 			continue;
+ 		}
++		if (streq(token, "mldsa44") || streq(token, "ike:mldsa44"))
++		{
++			key_token = token;
++			expected_type = KEY_ML_DSA_44;
++			continue;
++		}
++		if (streq(token, "mldsa65") || streq(token, "ike:mldsa65"))
++		{
++			key_token = token;
++			expected_type = KEY_ML_DSA_65;
++			continue;
++		}
++		if (streq(token, "mldsa87") || streq(token, "ike:mldsa87"))
++		{
++			key_token = token;
++			expected_type = KEY_ML_DSA_87;
++			continue;
++		}
+ 		if (streq(token, "pubkey") || streq(token, "ike:pubkey"))
+ 		{
+ 			key_token = token;
+diff --git a/src/libstrongswan/credentials/cred_encoding.h b/src/libstrongswan/credentials/cred_encoding.h
+index 3f0b5f1b63a..41fadfcf1fa 100644
+--- a/src/libstrongswan/credentials/cred_encoding.h
++++ b/src/libstrongswan/credentials/cred_encoding.h
+@@ -145,6 +145,10 @@ enum cred_encoding_part_t {
+ 	CRED_PART_PKCS10_ASN1_DER,
+ 	/** a PGP encoded certificate */
+ 	CRED_PART_PGP_CERT,
++	/** a DER encoded public key */
++	CRED_PART_PUB_ASN1_DER,
++	/** a DER encoded private key */
++	CRED_PART_PRIV_ASN1_DER,
+ 	/** a DER encoded EdDSA public key */
+ 	CRED_PART_EDDSA_PUB_ASN1_DER,
+ 	/** a DER encoded EdDSA private key */
+diff --git a/src/libstrongswan/credentials/keys/public_key.c b/src/libstrongswan/credentials/keys/public_key.c
+index 927e6f53cab..9cd1794ab47 100644
+--- a/src/libstrongswan/credentials/keys/public_key.c
++++ b/src/libstrongswan/credentials/keys/public_key.c
+@@ -17,20 +17,25 @@
+  */
+
+ #include <asn1/oid.h>
++#include <asn1/asn1.h>
++#include <asn1/asn1_parser.h>
+
+ #include "public_key.h"
+ #include "signature_params.h"
+
+-ENUM(key_type_names, KEY_ANY, KEY_ED448,
++ENUM(key_type_names, KEY_ANY, KEY_ML_DSA_87,
+ 	"ANY",
+ 	"RSA",
+ 	"ECDSA",
+ 	"DSA",
+ 	"ED25519",
+ 	"ED448",
++	"ML_DSA_44",
++	"ML_DSA_65",
++	"ML_DSA_87",
+ );
+
+-ENUM(signature_scheme_names, SIGN_UNKNOWN, SIGN_ED448,
++ENUM(signature_scheme_names, SIGN_UNKNOWN, SIGN_ML_DSA_87,
+ 	"UNKNOWN",
+ 	"RSA_EMSA_PKCS1_NULL",
+ 	"RSA_EMSA_PKCS1_MD5",
+@@ -54,6 +59,9 @@ ENUM(signature_scheme_names, SIGN_UNKNOWN, SIGN_ED448,
+ 	"ECDSA-521",
+ 	"ED25519",
+ 	"ED448",
++	"ML_DSA_44",
++	"ML_DSA_65",
++	"ML_DSA_87",
+ );
+
+ ENUM(encryption_scheme_names, ENCRYPT_UNKNOWN, ENCRYPT_RSA_OAEP_SHA512,
+@@ -109,6 +117,116 @@ bool public_key_has_fingerprint(public_key_t *public, chunk_t fingerprint)
+ 	return FALSE;
+ }
+
++/**
++ * See header.
++ */
++chunk_t public_key_info_encode(chunk_t pubkey, int oid)
++{
++	return asn1_wrap(ASN1_SEQUENCE, "mm",
++						asn1_algorithmIdentifier(oid),
++						asn1_bitstring("c", pubkey)
++					 );
++}
++
++/**
++ * ASN.1 definition of a subjectPublicKeyInfo structure
++ */
++static const asn1Object_t pkinfoObjects[] = {
++	{ 0, "subjectPublicKeyInfo",ASN1_SEQUENCE,		ASN1_NONE	}, /* 0 */
++	{ 1,   "algorithm",			ASN1_EOC,			ASN1_RAW	}, /* 1 */
++	{ 1,   "subjectPublicKey",	ASN1_BIT_STRING,	ASN1_BODY	}, /* 2 */
++	{ 0, "exit",				ASN1_EOC,			ASN1_EXIT	}
++};
++#define PKINFO_SUBJECT_PUBLIC_KEY_ALGORITHM	1
++#define PKINFO_SUBJECT_PUBLIC_KEY			2
++
++/**
++ * See header.
++ */
++key_type_t public_key_info_decode(chunk_t pkcs1, chunk_t *pubkey)
++{
++	asn1_parser_t *parser;
++	int oid = OID_UNKNOWN;
++	chunk_t object;
++	int objectID;
++	bool success;
++
++	parser = asn1_parser_create(pkinfoObjects, pkcs1);
++	while (parser->iterate(parser, &objectID, &object))
++	{
++		switch (objectID)
++		{
++			case PKINFO_SUBJECT_PUBLIC_KEY_ALGORITHM:
++				oid = asn1_parse_algorithmIdentifier(object,
++							parser->get_level(parser)+1, NULL);
++				break;
++			case PKINFO_SUBJECT_PUBLIC_KEY:
++				if (pubkey && object.len > 0 && *object.ptr == 0x00)
++				{
++					/* skip initial bit string octet defining 0 unused bits */
++					*pubkey = chunk_skip(object, 1);
++				}
++				break;
++		}
++	}
++	success = parser->success(parser);
++	parser->destroy(parser);
++
++	return success ? key_type_from_oid(oid) : KEY_ANY;
++}
++
++/**
++ * See header.
++ */
++int key_type_to_oid(key_type_t type)
++{
++	switch (type)
++	{
++		case KEY_ED25519:
++			return OID_ED25519;
++		case KEY_ED448:
++			return OID_ED448;
++		case KEY_ML_DSA_44:
++			return OID_ML_DSA_44;
++		case KEY_ML_DSA_65:
++			return OID_ML_DSA_65;
++		case KEY_ML_DSA_87:
++			return OID_ML_DSA_87;
++		case KEY_ECDSA:
++			return OID_EC_PUBLICKEY;
++		default:
++			return OID_UNKNOWN;
++	}
++}
++
++/**
++ * See header.
++ */
++key_type_t key_type_from_oid(int oid)
++{
++	switch (oid)
++	{
++		case OID_ED25519:
++			return KEY_ED25519;
++		case OID_ED448:
++			return KEY_ED448;
++		case OID_ML_DSA_44:
++			return KEY_ML_DSA_44;
++		case OID_ML_DSA_65:
++			return KEY_ML_DSA_65;
++		case OID_ML_DSA_87:
++			return KEY_ML_DSA_87;
++		case OID_EC_PUBLICKEY:
++			return KEY_ECDSA;
++		case OID_RSA_ENCRYPTION:
++		case OID_RSAES_OAEP:
++		case OID_RSASSA_PSS:
++			return KEY_RSA;
++		default:
++			return KEY_ANY;
++	}
++}
++
+ /*
+  * Defined in header.
+  */
+@@ -157,6 +275,12 @@ signature_scheme_t signature_scheme_from_oid(int oid)
+ 			return SIGN_ED25519;
+ 		case OID_ED448:
+ 			return SIGN_ED448;
++		case OID_ML_DSA_44:
++			return SIGN_ML_DSA_44;
++		case OID_ML_DSA_65:
++			return SIGN_ML_DSA_65;
++		case OID_ML_DSA_87:
++			return SIGN_ML_DSA_87;
+ 	}
+ 	return SIGN_UNKNOWN;
+ }
+@@ -209,6 +333,12 @@ int signature_scheme_to_oid(signature_scheme_t scheme)
+ 			return OID_ED25519;
+ 		case SIGN_ED448:
+ 			return OID_ED448;
++		case SIGN_ML_DSA_44:
++			return OID_ML_DSA_44;
++		case SIGN_ML_DSA_65:
++			return OID_ML_DSA_65;
++		case SIGN_ML_DSA_87:
++			return OID_ML_DSA_87;
+ 	}
+ 	return OID_UNKNOWN;
+ }
+@@ -236,17 +366,20 @@ static struct {
+ 	int max_keysize;
+ 	signature_params_t params;
+ } scheme_map[] = {
+-	{ KEY_RSA,  3072, { .scheme = SIGN_RSA_EMSA_PSS, .params = &pss_params_sha256, }},
+-	{ KEY_RSA,  7680, { .scheme = SIGN_RSA_EMSA_PSS, .params = &pss_params_sha384, }},
+-	{ KEY_RSA,     0, { .scheme = SIGN_RSA_EMSA_PSS, .params = &pss_params_sha512, }},
+-	{ KEY_RSA,  3072, { .scheme = SIGN_RSA_EMSA_PKCS1_SHA2_256 }},
+-	{ KEY_RSA,  7680, { .scheme = SIGN_RSA_EMSA_PKCS1_SHA2_384 }},
+-	{ KEY_RSA,     0, { .scheme = SIGN_RSA_EMSA_PKCS1_SHA2_512 }},
+-	{ KEY_ECDSA, 256, { .scheme = SIGN_ECDSA_WITH_SHA256_DER }},
+-	{ KEY_ECDSA, 384, { .scheme = SIGN_ECDSA_WITH_SHA384_DER }},
+-	{ KEY_ECDSA,   0, { .scheme = SIGN_ECDSA_WITH_SHA512_DER }},
+-	{ KEY_ED25519, 0, { .scheme = SIGN_ED25519 }},
+-	{ KEY_ED448,   0, { .scheme = SIGN_ED448 }},
++	{ KEY_RSA,    3072, { .scheme = SIGN_RSA_EMSA_PSS, .params = &pss_params_sha256, }},
++	{ KEY_RSA,    7680, { .scheme = SIGN_RSA_EMSA_PSS, .params = &pss_params_sha384, }},
++	{ KEY_RSA,       0, { .scheme = SIGN_RSA_EMSA_PSS, .params = &pss_params_sha512, }},
++	{ KEY_RSA,    3072, { .scheme = SIGN_RSA_EMSA_PKCS1_SHA2_256 }},
++	{ KEY_RSA,    7680, { .scheme = SIGN_RSA_EMSA_PKCS1_SHA2_384 }},
++	{ KEY_RSA,       0, { .scheme = SIGN_RSA_EMSA_PKCS1_SHA2_512 }},
++	{ KEY_ECDSA,   256, { .scheme = SIGN_ECDSA_WITH_SHA256_DER }},
++	{ KEY_ECDSA,   384, { .scheme = SIGN_ECDSA_WITH_SHA384_DER }},
++	{ KEY_ECDSA,     0, { .scheme = SIGN_ECDSA_WITH_SHA512_DER }},
++	{ KEY_ED25519,   0, { .scheme = SIGN_ED25519 }},
++	{ KEY_ED448,     0, { .scheme = SIGN_ED448 }},
++	{ KEY_ML_DSA_44, 0, { .scheme = SIGN_ML_DSA_44 }},
++	{ KEY_ML_DSA_65, 0, { .scheme = SIGN_ML_DSA_65 }},
++	{ KEY_ML_DSA_87, 0, { .scheme = SIGN_ML_DSA_87 }},
+ };
+
+ /**
+@@ -335,6 +468,34 @@ key_type_t key_type_from_signature_scheme(signature_scheme_t scheme)
+ 			return KEY_ED25519;
+ 		case SIGN_ED448:
+ 			return KEY_ED448;
++		case SIGN_ML_DSA_44:
++			return KEY_ML_DSA_44;
++		case SIGN_ML_DSA_65:
++			return KEY_ML_DSA_65;
++		case SIGN_ML_DSA_87:
++			return KEY_ML_DSA_87;
+ 	}
+ 	return KEY_ANY;
+ }
++
++/*
++ * Defined in header.
++ */
++int get_public_key_size(key_type_t type)
++{
++	switch (type)
++	{
++		case KEY_ED25519:
++			return   32;   /* bytes */
++		case KEY_ED448:
++			return   57;   /* bytes */
++		case KEY_ML_DSA_44:
++			return 1312;   /* bytes */
++		case KEY_ML_DSA_65:
++			return 1952;   /* bytes */
++		case KEY_ML_DSA_87:
++			return 2592;   /* bytes */
++		default:
++			return 0;
++	}
++}
+diff --git a/src/libstrongswan/credentials/keys/public_key.h b/src/libstrongswan/credentials/keys/public_key.h
+index 32a41cf9cba..283d880d40e 100644
+--- a/src/libstrongswan/credentials/keys/public_key.h
++++ b/src/libstrongswan/credentials/keys/public_key.h
+@@ -37,17 +37,23 @@ typedef enum encryption_scheme_t encryption_scheme_t;
+  */
+ enum key_type_t {
+ 	/** key type wildcard */
+-	KEY_ANY     = 0,
++	KEY_ANY       = 0,
+ 	/** RSA crypto system as in PKCS#1 */
+-	KEY_RSA     = 1,
++	KEY_RSA       = 1,
+ 	/** ECDSA as in ANSI X9.62 */
+-	KEY_ECDSA   = 2,
++	KEY_ECDSA     = 2,
+ 	/** DSA */
+-	KEY_DSA     = 3,
++	KEY_DSA       = 3,
+ 	/** Ed25519 PureEdDSA instance as in RFC 8032 */
+-	KEY_ED25519 = 4,
++	KEY_ED25519   = 4,
+ 	/** Ed448   PureEdDSA instance as in RFC 8032 */
+-	KEY_ED448   = 5,
++	KEY_ED448     = 5,
++	/** ML-DSA-44 as in FIPS 204 */
++	KEY_ML_DSA_44 = 6,
++	/** ML-DSA-65 as in FIPS 204 */
++	KEY_ML_DSA_65 = 7,
++	/** ML-DSA-87 as in FIPS 204 */
++	KEY_ML_DSA_87 = 8,
+ };
+
+ /**
+@@ -109,6 +115,12 @@ enum signature_scheme_t {
+ 	SIGN_ED25519,
+ 	/** PureEdDSA on Curve448 as in RFC 8410                           */
+ 	SIGN_ED448,
++	/** Pure ML-DSA-44 as in FIPS 204                                   */
++	SIGN_ML_DSA_44,
++	/** Pure ML-DSA-65 as in FIPS 204                                   */
++	SIGN_ML_DSA_65,
++	/** Pure ML-DSA-87 as in FIPS 204                                   */
++	SIGN_ML_DSA_87,
+ };
+
+ /**
+@@ -251,6 +263,40 @@ bool public_key_equals(public_key_t *public, public_key_t *other);
+  */
+ bool public_key_has_fingerprint(public_key_t *public, chunk_t fingerprint);
+
++/**
++ * ASN.1 encoding of public key info
++ *
++ * @param pubkey		public key blob
++ * @param oid			OID of the public key type
++ * @return				ASN.1 encoded public key info blob
++ */
++chunk_t public_key_info_encode(chunk_t pubkey, int oid);
++
++/**
++ * ASN.1 decoding of public key info
++ *
++ * @param pkcs1			ASN.1 encoded public key in PCKS#1 format
++ * @param pubkey		unwrapped public key blob
++ * @return				type of the key (KEY_ANY if failure)
++ */
++key_type_t public_key_info_decode(chunk_t pkcs1, chunk_t *pubkey);
++
++/**
++ * Return OID for a given key type
++ *
++ * @param type		type of the key
++ * @return			OID
++ */
++int key_type_to_oid(key_type_t type);
++
++/**
++ * Return key type for a given OID
++ *
++ * @param oid		OID
++ * @return			type of the key
++ */
++key_type_t key_type_from_oid(int oid);
++
+ /**
+  * Conversion of ASN.1 signature or hash OID to signature scheme.
+  *
+@@ -285,5 +331,12 @@ enumerator_t *signature_schemes_for_key(key_type_t type, int size);
+  */
+ key_type_t key_type_from_signature_scheme(signature_scheme_t scheme);
+
++/**
++ * Return the public key size in octets for key types with fixed sizes.
++ *
++ * @param type			type of the key
++ * @return				public key size in octets
++ */
++int get_public_key_size(key_type_t type);
+
+ #endif /** PUBLIC_KEY_H_ @}*/
+diff --git a/src/libstrongswan/credentials/keys/signature_params.c b/src/libstrongswan/credentials/keys/signature_params.c
+index 5a391df8930..44b6daacc9f 100644
+--- a/src/libstrongswan/credentials/keys/signature_params.c
++++ b/src/libstrongswan/credentials/keys/signature_params.c
+@@ -407,3 +407,50 @@ bool rsa_pss_params_build(rsa_pss_params_t *params, chunk_t *asn1)
+ 				trfd.len ? asn1_wrap(ASN1_CONTEXT_C_3, "m", trfd) : chunk_empty);
+ 	return TRUE;
+ }
++
++/**
++ * Maximum length of the context string.
++ */
++#define PQC_MAX_CTX_LEN  255
++
++/*
++ * Described in header
++ */
++bool pqc_params_create(pqc_params_t *p_in, pqc_params_t *p_out)
++{
++	if (p_in == NULL)
++	{
++		p_out->deterministic = FALSE;
++
++		p_out->pre_ctx = chunk_alloc(2);
++		p_out->pre_ctx.ptr[0] = 0x00;
++		p_out->pre_ctx.ptr[1] = 0x00;
++	}
++	else
++	{
++		p_out->deterministic = p_in->deterministic;
++
++		if (p_in->ctx.len > PQC_MAX_CTX_LEN)
++		{
++			DBG1(DBG_LIB, "error: context length of PQC signature is %u bytes, "
++						  "larger than the maximum of %u bytes",
++						  p_in->ctx.len, PQC_MAX_CTX_LEN);
++			return FALSE;
++		}
++		p_out->pre_ctx = chunk_alloc(2 + p_in->ctx.len);
++		p_out->pre_ctx.ptr[0] = 0x00;
++		p_out->pre_ctx.ptr[1] = (uint8_t)p_in->ctx.len;
++		memcpy(p_out->pre_ctx.ptr + 2, p_in->ctx.ptr, p_in->ctx.len);
++	}
++	p_out->ctx = chunk_skip(p_out->pre_ctx, 2);
++
++	return TRUE;
++}
++
++/*
++ * Described in header
++ */
++void pqc_params_free(pqc_params_t *params)
++{
++	chunk_free(&params->pre_ctx);
++}
+diff --git a/src/libstrongswan/credentials/keys/signature_params.h b/src/libstrongswan/credentials/keys/signature_params.h
+index 19ce82c30d0..d93b8310432 100644
+--- a/src/libstrongswan/credentials/keys/signature_params.h
++++ b/src/libstrongswan/credentials/keys/signature_params.h
+@@ -24,6 +24,7 @@
+
+ typedef struct signature_params_t signature_params_t;
+ typedef struct rsa_pss_params_t rsa_pss_params_t;
++typedef struct pqc_params_t pqc_params_t;
+
+ #include <crypto/hashers/hasher.h>
+
+@@ -112,6 +113,18 @@ struct rsa_pss_params_t {
+ #define RSA_PSS_SALT_LEN_MAX -2
+ };
+
++/**
++ * Parameters for Post Quantum Cryptography (PQC) signature schemes
++ */
++struct pqc_params_t {
++	/** Use deterministic signature */
++	bool deterministic;
++	/** Context string */
++	chunk_t ctx;
++	/** Context string with length prefix */
++	chunk_t pre_ctx;
++};
++
+ /**
+  * Parse the given ASN.1 algorithm identifier params
+  *
+@@ -142,4 +155,20 @@ bool rsa_pss_params_build(rsa_pss_params_t *params, chunk_t *asn1);
+  */
+ bool rsa_pss_params_set_salt_len(rsa_pss_params_t *params, size_t modbits);
+
++/**
++ * Set PQC signature params, allocating context string with length prefix
++ *
++ * @param p_in		input PQC signature params, use defaults if NULL
++ * @param p_out		output PQC signature params
++ * @return			TRUE if successfully created
++ */
++bool pqc_params_create(pqc_params_t *p_in, pqc_params_t *p_out);
++
++/**
++ * Free allocated context string with length prefix in PQC signature params
++ *
++ * @param params	PQC signature params to be freed
++ */
++void pqc_params_free(pqc_params_t *params);
++
+ #endif /** SIGNATURE_PARAMS_H_ @}*/
+diff --git a/src/libstrongswan/crypto/hashers/hasher.c b/src/libstrongswan/crypto/hashers/hasher.c
+index 444a59c5f0c..1aa05ed04bb 100644
+--- a/src/libstrongswan/crypto/hashers/hasher.c
++++ b/src/libstrongswan/crypto/hashers/hasher.c
+@@ -148,6 +148,9 @@ hash_algorithm_t hasher_algorithm_from_oid(int oid)
+ 			return HASH_SHA3_512;
+ 		case OID_ED25519:
+ 		case OID_ED448:
++		case OID_ML_DSA_44:
++		case OID_ML_DSA_65:
++		case OID_ML_DSA_87:
+ 			return HASH_IDENTITY;
+ 		default:
+ 			return HASH_UNKNOWN;
+@@ -462,6 +465,30 @@ int hasher_signature_algorithm_to_oid(hash_algorithm_t alg, key_type_t key)
+ 				default:
+ 					return OID_UNKNOWN;
+ 			}
++		case KEY_ML_DSA_44:
++			switch (alg)
++			{
++				case HASH_IDENTITY:
++					return OID_ML_DSA_44;
++				default:
++					return OID_UNKNOWN;
++			}
++		case KEY_ML_DSA_65:
++			switch (alg)
++			{
++				case HASH_IDENTITY:
++					return OID_ML_DSA_65;
++				default:
++					return OID_UNKNOWN;
++			}
++		case KEY_ML_DSA_87:
++			switch (alg)
++			{
++				case HASH_IDENTITY:
++					return OID_ML_DSA_87;
++				default:
++					return OID_UNKNOWN;
++			}
+ 		default:
+ 			return OID_UNKNOWN;
+ 	}
+@@ -488,6 +515,9 @@ hash_algorithm_t hasher_from_signature_scheme(signature_scheme_t scheme,
+ 			break;
+ 		case SIGN_ED25519:
+ 		case SIGN_ED448:
++		case SIGN_ML_DSA_44:
++		case SIGN_ML_DSA_65:
++		case SIGN_ML_DSA_87:
+ 			return HASH_IDENTITY;
+ 		case SIGN_RSA_EMSA_PKCS1_MD5:
+ 			return HASH_MD5;
+diff --git a/src/libstrongswan/plugins/pem/pem_encoder.c b/src/libstrongswan/plugins/pem/pem_encoder.c
+index 4150d7fa506..f9b7c9aef04 100644
+--- a/src/libstrongswan/plugins/pem/pem_encoder.c
++++ b/src/libstrongswan/plugins/pem/pem_encoder.c
+@@ -41,6 +41,8 @@ bool pem_encoder_encode(cred_encoding_type_t type, chunk_t *encoding,
+ 									&asn1, CRED_PART_END) ||
+ 				cred_encoding_args(args, CRED_PART_ECDSA_PUB_ASN1_DER,
+ 									&asn1, CRED_PART_END) ||
++				cred_encoding_args(args, CRED_PART_PUB_ASN1_DER,
++									&asn1, CRED_PART_END) ||
+ 				cred_encoding_args(args, CRED_PART_EDDSA_PUB_ASN1_DER,
+ 									&asn1, CRED_PART_END))
+ 			{
+@@ -91,7 +93,9 @@ bool pem_encoder_encode(cred_encoding_type_t type, chunk_t *encoding,
+ 				label ="EC PRIVATE KEY";
+ 				break;
+ 			}
+-			if (cred_encoding_args(args, CRED_PART_EDDSA_PRIV_ASN1_DER,
++			if (cred_encoding_args(args, CRED_PART_PRIV_ASN1_DER,
++								   &asn1, CRED_PART_END) ||
++				cred_encoding_args(args, CRED_PART_EDDSA_PRIV_ASN1_DER,
+ 								   &asn1, CRED_PART_END))
+ 			{
+ 				label ="PRIVATE KEY";
+diff --git a/src/libstrongswan/plugins/pem/pem_plugin.c b/src/libstrongswan/plugins/pem/pem_plugin.c
+index d46906168e1..6542f100c96 100644
+--- a/src/libstrongswan/plugins/pem/pem_plugin.c
++++ b/src/libstrongswan/plugins/pem/pem_plugin.c
+@@ -67,6 +68,15 @@ METHOD(plugin_t, get_features, int,
+ 		PLUGIN_REGISTER(PRIVKEY, pem_private_key_load, FALSE),
+ 			PLUGIN_PROVIDE(PRIVKEY, KEY_ED448),
+ 				PLUGIN_DEPENDS(PRIVKEY, KEY_ED448),
++		PLUGIN_REGISTER(PRIVKEY, pem_private_key_load, FALSE),
++			PLUGIN_PROVIDE(PRIVKEY, KEY_ML_DSA_44),
++				PLUGIN_DEPENDS(PRIVKEY, KEY_ML_DSA_44),
++		PLUGIN_REGISTER(PRIVKEY, pem_private_key_load, FALSE),
++			PLUGIN_PROVIDE(PRIVKEY, KEY_ML_DSA_65),
++				PLUGIN_DEPENDS(PRIVKEY, KEY_ML_DSA_65),
++		PLUGIN_REGISTER(PRIVKEY, pem_private_key_load, FALSE),
++			PLUGIN_PROVIDE(PRIVKEY, KEY_ML_DSA_87),
++				PLUGIN_DEPENDS(PRIVKEY, KEY_ML_DSA_87),
+
+ 		/* public key PEM decoding */
+ 		PLUGIN_REGISTER(PUBKEY, pem_public_key_load, FALSE),
+@@ -87,6 +97,15 @@ METHOD(plugin_t, get_features, int,
+ 		PLUGIN_REGISTER(PUBKEY, pem_public_key_load, FALSE),
+ 			PLUGIN_PROVIDE(PUBKEY, KEY_ED448),
+ 				PLUGIN_DEPENDS(PUBKEY, KEY_ED448),
++		PLUGIN_REGISTER(PUBKEY, pem_public_key_load, FALSE),
++			PLUGIN_PROVIDE(PUBKEY, KEY_ML_DSA_44),
++				PLUGIN_DEPENDS(PUBKEY, KEY_ML_DSA_44),
++		PLUGIN_REGISTER(PUBKEY, pem_public_key_load, FALSE),
++			PLUGIN_PROVIDE(PUBKEY, KEY_ML_DSA_65),
++				PLUGIN_DEPENDS(PUBKEY, KEY_ML_DSA_65),
++		PLUGIN_REGISTER(PUBKEY, pem_public_key_load, FALSE),
++			PLUGIN_PROVIDE(PUBKEY, KEY_ML_DSA_87),
++				PLUGIN_DEPENDS(PUBKEY, KEY_ML_DSA_87),
+
+ 		/* certificate PEM decoding */
+ 		PLUGIN_REGISTER(CERT_DECODE, pem_certificate_load, FALSE),
+diff --git a/src/libstrongswan/plugins/pkcs1/pkcs1_builder.c b/src/libstrongswan/plugins/pkcs1/pkcs1_builder.c
+index 15627ab05a5..e0a26833e2c 100644
+--- a/src/libstrongswan/plugins/pkcs1/pkcs1_builder.c
++++ b/src/libstrongswan/plugins/pkcs1/pkcs1_builder.c
+@@ -24,94 +24,35 @@
+ #include <asn1/asn1_parser.h>
+ #include <credentials/keys/private_key.h>
+
+-/**
+- * ASN.1 definition of a subjectPublicKeyInfo structure
+- */
+-static const asn1Object_t pkinfoObjects[] = {
+-	{ 0, "subjectPublicKeyInfo",ASN1_SEQUENCE,		ASN1_NONE	}, /* 0 */
+-	{ 1,   "algorithm",			ASN1_EOC,			ASN1_RAW	}, /* 1 */
+-	{ 1,   "subjectPublicKey",	ASN1_BIT_STRING,	ASN1_BODY	}, /* 2 */
+-	{ 0, "exit",				ASN1_EOC,			ASN1_EXIT	}
+-};
+-#define PKINFO_SUBJECT_PUBLIC_KEY_ALGORITHM	1
+-#define PKINFO_SUBJECT_PUBLIC_KEY			2
+-
+ /**
+  * Load a generic public key from an ASN.1 encoded blob
+  */
+ static public_key_t *parse_public_key(chunk_t blob)
+ {
+-	asn1_parser_t *parser;
+-	chunk_t object;
+-	int objectID;
+-	public_key_t *key = NULL;
+-	key_type_t type = KEY_ANY;
++	chunk_t pubkey;
++	key_type_t type;
+
+-	parser = asn1_parser_create(pkinfoObjects, blob);
++	type = public_key_info_decode(blob, &pubkey);
+
+-	while (parser->iterate(parser, &objectID, &object))
++	switch (type)
+ 	{
+-		switch (objectID)
+-		{
+-			case PKINFO_SUBJECT_PUBLIC_KEY_ALGORITHM:
+-			{
+-				int oid = asn1_parse_algorithmIdentifier(object,
+-										parser->get_level(parser)+1, NULL);
+-
+-				if (oid == OID_RSA_ENCRYPTION || oid == OID_RSAES_OAEP ||
+-					oid == OID_RSASSA_PSS)
+-				{
+-					/* TODO: we should parse parameters for PSS and pass them
+-					 * (and the type), or the complete subjectPublicKeyInfo,
+-					 * along so we can treat these as restrictions when
+-					 * generating signatures with the associated private key */
+-					type = KEY_RSA;
+-				}
+-				else if (oid == OID_EC_PUBLICKEY)
+-				{
+-					/* Need the whole subjectPublicKeyInfo for EC public keys */
+-					key = lib->creds->create(lib->creds, CRED_PUBLIC_KEY,
+-								KEY_ECDSA, BUILD_BLOB_ASN1_DER, blob, BUILD_END);
+-					goto end;
+-				}
+-				else if (oid == OID_ED25519)
+-				{
+-					/* Need the whole subjectPublicKeyInfo for Ed25519 public keys */
+-					key = lib->creds->create(lib->creds, CRED_PUBLIC_KEY,
+-								KEY_ED25519, BUILD_BLOB_ASN1_DER, blob, BUILD_END);
+-					goto end;
+-				}
+-				else if (oid == OID_ED448)
+-				{
+-					/* Need the whole subjectPublicKeyInfo for Ed448 public keys */
+-					key = lib->creds->create(lib->creds, CRED_PUBLIC_KEY,
+-								KEY_ED448, BUILD_BLOB_ASN1_DER, blob, BUILD_END);
+-					goto end;
+-				}
+-				else
+-				{
+-					/* key type not supported */
+-					goto end;
+-				}
+-				break;
+-			}
+-			case PKINFO_SUBJECT_PUBLIC_KEY:
+-				if (object.len > 0 && *object.ptr == 0x00)
+-				{
+-					/* skip initial bit string octet defining 0 unused bits */
+-					object = chunk_skip(object, 1);
+-				}
+-				DBG2(DBG_ASN, "-- > --");
+-				key = lib->creds->create(lib->creds, CRED_PUBLIC_KEY, type,
+-										 BUILD_BLOB_ASN1_DER, object, BUILD_END);
+-				DBG2(DBG_ASN, "-- < --");
+-				break;
+-		}
++		case KEY_RSA:
++			return lib->creds->create(lib->creds, CRED_PUBLIC_KEY, type,
++								BUILD_BLOB_ASN1_DER, pubkey, BUILD_END);
++		case KEY_ECDSA:
++		case KEY_ED25519:
++		case KEY_ED448:
++			/* need the whole subjectPublicKeyInfo for EC public keys */
++			return lib->creds->create(lib->creds, CRED_PUBLIC_KEY, type,
++								BUILD_BLOB_ASN1_DER, blob, BUILD_END);
++		case KEY_ML_DSA_44:
++		case KEY_ML_DSA_65:
++		case KEY_ML_DSA_87:
++			return lib->creds->create(lib->creds, CRED_PUBLIC_KEY, type,
++								BUILD_BLOB, pubkey, BUILD_END);
++		default:
++			return NULL;
+ 	}
+-
+-end:
+-	parser->destroy(parser);
+-	return key;
+ }
+
+ /**
+diff --git a/src/libstrongswan/plugins/pkcs1/pkcs1_plugin.c b/src/libstrongswan/plugins/pkcs1/pkcs1_plugin.c
+index 68a57bceed1..0762a58f75d 100644
+--- a/src/libstrongswan/plugins/pkcs1/pkcs1_plugin.c
++++ b/src/libstrongswan/plugins/pkcs1/pkcs1_plugin.c
+@@ -55,6 +56,9 @@ METHOD(plugin_t, get_features, int,
+ 				PLUGIN_SDEPEND(PUBKEY, KEY_ECDSA),
+ 				PLUGIN_SDEPEND(PUBKEY, KEY_ED25519),
+ 				PLUGIN_SDEPEND(PUBKEY, KEY_ED448),
++				PLUGIN_SDEPEND(PUBKEY, KEY_ML_DSA_44),
++				PLUGIN_SDEPEND(PUBKEY, KEY_ML_DSA_65),
++				PLUGIN_SDEPEND(PUBKEY, KEY_ML_DSA_87),
+ 				PLUGIN_SDEPEND(PUBKEY, KEY_DSA),
+ 		PLUGIN_REGISTER(PUBKEY, pkcs1_public_key_load, FALSE),
+ 			PLUGIN_PROVIDE(PUBKEY, KEY_RSA),
+diff --git a/src/libstrongswan/plugins/pkcs8/pkcs8_builder.c b/src/libstrongswan/plugins/pkcs8/pkcs8_builder.c
+index defaac19d41..f1d6a2473ed 100644
+--- a/src/libstrongswan/plugins/pkcs8/pkcs8_builder.c
++++ b/src/libstrongswan/plugins/pkcs8/pkcs8_builder.c
+@@ -89,6 +90,18 @@ static private_key_t *parse_private_key(chunk_t blob)
+ 						type = KEY_ED448;
+ 						part = BUILD_EDDSA_PRIV_ASN1_DER;
+ 						break;
++					case OID_ML_DSA_44:
++						type = KEY_ML_DSA_44;
++						part = BUILD_BLOB;
++						break;
++					case OID_ML_DSA_65:
++						type = KEY_ML_DSA_65;
++						part = BUILD_BLOB;
++						break;
++					case OID_ML_DSA_87:
++						type = KEY_ML_DSA_87;
++						part = BUILD_BLOB;
++						break;
+ 					default:
+ 						/* key type not supported */
+ 						goto end;
+diff --git a/src/libstrongswan/plugins/pkcs8/pkcs8_plugin.c b/src/libstrongswan/plugins/pkcs8/pkcs8_plugin.c
+index 44b0b1649bf..e70855c6f3d 100644
+--- a/src/libstrongswan/plugins/pkcs8/pkcs8_plugin.c
++++ b/src/libstrongswan/plugins/pkcs8/pkcs8_plugin.c
+@@ -49,6 +50,9 @@ METHOD(plugin_t, get_features, int,
+ 			PLUGIN_PROVIDE(PRIVKEY, KEY_ECDSA),
+ 			PLUGIN_PROVIDE(PRIVKEY, KEY_ED25519),
+ 			PLUGIN_PROVIDE(PRIVKEY, KEY_ED448),
++			PLUGIN_PROVIDE(PRIVKEY, KEY_ML_DSA_44),
++			PLUGIN_PROVIDE(PRIVKEY, KEY_ML_DSA_65),
++			PLUGIN_PROVIDE(PRIVKEY, KEY_ML_DSA_87),
+ 	};
+ 	*features = f;
+ 	return countof(f);
