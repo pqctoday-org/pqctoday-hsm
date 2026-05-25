@@ -1,0 +1,390 @@
+# strongSwan 6.0.6 SLH-DSA supplement patch
+# Applied after strongswan-6.0.6-pqc.patch + strongswan-6.0.6-pqc-supplement.patch.
+# Adds SLH-DSA-SHA2-128s / 192s / 256s (FIPS 205) support to strongSwan core.
+# PKCS#11 plugin changes handled separately via strongswan-pkcs11/ copy.
+#
+--- a/src/libstrongswan/asn1/asn1.c
++++ b/src/libstrongswan/asn1/asn1.c
+@@ -61,6 +61,9 @@
+ 		case OID_ML_DSA_44:
+ 		case OID_ML_DSA_65:
+ 		case OID_ML_DSA_87:
++		case OID_SLH_DSA_SHA2_128S:
++		case OID_SLH_DSA_SHA2_192S:
++		case OID_SLH_DSA_SHA2_256S:
+ 			parameters = chunk_empty;
+ 			break;
+ 		default:
+--- a/src/libstrongswan/asn1/oid.txt
++++ b/src/libstrongswan/asn1/oid.txt
+@@ -454,6 +454,18 @@
+                 0x11         "id-ml-dsa-44" OID_ML_DSA_44
+                 0x12         "id-ml-dsa-65" OID_ML_DSA_65
+                 0x13         "id-ml-dsa-87" OID_ML_DSA_87
++                0x14         "id-slh-dsa-sha2-128s" OID_SLH_DSA_SHA2_128S
++                0x15         "id-slh-dsa-sha2-128f"
++                0x16         "id-slh-dsa-sha2-192s" OID_SLH_DSA_SHA2_192S
++                0x17         "id-slh-dsa-sha2-192f"
++                0x18         "id-slh-dsa-sha2-256s" OID_SLH_DSA_SHA2_256S
++                0x19         "id-slh-dsa-sha2-256f"
++                0x1a         "id-slh-dsa-shake-128s"
++                0x1b         "id-slh-dsa-shake-128f"
++                0x1c         "id-slh-dsa-shake-192s"
++                0x1d         "id-slh-dsa-shake-192f"
++                0x1e         "id-slh-dsa-shake-256s"
++                0x1f         "id-slh-dsa-shake-256f"
+                 0x20         "id-hash-ml-dsa-44-with-sha512"
+                 0x21         "id-hash-ml-dsa-65-with-sha512"
+                 0x22         "id-hash-ml-dsa-87-with-sha512"
+--- a/src/libstrongswan/credentials/auth_cfg.c
++++ b/src/libstrongswan/credentials/auth_cfg.c
+@@ -633,6 +633,9 @@
+ 			{ "identity",	SIGN_ML_DSA_44,					KEY_ML_DSA_44, },
+ 			{ "identity",	SIGN_ML_DSA_65,					KEY_ML_DSA_65, },
+ 			{ "identity",	SIGN_ML_DSA_87,					KEY_ML_DSA_87, },
++			{ "identity",	SIGN_SLH_DSA_SHA2_128S,			KEY_SLH_DSA_SHA2_128S, },
++			{ "identity",	SIGN_SLH_DSA_SHA2_192S,			KEY_SLH_DSA_SHA2_192S, },
++			{ "identity",	SIGN_SLH_DSA_SHA2_256S,			KEY_SLH_DSA_SHA2_256S, },
+ 		};
+ 
+ 		if (expected_strength != AUTH_RULE_MAX)
+@@ -697,8 +700,26 @@
+ 		{
+ 			key_token = token;
+ 			expected_type = KEY_ML_DSA_87;
++			continue;
++		}
++		if (streq(token, "slhdsa128s") || streq(token, "ike:slhdsa128s"))
++		{
++			key_token = token;
++			expected_type = KEY_SLH_DSA_SHA2_128S;
+ 			continue;
+ 		}
++		if (streq(token, "slhdsa192s") || streq(token, "ike:slhdsa192s"))
++		{
++			key_token = token;
++			expected_type = KEY_SLH_DSA_SHA2_192S;
++			continue;
++		}
++		if (streq(token, "slhdsa256s") || streq(token, "ike:slhdsa256s"))
++		{
++			key_token = token;
++			expected_type = KEY_SLH_DSA_SHA2_256S;
++			continue;
++		}
+ 		if (streq(token, "pubkey") || streq(token, "ike:pubkey"))
+ 		{
+ 			key_token = token;
+--- a/src/libstrongswan/credentials/keys/public_key.h
++++ b/src/libstrongswan/credentials/keys/public_key.h
+@@ -54,6 +54,12 @@
+ 	KEY_ML_DSA_65 = 7,
+ 	/** ML-DSA-87 as in FIPS 204 */
+ 	KEY_ML_DSA_87 = 8,
++	/** SLH-DSA-SHA2-128s as in FIPS 205 */
++	KEY_SLH_DSA_SHA2_128S = 9,
++	/** SLH-DSA-SHA2-192s as in FIPS 205 */
++	KEY_SLH_DSA_SHA2_192S = 10,
++	/** SLH-DSA-SHA2-256s as in FIPS 205 */
++	KEY_SLH_DSA_SHA2_256S = 11,
+ };
+ 
+ /**
+@@ -121,6 +127,12 @@
+ 	SIGN_ML_DSA_65,
+ 	/** Pure ML-DSA-87 as in FIPS 204                                   */
+ 	SIGN_ML_DSA_87,
++	/** Pure SLH-DSA-SHA2-128s as in FIPS 205 */
++	SIGN_SLH_DSA_SHA2_128S,
++	/** Pure SLH-DSA-SHA2-192s as in FIPS 205 */
++	SIGN_SLH_DSA_SHA2_192S,
++	/** Pure SLH-DSA-SHA2-256s as in FIPS 205 */
++	SIGN_SLH_DSA_SHA2_256S,
+ };
+ 
+ /**
+--- a/src/libstrongswan/credentials/keys/public_key.c
++++ b/src/libstrongswan/credentials/keys/public_key.c
+@@ -23,7 +23,7 @@
+ #include "public_key.h"
+ #include "signature_params.h"
+ 
+-ENUM(key_type_names, KEY_ANY, KEY_ML_DSA_87,
++ENUM(key_type_names, KEY_ANY, KEY_SLH_DSA_SHA2_256S,
+ 	"ANY",
+ 	"RSA",
+ 	"ECDSA",
+@@ -33,9 +33,12 @@
+ 	"ML_DSA_44",
+ 	"ML_DSA_65",
+ 	"ML_DSA_87",
++	"SLH_DSA_SHA2_128S",
++	"SLH_DSA_SHA2_192S",
++	"SLH_DSA_SHA2_256S",
+ );
+ 
+-ENUM(signature_scheme_names, SIGN_UNKNOWN, SIGN_ML_DSA_87,
++ENUM(signature_scheme_names, SIGN_UNKNOWN, SIGN_SLH_DSA_SHA2_256S,
+ 	"UNKNOWN",
+ 	"RSA_EMSA_PKCS1_NULL",
+ 	"RSA_EMSA_PKCS1_MD5",
+@@ -62,6 +65,9 @@
+ 	"ML_DSA_44",
+ 	"ML_DSA_65",
+ 	"ML_DSA_87",
++	"SLH_DSA_SHA2_128S",
++	"SLH_DSA_SHA2_192S",
++	"SLH_DSA_SHA2_256S",
+ );
+ 
+ ENUM(encryption_scheme_names, ENCRYPT_UNKNOWN, ENCRYPT_RSA_OAEP_SHA512,
+@@ -192,6 +198,12 @@
+ 			return OID_ML_DSA_65;
+ 		case KEY_ML_DSA_87:
+ 			return OID_ML_DSA_87;
++		case KEY_SLH_DSA_SHA2_128S:
++			return OID_SLH_DSA_SHA2_128S;
++		case KEY_SLH_DSA_SHA2_192S:
++			return OID_SLH_DSA_SHA2_192S;
++		case KEY_SLH_DSA_SHA2_256S:
++			return OID_SLH_DSA_SHA2_256S;
+ 		case KEY_ECDSA:
+ 			return OID_EC_PUBLICKEY;
+ 		default:
+@@ -216,6 +228,12 @@
+ 			return KEY_ML_DSA_65;
+ 		case OID_ML_DSA_87:
+ 			return KEY_ML_DSA_87;
++		case OID_SLH_DSA_SHA2_128S:
++			return KEY_SLH_DSA_SHA2_128S;
++		case OID_SLH_DSA_SHA2_192S:
++			return KEY_SLH_DSA_SHA2_192S;
++		case OID_SLH_DSA_SHA2_256S:
++			return KEY_SLH_DSA_SHA2_256S;
+ 		case OID_EC_PUBLICKEY:
+ 			return KEY_ECDSA;
+ 		case OID_RSA_ENCRYPTION:
+@@ -281,6 +299,12 @@
+ 			return SIGN_ML_DSA_65;
+ 		case OID_ML_DSA_87:
+ 			return SIGN_ML_DSA_87;
++		case OID_SLH_DSA_SHA2_128S:
++			return SIGN_SLH_DSA_SHA2_128S;
++		case OID_SLH_DSA_SHA2_192S:
++			return SIGN_SLH_DSA_SHA2_192S;
++		case OID_SLH_DSA_SHA2_256S:
++			return SIGN_SLH_DSA_SHA2_256S;
+ 	}
+ 	return SIGN_UNKNOWN;
+ }
+@@ -339,6 +363,12 @@
+ 			return OID_ML_DSA_65;
+ 		case SIGN_ML_DSA_87:
+ 			return OID_ML_DSA_87;
++		case SIGN_SLH_DSA_SHA2_128S:
++			return OID_SLH_DSA_SHA2_128S;
++		case SIGN_SLH_DSA_SHA2_192S:
++			return OID_SLH_DSA_SHA2_192S;
++		case SIGN_SLH_DSA_SHA2_256S:
++			return OID_SLH_DSA_SHA2_256S;
+ 	}
+ 	return OID_UNKNOWN;
+ }
+@@ -380,6 +410,9 @@
+ 	{ KEY_ML_DSA_44, 0, { .scheme = SIGN_ML_DSA_44 }},
+ 	{ KEY_ML_DSA_65, 0, { .scheme = SIGN_ML_DSA_65 }},
+ 	{ KEY_ML_DSA_87, 0, { .scheme = SIGN_ML_DSA_87 }},
++	{ KEY_SLH_DSA_SHA2_128S, 0, { .scheme = SIGN_SLH_DSA_SHA2_128S }},
++	{ KEY_SLH_DSA_SHA2_192S, 0, { .scheme = SIGN_SLH_DSA_SHA2_192S }},
++	{ KEY_SLH_DSA_SHA2_256S, 0, { .scheme = SIGN_SLH_DSA_SHA2_256S }},
+ };
+ 
+ /**
+@@ -474,6 +507,12 @@
+ 			return KEY_ML_DSA_65;
+ 		case SIGN_ML_DSA_87:
+ 			return KEY_ML_DSA_87;
++		case SIGN_SLH_DSA_SHA2_128S:
++			return KEY_SLH_DSA_SHA2_128S;
++		case SIGN_SLH_DSA_SHA2_192S:
++			return KEY_SLH_DSA_SHA2_192S;
++		case SIGN_SLH_DSA_SHA2_256S:
++			return KEY_SLH_DSA_SHA2_256S;
+ 	}
+ 	return KEY_ANY;
+ }
+@@ -495,6 +534,12 @@
+ 			return 1952;   /* bytes */
+ 		case KEY_ML_DSA_87:
+ 			return 2592;   /* bytes */
++		case KEY_SLH_DSA_SHA2_128S:
++			return   32;   /* bytes, FIPS 205 */
++		case KEY_SLH_DSA_SHA2_192S:
++			return   48;   /* bytes, FIPS 205 */
++		case KEY_SLH_DSA_SHA2_256S:
++			return   64;   /* bytes, FIPS 205 */
+ 		default:
+ 			return 0;
+ 	}
+--- a/src/libstrongswan/crypto/hashers/hasher.c
++++ b/src/libstrongswan/crypto/hashers/hasher.c
+@@ -151,6 +151,9 @@
+ 		case OID_ML_DSA_44:
+ 		case OID_ML_DSA_65:
+ 		case OID_ML_DSA_87:
++		case OID_SLH_DSA_SHA2_128S:
++		case OID_SLH_DSA_SHA2_192S:
++		case OID_SLH_DSA_SHA2_256S:
+ 			return HASH_IDENTITY;
+ 		default:
+ 			return HASH_UNKNOWN;
+@@ -486,9 +489,33 @@
+ 			{
+ 				case HASH_IDENTITY:
+ 					return OID_ML_DSA_87;
++				default:
++					return OID_UNKNOWN;
++			}
++		case KEY_SLH_DSA_SHA2_128S:
++			switch (alg)
++			{
++				case HASH_IDENTITY:
++					return OID_SLH_DSA_SHA2_128S;
++				default:
++					return OID_UNKNOWN;
++			}
++		case KEY_SLH_DSA_SHA2_192S:
++			switch (alg)
++			{
++				case HASH_IDENTITY:
++					return OID_SLH_DSA_SHA2_192S;
+ 				default:
+ 					return OID_UNKNOWN;
+ 			}
++		case KEY_SLH_DSA_SHA2_256S:
++			switch (alg)
++			{
++				case HASH_IDENTITY:
++					return OID_SLH_DSA_SHA2_256S;
++				default:
++					return OID_UNKNOWN;
++			}
+ 		default:
+ 			return OID_UNKNOWN;
+ 	}
+@@ -518,6 +545,9 @@
+ 		case SIGN_ML_DSA_44:
+ 		case SIGN_ML_DSA_65:
+ 		case SIGN_ML_DSA_87:
++		case SIGN_SLH_DSA_SHA2_128S:
++		case SIGN_SLH_DSA_SHA2_192S:
++		case SIGN_SLH_DSA_SHA2_256S:
+ 			return HASH_IDENTITY;
+ 		case SIGN_RSA_EMSA_PKCS1_MD5:
+ 			return HASH_MD5;
+--- a/src/libstrongswan/plugins/pem/pem_plugin.c
++++ b/src/libstrongswan/plugins/pem/pem_plugin.c
+@@ -76,6 +76,15 @@
+ 		PLUGIN_REGISTER(PRIVKEY, pem_private_key_load, FALSE),
+ 			PLUGIN_PROVIDE(PRIVKEY, KEY_ML_DSA_87),
+ 				PLUGIN_DEPENDS(PRIVKEY, KEY_ML_DSA_87),
++		PLUGIN_REGISTER(PRIVKEY, pem_private_key_load, FALSE),
++			PLUGIN_PROVIDE(PRIVKEY, KEY_SLH_DSA_SHA2_128S),
++				PLUGIN_DEPENDS(PRIVKEY, KEY_SLH_DSA_SHA2_128S),
++		PLUGIN_REGISTER(PRIVKEY, pem_private_key_load, FALSE),
++			PLUGIN_PROVIDE(PRIVKEY, KEY_SLH_DSA_SHA2_192S),
++				PLUGIN_DEPENDS(PRIVKEY, KEY_SLH_DSA_SHA2_192S),
++		PLUGIN_REGISTER(PRIVKEY, pem_private_key_load, FALSE),
++			PLUGIN_PROVIDE(PRIVKEY, KEY_SLH_DSA_SHA2_256S),
++				PLUGIN_DEPENDS(PRIVKEY, KEY_SLH_DSA_SHA2_256S),
+ 
+ 		/* public key PEM decoding */
+ 		PLUGIN_REGISTER(PUBKEY, pem_public_key_load, FALSE),
+@@ -105,6 +114,15 @@
+ 		PLUGIN_REGISTER(PUBKEY, pem_public_key_load, FALSE),
+ 			PLUGIN_PROVIDE(PUBKEY, KEY_ML_DSA_87),
+ 				PLUGIN_DEPENDS(PUBKEY, KEY_ML_DSA_87),
++		PLUGIN_REGISTER(PUBKEY, pem_public_key_load, FALSE),
++			PLUGIN_PROVIDE(PUBKEY, KEY_SLH_DSA_SHA2_128S),
++				PLUGIN_DEPENDS(PUBKEY, KEY_SLH_DSA_SHA2_128S),
++		PLUGIN_REGISTER(PUBKEY, pem_public_key_load, FALSE),
++			PLUGIN_PROVIDE(PUBKEY, KEY_SLH_DSA_SHA2_192S),
++				PLUGIN_DEPENDS(PUBKEY, KEY_SLH_DSA_SHA2_192S),
++		PLUGIN_REGISTER(PUBKEY, pem_public_key_load, FALSE),
++			PLUGIN_PROVIDE(PUBKEY, KEY_SLH_DSA_SHA2_256S),
++				PLUGIN_DEPENDS(PUBKEY, KEY_SLH_DSA_SHA2_256S),
+ 
+ 		/* certificate PEM decoding */
+ 		PLUGIN_REGISTER(CERT_DECODE, pem_certificate_load, FALSE),
+--- a/src/libstrongswan/plugins/pkcs1/pkcs1_builder.c
++++ b/src/libstrongswan/plugins/pkcs1/pkcs1_builder.c
+@@ -48,6 +48,9 @@
+ 		case KEY_ML_DSA_44:
+ 		case KEY_ML_DSA_65:
+ 		case KEY_ML_DSA_87:
++		case KEY_SLH_DSA_SHA2_128S:
++		case KEY_SLH_DSA_SHA2_192S:
++		case KEY_SLH_DSA_SHA2_256S:
+ 			return lib->creds->create(lib->creds, CRED_PUBLIC_KEY, type,
+ 								BUILD_BLOB, pubkey, BUILD_END);
+ 		default:
+--- a/src/libstrongswan/plugins/pkcs1/pkcs1_plugin.c
++++ b/src/libstrongswan/plugins/pkcs1/pkcs1_plugin.c
+@@ -58,6 +58,9 @@
+ 				PLUGIN_SDEPEND(PUBKEY, KEY_ML_DSA_44),
+ 				PLUGIN_SDEPEND(PUBKEY, KEY_ML_DSA_65),
+ 				PLUGIN_SDEPEND(PUBKEY, KEY_ML_DSA_87),
++				PLUGIN_SDEPEND(PUBKEY, KEY_SLH_DSA_SHA2_128S),
++				PLUGIN_SDEPEND(PUBKEY, KEY_SLH_DSA_SHA2_192S),
++				PLUGIN_SDEPEND(PUBKEY, KEY_SLH_DSA_SHA2_256S),
+ 				PLUGIN_SDEPEND(PUBKEY, KEY_DSA),
+ 		PLUGIN_REGISTER(PUBKEY, pkcs1_public_key_load, FALSE),
+ 			PLUGIN_PROVIDE(PUBKEY, KEY_RSA),
+@@ -67,6 +70,12 @@
+ 			PLUGIN_PROVIDE(PUBKEY, KEY_ML_DSA_65),
+ 		PLUGIN_REGISTER(PUBKEY, pkcs1_public_key_load, FALSE),
+ 			PLUGIN_PROVIDE(PUBKEY, KEY_ML_DSA_87),
++		PLUGIN_REGISTER(PUBKEY, pkcs1_public_key_load, FALSE),
++			PLUGIN_PROVIDE(PUBKEY, KEY_SLH_DSA_SHA2_128S),
++		PLUGIN_REGISTER(PUBKEY, pkcs1_public_key_load, FALSE),
++			PLUGIN_PROVIDE(PUBKEY, KEY_SLH_DSA_SHA2_192S),
++		PLUGIN_REGISTER(PUBKEY, pkcs1_public_key_load, FALSE),
++			PLUGIN_PROVIDE(PUBKEY, KEY_SLH_DSA_SHA2_256S),
+ 	};
+ 	*features = f;
+ 	return countof(f);
+--- a/src/libstrongswan/plugins/pkcs8/pkcs8_builder.c
++++ b/src/libstrongswan/plugins/pkcs8/pkcs8_builder.c
+@@ -99,8 +99,20 @@
+ 						break;
+ 					case OID_ML_DSA_87:
+ 						type = KEY_ML_DSA_87;
++						part = BUILD_BLOB;
++						break;
++					case OID_SLH_DSA_SHA2_128S:
++						type = KEY_SLH_DSA_SHA2_128S;
++						part = BUILD_BLOB;
++						break;
++					case OID_SLH_DSA_SHA2_192S:
++						type = KEY_SLH_DSA_SHA2_192S;
+ 						part = BUILD_BLOB;
+ 						break;
++					case OID_SLH_DSA_SHA2_256S:
++						type = KEY_SLH_DSA_SHA2_256S;
++						part = BUILD_BLOB;
++						break;
+ 					default:
+ 						/* key type not supported */
+ 						goto end;
+--- a/src/libstrongswan/plugins/pkcs8/pkcs8_plugin.c
++++ b/src/libstrongswan/plugins/pkcs8/pkcs8_plugin.c
+@@ -52,6 +52,9 @@
+ 			PLUGIN_PROVIDE(PRIVKEY, KEY_ML_DSA_44),
+ 			PLUGIN_PROVIDE(PRIVKEY, KEY_ML_DSA_65),
+ 			PLUGIN_PROVIDE(PRIVKEY, KEY_ML_DSA_87),
++		PLUGIN_PROVIDE(PRIVKEY, KEY_SLH_DSA_SHA2_128S),
++		PLUGIN_PROVIDE(PRIVKEY, KEY_SLH_DSA_SHA2_192S),
++		PLUGIN_PROVIDE(PRIVKEY, KEY_SLH_DSA_SHA2_256S),
+ 	};
+ 	*features = f;
+ 	return countof(f);
