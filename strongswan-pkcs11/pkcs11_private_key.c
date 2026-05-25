@@ -200,6 +200,12 @@ CK_MECHANISM_PTR pkcs11_signature_scheme_to_mech(pkcs11_library_t *p11,
 		 KEY_ML_DSA_65, 0,								  HASH_IDENTITY},
 		{SIGN_ML_DSA_87,				{CKM_ML_DSA,			NULL, 0},
 		 KEY_ML_DSA_87, 0,								  HASH_IDENTITY},
+		{SIGN_SLH_DSA_SHA2_128S,		{CKM_SLH_DSA,			NULL, 0},
+		 KEY_SLH_DSA_SHA2_128S, 0,						  HASH_IDENTITY},
+		{SIGN_SLH_DSA_SHA2_192S,		{CKM_SLH_DSA,			NULL, 0},
+		 KEY_SLH_DSA_SHA2_192S, 0,						  HASH_IDENTITY},
+		{SIGN_SLH_DSA_SHA2_256S,		{CKM_SLH_DSA,			NULL, 0},
+		 KEY_SLH_DSA_SHA2_256S, 0,						  HASH_IDENTITY},
 
 	};
 
@@ -500,9 +506,12 @@ METHOD(private_key_t, sign, bool,
 		case SIGN_ML_DSA_44:
 		case SIGN_ML_DSA_65:
 		case SIGN_ML_DSA_87:
-			/* ML-DSA signatures are variable-length per variant (2420/3293/4595)
-			 * and cannot be derived from the public key size. Query the token
-			 * for the required buffer length first. */
+		case SIGN_SLH_DSA_SHA2_128S:
+		case SIGN_SLH_DSA_SHA2_192S:
+		case SIGN_SLH_DSA_SHA2_256S:
+			/* ML-DSA (2420/3293/4595 B) and SLH-DSA (7856/16224/29792 B)
+			 * signatures are fixed per variant but cannot be derived from
+			 * public key size. Query the token for the required buffer first. */
 			len = 0;
 			rv = this->lib->f->C_Sign(session, data.ptr, data.len, NULL, &len);
 			if (rv != CKR_OK || len == 0)
@@ -930,6 +939,46 @@ static bool find_key(private_pkcs11_private_key_t *this, chunk_t keyid)
 						break;
 					default:
 						DBG1(DBG_CFG, "PKCS#11 unknown ML-DSA parameter set: %lu",
+							 param_set);
+						break;
+				}
+				if (this->type != KEY_RSA)
+				{
+					if (attr[1].ulValueLen != CK_UNAVAILABLE_INFORMATION)
+					{
+						this->reauth = reauth;
+					}
+					this->object = object;
+					found = TRUE;
+				}
+				break;
+			}
+			case CKK_SLH_DSA:
+			{
+				CK_SLH_DSA_PARAMETER_SET_TYPE param_set = 0;
+				CK_ATTRIBUTE attr_ps[] = {
+					{CKA_PARAMETER_SET, &param_set, sizeof(param_set)},
+				};
+				if (this->lib->f->C_GetAttributeValue(this->session, object,
+												attr_ps, 1) != CKR_OK)
+				{
+					DBG1(DBG_CFG, "PKCS#11 CKA_PARAMETER_SET missing on "
+						 "CKK_SLH_DSA key");
+					break;
+				}
+				switch (param_set)
+				{
+					case CKP_SLH_DSA_SHA2_128S:
+						this->type = KEY_SLH_DSA_SHA2_128S;
+						break;
+					case CKP_SLH_DSA_SHA2_192S:
+						this->type = KEY_SLH_DSA_SHA2_192S;
+						break;
+					case CKP_SLH_DSA_SHA2_256S:
+						this->type = KEY_SLH_DSA_SHA2_256S;
+						break;
+					default:
+						DBG1(DBG_CFG, "PKCS#11 unknown SLH-DSA parameter set: %lu",
 							 param_set);
 						break;
 				}

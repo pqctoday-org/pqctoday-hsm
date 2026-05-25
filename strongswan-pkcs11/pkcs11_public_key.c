@@ -586,6 +586,9 @@ METHOD(public_key_t, get_encoding, bool,
 		case KEY_ML_DSA_44:
 		case KEY_ML_DSA_65:
 		case KEY_ML_DSA_87:
+		case KEY_SLH_DSA_SHA2_128S:
+		case KEY_SLH_DSA_SHA2_192S:
+		case KEY_SLH_DSA_SHA2_256S:
 			return encode_ml_dsa(this, type, encoding);
 		default:
 			return FALSE;
@@ -608,6 +611,9 @@ METHOD(public_key_t, get_fingerprint, bool,
 		case KEY_ML_DSA_44:
 		case KEY_ML_DSA_65:
 		case KEY_ML_DSA_87:
+		case KEY_SLH_DSA_SHA2_128S:
+		case KEY_SLH_DSA_SHA2_192S:
+		case KEY_SLH_DSA_SHA2_256S:
 			return encode_ml_dsa(this, type, fp);
 		default:
 			return FALSE;
@@ -901,6 +907,67 @@ static CK_ML_DSA_PARAMETER_SET_TYPE ml_dsa_param_set(key_type_t type)
 }
 
 /**
+ * Map a strongSwan SLH-DSA key type to the PKCS#11 v3.2 parameter-set value.
+ */
+static CK_SLH_DSA_PARAMETER_SET_TYPE slh_dsa_param_set(key_type_t type)
+{
+	switch (type)
+	{
+		case KEY_SLH_DSA_SHA2_128S:
+			return CKP_SLH_DSA_SHA2_128S;
+		case KEY_SLH_DSA_SHA2_192S:
+			return CKP_SLH_DSA_SHA2_192S;
+		case KEY_SLH_DSA_SHA2_256S:
+			return CKP_SLH_DSA_SHA2_256S;
+		default:
+			return 0;
+	}
+}
+
+/**
+ * Find an SLH-DSA key object matching the given raw public-key bytes and
+ * parameter set.
+ */
+static private_pkcs11_public_key_t* find_slh_dsa_key(chunk_t pubkey,
+													 key_type_t key_type,
+													 size_t keylen)
+{
+	CK_OBJECT_CLASS class = CKO_PUBLIC_KEY;
+	CK_KEY_TYPE type = CKK_SLH_DSA;
+	CK_SLH_DSA_PARAMETER_SET_TYPE param_set = slh_dsa_param_set(key_type);
+	CK_ATTRIBUTE tmpl[] = {
+		{CKA_CLASS, &class, sizeof(class)},
+		{CKA_KEY_TYPE, &type, sizeof(type)},
+		{CKA_PARAMETER_SET, &param_set, sizeof(param_set)},
+		{CKA_VALUE, pubkey.ptr, pubkey.len},
+	};
+	return find_key(key_type, keylen, tmpl, countof(tmpl));
+}
+
+/**
+ * Create an SLH-DSA public key object in a suitable token session.
+ */
+static private_pkcs11_public_key_t* create_slh_dsa_key(chunk_t pubkey,
+													   key_type_t key_type,
+													   size_t keylen)
+{
+	CK_OBJECT_CLASS class = CKO_PUBLIC_KEY;
+	CK_KEY_TYPE type = CKK_SLH_DSA;
+	CK_SLH_DSA_PARAMETER_SET_TYPE param_set = slh_dsa_param_set(key_type);
+	CK_ATTRIBUTE tmpl[] = {
+		{CKA_CLASS, &class, sizeof(class)},
+		{CKA_KEY_TYPE, &type, sizeof(type)},
+		{CKA_PARAMETER_SET, &param_set, sizeof(param_set)},
+		{CKA_VALUE, pubkey.ptr, pubkey.len},
+	};
+	CK_MECHANISM_TYPE mechs[] = {
+		CKM_SLH_DSA,
+	};
+	return create_key(key_type, keylen, mechs, countof(mechs), tmpl,
+					  countof(tmpl));
+}
+
+/**
  * Find an ML-DSA key object matching the given raw public-key bytes and
  * parameter set.
  */
@@ -1051,6 +1118,41 @@ pkcs11_public_key_t *pkcs11_public_key_load(key_type_t type, va_list args)
 			}
 		}
 	}
+	else if (type == KEY_SLH_DSA_SHA2_128S || type == KEY_SLH_DSA_SHA2_192S ||
+			 type == KEY_SLH_DSA_SHA2_256S)
+	{
+		chunk_t pubkey = chunk_empty;
+
+		/* Two inputs possible from the builder chain:
+		 *   BUILD_BLOB          — raw FIPS 205 public key (unwrapped from
+		 *                         SPKI by pkcs1_builder's parse_public_key)
+		 *   BUILD_BLOB_ASN1_DER — full SubjectPublicKeyInfo
+		 */
+		if (raw.ptr)
+		{
+			pubkey = raw;
+		}
+		else if (blob.ptr)
+		{
+			if (public_key_info_decode(blob, &pubkey) != type)
+			{
+				return NULL;
+			}
+		}
+		if (pubkey.ptr && pubkey.len == (size_t)get_public_key_size(type))
+		{
+			keylen = pubkey.len * 8;
+			this = find_slh_dsa_key(pubkey, type, keylen);
+			if (!this)
+			{
+				this = create_slh_dsa_key(pubkey, type, keylen);
+			}
+			if (this)
+			{
+				return &this->public;
+			}
+		}
+	}
 	return NULL;
 }
 
@@ -1088,6 +1190,11 @@ static private_pkcs11_public_key_t *find_key_by_keyid(pkcs11_library_t *p11,
 		case KEY_ML_DSA_65:
 		case KEY_ML_DSA_87:
 			type = CKK_ML_DSA;
+			break;
+		case KEY_SLH_DSA_SHA2_128S:
+		case KEY_SLH_DSA_SHA2_192S:
+		case KEY_SLH_DSA_SHA2_256S:
+			type = CKK_SLH_DSA;
 			break;
 		default:
 			/* don't specify key type on KEY_ANY */
@@ -1168,6 +1275,40 @@ static private_pkcs11_public_key_t *find_key_by_keyid(pkcs11_library_t *p11,
 				keylen = get_public_key_size(key_type) * 8;
 				found = TRUE;
 			ml_dsa_done:
+				break;
+			}
+			case CKK_SLH_DSA:
+			{
+				CK_SLH_DSA_PARAMETER_SET_TYPE param_set = 0;
+				CK_ATTRIBUTE attr_ps[] = {
+					{CKA_PARAMETER_SET, &param_set, sizeof(param_set)},
+				};
+				if (p11->f->C_GetAttributeValue(session, object, attr_ps, 1)
+					!= CKR_OK)
+				{
+					DBG1(DBG_CFG, "PKCS#11 CKA_PARAMETER_SET missing on "
+						 "CKK_SLH_DSA key");
+					break;
+				}
+				switch (param_set)
+				{
+					case CKP_SLH_DSA_SHA2_128S:
+						key_type = KEY_SLH_DSA_SHA2_128S;
+						break;
+					case CKP_SLH_DSA_SHA2_192S:
+						key_type = KEY_SLH_DSA_SHA2_192S;
+						break;
+					case CKP_SLH_DSA_SHA2_256S:
+						key_type = KEY_SLH_DSA_SHA2_256S;
+						break;
+					default:
+						DBG1(DBG_CFG, "PKCS#11 unknown SLH-DSA parameter set: "
+							 "%lu", param_set);
+						goto slh_dsa_done;
+				}
+				keylen = get_public_key_size(key_type) * 8;
+				found = TRUE;
+			slh_dsa_done:
 				break;
 			}
 			default:

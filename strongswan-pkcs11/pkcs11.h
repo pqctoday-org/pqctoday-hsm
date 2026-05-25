@@ -386,6 +386,7 @@ typedef unsigned long ck_key_type_t;
  * didn't match any registered type. */
 #define CKK_ML_KEM              (0x00000049UL)
 #define CKK_ML_DSA              (0x0000004aUL)
+#define CKK_SLH_DSA             (0x0000004bUL)
 #define CKK_VENDOR_DEFINED      (1UL << 31)
 
 
@@ -530,6 +531,21 @@ typedef unsigned long CK_ML_KEM_PARAMETER_SET_TYPE;
 #define CKP_ML_KEM_512                  (1UL)
 #define CKP_ML_KEM_768                  (2UL)
 #define CKP_ML_KEM_1024                 (3UL)
+
+/* PKCS#11 v3.2 §6.66.2 — SLH-DSA parameter set values (RFC 9909) */
+typedef unsigned long CK_SLH_DSA_PARAMETER_SET_TYPE;
+#define CKP_SLH_DSA_SHA2_128S           (0x00000001UL)
+#define CKP_SLH_DSA_SHAKE_128S          (0x00000002UL)
+#define CKP_SLH_DSA_SHA2_128F           (0x00000003UL)
+#define CKP_SLH_DSA_SHAKE_128F          (0x00000004UL)
+#define CKP_SLH_DSA_SHA2_192S           (0x00000005UL)
+#define CKP_SLH_DSA_SHAKE_192S          (0x00000006UL)
+#define CKP_SLH_DSA_SHA2_192F           (0x00000007UL)
+#define CKP_SLH_DSA_SHAKE_192F          (0x00000008UL)
+#define CKP_SLH_DSA_SHA2_256S           (0x00000009UL)
+#define CKP_SLH_DSA_SHAKE_256S          (0x0000000aUL)
+#define CKP_SLH_DSA_SHA2_256F           (0x0000000bUL)
+#define CKP_SLH_DSA_SHAKE_256F          (0x0000000cUL)
 
 
 struct ck_attribute
@@ -789,6 +805,8 @@ typedef unsigned long ck_mechanism_type_t;
 #define CKM_ML_KEM                      (0x00000017UL)
 #define CKM_ML_DSA_KEY_PAIR_GEN         (0x0000001cUL)
 #define CKM_ML_DSA                      (0x0000001dUL)
+#define CKM_SLH_DSA_KEY_PAIR_GEN        (0x0000002dUL)
+#define CKM_SLH_DSA                     (0x0000002eUL)
 #define CKM_JUNIPER_KEY_GEN             (0x1060UL)
 #define CKM_JUNIPER_ECB128              (0x1061UL)
 #define CKM_JUNIPER_CBC128              (0x1062UL)
