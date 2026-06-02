@@ -951,8 +951,23 @@ pub fn get_sig_len(mech: u32, hkey: u32) -> u32 {
         CKM_KMAC_128 => 32,
         CKM_KMAC_256 => 64,
         CKM_SHA256_RSA_PKCS | CKM_SHA256_RSA_PKCS_PSS => 512,
-        CKM_ECDSA_SHA256 | CKM_ECDSA_SHA512 | CKM_ECDSA_SHA3_224 | CKM_ECDSA_SHA3_256 => 64,
-        CKM_ECDSA_SHA384 | CKM_ECDSA_SHA3_384 | CKM_ECDSA_SHA3_512 => 96,
+        // ECDSA — sig size = 2 × ⌈curve_bits / 8⌉, independent of the hash. The
+        // SHA384/SHA3-384 hardcode for 96-byte was wrong for P-256 + P-521 etc;
+        // size MUST come from the key's curve, not the hash mechanism.
+        // - P-256 / secp256k1 (256-bit) → 64 bytes (32 + 32)
+        // - P-384            (384-bit) → 96 bytes (48 + 48)
+        // - P-521            (521-bit) → 132 bytes (66 + 66)
+        CKM_ECDSA_SHA256
+        | CKM_ECDSA_SHA384
+        | CKM_ECDSA_SHA512
+        | CKM_ECDSA_SHA3_224
+        | CKM_ECDSA_SHA3_256
+        | CKM_ECDSA_SHA3_384
+        | CKM_ECDSA_SHA3_512 => match ps {
+            CURVE_P521 => 132,
+            CURVE_P384 => 96,
+            _ => 64, // CURVE_P256, CURVE_K256, and default
+        },
         CKM_EDDSA | CKM_EDDSA_PH => 64,
         _ => 512,
     }

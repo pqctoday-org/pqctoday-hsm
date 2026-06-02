@@ -222,13 +222,27 @@ pub fn get_ec_point_sec1(handle: u32) -> Option<Vec<u8>> {
                 .and_then(|attrs| attrs.get(&CKA_EC_POINT).cloned())
         })
         .map(|ec_point| {
-            // DER OCTET STRING short form: tag=0x04, then one length byte.
-            // If byte[1] equals len-2 the buffer carries the DER header; strip it.
-            if ec_point.len() > 2 && ec_point[1] as usize == ec_point.len() - 2 {
-                ec_point[2..].to_vec()
-            } else {
-                ec_point
+            // CKA_EC_POINT stores a DER OCTET STRING wrapping the SEC1 point
+            // (PKCS#11 v3.2 §2.3.3). Strip the header to return the raw SEC1
+            // bytes. Two encodings exist:
+            //   - Short form  : 0x04 <len ≤ 127> <data>            (len = data.len())
+            //   - Long form 1B: 0x04 0x81 <len> <data>             (P-521 path — data=133)
+            // P-256 / P-384 / secp256k1 fit short form (65 / 97 / 65 ≤ 127).
+            // P-521's 133-byte SEC1 point requires long form.
+            if ec_point.len() > 2 && ec_point[0] == 0x04 {
+                if ec_point[1] as usize == ec_point.len() - 2 {
+                    // Short form
+                    return ec_point[2..].to_vec();
+                }
+                if ec_point.len() > 3
+                    && ec_point[1] == 0x81
+                    && ec_point[2] as usize == ec_point.len() - 3
+                {
+                    // Long form, 1-byte length (covers all SEC1 points up to 255 B)
+                    return ec_point[3..].to_vec();
+                }
             }
+            ec_point
         })
 }
 
