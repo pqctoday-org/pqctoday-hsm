@@ -62,12 +62,29 @@ const ByteString& SymmetricKey::getKeyBits() const
 }
 
 // Get the key check value
+//
+// PKCS#11 v3.2 mandates per-key-type KCV algorithms. This base method is used
+// for secret-key types whose §6.x.2 object definition specifies SHA-1, namely:
+//   • CKK_GENERIC_SECRET — §6.8.2 (line 39752): SHA-1(CKA_VALUE)[0:3]
+//   • CKK_CHACHA20       — §6.58.2 (line 70198): SHA-1(CKA_VALUE)[0:3]
+//   • CKK_SALSA20        — §6.59.2 (line 70724): SHA-1(CKA_VALUE)[0:3]
+// Cipher-bearing types (AES, DES2, DES3) override this via their own subclass
+// to follow the §4.11 "default-cipher ECB(zero block)[0:3]" form.
+//
+// SHA-1 deprecation note: NIST SP 800-131A R2 deprecates SHA-1 for cryptographic
+// uses (signatures, MACs). KCV is explicitly defined (PKCS#11 v3.2 §4.11 line
+// 15879-15885) as a non-cryptographic 24-bit fingerprint with expected
+// collisions and "should not be usable to obtain any part of the key value".
+// The collision-finding work factor that motivates SHA-1 deprecation (~2^60)
+// is orders of magnitude beyond what a 24-bit truncated fingerprint exposes,
+// so the spec authors knowingly kept SHA-1 in v3.2 (published 2024–2025).
+// No PKCS#11 v3.x version permits SHA-256 for KCV — verified against v3.0,
+// v3.1, and v3.2 cs01 (grep "SHA-256" + CKA_CHECK_VALUE returns 0 hits).
 ByteString SymmetricKey::getKeyCheckValue() const
 {
 	ByteString digest;
 
-	// PKCS#11 v3.2 §4.10.2: SHA-256 for non-ECB secret keys (updated from SHA-1)
-	HashAlgorithm* hash = CryptoFactory::i()->getHashAlgorithm(HashAlgo::SHA256);
+	HashAlgorithm* hash = CryptoFactory::i()->getHashAlgorithm(HashAlgo::SHA1);
 	if (hash == NULL) return digest;
 
 	if (!hash->hashInit() ||

@@ -8,6 +8,10 @@
 #include <iostream>
 #include <fstream>
 
+// OpenSSL — independent oracle for KCV reference computation (SHA-1 + AES-ECB).
+#include <openssl/sha.h>
+#include <openssl/evp.h>
+
 #include "tests/json.hpp"
 using json = nlohmann::json;
 
@@ -2422,9 +2426,535 @@ void test_cka_id_retrieval() {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// CKA_CHECK_VALUE (KCV) compliance — PKCS#11 v3.2 §4.11 / §6.8.2 / §6.10.2
+//
+// §4.11 (line 15886-15889): "if supported, regardless of how the key object
+// is created or derived, the value of the attribute is always supplied".
+// This MUST cover C_GenerateKey, C_UnwrapKey, AND C_DeriveKey.
+//
+// Per-key-type algorithms (verified against v3.2 spec, no SHA-256 ever):
+//   • CKK_AES (§6.10.2 line 40671): AES-ECB(zero block) first 3 bytes
+//   • CKK_GENERIC_SECRET (§6.8.2 line 39752): SHA-1(CKA_VALUE) first 3 bytes
+//
+// This test independently computes the spec reference using OpenSSL EVP and
+// asserts the HSM's CKA_CHECK_VALUE matches byte-for-byte. It also verifies
+// the "for two cryptographically identical keys the KCV is identical"
+// property by wrapping/unwrapping a key and confirming both handles produce
+// the same 3-byte KCV.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Helper: compute SHA-1(data)[0:3] using OpenSSL as the independent oracle.
+static std::vector<unsigned char> oracle_sha1_kcv(const unsigned char* data, size_t len) {
+    unsigned char digest[SHA_DIGEST_LENGTH] = {0};
+    SHA1(data, len, digest);
+    return std::vector<unsigned char>(digest, digest + 3);
+}
+
+// Helper: compute AES-ECB(zero block)[0:3] using OpenSSL as the independent oracle.
+static std::vector<unsigned char> oracle_aes_ecb_kcv(const unsigned char* key, size_t keyLen) {
+    const EVP_CIPHER* cipher = nullptr;
+    switch (keyLen) {
+        case 16: cipher = EVP_aes_128_ecb(); break;
+        case 24: cipher = EVP_aes_192_ecb(); break;
+        case 32: cipher = EVP_aes_256_ecb(); break;
+        default: return {};
+    }
+    EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
+    if (!ctx) return {};
+    unsigned char zero_block[16] = {0};
+    unsigned char out[32] = {0};
+    int outlen = 0;
+    std::vector<unsigned char> kcv;
+    if (EVP_EncryptInit_ex(ctx, cipher, nullptr, key, nullptr) == 1 &&
+        EVP_CIPHER_CTX_set_padding(ctx, 0) == 1 &&
+        EVP_EncryptUpdate(ctx, out, &outlen, zero_block, 16) == 1 &&
+        outlen >= 3) {
+        kcv.assign(out, out + 3);
+    }
+    EVP_CIPHER_CTX_free(ctx);
+    return kcv;
+}
+
+// Helper: read CKA_CHECK_VALUE from a key handle. Returns empty vector on any error.
+static std::vector<unsigned char> read_kcv(CK_OBJECT_HANDLE hKey) {
+    CK_ATTRIBUTE tpl[1] = { { CKA_CHECK_VALUE, NULL_PTR, 0 } };
+    CK_RV rv = fl->C_GetAttributeValue(hSess, hKey, tpl, 1);
+    if (rv != CKR_OK || tpl[0].ulValueLen == 0 || tpl[0].ulValueLen == (CK_ULONG)-1) return {};
+    std::vector<unsigned char> kcv(tpl[0].ulValueLen);
+    tpl[0].pValue = kcv.data();
+    rv = fl->C_GetAttributeValue(hSess, hKey, tpl, 1);
+    if (rv != CKR_OK) return {};
+    return kcv;
+}
+
+static std::string hex_bytes(const std::vector<unsigned char>& bytes) {
+    std::string s;
+    s.reserve(bytes.size() * 2);
+    static const char* lut = "0123456789ABCDEF";
+    for (auto b : bytes) { s += lut[b >> 4]; s += lut[b & 0xF]; }
+    return s;
+}
+
+void test_kcv_compliance() {
+    // ── 1. CKK_AES KCV after C_GenerateKey — baseline, must match AES-ECB oracle ──
+    {
+        CK_OBJECT_CLASS cls = CKO_SECRET_KEY;
+        CK_KEY_TYPE     kt  = CKK_AES;
+        CK_ULONG        klen = 32;
+        CK_BBOOL        bTrue = CK_TRUE;
+        CK_BBOOL        bFalse = CK_FALSE;
+        CK_ATTRIBUTE tpl[] = {
+            { CKA_CLASS,       &cls,    sizeof(cls)    },
+            { CKA_KEY_TYPE,    &kt,     sizeof(kt)     },
+            { CKA_VALUE_LEN,   &klen,   sizeof(klen)   },
+            { CKA_TOKEN,       &bFalse, sizeof(bFalse) },
+            { CKA_SENSITIVE,   &bFalse, sizeof(bFalse) },
+            { CKA_EXTRACTABLE, &bTrue,  sizeof(bTrue)  },
+            { CKA_WRAP,        &bTrue,  sizeof(bTrue)  },
+            { CKA_UNWRAP,      &bTrue,  sizeof(bTrue)  },
+            { CKA_ENCRYPT,     &bTrue,  sizeof(bTrue)  },
+            { CKA_DECRYPT,     &bTrue,  sizeof(bTrue)  },
+        };
+        CK_MECHANISM mech = { CKM_AES_KEY_GEN, NULL_PTR, 0 };
+        CK_OBJECT_HANDLE hKek = CK_INVALID_HANDLE;
+        CK_RV rv = fl->C_GenerateKey(hSess, &mech, tpl, sizeof(tpl)/sizeof(tpl[0]), &hKek);
+        if (rv != CKR_OK) {
+            record_result("KCV", "AES_Generate_KCV_Present", "FAIL",
+                          "C_GenerateKey RV=" + std::to_string(rv));
+            return;
+        }
+
+        // Read CKA_VALUE (extractable key) and CKA_CHECK_VALUE.
+        std::vector<unsigned char> keyBits(klen);
+        CK_ATTRIBUTE vtpl[1] = { { CKA_VALUE, keyBits.data(), klen } };
+        rv = fl->C_GetAttributeValue(hSess, hKek, vtpl, 1);
+        if (rv != CKR_OK) {
+            record_result("KCV", "AES_Generate_CKA_VALUE_Readable", "FAIL",
+                          "C_GetAttributeValue(CKA_VALUE) RV=" + std::to_string(rv));
+            fl->C_DestroyObject(hSess, hKek);
+            return;
+        }
+        std::vector<unsigned char> hsmKcv = read_kcv(hKek);
+        std::vector<unsigned char> oracleKcv = oracle_aes_ecb_kcv(keyBits.data(), klen);
+
+        bool present = (hsmKcv.size() == 3);
+        bool matches = present && (hsmKcv == oracleKcv);
+        record_result("KCV", "AES_Generate_KCV_Present",
+                      present ? "PASS" : "FAIL",
+                      present ? "3 bytes: " + hex_bytes(hsmKcv)
+                              : "expected 3 bytes, got " + std::to_string(hsmKcv.size()));
+        record_result("KCV", "AES_Generate_KCV_Equals_OracleEcbZeroBlock",
+                      matches ? "PASS" : "FAIL",
+                      matches ? "HSM=" + hex_bytes(hsmKcv) + " == oracle=" + hex_bytes(oracleKcv)
+                              : "HSM=" + hex_bytes(hsmKcv) + " != oracle=" + hex_bytes(oracleKcv) +
+                                " (PKCS#11 v3.2 §6.10.2: AES-ECB(zero block)[0:3])");
+
+        // ── 2. CKA_CHECK_VALUE after C_UnwrapKey — §4.11 mandate ─────────────
+        // Generate a fresh AES DEK, wrap it with the KEK, unwrap to a new handle,
+        // assert KCV(unwrapped) matches KCV(original) and the AES-ECB oracle.
+        CK_OBJECT_HANDLE hDek = CK_INVALID_HANDLE;
+        rv = fl->C_GenerateKey(hSess, &mech, tpl, sizeof(tpl)/sizeof(tpl[0]), &hDek);
+        if (rv != CKR_OK) {
+            record_result("KCV", "AES_Unwrap_DEK_Setup", "FAIL", "RV=" + std::to_string(rv));
+            fl->C_DestroyObject(hSess, hKek);
+            return;
+        }
+        std::vector<unsigned char> dekBits(klen);
+        CK_ATTRIBUTE dekVtpl[1] = { { CKA_VALUE, dekBits.data(), klen } };
+        fl->C_GetAttributeValue(hSess, hDek, dekVtpl, 1);
+        std::vector<unsigned char> dekKcvOrig = read_kcv(hDek);
+        std::vector<unsigned char> dekKcvOracle = oracle_aes_ecb_kcv(dekBits.data(), klen);
+
+        // Wrap DEK under KEK (CKM_AES_KEY_WRAP).
+        CK_MECHANISM wrapMech = { CKM_AES_KEY_WRAP, NULL_PTR, 0 };
+        CK_BYTE wrapped[64] = {0};
+        CK_ULONG wrappedLen = sizeof(wrapped);
+        rv = fl->C_WrapKey(hSess, &wrapMech, hKek, hDek, wrapped, &wrappedLen);
+        if (rv != CKR_OK) {
+            record_result("KCV", "AES_Wrap_For_Unwrap", "FAIL", "RV=" + std::to_string(rv));
+            fl->C_DestroyObject(hSess, hDek);
+            fl->C_DestroyObject(hSess, hKek);
+            return;
+        }
+
+        // Unwrap to a new handle.
+        CK_OBJECT_HANDLE hDekRec = CK_INVALID_HANDLE;
+        CK_ATTRIBUTE unwrapTpl[] = {
+            { CKA_CLASS,       &cls,    sizeof(cls)    },
+            { CKA_KEY_TYPE,    &kt,     sizeof(kt)     },
+            { CKA_TOKEN,       &bFalse, sizeof(bFalse) },
+            { CKA_SENSITIVE,   &bFalse, sizeof(bFalse) },
+            { CKA_EXTRACTABLE, &bTrue,  sizeof(bTrue)  },
+            { CKA_ENCRYPT,     &bTrue,  sizeof(bTrue)  },
+            { CKA_DECRYPT,     &bTrue,  sizeof(bTrue)  },
+        };
+        rv = fl->C_UnwrapKey(hSess, &wrapMech, hKek, wrapped, wrappedLen,
+                             unwrapTpl, sizeof(unwrapTpl)/sizeof(unwrapTpl[0]), &hDekRec);
+        if (rv != CKR_OK) {
+            record_result("KCV", "AES_UnwrapKey_Succeeds", "FAIL", "RV=" + std::to_string(rv));
+            fl->C_DestroyObject(hSess, hDek);
+            fl->C_DestroyObject(hSess, hKek);
+            return;
+        }
+
+        std::vector<unsigned char> dekKcvRec = read_kcv(hDekRec);
+        bool unwrapKcvPresent = (dekKcvRec.size() == 3);
+        bool unwrapKcvMatchesOriginal = unwrapKcvPresent && (dekKcvRec == dekKcvOrig);
+        bool unwrapKcvMatchesOracle   = unwrapKcvPresent && (dekKcvRec == dekKcvOracle);
+        record_result("KCV", "AES_Unwrap_KCV_Present",
+                      unwrapKcvPresent ? "PASS" : "FAIL",
+                      unwrapKcvPresent ? "3 bytes: " + hex_bytes(dekKcvRec)
+                                       : "PKCS#11 v3.2 §4.11: KCV mandatory after C_UnwrapKey, "
+                                         "got " + std::to_string(dekKcvRec.size()) + " bytes");
+        record_result("KCV", "AES_Unwrap_KCV_Equals_Original",
+                      unwrapKcvMatchesOriginal ? "PASS" : "FAIL",
+                      unwrapKcvMatchesOriginal ? "original=" + hex_bytes(dekKcvOrig) +
+                                                 " unwrapped=" + hex_bytes(dekKcvRec)
+                                               : "PKCS#11 v3.2 §4.11 property 1: "
+                                                 "cryptographically identical keys MUST have identical KCV. "
+                                                 "original=" + hex_bytes(dekKcvOrig) +
+                                                 " unwrapped=" + hex_bytes(dekKcvRec));
+        record_result("KCV", "AES_Unwrap_KCV_Equals_OracleEcbZeroBlock",
+                      unwrapKcvMatchesOracle ? "PASS" : "FAIL",
+                      unwrapKcvMatchesOracle ? "matches AES-ECB(zero block)[0:3] oracle"
+                                             : "deviates from §6.10.2 algorithm");
+
+        fl->C_DestroyObject(hSess, hDekRec);
+        fl->C_DestroyObject(hSess, hDek);
+        fl->C_DestroyObject(hSess, hKek);
+    }
+
+    // ── 3. CKK_GENERIC_SECRET KCV after C_DeriveKey (HKDF) — §4.11 + §6.8.2 ──
+    {
+        // Build a base generic-secret key with known bytes for HKDF input.
+        CK_OBJECT_CLASS cls = CKO_SECRET_KEY;
+        CK_KEY_TYPE     kt  = CKK_GENERIC_SECRET;
+        CK_BBOOL        bTrue = CK_TRUE;
+        CK_BBOOL        bFalse = CK_FALSE;
+        unsigned char baseBits[32] = {
+            0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,
+            0x09,0x0a,0x0b,0x0c,0x0d,0x0e,0x0f,0x10,
+            0x11,0x12,0x13,0x14,0x15,0x16,0x17,0x18,
+            0x19,0x1a,0x1b,0x1c,0x1d,0x1e,0x1f,0x20,
+        };
+        CK_ATTRIBUTE baseTpl[] = {
+            { CKA_CLASS,       &cls,      sizeof(cls)      },
+            { CKA_KEY_TYPE,    &kt,       sizeof(kt)       },
+            { CKA_TOKEN,       &bFalse,   sizeof(bFalse)   },
+            { CKA_SENSITIVE,   &bFalse,   sizeof(bFalse)   },
+            { CKA_EXTRACTABLE, &bTrue,    sizeof(bTrue)    },
+            { CKA_DERIVE,      &bTrue,    sizeof(bTrue)    },
+            { CKA_VALUE,       baseBits,  sizeof(baseBits) },
+        };
+        CK_OBJECT_HANDLE hBase = CK_INVALID_HANDLE;
+        CK_RV rv = fl->C_CreateObject(hSess, baseTpl, sizeof(baseTpl)/sizeof(baseTpl[0]), &hBase);
+        if (rv != CKR_OK) {
+            record_result("KCV", "HKDF_Derive_Base_Setup", "FAIL", "RV=" + std::to_string(rv));
+            return;
+        }
+
+        // HKDF derive a 32-byte generic-secret.
+        CK_ULONG outLen = 32;
+        CK_ATTRIBUTE derTpl[] = {
+            { CKA_CLASS,       &cls,    sizeof(cls)    },
+            { CKA_KEY_TYPE,    &kt,     sizeof(kt)     },
+            { CKA_VALUE_LEN,   &outLen, sizeof(outLen) },
+            { CKA_TOKEN,       &bFalse, sizeof(bFalse) },
+            { CKA_SENSITIVE,   &bFalse, sizeof(bFalse) },
+            { CKA_EXTRACTABLE, &bTrue,  sizeof(bTrue)  },
+        };
+        unsigned char salt[] = { 's','a','l','t' };
+        unsigned char info[] = { 'i','n','f','o' };
+        struct {
+            CK_BBOOL bExtract; CK_BBOOL bExpand;
+            CK_MECHANISM_TYPE prfHashMechanism;
+            CK_ULONG ulSaltType;
+            CK_BYTE_PTR pSalt; CK_ULONG ulSaltLen;
+            CK_OBJECT_HANDLE hSaltKey;
+            CK_BYTE_PTR pInfo; CK_ULONG ulInfoLen;
+        } hkdfParams = {
+            CK_TRUE, CK_TRUE, CKM_SHA256,
+            0x00000002UL /* CKF_HKDF_SALT_DATA */,
+            salt, sizeof(salt), 0,
+            info, sizeof(info),
+        };
+        CK_MECHANISM hkdfMech = { CKM_HKDF_DERIVE, &hkdfParams, sizeof(hkdfParams) };
+        CK_OBJECT_HANDLE hDerived = CK_INVALID_HANDLE;
+        rv = fl->C_DeriveKey(hSess, &hkdfMech, hBase, derTpl, sizeof(derTpl)/sizeof(derTpl[0]), &hDerived);
+        if (rv != CKR_OK) {
+            record_result("KCV", "HKDF_Derive_Succeeds", "FAIL", "RV=" + std::to_string(rv));
+            fl->C_DestroyObject(hSess, hBase);
+            return;
+        }
+
+        // Read derived key bytes + KCV.
+        std::vector<unsigned char> derivedBits(outLen);
+        CK_ATTRIBUTE dvTpl[1] = { { CKA_VALUE, derivedBits.data(), outLen } };
+        rv = fl->C_GetAttributeValue(hSess, hDerived, dvTpl, 1);
+        if (rv != CKR_OK) {
+            record_result("KCV", "HKDF_Derived_CKA_VALUE_Readable", "FAIL", "RV=" + std::to_string(rv));
+            fl->C_DestroyObject(hSess, hDerived);
+            fl->C_DestroyObject(hSess, hBase);
+            return;
+        }
+        std::vector<unsigned char> derivedKcv = read_kcv(hDerived);
+        std::vector<unsigned char> oracleKcv = oracle_sha1_kcv(derivedBits.data(), outLen);
+
+        bool present = (derivedKcv.size() == 3);
+        bool matches = present && (derivedKcv == oracleKcv);
+        record_result("KCV", "HKDF_Derive_KCV_Present",
+                      present ? "PASS" : "FAIL",
+                      present ? "3 bytes: " + hex_bytes(derivedKcv)
+                              : "PKCS#11 v3.2 §4.11: KCV mandatory after C_DeriveKey, "
+                                "got " + std::to_string(derivedKcv.size()) + " bytes");
+        record_result("KCV", "HKDF_Derive_KCV_Equals_OracleSha1",
+                      matches ? "PASS" : "FAIL",
+                      matches ? "HSM=" + hex_bytes(derivedKcv) + " == oracle=" + hex_bytes(oracleKcv)
+                              : "HSM=" + hex_bytes(derivedKcv) + " != oracle=" + hex_bytes(oracleKcv) +
+                                " (PKCS#11 v3.2 §6.8.2: SHA-1(CKA_VALUE)[0:3])");
+
+        fl->C_DestroyObject(hSess, hDerived);
+        fl->C_DestroyObject(hSess, hBase);
+    }
+
+    // ── 4. CKK_GENERIC_SECRET KCV after C_DeriveKey (PBKD2) — §4.11 + §6.8.2 ──
+    {
+        CK_OBJECT_CLASS cls = CKO_SECRET_KEY;
+        CK_KEY_TYPE     kt  = CKK_GENERIC_SECRET;
+        CK_BBOOL        bTrue = CK_TRUE;
+        CK_BBOOL        bFalse = CK_FALSE;
+        CK_ULONG        outLen = 32;
+        CK_ATTRIBUTE derTpl[] = {
+            { CKA_CLASS,       &cls,    sizeof(cls)    },
+            { CKA_KEY_TYPE,    &kt,     sizeof(kt)     },
+            { CKA_VALUE_LEN,   &outLen, sizeof(outLen) },
+            { CKA_TOKEN,       &bFalse, sizeof(bFalse) },
+            { CKA_SENSITIVE,   &bFalse, sizeof(bFalse) },
+            { CKA_EXTRACTABLE, &bTrue,  sizeof(bTrue)  },
+        };
+
+        CK_UTF8CHAR password[] = "compliance-pbkd2-password";
+        CK_BYTE     salt[]     = "compliance-pbkd2-salt";
+        CK_ULONG    iters      = 2048;
+        CK_PKCS5_PBKD2_PARAMS2 pbkdf2Params = {
+            1 /* CKZ_SALT_SPECIFIED */, salt, sizeof(salt) - 1,
+            iters,
+            4 /* CKP_PKCS5_PBKD2_HMAC_SHA256 */, NULL_PTR, 0,
+            password, sizeof(password) - 1
+        };
+        CK_MECHANISM pbkdMech = { CKM_PKCS5_PBKD2, &pbkdf2Params, sizeof(pbkdf2Params) };
+        CK_OBJECT_HANDLE hDerived = CK_INVALID_HANDLE;
+        // PBKD2 does not require a base key — pass CK_INVALID_HANDLE.
+        CK_RV rv = fl->C_DeriveKey(hSess, &pbkdMech, CK_INVALID_HANDLE,
+                                   derTpl, sizeof(derTpl)/sizeof(derTpl[0]), &hDerived);
+        if (rv != CKR_OK) {
+            record_result("KCV", "PBKD2_Derive_Succeeds", "FAIL", "RV=" + std::to_string(rv));
+        } else {
+            std::vector<unsigned char> derivedBits(outLen);
+            CK_ATTRIBUTE dvTpl[1] = { { CKA_VALUE, derivedBits.data(), outLen } };
+            CK_RV rv2 = fl->C_GetAttributeValue(hSess, hDerived, dvTpl, 1);
+            if (rv2 != CKR_OK) {
+                record_result("KCV", "PBKD2_Derived_CKA_VALUE_Readable", "FAIL",
+                              "RV=" + std::to_string(rv2));
+            } else {
+                std::vector<unsigned char> derivedKcv = read_kcv(hDerived);
+                std::vector<unsigned char> oracleKcv  = oracle_sha1_kcv(derivedBits.data(), outLen);
+                bool present = (derivedKcv.size() == 3);
+                bool matches = present && (derivedKcv == oracleKcv);
+                record_result("KCV", "PBKD2_Derive_KCV_Present",
+                              present ? "PASS" : "FAIL",
+                              present ? "3 bytes: " + hex_bytes(derivedKcv)
+                                      : "PKCS#11 v3.2 §4.11: KCV mandatory after C_DeriveKey, "
+                                        "got " + std::to_string(derivedKcv.size()) + " bytes");
+                record_result("KCV", "PBKD2_Derive_KCV_Equals_OracleSha1",
+                              matches ? "PASS" : "FAIL",
+                              matches ? "HSM=" + hex_bytes(derivedKcv) + " == oracle=" + hex_bytes(oracleKcv)
+                                      : "HSM=" + hex_bytes(derivedKcv) + " != oracle=" + hex_bytes(oracleKcv) +
+                                        " (PKCS#11 v3.2 §6.8.2: SHA-1(CKA_VALUE)[0:3])");
+            }
+            fl->C_DestroyObject(hSess, hDerived);
+        }
+    }
+
+    // ── 5. CKK_GENERIC_SECRET KCV after C_DeriveKey (SP800-108 Counter) — §4.11 + §6.8.2 ──
+    {
+        CK_OBJECT_CLASS cls = CKO_SECRET_KEY;
+        CK_KEY_TYPE     kt  = CKK_GENERIC_SECRET;
+        CK_BBOOL        bTrue = CK_TRUE;
+        CK_BBOOL        bFalse = CK_FALSE;
+        unsigned char baseBits[32] = {
+            0x21,0x22,0x23,0x24,0x25,0x26,0x27,0x28,
+            0x29,0x2a,0x2b,0x2c,0x2d,0x2e,0x2f,0x30,
+            0x31,0x32,0x33,0x34,0x35,0x36,0x37,0x38,
+            0x39,0x3a,0x3b,0x3c,0x3d,0x3e,0x3f,0x40,
+        };
+        CK_ATTRIBUTE baseTpl[] = {
+            { CKA_CLASS,       &cls,    sizeof(cls)      },
+            { CKA_KEY_TYPE,    &kt,     sizeof(kt)       },
+            { CKA_TOKEN,       &bFalse, sizeof(bFalse)   },
+            { CKA_SENSITIVE,   &bFalse, sizeof(bFalse)   },
+            { CKA_EXTRACTABLE, &bTrue,  sizeof(bTrue)    },
+            { CKA_DERIVE,      &bTrue,  sizeof(bTrue)    },
+            { CKA_VALUE,       baseBits, sizeof(baseBits) },
+        };
+        CK_OBJECT_HANDLE hBase = CK_INVALID_HANDLE;
+        CK_RV rv = fl->C_CreateObject(hSess, baseTpl, sizeof(baseTpl)/sizeof(baseTpl[0]), &hBase);
+        if (rv != CKR_OK) {
+            record_result("KCV", "SP800_108_Counter_Base_Setup", "FAIL", "RV=" + std::to_string(rv));
+        } else {
+            CK_ULONG outLen = 32;
+            CK_ATTRIBUTE derTpl[] = {
+                { CKA_CLASS,       &cls,    sizeof(cls)    },
+                { CKA_KEY_TYPE,    &kt,     sizeof(kt)     },
+                { CKA_VALUE_LEN,   &outLen, sizeof(outLen) },
+                { CKA_TOKEN,       &bFalse, sizeof(bFalse) },
+                { CKA_SENSITIVE,   &bFalse, sizeof(bFalse) },
+                { CKA_EXTRACTABLE, &bTrue,  sizeof(bTrue)  },
+            };
+            CK_BYTE label[]   = "compliance-counter-label";
+            CK_BYTE context[] = "compliance-counter-context";
+            CK_PRF_DATA_PARAM prfParams[] = {
+                { 1 /* CK_SP800_108_INITIAL_COUNTER */, NULL_PTR, 0 },
+                { 2 /* CK_SP800_108_LABEL */,           label,    sizeof(label)   - 1 },
+                { 3 /* CK_SP800_108_CONTEXT */,         context,  sizeof(context) - 1 },
+            };
+            CK_SP800_108_KDF_PARAMS ctrParams = {
+                CKM_SHA256, 3, prfParams, 0, NULL_PTR
+            };
+            CK_MECHANISM ctrMech = { CKM_SP800_108_COUNTER_KDF, &ctrParams, sizeof(ctrParams) };
+            CK_OBJECT_HANDLE hDerived = CK_INVALID_HANDLE;
+            rv = fl->C_DeriveKey(hSess, &ctrMech, hBase,
+                                 derTpl, sizeof(derTpl)/sizeof(derTpl[0]), &hDerived);
+            if (rv == CKR_MECHANISM_INVALID || rv == CKR_FUNCTION_NOT_SUPPORTED) {
+                record_result("KCV", "SP800_108_Counter_Derive_KCV_Present", "SKIP",
+                              "CKM_SP800_108_COUNTER_KDF unavailable");
+                record_result("KCV", "SP800_108_Counter_Derive_KCV_Equals_OracleSha1", "SKIP",
+                              "CKM_SP800_108_COUNTER_KDF unavailable");
+            } else if (rv != CKR_OK) {
+                record_result("KCV", "SP800_108_Counter_Derive_Succeeds", "FAIL",
+                              "RV=" + std::to_string(rv));
+            } else {
+                std::vector<unsigned char> derivedBits(outLen);
+                CK_ATTRIBUTE dvTpl[1] = { { CKA_VALUE, derivedBits.data(), outLen } };
+                CK_RV rv2 = fl->C_GetAttributeValue(hSess, hDerived, dvTpl, 1);
+                if (rv2 != CKR_OK) {
+                    record_result("KCV", "SP800_108_Counter_Derived_CKA_VALUE_Readable", "FAIL",
+                                  "RV=" + std::to_string(rv2));
+                } else {
+                    std::vector<unsigned char> derivedKcv = read_kcv(hDerived);
+                    std::vector<unsigned char> oracleKcv  = oracle_sha1_kcv(derivedBits.data(), outLen);
+                    bool present = (derivedKcv.size() == 3);
+                    bool matches = present && (derivedKcv == oracleKcv);
+                    record_result("KCV", "SP800_108_Counter_Derive_KCV_Present",
+                                  present ? "PASS" : "FAIL",
+                                  present ? "3 bytes: " + hex_bytes(derivedKcv)
+                                          : "PKCS#11 v3.2 §4.11: KCV mandatory after C_DeriveKey, "
+                                            "got " + std::to_string(derivedKcv.size()) + " bytes");
+                    record_result("KCV", "SP800_108_Counter_Derive_KCV_Equals_OracleSha1",
+                                  matches ? "PASS" : "FAIL",
+                                  matches ? "HSM=" + hex_bytes(derivedKcv) + " == oracle=" + hex_bytes(oracleKcv)
+                                          : "HSM=" + hex_bytes(derivedKcv) + " != oracle=" + hex_bytes(oracleKcv) +
+                                            " (PKCS#11 v3.2 §6.8.2: SHA-1(CKA_VALUE)[0:3])");
+                }
+                fl->C_DestroyObject(hSess, hDerived);
+            }
+            fl->C_DestroyObject(hSess, hBase);
+        }
+    }
+
+    // ── 6. CKK_GENERIC_SECRET KCV after C_DeriveKey (SP800-108 Feedback) — §4.11 + §6.8.2 ──
+    {
+        CK_OBJECT_CLASS cls = CKO_SECRET_KEY;
+        CK_KEY_TYPE     kt  = CKK_GENERIC_SECRET;
+        CK_BBOOL        bTrue = CK_TRUE;
+        CK_BBOOL        bFalse = CK_FALSE;
+        unsigned char baseBits[32] = {
+            0x41,0x42,0x43,0x44,0x45,0x46,0x47,0x48,
+            0x49,0x4a,0x4b,0x4c,0x4d,0x4e,0x4f,0x50,
+            0x51,0x52,0x53,0x54,0x55,0x56,0x57,0x58,
+            0x59,0x5a,0x5b,0x5c,0x5d,0x5e,0x5f,0x60,
+        };
+        CK_ATTRIBUTE baseTpl[] = {
+            { CKA_CLASS,       &cls,    sizeof(cls)      },
+            { CKA_KEY_TYPE,    &kt,     sizeof(kt)       },
+            { CKA_TOKEN,       &bFalse, sizeof(bFalse)   },
+            { CKA_SENSITIVE,   &bFalse, sizeof(bFalse)   },
+            { CKA_EXTRACTABLE, &bTrue,  sizeof(bTrue)    },
+            { CKA_DERIVE,      &bTrue,  sizeof(bTrue)    },
+            { CKA_VALUE,       baseBits, sizeof(baseBits) },
+        };
+        CK_OBJECT_HANDLE hBase = CK_INVALID_HANDLE;
+        CK_RV rv = fl->C_CreateObject(hSess, baseTpl, sizeof(baseTpl)/sizeof(baseTpl[0]), &hBase);
+        if (rv != CKR_OK) {
+            record_result("KCV", "SP800_108_Feedback_Base_Setup", "FAIL", "RV=" + std::to_string(rv));
+        } else {
+            CK_ULONG outLen = 32;
+            CK_ATTRIBUTE derTpl[] = {
+                { CKA_CLASS,       &cls,    sizeof(cls)    },
+                { CKA_KEY_TYPE,    &kt,     sizeof(kt)     },
+                { CKA_VALUE_LEN,   &outLen, sizeof(outLen) },
+                { CKA_TOKEN,       &bFalse, sizeof(bFalse) },
+                { CKA_SENSITIVE,   &bFalse, sizeof(bFalse) },
+                { CKA_EXTRACTABLE, &bTrue,  sizeof(bTrue)  },
+            };
+            CK_BYTE label[]   = "compliance-feedback-label";
+            CK_BYTE context[] = "compliance-feedback-context";
+            CK_PRF_DATA_PARAM prfParams[] = {
+                { 1 /* CK_SP800_108_INITIAL_COUNTER */, NULL_PTR, 0 },
+                { 2 /* CK_SP800_108_LABEL */,           label,    sizeof(label)   - 1 },
+                { 3 /* CK_SP800_108_CONTEXT */,         context,  sizeof(context) - 1 },
+            };
+            CK_SP800_108_FEEDBACK_KDF_PARAMS fbkParams = {
+                CKM_SHA256, 3, prfParams,
+                0, NULL_PTR,   // ulIVLen, pIV
+                0, NULL_PTR    // ulAdditionalDerivedKeys, pAdditionalDerivedKeys
+            };
+            CK_MECHANISM fbkMech = { CKM_SP800_108_FEEDBACK_KDF, &fbkParams, sizeof(fbkParams) };
+            CK_OBJECT_HANDLE hDerived = CK_INVALID_HANDLE;
+            rv = fl->C_DeriveKey(hSess, &fbkMech, hBase,
+                                 derTpl, sizeof(derTpl)/sizeof(derTpl[0]), &hDerived);
+            if (rv == CKR_MECHANISM_INVALID || rv == CKR_FUNCTION_NOT_SUPPORTED) {
+                record_result("KCV", "SP800_108_Feedback_Derive_KCV_Present", "SKIP",
+                              "CKM_SP800_108_FEEDBACK_KDF unavailable");
+                record_result("KCV", "SP800_108_Feedback_Derive_KCV_Equals_OracleSha1", "SKIP",
+                              "CKM_SP800_108_FEEDBACK_KDF unavailable");
+            } else if (rv != CKR_OK) {
+                record_result("KCV", "SP800_108_Feedback_Derive_Succeeds", "FAIL",
+                              "RV=" + std::to_string(rv));
+            } else {
+                std::vector<unsigned char> derivedBits(outLen);
+                CK_ATTRIBUTE dvTpl[1] = { { CKA_VALUE, derivedBits.data(), outLen } };
+                CK_RV rv2 = fl->C_GetAttributeValue(hSess, hDerived, dvTpl, 1);
+                if (rv2 != CKR_OK) {
+                    record_result("KCV", "SP800_108_Feedback_Derived_CKA_VALUE_Readable", "FAIL",
+                                  "RV=" + std::to_string(rv2));
+                } else {
+                    std::vector<unsigned char> derivedKcv = read_kcv(hDerived);
+                    std::vector<unsigned char> oracleKcv  = oracle_sha1_kcv(derivedBits.data(), outLen);
+                    bool present = (derivedKcv.size() == 3);
+                    bool matches = present && (derivedKcv == oracleKcv);
+                    record_result("KCV", "SP800_108_Feedback_Derive_KCV_Present",
+                                  present ? "PASS" : "FAIL",
+                                  present ? "3 bytes: " + hex_bytes(derivedKcv)
+                                          : "PKCS#11 v3.2 §4.11: KCV mandatory after C_DeriveKey, "
+                                            "got " + std::to_string(derivedKcv.size()) + " bytes");
+                    record_result("KCV", "SP800_108_Feedback_Derive_KCV_Equals_OracleSha1",
+                                  matches ? "PASS" : "FAIL",
+                                  matches ? "HSM=" + hex_bytes(derivedKcv) + " == oracle=" + hex_bytes(oracleKcv)
+                                          : "HSM=" + hex_bytes(derivedKcv) + " != oracle=" + hex_bytes(oracleKcv) +
+                                            " (PKCS#11 v3.2 §6.8.2: SHA-1(CKA_VALUE)[0:3])");
+                }
+                fl->C_DestroyObject(hSess, hDerived);
+            }
+            fl->C_DestroyObject(hSess, hBase);
+        }
+    }
+}
+
 int main(int argc, char** argv) {
     parse_args(argc, argv);
-    
+
     printf("--- PKCS#11 v3.2 Compliance Test Tool ---\n");
     printf("Engine: %s\n", opt_engine.c_str());
 
@@ -2467,6 +2997,9 @@ int main(int argc, char** argv) {
     }
     if (opt_category == "all" || opt_category == "authwrap") {
         refresh_session(); test_authenticated_wrap();
+    }
+    if (opt_category == "all" || opt_category == "kcv") {
+        refresh_session(); test_kcv_compliance();
     }
     
     if (opt_category == "all" || opt_category == "classical") {

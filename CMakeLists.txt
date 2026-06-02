@@ -156,5 +156,11 @@ endif()
 
 if(NOT EMSCRIPTEN AND BUILD_TESTS)
     add_executable(p11_v32_compliance_test p11_v32_compliance_test.cpp)
-    target_link_libraries(p11_v32_compliance_test dl)
+    # OpenSSL is used as an INDEPENDENT reference oracle for KCV tests —
+    # the test computes SHA-1(keyBits)[0:3] / AES-ECB(zero block)[0:3]
+    # locally and compares against what the HSM returned. Without an
+    # independent oracle the test can't tell a buggy KCV from a buggy
+    # SHA-1 digest in the HSM that happens to fail in the same direction.
+    target_include_directories(p11_v32_compliance_test PRIVATE ${OPENSSL_INCLUDE_DIR})
+    target_link_libraries(p11_v32_compliance_test dl ${OPENSSL_LIBRARIES})
 endif()

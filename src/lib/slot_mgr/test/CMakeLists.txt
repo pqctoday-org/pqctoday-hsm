@@ -9,6 +9,7 @@ set(INCLUDE_DIRS ${PROJECT_SOURCE_DIR}/..
                  ${PROJECT_SOURCE_DIR}/../../pkcs11
                  ${PROJECT_SOURCE_DIR}/../../session_mgr
                  ${CRYPTO_INCLUDES}
+                 ${CPPUNIT_INCLUDES}
                  )
 
 set(SOURCES slotmgrtest.cpp
