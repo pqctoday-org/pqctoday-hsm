@@ -114,6 +114,27 @@ static ByteString computeAsymKCV(const ByteString& keyValue)
 	return digest.substr(0, 3);
 }
 
+// Compute secret-key check value per PKCS#11 v3.2 §4.11 / §4.10.2:
+//   • CKK_AES → AES-ECB(zero block)[0:3]   (matches AESKey::getKeyCheckValue)
+//   • other symmetric key types → SHA-256(keyBits)[0:3]   (matches SymmetricKey::getKeyCheckValue)
+// §4.11 mandates KCV "regardless of how the key object is created or derived" —
+// used by C_UnwrapKey + C_DeriveKey (HKDF, SP800-108, PBKD2) to populate
+// CKA_CHECK_VALUE consistently with C_GenerateKey.
+static ByteString computeSecretKeyKCV(CK_KEY_TYPE keyType, const ByteString& keyBits)
+{
+	if (keyBits.size() == 0) return ByteString("");
+	if (keyType == CKK_AES)
+	{
+		AESKey aesKey(keyBits.size() * 8);
+		aesKey.setKeyBits(keyBits);
+		return aesKey.getKeyCheckValue();
+	}
+	SymmetricKey symKey;
+	symKey.setKeyBits(keyBits);
+	symKey.setBitLen(keyBits.size() * 8);
+	return symKey.getKeyCheckValue();
+}
+
 // KDF helpers: map PKCS#11 v3.2 CKD_* identifiers to OpenSSL digest names (for X9.63 KDF)
 static const char* ckdToDigestName(CK_ULONG kdf)
 {
@@ -1724,6 +1745,13 @@ CK_RV SoftHSM::C_UnwrapKey
 	};
 	CK_ULONG secretAttribsCount = 4;
 
+	// PKCS#11 v3.2 §4.11: CKA_CHECK_VALUE is auto-computed for secret keys.
+	// The application MAY suppress KCV generation by supplying a no-value
+	// (0-length) CKA_CHECK_VALUE in the template. A non-empty supplied value
+	// is rejected (we don't support template-side KCV verification, matching
+	// generateAES/generateGeneric behavior).
+	bool checkValue = true;
+
 	// Add the additional
 	if (ulCount > (maxAttribs - secretAttribsCount))
 		return CKR_TEMPLATE_INCONSISTENT;
@@ -1735,6 +1763,14 @@ CK_RV SoftHSM::C_UnwrapKey
 			case CKA_TOKEN:
 			case CKA_PRIVATE:
 			case CKA_KEY_TYPE:
+				continue;
+			case CKA_CHECK_VALUE:
+				if (pTemplate[i].ulValueLen > 0)
+				{
+					INFO_MSG("CKA_CHECK_VALUE must be a no-value (0 length) entry");
+					return CKR_ATTRIBUTE_VALUE_INVALID;
+				}
+				checkValue = false;
 				continue;
 			default:
 				secretAttribs[secretAttribsCount++] = pTemplate[i];
@@ -1841,6 +1877,17 @@ CK_RV SoftHSM::C_UnwrapKey
 				else
 					value = keydata;
 				bOK = bOK && osobject->setAttribute(CKA_VALUE, value);
+
+				// PKCS#11 v3.2 §4.11: KCV "SHALL be supplied … regardless of
+				// how the key object is created or derived" → covers C_UnwrapKey.
+				// KCV is always stored in clear, computed over the plaintext
+				// key bits (NOT the token-encrypted blob).
+				if (checkValue)
+				{
+					ByteString kcv = computeSecretKeyKCV(keyType, keydata);
+					if (kcv.size() == 3)
+						bOK = bOK && osobject->setAttribute(CKA_CHECK_VALUE, kcv);
+				}
 			}
 			else if (keyType == CKK_RSA)
 			{
@@ -2381,6 +2428,7 @@ CK_RV SoftHSM::C_DeriveKey
 			{ CKA_KEY_TYPE, &pbkdKeyType,  sizeof(pbkdKeyType)  },
 		};
 		CK_ULONG pbkdAttribsCount = 4;
+		bool pbkdCheckValue = true;
 		for (CK_ULONG i = 0; i < ulCount && pbkdAttribsCount < pbkdMaxAttribs; i++)
 		{
 			switch (pTemplate[i].type)
@@ -2389,7 +2437,14 @@ CK_RV SoftHSM::C_DeriveKey
 				case CKA_TOKEN:
 				case CKA_PRIVATE:
 				case CKA_KEY_TYPE:
+					continue;
 				case CKA_CHECK_VALUE:
+					if (pTemplate[i].ulValueLen > 0)
+					{
+						INFO_MSG("CKM_PKCS5_PBKD2: CKA_CHECK_VALUE must be a no-value (0 length) entry");
+						return CKR_ATTRIBUTE_VALUE_INVALID;
+					}
+					pbkdCheckValue = false;
 					continue;
 				default:
 					pbkdAttribs[pbkdAttribsCount++] = pTemplate[i];
@@ -2422,6 +2477,14 @@ CK_RV SoftHSM::C_DeriveKey
 		else
 			pbkdValue = pbkdSymKey.getKeyBits();
 		pbkdOK = pbkdOK && pbkdObj->setAttribute(CKA_VALUE, pbkdValue);
+
+		// PKCS#11 v3.2 §4.11: KCV mandatory regardless of creation path (incl. derive).
+		if (pbkdCheckValue)
+		{
+			ByteString pbkdKcv = computeSecretKeyKCV(pbkdKeyType, pbkdSymKey.getKeyBits());
+			if (pbkdKcv.size() == 3)
+				pbkdOK = pbkdOK && pbkdObj->setAttribute(CKA_CHECK_VALUE, pbkdKcv);
+		}
 
 		if (pbkdOK)
 			pbkdObj->commitTransaction();
@@ -2823,12 +2886,21 @@ CK_RV SoftHSM::C_DeriveKey
 			{ CKA_KEY_TYPE, &kbkKeyType,  sizeof(kbkKeyType)  },
 		};
 		CK_ULONG kbkAttribsCount = 4;
+		bool kbkCheckValue = true;
 		for (CK_ULONG i = 0; i < ulCount && kbkAttribsCount < kbkMaxAttribs; i++)
 		{
 			switch (pTemplate[i].type)
 			{
 				case CKA_CLASS: case CKA_TOKEN: case CKA_PRIVATE:
-				case CKA_KEY_TYPE: case CKA_CHECK_VALUE: continue;
+				case CKA_KEY_TYPE: continue;
+				case CKA_CHECK_VALUE:
+					if (pTemplate[i].ulValueLen > 0)
+					{
+						INFO_MSG("CKM_SP800_108_COUNTER_KDF: CKA_CHECK_VALUE must be a no-value (0 length) entry");
+						return CKR_ATTRIBUTE_VALUE_INVALID;
+					}
+					kbkCheckValue = false;
+					continue;
 				default: kbkAttribs[kbkAttribsCount++] = pTemplate[i]; break;
 			}
 		}
@@ -2858,6 +2930,14 @@ CK_RV SoftHSM::C_DeriveKey
 		else
 			kbkValue = kbkSymKey.getKeyBits();
 		kbkOK = kbkOK && kbkObj->setAttribute(CKA_VALUE, kbkValue);
+
+		// PKCS#11 v3.2 §4.11: KCV mandatory regardless of creation path (incl. derive).
+		if (kbkCheckValue)
+		{
+			ByteString kbkKcv = computeSecretKeyKCV(kbkKeyType, kbkSymKey.getKeyBits());
+			if (kbkKcv.size() == 3)
+				kbkOK = kbkOK && kbkObj->setAttribute(CKA_CHECK_VALUE, kbkKcv);
+		}
 
 		if (kbkOK)
 			kbkObj->commitTransaction();
@@ -3032,12 +3112,21 @@ CK_RV SoftHSM::C_DeriveKey
 			{ CKA_KEY_TYPE, &fbkKeyType,  sizeof(fbkKeyType)  },
 		};
 		CK_ULONG fbkAttribsCount = 4;
+		bool fbkCheckValue = true;
 		for (CK_ULONG i = 0; i < ulCount && fbkAttribsCount < fbkMaxAttribs; i++)
 		{
 			switch (pTemplate[i].type)
 			{
 				case CKA_CLASS: case CKA_TOKEN: case CKA_PRIVATE:
-				case CKA_KEY_TYPE: case CKA_CHECK_VALUE: continue;
+				case CKA_KEY_TYPE: continue;
+				case CKA_CHECK_VALUE:
+					if (pTemplate[i].ulValueLen > 0)
+					{
+						INFO_MSG("CKM_SP800_108_FEEDBACK_KDF: CKA_CHECK_VALUE must be a no-value (0 length) entry");
+						return CKR_ATTRIBUTE_VALUE_INVALID;
+					}
+					fbkCheckValue = false;
+					continue;
 				default: fbkAttribs[fbkAttribsCount++] = pTemplate[i]; break;
 			}
 		}
@@ -3067,6 +3156,14 @@ CK_RV SoftHSM::C_DeriveKey
 		else
 			fbkValue = fbkSymKey.getKeyBits();
 		fbkOK = fbkOK && fbkObj->setAttribute(CKA_VALUE, fbkValue);
+
+		// PKCS#11 v3.2 §4.11: KCV mandatory regardless of creation path (incl. derive).
+		if (fbkCheckValue)
+		{
+			ByteString fbkKcv = computeSecretKeyKCV(fbkKeyType, fbkSymKey.getKeyBits());
+			if (fbkKcv.size() == 3)
+				fbkOK = fbkOK && fbkObj->setAttribute(CKA_CHECK_VALUE, fbkKcv);
+		}
 
 		if (fbkOK)
 			fbkObj->commitTransaction();
@@ -3223,12 +3320,21 @@ CK_RV SoftHSM::C_DeriveKey
 			{ CKA_KEY_TYPE, &hkdfKeyType,  sizeof(hkdfKeyType)  },
 		};
 		CK_ULONG hkdfAttribsCount = 4;
+		bool hkdfCheckValue = true;
 		for (CK_ULONG i = 0; i < ulCount && hkdfAttribsCount < hkdfMaxAttribs; i++)
 		{
 			switch (pTemplate[i].type)
 			{
 				case CKA_CLASS: case CKA_TOKEN: case CKA_PRIVATE:
-				case CKA_KEY_TYPE: case CKA_CHECK_VALUE: continue;
+				case CKA_KEY_TYPE: continue;
+				case CKA_CHECK_VALUE:
+					if (pTemplate[i].ulValueLen > 0)
+					{
+						INFO_MSG("CKM_HKDF_DERIVE: CKA_CHECK_VALUE must be a no-value (0 length) entry");
+						return CKR_ATTRIBUTE_VALUE_INVALID;
+					}
+					hkdfCheckValue = false;
+					continue;
 				default: hkdfAttribs[hkdfAttribsCount++] = pTemplate[i]; break;
 			}
 		}
@@ -3258,6 +3364,14 @@ CK_RV SoftHSM::C_DeriveKey
 		else
 			hkdfValue = hkdfSymKey.getKeyBits();
 		hkdfOK = hkdfOK && hkdfObj->setAttribute(CKA_VALUE, hkdfValue);
+
+		// PKCS#11 v3.2 §4.11: KCV mandatory regardless of creation path (incl. derive).
+		if (hkdfCheckValue)
+		{
+			ByteString hkdfKcv = computeSecretKeyKCV(hkdfKeyType, hkdfSymKey.getKeyBits());
+			if (hkdfKcv.size() == 3)
+				hkdfOK = hkdfOK && hkdfObj->setAttribute(CKA_CHECK_VALUE, hkdfKcv);
+		}
 
 		if (hkdfOK)
 			hkdfObj->commitTransaction();
