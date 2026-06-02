@@ -1527,7 +1527,11 @@ pub fn C_GenerateKeyPair(
                 // Public key attributes
                 store_ulong(&mut pub_attrs, CKA_CLASS, CKO_PUBLIC_KEY);
                 store_ulong(&mut pub_attrs, CKA_KEY_TYPE, CKK_XMSS);
-                store_ulong(&mut pub_attrs, CKA_XMSS_PARAM_SET, param_code);
+                // Store the EFFECTIVE xmss_param (with default applied) — not
+                // the raw param_code. xmss_sign / xmss_verify read this attr
+                // and dispatch on it; a stored 0 falls into the catch-all
+                // `_ => Err(CKR_FUNCTION_FAILED)` arm and breaks every sign.
+                store_ulong(&mut pub_attrs, CKA_XMSS_PARAM_SET, xmss_param);
                 store_ulong(&mut pub_attrs, CKA_KEY_GEN_MECHANISM, CKM_XMSS_KEY_PAIR_GEN);
                 store_bool(&mut pub_attrs, CKA_TOKEN, false);
                 store_bool(&mut pub_attrs, CKA_PRIVATE, false);
@@ -1538,7 +1542,7 @@ pub fn C_GenerateKeyPair(
                 // Private key attributes
                 store_ulong(&mut prv_attrs, CKA_CLASS, CKO_PRIVATE_KEY);
                 store_ulong(&mut prv_attrs, CKA_KEY_TYPE, CKK_XMSS);
-                store_ulong(&mut prv_attrs, CKA_XMSS_PARAM_SET, param_code);
+                store_ulong(&mut prv_attrs, CKA_XMSS_PARAM_SET, xmss_param);
                 store_ulong(&mut prv_attrs, CKA_KEY_GEN_MECHANISM, CKM_XMSS_KEY_PAIR_GEN);
                 store_bool(&mut prv_attrs, CKA_TOKEN, false);
                 store_bool(&mut prv_attrs, CKA_PRIVATE, true);
