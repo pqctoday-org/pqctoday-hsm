@@ -24,7 +24,7 @@ All participants must follow our [Code of Conduct](CODE_OF_CONDUCT.md).
 | OpenSSL | 3.5.0 (native + WASM builds, enforced by `CMakeLists.txt` line 93; also linked by `p11_v32_compliance_test` as an independent oracle) |
 | Emscripten | 3.1.x (WASM build) |
 | C++ compiler | C++17 (GCC 10+, Clang 14+, MSVC 2022+) |
-| CppUnit | 1.15+ (only needed for the legacy upstream test suite — currently blocked, see warning below) |
+| CppUnit | 1.15+ (only needed for the legacy upstream test suite under `src/lib/*/test/`) |
 
 On macOS the Homebrew OpenSSL is not on the default search path; pass `-DOPENSSL_ROOT_DIR=$(brew --prefix openssl@3)` to every `cmake` invocation below.
 
@@ -36,7 +36,7 @@ cmake -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBUILD_TESTS=ON \
 cmake --build build -j$(nproc)
 ```
 
-> ⚠️ **Known issue (as of 2026-06-01):** a full `cmake --build build` with `BUILD_TESTS=ON` currently fails inside the legacy CppUnit-based upstream test targets under `src/lib/*/test/` with `fatal error: 'cppunit/extensions/HelperMacros.h' file not found`. The CppUnit include path is not propagated to those sub-targets. The failures are unrelated to library code; the shared library itself (`libsofthsmv3.dylib`) and the `p11_v32_compliance_test` binary both build cleanly. Use one of the targeted-build workflows below until the upstream-test infra is repaired. Tracked in a follow-up; do not block your PR on it.
+A full `cmake --build build` with `BUILD_TESTS=ON` builds everything: the shared library (`libsofthsmv3.dylib`), the modern `p11_v32_compliance_test` binary, and the legacy CppUnit-based upstream test targets under `src/lib/*/test/`. Earlier in 2026-06-01 the legacy targets failed with `fatal error: 'cppunit/extensions/HelperMacros.h' file not found` because the `CPPUNIT_INCLUDES` variable was not propagated to the per-sub-target `INCLUDE_DIRS` lists; that was fixed by commit `15ec74d` and CI now builds every target cleanly.
 
 ### Compliance-test-only workflow (recommended)
 
@@ -60,9 +60,9 @@ Supported `--category` values: `all`, `init`, `discovery`, `attr`, `pqc-kem`, `p
 
 Reports land in `compliance_report.json` and `compliance_report.md`.
 
-### Legacy CppUnit suite (currently blocked)
+### Legacy CppUnit suite
 
-`ctest --test-dir build --output-on-failure` cannot run end-to-end while the CppUnit include propagation is broken. If you need to run a specific legacy test target after that's fixed, the targets live under `src/lib/{crypto,data_mgr,session_mgr,slot_mgr,object_store}/test/`.
+`ctest --test-dir build --output-on-failure` runs the upstream SoftHSMv2 CppUnit suite. Individual targets live under `src/lib/{crypto,data_mgr,session_mgr,slot_mgr,object_store,handle_mgr}/test/` and can be built one at a time via `cmake --build build --target cryptotest` etc.
 
 ### WASM build
 
