@@ -1041,8 +1041,8 @@ pub fn C_GenerateKeyPair(
                 );
                 // PKCS#11 v3.2 §2.1.2 — RSA public key MUST expose CKA_MODULUS and
                 // CKA_PUBLIC_EXPONENT as distinct attributes (not packed into CKA_VALUE).
-                pub_attrs.insert(CKA_MODULUS, n_bytes.to_vec());
-                pub_attrs.insert(CKA_PUBLIC_EXPONENT, e_bytes.to_vec());
+                pub_attrs.insert(CKA_MODULUS, n_bytes.clone());
+                pub_attrs.insert(CKA_PUBLIC_EXPONENT, e_bytes.clone());
                 store_ulong(&mut pub_attrs, CKA_MODULUS_BITS, bits as u32);
                 // SubjectPublicKeyInfo DER (CKA_PUBLIC_KEY_INFO)
                 {
@@ -1051,6 +1051,20 @@ pub fn C_GenerateKeyPair(
                         pub_attrs.insert(CKA_PUBLIC_KEY_INFO, spki_der.as_bytes().to_vec());
                     }
                 }
+                // Internal CKA_VALUE in packed `[n_len:4LE][n_bytes][e_bytes]`
+                // format. This is the Rust engine's per-object cipher-input
+                // convention used by C_Encrypt/C_WrapKey (CKM_RSA_PKCS_OAEP) and
+                // C_Decrypt/C_UnwrapKey. Storing it here means
+                // get_object_value(pub_handle) returns a parsable buffer; without
+                // this, C_WrapKey returns CKR_ARGUMENTS_BAD (0x07) because no
+                // CKA_VALUE exists on the public-key object. The C++ engine
+                // doesn't need this because OpenSSL EVP keys carry both halves
+                // natively; the Rust engine reconstructs from raw modulus/exp.
+                let mut packed = Vec::with_capacity(4 + n_bytes.len() + e_bytes.len());
+                packed.extend_from_slice(&(n_bytes.len() as u32).to_le_bytes());
+                packed.extend_from_slice(&n_bytes);
+                packed.extend_from_slice(&e_bytes);
+                pub_attrs.insert(CKA_VALUE, packed);
                 prv_attrs.insert(CKA_VALUE, sk_der.as_bytes().to_vec());
                 absorb_template_attrs(
                     &mut pub_attrs,
@@ -3428,6 +3442,9 @@ pub fn C_DeriveKey(
             store_bool(&mut attrs, CKA_SENSITIVE, !extractable);
             store_bool(&mut attrs, CKA_EXTRACTABLE, extractable);
 
+            // PKCS#11 v3.2 §4.11: KCV mandatory on derived secret keys.
+            crate::state::compute_kcv(&mut attrs);
+
             *ph_key = allocate_handle(attrs);
             return CKR_OK;
         }
@@ -3923,6 +3940,10 @@ pub fn C_DeriveKey(
         store_bool(&mut attrs, CKA_LOCAL, true); // PKCS#11 v3.2 §4.3 — derived = locally generated
         store_ulong(&mut attrs, CKA_KEY_GEN_MECHANISM, mech_type); // PKCS#11 v3.2 §4.3
         finalize_private_key_attrs(&mut attrs); // sets CKA_ALWAYS_SENSITIVE + CKA_NEVER_EXTRACTABLE
+
+        // PKCS#11 v3.2 §4.11: KCV mandatory on every secret-key derivation result.
+        crate::state::compute_kcv(&mut attrs);
+
         *ph_key = allocate_handle(attrs);
     }
     CKR_OK
@@ -4237,6 +4258,13 @@ pub fn C_UnwrapKey(
             }
         }
 
+        // PKCS#11 v3.2 §4.10.2 / §4.11: CKA_CHECK_VALUE is mandatory on all
+        // secret-key objects regardless of how the key was created. C_UnwrapKey
+        // builds a new secret-key object from the unwrapped bytes, so the KCV
+        // MUST be computed and stored before the handle is exposed. Mirrors
+        // the C++ engine's C_UnwrapKey path (SoftHSM_keygen.cpp §C_UnwrapKey).
+        crate::state::compute_kcv(&mut attrs);
+
         *ph_key = allocate_handle(attrs);
     }
     CKR_OK
@@ -4489,6 +4517,11 @@ pub fn C_UnwrapKeyAuthenticated(
                 store_param_set(&mut attrs, ps);
             }
         }
+
+        // PKCS#11 v3.2 §4.10.2 / §4.11: KCV MUST be populated on every
+        // secret-key object — C_UnwrapKeyAuthenticated counts as a new
+        // object-creation path per §5.18.7.
+        crate::state::compute_kcv(&mut attrs);
 
         *ph_key = allocate_handle(attrs);
     }
