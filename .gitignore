@@ -63,6 +63,3 @@ rust/pkg_bundler_new/
 rust/pkg_bundler_p521/
 rust/pkg_bundler_v3/
 rust/pkg_nomod/
-
-# KMIP subsystem (separate WIP — not yet ready to track)
-kmip/
