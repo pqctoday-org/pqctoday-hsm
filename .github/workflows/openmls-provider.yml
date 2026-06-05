@@ -99,7 +99,7 @@ jobs:
 
       - name: Build interop binary
         working-directory: openmls-provider
-        run: cargo build --release -p pqctoday-mls-grpc
+        run: cargo build --release -p pqctoday-mls-interop --bin pqctoday-mls-grpc
 
       - name: cargo clippy
         working-directory: openmls-provider
