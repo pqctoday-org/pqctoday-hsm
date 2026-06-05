@@ -22,6 +22,11 @@
 //! wire as `signature_priv` in the protobuf is our opaque `HsmKeyHandle`
 //! blob, not raw key bytes.
 
+// tonic::Status is intentionally large (~140 B). This crate's whole purpose
+// is implementing tonic services that return Result<T, Status>; boxing the
+// Err variant would fight the framework's API. Allow at crate scope.
+#![allow(clippy::result_large_err)]
+
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::PathBuf;

@@ -5,23 +5,70 @@ on:
     branches: [main]
     paths:
       - 'openmls-provider/**'
+      - 'src/**'
+      - 'CMakeLists.txt'
+      - '.github/workflows/openmls-provider.yml'
   pull_request:
     branches: [main]
     paths:
       - 'openmls-provider/**'
+      - 'src/**'
+      - 'CMakeLists.txt'
+      - '.github/workflows/openmls-provider.yml'
 
 jobs:
   rust:
     name: Check / Test / Clippy (Ubuntu 24.04)
     runs-on: ubuntu-24.04
+    env:
+      PKG_CONFIG_PATH: /opt/openssl-3.6/lib64/pkgconfig:/opt/openssl-3.6/lib/pkgconfig
+      LD_LIBRARY_PATH: /opt/openssl-3.6/lib64:/opt/openssl-3.6/lib
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+
+      - name: Install build dependencies (softhsmv3 + protoc)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            cmake g++ pkg-config \
+            libcppunit-dev \
+            protobuf-compiler
+
+      - name: Cache OpenSSL 3.6
+        id: cache-openssl
+        uses: actions/cache@v4
+        with:
+          path: /opt/openssl-3.6
+          key: ${{ runner.os }}-openssl-3.6-master-v1
+
+      - name: Build and Install OpenSSL 3.6
+        if: steps.cache-openssl.outputs.cache-hit != 'true'
+        run: |
+          sudo mkdir -p /opt/openssl-3.6
+          sudo chown -R $USER:$USER /opt/openssl-3.6
+          git clone --depth 1 https://github.com/openssl/openssl.git
+          cd openssl
+          ./config --prefix=/opt/openssl-3.6 --openssldir=/opt/openssl-3.6/ssl shared
+          make -j$(nproc)
+          make install
+
+      - name: Build softhsmv3 (provides libsofthsmv3.so for interop tests)
+        run: |
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_TESTS=OFF \
+            -DOPENSSL_ROOT_DIR=/opt/openssl-3.6
+          cmake --build build -j$(nproc) --target softhsmv3
+          # interop/src/lib.rs::resolve_module() looks for this exact path
+          ls -la build/src/lib/libsofthsmv3.so
 
       - name: Cache cargo registry + build
         uses: actions/cache@v4
@@ -35,11 +82,6 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-openmls-provider-
 
-      - name: Install protoc (required by pqctoday-mls-grpc build.rs)
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y protobuf-compiler
-
       - name: cargo check
         working-directory: openmls-provider
         run: cargo check --workspace
@@ -47,9 +89,8 @@ jobs:
       - name: cargo test
         working-directory: openmls-provider
         env:
-          # softhsmv3 shared library is NOT available in CI — all PKCS#11
-          # integration tests detect the empty module path and skip gracefully.
-          PKCS11_MODULE: ''
+          # softhsmv3 built above; interop gRPC tests need this to initialise.
+          PKCS11_MODULE: ${{ github.workspace }}/build/src/lib/libsofthsmv3.so
           RUST_LOG: warn
         run: >
           cargo test --workspace
@@ -58,7 +99,7 @@ jobs:
 
       - name: Build interop binary
         working-directory: openmls-provider
-        run: cargo build --release -p pqctoday-mls-grpc
+        run: cargo build --release -p pqctoday-mls-interop --bin pqctoday-mls-grpc
 
       - name: cargo clippy
         working-directory: openmls-provider

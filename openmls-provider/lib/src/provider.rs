@@ -62,7 +62,7 @@ impl PqcTodayProvider {
         #[cfg(not(target_arch = "wasm32"))]
         {
             let new_hsm = self.hsm.open_additional_session(user_pin)?;
-            return Ok(Self::with_session(new_hsm));
+            Ok(Self::with_session(new_hsm))
         }
         #[cfg(target_arch = "wasm32")]
         {

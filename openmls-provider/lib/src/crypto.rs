@@ -228,11 +228,7 @@ impl OpenMlsCrypto for PqcTodayCrypto {
         ptxt: &[u8],
     ) -> Result<HpkeCiphertext, CryptoError> {
         if pqhpke::supports_pkcs11_path(&config) {
-            let ephemeral_ikm = self
-                .ops
-                .random(32)
-                .map_err(PqcTodayError::from)
-                .map_err(CryptoError::from)?;
+            let ephemeral_ikm = self.ops.random(32).map_err(CryptoError::from)?;
             return pqhpke::seal(self.ops.as_ref(), pk_r, info, aad, ptxt, &ephemeral_ikm);
         }
         let mut hpke = mk_hpke(config)?;
@@ -281,11 +277,7 @@ impl OpenMlsCrypto for PqcTodayCrypto {
         exporter_length: usize,
     ) -> Result<(KemOutput, ExporterSecret), CryptoError> {
         if pqhpke::supports_pkcs11_path(&config) {
-            let ephemeral_ikm = self
-                .ops
-                .random(32)
-                .map_err(PqcTodayError::from)
-                .map_err(CryptoError::from)?;
+            let ephemeral_ikm = self.ops.random(32).map_err(CryptoError::from)?;
             return pqhpke::setup_sender_and_export(
                 self.ops.as_ref(),
                 pk_r,

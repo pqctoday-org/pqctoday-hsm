@@ -8,7 +8,48 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+_No changes yet._
+
+---
+
+## [0.5.0] — 2026-06-04
+
+**Major release** — first release after the stale v0.4.25 Cargo.toml manifest. Aggregates 60+ commits since v0.4.26 across the Rust WASM engine, C++ engine, strongSwan integration (upgraded to 6.0.6 with full SLH-DSA), pkcs11-provider (composite-sig + ML-KEM CMS), OpenMLS provider, OpenPGP bridge, and openssh-pkcs11. Required base for the upcoming `pqctoday-hsm/kmip/` subsystem.
+
 ### Fixed
+
+- **softhsmrustv3 — XMSS `C_Sign` → `CKR_FUNCTION_FAILED` + ECDSA P-521 sig length + SEC1 long-form DER** ([#63](https://github.com/pqctoday-org/pqctoday-hsm/pull/63), `rust/src/ffi.rs`, `rust/src/crypto/handlers.rs`, `rust/src/state.rs`). Three PKCS#11 v3.2 compliance gaps surfaced by pqctoday-hub's `HsmAcvpTesting` workshop. (1) `C_GenerateKeyPair(CKM_XMSS_KEY_PAIR_GEN)` stored the raw `param_code` from `CK_XMSS_PARAMS` in `CKA_XMSS_PARAM_SET`; when the caller omitted the struct, the stored 0 fell through `xmss_sign`'s `CKP_XMSS_*` match → catch-all `CKR_FUNCTION_FAILED`. Fix: store the *effective* param (default `CKP_XMSS_SHA2_10_256`). (2) `get_sig_len(CKM_ECDSA_SHA512, _)` returned a hardcoded 64 B regardless of curve; ECDSA size is `2 × ⌈curve_bits/8⌉` (P-521 → 132 B). Size-query returned 64 → caller allocated 64 → sign wrote 132 → `CKR_BUFFER_TOO_SMALL`. Fix: curve-aware lookup across all ECDSA mechanism arms. (3) `get_ec_point_sec1` only stripped DER OCTET STRING **short-form** length (`0x04 <len ≤ 127> <data>`); P-521's 133-byte SEC1 point requires **long-form** (`0x04 0x81 0x85 <data>`). Keygen already emitted long-form; the strip helper now recognizes it. Short-form path preserved (P-256 / P-384 / secp256k1 unaffected). Verified XMSS Stateful + ECDSA P-521 + secp256k1 (regression) sign+verify all PASS in-browser.
+
+- **softhsmrustv3 — KCV missing on `C_UnwrapKey` / `C_DeriveKey` + RSA public key missing `CKA_VALUE`** ([#62](https://github.com/pqctoday-org/pqctoday-hsm/pull/62), `rust/src/ffi.rs`). Two PKCS#11 v3.2 compliance gaps surfaced in pqctoday-hub's `/learn/kms-pqc` Envelope Encryption workshop. (1) `C_UnwrapKey`, `C_UnwrapKeyAuthenticated`, `C_DeriveKey` (§5.18.4 / §5.18.7 / §6.5.6) built new secret-key objects but never called `compute_kcv` before `allocate_handle`. §4.10.2 + §4.11 require `CKA_CHECK_VALUE` regardless of creation path. `C_GetAttributeValue(CKA_CHECK_VALUE)` on an unwrapped AES DEK returned `CKR_ATTRIBUTE_TYPE_INVALID`. Fix at 4 call sites (RSA-OAEP/AES-KW unwrap, AES-GCM authenticated unwrap, ECDH/X25519 derive, HKDF/SP800-108 derive). (2) `C_GenerateKeyPair(CKM_RSA_PKCS_KEY_PAIR_GEN)` stored modulus + exponent in spec attributes but not in the packed `[n_len:4LE][n_bytes][e_bytes]` form under `CKA_VALUE` that the Rust engine's `C_Encrypt` + `C_WrapKey(CKM_RSA_PKCS_OAEP)` parse. Every RSA-OAEP wrap returned `CKR_ARGUMENTS_BAD`. The C++ engine doesn't have this issue because OpenSSL EVP_PKEY carries both halves natively. Verified ML-KEM-768 / AES-KW AND RSA-2048 / RSA-OAEP flows now end-to-end with KCV displayed and integrity verified.
+
+- **softhsmv3 C++ engine — `CKA_CHECK_VALUE` populated on `C_UnwrapKey` + `C_DeriveKey`** ([#61](https://github.com/pqctoday-org/pqctoday-hsm/pull/61), `src/lib/SoftHSM_keygen.cpp`). PKCS#11 v3.2 §4.11 mandates `CKA_CHECK_VALUE` "regardless of how the key object is created or derived." Every `C_GenerateKey` path was compliant, but `C_UnwrapKey` and four `C_DeriveKey` paths (PBKD2, SP800-108 Counter, SP800-108 Feedback, HKDF) silently skipped it → `CKR_ATTRIBUTE_TYPE_INVALID` on the recovered key. Mirrors the Rust engine fix in PR #62.
+
+- **composite-sig — 8 root-cause fixes + dormant SPKI decoder (`X509_sign` works end-to-end)** (`vendor/pkcs11-provider/`). Resolves the LAMPS draft-19 composite-sig path through `pkcs11-provider` → softhsmv3. Composite OIDs now sign + verify under `X509_sign` for cert issuance.
+
+- **pkcs11-provider — ML-KEM CMS decrypt end-to-end via softhsm** (`vendor/pkcs11-provider/`). CMS AuthEnvelopedData (KEMRecipientInfo per RFC 9629/9936) now decapsulates a wrapped CEK using an ML-KEM key resident in softhsmv3, then unwraps the CEK and decrypts the inner payload — fully driven through pkcs11-provider, no JS-side fallback.
+
+- **pkcs11_dh — WASM `C_Login` guard in `find_token`** (`strongswan-pkcs11/pkcs11_dh.c`). Same WASM-routing fix previously applied to `pkcs11_kem.c`. Without this, ECDH key agreement during IKEv2 failed at token-find when the WASM build's softhsm context required a synthetic Login.
+
+- **traced_C_GenerateKeyPair — belt-and-suspenders `C_Login` guard** (`strongswan-pkcs11/`). Defensive Login check on the traced wrapper so a missing session login on the WASM build doesn't surface as a generic generate-key failure.
+
+- **composite-provider — wire composite / KEM / SLH-DSA / XMSS sources into meson build** (`vendor/pkcs11-provider/meson.build`). The composite + PQC source files existed but weren't compiled into the provider .so / .a, so symbols were missing at link time. Now wired and built.
+
+### Added
+
+- **strongSwan 6.0.6 — full SLH-DSA support in PKCS#11 plugin** (`strongswan-pkcs11/`). New feature registrations and crypto plumbing for SLH-DSA (SHA2-128s / 192s / 256s) on both PRIVKEY and PUBKEY paths. Enables IKEv2 `leftauth=pubkey` with SLH-DSA-signed certificates routed through softhsmv3.
+- **strongSwan 6.0.6 patches** (`patches/strongswan-6.0.6-pqc-slhdsa.patch`, plus dry-run-verified variants). Upgraded the IKEv2 base from 6.0.5 → 6.0.6 with the PQC + SLH-DSA stack rebased on top. Required by `Dockerfile.network`.
+- **softhsm-wasm-v2 — emscripten 5.0.7 rebuild + `pkcs11_dh` Login fix bundled**. Bumped the published WASM artifact to the new emscripten + the `pkcs11_dh` C_Login guard above.
+
+### Changed
+
+- **`rust/Cargo.toml` version**: `0.4.25` → `0.5.0`. The 0.4.25 manifest had been stale since 2026-04-15 despite v0.4.26–v0.4.29 tags shipping; this catches the Rust crate up to the release line.
+
+### Notes
+
+- Untracked `kmip/` directory in the working tree is an unreleased standalone subsystem (KMIP 3.0 wrapper over PKCS#11) — explicitly NOT shipped in this release. See `kmip/docs/IMPLEMENTATION_PLAN.md` for scope.
+- The entries below were previously under `[Unreleased]` while v0.4.27–v0.4.29 shipped without CHANGELOG updates. Folded into this release for a single source of truth.
+
+### Fixed (continued — folded from prior [Unreleased])
 
 - **softhsmrustv3 (WASM engine) — AES-GCM AAD authentication restored** (`rust/src/ffi.rs`). Critical correctness + security bug: AES-GCM in the Rust/WASM engine silently dropped the AAD parameter on both encrypt and decrypt — meaning every in-browser AES-GCM operation produced *unauthenticated* ciphertext (the tag was computed over empty AAD regardless of what the caller passed). The C++ engine (`src/lib/SoftHSM_cipher.cpp` + `src/lib/crypto/OSSLEVPSymmetricAlgorithm.cpp`) used by native softhsmv3.so/.dylib was unaffected.
 
