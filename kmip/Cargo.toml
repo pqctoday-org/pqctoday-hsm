@@ -22,6 +22,13 @@ path = "bin/pqctoday-kmip-client.rs"
 name = "pqctoday-kmip-compliance"
 path = "bin/pqctoday-kmip-compliance.rs"
 
+# Build-time spec extractor — walks OASIS KMIP 3.0 HTML to produce
+# spec/oasis-kmip-3.0/kmip-spec-3.0-tags-enums.json. Run on demand:
+# `cargo run --bin extract-kmip-spec`. Not a shipping binary.
+[[bin]]
+name = "extract-kmip-spec"
+path = "tools/extract_kmip_spec.rs"
+
 [dependencies]
 # Plane 3 — direct Rust dependency on the engine, NO FFI
 softhsmrustv3 = { path = "../rust" }
@@ -61,6 +68,13 @@ time = { version = "0.3", features = ["serde", "formatting"] }
 # Error handling
 thiserror = "1"
 anyhow    = "1"
+
+# HTML parsing — only used by the build-time `extract-kmip-spec` tool
+# (tools/extract_kmip_spec.rs). The OASIS KMIP 3.0 spec ships as Word-converted
+# HTML with deeply nested span trees that defy regex-based extraction; a real
+# DOM walker is the reliable path. Kept as a regular dep (not dev-) so the
+# tool builds in normal `cargo build`.
+scraper = "0.20"
 
 [dev-dependencies]
 proptest   = "1"
