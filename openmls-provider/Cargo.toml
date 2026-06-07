@@ -17,3 +17,22 @@ members = ["lib", "interop", "wasm-smoke"]
 [patch.crates-io]
 fips204 = { path = "../rust/fips204-patched" }
 fips205 = { path = "../rust/fips205-patched" }
+
+# Pull the unreleased fix for the libcrux-chacha20poly1305 <0.0.8 advisory
+# (Dependabot alert #10 against this workspace's Cargo.lock — severity: high).
+#
+# crates.io `hpke-rs-libcrux 0.6.1` (released 2026-03) exact-pins
+# `libcrux-aead = "^0.0.7"`, which in turn exact-pins
+# `libcrux-chacha20poly1305 = "=0.0.7"`. The fix only resolves at the top of
+# the chain: cryspen/hpke-rs `main` HEAD bumped `libcrux-aead` and
+# `libcrux-kem` to 0.0.8 (verified in
+# https://github.com/cryspen/hpke-rs/blob/main/libcrux_provider/Cargo.toml)
+# but the package version is still 0.6.1 and no new tag has been published
+# to crates.io (last commit on main: 2026-05-27 `634caf8`). Pointing the
+# `[patch.crates-io]` at the branch substitutes the patched 0.6.1 whose
+# deps satisfy `libcrux-aead 0.0.8 → libcrux-chacha20poly1305 0.0.8`.
+#
+# Revisit when cryspen publishes a new `hpke-rs-libcrux` release that
+# bundles the libcrux-aead 0.0.8 bump to crates.io — at which point we
+# can drop this patch and bump our `hpke-rs` constraint instead.
+hpke-rs-libcrux = { git = "https://github.com/cryspen/hpke-rs", branch = "main" }
