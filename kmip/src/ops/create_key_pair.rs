@@ -178,7 +178,8 @@ pub fn create_key_pair(
 
     // Phase 7b: real bridge call when a session is wired. Falls back to
     // placeholder UUIDs for unit tests.
-    let generated = match engine_generate_keypair(deps, correlation_id, kmip_algo, mech) {
+    let generated = match engine_generate_keypair(deps, correlation_id, kmip_algo, key_length, mech)
+    {
         Ok(g) => g,
         Err(err) => return fail(deps, correlation_id, op_canonical, err),
     };
@@ -332,6 +333,7 @@ pub(crate) fn engine_generate_keypair(
     deps: &Deps,
     correlation_id: &str,
     kmip_algo: KmipAlgorithm,
+    key_length: Option<u32>,
     mech: u32,
 ) -> std::result::Result<GeneratedKeyPair, KmipError> {
     if let Some(session) = deps.engine_session {
@@ -339,8 +341,15 @@ pub(crate) fn engine_generate_keypair(
         // record itself, after the native call, with the real rv and
         // the actual entry-point name.
         let cka_id = Uuid::new_v4().as_bytes().to_vec();
-        let (pub_h, prv_h) =
-            native_generate_keypair(deps, correlation_id, session, kmip_algo, &cka_id, mech)?;
+        let (pub_h, prv_h) = native_generate_keypair(
+            deps,
+            correlation_id,
+            session,
+            kmip_algo,
+            key_length,
+            &cka_id,
+            mech,
+        )?;
         Ok(GeneratedKeyPair {
             cka_id_priv: cka_id.clone(),
             cka_id_pub: cka_id,
@@ -481,6 +490,12 @@ fn parse_algorithm(s: &str) -> Result<KmipAlgorithm> {
 /// derive per-half metadata (e.g. the KMIP §11 `Digest`) without
 /// re-finding the objects.
 ///
+/// `key_length` carries the KMIP `CryptographicLength` attribute when the
+/// client supplied one. For RSA it's the modulus bit count (validated
+/// 2048..=4096); for ECDSA it selects the NIST curve (256→P-256,
+/// 384→P-384, 521→P-521). For PQC algorithms the parameter set fully
+/// determines the size, so the attribute is ignored.
+///
 /// K15 — emits the `Pkcs11Call` audit record AFTER the native call with
 /// the raw `CK_RV` (success or failure) and the actual entry-point name.
 fn native_generate_keypair(
@@ -488,6 +503,7 @@ fn native_generate_keypair(
     correlation_id: &str,
     session: u32,
     algo: crate::kmip30::KmipAlgorithm,
+    key_length: Option<u32>,
     cka_id: &[u8],
     mech: u32,
 ) -> std::result::Result<(u32, u32), KmipError> {
@@ -525,19 +541,22 @@ fn native_generate_keypair(
             )
         }
         Rsa => {
-            // v0.1: default to RSA-2048. Phase 9 — read CKA_MODULUS_BITS
-            // from template if provided.
+            let bits = key_length.unwrap_or(2048);
+            if !(2048..=4096).contains(&bits) {
+                return Err(KmipError::invalid_attribute_value(format!(
+                    "RSA CryptographicLength {bits} out of supported range 2048..=4096"
+                )));
+            }
             (
                 "native::generate_rsa_keypair",
-                native::generate_rsa_keypair(session, 2048, cka_id, label),
+                native::generate_rsa_keypair(session, bits, cka_id, label),
             )
         }
         Ecdsa => {
-            // v0.1: default to P-256. Phase 9 — read CKA_EC_PARAMS from
-            // template to pick the curve.
+            let curve = ecdsa_curve_from_length(key_length)?;
             (
                 "native::generate_ecdsa_keypair",
-                native::generate_ecdsa_keypair(session, native::EccCurve::P256, cka_id, label),
+                native::generate_ecdsa_keypair(session, curve, cka_id, label),
             )
         }
         _ => {
@@ -549,6 +568,24 @@ fn native_generate_keypair(
     };
     super::helpers::emit_pkcs11_result(deps, correlation_id, native_fn, Some(mech), &result);
     result.map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "CreateKeyPair"))
+}
+
+/// Map KMIP `CryptographicLength` to a NIST curve. KMIP doesn't carry a
+/// dedicated `Recommended Curve` attribute in our v0.1 surface, so we infer
+/// from the length: 256 ⇒ P-256, 384 ⇒ P-384, 521 ⇒ P-521. Default (no
+/// length supplied) is P-256.
+fn ecdsa_curve_from_length(
+    key_length: Option<u32>,
+) -> std::result::Result<softhsmrustv3::native::EccCurve, KmipError> {
+    use softhsmrustv3::native::EccCurve;
+    match key_length {
+        None | Some(256) => Ok(EccCurve::P256),
+        Some(384) => Ok(EccCurve::P384),
+        Some(521) => Ok(EccCurve::P521),
+        Some(n) => Err(KmipError::invalid_attribute_value(format!(
+            "ECDSA CryptographicLength {n} not supported (expected 256, 384, or 521)"
+        ))),
+    }
 }
 
 fn fail<T>(deps: &Deps, correlation_id: &str, op: &str, err: KmipError) -> Result<T> {
@@ -651,6 +688,21 @@ rules: []
         );
         let err = create_key_pair(&d, empty_req(), "CreateKeyPair:Sign", "corr-3").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::MissingData);
+    }
+
+    #[test]
+    fn ecdsa_curve_from_length_maps_nist_sizes() {
+        use softhsmrustv3::native::EccCurve;
+        assert!(matches!(ecdsa_curve_from_length(None), Ok(EccCurve::P256)));
+        assert!(matches!(ecdsa_curve_from_length(Some(256)), Ok(EccCurve::P256)));
+        assert!(matches!(ecdsa_curve_from_length(Some(384)), Ok(EccCurve::P384)));
+        assert!(matches!(ecdsa_curve_from_length(Some(521)), Ok(EccCurve::P521)));
+    }
+
+    #[test]
+    fn ecdsa_curve_from_length_rejects_unknown_size() {
+        let err = ecdsa_curve_from_length(Some(192)).unwrap_err();
+        assert_eq!(err.result_reason(), ResultReason::InvalidAttributeValue);
     }
 
     #[test]

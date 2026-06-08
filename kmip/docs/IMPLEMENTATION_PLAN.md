@@ -953,16 +953,41 @@ is `lazy_static! Mutex<T>`; parallel bootstrap dances race).
 
 **What's NOT real yet** (documented limitations, not blockers):
 
-- `ops::locate` — store-driven, no native call needed (KMIP metadata
-  lookup, not engine state).
 - `ops::query` / `ops::activate` / `ops::revoke` — KMIP-only lifecycle,
-  no PKCS#11 equivalent.
+  no PKCS#11 equivalent (correct by spec, not a gap).
 - Symmetric keys via `Create`: only `AES` + `HMAC-SHA-{256,384,512}`
   routes are real; other algorithms fall through to placeholder.
-- Asymmetric keypairs via `CreateKeyPair`: ML-DSA / ML-KEM / SLH-DSA /
-  RSA-2048 / ECDSA-P256 routes are real. `RSA` defaults to 2048-bit,
-  `ECDSA` defaults to P-256 — v0.2 will read template attributes
-  (`CKA_MODULUS_BITS` / `CKA_EC_PARAMS`) for finer control.
+
+#### Phase 7b.1 — gap tightening (2026-06-08)
+
+Follow-on to Phase 7b on branch `feat/kmip-phase-7b-gap-tightening`.
+Closes the three concrete gaps the initial wiring left open.
+
+- **RSA bit length** — `ops::create_key_pair` reads the
+  `CryptographicLength` attribute and threads it into
+  `native::generate_rsa_keypair(bits, …)`. Default 2048 if absent;
+  values outside `2048..=4096` return `ResultReason::InvalidAttributeValue`
+  before the engine ever sees the call.
+- **ECDSA curve** — same handler maps `CryptographicLength` to
+  `EccCurve`: `256 → P-256`, `384 → P-384`, `521 → P-521`. Default
+  P-256 if no length supplied; unsupported sizes (e.g. 192, 512) are
+  rejected client-side with `InvalidAttributeValue`. (KMIP's
+  `Recommended Curve` attribute isn't in our v0.1 enum yet; length-based
+  inference matches how most clients carry curve choice today.)
+- **`ops::locate` PKCS#11 reconciliation** — when `engine_session.is_some()`,
+  the post-filter runs `find_handle_for_object` on every match and
+  drops orphans (records whose `CKA_ID` is gone from the engine).
+  Defends the persistent-SQLite + volatile-engine restart scenario where
+  store metadata would otherwise outlive its handles. Pure-store mode
+  (unit tests) is untouched.
+
+**Tests added**: 2 unit (`ecdsa_curve_from_length_maps_nist_sizes`,
+`ecdsa_curve_from_length_rejects_unknown_size`) + 4 e2e
+(`rsa_create_respects_cryptographic_length_attribute`,
+`rsa_create_rejects_unsupported_length`,
+`ecdsa_create_respects_cryptographic_length_attribute`,
+`locate_drops_orphans_when_engine_handle_is_gone`). All 420 lib +
+19 native-bridge e2e pass after the rebase onto the conformance track.
 
 The Phase-12 dev-sandbox MVP can now ship with **honest cryptographic
 output** through all the demo-critical paths.

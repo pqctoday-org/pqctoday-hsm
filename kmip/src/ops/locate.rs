@@ -79,6 +79,20 @@ pub fn locate(deps: &Deps, req: LocateRequest, correlation_id: &str) -> Result<L
         storage_ok && filters.matches(r)
     })?;
 
+    // Plane-3 reconciliation: when a real engine is wired, drop records
+    // whose PKCS#11 handle is no longer present. Guards against the
+    // persistent-SQLite + volatile-engine restart case where store
+    // metadata outlives the token. Runs before paging so `Offset Items`
+    // and `Maximum Items` operate on live records only.
+    if let Some(session) = deps.engine_session {
+        matches.retain(|r| {
+            matches!(
+                super::helpers::find_handle_for_object(session, &r.pkcs11_cka_id, r.object_type),
+                Ok(Some(_))
+            )
+        });
+    }
+
     // Paging needs a stable total order — `MemoryStore::find` iterates a
     // HashMap, so without a sort `Offset Items` would skip a *random* N.
     // Sort on (Initial Date, UID): creation order with a deterministic
