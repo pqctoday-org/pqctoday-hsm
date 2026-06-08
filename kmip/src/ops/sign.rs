@@ -162,8 +162,29 @@ pub fn sign(deps: &Deps, req: SignRequest, correlation_id: &str) -> Result<SignR
         },
     ));
 
-    // v0.1 placeholder signature — Phase 7 wires the real call.
-    let signature = placeholder_signature(&req.uid, &req.data);
+    // Phase 7b: real bridge call when a session is wired. Falls back to
+    // deterministic SHA-256 placeholder for unit tests that don't
+    // bootstrap an engine.
+    let signature = match deps.engine_session {
+        Some(session) => {
+            // KMIP UID → CKA_ID → engine handle → native::sign. Filter
+            // by ObjectType because pub + prv share CKA_ID per PKCS#11
+            // convention; sign needs the private-key handle.
+            let handle =
+                super::helpers::find_handle_for_object(session, &obj.pkcs11_cka_id, obj.object_type)
+                    .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Sign:find"))?
+                    .ok_or_else(|| KmipError::not_found(&req.uid))?;
+            let native_mech = super::helpers::native_sign_mech(obj.algorithm).ok_or_else(|| {
+                KmipError::failed(
+                    ResultReason::OperationNotSupported,
+                    format!("Sign: no native mechanism for {:?}", obj.algorithm),
+                )
+            })?;
+            softhsmrustv3::native::sign(session, handle, native_mech, &req.data)
+                .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Sign"))?
+        }
+        None => placeholder_signature(&req.uid, &req.data),
+    };
 
     deps.sink.emit(AuditEvent::at(
         OffsetDateTime::now_utc(),

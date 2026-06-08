@@ -93,9 +93,9 @@ pub fn encrypt(deps: &Deps, req: EncryptRequest, correlation_id: &str) -> Result
 
     // Plane-3: branch on algorithm.
     let resp = if is_ml_kem(obj.algorithm) {
-        encrypt_ml_kem(deps, &req, obj.algorithm, correlation_id)
+        encrypt_ml_kem(deps, &req, &obj, correlation_id)
     } else {
-        encrypt_classical(deps, &req, obj.algorithm, correlation_id)
+        encrypt_classical(deps, &req, &obj, correlation_id)
     }?;
 
     emit_success(deps, correlation_id, "Encrypt");
@@ -111,24 +111,41 @@ fn is_ml_kem(a: KmipAlgorithm) -> bool {
 fn encrypt_ml_kem(
     deps: &Deps,
     req: &EncryptRequest,
-    algo: KmipAlgorithm,
+    obj: &crate::store::ObjectRecord,
     correlation_id: &str,
 ) -> Result<EncryptResponse> {
-    let mech = algo.to_pkcs11_mech(PkcsOp::Encrypt).ok_or_else(|| {
+    let mech = obj.algorithm.to_pkcs11_mech(PkcsOp::Encrypt).ok_or_else(|| {
         KmipError::failed(
             ResultReason::OperationNotSupported,
-            format!("ML-KEM {algo:?} has no Encrypt mechanism"),
+            format!("ML-KEM {:?} has no Encrypt mechanism", obj.algorithm),
         )
     })?;
     emit_pkcs11(deps, correlation_id, "C_EncapsulateKey", Some(mech), 0, "CKR_OK");
 
-    // v0.1 placeholder: deterministic encapsulation + shared secret.
-    // Phase 7 wires real softhsmrustv3::C_EncapsulateKey call.
-    let encapsulation = placeholder_bytes(&req.uid, &req.data, b"encap", 32);
-    let shared_secret = placeholder_bytes(&req.uid, &req.data, b"ss", 32);
+    // Phase 7b: real bridge call when a session is wired.
+    let (ciphertext, shared_secret) = match deps.engine_session {
+        Some(session) => {
+            let handle =
+                softhsmrustv3::native::find_by_cka_id(session, &obj.pkcs11_cka_id)
+                    .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Encap:find"))?
+                    .ok_or_else(|| KmipError::not_found(&req.uid))?;
+            let native_mech = super::helpers::native_kem_mech(obj.algorithm).ok_or_else(|| {
+                KmipError::failed(
+                    ResultReason::OperationNotSupported,
+                    format!("no KEM mechanism for {:?}", obj.algorithm),
+                )
+            })?;
+            softhsmrustv3::native::encapsulate(session, handle, native_mech)
+                .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Encap"))?
+        }
+        None => (
+            placeholder_bytes(&req.uid, &req.data, b"encap", 32),
+            placeholder_bytes(&req.uid, &req.data, b"ss", 32),
+        ),
+    };
     Ok(EncryptResponse {
         uid: req.uid.clone(),
-        ciphertext: encapsulation,
+        ciphertext,
         shared_secret: Some(shared_secret),
     })
 }
@@ -137,22 +154,40 @@ fn encrypt_ml_kem(
 fn encrypt_classical(
     deps: &Deps,
     req: &EncryptRequest,
-    algo: KmipAlgorithm,
+    obj: &crate::store::ObjectRecord,
     correlation_id: &str,
 ) -> Result<EncryptResponse> {
-    let mech = algo.to_pkcs11_mech(PkcsOp::Encrypt).ok_or_else(|| {
+    let mech = obj.algorithm.to_pkcs11_mech(PkcsOp::Encrypt).ok_or_else(|| {
         KmipError::failed(
             ResultReason::OperationNotSupported,
-            format!("{algo:?} has no Encrypt mechanism"),
+            format!("{:?} has no Encrypt mechanism", obj.algorithm),
         )
     })?;
     emit_pkcs11(deps, correlation_id, "C_EncryptInit", Some(mech), 0, "CKR_OK");
     emit_pkcs11(deps, correlation_id, "C_Encrypt", Some(mech), 0, "CKR_OK");
 
-    // v0.1 placeholder: deterministic stamp from uid + iv + data.
-    let mut input = req.iv.clone().unwrap_or_default();
-    input.extend_from_slice(&req.data);
-    let ciphertext = placeholder_bytes(&req.uid, &input, b"enc", input.len().max(16));
+    // Phase 7b: real AES-GCM (only classical encrypt the native API
+    // supports in v0.1). Falls back to placeholder for unit tests / non-AES.
+    let ciphertext = match (deps.engine_session, obj.algorithm) {
+        (Some(session), crate::kmip30::KmipAlgorithm::Aes) => {
+            let handle = softhsmrustv3::native::find_by_cka_id(session, &obj.pkcs11_cka_id)
+                .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Encrypt:find"))?
+                .ok_or_else(|| KmipError::not_found(&req.uid))?;
+            softhsmrustv3::native::encrypt(
+                session,
+                handle,
+                softhsmrustv3::constants::CKM_AES_GCM,
+                &req.data,
+                req.iv.as_deref(),
+            )
+            .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Encrypt"))?
+        }
+        _ => {
+            let mut input = req.iv.clone().unwrap_or_default();
+            input.extend_from_slice(&req.data);
+            placeholder_bytes(&req.uid, &input, b"enc", input.len().max(16))
+        }
+    };
     Ok(EncryptResponse {
         uid: req.uid.clone(),
         ciphertext,

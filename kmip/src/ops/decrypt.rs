@@ -81,9 +81,9 @@ pub fn decrypt(deps: &Deps, req: DecryptRequest, correlation_id: &str) -> Result
 
     // Plane-3: branch on algorithm.
     let resp = if is_ml_kem(obj.algorithm) {
-        decrypt_ml_kem(deps, &req, obj.algorithm, correlation_id)
+        decrypt_ml_kem(deps, &req, &obj, correlation_id)
     } else {
-        decrypt_classical(deps, &req, obj.algorithm, correlation_id)
+        decrypt_classical(deps, &req, &obj, correlation_id)
     }?;
 
     emit_success(deps, correlation_id, "Decrypt");
@@ -99,20 +99,33 @@ fn is_ml_kem(a: KmipAlgorithm) -> bool {
 fn decrypt_ml_kem(
     deps: &Deps,
     req: &DecryptRequest,
-    algo: KmipAlgorithm,
+    obj: &crate::store::ObjectRecord,
     correlation_id: &str,
 ) -> Result<DecryptResponse> {
-    let mech = algo.to_pkcs11_mech(PkcsOp::Decrypt).ok_or_else(|| {
+    let mech = obj.algorithm.to_pkcs11_mech(PkcsOp::Decrypt).ok_or_else(|| {
         KmipError::failed(
             ResultReason::OperationNotSupported,
-            format!("ML-KEM {algo:?} has no Decrypt mechanism"),
+            format!("ML-KEM {:?} has no Decrypt mechanism", obj.algorithm),
         )
     })?;
     emit_pkcs11(deps, correlation_id, "C_DecapsulateKey", Some(mech), 0, "CKR_OK");
 
-    // v0.1 placeholder: deterministic SS derived from uid + encapsulation.
-    // Phase 7 wires real softhsmrustv3::C_DecapsulateKey.
-    let shared_secret = placeholder_bytes(&req.uid, &req.data, b"ss", 32);
+    let shared_secret = match deps.engine_session {
+        Some(session) => {
+            let handle = softhsmrustv3::native::find_by_cka_id(session, &obj.pkcs11_cka_id)
+                .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Decap:find"))?
+                .ok_or_else(|| KmipError::not_found(&req.uid))?;
+            let native_mech = super::helpers::native_kem_mech(obj.algorithm).ok_or_else(|| {
+                KmipError::failed(
+                    ResultReason::OperationNotSupported,
+                    format!("no KEM mechanism for {:?}", obj.algorithm),
+                )
+            })?;
+            softhsmrustv3::native::decapsulate(session, handle, native_mech, &req.data)
+                .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Decap"))?
+        }
+        None => placeholder_bytes(&req.uid, &req.data, b"ss", 32),
+    };
     Ok(DecryptResponse { uid: req.uid.clone(), data: shared_secret })
 }
 
@@ -120,22 +133,38 @@ fn decrypt_ml_kem(
 fn decrypt_classical(
     deps: &Deps,
     req: &DecryptRequest,
-    algo: KmipAlgorithm,
+    obj: &crate::store::ObjectRecord,
     correlation_id: &str,
 ) -> Result<DecryptResponse> {
-    let mech = algo.to_pkcs11_mech(PkcsOp::Decrypt).ok_or_else(|| {
+    let mech = obj.algorithm.to_pkcs11_mech(PkcsOp::Decrypt).ok_or_else(|| {
         KmipError::failed(
             ResultReason::OperationNotSupported,
-            format!("{algo:?} has no Decrypt mechanism"),
+            format!("{:?} has no Decrypt mechanism", obj.algorithm),
         )
     })?;
     emit_pkcs11(deps, correlation_id, "C_DecryptInit", Some(mech), 0, "CKR_OK");
     emit_pkcs11(deps, correlation_id, "C_Decrypt", Some(mech), 0, "CKR_OK");
 
-    // v0.1 placeholder: deterministic stamp from uid + iv + ciphertext.
-    let mut input = req.iv.clone().unwrap_or_default();
-    input.extend_from_slice(&req.data);
-    let plaintext = placeholder_bytes(&req.uid, &input, b"dec", input.len().max(16));
+    let plaintext = match (deps.engine_session, obj.algorithm) {
+        (Some(session), crate::kmip30::KmipAlgorithm::Aes) => {
+            let handle = softhsmrustv3::native::find_by_cka_id(session, &obj.pkcs11_cka_id)
+                .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Decrypt:find"))?
+                .ok_or_else(|| KmipError::not_found(&req.uid))?;
+            softhsmrustv3::native::decrypt(
+                session,
+                handle,
+                softhsmrustv3::constants::CKM_AES_GCM,
+                &req.data,
+                req.iv.as_deref(),
+            )
+            .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Decrypt"))?
+        }
+        _ => {
+            let mut input = req.iv.clone().unwrap_or_default();
+            input.extend_from_slice(&req.data);
+            placeholder_bytes(&req.uid, &input, b"dec", input.len().max(16))
+        }
+    };
     Ok(DecryptResponse { uid: req.uid.clone(), data: plaintext })
 }
 

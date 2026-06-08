@@ -50,6 +50,17 @@ pub struct Deps {
     pub store: Arc<dyn KeyStore>,
     pub sink: Arc<dyn AuditSink>,
     pub config: DepsConfig,
+    /// `softhsmrustv3::native` engine session handle (Phase 7b). When
+    /// `Some`, op handlers route Plane-3 calls through the real bridge
+    /// (real cryptographic output). When `None`, handlers use
+    /// deterministic SHA-256 placeholder bytes — preserves the v0.1
+    /// unit-test surface (185+ existing tests use `None`) so test
+    /// fixtures don't need to bootstrap a real engine session per test.
+    ///
+    /// Production binary (`bin/pqctoday-kmip.rs`) initialises the
+    /// engine and passes `Some(session)`. Closes the §12.7.7 lock from
+    /// `IMPLEMENTATION_PLAN.md` once every op handler honours this branch.
+    pub engine_session: Option<u32>,
 }
 
 impl Deps {
@@ -64,7 +75,15 @@ impl Deps {
             store,
             sink,
             config,
+            engine_session: None,
         }
+    }
+
+    /// Construct with an engine session for real bridge wiring. Used by
+    /// the production binary.
+    pub fn with_engine_session(mut self, session: u32) -> Self {
+        self.engine_session = Some(session);
+        self
     }
 }
 

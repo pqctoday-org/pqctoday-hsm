@@ -159,3 +159,125 @@ pub fn state_name(s: crate::kmip30::State) -> &'static str {
         DestroyedCompromised => "DestroyedCompromised",
     }
 }
+
+// ── Phase 7b: KMIP ↔ softhsmrustv3 native API mapping ──────────────────────
+//
+// The Plane-3 sections of each op handler use these helpers to translate
+// from KMIP types (`KmipAlgorithm`) to the engine's standard `CKM_*` /
+// `CKP_*` codepoints that `softhsmrustv3::native::*` consumes.
+
+/// Map a `KmipAlgorithm` to the engine's **standard PKCS#11 v3.2** sign
+/// mechanism — what `softhsmrustv3::native::sign` / `verify` dispatch on.
+///
+/// Different from [`crate::kmip30::KmipAlgorithm::to_pkcs11_mech`] which
+/// returns the **vendor** codepoints from the `pkcs11-mech-manifest.json`
+/// (e.g. `CKM_PQCTODAY_ML_DSA_SIGN_VERIFY = 0x4036`). The native API
+/// uses the standard codepoints (`CKM_ML_DSA = 0x1D`).
+pub fn native_sign_mech(a: KmipAlgorithm) -> Option<u32> {
+    use softhsmrustv3::constants as c;
+    use KmipAlgorithm::*;
+    Some(match a {
+        MlDsa44 | MlDsa65 | MlDsa87 => c::CKM_ML_DSA,
+        SlhDsaSha2_128s | SlhDsaSha2_128f | SlhDsaSha2_192s | SlhDsaSha2_192f
+        | SlhDsaSha2_256s | SlhDsaSha2_256f | SlhDsaShake128s | SlhDsaShake128f
+        | SlhDsaShake192s | SlhDsaShake192f | SlhDsaShake256s | SlhDsaShake256f => c::CKM_SLH_DSA,
+        Rsa => c::CKM_SHA256_RSA_PKCS,
+        Ecdsa => c::CKM_ECDSA_SHA256,
+        HmacSha256 => c::CKM_SHA256_HMAC,
+        HmacSha384 => c::CKM_SHA384_HMAC,
+        HmacSha512 => c::CKM_SHA512_HMAC,
+        _ => return None,
+    })
+}
+
+/// Map a `KmipAlgorithm` to the engine's KEM mechanism.
+pub fn native_kem_mech(a: KmipAlgorithm) -> Option<u32> {
+    use softhsmrustv3::constants as c;
+    use KmipAlgorithm::*;
+    match a {
+        MlKem512 | MlKem768 | MlKem1024 => Some(c::CKM_ML_KEM),
+        _ => None,
+    }
+}
+
+/// Map a `KmipAlgorithm` to the parameter-set codepoint (`CKP_*`) used
+/// by `softhsmrustv3::native::generate_*_keypair`.
+pub fn native_parameter_set(a: KmipAlgorithm) -> Option<u32> {
+    use softhsmrustv3::constants as c;
+    use KmipAlgorithm::*;
+    Some(match a {
+        MlKem512  => c::CKP_ML_KEM_512,
+        MlKem768  => c::CKP_ML_KEM_768,
+        MlKem1024 => c::CKP_ML_KEM_1024,
+        MlDsa44   => c::CKP_ML_DSA_44,
+        MlDsa65   => c::CKP_ML_DSA_65,
+        MlDsa87   => c::CKP_ML_DSA_87,
+        SlhDsaSha2_128s  => c::CKP_SLH_DSA_SHA2_128S,
+        SlhDsaSha2_128f  => c::CKP_SLH_DSA_SHA2_128F,
+        SlhDsaSha2_192s  => c::CKP_SLH_DSA_SHA2_192S,
+        SlhDsaSha2_192f  => c::CKP_SLH_DSA_SHA2_192F,
+        SlhDsaSha2_256s  => c::CKP_SLH_DSA_SHA2_256S,
+        SlhDsaSha2_256f  => c::CKP_SLH_DSA_SHA2_256F,
+        SlhDsaShake128s  => c::CKP_SLH_DSA_SHAKE_128S,
+        SlhDsaShake128f  => c::CKP_SLH_DSA_SHAKE_128F,
+        SlhDsaShake192s  => c::CKP_SLH_DSA_SHAKE_192S,
+        SlhDsaShake192f  => c::CKP_SLH_DSA_SHAKE_192F,
+        SlhDsaShake256s  => c::CKP_SLH_DSA_SHAKE_256S,
+        SlhDsaShake256f  => c::CKP_SLH_DSA_SHAKE_256F,
+        _ => return None,
+    })
+}
+
+/// Find the engine handle matching a stored `pkcs11_cka_id` AND a KMIP
+/// `ObjectType` (PrivateKey / PublicKey / SymmetricKey / SecretData).
+///
+/// Both halves of an asymmetric keypair share the same `CKA_ID` in
+/// PKCS#11 convention, so plain `find_by_cka_id` is ambiguous — sign
+/// needs the private handle, verify needs the public, encap needs
+/// public, decap needs private. This helper filters
+/// `find_all_by_cka_id` by `CKA_CLASS`.
+pub fn find_handle_for_object(
+    session: u32,
+    cka_id: &[u8],
+    object_type: crate::kmip30::ObjectType,
+) -> Result<Option<u32>, u32> {
+    use crate::kmip30::ObjectType;
+    use softhsmrustv3::constants as c;
+    let target_class = match object_type {
+        ObjectType::PrivateKey => c::CKO_PRIVATE_KEY,
+        ObjectType::PublicKey => c::CKO_PUBLIC_KEY,
+        ObjectType::SymmetricKey | ObjectType::SecretData => c::CKO_SECRET_KEY,
+        // PKCS#11 CKO_CERTIFICATE = 0x01, not exposed in softhsmrustv3 constants
+        ObjectType::Certificate => 0x01,
+    };
+    let handles = softhsmrustv3::native::find_all_by_cka_id(session, cka_id)?;
+    for handle in handles {
+        if let Some(class) = softhsmrustv3::native::get_attribute_u32(session, handle, c::CKA_CLASS)
+        {
+            if class == target_class {
+                return Ok(Some(handle));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Convert a `softhsmrustv3` `CK_RV` (`u32`) to a `KmipError`.
+pub fn ck_rv_to_kmip_error(rv: u32, op: &str) -> KmipError {
+    use softhsmrustv3::constants as c;
+    match rv {
+        c::CKR_KEY_FUNCTION_NOT_PERMITTED => {
+            KmipError::permission_denied(format!("{op}: CKA_SIGN/CKA_ENCAPSULATE/etc. denied"))
+        }
+        c::CKR_OBJECT_HANDLE_INVALID => KmipError::not_found(&format!("{op}: object handle gone")),
+        c::CKR_MECHANISM_INVALID => KmipError::failed(
+            crate::error::ResultReason::OperationNotSupported,
+            format!("{op}: mechanism not supported by the engine"),
+        ),
+        c::CKR_ARGUMENTS_BAD => KmipError::invalid_attribute_value(format!("{op}: bad arguments")),
+        c::CKR_ENCRYPTED_DATA_INVALID => {
+            KmipError::cryptographic_failure(format!("{op}: ciphertext authentication failed"))
+        }
+        _ => KmipError::cryptographic_failure(format!("{op}: CK_RV=0x{rv:08x}")),
+    }
+}

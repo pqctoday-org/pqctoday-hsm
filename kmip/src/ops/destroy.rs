@@ -78,9 +78,17 @@ pub fn destroy(deps: &Deps, req: DestroyRequest, correlation_id: &str) -> Result
         ));
     }
 
-    // Plane-3: emit (Phase 7 wires the real bridge call to
-    // softhsmrustv3::C_DestroyObject(session, h_object)).
+    // Phase 7b: real bridge call when a session is wired. Falls back
+    // to audit-only emission for unit tests.
     emit_pkcs11(deps, correlation_id, "C_DestroyObject", None, 0, "CKR_OK");
+    if let Some(session) = deps.engine_session {
+        // Best-effort: if the handle is already gone (e.g. engine restart
+        // between record creation and Destroy), ignore the error — the
+        // KMIP lifecycle transition still proceeds.
+        if let Ok(Some(handle)) = softhsmrustv3::native::find_by_cka_id(session, &obj.pkcs11_cka_id) {
+            let _ = softhsmrustv3::native::destroy_object(session, handle);
+        }
+    }
 
     // Plane-2: lifecycle update.
     let from_label = state_name(obj.state).to_string();

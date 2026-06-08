@@ -117,6 +117,45 @@ pub fn create(deps: &Deps, req: CreateRequest, correlation_id: &str) -> Result<C
         "CKR_OK",
     );
 
+    // Phase 7b: real bridge call when a session is wired.
+    let cka_id_bytes = Uuid::new_v4().as_bytes().to_vec();
+    if let Some(session) = deps.engine_session {
+        let result = match algo {
+            KmipAlgorithm::Aes => {
+                let bits = key_length.unwrap_or(256);
+                softhsmrustv3::native::generate_aes_key(session, bits, &cka_id_bytes, "kmip-aes")
+            }
+            KmipAlgorithm::HmacSha256 | KmipAlgorithm::HmacSha384 | KmipAlgorithm::HmacSha512 => {
+                let bits = key_length.unwrap_or(256);
+                softhsmrustv3::native::generate_generic_secret(
+                    session,
+                    bits,
+                    &cka_id_bytes,
+                    "kmip-hmac",
+                )
+            }
+            _ => {
+                return Err(fail_err(
+                    deps,
+                    correlation_id,
+                    "Create",
+                    KmipError::failed(
+                        ResultReason::OperationNotSupported,
+                        format!("Create: {:?} not supported by native API", algo),
+                    ),
+                ));
+            }
+        };
+        if let Err(rv) = result {
+            return Err(fail_err(
+                deps,
+                correlation_id,
+                "Create",
+                super::helpers::ck_rv_to_kmip_error(rv, "Create"),
+            ));
+        }
+    }
+
     // Plane-2: persist.
     let uid = format!("urn:pqctoday:obj:{}", Uuid::new_v4());
     let now = OffsetDateTime::now_utc();
@@ -127,7 +166,7 @@ pub fn create(deps: &Deps, req: CreateRequest, correlation_id: &str) -> Result<C
         cryptographic_length: key_length.unwrap_or(0),
         usage_mask: usage_mask.unwrap_or_else(UsageMask::empty),
         state: State::PreActive,
-        pkcs11_cka_id: Uuid::new_v4().as_bytes().to_vec(),
+        pkcs11_cka_id: cka_id_bytes,
         pkcs11_slot: deps.config.pkcs11_slot,
         initial_date: now,
         activation_date: None,

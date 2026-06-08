@@ -890,33 +890,82 @@ idempotently).
 **Test summary**: 224 total pass (was 212; +12 from Phase 7 — wire codec
 + dispatcher + server + tls_e2e). 0 failed.
 
-### Phase 7b deferred — real `softhsmrustv3::C_*` wiring in op handlers
+### Phase 7b — real `softhsmrustv3::native::*` wiring ✅ **COMPLETE** (2026-06-08)
 
-The §12.7.7 lock ("real softhsmrustv3 wiring required before MVP ships")
-is **partially satisfied** by Phase 7:
+Closes the §12.7.7 lock. Real cryptographic bridge in every applicable
+KMIP op handler.
 
-- ✅ **Network stack is real** — TLS-terminated TTLV, spec-compliant wire
-  envelope, dispatcher routes all 12 ops, end-to-end round-trip tested.
-- ✅ **Plane-3 audit emissions are real** — correct function names,
-  correct mechanism (`CKM_*`) symbolic names from the Phase-3 algo map.
-- ❌ **Cryptographic output is still deterministic SHA-256 placeholder**
-  in each op handler's Plane-3 section. The handlers don't yet call
-  `softhsmrustv3::C_GenerateKeyPair` / `C_Sign` / etc.
+**Foundation** (engine side, merged via PR #76 to `main`):
 
-The remaining wiring is mechanical (12 handlers × replace placeholder
-bytes with real `C_*` calls via the Phase-4 `Session`) but requires:
+- New `softhsmrustv3::native` module — 8 commits on `feat/rust-native-api`,
+  62 lib tests. Exposes typed Rust API (session lifecycle, keygen for
+  PQC + classical, sign/verify dispatch, ML-KEM encap/decap + AES-GCM,
+  object lifecycle + sensitivity-gated attribute reads). Bypasses the
+  C ABI's wasm32 32-bit pointer hazard. See `rust/docs/NATIVE_API.md` and
+  `rust/src/native/parity.rs` for the dual-API contract proof.
 
-- an initialised softhsmv3 token in CI (or per-test ceremony) before
-  any op's smoke test can run end-to-end against the real bridge
-- per-handler validation against a KAT (or at minimum a self-roundtrip:
-  generate keypair → sign → verify → expect Valid)
-- session pooling / management (per-call open is too slow; need to
-  cache a Session on `Deps` or behind a `Mutex`)
+**KMIP-side wiring** (this PR, `feat/kmip-phase-7b-real-crypto`):
 
-These are best handled in a focused Phase 7b session — same branch base,
-new branch off this one. The Phase-12 dev-sandbox demo can ship Phase 7
-as-is for the wire / UI layer; Phase 7b replaces the placeholder bytes
-without changing any audit-event shapes or dispatcher logic.
+- `Deps::engine_session: Option<u32>` — `Some(handle)` in production
+  routes Plane-3 through the real bridge; `None` preserves the v0.1
+  unit-test fallback (185+ existing tests unaffected).
+- `ops::helpers::{native_sign_mech, native_kem_mech, native_parameter_set,
+  find_handle_for_object, ck_rv_to_kmip_error}` — KMIP ↔ softhsmrustv3
+  type mapping.
+- `ops::sign` — real `native::sign` (FIPS-204-conformant signatures:
+  ML-DSA-65 = 3309 bytes, ML-DSA-87 = 4627 bytes).
+- `ops::signature_verify` — real `native::verify` (returns
+  `ValidityIndicator::{Valid, Invalid}` per KMIP semantics).
+- `ops::create_key_pair` — real `native::generate_*_keypair` (ML-DSA,
+  ML-KEM, SLH-DSA, RSA, ECDSA).
+- `ops::create` — real `native::generate_aes_key` / `generate_generic_secret`.
+- `ops::encrypt` — real `native::encapsulate` (ML-KEM) / `native::encrypt`
+  (AES-GCM).
+- `ops::decrypt` — real `native::decapsulate` (ML-KEM) / `native::decrypt`
+  (AES-GCM, returns `CKR_ENCRYPTED_DATA_INVALID` on tag failure).
+- `ops::destroy` — real `native::destroy_object` (best-effort if handle
+  already gone, e.g. after engine restart).
+- `ops::get` — real `native::get_attribute` (PKCS#11 v3.2 §4.7
+  sensitivity gate enforced — private keys never expose `CKA_VALUE`).
+- `bin/pqctoday-kmip.rs` — bootstraps a real engine session at startup
+  via `native::session::bootstrap_default_token(slot, so_pin, user_pin,
+  label)` and passes it through `Deps::with_engine_session`.
+- Filter helper `find_handle_for_object(session, cka_id, object_type)` —
+  both halves of an asymmetric keypair share the same `CKA_ID` per
+  PKCS#11 convention; sign / verify / encap / decap need the right one
+  by `CKA_CLASS`.
+
+**Tests**: 226 total pass (191 lib + 33 prior integration + 2 new e2e).
+
+`tests/native_bridge_e2e.rs` proves the end-to-end flow against a real
+engine session:
+
+- `ml_dsa_65_create_sign_verify_destroy_against_real_engine` — bootstrap
+  → CreateKeyPair → Activate → Sign → SignatureVerify (correct AND
+  tampered) → Revoke → Destroy. Assertions: signature is the
+  FIPS-204-mandated 3309 bytes; tampered signature returns Invalid; KMIP
+  lifecycle FSM honored.
+- `ml_dsa_87_create_sign_verify_against_real_engine` — same with 4627-byte
+  signatures.
+
+Both tests serialize on a local `engine_test_lock` mutex (engine state
+is `lazy_static! Mutex<T>`; parallel bootstrap dances race).
+
+**What's NOT real yet** (documented limitations, not blockers):
+
+- `ops::locate` — store-driven, no native call needed (KMIP metadata
+  lookup, not engine state).
+- `ops::query` / `ops::activate` / `ops::revoke` — KMIP-only lifecycle,
+  no PKCS#11 equivalent.
+- Symmetric keys via `Create`: only `AES` + `HMAC-SHA-{256,384,512}`
+  routes are real; other algorithms fall through to placeholder.
+- Asymmetric keypairs via `CreateKeyPair`: ML-DSA / ML-KEM / SLH-DSA /
+  RSA-2048 / ECDSA-P256 routes are real. `RSA` defaults to 2048-bit,
+  `ECDSA` defaults to P-256 — v0.2 will read template attributes
+  (`CKA_MODULUS_BITS` / `CKA_EC_PARAMS`) for finer control.
+
+The Phase-12 dev-sandbox MVP can now ship with **honest cryptographic
+output** through all the demo-critical paths.
 
 
 
