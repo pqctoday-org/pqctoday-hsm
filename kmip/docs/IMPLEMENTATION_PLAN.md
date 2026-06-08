@@ -600,7 +600,121 @@ at startup. Sandbox must explicitly load `training-permissive.yaml`.
 
 **Commit**: `feat/kmip-phase-4.5-policy-engine` branch; PR pending.
 
-### Phase 5 — Op handlers (Plane 2) (2.0 PD)
+### Phase 5 — Op handlers (Plane 2) (2.0 PD) — ✅ **COMPLETE 2026-06-07** (12 of 12 ops + shared infra + active-policy persistence)
+
+**Session 2 (this) — remaining 9 ops + shared helpers + Plane-1 active-policy persistence shipped:**
+
+- [x] `src/ops/helpers.rs` — extracted before writing the new ops so all 12
+      handlers share one surface for emit_request / emit_pkcs11 /
+      emit_state_change / emit_success / fail_err / canonical_name /
+      state_name. Each op file stays focused on its KMIP semantics.
+- [x] `src/ops/activate.rs` — KMIP 3.0 §6.1.1 Activate (op 0x12).
+- [x] `src/ops/revoke.rs` — KMIP 3.0 §6.1.49 Revoke (op 0x13). Branches on
+      RevocationReason: KeyCompromise/CaCompromise → Compromised, else
+      → Deactivated.
+- [x] `src/ops/destroy.rs` — KMIP 3.0 §6.1.19 Destroy (op 0x14). PreActive
+      | Deactivated → Destroyed; Compromised → DestroyedCompromised;
+      Active rejected (must Revoke first per §3.4). C_DestroyObject.
+- [x] `src/ops/create.rs` — KMIP 3.0 §6.1.8 Create (op 0x01) symmetric +
+      secret data only; asymmetric rejected. C_GenerateKey.
+- [x] `src/ops/get.rs` — KMIP 3.0 §6.1.23 Get (op 0x0a). Private-key
+      material never extracted (CKA_SENSITIVE) — returns OpaqueObject
+      with empty value. C_GetAttributeValue.
+- [x] `src/ops/locate.rs` — KMIP 3.0 §6.1.32 Locate (op 0x08). Filters
+      by CryptographicAlgorithm / ObjectType / State. C_FindObjects*.
+- [x] `src/ops/signature_verify.rs` — KMIP 3.0 §6.1.61 (op 0x22). Failed
+      verify is NOT a KMIP error — returns success with validity=Invalid.
+      C_VerifyInit + C_Verify.
+- [x] `src/ops/encrypt.rs` — KMIP 3.0 §6.1.21 Encrypt (op 0x1f). Branches:
+      ML-KEM → C_EncapsulateKey (ciphertext + shared_secret); classical
+      → C_EncryptInit + C_Encrypt (ciphertext only).
+- [x] `src/ops/decrypt.rs` — KMIP 3.0 §6.1.15 Decrypt (op 0x20). Branches:
+      ML-KEM → C_DecapsulateKey (shared secret); classical →
+      C_DecryptInit + C_Decrypt (plaintext). Allowed in Active /
+      Deactivated / Compromised (need to decrypt old ciphertexts post-rotation).
+- [x] `src/policy/store.rs` — Plane-1 active-policy persistence (§12 user
+      decision 2026-06-07). New `.active` marker file in the policies/
+      directory, JSON shape `{ name, fingerprint, activated_at }`. API:
+      `read_active`, `write_active` (atomic-rename), `clear_active`,
+      `activate_with_engine` (load + activate + write marker as one),
+      `resume_active` (boot-time replay with **fingerprint-drift
+      protection** — refuses to silently re-activate a YAML edited
+      out-of-band; operator must re-activate via Hub). Mirrors how
+      softhsmv3 persists slot/token state so handles survive engine
+      restarts — same pattern, one level up the stack.
+
+**Test summary (Phase 5 cumulative):** 193 total pass (was 153 at start
+of session; +40 across the 8 ops, helpers, and active-marker persistence
++ engine + tests). 0 failed. 50 ops-module tests across all 12 handlers;
+13 store tests (4 prior + 9 new for active marker).
+
+**Phase-7 wiring remaining (deferred per §12.7.7 lock):** All Plane-3
+emissions today produce correct `Pkcs11Call` audit events (function
+name, mechanism, slot) but use deterministic SHA-256 placeholders for
+the actual cryptographic output. Phase 7 wires real
+`softhsmrustv3::C_*` calls behind the same audit emissions — the wire
+format committed in PR #72 + §12.7.5 doesn't change, only the bytes
+inside `ciphertext` / `signature` / `shared_secret` become real instead
+of placeholder.
+
+**Session 1 (prior) — foundation + 3 demo-critical ops shipped on `feat/kmip-phase-5-op-handlers`:**
+
+- [x] `src/error.rs` — `ResultReason` enum with codepoints cross-checked
+      against `spec/oasis-kmip-3.0/kmip-spec-3.0-tags-enums.json` (`Result Reason`):
+      ItemNotFound (0x01), OperationNotSupported (0x05), MissingData (0x06),
+      InvalidField (0x07), CryptographicFailure (0x0a), PermissionDenied
+      (0x0c), ObjectArchived (0x0d), ObjectAlreadyExists (0x18),
+      InvalidAttribute (0x2c), InvalidAttributeValue (0x2d). `KmipError`
+      enum with typed constructors + `From<BridgeError>`.
+- [x] `src/store/{traits,memory}.rs` — `KeyStore` trait (minimal surface
+      for ops) + `MemoryStore` in-memory impl for Phase-5 tests.
+      `ObjectRecord` carries uid + object_type + algorithm + usage_mask +
+      state + pkcs11_cka_id + pkcs11_slot + timestamps + supersedes link.
+      Phase 6 replaces `MemoryStore` with SQLite-backed durable store.
+- [x] `src/ops/deps.rs` — `Deps` shared bundle: `engine`, `store`, `sink`,
+      `config` (slot, pin, vendor identification, server version).
+- [x] `src/ops/query.rs` — **KMIP 3.0 §6.1.45 Query** (op `0x18`).
+      Returns supported operations / object types / server information.
+      Phase-3 capability list (12 ops). PKCS#11 v3.2 §C.5.3 `C_GetInfo`
+      not yet called — v0.1 uses static config.
+- [x] `src/ops/create_key_pair.rs` — **KMIP 3.0 §6.1.11 Create Key Pair**
+      (op `0x02`). Extracts `CryptographicAlgorithm` / `CryptographicLength`
+      / `CryptographicUsageMask` from template attributes. Plane-1 engine
+      gate; honours `algorithm_default` / `algorithm_substitution`. Maps
+      `(KmipAlgorithm, PkcsOp::KeyGen) → CKM_*` via Phase-3 enum. Audit
+      emits `KmipRequestReceived` → `Pkcs11Call(C_GenerateKeyPair)` →
+      `KmipResponseSent`. Persists `PreActive` records for both public +
+      private keys. PKCS#11 v3.2 §C.7.1 entry-point signature verified
+      against `rust/src/ffi.rs::C_GenerateKeyPair`.
+- [x] `src/ops/sign.rs` — **KMIP 3.0 §6.1.60 Sign** (op `0x21`). Store
+      lookup → lifecycle gate (only `Active` per §3.4) → Plane-1 engine.
+      Surfaces `Decision::RekeyAndProceed` as `PermissionDenied` with an
+      actionable hint (`"rekey required: policy substitutes X → Y for
+      UID Z"`); the actual multi-op rekey transaction belongs to Phase 6
+      / dispatcher work. PKCS#11 v3.2 §C.6.5 `C_SignInit` + §C.6.6
+      `C_Sign` signatures verified against `rust/src/ffi.rs`.
+
+**Test summary (this session):** 150 total pass (121 lib + 29 integration;
+0 failed). Added 16 ops tests + 4 store tests + 9 error tests = 29 new.
+
+**Session 2+ — remaining 9 ops:** Activate, Create (sym), Decrypt, Destroy,
+Encrypt (branches classical / ML-KEM encapsulate), Get, Locate, Revoke,
+SignatureVerify. Same template — each ≤ ~250 LOC with KMIP 3.0 + PKCS#11
+v3.2 spec citations in the file header.
+
+**Known limitations carried to Phase 6:**
+
+- `canonical_name(KmipAlgorithm)` returns bare names (`"ECDSA"`, `"RSA"`,
+  `"AES"`) — no curve/size suffix. The Phase-5 store doesn't yet carry
+  the `Cryptographic Parameters` attribute that would let the dispatcher
+  produce `"ECDSA-P256"` / `"AES-256"`. Phase 6 closes this so policies
+  can target sized algorithms.
+- Bridge calls into `softhsmrustv3::C_*` are placeholder-audited but not
+  actually executed (v0.1 produces deterministic SHA-256 signatures and
+  UUID-derived CKA_IDs). Phase 7 (TLS server) wires the real session +
+  bridge calls behind the audit emissions.
+
+### Phase 5 — Op handlers (Plane 2) — original plan (2.0 PD)
 
 11 ops, one module each, ≤ 100 LOC including tests. Note KMIP 3.0 reuses `Encrypt` for ML-KEM encapsulation and `Decrypt` for decapsulation — the handler branches on key algorithm:
 
@@ -792,7 +906,129 @@ Phase 1 (the entire subsystem, standalone) is NOT complete until ALL of these ar
 | 100-LOC-per-op-handler gate forces helper proliferation | Hard CI gate; prefer extracting helpers into `src/ops/_common.rs` over relaxing the gate |
 | Policy YAML schema drift over time | `policies/SCHEMA.md` documents the v0.1 schema; loader validates against it; bump schema version + provide migration |
 
-## 12. Status log
+## 12. Phase 10 — Dev sandbox integration (scoped 2026-06-07)
+
+### 12.1 What the existing dev sandbox is (findings)
+
+`pqctoday-sandbox` is **already a Docker dev workbench** where users run and modify crypto code in five languages against `libsofthsmv3.so`. Inventory verified by reading the actual code:
+
+| Component | Path | What it does |
+|---|---|---|
+| **Multi-language samples** | [`samples/{py,c,cpp,rust,java}/`](../../pqctoday-sandbox/samples/) | 13 Python + 12 C + Rust + C++ + Java sample programs, each exercising one PKCS#11 v3.2 primitive (ML-DSA / ML-KEM / SLH-DSA / classical). Coverage matrix in [`samples/SAMPLES.md`](../../pqctoday-sandbox/samples/SAMPLES.md). |
+| **HTTP API** | [`api/server.py`](../../pqctoday-sandbox/api/server.py), [`api/kms_router.py`](../../pqctoday-sandbox/api/kms_router.py) | Flask app exposing `/api/run/*` scenario endpoints + a PKCS#11-fronted REST surface. |
+| **WebSocket terminal** | [`pyterm.py`](../../pqctoday-sandbox/pyterm.py) | ttyd-protocol-compatible PTY/tmux WebSocket server; users get an interactive shell inside the container via xterm.js. |
+| **PKCS#11 spy log parser** | [`api/spy_parser.py`](../../pqctoday-sandbox/api/spy_parser.py) | Parses live `C_*` call traces into the Hub UI's telemetry stream. |
+| **Hub embedding** | [`SandboxScenarioEmbed.tsx`](../../pqctoday-hub/src/components/Playground/SandboxScenarioEmbed.tsx) | Iframes the sandbox container (localhost:4000 or orchestrator-issued session); postMessage for theme/userId/scenarioId. |
+
+**Plane coverage today vs needed:**
+
+| Plane | Dev sandbox today | Phase 10 adds |
+|---|---|---|
+| **P3 — PKCS#11 HSM** (softhsmv3) | ✅ full — 5-language samples + spy logs visible | (unchanged) |
+| **P2 — KMIP 3.0** | ❌ no KMIP server in the container | ✅ ship Rust `pqctoday-kmip` binary alongside softhsmv3 |
+| **P1 — Crypto agility engine** | ❌ no policy layer | ✅ engine + dropdown-editable YAML policies, audit ring exposed via API |
+
+**The pivot is therefore not "build a dev sandbox" — it's "extend the existing dev sandbox with the P1/P2 layers Phases 0–9 have been building."**
+
+### 12.2 Deliverables (MVP, Python first)
+
+| # | Deliverable | Path | Effort |
+|---|---|---|---|
+| 12.2.1 | Finish remaining 9 Rust ops (Phase 5b) + wire real softhsmrustv3 calls (short Phase 7) so the binary actually runs end-to-end | `pqctoday-hsm/kmip/src/ops/`, `src/pkcs11bridge/`, `src/server/` | 2.5 PD |
+| 12.2.2 | Ship the Rust binary inside the sandbox Docker image | `pqctoday-sandbox/docker/Dockerfile.network`, `entrypoint.sh` | 0.25 PD |
+| 12.2.3 | Add 10 `/api/kmip/*` proxy endpoints to the Flask API (§12.3) | `pqctoday-sandbox/api/server.py` | 0.5 PD |
+| 12.2.4 | `kmip_client.py` Python helper (thin TTLV codec) + 4 sample programs (§12.4) | `pqctoday-sandbox/samples/py/kmip/` | 0.5 PD |
+| 12.2.5 | Hub-side `AgilityScenarioPanel.tsx` — policy dropdown + Monaco YAML editor + tri-plane log viewer | `pqctoday-hub/src/components/Playground/` | 1.0 PD |
+| 12.2.6 | End-to-end demo recording + lab-guide doc | `docs/labs/agility-scenario.md` | 0.25 PD |
+| **MVP total** | | | **~5.0 PD** |
+
+**Cross-language sample extension** (C / C++ / Rust / Java) parked at ~0.5 PD per language — pick up after the Python MVP demos cleanly.
+
+### 12.3 New API endpoints in `api/server.py`
+
+All under `/api/kmip/` prefix; thin proxy in front of the Rust binary's `PolicyStore` + audit surface.
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/kmip/health` | KMIP server up? policy loaded? sink size? |
+| GET | `/api/kmip/policy/list` | Names of YAML files in `policies/` dir (Hub dropdown source) |
+| GET | `/api/kmip/policy/active` | `{ name, fingerprint, loaded_at }` |
+| GET | `/api/kmip/policy/yaml?name=X` | Raw YAML body for editor display |
+| PUT | `/api/kmip/policy/yaml?name=X` | Save edited YAML (`PolicyStore::save` — validate-then-atomic-rename) |
+| POST | `/api/kmip/policy/activate` | Body `{ name }` → `Engine::activate` (atomic swap) |
+| POST | `/api/kmip/policy/dry_run` | Body `{ yaml, sample_request }` → `Decision` JSON (editor "test" button) |
+| GET | `/api/kmip/audit/tail` (SSE) | Stream of tri-plane `AuditEvent`s — one JSON per SSE event |
+| GET | `/api/kmip/audit?correlation_id=X` | Full historical trace for one request |
+| POST | `/api/kmip/audit/clear` | Reset in-memory ring for clean demo runs |
+
+### 12.4 Sample subset (`samples/py/kmip/`)
+
+Parallel to existing `samples/py/` PKCS#11-direct samples. Each ≤ 60 LOC + a shared `kmip_client.py` helper.
+
+| # | File | Demonstrates | KMIP ops exercised |
+|---|---|---|---|
+| 1 | `kmip-01-create-keypair-sign.py` | Generate sig keypair via KMIP, sign a message, verify | CreateKeyPair, Sign, SignatureVerify |
+| 2 | `kmip-02-create-keypair-kem.py` | Generate KEM keypair, encapsulate, decapsulate | CreateKeyPair, Encrypt (encap), Decrypt (decap) |
+| 3 | `kmip-03-create-key-encrypt.py` | Generate AES key, encrypt + decrypt a blob | Create, Encrypt, Decrypt |
+| 4 | `kmip-04-rekey-on-policy-flip.py` | Create classical key → flip policy → next Sign auto-rekeys to PQC | CreateKeyPair, Sign (twice, with policy edit between) |
+
+Sample #4 is the headline demo: user runs script, flips policy dropdown in Hub, runs script again, observes engine emitting `RekeyAndProceed` and the second Sign producing an ML-DSA signature under the same Python code.
+
+### 12.5 Hub-side panel (`AgilityScenarioPanel.tsx`)
+
+New component **in the same tab as** the existing `SandboxScenarioEmbed`
+(per locked decision §12.7.6). The two panels share one viewport — the
+existing iframe + terminal occupy the upper / left region, the agility
+panel occupies the lower / right region; exact split is responsive.
+Layout of the agility panel itself:
+
+```text
+┌────────────────────────────────────────────────────────────────────┐
+│  Policy: [classical ▼]  [Edit YAML]  [Activate]   • active:pqc     │
+├────────────────────────────────┬───────────────────────────────────┤
+│   ╔══════════════════════════╗ │  Plane 1 — Agility engine          │
+│   ║  Monaco YAML editor      ║ ├───────────────────────────────────┤
+│   ║  (GET /api/kmip/yaml)    ║ │  Plane 2 — KMIP dispatcher         │
+│   ╚══════════════════════════╝ ├───────────────────────────────────┤
+│                                │  Plane 3 — PKCS#11 HSM             │
+└────────────────────────────────┴───────────────────────────────────┘
+```
+
+Behavioural pieces (each ≤ ~150 LOC):
+- **Policy dropdown** — `useEffect` on mount → `GET /api/kmip/policy/list`; on change → `POST /api/kmip/policy/activate`
+- **YAML editor** — Monaco wired to `GET/PUT /api/kmip/policy/yaml?name=X`; Activate button → `POST /activate`
+- **Tri-plane log panes** — three stacked panels; each `EventSource('/api/kmip/audit/tail')` filtered by `plane: "p1"|"p2"|"p3"`; rows render with timestamp + summary + click-to-expand JSON
+- **Correlation highlight** — clicking any row dims everything except matching `correlation_id` across all three panes (the "see one request flow through all three layers" moment)
+
+### 12.6 Sandbox container changes
+
+`Dockerfile.network` additions:
+
+1. Multi-stage build the Rust KMIP binary (`cargo build --release --bin pqctoday-kmip`).
+2. Copy binary + `policies/*.yaml` into the runtime image.
+3. Start KMIP server in `entrypoint.sh` alongside softhsmv3 init — listens on `127.0.0.1:5696` (standard KMIP port), reads policies from `/etc/pqctoday/policies/` (host-mounted volume), writes audit JSONL to `/var/log/pqctoday/audit.jsonl` via `CompositeSink(RingSink, JsonlSink)`.
+
+### 12.7 Locked decisions
+
+| # | Decision | Choice | Reason |
+|---|---|---|---|
+| 12.7.1 | KMIP wire transport for samples | Raw TTLV over local TCP via a thin `kmip_client.py` helper | No third-party dep; honest about being a KMIP client; portable to a real KMS later. |
+| 12.7.2 | Server bind | TCP `localhost:5696` (KMIP IANA port) | Standard; samples port to a real KMS unchanged. |
+| 12.7.3 | Container topology | Single container — KMIP server + softhsmv3 + Flask API + ttyd in the same image | Simpler MVP; sidecar split later if needed. |
+| 12.7.4 | Policy YAML location | Host-mounted volume at `/etc/pqctoday/policies/` | Users edit + persist without rebuild. |
+| 12.7.5 | Audit storage | `CompositeSink(RingSink(16_384), JsonlSink("/var/log/pqctoday/audit.jsonl"))` | Hub UI tails the ring; JSONL accumulates durable forensics. Both supported by PR #72. |
+| 12.7.6 | Hub UX | **Single-tab split panel** — the existing `SandboxScenarioEmbed` (iframe + terminal) shares one tab with the new `AgilityScenarioPanel` (policy editor + tri-plane log viewer). The two panels sit side-by-side (or stacked vertically depending on viewport). | User decision 2026-06-07: agility view is part of the same scenario, not a parallel one. One tab, one mental model. |
+| 12.7.7 | Real softhsmrustv3 wiring | Required before MVP ships — placeholder Plane-3 events lie to the user | Forces completion of Phase 5b + a short Phase 7 binding the bridge. |
+
+### 12.8 Sequencing constraint
+
+§12.2.1 blocks §12.2.4 (samples need real ops). Everything else can parallelise. Three PRs:
+
+1. **PR A** (this repo) — Phase 5b + short Phase 7 (the binary actually runs).
+2. **PR B** (`pqctoday-sandbox`) — Dockerfile + API endpoints + Python samples.
+3. **PR C** (`pqctoday-hub`) — `AgilityScenarioPanel.tsx`.
+
+## 13. Status log
 
 | Date | Note |
 |---|---|
@@ -804,3 +1040,4 @@ Phase 1 (the entire subsystem, standalone) is NOT complete until ALL of these ar
 | 2026-06-07 | **Phase 3 (KMIP 3.0 extension layer) ✅ complete on branch `feat/kmip-phase-3-extension`.** 1,108 LOC across `src/kmip30/{mod,algos,attrs,ops}.rs`. **algos.rs** (432 LOC): `KmipAlgorithm` enum with 25 variants (7 classical AES/RSA/ECDSA/HMAC + 18 FIPS PQC ML-KEM/ML-DSA/SLH-DSA-{SHA2,SHAKE} per the FIPS-only workflow decision); `to_wire_value`/`from_wire_value` map to OASIS-extracted §10.2.6 codepoints (ML-KEM-768=`0x3a`, ML-DSA-65=`0x3d`, etc.); `to_pkcs11_mech(self, PkcsOp)` returns the right vendor or standard mech based on the `(algorithm, op)` pair; `manifest_consistency_test` pins the six `0x4032`–`0x4037` vendor codepoints to `pkcs11-mech-manifest.json` `active.*` block (so any drift between the consumer table and the authoritative manifest is caught at test time). **attrs.rs** (301 LOC): `Attribute` enum (8 variants for v0.1), `UsageMask` bitflags (21 KMIP 3.0 §4 flags), `ObjectType` (5 variants), `State` lifecycle enum with `can_transition_to(next)` FSM enforcement, `RevocationReason` for the Revoke op. **ops.rs** (340 LOC): `Operation` enum + 12 request/response struct pairs covering the v0.1 op set (Query, Create, CreateKeyPair, Get, Locate, Activate, Revoke, Destroy, Encrypt, Decrypt, Sign, SignatureVerify). `EncryptRequest`/`EncryptResponse` carry `shared_secret: Option<Vec<u8>>` so ML-KEM encapsulation reuses the same struct (KMIP 3.0 design — no separate Encapsulate/Decapsulate ops; handler branches on key algorithm). Test summary: 50 lib tests pass (30 from Phase 2 + 20 new) — includes wire round-trips for every algorithm variant, FIPS-PQC classifier, ML-KEM encap/decap mech equality, ML-DSA rejecting Encrypt + ML-KEM rejecting Sign, lifecycle FSM transition table, OASIS Operation codepoint sanity checks. KAT replay still green. `bitflags = "2"` added as a regular dep. Phase 4 (trivial PKCS#11 bridge — `use softhsmrustv3` + session wrappers) can begin against this typed surface. |
 
 | 2026-06-07 | **Phase 4 (PKCS#11 bridge) ✅ complete on branch `feat/kmip-phase-4-pkcs11bridge`.** 435 LOC across `src/pkcs11bridge/{mod,error,mechs,session}.rs`. Plan called it "trivial — no FFI"; in practice softhsmrustv3 exposes the raw PKCS#11 v3.2 C ABI (`u32` handles, `*mut u8` buffers, `CK_RV` return codes — no `unsafe fn` annotations because the engine self-validates pointers). Phase 4 puts a safe Rust face on the session lifecycle. **error.rs** (152 LOC): `BridgeError` enum mapping named `CKR_*` classes Phase 5 cares about (GeneralError, MechanismInvalid, ObjectHandleInvalid, TemplateError, SignatureInvalid, BufferTooSmall, SessionInvalid range `0x00B0..=0x00BC`, ArgumentsBad, HostMemory, FunctionFailed, MechanismParamInvalid, UnclassifiedCkr catch-all). **session.rs** (199 LOC): `Session` struct with RAII Drop calling `C_CloseSession`. `open(slot, pin)` initialises the engine on first call (`Once`-guarded `C_Initialize` to avoid `CKR_CRYPTOKI_ALREADY_INITIALIZED`), opens an R/W user session, logs in as `CKU_USER`. `Session: !Send` deliberately via `*const ()` PhantomData — the engine has thread-local state. Op-method bodies (sign/encapsulate/etc.) intentionally NOT in this phase — Phase 5 wires them up alongside their handlers. **mechs.rs** (55 LOC): re-exports the FIPS-only mech constants from `crate::kmip30::algos` so the bridge has one mech table for the whole subsystem; second drift detector against the manifest. **Smoke test**: `initialize_engine_round_trip` calls `softhsmrustv3::C_Initialize(null_mut)` and accepts `CKR_OK` or `CKR_CRYPTOKI_ALREADY_INITIALIZED`. The plan's broader smoke test (open session, ML-KEM-768 keygen, encap/decap, destroy) requires a fully-initialised softhsmv3 token; end-to-end smoke belongs in Phase 7 when the TLS server can drive the whole stack. Test summary: 58 lib tests pass (50 prior + 8 new) — error mapping per CKR class, raw round-trip through classify, Session is !Send, engine initialise round-trip, flag constants match PKCS#11 v3.2 §11.6, vendor codepoints match the manifest. KAT replay still green. Phase 4.5 (Plane 1 policy engine) can begin against this bridge. |
+| 2026-06-07 | **Phase 10 (Dev sandbox integration) scoped — see §12.** Initially confused this with "build a dev sandbox from scratch"; corrected after reading the actual `pqctoday-sandbox` code. **Finding:** the dev sandbox is already a substantial multi-language Docker workbench (5-language samples + ttyd PTY shell + Flask API + Hub iframe embed) — what's missing is only the Plane 1 (agility engine) + Plane 2 (KMIP) layers Phases 0–9 have been building. Phase 10 wires those in: ship the Rust `pqctoday-kmip` binary inside the sandbox container, add 10 `/api/kmip/*` proxy endpoints, ship 4 Python samples + a tiny `kmip_client.py` TTLV helper, and add a Hub-side `AgilityScenarioPanel.tsx`. **MVP effort: ~5.0 PD across three PRs** (Phase 5b+short Phase 7 in this repo; container + API + samples in `pqctoday-sandbox`; agility panel in `pqctoday-hub`). **Locked decisions:** (13.7.1) raw TTLV over local TCP, no pykmip dep; (13.7.2) bind on standard KMIP IANA port 5696; (13.7.3) single container; (13.7.4) policies host-mounted; (13.7.5) `CompositeSink(RingSink, JsonlSink)`; (13.7.6) **single-tab split panel** alongside the existing `SandboxScenarioEmbed` (user override of my recommendation — agility is part of the same scenario, not a parallel one); (13.7.7) real softhsmrustv3 wiring required before MVP ships (no placeholder Plane-3 events in production). Cross-language sample extension (C / C++ / Rust / Java) parked at ~0.5 PD per language after the Python MVP demos cleanly. |

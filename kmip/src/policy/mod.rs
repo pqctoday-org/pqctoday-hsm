@@ -92,4 +92,4 @@ pub use loader::{load_from_file, load_from_str, validate, LoadedPolicy, LoaderEr
 pub use policy::{ComplianceMapping, Metadata, Policy};
 pub use request::PolicyRequest;
 pub use rule::{AttrPredicate, GatingDeny, Rule, Substitution, TimeBound};
-pub use store::{PolicyStore, StoreError};
+pub use store::{ActiveMarker, PolicyStore, StoreError, POLICY_STORE_ACTIVE_FILE};
