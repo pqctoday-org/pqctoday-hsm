@@ -5,9 +5,13 @@
 //!
 //! | File | KMIP 3.0 § | Op codepoint |
 //! |---|---|---|
+//! | [`activate`]        | 6.1.1  | 0x12 |
 //! | [`query`]           | 6.1.45 | 0x18 |
 //! | [`create_key_pair`] | 6.1.11 | 0x02 |
 //! | [`sign`]            | 6.1.60 | 0x21 |
+//!
+//! Shared helpers (audit emission, canonical algorithm names) live in
+//! [`helpers`] so every op file stays focused on its own KMIP semantics.
 //!
 //! Remaining 9 ops (Create, Get, Locate, Activate, Revoke, Destroy,
 //! Encrypt, Decrypt, SignatureVerify) follow the same template:
@@ -27,8 +31,10 @@
 //! ML-KEM encapsulation reuses `Encrypt`; ML-KEM decapsulation reuses
 //! `Decrypt`. The handler branches on key algorithm.
 
+pub mod activate;
 pub mod create_key_pair;
 pub mod deps;
+pub mod helpers;
 pub mod query;
 pub mod sign;
 
