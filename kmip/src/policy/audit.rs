@@ -1,87 +1,64 @@
-//! [`PolicyAudit`] — Plane-1 in-memory audit ring.
+//! [`PolicyAudit`] — Plane-1 facade over the cross-plane [`AuditSink`].
 //!
-//! Captures three event classes the Hub UI and Phase 9 audit CLI both need:
+//! Phase 4.6 retrofit: PolicyAudit no longer owns its own bespoke ring +
+//! event enum. It is now a thin typed wrapper that:
 //!
-//! - **PolicyActivated** — every successful [`super::Engine::activate`] call.
-//!   Carries the new policy's fingerprint, the prior fingerprint (so an
-//!   operator can diff which YAML was just swapped in), and any loader
-//!   warnings.
-//! - **Decision** — one row per `evaluate` call: the request shape +
-//!   resulting [`super::Decision`] + the active policy fingerprint at the
-//!   time. Lets the operator answer "why was this Sign denied at 09:14:32?"
-//!   without replaying the request.
-//! - **RekeyPlanned** — synthesised when an `evaluate` returns
-//!   [`super::Decision::RekeyAndProceed`]. Same info as the Decision row
-//!   plus the rekey-specific fields, separated so the rekey audit view in
-//!   the Hub doesn't have to walk every Decision row.
+//! 1. Holds a backing [`crate::auditlog::RingSink`] for its existing
+//!    `snapshot()` API (Hub UI's "Plane-1 history" panel).
+//! 2. Optionally fans every event ALSO into a global
+//!    [`crate::auditlog::AuditSink`] (typically a
+//!    [`crate::auditlog::CompositeSink`] that also drives Plane 2 + 3).
+//!    This is how the Hub UI gets the tri-plane correlated stream.
 //!
-//! Storage is a bounded ring buffer (default 1024 entries) — sufficient
-//! for a sandbox-grade engine and the per-request "what just happened?"
-//! UI. Phase 9 wires this to the SQLite audit log for durable history.
+//! Engine code is unchanged — `record_activation`, `record_decision`,
+//! `snapshot` keep the same call shape.
 
-use std::collections::VecDeque;
-use std::sync::Mutex;
+use std::sync::Arc;
 use time::OffsetDateTime;
+
+use crate::auditlog::{
+    AuditEvent, AuditSink, CompositeSink, DecisionSummary, EventPayload, Plane, RingSink,
+};
 
 use super::decision::Decision;
 use super::request::PolicyRequest;
 
-#[derive(Clone, Debug)]
-pub enum AuditEvent {
-    PolicyActivated {
-        ts: OffsetDateTime,
-        policy_name: String,
-        new_fingerprint: String,
-        prior_fingerprint: Option<String>,
-        warnings: Vec<String>,
-    },
-    Decision {
-        ts: OffsetDateTime,
-        op: String,
-        algorithm: Option<String>,
-        correlation_id: String,
-        policy_fingerprint: String,
-        outcome: AuditDecision,
-    },
-    RekeyPlanned {
-        ts: OffsetDateTime,
-        correlation_id: String,
-        original_uid: String,
-        from_algorithm: String,
-        new_algorithm: String,
-        triggered_by_rule: usize,
-        policy_fingerprint: String,
-    },
-}
-
-/// Compact projection of [`Decision`] suitable for log persistence.
-#[derive(Clone, Debug)]
-pub enum AuditDecision {
-    Allow {
-        algorithm_override: Option<String>,
-        substituted_by_rule: Option<usize>,
-    },
-    Deny {
-        reason: String,
-        fired_rule_index: usize,
-    },
-    Rekey {
-        new_algorithm: String,
-        original_uid: String,
-    },
-}
-
+/// Plane-1 audit facade. The backing [`RingSink`] is exposed via
+/// [`Self::snapshot`] so existing callers (engine tests, Hub UI Plane-1
+/// panel) keep working.
 pub struct PolicyAudit {
-    inner: Mutex<VecDeque<AuditEvent>>,
-    capacity: usize,
+    /// Where Plane-1 events land. Always at least the backing ring; if a
+    /// global sink was provided it's wrapped in a [`CompositeSink`].
+    sink: Arc<dyn AuditSink>,
+    /// Backing in-memory ring — keeps the [`Self::snapshot`] API working.
+    ring: Arc<RingSink>,
 }
 
 impl PolicyAudit {
+    /// Standalone ring with `capacity` slots — no cross-plane fan-out.
+    /// Default for unit tests and engines constructed via
+    /// [`super::Engine::deny_all`] / [`super::Engine::permissive`].
     pub fn new(capacity: usize) -> Self {
+        let ring = Arc::new(RingSink::new(capacity));
         Self {
-            inner: Mutex::new(VecDeque::with_capacity(capacity)),
-            capacity,
+            sink: ring.clone(),
+            ring,
         }
+    }
+
+    /// Cross-plane wiring: events land in this local ring AND in the
+    /// supplied global sink. Production engines built by the Phase-7
+    /// server call this with the composite sink that also drives Plane 2
+    /// + Plane 3 emitters.
+    pub fn with_global_sink(capacity: usize, global: Arc<dyn AuditSink>) -> Self {
+        let ring = Arc::new(RingSink::new(capacity));
+        let composite: Arc<dyn AuditSink> = Arc::new(CompositeSink::new(vec![ring.clone(), global]));
+        Self { sink: composite, ring }
+    }
+
+    /// Borrow the backing ring (Hub UI Plane-1 panel reads through this).
+    pub fn ring(&self) -> Arc<RingSink> {
+        self.ring.clone()
     }
 
     pub fn record_activation(
@@ -92,13 +69,21 @@ impl PolicyAudit {
         prior_fp: Option<&str>,
         warnings: &[String],
     ) {
-        self.push(AuditEvent::PolicyActivated {
+        // Policy-activation events have no per-request correlation — use the
+        // policy fingerprint as the grouping key in the Hub UI.
+        let correlation_id = format!("policy:{new_fp}");
+        let ev = AuditEvent::at(
             ts,
-            policy_name: policy_name.into(),
-            new_fingerprint: new_fp.into(),
-            prior_fingerprint: prior_fp.map(str::to_string),
-            warnings: warnings.to_vec(),
-        });
+            Plane::Agility,
+            correlation_id,
+            EventPayload::PolicyActivated {
+                policy_name: policy_name.into(),
+                new_fingerprint: new_fp.into(),
+                prior_fingerprint: prior_fp.map(str::to_string),
+                warnings: warnings.to_vec(),
+            },
+        );
+        self.sink.emit(ev);
     }
 
     pub fn record_decision(&self, req: &PolicyRequest, decision: &Decision, policy_fp: &str) {
@@ -106,7 +91,7 @@ impl PolicyAudit {
             Decision::Allow {
                 algorithm_override,
                 substituted_by_rule,
-            } => AuditDecision::Allow {
+            } => DecisionSummary::Allow {
                 algorithm_override: algorithm_override.clone(),
                 substituted_by_rule: *substituted_by_rule,
             },
@@ -114,7 +99,7 @@ impl PolicyAudit {
                 human,
                 fired_rule_index,
                 ..
-            } => AuditDecision::Deny {
+            } => DecisionSummary::Deny {
                 reason: human.clone(),
                 fired_rule_index: *fired_rule_index,
             },
@@ -122,19 +107,22 @@ impl PolicyAudit {
                 new_algorithm,
                 original_uid,
                 ..
-            } => AuditDecision::Rekey {
+            } => DecisionSummary::Rekey {
                 new_algorithm: new_algorithm.clone(),
                 original_uid: original_uid.clone(),
             },
         };
-        self.push(AuditEvent::Decision {
-            ts: req.ts,
-            op: req.op.into(),
-            algorithm: req.algorithm.map(str::to_string),
-            correlation_id: req.correlation_id.into(),
-            policy_fingerprint: policy_fp.into(),
-            outcome,
-        });
+        self.sink.emit(AuditEvent::at(
+            req.ts,
+            Plane::Agility,
+            req.correlation_id.to_string(),
+            EventPayload::PolicyDecided {
+                op: req.op.into(),
+                algorithm: req.algorithm.map(str::to_string),
+                outcome,
+                policy_fingerprint: policy_fp.into(),
+            },
+        ));
 
         if let Decision::RekeyAndProceed {
             original_uid,
@@ -144,34 +132,24 @@ impl PolicyAudit {
             ..
         } = decision
         {
-            self.push(AuditEvent::RekeyPlanned {
-                ts: req.ts,
-                correlation_id: req.correlation_id.into(),
-                original_uid: original_uid.clone(),
-                from_algorithm: from_algorithm.clone(),
-                new_algorithm: new_algorithm.clone(),
-                triggered_by_rule: *triggered_by_rule,
-                policy_fingerprint: policy_fp.into(),
-            });
+            self.sink.emit(AuditEvent::at(
+                req.ts,
+                Plane::Agility,
+                req.correlation_id.to_string(),
+                EventPayload::RekeyPlanned {
+                    original_uid: original_uid.clone(),
+                    from_algorithm: from_algorithm.clone(),
+                    new_algorithm: new_algorithm.clone(),
+                    triggered_by_rule: *triggered_by_rule,
+                    policy_fingerprint: policy_fp.into(),
+                },
+            ));
         }
     }
 
-    /// Snapshot the current event ring. Cheap-ish — clones the deque.
+    /// Snapshot the backing ring — Plane-1 events only.
     pub fn snapshot(&self) -> Vec<AuditEvent> {
-        self.inner
-            .lock()
-            .expect("audit ring poisoned")
-            .iter()
-            .cloned()
-            .collect()
-    }
-
-    fn push(&self, ev: AuditEvent) {
-        let mut q = self.inner.lock().expect("audit ring poisoned");
-        if q.len() == self.capacity {
-            q.pop_front();
-        }
-        q.push_back(ev);
+        self.ring.snapshot()
     }
 }
 
@@ -184,7 +162,10 @@ mod tests {
     fn activation_logged() {
         let audit = PolicyAudit::new(8);
         audit.record_activation(OffsetDateTime::UNIX_EPOCH, "test", "sha256:abc", None, &[]);
-        assert_eq!(audit.snapshot().len(), 1);
+        let snap = audit.snapshot();
+        assert_eq!(snap.len(), 1);
+        assert!(matches!(snap[0].event, EventPayload::PolicyActivated { .. }));
+        assert_eq!(snap[0].plane, Plane::Agility);
     }
 
     #[test]
@@ -209,11 +190,13 @@ mod tests {
             },
             "sha256:fp",
         );
-        // Two events: Decision + RekeyPlanned
         let snap = audit.snapshot();
         assert_eq!(snap.len(), 2);
-        assert!(matches!(snap[0], AuditEvent::Decision { .. }));
-        assert!(matches!(snap[1], AuditEvent::RekeyPlanned { .. }));
+        assert!(matches!(snap[0].event, EventPayload::PolicyDecided { .. }));
+        assert!(matches!(snap[1].event, EventPayload::RekeyPlanned { .. }));
+        // Both events share the request's correlation_id.
+        assert_eq!(snap[0].correlation_id, "corr-1");
+        assert_eq!(snap[1].correlation_id, "corr-1");
     }
 
     #[test]
@@ -229,5 +212,32 @@ mod tests {
             );
         }
         assert_eq!(audit.snapshot().len(), 2);
+    }
+
+    #[test]
+    fn with_global_sink_fans_out_to_both() {
+        let global = Arc::new(RingSink::new(8));
+        let audit = PolicyAudit::with_global_sink(8, global.clone());
+        let attrs = HashMap::new();
+        let req = PolicyRequest::minimal(
+            "Sign",
+            Some("ML-DSA-87"),
+            OffsetDateTime::UNIX_EPOCH,
+            "global-corr",
+            &attrs,
+        );
+        audit.record_decision(
+            &req,
+            &Decision::Allow {
+                algorithm_override: None,
+                substituted_by_rule: None,
+            },
+            "sha256:fp",
+        );
+        // Local ring saw it.
+        assert_eq!(audit.snapshot().len(), 1);
+        // Global ring also saw it.
+        assert_eq!(global.snapshot().len(), 1);
+        assert_eq!(global.snapshot()[0].correlation_id, "global-corr");
     }
 }
