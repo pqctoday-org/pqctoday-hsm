@@ -11,7 +11,9 @@
 
 pub mod algos;
 pub mod attrs;
+pub mod message;
 pub mod ops;
+pub mod wire;
 
 pub use algos::{CkMechanismType, KmipAlgorithm, PkcsOp};
 pub use attrs::{Attribute, ObjectType, RevocationReason, State, UsageMask};
@@ -33,3 +35,10 @@ pub use ops::{
     SignatureVerifyRequest, SignatureVerifyResponse,
     SignRequest, SignResponse,
 };
+
+pub use message::{
+    RequestBatchItem, RequestHeader, RequestMessage, RequestPayload, ResponseBatchItem,
+    ResponseHeader, ResponseMessage, ResponsePayload, ResultStatus, KMIP_VERSION_MAJOR,
+    KMIP_VERSION_MINOR,
+};
+pub use wire::{decode_request_message, encode_response_message, WireError};

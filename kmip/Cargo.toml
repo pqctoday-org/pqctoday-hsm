@@ -39,6 +39,10 @@ tokio-rustls = "0.26"
 rustls       = { version = "0.23", features = ["ring"] }
 rustls-pemfile = "2"
 
+# Self-signed cert auto-gen for sandbox / dev runs (Phase 7).
+# Production deployments mount real certs via --tls-cert / --tls-key.
+rcgen = { version = "0.13", default-features = false, features = ["aws_lc_rs", "pem"] }
+
 # Persistence
 rusqlite           = { version = "0.32", features = ["bundled"] }
 rusqlite_migration = "1"

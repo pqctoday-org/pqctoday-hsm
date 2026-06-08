@@ -830,7 +830,95 @@ Shipped on `feat/kmip-phase-6-sqlite-store`:
 - [ ] `src/store/tags.rs` — KMIP Locate query builder.
 - [ ] Migration via `rusqlite_migration`: schema version 1 = initial.
 
-### Phase 7 — Dispatcher + KMIP server (0.75 PD)
+### Phase 7 — Dispatcher + KMIP TLS server (0.75 PD) — ✅ **COMPLETE 2026-06-07**
+
+Shipped on `feat/kmip-phase-7-tls-dispatcher`:
+
+- [x] `src/kmip30/message.rs` — Request/Response Message + Header + Batch Item
+      types per KMIP 3.0 §8.1.x and §8.2.x. **Spec-verified shape:** KMIP 3.0
+      removed `Batch Count` (was 0x42000d in 2.x) and `Unique Batch Item ID`
+      (was 0x420093) — batch items are correlated by position only. Confirmed
+      against `spec/oasis-kmip-3.0/kmip-spec-v3.0.pdf` §8.1.2 / §8.1.3 / §8.2.3.
+- [x] `src/kmip30/wire.rs` — TTLV ↔ typed-struct codec for the message
+      envelope + all 12 op request/response payloads. Every KMIP tag
+      codepoint cited from `kmip-spec-3.0-tags-enums.json`. Protocol
+      version rejection: anything other than `3.0` returns
+      `WireError::UnsupportedVersion`.
+- [x] `src/dispatcher/mod.rs` — `dispatch(deps, RequestMessage) ->
+      ResponseMessage`. Per-batch-item: allocate fresh `correlation_id`
+      (UUID v4), call op handler, convert `Result<<Op>Response, KmipError>`
+      to `ResponseBatchItem` (Success or OperationFailed + KMIP §9.2
+      ResultReason wire codepoint). Includes the
+      `canonical_create_key_pair_op` helper that derives
+      `CreateKeyPair:KeyAgreement` / `:Sign` / `:Encrypt` from the
+      request's `CryptographicUsageMask` (per `policies/README.md`
+      convention).
+- [x] `src/server/listener.rs` — TLS-terminated KMIP listener:
+      - `tls_self_signed` — auto-generated Ed25519 cert via `rcgen` for
+        sandbox/dev (cert in-memory, PEM logged at startup so the operator
+        can pin the fingerprint client-side).
+      - `tls_from_pem` — load real cert + key from disk (production).
+      - `tls_mtls` — mTLS server config (Phase 7b will wire mandatory
+        client cert auth; v0.1 ships server-cert-only).
+      - `serve(addr, tls, deps)` — `tokio::TcpListener` + per-connection
+        `tokio::spawn` + `tokio_rustls::TlsAcceptor`. One request per
+        connection in v0.1 (multi-op batching deferred to v0.2).
+      - `read_one_frame` — TTLV self-describing frame reader; honours
+        KMIP §9.6 (3-byte tag + type byte + 4-byte length + value bytes
+        + zero-padding to 8-byte boundary).
+- [x] `bin/pqctoday-kmip.rs` — production-shaped binary: `clap` CLI with
+      `--listen`, `--policy-dir`, `--policy`, `--store/--store-memory`,
+      `--audit-log`, `--tls-cert/--tls-key`, `--slot`, `--pin`. Loads
+      `policies/.active` on boot (resume path from PR #73) or activates
+      `--policy <name>` explicitly; falls back to built-in permissive
+      if neither is provided.
+- [x] `tests/tls_e2e.rs` — full TLS round-trip: real rustls client
+      connects to a real KMIP server bound to a free port, sends a Query
+      request as TTLV bytes, server decodes through the wire codec,
+      dispatches to the Query op handler, encodes the Response Message,
+      sends it back; client verifies the top-level wire tag is
+      `0x42007b Response Message`. Proves the entire Phase-7 stack works
+      end-to-end.
+
+**Dependencies added:** `rcgen = "0.13"` (with `pem` + `aws_lc_rs`
+features) for self-signed cert generation. `rustls` crypto provider
+explicitly installed as `ring` (rustls + rcgen pull in conflicting
+default providers; the listener now calls
+`rustls::crypto::ring::default_provider().install_default()`
+idempotently).
+
+**Test summary**: 224 total pass (was 212; +12 from Phase 7 — wire codec
++ dispatcher + server + tls_e2e). 0 failed.
+
+### Phase 7b deferred — real `softhsmrustv3::C_*` wiring in op handlers
+
+The §12.7.7 lock ("real softhsmrustv3 wiring required before MVP ships")
+is **partially satisfied** by Phase 7:
+
+- ✅ **Network stack is real** — TLS-terminated TTLV, spec-compliant wire
+  envelope, dispatcher routes all 12 ops, end-to-end round-trip tested.
+- ✅ **Plane-3 audit emissions are real** — correct function names,
+  correct mechanism (`CKM_*`) symbolic names from the Phase-3 algo map.
+- ❌ **Cryptographic output is still deterministic SHA-256 placeholder**
+  in each op handler's Plane-3 section. The handlers don't yet call
+  `softhsmrustv3::C_GenerateKeyPair` / `C_Sign` / etc.
+
+The remaining wiring is mechanical (12 handlers × replace placeholder
+bytes with real `C_*` calls via the Phase-4 `Session`) but requires:
+
+- an initialised softhsmv3 token in CI (or per-test ceremony) before
+  any op's smoke test can run end-to-end against the real bridge
+- per-handler validation against a KAT (or at minimum a self-roundtrip:
+  generate keypair → sign → verify → expect Valid)
+- session pooling / management (per-call open is too slow; need to
+  cache a Session on `Deps` or behind a `Mutex`)
+
+These are best handled in a focused Phase 7b session — same branch base,
+new branch off this one. The Phase-12 dev-sandbox demo can ship Phase 7
+as-is for the wire / UI layer; Phase 7b replaces the placeholder bytes
+without changing any audit-event shapes or dispatcher logic.
+
+
 
 - [ ] `src/dispatcher/mod.rs`:
 

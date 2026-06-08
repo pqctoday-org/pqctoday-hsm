@@ -32,7 +32,7 @@ use std::fmt;
 /// above `0x00FFFFFF` cannot fit and are rejected at construction.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[repr(transparent)]
-pub struct Tag(u32);
+pub struct Tag(pub u32);
 
 impl Tag {
     /// Construct from a raw codepoint. Returns `None` if the value does not
