@@ -40,7 +40,7 @@ pub mod decode;
 mod tests;
 
 pub use tag::Tag;
-pub use value::{ItemType, Value};
+pub use value::{ItemType, TtlvFrame, Value};
 pub use encode::{encode, encode_to_vec};
 pub use decode::{decode, decode_one};
 
