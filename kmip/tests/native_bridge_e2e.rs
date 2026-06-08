@@ -1452,3 +1452,147 @@ fn k21_rekeyed_aes_key_encrypts_against_real_engine() {
 
     let _ = softhsmrustv3::native::session::finalize();
 }
+
+/// Phase 7b gap-tightening: RSA CryptographicLength flows from the
+/// KMIP attribute into `generate_rsa_keypair(bits=...)`. Smaller modulus
+/// (2048) chosen for test speed — same code path covers up to 4096.
+#[test]
+fn rsa_create_respects_cryptographic_length_attribute() {
+    let _guard = engine_test_lock();
+    let deps = build_deps_with_real_engine();
+
+    let create_req = CreateKeyPairRequest {
+        common_attributes: vec![
+            Attribute::CryptographicAlgorithm(KmipAlgorithm::Rsa),
+            Attribute::CryptographicLength(2048),
+        ],
+        private_key_attributes: vec![Attribute::CryptographicUsageMask(UsageMask::SIGN)],
+        public_key_attributes: vec![Attribute::CryptographicUsageMask(UsageMask::VERIFY)],
+    };
+    let kp = create_key_pair(&deps, create_req, "CreateKeyPair:Sign", "rsa-len").unwrap();
+    let priv_rec = deps.store.get(&kp.private_key_uid).unwrap().unwrap();
+    assert_eq!(priv_rec.cryptographic_length, 2048);
+
+    let _ = softhsmrustv3::native::session::finalize();
+}
+
+/// Phase 7b gap-tightening: rejecting an unsupported RSA bit length
+/// surfaces as `InvalidAttributeValue`, not a generic engine error.
+#[test]
+fn rsa_create_rejects_unsupported_length() {
+    use pqctoday_kmip::error::ResultReason;
+    let _guard = engine_test_lock();
+    let deps = build_deps_with_real_engine();
+
+    let create_req = CreateKeyPairRequest {
+        common_attributes: vec![
+            Attribute::CryptographicAlgorithm(KmipAlgorithm::Rsa),
+            Attribute::CryptographicLength(1024),
+        ],
+        private_key_attributes: vec![Attribute::CryptographicUsageMask(UsageMask::SIGN)],
+        public_key_attributes: vec![Attribute::CryptographicUsageMask(UsageMask::VERIFY)],
+    };
+    let err = create_key_pair(&deps, create_req, "CreateKeyPair:Sign", "rsa-bad")
+        .expect_err("RSA-1024 must be rejected");
+    assert_eq!(err.result_reason(), ResultReason::InvalidAttributeValue);
+
+    let _ = softhsmrustv3::native::session::finalize();
+}
+
+/// Phase 7b gap-tightening: ECDSA curve selection via
+/// `CryptographicLength` (384 → P-384). Validates the new
+/// length-to-curve mapping survives the round-trip from KMIP attribute
+/// through the bridge.
+#[test]
+fn ecdsa_create_respects_cryptographic_length_attribute() {
+    let _guard = engine_test_lock();
+    let deps = build_deps_with_real_engine();
+
+    let create_req = CreateKeyPairRequest {
+        common_attributes: vec![
+            Attribute::CryptographicAlgorithm(KmipAlgorithm::Ecdsa),
+            Attribute::CryptographicLength(384),
+        ],
+        private_key_attributes: vec![Attribute::CryptographicUsageMask(UsageMask::SIGN)],
+        public_key_attributes: vec![Attribute::CryptographicUsageMask(UsageMask::VERIFY)],
+    };
+    let kp = create_key_pair(&deps, create_req, "CreateKeyPair:Sign", "ec-384").unwrap();
+    let priv_rec = deps.store.get(&kp.private_key_uid).unwrap().unwrap();
+    assert_eq!(priv_rec.cryptographic_length, 384);
+
+    let _ = softhsmrustv3::native::session::finalize();
+}
+
+/// Phase 7b gap-tightening: Locate's PKCS#11 reconciliation drops
+/// records whose engine handle is gone. Simulates the
+/// persistent-SQLite + volatile-engine restart scenario by finalising
+/// the engine after CreateKeyPair, then re-init'ing without a re-keygen
+/// — the orphan UID must be filtered out of the Locate response.
+#[test]
+fn locate_drops_orphans_when_engine_handle_is_gone() {
+    use pqctoday_kmip::kmip30::LocateRequest;
+    use pqctoday_kmip::ops::locate::locate;
+    use softhsmrustv3::native::session;
+
+    let _guard = engine_test_lock();
+    let mut deps = build_deps_with_real_engine();
+
+    // Create one ML-DSA-65 keypair — store has 2 records, engine has 2 handles.
+    let create_req = CreateKeyPairRequest {
+        common_attributes: vec![Attribute::CryptographicAlgorithm(KmipAlgorithm::MlDsa65)],
+        private_key_attributes: vec![Attribute::CryptographicUsageMask(UsageMask::SIGN)],
+        public_key_attributes: vec![Attribute::CryptographicUsageMask(UsageMask::VERIFY)],
+    };
+    let _ = create_key_pair(&deps, create_req, "CreateKeyPair:Sign", "loc-create").unwrap();
+
+    // Sanity: locate finds both halves.
+    let before = locate(
+        &deps,
+        LocateRequest {
+            attributes: vec![Attribute::CryptographicAlgorithm(KmipAlgorithm::MlDsa65)],
+            maximum_items: None,
+            ..Default::default()
+        },
+        "loc-before",
+    )
+    .unwrap();
+    assert_eq!(
+        before.uids.len(),
+        2,
+        "both pub + priv records must surface when engine state is fresh"
+    );
+
+    // Wipe engine state but keep the KMIP store intact — the records
+    // are now orphans pointing at dead handles. Re-init with a fresh
+    // bootstrap so we have a *valid* session for the reconciliation
+    // probe to run against (and find nothing).
+    let _ = session::finalize();
+    session::init().unwrap();
+    let fresh = session::bootstrap_default_token(0, "so-pin", "user-pin", "phase7b-orphan-reinit")
+        .unwrap();
+    deps = Deps::new(
+        Engine::permissive(),
+        deps.store.clone(),
+        Arc::new(RingSink::new(64)),
+        DepsConfig::default(),
+    )
+    .with_engine_session(fresh);
+
+    let after = locate(
+        &deps,
+        LocateRequest {
+            attributes: vec![Attribute::CryptographicAlgorithm(KmipAlgorithm::MlDsa65)],
+            maximum_items: None,
+            ..Default::default()
+        },
+        "loc-after",
+    )
+    .unwrap();
+    assert!(
+        after.uids.is_empty(),
+        "orphan records must be filtered out when their PKCS#11 handle is gone (got {:?})",
+        after.uids
+    );
+
+    let _ = session::finalize();
+}

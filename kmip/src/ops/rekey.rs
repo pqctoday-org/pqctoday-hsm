@@ -304,8 +304,18 @@ pub fn rekey_key_pair(
             format!("algorithm {algo:?} has no KeyGen mechanism"),
         ))
     })?;
-    let generated = super::create_key_pair::engine_generate_keypair(deps, correlation_id, algo, mech)
-        .map_err(&fail)?;
+    // Request > inherited for the generation length too: an explicit
+    // `CryptographicLength` in the re-key template drives the RSA modulus
+    // size / ECDSA curve; otherwise the family default applies (as before).
+    let key_length = priv_x.length.or(pub_x.length);
+    let generated = super::create_key_pair::engine_generate_keypair(
+        deps,
+        correlation_id,
+        algo,
+        key_length,
+        mech,
+    )
+    .map_err(&fail)?;
 
     // ── Plane-2: build both replacement records ─────────────────────
     let now = OffsetDateTime::now_utc();
