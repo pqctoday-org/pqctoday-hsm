@@ -1,0 +1,83 @@
+{
+  "$schema": "https://pqctoday.org/schemas/pkcs11-mech-manifest/v1.json",
+  "manifest_version": 1,
+  "captured_at": "2026-06-07",
+  "captured_by_phase": "P0-KMIP-PQC-22 Phase 0 (bootstrap)",
+  "authority": {
+    "path": "pqctoday-priv/docs/platform/data/pkcs11-vendor-mech-allocation.md",
+    "sha256": "3f63146bca1a8bd1454ea8f80e59911886014aebcab082754dec8c46eb70ab58",
+    "note": "Authority file lives in the private repo; CI gate verifies sha256 match. Update this manifest's `authority.sha256` whenever the authority file changes."
+  },
+  "active": {
+    "0x4032": {
+      "symbol": "CKM_PQCTODAY_HSS_KEY_PAIR_GEN",
+      "operation": "keygen",
+      "algorithm": "HSS / LMS",
+      "standard": "NIST SP 800-208",
+      "shipped_in": "softhsmv3 v0.4.x"
+    },
+    "0x4033": {
+      "symbol": "CKM_PQCTODAY_SLH_DSA_SIGN_VERIFY",
+      "operation": "sign_verify",
+      "algorithm": "SLH-DSA family (SHA2+SHAKE × s/f × 128/192/256; 12 variants by CKA_PARAMETER_SET)",
+      "standard": "FIPS 205",
+      "shipped_in": "softhsmv3 v0.4.x"
+    },
+    "0x4034": {
+      "symbol": "CKM_PQCTODAY_ML_KEM_KEY_PAIR_GEN",
+      "operation": "keygen",
+      "algorithm": "ML-KEM 512/768/1024 (param via CKA_PARAMETER_SET)",
+      "standard": "FIPS 203",
+      "shipped_in": "softhsmv3 v0.4.x"
+    },
+    "0x4035": {
+      "symbol": "CKM_PQCTODAY_ML_DSA_KEY_PAIR_GEN",
+      "operation": "keygen",
+      "algorithm": "ML-DSA 44/65/87 (param via CKA_PARAMETER_SET)",
+      "standard": "FIPS 204",
+      "shipped_in": "softhsmv3 v0.4.x"
+    },
+    "0x4036": {
+      "symbol": "CKM_PQCTODAY_ML_DSA_SIGN_VERIFY",
+      "operation": "sign_verify",
+      "algorithm": "ML-DSA 44/65/87",
+      "standard": "FIPS 204",
+      "shipped_in": "softhsmv3 v0.4.x"
+    },
+    "0x4037": {
+      "symbol": "CKM_PQCTODAY_ML_KEM_ENCAPSULATE",
+      "operation": "encap_decap",
+      "algorithm": "ML-KEM 512/768/1024",
+      "standard": "FIPS 203",
+      "shipped_in": "softhsmv3 v0.4.x"
+    }
+  },
+  "provisional_v0_5_x": {
+    "_note": "0x4040–0x404F codepoints reserved by P0-ALGO-SURFACE. Ship in softhsmv3 v0.5.x (post-v0.5.0). Backed by liboqs 0.15.0 linked statically with -fvisibility=hidden inside softhsmv3. Listed here so the KMIP wrapper can already speak to them when allocated, but ARE NOT YET shipping mechs as of v0.5.0.",
+    "0x4040": {"symbol": "CKM_PQCTODAY_FALCON_512_KEY_PAIR_GEN",      "operation": "keygen",      "algorithm": "Falcon-512"},
+    "0x4041": {"symbol": "CKM_PQCTODAY_FALCON_1024_KEY_PAIR_GEN",     "operation": "keygen",      "algorithm": "Falcon-1024"},
+    "0x4042": {"symbol": "CKM_PQCTODAY_FALCON_SIGN_VERIFY",           "operation": "sign_verify", "algorithm": "Falcon-{512,1024}"},
+    "0x4043": {"symbol": "CKM_PQCTODAY_HQC_128_KEY_PAIR_GEN",         "operation": "keygen",      "algorithm": "HQC-128"},
+    "0x4044": {"symbol": "CKM_PQCTODAY_HQC_192_KEY_PAIR_GEN",         "operation": "keygen",      "algorithm": "HQC-192"},
+    "0x4045": {"symbol": "CKM_PQCTODAY_HQC_256_KEY_PAIR_GEN",         "operation": "keygen",      "algorithm": "HQC-256"},
+    "0x4046": {"symbol": "CKM_PQCTODAY_HQC_ENCAPSULATE",              "operation": "encap_decap", "algorithm": "HQC-{128,192,256}"},
+    "0x4047": {"symbol": "CKM_PQCTODAY_BIKE_L1_KEY_PAIR_GEN",         "operation": "keygen",      "algorithm": "BIKE-L1"},
+    "0x4048": {"symbol": "CKM_PQCTODAY_BIKE_L3_KEY_PAIR_GEN",         "operation": "keygen",      "algorithm": "BIKE-L3"},
+    "0x4049": {"symbol": "CKM_PQCTODAY_BIKE_ENCAPSULATE",             "operation": "encap_decap", "algorithm": "BIKE-{L1,L3}"},
+    "0x404A": {"symbol": "CKM_PQCTODAY_FRODOKEM_KEY_PAIR_GEN",        "operation": "keygen",      "algorithm": "FrodoKEM-{640,976,1344}"},
+    "0x404B": {"symbol": "CKM_PQCTODAY_FRODOKEM_ENCAPSULATE",         "operation": "encap_decap", "algorithm": "FrodoKEM"},
+    "0x404C": {"symbol": "CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN","operation": "keygen",      "algorithm": "Classic McEliece-{348864,460896,6688128,6960119,8192128}"},
+    "0x404D": {"symbol": "CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE", "operation": "encap_decap", "algorithm": "Classic McEliece"},
+    "0x404E": {"symbol": "CKM_PQCTODAY_XMSS_KEY_PAIR_GEN",            "operation": "keygen_stateful", "algorithm": "XMSS / XMSS^MT"}
+  },
+  "consumer_contract": {
+    "ci_gate": "Any CI job that touches this manifest MUST recompute the authority sha256 and fail if it diverges from `authority.sha256` above. Mech codepoints are append-only — retired codepoints stay reserved forever per the authority file's mutation policy.",
+    "downstream_consumers": [
+      "pqctoday-hsm/src/lib/SoftHSM.cpp (mech table)",
+      "pqctoday-hsm/rust/src/ffi.rs (Rust engine)",
+      "pqctoday-hsm/src/vendor/pkcs11-provider (OpenSSL provider)",
+      "pqctoday-hsm/kmip/src/pkcs11bridge/mechs.rs (THIS subsystem, Phase 4)",
+      "pqctoday-sandbox tests/* (every PQC test script that hardcodes mech IDs)"
+    ]
+  }
+}

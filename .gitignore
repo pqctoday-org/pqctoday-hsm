@@ -57,6 +57,7 @@ Makefile.in
 .idea/
 rust/target/
 openmls-provider/target/
+kmip/target/
 
 # Scratch wasm-bindgen iterations (canonical is rust/pkg_bundler/)
 rust/pkg_bundler_new/
