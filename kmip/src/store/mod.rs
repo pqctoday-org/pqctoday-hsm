@@ -1,7 +1,12 @@
-//! Plane 2 — SQLite-backed KMIP object store + lifecycle FSM.
+//! Plane 2 — KMIP object store + lifecycle FSM.
 //!
-//! `rusqlite` wrapper, CRUD, lifecycle state transitions per
-//! `docs/IMPLEMENTATION_PLAN.md` §3.4, KMIP `Locate` query builder, `rusqlite_migration`
-//! schema versioning.
-//!
-//! Phase 0 (bootstrap): module declared, no implementation. Lands in Phase 6.
+//! Phase 5 (this) ships the [`KeyStore`] trait + [`MemoryStore`] impl —
+//! the minimum surface the op handlers need to compile + test. Phase 6
+//! ships the SQLite-backed durable store with full lifecycle FSM
+//! enforcement per `docs/IMPLEMENTATION_PLAN.md` §3.4.
+
+pub mod memory;
+pub mod traits;
+
+pub use memory::MemoryStore;
+pub use traits::{KeyStore, ObjectRecord, Uid};

@@ -600,7 +600,66 @@ at startup. Sandbox must explicitly load `training-permissive.yaml`.
 
 **Commit**: `feat/kmip-phase-4.5-policy-engine` branch; PR pending.
 
-### Phase 5 — Op handlers (Plane 2) (2.0 PD)
+### Phase 5 — Op handlers (Plane 2) (2.0 PD) — 🟡 **PARTIAL 2026-06-07** (3 of 12 ops + shared infra)
+
+**Session 1 (this) — foundation + 3 demo-critical ops shipped on `feat/kmip-phase-5-op-handlers`:**
+
+- [x] `src/error.rs` — `ResultReason` enum with codepoints cross-checked
+      against `spec/oasis-kmip-3.0/kmip-spec-3.0-tags-enums.json` (`Result Reason`):
+      ItemNotFound (0x01), OperationNotSupported (0x05), MissingData (0x06),
+      InvalidField (0x07), CryptographicFailure (0x0a), PermissionDenied
+      (0x0c), ObjectArchived (0x0d), ObjectAlreadyExists (0x18),
+      InvalidAttribute (0x2c), InvalidAttributeValue (0x2d). `KmipError`
+      enum with typed constructors + `From<BridgeError>`.
+- [x] `src/store/{traits,memory}.rs` — `KeyStore` trait (minimal surface
+      for ops) + `MemoryStore` in-memory impl for Phase-5 tests.
+      `ObjectRecord` carries uid + object_type + algorithm + usage_mask +
+      state + pkcs11_cka_id + pkcs11_slot + timestamps + supersedes link.
+      Phase 6 replaces `MemoryStore` with SQLite-backed durable store.
+- [x] `src/ops/deps.rs` — `Deps` shared bundle: `engine`, `store`, `sink`,
+      `config` (slot, pin, vendor identification, server version).
+- [x] `src/ops/query.rs` — **KMIP 3.0 §6.1.45 Query** (op `0x18`).
+      Returns supported operations / object types / server information.
+      Phase-3 capability list (12 ops). PKCS#11 v3.2 §C.5.3 `C_GetInfo`
+      not yet called — v0.1 uses static config.
+- [x] `src/ops/create_key_pair.rs` — **KMIP 3.0 §6.1.11 Create Key Pair**
+      (op `0x02`). Extracts `CryptographicAlgorithm` / `CryptographicLength`
+      / `CryptographicUsageMask` from template attributes. Plane-1 engine
+      gate; honours `algorithm_default` / `algorithm_substitution`. Maps
+      `(KmipAlgorithm, PkcsOp::KeyGen) → CKM_*` via Phase-3 enum. Audit
+      emits `KmipRequestReceived` → `Pkcs11Call(C_GenerateKeyPair)` →
+      `KmipResponseSent`. Persists `PreActive` records for both public +
+      private keys. PKCS#11 v3.2 §C.7.1 entry-point signature verified
+      against `rust/src/ffi.rs::C_GenerateKeyPair`.
+- [x] `src/ops/sign.rs` — **KMIP 3.0 §6.1.60 Sign** (op `0x21`). Store
+      lookup → lifecycle gate (only `Active` per §3.4) → Plane-1 engine.
+      Surfaces `Decision::RekeyAndProceed` as `PermissionDenied` with an
+      actionable hint (`"rekey required: policy substitutes X → Y for
+      UID Z"`); the actual multi-op rekey transaction belongs to Phase 6
+      / dispatcher work. PKCS#11 v3.2 §C.6.5 `C_SignInit` + §C.6.6
+      `C_Sign` signatures verified against `rust/src/ffi.rs`.
+
+**Test summary (this session):** 150 total pass (121 lib + 29 integration;
+0 failed). Added 16 ops tests + 4 store tests + 9 error tests = 29 new.
+
+**Session 2+ — remaining 9 ops:** Activate, Create (sym), Decrypt, Destroy,
+Encrypt (branches classical / ML-KEM encapsulate), Get, Locate, Revoke,
+SignatureVerify. Same template — each ≤ ~250 LOC with KMIP 3.0 + PKCS#11
+v3.2 spec citations in the file header.
+
+**Known limitations carried to Phase 6:**
+
+- `canonical_name(KmipAlgorithm)` returns bare names (`"ECDSA"`, `"RSA"`,
+  `"AES"`) — no curve/size suffix. The Phase-5 store doesn't yet carry
+  the `Cryptographic Parameters` attribute that would let the dispatcher
+  produce `"ECDSA-P256"` / `"AES-256"`. Phase 6 closes this so policies
+  can target sized algorithms.
+- Bridge calls into `softhsmrustv3::C_*` are placeholder-audited but not
+  actually executed (v0.1 produces deterministic SHA-256 signatures and
+  UUID-derived CKA_IDs). Phase 7 (TLS server) wires the real session +
+  bridge calls behind the audit emissions.
+
+### Phase 5 — Op handlers (Plane 2) — original plan (2.0 PD)
 
 11 ops, one module each, ≤ 100 LOC including tests. Note KMIP 3.0 reuses `Encrypt` for ML-KEM encapsulation and `Decrypt` for decapsulation — the handler branches on key algorithm:
 
