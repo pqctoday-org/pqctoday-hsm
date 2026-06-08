@@ -768,7 +768,60 @@ All 11 ops: `query`, `create_sym`, `create_asym`, `get`, `locate`, `activate`, `
 
 Per-op unit tests (mock store + mock pkcs11 surface) + integration tests against real `softhsmrustv3`.
 
-### Phase 6 — Object store + lifecycle FSM (0.75 PD)
+### Phase 6 — Object store + lifecycle FSM (0.75 PD) — ✅ **COMPLETE 2026-06-07**
+
+Shipped on `feat/kmip-phase-6-sqlite-store`:
+
+- [x] `src/store/sqlite.rs` — `SqliteStore` implementing the Phase-5
+      `KeyStore` trait. `rusqlite` (bundled) + `rusqlite_migration` for
+      schema versioning. Schema v1 matches `IMPLEMENTATION_PLAN §3.3`
+      objects table (uid, pkcs11_cka_id, pkcs11_slot, object_type,
+      algorithm, cryptographic_length, state, usage_mask, supersedes,
+      created_at, activated_at) + indices on `state` + `algorithm`.
+      Additional §3.3 tables (object_attributes, object_tags, audit_log)
+      deferred to Phase 8/9 where the surface needs them. `open(path)`
+      and `in_memory()` constructors; the latter shares the same migration
+      path so unit tests cover the schema bootstrap.
+- [x] `src/store/lifecycle.rs` — `enforce_transition(from, to) -> Result<()>`
+      wrapping the `State::can_transition_to` FSM (Phase 3). Identity
+      transitions allowed; FSM violations return
+      `KmipError::permission_denied`. Per-state coverage in unit tests
+      (PreActive, Active, Deactivated, Compromised, Destroyed,
+      DestroyedCompromised).
+- [x] `tests/store_backend_parity.rs` — three integration tests proving
+      the swap is genuinely drop-in: (1) Create + Activate flow produces
+      identical store outcomes whether `Deps` holds a `MemoryStore` or
+      `SqliteStore`; (2) FSM enforcement at the store layer (SqliteStore
+      rejects Active → PreActive; MemoryStore currently accepts since the
+      handler layer enforces — documented gap); (3) data survives a
+      round-trip through a real on-disk SQLite file across two `open()`
+      calls — proves persistence.
+
+**Key design decisions:**
+
+- **Algorithm persistence by wire codepoint, not variant name**:
+  `algorithm` column stores `"0x0000003e"` (hex of the OASIS §10.2.6
+  CryptographicAlgorithm wire value), not `"MlDsa87"`. Adding a new
+  variant to `KmipAlgorithm` doesn't break the persistence layer; the
+  database is portable across engine versions that share the same wire
+  table.
+- **State as text not integer**: `"Active"` not `0x02`. Database is
+  human-readable at the cost of one string comparison per row. Phase-3
+  enum names are the source of truth (verified by `state_str` /
+  `state_from_str` round-trip tests).
+- **Drop-in trait swap, not config split**: ops handlers take
+  `Arc<dyn KeyStore>` so the runtime chooses between `MemoryStore` (sandbox
+  default) and `SqliteStore` (production / persistent sandbox). No op-
+  handler code changes between the two backends.
+- **`SqliteStore` enforces FSM**, `MemoryStore` does not (yet) — flagged
+  as a follow-up: lift `enforce_transition` into a `KeyStore` trait
+  default method so all backends share the gate. Held back from this PR
+  to keep the Phase-6 scope tight.
+
+**Test summary**: 212 total pass (was 193; +19 from Phase 6 — 10 sqlite
++ 5 lifecycle + 1 store-mod doc + 3 parity). 0 failed.
+
+
 
 - [ ] `src/store/mod.rs` — `Store` struct wrapping `rusqlite::Connection` in `Arc<Mutex<_>>`.
 - [ ] `src/store/schema.sql` — embedded via `include_str!()`.
