@@ -49,6 +49,11 @@ rusqlite_migration = "1"
 # nom-style position tracking against `&[u8]`.
 bytes = "1"
 
+# Phase 3 — UsageMask flag set in `src/kmip30/attrs.rs`. `bitflags`
+# generates `contains`/`bits()`/bitwise-or so handler code reads
+# flags by name rather than poking at raw `u32`.
+bitflags = "2"
+
 # Serialization (policy + spec JSON + compliance profiles)
 serde       = { version = "1", features = ["derive"] }
 serde_json  = "1"
