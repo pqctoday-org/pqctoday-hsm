@@ -98,14 +98,43 @@ pub fn signature_verify(
     })?;
     emit_pkcs11(deps, correlation_id, "C_VerifyInit", Some(mech), 0, "CKR_OK");
 
-    // v0.1 placeholder: re-compute the SHA-256 stamp sign.rs uses and
-    // compare. Phase 7 replaces with the real C_Verify call and returns
-    // Invalid on CKR_SIGNATURE_INVALID (and Unknown on other CKRs).
-    let expected = placeholder_signature(&req.uid, &req.data);
-    let validity = if req.signature == expected {
-        SignatureValidity::Valid
-    } else {
-        SignatureValidity::Invalid
+    // Phase 7b: real bridge call when a session is wired. Falls back
+    // to the SHA-256 stamp comparison for unit tests.
+    let validity = match deps.engine_session {
+        Some(session) => {
+            let handle =
+                super::helpers::find_handle_for_object(session, &obj.pkcs11_cka_id, obj.object_type)
+                    .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Verify:find"))?
+                    .ok_or_else(|| KmipError::not_found(&req.uid))?;
+            let native_mech = super::helpers::native_sign_mech(obj.algorithm).ok_or_else(|| {
+                KmipError::failed(
+                    ResultReason::OperationNotSupported,
+                    format!("Verify: no native mechanism for {:?}", obj.algorithm),
+                )
+            })?;
+            // native::verify returns Ok(true)/Ok(false) for the KMIP
+            // ValidityIndicator model — exactly what we need.
+            match softhsmrustv3::native::verify(
+                session,
+                handle,
+                native_mech,
+                &req.data,
+                &req.signature,
+            ) {
+                Ok(true) => SignatureValidity::Valid,
+                Ok(false) => SignatureValidity::Invalid,
+                Err(rv) => return Err(super::helpers::ck_rv_to_kmip_error(rv, "Verify")),
+            }
+        }
+        None => {
+            // Unit-test fallback — re-compute the SHA-256 stamp.
+            let expected = placeholder_signature(&req.uid, &req.data);
+            if req.signature == expected {
+                SignatureValidity::Valid
+            } else {
+                SignatureValidity::Invalid
+            }
+        }
     };
     emit_pkcs11(deps, correlation_id, "C_Verify", Some(mech), 0, "CKR_OK");
     emit_success(deps, correlation_id, "SignatureVerify");

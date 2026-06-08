@@ -121,6 +121,24 @@ async fn main() -> anyhow::Result<()> {
         Arc::new(SqliteStore::open(&path).map_err(|e| anyhow::anyhow!("sqlite open: {e}"))?)
     };
 
+    // ── Engine session (Phase 7b — real bridge to softhsmrustv3) ────────
+    // Bootstrap a fresh token on `--slot` and open a long-lived user
+    // session. The handle is shared across all per-connection tasks
+    // (`softhsmrustv3` storage is Mutex-protected globals — safe across
+    // threads, serialised internally).
+    let engine_session = softhsmrustv3::native::session::bootstrap_default_token(
+        cli.slot,
+        "so-pin",
+        &cli.pin,
+        "pqctoday-kmip",
+    )
+    .map_err(|rv| anyhow::anyhow!("engine bootstrap failed: CK_RV=0x{rv:08x}"))?;
+    tracing::info!(
+        "engine session {} opened against slot {} — real bridge wired",
+        engine_session,
+        cli.slot
+    );
+
     // ── Deps bundle ─────────────────────────────────────────────────────
     let config = DepsConfig {
         pkcs11_slot: cli.slot,
@@ -128,7 +146,9 @@ async fn main() -> anyhow::Result<()> {
         vendor_identification: "pqctoday-hsm".into(),
         server_version: env!("CARGO_PKG_VERSION").into(),
     };
-    let deps = Arc::new(Deps::new(engine, store, sink, config));
+    let deps = Arc::new(
+        Deps::new(engine, store, sink, config).with_engine_session(engine_session),
+    );
 
     // ── TLS config ──────────────────────────────────────────────────────
     let tls_cfg = match (cli.tls_cert.as_ref(), cli.tls_key.as_ref()) {

@@ -68,13 +68,40 @@ pub fn get(deps: &Deps, req: GetRequest, correlation_id: &str) -> Result<GetResp
     // CKA_VALUE on symmetric keys / CKA_PUBLIC_KEY_INFO on public keys).
     emit_pkcs11(deps, correlation_id, "C_GetAttributeValue", None, 0, "CKR_OK");
 
-    // v0.1 placeholder key bytes — Phase 7 returns the real material.
-    // Private keys never expose CKA_VALUE (sensitive); return an empty
-    // value with format = OpaqueObject so KMIP-conformant clients see the
-    // object exists but contains no extractable material.
+    // Phase 7b: real material when a session is wired. Private keys
+    // remain opaque per PKCS#11 v3.2 §4.7 — `native::get_attribute`
+    // honours the CKA_SENSITIVE gate, returning None for sensitive
+    // private/secret keys (so we always emit OpaqueObject for those).
     let (key_format, key_value) = match obj.object_type {
         ObjectType::PrivateKey => (KeyFormatType::OpaqueObject, Vec::new()),
-        _ => (KeyFormatType::Raw, vec![0u8; (obj.cryptographic_length as usize).max(1)]),
+        _ => match deps.engine_session {
+            Some(session) => {
+                // CKA_VALUE on public + symmetric keys is allowed by the
+                // sensitivity gate. None means "no engine state for this
+                // CKA_ID" — fall back to placeholder.
+                let bytes = softhsmrustv3::native::find_by_cka_id(session, &obj.pkcs11_cka_id)
+                    .ok()
+                    .flatten()
+                    .and_then(|h| {
+                        softhsmrustv3::native::get_attribute(
+                            session,
+                            h,
+                            softhsmrustv3::constants::CKA_VALUE,
+                        )
+                    });
+                match bytes {
+                    Some(v) => (KeyFormatType::Raw, v),
+                    None => (
+                        KeyFormatType::Raw,
+                        vec![0u8; (obj.cryptographic_length as usize).max(1)],
+                    ),
+                }
+            }
+            None => (
+                KeyFormatType::Raw,
+                vec![0u8; (obj.cryptographic_length as usize).max(1)],
+            ),
+        },
     };
 
     emit_success(deps, correlation_id, "Get");

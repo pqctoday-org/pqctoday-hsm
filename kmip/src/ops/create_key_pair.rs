@@ -132,12 +132,24 @@ pub fn create_key_pair(
         )
     })?;
 
-    // v0.1 deterministic placeholder: Phase 7 wires the real bridge call
-    // and records the actual u32 handles. The audit event below pins the
-    // mechanism name so the trace remains spec-accurate.
-    let pkcs11_cka_id_priv = Uuid::new_v4().as_bytes().to_vec();
-    let pkcs11_cka_id_pub = Uuid::new_v4().as_bytes().to_vec();
+    // Phase 7b: real bridge call when a session is wired. Falls back to
+    // placeholder UUIDs for unit tests.
     let mech_name = format!("CKM_0x{mech:04X}");
+    let (pkcs11_cka_id_priv, pkcs11_cka_id_pub) = if let Some(session) = deps.engine_session {
+        // Both halves of the keypair share the same CKA_ID so
+        // `find_by_cka_id` recovers both handles for subsequent ops.
+        let cka_id = Uuid::new_v4().as_bytes().to_vec();
+        match native_generate_keypair(session, kmip_algo, &cka_id) {
+            Ok(()) => (cka_id.clone(), cka_id),
+            Err(err) => return fail(deps, correlation_id, op_canonical, err),
+        }
+    } else {
+        // Unit-test fallback — UUIDs as before, no real keys generated.
+        (
+            Uuid::new_v4().as_bytes().to_vec(),
+            Uuid::new_v4().as_bytes().to_vec(),
+        )
+    };
 
     deps.sink.emit(AuditEvent::at(
         OffsetDateTime::now_utc(),
@@ -308,6 +320,61 @@ fn parse_algorithm(s: &str) -> Result<KmipAlgorithm> {
             }
         },
     })
+}
+
+/// Phase 7b — call `softhsmrustv3::native::generate_*_keypair` for the
+/// right family. Engine stores the key bytes in OBJECTS keyed by handle;
+/// subsequent ops (Sign, Encrypt, etc.) recover handles via
+/// `find_by_cka_id(cka_id)`.
+fn native_generate_keypair(
+    session: u32,
+    algo: crate::kmip30::KmipAlgorithm,
+    cka_id: &[u8],
+) -> std::result::Result<(), KmipError> {
+    use crate::kmip30::KmipAlgorithm::*;
+    use softhsmrustv3::native;
+    let label = "kmip-generated";
+
+    let result: std::result::Result<(u32, u32), u32> = match algo {
+        MlKem512 | MlKem768 | MlKem1024 => {
+            let ps = super::helpers::native_parameter_set(algo).ok_or_else(|| {
+                KmipError::failed(
+                    ResultReason::OperationNotSupported,
+                    format!("no parameter-set codepoint for {:?}", algo),
+                )
+            })?;
+            native::generate_ml_kem_keypair(session, ps, cka_id, label)
+        }
+        MlDsa44 | MlDsa65 | MlDsa87 => {
+            let ps = super::helpers::native_parameter_set(algo).unwrap();
+            native::generate_ml_dsa_keypair(session, ps, cka_id, label)
+        }
+        SlhDsaSha2_128s | SlhDsaSha2_128f | SlhDsaSha2_192s | SlhDsaSha2_192f
+        | SlhDsaSha2_256s | SlhDsaSha2_256f | SlhDsaShake128s | SlhDsaShake128f
+        | SlhDsaShake192s | SlhDsaShake192f | SlhDsaShake256s | SlhDsaShake256f => {
+            let ps = super::helpers::native_parameter_set(algo).unwrap();
+            native::generate_slh_dsa_keypair(session, ps, cka_id, label)
+        }
+        Rsa => {
+            // v0.1: default to RSA-2048. Phase 9 — read CKA_MODULUS_BITS
+            // from template if provided.
+            native::generate_rsa_keypair(session, 2048, cka_id, label)
+        }
+        Ecdsa => {
+            // v0.1: default to P-256. Phase 9 — read CKA_EC_PARAMS from
+            // template to pick the curve.
+            native::generate_ecdsa_keypair(session, native::EccCurve::P256, cka_id, label)
+        }
+        _ => {
+            return Err(KmipError::failed(
+                ResultReason::OperationNotSupported,
+                format!("CreateKeyPair: {:?} not supported by native API", algo),
+            ));
+        }
+    };
+    result
+        .map(|_handles| ())
+        .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "CreateKeyPair"))
 }
 
 fn fail<T>(deps: &Deps, correlation_id: &str, op: &str, err: KmipError) -> Result<T> {
