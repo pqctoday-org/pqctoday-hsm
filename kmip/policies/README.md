@@ -8,11 +8,44 @@ Loaded at server start via `pqctoday-kmip --policy-file policies/<name>.yaml`. T
 
 | File | Use case |
 |---|---|
+| [`classical.yaml`](classical.yaml) | **Headline-demo "before".** Every new key defaults to classical (ECDH-P256 KEM / ECDSA-P256 sig / RSA-3072 enc / AES-256). Pair with `pqc.yaml`. |
+| [`pqc.yaml`](pqc.yaml) | **Headline-demo "after".** Every new key defaults to PQC (ML-KEM-1024 / ML-DSA-87 / AES-256). Substitution rules auto-rekey existing classical keys at first Sign / Encrypt. Pair with `classical.yaml`. |
 | [`training-permissive.yaml`](training-permissive.yaml) | **Default for sandbox.** Allows everything. Used for KAT validation, KMIP conformance testing, and trainee exploration. |
 | [`pqc-migration-2030.yaml`](pqc-migration-2030.yaml) | Realistic migration policy: classical algorithms allowed for verify/decrypt only, banned for sign/encrypt after 2030-01-01. |
 | [`fips-only.yaml`](fips-only.yaml) | FIPS 140-3 mode: only FIPS 203 (ML-KEM), FIPS 204 (ML-DSA), FIPS 205 (SLH-DSA) plus FIPS-validated classical. |
 | [`hybrid-migration-window.yaml`](hybrid-migration-window.yaml) | Dual-signing enforced during 2026–2029 migration window: every signature is ML-DSA-65 + Ed25519 composite per LAMPS draft-19. |
 | [`cnsa-2.0.yaml`](cnsa-2.0.yaml) | NSA Commercial National Security Algorithm Suite 2.0 (CNSA 2.0): ML-KEM-1024 + ML-DSA-87 + AES-256 + SHA-384. |
+
+## Headline-demo dropdown (Hub scenario UI)
+
+The Hub scenario UI exposes a dropdown with `classical` and `pqc` as the
+two entries. The application code on both sides of the dropdown is
+byte-identical — only the active policy changes. Flipping the dropdown
+demonstrates the agility engine's three capabilities:
+
+1. **Defaulting** — application calls `CreateKeyPair` without specifying
+   an algorithm; engine supplies one from the active policy.
+2. **Substitution** — application asks for ECDSA-P256 / RSA-3072; engine
+   silently rewrites to ML-DSA-87 / ML-KEM-1024.
+3. **Rekey orchestration** — existing classical key handles are
+   transparently migrated to PQC at first use after the flip
+   (`Decision::RekeyAndProceed` → dispatcher runs the rekey transaction).
+
+### Op-name canonicalisation convention
+
+KMIP `CreateKeyPair` is a single op but the policy needs to default
+different algorithms for KEM vs signature vs encryption keys. The
+dispatcher resolves this by canonicalising `CreateKeyPair` into one of
+three purpose-discriminated op strings based on `CryptographicUsageMask`:
+
+| Mask flags | Canonical op string |
+|---|---|
+| `KeyAgreement` | `CreateKeyPair:KeyAgreement` |
+| `Sign`, `Verify` | `CreateKeyPair:Sign` |
+| `Encrypt`, `Decrypt` | `CreateKeyPair:Encrypt` |
+
+`Create` (symmetric) keeps its plain op name. The Hub UI dropdown and
+the dry-run panel use the same convention.
 
 ## Schema (v0.1)
 
