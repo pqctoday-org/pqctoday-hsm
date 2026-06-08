@@ -83,10 +83,24 @@ impl Engine {
     /// Build a deny-all engine — the safe default when no policy file is
     /// supplied at startup. Sandbox / dev should call [`Self::permissive`]
     /// or load the `training-permissive.yaml` policy explicitly.
+    ///
+    /// Audit events land in a private 1024-slot ring. Use
+    /// [`Self::with_global_sink`] if the Plane-7 server needs to fan events
+    /// into a cross-plane sink that also captures KMIP + PKCS#11 events.
     pub fn deny_all() -> Self {
         Self {
             inner: Arc::new(RwLock::new(EngineInner { active: None })),
             audit: Arc::new(PolicyAudit::new(1024)),
+        }
+    }
+
+    /// Build a deny-all engine wired to a cross-plane audit sink. Plane-1
+    /// events ALSO land in a private 1024-slot ring for the Hub UI's
+    /// dedicated Plane-1 panel.
+    pub fn with_global_sink(sink: std::sync::Arc<dyn crate::auditlog::AuditSink>) -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(EngineInner { active: None })),
+            audit: Arc::new(PolicyAudit::with_global_sink(1024, sink)),
         }
     }
 

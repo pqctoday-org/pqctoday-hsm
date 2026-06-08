@@ -74,7 +74,7 @@ sha2        = "0.10"
 uuid = { version = "1", features = ["v4"] }
 
 # Time
-time = { version = "0.3", features = ["serde", "formatting"] }
+time = { version = "0.3", features = ["serde", "formatting", "parsing", "serde-well-known"] }
 
 # Error handling
 thiserror = "1"

@@ -85,7 +85,7 @@ pub mod request;
 pub mod rule;
 pub mod store;
 
-pub use audit::{AuditDecision, AuditEvent, PolicyAudit};
+pub use audit::PolicyAudit;
 pub use decision::{Decision, DenyReason};
 pub use engine::{ActivePolicy, Engine};
 pub use loader::{load_from_file, load_from_str, validate, LoadedPolicy, LoaderError};
