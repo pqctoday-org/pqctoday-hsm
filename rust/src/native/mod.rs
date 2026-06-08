@@ -59,6 +59,9 @@ pub use sign::*;
 pub type CkRv = u32;
 
 #[cfg(test)]
+mod parity;
+
+#[cfg(test)]
 pub(crate) mod test_lock {
     //! Shared mutex serialising every test in `native::*` that touches
     //! engine state.
