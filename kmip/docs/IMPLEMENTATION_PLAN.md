@@ -600,9 +600,64 @@ at startup. Sandbox must explicitly load `training-permissive.yaml`.
 
 **Commit**: `feat/kmip-phase-4.5-policy-engine` branch; PR pending.
 
-### Phase 5 — Op handlers (Plane 2) (2.0 PD) — 🟡 **PARTIAL 2026-06-07** (3 of 12 ops + shared infra)
+### Phase 5 — Op handlers (Plane 2) (2.0 PD) — ✅ **COMPLETE 2026-06-07** (12 of 12 ops + shared infra + active-policy persistence)
 
-**Session 1 (this) — foundation + 3 demo-critical ops shipped on `feat/kmip-phase-5-op-handlers`:**
+**Session 2 (this) — remaining 9 ops + shared helpers + Plane-1 active-policy persistence shipped:**
+
+- [x] `src/ops/helpers.rs` — extracted before writing the new ops so all 12
+      handlers share one surface for emit_request / emit_pkcs11 /
+      emit_state_change / emit_success / fail_err / canonical_name /
+      state_name. Each op file stays focused on its KMIP semantics.
+- [x] `src/ops/activate.rs` — KMIP 3.0 §6.1.1 Activate (op 0x12).
+- [x] `src/ops/revoke.rs` — KMIP 3.0 §6.1.49 Revoke (op 0x13). Branches on
+      RevocationReason: KeyCompromise/CaCompromise → Compromised, else
+      → Deactivated.
+- [x] `src/ops/destroy.rs` — KMIP 3.0 §6.1.19 Destroy (op 0x14). PreActive
+      | Deactivated → Destroyed; Compromised → DestroyedCompromised;
+      Active rejected (must Revoke first per §3.4). C_DestroyObject.
+- [x] `src/ops/create.rs` — KMIP 3.0 §6.1.8 Create (op 0x01) symmetric +
+      secret data only; asymmetric rejected. C_GenerateKey.
+- [x] `src/ops/get.rs` — KMIP 3.0 §6.1.23 Get (op 0x0a). Private-key
+      material never extracted (CKA_SENSITIVE) — returns OpaqueObject
+      with empty value. C_GetAttributeValue.
+- [x] `src/ops/locate.rs` — KMIP 3.0 §6.1.32 Locate (op 0x08). Filters
+      by CryptographicAlgorithm / ObjectType / State. C_FindObjects*.
+- [x] `src/ops/signature_verify.rs` — KMIP 3.0 §6.1.61 (op 0x22). Failed
+      verify is NOT a KMIP error — returns success with validity=Invalid.
+      C_VerifyInit + C_Verify.
+- [x] `src/ops/encrypt.rs` — KMIP 3.0 §6.1.21 Encrypt (op 0x1f). Branches:
+      ML-KEM → C_EncapsulateKey (ciphertext + shared_secret); classical
+      → C_EncryptInit + C_Encrypt (ciphertext only).
+- [x] `src/ops/decrypt.rs` — KMIP 3.0 §6.1.15 Decrypt (op 0x20). Branches:
+      ML-KEM → C_DecapsulateKey (shared secret); classical →
+      C_DecryptInit + C_Decrypt (plaintext). Allowed in Active /
+      Deactivated / Compromised (need to decrypt old ciphertexts post-rotation).
+- [x] `src/policy/store.rs` — Plane-1 active-policy persistence (§12 user
+      decision 2026-06-07). New `.active` marker file in the policies/
+      directory, JSON shape `{ name, fingerprint, activated_at }`. API:
+      `read_active`, `write_active` (atomic-rename), `clear_active`,
+      `activate_with_engine` (load + activate + write marker as one),
+      `resume_active` (boot-time replay with **fingerprint-drift
+      protection** — refuses to silently re-activate a YAML edited
+      out-of-band; operator must re-activate via Hub). Mirrors how
+      softhsmv3 persists slot/token state so handles survive engine
+      restarts — same pattern, one level up the stack.
+
+**Test summary (Phase 5 cumulative):** 193 total pass (was 153 at start
+of session; +40 across the 8 ops, helpers, and active-marker persistence
++ engine + tests). 0 failed. 50 ops-module tests across all 12 handlers;
+13 store tests (4 prior + 9 new for active marker).
+
+**Phase-7 wiring remaining (deferred per §12.7.7 lock):** All Plane-3
+emissions today produce correct `Pkcs11Call` audit events (function
+name, mechanism, slot) but use deterministic SHA-256 placeholders for
+the actual cryptographic output. Phase 7 wires real
+`softhsmrustv3::C_*` calls behind the same audit emissions — the wire
+format committed in PR #72 + §12.7.5 doesn't change, only the bytes
+inside `ciphertext` / `signature` / `shared_secret` become real instead
+of placeholder.
+
+**Session 1 (prior) — foundation + 3 demo-critical ops shipped on `feat/kmip-phase-5-op-handlers`:**
 
 - [x] `src/error.rs` — `ResultReason` enum with codepoints cross-checked
       against `spec/oasis-kmip-3.0/kmip-spec-3.0-tags-enums.json` (`Result Reason`):

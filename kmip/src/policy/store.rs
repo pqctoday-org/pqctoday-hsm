@@ -13,13 +13,60 @@
 //! flushed write never leaves the directory with broken YAML. The on-disk
 //! `policies/` directory is the source of truth — Phase 9 audit will
 //! commit + push these to git for change history.
+//!
+//! ## Active-policy persistence
+//!
+//! The `policies/` directory holds N candidate policies; exactly one is
+//! "active" at any moment. To survive container restart without an
+//! operator re-flipping the dropdown, the active selection is persisted
+//! in a small marker file [`POLICY_STORE_ACTIVE_FILE`] (= `.active`) in
+//! the same directory:
+//!
+//! ```json
+//! { "name": "pqc", "fingerprint": "sha256:...", "activated_at": "2026-..." }
+//! ```
+//!
+//! - [`Self::activate_with_engine`] activates a policy AND writes the
+//!   marker atomically (validate-then-rename).
+//! - [`Self::resume_active`] reads the marker on boot and re-activates
+//!   the same policy. No marker → caller decides the default (typically
+//!   load `training-permissive.yaml` for sandbox, or refuse to start in
+//!   production).
+//!
+//! This mirrors the way softhsmv3 persists slot/token state on disk so
+//! key handles survive engine restarts (PKCS#11 §A) — same pattern, one
+//! level up the stack.
 
 use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+use time::OffsetDateTime;
 
 use super::{
     engine::Engine,
     loader::{load_from_file, load_from_str, LoadedPolicy, LoaderError},
 };
+
+/// Filename for the active-policy marker. Conventionally a dotfile so the
+/// `*.yaml` filter in [`PolicyStore::list`] ignores it.
+pub const POLICY_STORE_ACTIVE_FILE: &str = ".active";
+
+/// On-disk record of which policy is currently active. Written by
+/// [`PolicyStore::write_active`] / [`PolicyStore::activate_with_engine`].
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ActiveMarker {
+    /// Stem of the YAML file (no extension, no path) — same shape as the
+    /// names returned by [`PolicyStore::list`].
+    pub name: String,
+    /// SHA-256 fingerprint of the YAML body at activation time. Lets an
+    /// operator detect "policies/<name>.yaml was edited since this marker
+    /// was written" — the engine refuses to silently re-activate a
+    /// fingerprint-mismatched file (see [`PolicyStore::resume_active`]).
+    pub fingerprint: String,
+    /// UTC timestamp when the marker was written.
+    #[serde(with = "time::serde::rfc3339")]
+    pub activated_at: OffsetDateTime,
+}
 
 #[derive(Clone, Debug)]
 pub struct PolicyStore {
@@ -40,6 +87,12 @@ pub enum StoreError {
 
     #[error("policy store: policy name {0:?} is invalid (must be non-empty, no path separators)")]
     BadName(String),
+
+    #[error("policy store: active-marker JSON malformed: {0}")]
+    BadMarker(String),
+
+    #[error("policy store: active-marker fingerprint mismatch (marker={marker_fp}, on-disk={disk_fp}) — refusing to resume; operator must re-activate via Hub")]
+    FingerprintDrift { marker_fp: String, disk_fp: String },
 }
 
 impl PolicyStore {
@@ -109,6 +162,113 @@ impl PolicyStore {
         let engine = Engine::deny_all();
         engine.activate(loaded).expect("activation in dry_run must succeed");
         Ok(engine.evaluate(req))
+    }
+
+    // ── Active-policy persistence (.active marker) ──────────────────────
+
+    /// Path to the active-marker file inside the store root.
+    pub fn active_marker_path(&self) -> PathBuf {
+        self.root.join(POLICY_STORE_ACTIVE_FILE)
+    }
+
+    /// Read the on-disk active-policy marker, if present. `Ok(None)` for
+    /// "no marker on disk" (first boot, or after [`Self::clear_active`]).
+    pub fn read_active(&self) -> Result<Option<ActiveMarker>, StoreError> {
+        let path = self.active_marker_path();
+        let body = match std::fs::read_to_string(&path) {
+            Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(source) => return Err(StoreError::Io { path, source }),
+        };
+        let marker: ActiveMarker = serde_json::from_str(&body)
+            .map_err(|e| StoreError::BadMarker(e.to_string()))?;
+        Ok(Some(marker))
+    }
+
+    /// Write the active-policy marker atomically (validate-then-rename
+    /// onto `.active`). Called automatically by
+    /// [`Self::activate_with_engine`]; the standalone form exists for
+    /// tools that need to drop a marker without running the engine
+    /// (e.g. ops bootstrap scripts).
+    pub fn write_active(&self, name: &str, fingerprint: &str) -> Result<(), StoreError> {
+        // Name must reference a real policy file — fail fast if not.
+        let _ = self.path_for(name)?;
+        let marker = ActiveMarker {
+            name: name.to_string(),
+            fingerprint: fingerprint.to_string(),
+            activated_at: OffsetDateTime::now_utc(),
+        };
+        let body = serde_json::to_string_pretty(&marker)
+            .map_err(|e| StoreError::BadMarker(e.to_string()))?;
+        let target = self.active_marker_path();
+        let tmp = self.root.join(format!("{POLICY_STORE_ACTIVE_FILE}.tmp"));
+        std::fs::write(&tmp, body).map_err(|source| StoreError::Io {
+            path: tmp.clone(),
+            source,
+        })?;
+        std::fs::rename(&tmp, &target).map_err(|source| StoreError::Io { path: target, source })?;
+        Ok(())
+    }
+
+    /// Delete the active marker. Idempotent (no-op if absent). Tests +
+    /// "go back to default" tooling use this.
+    pub fn clear_active(&self) -> Result<(), StoreError> {
+        let path = self.active_marker_path();
+        match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(source) => Err(StoreError::Io { path, source }),
+        }
+    }
+
+    /// Combined: load + activate on the engine + write the marker.
+    /// Hub UI's policy-dropdown `Activate` button maps to this.
+    ///
+    /// Returns the prior marker (if any) so the caller can audit the
+    /// transition. The engine-internal `PolicyAudit` also records the
+    /// activation via its existing path.
+    pub fn activate_with_engine(
+        &self,
+        name: &str,
+        engine: &Engine,
+    ) -> Result<Option<ActiveMarker>, StoreError> {
+        let loaded = self.load(name)?;
+        let fingerprint = super::policy::Policy::fingerprint(&loaded.source);
+        let prior = self.read_active()?;
+        engine
+            .activate(loaded)
+            .map_err(|e| StoreError::BadMarker(format!("engine activate: {e}")))?;
+        self.write_active(name, &fingerprint)?;
+        Ok(prior)
+    }
+
+    /// Boot path: read `.active`, re-load the same YAML, re-activate on
+    /// the engine. Returns the resumed marker, or `Ok(None)` if there
+    /// was no marker on disk (caller picks a default).
+    ///
+    /// **Drift protection:** if the YAML file's current fingerprint
+    /// differs from the marker, returns
+    /// [`StoreError::FingerprintDrift`] rather than silently activating
+    /// an edited policy — operator must explicitly re-activate via the
+    /// Hub (this is exactly the "edited a policy file out-of-band" case
+    /// that should NOT auto-resume).
+    pub fn resume_active(&self, engine: &Engine) -> Result<Option<ActiveMarker>, StoreError> {
+        let marker = match self.read_active()? {
+            Some(m) => m,
+            None => return Ok(None),
+        };
+        let loaded = self.load(&marker.name)?;
+        let current_fp = super::policy::Policy::fingerprint(&loaded.source);
+        if current_fp != marker.fingerprint {
+            return Err(StoreError::FingerprintDrift {
+                marker_fp: marker.fingerprint,
+                disk_fp: current_fp,
+            });
+        }
+        engine
+            .activate(loaded)
+            .map_err(|e| StoreError::BadMarker(format!("engine activate: {e}")))?;
+        Ok(Some(marker))
     }
 
     fn path_for(&self, name: &str) -> Result<PathBuf, StoreError> {
@@ -222,5 +382,145 @@ rules:
         assert!(matches!(store.load(""), Err(StoreError::BadName(_))));
         assert!(matches!(store.load("../etc/passwd"), Err(StoreError::BadName(_))));
         assert!(matches!(store.load("foo/bar"), Err(StoreError::BadName(_))));
+    }
+
+    // ── Active-policy persistence ───────────────────────────────────────
+
+    fn write_yaml(dir: &Path, name: &str) {
+        std::fs::write(
+            dir.join(format!("{name}.yaml")),
+            format!(
+                "schema_version: 1\nmetadata: {{ name: {name}, description: {name}, authority: t, effective: always }}\nrules: []\n",
+            ),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn read_active_returns_none_when_no_marker() {
+        let dir = tmp_dir("active-none");
+        let store = PolicyStore::new(&dir);
+        assert!(store.read_active().unwrap().is_none());
+    }
+
+    #[test]
+    fn write_then_read_active_round_trip() {
+        let dir = tmp_dir("active-rw");
+        write_yaml(&dir, "classical");
+        let store = PolicyStore::new(&dir);
+        store.write_active("classical", "sha256:abc123").unwrap();
+        let marker = store.read_active().unwrap().expect("marker present");
+        assert_eq!(marker.name, "classical");
+        assert_eq!(marker.fingerprint, "sha256:abc123");
+        // Marker file is excluded from list (dotfile, no .yaml extension).
+        assert_eq!(store.list().unwrap(), vec!["classical"]);
+    }
+
+    #[test]
+    fn write_active_rejects_bad_name() {
+        let dir = tmp_dir("active-bad");
+        let store = PolicyStore::new(&dir);
+        assert!(matches!(
+            store.write_active("../etc/passwd", "sha256:x"),
+            Err(StoreError::BadName(_))
+        ));
+    }
+
+    #[test]
+    fn clear_active_is_idempotent() {
+        let dir = tmp_dir("active-clear");
+        let store = PolicyStore::new(&dir);
+        store.clear_active().unwrap(); // no-op when absent
+        write_yaml(&dir, "p");
+        store.write_active("p", "sha256:0").unwrap();
+        assert!(store.read_active().unwrap().is_some());
+        store.clear_active().unwrap();
+        assert!(store.read_active().unwrap().is_none());
+        // Second call still no-ops.
+        store.clear_active().unwrap();
+    }
+
+    #[test]
+    fn activate_with_engine_writes_marker_and_engine_observes_policy() {
+        let dir = tmp_dir("aw-engine");
+        write_yaml(&dir, "pqc");
+        let store = PolicyStore::new(&dir);
+        let engine = super::super::Engine::deny_all();
+
+        let prior = store.activate_with_engine("pqc", &engine).unwrap();
+        assert!(prior.is_none(), "no prior marker on first activate");
+
+        // Marker now present + engine has the policy active.
+        let m = store.read_active().unwrap().unwrap();
+        assert_eq!(m.name, "pqc");
+        assert!(m.fingerprint.starts_with("sha256:"));
+        assert_eq!(engine.active().unwrap().policy.metadata.name, "pqc");
+    }
+
+    #[test]
+    fn activate_with_engine_returns_prior_marker() {
+        let dir = tmp_dir("aw-prior");
+        write_yaml(&dir, "a");
+        write_yaml(&dir, "b");
+        let store = PolicyStore::new(&dir);
+        let engine = super::super::Engine::deny_all();
+
+        store.activate_with_engine("a", &engine).unwrap();
+        let prior = store.activate_with_engine("b", &engine).unwrap();
+        let prior = prior.expect("second activate should return prior");
+        assert_eq!(prior.name, "a");
+        assert_eq!(engine.active().unwrap().policy.metadata.name, "b");
+    }
+
+    #[test]
+    fn resume_active_replays_marker_on_boot() {
+        let dir = tmp_dir("resume-ok");
+        write_yaml(&dir, "pqc");
+        let store = PolicyStore::new(&dir);
+
+        // First boot: operator activates pqc.
+        let engine1 = super::super::Engine::deny_all();
+        store.activate_with_engine("pqc", &engine1).unwrap();
+        let original_fp = store.read_active().unwrap().unwrap().fingerprint;
+
+        // Restart simulation: fresh engine; resume reads marker + re-activates.
+        let engine2 = super::super::Engine::deny_all();
+        let resumed = store.resume_active(&engine2).unwrap().expect("must resume");
+        assert_eq!(resumed.name, "pqc");
+        assert_eq!(resumed.fingerprint, original_fp);
+        assert_eq!(engine2.active().unwrap().policy.metadata.name, "pqc");
+    }
+
+    #[test]
+    fn resume_active_returns_none_when_no_marker() {
+        let dir = tmp_dir("resume-empty");
+        let store = PolicyStore::new(&dir);
+        let engine = super::super::Engine::deny_all();
+        let resumed = store.resume_active(&engine).unwrap();
+        assert!(resumed.is_none());
+        // Engine still in its prior (no-policy) state.
+        assert!(engine.active().is_none());
+    }
+
+    #[test]
+    fn resume_active_rejects_drifted_yaml() {
+        let dir = tmp_dir("resume-drift");
+        write_yaml(&dir, "p");
+        let store = PolicyStore::new(&dir);
+        let engine1 = super::super::Engine::deny_all();
+        store.activate_with_engine("p", &engine1).unwrap();
+
+        // Operator edits the YAML out-of-band between sessions (e.g. via vim,
+        // not through the Hub). Fingerprint now mismatches.
+        std::fs::write(
+            dir.join("p.yaml"),
+            "schema_version: 1\nmetadata: { name: p, description: edited, authority: t, effective: always }\nrules: []\n",
+        ).unwrap();
+
+        let engine2 = super::super::Engine::deny_all();
+        let err = store.resume_active(&engine2).unwrap_err();
+        assert!(matches!(err, StoreError::FingerprintDrift { .. }));
+        // Engine NOT activated (refused to silently load drifted policy).
+        assert!(engine2.active().is_none());
     }
 }
