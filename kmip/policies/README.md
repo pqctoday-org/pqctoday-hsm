@@ -34,24 +34,88 @@ rules:                                   # ordered; first matching Deny wins
     reason: <human reason for audit log>
 ```
 
-## Rule types (v0.1)
+## Rule types (v0.1 — 12 built-in primitives)
+
+Two families:
+
+- **Resolution rules** run in Pass 1 — they can rewrite the request's
+  algorithm before gating begins. Last match wins (later rules in the file
+  override earlier ones, so a "general default" + "specific exception"
+  pattern works as you'd expect).
+- **Gating rules** run in Pass 2 — first `Deny` short-circuits.
+
+### Resolution rules (Pass 1)
 
 | Type | Fields | Effect |
 |---|---|---|
-| `algorithm_allowlist` | `ops: [...]`, `algorithms: [...]` | If `op ∈ ops` AND `algorithm ∉ algorithms` → Deny |
-| `algorithm_denylist` | `ops: [...]`, `algorithms: [...]` | If `op ∈ ops` AND `algorithm ∈ algorithms` → Deny |
+| `algorithm_default` | `ops: [...]`, `default_algorithm: <name>` | When request carries `algorithm = None` AND `op ∈ ops`, supply `default_algorithm`. Lets applications call `CreateKeyPair` without naming an algorithm and let policy decide. |
+| `algorithm_substitution` | `ops: [...]`, `from: <name>`, `to: <name>` | When `algorithm == from` AND `op ∈ ops`, rewrite to `to`. **Headline demo:** application keeps asking for ECDSA-P256, policy substitutes ML-DSA-65 silently. |
+
+### Gating rules (Pass 2)
+
+| Type | Fields | Effect |
+|---|---|---|
+| `algorithm_allowlist` | `ops: [...]`, `algorithms: [...]` | If `op ∈ ops` AND `algorithm ∉ algorithms` → Deny. Optional `effective_from` / `effective_until` (`YYYY-MM-DD` or `"always"`) gate the rule by date. |
+| `algorithm_denylist` | `ops: [...]`, `algorithms: [...]` | If `op ∈ ops` AND `algorithm ∈ algorithms` → Deny. Optional `exception_custom_attribute: { name, value }` suppresses the deny when the request carries that attribute. |
 | `min_key_length` | `algorithm: <name>`, `min_bits: N` | If `algorithm == name` AND `key_length < min_bits` → Deny |
-| `max_key_age_days` | `days: N`, `ops: [...]` | If `op ∈ ops` AND `(now - key.activated_at) > days` → Deny (rotate) |
-| `require_usage_mask` | `algorithm: <name>`, `flags: [...]` | If creating `algorithm` without all `flags` set → Deny |
-| `require_custom_attribute` | `attribute_name: <name>`, `algorithms: [...]` | If creating any in `algorithms` without `x-<attribute_name>` set → Deny |
-| `temporal_cutoff` | `op: <name>`, `algorithm_class: <classical\|pqc>`, `after: <ISO 8601>` | If `now >= after` AND request matches → Deny |
-| `lifecycle_state_gate` | `op: <name>`, `allowed_states: [...]` | If `op == name` AND `key.state ∉ allowed_states` → Deny |
-| `hybrid_dual_sign_requirement` | `primary: <alg>`, `secondary: <alg>`, `effective: <date range>` | During range, every `Sign` op MUST use composite `primary + secondary` |
-| `compliance_profile_gate` | `profile: <FIPS\|CNSA\|...>`, `ops: [...]` | If `op ∈ ops` AND request not compliant with profile → Deny |
+| `max_key_age_days` | `days: N`, `ops: [...]` | If `op ∈ ops` AND `(now - key.activated_at) > days` → Deny (rotate). **Phase 4.5 stub** — needs Phase 6 object store to expose key timestamps; loader emits a warning at load time. |
+| `require_usage_mask` | `algorithm: <name>`, `flags: [...]` | If creating `algorithm` without all `flags` set (or with no mask at all) → Deny. Flag names: `Sign`, `Verify`, `Encrypt`, `Decrypt`, `WrapKey`, `UnwrapKey`, `Export`, `MacGenerate`, `MacVerify`, `DeriveKey`, `ContentCommitment`, `KeyAgreement`, `CertificateSign`, `CrlSign`, `Authenticate`. |
+| `require_custom_attribute` | `attribute_name: <name>`, `algorithms: [...]` | If `algorithm ∈ algorithms` AND `x-<attribute_name>` not set → Deny |
+| `temporal_cutoff` | `op: <name>`, `algorithm_class: <classical\|pqc>`, `after: <YYYY-MM-DD>`, optional `algorithms: [...]` | If `now >= after` AND `op == name` AND algorithm matches class (and optional narrow list) → Deny |
+| `lifecycle_state_gate` | `op: <name>`, `allowed_states: [...]` | If `op == name` AND `state ∉ allowed_states` → Deny |
+| `hybrid_dual_sign_requirement` | `primary: <alg>`, `secondary: <alg>`, `effective_from: <date>`, `effective_until: <date>`, `ops_affected: [...]` | During window, every op in `ops_affected` MUST carry the composite algorithm name `<primary>-<SECONDARY>` (e.g. `ML-DSA-65-ED25519`). |
+| `compliance_profile_gate` | `profile: <FIPS-140-3\|CNSA-2.0\|...>`, `ops: [...]` | **Documentational only in Phase 4.5.** Composing allowlist/denylist rules carry actual enforcement; this variant exists so the Phase 8 compliance tool can map a policy back to its profile name. |
+
+## Decisions
+
+The engine emits one of three decisions. **KMIP 3.0 cannot natively express
+the third one — it's the agility engine's value-add.**
+
+| Decision | Dispatcher action |
+|---|---|
+| `Allow { algorithm_override: None }` | Forward request unchanged to Plane 2. |
+| `Allow { algorithm_override: Some(name) }` | Rewrite request's `CryptographicAlgorithm` to `name`, then forward. Used on Create/CreateKeyPair when policy substitutes the algorithm at key-gen time. |
+| `RekeyAndProceed { original_uid, from_algorithm, new_algorithm }` | Plan a rekey: generate fresh key under `new_algorithm`, mark `original_uid` as `Deprecated`, link new ↔ old via `x-pqctoday-supersedes`, re-issue the op against the new handle. Triggered when a substitution rule fires against an existing stored object whose algorithm differs from the policy's resolved algorithm. **This is how the engine transparently migrates an application from classical to PQC at the next use of an existing key.** |
+| `Deny { kmip_reason, human, fired_rule_index }` | Return KMIP `OperationFailed` with `ResultReason = kmip_reason` and message `human`. `fired_rule_index` (1-based) identifies which rule fired, surfaceable in the Hub UI. |
 
 ## Evaluation order
 
-Rules are evaluated **in order**. The first rule that returns `Deny` short-circuits the request — subsequent rules are not evaluated. If no rule denies, the request is `Allow`ed.
+**Pass 1 — algorithm resolution.** Walk all rules; collect substitutions
+from `algorithm_default` (when request.algorithm is `None`) and
+`algorithm_substitution` (when request.algorithm matches `from`). Last
+match wins.
+
+**Pass 2 — gating.** Walk gating rules in declaration order against the
+*resolved* algorithm. First `Deny` short-circuits. A substitution that
+points at a banned algorithm is denied at Pass 2 — there is no orphan
+rekey to a forbidden algorithm.
+
+If Pass 1 produced a substitution AND the request targets an existing
+object whose `current_object_algorithm` differs from the substituted
+value, the engine emits `RekeyAndProceed` instead of plain `Allow`.
+
+## No-policy default
+
+If the engine has no active policy loaded, **every** request is denied
+with `kmip_reason = PolicyNotLoaded` — the safe default. Sandbox / dev
+runs must explicitly load `training-permissive.yaml` or call
+`Engine::permissive()` for unit tests.
+
+## Security-officer editing workflow
+
+Policies are plain YAML files. The intended workflow:
+
+1. Edit the file (Hub UI, text editor, or `pqctoday-kmip-compliance edit`).
+2. Validate the draft via [`PolicyStore::validate_draft`] — line-aware
+   parse errors surface for UI display.
+3. Dry-run the draft against a sample request via [`PolicyStore::dry_run`]
+   to see the resulting `Decision` before activating.
+4. Save via [`PolicyStore::save`] — writes to a tempfile then atomic-renames
+   onto the target path. Broken drafts never reach disk.
+5. Activate via [`Engine::activate`] — atomic swap; in-flight evaluations
+   observe either the old or new policy, never a partially-applied one.
+   Every activation is recorded in the audit ring with SHA-256 fingerprints
+   of both prior and new YAML.
 
 ## Audit
 

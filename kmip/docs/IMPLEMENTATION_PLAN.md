@@ -520,11 +520,46 @@ predicates = "3"
 
 **Test summary**: 58 lib tests pass (50 from Phase 2 + Phase 3 + 8 new Phase 4 — `BridgeError` mapping per CKR class, raw round-trip through classify, `Session` is `!Send`, engine initialise round-trip, flag constants match PKCS#11 v3.2 §11.6, vendor codepoints match the manifest). KAT replay still green.
 
-### Phase 4.5 — Plane 1 Crypto Agility Management Plane / policy engine (1.5 PD)
+### Phase 4.5 — Plane 1 Crypto Agility Management Plane / policy engine (1.5 PD) ✅ **COMPLETE 2026-06-07**
 
 Implemented before op handlers (Phase 5) so handlers can call `policy::Engine::evaluate()`.
 
-- [ ] `src/policy/engine.rs`:
+**Mid-phase reframe (user direction).** During implementation the user
+escalated the scope from "10-rule policy gate" to "configurable crypto-
+agility engine that demonstrates classical → PQC switch by editing YAML,
+zero application changes." Three additions to the original plan:
+
+1. **Two new rule types** — `algorithm_default` and `algorithm_substitution`
+   (Pass-1 resolution rules) — let policies rewrite the request's algorithm
+   before gating. Brings the rule count to 12.
+2. **Two-pass evaluation semantics.** Pass 1: resolve algorithm (last
+   match wins). Pass 2: gating (first deny wins). A substitution into a
+   banned algorithm is denied at Pass 2 — no orphan rekey to a forbidden
+   algorithm.
+3. **`Decision::RekeyAndProceed`** — the third decision variant. KMIP 3.0
+   has no native way to silently migrate an application from a classical
+   key to a PQC key under the same handle. When a substitution rule fires
+   against an existing object whose stored algorithm differs from the
+   substituted value, the engine emits a rekey plan. Phase 5 implements
+   the multi-op rekey transaction (generate new key → mark old as
+   Deprecated → link via `x-pqctoday-supersedes` → re-issue the op).
+
+**Hub UI integration.** [`PolicyStore`] exposes `list` / `load` /
+`validate_draft` / `save` / `dry_run` — pure-library API the future Hub
+scenario UI calls (HTTP or WASM, separate workstream). `dry_run` evaluates
+a draft policy against a sample request side-effect-free so the UI can
+show "what would this policy decide?" without persisting anything.
+
+**Security-officer editability.** Validate-then-rename file saves
+([`PolicyStore::save`] writes to a tempfile then atomic-renames). Atomic
+in-memory policy swap ([`Engine::activate`]) — in-flight evaluations
+observe either old or new, never partial. Every activation logged in
+[`PolicyAudit`] with SHA-256 fingerprints of both prior and new YAML.
+
+**No-policy default: deny-all.** Safe default when no policy is loaded
+at startup. Sandbox must explicitly load `training-permissive.yaml`.
+
+- [x] `src/policy/engine.rs`:
 
   ```rust
   pub struct Engine { rules: Vec<Box<dyn Rule + Send + Sync>>, audit: Arc<AuditLog> }
@@ -550,13 +585,20 @@ Implemented before op handlers (Phase 5) so handlers can call `policy::Engine::e
   }
   ```
 
-- [ ] `src/policy/rules.rs` — built-in rule types: `AlgorithmAllowlist`, `AlgorithmDenylist`, `MinKeyLength`, `MaxKeyAge`, `RequireUsageMask`, `RequireCustomAttribute`, `TemporalCutoff`, `LifecycleStateGate`, `HybridDualSignRequirement`, `ComplianceProfileGate`. Each implements `trait Rule { fn check(&self, req: &PolicyRequest) -> Option<Decision>; }` (returns `Some(Deny)` to short-circuit, `None` to pass through).
-- [ ] `src/policy/loader.rs` — `serde_yaml`-based loader; schema validation; line/column error reporting.
-- [ ] `src/policy/inventory.rs` — `pub fn inventory(store: &Store) -> InventoryReport` walks objects + their algorithms + lifecycle state; basis for drift detection.
-- [ ] `src/policy/report.rs` — compliance mapping output (FIPS, CNSA-2.0, NIS2, ANSSI, BSI cross-reference).
-- [ ] `policies/training-permissive.yaml` — default policy loaded when no override is provided (sandbox testing).
-- [ ] `policies/{pqc-migration-2030,fips-only,hybrid-migration-window,cnsa-2.0}.yaml` — example policy files.
-- [ ] Unit tests per rule type covering positive + negative + boundary cases.
+- [x] `src/policy/rule.rs` — `Rule` enum (12 variants — 10 original + `AlgorithmDefault` + `AlgorithmSubstitution`). Pass-1 (`resolve_pass1`) and Pass-2 (`check_pass2`) methods on each. `TimeBound` with custom serde for `"always"` or `"YYYY-MM-DD"`. `AttrPredicate` for `exception_custom_attribute` / `triggered_by_custom_attribute`.
+- [x] `src/policy/loader.rs` — `serde_yaml`-based loader; schema validation; line/column error reporting; non-fatal warnings (`max_key_age_days` stub, `compliance_profile_gate` documentational note).
+- [x] `src/policy/store.rs` — `PolicyStore` for filesystem CRUD: `list`, `load`, `validate_draft`, `save` (atomic), `dry_run`. Hub UI binds against these primitives.
+- [x] `src/policy/audit.rs` — `PolicyAudit` in-memory ring of `PolicyActivated` / `Decision` / `RekeyPlanned` events with SHA-256 fingerprints. Phase 9 wires to SQLite for durable history.
+- [ ] `src/policy/inventory.rs` — **deferred to Phase 6** (needs object store).
+- [ ] `src/policy/report.rs` — **deferred to Phase 8** (compliance tool surface).
+- [x] `policies/training-permissive.yaml` + 4 others (already shipped in Phase 0 scaffolding) — all parse + activate + behave as advertised under the new engine.
+- [x] Unit tests per rule type covering positive + negative + boundary cases: 35 in `policy::*::tests`.
+- [x] Integration: `tests/policy_demo_flows.rs` (6 tests) — KEM + signature + encryption flipped classical→PQC by policy edit, with the application helper unchanged across both halves.
+- [x] Integration: `tests/policy_example_policies.rs` (8 tests) — every shipped policy parses, activates, and produces the expected verdict for representative KEM / signature / encryption requests.
+
+**Test summary**: 109 tests pass (93 lib + 2 KAT replay + 6 demo flows + 8 example policies; 0 failed). Phase 4 surface (58 lib tests) preserved.
+
+**Commit**: `feat/kmip-phase-4.5-policy-engine` branch; PR pending.
 
 ### Phase 5 — Op handlers (Plane 2) (2.0 PD)
 
