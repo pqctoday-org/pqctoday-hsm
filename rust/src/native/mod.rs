@@ -57,3 +57,27 @@ pub use sign::*;
 /// so KMIP can map them to KMIP `ResultReason` without an intermediate
 /// type. `CKR_OK = 0x00000000` is `Ok(_)`; any other `CK_RV` is `Err(_)`.
 pub type CkRv = u32;
+
+#[cfg(test)]
+pub(crate) mod test_lock {
+    //! Shared mutex serialising every test in `native::*` that touches
+    //! engine state.
+    //!
+    //! Engine storage (`OBJECTS`, `SESSIONS`, `TOKEN_STORE`) is
+    //! `lazy_static! ref _: Mutex<T>` — **global**, not `thread_local!`.
+    //! cargo test runs tests in parallel by default; without this lock,
+    //! the engine's lifecycle dance (`init_token` → SO login →
+    //! `init_pin` → logout → user login) races across threads, producing
+    //! `CKR_SESSION_EXISTS` (0xB6) or `CKR_USER_NOT_LOGGED_IN` (0x101).
+    //!
+    //! Acquire at the top of every `#[test]` body that calls
+    //! `native::*`: `let _guard = test_lock::acquire();`.
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    pub fn acquire() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+}

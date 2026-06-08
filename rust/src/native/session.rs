@@ -188,11 +188,12 @@ const _CONSTS_USED: (u32, u32, u32, u32) = (CKF_SERIAL_SESSION, CKF_RW_SESSION, 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::native::test_lock;
 
-    /// Reset thread-local engine state before a test that depends on
-    /// fresh slot / session / object stores. `cargo test` reuses OS
-    /// threads across tests, so without this helper one test's state
-    /// leaks into the next.
+    /// Reset engine state. Engine storage is `lazy_static! ref _: Mutex<T>`
+    /// (global, not `thread_local!`), so cargo test's default parallel
+    /// execution races on it. Every test acquires [`test_lock::acquire`]
+    /// before touching engine state — see `native::test_lock`.
     fn reset_engine() {
         let _ = finalize();
         init().expect("re-init after finalize");
@@ -202,7 +203,7 @@ mod tests {
     /// always returns `CKR_OK`. Multiple calls within one test are safe.
     #[test]
     fn init_returns_ok() {
-        reset_engine();
+        let _guard = test_lock::acquire(); reset_engine();
         init().expect("init must succeed");
         // Second call is fine — engine handles re-init via init_token_store.
         init().expect("re-init must succeed");
@@ -213,7 +214,7 @@ mod tests {
     /// session lifecycle works against the engine.
     #[test]
     fn bootstrap_default_token_round_trip() {
-        reset_engine();
+        let _guard = test_lock::acquire(); reset_engine();
         let session = bootstrap_default_token(0, "so-1234", "user-1234", "pqctoday-test")
             .expect("bootstrap must succeed");
         // Session handle is a positive u32 (engine starts at 1).
@@ -225,7 +226,7 @@ mod tests {
     /// the engine refuses logins before init_pin has set a user PIN.
     #[test]
     fn open_session_without_init_pin_fails() {
-        reset_engine();
+        let _guard = test_lock::acquire(); reset_engine();
         // No init_token / init_pin → login should fail.
         let result = open_session(0, "anything");
         assert!(result.is_err(), "login against uninit token must fail");
@@ -234,7 +235,7 @@ mod tests {
     /// Closing a stale session handle returns Err rather than panicking.
     #[test]
     fn close_session_on_stale_handle_returns_err() {
-        reset_engine();
+        let _guard = test_lock::acquire(); reset_engine();
         let result = close_session(99999);
         assert!(result.is_err(), "stale handle close must return Err");
     }
@@ -242,7 +243,7 @@ mod tests {
     /// init_token on a non-existent slot returns Err.
     #[test]
     fn init_token_invalid_slot_returns_err() {
-        reset_engine();
+        let _guard = test_lock::acquire(); reset_engine();
         let result = init_token(99, "so-pin", "test");
         assert!(result.is_err(), "init_token on bad slot must return Err");
     }
@@ -251,6 +252,7 @@ mod tests {
     /// already-clean engine) returns Ok.
     #[test]
     fn finalize_is_idempotent() {
+        let _guard = test_lock::acquire();
         let _ = finalize(); // works whether engine had state or not
         let _ = finalize(); // and a second time
     }
