@@ -43,6 +43,12 @@ rustls-pemfile = "2"
 rusqlite           = { version = "0.32", features = ["bundled"] }
 rusqlite_migration = "1"
 
+# Phase 2 — TTLV codec buffer ops. `bytes::BytesMut` matches the
+# `fn encode(value: &Value, buf: &mut BytesMut)` signature in
+# IMPLEMENTATION_PLAN.md §6 Phase 2. Decode side is hand-rolled
+# nom-style position tracking against `&[u8]`.
+bytes = "1"
+
 # Serialization (policy + spec JSON + compliance profiles)
 serde       = { version = "1", features = ["derive"] }
 serde_json  = "1"
