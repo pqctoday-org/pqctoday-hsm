@@ -14,6 +14,7 @@
 pub mod constants;
 pub mod crypto;
 pub mod ffi;
+pub mod native;
 pub mod state;
 
 pub use ffi::*;
