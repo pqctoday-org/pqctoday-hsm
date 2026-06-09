@@ -170,11 +170,18 @@ pub fn canonical_name(a: KmipAlgorithm) -> String {
 pub fn aes_mechanism_for(
     cp: Option<&crate::kmip30::CryptographicParameters>,
 ) -> u32 {
-    use softhsmrustv3::constants::{CKM_AES_CBC, CKM_AES_ECB, CKM_AES_GCM};
-    match cp.and_then(|c| c.block_cipher_mode) {
-        Some(1) => CKM_AES_CBC,
-        Some(2) => CKM_AES_ECB,
-        Some(9) | None => CKM_AES_GCM,
+    use softhsmrustv3::constants::{CKM_AES_CBC, CKM_AES_CBC_PAD, CKM_AES_ECB, CKM_AES_GCM};
+    let bcm = cp.and_then(|c| c.block_cipher_mode);
+    // KMIP 3.0 §11 `Padding Method` enum — codepoint 3 = `PKCS5`
+    // (synonym for PKCS#7 for AES). With BlockCipherMode=CBC this
+    // selects `CKM_AES_CBC_PAD`, which permits arbitrary-length
+    // plaintext (the shim's CBC_PAD path adds PKCS#7 padding).
+    let pad = cp.and_then(|c| c.padding_method);
+    match (bcm, pad) {
+        (Some(1), Some(3)) => CKM_AES_CBC_PAD,
+        (Some(1), _) => CKM_AES_CBC,
+        (Some(2), _) => CKM_AES_ECB,
+        (Some(9), _) | (None, _) => CKM_AES_GCM,
         // Unimplemented modes (PCBC / CFB / OFB / CTR / wrap) fall
         // through to GCM which the shim already supports; callers can
         // upgrade `aes_mechanism_for` as the shim grows.
