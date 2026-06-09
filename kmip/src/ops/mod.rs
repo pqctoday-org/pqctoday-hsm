@@ -59,6 +59,7 @@ pub mod mac_and_hash;
 pub mod query;
 pub mod register_import_export;
 pub mod revoke;
+pub mod rng_and_pkcs11;
 pub mod session_and_auth;
 pub mod sign;
 pub mod signature_verify;

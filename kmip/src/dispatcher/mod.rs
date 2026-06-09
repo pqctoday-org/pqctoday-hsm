@@ -43,6 +43,7 @@ use crate::ops::{
     query::query,
     register_import_export::{export, import_object, register},
     revoke::revoke,
+    rng_and_pkcs11::{pkcs11, rng_retrieve, rng_seed},
     session_and_auth::{create_credential, create_group, create_user, log, login, logout},
     sign::sign, signature_verify::signature_verify, Deps,
 };
@@ -134,6 +135,9 @@ fn handle_payload(
         RequestPayload::Log(r) => ResponsePayload::Log(log(deps, r, correlation_id)?),
         RequestPayload::Login(r) => ResponsePayload::Login(login(deps, r, correlation_id)?),
         RequestPayload::Logout(r) => ResponsePayload::Logout(logout(deps, r, correlation_id)?),
+        RequestPayload::RngRetrieve(r) => ResponsePayload::RngRetrieve(rng_retrieve(deps, r, correlation_id)?),
+        RequestPayload::RngSeed(r) => ResponsePayload::RngSeed(rng_seed(deps, r, correlation_id)?),
+        RequestPayload::Pkcs11(r) => ResponsePayload::Pkcs11(pkcs11(deps, r, correlation_id)?),
     })
 }
 

@@ -149,6 +149,15 @@ mod tags {
     pub const RequestCount: u32           = 0x42_014c;
     pub const UsageLimits: u32            = 0x42_0095;
     pub const UsageLimitsTotal: u32       = 0x42_0097;
+    /// KMIP 3.0 §6.1.{54,55} RNG tags.
+    pub const DataLength: u32             = 0x42_00c4;
+    /// KMIP 3.0 §6.1.42 PKCS#11 passthrough tags.
+    pub const Pkcs11Interface: u32        = 0x42_0159;
+    pub const Pkcs11Function: u32         = 0x42_015a;
+    pub const Pkcs11InputParameters: u32  = 0x42_015b;
+    pub const Pkcs11OutputParameters: u32 = 0x42_015c;
+    pub const Pkcs11ReturnCode: u32       = 0x42_015d;
+    pub const CorrelationValue: u32       = 0x42_00d6;
     pub const InteropFunction: u32        = 0x42_0160;
     pub const InteropIdentifier: u32      = 0x42_0161;
     pub const InitialDate: u32            = 0x42_002f;
@@ -359,6 +368,9 @@ fn decode_request_payload(op: Operation, frame: &TtlvFrame) -> Result<RequestPay
         Operation::Log              => RequestPayload::Log(decode_log_req(children)?),
         Operation::Login            => RequestPayload::Login(decode_login_req(children)?),
         Operation::Logout           => RequestPayload::Logout(decode_logout_req(children)?),
+        Operation::RNGRetrieve      => RequestPayload::RngRetrieve(decode_rng_retrieve_req(children)?),
+        Operation::RNGSeed          => RequestPayload::RngSeed(decode_rng_seed_req(children)?),
+        Operation::Pkcs11           => RequestPayload::Pkcs11(decode_pkcs11_req(children)?),
     })
 }
 
@@ -408,6 +420,13 @@ fn response_payload_to_frame(payload: &ResponsePayload) -> TtlvFrame {
             TtlvFrame::new(Tag(tags::Ticket), Value::TextString(r.ticket.clone())),
         ],
         ResponsePayload::Logout(_)           => vec![],
+        ResponsePayload::RngRetrieve(r)      => vec![
+            TtlvFrame::new(Tag(tags::Data), Value::ByteString(r.data.clone())),
+        ],
+        ResponsePayload::RngSeed(r)          => vec![
+            TtlvFrame::new(Tag(tags::DataLength), Value::Integer(r.data_length)),
+        ],
+        ResponsePayload::Pkcs11(r)           => encode_pkcs11_resp(r),
     };
     TtlvFrame::new(Tag(tags::ResponsePayload), Value::Structure(children))
 }
@@ -843,6 +862,78 @@ fn decode_attribute_v3(frame: &TtlvFrame) -> Result<Option<Attribute>, WireError
         }
         _ => return Ok(None),
     }))
+}
+
+// ── Group G codecs: RNG + PKCS#11 passthrough ──────────────────────────────
+
+fn decode_rng_retrieve_req(children: &[TtlvFrame]) -> Result<RngRetrieveRequest, WireError> {
+    let mut data_length = 0i32;
+    for c in children {
+        if c.tag.0 == tags::DataLength {
+            data_length = expect_integer(c, "Data Length")?;
+        }
+    }
+    Ok(RngRetrieveRequest { data_length })
+}
+
+fn decode_rng_seed_req(children: &[TtlvFrame]) -> Result<RngSeedRequest, WireError> {
+    let mut data = Vec::new();
+    for c in children {
+        if c.tag.0 == tags::Data {
+            if let Value::ByteString(b) = &c.value { data = b.clone(); }
+        }
+    }
+    Ok(RngSeedRequest { data })
+}
+
+fn decode_pkcs11_req(children: &[TtlvFrame]) -> Result<Pkcs11Request, WireError> {
+    let mut interface = None;
+    let mut function = None;
+    let mut correlation_value = None;
+    let mut input_parameters = None;
+    for c in children {
+        match c.tag.0 {
+            tags::Pkcs11Interface => {
+                if let Value::TextString(s) = &c.value { interface = Some(s.clone()); }
+            }
+            tags::Pkcs11Function => {
+                function = Some(expect_enum(c, "PKCS#11 Function")?);
+            }
+            tags::CorrelationValue => {
+                if let Value::ByteString(b) = &c.value { correlation_value = Some(b.clone()); }
+            }
+            tags::Pkcs11InputParameters => {
+                if let Value::ByteString(b) = &c.value { input_parameters = Some(b.clone()); }
+            }
+            _ => {}
+        }
+    }
+    let function = function.ok_or(WireError::Missing {
+        tag: tags::Pkcs11Function,
+        name: "PKCS#11 Function",
+    })?;
+    Ok(Pkcs11Request {
+        interface,
+        function,
+        correlation_value,
+        input_parameters,
+    })
+}
+
+fn encode_pkcs11_resp(r: &Pkcs11Response) -> Vec<TtlvFrame> {
+    let mut out = Vec::new();
+    if let Some(iface) = &r.interface {
+        out.push(TtlvFrame::new(Tag(tags::Pkcs11Interface), Value::TextString(iface.clone())));
+    }
+    out.push(TtlvFrame::new(Tag(tags::Pkcs11Function), Value::Enumeration(r.function)));
+    if let Some(cv) = &r.correlation_value {
+        out.push(TtlvFrame::new(Tag(tags::CorrelationValue), Value::ByteString(cv.clone())));
+    }
+    if let Some(op) = &r.output_parameters {
+        out.push(TtlvFrame::new(Tag(tags::Pkcs11OutputParameters), Value::ByteString(op.clone())));
+    }
+    out.push(TtlvFrame::new(Tag(tags::Pkcs11ReturnCode), Value::Integer(r.return_code)));
+    out
 }
 
 // ── Group F codecs: session / auth ─────────────────────────────────────────

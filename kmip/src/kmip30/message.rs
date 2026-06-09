@@ -189,6 +189,9 @@ pub enum RequestPayload {
     Log(super::ops::LogRequest),
     Login(super::ops::LoginRequest),
     Logout(super::ops::LogoutRequest),
+    RngRetrieve(super::ops::RngRetrieveRequest),
+    RngSeed(super::ops::RngSeedRequest),
+    Pkcs11(super::ops::Pkcs11Request),
 }
 
 /// Typed response payload — one variant per supported op.
@@ -233,6 +236,9 @@ pub enum ResponsePayload {
     Log(super::ops::LogResponse),
     Login(super::ops::LoginResponse),
     Logout(super::ops::LogoutResponse),
+    RngRetrieve(super::ops::RngRetrieveResponse),
+    RngSeed(super::ops::RngSeedResponse),
+    Pkcs11(super::ops::Pkcs11Response),
 }
 
 impl RequestPayload {
@@ -278,6 +284,9 @@ impl RequestPayload {
             Self::Log(_)              => Operation::Log,
             Self::Login(_)            => Operation::Login,
             Self::Logout(_)           => Operation::Logout,
+            Self::RngRetrieve(_)      => Operation::RNGRetrieve,
+            Self::RngSeed(_)          => Operation::RNGSeed,
+            Self::Pkcs11(_)           => Operation::Pkcs11,
         }
     }
 }

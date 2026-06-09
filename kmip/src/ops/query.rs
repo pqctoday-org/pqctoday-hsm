@@ -135,6 +135,9 @@ fn supported_operations() -> Vec<Operation> {
         Operation::Log,
         Operation::Login,
         Operation::Logout,
+        Operation::RNGRetrieve,
+        Operation::RNGSeed,
+        Operation::Pkcs11,
     ]
 }
 
@@ -170,7 +173,7 @@ mod tests {
         let (_ring, d) = deps();
         let resp = query(&d, QueryRequest { functions: vec![QueryFunction::QueryOperations] }, "corr-q").unwrap();
         let ops = resp.operations.unwrap();
-        assert_eq!(ops.len(), 39);
+        assert_eq!(ops.len(), 42);
         assert!(ops.contains(&Operation::Sign));
         assert!(ops.contains(&Operation::Encrypt));
         assert!(ops.contains(&Operation::Decrypt));

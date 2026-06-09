@@ -1,6 +1,6 @@
 # OASIS KMIP 3.0 Dispatcher Replay Report
 
-Generated: 2026-06-09 02:28:46 UTC
+Generated: 2026-06-09 02:39:45 UTC
 
 
 ## Aggregate
@@ -8,19 +8,19 @@ Generated: 2026-06-09 02:28:46 UTC
 
 | Status | Count | % of total |
 |---|---|---|
-| **PASS** | 3 | 2.9% |
-| **FAIL** | 93 | 91.2% |
+| **PASS** | 5 | 4.9% |
+| **FAIL** | 97 | 95.1% |
 | ERROR | 0 | 0.0% |
-| SKIP_OP (op not implemented) | 6 | 5.9% |
+| SKIP_OP (op not implemented) | 0 | 0.0% |
 | SKIP_PARSE (XML malformed) | 0 | 0.0% |
 | **Total** | **102** | 100.0% |
 
 
-Of the 96 tests that exercise only implemented ops:
+Of the 102 tests that exercise only implemented ops:
 
-  - **3 pass (3%)**
+  - **5 pass (5%)**
 
-  - 93 fail
+  - 97 fail
 
   - 0 errored
 
@@ -96,14 +96,18 @@ Of the 96 tests that exercise only implemented ops:
 | `CS-BC-M-GCM-1-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem: child count 3 != 4 |
 | `CS-BC-M-GCM-2-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem: child count 3 != 4 |
 | `CS-BC-M-GCM-3-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem: child count 3 != 4 |
+| `CS-RNG-O-2-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResponsePayload/DataLength: expected '16' got 32 |
+| `CS-RNG-O-3-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResponsePayload/DataLength: expected '0' got 32 |
+| `CS-RNG-O-4-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem: child count 4 != 3 |
 | `MSGENC-HTTPS-M-1-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem: child count 4 != 3 |
 | `MSGENC-JSON-M-1-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem: child count 4 != 3 |
 | `MSGENC-XML-M-1-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem: child count 4 != 3 |
 | `OMOS-M-1-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/tag 'Operation' != 'Result Status' |
 | `OMOS-O-1-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/tag 'Operation' != 'Result Status' |
-| `QS-M-1-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 21 != 39 |
+| `PKCS11-M-1-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 3 != 2 |
+| `QS-M-1-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 21 != 42 |
 | `QS-M-2-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem: child count 4 != 3 |
-| `SASED-M-1-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 11 != 43 |
+| `SASED-M-1-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 11 != 46 |
 | `SASED-M-2-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem: child count 3 != 4 |
 | `SASED-M-3-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 1 != 0 |
 | `SKFF-M-10-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem: child count 3 != 4 |
@@ -120,15 +124,11 @@ Of the 96 tests that exercise only implemented ops:
 | `SKLC-M-2-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: child count 9 != 6 |
 | `SKLC-M-3-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: child count 9 != 6 |
 | `SKLC-O-1-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: child count 9 != 6 |
-| `TL-M-1-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 17 != 43 |
+| `TL-M-1-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 17 != 46 |
 | `TL-M-2-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage: child count 3 != 2 |
 | `TL-M-3-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage: child count 3 != 2 |
 | `CS-AC-M-7-30.xml` | PASS |  |
+| `CS-RNG-M-1-30.xml` | PASS |  |
+| `CS-RNG-O-1-30.xml` | PASS |  |
 | `SKFF-M-1-30.xml` | PASS |  |
 | `SKFF-M-3-30.xml` | PASS |  |
-| `CS-RNG-M-1-30.xml` | SKIP_OP | unsupported ops: ['RNGRetrieve'] |
-| `CS-RNG-O-1-30.xml` | SKIP_OP | unsupported ops: ['RNGSeed'] |
-| `CS-RNG-O-2-30.xml` | SKIP_OP | unsupported ops: ['RNGSeed'] |
-| `CS-RNG-O-3-30.xml` | SKIP_OP | unsupported ops: ['RNGSeed'] |
-| `CS-RNG-O-4-30.xml` | SKIP_OP | unsupported ops: ['RNGSeed'] |
-| `PKCS11-M-1-30.xml` | SKIP_OP | unsupported ops: ['PKCS_11'] |

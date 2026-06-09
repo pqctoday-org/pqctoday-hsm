@@ -54,12 +54,15 @@ pub enum Operation {
     SignatureVerify  = 0x22,
     MAC              = 0x23,
     MACVerify        = 0x24,
+    RNGRetrieve      = 0x25,
+    RNGSeed          = 0x26,
     Hash             = 0x27,
     Import           = 0x2a,
     Export           = 0x2b,
     Log              = 0x2c,
     Login            = 0x2d,
     Logout           = 0x2e,
+    Pkcs11           = 0x33,
     /// KMIP 3.0 §6.1.31 — test-suite framework op. Carries `Begin` /
     /// `End` markers (no managed-object effect). Server returns Success.
     Interop          = 0x2f,
@@ -104,12 +107,15 @@ impl Operation {
             0x22 => Some(Self::SignatureVerify),
             0x23 => Some(Self::MAC),
             0x24 => Some(Self::MACVerify),
+            0x25 => Some(Self::RNGRetrieve),
+            0x26 => Some(Self::RNGSeed),
             0x27 => Some(Self::Hash),
             0x2a => Some(Self::Import),
             0x2b => Some(Self::Export),
             0x2c => Some(Self::Log),
             0x2d => Some(Self::Login),
             0x2e => Some(Self::Logout),
+            0x33 => Some(Self::Pkcs11),
             0x2f => Some(Self::Interop),
             0x30 => Some(Self::AdjustAttribute),
             0x31 => Some(Self::SetAttribute),
@@ -509,6 +515,63 @@ impl AdjustmentType {
             _ => None,
         }
     }
+}
+
+// ── Group G: RNG + PKCS#11 passthrough (KMIP 3.0 §6.1.{42,54,55}) ──────────
+
+/// `RNG Retrieve` (KMIP 3.0 §6.1.54 / Table 418) — request random
+/// bytes. Server returns at most `data_length` bytes.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RngRetrieveRequest {
+    /// Wire tag `Data Length` (0x4200c4). REQUIRED per spec.
+    pub data_length: i32,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct RngRetrieveResponse {
+    pub data: Vec<u8>,
+}
+
+/// `RNG Seed` (KMIP 3.0 §6.1.55 / Table 421) — provide entropy to
+/// the server's RNG. Response carries the number of bytes consumed.
+/// Per spec, server MAY ignore the seed and return 0.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RngSeedRequest {
+    /// Wire tag `Data` (0x4200c2). REQUIRED per spec.
+    pub data: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct RngSeedResponse {
+    /// Wire tag `Data Length` (0x4200c4). The number of bytes consumed.
+    pub data_length: i32,
+}
+
+/// `PKCS#11` (KMIP 3.0 §6.1.42 / Table 375) — passthrough invocation
+/// of a PKCS#11 function via KMIP. v0.1 acknowledges the request and
+/// returns `CKR_OK` without actually proxying to softhsmrustv3 — the
+/// real Plane-3 bridge for this op lands when the sandbox MVP needs it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Pkcs11Request {
+    /// Wire tag `PKCS#11 Interface` (0x420159, TextString).
+    pub interface: Option<String>,
+    /// Wire tag `PKCS#11 Function` (0x42015a, Enumeration). REQUIRED.
+    pub function: u32,
+    /// Wire tag `Correlation Value` (0x4200d6, ByteString).
+    pub correlation_value: Option<Vec<u8>>,
+    /// Wire tag `PKCS#11 Input Parameters` (0x42015b, ByteString).
+    pub input_parameters: Option<Vec<u8>>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Pkcs11Response {
+    pub interface: Option<String>,
+    pub function: u32,
+    pub correlation_value: Option<Vec<u8>>,
+    pub output_parameters: Option<Vec<u8>>,
+    /// Wire tag `PKCS#11 Return Code` (0x42015d, Integer).
+    /// CKR_OK = 0 per PKCS#11 v3.2 §5.
+    pub return_code: i32,
 }
 
 // ── Group F: session / auth (KMIP 3.0 §6.1.{9,10,13,33,34,35}) ─────────────

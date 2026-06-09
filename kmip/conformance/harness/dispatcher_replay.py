@@ -93,6 +93,8 @@ IMPLEMENTED_OPS: set[str] = {
     # PR #86 (Group F): session / auth.
     "CreateCredential", "CreateGroup", "CreateUser",
     "Log", "Login", "Logout",
+    # PR #87 (Group G): RNG + PKCS#11 passthrough — closes SKIP_OP universe.
+    "RNGRetrieve", "RNGSeed", "PKCS_11",
 }
 
 
