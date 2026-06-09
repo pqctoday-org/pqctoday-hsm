@@ -234,6 +234,15 @@ pub const CKM_AES_KEY_WRAP: u32 = 0x0000_2109;
 pub const CKM_AES_KEY_WRAP_KWP: u32 = 0x0000_210A; // RFC 5649 (PKCS#11 v3.2)
 pub const CKM_AES_KEY_WRAP_PAD_LEGACY: u32 = 0x0000_108b; // SoftHSM2 legacy alias
 
+// ChaCha20 family — PKCS#11 v3.2 §6.20 (RFC 7539 / 8439 stream cipher
+// + AEAD). Vendor table verified against `pkcs11-mech-manifest.json`.
+/// `CKM_CHACHA20` — IETF ChaCha20 stream cipher. 32-byte key, 12-byte
+/// nonce. Distinct from the older 8-byte-nonce variant.
+pub const CKM_CHACHA20: u32 = 0x0000_1071;
+/// `CKM_CHACHA20_POLY1305` — IETF ChaCha20-Poly1305 AEAD (RFC 8439).
+/// 32-byte key, 12-byte nonce, 16-byte tag.
+pub const CKM_CHACHA20_POLY1305: u32 = 0x0000_1093;
+
 // ── PKCS#11 Parameter Sets ──────────────────────────────────────────────────
 
 pub const CKP_ML_KEM_512: u32 = 0x1;

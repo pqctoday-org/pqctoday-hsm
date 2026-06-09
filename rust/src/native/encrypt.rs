@@ -189,6 +189,14 @@ pub fn encrypt(
             let iv = iv.ok_or(CKR_ARGUMENTS_BAD)?;
             aes_cbc_pad_encrypt(&key_bytes, iv, plaintext)
         }
+        CKM_CHACHA20 => {
+            let iv = iv.ok_or(CKR_ARGUMENTS_BAD)?;
+            chacha20_encrypt(&key_bytes, iv, plaintext)
+        }
+        CKM_CHACHA20_POLY1305 => {
+            let iv = iv.ok_or(CKR_ARGUMENTS_BAD)?;
+            chacha20_poly1305_encrypt(&key_bytes, iv, plaintext)
+        }
         CKM_RSA_PKCS_OAEP => {
             // Handle-based path doesn't carry parameters yet; defaults
             // to SHA-256/MGF1-SHA-256/no-label (the Baseline default).
@@ -224,6 +232,16 @@ pub fn decrypt(
         CKM_AES_CBC_PAD => {
             let iv = iv.ok_or(CKR_ARGUMENTS_BAD)?;
             aes_cbc_pad_decrypt(&key_bytes, iv, ciphertext)
+        }
+        CKM_CHACHA20 => {
+            let iv = iv.ok_or(CKR_ARGUMENTS_BAD)?;
+            // ChaCha20 is symmetric / self-inverse — same primitive
+            // for encrypt and decrypt.
+            chacha20_encrypt(&key_bytes, iv, ciphertext)
+        }
+        CKM_CHACHA20_POLY1305 => {
+            let iv = iv.ok_or(CKR_ARGUMENTS_BAD)?;
+            chacha20_poly1305_decrypt(&key_bytes, iv, ciphertext)
         }
         CKM_RSA_PKCS_OAEP => {
             rsa_oaep_decrypt(&key_bytes, ciphertext, &OaepParams::sha256_default())
@@ -299,6 +317,14 @@ pub fn encrypt_with_key_bytes(
             let iv = iv.ok_or(CKR_ARGUMENTS_BAD)?;
             aes_cbc_pad_encrypt(key_bytes, iv, plaintext)
         }
+        CKM_CHACHA20 => {
+            let iv = iv.ok_or(CKR_ARGUMENTS_BAD)?;
+            chacha20_encrypt(key_bytes, iv, plaintext)
+        }
+        CKM_CHACHA20_POLY1305 => {
+            let iv = iv.ok_or(CKR_ARGUMENTS_BAD)?;
+            chacha20_poly1305_encrypt(key_bytes, iv, plaintext)
+        }
         CKM_RSA_PKCS_OAEP => {
             let default = OaepParams::sha256_default();
             let p = oaep.unwrap_or(&default);
@@ -330,6 +356,14 @@ pub fn decrypt_with_key_bytes(
         CKM_AES_CBC_PAD => {
             let iv = iv.ok_or(CKR_ARGUMENTS_BAD)?;
             aes_cbc_pad_decrypt(key_bytes, iv, ciphertext)
+        }
+        CKM_CHACHA20 => {
+            let iv = iv.ok_or(CKR_ARGUMENTS_BAD)?;
+            chacha20_encrypt(key_bytes, iv, ciphertext)
+        }
+        CKM_CHACHA20_POLY1305 => {
+            let iv = iv.ok_or(CKR_ARGUMENTS_BAD)?;
+            chacha20_poly1305_decrypt(key_bytes, iv, ciphertext)
         }
         CKM_RSA_PKCS_OAEP => {
             let default = OaepParams::sha256_default();
@@ -618,6 +652,68 @@ fn aes_cbc_pad_decrypt(key: &[u8], iv: &[u8], ciphertext: &[u8]) -> Result<Vec<u
     };
     out.truncate(plain_len);
     Ok(out)
+}
+
+// ── ChaCha20 / ChaCha20-Poly1305 ───────────────────────────────────────────
+//
+// PKCS#11 v3.2 §6.20 — IETF ChaCha20 (32-byte key, 12-byte nonce,
+// stream cipher) and ChaCha20-Poly1305 AEAD (RFC 8439). Cipher impls
+// live in the `chacha20` + `chacha20poly1305` crates already in our
+// `Cargo.toml`.
+
+fn chacha20_encrypt(key: &[u8], nonce: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, CkRv> {
+    use chacha20::cipher::{KeyIvInit, StreamCipher};
+    if key.len() != 32 {
+        return Err(CKR_ARGUMENTS_BAD);
+    }
+    // PKCS#11 v3.2 §6.20 lets `CKM_CHACHA20` accept either an 8-byte
+    // (RFC 7539 "legacy" / DJB original) or 12-byte (IETF) nonce.
+    // OASIS BC-CHACHA20-* tests use the 8-byte legacy form.
+    let mut buf = plaintext.to_vec();
+    match nonce.len() {
+        8 => {
+            let mut cipher = chacha20::ChaCha20Legacy::new(key.into(), nonce.into());
+            cipher.apply_keystream(&mut buf);
+        }
+        12 => {
+            let mut cipher = chacha20::ChaCha20::new(key.into(), nonce.into());
+            cipher.apply_keystream(&mut buf);
+        }
+        _ => return Err(CKR_ARGUMENTS_BAD),
+    }
+    Ok(buf)
+}
+
+fn chacha20_poly1305_encrypt(
+    key: &[u8],
+    nonce: &[u8],
+    plaintext: &[u8],
+) -> Result<Vec<u8>, CkRv> {
+    use chacha20poly1305::aead::{Aead, KeyInit};
+    use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
+    if key.len() != 32 || nonce.len() != 12 {
+        return Err(CKR_ARGUMENTS_BAD);
+    }
+    let cipher = ChaCha20Poly1305::new(Key::from_slice(key));
+    cipher
+        .encrypt(Nonce::from_slice(nonce), plaintext)
+        .map_err(|_| CKR_FUNCTION_FAILED)
+}
+
+fn chacha20_poly1305_decrypt(
+    key: &[u8],
+    nonce: &[u8],
+    ciphertext: &[u8],
+) -> Result<Vec<u8>, CkRv> {
+    use chacha20poly1305::aead::{Aead, KeyInit};
+    use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
+    if key.len() != 32 || nonce.len() != 12 {
+        return Err(CKR_ARGUMENTS_BAD);
+    }
+    let cipher = ChaCha20Poly1305::new(Key::from_slice(key));
+    cipher
+        .decrypt(Nonce::from_slice(nonce), ciphertext)
+        .map_err(|_| CKR_ENCRYPTED_DATA_INVALID)
 }
 
 fn aes_cbc_decrypt(key: &[u8], iv: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, CkRv> {

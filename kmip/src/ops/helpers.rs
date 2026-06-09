@@ -124,6 +124,8 @@ pub fn canonical_name(a: KmipAlgorithm) -> String {
         HmacSha384 => "HMAC-SHA-384",
         HmacSha512 => "HMAC-SHA-512",
         Ecdh => "ECDH",
+        ChaCha20 => "ChaCha20",
+        ChaCha20Poly1305 => "ChaCha20-Poly1305",
         MlKem512 => "ML-KEM-512",
         MlKem768 => "ML-KEM-768",
         MlKem1024 => "ML-KEM-1024",
