@@ -157,12 +157,20 @@ fn encrypt_classical(
     obj: &crate::store::ObjectRecord,
     correlation_id: &str,
 ) -> Result<EncryptResponse> {
-    let mech = obj.algorithm.to_pkcs11_mech(PkcsOp::Encrypt).ok_or_else(|| {
-        KmipError::failed(
-            ResultReason::OperationNotSupported,
-            format!("{:?} has no Encrypt mechanism", obj.algorithm),
-        )
-    })?;
+    // Default mech from the algorithm table; for AES we additionally
+    // honour the key's stored `BlockCipherMode` per KMIP §11 so
+    // ECB/CBC/CTR/GCM all dispatch to the right PKCS#11 mechanism.
+    let mech = match obj.algorithm {
+        KmipAlgorithm::Aes => {
+            super::helpers::aes_mechanism_for(obj.cryptographic_parameters.as_ref())
+        }
+        _ => obj.algorithm.to_pkcs11_mech(PkcsOp::Encrypt).ok_or_else(|| {
+            KmipError::failed(
+                ResultReason::OperationNotSupported,
+                format!("{:?} has no Encrypt mechanism", obj.algorithm),
+            )
+        })?,
+    };
     emit_pkcs11(deps, correlation_id, "C_EncryptInit", Some(mech), 0, "CKR_OK");
     emit_pkcs11(deps, correlation_id, "C_Encrypt", Some(mech), 0, "CKR_OK");
 
@@ -317,5 +325,31 @@ mod tests {
         put(&d, "a", KmipAlgorithm::Aes, ObjectType::SymmetricKey, State::Destroyed, UsageMask::ENCRYPT);
         let err = encrypt(&d, EncryptRequest { uid: "a".into(), data: vec![], iv: None }, "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::ObjectArchived);
+    }
+}
+
+#[cfg(test)]
+mod block_cipher_mode_test {
+    use crate::kmip30::{CryptographicParameters, KmipAlgorithm};
+    use crate::store::ObjectRecord;
+
+    /// Regression: a key Created with
+    /// `<CryptographicParameters><BlockCipherMode>ECB</BlockCipherMode></CryptographicParameters>`
+    /// must dispatch to `CKM_AES_ECB` (codepoint 0x1081), not to the
+    /// default `CKM_AES_GCM`. This caught the BlockCipherMode tag
+    /// codepoint mix-up (0x420011 vs 0x420013).
+    #[test]
+    fn cp_block_cipher_mode_routes_to_ecb() {
+        let cp = CryptographicParameters {
+            block_cipher_mode: Some(2), // ECB
+            ..Default::default()
+        };
+        let rec = ObjectRecord {
+            cryptographic_parameters: Some(cp),
+            algorithm: KmipAlgorithm::Aes,
+            ..ObjectRecord::default()
+        };
+        let m = super::super::helpers::aes_mechanism_for(rec.cryptographic_parameters.as_ref());
+        assert_eq!(m, softhsmrustv3::constants::CKM_AES_ECB);
     }
 }

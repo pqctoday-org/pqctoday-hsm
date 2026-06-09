@@ -136,12 +136,19 @@ fn decrypt_classical(
     obj: &crate::store::ObjectRecord,
     correlation_id: &str,
 ) -> Result<DecryptResponse> {
-    let mech = obj.algorithm.to_pkcs11_mech(PkcsOp::Decrypt).ok_or_else(|| {
-        KmipError::failed(
-            ResultReason::OperationNotSupported,
-            format!("{:?} has no Decrypt mechanism", obj.algorithm),
-        )
-    })?;
+    // KMIP 3.0 §11 — AES decrypt mechanism mirrors the key's
+    // `BlockCipherMode`; falls back to GCM when unspecified.
+    let mech = match obj.algorithm {
+        KmipAlgorithm::Aes => {
+            super::helpers::aes_mechanism_for(obj.cryptographic_parameters.as_ref())
+        }
+        _ => obj.algorithm.to_pkcs11_mech(PkcsOp::Decrypt).ok_or_else(|| {
+            KmipError::failed(
+                ResultReason::OperationNotSupported,
+                format!("{:?} has no Decrypt mechanism", obj.algorithm),
+            )
+        })?,
+    };
     emit_pkcs11(deps, correlation_id, "C_DecryptInit", Some(mech), 0, "CKR_OK");
     emit_pkcs11(deps, correlation_id, "C_Decrypt", Some(mech), 0, "CKR_OK");
 

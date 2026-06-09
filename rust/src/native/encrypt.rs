@@ -180,6 +180,11 @@ pub fn encrypt(
             let iv = iv.ok_or(CKR_ARGUMENTS_BAD)?;
             aes_gcm_encrypt(&key_bytes, iv, plaintext)
         }
+        CKM_AES_ECB => aes_ecb_encrypt(&key_bytes, plaintext),
+        CKM_AES_CBC => {
+            let iv = iv.ok_or(CKR_ARGUMENTS_BAD)?;
+            aes_cbc_encrypt(&key_bytes, iv, plaintext)
+        }
         CKM_RSA_PKCS_OAEP => {
             // Handle-based path doesn't carry parameters yet; defaults
             // to SHA-256/MGF1-SHA-256/no-label (the Baseline default).
@@ -206,6 +211,11 @@ pub fn decrypt(
         CKM_AES_GCM => {
             let iv = iv.ok_or(CKR_ARGUMENTS_BAD)?;
             aes_gcm_decrypt(&key_bytes, iv, ciphertext)
+        }
+        CKM_AES_ECB => aes_ecb_decrypt(&key_bytes, ciphertext),
+        CKM_AES_CBC => {
+            let iv = iv.ok_or(CKR_ARGUMENTS_BAD)?;
+            aes_cbc_decrypt(&key_bytes, iv, ciphertext)
         }
         CKM_RSA_PKCS_OAEP => {
             rsa_oaep_decrypt(&key_bytes, ciphertext, &OaepParams::sha256_default())
@@ -272,6 +282,11 @@ pub fn encrypt_with_key_bytes(
             let iv = iv.ok_or(CKR_ARGUMENTS_BAD)?;
             aes_gcm_encrypt(key_bytes, iv, plaintext)
         }
+        CKM_AES_ECB => aes_ecb_encrypt(key_bytes, plaintext),
+        CKM_AES_CBC => {
+            let iv = iv.ok_or(CKR_ARGUMENTS_BAD)?;
+            aes_cbc_encrypt(key_bytes, iv, plaintext)
+        }
         CKM_RSA_PKCS_OAEP => {
             let default = OaepParams::sha256_default();
             let p = oaep.unwrap_or(&default);
@@ -294,6 +309,11 @@ pub fn decrypt_with_key_bytes(
         CKM_AES_GCM => {
             let iv = iv.ok_or(CKR_ARGUMENTS_BAD)?;
             aes_gcm_decrypt(key_bytes, iv, ciphertext)
+        }
+        CKM_AES_ECB => aes_ecb_decrypt(key_bytes, ciphertext),
+        CKM_AES_CBC => {
+            let iv = iv.ok_or(CKR_ARGUMENTS_BAD)?;
+            aes_cbc_decrypt(key_bytes, iv, ciphertext)
         }
         CKM_RSA_PKCS_OAEP => {
             let default = OaepParams::sha256_default();
@@ -429,6 +449,119 @@ fn aes_gcm_decrypt(key: &[u8], iv: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, 
         }
         _ => Err(CKR_KEY_TYPE_INCONSISTENT),
     }
+}
+
+// ── AES-ECB ────────────────────────────────────────────────────────────────
+//
+// PKCS#11 v3.2 §6.10 — `CKM_AES_ECB`. No IV, no padding. The plaintext
+// length MUST be a positive multiple of the AES block size (16); the
+// ciphertext is the same length. We refuse non-multiple-of-16 inputs
+// with `CKR_DATA_LEN_RANGE` to match the spec.
+
+fn aes_ecb_encrypt(key: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, CkRv> {
+    use aes::cipher::{BlockEncrypt, KeyInit, generic_array::GenericArray};
+    if plaintext.is_empty() || plaintext.len() % 16 != 0 {
+        return Err(CKR_DATA_LEN_RANGE);
+    }
+    let mut out = plaintext.to_vec();
+    fn enc<C: BlockEncrypt + KeyInit>(k: &[u8], buf: &mut [u8]) -> Result<(), CkRv> {
+        let cipher = C::new_from_slice(k).map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+        for block in buf.chunks_exact_mut(16) {
+            cipher.encrypt_block(GenericArray::from_mut_slice(block));
+        }
+        Ok(())
+    }
+    match key.len() {
+        16 => enc::<aes::Aes128>(key, &mut out)?,
+        32 => enc::<aes::Aes256>(key, &mut out)?,
+        _ => return Err(CKR_KEY_TYPE_INCONSISTENT),
+    }
+    Ok(out)
+}
+
+fn aes_ecb_decrypt(key: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, CkRv> {
+    use aes::cipher::{BlockDecrypt, KeyInit, generic_array::GenericArray};
+    if ciphertext.is_empty() || ciphertext.len() % 16 != 0 {
+        return Err(CKR_ENCRYPTED_DATA_LEN_RANGE);
+    }
+    let mut out = ciphertext.to_vec();
+    fn dec<C: BlockDecrypt + KeyInit>(k: &[u8], buf: &mut [u8]) -> Result<(), CkRv> {
+        let cipher = C::new_from_slice(k).map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+        for block in buf.chunks_exact_mut(16) {
+            cipher.decrypt_block(GenericArray::from_mut_slice(block));
+        }
+        Ok(())
+    }
+    match key.len() {
+        16 => dec::<aes::Aes128>(key, &mut out)?,
+        32 => dec::<aes::Aes256>(key, &mut out)?,
+        _ => return Err(CKR_KEY_TYPE_INCONSISTENT),
+    }
+    Ok(out)
+}
+
+// ── AES-CBC ────────────────────────────────────────────────────────────────
+//
+// PKCS#11 v3.2 §6.10 — `CKM_AES_CBC`. Requires a 16-byte IV; plaintext
+// MUST be a multiple of 16 (no padding). Use `CKM_AES_CBC_PAD` (not
+// implemented here) for PKCS#7 padding.
+
+fn aes_cbc_encrypt(key: &[u8], iv: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, CkRv> {
+    use cbc::cipher::{BlockEncryptMut, KeyIvInit};
+    if iv.len() != 16 {
+        return Err(CKR_ARGUMENTS_BAD);
+    }
+    if plaintext.is_empty() || plaintext.len() % 16 != 0 {
+        return Err(CKR_DATA_LEN_RANGE);
+    }
+    let mut out = vec![0u8; plaintext.len()];
+    match key.len() {
+        16 => {
+            let cipher = cbc::Encryptor::<aes::Aes128>::new_from_slices(key, iv)
+                .map_err(|_| CKR_ARGUMENTS_BAD)?;
+            cipher
+                .encrypt_padded_b2b_mut::<aes::cipher::block_padding::NoPadding>(plaintext, &mut out)
+                .map_err(|_| CKR_FUNCTION_FAILED)?;
+        }
+        32 => {
+            let cipher = cbc::Encryptor::<aes::Aes256>::new_from_slices(key, iv)
+                .map_err(|_| CKR_ARGUMENTS_BAD)?;
+            cipher
+                .encrypt_padded_b2b_mut::<aes::cipher::block_padding::NoPadding>(plaintext, &mut out)
+                .map_err(|_| CKR_FUNCTION_FAILED)?;
+        }
+        _ => return Err(CKR_KEY_TYPE_INCONSISTENT),
+    }
+    Ok(out)
+}
+
+fn aes_cbc_decrypt(key: &[u8], iv: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, CkRv> {
+    use cbc::cipher::{BlockDecryptMut, KeyIvInit};
+    if iv.len() != 16 {
+        return Err(CKR_ARGUMENTS_BAD);
+    }
+    if ciphertext.is_empty() || ciphertext.len() % 16 != 0 {
+        return Err(CKR_ENCRYPTED_DATA_LEN_RANGE);
+    }
+    let mut out = vec![0u8; ciphertext.len()];
+    match key.len() {
+        16 => {
+            let cipher = cbc::Decryptor::<aes::Aes128>::new_from_slices(key, iv)
+                .map_err(|_| CKR_ARGUMENTS_BAD)?;
+            cipher
+                .decrypt_padded_b2b_mut::<aes::cipher::block_padding::NoPadding>(ciphertext, &mut out)
+                .map_err(|_| CKR_ENCRYPTED_DATA_INVALID)?;
+        }
+        32 => {
+            let cipher = cbc::Decryptor::<aes::Aes256>::new_from_slices(key, iv)
+                .map_err(|_| CKR_ARGUMENTS_BAD)?;
+            cipher
+                .decrypt_padded_b2b_mut::<aes::cipher::block_padding::NoPadding>(ciphertext, &mut out)
+                .map_err(|_| CKR_ENCRYPTED_DATA_INVALID)?;
+        }
+        _ => return Err(CKR_KEY_TYPE_INCONSISTENT),
+    }
+    Ok(out)
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────

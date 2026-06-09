@@ -162,6 +162,26 @@ pub fn canonical_name(a: KmipAlgorithm) -> String {
 /// `Active` MUST NOT be passed; the helper returns
 /// `WrongKeyLifecycleState` so a bug doesn't masquerade as a
 /// successful response.
+/// Pick the PKCS#11 mechanism for AES Encrypt / Decrypt off the key's
+/// stored `BlockCipherMode`. KMIP 3.0 §11 `Block Cipher Mode` enum:
+/// `CBC=1, ECB=2, PCBC=3, CFB=4, OFB=5, CTR=6, CMAC=7, CCM=8,
+/// GCM=9, NIST_KEY_WRAP=10, ...`. Falls back to GCM (the only mode
+/// our shim handled before) when the key carries no params.
+pub fn aes_mechanism_for(
+    cp: Option<&crate::kmip30::CryptographicParameters>,
+) -> u32 {
+    use softhsmrustv3::constants::{CKM_AES_CBC, CKM_AES_ECB, CKM_AES_GCM};
+    match cp.and_then(|c| c.block_cipher_mode) {
+        Some(1) => CKM_AES_CBC,
+        Some(2) => CKM_AES_ECB,
+        Some(9) | None => CKM_AES_GCM,
+        // Unimplemented modes (PCBC / CFB / OFB / CTR / wrap) fall
+        // through to GCM which the shim already supports; callers can
+        // upgrade `aes_mechanism_for` as the shim grows.
+        _ => CKM_AES_GCM,
+    }
+}
+
 /// Map a KMIP `CryptographicParameters` onto the shim's
 /// [`softhsmrustv3::native::OaepParams`]. Returns `None` when the key
 /// carries no params (callers should treat that as "use shim default

@@ -789,6 +789,10 @@ pub struct CryptographicParameters {
     /// Wire tag `P Source` (0x420062) — ByteString. The OAEP label
     /// (`pSourceData`). `None` means an empty label.
     pub p_source: Option<Vec<u8>>,
+    /// Wire tag `Block Cipher Mode` (0x420013) — Enumeration. Drives
+    /// symmetric Encrypt / Decrypt mechanism choice. Codepoints per
+    /// KMIP 3.0 §11 (1=CBC, 2=ECB, 3=PCBC, …, 6=GCM, …).
+    pub block_cipher_mode: Option<u32>,
 }
 
 /// `Hashing Algorithm` Enumeration — KMIP 3.0 §11. Codepoints from the

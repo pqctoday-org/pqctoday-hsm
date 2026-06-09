@@ -164,6 +164,7 @@ pub fn create(deps: &Deps, req: CreateRequest, correlation_id: &str) -> Result<C
     let now = OffsetDateTime::now_utc();
     let x = super::register_import_export::extract_attrs(&req.template_attribute);
     let initial_state = super::register_import_export::compute_initial_state(now, &x);
+    let cp = x.cryptographic_parameters.clone();
     deps.store.put(ObjectRecord {
         uid: uid.clone(),
         object_type: req.object_type,
@@ -180,6 +181,7 @@ pub fn create(deps: &Deps, req: CreateRequest, correlation_id: &str) -> Result<C
         compromise_occurrence_date: x.compromise_date,
         last_change_date: Some(now),
         original_creation_date: Some(now),
+        cryptographic_parameters: cp,
         supersedes: None,
         name: x.name.clone(),
         links: std::collections::HashMap::new(),

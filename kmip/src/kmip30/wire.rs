@@ -150,6 +150,10 @@ mod tags {
     pub const MaskGenerator: u32          = 0x42_0101;
     pub const MaskGeneratorHashingAlgorithm: u32 = 0x42_0102;
     pub const PSource: u32                = 0x42_0103;
+    /// KMIP 3.0 §11 `Block Cipher Mode` Enumeration. Codepoint
+    /// `0x420011` per `kmip-spec-3.0-tags-enums.json` (NOT 0x420013
+    /// which is the `Certificate` tag — easy mix-up to make).
+    pub const BlockCipherMode: u32        = 0x42_0011;
     /// KMIP 3.0 §11 `Digest` family — Structure + ByteString sub-field.
     pub const Digest: u32                 = 0x42_0034;
     pub const DigestValue: u32            = 0x42_0035;
@@ -1213,6 +1217,9 @@ fn encode_cryptographic_parameters(cp: &CryptographicParameters) -> TtlvFrame {
     if let Some(b) = &cp.p_source {
         children.push(TtlvFrame::new(Tag(tags::PSource), Value::ByteString(b.clone())));
     }
+    if let Some(v) = cp.block_cipher_mode {
+        children.push(TtlvFrame::new(Tag(tags::BlockCipherMode), Value::Enumeration(v)));
+    }
     TtlvFrame::new(Tag(tags::CryptographicParameters), Value::Structure(children))
 }
 
@@ -1247,6 +1254,9 @@ fn decode_cryptographic_parameters(frame: &TtlvFrame) -> Result<CryptographicPar
                 if let Value::ByteString(b) = &c.value {
                     cp.p_source = Some(b.clone());
                 }
+            }
+            tags::BlockCipherMode => {
+                cp.block_cipher_mode = Some(expect_enum(c, "Block Cipher Mode")?);
             }
             _ => {}
         }
