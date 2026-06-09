@@ -25,13 +25,17 @@ use uuid::Uuid;
 use crate::error::KmipError;
 use crate::kmip30::{
     ActivateRequest, CreateKeyPairRequest, CreateRequest, DecryptRequest, DestroyRequest,
-    EncryptRequest, GetRequest, LocateRequest, QueryRequest, RequestBatchItem, RequestMessage,
+    EncryptRequest, GetAttributeListRequest, GetAttributesRequest, GetRequest, InteropRequest,
+    LocateRequest, QueryRequest, RequestBatchItem, RequestMessage,
     ResponseBatchItem, ResponseHeader, ResponseMessage, ResponsePayload, ResultStatus,
     RevokeRequest, SignRequest, SignatureVerifyRequest,
 };
 use crate::ops::{
     activate::activate, create::create, create_key_pair::create_key_pair, decrypt::decrypt,
-    destroy::destroy, encrypt::encrypt, get::get, locate::locate, query::query, revoke::revoke,
+    destroy::destroy, encrypt::encrypt, get::get,
+    get_attribute_list::get_attribute_list, get_attributes::get_attributes,
+    interop::interop,
+    locate::locate, query::query, revoke::revoke,
     sign::sign, signature_verify::signature_verify, Deps,
 };
 
@@ -85,6 +89,8 @@ fn handle_payload(
             ResponsePayload::CreateKeyPair(create_key_pair(deps, r, &op_canonical, correlation_id)?)
         }
         RequestPayload::Get(r) => ResponsePayload::Get(get(deps, r, correlation_id)?),
+        RequestPayload::GetAttributes(r) => ResponsePayload::GetAttributes(get_attributes(deps, r, correlation_id)?),
+        RequestPayload::GetAttributeList(r) => ResponsePayload::GetAttributeList(get_attribute_list(deps, r, correlation_id)?),
         RequestPayload::Locate(r) => ResponsePayload::Locate(locate(deps, r, correlation_id)?),
         RequestPayload::Activate(r) => ResponsePayload::Activate(activate(deps, r, correlation_id)?),
         RequestPayload::Revoke(r) => ResponsePayload::Revoke(revoke(deps, r, correlation_id)?),
@@ -95,6 +101,7 @@ fn handle_payload(
         RequestPayload::SignatureVerify(r) => {
             ResponsePayload::SignatureVerify(signature_verify(deps, r, correlation_id)?)
         }
+        RequestPayload::Interop(r) => ResponsePayload::Interop(interop(deps, r, correlation_id)?),
     })
 }
 

@@ -125,6 +125,7 @@ mod tests {
             initial_date: OffsetDateTime::UNIX_EPOCH,
             activation_date: None,
             supersedes: None,
+            name: None,
         }).unwrap();
     }
 
@@ -158,6 +159,7 @@ mod tests {
             initial_date: OffsetDateTime::UNIX_EPOCH,
             activation_date: Some(OffsetDateTime::UNIX_EPOCH),
             supersedes: None,
+            name: None,
         }).unwrap();
         let err = activate(&d, ActivateRequest { uid: "urn:a".into() }, "c").unwrap_err();
         assert_eq!(err.result_reason(), crate::error::ResultReason::PermissionDenied);

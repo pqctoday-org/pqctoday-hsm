@@ -302,6 +302,7 @@ mod tests {
             initial_date: OffsetDateTime::UNIX_EPOCH,
             activation_date: Some(OffsetDateTime::UNIX_EPOCH),
             supersedes: None,
+            name: None,
         };
         deps.store.put(rec).unwrap();
     }
@@ -377,6 +378,7 @@ rules:
             initial_date: OffsetDateTime::UNIX_EPOCH,
             activation_date: None,
             supersedes: None,
+            name: None,
         };
         d.store.put(rec).unwrap();
         let err = sign(&d, SignRequest { uid: "urn:pre".into(), data: vec![] }, "corr").unwrap_err();

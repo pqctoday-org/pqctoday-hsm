@@ -90,6 +90,7 @@ fn lifecycle_fsm_enforced_at_store_layer_on_both_backends() {
             initial_date: OffsetDateTime::UNIX_EPOCH,
             activation_date: Some(OffsetDateTime::UNIX_EPOCH),
             supersedes: None,
+            name: None,
         }).unwrap();
 
         // Try Active → PreActive (illegal per §3.4 FSM).
@@ -135,6 +136,7 @@ fn data_survives_round_trip_through_sqlite_on_disk() {
             initial_date: OffsetDateTime::UNIX_EPOCH,
             activation_date: Some(OffsetDateTime::UNIX_EPOCH),
             supersedes: None,
+            name: None,
         }).unwrap();
     }
 

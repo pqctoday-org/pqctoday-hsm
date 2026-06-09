@@ -184,6 +184,7 @@ pub fn create_key_pair(
         initial_date: now,
         activation_date: None,
         supersedes: None,
+            name: None,
     })?;
     deps.store.put(ObjectRecord {
         uid: pub_uid.clone(),
@@ -197,6 +198,7 @@ pub fn create_key_pair(
         initial_date: now,
         activation_date: None,
         supersedes: None,
+            name: None,
     })?;
 
     deps.sink.emit(AuditEvent::at(

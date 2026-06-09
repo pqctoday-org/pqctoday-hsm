@@ -92,13 +92,16 @@ pub fn query(deps: &Deps, req: QueryRequest, correlation_id: &str) -> Result<Que
     Ok(resp)
 }
 
-/// v0.1 operation capability list — the 12 ops Phase 5 implements.
+/// Operation capability list — surfaced via `QueryOperations`. Includes
+/// every op the dispatcher actually routes to a handler.
 fn supported_operations() -> Vec<Operation> {
     vec![
         Operation::Query,
         Operation::Create,
         Operation::CreateKeyPair,
         Operation::Get,
+        Operation::GetAttributes,
+        Operation::GetAttributeList,
         Operation::Locate,
         Operation::Activate,
         Operation::Revoke,
@@ -107,6 +110,7 @@ fn supported_operations() -> Vec<Operation> {
         Operation::Decrypt,
         Operation::Sign,
         Operation::SignatureVerify,
+        Operation::Interop,
     ]
 }
 
@@ -142,10 +146,12 @@ mod tests {
         let (_ring, d) = deps();
         let resp = query(&d, QueryRequest { functions: vec![QueryFunction::QueryOperations] }, "corr-q").unwrap();
         let ops = resp.operations.unwrap();
-        assert_eq!(ops.len(), 12);
+        assert_eq!(ops.len(), 15);
         assert!(ops.contains(&Operation::Sign));
         assert!(ops.contains(&Operation::Encrypt));
         assert!(ops.contains(&Operation::Decrypt));
+        assert!(ops.contains(&Operation::GetAttributes));
+        assert!(ops.contains(&Operation::Interop));
     }
 
     #[test]

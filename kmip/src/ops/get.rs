@@ -153,6 +153,7 @@ mod tests {
             initial_date: OffsetDateTime::UNIX_EPOCH,
             activation_date: None,
             supersedes: None,
+            name: None,
         }).unwrap();
     }
 

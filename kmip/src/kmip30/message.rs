@@ -154,6 +154,8 @@ pub enum RequestPayload {
     Create(super::ops::CreateRequest),
     CreateKeyPair(super::ops::CreateKeyPairRequest),
     Get(super::ops::GetRequest),
+    GetAttributes(super::ops::GetAttributesRequest),
+    GetAttributeList(super::ops::GetAttributeListRequest),
     Locate(super::ops::LocateRequest),
     Activate(super::ops::ActivateRequest),
     Revoke(super::ops::RevokeRequest),
@@ -162,6 +164,7 @@ pub enum RequestPayload {
     Decrypt(super::ops::DecryptRequest),
     Sign(super::ops::SignRequest),
     SignatureVerify(super::ops::SignatureVerifyRequest),
+    Interop(super::ops::InteropRequest),
 }
 
 /// Typed response payload — one variant per supported op.
@@ -171,6 +174,8 @@ pub enum ResponsePayload {
     Create(super::ops::CreateResponse),
     CreateKeyPair(super::ops::CreateKeyPairResponse),
     Get(super::ops::GetResponse),
+    GetAttributes(super::ops::GetAttributesResponse),
+    GetAttributeList(super::ops::GetAttributeListResponse),
     Locate(super::ops::LocateResponse),
     Activate(super::ops::ActivateResponse),
     Revoke(super::ops::RevokeResponse),
@@ -179,24 +184,28 @@ pub enum ResponsePayload {
     Decrypt(super::ops::DecryptResponse),
     Sign(super::ops::SignResponse),
     SignatureVerify(super::ops::SignatureVerifyResponse),
+    Interop(super::ops::InteropResponse),
 }
 
 impl RequestPayload {
     /// Operation codepoint that goes in the Batch Item's Operation field.
     pub fn operation(&self) -> Operation {
         match self {
-            Self::Query(_)           => Operation::Query,
-            Self::Create(_)          => Operation::Create,
-            Self::CreateKeyPair(_)   => Operation::CreateKeyPair,
-            Self::Get(_)             => Operation::Get,
-            Self::Locate(_)          => Operation::Locate,
-            Self::Activate(_)        => Operation::Activate,
-            Self::Revoke(_)          => Operation::Revoke,
-            Self::Destroy(_)         => Operation::Destroy,
-            Self::Encrypt(_)         => Operation::Encrypt,
-            Self::Decrypt(_)         => Operation::Decrypt,
-            Self::Sign(_)            => Operation::Sign,
-            Self::SignatureVerify(_) => Operation::SignatureVerify,
+            Self::Query(_)            => Operation::Query,
+            Self::Create(_)           => Operation::Create,
+            Self::CreateKeyPair(_)    => Operation::CreateKeyPair,
+            Self::Get(_)              => Operation::Get,
+            Self::GetAttributes(_)    => Operation::GetAttributes,
+            Self::GetAttributeList(_) => Operation::GetAttributeList,
+            Self::Locate(_)           => Operation::Locate,
+            Self::Activate(_)         => Operation::Activate,
+            Self::Revoke(_)           => Operation::Revoke,
+            Self::Destroy(_)          => Operation::Destroy,
+            Self::Encrypt(_)          => Operation::Encrypt,
+            Self::Decrypt(_)          => Operation::Decrypt,
+            Self::Sign(_)             => Operation::Sign,
+            Self::SignatureVerify(_)  => Operation::SignatureVerify,
+            Self::Interop(_)          => Operation::Interop,
         }
     }
 }

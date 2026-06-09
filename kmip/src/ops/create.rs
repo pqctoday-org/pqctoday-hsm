@@ -156,9 +156,14 @@ pub fn create(deps: &Deps, req: CreateRequest, correlation_id: &str) -> Result<C
         }
     }
 
-    // Plane-2: persist.
+    // Plane-2: persist. Lift `Name` out of the template if the client
+    // supplied one — required for Locate-by-Name later.
     let uid = format!("urn:pqctoday:obj:{}", Uuid::new_v4());
     let now = OffsetDateTime::now_utc();
+    let name = req.template_attribute.iter().find_map(|a| match a {
+        Attribute::Name(n) => Some(n.clone()),
+        _ => None,
+    });
     deps.store.put(ObjectRecord {
         uid: uid.clone(),
         object_type: req.object_type,
@@ -171,6 +176,7 @@ pub fn create(deps: &Deps, req: CreateRequest, correlation_id: &str) -> Result<C
         initial_date: now,
         activation_date: None,
         supersedes: None,
+        name,
     })?;
 
     emit_success(deps, correlation_id, "Create");

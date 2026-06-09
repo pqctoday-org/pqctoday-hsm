@@ -30,18 +30,23 @@ use super::attrs::{Attribute, ObjectType, RevocationReason, State};
 /// `enums.Operation`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Operation {
-    Create          = 0x01,
-    CreateKeyPair   = 0x02,
-    Get             = 0x0a,
-    Locate          = 0x08,
-    Activate        = 0x12,
-    Revoke          = 0x13,
-    Destroy         = 0x14,
-    Encrypt         = 0x1f,
-    Decrypt         = 0x20,
-    Sign            = 0x21,
-    SignatureVerify = 0x22,
-    Query           = 0x18,
+    Create           = 0x01,
+    CreateKeyPair    = 0x02,
+    Get              = 0x0a,
+    GetAttributes    = 0x0b,
+    GetAttributeList = 0x0c,
+    Locate           = 0x08,
+    Activate         = 0x12,
+    Revoke           = 0x13,
+    Destroy          = 0x14,
+    Query            = 0x18,
+    Encrypt          = 0x1f,
+    Decrypt          = 0x20,
+    Sign             = 0x21,
+    SignatureVerify  = 0x22,
+    /// KMIP 3.0 §6.1.31 — test-suite framework op. Carries `Begin` /
+    /// `End` markers (no managed-object effect). Server returns Success.
+    Interop          = 0x2f,
 }
 
 impl Operation {
@@ -55,6 +60,8 @@ impl Operation {
             0x02 => Some(Self::CreateKeyPair),
             0x08 => Some(Self::Locate),
             0x0a => Some(Self::Get),
+            0x0b => Some(Self::GetAttributes),
+            0x0c => Some(Self::GetAttributeList),
             0x12 => Some(Self::Activate),
             0x13 => Some(Self::Revoke),
             0x14 => Some(Self::Destroy),
@@ -63,6 +70,7 @@ impl Operation {
             0x20 => Some(Self::Decrypt),
             0x21 => Some(Self::Sign),
             0x22 => Some(Self::SignatureVerify),
+            0x2f => Some(Self::Interop),
             _ => None,
         }
     }
@@ -300,6 +308,65 @@ pub enum SignatureValidity {
     Invalid     = 0x02,
     Unknown     = 0x03,
 }
+
+// ── Group B: attribute family (KMIP 3.0 §6.1) ──────────────────────────────
+
+/// `GetAttributes` (§6.1.21) — read named attributes from one managed
+/// object. An empty `attribute_references` list means "all attributes".
+#[derive(Clone, Debug, PartialEq)]
+pub struct GetAttributesRequest {
+    pub uid: String,
+    /// Tag-name references (e.g. `"Cryptographic Algorithm"`,
+    /// `"State"`). Empty = return every attribute the server knows about.
+    pub attribute_references: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct GetAttributesResponse {
+    pub uid: String,
+    pub attributes: Vec<Attribute>,
+}
+
+/// `GetAttributeList` (§6.1.22) — enumerate attribute names available on
+/// an object without returning their values.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GetAttributeListRequest {
+    pub uid: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct GetAttributeListResponse {
+    pub uid: String,
+    pub attribute_references: Vec<String>,
+}
+
+// ── Interop (KMIP 3.0 §6.1.31) ─────────────────────────────────────────────
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InteropFunction {
+    Begin = 0x01,
+    End   = 0x02,
+}
+
+impl InteropFunction {
+    pub const fn to_wire_value(self) -> u32 { self as u32 }
+    pub const fn from_wire_value(v: u32) -> Option<Self> {
+        match v {
+            0x01 => Some(Self::Begin),
+            0x02 => Some(Self::End),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct InteropRequest {
+    pub function: InteropFunction,
+    pub identifier: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct InteropResponse;
 
 #[cfg(test)]
 mod tests {

@@ -76,9 +76,10 @@ IMPLEMENTED_OPS: set[str] = {
     "Activate", "Revoke", "Destroy",
     "Encrypt", "Decrypt", "Sign", "SignatureVerify",
     "Query",
-    # Interop is the OASIS test-framework op (Begin / End markers) — every
-    # transcript starts with one. We don't implement it; the runner treats
-    # an unsupported Interop as a skipped test, not a fail.
+    # PR #81 (Group B + Interop): attribute read-side ops + test-framework
+    # markers. Wave 2 adds the mutating attribute ops.
+    "GetAttributes", "GetAttributeList",
+    "Interop",
 }
 
 

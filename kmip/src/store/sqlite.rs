@@ -319,6 +319,10 @@ fn decode_record(
         initial_date,
         activation_date,
         supersedes,
+        // KMIP 3.0 §4 `Name` attribute persistence lands in the
+        // attribute-mutation wave (PR #82); for now SQLite doesn't
+        // carry a Name column, so we always reconstruct as None.
+        name: None,
     })
 }
 
@@ -396,6 +400,7 @@ mod tests {
             initial_date: OffsetDateTime::UNIX_EPOCH,
             activation_date: None,
             supersedes: None,
+            name: None,
         }
     }
 

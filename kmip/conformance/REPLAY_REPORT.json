@@ -1,19 +1,19 @@
 {
-  "generated_at": 1780965445,
+  "generated_at": 1780967080,
   "summary": {
     "pass": 2,
-    "fail": 17,
+    "fail": 24,
     "error": 0,
-    "skip_op": 83,
+    "skip_op": 76,
     "skip_parse": 0,
     "total": 102,
-    "candidates": 19
+    "candidates": 26
   },
   "tests": [
     {
       "name": "AKLC-M-1-30.xml",
-      "status": "SKIP_OP",
-      "detail": "unsupported ops: ['GetAttributes']",
+      "status": "FAIL",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: child count 12 != 6",
       "ops_used": [
         "CreateKeyPair",
         "Destroy",
@@ -22,8 +22,8 @@
     },
     {
       "name": "AKLC-M-2-30.xml",
-      "status": "SKIP_OP",
-      "detail": "unsupported ops: ['GetAttributes']",
+      "status": "FAIL",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: child count 11 != 6",
       "ops_used": [
         "Activate",
         "CreateKeyPair",
@@ -35,7 +35,7 @@
     {
       "name": "AKLC-M-3-30.xml",
       "status": "SKIP_OP",
-      "detail": "unsupported ops: ['GetAttributes', 'ModifyAttribute']",
+      "detail": "unsupported ops: ['ModifyAttribute']",
       "ops_used": [
         "Activate",
         "CreateKeyPair",
@@ -48,7 +48,7 @@
     {
       "name": "AX-M-1-30.xml",
       "status": "SKIP_OP",
-      "detail": "unsupported ops: ['AddAttribute', 'GetAttributes']",
+      "detail": "unsupported ops: ['AddAttribute']",
       "ops_used": [
         "AddAttribute",
         "Create",
@@ -61,7 +61,7 @@
     {
       "name": "AX-M-2-30.xml",
       "status": "SKIP_OP",
-      "detail": "unsupported ops: ['AddAttribute', 'GetAttributes']",
+      "detail": "unsupported ops: ['AddAttribute']",
       "ops_used": [
         "AddAttribute",
         "Create",
@@ -74,7 +74,7 @@
     {
       "name": "BL-M-1-30.xml",
       "status": "SKIP_OP",
-      "detail": "unsupported ops: ['Interop', 'Log', 'Register']",
+      "detail": "unsupported ops: ['Log', 'Register']",
       "ops_used": [
         "Destroy",
         "Get",
@@ -87,7 +87,7 @@
     {
       "name": "BL-M-10-30.xml",
       "status": "SKIP_OP",
-      "detail": "unsupported ops: ['GetAttributes', 'Interop', 'ModifyAttribute', 'Register']",
+      "detail": "unsupported ops: ['ModifyAttribute', 'Register']",
       "ops_used": [
         "GetAttributes",
         "Interop",
@@ -98,7 +98,7 @@
     {
       "name": "BL-M-11-30.xml",
       "status": "SKIP_OP",
-      "detail": "unsupported ops: ['GetAttributes', 'Interop', 'Register']",
+      "detail": "unsupported ops: ['Register']",
       "ops_used": [
         "GetAttributes",
         "Interop",
@@ -109,7 +109,7 @@
     {
       "name": "BL-M-12-30.xml",
       "status": "SKIP_OP",
-      "detail": "unsupported ops: ['GetAttributes', 'Interop', 'Register']",
+      "detail": "unsupported ops: ['Register']",
       "ops_used": [
         "Get",
         "GetAttributes",
@@ -120,7 +120,7 @@
     {
       "name": "BL-M-13-30.xml",
       "status": "SKIP_OP",
-      "detail": "unsupported ops: ['GetAttributes', 'Interop', 'Register']",
+      "detail": "unsupported ops: ['Register']",
       "ops_used": [
         "Get",
         "GetAttributes",
@@ -131,7 +131,7 @@
     {
       "name": "BL-M-14-30.xml",
       "status": "SKIP_OP",
-      "detail": "unsupported ops: ['GetAttributes', 'Interop', 'Register']",
+      "detail": "unsupported ops: ['Register']",
       "ops_used": [
         "Destroy",
         "Get",
@@ -144,7 +144,7 @@
     {
       "name": "BL-M-15-30.xml",
       "status": "SKIP_OP",
-      "detail": "unsupported ops: ['CreateCredential', 'Interop']",
+      "detail": "unsupported ops: ['CreateCredential']",
       "ops_used": [
         "CreateCredential",
         "Interop"
@@ -153,7 +153,7 @@
     {
       "name": "BL-M-16-30.xml",
       "status": "SKIP_OP",
-      "detail": "unsupported ops: ['CreateCredential', 'Interop']",
+      "detail": "unsupported ops: ['CreateCredential']",
       "ops_used": [
         "CreateCredential",
         "Interop"
@@ -162,7 +162,7 @@
     {
       "name": "BL-M-17-30.xml",
       "status": "SKIP_OP",
-      "detail": "unsupported ops: ['CreateCredential', 'CreateUser', 'Interop']",
+      "detail": "unsupported ops: ['CreateCredential', 'CreateUser']",
       "ops_used": [
         "CreateCredential",
         "CreateUser",
@@ -172,7 +172,7 @@
     {
       "name": "BL-M-18-30.xml",
       "status": "SKIP_OP",
-      "detail": "unsupported ops: ['CreateCredential', 'CreateUser', 'Interop']",
+      "detail": "unsupported ops: ['CreateCredential', 'CreateUser']",
       "ops_used": [
         "CreateCredential",
         "CreateUser",
@@ -182,7 +182,7 @@
     {
       "name": "BL-M-19-30.xml",
       "status": "SKIP_OP",
-      "detail": "unsupported ops: ['CreateCredential', 'CreateUser', 'Interop']",
+      "detail": "unsupported ops: ['CreateCredential', 'CreateUser']",
       "ops_used": [
         "CreateCredential",
         "CreateUser",
@@ -192,7 +192,7 @@
     {
       "name": "BL-M-2-30.xml",
       "status": "SKIP_OP",
-      "detail": "unsupported ops: ['Check', 'GetAttributes', 'Interop', 'Register']",
+      "detail": "unsupported ops: ['Check', 'Register']",
       "ops_used": [
         "Activate",
         "Check",
@@ -204,7 +204,7 @@
     {
       "name": "BL-M-20-30.xml",
       "status": "SKIP_OP",
-      "detail": "unsupported ops: ['GetAttributes', 'Interop', 'Obliterate', 'Register']",
+      "detail": "unsupported ops: ['Obliterate', 'Register']",
       "ops_used": [
         "GetAttributes",
         "Interop",
@@ -215,7 +215,7 @@
     {
       "name": "BL-M-21-30.xml",
       "status": "SKIP_OP",
-      "detail": "unsupported ops: ['CreateGroup', 'Interop']",
+      "detail": "unsupported ops: ['CreateGroup']",
       "ops_used": [
         "CreateGroup",
         "Interop"
@@ -224,7 +224,7 @@
     {
       "name": "BL-M-3-30.xml",
       "status": "SKIP_OP",
-      "detail": "unsupported ops: ['Check', 'GetAttributes', 'Interop', 'Register']",
+      "detail": "unsupported ops: ['Check', 'Register']",
       "ops_used": [
         "Check",
         "Get",
@@ -236,7 +236,7 @@
     {
       "name": "BL-M-4-30.xml",
       "status": "SKIP_OP",
-      "detail": "unsupported ops: ['GetAttributes', 'Interop', 'Register']",
+      "detail": "unsupported ops: ['Register']",
       "ops_used": [
         "Destroy",
         "Get",
@@ -249,7 +249,7 @@
     {
       "name": "BL-M-5-30.xml",
       "status": "SKIP_OP",
-      "detail": "unsupported ops: ['AddAttribute', 'GetAttributes', 'Interop', 'Register']",
+      "detail": "unsupported ops: ['AddAttribute', 'Register']",
       "ops_used": [
         "AddAttribute",
         "Get",
@@ -261,7 +261,7 @@
     {
       "name": "BL-M-6-30.xml",
       "status": "SKIP_OP",
-      "detail": "unsupported ops: ['GetAttributes', 'Interop', 'Register']",
+      "detail": "unsupported ops: ['Register']",
       "ops_used": [
         "Get",
         "GetAttributes",
@@ -272,7 +272,7 @@
     {
       "name": "BL-M-7-30.xml",
       "status": "SKIP_OP",
-      "detail": "unsupported ops: ['GetAttributes', 'Interop', 'ModifyAttribute', 'Register']",
+      "detail": "unsupported ops: ['ModifyAttribute', 'Register']",
       "ops_used": [
         "GetAttributes",
         "Interop",
@@ -284,7 +284,7 @@
     {
       "name": "BL-M-8-30.xml",
       "status": "SKIP_OP",
-      "detail": "unsupported ops: ['AddAttribute', 'GetAttributes', 'Interop', 'Register']",
+      "detail": "unsupported ops: ['AddAttribute', 'Register']",
       "ops_used": [
         "AddAttribute",
         "Destroy",
@@ -297,7 +297,7 @@
     {
       "name": "BL-M-9-30.xml",
       "status": "SKIP_OP",
-      "detail": "unsupported ops: ['GetAttributes', 'Interop', 'Register']",
+      "detail": "unsupported ops: ['Register']",
       "ops_used": [
         "Destroy",
         "GetAttributes",
@@ -813,7 +813,7 @@
     {
       "name": "QS-M-1-30.xml",
       "status": "FAIL",
-      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 21 != 12",
+      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 21 != 15",
       "ops_used": [
         "Query"
       ]
@@ -829,7 +829,7 @@
     {
       "name": "SASED-M-1-30.xml",
       "status": "FAIL",
-      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 11 != 16",
+      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 11 != 19",
       "ops_used": [
         "Query"
       ]
@@ -845,8 +845,8 @@
     },
     {
       "name": "SASED-M-3-30.xml",
-      "status": "SKIP_OP",
-      "detail": "unsupported ops: ['GetAttributes']",
+      "status": "FAIL",
+      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 1 != 0",
       "ops_used": [
         "Destroy",
         "Get",
@@ -866,7 +866,7 @@
     {
       "name": "SKFF-M-10-30.xml",
       "status": "SKIP_OP",
-      "detail": "unsupported ops: ['AddAttribute', 'DeleteAttribute', 'GetAttributeList', 'GetAttributes', 'ModifyAttribute']",
+      "detail": "unsupported ops: ['AddAttribute', 'DeleteAttribute', 'ModifyAttribute']",
       "ops_used": [
         "Activate",
         "AddAttribute",
@@ -884,7 +884,7 @@
     {
       "name": "SKFF-M-11-30.xml",
       "status": "SKIP_OP",
-      "detail": "unsupported ops: ['AddAttribute', 'DeleteAttribute', 'GetAttributeList', 'GetAttributes', 'ModifyAttribute']",
+      "detail": "unsupported ops: ['AddAttribute', 'DeleteAttribute', 'ModifyAttribute']",
       "ops_used": [
         "Activate",
         "AddAttribute",
@@ -902,7 +902,7 @@
     {
       "name": "SKFF-M-12-30.xml",
       "status": "SKIP_OP",
-      "detail": "unsupported ops: ['AddAttribute', 'DeleteAttribute', 'GetAttributeList', 'GetAttributes', 'ModifyAttribute']",
+      "detail": "unsupported ops: ['AddAttribute', 'DeleteAttribute', 'ModifyAttribute']",
       "ops_used": [
         "Activate",
         "AddAttribute",
@@ -991,7 +991,7 @@
     {
       "name": "SKFF-M-9-30.xml",
       "status": "SKIP_OP",
-      "detail": "unsupported ops: ['AddAttribute', 'DeleteAttribute', 'GetAttributeList', 'GetAttributes', 'ModifyAttribute']",
+      "detail": "unsupported ops: ['AddAttribute', 'DeleteAttribute', 'ModifyAttribute']",
       "ops_used": [
         "Activate",
         "AddAttribute",
@@ -1008,8 +1008,8 @@
     },
     {
       "name": "SKLC-M-1-30.xml",
-      "status": "SKIP_OP",
-      "detail": "unsupported ops: ['GetAttributes']",
+      "status": "FAIL",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: child count 9 != 6",
       "ops_used": [
         "Create",
         "Destroy",
@@ -1018,8 +1018,8 @@
     },
     {
       "name": "SKLC-M-2-30.xml",
-      "status": "SKIP_OP",
-      "detail": "unsupported ops: ['GetAttributes']",
+      "status": "FAIL",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: child count 9 != 6",
       "ops_used": [
         "Activate",
         "Create",
@@ -1031,7 +1031,7 @@
     {
       "name": "SKLC-M-3-30.xml",
       "status": "SKIP_OP",
-      "detail": "unsupported ops: ['GetAttributes', 'ModifyAttribute']",
+      "detail": "unsupported ops: ['ModifyAttribute']",
       "ops_used": [
         "Activate",
         "Create",
@@ -1044,7 +1044,7 @@
     {
       "name": "TL-M-1-30.xml",
       "status": "FAIL",
-      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 17 != 16",
+      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 17 != 19",
       "ops_used": [
         "Query"
       ]
@@ -1061,7 +1061,7 @@
     {
       "name": "TL-M-3-30.xml",
       "status": "SKIP_OP",
-      "detail": "unsupported ops: ['GetAttributeList', 'GetAttributes', 'ModifyAttribute']",
+      "detail": "unsupported ops: ['ModifyAttribute']",
       "ops_used": [
         "Destroy",
         "Get",
@@ -1073,8 +1073,8 @@
     },
     {
       "name": "AKLC-O-1-30.xml",
-      "status": "SKIP_OP",
-      "detail": "unsupported ops: ['GetAttributes']",
+      "status": "FAIL",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: child count 10 != 6",
       "ops_used": [
         "CreateKeyPair",
         "Destroy",
@@ -1124,8 +1124,8 @@
     },
     {
       "name": "SKLC-O-1-30.xml",
-      "status": "SKIP_OP",
-      "detail": "unsupported ops: ['GetAttributes']",
+      "status": "FAIL",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: child count 9 != 6",
       "ops_used": [
         "Create",
         "Destroy",

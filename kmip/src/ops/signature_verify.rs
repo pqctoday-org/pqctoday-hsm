@@ -185,6 +185,7 @@ mod tests {
             initial_date: OffsetDateTime::UNIX_EPOCH,
             activation_date: Some(OffsetDateTime::UNIX_EPOCH),
             supersedes: None,
+            name: None,
         }).unwrap();
     }
 
@@ -225,6 +226,7 @@ mod tests {
             initial_date: OffsetDateTime::UNIX_EPOCH,
             activation_date: None,
             supersedes: None,
+            name: None,
         }).unwrap();
         let _ = signature_verify(&d, SignatureVerifyRequest {
             uid: "u".into(),
@@ -249,6 +251,7 @@ mod tests {
             initial_date: OffsetDateTime::UNIX_EPOCH,
             activation_date: None,
             supersedes: None,
+            name: None,
         }).unwrap();
         let err = signature_verify(&d, SignatureVerifyRequest {
             uid: "u".into(),

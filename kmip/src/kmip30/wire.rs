@@ -106,6 +106,16 @@ mod tags {
     pub const PublicKey: u32              = 0x42_006d;
     pub const PrivateKey: u32             = 0x42_0064;
     pub const KeyMaterial: u32            = 0x42_0043;
+    pub const AttributeReference: u32     = 0x42_013b;
+    pub const InteropFunction: u32        = 0x42_0160;
+    pub const InteropIdentifier: u32      = 0x42_0161;
+    pub const InitialDate: u32            = 0x42_002f;
+    pub const ActivationDate: u32         = 0x42_0001;
+    /// KMIP 3.0 §6.1.7 CreateKeyPair response uses distinct typed tags
+    /// for the two halves; using plain `UniqueIdentifier` for both
+    /// breaks OASIS comparison.
+    pub const PrivateKeyUniqueIdentifier: u32 = 0x42_0066;
+    pub const PublicKeyUniqueIdentifier: u32  = 0x42_006f;
 }
 
 // ── Public entry points ─────────────────────────────────────────────────────
@@ -268,35 +278,41 @@ fn response_batch_item_to_frame(bi: &ResponseBatchItem) -> TtlvFrame {
 fn decode_request_payload(op: Operation, frame: &TtlvFrame) -> Result<RequestPayload, WireError> {
     let children = expect_structure(frame, "Request Payload")?;
     Ok(match op {
-        Operation::Query           => RequestPayload::Query(decode_query_req(children)?),
-        Operation::Create          => RequestPayload::Create(decode_create_req(children)?),
-        Operation::CreateKeyPair   => RequestPayload::CreateKeyPair(decode_create_key_pair_req(children)?),
-        Operation::Get             => RequestPayload::Get(decode_get_req(children)?),
-        Operation::Locate          => RequestPayload::Locate(decode_locate_req(children)?),
-        Operation::Activate        => RequestPayload::Activate(decode_activate_req(children)?),
-        Operation::Revoke          => RequestPayload::Revoke(decode_revoke_req(children)?),
-        Operation::Destroy         => RequestPayload::Destroy(decode_destroy_req(children)?),
-        Operation::Encrypt         => RequestPayload::Encrypt(decode_encrypt_req(children)?),
-        Operation::Decrypt         => RequestPayload::Decrypt(decode_decrypt_req(children)?),
-        Operation::Sign            => RequestPayload::Sign(decode_sign_req(children)?),
-        Operation::SignatureVerify => RequestPayload::SignatureVerify(decode_sigverify_req(children)?),
+        Operation::Query            => RequestPayload::Query(decode_query_req(children)?),
+        Operation::Create           => RequestPayload::Create(decode_create_req(children)?),
+        Operation::CreateKeyPair    => RequestPayload::CreateKeyPair(decode_create_key_pair_req(children)?),
+        Operation::Get              => RequestPayload::Get(decode_get_req(children)?),
+        Operation::GetAttributes    => RequestPayload::GetAttributes(decode_get_attributes_req(children)?),
+        Operation::GetAttributeList => RequestPayload::GetAttributeList(decode_get_attribute_list_req(children)?),
+        Operation::Locate           => RequestPayload::Locate(decode_locate_req(children)?),
+        Operation::Activate         => RequestPayload::Activate(decode_activate_req(children)?),
+        Operation::Revoke           => RequestPayload::Revoke(decode_revoke_req(children)?),
+        Operation::Destroy          => RequestPayload::Destroy(decode_destroy_req(children)?),
+        Operation::Encrypt          => RequestPayload::Encrypt(decode_encrypt_req(children)?),
+        Operation::Decrypt          => RequestPayload::Decrypt(decode_decrypt_req(children)?),
+        Operation::Sign             => RequestPayload::Sign(decode_sign_req(children)?),
+        Operation::SignatureVerify  => RequestPayload::SignatureVerify(decode_sigverify_req(children)?),
+        Operation::Interop          => RequestPayload::Interop(decode_interop_req(children)?),
     })
 }
 
 fn response_payload_to_frame(payload: &ResponsePayload) -> TtlvFrame {
     let children = match payload {
-        ResponsePayload::Query(r)           => encode_query_resp(r),
-        ResponsePayload::Create(r)          => encode_create_resp(r),
-        ResponsePayload::CreateKeyPair(r)   => encode_create_key_pair_resp(r),
-        ResponsePayload::Get(r)             => encode_get_resp(r),
-        ResponsePayload::Locate(r)          => encode_locate_resp(r),
-        ResponsePayload::Activate(r)        => encode_activate_resp(r),
-        ResponsePayload::Revoke(r)          => encode_revoke_resp(r),
-        ResponsePayload::Destroy(r)         => encode_destroy_resp(r),
-        ResponsePayload::Encrypt(r)         => encode_encrypt_resp(r),
-        ResponsePayload::Decrypt(r)         => encode_decrypt_resp(r),
-        ResponsePayload::Sign(r)            => encode_sign_resp(r),
-        ResponsePayload::SignatureVerify(r) => encode_sigverify_resp(r),
+        ResponsePayload::Query(r)            => encode_query_resp(r),
+        ResponsePayload::Create(r)           => encode_create_resp(r),
+        ResponsePayload::CreateKeyPair(r)    => encode_create_key_pair_resp(r),
+        ResponsePayload::Get(r)              => encode_get_resp(r),
+        ResponsePayload::GetAttributes(r)    => encode_get_attributes_resp(r),
+        ResponsePayload::GetAttributeList(r) => encode_get_attribute_list_resp(r),
+        ResponsePayload::Locate(r)           => encode_locate_resp(r),
+        ResponsePayload::Activate(r)         => encode_activate_resp(r),
+        ResponsePayload::Revoke(r)           => encode_revoke_resp(r),
+        ResponsePayload::Destroy(r)          => encode_destroy_resp(r),
+        ResponsePayload::Encrypt(r)          => encode_encrypt_resp(r),
+        ResponsePayload::Decrypt(r)          => encode_decrypt_resp(r),
+        ResponsePayload::Sign(r)             => encode_sign_resp(r),
+        ResponsePayload::SignatureVerify(r)  => encode_sigverify_resp(r),
+        ResponsePayload::Interop(_)          => vec![],
     };
     TtlvFrame::new(Tag(tags::ResponsePayload), Value::Structure(children))
 }
@@ -425,9 +441,18 @@ fn decode_create_key_pair_req(children: &[TtlvFrame]) -> Result<CreateKeyPairReq
 }
 
 fn encode_create_key_pair_resp(r: &CreateKeyPairResponse) -> Vec<TtlvFrame> {
+    // KMIP 3.0 §6.1.7 — distinct typed tags for the two halves of the
+    // keypair. Using plain UniqueIdentifier for both is a 1.x
+    // shortcut that breaks OASIS comparison.
     vec![
-        TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString(r.private_key_uid.clone())),
-        TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString(r.public_key_uid.clone())),
+        TtlvFrame::new(
+            Tag(tags::PrivateKeyUniqueIdentifier),
+            Value::TextString(r.private_key_uid.clone()),
+        ),
+        TtlvFrame::new(
+            Tag(tags::PublicKeyUniqueIdentifier),
+            Value::TextString(r.public_key_uid.clone()),
+        ),
     ]
 }
 
@@ -723,6 +748,171 @@ fn decode_attribute_v3(frame: &TtlvFrame) -> Result<Option<Attribute>, WireError
         }
         _ => return Ok(None),
     }))
+}
+
+// ── Group B (attribute read-side) + Interop codecs ─────────────────────────
+
+/// `GetAttributes` request body — UniqueIdentifier + zero-or-more
+/// `AttributeReference` typed-tag values pointing at named attributes.
+fn decode_get_attributes_req(children: &[TtlvFrame]) -> Result<GetAttributesRequest, WireError> {
+    let uid = required_uid(children)?;
+    let mut refs = Vec::new();
+    for c in children {
+        if c.tag.0 == tags::AttributeReference {
+            // KMIP 3.0 §11: AttributeReference is the enumerable Tag —
+            // its 4-byte value names a tag from the §11 table. We carry
+            // the spec-form name to the handler so it can look up the
+            // matching ObjectRecord field.
+            if let Value::Enumeration(tag_code) = c.value {
+                refs.push(tag_name_from_code(tag_code).to_string());
+            }
+        }
+    }
+    Ok(GetAttributesRequest { uid, attribute_references: refs })
+}
+
+fn encode_get_attributes_resp(r: &GetAttributesResponse) -> Vec<TtlvFrame> {
+    let mut out = vec![TtlvFrame::new(
+        Tag(tags::UniqueIdentifier),
+        Value::TextString(r.uid.clone()),
+    )];
+    // KMIP 3.0 §6.1.21 — GetAttributes response wraps the returned
+    // attributes in a single `Attributes` Structure whose children are
+    // the typed-tag attribute values.
+    let attrs = TtlvFrame::new(
+        Tag(tags::Attributes),
+        Value::Structure(r.attributes.iter().map(encode_attribute_v3).collect()),
+    );
+    out.push(attrs);
+    out
+}
+
+/// `GetAttributeList` request body — just a UniqueIdentifier.
+fn decode_get_attribute_list_req(children: &[TtlvFrame]) -> Result<GetAttributeListRequest, WireError> {
+    Ok(GetAttributeListRequest { uid: required_uid(children)? })
+}
+
+fn encode_get_attribute_list_resp(r: &GetAttributeListResponse) -> Vec<TtlvFrame> {
+    let mut out = vec![TtlvFrame::new(
+        Tag(tags::UniqueIdentifier),
+        Value::TextString(r.uid.clone()),
+    )];
+    for name in &r.attribute_references {
+        // Per §6.1.22 each attribute name is carried as an
+        // AttributeReference Enumeration (the spec's "enumerable Tag"
+        // form — value is the 4-byte tag code).
+        if let Some(tag_code) = tag_code_from_name(name) {
+            out.push(TtlvFrame::new(
+                Tag(tags::AttributeReference),
+                Value::Enumeration(tag_code),
+            ));
+        }
+    }
+    out
+}
+
+/// `Interop` request body — function (Begin/End) + identifier string.
+/// The op is a test-framework no-op; we still parse it so we can echo
+/// the framework markers without dropping the connection.
+fn decode_interop_req(children: &[TtlvFrame]) -> Result<InteropRequest, WireError> {
+    let mut function = None;
+    let mut identifier = String::new();
+    for c in children {
+        match c.tag.0 {
+            tags::InteropFunction => {
+                let v = expect_enum(c, "Interop Function")?;
+                function = InteropFunction::from_wire_value(v);
+            }
+            tags::InteropIdentifier => {
+                if let Value::TextString(s) = &c.value {
+                    identifier = s.clone();
+                }
+            }
+            _ => {}
+        }
+    }
+    let function = function.ok_or(WireError::Missing {
+        tag: tags::InteropFunction,
+        name: "Interop Function",
+    })?;
+    Ok(InteropRequest { function, identifier })
+}
+
+/// Encode an Attribute as a single typed-tag TtlvFrame (KMIP 3.0
+/// §6.1.6 form). Inverse of `decode_attribute_v3`.
+fn encode_attribute_v3(a: &Attribute) -> TtlvFrame {
+    match a {
+        Attribute::CryptographicAlgorithm(alg) => TtlvFrame::new(
+            Tag(tags::CryptographicAlgorithm),
+            Value::Enumeration(alg.to_wire_value()),
+        ),
+        Attribute::CryptographicLength(n) => TtlvFrame::new(
+            Tag(tags::CryptographicLength),
+            Value::Integer(*n as i32),
+        ),
+        Attribute::CryptographicUsageMask(m) => TtlvFrame::new(
+            Tag(tags::CryptographicUsageMask),
+            Value::Integer(m.bits() as i32),
+        ),
+        Attribute::ObjectType(ot) => TtlvFrame::new(
+            Tag(tags::ObjectType),
+            Value::Enumeration(ot.to_wire_value()),
+        ),
+        Attribute::State(s) => TtlvFrame::new(
+            Tag(tags::State),
+            Value::Enumeration(s.to_wire_value()),
+        ),
+        Attribute::UniqueIdentifier(s) => TtlvFrame::new(
+            Tag(tags::UniqueIdentifier),
+            Value::TextString(s.clone()),
+        ),
+        Attribute::Name(s) => TtlvFrame::new(
+            Tag(tags::Name),
+            Value::TextString(s.clone()),
+        ),
+        Attribute::Custom { name: _, value } => {
+            // v0.1 falls back to a TextString-typed Name frame for custom
+            // attrs; proper vendor-extension tag allocation is wave 2.
+            TtlvFrame::new(Tag(tags::Name), Value::TextString(value.clone()))
+        }
+    }
+}
+
+/// Look up the 4-byte tag codepoint by attribute name. Drives
+/// `GetAttributeList` encoding. Names are matched modulo whitespace +
+/// punctuation so `"Cryptographic Algorithm"` and `"CryptographicAlgorithm"`
+/// both resolve.
+fn tag_code_from_name(name: &str) -> Option<u32> {
+    let n: String = name.chars().filter(|c| c.is_alphanumeric()).collect();
+    Some(match n.as_str() {
+        "CryptographicAlgorithm" => tags::CryptographicAlgorithm,
+        "CryptographicLength"    => tags::CryptographicLength,
+        "CryptographicUsageMask" => tags::CryptographicUsageMask,
+        "ObjectType"             => tags::ObjectType,
+        "State"                  => tags::State,
+        "UniqueIdentifier"       => tags::UniqueIdentifier,
+        "Name"                   => tags::Name,
+        "InitialDate"            => tags::InitialDate,
+        "ActivationDate"         => tags::ActivationDate,
+        _ => return None,
+    })
+}
+
+/// Inverse of `tag_code_from_name` — used to surface AttributeReference
+/// names in GetAttributes request decoding.
+fn tag_name_from_code(code: u32) -> &'static str {
+    match code {
+        tags::CryptographicAlgorithm => "Cryptographic Algorithm",
+        tags::CryptographicLength    => "Cryptographic Length",
+        tags::CryptographicUsageMask => "Cryptographic Usage Mask",
+        tags::ObjectType             => "Object Type",
+        tags::State                  => "State",
+        tags::UniqueIdentifier       => "Unique Identifier",
+        tags::Name                   => "Name",
+        tags::InitialDate            => "Initial Date",
+        tags::ActivationDate         => "Activation Date",
+        _ => "Unknown",
+    }
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────

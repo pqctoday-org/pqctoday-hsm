@@ -84,6 +84,7 @@ struct LocateFilters {
     algorithm: Option<KmipAlgorithm>,
     object_type: Option<ObjectType>,
     state: Option<State>,
+    name: Option<String>,
 }
 
 impl LocateFilters {
@@ -103,6 +104,12 @@ impl LocateFilters {
                 return false;
             }
         }
+        if let Some(want) = &self.name {
+            match &r.name {
+                Some(have) if have == want => {}
+                _ => return false,
+            }
+        }
         true
     }
 }
@@ -112,12 +119,14 @@ fn build_filters(attrs: &[Attribute]) -> LocateFilters {
         algorithm: None,
         object_type: None,
         state: None,
+        name: None,
     };
     for a in attrs {
         match a {
             Attribute::CryptographicAlgorithm(alg) => f.algorithm = Some(*alg),
             Attribute::ObjectType(t) => f.object_type = Some(*t),
             Attribute::State(s) => f.state = Some(*s),
+            Attribute::Name(n) => f.name = Some(n.clone()),
             _ => {}
         }
     }
@@ -159,6 +168,7 @@ mod tests {
             initial_date: OffsetDateTime::UNIX_EPOCH,
             activation_date: None,
             supersedes: None,
+            name: None,
         }).unwrap();
     }
 

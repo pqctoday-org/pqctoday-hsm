@@ -39,6 +39,10 @@ pub struct ObjectRecord {
     /// `RekeyAndProceed`. KMIP `Link` attribute (§4.x); the dispatcher
     /// also surfaces this via the `x-pqctoday-supersedes` custom attr.
     pub supersedes: Option<Uid>,
+    /// KMIP `Name` (§4.x) — optional textual label set on Create. Used
+    /// by Locate's Name filter and GetAttributes. None until a client
+    /// sets one.
+    pub name: Option<String>,
 }
 
 /// Minimum surface the Phase-5 op handlers call.
