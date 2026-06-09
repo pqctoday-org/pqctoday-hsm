@@ -116,9 +116,15 @@ class Bindings:
         value = node.value
         if isinstance(value, str) and value.startswith("$"):
             if value == "$NOW":
-                # Use current epoch seconds — server will overwrite for
-                # response TimeStamp anyway.
                 value = str(int(time.time()))
+            elif value.startswith("$NOW-") or value.startswith("$NOW+"):
+                # `$NOW-3600` / `$NOW+86400` arithmetic — OASIS uses these
+                # for ActivationDate / DeactivationDate sentinel values.
+                try:
+                    offset = int(value[4:])
+                except ValueError:
+                    raise ValueError(f"malformed NOW arithmetic {value!r}")
+                value = str(int(time.time()) + offset)
             elif value in self.values:
                 value = self.values[value]
             else:
@@ -529,16 +535,19 @@ def main(argv: list[str]) -> int:
             print(f"no such test: {target_name!r}", file=sys.stderr)
             return 1
 
-    print(f"starting server …")
-    srv = start_server()
-    try:
-        results: list[TestResult] = []
-        for path in paths:
+    # Restart the server fresh per test so the in-process MemoryStore
+    # carries no state across tests. Without this, e.g. Locate by Name
+    # leaks objects from prior runs and breaks placeholder bindings.
+    # Cost: ~0.5 s startup × N tests; for the full corpus that's ~50 s.
+    results: list[TestResult] = []
+    for i, path in enumerate(paths, 1):
+        srv = start_server()
+        try:
             r = run_test(srv, path)
-            results.append(r)
-            print(f"  {r.status:12s}  {r.name}  {r.detail[:80]}")
-    finally:
-        srv.stop()
+        finally:
+            srv.stop()
+        results.append(r)
+        print(f"  [{i:3d}/{len(paths)}] {r.status:12s}  {r.name}  {r.detail[:60]}")
 
     out = REPORT_DIR / "REPLAY_REPORT.md"
     write_report(results, out)

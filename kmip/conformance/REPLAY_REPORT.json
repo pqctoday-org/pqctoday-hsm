@@ -1,9 +1,9 @@
 {
-  "generated_at": 1780963681,
+  "generated_at": 1780965445,
   "summary": {
-    "pass": 0,
-    "fail": 16,
-    "error": 3,
+    "pass": 2,
+    "fail": 17,
+    "error": 0,
     "skip_op": 83,
     "skip_parse": 0,
     "total": 102,
@@ -505,8 +505,8 @@
     },
     {
       "name": "CS-BC-M-1-30.xml",
-      "status": "ERROR",
-      "detail": "msg #0: encode request: ValueError: unresolved placeholder '$NOW-3600' on ActivationDate",
+      "status": "FAIL",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem: child count 3 != 4",
       "ops_used": [
         "Create",
         "Destroy",
@@ -576,8 +576,8 @@
     },
     {
       "name": "CS-BC-M-2-30.xml",
-      "status": "ERROR",
-      "detail": "msg #0: encode request: ValueError: unresolved placeholder '$NOW-3600' on ActivationDate",
+      "status": "FAIL",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem: child count 3 != 4",
       "ops_used": [
         "Create",
         "Decrypt",
@@ -587,8 +587,8 @@
     },
     {
       "name": "CS-BC-M-3-30.xml",
-      "status": "ERROR",
-      "detail": "msg #0: encode request: ValueError: unresolved placeholder '$NOW-3600' on ActivationDate",
+      "status": "FAIL",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem: child count 3 != 4",
       "ops_used": [
         "Create",
         "Decrypt",
@@ -821,7 +821,7 @@
     {
       "name": "QS-M-2-30.xml",
       "status": "FAIL",
-      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem/ResultReason: expected 'GeneralFailure' got 6",
+      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem: child count 4 != 3",
       "ops_used": [
         "Create"
       ]
@@ -856,8 +856,8 @@
     },
     {
       "name": "SKFF-M-1-30.xml",
-      "status": "FAIL",
-      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem: child count 3 != 4",
+      "status": "PASS",
+      "detail": "",
       "ops_used": [
         "Create",
         "Destroy"
@@ -928,8 +928,8 @@
     },
     {
       "name": "SKFF-M-3-30.xml",
-      "status": "FAIL",
-      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem: child count 3 != 4",
+      "status": "PASS",
+      "detail": "",
       "ops_used": [
         "Create",
         "Destroy"
@@ -938,7 +938,7 @@
     {
       "name": "SKFF-M-4-30.xml",
       "status": "FAIL",
-      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem: child count 3 != 4",
+      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem/tag 'Operation' != 'Result Status'",
       "ops_used": [
         "Create",
         "Destroy"
@@ -947,7 +947,7 @@
     {
       "name": "SKFF-M-5-30.xml",
       "status": "FAIL",
-      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem: child count 3 != 4",
+      "detail": "msg #4: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 0 != 1",
       "ops_used": [
         "Create",
         "Destroy",
@@ -969,7 +969,7 @@
     {
       "name": "SKFF-M-7-30.xml",
       "status": "FAIL",
-      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem: child count 3 != 4",
+      "detail": "msg #4: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 0 != 1",
       "ops_used": [
         "Create",
         "Destroy",
@@ -980,7 +980,7 @@
     {
       "name": "SKFF-M-8-30.xml",
       "status": "FAIL",
-      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem: child count 3 != 4",
+      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem/tag 'Operation' != 'Result Status'",
       "ops_used": [
         "Create",
         "Destroy",
@@ -1052,7 +1052,7 @@
     {
       "name": "TL-M-2-30.xml",
       "status": "FAIL",
-      "detail": "msg #0: server returned 0 bytes \u2014 likely rejected the request",
+      "detail": "msg #0: response mismatch: ResponseMessage: child count 3 != 2",
       "ops_used": [
         "Create",
         "Get"

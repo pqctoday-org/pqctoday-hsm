@@ -14,6 +14,9 @@ use thiserror::Error;
 #[repr(u32)]
 pub enum ResultReason {
     ItemNotFound          = 0x0000_0001,
+    ResponseTooLarge      = 0x0000_0002,
+    AuthenticationNotSuccessful = 0x0000_0003,
+    InvalidMessage        = 0x0000_0004,
     OperationNotSupported = 0x0000_0005,
     MissingData           = 0x0000_0006,
     InvalidField          = 0x0000_0007,

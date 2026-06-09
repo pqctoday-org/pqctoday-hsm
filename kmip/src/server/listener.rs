@@ -150,12 +150,41 @@ async fn handle_conn(
 ) -> Result<(), ServerError> {
     let mut tls_stream = acceptor.accept(stream).await.map_err(ServerError::Io)?;
     let frame_bytes = read_one_frame(&mut tls_stream).await?;
-    let request = decode_request_message(&frame_bytes)?;
-    let response = dispatch(&deps, request);
+    let response = match decode_request_message(&frame_bytes) {
+        Ok(request) => dispatch(&deps, request),
+        // KMIP 3.0 §6.4: a wire-decode failure (unknown tag, unknown enum
+        // value, malformed length, etc.) must produce a structured
+        // `OperationFailed` response with `ResultReason = InvalidMessage`
+        // — NOT a TCP/TLS connection drop. Closing the socket without a
+        // response makes the client see a transport error instead of a
+        // proper protocol-level rejection (and breaks OASIS conformance).
+        Err(e) => wire_error_response(&e),
+    };
     let response_bytes = encode_response_message(&response);
     tls_stream.write_all(&response_bytes).await?;
     tls_stream.shutdown().await?;
     Ok(())
+}
+
+/// Build a KMIP 3.0 §6.4 error ResponseMessage for an unparseable request.
+///
+/// Used when our codec can't decode the inbound frame — e.g. unknown
+/// algorithm enum value, missing required field, malformed Structure
+/// length. The spec requires us to still respond on the same connection
+/// so the client gets a `ResultReason` rather than a dangling socket.
+fn wire_error_response(err: &WireError) -> crate::kmip30::ResponseMessage {
+    use crate::error::ResultReason;
+    use crate::kmip30::{ResponseBatchItem, ResponseHeader, ResponseMessage, ResultStatus};
+    ResponseMessage {
+        header: ResponseHeader::v3_now(),
+        batch_items: vec![ResponseBatchItem {
+            operation: None,
+            result_status: ResultStatus::OperationFailed,
+            result_reason: Some(ResultReason::InvalidMessage as u32),
+            result_message: Some(format!("KMIP wire decode failed: {err}")),
+            payload: None,
+        }],
+    }
 }
 
 /// Read exactly one TTLV frame from `stream`. KMIP §9.6 frame layout:

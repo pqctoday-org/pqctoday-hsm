@@ -96,6 +96,16 @@ mod tags {
     pub const CommonAttributes: u32       = 0x42_0126;
     pub const PrivateKeyAttributes: u32   = 0x42_0127;
     pub const PublicKeyAttributes: u32    = 0x42_0128;
+    /// KMIP 3.0 §6.1.6 — plural `Attributes` Structure (OASIS-conformant
+    /// successor to the KMIP 1.x `Attribute`-envelope convention).
+    /// Children are direct typed tags (e.g. `CryptographicAlgorithm`)
+    /// rather than `AttributeName` / `AttributeValue` pairs.
+    pub const Attributes: u32             = 0x42_0125;
+    pub const Name: u32                   = 0x42_0053;
+    pub const SymmetricKey: u32           = 0x42_008f;
+    pub const PublicKey: u32              = 0x42_006d;
+    pub const PrivateKey: u32             = 0x42_0064;
+    pub const KeyMaterial: u32            = 0x42_0043;
 }
 
 // ── Public entry points ─────────────────────────────────────────────────────
@@ -217,6 +227,17 @@ fn header_to_frame(h: &ResponseHeader) -> TtlvFrame {
     TtlvFrame::new(Tag(tags::ResponseHeader), Value::Structure(vec![pv, ts]))
 }
 
+/// Encode a KMIP 3.0 §6.4.2 response BatchItem.
+///
+/// Spec-mandated child sequencing depends on `ResultStatus`:
+///
+/// - **Success** (`0x00`) — `Operation`, `ResultStatus`, `ResponsePayload`.
+///   `ResultReason` and `ResultMessage` MUST NOT appear.
+/// - **OperationFailed / Pending / Undone** — `Operation`, `ResultStatus`,
+///   `ResultReason`, `ResultMessage`. No `ResponsePayload`.
+///
+/// Mixing the two branches (e.g. emitting `ResultReason` on success or
+/// `ResponsePayload` on failure) fails OASIS conformance.
 fn response_batch_item_to_frame(bi: &ResponseBatchItem) -> TtlvFrame {
     let mut children = Vec::new();
     if let Some(op) = bi.operation {
@@ -226,14 +247,18 @@ fn response_batch_item_to_frame(bi: &ResponseBatchItem) -> TtlvFrame {
         Tag(tags::ResultStatus),
         Value::Enumeration(bi.result_status.to_wire_value()),
     ));
-    if let Some(reason) = bi.result_reason {
-        children.push(TtlvFrame::new(Tag(tags::ResultReason), Value::Enumeration(reason)));
-    }
-    if let Some(msg) = &bi.result_message {
-        children.push(TtlvFrame::new(Tag(tags::ResultMessage), Value::TextString(msg.clone())));
-    }
-    if let Some(payload) = &bi.payload {
-        children.push(response_payload_to_frame(payload));
+    let is_success = matches!(bi.result_status, ResultStatus::Success);
+    if is_success {
+        if let Some(payload) = &bi.payload {
+            children.push(response_payload_to_frame(payload));
+        }
+    } else {
+        if let Some(reason) = bi.result_reason {
+            children.push(TtlvFrame::new(Tag(tags::ResultReason), Value::Enumeration(reason)));
+        }
+        if let Some(msg) = &bi.result_message {
+            children.push(TtlvFrame::new(Tag(tags::ResultMessage), Value::TextString(msg.clone())));
+        }
     }
     TtlvFrame::new(Tag(tags::BatchItem), Value::Structure(children))
 }
@@ -321,6 +346,12 @@ fn encode_query_resp(r: &QueryResponse) -> Vec<TtlvFrame> {
     out
 }
 
+/// Decode the KMIP 3.0 §6.1.6 `Create` Request Payload.
+///
+/// Strict KMIP 3.0: attributes are carried inside an `Attributes`
+/// Structure whose children are direct typed tags (`CryptographicAlgorithm`,
+/// `CryptographicLength`, etc.). The KMIP 1.x `Attribute`-envelope
+/// convention is **not** accepted — see §3 of the spec migration notes.
 fn decode_create_req(children: &[TtlvFrame]) -> Result<CreateRequest, WireError> {
     let mut object_type = ObjectType::SymmetricKey;
     let mut template_attribute = Vec::new();
@@ -331,7 +362,14 @@ fn decode_create_req(children: &[TtlvFrame]) -> Result<CreateRequest, WireError>
                 object_type = ObjectType::from_wire_value(v)
                     .ok_or(WireError::UnknownEnum { field: "Object Type", value: v })?;
             }
-            tags::Attribute => template_attribute.push(decode_attribute(c)?),
+            tags::Attributes => {
+                let inner = expect_structure(c, "Attributes")?;
+                for child in inner {
+                    if let Some(a) = decode_attribute_v3(child)? {
+                        template_attribute.push(a);
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -349,29 +387,30 @@ fn decode_create_key_pair_req(children: &[TtlvFrame]) -> Result<CreateKeyPairReq
     let mut common = Vec::new();
     let mut priv_attrs = Vec::new();
     let mut pub_attrs = Vec::new();
+    // KMIP 3.0 §6.1.7 `Create Key Pair` — `Common Attributes`,
+    // `Private Key Attributes`, `Public Key Attributes` are each
+    // wrapping Structures whose children are direct typed tags (no 1.x
+    // `Attribute` envelopes).
     for c in children {
         match c.tag.0 {
             tags::CommonAttributes => {
-                let inner = expect_structure(c, "Common Attributes")?;
-                for a in inner {
-                    if a.tag.0 == tags::Attribute {
-                        common.push(decode_attribute(a)?);
+                for a in expect_structure(c, "Common Attributes")? {
+                    if let Some(decoded) = decode_attribute_v3(a)? {
+                        common.push(decoded);
                     }
                 }
             }
             tags::PrivateKeyAttributes => {
-                let inner = expect_structure(c, "Private Key Attributes")?;
-                for a in inner {
-                    if a.tag.0 == tags::Attribute {
-                        priv_attrs.push(decode_attribute(a)?);
+                for a in expect_structure(c, "Private Key Attributes")? {
+                    if let Some(decoded) = decode_attribute_v3(a)? {
+                        priv_attrs.push(decoded);
                     }
                 }
             }
             tags::PublicKeyAttributes => {
-                let inner = expect_structure(c, "Public Key Attributes")?;
-                for a in inner {
-                    if a.tag.0 == tags::Attribute {
-                        pub_attrs.push(decode_attribute(a)?);
+                for a in expect_structure(c, "Public Key Attributes")? {
+                    if let Some(decoded) = decode_attribute_v3(a)? {
+                        pub_attrs.push(decoded);
                     }
                 }
             }
@@ -397,20 +436,57 @@ fn decode_get_req(children: &[TtlvFrame]) -> Result<GetRequest, WireError> {
     Ok(GetRequest { uid })
 }
 
+/// Encode a KMIP 3.0 §6.1.18 `Get` Response Payload.
+///
+/// The KeyBlock is wrapped in a ManagedObject Structure tagged by the
+/// object's type — `SymmetricKey` (0x42008f), `PublicKey` (0x42006d),
+/// or `PrivateKey` (0x420064). This wrapping is mandated by the spec
+/// and required by OASIS conformance tests; emitting the KeyBlock
+/// directly under ResponsePayload is a 1.x-style shortcut that fails
+/// 3.0 strict comparison.
 fn encode_get_resp(r: &GetResponse) -> Vec<TtlvFrame> {
+    // KMIP 3.0 §6.2 `Key Block`:
+    //   KeyFormatType
+    //   KeyValue (Structure)
+    //     KeyMaterial (ByteString or Structure depending on format)
+    //   CryptographicAlgorithm
+    //   CryptographicLength
+    //
+    // The 1.x convention of emitting `KeyValue` as a raw ByteString is
+    // a wire-format break; OASIS expects `KeyMaterial` inside a
+    // `KeyValue` Structure.
+    let key_value_struct = TtlvFrame::new(
+        Tag(tags::KeyValue),
+        Value::Structure(vec![
+            TtlvFrame::new(
+                Tag(tags::KeyMaterial),
+                Value::ByteString(r.key_block.key_value.clone()),
+            ),
+        ]),
+    );
     let kb = TtlvFrame::new(
         Tag(tags::KeyBlock),
         Value::Structure(vec![
             TtlvFrame::new(Tag(tags::KeyFormatType), Value::Enumeration(r.key_block.key_format_type as u32)),
+            key_value_struct,
             TtlvFrame::new(Tag(tags::CryptographicAlgorithm), Value::Enumeration(r.key_block.cryptographic_algorithm.to_wire_value())),
             TtlvFrame::new(Tag(tags::CryptographicLength), Value::Integer(r.key_block.cryptographic_length as i32)),
-            TtlvFrame::new(Tag(tags::KeyValue), Value::ByteString(r.key_block.key_value.clone())),
         ]),
     );
+    let managed_object_tag = match r.object_type {
+        ObjectType::PublicKey  => tags::PublicKey,
+        ObjectType::PrivateKey => tags::PrivateKey,
+        // SymmetricKey / SecretData / Certificate / OpaqueObject all
+        // surface as SymmetricKey in v0.1 (we don't yet model Certificate
+        // / SecretData object shapes; they'll get their own match arms
+        // when we add Certify / SecretData ops).
+        _ => tags::SymmetricKey,
+    };
+    let managed_object = TtlvFrame::new(Tag(managed_object_tag), Value::Structure(vec![kb]));
     vec![
         TtlvFrame::new(Tag(tags::ObjectType), Value::Enumeration(r.object_type.to_wire_value())),
         TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString(r.uid.clone())),
-        kb,
+        managed_object,
     ]
 }
 
@@ -419,7 +495,16 @@ fn decode_locate_req(children: &[TtlvFrame]) -> Result<LocateRequest, WireError>
     let mut maximum_items = None;
     for c in children {
         match c.tag.0 {
-            tags::Attribute => attributes.push(decode_attribute(c)?),
+            // KMIP 3.0 §6.1.32: Locate request body carries an `Attributes`
+            // Structure whose children are direct typed tags used as
+            // search filters.
+            tags::Attributes => {
+                for a in expect_structure(c, "Attributes")? {
+                    if let Some(decoded) = decode_attribute_v3(a)? {
+                        attributes.push(decoded);
+                    }
+                }
+            }
             tags::MaximumItems => maximum_items = Some(expect_integer(c, "Maximum Items")? as u32),
             _ => {}
         }
@@ -575,60 +660,69 @@ fn encode_sigverify_resp(r: &SignatureVerifyResponse) -> Vec<TtlvFrame> {
 
 // ── Attribute codec ─────────────────────────────────────────────────────────
 
-fn decode_attribute(frame: &TtlvFrame) -> Result<Attribute, WireError> {
-    let children = expect_structure(frame, "Attribute")?;
-    let mut name: Option<String> = None;
-    let mut value_frame: Option<&TtlvFrame> = None;
-    for c in children {
-        match c.tag.0 {
-            tags::AttributeName => {
-                if let Value::TextString(s) = &c.value { name = Some(s.clone()); }
-            }
-            tags::AttributeValue => value_frame = Some(c),
-            _ => {}
-        }
-    }
-    let name = name.ok_or(WireError::Missing { tag: tags::AttributeName, name: "Attribute Name" })?;
-    let value = value_frame.ok_or(WireError::Missing { tag: tags::AttributeValue, name: "Attribute Value" })?;
-    Ok(match name.as_str() {
-        "Cryptographic Algorithm" => {
-            let v = expect_enum(value, "Cryptographic Algorithm value")?;
+/// Decode one typed-tag child inside a KMIP 3.0 `Attributes` Structure.
+///
+/// Per KMIP 3.0 §6.1.6 the OASIS wire format replaces the 1.x `Attribute`
+/// envelope (`AttributeName` + `AttributeValue`) with direct typed tags:
+/// a `CryptographicAlgorithm` TTLV frame *is* the attribute, no wrapper.
+///
+/// Unknown tags inside the wrapper are silently ignored (return `Ok(None)`)
+/// so future spec additions don't break older clients — same forward-compat
+/// stance as the rest of the codec.
+fn decode_attribute_v3(frame: &TtlvFrame) -> Result<Option<Attribute>, WireError> {
+    Ok(Some(match frame.tag.0 {
+        tags::CryptographicAlgorithm => {
+            let v = expect_enum(frame, "Cryptographic Algorithm")?;
             Attribute::CryptographicAlgorithm(
-                KmipAlgorithm::from_wire_value(v).ok_or(WireError::UnknownEnum { field: "Cryptographic Algorithm", value: v })?,
+                KmipAlgorithm::from_wire_value(v)
+                    .ok_or(WireError::UnknownEnum { field: "Cryptographic Algorithm", value: v })?,
             )
         }
-        "Cryptographic Length" => Attribute::CryptographicLength(expect_integer(value, "Cryptographic Length")? as u32),
-        "Cryptographic Usage Mask" => {
-            let v = expect_integer(value, "Cryptographic Usage Mask")? as u32;
+        tags::CryptographicLength => {
+            Attribute::CryptographicLength(expect_integer(frame, "Cryptographic Length")? as u32)
+        }
+        tags::CryptographicUsageMask => {
+            let v = expect_integer(frame, "Cryptographic Usage Mask")? as u32;
             Attribute::CryptographicUsageMask(UsageMask::from_bits_truncate(v))
         }
-        "Object Type" => {
-            let v = expect_enum(value, "Object Type value")?;
+        tags::ObjectType => {
+            let v = expect_enum(frame, "Object Type")?;
             Attribute::ObjectType(
-                ObjectType::from_wire_value(v).ok_or(WireError::UnknownEnum { field: "Object Type", value: v })?,
+                ObjectType::from_wire_value(v)
+                    .ok_or(WireError::UnknownEnum { field: "Object Type", value: v })?,
             )
         }
-        "State" => {
-            let v = expect_enum(value, "State value")?;
-            Attribute::State(State::from_wire_value(v).ok_or(WireError::UnknownEnum { field: "State", value: v })?)
+        tags::State => {
+            let v = expect_enum(frame, "State")?;
+            Attribute::State(
+                State::from_wire_value(v)
+                    .ok_or(WireError::UnknownEnum { field: "State", value: v })?,
+            )
         }
-        "Unique Identifier" => {
-            if let Value::TextString(s) = &value.value { Attribute::UniqueIdentifier(s.clone()) }
-            else { return Err(WireError::BadType { tag: value.tag.0, name: "Attribute Value", msg: "expected TextString".into() }); }
+        tags::UniqueIdentifier => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::UniqueIdentifier(s.clone())
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Unique Identifier",
+                    msg: "expected TextString".into(),
+                });
+            }
         }
-        "Name" => {
-            if let Value::TextString(s) = &value.value { Attribute::Name(s.clone()) }
-            else { return Err(WireError::BadType { tag: value.tag.0, name: "Attribute Value", msg: "expected TextString".into() }); }
+        tags::Name => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::Name(s.clone())
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Name",
+                    msg: "expected TextString".into(),
+                });
+            }
         }
-        other => {
-            // Custom attribute (x-* convention).
-            let value_s = match &value.value {
-                Value::TextString(s) => s.clone(),
-                _ => format!("{:?}", value.value),
-            };
-            Attribute::Custom { name: other.into(), value: value_s }
-        }
-    })
+        _ => return Ok(None),
+    }))
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
