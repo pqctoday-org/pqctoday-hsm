@@ -1,8 +1,8 @@
 {
-  "generated_at": 1781041841,
+  "generated_at": 1781043236,
   "summary": {
-    "pass": 44,
-    "fail": 58,
+    "pass": 45,
+    "fail": 57,
     "error": 0,
     "skip_op": 0,
     "skip_parse": 0,
@@ -48,7 +48,7 @@
     {
       "name": "AX-M-1-30.xml",
       "status": "FAIL",
-      "detail": "msg #0: response mismatch: ResponseMessage: child count 5 != 2",
+      "detail": "msg #1: response mismatch: ResponseMessage: child count 3 != 2",
       "ops_used": [
         "AddAttribute",
         "Create",
@@ -61,7 +61,7 @@
     {
       "name": "AX-M-2-30.xml",
       "status": "FAIL",
-      "detail": "msg #0: response mismatch: ResponseMessage: child count 3 != 2",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload/SymmetricKey/KeyBlock: child count 5 != 4",
       "ops_used": [
         "AddAttribute",
         "Create",
@@ -109,7 +109,7 @@
     {
       "name": "BL-M-12-30.xml",
       "status": "FAIL",
-      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem: child count 3 != 2 (after dropping optional ResultMessage per \u00a74.1.1 item 3)",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1",
       "ops_used": [
         "Get",
         "GetAttributes",
@@ -120,7 +120,7 @@
     {
       "name": "BL-M-13-30.xml",
       "status": "FAIL",
-      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem: child count 3 != 2 (after dropping optional ResultMessage per \u00a74.1.1 item 3)",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1",
       "ops_used": [
         "Get",
         "GetAttributes",
@@ -249,7 +249,7 @@
     {
       "name": "BL-M-5-30.xml",
       "status": "FAIL",
-      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem: child count 3 != 2 (after dropping optional ResultMessage per \u00a74.1.1 item 3)",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1",
       "ops_used": [
         "AddAttribute",
         "Get",
@@ -796,7 +796,7 @@
     {
       "name": "OMOS-M-1-30.xml",
       "status": "FAIL",
-      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem: child count 3 != 2 (after dropping optional ResultMessage per \u00a74.1.1 item 3)",
+      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1",
       "ops_used": [
         "Destroy",
         "Register"
@@ -902,7 +902,7 @@
     {
       "name": "SKFF-M-12-30.xml",
       "status": "FAIL",
-      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem: child count 3 != 2 (after dropping optional ResultMessage per \u00a74.1.1 item 3)",
+      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1",
       "ops_used": [
         "Activate",
         "AddAttribute",
@@ -938,7 +938,7 @@
     {
       "name": "SKFF-M-4-30.xml",
       "status": "FAIL",
-      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem: child count 3 != 2 (after dropping optional ResultMessage per \u00a74.1.1 item 3)",
+      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1",
       "ops_used": [
         "Create",
         "Destroy"
@@ -980,7 +980,7 @@
     {
       "name": "SKFF-M-8-30.xml",
       "status": "FAIL",
-      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem: child count 3 != 2 (after dropping optional ResultMessage per \u00a74.1.1 item 3)",
+      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1",
       "ops_used": [
         "Create",
         "Destroy",
@@ -1051,8 +1051,8 @@
     },
     {
       "name": "TL-M-2-30.xml",
-      "status": "FAIL",
-      "detail": "msg #0: response mismatch: ResponseMessage: child count 3 != 2",
+      "status": "PASS",
+      "detail": "",
       "ops_used": [
         "Create",
         "Get"
@@ -1061,7 +1061,7 @@
     {
       "name": "TL-M-3-30.xml",
       "status": "FAIL",
-      "detail": "msg #0: response mismatch: ResponseMessage: child count 3 != 2",
+      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 1 != 0",
       "ops_used": [
         "Destroy",
         "Get",
@@ -1116,7 +1116,7 @@
     {
       "name": "OMOS-O-1-30.xml",
       "status": "FAIL",
-      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem: child count 3 != 2 (after dropping optional ResultMessage per \u00a74.1.1 item 3)",
+      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1",
       "ops_used": [
         "Destroy",
         "Register"

@@ -58,6 +58,9 @@ mod tags {
     pub const AttributeName: u32          = 0x42_000a;
     pub const AttributeValue: u32         = 0x42_000b;
     pub const BatchItem: u32              = 0x42_000f;
+    /// KMIP 3.0 §9.5 `Batch Error Continuation Option` Enumeration.
+    /// Codepoint `0x42000e` per `kmip-spec-3.0-tags-enums.json`.
+    pub const BatchErrorContinuationOption: u32 = 0x42_000e;
     pub const CryptographicAlgorithm: u32 = 0x42_0028;
     pub const CryptographicLength: u32    = 0x42_002a;
     pub const CryptographicUsageMask: u32 = 0x42_002c;
@@ -257,7 +260,20 @@ pub fn decode_request_message(bytes: &[u8]) -> Result<RequestMessage, WireError>
     for child in children {
         match child.tag.0 {
             tags::RequestHeader => header = Some(decode_request_header(child)?),
-            tags::BatchItem => batch_items.push(decode_request_batch_item(child)?),
+            tags::BatchItem => {
+                // KMIP 3.0 §8.1.1 / §8.2.3 + R7 plan Phase 1 — a
+                // per-item payload-decode failure MUST NOT kill the
+                // whole RequestMessage. We synthesise a stub
+                // `RequestBatchItem` carrying a sentinel payload that
+                // the dispatcher recognises as "decode failed" and
+                // turns into a per-item `OperationFailed /
+                // InvalidMessage` response (Operation echoed when we
+                // managed to read it).
+                match decode_request_batch_item(child) {
+                    Ok(bi) => batch_items.push(bi),
+                    Err(err) => batch_items.push(synthetic_decode_failed_item(child, err)),
+                }
+            }
             other => {
                 return Err(WireError::UnexpectedTag {
                     got: other,
@@ -280,6 +296,30 @@ pub fn decode_request_message(bytes: &[u8]) -> Result<RequestMessage, WireError>
     Ok(RequestMessage { header, batch_items })
 }
 
+/// Build a stand-in `RequestBatchItem` for a BatchItem whose payload
+/// failed to decode. Tries to echo the Operation when we can read it
+/// (KMIP 3.0 §8.2.3 mandates the echo when known); the payload is the
+/// `Ping` sentinel which the dispatcher special-cases to emit
+/// `OperationFailed / InvalidMessage` instead of running the real
+/// `ping` handler.
+fn synthetic_decode_failed_item(frame: &TtlvFrame, err: WireError) -> RequestBatchItem {
+    let op = expect_structure(frame, "Batch Item").ok().and_then(|kids| {
+        kids.iter()
+            .find(|c| c.tag.0 == tags::Operation)
+            .and_then(|c| match c.value {
+                Value::Enumeration(v) => Operation::from_wire_value(v),
+                _ => None,
+            })
+    });
+    RequestBatchItem {
+        operation: op.unwrap_or(Operation::Ping),
+        payload: RequestPayload::DecodeFailed {
+            operation_echo: op,
+            message: err.to_string(),
+        },
+    }
+}
+
 /// Encode a Response Message to wire bytes.
 pub fn encode_response_message(msg: &ResponseMessage) -> Vec<u8> {
     let mut buf = BytesMut::new();
@@ -294,6 +334,7 @@ fn decode_request_header(frame: &TtlvFrame) -> Result<RequestHeader, WireError> 
     let mut major: Option<i32> = None;
     let mut minor: Option<i32> = None;
     let mut time_stamp = None;
+    let mut becopt: Option<crate::kmip30::BatchErrorContinuationOption> = None;
     for child in children {
         match child.tag.0 {
             tags::ProtocolVersion => {
@@ -311,13 +352,25 @@ fn decode_request_header(frame: &TtlvFrame) -> Result<RequestHeader, WireError> 
                     time_stamp = time::OffsetDateTime::from_unix_timestamp(ts).ok();
                 }
             }
+            // KMIP 3.0 §9.5 — `Batch Error Continuation Option`
+            // Enumeration. Codepoint `0x42000e` per
+            // `kmip-spec-3.0-tags-enums.json`. Absent ≡ Stop per spec.
+            tags::BatchErrorContinuationOption => {
+                let v = expect_enum(child, "Batch Error Continuation Option")?;
+                becopt = crate::kmip30::BatchErrorContinuationOption::from_wire_value(v);
+            }
             // Ignore optional header fields v0.1 doesn't consume.
             _ => {}
         }
     }
     let major = major.ok_or(WireError::Missing { tag: tags::ProtocolVersionMajor, name: "Protocol Version Major" })?;
     let minor = minor.ok_or(WireError::Missing { tag: tags::ProtocolVersionMinor, name: "Protocol Version Minor" })?;
-    Ok(RequestHeader { protocol_version_major: major, protocol_version_minor: minor, time_stamp })
+    Ok(RequestHeader {
+        protocol_version_major: major,
+        protocol_version_minor: minor,
+        time_stamp,
+        batch_error_continuation_option: becopt,
+    })
 }
 
 fn decode_request_batch_item(frame: &TtlvFrame) -> Result<RequestBatchItem, WireError> {
@@ -2219,8 +2272,26 @@ fn tag_name_from_code(code: u32) -> &'static str {
 fn required_uid(children: &[TtlvFrame]) -> Result<String, WireError> {
     for c in children {
         if c.tag.0 == tags::UniqueIdentifier {
-            if let Value::TextString(s) = &c.value {
-                return Ok(s.clone());
+            match &c.value {
+                Value::TextString(s) => return Ok(s.clone()),
+                // KMIP 3.0 §6.4 — `UniqueIdentifier` MAY be carried as
+                // an Enumeration referring to a previously-produced
+                // UID within the same batch. The OASIS Baseline corpus
+                // only exercises value `0x01` (`IDPlaceholder` — "the
+                // most-recent UID"); the dispatcher resolves the
+                // sentinel at op-handler entry. Other enum codepoints
+                // (`Create`=0x03, `CreateKeyPair`=0x04, …) are not yet
+                // wired and the decoder treats them as bad input.
+                Value::Enumeration(v) if *v == 0x00000001 => {
+                    return Ok(crate::dispatcher::ID_PLACEHOLDER_SENTINEL.to_string());
+                }
+                Value::Enumeration(v) => {
+                    return Err(WireError::UnknownEnum {
+                        field: "Unique Identifier (only IDPlaceholder=0x01 supported)",
+                        value: *v,
+                    });
+                }
+                _ => {}
             }
         }
     }

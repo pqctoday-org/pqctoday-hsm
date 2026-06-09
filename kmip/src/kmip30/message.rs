@@ -58,6 +58,40 @@ pub struct RequestHeader {
     pub protocol_version_major: i32,
     pub protocol_version_minor: i32,
     pub time_stamp: Option<OffsetDateTime>,
+    /// KMIP 3.0 §9.5 `Batch Error Continuation Option`. Per spec: "If
+    /// not specified, then Stop is assumed." We carry `None` to mean
+    /// the field was absent, and the dispatcher applies the Stop
+    /// default at the consumer site so the absent-vs-explicitly-Stop
+    /// distinction is preserved for logging.
+    pub batch_error_continuation_option: Option<BatchErrorContinuationOption>,
+}
+
+/// KMIP 3.0 §9.5 enum. Codepoints (verified against
+/// `kmip-spec-3.0-tags-enums.json`):
+/// - `Continue = 0x01`: process every item even after a failure
+/// - `Stop     = 0x02`: halt after the first failure; later items are
+///                       NOT processed and NOT returned (default)
+/// - `Undo     = 0x03`: halt after the first failure AND roll back
+///                       earlier successful items, reporting them with
+///                       `ResultStatus::OperationUndone`
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[repr(u32)]
+pub enum BatchErrorContinuationOption {
+    Continue = 0x0000_0001,
+    Stop     = 0x0000_0002,
+    Undo     = 0x0000_0003,
+}
+
+impl BatchErrorContinuationOption {
+    pub const fn to_wire_value(self) -> u32 { self as u32 }
+    pub const fn from_wire_value(v: u32) -> Option<Self> {
+        match v {
+            0x01 => Some(Self::Continue),
+            0x02 => Some(Self::Stop),
+            0x03 => Some(Self::Undo),
+            _ => None,
+        }
+    }
 }
 
 impl RequestHeader {
@@ -67,6 +101,7 @@ impl RequestHeader {
             protocol_version_major: KMIP_VERSION_MAJOR,
             protocol_version_minor: KMIP_VERSION_MINOR,
             time_stamp: None,
+            batch_error_continuation_option: None,
         }
     }
 }
@@ -206,6 +241,15 @@ pub enum RequestPayload {
     RngRetrieve(super::ops::RngRetrieveRequest),
     RngSeed(super::ops::RngSeedRequest),
     Pkcs11(super::ops::Pkcs11Request),
+    /// R7 Phase 1 sentinel — emitted by `decode_request_message` when
+    /// a per-BatchItem payload fails to decode but the outer envelope
+    /// is intact. The dispatcher recognises it and emits a per-item
+    /// `OperationFailed / InvalidMessage` ResponseBatchItem with the
+    /// `operation_echo` (when readable) per KMIP 3.0 §8.2.3.
+    DecodeFailed {
+        operation_echo: Option<super::ops::Operation>,
+        message: String,
+    },
 }
 
 /// Typed response payload — one variant per supported op.
@@ -301,6 +345,13 @@ impl RequestPayload {
             Self::RngRetrieve(_)      => Operation::RNGRetrieve,
             Self::RngSeed(_)          => Operation::RNGSeed,
             Self::Pkcs11(_)           => Operation::Pkcs11,
+            // Echo the original Operation when we were able to read it
+            // before the payload decode failed; fall back to `Ping`
+            // (whose handler we already special-case in the
+            // dispatcher) so callers always see a valid Operation.
+            Self::DecodeFailed { operation_echo, .. } => {
+                operation_echo.unwrap_or(Operation::Ping)
+            }
         }
     }
 }

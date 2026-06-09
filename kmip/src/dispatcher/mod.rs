@@ -52,10 +52,41 @@ use crate::kmip30::RequestPayload;
 
 /// Top-level entry: decoded inbound `RequestMessage` → encoded outbound
 /// `ResponseMessage`.
+///
+/// Honours KMIP 3.0 §9.5 `Batch Error Continuation Option`:
+/// - **Stop** (default): halt at first failure; later items are NOT
+///   processed and NOT returned.
+/// - **Continue**: process every item independently.
+/// - **Undo**: deferred — see `R7 Phase 4`. Currently treated as
+///   `Stop` for forward-compat (the test corpus needing Undo is
+///   tracked in conformance/REPLAY_REPORT.md as BL-M-2).
+///
+/// Threads the §6.4 **ID Placeholder** through the batch: the
+/// most-recently-produced UID is stashed in `BatchState` and any item
+/// that references the placeholder sentinel
+/// [`ID_PLACEHOLDER_SENTINEL`] gets it substituted on entry.
 pub fn dispatch(deps: &Deps, request: RequestMessage) -> ResponseMessage {
+    use crate::kmip30::BatchErrorContinuationOption;
+    let mode = request
+        .header
+        .batch_error_continuation_option
+        .unwrap_or(BatchErrorContinuationOption::Stop);
+    let mut state = BatchState::default();
     let mut items: Vec<ResponseBatchItem> = Vec::with_capacity(request.batch_items.len());
     for item in request.batch_items {
-        items.push(dispatch_one(deps, item));
+        let response = dispatch_one(deps, item, &mut state);
+        let failed = response.result_status == ResultStatus::OperationFailed;
+        items.push(response);
+        if failed {
+            // Continue is the only mode that proceeds past a failure.
+            // Stop (default) and Undo (deferred) both halt. Per §9.5:
+            // "Responses to batch items that have not been processed
+            // are not returned."
+            if matches!(mode, BatchErrorContinuationOption::Continue) {
+                continue;
+            }
+            break;
+        }
     }
     ResponseMessage {
         header: ResponseHeader::v3_now(),
@@ -63,18 +94,44 @@ pub fn dispatch(deps: &Deps, request: RequestMessage) -> ResponseMessage {
     }
 }
 
-fn dispatch_one(deps: &Deps, item: RequestBatchItem) -> ResponseBatchItem {
+/// Per-batch transient state per KMIP 3.0 §6.4 — "a temporary variable
+/// called the ID Placeholder. This value consists of a single Unique
+/// Identifier. It is a variable stored inside the server that is only
+/// valid and preserved during the execution of a single request.
+/// After execution, the variable is discarded."
+#[derive(Default)]
+struct BatchState {
+    id_placeholder: Option<String>,
+}
+
+/// Sentinel the wire codec emits for `<UniqueIdentifier
+/// type="Enumeration" value="IDPlaceholder"/>` (enum value `0x01`).
+/// The dispatcher substitutes the live ID Placeholder before handing
+/// the request to the handler.
+pub const ID_PLACEHOLDER_SENTINEL: &str = "$IDPlaceholder";
+
+fn dispatch_one(
+    deps: &Deps,
+    item: RequestBatchItem,
+    state: &mut BatchState,
+) -> ResponseBatchItem {
     let correlation_id = Uuid::new_v4().to_string();
     let op = item.operation;
-    let result = handle_payload(deps, item.payload, &correlation_id);
+    let payload = substitute_id_placeholder(item.payload, state);
+    let result = handle_payload(deps, payload, &correlation_id);
     match result {
-        Ok(payload) => ResponseBatchItem {
-            operation: Some(op),
-            result_status: ResultStatus::Success,
-            result_reason: None,
-            result_message: None,
-            payload: Some(payload),
-        },
+        Ok(payload) => {
+            // After every successful UID-producing op, refresh the ID
+            // Placeholder for subsequent items in this batch.
+            update_id_placeholder(state, &payload);
+            ResponseBatchItem {
+                operation: Some(op),
+                result_status: ResultStatus::Success,
+                result_reason: None,
+                result_message: None,
+                payload: Some(payload),
+            }
+        }
         Err(err) => ResponseBatchItem {
             operation: Some(op),
             result_status: ResultStatus::OperationFailed,
@@ -83,6 +140,76 @@ fn dispatch_one(deps: &Deps, item: RequestBatchItem) -> ResponseBatchItem {
             payload: None,
         },
     }
+}
+
+/// Walk the request payload and replace any field equal to
+/// [`ID_PLACEHOLDER_SENTINEL`] with the live ID Placeholder. Covers the
+/// `uid` field on every payload that consumes a single UID; multi-UID
+/// payloads (none of the OASIS Baseline tests use them so far) can be
+/// added as the corpus grows.
+fn substitute_id_placeholder(
+    payload: RequestPayload,
+    state: &BatchState,
+) -> RequestPayload {
+    let live = match &state.id_placeholder {
+        Some(s) => s.clone(),
+        None => return payload, // nothing to substitute against
+    };
+    fn fix(s: &mut String, live: &str) {
+        if s == ID_PLACEHOLDER_SENTINEL {
+            *s = live.to_string();
+        }
+    }
+    let mut p = payload;
+    match &mut p {
+        RequestPayload::Get(r)             => fix(&mut r.uid, &live),
+        RequestPayload::GetAttributes(r)   => fix(&mut r.uid, &live),
+        RequestPayload::GetAttributeList(r)=> fix(&mut r.uid, &live),
+        RequestPayload::Activate(r)        => fix(&mut r.uid, &live),
+        RequestPayload::Revoke(r)          => fix(&mut r.uid, &live),
+        RequestPayload::Destroy(r)         => fix(&mut r.uid, &live),
+        RequestPayload::Encrypt(r)         => fix(&mut r.uid, &live),
+        RequestPayload::Decrypt(r)         => fix(&mut r.uid, &live),
+        RequestPayload::Sign(r)            => fix(&mut r.uid, &live),
+        RequestPayload::SignatureVerify(r) => fix(&mut r.uid, &live),
+        RequestPayload::AddAttribute(r)    => fix(&mut r.uid, &live),
+        RequestPayload::ModifyAttribute(r) => fix(&mut r.uid, &live),
+        RequestPayload::DeleteAttribute(r) => fix(&mut r.uid, &live),
+        RequestPayload::SetAttribute(r)    => fix(&mut r.uid, &live),
+        RequestPayload::AdjustAttribute(r) => fix(&mut r.uid, &live),
+        RequestPayload::Export(r)          => fix(&mut r.uid, &live),
+        RequestPayload::Deactivate(r)      => fix(&mut r.uid, &live),
+        RequestPayload::Check(r)           => fix(&mut r.uid, &live),
+        RequestPayload::Archive(r)         => fix(&mut r.uid, &live),
+        RequestPayload::Recover(r)         => fix(&mut r.uid, &live),
+        RequestPayload::Obliterate(r)      => fix(&mut r.uid, &live),
+        RequestPayload::Mac(r)             => fix(&mut r.uid, &live),
+        RequestPayload::MacVerify(r)       => fix(&mut r.uid, &live),
+        // Ops that don't take a UID (Create, Locate, Query, …) skip.
+        _ => {}
+    }
+    p
+}
+
+/// After a successful op, refresh the per-batch ID Placeholder with
+/// the most-recently produced UID per KMIP 3.0 §6.4.
+fn update_id_placeholder(state: &mut BatchState, payload: &ResponsePayload) {
+    let uid: Option<&str> = match payload {
+        ResponsePayload::Create(r)      => Some(&r.uid),
+        ResponsePayload::CreateKeyPair(r) => Some(&r.private_key_uid),
+        ResponsePayload::Register(r)    => Some(&r.uid),
+        ResponsePayload::Import(r)      => Some(&r.uid),
+        ResponsePayload::Activate(r)    => Some(&r.uid),
+        ResponsePayload::Revoke(r)      => Some(&r.uid),
+        ResponsePayload::Destroy(r)     => Some(&r.uid),
+        ResponsePayload::Deactivate(r)  => Some(&r.uid),
+        ResponsePayload::Get(r)         => Some(&r.uid),
+        ResponsePayload::GetAttributes(r) => Some(&r.uid),
+        ResponsePayload::GetAttributeList(r) => Some(&r.uid),
+        ResponsePayload::Locate(r)      => r.uids.first().map(|s| s.as_str()),
+        _ => None,
+    };
+    if let Some(u) = uid { state.id_placeholder = Some(u.to_string()); }
 }
 
 fn handle_payload(
@@ -135,6 +262,14 @@ fn handle_payload(
         RequestPayload::Log(r) => ResponsePayload::Log(log(deps, r, correlation_id)?),
         RequestPayload::Login(r) => ResponsePayload::Login(login(deps, r, correlation_id)?),
         RequestPayload::Logout(r) => ResponsePayload::Logout(logout(deps, r, correlation_id)?),
+        RequestPayload::DecodeFailed { message, .. } => {
+            // R7 Phase 1 — surface per-item decode failures as
+            // `OperationFailed / InvalidMessage` per KMIP 3.0 §8.2.3.
+            return Err(KmipError::failed(
+                crate::error::ResultReason::InvalidMessage,
+                message,
+            ));
+        }
         RequestPayload::RngRetrieve(r) => ResponsePayload::RngRetrieve(rng_retrieve(deps, r, correlation_id)?),
         RequestPayload::RngSeed(r) => ResponsePayload::RngSeed(rng_seed(deps, r, correlation_id)?),
         RequestPayload::Pkcs11(r) => ResponsePayload::Pkcs11(pkcs11(deps, r, correlation_id)?),
@@ -272,4 +407,176 @@ mod tests {
         };
         assert_eq!(canonical_create_key_pair_op(&req), "CreateKeyPair:Sign");
     }
+
+    // ── R7 multi-batch contracts ───────────────────────────────────────────
+    //
+    // These pin the spec-compliant behaviour for multi-item RequestMessage
+    // dispatch per KMIP 3.0 §8.1.1 / §8.2.1 / §9.5 / §6.4. They MUST
+    // continue to pass as the wire codec and dispatcher evolve.
+
+    use crate::kmip30::{
+        BatchErrorContinuationOption, CreateRequest, DestroyRequest, GetRequest, KmipAlgorithm,
+        ObjectType, RequestHeader, RequestPayload as RP, Attribute, UsageMask,
+    };
+
+    /// §8.1.1 — a RequestMessage with three valid BatchItems produces
+    /// three ResponseBatchItems (one per request item, in order). This
+    /// regression-locks the existing multi-batch path.
+    #[test]
+    fn r7_phase1_three_valid_items_yield_three_responses() {
+        let d = deps();
+        let msg = crate::kmip30::RequestMessage {
+            header: RequestHeader::v3(),
+            batch_items: vec![
+                RequestBatchItem {
+                    operation: crate::kmip30::Operation::Query,
+                    payload: RP::Query(crate::kmip30::QueryRequest {
+                        functions: vec![crate::kmip30::QueryFunction::QueryOperations],
+                    }),
+                },
+                RequestBatchItem {
+                    operation: crate::kmip30::Operation::Query,
+                    payload: RP::Query(crate::kmip30::QueryRequest {
+                        functions: vec![crate::kmip30::QueryFunction::QueryObjects],
+                    }),
+                },
+                RequestBatchItem {
+                    operation: crate::kmip30::Operation::Query,
+                    payload: RP::Query(crate::kmip30::QueryRequest { functions: vec![] }),
+                },
+            ],
+        };
+        let resp = dispatch(&d, msg);
+        assert_eq!(resp.batch_items.len(), 3, "one response per request item");
+        for (i, bi) in resp.batch_items.iter().enumerate() {
+            assert_eq!(
+                bi.result_status,
+                ResultStatus::Success,
+                "item {i} expected Success",
+            );
+        }
+    }
+
+    /// §9.5 — `BatchErrorContinuationOption = Stop` (the default). After
+    /// the first OperationFailed the server SHALL NOT process subsequent
+    /// items and their responses SHALL NOT be returned. The failed item
+    /// IS returned.
+    #[test]
+    fn r7_phase2_stop_mode_halts_after_first_failure() {
+        let d = deps();
+        let msg = crate::kmip30::RequestMessage {
+            header: RequestHeader {
+                batch_error_continuation_option: Some(BatchErrorContinuationOption::Stop),
+                ..RequestHeader::v3()
+            },
+            batch_items: vec![
+                // Item 0: succeeds (Query).
+                RequestBatchItem {
+                    operation: crate::kmip30::Operation::Query,
+                    payload: RP::Query(crate::kmip30::QueryRequest { functions: vec![] }),
+                },
+                // Item 1: fails (Get on unknown UID).
+                RequestBatchItem {
+                    operation: crate::kmip30::Operation::Get,
+                    payload: RP::Get(GetRequest { uid: "urn:ghost".into() }),
+                },
+                // Item 2: should NOT be processed under Stop semantics.
+                RequestBatchItem {
+                    operation: crate::kmip30::Operation::Query,
+                    payload: RP::Query(crate::kmip30::QueryRequest { functions: vec![] }),
+                },
+            ],
+        };
+        let resp = dispatch(&d, msg);
+        assert_eq!(resp.batch_items.len(), 2, "Stop drops items after the failed one");
+        assert_eq!(resp.batch_items[0].result_status, ResultStatus::Success);
+        assert_eq!(resp.batch_items[1].result_status, ResultStatus::OperationFailed);
+    }
+
+    /// §9.5 — `BatchErrorContinuationOption = Continue`. Even after a
+    /// failure the server SHALL keep processing subsequent items and
+    /// MUST return a response for each of them.
+    #[test]
+    fn r7_phase2_continue_mode_processes_all_items() {
+        let d = deps();
+        let msg = crate::kmip30::RequestMessage {
+            header: RequestHeader {
+                batch_error_continuation_option: Some(BatchErrorContinuationOption::Continue),
+                ..RequestHeader::v3()
+            },
+            batch_items: vec![
+                RequestBatchItem {
+                    operation: crate::kmip30::Operation::Get,
+                    payload: RP::Get(GetRequest { uid: "urn:ghost-1".into() }),
+                },
+                RequestBatchItem {
+                    operation: crate::kmip30::Operation::Get,
+                    payload: RP::Get(GetRequest { uid: "urn:ghost-2".into() }),
+                },
+                RequestBatchItem {
+                    operation: crate::kmip30::Operation::Query,
+                    payload: RP::Query(crate::kmip30::QueryRequest { functions: vec![] }),
+                },
+            ],
+        };
+        let resp = dispatch(&d, msg);
+        assert_eq!(resp.batch_items.len(), 3, "Continue keeps processing");
+        assert_eq!(resp.batch_items[0].result_status, ResultStatus::OperationFailed);
+        assert_eq!(resp.batch_items[1].result_status, ResultStatus::OperationFailed);
+        assert_eq!(resp.batch_items[2].result_status, ResultStatus::Success);
+    }
+
+    /// §6.4 ID Placeholder — "a temporary variable… only valid and
+    /// preserved during the execution of a single request." A
+    /// subsequent BatchItem that uses `UniqueIdentifier =
+    /// IDPlaceholder` (the well-known enum value `0x01`) MUST resolve
+    /// to the UID produced by the most recent UID-producing op in the
+    /// same batch.
+    #[test]
+    fn r7_phase3_id_placeholder_resolves_within_a_batch() {
+        let d = deps();
+        // Build a Create + Destroy pair. The Destroy references the
+        // Create's UID via the `IDPlaceholder` sentinel rather than a
+        // literal UID — the dispatcher MUST resolve that reference
+        // against the per-batch ID Placeholder state.
+        let msg = crate::kmip30::RequestMessage {
+            header: RequestHeader::v3(),
+            batch_items: vec![
+                RequestBatchItem {
+                    operation: crate::kmip30::Operation::Create,
+                    payload: RP::Create(CreateRequest {
+                        object_type: ObjectType::SymmetricKey,
+                        template_attribute: vec![
+                            Attribute::CryptographicAlgorithm(KmipAlgorithm::Aes),
+                            Attribute::CryptographicLength(128),
+                            Attribute::CryptographicUsageMask(UsageMask::ENCRYPT),
+                        ],
+                    }),
+                },
+                RequestBatchItem {
+                    operation: crate::kmip30::Operation::Destroy,
+                    payload: RP::Destroy(DestroyRequest {
+                        // ID Placeholder sentinel — Phase 3 resolves
+                        // this to the UID Create just produced.
+                        uid: ID_PLACEHOLDER_SENTINEL.to_string(),
+                    }),
+                },
+            ],
+        };
+        let resp = dispatch(&d, msg);
+        assert_eq!(resp.batch_items.len(), 2);
+        assert_eq!(resp.batch_items[0].result_status, ResultStatus::Success);
+        assert_eq!(
+            resp.batch_items[1].result_status,
+            ResultStatus::Success,
+            "Destroy with IDPlaceholder must resolve to Create's UID",
+        );
+    }
+
+    /// Sentinel string the wire codec emits when it sees
+    /// `<UniqueIdentifier type="Enumeration" value="IDPlaceholder"/>`
+    /// (enum value `0x00000001`). The dispatcher recognises it and
+    /// substitutes the live ID Placeholder before handing the request
+    /// to the handler.
+    const ID_PLACEHOLDER_SENTINEL: &str = "$IDPlaceholder";
 }
