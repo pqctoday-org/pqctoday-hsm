@@ -59,7 +59,7 @@ pub fn sign(deps: &Deps, req: SignRequest, correlation_id: &str) -> Result<SignR
             deps,
             correlation_id,
             "Sign",
-            KmipError::object_archived(&req.uid),
+            super::helpers::non_active_state_error(&req.uid, obj.state),
         ));
     }
 
@@ -374,7 +374,7 @@ rules:
     }
 
     #[test]
-    fn non_active_key_returns_object_archived() {
+    fn non_active_key_returns_wrong_lifecycle_state() {
         let (_ring, d) = deps_with(PERMISSIVE);
         // Insert a PreActive key.
         let rec = ObjectRecord {
@@ -404,7 +404,8 @@ rules:
 };
         d.store.put(rec).unwrap();
         let err = sign(&d, SignRequest { uid: "urn:pre".into(), data: vec![] }, "corr").unwrap_err();
-        assert_eq!(err.result_reason(), ResultReason::ObjectArchived);
+        // KMIP 3.0 §11 — PreActive is a lifecycle-state failure.
+        assert_eq!(err.result_reason(), ResultReason::WrongKeyLifecycleState);
     }
 
     #[test]

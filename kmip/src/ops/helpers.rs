@@ -148,6 +148,28 @@ pub fn canonical_name(a: KmipAlgorithm) -> String {
 
 /// State name string for the engine's `state` field — mirrors KMIP 3.0
 /// `State` enum names verbatim.
+/// Map a non-`Active` state to the spec-correct `ResultReason` for a
+/// cryptographic op that requires `Active` (KMIP 3.0 §11 Result Reason):
+///
+/// - `Destroyed` / `DestroyedCompromised` → `ObjectArchived` (0x0d)
+///   per Spec §6.1.19 — the object's material is gone.
+/// - `Deactivated` / `Compromised` → `WrongKeyLifecycleState` (0x43)
+///   per Spec §6.1.49 (Revoke) — the object exists but the FSM
+///   forbids the requested op.
+/// - `PreActive` → `WrongKeyLifecycleState` (0x43) — same family
+///   (key isn't ready yet).
+///
+/// `Active` MUST NOT be passed; the helper returns
+/// `WrongKeyLifecycleState` so a bug doesn't masquerade as a
+/// successful response.
+pub fn non_active_state_error(uid: &str, state: crate::kmip30::State) -> KmipError {
+    use crate::kmip30::State::*;
+    match state {
+        Destroyed | DestroyedCompromised => KmipError::object_archived(uid),
+        _ => KmipError::wrong_key_lifecycle_state(uid, state_name(state)),
+    }
+}
+
 pub fn state_name(s: crate::kmip30::State) -> &'static str {
     use crate::kmip30::State::*;
     match s {

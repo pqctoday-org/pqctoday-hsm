@@ -52,7 +52,7 @@ pub fn encrypt(deps: &Deps, req: EncryptRequest, correlation_id: &str) -> Result
             deps,
             correlation_id,
             "Encrypt",
-            KmipError::object_archived(&req.uid),
+            super::helpers::non_active_state_error(&req.uid, obj.state),
         ));
     }
 

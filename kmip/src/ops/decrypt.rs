@@ -57,7 +57,7 @@ pub fn decrypt(deps: &Deps, req: DecryptRequest, correlation_id: &str) -> Result
                 deps,
                 correlation_id,
                 "Decrypt",
-                KmipError::object_archived(&req.uid),
+                super::helpers::non_active_state_error(&req.uid, obj.state),
             ));
         }
     }
@@ -268,6 +268,9 @@ mod tests {
         let (_ring, d) = deps_and_ring();
         put(&d, "a", KmipAlgorithm::Aes, ObjectType::SymmetricKey, State::PreActive, UsageMask::DECRYPT);
         let err = decrypt(&d, DecryptRequest { uid: "a".into(), data: vec![0; 32], iv: None }, "c").unwrap_err();
-        assert_eq!(err.result_reason(), ResultReason::ObjectArchived);
+        // KMIP 3.0 §11: PreActive is a lifecycle-state failure, not
+        // "object archived". ObjectArchived (0x0d) is reserved for
+        // Destroyed* per §6.1.19.
+        assert_eq!(err.result_reason(), ResultReason::WrongKeyLifecycleState);
     }
 }

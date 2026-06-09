@@ -113,11 +113,9 @@ pub fn hash(deps: &Deps, req: HashRequest, correlation_id: &str) -> Result<HashR
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
-fn require_active(obj: &ObjectRecord, op: &'static str) -> Result<()> {
+fn require_active(obj: &ObjectRecord, _op: &'static str) -> Result<()> {
     if obj.state != State::Active {
-        return Err(KmipError::permission_denied(format!(
-            "{op} requires Active state; {} is in {:?}", obj.uid, obj.state
-        )));
+        return Err(super::helpers::non_active_state_error(&obj.uid, obj.state));
     }
     Ok(())
 }

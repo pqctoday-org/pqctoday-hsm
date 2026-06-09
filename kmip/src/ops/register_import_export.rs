@@ -22,6 +22,8 @@ use crate::kmip30::{
     Attribute, ExportRequest, ExportResponse, ImportRequest, ImportResponse, KeyBlock,
     KeyFormatType, ObjectType, RegisterRequest, RegisterResponse, State, UsageMask,
 };
+#[allow(unused_imports)]
+use ObjectType as _ObjectType;
 use crate::policy::{Decision, PolicyRequest};
 use crate::store::ObjectRecord;
 
@@ -47,7 +49,9 @@ pub fn register(
     // attributes are REQUIRED. CryptographicAlgorithm + Length may be
     // omitted only if encapsulated in the KeyBlock. Our handler accepts
     // either form.
-    let (algorithm, length, usage_mask, name, supplied_uid) = extract_attributes(&req.attributes);
+    let x = extract_attrs(&req.attributes);
+    let (algorithm, length, usage_mask, name, supplied_uid) =
+        (x.algorithm, x.length, x.usage, x.name.clone(), x.uid.clone());
 
     let key_block = req.managed_object.as_ref();
     let resolved_algorithm = algorithm.or(key_block.map(|kb| kb.cryptographic_algorithm));
@@ -77,6 +81,25 @@ pub fn register(
         ))
     })?;
 
+    // KMIP 3.0 §6.1.48 + §11 Result Reason — `Name` MUST be unique
+    // across the server's managed objects; a duplicate yields
+    // `NonUniqueNameAttribute` (0x35), NOT a generic `InvalidField`.
+    // BL-M-8 exercises this with a deliberate duplicate Register.
+    if let Some(ref n) = name {
+        let dup = deps
+            .store
+            .find(&|r| r.name.as_deref() == Some(n.as_str()))
+            .unwrap_or_default();
+        if !dup.is_empty() {
+            return Err(fail_err(
+                deps,
+                correlation_id,
+                "Register",
+                KmipError::non_unique_name_attribute(n),
+            ));
+        }
+    }
+
     // Per §6.1.48: honor a client-supplied UniqueIdentifier (must be
     // unique) — else allocate one.
     let uid = if let Some(client_uid) = supplied_uid {
@@ -96,20 +119,29 @@ pub fn register(
     let key_material = key_block.map(|kb| kb.key_value.clone());
     let key_format_type = key_block.map(|kb| kb.key_format_type as u32);
 
+    // KMIP 3.0 Spec §3.x lifecycle — Register honours any date
+    // attributes the client supplied (ActivationDate / DeactivationDate
+    // / CompromiseDate). A past Activation Date means the object is
+    // born `Active`, not `PreActive`, so a subsequent Encrypt/Sign
+    // succeeds without an explicit `Activate` round-trip. OASIS uses
+    // `$NOW-3600` for this in the cryptographic-op conformance tests.
+    let initial_state = compute_initial_state(now, &x);
+
     deps.store.put(ObjectRecord {
         uid: uid.clone(),
         object_type: req.object_type,
         algorithm: kmip_algorithm,
         cryptographic_length: resolved_length.unwrap_or(0),
         usage_mask: usage_mask.unwrap_or_else(UsageMask::empty),
-        // §6.1.48 doesn't speak to lifecycle state on Register; the
-        // sensible default per §3.x is PreActive — client follows with
-        // Activate when ready.
-        state: State::PreActive,
+        state: initial_state,
         pkcs11_cka_id: Uuid::new_v4().as_bytes().to_vec(),
         pkcs11_slot: deps.config.pkcs11_slot,
         initial_date: now,
-        activation_date: None,
+        activation_date: x.activation_date,
+        deactivation_date: x.deactivation_date,
+        compromise_date: x.compromise_date,
+        compromise_occurrence_date: x.compromise_date,
+        last_change_date: Some(now),
         supersedes: None,
         name,
         links: HashMap::new(),
@@ -274,25 +306,69 @@ pub fn export(
 /// Pull algorithm / length / usage mask / name / UID out of the
 /// request's Attributes block. Returned tuple ordering mirrors the
 /// spec's Table 395 (Register Attribute Requirements).
-fn extract_attributes(
-    attrs: &[Attribute],
-) -> (Option<crate::kmip30::KmipAlgorithm>, Option<u32>, Option<UsageMask>, Option<String>, Option<String>) {
-    let mut algorithm = None;
-    let mut length = None;
-    let mut usage = None;
-    let mut name = None;
-    let mut uid = None;
+/// Bundle of attributes pulled from a Register/Create-style template.
+///
+/// `activation_date` / `deactivation_date` / `compromise_date` drive the
+/// initial lifecycle state per KMIP 3.0 Spec §3.x; see
+/// [`compute_initial_state`].
+pub(crate) struct ExtractedAttrs {
+    pub algorithm: Option<crate::kmip30::KmipAlgorithm>,
+    pub length: Option<u32>,
+    pub usage: Option<UsageMask>,
+    pub name: Option<String>,
+    pub uid: Option<String>,
+    pub activation_date: Option<OffsetDateTime>,
+    pub deactivation_date: Option<OffsetDateTime>,
+    pub compromise_date: Option<OffsetDateTime>,
+}
+
+pub(crate) fn extract_attrs(attrs: &[Attribute]) -> ExtractedAttrs {
+    let mut out = ExtractedAttrs {
+        algorithm: None, length: None, usage: None, name: None, uid: None,
+        activation_date: None, deactivation_date: None, compromise_date: None,
+    };
     for a in attrs {
         match a {
-            Attribute::CryptographicAlgorithm(alg) => algorithm = Some(*alg),
-            Attribute::CryptographicLength(n)      => length = Some(*n),
-            Attribute::CryptographicUsageMask(m)   => usage = Some(*m),
-            Attribute::Name(n)                     => name = Some(n.clone()),
-            Attribute::UniqueIdentifier(u)         => uid = Some(u.clone()),
+            Attribute::CryptographicAlgorithm(alg) => out.algorithm = Some(*alg),
+            Attribute::CryptographicLength(n)      => out.length = Some(*n),
+            Attribute::CryptographicUsageMask(m)   => out.usage = Some(*m),
+            Attribute::Name(n)                     => out.name = Some(n.clone()),
+            Attribute::UniqueIdentifier(u)         => out.uid = Some(u.clone()),
+            Attribute::ActivationDate(t)   => out.activation_date   = OffsetDateTime::from_unix_timestamp(*t).ok(),
+            Attribute::DeactivationDate(t) => out.deactivation_date = OffsetDateTime::from_unix_timestamp(*t).ok(),
+            Attribute::CompromiseDate(t)   => out.compromise_date   = OffsetDateTime::from_unix_timestamp(*t).ok(),
             _ => {}
         }
     }
-    (algorithm, length, usage, name, uid)
+    out
+}
+
+/// KMIP 3.0 Spec §3.x — derive a managed-object's lifecycle state from
+/// the date attributes the client supplied at Register/Create time.
+///
+/// Precedence (highest first):
+///   1. Compromise Date ≤ now  → `Compromised`
+///   2. Deactivation Date ≤ now → `Deactivated`
+///   3. Activation Date ≤ now   → `Active`
+///   4. otherwise              → `PreActive`
+///
+/// Future dates are stored verbatim but DO NOT advance the state until
+/// the time arrives (a polling layer outside the scope of v0.1 would
+/// re-evaluate this transition; tests in the OASIS corpus use past
+/// `$NOW-3600` values exclusively, so the synchronous gate suffices).
+pub(crate) fn compute_initial_state(now: OffsetDateTime, x: &ExtractedAttrs) -> State {
+    if x.compromise_date.map_or(false, |t| t <= now) { State::Compromised }
+    else if x.deactivation_date.map_or(false, |t| t <= now) { State::Deactivated }
+    else if x.activation_date.map_or(false, |t| t <= now) { State::Active }
+    else { State::PreActive }
+}
+
+// Backwards-compat shim retained while callers migrate.
+fn extract_attributes(
+    attrs: &[Attribute],
+) -> (Option<crate::kmip30::KmipAlgorithm>, Option<u32>, Option<UsageMask>, Option<String>, Option<String>) {
+    let x = extract_attrs(attrs);
+    (x.algorithm, x.length, x.usage, x.name, x.uid)
 }
 
 #[cfg(test)]

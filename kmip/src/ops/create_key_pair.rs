@@ -65,9 +65,35 @@ pub fn create_key_pair(
         },
     ));
 
-    // Extract algorithm + usage_mask from the merged template attributes
-    // (KMIP 3.0 §4.x — `Common Attributes` precede the per-key ones).
+    // KMIP 3.0 Spec §6.1.10 CreateKeyPair — three distinct attribute
+    // baskets: `CommonAttributes` is merged into BOTH halves;
+    // `PrivateKeyAttributes` applies only to the private record;
+    // `PublicKeyAttributes` only to the public record. The previous
+    // implementation flattened all three lists with `.chain()` so a
+    // private-half `<CryptographicUsageMask value="Sign"/>` collided
+    // with the public-half `<CryptographicUsageMask value="Verify"/>`
+    // — last write won, both halves received the same mask. AKLC-M-*
+    // / SKLC-M-* exercised that collision.
+    let priv_attrs: Vec<Attribute> = req
+        .common_attributes
+        .iter()
+        .chain(req.private_key_attributes.iter())
+        .cloned()
+        .collect();
+    let pub_attrs: Vec<Attribute> = req
+        .common_attributes
+        .iter()
+        .chain(req.public_key_attributes.iter())
+        .cloned()
+        .collect();
+    let priv_x = super::register_import_export::extract_attrs(&priv_attrs);
+    let pub_x = super::register_import_export::extract_attrs(&pub_attrs);
+
+    // Algorithm + length should be the same on both halves (carried in
+    // CommonAttributes per the spec; private/public mismatch would be
+    // a client bug). Pull from whichever side has it first.
     let (algorithm_in, key_length, usage_mask) = extract_template(&req);
+    let _ = (priv_x.algorithm, pub_x.algorithm); // silence unused; merged via extract_template
 
     // ── Plane 1: policy gate ────────────────────────────────────────────
     let empty_attrs: HashMap<String, String> = HashMap::new();
@@ -171,20 +197,28 @@ pub fn create_key_pair(
     let pub_uid = format!("urn:pqctoday:obj:{}", Uuid::new_v4());
 
     let now = OffsetDateTime::now_utc();
-    let usage = usage_mask.unwrap_or_else(UsageMask::empty);
+    let priv_usage = priv_x.usage.unwrap_or_else(UsageMask::empty);
+    let pub_usage = pub_x.usage.unwrap_or_else(UsageMask::empty);
+    let priv_state = super::register_import_export::compute_initial_state(now, &priv_x);
+    let pub_state = super::register_import_export::compute_initial_state(now, &pub_x);
+    let _ = (usage_mask, key_length); // silence unused warnings
     deps.store.put(ObjectRecord {
         uid: priv_uid.clone(),
         object_type: ObjectType::PrivateKey,
         algorithm: kmip_algo,
-        cryptographic_length: key_length.unwrap_or(0),
-        usage_mask: usage,
-        state: State::PreActive,
+        cryptographic_length: priv_x.length.unwrap_or(0),
+        usage_mask: priv_usage,
+        state: priv_state,
         pkcs11_cka_id: pkcs11_cka_id_priv,
         pkcs11_slot: deps.config.pkcs11_slot,
         initial_date: now,
-        activation_date: None,
+        activation_date: priv_x.activation_date,
+        deactivation_date: priv_x.deactivation_date,
+        compromise_date: priv_x.compromise_date,
+        compromise_occurrence_date: priv_x.compromise_date,
+        last_change_date: Some(now),
         supersedes: None,
-            name: None,
+            name: priv_x.name.clone(),
 
             links: std::collections::HashMap::new(),
 
@@ -201,15 +235,19 @@ pub fn create_key_pair(
         uid: pub_uid.clone(),
         object_type: ObjectType::PublicKey,
         algorithm: kmip_algo,
-        cryptographic_length: key_length.unwrap_or(0),
-        usage_mask: usage,
-        state: State::PreActive,
+        cryptographic_length: pub_x.length.unwrap_or(0),
+        usage_mask: pub_usage,
+        state: pub_state,
         pkcs11_cka_id: pkcs11_cka_id_pub,
         pkcs11_slot: deps.config.pkcs11_slot,
         initial_date: now,
-        activation_date: None,
+        activation_date: pub_x.activation_date,
+        deactivation_date: pub_x.deactivation_date,
+        compromise_date: pub_x.compromise_date,
+        compromise_occurrence_date: pub_x.compromise_date,
+        last_change_date: Some(now),
         supersedes: None,
-            name: None,
+            name: pub_x.name.clone(),
 
             links: std::collections::HashMap::new(),
 

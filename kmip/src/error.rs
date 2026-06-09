@@ -26,6 +26,15 @@ pub enum ResultReason {
     ObjectAlreadyExists   = 0x0000_0018,
     InvalidAttribute      = 0x0000_002c,
     InvalidAttributeValue = 0x0000_002d,
+    /// `Non Unique Name Attribute` — KMIP 3.0 §11. Surfaced when a
+    /// Register/Create supplies a `Name` already present on another
+    /// managed object.
+    NonUniqueNameAttribute = 0x0000_0035,
+    /// `Wrong Key Lifecycle State` — KMIP 3.0 §11. The crypto op
+    /// (Encrypt/Decrypt/Sign/etc.) requires `Active` but the object
+    /// is in `Deactivated` / `Compromised`. Distinct from
+    /// `ObjectArchived` which is reserved for `Destroyed` states.
+    WrongKeyLifecycleState = 0x0000_0043,
     GeneralFailure        = 0x0000_0100,
 }
 
@@ -86,6 +95,18 @@ impl KmipError {
         Self::failed(
             ResultReason::ObjectArchived,
             format!("UID {uid:?} not in usable lifecycle state"),
+        )
+    }
+    pub fn wrong_key_lifecycle_state(uid: &str, state: &str) -> Self {
+        Self::failed(
+            ResultReason::WrongKeyLifecycleState,
+            format!("UID {uid:?} is in {state} — op requires Active"),
+        )
+    }
+    pub fn non_unique_name_attribute(name: &str) -> Self {
+        Self::failed(
+            ResultReason::NonUniqueNameAttribute,
+            format!("Name {name:?} already assigned to another managed object"),
         )
     }
     pub fn cryptographic_failure(msg: impl Into<String>) -> Self {

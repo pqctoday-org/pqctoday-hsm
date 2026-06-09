@@ -925,6 +925,25 @@ fn decode_attribute_v3(frame: &TtlvFrame) -> Result<Option<Attribute>, WireError
                 });
             }
         }
+        // ── KMIP Profiles v3.0 §5.1.2 Baseline Server date attributes ──
+        // The client SHALL be able to set these at Register / Create time;
+        // they drive the lifecycle FSM (§3.x). Dropping them silently
+        // (the previous wildcard behaviour) caused PreActive-stuck keys
+        // even when the client supplied a past ActivationDate.
+        tags::ActivationDate => Attribute::ActivationDate(expect_datetime(frame, "Activation Date")?),
+        tags::DeactivationDate => Attribute::DeactivationDate(expect_datetime(frame, "Deactivation Date")?),
+        tags::DestroyDate => Attribute::DestroyDate(expect_datetime(frame, "Destroy Date")?),
+        tags::CompromiseDate => Attribute::CompromiseDate(expect_datetime(frame, "Compromise Date")?),
+        tags::CompromiseOccurrenceDate => Attribute::CompromiseOccurrenceDate(expect_datetime(frame, "Compromise Occurrence Date")?),
+        tags::ProcessStartDate => Attribute::ProcessStartDate(expect_datetime(frame, "Process Start Date")?),
+        tags::ProtectStopDate => Attribute::ProtectStopDate(expect_datetime(frame, "Protect Stop Date")?),
+        tags::OriginalCreationDate => Attribute::OriginalCreationDate(expect_datetime(frame, "Original Creation Date")?),
+        // ── §5.1.2 Baseline security-posture booleans ──
+        tags::Sensitive => Attribute::Sensitive(expect_boolean(frame, "Sensitive")?),
+        tags::Extractable => Attribute::Extractable(expect_boolean(frame, "Extractable")?),
+        tags::Fresh => Attribute::Fresh(expect_boolean(frame, "Fresh")?),
+        tags::KeyValuePresent => Attribute::KeyValuePresent(expect_boolean(frame, "Key Value Present")?),
+        tags::QuantumSafe => Attribute::QuantumSafe(expect_boolean(frame, "Quantum Safe")?),
         _ => return Ok(None),
     }))
 }
@@ -2019,6 +2038,20 @@ fn expect_enum(frame: &TtlvFrame, name: &'static str) -> Result<u32, WireError> 
     match &frame.value {
         Value::Enumeration(v) => Ok(*v),
         _ => Err(WireError::BadType { tag: frame.tag.0, name, msg: "expected Enumeration".into() }),
+    }
+}
+
+fn expect_datetime(frame: &TtlvFrame, name: &'static str) -> Result<i64, WireError> {
+    match &frame.value {
+        Value::DateTime(v) => Ok(*v),
+        _ => Err(WireError::BadType { tag: frame.tag.0, name, msg: "expected DateTime".into() }),
+    }
+}
+
+fn expect_boolean(frame: &TtlvFrame, name: &'static str) -> Result<bool, WireError> {
+    match &frame.value {
+        Value::Boolean(v) => Ok(*v),
+        _ => Err(WireError::BadType { tag: frame.tag.0, name, msg: "expected Boolean".into() }),
     }
 }
 

@@ -44,28 +44,44 @@ pub fn create_credential(
         format!("type={:#x} attrs={}", req.credential_type, req.attributes.len()),
     );
 
-    // KMIP 3.0 §11 Credential Type enum codepoints:
-    //   0x01 Username and Password
-    //   0x02 Device
-    //   0x03 Attestation
-    //   0x04 One Time Password
-    //   0x05 Hashed Password
-    //   0x06 Ticket
-    // v0.1 honours UsernameAndPassword only.
-    if req.credential_type != 0x01 {
-        return Err(fail_err(deps, correlation_id, "CreateCredential",
-            KmipError::failed(
-                ResultReason::OperationNotSupported,
-                format!("Credential Type {:#x} not supported (v0.1 = Username+Password)", req.credential_type),
-            )));
-    }
-    let _cred = req.password_credential.ok_or_else(|| {
-        fail_err(deps, correlation_id, "CreateCredential",
+    // KMIP 3.0 §11 Credential Type enum + §6.1.9 CreateCredential
+    // table. The Baseline Server SHALL accept every type it advertises
+    // in Query. We currently accept:
+    //   0x01 Username and Password — PasswordCredential{Username,Password}
+    //   0x02 Device                — DeviceCredential (passthrough)
+    //   0x05 Hashed Password       — PasswordCredential{Password=hash}
+    //   0x07 Password              — PasswordCredential{Password}
+    //   0x08 Certificate           — CertificateCredential (passthrough)
+    // Each maps to a SecretData record in the store; the credential
+    // material itself is opaque to the engine, which only needs to
+    // hold a UID for subsequent Login/Logout.
+    let needs_password = matches!(req.credential_type, 0x01 | 0x05 | 0x07);
+    if needs_password && req.password_credential.is_none() {
+        return Err(fail_err(
+            deps,
+            correlation_id,
+            "CreateCredential",
             KmipError::failed(
                 ResultReason::MissingData,
-                "Username+Password credential requires PasswordCredential structure".to_string(),
-            ))
-    })?;
+                format!(
+                    "CredentialType {:#x} requires PasswordCredential structure",
+                    req.credential_type
+                ),
+            ),
+        ));
+    }
+    let supported = matches!(req.credential_type, 0x01 | 0x02 | 0x05 | 0x07 | 0x08);
+    if !supported {
+        return Err(fail_err(
+            deps,
+            correlation_id,
+            "CreateCredential",
+            KmipError::failed(
+                ResultReason::InvalidField,
+                format!("Credential Type {:#x} unknown", req.credential_type),
+            ),
+        ));
+    }
 
     let uid = persist_simple_record(deps, ObjectType::SecretData, req.attributes)?;
     emit_success(deps, correlation_id, "CreateCredential");
@@ -217,14 +233,28 @@ mod tests {
     }
 
     #[test]
-    fn create_credential_unsupported_type_fails() {
+    fn create_credential_device_type_succeeds() {
+        // KMIP 3.0 §6.1.9 — Baseline accepts every CredentialType it
+        // advertises in Query. Device (0x02) is one such type and now
+        // succeeds (was OperationNotSupported under v0.1).
         let d = deps_with();
-        let err = create_credential(&d, CreateCredentialRequest {
+        let resp = create_credential(&d, CreateCredentialRequest {
             credential_type: 0x02, // Device
             attributes: vec![],
             password_credential: None,
+        }, "c").unwrap();
+        assert!(!resp.uid.is_empty());
+    }
+
+    #[test]
+    fn create_credential_unknown_type_fails_with_invalid_field() {
+        let d = deps_with();
+        let err = create_credential(&d, CreateCredentialRequest {
+            credential_type: 0xFF, // unassigned
+            attributes: vec![],
+            password_credential: None,
         }, "c").unwrap_err();
-        assert_eq!(err.result_reason(), ResultReason::OperationNotSupported);
+        assert_eq!(err.result_reason(), ResultReason::InvalidField);
     }
 
     #[test]

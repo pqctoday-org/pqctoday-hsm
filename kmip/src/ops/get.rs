@@ -68,40 +68,54 @@ pub fn get(deps: &Deps, req: GetRequest, correlation_id: &str) -> Result<GetResp
     // CKA_VALUE on symmetric keys / CKA_PUBLIC_KEY_INFO on public keys).
     emit_pkcs11(deps, correlation_id, "C_GetAttributeValue", None, 0, "CKR_OK");
 
-    // Phase 7b: real material when a session is wired. Private keys
-    // remain opaque per PKCS#11 v3.2 §4.7 — `native::get_attribute`
-    // honours the CKA_SENSITIVE gate, returning None for sensitive
-    // private/secret keys (so we always emit OpaqueObject for those).
-    let (key_format, key_value) = match obj.object_type {
-        ObjectType::PrivateKey => (KeyFormatType::OpaqueObject, Vec::new()),
-        _ => match deps.engine_session {
-            Some(session) => {
-                // CKA_VALUE on public + symmetric keys is allowed by the
-                // sensitivity gate. None means "no engine state for this
-                // CKA_ID" — fall back to placeholder.
-                let bytes = softhsmrustv3::native::find_by_cka_id(session, &obj.pkcs11_cka_id)
-                    .ok()
-                    .flatten()
-                    .and_then(|h| {
-                        softhsmrustv3::native::get_attribute(
-                            session,
-                            h,
-                            softhsmrustv3::constants::CKA_VALUE,
-                        )
-                    });
-                match bytes {
-                    Some(v) => (KeyFormatType::Raw, v),
-                    None => (
-                        KeyFormatType::Raw,
-                        vec![0u8; (obj.cryptographic_length as usize).max(1)],
-                    ),
+    // KMIP 3.0 §6.1.21 Get returns the managed object exactly as the
+    // server holds it. Three-tier material lookup:
+    //   1. Client-supplied bytes captured at Register/Import time
+    //      (`obj.key_material`) — Profiles §4.1.1 item 7 carve-out for
+    //      "server-generated" material DOES NOT apply here.
+    //   2. Engine session lookup via CKA_VALUE — Plane-3 source for
+    //      keys the engine generated. Honours PKCS#11 v3.2 §4.7
+    //      CKA_SENSITIVE gate (private/secret keys return None).
+    //   3. Last resort: empty buffer. We DO NOT fabricate zeros — that
+    //      would silently corrupt KAT comparisons (BL-M-1 etc.).
+    //
+    // Private keys whose material is sensitive and not client-supplied
+    // surface as `KeyFormatType::OpaqueObject` with an empty value.
+    let stored_format = obj
+        .key_format_type
+        .and_then(|n| match n {
+            0x01 => Some(KeyFormatType::Raw),
+            0x02 => Some(KeyFormatType::OpaqueObject),
+            0x07 => Some(KeyFormatType::OpaqueObject), // X_509
+            0x08 => Some(KeyFormatType::Raw),          // PKCS_1
+            0x09 => Some(KeyFormatType::Raw),          // PKCS_8
+            _ => None,
+        });
+    let (key_format, key_value) = if let Some(bytes) = &obj.key_material {
+        (stored_format.unwrap_or(KeyFormatType::Raw), bytes.clone())
+    } else {
+        match obj.object_type {
+            ObjectType::PrivateKey => (KeyFormatType::OpaqueObject, Vec::new()),
+            _ => match deps.engine_session {
+                Some(session) => {
+                    let bytes = softhsmrustv3::native::find_by_cka_id(session, &obj.pkcs11_cka_id)
+                        .ok()
+                        .flatten()
+                        .and_then(|h| {
+                            softhsmrustv3::native::get_attribute(
+                                session,
+                                h,
+                                softhsmrustv3::constants::CKA_VALUE,
+                            )
+                        });
+                    match bytes {
+                        Some(v) => (KeyFormatType::Raw, v),
+                        None => (KeyFormatType::Raw, Vec::new()),
+                    }
                 }
-            }
-            None => (
-                KeyFormatType::Raw,
-                vec![0u8; (obj.cryptographic_length as usize).max(1)],
-            ),
-        },
+                None => (KeyFormatType::Raw, Vec::new()),
+            },
+        }
     };
 
     emit_success(deps, correlation_id, "Get");

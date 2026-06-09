@@ -62,7 +62,7 @@ pub fn signature_verify(
                 deps,
                 correlation_id,
                 "SignatureVerify",
-                KmipError::object_archived(&req.uid),
+                super::helpers::non_active_state_error(&req.uid, obj.state),
             ));
         }
     }
