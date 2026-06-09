@@ -429,6 +429,10 @@ mod tests {
             name: None,
             links: HashMap::new(),
             custom_attributes: HashMap::new(),
+
+            key_material: None,
+
+            key_format_type: None,
         }).unwrap();
     }
 

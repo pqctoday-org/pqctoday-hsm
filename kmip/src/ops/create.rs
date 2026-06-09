@@ -179,6 +179,10 @@ pub fn create(deps: &Deps, req: CreateRequest, correlation_id: &str) -> Result<C
         name,
         links: std::collections::HashMap::new(),
         custom_attributes: std::collections::HashMap::new(),
+
+        key_material: None,
+
+        key_format_type: None,
     })?;
 
     emit_success(deps, correlation_id, "Create");

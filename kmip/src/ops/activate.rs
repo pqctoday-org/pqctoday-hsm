@@ -130,6 +130,12 @@ mod tests {
             links: std::collections::HashMap::new(),
 
             custom_attributes: std::collections::HashMap::new(),
+
+
+            key_material: None,
+
+
+            key_format_type: None,
         }).unwrap();
     }
 
@@ -168,6 +174,12 @@ mod tests {
             links: std::collections::HashMap::new(),
 
             custom_attributes: std::collections::HashMap::new(),
+
+
+            key_material: None,
+
+
+            key_format_type: None,
         }).unwrap();
         let err = activate(&d, ActivateRequest { uid: "urn:a".into() }, "c").unwrap_err();
         assert_eq!(err.result_reason(), crate::error::ResultReason::PermissionDenied);

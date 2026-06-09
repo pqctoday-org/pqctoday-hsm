@@ -189,6 +189,12 @@ pub fn create_key_pair(
             links: std::collections::HashMap::new(),
 
             custom_attributes: std::collections::HashMap::new(),
+
+
+            key_material: None,
+
+
+            key_format_type: None,
     })?;
     deps.store.put(ObjectRecord {
         uid: pub_uid.clone(),
@@ -207,6 +213,12 @@ pub fn create_key_pair(
             links: std::collections::HashMap::new(),
 
             custom_attributes: std::collections::HashMap::new(),
+
+
+            key_material: None,
+
+
+            key_format_type: None,
     })?;
 
     deps.sink.emit(AuditEvent::at(

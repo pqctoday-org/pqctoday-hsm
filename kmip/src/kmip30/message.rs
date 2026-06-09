@@ -170,6 +170,9 @@ pub enum RequestPayload {
     Sign(super::ops::SignRequest),
     SignatureVerify(super::ops::SignatureVerifyRequest),
     Interop(super::ops::InteropRequest),
+    Register(super::ops::RegisterRequest),
+    Import(super::ops::ImportRequest),
+    Export(super::ops::ExportRequest),
 }
 
 /// Typed response payload — one variant per supported op.
@@ -195,6 +198,9 @@ pub enum ResponsePayload {
     Sign(super::ops::SignResponse),
     SignatureVerify(super::ops::SignatureVerifyResponse),
     Interop(super::ops::InteropResponse),
+    Register(super::ops::RegisterResponse),
+    Import(super::ops::ImportResponse),
+    Export(super::ops::ExportResponse),
 }
 
 impl RequestPayload {
@@ -221,6 +227,9 @@ impl RequestPayload {
             Self::Sign(_)             => Operation::Sign,
             Self::SignatureVerify(_)  => Operation::SignatureVerify,
             Self::Interop(_)          => Operation::Interop,
+            Self::Register(_)         => Operation::Register,
+            Self::Import(_)           => Operation::Import,
+            Self::Export(_)           => Operation::Export,
         }
     }
 }

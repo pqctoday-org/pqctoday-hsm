@@ -83,6 +83,8 @@ IMPLEMENTED_OPS: set[str] = {
     # PR #82 (Group B wave 2): attribute mutation ops.
     "AddAttribute", "ModifyAttribute", "DeleteAttribute",
     "SetAttribute", "AdjustAttribute",
+    # PR #83 (Group C): object import/export.
+    "Register", "Import", "Export",
 }
 
 

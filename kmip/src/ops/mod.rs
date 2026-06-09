@@ -55,6 +55,7 @@ pub mod helpers;
 pub mod interop;
 pub mod locate;
 pub mod query;
+pub mod register_import_export;
 pub mod revoke;
 pub mod sign;
 pub mod signature_verify;

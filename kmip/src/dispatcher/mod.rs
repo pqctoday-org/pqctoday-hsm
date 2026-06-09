@@ -37,7 +37,9 @@ use crate::ops::{
     destroy::destroy, encrypt::encrypt, get::get,
     get_attribute_list::get_attribute_list, get_attributes::get_attributes,
     interop::interop,
-    locate::locate, query::query, revoke::revoke,
+    locate::locate, query::query,
+    register_import_export::{export, import_object, register},
+    revoke::revoke,
     sign::sign, signature_verify::signature_verify, Deps,
 };
 
@@ -109,6 +111,9 @@ fn handle_payload(
         RequestPayload::DeleteAttribute(r) => ResponsePayload::DeleteAttribute(delete_attribute(deps, r, correlation_id)?),
         RequestPayload::SetAttribute(r) => ResponsePayload::SetAttribute(set_attribute(deps, r, correlation_id)?),
         RequestPayload::AdjustAttribute(r) => ResponsePayload::AdjustAttribute(adjust_attribute(deps, r, correlation_id)?),
+        RequestPayload::Register(r) => ResponsePayload::Register(register(deps, r, correlation_id)?),
+        RequestPayload::Import(r) => ResponsePayload::Import(import_object(deps, r, correlation_id)?),
+        RequestPayload::Export(r) => ResponsePayload::Export(export(deps, r, correlation_id)?),
     })
 }
 

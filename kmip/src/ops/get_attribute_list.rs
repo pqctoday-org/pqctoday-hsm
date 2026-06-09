@@ -106,6 +106,12 @@ mod tests {
             links: std::collections::HashMap::new(),
 
             custom_attributes: std::collections::HashMap::new(),
+
+
+            key_material: None,
+
+
+            key_format_type: None,
         }).unwrap();
 
         let r = get_attribute_list(&d, GetAttributeListRequest { uid: "u".into() }, "c").unwrap();

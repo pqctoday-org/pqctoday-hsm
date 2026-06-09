@@ -56,6 +56,18 @@ pub struct ObjectRecord {
     /// AddAttribute / SetAttribute; surfaced by GetAttributes /
     /// GetAttributeList.
     pub custom_attributes: std::collections::HashMap<String, String>,
+    /// Raw KMIP `Key Material` bytes (KMIP 3.0 §6.2 KeyBlock →
+    /// KeyValue → KeyMaterial). Populated by Register / Import when
+    /// a client-supplied key payload arrives; surfaced by Get / Export.
+    /// `None` for objects created via Create / CreateKeyPair where the
+    /// key bytes live exclusively inside the engine.
+    pub key_material: Option<Vec<u8>>,
+    /// KMIP `Key Format Type` (§6.2) — `Raw`, `Opaque`, `X.509`,
+    /// `PKCS#1`, `PKCS#8`, `TransparentSymmetricKey`, etc. Stored as
+    /// the wire codepoint; v0.1 only needs `Raw` (0x01) for symmetric
+    /// Register/Import flows but the field keeps the format honest
+    /// when other formats land.
+    pub key_format_type: Option<u32>,
 }
 
 /// Minimum surface the Phase-5 op handlers call.

@@ -32,6 +32,7 @@ use super::attrs::{Attribute, ObjectType, RevocationReason, State};
 pub enum Operation {
     Create           = 0x01,
     CreateKeyPair    = 0x02,
+    Register         = 0x03,
     Get              = 0x0a,
     GetAttributes    = 0x0b,
     GetAttributeList = 0x0c,
@@ -47,6 +48,8 @@ pub enum Operation {
     Decrypt          = 0x20,
     Sign             = 0x21,
     SignatureVerify  = 0x22,
+    Import           = 0x2a,
+    Export           = 0x2b,
     /// KMIP 3.0 §6.1.31 — test-suite framework op. Carries `Begin` /
     /// `End` markers (no managed-object effect). Server returns Success.
     Interop          = 0x2f,
@@ -63,6 +66,7 @@ impl Operation {
         match v {
             0x01 => Some(Self::Create),
             0x02 => Some(Self::CreateKeyPair),
+            0x03 => Some(Self::Register),
             0x08 => Some(Self::Locate),
             0x0a => Some(Self::Get),
             0x0b => Some(Self::GetAttributes),
@@ -78,6 +82,8 @@ impl Operation {
             0x20 => Some(Self::Decrypt),
             0x21 => Some(Self::Sign),
             0x22 => Some(Self::SignatureVerify),
+            0x2a => Some(Self::Import),
+            0x2b => Some(Self::Export),
             0x2f => Some(Self::Interop),
             0x30 => Some(Self::AdjustAttribute),
             0x31 => Some(Self::SetAttribute),
@@ -471,6 +477,90 @@ impl AdjustmentType {
             _ => None,
         }
     }
+}
+
+// ── Group C: Register / Import / Export (KMIP 3.0 §6.1.48, 6.1.29, 6.1.22) ─
+
+/// `Register` (KMIP 3.0 §6.1.48 / Table 393) — register a Managed
+/// Object that was created or obtained by the client through some other
+/// means, allowing the server to manage it. Spec-mandated request shape:
+///
+/// 1. `ObjectType` — Yes (Enumeration)
+/// 2. `Attributes` — Yes (Structure with typed-tag children)
+/// 3. `Any Object (Section 2)` — Yes (one of SymmetricKey / PublicKey /
+///    PrivateKey / Certificate / SecretData / OpaqueObject; the
+///    handler routes by `ObjectType`)
+/// 4. `Protection Storage Masks` — No (Structure)
+///
+/// Response: `Unique Identifier` (Yes).
+///
+/// Spec: "If the client provides a Unique Identifier value in the set
+/// of attributes, the server SHALL use the provided Unique Identifier
+/// value unless the Unique Identifier value is already in use within
+/// the server (and in which case the server SHALL return a Result
+/// Reason of Object Already Exists)."
+#[derive(Clone, Debug, PartialEq)]
+pub struct RegisterRequest {
+    pub object_type: ObjectType,
+    pub attributes: Vec<Attribute>,
+    /// The managed object payload — for v0.1 we honour symmetric keys
+    /// (KeyBlock with raw bytes). Asymmetric / certificate handling
+    /// arrives when those object families gain test coverage.
+    pub managed_object: Option<KeyBlock>,
+    /// Optional `Protection Storage Masks` (§6.1.48 — a Structure
+    /// listing permitted Protection Storage Mask values). Stored as
+    /// a raw bitmap; v0.1 ignores it during dispatch.
+    pub protection_storage_masks: Option<u32>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct RegisterResponse {
+    pub uid: String,
+}
+
+/// `Import` (KMIP 3.0 §6.1.29 / Table 337) — import a managed object
+/// at a specific client-supplied UID. Distinct from Register in that
+/// the client *always* dictates the UID; Register lets the server
+/// generate one if no UID attribute is in the request.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ImportRequest {
+    /// REQUIRED per spec — client-chosen UID.
+    pub uid: String,
+    pub object_type: ObjectType,
+    /// Spec default: false (if absent or false and an object exists
+    /// with the same UID, server SHALL return an error).
+    pub replace_existing: bool,
+    /// REQUIRED iff the key object is wrapped (we don't yet parse
+    /// wrapped imports — wave 2 of this PR or later).
+    pub key_wrap_type: Option<u32>,
+    pub attributes: Vec<Attribute>,
+    pub managed_object: Option<KeyBlock>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ImportResponse {
+    pub uid: String,
+}
+
+/// `Export` (KMIP 3.0 §6.1.22 / Table 316) — return a Managed Object
+/// + its attributes + the actual object value. Larger response than
+/// Get because it also carries the attribute set.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExportRequest {
+    pub uid: String,
+    pub key_format_type: Option<u32>,
+    pub key_wrap_type: Option<u32>,
+    pub key_compression_type: Option<u32>,
+    // KeyWrappingSpecification (§ - Structure) deferred — no tests
+    // in the corpus invoke it.
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExportResponse {
+    pub object_type: ObjectType,
+    pub uid: String,
+    pub attributes: Vec<Attribute>,
+    pub managed_object: Option<KeyBlock>,
 }
 
 // ── Interop (KMIP 3.0 §6.1.31) ─────────────────────────────────────────────

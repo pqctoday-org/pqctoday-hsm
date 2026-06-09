@@ -118,6 +118,11 @@ mod tags {
     pub const AdjustmentType: u32         = 0x42_0158;
     /// KMIP 3.0 §6.1.3 `Adjustment Value` — typed per target attribute.
     pub const AdjustmentValue: u32        = 0x42_0162;
+    pub const ReplaceExisting: u32        = 0x42_0124;
+    pub const KeyWrapType: u32            = 0x42_00f8;
+    pub const KeyCompressionType: u32     = 0x42_0041;
+    pub const ProtectionStorageMask: u32  = 0x42_015e;
+    pub const ProtectionStorageMasks: u32 = 0x42_015f;
     pub const InteropFunction: u32        = 0x42_0160;
     pub const InteropIdentifier: u32      = 0x42_0161;
     pub const InitialDate: u32            = 0x42_002f;
@@ -309,6 +314,9 @@ fn decode_request_payload(op: Operation, frame: &TtlvFrame) -> Result<RequestPay
         Operation::DeleteAttribute  => RequestPayload::DeleteAttribute(decode_delete_attribute_req(children)?),
         Operation::SetAttribute     => RequestPayload::SetAttribute(decode_set_attribute_req(children)?),
         Operation::AdjustAttribute  => RequestPayload::AdjustAttribute(decode_adjust_attribute_req(children)?),
+        Operation::Register         => RequestPayload::Register(decode_register_req(children)?),
+        Operation::Import           => RequestPayload::Import(decode_import_req(children)?),
+        Operation::Export           => RequestPayload::Export(decode_export_req(children)?),
     })
 }
 
@@ -337,6 +345,9 @@ fn response_payload_to_frame(payload: &ResponsePayload) -> TtlvFrame {
         ResponsePayload::DeleteAttribute(r)  => encode_uid_only_resp(&r.uid),
         ResponsePayload::SetAttribute(r)     => encode_uid_only_resp(&r.uid),
         ResponsePayload::AdjustAttribute(r)  => encode_uid_only_resp(&r.uid),
+        ResponsePayload::Register(r)         => encode_uid_only_resp(&r.uid),
+        ResponsePayload::Import(r)           => encode_uid_only_resp(&r.uid),
+        ResponsePayload::Export(r)           => encode_export_resp(r),
     };
     TtlvFrame::new(Tag(tags::ResponsePayload), Value::Structure(children))
 }
@@ -772,6 +783,253 @@ fn decode_attribute_v3(frame: &TtlvFrame) -> Result<Option<Attribute>, WireError
         }
         _ => return Ok(None),
     }))
+}
+
+// ── Group C codecs: Register / Import / Export ─────────────────────────────
+//
+// Spec mapping:
+//
+// - Register §6.1.48 / Table 393 — Request: ObjectType + Attributes +
+//   Any Object + ProtectionStorageMasks?  → Response: UID
+// - Import   §6.1.29 / Table 337 — Request: UID + ObjectType +
+//   ReplaceExisting? + KeyWrapType? + Attributes + Any Object → Response: UID
+// - Export   §6.1.22 / Table 316 — Request: UID + format options →
+//   Response: ObjectType + UID + Attributes + Any Object
+//
+// "Any Object (Section 2)" resolves to one of SymmetricKey / PublicKey /
+// PrivateKey / Certificate / SecretData / OpaqueObject; each wraps a
+// KeyBlock structure. v0.1 honours SymmetricKey + PublicKey/PrivateKey;
+// other object families return InvalidObjectType.
+
+fn decode_register_req(children: &[TtlvFrame]) -> Result<RegisterRequest, WireError> {
+    let mut object_type = None;
+    let mut attributes = Vec::new();
+    let mut managed_object = None;
+    let mut protection_storage_masks = None;
+    for c in children {
+        match c.tag.0 {
+            tags::ObjectType => {
+                let v = expect_enum(c, "Object Type")?;
+                object_type = Some(
+                    ObjectType::from_wire_value(v)
+                        .ok_or(WireError::UnknownEnum { field: "Object Type", value: v })?,
+                );
+            }
+            tags::Attributes => {
+                for child in expect_structure(c, "Attributes")? {
+                    if let Some(a) = decode_attribute_v3(child)? {
+                        attributes.push(a);
+                    }
+                }
+            }
+            tags::SymmetricKey | tags::PublicKey | tags::PrivateKey => {
+                managed_object = Some(decode_managed_object(c)?);
+            }
+            tags::ProtectionStorageMasks => {
+                // Per §6.1.48 the field is a Structure containing one
+                // ProtectionStorageMask Integer per permitted mask. v0.1
+                // collapses to the bitwise-OR of the bits since the
+                // current handler doesn't enforce them.
+                let mut acc = 0u32;
+                for child in expect_structure(c, "Protection Storage Masks")? {
+                    if child.tag.0 == tags::ProtectionStorageMask {
+                        if let Value::Integer(n) = child.value {
+                            acc |= n as u32;
+                        }
+                    }
+                }
+                protection_storage_masks = Some(acc);
+            }
+            _ => {}
+        }
+    }
+    let object_type = object_type.ok_or(WireError::Missing {
+        tag: tags::ObjectType,
+        name: "Object Type",
+    })?;
+    Ok(RegisterRequest {
+        object_type,
+        attributes,
+        managed_object,
+        protection_storage_masks,
+    })
+}
+
+fn decode_import_req(children: &[TtlvFrame]) -> Result<ImportRequest, WireError> {
+    let uid = required_uid(children)?;
+    let mut object_type = None;
+    let mut replace_existing = false;
+    let mut key_wrap_type = None;
+    let mut attributes = Vec::new();
+    let mut managed_object = None;
+    for c in children {
+        match c.tag.0 {
+            tags::ObjectType => {
+                let v = expect_enum(c, "Object Type")?;
+                object_type = Some(
+                    ObjectType::from_wire_value(v)
+                        .ok_or(WireError::UnknownEnum { field: "Object Type", value: v })?,
+                );
+            }
+            tags::ReplaceExisting => {
+                if let Value::Boolean(b) = c.value {
+                    replace_existing = b;
+                }
+            }
+            tags::KeyWrapType => {
+                if let Value::Enumeration(v) = c.value {
+                    key_wrap_type = Some(v);
+                }
+            }
+            tags::Attributes => {
+                for child in expect_structure(c, "Attributes")? {
+                    if let Some(a) = decode_attribute_v3(child)? {
+                        attributes.push(a);
+                    }
+                }
+            }
+            tags::SymmetricKey | tags::PublicKey | tags::PrivateKey => {
+                managed_object = Some(decode_managed_object(c)?);
+            }
+            _ => {}
+        }
+    }
+    let object_type = object_type.ok_or(WireError::Missing {
+        tag: tags::ObjectType,
+        name: "Object Type",
+    })?;
+    Ok(ImportRequest {
+        uid,
+        object_type,
+        replace_existing,
+        key_wrap_type,
+        attributes,
+        managed_object,
+    })
+}
+
+fn decode_export_req(children: &[TtlvFrame]) -> Result<ExportRequest, WireError> {
+    let uid = required_uid(children)?;
+    let mut key_format_type = None;
+    let mut key_wrap_type = None;
+    let mut key_compression_type = None;
+    for c in children {
+        match c.tag.0 {
+            tags::KeyFormatType => {
+                if let Value::Enumeration(v) = c.value { key_format_type = Some(v); }
+            }
+            tags::KeyWrapType => {
+                if let Value::Enumeration(v) = c.value { key_wrap_type = Some(v); }
+            }
+            tags::KeyCompressionType => {
+                if let Value::Enumeration(v) = c.value { key_compression_type = Some(v); }
+            }
+            _ => {}
+        }
+    }
+    Ok(ExportRequest { uid, key_format_type, key_wrap_type, key_compression_type })
+}
+
+/// Decode a `Any Object (Section 2)` payload — i.e. a SymmetricKey /
+/// PublicKey / PrivateKey Structure wrapping a `KeyBlock`. Returns just
+/// the KeyBlock (the wrapping tag is what the caller used to dispatch).
+fn decode_managed_object(frame: &TtlvFrame) -> Result<KeyBlock, WireError> {
+    let inner = expect_structure(frame, "Managed Object")?;
+    for child in inner {
+        if child.tag.0 == tags::KeyBlock {
+            return decode_key_block(child);
+        }
+    }
+    Err(WireError::Missing { tag: tags::KeyBlock, name: "Key Block" })
+}
+
+/// Decode a `KeyBlock` Structure (KMIP 3.0 §6.2):
+///   KeyFormatType + KeyValue (Structure containing KeyMaterial) +
+///   CryptographicAlgorithm + CryptographicLength.
+fn decode_key_block(frame: &TtlvFrame) -> Result<KeyBlock, WireError> {
+    let children = expect_structure(frame, "Key Block")?;
+    let mut key_format_type = 1; // Raw
+    let mut algorithm = KmipAlgorithm::Aes;
+    let mut length: u32 = 0;
+    let mut bytes: Vec<u8> = Vec::new();
+    for c in children {
+        match c.tag.0 {
+            tags::KeyFormatType => {
+                if let Value::Enumeration(v) = c.value { key_format_type = v; }
+            }
+            tags::CryptographicAlgorithm => {
+                let v = expect_enum(c, "Cryptographic Algorithm")?;
+                algorithm = KmipAlgorithm::from_wire_value(v)
+                    .ok_or(WireError::UnknownEnum { field: "Cryptographic Algorithm", value: v })?;
+            }
+            tags::CryptographicLength => {
+                length = expect_integer(c, "Cryptographic Length")? as u32;
+            }
+            tags::KeyValue => {
+                // KeyValue is itself a Structure containing KeyMaterial.
+                for inner in expect_structure(c, "Key Value")? {
+                    if inner.tag.0 == tags::KeyMaterial {
+                        if let Value::ByteString(b) = &inner.value {
+                            bytes = b.clone();
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(KeyBlock {
+        key_format_type: match key_format_type {
+            0x01 => KeyFormatType::Raw,
+            _    => KeyFormatType::Raw, // v0.1 — wave 2 will expand
+        },
+        cryptographic_algorithm: algorithm,
+        cryptographic_length: length,
+        key_value: bytes,
+    })
+}
+
+/// Encode an Export response payload per §6.1.22 / Table 317:
+/// ObjectType + UID + Attributes (Structure) + Any Object (SymmetricKey
+/// / PublicKey / PrivateKey wrapping a KeyBlock).
+fn encode_export_resp(r: &ExportResponse) -> Vec<TtlvFrame> {
+    let mut out = vec![
+        TtlvFrame::new(Tag(tags::ObjectType), Value::Enumeration(r.object_type.to_wire_value())),
+        TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString(r.uid.clone())),
+    ];
+    out.push(TtlvFrame::new(
+        Tag(tags::Attributes),
+        Value::Structure(r.attributes.iter().map(encode_attribute_v3).collect()),
+    ));
+    if let Some(kb) = &r.managed_object {
+        let kb_frame = encode_key_block(kb);
+        let managed_object_tag = match r.object_type {
+            ObjectType::PublicKey  => tags::PublicKey,
+            ObjectType::PrivateKey => tags::PrivateKey,
+            _ => tags::SymmetricKey,
+        };
+        out.push(TtlvFrame::new(Tag(managed_object_tag), Value::Structure(vec![kb_frame])));
+    }
+    out
+}
+
+/// Encode a `KeyBlock` Structure. Mirror of `decode_key_block`.
+fn encode_key_block(kb: &KeyBlock) -> TtlvFrame {
+    let key_value = TtlvFrame::new(
+        Tag(tags::KeyValue),
+        Value::Structure(vec![
+            TtlvFrame::new(Tag(tags::KeyMaterial), Value::ByteString(kb.key_value.clone())),
+        ]),
+    );
+    TtlvFrame::new(
+        Tag(tags::KeyBlock),
+        Value::Structure(vec![
+            TtlvFrame::new(Tag(tags::KeyFormatType), Value::Enumeration(kb.key_format_type as u32)),
+            key_value,
+            TtlvFrame::new(Tag(tags::CryptographicAlgorithm), Value::Enumeration(kb.cryptographic_algorithm.to_wire_value())),
+            TtlvFrame::new(Tag(tags::CryptographicLength), Value::Integer(kb.cryptographic_length as i32)),
+        ]),
+    )
 }
 
 // ── Group B Wave 2 codecs (attribute mutations + shared helpers) ───────────

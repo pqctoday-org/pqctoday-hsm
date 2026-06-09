@@ -327,6 +327,12 @@ fn decode_record(
         links: std::collections::HashMap::new(),
 
         custom_attributes: std::collections::HashMap::new(),
+
+
+        key_material: None,
+
+
+        key_format_type: None,
     })
 }
 
@@ -409,6 +415,12 @@ mod tests {
             links: std::collections::HashMap::new(),
 
             custom_attributes: std::collections::HashMap::new(),
+
+
+            key_material: None,
+
+
+            key_format_type: None,
         }
     }
 

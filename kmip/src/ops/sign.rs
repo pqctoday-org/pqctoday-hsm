@@ -307,6 +307,12 @@ mod tests {
             links: std::collections::HashMap::new(),
 
             custom_attributes: std::collections::HashMap::new(),
+
+
+            key_material: None,
+
+
+            key_format_type: None,
         };
         deps.store.put(rec).unwrap();
     }
@@ -387,6 +393,12 @@ rules:
             links: std::collections::HashMap::new(),
 
             custom_attributes: std::collections::HashMap::new(),
+
+
+            key_material: None,
+
+
+            key_format_type: None,
         };
         d.store.put(rec).unwrap();
         let err = sign(&d, SignRequest { uid: "urn:pre".into(), data: vec![] }, "corr").unwrap_err();
