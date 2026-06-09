@@ -157,13 +157,16 @@ fn encrypt_classical(
     obj: &crate::store::ObjectRecord,
     correlation_id: &str,
 ) -> Result<EncryptResponse> {
-    // Default mech from the algorithm table; for AES we additionally
-    // honour the key's stored `BlockCipherMode` per KMIP §11 so
-    // ECB/CBC/CTR/GCM all dispatch to the right PKCS#11 mechanism.
+    // KMIP 3.0 §6.1.21 — the request MAY carry its own
+    // `CryptographicParameters` that override the key-attached value.
+    // CS-BC-M-4..13 exercise the override pattern (the AES mode lives
+    // on the Encrypt call, not the registered key).
+    let effective_cp = req
+        .cryptographic_parameters
+        .as_ref()
+        .or(obj.cryptographic_parameters.as_ref());
     let mech = match obj.algorithm {
-        KmipAlgorithm::Aes => {
-            super::helpers::aes_mechanism_for(obj.cryptographic_parameters.as_ref())
-        }
+        KmipAlgorithm::Aes => super::helpers::aes_mechanism_for(effective_cp),
         _ => obj.algorithm.to_pkcs11_mech(PkcsOp::Encrypt).ok_or_else(|| {
             KmipError::failed(
                 ResultReason::OperationNotSupported,
@@ -294,7 +297,7 @@ mod tests {
     fn ml_kem_branch_returns_encapsulation_and_shared_secret() {
         let (ring, d) = deps_and_ring();
         put(&d, "k", KmipAlgorithm::MlKem1024, ObjectType::PublicKey, State::Active, UsageMask::KEY_AGREEMENT);
-        let r = encrypt(&d, EncryptRequest { uid: "k".into(), data: vec![], iv: None }, "c").unwrap();
+        let r = encrypt(&d, EncryptRequest { uid: "k".into(), data: vec![], iv: None , cryptographic_parameters: None}, "c").unwrap();
         assert!(r.shared_secret.is_some(), "ML-KEM must return shared secret");
         assert_eq!(r.ciphertext.len(), 32);
         // Plane-3 emit should be C_EncapsulateKey, not C_EncryptInit.
@@ -311,6 +314,7 @@ mod tests {
             uid: "a".into(),
             data: b"plaintext".to_vec(),
             iv: Some(vec![0u8; 12]),
+            cryptographic_parameters: None,
         }, "c").unwrap();
         assert!(r.shared_secret.is_none(), "classical encrypt has no shared secret");
         // Plane-3 emit should be C_EncryptInit + C_Encrypt.
@@ -323,7 +327,7 @@ mod tests {
     fn encrypt_on_destroyed_returns_object_archived() {
         let (_ring, d) = deps_and_ring();
         put(&d, "a", KmipAlgorithm::Aes, ObjectType::SymmetricKey, State::Destroyed, UsageMask::ENCRYPT);
-        let err = encrypt(&d, EncryptRequest { uid: "a".into(), data: vec![], iv: None }, "c").unwrap_err();
+        let err = encrypt(&d, EncryptRequest { uid: "a".into(), data: vec![], iv: None , cryptographic_parameters: None}, "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::ObjectArchived);
     }
 }

@@ -136,12 +136,15 @@ fn decrypt_classical(
     obj: &crate::store::ObjectRecord,
     correlation_id: &str,
 ) -> Result<DecryptResponse> {
-    // KMIP 3.0 §11 — AES decrypt mechanism mirrors the key's
-    // `BlockCipherMode`; falls back to GCM when unspecified.
+    // KMIP 3.0 §6.1.21 — request-time `CryptographicParameters`
+    // override the key-attached value (mirrors Encrypt). The Baseline
+    // CS-BC tests put the mode on the call, not the key.
+    let effective_cp = req
+        .cryptographic_parameters
+        .as_ref()
+        .or(obj.cryptographic_parameters.as_ref());
     let mech = match obj.algorithm {
-        KmipAlgorithm::Aes => {
-            super::helpers::aes_mechanism_for(obj.cryptographic_parameters.as_ref())
-        }
+        KmipAlgorithm::Aes => super::helpers::aes_mechanism_for(effective_cp),
         _ => obj.algorithm.to_pkcs11_mech(PkcsOp::Decrypt).ok_or_else(|| {
             KmipError::failed(
                 ResultReason::OperationNotSupported,
@@ -253,7 +256,7 @@ mod tests {
     fn ml_kem_branch_calls_decapsulate() {
         let (ring, d) = deps_and_ring();
         put(&d, "k", KmipAlgorithm::MlKem1024, ObjectType::PrivateKey, State::Active, UsageMask::KEY_AGREEMENT);
-        let r = decrypt(&d, DecryptRequest { uid: "k".into(), data: vec![0u8; 1568], iv: None }, "c").unwrap();
+        let r = decrypt(&d, DecryptRequest { uid: "k".into(), data: vec![0u8; 1568], iv: None , cryptographic_parameters: None}, "c").unwrap();
         assert_eq!(r.data.len(), 32, "shared secret length");
         let p3: Vec<_> = ring.filter_plane(Plane::Pkcs11);
         assert!(p3.iter().any(|e| matches!(&e.event, EventPayload::Pkcs11Call { function, .. } if function == "C_DecapsulateKey")));
@@ -264,7 +267,7 @@ mod tests {
     fn classical_branch_calls_decrypt_init_then_decrypt() {
         let (ring, d) = deps_and_ring();
         put(&d, "a", KmipAlgorithm::Aes, ObjectType::SymmetricKey, State::Active, UsageMask::DECRYPT);
-        let _r = decrypt(&d, DecryptRequest { uid: "a".into(), data: vec![0; 32], iv: Some(vec![0; 12]) }, "c").unwrap();
+        let _r = decrypt(&d, DecryptRequest { uid: "a".into(), data: vec![0; 32], iv: Some(vec![0; 12]) , cryptographic_parameters: None}, "c").unwrap();
         let p3: Vec<_> = ring.filter_plane(Plane::Pkcs11);
         assert!(p3.iter().any(|e| matches!(&e.event, EventPayload::Pkcs11Call { function, .. } if function == "C_DecryptInit")));
         assert!(p3.iter().any(|e| matches!(&e.event, EventPayload::Pkcs11Call { function, .. } if function == "C_Decrypt")));
@@ -274,14 +277,14 @@ mod tests {
     fn decrypt_allowed_in_deactivated_state() {
         let (_ring, d) = deps_and_ring();
         put(&d, "a", KmipAlgorithm::Aes, ObjectType::SymmetricKey, State::Deactivated, UsageMask::DECRYPT);
-        let _ = decrypt(&d, DecryptRequest { uid: "a".into(), data: vec![0; 32], iv: None }, "c").unwrap();
+        let _ = decrypt(&d, DecryptRequest { uid: "a".into(), data: vec![0; 32], iv: None , cryptographic_parameters: None}, "c").unwrap();
     }
 
     #[test]
     fn decrypt_pre_active_rejected() {
         let (_ring, d) = deps_and_ring();
         put(&d, "a", KmipAlgorithm::Aes, ObjectType::SymmetricKey, State::PreActive, UsageMask::DECRYPT);
-        let err = decrypt(&d, DecryptRequest { uid: "a".into(), data: vec![0; 32], iv: None }, "c").unwrap_err();
+        let err = decrypt(&d, DecryptRequest { uid: "a".into(), data: vec![0; 32], iv: None , cryptographic_parameters: None}, "c").unwrap_err();
         // KMIP 3.0 §11: PreActive is a lifecycle-state failure, not
         // "object archived". ObjectArchived (0x0d) is reserved for
         // Destroyed* per §6.1.19.

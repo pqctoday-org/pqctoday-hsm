@@ -1,8 +1,8 @@
 {
-  "generated_at": 1781006475,
+  "generated_at": 1781006961,
   "summary": {
-    "pass": 35,
-    "fail": 67,
+    "pass": 38,
+    "fail": 64,
     "error": 0,
     "skip_op": 0,
     "skip_parse": 0,
@@ -565,7 +565,7 @@
     {
       "name": "CS-BC-M-14-30.xml",
       "status": "FAIL",
-      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResultReason: expected 'WrongKeyLifecycleState' got 45",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'OperationFailed' got 0",
       "ops_used": [
         "Decrypt",
         "Destroy",
@@ -599,8 +599,8 @@
     },
     {
       "name": "CS-BC-M-4-30.xml",
-      "status": "FAIL",
-      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1",
+      "status": "PASS",
+      "detail": "",
       "ops_used": [
         "Destroy",
         "Encrypt",
@@ -610,8 +610,8 @@
     },
     {
       "name": "CS-BC-M-5-30.xml",
-      "status": "FAIL",
-      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1",
+      "status": "PASS",
+      "detail": "",
       "ops_used": [
         "Decrypt",
         "Destroy",
@@ -621,8 +621,8 @@
     },
     {
       "name": "CS-BC-M-6-30.xml",
-      "status": "FAIL",
-      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1",
+      "status": "PASS",
+      "detail": "",
       "ops_used": [
         "Decrypt",
         "Destroy",
@@ -634,7 +634,7 @@
     {
       "name": "CS-BC-M-7-30.xml",
       "status": "FAIL",
-      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1",
+      "detail": "msg #2: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'OperationFailed' got 0",
       "ops_used": [
         "Destroy",
         "Encrypt",
@@ -645,7 +645,7 @@
     {
       "name": "CS-BC-M-8-30.xml",
       "status": "FAIL",
-      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Data: expected 'd9bcce11b0b437b90239552df3a360c90efb6bfed93b4d1ea2123ba4db075ff6' got 'd9bcce11b0b437b90239552df3a360c9'",
       "ops_used": [
         "Decrypt",
         "Destroy",

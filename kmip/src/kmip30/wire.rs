@@ -805,6 +805,7 @@ fn decode_encrypt_req(children: &[TtlvFrame]) -> Result<EncryptRequest, WireErro
     let uid = required_uid(children)?;
     let mut data = Vec::new();
     let mut iv = None;
+    let mut cp = None;
     for c in children {
         match c.tag.0 {
             tags::Data => {
@@ -813,10 +814,13 @@ fn decode_encrypt_req(children: &[TtlvFrame]) -> Result<EncryptRequest, WireErro
             tags::IvCounterNonce => {
                 if let Value::ByteString(b) = &c.value { iv = Some(b.clone()); }
             }
+            tags::CryptographicParameters => {
+                cp = Some(decode_cryptographic_parameters(c)?);
+            }
             _ => {}
         }
     }
-    Ok(EncryptRequest { uid, data, iv })
+    Ok(EncryptRequest { uid, data, iv, cryptographic_parameters: cp })
 }
 
 fn encode_encrypt_resp(r: &EncryptResponse) -> Vec<TtlvFrame> {
@@ -838,14 +842,18 @@ fn decode_decrypt_req(children: &[TtlvFrame]) -> Result<DecryptRequest, WireErro
     let uid = required_uid(children)?;
     let mut data = Vec::new();
     let mut iv = None;
+    let mut cp = None;
     for c in children {
         match c.tag.0 {
             tags::Data => { if let Value::ByteString(b) = &c.value { data = b.clone(); } }
             tags::IvCounterNonce => { if let Value::ByteString(b) = &c.value { iv = Some(b.clone()); } }
+            tags::CryptographicParameters => {
+                cp = Some(decode_cryptographic_parameters(c)?);
+            }
             _ => {}
         }
     }
-    Ok(DecryptRequest { uid, data, iv })
+    Ok(DecryptRequest { uid, data, iv, cryptographic_parameters: cp })
 }
 
 fn encode_decrypt_resp(r: &DecryptResponse) -> Vec<TtlvFrame> {

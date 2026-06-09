@@ -322,6 +322,11 @@ pub struct EncryptRequest {
     pub data: Vec<u8>,
     /// IV (AES-GCM) or other per-op input. None for ML-KEM.
     pub iv: Option<Vec<u8>>,
+    /// KMIP 3.0 §6.1.21 — per-call override for the key's stored
+    /// `CryptographicParameters`. When the client supplies
+    /// `BlockCipherMode` here, it takes precedence over whatever was
+    /// stored at Register/Create time.
+    pub cryptographic_parameters: Option<CryptographicParameters>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -342,6 +347,9 @@ pub struct DecryptRequest {
     /// encapsulation bytes.
     pub data: Vec<u8>,
     pub iv: Option<Vec<u8>>,
+    /// KMIP 3.0 §6.1.21 — per-call override for the key's stored
+    /// `CryptographicParameters`. See [`EncryptRequest`].
+    pub cryptographic_parameters: Option<CryptographicParameters>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
