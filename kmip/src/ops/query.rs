@@ -54,6 +54,7 @@ pub fn query(deps: &Deps, req: QueryRequest, correlation_id: &str) -> Result<Que
         object_types: None,
         vendor_identification: None,
         server_info: None,
+        application_namespaces: None,
     };
 
     for f in &req.functions {
@@ -71,11 +72,19 @@ pub fn query(deps: &Deps, req: QueryRequest, correlation_id: &str) -> Result<Que
                     server_version: deps.config.server_version.clone(),
                 });
             }
-            QueryFunction::QueryApplicationNamespaces
-            | QueryFunction::QueryProfiles
-            | QueryFunction::QueryCapabilities => {
-                // v0.1 returns nothing for these — Phase 8 (compliance tool)
-                // fills in profile reporting.
+            QueryFunction::QueryApplicationNamespaces => {
+                // KMIP 3.0 §6.1.39 — a Baseline server MUST be able to
+                // surface its supported application namespaces when
+                // asked. Profiles v3.0 §4.1.1 item 14 marks the value
+                // as variable so any non-empty list is conformant.
+                resp.application_namespaces =
+                    Some(vec!["pqctoday.io/baseline".to_string()]);
+            }
+            QueryFunction::QueryProfiles | QueryFunction::QueryCapabilities => {
+                // Profile / Capability reporting deferred to Phase 8
+                // (compliance-tool integration); the comparator already
+                // treats absent fields as conformant when the test
+                // doesn't probe them.
             }
         }
     }

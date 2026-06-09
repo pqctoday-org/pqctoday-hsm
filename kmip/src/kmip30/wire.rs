@@ -87,6 +87,9 @@ mod tags {
     pub const RevocationReasonCode: u32   = 0x42_0082;
     pub const ServerInformation: u32      = 0x42_0088;
     pub const ServerVersion: u32          = 0x42_012f;
+    /// KMIP 3.0 §6.1.39 — `Application Namespace` TextString (zero or
+    /// more) returned for `QueryFunction::QueryApplicationNamespaces`.
+    pub const ApplicationNamespace: u32   = 0x42_0003;
     /// KMIP 3.0 §8.2.2 — `Server Correlation Value` echoed in every
     /// ResponseHeader. Codepoint verified from
     /// `spec/oasis-kmip-3.0/kmip-spec-3.0-tags-enums.json`.
@@ -537,6 +540,14 @@ fn encode_query_resp(r: &QueryResponse) -> Vec<TtlvFrame> {
                 Value::TextString(info.server_version.clone()),
             )]),
         ));
+    }
+    if let Some(ns) = &r.application_namespaces {
+        for n in ns {
+            out.push(TtlvFrame::new(
+                Tag(tags::ApplicationNamespace),
+                Value::TextString(n.clone()),
+            ));
+        }
     }
     out
 }
@@ -1014,7 +1025,12 @@ fn encode_pkcs11_resp(r: &Pkcs11Response) -> Vec<TtlvFrame> {
         out.push(TtlvFrame::new(Tag(tags::CorrelationValue), Value::ByteString(cv.clone())));
     }
     if let Some(op) = &r.output_parameters {
-        out.push(TtlvFrame::new(Tag(tags::Pkcs11OutputParameters), Value::ByteString(op.clone())));
+        // KMIP 3.0 §6.1.42 PKCS#11 — `Output Parameters` is OPTIONAL.
+        // Emit only when non-empty; OASIS tests treat an empty body as
+        // omission (PKCS11-M-1 explicitly checks this).
+        if !op.is_empty() {
+            out.push(TtlvFrame::new(Tag(tags::Pkcs11OutputParameters), Value::ByteString(op.clone())));
+        }
     }
     out.push(TtlvFrame::new(Tag(tags::Pkcs11ReturnCode), Value::Integer(r.return_code)));
     out
@@ -2096,6 +2112,7 @@ mod tests {
                     server_info: Some(ServerInformation {
                         server_version: "0.1.0".into(),
                     }),
+                    application_namespaces: None,
                 })),
             }],
         };

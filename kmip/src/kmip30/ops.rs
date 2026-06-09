@@ -173,6 +173,11 @@ pub struct QueryResponse {
     /// per `kmip-profiles-v3.0` §4.1 Response Variations item 8 — the
     /// comparator skips its interior shape.
     pub server_info: Option<ServerInformation>,
+    /// Zero or more `Application Namespace` TextStrings per KMIP 3.0
+    /// §6.1.39 — surfaced when the client passes
+    /// `QueryFunction::QueryApplicationNamespaces`. Values are variable
+    /// per §4.1.1 item 14.
+    pub application_namespaces: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]

@@ -1,6 +1,6 @@
 # OASIS KMIP 3.0 Dispatcher Replay Report
 
-Generated: 2026-06-09 04:46:23 UTC
+Generated: 2026-06-09 05:01:20 UTC
 
 
 ## Aggregate
@@ -8,8 +8,8 @@ Generated: 2026-06-09 04:46:23 UTC
 
 | Status | Count | % of total |
 |---|---|---|
-| **PASS** | 24 | 23.5% |
-| **FAIL** | 78 | 76.5% |
+| **PASS** | 25 | 24.5% |
+| **FAIL** | 77 | 75.5% |
 | ERROR | 0 | 0.0% |
 | SKIP_OP (op not implemented) | 0 | 0.0% |
 | SKIP_PARSE (XML malformed) | 0 | 0.0% |
@@ -18,9 +18,9 @@ Generated: 2026-06-09 04:46:23 UTC
 
 Of the 102 tests that exercise only implemented ops:
 
-  - **24 pass (24%)**
+  - **25 pass (25%)**
 
-  - 78 fail
+  - 77 fail
 
   - 0 errored
 
@@ -97,15 +97,14 @@ Of the 102 tests that exercise only implemented ops:
 | `SKFF-M-12-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem: child count 3 != 2 (after dropping optional ResultMessage per §4.1.1 item 3) |
 | `SKFF-M-2-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
 | `SKFF-M-4-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem: child count 3 != 2 (after dropping optional ResultMessage per §4.1.1 item 3) |
-| `SKFF-M-5-30.xml` | FAIL | msg #4: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 0 != 1 |
 | `SKFF-M-6-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
-| `SKFF-M-7-30.xml` | FAIL | msg #4: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 0 != 1 |
 | `SKFF-M-8-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem: child count 3 != 2 (after dropping optional ResultMessage per §4.1.1 item 3) |
 | `SKFF-M-9-30.xml` | FAIL | msg #8: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 27 != 10 |
 | `SKLC-M-1-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: no actual 'CryptographicUsageMask' matches expected value |
 | `SKLC-M-2-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: no actual 'CryptographicUsageMask' matches expected value |
 | `SKLC-M-3-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: no actual 'CryptographicUsageMask' matches expected value |
 | `SKLC-O-1-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: no actual 'CryptographicUsageMask' matches expected value |
+| `TL-M-1-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/Query ResponsePayload: non-list child count 2 != 3 |
 | `TL-M-2-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage: child count 3 != 2 |
 | `TL-M-3-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage: child count 3 != 2 |
 | `BL-M-1-30.xml` | PASS |  |
@@ -131,4 +130,5 @@ Of the 102 tests that exercise only implemented ops:
 | `SASED-M-1-30.xml` | PASS |  |
 | `SKFF-M-1-30.xml` | PASS |  |
 | `SKFF-M-3-30.xml` | PASS |  |
-| `TL-M-1-30.xml` | PASS |  |
+| `SKFF-M-5-30.xml` | PASS |  |
+| `SKFF-M-7-30.xml` | PASS |  |

@@ -89,6 +89,20 @@ struct LocateFilters {
 
 impl LocateFilters {
     fn matches(&self, r: &ObjectRecord) -> bool {
+        // KMIP 3.0 §6.1.32 — by default Locate filters out objects in
+        // the `Destroyed` / `DestroyedCompromised` states (the
+        // `StorageStatusMask` default value is `Online` only). A client
+        // who wants tombstones must request them explicitly via the
+        // mask — not yet wired through the codec; until it is, the
+        // strict default applies.
+        if matches!(r.state, State::Destroyed | State::DestroyedCompromised) {
+            // Override the default only when the client explicitly
+            // filtered by one of those states.
+            if !matches!(self.state, Some(State::Destroyed) | Some(State::DestroyedCompromised)) {
+                return false;
+            }
+        }
+
         if let Some(a) = self.algorithm {
             if r.algorithm != a {
                 return false;
