@@ -196,7 +196,8 @@ mod tests {
 
 
             key_format_type: None,
-        }).unwrap();
+        ..ObjectRecord::default()
+}).unwrap();
     }
 
     #[test]
@@ -247,7 +248,8 @@ mod tests {
 
 
             key_format_type: None,
-        }).unwrap();
+        ..ObjectRecord::default()
+}).unwrap();
         let _ = signature_verify(&d, SignatureVerifyRequest {
             uid: "u".into(),
             data: vec![],
@@ -282,7 +284,8 @@ mod tests {
 
 
             key_format_type: None,
-        }).unwrap();
+        ..ObjectRecord::default()
+}).unwrap();
         let err = signature_verify(&d, SignatureVerifyRequest {
             uid: "u".into(),
             data: vec![],

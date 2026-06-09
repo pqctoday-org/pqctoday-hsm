@@ -225,7 +225,8 @@ mod tests {
             custom_attributes: HashMap::new(),
             key_material: Some(key),
             key_format_type: Some(0x01),
-        }).unwrap();
+        ..ObjectRecord::default()
+}).unwrap();
     }
 
     #[test]

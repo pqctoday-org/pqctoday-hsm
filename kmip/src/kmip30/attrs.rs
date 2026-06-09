@@ -193,6 +193,77 @@ pub enum Attribute {
     /// Arbitrary key-value pair the platform tracks (e.g. `pqc-demo`).
     /// Mapped to KMIP `Custom Attribute` on the wire.
     Custom { name: String, value: String },
+
+    // ── KMIP Profiles v3.0 §5.1.2 Baseline Server attributes ──────────
+    //
+    // The variants below cover every Object Attribute the Baseline Server
+    // profile requires. Each carries the typed payload the wire codec
+    // expects. Most map 1:1 to a typed field on `ObjectRecord`.
+
+    /// `Initial Date` (0x420039) — DateTime as Unix epoch seconds.
+    InitialDate(i64),
+    /// `Activation Date` (0x420001).
+    ActivationDate(i64),
+    /// `Deactivation Date` (0x42002f).
+    DeactivationDate(i64),
+    /// `Destroy Date` (0x420033).
+    DestroyDate(i64),
+    /// `Compromise Date` (0x420020).
+    CompromiseDate(i64),
+    /// `Compromise Occurrence Date` (0x420021).
+    CompromiseOccurrenceDate(i64),
+    /// `Last Change Date` (0x420048).
+    LastChangeDate(i64),
+    /// `Original Creation Date` (0x4200bc).
+    OriginalCreationDate(i64),
+    /// `Process Start Date` (0x420067).
+    ProcessStartDate(i64),
+    /// `Protect Stop Date` (0x420068).
+    ProtectStopDate(i64),
+    /// `Rotate Date` (0x42016d).
+    RotateDate(i64),
+
+    /// Security posture booleans.
+    Sensitive(bool),
+    AlwaysSensitive(bool),
+    Extractable(bool),
+    NeverExtractable(bool),
+    Fresh(bool),
+    KeyValuePresent(bool),
+    QuantumSafe(bool),
+    RotateAutomatic(bool),
+
+    /// Identity / description strings.
+    ShortUniqueIdentifier(String),
+    AlternativeName(String),
+    Comment(String),
+    Description(String),
+    ContactInformation(String),
+    ObjectClass(String),
+    KeyValueLocation(String),
+    X509CertificateIdentifier(String),
+    X509CertificateIssuer(String),
+    X509CertificateSubject(String),
+    RotateName(String),
+
+    /// Enum codepoints.
+    CertificateType(u32),
+    DigitalSignatureAlgorithm(u32),
+    NistKeyType(u32),
+    ProtectionLevel(u32),
+    RevocationReasonCode(u32),
+    DeactivationReasonCode(u32),
+    KeyFormatType(u32),
+
+    /// Integers.
+    CertificateLength(i32),
+    LeaseTime(u32),
+    ProtectionPeriod(u32),
+    RotateInterval(u32),
+    RotateOffset(i32),
+    RotateGeneration(i32),
+    /// `Usage Limits` Structure — v0.1 carries just `Usage Limits Total`.
+    UsageLimitsTotal(i64),
 }
 
 impl Attribute {

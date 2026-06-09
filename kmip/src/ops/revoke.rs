@@ -80,6 +80,16 @@ pub fn revoke(deps: &Deps, req: RevokeRequest, correlation_id: &str) -> Result<R
     let from_label = state_name(obj.state).to_string();
     let to_label = state_name(target_state).to_string();
     obj.state = target_state;
+    // Per Baseline §5.1.2: Compromise Date / Compromise Occurrence Date
+    // become attribute-visible when Revoke moves the object into the
+    // Compromised state. Last Change Date follows any state change.
+    let now = OffsetDateTime::now_utc();
+    obj.last_change_date = Some(now);
+    if target_state == State::Compromised {
+        obj.compromise_date = Some(now);
+        obj.compromise_occurrence_date = Some(now);
+    }
+    obj.revocation_reason_code = Some(req.reason.to_wire_value());
     deps.store.update(obj)?;
 
     emit_state_change(
@@ -139,7 +149,8 @@ mod tests {
 
 
             key_format_type: None,
-        }).unwrap();
+        ..ObjectRecord::default()
+}).unwrap();
     }
 
     const ALLOW: &str = "schema_version: 1\nmetadata: {name: t, description: t, authority: t, effective: always}\nrules: []\n";
@@ -186,7 +197,8 @@ mod tests {
 
 
             key_format_type: None,
-        }).unwrap();
+        ..ObjectRecord::default()
+}).unwrap();
         let err = revoke(&d, RevokeRequest { uid: "p".into(), reason: RevocationReason::Unspecified }, "c").unwrap_err();
         assert_eq!(err.result_reason(), crate::error::ResultReason::PermissionDenied);
     }

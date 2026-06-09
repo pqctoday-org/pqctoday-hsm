@@ -51,17 +51,65 @@ pub fn get_attribute_list(
         ));
     }
 
-    // Names mirror what `attributes_from_record` returns.
+    // Names mirror what `attributes_from_record` returns. Per KMIP
+    // Profiles v3.0 §4.1.2 item 5, order doesn't matter — clients must
+    // accept any permutation.
     let mut names = vec![
         "Unique Identifier".to_string(),
         "Object Type".to_string(),
         "Cryptographic Algorithm".to_string(),
         "Cryptographic Usage Mask".to_string(),
         "State".to_string(),
+        "Initial Date".to_string(),
     ];
     if obj.cryptographic_length > 0 {
         names.push("Cryptographic Length".into());
     }
+    if obj.name.is_some()                          { names.push("Name".into()); }
+    if obj.activation_date.is_some()               { names.push("Activation Date".into()); }
+    if obj.deactivation_date.is_some()             { names.push("Deactivation Date".into()); }
+    if obj.destroy_date.is_some()                  { names.push("Destroy Date".into()); }
+    if obj.compromise_date.is_some()               { names.push("Compromise Date".into()); }
+    if obj.compromise_occurrence_date.is_some()    { names.push("Compromise Occurrence Date".into()); }
+    if obj.last_change_date.is_some()              { names.push("Last Change Date".into()); }
+    if obj.original_creation_date.is_some()        { names.push("Original Creation Date".into()); }
+    if obj.process_start_date.is_some()            { names.push("Process Start Date".into()); }
+    if obj.protect_stop_date.is_some()             { names.push("Protect Stop Date".into()); }
+    if obj.rotate_date.is_some()                   { names.push("Rotate Date".into()); }
+    if obj.sensitive.is_some()                     { names.push("Sensitive".into()); }
+    if obj.always_sensitive.is_some()              { names.push("Always Sensitive".into()); }
+    if obj.extractable.is_some()                   { names.push("Extractable".into()); }
+    if obj.never_extractable.is_some()             { names.push("Never Extractable".into()); }
+    if obj.fresh.is_some()                         { names.push("Fresh".into()); }
+    if obj.key_value_present.is_some()             { names.push("Key Value Present".into()); }
+    if obj.quantum_safe.is_some()                  { names.push("Quantum Safe".into()); }
+    if obj.rotate_automatic.is_some()              { names.push("Rotate Automatic".into()); }
+    if obj.short_unique_identifier.is_some()       { names.push("Short Unique Identifier".into()); }
+    if obj.alternative_name.is_some()              { names.push("Alternative Name".into()); }
+    if obj.comment.is_some()                       { names.push("Comment".into()); }
+    if obj.description.is_some()                   { names.push("Description".into()); }
+    if obj.contact_information.is_some()           { names.push("Contact Information".into()); }
+    if obj.object_class.is_some()                  { names.push("Object Class".into()); }
+    if obj.key_value_location.is_some()            { names.push("Key Value Location".into()); }
+    if obj.x509_certificate_identifier.is_some()   { names.push("X.509 Certificate Identifier".into()); }
+    if obj.x509_certificate_issuer.is_some()       { names.push("X.509 Certificate Issuer".into()); }
+    if obj.x509_certificate_subject.is_some()      { names.push("X.509 Certificate Subject".into()); }
+    if obj.rotate_name.is_some()                   { names.push("Rotate Name".into()); }
+    if obj.certificate_type.is_some()              { names.push("Certificate Type".into()); }
+    if obj.digital_signature_algorithm.is_some()   { names.push("Digital Signature Algorithm".into()); }
+    if obj.nist_key_type.is_some()                 { names.push("NIST Key Type".into()); }
+    if obj.protection_level.is_some()              { names.push("Protection Level".into()); }
+    if obj.revocation_reason_code.is_some()        { names.push("Revocation Reason".into()); }
+    if obj.deactivation_reason_code.is_some()      { names.push("Deactivation Reason".into()); }
+    if obj.key_format_type.is_some()               { names.push("Key Format Type".into()); }
+    if obj.certificate_length.is_some()            { names.push("Certificate Length".into()); }
+    if obj.lease_time.is_some()                    { names.push("Lease Time".into()); }
+    if obj.protection_period.is_some()             { names.push("Protection Period".into()); }
+    if obj.rotate_interval.is_some()               { names.push("Rotate Interval".into()); }
+    if obj.rotate_offset.is_some()                 { names.push("Rotate Offset".into()); }
+    if obj.rotate_generation.is_some()             { names.push("Rotate Generation".into()); }
+    if obj.usage_limits_total.is_some()            { names.push("Usage Limits".into()); }
+    for k in obj.custom_attributes.keys() { names.push(k.clone()); }
 
     emit_success(deps, correlation_id, "GetAttributeList");
     Ok(GetAttributeListResponse {
@@ -112,7 +160,8 @@ mod tests {
 
 
             key_format_type: None,
-        }).unwrap();
+        ..ObjectRecord::default()
+}).unwrap();
 
         let r = get_attribute_list(&d, GetAttributeListRequest { uid: "u".into() }, "c").unwrap();
         assert!(r.attribute_references.contains(&"Cryptographic Algorithm".to_string()));

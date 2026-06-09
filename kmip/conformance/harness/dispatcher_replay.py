@@ -183,47 +183,163 @@ def find_child(node: TtlvNode, tag: str) -> TtlvNode | None:
     return None
 
 
-_VOLATILE_TAG_FORMS: set[str] = {
-    _norm(t) for t in ("TimeStamp", "ServerCorrelationValue", "ClientCorrelationValue")
+# Each entry below is grounded in a specific item in
+# KMIP Profiles v3.0 §4.1 "Permitted Test Case Variations". The
+# section enumerates which TTLV fields MAY differ between the test
+# transcript's expected response and the server's actual output. Any
+# variation not enumerated there SHALL be deemed non-conformant
+# (§4.1 closing sentence) — so this set is the entire permitted list,
+# nothing invented.
+#
+# Format: tag-name → spec citation. Codec citations point to PDF page
+# numbers in `spec/oasis-kmip-3.0/kmip-profiles-v3.0.pdf`.
+_VARIABLE_ITEM_TAGS: dict[str, str] = {
+    # Envelope fields the main spec §6.4 marks as transient.
+    _norm("TimeStamp"): "§4.1.1 item 6 — Time Stamp",
+    _norm("ServerCorrelationValue"): "§4.1.1 item 18",
+    _norm("ClientCorrelationValue"): "§4.1.1 item 19",
+    # §4.1.1 item 5 — Asynchronous Correlation Value.
+    _norm("AsynchronousCorrelationValue"): "§4.1.1 item 5",
+    # §4.1.1 item 9 — DateTime attributes whose value isn't fixed by the
+    # client request. Each sub-item enumerated explicitly in §4.1.1.9.a-o.
+    _norm("ActivationDate"): "§4.1.1 item 9.a",
+    _norm("ArchiveDate"): "§4.1.1 item 9.b",
+    _norm("BuildDate"): "§4.1.1 item 9.c",
+    _norm("CompromiseDate"): "§4.1.1 item 9.d",
+    _norm("CompromiseOccurrenceDate"): "§4.1.1 item 9.e",
+    _norm("DeactivationDate"): "§4.1.1 item 9.f",
+    _norm("DestroyDate"): "§4.1.1 item 9.g",
+    _norm("InitialDate"): "§4.1.1 item 9.h",
+    _norm("LastChangeDate"): "§4.1.1 item 9.i",
+    _norm("ProtectStopDate"): "§4.1.1 item 9.j",
+    _norm("ProcessStartDate"): "§4.1.1 item 9.k",
+    _norm("RotateDate"): "§4.1.1 item 9.l",
+    _norm("SubmissionDate"): "§4.1.1 item 9.m",
+    _norm("ValidityDate"): "§4.1.1 item 9.n",
+    _norm("OriginalCreationDate"): "§4.1.1 item 9.o",
+    # §4.1.1 item 10 — Digest Value for dynamically-generated objects.
+    _norm("Digest"): "§4.1.1 item 10",
+    # §4.1.1 item 11 — Key Format Type selected by the server.
+    _norm("KeyFormatType"): "§4.1.1 item 11",
+    # §4.1 Response Variations item 5 — Vendor Identification value.
+    _norm("VendorIdentification"): "§4.1 Response Variations item 5",
+    # §4.1.1 items 1-4 — UID family. These are placeholder-bound via
+    # the existing $UNIQUE_IDENTIFIER_n mechanism rather than skipped
+    # outright, but if a test expects a literal UID and we return our
+    # urn:pqctoday:obj:<uuid> form they should compare equal because
+    # the binding harvest captures the actual value.
 }
 
 
 def is_volatile_tag(tag: str) -> bool:
-    """Tags whose values vary run-to-run and aren't worth comparing
-    semantically: server timestamps, server correlation tokens, etc."""
-    return _norm(tag) in _VOLATILE_TAG_FORMS
+    """True iff this TTLV tag is enumerated in §4.1.1 as a Variable
+    Item — values are permitted to differ between expected and actual.
+    """
+    return _norm(tag) in _VARIABLE_ITEM_TAGS
+
+
+# A handful of §4.1.1 Variable Items are ALSO optional-presence per the
+# main KMIP 3.0 spec §6.4 Message-Envelope rules — the server MAY emit
+# them or omit them. Different OASIS XML fixtures pick one form or the
+# other for the same op, so the comparator must tolerate presence/absence
+# in BOTH directions: drop these tags from both sides before structural
+# (child-count) comparison.
+#
+# Restricted on purpose: most Variable Items (e.g. ActivationDate) are
+# value-variable but presence-mandatory when the attribute exists —
+# silently dropping them would mask real dispatcher bugs.
+_OPTIONAL_PRESENCE_TAGS: dict[str, str] = {
+    _norm("ServerCorrelationValue"): "§8.2.2 — optional in ResponseHeader",
+    _norm("ClientCorrelationValue"): "§8.1.2 — optional in RequestHeader",
+}
+
+
+def is_optional_presence(tag: str) -> bool:
+    return _norm(tag) in _OPTIONAL_PRESENCE_TAGS
+
+
+# `kmip-profiles-v3.0` §4.1 Response Variations item 8 — "Server
+# Information – the contents of the structure returned MAY vary…".
+# The structure itself is positionally compared, but its interior is
+# treated as opaque (only the presence of the tag is checked).
+_OPAQUE_STRUCTURE_TAGS: dict[str, str] = {
+    _norm("ServerInformation"): "§4.1 Response Variations item 8",
+}
+
+
+def is_opaque_structure(tag: str) -> bool:
+    return _norm(tag) in _OPAQUE_STRUCTURE_TAGS
 
 
 def compare_responses(
     expected: TtlvNode,
     actual: TtlvNode,
     bindings: Bindings,
+    op_context: str | None = None,
 ) -> tuple[bool, str]:
     """Recursively compare two ResponseMessage ASTs modulo volatile tags
     and bound placeholders.
 
     Bind newly-introduced placeholders along the way so later messages
     in the test see them. Returns ``(ok, diagnostic)``.
+
+    ``op_context`` is the Operation enum value of the enclosing
+    ``BatchItem`` (e.g. "Query", "GetAttributes"). It selects spec-cited
+    container-specific comparison rules per §4.1.1 items 15-16
+    (Query) — every other comparison falls through to byte-exact KAT
+    discipline (§4.1 closing sentence: variations not enumerated SHALL
+    be deemed non-conformant).
     """
     # Tag names compare modulo whitespace/punctuation — spec table uses
     # "Response Message", XML uses "ResponseMessage". Both must normalise
     # to the same alphanumeric form.
     if _norm(expected.tag_name) != _norm(actual.tag_name):
         return False, f"tag {expected.tag_name!r} != {actual.tag_name!r}"
-    if is_volatile_tag(_norm(expected.tag_name)) or is_volatile_tag(expected.tag_name):
+    if is_volatile_tag(expected.tag_name):
         return True, "skipped (volatile)"
 
     if expected.ttlv_type == "Structure":
-        # Compare children in order; KMIP message structures are positional
-        # except for attribute bags (which OASIS happens to order
-        # consistently so we can keep this simple for v0.1).
-        if len(expected.children) != len(actual.children):
+        norm_tag = _norm(expected.tag_name)
+
+        # §4.1 Response Variations item 8 — Server Information structure
+        # contents may vary; presence of the tag is what counts.
+        if is_opaque_structure(expected.tag_name):
+            return True, "ok (opaque structure)"
+
+        # §4.1.1 Response Variations item 3 — ResultMessage is optional;
+        # also detect Operation child to set op_context for descendants.
+        if norm_tag == _norm("BatchItem"):
+            return _compare_batch_item(expected, actual, bindings)
+
+        # §4.1.1 items 15-16 — Query ResponsePayload reports Operation /
+        # ObjectType lists; server's set MAY be a superset of what the
+        # OASIS test enumerates.
+        if norm_tag == _norm("ResponsePayload") and op_context == "Query":
+            return _compare_query_response_payload(expected, actual, bindings)
+
+        # §4.1.1 item 20 (additional attributes server MAY include) +
+        # §4.1.2 item 5 ("any permutation of the order of the required
+        # entries is allowed"). Apply to every Attributes container —
+        # bag semantics, expected ⊆ actual by tag-name.
+        if norm_tag == _norm("Attributes"):
+            return _compare_attributes_container(expected, actual, bindings)
+
+        # Default: positional child compare. KMIP message structures are
+        # positional per the main spec §6 unless §4.1 grants a variation
+        # — see the carve-outs above. Drop optional-presence tags
+        # (ServerCorrelationValue, ClientCorrelationValue) from both
+        # sides first so emit/omit asymmetry doesn't fail the count.
+        exp_children = [c for c in expected.children
+                        if not is_optional_presence(c.tag_name)]
+        act_children = [c for c in actual.children
+                        if not is_optional_presence(c.tag_name)]
+        if len(exp_children) != len(act_children):
             return False, (
-                f"{expected.tag_name}: child count {len(expected.children)} "
-                f"!= {len(actual.children)}"
+                f"{expected.tag_name}: child count {len(exp_children)} "
+                f"!= {len(act_children)}"
             )
-        for ec, ac in zip(expected.children, actual.children):
-            ok, why = compare_responses(ec, ac, bindings)
+        for ec, ac in zip(exp_children, act_children):
+            ok, why = compare_responses(ec, ac, bindings, op_context)
             if not ok:
                 return False, f"{expected.tag_name}/{why}"
         return True, "ok"
@@ -243,6 +359,172 @@ def compare_responses(
     if _values_equal(expected.ttlv_type, ev, av):
         return True, "ok"
     return False, f"{expected.tag_name}: expected {ev!r} got {av!r}"
+
+
+def _compare_batch_item(
+    expected: TtlvNode,
+    actual: TtlvNode,
+    bindings: Bindings,
+) -> tuple[bool, str]:
+    """KMIP Profiles v3.0 §4.1.1 Response Variations item 3 — the
+    ``Result Message`` element is optional in a BatchItem; servers MAY
+    omit it even on failures. Drop it from both sides before positional
+    compare. Also derive op_context from the Operation child so the
+    ResponsePayload comparison knows which §4.1 carve-outs to apply.
+    """
+    op_enum = find_child(expected, "Operation")
+    op_context: str | None = None
+    if op_enum is not None:
+        if isinstance(op_enum.value, str):
+            op_context = op_enum.value
+        elif isinstance(op_enum.value, int):
+            # Decoded actual side gives codepoint; look up the name.
+            from conformance.harness.oasis_codec import table
+            for _name, members in table().enum_name_to_value.items():
+                if _norm(_name) != _norm("Operation"):
+                    continue
+                for k, v in members.items():
+                    if v == op_enum.value:
+                        op_context = k
+                        break
+
+    rm = _norm("ResultMessage")
+    exp_children = [c for c in expected.children if _norm(c.tag_name) != rm]
+    act_children = [c for c in actual.children if _norm(c.tag_name) != rm]
+    if len(exp_children) != len(act_children):
+        return False, (
+            f"BatchItem: child count {len(exp_children)} != {len(act_children)} "
+            f"(after dropping optional ResultMessage per §4.1.1 item 3)"
+        )
+    for ec, ac in zip(exp_children, act_children):
+        ok, why = compare_responses(ec, ac, bindings, op_context)
+        if not ok:
+            return False, f"BatchItem/{why}"
+    return True, "ok"
+
+
+def _compare_attributes_container(
+    expected: TtlvNode,
+    actual: TtlvNode,
+    bindings: Bindings,
+) -> tuple[bool, str]:
+    """KMIP Profiles v3.0 §4.1.1 item 20 + §4.1.2 item 5.
+
+    Item 20 — *Additional attributes MAY be returned by the server*.
+    Item 5 — *any permutation of the order of the required entries is
+    allowed.*
+
+    Bag semantics: every expected child must find a matching actual
+    child (by tag-name + deep-equal value). The actual side MAY include
+    extra attributes; expected must be a subset. Order is irrelevant.
+    Within a matched pair, descendant comparison still follows §4.1
+    rules (volatile tags skipped, etc.).
+    """
+    # Build a name → list-of-nodes index of actual children. We pop
+    # matched candidates as we go so a duplicated expected attribute
+    # demands a duplicated actual.
+    actual_by_name: dict[str, list[TtlvNode]] = {}
+    for c in actual.children:
+        actual_by_name.setdefault(_norm(c.tag_name), []).append(c)
+
+    for ec in expected.children:
+        candidates = actual_by_name.get(_norm(ec.tag_name), [])
+        if not candidates:
+            return False, (
+                f"Attributes: missing expected attribute {ec.tag_name!r} "
+                f"(§4.1.1 item 20 permits server *extras* — not omissions)"
+            )
+        matched_idx: int | None = None
+        for idx, ac in enumerate(candidates):
+            ok, _why = compare_responses(ec, ac, bindings)
+            if ok:
+                matched_idx = idx
+                break
+        if matched_idx is None:
+            return False, (
+                f"Attributes: no actual {ec.tag_name!r} matches expected value"
+            )
+        candidates.pop(matched_idx)
+    return True, "ok"
+
+
+def _compare_query_response_payload(
+    expected: TtlvNode,
+    actual: TtlvNode,
+    bindings: Bindings,
+) -> tuple[bool, str]:
+    """KMIP Profiles v3.0 §4.1.1 items 15-16.
+
+    Item 15 — *Operation Types returned in the Query response MAY be a
+    superset.*
+    Item 16 — *Object Types returned in the Query response MAY be a
+    superset.*
+
+    Set-superset semantics on those two tag-name lists; every other
+    child compares positionally as a normal structure.
+    """
+    superset_tags = {_norm("Operation"), _norm("ObjectType")}
+
+    actual_by_name: dict[str, list[TtlvNode]] = {}
+    for c in actual.children:
+        actual_by_name.setdefault(_norm(c.tag_name), []).append(c)
+    expected_by_name: dict[str, list[TtlvNode]] = {}
+    for c in expected.children:
+        expected_by_name.setdefault(_norm(c.tag_name), []).append(c)
+
+    for list_tag in superset_tags:
+        exp_items = expected_by_name.get(list_tag, [])
+        if not exp_items:
+            continue
+        act_items = actual_by_name.get(list_tag, [])
+        act_values = [a.value for a in act_items]
+        missing = []
+        for e in exp_items:
+            if not any(_enum_match(e.value, av) for av in act_values):
+                missing.append(e.value)
+        if missing:
+            return False, (
+                f"Query ResponsePayload {list_tag}: actual lacks expected "
+                f"{missing!r} (§4.1.1 items 15-16 permit *supersets* — "
+                f"not subsets)"
+            )
+
+    # Compare the remaining non-list children positionally.
+    other_expected = [c for c in expected.children
+                      if _norm(c.tag_name) not in superset_tags]
+    other_actual = [c for c in actual.children
+                    if _norm(c.tag_name) not in superset_tags]
+    if len(other_expected) != len(other_actual):
+        return False, (
+            f"Query ResponsePayload: non-list child count "
+            f"{len(other_expected)} != {len(other_actual)}"
+        )
+    for ec, ac in zip(other_expected, other_actual):
+        ok, why = compare_responses(ec, ac, bindings, "Query")
+        if not ok:
+            return False, f"Query ResponsePayload/{why}"
+    return True, "ok"
+
+
+def _enum_match(expected: Any, actual: Any) -> bool:
+    """True iff two enum leaf values match — accounts for the
+    string-name (XML) vs codepoint (decoded actual) skew."""
+    if expected == actual:
+        return True
+    if isinstance(expected, str) and isinstance(actual, int):
+        from conformance.harness.oasis_codec import table
+        norm_exp = _norm(expected)
+        for _name, members in table().enum_name_to_value.items():
+            if members.get(norm_exp) == actual:
+                return True
+        return False
+    if isinstance(expected, int) and isinstance(actual, str):
+        return _enum_match(actual, expected)
+    # Integer codepoints from XML can be hex strings — try parse.
+    try:
+        return int(str(expected), 0) == int(actual)
+    except (ValueError, TypeError):
+        return False
 
 
 def _values_equal(ttlv_type: str, expected: Any, actual: Any) -> bool:

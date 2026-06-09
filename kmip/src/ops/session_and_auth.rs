@@ -166,7 +166,8 @@ fn persist_simple_record(
         custom_attributes: HashMap::new(),
         key_material: None,
         key_format_type: None,
-    })?;
+    ..ObjectRecord::default()
+})?;
     Ok(uid)
 }
 

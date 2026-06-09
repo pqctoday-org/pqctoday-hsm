@@ -183,7 +183,8 @@ pub fn create(deps: &Deps, req: CreateRequest, correlation_id: &str) -> Result<C
         key_material: None,
 
         key_format_type: None,
-    })?;
+    ..ObjectRecord::default()
+})?;
 
     emit_success(deps, correlation_id, "Create");
 

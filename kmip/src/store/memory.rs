@@ -115,7 +115,8 @@ mod tests {
 
 
             key_format_type: None,
-        }
+        ..ObjectRecord::default()
+}
     }
 
     #[test]

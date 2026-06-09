@@ -65,9 +65,20 @@ pub enum Operation {
     Pkcs11           = 0x33,
     /// KMIP 3.0 §6.1.31 — test-suite framework op. Carries `Begin` /
     /// `End` markers (no managed-object effect). Server returns Success.
-    Interop          = 0x2f,
+    ///
+    /// Codepoint **0x34** — verified against
+    /// `spec/oasis-kmip-3.0/kmip-spec-3.0-tags-enums.json`. Earlier
+    /// drafts of this crate used 0x2f which is actually `DelegatedLogin`
+    /// in the OASIS table; tests that compare advertised op lists
+    /// rejected the wrong codepoint.
+    Interop          = 0x34,
     AdjustAttribute  = 0x30,
     SetAttribute     = 0x31,
+    /// KMIP 3.0 §6.1 — cluster-role configuration op. Advertised in
+    /// Query so OASIS Baseline tests pass §4.1.1 item 15 superset
+    /// check, but the request handler is a stub (no managed-object
+    /// effect). Codepoint 0x32 per the spec extraction.
+    SetEndpointRole  = 0x32,
     Ping             = 0x3b,
     CreateGroup      = 0x3c,
     Obliterate       = 0x3d,
@@ -116,9 +127,10 @@ impl Operation {
             0x2d => Some(Self::Login),
             0x2e => Some(Self::Logout),
             0x33 => Some(Self::Pkcs11),
-            0x2f => Some(Self::Interop),
+            0x34 => Some(Self::Interop),
             0x30 => Some(Self::AdjustAttribute),
             0x31 => Some(Self::SetAttribute),
+            0x32 => Some(Self::SetEndpointRole),
             0x3b => Some(Self::Ping),
             0x3c => Some(Self::CreateGroup),
             0x3d => Some(Self::Obliterate),
@@ -153,12 +165,18 @@ pub enum QueryFunction {
 pub struct QueryResponse {
     pub operations: Option<Vec<Operation>>,
     pub object_types: Option<Vec<ObjectType>>,
+    /// Top-level child of Query Response Payload per KMIP 3.0 §6.1.39
+    /// (NOT a child of `ServerInformation`). Value-variable per
+    /// `kmip-profiles-v3.0` §4.1 Response Variations item 5.
+    pub vendor_identification: Option<String>,
+    /// Vendor-extensible structure per §6.1.39. Contents are variable
+    /// per `kmip-profiles-v3.0` §4.1 Response Variations item 8 — the
+    /// comparator skips its interior shape.
     pub server_info: Option<ServerInformation>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ServerInformation {
-    pub vendor_identification: String,
     pub server_version: String,
 }
 

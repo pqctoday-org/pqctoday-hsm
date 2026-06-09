@@ -89,19 +89,33 @@ pub struct ResponseMessage {
 }
 
 /// §8.2.2 Response Header — minimal v0.1 shape.
+///
+/// `ServerCorrelationValue` is opaque server-generated text included in
+/// every response — KMIP Profiles v3.0 §5.1.2 item 11.l ("Baseline
+/// Server" capability set) requires support; §4.1.1 item 18 designates
+/// its value as a Permitted Test Case Variation so the comparator
+/// accepts whatever we emit. We currently emit a monotonic
+/// `pqctoday-<unix-nanos>` token; clients echo it via Client
+/// Correlation Value if they choose.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ResponseHeader {
     pub protocol_version_major: i32,
     pub protocol_version_minor: i32,
     pub time_stamp: OffsetDateTime,
+    pub server_correlation_value: Option<String>,
 }
 
 impl ResponseHeader {
     pub fn v3_now() -> Self {
+        let now = OffsetDateTime::now_utc();
         Self {
             protocol_version_major: KMIP_VERSION_MAJOR,
             protocol_version_minor: KMIP_VERSION_MINOR,
-            time_stamp: OffsetDateTime::now_utc(),
+            time_stamp: now,
+            server_correlation_value: Some(format!(
+                "pqctoday-{}",
+                now.unix_timestamp_nanos()
+            )),
         }
     }
 }

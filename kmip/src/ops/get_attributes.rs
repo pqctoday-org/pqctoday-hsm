@@ -83,6 +83,12 @@ pub fn get_attributes(
 }
 
 /// Project the `ObjectRecord` fields into a flat KMIP `Attribute` list.
+///
+/// Honours **KMIP Profiles v3.0 §5.1.2 (Baseline Server)** — every
+/// attribute the profile mandates is surfaced if the record carries a
+/// value for it. Optional fields are only emitted when populated so the
+/// per-test count comparisons see meaningful counts (per §4.1.1 item 20
+/// extras are allowed but we don't gratuitously inflate either).
 fn attributes_from_record(r: &ObjectRecord) -> Vec<Attribute> {
     let mut out = vec![
         Attribute::UniqueIdentifier(r.uid.clone()),
@@ -90,9 +96,58 @@ fn attributes_from_record(r: &ObjectRecord) -> Vec<Attribute> {
         Attribute::CryptographicAlgorithm(r.algorithm),
         Attribute::CryptographicUsageMask(r.usage_mask),
         Attribute::State(r.state),
+        Attribute::InitialDate(r.initial_date.unix_timestamp()),
     ];
     if r.cryptographic_length > 0 {
         out.push(Attribute::CryptographicLength(r.cryptographic_length));
+    }
+    if let Some(n) = &r.name { out.push(Attribute::Name(n.clone())); }
+    if let Some(d) = r.activation_date { out.push(Attribute::ActivationDate(d.unix_timestamp())); }
+    if let Some(d) = r.deactivation_date { out.push(Attribute::DeactivationDate(d.unix_timestamp())); }
+    if let Some(d) = r.destroy_date { out.push(Attribute::DestroyDate(d.unix_timestamp())); }
+    if let Some(d) = r.compromise_date { out.push(Attribute::CompromiseDate(d.unix_timestamp())); }
+    if let Some(d) = r.compromise_occurrence_date { out.push(Attribute::CompromiseOccurrenceDate(d.unix_timestamp())); }
+    if let Some(d) = r.last_change_date { out.push(Attribute::LastChangeDate(d.unix_timestamp())); }
+    if let Some(d) = r.original_creation_date { out.push(Attribute::OriginalCreationDate(d.unix_timestamp())); }
+    if let Some(d) = r.process_start_date { out.push(Attribute::ProcessStartDate(d.unix_timestamp())); }
+    if let Some(d) = r.protect_stop_date { out.push(Attribute::ProtectStopDate(d.unix_timestamp())); }
+    if let Some(d) = r.rotate_date { out.push(Attribute::RotateDate(d.unix_timestamp())); }
+    if let Some(b) = r.sensitive { out.push(Attribute::Sensitive(b)); }
+    if let Some(b) = r.always_sensitive { out.push(Attribute::AlwaysSensitive(b)); }
+    if let Some(b) = r.extractable { out.push(Attribute::Extractable(b)); }
+    if let Some(b) = r.never_extractable { out.push(Attribute::NeverExtractable(b)); }
+    if let Some(b) = r.fresh { out.push(Attribute::Fresh(b)); }
+    if let Some(b) = r.key_value_present { out.push(Attribute::KeyValuePresent(b)); }
+    if let Some(b) = r.quantum_safe { out.push(Attribute::QuantumSafe(b)); }
+    if let Some(b) = r.rotate_automatic { out.push(Attribute::RotateAutomatic(b)); }
+    if let Some(s) = &r.short_unique_identifier { out.push(Attribute::ShortUniqueIdentifier(s.clone())); }
+    if let Some(s) = &r.alternative_name { out.push(Attribute::AlternativeName(s.clone())); }
+    if let Some(s) = &r.comment { out.push(Attribute::Comment(s.clone())); }
+    if let Some(s) = &r.description { out.push(Attribute::Description(s.clone())); }
+    if let Some(s) = &r.contact_information { out.push(Attribute::ContactInformation(s.clone())); }
+    if let Some(s) = &r.object_class { out.push(Attribute::ObjectClass(s.clone())); }
+    if let Some(s) = &r.key_value_location { out.push(Attribute::KeyValueLocation(s.clone())); }
+    if let Some(s) = &r.x509_certificate_identifier { out.push(Attribute::X509CertificateIdentifier(s.clone())); }
+    if let Some(s) = &r.x509_certificate_issuer { out.push(Attribute::X509CertificateIssuer(s.clone())); }
+    if let Some(s) = &r.x509_certificate_subject { out.push(Attribute::X509CertificateSubject(s.clone())); }
+    if let Some(s) = &r.rotate_name { out.push(Attribute::RotateName(s.clone())); }
+    if let Some(v) = r.certificate_type { out.push(Attribute::CertificateType(v)); }
+    if let Some(v) = r.digital_signature_algorithm { out.push(Attribute::DigitalSignatureAlgorithm(v)); }
+    if let Some(v) = r.nist_key_type { out.push(Attribute::NistKeyType(v)); }
+    if let Some(v) = r.protection_level { out.push(Attribute::ProtectionLevel(v)); }
+    if let Some(v) = r.revocation_reason_code { out.push(Attribute::RevocationReasonCode(v)); }
+    if let Some(v) = r.deactivation_reason_code { out.push(Attribute::DeactivationReasonCode(v)); }
+    if let Some(v) = r.key_format_type { out.push(Attribute::KeyFormatType(v)); }
+    if let Some(n) = r.certificate_length { out.push(Attribute::CertificateLength(n)); }
+    if let Some(n) = r.lease_time { out.push(Attribute::LeaseTime(n)); }
+    if let Some(n) = r.protection_period { out.push(Attribute::ProtectionPeriod(n)); }
+    if let Some(n) = r.rotate_interval { out.push(Attribute::RotateInterval(n)); }
+    if let Some(n) = r.rotate_offset { out.push(Attribute::RotateOffset(n)); }
+    if let Some(n) = r.rotate_generation { out.push(Attribute::RotateGeneration(n)); }
+    if let Some(n) = r.usage_limits_total { out.push(Attribute::UsageLimitsTotal(n)); }
+    // Custom attributes — surface each as Attribute::Custom.
+    for (name, value) in &r.custom_attributes {
+        out.push(Attribute::Custom { name: name.clone(), value: value.clone() });
     }
     let _ = UsageMask::empty(); // touch import so future expansion compiles cleanly
     out
@@ -100,7 +155,14 @@ fn attributes_from_record(r: &ObjectRecord) -> Vec<Attribute> {
 
 fn matches_name(attr: &Attribute, name: &str) -> bool {
     let canonical: String = name.chars().filter(|c| c.is_alphanumeric()).collect();
-    let attr_name = match attr {
+    canonical == canonical_attribute_name(attr)
+}
+
+/// Canonical alphanumeric-only attribute name matching the spec's tag
+/// form. Used by the reference-filter logic in GetAttributes and the
+/// GetAttributeList name surface.
+pub(crate) fn canonical_attribute_name(attr: &Attribute) -> &'static str {
+    match attr {
         Attribute::CryptographicAlgorithm(_) => "CryptographicAlgorithm",
         Attribute::CryptographicLength(_)    => "CryptographicLength",
         Attribute::CryptographicUsageMask(_) => "CryptographicUsageMask",
@@ -109,8 +171,51 @@ fn matches_name(attr: &Attribute, name: &str) -> bool {
         Attribute::UniqueIdentifier(_)       => "UniqueIdentifier",
         Attribute::Name(_)                   => "Name",
         Attribute::Custom { .. }             => "Custom",
-    };
-    canonical == attr_name
+        Attribute::InitialDate(_)            => "InitialDate",
+        Attribute::ActivationDate(_)         => "ActivationDate",
+        Attribute::DeactivationDate(_)       => "DeactivationDate",
+        Attribute::DestroyDate(_)            => "DestroyDate",
+        Attribute::CompromiseDate(_)         => "CompromiseDate",
+        Attribute::CompromiseOccurrenceDate(_) => "CompromiseOccurrenceDate",
+        Attribute::LastChangeDate(_)         => "LastChangeDate",
+        Attribute::OriginalCreationDate(_)   => "OriginalCreationDate",
+        Attribute::ProcessStartDate(_)       => "ProcessStartDate",
+        Attribute::ProtectStopDate(_)        => "ProtectStopDate",
+        Attribute::RotateDate(_)             => "RotateDate",
+        Attribute::Sensitive(_)              => "Sensitive",
+        Attribute::AlwaysSensitive(_)        => "AlwaysSensitive",
+        Attribute::Extractable(_)            => "Extractable",
+        Attribute::NeverExtractable(_)       => "NeverExtractable",
+        Attribute::Fresh(_)                  => "Fresh",
+        Attribute::KeyValuePresent(_)        => "KeyValuePresent",
+        Attribute::QuantumSafe(_)            => "QuantumSafe",
+        Attribute::RotateAutomatic(_)        => "RotateAutomatic",
+        Attribute::ShortUniqueIdentifier(_)  => "ShortUniqueIdentifier",
+        Attribute::AlternativeName(_)        => "AlternativeName",
+        Attribute::Comment(_)                => "Comment",
+        Attribute::Description(_)            => "Description",
+        Attribute::ContactInformation(_)     => "ContactInformation",
+        Attribute::ObjectClass(_)            => "ObjectClass",
+        Attribute::KeyValueLocation(_)       => "KeyValueLocation",
+        Attribute::X509CertificateIdentifier(_) => "X509CertificateIdentifier",
+        Attribute::X509CertificateIssuer(_)  => "X509CertificateIssuer",
+        Attribute::X509CertificateSubject(_) => "X509CertificateSubject",
+        Attribute::RotateName(_)             => "RotateName",
+        Attribute::CertificateType(_)        => "CertificateType",
+        Attribute::DigitalSignatureAlgorithm(_) => "DigitalSignatureAlgorithm",
+        Attribute::NistKeyType(_)            => "NistKeyType",
+        Attribute::ProtectionLevel(_)        => "ProtectionLevel",
+        Attribute::RevocationReasonCode(_)   => "RevocationReason",
+        Attribute::DeactivationReasonCode(_) => "DeactivationReason",
+        Attribute::KeyFormatType(_)          => "KeyFormatType",
+        Attribute::CertificateLength(_)      => "CertificateLength",
+        Attribute::LeaseTime(_)              => "LeaseTime",
+        Attribute::ProtectionPeriod(_)       => "ProtectionPeriod",
+        Attribute::RotateInterval(_)         => "RotateInterval",
+        Attribute::RotateOffset(_)           => "RotateOffset",
+        Attribute::RotateGeneration(_)       => "RotateGeneration",
+        Attribute::UsageLimitsTotal(_)       => "UsageLimits",
+    }
 }
 
 #[cfg(test)]
@@ -157,7 +262,8 @@ mod tests {
 
 
             key_format_type: None,
-        }).unwrap();
+        ..ObjectRecord::default()
+}).unwrap();
     }
 
     #[test]

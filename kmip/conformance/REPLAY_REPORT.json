@@ -1,8 +1,8 @@
 {
-  "generated_at": 1780972785,
+  "generated_at": 1780978365,
   "summary": {
-    "pass": 5,
-    "fail": 97,
+    "pass": 11,
+    "fail": 91,
     "error": 0,
     "skip_op": 0,
     "skip_parse": 0,
@@ -13,7 +13,7 @@
     {
       "name": "AKLC-M-1-30.xml",
       "status": "FAIL",
-      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: child count 12 != 6",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: no actual 'CryptographicUsageMask' matches expected value",
       "ops_used": [
         "CreateKeyPair",
         "Destroy",
@@ -23,7 +23,7 @@
     {
       "name": "AKLC-M-2-30.xml",
       "status": "FAIL",
-      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: child count 11 != 6",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: no actual 'CryptographicUsageMask' matches expected value",
       "ops_used": [
         "Activate",
         "CreateKeyPair",
@@ -35,7 +35,7 @@
     {
       "name": "AKLC-M-3-30.xml",
       "status": "FAIL",
-      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: child count 11 != 6",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: no actual 'CryptographicUsageMask' matches expected value",
       "ops_used": [
         "Activate",
         "CreateKeyPair",
@@ -74,7 +74,7 @@
     {
       "name": "BL-M-1-30.xml",
       "status": "FAIL",
-      "detail": "msg #0: response mismatch: ResponseMessage/ResponseHeader: child count 3 != 2",
+      "detail": "msg #3: response mismatch: ResponseMessage/BatchItem/ResponsePayload/SymmetricKey/KeyBlock/KeyValue/KeyMaterial: expected '0123456789abcdef0123456789abcdef' got '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'",
       "ops_used": [
         "Destroy",
         "Get",
@@ -87,7 +87,7 @@
     {
       "name": "BL-M-10-30.xml",
       "status": "FAIL",
-      "detail": "msg #0: response mismatch: ResponseMessage/ResponseHeader: child count 3 != 2",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1",
       "ops_used": [
         "GetAttributes",
         "Interop",
@@ -98,7 +98,7 @@
     {
       "name": "BL-M-11-30.xml",
       "status": "FAIL",
-      "detail": "msg #0: response mismatch: ResponseMessage/ResponseHeader: child count 3 != 2",
+      "detail": "msg #2: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1",
       "ops_used": [
         "GetAttributes",
         "Interop",
@@ -109,7 +109,7 @@
     {
       "name": "BL-M-12-30.xml",
       "status": "FAIL",
-      "detail": "msg #0: response mismatch: ResponseMessage/ResponseHeader: child count 3 != 2",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem: child count 3 != 2 (after dropping optional ResultMessage per \u00a74.1.1 item 3)",
       "ops_used": [
         "Get",
         "GetAttributes",
@@ -120,7 +120,7 @@
     {
       "name": "BL-M-13-30.xml",
       "status": "FAIL",
-      "detail": "msg #0: response mismatch: ResponseMessage/ResponseHeader: child count 3 != 2",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem: child count 3 != 2 (after dropping optional ResultMessage per \u00a74.1.1 item 3)",
       "ops_used": [
         "Get",
         "GetAttributes",
@@ -131,7 +131,7 @@
     {
       "name": "BL-M-14-30.xml",
       "status": "FAIL",
-      "detail": "msg #0: response mismatch: ResponseMessage/ResponseHeader: child count 3 != 2",
+      "detail": "msg #5: response mismatch: ResponseMessage/BatchItem/ResponsePayload/SymmetricKey/KeyBlock/KeyValue/KeyMaterial: expected '0123456789abcdef0123456789abcdef' got '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'",
       "ops_used": [
         "Destroy",
         "Get",
@@ -144,7 +144,7 @@
     {
       "name": "BL-M-15-30.xml",
       "status": "FAIL",
-      "detail": "msg #0: response mismatch: ResponseMessage/ResponseHeader: child count 3 != 2",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1",
       "ops_used": [
         "CreateCredential",
         "Interop"
@@ -153,7 +153,7 @@
     {
       "name": "BL-M-16-30.xml",
       "status": "FAIL",
-      "detail": "msg #0: response mismatch: ResponseMessage/ResponseHeader: child count 3 != 2",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1",
       "ops_used": [
         "CreateCredential",
         "Interop"
@@ -162,7 +162,7 @@
     {
       "name": "BL-M-17-30.xml",
       "status": "FAIL",
-      "detail": "msg #0: response mismatch: ResponseMessage/ResponseHeader: child count 3 != 2",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1",
       "ops_used": [
         "CreateCredential",
         "CreateUser",
@@ -172,7 +172,7 @@
     {
       "name": "BL-M-18-30.xml",
       "status": "FAIL",
-      "detail": "msg #0: response mismatch: ResponseMessage/ResponseHeader: child count 3 != 2",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1",
       "ops_used": [
         "CreateCredential",
         "CreateUser",
@@ -182,7 +182,7 @@
     {
       "name": "BL-M-19-30.xml",
       "status": "FAIL",
-      "detail": "msg #0: response mismatch: ResponseMessage/ResponseHeader: child count 3 != 2",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1",
       "ops_used": [
         "CreateCredential",
         "CreateUser",
@@ -192,7 +192,7 @@
     {
       "name": "BL-M-2-30.xml",
       "status": "FAIL",
-      "detail": "msg #0: response mismatch: ResponseMessage/ResponseHeader: child count 3 != 2",
+      "detail": "msg #2: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'OperationUndone' got 0",
       "ops_used": [
         "Activate",
         "Check",
@@ -203,8 +203,8 @@
     },
     {
       "name": "BL-M-20-30.xml",
-      "status": "FAIL",
-      "detail": "msg #0: response mismatch: ResponseMessage/ResponseHeader: child count 3 != 2",
+      "status": "PASS",
+      "detail": "",
       "ops_used": [
         "GetAttributes",
         "Interop",
@@ -214,8 +214,8 @@
     },
     {
       "name": "BL-M-21-30.xml",
-      "status": "FAIL",
-      "detail": "msg #0: response mismatch: ResponseMessage/ResponseHeader: child count 3 != 2",
+      "status": "PASS",
+      "detail": "",
       "ops_used": [
         "CreateGroup",
         "Interop"
@@ -224,7 +224,7 @@
     {
       "name": "BL-M-3-30.xml",
       "status": "FAIL",
-      "detail": "msg #0: response mismatch: ResponseMessage/ResponseHeader: child count 3 != 2",
+      "detail": "msg #2: response mismatch: ResponseMessage/BatchItem/ResponsePayload/SymmetricKey/KeyBlock/KeyValue/KeyMaterial: child count 1 != 0",
       "ops_used": [
         "Check",
         "Get",
@@ -236,7 +236,7 @@
     {
       "name": "BL-M-4-30.xml",
       "status": "FAIL",
-      "detail": "msg #0: response mismatch: ResponseMessage/ResponseHeader: child count 3 != 2",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1",
       "ops_used": [
         "Destroy",
         "Get",
@@ -249,7 +249,7 @@
     {
       "name": "BL-M-5-30.xml",
       "status": "FAIL",
-      "detail": "msg #0: response mismatch: ResponseMessage/ResponseHeader: child count 3 != 2",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem: child count 3 != 2 (after dropping optional ResultMessage per \u00a74.1.1 item 3)",
       "ops_used": [
         "AddAttribute",
         "Get",
@@ -261,7 +261,7 @@
     {
       "name": "BL-M-6-30.xml",
       "status": "FAIL",
-      "detail": "msg #0: response mismatch: ResponseMessage/ResponseHeader: child count 3 != 2",
+      "detail": "msg #2: response mismatch: ResponseMessage/BatchItem/ResponsePayload/PublicKey/KeyBlock/KeyValue/KeyMaterial: expected '3082010a0282010100ab7f161c0042496ccd6c6d4dadb919973435357776003acf54b7af1e440afb80b64a8755f8002cfeba6b184540a2d66086d74648346d75b8d71812b205387c0f6583bc4d7dc7ec114f3b176b7957c422e7d03fc6267fa2a6f89b9bee9e60a1d7c2d833e5a5f4bb0b1434f4e795a41100f8aa214900df8b65089f98135b1c67b701675abdbc7d5721aac9d14a7f081fcec80b64e8a0ecc8295353c795328abf70e1b42e7bb8b7f4e8ac8c810cdb66e3d21126eba8da7d0ca34142cb76f91f013da809e9c1b7ae64c54130fbc21d80e9c2cb06c5c8d7cce8946a9ac99b1c2815c3612a29a82d73a1f99374fe30e54951662a6eda29c6fc411335d5dc7426b0f6050203010001' got '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'",
       "ops_used": [
         "Get",
         "GetAttributes",
@@ -272,7 +272,7 @@
     {
       "name": "BL-M-7-30.xml",
       "status": "FAIL",
-      "detail": "msg #0: response mismatch: ResponseMessage/ResponseHeader: child count 3 != 2",
+      "detail": "msg #2: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'OperationFailed' got 0",
       "ops_used": [
         "GetAttributes",
         "Interop",
@@ -284,7 +284,7 @@
     {
       "name": "BL-M-8-30.xml",
       "status": "FAIL",
-      "detail": "msg #0: response mismatch: ResponseMessage/ResponseHeader: child count 3 != 2",
+      "detail": "msg #2: response mismatch: ResponseMessage/BatchItem/ResultReason: expected 'NonUniqueNameAttribute' got 7",
       "ops_used": [
         "AddAttribute",
         "Destroy",
@@ -296,8 +296,8 @@
     },
     {
       "name": "BL-M-9-30.xml",
-      "status": "FAIL",
-      "detail": "msg #0: response mismatch: ResponseMessage/ResponseHeader: child count 3 != 2",
+      "status": "PASS",
+      "detail": "",
       "ops_used": [
         "Destroy",
         "GetAttributes",
@@ -308,7 +308,7 @@
     {
       "name": "CS-AC-M-1-30.xml",
       "status": "FAIL",
-      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem: child count 3 != 4",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1",
       "ops_used": [
         "Destroy",
         "Register",
@@ -319,7 +319,7 @@
     {
       "name": "CS-AC-M-2-30.xml",
       "status": "FAIL",
-      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem: child count 3 != 4",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1",
       "ops_used": [
         "Destroy",
         "Register",
@@ -330,7 +330,7 @@
     {
       "name": "CS-AC-M-3-30.xml",
       "status": "FAIL",
-      "detail": "msg #2: response mismatch: ResponseMessage/BatchItem: child count 3 != 4",
+      "detail": "msg #2: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1",
       "ops_used": [
         "Destroy",
         "Register",
@@ -342,7 +342,7 @@
     {
       "name": "CS-AC-M-4-30.xml",
       "status": "FAIL",
-      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem: child count 3 != 4",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1",
       "ops_used": [
         "Destroy",
         "MAC",
@@ -353,7 +353,7 @@
     {
       "name": "CS-AC-M-5-30.xml",
       "status": "FAIL",
-      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem: child count 3 != 4",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1",
       "ops_used": [
         "Destroy",
         "MACVerify",
@@ -364,7 +364,7 @@
     {
       "name": "CS-AC-M-6-30.xml",
       "status": "FAIL",
-      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem: child count 3 != 4",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1",
       "ops_used": [
         "Destroy",
         "MAC",
@@ -396,7 +396,7 @@
     {
       "name": "CS-AC-M-OAEP-1-30.xml",
       "status": "FAIL",
-      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem: child count 3 != 4",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1",
       "ops_used": [
         "Destroy",
         "Encrypt",
@@ -407,7 +407,7 @@
     {
       "name": "CS-AC-M-OAEP-10-30.xml",
       "status": "FAIL",
-      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem: child count 3 != 4",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1",
       "ops_used": [
         "Decrypt",
         "Destroy",
@@ -418,7 +418,7 @@
     {
       "name": "CS-AC-M-OAEP-2-30.xml",
       "status": "FAIL",
-      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem: child count 3 != 4",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1",
       "ops_used": [
         "Decrypt",
         "Destroy",
@@ -429,7 +429,7 @@
     {
       "name": "CS-AC-M-OAEP-3-30.xml",
       "status": "FAIL",
-      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem: child count 3 != 4",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1",
       "ops_used": [
         "Destroy",
         "Encrypt",
@@ -440,7 +440,7 @@
     {
       "name": "CS-AC-M-OAEP-4-30.xml",
       "status": "FAIL",
-      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem: child count 3 != 4",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1",
       "ops_used": [
         "Decrypt",
         "Destroy",
@@ -451,7 +451,7 @@
     {
       "name": "CS-AC-M-OAEP-5-30.xml",
       "status": "FAIL",
-      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem: child count 3 != 4",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1",
       "ops_used": [
         "Destroy",
         "Encrypt",
@@ -462,7 +462,7 @@
     {
       "name": "CS-AC-M-OAEP-6-30.xml",
       "status": "FAIL",
-      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem: child count 3 != 4",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1",
       "ops_used": [
         "Decrypt",
         "Destroy",
@@ -473,7 +473,7 @@
     {
       "name": "CS-AC-M-OAEP-7-30.xml",
       "status": "FAIL",
-      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem: child count 3 != 4",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1",
       "ops_used": [
         "Destroy",
         "Encrypt",
@@ -484,7 +484,7 @@
     {
       "name": "CS-AC-M-OAEP-8-30.xml",
       "status": "FAIL",
-      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem: child count 3 != 4",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1",
       "ops_used": [
         "Decrypt",
         "Destroy",
@@ -495,7 +495,7 @@
     {
       "name": "CS-AC-M-OAEP-9-30.xml",
       "status": "FAIL",
-      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem: child count 3 != 4",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1",
       "ops_used": [
         "Destroy",
         "Encrypt",
@@ -506,7 +506,7 @@
     {
       "name": "CS-BC-M-1-30.xml",
       "status": "FAIL",
-      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem: child count 3 != 4",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1",
       "ops_used": [
         "Create",
         "Destroy",
@@ -517,7 +517,7 @@
     {
       "name": "CS-BC-M-10-30.xml",
       "status": "FAIL",
-      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem: child count 3 != 4",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1",
       "ops_used": [
         "Decrypt",
         "Destroy",
@@ -529,7 +529,7 @@
     {
       "name": "CS-BC-M-11-30.xml",
       "status": "FAIL",
-      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem: child count 3 != 4",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1",
       "ops_used": [
         "Decrypt",
         "Destroy",
@@ -541,7 +541,7 @@
     {
       "name": "CS-BC-M-12-30.xml",
       "status": "FAIL",
-      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem: child count 3 != 4",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1",
       "ops_used": [
         "Decrypt",
         "Destroy",
@@ -553,7 +553,7 @@
     {
       "name": "CS-BC-M-13-30.xml",
       "status": "FAIL",
-      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem: child count 3 != 4",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1",
       "ops_used": [
         "Decrypt",
         "Destroy",
@@ -577,7 +577,7 @@
     {
       "name": "CS-BC-M-2-30.xml",
       "status": "FAIL",
-      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem: child count 3 != 4",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1",
       "ops_used": [
         "Create",
         "Decrypt",
@@ -588,7 +588,7 @@
     {
       "name": "CS-BC-M-3-30.xml",
       "status": "FAIL",
-      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem: child count 3 != 4",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1",
       "ops_used": [
         "Create",
         "Decrypt",
@@ -600,7 +600,7 @@
     {
       "name": "CS-BC-M-4-30.xml",
       "status": "FAIL",
-      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem: child count 3 != 4",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1",
       "ops_used": [
         "Destroy",
         "Encrypt",
@@ -611,7 +611,7 @@
     {
       "name": "CS-BC-M-5-30.xml",
       "status": "FAIL",
-      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem: child count 3 != 4",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1",
       "ops_used": [
         "Decrypt",
         "Destroy",
@@ -622,7 +622,7 @@
     {
       "name": "CS-BC-M-6-30.xml",
       "status": "FAIL",
-      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem: child count 3 != 4",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1",
       "ops_used": [
         "Decrypt",
         "Destroy",
@@ -634,7 +634,7 @@
     {
       "name": "CS-BC-M-7-30.xml",
       "status": "FAIL",
-      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem: child count 3 != 4",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1",
       "ops_used": [
         "Destroy",
         "Encrypt",
@@ -645,7 +645,7 @@
     {
       "name": "CS-BC-M-8-30.xml",
       "status": "FAIL",
-      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem: child count 3 != 4",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1",
       "ops_used": [
         "Decrypt",
         "Destroy",
@@ -657,7 +657,7 @@
     {
       "name": "CS-BC-M-9-30.xml",
       "status": "FAIL",
-      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem: child count 3 != 4",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1",
       "ops_used": [
         "Decrypt",
         "Destroy",
@@ -669,7 +669,7 @@
     {
       "name": "CS-BC-M-CHACHA20-1-30.xml",
       "status": "FAIL",
-      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem/tag 'Operation' != 'Result Status'",
+      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem: child count 3 != 2 (after dropping optional ResultMessage per \u00a74.1.1 item 3)",
       "ops_used": [
         "Decrypt",
         "Destroy",
@@ -681,7 +681,7 @@
     {
       "name": "CS-BC-M-CHACHA20-2-30.xml",
       "status": "FAIL",
-      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem/tag 'Operation' != 'Result Status'",
+      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem: child count 3 != 2 (after dropping optional ResultMessage per \u00a74.1.1 item 3)",
       "ops_used": [
         "Decrypt",
         "Destroy",
@@ -693,7 +693,7 @@
     {
       "name": "CS-BC-M-CHACHA20-3-30.xml",
       "status": "FAIL",
-      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem/tag 'Operation' != 'Result Status'",
+      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem: child count 3 != 2 (after dropping optional ResultMessage per \u00a74.1.1 item 3)",
       "ops_used": [
         "Decrypt",
         "Destroy",
@@ -705,7 +705,7 @@
     {
       "name": "CS-BC-M-CHACHA20-4-30.xml",
       "status": "FAIL",
-      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem/tag 'Operation' != 'Result Status'",
+      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem: child count 3 != 2 (after dropping optional ResultMessage per \u00a74.1.1 item 3)",
       "ops_used": [
         "Decrypt",
         "Destroy",
@@ -717,7 +717,7 @@
     {
       "name": "CS-BC-M-CHACHA20POLY1305-1-30.xml",
       "status": "FAIL",
-      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem/tag 'Operation' != 'Result Status'",
+      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem: child count 3 != 2 (after dropping optional ResultMessage per \u00a74.1.1 item 3)",
       "ops_used": [
         "Decrypt",
         "Destroy",
@@ -729,7 +729,7 @@
     {
       "name": "CS-BC-M-GCM-1-30.xml",
       "status": "FAIL",
-      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem: child count 3 != 4",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1",
       "ops_used": [
         "Decrypt",
         "Destroy",
@@ -741,7 +741,7 @@
     {
       "name": "CS-BC-M-GCM-2-30.xml",
       "status": "FAIL",
-      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem: child count 3 != 4",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1",
       "ops_used": [
         "Decrypt",
         "Destroy",
@@ -753,7 +753,7 @@
     {
       "name": "CS-BC-M-GCM-3-30.xml",
       "status": "FAIL",
-      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem: child count 3 != 4",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1",
       "ops_used": [
         "Destroy",
         "Encrypt",
@@ -772,7 +772,7 @@
     {
       "name": "MSGENC-HTTPS-M-1-30.xml",
       "status": "FAIL",
-      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem: child count 4 != 3",
+      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'OperationFailed' got 0",
       "ops_used": [
         "Query"
       ]
@@ -780,7 +780,7 @@
     {
       "name": "MSGENC-JSON-M-1-30.xml",
       "status": "FAIL",
-      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem: child count 4 != 3",
+      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'OperationFailed' got 0",
       "ops_used": [
         "Query"
       ]
@@ -788,7 +788,7 @@
     {
       "name": "MSGENC-XML-M-1-30.xml",
       "status": "FAIL",
-      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem: child count 4 != 3",
+      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'OperationFailed' got 0",
       "ops_used": [
         "Query"
       ]
@@ -796,7 +796,7 @@
     {
       "name": "OMOS-M-1-30.xml",
       "status": "FAIL",
-      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem/tag 'Operation' != 'Result Status'",
+      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem: child count 3 != 2 (after dropping optional ResultMessage per \u00a74.1.1 item 3)",
       "ops_used": [
         "Destroy",
         "Register"
@@ -812,8 +812,8 @@
     },
     {
       "name": "QS-M-1-30.xml",
-      "status": "FAIL",
-      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 21 != 42",
+      "status": "PASS",
+      "detail": "",
       "ops_used": [
         "Query"
       ]
@@ -821,15 +821,15 @@
     {
       "name": "QS-M-2-30.xml",
       "status": "FAIL",
-      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem: child count 4 != 3",
+      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'OperationFailed' got 0",
       "ops_used": [
         "Create"
       ]
     },
     {
       "name": "SASED-M-1-30.xml",
-      "status": "FAIL",
-      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 11 != 46",
+      "status": "PASS",
+      "detail": "",
       "ops_used": [
         "Query"
       ]
@@ -837,7 +837,7 @@
     {
       "name": "SASED-M-2-30.xml",
       "status": "FAIL",
-      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem: child count 3 != 4",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1",
       "ops_used": [
         "Locate",
         "Register"
@@ -866,7 +866,7 @@
     {
       "name": "SKFF-M-10-30.xml",
       "status": "FAIL",
-      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem: child count 3 != 4",
+      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1",
       "ops_used": [
         "Activate",
         "AddAttribute",
@@ -884,7 +884,7 @@
     {
       "name": "SKFF-M-11-30.xml",
       "status": "FAIL",
-      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: child count 2 != 1",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: missing expected attribute 'RandomNumberGenerator' (\u00a74.1.1 item 20 permits server *extras* \u2014 not omissions)",
       "ops_used": [
         "Activate",
         "AddAttribute",
@@ -902,7 +902,7 @@
     {
       "name": "SKFF-M-12-30.xml",
       "status": "FAIL",
-      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem/tag 'Operation' != 'Result Status'",
+      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem: child count 3 != 2 (after dropping optional ResultMessage per \u00a74.1.1 item 3)",
       "ops_used": [
         "Activate",
         "AddAttribute",
@@ -920,7 +920,7 @@
     {
       "name": "SKFF-M-2-30.xml",
       "status": "FAIL",
-      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem: child count 3 != 4",
+      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1",
       "ops_used": [
         "Create",
         "Destroy"
@@ -938,7 +938,7 @@
     {
       "name": "SKFF-M-4-30.xml",
       "status": "FAIL",
-      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem/tag 'Operation' != 'Result Status'",
+      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem: child count 3 != 2 (after dropping optional ResultMessage per \u00a74.1.1 item 3)",
       "ops_used": [
         "Create",
         "Destroy"
@@ -958,7 +958,7 @@
     {
       "name": "SKFF-M-6-30.xml",
       "status": "FAIL",
-      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem: child count 3 != 4",
+      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1",
       "ops_used": [
         "Create",
         "Destroy",
@@ -980,7 +980,7 @@
     {
       "name": "SKFF-M-8-30.xml",
       "status": "FAIL",
-      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem/tag 'Operation' != 'Result Status'",
+      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem: child count 3 != 2 (after dropping optional ResultMessage per \u00a74.1.1 item 3)",
       "ops_used": [
         "Create",
         "Destroy",
@@ -991,7 +991,7 @@
     {
       "name": "SKFF-M-9-30.xml",
       "status": "FAIL",
-      "detail": "msg #8: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 27 != 7",
+      "detail": "msg #8: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 27 != 10",
       "ops_used": [
         "Activate",
         "AddAttribute",
@@ -1009,7 +1009,7 @@
     {
       "name": "SKLC-M-1-30.xml",
       "status": "FAIL",
-      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: child count 9 != 6",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: no actual 'CryptographicUsageMask' matches expected value",
       "ops_used": [
         "Create",
         "Destroy",
@@ -1019,7 +1019,7 @@
     {
       "name": "SKLC-M-2-30.xml",
       "status": "FAIL",
-      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: child count 9 != 6",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: no actual 'CryptographicUsageMask' matches expected value",
       "ops_used": [
         "Activate",
         "Create",
@@ -1031,7 +1031,7 @@
     {
       "name": "SKLC-M-3-30.xml",
       "status": "FAIL",
-      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: child count 9 != 6",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: no actual 'CryptographicUsageMask' matches expected value",
       "ops_used": [
         "Activate",
         "Create",
@@ -1043,8 +1043,8 @@
     },
     {
       "name": "TL-M-1-30.xml",
-      "status": "FAIL",
-      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 17 != 46",
+      "status": "PASS",
+      "detail": "",
       "ops_used": [
         "Query"
       ]
@@ -1074,7 +1074,7 @@
     {
       "name": "AKLC-O-1-30.xml",
       "status": "FAIL",
-      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: child count 10 != 6",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: no actual 'CryptographicUsageMask' matches expected value",
       "ops_used": [
         "CreateKeyPair",
         "Destroy",
@@ -1108,7 +1108,7 @@
     {
       "name": "CS-RNG-O-4-30.xml",
       "status": "FAIL",
-      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem: child count 4 != 3",
+      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'OperationFailed' got 0",
       "ops_used": [
         "RNGSeed"
       ]
@@ -1116,7 +1116,7 @@
     {
       "name": "OMOS-O-1-30.xml",
       "status": "FAIL",
-      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem/tag 'Operation' != 'Result Status'",
+      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem: child count 3 != 2 (after dropping optional ResultMessage per \u00a74.1.1 item 3)",
       "ops_used": [
         "Destroy",
         "Register"
@@ -1125,7 +1125,7 @@
     {
       "name": "SKLC-O-1-30.xml",
       "status": "FAIL",
-      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: child count 9 != 6",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: no actual 'CryptographicUsageMask' matches expected value",
       "ops_used": [
         "Create",
         "Destroy",

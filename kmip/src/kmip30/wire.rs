@@ -87,6 +87,12 @@ mod tags {
     pub const RevocationReasonCode: u32   = 0x42_0082;
     pub const ServerInformation: u32      = 0x42_0088;
     pub const ServerVersion: u32          = 0x42_012f;
+    /// KMIP 3.0 §8.2.2 — `Server Correlation Value` echoed in every
+    /// ResponseHeader. Codepoint verified from
+    /// `spec/oasis-kmip-3.0/kmip-spec-3.0-tags-enums.json`.
+    pub const ServerCorrelationValue: u32 = 0x42_0106;
+    /// KMIP 3.0 §8.1.2 — `Client Correlation Value` (request side only).
+    pub const ClientCorrelationValue: u32 = 0x42_0105;
     pub const SignatureData: u32          = 0x42_00c3;
     pub const State: u32                  = 0x42_008d;
     pub const TimeStamp: u32              = 0x42_0092;
@@ -158,6 +164,43 @@ mod tags {
     pub const Pkcs11OutputParameters: u32 = 0x42_015c;
     pub const Pkcs11ReturnCode: u32       = 0x42_015d;
     pub const CorrelationValue: u32       = 0x42_00d6;
+    // ── KMIP Profiles v3.0 §5.1.2 Baseline Server attribute tags ──
+    pub const DestroyDate: u32                   = 0x42_0033;
+    pub const CompromiseDate: u32                = 0x42_0020;
+    pub const CompromiseOccurrenceDate: u32      = 0x42_0021;
+    pub const LastChangeDate: u32                = 0x42_0048;
+    pub const OriginalCreationDate: u32          = 0x42_00bc;
+    pub const ProcessStartDate: u32              = 0x42_0067;
+    pub const ProtectStopDate: u32               = 0x42_0068;
+    pub const RotateDate: u32                    = 0x42_016d;
+    pub const Sensitive: u32                     = 0x42_0120;
+    pub const AlwaysSensitive: u32               = 0x42_0121;
+    pub const Extractable: u32                   = 0x42_0122;
+    pub const NeverExtractable: u32              = 0x42_0123;
+    pub const Fresh: u32                         = 0x42_00a8;
+    pub const KeyValuePresent: u32               = 0x42_00bb;
+    pub const QuantumSafe: u32                   = 0x42_0147;
+    pub const RotateAutomatic: u32               = 0x42_016b;
+    pub const ShortUniqueIdentifier: u32         = 0x42_0136;
+    pub const AlternativeName: u32               = 0x42_00bf;
+    pub const Comment: u32                       = 0x42_00fd;
+    pub const Description: u32                   = 0x42_00fc;
+    pub const ContactInformation: u32            = 0x42_0022;
+    pub const ObjectClass: u32                   = 0x42_019e;
+    pub const KeyValueLocation: u32              = 0x42_00b8;
+    pub const X509CertificateIdentifier: u32     = 0x42_00b5;
+    pub const X509CertificateIssuer: u32         = 0x42_00b6;
+    pub const X509CertificateSubject: u32        = 0x42_00b7;
+    pub const RotateName: u32                    = 0x42_016f;
+    pub const CertificateType: u32               = 0x42_001d;
+    pub const DigitalSignatureAlgorithm: u32     = 0x42_00ae;
+    pub const NistKeyType: u32                   = 0x42_013a;
+    pub const ProtectionLevel: u32               = 0x42_0145;
+    pub const CertificateLength: u32             = 0x42_00ad;
+    pub const ProtectionPeriod: u32              = 0x42_0146;
+    pub const RotateInterval: u32                = 0x42_016a;
+    pub const RotateOffset: u32                  = 0x42_016c;
+    pub const RotateGeneration: u32              = 0x42_016e;
     pub const InteropFunction: u32        = 0x42_0160;
     pub const InteropIdentifier: u32      = 0x42_0161;
     pub const InitialDate: u32            = 0x42_002f;
@@ -285,7 +328,14 @@ fn header_to_frame(h: &ResponseHeader) -> TtlvFrame {
         ]),
     );
     let ts = TtlvFrame::new(Tag(tags::TimeStamp), Value::DateTime(h.time_stamp.unix_timestamp()));
-    TtlvFrame::new(Tag(tags::ResponseHeader), Value::Structure(vec![pv, ts]))
+    let mut children = vec![pv, ts];
+    if let Some(scv) = &h.server_correlation_value {
+        children.push(TtlvFrame::new(
+            Tag(tags::ServerCorrelationValue),
+            Value::TextString(scv.clone()),
+        ));
+    }
+    TtlvFrame::new(Tag(tags::ResponseHeader), Value::Structure(children))
 }
 
 /// Encode a KMIP 3.0 §6.4.2 response BatchItem.
@@ -371,6 +421,13 @@ fn decode_request_payload(op: Operation, frame: &TtlvFrame) -> Result<RequestPay
         Operation::RNGRetrieve      => RequestPayload::RngRetrieve(decode_rng_retrieve_req(children)?),
         Operation::RNGSeed          => RequestPayload::RngSeed(decode_rng_seed_req(children)?),
         Operation::Pkcs11           => RequestPayload::Pkcs11(decode_pkcs11_req(children)?),
+        // Advertised in Query for OASIS Baseline conformance (§4.1.1
+        // item 15 superset) but the request handler is unimplemented —
+        // no OASIS test in the corpus actually invokes it.
+        Operation::SetEndpointRole  => return Err(WireError::UnknownEnum {
+            field: "Operation (SetEndpointRole — advertised but no handler)",
+            value: Operation::SetEndpointRole.to_wire_value(),
+        }),
     })
 }
 
@@ -464,13 +521,21 @@ fn encode_query_resp(r: &QueryResponse) -> Vec<TtlvFrame> {
             out.push(TtlvFrame::new(Tag(tags::ObjectType), Value::Enumeration(t.to_wire_value())));
         }
     }
+    // VendorIdentification is a top-level child of the Query response
+    // payload per KMIP 3.0 §6.1.39, not nested inside ServerInformation.
+    if let Some(vendor) = &r.vendor_identification {
+        out.push(TtlvFrame::new(
+            Tag(tags::VendorIdentification),
+            Value::TextString(vendor.clone()),
+        ));
+    }
     if let Some(info) = &r.server_info {
         out.push(TtlvFrame::new(
             Tag(tags::ServerInformation),
-            Value::Structure(vec![
-                TtlvFrame::new(Tag(tags::VendorIdentification), Value::TextString(info.vendor_identification.clone())),
-                TtlvFrame::new(Tag(tags::ServerVersion), Value::TextString(info.server_version.clone())),
-            ]),
+            Value::Structure(vec![TtlvFrame::new(
+                Tag(tags::ServerVersion),
+                Value::TextString(info.server_version.clone()),
+            )]),
         ));
     }
     out
@@ -1809,6 +1874,73 @@ fn encode_attribute_v3(a: &Attribute) -> TtlvFrame {
             // attrs; proper vendor-extension tag allocation is wave 2.
             TtlvFrame::new(Tag(tags::Name), Value::TextString(value.clone()))
         }
+        // ── Baseline Server profile attributes (KMIP Profiles v3.0 §5.1.2) ──
+        Attribute::InitialDate(t)              => TtlvFrame::new(Tag(tags::InitialDate),              Value::DateTime(*t)),
+        Attribute::ActivationDate(t)           => TtlvFrame::new(Tag(tags::ActivationDate),           Value::DateTime(*t)),
+        Attribute::DeactivationDate(t)         => TtlvFrame::new(Tag(tags::DeactivationDate),         Value::DateTime(*t)),
+        Attribute::DestroyDate(t)              => TtlvFrame::new(Tag(tags::DestroyDate),              Value::DateTime(*t)),
+        Attribute::CompromiseDate(t)           => TtlvFrame::new(Tag(tags::CompromiseDate),           Value::DateTime(*t)),
+        Attribute::CompromiseOccurrenceDate(t) => TtlvFrame::new(Tag(tags::CompromiseOccurrenceDate), Value::DateTime(*t)),
+        Attribute::LastChangeDate(t)           => TtlvFrame::new(Tag(tags::LastChangeDate),           Value::DateTime(*t)),
+        Attribute::OriginalCreationDate(t)     => TtlvFrame::new(Tag(tags::OriginalCreationDate),     Value::DateTime(*t)),
+        Attribute::ProcessStartDate(t)         => TtlvFrame::new(Tag(tags::ProcessStartDate),         Value::DateTime(*t)),
+        Attribute::ProtectStopDate(t)          => TtlvFrame::new(Tag(tags::ProtectStopDate),          Value::DateTime(*t)),
+        Attribute::RotateDate(t)               => TtlvFrame::new(Tag(tags::RotateDate),               Value::DateTime(*t)),
+        Attribute::Sensitive(b)                => TtlvFrame::new(Tag(tags::Sensitive),                Value::Boolean(*b)),
+        Attribute::AlwaysSensitive(b)          => TtlvFrame::new(Tag(tags::AlwaysSensitive),          Value::Boolean(*b)),
+        Attribute::Extractable(b)              => TtlvFrame::new(Tag(tags::Extractable),              Value::Boolean(*b)),
+        Attribute::NeverExtractable(b)         => TtlvFrame::new(Tag(tags::NeverExtractable),         Value::Boolean(*b)),
+        Attribute::Fresh(b)                    => TtlvFrame::new(Tag(tags::Fresh),                    Value::Boolean(*b)),
+        Attribute::KeyValuePresent(b)          => TtlvFrame::new(Tag(tags::KeyValuePresent),          Value::Boolean(*b)),
+        Attribute::QuantumSafe(b)              => TtlvFrame::new(Tag(tags::QuantumSafe),              Value::Boolean(*b)),
+        Attribute::RotateAutomatic(b)          => TtlvFrame::new(Tag(tags::RotateAutomatic),          Value::Boolean(*b)),
+        Attribute::ShortUniqueIdentifier(s)    => TtlvFrame::new(Tag(tags::ShortUniqueIdentifier),    Value::TextString(s.clone())),
+        Attribute::AlternativeName(s)          => TtlvFrame::new(Tag(tags::AlternativeName),          Value::TextString(s.clone())),
+        Attribute::Comment(s)                  => TtlvFrame::new(Tag(tags::Comment),                  Value::TextString(s.clone())),
+        Attribute::Description(s)              => TtlvFrame::new(Tag(tags::Description),              Value::TextString(s.clone())),
+        Attribute::ContactInformation(s)       => TtlvFrame::new(Tag(tags::ContactInformation),       Value::TextString(s.clone())),
+        Attribute::ObjectClass(s)              => TtlvFrame::new(Tag(tags::ObjectClass),              Value::TextString(s.clone())),
+        Attribute::KeyValueLocation(s)         => TtlvFrame::new(Tag(tags::KeyValueLocation),         Value::TextString(s.clone())),
+        Attribute::X509CertificateIdentifier(s) => TtlvFrame::new(Tag(tags::X509CertificateIdentifier), Value::TextString(s.clone())),
+        Attribute::X509CertificateIssuer(s)    => TtlvFrame::new(Tag(tags::X509CertificateIssuer),    Value::TextString(s.clone())),
+        Attribute::X509CertificateSubject(s)   => TtlvFrame::new(Tag(tags::X509CertificateSubject),   Value::TextString(s.clone())),
+        Attribute::RotateName(s)               => TtlvFrame::new(Tag(tags::RotateName),               Value::TextString(s.clone())),
+        Attribute::CertificateType(v)          => TtlvFrame::new(Tag(tags::CertificateType),          Value::Enumeration(*v)),
+        Attribute::DigitalSignatureAlgorithm(v) => TtlvFrame::new(Tag(tags::DigitalSignatureAlgorithm), Value::Enumeration(*v)),
+        Attribute::NistKeyType(v)              => TtlvFrame::new(Tag(tags::NistKeyType),              Value::Enumeration(*v)),
+        Attribute::ProtectionLevel(v)          => TtlvFrame::new(Tag(tags::ProtectionLevel),          Value::Enumeration(*v)),
+        Attribute::RevocationReasonCode(v) => {
+            // RevocationReason is a Structure containing RevocationReasonCode.
+            TtlvFrame::new(
+                Tag(tags::RevocationReason),
+                Value::Structure(vec![
+                    TtlvFrame::new(Tag(tags::RevocationReasonCode), Value::Enumeration(*v)),
+                ]),
+            )
+        }
+        Attribute::DeactivationReasonCode(v) => {
+            TtlvFrame::new(
+                Tag(tags::DeactivationReason),
+                Value::Structure(vec![
+                    TtlvFrame::new(Tag(tags::DeactivationReasonCode), Value::Enumeration(*v)),
+                ]),
+            )
+        }
+        Attribute::KeyFormatType(v)            => TtlvFrame::new(Tag(tags::KeyFormatType),            Value::Enumeration(*v)),
+        Attribute::CertificateLength(n)        => TtlvFrame::new(Tag(tags::CertificateLength),        Value::Integer(*n)),
+        Attribute::LeaseTime(n)                => TtlvFrame::new(Tag(tags::LeaseTime),                Value::Interval(*n)),
+        Attribute::ProtectionPeriod(n)         => TtlvFrame::new(Tag(tags::ProtectionPeriod),         Value::Interval(*n)),
+        Attribute::RotateInterval(n)           => TtlvFrame::new(Tag(tags::RotateInterval),           Value::Interval(*n)),
+        Attribute::RotateOffset(n)             => TtlvFrame::new(Tag(tags::RotateOffset),             Value::Integer(*n)),
+        Attribute::RotateGeneration(n)         => TtlvFrame::new(Tag(tags::RotateGeneration),         Value::Integer(*n)),
+        Attribute::UsageLimitsTotal(n)         => {
+            TtlvFrame::new(
+                Tag(tags::UsageLimits),
+                Value::Structure(vec![
+                    TtlvFrame::new(Tag(tags::UsageLimitsTotal), Value::LongInteger(*n)),
+                ]),
+            )
+        }
     }
 }
 
@@ -1917,6 +2049,7 @@ mod tests {
                 protocol_version_major: 3,
                 protocol_version_minor: 0,
                 time_stamp: OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap(),
+                server_correlation_value: None,
             },
             batch_items: vec![ResponseBatchItem {
                 operation: Some(Operation::Query),
@@ -1926,8 +2059,8 @@ mod tests {
                 payload: Some(ResponsePayload::Query(QueryResponse {
                     operations: Some(vec![Operation::Query, Operation::Sign]),
                     object_types: None,
+                    vendor_identification: Some("pqctoday-hsm".into()),
                     server_info: Some(ServerInformation {
-                        vendor_identification: "pqctoday-hsm".into(),
                         server_version: "0.1.0".into(),
                     }),
                 })),

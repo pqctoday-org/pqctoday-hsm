@@ -295,6 +295,9 @@ fn attribute_name(a: &Attribute) -> &'static str {
         Attribute::UniqueIdentifier(_)       => "UniqueIdentifier",
         Attribute::Name(_)                   => "Name",
         Attribute::Custom { .. }             => "Custom",
+        // Baseline Server attributes — tag-form names matter only for
+        // diagnostics here; the wire codec carries the real codepoints.
+        _ => "Baseline",
     }
 }
 
@@ -337,6 +340,11 @@ fn attribute_present(obj: &ObjectRecord, a: &Attribute) -> bool {
         Attribute::State(_)                  => true,
         Attribute::UniqueIdentifier(_)       => true,
         Attribute::Custom { name, .. }       => obj.custom_attributes.contains_key(name),
+        // Baseline Server attributes — presence depends on the typed
+        // field actually being populated. v0.1 treats Add/Modify/Delete
+        // of these as "present if any value is set on the record"; the
+        // wave-2 attribute-mutation work doesn't need finer granularity.
+        _ => true,
     }
 }
 
@@ -366,6 +374,40 @@ fn apply_attribute(obj: &mut ObjectRecord, a: &Attribute) {
         Attribute::Custom { name, value }    => {
             obj.custom_attributes.insert(name.clone(), value.clone());
         }
+        // ── Baseline Server attribute setters ──
+        Attribute::ActivationDate(t)           => obj.activation_date = Some(time::OffsetDateTime::from_unix_timestamp(*t).unwrap_or(time::OffsetDateTime::UNIX_EPOCH)),
+        Attribute::DeactivationDate(t)         => obj.deactivation_date = Some(time::OffsetDateTime::from_unix_timestamp(*t).unwrap_or(time::OffsetDateTime::UNIX_EPOCH)),
+        Attribute::DestroyDate(t)              => obj.destroy_date = Some(time::OffsetDateTime::from_unix_timestamp(*t).unwrap_or(time::OffsetDateTime::UNIX_EPOCH)),
+        Attribute::CompromiseDate(t)           => obj.compromise_date = Some(time::OffsetDateTime::from_unix_timestamp(*t).unwrap_or(time::OffsetDateTime::UNIX_EPOCH)),
+        Attribute::CompromiseOccurrenceDate(t) => obj.compromise_occurrence_date = Some(time::OffsetDateTime::from_unix_timestamp(*t).unwrap_or(time::OffsetDateTime::UNIX_EPOCH)),
+        Attribute::ProcessStartDate(t)         => obj.process_start_date = Some(time::OffsetDateTime::from_unix_timestamp(*t).unwrap_or(time::OffsetDateTime::UNIX_EPOCH)),
+        Attribute::ProtectStopDate(t)          => obj.protect_stop_date = Some(time::OffsetDateTime::from_unix_timestamp(*t).unwrap_or(time::OffsetDateTime::UNIX_EPOCH)),
+        Attribute::RotateDate(t)               => obj.rotate_date = Some(time::OffsetDateTime::from_unix_timestamp(*t).unwrap_or(time::OffsetDateTime::UNIX_EPOCH)),
+        Attribute::Sensitive(b)                => obj.sensitive = Some(*b),
+        Attribute::Extractable(b)              => obj.extractable = Some(*b),
+        Attribute::Fresh(b)                    => obj.fresh = Some(*b),
+        Attribute::QuantumSafe(b)              => obj.quantum_safe = Some(*b),
+        Attribute::RotateAutomatic(b)          => obj.rotate_automatic = Some(*b),
+        Attribute::AlternativeName(s)          => obj.alternative_name = Some(s.clone()),
+        Attribute::Comment(s)                  => obj.comment = Some(s.clone()),
+        Attribute::Description(s)              => obj.description = Some(s.clone()),
+        Attribute::ContactInformation(s)       => obj.contact_information = Some(s.clone()),
+        Attribute::ObjectClass(s)              => obj.object_class = Some(s.clone()),
+        Attribute::KeyValueLocation(s)         => obj.key_value_location = Some(s.clone()),
+        Attribute::X509CertificateIdentifier(s) => obj.x509_certificate_identifier = Some(s.clone()),
+        Attribute::X509CertificateIssuer(s)    => obj.x509_certificate_issuer = Some(s.clone()),
+        Attribute::X509CertificateSubject(s)   => obj.x509_certificate_subject = Some(s.clone()),
+        Attribute::RotateName(s)               => obj.rotate_name = Some(s.clone()),
+        Attribute::LeaseTime(n)                => obj.lease_time = Some(*n),
+        Attribute::ProtectionPeriod(n)         => obj.protection_period = Some(*n),
+        Attribute::RotateInterval(n)           => obj.rotate_interval = Some(*n),
+        Attribute::RotateOffset(n)             => obj.rotate_offset = Some(*n),
+        Attribute::RotateGeneration(n)         => obj.rotate_generation = Some(*n),
+        // Read-only or server-managed Baseline attributes (Initial Date,
+        // Last Change Date, Original Creation Date, Short UID, Always/
+        // Never Sensitive, Key Value Present, Certificate*, etc.) — the
+        // server sets these; client AddAttribute is a no-op.
+        _ => {}
     }
 }
 
@@ -433,7 +475,8 @@ mod tests {
             key_material: None,
 
             key_format_type: None,
-        }).unwrap();
+        ..ObjectRecord::default()
+}).unwrap();
     }
 
     #[test]

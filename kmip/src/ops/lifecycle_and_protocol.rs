@@ -63,7 +63,15 @@ pub fn deactivate(
             KmipError::permission_denied(human)));
     }
 
+    // Per §6.1.14: Deactivation Date is set to the current date and
+    // time. Last Change Date follows automatically per profile §5.1.2.
+    let now = OffsetDateTime::now_utc();
     obj.state = State::Deactivated;
+    obj.deactivation_date = Some(now);
+    obj.last_change_date = Some(now);
+    if let Some(code) = req.deactivation_reason.map(|r| r.to_wire_value()) {
+        obj.deactivation_reason_code = Some(code);
+    }
     deps.store.update(obj)?;
     emit_success(deps, correlation_id, "Deactivate");
     Ok(DeactivateResponse { uid: req.uid })
@@ -229,7 +237,8 @@ mod tests {
             custom_attributes: HashMap::new(),
             key_material: None,
             key_format_type: None,
-        }).unwrap();
+        ..ObjectRecord::default()
+}).unwrap();
     }
 
     #[test]

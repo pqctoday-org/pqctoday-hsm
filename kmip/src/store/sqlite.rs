@@ -333,7 +333,8 @@ fn decode_record(
 
 
         key_format_type: None,
-    })
+    ..ObjectRecord::default()
+})
 }
 
 fn object_type_str(t: ObjectType) -> &'static str {
@@ -421,7 +422,8 @@ mod tests {
 
 
             key_format_type: None,
-        }
+        ..ObjectRecord::default()
+}
     }
 
     #[test]

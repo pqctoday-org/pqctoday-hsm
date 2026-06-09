@@ -313,7 +313,8 @@ mod tests {
 
 
             key_format_type: None,
-        };
+        ..ObjectRecord::default()
+};
         deps.store.put(rec).unwrap();
     }
 
@@ -399,7 +400,8 @@ rules:
 
 
             key_format_type: None,
-        };
+        ..ObjectRecord::default()
+};
         d.store.put(rec).unwrap();
         let err = sign(&d, SignRequest { uid: "urn:pre".into(), data: vec![] }, "corr").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::ObjectArchived);

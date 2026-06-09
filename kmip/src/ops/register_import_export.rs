@@ -116,6 +116,7 @@ pub fn register(
         custom_attributes: HashMap::new(),
         key_material,
         key_format_type,
+        ..ObjectRecord::default()
     })?;
 
     emit_success(deps, correlation_id, "Register");
@@ -203,6 +204,7 @@ pub fn import_object(
         custom_attributes: HashMap::new(),
         key_material,
         key_format_type,
+        ..ObjectRecord::default()
     })?;
 
     emit_success(deps, correlation_id, "Import");

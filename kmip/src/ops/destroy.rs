@@ -90,10 +90,13 @@ pub fn destroy(deps: &Deps, req: DestroyRequest, correlation_id: &str) -> Result
         }
     }
 
-    // Plane-2: lifecycle update.
+    // Plane-2: lifecycle update. Destroy Date set per Baseline §5.1.2.
     let from_label = state_name(obj.state).to_string();
     let to_label = state_name(target_state).to_string();
+    let now = OffsetDateTime::now_utc();
     obj.state = target_state;
+    obj.destroy_date = Some(now);
+    obj.last_change_date = Some(now);
     deps.store.update(obj)?;
 
     emit_state_change(
@@ -158,7 +161,8 @@ mod tests {
 
 
             key_format_type: None,
-        }).unwrap();
+        ..ObjectRecord::default()
+}).unwrap();
     }
 
     #[test]

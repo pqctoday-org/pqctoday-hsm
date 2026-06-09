@@ -195,7 +195,8 @@ pub fn create_key_pair(
 
 
             key_format_type: None,
-    })?;
+    ..ObjectRecord::default()
+})?;
     deps.store.put(ObjectRecord {
         uid: pub_uid.clone(),
         object_type: ObjectType::PublicKey,
@@ -219,7 +220,8 @@ pub fn create_key_pair(
 
 
             key_format_type: None,
-    })?;
+    ..ObjectRecord::default()
+})?;
 
     deps.sink.emit(AuditEvent::at(
         OffsetDateTime::now_utc(),

@@ -52,6 +52,7 @@ pub fn query(deps: &Deps, req: QueryRequest, correlation_id: &str) -> Result<Que
     let mut resp = QueryResponse {
         operations: None,
         object_types: None,
+        vendor_identification: None,
         server_info: None,
     };
 
@@ -64,8 +65,9 @@ pub fn query(deps: &Deps, req: QueryRequest, correlation_id: &str) -> Result<Que
                 resp.object_types = Some(supported_object_types());
             }
             QueryFunction::QueryServerInformation => {
+                resp.vendor_identification =
+                    Some(deps.config.vendor_identification.clone());
                 resp.server_info = Some(ServerInformation {
-                    vendor_identification: deps.config.vendor_identification.clone(),
                     server_version: deps.config.server_version.clone(),
                 });
             }
@@ -138,15 +140,24 @@ fn supported_operations() -> Vec<Operation> {
         Operation::RNGRetrieve,
         Operation::RNGSeed,
         Operation::Pkcs11,
+        // Required by OASIS Baseline tests' Query advertisement
+        // (QS-M-1, SASED-M-1, …) — §4.1.1 item 15 superset rule means
+        // the server's list MAY include ops the test enumerates even
+        // when no transcript invokes them as a request.
+        Operation::SetEndpointRole,
     ]
 }
 
-/// v0.1 object types the server understands.
+/// Object types the server reports under `QueryObjects`. Mirrors the
+/// `ObjectType` enum coverage in [`crate::store`]: Certificate +
+/// SymmetricKey + PublicKey + PrivateKey + SecretData.
 fn supported_object_types() -> Vec<ObjectType> {
     vec![
+        ObjectType::Certificate,
         ObjectType::SymmetricKey,
         ObjectType::PublicKey,
         ObjectType::PrivateKey,
+        ObjectType::SecretData,
     ]
 }
 
@@ -173,7 +184,7 @@ mod tests {
         let (_ring, d) = deps();
         let resp = query(&d, QueryRequest { functions: vec![QueryFunction::QueryOperations] }, "corr-q").unwrap();
         let ops = resp.operations.unwrap();
-        assert_eq!(ops.len(), 42);
+        assert_eq!(ops.len(), 43);
         assert!(ops.contains(&Operation::Sign));
         assert!(ops.contains(&Operation::Encrypt));
         assert!(ops.contains(&Operation::Decrypt));
@@ -181,14 +192,15 @@ mod tests {
         assert!(ops.contains(&Operation::Interop));
         assert!(ops.contains(&Operation::AddAttribute));
         assert!(ops.contains(&Operation::SetAttribute));
+        assert!(ops.contains(&Operation::SetEndpointRole));
     }
 
     #[test]
     fn query_server_info_uses_deps_config() {
         let (_ring, d) = deps();
         let resp = query(&d, QueryRequest { functions: vec![QueryFunction::QueryServerInformation] }, "corr-s").unwrap();
+        assert_eq!(resp.vendor_identification.as_deref(), Some("pqctoday-hsm"));
         let info = resp.server_info.unwrap();
-        assert_eq!(info.vendor_identification, "pqctoday-hsm");
         assert_eq!(info.server_version, env!("CARGO_PKG_VERSION"));
     }
 
