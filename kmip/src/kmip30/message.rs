@@ -183,6 +183,12 @@ pub enum RequestPayload {
     Mac(super::ops::MacRequest),
     MacVerify(super::ops::MacVerifyRequest),
     Hash(super::ops::HashRequest),
+    CreateCredential(super::ops::CreateCredentialRequest),
+    CreateGroup(super::ops::CreateGroupRequest),
+    CreateUser(super::ops::CreateUserRequest),
+    Log(super::ops::LogRequest),
+    Login(super::ops::LoginRequest),
+    Logout(super::ops::LogoutRequest),
 }
 
 /// Typed response payload — one variant per supported op.
@@ -221,6 +227,12 @@ pub enum ResponsePayload {
     Mac(super::ops::MacResponse),
     MacVerify(super::ops::MacVerifyResponse),
     Hash(super::ops::HashResponse),
+    CreateCredential(super::ops::CreateCredentialResponse),
+    CreateGroup(super::ops::CreateGroupResponse),
+    CreateUser(super::ops::CreateUserResponse),
+    Log(super::ops::LogResponse),
+    Login(super::ops::LoginResponse),
+    Logout(super::ops::LogoutResponse),
 }
 
 impl RequestPayload {
@@ -260,6 +272,12 @@ impl RequestPayload {
             Self::Mac(_)              => Operation::MAC,
             Self::MacVerify(_)        => Operation::MACVerify,
             Self::Hash(_)             => Operation::Hash,
+            Self::CreateCredential(_) => Operation::CreateCredential,
+            Self::CreateGroup(_)      => Operation::CreateGroup,
+            Self::CreateUser(_)       => Operation::CreateUser,
+            Self::Log(_)              => Operation::Log,
+            Self::Login(_)            => Operation::Login,
+            Self::Logout(_)           => Operation::Logout,
         }
     }
 }

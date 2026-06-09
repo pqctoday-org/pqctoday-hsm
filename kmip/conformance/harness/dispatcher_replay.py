@@ -90,6 +90,9 @@ IMPLEMENTED_OPS: set[str] = {
     "DiscoverVersions", "Ping",
     # PR #85 (Group E wave 1): keyed + keyless crypto.
     "MAC", "MACVerify", "Hash",
+    # PR #86 (Group F): session / auth.
+    "CreateCredential", "CreateGroup", "CreateUser",
+    "Log", "Login", "Logout",
 }
 
 

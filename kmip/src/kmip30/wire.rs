@@ -137,6 +137,18 @@ mod tags {
     pub const HashingAlgorithm: u32       = 0x42_0038;
     /// KMIP 3.0 §6.1.36/37 MAC Data ByteString.
     pub const MacData: u32                = 0x42_00c6;
+    /// KMIP 3.0 §6.1.9/34/35 session + auth tags.
+    pub const CredentialType: u32         = 0x42_0024;
+    pub const Credential: u32             = 0x42_0023;
+    pub const CredentialValue: u32        = 0x42_0025;
+    pub const PasswordCredential: u32     = 0x42_01a1;
+    pub const Username: u32               = 0x42_0099;
+    pub const Password: u32               = 0x42_00a1;
+    pub const Ticket: u32                 = 0x42_0149;
+    pub const LogMessage: u32             = 0x42_0141;
+    pub const RequestCount: u32           = 0x42_014c;
+    pub const UsageLimits: u32            = 0x42_0095;
+    pub const UsageLimitsTotal: u32       = 0x42_0097;
     pub const InteropFunction: u32        = 0x42_0160;
     pub const InteropIdentifier: u32      = 0x42_0161;
     pub const InitialDate: u32            = 0x42_002f;
@@ -341,6 +353,12 @@ fn decode_request_payload(op: Operation, frame: &TtlvFrame) -> Result<RequestPay
         Operation::MAC              => RequestPayload::Mac(decode_mac_req(children)?),
         Operation::MACVerify        => RequestPayload::MacVerify(decode_mac_verify_req(children)?),
         Operation::Hash             => RequestPayload::Hash(decode_hash_req(children)?),
+        Operation::CreateCredential => RequestPayload::CreateCredential(decode_create_credential_req(children)?),
+        Operation::CreateGroup      => RequestPayload::CreateGroup(decode_create_group_req(children)?),
+        Operation::CreateUser       => RequestPayload::CreateUser(decode_create_user_req(children)?),
+        Operation::Log              => RequestPayload::Log(decode_log_req(children)?),
+        Operation::Login            => RequestPayload::Login(decode_login_req(children)?),
+        Operation::Logout           => RequestPayload::Logout(decode_logout_req(children)?),
     })
 }
 
@@ -382,6 +400,14 @@ fn response_payload_to_frame(payload: &ResponsePayload) -> TtlvFrame {
         ResponsePayload::Mac(r)              => encode_mac_resp(r),
         ResponsePayload::MacVerify(r)        => encode_mac_verify_resp(r),
         ResponsePayload::Hash(r)             => encode_hash_resp(r),
+        ResponsePayload::CreateCredential(r) => encode_uid_only_resp(&r.uid),
+        ResponsePayload::CreateGroup(r)      => encode_uid_only_resp(&r.uid),
+        ResponsePayload::CreateUser(r)       => encode_uid_only_resp(&r.uid),
+        ResponsePayload::Log(_)              => vec![],
+        ResponsePayload::Login(r)            => vec![
+            TtlvFrame::new(Tag(tags::Ticket), Value::TextString(r.ticket.clone())),
+        ],
+        ResponsePayload::Logout(_)           => vec![],
     };
     TtlvFrame::new(Tag(tags::ResponsePayload), Value::Structure(children))
 }
@@ -817,6 +843,133 @@ fn decode_attribute_v3(frame: &TtlvFrame) -> Result<Option<Attribute>, WireError
         }
         _ => return Ok(None),
     }))
+}
+
+// ── Group F codecs: session / auth ─────────────────────────────────────────
+//
+// Spec mapping:
+// - CreateCredential §6.1.9  — CredentialType + Attributes + Credential? (Structure)
+// - CreateGroup      §6.1.10 — Attributes only
+// - CreateUser       §6.1.13 — Attributes only
+// - Log              §6.1.33 — LogMessage (TextString)
+// - Login            §6.1.34 — LeaseTime? + RequestCount? + UsageLimits?
+// - Logout           §6.1.35 — Ticket (TextString)
+
+fn decode_attributes_block(frame: &TtlvFrame) -> Result<Vec<Attribute>, WireError> {
+    let mut out = Vec::new();
+    for c in expect_structure(frame, "Attributes")? {
+        if let Some(a) = decode_attribute_v3(c)? {
+            out.push(a);
+        }
+    }
+    Ok(out)
+}
+
+fn decode_create_credential_req(children: &[TtlvFrame]) -> Result<CreateCredentialRequest, WireError> {
+    let mut credential_type = None;
+    let mut attributes = Vec::new();
+    let mut password_credential = None;
+    for c in children {
+        match c.tag.0 {
+            tags::CredentialType => {
+                credential_type = Some(expect_enum(c, "Credential Type")?);
+            }
+            tags::Attributes => attributes = decode_attributes_block(c)?,
+            tags::PasswordCredential => {
+                password_credential = Some(decode_password_credential(c)?);
+            }
+            _ => {}
+        }
+    }
+    let credential_type = credential_type.ok_or(WireError::Missing {
+        tag: tags::CredentialType,
+        name: "Credential Type",
+    })?;
+    Ok(CreateCredentialRequest { credential_type, attributes, password_credential })
+}
+
+fn decode_password_credential(frame: &TtlvFrame) -> Result<PasswordCredential, WireError> {
+    let mut username = String::new();
+    let mut password = None;
+    for c in expect_structure(frame, "Password Credential")? {
+        match c.tag.0 {
+            tags::Username => {
+                if let Value::TextString(s) = &c.value { username = s.clone(); }
+            }
+            tags::Password => {
+                if let Value::TextString(s) = &c.value { password = Some(s.clone()); }
+            }
+            _ => {}
+        }
+    }
+    Ok(PasswordCredential { username, password })
+}
+
+fn decode_create_group_req(children: &[TtlvFrame]) -> Result<CreateGroupRequest, WireError> {
+    let mut attributes = Vec::new();
+    for c in children {
+        if c.tag.0 == tags::Attributes {
+            attributes = decode_attributes_block(c)?;
+        }
+    }
+    Ok(CreateGroupRequest { attributes })
+}
+
+fn decode_create_user_req(children: &[TtlvFrame]) -> Result<CreateUserRequest, WireError> {
+    let mut attributes = Vec::new();
+    for c in children {
+        if c.tag.0 == tags::Attributes {
+            attributes = decode_attributes_block(c)?;
+        }
+    }
+    Ok(CreateUserRequest { attributes })
+}
+
+fn decode_log_req(children: &[TtlvFrame]) -> Result<LogRequest, WireError> {
+    let mut message = String::new();
+    for c in children {
+        if c.tag.0 == tags::LogMessage {
+            if let Value::TextString(s) = &c.value { message = s.clone(); }
+        }
+    }
+    Ok(LogRequest { message })
+}
+
+fn decode_login_req(children: &[TtlvFrame]) -> Result<LoginRequest, WireError> {
+    let mut lease_time = None;
+    let mut request_count = None;
+    let mut usage_limits = None;
+    for c in children {
+        match c.tag.0 {
+            tags::LeaseTime => {
+                if let Value::Interval(n) = c.value { lease_time = Some(n); }
+                else if let Value::Integer(n) = c.value { lease_time = Some(n as u32); }
+            }
+            tags::RequestCount => {
+                if let Value::Integer(n) = c.value { request_count = Some(n); }
+            }
+            tags::UsageLimits => {
+                for inner in expect_structure(c, "Usage Limits")? {
+                    if inner.tag.0 == tags::UsageLimitsTotal {
+                        if let Value::LongInteger(n) = inner.value { usage_limits = Some(n); }
+                        else if let Value::Integer(n) = inner.value { usage_limits = Some(n as i64); }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(LoginRequest { lease_time, request_count, usage_limits })
+}
+
+fn decode_logout_req(children: &[TtlvFrame]) -> Result<LogoutRequest, WireError> {
+    let mut ticket = String::new();
+    for c in children {
+        if c.tag.0 == tags::Ticket {
+            if let Value::TextString(s) = &c.value { ticket = s.clone(); }
+        }
+    }
+    Ok(LogoutRequest { ticket })
 }
 
 // ── Group E codecs: MAC / MACVerify / Hash ─────────────────────────────────

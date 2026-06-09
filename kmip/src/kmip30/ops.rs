@@ -57,13 +57,19 @@ pub enum Operation {
     Hash             = 0x27,
     Import           = 0x2a,
     Export           = 0x2b,
+    Log              = 0x2c,
+    Login            = 0x2d,
+    Logout           = 0x2e,
     /// KMIP 3.0 §6.1.31 — test-suite framework op. Carries `Begin` /
     /// `End` markers (no managed-object effect). Server returns Success.
     Interop          = 0x2f,
     AdjustAttribute  = 0x30,
     SetAttribute     = 0x31,
     Ping             = 0x3b,
+    CreateGroup      = 0x3c,
     Obliterate       = 0x3d,
+    CreateUser       = 0x3e,
+    CreateCredential = 0x3f,
     Deactivate       = 0x40,
 }
 
@@ -101,11 +107,17 @@ impl Operation {
             0x27 => Some(Self::Hash),
             0x2a => Some(Self::Import),
             0x2b => Some(Self::Export),
+            0x2c => Some(Self::Log),
+            0x2d => Some(Self::Login),
+            0x2e => Some(Self::Logout),
             0x2f => Some(Self::Interop),
             0x30 => Some(Self::AdjustAttribute),
             0x31 => Some(Self::SetAttribute),
             0x3b => Some(Self::Ping),
+            0x3c => Some(Self::CreateGroup),
             0x3d => Some(Self::Obliterate),
+            0x3e => Some(Self::CreateUser),
+            0x3f => Some(Self::CreateCredential),
             0x40 => Some(Self::Deactivate),
             _ => None,
         }
@@ -498,6 +510,105 @@ impl AdjustmentType {
         }
     }
 }
+
+// ── Group F: session / auth (KMIP 3.0 §6.1.{9,10,13,33,34,35}) ─────────────
+//
+// All response shapes are minimal — most return just `Unique Identifier`
+// (Log / Logout return empty; Login returns a Ticket).
+
+/// `CreateCredential` (KMIP 3.0 §6.1.9 / Table 276) — create a
+/// credential object. Per spec, request carries `Credential Type` +
+/// `Attributes` + exactly one of {Password / Device / Hashed Password /
+/// OTP / Certificate} Credential. v0.1 honours Password Credential
+/// only; others return OperationNotSupported.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CreateCredentialRequest {
+    /// Wire tag `Credential Type` (0x420024). Enumeration codepoint
+    /// for the credential family.
+    pub credential_type: u32,
+    pub attributes: Vec<Attribute>,
+    /// Wire tag `Password Credential` (0x4201a1). Honoured when
+    /// `credential_type` is `Username and Password`. Optional in the
+    /// codec; handler enforces the right combination.
+    pub password_credential: Option<PasswordCredential>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct CreateCredentialResponse {
+    pub uid: String,
+}
+
+/// `PasswordCredential` Structure — KMIP 3.0 §11. Carries the username
+/// and password fields a client supplies for Username+Password auth.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PasswordCredential {
+    pub username: String,
+    pub password: Option<String>,
+}
+
+/// `CreateGroup` (KMIP 3.0 §6.1.10 / Table 279).
+#[derive(Clone, Debug, PartialEq)]
+pub struct CreateGroupRequest {
+    pub attributes: Vec<Attribute>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct CreateGroupResponse {
+    pub uid: String,
+}
+
+/// `CreateUser` (KMIP 3.0 §6.1.13 / Table 289).
+#[derive(Clone, Debug, PartialEq)]
+pub struct CreateUserRequest {
+    pub attributes: Vec<Attribute>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct CreateUserResponse {
+    pub uid: String,
+}
+
+/// `Log` (KMIP 3.0 §6.1.33 / Table 349) — log a message to the
+/// server log. Response is empty.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LogRequest {
+    /// Wire tag `Log Message` (0x420141, TextString).
+    pub message: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct LogResponse;
+
+/// `Login` (KMIP 3.0 §6.1.34 / Table 352) — request authentication
+/// ticket. Lease Time / Request Count / Usage Limits are all optional
+/// hints; server returns a Ticket the client uses in subsequent
+/// requests.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LoginRequest {
+    /// Wire tag `Lease Time` (0x420049, Interval).
+    pub lease_time: Option<u32>,
+    /// Wire tag `Request Count` (0x42014c, Integer).
+    pub request_count: Option<i32>,
+    /// Wire tag `Usage Limits` (0x420095, Structure). v0.1 stores the
+    /// raw count if a `UsageLimitsTotal` child is present.
+    pub usage_limits: Option<i64>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct LoginResponse {
+    /// Wire tag `Ticket` (0x420149, TextString).
+    pub ticket: String,
+}
+
+/// `Logout` (KMIP 3.0 §6.1.35 / Table 355) — invalidate a Login
+/// ticket. Empty response.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LogoutRequest {
+    pub ticket: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct LogoutResponse;
 
 // ── Group E (crypto wave 1): MAC / MACVerify / Hash ────────────────────────
 //

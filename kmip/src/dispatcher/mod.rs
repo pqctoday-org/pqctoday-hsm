@@ -43,6 +43,7 @@ use crate::ops::{
     query::query,
     register_import_export::{export, import_object, register},
     revoke::revoke,
+    session_and_auth::{create_credential, create_group, create_user, log, login, logout},
     sign::sign, signature_verify::signature_verify, Deps,
 };
 
@@ -127,6 +128,12 @@ fn handle_payload(
         RequestPayload::Mac(r) => ResponsePayload::Mac(mac(deps, r, correlation_id)?),
         RequestPayload::MacVerify(r) => ResponsePayload::MacVerify(mac_verify(deps, r, correlation_id)?),
         RequestPayload::Hash(r) => ResponsePayload::Hash(hash(deps, r, correlation_id)?),
+        RequestPayload::CreateCredential(r) => ResponsePayload::CreateCredential(create_credential(deps, r, correlation_id)?),
+        RequestPayload::CreateGroup(r) => ResponsePayload::CreateGroup(create_group(deps, r, correlation_id)?),
+        RequestPayload::CreateUser(r) => ResponsePayload::CreateUser(create_user(deps, r, correlation_id)?),
+        RequestPayload::Log(r) => ResponsePayload::Log(log(deps, r, correlation_id)?),
+        RequestPayload::Login(r) => ResponsePayload::Login(login(deps, r, correlation_id)?),
+        RequestPayload::Logout(r) => ResponsePayload::Logout(logout(deps, r, correlation_id)?),
     })
 }
 

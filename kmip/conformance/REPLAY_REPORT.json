@@ -1,13 +1,13 @@
 {
-  "generated_at": 1780971288,
+  "generated_at": 1780972126,
   "summary": {
     "pass": 3,
-    "fail": 86,
+    "fail": 93,
     "error": 0,
-    "skip_op": 13,
+    "skip_op": 6,
     "skip_parse": 0,
     "total": 102,
-    "candidates": 89
+    "candidates": 96
   },
   "tests": [
     {
@@ -73,8 +73,8 @@
     },
     {
       "name": "BL-M-1-30.xml",
-      "status": "SKIP_OP",
-      "detail": "unsupported ops: ['Log']",
+      "status": "FAIL",
+      "detail": "msg #0: response mismatch: ResponseMessage/ResponseHeader: child count 3 != 2",
       "ops_used": [
         "Destroy",
         "Get",
@@ -143,8 +143,8 @@
     },
     {
       "name": "BL-M-15-30.xml",
-      "status": "SKIP_OP",
-      "detail": "unsupported ops: ['CreateCredential']",
+      "status": "FAIL",
+      "detail": "msg #0: response mismatch: ResponseMessage/ResponseHeader: child count 3 != 2",
       "ops_used": [
         "CreateCredential",
         "Interop"
@@ -152,8 +152,8 @@
     },
     {
       "name": "BL-M-16-30.xml",
-      "status": "SKIP_OP",
-      "detail": "unsupported ops: ['CreateCredential']",
+      "status": "FAIL",
+      "detail": "msg #0: response mismatch: ResponseMessage/ResponseHeader: child count 3 != 2",
       "ops_used": [
         "CreateCredential",
         "Interop"
@@ -161,8 +161,8 @@
     },
     {
       "name": "BL-M-17-30.xml",
-      "status": "SKIP_OP",
-      "detail": "unsupported ops: ['CreateCredential', 'CreateUser']",
+      "status": "FAIL",
+      "detail": "msg #0: response mismatch: ResponseMessage/ResponseHeader: child count 3 != 2",
       "ops_used": [
         "CreateCredential",
         "CreateUser",
@@ -171,8 +171,8 @@
     },
     {
       "name": "BL-M-18-30.xml",
-      "status": "SKIP_OP",
-      "detail": "unsupported ops: ['CreateCredential', 'CreateUser']",
+      "status": "FAIL",
+      "detail": "msg #0: response mismatch: ResponseMessage/ResponseHeader: child count 3 != 2",
       "ops_used": [
         "CreateCredential",
         "CreateUser",
@@ -181,8 +181,8 @@
     },
     {
       "name": "BL-M-19-30.xml",
-      "status": "SKIP_OP",
-      "detail": "unsupported ops: ['CreateCredential', 'CreateUser']",
+      "status": "FAIL",
+      "detail": "msg #0: response mismatch: ResponseMessage/ResponseHeader: child count 3 != 2",
       "ops_used": [
         "CreateCredential",
         "CreateUser",
@@ -214,8 +214,8 @@
     },
     {
       "name": "BL-M-21-30.xml",
-      "status": "SKIP_OP",
-      "detail": "unsupported ops: ['CreateGroup']",
+      "status": "FAIL",
+      "detail": "msg #0: response mismatch: ResponseMessage/ResponseHeader: child count 3 != 2",
       "ops_used": [
         "CreateGroup",
         "Interop"
@@ -813,7 +813,7 @@
     {
       "name": "QS-M-1-30.xml",
       "status": "FAIL",
-      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 21 != 33",
+      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 21 != 39",
       "ops_used": [
         "Query"
       ]
@@ -829,7 +829,7 @@
     {
       "name": "SASED-M-1-30.xml",
       "status": "FAIL",
-      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 11 != 37",
+      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 11 != 43",
       "ops_used": [
         "Query"
       ]
@@ -1044,7 +1044,7 @@
     {
       "name": "TL-M-1-30.xml",
       "status": "FAIL",
-      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 17 != 37",
+      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 17 != 43",
       "ops_used": [
         "Query"
       ]
