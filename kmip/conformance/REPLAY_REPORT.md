@@ -1,6 +1,6 @@
 # OASIS KMIP 3.0 Dispatcher Replay Report
 
-Generated: 2026-06-09 01:41:33 UTC
+Generated: 2026-06-09 01:56:52 UTC
 
 
 ## Aggregate
@@ -9,18 +9,18 @@ Generated: 2026-06-09 01:41:33 UTC
 | Status | Count | % of total |
 |---|---|---|
 | **PASS** | 2 | 2.0% |
-| **FAIL** | 80 | 78.4% |
+| **FAIL** | 83 | 81.4% |
 | ERROR | 0 | 0.0% |
-| SKIP_OP (op not implemented) | 20 | 19.6% |
+| SKIP_OP (op not implemented) | 17 | 16.7% |
 | SKIP_PARSE (XML malformed) | 0 | 0.0% |
 | **Total** | **102** | 100.0% |
 
 
-Of the 82 tests that exercise only implemented ops:
+Of the 85 tests that exercise only implemented ops:
 
   - **2 pass (2%)**
 
-  - 80 fail
+  - 83 fail
 
   - 0 errored
 
@@ -41,6 +41,9 @@ Of the 82 tests that exercise only implemented ops:
 | `BL-M-12-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/ResponseHeader: child count 3 != 2 |
 | `BL-M-13-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/ResponseHeader: child count 3 != 2 |
 | `BL-M-14-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/ResponseHeader: child count 3 != 2 |
+| `BL-M-2-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/ResponseHeader: child count 3 != 2 |
+| `BL-M-20-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/ResponseHeader: child count 3 != 2 |
+| `BL-M-3-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/ResponseHeader: child count 3 != 2 |
 | `BL-M-4-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/ResponseHeader: child count 3 != 2 |
 | `BL-M-5-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/ResponseHeader: child count 3 != 2 |
 | `BL-M-6-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/ResponseHeader: child count 3 != 2 |
@@ -88,9 +91,9 @@ Of the 82 tests that exercise only implemented ops:
 | `MSGENC-XML-M-1-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem: child count 4 != 3 |
 | `OMOS-M-1-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/tag 'Operation' != 'Result Status' |
 | `OMOS-O-1-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/tag 'Operation' != 'Result Status' |
-| `QS-M-1-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 21 != 23 |
+| `QS-M-1-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 21 != 30 |
 | `QS-M-2-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem: child count 4 != 3 |
-| `SASED-M-1-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 11 != 27 |
+| `SASED-M-1-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 11 != 34 |
 | `SASED-M-2-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem: child count 3 != 4 |
 | `SASED-M-3-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 1 != 0 |
 | `SKFF-M-10-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem: child count 3 != 4 |
@@ -107,7 +110,7 @@ Of the 82 tests that exercise only implemented ops:
 | `SKLC-M-2-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: child count 9 != 6 |
 | `SKLC-M-3-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: child count 9 != 6 |
 | `SKLC-O-1-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: child count 9 != 6 |
-| `TL-M-1-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 17 != 27 |
+| `TL-M-1-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 17 != 34 |
 | `TL-M-2-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage: child count 3 != 2 |
 | `TL-M-3-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage: child count 3 != 2 |
 | `SKFF-M-1-30.xml` | PASS |  |
@@ -118,10 +121,7 @@ Of the 82 tests that exercise only implemented ops:
 | `BL-M-17-30.xml` | SKIP_OP | unsupported ops: ['CreateCredential', 'CreateUser'] |
 | `BL-M-18-30.xml` | SKIP_OP | unsupported ops: ['CreateCredential', 'CreateUser'] |
 | `BL-M-19-30.xml` | SKIP_OP | unsupported ops: ['CreateCredential', 'CreateUser'] |
-| `BL-M-2-30.xml` | SKIP_OP | unsupported ops: ['Check'] |
-| `BL-M-20-30.xml` | SKIP_OP | unsupported ops: ['Obliterate'] |
 | `BL-M-21-30.xml` | SKIP_OP | unsupported ops: ['CreateGroup'] |
-| `BL-M-3-30.xml` | SKIP_OP | unsupported ops: ['Check'] |
 | `CS-AC-M-4-30.xml` | SKIP_OP | unsupported ops: ['MAC'] |
 | `CS-AC-M-5-30.xml` | SKIP_OP | unsupported ops: ['MACVerify'] |
 | `CS-AC-M-6-30.xml` | SKIP_OP | unsupported ops: ['MAC', 'MACVerify'] |

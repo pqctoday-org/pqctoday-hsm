@@ -85,6 +85,9 @@ IMPLEMENTED_OPS: set[str] = {
     "SetAttribute", "AdjustAttribute",
     # PR #83 (Group C): object import/export.
     "Register", "Import", "Export",
+    # PR #84 (Group D + Group A leftover): lifecycle + protocol.
+    "Deactivate", "Check", "Archive", "Recover", "Obliterate",
+    "DiscoverVersions", "Ping",
 }
 
 

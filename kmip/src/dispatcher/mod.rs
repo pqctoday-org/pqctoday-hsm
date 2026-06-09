@@ -37,6 +37,7 @@ use crate::ops::{
     destroy::destroy, encrypt::encrypt, get::get,
     get_attribute_list::get_attribute_list, get_attributes::get_attributes,
     interop::interop,
+    lifecycle_and_protocol::{archive, check, deactivate, discover_versions, obliterate, ping, recover},
     locate::locate, query::query,
     register_import_export::{export, import_object, register},
     revoke::revoke,
@@ -114,6 +115,13 @@ fn handle_payload(
         RequestPayload::Register(r) => ResponsePayload::Register(register(deps, r, correlation_id)?),
         RequestPayload::Import(r) => ResponsePayload::Import(import_object(deps, r, correlation_id)?),
         RequestPayload::Export(r) => ResponsePayload::Export(export(deps, r, correlation_id)?),
+        RequestPayload::Deactivate(r) => ResponsePayload::Deactivate(deactivate(deps, r, correlation_id)?),
+        RequestPayload::Check(r) => ResponsePayload::Check(check(deps, r, correlation_id)?),
+        RequestPayload::Archive(r) => ResponsePayload::Archive(archive(deps, r, correlation_id)?),
+        RequestPayload::Recover(r) => ResponsePayload::Recover(recover(deps, r, correlation_id)?),
+        RequestPayload::Obliterate(r) => ResponsePayload::Obliterate(obliterate(deps, r, correlation_id)?),
+        RequestPayload::DiscoverVersions(r) => ResponsePayload::DiscoverVersions(discover_versions(deps, r, correlation_id)?),
+        RequestPayload::Ping(r) => ResponsePayload::Ping(ping(deps, r, correlation_id)?),
     })
 }
 

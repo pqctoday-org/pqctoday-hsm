@@ -53,6 +53,7 @@ pub mod get_attribute_list;
 pub mod get_attributes;
 pub mod helpers;
 pub mod interop;
+pub mod lifecycle_and_protocol;
 pub mod locate;
 pub mod query;
 pub mod register_import_export;

@@ -1,13 +1,13 @@
 {
-  "generated_at": 1780969293,
+  "generated_at": 1780970212,
   "summary": {
     "pass": 2,
-    "fail": 80,
+    "fail": 83,
     "error": 0,
-    "skip_op": 20,
+    "skip_op": 17,
     "skip_parse": 0,
     "total": 102,
-    "candidates": 82
+    "candidates": 85
   },
   "tests": [
     {
@@ -191,8 +191,8 @@
     },
     {
       "name": "BL-M-2-30.xml",
-      "status": "SKIP_OP",
-      "detail": "unsupported ops: ['Check']",
+      "status": "FAIL",
+      "detail": "msg #0: response mismatch: ResponseMessage/ResponseHeader: child count 3 != 2",
       "ops_used": [
         "Activate",
         "Check",
@@ -203,8 +203,8 @@
     },
     {
       "name": "BL-M-20-30.xml",
-      "status": "SKIP_OP",
-      "detail": "unsupported ops: ['Obliterate']",
+      "status": "FAIL",
+      "detail": "msg #0: response mismatch: ResponseMessage/ResponseHeader: child count 3 != 2",
       "ops_used": [
         "GetAttributes",
         "Interop",
@@ -223,8 +223,8 @@
     },
     {
       "name": "BL-M-3-30.xml",
-      "status": "SKIP_OP",
-      "detail": "unsupported ops: ['Check']",
+      "status": "FAIL",
+      "detail": "msg #0: response mismatch: ResponseMessage/ResponseHeader: child count 3 != 2",
       "ops_used": [
         "Check",
         "Get",
@@ -813,7 +813,7 @@
     {
       "name": "QS-M-1-30.xml",
       "status": "FAIL",
-      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 21 != 23",
+      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 21 != 30",
       "ops_used": [
         "Query"
       ]
@@ -829,7 +829,7 @@
     {
       "name": "SASED-M-1-30.xml",
       "status": "FAIL",
-      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 11 != 27",
+      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 11 != 34",
       "ops_used": [
         "Query"
       ]
@@ -1044,7 +1044,7 @@
     {
       "name": "TL-M-1-30.xml",
       "status": "FAIL",
-      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 17 != 27",
+      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 17 != 34",
       "ops_used": [
         "Query"
       ]

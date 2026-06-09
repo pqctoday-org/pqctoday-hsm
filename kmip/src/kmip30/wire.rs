@@ -123,6 +123,13 @@ mod tags {
     pub const KeyCompressionType: u32     = 0x42_0041;
     pub const ProtectionStorageMask: u32  = 0x42_015e;
     pub const ProtectionStorageMasks: u32 = 0x42_015f;
+    /// KMIP 3.0 §6.1.14 Deactivate request fields.
+    pub const DeactivationReason: u32     = 0x42_01b8;
+    pub const DeactivationReasonCode: u32 = 0x42_01b9;
+    pub const DeactivationDate: u32       = 0x42_002f;
+    /// KMIP 3.0 §6.1.7 Check request fields.
+    pub const UsageLimitsCount: u32       = 0x42_0096;
+    pub const LeaseTime: u32              = 0x42_0049;
     pub const InteropFunction: u32        = 0x42_0160;
     pub const InteropIdentifier: u32      = 0x42_0161;
     pub const InitialDate: u32            = 0x42_002f;
@@ -317,6 +324,13 @@ fn decode_request_payload(op: Operation, frame: &TtlvFrame) -> Result<RequestPay
         Operation::Register         => RequestPayload::Register(decode_register_req(children)?),
         Operation::Import           => RequestPayload::Import(decode_import_req(children)?),
         Operation::Export           => RequestPayload::Export(decode_export_req(children)?),
+        Operation::Deactivate       => RequestPayload::Deactivate(decode_deactivate_req(children)?),
+        Operation::Check            => RequestPayload::Check(decode_check_req(children)?),
+        Operation::Archive          => RequestPayload::Archive(ArchiveRequest { uid: required_uid(children)? }),
+        Operation::Recover          => RequestPayload::Recover(RecoverRequest { uid: required_uid(children)? }),
+        Operation::Obliterate       => RequestPayload::Obliterate(ObliterateRequest { uid: required_uid(children)? }),
+        Operation::DiscoverVersions => RequestPayload::DiscoverVersions(decode_discover_versions_req(children)?),
+        Operation::Ping             => RequestPayload::Ping(PingRequest),
     })
 }
 
@@ -348,6 +362,13 @@ fn response_payload_to_frame(payload: &ResponsePayload) -> TtlvFrame {
         ResponsePayload::Register(r)         => encode_uid_only_resp(&r.uid),
         ResponsePayload::Import(r)           => encode_uid_only_resp(&r.uid),
         ResponsePayload::Export(r)           => encode_export_resp(r),
+        ResponsePayload::Deactivate(r)       => encode_uid_only_resp(&r.uid),
+        ResponsePayload::Check(r)            => encode_uid_only_resp(&r.uid),
+        ResponsePayload::Archive(r)          => encode_uid_only_resp(&r.uid),
+        ResponsePayload::Recover(r)          => encode_uid_only_resp(&r.uid),
+        ResponsePayload::Obliterate(_)       => vec![],
+        ResponsePayload::DiscoverVersions(r) => encode_discover_versions_resp(r),
+        ResponsePayload::Ping(_)             => vec![],
     };
     TtlvFrame::new(Tag(tags::ResponsePayload), Value::Structure(children))
 }
@@ -783,6 +804,114 @@ fn decode_attribute_v3(frame: &TtlvFrame) -> Result<Option<Attribute>, WireError
         }
         _ => return Ok(None),
     }))
+}
+
+// ── Group D + leftover Group A codecs ──────────────────────────────────────
+//
+// - Deactivate §6.1.14 — UID + DeactivationReason? + DeactivationDate?
+//   The DeactivationReason wire shape mirrors RevocationReason:
+//   a Structure containing a DeactivationReasonCode Enumeration.
+// - Check §6.1.7 — UID + UsageLimitsCount? + CryptographicUsageMask? + LeaseTime?
+//   Per spec the optional fields are NOT wrapped in an Attribute envelope.
+// - Discover Versions §6.1.20 — repeatable ProtocolVersion Structures.
+
+fn decode_deactivate_req(children: &[TtlvFrame]) -> Result<DeactivateRequest, WireError> {
+    let uid = required_uid(children)?;
+    let mut reason: Option<DeactivationReason> = None;
+    let mut date: Option<i64> = None;
+    for c in children {
+        match c.tag.0 {
+            tags::DeactivationReason => {
+                for inner in expect_structure(c, "Deactivation Reason")? {
+                    if inner.tag.0 == tags::DeactivationReasonCode {
+                        let v = expect_enum(inner, "Deactivation Reason Code")?;
+                        reason = DeactivationReason::from_wire_value(v);
+                        if reason.is_none() {
+                            return Err(WireError::UnknownEnum {
+                                field: "Deactivation Reason Code",
+                                value: v,
+                            });
+                        }
+                    }
+                }
+            }
+            tags::DeactivationDate => {
+                if let Value::DateTime(t) = c.value { date = Some(t); }
+            }
+            _ => {}
+        }
+    }
+    Ok(DeactivateRequest {
+        uid,
+        deactivation_reason: reason,
+        deactivation_date: date,
+    })
+}
+
+fn decode_check_req(children: &[TtlvFrame]) -> Result<CheckRequest, WireError> {
+    let uid = required_uid(children)?;
+    let mut usage_limits_count = None;
+    let mut cryptographic_usage_mask = None;
+    let mut lease_time = None;
+    for c in children {
+        match c.tag.0 {
+            tags::UsageLimitsCount => {
+                if let Value::LongInteger(n) = c.value { usage_limits_count = Some(n); }
+                else if let Value::Integer(n) = c.value { usage_limits_count = Some(n as i64); }
+            }
+            tags::CryptographicUsageMask => {
+                cryptographic_usage_mask = Some(expect_integer(c, "Cryptographic Usage Mask")? as u32);
+            }
+            tags::LeaseTime => {
+                // Spec: Interval. Codec models Interval as u32.
+                if let Value::Interval(n) = c.value { lease_time = Some(n); }
+                else if let Value::Integer(n) = c.value { lease_time = Some(n as u32); }
+            }
+            _ => {}
+        }
+    }
+    Ok(CheckRequest {
+        uid,
+        usage_limits_count,
+        cryptographic_usage_mask,
+        lease_time,
+    })
+}
+
+fn decode_discover_versions_req(children: &[TtlvFrame]) -> Result<DiscoverVersionsRequest, WireError> {
+    let mut versions = Vec::new();
+    for c in children {
+        if c.tag.0 == tags::ProtocolVersion {
+            versions.push(decode_protocol_version(c)?);
+        }
+    }
+    Ok(DiscoverVersionsRequest { protocol_versions: versions })
+}
+
+/// Decode one `ProtocolVersion` Structure → (major, minor).
+fn decode_protocol_version(frame: &TtlvFrame) -> Result<(i32, i32), WireError> {
+    let mut major = 0i32;
+    let mut minor = 0i32;
+    for c in expect_structure(frame, "Protocol Version")? {
+        match c.tag.0 {
+            tags::ProtocolVersionMajor => major = expect_integer(c, "Protocol Version Major")?,
+            tags::ProtocolVersionMinor => minor = expect_integer(c, "Protocol Version Minor")?,
+            _ => {}
+        }
+    }
+    Ok((major, minor))
+}
+
+fn encode_discover_versions_resp(r: &DiscoverVersionsResponse) -> Vec<TtlvFrame> {
+    r.protocol_versions.iter().map(|&(major, minor)| {
+        TtlvFrame::new(
+            Tag(tags::ProtocolVersion),
+            Value::Structure(vec![
+                TtlvFrame::new(Tag(tags::ProtocolVersionMajor), Value::Integer(major)),
+                TtlvFrame::new(Tag(tags::ProtocolVersionMinor), Value::Integer(minor)),
+            ]),
+        )
+    }).collect()
 }
 
 // ── Group C codecs: Register / Import / Export ─────────────────────────────

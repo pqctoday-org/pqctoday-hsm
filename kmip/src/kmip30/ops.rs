@@ -33,6 +33,7 @@ pub enum Operation {
     Create           = 0x01,
     CreateKeyPair    = 0x02,
     Register         = 0x03,
+    Check            = 0x09,
     Get              = 0x0a,
     GetAttributes    = 0x0b,
     GetAttributeList = 0x0c,
@@ -43,7 +44,10 @@ pub enum Operation {
     Activate         = 0x12,
     Revoke           = 0x13,
     Destroy          = 0x14,
+    Archive          = 0x15,
+    Recover          = 0x16,
     Query            = 0x18,
+    DiscoverVersions = 0x1e,
     Encrypt          = 0x1f,
     Decrypt          = 0x20,
     Sign             = 0x21,
@@ -55,6 +59,9 @@ pub enum Operation {
     Interop          = 0x2f,
     AdjustAttribute  = 0x30,
     SetAttribute     = 0x31,
+    Ping             = 0x3b,
+    Obliterate       = 0x3d,
+    Deactivate       = 0x40,
 }
 
 impl Operation {
@@ -68,6 +75,7 @@ impl Operation {
             0x02 => Some(Self::CreateKeyPair),
             0x03 => Some(Self::Register),
             0x08 => Some(Self::Locate),
+            0x09 => Some(Self::Check),
             0x0a => Some(Self::Get),
             0x0b => Some(Self::GetAttributes),
             0x0c => Some(Self::GetAttributeList),
@@ -77,7 +85,10 @@ impl Operation {
             0x12 => Some(Self::Activate),
             0x13 => Some(Self::Revoke),
             0x14 => Some(Self::Destroy),
+            0x15 => Some(Self::Archive),
+            0x16 => Some(Self::Recover),
             0x18 => Some(Self::Query),
+            0x1e => Some(Self::DiscoverVersions),
             0x1f => Some(Self::Encrypt),
             0x20 => Some(Self::Decrypt),
             0x21 => Some(Self::Sign),
@@ -87,6 +98,9 @@ impl Operation {
             0x2f => Some(Self::Interop),
             0x30 => Some(Self::AdjustAttribute),
             0x31 => Some(Self::SetAttribute),
+            0x3b => Some(Self::Ping),
+            0x3d => Some(Self::Obliterate),
+            0x40 => Some(Self::Deactivate),
             _ => None,
         }
     }
@@ -478,6 +492,142 @@ impl AdjustmentType {
         }
     }
 }
+
+// ── Group D + Group A leftover: lifecycle + protocol ops ───────────────────
+//
+// All seven ops below trace directly to spec sections — see comments per
+// op for page references. Each response carries `UniqueIdentifier` (or
+// nothing for Ping / Obliterate) per the spec's `Response Payload` table.
+
+/// `Deactivate` (KMIP 3.0 §6.1.14 / Table 292) — transition `Active →
+/// Deactivated`, set Deactivation Date to current time. If no
+/// Deactivation Reason, treat as `Unspecified` per spec.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DeactivateRequest {
+    pub uid: String,
+    /// Wire tag `Deactivation Reason` (0x4201b8). Structure containing
+    /// `Deactivation Reason Code`. OPTIONAL per spec.
+    pub deactivation_reason: Option<DeactivationReason>,
+    /// Wire tag `Deactivation Date` (0x42002f). OPTIONAL per spec —
+    /// if absent, server uses current time.
+    pub deactivation_date: Option<i64>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct DeactivateResponse {
+    pub uid: String,
+}
+
+/// `Deactivation Reason Code` Enumeration. Codepoints from the spec
+/// extract (`enums.Deactivation Reason Code`). Mirrors the structure
+/// of `Revocation Reason Code` per §3.x.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeactivationReason {
+    Unspecified           = 0x01,
+    KeyCompromise         = 0x02,
+    CACompromise          = 0x03,
+    AffiliationChanged    = 0x04,
+    Superseded            = 0x05,
+    CessationOfOperation  = 0x06,
+    PrivilegeWithdrawn    = 0x07,
+}
+
+impl DeactivationReason {
+    pub const fn to_wire_value(self) -> u32 {
+        self as u32
+    }
+    pub const fn from_wire_value(v: u32) -> Option<Self> {
+        match v {
+            0x01 => Some(Self::Unspecified),
+            0x02 => Some(Self::KeyCompromise),
+            0x03 => Some(Self::CACompromise),
+            0x04 => Some(Self::AffiliationChanged),
+            0x05 => Some(Self::Superseded),
+            0x06 => Some(Self::CessationOfOperation),
+            0x07 => Some(Self::PrivilegeWithdrawn),
+            _ => None,
+        }
+    }
+}
+
+/// `Check` (KMIP 3.0 §6.1.7 / Table 270) — validate policy permits the
+/// client's intended use. Spec response: UID if allowed, attribute
+/// reflection if denied (v0.1 always allows; we always return UID).
+#[derive(Clone, Debug, PartialEq)]
+pub struct CheckRequest {
+    pub uid: String,
+    /// Wire tag `Usage Limits Count` (0x420096). OPTIONAL.
+    pub usage_limits_count: Option<i64>,
+    /// Wire tag `Cryptographic Usage Mask` (0x42002c). OPTIONAL.
+    pub cryptographic_usage_mask: Option<u32>,
+    /// Wire tag `Lease Time` (0x420049, Interval). OPTIONAL.
+    pub lease_time: Option<u32>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct CheckResponse {
+    pub uid: String,
+}
+
+/// `Archive` (KMIP 3.0 §6.1.4 / Table 260) — client indicates the
+/// object MAY be archived. v0.1 acknowledges but does not move bytes;
+/// archival policy is server-determined per spec.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ArchiveRequest {
+    pub uid: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ArchiveResponse {
+    pub uid: String,
+}
+
+/// `Recover` (KMIP 3.0 §6.1.47 / Table 390) — recover an archived
+/// object. v0.1 emits success since archival is a no-op.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RecoverRequest {
+    pub uid: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct RecoverResponse {
+    pub uid: String,
+}
+
+/// `Obliterate` (KMIP 3.0 §6.1.39 / Table 367) — remove the Managed
+/// Object completely. "All meta-data SHALL also be removed". Response
+/// SHALL be empty per spec.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ObliterateRequest {
+    pub uid: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ObliterateResponse;
+
+/// `Discover Versions` (KMIP 3.0 §6.1.20 / Table 310) — protocol
+/// version negotiation. Request has optional list of versions the
+/// client supports (ranked); response has the versions the server
+/// supports (filtered to intersect the client's list if supplied).
+#[derive(Clone, Debug, PartialEq)]
+pub struct DiscoverVersionsRequest {
+    /// Wire tag `Protocol Version` (0x420069, repeatable Structure).
+    /// Each entry is a (Major, Minor) pair.
+    pub protocol_versions: Vec<(i32, i32)>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct DiscoverVersionsResponse {
+    pub protocol_versions: Vec<(i32, i32)>,
+}
+
+/// `Ping` (KMIP 3.0 §6.1.41 / Table 373) — liveness check. Both
+/// request and response payloads are empty per spec.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PingRequest;
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct PingResponse;
 
 // ── Group C: Register / Import / Export (KMIP 3.0 §6.1.48, 6.1.29, 6.1.22) ─
 

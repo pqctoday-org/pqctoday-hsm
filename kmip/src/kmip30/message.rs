@@ -173,6 +173,13 @@ pub enum RequestPayload {
     Register(super::ops::RegisterRequest),
     Import(super::ops::ImportRequest),
     Export(super::ops::ExportRequest),
+    Deactivate(super::ops::DeactivateRequest),
+    Check(super::ops::CheckRequest),
+    Archive(super::ops::ArchiveRequest),
+    Recover(super::ops::RecoverRequest),
+    Obliterate(super::ops::ObliterateRequest),
+    DiscoverVersions(super::ops::DiscoverVersionsRequest),
+    Ping(super::ops::PingRequest),
 }
 
 /// Typed response payload — one variant per supported op.
@@ -201,6 +208,13 @@ pub enum ResponsePayload {
     Register(super::ops::RegisterResponse),
     Import(super::ops::ImportResponse),
     Export(super::ops::ExportResponse),
+    Deactivate(super::ops::DeactivateResponse),
+    Check(super::ops::CheckResponse),
+    Archive(super::ops::ArchiveResponse),
+    Recover(super::ops::RecoverResponse),
+    Obliterate(super::ops::ObliterateResponse),
+    DiscoverVersions(super::ops::DiscoverVersionsResponse),
+    Ping(super::ops::PingResponse),
 }
 
 impl RequestPayload {
@@ -230,6 +244,13 @@ impl RequestPayload {
             Self::Register(_)         => Operation::Register,
             Self::Import(_)           => Operation::Import,
             Self::Export(_)           => Operation::Export,
+            Self::Deactivate(_)       => Operation::Deactivate,
+            Self::Check(_)            => Operation::Check,
+            Self::Archive(_)          => Operation::Archive,
+            Self::Recover(_)          => Operation::Recover,
+            Self::Obliterate(_)       => Operation::Obliterate,
+            Self::DiscoverVersions(_) => Operation::DiscoverVersions,
+            Self::Ping(_)             => Operation::Ping,
         }
     }
 }
