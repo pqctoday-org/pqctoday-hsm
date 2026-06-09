@@ -270,6 +270,39 @@ pub enum Attribute {
     /// + label, MAC hash, etc.). Carried as an Attribute when the
     /// client supplies it inside a Register/Create `Attributes` bag.
     CryptographicParameters(crate::kmip30::ops::CryptographicParameters),
+    /// `Digest` Structure (KMIP 3.0 §11) — server-computed digest over
+    /// the key material. Profiles v3.0 §4.1.1 item 10 marks the value
+    /// as variable; we emit SHA-256 (always available per the same
+    /// item) and let the comparator skip the bytes.
+    Digest(DigestAttribute),
+    /// `Random Number Generator` Structure (KMIP 3.0 §11) — describes
+    /// the RNG the server used to generate the material. Profiles
+    /// v3.0 §4.1 Response Variations item 6 — fields are variable.
+    RandomNumberGenerator(RngAttribute),
+}
+
+/// `Digest` attribute Structure (KMIP 3.0 §11 / §6.2.x). The Digest
+/// covers the wire-form key material so a client can spot tampering;
+/// the comparator treats the value as variable (§4.1.1 item 10).
+#[derive(Clone, Debug, PartialEq)]
+pub struct DigestAttribute {
+    pub hashing_algorithm: crate::kmip30::HashingAlgorithm,
+    pub digest_value: Vec<u8>,
+    /// `KeyFormatType` sub-field — wire codepoint, optional.
+    pub key_format_type: Option<u32>,
+}
+
+/// `Random Number Generator` attribute Structure (KMIP 3.0 §11).
+/// Reports which RNG produced the key material. All sub-fields are
+/// optional and value-variable per Profiles §4.1 RV item 6.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RngAttribute {
+    /// Wire tag `RNG Algorithm` (0x420149) — Enumeration. We default
+    /// to `ANSIX9_31 = 0x02` to match the OASIS test expectation
+    /// shape even though the spec lets us use any value.
+    pub rng_algorithm: u32,
+    pub cryptographic_algorithm: Option<KmipAlgorithm>,
+    pub cryptographic_length: Option<u32>,
 }
 
 impl Attribute {

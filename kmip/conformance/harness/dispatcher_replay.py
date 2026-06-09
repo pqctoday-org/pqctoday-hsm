@@ -264,6 +264,16 @@ def is_optional_presence(tag: str) -> bool:
 # treated as opaque (only the presence of the tag is checked).
 _OPAQUE_STRUCTURE_TAGS: dict[str, str] = {
     _norm("ServerInformation"): "§4.1 Response Variations item 8",
+    # `kmip-profiles-v3.0` §4.1.1 item 10 — `Digest Value` is variable
+    # for dynamically-generated managed objects (and the Hashing
+    # Algorithm sub-field is variable per item 12.a). Presence of the
+    # `Digest` Structure is required when the client asks for it, but
+    # its interior bytes can vary.
+    _norm("Digest"): "§4.1.1 item 10 + item 12",
+    # `kmip-profiles-v3.0` §4.1 Response Variations item 6 — Random
+    # Number Generator fields are all variable; treat the entire
+    # structure as opaque.
+    _norm("RandomNumberGenerator"): "§4.1 Response Variations item 6",
 }
 
 
@@ -356,7 +366,7 @@ def compare_responses(
         else:
             bindings.bind(ev, av)
             return True, f"ok (bound {expected.value} = {av!r})"
-    if _values_equal(expected.ttlv_type, ev, av):
+    if _values_equal(expected.ttlv_type, ev, av, expected.tag_name):
         return True, "ok"
     return False, f"{expected.tag_name}: expected {ev!r} got {av!r}"
 
@@ -527,9 +537,20 @@ def _enum_match(expected: Any, actual: Any) -> bool:
         return False
 
 
-def _values_equal(ttlv_type: str, expected: Any, actual: Any) -> bool:
+def _values_equal(
+    ttlv_type: str,
+    expected: Any,
+    actual: Any,
+    tag_name: str | None = None,
+) -> bool:
     """Compare leaf values modulo the str/int/hex skew between XML (always
-    strings) and decoded bytes (typed). Enum values are looked up by name."""
+    strings) and decoded bytes (typed). Enum values are looked up by name.
+
+    `tag_name` enables named-bit-flag resolution for KMIP 3.0 §5.4.1.6.4
+    "Integer — Special case for Masks" (CryptographicUsageMask /
+    ProtectionStorageMask): the XML carries `value="Sign Verify"` as the
+    space-separated flag names; the wire encodes them as the bitwise OR.
+    """
     if expected == actual:
         return True
     # XML always gives us strings; the decoder gives us typed values.
@@ -538,7 +559,26 @@ def _values_equal(ttlv_type: str, expected: Any, actual: Any) -> bool:
         try:
             return int(str(expected), 0) == int(actual)
         except (ValueError, TypeError):
-            return False
+            pass
+        # KMIP 3.0 §5.4.1.6.4 — named bit-flag mask. Resolve flag names
+        # → bitwise OR before comparing. Only `CryptographicUsageMask`
+        # and `ProtectionStorageMask` carry named flags per the spec.
+        if tag_name is not None:
+            from conformance.harness.oasis_codec import NAMED_INTEGER_MASKS
+            # NAMED_INTEGER_MASKS keys are the spec-canonical CamelCase
+            # tag names; the AST carries the same form (XML element name).
+            mask = NAMED_INTEGER_MASKS.get(tag_name)
+            if mask is not None and isinstance(expected, str):
+                acc = 0
+                for flag in str(expected).split():
+                    if flag not in mask:
+                        return False
+                    acc |= mask[flag]
+                try:
+                    return acc == int(actual)
+                except (ValueError, TypeError):
+                    return False
+        return False
     if ttlv_type == "Boolean":
         return str(expected).lower() in ("true", "1") and bool(actual) is True or \
                str(expected).lower() in ("false", "0") and bool(actual) is False

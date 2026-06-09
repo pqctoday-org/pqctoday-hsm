@@ -179,6 +179,7 @@ pub fn create(deps: &Deps, req: CreateRequest, correlation_id: &str) -> Result<C
         compromise_date: x.compromise_date,
         compromise_occurrence_date: x.compromise_date,
         last_change_date: Some(now),
+        original_creation_date: Some(now),
         supersedes: None,
         name: x.name.clone(),
         links: std::collections::HashMap::new(),

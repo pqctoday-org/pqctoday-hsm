@@ -1,8 +1,8 @@
 {
-  "generated_at": 1780983140,
+  "generated_at": 1780984382,
   "summary": {
-    "pass": 30,
-    "fail": 72,
+    "pass": 32,
+    "fail": 70,
     "error": 0,
     "skip_op": 0,
     "skip_parse": 0,
@@ -12,8 +12,8 @@
   "tests": [
     {
       "name": "AKLC-M-1-30.xml",
-      "status": "FAIL",
-      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: no actual 'CryptographicUsageMask' matches expected value",
+      "status": "PASS",
+      "detail": "",
       "ops_used": [
         "CreateKeyPair",
         "Destroy",
@@ -23,7 +23,7 @@
     {
       "name": "AKLC-M-2-30.xml",
       "status": "FAIL",
-      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: no actual 'CryptographicUsageMask' matches expected value",
+      "detail": "msg #5: response mismatch: ResponseMessage/BatchItem/ResultReason: expected 'WrongKeyLifecycleState' got 12",
       "ops_used": [
         "Activate",
         "CreateKeyPair",
@@ -35,7 +35,7 @@
     {
       "name": "AKLC-M-3-30.xml",
       "status": "FAIL",
-      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: no actual 'CryptographicUsageMask' matches expected value",
+      "detail": "msg #4: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'OperationFailed' got 0",
       "ops_used": [
         "Activate",
         "CreateKeyPair",
@@ -884,7 +884,7 @@
     {
       "name": "SKFF-M-11-30.xml",
       "status": "FAIL",
-      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: missing expected attribute 'RandomNumberGenerator' (\u00a74.1.1 item 20 permits server *extras* \u2014 not omissions)",
+      "detail": "msg #8: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 27 != 10",
       "ops_used": [
         "Activate",
         "AddAttribute",
@@ -1008,8 +1008,8 @@
     },
     {
       "name": "SKLC-M-1-30.xml",
-      "status": "FAIL",
-      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: no actual 'CryptographicUsageMask' matches expected value",
+      "status": "PASS",
+      "detail": "",
       "ops_used": [
         "Create",
         "Destroy",
@@ -1019,7 +1019,7 @@
     {
       "name": "SKLC-M-2-30.xml",
       "status": "FAIL",
-      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: no actual 'CryptographicUsageMask' matches expected value",
+      "detail": "msg #4: response mismatch: ResponseMessage/BatchItem/ResultReason: expected 'WrongKeyLifecycleState' got 12",
       "ops_used": [
         "Activate",
         "Create",
@@ -1031,7 +1031,7 @@
     {
       "name": "SKLC-M-3-30.xml",
       "status": "FAIL",
-      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: no actual 'CryptographicUsageMask' matches expected value",
+      "detail": "msg #4: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'OperationFailed' got 0",
       "ops_used": [
         "Activate",
         "Create",
@@ -1074,7 +1074,7 @@
     {
       "name": "AKLC-O-1-30.xml",
       "status": "FAIL",
-      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: no actual 'CryptographicUsageMask' matches expected value",
+      "detail": "msg #3: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: missing expected attribute 'AlwaysSensitive' (\u00a74.1.1 item 20 permits server *extras* \u2014 not omissions)",
       "ops_used": [
         "CreateKeyPair",
         "Destroy",
@@ -1125,7 +1125,7 @@
     {
       "name": "SKLC-O-1-30.xml",
       "status": "FAIL",
-      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: no actual 'CryptographicUsageMask' matches expected value",
+      "detail": "msg #3: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: missing expected attribute 'AlwaysSensitive' (\u00a74.1.1 item 20 permits server *extras* \u2014 not omissions)",
       "ops_used": [
         "Create",
         "Destroy",

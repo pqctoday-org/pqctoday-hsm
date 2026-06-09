@@ -150,6 +150,13 @@ mod tags {
     pub const MaskGenerator: u32          = 0x42_0101;
     pub const MaskGeneratorHashingAlgorithm: u32 = 0x42_0102;
     pub const PSource: u32                = 0x42_0103;
+    /// KMIP 3.0 §11 `Digest` family — Structure + ByteString sub-field.
+    pub const Digest: u32                 = 0x42_0034;
+    pub const DigestValue: u32            = 0x42_0035;
+    /// KMIP 3.0 §11 `Random Number Generator` Structure + Enumeration
+    /// sub-field. Codepoints verified against the spec extraction.
+    pub const RandomNumberGenerator: u32  = 0x42_00de;
+    pub const RngAlgorithm: u32           = 0x42_00da;
     /// KMIP 3.0 §6.1.36/37 MAC Data ByteString.
     pub const MacData: u32                = 0x42_00c6;
     /// KMIP 3.0 §6.1.9/34/35 session + auth tags.
@@ -212,7 +219,11 @@ mod tags {
     pub const RotateGeneration: u32              = 0x42_016e;
     pub const InteropFunction: u32        = 0x42_0160;
     pub const InteropIdentifier: u32      = 0x42_0161;
-    pub const InitialDate: u32            = 0x42_002f;
+    // Spec extraction: `Initial Date = 0x420039` (was wrongly set to
+    // 0x42002f which is actually `Deactivation Date`). The
+    // misassignment collided with `DeactivationDate` further up so
+    // `tag_name_from_code` silently returned the wrong attribute name.
+    pub const InitialDate: u32            = 0x42_0039;
     pub const ActivationDate: u32         = 0x42_0001;
     /// KMIP 3.0 §6.1.7 CreateKeyPair response uses distinct typed tags
     /// for the two halves; using plain `UniqueIdentifier` for both
@@ -2034,6 +2045,28 @@ fn encode_attribute_v3(a: &Attribute) -> TtlvFrame {
             )
         }
         Attribute::CryptographicParameters(cp) => encode_cryptographic_parameters(cp),
+        Attribute::Digest(d) => {
+            let mut children = vec![
+                TtlvFrame::new(Tag(tags::HashingAlgorithm), Value::Enumeration(d.hashing_algorithm.to_wire_value())),
+                TtlvFrame::new(Tag(tags::DigestValue), Value::ByteString(d.digest_value.clone())),
+            ];
+            if let Some(k) = d.key_format_type {
+                children.push(TtlvFrame::new(Tag(tags::KeyFormatType), Value::Enumeration(k)));
+            }
+            TtlvFrame::new(Tag(tags::Digest), Value::Structure(children))
+        }
+        Attribute::RandomNumberGenerator(r) => {
+            let mut children = vec![
+                TtlvFrame::new(Tag(tags::RngAlgorithm), Value::Enumeration(r.rng_algorithm)),
+            ];
+            if let Some(a) = r.cryptographic_algorithm {
+                children.push(TtlvFrame::new(Tag(tags::CryptographicAlgorithm), Value::Enumeration(a.to_wire_value())));
+            }
+            if let Some(n) = r.cryptographic_length {
+                children.push(TtlvFrame::new(Tag(tags::CryptographicLength), Value::Integer(n as i32)));
+            }
+            TtlvFrame::new(Tag(tags::RandomNumberGenerator), Value::Structure(children))
+        }
     }
 }
 
@@ -2060,6 +2093,11 @@ fn tag_code_from_name(name: &str) -> Option<u32> {
 /// Inverse of `tag_code_from_name` — used to surface AttributeReference
 /// names in GetAttributes request decoding.
 fn tag_name_from_code(code: u32) -> &'static str {
+    // KMIP 3.0 §11 — full Baseline Server attribute-name table. An
+    // `AttributeReference` Enumeration carries the spec-encoded tag
+    // codepoint; the handler maps it back to the canonical CamelCase
+    // name so `matches_name` in `get_attributes` can filter the
+    // ObjectRecord-derived attribute set.
     match code {
         tags::CryptographicAlgorithm => "Cryptographic Algorithm",
         tags::CryptographicLength    => "Cryptographic Length",
@@ -2070,6 +2108,50 @@ fn tag_name_from_code(code: u32) -> &'static str {
         tags::Name                   => "Name",
         tags::InitialDate            => "Initial Date",
         tags::ActivationDate         => "Activation Date",
+        tags::DeactivationDate       => "Deactivation Date",
+        tags::DestroyDate            => "Destroy Date",
+        tags::CompromiseDate         => "Compromise Date",
+        tags::CompromiseOccurrenceDate => "Compromise Occurrence Date",
+        tags::LastChangeDate         => "Last Change Date",
+        tags::OriginalCreationDate   => "Original Creation Date",
+        tags::ProcessStartDate       => "Process Start Date",
+        tags::ProtectStopDate        => "Protect Stop Date",
+        tags::RotateDate             => "Rotate Date",
+        tags::Sensitive              => "Sensitive",
+        tags::AlwaysSensitive        => "Always Sensitive",
+        tags::Extractable            => "Extractable",
+        tags::NeverExtractable       => "Never Extractable",
+        tags::Fresh                  => "Fresh",
+        tags::KeyValuePresent        => "Key Value Present",
+        tags::QuantumSafe            => "Quantum Safe",
+        tags::Digest                 => "Digest",
+        tags::RandomNumberGenerator  => "Random Number Generator",
+        tags::KeyFormatType          => "Key Format Type",
+        tags::CryptographicParameters => "Cryptographic Parameters",
+        tags::CertificateType        => "Certificate Type",
+        tags::CertificateLength      => "Certificate Length",
+        tags::DigitalSignatureAlgorithm => "Digital Signature Algorithm",
+        tags::NistKeyType            => "NIST Key Type",
+        tags::ProtectionLevel        => "Protection Level",
+        tags::RevocationReasonCode   => "Revocation Reason",
+        tags::DeactivationReasonCode => "Deactivation Reason",
+        tags::Comment                => "Comment",
+        tags::Description            => "Description",
+        tags::ContactInformation     => "Contact Information",
+        tags::ObjectClass            => "Object Class",
+        tags::KeyValueLocation       => "Key Value Location",
+        tags::AlternativeName        => "Alternative Name",
+        tags::ShortUniqueIdentifier  => "Short Unique Identifier",
+        tags::X509CertificateIdentifier => "X.509 Certificate Identifier",
+        tags::X509CertificateIssuer  => "X.509 Certificate Issuer",
+        tags::X509CertificateSubject => "X.509 Certificate Subject",
+        tags::LeaseTime              => "Lease Time",
+        tags::ProtectionPeriod       => "Protection Period",
+        tags::RotateInterval         => "Rotate Interval",
+        tags::RotateOffset           => "Rotate Offset",
+        tags::RotateGeneration       => "Rotate Generation",
+        tags::RotateName             => "Rotate Name",
+        tags::UsageLimits            => "Usage Limits",
         _ => "Unknown",
     }
 }

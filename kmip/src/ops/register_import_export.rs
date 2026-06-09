@@ -142,6 +142,7 @@ pub fn register(
         compromise_date: x.compromise_date,
         compromise_occurrence_date: x.compromise_date,
         last_change_date: Some(now),
+        original_creation_date: Some(now),
         supersedes: None,
         name,
         links: HashMap::new(),

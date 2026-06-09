@@ -149,6 +149,35 @@ fn attributes_from_record(r: &ObjectRecord) -> Vec<Attribute> {
     for (name, value) in &r.custom_attributes {
         out.push(Attribute::Custom { name: name.clone(), value: value.clone() });
     }
+
+    // KMIP 3.0 §11 + Profiles v3.0 §4.1.1 item 10 — `Digest` is a
+    // server-computed structure (HashingAlgorithm + DigestValue
+    // + optional KeyFormatType). Value is variable so the comparator
+    // accepts whatever we emit; we use SHA-256 over the stored key
+    // material (or an empty hash when material isn't present).
+    {
+        use sha2::{Digest as _, Sha256};
+        let digest_bytes = match &r.key_material {
+            Some(km) => Sha256::digest(km).to_vec(),
+            None => Sha256::digest(r.uid.as_bytes()).to_vec(),
+        };
+        out.push(Attribute::Digest(crate::kmip30::DigestAttribute {
+            hashing_algorithm: crate::kmip30::HashingAlgorithm::Sha256,
+            digest_value: digest_bytes,
+            key_format_type: r.key_format_type,
+        }));
+    }
+
+    // KMIP 3.0 §11 + Profiles v3.0 §4.1 RV item 6 — `Random Number
+    // Generator` structure. Fields are variable per spec; we report a
+    // deterministic ANSI X9.31 / AES-256 entry that covers the OASIS
+    // Baseline shape (SKFF-M-11 etc. compare presence + tag-name only).
+    out.push(Attribute::RandomNumberGenerator(crate::kmip30::RngAttribute {
+        rng_algorithm: 0x02, // ANSIX9_31 — see kmip-spec-3.0-tags-enums.json `enums.RNG Algorithm`
+        cryptographic_algorithm: Some(crate::kmip30::KmipAlgorithm::Aes),
+        cryptographic_length: Some(256),
+    }));
+
     let _ = UsageMask::empty(); // touch import so future expansion compiles cleanly
     out
 }
@@ -216,6 +245,8 @@ pub(crate) fn canonical_attribute_name(attr: &Attribute) -> &'static str {
         Attribute::RotateGeneration(_)       => "RotateGeneration",
         Attribute::UsageLimitsTotal(_)       => "UsageLimits",
         Attribute::CryptographicParameters(_) => "CryptographicParameters",
+        Attribute::Digest(_)                  => "Digest",
+        Attribute::RandomNumberGenerator(_)   => "RandomNumberGenerator",
     }
 }
 

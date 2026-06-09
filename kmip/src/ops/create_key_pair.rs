@@ -217,6 +217,7 @@ pub fn create_key_pair(
         compromise_date: priv_x.compromise_date,
         compromise_occurrence_date: priv_x.compromise_date,
         last_change_date: Some(now),
+        original_creation_date: Some(now),
         supersedes: None,
             name: priv_x.name.clone(),
 
@@ -228,7 +229,14 @@ pub fn create_key_pair(
             key_material: None,
 
 
-            key_format_type: None,
+            // KMIP 3.0 §6.2 — default `KeyFormatType` depends on algo.
+            // For RSA the OASIS Baseline test corpus expects PKCS#1
+            // (codepoint 0x03) on both halves of a CreateKeyPair-
+            // generated keypair.
+            key_format_type: match kmip_algo {
+                crate::kmip30::KmipAlgorithm::Rsa => Some(0x03),
+                _ => None,
+            },
     ..ObjectRecord::default()
 })?;
     deps.store.put(ObjectRecord {
@@ -246,6 +254,7 @@ pub fn create_key_pair(
         compromise_date: pub_x.compromise_date,
         compromise_occurrence_date: pub_x.compromise_date,
         last_change_date: Some(now),
+        original_creation_date: Some(now),
         supersedes: None,
             name: pub_x.name.clone(),
 
@@ -257,7 +266,14 @@ pub fn create_key_pair(
             key_material: None,
 
 
-            key_format_type: None,
+            // KMIP 3.0 §6.2 — default `KeyFormatType` depends on algo.
+            // For RSA the OASIS Baseline test corpus expects PKCS#1
+            // (codepoint 0x03) on both halves of a CreateKeyPair-
+            // generated keypair.
+            key_format_type: match kmip_algo {
+                crate::kmip30::KmipAlgorithm::Rsa => Some(0x03),
+                _ => None,
+            },
     ..ObjectRecord::default()
 })?;
 
