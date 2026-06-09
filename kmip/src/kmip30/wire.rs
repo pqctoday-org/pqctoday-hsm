@@ -825,7 +825,13 @@ fn decode_encrypt_req(children: &[TtlvFrame]) -> Result<EncryptRequest, WireErro
             _ => {}
         }
     }
-    Ok(EncryptRequest { uid, data, iv, cryptographic_parameters: cp })
+    let mut aad = None;
+    for c in children {
+        if c.tag.0 == tags::AuthenticatedEncryptionAdditionalData {
+            if let Value::ByteString(b) = &c.value { aad = Some(b.clone()); }
+        }
+    }
+    Ok(EncryptRequest { uid, data, iv, cryptographic_parameters: cp, aad })
 }
 
 fn encode_encrypt_resp(r: &EncryptResponse) -> Vec<TtlvFrame> {
@@ -868,13 +874,19 @@ fn decode_decrypt_req(children: &[TtlvFrame]) -> Result<DecryptRequest, WireErro
             _ => {}
         }
     }
+    let mut aad = None;
+    for c in children {
+        if c.tag.0 == tags::AuthenticatedEncryptionAdditionalData {
+            if let Value::ByteString(b) = &c.value { aad = Some(b.clone()); }
+        }
+    }
     // For AEAD decrypt, the shim expects ciphertext||tag concatenated.
     // KMIP keeps them as separate fields per §6.1.21; recombine on
     // ingress so the shim sees what `aes-gcm` expects.
     if let Some(t) = tag {
         data.extend_from_slice(&t);
     }
-    Ok(DecryptRequest { uid, data, iv, cryptographic_parameters: cp })
+    Ok(DecryptRequest { uid, data, iv, cryptographic_parameters: cp, aad })
 }
 
 fn encode_decrypt_resp(r: &DecryptResponse) -> Vec<TtlvFrame> {

@@ -327,6 +327,10 @@ pub struct EncryptRequest {
     /// `BlockCipherMode` here, it takes precedence over whatever was
     /// stored at Register/Create time.
     pub cryptographic_parameters: Option<CryptographicParameters>,
+    /// KMIP 3.0 §11 `Authenticated Encryption Additional Data` — the
+    /// AAD ("associated data") for AEAD ciphers (AES-GCM, ChaCha20-
+    /// Poly1305). Bound into the auth tag computation, NOT encrypted.
+    pub aad: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -355,6 +359,10 @@ pub struct DecryptRequest {
     /// KMIP 3.0 §6.1.21 — per-call override for the key's stored
     /// `CryptographicParameters`. See [`EncryptRequest`].
     pub cryptographic_parameters: Option<CryptographicParameters>,
+    /// KMIP 3.0 §11 `Authenticated Encryption Additional Data`. See
+    /// [`EncryptRequest::aad`]. MUST be byte-equal to the value passed
+    /// at encryption time or the AEAD tag check will fail.
+    pub aad: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]

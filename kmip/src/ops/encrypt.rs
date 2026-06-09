@@ -196,6 +196,7 @@ fn encrypt_classical(
     // The previous code fell back to a SHA-256 placeholder buffer when
     // no session was wired — that broke KAT comparisons.
     let oaep = super::helpers::oaep_params_for(obj.cryptographic_parameters.as_ref());
+    let aad = req.aad.as_deref().unwrap_or(&[]);
     let ciphertext = if let Some(key_bytes) = &obj.key_material {
         softhsmrustv3::native::encrypt_with_key_bytes(
             key_bytes,
@@ -203,6 +204,7 @@ fn encrypt_classical(
             &req.data,
             req.iv.as_deref(),
             oaep.as_ref(),
+            aad,
         )
         .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Encrypt"))?
     } else if let Some(session) = deps.engine_session {
@@ -220,18 +222,25 @@ fn encrypt_classical(
         input.extend_from_slice(&req.data);
         placeholder_bytes(&req.uid, &input, b"enc", input.len().max(16))
     };
-    // AES-GCM / ChaCha20-Poly1305 — the shim returns `ciphertext`
-    // with the 16-byte tag appended. KMIP 3.0 §6.1.21 requires the
-    // tag to ride in its own `AuthenticatedEncryptionTag` field, not
-    // tacked onto Data. Split on the way out.
-    let (ciphertext, authenticated_encryption_tag) = match mech {
-        softhsmrustv3::constants::CKM_AES_GCM if ciphertext.len() >= 16 => {
+    // AEAD mechanisms — the shim returns `ciphertext || tag`
+    // (the standard Rust `aead` crate convention). KMIP 3.0 §6.1.21
+    // requires the tag to ride in its own `AuthenticatedEncryptionTag`
+    // field, not tacked onto Data, so we split on the way out. Every
+    // AEAD mechanism in our shim uses a 16-byte tag (AES-GCM and
+    // ChaCha20-Poly1305 per RFC 5116 / 8439).
+    let is_aead = matches!(
+        mech,
+        softhsmrustv3::constants::CKM_AES_GCM
+            | softhsmrustv3::constants::CKM_CHACHA20_POLY1305,
+    );
+    let (ciphertext, authenticated_encryption_tag) =
+        if is_aead && ciphertext.len() >= 16 {
             let split = ciphertext.len() - 16;
             let tag = ciphertext[split..].to_vec();
             (ciphertext[..split].to_vec(), Some(tag))
-        }
-        _ => (ciphertext, None),
-    };
+        } else {
+            (ciphertext, None)
+        };
     Ok(EncryptResponse {
         uid: req.uid.clone(),
         ciphertext,
@@ -311,7 +320,7 @@ mod tests {
     fn ml_kem_branch_returns_encapsulation_and_shared_secret() {
         let (ring, d) = deps_and_ring();
         put(&d, "k", KmipAlgorithm::MlKem1024, ObjectType::PublicKey, State::Active, UsageMask::KEY_AGREEMENT);
-        let r = encrypt(&d, EncryptRequest { uid: "k".into(), data: vec![], iv: None , cryptographic_parameters: None}, "c").unwrap();
+        let r = encrypt(&d, EncryptRequest { uid: "k".into(), data: vec![], iv: None , cryptographic_parameters: None, aad: None}, "c").unwrap();
         assert!(r.shared_secret.is_some(), "ML-KEM must return shared secret");
         assert_eq!(r.ciphertext.len(), 32);
         // Plane-3 emit should be C_EncapsulateKey, not C_EncryptInit.
@@ -328,7 +337,7 @@ mod tests {
             uid: "a".into(),
             data: b"plaintext".to_vec(),
             iv: Some(vec![0u8; 12]),
-            cryptographic_parameters: None,
+            cryptographic_parameters: None, aad: None,
         }, "c").unwrap();
         assert!(r.shared_secret.is_none(), "classical encrypt has no shared secret");
         // Plane-3 emit should be C_EncryptInit + C_Encrypt.
@@ -341,7 +350,7 @@ mod tests {
     fn encrypt_on_destroyed_returns_object_archived() {
         let (_ring, d) = deps_and_ring();
         put(&d, "a", KmipAlgorithm::Aes, ObjectType::SymmetricKey, State::Destroyed, UsageMask::ENCRYPT);
-        let err = encrypt(&d, EncryptRequest { uid: "a".into(), data: vec![], iv: None , cryptographic_parameters: None}, "c").unwrap_err();
+        let err = encrypt(&d, EncryptRequest { uid: "a".into(), data: vec![], iv: None , cryptographic_parameters: None, aad: None}, "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::ObjectArchived);
     }
 }

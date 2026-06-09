@@ -1,5 +1,5 @@
 {
-  "generated_at": 1781040441,
+  "generated_at": 1781041354,
   "summary": {
     "pass": 43,
     "fail": 59,
@@ -717,7 +717,7 @@
     {
       "name": "CS-BC-M-CHACHA20POLY1305-1-30.xml",
       "status": "FAIL",
-      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 3 != 2",
+      "detail": "msg #6: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'OperationFailed' got 0",
       "ops_used": [
         "Decrypt",
         "Destroy",

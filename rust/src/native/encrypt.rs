@@ -195,7 +195,7 @@ pub fn encrypt(
         }
         CKM_CHACHA20_POLY1305 => {
             let iv = iv.ok_or(CKR_ARGUMENTS_BAD)?;
-            chacha20_poly1305_encrypt(&key_bytes, iv, plaintext)
+            chacha20_poly1305_encrypt(&key_bytes, iv, plaintext, &[])
         }
         CKM_RSA_PKCS_OAEP => {
             // Handle-based path doesn't carry parameters yet; defaults
@@ -241,7 +241,7 @@ pub fn decrypt(
         }
         CKM_CHACHA20_POLY1305 => {
             let iv = iv.ok_or(CKR_ARGUMENTS_BAD)?;
-            chacha20_poly1305_decrypt(&key_bytes, iv, ciphertext)
+            chacha20_poly1305_decrypt(&key_bytes, iv, ciphertext, &[])
         }
         CKM_RSA_PKCS_OAEP => {
             rsa_oaep_decrypt(&key_bytes, ciphertext, &OaepParams::sha256_default())
@@ -302,6 +302,7 @@ pub fn encrypt_with_key_bytes(
     plaintext: &[u8],
     iv: Option<&[u8]>,
     oaep: Option<&OaepParams>,
+    aad: &[u8],
 ) -> Result<Vec<u8>, CkRv> {
     match mechanism {
         CKM_AES_GCM => {
@@ -323,7 +324,7 @@ pub fn encrypt_with_key_bytes(
         }
         CKM_CHACHA20_POLY1305 => {
             let iv = iv.ok_or(CKR_ARGUMENTS_BAD)?;
-            chacha20_poly1305_encrypt(key_bytes, iv, plaintext)
+            chacha20_poly1305_encrypt(key_bytes, iv, plaintext, aad)
         }
         CKM_RSA_PKCS_OAEP => {
             let default = OaepParams::sha256_default();
@@ -342,6 +343,7 @@ pub fn decrypt_with_key_bytes(
     ciphertext: &[u8],
     iv: Option<&[u8]>,
     oaep: Option<&OaepParams>,
+    aad: &[u8],
 ) -> Result<Vec<u8>, CkRv> {
     match mechanism {
         CKM_AES_GCM => {
@@ -363,7 +365,7 @@ pub fn decrypt_with_key_bytes(
         }
         CKM_CHACHA20_POLY1305 => {
             let iv = iv.ok_or(CKR_ARGUMENTS_BAD)?;
-            chacha20_poly1305_decrypt(key_bytes, iv, ciphertext)
+            chacha20_poly1305_decrypt(key_bytes, iv, ciphertext, aad)
         }
         CKM_RSA_PKCS_OAEP => {
             let default = OaepParams::sha256_default();
@@ -688,15 +690,16 @@ fn chacha20_poly1305_encrypt(
     key: &[u8],
     nonce: &[u8],
     plaintext: &[u8],
+    aad: &[u8],
 ) -> Result<Vec<u8>, CkRv> {
-    use chacha20poly1305::aead::{Aead, KeyInit};
+    use chacha20poly1305::aead::{Aead, KeyInit, Payload};
     use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
     if key.len() != 32 || nonce.len() != 12 {
         return Err(CKR_ARGUMENTS_BAD);
     }
     let cipher = ChaCha20Poly1305::new(Key::from_slice(key));
     cipher
-        .encrypt(Nonce::from_slice(nonce), plaintext)
+        .encrypt(Nonce::from_slice(nonce), Payload { msg: plaintext, aad })
         .map_err(|_| CKR_FUNCTION_FAILED)
 }
 
@@ -704,15 +707,16 @@ fn chacha20_poly1305_decrypt(
     key: &[u8],
     nonce: &[u8],
     ciphertext: &[u8],
+    aad: &[u8],
 ) -> Result<Vec<u8>, CkRv> {
-    use chacha20poly1305::aead::{Aead, KeyInit};
+    use chacha20poly1305::aead::{Aead, KeyInit, Payload};
     use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
     if key.len() != 32 || nonce.len() != 12 {
         return Err(CKR_ARGUMENTS_BAD);
     }
     let cipher = ChaCha20Poly1305::new(Key::from_slice(key));
     cipher
-        .decrypt(Nonce::from_slice(nonce), ciphertext)
+        .decrypt(Nonce::from_slice(nonce), Payload { msg: ciphertext, aad })
         .map_err(|_| CKR_ENCRYPTED_DATA_INVALID)
 }
 
