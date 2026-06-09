@@ -178,6 +178,39 @@ fn encrypt_classical(
     emit_pkcs11(deps, correlation_id, "C_EncryptInit", Some(mech), 0, "CKR_OK");
     emit_pkcs11(deps, correlation_id, "C_Encrypt", Some(mech), 0, "CKR_OK");
 
+    // KMIP 3.0 §11 — `Tag Length` validation. The spec text reads
+    // "Tag Length is the length of the authenticator tag in bytes."
+    // The valid range depends on the AEAD mechanism:
+    //   • ChaCha20-Poly1305 — RFC 8439 §2.8.1 mandates a fixed 128-bit
+    //     (16-byte) tag. Any other Tag Length is unsupported.
+    //   • AES-GCM — NIST SP 800-38D §5.2.1.2 permits 96, 104, 112,
+    //     120, or 128 bits (12-16 bytes); the shim only emits 128.
+    // OASIS CS-BC-M-CHACHA20POLY1305-1 msg #6 expects
+    // `GeneralFailure` (0x100) for this rejection rather than the
+    // more obvious `CryptographicFailure` (0x0a) — the result message
+    // pattern they pin (`L_KMIPCRYPTO_random:invalid-tag-length`)
+    // shows it's surfaced through the engine's generic random/AEAD
+    // failure path, not the AEAD-specific cryptographic-failure path.
+    if let Some(tl) = effective_cp.and_then(|c| c.tag_length) {
+        let bytes = tl as i64;
+        let valid = match mech {
+            softhsmrustv3::constants::CKM_CHACHA20_POLY1305 => bytes == 16,
+            softhsmrustv3::constants::CKM_AES_GCM => (12..=16).contains(&bytes),
+            _ => true,
+        };
+        if !valid {
+            return Err(fail_err(
+                deps,
+                correlation_id,
+                "Encrypt",
+                KmipError::failed(
+                    ResultReason::GeneralFailure,
+                    format!("invalid-tag-length: {bytes} bytes for mechanism {mech:#x}"),
+                ),
+            ));
+        }
+    }
+
     // Plane-3 dispatch. KMIP 3.0 §6.1.21 — the engine performs the
     // cryptographic op via the PKCS#11 bridge. Three paths:
     //

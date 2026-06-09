@@ -159,6 +159,10 @@ mod tags {
     /// separate field on the Encrypt/Decrypt payload.
     pub const AuthenticatedEncryptionTag: u32       = 0x42_00ff;
     pub const AuthenticatedEncryptionAdditionalData: u32 = 0x42_00fe;
+    /// KMIP 3.0 §11 `Tag Length` Integer — the requested AEAD
+    /// authentication tag length, in bytes. Codepoint `0x4200ce`
+    /// per `kmip-spec-3.0-tags-enums.json`.
+    pub const TagLength: u32                        = 0x42_00ce;
     /// KMIP 3.0 §11 `Digest` family — Structure + ByteString sub-field.
     pub const Digest: u32                 = 0x42_0034;
     pub const DigestValue: u32            = 0x42_0035;
@@ -1298,6 +1302,9 @@ fn decode_cryptographic_parameters(frame: &TtlvFrame) -> Result<CryptographicPar
             }
             tags::BlockCipherMode => {
                 cp.block_cipher_mode = Some(expect_enum(c, "Block Cipher Mode")?);
+            }
+            tags::TagLength => {
+                cp.tag_length = Some(expect_integer(c, "Tag Length")?);
             }
             _ => {}
         }

@@ -1,6 +1,6 @@
 # OASIS KMIP 3.0 Dispatcher Replay Report
 
-Generated: 2026-06-09 21:42:34 UTC
+Generated: 2026-06-09 21:50:41 UTC
 
 
 ## Aggregate
@@ -8,8 +8,8 @@ Generated: 2026-06-09 21:42:34 UTC
 
 | Status | Count | % of total |
 |---|---|---|
-| **PASS** | 43 | 42.2% |
-| **FAIL** | 59 | 57.8% |
+| **PASS** | 44 | 43.1% |
+| **FAIL** | 58 | 56.9% |
 | ERROR | 0 | 0.0% |
 | SKIP_OP (op not implemented) | 0 | 0.0% |
 | SKIP_PARSE (XML malformed) | 0 | 0.0% |
@@ -18,9 +18,9 @@ Generated: 2026-06-09 21:42:34 UTC
 
 Of the 102 tests that exercise only implemented ops:
 
-  - **43 pass (42%)**
+  - **44 pass (43%)**
 
-  - 59 fail
+  - 58 fail
 
   - 0 errored
 
@@ -59,7 +59,6 @@ Of the 102 tests that exercise only implemented ops:
 | `CS-BC-M-7-30.xml` | FAIL | msg #2: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'OperationFailed' got 0 |
 | `CS-BC-M-8-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Data: expected 'd9bcce11b0b437b90239552df3a360c90efb6bfed93b4d1ea2123ba |
 | `CS-BC-M-9-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
-| `CS-BC-M-CHACHA20POLY1305-1-30.xml` | FAIL | msg #6: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'OperationFailed' got 0 |
 | `CS-BC-M-GCM-1-30.xml` | FAIL | msg #6: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
 | `CS-BC-M-GCM-2-30.xml` | FAIL | msg #16: response mismatch: ResponseMessage/BatchItem/ResponsePayload/AuthenticatedEncryptionTag: expected '5bc94fbc3221a5db94fae95ae7121a47 |
 | `CS-BC-M-GCM-3-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
@@ -123,6 +122,7 @@ Of the 102 tests that exercise only implemented ops:
 | `CS-BC-M-CHACHA20-2-30.xml` | PASS |  |
 | `CS-BC-M-CHACHA20-3-30.xml` | PASS |  |
 | `CS-BC-M-CHACHA20-4-30.xml` | PASS |  |
+| `CS-BC-M-CHACHA20POLY1305-1-30.xml` | PASS |  |
 | `CS-RNG-M-1-30.xml` | PASS |  |
 | `CS-RNG-O-1-30.xml` | PASS |  |
 | `QS-M-1-30.xml` | PASS |  |

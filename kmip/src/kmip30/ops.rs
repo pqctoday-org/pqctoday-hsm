@@ -814,6 +814,11 @@ pub struct CryptographicParameters {
     /// symmetric Encrypt / Decrypt mechanism choice. Codepoints per
     /// KMIP 3.0 §11 (1=CBC, 2=ECB, 3=PCBC, …, 6=GCM, …).
     pub block_cipher_mode: Option<u32>,
+    /// Wire tag `Tag Length` (0x4200ce) — Integer (bytes). Per KMIP
+    /// 3.0 §11, the requested AEAD authentication-tag length. The
+    /// server SHALL reject values incompatible with the mechanism
+    /// (e.g. ChaCha20-Poly1305 mandates 16 bytes per RFC 8439 §2.8).
+    pub tag_length: Option<i32>,
 }
 
 /// `Hashing Algorithm` Enumeration — KMIP 3.0 §11. Codepoints from the
