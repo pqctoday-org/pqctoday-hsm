@@ -1708,6 +1708,7 @@ dependencies = [
  "bytes",
  "clap",
  "hex",
+ "hmac",
  "predicates",
  "proptest",
  "rand 0.8.6",

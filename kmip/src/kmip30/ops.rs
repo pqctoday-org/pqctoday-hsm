@@ -52,6 +52,9 @@ pub enum Operation {
     Decrypt          = 0x20,
     Sign             = 0x21,
     SignatureVerify  = 0x22,
+    MAC              = 0x23,
+    MACVerify        = 0x24,
+    Hash             = 0x27,
     Import           = 0x2a,
     Export           = 0x2b,
     /// KMIP 3.0 §6.1.31 — test-suite framework op. Carries `Begin` /
@@ -93,6 +96,9 @@ impl Operation {
             0x20 => Some(Self::Decrypt),
             0x21 => Some(Self::Sign),
             0x22 => Some(Self::SignatureVerify),
+            0x23 => Some(Self::MAC),
+            0x24 => Some(Self::MACVerify),
+            0x27 => Some(Self::Hash),
             0x2a => Some(Self::Import),
             0x2b => Some(Self::Export),
             0x2f => Some(Self::Interop),
@@ -488,6 +494,138 @@ impl AdjustmentType {
             0x01 => Some(Self::Increment),
             0x02 => Some(Self::Decrement),
             0x03 => Some(Self::Negate),
+            _ => None,
+        }
+    }
+}
+
+// ── Group E (crypto wave 1): MAC / MACVerify / Hash ────────────────────────
+//
+// Spec mapping (single-part forms only — multi-part state machine deferred):
+//
+// - MAC       §6.1.36 / Tbl 358  UID + CryptoParams? + Data → UID + MACData
+// - MACVerify §6.1.37 / Tbl 361  UID + CryptoParams? + Data? + MACData →
+//                                  UID + ValidityIndicator
+// - Hash      §6.1.28 / Tbl 334  CryptoParams + Data → Data
+
+/// `MAC` (KMIP 3.0 §6.1.36) — compute a MAC over `data` using the keyed
+/// Managed Cryptographic Object referenced by `uid`. v0.1 supports
+/// single-part HMAC-SHA-256 / -384 / -512 (mapped from the key's
+/// `CryptographicAlgorithm`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct MacRequest {
+    pub uid: String,
+    /// Wire tag `Cryptographic Parameters` (0x42002b). Structure carrying
+    /// the algorithm + parameters. OPTIONAL per spec — may be specified
+    /// as object attributes.
+    pub cryptographic_parameters: Option<CryptographicParameters>,
+    /// Wire tag `Data` (0x4200c2). Required for single-part.
+    pub data: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct MacResponse {
+    pub uid: String,
+    /// Wire tag `MAC Data` (0x4200c6).
+    pub mac_data: Vec<u8>,
+}
+
+/// `MACVerify` (KMIP 3.0 §6.1.37) — verify a previously computed MAC.
+/// The original `data` is supplied alongside the `mac_data` to verify.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MacVerifyRequest {
+    pub uid: String,
+    pub cryptographic_parameters: Option<CryptographicParameters>,
+    /// Wire tag `Data` (0x4200c2). The original data that was MACed.
+    pub data: Vec<u8>,
+    /// Wire tag `MAC Data` (0x4200c6). The MAC bytes to verify.
+    pub mac_data: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct MacVerifyResponse {
+    pub uid: String,
+    pub validity: SignatureValidity,
+}
+
+/// `Hash` (KMIP 3.0 §6.1.28) — keyless cryptographic hash. The
+/// `cryptographic_parameters.hashing_algorithm` field selects SHA-256 /
+/// -384 / -512 / -1 etc.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HashRequest {
+    /// REQUIRED per spec — carries the HashingAlgorithm enum.
+    pub cryptographic_parameters: CryptographicParameters,
+    /// REQUIRED for single-part.
+    pub data: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct HashResponse {
+    pub data: Vec<u8>,
+}
+
+/// `Cryptographic Parameters` (KMIP 3.0 §11) — Structure holding the
+/// parameters that govern one cryptographic operation. v0.1 carries
+/// only the fields the corpus needs (HashingAlgorithm + CryptographicAlgorithm);
+/// the spec defines ~30 more sub-fields.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct CryptographicParameters {
+    /// Wire tag `Hashing Algorithm` (0x420038) — Enumeration.
+    pub hashing_algorithm: Option<HashingAlgorithm>,
+    /// Wire tag `Cryptographic Algorithm` (0x420028) — Enumeration.
+    /// Some ops (e.g. MAC) get this from the key; others (Hash) carry
+    /// it inside CryptographicParameters.
+    pub cryptographic_algorithm: Option<KmipAlgorithm>,
+}
+
+/// `Hashing Algorithm` Enumeration — KMIP 3.0 §11. Codepoints from the
+/// spec extract (`enums.Hashing Algorithm`). SHA-2 family is what the
+/// OASIS corpus tests; SHA-1 is here for completeness even though it's
+/// deprecated.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HashingAlgorithm {
+    Md2     = 0x01,
+    Md4     = 0x02,
+    Md5     = 0x03,
+    Sha1    = 0x04,
+    Sha224  = 0x05,
+    Sha256  = 0x06,
+    Sha384  = 0x07,
+    Sha512  = 0x08,
+    Ripemd160 = 0x09,
+    Tiger   = 0x0A,
+    Whirlpool = 0x0B,
+    Sha512224 = 0x0C,
+    Sha512256 = 0x0D,
+    Sha3224 = 0x0E,
+    Sha3256 = 0x0F,
+    Sha3384 = 0x10,
+    Sha3512 = 0x11,
+}
+
+impl HashingAlgorithm {
+    pub const fn to_wire_value(self) -> u32 {
+        self as u32
+    }
+    pub const fn from_wire_value(v: u32) -> Option<Self> {
+        match v {
+            0x01 => Some(Self::Md2),
+            0x02 => Some(Self::Md4),
+            0x03 => Some(Self::Md5),
+            0x04 => Some(Self::Sha1),
+            0x05 => Some(Self::Sha224),
+            0x06 => Some(Self::Sha256),
+            0x07 => Some(Self::Sha384),
+            0x08 => Some(Self::Sha512),
+            0x09 => Some(Self::Ripemd160),
+            0x0A => Some(Self::Tiger),
+            0x0B => Some(Self::Whirlpool),
+            0x0C => Some(Self::Sha512224),
+            0x0D => Some(Self::Sha512256),
+            0x0E => Some(Self::Sha3224),
+            0x0F => Some(Self::Sha3256),
+            0x10 => Some(Self::Sha3384),
+            0x11 => Some(Self::Sha3512),
             _ => None,
         }
     }

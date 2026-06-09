@@ -88,6 +88,8 @@ IMPLEMENTED_OPS: set[str] = {
     # PR #84 (Group D + Group A leftover): lifecycle + protocol.
     "Deactivate", "Check", "Archive", "Recover", "Obliterate",
     "DiscoverVersions", "Ping",
+    # PR #85 (Group E wave 1): keyed + keyless crypto.
+    "MAC", "MACVerify", "Hash",
 }
 
 

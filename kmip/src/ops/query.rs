@@ -126,6 +126,9 @@ fn supported_operations() -> Vec<Operation> {
         Operation::Obliterate,
         Operation::DiscoverVersions,
         Operation::Ping,
+        Operation::MAC,
+        Operation::MACVerify,
+        Operation::Hash,
     ]
 }
 
@@ -161,7 +164,7 @@ mod tests {
         let (_ring, d) = deps();
         let resp = query(&d, QueryRequest { functions: vec![QueryFunction::QueryOperations] }, "corr-q").unwrap();
         let ops = resp.operations.unwrap();
-        assert_eq!(ops.len(), 30);
+        assert_eq!(ops.len(), 33);
         assert!(ops.contains(&Operation::Sign));
         assert!(ops.contains(&Operation::Encrypt));
         assert!(ops.contains(&Operation::Decrypt));

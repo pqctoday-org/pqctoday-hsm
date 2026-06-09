@@ -38,7 +38,9 @@ use crate::ops::{
     get_attribute_list::get_attribute_list, get_attributes::get_attributes,
     interop::interop,
     lifecycle_and_protocol::{archive, check, deactivate, discover_versions, obliterate, ping, recover},
-    locate::locate, query::query,
+    locate::locate,
+    mac_and_hash::{hash, mac, mac_verify},
+    query::query,
     register_import_export::{export, import_object, register},
     revoke::revoke,
     sign::sign, signature_verify::signature_verify, Deps,
@@ -122,6 +124,9 @@ fn handle_payload(
         RequestPayload::Obliterate(r) => ResponsePayload::Obliterate(obliterate(deps, r, correlation_id)?),
         RequestPayload::DiscoverVersions(r) => ResponsePayload::DiscoverVersions(discover_versions(deps, r, correlation_id)?),
         RequestPayload::Ping(r) => ResponsePayload::Ping(ping(deps, r, correlation_id)?),
+        RequestPayload::Mac(r) => ResponsePayload::Mac(mac(deps, r, correlation_id)?),
+        RequestPayload::MacVerify(r) => ResponsePayload::MacVerify(mac_verify(deps, r, correlation_id)?),
+        RequestPayload::Hash(r) => ResponsePayload::Hash(hash(deps, r, correlation_id)?),
     })
 }
 

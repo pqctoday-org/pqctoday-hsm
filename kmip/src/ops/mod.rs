@@ -55,6 +55,7 @@ pub mod helpers;
 pub mod interop;
 pub mod lifecycle_and_protocol;
 pub mod locate;
+pub mod mac_and_hash;
 pub mod query;
 pub mod register_import_export;
 pub mod revoke;

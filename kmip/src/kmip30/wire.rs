@@ -130,6 +130,13 @@ mod tags {
     /// KMIP 3.0 §6.1.7 Check request fields.
     pub const UsageLimitsCount: u32       = 0x42_0096;
     pub const LeaseTime: u32              = 0x42_0049;
+    /// KMIP 3.0 §11 Cryptographic Parameters Structure (codepoint
+    /// verified against kmip-spec-3.0-tags-enums.json).
+    pub const CryptographicParameters: u32 = 0x42_002b;
+    /// KMIP 3.0 §11 Hashing Algorithm Enumeration.
+    pub const HashingAlgorithm: u32       = 0x42_0038;
+    /// KMIP 3.0 §6.1.36/37 MAC Data ByteString.
+    pub const MacData: u32                = 0x42_00c6;
     pub const InteropFunction: u32        = 0x42_0160;
     pub const InteropIdentifier: u32      = 0x42_0161;
     pub const InitialDate: u32            = 0x42_002f;
@@ -331,6 +338,9 @@ fn decode_request_payload(op: Operation, frame: &TtlvFrame) -> Result<RequestPay
         Operation::Obliterate       => RequestPayload::Obliterate(ObliterateRequest { uid: required_uid(children)? }),
         Operation::DiscoverVersions => RequestPayload::DiscoverVersions(decode_discover_versions_req(children)?),
         Operation::Ping             => RequestPayload::Ping(PingRequest),
+        Operation::MAC              => RequestPayload::Mac(decode_mac_req(children)?),
+        Operation::MACVerify        => RequestPayload::MacVerify(decode_mac_verify_req(children)?),
+        Operation::Hash             => RequestPayload::Hash(decode_hash_req(children)?),
     })
 }
 
@@ -369,6 +379,9 @@ fn response_payload_to_frame(payload: &ResponsePayload) -> TtlvFrame {
         ResponsePayload::Obliterate(_)       => vec![],
         ResponsePayload::DiscoverVersions(r) => encode_discover_versions_resp(r),
         ResponsePayload::Ping(_)             => vec![],
+        ResponsePayload::Mac(r)              => encode_mac_resp(r),
+        ResponsePayload::MacVerify(r)        => encode_mac_verify_resp(r),
+        ResponsePayload::Hash(r)             => encode_hash_resp(r),
     };
     TtlvFrame::new(Tag(tags::ResponsePayload), Value::Structure(children))
 }
@@ -804,6 +817,100 @@ fn decode_attribute_v3(frame: &TtlvFrame) -> Result<Option<Attribute>, WireError
         }
         _ => return Ok(None),
     }))
+}
+
+// ── Group E codecs: MAC / MACVerify / Hash ─────────────────────────────────
+
+fn decode_cryptographic_parameters(frame: &TtlvFrame) -> Result<CryptographicParameters, WireError> {
+    let mut cp = CryptographicParameters::default();
+    for c in expect_structure(frame, "Cryptographic Parameters")? {
+        match c.tag.0 {
+            tags::HashingAlgorithm => {
+                let v = expect_enum(c, "Hashing Algorithm")?;
+                cp.hashing_algorithm = HashingAlgorithm::from_wire_value(v);
+                if cp.hashing_algorithm.is_none() {
+                    return Err(WireError::UnknownEnum { field: "Hashing Algorithm", value: v });
+                }
+            }
+            tags::CryptographicAlgorithm => {
+                let v = expect_enum(c, "Cryptographic Algorithm")?;
+                cp.cryptographic_algorithm = KmipAlgorithm::from_wire_value(v);
+            }
+            _ => {}
+        }
+    }
+    Ok(cp)
+}
+
+fn decode_mac_req(children: &[TtlvFrame]) -> Result<MacRequest, WireError> {
+    let uid = required_uid(children)?;
+    let mut cp = None;
+    let mut data = Vec::new();
+    for c in children {
+        match c.tag.0 {
+            tags::CryptographicParameters => cp = Some(decode_cryptographic_parameters(c)?),
+            tags::Data => {
+                if let Value::ByteString(b) = &c.value { data = b.clone(); }
+            }
+            _ => {}
+        }
+    }
+    Ok(MacRequest { uid, cryptographic_parameters: cp, data })
+}
+
+fn decode_mac_verify_req(children: &[TtlvFrame]) -> Result<MacVerifyRequest, WireError> {
+    let uid = required_uid(children)?;
+    let mut cp = None;
+    let mut data = Vec::new();
+    let mut mac_data = Vec::new();
+    for c in children {
+        match c.tag.0 {
+            tags::CryptographicParameters => cp = Some(decode_cryptographic_parameters(c)?),
+            tags::Data => {
+                if let Value::ByteString(b) = &c.value { data = b.clone(); }
+            }
+            tags::MacData => {
+                if let Value::ByteString(b) = &c.value { mac_data = b.clone(); }
+            }
+            _ => {}
+        }
+    }
+    Ok(MacVerifyRequest { uid, cryptographic_parameters: cp, data, mac_data })
+}
+
+fn decode_hash_req(children: &[TtlvFrame]) -> Result<HashRequest, WireError> {
+    let mut cp = CryptographicParameters::default();
+    let mut data = Vec::new();
+    for c in children {
+        match c.tag.0 {
+            tags::CryptographicParameters => cp = decode_cryptographic_parameters(c)?,
+            tags::Data => {
+                if let Value::ByteString(b) = &c.value { data = b.clone(); }
+            }
+            _ => {}
+        }
+    }
+    Ok(HashRequest { cryptographic_parameters: cp, data })
+}
+
+fn encode_mac_resp(r: &MacResponse) -> Vec<TtlvFrame> {
+    vec![
+        TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString(r.uid.clone())),
+        TtlvFrame::new(Tag(tags::MacData), Value::ByteString(r.mac_data.clone())),
+    ]
+}
+
+fn encode_mac_verify_resp(r: &MacVerifyResponse) -> Vec<TtlvFrame> {
+    vec![
+        TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString(r.uid.clone())),
+        TtlvFrame::new(Tag(tags::ValidityIndicator), Value::Enumeration(r.validity as u32)),
+    ]
+}
+
+fn encode_hash_resp(r: &HashResponse) -> Vec<TtlvFrame> {
+    vec![
+        TtlvFrame::new(Tag(tags::Data), Value::ByteString(r.data.clone())),
+    ]
 }
 
 // ── Group D + leftover Group A codecs ──────────────────────────────────────

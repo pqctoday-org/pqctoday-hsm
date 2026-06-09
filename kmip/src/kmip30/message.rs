@@ -180,6 +180,9 @@ pub enum RequestPayload {
     Obliterate(super::ops::ObliterateRequest),
     DiscoverVersions(super::ops::DiscoverVersionsRequest),
     Ping(super::ops::PingRequest),
+    Mac(super::ops::MacRequest),
+    MacVerify(super::ops::MacVerifyRequest),
+    Hash(super::ops::HashRequest),
 }
 
 /// Typed response payload — one variant per supported op.
@@ -215,6 +218,9 @@ pub enum ResponsePayload {
     Obliterate(super::ops::ObliterateResponse),
     DiscoverVersions(super::ops::DiscoverVersionsResponse),
     Ping(super::ops::PingResponse),
+    Mac(super::ops::MacResponse),
+    MacVerify(super::ops::MacVerifyResponse),
+    Hash(super::ops::HashResponse),
 }
 
 impl RequestPayload {
@@ -251,6 +257,9 @@ impl RequestPayload {
             Self::Obliterate(_)       => Operation::Obliterate,
             Self::DiscoverVersions(_) => Operation::DiscoverVersions,
             Self::Ping(_)             => Operation::Ping,
+            Self::Mac(_)              => Operation::MAC,
+            Self::MacVerify(_)        => Operation::MACVerify,
+            Self::Hash(_)             => Operation::Hash,
         }
     }
 }
