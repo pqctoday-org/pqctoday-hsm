@@ -478,6 +478,7 @@ def decode_one(buf: bytes, offset: int = 0) -> tuple[TtlvNode, int]:
         end = offset + 8 + body_len
         while inner < end:
             child, inner = decode_one(buf, inner)
+            children.append(child)
         return TtlvNode(tag_name=tag_name, ttlv_type="Structure", children=children), next_off
 
     if type_name == "Integer":
