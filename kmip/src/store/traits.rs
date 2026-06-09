@@ -17,7 +17,10 @@ pub type Uid = String;
 /// One managed object as the store sees it. Key material itself stays in
 /// `softhsmrustv3`; the store keeps the KMIP-level metadata + the stable
 /// PKCS#11 `CKA_ID` we use to find the object back inside the token.
-#[derive(Clone, Debug, PartialEq, Eq)]
+// `CryptographicParameters` carries optional `HashingAlgorithm` enums
+// that don't implement `Eq` — drop the `Eq` bound; PartialEq is what
+// the store-parity tests actually need.
+#[derive(Clone, Debug, PartialEq)]
 pub struct ObjectRecord {
     pub uid: Uid,
     pub object_type: ObjectType,
@@ -68,6 +71,15 @@ pub struct ObjectRecord {
     /// Register/Import flows but the field keeps the format honest
     /// when other formats land.
     pub key_format_type: Option<u32>,
+
+    /// KMIP 3.0 §11 `Cryptographic Parameters` attached to the key.
+    /// Drives the Plane-3 mechanism choice — most importantly the
+    /// RSA-OAEP family (PaddingMethod / HashingAlgorithm / MaskGenerator
+    /// / MaskGeneratorHashingAlgorithm / PSource), which Encrypt /
+    /// Decrypt read off the *key* per §6.1.21 rather than off the
+    /// request payload. Stored as the typed struct from
+    /// [`crate::kmip30::CryptographicParameters`].
+    pub cryptographic_parameters: Option<crate::kmip30::CryptographicParameters>,
 
     // ── Baseline Server profile (KMIP Profiles v3.0 §5.1.2) extension ──
     //
@@ -199,6 +211,7 @@ impl From<BaselineDefaults> for ObjectRecord {
             custom_attributes: std::collections::HashMap::new(),
             key_material: None,
             key_format_type: None,
+            cryptographic_parameters: None,
             last_change_date: None,
             original_creation_date: None,
             deactivation_date: None,

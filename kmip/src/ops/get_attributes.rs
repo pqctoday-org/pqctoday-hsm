@@ -215,6 +215,7 @@ pub(crate) fn canonical_attribute_name(attr: &Attribute) -> &'static str {
         Attribute::RotateOffset(_)           => "RotateOffset",
         Attribute::RotateGeneration(_)       => "RotateGeneration",
         Attribute::UsageLimitsTotal(_)       => "UsageLimits",
+        Attribute::CryptographicParameters(_) => "CryptographicParameters",
     }
 }
 

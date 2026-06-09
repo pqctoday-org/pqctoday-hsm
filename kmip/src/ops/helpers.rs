@@ -162,6 +162,31 @@ pub fn canonical_name(a: KmipAlgorithm) -> String {
 /// `Active` MUST NOT be passed; the helper returns
 /// `WrongKeyLifecycleState` so a bug doesn't masquerade as a
 /// successful response.
+/// Map a KMIP `CryptographicParameters` onto the shim's
+/// [`softhsmrustv3::native::OaepParams`]. Returns `None` when the key
+/// carries no params (callers should treat that as "use shim default
+/// = SHA-256 / MGF1-SHA-256 / no label").
+pub fn oaep_params_for(
+    cp: Option<&crate::kmip30::CryptographicParameters>,
+) -> Option<softhsmrustv3::native::OaepParams<'_>> {
+    use crate::kmip30::HashingAlgorithm;
+    use softhsmrustv3::native::OaepHash;
+    let cp = cp?;
+    let map_hash = |h: HashingAlgorithm| -> Option<OaepHash> {
+        match h {
+            HashingAlgorithm::Sha256 => Some(OaepHash::Sha256),
+            HashingAlgorithm::Sha384 => Some(OaepHash::Sha384),
+            HashingAlgorithm::Sha512 => Some(OaepHash::Sha512),
+            _ => None,
+        }
+    };
+    Some(softhsmrustv3::native::OaepParams {
+        hash: cp.hashing_algorithm.and_then(map_hash),
+        mgf_hash: cp.mask_generator_hashing_algorithm.and_then(map_hash),
+        label: cp.p_source.as_deref(),
+    })
+}
+
 pub fn non_active_state_error(uid: &str, state: crate::kmip30::State) -> KmipError {
     use crate::kmip30::State::*;
     match state {

@@ -762,9 +762,11 @@ pub struct HashResponse {
 }
 
 /// `Cryptographic Parameters` (KMIP 3.0 §11) — Structure holding the
-/// parameters that govern one cryptographic operation. v0.1 carries
-/// only the fields the corpus needs (HashingAlgorithm + CryptographicAlgorithm);
-/// the spec defines ~30 more sub-fields.
+/// parameters that govern one cryptographic operation. Fields we
+/// surface so far cover Hash, MAC, and the RSA-OAEP family
+/// (PaddingMethod / MaskGenerator / MaskGeneratorHashingAlgorithm /
+/// PSource). The spec defines ~30 more sub-fields; the rest are
+/// additive when an op needs them.
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct CryptographicParameters {
     /// Wire tag `Hashing Algorithm` (0x420038) — Enumeration.
@@ -773,6 +775,20 @@ pub struct CryptographicParameters {
     /// Some ops (e.g. MAC) get this from the key; others (Hash) carry
     /// it inside CryptographicParameters.
     pub cryptographic_algorithm: Option<KmipAlgorithm>,
+    /// Wire tag `Padding Method` (0x42005f) — Enumeration. We carry
+    /// the raw codepoint; `OAEP = 0x07` is the value the OASIS
+    /// Baseline corpus exercises (RSA Encrypt/Decrypt path).
+    pub padding_method: Option<u32>,
+    /// Wire tag `Mask Generator` (0x420054) — Enumeration.
+    /// `MGF1 = 0x01` is the only standardised value per KMIP 3.0 §11.
+    pub mask_generator: Option<u32>,
+    /// Wire tag `Mask Generator Hashing Algorithm` (0x420055) —
+    /// Enumeration. For MGF1 this picks the hash the mask generator
+    /// uses; KMIP allows it to differ from `hashing_algorithm`.
+    pub mask_generator_hashing_algorithm: Option<HashingAlgorithm>,
+    /// Wire tag `P Source` (0x420062) — ByteString. The OAEP label
+    /// (`pSourceData`). `None` means an empty label.
+    pub p_source: Option<Vec<u8>>,
 }
 
 /// `Hashing Algorithm` Enumeration — KMIP 3.0 §11. Codepoints from the

@@ -266,6 +266,7 @@ mod tests {
             cryptographic_parameters: CP {
                 hashing_algorithm: Some(HashingAlgorithm::Sha256),
                 cryptographic_algorithm: None,
+                ..CP::default()
             },
             data: b"abc".to_vec(),
         }, "c").unwrap();

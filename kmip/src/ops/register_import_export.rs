@@ -148,6 +148,7 @@ pub fn register(
         custom_attributes: HashMap::new(),
         key_material,
         key_format_type,
+        cryptographic_parameters: x.cryptographic_parameters.clone(),
         ..ObjectRecord::default()
     })?;
 
@@ -320,12 +321,18 @@ pub(crate) struct ExtractedAttrs {
     pub activation_date: Option<OffsetDateTime>,
     pub deactivation_date: Option<OffsetDateTime>,
     pub compromise_date: Option<OffsetDateTime>,
+    /// Per-key `CryptographicParameters` (KMIP §11) — the OAEP /
+    /// PSS / MAC handshake parameters attached to the managed object
+    /// at Register time. Read back by Encrypt / Decrypt / Sign /
+    /// Verify in place of any request-time override.
+    pub cryptographic_parameters: Option<crate::kmip30::CryptographicParameters>,
 }
 
 pub(crate) fn extract_attrs(attrs: &[Attribute]) -> ExtractedAttrs {
     let mut out = ExtractedAttrs {
         algorithm: None, length: None, usage: None, name: None, uid: None,
         activation_date: None, deactivation_date: None, compromise_date: None,
+        cryptographic_parameters: None,
     };
     for a in attrs {
         match a {
@@ -337,6 +344,7 @@ pub(crate) fn extract_attrs(attrs: &[Attribute]) -> ExtractedAttrs {
             Attribute::ActivationDate(t)   => out.activation_date   = OffsetDateTime::from_unix_timestamp(*t).ok(),
             Attribute::DeactivationDate(t) => out.deactivation_date = OffsetDateTime::from_unix_timestamp(*t).ok(),
             Attribute::CompromiseDate(t)   => out.compromise_date   = OffsetDateTime::from_unix_timestamp(*t).ok(),
+            Attribute::CryptographicParameters(cp) => out.cryptographic_parameters = Some(cp.clone()),
             _ => {}
         }
     }

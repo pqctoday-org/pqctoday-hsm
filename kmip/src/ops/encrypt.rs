@@ -166,27 +166,47 @@ fn encrypt_classical(
     emit_pkcs11(deps, correlation_id, "C_EncryptInit", Some(mech), 0, "CKR_OK");
     emit_pkcs11(deps, correlation_id, "C_Encrypt", Some(mech), 0, "CKR_OK");
 
-    // Phase 7b: real AES-GCM (only classical encrypt the native API
-    // supports in v0.1). Falls back to placeholder for unit tests / non-AES.
-    let ciphertext = match (deps.engine_session, obj.algorithm) {
-        (Some(session), crate::kmip30::KmipAlgorithm::Aes) => {
-            let handle = softhsmrustv3::native::find_by_cka_id(session, &obj.pkcs11_cka_id)
-                .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Encrypt:find"))?
-                .ok_or_else(|| KmipError::not_found(&req.uid))?;
-            softhsmrustv3::native::encrypt(
-                session,
-                handle,
-                softhsmrustv3::constants::CKM_AES_GCM,
-                &req.data,
-                req.iv.as_deref(),
-            )
+    // Plane-3 dispatch. KMIP 3.0 §6.1.21 — the engine performs the
+    // cryptographic op via the PKCS#11 bridge. Three paths:
+    //
+    //   1. Engine session present AND key was generated inside the
+    //      engine (Create/CreateKeyPair): look the handle up by
+    //      CKA_ID and call the bridge.
+    //   2. Engine session present BUT key was supplied via Register
+    //      (client-supplied bytes in obj.key_material): drive the
+    //      bridge with raw bytes via `encrypt_with_key_bytes` — bytes
+    //      never re-enter the engine.
+    //   3. No engine session (unit tests, in-memory store with no
+    //      Plane-3): still use `encrypt_with_key_bytes` so the
+    //      OASIS-conformance harness gets real RSA-OAEP ciphertext /
+    //      real AES-GCM ciphertext from `obj.key_material`.
+    //
+    // The previous code fell back to a SHA-256 placeholder buffer when
+    // no session was wired — that broke KAT comparisons.
+    let oaep = super::helpers::oaep_params_for(obj.cryptographic_parameters.as_ref());
+    let ciphertext = if let Some(key_bytes) = &obj.key_material {
+        softhsmrustv3::native::encrypt_with_key_bytes(
+            key_bytes,
+            mech,
+            &req.data,
+            req.iv.as_deref(),
+            oaep.as_ref(),
+        )
+        .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Encrypt"))?
+    } else if let Some(session) = deps.engine_session {
+        let handle = softhsmrustv3::native::find_by_cka_id(session, &obj.pkcs11_cka_id)
+            .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Encrypt:find"))?
+            .ok_or_else(|| KmipError::not_found(&req.uid))?;
+        softhsmrustv3::native::encrypt(session, handle, mech, &req.data, req.iv.as_deref())
             .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Encrypt"))?
-        }
-        _ => {
-            let mut input = req.iv.clone().unwrap_or_default();
-            input.extend_from_slice(&req.data);
-            placeholder_bytes(&req.uid, &input, b"enc", input.len().max(16))
-        }
+    } else {
+        // No key material AND no engine session — the object is a
+        // placeholder for unit tests with mock policy gates. Match
+        // the legacy behaviour so unit-tests that don't exercise
+        // real crypto keep passing.
+        let mut input = req.iv.clone().unwrap_or_default();
+        input.extend_from_slice(&req.data);
+        placeholder_bytes(&req.uid, &input, b"enc", input.len().max(16))
     };
     Ok(EncryptResponse {
         uid: req.uid.clone(),

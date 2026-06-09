@@ -264,6 +264,12 @@ pub enum Attribute {
     RotateGeneration(i32),
     /// `Usage Limits` Structure — v0.1 carries just `Usage Limits Total`.
     UsageLimitsTotal(i64),
+
+    /// `Cryptographic Parameters` Structure (KMIP 3.0 §11) — opaque
+    /// per-key handshake parameters (RSA-OAEP padding + mask generator
+    /// + label, MAC hash, etc.). Carried as an Attribute when the
+    /// client supplies it inside a Register/Create `Attributes` bag.
+    CryptographicParameters(crate::kmip30::ops::CryptographicParameters),
 }
 
 impl Attribute {

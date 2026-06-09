@@ -153,8 +153,16 @@ pub fn decapsulate(
 /// ever exposes AAD in its Encrypt request, this function can grow an
 /// optional `aad` arg.
 ///
-/// Other modes (AES-CBC, AES-CTR, RSA-OAEP) return
-/// `CKR_MECHANISM_INVALID` in v0.1 — easy to add when KMIP needs them.
+/// `mechanism` selects:
+/// - `CKM_AES_GCM`: AES-128/256-GCM (12-byte IV) — Rust `aes-gcm`.
+/// - `CKM_RSA_PKCS_OAEP`: RSA OAEP with **SHA-256** hash + MGF1-SHA-256
+///   (the only OAEP profile the OASIS Baseline corpus exercises;
+///   §11.x lists the full set). Public key is stored as X.509
+///   SubjectPublicKeyInfo DER (the form `C_RegisterObject` accepts
+///   from the KMIP `Register` op).
+///
+/// Other modes (AES-CBC, AES-CTR, other OAEP hashes) return
+/// `CKR_MECHANISM_INVALID`.
 pub fn encrypt(
     _session: u32,
     key_handle: u32,
@@ -172,11 +180,16 @@ pub fn encrypt(
             let iv = iv.ok_or(CKR_ARGUMENTS_BAD)?;
             aes_gcm_encrypt(&key_bytes, iv, plaintext)
         }
+        CKM_RSA_PKCS_OAEP => {
+            // Handle-based path doesn't carry parameters yet; defaults
+            // to SHA-256/MGF1-SHA-256/no-label (the Baseline default).
+            rsa_oaep_encrypt(&key_bytes, plaintext, &OaepParams::sha256_default())
+        }
         _ => Err(CKR_MECHANISM_INVALID),
     }
 }
 
-/// Classical decrypt. v0.1 supports `CKM_AES_GCM`.
+/// Classical decrypt. See [`encrypt`] for the mechanism table.
 pub fn decrypt(
     _session: u32,
     key_handle: u32,
@@ -194,8 +207,183 @@ pub fn decrypt(
             let iv = iv.ok_or(CKR_ARGUMENTS_BAD)?;
             aes_gcm_decrypt(&key_bytes, iv, ciphertext)
         }
+        CKM_RSA_PKCS_OAEP => {
+            rsa_oaep_decrypt(&key_bytes, ciphertext, &OaepParams::sha256_default())
+        }
         _ => Err(CKR_MECHANISM_INVALID),
     }
+}
+
+/// OAEP padding parameters per PKCS#11 v3.2 §6.13 (`CK_RSA_PKCS_OAEP_PARAMS`).
+/// Used by [`encrypt_with_key_bytes`] / [`decrypt_with_key_bytes`] when
+/// the mechanism is `CKM_RSA_PKCS_OAEP`; the KMIP layer reads these
+/// fields off the key's `CryptographicParameters` attribute (KMIP 3.0
+/// §11 — `HashingAlgorithm`, `MaskGenerator`, `MaskGeneratorHashingAlgorithm`,
+/// `PSource`).
+#[derive(Clone, Copy, Debug)]
+pub enum OaepHash {
+    /// PKCS#11 `CKM_SHA256` codepoint 0x250.
+    Sha256,
+    /// PKCS#11 `CKM_SHA384` codepoint 0x260.
+    Sha384,
+    /// PKCS#11 `CKM_SHA512` codepoint 0x270.
+    Sha512,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct OaepParams<'a> {
+    pub hash: Option<OaepHash>,
+    pub mgf_hash: Option<OaepHash>,
+    /// `pSourceData` — OAEP label bytes. None ≡ empty label.
+    pub label: Option<&'a [u8]>,
+}
+
+impl OaepParams<'_> {
+    /// SHA-256 hash + MGF1-SHA-256 + empty label — the simplest
+    /// profile, used when the KMIP key carries no
+    /// `CryptographicParameters` at all.
+    pub fn sha256_default() -> Self {
+        Self {
+            hash: Some(OaepHash::Sha256),
+            mgf_hash: Some(OaepHash::Sha256),
+            label: None,
+        }
+    }
+}
+
+/// Encrypt with raw key bytes — bypass the engine lookup. KMIP
+/// `Register` stores the client-supplied key bytes outside the
+/// engine, so calls from that path need a direct entry point. The
+/// mechanism semantics are identical to [`encrypt`] but for
+/// `CKM_RSA_PKCS_OAEP` the caller can pass `oaep` to override the
+/// default SHA-256 / MGF1-SHA-256 / no-label profile.
+///
+/// Returns the same `CkRv` codes as [`encrypt`] so the KMIP error
+/// mapping in `ops/helpers.rs::ck_rv_to_kmip_error` carries through.
+pub fn encrypt_with_key_bytes(
+    key_bytes: &[u8],
+    mechanism: u32,
+    plaintext: &[u8],
+    iv: Option<&[u8]>,
+    oaep: Option<&OaepParams>,
+) -> Result<Vec<u8>, CkRv> {
+    match mechanism {
+        CKM_AES_GCM => {
+            let iv = iv.ok_or(CKR_ARGUMENTS_BAD)?;
+            aes_gcm_encrypt(key_bytes, iv, plaintext)
+        }
+        CKM_RSA_PKCS_OAEP => {
+            let default = OaepParams::sha256_default();
+            let p = oaep.unwrap_or(&default);
+            rsa_oaep_encrypt(key_bytes, plaintext, p)
+        }
+        _ => Err(CKR_MECHANISM_INVALID),
+    }
+}
+
+/// Decrypt with raw key bytes — symmetric counterpart to
+/// [`encrypt_with_key_bytes`].
+pub fn decrypt_with_key_bytes(
+    key_bytes: &[u8],
+    mechanism: u32,
+    ciphertext: &[u8],
+    iv: Option<&[u8]>,
+    oaep: Option<&OaepParams>,
+) -> Result<Vec<u8>, CkRv> {
+    match mechanism {
+        CKM_AES_GCM => {
+            let iv = iv.ok_or(CKR_ARGUMENTS_BAD)?;
+            aes_gcm_decrypt(key_bytes, iv, ciphertext)
+        }
+        CKM_RSA_PKCS_OAEP => {
+            let default = OaepParams::sha256_default();
+            let p = oaep.unwrap_or(&default);
+            rsa_oaep_decrypt(key_bytes, ciphertext, p)
+        }
+        _ => Err(CKR_MECHANISM_INVALID),
+    }
+}
+
+// ── RSA-OAEP ────────────────────────────────────────────────────────────────
+
+/// Parse an RSA public key from either X.509 SubjectPublicKeyInfo
+/// (KMIP `KeyFormatType = X_509`, the most common Register form) or
+/// PKCS#1 raw `RSAPublicKey` DER (KMIP `KeyFormatType = PKCS_1`).
+fn rsa_public_key_from_any_der(bytes: &[u8]) -> Result<rsa::RsaPublicKey, CkRv> {
+    use rsa::pkcs1::DecodeRsaPublicKey;
+    use rsa::pkcs8::DecodePublicKey;
+    rsa::RsaPublicKey::from_public_key_der(bytes)
+        .or_else(|_| rsa::RsaPublicKey::from_pkcs1_der(bytes))
+        .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)
+}
+
+/// Parse an RSA private key from either PKCS#8 PrivateKeyInfo (KMIP
+/// `KeyFormatType = PKCS_8`) or PKCS#1 raw `RSAPrivateKey` DER (KMIP
+/// `KeyFormatType = PKCS_1`).
+fn rsa_private_key_from_any_der(bytes: &[u8]) -> Result<rsa::RsaPrivateKey, CkRv> {
+    use rsa::pkcs1::DecodeRsaPrivateKey;
+    use rsa::pkcs8::DecodePrivateKey;
+    rsa::RsaPrivateKey::from_pkcs8_der(bytes)
+        .or_else(|_| rsa::RsaPrivateKey::from_pkcs1_der(bytes))
+        .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)
+}
+
+/// Build an [`rsa::Oaep`] from `(hash, mgf_hash, label)`. The `rsa`
+/// crate's constructor is generic over `T: Digest + DynDigest`, so
+/// runtime hash selection means picking one of the SHA-2 variants
+/// at every callsite. All five OAEP-family OASIS conformance tests
+/// reach this matrix (SHA-256 / SHA-384 / SHA-512 in either slot).
+fn oaep_for(p: &OaepParams) -> rsa::Oaep {
+    let h = p.hash.unwrap_or(OaepHash::Sha256);
+    let m = p.mgf_hash.unwrap_or(h);
+    macro_rules! mk {
+        ($H:ty, $M:ty) => {
+            match p.label {
+                Some(l) => {
+                    let s = String::from_utf8_lossy(l).into_owned();
+                    rsa::Oaep::new_with_mgf_hash_and_label::<$H, $M, String>(s)
+                }
+                None => rsa::Oaep::new_with_mgf_hash::<$H, $M>(),
+            }
+        };
+    }
+    match (h, m) {
+        (OaepHash::Sha256, OaepHash::Sha256) => mk!(sha2::Sha256, sha2::Sha256),
+        (OaepHash::Sha256, OaepHash::Sha384) => mk!(sha2::Sha256, sha2::Sha384),
+        (OaepHash::Sha256, OaepHash::Sha512) => mk!(sha2::Sha256, sha2::Sha512),
+        (OaepHash::Sha384, OaepHash::Sha256) => mk!(sha2::Sha384, sha2::Sha256),
+        (OaepHash::Sha384, OaepHash::Sha384) => mk!(sha2::Sha384, sha2::Sha384),
+        (OaepHash::Sha384, OaepHash::Sha512) => mk!(sha2::Sha384, sha2::Sha512),
+        (OaepHash::Sha512, OaepHash::Sha256) => mk!(sha2::Sha512, sha2::Sha256),
+        (OaepHash::Sha512, OaepHash::Sha384) => mk!(sha2::Sha512, sha2::Sha384),
+        (OaepHash::Sha512, OaepHash::Sha512) => mk!(sha2::Sha512, sha2::Sha512),
+    }
+}
+
+/// RSA OAEP encrypt — accepts both X.509 SPKI and PKCS#1 RSAPublicKey
+/// DER for the public-key bytes.
+fn rsa_oaep_encrypt(pub_der: &[u8], plaintext: &[u8], params: &OaepParams) -> Result<Vec<u8>, CkRv> {
+    let public_key = rsa_public_key_from_any_der(pub_der)?;
+    let padding = oaep_for(params);
+    let mut rng = rand::rngs::OsRng;
+    public_key
+        .encrypt(&mut rng, padding, plaintext)
+        .map_err(|_| CKR_FUNCTION_FAILED)
+}
+
+/// RSA OAEP decrypt — accepts both PKCS#8 PrivateKeyInfo and PKCS#1
+/// RSAPrivateKey DER. CS-AC-M-OAEP-10 registers with
+/// `KeyFormatType=PKCS_1`, `HashingAlgorithm=SHA_384`,
+/// `MaskGeneratorHashingAlgorithm=SHA_256`, and a `PSource` label.
+fn rsa_oaep_decrypt(priv_der: &[u8], ciphertext: &[u8], params: &OaepParams) -> Result<Vec<u8>, CkRv> {
+    let private_key = rsa_private_key_from_any_der(priv_der)?;
+    let padding = oaep_for(params);
+    private_key
+        .decrypt(padding, ciphertext)
+        // PKCS#11 v3.2 §6.13 — OAEP decode failure on RSA decrypt
+        // surfaces as CKR_ENCRYPTED_DATA_INVALID, matching the AES-GCM
+        // branch's tag-failure semantics.
+        .map_err(|_| CKR_ENCRYPTED_DATA_INVALID)
 }
 
 // ── AES-GCM ─────────────────────────────────────────────────────────────────

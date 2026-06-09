@@ -145,25 +145,32 @@ fn decrypt_classical(
     emit_pkcs11(deps, correlation_id, "C_DecryptInit", Some(mech), 0, "CKR_OK");
     emit_pkcs11(deps, correlation_id, "C_Decrypt", Some(mech), 0, "CKR_OK");
 
-    let plaintext = match (deps.engine_session, obj.algorithm) {
-        (Some(session), crate::kmip30::KmipAlgorithm::Aes) => {
-            let handle = softhsmrustv3::native::find_by_cka_id(session, &obj.pkcs11_cka_id)
-                .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Decrypt:find"))?
-                .ok_or_else(|| KmipError::not_found(&req.uid))?;
-            softhsmrustv3::native::decrypt(
-                session,
-                handle,
-                softhsmrustv3::constants::CKM_AES_GCM,
-                &req.data,
-                req.iv.as_deref(),
-            )
+    // KMIP 3.0 §6.1.21 Decrypt — Plane-3 dispatch through the
+    // PKCS#11 bridge. Mirrors the Encrypt path:
+    //   1. obj.key_material set (Register'd by client) → bridge with
+    //      raw bytes (RSA-OAEP private key DER for OAEP-* tests).
+    //   2. Engine session → look up the engine handle by CKA_ID.
+    //   3. Neither → placeholder for unit-test path.
+    let oaep = super::helpers::oaep_params_for(obj.cryptographic_parameters.as_ref());
+    let plaintext = if let Some(key_bytes) = &obj.key_material {
+        softhsmrustv3::native::decrypt_with_key_bytes(
+            key_bytes,
+            mech,
+            &req.data,
+            req.iv.as_deref(),
+            oaep.as_ref(),
+        )
+        .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Decrypt"))?
+    } else if let Some(session) = deps.engine_session {
+        let handle = softhsmrustv3::native::find_by_cka_id(session, &obj.pkcs11_cka_id)
+            .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Decrypt:find"))?
+            .ok_or_else(|| KmipError::not_found(&req.uid))?;
+        softhsmrustv3::native::decrypt(session, handle, mech, &req.data, req.iv.as_deref())
             .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Decrypt"))?
-        }
-        _ => {
-            let mut input = req.iv.clone().unwrap_or_default();
-            input.extend_from_slice(&req.data);
-            placeholder_bytes(&req.uid, &input, b"dec", input.len().max(16))
-        }
+    } else {
+        let mut input = req.iv.clone().unwrap_or_default();
+        input.extend_from_slice(&req.data);
+        placeholder_bytes(&req.uid, &input, b"dec", input.len().max(16))
     };
     Ok(DecryptResponse { uid: req.uid.clone(), data: plaintext })
 }

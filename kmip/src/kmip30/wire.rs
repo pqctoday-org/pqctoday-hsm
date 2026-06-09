@@ -144,6 +144,12 @@ mod tags {
     pub const CryptographicParameters: u32 = 0x42_002b;
     /// KMIP 3.0 §11 Hashing Algorithm Enumeration.
     pub const HashingAlgorithm: u32       = 0x42_0038;
+    /// KMIP 3.0 §11 RSA-OAEP family Enumerations / ByteString. All four
+    /// codepoints verified against `kmip-spec-3.0-tags-enums.json`.
+    pub const PaddingMethod: u32          = 0x42_005f;
+    pub const MaskGenerator: u32          = 0x42_0101;
+    pub const MaskGeneratorHashingAlgorithm: u32 = 0x42_0102;
+    pub const PSource: u32                = 0x42_0103;
     /// KMIP 3.0 §6.1.36/37 MAC Data ByteString.
     pub const MacData: u32                = 0x42_00c6;
     /// KMIP 3.0 §6.1.9/34/35 session + auth tags.
@@ -955,6 +961,13 @@ fn decode_attribute_v3(frame: &TtlvFrame) -> Result<Option<Attribute>, WireError
         tags::Fresh => Attribute::Fresh(expect_boolean(frame, "Fresh")?),
         tags::KeyValuePresent => Attribute::KeyValuePresent(expect_boolean(frame, "Key Value Present")?),
         tags::QuantumSafe => Attribute::QuantumSafe(expect_boolean(frame, "Quantum Safe")?),
+        // KMIP 3.0 §11 — `CryptographicParameters` Structure attached
+        // to a key drives Plane-3 mechanism choice (RSA-OAEP padding /
+        // MGF / label, MAC hash, ...). Captured here so Register's
+        // Attributes-bag carries it through to the store.
+        tags::CryptographicParameters => Attribute::CryptographicParameters(
+            decode_cryptographic_parameters(frame)?,
+        ),
         _ => return Ok(None),
     }))
 }
@@ -1165,6 +1178,33 @@ fn decode_logout_req(children: &[TtlvFrame]) -> Result<LogoutRequest, WireError>
 
 // ── Group E codecs: MAC / MACVerify / Hash ─────────────────────────────────
 
+/// Encode a `CryptographicParameters` Structure (inverse of
+/// [`decode_cryptographic_parameters`]). Used by `GetAttributes`/
+/// `Export` when the stored attribute needs to round-trip back to the
+/// client.
+fn encode_cryptographic_parameters(cp: &CryptographicParameters) -> TtlvFrame {
+    let mut children = Vec::new();
+    if let Some(h) = cp.hashing_algorithm {
+        children.push(TtlvFrame::new(Tag(tags::HashingAlgorithm), Value::Enumeration(h.to_wire_value())));
+    }
+    if let Some(a) = cp.cryptographic_algorithm {
+        children.push(TtlvFrame::new(Tag(tags::CryptographicAlgorithm), Value::Enumeration(a.to_wire_value())));
+    }
+    if let Some(v) = cp.padding_method {
+        children.push(TtlvFrame::new(Tag(tags::PaddingMethod), Value::Enumeration(v)));
+    }
+    if let Some(v) = cp.mask_generator {
+        children.push(TtlvFrame::new(Tag(tags::MaskGenerator), Value::Enumeration(v)));
+    }
+    if let Some(h) = cp.mask_generator_hashing_algorithm {
+        children.push(TtlvFrame::new(Tag(tags::MaskGeneratorHashingAlgorithm), Value::Enumeration(h.to_wire_value())));
+    }
+    if let Some(b) = &cp.p_source {
+        children.push(TtlvFrame::new(Tag(tags::PSource), Value::ByteString(b.clone())));
+    }
+    TtlvFrame::new(Tag(tags::CryptographicParameters), Value::Structure(children))
+}
+
 fn decode_cryptographic_parameters(frame: &TtlvFrame) -> Result<CryptographicParameters, WireError> {
     let mut cp = CryptographicParameters::default();
     for c in expect_structure(frame, "Cryptographic Parameters")? {
@@ -1179,6 +1219,23 @@ fn decode_cryptographic_parameters(frame: &TtlvFrame) -> Result<CryptographicPar
             tags::CryptographicAlgorithm => {
                 let v = expect_enum(c, "Cryptographic Algorithm")?;
                 cp.cryptographic_algorithm = KmipAlgorithm::from_wire_value(v);
+            }
+            // KMIP 3.0 §11 RSA-OAEP family. Codepoints verified from
+            // the spec extraction.
+            tags::PaddingMethod => {
+                cp.padding_method = Some(expect_enum(c, "Padding Method")?);
+            }
+            tags::MaskGenerator => {
+                cp.mask_generator = Some(expect_enum(c, "Mask Generator")?);
+            }
+            tags::MaskGeneratorHashingAlgorithm => {
+                let v = expect_enum(c, "Mask Generator Hashing Algorithm")?;
+                cp.mask_generator_hashing_algorithm = HashingAlgorithm::from_wire_value(v);
+            }
+            tags::PSource => {
+                if let Value::ByteString(b) = &c.value {
+                    cp.p_source = Some(b.clone());
+                }
             }
             _ => {}
         }
@@ -1976,6 +2033,7 @@ fn encode_attribute_v3(a: &Attribute) -> TtlvFrame {
                 ]),
             )
         }
+        Attribute::CryptographicParameters(cp) => encode_cryptographic_parameters(cp),
     }
 }
 
