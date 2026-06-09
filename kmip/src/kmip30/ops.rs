@@ -338,6 +338,11 @@ pub struct EncryptResponse {
     /// For ML-KEM only: the derived shared secret.
     /// `None` for classical encrypt.
     pub shared_secret: Option<Vec<u8>>,
+    /// AES-GCM / ChaCha20-Poly1305 authentication tag (KMIP 3.0 §11
+    /// `Authenticated Encryption Tag`). Populated only when the
+    /// mechanism produces a separate tag — for non-AEAD modes (ECB /
+    /// CBC / CBC_PAD) this is `None`.
+    pub authenticated_encryption_tag: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]

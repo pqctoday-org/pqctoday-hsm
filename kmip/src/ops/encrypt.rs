@@ -147,6 +147,7 @@ fn encrypt_ml_kem(
         uid: req.uid.clone(),
         ciphertext,
         shared_secret: Some(shared_secret),
+        authenticated_encryption_tag: None,
     })
 }
 
@@ -219,10 +220,23 @@ fn encrypt_classical(
         input.extend_from_slice(&req.data);
         placeholder_bytes(&req.uid, &input, b"enc", input.len().max(16))
     };
+    // AES-GCM / ChaCha20-Poly1305 — the shim returns `ciphertext`
+    // with the 16-byte tag appended. KMIP 3.0 §6.1.21 requires the
+    // tag to ride in its own `AuthenticatedEncryptionTag` field, not
+    // tacked onto Data. Split on the way out.
+    let (ciphertext, authenticated_encryption_tag) = match mech {
+        softhsmrustv3::constants::CKM_AES_GCM if ciphertext.len() >= 16 => {
+            let split = ciphertext.len() - 16;
+            let tag = ciphertext[split..].to_vec();
+            (ciphertext[..split].to_vec(), Some(tag))
+        }
+        _ => (ciphertext, None),
+    };
     Ok(EncryptResponse {
         uid: req.uid.clone(),
         ciphertext,
         shared_secret: None,
+        authenticated_encryption_tag,
     })
 }
 

@@ -1,5 +1,5 @@
 {
-  "generated_at": 1781007319,
+  "generated_at": 1781007830,
   "summary": {
     "pass": 39,
     "fail": 63,
@@ -729,7 +729,7 @@
     {
       "name": "CS-BC-M-GCM-1-30.xml",
       "status": "FAIL",
-      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 3 != 2",
+      "detail": "msg #6: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1",
       "ops_used": [
         "Decrypt",
         "Destroy",
@@ -741,7 +741,7 @@
     {
       "name": "CS-BC-M-GCM-2-30.xml",
       "status": "FAIL",
-      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 3 != 2",
+      "detail": "msg #16: response mismatch: ResponseMessage/BatchItem/ResponsePayload/AuthenticatedEncryptionTag: expected '5bc94fbc3221a5db94fae95ae7121a47' got 'cc15abcc191161501aabab46b8fbac85'",
       "ops_used": [
         "Decrypt",
         "Destroy",

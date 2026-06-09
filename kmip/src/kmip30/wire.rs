@@ -154,6 +154,11 @@ mod tags {
     /// `0x420011` per `kmip-spec-3.0-tags-enums.json` (NOT 0x420013
     /// which is the `Certificate` tag — easy mix-up to make).
     pub const BlockCipherMode: u32        = 0x42_0011;
+    /// KMIP 3.0 §11 `Authenticated Encryption Tag` ByteString —
+    /// holds the AEAD tag (AES-GCM / ChaCha20-Poly1305 / etc.) as a
+    /// separate field on the Encrypt/Decrypt payload.
+    pub const AuthenticatedEncryptionTag: u32       = 0x42_00ff;
+    pub const AuthenticatedEncryptionAdditionalData: u32 = 0x42_00fe;
     /// KMIP 3.0 §11 `Digest` family — Structure + ByteString sub-field.
     pub const Digest: u32                 = 0x42_0034;
     pub const DigestValue: u32            = 0x42_0035;
@@ -828,6 +833,12 @@ fn encode_encrypt_resp(r: &EncryptResponse) -> Vec<TtlvFrame> {
         TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString(r.uid.clone())),
         TtlvFrame::new(Tag(tags::Data), Value::ByteString(r.ciphertext.clone())),
     ];
+    if let Some(tag) = &r.authenticated_encryption_tag {
+        out.push(TtlvFrame::new(
+            Tag(tags::AuthenticatedEncryptionTag),
+            Value::ByteString(tag.clone()),
+        ));
+    }
     if let Some(ss) = &r.shared_secret {
         // ML-KEM shared secret rides in IvCounterNonce slot for v0.1 — a
         // KMIP 3.0 dedicated tag for "shared secret out-of-band of the
@@ -843,6 +854,7 @@ fn decode_decrypt_req(children: &[TtlvFrame]) -> Result<DecryptRequest, WireErro
     let mut data = Vec::new();
     let mut iv = None;
     let mut cp = None;
+    let mut tag: Option<Vec<u8>> = None;
     for c in children {
         match c.tag.0 {
             tags::Data => { if let Value::ByteString(b) = &c.value { data = b.clone(); } }
@@ -850,8 +862,17 @@ fn decode_decrypt_req(children: &[TtlvFrame]) -> Result<DecryptRequest, WireErro
             tags::CryptographicParameters => {
                 cp = Some(decode_cryptographic_parameters(c)?);
             }
+            tags::AuthenticatedEncryptionTag => {
+                if let Value::ByteString(b) = &c.value { tag = Some(b.clone()); }
+            }
             _ => {}
         }
+    }
+    // For AEAD decrypt, the shim expects ciphertext||tag concatenated.
+    // KMIP keeps them as separate fields per §6.1.21; recombine on
+    // ingress so the shim sees what `aes-gcm` expects.
+    if let Some(t) = tag {
+        data.extend_from_slice(&t);
     }
     Ok(DecryptRequest { uid, data, iv, cryptographic_parameters: cp })
 }

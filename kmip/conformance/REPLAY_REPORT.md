@@ -1,6 +1,6 @@
 # OASIS KMIP 3.0 Dispatcher Replay Report
 
-Generated: 2026-06-09 12:15:19 UTC
+Generated: 2026-06-09 12:23:50 UTC
 
 
 ## Aggregate
@@ -64,8 +64,8 @@ Of the 102 tests that exercise only implemented ops:
 | `CS-BC-M-CHACHA20-3-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem: child count 3 != 2 (after dropping optional ResultMessage per §4.1.1 item 3) |
 | `CS-BC-M-CHACHA20-4-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem: child count 3 != 2 (after dropping optional ResultMessage per §4.1.1 item 3) |
 | `CS-BC-M-CHACHA20POLY1305-1-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem: child count 3 != 2 (after dropping optional ResultMessage per §4.1.1 item 3) |
-| `CS-BC-M-GCM-1-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 3 != 2 |
-| `CS-BC-M-GCM-2-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 3 != 2 |
+| `CS-BC-M-GCM-1-30.xml` | FAIL | msg #6: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
+| `CS-BC-M-GCM-2-30.xml` | FAIL | msg #16: response mismatch: ResponseMessage/BatchItem/ResponsePayload/AuthenticatedEncryptionTag: expected '5bc94fbc3221a5db94fae95ae7121a47 |
 | `CS-BC-M-GCM-3-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
 | `CS-RNG-O-2-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResponsePayload/DataLength: expected '16' got 32 |
 | `CS-RNG-O-3-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResponsePayload/DataLength: expected '0' got 32 |
