@@ -102,6 +102,11 @@ fn supported_operations() -> Vec<Operation> {
         Operation::Get,
         Operation::GetAttributes,
         Operation::GetAttributeList,
+        Operation::AddAttribute,
+        Operation::ModifyAttribute,
+        Operation::DeleteAttribute,
+        Operation::SetAttribute,
+        Operation::AdjustAttribute,
         Operation::Locate,
         Operation::Activate,
         Operation::Revoke,
@@ -146,12 +151,14 @@ mod tests {
         let (_ring, d) = deps();
         let resp = query(&d, QueryRequest { functions: vec![QueryFunction::QueryOperations] }, "corr-q").unwrap();
         let ops = resp.operations.unwrap();
-        assert_eq!(ops.len(), 15);
+        assert_eq!(ops.len(), 20);
         assert!(ops.contains(&Operation::Sign));
         assert!(ops.contains(&Operation::Encrypt));
         assert!(ops.contains(&Operation::Decrypt));
         assert!(ops.contains(&Operation::GetAttributes));
         assert!(ops.contains(&Operation::Interop));
+        assert!(ops.contains(&Operation::AddAttribute));
+        assert!(ops.contains(&Operation::SetAttribute));
     }
 
     #[test]

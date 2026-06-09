@@ -1,6 +1,6 @@
 # OASIS KMIP 3.0 Dispatcher Replay Report
 
-Generated: 2026-06-09 01:04:40 UTC
+Generated: 2026-06-09 01:24:07 UTC
 
 
 ## Aggregate
@@ -9,18 +9,18 @@ Generated: 2026-06-09 01:04:40 UTC
 | Status | Count | % of total |
 |---|---|---|
 | **PASS** | 2 | 2.0% |
-| **FAIL** | 24 | 23.5% |
+| **FAIL** | 33 | 32.4% |
 | ERROR | 0 | 0.0% |
-| SKIP_OP (op not implemented) | 76 | 74.5% |
+| SKIP_OP (op not implemented) | 67 | 65.7% |
 | SKIP_PARSE (XML malformed) | 0 | 0.0% |
 | **Total** | **102** | 100.0% |
 
 
-Of the 26 tests that exercise only implemented ops:
+Of the 35 tests that exercise only implemented ops:
 
-  - **2 pass (8%)**
+  - **2 pass (6%)**
 
-  - 24 fail
+  - 33 fail
 
   - 0 errored
 
@@ -32,35 +32,41 @@ Of the 26 tests that exercise only implemented ops:
 |---|---|---|
 | `AKLC-M-1-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: child count 12 != 6 |
 | `AKLC-M-2-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: child count 11 != 6 |
+| `AKLC-M-3-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: child count 11 != 6 |
 | `AKLC-O-1-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: child count 10 != 6 |
+| `AX-M-1-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage: child count 5 != 2 |
+| `AX-M-2-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage: child count 3 != 2 |
 | `CS-BC-M-1-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem: child count 3 != 4 |
 | `CS-BC-M-2-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem: child count 3 != 4 |
 | `CS-BC-M-3-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem: child count 3 != 4 |
 | `MSGENC-HTTPS-M-1-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem: child count 4 != 3 |
 | `MSGENC-JSON-M-1-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem: child count 4 != 3 |
 | `MSGENC-XML-M-1-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem: child count 4 != 3 |
-| `QS-M-1-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 21 != 15 |
+| `QS-M-1-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 21 != 20 |
 | `QS-M-2-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem: child count 4 != 3 |
-| `SASED-M-1-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 11 != 19 |
+| `SASED-M-1-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 11 != 24 |
 | `SASED-M-3-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 1 != 0 |
+| `SKFF-M-10-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem: child count 3 != 4 |
+| `SKFF-M-11-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: child count 2 != 1 |
+| `SKFF-M-12-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/tag 'Operation' != 'Result Status' |
 | `SKFF-M-2-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem: child count 3 != 4 |
 | `SKFF-M-4-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/tag 'Operation' != 'Result Status' |
 | `SKFF-M-5-30.xml` | FAIL | msg #4: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 0 != 1 |
 | `SKFF-M-6-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem: child count 3 != 4 |
 | `SKFF-M-7-30.xml` | FAIL | msg #4: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 0 != 1 |
 | `SKFF-M-8-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/tag 'Operation' != 'Result Status' |
+| `SKFF-M-9-30.xml` | FAIL | msg #8: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 27 != 7 |
 | `SKLC-M-1-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: child count 9 != 6 |
 | `SKLC-M-2-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: child count 9 != 6 |
+| `SKLC-M-3-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: child count 9 != 6 |
 | `SKLC-O-1-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: child count 9 != 6 |
-| `TL-M-1-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 17 != 19 |
+| `TL-M-1-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 17 != 24 |
 | `TL-M-2-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage: child count 3 != 2 |
+| `TL-M-3-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage: child count 3 != 2 |
 | `SKFF-M-1-30.xml` | PASS |  |
 | `SKFF-M-3-30.xml` | PASS |  |
-| `AKLC-M-3-30.xml` | SKIP_OP | unsupported ops: ['ModifyAttribute'] |
-| `AX-M-1-30.xml` | SKIP_OP | unsupported ops: ['AddAttribute'] |
-| `AX-M-2-30.xml` | SKIP_OP | unsupported ops: ['AddAttribute'] |
 | `BL-M-1-30.xml` | SKIP_OP | unsupported ops: ['Log', 'Register'] |
-| `BL-M-10-30.xml` | SKIP_OP | unsupported ops: ['ModifyAttribute', 'Register'] |
+| `BL-M-10-30.xml` | SKIP_OP | unsupported ops: ['Register'] |
 | `BL-M-11-30.xml` | SKIP_OP | unsupported ops: ['Register'] |
 | `BL-M-12-30.xml` | SKIP_OP | unsupported ops: ['Register'] |
 | `BL-M-13-30.xml` | SKIP_OP | unsupported ops: ['Register'] |
@@ -75,10 +81,10 @@ Of the 26 tests that exercise only implemented ops:
 | `BL-M-21-30.xml` | SKIP_OP | unsupported ops: ['CreateGroup'] |
 | `BL-M-3-30.xml` | SKIP_OP | unsupported ops: ['Check', 'Register'] |
 | `BL-M-4-30.xml` | SKIP_OP | unsupported ops: ['Register'] |
-| `BL-M-5-30.xml` | SKIP_OP | unsupported ops: ['AddAttribute', 'Register'] |
+| `BL-M-5-30.xml` | SKIP_OP | unsupported ops: ['Register'] |
 | `BL-M-6-30.xml` | SKIP_OP | unsupported ops: ['Register'] |
-| `BL-M-7-30.xml` | SKIP_OP | unsupported ops: ['ModifyAttribute', 'Register'] |
-| `BL-M-8-30.xml` | SKIP_OP | unsupported ops: ['AddAttribute', 'Register'] |
+| `BL-M-7-30.xml` | SKIP_OP | unsupported ops: ['Register'] |
+| `BL-M-8-30.xml` | SKIP_OP | unsupported ops: ['Register'] |
 | `BL-M-9-30.xml` | SKIP_OP | unsupported ops: ['Register'] |
 | `CS-AC-M-1-30.xml` | SKIP_OP | unsupported ops: ['Register'] |
 | `CS-AC-M-2-30.xml` | SKIP_OP | unsupported ops: ['Register'] |
@@ -126,9 +132,3 @@ Of the 26 tests that exercise only implemented ops:
 | `OMOS-O-1-30.xml` | SKIP_OP | unsupported ops: ['Register'] |
 | `PKCS11-M-1-30.xml` | SKIP_OP | unsupported ops: ['PKCS_11'] |
 | `SASED-M-2-30.xml` | SKIP_OP | unsupported ops: ['Register'] |
-| `SKFF-M-10-30.xml` | SKIP_OP | unsupported ops: ['AddAttribute', 'DeleteAttribute', 'ModifyAttribute'] |
-| `SKFF-M-11-30.xml` | SKIP_OP | unsupported ops: ['AddAttribute', 'DeleteAttribute', 'ModifyAttribute'] |
-| `SKFF-M-12-30.xml` | SKIP_OP | unsupported ops: ['AddAttribute', 'DeleteAttribute', 'ModifyAttribute'] |
-| `SKFF-M-9-30.xml` | SKIP_OP | unsupported ops: ['AddAttribute', 'DeleteAttribute', 'ModifyAttribute'] |
-| `SKLC-M-3-30.xml` | SKIP_OP | unsupported ops: ['ModifyAttribute'] |
-| `TL-M-3-30.xml` | SKIP_OP | unsupported ops: ['ModifyAttribute'] |

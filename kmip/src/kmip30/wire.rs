@@ -107,6 +107,17 @@ mod tags {
     pub const PrivateKey: u32             = 0x42_0064;
     pub const KeyMaterial: u32            = 0x42_0043;
     pub const AttributeReference: u32     = 0x42_013b;
+    /// KMIP 3.0 §6.1.{2,38,56} `New Attribute` — Structure wrapping the
+    /// typed-tag attribute being added / modified / set.
+    pub const NewAttribute: u32           = 0x42_013d;
+    /// KMIP 3.0 §6.1.{17,38} `Current Attribute` — Structure wrapping
+    /// the existing attribute value being targeted.
+    pub const CurrentAttribute: u32       = 0x42_013c;
+    /// KMIP 3.0 §6.1.3 `Adjustment Type` — Enumeration:
+    /// Increment=0x01, Decrement=0x02, Negate=0x03.
+    pub const AdjustmentType: u32         = 0x42_0158;
+    /// KMIP 3.0 §6.1.3 `Adjustment Value` — typed per target attribute.
+    pub const AdjustmentValue: u32        = 0x42_0162;
     pub const InteropFunction: u32        = 0x42_0160;
     pub const InteropIdentifier: u32      = 0x42_0161;
     pub const InitialDate: u32            = 0x42_002f;
@@ -293,6 +304,11 @@ fn decode_request_payload(op: Operation, frame: &TtlvFrame) -> Result<RequestPay
         Operation::Sign             => RequestPayload::Sign(decode_sign_req(children)?),
         Operation::SignatureVerify  => RequestPayload::SignatureVerify(decode_sigverify_req(children)?),
         Operation::Interop          => RequestPayload::Interop(decode_interop_req(children)?),
+        Operation::AddAttribute     => RequestPayload::AddAttribute(decode_add_attribute_req(children)?),
+        Operation::ModifyAttribute  => RequestPayload::ModifyAttribute(decode_modify_attribute_req(children)?),
+        Operation::DeleteAttribute  => RequestPayload::DeleteAttribute(decode_delete_attribute_req(children)?),
+        Operation::SetAttribute     => RequestPayload::SetAttribute(decode_set_attribute_req(children)?),
+        Operation::AdjustAttribute  => RequestPayload::AdjustAttribute(decode_adjust_attribute_req(children)?),
     })
 }
 
@@ -313,6 +329,14 @@ fn response_payload_to_frame(payload: &ResponsePayload) -> TtlvFrame {
         ResponsePayload::Sign(r)             => encode_sign_resp(r),
         ResponsePayload::SignatureVerify(r)  => encode_sigverify_resp(r),
         ResponsePayload::Interop(_)          => vec![],
+        // Group B wave 2 — Add/Modify/Delete/Set/Adjust Attribute all
+        // return the same single-field UniqueIdentifier payload per
+        // KMIP 3.0 §6.1.{2,3,17,38,56}.
+        ResponsePayload::AddAttribute(r)     => encode_uid_only_resp(&r.uid),
+        ResponsePayload::ModifyAttribute(r)  => encode_uid_only_resp(&r.uid),
+        ResponsePayload::DeleteAttribute(r)  => encode_uid_only_resp(&r.uid),
+        ResponsePayload::SetAttribute(r)     => encode_uid_only_resp(&r.uid),
+        ResponsePayload::AdjustAttribute(r)  => encode_uid_only_resp(&r.uid),
     };
     TtlvFrame::new(Tag(tags::ResponsePayload), Value::Structure(children))
 }
@@ -748,6 +772,178 @@ fn decode_attribute_v3(frame: &TtlvFrame) -> Result<Option<Attribute>, WireError
         }
         _ => return Ok(None),
     }))
+}
+
+// ── Group B Wave 2 codecs (attribute mutations + shared helpers) ───────────
+//
+// Spec mapping:
+//
+// - AddAttribute     §6.1.2  / Table 254 — UID + NewAttribute (Structure)
+// - AdjustAttribute  §6.1.3  / Table 257 — UID + AttributeReference + AdjustmentType + AdjustmentValue?
+// - DeleteAttribute  §6.1.17 / Table 301 — UID + CurrentAttribute? + AttributeReference?
+// - ModifyAttribute  §6.1.38 / Table 364 — UID + CurrentAttribute? + NewAttribute
+// - SetAttribute     §6.1.56 / Table 424 — UID + NewAttribute
+//
+// All responses: UID only — emitted via `encode_uid_only_resp`.
+
+/// Encode a response payload whose only content is a `UniqueIdentifier`.
+/// Used by every attribute-mutation op (and the lifecycle ops that
+/// echo the operand UID).
+fn encode_uid_only_resp(uid: &str) -> Vec<TtlvFrame> {
+    vec![TtlvFrame::new(
+        Tag(tags::UniqueIdentifier),
+        Value::TextString(uid.to_string()),
+    )]
+}
+
+/// Decode a `NewAttribute` (0x42013d) or `CurrentAttribute` (0x42013c)
+/// wrapper Structure. Both per spec carry exactly one typed-tag child
+/// describing the attribute name + value.
+fn decode_attribute_wrapper(
+    frame: &TtlvFrame,
+    name: &'static str,
+) -> Result<Attribute, WireError> {
+    let inner = expect_structure(frame, name)?;
+    for child in inner {
+        if let Some(a) = decode_attribute_v3(child)? {
+            return Ok(a);
+        }
+    }
+    Err(WireError::Missing { tag: frame.tag.0, name })
+}
+
+fn decode_add_attribute_req(children: &[TtlvFrame]) -> Result<AddAttributeRequest, WireError> {
+    let uid = required_uid(children)?;
+    let mut new_attr = None;
+    for c in children {
+        if c.tag.0 == tags::NewAttribute {
+            new_attr = Some(decode_attribute_wrapper(c, "New Attribute")?);
+        }
+    }
+    let new_attribute = new_attr.ok_or(WireError::Missing {
+        tag: tags::NewAttribute,
+        name: "New Attribute",
+    })?;
+    Ok(AddAttributeRequest { uid, new_attribute })
+}
+
+fn decode_modify_attribute_req(children: &[TtlvFrame]) -> Result<ModifyAttributeRequest, WireError> {
+    let uid = required_uid(children)?;
+    let mut current = None;
+    let mut new_attr = None;
+    for c in children {
+        match c.tag.0 {
+            tags::CurrentAttribute => current = Some(decode_attribute_wrapper(c, "Current Attribute")?),
+            tags::NewAttribute     => new_attr = Some(decode_attribute_wrapper(c, "New Attribute")?),
+            _ => {}
+        }
+    }
+    let new_attribute = new_attr.ok_or(WireError::Missing {
+        tag: tags::NewAttribute,
+        name: "New Attribute",
+    })?;
+    Ok(ModifyAttributeRequest {
+        uid,
+        current_attribute: current,
+        new_attribute,
+    })
+}
+
+fn decode_delete_attribute_req(children: &[TtlvFrame]) -> Result<DeleteAttributeRequest, WireError> {
+    let uid = required_uid(children)?;
+    let mut current = None;
+    let mut attr_ref = None;
+    for c in children {
+        match c.tag.0 {
+            tags::CurrentAttribute => current = Some(decode_attribute_wrapper(c, "Current Attribute")?),
+            tags::AttributeReference => {
+                // KMIP 3.0 §11: AttributeReference is an "enumerable Tag"
+                // — value is the 4-byte tag codepoint of the named
+                // attribute. We surface the spec-form human-readable
+                // name to the handler.
+                if let Value::Enumeration(tag_code) = c.value {
+                    attr_ref = Some(tag_name_from_code(tag_code).to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(DeleteAttributeRequest {
+        uid,
+        current_attribute: current,
+        attribute_reference: attr_ref,
+    })
+}
+
+fn decode_set_attribute_req(children: &[TtlvFrame]) -> Result<SetAttributeRequest, WireError> {
+    let uid = required_uid(children)?;
+    let mut new_attr = None;
+    for c in children {
+        if c.tag.0 == tags::NewAttribute {
+            new_attr = Some(decode_attribute_wrapper(c, "New Attribute")?);
+        }
+    }
+    let new_attribute = new_attr.ok_or(WireError::Missing {
+        tag: tags::NewAttribute,
+        name: "New Attribute",
+    })?;
+    Ok(SetAttributeRequest { uid, new_attribute })
+}
+
+fn decode_adjust_attribute_req(children: &[TtlvFrame]) -> Result<AdjustAttributeRequest, WireError> {
+    let uid = required_uid(children)?;
+    let mut attr_ref = None;
+    let mut adjustment_type = None;
+    let mut adjustment_value = None;
+    for c in children {
+        match c.tag.0 {
+            tags::AttributeReference => {
+                if let Value::Enumeration(tag_code) = c.value {
+                    attr_ref = Some(tag_name_from_code(tag_code).to_string());
+                }
+            }
+            tags::AdjustmentType => {
+                let v = expect_enum(c, "Adjustment Type")?;
+                adjustment_type = AdjustmentType::from_wire_value(v);
+                if adjustment_type.is_none() {
+                    return Err(WireError::UnknownEnum {
+                        field: "Adjustment Type",
+                        value: v,
+                    });
+                }
+            }
+            tags::AdjustmentValue => {
+                // Spec §6.1.3 — type follows the target attribute. v0.1
+                // honours Integer + LongInteger; other types (Boolean,
+                // Interval) raise BadType. AdjustmentValue is optional
+                // for Negate (which doesn't need it).
+                match &c.value {
+                    Value::Integer(n)     => adjustment_value = Some(*n as i64),
+                    Value::LongInteger(n) => adjustment_value = Some(*n),
+                    _ => return Err(WireError::BadType {
+                        tag: c.tag.0,
+                        name: "Adjustment Value",
+                        msg: "expected Integer or LongInteger".into(),
+                    }),
+                }
+            }
+            _ => {}
+        }
+    }
+    let attribute_reference = attr_ref.ok_or(WireError::Missing {
+        tag: tags::AttributeReference,
+        name: "Attribute Reference",
+    })?;
+    let adjustment_type = adjustment_type.ok_or(WireError::Missing {
+        tag: tags::AdjustmentType,
+        name: "Adjustment Type",
+    })?;
+    Ok(AdjustAttributeRequest {
+        uid,
+        attribute_reference,
+        adjustment_type,
+        adjustment_value,
+    })
 }
 
 // ── Group B (attribute read-side) + Interop codecs ─────────────────────────

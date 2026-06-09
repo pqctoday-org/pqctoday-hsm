@@ -169,6 +169,10 @@ mod tests {
             activation_date: None,
             supersedes: None,
             name: None,
+
+            links: std::collections::HashMap::new(),
+
+            custom_attributes: std::collections::HashMap::new(),
         }).unwrap();
     }
 

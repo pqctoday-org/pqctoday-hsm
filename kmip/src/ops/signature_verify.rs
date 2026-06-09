@@ -186,6 +186,10 @@ mod tests {
             activation_date: Some(OffsetDateTime::UNIX_EPOCH),
             supersedes: None,
             name: None,
+
+            links: std::collections::HashMap::new(),
+
+            custom_attributes: std::collections::HashMap::new(),
         }).unwrap();
     }
 
@@ -227,6 +231,10 @@ mod tests {
             activation_date: None,
             supersedes: None,
             name: None,
+
+            links: std::collections::HashMap::new(),
+
+            custom_attributes: std::collections::HashMap::new(),
         }).unwrap();
         let _ = signature_verify(&d, SignatureVerifyRequest {
             uid: "u".into(),
@@ -252,6 +260,10 @@ mod tests {
             activation_date: None,
             supersedes: None,
             name: None,
+
+            links: std::collections::HashMap::new(),
+
+            custom_attributes: std::collections::HashMap::new(),
         }).unwrap();
         let err = signature_verify(&d, SignatureVerifyRequest {
             uid: "u".into(),

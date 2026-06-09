@@ -35,6 +35,9 @@ pub enum Operation {
     Get              = 0x0a,
     GetAttributes    = 0x0b,
     GetAttributeList = 0x0c,
+    AddAttribute     = 0x0d,
+    ModifyAttribute  = 0x0e,
+    DeleteAttribute  = 0x0f,
     Locate           = 0x08,
     Activate         = 0x12,
     Revoke           = 0x13,
@@ -47,6 +50,8 @@ pub enum Operation {
     /// KMIP 3.0 §6.1.31 — test-suite framework op. Carries `Begin` /
     /// `End` markers (no managed-object effect). Server returns Success.
     Interop          = 0x2f,
+    AdjustAttribute  = 0x30,
+    SetAttribute     = 0x31,
 }
 
 impl Operation {
@@ -62,6 +67,9 @@ impl Operation {
             0x0a => Some(Self::Get),
             0x0b => Some(Self::GetAttributes),
             0x0c => Some(Self::GetAttributeList),
+            0x0d => Some(Self::AddAttribute),
+            0x0e => Some(Self::ModifyAttribute),
+            0x0f => Some(Self::DeleteAttribute),
             0x12 => Some(Self::Activate),
             0x13 => Some(Self::Revoke),
             0x14 => Some(Self::Destroy),
@@ -71,6 +79,8 @@ impl Operation {
             0x21 => Some(Self::Sign),
             0x22 => Some(Self::SignatureVerify),
             0x2f => Some(Self::Interop),
+            0x30 => Some(Self::AdjustAttribute),
+            0x31 => Some(Self::SetAttribute),
             _ => None,
         }
     }
@@ -338,6 +348,129 @@ pub struct GetAttributeListRequest {
 pub struct GetAttributeListResponse {
     pub uid: String,
     pub attribute_references: Vec<String>,
+}
+
+// ── Group B Wave 2: attribute mutation ops ─────────────────────────────────
+//
+// All five ops below trace directly to spec sections; see comments per op
+// for the page reference. Wire shape verified against OASIS XML test cases.
+
+/// `AddAttribute` (KMIP 3.0 §6.1.2 / Table 254) — add a new attribute
+/// instance to a managed object. Existing values SHALL NOT be changed
+/// by this operation; Read-Only attributes SHALL NOT be added.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AddAttributeRequest {
+    pub uid: String,
+    /// Wire tag `NewAttribute` (0x42013d) — a Structure wrapping one
+    /// typed-tag child carrying the attribute name + value.
+    pub new_attribute: Attribute,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct AddAttributeResponse {
+    pub uid: String,
+}
+
+/// `ModifyAttribute` (KMIP 3.0 §6.1.38 / Table 364) — change an existing
+/// attribute's value. The optional `current_attribute` lets the client
+/// disambiguate between multi-instance attributes; if omitted, the
+/// single instance is selected automatically.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ModifyAttributeRequest {
+    pub uid: String,
+    /// Wire tag `CurrentAttribute` (0x42013c). OPTIONAL per spec.
+    pub current_attribute: Option<Attribute>,
+    /// Wire tag `NewAttribute` (0x42013d). REQUIRED per spec.
+    pub new_attribute: Attribute,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ModifyAttributeResponse {
+    pub uid: String,
+}
+
+/// `DeleteAttribute` (KMIP 3.0 §6.1.17 / Table 301) — remove an
+/// attribute. Spec semantics: if `current_attribute` is given, delete
+/// that specific value; if only `attribute_reference` is given, delete
+/// all instances of the named attribute. Always-required attributes
+/// SHALL NOT be deleted.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DeleteAttributeRequest {
+    pub uid: String,
+    /// Wire tag `CurrentAttribute` (0x42013c). OPTIONAL per spec.
+    pub current_attribute: Option<Attribute>,
+    /// Wire tag `AttributeReference` (0x42013b). OPTIONAL per spec.
+    /// The "enumerable Tag" form — values are 4-byte tag codepoints
+    /// from §11. v0.1 surfaces the human-readable spec-form name.
+    pub attribute_reference: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct DeleteAttributeResponse {
+    pub uid: String,
+}
+
+/// `SetAttribute` (KMIP 3.0 §6.1.56 / Table 424) — atomic
+/// add-or-modify. If no instance exists, creates it. If exactly one
+/// instance exists, modifies it. Multiple instances → error.
+/// Read-Only attributes SHALL NOT be added or modified.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SetAttributeRequest {
+    pub uid: String,
+    /// Wire tag `NewAttribute` (0x42013d). REQUIRED per spec.
+    pub new_attribute: Attribute,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct SetAttributeResponse {
+    pub uid: String,
+}
+
+/// `AdjustAttribute` (KMIP 3.0 §6.1.3 / Table 257) — numeric
+/// adjustment. If the object had no value, the previous value is
+/// assumed to be 0 (numeric / interval) or false (boolean). Exactly
+/// one instance required.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AdjustAttributeRequest {
+    pub uid: String,
+    /// Wire tag `AttributeReference` (0x42013b). REQUIRED per spec.
+    pub attribute_reference: String,
+    /// Wire tag `AdjustmentType` (0x420158). REQUIRED per spec.
+    pub adjustment_type: AdjustmentType,
+    /// Wire tag `AdjustmentValue` (0x420162). OPTIONAL per spec.
+    /// Type follows the target attribute (Integer for length, Boolean
+    /// for toggle, etc.). Wave 2 honours Integer only; broader type
+    /// coverage in Wave 3 when more numeric attributes appear in the
+    /// corpus.
+    pub adjustment_value: Option<i64>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct AdjustAttributeResponse {
+    pub uid: String,
+}
+
+/// `AdjustmentType` Enumeration — KMIP 3.0 §11 (spec extract).
+/// Codepoints match `kmip-spec-3.0-tags-enums.json` exactly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AdjustmentType {
+    Increment = 0x01,
+    Decrement = 0x02,
+    Negate    = 0x03,
+}
+
+impl AdjustmentType {
+    pub const fn to_wire_value(self) -> u32 {
+        self as u32
+    }
+    pub const fn from_wire_value(v: u32) -> Option<Self> {
+        match v {
+            0x01 => Some(Self::Increment),
+            0x02 => Some(Self::Decrement),
+            0x03 => Some(Self::Negate),
+            _ => None,
+        }
+    }
 }
 
 // ── Interop (KMIP 3.0 §6.1.31) ─────────────────────────────────────────────

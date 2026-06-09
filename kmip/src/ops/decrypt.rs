@@ -221,6 +221,10 @@ mod tests {
             activation_date: Some(OffsetDateTime::UNIX_EPOCH),
             supersedes: None,
             name: None,
+
+            links: std::collections::HashMap::new(),
+
+            custom_attributes: std::collections::HashMap::new(),
         }).unwrap();
     }
 

@@ -129,6 +129,10 @@ mod tests {
             activation_date: Some(OffsetDateTime::UNIX_EPOCH),
             supersedes: None,
             name: None,
+
+            links: std::collections::HashMap::new(),
+
+            custom_attributes: std::collections::HashMap::new(),
         }).unwrap();
     }
 
@@ -166,6 +170,10 @@ mod tests {
             activation_date: None,
             supersedes: None,
             name: None,
+
+            links: std::collections::HashMap::new(),
+
+            custom_attributes: std::collections::HashMap::new(),
         }).unwrap();
         let err = revoke(&d, RevokeRequest { uid: "p".into(), reason: RevocationReason::Unspecified }, "c").unwrap_err();
         assert_eq!(err.result_reason(), crate::error::ResultReason::PermissionDenied);

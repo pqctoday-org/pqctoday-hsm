@@ -303,6 +303,10 @@ mod tests {
             activation_date: Some(OffsetDateTime::UNIX_EPOCH),
             supersedes: None,
             name: None,
+
+            links: std::collections::HashMap::new(),
+
+            custom_attributes: std::collections::HashMap::new(),
         };
         deps.store.put(rec).unwrap();
     }
@@ -379,6 +383,10 @@ rules:
             activation_date: None,
             supersedes: None,
             name: None,
+
+            links: std::collections::HashMap::new(),
+
+            custom_attributes: std::collections::HashMap::new(),
         };
         d.store.put(rec).unwrap();
         let err = sign(&d, SignRequest { uid: "urn:pre".into(), data: vec![] }, "corr").unwrap_err();

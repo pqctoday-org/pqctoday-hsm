@@ -77,9 +77,12 @@ IMPLEMENTED_OPS: set[str] = {
     "Encrypt", "Decrypt", "Sign", "SignatureVerify",
     "Query",
     # PR #81 (Group B + Interop): attribute read-side ops + test-framework
-    # markers. Wave 2 adds the mutating attribute ops.
+    # markers.
     "GetAttributes", "GetAttributeList",
     "Interop",
+    # PR #82 (Group B wave 2): attribute mutation ops.
+    "AddAttribute", "ModifyAttribute", "DeleteAttribute",
+    "SetAttribute", "AdjustAttribute",
 }
 
 

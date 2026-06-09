@@ -185,6 +185,10 @@ pub fn create_key_pair(
         activation_date: None,
         supersedes: None,
             name: None,
+
+            links: std::collections::HashMap::new(),
+
+            custom_attributes: std::collections::HashMap::new(),
     })?;
     deps.store.put(ObjectRecord {
         uid: pub_uid.clone(),
@@ -199,6 +203,10 @@ pub fn create_key_pair(
         activation_date: None,
         supersedes: None,
             name: None,
+
+            links: std::collections::HashMap::new(),
+
+            custom_attributes: std::collections::HashMap::new(),
     })?;
 
     deps.sink.emit(AuditEvent::at(

@@ -31,7 +31,9 @@ use crate::kmip30::{
     RevokeRequest, SignRequest, SignatureVerifyRequest,
 };
 use crate::ops::{
-    activate::activate, create::create, create_key_pair::create_key_pair, decrypt::decrypt,
+    activate::activate,
+    attribute_mutate::{add_attribute, adjust_attribute, delete_attribute, modify_attribute, set_attribute},
+    create::create, create_key_pair::create_key_pair, decrypt::decrypt,
     destroy::destroy, encrypt::encrypt, get::get,
     get_attribute_list::get_attribute_list, get_attributes::get_attributes,
     interop::interop,
@@ -102,6 +104,11 @@ fn handle_payload(
             ResponsePayload::SignatureVerify(signature_verify(deps, r, correlation_id)?)
         }
         RequestPayload::Interop(r) => ResponsePayload::Interop(interop(deps, r, correlation_id)?),
+        RequestPayload::AddAttribute(r) => ResponsePayload::AddAttribute(add_attribute(deps, r, correlation_id)?),
+        RequestPayload::ModifyAttribute(r) => ResponsePayload::ModifyAttribute(modify_attribute(deps, r, correlation_id)?),
+        RequestPayload::DeleteAttribute(r) => ResponsePayload::DeleteAttribute(delete_attribute(deps, r, correlation_id)?),
+        RequestPayload::SetAttribute(r) => ResponsePayload::SetAttribute(set_attribute(deps, r, correlation_id)?),
+        RequestPayload::AdjustAttribute(r) => ResponsePayload::AdjustAttribute(adjust_attribute(deps, r, correlation_id)?),
     })
 }
 

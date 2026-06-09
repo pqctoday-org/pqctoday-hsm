@@ -323,6 +323,10 @@ fn decode_record(
         // attribute-mutation wave (PR #82); for now SQLite doesn't
         // carry a Name column, so we always reconstruct as None.
         name: None,
+
+        links: std::collections::HashMap::new(),
+
+        custom_attributes: std::collections::HashMap::new(),
     })
 }
 
@@ -401,6 +405,10 @@ mod tests {
             activation_date: None,
             supersedes: None,
             name: None,
+
+            links: std::collections::HashMap::new(),
+
+            custom_attributes: std::collections::HashMap::new(),
         }
     }
 

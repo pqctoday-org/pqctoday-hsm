@@ -102,6 +102,10 @@ mod tests {
             activation_date: None,
             supersedes: None,
             name: None,
+
+            links: std::collections::HashMap::new(),
+
+            custom_attributes: std::collections::HashMap::new(),
         }).unwrap();
 
         let r = get_attribute_list(&d, GetAttributeListRequest { uid: "u".into() }, "c").unwrap();

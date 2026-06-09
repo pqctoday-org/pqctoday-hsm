@@ -43,6 +43,19 @@ pub struct ObjectRecord {
     /// by Locate's Name filter and GetAttributes. None until a client
     /// sets one.
     pub name: Option<String>,
+    /// KMIP `Link` attributes that point at other managed objects, keyed
+    /// by `LinkType` (NextLink / PreviousLink / ParentLink / ChildLink /
+    /// PreviousLink / DerivationBaseObjectLink / DerivedKeyLink /
+    /// ReplacementObjectLink / ReplacedObjectLink — see KMIP 3.0 §4.x).
+    /// v0.1 stores the raw tag-form name as the key (e.g. "NextLink")
+    /// and the target UID string as the value, so AddAttribute on a
+    /// `NextLink` round-trips correctly through OASIS test cases.
+    pub links: std::collections::HashMap<String, String>,
+    /// Arbitrary custom attributes carried per managed object (KMIP
+    /// `Custom Attribute` family, x-* / y- names). Populated by
+    /// AddAttribute / SetAttribute; surfaced by GetAttributes /
+    /// GetAttributeList.
+    pub custom_attributes: std::collections::HashMap<String, String>,
 }
 
 /// Minimum surface the Phase-5 op handlers call.
