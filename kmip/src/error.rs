@@ -40,6 +40,15 @@ pub enum ResultReason {
     /// carry (e.g. `Check` against a key whose mask lacks
     /// `ProcessStart`). Distinct from generic `PermissionDenied`.
     IncompatibleCryptographicUsageMask = 0x0000_0029,
+    /// `Attribute Read Only` — KMIP 3.0 §11. ModifyAttribute /
+    /// AddAttribute / SetAttribute against an attribute the server
+    /// owns (UniqueIdentifier, ObjectType, State, InitialDate,
+    /// LastChangeDate, OriginalCreationDate, Digest, …) per §11
+    /// attribute table. Distinct from generic `InvalidField` so the
+    /// client knows the request is rejected because the *attribute*
+    /// is read-only rather than the *value* being malformed. BL-M-7
+    /// step #2 pins this code.
+    AttributeReadOnly      = 0x0000_0022,
     GeneralFailure        = 0x0000_0100,
 }
 
@@ -108,6 +117,12 @@ impl KmipError {
             format!("UID {uid:?} is in {state} — op requires Active"),
         )
     }
+    pub fn attribute_read_only(attr: &str) -> Self {
+        Self::failed(
+            ResultReason::AttributeReadOnly,
+            format!("attribute {attr} is Read-Only"),
+        )
+    }
     pub fn non_unique_name_attribute(name: &str) -> Self {
         Self::failed(
             ResultReason::NonUniqueNameAttribute,
@@ -152,6 +167,9 @@ mod tests {
         assert_eq!(ResultReason::ObjectAlreadyExists.to_wire_value(),   0x0000_0018);
         assert_eq!(ResultReason::InvalidAttribute.to_wire_value(),      0x0000_002c);
         assert_eq!(ResultReason::InvalidAttributeValue.to_wire_value(), 0x0000_002d);
+        assert_eq!(ResultReason::AttributeReadOnly.to_wire_value(),     0x0000_0022);
+        assert_eq!(ResultReason::WrongKeyLifecycleState.to_wire_value(), 0x0000_0043);
+        assert_eq!(ResultReason::NonUniqueNameAttribute.to_wire_value(), 0x0000_0035);
     }
 
     #[test]

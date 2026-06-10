@@ -1,6 +1,6 @@
 # OASIS KMIP 3.0 Dispatcher Replay Report
 
-Generated: 2026-06-10 01:48:42 UTC
+Generated: 2026-06-10 02:12:06 UTC
 
 
 ## Aggregate
@@ -8,8 +8,8 @@ Generated: 2026-06-10 01:48:42 UTC
 
 | Status | Count | % of total |
 |---|---|---|
-| **PASS** | 51 | 50.0% |
-| **FAIL** | 51 | 50.0% |
+| **PASS** | 53 | 52.0% |
+| **FAIL** | 49 | 48.0% |
 | ERROR | 0 | 0.0% |
 | SKIP_OP (op not implemented) | 0 | 0.0% |
 | SKIP_PARSE (XML malformed) | 0 | 0.0% |
@@ -18,9 +18,9 @@ Generated: 2026-06-10 01:48:42 UTC
 
 Of the 102 tests that exercise only implemented ops:
 
-  - **51 pass (50%)**
+  - **53 pass (52%)**
 
-  - 51 fail
+  - 49 fail
 
   - 0 errored
 
@@ -30,7 +30,6 @@ Of the 102 tests that exercise only implemented ops:
 
 | Test | Status | Detail |
 |---|---|---|
-| `AKLC-M-3-30.xml` | FAIL | msg #4: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'OperationFailed' got 0 |
 | `AKLC-O-1-30.xml` | FAIL | msg #3: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: missing expected attribute 'AlwaysSensitive' (§4.1.1 item 2 |
 | `AX-M-1-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage: child count 3 != 2 |
 | `AX-M-2-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload/SymmetricKey/KeyBlock: child count 5 != 4 |
@@ -40,7 +39,7 @@ Of the 102 tests that exercise only implemented ops:
 | `BL-M-14-30.xml` | FAIL | msg #5: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: missing expected attribute 'AlwaysSensitive' (§4.1.1 item 2 |
 | `BL-M-4-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
 | `BL-M-5-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
-| `BL-M-7-30.xml` | FAIL | msg #2: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'OperationFailed' got 0 |
+| `BL-M-7-30.xml` | FAIL | msg #3: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
 | `BL-M-8-30.xml` | FAIL | msg #2: response mismatch: ResponseMessage/BatchItem/ResultReason: expected 'NonUniqueNameAttribute' got 7 |
 | `CS-AC-M-1-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
 | `CS-AC-M-2-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
@@ -77,12 +76,12 @@ Of the 102 tests that exercise only implemented ops:
 | `SKFF-M-6-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
 | `SKFF-M-8-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
 | `SKFF-M-9-30.xml` | FAIL | msg #8: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 27 != 10 |
-| `SKLC-M-3-30.xml` | FAIL | msg #4: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'OperationFailed' got 0 |
 | `SKLC-O-1-30.xml` | FAIL | msg #3: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: missing expected attribute 'AlwaysSensitive' (§4.1.1 item 2 |
 | `TL-M-1-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/Query ResponsePayload: non-list child count 2 != 3 |
 | `TL-M-3-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 1 != 0 |
 | `AKLC-M-1-30.xml` | PASS |  |
 | `AKLC-M-2-30.xml` | PASS |  |
+| `AKLC-M-3-30.xml` | PASS |  |
 | `BL-M-1-30.xml` | PASS |  |
 | `BL-M-11-30.xml` | PASS |  |
 | `BL-M-15-30.xml` | PASS |  |
@@ -131,4 +130,5 @@ Of the 102 tests that exercise only implemented ops:
 | `SKFF-M-7-30.xml` | PASS |  |
 | `SKLC-M-1-30.xml` | PASS |  |
 | `SKLC-M-2-30.xml` | PASS |  |
+| `SKLC-M-3-30.xml` | PASS |  |
 | `TL-M-2-30.xml` | PASS |  |

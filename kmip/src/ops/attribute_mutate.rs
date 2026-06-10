@@ -111,6 +111,29 @@ pub fn modify_attribute(
     })?;
     policy_gate(deps, &obj, "ModifyAttribute", correlation_id)?;
 
+    // Per KMIP 3.0 §6.1.38 + §11 attribute table — Read-Only attributes
+    // (UniqueIdentifier, ObjectType, State, …) are server-owned and MUST
+    // NOT be modified by clients. BL-M-7 step #2 pins the reason code as
+    // `AttributeReadOnly` (0x22) not the generic `InvalidField`.
+    if attribute_is_read_only(&req.new_attribute) {
+        return Err(fail_err(deps, correlation_id, "ModifyAttribute",
+            KmipError::attribute_read_only(attribute_name(&req.new_attribute))));
+    }
+
+    // Per KMIP 3.0 §11 attribute table — `Activation Date` is modifiable
+    // only while the object is in `PreActive`. AKLC-M-3 + SKLC-M-3 step #4
+    // both pin `WrongKeyLifecycleState` once the object is Active.
+    if let Attribute::ActivationDate(_) = &req.new_attribute {
+        if !matches!(obj.state, crate::kmip30::State::PreActive) {
+            return Err(fail_err(deps, correlation_id, "ModifyAttribute",
+                KmipError::failed(
+                    ResultReason::WrongKeyLifecycleState,
+                    format!("ActivationDate modifiable only in PreActive (object is in {})",
+                        state_name(obj.state)),
+                )));
+        }
+    }
+
     // Per §6.1.38: "Only existing attributes MAY be changed via this operation."
     if !attribute_present(&obj, &req.new_attribute) {
         return Err(fail_err(deps, correlation_id, "ModifyAttribute",
@@ -547,6 +570,70 @@ mod tests {
             new_attribute: Attribute::Name("v2".into()),
         }, "c").unwrap();
         assert_eq!(d.store.get("u").unwrap().unwrap().name.as_deref(), Some("v2"));
+    }
+
+    /// KMIP 3.0 §6.1.38 + §11 attribute table — `State` is Read-Only
+    /// (modifiable only by Activate/Revoke/Destroy state transitions).
+    /// BL-M-7 step #2 pins `ResultReason = AttributeReadOnly` (0x22).
+    #[test]
+    fn modify_read_only_attribute_returns_attribute_read_only() {
+        let d = deps_with();
+        put(&d, "u");
+        let err = modify_attribute(&d, ModifyAttributeRequest {
+            uid: "u".into(),
+            current_attribute: None,
+            new_attribute: Attribute::State(crate::kmip30::State::Compromised),
+        }, "c").unwrap_err();
+        assert_eq!(err.result_reason(), ResultReason::AttributeReadOnly);
+    }
+
+    /// KMIP 3.0 §11 attribute table — `Activation Date` is modifiable
+    /// only while the managed object is in `PreActive`. Mutating it
+    /// once the object has Activated returns `WrongKeyLifecycleState`
+    /// (AKLC-M-3 step #4 + SKLC-M-3 step #4 both pin this code).
+    #[test]
+    fn modify_activation_date_after_active_returns_wrong_lifecycle_state() {
+        let d = deps_with();
+        // put() places the object directly in `Active` state.
+        put(&d, "u");
+        let err = modify_attribute(&d, ModifyAttributeRequest {
+            uid: "u".into(),
+            current_attribute: None,
+            new_attribute: Attribute::ActivationDate(123_456_789),
+        }, "c").unwrap_err();
+        assert_eq!(err.result_reason(), ResultReason::WrongKeyLifecycleState);
+    }
+
+    /// PreActive → modifying ActivationDate MUST succeed per §11.
+    #[test]
+    fn modify_activation_date_while_preactive_succeeds() {
+        let d = deps_with();
+        d.store.put(ObjectRecord {
+            uid: "p".into(),
+            object_type: ObjectType::SymmetricKey,
+            algorithm: KmipAlgorithm::Aes,
+            cryptographic_length: 256,
+            usage_mask: UsageMask::ENCRYPT,
+            state: State::PreActive,
+            pkcs11_cka_id: vec![],
+            pkcs11_slot: 0,
+            initial_date: OffsetDateTime::UNIX_EPOCH,
+            activation_date: None,
+            supersedes: None,
+            name: None,
+            links: HashMap::new(),
+            custom_attributes: HashMap::new(),
+            key_material: None,
+            key_format_type: None,
+            ..ObjectRecord::default()
+        }).unwrap();
+        modify_attribute(&d, ModifyAttributeRequest {
+            uid: "p".into(),
+            current_attribute: None,
+            new_attribute: Attribute::ActivationDate(42),
+        }, "c").unwrap();
+        let rec = d.store.get("p").unwrap().unwrap();
+        assert_eq!(rec.activation_date.unwrap().unix_timestamp(), 42);
     }
 
     #[test]

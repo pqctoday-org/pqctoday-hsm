@@ -1,8 +1,8 @@
 {
-  "generated_at": 1781056122,
+  "generated_at": 1781057526,
   "summary": {
-    "pass": 51,
-    "fail": 51,
+    "pass": 53,
+    "fail": 49,
     "error": 0,
     "skip_op": 0,
     "skip_parse": 0,
@@ -34,8 +34,8 @@
     },
     {
       "name": "AKLC-M-3-30.xml",
-      "status": "FAIL",
-      "detail": "msg #4: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'OperationFailed' got 0",
+      "status": "PASS",
+      "detail": "",
       "ops_used": [
         "Activate",
         "CreateKeyPair",
@@ -272,7 +272,7 @@
     {
       "name": "BL-M-7-30.xml",
       "status": "FAIL",
-      "detail": "msg #2: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'OperationFailed' got 0",
+      "detail": "msg #3: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1",
       "ops_used": [
         "GetAttributes",
         "Interop",
@@ -1030,8 +1030,8 @@
     },
     {
       "name": "SKLC-M-3-30.xml",
-      "status": "FAIL",
-      "detail": "msg #4: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'OperationFailed' got 0",
+      "status": "PASS",
+      "detail": "",
       "ops_used": [
         "Activate",
         "Create",
