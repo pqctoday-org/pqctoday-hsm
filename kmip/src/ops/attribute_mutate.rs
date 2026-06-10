@@ -479,6 +479,10 @@ fn apply_attribute(obj: &mut ObjectRecord, a: &Attribute) {
         Attribute::PreviousLink(uid)         => { obj.links.insert("PreviousLink".into(), uid.clone()); }
         Attribute::PublicKeyLink(uid)        => { obj.links.insert("PublicKeyLink".into(), uid.clone()); }
         Attribute::PrivateKeyLink(uid)       => { obj.links.insert("PrivateKeyLink".into(), uid.clone()); }
+        Attribute::GroupLink(uid)            => { obj.links.insert("GroupLink".into(), uid.clone()); }
+        Attribute::ApplicationSpecificInformation { namespace, data } => {
+            obj.application_specific_information = Some((namespace.clone(), data.clone()));
+        }
         // ── Baseline Server attribute setters ──
         Attribute::ActivationDate(t)           => obj.activation_date = Some(time::OffsetDateTime::from_unix_timestamp(*t).unwrap_or(time::OffsetDateTime::UNIX_EPOCH)),
         Attribute::DeactivationDate(t)         => obj.deactivation_date = Some(time::OffsetDateTime::from_unix_timestamp(*t).unwrap_or(time::OffsetDateTime::UNIX_EPOCH)),

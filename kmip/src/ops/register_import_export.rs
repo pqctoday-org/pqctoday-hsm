@@ -208,9 +208,21 @@ pub fn register(
     // surface them. BL-M-14 / SKFF-M-{9..11} step #0 supply
     // `<Attribute>` envelopes inside `<Attributes>`.
     let mut custom_attributes: HashMap<String, String> = HashMap::new();
+    let mut links: HashMap<String, String> = HashMap::new();
     for a in &req.attributes {
-        if let Attribute::Custom { name, value } = a {
-            custom_attributes.insert(name.clone(), value.clone());
+        match a {
+            Attribute::Custom { name, value } => {
+                custom_attributes.insert(name.clone(), value.clone());
+            }
+            // KMIP §11 Link family — UID references the Register
+            // request can stamp onto the new object. SASED-M-2
+            // pins GroupLink; CS-AC tests use PublicKey/PrivateKeyLink.
+            Attribute::GroupLink(uid)      => { links.insert("GroupLink".into(), uid.clone()); }
+            Attribute::NextLink(uid)       => { links.insert("NextLink".into(), uid.clone()); }
+            Attribute::PreviousLink(uid)   => { links.insert("PreviousLink".into(), uid.clone()); }
+            Attribute::PublicKeyLink(uid)  => { links.insert("PublicKeyLink".into(), uid.clone()); }
+            Attribute::PrivateKeyLink(uid) => { links.insert("PrivateKeyLink".into(), uid.clone()); }
+            _ => {}
         }
     }
 
@@ -253,11 +265,12 @@ pub fn register(
         protect_stop_date: x.protect_stop_date,
         usage_limits_total: x.usage_limits_total,
         usage_limits_remaining: x.usage_limits_total,
+        application_specific_information: x.application_specific_information.clone(),
         last_change_date: Some(now),
         original_creation_date: Some(now),
         supersedes: None,
         name,
-        links: HashMap::new(),
+        links,
         custom_attributes,
         key_material,
         key_format_type,
@@ -444,6 +457,10 @@ pub(crate) struct ExtractedAttrs {
     /// Register / Create time. `None` = unlimited. CS-BC-M-7 pins
     /// a 16-byte budget that the second Encrypt should exhaust.
     pub usage_limits_total: Option<i64>,
+    /// KMIP §11 `Application Specific Information` — `(namespace,
+    /// data)` pair. TL-M-2 creates a SymmetricKey with one, TL-M-3
+    /// finds it via a Locate filter.
+    pub application_specific_information: Option<(String, String)>,
     /// Per-key `CryptographicParameters` (KMIP §11) — the OAEP /
     /// PSS / MAC handshake parameters attached to the managed object
     /// at Register time. Read back by Encrypt / Decrypt / Sign /
@@ -462,6 +479,7 @@ pub(crate) fn extract_attrs(attrs: &[Attribute]) -> ExtractedAttrs {
         process_start_date: None, protect_stop_date: None,
         cryptographic_parameters: None, quantum_safe: None,
         usage_limits_total: None,
+        application_specific_information: None,
     };
     for a in attrs {
         match a {
@@ -478,6 +496,9 @@ pub(crate) fn extract_attrs(attrs: &[Attribute]) -> ExtractedAttrs {
             Attribute::CryptographicParameters(cp) => out.cryptographic_parameters = Some(cp.clone()),
             Attribute::QuantumSafe(b)              => out.quantum_safe = Some(*b),
             Attribute::UsageLimitsTotal(n)         => out.usage_limits_total = Some(*n),
+            Attribute::ApplicationSpecificInformation { namespace, data } => {
+                out.application_specific_information = Some((namespace.clone(), data.clone()));
+            }
             _ => {}
         }
     }

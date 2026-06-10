@@ -155,6 +155,14 @@ mod tags {
     /// stitches two freshly-created keys into a linked pair).
     pub const NextLink: u32               = 0x42_0194;
     pub const PreviousLink: u32           = 0x42_0198;
+    /// KMIP 3.0 §11 — `Application Specific Information` Structure
+    /// containing `ApplicationNamespace` + `ApplicationData` text
+    /// strings. Used by Locate to find managed objects keyed by a
+    /// client-defined namespace (e.g. tape labels under LIBRARY-LTO).
+    pub const ApplicationSpecificInformation: u32 = 0x42_0004;
+    pub const ApplicationData: u32        = 0x42_0002;
+    /// KMIP 3.0 §11 — `Group Link` Reference (UID of a Group object).
+    pub const GroupLink: u32              = 0x42_01b3;
     /// KMIP 3.0 §6.1.14 Deactivate request fields.
     pub const DeactivationReason: u32     = 0x42_01b8;
     pub const DeactivationReasonCode: u32 = 0x42_01b9;
@@ -1242,6 +1250,28 @@ fn decode_attribute_v3(frame: &TtlvFrame) -> Result<Option<Attribute>, WireError
             if let Value::TextString(s) = &frame.value {
                 Attribute::PrivateKeyLink(s.clone())
             } else { return Ok(None); }
+        }
+        tags::GroupLink => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::GroupLink(s.clone())
+            } else { return Ok(None); }
+        }
+        tags::ApplicationSpecificInformation => {
+            // Structure containing ApplicationNamespace + ApplicationData.
+            let mut ns = String::new();
+            let mut data = String::new();
+            for c in expect_structure(frame, "Application Specific Information")? {
+                match c.tag.0 {
+                    tags::ApplicationNamespace => {
+                        if let Value::TextString(s) = &c.value { ns = s.clone(); }
+                    }
+                    tags::ApplicationData => {
+                        if let Value::TextString(s) = &c.value { data = s.clone(); }
+                    }
+                    _ => {}
+                }
+            }
+            Attribute::ApplicationSpecificInformation { namespace: ns, data }
         }
         // KMIP 3.0 §11 Certificate attributes — needed so that
         // ModifyAttribute(<CertificateLength …>) decodes to a real
@@ -2479,6 +2509,13 @@ fn encode_attribute_v3(a: &Attribute) -> TtlvFrame {
         Attribute::PrivateKeyLink(s)           => TtlvFrame::new(Tag(tags::PrivateKeyLink),           Value::TextString(s.clone())),
         Attribute::NextLink(s)                 => TtlvFrame::new(Tag(tags::NextLink),                 Value::TextString(s.clone())),
         Attribute::PreviousLink(s)             => TtlvFrame::new(Tag(tags::PreviousLink),             Value::TextString(s.clone())),
+        Attribute::GroupLink(s)                => TtlvFrame::new(Tag(tags::GroupLink),                Value::TextString(s.clone())),
+        Attribute::ApplicationSpecificInformation { namespace, data } => {
+            TtlvFrame::new(Tag(tags::ApplicationSpecificInformation), Value::Structure(vec![
+                TtlvFrame::new(Tag(tags::ApplicationNamespace), Value::TextString(namespace.clone())),
+                TtlvFrame::new(Tag(tags::ApplicationData), Value::TextString(data.clone())),
+            ]))
+        }
         Attribute::CertificateSubjectCN(s)     => TtlvFrame::new(Tag(tags::CertificateSubjectCN),     Value::TextString(s.clone())),
         Attribute::DigitalSignatureAlgorithm(v) => TtlvFrame::new(Tag(tags::DigitalSignatureAlgorithm), Value::Enumeration(*v)),
         Attribute::NistKeyType(v)              => TtlvFrame::new(Tag(tags::NistKeyType),              Value::Enumeration(*v)),
@@ -2611,6 +2648,8 @@ fn tag_code_from_name(name: &str) -> Option<u32> {
         "PreviousLink"           => tags::PreviousLink,
         "PublicKeyLink"          => tags::PublicKeyLink,
         "PrivateKeyLink"         => tags::PrivateKeyLink,
+        "GroupLink"              => tags::GroupLink,
+        "ApplicationSpecificInformation" => tags::ApplicationSpecificInformation,
         "Digest"                 => tags::Digest,
         "RandomNumberGenerator"  => tags::RandomNumberGenerator,
         "CryptographicParameters" => tags::CryptographicParameters,
@@ -2686,6 +2725,8 @@ fn tag_name_from_code(code: u32) -> &'static str {
         tags::PreviousLink           => "Previous Link",
         tags::PublicKeyLink          => "Public Key Link",
         tags::PrivateKeyLink         => "Private Key Link",
+        tags::GroupLink              => "Group Link",
+        tags::ApplicationSpecificInformation => "Application Specific Information",
         _ => "Unknown",
     }
 }

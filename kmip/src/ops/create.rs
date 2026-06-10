@@ -212,6 +212,7 @@ pub fn create(deps: &Deps, req: CreateRequest, correlation_id: &str) -> Result<C
         key_format_type: None,
         // KMIP §11 Fresh = True for server-generated objects.
         fresh: Some(true),
+        application_specific_information: x.application_specific_information.clone(),
     ..ObjectRecord::default()
 })?;
 

@@ -85,6 +85,13 @@ struct LocateFilters {
     object_type: Option<ObjectType>,
     state: Option<State>,
     name: Option<String>,
+    /// KMIP 3.0 §11 `Application Specific Information` filter —
+    /// `(namespace, data)` pair. TL-M-3 step #0 finds a previously
+    /// Created SymmetricKey by it.
+    application_specific_information: Option<(String, String)>,
+    /// KMIP 3.0 §11 `Group Link` filter — UID reference. SASED-M-3
+    /// step #0 finds a previously Registered SecretData by it.
+    group_link: Option<String>,
 }
 
 impl LocateFilters {
@@ -124,6 +131,18 @@ impl LocateFilters {
                 _ => return false,
             }
         }
+        if let Some((ns, data)) = &self.application_specific_information {
+            match &r.application_specific_information {
+                Some((have_ns, have_data)) if have_ns == ns && have_data == data => {}
+                _ => return false,
+            }
+        }
+        if let Some(want_gl) = &self.group_link {
+            match r.links.get("GroupLink") {
+                Some(have) if have == want_gl => {}
+                _ => return false,
+            }
+        }
         true
     }
 }
@@ -134,6 +153,8 @@ fn build_filters(attrs: &[Attribute]) -> LocateFilters {
         object_type: None,
         state: None,
         name: None,
+        application_specific_information: None,
+        group_link: None,
     };
     for a in attrs {
         match a {
@@ -141,6 +162,12 @@ fn build_filters(attrs: &[Attribute]) -> LocateFilters {
             Attribute::ObjectType(t) => f.object_type = Some(*t),
             Attribute::State(s) => f.state = Some(*s),
             Attribute::Name(n) => f.name = Some(n.clone()),
+            Attribute::ApplicationSpecificInformation { namespace, data } => {
+                f.application_specific_information = Some((namespace.clone(), data.clone()));
+            }
+            Attribute::GroupLink(uid) => {
+                f.group_link = Some(uid.clone());
+            }
             _ => {}
         }
     }

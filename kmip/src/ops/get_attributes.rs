@@ -290,6 +290,8 @@ pub(crate) fn canonical_attribute_name(attr: &Attribute) -> &'static str {
         Attribute::PrivateKeyLink(_)         => "PrivateKeyLink",
         Attribute::NextLink(_)               => "NextLink",
         Attribute::PreviousLink(_)           => "PreviousLink",
+        Attribute::GroupLink(_)              => "GroupLink",
+        Attribute::ApplicationSpecificInformation { .. } => "ApplicationSpecificInformation",
         Attribute::DigitalSignatureAlgorithm(_) => "DigitalSignatureAlgorithm",
         Attribute::NistKeyType(_)            => "NistKeyType",
         Attribute::ProtectionLevel(_)        => "ProtectionLevel",

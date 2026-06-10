@@ -185,6 +185,9 @@ pub struct ObjectRecord {
     /// per-Encrypt byte-count accounting against it.
     pub usage_limits_total: Option<i64>,
     pub usage_limits_remaining: Option<i64>,
+    /// KMIP §11 `Application Specific Information` Structure —
+    /// `(namespace, data)` pair. TL-M-3 step #0 finds objects by it.
+    pub application_specific_information: Option<(String, String)>,
 }
 
 impl ObjectRecord {
@@ -267,6 +270,7 @@ impl From<BaselineDefaults> for ObjectRecord {
             random_number_generator_present: false,
             usage_limits_total: None,
             usage_limits_remaining: None,
+            application_specific_information: None,
         }
     }
 }
