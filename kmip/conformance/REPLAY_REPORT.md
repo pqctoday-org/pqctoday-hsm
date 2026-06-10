@@ -1,6 +1,6 @@
 # OASIS KMIP 3.0 Dispatcher Replay Report
 
-Generated: 2026-06-10 05:14:16 UTC
+Generated: 2026-06-10 05:25:06 UTC
 
 
 ## Aggregate
@@ -8,8 +8,8 @@ Generated: 2026-06-10 05:14:16 UTC
 
 | Status | Count | % of total |
 |---|---|---|
-| **PASS** | 81 | 79.4% |
-| **FAIL** | 21 | 20.6% |
+| **PASS** | 82 | 80.4% |
+| **FAIL** | 20 | 19.6% |
 | ERROR | 0 | 0.0% |
 | SKIP_OP (op not implemented) | 0 | 0.0% |
 | SKIP_PARSE (XML malformed) | 0 | 0.0% |
@@ -18,9 +18,9 @@ Generated: 2026-06-10 05:14:16 UTC
 
 Of the 102 tests that exercise only implemented ops:
 
-  - **81 pass (79%)**
+  - **82 pass (80%)**
 
-  - 21 fail
+  - 20 fail
 
   - 0 errored
 
@@ -34,13 +34,12 @@ Of the 102 tests that exercise only implemented ops:
 | `AX-M-2-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload/SymmetricKey/KeyBlock: child count 5 != 4 |
 | `BL-M-12-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
 | `BL-M-13-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
-| `CS-AC-M-1-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
 | `CS-AC-M-2-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
-| `CS-AC-M-3-30.xml` | FAIL | msg #2: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
+| `CS-AC-M-3-30.xml` | FAIL | msg #3: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
 | `CS-AC-M-4-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
 | `CS-AC-M-5-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
 | `CS-AC-M-6-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
-| `CS-AC-M-8-30.xml` | FAIL | msg #2: response mismatch: ResponseMessage/BatchItem/ResultReason: expected 'WrongKeyLifecycleState' got 1 |
+| `CS-AC-M-8-30.xml` | FAIL | msg #2: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'OperationFailed' got 0 |
 | `CS-BC-M-GCM-2-30.xml` | FAIL | msg #21: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
 | `CS-BC-M-GCM-3-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
 | `CS-RNG-O-2-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResponsePayload/DataLength: expected '16' got 32 |
@@ -74,6 +73,7 @@ Of the 102 tests that exercise only implemented ops:
 | `BL-M-7-30.xml` | PASS |  |
 | `BL-M-8-30.xml` | PASS |  |
 | `BL-M-9-30.xml` | PASS |  |
+| `CS-AC-M-1-30.xml` | PASS |  |
 | `CS-AC-M-7-30.xml` | PASS |  |
 | `CS-AC-M-OAEP-1-30.xml` | PASS |  |
 | `CS-AC-M-OAEP-10-30.xml` | PASS |  |

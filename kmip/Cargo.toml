@@ -93,6 +93,14 @@ anyhow    = "1"
 # (rustls-adjacent, Sequoia, ~7M/month downloads), MIT/Apache.
 x509-parser = "0.16"
 
+# RSA — KMIP 3.0 §6.1.48 Register accepts client-supplied RSA private
+# keys in PKCS#1 (KeyFormatType=0x03) or PKCS#8 (0x04) DER form. The
+# shim's CKM_*_RSA_PKCS / CKM_*_RSA_PKCS_PSS sign path reads PKCS#8
+# from CKA_VALUE; we use the `rsa` crate's pkcs1::Decode + pkcs8::Encode
+# traits to convert PKCS#1 → PKCS#8 at Register time. CS-AC-M-{1..6,8}
+# pin this flow against a 2048-bit RSA-PSS signing key.
+rsa = "0.9"
+
 # HTML parsing — only used by the build-time `extract-kmip-spec` tool
 # (tools/extract_kmip_spec.rs). The OASIS KMIP 3.0 spec ships as Word-converted
 # HTML with deeply nested span trees that defy regex-based extraction; a real

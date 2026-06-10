@@ -455,6 +455,78 @@ pub fn generate_aes_key(
     Ok(allocate_handle(finalize_secret_attrs(attrs)))
 }
 
+/// Register an existing RSA private key supplied as PKCS#8 DER bytes.
+///
+/// Creates a `CKO_PRIVATE_KEY` object with `CKK_RSA`, storing the
+/// PKCS#8 DER bytes at `CKA_VALUE` (the same place `sign_rsa` reads
+/// from via `from_pkcs8_der`). Returns the engine handle so the
+/// caller can wire it into a KMIP UID → handle mapping.
+///
+/// Used by KMIP's `Register` op when a client supplies a PrivateKey
+/// with `KeyFormatType=PKCS#8`. CS-AC-M-{1..6,8} exercise this path
+/// against an RSA-2048 signing key.
+pub fn register_rsa_private_key_pkcs8(
+    _session: u32,
+    pkcs8_der: &[u8],
+    cka_id: &[u8],
+    label: &str,
+) -> Result<u32, CkRv> {
+    use crate::constants::{CKA_CLASS, CKA_DECRYPT, CKA_KEY_TYPE, CKA_SIGN, CKA_VALUE, CKK_RSA, CKO_PRIVATE_KEY};
+    let mut attrs = std::collections::HashMap::new();
+    store_ulong(&mut attrs, CKA_CLASS, CKO_PRIVATE_KEY);
+    store_ulong(&mut attrs, CKA_KEY_TYPE, CKK_RSA);
+    store_bool(&mut attrs, CKA_SIGN, true);
+    store_bool(&mut attrs, CKA_DECRYPT, true);
+    attrs.insert(CKA_VALUE, pkcs8_der.to_vec());
+    insert_id_and_label(&mut attrs, cka_id, label);
+    finalize_private_key_attrs(&mut attrs);
+    compute_kcv(&mut attrs);
+    Ok(allocate_handle(attrs))
+}
+
+/// Register an existing RSA public key supplied as PKCS#1 (RSAPublicKey)
+/// or PKCS#8 (SubjectPublicKeyInfo) DER bytes. Used by KMIP Register
+/// when the client provides an RSA PublicKey. CS-AC-M-2 exercises this
+/// path against an Encrypt op.
+pub fn register_rsa_public_key_der(
+    _session: u32,
+    der: &[u8],
+    cka_id: &[u8],
+    label: &str,
+) -> Result<u32, CkRv> {
+    use crate::constants::{CKA_CLASS, CKA_ENCRYPT, CKA_KEY_TYPE, CKA_VALUE, CKA_VERIFY, CKK_RSA, CKO_PUBLIC_KEY};
+    let mut attrs = std::collections::HashMap::new();
+    store_ulong(&mut attrs, CKA_CLASS, CKO_PUBLIC_KEY);
+    store_ulong(&mut attrs, CKA_KEY_TYPE, CKK_RSA);
+    store_bool(&mut attrs, CKA_VERIFY, true);
+    store_bool(&mut attrs, CKA_ENCRYPT, true);
+    attrs.insert(CKA_VALUE, der.to_vec());
+    insert_id_and_label(&mut attrs, cka_id, label);
+    compute_kcv(&mut attrs);
+    Ok(allocate_handle(attrs))
+}
+
+/// Register an existing HMAC / Generic Secret key supplied as raw key
+/// bytes. Used by KMIP Register when the client provides a SymmetricKey
+/// with `CryptographicAlgorithm = HMAC_SHA{256,384,512}`. CS-AC-M-{4,5,6}
+/// exercise this path against MAC / MACVerify ops.
+pub fn register_generic_secret_bytes(
+    _session: u32,
+    key_bytes: &[u8],
+    cka_id: &[u8],
+    label: &str,
+) -> Result<u32, CkRv> {
+    let mut attrs = build_generic_secret_attrs(
+        key_bytes.to_vec(),
+        key_bytes.len() as u32,
+        cka_id,
+        label,
+    );
+    finalize_private_key_attrs(&mut attrs);
+    compute_kcv(&mut attrs);
+    Ok(allocate_handle(attrs))
+}
+
 /// Generate a Generic-Secret key (HMAC etc.). `bits` ∈ [8, 4096] in
 /// multiples of 8 (engine permits 1..=512 bytes).
 pub fn generate_generic_secret(

@@ -2000,6 +2000,11 @@ fn decode_key_block(frame: &TtlvFrame) -> Result<KeyBlock, WireError> {
     Ok(KeyBlock {
         key_format_type: match key_format_type {
             0x01 => KeyFormatType::Raw,
+            0x02 => KeyFormatType::OpaqueObject,
+            0x03 => KeyFormatType::Pkcs1,
+            0x04 => KeyFormatType::Pkcs8,
+            0x05 => KeyFormatType::X509,
+            0x06 => KeyFormatType::EcPrivateKey,
             0x07 => KeyFormatType::TransparentSymmetricKey,
             // Other formats land in the store as Raw bytes for now;
             // we keep the codepoint via `ObjectRecord.key_format_type`

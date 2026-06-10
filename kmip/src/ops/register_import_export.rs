@@ -132,8 +132,68 @@ pub fn register(
 
     // Initial Date SHALL be set to current time per §6.1.48.
     let now = OffsetDateTime::now_utc();
-    let key_material = key_block.map(|kb| kb.key_value.clone());
+    // Stable CKA_ID for this object so the KMIP layer can locate the
+    // engine handle later via `find_by_cka_id` (Sign/Decrypt path).
+    let cka_id_bytes = Uuid::new_v4().as_bytes().to_vec();
     let key_format_type = key_block.map(|kb| kb.key_format_type as u32);
+    let key_material = key_block.map(|kb| kb.key_value.clone());
+
+    // KMIP 3.0 §6.1.48 + §6.2 — when the client supplies an RSA
+    // private key in PKCS#1 (KeyFormatType=0x03) or PKCS#8 form, we
+    // create a real engine object so subsequent Sign / Decrypt can
+    // find the handle. CS-AC-M-{1..6,8} pin this flow.
+    //
+    // KeyFormatType codepoints (KMIP §11): 3 = PKCS_1, 4 = PKCS_8.
+    if let (Some(material), Some(fmt), Some(session)) =
+        (key_material.as_ref(), key_format_type, deps.engine_session)
+    {
+        match (req.object_type, kmip_algorithm) {
+            (ObjectType::PrivateKey, crate::kmip30::KmipAlgorithm::Rsa) => {
+                // PKCS_1 = 3 (RSAPrivateKey), PKCS_8 = 4
+                // (PrivateKeyInfo). Both surface in `sign_rsa` via
+                // `RsaPrivateKey::from_pkcs8_der`.
+                let pkcs8_bytes: Option<Vec<u8>> = match fmt {
+                    3 => {
+                        use rsa::pkcs1::DecodeRsaPrivateKey;
+                        use rsa::pkcs8::EncodePrivateKey;
+                        rsa::RsaPrivateKey::from_pkcs1_der(material)
+                            .ok()
+                            .and_then(|k| k.to_pkcs8_der().ok().map(|d| d.as_bytes().to_vec()))
+                    }
+                    4 => Some(material.clone()),
+                    _ => None,
+                };
+                if let Some(pkcs8) = pkcs8_bytes {
+                    let _ = softhsmrustv3::native::register_rsa_private_key_pkcs8(
+                        session, &pkcs8, &cka_id_bytes, "kmip-register",
+                    );
+                }
+            }
+            (ObjectType::PublicKey, crate::kmip30::KmipAlgorithm::Rsa) => {
+                // PKCS_1 RSAPublicKey or PKCS_8 SubjectPublicKeyInfo —
+                // store the DER as-is; `verify_rsa` extracts the
+                // modulus/exponent from CKA_VALUE.
+                let _ = softhsmrustv3::native::register_rsa_public_key_der(
+                    session, material, &cka_id_bytes, "kmip-register-pub",
+                );
+            }
+            (ObjectType::SymmetricKey, alg)
+                if matches!(
+                    alg,
+                    crate::kmip30::KmipAlgorithm::HmacSha256
+                        | crate::kmip30::KmipAlgorithm::HmacSha384
+                        | crate::kmip30::KmipAlgorithm::HmacSha512,
+                ) =>
+            {
+                // HMAC keys are raw bytes; the shim's MAC path reads
+                // them from CKA_VALUE.
+                let _ = softhsmrustv3::native::register_generic_secret_bytes(
+                    session, material, &cka_id_bytes, "kmip-register-hmac",
+                );
+            }
+            _ => {}
+        }
+    }
 
     // KMIP 3.0 Spec §3.x lifecycle — Register honours any date
     // attributes the client supplied (ActivationDate / DeactivationDate
@@ -182,7 +242,7 @@ pub fn register(
         cryptographic_length: resolved_length.unwrap_or(0),
         usage_mask: usage_mask.unwrap_or_else(UsageMask::empty),
         state: initial_state,
-        pkcs11_cka_id: Uuid::new_v4().as_bytes().to_vec(),
+        pkcs11_cka_id: cka_id_bytes,
         pkcs11_slot: deps.config.pkcs11_slot,
         initial_date: now,
         activation_date: x.activation_date,
