@@ -1,8 +1,8 @@
 {
-  "generated_at": 1781064996,
+  "generated_at": 1781065122,
   "summary": {
-    "pass": 72,
-    "fail": 30,
+    "pass": 73,
+    "fail": 29,
     "error": 0,
     "skip_op": 0,
     "skip_parse": 0,
@@ -130,8 +130,8 @@
     },
     {
       "name": "BL-M-14-30.xml",
-      "status": "FAIL",
-      "detail": "msg #5: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: missing expected attribute 'Attribute' (\u00a74.1.1 item 20 permits server *extras* \u2014 not omissions)",
+      "status": "PASS",
+      "detail": "",
       "ops_used": [
         "Destroy",
         "Get",

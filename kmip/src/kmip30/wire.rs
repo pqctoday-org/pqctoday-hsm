@@ -2316,10 +2316,16 @@ fn encode_attribute_v3(a: &Attribute) -> TtlvFrame {
             Tag(tags::Name),
             Value::TextString(s.clone()),
         ),
-        Attribute::Custom { name: _, value } => {
-            // v0.1 falls back to a TextString-typed Name frame for custom
-            // attrs; proper vendor-extension tag allocation is wave 2.
-            TtlvFrame::new(Tag(tags::Name), Value::TextString(value.clone()))
+        Attribute::Custom { name, value } => {
+            // KMIP 3.0 §11 — Vendor-extension Custom attribute envelope:
+            // Attribute Structure { VendorIdentification, AttributeName,
+            // AttributeValue }. v0.1 defaults VendorIdentification to "x".
+            // BL-M-14 / SKFF-M-9 GetAttributes responses pin this shape.
+            TtlvFrame::new(Tag(tags::Attribute), Value::Structure(vec![
+                TtlvFrame::new(Tag(tags::VendorIdentification), Value::TextString("x".into())),
+                TtlvFrame::new(Tag(tags::AttributeName), Value::TextString(name.clone())),
+                TtlvFrame::new(Tag(tags::AttributeValue), Value::TextString(value.clone())),
+            ]))
         }
         // ── Baseline Server profile attributes (KMIP Profiles v3.0 §5.1.2) ──
         Attribute::InitialDate(t)              => TtlvFrame::new(Tag(tags::InitialDate),              Value::DateTime(*t)),

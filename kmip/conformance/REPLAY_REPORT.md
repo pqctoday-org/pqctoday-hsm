@@ -1,6 +1,6 @@
 # OASIS KMIP 3.0 Dispatcher Replay Report
 
-Generated: 2026-06-10 04:16:36 UTC
+Generated: 2026-06-10 04:18:42 UTC
 
 
 ## Aggregate
@@ -8,8 +8,8 @@ Generated: 2026-06-10 04:16:36 UTC
 
 | Status | Count | % of total |
 |---|---|---|
-| **PASS** | 72 | 70.6% |
-| **FAIL** | 30 | 29.4% |
+| **PASS** | 73 | 71.6% |
+| **FAIL** | 29 | 28.4% |
 | ERROR | 0 | 0.0% |
 | SKIP_OP (op not implemented) | 0 | 0.0% |
 | SKIP_PARSE (XML malformed) | 0 | 0.0% |
@@ -18,9 +18,9 @@ Generated: 2026-06-10 04:16:36 UTC
 
 Of the 102 tests that exercise only implemented ops:
 
-  - **72 pass (71%)**
+  - **73 pass (72%)**
 
-  - 30 fail
+  - 29 fail
 
   - 0 errored
 
@@ -34,7 +34,6 @@ Of the 102 tests that exercise only implemented ops:
 | `AX-M-2-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload/SymmetricKey/KeyBlock: child count 5 != 4 |
 | `BL-M-12-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
 | `BL-M-13-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
-| `BL-M-14-30.xml` | FAIL | msg #5: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: missing expected attribute 'Attribute' (§4.1.1 item 20 perm |
 | `BL-M-5-30.xml` | FAIL | msg #2: response mismatch: ResponseMessage/BatchItem/ResponsePayload/OpaqueObject/OpaqueDataType: expected '0x80123456' got 2148676694 |
 | `CS-AC-M-1-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
 | `CS-AC-M-2-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
@@ -67,6 +66,7 @@ Of the 102 tests that exercise only implemented ops:
 | `BL-M-1-30.xml` | PASS |  |
 | `BL-M-10-30.xml` | PASS |  |
 | `BL-M-11-30.xml` | PASS |  |
+| `BL-M-14-30.xml` | PASS |  |
 | `BL-M-15-30.xml` | PASS |  |
 | `BL-M-16-30.xml` | PASS |  |
 | `BL-M-17-30.xml` | PASS |  |

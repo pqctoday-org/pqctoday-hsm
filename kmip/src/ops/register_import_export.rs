@@ -143,6 +143,17 @@ pub fn register(
     // `$NOW-3600` for this in the cryptographic-op conformance tests.
     let initial_state = compute_initial_state(now, &x);
 
+    // KMIP 3.0 §6.1.2 / §11 — preserve client-supplied Custom
+    // attributes (vendor-extension envelope) so GetAttributes can
+    // surface them. BL-M-14 / SKFF-M-{9..11} step #0 supply
+    // `<Attribute>` envelopes inside `<Attributes>`.
+    let mut custom_attributes: HashMap<String, String> = HashMap::new();
+    for a in &req.attributes {
+        if let Attribute::Custom { name, value } = a {
+            custom_attributes.insert(name.clone(), value.clone());
+        }
+    }
+
     // KMIP 3.0 §6.2 Certificate payload — populate cert-specific
     // attributes from the wire `Certificate` Structure (DER bytes +
     // type). `CertificateLength` is the DER byte count; the §11
@@ -185,7 +196,7 @@ pub fn register(
         supersedes: None,
         name,
         links: HashMap::new(),
-        custom_attributes: HashMap::new(),
+        custom_attributes,
         key_material,
         key_format_type,
         cryptographic_parameters: x.cryptographic_parameters.clone(),
