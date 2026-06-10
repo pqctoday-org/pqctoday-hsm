@@ -452,8 +452,25 @@ pub const SUPPORTED_MECHS: &[u32] = &[
     CKM_KECCAK_256,
 ];
 
+/// PKCS#11 v3.2 §5.5 — C_GetMechanismList. Gated on library initialization
+/// (§5.4), validates the slot (CKR_SLOT_ID_INVALID, mirroring
+/// C_GetTokenInfo) and the required `pulCount` out-param
+/// (CKR_ARGUMENTS_BAD). NULL `pMechanismList` is the §5.2 size query.
 #[wasm_bindgen(js_name = _C_GetMechanismList)]
-pub fn C_GetMechanismList(_slot_id: u32, p_mechanism_list: *mut u32, pul_count: *mut u32) -> u32 {
+pub fn C_GetMechanismList(slot_id: u32, p_mechanism_list: *mut u32, pul_count: *mut u32) -> u32 {
+    // §5.4 init gate — the `require_init!` macro is textually scoped to
+    // ffi.rs (declared after this module in lib.rs), so the check is
+    // replicated here.
+    if !crate::state::is_initialized() {
+        return CKR_CRYPTOKI_NOT_INITIALIZED;
+    }
+    if pul_count.is_null() {
+        return CKR_ARGUMENTS_BAD;
+    }
+    let valid_slot = crate::state::TOKEN_STORE.with(|ts| ts.borrow().contains_key(&slot_id));
+    if !valid_slot {
+        return CKR_SLOT_ID_INVALID;
+    }
     unsafe {
         if p_mechanism_list.is_null() {
             *pul_count = SUPPORTED_MECHS.len() as u32;

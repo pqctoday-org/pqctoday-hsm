@@ -71,6 +71,22 @@ macro_rules! require_session {
     };
 }
 
+/// PKCS#11 v3.2 §5.2 — required pointer arguments must not be NULL
+/// (CKR_ARGUMENTS_BAD). Output buffers in the two-call size-query
+/// convention MAY be NULL and must NOT be gated with this macro; apply it
+/// to input pointers and required out-params (handles, counts) only. In
+/// wasm linear memory address 0 is readable/writable, so a missing check
+/// silently corrupts memory instead of faulting.
+macro_rules! nonnull {
+    ($($p:expr),+ $(,)?) => {
+        $(
+            if $p.is_null() {
+                return CKR_ARGUMENTS_BAD;
+            }
+        )+
+    };
+}
+
 #[wasm_bindgen(js_name = _C_Initialize)]
 pub fn C_Initialize(p_init_args: *mut u8) -> u32 {
     // PKCS#11 v3.2 §5.6 — a second C_Initialize without an intervening
@@ -414,6 +430,18 @@ pub fn C_SessionCancel(h_session: u32, flags: u32) -> u32 {
                 ctx.key.zeroize();
             }
         });
+    }
+    if flags & 0x8 != 0 {
+        // CKF_MESSAGE_SIGN — terminate the message-based sign op (the
+        // C_MessageSignInit state lives in SIGN_STATE; the per-message
+        // accumulator in MESSAGE_SIGN_ACC), mirroring C_CloseSession.
+        SIGN_STATE.with(|s| s.borrow_mut().remove(&h_session));
+        MESSAGE_SIGN_ACC.with(|s| s.borrow_mut().remove(&h_session));
+    }
+    if flags & 0x10 != 0 {
+        // CKF_MESSAGE_VERIFY — terminate the message-based verify op.
+        VERIFY_STATE.with(|s| s.borrow_mut().remove(&h_session));
+        MESSAGE_VERIFY_ACC.with(|s| s.borrow_mut().remove(&h_session));
     }
     CKR_OK
 }
@@ -1943,9 +1971,8 @@ pub fn C_GenerateKey(
 ) -> u32 {
     require_init!();
     require_session!(_h_session);
-    if ph_key.is_null() {
-        return CKR_ARGUMENTS_BAD;
-    }
+    // §5.18.1 — pMechanism is a required input pointer.
+    nonnull!(p_mechanism, ph_key);
     unsafe {
         let mech_type = *(p_mechanism as *const u32);
         match mech_type {
@@ -2046,9 +2073,7 @@ pub fn C_EncapsulateKey(
     require_session!(_h_session);
     use ml_kem::{EncodedSizeUser, KemCore, kem::Encapsulate};
 
-    if ph_key.is_null() || pul_ciphertext_len.is_null() {
-        return CKR_ARGUMENTS_BAD;
-    }
+    nonnull!(p_mechanism, ph_key, pul_ciphertext_len);
     // PKCS#11 v3.2 §5.18.8 — the key must permit encapsulation.
     if let Err(rv) = check_key_usage(_h_session, h_key, CKA_ENCAPSULATE) {
         return rv;
@@ -2142,9 +2167,7 @@ pub fn C_DecapsulateKey(
     require_session!(_h_session);
     use ml_kem::{EncodedSizeUser, KemCore, kem::Decapsulate};
 
-    if ph_key.is_null() {
-        return CKR_ARGUMENTS_BAD;
-    }
+    nonnull!(p_mechanism, p_ciphertext, ph_key);
     // PKCS#11 v3.2 §5.18.9 — the key must permit decapsulation.
     if let Err(rv) = check_key_usage(_h_session, h_private_key, CKA_DECAPSULATE) {
         return rv;
@@ -3862,8 +3885,19 @@ pub fn C_Encrypt(
         None => return CKR_ARGUMENTS_BAD,
     };
 
+    // §5.2 — pData is the INPUT; NULL with a nonzero length is
+    // CKR_ARGUMENTS_BAD (only output buffers may be NULL for the two-call
+    // size query). NULL with zero length is an empty input, consistent
+    // with C_Decrypt and C_SignMessageNext.
+    if p_data.is_null() && ul_data_len > 0 {
+        return CKR_ARGUMENTS_BAD;
+    }
     unsafe {
-        let plaintext = std::slice::from_raw_parts(p_data, ul_data_len as usize);
+        let plaintext: &[u8] = if p_data.is_null() {
+            &[]
+        } else {
+            std::slice::from_raw_parts(p_data, ul_data_len as usize)
+        };
         let ct = match mech_type {
             CKM_AES_GCM => {
                 // GcmState honours ulTagBits (truncated tags) and keeps the
@@ -4193,9 +4227,18 @@ pub fn C_Decrypt(
         None => return CKR_ARGUMENTS_BAD,
     };
 
+    // §5.2 — pEncryptedData is the INPUT; NULL with a nonzero length is
+    // CKR_ARGUMENTS_BAD. NULL with zero length is an empty input
+    // (consistent with C_Encrypt).
+    if p_encrypted_data.is_null() && ul_encrypted_data_len > 0 {
+        return CKR_ARGUMENTS_BAD;
+    }
     unsafe {
-        let ciphertext =
-            std::slice::from_raw_parts(p_encrypted_data, ul_encrypted_data_len as usize);
+        let ciphertext: &[u8] = if p_encrypted_data.is_null() {
+            &[]
+        } else {
+            std::slice::from_raw_parts(p_encrypted_data, ul_encrypted_data_len as usize)
+        };
         let pt = match mech_type {
             CKM_AES_GCM => {
                 // GcmState verifies the (possibly truncated) tag before any
@@ -4571,6 +4614,8 @@ pub fn C_FindObjects(
     pul_object_count: *mut u32,
 ) -> u32 {
     require_init!();
+    // §5.10.2 — phObject and pulObjectCount are required pointers.
+    nonnull!(ph_object, pul_object_count);
     FIND_STATE.with(|s| {
         let mut map = s.borrow_mut();
         if let Some(ctx) = map.get_mut(&h_session) {
@@ -5551,10 +5596,10 @@ pub fn C_UnwrapKey(
 ) -> u32 {
     require_init!();
     require_session!(_h_session);
+    // §5.18.4 — pWrappedKey is the input ciphertext and phKey the required
+    // out-param; neither may be NULL.
+    nonnull!(p_mechanism, p_wrapped_key, ph_key);
     unsafe {
-        if p_mechanism.is_null() {
-            return CKR_ARGUMENTS_BAD;
-        }
         let mech_type = *(p_mechanism as *const u32);
         let is_kwp = mech_type == CKM_AES_KEY_WRAP_KWP || mech_type == CKM_AES_KEY_WRAP_PAD;
         let is_aes_wrap = mech_type == CKM_AES_KEY_WRAP || is_kwp;
@@ -5864,10 +5909,9 @@ pub fn C_UnwrapKeyAuthenticated(
 ) -> u32 {
     require_init!();
     require_session!(_h_session);
+    // Same required-pointer surface as C_UnwrapKey.
+    nonnull!(p_mechanism, p_wrapped_key, ph_key);
     unsafe {
-        if p_mechanism.is_null() {
-            return CKR_ARGUMENTS_BAD;
-        }
         let mech_type = *(p_mechanism as *const u32);
         if mech_type != CKM_AES_GCM {
             return CKR_MECHANISM_INVALID;
@@ -6335,7 +6379,10 @@ pub fn C_GetInfo(p_info: *mut u8) -> u32 {
 /// C_GetSlotInfo: returns basic slot info for slot 0.
 /// CK_SLOT_INFO: slotDescription(64) + manufacturerID(32) + flags(4) + hardwareVersion(2) + firmwareVersion(2) = 104 bytes
 /// PKCS#11 v3.2 §5.5 — C_GetInterfaceList. Reports one interface,
-/// "PKCS 11" version 3.2. wasm constraint: exported functions are not
+/// "PKCS 11" version 3.2. Callable BEFORE C_Initialize (§5.4: the
+/// function-list/interface getters are exempt from the init gate;
+/// CKR_CRYPTOKI_NOT_INITIALIZED is not in this function's return list).
+/// wasm constraint: exported functions are not
 /// addressable as C function pointers in linear memory, so pFunctionList
 /// points to a CK_VERSION{3,2} header only; symbol binding happens in the
 /// JS shim (each `_C_*` export), which is the function table for every
@@ -6343,7 +6390,7 @@ pub fn C_GetInfo(p_info: *mut u8) -> u32 {
 /// pInterfaceName, pFunctionList, flags.
 #[wasm_bindgen(js_name = _C_GetInterfaceList)]
 pub fn C_GetInterfaceList(p_interfaces_list: *mut u8, pul_count: *mut u32) -> u32 {
-    require_init!();
+    // No require_init!() — §5.4 pre-init surface.
     if pul_count.is_null() {
         return CKR_ARGUMENTS_BAD;
     }
@@ -6367,6 +6414,8 @@ pub fn C_GetInterfaceList(p_interfaces_list: *mut u8, pul_count: *mut u32) -> u3
 }
 
 /// §5.5 — C_GetInterface. NULL name/version match the default interface.
+/// Callable BEFORE C_Initialize (§5.4 — same pre-init surface as
+/// C_GetFunctionList / C_GetInterfaceList).
 #[wasm_bindgen(js_name = _C_GetInterface)]
 pub fn C_GetInterface(
     p_interface_name: *mut u8,
@@ -6374,7 +6423,7 @@ pub fn C_GetInterface(
     pp_interface: *mut u32,
     _flags: u32,
 ) -> u32 {
-    require_init!();
+    // No require_init!() — §5.4 pre-init surface.
     if pp_interface.is_null() {
         return CKR_ARGUMENTS_BAD;
     }
@@ -6866,6 +6915,13 @@ pub fn C_EncryptMessage(
     if ctx.in_message {
         return CKR_OPERATION_ACTIVE;
     }
+    // §5.2 — input pointers (AAD, plaintext) may be NULL only with zero
+    // length; only the output buffer participates in the size query.
+    if (p_associated_data.is_null() && ul_associated_data_len > 0)
+        || (p_plaintext.is_null() && ul_plaintext_len > 0)
+    {
+        return CKR_ARGUMENTS_BAD;
+    }
 
     unsafe {
         if p_ciphertext.is_null() {
@@ -6881,8 +6937,16 @@ pub fn C_EncryptMessage(
             Ok(v) => v,
             Err(e) => return e,
         };
-        let aad = std::slice::from_raw_parts(p_associated_data, ul_associated_data_len as usize);
-        let plain = std::slice::from_raw_parts(p_plaintext, ul_plaintext_len as usize);
+        let aad: &[u8] = if p_associated_data.is_null() {
+            &[]
+        } else {
+            std::slice::from_raw_parts(p_associated_data, ul_associated_data_len as usize)
+        };
+        let plain: &[u8] = if p_plaintext.is_null() {
+            &[]
+        } else {
+            std::slice::from_raw_parts(p_plaintext, ul_plaintext_len as usize)
+        };
 
         match aes_gcm_exec(&ctx.key, &iv, aad, plain, true, p_tag, tag_bits) {
             Ok(ct) => {
@@ -6913,13 +6977,20 @@ pub fn C_EncryptMessageBegin(
         return CKR_OPERATION_ACTIVE;
     }
 
+    // §5.2 — NULL AAD with a nonzero length is invalid input.
+    if p_associated_data.is_null() && ul_associated_data_len > 0 {
+        return CKR_ARGUMENTS_BAD;
+    }
     unsafe {
         let (iv, _p_tag, tag_bits) = match parse_gcm_msg_params(p_parameter) {
             Ok(v) => v,
             Err(e) => return e,
         };
-        let aad =
-            std::slice::from_raw_parts(p_associated_data, ul_associated_data_len as usize).to_vec();
+        let aad = if p_associated_data.is_null() {
+            Vec::new()
+        } else {
+            std::slice::from_raw_parts(p_associated_data, ul_associated_data_len as usize).to_vec()
+        };
 
         MESSAGE_ENCRYPT_STATE.with(|s| {
             let mut store = s.borrow_mut();
@@ -6954,6 +7025,10 @@ pub fn C_EncryptMessageNext(
     if !ctx.in_message {
         return CKR_OPERATION_NOT_INITIALIZED;
     }
+    // §5.2 — NULL plaintext part with a nonzero length is invalid input.
+    if p_plaintext_part.is_null() && ul_plaintext_part_len > 0 {
+        return CKR_ARGUMENTS_BAD;
+    }
 
     unsafe {
         if p_ciphertext_part.is_null() {
@@ -6967,9 +7042,13 @@ pub fn C_EncryptMessageNext(
 
         MESSAGE_ENCRYPT_STATE.with(|s| {
             if let Some(c) = s.borrow_mut().get_mut(&h_session) {
-                let plain_chunk =
-                    std::slice::from_raw_parts(p_plaintext_part, ul_plaintext_part_len as usize);
-                c.payload_acc.extend_from_slice(plain_chunk);
+                if ul_plaintext_part_len > 0 {
+                    let plain_chunk = std::slice::from_raw_parts(
+                        p_plaintext_part,
+                        ul_plaintext_part_len as usize,
+                    );
+                    c.payload_acc.extend_from_slice(plain_chunk);
+                }
             }
         });
 
@@ -7087,6 +7166,13 @@ pub fn C_DecryptMessage(
     if ctx.in_message {
         return CKR_OPERATION_ACTIVE;
     }
+    // §5.2 — input pointers (AAD, ciphertext) may be NULL only with zero
+    // length; only the output buffer participates in the size query.
+    if (p_associated_data.is_null() && ul_associated_data_len > 0)
+        || (p_ciphertext.is_null() && ul_ciphertext_len > 0)
+    {
+        return CKR_ARGUMENTS_BAD;
+    }
 
     unsafe {
         if p_plaintext.is_null() {
@@ -7102,8 +7188,16 @@ pub fn C_DecryptMessage(
             Ok(v) => v,
             Err(e) => return e,
         };
-        let aad = std::slice::from_raw_parts(p_associated_data, ul_associated_data_len as usize);
-        let ct = std::slice::from_raw_parts(p_ciphertext, ul_ciphertext_len as usize);
+        let aad: &[u8] = if p_associated_data.is_null() {
+            &[]
+        } else {
+            std::slice::from_raw_parts(p_associated_data, ul_associated_data_len as usize)
+        };
+        let ct: &[u8] = if p_ciphertext.is_null() {
+            &[]
+        } else {
+            std::slice::from_raw_parts(p_ciphertext, ul_ciphertext_len as usize)
+        };
 
         match aes_gcm_exec(&ctx.key, &iv, aad, ct, false, p_tag, tag_bits) {
             Ok(plain) => {
@@ -7134,13 +7228,20 @@ pub fn C_DecryptMessageBegin(
         return CKR_OPERATION_ACTIVE;
     }
 
+    // §5.2 — NULL AAD with a nonzero length is invalid input.
+    if p_associated_data.is_null() && ul_associated_data_len > 0 {
+        return CKR_ARGUMENTS_BAD;
+    }
     unsafe {
         let (iv, _p_tag, tag_bits) = match parse_gcm_msg_params(p_parameter) {
             Ok(v) => v,
             Err(e) => return e,
         };
-        let aad =
-            std::slice::from_raw_parts(p_associated_data, ul_associated_data_len as usize).to_vec();
+        let aad = if p_associated_data.is_null() {
+            Vec::new()
+        } else {
+            std::slice::from_raw_parts(p_associated_data, ul_associated_data_len as usize).to_vec()
+        };
 
         MESSAGE_DECRYPT_STATE.with(|s| {
             let mut store = s.borrow_mut();
@@ -7175,6 +7276,10 @@ pub fn C_DecryptMessageNext(
     if !ctx.in_message {
         return CKR_OPERATION_NOT_INITIALIZED;
     }
+    // §5.2 — NULL ciphertext part with a nonzero length is invalid input.
+    if p_ciphertext_part.is_null() && ul_ciphertext_part_len > 0 {
+        return CKR_ARGUMENTS_BAD;
+    }
 
     unsafe {
         if p_plaintext_part.is_null() {
@@ -7188,9 +7293,13 @@ pub fn C_DecryptMessageNext(
 
         MESSAGE_DECRYPT_STATE.with(|s| {
             if let Some(c) = s.borrow_mut().get_mut(&h_session) {
-                let ct_chunk =
-                    std::slice::from_raw_parts(p_ciphertext_part, ul_ciphertext_part_len as usize);
-                c.payload_acc.extend_from_slice(ct_chunk);
+                if ul_ciphertext_part_len > 0 {
+                    let ct_chunk = std::slice::from_raw_parts(
+                        p_ciphertext_part,
+                        ul_ciphertext_part_len as usize,
+                    );
+                    c.payload_acc.extend_from_slice(ct_chunk);
+                }
             }
         });
 
@@ -7650,5 +7759,317 @@ mod multipart_ffi_tests {
         assert_eq!(C_EncryptFinal(session, buf.as_mut_ptr(), &mut len), CKR_DATA_LEN_RANGE);
         // Failed Final terminates the operation.
         assert!(!ENCRYPT_STATE.borrow().contains_key(&session));
+    }
+}
+
+#[cfg(test)]
+mod abi_hygiene_ffi_tests {
+    //! S2 — ABI hygiene: pre-init surface, C_GetMechanismList gate,
+    //! `nonnull!` sweep, and C_SessionCancel message-op flags.
+    use super::*;
+    use crate::native::test_lock;
+
+    /// High fixed handles, disjoint from `multipart_ffi_tests` and the
+    /// `native::*` allocators.
+    const SESSION: u32 = 0x5332_1001;
+    const KEY_HANDLE: u32 = 0x5332_0002;
+
+    fn install_session(h: u32) {
+        SESSIONS.with(|s| {
+            s.borrow_mut()
+                .insert(h, crate::state::SessionState { slot_id: 0, rw_session: true });
+        });
+    }
+
+    fn install_aes_key(key: &[u8]) {
+        OBJECTS.with(|o| {
+            let mut attrs = Attributes::new();
+            attrs.insert(CKA_VALUE, key.to_vec());
+            o.borrow_mut().insert(KEY_HANDLE, attrs);
+        });
+    }
+
+    /// §5.4 — C_GetInterfaceList / C_GetInterface are callable BEFORE
+    /// C_Initialize. The init flag is process-global; `test_lock` serializes
+    /// every test that touches it (the established crate pattern), so the
+    /// flag is flipped off, exercised, and restored under the lock.
+    #[test]
+    fn interface_getters_callable_before_initialize() {
+        let _guard = test_lock::acquire();
+        let was = crate::state::is_initialized();
+        crate::state::set_initialized(false);
+
+        let mut count: u32 = 0;
+        let rv = C_GetInterfaceList(std::ptr::null_mut(), &mut count);
+        assert_ne!(rv, CKR_CRYPTOKI_NOT_INITIALIZED);
+        assert_eq!(rv, CKR_OK);
+        assert_eq!(count, 1);
+
+        let mut iface: u32 = 0;
+        let rv = C_GetInterface(std::ptr::null_mut(), std::ptr::null_mut(), &mut iface, 0);
+        assert_ne!(rv, CKR_CRYPTOKI_NOT_INITIALIZED);
+        assert_eq!(rv, CKR_OK);
+        assert_ne!(iface, 0);
+
+        // Counter-check: C_GetMechanismList IS gated (§5.4).
+        let mut n: u32 = 0;
+        assert_eq!(
+            crate::constants::C_GetMechanismList(0, std::ptr::null_mut(), &mut n),
+            CKR_CRYPTOKI_NOT_INITIALIZED,
+        );
+
+        crate::state::set_initialized(was);
+    }
+
+    /// C_GetMechanismList: NULL pulCount → CKR_ARGUMENTS_BAD; unknown slot →
+    /// CKR_SLOT_ID_INVALID; valid slot size query → CKR_OK.
+    #[test]
+    fn get_mechanism_list_null_count_and_bad_slot() {
+        let _guard = test_lock::acquire();
+        crate::state::set_initialized(true);
+        crate::state::init_token_store(); // slot 0
+
+        assert_eq!(
+            crate::constants::C_GetMechanismList(0, std::ptr::null_mut(), std::ptr::null_mut()),
+            CKR_ARGUMENTS_BAD,
+        );
+        let mut n: u32 = 0;
+        assert_eq!(
+            crate::constants::C_GetMechanismList(0xDEAD, std::ptr::null_mut(), &mut n),
+            CKR_SLOT_ID_INVALID,
+        );
+        assert_eq!(
+            crate::constants::C_GetMechanismList(0, std::ptr::null_mut(), &mut n),
+            CKR_OK,
+        );
+        assert_eq!(n as usize, crate::constants::SUPPORTED_MECHS.len());
+    }
+
+    #[test]
+    fn find_objects_null_pointers() {
+        let _guard = test_lock::acquire();
+        crate::state::set_initialized(true);
+        install_session(SESSION);
+        let mut count: u32 = 0;
+        let mut handle: u32 = 0;
+        assert_eq!(
+            C_FindObjects(SESSION, std::ptr::null_mut(), 8, &mut count),
+            CKR_ARGUMENTS_BAD,
+        );
+        assert_eq!(
+            C_FindObjects(SESSION, &mut handle, 1, std::ptr::null_mut()),
+            CKR_ARGUMENTS_BAD,
+        );
+    }
+
+    /// C_Encrypt / C_Decrypt: pData/pEncryptedData is the INPUT — NULL with a
+    /// nonzero length is CKR_ARGUMENTS_BAD (the two-call NULL convention only
+    /// applies to the output buffer).
+    #[test]
+    fn encrypt_decrypt_null_input_pointer() {
+        let _guard = test_lock::acquire();
+        crate::state::set_initialized(true);
+        install_session(SESSION);
+        install_aes_key(&[0x11u8; 32]);
+
+        ENCRYPT_STATE.with(|s| {
+            s.borrow_mut().insert(
+                SESSION,
+                EncryptCtx {
+                    mech_type: CKM_AES_GCM,
+                    key_handle: KEY_HANDLE,
+                    iv: vec![0u8; 12],
+                    aad: Vec::new(),
+                    tag_bits: 128,
+                    multipart: None,
+                },
+            );
+        });
+        let mut out_len: u32 = 0;
+        assert_eq!(
+            C_Encrypt(SESSION, std::ptr::null_mut(), 16, std::ptr::null_mut(), &mut out_len),
+            CKR_ARGUMENTS_BAD,
+        );
+
+        DECRYPT_STATE.with(|s| {
+            s.borrow_mut().insert(
+                SESSION,
+                EncryptCtx {
+                    mech_type: CKM_AES_GCM,
+                    key_handle: KEY_HANDLE,
+                    iv: vec![0u8; 12],
+                    aad: Vec::new(),
+                    tag_bits: 128,
+                    multipart: None,
+                },
+            );
+        });
+        let mut out_len: u32 = 0;
+        assert_eq!(
+            C_Decrypt(SESSION, std::ptr::null_mut(), 16, std::ptr::null_mut(), &mut out_len),
+            CKR_ARGUMENTS_BAD,
+        );
+        DECRYPT_STATE.with(|s| s.borrow_mut().remove(&SESSION));
+    }
+
+    #[test]
+    fn unwrap_key_null_pointers() {
+        let _guard = test_lock::acquire();
+        crate::state::set_initialized(true);
+        install_session(SESSION);
+        // CK_MECHANISM (wasm32 layout): mechanism, pParameter, ulParameterLen.
+        let mech = [CKM_AES_KEY_WRAP, 0u32, 0u32];
+        let p_mech = mech.as_ptr() as *mut u8;
+        let mut wrapped = [0u8; 24];
+        let mut h_key: u32 = 0;
+
+        // NULL pMechanism
+        assert_eq!(
+            C_UnwrapKey(
+                SESSION,
+                std::ptr::null_mut(),
+                KEY_HANDLE,
+                wrapped.as_mut_ptr(),
+                24,
+                std::ptr::null_mut(),
+                0,
+                &mut h_key,
+            ),
+            CKR_ARGUMENTS_BAD,
+        );
+        // NULL pWrappedKey
+        assert_eq!(
+            C_UnwrapKey(
+                SESSION,
+                p_mech,
+                KEY_HANDLE,
+                std::ptr::null_mut(),
+                24,
+                std::ptr::null_mut(),
+                0,
+                &mut h_key,
+            ),
+            CKR_ARGUMENTS_BAD,
+        );
+        // NULL phKey
+        assert_eq!(
+            C_UnwrapKey(
+                SESSION,
+                p_mech,
+                KEY_HANDLE,
+                wrapped.as_mut_ptr(),
+                24,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+            ),
+            CKR_ARGUMENTS_BAD,
+        );
+    }
+
+    #[test]
+    fn generate_key_null_mechanism() {
+        let _guard = test_lock::acquire();
+        crate::state::set_initialized(true);
+        install_session(SESSION);
+        let mut h_key: u32 = 0;
+        assert_eq!(
+            C_GenerateKey(
+                SESSION,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                0,
+                &mut h_key,
+            ),
+            CKR_ARGUMENTS_BAD,
+        );
+    }
+
+    #[test]
+    fn encapsulate_decapsulate_null_mechanism() {
+        let _guard = test_lock::acquire();
+        crate::state::set_initialized(true);
+        install_session(SESSION);
+        let mut ct_len: u32 = 0;
+        let mut h_key: u32 = 0;
+        let mut ct = [0u8; 4];
+        assert_eq!(
+            C_EncapsulateKey(
+                SESSION,
+                std::ptr::null_mut(),
+                KEY_HANDLE,
+                std::ptr::null_mut(),
+                0,
+                ct.as_mut_ptr(),
+                &mut ct_len,
+                &mut h_key,
+            ),
+            CKR_ARGUMENTS_BAD,
+        );
+        assert_eq!(
+            C_DecapsulateKey(
+                SESSION,
+                std::ptr::null_mut(),
+                KEY_HANDLE,
+                std::ptr::null_mut(),
+                0,
+                ct.as_mut_ptr(),
+                4,
+                &mut h_key,
+            ),
+            CKR_ARGUMENTS_BAD,
+        );
+    }
+
+    /// C_SessionCancel CKF_MESSAGE_SIGN (0x8) / CKF_MESSAGE_VERIFY (0x10) —
+    /// terminate the message-based ops so the *MessageNext entry points
+    /// report CKR_OPERATION_NOT_INITIALIZED.
+    #[test]
+    fn session_cancel_message_sign_and_verify_flags() {
+        let _guard = test_lock::acquire();
+        crate::state::set_initialized(true);
+        install_session(SESSION);
+
+        // Seed an in-flight message-sign op (C_MessageSignInit state lives in
+        // SIGN_STATE; the per-message accumulator in MESSAGE_SIGN_ACC).
+        SIGN_STATE
+            .with(|s| s.borrow_mut().insert(SESSION, (CKM_EDDSA, KEY_HANDLE, Vec::new(), false)));
+        MESSAGE_SIGN_ACC.with(|s| s.borrow_mut().insert(SESSION, vec![1, 2, 3]));
+        assert_eq!(C_SessionCancel(SESSION, 0x8), CKR_OK);
+        assert!(!MESSAGE_SIGN_ACC.with(|s| s.borrow().contains_key(&SESSION)));
+        let part = [0u8; 4];
+        let mut sig_len: u32 = 0;
+        assert_eq!(
+            C_SignMessageNext(
+                SESSION,
+                std::ptr::null_mut(),
+                0,
+                part.as_ptr() as *mut u8,
+                4,
+                std::ptr::null_mut(),
+                &mut sig_len,
+            ),
+            CKR_OPERATION_NOT_INITIALIZED,
+        );
+
+        // Same for the message-verify op.
+        VERIFY_STATE
+            .with(|s| s.borrow_mut().insert(SESSION, (CKM_EDDSA, KEY_HANDLE, Vec::new(), false)));
+        MESSAGE_VERIFY_ACC.with(|s| s.borrow_mut().insert(SESSION, vec![4, 5]));
+        assert_eq!(C_SessionCancel(SESSION, 0x10), CKR_OK);
+        assert!(!MESSAGE_VERIFY_ACC.with(|s| s.borrow().contains_key(&SESSION)));
+        let sig = [0u8; 64];
+        assert_eq!(
+            C_VerifyMessageNext(
+                SESSION,
+                std::ptr::null_mut(),
+                0,
+                part.as_ptr() as *mut u8,
+                4,
+                sig.as_ptr() as *mut u8,
+                64,
+            ),
+            CKR_OPERATION_NOT_INITIALIZED,
+        );
     }
 }
