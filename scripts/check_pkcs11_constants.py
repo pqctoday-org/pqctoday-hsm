@@ -54,8 +54,8 @@ def parse_header(path: Path) -> dict[str, int]:
     out = {}
     text = path.read_text(errors="replace")
     pat = re.compile(
-        r"#define\s+(CK[A-Za-z0-9_]+)\s+\(?((?:0x[0-9a-fA-F]+|\d+)UL?L?"
-        r"(?:\s*\|\s*0x[0-9a-fA-F]+UL?L?)?)\)?"
+        r"#define\s+(CK[A-Za-z0-9_]+)\s+\(?((?:0x[0-9a-fA-F]+|\d+)(?:UL|U|L)?"
+        r"(?:\s*\|\s*0x[0-9a-fA-F]+(?:UL|U|L)?)?)\)?"
     )
     for m in pat.finditer(text):
         name, expr = m.group(1), m.group(2)

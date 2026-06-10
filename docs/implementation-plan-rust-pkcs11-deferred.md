@@ -397,3 +397,49 @@ parallelized across sessions/agents.
   engine's outputs (cross-engine parity run).
 - F: SUPPORTED_MECHS↔GetMechanismInfo unit test green; CI constants diff green and
   wired into the pipeline.
+
+---
+
+# EXECUTION STATUS (2026-06-10) — plan executed
+
+All nine PR slices implemented on `feat/kmip-conformance-round-2`.
+Validation at completion: **121/121** `test_p11_conformance.js`, **4/4**
+`test_kat_parity.js`, `test_harness.js` pass, **2/2** `test_r36_paramset.js`,
+**80** native `cargo test --lib`, **328/328** `scripts/check_pkcs11_constants.py`,
+`kmip` crate checks clean. Release shim rebuilt and synced to
+`pqctoday-hub/src/wasm/`.
+
+| Slice | Status | Notes |
+|---|---|---|
+| PR-1 M0+F2 | ✅ | Harness found 2 real bugs day-one: `get_attr_ulong` misaligned-pointer panic on legal templates (fixed via `read_unaligned`) and `_malloc` align-1 layout (now align-8, `free` matched) |
+| PR-2 F1+D4+E5+E9 | ✅ | 11 mechanism-info arms added + `supported_mechs_all_have_info` unit test; 10 spec stubs; SHA3-512-on-P-384 truncation (sign+verify); SIGNATURE_LEN_RANGE for fixed-size mechs. Harness FUNCTION_NOT_PARALLEL constant fixed (0x51, was wrongly 0x55) |
+| PR-3 E1 | ✅ | `parse_sign_additional_ctx` (ML-DSA + SLH-DSA, pure+prehash, all 3 init sites); ctx≤255 enforced (silent-drop fixed); CKH hedge variants validated; deterministic via ZeroRng; ctx threaded through sign/verify_ml_dsa; tests: ctx round-trip, cross-ctx fail, deterministic repeatability, hedged uniqueness |
+| PR-4 B+D5 | ✅ | 5 state accessors → `pub(crate)`; shared `value_is_blocked` (adds EXTRACTABLE gate to native); `set_object_attr_checked` one-way transitions + vendor carve-out; `native::object::set_attribute`; import-path provenance defaults; symmetric keygen EXTRACTABLE default flipped to true (KMIP Get compat); `static mut KAT_SEED`→Mutex; dangling-ptr fix; null-check sweep (Sign/Verify/GetAttributeValue/FindObjects/DecapsulateKey/GenerateKeyPair) |
+| PR-5 A | ✅ | `validate_create_template`: CKA_CLASS required (closes the CKO_PUBLIC_KEY-default sensitivity bypass), KEY_TYPE required, class↔type consistency, material requirements per class, AES length check. Found+fixed `test_kat_parity.js` template bug (CKA_CLASS=3 vs commented SECRET_KEY=4) |
+| PR-6 E3+E4 | ✅ | GCM ulTagBits validated {0,32,64,96,104,112,120,128} + honored in single-shot (routed through GcmState — single-shot ≡ multipart); ulIvBits consistency; CTR ulCounterBits validated (byte-granular) + width-parameterized `CtrState` in single-shot and multipart; tests incl. counter-wrap divergence and truncated-tag round-trip/corruption |
+| PR-7 E2+E6+E7+E8 | ✅ | PSS params parsed/validated (sLen pinned when supplied; legacy two-candidate accept kept for the param-less native/KMIP path); OAEP full params (hash×MGF matrix + UTF-8 label) across Encrypt/Decrypt/Wrap/Unwrap, decode failures → ENCRYPTED_DATA_INVALID; SP800-108 ordered segments (counter width/endianness, [L] field, byte arrays) for counter+feedback KDFs; 5 HMAC `_GENERAL` mechanisms end-to-end; KMAC customization+output-length (`sign_kmac_ext`) |
+| PR-8 C+D2 | ✅ | `CKA_PRIV_OWNER_SESSION` tag on all 27 FFI creation sites (`allocate_handle_owned`); session objects destroyed (zeroized) at CloseSession, token + native/KMIP objects survive; `C_CloseAllSessions`, `C_SessionCancel` (flag-selected op cancellation incl. message-state zeroize), `C_LoginUser`. Hub verified safe (closes only the SO bootstrap + teardown sessions) |
+| PR-9 D1+D3 | ✅ | `C_GetInterfaceList`/`C_GetInterface` ("PKCS 11" v3.2, two-call convention; wasm function-pointer constraint documented — JS shim is the function table); `C_SignMessageBegin/Next`, `C_VerifyMessageBegin/Next` (accumulator model, §5.2-preserving final); `C_MessageSignFinal` fixed to 1-arg pkcs11f.h shape + OPERATION_NOT_INITIALIZED; hub TS updated (4 call sites + worker decl + real Begin/Next bindings); release shim synced to hub |
+
+## Deviations from plan (documented choices)
+- **R3.7 slot-scoping of FindObjects**: deferred — single-slot deployment; owner-session
+  scoping covers the spec-mandated lifecycle. Tracked for a multi-slot future.
+- **PSS verify**: kept the two-candidate salt acceptance when NO params are supplied
+  (KMIP conformance suite depends on `saltlen:auto` signatures); params supplied = pinned.
+- **GCM tag set includes 32/64** (SP 800-38D special-application lengths) to preserve
+  KMIP CS-BC-M-GCM-1 truncatable tags.
+- **CTR ulCounterBits**: byte-granular widths only (8,16,…,128); non-multiples of 8 →
+  MECHANISM_PARAM_INVALID (documented engine restriction).
+- **OAEP labels**: UTF-8 only (rsa-crate constraint); non-UTF-8 → MECHANISM_PARAM_INVALID.
+
+## New/changed test assets
+- `rust/test_p11_conformance.js` — 121 checks (the Rust-engine compliance suite)
+- `scripts/check_pkcs11_constants.py` — 328/328 constants vs pkcs11t.h (CI guard)
+- `rust/test_kat_parity.js` — fixed: session flags 0x06; ChaCha template class 4
+- Engine unit test `ffi::mechanism_table_tests::supported_mechs_all_have_info`
+
+## Cross-layer flag (outside scope, surfaced during PR-9)
+`pqctoday-hub/src/wasm/softhsm.worker.ts` declares `CKO_PUBLIC_KEY = 3` /
+`CKO_PRIVATE_KEY = 4` (spec: 2/3) — this worker drives the **C++** Emscripten
+engine, so it was not fixed here; the C++ engine apparently tolerates it.
+Recommend correcting alongside a C++-side template-validation pass.

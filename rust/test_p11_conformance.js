@@ -23,7 +23,7 @@ const CKR = {
   OK: 0x00, ARGUMENTS_BAD: 0x07, ATTRIBUTE_READ_ONLY: 0x10, ATTRIBUTE_SENSITIVE: 0x11,
   ATTRIBUTE_TYPE_INVALID: 0x12, ATTRIBUTE_VALUE_INVALID: 0x13,
   DATA_LEN_RANGE: 0x21, ENCRYPTED_DATA_INVALID: 0x40,
-  FUNCTION_NOT_PARALLEL: 0x55, FUNCTION_NOT_SUPPORTED: 0x54,
+  FUNCTION_NOT_PARALLEL: 0x51, FUNCTION_NOT_SUPPORTED: 0x54,
   KEY_HANDLE_INVALID: 0x60, KEY_FUNCTION_NOT_PERMITTED: 0x68, KEY_UNEXTRACTABLE: 0x6a,
   MECHANISM_INVALID: 0x70, MECHANISM_PARAM_INVALID: 0x71,
   OBJECT_HANDLE_INVALID: 0x82, OPERATION_ACTIVE: 0x90, OPERATION_NOT_INITIALIZED: 0x91,
@@ -323,6 +323,286 @@ section('ML-KEM — encap/decap usage + provenance (§5.18.8/9)');
   // usage enforcement: encapsulate with the PRIVATE key (no CKA_ENCAPSULATE) must fail
   check('C_EncapsulateKey with private key → KEY_FUNCTION_NOT_PERMITTED',
     w._C_EncapsulateKey(hS, buildMech(CKM.ML_KEM), readU32(hPrv), 0, 0, ct, ctLen, hSS), CKR.KEY_FUNCTION_NOT_PERMITTED);
+}
+
+section('E1 — ML-DSA context string + hedge variant (§6.67, FIPS 204 §5.2)');
+{
+  // CK_SIGN_ADDITIONAL_CONTEXT (wasm32, 12 B): hedgeVariant, pContext, ulContextLen
+  function signCtxParam(hedge, ctxBytes) {
+    let ctxPtr = 0;
+    if (ctxBytes && ctxBytes.length) { ctxPtr = alloc(ctxBytes.length); writeBytes(ctxPtr, ctxBytes); }
+    return new Uint8Array(new Uint32Array([hedge, ctxPtr, ctxBytes ? ctxBytes.length : 0]).buffer);
+  }
+  const kp = genMlDsa(hS, true);
+  const msg = alloc(24); writeBytes(msg, new TextEncoder().encode('ml-dsa context test msg!'));
+  const ctxA = new TextEncoder().encode('app-context-A');
+  const CKH_DETERMINISTIC_REQUIRED = 2;
+
+  function signWith(param) {
+    const rv1 = w._C_SignInit(hS, buildMech(CKM.ML_DSA, param), kp.prv);
+    if (rv1 !== CKR.OK) return { rv: rv1 };
+    const sl = alloc(4); writeU32(sl, 0);
+    w._C_Sign(hS, msg, 24, 0, sl);
+    const sig = alloc(readU32(sl));
+    const rv2 = w._C_Sign(hS, msg, 24, sig, sl);
+    return { rv: rv2, sig, len: readU32(sl) };
+  }
+  function verifyWith(param, sig, len) {
+    const rv1 = w._C_VerifyInit(hS, buildMech(CKM.ML_DSA, param), kp.pub);
+    if (rv1 !== CKR.OK) return rv1;
+    return w._C_Verify(hS, msg, 24, sig, len);
+  }
+
+  const sA = signWith(signCtxParam(0, ctxA));
+  check('sign with context A → OK', sA.rv, CKR.OK);
+  check('verify with context A → OK', verifyWith(signCtxParam(0, ctxA), sA.sig, sA.len), CKR.OK);
+  check('verify with EMPTY context → SIGNATURE_INVALID',
+    verifyWith(null, sA.sig, sA.len), CKR.SIGNATURE_INVALID);
+  check('verify with context B → SIGNATURE_INVALID',
+    verifyWith(signCtxParam(0, new TextEncoder().encode('app-context-B')), sA.sig, sA.len), CKR.SIGNATURE_INVALID);
+
+  // deterministic mode: two signatures over the same message must be identical
+  const d1 = signWith(signCtxParam(CKH_DETERMINISTIC_REQUIRED, ctxA));
+  const d2 = signWith(signCtxParam(CKH_DETERMINISTIC_REQUIRED, ctxA));
+  check('deterministic sign #1 → OK', d1.rv, CKR.OK);
+  const b1 = Buffer.from(new Uint8Array(mem().buffer, d1.sig, d1.len));
+  const b2 = Buffer.from(new Uint8Array(mem().buffer, d2.sig, d2.len));
+  check('deterministic signatures identical → true', b1.equals(b2) ? 1 : 0, 1);
+  check('deterministic sig verifies → OK', verifyWith(signCtxParam(0, ctxA), d1.sig, d1.len), CKR.OK);
+
+  // hedged: two signatures should differ (randomized)
+  const h1 = signWith(signCtxParam(0, ctxA));
+  const h2 = signWith(signCtxParam(0, ctxA));
+  const hb1 = Buffer.from(new Uint8Array(mem().buffer, h1.sig, h1.len));
+  const hb2 = Buffer.from(new Uint8Array(mem().buffer, h2.sig, h2.len));
+  check('hedged signatures differ → true', hb1.equals(hb2) ? 0 : 1, 1);
+
+  // ctx > 255 → MECHANISM_PARAM_INVALID at SignInit
+  check('context >255 bytes → MECHANISM_PARAM_INVALID',
+    w._C_SignInit(hS, buildMech(CKM.ML_DSA, signCtxParam(0, new Uint8Array(256))), kp.prv),
+    CKR.MECHANISM_PARAM_INVALID);
+  // unknown hedge variant → MECHANISM_PARAM_INVALID
+  check('bad hedge variant → MECHANISM_PARAM_INVALID',
+    w._C_SignInit(hS, buildMech(CKM.ML_DSA, signCtxParam(7, ctxA)), kp.prv),
+    CKR.MECHANISM_PARAM_INVALID);
+}
+
+section('E9 — CKR_SIGNATURE_LEN_RANGE (§5.12.6)');
+{
+  const kp = genMlDsa(hS, true);
+  const msg = alloc(8); writeBytes(msg, new Uint8Array(8).fill(1));
+  check('VerifyInit → OK', w._C_VerifyInit(hS, buildMech(CKM.ML_DSA), kp.pub), CKR.OK);
+  const shortSig = alloc(100);
+  check('C_Verify with truncated signature → SIGNATURE_LEN_RANGE',
+    w._C_Verify(hS, msg, 8, shortSig, 100), CKR.SIGNATURE_LEN_RANGE);
+}
+
+section('D4 — spec-mandated stubs');
+check('C_GetFunctionStatus → FUNCTION_NOT_PARALLEL', w._C_GetFunctionStatus(hS), CKR.FUNCTION_NOT_PARALLEL);
+check('C_CancelFunction → FUNCTION_NOT_PARALLEL', w._C_CancelFunction(hS), CKR.FUNCTION_NOT_PARALLEL);
+check('C_WaitForSlotEvent(DONT_BLOCK) → NO_EVENT', w._C_WaitForSlotEvent(1, 0, 0), CKR.NO_EVENT);
+check('C_WaitForSlotEvent(blocking) → FUNCTION_NOT_SUPPORTED', w._C_WaitForSlotEvent(0, 0, 0), CKR.FUNCTION_NOT_SUPPORTED);
+check('C_SignRecoverInit → FUNCTION_NOT_SUPPORTED', w._C_SignRecoverInit(hS, 0, 0), CKR.FUNCTION_NOT_SUPPORTED);
+check('C_DigestEncryptUpdate → FUNCTION_NOT_SUPPORTED', w._C_DigestEncryptUpdate(hS, 0, 0, 0, 0), CKR.FUNCTION_NOT_SUPPORTED);
+
+section('F1 — mechanism table reconciliation (R6.2)');
+{
+  // every advertised mechanism answerable
+  const cntP = alloc(4); writeU32(cntP, 0);
+  w._C_GetMechanismList(0, 0, cntP);
+  const n = readU32(cntP);
+  const listP = alloc(4 * n);
+  w._C_GetMechanismList(0, listP, cntP);
+  const mechs = Array.from(new Uint32Array(mem().buffer, listP, n));
+  const info = alloc(12);
+  const unanswerable = mechs.filter((m) => w._C_GetMechanismInfo(0, m, info) !== CKR.OK);
+  check(`all ${n} advertised mechanisms answerable → 0 missing`, unanswerable.length, 0);
+}
+
+section('R3.1 — C_CreateObject template validation (§4.1.1)');
+{
+  const hp = alloc(4);
+  // missing CKA_CLASS
+  let tpl = buildTpl([{ type: CKA.KEY_TYPE, ulong: CKK.AES }, { type: CKA.VALUE, bytes: new Uint8Array(32) }]);
+  check('no CKA_CLASS → TEMPLATE_INCOMPLETE', w._C_CreateObject(hS, tpl, 2, hp), CKR.TEMPLATE_INCOMPLETE);
+  // missing CKA_KEY_TYPE on a key class
+  tpl = buildTpl([{ type: CKA.CLASS, ulong: CKO.SECRET_KEY }, { type: CKA.VALUE, bytes: new Uint8Array(32) }]);
+  check('key class without CKA_KEY_TYPE → TEMPLATE_INCOMPLETE', w._C_CreateObject(hS, tpl, 2, hp), CKR.TEMPLATE_INCOMPLETE);
+  // secret key without CKA_VALUE
+  tpl = buildTpl([{ type: CKA.CLASS, ulong: CKO.SECRET_KEY }, { type: CKA.KEY_TYPE, ulong: CKK.AES }]);
+  check('secret key without CKA_VALUE → TEMPLATE_INCOMPLETE', w._C_CreateObject(hS, tpl, 2, hp), CKR.TEMPLATE_INCOMPLETE);
+  // AES with bad length
+  tpl = buildTpl([{ type: CKA.CLASS, ulong: CKO.SECRET_KEY }, { type: CKA.KEY_TYPE, ulong: CKK.AES },
+    { type: CKA.VALUE, bytes: new Uint8Array(17) }]);
+  check('AES key with 17-byte value → ATTRIBUTE_VALUE_INVALID', w._C_CreateObject(hS, tpl, 3, hp), CKR.ATTRIBUTE_VALUE_INVALID);
+  // class/type inconsistency
+  tpl = buildTpl([{ type: CKA.CLASS, ulong: CKO.PUBLIC_KEY }, { type: CKA.KEY_TYPE, ulong: CKK.AES },
+    { type: CKA.VALUE, bytes: new Uint8Array(32) }]);
+  check('CKK_AES under CKO_PUBLIC_KEY → TEMPLATE_INCONSISTENT', w._C_CreateObject(hS, tpl, 3, hp), CKR.TEMPLATE_INCONSISTENT);
+  // valid import still works
+  tpl = buildTpl([{ type: CKA.CLASS, ulong: CKO.SECRET_KEY }, { type: CKA.KEY_TYPE, ulong: CKK.AES },
+    { type: CKA.VALUE, bytes: new Uint8Array(32).fill(7) }, { type: CKA.EXTRACTABLE, bool: true }]);
+  check('valid AES import → OK', w._C_CreateObject(hS, tpl, 4, hp), CKR.OK);
+  // null ph_object
+  check('null ph_object → ARGUMENTS_BAD', w._C_CreateObject(hS, tpl, 4, 0), CKR.ARGUMENTS_BAD);
+}
+
+section('E3 — GCM ulTagBits honored + validated (§6.27.7 / SP 800-38D §5.2.1.2)');
+{
+  const key = genAes(hS);
+  const iv = new Uint8Array(12).fill(0x42);
+  const pt = alloc(20); writeBytes(pt, new Uint8Array(20).fill(0x5a));
+  // 96-bit tag: ciphertext must be 20 + 12 = 32 bytes (not 36)
+  check('EncryptInit GCM tag=96 → OK',
+    w._C_EncryptInit(hS, buildMech(CKM.AES_GCM, gcmParams(iv, null, 96)), key.h), CKR.OK);
+  const lp = alloc(4); writeU32(lp, 0);
+  check('length query → OK', w._C_Encrypt(hS, pt, 20, 0, lp), CKR.OK);
+  check('ct length honors 96-bit tag (20+12)', readU32(lp), 32);
+  const ct = alloc(32); writeU32(lp, 32);
+  check('Encrypt(tag=96) → OK', w._C_Encrypt(hS, pt, 20, ct, lp), CKR.OK);
+  // round-trip decrypt with matching tag bits
+  check('DecryptInit GCM tag=96 → OK',
+    w._C_DecryptInit(hS, buildMech(CKM.AES_GCM, gcmParams(iv, null, 96)), key.h), CKR.OK);
+  const ptOut = alloc(32); const lp2 = alloc(4); writeU32(lp2, 32);
+  check('Decrypt(tag=96) round-trip → OK', w._C_Decrypt(hS, ct, 32, ptOut, lp2), CKR.OK);
+  check('plaintext length 20', readU32(lp2), 20);
+  // corrupt tag → ENCRYPTED_DATA_INVALID
+  check('DecryptInit again → OK',
+    w._C_DecryptInit(hS, buildMech(CKM.AES_GCM, gcmParams(iv, null, 96)), key.h), CKR.OK);
+  new Uint8Array(mem().buffer, ct + 31, 1)[0] ^= 0xff;
+  writeU32(lp2, 32);
+  check('Decrypt with corrupted truncated tag → ENCRYPTED_DATA_INVALID',
+    w._C_Decrypt(hS, ct, 32, ptOut, lp2), CKR.ENCRYPTED_DATA_INVALID);
+  // out-of-set tag bits rejected
+  check('EncryptInit GCM tag=24 → MECHANISM_PARAM_INVALID',
+    w._C_EncryptInit(hS, buildMech(CKM.AES_GCM, gcmParams(iv, null, 24)), key.h), CKR.MECHANISM_PARAM_INVALID);
+  // ulIvBits contradiction rejected
+  const badIvBits = gcmParams(iv, null, 128);
+  new Uint32Array(badIvBits.buffer)[2] = 64; // ulIvBits=64 vs ulIvLen=12 (96 bits)
+  check('GCM ulIvBits≠ulIvLen*8 → MECHANISM_PARAM_INVALID',
+    w._C_EncryptInit(hS, buildMech(CKM.AES_GCM, badIvBits), key.h), CKR.MECHANISM_PARAM_INVALID);
+}
+
+section('E4 — AES-CTR ulCounterBits (§6.27.6)');
+{
+  const key = genAes(hS);
+  // CK_AES_CTR_PARAMS: ulCounterBits(4) + cb[16]
+  function ctrParams(bits, cb) {
+    const b = new Uint8Array(20);
+    new Uint32Array(b.buffer, 0, 1)[0] = bits;
+    b.set(cb, 4);
+    return b;
+  }
+  const cb = new Uint8Array(16); cb.fill(0xff); // counter at all-ones → wraps immediately
+  const pt = alloc(48); writeBytes(pt, new Uint8Array(48).fill(0x11));
+  // 32-bit counter: low 4 bytes wrap, high 12 bytes stay 0xff
+  check('EncryptInit CTR counterBits=32 → OK',
+    w._C_EncryptInit(hS, buildMech(CKM.AES_CTR, ctrParams(32, cb)), key.h), CKR.OK);
+  const ct32 = alloc(48); const l1 = alloc(4); writeU32(l1, 48);
+  check('Encrypt(ctr32) → OK', w._C_Encrypt(hS, pt, 48, ct32, l1), CKR.OK);
+  // 128-bit counter: whole block wraps — different keystream after block 1
+  check('EncryptInit CTR counterBits=128 → OK',
+    w._C_EncryptInit(hS, buildMech(CKM.AES_CTR, ctrParams(128, cb)), key.h), CKR.OK);
+  const ct128 = alloc(48); const l2 = alloc(4); writeU32(l2, 48);
+  check('Encrypt(ctr128) → OK', w._C_Encrypt(hS, pt, 48, ct128, l2), CKR.OK);
+  const a = Buffer.from(new Uint8Array(mem().buffer, ct32, 48));
+  const b = Buffer.from(new Uint8Array(mem().buffer, ct128, 48));
+  check('block 1 identical across widths', a.subarray(0, 16).equals(b.subarray(0, 16)) ? 1 : 0, 1);
+  check('post-wrap blocks DIFFER between 32/128-bit widths', a.equals(b) ? 0 : 1, 1);
+  // CTR round-trip with 32-bit width
+  check('DecryptInit CTR counterBits=32 → OK',
+    w._C_DecryptInit(hS, buildMech(CKM.AES_CTR, ctrParams(32, cb)), key.h), CKR.OK);
+  const rt = alloc(48); const l3 = alloc(4); writeU32(l3, 48);
+  check('Decrypt(ctr32) round-trip → OK', w._C_Decrypt(hS, ct32, 48, rt, l3), CKR.OK);
+  check('round-trip matches plaintext',
+    Buffer.from(new Uint8Array(mem().buffer, rt, 48)).equals(Buffer.from(new Uint8Array(48).fill(0x11))) ? 1 : 0, 1);
+  // invalid counter bits
+  check('CTR counterBits=0 → MECHANISM_PARAM_INVALID',
+    w._C_EncryptInit(hS, buildMech(CKM.AES_CTR, ctrParams(0, cb)), key.h), CKR.MECHANISM_PARAM_INVALID);
+  check('CTR counterBits=129 → MECHANISM_PARAM_INVALID',
+    w._C_EncryptInit(hS, buildMech(CKM.AES_CTR, ctrParams(129, cb)), key.h), CKR.MECHANISM_PARAM_INVALID);
+}
+
+section('E8 — HMAC general-length (§6.x CK_MAC_GENERAL_PARAMS)');
+{
+  // generic secret with CKA_SIGN
+  const tpl = buildTpl([{ type: CKA.CLASS, ulong: CKO.SECRET_KEY },
+    { type: CKA.KEY_TYPE, ulong: CKK.GENERIC_SECRET },
+    { type: CKA.VALUE, bytes: new Uint8Array(32).fill(0x77) },
+    { type: CKA.SIGN, bool: true }, { type: CKA.VERIFY, bool: true }]);
+  const hp = alloc(4);
+  check('import HMAC key → OK', w._C_CreateObject(hS, tpl, 5, hp), CKR.OK);
+  const hKey = readU32(hp);
+  const macParam = new Uint8Array(new Uint32Array([16]).buffer); // ulMacLength=16
+  const msg = alloc(10); writeBytes(msg, new Uint8Array(10).fill(2));
+  check('SignInit SHA256_HMAC_GENERAL(16) → OK',
+    w._C_SignInit(hS, buildMech(CKM.SHA256_HMAC_GENERAL, macParam), hKey), CKR.OK);
+  const sl = alloc(4); writeU32(sl, 0);
+  check('length query → OK', w._C_Sign(hS, msg, 10, 0, sl), CKR.OK);
+  check('mac length = 16', readU32(sl), 16);
+  const mac = alloc(16); writeU32(sl, 16);
+  check('Sign → OK', w._C_Sign(hS, msg, 10, mac, sl), CKR.OK);
+  check('VerifyInit GENERAL(16) → OK',
+    w._C_VerifyInit(hS, buildMech(CKM.SHA256_HMAC_GENERAL, macParam), hKey), CKR.OK);
+  check('Verify truncated MAC → OK', w._C_Verify(hS, msg, 10, mac, 16), CKR.OK);
+  check('VerifyInit again → OK',
+    w._C_VerifyInit(hS, buildMech(CKM.SHA256_HMAC_GENERAL, macParam), hKey), CKR.OK);
+  check('Verify with wrong length (8) → SIGNATURE_LEN_RANGE',
+    w._C_Verify(hS, msg, 10, mac, 8), CKR.SIGNATURE_LEN_RANGE);
+  // out-of-range ulMacLength
+  const badParam = new Uint8Array(new Uint32Array([33]).buffer);
+  check('ulMacLength=33 > digest → MECHANISM_PARAM_INVALID',
+    w._C_SignInit(hS, buildMech(CKM.SHA256_HMAC_GENERAL, badParam), hKey), CKR.MECHANISM_PARAM_INVALID);
+}
+
+section('E2 — RSA-PSS params validated (§6.4.5)');
+{
+  // bad mgf in CK_RSA_PKCS_PSS_PARAMS must be rejected at SignInit.
+  // (Uses a dummy key handle — param validation precedes key-type checks
+  // only for mechanism params parsed at init; key check runs first, so
+  // generate a real RSA keypair is slow; instead use an AES key with SIGN.)
+  const tpl = buildTpl([{ type: CKA.CLASS, ulong: CKO.SECRET_KEY },
+    { type: CKA.KEY_TYPE, ulong: CKK.GENERIC_SECRET },
+    { type: CKA.VALUE, bytes: new Uint8Array(32) }, { type: CKA.SIGN, bool: true }]);
+  const hp = alloc(4);
+  w._C_CreateObject(hS, tpl, 4, hp);
+  const pssBad = new Uint8Array(new Uint32Array([CKM.SHA256, 99 /*bad mgf*/, 32]).buffer);
+  check('PSS params with bad MGF → MECHANISM_PARAM_INVALID',
+    w._C_SignInit(hS, buildMech(0x43 /*CKM_SHA256_RSA_PKCS_PSS*/, pssBad), readU32(hp)),
+    CKR.MECHANISM_PARAM_INVALID);
+}
+
+section('R3.7/D2 — session-object lifecycle + SessionCancel (§4.4/§5.6)');
+{
+  // session object dies with its session; token object survives
+  const s2 = openSession();
+  check('second session opens → OK', s2.rv, CKR.OK);
+  const mkTpl = (token) => buildTpl([{ type: CKA.CLASS, ulong: CKO.SECRET_KEY },
+    { type: CKA.KEY_TYPE, ulong: CKK.GENERIC_SECRET },
+    { type: CKA.VALUE, bytes: new Uint8Array(32).fill(0xcc) },
+    { type: CKA.TOKEN, bool: token }, { type: CKA.EXTRACTABLE, bool: true }]);
+  const hp1 = alloc(4), hp2 = alloc(4);
+  check('create SESSION object in s2 → OK', w._C_CreateObject(s2.h, mkTpl(false), 5, hp1), CKR.OK);
+  check('create TOKEN object in s2 → OK', w._C_CreateObject(s2.h, mkTpl(true), 5, hp2), CKR.OK);
+  const hSess = readU32(hp1), hTok = readU32(hp2);
+  check('close s2 → OK', w._C_CloseSession(s2.h), CKR.OK);
+  const out = buildTpl([{ type: CKA.CLASS, bytes: new Uint8Array(4) }]);
+  check('session object gone after close → OBJECT_HANDLE_INVALID',
+    w._C_GetAttributeValue(hS, hSess, out, 1), CKR.OBJECT_HANDLE_INVALID);
+  check('token object survives close → OK', w._C_GetAttributeValue(hS, hTok, out, 1), CKR.OK);
+
+  // C_SessionCancel aborts a digest op
+  check('DigestInit → OK', w._C_DigestInit(hS, buildMech(CKM.SHA256)), CKR.OK);
+  check('SessionCancel(CKF_DIGEST) → OK', w._C_SessionCancel(hS, 0x400), CKR.OK);
+  const dl2 = alloc(4); writeU32(dl2, 32);
+  check('DigestFinal after cancel → OPERATION_NOT_INITIALIZED',
+    w._C_DigestFinal(hS, alloc(32), dl2), CKR.OPERATION_NOT_INITIALIZED);
+  check('SessionCancel(flags=0) → OK (cancels nothing)', w._C_SessionCancel(hS, 0), CKR.OK);
+  check('SessionCancel bad session → SESSION_HANDLE_INVALID',
+    w._C_SessionCancel(0xdead, 0x400), CKR.SESSION_HANDLE_INVALID);
+
+  // C_CloseAllSessions: bad slot
+  check('CloseAllSessions bad slot → SLOT_ID_INVALID', w._C_CloseAllSessions(99), 0x3);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

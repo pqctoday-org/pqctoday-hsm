@@ -479,7 +479,17 @@ pub fn register_rsa_private_key_pkcs8(
     store_bool(&mut attrs, CKA_DECRYPT, true);
     attrs.insert(CKA_VALUE, pkcs8_der.to_vec());
     insert_id_and_label(&mut attrs, cka_id, label);
-    finalize_private_key_attrs(&mut attrs);
+    // PKCS#11 v3.2 §4.3/§4.9 — IMPORTED key provenance: not locally generated,
+    // not always-sensitive, not never-extractable. Exportable by default
+    // (KMIP Register'd material round-trips through Get).
+    store_bool(&mut attrs, CKA_TOKEN, false);
+    store_bool(&mut attrs, CKA_PRIVATE, false);
+    store_bool(&mut attrs, CKA_SENSITIVE, false);
+    store_bool(&mut attrs, CKA_EXTRACTABLE, true);
+    store_bool(&mut attrs, CKA_LOCAL, false);
+    store_ulong(&mut attrs, CKA_KEY_GEN_MECHANISM, CKM_UNAVAILABLE_INFORMATION);
+    store_bool(&mut attrs, CKA_ALWAYS_SENSITIVE, false);
+    store_bool(&mut attrs, CKA_NEVER_EXTRACTABLE, false);
     compute_kcv(&mut attrs);
     Ok(allocate_handle(attrs))
 }
@@ -519,6 +529,9 @@ pub fn register_rsa_public_key_der(
     // the original Register material.
     attrs.insert(CKA_VALUE, der.to_vec());
     insert_id_and_label(&mut attrs, cka_id, label);
+    // PKCS#11 v3.2 §4.3 — imported, not locally generated.
+    store_bool(&mut attrs, CKA_LOCAL, false);
+    store_ulong(&mut attrs, CKA_KEY_GEN_MECHANISM, CKM_UNAVAILABLE_INFORMATION);
     compute_kcv(&mut attrs);
     Ok(allocate_handle(attrs))
 }
@@ -539,7 +552,14 @@ pub fn register_generic_secret_bytes(
         cka_id,
         label,
     );
-    finalize_private_key_attrs(&mut attrs);
+    // PKCS#11 v3.2 §4.3/§4.10 — IMPORTED key provenance (overrides the
+    // generated-key values from the attr builder). Must NOT call
+    // finalize_private_key_attrs here: that would derive ALWAYS_SENSITIVE /
+    // NEVER_EXTRACTABLE as if the key had been born inside the token.
+    store_bool(&mut attrs, CKA_LOCAL, false);
+    store_ulong(&mut attrs, CKA_KEY_GEN_MECHANISM, CKM_UNAVAILABLE_INFORMATION);
+    store_bool(&mut attrs, CKA_ALWAYS_SENSITIVE, false);
+    store_bool(&mut attrs, CKA_NEVER_EXTRACTABLE, false);
     compute_kcv(&mut attrs);
     Ok(allocate_handle(attrs))
 }
@@ -663,8 +683,11 @@ fn build_aes_attrs(key: Vec<u8>, key_len_bytes: u32, cka_id: &[u8], label: &str)
     store_ulong(&mut attrs, CKA_KEY_GEN_MECHANISM, CKM_AES_KEY_GEN);
     store_bool(&mut attrs, CKA_TOKEN, false);
     store_bool(&mut attrs, CKA_PRIVATE, false);
+    // Exportable by default: KMIP Get/Export reads CKA_VALUE through the
+    // native sensitivity gate (SENSITIVE || !EXTRACTABLE blocks). A KMIP
+    // Sensitive attribute flips these at registration time.
     store_bool(&mut attrs, CKA_SENSITIVE, false);
-    store_bool(&mut attrs, CKA_EXTRACTABLE, false);
+    store_bool(&mut attrs, CKA_EXTRACTABLE, true);
     store_bool(&mut attrs, CKA_ENCRYPT, true);
     store_bool(&mut attrs, CKA_DECRYPT, true);
     store_bool(&mut attrs, CKA_WRAP, true);
@@ -692,8 +715,11 @@ fn build_generic_secret_attrs(
     store_ulong(&mut attrs, CKA_VALUE_LEN, key_len_bytes);
     store_ulong(&mut attrs, CKA_KEY_GEN_MECHANISM, CKM_GENERIC_SECRET_KEY_GEN);
     store_bool(&mut attrs, CKA_TOKEN, false);
+    // Exportable by default: KMIP Get/Export reads CKA_VALUE through the
+    // native sensitivity gate (SENSITIVE || !EXTRACTABLE blocks). A KMIP
+    // Sensitive attribute flips these at registration time.
     store_bool(&mut attrs, CKA_SENSITIVE, false);
-    store_bool(&mut attrs, CKA_EXTRACTABLE, false);
+    store_bool(&mut attrs, CKA_EXTRACTABLE, true);
     store_bool(&mut attrs, CKA_ENCRYPT, false);
     store_bool(&mut attrs, CKA_DECRYPT, false);
     store_bool(&mut attrs, CKA_WRAP, false);

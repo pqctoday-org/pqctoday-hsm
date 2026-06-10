@@ -33,6 +33,7 @@ pub const CKR_KEY_HANDLE_INVALID: u32 = 0x0000_0060;
 pub const CKR_SIGNATURE_LEN_RANGE: u32 = 0x0000_00C1;
 pub const CKR_ATTRIBUTE_READ_ONLY: u32 = 0x0000_0010;
 pub const CKR_ATTRIBUTE_SENSITIVE: u32 = 0x0000_0011;
+pub const CKR_ATTRIBUTE_VALUE_INVALID: u32 = 0x0000_0013;
 pub const CKR_ACTION_PROHIBITED: u32 = 0x0000_001B;
 pub const CKR_SESSION_PARALLEL_NOT_SUPPORTED: u32 = 0x0000_00B4;
 pub const CKR_TOKEN_NOT_RECOGNIZED: u32 = 0x0000_00E1;
@@ -116,6 +117,10 @@ pub const CKA_ALWAYS_AUTHENTICATE: u32 = 0x0000_0202; // PKCS#11 v3.2 — privat
 pub const CKA_PRIV_PARAM_SET: u32 = 0xFFFF_0001;
 // Private attribute: stores the algorithm family for polymorphic dispatch
 pub const CKA_PRIV_ALGO_FAMILY: u32 = 0xFFFF_0002;
+// Private attribute: handle of the session that created the object (u32 LE).
+// 0 / absent = library scope (native/KMIP-registered objects). Session objects
+// (CKA_TOKEN=FALSE) owned by a session are destroyed when it closes (§4.4).
+pub const CKA_PRIV_OWNER_SESSION: u32 = 0xFFFF_0003;
 
 // ── PKCS#11 Mechanism Types ──────────────────────────────────────────────────
 
@@ -153,6 +158,24 @@ pub const CKM_SHA384_HMAC: u32 = 0x0000_0261;
 pub const CKM_SHA512_HMAC: u32 = 0x0000_0271;
 pub const CKM_SHA3_256_HMAC: u32 = 0x0000_02B1;
 pub const CKM_SHA3_512_HMAC: u32 = 0x0000_02D1;
+// HMAC general-length variants (§6.x — CK_MAC_GENERAL_PARAMS = ulMacLength)
+pub const CKM_SHA256_HMAC_GENERAL: u32 = 0x0000_0252;
+pub const CKM_SHA384_HMAC_GENERAL: u32 = 0x0000_0262;
+pub const CKM_SHA512_HMAC_GENERAL: u32 = 0x0000_0272;
+pub const CKM_SHA3_256_HMAC_GENERAL: u32 = 0x0000_02B2;
+pub const CKM_SHA3_512_HMAC_GENERAL: u32 = 0x0000_02D2;
+
+// MGF identifiers (CK_RSA_PKCS_MGF_TYPE)
+pub const CKG_MGF1_SHA1: u32 = 0x0000_0001;
+pub const CKG_MGF1_SHA256: u32 = 0x0000_0002;
+pub const CKG_MGF1_SHA384: u32 = 0x0000_0003;
+pub const CKG_MGF1_SHA512: u32 = 0x0000_0004;
+// OAEP source type
+pub const CKZ_DATA_SPECIFIED: u32 = 0x0000_0001;
+// SP 800-108 data-param types (beyond BYTE_ARRAY below)
+pub const CK_SP800_108_ITERATION_VARIABLE: u32 = 0x0000_0001;
+pub const CK_SP800_108_DKM_LENGTH: u32 = 0x0000_0003;
+pub const CK_SP800_108_DKM_LENGTH_SUM_OF_KEYS: u32 = 0x0000_0001;
 
 // KMAC
 pub const CKM_KMAC_128: u32 = 0x8000_0100;
@@ -369,6 +392,11 @@ pub const SUPPORTED_MECHS: &[u32] = &[
     CKM_SHA512_HMAC,
     CKM_SHA3_256_HMAC,
     CKM_SHA3_512_HMAC,
+    CKM_SHA256_HMAC_GENERAL,
+    CKM_SHA384_HMAC_GENERAL,
+    CKM_SHA512_HMAC_GENERAL,
+    CKM_SHA3_256_HMAC_GENERAL,
+    CKM_SHA3_512_HMAC_GENERAL,
     // KMAC
     CKM_KMAC_128,
     CKM_KMAC_256,
@@ -442,6 +470,10 @@ pub fn C_GetMechanismList(_slot_id: u32, p_mechanism_list: *mut u32, pul_count: 
 // single-shot operations. DigestUpdate/DigestFinal are fully implemented above.
 
 pub const CKR_FUNCTION_NOT_SUPPORTED: u32 = 0x0000_0054;
+pub const CKR_FUNCTION_NOT_PARALLEL: u32 = 0x0000_0051;
+pub const CKR_NO_EVENT: u32 = 0x0000_0008;
+/// C_WaitForSlotEvent non-blocking flag (pkcs11t.h).
+pub const CKF_DONT_BLOCK: u32 = 0x0000_0001;
 pub const CKR_KEY_EXHAUSTED: u32 = 0x0000_0203; // PKCS#11 v3.2 — stateful key has no remaining signatures
 
 // ── Stateful Signature Mechanisms (G10) ─────────────────────────────────────

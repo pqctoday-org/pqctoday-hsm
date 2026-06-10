@@ -60,6 +60,10 @@ lazy_static! {
     pub static ref MESSAGE_ENCRYPT_STATE: GlobalState<HashMap<u32, MsgAeadCtx>> = GlobalState::new(HashMap::new());
     pub static ref MESSAGE_DECRYPT_STATE: GlobalState<HashMap<u32, MsgAeadCtx>> = GlobalState::new(HashMap::new());
     pub static ref DIGEST_STATE: GlobalState<HashMap<u32, DigestCtx>> = GlobalState::new(HashMap::new());
+    /// C_SignMessageBegin/Next accumulator (message parts between Begin and the final Next).
+    pub static ref MESSAGE_SIGN_ACC: GlobalState<HashMap<u32, Vec<u8>>> = GlobalState::new(HashMap::new());
+    /// C_VerifyMessageBegin/Next accumulator.
+    pub static ref MESSAGE_VERIFY_ACC: GlobalState<HashMap<u32, Vec<u8>>> = GlobalState::new(HashMap::new());
     pub static ref FIND_STATE: GlobalState<HashMap<u32, FindCtx>> = GlobalState::new(HashMap::new());
     /// Persistent ACVP deterministic RNG — created once in C_Initialize, advances
     /// across all operations, cleared in C_Finalize. Uses IETF ChaCha20 (RFC 8439)
@@ -266,6 +270,124 @@ pub fn can_access_handle(h_session: u32, handle: u32) -> bool {
     })
 }
 
+/// PKCS#11 v3.2 §4.9/§4.10 — CKA_VALUE of a private/secret key must not be
+/// revealed when CKA_SENSITIVE=TRUE **or** CKA_EXTRACTABLE=FALSE. This single
+/// predicate backs both `ffi::C_GetAttributeValue` and the native API
+/// (`native::object::get_attribute`) so the two surfaces cannot drift.
+pub fn value_is_blocked(attrs: &Attributes) -> bool {
+    let class = attrs
+        .get(&CKA_CLASS)
+        .filter(|v| v.len() >= 4)
+        .map(|v| u32::from_le_bytes([v[0], v[1], v[2], v[3]]))
+        .unwrap_or(CKO_PUBLIC_KEY);
+    let is_private_or_secret = class == CKO_PRIVATE_KEY || class == CKO_SECRET_KEY;
+    if !is_private_or_secret {
+        return false;
+    }
+    let sensitive = read_bool_attr(attrs, CKA_SENSITIVE);
+    let extractable = read_bool_attr(attrs, CKA_EXTRACTABLE);
+    sensitive || !extractable
+}
+
+/// Server-managed (read-only) attributes a mutation API must refuse to change,
+/// plus the one-way transition rules (PKCS#11 v3.2 §4.1.1 Table 12):
+/// CKA_SENSITIVE may only go FALSE→TRUE; CKA_EXTRACTABLE only TRUE→FALSE.
+/// Vendor stateful-key attrs (≥0x8000_0100) and engine-internal CKA_PRIV_*
+/// (≥0xFFFF_0000) are the engine's own state channel and bypass the policy.
+pub fn set_object_attr_checked(handle: u32, attr_type: u32, value: Vec<u8>) -> Result<(), u32> {
+    // engine-internal / vendor stateful channel — no policy
+    if attr_type >= 0x8000_0000 {
+        if set_object_attr_bytes(handle, attr_type, value) {
+            return Ok(());
+        }
+        return Err(CKR_OBJECT_HANDLE_INVALID);
+    }
+    const READ_ONLY: &[u32] = &[
+        CKA_CLASS,
+        CKA_KEY_TYPE,
+        CKA_LOCAL,
+        CKA_KEY_GEN_MECHANISM,
+        CKA_ALWAYS_SENSITIVE,
+        CKA_NEVER_EXTRACTABLE,
+        CKA_CHECK_VALUE,
+        CKA_MODULUS,
+        CKA_PUBLIC_EXPONENT,
+        CKA_EC_PARAMS,
+        CKA_EC_POINT,
+    ];
+    if READ_ONLY.contains(&attr_type) {
+        return Err(CKR_ATTRIBUTE_READ_ONLY);
+    }
+    if attr_type == CKA_SENSITIVE || attr_type == CKA_EXTRACTABLE {
+        let new_val = value.first().copied().unwrap_or(0) != 0;
+        let cur = OBJECTS.with(|o| {
+            o.borrow()
+                .get(&handle)
+                .map(|attrs| read_bool_attr(attrs, attr_type))
+        });
+        match cur {
+            None => return Err(CKR_OBJECT_HANDLE_INVALID),
+            Some(cur_val) => {
+                let legal = if attr_type == CKA_SENSITIVE {
+                    // FALSE→TRUE only
+                    !cur_val || new_val
+                } else {
+                    // CKA_EXTRACTABLE: TRUE→FALSE only
+                    cur_val || !new_val
+                };
+                if !legal {
+                    return Err(CKR_ATTRIBUTE_READ_ONLY);
+                }
+            }
+        }
+    }
+    if set_object_attr_bytes(handle, attr_type, value) {
+        Ok(())
+    } else {
+        Err(CKR_OBJECT_HANDLE_INVALID)
+    }
+}
+
+/// `allocate_handle` + owner-session tag (PKCS#11 §4.4 session objects).
+/// The C-ABI object-creation paths use this; the native/KMIP surface keeps
+/// plain `allocate_handle` (library scope — survives session churn).
+pub fn allocate_handle_owned(owner_session: u32, mut attrs: Attributes) -> u32 {
+    attrs.insert(
+        CKA_PRIV_OWNER_SESSION,
+        owner_session.to_le_bytes().to_vec(),
+    );
+    allocate_handle(attrs)
+}
+
+/// §4.4 — destroy (zeroizing CKA_VALUE) every session object
+/// (CKA_TOKEN=FALSE) owned by `h_session`. Token objects and library-scoped
+/// (untagged) objects survive.
+pub fn destroy_session_objects(h_session: u32) {
+    use zeroize::Zeroize;
+    OBJECTS.with(|objs| {
+        let mut store = objs.borrow_mut();
+        let doomed: Vec<u32> = store
+            .iter()
+            .filter(|(_, attrs)| {
+                let owner = attrs
+                    .get(&CKA_PRIV_OWNER_SESSION)
+                    .filter(|v| v.len() >= 4)
+                    .map(|v| u32::from_le_bytes([v[0], v[1], v[2], v[3]]))
+                    .unwrap_or(0);
+                owner == h_session && owner != 0 && !read_bool_attr(attrs, CKA_TOKEN)
+            })
+            .map(|(h, _)| *h)
+            .collect();
+        for h in doomed {
+            if let Some(mut attrs) = store.remove(&h) {
+                if let Some(val) = attrs.get_mut(&CKA_VALUE) {
+                    val.zeroize();
+                }
+            }
+        }
+    });
+}
+
 pub fn allocate_handle(mut attrs: Attributes) -> u32 {
     apply_object_defaults(&mut attrs);
     NEXT_HANDLE.with(|h| {
@@ -283,7 +405,7 @@ pub fn allocate_handle(mut attrs: Attributes) -> u32 {
     })
 }
 
-pub fn get_object_value(handle: u32) -> Option<Vec<u8>> {
+pub(crate) fn get_object_value(handle: u32) -> Option<Vec<u8>> {
     OBJECTS.with(|objs| {
         objs.borrow()
             .get(&handle)
@@ -374,7 +496,7 @@ pub fn get_object_algo_family(handle: u32) -> u32 {
 }
 
 /// Read an arbitrary attribute from an existing object in the store.
-pub fn get_object_attr_bytes(handle: u32, attr_type: u32) -> Option<Vec<u8>> {
+pub(crate) fn get_object_attr_bytes(handle: u32, attr_type: u32) -> Option<Vec<u8>> {
     OBJECTS.with(|objs| {
         objs.borrow()
             .get(&handle)
@@ -383,7 +505,7 @@ pub fn get_object_attr_bytes(handle: u32, attr_type: u32) -> Option<Vec<u8>> {
 }
 
 /// Read a u32 attribute (4-byte LE) from an existing object in the store.
-pub fn get_object_attr_u32(handle: u32, attr_type: u32) -> Option<u32> {
+pub(crate) fn get_object_attr_u32(handle: u32, attr_type: u32) -> Option<u32> {
     get_object_attr_bytes(handle, attr_type).and_then(|v| {
         if v.len() >= 4 {
             Some(u32::from_le_bytes([v[0], v[1], v[2], v[3]]))
@@ -394,7 +516,7 @@ pub fn get_object_attr_u32(handle: u32, attr_type: u32) -> Option<u32> {
 }
 
 /// Read a u64 attribute (8-byte LE) from an existing object in the store.
-pub fn get_object_attr_u64(handle: u32, attr_type: u32) -> Option<u64> {
+pub(crate) fn get_object_attr_u64(handle: u32, attr_type: u32) -> Option<u64> {
     get_object_attr_bytes(handle, attr_type).and_then(|v| {
         if v.len() >= 8 {
             Some(u64::from_le_bytes([
@@ -407,7 +529,7 @@ pub fn get_object_attr_u64(handle: u32, attr_type: u32) -> Option<u64> {
 }
 
 /// Overwrite an attribute on an existing object in the store. Returns true on success.
-pub fn set_object_attr_bytes(handle: u32, attr_type: u32, value: Vec<u8>) -> bool {
+pub(crate) fn set_object_attr_bytes(handle: u32, attr_type: u32, value: Vec<u8>) -> bool {
     OBJECTS.with(|objs| {
         let mut store = objs.borrow_mut();
         if let Some(attrs) = store.get_mut(&handle) {

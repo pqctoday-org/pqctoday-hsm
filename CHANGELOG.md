@@ -6,7 +6,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
-## [Unreleased]
+## [0.6.0] — 2026-06-10
+
+**softhsmrustv3 PKCS#11 v3.2 conformance release** — the multi-part cipher work plus
+the full compliance-remediation program: the R1–R3/R6.1 phases below and the executed
+deferred-work plan (`docs/implementation-plan-rust-pkcs11-deferred.md`, 9 PR slices:
+template validation, native-API parity, session-object lifecycle, entry-point surface,
+mechanism-parameter sweep, mechanism-table reconciliation). Validation at release:
+121/121 `rust/test_p11_conformance.js`, 4/4 KAT parity, 80 native unit tests,
+328/328 `scripts/check_pkcs11_constants.py`.
 
 ### Added
 
@@ -16,8 +24,33 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **softhsmrustv3 — PKCS#11 v3.2 compliance gap analysis + R1–R3/R6.1 remediation** (`docs/gap-analysis-rust-pkcs11-v3.2.md` (new), `rust/src/ffi.rs`, `rust/src/state.rs`, `rust/src/crypto/handlers.rs`, `rust/src/constants.rs`). Library lifecycle enforcement per §5.4/§5.6 — `require_init!()` gates on every entry point (`CKR_CRYPTOKI_NOT_INITIALIZED`), strict double-`C_Initialize` (`CKR_CRYPTOKI_ALREADY_INITIALIZED`), `C_Finalize` zeroizes key material and resets lifecycle; session-handle validation (`CKR_SESSION_HANDLE_INVALID`) ordered per §5.1 error priority; server-managed read-only attributes (`CKA_CLASS`, `CKA_KEY_TYPE`, `CKA_LOCAL`, `CKA_KEY_GEN_MECHANISM`, `CKA_ALWAYS_SENSITIVE`, `CKA_NEVER_EXTRACTABLE`, `CKA_CHECK_VALUE`) are no longer absorbable from caller templates (prevents key-provenance forgery). See the gap-analysis doc's remediation ledger for per-item detail.
 
+- **softhsmrustv3 — PKCS#11 v3.2 conformance suite + CI constants guard** (`rust/test_p11_conformance.js` (new, 121 checks), `scripts/check_pkcs11_constants.py` (new)). Table-driven negative-path matrix asserting exact CKR_* codes in §5.4/§5.12 priority order (init → session → key → operation → buffer); scripted diff of every `constants.rs` value against the normative `pkcs11t.h` (whitelisted vendor/IANA names) — permanently prevents the wrong-mechanism-ID bug class. The harness found two real memory-safety bugs on day one (see Fixed).
+
+- **softhsmrustv3 — ML-DSA context string + hedge variant (FIPS 204 §5.2 / §6.67)** (`rust/src/ffi.rs`, `rust/src/crypto/handlers.rs`). `CK_SIGN_ADDITIONAL_CONTEXT` parsed for ML-DSA and SLH-DSA (pure + all pre-hash variants) at every sign/verify init site; context >255 bytes now `CKR_MECHANISM_PARAM_INVALID` (was silently dropped to empty); `CKH_HEDGE_PREFERRED/REQUIRED/DETERMINISTIC_REQUIRED` validated; deterministic mode via the FIPS 204 zero-rnd substitution; context threaded through `sign_ml_dsa`/`verify_ml_dsa`. Tests: ctx round-trip, cross-context verify failure, deterministic repeatability, hedged uniqueness.
+
+- **softhsmrustv3 — full pkcs11f.h v3.2 entry-point surface** (`rust/src/ffi.rs`). `C_GetInterfaceList`/`C_GetInterface` ("PKCS 11" v3.2 negotiation; the wasm function-pointer constraint is documented — the JS shim is the function table); `C_CloseAllSessions`; `C_SessionCancel` (flag-selected operation cancellation with message-state key zeroization); `C_LoginUser`; `C_SignMessageBegin/Next` + `C_VerifyMessageBegin/Next` (multipart-message accumulators with §5.2-preserving final calls); spec-mandated stubs for legacy/recover/dual-function ops (`CKR_FUNCTION_NOT_PARALLEL`, `CKR_NO_EVENT`, `CKR_FUNCTION_NOT_SUPPORTED`). `C_MessageSignFinal` corrected from a 5-arg shape to the 1-arg pkcs11f.h declaration (pqctoday-hub callers updated in lockstep).
+
+- **softhsmrustv3 — mechanism-parameter compliance sweep** (`rust/src/ffi.rs`, `rust/src/crypto/handlers.rs`, `rust/src/crypto/multipart.rs`). GCM `ulTagBits` validated per SP 800-38D §5.2.1.2 ({0,32,64,96,104,112,120,128} — 32/64 retained for KMIP CS-BC-M-GCM-1 truncatable tags) and honored in single-shot, which is now routed through the KAT-verified streaming `GcmState` (single-shot ≡ multipart byte-for-byte); `ulIvBits` consistency enforced. AES-CTR `ulCounterBits` validated (byte-granular) and honored via a width-parameterized counter in both single-shot and multipart. RSA-PSS `CK_RSA_PKCS_PSS_PARAMS` parsed and validated (caller `sLen` pinned; param-less native/KMIP paths keep the documented dual-salt acceptance). RSA-OAEP full parameters (hash × MGF1 matrix + UTF-8 label) across Encrypt/Decrypt/Wrap/Unwrap; OAEP decode failures uniformly `CKR_ENCRYPTED_DATA_INVALID` (padding-oracle hygiene). SP 800-108 counter+feedback KDFs honor ordered `CK_PRF_DATA_PARAM` segments (counter width/endianness, [L]₂ DKM-length field). Five `CKM_*_HMAC_GENERAL` mechanisms end-to-end (truncated MACs, constant-time verify, `CKR_SIGNATURE_LEN_RANGE` on wrong-length signatures). KMAC customization string + variable output length (`sign_kmac_ext`).
+
+- **softhsmrustv3 — `C_CreateObject` template validation (§4.1.1)** (`rust/src/ffi.rs`). `CKA_CLASS` and `CKA_KEY_TYPE` required (`CKR_TEMPLATE_INCOMPLETE`), class↔key-type consistency (`CKR_TEMPLATE_INCONSISTENT`), per-class key-material requirements, AES value-length checks (`CKR_ATTRIBUTE_VALUE_INVALID`). Closes the missing-`CKA_CLASS` sensitivity bypass (class defaulted to CKO_PUBLIC_KEY, exposing an imported secret key's `CKA_VALUE`).
+
+- **softhsmrustv3 — session-object lifecycle (§4.4)** (`rust/src/state.rs`, `rust/src/ffi.rs`). Objects carry their creating session (`CKA_PRIV_OWNER_SESSION`, set across all 27 C-ABI creation sites); session objects (`CKA_TOKEN=FALSE`) are destroyed and zeroized at `C_CloseSession`; token objects and native/KMIP-registered (library-scoped) objects survive session churn.
+
+### Changed
+
+- **softhsmrustv3 — native-API parity hardening** (`rust/src/state.rs`, `rust/src/native/object.rs`, `rust/src/native/keygen.rs`). Raw `state::` object accessors demoted to `pub(crate)`; one shared `value_is_blocked` predicate — `CKA_VALUE` of private/secret keys now blocked when `CKA_SENSITIVE=TRUE` **or** `CKA_EXTRACTABLE=FALSE` on both the C-ABI and native surfaces; new `native::object::set_attribute` enforcing read-only attributes and the one-way `CKA_SENSITIVE`/`CKA_EXTRACTABLE` transitions (vendor stateful-key attrs exempt — they are the engine/KMIP state channel). Symmetric native keygen defaults flipped to `CKA_EXTRACTABLE=TRUE` (coherent with `SENSITIVE=FALSE`; keeps KMIP Get/Export working under the stricter gate); import/Register paths get explicit §4.3 provenance defaults (`LOCAL=FALSE`, `KEY_GEN_MECHANISM=CK_UNAVAILABLE_INFORMATION`, `ALWAYS_SENSITIVE`/`NEVER_EXTRACTABLE=FALSE`).
+
+- **softhsmrustv3 — mechanism-table reconciliation (R6.2)** (`rust/src/ffi.rs`, `rust/src/constants.rs`). All 11 advertised-but-unanswerable mechanisms (raw ECDSA, EdDSA-ph, parametrized HASH_ML_DSA/HASH_SLH_DSA, HSS/XMSS/XMSS^MT keygen+sign, Keccak-256) now answerable by `C_GetMechanismInfo`; `CKF_MESSAGE_*` flags advertised on ML-DSA/SLH-DSA/AES-GCM; AES-192 accepted by `C_GenerateKey` (resolves the keygen/native/mechanism-info three-way disagreement). A unit test (`supported_mechs_all_have_info`) pins `SUPPORTED_MECHS` ↔ `mechanism_info` so the two tables can never drift again.
+
 ### Fixed
 
+- **softhsmrustv3 — misaligned-pointer panic on legal caller templates** (`rust/src/crypto/handlers.rs`, `rust/src/state.rs`). `get_attr_ulong` performed an aligned `u32` deref of `CK_ATTRIBUTE.pValue`, which carries no alignment guarantee — a perfectly legal unaligned template panicked the whole engine (found by the new conformance harness on its first run). Fixed with `read_unaligned`; engine `_malloc` now uses align-8 layouts (`_free` matched) so caller-built template arrays are always aligned.
+
+- **softhsmrustv3 — ECDSA SHA3-512-on-P-384 digest truncation (FIPS 186-5 §6.4)** (`rust/src/crypto/handlers.rs`). The SHA-3 pre-hash arms fed the full 64-byte digest into the P-384 signer/verifier; now truncated to the 48-byte field size on both sign and verify (the SHA-2 arms already did this).
+
+- **softhsmrustv3 — `static mut KAT_SEED` UB + dangling-pointer hack + null-deref sweep** (`rust/src/crypto/xmss_bridge.rs`, `rust/src/ffi.rs`). KAT seed moved behind a Mutex; `C_VerifySignatureFinal`'s fabricated `4 as *mut u8` empty-message pointer replaced with a valid backing buffer; null-checks added across `C_Sign`/`C_Verify`/`C_GetAttributeValue`/`C_FindObjects`/`C_DecapsulateKey`/`C_GenerateKeyPair` in/out pointers (`CKR_ARGUMENTS_BAD` instead of a wasm memory[0] access).
+
+- **test scripts — latent template bug** (`rust/test_kat_parity.js`). The ChaCha20 import template passed `CKA_CLASS=3` (CKO_PRIVATE_KEY) while its own comment said CKO_SECRET_KEY (=4) — caught by the new template validation; fixed to 4.
 - **softhsmrustv3 — `native::session::init()` made idempotent** (`rust/src/native/session.rs`). With strict §5.6 double-init now in force, the typed wrapper absorbs the non-fatal `CKR_CRYPTOKI_ALREADY_INITIALIZED` so composed helpers (`bootstrap_default_token`) keep working.
 - **softhsmrustv3 — stale test expectations vs current spec behavior** (`rust/src/native/keygen.rs`, `rust/src/native/parity.rs`, `rust/test_kat_parity.js`). AES-192 keygen is valid per §6.5 (was asserted to fail); `C_SignInit` on a destroyed handle returns `CKR_KEY_HANDLE_INVALID` per §5.1 error priority (was `CKR_KEY_FUNCTION_NOT_PERMITTED`); KAT parity harness opens sessions with the mandatory `CKF_SERIAL_SESSION` flag per §5.6.
 

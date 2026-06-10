@@ -449,9 +449,14 @@ Implemented on `feat/kmip-conformance-round-2`. Build green on wasm32; full
 
 ## DEFERRED / NOT YET DONE
 
-> Detailed implementation plan for everything in this section:
-> `docs/implementation-plan-rust-pkcs11-deferred.md` (9 PR slices, sequencing,
-> risks, acceptance criteria).
+> **2026-06-10 UPDATE: this entire section has been EXECUTED.** See the
+> EXECUTION STATUS table in `docs/implementation-plan-rust-pkcs11-deferred.md`
+> for the per-slice ledger. Validation: 121/121 `test_p11_conformance.js`,
+> 4/4 KAT, 80 native unit tests, 328/328 constants guard, kmip clean.
+> Remaining known deferrals: multi-slot Find scoping (R3.7 item 3) and the
+> C++-engine parity items (CKA_PARAMETER_SET enforcement, worker CKO 3/4
+> constants) — tracked in the plan doc's "Deviations" section.
+> The items below are retained for historical context.
 
 - **R3.1** — full `C_CreateObject` template validation (TEMPLATE_INCOMPLETE / ATTRIBUTE_*
   / TEMPLATE_INCONSISTENT).

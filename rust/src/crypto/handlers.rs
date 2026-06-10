@@ -509,63 +509,64 @@ pub fn prehash_message(mech: u32, msg: &[u8]) -> Option<Vec<u8>> {
 
 // ── Sign Helpers ────────────────────────────────────────────────────────────
 
-pub fn sign_ml_dsa(mech: u32, ps: u32, sk_bytes: &[u8], msg: &[u8]) -> Result<Vec<u8>, u32> {
+/// Zero-filled RNG for FIPS 204 §5.2 deterministic ML-DSA signing
+/// (algorithm 2 line 5: "for the optional deterministic variant,
+/// substitute rnd ← {0}^32"). Only `try_fill_bytes`/`fill_bytes` are
+/// exercised by the fips204 crate's signing path.
+struct ZeroRng;
+impl rand::RngCore for ZeroRng {
+    fn next_u32(&mut self) -> u32 {
+        0
+    }
+    fn next_u64(&mut self) -> u64 {
+        0
+    }
+    fn fill_bytes(&mut self, out: &mut [u8]) {
+        out.fill(0);
+    }
+    fn try_fill_bytes(&mut self, out: &mut [u8]) -> Result<(), rand::Error> {
+        out.fill(0);
+        Ok(())
+    }
+}
+impl rand::CryptoRng for ZeroRng {}
+
+/// Sign with ML-DSA, honoring the PKCS#11 v3.2 CK_SIGN_ADDITIONAL_CONTEXT
+/// parameters: `ctx` is the FIPS 204 context string (≤255 bytes, validated at
+/// C_SignInit), `deterministic` selects the §5.2 deterministic variant
+/// (CKH_DETERMINISTIC_REQUIRED); otherwise signing is hedged (default).
+pub fn sign_ml_dsa(
+    mech: u32,
+    ps: u32,
+    sk_bytes: &[u8],
+    msg: &[u8],
+    ctx: &[u8],
+    deterministic: bool,
+) -> Result<Vec<u8>, u32> {
     use fips204::traits::Signer;
+    macro_rules! ml_dsa_sign {
+        ($variant:path) => {{
+            type Sk = <$variant as KeyGen>::PrivateKey;
+            let sk_arr: &<Sk as fips204::traits::SerDes>::ByteArray =
+                sk_bytes.try_into().map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+            let sk = <Sk as fips204::traits::SerDes>::try_from_bytes(*sk_arr)
+                .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+            let result = match (get_ml_dsa_ph(mech), deterministic) {
+                (Some(ph), false) => sk.try_hash_sign(msg, ctx, &ph),
+                (Some(ph), true) => sk.try_hash_sign_with_rng(&mut ZeroRng, msg, ctx, &ph),
+                (None, false) => sk.try_sign(msg, ctx),
+                (None, true) => sk.try_sign_with_rng(&mut ZeroRng, msg, ctx),
+            };
+            result
+                .map_err(|_| CKR_FUNCTION_FAILED)
+                .map(|s| Into::<Vec<u8>>::into(s))
+        }};
+    }
+    use fips204::traits::KeyGen;
     match ps {
-        CKP_ML_DSA_44 => {
-            let sk_arr: &<fips204::ml_dsa_44::PrivateKey as fips204::traits::SerDes>::ByteArray =
-                sk_bytes.try_into().map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
-            let sk = <fips204::ml_dsa_44::PrivateKey as fips204::traits::SerDes>::try_from_bytes(
-                *sk_arr,
-            )
-            .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
-            match get_ml_dsa_ph(mech) {
-                Some(ph) => sk
-                    .try_hash_sign(msg, b"", &ph)
-                    .map_err(|_| CKR_FUNCTION_FAILED)
-                    .map(|s| Into::<Vec<u8>>::into(s)),
-                None => sk
-                    .try_sign(msg, b"")
-                    .map_err(|_| CKR_FUNCTION_FAILED)
-                    .map(|s| Into::<Vec<u8>>::into(s)),
-            }
-        }
-        CKP_ML_DSA_65 | 0 => {
-            let sk_arr: &<fips204::ml_dsa_65::PrivateKey as fips204::traits::SerDes>::ByteArray =
-                sk_bytes.try_into().map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
-            let sk = <fips204::ml_dsa_65::PrivateKey as fips204::traits::SerDes>::try_from_bytes(
-                *sk_arr,
-            )
-            .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
-            match get_ml_dsa_ph(mech) {
-                Some(ph) => sk
-                    .try_hash_sign(msg, b"", &ph)
-                    .map_err(|_| CKR_FUNCTION_FAILED)
-                    .map(|s| Into::<Vec<u8>>::into(s)),
-                None => sk
-                    .try_sign(msg, b"")
-                    .map_err(|_| CKR_FUNCTION_FAILED)
-                    .map(|s| Into::<Vec<u8>>::into(s)),
-            }
-        }
-        CKP_ML_DSA_87 => {
-            let sk_arr: &<fips204::ml_dsa_87::PrivateKey as fips204::traits::SerDes>::ByteArray =
-                sk_bytes.try_into().map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
-            let sk = <fips204::ml_dsa_87::PrivateKey as fips204::traits::SerDes>::try_from_bytes(
-                *sk_arr,
-            )
-            .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
-            match get_ml_dsa_ph(mech) {
-                Some(ph) => sk
-                    .try_hash_sign(msg, b"", &ph)
-                    .map_err(|_| CKR_FUNCTION_FAILED)
-                    .map(|s| Into::<Vec<u8>>::into(s)),
-                None => sk
-                    .try_sign(msg, b"")
-                    .map_err(|_| CKR_FUNCTION_FAILED)
-                    .map(|s| Into::<Vec<u8>>::into(s)),
-            }
-        }
+        CKP_ML_DSA_44 => ml_dsa_sign!(fips204::ml_dsa_44::KG),
+        CKP_ML_DSA_65 | 0 => ml_dsa_sign!(fips204::ml_dsa_65::KG),
+        CKP_ML_DSA_87 => ml_dsa_sign!(fips204::ml_dsa_87::KG),
         _ => Err(CKR_KEY_TYPE_INCONSISTENT),
     }
 }
@@ -717,19 +718,31 @@ pub fn sign_hmac(mech: u32, key_bytes: &[u8], msg: &[u8]) -> Result<Vec<u8>, u32
 }
 
 pub fn sign_kmac(mech: u32, key_bytes: &[u8], msg: &[u8]) -> Result<Vec<u8>, u32> {
+    sign_kmac_ext(mech, key_bytes, msg, b"", 0)
+}
+
+/// SP 800-185 KMAC with customization string `s` and `out_len` bytes of
+/// output (0 = mechanism default: 32 for KMAC-128, 64 for KMAC-256).
+pub fn sign_kmac_ext(
+    mech: u32,
+    key_bytes: &[u8],
+    msg: &[u8],
+    s: &[u8],
+    out_len: usize,
+) -> Result<Vec<u8>, u32> {
     use sp800_185::KMac;
     match mech {
         CKM_KMAC_128 => {
-            let mut mac = KMac::new_kmac128(key_bytes, b"");
+            let mut mac = KMac::new_kmac128(key_bytes, s);
             mac.update(msg);
-            let mut out = vec![0u8; 32];
+            let mut out = vec![0u8; if out_len == 0 { 32 } else { out_len }];
             mac.finalize(&mut out);
             Ok(out)
         }
         CKM_KMAC_256 => {
-            let mut mac = KMac::new_kmac256(key_bytes, b"");
+            let mut mac = KMac::new_kmac256(key_bytes, s);
             mac.update(msg);
-            let mut out = vec![0u8; 64];
+            let mut out = vec![0u8; if out_len == 0 { 64 } else { out_len }];
             mac.finalize(&mut out);
             Ok(out)
         }
@@ -737,7 +750,14 @@ pub fn sign_kmac(mech: u32, key_bytes: &[u8], msg: &[u8]) -> Result<Vec<u8>, u32
     }
 }
 
-pub fn sign_rsa(mech: u32, sk_bytes: &[u8], msg: &[u8]) -> Result<Vec<u8>, u32> {
+/// `pss_salt_len`: caller-supplied CK_RSA_PKCS_PSS_PARAMS.sLen (bytes).
+/// `None` = the documented default (sLen = hash length = 32 for SHA-256).
+pub fn sign_rsa(
+    mech: u32,
+    sk_bytes: &[u8],
+    msg: &[u8],
+    pss_salt_len: Option<usize>,
+) -> Result<Vec<u8>, u32> {
     use rsa::pkcs8::DecodePrivateKey;
     use rsa::signature::SignatureEncoding;
     let private_key =
@@ -753,7 +773,9 @@ pub fn sign_rsa(mech: u32, sk_bytes: &[u8], msg: &[u8]) -> Result<Vec<u8>, u32> 
         CKM_SHA256_RSA_PKCS_PSS => {
             use rsa::pss::BlindedSigningKey;
             use rsa::signature::RandomizedSigner;
-            let signing_key = BlindedSigningKey::<sha2::Sha256>::new(private_key);
+            let salt_len = pss_salt_len.unwrap_or(32);
+            let signing_key =
+                BlindedSigningKey::<sha2::Sha256>::new_with_salt_len(private_key, salt_len);
             let mut rng = rand::rngs::OsRng;
             let sig = signing_key
                 .try_sign_with_rng(&mut rng, msg)
@@ -837,16 +859,19 @@ pub fn sign_ecdsa(mech: u32, curve: u32, sk_bytes: &[u8], msg: &[u8]) -> Result<
                 sk.sign_prehash(&hash).map_err(|_| CKR_FUNCTION_FAILED)?;
             Ok(sig.to_bytes().to_vec())
         }
-        // SHA-3 prehash variants on P-384 — manually hash then sign prehash bytes
+        // SHA-3 prehash variants on P-384 — manually hash then sign prehash bytes.
+        // FIPS 186-5 §6.4: digests longer than the curve order use the LEFTMOST
+        // bits — SHA3-512 (64 B) must be truncated to the P-384 field size (48 B).
         (CKM_ECDSA_SHA3_384, CURVE_P384) | (CKM_ECDSA_SHA3_512, CURVE_P384) => {
             use p384::ecdsa::signature::hazmat::PrehashSigner;
             use sha3::Digest as _;
             let sk = p384::ecdsa::SigningKey::from_slice(sk_bytes)
                 .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
-            let hash: Vec<u8> = match mech {
+            let mut hash: Vec<u8> = match mech {
                 CKM_ECDSA_SHA3_512 => sha3::Sha3_512::digest(msg).to_vec(),
                 _ => sha3::Sha3_384::digest(msg).to_vec(),
             };
+            hash.truncate(48);
             let sig: p384::ecdsa::Signature =
                 sk.sign_prehash(&hash).map_err(|_| CKR_FUNCTION_FAILED)?;
             Ok(sig.to_bytes().to_vec())
@@ -913,6 +938,19 @@ pub fn sign_eddsa_ph(sk_bytes: &[u8], msg: &[u8]) -> Result<Vec<u8>, u32> {
     sk.sign_prehashed(prehash, None)
         .map(|sig| sig.to_bytes().to_vec())
         .map_err(|_| CKR_FUNCTION_FAILED)
+}
+
+/// Map a CKM_*_HMAC_GENERAL mechanism to (base full-length HMAC mechanism,
+/// digest length in bytes). None for non-general mechanisms.
+pub fn hmac_general_base(mech: u32) -> Option<(u32, usize)> {
+    match mech {
+        CKM_SHA256_HMAC_GENERAL => Some((CKM_SHA256_HMAC, 32)),
+        CKM_SHA384_HMAC_GENERAL => Some((CKM_SHA384_HMAC, 48)),
+        CKM_SHA512_HMAC_GENERAL => Some((CKM_SHA512_HMAC, 64)),
+        CKM_SHA3_256_HMAC_GENERAL => Some((CKM_SHA3_256_HMAC, 32)),
+        CKM_SHA3_512_HMAC_GENERAL => Some((CKM_SHA3_512_HMAC, 64)),
+        _ => None,
+    }
 }
 
 pub fn get_sig_len(mech: u32, hkey: u32) -> u32 {
@@ -1045,12 +1083,15 @@ pub fn hss_sig_len(levels: u32, lms_param: u32, lmots_param: u32) -> u32 {
 
 // ── Verify Helpers ──────────────────────────────────────────────────────────
 
+/// Verify an ML-DSA signature with the caller's FIPS 204 context string
+/// (empty when no CK_SIGN_ADDITIONAL_CONTEXT was supplied).
 pub fn verify_ml_dsa(
     mech: u32,
     ps: u32,
     pk_bytes: &[u8],
     msg: &[u8],
     sig_bytes: &[u8],
+    ctx: &[u8],
 ) -> Result<(), u32> {
     use fips204::traits::Verifier;
     match ps {
@@ -1064,14 +1105,14 @@ pub fn verify_ml_dsa(
                 sig_bytes.try_into().map_err(|_| CKR_SIGNATURE_INVALID)?;
             match get_ml_dsa_ph(mech) {
                 Some(ph) => {
-                    if pk.hash_verify(msg, &sig, b"", &ph) {
+                    if pk.hash_verify(msg, &sig, ctx, &ph) {
                         Ok(())
                     } else {
                         Err(CKR_SIGNATURE_INVALID)
                     }
                 }
                 None => {
-                    if pk.verify(msg, &sig, b"") {
+                    if pk.verify(msg, &sig, ctx) {
                         Ok(())
                     } else {
                         Err(CKR_SIGNATURE_INVALID)
@@ -1089,14 +1130,14 @@ pub fn verify_ml_dsa(
                 sig_bytes.try_into().map_err(|_| CKR_SIGNATURE_INVALID)?;
             match get_ml_dsa_ph(mech) {
                 Some(ph) => {
-                    if pk.hash_verify(msg, &sig, b"", &ph) {
+                    if pk.hash_verify(msg, &sig, ctx, &ph) {
                         Ok(())
                     } else {
                         Err(CKR_SIGNATURE_INVALID)
                     }
                 }
                 None => {
-                    if pk.verify(msg, &sig, b"") {
+                    if pk.verify(msg, &sig, ctx) {
                         Ok(())
                     } else {
                         Err(CKR_SIGNATURE_INVALID)
@@ -1114,14 +1155,14 @@ pub fn verify_ml_dsa(
                 sig_bytes.try_into().map_err(|_| CKR_SIGNATURE_INVALID)?;
             match get_ml_dsa_ph(mech) {
                 Some(ph) => {
-                    if pk.hash_verify(msg, &sig, b"", &ph) {
+                    if pk.hash_verify(msg, &sig, ctx, &ph) {
                         Ok(())
                     } else {
                         Err(CKR_SIGNATURE_INVALID)
                     }
                 }
                 None => {
-                    if pk.verify(msg, &sig, b"") {
+                    if pk.verify(msg, &sig, ctx) {
                         Ok(())
                     } else {
                         Err(CKR_SIGNATURE_INVALID)
@@ -1254,12 +1295,19 @@ pub fn verify_hmac(mech: u32, key_bytes: &[u8], msg: &[u8], sig_bytes: &[u8]) ->
 
 /// PKCS#11 v3.2 §2.1.2: RSA public key has CKA_MODULUS (n) and CKA_PUBLIC_EXPONENT (e).
 /// Both are unsigned big-endian byte arrays; CKA_VALUE is NOT defined for RSA public keys.
+/// `pss_salt_len`: caller-supplied CK_RSA_PKCS_PSS_PARAMS.sLen (bytes).
+/// `Some(n)` pins EMSA-PSS-VERIFY to that salt length (§6.4.5 — the caller's
+/// parameters are authoritative). `None` (no params supplied / native path)
+/// keeps the historical two-candidate acceptance: sLen = hashLen and
+/// sLen = modOctets - hashLen - 2 (OpenSSL's `rsa_pss_saltlen:auto`), which
+/// the KMIP conformance suite depends on.
 pub fn verify_rsa(
     mech: u32,
     n_bytes: &[u8],
     e_bytes: &[u8],
     msg: &[u8],
     sig_bytes: &[u8],
+    pss_salt_len: Option<usize>,
 ) -> Result<(), u32> {
     use rsa::signature::Verifier;
     if n_bytes.is_empty() || e_bytes.is_empty() {
@@ -1288,7 +1336,10 @@ pub fn verify_rsa(
             // either convention.
             let mod_octets = public_key.size();
             const HASH_LEN: usize = 32;
-            let candidates = [HASH_LEN, mod_octets.saturating_sub(HASH_LEN + 2)];
+            let candidates: Vec<usize> = match pss_salt_len {
+                Some(s) => vec![s],
+                None => vec![HASH_LEN, mod_octets.saturating_sub(HASH_LEN + 2)],
+            };
             for salt_len in candidates {
                 let vk = rsa::pss::VerifyingKey::<sha2::Sha256>::new_with_salt_len(
                     public_key.clone(),
@@ -1398,10 +1449,13 @@ pub fn verify_ecdsa(
                 .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
             let sig =
                 p384::ecdsa::Signature::try_from(sig_bytes).map_err(|_| CKR_SIGNATURE_INVALID)?;
-            let hash: Vec<u8> = match mech {
+            // FIPS 186-5 §6.4 — truncate SHA3-512 (64 B) to the P-384 field
+            // size (48 B), matching sign_ecdsa.
+            let mut hash: Vec<u8> = match mech {
                 CKM_ECDSA_SHA3_512 => sha3::Sha3_512::digest(msg).to_vec(),
                 _ => sha3::Sha3_384::digest(msg).to_vec(),
             };
+            hash.truncate(48);
             vk.verify_prehash(&hash, &sig)
                 .map_err(|_| CKR_SIGNATURE_INVALID)
         }

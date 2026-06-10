@@ -58,7 +58,11 @@ pub fn sign(
     let ps = get_object_param_set(key_handle);
 
     match mechanism {
-        m if m == CKM_ML_DSA || is_prehash_ml_dsa(m) => sign_ml_dsa(m, ps, &sk_bytes, data),
+        m if m == CKM_ML_DSA || is_prehash_ml_dsa(m) => {
+            // Native surface signs with empty context, hedged (the FIPS 204
+            // defaults) — same convention as the SLH-DSA arm below.
+            sign_ml_dsa(m, ps, &sk_bytes, data, &[], false)
+        }
         m if m == CKM_SLH_DSA || is_prehash_slh_dsa(m) => {
             // v0.1: SLH-DSA signing uses empty context + non-deterministic
             // (random hedge). FIPS 205 §10. KMIP's Phase-5 Sign handler
@@ -69,7 +73,7 @@ pub fn sign(
         CKM_SHA256_HMAC | CKM_SHA384_HMAC | CKM_SHA512_HMAC | CKM_SHA3_256_HMAC
         | CKM_SHA3_512_HMAC => sign_hmac(mechanism, &sk_bytes, data),
         CKM_KMAC_128 | CKM_KMAC_256 => sign_kmac(mechanism, &sk_bytes, data),
-        CKM_SHA256_RSA_PKCS | CKM_SHA256_RSA_PKCS_PSS => sign_rsa(mechanism, &sk_bytes, data),
+        CKM_SHA256_RSA_PKCS | CKM_SHA256_RSA_PKCS_PSS => sign_rsa(mechanism, &sk_bytes, data, None),
         CKM_ECDSA | CKM_ECDSA_SHA256 | CKM_ECDSA_SHA384 | CKM_ECDSA_SHA512 => {
             sign_ecdsa(mechanism, ps, &sk_bytes, data)
         }
@@ -109,7 +113,7 @@ pub fn verify(
 
     let result: Result<(), CkRv> = match mechanism {
         m if m == CKM_ML_DSA || is_prehash_ml_dsa(m) => {
-            verify_ml_dsa(m, ps, &pk_bytes, data, signature)
+            verify_ml_dsa(m, ps, &pk_bytes, data, signature, &[])
         }
         m if m == CKM_SLH_DSA || is_prehash_slh_dsa(m) => {
             verify_slh_dsa(m, ps, &pk_bytes, data, signature, &[])
@@ -132,7 +136,7 @@ pub fn verify(
             }
         }
         CKM_SHA256_RSA_PKCS | CKM_SHA256_RSA_PKCS_PSS => match get_rsa_public_components(key_handle) {
-            Some((n, e)) => verify_rsa(mechanism, &n, &e, data, signature),
+            Some((n, e)) => verify_rsa(mechanism, &n, &e, data, signature, None),
             None => Err(CKR_KEY_TYPE_INCONSISTENT),
         },
         CKM_ECDSA | CKM_ECDSA_SHA256 | CKM_ECDSA_SHA384 | CKM_ECDSA_SHA512 => {

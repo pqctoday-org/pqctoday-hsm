@@ -333,27 +333,42 @@ fn releasable(total: usize) -> usize {
 
 // ── CTR (§6.27.5) ────────────────────────────────────────────────────────────
 
-/// Big-endian 128-bit counter mode, matching `ctr::Ctr128BE` (and thus
-/// the single-shot `C_Encrypt` path): the whole counter block increments,
-/// not just the low `ulCounterBits`.
+/// Big-endian counter mode. By default the whole 128-bit block increments
+/// (matching `ctr::Ctr128BE`); `new_with_width` restricts the increment to
+/// the low `counter_width` bytes per CK_AES_CTR_PARAMS.ulCounterBits
+/// (PKCS#11 v3.2 §6.27.6 — the counter wraps within ulCounterBits).
 pub struct CtrState {
     key: AesKey,
     counter: [u8; BLOCK],
     keystream: [u8; BLOCK],
     /// Read offset into `keystream`; `BLOCK` means exhausted.
     ks_pos: usize,
+    /// Bytes of the block that increment (1..=16).
+    counter_width: usize,
 }
 
 impl CtrState {
     pub fn new(key: AesKey, counter_block: [u8; BLOCK]) -> Self {
-        Self { key, counter: counter_block, keystream: [0u8; BLOCK], ks_pos: BLOCK }
+        Self::new_with_width(key, counter_block, BLOCK)
+    }
+
+    /// `width_bytes` = ulCounterBits / 8 (engine restriction: ulCounterBits
+    /// must be a byte multiple; validated at C_EncryptInit).
+    pub fn new_with_width(key: AesKey, counter_block: [u8; BLOCK], width_bytes: usize) -> Self {
+        Self {
+            key,
+            counter: counter_block,
+            keystream: [0u8; BLOCK],
+            ks_pos: BLOCK,
+            counter_width: width_bytes.clamp(1, BLOCK),
+        }
     }
 
     fn next_keystream_byte(&mut self) -> u8 {
         if self.ks_pos == BLOCK {
             self.keystream = self.counter;
             self.key.encrypt_block(&mut self.keystream);
-            inc_be(&mut self.counter, BLOCK);
+            inc_be(&mut self.counter, self.counter_width);
             self.ks_pos = 0;
         }
         let b = self.keystream[self.ks_pos];
@@ -363,6 +378,11 @@ impl CtrState {
 
     fn update(&mut self, part: &[u8]) -> Vec<u8> {
         part.iter().map(|&b| b ^ self.next_keystream_byte()).collect()
+    }
+
+    /// One-shot helper for the single-part C_Encrypt/C_Decrypt paths.
+    pub fn update_public(&mut self, part: &[u8]) -> Vec<u8> {
+        self.update(part)
     }
 }
 
@@ -402,11 +422,13 @@ pub struct GcmState {
 }
 
 impl GcmState {
-    /// `iv` must be the 96-bit nonce (enforced at `C_EncryptInit`);
+    /// `iv` is the GCM IV — any length in SP 800-38D's 1..2^64-bit range
+    /// (callers validate non-empty); 96-bit IVs take the fast J0 path,
+    /// every other length derives J0 through GHASH (§7.1 step 2b).
     /// `tag_bits` of 0 defaults to a full 128-bit tag.
     pub fn new(
         key: AesKey,
-        iv: &[u8; 12],
+        iv: &[u8],
         aad: &[u8],
         tag_bits: u32,
         dir: CipherDirection,
@@ -417,10 +439,20 @@ impl GcmState {
         let mut ghash = GHash::new(GenericArray::from_slice(&h));
         ghash.update_padded(aad);
 
-        // J0 = IV || 0^31 || 1 for the 96-bit IV path (§7.1 step 2).
+        // §7.1 step 2: J0 = IV || 0^31 || 1 when len(IV) = 96 bits;
+        // otherwise J0 = GHASH_H(IV || 0-pad || 0^64 || [len(IV)]_64).
         let mut j0 = [0u8; BLOCK];
-        j0[..12].copy_from_slice(iv);
-        j0[15] = 1;
+        if iv.len() == 12 {
+            j0[..12].copy_from_slice(iv);
+            j0[15] = 1;
+        } else {
+            let mut g = GHash::new(GenericArray::from_slice(&h));
+            g.update_padded(iv);
+            let mut len_block = [0u8; BLOCK];
+            len_block[8..].copy_from_slice(&((iv.len() as u64) * 8).to_be_bytes());
+            g.update(&[len_block.into()]);
+            j0.copy_from_slice(&g.finalize());
+        }
         let mut ek_j0 = j0;
         key.encrypt_block(&mut ek_j0);
         let mut counter = j0;
@@ -754,7 +786,27 @@ mod tests {
         run_gcm_kat(&key, &iv, &aad, &pt, &ct, &tag);
     }
 
-    fn run_gcm_kat(key: &[u8], iv: &[u8; 12], aad: &[u8], pt: &[u8], ct: &[u8], tag: &[u8]) {
+    // Same set, test case 5: 8-byte (64-bit) IV — exercises the GHASH
+    // J0 derivation of SP 800-38D §7.1 step 2b. Also pinned on the wire
+    // by OASIS KMIP CS-BC-M-GCM-3.
+    #[test]
+    fn gcm_kat_64_bit_iv() {
+        let key = hex("feffe9928665731c6d6a8f9467308308");
+        let iv = hex("cafebabefacedbad");
+        let aad = hex("feedfacedeadbeeffeedfacedeadbeefabaddad2");
+        let pt = hex(
+            "d9313225f88406e5a55909c5aff5269a86a7a9531534f7da2e4c303d8a318a72\
+             1c3c0c95956809532fcf0e2449a6b525b16aedf5aa0de657ba637b39",
+        );
+        let ct = hex(
+            "61353b4c2806934a777ff51fa22a4755699b2a714fcdc6f83766e5f97b6c7423\
+             73806900e49f24b22b097544d4896b424989b5e1ebac0f07c23f4598",
+        );
+        let tag = hex("3612d2e79e3b0785561be14aaca2fccb");
+        run_gcm_kat(&key, &iv, &aad, &pt, &ct, &tag);
+    }
+
+    fn run_gcm_kat(key: &[u8], iv: &[u8], aad: &[u8], pt: &[u8], ct: &[u8], tag: &[u8]) {
         let mut ct_tag = ct.to_vec();
         ct_tag.extend_from_slice(tag);
         for sizes in CHUNKINGS {
