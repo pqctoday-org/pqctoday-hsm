@@ -27,6 +27,7 @@ pub const CKR_OPERATION_NOT_INITIALIZED: u32 = 0x0000_0091;
 pub const CKR_SIGNATURE_INVALID: u32 = 0x0000_00C0;
 pub const CKR_TEMPLATE_INCOMPLETE: u32 = 0x0000_00D0;
 pub const CKR_TEMPLATE_INCONSISTENT: u32 = 0x0000_00D1;
+pub const CKR_KEY_NOT_WRAPPABLE: u32 = 0x0000_0069; // PKCS#11 v3.2 — CKA_WRAP_WITH_TRUSTED policy violation
 pub const CKR_KEY_UNEXTRACTABLE: u32 = 0x0000_006A;
 pub const CKR_KEY_FUNCTION_NOT_PERMITTED: u32 = 0x0000_0068;
 pub const CKR_KEY_HANDLE_INVALID: u32 = 0x0000_0060;
@@ -90,6 +91,9 @@ pub const CKK_XMSSMT: u32 = 0x0000_0048; // XMSS^MT multi-tree (standard)
 pub const CKA_CLASS: u32 = 0x0000_0000;
 pub const CKA_TOKEN: u32 = 0x0000_0001;
 pub const CKA_PRIVATE: u32 = 0x0000_0002;
+// PKCS#11 v3.2 §4.4.1 — token-generated unique object identifier (read-only,
+// assigned by the engine at object creation; see state::allocate_handle).
+pub const CKA_UNIQUE_ID: u32 = 0x0000_0017;
 pub const CKA_SENSITIVE: u32 = 0x0000_0103;
 pub const CKA_ENCRYPT: u32 = 0x0000_0104;
 pub const CKA_DECRYPT: u32 = 0x0000_0105;

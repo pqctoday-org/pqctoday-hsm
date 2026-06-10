@@ -2281,9 +2281,10 @@ pub fn C_GetAttributeValue(h_session: u32, h_object: u32, p_template: *mut u8, c
                 let attr_type = *tmpl_ptr.add((i * 3) as usize);
                 let val_ptr = *tmpl_ptr.add((i * 3 + 1) as usize) as usize as *mut u8;
                 let val_len_ptr = tmpl_ptr.add((i * 3 + 2) as usize);
-                // Block CKA_VALUE (and other sensitive material) for sensitive or
+                // Block CKA_VALUE / CKA_SEED (raw secret material — see
+                // state::attr_is_sensitive_material) for sensitive or
                 // non-extractable private/secret keys → CKR_ATTRIBUTE_SENSITIVE.
-                if attr_type == CKA_VALUE && (sensitive || !extractable) {
+                if attr_is_sensitive_material(attr_type) && (sensitive || !extractable) {
                     *val_len_ptr = 0xFFFFFFFF; // CK_UNAVAILABLE_INFORMATION
                     had_sensitive = true;
                     continue;
@@ -2399,6 +2400,88 @@ fn validate_create_template(attrs: &Attributes) -> Result<(), u32> {
     Ok(())
 }
 
+/// Engine core of `C_CreateObject` — operates on an already-marshalled
+/// attribute map. Split from the FFI wrapper so policy can be unit-tested on
+/// 64-bit native builds, where CK_ATTRIBUTE templates (32-bit value pointers)
+/// cannot be constructed.
+pub(crate) fn create_object_from_attrs(
+    h_session: u32,
+    mut new_attrs: Attributes,
+) -> Result<u32, u32> {
+    // PKCS#11 v3.2 §4.1.1 Table 12 — token-computed / SO-only attributes may
+    // never appear in a C_CreateObject template → CKR_ATTRIBUTE_READ_ONLY.
+    const CREATE_READ_ONLY: &[u32] = &[
+        CKA_ALWAYS_SENSITIVE,  // §4.9/§4.10 — provenance is token-computed
+        CKA_NEVER_EXTRACTABLE, // §4.9/§4.10 — provenance is token-computed
+        CKA_KEY_GEN_MECHANISM, // §4.3 Table 13 — token-computed
+        CKA_UNIQUE_ID,         // §4.4.1 — token-generated (state::allocate_handle)
+        // §4.1.1 Table 12 — CKA_TRUSTED requires SO login to set; this crate
+        // has no SO-session concept, so ALL caller sets are rejected and the
+        // FALSE default (state::apply_object_defaults) stands.
+        CKA_TRUSTED,
+    ];
+    for ro in CREATE_READ_ONLY {
+        if new_attrs.contains_key(ro) {
+            return Err(CKR_ATTRIBUTE_READ_ONLY);
+        }
+    }
+    // PKCS#11 v3.2 §4.1.1 — template validation (required attrs, value
+    // sanity, class/type consistency) before any object is created.
+    validate_create_template(&new_attrs)?;
+    // PKCS#11 v3.2 §5.6 — a token object (CKA_TOKEN=TRUE) may only be
+    // created from a read/write session. Session objects are allowed in R/O.
+    if read_bool_attr(&new_attrs, CKA_TOKEN) && !crate::state::session_is_rw(h_session) {
+        return Err(CKR_SESSION_READ_ONLY);
+    }
+    if let Some(ps_bytes) = new_attrs.get(&CKA_PARAMETER_SET).cloned() {
+        if ps_bytes.len() >= 4 {
+            let ps = u32::from_le_bytes([ps_bytes[0], ps_bytes[1], ps_bytes[2], ps_bytes[3]]);
+            store_param_set(&mut new_attrs, ps);
+        }
+    } else if let Some(ec_params) = new_attrs.get(&CKA_EC_PARAMS).cloned() {
+        // Derive curve from CKA_EC_PARAMS OID for imported EC keys.
+        // P-384 OID (1.3.132.0.34): 06 05 2b 81 04 00 22 — last byte 0x22
+        // P-256 OID (1.2.840.10045.3.1.7): 06 07 2a 86 48 ce 3d 03 01 07 — last byte 0x07
+        let is_p521 = ec_params.len() >= 7 && ec_params[ec_params.len() - 1] == 0x23;
+        let is_p384 = ec_params.len() >= 7 && ec_params[ec_params.len() - 1] == 0x22;
+        store_param_set(
+            &mut new_attrs,
+            if is_p521 {
+                CURVE_P521
+            } else if is_p384 {
+                CURVE_P384
+            } else {
+                CURVE_P256
+            },
+        );
+    }
+    // PKCS#11 v3.2 §4.3 — CKA_LOCAL=FALSE is mandatory for imported objects;
+    // override any caller-provided value since this is a server-managed attribute.
+    store_bool(&mut new_attrs, CKA_LOCAL, false);
+    // PKCS#11 v3.2 §4.3 — CKA_KEY_GEN_MECHANISM = CKM_UNAVAILABLE_INFORMATION
+    // for imported keys (unconditional — caller-supplied values are rejected above).
+    store_ulong(
+        &mut new_attrs,
+        CKA_KEY_GEN_MECHANISM,
+        CKM_UNAVAILABLE_INFORMATION,
+    );
+    // PKCS#11 v3.2 §4.9/§4.10 — an object created via C_CreateObject was born
+    // OUTSIDE the token, so it can never claim CKA_ALWAYS_SENSITIVE or
+    // CKA_NEVER_EXTRACTABLE, regardless of the template's CKA_SENSITIVE /
+    // CKA_EXTRACTABLE values (mirrors the C_UnwrapKey / C_DeriveKey paths).
+    let class = new_attrs
+        .get(&CKA_CLASS)
+        .filter(|v| v.len() >= 4)
+        .map(|v| u32::from_le_bytes([v[0], v[1], v[2], v[3]]));
+    if matches!(class, Some(CKO_PRIVATE_KEY) | Some(CKO_SECRET_KEY)) {
+        store_bool(&mut new_attrs, CKA_ALWAYS_SENSITIVE, false);
+        store_bool(&mut new_attrs, CKA_NEVER_EXTRACTABLE, false);
+    }
+    // Compute CKA_CHECK_VALUE (KCV) — PKCS#11 v3.2
+    compute_kcv(&mut new_attrs);
+    Ok(allocate_handle_owned(h_session, new_attrs))
+}
+
 #[wasm_bindgen(js_name = _C_CreateObject)]
 pub fn C_CreateObject(
     _h_session: u32,
@@ -2427,56 +2510,10 @@ pub fn C_CreateObject(
                 new_attrs.insert(attr_type, v);
             }
         }
-        // PKCS#11 v3.2 §4.1.1 — template validation (required attrs, value
-        // sanity, class/type consistency) before any object is created.
-        if let Err(rv) = validate_create_template(&new_attrs) {
-            return rv;
+        match create_object_from_attrs(_h_session, new_attrs) {
+            Ok(handle) => *ph_object = handle,
+            Err(rv) => return rv,
         }
-        // PKCS#11 v3.2 §5.6 — a token object (CKA_TOKEN=TRUE) may only be
-        // created from a read/write session. Session objects are allowed in R/O.
-        if read_bool_attr(&new_attrs, CKA_TOKEN) && !crate::state::session_is_rw(_h_session) {
-            return CKR_SESSION_READ_ONLY;
-        }
-        if let Some(ps_bytes) = new_attrs.get(&CKA_PARAMETER_SET).cloned() {
-            if ps_bytes.len() >= 4 {
-                let ps = u32::from_le_bytes([ps_bytes[0], ps_bytes[1], ps_bytes[2], ps_bytes[3]]);
-                store_param_set(&mut new_attrs, ps);
-            }
-        } else if let Some(ec_params) = new_attrs.get(&CKA_EC_PARAMS).cloned() {
-            // Derive curve from CKA_EC_PARAMS OID for imported EC keys.
-            // P-384 OID (1.3.132.0.34): 06 05 2b 81 04 00 22 — last byte 0x22
-            // P-256 OID (1.2.840.10045.3.1.7): 06 07 2a 86 48 ce 3d 03 01 07 — last byte 0x07
-            let is_p521 = ec_params.len() >= 7 && ec_params[ec_params.len() - 1] == 0x23;
-            let is_p384 = ec_params.len() >= 7 && ec_params[ec_params.len() - 1] == 0x22;
-            store_param_set(
-                &mut new_attrs,
-                if is_p521 {
-                    CURVE_P521
-                } else if is_p384 {
-                    CURVE_P384
-                } else {
-                    CURVE_P256
-                },
-            );
-        }
-        // PKCS#11 v3.2 §4.3 — CKA_LOCAL=FALSE is mandatory for imported objects;
-        // override any caller-provided value since this is a server-managed attribute.
-        store_bool(&mut new_attrs, CKA_LOCAL, false);
-        // PKCS#11 v3.2 §4.3 — CKA_KEY_GEN_MECHANISM = CKM_UNAVAILABLE_INFORMATION for imported keys
-        if !new_attrs.contains_key(&CKA_KEY_GEN_MECHANISM) {
-            store_ulong(
-                &mut new_attrs,
-                CKA_KEY_GEN_MECHANISM,
-                CKM_UNAVAILABLE_INFORMATION,
-            );
-        }
-        // Set CKA_ALWAYS_SENSITIVE + CKA_NEVER_EXTRACTABLE if CKA_SENSITIVE is present
-        if new_attrs.contains_key(&CKA_SENSITIVE) {
-            finalize_private_key_attrs(&mut new_attrs);
-        }
-        // Compute CKA_CHECK_VALUE (KCV) — PKCS#11 v3.2
-        compute_kcv(&mut new_attrs);
-        *ph_object = allocate_handle_owned(_h_session, new_attrs);
     }
     CKR_OK
 }
@@ -5434,6 +5471,28 @@ pub fn C_DeriveKey(
 
 // ── Key Wrap/Unwrap ─────────────────────────────────────────────────────────
 
+/// PKCS#11 v3.2 §4.9/§4.10 (CKA_WRAP_WITH_TRUSTED) + §4.1.1 Table 12
+/// (CKA_TRUSTED) — a key with CKA_WRAP_WITH_TRUSTED=TRUE may only be wrapped
+/// by a wrapping key whose CKA_TRUSTED=TRUE. Returns true when the policy is
+/// violated (caller must fail with CKR_KEY_NOT_WRAPPABLE).
+fn wrap_with_trusted_violation(h_wrapping_key: u32, h_key: u32) -> bool {
+    OBJECTS.with(|o| {
+        let store = o.borrow();
+        let wwt = store
+            .get(&h_key)
+            .map(|a| read_bool_attr(a, CKA_WRAP_WITH_TRUSTED))
+            .unwrap_or(false);
+        if !wwt {
+            return false;
+        }
+        let trusted = store
+            .get(&h_wrapping_key)
+            .map(|a| read_bool_attr(a, CKA_TRUSTED))
+            .unwrap_or(false);
+        !trusted
+    })
+}
+
 #[wasm_bindgen(js_name = _C_WrapKey)]
 pub fn C_WrapKey(
     _h_session: u32,
@@ -5477,6 +5536,12 @@ pub fn C_WrapKey(
         });
         if !extractable {
             return CKR_KEY_UNEXTRACTABLE;
+        }
+
+        // CKA_WRAP_WITH_TRUSTED=TRUE on the target requires CKA_TRUSTED=TRUE
+        // on the wrapping key (PKCS#11 v3.2 §4.9/§4.10).
+        if wrap_with_trusted_violation(h_wrapping_key, h_key) {
+            return CKR_KEY_NOT_WRAPPABLE;
         }
 
         let wrapping_key = match get_object_value(h_wrapping_key) {
@@ -5838,6 +5903,12 @@ pub fn C_WrapKeyAuthenticated(
         });
         if !extractable {
             return CKR_KEY_UNEXTRACTABLE;
+        }
+
+        // CKA_WRAP_WITH_TRUSTED=TRUE on the target requires CKA_TRUSTED=TRUE
+        // on the wrapping key (PKCS#11 v3.2 §4.9/§4.10).
+        if wrap_with_trusted_violation(h_wrapping_key, h_key) {
+            return CKR_KEY_NOT_WRAPPABLE;
         }
 
         let wrapping_key = match get_object_value(h_wrapping_key) {
@@ -8071,5 +8142,246 @@ mod abi_hygiene_ffi_tests {
             ),
             CKR_OPERATION_NOT_INITIALIZED,
         );
+    }
+}
+
+#[cfg(test)]
+mod attr_integrity_ffi_tests {
+    //! S3 — object attribute integrity: honest provenance on import,
+    //! CKA_SEED sensitive-class blocking, token-generated CKA_UNIQUE_ID,
+    //! CKA_TRUSTED / CKA_WRAP_WITH_TRUSTED policy.
+    use super::*;
+    use crate::native::test_lock;
+
+    /// High fixed session handle, disjoint from the other ffi test modules
+    /// and the `native::*` allocators.
+    const SESSION: u32 = 0x5333_1001;
+
+    fn setup() {
+        crate::state::set_initialized(true);
+        SESSIONS.with(|s| {
+            s.borrow_mut().insert(
+                SESSION,
+                crate::state::SessionState { slot_id: 0, rw_session: true },
+            );
+        });
+    }
+
+    /// Minimal valid C_CreateObject template for an AES secret key.
+    fn aes_import_attrs() -> Attributes {
+        let mut attrs = Attributes::new();
+        store_ulong(&mut attrs, CKA_CLASS, CKO_SECRET_KEY);
+        store_ulong(&mut attrs, CKA_KEY_TYPE, CKK_AES);
+        attrs.insert(CKA_VALUE, vec![0x42u8; 16]);
+        attrs
+    }
+
+    fn obj_attr(handle: u32, attr_type: u32) -> Option<Vec<u8>> {
+        OBJECTS.with(|o| o.borrow().get(&handle).and_then(|a| a.get(&attr_type).cloned()))
+    }
+
+    fn obj_bool(handle: u32, attr_type: u32) -> Option<bool> {
+        obj_attr(handle, attr_type).map(|v| !v.is_empty() && v[0] == 0x01)
+    }
+
+    /// §4.9/§4.10 — a key imported via C_CreateObject with CKA_SENSITIVE=TRUE
+    /// must still get CKA_ALWAYS_SENSITIVE=FALSE and CKA_NEVER_EXTRACTABLE=
+    /// FALSE: it was born outside the token, so provenance cannot be claimed.
+    #[test]
+    fn create_object_import_stores_honest_provenance() {
+        let _guard = test_lock::acquire();
+        setup();
+        let mut attrs = aes_import_attrs();
+        store_bool(&mut attrs, CKA_SENSITIVE, true);
+        let h = create_object_from_attrs(SESSION, attrs).expect("import must succeed");
+
+        assert_eq!(obj_bool(h, CKA_SENSITIVE), Some(true));
+        assert_eq!(obj_bool(h, CKA_ALWAYS_SENSITIVE), Some(false));
+        assert_eq!(obj_bool(h, CKA_NEVER_EXTRACTABLE), Some(false));
+        assert_eq!(obj_bool(h, CKA_LOCAL), Some(false));
+        let kgm = obj_attr(h, CKA_KEY_GEN_MECHANISM).expect("KEY_GEN_MECHANISM stored");
+        assert_eq!(
+            u32::from_le_bytes([kgm[0], kgm[1], kgm[2], kgm[3]]),
+            CKM_UNAVAILABLE_INFORMATION
+        );
+    }
+
+    /// §4.1.1 Table 12 — token-computed / SO-only attributes in a
+    /// C_CreateObject template → CKR_ATTRIBUTE_READ_ONLY.
+    #[test]
+    fn create_object_rejects_read_only_template_attrs() {
+        let _guard = test_lock::acquire();
+        setup();
+        for ro in [
+            CKA_ALWAYS_SENSITIVE,
+            CKA_NEVER_EXTRACTABLE,
+            CKA_KEY_GEN_MECHANISM,
+            CKA_UNIQUE_ID,
+            CKA_TRUSTED,
+        ] {
+            let mut attrs = aes_import_attrs();
+            attrs.insert(ro, vec![0x01]);
+            assert_eq!(
+                create_object_from_attrs(SESSION, attrs).unwrap_err(),
+                CKR_ATTRIBUTE_READ_ONLY,
+                "attr 0x{ro:x} must be rejected as read-only"
+            );
+        }
+    }
+
+    /// CKA_SEED readback on a sensitive secret key → CKR_ATTRIBUTE_SENSITIVE
+    /// with ulValueLen = CK_UNAVAILABLE_INFORMATION (same gate as CKA_VALUE);
+    /// readable on a non-sensitive extractable key.
+    #[test]
+    fn seed_readback_blocked_on_sensitive_key() {
+        let _guard = test_lock::acquire();
+        setup();
+        // Sensitive key carrying a seed.
+        let mut attrs = aes_import_attrs();
+        attrs.insert(CKA_SEED, vec![0xAAu8; 32]);
+        store_bool(&mut attrs, CKA_SENSITIVE, true);
+        let h = create_object_from_attrs(SESSION, attrs).unwrap();
+
+        // CK_ATTRIBUTE { type, pValue = NULL, ulValueLen } — size query form,
+        // safe on 64-bit native (no embedded value pointers).
+        let mut tmpl: [u32; 3] = [CKA_SEED, 0, 0];
+        let rv = C_GetAttributeValue(SESSION, h, tmpl.as_mut_ptr() as *mut u8, 1);
+        assert_eq!(rv, CKR_ATTRIBUTE_SENSITIVE);
+        assert_eq!(tmpl[2], 0xFFFF_FFFF, "ulValueLen = CK_UNAVAILABLE_INFORMATION");
+
+        // Non-sensitive + extractable key: CKA_SEED length is readable.
+        let mut attrs = aes_import_attrs();
+        attrs.insert(CKA_SEED, vec![0xBBu8; 32]);
+        store_bool(&mut attrs, CKA_SENSITIVE, false);
+        store_bool(&mut attrs, CKA_EXTRACTABLE, true);
+        let h2 = create_object_from_attrs(SESSION, attrs).unwrap();
+        let mut tmpl2: [u32; 3] = [CKA_SEED, 0, 0];
+        let rv = C_GetAttributeValue(SESSION, h2, tmpl2.as_mut_ptr() as *mut u8, 1);
+        assert_eq!(rv, CKR_OK);
+        assert_eq!(tmpl2[2], 32);
+    }
+
+    /// CKA_SEED (and the other server-managed / material attrs) must never be
+    /// absorbed from generate/derive/unwrap templates. The skip predicate
+    /// backs `absorb_template_attrs`, which cannot be called with value
+    /// pointers from 64-bit native tests (32-bit CK_ATTRIBUTE ABI).
+    #[test]
+    fn generate_template_skip_list_covers_seed_and_server_managed() {
+        for skipped in [
+            CKA_VALUE,
+            CKA_SEED,
+            CKA_UNIQUE_ID,
+            CKA_TRUSTED,
+            CKA_ALWAYS_SENSITIVE,
+            CKA_NEVER_EXTRACTABLE,
+            CKA_KEY_GEN_MECHANISM,
+            CKA_CHECK_VALUE,
+            CKA_CLASS,
+            CKA_KEY_TYPE,
+            CKA_LOCAL,
+            CKA_PRIV_PARAM_SET,
+        ] {
+            assert!(
+                crate::crypto::handlers::template_attr_is_skipped(skipped),
+                "0x{skipped:x} must be skipped by template absorption"
+            );
+        }
+        // Client-settable attrs still flow through.
+        for absorbable in [crate::native::keygen::CKA_LABEL, CKA_ENCRYPT, CKA_EXTRACTABLE, CKA_WRAP_WITH_TRUSTED] {
+            assert!(
+                !crate::crypto::handlers::template_attr_is_skipped(absorbable),
+                "0x{absorbable:x} must remain client-settable"
+            );
+        }
+    }
+
+    /// §4.4.1 — every created object carries a token-generated CKA_UNIQUE_ID;
+    /// two objects get distinct values.
+    #[test]
+    fn unique_id_assigned_and_distinct() {
+        let _guard = test_lock::acquire();
+        setup();
+        let h1 = create_object_from_attrs(SESSION, aes_import_attrs()).unwrap();
+        let h2 = create_object_from_attrs(SESSION, aes_import_attrs()).unwrap();
+        let id1 = obj_attr(h1, CKA_UNIQUE_ID).expect("object 1 has CKA_UNIQUE_ID");
+        let id2 = obj_attr(h2, CKA_UNIQUE_ID).expect("object 2 has CKA_UNIQUE_ID");
+        assert!(id1.starts_with(b"shr3-"), "token-format unique id");
+        assert!(id2.starts_with(b"shr3-"));
+        assert_ne!(id1, id2, "unique ids must differ across objects");
+    }
+
+    /// §4.9/§4.10 wrap-with-trusted matrix:
+    ///  (WWT=TRUE, wrapping key not trusted) → CKR_KEY_NOT_WRAPPABLE
+    ///  (WWT=TRUE, wrapping key TRUSTED=TRUE) → CKR_OK
+    ///  (WWT absent/FALSE)                    → CKR_OK
+    #[test]
+    fn wrap_with_trusted_policy_matrix() {
+        let _guard = test_lock::acquire();
+        setup();
+
+        // Wrapping key: AES-128, CKA_WRAP=TRUE (CKA_TRUSTED defaults FALSE —
+        // callers cannot set it; see create_object_rejects_read_only_template_attrs).
+        let mut wrap_attrs = aes_import_attrs();
+        store_bool(&mut wrap_attrs, CKA_WRAP, true);
+        let h_wrap = create_object_from_attrs(SESSION, wrap_attrs).unwrap();
+
+        // Target key: extractable, WRAP_WITH_TRUSTED=TRUE.
+        let mut tgt_attrs = aes_import_attrs();
+        store_bool(&mut tgt_attrs, CKA_EXTRACTABLE, true);
+        store_bool(&mut tgt_attrs, CKA_WRAP_WITH_TRUSTED, true);
+        let h_tgt = create_object_from_attrs(SESSION, tgt_attrs).unwrap();
+
+        // CK_MECHANISM { CKM_AES_KEY_WRAP, NULL, 0 }; length-query call form.
+        let mut mech: [u32; 3] = [CKM_AES_KEY_WRAP, 0, 0];
+        let mut wrapped_len: u32 = 0;
+
+        // 1. WWT=TRUE, wrapping key lacks CKA_TRUSTED → CKR_KEY_NOT_WRAPPABLE.
+        let rv = C_WrapKey(
+            SESSION,
+            mech.as_mut_ptr() as *mut u8,
+            h_wrap,
+            h_tgt,
+            std::ptr::null_mut(),
+            &mut wrapped_len,
+        );
+        assert_eq!(rv, CKR_KEY_NOT_WRAPPABLE);
+
+        // 2. Mark the wrapping key trusted via internal store manipulation
+        //    (the only way — CKA_TRUSTED is SO-only/read-only to callers).
+        OBJECTS.with(|o| {
+            let mut store = o.borrow_mut();
+            let attrs = store.get_mut(&h_wrap).unwrap();
+            store_bool(attrs, CKA_TRUSTED, true);
+        });
+        let rv = C_WrapKey(
+            SESSION,
+            mech.as_mut_ptr() as *mut u8,
+            h_wrap,
+            h_tgt,
+            std::ptr::null_mut(),
+            &mut wrapped_len,
+        );
+        assert_eq!(rv, CKR_OK);
+        assert_eq!(wrapped_len, 24, "AES-KW of 16-byte key = 24 bytes");
+
+        // 3. Target without WRAP_WITH_TRUSTED (defaults FALSE) wraps fine even
+        //    under an untrusted wrapping key.
+        let mut wrap2 = aes_import_attrs();
+        store_bool(&mut wrap2, CKA_WRAP, true);
+        let h_wrap2 = create_object_from_attrs(SESSION, wrap2).unwrap();
+        let mut tgt2 = aes_import_attrs();
+        store_bool(&mut tgt2, CKA_EXTRACTABLE, true);
+        let h_tgt2 = create_object_from_attrs(SESSION, tgt2).unwrap();
+        let mut wrapped_len2: u32 = 0;
+        let rv = C_WrapKey(
+            SESSION,
+            mech.as_mut_ptr() as *mut u8,
+            h_wrap2,
+            h_tgt2,
+            std::ptr::null_mut(),
+            &mut wrapped_len2,
+        );
+        assert_eq!(rv, CKR_OK);
+        assert_eq!(wrapped_len2, 24);
     }
 }
