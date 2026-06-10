@@ -429,11 +429,18 @@ pub const SUPPORTED_MECHS: &[u32] = &[
     CKM_AES_KEY_WRAP,
     CKM_AES_KEY_WRAP_KWP,
     CKM_AES_KEY_WRAP_PAD,
+    // ChaCha20 stream cipher + ChaCha20-Poly1305 AEAD (S1 — were implemented
+    // but not advertised; values verified against pkcs11t.h 0x1226 / 0x4021)
+    CKM_CHACHA20,
+    CKM_CHACHA20_POLY1305,
     // Key derivation
     CKM_PKCS5_PBKD2,
     CKM_HKDF_DERIVE,
     CKM_SP800_108_COUNTER_KDF,
     CKM_SP800_108_FEEDBACK_KDF,
+    // BIP32 HD derivation (C_DeriveKey master/child — pkcs11t.h 0x105B/0x105C)
+    CKM_BIP32_MASTER_DERIVE,
+    CKM_BIP32_CHILD_DERIVE,
     // Stateful hash-based signatures (G10)
     CKM_HSS_KEY_PAIR_GEN,
     CKM_HSS,

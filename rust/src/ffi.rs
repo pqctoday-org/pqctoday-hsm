@@ -694,14 +694,20 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
         CKM_RSA_PKCS_KEY_PAIR_GEN => (2048, 4096, 0x00010000u32),
         CKM_SHA256_RSA_PKCS | CKM_SHA256_RSA_PKCS_PSS => (2048, 4096, 0x00000800 | 0x00002000),
         CKM_RSA_PKCS_OAEP => (2048, 4096, 0x00000100 | 0x00000200),
-        CKM_ML_KEM_KEY_PAIR_GEN => (512, 1024, 0x00010000),
-        CKM_ML_KEM => (512, 1024, 0x10000000 | 0x20000000),
-        CKM_ML_DSA_KEY_PAIR_GEN => (44, 87, 0x00010000),
+        // PKCS#11 v3.2 §6.67–§6.69: ulMin/MaxKeySize for ML-DSA / ML-KEM /
+        // SLH-DSA are PUBLIC-KEY sizes in BYTES (FIPS 203/204/205), not
+        // parameter-set numbers.
+        // ML-KEM ek: 800 B (ML-KEM-512) … 1568 B (ML-KEM-1024) — FIPS 203 Table 3.
+        CKM_ML_KEM_KEY_PAIR_GEN => (800, 1568, 0x00010000),
+        CKM_ML_KEM => (800, 1568, 0x10000000 | 0x20000000),
+        // ML-DSA pk: 1312 B (ML-DSA-44) … 2592 B (ML-DSA-87) — FIPS 204 Table 2.
+        CKM_ML_DSA_KEY_PAIR_GEN => (1312, 2592, 0x00010000),
         // CKF_SIGN | CKF_VERIFY | CKF_MESSAGE_SIGN | CKF_MESSAGE_VERIFY —
         // C_MessageSign/Verify* are implemented for these (pkcs11t.h 0x8/0x10).
-        CKM_ML_DSA => (44, 87, 0x00000800 | 0x00002000 | 0x0008 | 0x0010),
-        CKM_SLH_DSA_KEY_PAIR_GEN => (128, 256, 0x00010000),
-        CKM_SLH_DSA => (128, 256, 0x00000800 | 0x00002000 | 0x0008 | 0x0010),
+        CKM_ML_DSA => (1312, 2592, 0x00000800 | 0x00002000 | 0x0008 | 0x0010),
+        // SLH-DSA pk: 32 B (128-bit sets) … 64 B (256-bit sets) — FIPS 205 Table 2.
+        CKM_SLH_DSA_KEY_PAIR_GEN => (32, 64, 0x00010000),
+        CKM_SLH_DSA => (32, 64, 0x00000800 | 0x00002000 | 0x0008 | 0x0010),
         CKM_SHA256 | CKM_SHA384 | CKM_SHA512 | CKM_SHA3_256 | CKM_SHA3_512 => (0, 0, 0x00000400),
         CKM_SHA256_HMAC | CKM_SHA384_HMAC | CKM_SHA512_HMAC | CKM_SHA3_256_HMAC
         | CKM_SHA3_512_HMAC => (16, 64, 0x00000800 | 0x00002000),
@@ -712,9 +718,11 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
         | CKM_SHA3_512_HMAC_GENERAL => (16, 64, 0x00000800 | 0x00002000),
         CKM_KMAC_128 | CKM_KMAC_256 => (16, 64, 0x00000800 | 0x00002000),
         CKM_GENERIC_SECRET_KEY_GEN => (1, 512, 0x00008000),
-        CKM_EC_KEY_PAIR_GEN => (256, 384, 0x00010000),
+        // Engine generates P-256/P-384/P-521 (+ secp256k1) — range unified
+        // with CKM_ECDSA below (compliance-audit P-15).
+        CKM_EC_KEY_PAIR_GEN => (256, 521, 0x00010000),
         CKM_ECDSA_SHA256 | CKM_ECDSA_SHA384 | CKM_ECDSA_SHA512 => {
-            (256, 384, 0x00000800 | 0x00002000)
+            (256, 521, 0x00000800 | 0x00002000)
         }
         CKM_ECDH1_DERIVE | CKM_ECDH1_COFACTOR_DERIVE => (256, 384, 0x00080000),
         CKM_EC_EDWARDS_KEY_PAIR_GEN => (255, 255, 0x00010000),
@@ -744,7 +752,7 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
         | CKM_HASH_ML_DSA_SHA3_384
         | CKM_HASH_ML_DSA_SHA3_512
         | CKM_HASH_ML_DSA_SHAKE128
-        | CKM_HASH_ML_DSA_SHAKE256 => (44, 87, 0x00000800 | 0x00002000),
+        | CKM_HASH_ML_DSA_SHAKE256 => (1312, 2592, 0x00000800 | 0x00002000),
         // SLH-DSA pre-hash variants — same sign/verify capabilities as pure SLH-DSA
         CKM_HASH_SLH_DSA_SHA224
         | CKM_HASH_SLH_DSA_SHA256
@@ -755,7 +763,7 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
         | CKM_HASH_SLH_DSA_SHA3_384
         | CKM_HASH_SLH_DSA_SHA3_512
         | CKM_HASH_SLH_DSA_SHAKE128
-        | CKM_HASH_SLH_DSA_SHAKE256 => (128, 256, 0x00000800 | 0x00002000),
+        | CKM_HASH_SLH_DSA_SHAKE256 => (32, 64, 0x00000800 | 0x00002000),
         // ECDSA-SHA3 variants
         CKM_ECDSA_SHA3_224 | CKM_ECDSA_SHA3_256 | CKM_ECDSA_SHA3_384 | CKM_ECDSA_SHA3_512 => {
             (256, 384, 0x00000800 | 0x00002000)
@@ -773,8 +781,8 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
         // Ed25519ph (pkcs11t.h CKM_EDDSA_PH 0x80001057)
         CKM_EDDSA_PH => (255, 255, 0x00000800 | 0x00002000),
         // Parametrized pre-hash mechanisms (hash chosen via param, §6.67.7/§6.69.7)
-        CKM_HASH_ML_DSA => (44, 87, 0x00000800 | 0x00002000),
-        CKM_HASH_SLH_DSA => (128, 256, 0x00000800 | 0x00002000),
+        CKM_HASH_ML_DSA => (1312, 2592, 0x00000800 | 0x00002000),
+        CKM_HASH_SLH_DSA => (32, 64, 0x00000800 | 0x00002000),
         // Stateful hash-based signatures (§6.14/§6.66) — sign on the private
         // key only while it has leaves remaining; verify is stateless
         CKM_HSS_KEY_PAIR_GEN | CKM_XMSS_KEY_PAIR_GEN | CKM_XMSSMT_KEY_PAIR_GEN => {
@@ -783,6 +791,12 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
         CKM_HSS | CKM_XMSS | CKM_XMSSMT => (0, 0, 0x00000800 | 0x00002000),
         // Vendor Keccak-256 digest (Ethereum address derivation)
         CKM_KECCAK_256 => (0, 0, 0x00000400),
+        // ChaCha20 stream cipher / ChaCha20-Poly1305 AEAD (§6.20/§6.25) —
+        // 256-bit keys only. CKF_ENCRYPT | CKF_DECRYPT; no CKF_MESSAGE_*
+        // (the message-based family does not dispatch these mechanisms).
+        CKM_CHACHA20 | CKM_CHACHA20_POLY1305 => (32, 32, 0x00000100 | 0x00000200),
+        // BIP32 HD derivation (C_DeriveKey) — 32-byte seeds/keys, CKF_DERIVE.
+        CKM_BIP32_MASTER_DERIVE | CKM_BIP32_CHILD_DERIVE => (32, 32, 0x00080000),
         _ => return None,
     };
     Some(info)
@@ -807,6 +821,74 @@ mod mechanism_table_tests {
             missing.is_empty(),
             "SUPPORTED_MECHS entries without a C_GetMechanismInfo arm: {missing:#06x?}"
         );
+    }
+
+    /// S1 / P-1 — PKCS#11 v3.2 §6.67–§6.69: ulMin/MaxKeySize for the PQC
+    /// mechanisms are public-key sizes in BYTES per FIPS 203/204/205, not
+    /// parameter-set numbers. Pin the exact values.
+    #[test]
+    fn pqc_mechanism_key_sizes_are_fips_public_key_bytes() {
+        // FIPS 204 Table 2: pk = 1312 (ML-DSA-44) … 2592 (ML-DSA-87)
+        assert_eq!(mechanism_info(CKM_ML_DSA).map(|(a, b, _)| (a, b)), Some((1312, 2592)));
+        assert_eq!(
+            mechanism_info(CKM_ML_DSA_KEY_PAIR_GEN).map(|(a, b, _)| (a, b)),
+            Some((1312, 2592))
+        );
+        // FIPS 203 Table 3: ek = 800 (ML-KEM-512) … 1568 (ML-KEM-1024)
+        assert_eq!(mechanism_info(CKM_ML_KEM).map(|(a, b, _)| (a, b)), Some((800, 1568)));
+        assert_eq!(
+            mechanism_info(CKM_ML_KEM_KEY_PAIR_GEN).map(|(a, b, _)| (a, b)),
+            Some((800, 1568))
+        );
+        // FIPS 205 Table 2: pk = 32 (128-bit sets) … 64 (256-bit sets)
+        assert_eq!(mechanism_info(CKM_SLH_DSA).map(|(a, b, _)| (a, b)), Some((32, 64)));
+        assert_eq!(
+            mechanism_info(CKM_SLH_DSA_KEY_PAIR_GEN).map(|(a, b, _)| (a, b)),
+            Some((32, 64))
+        );
+    }
+
+    /// S1 — ChaCha20 / ChaCha20-Poly1305 are implemented and must be both
+    /// advertised in C_GetMechanismList and answerable by C_GetMechanismInfo.
+    #[test]
+    fn chacha20_mechs_advertised_with_info() {
+        for mech in [CKM_CHACHA20, CKM_CHACHA20_POLY1305] {
+            assert!(
+                SUPPORTED_MECHS.contains(&mech),
+                "mech {mech:#06x} missing from SUPPORTED_MECHS"
+            );
+            // 256-bit key only, CKF_ENCRYPT | CKF_DECRYPT, no CKF_MESSAGE_*
+            assert_eq!(mechanism_info(mech), Some((32, 32, 0x00000100 | 0x00000200)));
+        }
+    }
+
+    /// S1 — BIP32 derive mechanisms are dispatched by C_DeriveKey and must be
+    /// advertised with CKF_DERIVE.
+    #[test]
+    fn bip32_mechs_advertised_with_info() {
+        for mech in [CKM_BIP32_MASTER_DERIVE, CKM_BIP32_CHILD_DERIVE] {
+            assert!(
+                SUPPORTED_MECHS.contains(&mech),
+                "mech {mech:#06x} missing from SUPPORTED_MECHS"
+            );
+            assert_eq!(mechanism_info(mech), Some((32, 32, 0x00080000)));
+        }
+    }
+
+    /// S1 / P-15 — ECDSA mechanism ranges unified to P-521 (engine generates
+    /// and signs P-521; CKM_ECDSA already advertised 521).
+    #[test]
+    fn ecdsa_mech_ranges_cover_p521() {
+        for mech in [
+            CKM_EC_KEY_PAIR_GEN,
+            CKM_ECDSA,
+            CKM_ECDSA_SHA256,
+            CKM_ECDSA_SHA384,
+            CKM_ECDSA_SHA512,
+        ] {
+            let (min, max, _) = mechanism_info(mech).expect("ECDSA mech must have info");
+            assert_eq!((min, max), (256, 521), "mech {mech:#06x}");
+        }
     }
 }
 
