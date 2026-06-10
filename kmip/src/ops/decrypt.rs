@@ -62,6 +62,29 @@ pub fn decrypt(deps: &Deps, req: DecryptRequest, correlation_id: &str) -> Result
         }
     }
 
+    // KMIP 3.0 §3.4 — `Process Start Date` / `Protect Stop Date`
+    // mirror gate: Decrypt also requires `now >= ProcessStartDate`
+    // (the key hasn't started its processing window yet otherwise).
+    // CS-BC-M-14 pins both edges for Decrypt as well as Encrypt.
+    if let Some(t) = obj.process_start_date {
+        if started < t {
+            return Err(fail_err(deps, correlation_id, "Decrypt",
+                KmipError::failed(
+                    crate::error::ResultReason::WrongKeyLifecycleState,
+                    "Decrypt: now < ProcessStartDate".to_string(),
+                )));
+        }
+    }
+    if let Some(t) = obj.protect_stop_date {
+        if started > t {
+            return Err(fail_err(deps, correlation_id, "Decrypt",
+                KmipError::failed(
+                    crate::error::ResultReason::WrongKeyLifecycleState,
+                    "Decrypt: now > ProtectStopDate".to_string(),
+                )));
+        }
+    }
+
     // Plane-1 policy gate.
     let empty: HashMap<String, String> = HashMap::new();
     let algo = canonical_name(obj.algorithm);

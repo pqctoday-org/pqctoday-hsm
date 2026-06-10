@@ -178,7 +178,10 @@ pub fn encrypt(
     match mechanism {
         CKM_AES_GCM => {
             let iv = iv.ok_or(CKR_ARGUMENTS_BAD)?;
-            aes_gcm_encrypt(&key_bytes, iv, plaintext)
+            // Handle-based encrypt has no AAD plumbing yet — use empty.
+            // KMIP callers that need AEAD with AAD go through
+            // `encrypt_with_key_bytes` instead.
+            aes_gcm_encrypt(&key_bytes, iv, plaintext, &[])
         }
         CKM_AES_ECB => aes_ecb_encrypt(&key_bytes, plaintext),
         CKM_AES_CBC => {
@@ -222,7 +225,7 @@ pub fn decrypt(
     match mechanism {
         CKM_AES_GCM => {
             let iv = iv.ok_or(CKR_ARGUMENTS_BAD)?;
-            aes_gcm_decrypt(&key_bytes, iv, ciphertext)
+            aes_gcm_decrypt(&key_bytes, iv, ciphertext, &[])
         }
         CKM_AES_ECB => aes_ecb_decrypt(&key_bytes, ciphertext),
         CKM_AES_CBC => {
@@ -307,7 +310,7 @@ pub fn encrypt_with_key_bytes(
     match mechanism {
         CKM_AES_GCM => {
             let iv = iv.ok_or(CKR_ARGUMENTS_BAD)?;
-            aes_gcm_encrypt(key_bytes, iv, plaintext)
+            aes_gcm_encrypt(key_bytes, iv, plaintext, aad)
         }
         CKM_AES_ECB => aes_ecb_encrypt(key_bytes, plaintext),
         CKM_AES_CBC => {
@@ -348,7 +351,7 @@ pub fn decrypt_with_key_bytes(
     match mechanism {
         CKM_AES_GCM => {
             let iv = iv.ok_or(CKR_ARGUMENTS_BAD)?;
-            aes_gcm_decrypt(key_bytes, iv, ciphertext)
+            aes_gcm_decrypt(key_bytes, iv, ciphertext, aad)
         }
         CKM_AES_ECB => aes_ecb_decrypt(key_bytes, ciphertext),
         CKM_AES_CBC => {
@@ -460,14 +463,14 @@ fn rsa_oaep_decrypt(priv_der: &[u8], ciphertext: &[u8], params: &OaepParams) -> 
 
 // ── AES-GCM ─────────────────────────────────────────────────────────────────
 
-fn aes_gcm_encrypt(key: &[u8], iv: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, CkRv> {
+fn aes_gcm_encrypt(key: &[u8], iv: &[u8], plaintext: &[u8], aad: &[u8]) -> Result<Vec<u8>, CkRv> {
     use aes_gcm::aead::generic_array::GenericArray;
     use aes_gcm::{aead::{Aead, Payload}, Aes128Gcm, Aes256Gcm, KeyInit};
     if iv.len() != 12 {
         return Err(CKR_ARGUMENTS_BAD);
     }
     let nonce = GenericArray::from_slice(iv);
-    let payload = Payload { msg: plaintext, aad: &[] };
+    let payload = Payload { msg: plaintext, aad };
     match key.len() {
         16 => {
             let cipher = Aes128Gcm::new_from_slice(key).map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
@@ -481,14 +484,14 @@ fn aes_gcm_encrypt(key: &[u8], iv: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, C
     }
 }
 
-fn aes_gcm_decrypt(key: &[u8], iv: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, CkRv> {
+fn aes_gcm_decrypt(key: &[u8], iv: &[u8], ciphertext: &[u8], aad: &[u8]) -> Result<Vec<u8>, CkRv> {
     use aes_gcm::aead::generic_array::GenericArray;
     use aes_gcm::{aead::{Aead, Payload}, Aes128Gcm, Aes256Gcm, KeyInit};
     if iv.len() != 12 {
         return Err(CKR_ARGUMENTS_BAD);
     }
     let nonce = GenericArray::from_slice(iv);
-    let payload = Payload { msg: ciphertext, aad: &[] };
+    let payload = Payload { msg: ciphertext, aad };
     match key.len() {
         16 => {
             let cipher = Aes128Gcm::new_from_slice(key).map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;

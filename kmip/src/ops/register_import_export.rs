@@ -178,6 +178,8 @@ pub fn register(
         deactivation_date: x.deactivation_date,
         compromise_date: x.compromise_date,
         compromise_occurrence_date: x.compromise_date,
+        process_start_date: x.process_start_date,
+        protect_stop_date: x.protect_stop_date,
         last_change_date: Some(now),
         original_creation_date: Some(now),
         supersedes: None,
@@ -363,6 +365,8 @@ pub(crate) struct ExtractedAttrs {
     pub activation_date: Option<OffsetDateTime>,
     pub deactivation_date: Option<OffsetDateTime>,
     pub compromise_date: Option<OffsetDateTime>,
+    pub process_start_date: Option<OffsetDateTime>,
+    pub protect_stop_date: Option<OffsetDateTime>,
     /// Per-key `CryptographicParameters` (KMIP §11) — the OAEP /
     /// PSS / MAC handshake parameters attached to the managed object
     /// at Register time. Read back by Encrypt / Decrypt / Sign /
@@ -378,6 +382,7 @@ pub(crate) fn extract_attrs(attrs: &[Attribute]) -> ExtractedAttrs {
     let mut out = ExtractedAttrs {
         algorithm: None, length: None, usage: None, name: None, uid: None,
         activation_date: None, deactivation_date: None, compromise_date: None,
+        process_start_date: None, protect_stop_date: None,
         cryptographic_parameters: None, quantum_safe: None,
     };
     for a in attrs {
@@ -390,6 +395,8 @@ pub(crate) fn extract_attrs(attrs: &[Attribute]) -> ExtractedAttrs {
             Attribute::ActivationDate(t)   => out.activation_date   = OffsetDateTime::from_unix_timestamp(*t).ok(),
             Attribute::DeactivationDate(t) => out.deactivation_date = OffsetDateTime::from_unix_timestamp(*t).ok(),
             Attribute::CompromiseDate(t)   => out.compromise_date   = OffsetDateTime::from_unix_timestamp(*t).ok(),
+            Attribute::ProcessStartDate(t) => out.process_start_date = OffsetDateTime::from_unix_timestamp(*t).ok(),
+            Attribute::ProtectStopDate(t)  => out.protect_stop_date  = OffsetDateTime::from_unix_timestamp(*t).ok(),
             Attribute::CryptographicParameters(cp) => out.cryptographic_parameters = Some(cp.clone()),
             Attribute::QuantumSafe(b)              => out.quantum_safe = Some(*b),
             _ => {}

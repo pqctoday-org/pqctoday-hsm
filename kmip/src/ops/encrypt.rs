@@ -56,6 +56,31 @@ pub fn encrypt(deps: &Deps, req: EncryptRequest, correlation_id: &str) -> Result
         ));
     }
 
+    // KMIP 3.0 §3.4 — `Process Start Date` / `Protect Stop Date`
+    // define the time window during which Encrypt MAY be performed
+    // even when the object is Active. Outside the window the op
+    // SHALL fail with `WrongKeyLifecycleState`. CS-BC-M-14 pins
+    // both edges (ProcessStartDate=$NOW+3600 future, ProtectStopDate
+    // =$NOW-3600 past).
+    if let Some(t) = obj.process_start_date {
+        if started < t {
+            return Err(fail_err(deps, correlation_id, "Encrypt",
+                KmipError::failed(
+                    crate::error::ResultReason::WrongKeyLifecycleState,
+                    "Encrypt: now < ProcessStartDate".to_string(),
+                )));
+        }
+    }
+    if let Some(t) = obj.protect_stop_date {
+        if started > t {
+            return Err(fail_err(deps, correlation_id, "Encrypt",
+                KmipError::failed(
+                    crate::error::ResultReason::WrongKeyLifecycleState,
+                    "Encrypt: now > ProtectStopDate".to_string(),
+                )));
+        }
+    }
+
     // Plane-1 policy gate. The dispatcher would canonicalise the op to
     // "Encapsulate" for ML-KEM in a future revision so policies can
     // differentiate; v0.1 passes plain "Encrypt".
