@@ -44,6 +44,7 @@ Usage (from ``kmip/``):
 from __future__ import annotations
 
 import json
+import re
 import socket
 import ssl
 import subprocess
@@ -187,6 +188,37 @@ def is_policy_variant_test(name: str) -> str | None:
 # ── Placeholder resolution ──────────────────────────────────────────────────
 
 
+# Tags whose leaf value is volatile across runs even though the tag isn't
+# in the §4.1.1 Variable Items table — auto-binding from these would
+# bind a stale value into a later request. UID is bound via the
+# positional ``$UNIQUE_IDENTIFIER_n`` mechanism, not by tag name.
+_AUTO_BIND_SKIP = {
+    "TimeStamp",
+    "UniqueIdentifier",
+    "ServerCorrelationValue",
+    "ClientCorrelationValue",
+    "CorrelationValue",  # streaming AEAD session token
+}
+
+
+def _tag_to_placeholder(tag: str) -> str | None:
+    """``MACData`` → ``MAC_DATA``; ``KeyMaterial`` → ``KEY_MATERIAL``.
+
+    OASIS test transcripts use this naming convention for placeholders
+    like ``$MAC_DATA`` and ``$KEY_MATERIAL`` — the leaf value is printed
+    literally in the response but referenced by upper-underscore name in
+    later requests. Returns ``None`` for tags we never auto-bind.
+    """
+    if tag in _AUTO_BIND_SKIP:
+        return None
+    # Insert ``_`` at lowercase→uppercase boundaries AND at the boundary
+    # of a run of uppercase followed by an uppercase+lowercase pair
+    # (``MAC`` + ``Data`` → ``MAC_DATA``).
+    s1 = re.sub(r"(.)([A-Z][a-z]+)", r"\1_\2", tag)
+    s2 = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", s1)
+    return s2.upper() if s2 else None
+
+
 @dataclass
 class Bindings:
     """Per-test ``$NAME`` → resolved value map.
@@ -240,7 +272,11 @@ class Bindings:
 
     def harvest_from_response(self, expected: TtlvNode, actual: TtlvNode) -> None:
         """Walk expected & actual; whenever expected has a ``$NAME``
-        value, bind ``NAME`` to actual's corresponding value.
+        value, bind ``NAME`` to actual's corresponding value. Also
+        auto-binds ``$TAG_NAME`` (upper-underscore form of the tag) to
+        the actual value at every leaf, so a later request can
+        reference e.g. ``$MAC_DATA`` against the ``MACData`` leaf of an
+        earlier response without an explicit placeholder in the XML.
 
         Skips TimeStamp and ServerCorrelationValue (always differ).
         Tolerant of structural mismatches — the comparator will flag
@@ -261,6 +297,22 @@ class Bindings:
                     self.bind(expected.value, actual.value)
                 except ValueError:
                     pass  # mismatch — comparator will catch it
+        # Auto-bind by tag-name so later requests can reference values
+        # without an explicit ``$NAME`` placeholder in the expected
+        # response. KMIP OASIS transcripts use this convention for
+        # MACData / KeyMaterial / Data fields where the spec value is
+        # printed literally in the response but referenced as
+        # ``$MAC_DATA`` / ``$KEY_MATERIAL`` / ``$DATA`` later. Only fires
+        # at leaves (Structures have no value) and skips $NOW / volatile.
+        if actual.value is not None and not (
+            isinstance(expected.value, str) and expected.value == "$NOW"
+        ):
+            auto = _tag_to_placeholder(expected.tag_name)
+            if auto:
+                key = f"${auto}"
+                if key not in self.values:
+                    # First-write wins; never overwrite an explicit bind.
+                    self.values[key] = actual.value
         # Container traversal.
         if _norm(expected.tag_name) == _norm("Attributes"):
             # Tag-name-aware: pair each expected child to the FIRST

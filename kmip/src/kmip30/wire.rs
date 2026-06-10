@@ -1033,12 +1033,17 @@ fn encode_decrypt_resp(r: &DecryptResponse) -> Vec<TtlvFrame> {
 fn decode_sign_req(children: &[TtlvFrame]) -> Result<SignRequest, WireError> {
     let uid = required_uid(children)?;
     let mut data = Vec::new();
+    let mut cp: Option<CryptographicParameters> = None;
     for c in children {
-        if c.tag.0 == tags::Data {
-            if let Value::ByteString(b) = &c.value { data = b.clone(); }
+        match c.tag.0 {
+            tags::Data => { if let Value::ByteString(b) = &c.value { data = b.clone(); } }
+            tags::CryptographicParameters => {
+                cp = Some(decode_cryptographic_parameters(c)?);
+            }
+            _ => {}
         }
     }
-    Ok(SignRequest { uid, data })
+    Ok(SignRequest { uid, data, cryptographic_parameters: cp })
 }
 
 fn encode_sign_resp(r: &SignResponse) -> Vec<TtlvFrame> {
@@ -1052,14 +1057,18 @@ fn decode_sigverify_req(children: &[TtlvFrame]) -> Result<SignatureVerifyRequest
     let uid = required_uid(children)?;
     let mut data = Vec::new();
     let mut signature = Vec::new();
+    let mut cp: Option<CryptographicParameters> = None;
     for c in children {
         match c.tag.0 {
             tags::Data => { if let Value::ByteString(b) = &c.value { data = b.clone(); } }
             tags::SignatureData => { if let Value::ByteString(b) = &c.value { signature = b.clone(); } }
+            tags::CryptographicParameters => {
+                cp = Some(decode_cryptographic_parameters(c)?);
+            }
             _ => {}
         }
     }
-    Ok(SignatureVerifyRequest { uid, data, signature })
+    Ok(SignatureVerifyRequest { uid, data, signature, cryptographic_parameters: cp })
 }
 
 fn encode_sigverify_resp(r: &SignatureVerifyResponse) -> Vec<TtlvFrame> {

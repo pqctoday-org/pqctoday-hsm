@@ -199,7 +199,15 @@ pub fn sign(deps: &Deps, req: SignRequest, correlation_id: &str) -> Result<SignR
                 super::helpers::find_handle_for_object(session, &obj.pkcs11_cka_id, obj.object_type)
                     .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Sign:find"))?
                     .ok_or_else(|| KmipError::not_found(&req.uid))?;
-            let native_mech = super::helpers::native_sign_mech(obj.algorithm).ok_or_else(|| {
+            let effective_cp = req
+                .cryptographic_parameters
+                .as_ref()
+                .or(obj.cryptographic_parameters.as_ref());
+            let native_mech = super::helpers::native_sign_mech_with_params(
+                obj.algorithm,
+                effective_cp,
+            )
+            .ok_or_else(|| {
                 KmipError::failed(
                     ResultReason::OperationNotSupported,
                     format!("Sign: no native mechanism for {:?}", obj.algorithm),
@@ -376,7 +384,8 @@ rules:
             SignRequest {
                 uid: "urn:uid:1".into(),
                 data: b"hello".to_vec(),
-            },
+            cryptographic_parameters: None,
+        },
             "corr-sign",
         )
         .unwrap();
@@ -393,7 +402,9 @@ rules:
         let (_ring, d) = deps_with(PERMISSIVE);
         let err = sign(
             &d,
-            SignRequest { uid: "urn:nope".into(), data: vec![] },
+            SignRequest { uid: "urn:nope".into(), data: vec![],
+            cryptographic_parameters: None,
+        },
             "corr-404",
         )
         .unwrap_err();
@@ -430,7 +441,9 @@ rules:
         ..ObjectRecord::default()
 };
         d.store.put(rec).unwrap();
-        let err = sign(&d, SignRequest { uid: "urn:pre".into(), data: vec![] }, "corr").unwrap_err();
+        let err = sign(&d, SignRequest { uid: "urn:pre".into(), data: vec![],
+            cryptographic_parameters: None,
+        }, "corr").unwrap_err();
         // KMIP 3.0 §11 — PreActive is a lifecycle-state failure.
         assert_eq!(err.result_reason(), ResultReason::WrongKeyLifecycleState);
     }
@@ -444,7 +457,9 @@ rules:
         make_active_key(&d, "urn:ecdsa", KmipAlgorithm::Ecdsa);
         let err = sign(
             &d,
-            SignRequest { uid: "urn:ecdsa".into(), data: b"x".to_vec() },
+            SignRequest { uid: "urn:ecdsa".into(), data: b"x".to_vec(),
+            cryptographic_parameters: None,
+        },
             "corr-rk",
         )
         .unwrap_err();

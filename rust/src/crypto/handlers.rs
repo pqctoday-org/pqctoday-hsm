@@ -1253,10 +1253,28 @@ pub fn verify_rsa(
             vk.verify(msg, &sig).map_err(|_| CKR_SIGNATURE_INVALID)
         }
         CKM_SHA256_RSA_PKCS_PSS => {
-            let vk = rsa::pss::VerifyingKey::<sha2::Sha256>::new(public_key);
+            use rsa::traits::PublicKeyParts;
             let sig =
                 rsa::pss::Signature::try_from(sig_bytes).map_err(|_| CKR_SIGNATURE_INVALID)?;
-            vk.verify(msg, &sig).map_err(|_| CKR_SIGNATURE_INVALID)
+            // RFC 8017 §9.1.2 — EMSA-PSS-VERIFY parameterised by salt
+            // length. The `rsa` crate's default verifier pins sLen =
+            // hashLen (32). OASIS conformance signatures use sLen =
+            // modulus_octets - hashLen - 2 (the "maximum" form openssl
+            // exposes as `rsa_pss_saltlen:auto`). Try both so we accept
+            // either convention.
+            let mod_octets = public_key.size();
+            const HASH_LEN: usize = 32;
+            let candidates = [HASH_LEN, mod_octets.saturating_sub(HASH_LEN + 2)];
+            for salt_len in candidates {
+                let vk = rsa::pss::VerifyingKey::<sha2::Sha256>::new_with_salt_len(
+                    public_key.clone(),
+                    salt_len,
+                );
+                if vk.verify(msg, &sig).is_ok() {
+                    return Ok(());
+                }
+            }
+            Err(CKR_SIGNATURE_INVALID)
         }
         _ => Err(CKR_MECHANISM_INVALID),
     }

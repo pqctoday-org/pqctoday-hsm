@@ -1,6 +1,6 @@
 # OASIS KMIP 3.0 Dispatcher Replay Report
 
-Generated: 2026-06-10 14:44:46 UTC
+Generated: 2026-06-10 15:51:07 UTC
 
 
 ## Aggregate
@@ -8,8 +8,8 @@ Generated: 2026-06-10 14:44:46 UTC
 
 | Status | Count | % of total |
 |---|---|---|
-| **PASS** | 84 | 82.4% |
-| **FAIL** | 8 | 7.8% |
+| **PASS** | 89 | 87.3% |
+| **FAIL** | 3 | 2.9% |
 | ERROR | 0 | 0.0% |
 | SKIP_OP (op not implemented) | 0 | 0.0% |
 | SKIP_DEPRECATED (DES / 3DES / DSA out of scope) | 5 | 4.9% |
@@ -21,9 +21,9 @@ Generated: 2026-06-10 14:44:46 UTC
 
 Of the 92 tests that exercise only implemented + non-deprecated ops:
 
-  - **84 pass (91%)**
+  - **89 pass (97%)**
 
-  - 8 fail
+  - 3 fail
 
   - 0 errored
 
@@ -69,11 +69,6 @@ choice our server does not select:
 | Test | Status | Detail |
 |---|---|---|
 | `AX-M-2-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload/SymmetricKey/KeyBlock: child count 5 != 4 |
-| `CS-AC-M-2-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload/ValidityIndicator: expected 'Valid' got 2 |
-| `CS-AC-M-3-30.xml` | FAIL | msg #4: response mismatch: ResponseMessage/BatchItem/ResponsePayload/ValidityIndicator: expected 'Invalid' got 1 |
-| `CS-AC-M-4-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
-| `CS-AC-M-5-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
-| `CS-AC-M-6-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
 | `CS-BC-M-GCM-2-30.xml` | FAIL | msg #21: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
 | `CS-BC-M-GCM-3-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
 | `AKLC-M-1-30.xml` | PASS |  |
@@ -101,6 +96,11 @@ choice our server does not select:
 | `BL-M-8-30.xml` | PASS |  |
 | `BL-M-9-30.xml` | PASS |  |
 | `CS-AC-M-1-30.xml` | PASS |  |
+| `CS-AC-M-2-30.xml` | PASS |  |
+| `CS-AC-M-3-30.xml` | PASS |  |
+| `CS-AC-M-4-30.xml` | PASS |  |
+| `CS-AC-M-5-30.xml` | PASS |  |
+| `CS-AC-M-6-30.xml` | PASS |  |
 | `CS-AC-M-7-30.xml` | PASS |  |
 | `CS-AC-M-8-30.xml` | PASS |  |
 | `CS-AC-M-OAEP-1-30.xml` | PASS |  |

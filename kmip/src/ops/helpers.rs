@@ -257,14 +257,32 @@ pub fn state_name(s: crate::kmip30::State) -> &'static str {
 /// (e.g. `CKM_PQCTODAY_ML_DSA_SIGN_VERIFY = 0x4036`). The native API
 /// uses the standard codepoints (`CKM_ML_DSA = 0x1D`).
 pub fn native_sign_mech(a: KmipAlgorithm) -> Option<u32> {
+    native_sign_mech_with_params(a, None)
+}
+
+/// Like [`native_sign_mech`] but consults `CryptographicParameters` so
+/// the RSA `PaddingMethod` (PKCS1v15 vs PSS) can pick the right shim
+/// mechanism. KMIP 3.0 §6.1.{60,61} permit either as the request's CP
+/// or as the object's stored attribute.
+pub fn native_sign_mech_with_params(
+    a: KmipAlgorithm,
+    cp: Option<&crate::kmip30::CryptographicParameters>,
+) -> Option<u32> {
     use softhsmrustv3::constants as c;
     use KmipAlgorithm::*;
+    // KMIP 3.0 §11 `Padding Method` codepoints (per
+    // spec/oasis-kmip-3.0/kmip-spec-3.0-tags-enums.json):
+    // 0x08 = `PKCS1 v1.5`, 0x0a = `PSS`.
+    const PADDING_PSS: u32 = 0x0a;
     Some(match a {
         MlDsa44 | MlDsa65 | MlDsa87 => c::CKM_ML_DSA,
         SlhDsaSha2_128s | SlhDsaSha2_128f | SlhDsaSha2_192s | SlhDsaSha2_192f
         | SlhDsaSha2_256s | SlhDsaSha2_256f | SlhDsaShake128s | SlhDsaShake128f
         | SlhDsaShake192s | SlhDsaShake192f | SlhDsaShake256s | SlhDsaShake256f => c::CKM_SLH_DSA,
-        Rsa => c::CKM_SHA256_RSA_PKCS,
+        Rsa => match cp.and_then(|p| p.padding_method) {
+            Some(PADDING_PSS) => c::CKM_SHA256_RSA_PKCS_PSS,
+            _ => c::CKM_SHA256_RSA_PKCS,
+        },
         Ecdsa => c::CKM_ECDSA_SHA256,
         HmacSha256 => c::CKM_SHA256_HMAC,
         HmacSha384 => c::CKM_SHA384_HMAC,

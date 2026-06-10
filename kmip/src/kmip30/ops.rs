@@ -423,6 +423,10 @@ pub struct DecryptResponse {
 pub struct SignRequest {
     pub uid: String,
     pub data: Vec<u8>,
+    /// Wire tag `Cryptographic Parameters` (0x42002b). OPTIONAL per
+    /// §6.1.60 — when present, overrides the object's stored
+    /// `CryptographicParameters` attribute for this op.
+    pub cryptographic_parameters: Option<CryptographicParameters>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -436,6 +440,12 @@ pub struct SignatureVerifyRequest {
     pub uid: String,
     pub data: Vec<u8>,
     pub signature: Vec<u8>,
+    /// Wire tag `Cryptographic Parameters` (0x42002b). OPTIONAL per
+    /// §6.1.61 — when present, drives padding-method / hashing-algorithm
+    /// selection (RSA-PKCS1v15 vs RSA-PSS, SHA-256 vs SHA-384, …). When
+    /// absent, the server falls back to the object's stored
+    /// `CryptographicParameters` attribute.
+    pub cryptographic_parameters: Option<CryptographicParameters>,
 }
 
 #[derive(Clone, Debug, PartialEq)]

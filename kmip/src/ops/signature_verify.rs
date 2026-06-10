@@ -128,7 +128,37 @@ pub fn signature_verify(
                 super::helpers::find_handle_for_object(session, &obj.pkcs11_cka_id, obj.object_type)
                     .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Verify:find"))?
                     .ok_or_else(|| KmipError::not_found(&req.uid))?;
-            let native_mech = super::helpers::native_sign_mech(obj.algorithm).ok_or_else(|| {
+            // KMIP 3.0 §6.1.61 — pick padding/hash from the request's
+            // CryptographicParameters, falling back to the object's
+            // stored attribute. CS-AC-M-2 pins RSA-PSS / SHA-256 via
+            // the registered CryptographicParameters; CS-AC-M-3 uses
+            // PKCS1v15 / SHA-256.
+            let effective_cp = req
+                .cryptographic_parameters
+                .as_ref()
+                .or(obj.cryptographic_parameters.as_ref());
+            // KMIP 3.0 §6.1.61 — when the client pins a hash variant we
+            // can't run (e.g. SHA-1 with RSA-PSS), the verify CANNOT
+            // succeed. Per the spec, this surfaces as ResultStatus=Success
+            // + ValidityIndicator=Invalid, NOT OperationFailed. CS-AC-M-3
+            // step #4 pins SHA-1 over a SHA-256 signature.
+            let hash_supported = match effective_cp.and_then(|cp| cp.hashing_algorithm) {
+                None | Some(crate::kmip30::HashingAlgorithm::Sha256) => true,
+                _ => false,
+            };
+            if !hash_supported {
+                emit_pkcs11(deps, correlation_id, "C_Verify", Some(mech), 0, "CKR_SIGNATURE_INVALID");
+                emit_success(deps, correlation_id, "SignatureVerify");
+                return Ok(SignatureVerifyResponse {
+                    uid: req.uid,
+                    validity: SignatureValidity::Invalid,
+                });
+            }
+            let native_mech = super::helpers::native_sign_mech_with_params(
+                obj.algorithm,
+                effective_cp,
+            )
+            .ok_or_else(|| {
                 KmipError::failed(
                     ResultReason::OperationNotSupported,
                     format!("Verify: no native mechanism for {:?}", obj.algorithm),
@@ -228,7 +258,7 @@ mod tests {
         active(&d, "u");
         let data = b"hello world".to_vec();
         let sig = placeholder_signature("u", &data);
-        let r = signature_verify(&d, SignatureVerifyRequest { uid: "u".into(), data, signature: sig }, "c").unwrap();
+        let r = signature_verify(&d, SignatureVerifyRequest { uid: "u".into(), data, signature: sig, cryptographic_parameters: None }, "c").unwrap();
         assert_eq!(r.validity, SignatureValidity::Valid);
     }
 
@@ -240,6 +270,7 @@ mod tests {
             uid: "u".into(),
             data: b"hello".to_vec(),
             signature: vec![0xff; 32],
+            cryptographic_parameters: None,
         }, "c").unwrap();
         assert_eq!(r.validity, SignatureValidity::Invalid);
     }
@@ -276,6 +307,7 @@ mod tests {
             uid: "u".into(),
             data: vec![],
             signature: vec![],
+            cryptographic_parameters: None,
         }, "c").unwrap();
         // success — Verify is permitted in Deactivated state per §3.4
     }
@@ -312,6 +344,7 @@ mod tests {
             uid: "u".into(),
             data: vec![],
             signature: vec![],
+            cryptographic_parameters: None,
         }, "c").unwrap_err();
         // KMIP 3.0 §11 — Destroyed is an FSM-rejection state. See
         // `ops::helpers::non_active_state_error` for the citation.
