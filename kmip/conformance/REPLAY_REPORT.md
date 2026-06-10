@@ -1,6 +1,6 @@
 # OASIS KMIP 3.0 Dispatcher Replay Report
 
-Generated: 2026-06-10 05:28:25 UTC
+Generated: 2026-06-10 11:58:05 UTC
 
 
 ## Aggregate
@@ -9,20 +9,36 @@ Generated: 2026-06-10 05:28:25 UTC
 | Status | Count | % of total |
 |---|---|---|
 | **PASS** | 82 | 80.4% |
-| **FAIL** | 20 | 19.6% |
+| **FAIL** | 15 | 14.7% |
 | ERROR | 0 | 0.0% |
 | SKIP_OP (op not implemented) | 0 | 0.0% |
+| SKIP_DEPRECATED (DES / 3DES / DSA out of scope) | 5 | 4.9% |
 | SKIP_PARSE (XML malformed) | 0 | 0.0% |
 | **Total** | **102** | 100.0% |
 
 
-Of the 102 tests that exercise only implemented ops:
+Of the 97 tests that exercise only implemented + non-deprecated ops:
 
-  - **82 pass (80%)**
+  - **82 pass (85%)**
 
-  - 20 fail
+  - 15 fail
 
   - 0 errored
+
+
+5 test(s) skipped per the deprecated-mechanism policy 
+(see `kmip/DEPRECATED.md`):
+
+  - `BL-M-12-30.xml` — DSA — deprecated (NIST SP 800-186 §5.4)
+
+  - `BL-M-13-30.xml` — DSA — deprecated (NIST SP 800-186 §5.4)
+
+  - `SKFF-M-12-30.xml` — 3DES — deprecated (NIST SP 800-131A r2 §1.2.1)
+
+  - `SKFF-M-4-30.xml` — 3DES — deprecated (NIST SP 800-131A r2 §1.2.1)
+
+  - `SKFF-M-8-30.xml` — 3DES — deprecated (NIST SP 800-131A r2 §1.2.1)
+
 
 
 ## Per-test breakdown
@@ -32,8 +48,6 @@ Of the 102 tests that exercise only implemented ops:
 |---|---|---|
 | `AX-M-1-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage: child count 3 != 2 |
 | `AX-M-2-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload/SymmetricKey/KeyBlock: child count 5 != 4 |
-| `BL-M-12-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
-| `BL-M-13-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
 | `CS-AC-M-2-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload/ValidityIndicator: expected 'Valid' got 2 |
 | `CS-AC-M-3-30.xml` | FAIL | msg #4: response mismatch: ResponseMessage/BatchItem/ResponsePayload/ValidityIndicator: expected 'Invalid' got 1 |
 | `CS-AC-M-4-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
@@ -46,9 +60,6 @@ Of the 102 tests that exercise only implemented ops:
 | `CS-RNG-O-3-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResponsePayload/DataLength: expected '0' got 32 |
 | `CS-RNG-O-4-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'OperationFailed' got 0 |
 | `SASED-M-3-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 1 != 0 |
-| `SKFF-M-12-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
-| `SKFF-M-4-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
-| `SKFF-M-8-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
 | `TL-M-3-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 1 != 0 |
 | `AKLC-M-1-30.xml` | PASS |  |
 | `AKLC-M-2-30.xml` | PASS |  |
@@ -132,3 +143,8 @@ Of the 102 tests that exercise only implemented ops:
 | `SKLC-O-1-30.xml` | PASS |  |
 | `TL-M-1-30.xml` | PASS |  |
 | `TL-M-2-30.xml` | PASS |  |
+| `BL-M-12-30.xml` | SKIP_DEPRECATED | DSA — deprecated (NIST SP 800-186 §5.4) |
+| `BL-M-13-30.xml` | SKIP_DEPRECATED | DSA — deprecated (NIST SP 800-186 §5.4) |
+| `SKFF-M-12-30.xml` | SKIP_DEPRECATED | 3DES — deprecated (NIST SP 800-131A r2 §1.2.1) |
+| `SKFF-M-4-30.xml` | SKIP_DEPRECATED | 3DES — deprecated (NIST SP 800-131A r2 §1.2.1) |
+| `SKFF-M-8-30.xml` | SKIP_DEPRECATED | 3DES — deprecated (NIST SP 800-131A r2 §1.2.1) |

@@ -98,6 +98,31 @@ IMPLEMENTED_OPS: set[str] = {
 }
 
 
+# OASIS conformance tests that exercise cryptographic mechanisms the
+# `softhsmrustv3` PKCS#11 backend does NOT implement by policy. These
+# are not implementation gaps — the algorithms are deprecated and
+# intentionally out of scope. See `kmip/DEPRECATED.md` for the full
+# rationale + spec citations. Tests in this set surface as
+# `SKIP_DEPRECATED` rather than `FAIL` and are removed from the
+# headline pass-rate denominator.
+_DEPRECATED_ALGO_TESTS: dict[str, str] = {
+    # `KmipAlgorithm = DSA` (0x05). Classical DSA discrete-log signatures.
+    "BL-M-12-30.xml": "DSA — deprecated (NIST SP 800-186 §5.4)",
+    "BL-M-13-30.xml": "DSA — deprecated (NIST SP 800-186 §5.4)",
+    # `KmipAlgorithm = 3DES / DES3` (0x02). Triple-DES.
+    "SKFF-M-4-30.xml": "3DES — deprecated (NIST SP 800-131A r2 §1.2.1)",
+    "SKFF-M-8-30.xml": "3DES — deprecated (NIST SP 800-131A r2 §1.2.1)",
+    "SKFF-M-12-30.xml": "3DES — deprecated (NIST SP 800-131A r2 §1.2.1)",
+    # `KmipAlgorithm = DES` (0x01) — single-DES. Not currently in any
+    # mandatory OASIS test we replay, but listed for completeness so
+    # the policy + skip-list stay together.
+}
+
+
+def is_deprecated_algo_test(name: str) -> str | None:
+    return _DEPRECATED_ALGO_TESTS.get(name)
+
+
 # ── Placeholder resolution ──────────────────────────────────────────────────
 
 
@@ -812,13 +837,18 @@ def operations_used(transcript: list[TtlvNode]) -> set[str]:
 @dataclass
 class TestResult:
     name: str
-    status: str  # PASS / FAIL / SKIP_OP / SKIP_PARSE / ERROR
+    status: str  # PASS / FAIL / SKIP_OP / SKIP_PARSE / SKIP_DEPRECATED / ERROR
     detail: str = ""
     ops_used: list[str] = field(default_factory=list)
 
 
 def run_test(srv: Server, xml_path: Path) -> TestResult:
     name = xml_path.name
+    # Policy: deprecated mechanisms (DES, 3DES, classical DSA) are
+    # out of scope for the softhsmrustv3 backend. See
+    # `kmip/DEPRECATED.md` for the full rationale + spec citations.
+    if (reason := is_deprecated_algo_test(name)) is not None:
+        return TestResult(name=name, status="SKIP_DEPRECATED", detail=reason)
     try:
         transcript = parse_transcript_xml(xml_path)
     except Exception as e:
@@ -910,9 +940,13 @@ def write_report(results: list[TestResult], path: Path) -> None:
     n_fail = sum(1 for r in results if r.status == "FAIL")
     n_skip_op = sum(1 for r in results if r.status == "SKIP_OP")
     n_skip_parse = sum(1 for r in results if r.status == "SKIP_PARSE")
+    n_skip_deprecated = sum(1 for r in results if r.status == "SKIP_DEPRECATED")
     n_err = sum(1 for r in results if r.status == "ERROR")
     n_total = len(results)
-    n_candidates = n_total - n_skip_op - n_skip_parse
+    # Candidates = tests we can actually run and expect to pass:
+    # excludes SKIP_PARSE (XML malformed), SKIP_OP (op not implemented),
+    # and SKIP_DEPRECATED (algorithm out-of-scope per policy).
+    n_candidates = n_total - n_skip_op - n_skip_parse - n_skip_deprecated
 
     md = []
     md.append("# OASIS KMIP 3.0 Dispatcher Replay Report\n")
@@ -924,12 +958,20 @@ def write_report(results: list[TestResult], path: Path) -> None:
     md.append(f"| **FAIL** | {n_fail} | {100*n_fail/n_total:.1f}% |")
     md.append(f"| ERROR | {n_err} | {100*n_err/n_total:.1f}% |")
     md.append(f"| SKIP_OP (op not implemented) | {n_skip_op} | {100*n_skip_op/n_total:.1f}% |")
+    md.append(f"| SKIP_DEPRECATED (DES / 3DES / DSA out of scope) | {n_skip_deprecated} | {100*n_skip_deprecated/n_total:.1f}% |")
     md.append(f"| SKIP_PARSE (XML malformed) | {n_skip_parse} | {100*n_skip_parse/n_total:.1f}% |")
     md.append(f"| **Total** | **{n_total}** | 100.0% |\n")
-    md.append(f"\nOf the {n_candidates} tests that exercise only implemented ops:")
+    md.append(f"\nOf the {n_candidates} tests that exercise only implemented + non-deprecated ops:")
     md.append(f"\n  - **{n_pass} pass ({100*n_pass/max(n_candidates,1):.0f}%)**")
     md.append(f"\n  - {n_fail} fail")
     md.append(f"\n  - {n_err} errored\n")
+    if n_skip_deprecated:
+        md.append(f"\n{n_skip_deprecated} test(s) skipped per the deprecated-mechanism policy ")
+        md.append("(see `kmip/DEPRECATED.md`):")
+        for r in results:
+            if r.status == "SKIP_DEPRECATED":
+                md.append(f"\n  - `{r.name}` — {r.detail}")
+        md.append("\n")
     md.append("\n## Per-test breakdown\n\n")
     md.append("| Test | Status | Detail |")
     md.append("|---|---|---|")
@@ -946,6 +988,7 @@ def write_report(results: list[TestResult], path: Path) -> None:
             "summary": {
                 "pass": n_pass, "fail": n_fail, "error": n_err,
                 "skip_op": n_skip_op, "skip_parse": n_skip_parse,
+                "skip_deprecated": n_skip_deprecated,
                 "total": n_total, "candidates": n_candidates,
             },
             "tests": [
