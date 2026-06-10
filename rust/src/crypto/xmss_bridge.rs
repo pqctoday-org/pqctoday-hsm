@@ -34,18 +34,28 @@ pub fn xmss_keys_remaining(xmss_param: u32, priv_key: &[u8]) -> u32 {
     xmss_param_max_sigs(xmss_param).saturating_sub(idx)
 }
 
-pub static mut KAT_SEED: Option<[u8; 96]> = None;
+// Mutex (not `static mut`): writing a `static mut` is UB under any future
+// multithreaded build. Poison recovery matches GlobalState's convention.
+pub static KAT_SEED: std::sync::Mutex<Option<[u8; 96]>> = std::sync::Mutex::new(None);
+
+/// Read the KAT seed (test hook), tolerating a poisoned lock.
+pub fn kat_seed() -> Option<[u8; 96]> {
+    *KAT_SEED.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Set/clear the KAT seed (test hook).
+pub fn set_kat_seed_value(v: Option<[u8; 96]>) {
+    *KAT_SEED.lock().unwrap_or_else(|e| e.into_inner()) = v;
+}
 
 pub fn xmss_keygen(xmss_param: u32) -> Result<(Vec<u8>, Vec<u8>), ()> {
     macro_rules! dispatch {
         ($t:ty) => {{
             let mut seed = [0u8; 96];
-            unsafe {
-                if let Some(kat) = KAT_SEED {
-                    seed.copy_from_slice(&kat);
-                } else {
-                    getrandom::getrandom(&mut seed).map_err(|_| ())?;
-                }
+            if let Some(kat) = kat_seed() {
+                seed.copy_from_slice(&kat);
+            } else {
+                getrandom::getrandom(&mut seed).map_err(|_| ())?;
             }
             let mut kp = KeyPair::<$t>::from_seed(&seed).map_err(|_| ())?;
             Ok((
@@ -153,12 +163,10 @@ pub fn xmssmt_keygen(xmssmt_param: u32) -> Result<(Vec<u8>, Vec<u8>), ()> {
     macro_rules! dispatch {
         ($t:ty) => {{
             let mut seed = [0u8; 96];
-            unsafe {
-                if let Some(kat) = KAT_SEED {
-                    seed.copy_from_slice(&kat);
-                } else {
-                    getrandom::getrandom(&mut seed).map_err(|_| ())?;
-                }
+            if let Some(kat) = kat_seed() {
+                seed.copy_from_slice(&kat);
+            } else {
+                getrandom::getrandom(&mut seed).map_err(|_| ())?;
             }
             let mut kp = KeyPair::<$t>::from_seed(&seed).map_err(|_| ())?;
             Ok((

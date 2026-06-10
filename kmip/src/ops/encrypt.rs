@@ -56,6 +56,19 @@ pub fn encrypt(deps: &Deps, req: EncryptRequest, correlation_id: &str) -> Result
         ));
     }
 
+    // KMIP 3.0 §11 `Usage Limits` — Encrypt SHALL be rejected with
+    // `PermissionDenied` once the byte-count budget is exhausted.
+    // CS-BC-M-7 pins a 16-byte budget that the second Encrypt
+    // SHALL exhaust (16 + 16 > 16).
+    if let Some(remaining) = obj.usage_limits_remaining {
+        if (req.data.len() as i64) > remaining {
+            return Err(fail_err(deps, correlation_id, "Encrypt",
+                KmipError::permission_denied(
+                    "Usage Limits exhausted".to_string(),
+                )));
+        }
+    }
+
     // KMIP 3.0 §3.4 — `Process Start Date` / `Protect Stop Date`
     // define the time window during which Encrypt MAY be performed
     // even when the object is Active. Outside the window the op
@@ -116,8 +129,13 @@ pub fn encrypt(deps: &Deps, req: EncryptRequest, correlation_id: &str) -> Result
         }
     }
 
-    // Plane-3: branch on algorithm.
-    let resp = if is_ml_kem(obj.algorithm) {
+    // KMIP 3.0 §6.1.21 multi-part streaming — `Init Indicator` opens a
+    // stream, `Correlation Value` chains parts, `Final Indicator`
+    // closes it (emitting the AEAD tag). CS-BC-M-GCM-3 pins this flow.
+    let resp = if req.init_indicator == Some(true) || req.correlation_value.is_some() {
+        encrypt_streaming(deps, &req, &obj, correlation_id)
+    } else if is_ml_kem(obj.algorithm) {
+        // Plane-3: branch on algorithm.
         encrypt_ml_kem(deps, &req, &obj, correlation_id)
     } else {
         encrypt_classical(deps, &req, &obj, correlation_id)
@@ -125,6 +143,158 @@ pub fn encrypt(deps: &Deps, req: EncryptRequest, correlation_id: &str) -> Result
 
     emit_success(deps, correlation_id, "Encrypt");
     Ok(resp)
+}
+
+/// Multi-part Encrypt (KMIP 3.0 §6.1.21 streaming). Drives the engine's
+/// PKCS#11 §5.2 Update/Final state machines
+/// (`softhsmrustv3::crypto::multipart`) — one `StreamCtx` per
+/// server-issued `Correlation Value`, held on [`Deps::streams`].
+fn encrypt_streaming(
+    deps: &Deps,
+    req: &EncryptRequest,
+    obj: &crate::store::ObjectRecord,
+    correlation_id: &str,
+) -> Result<EncryptResponse> {
+    use softhsmrustv3::crypto::multipart::{
+        AesKey, CbcPadState, CbcState, CipherDirection, CtrState, EcbState, GcmState,
+        MultipartCipher,
+    };
+    use super::deps::StreamCtx;
+
+    let invalid = |msg: &str| {
+        KmipError::failed(ResultReason::InvalidMessage, msg.to_string())
+    };
+
+    if req.init_indicator == Some(true) {
+        // ── Open a new stream ───────────────────────────────────────────
+        if obj.algorithm != KmipAlgorithm::Aes {
+            return Err(fail_err(deps, correlation_id, "Encrypt",
+                KmipError::failed(
+                    ResultReason::OperationNotSupported,
+                    format!("streaming Encrypt not supported for {:?}", obj.algorithm),
+                )));
+        }
+        let effective_cp = req
+            .cryptographic_parameters
+            .as_ref()
+            .or(obj.cryptographic_parameters.as_ref());
+        let mech = super::helpers::aes_mechanism_for(effective_cp);
+        let key_bytes = obj.key_material.as_ref().ok_or_else(|| {
+            fail_err(deps, correlation_id, "Encrypt",
+                KmipError::failed(
+                    ResultReason::OperationNotSupported,
+                    "streaming Encrypt requires Registered key material".to_string(),
+                ))
+        })?;
+        let key = AesKey::new(key_bytes).ok_or_else(|| {
+            fail_err(deps, correlation_id, "Encrypt",
+                KmipError::failed(
+                    ResultReason::CryptographicFailure,
+                    format!("unsupported AES key length {}", key_bytes.len()),
+                ))
+        })?;
+        validate_iv_for_mech(deps, correlation_id, mech, req.iv.as_deref())?;
+        let iv = req.iv.as_deref().unwrap_or(&[]);
+        let tag_bits = effective_cp
+            .and_then(|c| c.tag_length)
+            .map(|n| (n as u32) * 8)
+            .unwrap_or(128);
+        use softhsmrustv3::constants as ck;
+        let cipher = match mech {
+            ck::CKM_AES_GCM => MultipartCipher::Gcm(GcmState::new(
+                key,
+                iv,
+                req.aad.as_deref().unwrap_or(&[]),
+                tag_bits,
+                CipherDirection::Encrypt,
+            )),
+            ck::CKM_AES_ECB => MultipartCipher::Ecb(EcbState::new(key, CipherDirection::Encrypt)),
+            ck::CKM_AES_CBC => {
+                let iv16: [u8; 16] = iv.try_into().map_err(|_| invalid("invalid-iv-length"))?;
+                MultipartCipher::Cbc(CbcState::new(key, iv16, CipherDirection::Encrypt))
+            }
+            ck::CKM_AES_CBC_PAD => {
+                let iv16: [u8; 16] = iv.try_into().map_err(|_| invalid("invalid-iv-length"))?;
+                MultipartCipher::CbcPad(CbcPadState::new(key, iv16, CipherDirection::Encrypt))
+            }
+            ck::CKM_AES_CTR => {
+                let cb: [u8; 16] = iv.try_into().map_err(|_| invalid("invalid-iv-length"))?;
+                MultipartCipher::Ctr(CtrState::new(key, cb))
+            }
+            _ => {
+                return Err(fail_err(deps, correlation_id, "Encrypt",
+                    KmipError::failed(
+                        ResultReason::OperationNotSupported,
+                        format!("streaming Encrypt: unsupported mechanism {mech:#x}"),
+                    )));
+            }
+        };
+        let mut cipher = cipher;
+        let ct = cipher
+            .update(&req.data)
+            .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Encrypt:update"))?;
+        emit_pkcs11(deps, correlation_id, "C_EncryptInit", Some(mech), 0, "CKR_OK");
+        emit_pkcs11(deps, correlation_id, "C_EncryptUpdate", Some(mech), 0, "CKR_OK");
+        let cv = deps.new_correlation_value();
+        deps.streams.lock().unwrap().insert(
+            cv.clone(),
+            StreamCtx { cipher, uid: req.uid.clone() },
+        );
+        return Ok(EncryptResponse {
+            uid: req.uid.clone(),
+            ciphertext: ct,
+            correlation_value: Some(cv),
+            ..Default::default()
+        });
+    }
+
+    // ── Continue / close an existing stream ────────────────────────────
+    let cv = req.correlation_value.as_ref().expect("checked by caller");
+    let mut streams = deps.streams.lock().unwrap();
+    let mut ctx = streams.remove(cv).ok_or_else(|| {
+        fail_err(deps, correlation_id, "Encrypt", invalid("unknown-correlation-value"))
+    })?;
+    if ctx.uid != req.uid {
+        return Err(fail_err(deps, correlation_id, "Encrypt",
+            invalid("correlation-value/uid mismatch")));
+    }
+    let mut ct = ctx
+        .cipher
+        .update(&req.data)
+        .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Encrypt:update"))?;
+    if req.final_indicator == Some(true) {
+        let is_aead = matches!(ctx.cipher, MultipartCipher::Gcm(_));
+        let tail = ctx
+            .cipher
+            .finalize()
+            .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Encrypt:final"))?;
+        emit_pkcs11(deps, correlation_id, "C_EncryptUpdate", None, 0, "CKR_OK");
+        emit_pkcs11(deps, correlation_id, "C_EncryptFinal", None, 0, "CKR_OK");
+        // AEAD finalize emits the auth tag (own response field per
+        // §6.1.21); block-mode finalize emits trailing ciphertext.
+        let tag = if is_aead {
+            Some(tail)
+        } else {
+            ct.extend_from_slice(&tail);
+            None
+        };
+        Ok(EncryptResponse {
+            uid: req.uid.clone(),
+            ciphertext: ct,
+            authenticated_encryption_tag: tag,
+            ..Default::default()
+        })
+    } else {
+        // Middle part — put the stream back and echo the handle.
+        streams.insert(cv.clone(), ctx);
+        emit_pkcs11(deps, correlation_id, "C_EncryptUpdate", None, 0, "CKR_OK");
+        Ok(EncryptResponse {
+            uid: req.uid.clone(),
+            ciphertext: ct,
+            correlation_value: Some(cv.clone()),
+            ..Default::default()
+        })
+    }
 }
 
 fn is_ml_kem(a: KmipAlgorithm) -> bool {
@@ -172,8 +342,7 @@ fn encrypt_ml_kem(
         uid: req.uid.clone(),
         ciphertext,
         shared_secret: Some(shared_secret),
-        authenticated_encryption_tag: None,
-        iv_counter_nonce: None,
+        ..Default::default()
     })
 }
 
@@ -304,6 +473,12 @@ fn encrypt_classical(
     } else {
         &req.data
     };
+    // KMIP 3.0 §11 `Tag Length` — caller-selectable AEAD authenticator
+    // length (NIST SP 800-38D §5.2.1.2: 12/13/14/15/16 bytes). Forwarded
+    // to the shim so it can pick the right typed AesGcm variant.
+    let tag_len = effective_cp
+        .and_then(|c| c.tag_length)
+        .map(|n| n as usize);
     let ciphertext = if let Some(key_bytes) = &obj.key_material {
         softhsmrustv3::native::encrypt_with_key_bytes(
             key_bytes,
@@ -312,6 +487,7 @@ fn encrypt_classical(
             effective_iv,
             oaep.as_ref(),
             aad,
+            tag_len,
         )
         .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Encrypt"))?
     } else if let Some(session) = deps.engine_session {
@@ -332,28 +508,41 @@ fn encrypt_classical(
     // AEAD mechanisms — the shim returns `ciphertext || tag`
     // (the standard Rust `aead` crate convention). KMIP 3.0 §6.1.21
     // requires the tag to ride in its own `AuthenticatedEncryptionTag`
-    // field, not tacked onto Data, so we split on the way out. Every
-    // AEAD mechanism in our shim uses a 16-byte tag (AES-GCM and
-    // ChaCha20-Poly1305 per RFC 5116 / 8439).
+    // field, not tacked onto Data, so we split on the way out. The tag
+    // is `Tag Length` bytes when the request's CryptographicParameters
+    // pin one (NIST SP 800-38D §5.2.1.2 truncation; CS-BC-M-GCM-2 pair
+    // #91 pins a 15-byte tag over empty plaintext), 16 otherwise.
     let is_aead = matches!(
         mech,
         softhsmrustv3::constants::CKM_AES_GCM
             | softhsmrustv3::constants::CKM_CHACHA20_POLY1305,
     );
+    let split_tag = tag_len.unwrap_or(16);
     let (ciphertext, authenticated_encryption_tag) =
-        if is_aead && ciphertext.len() >= 16 {
-            let split = ciphertext.len() - 16;
+        if is_aead && ciphertext.len() >= split_tag {
+            let split = ciphertext.len() - split_tag;
             let tag = ciphertext[split..].to_vec();
             (ciphertext[..split].to_vec(), Some(tag))
         } else {
             (ciphertext, None)
         };
+
+    // KMIP §11 Usage Limits — deduct after the encrypt succeeds.
+    // We checked `req.data.len() <= remaining` up-front; do the
+    // bookkeeping now so a failed encrypt doesn't burn the budget.
+    if let Some(remaining) = obj.usage_limits_remaining {
+        if let Ok(Some(mut rec)) = deps.store.get(&req.uid) {
+            rec.usage_limits_remaining = Some(remaining - req.data.len() as i64);
+            let _ = deps.store.update(rec);
+        }
+    }
+
     Ok(EncryptResponse {
         uid: req.uid.clone(),
         ciphertext,
-        shared_secret: None,
         authenticated_encryption_tag,
         iv_counter_nonce: generated_iv,
+        ..Default::default()
     })
 }
 
@@ -373,7 +562,11 @@ pub(crate) fn validate_iv_for_mech(
     let len = iv.map(|b| b.len());
     let valid = match mech {
         ck::CKM_AES_CBC | ck::CKM_AES_CBC_PAD => len == Some(16),
-        ck::CKM_AES_GCM => len == Some(12),
+        // NIST SP 800-38D §5.2.1.1 — GCM accepts any IV of 1..2^64-1
+        // bits; non-96-bit IVs derive J0 via GHASH (§7.1 step 2b). The
+        // engine handles both paths. OASIS CS-BC-M-GCM-2 pins 8- and
+        // 60-byte IVs.
+        ck::CKM_AES_GCM => len.is_some_and(|l| l >= 1),
         ck::CKM_CHACHA20_POLY1305 => len == Some(12),
         ck::CKM_CHACHA20 => matches!(len, Some(8) | Some(12)),
         // No IV for these mechanisms.
@@ -460,7 +653,7 @@ mod tests {
     fn ml_kem_branch_returns_encapsulation_and_shared_secret() {
         let (ring, d) = deps_and_ring();
         put(&d, "k", KmipAlgorithm::MlKem1024, ObjectType::PublicKey, State::Active, UsageMask::KEY_AGREEMENT);
-        let r = encrypt(&d, EncryptRequest { uid: "k".into(), data: vec![], iv: None , cryptographic_parameters: None, aad: None}, "c").unwrap();
+        let r = encrypt(&d, EncryptRequest { uid: "k".into(), ..Default::default() }, "c").unwrap();
         assert!(r.shared_secret.is_some(), "ML-KEM must return shared secret");
         assert_eq!(r.ciphertext.len(), 32);
         // Plane-3 emit should be C_EncapsulateKey, not C_EncryptInit.
@@ -477,7 +670,7 @@ mod tests {
             uid: "a".into(),
             data: b"plaintext".to_vec(),
             iv: Some(vec![0u8; 12]),
-            cryptographic_parameters: None, aad: None,
+            ..Default::default()
         }, "c").unwrap();
         assert!(r.shared_secret.is_none(), "classical encrypt has no shared secret");
         // Plane-3 emit should be C_EncryptInit + C_Encrypt.
@@ -490,7 +683,7 @@ mod tests {
     fn encrypt_on_destroyed_returns_wrong_lifecycle_state() {
         let (_ring, d) = deps_and_ring();
         put(&d, "a", KmipAlgorithm::Aes, ObjectType::SymmetricKey, State::Destroyed, UsageMask::ENCRYPT);
-        let err = encrypt(&d, EncryptRequest { uid: "a".into(), data: vec![], iv: None , cryptographic_parameters: None, aad: None}, "c").unwrap_err();
+        let err = encrypt(&d, EncryptRequest { uid: "a".into(), ..Default::default() }, "c").unwrap_err();
         // KMIP 3.0 §11 — Destroyed is an FSM-rejection state, not
         // an archive state. CS-AC-M-8 pins WrongKeyLifecycleState
         // for crypto-ops against Destroyed keys.

@@ -288,6 +288,21 @@ pub enum Attribute {
     /// `Private Key Link` (0x420199) — UID reference to the private
     /// key half (mirror of PublicKeyLink, emitted on the public half).
     PrivateKeyLink(String),
+    /// `Next Link` (0x420194) — UID reference to the next-generation
+    /// key in a rotation chain. AX-M-1 step #1 sets it on a freshly
+    /// rotated source key to point at its replacement.
+    NextLink(String),
+    /// `Previous Link` (0x420198) — UID reference to the previous-
+    /// generation key (mirror of NextLink on the replacement).
+    PreviousLink(String),
+    /// `Group Link` (0x4201b3) — UID reference to a `Group` object
+    /// that contains this managed object. SASED-M-3 step #0 pins a
+    /// Locate filter by GroupLink.
+    GroupLink(String),
+    /// `Application Specific Information` (0x420004) Structure —
+    /// `ApplicationNamespace` + `ApplicationData` text-string pair.
+    /// TL-M-3 step #0 pins a Locate filter by both fields.
+    ApplicationSpecificInformation { namespace: String, data: String },
     /// `Certificate Value` (0x42001e) — the DER bytes of the X.509
     /// certificate as supplied to Register / surfaced via Get.
     CertificateValue(Vec<u8>),

@@ -1,6 +1,6 @@
 # KMIP 3.0 Conformance Report
 
-**Generated**: 2026-06-08
+**Generated**: 2026-06-08 · **Updated**: 2026-06-10 (dispatcher replay results)
 **Subsystem**: `pqctoday-kmip` (`kmip/` crate)
 **Spec**: OASIS Key Management Interoperability Protocol v3.0 CSD01
 **Test corpus**: `kmip-profiles-v3.0.zip` (`test-cases/kmip-v3.0/{mandatory,optional}/*.xml`)
@@ -10,14 +10,19 @@
 | Layer | Status | Evidence |
 |---|---|---|
 | TTLV wire-format codec | ✅ **100% conformant** | 1234/1234 OASIS messages round-trip byte-identical |
-| Op coverage (12 of ~60 KMIP 3.0 ops) | ❌ **non-conformant** | Fails Baseline Server profile (missing Register, GetAttributes, DiscoverVersions) |
-| Dispatcher behaviour vs OASIS expectations | ⏸️ not measured | Harness pending — see §4 below |
+| Dispatcher behaviour vs OASIS expectations | ✅ **92/92 actionable tests pass (100%)** | `conformance/REPLAY_REPORT.md` (regenerated per run) |
+| Op coverage | ✅ all ops used by the OASIS corpus | 0 `SKIP_OP` in the replay report |
 | Third-party interop (PyKMIP / vendor) | ⏸️ never run | KMIP 3.0 has no compatible OSS client |
 
-**Bottom line**: The wire bytes our server speaks are KMIP 3.0 standard. The
-*set of operations* it answers to is a 12-op PQC-focused subset, not a
-recognised KMIP 3.0 conformance profile. Pre-MVP scope decision required —
-see §5.
+**Bottom line**: the wire bytes are KMIP 3.0 standard AND the dispatcher
+matches the OASIS conformance transcripts on **all 92 tests** that
+exercise implemented, non-deprecated mechanisms (`Get` with
+`KeyWrappingSpecification` — AES-KW key wrapping per AX-M-2 — was the
+last gap, closed 2026-06-10). The remaining 10 transcripts are
+deliberate skips: 5 deprecated mechanisms (DES / 3DES
+/ DSA per `kmip/DEPRECATED.md`), 2 precondition tests requiring
+prior-transcript state the hermetic harness wipes, 3 mutually-exclusive
+RNG-seed policy variants.
 
 ## 1. Test corpus inventory
 
@@ -83,125 +88,31 @@ bit-flag mask, every enum lookup including the KMIP 3.0 `AttributeReference`
 Codec round-trip says **the bytes we speak are KMIP 3.0**. It does *not*
 say "we respond correctly to a KMIP 3.0 request". That's §4 below.
 
-## 3. Op coverage gap
+## 3. Op coverage: closed
 
-The OASIS test corpus uses 47 distinct KMIP operations. We implement 12:
+The 2026-06-08 revision of this report listed 35+ missing operations.
+All ops exercised by the OASIS corpus have since been implemented
+(`Register`, `GetAttributes`, `GetAttributeList`, attribute CRUD, `MAC` /
+`MACVerify` / `Hash`, `DiscoverVersions`, RNG ops, session/auth ops,
+`Check`, `Export` / `Import`, lifecycle ops, the PKCS#11 passthrough, and
+multi-part streaming `Encrypt`). The replay report shows **0 `SKIP_OP`**.
 
-**Implemented** (12): `Create`, `CreateKeyPair`, `Get`, `Locate`,
-`Activate`, `Revoke`, `Destroy`, `Encrypt`, `Decrypt`, `Sign`,
-`SignatureVerify`, `Query`.
+## 4. Dispatcher conformance: ✅ measured continuously
 
-**Missing** (35+), grouped by what they block:
+The replay harness (`conformance/harness/dispatcher_replay.py`) drives
+every OASIS transcript against a freshly started server per test
+(hermetic; in-memory store), resolves `$NOW` / `$UNIQUE_IDENTIFIER_n` /
+auto-bound tag placeholders, and compares responses tree-wise.
 
-| Missing op | Blocks N tests | Notes |
-|---|---|---|
-| `Register` | 60 | Import existing key bytes (vs. `Create` which generates) |
-| `GetAttributes` | 36 | Named-attribute fetch (distinct from `Get` which returns full object) |
-| `ModifyAttribute` | 14 | Attribute CRUD family |
-| `AddAttribute` | 14 | "" |
-| `GetAttributeList` | 11 | "" |
-| `DeleteAttribute` | 9 | "" |
-| `CreateCredential` | 8 | Auth / session ops |
-| `Check` | 7 | Object usage authorisation |
-| `RNGSeed` / `RNGRetrieve` | 7+4 | RNG entropy management |
-| `CreateUser` / `Login` / `Logout` | 6+3+3 | Session ops |
-| `MAC` / `MACVerify` / `Hash` | 5+5+4 | Basic crypto ops we don't expose via KMIP |
-| `Obliterate` / `Archive` / `Recover` | 4+3+3 | Object lifecycle |
-| `Export` / `Import` | 4+4 | Key transport |
-| `DiscoverVersions` | 4 | **KMIP 3.0 protocol version negotiation handshake (required by every profile)** |
-| `DeriveKey` / `ReKey` / `ReKeyKeyPair` | 3+3+3 | Key derivation / rotation |
-| `Certify` / `ReCertify` | 3+3 | Certificate issuance |
-| `JoinSplitKey` / `CreateSplitKey` | 3+3 | Key splitting |
-| `Validate` / `Process` | 3+3 | Object validation |
-| `SetAttribute` / `AdjustAttribute` | 4+4 | Attribute CRUD |
-| `SetEndpointRole` / `Notify` / `Put` | 4+3+3 | Endpoint management |
-| `QueryAsynchronousRequests` / `Poll` / `Cancel` | 3+3+3 | Async op management |
-| `Deactivate` | 3 | Lifecycle |
-| `ObtainLease` / `GetUsageAllocation` / `GetConstraints` / `SetConstraints` | 3+3+3+3 | Quota / lease |
-| `Ping` | 3 | Liveness |
-| `Log` | 5 | Server-side logging |
-| `Recover` | 3 | Compromise recovery |
-| `CreateGroup` | 4 | Object grouping |
-| `PKCS_11` | 1 | PKCS#11 passthrough |
+Current standing (2026-06-10): **92 PASS / 0 FAIL / 10 deliberate
+skips** out of 102 transcripts. Per-test detail: `conformance/REPLAY_REPORT.md`.
 
-**Tests we can theoretically pass** (using only our 12 ops):
+## 5. Scope decision: resolved
 
-| Subset | Count | % of total |
-|---|---|---|
-| `mandatory/` | 13 | 13.7% |
-| `optional/` | 0 | 0% |
-| **Total candidates** | **13** | **12.7%** |
-
-### 3.1 Conformance to standard profiles
-
-The OASIS KMIP 3.0 Profiles document defines named server profiles
-(Baseline Server, Symmetric Key Lifecycle Server, Asymmetric Key Lifecycle
-Server, Basic Cryptographic Services, etc.). Each profile has a mandatory
-op list.
-
-| Profile | Required-but-missing ops | Status |
-|---|---|---|
-| Baseline Server | `Register`, `GetAttributes`, `DiscoverVersions`, … | ❌ non-conformant |
-| Symmetric Key Lifecycle | + `MAC`, `MACVerify`, … | ❌ non-conformant |
-| Asymmetric Key Lifecycle | + `Certify`, `ReCertify`, … | ❌ non-conformant |
-| Basic Cryptographic Services | + `Hash`, … | ❌ non-conformant |
-
-**We conform to zero KMIP 3.0 named profiles.** This is not a bug in our
-implementation — the codebase was scoped to 12 PQC-focused ops, not to
-match any profile. The gap is documented here so it's visible to
-downstream consumers.
-
-## 4. Dispatcher conformance: ⏸️ not yet measured
-
-Codec round-trip proves the wire format is correct. It does NOT prove the
-op handlers produce OASIS-conformant responses for the 13 testable cases.
-Doing so requires a **replay harness** that:
-
-1. Parses an XML transcript into request/response message pairs.
-2. Resolves placeholders (`$UNIQUE_IDENTIFIER_0` ← bound to the UID
-   returned by the first prior `Create` response, etc.).
-3. Drives each Request through the dispatcher.
-4. Compares the produced Response to the expected Response, modulo
-   `$NOW` (timestamps) and bound placeholders.
-
-This is the next deliverable and not yet built. Status: scoped, prerequisite
-work (codec round-trip) is complete.
-
-Expected outcome estimate based on op coverage:
-
-- 13 candidate tests where every op is implemented.
-- Of those, somewhere between **5 and 13 will fully pass** depending on
-  attribute-template completeness and lifecycle-FSM edge cases. We'll know
-  the exact number once §4's harness ships.
-
-## 5. Scope decision required
-
-Three viable paths forward, each with different effort and conformance
-posture:
-
-### Path A — Reach Baseline Server profile (~5-10 person-days)
-
-Add `Register`, `GetAttributes`, `DiscoverVersions`, `AddAttribute`,
-`DeleteAttribute`, `ModifyAttribute`, `GetAttributeList`, `MAC`,
-`MACVerify`. Targets the minimum named OASIS profile. Achievable; doesn't
-help the PQC story directly but legitimises the "KMIP 3.0 server" claim.
-
-### Path B — Stay PQC-subset, document non-conformance (~0.5 PD)
-
-Rename the subsystem from "KMIP 3.0 server" to "PQC-extended KMIP 3.0
-subset". Document the 12 supported ops + the codec compliance proof
-clearly. Honest; ships fastest; downstream consumers know what they're
-getting.
-
-### Path C — Hybrid: add the 3 cheap high-value ops (~1.5 PD)
-
-Add `DiscoverVersions` (protocol handshake, ~50 LOC), `GetAttributes`
-(read attrs, ~150 LOC), `Register` (import key, ~250 LOC). These unblock
-~95% of the OASIS tests without committing to the full attribute-CRUD or
-crypto-op family. Lands us at a "PQC-extended Baseline subset" claim
-that's defensible.
-
-Recommendation: **Path C**, with Path A's remainder parked.
+The 2026-06-08 revision proposed Paths A/B/C. Events overtook it: the
+implemented surface now exceeds Path A (Baseline-profile ops plus the
+crypto-op family, streaming, KMIP-level key wrapping on `Get`, and the
+PKCS#11 passthrough). No open scope lines remain against the corpus.
 
 ## 6. How to re-run the codec compliance test
 

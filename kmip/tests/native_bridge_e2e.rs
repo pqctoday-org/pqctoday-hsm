@@ -135,6 +135,7 @@ fn ml_dsa_65_create_sign_verify_destroy_against_real_engine() {
         SignRequest {
             uid: priv_rec.uid.clone(),
             data: message.to_vec(),
+            cryptographic_parameters: None,
         },
         "e2e-sign",
     )
@@ -153,6 +154,7 @@ fn ml_dsa_65_create_sign_verify_destroy_against_real_engine() {
             uid: pub_rec.uid.clone(),
             data: message.to_vec(),
             signature: sig_resp.signature.clone(),
+            cryptographic_parameters: None,
         },
         "e2e-verify-ok",
     )
@@ -173,6 +175,7 @@ fn ml_dsa_65_create_sign_verify_destroy_against_real_engine() {
             uid: pub_rec.uid.clone(),
             data: message.to_vec(),
             signature: tampered,
+            cryptographic_parameters: None,
         },
         "e2e-verify-bad",
     )
@@ -239,6 +242,7 @@ fn ml_dsa_87_create_sign_verify_against_real_engine() {
         SignRequest {
             uid: priv_rec.uid.clone(),
             data: b"hello".to_vec(),
+            cryptographic_parameters: None,
         },
         "s",
     )
@@ -255,6 +259,7 @@ fn ml_dsa_87_create_sign_verify_against_real_engine() {
             uid: pub_rec.uid.clone(),
             data: b"hello".to_vec(),
             signature: sig.signature,
+            cryptographic_parameters: None,
         },
         "v",
     )

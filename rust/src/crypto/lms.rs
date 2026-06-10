@@ -216,267 +216,40 @@ pub fn hss_sign(
     }
 }
 
-// ── Custom SHAKE-256 N32 verifier (RFC 8554 §5) ─────────────────────────────
-// Required because hbs-lms 0.1.1 writes SHA-256 internal type codes in all
-// serialized key/sig bytes; it cannot parse SP 800-208 SHAKE type IDs (0x0F–0x13).
-// This path is only hit for §12.3 ACVP sigver KAT (external vectors from NIST).
-
-use sha3::{
-    Shake256 as Sha3Shake256,
-    digest::{ExtendableOutput, Update},
-};
-
-fn shake256_n32(input: &[u8]) -> [u8; 32] {
-    use sha3::digest::XofReader;
-    let mut h = Sha3Shake256::default();
-    h.update(input);
-    let mut out = [0u8; 32];
-    h.finalize_xof().read(&mut out);
-    out
-}
-
-/// LMOTS params for N32 variants (RFC 8554 Table 1 / SP 800-208 Table 2).
-/// Returns (w, p, ls) for IANA LMOTS type IDs:
-///   SHAKE N32 W1=0x09, W2=0x0A, W4=0x0B, W8=0x0C
-fn lmots_n32_params(lmots_type: u32) -> Option<(u8, usize, u8)> {
-    match lmots_type {
-        // SHA-256 N32 (0x01–0x04) and SHAKE-256 N32 (0x09–0x0C) share same w/p/ls
-        0x01 | 0x09 => Some((1, 265, 7)),
-        0x02 | 0x0A => Some((2, 133, 6)),
-        0x03 | 0x0B => Some((4, 67, 4)),
-        0x04 | 0x0C => Some((8, 34, 0)),
-        _ => None,
-    }
-}
-
-/// RFC 8554 §3.1 coef(S, i, w): extract i-th w-bit value from byte string S.
-fn coef(s: &[u8], i: usize, w: u8) -> u8 {
-    let bits = 8 / w as usize;
-    let byte_idx = i / bits;
-    let shift = (bits - 1 - (i % bits)) * w as usize;
-    (s[byte_idx] >> shift) & ((1u32 << w) - 1) as u8
-}
-
-/// RFC 8554 §4.4 checksum Cksm(S, w, ls).
-fn checksum(s: &[u8], w: u8, ls: u8) -> u16 {
-    let mut sum: u32 = 0;
-    let max_val = (1u32 << w) - 1;
-    let p_data = s.len() * (8 / w as usize);
-    for i in 0..p_data {
-        sum += max_val - coef(s, i, w) as u32;
-    }
-    (sum << ls) as u16
-}
-
-/// RFC 8554 §4.6 Algorithm 4b: compute LMOTS candidate public key Kc from sig+msg.
-/// I = 16-byte identifier, q = leaf index, lmots_type = IANA type ID (SHAKE or SHA-256).
-fn lmots_candidate_key(
-    i_val: &[u8; 16],
-    q: u32,
-    lmots_type: u32,
-    c: &[u8],    // n-byte randomizer C from sig
-    y: &[&[u8]], // p × n-byte sig components
-    message: &[u8],
-    is_shake: bool,
-) -> Option<[u8; 32]> {
-    let (w, p, ls) = lmots_n32_params(lmots_type)?;
-    let n = 32usize;
-
-    // Q = H(I || u32be(q) || u16be(0xD2) || C || message)
-    let mut buf = Vec::with_capacity(i_val.len() + 4 + 2 + c.len() + message.len());
-    buf.extend_from_slice(i_val);
-    buf.extend_from_slice(&q.to_be_bytes());
-    buf.extend_from_slice(&0xD2u16.to_be_bytes());
-    buf.extend_from_slice(c);
-    buf.extend_from_slice(message);
-    use sha2::Digest;
-    let q_hash: [u8; 32] = if is_shake {
-        shake256_n32(&buf)
-    } else {
-        sha2::Sha256::digest(&buf).into()
-    };
-
-    // Cksm computation: append 2-byte checksum to Q
-    let ck = checksum(&q_hash, w, ls);
-    let mut q_cksm = q_hash.to_vec();
-    q_cksm.push((ck >> 8) as u8);
-    q_cksm.push((ck & 0xFF) as u8);
-
-    // Iterate: z[i] = H(I || q || u16be(i) || u8(a+j) || y[i])
-    let mut z: Vec<Vec<u8>> = Vec::with_capacity(p);
-    for i in 0..p {
-        let a = coef(&q_cksm, i, w) as u32;
-        let max_j = (1u32 << w) - 1;
-        let mut tmp = y[i].to_vec();
-        for j in a..=max_j {
-            let mut h_in = Vec::with_capacity(i_val.len() + 4 + 2 + 1 + n);
-            h_in.extend_from_slice(i_val);
-            h_in.extend_from_slice(&q.to_be_bytes());
-            h_in.extend_from_slice(&(i as u16).to_be_bytes());
-            h_in.push(j as u8);
-            h_in.extend_from_slice(&tmp);
-            tmp = if is_shake {
-                shake256_n32(&h_in).to_vec()
-            } else {
-                sha2::Sha256::digest(&h_in).to_vec()
-            };
-        }
-        z.push(tmp);
-    }
-
-    // Kc = H(I || u32be(q) || u16be(0xD3) || C || z[0] || ... || z[p-1])
-    let mut kc_in = Vec::new();
-    kc_in.extend_from_slice(i_val);
-    kc_in.extend_from_slice(&q.to_be_bytes());
-    kc_in.extend_from_slice(&0xD3u16.to_be_bytes());
-    kc_in.extend_from_slice(c);
-    for zi in &z {
-        kc_in.extend_from_slice(zi);
-    }
-    let kc: [u8; 32] = if is_shake {
-        shake256_n32(&kc_in)
-    } else {
-        sha2::Sha256::digest(&kc_in).into()
-    };
-    Some(kc)
-}
-
-/// RFC 8554 §5.4.2 Algorithm 6b: LMS signature verification for SHAKE-256 N32.
-/// pubkey_bytes: raw 56-byte LMS pubkey (no HSS L prefix)
-///               format: u32be(lms_type) || u32be(lmots_type) || I[16] || T[1][32]
-/// signature_bytes: raw LMS sig (no HSS Nspk prefix)
-///                  format: u32be(q) || LMOTS_SIG || u32be(lms_type) || path[h][32]
-pub fn lms_shake_n32_verify(pubkey_bytes: &[u8], message: &[u8], signature_bytes: &[u8]) -> bool {
-    // Parse public key (56 bytes for N32)
-    if pubkey_bytes.len() < 56 {
-        return false;
-    }
-    let lms_type = u32::from_be_bytes(pubkey_bytes[0..4].try_into().unwrap_or_default());
-    let lmots_type = u32::from_be_bytes(pubkey_bytes[4..8].try_into().unwrap_or_default());
-    let i_val: [u8; 16] = pubkey_bytes[8..24].try_into().unwrap_or_default();
-    let t1 = &pubkey_bytes[24..56]; // T[1]: root node
-
-    // Tree height from LMS type
-    let height = match lms_param_height(lms_type) {
-        Some(h) => h as u32,
-        None => return false,
-    };
-    let n = 32usize;
-    let is_shake = matches!(lms_type, 0x0F..=0x13 | 0x14..=0x18);
-
-    // Get LMOTS params
-    let (_, p, _) = match lmots_n32_params(lmots_type) {
-        Some(p) => p,
-        None => return false,
-    };
-
-    // Parse LMS signature
-    // LMS sig = u32be(q) || LMOTS_SIG || u32be(lms_type) || h×n path nodes
-    // LMOTS_SIG = u32be(lmots_type) || C[n] || y[p][n]
-    let lmots_sig_len = 4 + n + p * n; // type(4) + C(n) + y(p×n)
-    let lms_sig_len = 4 + lmots_sig_len + 4 + height as usize * n;
-    if signature_bytes.len() < lms_sig_len {
-        return false;
-    }
-
-    let q = u32::from_be_bytes(signature_bytes[0..4].try_into().unwrap_or_default());
-    if q >= (1u32 << height) {
-        return false;
-    }
-
-    let lmots_sig = &signature_bytes[4..4 + lmots_sig_len];
-    let lmots_type_sig = u32::from_be_bytes(lmots_sig[0..4].try_into().unwrap_or_default());
-    if lmots_type_sig != lmots_type {
-        return false;
-    }
-    let c = &lmots_sig[4..4 + n];
-    let y: Vec<&[u8]> = (0..p)
-        .map(|i| &lmots_sig[4 + n + i * n..4 + n + (i + 1) * n])
-        .collect();
-
-    let lms_type_sig = u32::from_be_bytes(
-        signature_bytes[4 + lmots_sig_len..4 + lmots_sig_len + 4]
-            .try_into()
-            .unwrap_or_default(),
-    );
-    if lms_type_sig != lms_type {
-        return false;
-    }
-    let path_start = 4 + lmots_sig_len + 4;
-    let path: Vec<&[u8]> = (0..height as usize)
-        .map(|i| &signature_bytes[path_start + i * n..path_start + (i + 1) * n])
-        .collect();
-
-    // Step 1: compute LMOTS candidate key Kc
-    let kc = match lmots_candidate_key(&i_val, q, lmots_type, c, &y, message, is_shake) {
-        Some(k) => k,
-        None => return false,
-    };
-
-    // Step 2: compute LMS candidate root (Algorithm 6b)
-    let mut node_num = (1u32 << height) + q;
-    use sha2::Digest;
-
-    // Tn = H(I || u32be(node_num) || u16be(0x82) || Kc)
-    let mut h_in = Vec::with_capacity(i_val.len() + 4 + 2 + n);
-    h_in.extend_from_slice(&i_val);
-    h_in.extend_from_slice(&node_num.to_be_bytes());
-    h_in.extend_from_slice(&0x82u16.to_be_bytes());
-    h_in.extend_from_slice(&kc);
-    let mut tmp: [u8; 32] = if is_shake {
-        shake256_n32(&h_in)
-    } else {
-        sha2::Sha256::digest(&h_in).into()
-    };
-
-    for path_node in &path {
-        let parent = node_num / 2;
-        let mut h_in2 = Vec::with_capacity(i_val.len() + 4 + 2 + n * 2);
-        h_in2.extend_from_slice(&i_val);
-        h_in2.extend_from_slice(&parent.to_be_bytes());
-        h_in2.extend_from_slice(&0x01u16.to_be_bytes());
-        if node_num % 2 == 0 {
-            h_in2.extend_from_slice(&tmp);
-            h_in2.extend_from_slice(path_node);
-        } else {
-            h_in2.extend_from_slice(path_node);
-            h_in2.extend_from_slice(&tmp);
-        }
-        tmp = if is_shake {
-            shake256_n32(&h_in2)
-        } else {
-            sha2::Sha256::digest(&h_in2).into()
-        };
-        node_num = parent;
-    }
-
-    // Compare computed root with T[1] in public key
-    tmp == t1
-}
-
 // ── HSS multi-level verify ──────────────────────────────────────────────────
 
+/// Derive the CKP_LMS_* (IANA) type ID from HSS/LMS public-key bytes.
+/// HSS form: u32be(L) || u32be(lms_type) || …  (lms_type at offset 4);
+/// raw LMS form (no L prefix): lms_type at offset 0. The key material is
+/// self-describing, so this is the authoritative source when the object
+/// carries no CKA_LMS_PARAM_SET attribute (e.g. external ACVP imports).
+pub fn lms_param_from_pubkey(pub_key_bytes: &[u8]) -> Option<u32> {
+    if pub_key_bytes.len() >= 8 {
+        let first = u32::from_be_bytes(pub_key_bytes[0..4].try_into().ok()?);
+        // L (HSS levels) is small (1..=8); LMS type ids start at 0x05.
+        if (1..=8).contains(&first) {
+            let t = u32::from_be_bytes(pub_key_bytes[4..8].try_into().ok()?);
+            if lms_param_height(t).is_some() {
+                return Some(t);
+            }
+        }
+        if lms_param_height(first).is_some() {
+            return Some(first);
+        }
+    }
+    None
+}
+
 /// Verify an HSS/LMS signature.  `lms_param` is the CKP_LMS_* value stored in
-/// CKA_LMS_PARAM_SET of the key object; it selects the correct hash type.
-/// Note: hbs-lms 0.1.1 uses RFC 8554 internal type codes for all hash variants,
-/// so SP 800-208 SHAKE-256 type IDs (0x0F-0x18) require Shake256_* dispatch.
+/// CKA_LMS_PARAM_SET of the key object; it selects the hash family.
+/// The patched hbs-lms serializes/parses SP 800-208 family-specific type IDs,
+/// so all four families verify through the crate.
 pub fn hss_verify(pub_key_bytes: &[u8], message: &[u8], signature: &[u8], lms_param: u32) -> bool {
     match lms_param {
         0x05..=0x09 => lms::verify::<Sha256_256>(message, signature, pub_key_bytes).is_ok(),
         0x0A..=0x0E => lms::verify::<Sha256_192>(message, signature, pub_key_bytes).is_ok(),
-        0x0F..=0x13 | 0x14..=0x18 => {
-            let raw_lms_pub = if pub_key_bytes.len() == 60 && pub_key_bytes[..4] == [0, 0, 0, 1] {
-                &pub_key_bytes[4..]
-            } else {
-                pub_key_bytes
-            };
-            let raw_lms_sig = if signature.len() > 4 && signature[..4] == [0, 0, 0, 0] {
-                &signature[4..]
-            } else {
-                signature
-            };
-            lms_shake_n32_verify(raw_lms_pub, message, raw_lms_sig)
-        }
+        0x0F..=0x13 => lms::verify::<Shake256_256>(message, signature, pub_key_bytes).is_ok(),
+        0x14..=0x18 => lms::verify::<Shake256_192>(message, signature, pub_key_bytes).is_ok(),
         _ => lms::verify::<Sha256_256>(message, signature, pub_key_bytes).is_ok(),
     }
 }

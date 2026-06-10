@@ -94,27 +94,30 @@ pub fn find_all_by_cka_id(_session: u32, cka_id: &[u8]) -> Result<Vec<u32>, CkRv
 /// LE u32 etc.; convenience wrappers [`get_attribute_u32`] and
 /// [`get_attribute_bool`] do the decode.
 pub fn get_attribute(_session: u32, handle: u32, attr_type: u32) -> Option<Vec<u8>> {
-    // Honour the same sensitivity gate as the C ABI: private + secret
-    // keys with CKA_SENSITIVE=true refuse to expose CKA_VALUE.
+    // Same predicate as ffi::C_GetAttributeValue (state::value_is_blocked):
+    // CKA_VALUE of private/secret keys is blocked when CKA_SENSITIVE=TRUE
+    // **or** CKA_EXTRACTABLE=FALSE (PKCS#11 v3.2 §4.9/§4.10). Sharing one
+    // predicate keeps the native and C-ABI surfaces from drifting.
     if attr_type == CKA_VALUE {
-        let blocked = OBJECTS.with(|o| {
-            o.borrow().get(&handle).map(|attrs| {
-                let class = attrs
-                    .get(&CKA_CLASS)
-                    .filter(|v| v.len() >= 4)
-                    .map(|v| u32::from_le_bytes([v[0], v[1], v[2], v[3]]))
-                    .unwrap_or(CKO_PUBLIC_KEY);
-                let is_private_or_secret = class == CKO_PRIVATE_KEY || class == CKO_SECRET_KEY;
-                let sensitive = is_private_or_secret
-                    && attrs.get(&CKA_SENSITIVE).map(|v| !v.is_empty() && v[0] == 0x01).unwrap_or(false);
-                sensitive
-            })
-        });
+        let blocked = OBJECTS.with(|o| o.borrow().get(&handle).map(crate::state::value_is_blocked));
         if blocked == Some(true) {
             return None;
         }
     }
     get_object_attr_bytes(handle, attr_type)
+}
+
+/// Mutate an attribute, enforcing PKCS#11 v3.2 §4.1.1 policy: server-managed
+/// attributes are CKR_ATTRIBUTE_READ_ONLY; CKA_SENSITIVE only FALSE→TRUE;
+/// CKA_EXTRACTABLE only TRUE→FALSE. Vendor stateful-key attrs (≥0x8000_0000)
+/// bypass the policy — they are the engine/KMIP internal state channel.
+pub fn set_attribute(
+    _session: u32,
+    handle: u32,
+    attr_type: u32,
+    value: Vec<u8>,
+) -> Result<(), CkRv> {
+    crate::state::set_object_attr_checked(handle, attr_type, value)
 }
 
 /// Read a `u32` attribute (4-byte little-endian — engine's storage

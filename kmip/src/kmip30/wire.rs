@@ -76,6 +76,12 @@ mod tags {
     pub const KeyBlock: u32               = 0x42_0040;
     pub const KeyFormatType: u32          = 0x42_0042;
     pub const KeyValue: u32               = 0x42_0045;
+    // KMIP 3.0 key wrapping (AX-M-2) — codepoints verified from
+    // kmip-spec-3.0-tags-enums.json.
+    pub const KeyWrappingData: u32          = 0x42_0046;
+    pub const KeyWrappingSpecification: u32 = 0x42_0047;
+    pub const WrappingMethod: u32           = 0x42_009e;
+    pub const EncryptionKeyInformation: u32 = 0x42_0036;
     pub const MaximumItems: u32           = 0x42_004f;
     pub const ObjectType: u32             = 0x42_0057;
     pub const Operation: u32              = 0x42_005c;
@@ -150,6 +156,19 @@ mod tags {
     /// references between the two halves of a key pair.
     pub const PublicKeyLink: u32          = 0x42_019a;
     pub const PrivateKeyLink: u32         = 0x42_0199;
+    /// KMIP 3.0 §11 — `Next Link` / `Previous Link`: forward/backward
+    /// UID references that thread a key-rotation chain (AX-M-1 step #1
+    /// stitches two freshly-created keys into a linked pair).
+    pub const NextLink: u32               = 0x42_0194;
+    pub const PreviousLink: u32           = 0x42_0198;
+    /// KMIP 3.0 §11 — `Application Specific Information` Structure
+    /// containing `ApplicationNamespace` + `ApplicationData` text
+    /// strings. Used by Locate to find managed objects keyed by a
+    /// client-defined namespace (e.g. tape labels under LIBRARY-LTO).
+    pub const ApplicationSpecificInformation: u32 = 0x42_0004;
+    pub const ApplicationData: u32        = 0x42_0002;
+    /// KMIP 3.0 §11 — `Group Link` Reference (UID of a Group object).
+    pub const GroupLink: u32              = 0x42_01b3;
     /// KMIP 3.0 §6.1.14 Deactivate request fields.
     pub const DeactivationReason: u32     = 0x42_01b8;
     pub const DeactivationReasonCode: u32 = 0x42_01b9;
@@ -213,6 +232,11 @@ mod tags {
     pub const Pkcs11OutputParameters: u32 = 0x42_015c;
     pub const Pkcs11ReturnCode: u32       = 0x42_015d;
     pub const CorrelationValue: u32       = 0x42_00d6;
+    // KMIP 3.0 §6.1.21 multi-part streaming (verified from
+    // kmip-spec-3.0-tags-enums.json: Init Indicator = 0x4200d7,
+    // Final Indicator = 0x4200d8).
+    pub const InitIndicator: u32          = 0x42_00d7;
+    pub const FinalIndicator: u32         = 0x42_00d8;
     // ── KMIP Profiles v3.0 §5.1.2 Baseline Server attribute tags ──
     pub const DestroyDate: u32                   = 0x42_0033;
     pub const CompromiseDate: u32                = 0x42_0020;
@@ -795,7 +819,68 @@ fn encode_create_key_pair_resp(r: &CreateKeyPairResponse) -> Vec<TtlvFrame> {
 
 fn decode_get_req(children: &[TtlvFrame]) -> Result<GetRequest, WireError> {
     let uid = required_uid(children)?;
-    Ok(GetRequest { uid })
+    let mut key_wrapping_specification = None;
+    for c in children {
+        if c.tag.0 == tags::KeyWrappingSpecification {
+            key_wrapping_specification = Some(decode_key_wrapping_spec(c)?);
+        }
+    }
+    Ok(GetRequest { uid, key_wrapping_specification })
+}
+
+/// TTLV-encode a cleartext `KeyValue` structure (`KeyValue { KeyMaterial
+/// (ByteString) }`) — the §4.x wrap target for `Get` with a
+/// `KeyWrappingSpecification` under the default TTLV Encoding Option.
+/// TTLV §9.6 pads every frame to 8 bytes, so the output length always
+/// satisfies AES-KW's multiple-of-8 input requirement.
+pub fn ttlv_encode_key_value(key_material: &[u8]) -> Vec<u8> {
+    let frame = TtlvFrame::new(
+        Tag(tags::KeyValue),
+        Value::Structure(vec![TtlvFrame::new(
+            Tag(tags::KeyMaterial),
+            Value::ByteString(key_material.to_vec()),
+        )]),
+    );
+    let mut buf = bytes::BytesMut::new();
+    encode(&frame, &mut buf);
+    buf.to_vec()
+}
+
+/// Decode a §4.x `Key Wrapping Specification`:
+/// `WrappingMethod` (Enumeration) + `EncryptionKeyInformation`
+/// { `UniqueIdentifier`, `CryptographicParameters`? }.
+fn decode_key_wrapping_spec(frame: &TtlvFrame) -> Result<KeyWrappingSpec, WireError> {
+    let mut wrapping_method = 0u32;
+    let mut encryption_key_uid = String::new();
+    let mut cp = None;
+    for c in expect_structure(frame, "Key Wrapping Specification")? {
+        match c.tag.0 {
+            tags::WrappingMethod => wrapping_method = expect_enum(c, "Wrapping Method")?,
+            tags::EncryptionKeyInformation => {
+                for e in expect_structure(c, "Encryption Key Information")? {
+                    match e.tag.0 {
+                        tags::UniqueIdentifier => {
+                            if let Value::TextString(s) = &e.value {
+                                encryption_key_uid = s.clone();
+                            }
+                        }
+                        tags::CryptographicParameters => {
+                            cp = Some(decode_cryptographic_parameters(e)?);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    if encryption_key_uid.is_empty() {
+        return Err(WireError::Missing {
+            tag: tags::UniqueIdentifier,
+            name: "Encryption Key Information / Unique Identifier",
+        });
+    }
+    Ok(KeyWrappingSpec { wrapping_method, encryption_key_uid, cryptographic_parameters: cp })
 }
 
 /// Encode a KMIP 3.0 §6.1.18 `Get` Response Payload.
@@ -926,6 +1011,9 @@ fn decode_encrypt_req(children: &[TtlvFrame]) -> Result<EncryptRequest, WireErro
     let mut data = Vec::new();
     let mut iv = None;
     let mut cp = None;
+    let mut init_indicator = None;
+    let mut final_indicator = None;
+    let mut correlation_value = None;
     for c in children {
         match c.tag.0 {
             tags::Data => {
@@ -937,6 +1025,16 @@ fn decode_encrypt_req(children: &[TtlvFrame]) -> Result<EncryptRequest, WireErro
             tags::CryptographicParameters => {
                 cp = Some(decode_cryptographic_parameters(c)?);
             }
+            // KMIP 3.0 §6.1.21 multi-part streaming fields.
+            tags::InitIndicator => {
+                if let Value::Boolean(b) = &c.value { init_indicator = Some(*b); }
+            }
+            tags::FinalIndicator => {
+                if let Value::Boolean(b) = &c.value { final_indicator = Some(*b); }
+            }
+            tags::CorrelationValue => {
+                if let Value::ByteString(b) = &c.value { correlation_value = Some(b.clone()); }
+            }
             _ => {}
         }
     }
@@ -946,25 +1044,45 @@ fn decode_encrypt_req(children: &[TtlvFrame]) -> Result<EncryptRequest, WireErro
             if let Value::ByteString(b) = &c.value { aad = Some(b.clone()); }
         }
     }
-    Ok(EncryptRequest { uid, data, iv, cryptographic_parameters: cp, aad })
+    Ok(EncryptRequest {
+        uid,
+        data,
+        iv,
+        cryptographic_parameters: cp,
+        aad,
+        init_indicator,
+        final_indicator,
+        correlation_value,
+    })
 }
 
 fn encode_encrypt_resp(r: &EncryptResponse) -> Vec<TtlvFrame> {
+    // Field order follows the §6.1.21 Encrypt response-payload table:
+    // Unique Identifier, Data, IV/Counter/Nonce, Correlation Value,
+    // Authenticated Encryption Tag. CS-BC-M-GCM-2 pair #111 pins the
+    // IV-before-tag ordering when RandomIV generates both.
     let mut out = vec![
         TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString(r.uid.clone())),
         TtlvFrame::new(Tag(tags::Data), Value::ByteString(r.ciphertext.clone())),
     ];
-    if let Some(tag) = &r.authenticated_encryption_tag {
-        out.push(TtlvFrame::new(
-            Tag(tags::AuthenticatedEncryptionTag),
-            Value::ByteString(tag.clone()),
-        ));
-    }
     if let Some(iv) = &r.iv_counter_nonce {
         // KMIP 3.0 §6.1.21 — server-generated IV/Counter/Nonce when
         // the key's `RandomIV` is true. CS-BC-M-13 expects the server
         // to emit this field with the IV it used.
         out.push(TtlvFrame::new(Tag(tags::IvCounterNonce), Value::ByteString(iv.clone())));
+    }
+    if let Some(cv) = &r.correlation_value {
+        // §6.1.21 — handle for the client to chain the next stream part.
+        out.push(TtlvFrame::new(
+            Tag(tags::CorrelationValue),
+            Value::ByteString(cv.clone()),
+        ));
+    }
+    if let Some(tag) = &r.authenticated_encryption_tag {
+        out.push(TtlvFrame::new(
+            Tag(tags::AuthenticatedEncryptionTag),
+            Value::ByteString(tag.clone()),
+        ));
     }
     if let Some(ss) = &r.shared_secret {
         // ML-KEM shared secret rides in IvCounterNonce slot for v0.1 — a
@@ -1020,12 +1138,17 @@ fn encode_decrypt_resp(r: &DecryptResponse) -> Vec<TtlvFrame> {
 fn decode_sign_req(children: &[TtlvFrame]) -> Result<SignRequest, WireError> {
     let uid = required_uid(children)?;
     let mut data = Vec::new();
+    let mut cp: Option<CryptographicParameters> = None;
     for c in children {
-        if c.tag.0 == tags::Data {
-            if let Value::ByteString(b) = &c.value { data = b.clone(); }
+        match c.tag.0 {
+            tags::Data => { if let Value::ByteString(b) = &c.value { data = b.clone(); } }
+            tags::CryptographicParameters => {
+                cp = Some(decode_cryptographic_parameters(c)?);
+            }
+            _ => {}
         }
     }
-    Ok(SignRequest { uid, data })
+    Ok(SignRequest { uid, data, cryptographic_parameters: cp })
 }
 
 fn encode_sign_resp(r: &SignResponse) -> Vec<TtlvFrame> {
@@ -1039,14 +1162,18 @@ fn decode_sigverify_req(children: &[TtlvFrame]) -> Result<SignatureVerifyRequest
     let uid = required_uid(children)?;
     let mut data = Vec::new();
     let mut signature = Vec::new();
+    let mut cp: Option<CryptographicParameters> = None;
     for c in children {
         match c.tag.0 {
             tags::Data => { if let Value::ByteString(b) = &c.value { data = b.clone(); } }
             tags::SignatureData => { if let Value::ByteString(b) = &c.value { signature = b.clone(); } }
+            tags::CryptographicParameters => {
+                cp = Some(decode_cryptographic_parameters(c)?);
+            }
             _ => {}
         }
     }
-    Ok(SignatureVerifyRequest { uid, data, signature })
+    Ok(SignatureVerifyRequest { uid, data, signature, cryptographic_parameters: cp })
 }
 
 fn encode_sigverify_resp(r: &SignatureVerifyResponse) -> Vec<TtlvFrame> {
@@ -1145,6 +1272,24 @@ fn decode_attribute_v3(frame: &TtlvFrame) -> Result<Option<Attribute>, WireError
         tags::CryptographicParameters => Attribute::CryptographicParameters(
             decode_cryptographic_parameters(frame)?,
         ),
+        // KMIP §11 `Usage Limits` Structure — UsageLimitsTotal +
+        // UsageLimitsUnit (+ UsageLimitsCount on the response side).
+        // v0.1 surfaces only the Total field so AddAttribute /
+        // Register can set the encrypt-byte budget. CS-BC-M-7 pins
+        // a 16-byte budget that two 16-byte Encrypts must exhaust.
+        tags::UsageLimits => {
+            let mut total: i64 = 0;
+            for inner in expect_structure(frame, "Usage Limits")? {
+                if inner.tag.0 == tags::UsageLimitsTotal {
+                    match inner.value {
+                        Value::LongInteger(n) => total = n,
+                        Value::Integer(n)     => total = n as i64,
+                        _ => {}
+                    }
+                }
+            }
+            Attribute::UsageLimitsTotal(total)
+        }
         // KMIP 3.0 §11 — `Attribute` (0x420008) is the v1.x-style
         // vendor-extension envelope: VendorIdentification + AttributeName
         // + AttributeValue. v3.0 keeps this Structure for client-defined
@@ -1196,6 +1341,51 @@ fn decode_attribute_v3(frame: &TtlvFrame) -> Result<Option<Attribute>, WireError
                 // the typed Attribute carries the human-readable label.
                 Attribute::ObjectClass(match v { 2 => "System".into(), _ => "User".into() })
             } else { return Ok(None); }
+        }
+        // KMIP 3.0 §11 — Link attributes (UID references). All three
+        // wire as TextString on the response side; the XML uses
+        // `type="Reference"` which the oasis_codec maps to TextString.
+        tags::NextLink => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::NextLink(s.clone())
+            } else { return Ok(None); }
+        }
+        tags::PreviousLink => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::PreviousLink(s.clone())
+            } else { return Ok(None); }
+        }
+        tags::PublicKeyLink => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::PublicKeyLink(s.clone())
+            } else { return Ok(None); }
+        }
+        tags::PrivateKeyLink => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::PrivateKeyLink(s.clone())
+            } else { return Ok(None); }
+        }
+        tags::GroupLink => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::GroupLink(s.clone())
+            } else { return Ok(None); }
+        }
+        tags::ApplicationSpecificInformation => {
+            // Structure containing ApplicationNamespace + ApplicationData.
+            let mut ns = String::new();
+            let mut data = String::new();
+            for c in expect_structure(frame, "Application Specific Information")? {
+                match c.tag.0 {
+                    tags::ApplicationNamespace => {
+                        if let Value::TextString(s) = &c.value { ns = s.clone(); }
+                    }
+                    tags::ApplicationData => {
+                        if let Value::TextString(s) = &c.value { data = s.clone(); }
+                    }
+                    _ => {}
+                }
+            }
+            Attribute::ApplicationSpecificInformation { namespace: ns, data }
         }
         // KMIP 3.0 §11 Certificate attributes — needed so that
         // ModifyAttribute(<CertificateLength …>) decodes to a real
@@ -1777,6 +1967,7 @@ fn decode_register_req(children: &[TtlvFrame]) -> Result<RegisterRequest, WireEr
                     key_value: opaque_bytes,
                     cryptographic_algorithm: crate::kmip30::KmipAlgorithm::Aes,
                     cryptographic_length: 0,
+                    key_wrapping_data: None,
                 });
                 // Stash OpaqueDataType so Register can copy it onto
                 // the record's `certificate_type` slot for the Get
@@ -1982,6 +2173,11 @@ fn decode_key_block(frame: &TtlvFrame) -> Result<KeyBlock, WireError> {
     Ok(KeyBlock {
         key_format_type: match key_format_type {
             0x01 => KeyFormatType::Raw,
+            0x02 => KeyFormatType::OpaqueObject,
+            0x03 => KeyFormatType::Pkcs1,
+            0x04 => KeyFormatType::Pkcs8,
+            0x05 => KeyFormatType::X509,
+            0x06 => KeyFormatType::EcPrivateKey,
             0x07 => KeyFormatType::TransparentSymmetricKey,
             // Other formats land in the store as Raw bytes for now;
             // we keep the codepoint via `ObjectRecord.key_format_type`
@@ -1991,6 +2187,7 @@ fn decode_key_block(frame: &TtlvFrame) -> Result<KeyBlock, WireError> {
         cryptographic_algorithm: algorithm,
         cryptographic_length: length,
         key_value: bytes,
+        key_wrapping_data: None,
     })
 }
 
@@ -2023,17 +2220,24 @@ fn encode_export_resp(r: &ExportResponse) -> Vec<TtlvFrame> {
 /// `Raw` ⇒ leaf ByteString; `TransparentSymmetricKey` ⇒ Structure
 /// containing one `Key` ByteString sub-element.
 fn encode_key_block(kb: &KeyBlock) -> TtlvFrame {
-    let key_material = match kb.key_format_type {
-        KeyFormatType::TransparentSymmetricKey => TtlvFrame::new(
-            Tag(tags::KeyMaterial),
-            Value::Structure(vec![TtlvFrame::new(
-                Tag(tags::Key),
-                Value::ByteString(kb.key_value.clone()),
-            )]),
-        ),
-        _ => TtlvFrame::new(Tag(tags::KeyMaterial), Value::ByteString(kb.key_value.clone())),
+    // KMIP 3.0 §4.x — when KeyWrappingData is present, KeyValue is the
+    // wrapped (AES-KW) ciphertext of the TTLV-encoded KeyValue structure
+    // and goes on the wire as a ByteString, not a Structure (AX-M-2).
+    let key_value = if kb.key_wrapping_data.is_some() {
+        TtlvFrame::new(Tag(tags::KeyValue), Value::ByteString(kb.key_value.clone()))
+    } else {
+        let key_material = match kb.key_format_type {
+            KeyFormatType::TransparentSymmetricKey => TtlvFrame::new(
+                Tag(tags::KeyMaterial),
+                Value::Structure(vec![TtlvFrame::new(
+                    Tag(tags::Key),
+                    Value::ByteString(kb.key_value.clone()),
+                )]),
+            ),
+            _ => TtlvFrame::new(Tag(tags::KeyMaterial), Value::ByteString(kb.key_value.clone())),
+        };
+        TtlvFrame::new(Tag(tags::KeyValue), Value::Structure(vec![key_material]))
     };
-    let key_value = TtlvFrame::new(Tag(tags::KeyValue), Value::Structure(vec![key_material]));
     // KMIP 3.0 §6.2 KeyBlock structure — CryptographicAlgorithm and
     // CryptographicLength are OPTIONAL when the wrapping ObjectType
     // doesn't have those attributes in its §11 table. SecretData
@@ -2048,6 +2252,24 @@ fn encode_key_block(kb: &KeyBlock) -> TtlvFrame {
     if kb.cryptographic_length > 0 {
         children.push(TtlvFrame::new(Tag(tags::CryptographicAlgorithm), Value::Enumeration(kb.cryptographic_algorithm.to_wire_value())));
         children.push(TtlvFrame::new(Tag(tags::CryptographicLength), Value::Integer(kb.cryptographic_length as i32)));
+    }
+    if let Some(kwd) = &kb.key_wrapping_data {
+        // §4.x KeyWrappingData — echoes the request's wrapping spec:
+        // WrappingMethod + EncryptionKeyInformation{UID, CP}.
+        let mut eki = vec![TtlvFrame::new(
+            Tag(tags::UniqueIdentifier),
+            Value::TextString(kwd.encryption_key_uid.clone()),
+        )];
+        if let Some(cp) = &kwd.cryptographic_parameters {
+            eki.push(encode_cryptographic_parameters(cp));
+        }
+        children.push(TtlvFrame::new(
+            Tag(tags::KeyWrappingData),
+            Value::Structure(vec![
+                TtlvFrame::new(Tag(tags::WrappingMethod), Value::Enumeration(kwd.wrapping_method)),
+                TtlvFrame::new(Tag(tags::EncryptionKeyInformation), Value::Structure(eki)),
+            ]),
+        ));
     }
     TtlvFrame::new(Tag(tags::KeyBlock), Value::Structure(children))
 }
@@ -2426,6 +2648,15 @@ fn encode_attribute_v3(a: &Attribute) -> TtlvFrame {
         Attribute::ProtectionStorageMask(m)    => TtlvFrame::new(Tag(tags::ProtectionStorageMask),    Value::Integer(*m as i32)),
         Attribute::PublicKeyLink(s)            => TtlvFrame::new(Tag(tags::PublicKeyLink),            Value::TextString(s.clone())),
         Attribute::PrivateKeyLink(s)           => TtlvFrame::new(Tag(tags::PrivateKeyLink),           Value::TextString(s.clone())),
+        Attribute::NextLink(s)                 => TtlvFrame::new(Tag(tags::NextLink),                 Value::TextString(s.clone())),
+        Attribute::PreviousLink(s)             => TtlvFrame::new(Tag(tags::PreviousLink),             Value::TextString(s.clone())),
+        Attribute::GroupLink(s)                => TtlvFrame::new(Tag(tags::GroupLink),                Value::TextString(s.clone())),
+        Attribute::ApplicationSpecificInformation { namespace, data } => {
+            TtlvFrame::new(Tag(tags::ApplicationSpecificInformation), Value::Structure(vec![
+                TtlvFrame::new(Tag(tags::ApplicationNamespace), Value::TextString(namespace.clone())),
+                TtlvFrame::new(Tag(tags::ApplicationData), Value::TextString(data.clone())),
+            ]))
+        }
         Attribute::CertificateSubjectCN(s)     => TtlvFrame::new(Tag(tags::CertificateSubjectCN),     Value::TextString(s.clone())),
         Attribute::DigitalSignatureAlgorithm(v) => TtlvFrame::new(Tag(tags::DigitalSignatureAlgorithm), Value::Enumeration(*v)),
         Attribute::NistKeyType(v)              => TtlvFrame::new(Tag(tags::NistKeyType),              Value::Enumeration(*v)),
@@ -2554,6 +2785,12 @@ fn tag_code_from_name(name: &str) -> Option<u32> {
         "UsageLimits"            => tags::UsageLimits,
         "ProtectionStorageMask"  => tags::ProtectionStorageMask,
         "ProtectionStorageMasks" => tags::ProtectionStorageMasks,
+        "NextLink"               => tags::NextLink,
+        "PreviousLink"           => tags::PreviousLink,
+        "PublicKeyLink"          => tags::PublicKeyLink,
+        "PrivateKeyLink"         => tags::PrivateKeyLink,
+        "GroupLink"              => tags::GroupLink,
+        "ApplicationSpecificInformation" => tags::ApplicationSpecificInformation,
         "Digest"                 => tags::Digest,
         "RandomNumberGenerator"  => tags::RandomNumberGenerator,
         "CryptographicParameters" => tags::CryptographicParameters,
@@ -2625,6 +2862,12 @@ fn tag_name_from_code(code: u32) -> &'static str {
         tags::RotateGeneration       => "Rotate Generation",
         tags::RotateName             => "Rotate Name",
         tags::UsageLimits            => "Usage Limits",
+        tags::NextLink               => "Next Link",
+        tags::PreviousLink           => "Previous Link",
+        tags::PublicKeyLink          => "Public Key Link",
+        tags::PrivateKeyLink         => "Private Key Link",
+        tags::GroupLink              => "Group Link",
+        tags::ApplicationSpecificInformation => "Application Specific Information",
         _ => "Unknown",
     }
 }

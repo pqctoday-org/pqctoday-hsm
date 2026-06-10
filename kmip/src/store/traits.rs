@@ -178,9 +178,16 @@ pub struct ObjectRecord {
     /// metadata. v0.1 stores nothing; this field exists so the
     /// attribute surface table is honest.
     pub random_number_generator_present: bool,
-    /// KMIP §4 `Usage Limits` — Structure. v0.1 stores total only;
-    /// per-unit accounting deferred until a test demands it.
+    /// KMIP §4 `Usage Limits` — Structure containing
+    /// `UsageLimitsTotal` (the budget set at Register / Create time)
+    /// and `UsageLimitsCount` (the remaining budget, deducted on
+    /// each cryptographic op). CS-BC-M-7 pins a 16-byte total +
+    /// per-Encrypt byte-count accounting against it.
     pub usage_limits_total: Option<i64>,
+    pub usage_limits_remaining: Option<i64>,
+    /// KMIP §11 `Application Specific Information` Structure —
+    /// `(namespace, data)` pair. TL-M-3 step #0 finds objects by it.
+    pub application_specific_information: Option<(String, String)>,
 }
 
 impl ObjectRecord {
@@ -262,6 +269,8 @@ impl From<BaselineDefaults> for ObjectRecord {
             rotate_name: None,
             random_number_generator_present: false,
             usage_limits_total: None,
+            usage_limits_remaining: None,
+            application_specific_information: None,
         }
     }
 }

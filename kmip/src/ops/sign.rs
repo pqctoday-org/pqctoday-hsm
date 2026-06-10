@@ -63,6 +63,31 @@ pub fn sign(deps: &Deps, req: SignRequest, correlation_id: &str) -> Result<SignR
         ));
     }
 
+    // KMIP 3.0 §3.4 — `Process Start Date` / `Protect Stop Date`
+    // define the time window during which Sign MAY be performed even
+    // when the object is Active. CS-AC-M-8 pins this with
+    // ProcessStartDate=$NOW+3600 (future) and ProtectStopDate=$NOW-3600
+    // (past), expecting Sign to fail with WrongKeyLifecycleState.
+    // Mirror of the gate in `encrypt.rs` / `decrypt.rs`.
+    if let Some(t) = obj.process_start_date {
+        if started < t {
+            return Err(fail_err(deps, correlation_id, "Sign",
+                KmipError::failed(
+                    ResultReason::WrongKeyLifecycleState,
+                    "Sign: now < ProcessStartDate".to_string(),
+                )));
+        }
+    }
+    if let Some(t) = obj.protect_stop_date {
+        if started > t {
+            return Err(fail_err(deps, correlation_id, "Sign",
+                KmipError::failed(
+                    ResultReason::WrongKeyLifecycleState,
+                    "Sign: now > ProtectStopDate".to_string(),
+                )));
+        }
+    }
+
     // ── Plane 1: policy gate ────────────────────────────────────────────
     let empty: HashMap<String, String> = HashMap::new();
     let stored_algo = canonical_name(obj.algorithm);
@@ -174,7 +199,15 @@ pub fn sign(deps: &Deps, req: SignRequest, correlation_id: &str) -> Result<SignR
                 super::helpers::find_handle_for_object(session, &obj.pkcs11_cka_id, obj.object_type)
                     .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Sign:find"))?
                     .ok_or_else(|| KmipError::not_found(&req.uid))?;
-            let native_mech = super::helpers::native_sign_mech(obj.algorithm).ok_or_else(|| {
+            let effective_cp = req
+                .cryptographic_parameters
+                .as_ref()
+                .or(obj.cryptographic_parameters.as_ref());
+            let native_mech = super::helpers::native_sign_mech_with_params(
+                obj.algorithm,
+                effective_cp,
+            )
+            .ok_or_else(|| {
                 KmipError::failed(
                     ResultReason::OperationNotSupported,
                     format!("Sign: no native mechanism for {:?}", obj.algorithm),
@@ -351,7 +384,8 @@ rules:
             SignRequest {
                 uid: "urn:uid:1".into(),
                 data: b"hello".to_vec(),
-            },
+            cryptographic_parameters: None,
+        },
             "corr-sign",
         )
         .unwrap();
@@ -368,7 +402,9 @@ rules:
         let (_ring, d) = deps_with(PERMISSIVE);
         let err = sign(
             &d,
-            SignRequest { uid: "urn:nope".into(), data: vec![] },
+            SignRequest { uid: "urn:nope".into(), data: vec![],
+            cryptographic_parameters: None,
+        },
             "corr-404",
         )
         .unwrap_err();
@@ -405,7 +441,9 @@ rules:
         ..ObjectRecord::default()
 };
         d.store.put(rec).unwrap();
-        let err = sign(&d, SignRequest { uid: "urn:pre".into(), data: vec![] }, "corr").unwrap_err();
+        let err = sign(&d, SignRequest { uid: "urn:pre".into(), data: vec![],
+            cryptographic_parameters: None,
+        }, "corr").unwrap_err();
         // KMIP 3.0 §11 — PreActive is a lifecycle-state failure.
         assert_eq!(err.result_reason(), ResultReason::WrongKeyLifecycleState);
     }
@@ -419,7 +457,9 @@ rules:
         make_active_key(&d, "urn:ecdsa", KmipAlgorithm::Ecdsa);
         let err = sign(
             &d,
-            SignRequest { uid: "urn:ecdsa".into(), data: b"x".to_vec() },
+            SignRequest { uid: "urn:ecdsa".into(), data: b"x".to_vec(),
+            cryptographic_parameters: None,
+        },
             "corr-rk",
         )
         .unwrap_err();

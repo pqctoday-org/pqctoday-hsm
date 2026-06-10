@@ -109,7 +109,8 @@ function run() {
     wasm._set_kat_seed(ptrSeed, 96);
     
     let ptrSes = wasm._malloc(4);
-    wasm._C_OpenSession(0, 0x02, 0, 0, ptrSes);
+    // CKF_RW_SESSION | CKF_SERIAL_SESSION (0x02 | 0x04) — SERIAL is mandatory per PKCS#11 §5.6
+    wasm._C_OpenSession(0, 0x06, 0, 0, ptrSes);
     let session = new Uint32Array(wasm.memory.buffer, ptrSes, 1)[0];
     
     // mechanism array for CKM_XMSS_KEY_PAIR_GEN
@@ -200,7 +201,7 @@ function run() {
         return p;
     }
     const chachaAttrs = [
-        { type: 0x0000,  val: u32LE(3)          },  // CKA_CLASS = CKO_SECRET_KEY
+        { type: 0x0000,  val: u32LE(4)          },  // CKA_CLASS = CKO_SECRET_KEY (4; was 3=CKO_PRIVATE_KEY — bug)
         { type: 0x0100,  val: u32LE(0x33)        },  // CKA_KEY_TYPE = CKK_CHACHA20
         { type: 0x0001,  val: Buffer.from([0x00]) }, // CKA_TOKEN = false
         { type: 0x0104,  val: Buffer.from([0x01]) }, // CKA_ENCRYPT = true

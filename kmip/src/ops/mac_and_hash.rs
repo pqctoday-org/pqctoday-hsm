@@ -46,7 +46,19 @@ pub fn mac(deps: &Deps, req: MacRequest, correlation_id: &str) -> Result<MacResp
             "MAC requires registered key material (Register / Import the key first)".to_string(),
         ))
     })?;
-    let mac_bytes = compute_mac(obj.algorithm, key_bytes, &req.data)?;
+    // KMIP 3.0 §6.1.36 — MAC algorithm selection: request's
+    // CryptographicParameters wins; else the object's stored
+    // CryptographicParameters attribute; else the object's
+    // CryptographicAlgorithm (e.g. a key registered as HmacShaXxx
+    // directly). CS-AC-M-4/5/6 register `AES` raw key bytes with the
+    // HMAC algorithm pinned via CryptographicParameters.
+    let mac_algo = req
+        .cryptographic_parameters
+        .as_ref()
+        .and_then(|cp| cp.cryptographic_algorithm)
+        .or_else(|| obj.cryptographic_parameters.as_ref().and_then(|cp| cp.cryptographic_algorithm))
+        .unwrap_or(obj.algorithm);
+    let mac_bytes = compute_mac(mac_algo, key_bytes, &req.data)?;
 
     emit_success(deps, correlation_id, "MAC");
     Ok(MacResponse { uid: req.uid, mac_data: mac_bytes })
@@ -76,7 +88,13 @@ pub fn mac_verify(
         ))
     })?;
 
-    let computed = compute_mac(obj.algorithm, key_bytes, &req.data)?;
+    let mac_algo = req
+        .cryptographic_parameters
+        .as_ref()
+        .and_then(|cp| cp.cryptographic_algorithm)
+        .or_else(|| obj.cryptographic_parameters.as_ref().and_then(|cp| cp.cryptographic_algorithm))
+        .unwrap_or(obj.algorithm);
+    let computed = compute_mac(mac_algo, key_bytes, &req.data)?;
     // Per KMIP §3.x: verification result is signalled via ValidityIndicator,
     // not via Result Status. Mismatched MACs do NOT raise OperationFailed.
     let validity = if computed == req.mac_data {

@@ -186,6 +186,12 @@ fn attributes_from_record(r: &ObjectRecord) -> Vec<Attribute> {
     if let Some(uid) = r.links.get("PrivateKeyLink") {
         out.push(Attribute::PrivateKeyLink(uid.clone()));
     }
+    if let Some(uid) = r.links.get("NextLink") {
+        out.push(Attribute::NextLink(uid.clone()));
+    }
+    if let Some(uid) = r.links.get("PreviousLink") {
+        out.push(Attribute::PreviousLink(uid.clone()));
+    }
     if let Some(n) = r.protection_period { out.push(Attribute::ProtectionPeriod(n)); }
     if let Some(n) = r.rotate_interval { out.push(Attribute::RotateInterval(n)); }
     if let Some(n) = r.rotate_offset { out.push(Attribute::RotateOffset(n)); }
@@ -282,6 +288,10 @@ pub(crate) fn canonical_attribute_name(attr: &Attribute) -> &'static str {
         Attribute::ProtectionStorageMask(_)  => "ProtectionStorageMask",
         Attribute::PublicKeyLink(_)          => "PublicKeyLink",
         Attribute::PrivateKeyLink(_)         => "PrivateKeyLink",
+        Attribute::NextLink(_)               => "NextLink",
+        Attribute::PreviousLink(_)           => "PreviousLink",
+        Attribute::GroupLink(_)              => "GroupLink",
+        Attribute::ApplicationSpecificInformation { .. } => "ApplicationSpecificInformation",
         Attribute::DigitalSignatureAlgorithm(_) => "DigitalSignatureAlgorithm",
         Attribute::NistKeyType(_)            => "NistKeyType",
         Attribute::ProtectionLevel(_)        => "ProtectionLevel",

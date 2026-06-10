@@ -270,10 +270,11 @@ fn sign_after_destroy_fails_in_both_apis() {
         "destroyed handle: got rv=0x{err:x}"
     );
 
-    // FFI sign on destroyed handle — CKR_KEY_FUNCTION_NOT_PERMITTED
-    // (CKA_SIGN check fails because the handle has no attributes).
+    // FFI sign on destroyed handle — CKR_KEY_HANDLE_INVALID. PKCS#11 v3.2
+    // §5.1 error priority: the object-handle check fires before any
+    // attribute gate (CKA_SIGN), and a destroyed handle no longer exists.
     let mut mech: [u32; 3] = [CKM_ML_DSA, 0, 0];
     let rv = ffi::C_SignInit(session, mech.as_mut_ptr() as *mut u8, prv_h);
-    assert_eq!(rv, CKR_KEY_FUNCTION_NOT_PERMITTED);
+    assert_eq!(rv, CKR_KEY_HANDLE_INVALID);
     close_session(session).unwrap();
 }

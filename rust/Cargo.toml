@@ -1,11 +1,20 @@
 [package]
 name = "softhsmrustv3"
-version = "0.5.0"
+version = "0.6.1"
 edition = "2024"
 description = "A native Rust WebAssembly clone of SoftHSMv3"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
+
+[features]
+# Vendor ACVP known-answer-test hook: lets C_Initialize seed a deterministic
+# ChaCha20 RNG via the CK_C_INITIALIZE_ARGS.pReserved field. This is a spec
+# violation (PKCS#11 §5.6 requires pReserved == NULL → CKR_ARGUMENTS_BAD), so
+# production/release builds MUST disable it with `--no-default-features`.
+# Enabled by default to keep the KAT/compliance harness working unchanged.
+default = ["acvp"]
+acvp = []
 
 [dependencies]
 wasm-bindgen = "0.2.117"
@@ -28,6 +37,11 @@ chacha20 = "0.9"
 aes-kw = { version = "0.2", features = ["alloc"] }
 cbc = "0.1.2"
 ctr = "0.9.2"
+# Incremental GHASH (NIST SP 800-38D §6.4) — needed to implement
+# multi-part `C_EncryptUpdate` / `C_DecryptUpdate` for `CKM_AES_GCM`
+# per PKCS#11 v3.2 §6.27.7. The high-level `aes-gcm` crate is
+# one-shot only; `ghash` lets us stream the authentication tag.
+ghash = "0.5"
 ed25519-dalek = { version = "2.1", features = ["rand_core", "digest"] }
 hmac = "0.12.1"
 sp800-185 = "0.2.0"
@@ -65,6 +79,10 @@ fips205 = "0.4.1"
 [patch.crates-io]
 fips204 = { path = "fips204-patched" }
 fips205 = { path = "fips205-patched" }
+# SP 800-208 SHAKE-256 type-ID support: upstream 0.1.1 serializes SHA-256
+# type codes for all hash families (gap-analysis hbs-lms finding; mirrors
+# the C++ engine's patched hash-sigs submodule).
+hbs-lms = { path = "hbs-lms-patched" }
 
 [profile.release]
 # Optimize purely for size in WASM

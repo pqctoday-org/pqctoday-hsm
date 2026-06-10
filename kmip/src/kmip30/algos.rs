@@ -58,12 +58,14 @@ pub const CKM_AES_KEY_GEN: CkMechanismType = 0x1080;
 pub const CKM_AES_GCM: CkMechanismType     = 0x1087;
 
 /// PKCS#11 v3.2 §6.20 — IETF ChaCha20 stream cipher. Codepoint
-/// `0x1071`. Distinct from `CKM_CHACHA20_POLY1305` so the bridge
-/// picks the right primitive (the actual cipher implementation lives
-/// in `softhsmrustv3::crypto`).
-pub const CKM_CHACHA20: CkMechanismType         = 0x1071;
+/// `0x1226` verified from the normative `pkcs11t.h`
+/// (`src/lib/pkcs11/pkcs11t.h:1132`) — the earlier `0x1071` here was a
+/// drifted duplicate that desynchronised from the engine when
+/// `softhsmrustv3::constants` was corrected to the spec value.
+pub const CKM_CHACHA20: CkMechanismType         = 0x1226;
 /// PKCS#11 v3.2 §6.20 — IETF ChaCha20-Poly1305 AEAD (RFC 8439).
-pub const CKM_CHACHA20_POLY1305: CkMechanismType = 0x1093;
+/// Codepoint `0x4021` per `pkcs11t.h:1187` (was a drifted `0x1093`).
+pub const CKM_CHACHA20_POLY1305: CkMechanismType = 0x4021;
 
 pub const CKM_GENERIC_SECRET_KEY_GEN: CkMechanismType = 0x0350;
 pub const CKM_SHA256_HMAC: CkMechanismType            = 0x0251;

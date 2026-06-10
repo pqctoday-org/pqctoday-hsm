@@ -1126,8 +1126,6 @@ dependencies = [
 [[package]]
 name = "hbs-lms"
 version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b4ce7c3ed7650d791a5403f21e5d6b5df4c9157cf173fd7d9a1a437b692aaf79"
 dependencies = [
  "digest 0.10.7",
  "sha2",
@@ -1818,6 +1816,7 @@ dependencies = [
  "proptest",
  "rand 0.8.6",
  "rcgen",
+ "rsa",
  "rusqlite",
  "rusqlite_migration",
  "rustls",
@@ -2510,7 +2509,7 @@ dependencies = [
 
 [[package]]
 name = "softhsmrustv3"
-version = "0.5.0"
+version = "0.6.1"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -2525,6 +2524,7 @@ dependencies = [
  "fips205",
  "getrandom 0.2.17",
  "getrandom 0.4.2",
+ "ghash",
  "hbs-lms",
  "hkdf",
  "hmac",

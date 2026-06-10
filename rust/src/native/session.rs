@@ -15,17 +15,18 @@ use super::CkRv;
 use crate::constants::{CKF_RW_SESSION, CKF_SERIAL_SESSION, CKR_OK, CKU_SO, CKU_USER};
 use crate::ffi as ffi;
 
-/// Initialise the engine. The wasm32 C ABI's `C_Initialize` always
-/// returns `CKR_OK` (the engine handles re-init idempotently via
-/// [`crate::state::init_token_store`]). Documented as `Result<(), CkRv>`
-/// for API parity with the rest of `native::*`; today the call cannot
-/// fail except via implementation bugs in the engine.
+/// Initialise the engine, idempotently. PKCS#11 v3.2 §5.6 makes a second
+/// `C_Initialize` return `CKR_CRYPTOKI_ALREADY_INITIALIZED`, which the
+/// spec describes as non-fatal ("the library is already initialized");
+/// this typed wrapper absorbs it so callers like
+/// [`bootstrap_default_token`] can call `init()` defensively.
 ///
 /// Native callers pin all subsequent `native::*` calls to the same OS
 /// thread as the `init()` call (`thread_local!` storage in the engine).
 pub fn init() -> Result<(), CkRv> {
+    use crate::constants::CKR_CRYPTOKI_ALREADY_INITIALIZED;
     let rv = ffi::C_Initialize(std::ptr::null_mut());
-    if rv == CKR_OK {
+    if rv == CKR_OK || rv == CKR_CRYPTOKI_ALREADY_INITIALIZED {
         Ok(())
     } else {
         Err(rv)

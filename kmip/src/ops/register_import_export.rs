@@ -132,8 +132,68 @@ pub fn register(
 
     // Initial Date SHALL be set to current time per §6.1.48.
     let now = OffsetDateTime::now_utc();
-    let key_material = key_block.map(|kb| kb.key_value.clone());
+    // Stable CKA_ID for this object so the KMIP layer can locate the
+    // engine handle later via `find_by_cka_id` (Sign/Decrypt path).
+    let cka_id_bytes = Uuid::new_v4().as_bytes().to_vec();
     let key_format_type = key_block.map(|kb| kb.key_format_type as u32);
+    let key_material = key_block.map(|kb| kb.key_value.clone());
+
+    // KMIP 3.0 §6.1.48 + §6.2 — when the client supplies an RSA
+    // private key in PKCS#1 (KeyFormatType=0x03) or PKCS#8 form, we
+    // create a real engine object so subsequent Sign / Decrypt can
+    // find the handle. CS-AC-M-{1..6,8} pin this flow.
+    //
+    // KeyFormatType codepoints (KMIP §11): 3 = PKCS_1, 4 = PKCS_8.
+    if let (Some(material), Some(fmt), Some(session)) =
+        (key_material.as_ref(), key_format_type, deps.engine_session)
+    {
+        match (req.object_type, kmip_algorithm) {
+            (ObjectType::PrivateKey, crate::kmip30::KmipAlgorithm::Rsa) => {
+                // PKCS_1 = 3 (RSAPrivateKey), PKCS_8 = 4
+                // (PrivateKeyInfo). Both surface in `sign_rsa` via
+                // `RsaPrivateKey::from_pkcs8_der`.
+                let pkcs8_bytes: Option<Vec<u8>> = match fmt {
+                    3 => {
+                        use rsa::pkcs1::DecodeRsaPrivateKey;
+                        use rsa::pkcs8::EncodePrivateKey;
+                        rsa::RsaPrivateKey::from_pkcs1_der(material)
+                            .ok()
+                            .and_then(|k| k.to_pkcs8_der().ok().map(|d| d.as_bytes().to_vec()))
+                    }
+                    4 => Some(material.clone()),
+                    _ => None,
+                };
+                if let Some(pkcs8) = pkcs8_bytes {
+                    let _ = softhsmrustv3::native::register_rsa_private_key_pkcs8(
+                        session, &pkcs8, &cka_id_bytes, "kmip-register",
+                    );
+                }
+            }
+            (ObjectType::PublicKey, crate::kmip30::KmipAlgorithm::Rsa) => {
+                // PKCS_1 RSAPublicKey or PKCS_8 SubjectPublicKeyInfo —
+                // store the DER as-is; `verify_rsa` extracts the
+                // modulus/exponent from CKA_VALUE.
+                let _ = softhsmrustv3::native::register_rsa_public_key_der(
+                    session, material, &cka_id_bytes, "kmip-register-pub",
+                );
+            }
+            (ObjectType::SymmetricKey, alg)
+                if matches!(
+                    alg,
+                    crate::kmip30::KmipAlgorithm::HmacSha256
+                        | crate::kmip30::KmipAlgorithm::HmacSha384
+                        | crate::kmip30::KmipAlgorithm::HmacSha512,
+                ) =>
+            {
+                // HMAC keys are raw bytes; the shim's MAC path reads
+                // them from CKA_VALUE.
+                let _ = softhsmrustv3::native::register_generic_secret_bytes(
+                    session, material, &cka_id_bytes, "kmip-register-hmac",
+                );
+            }
+            _ => {}
+        }
+    }
 
     // KMIP 3.0 Spec §3.x lifecycle — Register honours any date
     // attributes the client supplied (ActivationDate / DeactivationDate
@@ -148,9 +208,21 @@ pub fn register(
     // surface them. BL-M-14 / SKFF-M-{9..11} step #0 supply
     // `<Attribute>` envelopes inside `<Attributes>`.
     let mut custom_attributes: HashMap<String, String> = HashMap::new();
+    let mut links: HashMap<String, String> = HashMap::new();
     for a in &req.attributes {
-        if let Attribute::Custom { name, value } = a {
-            custom_attributes.insert(name.clone(), value.clone());
+        match a {
+            Attribute::Custom { name, value } => {
+                custom_attributes.insert(name.clone(), value.clone());
+            }
+            // KMIP §11 Link family — UID references the Register
+            // request can stamp onto the new object. SASED-M-2
+            // pins GroupLink; CS-AC tests use PublicKey/PrivateKeyLink.
+            Attribute::GroupLink(uid)      => { links.insert("GroupLink".into(), uid.clone()); }
+            Attribute::NextLink(uid)       => { links.insert("NextLink".into(), uid.clone()); }
+            Attribute::PreviousLink(uid)   => { links.insert("PreviousLink".into(), uid.clone()); }
+            Attribute::PublicKeyLink(uid)  => { links.insert("PublicKeyLink".into(), uid.clone()); }
+            Attribute::PrivateKeyLink(uid) => { links.insert("PrivateKeyLink".into(), uid.clone()); }
+            _ => {}
         }
     }
 
@@ -182,7 +254,7 @@ pub fn register(
         cryptographic_length: resolved_length.unwrap_or(0),
         usage_mask: usage_mask.unwrap_or_else(UsageMask::empty),
         state: initial_state,
-        pkcs11_cka_id: Uuid::new_v4().as_bytes().to_vec(),
+        pkcs11_cka_id: cka_id_bytes,
         pkcs11_slot: deps.config.pkcs11_slot,
         initial_date: now,
         activation_date: x.activation_date,
@@ -191,11 +263,14 @@ pub fn register(
         compromise_occurrence_date: x.compromise_date,
         process_start_date: x.process_start_date,
         protect_stop_date: x.protect_stop_date,
+        usage_limits_total: x.usage_limits_total,
+        usage_limits_remaining: x.usage_limits_total,
+        application_specific_information: x.application_specific_information.clone(),
         last_change_date: Some(now),
         original_creation_date: Some(now),
         supersedes: None,
         name,
-        links: HashMap::new(),
+        links,
         custom_attributes,
         key_material,
         key_format_type,
@@ -346,6 +421,7 @@ pub fn export(
         cryptographic_algorithm: obj.algorithm,
         cryptographic_length: obj.cryptographic_length,
         key_value: bytes,
+        key_wrapping_data: None,
     });
 
     emit_success(deps, correlation_id, "Export");
@@ -378,6 +454,14 @@ pub(crate) struct ExtractedAttrs {
     pub compromise_date: Option<OffsetDateTime>,
     pub process_start_date: Option<OffsetDateTime>,
     pub protect_stop_date: Option<OffsetDateTime>,
+    /// KMIP §11 `Usage Limits Total` — encrypt-byte budget set at
+    /// Register / Create time. `None` = unlimited. CS-BC-M-7 pins
+    /// a 16-byte budget that the second Encrypt should exhaust.
+    pub usage_limits_total: Option<i64>,
+    /// KMIP §11 `Application Specific Information` — `(namespace,
+    /// data)` pair. TL-M-2 creates a SymmetricKey with one, TL-M-3
+    /// finds it via a Locate filter.
+    pub application_specific_information: Option<(String, String)>,
     /// Per-key `CryptographicParameters` (KMIP §11) — the OAEP /
     /// PSS / MAC handshake parameters attached to the managed object
     /// at Register time. Read back by Encrypt / Decrypt / Sign /
@@ -395,6 +479,8 @@ pub(crate) fn extract_attrs(attrs: &[Attribute]) -> ExtractedAttrs {
         activation_date: None, deactivation_date: None, compromise_date: None,
         process_start_date: None, protect_stop_date: None,
         cryptographic_parameters: None, quantum_safe: None,
+        usage_limits_total: None,
+        application_specific_information: None,
     };
     for a in attrs {
         match a {
@@ -410,6 +496,10 @@ pub(crate) fn extract_attrs(attrs: &[Attribute]) -> ExtractedAttrs {
             Attribute::ProtectStopDate(t)  => out.protect_stop_date  = OffsetDateTime::from_unix_timestamp(*t).ok(),
             Attribute::CryptographicParameters(cp) => out.cryptographic_parameters = Some(cp.clone()),
             Attribute::QuantumSafe(b)              => out.quantum_safe = Some(*b),
+            Attribute::UsageLimitsTotal(n)         => out.usage_limits_total = Some(*n),
+            Attribute::ApplicationSpecificInformation { namespace, data } => {
+                out.application_specific_information = Some((namespace.clone(), data.clone()));
+            }
             _ => {}
         }
     }
@@ -486,6 +576,7 @@ mod tests {
             cryptographic_algorithm: KmipAlgorithm::Aes,
             cryptographic_length: 128,
             key_value: vec![0x01; 16],
+            key_wrapping_data: None,
         }
     }
 

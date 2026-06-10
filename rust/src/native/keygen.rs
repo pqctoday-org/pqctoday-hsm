@@ -431,8 +431,8 @@ pub fn generate_ecdsa_keypair(
     finalize_and_register(pub_attrs, prv_attrs)
 }
 
-/// Generate an AES secret key. `bits` ∈ {128, 256} (192 is permitted by
-/// PKCS#11 but the engine only supports 128 and 256 today).
+/// Generate an AES secret key. `bits` ∈ {128, 192, 256} per PKCS#11
+/// v3.2 §6.5.
 pub fn generate_aes_key(
     _session: u32,
     bits: u32,
@@ -453,6 +453,115 @@ pub fn generate_aes_key(
     getrandom::getrandom(&mut key).map_err(|_| CKR_FUNCTION_FAILED)?;
     let attrs = build_aes_attrs(key, bytes as u32, cka_id, label);
     Ok(allocate_handle(finalize_secret_attrs(attrs)))
+}
+
+/// Register an existing RSA private key supplied as PKCS#8 DER bytes.
+///
+/// Creates a `CKO_PRIVATE_KEY` object with `CKK_RSA`, storing the
+/// PKCS#8 DER bytes at `CKA_VALUE` (the same place `sign_rsa` reads
+/// from via `from_pkcs8_der`). Returns the engine handle so the
+/// caller can wire it into a KMIP UID → handle mapping.
+///
+/// Used by KMIP's `Register` op when a client supplies a PrivateKey
+/// with `KeyFormatType=PKCS#8`. CS-AC-M-{1..6,8} exercise this path
+/// against an RSA-2048 signing key.
+pub fn register_rsa_private_key_pkcs8(
+    _session: u32,
+    pkcs8_der: &[u8],
+    cka_id: &[u8],
+    label: &str,
+) -> Result<u32, CkRv> {
+    use crate::constants::{CKA_CLASS, CKA_DECRYPT, CKA_KEY_TYPE, CKA_SIGN, CKA_VALUE, CKK_RSA, CKO_PRIVATE_KEY};
+    let mut attrs = std::collections::HashMap::new();
+    store_ulong(&mut attrs, CKA_CLASS, CKO_PRIVATE_KEY);
+    store_ulong(&mut attrs, CKA_KEY_TYPE, CKK_RSA);
+    store_bool(&mut attrs, CKA_SIGN, true);
+    store_bool(&mut attrs, CKA_DECRYPT, true);
+    attrs.insert(CKA_VALUE, pkcs8_der.to_vec());
+    insert_id_and_label(&mut attrs, cka_id, label);
+    // PKCS#11 v3.2 §4.3/§4.9 — IMPORTED key provenance: not locally generated,
+    // not always-sensitive, not never-extractable. Exportable by default
+    // (KMIP Register'd material round-trips through Get).
+    store_bool(&mut attrs, CKA_TOKEN, false);
+    store_bool(&mut attrs, CKA_PRIVATE, false);
+    store_bool(&mut attrs, CKA_SENSITIVE, false);
+    store_bool(&mut attrs, CKA_EXTRACTABLE, true);
+    store_bool(&mut attrs, CKA_LOCAL, false);
+    store_ulong(&mut attrs, CKA_KEY_GEN_MECHANISM, CKM_UNAVAILABLE_INFORMATION);
+    store_bool(&mut attrs, CKA_ALWAYS_SENSITIVE, false);
+    store_bool(&mut attrs, CKA_NEVER_EXTRACTABLE, false);
+    compute_kcv(&mut attrs);
+    Ok(allocate_handle(attrs))
+}
+
+/// Register an existing RSA public key supplied as PKCS#1 (RSAPublicKey)
+/// DER bytes — `SEQUENCE { modulus, publicExponent }`. Parses the DER
+/// to extract `n` and `e`, stored as `CKA_MODULUS` + `CKA_PUBLIC_EXPONENT`
+/// (the form `verify_rsa` reads via `get_rsa_public_components`).
+///
+/// Used by KMIP Register when the client provides an RSA PublicKey.
+/// CS-AC-M-2 exercises this path against a SignatureVerify op.
+pub fn register_rsa_public_key_der(
+    _session: u32,
+    der: &[u8],
+    cka_id: &[u8],
+    label: &str,
+) -> Result<u32, CkRv> {
+    use crate::constants::{
+        CKA_CLASS, CKA_ENCRYPT, CKA_KEY_TYPE, CKA_MODULUS, CKA_MODULUS_BITS,
+        CKA_PUBLIC_EXPONENT, CKA_VALUE, CKA_VERIFY, CKK_RSA, CKO_PUBLIC_KEY,
+    };
+    use rsa::pkcs1::DecodeRsaPublicKey;
+    use rsa::traits::PublicKeyParts;
+    let pk = rsa::RsaPublicKey::from_pkcs1_der(der).map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+    let n_bytes = pk.n().to_bytes_be();
+    let e_bytes = pk.e().to_bytes_be();
+    let bits = (n_bytes.len() as u32) * 8;
+    let mut attrs = std::collections::HashMap::new();
+    store_ulong(&mut attrs, CKA_CLASS, CKO_PUBLIC_KEY);
+    store_ulong(&mut attrs, CKA_KEY_TYPE, CKK_RSA);
+    store_bool(&mut attrs, CKA_VERIFY, true);
+    store_bool(&mut attrs, CKA_ENCRYPT, true);
+    attrs.insert(CKA_MODULUS, n_bytes);
+    attrs.insert(CKA_PUBLIC_EXPONENT, e_bytes);
+    store_ulong(&mut attrs, CKA_MODULUS_BITS, bits);
+    // Keep the raw DER too — some KMIP paths (Get) want to round-trip
+    // the original Register material.
+    attrs.insert(CKA_VALUE, der.to_vec());
+    insert_id_and_label(&mut attrs, cka_id, label);
+    // PKCS#11 v3.2 §4.3 — imported, not locally generated.
+    store_bool(&mut attrs, CKA_LOCAL, false);
+    store_ulong(&mut attrs, CKA_KEY_GEN_MECHANISM, CKM_UNAVAILABLE_INFORMATION);
+    compute_kcv(&mut attrs);
+    Ok(allocate_handle(attrs))
+}
+
+/// Register an existing HMAC / Generic Secret key supplied as raw key
+/// bytes. Used by KMIP Register when the client provides a SymmetricKey
+/// with `CryptographicAlgorithm = HMAC_SHA{256,384,512}`. CS-AC-M-{4,5,6}
+/// exercise this path against MAC / MACVerify ops.
+pub fn register_generic_secret_bytes(
+    _session: u32,
+    key_bytes: &[u8],
+    cka_id: &[u8],
+    label: &str,
+) -> Result<u32, CkRv> {
+    let mut attrs = build_generic_secret_attrs(
+        key_bytes.to_vec(),
+        key_bytes.len() as u32,
+        cka_id,
+        label,
+    );
+    // PKCS#11 v3.2 §4.3/§4.10 — IMPORTED key provenance (overrides the
+    // generated-key values from the attr builder). Must NOT call
+    // finalize_private_key_attrs here: that would derive ALWAYS_SENSITIVE /
+    // NEVER_EXTRACTABLE as if the key had been born inside the token.
+    store_bool(&mut attrs, CKA_LOCAL, false);
+    store_ulong(&mut attrs, CKA_KEY_GEN_MECHANISM, CKM_UNAVAILABLE_INFORMATION);
+    store_bool(&mut attrs, CKA_ALWAYS_SENSITIVE, false);
+    store_bool(&mut attrs, CKA_NEVER_EXTRACTABLE, false);
+    compute_kcv(&mut attrs);
+    Ok(allocate_handle(attrs))
 }
 
 /// Generate a Generic-Secret key (HMAC etc.). `bits` ∈ [8, 4096] in
@@ -574,8 +683,11 @@ fn build_aes_attrs(key: Vec<u8>, key_len_bytes: u32, cka_id: &[u8], label: &str)
     store_ulong(&mut attrs, CKA_KEY_GEN_MECHANISM, CKM_AES_KEY_GEN);
     store_bool(&mut attrs, CKA_TOKEN, false);
     store_bool(&mut attrs, CKA_PRIVATE, false);
+    // Exportable by default: KMIP Get/Export reads CKA_VALUE through the
+    // native sensitivity gate (SENSITIVE || !EXTRACTABLE blocks). A KMIP
+    // Sensitive attribute flips these at registration time.
     store_bool(&mut attrs, CKA_SENSITIVE, false);
-    store_bool(&mut attrs, CKA_EXTRACTABLE, false);
+    store_bool(&mut attrs, CKA_EXTRACTABLE, true);
     store_bool(&mut attrs, CKA_ENCRYPT, true);
     store_bool(&mut attrs, CKA_DECRYPT, true);
     store_bool(&mut attrs, CKA_WRAP, true);
@@ -603,8 +715,11 @@ fn build_generic_secret_attrs(
     store_ulong(&mut attrs, CKA_VALUE_LEN, key_len_bytes);
     store_ulong(&mut attrs, CKA_KEY_GEN_MECHANISM, CKM_GENERIC_SECRET_KEY_GEN);
     store_bool(&mut attrs, CKA_TOKEN, false);
+    // Exportable by default: KMIP Get/Export reads CKA_VALUE through the
+    // native sensitivity gate (SENSITIVE || !EXTRACTABLE blocks). A KMIP
+    // Sensitive attribute flips these at registration time.
     store_bool(&mut attrs, CKA_SENSITIVE, false);
-    store_bool(&mut attrs, CKA_EXTRACTABLE, false);
+    store_bool(&mut attrs, CKA_EXTRACTABLE, true);
     store_bool(&mut attrs, CKA_ENCRYPT, false);
     store_bool(&mut attrs, CKA_DECRYPT, false);
     store_bool(&mut attrs, CKA_WRAP, false);
@@ -903,7 +1018,8 @@ mod tests {
         close_session(session).unwrap();
     }
 
-    /// AES invalid bit length → CKR_ARGUMENTS_BAD.
+    /// AES invalid bit length → CKR_ARGUMENTS_BAD; 192 is a valid
+    /// PKCS#11 v3.2 §6.5 size (OASIS SKFF-M-{2,6,10}).
     #[test]
     fn aes_invalid_bits_returns_err() {
         let _guard = test_lock::acquire();
@@ -912,10 +1028,8 @@ mod tests {
             generate_aes_key(session, 100, b"\x01", "x").unwrap_err(),
             CKR_ARGUMENTS_BAD,
         );
-        assert_eq!(
-            generate_aes_key(session, 192, b"\x01", "x").unwrap_err(),
-            CKR_ARGUMENTS_BAD,
-        );
+        let handle = generate_aes_key(session, 192, b"\x01", "x").unwrap();
+        assert_eq!(get_object_value(handle).unwrap().len(), 24);
         close_session(session).unwrap();
     }
 

@@ -411,6 +411,10 @@ fn attribute_present(obj: &ObjectRecord, a: &Attribute) -> bool {
         Attribute::State(_)                  => true,
         Attribute::UniqueIdentifier(_)       => true,
         Attribute::Custom { name, .. }       => obj.custom_attributes.contains_key(name),
+        Attribute::NextLink(_)               => obj.links.contains_key("NextLink"),
+        Attribute::PreviousLink(_)           => obj.links.contains_key("PreviousLink"),
+        Attribute::PublicKeyLink(_)          => obj.links.contains_key("PublicKeyLink"),
+        Attribute::PrivateKeyLink(_)         => obj.links.contains_key("PrivateKeyLink"),
         // Baseline Server attributes — presence depends on the typed
         // field actually being populated on the record. AddAttribute
         // MUST succeed when none of these is yet set (BL-M-5 step #3
@@ -467,6 +471,17 @@ fn apply_attribute(obj: &mut ObjectRecord, a: &Attribute) {
         Attribute::UniqueIdentifier(_)       => {}  // Read-Only
         Attribute::Custom { name, value }    => {
             obj.custom_attributes.insert(name.clone(), value.clone());
+        }
+        // KMIP §11 Link attributes — UID references into the
+        // record's `links` map keyed by canonical attribute name.
+        // GetAttributes / GetAttributeList read back the same keys.
+        Attribute::NextLink(uid)             => { obj.links.insert("NextLink".into(), uid.clone()); }
+        Attribute::PreviousLink(uid)         => { obj.links.insert("PreviousLink".into(), uid.clone()); }
+        Attribute::PublicKeyLink(uid)        => { obj.links.insert("PublicKeyLink".into(), uid.clone()); }
+        Attribute::PrivateKeyLink(uid)       => { obj.links.insert("PrivateKeyLink".into(), uid.clone()); }
+        Attribute::GroupLink(uid)            => { obj.links.insert("GroupLink".into(), uid.clone()); }
+        Attribute::ApplicationSpecificInformation { namespace, data } => {
+            obj.application_specific_information = Some((namespace.clone(), data.clone()));
         }
         // ── Baseline Server attribute setters ──
         Attribute::ActivationDate(t)           => obj.activation_date = Some(time::OffsetDateTime::from_unix_timestamp(*t).unwrap_or(time::OffsetDateTime::UNIX_EPOCH)),

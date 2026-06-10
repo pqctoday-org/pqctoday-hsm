@@ -181,7 +181,7 @@ pub fn encrypt(
             // Handle-based encrypt has no AAD plumbing yet — use empty.
             // KMIP callers that need AEAD with AAD go through
             // `encrypt_with_key_bytes` instead.
-            aes_gcm_encrypt(&key_bytes, iv, plaintext, &[])
+            aes_gcm_encrypt(&key_bytes, iv, plaintext, &[], None)
         }
         CKM_AES_ECB => aes_ecb_encrypt(&key_bytes, plaintext),
         CKM_AES_CBC => {
@@ -225,7 +225,7 @@ pub fn decrypt(
     match mechanism {
         CKM_AES_GCM => {
             let iv = iv.ok_or(CKR_ARGUMENTS_BAD)?;
-            aes_gcm_decrypt(&key_bytes, iv, ciphertext, &[])
+            aes_gcm_decrypt(&key_bytes, iv, ciphertext, &[], None)
         }
         CKM_AES_ECB => aes_ecb_decrypt(&key_bytes, ciphertext),
         CKM_AES_CBC => {
@@ -306,11 +306,12 @@ pub fn encrypt_with_key_bytes(
     iv: Option<&[u8]>,
     oaep: Option<&OaepParams>,
     aad: &[u8],
+    tag_len: Option<usize>,
 ) -> Result<Vec<u8>, CkRv> {
     match mechanism {
         CKM_AES_GCM => {
             let iv = iv.ok_or(CKR_ARGUMENTS_BAD)?;
-            aes_gcm_encrypt(key_bytes, iv, plaintext, aad)
+            aes_gcm_encrypt(key_bytes, iv, plaintext, aad, tag_len)
         }
         CKM_AES_ECB => aes_ecb_encrypt(key_bytes, plaintext),
         CKM_AES_CBC => {
@@ -347,11 +348,12 @@ pub fn decrypt_with_key_bytes(
     iv: Option<&[u8]>,
     oaep: Option<&OaepParams>,
     aad: &[u8],
+    tag_len: Option<usize>,
 ) -> Result<Vec<u8>, CkRv> {
     match mechanism {
         CKM_AES_GCM => {
             let iv = iv.ok_or(CKR_ARGUMENTS_BAD)?;
-            aes_gcm_decrypt(key_bytes, iv, ciphertext, aad)
+            aes_gcm_decrypt(key_bytes, iv, ciphertext, aad, tag_len)
         }
         CKM_AES_ECB => aes_ecb_decrypt(key_bytes, ciphertext),
         CKM_AES_CBC => {
@@ -463,47 +465,94 @@ fn rsa_oaep_decrypt(priv_der: &[u8], ciphertext: &[u8], params: &OaepParams) -> 
 
 // ── AES-GCM ─────────────────────────────────────────────────────────────────
 
-fn aes_gcm_encrypt(key: &[u8], iv: &[u8], plaintext: &[u8], aad: &[u8]) -> Result<Vec<u8>, CkRv> {
-    use aes_gcm::aead::generic_array::GenericArray;
-    use aes_gcm::{aead::{Aead, Payload}, Aes128Gcm, Aes256Gcm, KeyInit};
-    if iv.len() != 12 {
+/// AES-GCM encrypt with caller-selectable tag length and IV length.
+///
+/// `tag_len`: tag size in bytes (default 16; NIST SP 800-38D §5.2.1.2
+/// allows 12–16). `iv`: any length ≥ 1 — non-96-bit IVs derive J0 via
+/// GHASH per §7.1 step 2b (OASIS CS-BC-M-GCM-2 pins 8- and 60-byte
+/// IVs). Backed by the KAT-verified streaming `GcmState`, which also
+/// covers AES-192 — the one-shot `aes-gcm` crate handles neither
+/// arbitrary IV lengths nor 24-byte keys.
+fn aes_gcm_encrypt(
+    key: &[u8],
+    iv: &[u8],
+    plaintext: &[u8],
+    aad: &[u8],
+    tag_len: Option<usize>,
+) -> Result<Vec<u8>, CkRv> {
+    use crate::crypto::multipart::{AesKey, CipherDirection, GcmState, MultipartCipher};
+    if iv.is_empty() {
         return Err(CKR_ARGUMENTS_BAD);
     }
-    let nonce = GenericArray::from_slice(iv);
-    let payload = Payload { msg: plaintext, aad };
-    match key.len() {
-        16 => {
-            let cipher = Aes128Gcm::new_from_slice(key).map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
-            cipher.encrypt(nonce, payload).map_err(|_| CKR_FUNCTION_FAILED)
-        }
-        32 => {
-            let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
-            cipher.encrypt(nonce, payload).map_err(|_| CKR_FUNCTION_FAILED)
-        }
-        _ => Err(CKR_KEY_TYPE_INCONSISTENT),
-    }
+    let k = AesKey::new(key).ok_or(CKR_KEY_TYPE_INCONSISTENT)?;
+    let tag_bits = (tag_len.unwrap_or(16) as u32) * 8;
+    let mut st =
+        MultipartCipher::Gcm(GcmState::new(k, iv, aad, tag_bits, CipherDirection::Encrypt));
+    let mut out = st.update(plaintext)?;
+    out.extend_from_slice(&st.finalize()?);
+    Ok(out)
 }
 
-fn aes_gcm_decrypt(key: &[u8], iv: &[u8], ciphertext: &[u8], aad: &[u8]) -> Result<Vec<u8>, CkRv> {
-    use aes_gcm::aead::generic_array::GenericArray;
-    use aes_gcm::{aead::{Aead, Payload}, Aes128Gcm, Aes256Gcm, KeyInit};
-    if iv.len() != 12 {
+/// AES-GCM decrypt. `ciphertext` carries the tag appended (the shim
+/// convention); tag verification failure → `CKR_ENCRYPTED_DATA_INVALID`.
+fn aes_gcm_decrypt(
+    key: &[u8],
+    iv: &[u8],
+    ciphertext: &[u8],
+    aad: &[u8],
+    tag_len: Option<usize>,
+) -> Result<Vec<u8>, CkRv> {
+    use crate::crypto::multipart::{AesKey, CipherDirection, GcmState, MultipartCipher};
+    if iv.is_empty() {
         return Err(CKR_ARGUMENTS_BAD);
     }
-    let nonce = GenericArray::from_slice(iv);
-    let payload = Payload { msg: ciphertext, aad };
-    match key.len() {
-        16 => {
-            let cipher = Aes128Gcm::new_from_slice(key).map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
-            // GCM tag failure → CKR_ENCRYPTED_DATA_INVALID (PKCS#11 v3.2 §6.13).
-            cipher.decrypt(nonce, payload).map_err(|_| CKR_ENCRYPTED_DATA_INVALID)
-        }
-        32 => {
-            let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
-            cipher.decrypt(nonce, payload).map_err(|_| CKR_ENCRYPTED_DATA_INVALID)
-        }
-        _ => Err(CKR_KEY_TYPE_INCONSISTENT),
+    let k = AesKey::new(key).ok_or(CKR_KEY_TYPE_INCONSISTENT)?;
+    let tag_bits = (tag_len.unwrap_or(16) as u32) * 8;
+    let mut st =
+        MultipartCipher::Gcm(GcmState::new(k, iv, aad, tag_bits, CipherDirection::Decrypt));
+    let mut out = st.update(ciphertext)?;
+    out.extend_from_slice(&st.finalize()?);
+    Ok(out)
+}
+
+// ── AES-KW (RFC 3394 / NIST SP 800-38F KW-AE) ──────────────────────────────
+
+/// AES Key Wrap with raw KEK bytes — the `native` counterpart of
+/// `ffi::C_WrapKey(CKM_AES_KEY_WRAP)`. `plaintext` must be a multiple
+/// of 8 bytes and ≥ 16 (RFC 3394 §2.2.1); output is 8 bytes longer.
+/// KMIP callers (Get with `KeyWrappingSpecification`, BlockCipherMode
+/// `NISTKeyWrap`) wrap the TTLV-encoded KeyValue, which is 8-aligned
+/// by construction (TTLV §9.6 pads every frame to 8 bytes).
+pub fn aes_key_wrap(kek: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, CkRv> {
+    use aes::cipher::generic_array::GenericArray;
+    if plaintext.len() % 8 != 0 || plaintext.len() < 16 {
+        return Err(CKR_DATA_LEN_RANGE);
     }
+    let mut buf = vec![0u8; plaintext.len() + 8];
+    let ok = match kek.len() {
+        16 => aes_kw::KekAes128::new(GenericArray::from_slice(kek)).wrap(plaintext, &mut buf).is_ok(),
+        24 => aes_kw::KekAes192::new(GenericArray::from_slice(kek)).wrap(plaintext, &mut buf).is_ok(),
+        32 => aes_kw::KekAes256::new(GenericArray::from_slice(kek)).wrap(plaintext, &mut buf).is_ok(),
+        _ => return Err(CKR_KEY_TYPE_INCONSISTENT),
+    };
+    if ok { Ok(buf) } else { Err(CKR_FUNCTION_FAILED) }
+}
+
+/// AES Key Unwrap (RFC 3394 §2.2.2) — inverse of [`aes_key_wrap`].
+/// Integrity-check failure → `CKR_ENCRYPTED_DATA_INVALID`.
+pub fn aes_key_unwrap(kek: &[u8], wrapped: &[u8]) -> Result<Vec<u8>, CkRv> {
+    use aes::cipher::generic_array::GenericArray;
+    if wrapped.len() % 8 != 0 || wrapped.len() < 24 {
+        return Err(CKR_ENCRYPTED_DATA_LEN_RANGE);
+    }
+    let mut buf = vec![0u8; wrapped.len() - 8];
+    let ok = match kek.len() {
+        16 => aes_kw::KekAes128::new(GenericArray::from_slice(kek)).unwrap(wrapped, &mut buf).is_ok(),
+        24 => aes_kw::KekAes192::new(GenericArray::from_slice(kek)).unwrap(wrapped, &mut buf).is_ok(),
+        32 => aes_kw::KekAes256::new(GenericArray::from_slice(kek)).unwrap(wrapped, &mut buf).is_ok(),
+        _ => return Err(CKR_KEY_TYPE_INCONSISTENT),
+    };
+    if ok { Ok(buf) } else { Err(CKR_ENCRYPTED_DATA_INVALID) }
 }
 
 // ── AES-ECB ────────────────────────────────────────────────────────────────
@@ -773,6 +822,30 @@ mod tests {
     use crate::native::keygen::{generate_ml_dsa_keypair, generate_ml_kem_keypair};
     use crate::native::session::{bootstrap_default_token, close_session, finalize, init};
     use crate::native::test_lock;
+
+    /// RFC 3394 §4.1 — wrap 128 bits of key data with a 128-bit KEK.
+    #[test]
+    fn aes_key_wrap_rfc3394_kat() {
+        let kek: Vec<u8> = (0x00..=0x0f).collect();
+        let pt: Vec<u8> = vec![
+            0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+            0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
+        ];
+        let expected = [
+            0x1f, 0xa6, 0x8b, 0x0a, 0x81, 0x12, 0xb4, 0x47,
+            0xae, 0xf3, 0x4b, 0xd8, 0xfb, 0x5a, 0x7b, 0x82,
+            0x9d, 0x3e, 0x86, 0x23, 0x71, 0xd2, 0xcf, 0xe5,
+        ];
+        let wrapped = aes_key_wrap(&kek, &pt).unwrap();
+        assert_eq!(wrapped, expected);
+        assert_eq!(aes_key_unwrap(&kek, &wrapped).unwrap(), pt);
+        // Tampered ciphertext → integrity-check failure.
+        let mut bad = wrapped.clone();
+        bad[0] ^= 1;
+        assert_eq!(aes_key_unwrap(&kek, &bad).unwrap_err(), CKR_ENCRYPTED_DATA_INVALID);
+        // Non-8-multiple input rejected per RFC 3394 §2.2.1.
+        assert_eq!(aes_key_wrap(&kek, &pt[..15]).unwrap_err(), CKR_DATA_LEN_RANGE);
+    }
 
     fn fresh_session() -> u32 {
         let _ = finalize();

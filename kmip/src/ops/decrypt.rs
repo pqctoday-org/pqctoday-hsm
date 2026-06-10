@@ -192,6 +192,11 @@ fn decrypt_classical(
     let aad = req.aad.as_deref().unwrap_or(&[]);
     let pkcs7_strip_ecb = mech == softhsmrustv3::constants::CKM_AES_ECB
         && effective_cp.and_then(|c| c.padding_method) == Some(3);
+    // KMIP 3.0 §11 `Tag Length` — caller-selectable AEAD authenticator
+    // length forwarded to the shim. CS-BC-M-GCM-1 step #6 pins 12.
+    let tag_len = effective_cp
+        .and_then(|c| c.tag_length)
+        .map(|n| n as usize);
     let mut plaintext = if let Some(key_bytes) = &obj.key_material {
         softhsmrustv3::native::decrypt_with_key_bytes(
             key_bytes,
@@ -200,6 +205,7 @@ fn decrypt_classical(
             req.iv.as_deref(),
             oaep.as_ref(),
             aad,
+            tag_len,
         )
         .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Decrypt"))?
     } else if let Some(session) = deps.engine_session {

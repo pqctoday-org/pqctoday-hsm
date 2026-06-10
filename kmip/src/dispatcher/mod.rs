@@ -484,7 +484,7 @@ mod tests {
     #[test]
     fn missing_uid_get_returns_operation_failed_with_reason() {
         let d = deps();
-        let req = one_off_request(RequestPayload::Get(crate::kmip30::GetRequest { uid: "ghost".into() }));
+        let req = one_off_request(RequestPayload::Get(crate::kmip30::GetRequest { uid: "ghost".into(), key_wrapping_specification: None }));
         let resp = dispatch(&d, req);
         assert_eq!(resp.batch_items[0].result_status, ResultStatus::OperationFailed);
         assert_eq!(
@@ -586,7 +586,7 @@ mod tests {
                 // Item 1: fails (Get on unknown UID).
                 RequestBatchItem {
                     operation: crate::kmip30::Operation::Get,
-                    payload: RP::Get(GetRequest { uid: "urn:ghost".into() }),
+                    payload: RP::Get(GetRequest { uid: "urn:ghost".into(), key_wrapping_specification: None }),
                 },
                 // Item 2: should NOT be processed under Stop semantics.
                 RequestBatchItem {
@@ -615,11 +615,11 @@ mod tests {
             batch_items: vec![
                 RequestBatchItem {
                     operation: crate::kmip30::Operation::Get,
-                    payload: RP::Get(GetRequest { uid: "urn:ghost-1".into() }),
+                    payload: RP::Get(GetRequest { uid: "urn:ghost-1".into(), key_wrapping_specification: None }),
                 },
                 RequestBatchItem {
                     operation: crate::kmip30::Operation::Get,
-                    payload: RP::Get(GetRequest { uid: "urn:ghost-2".into() }),
+                    payload: RP::Get(GetRequest { uid: "urn:ghost-2".into(), key_wrapping_specification: None }),
                 },
                 RequestBatchItem {
                     operation: crate::kmip30::Operation::Query,

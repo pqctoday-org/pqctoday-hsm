@@ -33,7 +33,7 @@ pub use ops::{
     GetAttributesRequest, GetAttributesResponse,
     GetRequest, GetResponse,
     InteropFunction, InteropRequest, InteropResponse,
-    KeyBlock, KeyFormatType,
+    KeyBlock, KeyFormatType, KeyWrappingSpec,
     LocateRequest, LocateResponse,
     ModifyAttributeRequest, ModifyAttributeResponse,
     Operation,
@@ -76,4 +76,4 @@ pub use message::{
     ResponseHeader, ResponseMessage, ResponsePayload, ResultStatus, KMIP_VERSION_MAJOR,
     KMIP_VERSION_MINOR,
 };
-pub use wire::{decode_request_message, encode_response_message, WireError};
+pub use wire::{decode_request_message, encode_response_message, ttlv_encode_key_value, WireError};

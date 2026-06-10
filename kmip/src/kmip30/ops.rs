@@ -254,6 +254,25 @@ pub struct CreateKeyPairResponse {
 #[derive(Clone, Debug, PartialEq)]
 pub struct GetRequest {
     pub uid: String,
+    /// KMIP 3.0 §6.1.23 — when present, the server returns the key
+    /// material wrapped under the referenced wrapping key instead of
+    /// in the clear. AX-M-2 pins WrappingMethod=Encrypt with
+    /// BlockCipherMode=NISTKeyWrap (AES-KW, RFC 3394).
+    pub key_wrapping_specification: Option<KeyWrappingSpec>,
+}
+
+/// KMIP 3.0 `Key Wrapping Specification` (request side) and
+/// `Key Wrapping Data` (response side) share this shape — the response
+/// echoes the specification that produced the wrapped KeyValue.
+#[derive(Clone, Debug, PartialEq)]
+pub struct KeyWrappingSpec {
+    /// §11 `Wrapping Method` — only `Encrypt` (0x01) is supported.
+    pub wrapping_method: u32,
+    /// `Encryption Key Information / Unique Identifier` — the wrap key.
+    pub encryption_key_uid: String,
+    /// `Encryption Key Information / Cryptographic Parameters` —
+    /// `BlockCipherMode=NISTKeyWrap` selects AES-KW.
+    pub cryptographic_parameters: Option<CryptographicParameters>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -275,6 +294,11 @@ pub struct KeyBlock {
     pub cryptographic_algorithm: KmipAlgorithm,
     pub cryptographic_length: u32,
     pub key_value: Vec<u8>,
+    /// KMIP 3.0 §4.x — present when `key_value` carries the AES-KW
+    /// wrapped TTLV-encoded KeyValue rather than cleartext material.
+    /// On the wire this flips `KeyValue` from Structure to ByteString
+    /// and appends a `KeyWrappingData` structure (AX-M-2).
+    pub key_wrapping_data: Option<KeyWrappingSpec>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -353,7 +377,7 @@ pub struct DestroyResponse {
 // Handler branches on key.algorithm — see §6 Phase 5 in
 // IMPLEMENTATION_PLAN.md.
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct EncryptRequest {
     pub uid: String,
     /// For classical encrypt: the plaintext. For ML-KEM encapsulation: the
@@ -370,9 +394,18 @@ pub struct EncryptRequest {
     /// AAD ("associated data") for AEAD ciphers (AES-GCM, ChaCha20-
     /// Poly1305). Bound into the auth tag computation, NOT encrypted.
     pub aad: Option<Vec<u8>>,
+    /// KMIP 3.0 §6.1.21 multi-part streaming — `Init Indicator` opens a
+    /// stream: the server returns a `Correlation Value` instead of
+    /// finalising. CS-BC-M-GCM-3 pins the GCM streaming flow.
+    pub init_indicator: Option<bool>,
+    /// §6.1.21 — `Final Indicator` closes the stream identified by
+    /// `correlation_value`; the response carries the AEAD tag.
+    pub final_indicator: Option<bool>,
+    /// §6.1.21 — server-issued handle chaining the parts of one stream.
+    pub correlation_value: Option<Vec<u8>>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct EncryptResponse {
     pub uid: String,
     /// For classical encrypt: the ciphertext. For ML-KEM: the encapsulation
@@ -391,6 +424,10 @@ pub struct EncryptResponse {
     /// back so the client can use it for the subsequent Decrypt.
     /// `None` when the client supplied the IV (or the mech is keyless).
     pub iv_counter_nonce: Option<Vec<u8>>,
+    /// §6.1.21 streaming — echoed on every non-final part so the client
+    /// can chain the next request. `None` for single-part ops and on
+    /// the final part.
+    pub correlation_value: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -423,6 +460,10 @@ pub struct DecryptResponse {
 pub struct SignRequest {
     pub uid: String,
     pub data: Vec<u8>,
+    /// Wire tag `Cryptographic Parameters` (0x42002b). OPTIONAL per
+    /// §6.1.60 — when present, overrides the object's stored
+    /// `CryptographicParameters` attribute for this op.
+    pub cryptographic_parameters: Option<CryptographicParameters>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -436,6 +477,12 @@ pub struct SignatureVerifyRequest {
     pub uid: String,
     pub data: Vec<u8>,
     pub signature: Vec<u8>,
+    /// Wire tag `Cryptographic Parameters` (0x42002b). OPTIONAL per
+    /// §6.1.61 — when present, drives padding-method / hashing-algorithm
+    /// selection (RSA-PKCS1v15 vs RSA-PSS, SHA-256 vs SHA-384, …). When
+    /// absent, the server falls back to the object's stored
+    /// `CryptographicParameters` attribute.
+    pub cryptographic_parameters: Option<CryptographicParameters>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
