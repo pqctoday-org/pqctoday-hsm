@@ -1,6 +1,6 @@
 # OASIS KMIP 3.0 Dispatcher Replay Report
 
-Generated: 2026-06-10 01:19:16 UTC
+Generated: 2026-06-10 01:48:42 UTC
 
 
 ## Aggregate
@@ -60,9 +60,9 @@ Of the 102 tests that exercise only implemented ops:
 | `CS-RNG-O-2-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResponsePayload/DataLength: expected '16' got 32 |
 | `CS-RNG-O-3-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResponsePayload/DataLength: expected '0' got 32 |
 | `CS-RNG-O-4-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'OperationFailed' got 0 |
-| `MSGENC-HTTPS-M-1-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'OperationFailed' got 0 |
-| `MSGENC-JSON-M-1-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'OperationFailed' got 0 |
-| `MSGENC-XML-M-1-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'OperationFailed' got 0 |
+| `MSGENC-HTTPS-M-1-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/Query ResponsePayload ObjectType: actual lacks expected ['OpaqueObject', 'SplitKey', 'C |
+| `MSGENC-JSON-M-1-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/Query ResponsePayload ObjectType: actual lacks expected ['OpaqueObject', 'SplitKey', 'C |
+| `MSGENC-XML-M-1-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/Query ResponsePayload ObjectType: actual lacks expected ['OpaqueObject', 'SplitKey', 'C |
 | `OMOS-M-1-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
 | `OMOS-O-1-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
 | `PKCS11-M-1-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 4 != 3 |

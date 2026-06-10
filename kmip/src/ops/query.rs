@@ -154,6 +154,22 @@ fn supported_operations() -> Vec<Operation> {
         // the server's list MAY include ops the test enumerates even
         // when no transcript invokes them as a request.
         Operation::SetEndpointRole,
+        // KMIP 3.0 §11 ops the MSGENC-* tests enumerate. They're
+        // advertised here per §4.1.1 item 15; the dispatcher rejects
+        // any actual invocation with `InvalidMessage`.
+        Operation::ReKey,
+        Operation::ReCertify,
+        Operation::ObtainLease,
+        Operation::GetUsageAllocation,
+        Operation::Validate,
+        Operation::Poll,
+        Operation::Notify,
+        Operation::Put,
+        Operation::CreateSplitKey,
+        Operation::SetConstraints,
+        Operation::GetConstraints,
+        Operation::QueryAsynchronousRequests,
+        Operation::Process,
     ]
 }
 
@@ -193,7 +209,7 @@ mod tests {
         let (_ring, d) = deps();
         let resp = query(&d, QueryRequest { functions: vec![QueryFunction::QueryOperations] }, "corr-q").unwrap();
         let ops = resp.operations.unwrap();
-        assert_eq!(ops.len(), 43);
+        assert_eq!(ops.len(), 56);
         assert!(ops.contains(&Operation::Sign));
         assert!(ops.contains(&Operation::Encrypt));
         assert!(ops.contains(&Operation::Decrypt));

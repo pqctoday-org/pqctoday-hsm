@@ -64,6 +64,11 @@ pub struct RequestHeader {
     /// default at the consumer site so the absent-vs-explicitly-Stop
     /// distinction is preserved for logging.
     pub batch_error_continuation_option: Option<BatchErrorContinuationOption>,
+    /// KMIP 3.0 §9.10 `Maximum Response Size` (bytes). When set, the
+    /// server MUST return `OperationFailed / ResponseTooLarge` if
+    /// the encoded ResponseMessage would exceed it. `None` ≡ no
+    /// limit.
+    pub maximum_response_size: Option<i32>,
 }
 
 /// KMIP 3.0 §9.5 enum. Codepoints (verified against
@@ -102,6 +107,7 @@ impl RequestHeader {
             protocol_version_minor: KMIP_VERSION_MINOR,
             time_stamp: None,
             batch_error_continuation_option: None,
+            maximum_response_size: None,
         }
     }
 }

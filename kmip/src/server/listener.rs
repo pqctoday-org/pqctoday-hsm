@@ -150,6 +150,14 @@ async fn handle_conn(
 ) -> Result<(), ServerError> {
     let mut tls_stream = acceptor.accept(stream).await.map_err(ServerError::Io)?;
     let frame_bytes = read_one_frame(&mut tls_stream).await?;
+    // KMIP 3.0 §9.10 — capture `Maximum Response Size` from the
+    // header (when present) BEFORE dispatch so we can compare it
+    // against the encoded response below.
+    let max_resp_size = decode_request_message(&frame_bytes)
+        .as_ref()
+        .ok()
+        .and_then(|r| r.header.maximum_response_size)
+        .filter(|&n| n > 0);
     let response = match decode_request_message(&frame_bytes) {
         Ok(request) => dispatch(&deps, request),
         // KMIP 3.0 §6.4: a wire-decode failure (unknown tag, unknown enum
@@ -161,9 +169,49 @@ async fn handle_conn(
         Err(e) => wire_error_response(&e),
     };
     let response_bytes = encode_response_message(&response);
+    // KMIP 3.0 §9.10 — when the encoded response would exceed the
+    // client's `Maximum Response Size`, send a single-item
+    // `OperationFailed / ResponseTooLarge` response instead.
+    let response_bytes = if let Some(limit) = max_resp_size {
+        if response_bytes.len() > limit as usize {
+            // Echo the first BatchItem's Operation per §8.2.3 so the
+            // client can correlate the failure with its original
+            // request.
+            let echoed_op = response.batch_items.first().and_then(|bi| bi.operation);
+            let small = response_too_large(response_bytes.len(), limit as usize, echoed_op);
+            encode_response_message(&small)
+        } else {
+            response_bytes
+        }
+    } else {
+        response_bytes
+    };
     tls_stream.write_all(&response_bytes).await?;
     tls_stream.shutdown().await?;
     Ok(())
+}
+
+/// Build a single-BatchItem ResponseMessage carrying
+/// `OperationFailed / ResponseTooLarge` per KMIP 3.0 §9.10 +
+/// §11. Used when the caller-supplied `Maximum Response Size` is
+/// smaller than the actually-encoded response.
+fn response_too_large(
+    actual: usize,
+    limit: usize,
+    operation: Option<crate::kmip30::Operation>,
+) -> crate::kmip30::ResponseMessage {
+    use crate::error::ResultReason;
+    use crate::kmip30::{ResponseBatchItem, ResponseHeader, ResponseMessage, ResultStatus};
+    ResponseMessage {
+        header: ResponseHeader::v3_now(),
+        batch_items: vec![ResponseBatchItem {
+            operation,
+            result_status: ResultStatus::OperationFailed,
+            result_reason: Some(ResultReason::ResponseTooLarge as u32),
+            result_message: Some(format!("TOO_LARGE: {actual} bytes > limit {limit}")),
+            payload: None,
+        }],
+    }
 }
 
 /// Build a KMIP 3.0 §6.4 error ResponseMessage for an unparseable request.

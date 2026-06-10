@@ -85,6 +85,28 @@ pub enum Operation {
     CreateUser       = 0x3e,
     CreateCredential = 0x3f,
     Deactivate       = 0x40,
+
+    // ── KMIP 3.0 §11 — Advertised-only ops ────────────────────────────────
+    // Operations the OASIS Baseline corpus requires the server to
+    // enumerate in `Query` (per §4.1.1 items 15-16 superset rule) but
+    // doesn't actually invoke. They have no dispatcher routes —
+    // `decode_request_payload` rejects any inbound request with
+    // `UnknownEnum` so a misdirected client gets a structured
+    // `InvalidMessage` rather than a silent success. Codepoints
+    // verified against `kmip-spec-3.0-tags-enums.json`.
+    ReKey                     = 0x04,
+    ReCertify                 = 0x07,
+    ObtainLease               = 0x10,
+    GetUsageAllocation        = 0x11,
+    Validate                  = 0x17,
+    Poll                      = 0x1a,
+    Notify                    = 0x1b,
+    Put                       = 0x1c,
+    CreateSplitKey            = 0x28,
+    SetConstraints            = 0x37,
+    GetConstraints            = 0x38,
+    QueryAsynchronousRequests = 0x39,
+    Process                   = 0x3a,
 }
 
 impl Operation {
@@ -137,6 +159,19 @@ impl Operation {
             0x3e => Some(Self::CreateUser),
             0x3f => Some(Self::CreateCredential),
             0x40 => Some(Self::Deactivate),
+            0x04 => Some(Self::ReKey),
+            0x07 => Some(Self::ReCertify),
+            0x10 => Some(Self::ObtainLease),
+            0x11 => Some(Self::GetUsageAllocation),
+            0x17 => Some(Self::Validate),
+            0x1a => Some(Self::Poll),
+            0x1b => Some(Self::Notify),
+            0x1c => Some(Self::Put),
+            0x28 => Some(Self::CreateSplitKey),
+            0x37 => Some(Self::SetConstraints),
+            0x38 => Some(Self::GetConstraints),
+            0x39 => Some(Self::QueryAsynchronousRequests),
+            0x3a => Some(Self::Process),
             _ => None,
         }
     }

@@ -1,5 +1,5 @@
 {
-  "generated_at": 1781054356,
+  "generated_at": 1781056122,
   "summary": {
     "pass": 51,
     "fail": 51,
@@ -772,7 +772,7 @@
     {
       "name": "MSGENC-HTTPS-M-1-30.xml",
       "status": "FAIL",
-      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'OperationFailed' got 0",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/Query ResponsePayload ObjectType: actual lacks expected ['OpaqueObject', 'SplitKey', 'CertificateRequest', 'Group', 'HashedPasswordCredential', 'OneTimePasswordCredential', 'DeviceCredential', 'PasswordCredential'] (\u00a74.1.1 items 15-16 permit *supersets* \u2014 not subsets)",
       "ops_used": [
         "Query"
       ]
@@ -780,7 +780,7 @@
     {
       "name": "MSGENC-JSON-M-1-30.xml",
       "status": "FAIL",
-      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'OperationFailed' got 0",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/Query ResponsePayload ObjectType: actual lacks expected ['OpaqueObject', 'SplitKey', 'CertificateRequest', 'DeviceCredential', 'Group', 'HashedPasswordCredential', 'PasswordCredential', 'OneTimePasswordCredential'] (\u00a74.1.1 items 15-16 permit *supersets* \u2014 not subsets)",
       "ops_used": [
         "Query"
       ]
@@ -788,7 +788,7 @@
     {
       "name": "MSGENC-XML-M-1-30.xml",
       "status": "FAIL",
-      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'OperationFailed' got 0",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/Query ResponsePayload ObjectType: actual lacks expected ['OpaqueObject', 'SplitKey', 'CertificateRequest', 'DeviceCredential', 'Group', 'HashedPasswordCredential', 'PasswordCredential', 'OneTimePasswordCredential'] (\u00a74.1.1 items 15-16 permit *supersets* \u2014 not subsets)",
       "ops_used": [
         "Query"
       ]

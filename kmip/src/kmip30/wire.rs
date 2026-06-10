@@ -61,6 +61,13 @@ mod tags {
     /// KMIP 3.0 §9.5 `Batch Error Continuation Option` Enumeration.
     /// Codepoint `0x42000e` per `kmip-spec-3.0-tags-enums.json`.
     pub const BatchErrorContinuationOption: u32 = 0x42_000e;
+    /// KMIP 3.0 §9.10 `Maximum Response Size` — Integer carrying the
+    /// upper bound on the response size in bytes. The server SHALL
+    /// honour this per §9.10: when the encoded response exceeds it,
+    /// return a single-item ResponseMessage with `OperationFailed /
+    /// ResponseTooLarge`. Codepoint `0x420050` per the spec
+    /// extraction.
+    pub const MaximumResponseSize: u32    = 0x42_0050;
     pub const CryptographicAlgorithm: u32 = 0x42_0028;
     pub const CryptographicLength: u32    = 0x42_002a;
     pub const CryptographicUsageMask: u32 = 0x42_002c;
@@ -339,6 +346,7 @@ fn decode_request_header(frame: &TtlvFrame) -> Result<RequestHeader, WireError> 
     let mut minor: Option<i32> = None;
     let mut time_stamp = None;
     let mut becopt: Option<crate::kmip30::BatchErrorContinuationOption> = None;
+    let mut max_resp_size: Option<i32> = None;
     for child in children {
         match child.tag.0 {
             tags::ProtocolVersion => {
@@ -363,6 +371,13 @@ fn decode_request_header(frame: &TtlvFrame) -> Result<RequestHeader, WireError> 
                 let v = expect_enum(child, "Batch Error Continuation Option")?;
                 becopt = crate::kmip30::BatchErrorContinuationOption::from_wire_value(v);
             }
+            // KMIP 3.0 §9.10 — `Maximum Response Size` Integer.
+            // The listener checks the encoded response size after
+            // dispatch and replaces it with `OperationFailed /
+            // ResponseTooLarge` if it overflows.
+            tags::MaximumResponseSize => {
+                max_resp_size = Some(expect_integer(child, "Maximum Response Size")?);
+            }
             // Ignore optional header fields v0.1 doesn't consume.
             _ => {}
         }
@@ -374,6 +389,7 @@ fn decode_request_header(frame: &TtlvFrame) -> Result<RequestHeader, WireError> 
         protocol_version_minor: minor,
         time_stamp,
         batch_error_continuation_option: becopt,
+        maximum_response_size: max_resp_size,
     })
 }
 
@@ -524,6 +540,25 @@ fn decode_request_payload(op: Operation, frame: &TtlvFrame) -> Result<RequestPay
         Operation::SetEndpointRole  => return Err(WireError::UnknownEnum {
             field: "Operation (SetEndpointRole — advertised but no handler)",
             value: Operation::SetEndpointRole.to_wire_value(),
+        }),
+        // KMIP 3.0 §11 advertised-only ops: enumerated in `Query` per
+        // §4.1.1 items 15-16 but no dispatcher route. Invoking them
+        // gets a structured `InvalidMessage` per §6.4.
+        Operation::ReKey
+        | Operation::ReCertify
+        | Operation::ObtainLease
+        | Operation::GetUsageAllocation
+        | Operation::Validate
+        | Operation::Poll
+        | Operation::Notify
+        | Operation::Put
+        | Operation::CreateSplitKey
+        | Operation::SetConstraints
+        | Operation::GetConstraints
+        | Operation::QueryAsynchronousRequests
+        | Operation::Process => return Err(WireError::UnknownEnum {
+            field: "Operation (advertised-only — no handler in v0.1)",
+            value: op.to_wire_value(),
         }),
     })
 }
