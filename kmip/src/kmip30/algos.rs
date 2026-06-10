@@ -97,6 +97,11 @@ pub enum PkcsOp {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum KmipAlgorithm {
     // ── Classical baseline ────────────────────────────────────────────────
+    // Deprecated symmetric primitives (DES=0x01, 3DES=0x02) and the
+    // discrete-log signature algorithm (DSA=0x05) are explicitly NOT
+    // supported per pqctoday's deprecated-mechanism policy. Register
+    // requests carrying those codepoints surface as `InvalidMessage`
+    // via `from_wire_value` returning None.
     Aes,           // 0x03
     Rsa,           // 0x04
     Ecdsa,         // 0x06 — covers ECDSA over any curve; curve = attribute
