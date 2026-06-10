@@ -1,6 +1,6 @@
 [package]
 name = "softhsmrustv3"
-version = "0.6.0"
+version = "0.6.1"
 edition = "2024"
 description = "A native Rust WebAssembly clone of SoftHSMv3"
 
@@ -79,6 +79,10 @@ fips205 = "0.4.1"
 [patch.crates-io]
 fips204 = { path = "fips204-patched" }
 fips205 = { path = "fips205-patched" }
+# SP 800-208 SHAKE-256 type-ID support: upstream 0.1.1 serializes SHA-256
+# type codes for all hash families (gap-analysis hbs-lms finding; mirrors
+# the C++ engine's patched hash-sigs submodule).
+hbs-lms = { path = "hbs-lms-patched" }
 
 [profile.release]
 # Optimize purely for size in WASM

@@ -515,6 +515,46 @@ fn aes_gcm_decrypt(
     Ok(out)
 }
 
+// ── AES-KW (RFC 3394 / NIST SP 800-38F KW-AE) ──────────────────────────────
+
+/// AES Key Wrap with raw KEK bytes — the `native` counterpart of
+/// `ffi::C_WrapKey(CKM_AES_KEY_WRAP)`. `plaintext` must be a multiple
+/// of 8 bytes and ≥ 16 (RFC 3394 §2.2.1); output is 8 bytes longer.
+/// KMIP callers (Get with `KeyWrappingSpecification`, BlockCipherMode
+/// `NISTKeyWrap`) wrap the TTLV-encoded KeyValue, which is 8-aligned
+/// by construction (TTLV §9.6 pads every frame to 8 bytes).
+pub fn aes_key_wrap(kek: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, CkRv> {
+    use aes::cipher::generic_array::GenericArray;
+    if plaintext.len() % 8 != 0 || plaintext.len() < 16 {
+        return Err(CKR_DATA_LEN_RANGE);
+    }
+    let mut buf = vec![0u8; plaintext.len() + 8];
+    let ok = match kek.len() {
+        16 => aes_kw::KekAes128::new(GenericArray::from_slice(kek)).wrap(plaintext, &mut buf).is_ok(),
+        24 => aes_kw::KekAes192::new(GenericArray::from_slice(kek)).wrap(plaintext, &mut buf).is_ok(),
+        32 => aes_kw::KekAes256::new(GenericArray::from_slice(kek)).wrap(plaintext, &mut buf).is_ok(),
+        _ => return Err(CKR_KEY_TYPE_INCONSISTENT),
+    };
+    if ok { Ok(buf) } else { Err(CKR_FUNCTION_FAILED) }
+}
+
+/// AES Key Unwrap (RFC 3394 §2.2.2) — inverse of [`aes_key_wrap`].
+/// Integrity-check failure → `CKR_ENCRYPTED_DATA_INVALID`.
+pub fn aes_key_unwrap(kek: &[u8], wrapped: &[u8]) -> Result<Vec<u8>, CkRv> {
+    use aes::cipher::generic_array::GenericArray;
+    if wrapped.len() % 8 != 0 || wrapped.len() < 24 {
+        return Err(CKR_ENCRYPTED_DATA_LEN_RANGE);
+    }
+    let mut buf = vec![0u8; wrapped.len() - 8];
+    let ok = match kek.len() {
+        16 => aes_kw::KekAes128::new(GenericArray::from_slice(kek)).unwrap(wrapped, &mut buf).is_ok(),
+        24 => aes_kw::KekAes192::new(GenericArray::from_slice(kek)).unwrap(wrapped, &mut buf).is_ok(),
+        32 => aes_kw::KekAes256::new(GenericArray::from_slice(kek)).unwrap(wrapped, &mut buf).is_ok(),
+        _ => return Err(CKR_KEY_TYPE_INCONSISTENT),
+    };
+    if ok { Ok(buf) } else { Err(CKR_ENCRYPTED_DATA_INVALID) }
+}
+
 // ── AES-ECB ────────────────────────────────────────────────────────────────
 //
 // PKCS#11 v3.2 §6.10 — `CKM_AES_ECB`. No IV, no padding. The plaintext
@@ -782,6 +822,30 @@ mod tests {
     use crate::native::keygen::{generate_ml_dsa_keypair, generate_ml_kem_keypair};
     use crate::native::session::{bootstrap_default_token, close_session, finalize, init};
     use crate::native::test_lock;
+
+    /// RFC 3394 §4.1 — wrap 128 bits of key data with a 128-bit KEK.
+    #[test]
+    fn aes_key_wrap_rfc3394_kat() {
+        let kek: Vec<u8> = (0x00..=0x0f).collect();
+        let pt: Vec<u8> = vec![
+            0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+            0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
+        ];
+        let expected = [
+            0x1f, 0xa6, 0x8b, 0x0a, 0x81, 0x12, 0xb4, 0x47,
+            0xae, 0xf3, 0x4b, 0xd8, 0xfb, 0x5a, 0x7b, 0x82,
+            0x9d, 0x3e, 0x86, 0x23, 0x71, 0xd2, 0xcf, 0xe5,
+        ];
+        let wrapped = aes_key_wrap(&kek, &pt).unwrap();
+        assert_eq!(wrapped, expected);
+        assert_eq!(aes_key_unwrap(&kek, &wrapped).unwrap(), pt);
+        // Tampered ciphertext → integrity-check failure.
+        let mut bad = wrapped.clone();
+        bad[0] ^= 1;
+        assert_eq!(aes_key_unwrap(&kek, &bad).unwrap_err(), CKR_ENCRYPTED_DATA_INVALID);
+        // Non-8-multiple input rejected per RFC 3394 §2.2.1.
+        assert_eq!(aes_key_wrap(&kek, &pt[..15]).unwrap_err(), CKR_DATA_LEN_RANGE);
+    }
 
     fn fresh_session() -> u32 {
         let _ = finalize();

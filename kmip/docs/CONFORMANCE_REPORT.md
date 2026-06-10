@@ -10,16 +10,16 @@
 | Layer | Status | Evidence |
 |---|---|---|
 | TTLV wire-format codec | ✅ **100% conformant** | 1234/1234 OASIS messages round-trip byte-identical |
-| Dispatcher behaviour vs OASIS expectations | ✅ **91/92 actionable tests pass (98.9%)** | `conformance/REPLAY_REPORT.md` (regenerated per run) |
+| Dispatcher behaviour vs OASIS expectations | ✅ **92/92 actionable tests pass (100%)** | `conformance/REPLAY_REPORT.md` (regenerated per run) |
 | Op coverage | ✅ all ops used by the OASIS corpus | 0 `SKIP_OP` in the replay report |
 | Third-party interop (PyKMIP / vendor) | ⏸️ never run | KMIP 3.0 has no compatible OSS client |
 
 **Bottom line**: the wire bytes are KMIP 3.0 standard AND the dispatcher
-matches the OASIS conformance transcripts on 91 of the 92 tests that
-exercise implemented, non-deprecated mechanisms. The one open failure is
-`AX-M-2` (Get with `KeyWrappingSpecification` — KMIP-level key wrapping,
-an explicit v0.2 deferral in `IMPLEMENTATION_PLAN.md` §9). The remaining
-10 transcripts are deliberate skips: 5 deprecated mechanisms (DES / 3DES
+matches the OASIS conformance transcripts on **all 92 tests** that
+exercise implemented, non-deprecated mechanisms (`Get` with
+`KeyWrappingSpecification` — AES-KW key wrapping per AX-M-2 — was the
+last gap, closed 2026-06-10). The remaining 10 transcripts are
+deliberate skips: 5 deprecated mechanisms (DES / 3DES
 / DSA per `kmip/DEPRECATED.md`), 2 precondition tests requiring
 prior-transcript state the hermetic harness wipes, 3 mutually-exclusive
 RNG-seed policy variants.
@@ -104,21 +104,15 @@ every OASIS transcript against a freshly started server per test
 (hermetic; in-memory store), resolves `$NOW` / `$UNIQUE_IDENTIFIER_n` /
 auto-bound tag placeholders, and compares responses tree-wise.
 
-Current standing (2026-06-10): **91 PASS / 1 FAIL / 10 deliberate
+Current standing (2026-06-10): **92 PASS / 0 FAIL / 10 deliberate
 skips** out of 102 transcripts. Per-test detail: `conformance/REPLAY_REPORT.md`.
-
-The single failure:
-
-| Test | Root cause | Disposition |
-|---|---|---|
-| `AX-M-2` | `Get` with `KeyWrappingSpecification` expects the KeyBlock to carry `KeyWrappingData` (AES-key-wrapped KeyValue) | KMIP-level Wrap/Unwrap is a v0.2 deferral (`IMPLEMENTATION_PLAN.md` §9); pull forward or accept |
 
 ## 5. Scope decision: resolved
 
 The 2026-06-08 revision proposed Paths A/B/C. Events overtook it: the
 implemented surface now exceeds Path A (Baseline-profile ops plus the
-crypto-op family, streaming, and the PKCS#11 passthrough). The only
-remaining scope line is KMIP-level key wrapping (AX-M-2, v0.2).
+crypto-op family, streaming, KMIP-level key wrapping on `Get`, and the
+PKCS#11 passthrough). No open scope lines remain against the corpus.
 
 ## 6. How to re-run the codec compliance test
 

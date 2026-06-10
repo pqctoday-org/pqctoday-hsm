@@ -8,7 +8,7 @@ Focused implementation plan for the **KMIP 3.0 PKCS#11 wrapper** subsystem of `p
 | Language | **Rust (edition 2024)** — matches the parent repo's `rust/` engine (`softhsmrustv3`); no Go, no new language introduced |
 | **Required parent release** | **`pqctoday-hsm` ≥ v0.5.0** — ✅ **released 2026-06-04** as commit `025b074` (PR #65). `rust/Cargo.toml` aligned at `0.5.0`. All FIPS-surface fixes from the original §0.1 manifest are on `main`. **`main` is now a valid base.** The P0-ALGO-SURFACE algorithm expansion (vendor mech IDs `0x4040`+) ships in a future minor release. |
 | Goal | **Validate KMIP 3.0 with PQC + classical keys** by wrapping our PKCS#11 v3.2 HSM library as a KMIP 3.0 protocol surface |
-| Status | 🟩 **Phases 0–7b complete** (2026-06-08); OASIS conformance **91/92 actionable tests (98.9%)** as of 2026-06-10 — see [`CONFORMANCE_REPORT.md`](CONFORMANCE_REPORT.md). Open: AX-M-2 (KMIP key wrapping, v0.2), Phase 8/9 tooling tail (the Python replay harness supersedes the planned Rust compliance runner), §7 validation gate. |
+| Status | 🟩 **Phases 0–7b complete** (2026-06-08); OASIS conformance **92/92 actionable tests (100%)** as of 2026-06-10 — see [`CONFORMANCE_REPORT.md`](CONFORMANCE_REPORT.md). KMIP key wrapping on `Get` (AX-M-2) pulled forward from v0.2. Open: Phase 8/9 tooling tail (the Python replay harness supersedes the planned Rust compliance runner), §7 validation gate. |
 | License | MIT (matches `pqctoday-hsm` parent) |
 | Architecture choice | **Option A — thin KMIP wrapper directly over PKCS#11**, NO Thales kmip-go (no Go anywhere) |
 | Architecture model | **Three-plane model** (see [`THREE_PLANE_ARCHITECTURE.md`](THREE_PLANE_ARCHITECTURE.md)): Crypto Agility Management → KMIP 3.0 Key Management → PKCS#11 Crypto Execution |
@@ -1047,7 +1047,7 @@ Phase 1 (the entire subsystem, standalone) is NOT complete until ALL of these ar
 | Full OASIS KMIP 3.0 conformance (1,452-test interop) | Validation/training tool, not a certified product |
 | **NIST Round 3 alt / Round 4 algorithms (Falcon, HQC, BIKE, FrodoKEM, Classic McEliece, XMSS) — vendor mech codepoints `0x4040`–`0x404E`** | **Parked indefinitely per 2026-06-07 decision: focus stays on FIPS-certified mechanisms only.** v0.1 ships ML-KEM (FIPS 203), ML-DSA (FIPS 204), SLH-DSA (FIPS 205), HSS/LMS (NIST SP 800-208) — all already at vendor codepoints `0x4032`–`0x4037`. The `0x4040+` codepoints remain reserved in the mech allocation table and `pkcs11-mech-manifest.json` so they can be revisited later, but no roadmap commitment. P0-ALGO-SURFACE is not a KMIP dependency. |
 | `Register` (import existing key) | Defer to v0.2 |
-| `Wrap` / `Unwrap` (KMIP-level key wrapping) | Defer to v0.2 |
+| `Wrap` / `Unwrap` (KMIP-level key wrapping) | ~~Defer to v0.2~~ → **Get-side wrap shipped 2026-06-10** (`KeyWrappingSpecification` → AES-KW `KeyWrappingData`, AX-M-2); Register-side unwrap (importing a wrapped key) remains v0.2 |
 | `Re-key` (full lifecycle versioning) | Schema supports it; op handler defers to v0.2 |
 | Web UI | Lives in `pqctoday-hub`, not here |
 | Multi-tenancy / per-tenant slot isolation | Single-slot v0.1 |

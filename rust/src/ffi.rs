@@ -2965,7 +2965,12 @@ pub fn C_Verify(
                     get_object_attr_u32(hkey, CKA_XMSS_PARAM_SET).unwrap_or(CKP_XMSS_SHA2_10_256);
                 crate::crypto::xmss_bridge::xmss_verify(xmss_param, &pub_bytes, msg, sig_bytes)
             } else {
-                let lms_param = get_object_attr_u32(hkey, CKA_LMS_PARAM_SET).unwrap_or(0x05);
+                // The key material is self-describing (lms_type embedded in
+                // the HSS public key) — authoritative for imported keys that
+                // carry no CKA_LMS_PARAM_SET (e.g. external ACVP vectors).
+                let lms_param = get_object_attr_u32(hkey, CKA_LMS_PARAM_SET)
+                    .or_else(|| crate::crypto::lms::lms_param_from_pubkey(&pub_bytes))
+                    .unwrap_or(0x05);
                 crate::crypto::lms::hss_verify(&pub_bytes, msg, sig_bytes, lms_param)
             };
             VERIFY_STATE.with(|s| s.borrow_mut().remove(&h_session));

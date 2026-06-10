@@ -1126,8 +1126,6 @@ dependencies = [
 [[package]]
 name = "hbs-lms"
 version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b4ce7c3ed7650d791a5403f21e5d6b5df4c9157cf173fd7d9a1a437b692aaf79"
 dependencies = [
  "digest 0.10.7",
  "sha2",

@@ -76,6 +76,12 @@ mod tags {
     pub const KeyBlock: u32               = 0x42_0040;
     pub const KeyFormatType: u32          = 0x42_0042;
     pub const KeyValue: u32               = 0x42_0045;
+    // KMIP 3.0 key wrapping (AX-M-2) — codepoints verified from
+    // kmip-spec-3.0-tags-enums.json.
+    pub const KeyWrappingData: u32          = 0x42_0046;
+    pub const KeyWrappingSpecification: u32 = 0x42_0047;
+    pub const WrappingMethod: u32           = 0x42_009e;
+    pub const EncryptionKeyInformation: u32 = 0x42_0036;
     pub const MaximumItems: u32           = 0x42_004f;
     pub const ObjectType: u32             = 0x42_0057;
     pub const Operation: u32              = 0x42_005c;
@@ -813,7 +819,68 @@ fn encode_create_key_pair_resp(r: &CreateKeyPairResponse) -> Vec<TtlvFrame> {
 
 fn decode_get_req(children: &[TtlvFrame]) -> Result<GetRequest, WireError> {
     let uid = required_uid(children)?;
-    Ok(GetRequest { uid })
+    let mut key_wrapping_specification = None;
+    for c in children {
+        if c.tag.0 == tags::KeyWrappingSpecification {
+            key_wrapping_specification = Some(decode_key_wrapping_spec(c)?);
+        }
+    }
+    Ok(GetRequest { uid, key_wrapping_specification })
+}
+
+/// TTLV-encode a cleartext `KeyValue` structure (`KeyValue { KeyMaterial
+/// (ByteString) }`) — the §4.x wrap target for `Get` with a
+/// `KeyWrappingSpecification` under the default TTLV Encoding Option.
+/// TTLV §9.6 pads every frame to 8 bytes, so the output length always
+/// satisfies AES-KW's multiple-of-8 input requirement.
+pub fn ttlv_encode_key_value(key_material: &[u8]) -> Vec<u8> {
+    let frame = TtlvFrame::new(
+        Tag(tags::KeyValue),
+        Value::Structure(vec![TtlvFrame::new(
+            Tag(tags::KeyMaterial),
+            Value::ByteString(key_material.to_vec()),
+        )]),
+    );
+    let mut buf = bytes::BytesMut::new();
+    encode(&frame, &mut buf);
+    buf.to_vec()
+}
+
+/// Decode a §4.x `Key Wrapping Specification`:
+/// `WrappingMethod` (Enumeration) + `EncryptionKeyInformation`
+/// { `UniqueIdentifier`, `CryptographicParameters`? }.
+fn decode_key_wrapping_spec(frame: &TtlvFrame) -> Result<KeyWrappingSpec, WireError> {
+    let mut wrapping_method = 0u32;
+    let mut encryption_key_uid = String::new();
+    let mut cp = None;
+    for c in expect_structure(frame, "Key Wrapping Specification")? {
+        match c.tag.0 {
+            tags::WrappingMethod => wrapping_method = expect_enum(c, "Wrapping Method")?,
+            tags::EncryptionKeyInformation => {
+                for e in expect_structure(c, "Encryption Key Information")? {
+                    match e.tag.0 {
+                        tags::UniqueIdentifier => {
+                            if let Value::TextString(s) = &e.value {
+                                encryption_key_uid = s.clone();
+                            }
+                        }
+                        tags::CryptographicParameters => {
+                            cp = Some(decode_cryptographic_parameters(e)?);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    if encryption_key_uid.is_empty() {
+        return Err(WireError::Missing {
+            tag: tags::UniqueIdentifier,
+            name: "Encryption Key Information / Unique Identifier",
+        });
+    }
+    Ok(KeyWrappingSpec { wrapping_method, encryption_key_uid, cryptographic_parameters: cp })
 }
 
 /// Encode a KMIP 3.0 §6.1.18 `Get` Response Payload.
@@ -1900,6 +1967,7 @@ fn decode_register_req(children: &[TtlvFrame]) -> Result<RegisterRequest, WireEr
                     key_value: opaque_bytes,
                     cryptographic_algorithm: crate::kmip30::KmipAlgorithm::Aes,
                     cryptographic_length: 0,
+                    key_wrapping_data: None,
                 });
                 // Stash OpaqueDataType so Register can copy it onto
                 // the record's `certificate_type` slot for the Get
@@ -2119,6 +2187,7 @@ fn decode_key_block(frame: &TtlvFrame) -> Result<KeyBlock, WireError> {
         cryptographic_algorithm: algorithm,
         cryptographic_length: length,
         key_value: bytes,
+        key_wrapping_data: None,
     })
 }
 
@@ -2151,17 +2220,24 @@ fn encode_export_resp(r: &ExportResponse) -> Vec<TtlvFrame> {
 /// `Raw` ⇒ leaf ByteString; `TransparentSymmetricKey` ⇒ Structure
 /// containing one `Key` ByteString sub-element.
 fn encode_key_block(kb: &KeyBlock) -> TtlvFrame {
-    let key_material = match kb.key_format_type {
-        KeyFormatType::TransparentSymmetricKey => TtlvFrame::new(
-            Tag(tags::KeyMaterial),
-            Value::Structure(vec![TtlvFrame::new(
-                Tag(tags::Key),
-                Value::ByteString(kb.key_value.clone()),
-            )]),
-        ),
-        _ => TtlvFrame::new(Tag(tags::KeyMaterial), Value::ByteString(kb.key_value.clone())),
+    // KMIP 3.0 §4.x — when KeyWrappingData is present, KeyValue is the
+    // wrapped (AES-KW) ciphertext of the TTLV-encoded KeyValue structure
+    // and goes on the wire as a ByteString, not a Structure (AX-M-2).
+    let key_value = if kb.key_wrapping_data.is_some() {
+        TtlvFrame::new(Tag(tags::KeyValue), Value::ByteString(kb.key_value.clone()))
+    } else {
+        let key_material = match kb.key_format_type {
+            KeyFormatType::TransparentSymmetricKey => TtlvFrame::new(
+                Tag(tags::KeyMaterial),
+                Value::Structure(vec![TtlvFrame::new(
+                    Tag(tags::Key),
+                    Value::ByteString(kb.key_value.clone()),
+                )]),
+            ),
+            _ => TtlvFrame::new(Tag(tags::KeyMaterial), Value::ByteString(kb.key_value.clone())),
+        };
+        TtlvFrame::new(Tag(tags::KeyValue), Value::Structure(vec![key_material]))
     };
-    let key_value = TtlvFrame::new(Tag(tags::KeyValue), Value::Structure(vec![key_material]));
     // KMIP 3.0 §6.2 KeyBlock structure — CryptographicAlgorithm and
     // CryptographicLength are OPTIONAL when the wrapping ObjectType
     // doesn't have those attributes in its §11 table. SecretData
@@ -2176,6 +2252,24 @@ fn encode_key_block(kb: &KeyBlock) -> TtlvFrame {
     if kb.cryptographic_length > 0 {
         children.push(TtlvFrame::new(Tag(tags::CryptographicAlgorithm), Value::Enumeration(kb.cryptographic_algorithm.to_wire_value())));
         children.push(TtlvFrame::new(Tag(tags::CryptographicLength), Value::Integer(kb.cryptographic_length as i32)));
+    }
+    if let Some(kwd) = &kb.key_wrapping_data {
+        // §4.x KeyWrappingData — echoes the request's wrapping spec:
+        // WrappingMethod + EncryptionKeyInformation{UID, CP}.
+        let mut eki = vec![TtlvFrame::new(
+            Tag(tags::UniqueIdentifier),
+            Value::TextString(kwd.encryption_key_uid.clone()),
+        )];
+        if let Some(cp) = &kwd.cryptographic_parameters {
+            eki.push(encode_cryptographic_parameters(cp));
+        }
+        children.push(TtlvFrame::new(
+            Tag(tags::KeyWrappingData),
+            Value::Structure(vec![
+                TtlvFrame::new(Tag(tags::WrappingMethod), Value::Enumeration(kwd.wrapping_method)),
+                TtlvFrame::new(Tag(tags::EncryptionKeyInformation), Value::Structure(eki)),
+            ]),
+        ));
     }
     TtlvFrame::new(Tag(tags::KeyBlock), Value::Structure(children))
 }

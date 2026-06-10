@@ -1,6 +1,6 @@
 # OASIS KMIP 3.0 Dispatcher Replay Report
 
-Generated: 2026-06-10 21:48:51 UTC
+Generated: 2026-06-10 22:25:02 UTC
 
 
 ## Aggregate
@@ -8,8 +8,8 @@ Generated: 2026-06-10 21:48:51 UTC
 
 | Status | Count | % of total |
 |---|---|---|
-| **PASS** | 91 | 89.2% |
-| **FAIL** | 1 | 1.0% |
+| **PASS** | 92 | 90.2% |
+| **FAIL** | 0 | 0.0% |
 | ERROR | 0 | 0.0% |
 | SKIP_OP (op not implemented) | 0 | 0.0% |
 | SKIP_DEPRECATED (DES / 3DES / DSA out of scope) | 5 | 4.9% |
@@ -21,9 +21,9 @@ Generated: 2026-06-10 21:48:51 UTC
 
 Of the 92 tests that exercise only implemented + non-deprecated ops:
 
-  - **91 pass (99%)**
+  - **92 pass (100%)**
 
-  - 1 fail
+  - 0 fail
 
   - 0 errored
 
@@ -68,12 +68,12 @@ choice our server does not select:
 
 | Test | Status | Detail |
 |---|---|---|
-| `AX-M-2-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload/SymmetricKey/KeyBlock: child count 5 != 4 |
 | `AKLC-M-1-30.xml` | PASS |  |
 | `AKLC-M-2-30.xml` | PASS |  |
 | `AKLC-M-3-30.xml` | PASS |  |
 | `AKLC-O-1-30.xml` | PASS |  |
 | `AX-M-1-30.xml` | PASS |  |
+| `AX-M-2-30.xml` | PASS |  |
 | `BL-M-1-30.xml` | PASS |  |
 | `BL-M-10-30.xml` | PASS |  |
 | `BL-M-11-30.xml` | PASS |  |

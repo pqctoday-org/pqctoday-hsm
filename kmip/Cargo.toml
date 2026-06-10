@@ -123,3 +123,4 @@ predicates = "3"
 [patch.crates-io]
 fips204 = { path = "../rust/fips204-patched" }
 fips205 = { path = "../rust/fips205-patched" }
+hbs-lms = { path = "../rust/hbs-lms-patched" }

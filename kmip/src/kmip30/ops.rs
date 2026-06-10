@@ -254,6 +254,25 @@ pub struct CreateKeyPairResponse {
 #[derive(Clone, Debug, PartialEq)]
 pub struct GetRequest {
     pub uid: String,
+    /// KMIP 3.0 §6.1.23 — when present, the server returns the key
+    /// material wrapped under the referenced wrapping key instead of
+    /// in the clear. AX-M-2 pins WrappingMethod=Encrypt with
+    /// BlockCipherMode=NISTKeyWrap (AES-KW, RFC 3394).
+    pub key_wrapping_specification: Option<KeyWrappingSpec>,
+}
+
+/// KMIP 3.0 `Key Wrapping Specification` (request side) and
+/// `Key Wrapping Data` (response side) share this shape — the response
+/// echoes the specification that produced the wrapped KeyValue.
+#[derive(Clone, Debug, PartialEq)]
+pub struct KeyWrappingSpec {
+    /// §11 `Wrapping Method` — only `Encrypt` (0x01) is supported.
+    pub wrapping_method: u32,
+    /// `Encryption Key Information / Unique Identifier` — the wrap key.
+    pub encryption_key_uid: String,
+    /// `Encryption Key Information / Cryptographic Parameters` —
+    /// `BlockCipherMode=NISTKeyWrap` selects AES-KW.
+    pub cryptographic_parameters: Option<CryptographicParameters>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -275,6 +294,11 @@ pub struct KeyBlock {
     pub cryptographic_algorithm: KmipAlgorithm,
     pub cryptographic_length: u32,
     pub key_value: Vec<u8>,
+    /// KMIP 3.0 §4.x — present when `key_value` carries the AES-KW
+    /// wrapped TTLV-encoded KeyValue rather than cleartext material.
+    /// On the wire this flips `KeyValue` from Structure to ByteString
+    /// and appends a `KeyWrappingData` structure (AX-M-2).
+    pub key_wrapping_data: Option<KeyWrappingSpec>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

@@ -2,8 +2,9 @@
 
 > **HISTORICAL (resolved).** This analysis dates from the PR #88 era
 > (11/102 passing). All eight root-cause families below were remediated
-> across PRs #88–#89; standing as of 2026-06-10 is **91 PASS / 1 FAIL
-> (AX-M-2, KMIP key wrapping — v0.2 deferral) / 10 deliberate skips**.
+> across PRs #88–#89; standing as of 2026-06-10 is **92 PASS / 0 FAIL
+> / 10 deliberate skips** (AX-M-2's KMIP key wrapping was pulled
+> forward from v0.2 and closed last).
 > Kept for the audit trail; see `kmip/conformance/REPLAY_REPORT.md` for
 > the live per-test table.
 

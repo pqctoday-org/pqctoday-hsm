@@ -421,6 +421,7 @@ pub fn export(
         cryptographic_algorithm: obj.algorithm,
         cryptographic_length: obj.cryptographic_length,
         key_value: bytes,
+        key_wrapping_data: None,
     });
 
     emit_success(deps, correlation_id, "Export");
@@ -575,6 +576,7 @@ mod tests {
             cryptographic_algorithm: KmipAlgorithm::Aes,
             cryptographic_length: 128,
             key_value: vec![0x01; 16],
+            key_wrapping_data: None,
         }
     }
 

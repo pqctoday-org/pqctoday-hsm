@@ -10,6 +10,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **kmip — KMIP-level key wrapping on `Get`: OASIS conformance 91 → 92 of 92 actionable tests (100%)** (`kmip/src/ops/get.rs`, `kmip/src/kmip30/{ops,wire,mod}.rs`, `rust/src/native/encrypt.rs`). Closes AX-M-2, the last open conformance failure — pulled forward from the v0.2 deferral. `Get` with a `KeyWrappingSpecification` (KMIP 3.0 §6.1.23: `WrappingMethod=Encrypt` + `EncryptionKeyInformation` with `BlockCipherMode=NISTKeyWrap`) now returns the KeyBlock with the TTLV-encoded `KeyValue` wrapped via AES-KW (RFC 3394) under the referenced wrap key, the `KeyValue` flipped to ByteString form, and a `KeyWrappingData` structure echoing the spec. Wrap-key gating: Active state, `WrapKey` usage mask, material from Register-supplied bytes or the engine (`CKA_VALUE`). New tags verified from the spec extract: `KeyWrappingData` 0x420046, `KeyWrappingSpecification` 0x420047, `WrappingMethod` 0x42009e, `EncryptionKeyInformation` 0x420036. Engine gains `native::aes_key_wrap` / `aes_key_unwrap` (RFC 3394, KEK 128/192/256) verified against the RFC 3394 §4.1 KAT. Register-side unwrap (importing a wrapped key) remains v0.2.
+
 - **kmip — multi-part streaming `Encrypt` + arbitrary GCM IV lengths: OASIS conformance 89 → 91 of 92 actionable tests (98.9%)** (`kmip/src/ops/encrypt.rs`, `kmip/src/ops/deps.rs`, `kmip/src/kmip30/{ops,wire}.rs`, `rust/src/crypto/multipart.rs`, `rust/src/native/encrypt.rs`). Closes CS-BC-M-GCM-2 and CS-BC-M-GCM-3, the last two crypto-op conformance failures. (1) KMIP 3.0 §6.1.21 streaming: `Init Indicator` opens a stream (server issues a `Correlation Value`), chained parts feed the engine's PKCS#11 §5.2 Update state machines held on `Deps::streams`, `Final Indicator` closes it emitting the AEAD tag — wire codec gains `InitIndicator` (0x4200d7) / `FinalIndicator` (0x4200d8) / payload `CorrelationValue` and the §6.1.21 response field ordering (IV → Correlation Value → Tag). (2) `GcmState` now accepts any SP 800-38D IV length — non-96-bit IVs derive J0 via GHASH (§7.1 step 2b; new NIST test-case-5 KAT with 64-bit IV) — and `native::aes_gcm_{en,de}crypt` were rewritten on top of it, replacing the typenum matrix (adds AES-192 + 12–16-byte truncated tags uniformly). (3) AEAD tag split honours the request's `Tag Length` (a 15-byte tag over empty plaintext previously failed the hardcoded 16-byte split). The remaining failure, AX-M-2, is the documented KMIP-key-wrapping v0.2 deferral.
 
 ### Fixed
@@ -19,6 +21,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Docs refreshed to the 91/92 reality** (`kmip/docs/CONFORMANCE_REPORT.md`, `kmip/docs/IMPLEMENTATION_PLAN.md`, `kmip/conformance/analysis/REMEDIATION_PLAN.md`). The conformance report's "12 ops, non-conformant, harness pending" sections, the plan's "Not Started" status header, and the PR-#88-era remediation analysis (11/102) were all stale; updated/bannered with current standing.
 
 ---
+
+## [0.6.1] — 2026-06-10
+
+### Added
+
+- **softhsmrustv3 — SP 800-208 SHAKE-256 LMS/HSS via `hbs-lms-patched`** (`rust/hbs-lms-patched/` (new, vendored hbs-lms 0.1.1 + patch), `rust/src/crypto/lms.rs`, `rust/src/ffi.rs`, `tests/acvp-wasm.mjs`). Upstream hbs-lms 0.1.1 hardcodes the RFC 8554 SHA-256 type IDs into all serialized keys/signatures regardless of hash family, so SHAKE-256 material carried SHA-256 type codes — the engine's own SHAKE round-trip failed and external SP 800-208 vectors could not be parsed (80 ACVP KATs permanently skipped). The patch adds per-family IANA type-ID bases to the `HashChain` trait (`LMS_TYPE_BASE`/`LMOTS_TYPE_BASE`: SHA-256 N32 0x05/0x01, N24 0x0A/0x05, SHAKE N32 0x0F/0x09, N24 0x14/0x0D), makes parameter construction/parsing family-aware, and keeps the compressed private-key format byte-compatible (canonical discriminants; family re-derived from the hash type at decode). Mirrors the C++ engine's patched `hash-sigs` submodule fix. The engine's 240-line custom SHAKE verifier is retired — all four families now sign/verify through the crate; `C_Verify` additionally derives the LMS parameter set from the self-describing public-key bytes when `CKA_LMS_PARAM_SET` is absent (external ACVP imports).
+
+### Fixed
+
+- **hbs-lms-patched — panic-hardened wire parsers**. All five `InMemory*::new` signature/key parsers sliced caller-controlled bytes unchecked and `.unwrap()`ed unknown type IDs — a malformed (or corrupt-by-design ACVP sigver) input aborted the entire wasm instance. New bounds-checked `try_read`/`try_read_and_advance` helpers; every parse failure now returns `None` → `CKR_SIGNATURE_INVALID`. Wire `level` field bounded before `ArrayVec` extension.
+- **tests — ACVP runner loaded a stale (April 14) Rust wasm** from `wasm/rust/`; the §12.3 SHAKE SigVer KATs were also hard-skipped for the Rust engine. Both fixed; suite result moves from 51 PASS / 1 FAIL / 22 SKIP to **133 PASS / 0 FAIL / 1 SKIP** (the remaining skip is the Botan-specific SLH-DSA SigGen vector).
 
 ## [0.6.0] — 2026-06-10
 

@@ -693,15 +693,9 @@ async function runSuite(engineName) {
     for (const grp of lmsSigverVec.testGroups) {
       const lmsCkp = LMS_MODE_TO_CKP[grp.lmsMode]
       if (lmsCkp === undefined) continue  // skip SHA-256 groups (tested by Python script)
-      // Rust engine (hbs-lms 0.1.1) uses RFC 8554 internal type codes and cannot
-      // parse SP 800-208 SHAKE-256 type IDs (0x0F-0x13) in external key bytes.
-      if (engineName === 'rust') {
-        addResult(`hss-kat-${grp.lmsMode}`, grp.lmsMode,
-          `ACVP SigVer KAT (tgId ${grp.tgId}) §12.3`,
-          'SKIP', 'hbs-lms 0.1.1: SP 800-208 SHAKE type IDs not supported in external key bytes')
-        katSkip += grp.tests.length
-        continue
-      }
+      // Rust engine: hbs-lms-patched serializes/parses SP 800-208
+      // family-specific type IDs, so SHAKE-256 external vectors verify
+      // through the crate like any other family (was SKIP pre-patch).
       // ACVP provides a raw 56-byte LMS public key (no HSS L=1 prefix).
       // hss_validate_signature expects HSS format: u32be(L=1) || LMS_PUB_KEY.
       // Prepend the 4-byte L=1 big-endian prefix to match HSS serialization.
