@@ -148,6 +148,12 @@ pub struct ObjectRecord {
     /// = 0x01, PGP = 0x02). v0.1 stores the raw wire value.
     pub certificate_type: Option<u32>,
     pub certificate_length: Option<i32>,
+    /// KMIP §6.2 / §11 — DER bytes of an X.509 / PGP Certificate
+    /// supplied via Register. `certificate_length` mirrors the byte
+    /// count; `certificate_subject_cn` is extracted server-side at
+    /// Register time. All three travel together.
+    pub certificate_value: Option<Vec<u8>>,
+    pub certificate_subject_cn: Option<String>,
     /// KMIP §11 `Digital Signature Algorithm` — Enumeration codepoint.
     pub digital_signature_algorithm: Option<u32>,
     /// KMIP §11 `NIST Key Type` — Enumeration codepoint.
@@ -241,6 +247,8 @@ impl From<BaselineDefaults> for ObjectRecord {
             x509_certificate_subject: None,
             certificate_type: None,
             certificate_length: None,
+            certificate_value: None,
+            certificate_subject_cn: None,
             digital_signature_algorithm: None,
             nist_key_type: None,
             protection_level: None,

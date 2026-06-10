@@ -255,6 +255,13 @@ pub enum Attribute {
     DeactivationReasonCode(u32),
     KeyFormatType(u32),
 
+    /// `Certificate Value` (0x42001e) — the DER bytes of the X.509
+    /// certificate as supplied to Register / surfaced via Get.
+    CertificateValue(Vec<u8>),
+    /// `Certificate Subject CN` (0x420108) — server-extracted from the
+    /// DER Subject Name's commonName RDN. Marked Read-Only per §11.
+    CertificateSubjectCN(String),
+
     /// Integers.
     CertificateLength(i32),
     LeaseTime(u32),

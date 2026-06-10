@@ -1077,6 +1077,13 @@ pub struct RegisterRequest {
     /// listing permitted Protection Storage Mask values). Stored as
     /// a raw bitmap; v0.1 ignores it during dispatch.
     pub protection_storage_masks: Option<u32>,
+    /// Optional `Certificate` payload (§6.2 / §11). When `object_type`
+    /// is `Certificate` the client supplies an outer `Certificate`
+    /// Structure carrying `CertificateType` + `CertificateValue`
+    /// (DER bytes). We surface them paired here so the handler can
+    /// populate `certificate_value` / `certificate_length` /
+    /// `certificate_subject_cn` in one place.
+    pub certificate_payload: Option<(u32, Vec<u8>)>,
 }
 
 #[derive(Clone, Debug, PartialEq)]

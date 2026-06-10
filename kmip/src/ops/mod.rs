@@ -46,6 +46,7 @@ pub mod create;
 pub mod create_key_pair;
 pub mod decrypt;
 pub mod deps;
+pub mod der_x509;
 pub mod destroy;
 pub mod encrypt;
 pub mod get;

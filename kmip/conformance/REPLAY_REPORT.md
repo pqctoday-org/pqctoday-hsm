@@ -1,6 +1,6 @@
 # OASIS KMIP 3.0 Dispatcher Replay Report
 
-Generated: 2026-06-10 02:20:07 UTC
+Generated: 2026-06-10 02:37:46 UTC
 
 
 ## Aggregate
@@ -8,8 +8,8 @@ Generated: 2026-06-10 02:20:07 UTC
 
 | Status | Count | % of total |
 |---|---|---|
-| **PASS** | 54 | 52.9% |
-| **FAIL** | 48 | 47.1% |
+| **PASS** | 55 | 53.9% |
+| **FAIL** | 47 | 46.1% |
 | ERROR | 0 | 0.0% |
 | SKIP_OP (op not implemented) | 0 | 0.0% |
 | SKIP_PARSE (XML malformed) | 0 | 0.0% |
@@ -18,9 +18,9 @@ Generated: 2026-06-10 02:20:07 UTC
 
 Of the 102 tests that exercise only implemented ops:
 
-  - **54 pass (53%)**
+  - **55 pass (54%)**
 
-  - 48 fail
+  - 47 fail
 
   - 0 errored
 
@@ -33,7 +33,6 @@ Of the 102 tests that exercise only implemented ops:
 | `AKLC-O-1-30.xml` | FAIL | msg #3: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: missing expected attribute 'AlwaysSensitive' (§4.1.1 item 2 |
 | `AX-M-1-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage: child count 3 != 2 |
 | `AX-M-2-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload/SymmetricKey/KeyBlock: child count 5 != 4 |
-| `BL-M-10-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
 | `BL-M-12-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
 | `BL-M-13-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
 | `BL-M-14-30.xml` | FAIL | msg #5: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: missing expected attribute 'AlwaysSensitive' (§4.1.1 item 2 |
@@ -82,6 +81,7 @@ Of the 102 tests that exercise only implemented ops:
 | `AKLC-M-2-30.xml` | PASS |  |
 | `AKLC-M-3-30.xml` | PASS |  |
 | `BL-M-1-30.xml` | PASS |  |
+| `BL-M-10-30.xml` | PASS |  |
 | `BL-M-11-30.xml` | PASS |  |
 | `BL-M-15-30.xml` | PASS |  |
 | `BL-M-16-30.xml` | PASS |  |

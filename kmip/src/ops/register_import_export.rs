@@ -74,12 +74,27 @@ pub fn register(
         return Err(fail_err(deps, correlation_id, "Register", KmipError::permission_denied(human)));
     }
 
-    let kmip_algorithm = resolved_algorithm.ok_or_else(|| {
-        fail_err(deps, correlation_id, "Register", KmipError::failed(
+    // KMIP 3.0 §6.1.48 — Certificate / OpaqueObject Registers are not
+    // required to carry CryptographicAlgorithm (the object itself is
+    // not a cryptographic key in the §11 attribute-table sense). All
+    // other ObjectTypes (Symmetric/Public/Private/Secret) MUST supply
+    // the algorithm either in the Attributes bag or the KeyBlock.
+    let kmip_algorithm = match resolved_algorithm {
+        Some(a) => a,
+        None if matches!(req.object_type, ObjectType::Certificate) => {
+            // Sentinel: the algorithm slot is required by ObjectRecord
+            // but never surfaced in Certificate GetAttributes responses
+            // (CryptographicAlgorithm is not a Certificate attribute
+            // per §11). We pick Rsa as the most common cert subject-PK
+            // algorithm; the value is never inspected for Certificate
+            // objects.
+            crate::kmip30::KmipAlgorithm::Rsa
+        }
+        None => return Err(fail_err(deps, correlation_id, "Register", KmipError::failed(
             ResultReason::MissingData,
             "Register requires CryptographicAlgorithm (in Attributes or KeyBlock)".to_string(),
-        ))
-    })?;
+        ))),
+    };
 
     // KMIP 3.0 §6.1.48 + §11 Result Reason — `Name` MUST be unique
     // across the server's managed objects; a duplicate yields
@@ -127,6 +142,20 @@ pub fn register(
     // `$NOW-3600` for this in the cryptographic-op conformance tests.
     let initial_state = compute_initial_state(now, &x);
 
+    // KMIP 3.0 §6.2 Certificate payload — populate cert-specific
+    // attributes from the wire `Certificate` Structure (DER bytes +
+    // type). `CertificateLength` is the DER byte count; the §11
+    // attribute-table marks both `CertificateLength` and
+    // `CertificateSubjectCN` as server-set (Read-Only).
+    let (certificate_type, certificate_value, certificate_length, certificate_subject_cn) =
+        if let Some((wire_ct, der)) = &req.certificate_payload {
+            let len = der.len() as i32;
+            let cn = super::der_x509::extract_subject_cn(der);
+            (Some(*wire_ct), Some(der.clone()), Some(len), cn)
+        } else {
+            (None, None, None, None)
+        };
+
     deps.store.put(ObjectRecord {
         uid: uid.clone(),
         object_type: req.object_type,
@@ -150,6 +179,10 @@ pub fn register(
         key_material,
         key_format_type,
         cryptographic_parameters: x.cryptographic_parameters.clone(),
+        certificate_type,
+        certificate_value,
+        certificate_length,
+        certificate_subject_cn,
         ..ObjectRecord::default()
     })?;
 
@@ -422,6 +455,7 @@ mod tests {
             ],
             managed_object: Some(raw_aes128_kb()),
             protection_storage_masks: None,
+            certificate_payload: None,
         }, "c").unwrap();
         let rec = d.store.get(&resp.uid).unwrap().unwrap();
         assert_eq!(rec.algorithm, KmipAlgorithm::Aes);
@@ -443,6 +477,7 @@ mod tests {
             ],
             managed_object: Some(raw_aes128_kb()),
             protection_storage_masks: None,
+            certificate_payload: None,
         };
         let resp = register(&d, req(), "c").unwrap();
         assert_eq!(resp.uid, "urn:fixed");
@@ -464,6 +499,7 @@ mod tests {
             ],
             managed_object: Some(raw_aes128_kb()),
             protection_storage_masks: None,
+            certificate_payload: None,
         }, "c").unwrap();
 
         let err = import_object(&d, ImportRequest {
@@ -493,6 +529,7 @@ mod tests {
             ],
             managed_object: Some(raw_aes128_kb()),
             protection_storage_masks: None,
+            certificate_payload: None,
         }, "c").unwrap();
 
         let new_kb = KeyBlock { key_value: vec![0xAA; 16], ..raw_aes128_kb() };
@@ -525,6 +562,7 @@ mod tests {
             ],
             managed_object: Some(raw_aes128_kb()),
             protection_storage_masks: None,
+            certificate_payload: None,
         }, "c").unwrap();
         let exp = export(&d, ExportRequest {
             uid: r.uid.clone(),
@@ -550,6 +588,7 @@ mod tests {
             ],
             managed_object: Some(raw_aes128_kb()),
             protection_storage_masks: None,
+            certificate_payload: None,
         }, "c").unwrap();
         // Force Destroyed state via store.
         let mut rec = d.store.get(&r.uid).unwrap().unwrap();

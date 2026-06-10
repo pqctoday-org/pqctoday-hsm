@@ -361,13 +361,37 @@ fn attribute_name_is_required(name: &str) -> bool {
     )
 }
 
-/// Per KMIP 3.0 §4 these attributes are Read-Only — server SHALL NOT
-/// honour client attempts to add or modify them.
+/// Per KMIP 3.0 §11 attribute table these attributes are Read-Only —
+/// server SHALL NOT honour client attempts to add or modify them. The
+/// list below mirrors the spec's "Modifiable by client = No" column.
 fn attribute_is_read_only(a: &Attribute) -> bool {
     matches!(a,
         Attribute::UniqueIdentifier(_) |
         Attribute::ObjectType(_) |
-        Attribute::State(_)
+        Attribute::State(_) |
+        // Initial Date / Last Change Date / Original Creation Date /
+        // Short Unique Identifier are all server-set timestamps.
+        Attribute::InitialDate(_) |
+        Attribute::LastChangeDate(_) |
+        Attribute::OriginalCreationDate(_) |
+        Attribute::ShortUniqueIdentifier(_) |
+        // Always Sensitive / Never Extractable are server-derived from
+        // the Sensitive / Extractable history (§11).
+        Attribute::AlwaysSensitive(_) |
+        Attribute::NeverExtractable(_) |
+        // Digest + RandomNumberGenerator structures are server-computed.
+        Attribute::Digest(_) |
+        Attribute::RandomNumberGenerator(_) |
+        // Key Value Present mirrors the engine state.
+        Attribute::KeyValuePresent(_) |
+        // Certificate Length / Subject CN / Issuer / Subject are
+        // server-extracted from the Certificate Value DER bytes at
+        // Register time. BL-M-10 step #4 pins `CertificateLength`.
+        Attribute::CertificateLength(_) |
+        Attribute::CertificateSubjectCN(_) |
+        Attribute::X509CertificateSubject(_) |
+        Attribute::X509CertificateIssuer(_) |
+        Attribute::X509CertificateIdentifier(_)
     )
 }
 

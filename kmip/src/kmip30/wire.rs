@@ -236,6 +236,12 @@ mod tags {
     pub const X509CertificateSubject: u32        = 0x42_00b7;
     pub const RotateName: u32                    = 0x42_016f;
     pub const CertificateType: u32               = 0x42_001d;
+    /// KMIP 3.0 §6.2 — Certificate object outer Structure tag.
+    pub const Certificate: u32                   = 0x42_0013;
+    /// KMIP 3.0 §6.2 / §11 — Certificate Value ByteString (DER bytes).
+    pub const CertificateValue: u32              = 0x42_001e;
+    /// KMIP 3.0 §11 — Certificate Subject CN extracted from the DER.
+    pub const CertificateSubjectCN: u32          = 0x42_0108;
     pub const DigitalSignatureAlgorithm: u32     = 0x42_00ae;
     pub const NistKeyType: u32                   = 0x42_013a;
     pub const ProtectionLevel: u32               = 0x42_0145;
@@ -1104,6 +1110,36 @@ fn decode_attribute_v3(frame: &TtlvFrame) -> Result<Option<Attribute>, WireError
         tags::CryptographicParameters => Attribute::CryptographicParameters(
             decode_cryptographic_parameters(frame)?,
         ),
+        // KMIP 3.0 §11 Certificate attributes — needed so that
+        // ModifyAttribute(<CertificateLength …>) decodes to a real
+        // Attribute variant (and the read-only gate can reject it).
+        // CertificateValue (DER bytes) + CertificateSubjectCN (string)
+        // are read-only but still parseable here for symmetry.
+        tags::CertificateLength => {
+            Attribute::CertificateLength(expect_integer(frame, "Certificate Length")?)
+        }
+        tags::CertificateValue => {
+            if let Value::ByteString(b) = &frame.value {
+                Attribute::CertificateValue(b.clone())
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Certificate Value",
+                    msg: "expected ByteString".into(),
+                });
+            }
+        }
+        tags::CertificateSubjectCN => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::CertificateSubjectCN(s.clone())
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Certificate Subject CN",
+                    msg: "expected TextString".into(),
+                });
+            }
+        }
         _ => return Ok(None),
     }))
 }
@@ -1588,6 +1624,7 @@ fn decode_register_req(children: &[TtlvFrame]) -> Result<RegisterRequest, WireEr
     let mut attributes = Vec::new();
     let mut managed_object = None;
     let mut protection_storage_masks = None;
+    let mut certificate_payload: Option<(u32, Vec<u8>)> = None;
     for c in children {
         match c.tag.0 {
             tags::ObjectType => {
@@ -1606,6 +1643,27 @@ fn decode_register_req(children: &[TtlvFrame]) -> Result<RegisterRequest, WireEr
             }
             tags::SymmetricKey | tags::PublicKey | tags::PrivateKey => {
                 managed_object = Some(decode_managed_object(c)?);
+            }
+            tags::Certificate => {
+                // KMIP 3.0 §6.2 Certificate object Structure:
+                //   CertificateType   Enumeration  (0x42001d)
+                //   CertificateValue  ByteString   (0x42001e, DER bytes)
+                let mut ctype = 0u32;
+                let mut cvalue: Vec<u8> = Vec::new();
+                for child in expect_structure(c, "Certificate")? {
+                    match child.tag.0 {
+                        tags::CertificateType => {
+                            ctype = expect_enum(child, "Certificate Type")?;
+                        }
+                        tags::CertificateValue => {
+                            if let Value::ByteString(b) = &child.value {
+                                cvalue = b.clone();
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                certificate_payload = Some((ctype, cvalue));
             }
             tags::ProtectionStorageMasks => {
                 // Per §6.1.48 the field is a Structure containing one
@@ -1634,6 +1692,7 @@ fn decode_register_req(children: &[TtlvFrame]) -> Result<RegisterRequest, WireEr
         attributes,
         managed_object,
         protection_storage_masks,
+        certificate_payload,
     })
 }
 
@@ -2175,6 +2234,8 @@ fn encode_attribute_v3(a: &Attribute) -> TtlvFrame {
         Attribute::X509CertificateSubject(s)   => TtlvFrame::new(Tag(tags::X509CertificateSubject),   Value::TextString(s.clone())),
         Attribute::RotateName(s)               => TtlvFrame::new(Tag(tags::RotateName),               Value::TextString(s.clone())),
         Attribute::CertificateType(v)          => TtlvFrame::new(Tag(tags::CertificateType),          Value::Enumeration(*v)),
+        Attribute::CertificateValue(bs)        => TtlvFrame::new(Tag(tags::CertificateValue),         Value::ByteString(bs.clone())),
+        Attribute::CertificateSubjectCN(s)     => TtlvFrame::new(Tag(tags::CertificateSubjectCN),     Value::TextString(s.clone())),
         Attribute::DigitalSignatureAlgorithm(v) => TtlvFrame::new(Tag(tags::DigitalSignatureAlgorithm), Value::Enumeration(*v)),
         Attribute::NistKeyType(v)              => TtlvFrame::new(Tag(tags::NistKeyType),              Value::Enumeration(*v)),
         Attribute::ProtectionLevel(v)          => TtlvFrame::new(Tag(tags::ProtectionLevel),          Value::Enumeration(*v)),
@@ -2296,6 +2357,8 @@ fn tag_name_from_code(code: u32) -> &'static str {
         tags::CryptographicParameters => "Cryptographic Parameters",
         tags::CertificateType        => "Certificate Type",
         tags::CertificateLength      => "Certificate Length",
+        tags::CertificateValue       => "Certificate Value",
+        tags::CertificateSubjectCN   => "Certificate Subject CN",
         tags::DigitalSignatureAlgorithm => "Digital Signature Algorithm",
         tags::NistKeyType            => "NIST Key Type",
         tags::ProtectionLevel        => "Protection Level",

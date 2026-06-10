@@ -139,6 +139,8 @@ fn attributes_from_record(r: &ObjectRecord) -> Vec<Attribute> {
     if let Some(v) = r.deactivation_reason_code { out.push(Attribute::DeactivationReasonCode(v)); }
     if let Some(v) = r.key_format_type { out.push(Attribute::KeyFormatType(v)); }
     if let Some(n) = r.certificate_length { out.push(Attribute::CertificateLength(n)); }
+    if let Some(s) = &r.certificate_subject_cn { out.push(Attribute::CertificateSubjectCN(s.clone())); }
+    if let Some(b) = &r.certificate_value { out.push(Attribute::CertificateValue(b.clone())); }
     if let Some(n) = r.lease_time { out.push(Attribute::LeaseTime(n)); }
     if let Some(n) = r.protection_period { out.push(Attribute::ProtectionPeriod(n)); }
     if let Some(n) = r.rotate_interval { out.push(Attribute::RotateInterval(n)); }
@@ -231,6 +233,8 @@ pub(crate) fn canonical_attribute_name(attr: &Attribute) -> &'static str {
         Attribute::X509CertificateSubject(_) => "X509CertificateSubject",
         Attribute::RotateName(_)             => "RotateName",
         Attribute::CertificateType(_)        => "CertificateType",
+        Attribute::CertificateValue(_)       => "CertificateValue",
+        Attribute::CertificateSubjectCN(_)   => "CertificateSubjectCN",
         Attribute::DigitalSignatureAlgorithm(_) => "DigitalSignatureAlgorithm",
         Attribute::NistKeyType(_)            => "NistKeyType",
         Attribute::ProtectionLevel(_)        => "ProtectionLevel",
