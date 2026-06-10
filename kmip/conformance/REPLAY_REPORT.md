@@ -1,6 +1,6 @@
 # OASIS KMIP 3.0 Dispatcher Replay Report
 
-Generated: 2026-06-09 23:58:59 UTC
+Generated: 2026-06-10 00:12:19 UTC
 
 
 ## Aggregate
@@ -8,8 +8,8 @@ Generated: 2026-06-09 23:58:59 UTC
 
 | Status | Count | % of total |
 |---|---|---|
-| **PASS** | 46 | 45.1% |
-| **FAIL** | 56 | 54.9% |
+| **PASS** | 47 | 46.1% |
+| **FAIL** | 55 | 53.9% |
 | ERROR | 0 | 0.0% |
 | SKIP_OP (op not implemented) | 0 | 0.0% |
 | SKIP_PARSE (XML malformed) | 0 | 0.0% |
@@ -18,9 +18,9 @@ Generated: 2026-06-09 23:58:59 UTC
 
 Of the 102 tests that exercise only implemented ops:
 
-  - **46 pass (45%)**
+  - **47 pass (46%)**
 
-  - 56 fail
+  - 55 fail
 
   - 0 errored
 
@@ -39,7 +39,6 @@ Of the 102 tests that exercise only implemented ops:
 | `BL-M-12-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
 | `BL-M-13-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
 | `BL-M-14-30.xml` | FAIL | msg #5: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: missing expected attribute 'AlwaysSensitive' (§4.1.1 item 2 |
-| `BL-M-3-30.xml` | FAIL | msg #2: response mismatch: ResponseMessage/BatchItem/ResponsePayload/SymmetricKey/KeyBlock/KeyValue/KeyMaterial: child count 1 != 0 |
 | `BL-M-4-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
 | `BL-M-5-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
 | `BL-M-7-30.xml` | FAIL | msg #2: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'OperationFailed' got 0 |
@@ -69,7 +68,7 @@ Of the 102 tests that exercise only implemented ops:
 | `MSGENC-XML-M-1-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'OperationFailed' got 0 |
 | `OMOS-M-1-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
 | `OMOS-O-1-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
-| `PKCS11-M-1-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 3 != 2 |
+| `PKCS11-M-1-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 4 != 3 |
 | `QS-M-2-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'OperationFailed' got 0 |
 | `SASED-M-2-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
 | `SASED-M-3-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 1 != 0 |
@@ -97,6 +96,7 @@ Of the 102 tests that exercise only implemented ops:
 | `BL-M-2-30.xml` | PASS |  |
 | `BL-M-20-30.xml` | PASS |  |
 | `BL-M-21-30.xml` | PASS |  |
+| `BL-M-3-30.xml` | PASS |  |
 | `BL-M-6-30.xml` | PASS |  |
 | `BL-M-9-30.xml` | PASS |  |
 | `CS-AC-M-7-30.xml` | PASS |  |

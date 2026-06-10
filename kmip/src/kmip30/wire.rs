@@ -118,6 +118,10 @@ mod tags {
     pub const PublicKey: u32              = 0x42_006d;
     pub const PrivateKey: u32             = 0x42_0064;
     pub const KeyMaterial: u32            = 0x42_0043;
+    /// KMIP 3.0 §6.2.1 `Key` ByteString — the single sub-element of
+    /// `KeyMaterial` when `KeyFormatType = TransparentSymmetricKey`.
+    /// Codepoint `0x42003f`.
+    pub const Key: u32                    = 0x42_003f;
     pub const AttributeReference: u32     = 0x42_013b;
     /// KMIP 3.0 §6.1.{2,38,56} `New Attribute` — Structure wrapping the
     /// typed-tag attribute being added / modified / set.
@@ -750,34 +754,11 @@ fn decode_get_req(children: &[TtlvFrame]) -> Result<GetRequest, WireError> {
 /// directly under ResponsePayload is a 1.x-style shortcut that fails
 /// 3.0 strict comparison.
 fn encode_get_resp(r: &GetResponse) -> Vec<TtlvFrame> {
-    // KMIP 3.0 §6.2 `Key Block`:
-    //   KeyFormatType
-    //   KeyValue (Structure)
-    //     KeyMaterial (ByteString or Structure depending on format)
-    //   CryptographicAlgorithm
-    //   CryptographicLength
-    //
-    // The 1.x convention of emitting `KeyValue` as a raw ByteString is
-    // a wire-format break; OASIS expects `KeyMaterial` inside a
-    // `KeyValue` Structure.
-    let key_value_struct = TtlvFrame::new(
-        Tag(tags::KeyValue),
-        Value::Structure(vec![
-            TtlvFrame::new(
-                Tag(tags::KeyMaterial),
-                Value::ByteString(r.key_block.key_value.clone()),
-            ),
-        ]),
-    );
-    let kb = TtlvFrame::new(
-        Tag(tags::KeyBlock),
-        Value::Structure(vec![
-            TtlvFrame::new(Tag(tags::KeyFormatType), Value::Enumeration(r.key_block.key_format_type as u32)),
-            key_value_struct,
-            TtlvFrame::new(Tag(tags::CryptographicAlgorithm), Value::Enumeration(r.key_block.cryptographic_algorithm.to_wire_value())),
-            TtlvFrame::new(Tag(tags::CryptographicLength), Value::Integer(r.key_block.cryptographic_length as i32)),
-        ]),
-    );
+    // KMIP 3.0 §6.2 `Key Block`. Shape of `KeyMaterial` depends on
+    // `KeyFormatType` — delegate to `encode_key_block` so the
+    // TransparentSymmetricKey / Transparent*Key paths get the same
+    // wrapping as `encode_export_resp`.
+    let kb = encode_key_block(&r.key_block);
     let managed_object_tag = match r.object_type {
         ObjectType::PublicKey  => tags::PublicKey,
         ObjectType::PrivateKey => tags::PrivateKey,
@@ -1732,11 +1713,31 @@ fn decode_key_block(frame: &TtlvFrame) -> Result<KeyBlock, WireError> {
                 length = expect_integer(c, "Cryptographic Length")? as u32;
             }
             tags::KeyValue => {
-                // KeyValue is itself a Structure containing KeyMaterial.
+                // KMIP 3.0 §6.2.1 — `KeyValue` is a Structure that
+                // contains `KeyMaterial`. Two shapes:
+                //   • `KeyFormatType = Raw` (1) — `KeyMaterial` is a
+                //     leaf ByteString.
+                //   • `KeyFormatType = TransparentSymmetricKey` (7) —
+                //     `KeyMaterial` is a Structure with one `Key`
+                //     ByteString child. We unwrap the inner Key bytes
+                //     so the rest of the engine treats the key the
+                //     same way as Raw.
+                // Other Transparent* forms (DSA/RSA/EC) need their
+                // own sub-structure extraction; tracked in R3b.
                 for inner in expect_structure(c, "Key Value")? {
                     if inner.tag.0 == tags::KeyMaterial {
-                        if let Value::ByteString(b) = &inner.value {
-                            bytes = b.clone();
+                        match &inner.value {
+                            Value::ByteString(b) => bytes = b.clone(),
+                            Value::Structure(km_children) => {
+                                for km in km_children {
+                                    if km.tag.0 == tags::Key {
+                                        if let Value::ByteString(b) = &km.value {
+                                            bytes = b.clone();
+                                        }
+                                    }
+                                }
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -1747,7 +1748,11 @@ fn decode_key_block(frame: &TtlvFrame) -> Result<KeyBlock, WireError> {
     Ok(KeyBlock {
         key_format_type: match key_format_type {
             0x01 => KeyFormatType::Raw,
-            _    => KeyFormatType::Raw, // v0.1 — wave 2 will expand
+            0x07 => KeyFormatType::TransparentSymmetricKey,
+            // Other formats land in the store as Raw bytes for now;
+            // we keep the codepoint via `ObjectRecord.key_format_type`
+            // so the Get response can round-trip the original form.
+            _    => KeyFormatType::Raw,
         },
         cryptographic_algorithm: algorithm,
         cryptographic_length: length,
@@ -1780,13 +1785,21 @@ fn encode_export_resp(r: &ExportResponse) -> Vec<TtlvFrame> {
 }
 
 /// Encode a `KeyBlock` Structure. Mirror of `decode_key_block`.
+/// `KeyMaterial` shape depends on `KeyFormatType` per KMIP 3.0 §6.2.1:
+/// `Raw` ⇒ leaf ByteString; `TransparentSymmetricKey` ⇒ Structure
+/// containing one `Key` ByteString sub-element.
 fn encode_key_block(kb: &KeyBlock) -> TtlvFrame {
-    let key_value = TtlvFrame::new(
-        Tag(tags::KeyValue),
-        Value::Structure(vec![
-            TtlvFrame::new(Tag(tags::KeyMaterial), Value::ByteString(kb.key_value.clone())),
-        ]),
-    );
+    let key_material = match kb.key_format_type {
+        KeyFormatType::TransparentSymmetricKey => TtlvFrame::new(
+            Tag(tags::KeyMaterial),
+            Value::Structure(vec![TtlvFrame::new(
+                Tag(tags::Key),
+                Value::ByteString(kb.key_value.clone()),
+            )]),
+        ),
+        _ => TtlvFrame::new(Tag(tags::KeyMaterial), Value::ByteString(kb.key_value.clone())),
+    };
+    let key_value = TtlvFrame::new(Tag(tags::KeyValue), Value::Structure(vec![key_material]));
     TtlvFrame::new(
         Tag(tags::KeyBlock),
         Value::Structure(vec![

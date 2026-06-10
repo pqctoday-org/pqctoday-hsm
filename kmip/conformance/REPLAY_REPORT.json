@@ -1,8 +1,8 @@
 {
-  "generated_at": 1781049539,
+  "generated_at": 1781050339,
   "summary": {
-    "pass": 46,
-    "fail": 56,
+    "pass": 47,
+    "fail": 55,
     "error": 0,
     "skip_op": 0,
     "skip_parse": 0,
@@ -223,8 +223,8 @@
     },
     {
       "name": "BL-M-3-30.xml",
-      "status": "FAIL",
-      "detail": "msg #2: response mismatch: ResponseMessage/BatchItem/ResponsePayload/SymmetricKey/KeyBlock/KeyValue/KeyMaterial: child count 1 != 0",
+      "status": "PASS",
+      "detail": "",
       "ops_used": [
         "Check",
         "Get",
@@ -805,7 +805,7 @@
     {
       "name": "PKCS11-M-1-30.xml",
       "status": "FAIL",
-      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 3 != 2",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 4 != 3",
       "ops_used": [
         "PKCS_11"
       ]

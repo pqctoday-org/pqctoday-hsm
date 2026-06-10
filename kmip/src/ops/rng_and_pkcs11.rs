@@ -70,10 +70,19 @@ pub fn pkcs11(deps: &Deps, req: Pkcs11Request, correlation_id: &str) -> Result<P
     // genuine proxy to softhsmrustv3::native would land here when a
     // test actually depends on a specific PKCS#11 side-effect.
     emit_success(deps, correlation_id, "PKCS_11");
+    // KMIP 3.0 §6.1.42 — the server SHALL include a
+    // `Correlation Value` in the response. Echo what the client
+    // supplied (so chained calls share a value); generate a fresh
+    // 16-byte token otherwise (the OASIS test corpus uses the
+    // `$CORRELATION_VALUE` placeholder so any non-empty value is
+    // accepted by the comparator).
+    let cv = req.correlation_value.unwrap_or_else(|| {
+        uuid::Uuid::new_v4().as_bytes().to_vec()
+    });
     Ok(Pkcs11Response {
         interface: req.interface,
         function: req.function,
-        correlation_value: req.correlation_value,
+        correlation_value: Some(cv),
         output_parameters: None,
         return_code: 0, // CKR_OK per PKCS#11 v3.2 §5
     })

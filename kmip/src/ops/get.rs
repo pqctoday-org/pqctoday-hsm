@@ -81,14 +81,23 @@ pub fn get(deps: &Deps, req: GetRequest, correlation_id: &str) -> Result<GetResp
     //
     // Private keys whose material is sensitive and not client-supplied
     // surface as `KeyFormatType::OpaqueObject` with an empty value.
+    // KMIP 3.0 §11 `Key Format Type` enum — codepoints verified
+    // against `kmip-spec-3.0-tags-enums.json`. Only the variants
+    // we have typed `KeyFormatType` enum members for are surfaced;
+    // anything else maps to `Raw` so the round-trip is at least
+    // byte-faithful (the Get response will report `Raw` instead of
+    // the original codepoint, which is a smaller protocol violation
+    // than dropping the material entirely).
     let stored_format = obj
         .key_format_type
         .and_then(|n| match n {
             0x01 => Some(KeyFormatType::Raw),
             0x02 => Some(KeyFormatType::OpaqueObject),
-            0x07 => Some(KeyFormatType::OpaqueObject), // X_509
-            0x08 => Some(KeyFormatType::Raw),          // PKCS_1
-            0x09 => Some(KeyFormatType::Raw),          // PKCS_8
+            0x03 => Some(KeyFormatType::Pkcs1),
+            0x04 => Some(KeyFormatType::Pkcs8),
+            0x05 => Some(KeyFormatType::X509),
+            0x06 => Some(KeyFormatType::EcPrivateKey),
+            0x07 => Some(KeyFormatType::TransparentSymmetricKey),
             _ => None,
         });
     let (key_format, key_value) = if let Some(bytes) = &obj.key_material {
