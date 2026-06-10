@@ -44,13 +44,15 @@ pub fn destroy(deps: &Deps, req: DestroyRequest, correlation_id: &str) -> Result
         State::PreActive | State::Deactivated => State::Destroyed,
         State::Compromised => State::DestroyedCompromised,
         State::Active => {
+            // KMIP 3.0 §11 — `WrongKeyLifecycleState` (0x43) is the
+            // spec-specific reason for an op rejected by the §3.x
+            // FSM. AKLC-M-2 msg #5 pins this code. PermissionDenied
+            // (0x0c) is reserved for policy-engine denials.
             return Err(fail_err(
                 deps,
                 correlation_id,
                 "Destroy",
-                KmipError::permission_denied(
-                    "Active keys must be Revoked before Destroy (KMIP §3.x FSM)",
-                ),
+                super::helpers::non_active_state_error(&req.uid, obj.state),
             ));
         }
         State::Destroyed | State::DestroyedCompromised => {
@@ -194,7 +196,13 @@ mod tests {
         let d = deps_with();
         put(&d, "u", State::Active);
         let err = destroy(&d, DestroyRequest { uid: "u".into() }, "c").unwrap_err();
-        assert_eq!(err.result_reason(), crate::error::ResultReason::PermissionDenied);
+        // KMIP 3.0 §11 — the FSM rejection reason is
+        // `WrongKeyLifecycleState` (0x43), not the generic
+        // `PermissionDenied`. AKLC-M-2 msg #5 pins this code.
+        assert_eq!(
+            err.result_reason(),
+            crate::error::ResultReason::WrongKeyLifecycleState,
+        );
     }
 
     #[test]

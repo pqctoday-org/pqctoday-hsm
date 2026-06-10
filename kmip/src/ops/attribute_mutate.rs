@@ -54,6 +54,25 @@ pub fn add_attribute(
     })?;
     policy_gate(deps, &obj, "AddAttribute", correlation_id)?;
 
+    // KMIP 3.0 §6.1.48 + §11 — `Name` MUST be unique across the
+    // server's managed objects; a duplicate yields
+    // `NonUniqueNameAttribute` (0x35) NOT the generic `InvalidField`.
+    // BL-M-8 msg #2 pins this code.
+    if let Attribute::Name(n) = &req.new_attribute {
+        let dup = deps
+            .store
+            .find(&|r| r.uid != req.uid && r.name.as_deref() == Some(n.as_str()))
+            .unwrap_or_default();
+        if !dup.is_empty() {
+            return Err(fail_err(
+                deps,
+                correlation_id,
+                "AddAttribute",
+                KmipError::non_unique_name_attribute(n),
+            ));
+        }
+    }
+
     // Per §6.1.2: "Existing attribute values SHALL NOT be changed by this
     // operation". Reject if a value is already present for this attribute.
     if attribute_present(&obj, &req.new_attribute) {
