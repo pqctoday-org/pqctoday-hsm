@@ -100,7 +100,7 @@ pub unsafe fn get_attr_bytes(template: *mut u8, count: u32, attr_type: u32) -> O
 /// template must never set on a generate/derive/unwrap operation. PKCS#11 v3.2
 /// §4.1.1 / §4.3 Table 13 / §4.9 / §4.10: these are determined by the token, and
 /// honoring a template value would let a client forge key provenance.
-fn is_server_managed_attr(attr_type: u32) -> bool {
+pub(crate) fn is_server_managed_attr(attr_type: u32) -> bool {
     matches!(
         attr_type,
         CKA_CLASS
@@ -110,12 +110,33 @@ fn is_server_managed_attr(attr_type: u32) -> bool {
             | CKA_ALWAYS_SENSITIVE
             | CKA_NEVER_EXTRACTABLE
             | CKA_CHECK_VALUE
+            // §4.4.1 — CKA_UNIQUE_ID is token-generated at object creation
+            // (state::allocate_handle); a caller template must never supply it.
+            | CKA_UNIQUE_ID
+            // §4.1.1 Table 12 — CKA_TRUSTED requires an SO login to set. This
+            // crate has no SO-session concept, so ALL caller sets are refused
+            // (CKR_ATTRIBUTE_READ_ONLY on C_CreateObject / set-attr paths,
+            // skipped on generate templates) and the FALSE default from
+            // state::apply_object_defaults stands.
+            | CKA_TRUSTED
     )
 }
 
+/// True if `attr_type` must NOT be absorbed from a caller template into a new
+/// object's attribute map: raw key material (CKA_VALUE), seed material
+/// (CKA_SEED — sensitive-class per the v3.2 PQC key tables, like CKA_VALUE),
+/// engine-internal CKA_PRIV_* attrs, and the server-managed read-only set.
+pub(crate) fn template_attr_is_skipped(attr_type: u32) -> bool {
+    attr_type == CKA_VALUE
+        || attr_type == CKA_SEED
+        || attr_type >= 0xFFFF0000
+        || is_server_managed_attr(attr_type)
+}
+
 /// Copy all attributes from a caller's CK_ATTRIBUTE template into the attrs map.
-/// Skips: CKA_VALUE (key material), internal CKA_PRIV_* (>= 0xFFFF0000), and the
-/// server-managed read-only attributes (see `is_server_managed_attr`).
+/// Skips: CKA_VALUE / CKA_SEED (key + seed material), internal CKA_PRIV_*
+/// (>= 0xFFFF0000), and the server-managed read-only attributes (see
+/// `template_attr_is_skipped` / `is_server_managed_attr`).
 /// Call AFTER setting defaults so the caller's template can override the
 /// remaining (client-settable) attributes.
 pub unsafe fn absorb_template_attrs(attrs: &mut Attributes, template: *mut u8, count: u32) {
@@ -127,11 +148,8 @@ pub unsafe fn absorb_template_attrs(attrs: &mut Attributes, template: *mut u8, c
         let attr_type = *ptr.add((i * 3) as usize);
         let val_ptr = *ptr.add((i * 3 + 1) as usize) as usize as *const u8;
         let val_len = *ptr.add((i * 3 + 2) as usize) as usize;
-        // Skip key material, internal private attrs, and server-managed attrs.
-        if attr_type == CKA_VALUE
-            || attr_type >= 0xFFFF0000
-            || is_server_managed_attr(attr_type)
-        {
+        // Skip key/seed material, internal private attrs, and server-managed attrs.
+        if template_attr_is_skipped(attr_type) {
             continue;
         }
         if !val_ptr.is_null() && val_len > 0 {

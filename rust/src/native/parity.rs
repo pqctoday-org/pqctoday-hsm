@@ -278,3 +278,74 @@ fn sign_after_destroy_fails_in_both_apis() {
     assert_eq!(rv, CKR_KEY_HANDLE_INVALID);
     close_session(session).unwrap();
 }
+
+/// S3 — CKA_SEED sensitive-class parity: on a sensitive private key the
+/// seed is blocked through BOTH surfaces — `native::object::get_attribute`
+/// returns None and `ffi::C_GetAttributeValue` returns
+/// CKR_ATTRIBUTE_SENSITIVE (same shared predicate
+/// `state::attr_is_sensitive_material` + `state::value_is_blocked`).
+#[test]
+fn seed_blocked_on_sensitive_key_in_both_apis() {
+    use crate::native::object::get_attribute;
+    let _guard = test_lock::acquire();
+    let session = fresh_session();
+    let (_, prv_h) =
+        generate_ml_dsa_keypair(session, CKP_ML_DSA_65, b"\x01", "seed-parity").unwrap();
+    // ML-DSA private keys are CKA_SENSITIVE=TRUE by keygen default.
+
+    // Native path: blocked.
+    assert!(
+        get_attribute(session, prv_h, CKA_SEED).is_none(),
+        "native CKA_SEED readback must be blocked on a sensitive key"
+    );
+    // CKA_VALUE blocked identically (control).
+    assert!(get_attribute(session, prv_h, CKA_VALUE).is_none());
+
+    // FFI path: CK_ATTRIBUTE { CKA_SEED, NULL, 0 } size query — blocked with
+    // CKR_ATTRIBUTE_SENSITIVE and ulValueLen = CK_UNAVAILABLE_INFORMATION.
+    let mut tmpl: [u32; 3] = [CKA_SEED, 0, 0];
+    let rv = ffi::C_GetAttributeValue(session, prv_h, tmpl.as_mut_ptr() as *mut u8, 1);
+    assert_eq!(rv, CKR_ATTRIBUTE_SENSITIVE);
+    assert_eq!(tmpl[2], 0xFFFF_FFFF);
+    close_session(session).unwrap();
+}
+
+/// S3 — CKA_UNIQUE_ID parity: objects created through the native surface
+/// (keygen) carry token-generated unique ids readable from both APIs, and
+/// the ids differ across objects.
+#[test]
+fn unique_id_present_and_distinct_on_generated_objects() {
+    use crate::native::object::get_attribute;
+    let _guard = test_lock::acquire();
+    let session = fresh_session();
+    let (pub_h, prv_h) =
+        generate_ml_dsa_keypair(session, CKP_ML_DSA_65, b"\x01", "uid-parity").unwrap();
+
+    // Native readback.
+    let uid_pub = get_attribute(session, pub_h, CKA_UNIQUE_ID).expect("pub has CKA_UNIQUE_ID");
+    let uid_prv = get_attribute(session, prv_h, CKA_UNIQUE_ID).expect("prv has CKA_UNIQUE_ID");
+    assert!(uid_pub.starts_with(b"shr3-"));
+    assert!(uid_prv.starts_with(b"shr3-"));
+    assert_ne!(uid_pub, uid_prv, "unique ids must differ across objects");
+
+    // FFI readback (size query): CKA_UNIQUE_ID is NOT sensitive-blocked even
+    // on the sensitive private key — it is metadata, not key material.
+    let mut tmpl: [u32; 3] = [CKA_UNIQUE_ID, 0, 0];
+    let rv = ffi::C_GetAttributeValue(session, prv_h, tmpl.as_mut_ptr() as *mut u8, 1);
+    assert_eq!(rv, CKR_OK);
+    assert_eq!(tmpl[2] as usize, uid_prv.len());
+
+    // Read-only through the native set path.
+    assert_eq!(
+        crate::native::object::set_attribute(session, prv_h, CKA_UNIQUE_ID, b"forged".to_vec())
+            .unwrap_err(),
+        CKR_ATTRIBUTE_READ_ONLY
+    );
+    // CKA_TRUSTED equally refused (SO-only; no SO-session concept in-crate).
+    assert_eq!(
+        crate::native::object::set_attribute(session, pub_h, CKA_TRUSTED, vec![0x01])
+            .unwrap_err(),
+        CKR_ATTRIBUTE_READ_ONLY
+    );
+    close_session(session).unwrap();
+}

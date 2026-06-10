@@ -94,11 +94,13 @@ pub fn find_all_by_cka_id(_session: u32, cka_id: &[u8]) -> Result<Vec<u32>, CkRv
 /// LE u32 etc.; convenience wrappers [`get_attribute_u32`] and
 /// [`get_attribute_bool`] do the decode.
 pub fn get_attribute(_session: u32, handle: u32, attr_type: u32) -> Option<Vec<u8>> {
-    // Same predicate as ffi::C_GetAttributeValue (state::value_is_blocked):
-    // CKA_VALUE of private/secret keys is blocked when CKA_SENSITIVE=TRUE
-    // **or** CKA_EXTRACTABLE=FALSE (PKCS#11 v3.2 §4.9/§4.10). Sharing one
-    // predicate keeps the native and C-ABI surfaces from drifting.
-    if attr_type == CKA_VALUE {
+    // Same predicates as ffi::C_GetAttributeValue (state::value_is_blocked +
+    // state::attr_is_sensitive_material): CKA_VALUE / CKA_SEED of
+    // private/secret keys are blocked when CKA_SENSITIVE=TRUE **or**
+    // CKA_EXTRACTABLE=FALSE (PKCS#11 v3.2 §4.9/§4.10; the v3.2 PQC key tables
+    // footnote CKA_SEED identically to CKA_VALUE). Sharing the predicates
+    // keeps the native and C-ABI surfaces from drifting.
+    if crate::state::attr_is_sensitive_material(attr_type) {
         let blocked = OBJECTS.with(|o| o.borrow().get(&handle).map(crate::state::value_is_blocked));
         if blocked == Some(true) {
             return None;
@@ -124,7 +126,9 @@ pub fn set_attribute(
 /// convention). Returns `None` if the attribute is absent or is
 /// blocked by sensitivity policy.
 pub fn get_attribute_u32(_session: u32, handle: u32, attr_type: u32) -> Option<u32> {
-    if attr_type == CKA_VALUE && get_attribute(_session, handle, CKA_VALUE).is_none() {
+    if crate::state::attr_is_sensitive_material(attr_type)
+        && get_attribute(_session, handle, attr_type).is_none()
+    {
         return None;
     }
     state_get_object_attr_u32(handle, attr_type)

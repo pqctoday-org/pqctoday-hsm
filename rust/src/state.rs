@@ -51,6 +51,10 @@ pub fn set_initialized(v: bool) {
 lazy_static! {
     pub static ref OBJECTS: GlobalState<HashMap<u32, Attributes>> = GlobalState::new(HashMap::new());
     pub static ref NEXT_HANDLE: GlobalState<u32> = GlobalState::new(100);
+    /// PKCS#11 v3.2 §4.4.1 — CKA_UNIQUE_ID source. Process-monotonic and never
+    /// reset (not even by C_Finalize) so identifiers stay unique across
+    /// initialize/finalize cycles within one process.
+    pub static ref UNIQUE_ID_COUNTER: GlobalState<u64> = GlobalState::new(1);
     pub static ref NEXT_SESSION_HANDLE: GlobalState<u32> = GlobalState::new(1);
     pub static ref SIGN_STATE: GlobalState<HashMap<u32, (u32, u32, Vec<u8>, bool)>> = GlobalState::new(HashMap::new());
     pub static ref VERIFY_STATE: GlobalState<HashMap<u32, (u32, u32, Vec<u8>, bool)>> = GlobalState::new(HashMap::new());
@@ -289,6 +293,17 @@ pub fn value_is_blocked(attrs: &Attributes) -> bool {
     sensitive || !extractable
 }
 
+/// PKCS#11 v3.2 — attribute types that carry raw secret key material and share
+/// CKA_VALUE's sensitivity gate (`value_is_blocked`). CKA_SEED (the
+/// deterministic-keygen seed: ξ for ML-DSA, d‖z for ML-KEM) is footnoted
+/// identically to CKA_VALUE in the v3.2 PQC key tables: it must never be
+/// readable from a sensitive or unextractable key. Both
+/// `ffi::C_GetAttributeValue` and `native::object::get_attribute` use this
+/// predicate so the two surfaces cannot drift.
+pub fn attr_is_sensitive_material(attr_type: u32) -> bool {
+    attr_type == CKA_VALUE || attr_type == CKA_SEED
+}
+
 /// Server-managed (read-only) attributes a mutation API must refuse to change,
 /// plus the one-way transition rules (PKCS#11 v3.2 §4.1.1 Table 12):
 /// CKA_SENSITIVE may only go FALSE→TRUE; CKA_EXTRACTABLE only TRUE→FALSE.
@@ -310,6 +325,12 @@ pub fn set_object_attr_checked(handle: u32, attr_type: u32, value: Vec<u8>) -> R
         CKA_ALWAYS_SENSITIVE,
         CKA_NEVER_EXTRACTABLE,
         CKA_CHECK_VALUE,
+        // §4.4.1 — token-generated at creation, never client-mutable.
+        CKA_UNIQUE_ID,
+        // §4.1.1 Table 12 — CKA_TRUSTED may only be set by the SO. This crate
+        // has no SO-session concept, so every caller set is rejected and the
+        // FALSE default (apply_object_defaults) stands.
+        CKA_TRUSTED,
         CKA_MODULUS,
         CKA_PUBLIC_EXPONENT,
         CKA_EC_PARAMS,
@@ -390,6 +411,18 @@ pub fn destroy_session_objects(h_session: u32) {
 
 pub fn allocate_handle(mut attrs: Attributes) -> u32 {
     apply_object_defaults(&mut attrs);
+    // PKCS#11 v3.2 §4.4.1 — every object gets a token-generated CKA_UNIQUE_ID
+    // at creation. This is the single choke point through which all objects
+    // enter OBJECTS, so the attribute is guaranteed on every surface (FFI,
+    // native, KMIP). Unconditional insert: the attribute is read-only and any
+    // caller-supplied value has already been rejected/skipped upstream.
+    let uid = UNIQUE_ID_COUNTER.with(|c| {
+        let mut c = c.borrow_mut();
+        let v = *c;
+        *c += 1;
+        v
+    });
+    attrs.insert(CKA_UNIQUE_ID, format!("shr3-{uid}").into_bytes());
     NEXT_HANDLE.with(|h| {
         let mut handle = h.borrow_mut();
         if *handle == u32::MAX {
