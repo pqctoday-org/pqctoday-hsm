@@ -1,8 +1,8 @@
 {
-  "generated_at": 1781043236,
+  "generated_at": 1781049539,
   "summary": {
-    "pass": 45,
-    "fail": 57,
+    "pass": 46,
+    "fail": 56,
     "error": 0,
     "skip_op": 0,
     "skip_parse": 0,
@@ -191,8 +191,8 @@
     },
     {
       "name": "BL-M-2-30.xml",
-      "status": "FAIL",
-      "detail": "msg #2: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'OperationUndone' got 0",
+      "status": "PASS",
+      "detail": "",
       "ops_used": [
         "Activate",
         "Check",

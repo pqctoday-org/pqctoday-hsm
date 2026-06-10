@@ -35,6 +35,11 @@ pub enum ResultReason {
     /// is in `Deactivated` / `Compromised`. Distinct from
     /// `ObjectArchived` which is reserved for `Destroyed` states.
     WrongKeyLifecycleState = 0x0000_0043,
+    /// `Incompatible Cryptographic Usage Mask` — KMIP 3.0 §11. The
+    /// op requires a `CryptographicUsageMask` flag the key doesn't
+    /// carry (e.g. `Check` against a key whose mask lacks
+    /// `ProcessStart`). Distinct from generic `PermissionDenied`.
+    IncompatibleCryptographicUsageMask = 0x0000_0029,
     GeneralFailure        = 0x0000_0100,
 }
 

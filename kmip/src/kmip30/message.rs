@@ -354,6 +354,34 @@ impl RequestPayload {
             }
         }
     }
+
+    /// UIDs the op consumes as input. The dispatcher's R7 Phase 4
+    /// (§9.5 Undo) wave snapshots these BEFORE the op runs so it can
+    /// roll them back on a later failure. Read-only ops (Query / Get
+    /// / Locate / Sign / Verify / …) return an empty slice — they
+    /// have no side effect to revert.
+    pub fn touched_uids(&self) -> Vec<&str> {
+        match self {
+            Self::Activate(r)         => vec![r.uid.as_str()],
+            Self::Revoke(r)           => vec![r.uid.as_str()],
+            Self::Destroy(r)          => vec![r.uid.as_str()],
+            Self::Deactivate(r)       => vec![r.uid.as_str()],
+            Self::Archive(r)          => vec![r.uid.as_str()],
+            Self::Recover(r)          => vec![r.uid.as_str()],
+            Self::Obliterate(r)       => vec![r.uid.as_str()],
+            Self::AddAttribute(r)     => vec![r.uid.as_str()],
+            Self::ModifyAttribute(r)  => vec![r.uid.as_str()],
+            Self::DeleteAttribute(r)  => vec![r.uid.as_str()],
+            Self::SetAttribute(r)     => vec![r.uid.as_str()],
+            Self::AdjustAttribute(r)  => vec![r.uid.as_str()],
+            // Import always carries an explicit UID. Register MAY
+            // — the server-allocated case is captured post-hoc in
+            // `created_uids_after`.
+            Self::Import(r)           => vec![r.uid.as_str()],
+            // Read-only / output-only — no rollback needed.
+            _ => Vec::new(),
+        }
+    }
 }
 
 #[cfg(test)]

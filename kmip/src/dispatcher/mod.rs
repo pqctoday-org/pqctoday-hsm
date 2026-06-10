@@ -79,11 +79,15 @@ pub fn dispatch(deps: &Deps, request: RequestMessage) -> ResponseMessage {
         items.push(response);
         if failed {
             // Continue is the only mode that proceeds past a failure.
-            // Stop (default) and Undo (deferred) both halt. Per §9.5:
-            // "Responses to batch items that have not been processed
-            // are not returned."
+            // Stop halts. Undo halts and additionally rolls back the
+            // earlier successful items (relabelled OperationUndone).
+            // Per §9.5: "Responses to batch items that have not been
+            // processed are not returned."
             if matches!(mode, BatchErrorContinuationOption::Continue) {
                 continue;
+            }
+            if matches!(mode, BatchErrorContinuationOption::Undo) {
+                undo_wave(deps, &mut state, &mut items);
             }
             break;
         }
@@ -94,14 +98,78 @@ pub fn dispatch(deps: &Deps, request: RequestMessage) -> ResponseMessage {
     }
 }
 
+/// KMIP 3.0 §9.5 Undo — restore the store + engine state to its
+/// pre-batch shape and relabel every previously-successful response
+/// item as `OperationUndone`. The failed item (the last one in
+/// `items`) keeps `OperationFailed`. Snapshots are replayed in
+/// reverse order so that nested mutations roll back correctly.
+fn undo_wave(deps: &Deps, state: &mut BatchState, items: &mut [ResponseBatchItem]) {
+    // The last item is the failed one; relabel everything before it.
+    let undone_count = items.len().saturating_sub(1);
+    // Snapshots are aligned 1:1 with successful items (we only push
+    // a snapshot bucket after `Ok(_)` in `dispatch_one`). Replay in
+    // reverse to undo the most-recent change first.
+    while let Some(bucket) = state.snapshots.pop() {
+        for snap in bucket.0.into_iter().rev() {
+            match snap.pre {
+                Some(rec) => {
+                    // Restore the pre-state by overwriting. We use
+                    // `update` rather than `put` because the UID
+                    // still exists in the store.
+                    let _ = deps.store.update(rec);
+                }
+                None => {
+                    // The UID didn't exist before the op — remove it
+                    // and best-effort destroy any engine-resident
+                    // handle the op had created.
+                    if let Some(rec) = deps.store.get(&snap.uid).ok().flatten() {
+                        if let Some(session) = deps.engine_session {
+                            if let Ok(Some(handle)) = softhsmrustv3::native::find_by_cka_id(
+                                session, &rec.pkcs11_cka_id,
+                            ) {
+                                let _ = softhsmrustv3::native::destroy_object(session, handle);
+                            }
+                        }
+                    }
+                    let _ = deps.store.remove(&snap.uid);
+                }
+            }
+        }
+    }
+    for bi in items.iter_mut().take(undone_count) {
+        bi.result_status = ResultStatus::OperationUndone;
+        // Per spec, the response payload is still returned — the
+        // status field is the only thing that changes.
+    }
+}
+
 /// Per-batch transient state per KMIP 3.0 §6.4 — "a temporary variable
-/// called the ID Placeholder. This value consists of a single Unique
-/// Identifier. It is a variable stored inside the server that is only
-/// valid and preserved during the execution of a single request.
-/// After execution, the variable is discarded."
+/// called the ID Placeholder. … only valid and preserved during the
+/// execution of a single request. After execution, the variable is
+/// discarded." Also tracks snapshot stacks for the §9.5 Undo wave.
 #[derive(Default)]
 struct BatchState {
     id_placeholder: Option<String>,
+    /// R7 Phase 4 — every successful state-mutating op pushes one
+    /// or more `UidSnapshot`s here. On failure under Undo mode the
+    /// stack is replayed in reverse to restore the store + engine
+    /// state to its pre-batch shape.
+    snapshots: Vec<ItemSnapshots>,
+}
+
+/// All snapshots produced by a single BatchItem (most ops touch one
+/// UID; CreateKeyPair touches two; AddAttribute might touch one).
+#[derive(Default)]
+struct ItemSnapshots(Vec<UidSnapshot>);
+
+/// State of a single UID at the moment just before a BatchItem ran.
+/// `pre = None` means the UID didn't exist before the op (so the
+/// Undo wave will delete it); `pre = Some(rec)` means it did, and
+/// the Undo wave will write the snapshot back over whatever the op
+/// produced.
+struct UidSnapshot {
+    uid: String,
+    pre: Option<crate::store::ObjectRecord>,
 }
 
 /// Sentinel the wire codec emits for `<UniqueIdentifier
@@ -118,12 +186,35 @@ fn dispatch_one(
     let correlation_id = Uuid::new_v4().to_string();
     let op = item.operation;
     let payload = substitute_id_placeholder(item.payload, state);
+
+    // R7 Phase 4 — snapshot every input UID BEFORE the handler runs
+    // so the §9.5 Undo wave (if triggered later in this batch) can
+    // restore the store to its pre-op shape. Output-only ops
+    // (Create / CreateKeyPair / Register without explicit UID) get
+    // their snapshots filled in post-hoc — we capture `pre = None`
+    // for each newly-created UID after success.
+    let pre_snapshots: Vec<UidSnapshot> = payload
+        .touched_uids()
+        .into_iter()
+        .map(|uid| UidSnapshot {
+            uid: uid.to_string(),
+            pre: deps.store.get(uid).ok().flatten(),
+        })
+        .collect();
+
     let result = handle_payload(deps, payload, &correlation_id);
     match result {
         Ok(payload) => {
             // After every successful UID-producing op, refresh the ID
             // Placeholder for subsequent items in this batch.
             update_id_placeholder(state, &payload);
+            // Stitch in any newly-created UIDs as "pre = None" so
+            // the Undo wave knows to delete them rather than restore.
+            let mut bucket = ItemSnapshots(pre_snapshots);
+            for uid in newly_created_uids(&payload) {
+                bucket.0.push(UidSnapshot { uid, pre: None });
+            }
+            state.snapshots.push(bucket);
             ResponseBatchItem {
                 operation: Some(op),
                 result_status: ResultStatus::Success,
@@ -139,6 +230,23 @@ fn dispatch_one(
             result_message: Some(err.to_string()),
             payload: None,
         },
+    }
+}
+
+/// UIDs that the op produced (and that therefore must be DELETED on
+/// an Undo rollback, since they didn't exist before the op ran).
+fn newly_created_uids(payload: &ResponsePayload) -> Vec<String> {
+    match payload {
+        ResponsePayload::Create(r) => vec![r.uid.clone()],
+        ResponsePayload::CreateKeyPair(r) => {
+            vec![r.private_key_uid.clone(), r.public_key_uid.clone()]
+        }
+        ResponsePayload::Register(r) => vec![r.uid.clone()],
+        ResponsePayload::Import(r) => vec![r.uid.clone()],
+        ResponsePayload::CreateCredential(r) => vec![r.uid.clone()],
+        ResponsePayload::CreateGroup(r) => vec![r.uid.clone()],
+        ResponsePayload::CreateUser(r) => vec![r.uid.clone()],
+        _ => Vec::new(),
     }
 }
 
@@ -579,4 +687,155 @@ mod tests {
     /// substitutes the live ID Placeholder before handing the request
     /// to the handler.
     const ID_PLACEHOLDER_SENTINEL: &str = "$IDPlaceholder";
+
+    // ── R7 Phase 4 — Undo rollback contracts ───────────────────────────────
+    //
+    // KMIP 3.0 §9.5: "If any operation in the request fails [under
+    // Undo], then the server SHALL undo all the previous operations.
+    // Responses to batch items that have already been processed are
+    // returned normally." Combined with §9.x Result Status: those
+    // already-completed items have their `ResultStatus` switched to
+    // `Operation Undone` (codepoint `0x02`) — distinct from both
+    // `Success` (0x00) and `OperationFailed` (0x01).
+
+    use crate::store::ObjectRecord;
+    use crate::kmip30::State;
+
+    /// Item N fails ⇒ items 0..N-1 are reported with
+    /// `OperationUndone`; the failed item keeps `OperationFailed`;
+    /// items N+1.. are NOT returned (same Stop-like truncation, just
+    /// with the prior items relabelled). Verifies the response shape.
+    #[test]
+    fn r7_phase4_undo_relabels_completed_items_as_undone() {
+        let d = deps();
+        // Seed a PreActive key so the Activate succeeds.
+        d.store.put(ObjectRecord {
+            uid: "k-a".into(),
+            object_type: ObjectType::SymmetricKey,
+            algorithm: KmipAlgorithm::Aes,
+            cryptographic_length: 128,
+            usage_mask: UsageMask::ENCRYPT,
+            state: State::PreActive,
+            initial_date: time::OffsetDateTime::UNIX_EPOCH,
+            ..ObjectRecord::default()
+        }).unwrap();
+        let msg = crate::kmip30::RequestMessage {
+            header: RequestHeader {
+                batch_error_continuation_option: Some(BatchErrorContinuationOption::Undo),
+                ..RequestHeader::v3()
+            },
+            batch_items: vec![
+                RequestBatchItem {
+                    operation: crate::kmip30::Operation::Activate,
+                    payload: RP::Activate(crate::kmip30::ActivateRequest { uid: "k-a".into() }),
+                },
+                RequestBatchItem {
+                    operation: crate::kmip30::Operation::Destroy,
+                    payload: RP::Destroy(DestroyRequest { uid: "urn:ghost".into() }),
+                },
+                RequestBatchItem {
+                    operation: crate::kmip30::Operation::Query,
+                    payload: RP::Query(crate::kmip30::QueryRequest { functions: vec![] }),
+                },
+            ],
+        };
+        let resp = dispatch(&d, msg);
+        assert_eq!(resp.batch_items.len(), 2, "Undo truncates after the failure");
+        assert_eq!(
+            resp.batch_items[0].result_status,
+            ResultStatus::OperationUndone,
+            "the successful Activate should be relabelled OperationUndone",
+        );
+        assert_eq!(
+            resp.batch_items[1].result_status,
+            ResultStatus::OperationFailed,
+            "the failed Destroy keeps OperationFailed",
+        );
+    }
+
+    /// Snapshot/restore: the Activate's state mutation (PreActive →
+    /// Active) MUST be reversed by the Undo wave.
+    #[test]
+    fn r7_phase4_undo_restores_pre_op_object_record() {
+        let d = deps();
+        d.store.put(ObjectRecord {
+            uid: "k-b".into(),
+            object_type: ObjectType::SymmetricKey,
+            algorithm: KmipAlgorithm::Aes,
+            cryptographic_length: 128,
+            usage_mask: UsageMask::ENCRYPT,
+            state: State::PreActive,
+            initial_date: time::OffsetDateTime::UNIX_EPOCH,
+            ..ObjectRecord::default()
+        }).unwrap();
+        let msg = crate::kmip30::RequestMessage {
+            header: RequestHeader {
+                batch_error_continuation_option: Some(BatchErrorContinuationOption::Undo),
+                ..RequestHeader::v3()
+            },
+            batch_items: vec![
+                RequestBatchItem {
+                    operation: crate::kmip30::Operation::Activate,
+                    payload: RP::Activate(crate::kmip30::ActivateRequest { uid: "k-b".into() }),
+                },
+                RequestBatchItem {
+                    operation: crate::kmip30::Operation::Destroy,
+                    payload: RP::Destroy(DestroyRequest { uid: "urn:ghost".into() }),
+                },
+            ],
+        };
+        let _ = dispatch(&d, msg);
+        let rec = d.store.get("k-b").unwrap().unwrap();
+        assert_eq!(
+            rec.state,
+            State::PreActive,
+            "Undo wave must restore the pre-Activate state",
+        );
+        assert!(
+            rec.activation_date.is_none(),
+            "Activate's activation_date side-effect must be reverted",
+        );
+    }
+
+    /// Stop mode (the default) MUST NOT roll anything back. This
+    /// guards against accidentally triggering the Undo wave when
+    /// `BatchErrorContinuationOption` is absent or set to Stop.
+    #[test]
+    fn r7_phase4_stop_mode_preserves_completed_side_effects() {
+        let d = deps();
+        d.store.put(ObjectRecord {
+            uid: "k-c".into(),
+            object_type: ObjectType::SymmetricKey,
+            algorithm: KmipAlgorithm::Aes,
+            cryptographic_length: 128,
+            usage_mask: UsageMask::ENCRYPT,
+            state: State::PreActive,
+            initial_date: time::OffsetDateTime::UNIX_EPOCH,
+            ..ObjectRecord::default()
+        }).unwrap();
+        let msg = crate::kmip30::RequestMessage {
+            header: RequestHeader {
+                batch_error_continuation_option: Some(BatchErrorContinuationOption::Stop),
+                ..RequestHeader::v3()
+            },
+            batch_items: vec![
+                RequestBatchItem {
+                    operation: crate::kmip30::Operation::Activate,
+                    payload: RP::Activate(crate::kmip30::ActivateRequest { uid: "k-c".into() }),
+                },
+                RequestBatchItem {
+                    operation: crate::kmip30::Operation::Destroy,
+                    payload: RP::Destroy(DestroyRequest { uid: "urn:ghost".into() }),
+                },
+            ],
+        };
+        let resp = dispatch(&d, msg);
+        assert_eq!(resp.batch_items[0].result_status, ResultStatus::Success);
+        let rec = d.store.get("k-c").unwrap().unwrap();
+        assert_eq!(
+            rec.state,
+            State::Active,
+            "Stop mode preserves the Activate's effect",
+        );
+    }
 }

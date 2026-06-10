@@ -444,8 +444,15 @@ fn response_batch_item_to_frame(bi: &ResponseBatchItem) -> TtlvFrame {
         Tag(tags::ResultStatus),
         Value::Enumeration(bi.result_status.to_wire_value()),
     ));
-    let is_success = matches!(bi.result_status, ResultStatus::Success);
-    if is_success {
+    // KMIP 3.0 §9.x — `OperationUndone` (codepoint 0x02) is the
+    // status used by the §9.5 Undo wave to relabel items whose ops
+    // ran successfully but had to be reverted. The operation DID
+    // produce a response payload; the payload is still returned
+    // exactly as Success would. Only `OperationFailed` triggers the
+    // ResultReason / ResultMessage shape.
+    let has_payload =
+        matches!(bi.result_status, ResultStatus::Success | ResultStatus::OperationUndone);
+    if has_payload {
         if let Some(payload) = &bi.payload {
             children.push(response_payload_to_frame(payload));
         }

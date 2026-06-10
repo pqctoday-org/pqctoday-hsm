@@ -94,11 +94,19 @@ pub fn check(deps: &Deps, req: CheckRequest, correlation_id: &str) -> Result<Che
     if let Some(requested) = req.cryptographic_usage_mask {
         let have = obj.usage_mask.bits();
         if requested & have != requested {
+            // KMIP 3.0 §11 — the spec-specific reason is
+            // `IncompatibleCryptographicUsageMask` (0x29), distinct
+            // from the generic `PermissionDenied`. OASIS BL-M-2 msg
+            // #2 pins this code on the Check that triggers its Undo
+            // wave.
             return Err(fail_err(deps, correlation_id, "Check",
-                KmipError::permission_denied(format!(
-                    "Cryptographic Usage Mask {:#x} not all permitted by object's {:#x}",
-                    requested, have
-                ))));
+                KmipError::failed(
+                    crate::error::ResultReason::IncompatibleCryptographicUsageMask,
+                    format!(
+                        "Cryptographic Usage Mask {:#x} not all permitted by object's {:#x}",
+                        requested, have
+                    ),
+                )));
         }
     }
 
@@ -272,7 +280,14 @@ mod tests {
             cryptographic_usage_mask: Some(UsageMask::SIGN.bits()),
             lease_time: None,
         }, "c").unwrap_err();
-        assert_eq!(err.result_reason(), crate::error::ResultReason::PermissionDenied);
+        // KMIP 3.0 §11: the spec-specific reason is
+        // `IncompatibleCryptographicUsageMask` (0x29), not the
+        // generic `PermissionDenied` — the original assertion was
+        // wrong. OASIS BL-M-2 msg #2 pins the corrected behaviour.
+        assert_eq!(
+            err.result_reason(),
+            crate::error::ResultReason::IncompatibleCryptographicUsageMask,
+        );
     }
 
     #[test]
