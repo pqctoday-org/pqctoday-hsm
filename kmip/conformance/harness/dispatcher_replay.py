@@ -271,6 +271,16 @@ def is_volatile_tag(tag: str) -> bool:
 _OPTIONAL_PRESENCE_TAGS: dict[str, str] = {
     _norm("ServerCorrelationValue"): "§8.2.2 — optional in ResponseHeader",
     _norm("ClientCorrelationValue"): "§8.1.2 — optional in RequestHeader",
+    # KMIP 3.0 §6.1.42 — `PKCS_11OutputParameters` is optional on
+    # responses where the underlying PKCS#11 function returns no
+    # output buffer (`C_Initialize`, `C_Finalize`, etc.) and present
+    # only for the few functions that do (`C_GetInfo`, `C_GetSlotInfo`,
+    # `C_GetTokenInfo`, `C_GetMechanismInfo`, ...). Treating it as
+    # optional-presence on both sides matches the spec's permissive
+    # framing without forcing every server to emit a placeholder
+    # byte string just to keep child-count parity.
+    _norm("PKCS_11OutputParameters"): "PKCS#11 v3.2 §5 — optional per function",
+    _norm("PKCS11OutputParameters"): "PKCS#11 v3.2 §5 — optional per function",
 }
 
 
