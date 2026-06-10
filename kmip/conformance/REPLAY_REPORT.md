@@ -1,6 +1,6 @@
 # OASIS KMIP 3.0 Dispatcher Replay Report
 
-Generated: 2026-06-10 04:18:42 UTC
+Generated: 2026-06-10 04:21:06 UTC
 
 
 ## Aggregate
@@ -8,8 +8,8 @@ Generated: 2026-06-10 04:18:42 UTC
 
 | Status | Count | % of total |
 |---|---|---|
-| **PASS** | 73 | 71.6% |
-| **FAIL** | 29 | 28.4% |
+| **PASS** | 75 | 73.5% |
+| **FAIL** | 27 | 26.5% |
 | ERROR | 0 | 0.0% |
 | SKIP_OP (op not implemented) | 0 | 0.0% |
 | SKIP_PARSE (XML malformed) | 0 | 0.0% |
@@ -18,9 +18,9 @@ Generated: 2026-06-10 04:18:42 UTC
 
 Of the 102 tests that exercise only implemented ops:
 
-  - **73 pass (72%)**
+  - **75 pass (74%)**
 
-  - 29 fail
+  - 27 fail
 
   - 0 errored
 
@@ -44,8 +44,6 @@ Of the 102 tests that exercise only implemented ops:
 | `CS-AC-M-8-30.xml` | FAIL | msg #2: response mismatch: ResponseMessage/BatchItem/ResultReason: expected 'WrongKeyLifecycleState' got 1 |
 | `CS-BC-M-13-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
 | `CS-BC-M-7-30.xml` | FAIL | msg #2: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'OperationFailed' got 0 |
-| `CS-BC-M-8-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Data: expected 'd9bcce11b0b437b90239552df3a360c90efb6bfed93b4d1ea2123ba |
-| `CS-BC-M-9-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
 | `CS-BC-M-GCM-1-30.xml` | FAIL | msg #6: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
 | `CS-BC-M-GCM-2-30.xml` | FAIL | msg #21: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
 | `CS-BC-M-GCM-3-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
@@ -102,6 +100,8 @@ Of the 102 tests that exercise only implemented ops:
 | `CS-BC-M-4-30.xml` | PASS |  |
 | `CS-BC-M-5-30.xml` | PASS |  |
 | `CS-BC-M-6-30.xml` | PASS |  |
+| `CS-BC-M-8-30.xml` | PASS |  |
+| `CS-BC-M-9-30.xml` | PASS |  |
 | `CS-BC-M-CHACHA20-1-30.xml` | PASS |  |
 | `CS-BC-M-CHACHA20-2-30.xml` | PASS |  |
 | `CS-BC-M-CHACHA20-3-30.xml` | PASS |  |

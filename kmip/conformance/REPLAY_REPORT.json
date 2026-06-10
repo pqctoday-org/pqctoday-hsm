@@ -1,8 +1,8 @@
 {
-  "generated_at": 1781065122,
+  "generated_at": 1781065266,
   "summary": {
-    "pass": 73,
-    "fail": 29,
+    "pass": 75,
+    "fail": 27,
     "error": 0,
     "skip_op": 0,
     "skip_parse": 0,
@@ -644,8 +644,8 @@
     },
     {
       "name": "CS-BC-M-8-30.xml",
-      "status": "FAIL",
-      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Data: expected 'd9bcce11b0b437b90239552df3a360c90efb6bfed93b4d1ea2123ba4db075ff6' got 'd9bcce11b0b437b90239552df3a360c9'",
+      "status": "PASS",
+      "detail": "",
       "ops_used": [
         "Decrypt",
         "Destroy",
@@ -656,8 +656,8 @@
     },
     {
       "name": "CS-BC-M-9-30.xml",
-      "status": "FAIL",
-      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1",
+      "status": "PASS",
+      "detail": "",
       "ops_used": [
         "Decrypt",
         "Destroy",

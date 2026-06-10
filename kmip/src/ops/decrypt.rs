@@ -190,7 +190,9 @@ fn decrypt_classical(
     //   3. Neither → placeholder for unit-test path.
     let oaep = super::helpers::oaep_params_for(obj.cryptographic_parameters.as_ref());
     let aad = req.aad.as_deref().unwrap_or(&[]);
-    let plaintext = if let Some(key_bytes) = &obj.key_material {
+    let pkcs7_strip_ecb = mech == softhsmrustv3::constants::CKM_AES_ECB
+        && effective_cp.and_then(|c| c.padding_method) == Some(3);
+    let mut plaintext = if let Some(key_bytes) = &obj.key_material {
         softhsmrustv3::native::decrypt_with_key_bytes(
             key_bytes,
             mech,
@@ -211,6 +213,17 @@ fn decrypt_classical(
         input.extend_from_slice(&req.data);
         placeholder_bytes(&req.uid, &input, b"dec", input.len().max(16))
     };
+    // KMIP 3.0 §11 PKCS5 strip — mirror of the Encrypt-side pad
+    // (see `encrypt.rs::pkcs7_pad_ecb`). The last byte tells us how
+    // many pad bytes to drop; validate it's in [1, 16] for a real
+    // PKCS#7 stream, otherwise leave the buffer untouched.
+    if pkcs7_strip_ecb {
+        if let Some(&pad) = plaintext.last() {
+            if (1..=16).contains(&pad) && plaintext.len() >= pad as usize {
+                plaintext.truncate(plaintext.len() - pad as usize);
+            }
+        }
+    }
     Ok(DecryptResponse { uid: req.uid.clone(), data: plaintext })
 }
 

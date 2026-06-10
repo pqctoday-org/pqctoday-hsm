@@ -262,11 +262,28 @@ fn encrypt_classical(
     // no session was wired — that broke KAT comparisons.
     let oaep = super::helpers::oaep_params_for(obj.cryptographic_parameters.as_ref());
     let aad = req.aad.as_deref().unwrap_or(&[]);
+    // KMIP 3.0 §11 `Padding Method = PKCS5` (codepoint 3) on AES-ECB:
+    // the shim has only the plain `CKM_AES_ECB` path (which rejects
+    // non-16-byte-multiple inputs with `CKR_DATA_LEN_RANGE`). Honour
+    // padding at the KMIP layer by PKCS#7-padding before the shim
+    // call. CS-BC-M-8 / CS-BC-M-9 pin this.
+    let pkcs7_pad_ecb = mech == softhsmrustv3::constants::CKM_AES_ECB
+        && effective_cp.and_then(|c| c.padding_method) == Some(3);
+    let padded_data: Vec<u8>;
+    let data_for_shim: &[u8] = if pkcs7_pad_ecb {
+        let pad_len = 16 - (req.data.len() % 16);
+        padded_data = req.data.iter().copied()
+            .chain(std::iter::repeat(pad_len as u8).take(pad_len))
+            .collect();
+        &padded_data
+    } else {
+        &req.data
+    };
     let ciphertext = if let Some(key_bytes) = &obj.key_material {
         softhsmrustv3::native::encrypt_with_key_bytes(
             key_bytes,
             mech,
-            &req.data,
+            data_for_shim,
             req.iv.as_deref(),
             oaep.as_ref(),
             aad,
@@ -276,7 +293,7 @@ fn encrypt_classical(
         let handle = softhsmrustv3::native::find_by_cka_id(session, &obj.pkcs11_cka_id)
             .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Encrypt:find"))?
             .ok_or_else(|| KmipError::not_found(&req.uid))?;
-        softhsmrustv3::native::encrypt(session, handle, mech, &req.data, req.iv.as_deref())
+        softhsmrustv3::native::encrypt(session, handle, mech, data_for_shim, req.iv.as_deref())
             .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Encrypt"))?
     } else {
         // No key material AND no engine session — the object is a
