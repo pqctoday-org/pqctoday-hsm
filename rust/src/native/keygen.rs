@@ -485,21 +485,38 @@ pub fn register_rsa_private_key_pkcs8(
 }
 
 /// Register an existing RSA public key supplied as PKCS#1 (RSAPublicKey)
-/// or PKCS#8 (SubjectPublicKeyInfo) DER bytes. Used by KMIP Register
-/// when the client provides an RSA PublicKey. CS-AC-M-2 exercises this
-/// path against an Encrypt op.
+/// DER bytes — `SEQUENCE { modulus, publicExponent }`. Parses the DER
+/// to extract `n` and `e`, stored as `CKA_MODULUS` + `CKA_PUBLIC_EXPONENT`
+/// (the form `verify_rsa` reads via `get_rsa_public_components`).
+///
+/// Used by KMIP Register when the client provides an RSA PublicKey.
+/// CS-AC-M-2 exercises this path against a SignatureVerify op.
 pub fn register_rsa_public_key_der(
     _session: u32,
     der: &[u8],
     cka_id: &[u8],
     label: &str,
 ) -> Result<u32, CkRv> {
-    use crate::constants::{CKA_CLASS, CKA_ENCRYPT, CKA_KEY_TYPE, CKA_VALUE, CKA_VERIFY, CKK_RSA, CKO_PUBLIC_KEY};
+    use crate::constants::{
+        CKA_CLASS, CKA_ENCRYPT, CKA_KEY_TYPE, CKA_MODULUS, CKA_MODULUS_BITS,
+        CKA_PUBLIC_EXPONENT, CKA_VALUE, CKA_VERIFY, CKK_RSA, CKO_PUBLIC_KEY,
+    };
+    use rsa::pkcs1::DecodeRsaPublicKey;
+    use rsa::traits::PublicKeyParts;
+    let pk = rsa::RsaPublicKey::from_pkcs1_der(der).map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+    let n_bytes = pk.n().to_bytes_be();
+    let e_bytes = pk.e().to_bytes_be();
+    let bits = (n_bytes.len() as u32) * 8;
     let mut attrs = std::collections::HashMap::new();
     store_ulong(&mut attrs, CKA_CLASS, CKO_PUBLIC_KEY);
     store_ulong(&mut attrs, CKA_KEY_TYPE, CKK_RSA);
     store_bool(&mut attrs, CKA_VERIFY, true);
     store_bool(&mut attrs, CKA_ENCRYPT, true);
+    attrs.insert(CKA_MODULUS, n_bytes);
+    attrs.insert(CKA_PUBLIC_EXPONENT, e_bytes);
+    store_ulong(&mut attrs, CKA_MODULUS_BITS, bits);
+    // Keep the raw DER too — some KMIP paths (Get) want to round-trip
+    // the original Register material.
     attrs.insert(CKA_VALUE, der.to_vec());
     insert_id_and_label(&mut attrs, cka_id, label);
     compute_kcv(&mut attrs);

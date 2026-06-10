@@ -1,6 +1,6 @@
 # OASIS KMIP 3.0 Dispatcher Replay Report
 
-Generated: 2026-06-10 05:25:06 UTC
+Generated: 2026-06-10 05:28:25 UTC
 
 
 ## Aggregate
@@ -34,8 +34,8 @@ Of the 102 tests that exercise only implemented ops:
 | `AX-M-2-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload/SymmetricKey/KeyBlock: child count 5 != 4 |
 | `BL-M-12-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
 | `BL-M-13-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
-| `CS-AC-M-2-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
-| `CS-AC-M-3-30.xml` | FAIL | msg #3: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
+| `CS-AC-M-2-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload/ValidityIndicator: expected 'Valid' got 2 |
+| `CS-AC-M-3-30.xml` | FAIL | msg #4: response mismatch: ResponseMessage/BatchItem/ResponsePayload/ValidityIndicator: expected 'Invalid' got 1 |
 | `CS-AC-M-4-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
 | `CS-AC-M-5-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
 | `CS-AC-M-6-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |

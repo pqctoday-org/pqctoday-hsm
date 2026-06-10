@@ -1,5 +1,5 @@
 {
-  "generated_at": 1781069106,
+  "generated_at": 1781069305,
   "summary": {
     "pass": 82,
     "fail": 20,
@@ -319,7 +319,7 @@
     {
       "name": "CS-AC-M-2-30.xml",
       "status": "FAIL",
-      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload/ValidityIndicator: expected 'Valid' got 2",
       "ops_used": [
         "Destroy",
         "Register",
@@ -330,7 +330,7 @@
     {
       "name": "CS-AC-M-3-30.xml",
       "status": "FAIL",
-      "detail": "msg #3: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1",
+      "detail": "msg #4: response mismatch: ResponseMessage/BatchItem/ResponsePayload/ValidityIndicator: expected 'Invalid' got 1",
       "ops_used": [
         "Destroy",
         "Register",
