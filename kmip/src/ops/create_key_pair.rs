@@ -221,7 +221,14 @@ pub fn create_key_pair(
         supersedes: None,
             name: priv_x.name.clone(),
 
-            links: std::collections::HashMap::new(),
+            // KMIP §11 `Public Key Link` — UID of the matching
+            // public-key half on the private record (AKLC-O-1
+            // step #3 reads it back via GetAttributes).
+            links: {
+                let mut m = std::collections::HashMap::new();
+                m.insert("PublicKeyLink".to_string(), pub_uid.clone());
+                m
+            },
 
             custom_attributes: std::collections::HashMap::new(),
 
@@ -260,7 +267,13 @@ pub fn create_key_pair(
         supersedes: None,
             name: pub_x.name.clone(),
 
-            links: std::collections::HashMap::new(),
+            // KMIP §11 `Private Key Link` — UID of the matching
+            // private-key half on the public record.
+            links: {
+                let mut m = std::collections::HashMap::new();
+                m.insert("PrivateKeyLink".to_string(), priv_uid.clone());
+                m
+            },
 
             custom_attributes: std::collections::HashMap::new(),
 

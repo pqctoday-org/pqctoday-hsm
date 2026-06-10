@@ -1,6 +1,6 @@
 # OASIS KMIP 3.0 Dispatcher Replay Report
 
-Generated: 2026-06-10 03:54:44 UTC
+Generated: 2026-06-10 04:10:40 UTC
 
 
 ## Aggregate
@@ -8,8 +8,8 @@ Generated: 2026-06-10 03:54:44 UTC
 
 | Status | Count | % of total |
 |---|---|---|
-| **PASS** | 69 | 67.6% |
-| **FAIL** | 33 | 32.4% |
+| **PASS** | 71 | 69.6% |
+| **FAIL** | 31 | 30.4% |
 | ERROR | 0 | 0.0% |
 | SKIP_OP (op not implemented) | 0 | 0.0% |
 | SKIP_PARSE (XML malformed) | 0 | 0.0% |
@@ -18,9 +18,9 @@ Generated: 2026-06-10 03:54:44 UTC
 
 Of the 102 tests that exercise only implemented ops:
 
-  - **69 pass (68%)**
+  - **71 pass (70%)**
 
-  - 33 fail
+  - 31 fail
 
   - 0 errored
 
@@ -30,12 +30,11 @@ Of the 102 tests that exercise only implemented ops:
 
 | Test | Status | Detail |
 |---|---|---|
-| `AKLC-O-1-30.xml` | FAIL | msg #3: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: missing expected attribute 'PublicKeyLink' (§4.1.1 item 20  |
 | `AX-M-1-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage: child count 3 != 2 |
 | `AX-M-2-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload/SymmetricKey/KeyBlock: child count 5 != 4 |
 | `BL-M-12-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
 | `BL-M-13-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
-| `BL-M-14-30.xml` | FAIL | msg #5: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: missing expected attribute 'ProtectionStorageMask' (§4.1.1  |
+| `BL-M-14-30.xml` | FAIL | msg #5: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: missing expected attribute 'Attribute' (§4.1.1 item 20 perm |
 | `BL-M-5-30.xml` | FAIL | msg #2: response mismatch: ResponseMessage/BatchItem/ResponsePayload/OpaqueObject/OpaqueDataType: expected '0x80123456' got 2148676694 |
 | `CS-AC-M-1-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
 | `CS-AC-M-2-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
@@ -60,12 +59,12 @@ Of the 102 tests that exercise only implemented ops:
 | `SKFF-M-12-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
 | `SKFF-M-4-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
 | `SKFF-M-8-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
-| `SKLC-O-1-30.xml` | FAIL | msg #3: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: missing expected attribute 'ProtectionStorageMask' (§4.1.1  |
 | `TL-M-1-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/Query ResponsePayload: non-list child count 2 != 3 |
 | `TL-M-3-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 1 != 0 |
 | `AKLC-M-1-30.xml` | PASS |  |
 | `AKLC-M-2-30.xml` | PASS |  |
 | `AKLC-M-3-30.xml` | PASS |  |
+| `AKLC-O-1-30.xml` | PASS |  |
 | `BL-M-1-30.xml` | PASS |  |
 | `BL-M-10-30.xml` | PASS |  |
 | `BL-M-11-30.xml` | PASS |  |
@@ -131,4 +130,5 @@ Of the 102 tests that exercise only implemented ops:
 | `SKLC-M-1-30.xml` | PASS |  |
 | `SKLC-M-2-30.xml` | PASS |  |
 | `SKLC-M-3-30.xml` | PASS |  |
+| `SKLC-O-1-30.xml` | PASS |  |
 | `TL-M-2-30.xml` | PASS |  |

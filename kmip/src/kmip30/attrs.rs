@@ -275,6 +275,19 @@ pub enum Attribute {
     DeactivationReasonCode(u32),
     KeyFormatType(u32),
 
+    /// `Protection Storage Mask` (0x42015e) — Integer bit-flag mask
+    /// indicating where the server stores material (`Software=0x01`,
+    /// `Hardware=0x02`, `OnProcessor=0x04`, etc.). Defaulted to
+    /// `Software` on freshly-created managed objects per Baseline
+    /// expectations.
+    ProtectionStorageMask(u32),
+    /// `Public Key Link` (0x42019a) — UID reference to the public-key
+    /// half of a key pair. Emitted by AKLC-O-1's CreateKeyPair flow
+    /// on the private half so GetAttributes can return the link.
+    PublicKeyLink(String),
+    /// `Private Key Link` (0x420199) — UID reference to the private
+    /// key half (mirror of PublicKeyLink, emitted on the public half).
+    PrivateKeyLink(String),
     /// `Certificate Value` (0x42001e) — the DER bytes of the X.509
     /// certificate as supplied to Register / surfaced via Get.
     CertificateValue(Vec<u8>),

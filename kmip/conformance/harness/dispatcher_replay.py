@@ -153,12 +153,19 @@ class Bindings:
         )
 
     def harvest_from_response(self, expected: TtlvNode, actual: TtlvNode) -> None:
-        """Walk expected & actual in parallel; whenever expected has a
-        ``$NAME`` value, bind ``NAME`` to actual's corresponding value.
+        """Walk expected & actual; whenever expected has a ``$NAME``
+        value, bind ``NAME`` to actual's corresponding value.
 
         Skips TimeStamp and ServerCorrelationValue (always differ).
         Tolerant of structural mismatches — the comparator will flag
         those; this method's job is just to capture bindings.
+
+        Container traversal is positional EXCEPT inside an `Attributes`
+        Structure, where order is variable per §4.1.2 item 5. There we
+        match children by tag-name so a placeholder $X attached to a
+        specific attribute binds against THAT attribute's actual value
+        rather than a positionally-aligned but semantically unrelated
+        one.
         """
         if is_volatile_tag(expected.tag_name):
             return
@@ -168,9 +175,22 @@ class Bindings:
                     self.bind(expected.value, actual.value)
                 except ValueError:
                     pass  # mismatch — comparator will catch it
-        # Recurse pairwise as far as both trees go.
-        for ec, ac in zip(expected.children, actual.children):
-            self.harvest_from_response(ec, ac)
+        # Container traversal.
+        if _norm(expected.tag_name) == _norm("Attributes"):
+            # Tag-name-aware: pair each expected child to the FIRST
+            # actual child of the same tag name.
+            actual_by_name: dict[str, list[TtlvNode]] = {}
+            for c in actual.children:
+                actual_by_name.setdefault(_norm(c.tag_name), []).append(c)
+            for ec in expected.children:
+                candidates = actual_by_name.get(_norm(ec.tag_name), [])
+                if candidates:
+                    ac = candidates.pop(0)
+                    self.harvest_from_response(ec, ac)
+        else:
+            # Positional (default for spec-positional containers).
+            for ec, ac in zip(expected.children, actual.children):
+                self.harvest_from_response(ec, ac)
 
 
 # ── Response comparison ────────────────────────────────────────────────────

@@ -146,6 +146,10 @@ mod tags {
     pub const KeyCompressionType: u32     = 0x42_0041;
     pub const ProtectionStorageMask: u32  = 0x42_015e;
     pub const ProtectionStorageMasks: u32 = 0x42_015f;
+    /// KMIP 3.0 §11 — `Public Key Link` / `Private Key Link`: UID
+    /// references between the two halves of a key pair.
+    pub const PublicKeyLink: u32          = 0x42_019a;
+    pub const PrivateKeyLink: u32         = 0x42_0199;
     /// KMIP 3.0 §6.1.14 Deactivate request fields.
     pub const DeactivationReason: u32     = 0x42_01b8;
     pub const DeactivationReasonCode: u32 = 0x42_01b9;
@@ -2337,7 +2341,17 @@ fn encode_attribute_v3(a: &Attribute) -> TtlvFrame {
         Attribute::KeyValuePresent(b)          => TtlvFrame::new(Tag(tags::KeyValuePresent),          Value::Boolean(*b)),
         Attribute::QuantumSafe(b)              => TtlvFrame::new(Tag(tags::QuantumSafe),              Value::Boolean(*b)),
         Attribute::RotateAutomatic(b)          => TtlvFrame::new(Tag(tags::RotateAutomatic),          Value::Boolean(*b)),
-        Attribute::ShortUniqueIdentifier(s)    => TtlvFrame::new(Tag(tags::ShortUniqueIdentifier),    Value::TextString(s.clone())),
+        Attribute::ShortUniqueIdentifier(s)    => {
+            // KMIP §11 `Short Unique Identifier` is a ByteString on
+            // the wire — we carry it as a hex-encoded String in the
+            // typed Attribute variant for ergonomics; decode the hex
+            // before emitting bytes.
+            let bytes: Vec<u8> = (0..s.len())
+                .step_by(2)
+                .filter_map(|i| u8::from_str_radix(s.get(i..i+2)?, 16).ok())
+                .collect();
+            TtlvFrame::new(Tag(tags::ShortUniqueIdentifier), Value::ByteString(bytes))
+        }
         Attribute::AlternativeName(s)          => TtlvFrame::new(Tag(tags::AlternativeName),          Value::TextString(s.clone())),
         Attribute::Comment(s)                  => TtlvFrame::new(Tag(tags::Comment),                  Value::TextString(s.clone())),
         Attribute::Description(s)              => TtlvFrame::new(Tag(tags::Description),              Value::TextString(s.clone())),
@@ -2361,6 +2375,9 @@ fn encode_attribute_v3(a: &Attribute) -> TtlvFrame {
         Attribute::RotateName(s)               => TtlvFrame::new(Tag(tags::RotateName),               Value::TextString(s.clone())),
         Attribute::CertificateType(v)          => TtlvFrame::new(Tag(tags::CertificateType),          Value::Enumeration(*v)),
         Attribute::CertificateValue(bs)        => TtlvFrame::new(Tag(tags::CertificateValue),         Value::ByteString(bs.clone())),
+        Attribute::ProtectionStorageMask(m)    => TtlvFrame::new(Tag(tags::ProtectionStorageMask),    Value::Integer(*m as i32)),
+        Attribute::PublicKeyLink(s)            => TtlvFrame::new(Tag(tags::PublicKeyLink),            Value::TextString(s.clone())),
+        Attribute::PrivateKeyLink(s)           => TtlvFrame::new(Tag(tags::PrivateKeyLink),           Value::TextString(s.clone())),
         Attribute::CertificateSubjectCN(s)     => TtlvFrame::new(Tag(tags::CertificateSubjectCN),     Value::TextString(s.clone())),
         Attribute::DigitalSignatureAlgorithm(v) => TtlvFrame::new(Tag(tags::DigitalSignatureAlgorithm), Value::Enumeration(*v)),
         Attribute::NistKeyType(v)              => TtlvFrame::new(Tag(tags::NistKeyType),              Value::Enumeration(*v)),

@@ -130,7 +130,17 @@ fn attributes_from_record(r: &ObjectRecord) -> Vec<Attribute> {
     if let Some(b) = r.key_value_present { out.push(Attribute::KeyValuePresent(b)); }
     if let Some(b) = r.quantum_safe { out.push(Attribute::QuantumSafe(b)); }
     if let Some(b) = r.rotate_automatic { out.push(Attribute::RotateAutomatic(b)); }
-    if let Some(s) = &r.short_unique_identifier { out.push(Attribute::ShortUniqueIdentifier(s.clone())); }
+    // KMIP §11 `Short Unique Identifier` — server-derived: a short
+    // ByteString hash of the UID; honour the stored value when set,
+    // otherwise generate a deterministic SHA-256 prefix.
+    {
+        use sha2::{Digest as _, Sha256};
+        let sid = r.short_unique_identifier.clone().unwrap_or_else(|| {
+            let hash = Sha256::digest(r.uid.as_bytes());
+            hash[..8].iter().map(|b| format!("{b:02x}")).collect::<String>()
+        });
+        out.push(Attribute::ShortUniqueIdentifier(sid));
+    }
     if let Some(s) = &r.alternative_name { out.push(Attribute::AlternativeName(s.clone())); }
     if let Some(s) = &r.comment { out.push(Attribute::Comment(s.clone())); }
     if let Some(s) = &r.description { out.push(Attribute::Description(s.clone())); }
@@ -163,6 +173,19 @@ fn attributes_from_record(r: &ObjectRecord) -> Vec<Attribute> {
     // pins 3600 seconds for newly-created keys (BL-M-14 / AKLC-O-1 /
     // SKLC-O-1). Honour an explicit record value when set.
     out.push(Attribute::LeaseTime(r.lease_time.unwrap_or(3600)));
+    // KMIP §11 `Protection Storage Mask` — bit-flag Integer; the
+    // Baseline corpus pins `Software` (0x01) on every test-created
+    // managed object. BL-M-14 / SKLC-O-1 step #3 / AKLC-O-1 step #3.
+    out.push(Attribute::ProtectionStorageMask(0x01));
+    // KMIP §11 `Public Key Link` / `Private Key Link` — UID refs
+    // between key-pair halves. Surfaced when the record's `links`
+    // map has the relevant entry (populated by `create_key_pair`).
+    if let Some(uid) = r.links.get("PublicKeyLink") {
+        out.push(Attribute::PublicKeyLink(uid.clone()));
+    }
+    if let Some(uid) = r.links.get("PrivateKeyLink") {
+        out.push(Attribute::PrivateKeyLink(uid.clone()));
+    }
     if let Some(n) = r.protection_period { out.push(Attribute::ProtectionPeriod(n)); }
     if let Some(n) = r.rotate_interval { out.push(Attribute::RotateInterval(n)); }
     if let Some(n) = r.rotate_offset { out.push(Attribute::RotateOffset(n)); }
@@ -256,6 +279,9 @@ pub(crate) fn canonical_attribute_name(attr: &Attribute) -> &'static str {
         Attribute::CertificateType(_)        => "CertificateType",
         Attribute::CertificateValue(_)       => "CertificateValue",
         Attribute::CertificateSubjectCN(_)   => "CertificateSubjectCN",
+        Attribute::ProtectionStorageMask(_)  => "ProtectionStorageMask",
+        Attribute::PublicKeyLink(_)          => "PublicKeyLink",
+        Attribute::PrivateKeyLink(_)         => "PrivateKeyLink",
         Attribute::DigitalSignatureAlgorithm(_) => "DigitalSignatureAlgorithm",
         Attribute::NistKeyType(_)            => "NistKeyType",
         Attribute::ProtectionLevel(_)        => "ProtectionLevel",
