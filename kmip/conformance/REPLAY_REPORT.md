@@ -1,6 +1,6 @@
 # OASIS KMIP 3.0 Dispatcher Replay Report
 
-Generated: 2026-06-10 03:16:21 UTC
+Generated: 2026-06-10 03:36:02 UTC
 
 
 ## Aggregate
@@ -8,8 +8,8 @@ Generated: 2026-06-10 03:16:21 UTC
 
 | Status | Count | % of total |
 |---|---|---|
-| **PASS** | 62 | 60.8% |
-| **FAIL** | 40 | 39.2% |
+| **PASS** | 63 | 61.8% |
+| **FAIL** | 39 | 38.2% |
 | ERROR | 0 | 0.0% |
 | SKIP_OP (op not implemented) | 0 | 0.0% |
 | SKIP_PARSE (XML malformed) | 0 | 0.0% |
@@ -18,9 +18,9 @@ Generated: 2026-06-10 03:16:21 UTC
 
 Of the 102 tests that exercise only implemented ops:
 
-  - **62 pass (61%)**
+  - **63 pass (62%)**
 
-  - 40 fail
+  - 39 fail
 
   - 0 errored
 
@@ -37,7 +37,6 @@ Of the 102 tests that exercise only implemented ops:
 | `BL-M-13-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
 | `BL-M-14-30.xml` | FAIL | msg #5: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: missing expected attribute 'ProtectionStorageMask' (§4.1.1  |
 | `BL-M-5-30.xml` | FAIL | msg #2: response mismatch: ResponseMessage/BatchItem/ResponsePayload/OpaqueObject/OpaqueDataType: expected '0x80123456' got 2148676694 |
-| `BL-M-8-30.xml` | FAIL | msg #2: response mismatch: ResponseMessage/BatchItem/ResultReason: expected 'NonUniqueNameAttribute' got 7 |
 | `CS-AC-M-1-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
 | `CS-AC-M-2-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
 | `CS-AC-M-3-30.xml` | FAIL | msg #2: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
@@ -88,6 +87,7 @@ Of the 102 tests that exercise only implemented ops:
 | `BL-M-4-30.xml` | PASS |  |
 | `BL-M-6-30.xml` | PASS |  |
 | `BL-M-7-30.xml` | PASS |  |
+| `BL-M-8-30.xml` | PASS |  |
 | `BL-M-9-30.xml` | PASS |  |
 | `CS-AC-M-7-30.xml` | PASS |  |
 | `CS-AC-M-OAEP-1-30.xml` | PASS |  |

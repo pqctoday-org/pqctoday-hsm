@@ -55,13 +55,15 @@ pub fn add_attribute(
     policy_gate(deps, &obj, "AddAttribute", correlation_id)?;
 
     // KMIP 3.0 §6.1.48 + §11 — `Name` MUST be unique across the
-    // server's managed objects; a duplicate yields
-    // `NonUniqueNameAttribute` (0x35) NOT the generic `InvalidField`.
-    // BL-M-8 msg #2 pins this code.
+    // server's managed objects; a duplicate (on ANY UID, including
+    // the target itself) yields `NonUniqueNameAttribute` (0x35),
+    // NOT the generic `InvalidField`. BL-M-8 msg #2 pins this
+    // code: the test re-adds the same Name to the same object so
+    // the comparator can verify the uniqueness rule.
     if let Attribute::Name(n) = &req.new_attribute {
         let dup = deps
             .store
-            .find(&|r| r.uid != req.uid && r.name.as_deref() == Some(n.as_str()))
+            .find(&|r| r.name.as_deref() == Some(n.as_str()))
             .unwrap_or_default();
         if !dup.is_empty() {
             return Err(fail_err(

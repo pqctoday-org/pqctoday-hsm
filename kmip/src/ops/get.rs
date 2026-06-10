@@ -41,11 +41,15 @@ pub fn get(deps: &Deps, req: GetRequest, correlation_id: &str) -> Result<GetResp
     // (key material is needed to verify legacy signatures); only Destroyed
     // is blocked.
     if matches!(obj.state, State::Destroyed | State::DestroyedCompromised) {
+        // KMIP 3.0 §11 — `Object Destroyed` (0x36) is the spec-defined
+        // reason for accessing a Destroyed-state object via Get.
+        // BL-M-8 step #5 pins this code (vs the generic 0x0d
+        // `ObjectArchived` which is for the Archive op family).
         return Err(fail_err(
             deps,
             correlation_id,
             "Get",
-            KmipError::object_archived(&req.uid),
+            KmipError::object_destroyed(&req.uid),
         ));
     }
 
@@ -218,11 +222,11 @@ mod tests {
     }
 
     #[test]
-    fn get_destroyed_returns_object_archived() {
+    fn get_destroyed_returns_object_destroyed() {
         let d = deps_with();
         put(&d, "u", ObjectType::SymmetricKey, State::Destroyed);
         let err = get(&d, GetRequest { uid: "u".into() }, "c").unwrap_err();
-        assert_eq!(err.result_reason(), crate::error::ResultReason::ObjectArchived);
+        assert_eq!(err.result_reason(), crate::error::ResultReason::ObjectDestroyed);
     }
 
     #[test]

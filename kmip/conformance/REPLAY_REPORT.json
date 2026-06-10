@@ -1,8 +1,8 @@
 {
-  "generated_at": 1781061381,
+  "generated_at": 1781062562,
   "summary": {
-    "pass": 62,
-    "fail": 40,
+    "pass": 63,
+    "fail": 39,
     "error": 0,
     "skip_op": 0,
     "skip_parse": 0,
@@ -283,8 +283,8 @@
     },
     {
       "name": "BL-M-8-30.xml",
-      "status": "FAIL",
-      "detail": "msg #2: response mismatch: ResponseMessage/BatchItem/ResultReason: expected 'NonUniqueNameAttribute' got 7",
+      "status": "PASS",
+      "detail": "",
       "ops_used": [
         "AddAttribute",
         "Destroy",

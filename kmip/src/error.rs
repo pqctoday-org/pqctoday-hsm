@@ -55,6 +55,13 @@ pub enum ResultReason {
     /// item missing inside a request payload. BL-M-4 step #5
     /// (Get against a UID the server never minted) pins this code.
     ObjectNotFound         = 0x0000_0037,
+    /// `Object Destroyed` — KMIP 3.0 §11. The referenced object has
+    /// transitioned to `Destroyed` (or `DestroyedCompromised`); the
+    /// metadata still exists for audit but the cryptographic
+    /// material is gone. Distinct from `ObjectArchived` (0x0d),
+    /// which signals a separately-managed archival store. BL-M-8
+    /// step #5 (Get against a Destroyed UID) pins this code.
+    ObjectDestroyed        = 0x0000_0036,
     GeneralFailure        = 0x0000_0100,
 }
 
@@ -126,6 +133,12 @@ impl KmipError {
         Self::failed(
             ResultReason::ObjectArchived,
             format!("UID {uid:?} not in usable lifecycle state"),
+        )
+    }
+    pub fn object_destroyed(uid: &str) -> Self {
+        Self::failed(
+            ResultReason::ObjectDestroyed,
+            format!("UID {uid:?} has been destroyed"),
         )
     }
     pub fn wrong_key_lifecycle_state(uid: &str, state: &str) -> Self {
