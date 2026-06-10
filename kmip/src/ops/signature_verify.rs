@@ -67,6 +67,28 @@ pub fn signature_verify(
         }
     }
 
+    // KMIP 3.0 §3.4 — `Process Start Date` / `Protect Stop Date`
+    // window gating, mirror of `sign.rs` / `encrypt.rs` / `decrypt.rs`.
+    // CS-AC-M-8 step #3 pins this with ProcessStartDate=future.
+    if let Some(t) = obj.process_start_date {
+        if started < t {
+            return Err(fail_err(deps, correlation_id, "SignatureVerify",
+                KmipError::failed(
+                    crate::error::ResultReason::WrongKeyLifecycleState,
+                    "SignatureVerify: now < ProcessStartDate".to_string(),
+                )));
+        }
+    }
+    if let Some(t) = obj.protect_stop_date {
+        if started > t {
+            return Err(fail_err(deps, correlation_id, "SignatureVerify",
+                KmipError::failed(
+                    crate::error::ResultReason::WrongKeyLifecycleState,
+                    "SignatureVerify: now > ProtectStopDate".to_string(),
+                )));
+        }
+    }
+
     // Plane-1 policy gate.
     let empty: HashMap<String, String> = HashMap::new();
     let algo = canonical_name(obj.algorithm);

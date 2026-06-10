@@ -150,6 +150,11 @@ mod tags {
     /// references between the two halves of a key pair.
     pub const PublicKeyLink: u32          = 0x42_019a;
     pub const PrivateKeyLink: u32         = 0x42_0199;
+    /// KMIP 3.0 §11 — `Next Link` / `Previous Link`: forward/backward
+    /// UID references that thread a key-rotation chain (AX-M-1 step #1
+    /// stitches two freshly-created keys into a linked pair).
+    pub const NextLink: u32               = 0x42_0194;
+    pub const PreviousLink: u32           = 0x42_0198;
     /// KMIP 3.0 §6.1.14 Deactivate request fields.
     pub const DeactivationReason: u32     = 0x42_01b8;
     pub const DeactivationReasonCode: u32 = 0x42_01b9;
@@ -1213,6 +1218,29 @@ fn decode_attribute_v3(frame: &TtlvFrame) -> Result<Option<Attribute>, WireError
                 // ObjectClass on the wire is Enumeration (1=User, 2=System);
                 // the typed Attribute carries the human-readable label.
                 Attribute::ObjectClass(match v { 2 => "System".into(), _ => "User".into() })
+            } else { return Ok(None); }
+        }
+        // KMIP 3.0 §11 — Link attributes (UID references). All three
+        // wire as TextString on the response side; the XML uses
+        // `type="Reference"` which the oasis_codec maps to TextString.
+        tags::NextLink => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::NextLink(s.clone())
+            } else { return Ok(None); }
+        }
+        tags::PreviousLink => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::PreviousLink(s.clone())
+            } else { return Ok(None); }
+        }
+        tags::PublicKeyLink => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::PublicKeyLink(s.clone())
+            } else { return Ok(None); }
+        }
+        tags::PrivateKeyLink => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::PrivateKeyLink(s.clone())
             } else { return Ok(None); }
         }
         // KMIP 3.0 §11 Certificate attributes — needed so that
@@ -2449,6 +2477,8 @@ fn encode_attribute_v3(a: &Attribute) -> TtlvFrame {
         Attribute::ProtectionStorageMask(m)    => TtlvFrame::new(Tag(tags::ProtectionStorageMask),    Value::Integer(*m as i32)),
         Attribute::PublicKeyLink(s)            => TtlvFrame::new(Tag(tags::PublicKeyLink),            Value::TextString(s.clone())),
         Attribute::PrivateKeyLink(s)           => TtlvFrame::new(Tag(tags::PrivateKeyLink),           Value::TextString(s.clone())),
+        Attribute::NextLink(s)                 => TtlvFrame::new(Tag(tags::NextLink),                 Value::TextString(s.clone())),
+        Attribute::PreviousLink(s)             => TtlvFrame::new(Tag(tags::PreviousLink),             Value::TextString(s.clone())),
         Attribute::CertificateSubjectCN(s)     => TtlvFrame::new(Tag(tags::CertificateSubjectCN),     Value::TextString(s.clone())),
         Attribute::DigitalSignatureAlgorithm(v) => TtlvFrame::new(Tag(tags::DigitalSignatureAlgorithm), Value::Enumeration(*v)),
         Attribute::NistKeyType(v)              => TtlvFrame::new(Tag(tags::NistKeyType),              Value::Enumeration(*v)),
@@ -2577,6 +2607,10 @@ fn tag_code_from_name(name: &str) -> Option<u32> {
         "UsageLimits"            => tags::UsageLimits,
         "ProtectionStorageMask"  => tags::ProtectionStorageMask,
         "ProtectionStorageMasks" => tags::ProtectionStorageMasks,
+        "NextLink"               => tags::NextLink,
+        "PreviousLink"           => tags::PreviousLink,
+        "PublicKeyLink"          => tags::PublicKeyLink,
+        "PrivateKeyLink"         => tags::PrivateKeyLink,
         "Digest"                 => tags::Digest,
         "RandomNumberGenerator"  => tags::RandomNumberGenerator,
         "CryptographicParameters" => tags::CryptographicParameters,
@@ -2648,6 +2682,10 @@ fn tag_name_from_code(code: u32) -> &'static str {
         tags::RotateGeneration       => "Rotate Generation",
         tags::RotateName             => "Rotate Name",
         tags::UsageLimits            => "Usage Limits",
+        tags::NextLink               => "Next Link",
+        tags::PreviousLink           => "Previous Link",
+        tags::PublicKeyLink          => "Public Key Link",
+        tags::PrivateKeyLink         => "Private Key Link",
         _ => "Unknown",
     }
 }

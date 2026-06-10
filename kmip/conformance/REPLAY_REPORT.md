@@ -1,6 +1,6 @@
 # OASIS KMIP 3.0 Dispatcher Replay Report
 
-Generated: 2026-06-10 11:58:05 UTC
+Generated: 2026-06-10 12:16:02 UTC
 
 
 ## Aggregate
@@ -8,8 +8,8 @@ Generated: 2026-06-10 11:58:05 UTC
 
 | Status | Count | % of total |
 |---|---|---|
-| **PASS** | 82 | 80.4% |
-| **FAIL** | 15 | 14.7% |
+| **PASS** | 84 | 82.4% |
+| **FAIL** | 13 | 12.7% |
 | ERROR | 0 | 0.0% |
 | SKIP_OP (op not implemented) | 0 | 0.0% |
 | SKIP_DEPRECATED (DES / 3DES / DSA out of scope) | 5 | 4.9% |
@@ -19,9 +19,9 @@ Generated: 2026-06-10 11:58:05 UTC
 
 Of the 97 tests that exercise only implemented + non-deprecated ops:
 
-  - **82 pass (85%)**
+  - **84 pass (87%)**
 
-  - 15 fail
+  - 13 fail
 
   - 0 errored
 
@@ -46,14 +46,12 @@ Of the 97 tests that exercise only implemented + non-deprecated ops:
 
 | Test | Status | Detail |
 |---|---|---|
-| `AX-M-1-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage: child count 3 != 2 |
 | `AX-M-2-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload/SymmetricKey/KeyBlock: child count 5 != 4 |
 | `CS-AC-M-2-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload/ValidityIndicator: expected 'Valid' got 2 |
 | `CS-AC-M-3-30.xml` | FAIL | msg #4: response mismatch: ResponseMessage/BatchItem/ResponsePayload/ValidityIndicator: expected 'Invalid' got 1 |
 | `CS-AC-M-4-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
 | `CS-AC-M-5-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
 | `CS-AC-M-6-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
-| `CS-AC-M-8-30.xml` | FAIL | msg #2: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'OperationFailed' got 0 |
 | `CS-BC-M-GCM-2-30.xml` | FAIL | msg #21: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
 | `CS-BC-M-GCM-3-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
 | `CS-RNG-O-2-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResponsePayload/DataLength: expected '16' got 32 |
@@ -65,6 +63,7 @@ Of the 97 tests that exercise only implemented + non-deprecated ops:
 | `AKLC-M-2-30.xml` | PASS |  |
 | `AKLC-M-3-30.xml` | PASS |  |
 | `AKLC-O-1-30.xml` | PASS |  |
+| `AX-M-1-30.xml` | PASS |  |
 | `BL-M-1-30.xml` | PASS |  |
 | `BL-M-10-30.xml` | PASS |  |
 | `BL-M-11-30.xml` | PASS |  |
@@ -86,6 +85,7 @@ Of the 97 tests that exercise only implemented + non-deprecated ops:
 | `BL-M-9-30.xml` | PASS |  |
 | `CS-AC-M-1-30.xml` | PASS |  |
 | `CS-AC-M-7-30.xml` | PASS |  |
+| `CS-AC-M-8-30.xml` | PASS |  |
 | `CS-AC-M-OAEP-1-30.xml` | PASS |  |
 | `CS-AC-M-OAEP-10-30.xml` | PASS |  |
 | `CS-AC-M-OAEP-2-30.xml` | PASS |  |

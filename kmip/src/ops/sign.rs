@@ -63,6 +63,31 @@ pub fn sign(deps: &Deps, req: SignRequest, correlation_id: &str) -> Result<SignR
         ));
     }
 
+    // KMIP 3.0 §3.4 — `Process Start Date` / `Protect Stop Date`
+    // define the time window during which Sign MAY be performed even
+    // when the object is Active. CS-AC-M-8 pins this with
+    // ProcessStartDate=$NOW+3600 (future) and ProtectStopDate=$NOW-3600
+    // (past), expecting Sign to fail with WrongKeyLifecycleState.
+    // Mirror of the gate in `encrypt.rs` / `decrypt.rs`.
+    if let Some(t) = obj.process_start_date {
+        if started < t {
+            return Err(fail_err(deps, correlation_id, "Sign",
+                KmipError::failed(
+                    ResultReason::WrongKeyLifecycleState,
+                    "Sign: now < ProcessStartDate".to_string(),
+                )));
+        }
+    }
+    if let Some(t) = obj.protect_stop_date {
+        if started > t {
+            return Err(fail_err(deps, correlation_id, "Sign",
+                KmipError::failed(
+                    ResultReason::WrongKeyLifecycleState,
+                    "Sign: now > ProtectStopDate".to_string(),
+                )));
+        }
+    }
+
     // ── Plane 1: policy gate ────────────────────────────────────────────
     let empty: HashMap<String, String> = HashMap::new();
     let stored_algo = canonical_name(obj.algorithm);
