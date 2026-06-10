@@ -1,6 +1,6 @@
 # OASIS KMIP 3.0 Dispatcher Replay Report
 
-Generated: 2026-06-10 04:30:55 UTC
+Generated: 2026-06-10 04:39:47 UTC
 
 
 ## Aggregate
@@ -8,8 +8,8 @@ Generated: 2026-06-10 04:30:55 UTC
 
 | Status | Count | % of total |
 |---|---|---|
-| **PASS** | 76 | 74.5% |
-| **FAIL** | 26 | 25.5% |
+| **PASS** | 77 | 75.5% |
+| **FAIL** | 25 | 24.5% |
 | ERROR | 0 | 0.0% |
 | SKIP_OP (op not implemented) | 0 | 0.0% |
 | SKIP_PARSE (XML malformed) | 0 | 0.0% |
@@ -18,9 +18,9 @@ Generated: 2026-06-10 04:30:55 UTC
 
 Of the 102 tests that exercise only implemented ops:
 
-  - **76 pass (75%)**
+  - **77 pass (75%)**
 
-  - 26 fail
+  - 25 fail
 
   - 0 errored
 
@@ -34,7 +34,6 @@ Of the 102 tests that exercise only implemented ops:
 | `AX-M-2-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload/SymmetricKey/KeyBlock: child count 5 != 4 |
 | `BL-M-12-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
 | `BL-M-13-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
-| `BL-M-5-30.xml` | FAIL | msg #2: response mismatch: ResponseMessage/BatchItem/ResponsePayload/OpaqueObject/OpaqueDataType: expected '0x80123456' got 2148676694 |
 | `CS-AC-M-1-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
 | `CS-AC-M-2-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
 | `CS-AC-M-3-30.xml` | FAIL | msg #2: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
@@ -74,6 +73,7 @@ Of the 102 tests that exercise only implemented ops:
 | `BL-M-21-30.xml` | PASS |  |
 | `BL-M-3-30.xml` | PASS |  |
 | `BL-M-4-30.xml` | PASS |  |
+| `BL-M-5-30.xml` | PASS |  |
 | `BL-M-6-30.xml` | PASS |  |
 | `BL-M-7-30.xml` | PASS |  |
 | `BL-M-8-30.xml` | PASS |  |

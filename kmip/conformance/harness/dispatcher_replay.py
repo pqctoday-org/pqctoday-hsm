@@ -669,6 +669,13 @@ def _values_equal(
         # Expected is the human-readable name (e.g. "Query"); actual is the
         # 32-bit codepoint. Look up the codepoint via the tag table.
         if isinstance(expected, str) and isinstance(actual, int):
+            # Vendor-extension codepoints come through as a hex literal
+            # (e.g. `0x80123456`); compare directly to the decoded int.
+            try:
+                if int(expected, 0) == actual:
+                    return True
+            except (ValueError, TypeError):
+                pass
             # AttributeReference is a special case — expected is a tag name.
             from conformance.harness.oasis_codec import table
             tag_norm = _norm(expected)

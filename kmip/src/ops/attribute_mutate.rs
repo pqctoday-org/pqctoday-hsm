@@ -76,11 +76,14 @@ pub fn add_attribute(
     }
 
     // Per §6.1.2: "Existing attribute values SHALL NOT be changed by this
-    // operation". Reject if a value is already present for this attribute.
+    // operation". Reject if a value is already present for this
+    // single-valued attribute. KMIP §11 ResultReason for this scenario
+    // is `AttributeSingleValued` (0x23), NOT the generic `InvalidField`.
+    // BL-M-5 step #4 pins this for a duplicate `Description` add.
     if attribute_present(&obj, &req.new_attribute) {
         return Err(fail_err(deps, correlation_id, "AddAttribute",
             KmipError::failed(
-                ResultReason::InvalidField,
+                ResultReason::AttributeSingleValued,
                 format!("attribute {:?} already present on {}", attribute_name(&req.new_attribute), req.uid),
             )));
     }
@@ -409,9 +412,32 @@ fn attribute_present(obj: &ObjectRecord, a: &Attribute) -> bool {
         Attribute::UniqueIdentifier(_)       => true,
         Attribute::Custom { name, .. }       => obj.custom_attributes.contains_key(name),
         // Baseline Server attributes — presence depends on the typed
-        // field actually being populated. v0.1 treats Add/Modify/Delete
-        // of these as "present if any value is set on the record"; the
-        // wave-2 attribute-mutation work doesn't need finer granularity.
+        // field actually being populated on the record. AddAttribute
+        // MUST succeed when none of these is yet set (BL-M-5 step #3
+        // pins `AddAttribute Description` on a fresh OpaqueObject).
+        Attribute::Description(_)            => obj.description.is_some(),
+        Attribute::Comment(_)                => obj.comment.is_some(),
+        Attribute::ContactInformation(_)     => obj.contact_information.is_some(),
+        Attribute::AlternativeName(_)        => obj.alternative_name.is_some(),
+        Attribute::ObjectClass(_)            => obj.object_class.is_some(),
+        Attribute::KeyValueLocation(_)       => obj.key_value_location.is_some(),
+        Attribute::ActivationDate(_)         => obj.activation_date.is_some(),
+        Attribute::DeactivationDate(_)       => obj.deactivation_date.is_some(),
+        Attribute::DestroyDate(_)            => obj.destroy_date.is_some(),
+        Attribute::CompromiseDate(_)         => obj.compromise_date.is_some(),
+        Attribute::CompromiseOccurrenceDate(_) => obj.compromise_occurrence_date.is_some(),
+        Attribute::ProcessStartDate(_)       => obj.process_start_date.is_some(),
+        Attribute::ProtectStopDate(_)        => obj.protect_stop_date.is_some(),
+        Attribute::RotateDate(_)             => obj.rotate_date.is_some(),
+        Attribute::Sensitive(_)              => obj.sensitive.is_some(),
+        Attribute::Extractable(_)            => obj.extractable.is_some(),
+        Attribute::Fresh(_)                  => obj.fresh.is_some(),
+        Attribute::QuantumSafe(_)            => obj.quantum_safe.is_some(),
+        Attribute::LeaseTime(_)              => obj.lease_time.is_some(),
+        Attribute::RotateName(_)             => obj.rotate_name.is_some(),
+        // Conservative default: claim present for attrs we don't yet
+        // route into a typed field. Tightens up over time as more
+        // tests exercise them.
         _ => true,
     }
 }
@@ -559,18 +585,20 @@ mod tests {
     }
 
     #[test]
-    fn add_existing_name_fails_invalid_field() {
+    fn add_existing_name_fails_single_valued() {
         let d = deps_with();
         put(&d, "u");
         // First add succeeds.
         add_attribute(&d, AddAttributeRequest {
             uid: "u".into(), new_attribute: Attribute::Name("x".into()),
         }, "c").unwrap();
-        // Second add on same attribute must fail per §6.1.2.
+        // Second add on same attribute must fail per §6.1.2 with
+        // `AttributeSingleValued` (v0.1 carries only one Name per
+        // record; multi-valued Name support would relax this).
         let err = add_attribute(&d, AddAttributeRequest {
             uid: "u".into(), new_attribute: Attribute::Name("y".into()),
         }, "c").unwrap_err();
-        assert_eq!(err.result_reason(), ResultReason::InvalidField);
+        assert_eq!(err.result_reason(), ResultReason::AttributeSingleValued);
     }
 
     #[test]
@@ -581,7 +609,9 @@ mod tests {
             uid: "u".into(),
             new_attribute: Attribute::ObjectType(ObjectType::SymmetricKey),
         }, "c").unwrap_err();
-        assert_eq!(err.result_reason(), ResultReason::InvalidField);
+        // §6.1.2 — Add against an always-present (single-valued)
+        // attribute fails the presence check first → `AttributeSingleValued`.
+        assert_eq!(err.result_reason(), ResultReason::AttributeSingleValued);
     }
 
     #[test]
@@ -644,7 +674,11 @@ mod tests {
             pkcs11_cka_id: vec![],
             pkcs11_slot: 0,
             initial_date: OffsetDateTime::UNIX_EPOCH,
-            activation_date: None,
+            // KMIP §6.1.38 requires the attribute to ALREADY exist on
+            // the object — seed an initial ActivationDate the modify
+            // can then change. (SetAttribute is the right op when the
+            // attribute is absent.)
+            activation_date: Some(OffsetDateTime::UNIX_EPOCH),
             supersedes: None,
             name: None,
             links: HashMap::new(),

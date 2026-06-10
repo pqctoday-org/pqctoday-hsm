@@ -1166,6 +1166,37 @@ fn decode_attribute_v3(frame: &TtlvFrame) -> Result<Option<Attribute>, WireError
             }
             Attribute::Custom { name, value }
         }
+        // KMIP 3.0 §11 string-attribute decode arms — needed so that
+        // AddAttribute / ModifyAttribute requests carrying these
+        // attribute names round-trip through the attribute envelope.
+        // BL-M-5 step #3 (`AddAttribute Description`) pins Description.
+        tags::Description => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::Description(s.clone())
+            } else { return Ok(None); }
+        }
+        tags::Comment => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::Comment(s.clone())
+            } else { return Ok(None); }
+        }
+        tags::ContactInformation => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::ContactInformation(s.clone())
+            } else { return Ok(None); }
+        }
+        tags::AlternativeName => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::AlternativeName(s.clone())
+            } else { return Ok(None); }
+        }
+        tags::ObjectClass => {
+            if let Value::Enumeration(v) = frame.value {
+                // ObjectClass on the wire is Enumeration (1=User, 2=System);
+                // the typed Attribute carries the human-readable label.
+                Attribute::ObjectClass(match v { 2 => "System".into(), _ => "User".into() })
+            } else { return Ok(None); }
+        }
         // KMIP 3.0 §11 Certificate attributes — needed so that
         // ModifyAttribute(<CertificateLength …>) decodes to a real
         // Attribute variant (and the read-only gate can reject it).

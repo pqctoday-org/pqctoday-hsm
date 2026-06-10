@@ -62,6 +62,11 @@ pub enum ResultReason {
     /// which signals a separately-managed archival store. BL-M-8
     /// step #5 (Get against a Destroyed UID) pins this code.
     ObjectDestroyed        = 0x0000_0036,
+    /// `Attribute Single Valued` — KMIP 3.0 §11. AddAttribute / Set
+    /// against a single-valued attribute that already has a value
+    /// (vs `NonUniqueNameAttribute` which is name-uniqueness scope).
+    /// BL-M-5 step #4 pins this for a duplicate Description add.
+    AttributeSingleValued  = 0x0000_0023,
     GeneralFailure        = 0x0000_0100,
 }
 
