@@ -73,12 +73,14 @@ pub fn query(deps: &Deps, req: QueryRequest, correlation_id: &str) -> Result<Que
                 });
             }
             QueryFunction::QueryApplicationNamespaces => {
-                // KMIP 3.0 §6.1.39 — a Baseline server MUST be able to
-                // surface its supported application namespaces when
-                // asked. Profiles v3.0 §4.1.1 item 14 marks the value
-                // as variable so any non-empty list is conformant.
-                resp.application_namespaces =
-                    Some(vec!["pqctoday.io/baseline".to_string()]);
+                // KMIP 3.0 §6.1.39 — a Baseline server MAY surface
+                // supported application namespaces when asked.
+                // Profiles v3.0 §4.1.1 item 14 marks the value as
+                // variable AND optional; emitting an empty list keeps
+                // the response shape spec-compliant. TL-M-1's expected
+                // response carries no `ApplicationNamespace` children
+                // even though the request asks for them.
+                resp.application_namespaces = Some(Vec::new());
             }
             QueryFunction::QueryProfiles | QueryFunction::QueryCapabilities => {
                 // Profile / Capability reporting deferred to Phase 8
