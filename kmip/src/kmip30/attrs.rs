@@ -57,11 +57,21 @@ bitflags::bitflags! {
 /// op handler needs them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ObjectType {
-    Certificate    = 0x01,
-    SymmetricKey   = 0x02,
-    PublicKey      = 0x03,
-    PrivateKey     = 0x04,
-    SecretData     = 0x07,
+    Certificate              = 0x01,
+    SymmetricKey             = 0x02,
+    PublicKey                = 0x03,
+    PrivateKey               = 0x04,
+    SplitKey                 = 0x05,
+    SecretData               = 0x07,
+    OpaqueObject             = 0x08,
+    PgpKey                   = 0x09,
+    CertificateRequest       = 0x0a,
+    User                     = 0x0b,
+    Group                    = 0x0c,
+    PasswordCredential       = 0x0d,
+    DeviceCredential         = 0x0e,
+    OneTimePasswordCredential = 0x0f,
+    HashedPasswordCredential = 0x10,
 }
 
 impl ObjectType {
@@ -75,7 +85,17 @@ impl ObjectType {
             0x02 => Some(Self::SymmetricKey),
             0x03 => Some(Self::PublicKey),
             0x04 => Some(Self::PrivateKey),
+            0x05 => Some(Self::SplitKey),
             0x07 => Some(Self::SecretData),
+            0x08 => Some(Self::OpaqueObject),
+            0x09 => Some(Self::PgpKey),
+            0x0a => Some(Self::CertificateRequest),
+            0x0b => Some(Self::User),
+            0x0c => Some(Self::Group),
+            0x0d => Some(Self::PasswordCredential),
+            0x0e => Some(Self::DeviceCredential),
+            0x0f => Some(Self::OneTimePasswordCredential),
+            0x10 => Some(Self::HashedPasswordCredential),
             _ => None,
         }
     }

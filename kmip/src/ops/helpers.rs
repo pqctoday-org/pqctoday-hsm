@@ -332,6 +332,19 @@ pub fn find_handle_for_object(
         ObjectType::SymmetricKey | ObjectType::SecretData => c::CKO_SECRET_KEY,
         // PKCS#11 CKO_CERTIFICATE = 0x01, not exposed in softhsmrustv3 constants
         ObjectType::Certificate => 0x01,
+        // KMIP-only object types — no PKCS#11 cryptoki class maps cleanly.
+        // Surface as ItemNotFound by returning a sentinel that never
+        // matches a real handle class (CKO_VENDOR_DEFINED start = 0x80000000).
+        ObjectType::SplitKey
+        | ObjectType::OpaqueObject
+        | ObjectType::PgpKey
+        | ObjectType::CertificateRequest
+        | ObjectType::User
+        | ObjectType::Group
+        | ObjectType::PasswordCredential
+        | ObjectType::DeviceCredential
+        | ObjectType::OneTimePasswordCredential
+        | ObjectType::HashedPasswordCredential => 0x80000000,
     };
     let handles = softhsmrustv3::native::find_all_by_cka_id(session, cka_id)?;
     for handle in handles {

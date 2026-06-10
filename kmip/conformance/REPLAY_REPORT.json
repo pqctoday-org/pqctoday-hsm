@@ -1,8 +1,8 @@
 {
-  "generated_at": 1781059066,
+  "generated_at": 1781060280,
   "summary": {
-    "pass": 55,
-    "fail": 47,
+    "pass": 58,
+    "fail": 44,
     "error": 0,
     "skip_op": 0,
     "skip_parse": 0,
@@ -131,7 +131,7 @@
     {
       "name": "BL-M-14-30.xml",
       "status": "FAIL",
-      "detail": "msg #5: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: missing expected attribute 'AlwaysSensitive' (\u00a74.1.1 item 20 permits server *extras* \u2014 not omissions)",
+      "detail": "msg #5: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: missing expected attribute 'ProtectionStorageMask' (\u00a74.1.1 item 20 permits server *extras* \u2014 not omissions)",
       "ops_used": [
         "Destroy",
         "Get",
@@ -771,24 +771,24 @@
     },
     {
       "name": "MSGENC-HTTPS-M-1-30.xml",
-      "status": "FAIL",
-      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/Query ResponsePayload ObjectType: actual lacks expected ['OpaqueObject', 'SplitKey', 'CertificateRequest', 'Group', 'HashedPasswordCredential', 'OneTimePasswordCredential', 'DeviceCredential', 'PasswordCredential'] (\u00a74.1.1 items 15-16 permit *supersets* \u2014 not subsets)",
+      "status": "PASS",
+      "detail": "",
       "ops_used": [
         "Query"
       ]
     },
     {
       "name": "MSGENC-JSON-M-1-30.xml",
-      "status": "FAIL",
-      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/Query ResponsePayload ObjectType: actual lacks expected ['OpaqueObject', 'SplitKey', 'CertificateRequest', 'DeviceCredential', 'Group', 'HashedPasswordCredential', 'PasswordCredential', 'OneTimePasswordCredential'] (\u00a74.1.1 items 15-16 permit *supersets* \u2014 not subsets)",
+      "status": "PASS",
+      "detail": "",
       "ops_used": [
         "Query"
       ]
     },
     {
       "name": "MSGENC-XML-M-1-30.xml",
-      "status": "FAIL",
-      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/Query ResponsePayload ObjectType: actual lacks expected ['OpaqueObject', 'SplitKey', 'CertificateRequest', 'DeviceCredential', 'Group', 'HashedPasswordCredential', 'PasswordCredential', 'OneTimePasswordCredential'] (\u00a74.1.1 items 15-16 permit *supersets* \u2014 not subsets)",
+      "status": "PASS",
+      "detail": "",
       "ops_used": [
         "Query"
       ]
@@ -1074,7 +1074,7 @@
     {
       "name": "AKLC-O-1-30.xml",
       "status": "FAIL",
-      "detail": "msg #3: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: missing expected attribute 'AlwaysSensitive' (\u00a74.1.1 item 20 permits server *extras* \u2014 not omissions)",
+      "detail": "msg #3: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: missing expected attribute 'PublicKeyLink' (\u00a74.1.1 item 20 permits server *extras* \u2014 not omissions)",
       "ops_used": [
         "CreateKeyPair",
         "Destroy",
@@ -1125,7 +1125,7 @@
     {
       "name": "SKLC-O-1-30.xml",
       "status": "FAIL",
-      "detail": "msg #3: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: missing expected attribute 'AlwaysSensitive' (\u00a74.1.1 item 20 permits server *extras* \u2014 not omissions)",
+      "detail": "msg #3: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: missing expected attribute 'ProtectionStorageMask' (\u00a74.1.1 item 20 permits server *extras* \u2014 not omissions)",
       "ops_used": [
         "Create",
         "Destroy",

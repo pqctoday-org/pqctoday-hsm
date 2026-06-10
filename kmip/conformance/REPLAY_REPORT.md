@@ -1,6 +1,6 @@
 # OASIS KMIP 3.0 Dispatcher Replay Report
 
-Generated: 2026-06-10 02:37:46 UTC
+Generated: 2026-06-10 02:58:00 UTC
 
 
 ## Aggregate
@@ -8,8 +8,8 @@ Generated: 2026-06-10 02:37:46 UTC
 
 | Status | Count | % of total |
 |---|---|---|
-| **PASS** | 55 | 53.9% |
-| **FAIL** | 47 | 46.1% |
+| **PASS** | 58 | 56.9% |
+| **FAIL** | 44 | 43.1% |
 | ERROR | 0 | 0.0% |
 | SKIP_OP (op not implemented) | 0 | 0.0% |
 | SKIP_PARSE (XML malformed) | 0 | 0.0% |
@@ -18,9 +18,9 @@ Generated: 2026-06-10 02:37:46 UTC
 
 Of the 102 tests that exercise only implemented ops:
 
-  - **55 pass (54%)**
+  - **58 pass (57%)**
 
-  - 47 fail
+  - 44 fail
 
   - 0 errored
 
@@ -30,12 +30,12 @@ Of the 102 tests that exercise only implemented ops:
 
 | Test | Status | Detail |
 |---|---|---|
-| `AKLC-O-1-30.xml` | FAIL | msg #3: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: missing expected attribute 'AlwaysSensitive' (§4.1.1 item 2 |
+| `AKLC-O-1-30.xml` | FAIL | msg #3: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: missing expected attribute 'PublicKeyLink' (§4.1.1 item 20  |
 | `AX-M-1-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage: child count 3 != 2 |
 | `AX-M-2-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload/SymmetricKey/KeyBlock: child count 5 != 4 |
 | `BL-M-12-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
 | `BL-M-13-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
-| `BL-M-14-30.xml` | FAIL | msg #5: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: missing expected attribute 'AlwaysSensitive' (§4.1.1 item 2 |
+| `BL-M-14-30.xml` | FAIL | msg #5: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: missing expected attribute 'ProtectionStorageMask' (§4.1.1  |
 | `BL-M-4-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
 | `BL-M-5-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
 | `BL-M-8-30.xml` | FAIL | msg #2: response mismatch: ResponseMessage/BatchItem/ResultReason: expected 'NonUniqueNameAttribute' got 7 |
@@ -57,9 +57,6 @@ Of the 102 tests that exercise only implemented ops:
 | `CS-RNG-O-2-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResponsePayload/DataLength: expected '16' got 32 |
 | `CS-RNG-O-3-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResponsePayload/DataLength: expected '0' got 32 |
 | `CS-RNG-O-4-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'OperationFailed' got 0 |
-| `MSGENC-HTTPS-M-1-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/Query ResponsePayload ObjectType: actual lacks expected ['OpaqueObject', 'SplitKey', 'C |
-| `MSGENC-JSON-M-1-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/Query ResponsePayload ObjectType: actual lacks expected ['OpaqueObject', 'SplitKey', 'C |
-| `MSGENC-XML-M-1-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/Query ResponsePayload ObjectType: actual lacks expected ['OpaqueObject', 'SplitKey', 'C |
 | `OMOS-M-1-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
 | `OMOS-O-1-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
 | `PKCS11-M-1-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 4 != 3 |
@@ -74,7 +71,7 @@ Of the 102 tests that exercise only implemented ops:
 | `SKFF-M-6-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
 | `SKFF-M-8-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
 | `SKFF-M-9-30.xml` | FAIL | msg #8: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 27 != 10 |
-| `SKLC-O-1-30.xml` | FAIL | msg #3: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: missing expected attribute 'AlwaysSensitive' (§4.1.1 item 2 |
+| `SKLC-O-1-30.xml` | FAIL | msg #3: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: missing expected attribute 'ProtectionStorageMask' (§4.1.1  |
 | `TL-M-1-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/Query ResponsePayload: non-list child count 2 != 3 |
 | `TL-M-3-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 1 != 0 |
 | `AKLC-M-1-30.xml` | PASS |  |
@@ -122,6 +119,9 @@ Of the 102 tests that exercise only implemented ops:
 | `CS-BC-M-CHACHA20POLY1305-1-30.xml` | PASS |  |
 | `CS-RNG-M-1-30.xml` | PASS |  |
 | `CS-RNG-O-1-30.xml` | PASS |  |
+| `MSGENC-HTTPS-M-1-30.xml` | PASS |  |
+| `MSGENC-JSON-M-1-30.xml` | PASS |  |
+| `MSGENC-XML-M-1-30.xml` | PASS |  |
 | `QS-M-1-30.xml` | PASS |  |
 | `SASED-M-1-30.xml` | PASS |  |
 | `SKFF-M-1-30.xml` | PASS |  |

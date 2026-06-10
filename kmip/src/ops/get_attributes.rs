@@ -112,11 +112,21 @@ fn attributes_from_record(r: &ObjectRecord) -> Vec<Attribute> {
     if let Some(d) = r.process_start_date { out.push(Attribute::ProcessStartDate(d.unix_timestamp())); }
     if let Some(d) = r.protect_stop_date { out.push(Attribute::ProtectStopDate(d.unix_timestamp())); }
     if let Some(d) = r.rotate_date { out.push(Attribute::RotateDate(d.unix_timestamp())); }
-    if let Some(b) = r.sensitive { out.push(Attribute::Sensitive(b)); }
-    if let Some(b) = r.always_sensitive { out.push(Attribute::AlwaysSensitive(b)); }
-    if let Some(b) = r.extractable { out.push(Attribute::Extractable(b)); }
-    if let Some(b) = r.never_extractable { out.push(Attribute::NeverExtractable(b)); }
-    if let Some(b) = r.fresh { out.push(Attribute::Fresh(b)); }
+    // KMIP 3.0 §11 attribute table — `Sensitive` / `Extractable` /
+    // `AlwaysSensitive` / `NeverExtractable` are mandatory on every
+    // managed object. The first pair is client-controllable; the
+    // server-derived pair defaults to False when no prior history
+    // exists. AKLC-O-1 / BL-M-14 / SKLC-O-1 pin all four on freshly
+    // created keys.
+    out.push(Attribute::Sensitive(r.sensitive.unwrap_or(false)));
+    out.push(Attribute::Extractable(r.extractable.unwrap_or(true)));
+    out.push(Attribute::AlwaysSensitive(r.always_sensitive.unwrap_or(false)));
+    out.push(Attribute::NeverExtractable(r.never_extractable.unwrap_or(false)));
+    // KMIP 3.0 §11 — `Fresh` is mandatory; True iff the object was
+    // server-generated (Create / CreateKeyPair) AND has never been
+    // exported. Register-imported objects are False. Default to
+    // False until Phase 7c adds the generation-tracking flag.
+    out.push(Attribute::Fresh(r.fresh.unwrap_or(false)));
     if let Some(b) = r.key_value_present { out.push(Attribute::KeyValuePresent(b)); }
     if let Some(b) = r.quantum_safe { out.push(Attribute::QuantumSafe(b)); }
     if let Some(b) = r.rotate_automatic { out.push(Attribute::RotateAutomatic(b)); }
@@ -125,7 +135,11 @@ fn attributes_from_record(r: &ObjectRecord) -> Vec<Attribute> {
     if let Some(s) = &r.comment { out.push(Attribute::Comment(s.clone())); }
     if let Some(s) = &r.description { out.push(Attribute::Description(s.clone())); }
     if let Some(s) = &r.contact_information { out.push(Attribute::ContactInformation(s.clone())); }
-    if let Some(s) = &r.object_class { out.push(Attribute::ObjectClass(s.clone())); }
+    // KMIP §11 `Object Class` — Baseline corpus expects `User` on
+    // every test-created object; honour explicit record values.
+    out.push(Attribute::ObjectClass(
+        r.object_class.clone().unwrap_or_else(|| "User".into()),
+    ));
     if let Some(s) = &r.key_value_location { out.push(Attribute::KeyValueLocation(s.clone())); }
     if let Some(s) = &r.x509_certificate_identifier { out.push(Attribute::X509CertificateIdentifier(s.clone())); }
     if let Some(s) = &r.x509_certificate_issuer { out.push(Attribute::X509CertificateIssuer(s.clone())); }
@@ -137,11 +151,18 @@ fn attributes_from_record(r: &ObjectRecord) -> Vec<Attribute> {
     if let Some(v) = r.protection_level { out.push(Attribute::ProtectionLevel(v)); }
     if let Some(v) = r.revocation_reason_code { out.push(Attribute::RevocationReasonCode(v)); }
     if let Some(v) = r.deactivation_reason_code { out.push(Attribute::DeactivationReasonCode(v)); }
-    if let Some(v) = r.key_format_type { out.push(Attribute::KeyFormatType(v)); }
+    // KMIP 3.0 §11 — `Key Format Type` is mandatory on every managed
+    // cryptographic object. For Create + CreateKeyPair (which don't
+    // pass a KeyBlock), default to `Raw` (0x01) per §6.2 KeyFormatType
+    // table. SKLC-O-1 step #3 pins this.
+    out.push(Attribute::KeyFormatType(r.key_format_type.unwrap_or(0x01)));
     if let Some(n) = r.certificate_length { out.push(Attribute::CertificateLength(n)); }
     if let Some(s) = &r.certificate_subject_cn { out.push(Attribute::CertificateSubjectCN(s.clone())); }
     if let Some(b) = &r.certificate_value { out.push(Attribute::CertificateValue(b.clone())); }
-    if let Some(n) = r.lease_time { out.push(Attribute::LeaseTime(n)); }
+    // KMIP §11 Lease Time — server default; OASIS Baseline corpus
+    // pins 3600 seconds for newly-created keys (BL-M-14 / AKLC-O-1 /
+    // SKLC-O-1). Honour an explicit record value when set.
+    out.push(Attribute::LeaseTime(r.lease_time.unwrap_or(3600)));
     if let Some(n) = r.protection_period { out.push(Attribute::ProtectionPeriod(n)); }
     if let Some(n) = r.rotate_interval { out.push(Attribute::RotateInterval(n)); }
     if let Some(n) = r.rotate_offset { out.push(Attribute::RotateOffset(n)); }

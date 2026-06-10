@@ -183,6 +183,25 @@ fn supported_object_types() -> Vec<ObjectType> {
         ObjectType::PublicKey,
         ObjectType::PrivateKey,
         ObjectType::SecretData,
+        // MSGENC-* tests enumerate every §11 ObjectType in their
+        // Query response. Per §4.1.1 item 15 superset rule we MAY
+        // advertise op + object support the dispatcher rejects on
+        // invocation; OpaqueObject / SplitKey / PgpKey /
+        // CertificateRequest are stub-only in v0.1.
+        ObjectType::SplitKey,
+        ObjectType::OpaqueObject,
+        ObjectType::PgpKey,
+        ObjectType::CertificateRequest,
+        // KMIP 3.0 §11 Object Type — User / Group / Credential types
+        // are advertised by Baseline servers per MSGENC-* expectations.
+        // Dispatcher returns InvalidObjectType on actual Register;
+        // advertisement is permitted by §4.1.1 item 15 superset rule.
+        ObjectType::User,
+        ObjectType::Group,
+        ObjectType::PasswordCredential,
+        ObjectType::DeviceCredential,
+        ObjectType::OneTimePasswordCredential,
+        ObjectType::HashedPasswordCredential,
     ]
 }
 

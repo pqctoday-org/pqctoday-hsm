@@ -2227,7 +2227,18 @@ fn encode_attribute_v3(a: &Attribute) -> TtlvFrame {
         Attribute::Comment(s)                  => TtlvFrame::new(Tag(tags::Comment),                  Value::TextString(s.clone())),
         Attribute::Description(s)              => TtlvFrame::new(Tag(tags::Description),              Value::TextString(s.clone())),
         Attribute::ContactInformation(s)       => TtlvFrame::new(Tag(tags::ContactInformation),       Value::TextString(s.clone())),
-        Attribute::ObjectClass(s)              => TtlvFrame::new(Tag(tags::ObjectClass),              Value::TextString(s.clone())),
+        Attribute::ObjectClass(s) => {
+            // KMIP 3.0 §11 — `Object Class` is an Enumeration on the
+            // wire (`User = 0x01`, `System = 0x02`). The variant
+            // carries a string for ergonomic Add/Set; we map back
+            // to the codepoint here. Unknown labels default to
+            // `User` (0x01) per Baseline tests.
+            let code = match s.as_str() {
+                "System" => 2,
+                _ => 1,
+            };
+            TtlvFrame::new(Tag(tags::ObjectClass), Value::Enumeration(code))
+        }
         Attribute::KeyValueLocation(s)         => TtlvFrame::new(Tag(tags::KeyValueLocation),         Value::TextString(s.clone())),
         Attribute::X509CertificateIdentifier(s) => TtlvFrame::new(Tag(tags::X509CertificateIdentifier), Value::TextString(s.clone())),
         Attribute::X509CertificateIssuer(s)    => TtlvFrame::new(Tag(tags::X509CertificateIssuer),    Value::TextString(s.clone())),

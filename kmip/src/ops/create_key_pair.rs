@@ -237,6 +237,8 @@ pub fn create_key_pair(
                 crate::kmip30::KmipAlgorithm::Rsa => Some(0x03),
                 _ => None,
             },
+            // KMIP §11 Fresh = True for server-generated objects.
+            fresh: Some(true),
     ..ObjectRecord::default()
 })?;
     deps.store.put(ObjectRecord {
@@ -274,6 +276,8 @@ pub fn create_key_pair(
                 crate::kmip30::KmipAlgorithm::Rsa => Some(0x03),
                 _ => None,
             },
+            // KMIP §11 Fresh = True for server-generated objects.
+            fresh: Some(true),
     ..ObjectRecord::default()
 })?;
 
