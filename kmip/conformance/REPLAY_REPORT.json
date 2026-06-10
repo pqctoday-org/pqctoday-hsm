@@ -1,8 +1,8 @@
 {
-  "generated_at": 1781057526,
+  "generated_at": 1781058007,
   "summary": {
-    "pass": 53,
-    "fail": 49,
+    "pass": 54,
+    "fail": 48,
     "error": 0,
     "skip_op": 0,
     "skip_parse": 0,
@@ -271,8 +271,8 @@
     },
     {
       "name": "BL-M-7-30.xml",
-      "status": "FAIL",
-      "detail": "msg #3: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1",
+      "status": "PASS",
+      "detail": "",
       "ops_used": [
         "GetAttributes",
         "Interop",
