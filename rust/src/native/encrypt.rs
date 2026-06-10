@@ -181,7 +181,7 @@ pub fn encrypt(
             // Handle-based encrypt has no AAD plumbing yet — use empty.
             // KMIP callers that need AEAD with AAD go through
             // `encrypt_with_key_bytes` instead.
-            aes_gcm_encrypt(&key_bytes, iv, plaintext, &[])
+            aes_gcm_encrypt(&key_bytes, iv, plaintext, &[], None)
         }
         CKM_AES_ECB => aes_ecb_encrypt(&key_bytes, plaintext),
         CKM_AES_CBC => {
@@ -225,7 +225,7 @@ pub fn decrypt(
     match mechanism {
         CKM_AES_GCM => {
             let iv = iv.ok_or(CKR_ARGUMENTS_BAD)?;
-            aes_gcm_decrypt(&key_bytes, iv, ciphertext, &[])
+            aes_gcm_decrypt(&key_bytes, iv, ciphertext, &[], None)
         }
         CKM_AES_ECB => aes_ecb_decrypt(&key_bytes, ciphertext),
         CKM_AES_CBC => {
@@ -306,11 +306,12 @@ pub fn encrypt_with_key_bytes(
     iv: Option<&[u8]>,
     oaep: Option<&OaepParams>,
     aad: &[u8],
+    tag_len: Option<usize>,
 ) -> Result<Vec<u8>, CkRv> {
     match mechanism {
         CKM_AES_GCM => {
             let iv = iv.ok_or(CKR_ARGUMENTS_BAD)?;
-            aes_gcm_encrypt(key_bytes, iv, plaintext, aad)
+            aes_gcm_encrypt(key_bytes, iv, plaintext, aad, tag_len)
         }
         CKM_AES_ECB => aes_ecb_encrypt(key_bytes, plaintext),
         CKM_AES_CBC => {
@@ -347,11 +348,12 @@ pub fn decrypt_with_key_bytes(
     iv: Option<&[u8]>,
     oaep: Option<&OaepParams>,
     aad: &[u8],
+    tag_len: Option<usize>,
 ) -> Result<Vec<u8>, CkRv> {
     match mechanism {
         CKM_AES_GCM => {
             let iv = iv.ok_or(CKR_ARGUMENTS_BAD)?;
-            aes_gcm_decrypt(key_bytes, iv, ciphertext, aad)
+            aes_gcm_decrypt(key_bytes, iv, ciphertext, aad, tag_len)
         }
         CKM_AES_ECB => aes_ecb_decrypt(key_bytes, ciphertext),
         CKM_AES_CBC => {
@@ -463,43 +465,86 @@ fn rsa_oaep_decrypt(priv_der: &[u8], ciphertext: &[u8], params: &OaepParams) -> 
 
 // ── AES-GCM ─────────────────────────────────────────────────────────────────
 
-fn aes_gcm_encrypt(key: &[u8], iv: &[u8], plaintext: &[u8], aad: &[u8]) -> Result<Vec<u8>, CkRv> {
+/// AES-GCM encrypt with caller-selectable tag length.
+///
+/// `tag_len`: tag size in bytes (default 16; NIST SP 800-38D §5.2.1.2
+/// allows 12, 13, 14, 15, 16). Smaller tags reduce on-wire size at the
+/// cost of forgery probability. CS-BC-M-GCM-1 step #6 pins a 12-byte
+/// tag against the standard NIST AES-128-GCM test vector.
+fn aes_gcm_encrypt(
+    key: &[u8],
+    iv: &[u8],
+    plaintext: &[u8],
+    aad: &[u8],
+    tag_len: Option<usize>,
+) -> Result<Vec<u8>, CkRv> {
     use aes_gcm::aead::generic_array::GenericArray;
-    use aes_gcm::{aead::{Aead, Payload}, Aes128Gcm, Aes256Gcm, KeyInit};
+    use aes_gcm::aead::generic_array::typenum::{U12, U16};
+    use aes_gcm::{aead::{Aead, Payload}, AesGcm, Aes128Gcm, Aes256Gcm, KeyInit};
     if iv.len() != 12 {
         return Err(CKR_ARGUMENTS_BAD);
     }
     let nonce = GenericArray::from_slice(iv);
     let payload = Payload { msg: plaintext, aad };
-    match key.len() {
-        16 => {
+    match (key.len(), tag_len.unwrap_or(16)) {
+        (16, 16) => {
             let cipher = Aes128Gcm::new_from_slice(key).map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
             cipher.encrypt(nonce, payload).map_err(|_| CKR_FUNCTION_FAILED)
         }
-        32 => {
+        (32, 16) => {
             let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
             cipher.encrypt(nonce, payload).map_err(|_| CKR_FUNCTION_FAILED)
         }
-        _ => Err(CKR_KEY_TYPE_INCONSISTENT),
+        (16, 12) => {
+            let cipher: AesGcm<aes::Aes128, U12, U12> =
+                AesGcm::new_from_slice(key).map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+            cipher.encrypt(nonce, payload).map_err(|_| CKR_FUNCTION_FAILED)
+        }
+        (32, 12) => {
+            let cipher: AesGcm<aes::Aes256, U12, U12> =
+                AesGcm::new_from_slice(key).map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+            cipher.encrypt(nonce, payload).map_err(|_| CKR_FUNCTION_FAILED)
+        }
+        // Silence-the-warning hint: `U16` is implicit in the default arms above.
+        (_, _) => {
+            let _ = std::marker::PhantomData::<U16>;
+            Err(CKR_KEY_TYPE_INCONSISTENT)
+        }
     }
 }
 
-fn aes_gcm_decrypt(key: &[u8], iv: &[u8], ciphertext: &[u8], aad: &[u8]) -> Result<Vec<u8>, CkRv> {
+fn aes_gcm_decrypt(
+    key: &[u8],
+    iv: &[u8],
+    ciphertext: &[u8],
+    aad: &[u8],
+    tag_len: Option<usize>,
+) -> Result<Vec<u8>, CkRv> {
     use aes_gcm::aead::generic_array::GenericArray;
-    use aes_gcm::{aead::{Aead, Payload}, Aes128Gcm, Aes256Gcm, KeyInit};
+    use aes_gcm::aead::generic_array::typenum::U12;
+    use aes_gcm::{aead::{Aead, Payload}, AesGcm, Aes128Gcm, Aes256Gcm, KeyInit};
     if iv.len() != 12 {
         return Err(CKR_ARGUMENTS_BAD);
     }
     let nonce = GenericArray::from_slice(iv);
     let payload = Payload { msg: ciphertext, aad };
-    match key.len() {
-        16 => {
+    match (key.len(), tag_len.unwrap_or(16)) {
+        (16, 16) => {
             let cipher = Aes128Gcm::new_from_slice(key).map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
-            // GCM tag failure → CKR_ENCRYPTED_DATA_INVALID (PKCS#11 v3.2 §6.13).
             cipher.decrypt(nonce, payload).map_err(|_| CKR_ENCRYPTED_DATA_INVALID)
         }
-        32 => {
+        (32, 16) => {
             let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+            cipher.decrypt(nonce, payload).map_err(|_| CKR_ENCRYPTED_DATA_INVALID)
+        }
+        (16, 12) => {
+            let cipher: AesGcm<aes::Aes128, U12, U12> =
+                AesGcm::new_from_slice(key).map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+            cipher.decrypt(nonce, payload).map_err(|_| CKR_ENCRYPTED_DATA_INVALID)
+        }
+        (32, 12) => {
+            let cipher: AesGcm<aes::Aes256, U12, U12> =
+                AesGcm::new_from_slice(key).map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
             cipher.decrypt(nonce, payload).map_err(|_| CKR_ENCRYPTED_DATA_INVALID)
         }
         _ => Err(CKR_KEY_TYPE_INCONSISTENT),

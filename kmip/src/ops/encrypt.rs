@@ -317,6 +317,12 @@ fn encrypt_classical(
     } else {
         &req.data
     };
+    // KMIP 3.0 §11 `Tag Length` — caller-selectable AEAD authenticator
+    // length (NIST SP 800-38D §5.2.1.2: 12/13/14/15/16 bytes). Forwarded
+    // to the shim so it can pick the right typed AesGcm variant.
+    let tag_len = effective_cp
+        .and_then(|c| c.tag_length)
+        .map(|n| n as usize);
     let ciphertext = if let Some(key_bytes) = &obj.key_material {
         softhsmrustv3::native::encrypt_with_key_bytes(
             key_bytes,
@@ -325,6 +331,7 @@ fn encrypt_classical(
             effective_iv,
             oaep.as_ref(),
             aad,
+            tag_len,
         )
         .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Encrypt"))?
     } else if let Some(session) = deps.engine_session {

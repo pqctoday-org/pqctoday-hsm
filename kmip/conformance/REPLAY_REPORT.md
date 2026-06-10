@@ -1,6 +1,6 @@
 # OASIS KMIP 3.0 Dispatcher Replay Report
 
-Generated: 2026-06-10 05:09:25 UTC
+Generated: 2026-06-10 05:14:16 UTC
 
 
 ## Aggregate
@@ -8,8 +8,8 @@ Generated: 2026-06-10 05:09:25 UTC
 
 | Status | Count | % of total |
 |---|---|---|
-| **PASS** | 80 | 78.4% |
-| **FAIL** | 22 | 21.6% |
+| **PASS** | 81 | 79.4% |
+| **FAIL** | 21 | 20.6% |
 | ERROR | 0 | 0.0% |
 | SKIP_OP (op not implemented) | 0 | 0.0% |
 | SKIP_PARSE (XML malformed) | 0 | 0.0% |
@@ -18,9 +18,9 @@ Generated: 2026-06-10 05:09:25 UTC
 
 Of the 102 tests that exercise only implemented ops:
 
-  - **80 pass (78%)**
+  - **81 pass (79%)**
 
-  - 22 fail
+  - 21 fail
 
   - 0 errored
 
@@ -41,7 +41,6 @@ Of the 102 tests that exercise only implemented ops:
 | `CS-AC-M-5-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
 | `CS-AC-M-6-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
 | `CS-AC-M-8-30.xml` | FAIL | msg #2: response mismatch: ResponseMessage/BatchItem/ResultReason: expected 'WrongKeyLifecycleState' got 1 |
-| `CS-BC-M-GCM-1-30.xml` | FAIL | msg #6: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
 | `CS-BC-M-GCM-2-30.xml` | FAIL | msg #21: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
 | `CS-BC-M-GCM-3-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
 | `CS-RNG-O-2-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResponsePayload/DataLength: expected '16' got 32 |
@@ -105,6 +104,7 @@ Of the 102 tests that exercise only implemented ops:
 | `CS-BC-M-CHACHA20-3-30.xml` | PASS |  |
 | `CS-BC-M-CHACHA20-4-30.xml` | PASS |  |
 | `CS-BC-M-CHACHA20POLY1305-1-30.xml` | PASS |  |
+| `CS-BC-M-GCM-1-30.xml` | PASS |  |
 | `CS-RNG-M-1-30.xml` | PASS |  |
 | `CS-RNG-O-1-30.xml` | PASS |  |
 | `MSGENC-HTTPS-M-1-30.xml` | PASS |  |
