@@ -65,7 +65,9 @@ pub unsafe fn get_attr_ulong(template: *mut u8, count: u32, attr_type: u32) -> O
         if t == attr_type {
             let val_ptr = *ptr.add((i * 3 + 1) as usize) as usize as *const u32;
             if !val_ptr.is_null() {
-                return Some(*val_ptr);
+                // CK_ATTRIBUTE.pValue carries NO alignment guarantee — an aligned
+                // deref panics (misaligned pointer) on a legal caller template.
+                return Some(std::ptr::read_unaligned(val_ptr));
             }
         }
     }
@@ -94,9 +96,28 @@ pub unsafe fn get_attr_bytes(template: *mut u8, count: u32, attr_type: u32) -> O
     None
 }
 
+/// True if `attr_type` is a server-managed (read-only) attribute that a caller's
+/// template must never set on a generate/derive/unwrap operation. PKCS#11 v3.2
+/// §4.1.1 / §4.3 Table 13 / §4.9 / §4.10: these are determined by the token, and
+/// honoring a template value would let a client forge key provenance.
+fn is_server_managed_attr(attr_type: u32) -> bool {
+    matches!(
+        attr_type,
+        CKA_CLASS
+            | CKA_KEY_TYPE
+            | CKA_LOCAL
+            | CKA_KEY_GEN_MECHANISM
+            | CKA_ALWAYS_SENSITIVE
+            | CKA_NEVER_EXTRACTABLE
+            | CKA_CHECK_VALUE
+    )
+}
+
 /// Copy all attributes from a caller's CK_ATTRIBUTE template into the attrs map.
-/// Skips: CKA_VALUE (key material) and internal CKA_PRIV_* (>= 0xFFFF0000).
-/// Call AFTER setting defaults so the caller's template can override them.
+/// Skips: CKA_VALUE (key material), internal CKA_PRIV_* (>= 0xFFFF0000), and the
+/// server-managed read-only attributes (see `is_server_managed_attr`).
+/// Call AFTER setting defaults so the caller's template can override the
+/// remaining (client-settable) attributes.
 pub unsafe fn absorb_template_attrs(attrs: &mut Attributes, template: *mut u8, count: u32) {
     if template.is_null() || count == 0 || count > 65536 {
         return;
@@ -106,8 +127,11 @@ pub unsafe fn absorb_template_attrs(attrs: &mut Attributes, template: *mut u8, c
         let attr_type = *ptr.add((i * 3) as usize);
         let val_ptr = *ptr.add((i * 3 + 1) as usize) as usize as *const u8;
         let val_len = *ptr.add((i * 3 + 2) as usize) as usize;
-        // Skip key material and internal private attrs
-        if attr_type == CKA_VALUE || attr_type >= 0xFFFF0000 {
+        // Skip key material, internal private attrs, and server-managed attrs.
+        if attr_type == CKA_VALUE
+            || attr_type >= 0xFFFF0000
+            || is_server_managed_attr(attr_type)
+        {
             continue;
         }
         if !val_ptr.is_null() && val_len > 0 {

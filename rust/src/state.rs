@@ -31,6 +31,23 @@ impl<T> GlobalState<T> {
     }
 }
 
+/// PKCS#11 v3.2 §5.6 — library initialization state. Set by C_Initialize,
+/// cleared by C_Finalize. Every Cryptoki function except C_Initialize and the
+/// function-list/interface getters must return CKR_CRYPTOKI_NOT_INITIALIZED
+/// when this is false.
+pub static INITIALIZED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[inline]
+pub fn is_initialized() -> bool {
+    INITIALIZED.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+#[inline]
+pub fn set_initialized(v: bool) {
+    INITIALIZED.store(v, std::sync::atomic::Ordering::SeqCst);
+}
+
 lazy_static! {
     pub static ref OBJECTS: GlobalState<HashMap<u32, Attributes>> = GlobalState::new(HashMap::new());
     pub static ref NEXT_HANDLE: GlobalState<u32> = GlobalState::new(100);
@@ -115,6 +132,10 @@ pub struct EncryptCtx {
     pub iv: Vec<u8>,
     pub aad: Vec<u8>,
     pub tag_bits: u32,
+    /// Streaming state, built lazily on the first `C_EncryptUpdate` /
+    /// `C_DecryptUpdate` (or `*Final`) call. `None` while the op is
+    /// single-shot-only or untouched since Init.
+    pub multipart: Option<crate::crypto::multipart::MultipartCipher>,
 }
 
 #[derive(Clone)]
@@ -182,6 +203,67 @@ fn apply_object_defaults(attrs: &mut Attributes) {
             store_bool(attrs, CKA_ALWAYS_AUTHENTICATE, false);
         }
     }
+}
+
+/// Return the slot id backing a session handle, if the session exists.
+pub fn session_slot(h_session: u32) -> Option<u32> {
+    SESSIONS.with(|s| s.borrow().get(&h_session).map(|ss| ss.slot_id))
+}
+
+/// True if a session handle refers to a live session.
+pub fn session_exists(h_session: u32) -> bool {
+    SESSIONS.with(|s| s.borrow().contains_key(&h_session))
+}
+
+/// True if the session is read/write (CKF_RW_SESSION). Returns false for an
+/// unknown handle.
+pub fn session_is_rw(h_session: u32) -> bool {
+    SESSIONS.with(|s| {
+        s.borrow()
+            .get(&h_session)
+            .map(|ss| ss.rw_session)
+            .unwrap_or(false)
+    })
+}
+
+/// True if the token backing `slot_id` is logged in (User or SO).
+pub fn token_logged_in(slot_id: u32) -> bool {
+    TOKEN_STORE.with(|ts| {
+        ts.borrow()
+            .get(&slot_id)
+            .map(|t| t.login_state != LoginState::Public)
+            .unwrap_or(false)
+    })
+}
+
+/// True if the session's token is logged in (User or SO).
+pub fn session_logged_in(h_session: u32) -> bool {
+    match session_slot(h_session) {
+        Some(slot) => token_logged_in(slot),
+        None => false,
+    }
+}
+
+/// PKCS#11 v3.2 §4.4 / §5.6 — a private object (CKA_PRIVATE=TRUE) may only be
+/// accessed (found, read, used, destroyed) when the session's token is logged
+/// in as User or SO. Public objects are always accessible. Objects that do not
+/// set CKA_PRIVATE are treated as public (the engine's historical default).
+pub fn can_access_object(h_session: u32, attrs: &Attributes) -> bool {
+    if !read_bool_attr(attrs, CKA_PRIVATE) {
+        return true;
+    }
+    session_logged_in(h_session)
+}
+
+/// Convenience: look up an object by handle and decide accessibility from the
+/// given session. Returns false if the object does not exist.
+pub fn can_access_handle(h_session: u32, handle: u32) -> bool {
+    OBJECTS.with(|objs| {
+        objs.borrow()
+            .get(&handle)
+            .map(|attrs| can_access_object(h_session, attrs))
+            .unwrap_or(false)
+    })
 }
 
 pub fn allocate_handle(mut attrs: Attributes) -> u32 {
@@ -462,7 +544,10 @@ pub fn malloc(size: usize) -> *mut u8 {
         return 4 as *mut u8;
     }
     unsafe {
-        let layout = std::alloc::Layout::from_size_align_unchecked(size, 1);
+        // Align 8: callers build CK_ATTRIBUTE/CK_MECHANISM arrays in this memory
+        // and the engine reads them as u32 words — align-1 allocations can land
+        // odd addresses and trip Rust's misaligned-pointer check.
+        let layout = std::alloc::Layout::from_size_align_unchecked(size, 8);
         let ptr = std::alloc::alloc(layout);
         if !ptr.is_null() {
             ALLOC_SIZES.with(|m| m.borrow_mut().insert(ptr as u32, size as u32));
@@ -484,7 +569,8 @@ pub fn free(ptr: *mut u8, _js_size: usize) {
     if let Some(size) = ALLOC_SIZES.with(|m| m.borrow_mut().remove(&addr)) {
         if size > 0 {
             unsafe {
-                let layout = std::alloc::Layout::from_size_align_unchecked(size as usize, 1);
+                // Must match the align used in `malloc` above.
+                let layout = std::alloc::Layout::from_size_align_unchecked(size as usize, 8);
                 std::alloc::dealloc(ptr, layout);
             }
         }

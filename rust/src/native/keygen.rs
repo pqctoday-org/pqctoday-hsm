@@ -431,8 +431,8 @@ pub fn generate_ecdsa_keypair(
     finalize_and_register(pub_attrs, prv_attrs)
 }
 
-/// Generate an AES secret key. `bits` ∈ {128, 256} (192 is permitted by
-/// PKCS#11 but the engine only supports 128 and 256 today).
+/// Generate an AES secret key. `bits` ∈ {128, 192, 256} per PKCS#11
+/// v3.2 §6.5.
 pub fn generate_aes_key(
     _session: u32,
     bits: u32,
@@ -992,7 +992,8 @@ mod tests {
         close_session(session).unwrap();
     }
 
-    /// AES invalid bit length → CKR_ARGUMENTS_BAD.
+    /// AES invalid bit length → CKR_ARGUMENTS_BAD; 192 is a valid
+    /// PKCS#11 v3.2 §6.5 size (OASIS SKFF-M-{2,6,10}).
     #[test]
     fn aes_invalid_bits_returns_err() {
         let _guard = test_lock::acquire();
@@ -1001,10 +1002,8 @@ mod tests {
             generate_aes_key(session, 100, b"\x01", "x").unwrap_err(),
             CKR_ARGUMENTS_BAD,
         );
-        assert_eq!(
-            generate_aes_key(session, 192, b"\x01", "x").unwrap_err(),
-            CKR_ARGUMENTS_BAD,
-        );
+        let handle = generate_aes_key(session, 192, b"\x01", "x").unwrap();
+        assert_eq!(get_object_value(handle).unwrap().len(), 24);
         close_session(session).unwrap();
     }
 

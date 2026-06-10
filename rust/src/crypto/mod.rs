@@ -2,6 +2,7 @@ pub mod bip32;
 pub mod handlers;
 pub mod keccak;
 pub mod lms;
+pub mod multipart;
 
 pub use bip32::*;
 pub use handlers::*;

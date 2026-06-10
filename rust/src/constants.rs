@@ -4,6 +4,9 @@ use wasm_bindgen::prelude::*;
 
 pub const CKR_OK: u32 = 0x0000_0000;
 pub const CKR_HOST_MEMORY: u32 = 0x0000_0002;
+// PKCS#11 v3.2 §5.6 — Cryptoki library lifecycle.
+pub const CKR_CRYPTOKI_NOT_INITIALIZED: u32 = 0x0000_0190;
+pub const CKR_CRYPTOKI_ALREADY_INITIALIZED: u32 = 0x0000_0191;
 pub const CKR_GENERAL_ERROR: u32 = 0x0000_0005;
 pub const CKR_FUNCTION_FAILED: u32 = 0x0000_0006;
 pub const CKR_ARGUMENTS_BAD: u32 = 0x0000_0007;
@@ -26,6 +29,14 @@ pub const CKR_TEMPLATE_INCOMPLETE: u32 = 0x0000_00D0;
 pub const CKR_TEMPLATE_INCONSISTENT: u32 = 0x0000_00D1;
 pub const CKR_KEY_UNEXTRACTABLE: u32 = 0x0000_006A;
 pub const CKR_KEY_FUNCTION_NOT_PERMITTED: u32 = 0x0000_0068;
+pub const CKR_KEY_HANDLE_INVALID: u32 = 0x0000_0060;
+pub const CKR_SIGNATURE_LEN_RANGE: u32 = 0x0000_00C1;
+pub const CKR_ATTRIBUTE_READ_ONLY: u32 = 0x0000_0010;
+pub const CKR_ATTRIBUTE_SENSITIVE: u32 = 0x0000_0011;
+pub const CKR_ACTION_PROHIBITED: u32 = 0x0000_001B;
+pub const CKR_SESSION_PARALLEL_NOT_SUPPORTED: u32 = 0x0000_00B4;
+pub const CKR_TOKEN_NOT_RECOGNIZED: u32 = 0x0000_00E1;
+pub const CKR_TOKEN_WRITE_PROTECTED: u32 = 0x0000_00E2;
 pub const CKR_ATTRIBUTE_TYPE_INVALID: u32 = 0x0000_0012; // PKCS#11 §11.7 — attribute not present on object
 pub const CKR_BUFFER_TOO_SMALL: u32 = 0x0000_0150;
 pub const CKR_ENCRYPTED_DATA_INVALID: u32 = 0x0000_0040;
@@ -46,6 +57,9 @@ pub const CKA_BIP32_CHAIN_CODE: u32 = 0x0000_1021;
 pub const CKA_BIP32_CHILD_INDEX: u32 = 0x0000_1022;
 pub const CKA_PUBLIC_KEY_INFO: u32 = 0x0000_0129; // PKCS#11 v3.2 — DER SubjectPublicKeyInfo
 pub const CKA_PARAMETER_SET: u32 = 0x0000_061d;
+// PKCS#11 v3.2 — deterministic keygen seed (ξ for ML-DSA, d‖z for ML-KEM).
+// NOTE: deterministic seeded keygen is not yet wired; see gap analysis R3.6.
+pub const CKA_SEED: u32 = 0x0000_0637;
 
 // ── PKCS#11 Object Classes ────────────────────────────────────────────────────
 
@@ -214,9 +228,14 @@ pub const CKM_ECDH1_COFACTOR_DERIVE: u32 = 0x0000_1051;
 pub const CKM_EC_EDWARDS_KEY_PAIR_GEN: u32 = 0x0000_1055;
 pub const CKM_EC_MONTGOMERY_KEY_PAIR_GEN: u32 = 0x0000_1056; // PKCS#11 v3.2 §6.7 — X25519 keygen
 pub const CKM_EDDSA: u32 = 0x0000_1057;
-pub const CKM_EC_MONTGOMERY_KEY_DERIVE: u32 = 0x0000_1058; // Alias: ECDH1_DERIVE for X25519 keys
-// Internal-only: Ed25519ph (prehashed) — same PKCS#11 mechanism, dispatched via phFlag in params
-pub const CKM_EDDSA_PH: u32 = 0xFFFF_1057;
+// Vendor alias: ECDH1_DERIVE for X25519 keys. Moved into the vendor-defined
+// range (0x80000000+) — the former 0x1058 squatted unassigned spec-reserved
+// space adjacent to CKM_EDDSA and risked a future OASIS collision.
+pub const CKM_EC_MONTGOMERY_KEY_DERIVE: u32 = 0x8000_0011;
+// Ed25519ph (prehashed). This is the real PKCS#11 v3.2 mechanism value
+// (pkcs11t.h: CKM_EDDSA_PH = 0x80001057); the engine also dispatches to it
+// internally when CK_EDDSA_PARAMS.phFlag is set on a plain CKM_EDDSA op.
+pub const CKM_EDDSA_PH: u32 = 0x8000_1057;
 
 // AES
 pub const CKM_AES_KEY_GEN: u32 = 0x0000_1080;
@@ -231,17 +250,21 @@ pub const CKM_AES_CBC_PAD: u32 = 0x0000_1085;
 pub const CKM_AES_CTR: u32 = 0x0000_1086;
 pub const CKM_AES_GCM: u32 = 0x0000_1087;
 pub const CKM_AES_KEY_WRAP: u32 = 0x0000_2109;
-pub const CKM_AES_KEY_WRAP_KWP: u32 = 0x0000_210A; // RFC 5649 (PKCS#11 v3.2)
-pub const CKM_AES_KEY_WRAP_PAD_LEGACY: u32 = 0x0000_108b; // SoftHSM2 legacy alias
+// RFC 5649 AES Key Wrap with Padding. Both names denote the same RFC 5649
+// scheme; `_PAD` is the deprecated v2.40 name (was 0x1091), `_KWP` the v3.x
+// name. Values per pkcs11t.h: PAD=0x210A, KWP=0x210B.
+pub const CKM_AES_KEY_WRAP_PAD: u32 = 0x0000_210A;
+pub const CKM_AES_KEY_WRAP_KWP: u32 = 0x0000_210B;
 
 // ChaCha20 family — PKCS#11 v3.2 §6.20 (RFC 7539 / 8439 stream cipher
-// + AEAD). Vendor table verified against `pkcs11-mech-manifest.json`.
+// + AEAD). Values verified against normative pkcs11t.h (NOT the vendor
+// manifest, which had them wrong — collided with CKM_AES_XTS / CKM_TWOFISH_CBC).
 /// `CKM_CHACHA20` — IETF ChaCha20 stream cipher. 32-byte key, 12-byte
 /// nonce. Distinct from the older 8-byte-nonce variant.
-pub const CKM_CHACHA20: u32 = 0x0000_1071;
+pub const CKM_CHACHA20: u32 = 0x0000_1226;
 /// `CKM_CHACHA20_POLY1305` — IETF ChaCha20-Poly1305 AEAD (RFC 8439).
 /// 32-byte key, 12-byte nonce, 16-byte tag.
-pub const CKM_CHACHA20_POLY1305: u32 = 0x0000_1093;
+pub const CKM_CHACHA20_POLY1305: u32 = 0x0000_4021;
 
 // ── PKCS#11 Parameter Sets ──────────────────────────────────────────────────
 
@@ -370,11 +393,14 @@ pub const SUPPORTED_MECHS: &[u32] = &[
     CKM_EDDSA_PH,
     // AES
     CKM_AES_KEY_GEN,
+    CKM_AES_ECB,
+    CKM_AES_CBC,
     CKM_AES_CBC_PAD,
     CKM_AES_CTR,
     CKM_AES_GCM,
     CKM_AES_KEY_WRAP,
     CKM_AES_KEY_WRAP_KWP,
+    CKM_AES_KEY_WRAP_PAD,
     // Key derivation
     CKM_PKCS5_PBKD2,
     CKM_HKDF_DERIVE,

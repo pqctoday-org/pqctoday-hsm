@@ -8,7 +8,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-_No changes yet._
+### Added
+
+- **softhsmrustv3 — multi-part cipher operations: `C_EncryptUpdate` / `C_EncryptFinal` / `C_DecryptUpdate` / `C_DecryptFinal` for all five AES modes** ([#89](https://github.com/pqctoday-org/pqctoday-hsm/pull/89), `rust/src/crypto/multipart.rs` (new), `rust/src/ffi.rs`, `rust/src/state.rs`). The four entry points were stubs returning `CKR_FUNCTION_NOT_SUPPORTED` — a PKCS#11 v3.2 §5.2 conformance gap. New `MultipartCipher` state machines implement streaming ECB (§6.27.2), CBC (§6.27.3), CBC_PAD (§6.27.4 — decrypt holds back the final block until `Final` to strip PKCS#7 padding), CTR (§6.27.5), and GCM (§6.27.7 — incremental GHASH via the pure-Rust `ghash` crate: AAD at Init, ciphertext streamed per-Update, tag emitted/verified constant-time at Final; decrypt withholds the trailing `tag_len` bytes since the ciphertext/tag boundary is unknowable mid-stream). Honors the §5.2 two-pass convention (NULL output → size query without consuming input; `CKR_BUFFER_TOO_SMALL` keeps the op alive; any other failure terminates it) and §5.2.5/§5.2.9 `CKR_OPERATION_ACTIVE` on double-Init. Spec-correct error codes throughout (`CKR_DATA_LEN_RANGE` vs `CKR_ENCRYPTED_DATA_LEN_RANGE` by direction, `CKR_ENCRYPTED_DATA_INVALID` for bad padding/tag). AES-192 now supported in streaming GCM (one-shot path remains 128/256). Validated against NIST SP 800-38A KATs (ECB/CBC/CTR), the canonical GCM vectors with/without AAD, cross-checks vs the one-shot `aes-gcm`/`cbc` crates across five chunk-split patterns, plus FFI-level integration tests (tag split across Update calls, lifecycle/error-priority assertions).
+
+- **softhsmrustv3 — `CKM_AES_ECB` + `CKM_AES_CBC` exposed as first-class mechanisms** ([#89](https://github.com/pqctoday-org/pqctoday-hsm/pull/89), `rust/src/ffi.rs`, `rust/src/constants.rs`). Both raw block modes now work through single-shot `C_Encrypt`/`C_Decrypt` (routed through the streaming state machines) and appear in `C_GetMechanismList` / `C_GetMechanismInfo`.
+
+- **softhsmrustv3 — PKCS#11 v3.2 compliance gap analysis + R1–R3/R6.1 remediation** (`docs/gap-analysis-rust-pkcs11-v3.2.md` (new), `rust/src/ffi.rs`, `rust/src/state.rs`, `rust/src/crypto/handlers.rs`, `rust/src/constants.rs`). Library lifecycle enforcement per §5.4/§5.6 — `require_init!()` gates on every entry point (`CKR_CRYPTOKI_NOT_INITIALIZED`), strict double-`C_Initialize` (`CKR_CRYPTOKI_ALREADY_INITIALIZED`), `C_Finalize` zeroizes key material and resets lifecycle; session-handle validation (`CKR_SESSION_HANDLE_INVALID`) ordered per §5.1 error priority; server-managed read-only attributes (`CKA_CLASS`, `CKA_KEY_TYPE`, `CKA_LOCAL`, `CKA_KEY_GEN_MECHANISM`, `CKA_ALWAYS_SENSITIVE`, `CKA_NEVER_EXTRACTABLE`, `CKA_CHECK_VALUE`) are no longer absorbable from caller templates (prevents key-provenance forgery). See the gap-analysis doc's remediation ledger for per-item detail.
+
+### Fixed
+
+- **softhsmrustv3 — `native::session::init()` made idempotent** (`rust/src/native/session.rs`). With strict §5.6 double-init now in force, the typed wrapper absorbs the non-fatal `CKR_CRYPTOKI_ALREADY_INITIALIZED` so composed helpers (`bootstrap_default_token`) keep working.
+- **softhsmrustv3 — stale test expectations vs current spec behavior** (`rust/src/native/keygen.rs`, `rust/src/native/parity.rs`, `rust/test_kat_parity.js`). AES-192 keygen is valid per §6.5 (was asserted to fail); `C_SignInit` on a destroyed handle returns `CKR_KEY_HANDLE_INVALID` per §5.1 error priority (was `CKR_KEY_FUNCTION_NOT_PERMITTED`); KAT parity harness opens sessions with the mandatory `CKF_SERIAL_SESSION` flag per §5.6.
 
 ---
 
