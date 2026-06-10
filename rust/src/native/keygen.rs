@@ -439,8 +439,13 @@ pub fn generate_aes_key(
     cka_id: &[u8],
     label: &str,
 ) -> Result<u32, CkRv> {
+    // NIST SP 800-38A AES key sizes are 128/192/256. Extending to
+    // honour 192-bit keys (OASIS SKFF-M-{2,6,10}). PKCS#11 v3.2 §6.5
+    // permits any of the three; the engine has no algorithmic block
+    // on the intermediate size.
     let bytes = match bits {
         128 => 16usize,
+        192 => 24usize,
         256 => 32usize,
         _ => return Err(CKR_ARGUMENTS_BAD),
     };

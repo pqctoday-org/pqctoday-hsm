@@ -1,6 +1,6 @@
 # OASIS KMIP 3.0 Dispatcher Replay Report
 
-Generated: 2026-06-10 03:36:02 UTC
+Generated: 2026-06-10 03:54:44 UTC
 
 
 ## Aggregate
@@ -8,8 +8,8 @@ Generated: 2026-06-10 03:36:02 UTC
 
 | Status | Count | % of total |
 |---|---|---|
-| **PASS** | 63 | 61.8% |
-| **FAIL** | 39 | 38.2% |
+| **PASS** | 69 | 67.6% |
+| **FAIL** | 33 | 32.4% |
 | ERROR | 0 | 0.0% |
 | SKIP_OP (op not implemented) | 0 | 0.0% |
 | SKIP_PARSE (XML malformed) | 0 | 0.0% |
@@ -18,9 +18,9 @@ Generated: 2026-06-10 03:36:02 UTC
 
 Of the 102 tests that exercise only implemented ops:
 
-  - **63 pass (62%)**
+  - **69 pass (68%)**
 
-  - 39 fail
+  - 33 fail
 
   - 0 errored
 
@@ -56,16 +56,10 @@ Of the 102 tests that exercise only implemented ops:
 | `CS-RNG-O-3-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResponsePayload/DataLength: expected '0' got 32 |
 | `CS-RNG-O-4-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'OperationFailed' got 0 |
 | `PKCS11-M-1-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 4 != 3 |
-| `QS-M-2-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'OperationFailed' got 0 |
 | `SASED-M-3-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 1 != 0 |
-| `SKFF-M-10-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
-| `SKFF-M-11-30.xml` | FAIL | msg #8: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 27 != 10 |
 | `SKFF-M-12-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
-| `SKFF-M-2-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
 | `SKFF-M-4-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
-| `SKFF-M-6-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
 | `SKFF-M-8-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
-| `SKFF-M-9-30.xml` | FAIL | msg #8: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 27 != 10 |
 | `SKLC-O-1-30.xml` | FAIL | msg #3: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: missing expected attribute 'ProtectionStorageMask' (§4.1.1  |
 | `TL-M-1-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/Query ResponsePayload: non-list child count 2 != 3 |
 | `TL-M-3-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 1 != 0 |
@@ -122,12 +116,18 @@ Of the 102 tests that exercise only implemented ops:
 | `OMOS-M-1-30.xml` | PASS |  |
 | `OMOS-O-1-30.xml` | PASS |  |
 | `QS-M-1-30.xml` | PASS |  |
+| `QS-M-2-30.xml` | PASS |  |
 | `SASED-M-1-30.xml` | PASS |  |
 | `SASED-M-2-30.xml` | PASS |  |
 | `SKFF-M-1-30.xml` | PASS |  |
+| `SKFF-M-10-30.xml` | PASS |  |
+| `SKFF-M-11-30.xml` | PASS |  |
+| `SKFF-M-2-30.xml` | PASS |  |
 | `SKFF-M-3-30.xml` | PASS |  |
 | `SKFF-M-5-30.xml` | PASS |  |
+| `SKFF-M-6-30.xml` | PASS |  |
 | `SKFF-M-7-30.xml` | PASS |  |
+| `SKFF-M-9-30.xml` | PASS |  |
 | `SKLC-M-1-30.xml` | PASS |  |
 | `SKLC-M-2-30.xml` | PASS |  |
 | `SKLC-M-3-30.xml` | PASS |  |

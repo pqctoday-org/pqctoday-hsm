@@ -101,6 +101,26 @@ pub fn create(deps: &Deps, req: CreateRequest, correlation_id: &str) -> Result<C
 
     let algo = parse_sym_algorithm(&resolved)?;
 
+    // KMIP 3.0 §11 — reject `QuantumSafe=true` claims on non-PQC
+    // algorithms. QS-M-2 pins this with AES + QuantumSafe=true →
+    // `GeneralFailure` "NOT_SAFE".
+    {
+        let x = super::register_import_export::extract_attrs(&req.template_attribute);
+        if matches!(x.quantum_safe, Some(true))
+            && !super::register_import_export::algorithm_is_quantum_safe(algo)
+        {
+            return Err(fail_err(
+                deps,
+                correlation_id,
+                "Create",
+                KmipError::failed(
+                    ResultReason::GeneralFailure,
+                    format!("QuantumSafe=true claimed for non-PQC algorithm {algo:?}"),
+                ),
+            ));
+        }
+    }
+
     // Plane-3: emit (Phase 7 wires the real C_GenerateKey call).
     let mech = algo.to_pkcs11_mech(PkcsOp::KeyGen).ok_or_else(|| {
         KmipError::failed(

@@ -368,13 +368,17 @@ pub(crate) struct ExtractedAttrs {
     /// at Register time. Read back by Encrypt / Decrypt / Sign /
     /// Verify in place of any request-time override.
     pub cryptographic_parameters: Option<crate::kmip30::CryptographicParameters>,
+    /// `Quantum Safe` (KMIP §11) — client claim. The server SHALL
+    /// reject the request when the claim contradicts the actual
+    /// algorithm (e.g. AES + `QuantumSafe=true`). QS-M-2 pins this.
+    pub quantum_safe: Option<bool>,
 }
 
 pub(crate) fn extract_attrs(attrs: &[Attribute]) -> ExtractedAttrs {
     let mut out = ExtractedAttrs {
         algorithm: None, length: None, usage: None, name: None, uid: None,
         activation_date: None, deactivation_date: None, compromise_date: None,
-        cryptographic_parameters: None,
+        cryptographic_parameters: None, quantum_safe: None,
     };
     for a in attrs {
         match a {
@@ -387,10 +391,27 @@ pub(crate) fn extract_attrs(attrs: &[Attribute]) -> ExtractedAttrs {
             Attribute::DeactivationDate(t) => out.deactivation_date = OffsetDateTime::from_unix_timestamp(*t).ok(),
             Attribute::CompromiseDate(t)   => out.compromise_date   = OffsetDateTime::from_unix_timestamp(*t).ok(),
             Attribute::CryptographicParameters(cp) => out.cryptographic_parameters = Some(cp.clone()),
+            Attribute::QuantumSafe(b)              => out.quantum_safe = Some(*b),
             _ => {}
         }
     }
     out
+}
+
+/// KMIP 3.0 §11 attribute table — `Quantum Safe = true` is a
+/// server claim that the wrapped key's algorithm is resistant to
+/// quantum attack. ML-DSA / ML-KEM / SLH-DSA / XMSS{MT} qualify;
+/// classical AES / RSA / ECDSA / DSA / EdDSA do not. QS-M-2 pins
+/// this — a Create with AES + `QuantumSafe=true` must fail.
+pub(crate) fn algorithm_is_quantum_safe(a: crate::kmip30::KmipAlgorithm) -> bool {
+    use crate::kmip30::KmipAlgorithm::*;
+    matches!(a,
+        MlKem512 | MlKem768 | MlKem1024
+        | MlDsa44 | MlDsa65 | MlDsa87
+        | SlhDsaSha2_128s | SlhDsaSha2_128f
+        | SlhDsaSha2_192s | SlhDsaSha2_192f
+        | SlhDsaSha2_256s | SlhDsaSha2_256f
+    )
 }
 
 /// KMIP 3.0 Spec §3.x — derive a managed-object's lifecycle state from

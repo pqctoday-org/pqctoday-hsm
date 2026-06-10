@@ -1133,6 +1133,27 @@ fn decode_attribute_v3(frame: &TtlvFrame) -> Result<Option<Attribute>, WireError
         tags::CryptographicParameters => Attribute::CryptographicParameters(
             decode_cryptographic_parameters(frame)?,
         ),
+        // KMIP 3.0 §11 — `Attribute` (0x420008) is the v1.x-style
+        // vendor-extension envelope: VendorIdentification + AttributeName
+        // + AttributeValue. v3.0 keeps this Structure for client-defined
+        // custom attributes (SKFF-M-{9,10,11} step #10 exercises it).
+        tags::Attribute => {
+            let inner = expect_structure(frame, "Attribute")?;
+            let mut name = String::new();
+            let mut value = String::new();
+            for c in inner {
+                match c.tag.0 {
+                    tags::AttributeName => {
+                        if let Value::TextString(s) = &c.value { name = s.clone(); }
+                    }
+                    tags::AttributeValue => {
+                        if let Value::TextString(s) = &c.value { value = s.clone(); }
+                    }
+                    _ => {} // VendorIdentification + future fields ignored in v0.1
+                }
+            }
+            Attribute::Custom { name, value }
+        }
         // KMIP 3.0 §11 Certificate attributes — needed so that
         // ModifyAttribute(<CertificateLength …>) decodes to a real
         // Attribute variant (and the read-only gate can reject it).
@@ -2068,12 +2089,26 @@ fn decode_delete_attribute_req(children: &[TtlvFrame]) -> Result<DeleteAttribute
         match c.tag.0 {
             tags::CurrentAttribute => current = Some(decode_attribute_wrapper(c, "Current Attribute")?),
             tags::AttributeReference => {
-                // KMIP 3.0 §11: AttributeReference is an "enumerable Tag"
-                // — value is the 4-byte tag codepoint of the named
-                // attribute. We surface the spec-form human-readable
-                // name to the handler.
-                if let Value::Enumeration(tag_code) = c.value {
-                    attr_ref = Some(tag_name_from_code(tag_code).to_string());
+                // KMIP 3.0 §11: AttributeReference is normally an
+                // Enumeration whose value is the attribute's 4-byte
+                // tag codepoint. For vendor-extension Custom attributes
+                // it's instead a Structure carrying VendorIdentification
+                // + AttributeName (SKFF-M-{9,10,11} step #12). Honour
+                // both shapes.
+                match &c.value {
+                    Value::Enumeration(tag_code) => {
+                        attr_ref = Some(tag_name_from_code(*tag_code).to_string());
+                    }
+                    Value::Structure(kids) => {
+                        for k in kids {
+                            if k.tag.0 == tags::AttributeName {
+                                if let Value::TextString(s) = &k.value {
+                                    attr_ref = Some(s.clone());
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
             _ => {}
@@ -2404,6 +2439,59 @@ fn tag_code_from_name(name: &str) -> Option<u32> {
         "Name"                   => tags::Name,
         "InitialDate"            => tags::InitialDate,
         "ActivationDate"         => tags::ActivationDate,
+        "DeactivationDate"       => tags::DeactivationDate,
+        "DestroyDate"            => tags::DestroyDate,
+        "CompromiseDate"         => tags::CompromiseDate,
+        "CompromiseOccurrenceDate" => tags::CompromiseOccurrenceDate,
+        "LastChangeDate"         => tags::LastChangeDate,
+        "OriginalCreationDate"   => tags::OriginalCreationDate,
+        "ProcessStartDate"       => tags::ProcessStartDate,
+        "ProtectStopDate"        => tags::ProtectStopDate,
+        "RotateDate"             => tags::RotateDate,
+        "Sensitive"              => tags::Sensitive,
+        "AlwaysSensitive"        => tags::AlwaysSensitive,
+        "Extractable"            => tags::Extractable,
+        "NeverExtractable"       => tags::NeverExtractable,
+        "Fresh"                  => tags::Fresh,
+        "KeyValuePresent"        => tags::KeyValuePresent,
+        "QuantumSafe"            => tags::QuantumSafe,
+        "RotateAutomatic"        => tags::RotateAutomatic,
+        "ShortUniqueIdentifier"  => tags::ShortUniqueIdentifier,
+        "AlternativeName"        => tags::AlternativeName,
+        "Comment"                => tags::Comment,
+        "Description"            => tags::Description,
+        "ContactInformation"     => tags::ContactInformation,
+        "ObjectClass"            => tags::ObjectClass,
+        "KeyValueLocation"       => tags::KeyValueLocation,
+        "X509CertificateIdentifier" => tags::X509CertificateIdentifier,
+        "X509CertificateIssuer"  => tags::X509CertificateIssuer,
+        "X509CertificateSubject" => tags::X509CertificateSubject,
+        "RotateName"             => tags::RotateName,
+        "CertificateType"        => tags::CertificateType,
+        "CertificateLength"      => tags::CertificateLength,
+        "CertificateValue"       => tags::CertificateValue,
+        "CertificateSubjectCN"   => tags::CertificateSubjectCN,
+        "DigitalSignatureAlgorithm" => tags::DigitalSignatureAlgorithm,
+        "NistKeyType"            => tags::NistKeyType,
+        "ProtectionLevel"        => tags::ProtectionLevel,
+        // `Revocation Reason` (0x420081) is the outer Structure tag the
+        // attribute table references. The inner `RevocationReasonCode`
+        // (0x42007f) is just one child of that Structure and isn't a
+        // standalone attribute name.
+        "RevocationReason"       => tags::RevocationReason,
+        "DeactivationReason"     => tags::DeactivationReason,
+        "KeyFormatType"          => tags::KeyFormatType,
+        "LeaseTime"              => tags::LeaseTime,
+        "ProtectionPeriod"       => tags::ProtectionPeriod,
+        "RotateInterval"         => tags::RotateInterval,
+        "RotateOffset"           => tags::RotateOffset,
+        "RotateGeneration"       => tags::RotateGeneration,
+        "UsageLimits"            => tags::UsageLimits,
+        "ProtectionStorageMask"  => tags::ProtectionStorageMask,
+        "ProtectionStorageMasks" => tags::ProtectionStorageMasks,
+        "Digest"                 => tags::Digest,
+        "RandomNumberGenerator"  => tags::RandomNumberGenerator,
+        "CryptographicParameters" => tags::CryptographicParameters,
         _ => return None,
     })
 }

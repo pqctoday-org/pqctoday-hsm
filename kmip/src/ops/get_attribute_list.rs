@@ -71,16 +71,20 @@ pub fn get_attribute_list(
     if obj.destroy_date.is_some()                  { names.push("Destroy Date".into()); }
     if obj.compromise_date.is_some()               { names.push("Compromise Date".into()); }
     if obj.compromise_occurrence_date.is_some()    { names.push("Compromise Occurrence Date".into()); }
-    if obj.last_change_date.is_some()              { names.push("Last Change Date".into()); }
-    if obj.original_creation_date.is_some()        { names.push("Original Creation Date".into()); }
+    // Last Change Date + Original Creation Date are always emitted
+    // below in the "always present" baseline section.
     if obj.process_start_date.is_some()            { names.push("Process Start Date".into()); }
     if obj.protect_stop_date.is_some()             { names.push("Protect Stop Date".into()); }
     if obj.rotate_date.is_some()                   { names.push("Rotate Date".into()); }
-    if obj.sensitive.is_some()                     { names.push("Sensitive".into()); }
-    if obj.always_sensitive.is_some()              { names.push("Always Sensitive".into()); }
-    if obj.extractable.is_some()                   { names.push("Extractable".into()); }
-    if obj.never_extractable.is_some()             { names.push("Never Extractable".into()); }
-    if obj.fresh.is_some()                         { names.push("Fresh".into()); }
+    // KMIP 3.0 §11 — Sensitive / Extractable / AlwaysSensitive /
+    // NeverExtractable / Fresh are mandatory on every managed object
+    // (defaulted in `get_attributes::attributes_from_record`); the
+    // attribute-LIST surface must mirror what GetAttributes returns.
+    names.push("Sensitive".into());
+    names.push("Always Sensitive".into());
+    names.push("Extractable".into());
+    names.push("Never Extractable".into());
+    names.push("Fresh".into());
     if obj.key_value_present.is_some()             { names.push("Key Value Present".into()); }
     if obj.quantum_safe.is_some()                  { names.push("Quantum Safe".into()); }
     if obj.rotate_automatic.is_some()              { names.push("Rotate Automatic".into()); }
@@ -89,7 +93,10 @@ pub fn get_attribute_list(
     if obj.comment.is_some()                       { names.push("Comment".into()); }
     if obj.description.is_some()                   { names.push("Description".into()); }
     if obj.contact_information.is_some()           { names.push("Contact Information".into()); }
-    if obj.object_class.is_some()                  { names.push("Object Class".into()); }
+    // Object Class / Lease Time / Key Format Type / Digest /
+    // Random Number Generator / Last Change Date are always
+    // surfaced by GetAttributes — mirror them here.
+    names.push("Object Class".into());
     if obj.key_value_location.is_some()            { names.push("Key Value Location".into()); }
     if obj.x509_certificate_identifier.is_some()   { names.push("X.509 Certificate Identifier".into()); }
     if obj.x509_certificate_issuer.is_some()       { names.push("X.509 Certificate Issuer".into()); }
@@ -101,9 +108,15 @@ pub fn get_attribute_list(
     if obj.protection_level.is_some()              { names.push("Protection Level".into()); }
     if obj.revocation_reason_code.is_some()        { names.push("Revocation Reason".into()); }
     if obj.deactivation_reason_code.is_some()      { names.push("Deactivation Reason".into()); }
-    if obj.key_format_type.is_some()               { names.push("Key Format Type".into()); }
+    names.push("Key Format Type".into());
+    names.push("Digest".into());
+    names.push("Random Number Generator".into());
+    names.push("Last Change Date".into());
+    names.push("Original Creation Date".into());
+    names.push("Short Unique Identifier".into());
+    names.push("Protection Storage Mask".into());
     if obj.certificate_length.is_some()            { names.push("Certificate Length".into()); }
-    if obj.lease_time.is_some()                    { names.push("Lease Time".into()); }
+    names.push("Lease Time".into());
     if obj.protection_period.is_some()             { names.push("Protection Period".into()); }
     if obj.rotate_interval.is_some()               { names.push("Rotate Interval".into()); }
     if obj.rotate_offset.is_some()                 { names.push("Rotate Offset".into()); }

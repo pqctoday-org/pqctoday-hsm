@@ -334,6 +334,17 @@ def compare_responses(
         if norm_tag == _norm("Attributes"):
             return _compare_attributes_container(expected, actual, bindings)
 
+        # §4.1.2 item 5 also applies to the GetAttributeList
+        # `ResponsePayload` itself: it returns the UID + a series
+        # of `AttributeReference` Enumerations whose ORDER is
+        # explicitly variable per spec. Switch to bag semantics
+        # for that op's payload (SKFF-M-9/-10/-11 exercise it).
+        if (
+            norm_tag == _norm("ResponsePayload")
+            and op_context == "GetAttributeList"
+        ):
+            return _compare_attribute_reference_list(expected, actual, bindings)
+
         # Default: positional child compare. KMIP message structures are
         # positional per the main spec §6 unless §4.1 grants a variation
         # — see the carve-outs above. Drop optional-presence tags
@@ -455,6 +466,58 @@ def _compare_attributes_container(
                 f"Attributes: no actual {ec.tag_name!r} matches expected value"
             )
         candidates.pop(matched_idx)
+    return True, "ok"
+
+
+def _compare_attribute_reference_list(
+    expected: TtlvNode,
+    actual: TtlvNode,
+    bindings: Bindings,
+) -> tuple[bool, str]:
+    """KMIP Profiles v3.0 §4.1.2 item 5 — GetAttributeList ResponsePayload
+    returns the UniqueIdentifier + an unordered list of AttributeReference
+    Enumerations naming every attribute on the object.
+
+    Implementation: separate UniqueIdentifier (positional, mandatory first
+    child) from the AttributeReference bag. The expected bag must be a
+    subset of the actual bag (server MAY include extras per §4.1.1 item 20).
+    """
+    # Split UniqueIdentifier (positional) from the AttributeReference bag.
+    def split(node: TtlvNode):
+        uid = None
+        refs = []
+        for c in node.children:
+            if _norm(c.tag_name) == _norm("UniqueIdentifier"):
+                uid = c
+            elif _norm(c.tag_name) == _norm("AttributeReference"):
+                refs.append(c)
+        return uid, refs
+
+    e_uid, e_refs = split(expected)
+    a_uid, a_refs = split(actual)
+    if e_uid is not None and a_uid is None:
+        return False, "ResponsePayload: missing UniqueIdentifier"
+    if e_uid is not None and a_uid is not None:
+        ok, why = compare_responses(e_uid, a_uid, bindings, "GetAttributeList")
+        if not ok:
+            return False, f"ResponsePayload/{why}"
+    # Bag semantics on AttributeReference values. Each expected ref must
+    # resolve to a tag codepoint that also appears in the actual list.
+    from conformance.harness.oasis_codec import table
+    actual_codes = {a.value for a in a_refs}
+    for er in e_refs:
+        ev = er.value
+        if isinstance(ev, str):
+            ec = table().tag_name_to_code.get(_norm(ev))
+            ok = ec is not None and ec in actual_codes
+        else:
+            ok = ev in actual_codes
+        if not ok:
+            return False, (
+                f"ResponsePayload/AttributeReference: expected {ev!r} not "
+                f"present in actual list (§4.1.2 item 5 — order variable, "
+                f"omissions are non-conformant)"
+            )
     return True, "ok"
 
 
