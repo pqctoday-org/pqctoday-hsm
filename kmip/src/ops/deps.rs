@@ -12,11 +12,23 @@
 //! Phase 7 (TLS server) constructs `Deps` once at process start and
 //! shares it across all per-connection tasks.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use crate::auditlog::AuditSink;
 use crate::policy::Engine;
 use crate::store::KeyStore;
+
+/// One in-flight multi-part cryptographic operation (KMIP 3.0 §6.1.21 /
+/// §6.1.16 streaming: `Init Indicator` → [parts…] → `Final Indicator`,
+/// chained by the server-issued `Correlation Value`).
+pub struct StreamCtx {
+    /// The engine streaming state (owns key schedule + GHASH/CBC chain).
+    pub cipher: softhsmrustv3::crypto::multipart::MultipartCipher,
+    /// UID the stream was initialised against — §6.1.21 requires every
+    /// part to target the same key.
+    pub uid: String,
+}
 
 /// Runtime configuration the op handlers need.
 #[derive(Clone, Debug)]
@@ -61,6 +73,12 @@ pub struct Deps {
     /// engine and passes `Some(session)`. Closes the §12.7.7 lock from
     /// `IMPLEMENTATION_PLAN.md` once every op handler honours this branch.
     pub engine_session: Option<u32>,
+    /// Active multi-part Encrypt/Decrypt streams, keyed by the
+    /// server-issued `Correlation Value` (KMIP 3.0 §6.1.21). Lives on
+    /// `Deps` so streams survive across requests on the same server.
+    pub streams: Mutex<HashMap<Vec<u8>, StreamCtx>>,
+    /// Monotonic source for fresh correlation values.
+    pub next_correlation: std::sync::atomic::AtomicU64,
 }
 
 impl Deps {
@@ -76,7 +94,17 @@ impl Deps {
             sink,
             config,
             engine_session: None,
+            streams: Mutex::new(HashMap::new()),
+            next_correlation: std::sync::atomic::AtomicU64::new(1),
         }
+    }
+
+    /// Issue a fresh 8-byte correlation value for a new multi-part stream.
+    pub fn new_correlation_value(&self) -> Vec<u8> {
+        let n = self
+            .next_correlation
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        n.to_be_bytes().to_vec()
     }
 
     /// Construct with an engine session for real bridge wiring. Used by

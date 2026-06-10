@@ -226,6 +226,11 @@ mod tags {
     pub const Pkcs11OutputParameters: u32 = 0x42_015c;
     pub const Pkcs11ReturnCode: u32       = 0x42_015d;
     pub const CorrelationValue: u32       = 0x42_00d6;
+    // KMIP 3.0 §6.1.21 multi-part streaming (verified from
+    // kmip-spec-3.0-tags-enums.json: Init Indicator = 0x4200d7,
+    // Final Indicator = 0x4200d8).
+    pub const InitIndicator: u32          = 0x42_00d7;
+    pub const FinalIndicator: u32         = 0x42_00d8;
     // ── KMIP Profiles v3.0 §5.1.2 Baseline Server attribute tags ──
     pub const DestroyDate: u32                   = 0x42_0033;
     pub const CompromiseDate: u32                = 0x42_0020;
@@ -939,6 +944,9 @@ fn decode_encrypt_req(children: &[TtlvFrame]) -> Result<EncryptRequest, WireErro
     let mut data = Vec::new();
     let mut iv = None;
     let mut cp = None;
+    let mut init_indicator = None;
+    let mut final_indicator = None;
+    let mut correlation_value = None;
     for c in children {
         match c.tag.0 {
             tags::Data => {
@@ -950,6 +958,16 @@ fn decode_encrypt_req(children: &[TtlvFrame]) -> Result<EncryptRequest, WireErro
             tags::CryptographicParameters => {
                 cp = Some(decode_cryptographic_parameters(c)?);
             }
+            // KMIP 3.0 §6.1.21 multi-part streaming fields.
+            tags::InitIndicator => {
+                if let Value::Boolean(b) = &c.value { init_indicator = Some(*b); }
+            }
+            tags::FinalIndicator => {
+                if let Value::Boolean(b) = &c.value { final_indicator = Some(*b); }
+            }
+            tags::CorrelationValue => {
+                if let Value::ByteString(b) = &c.value { correlation_value = Some(b.clone()); }
+            }
             _ => {}
         }
     }
@@ -959,25 +977,45 @@ fn decode_encrypt_req(children: &[TtlvFrame]) -> Result<EncryptRequest, WireErro
             if let Value::ByteString(b) = &c.value { aad = Some(b.clone()); }
         }
     }
-    Ok(EncryptRequest { uid, data, iv, cryptographic_parameters: cp, aad })
+    Ok(EncryptRequest {
+        uid,
+        data,
+        iv,
+        cryptographic_parameters: cp,
+        aad,
+        init_indicator,
+        final_indicator,
+        correlation_value,
+    })
 }
 
 fn encode_encrypt_resp(r: &EncryptResponse) -> Vec<TtlvFrame> {
+    // Field order follows the §6.1.21 Encrypt response-payload table:
+    // Unique Identifier, Data, IV/Counter/Nonce, Correlation Value,
+    // Authenticated Encryption Tag. CS-BC-M-GCM-2 pair #111 pins the
+    // IV-before-tag ordering when RandomIV generates both.
     let mut out = vec![
         TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString(r.uid.clone())),
         TtlvFrame::new(Tag(tags::Data), Value::ByteString(r.ciphertext.clone())),
     ];
-    if let Some(tag) = &r.authenticated_encryption_tag {
-        out.push(TtlvFrame::new(
-            Tag(tags::AuthenticatedEncryptionTag),
-            Value::ByteString(tag.clone()),
-        ));
-    }
     if let Some(iv) = &r.iv_counter_nonce {
         // KMIP 3.0 §6.1.21 — server-generated IV/Counter/Nonce when
         // the key's `RandomIV` is true. CS-BC-M-13 expects the server
         // to emit this field with the IV it used.
         out.push(TtlvFrame::new(Tag(tags::IvCounterNonce), Value::ByteString(iv.clone())));
+    }
+    if let Some(cv) = &r.correlation_value {
+        // §6.1.21 — handle for the client to chain the next stream part.
+        out.push(TtlvFrame::new(
+            Tag(tags::CorrelationValue),
+            Value::ByteString(cv.clone()),
+        ));
+    }
+    if let Some(tag) = &r.authenticated_encryption_tag {
+        out.push(TtlvFrame::new(
+            Tag(tags::AuthenticatedEncryptionTag),
+            Value::ByteString(tag.clone()),
+        ));
     }
     if let Some(ss) = &r.shared_secret {
         // ML-KEM shared secret rides in IvCounterNonce slot for v0.1 — a

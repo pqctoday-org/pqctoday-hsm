@@ -234,6 +234,13 @@ class Bindings:
     matters.
     """
     values: dict[str, Any] = field(default_factory=dict)
+    # Tag-name auto-binds ($MAC_DATA et al.) — a RESOLUTION FALLBACK
+    # only. Kept separate from `values` so an eager tag-name bind
+    # never shadows the comparator's bind-on-first-use of an explicit
+    # corpus placeholder (CS-BC-M-GCM-2 pair #111: the response's
+    # $AUTHENTICATED_ENCRYPTION_TAG must bind THERE, not inherit the
+    # tag value auto-harvested from pair #1).
+    auto_values: dict[str, Any] = field(default_factory=dict)
 
     def bind(self, name: str, value: Any) -> None:
         if name in self.values and self.values[name] != value:
@@ -261,6 +268,9 @@ class Bindings:
                 value = str(int(time.time()) + offset)
             elif value in self.values:
                 value = self.values[value]
+            elif value in self.auto_values:
+                # Tag-name auto-bind fallback (see `auto_values`).
+                value = self.auto_values[value]
             else:
                 raise ValueError(f"unresolved placeholder {value!r} on {node.tag_name}")
         return TtlvNode(
@@ -310,9 +320,11 @@ class Bindings:
             auto = _tag_to_placeholder(expected.tag_name)
             if auto:
                 key = f"${auto}"
-                if key not in self.values:
-                    # First-write wins; never overwrite an explicit bind.
-                    self.values[key] = actual.value
+                if key not in self.auto_values:
+                    # First-write wins. Stored in the FALLBACK map so an
+                    # explicit corpus placeholder of the same name still
+                    # binds on first use in the comparator.
+                    self.auto_values[key] = actual.value
         # Container traversal.
         if _norm(expected.tag_name) == _norm("Attributes"):
             # Tag-name-aware: pair each expected child to the FIRST

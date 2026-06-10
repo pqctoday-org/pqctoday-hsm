@@ -1,5 +1,12 @@
 # OASIS KMIP 3.0 Conformance — Residual 91 FAILs — Deep Analysis + Remediation Plan
 
+> **HISTORICAL (resolved).** This analysis dates from the PR #88 era
+> (11/102 passing). All eight root-cause families below were remediated
+> across PRs #88–#89; standing as of 2026-06-10 is **91 PASS / 1 FAIL
+> (AX-M-2, KMIP key wrapping — v0.2 deferral) / 10 deliberate skips**.
+> Kept for the audit trail; see `kmip/conformance/REPLAY_REPORT.md` for
+> the live per-test table.
+
 **Status snapshot:** PR #88 lands PASS 11/102. The 91 residual FAILs are
 clustered into 8 root-cause families. Each family below cites the
 specific KMIP 3.0 spec section it violates and proposes a contained

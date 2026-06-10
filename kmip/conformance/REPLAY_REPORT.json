@@ -1,8 +1,8 @@
 {
-  "generated_at": 1781106667,
+  "generated_at": 1781128131,
   "summary": {
-    "pass": 89,
-    "fail": 3,
+    "pass": 91,
+    "fail": 1,
     "error": 0,
     "skip_op": 0,
     "skip_parse": 0,
@@ -733,8 +733,8 @@
     },
     {
       "name": "CS-BC-M-GCM-2-30.xml",
-      "status": "FAIL",
-      "detail": "msg #21: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1",
+      "status": "PASS",
+      "detail": "",
       "ops_used": [
         "Decrypt",
         "Destroy",
@@ -745,8 +745,8 @@
     },
     {
       "name": "CS-BC-M-GCM-3-30.xml",
-      "status": "FAIL",
-      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1",
+      "status": "PASS",
+      "detail": "",
       "ops_used": [
         "Destroy",
         "Encrypt",

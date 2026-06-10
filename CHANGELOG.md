@@ -6,6 +6,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [Unreleased]
+
+### Added
+
+- **kmip — multi-part streaming `Encrypt` + arbitrary GCM IV lengths: OASIS conformance 89 → 91 of 92 actionable tests (98.9%)** (`kmip/src/ops/encrypt.rs`, `kmip/src/ops/deps.rs`, `kmip/src/kmip30/{ops,wire}.rs`, `rust/src/crypto/multipart.rs`, `rust/src/native/encrypt.rs`). Closes CS-BC-M-GCM-2 and CS-BC-M-GCM-3, the last two crypto-op conformance failures. (1) KMIP 3.0 §6.1.21 streaming: `Init Indicator` opens a stream (server issues a `Correlation Value`), chained parts feed the engine's PKCS#11 §5.2 Update state machines held on `Deps::streams`, `Final Indicator` closes it emitting the AEAD tag — wire codec gains `InitIndicator` (0x4200d7) / `FinalIndicator` (0x4200d8) / payload `CorrelationValue` and the §6.1.21 response field ordering (IV → Correlation Value → Tag). (2) `GcmState` now accepts any SP 800-38D IV length — non-96-bit IVs derive J0 via GHASH (§7.1 step 2b; new NIST test-case-5 KAT with 64-bit IV) — and `native::aes_gcm_{en,de}crypt` were rewritten on top of it, replacing the typenum matrix (adds AES-192 + 12–16-byte truncated tags uniformly). (3) AEAD tag split honours the request's `Tag Length` (a 15-byte tag over empty plaintext previously failed the hardcoded 16-byte split). The remaining failure, AX-M-2, is the documented KMIP-key-wrapping v0.2 deferral.
+
+### Fixed
+
+- **kmip — `CKM_CHACHA20` / `CKM_CHACHA20_POLY1305` codepoint drift vs the engine** (`kmip/src/kmip30/algos.rs`). The kmip crate's duplicated mech table still carried `0x1071`/`0x1093` after `softhsmrustv3::constants` was corrected to the normative `pkcs11t.h` values (`0x1226`/`0x4021`), so every ChaCha20 Encrypt resolved to an unknown engine mechanism (`CKR_MECHANISM_INVALID`). Re-pinned to the spec values with `pkcs11t.h` line citations.
+- **kmip conformance harness — tag-name auto-binds no longer shadow explicit corpus placeholders** (`kmip/conformance/harness/dispatcher_replay.py`). The eager `$TAG_NAME` auto-bind (added for `$MAC_DATA`) captured `$AUTHENTICATED_ENCRYPTION_TAG` from pair #1 of CS-BC-M-GCM-2, so the RandomIV pair #111's placeholder compared against a stale value. Auto-binds now live in a separate fallback map consulted only for request resolution; the comparator's bind-on-first-use always wins.
+- **Docs refreshed to the 91/92 reality** (`kmip/docs/CONFORMANCE_REPORT.md`, `kmip/docs/IMPLEMENTATION_PLAN.md`, `kmip/conformance/analysis/REMEDIATION_PLAN.md`). The conformance report's "12 ops, non-conformant, harness pending" sections, the plan's "Not Started" status header, and the PR-#88-era remediation analysis (11/102) were all stale; updated/bannered with current standing.
+
+---
+
 ## [0.6.0] — 2026-06-10
 
 **softhsmrustv3 PKCS#11 v3.2 conformance release** — the multi-part cipher work plus

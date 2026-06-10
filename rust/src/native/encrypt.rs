@@ -465,12 +465,14 @@ fn rsa_oaep_decrypt(priv_der: &[u8], ciphertext: &[u8], params: &OaepParams) -> 
 
 // ── AES-GCM ─────────────────────────────────────────────────────────────────
 
-/// AES-GCM encrypt with caller-selectable tag length.
+/// AES-GCM encrypt with caller-selectable tag length and IV length.
 ///
 /// `tag_len`: tag size in bytes (default 16; NIST SP 800-38D §5.2.1.2
-/// allows 12, 13, 14, 15, 16). Smaller tags reduce on-wire size at the
-/// cost of forgery probability. CS-BC-M-GCM-1 step #6 pins a 12-byte
-/// tag against the standard NIST AES-128-GCM test vector.
+/// allows 12–16). `iv`: any length ≥ 1 — non-96-bit IVs derive J0 via
+/// GHASH per §7.1 step 2b (OASIS CS-BC-M-GCM-2 pins 8- and 60-byte
+/// IVs). Backed by the KAT-verified streaming `GcmState`, which also
+/// covers AES-192 — the one-shot `aes-gcm` crate handles neither
+/// arbitrary IV lengths nor 24-byte keys.
 fn aes_gcm_encrypt(
     key: &[u8],
     iv: &[u8],
@@ -478,41 +480,21 @@ fn aes_gcm_encrypt(
     aad: &[u8],
     tag_len: Option<usize>,
 ) -> Result<Vec<u8>, CkRv> {
-    use aes_gcm::aead::generic_array::GenericArray;
-    use aes_gcm::aead::generic_array::typenum::{U12, U16};
-    use aes_gcm::{aead::{Aead, Payload}, AesGcm, Aes128Gcm, Aes256Gcm, KeyInit};
-    if iv.len() != 12 {
+    use crate::crypto::multipart::{AesKey, CipherDirection, GcmState, MultipartCipher};
+    if iv.is_empty() {
         return Err(CKR_ARGUMENTS_BAD);
     }
-    let nonce = GenericArray::from_slice(iv);
-    let payload = Payload { msg: plaintext, aad };
-    match (key.len(), tag_len.unwrap_or(16)) {
-        (16, 16) => {
-            let cipher = Aes128Gcm::new_from_slice(key).map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
-            cipher.encrypt(nonce, payload).map_err(|_| CKR_FUNCTION_FAILED)
-        }
-        (32, 16) => {
-            let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
-            cipher.encrypt(nonce, payload).map_err(|_| CKR_FUNCTION_FAILED)
-        }
-        (16, 12) => {
-            let cipher: AesGcm<aes::Aes128, U12, U12> =
-                AesGcm::new_from_slice(key).map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
-            cipher.encrypt(nonce, payload).map_err(|_| CKR_FUNCTION_FAILED)
-        }
-        (32, 12) => {
-            let cipher: AesGcm<aes::Aes256, U12, U12> =
-                AesGcm::new_from_slice(key).map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
-            cipher.encrypt(nonce, payload).map_err(|_| CKR_FUNCTION_FAILED)
-        }
-        // Silence-the-warning hint: `U16` is implicit in the default arms above.
-        (_, _) => {
-            let _ = std::marker::PhantomData::<U16>;
-            Err(CKR_KEY_TYPE_INCONSISTENT)
-        }
-    }
+    let k = AesKey::new(key).ok_or(CKR_KEY_TYPE_INCONSISTENT)?;
+    let tag_bits = (tag_len.unwrap_or(16) as u32) * 8;
+    let mut st =
+        MultipartCipher::Gcm(GcmState::new(k, iv, aad, tag_bits, CipherDirection::Encrypt));
+    let mut out = st.update(plaintext)?;
+    out.extend_from_slice(&st.finalize()?);
+    Ok(out)
 }
 
+/// AES-GCM decrypt. `ciphertext` carries the tag appended (the shim
+/// convention); tag verification failure → `CKR_ENCRYPTED_DATA_INVALID`.
 fn aes_gcm_decrypt(
     key: &[u8],
     iv: &[u8],
@@ -520,35 +502,17 @@ fn aes_gcm_decrypt(
     aad: &[u8],
     tag_len: Option<usize>,
 ) -> Result<Vec<u8>, CkRv> {
-    use aes_gcm::aead::generic_array::GenericArray;
-    use aes_gcm::aead::generic_array::typenum::U12;
-    use aes_gcm::{aead::{Aead, Payload}, AesGcm, Aes128Gcm, Aes256Gcm, KeyInit};
-    if iv.len() != 12 {
+    use crate::crypto::multipart::{AesKey, CipherDirection, GcmState, MultipartCipher};
+    if iv.is_empty() {
         return Err(CKR_ARGUMENTS_BAD);
     }
-    let nonce = GenericArray::from_slice(iv);
-    let payload = Payload { msg: ciphertext, aad };
-    match (key.len(), tag_len.unwrap_or(16)) {
-        (16, 16) => {
-            let cipher = Aes128Gcm::new_from_slice(key).map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
-            cipher.decrypt(nonce, payload).map_err(|_| CKR_ENCRYPTED_DATA_INVALID)
-        }
-        (32, 16) => {
-            let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
-            cipher.decrypt(nonce, payload).map_err(|_| CKR_ENCRYPTED_DATA_INVALID)
-        }
-        (16, 12) => {
-            let cipher: AesGcm<aes::Aes128, U12, U12> =
-                AesGcm::new_from_slice(key).map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
-            cipher.decrypt(nonce, payload).map_err(|_| CKR_ENCRYPTED_DATA_INVALID)
-        }
-        (32, 12) => {
-            let cipher: AesGcm<aes::Aes256, U12, U12> =
-                AesGcm::new_from_slice(key).map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
-            cipher.decrypt(nonce, payload).map_err(|_| CKR_ENCRYPTED_DATA_INVALID)
-        }
-        _ => Err(CKR_KEY_TYPE_INCONSISTENT),
-    }
+    let k = AesKey::new(key).ok_or(CKR_KEY_TYPE_INCONSISTENT)?;
+    let tag_bits = (tag_len.unwrap_or(16) as u32) * 8;
+    let mut st =
+        MultipartCipher::Gcm(GcmState::new(k, iv, aad, tag_bits, CipherDirection::Decrypt));
+    let mut out = st.update(ciphertext)?;
+    out.extend_from_slice(&st.finalize()?);
+    Ok(out)
 }
 
 // ── AES-ECB ────────────────────────────────────────────────────────────────

@@ -353,7 +353,7 @@ pub struct DestroyResponse {
 // Handler branches on key.algorithm — see §6 Phase 5 in
 // IMPLEMENTATION_PLAN.md.
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct EncryptRequest {
     pub uid: String,
     /// For classical encrypt: the plaintext. For ML-KEM encapsulation: the
@@ -370,9 +370,18 @@ pub struct EncryptRequest {
     /// AAD ("associated data") for AEAD ciphers (AES-GCM, ChaCha20-
     /// Poly1305). Bound into the auth tag computation, NOT encrypted.
     pub aad: Option<Vec<u8>>,
+    /// KMIP 3.0 §6.1.21 multi-part streaming — `Init Indicator` opens a
+    /// stream: the server returns a `Correlation Value` instead of
+    /// finalising. CS-BC-M-GCM-3 pins the GCM streaming flow.
+    pub init_indicator: Option<bool>,
+    /// §6.1.21 — `Final Indicator` closes the stream identified by
+    /// `correlation_value`; the response carries the AEAD tag.
+    pub final_indicator: Option<bool>,
+    /// §6.1.21 — server-issued handle chaining the parts of one stream.
+    pub correlation_value: Option<Vec<u8>>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct EncryptResponse {
     pub uid: String,
     /// For classical encrypt: the ciphertext. For ML-KEM: the encapsulation
@@ -391,6 +400,10 @@ pub struct EncryptResponse {
     /// back so the client can use it for the subsequent Decrypt.
     /// `None` when the client supplied the IV (or the mech is keyless).
     pub iv_counter_nonce: Option<Vec<u8>>,
+    /// §6.1.21 streaming — echoed on every non-final part so the client
+    /// can chain the next request. `None` for single-part ops and on
+    /// the final part.
+    pub correlation_value: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]

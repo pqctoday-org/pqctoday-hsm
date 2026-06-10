@@ -8,7 +8,7 @@ Focused implementation plan for the **KMIP 3.0 PKCS#11 wrapper** subsystem of `p
 | Language | **Rust (edition 2024)** — matches the parent repo's `rust/` engine (`softhsmrustv3`); no Go, no new language introduced |
 | **Required parent release** | **`pqctoday-hsm` ≥ v0.5.0** — ✅ **released 2026-06-04** as commit `025b074` (PR #65). `rust/Cargo.toml` aligned at `0.5.0`. All FIPS-surface fixes from the original §0.1 manifest are on `main`. **`main` is now a valid base.** The P0-ALGO-SURFACE algorithm expansion (vendor mech IDs `0x4040`+) ships in a future minor release. |
 | Goal | **Validate KMIP 3.0 with PQC + classical keys** by wrapping our PKCS#11 v3.2 HSM library as a KMIP 3.0 protocol surface |
-| Status | 🟦 Not Started |
+| Status | 🟩 **Phases 0–7b complete** (2026-06-08); OASIS conformance **91/92 actionable tests (98.9%)** as of 2026-06-10 — see [`CONFORMANCE_REPORT.md`](CONFORMANCE_REPORT.md). Open: AX-M-2 (KMIP key wrapping, v0.2), Phase 8/9 tooling tail (the Python replay harness supersedes the planned Rust compliance runner), §7 validation gate. |
 | License | MIT (matches `pqctoday-hsm` parent) |
 | Architecture choice | **Option A — thin KMIP wrapper directly over PKCS#11**, NO Thales kmip-go (no Go anywhere) |
 | Architecture model | **Three-plane model** (see [`THREE_PLANE_ARCHITECTURE.md`](THREE_PLANE_ARCHITECTURE.md)): Crypto Agility Management → KMIP 3.0 Key Management → PKCS#11 Crypto Execution |

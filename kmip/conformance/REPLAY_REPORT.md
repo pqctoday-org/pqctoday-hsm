@@ -1,6 +1,6 @@
 # OASIS KMIP 3.0 Dispatcher Replay Report
 
-Generated: 2026-06-10 15:51:07 UTC
+Generated: 2026-06-10 21:48:51 UTC
 
 
 ## Aggregate
@@ -8,8 +8,8 @@ Generated: 2026-06-10 15:51:07 UTC
 
 | Status | Count | % of total |
 |---|---|---|
-| **PASS** | 89 | 87.3% |
-| **FAIL** | 3 | 2.9% |
+| **PASS** | 91 | 89.2% |
+| **FAIL** | 1 | 1.0% |
 | ERROR | 0 | 0.0% |
 | SKIP_OP (op not implemented) | 0 | 0.0% |
 | SKIP_DEPRECATED (DES / 3DES / DSA out of scope) | 5 | 4.9% |
@@ -21,9 +21,9 @@ Generated: 2026-06-10 15:51:07 UTC
 
 Of the 92 tests that exercise only implemented + non-deprecated ops:
 
-  - **89 pass (97%)**
+  - **91 pass (99%)**
 
-  - 3 fail
+  - 1 fail
 
   - 0 errored
 
@@ -69,8 +69,6 @@ choice our server does not select:
 | Test | Status | Detail |
 |---|---|---|
 | `AX-M-2-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload/SymmetricKey/KeyBlock: child count 5 != 4 |
-| `CS-BC-M-GCM-2-30.xml` | FAIL | msg #21: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
-| `CS-BC-M-GCM-3-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
 | `AKLC-M-1-30.xml` | PASS |  |
 | `AKLC-M-2-30.xml` | PASS |  |
 | `AKLC-M-3-30.xml` | PASS |  |
@@ -133,6 +131,8 @@ choice our server does not select:
 | `CS-BC-M-CHACHA20-4-30.xml` | PASS |  |
 | `CS-BC-M-CHACHA20POLY1305-1-30.xml` | PASS |  |
 | `CS-BC-M-GCM-1-30.xml` | PASS |  |
+| `CS-BC-M-GCM-2-30.xml` | PASS |  |
+| `CS-BC-M-GCM-3-30.xml` | PASS |  |
 | `CS-RNG-M-1-30.xml` | PASS |  |
 | `CS-RNG-O-1-30.xml` | PASS |  |
 | `MSGENC-HTTPS-M-1-30.xml` | PASS |  |
