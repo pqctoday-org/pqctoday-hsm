@@ -73,6 +73,7 @@ tracing-subscriber = "0.3"
 # Crypto helpers (NOT for PQC — that's softhsmrustv3 — only for TLS bootstrap)
 rand        = "0.8"
 sha2        = "0.10"
+hmac        = "0.12"
 
 # IDs
 uuid = { version = "1", features = ["v4"] }
@@ -83,6 +84,14 @@ time = { version = "0.3", features = ["serde", "formatting", "parsing", "serde-w
 # Error handling
 thiserror = "1"
 anyhow    = "1"
+
+# X.509 DER parsing — KMIP §11 Certificate attributes (CertificateSubjectCN,
+# CertificateLength, CertificateIssuerCN, …) MUST be server-derived from the
+# Certificate Value DER bytes. PKCS#11 stores the DER as an opaque CKA_VALUE
+# blob with no parsing; the KMIP layer is responsible for the §11 attribute
+# surface. x509-parser is a no-std-compatible RFC 5280 parser used widely
+# (rustls-adjacent, Sequoia, ~7M/month downloads), MIT/Apache.
+x509-parser = "0.16"
 
 # HTML parsing — only used by the build-time `extract-kmip-spec` tool
 # (tools/extract_kmip_spec.rs). The OASIS KMIP 3.0 spec ships as Word-converted

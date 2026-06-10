@@ -72,9 +72,11 @@ pub fn activate(deps: &Deps, req: ActivateRequest, correlation_id: &str) -> Resu
         ));
     }
 
-    // Lifecycle transition.
+    // Lifecycle transition. Last Change Date follows per Baseline §5.1.2.
+    let now = OffsetDateTime::now_utc();
     obj.state = State::Active;
-    obj.activation_date = Some(OffsetDateTime::now_utc());
+    obj.activation_date = Some(now);
+    obj.last_change_date = Some(now);
     deps.store.update(obj.clone())?;
     emit_state_change(
         deps,
@@ -125,7 +127,19 @@ mod tests {
             initial_date: OffsetDateTime::UNIX_EPOCH,
             activation_date: None,
             supersedes: None,
-        }).unwrap();
+            name: None,
+
+            links: std::collections::HashMap::new(),
+
+            custom_attributes: std::collections::HashMap::new(),
+
+
+            key_material: None,
+
+
+            key_format_type: None,
+        ..ObjectRecord::default()
+}).unwrap();
     }
 
     const ALLOW_ALL: &str = "schema_version: 1\nmetadata: {name: t, description: t, authority: t, effective: always}\nrules: []\n";
@@ -158,7 +172,19 @@ mod tests {
             initial_date: OffsetDateTime::UNIX_EPOCH,
             activation_date: Some(OffsetDateTime::UNIX_EPOCH),
             supersedes: None,
-        }).unwrap();
+            name: None,
+
+            links: std::collections::HashMap::new(),
+
+            custom_attributes: std::collections::HashMap::new(),
+
+
+            key_material: None,
+
+
+            key_format_type: None,
+        ..ObjectRecord::default()
+}).unwrap();
         let err = activate(&d, ActivateRequest { uid: "urn:a".into() }, "c").unwrap_err();
         assert_eq!(err.result_reason(), crate::error::ResultReason::PermissionDenied);
     }

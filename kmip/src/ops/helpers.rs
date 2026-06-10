@@ -124,6 +124,8 @@ pub fn canonical_name(a: KmipAlgorithm) -> String {
         HmacSha384 => "HMAC-SHA-384",
         HmacSha512 => "HMAC-SHA-512",
         Ecdh => "ECDH",
+        ChaCha20 => "ChaCha20",
+        ChaCha20Poly1305 => "ChaCha20-Poly1305",
         MlKem512 => "ML-KEM-512",
         MlKem768 => "ML-KEM-768",
         MlKem1024 => "ML-KEM-1024",
@@ -148,6 +150,87 @@ pub fn canonical_name(a: KmipAlgorithm) -> String {
 
 /// State name string for the engine's `state` field — mirrors KMIP 3.0
 /// `State` enum names verbatim.
+/// Map a non-`Active` state to the spec-correct `ResultReason` for a
+/// cryptographic op that requires `Active` (KMIP 3.0 §11 Result Reason):
+///
+/// - `Destroyed` / `DestroyedCompromised` → `ObjectArchived` (0x0d)
+///   per Spec §6.1.19 — the object's material is gone.
+/// - `Deactivated` / `Compromised` → `WrongKeyLifecycleState` (0x43)
+///   per Spec §6.1.49 (Revoke) — the object exists but the FSM
+///   forbids the requested op.
+/// - `PreActive` → `WrongKeyLifecycleState` (0x43) — same family
+///   (key isn't ready yet).
+///
+/// `Active` MUST NOT be passed; the helper returns
+/// `WrongKeyLifecycleState` so a bug doesn't masquerade as a
+/// successful response.
+/// Pick the PKCS#11 mechanism for AES Encrypt / Decrypt off the key's
+/// stored `BlockCipherMode`. KMIP 3.0 §11 `Block Cipher Mode` enum:
+/// `CBC=1, ECB=2, PCBC=3, CFB=4, OFB=5, CTR=6, CMAC=7, CCM=8,
+/// GCM=9, NIST_KEY_WRAP=10, ...`. Falls back to GCM (the only mode
+/// our shim handled before) when the key carries no params.
+pub fn aes_mechanism_for(
+    cp: Option<&crate::kmip30::CryptographicParameters>,
+) -> u32 {
+    use softhsmrustv3::constants::{CKM_AES_CBC, CKM_AES_CBC_PAD, CKM_AES_ECB, CKM_AES_GCM};
+    let bcm = cp.and_then(|c| c.block_cipher_mode);
+    // KMIP 3.0 §11 `Padding Method` enum — codepoint 3 = `PKCS5`
+    // (synonym for PKCS#7 for AES). With BlockCipherMode=CBC this
+    // selects `CKM_AES_CBC_PAD`, which permits arbitrary-length
+    // plaintext (the shim's CBC_PAD path adds PKCS#7 padding).
+    let pad = cp.and_then(|c| c.padding_method);
+    match (bcm, pad) {
+        (Some(1), Some(3)) => CKM_AES_CBC_PAD,
+        (Some(1), _) => CKM_AES_CBC,
+        (Some(2), _) => CKM_AES_ECB,
+        (Some(9), _) | (None, _) => CKM_AES_GCM,
+        // Unimplemented modes (PCBC / CFB / OFB / CTR / wrap) fall
+        // through to GCM which the shim already supports; callers can
+        // upgrade `aes_mechanism_for` as the shim grows.
+        _ => CKM_AES_GCM,
+    }
+}
+
+/// Map a KMIP `CryptographicParameters` onto the shim's
+/// [`softhsmrustv3::native::OaepParams`]. Returns `None` when the key
+/// carries no params (callers should treat that as "use shim default
+/// = SHA-256 / MGF1-SHA-256 / no label").
+pub fn oaep_params_for(
+    cp: Option<&crate::kmip30::CryptographicParameters>,
+) -> Option<softhsmrustv3::native::OaepParams<'_>> {
+    use crate::kmip30::HashingAlgorithm;
+    use softhsmrustv3::native::OaepHash;
+    let cp = cp?;
+    let map_hash = |h: HashingAlgorithm| -> Option<OaepHash> {
+        match h {
+            HashingAlgorithm::Sha256 => Some(OaepHash::Sha256),
+            HashingAlgorithm::Sha384 => Some(OaepHash::Sha384),
+            HashingAlgorithm::Sha512 => Some(OaepHash::Sha512),
+            _ => None,
+        }
+    };
+    Some(softhsmrustv3::native::OaepParams {
+        hash: cp.hashing_algorithm.and_then(map_hash),
+        mgf_hash: cp.mask_generator_hashing_algorithm.and_then(map_hash),
+        label: cp.p_source.as_deref(),
+    })
+}
+
+/// All §3.x lifecycle-FSM rejections surface as
+/// `WrongKeyLifecycleState` (0x43): the object exists, the request
+/// is well-formed, but the FSM forbids the op given the current
+/// state (PreActive / Deactivated / Compromised / Destroyed /
+/// DestroyedCompromised).
+///
+/// `ObjectArchived` (0x0d) is **not** used here — per KMIP 3.0 §11
+/// it's reserved for objects moved off-line by the `Archive` op
+/// (§6.1.5) and needing `Recover` before use. OASIS CS-AC-M-8 pins
+/// `WrongKeyLifecycleState` for `Sign` against a `Destroyed` key,
+/// confirming the interpretation.
+pub fn non_active_state_error(uid: &str, state: crate::kmip30::State) -> KmipError {
+    KmipError::wrong_key_lifecycle_state(uid, state_name(state))
+}
+
 pub fn state_name(s: crate::kmip30::State) -> &'static str {
     use crate::kmip30::State::*;
     match s {
@@ -249,6 +332,19 @@ pub fn find_handle_for_object(
         ObjectType::SymmetricKey | ObjectType::SecretData => c::CKO_SECRET_KEY,
         // PKCS#11 CKO_CERTIFICATE = 0x01, not exposed in softhsmrustv3 constants
         ObjectType::Certificate => 0x01,
+        // KMIP-only object types — no PKCS#11 cryptoki class maps cleanly.
+        // Surface as ItemNotFound by returning a sentinel that never
+        // matches a real handle class (CKO_VENDOR_DEFINED start = 0x80000000).
+        ObjectType::SplitKey
+        | ObjectType::OpaqueObject
+        | ObjectType::PgpKey
+        | ObjectType::CertificateRequest
+        | ObjectType::User
+        | ObjectType::Group
+        | ObjectType::PasswordCredential
+        | ObjectType::DeviceCredential
+        | ObjectType::OneTimePasswordCredential
+        | ObjectType::HashedPasswordCredential => 0x80000000,
     };
     let handles = softhsmrustv3::native::find_all_by_cka_id(session, cka_id)?;
     for handle in handles {

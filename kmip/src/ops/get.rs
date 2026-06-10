@@ -34,18 +34,22 @@ pub fn get(deps: &Deps, req: GetRequest, correlation_id: &str) -> Result<GetResp
     let obj = deps
         .store
         .get(&req.uid)?
-        .ok_or_else(|| fail_err(deps, correlation_id, "Get", KmipError::not_found(&req.uid)))?;
+        .ok_or_else(|| fail_err(deps, correlation_id, "Get", KmipError::object_not_found(&req.uid)))?;
 
     // Per the lifecycle table in docs/IMPLEMENTATION_PLAN.md §3.4, Get is
     // allowed in every state including Deactivated / Compromised
     // (key material is needed to verify legacy signatures); only Destroyed
     // is blocked.
     if matches!(obj.state, State::Destroyed | State::DestroyedCompromised) {
+        // KMIP 3.0 §11 — `Object Destroyed` (0x36) is the spec-defined
+        // reason for accessing a Destroyed-state object via Get.
+        // BL-M-8 step #5 pins this code (vs the generic 0x0d
+        // `ObjectArchived` which is for the Archive op family).
         return Err(fail_err(
             deps,
             correlation_id,
             "Get",
-            KmipError::object_archived(&req.uid),
+            KmipError::object_destroyed(&req.uid),
         ));
     }
 
@@ -68,43 +72,73 @@ pub fn get(deps: &Deps, req: GetRequest, correlation_id: &str) -> Result<GetResp
     // CKA_VALUE on symmetric keys / CKA_PUBLIC_KEY_INFO on public keys).
     emit_pkcs11(deps, correlation_id, "C_GetAttributeValue", None, 0, "CKR_OK");
 
-    // Phase 7b: real material when a session is wired. Private keys
-    // remain opaque per PKCS#11 v3.2 §4.7 — `native::get_attribute`
-    // honours the CKA_SENSITIVE gate, returning None for sensitive
-    // private/secret keys (so we always emit OpaqueObject for those).
-    let (key_format, key_value) = match obj.object_type {
-        ObjectType::PrivateKey => (KeyFormatType::OpaqueObject, Vec::new()),
-        _ => match deps.engine_session {
-            Some(session) => {
-                // CKA_VALUE on public + symmetric keys is allowed by the
-                // sensitivity gate. None means "no engine state for this
-                // CKA_ID" — fall back to placeholder.
-                let bytes = softhsmrustv3::native::find_by_cka_id(session, &obj.pkcs11_cka_id)
-                    .ok()
-                    .flatten()
-                    .and_then(|h| {
-                        softhsmrustv3::native::get_attribute(
-                            session,
-                            h,
-                            softhsmrustv3::constants::CKA_VALUE,
-                        )
-                    });
-                match bytes {
-                    Some(v) => (KeyFormatType::Raw, v),
-                    None => (
-                        KeyFormatType::Raw,
-                        vec![0u8; (obj.cryptographic_length as usize).max(1)],
-                    ),
+    // KMIP 3.0 §6.1.21 Get returns the managed object exactly as the
+    // server holds it. Three-tier material lookup:
+    //   1. Client-supplied bytes captured at Register/Import time
+    //      (`obj.key_material`) — Profiles §4.1.1 item 7 carve-out for
+    //      "server-generated" material DOES NOT apply here.
+    //   2. Engine session lookup via CKA_VALUE — Plane-3 source for
+    //      keys the engine generated. Honours PKCS#11 v3.2 §4.7
+    //      CKA_SENSITIVE gate (private/secret keys return None).
+    //   3. Last resort: empty buffer. We DO NOT fabricate zeros — that
+    //      would silently corrupt KAT comparisons (BL-M-1 etc.).
+    //
+    // Private keys whose material is sensitive and not client-supplied
+    // surface as `KeyFormatType::OpaqueObject` with an empty value.
+    // KMIP 3.0 §11 `Key Format Type` enum — codepoints verified
+    // against `kmip-spec-3.0-tags-enums.json`. Only the variants
+    // we have typed `KeyFormatType` enum members for are surfaced;
+    // anything else maps to `Raw` so the round-trip is at least
+    // byte-faithful (the Get response will report `Raw` instead of
+    // the original codepoint, which is a smaller protocol violation
+    // than dropping the material entirely).
+    let stored_format = obj
+        .key_format_type
+        .and_then(|n| match n {
+            0x01 => Some(KeyFormatType::Raw),
+            0x02 => Some(KeyFormatType::OpaqueObject),
+            0x03 => Some(KeyFormatType::Pkcs1),
+            0x04 => Some(KeyFormatType::Pkcs8),
+            0x05 => Some(KeyFormatType::X509),
+            0x06 => Some(KeyFormatType::EcPrivateKey),
+            0x07 => Some(KeyFormatType::TransparentSymmetricKey),
+            _ => None,
+        });
+    let (key_format, key_value) = if let Some(bytes) = &obj.key_material {
+        (stored_format.unwrap_or(KeyFormatType::Raw), bytes.clone())
+    } else {
+        match obj.object_type {
+            ObjectType::PrivateKey => (KeyFormatType::OpaqueObject, Vec::new()),
+            _ => match deps.engine_session {
+                Some(session) => {
+                    let bytes = softhsmrustv3::native::find_by_cka_id(session, &obj.pkcs11_cka_id)
+                        .ok()
+                        .flatten()
+                        .and_then(|h| {
+                            softhsmrustv3::native::get_attribute(
+                                session,
+                                h,
+                                softhsmrustv3::constants::CKA_VALUE,
+                            )
+                        });
+                    match bytes {
+                        Some(v) => (KeyFormatType::Raw, v),
+                        None => (KeyFormatType::Raw, Vec::new()),
+                    }
                 }
-            }
-            None => (
-                KeyFormatType::Raw,
-                vec![0u8; (obj.cryptographic_length as usize).max(1)],
-            ),
-        },
+                None => (KeyFormatType::Raw, Vec::new()),
+            },
+        }
     };
 
     emit_success(deps, correlation_id, "Get");
+
+    // OpaqueObject — echo back the client-supplied OpaqueDataType
+    // (stashed in `certificate_type` at Register time).
+    let opaque_data_type = match obj.object_type {
+        ObjectType::OpaqueObject => obj.certificate_type,
+        _ => None,
+    };
 
     Ok(GetResponse {
         object_type: obj.object_type,
@@ -115,6 +149,7 @@ pub fn get(deps: &Deps, req: GetRequest, correlation_id: &str) -> Result<GetResp
             cryptographic_length: obj.cryptographic_length,
             key_value,
         },
+        opaque_data_type,
     })
 }
 
@@ -153,7 +188,19 @@ mod tests {
             initial_date: OffsetDateTime::UNIX_EPOCH,
             activation_date: None,
             supersedes: None,
-        }).unwrap();
+            name: None,
+
+            links: std::collections::HashMap::new(),
+
+            custom_attributes: std::collections::HashMap::new(),
+
+
+            key_material: None,
+
+
+            key_format_type: None,
+        ..ObjectRecord::default()
+}).unwrap();
     }
 
     #[test]
@@ -175,17 +222,17 @@ mod tests {
     }
 
     #[test]
-    fn get_destroyed_returns_object_archived() {
+    fn get_destroyed_returns_object_destroyed() {
         let d = deps_with();
         put(&d, "u", ObjectType::SymmetricKey, State::Destroyed);
         let err = get(&d, GetRequest { uid: "u".into() }, "c").unwrap_err();
-        assert_eq!(err.result_reason(), crate::error::ResultReason::ObjectArchived);
+        assert_eq!(err.result_reason(), crate::error::ResultReason::ObjectDestroyed);
     }
 
     #[test]
     fn get_missing_uid() {
         let d = deps_with();
         let err = get(&d, GetRequest { uid: "ghost".into() }, "c").unwrap_err();
-        assert_eq!(err.result_reason(), crate::error::ResultReason::ItemNotFound);
+        assert_eq!(err.result_reason(), crate::error::ResultReason::ObjectNotFound);
     }
 }

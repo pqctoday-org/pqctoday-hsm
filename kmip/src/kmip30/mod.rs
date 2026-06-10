@@ -16,26 +16,61 @@ pub mod ops;
 pub mod wire;
 
 pub use algos::{CkMechanismType, KmipAlgorithm, PkcsOp};
-pub use attrs::{Attribute, ObjectType, RevocationReason, State, UsageMask};
+pub use attrs::{
+    Attribute, DigestAttribute, ObjectType, RevocationReason, RngAttribute, State, UsageMask,
+};
 pub use ops::{
     ActivateRequest, ActivateResponse,
+    AddAttributeRequest, AddAttributeResponse,
+    AdjustAttributeRequest, AdjustAttributeResponse, AdjustmentType,
     CreateKeyPairRequest, CreateKeyPairResponse,
     CreateRequest, CreateResponse,
     DecryptRequest, DecryptResponse,
+    DeleteAttributeRequest, DeleteAttributeResponse,
     DestroyRequest, DestroyResponse,
     EncryptRequest, EncryptResponse,
+    GetAttributeListRequest, GetAttributeListResponse,
+    GetAttributesRequest, GetAttributesResponse,
     GetRequest, GetResponse,
+    InteropFunction, InteropRequest, InteropResponse,
     KeyBlock, KeyFormatType,
     LocateRequest, LocateResponse,
+    ModifyAttributeRequest, ModifyAttributeResponse,
     Operation,
     QueryFunction, QueryRequest, QueryResponse,
     RevokeRequest, RevokeResponse,
+    RngRetrieveRequest, RngRetrieveResponse,
+    RngSeedRequest, RngSeedResponse,
+    Pkcs11Request, Pkcs11Response,
+    CreateCredentialRequest, CreateCredentialResponse,
+    CreateGroupRequest, CreateGroupResponse,
+    CreateUserRequest, CreateUserResponse,
+    LogRequest, LogResponse,
+    LoginRequest, LoginResponse,
+    LogoutRequest, LogoutResponse,
+    PasswordCredential,
+    CryptographicParameters, HashingAlgorithm,
+    HashRequest, HashResponse,
+    MacRequest, MacResponse,
+    MacVerifyRequest, MacVerifyResponse,
+    ArchiveRequest, ArchiveResponse,
+    CheckRequest, CheckResponse,
+    DeactivateRequest, DeactivateResponse, DeactivationReason,
+    DiscoverVersionsRequest, DiscoverVersionsResponse,
+    ExportRequest, ExportResponse,
+    ImportRequest, ImportResponse,
+    ObliterateRequest, ObliterateResponse,
+    PingRequest, PingResponse,
+    RecoverRequest, RecoverResponse,
+    RegisterRequest, RegisterResponse,
     ServerInformation,
+    SetAttributeRequest, SetAttributeResponse,
     SignatureValidity,
     SignatureVerifyRequest, SignatureVerifyResponse,
     SignRequest, SignResponse,
 };
 
+pub use message::BatchErrorContinuationOption;
 pub use message::{
     RequestBatchItem, RequestHeader, RequestMessage, RequestPayload, ResponseBatchItem,
     ResponseHeader, ResponseMessage, ResponsePayload, ResultStatus, KMIP_VERSION_MAJOR,

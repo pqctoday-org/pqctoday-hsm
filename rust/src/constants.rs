@@ -8,6 +8,14 @@ pub const CKR_GENERAL_ERROR: u32 = 0x0000_0005;
 pub const CKR_FUNCTION_FAILED: u32 = 0x0000_0006;
 pub const CKR_ARGUMENTS_BAD: u32 = 0x0000_0007;
 pub const CKR_DATA_INVALID: u32 = 0x0000_0020;
+/// PKCS#11 v3.2 §6.16 — `CKR_DATA_LEN_RANGE`. Input plaintext length
+/// invalid for the mechanism (e.g. AES-ECB requires a non-zero
+/// multiple of 16 bytes).
+pub const CKR_DATA_LEN_RANGE: u32 = 0x0000_0021;
+/// PKCS#11 v3.2 §6.16 — `CKR_ENCRYPTED_DATA_LEN_RANGE`. Ciphertext
+/// length invalid for the mechanism (decrypt side counterpart of
+/// `CKR_DATA_LEN_RANGE`).
+pub const CKR_ENCRYPTED_DATA_LEN_RANGE: u32 = 0x0000_0041;
 pub const CKR_KEY_TYPE_INCONSISTENT: u32 = 0x0000_0063;
 pub const CKR_MECHANISM_INVALID: u32 = 0x0000_0070;
 pub const CKR_MECHANISM_PARAM_INVALID: u32 = 0x0000_0071;
@@ -212,12 +220,28 @@ pub const CKM_EDDSA_PH: u32 = 0xFFFF_1057;
 
 // AES
 pub const CKM_AES_KEY_GEN: u32 = 0x0000_1080;
+/// PKCS#11 v3.2 §6.10 — AES-ECB. No IV; plaintext MUST be a multiple
+/// of 16 bytes (no padding); ciphertext same length.
+pub const CKM_AES_ECB: u32     = 0x0000_1081;
+/// PKCS#11 v3.2 §6.10 — AES-CBC. 16-byte IV; plaintext MUST be a
+/// multiple of 16 bytes (no padding); use `CKM_AES_CBC_PAD` for
+/// PKCS#7 padding.
+pub const CKM_AES_CBC: u32     = 0x0000_1082;
 pub const CKM_AES_CBC_PAD: u32 = 0x0000_1085;
 pub const CKM_AES_CTR: u32 = 0x0000_1086;
 pub const CKM_AES_GCM: u32 = 0x0000_1087;
 pub const CKM_AES_KEY_WRAP: u32 = 0x0000_2109;
 pub const CKM_AES_KEY_WRAP_KWP: u32 = 0x0000_210A; // RFC 5649 (PKCS#11 v3.2)
 pub const CKM_AES_KEY_WRAP_PAD_LEGACY: u32 = 0x0000_108b; // SoftHSM2 legacy alias
+
+// ChaCha20 family — PKCS#11 v3.2 §6.20 (RFC 7539 / 8439 stream cipher
+// + AEAD). Vendor table verified against `pkcs11-mech-manifest.json`.
+/// `CKM_CHACHA20` — IETF ChaCha20 stream cipher. 32-byte key, 12-byte
+/// nonce. Distinct from the older 8-byte-nonce variant.
+pub const CKM_CHACHA20: u32 = 0x0000_1071;
+/// `CKM_CHACHA20_POLY1305` — IETF ChaCha20-Poly1305 AEAD (RFC 8439).
+/// 32-byte key, 12-byte nonce, 16-byte tag.
+pub const CKM_CHACHA20_POLY1305: u32 = 0x0000_1093;
 
 // ── PKCS#11 Parameter Sets ──────────────────────────────────────────────────
 

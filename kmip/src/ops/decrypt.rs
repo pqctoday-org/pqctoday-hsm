@@ -57,8 +57,31 @@ pub fn decrypt(deps: &Deps, req: DecryptRequest, correlation_id: &str) -> Result
                 deps,
                 correlation_id,
                 "Decrypt",
-                KmipError::object_archived(&req.uid),
+                super::helpers::non_active_state_error(&req.uid, obj.state),
             ));
+        }
+    }
+
+    // KMIP 3.0 §3.4 — `Process Start Date` / `Protect Stop Date`
+    // mirror gate: Decrypt also requires `now >= ProcessStartDate`
+    // (the key hasn't started its processing window yet otherwise).
+    // CS-BC-M-14 pins both edges for Decrypt as well as Encrypt.
+    if let Some(t) = obj.process_start_date {
+        if started < t {
+            return Err(fail_err(deps, correlation_id, "Decrypt",
+                KmipError::failed(
+                    crate::error::ResultReason::WrongKeyLifecycleState,
+                    "Decrypt: now < ProcessStartDate".to_string(),
+                )));
+        }
+    }
+    if let Some(t) = obj.protect_stop_date {
+        if started > t {
+            return Err(fail_err(deps, correlation_id, "Decrypt",
+                KmipError::failed(
+                    crate::error::ResultReason::WrongKeyLifecycleState,
+                    "Decrypt: now > ProtectStopDate".to_string(),
+                )));
         }
     }
 
@@ -136,35 +159,71 @@ fn decrypt_classical(
     obj: &crate::store::ObjectRecord,
     correlation_id: &str,
 ) -> Result<DecryptResponse> {
-    let mech = obj.algorithm.to_pkcs11_mech(PkcsOp::Decrypt).ok_or_else(|| {
-        KmipError::failed(
-            ResultReason::OperationNotSupported,
-            format!("{:?} has no Decrypt mechanism", obj.algorithm),
-        )
-    })?;
+    // KMIP 3.0 §6.1.21 — request-time `CryptographicParameters`
+    // override the key-attached value (mirrors Encrypt). The Baseline
+    // CS-BC tests put the mode on the call, not the key.
+    let effective_cp = req
+        .cryptographic_parameters
+        .as_ref()
+        .or(obj.cryptographic_parameters.as_ref());
+    let mech = match obj.algorithm {
+        KmipAlgorithm::Aes => super::helpers::aes_mechanism_for(effective_cp),
+        _ => obj.algorithm.to_pkcs11_mech(PkcsOp::Decrypt).ok_or_else(|| {
+            KmipError::failed(
+                ResultReason::OperationNotSupported,
+                format!("{:?} has no Decrypt mechanism", obj.algorithm),
+            )
+        })?,
+    };
     emit_pkcs11(deps, correlation_id, "C_DecryptInit", Some(mech), 0, "CKR_OK");
     emit_pkcs11(deps, correlation_id, "C_Decrypt", Some(mech), 0, "CKR_OK");
 
-    let plaintext = match (deps.engine_session, obj.algorithm) {
-        (Some(session), crate::kmip30::KmipAlgorithm::Aes) => {
-            let handle = softhsmrustv3::native::find_by_cka_id(session, &obj.pkcs11_cka_id)
-                .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Decrypt:find"))?
-                .ok_or_else(|| KmipError::not_found(&req.uid))?;
-            softhsmrustv3::native::decrypt(
-                session,
-                handle,
-                softhsmrustv3::constants::CKM_AES_GCM,
-                &req.data,
-                req.iv.as_deref(),
-            )
+    // KMIP 3.0 §6.1.21 + §11 — IV presence/size mismatches surface
+    // as `InvalidMessage` per spec (mirror of the Encrypt path).
+    super::encrypt::validate_iv_for_mech(deps, correlation_id, mech, req.iv.as_deref())?;
+
+    // KMIP 3.0 §6.1.21 Decrypt — Plane-3 dispatch through the
+    // PKCS#11 bridge. Mirrors the Encrypt path:
+    //   1. obj.key_material set (Register'd by client) → bridge with
+    //      raw bytes (RSA-OAEP private key DER for OAEP-* tests).
+    //   2. Engine session → look up the engine handle by CKA_ID.
+    //   3. Neither → placeholder for unit-test path.
+    let oaep = super::helpers::oaep_params_for(obj.cryptographic_parameters.as_ref());
+    let aad = req.aad.as_deref().unwrap_or(&[]);
+    let pkcs7_strip_ecb = mech == softhsmrustv3::constants::CKM_AES_ECB
+        && effective_cp.and_then(|c| c.padding_method) == Some(3);
+    let mut plaintext = if let Some(key_bytes) = &obj.key_material {
+        softhsmrustv3::native::decrypt_with_key_bytes(
+            key_bytes,
+            mech,
+            &req.data,
+            req.iv.as_deref(),
+            oaep.as_ref(),
+            aad,
+        )
+        .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Decrypt"))?
+    } else if let Some(session) = deps.engine_session {
+        let handle = softhsmrustv3::native::find_by_cka_id(session, &obj.pkcs11_cka_id)
+            .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Decrypt:find"))?
+            .ok_or_else(|| KmipError::not_found(&req.uid))?;
+        softhsmrustv3::native::decrypt(session, handle, mech, &req.data, req.iv.as_deref())
             .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Decrypt"))?
-        }
-        _ => {
-            let mut input = req.iv.clone().unwrap_or_default();
-            input.extend_from_slice(&req.data);
-            placeholder_bytes(&req.uid, &input, b"dec", input.len().max(16))
-        }
+    } else {
+        let mut input = req.iv.clone().unwrap_or_default();
+        input.extend_from_slice(&req.data);
+        placeholder_bytes(&req.uid, &input, b"dec", input.len().max(16))
     };
+    // KMIP 3.0 §11 PKCS5 strip — mirror of the Encrypt-side pad
+    // (see `encrypt.rs::pkcs7_pad_ecb`). The last byte tells us how
+    // many pad bytes to drop; validate it's in [1, 16] for a real
+    // PKCS#7 stream, otherwise leave the buffer untouched.
+    if pkcs7_strip_ecb {
+        if let Some(&pad) = plaintext.last() {
+            if (1..=16).contains(&pad) && plaintext.len() >= pad as usize {
+                plaintext.truncate(plaintext.len() - pad as usize);
+            }
+        }
+    }
     Ok(DecryptResponse { uid: req.uid.clone(), data: plaintext })
 }
 
@@ -220,14 +279,26 @@ mod tests {
             initial_date: OffsetDateTime::UNIX_EPOCH,
             activation_date: Some(OffsetDateTime::UNIX_EPOCH),
             supersedes: None,
-        }).unwrap();
+            name: None,
+
+            links: std::collections::HashMap::new(),
+
+            custom_attributes: std::collections::HashMap::new(),
+
+
+            key_material: None,
+
+
+            key_format_type: None,
+        ..ObjectRecord::default()
+}).unwrap();
     }
 
     #[test]
     fn ml_kem_branch_calls_decapsulate() {
         let (ring, d) = deps_and_ring();
         put(&d, "k", KmipAlgorithm::MlKem1024, ObjectType::PrivateKey, State::Active, UsageMask::KEY_AGREEMENT);
-        let r = decrypt(&d, DecryptRequest { uid: "k".into(), data: vec![0u8; 1568], iv: None }, "c").unwrap();
+        let r = decrypt(&d, DecryptRequest { uid: "k".into(), data: vec![0u8; 1568], iv: None , cryptographic_parameters: None, aad: None}, "c").unwrap();
         assert_eq!(r.data.len(), 32, "shared secret length");
         let p3: Vec<_> = ring.filter_plane(Plane::Pkcs11);
         assert!(p3.iter().any(|e| matches!(&e.event, EventPayload::Pkcs11Call { function, .. } if function == "C_DecapsulateKey")));
@@ -238,7 +309,7 @@ mod tests {
     fn classical_branch_calls_decrypt_init_then_decrypt() {
         let (ring, d) = deps_and_ring();
         put(&d, "a", KmipAlgorithm::Aes, ObjectType::SymmetricKey, State::Active, UsageMask::DECRYPT);
-        let _r = decrypt(&d, DecryptRequest { uid: "a".into(), data: vec![0; 32], iv: Some(vec![0; 12]) }, "c").unwrap();
+        let _r = decrypt(&d, DecryptRequest { uid: "a".into(), data: vec![0; 32], iv: Some(vec![0; 12]) , cryptographic_parameters: None, aad: None}, "c").unwrap();
         let p3: Vec<_> = ring.filter_plane(Plane::Pkcs11);
         assert!(p3.iter().any(|e| matches!(&e.event, EventPayload::Pkcs11Call { function, .. } if function == "C_DecryptInit")));
         assert!(p3.iter().any(|e| matches!(&e.event, EventPayload::Pkcs11Call { function, .. } if function == "C_Decrypt")));
@@ -248,14 +319,20 @@ mod tests {
     fn decrypt_allowed_in_deactivated_state() {
         let (_ring, d) = deps_and_ring();
         put(&d, "a", KmipAlgorithm::Aes, ObjectType::SymmetricKey, State::Deactivated, UsageMask::DECRYPT);
-        let _ = decrypt(&d, DecryptRequest { uid: "a".into(), data: vec![0; 32], iv: None }, "c").unwrap();
+        // AES-GCM (the default for KmipAlgorithm::Aes) requires a
+        // 12-byte IV per KMIP 3.0 §6.1.21 + NIST SP 800-38D. Supply
+        // one so the lifecycle gate is what's actually under test.
+        let _ = decrypt(&d, DecryptRequest { uid: "a".into(), data: vec![0; 32], iv: Some(vec![0; 12]) , cryptographic_parameters: None, aad: None}, "c").unwrap();
     }
 
     #[test]
     fn decrypt_pre_active_rejected() {
         let (_ring, d) = deps_and_ring();
         put(&d, "a", KmipAlgorithm::Aes, ObjectType::SymmetricKey, State::PreActive, UsageMask::DECRYPT);
-        let err = decrypt(&d, DecryptRequest { uid: "a".into(), data: vec![0; 32], iv: None }, "c").unwrap_err();
-        assert_eq!(err.result_reason(), ResultReason::ObjectArchived);
+        let err = decrypt(&d, DecryptRequest { uid: "a".into(), data: vec![0; 32], iv: None , cryptographic_parameters: None, aad: None}, "c").unwrap_err();
+        // KMIP 3.0 §11: PreActive is a lifecycle-state failure, not
+        // "object archived". ObjectArchived (0x0d) is reserved for
+        // Destroyed* per §6.1.19.
+        assert_eq!(err.result_reason(), ResultReason::WrongKeyLifecycleState);
     }
 }

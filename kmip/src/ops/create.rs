@@ -23,7 +23,7 @@ use uuid::Uuid;
 
 use crate::error::{KmipError, Result, ResultReason};
 use crate::kmip30::{
-    Attribute, CreateRequest, CreateResponse, KmipAlgorithm, ObjectType, PkcsOp, State, UsageMask,
+    Attribute, CreateRequest, CreateResponse, KmipAlgorithm, ObjectType, PkcsOp, UsageMask,
 };
 use crate::policy::{Decision, PolicyRequest};
 use crate::store::ObjectRecord;
@@ -101,6 +101,26 @@ pub fn create(deps: &Deps, req: CreateRequest, correlation_id: &str) -> Result<C
 
     let algo = parse_sym_algorithm(&resolved)?;
 
+    // KMIP 3.0 §11 — reject `QuantumSafe=true` claims on non-PQC
+    // algorithms. QS-M-2 pins this with AES + QuantumSafe=true →
+    // `GeneralFailure` "NOT_SAFE".
+    {
+        let x = super::register_import_export::extract_attrs(&req.template_attribute);
+        if matches!(x.quantum_safe, Some(true))
+            && !super::register_import_export::algorithm_is_quantum_safe(algo)
+        {
+            return Err(fail_err(
+                deps,
+                correlation_id,
+                "Create",
+                KmipError::failed(
+                    ResultReason::GeneralFailure,
+                    format!("QuantumSafe=true claimed for non-PQC algorithm {algo:?}"),
+                ),
+            ));
+        }
+    }
+
     // Plane-3: emit (Phase 7 wires the real C_GenerateKey call).
     let mech = algo.to_pkcs11_mech(PkcsOp::KeyGen).ok_or_else(|| {
         KmipError::failed(
@@ -156,22 +176,44 @@ pub fn create(deps: &Deps, req: CreateRequest, correlation_id: &str) -> Result<C
         }
     }
 
-    // Plane-2: persist.
+    // Plane-2: persist. Lift `Name` + date attributes out of the
+    // template. KMIP 3.0 Spec §3.x lifecycle FSM means a past
+    // ActivationDate sets the object to Active immediately — see
+    // `register_import_export::compute_initial_state`.
     let uid = format!("urn:pqctoday:obj:{}", Uuid::new_v4());
     let now = OffsetDateTime::now_utc();
+    let x = super::register_import_export::extract_attrs(&req.template_attribute);
+    let initial_state = super::register_import_export::compute_initial_state(now, &x);
+    let cp = x.cryptographic_parameters.clone();
     deps.store.put(ObjectRecord {
         uid: uid.clone(),
         object_type: req.object_type,
         algorithm: algo,
         cryptographic_length: key_length.unwrap_or(0),
         usage_mask: usage_mask.unwrap_or_else(UsageMask::empty),
-        state: State::PreActive,
+        state: initial_state,
         pkcs11_cka_id: cka_id_bytes,
         pkcs11_slot: deps.config.pkcs11_slot,
         initial_date: now,
-        activation_date: None,
+        activation_date: x.activation_date,
+        deactivation_date: x.deactivation_date,
+        compromise_date: x.compromise_date,
+        compromise_occurrence_date: x.compromise_date,
+        last_change_date: Some(now),
+        original_creation_date: Some(now),
+        cryptographic_parameters: cp,
         supersedes: None,
-    })?;
+        name: x.name.clone(),
+        links: std::collections::HashMap::new(),
+        custom_attributes: std::collections::HashMap::new(),
+
+        key_material: None,
+
+        key_format_type: None,
+        // KMIP §11 Fresh = True for server-generated objects.
+        fresh: Some(true),
+    ..ObjectRecord::default()
+})?;
 
     emit_success(deps, correlation_id, "Create");
 
@@ -254,7 +296,7 @@ rules:
         let rec = d.store.get(&resp.uid).unwrap().unwrap();
         assert_eq!(rec.algorithm, KmipAlgorithm::Aes);
         assert_eq!(rec.object_type, ObjectType::SymmetricKey);
-        assert_eq!(rec.state, State::PreActive);
+        assert_eq!(rec.state, crate::kmip30::State::PreActive);
     }
 
     #[test]

@@ -57,6 +57,14 @@ pub const CKM_ECDSA_SHA256: CkMechanismType    = 0x1044;
 pub const CKM_AES_KEY_GEN: CkMechanismType = 0x1080;
 pub const CKM_AES_GCM: CkMechanismType     = 0x1087;
 
+/// PKCS#11 v3.2 §6.20 — IETF ChaCha20 stream cipher. Codepoint
+/// `0x1071`. Distinct from `CKM_CHACHA20_POLY1305` so the bridge
+/// picks the right primitive (the actual cipher implementation lives
+/// in `softhsmrustv3::crypto`).
+pub const CKM_CHACHA20: CkMechanismType         = 0x1071;
+/// PKCS#11 v3.2 §6.20 — IETF ChaCha20-Poly1305 AEAD (RFC 8439).
+pub const CKM_CHACHA20_POLY1305: CkMechanismType = 0x1093;
+
 pub const CKM_GENERIC_SECRET_KEY_GEN: CkMechanismType = 0x0350;
 pub const CKM_SHA256_HMAC: CkMechanismType            = 0x0251;
 pub const CKM_SHA384_HMAC: CkMechanismType            = 0x0261;
@@ -89,6 +97,11 @@ pub enum PkcsOp {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum KmipAlgorithm {
     // ── Classical baseline ────────────────────────────────────────────────
+    // Deprecated symmetric primitives (DES=0x01, 3DES=0x02) and the
+    // discrete-log signature algorithm (DSA=0x05) are explicitly NOT
+    // supported per pqctoday's deprecated-mechanism policy. Register
+    // requests carrying those codepoints surface as `InvalidMessage`
+    // via `from_wire_value` returning None.
     Aes,           // 0x03
     Rsa,           // 0x04
     Ecdsa,         // 0x06 — covers ECDSA over any curve; curve = attribute
@@ -96,6 +109,14 @@ pub enum KmipAlgorithm {
     HmacSha384,    // 0x0a
     HmacSha512,    // 0x0b
     Ecdh,          // 0x0e
+    /// IETF ChaCha20 stream cipher (RFC 8439) — KMIP 3.0 §11
+    /// `Cryptographic Algorithm` codepoint `0x1c`.
+    ChaCha20,
+    /// IETF ChaCha20-Poly1305 AEAD (RFC 8439) — codepoint `0x1e`.
+    /// Distinct from `ChaCha20` so the shim picks the right primitive
+    /// (separate auth-tag emit path) without needing a `BlockCipherMode`
+    /// hint.
+    ChaCha20Poly1305,
 
     // ── FIPS PQC — ML-KEM (FIPS 203) ──────────────────────────────────────
     MlKem512,      // 0x39
@@ -136,6 +157,8 @@ impl KmipAlgorithm {
             HmacSha384 => 0x0000000a,
             HmacSha512 => 0x0000000b,
             Ecdh       => 0x0000000e,
+            ChaCha20         => 0x0000001c,
+            ChaCha20Poly1305 => 0x0000001e,
             MlKem512   => 0x00000039,
             MlKem768   => 0x0000003a,
             MlKem1024  => 0x0000003b,
@@ -169,6 +192,8 @@ impl KmipAlgorithm {
             0x0000000a => HmacSha384,
             0x0000000b => HmacSha512,
             0x0000000e => Ecdh,
+            0x0000001c => ChaCha20,
+            0x0000001e => ChaCha20Poly1305,
             0x00000039 => MlKem512,
             0x0000003a => MlKem768,
             0x0000003b => MlKem1024,
@@ -265,6 +290,15 @@ impl KmipAlgorithm {
             (Aes, KeyGen) => Some(CKM_AES_KEY_GEN),
             (Aes, Encrypt | Decrypt) => Some(CKM_AES_GCM),
 
+            // ── ChaCha20 family ───────────────────────────────────────────
+            // KMIP carries ChaCha20 (stream) and ChaCha20-Poly1305 (AEAD)
+            // as distinct algorithms — see KMIP 3.0 §11 codepoints
+            // `0x1c` / `0x1e`. Encrypt/Decrypt routes straight to the
+            // softhsmv3 PKCS#11 mechanism; the underlying cipher lives
+            // entirely inside that crate.
+            (ChaCha20, Encrypt | Decrypt) => Some(CKM_CHACHA20),
+            (ChaCha20Poly1305, Encrypt | Decrypt) => Some(CKM_CHACHA20_POLY1305),
+
             // ── HMAC families ─────────────────────────────────────────────
             (HmacSha256 | HmacSha384 | HmacSha512, KeyGen) =>
                 Some(CKM_GENERIC_SECRET_KEY_GEN),
@@ -289,6 +323,8 @@ impl KmipAlgorithm {
             HmacSha384 => "HMAC-SHA384",
             HmacSha512 => "HMAC-SHA512",
             Ecdh       => "ECDH",
+            ChaCha20         => "ChaCha20",
+            ChaCha20Poly1305 => "ChaCha20-Poly1305",
             MlKem512   => "ML-KEM-512",
             MlKem768   => "ML-KEM-768",
             MlKem1024  => "ML-KEM-1024",

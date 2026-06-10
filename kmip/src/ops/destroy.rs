@@ -44,13 +44,15 @@ pub fn destroy(deps: &Deps, req: DestroyRequest, correlation_id: &str) -> Result
         State::PreActive | State::Deactivated => State::Destroyed,
         State::Compromised => State::DestroyedCompromised,
         State::Active => {
+            // KMIP 3.0 §11 — `WrongKeyLifecycleState` (0x43) is the
+            // spec-specific reason for an op rejected by the §3.x
+            // FSM. AKLC-M-2 msg #5 pins this code. PermissionDenied
+            // (0x0c) is reserved for policy-engine denials.
             return Err(fail_err(
                 deps,
                 correlation_id,
                 "Destroy",
-                KmipError::permission_denied(
-                    "Active keys must be Revoked before Destroy (KMIP §3.x FSM)",
-                ),
+                super::helpers::non_active_state_error(&req.uid, obj.state),
             ));
         }
         State::Destroyed | State::DestroyedCompromised => {
@@ -90,10 +92,13 @@ pub fn destroy(deps: &Deps, req: DestroyRequest, correlation_id: &str) -> Result
         }
     }
 
-    // Plane-2: lifecycle update.
+    // Plane-2: lifecycle update. Destroy Date set per Baseline §5.1.2.
     let from_label = state_name(obj.state).to_string();
     let to_label = state_name(target_state).to_string();
+    let now = OffsetDateTime::now_utc();
     obj.state = target_state;
+    obj.destroy_date = Some(now);
+    obj.last_change_date = Some(now);
     deps.store.update(obj)?;
 
     emit_state_change(
@@ -147,7 +152,19 @@ mod tests {
             initial_date: OffsetDateTime::UNIX_EPOCH,
             activation_date: None,
             supersedes: None,
-        }).unwrap();
+            name: None,
+
+            links: std::collections::HashMap::new(),
+
+            custom_attributes: std::collections::HashMap::new(),
+
+
+            key_material: None,
+
+
+            key_format_type: None,
+        ..ObjectRecord::default()
+}).unwrap();
     }
 
     #[test]
@@ -179,7 +196,13 @@ mod tests {
         let d = deps_with();
         put(&d, "u", State::Active);
         let err = destroy(&d, DestroyRequest { uid: "u".into() }, "c").unwrap_err();
-        assert_eq!(err.result_reason(), crate::error::ResultReason::PermissionDenied);
+        // KMIP 3.0 §11 — the FSM rejection reason is
+        // `WrongKeyLifecycleState` (0x43), not the generic
+        // `PermissionDenied`. AKLC-M-2 msg #5 pins this code.
+        assert_eq!(
+            err.result_reason(),
+            crate::error::ResultReason::WrongKeyLifecycleState,
+        );
     }
 
     #[test]

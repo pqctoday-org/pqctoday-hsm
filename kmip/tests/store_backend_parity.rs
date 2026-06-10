@@ -90,7 +90,19 @@ fn lifecycle_fsm_enforced_at_store_layer_on_both_backends() {
             initial_date: OffsetDateTime::UNIX_EPOCH,
             activation_date: Some(OffsetDateTime::UNIX_EPOCH),
             supersedes: None,
-        }).unwrap();
+            name: None,
+
+            links: std::collections::HashMap::new(),
+
+            custom_attributes: std::collections::HashMap::new(),
+
+
+            key_material: None,
+
+
+            key_format_type: None,
+        ..pqctoday_kmip::store::ObjectRecord::default()
+}).unwrap();
 
         // Try Active → PreActive (illegal per §3.4 FSM).
         // MemoryStore doesn't enforce yet — only SqliteStore does. So the
@@ -135,7 +147,19 @@ fn data_survives_round_trip_through_sqlite_on_disk() {
             initial_date: OffsetDateTime::UNIX_EPOCH,
             activation_date: Some(OffsetDateTime::UNIX_EPOCH),
             supersedes: None,
-        }).unwrap();
+            name: None,
+
+            links: std::collections::HashMap::new(),
+
+            custom_attributes: std::collections::HashMap::new(),
+
+
+            key_material: None,
+
+
+            key_format_type: None,
+        ..pqctoday_kmip::store::ObjectRecord::default()
+}).unwrap();
     }
 
     // Second "boot": re-open same file, record should be there.

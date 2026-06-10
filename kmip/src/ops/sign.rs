@@ -59,7 +59,7 @@ pub fn sign(deps: &Deps, req: SignRequest, correlation_id: &str) -> Result<SignR
             deps,
             correlation_id,
             "Sign",
-            KmipError::object_archived(&req.uid),
+            super::helpers::non_active_state_error(&req.uid, obj.state),
         ));
     }
 
@@ -240,6 +240,8 @@ fn canonical_name(a: crate::kmip30::KmipAlgorithm) -> String {
         HmacSha384 => "HMAC-SHA-384",
         HmacSha512 => "HMAC-SHA-512",
         Ecdh => "ECDH",
+        ChaCha20 => "ChaCha20",
+        ChaCha20Poly1305 => "ChaCha20-Poly1305",
         MlKem512 => "ML-KEM-512",
         MlKem768 => "ML-KEM-768",
         MlKem1024 => "ML-KEM-1024",
@@ -302,7 +304,19 @@ mod tests {
             initial_date: OffsetDateTime::UNIX_EPOCH,
             activation_date: Some(OffsetDateTime::UNIX_EPOCH),
             supersedes: None,
-        };
+            name: None,
+
+            links: std::collections::HashMap::new(),
+
+            custom_attributes: std::collections::HashMap::new(),
+
+
+            key_material: None,
+
+
+            key_format_type: None,
+        ..ObjectRecord::default()
+};
         deps.store.put(rec).unwrap();
     }
 
@@ -362,7 +376,7 @@ rules:
     }
 
     #[test]
-    fn non_active_key_returns_object_archived() {
+    fn non_active_key_returns_wrong_lifecycle_state() {
         let (_ring, d) = deps_with(PERMISSIVE);
         // Insert a PreActive key.
         let rec = ObjectRecord {
@@ -377,10 +391,23 @@ rules:
             initial_date: OffsetDateTime::UNIX_EPOCH,
             activation_date: None,
             supersedes: None,
-        };
+            name: None,
+
+            links: std::collections::HashMap::new(),
+
+            custom_attributes: std::collections::HashMap::new(),
+
+
+            key_material: None,
+
+
+            key_format_type: None,
+        ..ObjectRecord::default()
+};
         d.store.put(rec).unwrap();
         let err = sign(&d, SignRequest { uid: "urn:pre".into(), data: vec![] }, "corr").unwrap_err();
-        assert_eq!(err.result_reason(), ResultReason::ObjectArchived);
+        // KMIP 3.0 §11 — PreActive is a lifecycle-state failure.
+        assert_eq!(err.result_reason(), ResultReason::WrongKeyLifecycleState);
     }
 
     #[test]

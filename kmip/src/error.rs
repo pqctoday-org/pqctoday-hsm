@@ -14,6 +14,9 @@ use thiserror::Error;
 #[repr(u32)]
 pub enum ResultReason {
     ItemNotFound          = 0x0000_0001,
+    ResponseTooLarge      = 0x0000_0002,
+    AuthenticationNotSuccessful = 0x0000_0003,
+    InvalidMessage        = 0x0000_0004,
     OperationNotSupported = 0x0000_0005,
     MissingData           = 0x0000_0006,
     InvalidField          = 0x0000_0007,
@@ -23,6 +26,47 @@ pub enum ResultReason {
     ObjectAlreadyExists   = 0x0000_0018,
     InvalidAttribute      = 0x0000_002c,
     InvalidAttributeValue = 0x0000_002d,
+    /// `Non Unique Name Attribute` — KMIP 3.0 §11. Surfaced when a
+    /// Register/Create supplies a `Name` already present on another
+    /// managed object.
+    NonUniqueNameAttribute = 0x0000_0035,
+    /// `Wrong Key Lifecycle State` — KMIP 3.0 §11. The crypto op
+    /// (Encrypt/Decrypt/Sign/etc.) requires `Active` but the object
+    /// is in `Deactivated` / `Compromised`. Distinct from
+    /// `ObjectArchived` which is reserved for `Destroyed` states.
+    WrongKeyLifecycleState = 0x0000_0043,
+    /// `Incompatible Cryptographic Usage Mask` — KMIP 3.0 §11. The
+    /// op requires a `CryptographicUsageMask` flag the key doesn't
+    /// carry (e.g. `Check` against a key whose mask lacks
+    /// `ProcessStart`). Distinct from generic `PermissionDenied`.
+    IncompatibleCryptographicUsageMask = 0x0000_0029,
+    /// `Attribute Read Only` — KMIP 3.0 §11. ModifyAttribute /
+    /// AddAttribute / SetAttribute against an attribute the server
+    /// owns (UniqueIdentifier, ObjectType, State, InitialDate,
+    /// LastChangeDate, OriginalCreationDate, Digest, …) per §11
+    /// attribute table. Distinct from generic `InvalidField` so the
+    /// client knows the request is rejected because the *attribute*
+    /// is read-only rather than the *value* being malformed. BL-M-7
+    /// step #2 pins this code.
+    AttributeReadOnly      = 0x0000_0022,
+    /// `Object Not Found` — KMIP 3.0 §11. The referenced managed
+    /// object (UID) does not exist in the server's store. Distinct
+    /// from `ItemNotFound` (0x01) which signals an attribute /
+    /// item missing inside a request payload. BL-M-4 step #5
+    /// (Get against a UID the server never minted) pins this code.
+    ObjectNotFound         = 0x0000_0037,
+    /// `Object Destroyed` — KMIP 3.0 §11. The referenced object has
+    /// transitioned to `Destroyed` (or `DestroyedCompromised`); the
+    /// metadata still exists for audit but the cryptographic
+    /// material is gone. Distinct from `ObjectArchived` (0x0d),
+    /// which signals a separately-managed archival store. BL-M-8
+    /// step #5 (Get against a Destroyed UID) pins this code.
+    ObjectDestroyed        = 0x0000_0036,
+    /// `Attribute Single Valued` — KMIP 3.0 §11. AddAttribute / Set
+    /// against a single-valued attribute that already has a value
+    /// (vs `NonUniqueNameAttribute` which is name-uniqueness scope).
+    /// BL-M-5 step #4 pins this for a duplicate Description add.
+    AttributeSingleValued  = 0x0000_0023,
     GeneralFailure        = 0x0000_0100,
 }
 
@@ -65,7 +109,18 @@ impl KmipError {
         Self::failed(ResultReason::PermissionDenied, msg)
     }
     pub fn not_found(uid: &str) -> Self {
+        // KMIP 3.0 §11: `Item Not Found` is the spec's default for a
+        // missing-thing error — including the post-Obliterate
+        // GetAttributes path (BL-M-20). The `Get`-specific
+        // `Object Not Found` (0x37) case is reachable via
+        // [`Self::object_not_found`].
         Self::failed(ResultReason::ItemNotFound, format!("UID {uid:?} not found"))
+    }
+    pub fn object_not_found(uid: &str) -> Self {
+        // KMIP 3.0 §11 + §6.1.23 — `Get` against an unknown UID
+        // returns `Object Not Found` (0x37), not the generic
+        // `Item Not Found` (0x01). BL-M-4 step #5 pins this code.
+        Self::failed(ResultReason::ObjectNotFound, format!("UID {uid:?} not found"))
     }
     pub fn invalid_field(msg: impl Into<String>) -> Self {
         Self::failed(ResultReason::InvalidField, msg)
@@ -83,6 +138,30 @@ impl KmipError {
         Self::failed(
             ResultReason::ObjectArchived,
             format!("UID {uid:?} not in usable lifecycle state"),
+        )
+    }
+    pub fn object_destroyed(uid: &str) -> Self {
+        Self::failed(
+            ResultReason::ObjectDestroyed,
+            format!("UID {uid:?} has been destroyed"),
+        )
+    }
+    pub fn wrong_key_lifecycle_state(uid: &str, state: &str) -> Self {
+        Self::failed(
+            ResultReason::WrongKeyLifecycleState,
+            format!("UID {uid:?} is in {state} — op requires Active"),
+        )
+    }
+    pub fn attribute_read_only(attr: &str) -> Self {
+        Self::failed(
+            ResultReason::AttributeReadOnly,
+            format!("attribute {attr} is Read-Only"),
+        )
+    }
+    pub fn non_unique_name_attribute(name: &str) -> Self {
+        Self::failed(
+            ResultReason::NonUniqueNameAttribute,
+            format!("Name {name:?} already assigned to another managed object"),
         )
     }
     pub fn cryptographic_failure(msg: impl Into<String>) -> Self {
@@ -123,11 +202,15 @@ mod tests {
         assert_eq!(ResultReason::ObjectAlreadyExists.to_wire_value(),   0x0000_0018);
         assert_eq!(ResultReason::InvalidAttribute.to_wire_value(),      0x0000_002c);
         assert_eq!(ResultReason::InvalidAttributeValue.to_wire_value(), 0x0000_002d);
+        assert_eq!(ResultReason::AttributeReadOnly.to_wire_value(),     0x0000_0022);
+        assert_eq!(ResultReason::WrongKeyLifecycleState.to_wire_value(), 0x0000_0043);
+        assert_eq!(ResultReason::NonUniqueNameAttribute.to_wire_value(), 0x0000_0035);
     }
 
     #[test]
     fn helpers_carry_correct_reason() {
         assert_eq!(KmipError::not_found("u1").result_reason(), ResultReason::ItemNotFound);
+        assert_eq!(KmipError::object_not_found("u1").result_reason(), ResultReason::ObjectNotFound);
         assert_eq!(KmipError::permission_denied("x").result_reason(), ResultReason::PermissionDenied);
         assert_eq!(KmipError::object_archived("u1").result_reason(), ResultReason::ObjectArchived);
     }

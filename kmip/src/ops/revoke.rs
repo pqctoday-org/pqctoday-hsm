@@ -43,18 +43,34 @@ pub fn revoke(deps: &Deps, req: RevokeRequest, correlation_id: &str) -> Result<R
         .get(&req.uid)?
         .ok_or_else(|| fail_err(deps, correlation_id, "Revoke", KmipError::not_found(&req.uid)))?;
 
-    // KMIP 3.0 §3.x — Revoke is only valid from Active.
-    if obj.state != State::Active {
-        return Err(fail_err(
-            deps,
-            correlation_id,
-            "Revoke",
-            KmipError::permission_denied(format!(
-                "Revoke requires Active; UID {} is in {:?}",
-                req.uid, obj.state
-            )),
-        ));
-    }
+    // KMIP 3.0 §3 state-transition list — only Revoke transitions
+    // permitted (enumerated by the spec under the State attribute
+    // figure):
+    //   3.  Pre-Active   → Compromised          (compromise reason)
+    //   5.  Active       → Compromised          (compromise reason)
+    //   6/Revoke. Active → Deactivated          (non-compromise reason)
+    //   8.  Deactivated  → Compromised          (compromise reason)
+    //   10. Destroyed    → DestroyedCompromised (compromise reason)
+    // Anything else is a `WrongKeyLifecycleState` per §6.1.49 error table.
+    let is_compromise = matches!(
+        req.reason,
+        RevocationReason::KeyCompromise | RevocationReason::CaCompromise,
+    );
+    let target_state = match (obj.state, is_compromise) {
+        (State::PreActive,   true)  => State::Compromised,
+        (State::Active,      true)  => State::Compromised,
+        (State::Active,      false) => State::Deactivated,
+        (State::Deactivated, true)  => State::Compromised,
+        (State::Destroyed,   true)  => State::DestroyedCompromised,
+        _ => {
+            return Err(fail_err(
+                deps,
+                correlation_id,
+                "Revoke",
+                super::helpers::non_active_state_error(&req.uid, obj.state),
+            ));
+        }
+    };
 
     // Plane-1 policy gate.
     let empty: HashMap<String, String> = HashMap::new();
@@ -71,15 +87,21 @@ pub fn revoke(deps: &Deps, req: RevokeRequest, correlation_id: &str) -> Result<R
         ));
     }
 
-    // Lifecycle transition. KeyCompromise / CaCompromise → Compromised;
-    // every other RevocationReason → Deactivated.
-    let target_state = match req.reason {
-        RevocationReason::KeyCompromise | RevocationReason::CaCompromise => State::Compromised,
-        _ => State::Deactivated,
-    };
+    // Lifecycle transition (already validated above against §3 list).
     let from_label = state_name(obj.state).to_string();
     let to_label = state_name(target_state).to_string();
     obj.state = target_state;
+    // Per Baseline §5.1.2: Compromise Date / Compromise Occurrence Date
+    // become attribute-visible when Revoke moves the object into the
+    // Compromised (or DestroyedCompromised) state. Last Change Date
+    // follows any state change.
+    let now = OffsetDateTime::now_utc();
+    obj.last_change_date = Some(now);
+    if matches!(target_state, State::Compromised | State::DestroyedCompromised) {
+        obj.compromise_date = Some(now);
+        obj.compromise_occurrence_date = Some(now);
+    }
+    obj.revocation_reason_code = Some(req.reason.to_wire_value());
     deps.store.update(obj)?;
 
     emit_state_change(
@@ -128,7 +150,19 @@ mod tests {
             initial_date: OffsetDateTime::UNIX_EPOCH,
             activation_date: Some(OffsetDateTime::UNIX_EPOCH),
             supersedes: None,
-        }).unwrap();
+            name: None,
+
+            links: std::collections::HashMap::new(),
+
+            custom_attributes: std::collections::HashMap::new(),
+
+
+            key_material: None,
+
+
+            key_format_type: None,
+        ..ObjectRecord::default()
+}).unwrap();
     }
 
     const ALLOW: &str = "schema_version: 1\nmetadata: {name: t, description: t, authority: t, effective: always}\nrules: []\n";
@@ -149,14 +183,49 @@ mod tests {
         assert_eq!(resp.state, State::Compromised);
     }
 
+    /// KMIP 3.0 §3 transition #8: Deactivated → Compromised via
+    /// Revoke(KeyCompromise). BL-M-7 step #3 pins this — the registered
+    /// key has ActivationDate + DeactivationDate both in the past, so
+    /// Register lands it directly in Deactivated, and the test then
+    /// expects a successful Revoke(KeyCompromise) → Compromised.
     #[test]
-    fn revoke_from_pre_active_rejected() {
+    fn deactivated_to_compromised_via_key_compromise() {
+        let d = deps_with(ALLOW);
+        d.store.put(ObjectRecord {
+            uid: "d".into(),
+            object_type: ObjectType::PrivateKey,
+            algorithm: KmipAlgorithm::Rsa,
+            cryptographic_length: 1024,
+            usage_mask: UsageMask::SIGN,
+            state: State::Deactivated,
+            pkcs11_cka_id: vec![],
+            pkcs11_slot: 0,
+            initial_date: OffsetDateTime::UNIX_EPOCH,
+            activation_date: Some(OffsetDateTime::UNIX_EPOCH),
+            supersedes: None,
+            name: None,
+            links: std::collections::HashMap::new(),
+            custom_attributes: std::collections::HashMap::new(),
+            key_material: None,
+            key_format_type: None,
+            ..ObjectRecord::default()
+        }).unwrap();
+        let resp = revoke(&d, RevokeRequest {
+            uid: "d".into(), reason: RevocationReason::KeyCompromise,
+        }, "c").unwrap();
+        assert_eq!(resp.state, State::Compromised);
+    }
+
+    /// KMIP 3.0 §3 transition #3: Pre-Active → Compromised via
+    /// Revoke(KeyCompromise|CaCompromise) is permitted.
+    #[test]
+    fn preactive_to_compromised_via_ca_compromise() {
         let d = deps_with(ALLOW);
         d.store.put(ObjectRecord {
             uid: "p".into(),
             object_type: ObjectType::PrivateKey,
-            algorithm: KmipAlgorithm::MlDsa87,
-            cryptographic_length: 0,
+            algorithm: KmipAlgorithm::Rsa,
+            cryptographic_length: 1024,
             usage_mask: UsageMask::SIGN,
             state: State::PreActive,
             pkcs11_cka_id: vec![],
@@ -164,8 +233,47 @@ mod tests {
             initial_date: OffsetDateTime::UNIX_EPOCH,
             activation_date: None,
             supersedes: None,
+            name: None,
+            links: std::collections::HashMap::new(),
+            custom_attributes: std::collections::HashMap::new(),
+            key_material: None,
+            key_format_type: None,
+            ..ObjectRecord::default()
         }).unwrap();
-        let err = revoke(&d, RevokeRequest { uid: "p".into(), reason: RevocationReason::Unspecified }, "c").unwrap_err();
-        assert_eq!(err.result_reason(), crate::error::ResultReason::PermissionDenied);
+        let resp = revoke(&d, RevokeRequest {
+            uid: "p".into(), reason: RevocationReason::CaCompromise,
+        }, "c").unwrap();
+        assert_eq!(resp.state, State::Compromised);
     }
+
+    /// PreActive + non-compromise reason is NOT a legal transition per §3
+    /// (transition #3 is the only Pre-Active → … via Revoke). Reject.
+    #[test]
+    fn revoke_from_pre_active_unspecified_rejected_with_wrong_lifecycle() {
+        let d = deps_with(ALLOW);
+        d.store.put(ObjectRecord {
+            uid: "pu".into(),
+            object_type: ObjectType::PrivateKey,
+            algorithm: KmipAlgorithm::Rsa,
+            cryptographic_length: 1024,
+            usage_mask: UsageMask::SIGN,
+            state: State::PreActive,
+            pkcs11_cka_id: vec![],
+            pkcs11_slot: 0,
+            initial_date: OffsetDateTime::UNIX_EPOCH,
+            activation_date: None,
+            supersedes: None,
+            name: None,
+            links: std::collections::HashMap::new(),
+            custom_attributes: std::collections::HashMap::new(),
+            key_material: None,
+            key_format_type: None,
+            ..ObjectRecord::default()
+        }).unwrap();
+        let err = revoke(&d, RevokeRequest {
+            uid: "pu".into(), reason: RevocationReason::Unspecified,
+        }, "c").unwrap_err();
+        assert_eq!(err.result_reason(), crate::error::ResultReason::WrongKeyLifecycleState);
+    }
+
 }

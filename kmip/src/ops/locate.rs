@@ -84,10 +84,25 @@ struct LocateFilters {
     algorithm: Option<KmipAlgorithm>,
     object_type: Option<ObjectType>,
     state: Option<State>,
+    name: Option<String>,
 }
 
 impl LocateFilters {
     fn matches(&self, r: &ObjectRecord) -> bool {
+        // KMIP 3.0 §6.1.32 — by default Locate filters out objects in
+        // the `Destroyed` / `DestroyedCompromised` states (the
+        // `StorageStatusMask` default value is `Online` only). A client
+        // who wants tombstones must request them explicitly via the
+        // mask — not yet wired through the codec; until it is, the
+        // strict default applies.
+        if matches!(r.state, State::Destroyed | State::DestroyedCompromised) {
+            // Override the default only when the client explicitly
+            // filtered by one of those states.
+            if !matches!(self.state, Some(State::Destroyed) | Some(State::DestroyedCompromised)) {
+                return false;
+            }
+        }
+
         if let Some(a) = self.algorithm {
             if r.algorithm != a {
                 return false;
@@ -103,6 +118,12 @@ impl LocateFilters {
                 return false;
             }
         }
+        if let Some(want) = &self.name {
+            match &r.name {
+                Some(have) if have == want => {}
+                _ => return false,
+            }
+        }
         true
     }
 }
@@ -112,12 +133,14 @@ fn build_filters(attrs: &[Attribute]) -> LocateFilters {
         algorithm: None,
         object_type: None,
         state: None,
+        name: None,
     };
     for a in attrs {
         match a {
             Attribute::CryptographicAlgorithm(alg) => f.algorithm = Some(*alg),
             Attribute::ObjectType(t) => f.object_type = Some(*t),
             Attribute::State(s) => f.state = Some(*s),
+            Attribute::Name(n) => f.name = Some(n.clone()),
             _ => {}
         }
     }
@@ -159,7 +182,19 @@ mod tests {
             initial_date: OffsetDateTime::UNIX_EPOCH,
             activation_date: None,
             supersedes: None,
-        }).unwrap();
+            name: None,
+
+            links: std::collections::HashMap::new(),
+
+            custom_attributes: std::collections::HashMap::new(),
+
+
+            key_material: None,
+
+
+            key_format_type: None,
+        ..ObjectRecord::default()
+}).unwrap();
     }
 
     #[test]

@@ -319,16 +319,41 @@ fn decode_record(
         initial_date,
         activation_date,
         supersedes,
-    })
+        // KMIP 3.0 §4 `Name` attribute persistence lands in the
+        // attribute-mutation wave (PR #82); for now SQLite doesn't
+        // carry a Name column, so we always reconstruct as None.
+        name: None,
+
+        links: std::collections::HashMap::new(),
+
+        custom_attributes: std::collections::HashMap::new(),
+
+
+        key_material: None,
+
+
+        key_format_type: None,
+    ..ObjectRecord::default()
+})
 }
 
 fn object_type_str(t: ObjectType) -> &'static str {
     match t {
-        ObjectType::Certificate => "Certificate",
-        ObjectType::SymmetricKey => "SymmetricKey",
-        ObjectType::PublicKey => "PublicKey",
-        ObjectType::PrivateKey => "PrivateKey",
-        ObjectType::SecretData => "SecretData",
+        ObjectType::Certificate        => "Certificate",
+        ObjectType::SymmetricKey       => "SymmetricKey",
+        ObjectType::PublicKey          => "PublicKey",
+        ObjectType::PrivateKey         => "PrivateKey",
+        ObjectType::SplitKey           => "SplitKey",
+        ObjectType::SecretData         => "SecretData",
+        ObjectType::OpaqueObject       => "OpaqueObject",
+        ObjectType::PgpKey             => "PgpKey",
+        ObjectType::CertificateRequest => "CertificateRequest",
+        ObjectType::User                      => "User",
+        ObjectType::Group                     => "Group",
+        ObjectType::PasswordCredential        => "PasswordCredential",
+        ObjectType::DeviceCredential          => "DeviceCredential",
+        ObjectType::OneTimePasswordCredential => "OneTimePasswordCredential",
+        ObjectType::HashedPasswordCredential  => "HashedPasswordCredential",
     }
 }
 
@@ -337,6 +362,10 @@ fn object_type_from_str(s: &str) -> Option<ObjectType> {
         "Certificate" => Some(ObjectType::Certificate),
         "SymmetricKey" => Some(ObjectType::SymmetricKey),
         "PublicKey" => Some(ObjectType::PublicKey),
+        "SplitKey" => Some(ObjectType::SplitKey),
+        "OpaqueObject" => Some(ObjectType::OpaqueObject),
+        "PgpKey" => Some(ObjectType::PgpKey),
+        "CertificateRequest" => Some(ObjectType::CertificateRequest),
         "PrivateKey" => Some(ObjectType::PrivateKey),
         "SecretData" => Some(ObjectType::SecretData),
         _ => None,
@@ -396,7 +425,19 @@ mod tests {
             initial_date: OffsetDateTime::UNIX_EPOCH,
             activation_date: None,
             supersedes: None,
-        }
+            name: None,
+
+            links: std::collections::HashMap::new(),
+
+            custom_attributes: std::collections::HashMap::new(),
+
+
+            key_material: None,
+
+
+            key_format_type: None,
+        ..ObjectRecord::default()
+}
     }
 
     #[test]

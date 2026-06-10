@@ -41,17 +41,27 @@
 //! `Decrypt`. The handler branches on key algorithm.
 
 pub mod activate;
+pub mod attribute_mutate;
 pub mod create;
 pub mod create_key_pair;
 pub mod decrypt;
 pub mod deps;
+pub mod der_x509;
 pub mod destroy;
 pub mod encrypt;
 pub mod get;
+pub mod get_attribute_list;
+pub mod get_attributes;
 pub mod helpers;
+pub mod interop;
+pub mod lifecycle_and_protocol;
 pub mod locate;
+pub mod mac_and_hash;
 pub mod query;
+pub mod register_import_export;
 pub mod revoke;
+pub mod rng_and_pkcs11;
+pub mod session_and_auth;
 pub mod sign;
 pub mod signature_verify;
 

@@ -65,9 +65,35 @@ pub fn create_key_pair(
         },
     ));
 
-    // Extract algorithm + usage_mask from the merged template attributes
-    // (KMIP 3.0 §4.x — `Common Attributes` precede the per-key ones).
+    // KMIP 3.0 Spec §6.1.10 CreateKeyPair — three distinct attribute
+    // baskets: `CommonAttributes` is merged into BOTH halves;
+    // `PrivateKeyAttributes` applies only to the private record;
+    // `PublicKeyAttributes` only to the public record. The previous
+    // implementation flattened all three lists with `.chain()` so a
+    // private-half `<CryptographicUsageMask value="Sign"/>` collided
+    // with the public-half `<CryptographicUsageMask value="Verify"/>`
+    // — last write won, both halves received the same mask. AKLC-M-*
+    // / SKLC-M-* exercised that collision.
+    let priv_attrs: Vec<Attribute> = req
+        .common_attributes
+        .iter()
+        .chain(req.private_key_attributes.iter())
+        .cloned()
+        .collect();
+    let pub_attrs: Vec<Attribute> = req
+        .common_attributes
+        .iter()
+        .chain(req.public_key_attributes.iter())
+        .cloned()
+        .collect();
+    let priv_x = super::register_import_export::extract_attrs(&priv_attrs);
+    let pub_x = super::register_import_export::extract_attrs(&pub_attrs);
+
+    // Algorithm + length should be the same on both halves (carried in
+    // CommonAttributes per the spec; private/public mismatch would be
+    // a client bug). Pull from whichever side has it first.
     let (algorithm_in, key_length, usage_mask) = extract_template(&req);
+    let _ = (priv_x.algorithm, pub_x.algorithm); // silence unused; merged via extract_template
 
     // ── Plane 1: policy gate ────────────────────────────────────────────
     let empty_attrs: HashMap<String, String> = HashMap::new();
@@ -171,33 +197,102 @@ pub fn create_key_pair(
     let pub_uid = format!("urn:pqctoday:obj:{}", Uuid::new_v4());
 
     let now = OffsetDateTime::now_utc();
-    let usage = usage_mask.unwrap_or_else(UsageMask::empty);
+    let priv_usage = priv_x.usage.unwrap_or_else(UsageMask::empty);
+    let pub_usage = pub_x.usage.unwrap_or_else(UsageMask::empty);
+    let priv_state = super::register_import_export::compute_initial_state(now, &priv_x);
+    let pub_state = super::register_import_export::compute_initial_state(now, &pub_x);
+    let _ = (usage_mask, key_length); // silence unused warnings
     deps.store.put(ObjectRecord {
         uid: priv_uid.clone(),
         object_type: ObjectType::PrivateKey,
         algorithm: kmip_algo,
-        cryptographic_length: key_length.unwrap_or(0),
-        usage_mask: usage,
-        state: State::PreActive,
+        cryptographic_length: priv_x.length.unwrap_or(0),
+        usage_mask: priv_usage,
+        state: priv_state,
         pkcs11_cka_id: pkcs11_cka_id_priv,
         pkcs11_slot: deps.config.pkcs11_slot,
         initial_date: now,
-        activation_date: None,
+        activation_date: priv_x.activation_date,
+        deactivation_date: priv_x.deactivation_date,
+        compromise_date: priv_x.compromise_date,
+        compromise_occurrence_date: priv_x.compromise_date,
+        last_change_date: Some(now),
+        original_creation_date: Some(now),
         supersedes: None,
-    })?;
+            name: priv_x.name.clone(),
+
+            // KMIP §11 `Public Key Link` — UID of the matching
+            // public-key half on the private record (AKLC-O-1
+            // step #3 reads it back via GetAttributes).
+            links: {
+                let mut m = std::collections::HashMap::new();
+                m.insert("PublicKeyLink".to_string(), pub_uid.clone());
+                m
+            },
+
+            custom_attributes: std::collections::HashMap::new(),
+
+
+            key_material: None,
+
+
+            // KMIP 3.0 §6.2 — default `KeyFormatType` depends on algo.
+            // For RSA the OASIS Baseline test corpus expects PKCS#1
+            // (codepoint 0x03) on both halves of a CreateKeyPair-
+            // generated keypair.
+            key_format_type: match kmip_algo {
+                crate::kmip30::KmipAlgorithm::Rsa => Some(0x03),
+                _ => None,
+            },
+            // KMIP §11 Fresh = True for server-generated objects.
+            fresh: Some(true),
+    ..ObjectRecord::default()
+})?;
     deps.store.put(ObjectRecord {
         uid: pub_uid.clone(),
         object_type: ObjectType::PublicKey,
         algorithm: kmip_algo,
-        cryptographic_length: key_length.unwrap_or(0),
-        usage_mask: usage,
-        state: State::PreActive,
+        cryptographic_length: pub_x.length.unwrap_or(0),
+        usage_mask: pub_usage,
+        state: pub_state,
         pkcs11_cka_id: pkcs11_cka_id_pub,
         pkcs11_slot: deps.config.pkcs11_slot,
         initial_date: now,
-        activation_date: None,
+        activation_date: pub_x.activation_date,
+        deactivation_date: pub_x.deactivation_date,
+        compromise_date: pub_x.compromise_date,
+        compromise_occurrence_date: pub_x.compromise_date,
+        last_change_date: Some(now),
+        original_creation_date: Some(now),
         supersedes: None,
-    })?;
+            name: pub_x.name.clone(),
+
+            // KMIP §11 `Private Key Link` — UID of the matching
+            // private-key half on the public record.
+            links: {
+                let mut m = std::collections::HashMap::new();
+                m.insert("PrivateKeyLink".to_string(), priv_uid.clone());
+                m
+            },
+
+            custom_attributes: std::collections::HashMap::new(),
+
+
+            key_material: None,
+
+
+            // KMIP 3.0 §6.2 — default `KeyFormatType` depends on algo.
+            // For RSA the OASIS Baseline test corpus expects PKCS#1
+            // (codepoint 0x03) on both halves of a CreateKeyPair-
+            // generated keypair.
+            key_format_type: match kmip_algo {
+                crate::kmip30::KmipAlgorithm::Rsa => Some(0x03),
+                _ => None,
+            },
+            // KMIP §11 Fresh = True for server-generated objects.
+            fresh: Some(true),
+    ..ObjectRecord::default()
+})?;
 
     deps.sink.emit(AuditEvent::at(
         OffsetDateTime::now_utc(),
@@ -258,6 +353,8 @@ fn canonical_name(a: KmipAlgorithm) -> String {
         HmacSha384 => "HMAC-SHA-384",
         HmacSha512 => "HMAC-SHA-512",
         Ecdh       => "ECDH",
+        ChaCha20         => "ChaCha20",
+        ChaCha20Poly1305 => "ChaCha20-Poly1305",
         MlKem512   => "ML-KEM-512",
         MlKem768   => "ML-KEM-768",
         MlKem1024  => "ML-KEM-1024",

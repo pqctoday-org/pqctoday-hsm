@@ -1,0 +1,1136 @@
+{
+  "generated_at": 1781066943,
+  "summary": {
+    "pass": 78,
+    "fail": 24,
+    "error": 0,
+    "skip_op": 0,
+    "skip_parse": 0,
+    "total": 102,
+    "candidates": 102
+  },
+  "tests": [
+    {
+      "name": "AKLC-M-1-30.xml",
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "CreateKeyPair",
+        "Destroy",
+        "GetAttributes"
+      ]
+    },
+    {
+      "name": "AKLC-M-2-30.xml",
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "Activate",
+        "CreateKeyPair",
+        "Destroy",
+        "GetAttributes",
+        "Revoke"
+      ]
+    },
+    {
+      "name": "AKLC-M-3-30.xml",
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "Activate",
+        "CreateKeyPair",
+        "Destroy",
+        "GetAttributes",
+        "ModifyAttribute",
+        "Revoke"
+      ]
+    },
+    {
+      "name": "AX-M-1-30.xml",
+      "status": "FAIL",
+      "detail": "msg #1: response mismatch: ResponseMessage: child count 3 != 2",
+      "ops_used": [
+        "AddAttribute",
+        "Create",
+        "Destroy",
+        "Get",
+        "GetAttributes",
+        "Revoke"
+      ]
+    },
+    {
+      "name": "AX-M-2-30.xml",
+      "status": "FAIL",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload/SymmetricKey/KeyBlock: child count 5 != 4",
+      "ops_used": [
+        "AddAttribute",
+        "Create",
+        "Destroy",
+        "Get",
+        "GetAttributes",
+        "Revoke"
+      ]
+    },
+    {
+      "name": "BL-M-1-30.xml",
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "Destroy",
+        "Get",
+        "Interop",
+        "Locate",
+        "Log",
+        "Register"
+      ]
+    },
+    {
+      "name": "BL-M-10-30.xml",
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "GetAttributes",
+        "Interop",
+        "ModifyAttribute",
+        "Register"
+      ]
+    },
+    {
+      "name": "BL-M-11-30.xml",
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "GetAttributes",
+        "Interop",
+        "Register",
+        "Revoke"
+      ]
+    },
+    {
+      "name": "BL-M-12-30.xml",
+      "status": "FAIL",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1",
+      "ops_used": [
+        "Get",
+        "GetAttributes",
+        "Interop",
+        "Register"
+      ]
+    },
+    {
+      "name": "BL-M-13-30.xml",
+      "status": "FAIL",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1",
+      "ops_used": [
+        "Get",
+        "GetAttributes",
+        "Interop",
+        "Register"
+      ]
+    },
+    {
+      "name": "BL-M-14-30.xml",
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "Destroy",
+        "Get",
+        "GetAttributes",
+        "Interop",
+        "Locate",
+        "Register"
+      ]
+    },
+    {
+      "name": "BL-M-15-30.xml",
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "CreateCredential",
+        "Interop"
+      ]
+    },
+    {
+      "name": "BL-M-16-30.xml",
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "CreateCredential",
+        "Interop"
+      ]
+    },
+    {
+      "name": "BL-M-17-30.xml",
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "CreateCredential",
+        "CreateUser",
+        "Interop"
+      ]
+    },
+    {
+      "name": "BL-M-18-30.xml",
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "CreateCredential",
+        "CreateUser",
+        "Interop"
+      ]
+    },
+    {
+      "name": "BL-M-19-30.xml",
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "CreateCredential",
+        "CreateUser",
+        "Interop"
+      ]
+    },
+    {
+      "name": "BL-M-2-30.xml",
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "Activate",
+        "Check",
+        "GetAttributes",
+        "Interop",
+        "Register"
+      ]
+    },
+    {
+      "name": "BL-M-20-30.xml",
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "GetAttributes",
+        "Interop",
+        "Obliterate",
+        "Register"
+      ]
+    },
+    {
+      "name": "BL-M-21-30.xml",
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "CreateGroup",
+        "Interop"
+      ]
+    },
+    {
+      "name": "BL-M-3-30.xml",
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "Check",
+        "Get",
+        "GetAttributes",
+        "Interop",
+        "Register"
+      ]
+    },
+    {
+      "name": "BL-M-4-30.xml",
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "Destroy",
+        "Get",
+        "GetAttributes",
+        "Interop",
+        "Locate",
+        "Register"
+      ]
+    },
+    {
+      "name": "BL-M-5-30.xml",
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "AddAttribute",
+        "Get",
+        "GetAttributes",
+        "Interop",
+        "Register"
+      ]
+    },
+    {
+      "name": "BL-M-6-30.xml",
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "Get",
+        "GetAttributes",
+        "Interop",
+        "Register"
+      ]
+    },
+    {
+      "name": "BL-M-7-30.xml",
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "GetAttributes",
+        "Interop",
+        "ModifyAttribute",
+        "Register",
+        "Revoke"
+      ]
+    },
+    {
+      "name": "BL-M-8-30.xml",
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "AddAttribute",
+        "Destroy",
+        "Get",
+        "GetAttributes",
+        "Interop",
+        "Register"
+      ]
+    },
+    {
+      "name": "BL-M-9-30.xml",
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "Destroy",
+        "GetAttributes",
+        "Interop",
+        "Register"
+      ]
+    },
+    {
+      "name": "CS-AC-M-1-30.xml",
+      "status": "FAIL",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1",
+      "ops_used": [
+        "Destroy",
+        "Register",
+        "Revoke",
+        "Sign"
+      ]
+    },
+    {
+      "name": "CS-AC-M-2-30.xml",
+      "status": "FAIL",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1",
+      "ops_used": [
+        "Destroy",
+        "Register",
+        "Revoke",
+        "SignatureVerify"
+      ]
+    },
+    {
+      "name": "CS-AC-M-3-30.xml",
+      "status": "FAIL",
+      "detail": "msg #2: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1",
+      "ops_used": [
+        "Destroy",
+        "Register",
+        "Revoke",
+        "Sign",
+        "SignatureVerify"
+      ]
+    },
+    {
+      "name": "CS-AC-M-4-30.xml",
+      "status": "FAIL",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1",
+      "ops_used": [
+        "Destroy",
+        "MAC",
+        "Register",
+        "Revoke"
+      ]
+    },
+    {
+      "name": "CS-AC-M-5-30.xml",
+      "status": "FAIL",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1",
+      "ops_used": [
+        "Destroy",
+        "MACVerify",
+        "Register",
+        "Revoke"
+      ]
+    },
+    {
+      "name": "CS-AC-M-6-30.xml",
+      "status": "FAIL",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1",
+      "ops_used": [
+        "Destroy",
+        "MAC",
+        "MACVerify",
+        "Register",
+        "Revoke"
+      ]
+    },
+    {
+      "name": "CS-AC-M-7-30.xml",
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "Hash"
+      ]
+    },
+    {
+      "name": "CS-AC-M-8-30.xml",
+      "status": "FAIL",
+      "detail": "msg #2: response mismatch: ResponseMessage/BatchItem/ResultReason: expected 'WrongKeyLifecycleState' got 1",
+      "ops_used": [
+        "Destroy",
+        "Register",
+        "Revoke",
+        "Sign",
+        "SignatureVerify"
+      ]
+    },
+    {
+      "name": "CS-AC-M-OAEP-1-30.xml",
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "Destroy",
+        "Encrypt",
+        "Register",
+        "Revoke"
+      ]
+    },
+    {
+      "name": "CS-AC-M-OAEP-10-30.xml",
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "Decrypt",
+        "Destroy",
+        "Register",
+        "Revoke"
+      ]
+    },
+    {
+      "name": "CS-AC-M-OAEP-2-30.xml",
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "Decrypt",
+        "Destroy",
+        "Register",
+        "Revoke"
+      ]
+    },
+    {
+      "name": "CS-AC-M-OAEP-3-30.xml",
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "Destroy",
+        "Encrypt",
+        "Register",
+        "Revoke"
+      ]
+    },
+    {
+      "name": "CS-AC-M-OAEP-4-30.xml",
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "Decrypt",
+        "Destroy",
+        "Register",
+        "Revoke"
+      ]
+    },
+    {
+      "name": "CS-AC-M-OAEP-5-30.xml",
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "Destroy",
+        "Encrypt",
+        "Register",
+        "Revoke"
+      ]
+    },
+    {
+      "name": "CS-AC-M-OAEP-6-30.xml",
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "Decrypt",
+        "Destroy",
+        "Register",
+        "Revoke"
+      ]
+    },
+    {
+      "name": "CS-AC-M-OAEP-7-30.xml",
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "Destroy",
+        "Encrypt",
+        "Register",
+        "Revoke"
+      ]
+    },
+    {
+      "name": "CS-AC-M-OAEP-8-30.xml",
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "Decrypt",
+        "Destroy",
+        "Register",
+        "Revoke"
+      ]
+    },
+    {
+      "name": "CS-AC-M-OAEP-9-30.xml",
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "Destroy",
+        "Encrypt",
+        "Register",
+        "Revoke"
+      ]
+    },
+    {
+      "name": "CS-BC-M-1-30.xml",
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "Create",
+        "Destroy",
+        "Encrypt",
+        "Revoke"
+      ]
+    },
+    {
+      "name": "CS-BC-M-10-30.xml",
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "Decrypt",
+        "Destroy",
+        "Encrypt",
+        "Register",
+        "Revoke"
+      ]
+    },
+    {
+      "name": "CS-BC-M-11-30.xml",
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "Decrypt",
+        "Destroy",
+        "Encrypt",
+        "Register",
+        "Revoke"
+      ]
+    },
+    {
+      "name": "CS-BC-M-12-30.xml",
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "Decrypt",
+        "Destroy",
+        "Encrypt",
+        "Register",
+        "Revoke"
+      ]
+    },
+    {
+      "name": "CS-BC-M-13-30.xml",
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "Decrypt",
+        "Destroy",
+        "Encrypt",
+        "Register",
+        "Revoke"
+      ]
+    },
+    {
+      "name": "CS-BC-M-14-30.xml",
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "Decrypt",
+        "Destroy",
+        "Encrypt",
+        "Register",
+        "Revoke"
+      ]
+    },
+    {
+      "name": "CS-BC-M-2-30.xml",
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "Create",
+        "Decrypt",
+        "Destroy",
+        "Revoke"
+      ]
+    },
+    {
+      "name": "CS-BC-M-3-30.xml",
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "Create",
+        "Decrypt",
+        "Destroy",
+        "Encrypt",
+        "Revoke"
+      ]
+    },
+    {
+      "name": "CS-BC-M-4-30.xml",
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "Destroy",
+        "Encrypt",
+        "Register",
+        "Revoke"
+      ]
+    },
+    {
+      "name": "CS-BC-M-5-30.xml",
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "Decrypt",
+        "Destroy",
+        "Register",
+        "Revoke"
+      ]
+    },
+    {
+      "name": "CS-BC-M-6-30.xml",
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "Decrypt",
+        "Destroy",
+        "Encrypt",
+        "Register",
+        "Revoke"
+      ]
+    },
+    {
+      "name": "CS-BC-M-7-30.xml",
+      "status": "FAIL",
+      "detail": "msg #2: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'OperationFailed' got 0",
+      "ops_used": [
+        "Destroy",
+        "Encrypt",
+        "Register",
+        "Revoke"
+      ]
+    },
+    {
+      "name": "CS-BC-M-8-30.xml",
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "Decrypt",
+        "Destroy",
+        "Encrypt",
+        "Register",
+        "Revoke"
+      ]
+    },
+    {
+      "name": "CS-BC-M-9-30.xml",
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "Decrypt",
+        "Destroy",
+        "Encrypt",
+        "Register",
+        "Revoke"
+      ]
+    },
+    {
+      "name": "CS-BC-M-CHACHA20-1-30.xml",
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "Decrypt",
+        "Destroy",
+        "Encrypt",
+        "Register",
+        "Revoke"
+      ]
+    },
+    {
+      "name": "CS-BC-M-CHACHA20-2-30.xml",
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "Decrypt",
+        "Destroy",
+        "Encrypt",
+        "Register",
+        "Revoke"
+      ]
+    },
+    {
+      "name": "CS-BC-M-CHACHA20-3-30.xml",
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "Decrypt",
+        "Destroy",
+        "Encrypt",
+        "Register",
+        "Revoke"
+      ]
+    },
+    {
+      "name": "CS-BC-M-CHACHA20-4-30.xml",
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "Decrypt",
+        "Destroy",
+        "Encrypt",
+        "Register",
+        "Revoke"
+      ]
+    },
+    {
+      "name": "CS-BC-M-CHACHA20POLY1305-1-30.xml",
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "Decrypt",
+        "Destroy",
+        "Encrypt",
+        "Register",
+        "Revoke"
+      ]
+    },
+    {
+      "name": "CS-BC-M-GCM-1-30.xml",
+      "status": "FAIL",
+      "detail": "msg #6: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1",
+      "ops_used": [
+        "Decrypt",
+        "Destroy",
+        "Encrypt",
+        "Register",
+        "Revoke"
+      ]
+    },
+    {
+      "name": "CS-BC-M-GCM-2-30.xml",
+      "status": "FAIL",
+      "detail": "msg #21: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1",
+      "ops_used": [
+        "Decrypt",
+        "Destroy",
+        "Encrypt",
+        "Register",
+        "Revoke"
+      ]
+    },
+    {
+      "name": "CS-BC-M-GCM-3-30.xml",
+      "status": "FAIL",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1",
+      "ops_used": [
+        "Destroy",
+        "Encrypt",
+        "Register",
+        "Revoke"
+      ]
+    },
+    {
+      "name": "CS-RNG-M-1-30.xml",
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "RNGRetrieve"
+      ]
+    },
+    {
+      "name": "MSGENC-HTTPS-M-1-30.xml",
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "Query"
+      ]
+    },
+    {
+      "name": "MSGENC-JSON-M-1-30.xml",
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "Query"
+      ]
+    },
+    {
+      "name": "MSGENC-XML-M-1-30.xml",
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "Query"
+      ]
+    },
+    {
+      "name": "OMOS-M-1-30.xml",
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "Destroy",
+        "Register"
+      ]
+    },
+    {
+      "name": "PKCS11-M-1-30.xml",
+      "status": "FAIL",
+      "detail": "msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 4 != 3",
+      "ops_used": [
+        "PKCS_11"
+      ]
+    },
+    {
+      "name": "QS-M-1-30.xml",
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "Query"
+      ]
+    },
+    {
+      "name": "QS-M-2-30.xml",
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "Create"
+      ]
+    },
+    {
+      "name": "SASED-M-1-30.xml",
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "Query"
+      ]
+    },
+    {
+      "name": "SASED-M-2-30.xml",
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "Locate",
+        "Register"
+      ]
+    },
+    {
+      "name": "SASED-M-3-30.xml",
+      "status": "FAIL",
+      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 1 != 0",
+      "ops_used": [
+        "Destroy",
+        "Get",
+        "GetAttributes",
+        "Locate"
+      ]
+    },
+    {
+      "name": "SKFF-M-1-30.xml",
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "Create",
+        "Destroy"
+      ]
+    },
+    {
+      "name": "SKFF-M-10-30.xml",
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "Activate",
+        "AddAttribute",
+        "Create",
+        "DeleteAttribute",
+        "Destroy",
+        "Get",
+        "GetAttributeList",
+        "GetAttributes",
+        "Locate",
+        "ModifyAttribute",
+        "Revoke"
+      ]
+    },
+    {
+      "name": "SKFF-M-11-30.xml",
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "Activate",
+        "AddAttribute",
+        "Create",
+        "DeleteAttribute",
+        "Destroy",
+        "Get",
+        "GetAttributeList",
+        "GetAttributes",
+        "Locate",
+        "ModifyAttribute",
+        "Revoke"
+      ]
+    },
+    {
+      "name": "SKFF-M-12-30.xml",
+      "status": "FAIL",
+      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1",
+      "ops_used": [
+        "Activate",
+        "AddAttribute",
+        "Create",
+        "DeleteAttribute",
+        "Destroy",
+        "Get",
+        "GetAttributeList",
+        "GetAttributes",
+        "Locate",
+        "ModifyAttribute",
+        "Revoke"
+      ]
+    },
+    {
+      "name": "SKFF-M-2-30.xml",
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "Create",
+        "Destroy"
+      ]
+    },
+    {
+      "name": "SKFF-M-3-30.xml",
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "Create",
+        "Destroy"
+      ]
+    },
+    {
+      "name": "SKFF-M-4-30.xml",
+      "status": "FAIL",
+      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1",
+      "ops_used": [
+        "Create",
+        "Destroy"
+      ]
+    },
+    {
+      "name": "SKFF-M-5-30.xml",
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "Create",
+        "Destroy",
+        "Get",
+        "Locate"
+      ]
+    },
+    {
+      "name": "SKFF-M-6-30.xml",
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "Create",
+        "Destroy",
+        "Get",
+        "Locate"
+      ]
+    },
+    {
+      "name": "SKFF-M-7-30.xml",
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "Create",
+        "Destroy",
+        "Get",
+        "Locate"
+      ]
+    },
+    {
+      "name": "SKFF-M-8-30.xml",
+      "status": "FAIL",
+      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1",
+      "ops_used": [
+        "Create",
+        "Destroy",
+        "Get",
+        "Locate"
+      ]
+    },
+    {
+      "name": "SKFF-M-9-30.xml",
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "Activate",
+        "AddAttribute",
+        "Create",
+        "DeleteAttribute",
+        "Destroy",
+        "Get",
+        "GetAttributeList",
+        "GetAttributes",
+        "Locate",
+        "ModifyAttribute",
+        "Revoke"
+      ]
+    },
+    {
+      "name": "SKLC-M-1-30.xml",
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "Create",
+        "Destroy",
+        "GetAttributes"
+      ]
+    },
+    {
+      "name": "SKLC-M-2-30.xml",
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "Activate",
+        "Create",
+        "Destroy",
+        "GetAttributes",
+        "Revoke"
+      ]
+    },
+    {
+      "name": "SKLC-M-3-30.xml",
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "Activate",
+        "Create",
+        "Destroy",
+        "GetAttributes",
+        "ModifyAttribute",
+        "Revoke"
+      ]
+    },
+    {
+      "name": "TL-M-1-30.xml",
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "Query"
+      ]
+    },
+    {
+      "name": "TL-M-2-30.xml",
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "Create",
+        "Get"
+      ]
+    },
+    {
+      "name": "TL-M-3-30.xml",
+      "status": "FAIL",
+      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 1 != 0",
+      "ops_used": [
+        "Destroy",
+        "Get",
+        "GetAttributeList",
+        "GetAttributes",
+        "Locate",
+        "ModifyAttribute"
+      ]
+    },
+    {
+      "name": "AKLC-O-1-30.xml",
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "CreateKeyPair",
+        "Destroy",
+        "GetAttributes"
+      ]
+    },
+    {
+      "name": "CS-RNG-O-1-30.xml",
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "RNGSeed"
+      ]
+    },
+    {
+      "name": "CS-RNG-O-2-30.xml",
+      "status": "FAIL",
+      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem/ResponsePayload/DataLength: expected '16' got 32",
+      "ops_used": [
+        "RNGSeed"
+      ]
+    },
+    {
+      "name": "CS-RNG-O-3-30.xml",
+      "status": "FAIL",
+      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem/ResponsePayload/DataLength: expected '0' got 32",
+      "ops_used": [
+        "RNGSeed"
+      ]
+    },
+    {
+      "name": "CS-RNG-O-4-30.xml",
+      "status": "FAIL",
+      "detail": "msg #0: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'OperationFailed' got 0",
+      "ops_used": [
+        "RNGSeed"
+      ]
+    },
+    {
+      "name": "OMOS-O-1-30.xml",
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "Destroy",
+        "Register"
+      ]
+    },
+    {
+      "name": "SKLC-O-1-30.xml",
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "Create",
+        "Destroy",
+        "GetAttributes"
+      ]
+    }
+  ]
+}

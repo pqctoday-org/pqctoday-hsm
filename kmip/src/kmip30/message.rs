@@ -58,6 +58,45 @@ pub struct RequestHeader {
     pub protocol_version_major: i32,
     pub protocol_version_minor: i32,
     pub time_stamp: Option<OffsetDateTime>,
+    /// KMIP 3.0 §9.5 `Batch Error Continuation Option`. Per spec: "If
+    /// not specified, then Stop is assumed." We carry `None` to mean
+    /// the field was absent, and the dispatcher applies the Stop
+    /// default at the consumer site so the absent-vs-explicitly-Stop
+    /// distinction is preserved for logging.
+    pub batch_error_continuation_option: Option<BatchErrorContinuationOption>,
+    /// KMIP 3.0 §9.10 `Maximum Response Size` (bytes). When set, the
+    /// server MUST return `OperationFailed / ResponseTooLarge` if
+    /// the encoded ResponseMessage would exceed it. `None` ≡ no
+    /// limit.
+    pub maximum_response_size: Option<i32>,
+}
+
+/// KMIP 3.0 §9.5 enum. Codepoints (verified against
+/// `kmip-spec-3.0-tags-enums.json`):
+/// - `Continue = 0x01`: process every item even after a failure
+/// - `Stop     = 0x02`: halt after the first failure; later items are
+///                       NOT processed and NOT returned (default)
+/// - `Undo     = 0x03`: halt after the first failure AND roll back
+///                       earlier successful items, reporting them with
+///                       `ResultStatus::OperationUndone`
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[repr(u32)]
+pub enum BatchErrorContinuationOption {
+    Continue = 0x0000_0001,
+    Stop     = 0x0000_0002,
+    Undo     = 0x0000_0003,
+}
+
+impl BatchErrorContinuationOption {
+    pub const fn to_wire_value(self) -> u32 { self as u32 }
+    pub const fn from_wire_value(v: u32) -> Option<Self> {
+        match v {
+            0x01 => Some(Self::Continue),
+            0x02 => Some(Self::Stop),
+            0x03 => Some(Self::Undo),
+            _ => None,
+        }
+    }
 }
 
 impl RequestHeader {
@@ -67,6 +106,8 @@ impl RequestHeader {
             protocol_version_major: KMIP_VERSION_MAJOR,
             protocol_version_minor: KMIP_VERSION_MINOR,
             time_stamp: None,
+            batch_error_continuation_option: None,
+            maximum_response_size: None,
         }
     }
 }
@@ -89,19 +130,33 @@ pub struct ResponseMessage {
 }
 
 /// §8.2.2 Response Header — minimal v0.1 shape.
+///
+/// `ServerCorrelationValue` is opaque server-generated text included in
+/// every response — KMIP Profiles v3.0 §5.1.2 item 11.l ("Baseline
+/// Server" capability set) requires support; §4.1.1 item 18 designates
+/// its value as a Permitted Test Case Variation so the comparator
+/// accepts whatever we emit. We currently emit a monotonic
+/// `pqctoday-<unix-nanos>` token; clients echo it via Client
+/// Correlation Value if they choose.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ResponseHeader {
     pub protocol_version_major: i32,
     pub protocol_version_minor: i32,
     pub time_stamp: OffsetDateTime,
+    pub server_correlation_value: Option<String>,
 }
 
 impl ResponseHeader {
     pub fn v3_now() -> Self {
+        let now = OffsetDateTime::now_utc();
         Self {
             protocol_version_major: KMIP_VERSION_MAJOR,
             protocol_version_minor: KMIP_VERSION_MINOR,
-            time_stamp: OffsetDateTime::now_utc(),
+            time_stamp: now,
+            server_correlation_value: Some(format!(
+                "pqctoday-{}",
+                now.unix_timestamp_nanos()
+            )),
         }
     }
 }
@@ -154,6 +209,13 @@ pub enum RequestPayload {
     Create(super::ops::CreateRequest),
     CreateKeyPair(super::ops::CreateKeyPairRequest),
     Get(super::ops::GetRequest),
+    GetAttributes(super::ops::GetAttributesRequest),
+    GetAttributeList(super::ops::GetAttributeListRequest),
+    AddAttribute(super::ops::AddAttributeRequest),
+    ModifyAttribute(super::ops::ModifyAttributeRequest),
+    DeleteAttribute(super::ops::DeleteAttributeRequest),
+    SetAttribute(super::ops::SetAttributeRequest),
+    AdjustAttribute(super::ops::AdjustAttributeRequest),
     Locate(super::ops::LocateRequest),
     Activate(super::ops::ActivateRequest),
     Revoke(super::ops::RevokeRequest),
@@ -162,6 +224,38 @@ pub enum RequestPayload {
     Decrypt(super::ops::DecryptRequest),
     Sign(super::ops::SignRequest),
     SignatureVerify(super::ops::SignatureVerifyRequest),
+    Interop(super::ops::InteropRequest),
+    Register(super::ops::RegisterRequest),
+    Import(super::ops::ImportRequest),
+    Export(super::ops::ExportRequest),
+    Deactivate(super::ops::DeactivateRequest),
+    Check(super::ops::CheckRequest),
+    Archive(super::ops::ArchiveRequest),
+    Recover(super::ops::RecoverRequest),
+    Obliterate(super::ops::ObliterateRequest),
+    DiscoverVersions(super::ops::DiscoverVersionsRequest),
+    Ping(super::ops::PingRequest),
+    Mac(super::ops::MacRequest),
+    MacVerify(super::ops::MacVerifyRequest),
+    Hash(super::ops::HashRequest),
+    CreateCredential(super::ops::CreateCredentialRequest),
+    CreateGroup(super::ops::CreateGroupRequest),
+    CreateUser(super::ops::CreateUserRequest),
+    Log(super::ops::LogRequest),
+    Login(super::ops::LoginRequest),
+    Logout(super::ops::LogoutRequest),
+    RngRetrieve(super::ops::RngRetrieveRequest),
+    RngSeed(super::ops::RngSeedRequest),
+    Pkcs11(super::ops::Pkcs11Request),
+    /// R7 Phase 1 sentinel — emitted by `decode_request_message` when
+    /// a per-BatchItem payload fails to decode but the outer envelope
+    /// is intact. The dispatcher recognises it and emits a per-item
+    /// `OperationFailed / InvalidMessage` ResponseBatchItem with the
+    /// `operation_echo` (when readable) per KMIP 3.0 §8.2.3.
+    DecodeFailed {
+        operation_echo: Option<super::ops::Operation>,
+        message: String,
+    },
 }
 
 /// Typed response payload — one variant per supported op.
@@ -171,6 +265,13 @@ pub enum ResponsePayload {
     Create(super::ops::CreateResponse),
     CreateKeyPair(super::ops::CreateKeyPairResponse),
     Get(super::ops::GetResponse),
+    GetAttributes(super::ops::GetAttributesResponse),
+    GetAttributeList(super::ops::GetAttributeListResponse),
+    AddAttribute(super::ops::AddAttributeResponse),
+    ModifyAttribute(super::ops::ModifyAttributeResponse),
+    DeleteAttribute(super::ops::DeleteAttributeResponse),
+    SetAttribute(super::ops::SetAttributeResponse),
+    AdjustAttribute(super::ops::AdjustAttributeResponse),
     Locate(super::ops::LocateResponse),
     Activate(super::ops::ActivateResponse),
     Revoke(super::ops::RevokeResponse),
@@ -179,24 +280,112 @@ pub enum ResponsePayload {
     Decrypt(super::ops::DecryptResponse),
     Sign(super::ops::SignResponse),
     SignatureVerify(super::ops::SignatureVerifyResponse),
+    Interop(super::ops::InteropResponse),
+    Register(super::ops::RegisterResponse),
+    Import(super::ops::ImportResponse),
+    Export(super::ops::ExportResponse),
+    Deactivate(super::ops::DeactivateResponse),
+    Check(super::ops::CheckResponse),
+    Archive(super::ops::ArchiveResponse),
+    Recover(super::ops::RecoverResponse),
+    Obliterate(super::ops::ObliterateResponse),
+    DiscoverVersions(super::ops::DiscoverVersionsResponse),
+    Ping(super::ops::PingResponse),
+    Mac(super::ops::MacResponse),
+    MacVerify(super::ops::MacVerifyResponse),
+    Hash(super::ops::HashResponse),
+    CreateCredential(super::ops::CreateCredentialResponse),
+    CreateGroup(super::ops::CreateGroupResponse),
+    CreateUser(super::ops::CreateUserResponse),
+    Log(super::ops::LogResponse),
+    Login(super::ops::LoginResponse),
+    Logout(super::ops::LogoutResponse),
+    RngRetrieve(super::ops::RngRetrieveResponse),
+    RngSeed(super::ops::RngSeedResponse),
+    Pkcs11(super::ops::Pkcs11Response),
 }
 
 impl RequestPayload {
     /// Operation codepoint that goes in the Batch Item's Operation field.
     pub fn operation(&self) -> Operation {
         match self {
-            Self::Query(_)           => Operation::Query,
-            Self::Create(_)          => Operation::Create,
-            Self::CreateKeyPair(_)   => Operation::CreateKeyPair,
-            Self::Get(_)             => Operation::Get,
-            Self::Locate(_)          => Operation::Locate,
-            Self::Activate(_)        => Operation::Activate,
-            Self::Revoke(_)          => Operation::Revoke,
-            Self::Destroy(_)         => Operation::Destroy,
-            Self::Encrypt(_)         => Operation::Encrypt,
-            Self::Decrypt(_)         => Operation::Decrypt,
-            Self::Sign(_)            => Operation::Sign,
-            Self::SignatureVerify(_) => Operation::SignatureVerify,
+            Self::Query(_)            => Operation::Query,
+            Self::Create(_)           => Operation::Create,
+            Self::CreateKeyPair(_)    => Operation::CreateKeyPair,
+            Self::Get(_)              => Operation::Get,
+            Self::GetAttributes(_)    => Operation::GetAttributes,
+            Self::GetAttributeList(_) => Operation::GetAttributeList,
+            Self::AddAttribute(_)     => Operation::AddAttribute,
+            Self::ModifyAttribute(_)  => Operation::ModifyAttribute,
+            Self::DeleteAttribute(_)  => Operation::DeleteAttribute,
+            Self::SetAttribute(_)     => Operation::SetAttribute,
+            Self::AdjustAttribute(_)  => Operation::AdjustAttribute,
+            Self::Locate(_)           => Operation::Locate,
+            Self::Activate(_)         => Operation::Activate,
+            Self::Revoke(_)           => Operation::Revoke,
+            Self::Destroy(_)          => Operation::Destroy,
+            Self::Encrypt(_)          => Operation::Encrypt,
+            Self::Decrypt(_)          => Operation::Decrypt,
+            Self::Sign(_)             => Operation::Sign,
+            Self::SignatureVerify(_)  => Operation::SignatureVerify,
+            Self::Interop(_)          => Operation::Interop,
+            Self::Register(_)         => Operation::Register,
+            Self::Import(_)           => Operation::Import,
+            Self::Export(_)           => Operation::Export,
+            Self::Deactivate(_)       => Operation::Deactivate,
+            Self::Check(_)            => Operation::Check,
+            Self::Archive(_)          => Operation::Archive,
+            Self::Recover(_)          => Operation::Recover,
+            Self::Obliterate(_)       => Operation::Obliterate,
+            Self::DiscoverVersions(_) => Operation::DiscoverVersions,
+            Self::Ping(_)             => Operation::Ping,
+            Self::Mac(_)              => Operation::MAC,
+            Self::MacVerify(_)        => Operation::MACVerify,
+            Self::Hash(_)             => Operation::Hash,
+            Self::CreateCredential(_) => Operation::CreateCredential,
+            Self::CreateGroup(_)      => Operation::CreateGroup,
+            Self::CreateUser(_)       => Operation::CreateUser,
+            Self::Log(_)              => Operation::Log,
+            Self::Login(_)            => Operation::Login,
+            Self::Logout(_)           => Operation::Logout,
+            Self::RngRetrieve(_)      => Operation::RNGRetrieve,
+            Self::RngSeed(_)          => Operation::RNGSeed,
+            Self::Pkcs11(_)           => Operation::Pkcs11,
+            // Echo the original Operation when we were able to read it
+            // before the payload decode failed; fall back to `Ping`
+            // (whose handler we already special-case in the
+            // dispatcher) so callers always see a valid Operation.
+            Self::DecodeFailed { operation_echo, .. } => {
+                operation_echo.unwrap_or(Operation::Ping)
+            }
+        }
+    }
+
+    /// UIDs the op consumes as input. The dispatcher's R7 Phase 4
+    /// (§9.5 Undo) wave snapshots these BEFORE the op runs so it can
+    /// roll them back on a later failure. Read-only ops (Query / Get
+    /// / Locate / Sign / Verify / …) return an empty slice — they
+    /// have no side effect to revert.
+    pub fn touched_uids(&self) -> Vec<&str> {
+        match self {
+            Self::Activate(r)         => vec![r.uid.as_str()],
+            Self::Revoke(r)           => vec![r.uid.as_str()],
+            Self::Destroy(r)          => vec![r.uid.as_str()],
+            Self::Deactivate(r)       => vec![r.uid.as_str()],
+            Self::Archive(r)          => vec![r.uid.as_str()],
+            Self::Recover(r)          => vec![r.uid.as_str()],
+            Self::Obliterate(r)       => vec![r.uid.as_str()],
+            Self::AddAttribute(r)     => vec![r.uid.as_str()],
+            Self::ModifyAttribute(r)  => vec![r.uid.as_str()],
+            Self::DeleteAttribute(r)  => vec![r.uid.as_str()],
+            Self::SetAttribute(r)     => vec![r.uid.as_str()],
+            Self::AdjustAttribute(r)  => vec![r.uid.as_str()],
+            // Import always carries an explicit UID. Register MAY
+            // — the server-allocated case is captured post-hoc in
+            // `created_uids_after`.
+            Self::Import(r)           => vec![r.uid.as_str()],
+            // Read-only / output-only — no rollback needed.
+            _ => Vec::new(),
         }
     }
 }
