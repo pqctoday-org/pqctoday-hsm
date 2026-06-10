@@ -178,6 +178,13 @@ fn encrypt_classical(
     emit_pkcs11(deps, correlation_id, "C_EncryptInit", Some(mech), 0, "CKR_OK");
     emit_pkcs11(deps, correlation_id, "C_Encrypt", Some(mech), 0, "CKR_OK");
 
+    // KMIP 3.0 §6.1.21 + §11 — IV presence/size is a protocol-level
+    // requirement, so a missing/short IV for an IV-bearing mech is
+    // `InvalidMessage` (0x04), NOT the shim's downstream
+    // `InvalidAttributeValue` (0x2d). OASIS CS-BC-M-11 / CS-BC-M-12
+    // pin `InvalidMessage` with a `missing-iv` message string.
+    validate_iv_for_mech(deps, correlation_id, mech, req.iv.as_deref())?;
+
     // KMIP 3.0 §11 — `Tag Length` validation. The spec text reads
     // "Tag Length is the length of the authenticator tag in bytes."
     // The valid range depends on the AEAD mechanism:
@@ -282,6 +289,38 @@ fn encrypt_classical(
     })
 }
 
+/// Per-mechanism IV requirements per PKCS#11 v3.2 §6.10 / §6.20:
+/// AES-CBC and AES-CBC-PAD require a 16-byte IV; AES-GCM requires a
+/// 12-byte IV; ChaCha20-Poly1305 requires a 12-byte nonce; ChaCha20
+/// accepts 8 (legacy) or 12 (IETF) byte nonces; AES-ECB and
+/// RSA-OAEP have no IV. Anything else is `InvalidMessage` per the
+/// KMIP §11 protocol contract.
+pub(crate) fn validate_iv_for_mech(
+    deps: &Deps,
+    correlation_id: &str,
+    mech: u32,
+    iv: Option<&[u8]>,
+) -> Result<()> {
+    use softhsmrustv3::constants as ck;
+    let len = iv.map(|b| b.len());
+    let valid = match mech {
+        ck::CKM_AES_CBC | ck::CKM_AES_CBC_PAD => len == Some(16),
+        ck::CKM_AES_GCM => len == Some(12),
+        ck::CKM_CHACHA20_POLY1305 => len == Some(12),
+        ck::CKM_CHACHA20 => matches!(len, Some(8) | Some(12)),
+        // No IV for these mechanisms.
+        ck::CKM_AES_ECB | ck::CKM_RSA_PKCS_OAEP => iv.is_none() || iv == Some(&[][..]),
+        _ => true,
+    };
+    if valid { return Ok(()); }
+    Err(fail_err(deps, correlation_id, "Encrypt/Decrypt",
+        KmipError::failed(
+            ResultReason::InvalidMessage,
+            if iv.is_none() { "missing-iv".to_string() }
+            else { format!("invalid-iv-length: {:?} bytes for mechanism {:#x}", len, mech) },
+        )))
+}
+
 fn placeholder_bytes(uid: &str, input: &[u8], domain: &[u8], len: usize) -> Vec<u8> {
     use sha2::{Digest, Sha256};
     let mut out = Vec::with_capacity(len);
@@ -380,11 +419,14 @@ mod tests {
     }
 
     #[test]
-    fn encrypt_on_destroyed_returns_object_archived() {
+    fn encrypt_on_destroyed_returns_wrong_lifecycle_state() {
         let (_ring, d) = deps_and_ring();
         put(&d, "a", KmipAlgorithm::Aes, ObjectType::SymmetricKey, State::Destroyed, UsageMask::ENCRYPT);
         let err = encrypt(&d, EncryptRequest { uid: "a".into(), data: vec![], iv: None , cryptographic_parameters: None, aad: None}, "c").unwrap_err();
-        assert_eq!(err.result_reason(), ResultReason::ObjectArchived);
+        // KMIP 3.0 §11 — Destroyed is an FSM-rejection state, not
+        // an archive state. CS-AC-M-8 pins WrongKeyLifecycleState
+        // for crypto-ops against Destroyed keys.
+        assert_eq!(err.result_reason(), ResultReason::WrongKeyLifecycleState);
     }
 }
 

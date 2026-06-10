@@ -259,7 +259,7 @@ mod tests {
     }
 
     #[test]
-    fn verify_destroyed_returns_object_archived() {
+    fn verify_destroyed_returns_wrong_lifecycle_state() {
         let d = deps_with();
         d.store.put(ObjectRecord {
             uid: "u".into(),
@@ -291,6 +291,8 @@ mod tests {
             data: vec![],
             signature: vec![],
         }, "c").unwrap_err();
-        assert_eq!(err.result_reason(), ResultReason::ObjectArchived);
+        // KMIP 3.0 §11 — Destroyed is an FSM-rejection state. See
+        // `ops::helpers::non_active_state_error` for the citation.
+        assert_eq!(err.result_reason(), ResultReason::WrongKeyLifecycleState);
     }
 }

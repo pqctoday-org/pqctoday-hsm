@@ -155,6 +155,10 @@ fn decrypt_classical(
     emit_pkcs11(deps, correlation_id, "C_DecryptInit", Some(mech), 0, "CKR_OK");
     emit_pkcs11(deps, correlation_id, "C_Decrypt", Some(mech), 0, "CKR_OK");
 
+    // KMIP 3.0 §6.1.21 + §11 — IV presence/size mismatches surface
+    // as `InvalidMessage` per spec (mirror of the Encrypt path).
+    super::encrypt::validate_iv_for_mech(deps, correlation_id, mech, req.iv.as_deref())?;
+
     // KMIP 3.0 §6.1.21 Decrypt — Plane-3 dispatch through the
     // PKCS#11 bridge. Mirrors the Encrypt path:
     //   1. obj.key_material set (Register'd by client) → bridge with
@@ -279,7 +283,10 @@ mod tests {
     fn decrypt_allowed_in_deactivated_state() {
         let (_ring, d) = deps_and_ring();
         put(&d, "a", KmipAlgorithm::Aes, ObjectType::SymmetricKey, State::Deactivated, UsageMask::DECRYPT);
-        let _ = decrypt(&d, DecryptRequest { uid: "a".into(), data: vec![0; 32], iv: None , cryptographic_parameters: None, aad: None}, "c").unwrap();
+        // AES-GCM (the default for KmipAlgorithm::Aes) requires a
+        // 12-byte IV per KMIP 3.0 §6.1.21 + NIST SP 800-38D. Supply
+        // one so the lifecycle gate is what's actually under test.
+        let _ = decrypt(&d, DecryptRequest { uid: "a".into(), data: vec![0; 32], iv: Some(vec![0; 12]) , cryptographic_parameters: None, aad: None}, "c").unwrap();
     }
 
     #[test]

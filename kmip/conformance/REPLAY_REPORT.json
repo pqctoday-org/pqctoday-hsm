@@ -1,8 +1,8 @@
 {
-  "generated_at": 1781050703,
+  "generated_at": 1781054356,
   "summary": {
-    "pass": 49,
-    "fail": 53,
+    "pass": 51,
+    "fail": 51,
     "error": 0,
     "skip_op": 0,
     "skip_parse": 0,
@@ -528,8 +528,8 @@
     },
     {
       "name": "CS-BC-M-11-30.xml",
-      "status": "FAIL",
-      "detail": "msg #3: response mismatch: ResponseMessage/BatchItem/ResultReason: expected 'InvalidMessage' got 45",
+      "status": "PASS",
+      "detail": "",
       "ops_used": [
         "Decrypt",
         "Destroy",
@@ -540,8 +540,8 @@
     },
     {
       "name": "CS-BC-M-12-30.xml",
-      "status": "FAIL",
-      "detail": "msg #2: response mismatch: ResponseMessage/BatchItem/ResultReason: expected 'InvalidMessage' got 45",
+      "status": "PASS",
+      "detail": "",
       "ops_used": [
         "Decrypt",
         "Destroy",

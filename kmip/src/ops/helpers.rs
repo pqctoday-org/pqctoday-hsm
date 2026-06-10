@@ -216,12 +216,19 @@ pub fn oaep_params_for(
     })
 }
 
+/// All §3.x lifecycle-FSM rejections surface as
+/// `WrongKeyLifecycleState` (0x43): the object exists, the request
+/// is well-formed, but the FSM forbids the op given the current
+/// state (PreActive / Deactivated / Compromised / Destroyed /
+/// DestroyedCompromised).
+///
+/// `ObjectArchived` (0x0d) is **not** used here — per KMIP 3.0 §11
+/// it's reserved for objects moved off-line by the `Archive` op
+/// (§6.1.5) and needing `Recover` before use. OASIS CS-AC-M-8 pins
+/// `WrongKeyLifecycleState` for `Sign` against a `Destroyed` key,
+/// confirming the interpretation.
 pub fn non_active_state_error(uid: &str, state: crate::kmip30::State) -> KmipError {
-    use crate::kmip30::State::*;
-    match state {
-        Destroyed | DestroyedCompromised => KmipError::object_archived(uid),
-        _ => KmipError::wrong_key_lifecycle_state(uid, state_name(state)),
-    }
+    KmipError::wrong_key_lifecycle_state(uid, state_name(state))
 }
 
 pub fn state_name(s: crate::kmip30::State) -> &'static str {
