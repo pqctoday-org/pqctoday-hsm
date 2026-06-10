@@ -81,13 +81,14 @@ pub fn register(
     // the algorithm either in the Attributes bag or the KeyBlock.
     let kmip_algorithm = match resolved_algorithm {
         Some(a) => a,
-        None if matches!(req.object_type, ObjectType::Certificate) => {
+        None if matches!(
+            req.object_type,
+            ObjectType::Certificate | ObjectType::SecretData | ObjectType::OpaqueObject
+        ) => {
             // Sentinel: the algorithm slot is required by ObjectRecord
-            // but never surfaced in Certificate GetAttributes responses
-            // (CryptographicAlgorithm is not a Certificate attribute
-            // per §11). We pick Rsa as the most common cert subject-PK
-            // algorithm; the value is never inspected for Certificate
-            // objects.
+            // but isn't surfaced in Certificate / SecretData / OpaqueObject
+            // GetAttributes responses (CryptographicAlgorithm is not in
+            // their §11 attribute table). Rsa is harmless; never inspected.
             crate::kmip30::KmipAlgorithm::Rsa
         }
         None => return Err(fail_err(deps, correlation_id, "Register", KmipError::failed(
@@ -147,13 +148,20 @@ pub fn register(
     // type). `CertificateLength` is the DER byte count; the §11
     // attribute-table marks both `CertificateLength` and
     // `CertificateSubjectCN` as server-set (Read-Only).
+    // certificate_payload is reused for OpaqueObject's OpaqueDataType
+    // pass-through (no DER, no length, no CN). The wire decoder sets
+    // `der.is_empty()` for that path.
     let (certificate_type, certificate_value, certificate_length, certificate_subject_cn) =
-        if let Some((wire_ct, der)) = &req.certificate_payload {
-            let len = der.len() as i32;
-            let cn = super::der_x509::extract_subject_cn(der);
-            (Some(*wire_ct), Some(der.clone()), Some(len), cn)
-        } else {
-            (None, None, None, None)
+        match (&req.certificate_payload, req.object_type) {
+            (Some((wire_ct, der)), ObjectType::Certificate) => {
+                let len = der.len() as i32;
+                let cn = super::der_x509::extract_subject_cn(der);
+                (Some(*wire_ct), Some(der.clone()), Some(len), cn)
+            }
+            (Some((wire_ct, _)), ObjectType::OpaqueObject) => {
+                (Some(*wire_ct), None, None, None)
+            }
+            _ => (None, None, None, None),
         };
 
     deps.store.put(ObjectRecord {

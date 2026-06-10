@@ -49,6 +49,12 @@ pub enum ResultReason {
     /// is read-only rather than the *value* being malformed. BL-M-7
     /// step #2 pins this code.
     AttributeReadOnly      = 0x0000_0022,
+    /// `Object Not Found` — KMIP 3.0 §11. The referenced managed
+    /// object (UID) does not exist in the server's store. Distinct
+    /// from `ItemNotFound` (0x01) which signals an attribute /
+    /// item missing inside a request payload. BL-M-4 step #5
+    /// (Get against a UID the server never minted) pins this code.
+    ObjectNotFound         = 0x0000_0037,
     GeneralFailure        = 0x0000_0100,
 }
 
@@ -91,7 +97,18 @@ impl KmipError {
         Self::failed(ResultReason::PermissionDenied, msg)
     }
     pub fn not_found(uid: &str) -> Self {
+        // KMIP 3.0 §11: `Item Not Found` is the spec's default for a
+        // missing-thing error — including the post-Obliterate
+        // GetAttributes path (BL-M-20). The `Get`-specific
+        // `Object Not Found` (0x37) case is reachable via
+        // [`Self::object_not_found`].
         Self::failed(ResultReason::ItemNotFound, format!("UID {uid:?} not found"))
+    }
+    pub fn object_not_found(uid: &str) -> Self {
+        // KMIP 3.0 §11 + §6.1.23 — `Get` against an unknown UID
+        // returns `Object Not Found` (0x37), not the generic
+        // `Item Not Found` (0x01). BL-M-4 step #5 pins this code.
+        Self::failed(ResultReason::ObjectNotFound, format!("UID {uid:?} not found"))
     }
     pub fn invalid_field(msg: impl Into<String>) -> Self {
         Self::failed(ResultReason::InvalidField, msg)
@@ -175,6 +192,7 @@ mod tests {
     #[test]
     fn helpers_carry_correct_reason() {
         assert_eq!(KmipError::not_found("u1").result_reason(), ResultReason::ItemNotFound);
+        assert_eq!(KmipError::object_not_found("u1").result_reason(), ResultReason::ObjectNotFound);
         assert_eq!(KmipError::permission_denied("x").result_reason(), ResultReason::PermissionDenied);
         assert_eq!(KmipError::object_archived("u1").result_reason(), ResultReason::ObjectArchived);
     }

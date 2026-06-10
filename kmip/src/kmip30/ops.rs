@@ -261,6 +261,10 @@ pub struct GetResponse {
     pub object_type: ObjectType,
     pub uid: String,
     pub key_block: KeyBlock,
+    /// KMIP 3.0 §6.2 OpaqueObject pass-through — the client-supplied
+    /// `OpaqueDataType` codepoint stashed at Register time, echoed
+    /// in the Get response wrapper. `None` for non-Opaque objects.
+    pub opaque_data_type: Option<u32>,
 }
 
 /// `KeyBlock` (KMIP 3.0 §4.x) — the wrapped key material returned by `Get`

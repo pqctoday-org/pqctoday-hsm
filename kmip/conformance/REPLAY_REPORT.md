@@ -1,6 +1,6 @@
 # OASIS KMIP 3.0 Dispatcher Replay Report
 
-Generated: 2026-06-10 02:58:00 UTC
+Generated: 2026-06-10 03:16:21 UTC
 
 
 ## Aggregate
@@ -8,8 +8,8 @@ Generated: 2026-06-10 02:58:00 UTC
 
 | Status | Count | % of total |
 |---|---|---|
-| **PASS** | 58 | 56.9% |
-| **FAIL** | 44 | 43.1% |
+| **PASS** | 62 | 60.8% |
+| **FAIL** | 40 | 39.2% |
 | ERROR | 0 | 0.0% |
 | SKIP_OP (op not implemented) | 0 | 0.0% |
 | SKIP_PARSE (XML malformed) | 0 | 0.0% |
@@ -18,9 +18,9 @@ Generated: 2026-06-10 02:58:00 UTC
 
 Of the 102 tests that exercise only implemented ops:
 
-  - **58 pass (57%)**
+  - **62 pass (61%)**
 
-  - 44 fail
+  - 40 fail
 
   - 0 errored
 
@@ -36,8 +36,7 @@ Of the 102 tests that exercise only implemented ops:
 | `BL-M-12-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
 | `BL-M-13-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
 | `BL-M-14-30.xml` | FAIL | msg #5: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: missing expected attribute 'ProtectionStorageMask' (§4.1.1  |
-| `BL-M-4-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
-| `BL-M-5-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
+| `BL-M-5-30.xml` | FAIL | msg #2: response mismatch: ResponseMessage/BatchItem/ResponsePayload/OpaqueObject/OpaqueDataType: expected '0x80123456' got 2148676694 |
 | `BL-M-8-30.xml` | FAIL | msg #2: response mismatch: ResponseMessage/BatchItem/ResultReason: expected 'NonUniqueNameAttribute' got 7 |
 | `CS-AC-M-1-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
 | `CS-AC-M-2-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
@@ -57,11 +56,8 @@ Of the 102 tests that exercise only implemented ops:
 | `CS-RNG-O-2-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResponsePayload/DataLength: expected '16' got 32 |
 | `CS-RNG-O-3-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResponsePayload/DataLength: expected '0' got 32 |
 | `CS-RNG-O-4-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'OperationFailed' got 0 |
-| `OMOS-M-1-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
-| `OMOS-O-1-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
 | `PKCS11-M-1-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 4 != 3 |
 | `QS-M-2-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'OperationFailed' got 0 |
-| `SASED-M-2-30.xml` | FAIL | msg #1: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
 | `SASED-M-3-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 1 != 0 |
 | `SKFF-M-10-30.xml` | FAIL | msg #0: response mismatch: ResponseMessage/BatchItem/ResultStatus: expected 'Success' got 1 |
 | `SKFF-M-11-30.xml` | FAIL | msg #8: response mismatch: ResponseMessage/BatchItem/ResponsePayload: child count 27 != 10 |
@@ -89,6 +85,7 @@ Of the 102 tests that exercise only implemented ops:
 | `BL-M-20-30.xml` | PASS |  |
 | `BL-M-21-30.xml` | PASS |  |
 | `BL-M-3-30.xml` | PASS |  |
+| `BL-M-4-30.xml` | PASS |  |
 | `BL-M-6-30.xml` | PASS |  |
 | `BL-M-7-30.xml` | PASS |  |
 | `BL-M-9-30.xml` | PASS |  |
@@ -122,8 +119,11 @@ Of the 102 tests that exercise only implemented ops:
 | `MSGENC-HTTPS-M-1-30.xml` | PASS |  |
 | `MSGENC-JSON-M-1-30.xml` | PASS |  |
 | `MSGENC-XML-M-1-30.xml` | PASS |  |
+| `OMOS-M-1-30.xml` | PASS |  |
+| `OMOS-O-1-30.xml` | PASS |  |
 | `QS-M-1-30.xml` | PASS |  |
 | `SASED-M-1-30.xml` | PASS |  |
+| `SASED-M-2-30.xml` | PASS |  |
 | `SKFF-M-1-30.xml` | PASS |  |
 | `SKFF-M-3-30.xml` | PASS |  |
 | `SKFF-M-5-30.xml` | PASS |  |

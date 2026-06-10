@@ -489,7 +489,7 @@ mod tests {
         assert_eq!(resp.batch_items[0].result_status, ResultStatus::OperationFailed);
         assert_eq!(
             resp.batch_items[0].result_reason,
-            Some(crate::error::ResultReason::ItemNotFound.to_wire_value())
+            Some(crate::error::ResultReason::ObjectNotFound.to_wire_value())
         );
         assert!(resp.batch_items[0].payload.is_none());
     }

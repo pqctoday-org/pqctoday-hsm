@@ -34,7 +34,7 @@ pub fn get(deps: &Deps, req: GetRequest, correlation_id: &str) -> Result<GetResp
     let obj = deps
         .store
         .get(&req.uid)?
-        .ok_or_else(|| fail_err(deps, correlation_id, "Get", KmipError::not_found(&req.uid)))?;
+        .ok_or_else(|| fail_err(deps, correlation_id, "Get", KmipError::object_not_found(&req.uid)))?;
 
     // Per the lifecycle table in docs/IMPLEMENTATION_PLAN.md §3.4, Get is
     // allowed in every state including Deactivated / Compromised
@@ -129,6 +129,13 @@ pub fn get(deps: &Deps, req: GetRequest, correlation_id: &str) -> Result<GetResp
 
     emit_success(deps, correlation_id, "Get");
 
+    // OpaqueObject — echo back the client-supplied OpaqueDataType
+    // (stashed in `certificate_type` at Register time).
+    let opaque_data_type = match obj.object_type {
+        ObjectType::OpaqueObject => obj.certificate_type,
+        _ => None,
+    };
+
     Ok(GetResponse {
         object_type: obj.object_type,
         uid: req.uid,
@@ -138,6 +145,7 @@ pub fn get(deps: &Deps, req: GetRequest, correlation_id: &str) -> Result<GetResp
             cryptographic_length: obj.cryptographic_length,
             key_value,
         },
+        opaque_data_type,
     })
 }
 
@@ -221,6 +229,6 @@ mod tests {
     fn get_missing_uid() {
         let d = deps_with();
         let err = get(&d, GetRequest { uid: "ghost".into() }, "c").unwrap_err();
-        assert_eq!(err.result_reason(), crate::error::ResultReason::ItemNotFound);
+        assert_eq!(err.result_reason(), crate::error::ResultReason::ObjectNotFound);
     }
 }

@@ -242,6 +242,12 @@ mod tags {
     pub const CertificateValue: u32              = 0x42_001e;
     /// KMIP 3.0 §11 — Certificate Subject CN extracted from the DER.
     pub const CertificateSubjectCN: u32          = 0x42_0108;
+    /// KMIP 3.0 §6.2 — SecretData / OpaqueObject outer Structure tags.
+    pub const SecretData: u32                    = 0x42_0085;
+    pub const SecretDataType: u32                = 0x42_0086;
+    pub const OpaqueDataType: u32                = 0x42_0059;
+    pub const OpaqueDataValue: u32               = 0x42_005a;
+    pub const OpaqueObject: u32                  = 0x42_005b;
     pub const DigitalSignatureAlgorithm: u32     = 0x42_00ae;
     pub const NistKeyType: u32                   = 0x42_013a;
     pub const ProtectionLevel: u32               = 0x42_0145;
@@ -800,16 +806,33 @@ fn encode_get_resp(r: &GetResponse) -> Vec<TtlvFrame> {
     // TransparentSymmetricKey / Transparent*Key paths get the same
     // wrapping as `encode_export_resp`.
     let kb = encode_key_block(&r.key_block);
-    let managed_object_tag = match r.object_type {
-        ObjectType::PublicKey  => tags::PublicKey,
-        ObjectType::PrivateKey => tags::PrivateKey,
-        // SymmetricKey / SecretData / Certificate / OpaqueObject all
-        // surface as SymmetricKey in v0.1 (we don't yet model Certificate
-        // / SecretData object shapes; they'll get their own match arms
-        // when we add Certify / SecretData ops).
-        _ => tags::SymmetricKey,
+    let managed_object = match r.object_type {
+        ObjectType::PublicKey  => TtlvFrame::new(Tag(tags::PublicKey),  Value::Structure(vec![kb])),
+        ObjectType::PrivateKey => TtlvFrame::new(Tag(tags::PrivateKey), Value::Structure(vec![kb])),
+        ObjectType::SecretData => {
+            // KMIP 3.0 §6.2 SecretData Structure: SecretDataType
+            // (Enumeration) + KeyBlock. v0.1 defaults the data type
+            // to `Password` (0x01) — matches BL-M-4 expectation.
+            TtlvFrame::new(Tag(tags::SecretData), Value::Structure(vec![
+                TtlvFrame::new(Tag(tags::SecretDataType), Value::Enumeration(0x01)),
+                kb,
+            ]))
+        }
+        ObjectType::OpaqueObject => {
+            // KMIP 3.0 §6.2 OpaqueObject Structure: OpaqueDataType
+            // (Enumeration) + OpaqueDataValue (ByteString). Echo
+            // the client-supplied OpaqueDataType when stashed
+            // (else fall back to `Unknown = 0x01`).
+            TtlvFrame::new(Tag(tags::OpaqueObject), Value::Structure(vec![
+                TtlvFrame::new(Tag(tags::OpaqueDataType), Value::Enumeration(r.opaque_data_type.unwrap_or(0x01))),
+                TtlvFrame::new(Tag(tags::OpaqueDataValue), Value::ByteString(r.key_block.key_value.clone())),
+            ]))
+        }
+        // SymmetricKey / Certificate / others fall back to the
+        // SymmetricKey wrapper (v0.1 — Certificate Get path lands
+        // in the Certificate-typed branch once needed).
+        _ => TtlvFrame::new(Tag(tags::SymmetricKey), Value::Structure(vec![kb])),
     };
-    let managed_object = TtlvFrame::new(Tag(managed_object_tag), Value::Structure(vec![kb]));
     vec![
         TtlvFrame::new(Tag(tags::ObjectType), Value::Enumeration(r.object_type.to_wire_value())),
         TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString(r.uid.clone())),
@@ -1644,6 +1667,56 @@ fn decode_register_req(children: &[TtlvFrame]) -> Result<RegisterRequest, WireEr
             tags::SymmetricKey | tags::PublicKey | tags::PrivateKey => {
                 managed_object = Some(decode_managed_object(c)?);
             }
+            tags::SecretData => {
+                // KMIP 3.0 §6.2 SecretData Structure: SecretDataType
+                // (Enumeration) + KeyBlock. v0.1 captures the inner
+                // KeyBlock and silently drops the type; future Get
+                // can echo it as ObjectType=SecretData.
+                for child in expect_structure(c, "Secret Data")? {
+                    if child.tag.0 == tags::KeyBlock {
+                        managed_object = Some(decode_key_block(child)?);
+                    }
+                }
+            }
+            tags::OpaqueObject => {
+                // KMIP 3.0 §6.2 OpaqueObject Structure: OpaqueDataType
+                // (Enumeration) + OpaqueDataValue (ByteString). We
+                // synthesize a pseudo-KeyBlock with KeyFormatType=
+                // OpaqueObject so the Register handler's algo-bypass
+                // path triggers; the bytes go into `key_material` and
+                // the OpaqueDataType codepoint goes into the existing
+                // `certificate_type` slot on the record (re-purposed —
+                // OpaqueObjects don't carry CertificateType, and the
+                // Get encoder reads it back per object_type).
+                let mut opaque_bytes: Vec<u8> = Vec::new();
+                let mut opaque_type: u32 = 0x01;
+                for child in expect_structure(c, "Opaque Object")? {
+                    match child.tag.0 {
+                        tags::OpaqueDataValue => {
+                            if let Value::ByteString(b) = &child.value {
+                                opaque_bytes = b.clone();
+                            }
+                        }
+                        tags::OpaqueDataType => {
+                            if let Value::Enumeration(v) = child.value {
+                                opaque_type = v;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                managed_object = Some(KeyBlock {
+                    key_format_type: KeyFormatType::OpaqueObject,
+                    key_value: opaque_bytes,
+                    cryptographic_algorithm: crate::kmip30::KmipAlgorithm::Aes,
+                    cryptographic_length: 0,
+                });
+                // Stash OpaqueDataType so Register can copy it onto
+                // the record's `certificate_type` slot for the Get
+                // encoder. Use `certificate_payload` for this — the
+                // wire_ct slot maps to `certificate_type`.
+                certificate_payload = Some((opaque_type, Vec::new()));
+            }
             tags::Certificate => {
                 // KMIP 3.0 §6.2 Certificate object Structure:
                 //   CertificateType   Enumeration  (0x42001d)
@@ -1894,15 +1967,22 @@ fn encode_key_block(kb: &KeyBlock) -> TtlvFrame {
         _ => TtlvFrame::new(Tag(tags::KeyMaterial), Value::ByteString(kb.key_value.clone())),
     };
     let key_value = TtlvFrame::new(Tag(tags::KeyValue), Value::Structure(vec![key_material]));
-    TtlvFrame::new(
-        Tag(tags::KeyBlock),
-        Value::Structure(vec![
-            TtlvFrame::new(Tag(tags::KeyFormatType), Value::Enumeration(kb.key_format_type as u32)),
-            key_value,
-            TtlvFrame::new(Tag(tags::CryptographicAlgorithm), Value::Enumeration(kb.cryptographic_algorithm.to_wire_value())),
-            TtlvFrame::new(Tag(tags::CryptographicLength), Value::Integer(kb.cryptographic_length as i32)),
-        ]),
-    )
+    // KMIP 3.0 §6.2 KeyBlock structure — CryptographicAlgorithm and
+    // CryptographicLength are OPTIONAL when the wrapping ObjectType
+    // doesn't have those attributes in its §11 table. SecretData
+    // (BL-M-4) doesn't carry them; emitting them anyway breaks the
+    // strict-shape comparator. We treat `cryptographic_length == 0`
+    // + Aes (sentinel) as the "no crypto metadata" signal — same
+    // sentinel the SecretData decoder uses.
+    let mut children = vec![
+        TtlvFrame::new(Tag(tags::KeyFormatType), Value::Enumeration(kb.key_format_type as u32)),
+        key_value,
+    ];
+    if kb.cryptographic_length > 0 {
+        children.push(TtlvFrame::new(Tag(tags::CryptographicAlgorithm), Value::Enumeration(kb.cryptographic_algorithm.to_wire_value())));
+        children.push(TtlvFrame::new(Tag(tags::CryptographicLength), Value::Integer(kb.cryptographic_length as i32)));
+    }
+    TtlvFrame::new(Tag(tags::KeyBlock), Value::Structure(children))
 }
 
 // ── Group B Wave 2 codecs (attribute mutations + shared helpers) ───────────
