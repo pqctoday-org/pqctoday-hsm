@@ -1145,6 +1145,24 @@ fn decode_attribute_v3(frame: &TtlvFrame) -> Result<Option<Attribute>, WireError
         tags::CryptographicParameters => Attribute::CryptographicParameters(
             decode_cryptographic_parameters(frame)?,
         ),
+        // KMIP §11 `Usage Limits` Structure — UsageLimitsTotal +
+        // UsageLimitsUnit (+ UsageLimitsCount on the response side).
+        // v0.1 surfaces only the Total field so AddAttribute /
+        // Register can set the encrypt-byte budget. CS-BC-M-7 pins
+        // a 16-byte budget that two 16-byte Encrypts must exhaust.
+        tags::UsageLimits => {
+            let mut total: i64 = 0;
+            for inner in expect_structure(frame, "Usage Limits")? {
+                if inner.tag.0 == tags::UsageLimitsTotal {
+                    match inner.value {
+                        Value::LongInteger(n) => total = n,
+                        Value::Integer(n)     => total = n as i64,
+                        _ => {}
+                    }
+                }
+            }
+            Attribute::UsageLimitsTotal(total)
+        }
         // KMIP 3.0 §11 — `Attribute` (0x420008) is the v1.x-style
         // vendor-extension envelope: VendorIdentification + AttributeName
         // + AttributeValue. v3.0 keeps this Structure for client-defined

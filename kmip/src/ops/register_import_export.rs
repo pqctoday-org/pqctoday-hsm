@@ -191,6 +191,8 @@ pub fn register(
         compromise_occurrence_date: x.compromise_date,
         process_start_date: x.process_start_date,
         protect_stop_date: x.protect_stop_date,
+        usage_limits_total: x.usage_limits_total,
+        usage_limits_remaining: x.usage_limits_total,
         last_change_date: Some(now),
         original_creation_date: Some(now),
         supersedes: None,
@@ -378,6 +380,10 @@ pub(crate) struct ExtractedAttrs {
     pub compromise_date: Option<OffsetDateTime>,
     pub process_start_date: Option<OffsetDateTime>,
     pub protect_stop_date: Option<OffsetDateTime>,
+    /// KMIP §11 `Usage Limits Total` — encrypt-byte budget set at
+    /// Register / Create time. `None` = unlimited. CS-BC-M-7 pins
+    /// a 16-byte budget that the second Encrypt should exhaust.
+    pub usage_limits_total: Option<i64>,
     /// Per-key `CryptographicParameters` (KMIP §11) — the OAEP /
     /// PSS / MAC handshake parameters attached to the managed object
     /// at Register time. Read back by Encrypt / Decrypt / Sign /
@@ -395,6 +401,7 @@ pub(crate) fn extract_attrs(attrs: &[Attribute]) -> ExtractedAttrs {
         activation_date: None, deactivation_date: None, compromise_date: None,
         process_start_date: None, protect_stop_date: None,
         cryptographic_parameters: None, quantum_safe: None,
+        usage_limits_total: None,
     };
     for a in attrs {
         match a {
@@ -410,6 +417,7 @@ pub(crate) fn extract_attrs(attrs: &[Attribute]) -> ExtractedAttrs {
             Attribute::ProtectStopDate(t)  => out.protect_stop_date  = OffsetDateTime::from_unix_timestamp(*t).ok(),
             Attribute::CryptographicParameters(cp) => out.cryptographic_parameters = Some(cp.clone()),
             Attribute::QuantumSafe(b)              => out.quantum_safe = Some(*b),
+            Attribute::UsageLimitsTotal(n)         => out.usage_limits_total = Some(*n),
             _ => {}
         }
     }

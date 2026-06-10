@@ -56,6 +56,19 @@ pub fn encrypt(deps: &Deps, req: EncryptRequest, correlation_id: &str) -> Result
         ));
     }
 
+    // KMIP 3.0 §11 `Usage Limits` — Encrypt SHALL be rejected with
+    // `PermissionDenied` once the byte-count budget is exhausted.
+    // CS-BC-M-7 pins a 16-byte budget that the second Encrypt
+    // SHALL exhaust (16 + 16 > 16).
+    if let Some(remaining) = obj.usage_limits_remaining {
+        if (req.data.len() as i64) > remaining {
+            return Err(fail_err(deps, correlation_id, "Encrypt",
+                KmipError::permission_denied(
+                    "Usage Limits exhausted".to_string(),
+                )));
+        }
+    }
+
     // KMIP 3.0 §3.4 — `Process Start Date` / `Protect Stop Date`
     // define the time window during which Encrypt MAY be performed
     // even when the object is Active. Outside the window the op
@@ -348,6 +361,17 @@ fn encrypt_classical(
         } else {
             (ciphertext, None)
         };
+
+    // KMIP §11 Usage Limits — deduct after the encrypt succeeds.
+    // We checked `req.data.len() <= remaining` up-front; do the
+    // bookkeeping now so a failed encrypt doesn't burn the budget.
+    if let Some(remaining) = obj.usage_limits_remaining {
+        if let Ok(Some(mut rec)) = deps.store.get(&req.uid) {
+            rec.usage_limits_remaining = Some(remaining - req.data.len() as i64);
+            let _ = deps.store.update(rec);
+        }
+    }
+
     Ok(EncryptResponse {
         uid: req.uid.clone(),
         ciphertext,
