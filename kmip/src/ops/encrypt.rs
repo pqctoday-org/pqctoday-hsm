@@ -173,6 +173,7 @@ fn encrypt_ml_kem(
         ciphertext,
         shared_secret: Some(shared_secret),
         authenticated_encryption_tag: None,
+        iv_counter_nonce: None,
     })
 }
 
@@ -203,12 +204,36 @@ fn encrypt_classical(
     emit_pkcs11(deps, correlation_id, "C_EncryptInit", Some(mech), 0, "CKR_OK");
     emit_pkcs11(deps, correlation_id, "C_Encrypt", Some(mech), 0, "CKR_OK");
 
+    // KMIP 3.0 §11 `Random IV = true` — server-side IV auto-generation.
+    // When the key's CryptographicParameters carry RandomIV=true AND
+    // the request omits an IV, generate a mechanism-appropriate one
+    // and surface it via the response's `IVCounterNonce` field so the
+    // client can use it for the matching Decrypt. CS-BC-M-13 pins this.
+    let random_iv = effective_cp.and_then(|c| c.random_iv).unwrap_or(false);
+    let generated_iv: Option<Vec<u8>> = if random_iv && req.iv.is_none() {
+        let len = match mech {
+            softhsmrustv3::constants::CKM_AES_CBC
+            | softhsmrustv3::constants::CKM_AES_CBC_PAD => 16,
+            softhsmrustv3::constants::CKM_AES_GCM => 12,
+            softhsmrustv3::constants::CKM_CHACHA20
+            | softhsmrustv3::constants::CKM_CHACHA20_POLY1305 => 12,
+            _ => 0,
+        };
+        if len > 0 {
+            let mut iv = vec![0u8; len];
+            use rand::RngCore;
+            rand::thread_rng().fill_bytes(&mut iv);
+            Some(iv)
+        } else { None }
+    } else { None };
+    let effective_iv: Option<&[u8]> = generated_iv.as_deref().or(req.iv.as_deref());
+
     // KMIP 3.0 §6.1.21 + §11 — IV presence/size is a protocol-level
     // requirement, so a missing/short IV for an IV-bearing mech is
     // `InvalidMessage` (0x04), NOT the shim's downstream
     // `InvalidAttributeValue` (0x2d). OASIS CS-BC-M-11 / CS-BC-M-12
     // pin `InvalidMessage` with a `missing-iv` message string.
-    validate_iv_for_mech(deps, correlation_id, mech, req.iv.as_deref())?;
+    validate_iv_for_mech(deps, correlation_id, mech, effective_iv)?;
 
     // KMIP 3.0 §11 — `Tag Length` validation. The spec text reads
     // "Tag Length is the length of the authenticator tag in bytes."
@@ -284,7 +309,7 @@ fn encrypt_classical(
             key_bytes,
             mech,
             data_for_shim,
-            req.iv.as_deref(),
+            effective_iv,
             oaep.as_ref(),
             aad,
         )
@@ -293,14 +318,14 @@ fn encrypt_classical(
         let handle = softhsmrustv3::native::find_by_cka_id(session, &obj.pkcs11_cka_id)
             .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Encrypt:find"))?
             .ok_or_else(|| KmipError::not_found(&req.uid))?;
-        softhsmrustv3::native::encrypt(session, handle, mech, data_for_shim, req.iv.as_deref())
+        softhsmrustv3::native::encrypt(session, handle, mech, data_for_shim, effective_iv)
             .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Encrypt"))?
     } else {
         // No key material AND no engine session — the object is a
         // placeholder for unit tests with mock policy gates. Match
         // the legacy behaviour so unit-tests that don't exercise
         // real crypto keep passing.
-        let mut input = req.iv.clone().unwrap_or_default();
+        let mut input = effective_iv.map(|v| v.to_vec()).unwrap_or_default();
         input.extend_from_slice(&req.data);
         placeholder_bytes(&req.uid, &input, b"enc", input.len().max(16))
     };
@@ -328,6 +353,7 @@ fn encrypt_classical(
         ciphertext,
         shared_secret: None,
         authenticated_encryption_tag,
+        iv_counter_nonce: generated_iv,
     })
 }
 

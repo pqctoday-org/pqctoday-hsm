@@ -386,6 +386,11 @@ pub struct EncryptResponse {
     /// mechanism produces a separate tag — for non-AEAD modes (ECB /
     /// CBC / CBC_PAD) this is `None`.
     pub authenticated_encryption_tag: Option<Vec<u8>>,
+    /// KMIP 3.0 §6.1.21 — the IV/Counter/Nonce the server generated when
+    /// the key's `CryptographicParameters.RandomIV` was true. Echoed
+    /// back so the client can use it for the subsequent Decrypt.
+    /// `None` when the client supplied the IV (or the mech is keyless).
+    pub iv_counter_nonce: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -858,6 +863,11 @@ pub struct CryptographicParameters {
     /// server SHALL reject values incompatible with the mechanism
     /// (e.g. ChaCha20-Poly1305 mandates 16 bytes per RFC 8439 §2.8).
     pub tag_length: Option<i32>,
+    /// Wire tag `Random IV` (0x42_00c5) — Boolean. KMIP 3.0 §11: when
+    /// `true`, the server SHALL generate the IV/nonce itself for each
+    /// Encrypt and return it via the response payload's
+    /// `IVCounterNonce` field. CS-BC-M-13 pins this on AES-CBC-PAD.
+    pub random_iv: Option<bool>,
 }
 
 /// `Hashing Algorithm` Enumeration — KMIP 3.0 §11. Codepoints from the

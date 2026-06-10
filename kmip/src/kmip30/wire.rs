@@ -181,6 +181,8 @@ mod tags {
     /// authentication tag length, in bytes. Codepoint `0x4200ce`
     /// per `kmip-spec-3.0-tags-enums.json`.
     pub const TagLength: u32                        = 0x42_00ce;
+    /// KMIP 3.0 §11 — `Random IV` Boolean inside CryptographicParameters.
+    pub const RandomIV: u32                         = 0x42_00c5;
     /// KMIP 3.0 §11 `Digest` family — Structure + ByteString sub-field.
     pub const Digest: u32                 = 0x42_0034;
     pub const DigestValue: u32            = 0x42_0035;
@@ -958,6 +960,12 @@ fn encode_encrypt_resp(r: &EncryptResponse) -> Vec<TtlvFrame> {
             Value::ByteString(tag.clone()),
         ));
     }
+    if let Some(iv) = &r.iv_counter_nonce {
+        // KMIP 3.0 §6.1.21 — server-generated IV/Counter/Nonce when
+        // the key's `RandomIV` is true. CS-BC-M-13 expects the server
+        // to emit this field with the IV it used.
+        out.push(TtlvFrame::new(Tag(tags::IvCounterNonce), Value::ByteString(iv.clone())));
+    }
     if let Some(ss) = &r.shared_secret {
         // ML-KEM shared secret rides in IvCounterNonce slot for v0.1 — a
         // KMIP 3.0 dedicated tag for "shared secret out-of-band of the
@@ -1465,6 +1473,9 @@ fn decode_cryptographic_parameters(frame: &TtlvFrame) -> Result<CryptographicPar
             }
             tags::TagLength => {
                 cp.tag_length = Some(expect_integer(c, "Tag Length")?);
+            }
+            tags::RandomIV => {
+                cp.random_iv = Some(expect_boolean(c, "Random IV")?);
             }
             _ => {}
         }
