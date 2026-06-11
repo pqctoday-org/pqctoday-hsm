@@ -175,14 +175,17 @@ pub fn decapsulate(
 ///
 /// `mechanism` selects:
 /// - `CKM_AES_GCM`: AES-128/256-GCM (12-byte IV) — Rust `aes-gcm`.
+/// - `CKM_AES_ECB` / `CKM_AES_CBC` / `CKM_AES_CBC_PAD` / `CKM_AES_CTR`:
+///   block / counter modes (CTR takes the full 16-byte counter block
+///   as `iv`, per PKCS#11 v3.2 §6.10 `CK_AES_CTR_PARAMS.cb`; KMIP K6
+///   wires `BlockCipherMode=CTR` here).
 /// - `CKM_RSA_PKCS_OAEP`: RSA OAEP with **SHA-256** hash + MGF1-SHA-256
 ///   (the only OAEP profile the OASIS Baseline corpus exercises;
 ///   §11.x lists the full set). Public key is stored as X.509
 ///   SubjectPublicKeyInfo DER (the form `C_RegisterObject` accepts
 ///   from the KMIP `Register` op).
 ///
-/// Other modes (AES-CBC, AES-CTR, other OAEP hashes) return
-/// `CKR_MECHANISM_INVALID`.
+/// Other modes return `CKR_MECHANISM_INVALID`.
 pub fn encrypt(
     _session: u32,
     key_handle: u32,
@@ -211,6 +214,10 @@ pub fn encrypt(
         CKM_AES_CBC_PAD => {
             let iv = iv.ok_or(CKR_ARGUMENTS_BAD)?;
             aes_cbc_pad_encrypt(&key_bytes, iv, plaintext)
+        }
+        CKM_AES_CTR => {
+            let iv = iv.ok_or(CKR_ARGUMENTS_BAD)?;
+            aes_ctr_apply(&key_bytes, iv, plaintext)
         }
         CKM_CHACHA20 => {
             let iv = iv.ok_or(CKR_ARGUMENTS_BAD)?;
@@ -255,6 +262,11 @@ pub fn decrypt(
         CKM_AES_CBC_PAD => {
             let iv = iv.ok_or(CKR_ARGUMENTS_BAD)?;
             aes_cbc_pad_decrypt(&key_bytes, iv, ciphertext)
+        }
+        CKM_AES_CTR => {
+            // CTR is self-inverse — same keystream XOR for both directions.
+            let iv = iv.ok_or(CKR_ARGUMENTS_BAD)?;
+            aes_ctr_apply(&key_bytes, iv, ciphertext)
         }
         CKM_CHACHA20 => {
             let iv = iv.ok_or(CKR_ARGUMENTS_BAD)?;
@@ -342,6 +354,10 @@ pub fn encrypt_with_key_bytes(
             let iv = iv.ok_or(CKR_ARGUMENTS_BAD)?;
             aes_cbc_pad_encrypt(key_bytes, iv, plaintext)
         }
+        CKM_AES_CTR => {
+            let iv = iv.ok_or(CKR_ARGUMENTS_BAD)?;
+            aes_ctr_apply(key_bytes, iv, plaintext)
+        }
         CKM_CHACHA20 => {
             let iv = iv.ok_or(CKR_ARGUMENTS_BAD)?;
             chacha20_encrypt(key_bytes, iv, plaintext)
@@ -383,6 +399,11 @@ pub fn decrypt_with_key_bytes(
         CKM_AES_CBC_PAD => {
             let iv = iv.ok_or(CKR_ARGUMENTS_BAD)?;
             aes_cbc_pad_decrypt(key_bytes, iv, ciphertext)
+        }
+        CKM_AES_CTR => {
+            // CTR is self-inverse — same keystream XOR for both directions.
+            let iv = iv.ok_or(CKR_ARGUMENTS_BAD)?;
+            aes_ctr_apply(key_bytes, iv, ciphertext)
         }
         CKM_CHACHA20 => {
             let iv = iv.ok_or(CKR_ARGUMENTS_BAD)?;
@@ -728,6 +749,24 @@ fn aes_cbc_pad_decrypt(key: &[u8], iv: &[u8], ciphertext: &[u8]) -> Result<Vec<u
     Ok(out)
 }
 
+// ── AES-CTR ────────────────────────────────────────────────────────────────
+//
+// PKCS#11 v3.2 §6.10 — `CKM_AES_CTR`. `iv` is the full 16-byte initial
+// counter block (`CK_AES_CTR_PARAMS.cb`); the stream is self-inverse so
+// one helper serves both directions. Backed by the KAT-verified
+// streaming `CtrState` (NIST SP 800-38A §6.5 increment function),
+// which also covers AES-192.
+
+fn aes_ctr_apply(key: &[u8], iv: &[u8], data: &[u8]) -> Result<Vec<u8>, CkRv> {
+    use crate::crypto::multipart::{AesKey, CtrState, MultipartCipher};
+    let cb: [u8; 16] = iv.try_into().map_err(|_| CKR_ARGUMENTS_BAD)?;
+    let k = AesKey::new(key).ok_or(CKR_KEY_TYPE_INCONSISTENT)?;
+    let mut st = MultipartCipher::Ctr(CtrState::new(k, cb));
+    let mut out = st.update(data)?;
+    out.extend_from_slice(&st.finalize()?);
+    Ok(out)
+}
+
 // ── ChaCha20 / ChaCha20-Poly1305 ───────────────────────────────────────────
 //
 // PKCS#11 v3.2 §6.20 — IETF ChaCha20 (32-byte key, 12-byte nonce,
@@ -1064,6 +1103,36 @@ mod tests {
         );
         OBJECTS.with(|o| o.borrow_mut().remove(&h_kem));
         close_session(session).unwrap();
+    }
+
+    /// NIST SP 800-38A F.5.5 — AES-256-CTR one-shot KAT through the
+    /// `encrypt_with_key_bytes` / `decrypt_with_key_bytes` dispatch
+    /// (K6: KMIP `BlockCipherMode=CTR` routes here).
+    #[test]
+    fn aes_256_ctr_one_shot_kat_sp800_38a_f55() {
+        let key = hex_lit("603deb1015ca71be2b73aef0857d77811f352c073b6108d72d9810a30914dff4");
+        let cb = hex_lit("f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff");
+        let pt = hex_lit("6bc1bee22e409f96e93d7e117393172a");
+        let expected_ct = hex_lit("601ec313775789a5b7a7f504bbf3d228");
+        let ct = encrypt_with_key_bytes(&key, CKM_AES_CTR, &pt, Some(&cb), None, &[], None)
+            .expect("CTR encrypt");
+        assert_eq!(ct, expected_ct);
+        let back = decrypt_with_key_bytes(&key, CKM_AES_CTR, &ct, Some(&cb), None, &[], None)
+            .expect("CTR decrypt");
+        assert_eq!(back, pt);
+        // Counter block must be exactly 16 bytes.
+        assert_eq!(
+            encrypt_with_key_bytes(&key, CKM_AES_CTR, &pt, Some(&cb[..12]), None, &[], None)
+                .unwrap_err(),
+            CKR_ARGUMENTS_BAD
+        );
+    }
+
+    fn hex_lit(s: &str) -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
     }
 
     // ── AES-GCM tests deferred to commit 6 alongside generate_aes_key ──────

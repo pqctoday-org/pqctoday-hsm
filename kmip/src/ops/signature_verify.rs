@@ -137,33 +137,43 @@ pub fn signature_verify(
                 .cryptographic_parameters
                 .as_ref()
                 .or(obj.cryptographic_parameters.as_ref());
-            // KMIP 3.0 §6.1.61 — when the client pins a hash variant we
-            // can't run (e.g. SHA-1 with RSA-PSS), the verify CANNOT
-            // succeed. Per the spec, this surfaces as ResultStatus=Success
-            // + ValidityIndicator=Invalid, NOT OperationFailed. CS-AC-M-3
-            // step #4 pins SHA-1 over a SHA-256 signature.
-            let hash_supported = match effective_cp.and_then(|cp| cp.hashing_algorithm) {
-                None | Some(crate::kmip30::HashingAlgorithm::Sha256) => true,
-                _ => false,
-            };
-            if !hash_supported {
-                emit_pkcs11(deps, correlation_id, "C_Verify", Some(mech), 0, "CKR_SIGNATURE_INVALID");
-                emit_success(deps, correlation_id, "SignatureVerify");
-                return Ok(SignatureVerifyResponse {
-                    uid: req.uid,
-                    validity: SignatureValidity::Invalid,
-                });
-            }
-            let native_mech = super::helpers::native_sign_mech_with_params(
+            // K6 — exact padding + hash selection: SHA-256/384/512 map
+            // to the matching engine mechanism (CKM_SHA*_RSA_PKCS{,_PSS}
+            // / CKM_ECDSA_SHA*, available since engine slice S6) so
+            // SHA-384/512 verifies actually verify.
+            //
+            // KMIP 3.0 §6.1.61 — when the client pins a hash/padding the
+            // server cannot run (e.g. SHA-1 with RSA-PSS), the verify
+            // CANNOT succeed. Per the spec this surfaces as
+            // ResultStatus=Success + ValidityIndicator=Invalid, NOT
+            // OperationFailed. CS-AC-M-3 step #4 pins SHA-1 over a
+            // SHA-256 signature. Other failures (no mechanism for the
+            // algorithm at all) remain protocol errors.
+            let native_mech = match super::helpers::native_sign_mech_with_params(
                 obj.algorithm,
                 effective_cp,
-            )
-            .ok_or_else(|| {
-                KmipError::failed(
-                    ResultReason::OperationNotSupported,
-                    format!("Verify: no native mechanism for {:?}", obj.algorithm),
-                )
-            })?;
+            ) {
+                Ok(m) => m,
+                Err(e)
+                    if e.result_reason()
+                        == ResultReason::UnsupportedCryptographicParameters =>
+                {
+                    emit_pkcs11(
+                        deps,
+                        correlation_id,
+                        "C_Verify",
+                        Some(mech),
+                        0,
+                        "CKR_SIGNATURE_INVALID",
+                    );
+                    emit_success(deps, correlation_id, "SignatureVerify");
+                    return Ok(SignatureVerifyResponse {
+                        uid: req.uid,
+                        validity: SignatureValidity::Invalid,
+                    });
+                }
+                Err(e) => return Err(e),
+            };
             // native::verify returns Ok(true)/Ok(false) for the KMIP
             // ValidityIndicator model — exactly what we need.
             match softhsmrustv3::native::verify(

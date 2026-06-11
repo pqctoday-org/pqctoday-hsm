@@ -167,7 +167,13 @@ fn decrypt_classical(
         .as_ref()
         .or(obj.cryptographic_parameters.as_ref());
     let mech = match obj.algorithm {
-        KmipAlgorithm::Aes => super::helpers::aes_mechanism_for(effective_cp),
+        // K6 — total-or-failing mech selection (mirror of Encrypt):
+        // unsupported BlockCipherMode / PaddingMethod fail 0x3e instead
+        // of silently substituting GCM/OAEP (compliance-audit B-2).
+        KmipAlgorithm::Aes => super::helpers::aes_mechanism_for(effective_cp)
+            .map_err(|e| fail_err(deps, correlation_id, "Decrypt", e))?,
+        KmipAlgorithm::Rsa => super::helpers::rsa_encrypt_mechanism_for(effective_cp)
+            .map_err(|e| fail_err(deps, correlation_id, "Decrypt", e))?,
         _ => obj.algorithm.to_pkcs11_mech(PkcsOp::Decrypt).ok_or_else(|| {
             KmipError::failed(
                 ResultReason::OperationNotSupported,
@@ -188,7 +194,16 @@ fn decrypt_classical(
     //      raw bytes (RSA-OAEP private key DER for OAEP-* tests).
     //   2. Engine session → look up the engine handle by CKA_ID.
     //   3. Neither → placeholder for unit-test path.
-    let oaep = super::helpers::oaep_params_for(obj.cryptographic_parameters.as_ref());
+    // K6: OAEP params come from the SAME request-over-object effective
+    // CP used for mech selection (mirror of Encrypt); only computed for
+    // the OAEP mechanism so symmetric requests carrying a stray
+    // HashingAlgorithm aren't rejected for an unread field.
+    let oaep = if mech == softhsmrustv3::constants::CKM_RSA_PKCS_OAEP {
+        super::helpers::oaep_params_for(effective_cp)
+            .map_err(|e| fail_err(deps, correlation_id, "Decrypt", e))?
+    } else {
+        None
+    };
     let aad = req.aad.as_deref().unwrap_or(&[]);
     let pkcs7_strip_ecb = mech == softhsmrustv3::constants::CKM_AES_ECB
         && effective_cp.and_then(|c| c.padding_method) == Some(3);
