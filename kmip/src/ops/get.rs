@@ -68,6 +68,35 @@ pub fn get(deps: &Deps, req: GetRequest, correlation_id: &str) -> Result<GetResp
         ));
     }
 
+    // KMIP 3.0 §11 — `Extractable=false` blocks ALL key-material export,
+    // wrapped or not: `Not Extractable` (0x17). Checked before Sensitive
+    // because it is unconditional (a KeyWrappingSpecification does not
+    // lift it).
+    if obj.extractable == Some(false) {
+        return Err(fail_err(
+            deps,
+            correlation_id,
+            "Get",
+            KmipError::not_extractable(format!("object {} is not Extractable", req.uid)),
+        ));
+    }
+    // KMIP 3.0 §11 — `Sensitive=true` blocks only PLAINTEXT export:
+    // `Sensitive` (0x16). With a KeyWrappingSpecification the material
+    // leaves wrapped under the named KEK, which is the point of wrapping
+    // (BL-M-12 pins the 0x16 reason on an unwrapped Get of a
+    // Sensitive=true object).
+    if obj.sensitive == Some(true) && req.key_wrapping_specification.is_none() {
+        return Err(fail_err(
+            deps,
+            correlation_id,
+            "Get",
+            KmipError::sensitive(format!(
+                "object {} is Sensitive; Get requires a Key Wrapping Specification",
+                req.uid
+            )),
+        ));
+    }
+
     // Plane-3: emit (Phase 7 wires the real C_GetAttributeValue call for
     // CKA_VALUE on symmetric keys / CKA_PUBLIC_KEY_INFO on public keys).
     emit_pkcs11(deps, correlation_id, "C_GetAttributeValue", None, 0, "CKR_OK");
@@ -84,7 +113,8 @@ pub fn get(deps: &Deps, req: GetRequest, correlation_id: &str) -> Result<GetResp
     //      would silently corrupt KAT comparisons (BL-M-1 etc.).
     //
     // Private keys whose material is sensitive and not client-supplied
-    // surface as `KeyFormatType::OpaqueObject` with an empty value.
+    // FAIL with `Sensitive`/`NotExtractable` (see below) — never a
+    // zero-length KeyValue (compliance-audit B-4).
     // KMIP 3.0 §11 `Key Format Type` enum — codepoints verified
     // against `kmip-spec-3.0-tags-enums.json`. Only the variants
     // we have typed `KeyFormatType` enum members for are surfaced;
@@ -108,7 +138,31 @@ pub fn get(deps: &Deps, req: GetRequest, correlation_id: &str) -> Result<GetResp
         (stored_format.unwrap_or(KeyFormatType::Raw), bytes.clone())
     } else {
         match obj.object_type {
-            ObjectType::PrivateKey => (KeyFormatType::OpaqueObject, Vec::new()),
+            // Engine-held private key: the material lives behind the
+            // PKCS#11 CKA_SENSITIVE gate and is never extractable in
+            // the clear. compliance-audit B-4: fail instead of the old
+            // zero-length OpaqueObject KeyValue hack. Not corpus-pinned:
+            // no transcript Gets an engine-held private key (BL-M-13
+            // Gets a Registered DSA key whose material is
+            // client-supplied, and is skipped as deprecated anyway).
+            ObjectType::PrivateKey => {
+                return Err(fail_err(
+                    deps,
+                    correlation_id,
+                    "Get",
+                    if obj.sensitive == Some(true) {
+                        KmipError::sensitive(format!(
+                            "private key {} material is held by the engine and is Sensitive",
+                            req.uid
+                        ))
+                    } else {
+                        KmipError::not_extractable(format!(
+                            "private key {} material is held by the engine and is not extractable",
+                            req.uid
+                        ))
+                    },
+                ));
+            }
             _ => match deps.engine_session {
                 Some(session) => {
                     let bytes = softhsmrustv3::native::find_by_cka_id(session, &obj.pkcs11_cka_id)
@@ -311,12 +365,84 @@ mod tests {
     }
 
     #[test]
-    fn get_private_returns_opaque_format() {
+    fn get_engine_held_private_key_fails_not_empty_keyblock() {
+        // compliance-audit B-4: engine-held private key material must
+        // FAIL, never surface as a zero-length OpaqueObject KeyValue.
         let d = deps_with();
         put(&d, "u", ObjectType::PrivateKey, State::Active);
-        let r = get(&d, GetRequest { uid: "u".into(), key_wrapping_specification: None }, "c").unwrap();
-        assert_eq!(r.key_block.key_format_type, KeyFormatType::OpaqueObject);
-        assert!(r.key_block.key_value.is_empty(), "private key material never returned");
+        let err = get(&d, GetRequest { uid: "u".into(), key_wrapping_specification: None }, "c").unwrap_err();
+        assert_eq!(err.result_reason(), crate::error::ResultReason::NotExtractable);
+    }
+
+    #[test]
+    fn get_engine_held_sensitive_private_key_fails_sensitive() {
+        let d = deps_with();
+        put(&d, "u", ObjectType::PrivateKey, State::Active);
+        let mut obj = d.store.get("u").unwrap().unwrap();
+        obj.sensitive = Some(true);
+        d.store.update(obj).unwrap();
+        let err = get(&d, GetRequest { uid: "u".into(), key_wrapping_specification: None }, "c").unwrap_err();
+        assert_eq!(err.result_reason(), crate::error::ResultReason::Sensitive);
+    }
+
+    #[test]
+    fn get_sensitive_without_wrapping_fails_0x16() {
+        let d = deps_with();
+        put(&d, "u", ObjectType::SymmetricKey, State::Active);
+        let mut obj = d.store.get("u").unwrap().unwrap();
+        obj.sensitive = Some(true);
+        obj.key_material = Some(vec![0x11; 32]);
+        d.store.update(obj).unwrap();
+        let err = get(&d, GetRequest { uid: "u".into(), key_wrapping_specification: None }, "c").unwrap_err();
+        assert_eq!(err.result_reason(), crate::error::ResultReason::Sensitive);
+    }
+
+    #[test]
+    fn get_sensitive_with_wrapping_succeeds_wrapped() {
+        let d = deps_with();
+        // Target key: Sensitive=true with client-supplied material.
+        put(&d, "u", ObjectType::SymmetricKey, State::Active);
+        let mut obj = d.store.get("u").unwrap().unwrap();
+        obj.sensitive = Some(true);
+        obj.key_material = Some(vec![0x11; 32]);
+        d.store.update(obj).unwrap();
+        // Wrap key (KEK): Active with WrapKey usage + material.
+        put(&d, "kek", ObjectType::SymmetricKey, State::Active);
+        let mut kek = d.store.get("kek").unwrap().unwrap();
+        kek.usage_mask = UsageMask::WRAP_KEY;
+        kek.key_material = Some(vec![0x22; 32]);
+        d.store.update(kek).unwrap();
+        let spec = crate::kmip30::KeyWrappingSpec {
+            wrapping_method: 0x01,
+            encryption_key_uid: "kek".into(),
+            cryptographic_parameters: None,
+        };
+        let r = get(&d, GetRequest { uid: "u".into(), key_wrapping_specification: Some(spec.clone()) }, "c").unwrap();
+        assert_eq!(r.key_block.key_wrapping_data, Some(spec));
+        assert!(!r.key_block.key_value.is_empty(), "wrapped material returned");
+        // AES-KW output = TTLV(KeyValue) length + 8-byte integrity block.
+        assert_ne!(r.key_block.key_value, vec![0x11; 32], "material must not leave in the clear");
+    }
+
+    #[test]
+    fn get_not_extractable_fails_0x17_even_with_wrapping() {
+        let d = deps_with();
+        put(&d, "u", ObjectType::SymmetricKey, State::Active);
+        let mut obj = d.store.get("u").unwrap().unwrap();
+        obj.extractable = Some(false);
+        obj.key_material = Some(vec![0x11; 32]);
+        d.store.update(obj).unwrap();
+        // Without wrapping.
+        let err = get(&d, GetRequest { uid: "u".into(), key_wrapping_specification: None }, "c").unwrap_err();
+        assert_eq!(err.result_reason(), crate::error::ResultReason::NotExtractable);
+        // With wrapping — Extractable=false is unconditional.
+        let spec = crate::kmip30::KeyWrappingSpec {
+            wrapping_method: 0x01,
+            encryption_key_uid: "kek".into(),
+            cryptographic_parameters: None,
+        };
+        let err = get(&d, GetRequest { uid: "u".into(), key_wrapping_specification: Some(spec) }, "c").unwrap_err();
+        assert_eq!(err.result_reason(), crate::error::ResultReason::NotExtractable);
     }
 
     #[test]
