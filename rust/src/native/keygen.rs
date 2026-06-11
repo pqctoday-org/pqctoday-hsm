@@ -564,6 +564,216 @@ pub fn register_generic_secret_bytes(
     Ok(allocate_handle(attrs))
 }
 
+// ── PQC key import (fix-plan S7, consumed by KMIP K9 / B-6) ─────────────────
+//
+// Each `register_*` function accepts raw FIPS 203/204/205 key bytes plus
+// the `CKP_*` parameter set, validates the byte length against the
+// parameter-set table (and, where the crate backend can fail, performs the
+// structural deserialization at import time so a bad key is rejected with
+// `CKR_ATTRIBUTE_VALUE_INVALID` here rather than panicking/erroring at
+// first use), and stores an object byte-compatible with what
+// `native::sign` / `native::encrypt` read at use time (`CKA_VALUE` +
+// engine param-set + `CKA_SIGN`/`CKA_VERIFY`/`CKA_ENCAPSULATE`/
+// `CKA_DECAPSULATE` gates).
+//
+// Imported provenance per PKCS#11 v3.2 §4.3/§4.9/§4.10: `CKA_LOCAL=FALSE`,
+// `CKA_KEY_GEN_MECHANISM=CK_UNAVAILABLE_INFORMATION`, and — because the
+// key material existed outside the token — `CKA_ALWAYS_SENSITIVE=FALSE` /
+// `CKA_NEVER_EXTRACTABLE=FALSE` (same pattern as
+// `register_rsa_private_key_pkcs8` / `register_generic_secret_bytes`).
+// Private keys keep the keygen default `CKA_SENSITIVE=TRUE`.
+
+/// Register an existing ML-DSA private (signing) key supplied as raw
+/// FIPS 204 `sk` bytes. `parameter_set` ∈ {`CKP_ML_DSA_44`, `_65`, `_87`}.
+///
+/// Byte length must match the FIPS 204 §5 table (2560 / 4032 / 4896);
+/// the key is structurally deserialized via `fips204` at import time.
+/// Wrong length or undecodable material → `CKR_ATTRIBUTE_VALUE_INVALID`.
+pub fn register_ml_dsa_private_key(
+    _session: u32,
+    parameter_set: u32,
+    sk_bytes: &[u8],
+    cka_id: &[u8],
+    label: &str,
+) -> Result<u32, CkRv> {
+    let (sk_len, _) = ml_dsa_key_lens(parameter_set).ok_or(CKR_ARGUMENTS_BAD)?;
+    if sk_bytes.len() != sk_len {
+        return Err(CKR_ATTRIBUTE_VALUE_INVALID);
+    }
+    validate_ml_dsa_key(parameter_set, sk_bytes, true)?;
+    Ok(register_pqc_private(
+        parameter_set,
+        ALGO_ML_DSA,
+        CKK_ML_DSA,
+        CKM_ML_DSA_KEY_PAIR_GEN,
+        true,  // CKA_SIGN — keygen default for the DSA families
+        false, // CKA_DECAPSULATE
+        sk_bytes,
+        cka_id,
+        label,
+    ))
+}
+
+/// Register an existing ML-DSA public (verification) key supplied as raw
+/// FIPS 204 `pk` bytes (1312 / 1952 / 2592). Also stores the
+/// `CKA_PUBLIC_KEY_INFO` SPKI, mirroring keygen.
+pub fn register_ml_dsa_public_key(
+    _session: u32,
+    parameter_set: u32,
+    pk_bytes: &[u8],
+    cka_id: &[u8],
+    label: &str,
+) -> Result<u32, CkRv> {
+    let (_, pk_len) = ml_dsa_key_lens(parameter_set).ok_or(CKR_ARGUMENTS_BAD)?;
+    if pk_bytes.len() != pk_len {
+        return Err(CKR_ATTRIBUTE_VALUE_INVALID);
+    }
+    validate_ml_dsa_key(parameter_set, pk_bytes, false)?;
+    let spki = match parameter_set {
+        CKP_ML_DSA_44 => build_mldsa44_spki(pk_bytes),
+        CKP_ML_DSA_65 => build_mldsa65_spki(pk_bytes),
+        CKP_ML_DSA_87 => build_mldsa87_spki(pk_bytes),
+        _ => Vec::new(),
+    };
+    Ok(register_pqc_public(
+        parameter_set,
+        ALGO_ML_DSA,
+        CKK_ML_DSA,
+        CKM_ML_DSA_KEY_PAIR_GEN,
+        true,  // CKA_VERIFY
+        false, // CKA_ENCAPSULATE
+        pk_bytes,
+        spki,
+        cka_id,
+        label,
+    ))
+}
+
+/// Register an existing ML-KEM private (decapsulation) key supplied as
+/// raw FIPS 203 `dk` bytes. `parameter_set` ∈ {`CKP_ML_KEM_512`, `_768`,
+/// `_1024`}; length per FIPS 203 §7 (1632 / 2400 / 3168). Sets
+/// `CKA_DECAPSULATE=TRUE`, mirroring keygen defaults.
+///
+/// The `ml-kem` backend's `DecapsulationKey::from_bytes` is infallible
+/// for a correct-length encoding, so the length check **is** the
+/// structural check for this family.
+pub fn register_ml_kem_private_key(
+    _session: u32,
+    parameter_set: u32,
+    dk_bytes: &[u8],
+    cka_id: &[u8],
+    label: &str,
+) -> Result<u32, CkRv> {
+    let (dk_len, _) = ml_kem_key_lens(parameter_set).ok_or(CKR_ARGUMENTS_BAD)?;
+    if dk_bytes.len() != dk_len {
+        return Err(CKR_ATTRIBUTE_VALUE_INVALID);
+    }
+    Ok(register_pqc_private(
+        parameter_set,
+        ALGO_ML_KEM,
+        CKK_ML_KEM,
+        CKM_ML_KEM_KEY_PAIR_GEN,
+        false, // CKA_SIGN
+        true,  // CKA_DECAPSULATE — keygen default for ML-KEM
+        dk_bytes,
+        cka_id,
+        label,
+    ))
+}
+
+/// Register an existing ML-KEM public (encapsulation) key supplied as
+/// raw FIPS 203 `ek` bytes (800 / 1184 / 1568). Sets
+/// `CKA_ENCAPSULATE=TRUE` and stores the SPKI, mirroring keygen.
+pub fn register_ml_kem_public_key(
+    _session: u32,
+    parameter_set: u32,
+    ek_bytes: &[u8],
+    cka_id: &[u8],
+    label: &str,
+) -> Result<u32, CkRv> {
+    let (_, ek_len) = ml_kem_key_lens(parameter_set).ok_or(CKR_ARGUMENTS_BAD)?;
+    if ek_bytes.len() != ek_len {
+        return Err(CKR_ATTRIBUTE_VALUE_INVALID);
+    }
+    let spki = match parameter_set {
+        CKP_ML_KEM_512 => build_mlkem512_spki(ek_bytes),
+        CKP_ML_KEM_768 => build_mlkem768_spki(ek_bytes),
+        CKP_ML_KEM_1024 => build_mlkem1024_spki(ek_bytes),
+        _ => Vec::new(),
+    };
+    Ok(register_pqc_public(
+        parameter_set,
+        ALGO_ML_KEM,
+        CKK_ML_KEM,
+        CKM_ML_KEM_KEY_PAIR_GEN,
+        false, // CKA_VERIFY
+        true,  // CKA_ENCAPSULATE — keygen default for ML-KEM
+        ek_bytes,
+        spki,
+        cka_id,
+        label,
+    ))
+}
+
+/// Register an existing SLH-DSA private key supplied as raw FIPS 205
+/// `sk` bytes. `parameter_set` is one of the 12 `CKP_SLH_DSA_*` values;
+/// length is `4n` per FIPS 205 §9.1 (64 / 96 / 128 for n = 16 / 24 / 32),
+/// taken from the `fips205` crate's per-variant `SK_LEN` (same source
+/// keygen serializes from).
+pub fn register_slh_dsa_private_key(
+    _session: u32,
+    parameter_set: u32,
+    sk_bytes: &[u8],
+    cka_id: &[u8],
+    label: &str,
+) -> Result<u32, CkRv> {
+    let (sk_len, _) = slh_dsa_key_lens(parameter_set).ok_or(CKR_ARGUMENTS_BAD)?;
+    if sk_bytes.len() != sk_len {
+        return Err(CKR_ATTRIBUTE_VALUE_INVALID);
+    }
+    validate_slh_dsa_key(parameter_set, sk_bytes, true)?;
+    Ok(register_pqc_private(
+        parameter_set,
+        ALGO_SLH_DSA,
+        CKK_SLH_DSA,
+        CKM_SLH_DSA_KEY_PAIR_GEN,
+        true,  // CKA_SIGN
+        false, // CKA_DECAPSULATE
+        sk_bytes,
+        cka_id,
+        label,
+    ))
+}
+
+/// Register an existing SLH-DSA public key supplied as raw FIPS 205
+/// `pk` bytes (`2n`: 32 / 48 / 64). Stores the SPKI, mirroring keygen.
+pub fn register_slh_dsa_public_key(
+    _session: u32,
+    parameter_set: u32,
+    pk_bytes: &[u8],
+    cka_id: &[u8],
+    label: &str,
+) -> Result<u32, CkRv> {
+    let (_, pk_len) = slh_dsa_key_lens(parameter_set).ok_or(CKR_ARGUMENTS_BAD)?;
+    if pk_bytes.len() != pk_len {
+        return Err(CKR_ATTRIBUTE_VALUE_INVALID);
+    }
+    validate_slh_dsa_key(parameter_set, pk_bytes, false)?;
+    let spki = build_slhdsa_spki(parameter_set, pk_bytes);
+    Ok(register_pqc_public(
+        parameter_set,
+        ALGO_SLH_DSA,
+        CKK_SLH_DSA,
+        CKM_SLH_DSA_KEY_PAIR_GEN,
+        true,  // CKA_VERIFY
+        false, // CKA_ENCAPSULATE
+        pk_bytes,
+        spki,
+        cka_id,
+        label,
+    ))
+}
+
 /// Generate a Generic-Secret key (HMAC etc.). `bits` ∈ [8, 4096] in
 /// multiples of 8 (engine permits 1..=512 bytes).
 pub fn generate_generic_secret(
@@ -739,6 +949,202 @@ fn finalize_secret_attrs(mut attrs: Attributes) -> Attributes {
     finalize_private_key_attrs(&mut attrs);
     compute_kcv(&mut attrs);
     attrs
+}
+
+/// FIPS 204 §5 parameter-set table: `CKP_ML_DSA_*` → `(sk_len, pk_len)`.
+/// Lengths come from the `fips204` crate's per-variant constants — the
+/// same source `generate_ml_dsa_keypair` serializes from.
+fn ml_dsa_key_lens(parameter_set: u32) -> Option<(usize, usize)> {
+    match parameter_set {
+        CKP_ML_DSA_44 => Some((fips204::ml_dsa_44::SK_LEN, fips204::ml_dsa_44::PK_LEN)),
+        CKP_ML_DSA_65 => Some((fips204::ml_dsa_65::SK_LEN, fips204::ml_dsa_65::PK_LEN)),
+        CKP_ML_DSA_87 => Some((fips204::ml_dsa_87::SK_LEN, fips204::ml_dsa_87::PK_LEN)),
+        _ => None,
+    }
+}
+
+/// FIPS 203 §7 parameter-set table: `CKP_ML_KEM_*` → `(dk_len, ek_len)`.
+/// Derived from the `ml-kem` crate's encoded sizes (512: 1632/800,
+/// 768: 2400/1184, 1024: 3168/1568) — same source keygen serializes from.
+fn ml_kem_key_lens(parameter_set: u32) -> Option<(usize, usize)> {
+    use ml_kem::array::typenum::Unsigned;
+    use ml_kem::{EncodedSizeUser, KemCore};
+    macro_rules! lens {
+        ($k:ty) => {
+            Some((
+                <<<$k as KemCore>::DecapsulationKey as EncodedSizeUser>::EncodedSize as Unsigned>::USIZE,
+                <<<$k as KemCore>::EncapsulationKey as EncodedSizeUser>::EncodedSize as Unsigned>::USIZE,
+            ))
+        };
+    }
+    match parameter_set {
+        CKP_ML_KEM_512 => lens!(ml_kem::MlKem512),
+        CKP_ML_KEM_768 => lens!(ml_kem::MlKem768),
+        CKP_ML_KEM_1024 => lens!(ml_kem::MlKem1024),
+        _ => None,
+    }
+}
+
+/// FIPS 205 §9.1 parameter-set table: `CKP_SLH_DSA_*` → `(sk_len, pk_len)`
+/// = `(4n, 2n)` for n = 16 / 24 / 32. Taken from the `fips205` crate's
+/// per-variant `SK_LEN` / `PK_LEN` — same source keygen serializes from.
+fn slh_dsa_key_lens(parameter_set: u32) -> Option<(usize, usize)> {
+    macro_rules! lens {
+        ($m:ident) => {
+            Some((fips205::$m::SK_LEN, fips205::$m::PK_LEN))
+        };
+    }
+    match parameter_set {
+        CKP_SLH_DSA_SHA2_128S => lens!(slh_dsa_sha2_128s),
+        CKP_SLH_DSA_SHAKE_128S => lens!(slh_dsa_shake_128s),
+        CKP_SLH_DSA_SHA2_128F => lens!(slh_dsa_sha2_128f),
+        CKP_SLH_DSA_SHAKE_128F => lens!(slh_dsa_shake_128f),
+        CKP_SLH_DSA_SHA2_192S => lens!(slh_dsa_sha2_192s),
+        CKP_SLH_DSA_SHAKE_192S => lens!(slh_dsa_shake_192s),
+        CKP_SLH_DSA_SHA2_192F => lens!(slh_dsa_sha2_192f),
+        CKP_SLH_DSA_SHAKE_192F => lens!(slh_dsa_shake_192f),
+        CKP_SLH_DSA_SHA2_256S => lens!(slh_dsa_sha2_256s),
+        CKP_SLH_DSA_SHAKE_256S => lens!(slh_dsa_shake_256s),
+        CKP_SLH_DSA_SHA2_256F => lens!(slh_dsa_sha2_256f),
+        CKP_SLH_DSA_SHAKE_256F => lens!(slh_dsa_shake_256f),
+        _ => None,
+    }
+}
+
+/// Structural import-time validation for ML-DSA key material: run the
+/// same `fips204` `try_from_bytes` deserialization the sign/verify
+/// handlers perform at use time, so undecodable material fails at
+/// import with `CKR_ATTRIBUTE_VALUE_INVALID` instead of at first use.
+/// Caller has already length-checked `bytes`.
+fn validate_ml_dsa_key(parameter_set: u32, bytes: &[u8], private: bool) -> Result<(), CkRv> {
+    use fips204::traits::SerDes;
+    macro_rules! chk {
+        ($m:ident) => {{
+            if private {
+                let arr: [u8; fips204::$m::SK_LEN] =
+                    bytes.try_into().map_err(|_| CKR_ATTRIBUTE_VALUE_INVALID)?;
+                fips204::$m::PrivateKey::try_from_bytes(arr)
+                    .map(|_| ())
+                    .map_err(|_| CKR_ATTRIBUTE_VALUE_INVALID)
+            } else {
+                let arr: [u8; fips204::$m::PK_LEN] =
+                    bytes.try_into().map_err(|_| CKR_ATTRIBUTE_VALUE_INVALID)?;
+                fips204::$m::PublicKey::try_from_bytes(arr)
+                    .map(|_| ())
+                    .map_err(|_| CKR_ATTRIBUTE_VALUE_INVALID)
+            }
+        }};
+    }
+    match parameter_set {
+        CKP_ML_DSA_44 => chk!(ml_dsa_44),
+        CKP_ML_DSA_65 => chk!(ml_dsa_65),
+        CKP_ML_DSA_87 => chk!(ml_dsa_87),
+        _ => Err(CKR_ARGUMENTS_BAD),
+    }
+}
+
+/// Structural import-time validation for SLH-DSA key material via the
+/// `fips205` `try_from_bytes` deserialization (mirrors the use-time
+/// handler path). Caller has already length-checked `bytes`.
+fn validate_slh_dsa_key(parameter_set: u32, bytes: &[u8], private: bool) -> Result<(), CkRv> {
+    use fips205::traits::SerDes;
+    macro_rules! chk {
+        ($m:ident) => {{
+            if private {
+                let arr: [u8; fips205::$m::SK_LEN] =
+                    bytes.try_into().map_err(|_| CKR_ATTRIBUTE_VALUE_INVALID)?;
+                fips205::$m::PrivateKey::try_from_bytes(&arr)
+                    .map(|_| ())
+                    .map_err(|_| CKR_ATTRIBUTE_VALUE_INVALID)
+            } else {
+                let arr: [u8; fips205::$m::PK_LEN] =
+                    bytes.try_into().map_err(|_| CKR_ATTRIBUTE_VALUE_INVALID)?;
+                fips205::$m::PublicKey::try_from_bytes(&arr)
+                    .map(|_| ())
+                    .map_err(|_| CKR_ATTRIBUTE_VALUE_INVALID)
+            }
+        }};
+    }
+    match parameter_set {
+        CKP_SLH_DSA_SHA2_128S => chk!(slh_dsa_sha2_128s),
+        CKP_SLH_DSA_SHAKE_128S => chk!(slh_dsa_shake_128s),
+        CKP_SLH_DSA_SHA2_128F => chk!(slh_dsa_sha2_128f),
+        CKP_SLH_DSA_SHAKE_128F => chk!(slh_dsa_shake_128f),
+        CKP_SLH_DSA_SHA2_192S => chk!(slh_dsa_sha2_192s),
+        CKP_SLH_DSA_SHAKE_192S => chk!(slh_dsa_shake_192s),
+        CKP_SLH_DSA_SHA2_192F => chk!(slh_dsa_sha2_192f),
+        CKP_SLH_DSA_SHAKE_192F => chk!(slh_dsa_shake_192f),
+        CKP_SLH_DSA_SHA2_256S => chk!(slh_dsa_sha2_256s),
+        CKP_SLH_DSA_SHAKE_256S => chk!(slh_dsa_shake_256s),
+        CKP_SLH_DSA_SHA2_256F => chk!(slh_dsa_sha2_256f),
+        CKP_SLH_DSA_SHAKE_256F => chk!(slh_dsa_shake_256f),
+        _ => Err(CKR_ARGUMENTS_BAD),
+    }
+}
+
+/// Build + allocate an imported PQC **private**-key object: keygen
+/// attribute layout (`set_common_prv_attrs` — `CKA_SENSITIVE=TRUE`,
+/// `CKA_EXTRACTABLE=FALSE`) with imported-provenance overrides per
+/// PKCS#11 v3.2 §4.3/§4.9/§4.10. Must NOT call
+/// `finalize_private_key_attrs` (that would derive ALWAYS_SENSITIVE /
+/// NEVER_EXTRACTABLE as if the key had been born inside the token).
+#[allow(clippy::too_many_arguments)]
+fn register_pqc_private(
+    parameter_set: u32,
+    algo_family: u32,
+    key_type: u32,
+    keygen_mechanism: u32,
+    can_sign: bool,
+    can_decapsulate: bool,
+    key_bytes: &[u8],
+    cka_id: &[u8],
+    label: &str,
+) -> u32 {
+    let mut attrs: Attributes = HashMap::new();
+    set_common_prv_attrs(&mut attrs, parameter_set, algo_family, key_type, keygen_mechanism);
+    store_bool(&mut attrs, CKA_SIGN, can_sign);
+    store_bool(&mut attrs, CKA_DECAPSULATE, can_decapsulate);
+    attrs.insert(CKA_VALUE, key_bytes.to_vec());
+    insert_id_and_label(&mut attrs, cka_id, label);
+    // Imported provenance — overrides the generated-key values set above.
+    store_bool(&mut attrs, CKA_LOCAL, false);
+    store_ulong(&mut attrs, CKA_KEY_GEN_MECHANISM, CKM_UNAVAILABLE_INFORMATION);
+    store_bool(&mut attrs, CKA_ALWAYS_SENSITIVE, false);
+    store_bool(&mut attrs, CKA_NEVER_EXTRACTABLE, false);
+    compute_kcv(&mut attrs);
+    allocate_handle(attrs)
+}
+
+/// Build + allocate an imported PQC **public**-key object: keygen
+/// attribute layout + SPKI, with imported-provenance overrides
+/// (`CKA_LOCAL=FALSE`, `CKA_KEY_GEN_MECHANISM=CK_UNAVAILABLE_INFORMATION`).
+#[allow(clippy::too_many_arguments)]
+fn register_pqc_public(
+    parameter_set: u32,
+    algo_family: u32,
+    key_type: u32,
+    keygen_mechanism: u32,
+    can_verify: bool,
+    can_encapsulate: bool,
+    key_bytes: &[u8],
+    spki: Vec<u8>,
+    cka_id: &[u8],
+    label: &str,
+) -> u32 {
+    let mut attrs: Attributes = HashMap::new();
+    set_common_pub_attrs(&mut attrs, parameter_set, algo_family, key_type, keygen_mechanism);
+    store_bool(&mut attrs, CKA_VERIFY, can_verify);
+    store_bool(&mut attrs, CKA_ENCAPSULATE, can_encapsulate);
+    attrs.insert(CKA_VALUE, key_bytes.to_vec());
+    if !spki.is_empty() {
+        attrs.insert(CKA_PUBLIC_KEY_INFO, spki);
+    }
+    insert_id_and_label(&mut attrs, cka_id, label);
+    // Imported provenance — overrides the generated-key values set above.
+    store_bool(&mut attrs, CKA_LOCAL, false);
+    store_ulong(&mut attrs, CKA_KEY_GEN_MECHANISM, CKM_UNAVAILABLE_INFORMATION);
+    compute_kcv(&mut attrs);
+    allocate_handle(attrs)
 }
 
 fn insert_id_and_label(attrs: &mut Attributes, cka_id: &[u8], label: &str) {
@@ -1075,6 +1481,225 @@ mod tests {
         ct[0] ^= 0xFF;
         let err = decrypt(session, handle, CKM_AES_GCM, &ct, Some(&iv)).unwrap_err();
         assert_eq!(err, CKR_ENCRYPTED_DATA_INVALID);
+        close_session(session).unwrap();
+    }
+
+    // ── PQC key import (S7) ────────────────────────────────────────────────
+
+    /// Read a stored CK_BBOOL attribute (None if absent).
+    fn attr_bool(handle: u32, attr: u32) -> Option<bool> {
+        crate::state::get_object_attr_bytes(handle, attr).map(|v| !v.is_empty() && v[0] == 0x01)
+    }
+
+    /// ML-DSA-65 generate → export raw key bytes → reimport → sign with
+    /// the imported private + verify with the imported public; cross-check
+    /// both directions against the in-engine generated keypair.
+    #[test]
+    fn ml_dsa_65_import_roundtrip_sign_verify() {
+        use crate::native::sign::{sign, verify};
+        let _guard = test_lock::acquire();
+        let session = fresh_session();
+        let (gen_pub, gen_prv) =
+            generate_ml_dsa_keypair(session, CKP_ML_DSA_65, b"\x01", "gen-mldsa").unwrap();
+        let sk = get_object_value(gen_prv).unwrap();
+        let pk = get_object_value(gen_pub).unwrap();
+
+        let imp_prv =
+            register_ml_dsa_private_key(session, CKP_ML_DSA_65, &sk, b"\x02", "imp-sk").unwrap();
+        let imp_pub =
+            register_ml_dsa_public_key(session, CKP_ML_DSA_65, &pk, b"\x02", "imp-pk").unwrap();
+
+        let msg = b"imported ML-DSA key material";
+        let sig = sign(session, imp_prv, CKM_ML_DSA, msg).expect("sign with imported sk");
+        assert_eq!(sig.len(), 3309, "FIPS 204 §5 ML-DSA-65 signature");
+        assert!(verify(session, imp_pub, CKM_ML_DSA, msg, &sig).unwrap());
+        // Cross-check: imported-key signature verifies under the generated
+        // public, and vice versa (byte-compatible objects).
+        assert!(verify(session, gen_pub, CKM_ML_DSA, msg, &sig).unwrap());
+        let gen_sig = sign(session, gen_prv, CKM_ML_DSA, msg).unwrap();
+        assert!(verify(session, imp_pub, CKM_ML_DSA, msg, &gen_sig).unwrap());
+
+        close_session(session).unwrap();
+    }
+
+    /// ML-KEM-768 generate → reimport ek/dk → encapsulate with the
+    /// imported public, decapsulate with both the imported and the
+    /// generated private → identical shared secrets.
+    #[test]
+    fn ml_kem_768_import_roundtrip_encap_decap() {
+        use crate::native::encrypt::{decapsulate, encapsulate};
+        let _guard = test_lock::acquire();
+        let session = fresh_session();
+        let (gen_pub, gen_prv) =
+            generate_ml_kem_keypair(session, CKP_ML_KEM_768, b"\x01", "gen-mlkem").unwrap();
+        let dk = get_object_value(gen_prv).unwrap();
+        let ek = get_object_value(gen_pub).unwrap();
+
+        let imp_prv =
+            register_ml_kem_private_key(session, CKP_ML_KEM_768, &dk, b"\x02", "imp-dk").unwrap();
+        let imp_pub =
+            register_ml_kem_public_key(session, CKP_ML_KEM_768, &ek, b"\x02", "imp-ek").unwrap();
+
+        let (ct, ss_enc) = encapsulate(session, imp_pub, CKM_ML_KEM).unwrap();
+        assert_eq!(ct.len(), 1088, "FIPS 203 §7 ML-KEM-768 ciphertext");
+        assert_eq!(ss_enc.len(), 32);
+        assert_eq!(decapsulate(session, imp_prv, CKM_ML_KEM, &ct).unwrap(), ss_enc);
+        // Cross-check against the generated private key.
+        assert_eq!(decapsulate(session, gen_prv, CKM_ML_KEM, &ct).unwrap(), ss_enc);
+
+        close_session(session).unwrap();
+    }
+
+    /// SLH-DSA-SHAKE-128F generate → reimport → sign/verify round-trip
+    /// with cross-checks against the generated keypair.
+    #[test]
+    fn slh_dsa_shake_128f_import_roundtrip_sign_verify() {
+        use crate::native::sign::{sign, verify};
+        let _guard = test_lock::acquire();
+        let session = fresh_session();
+        let (gen_pub, gen_prv) =
+            generate_slh_dsa_keypair(session, CKP_SLH_DSA_SHAKE_128F, b"\x01", "gen-slh").unwrap();
+        let sk = get_object_value(gen_prv).unwrap();
+        let pk = get_object_value(gen_pub).unwrap();
+
+        let imp_prv =
+            register_slh_dsa_private_key(session, CKP_SLH_DSA_SHAKE_128F, &sk, b"\x02", "imp-sk")
+                .unwrap();
+        let imp_pub =
+            register_slh_dsa_public_key(session, CKP_SLH_DSA_SHAKE_128F, &pk, b"\x02", "imp-pk")
+                .unwrap();
+
+        let msg = b"imported SLH-DSA key material";
+        let sig = sign(session, imp_prv, CKM_SLH_DSA, msg).expect("sign with imported sk");
+        assert_eq!(sig.len(), 17088, "FIPS 205 §11 SLH-DSA-128f signature");
+        assert!(verify(session, imp_pub, CKM_SLH_DSA, msg, &sig).unwrap());
+        assert!(verify(session, gen_pub, CKM_SLH_DSA, msg, &sig).unwrap());
+        let gen_sig = sign(session, gen_prv, CKM_SLH_DSA, msg).unwrap();
+        assert!(verify(session, imp_pub, CKM_SLH_DSA, msg, &gen_sig).unwrap());
+
+        close_session(session).unwrap();
+    }
+
+    /// Imported private keys carry imported provenance: ALWAYS_SENSITIVE=
+    /// FALSE / NEVER_EXTRACTABLE=FALSE / LOCAL=FALSE (§4.9/4.10), while a
+    /// generated private key reports ALWAYS_SENSITIVE=TRUE. SENSITIVE
+    /// stays TRUE (keygen default).
+    #[test]
+    fn imported_pqc_private_reports_imported_provenance() {
+        use crate::state::get_object_attr_u32;
+        let _guard = test_lock::acquire();
+        let session = fresh_session();
+        let (_, gen_prv) =
+            generate_ml_dsa_keypair(session, CKP_ML_DSA_44, b"\x01", "gen").unwrap();
+        assert_eq!(attr_bool(gen_prv, CKA_ALWAYS_SENSITIVE), Some(true));
+        assert_eq!(attr_bool(gen_prv, CKA_NEVER_EXTRACTABLE), Some(true));
+
+        let sk = get_object_value(gen_prv).unwrap();
+        let imp_prv =
+            register_ml_dsa_private_key(session, CKP_ML_DSA_44, &sk, b"\x02", "imp").unwrap();
+        assert_eq!(attr_bool(imp_prv, CKA_ALWAYS_SENSITIVE), Some(false));
+        assert_eq!(attr_bool(imp_prv, CKA_NEVER_EXTRACTABLE), Some(false));
+        assert_eq!(attr_bool(imp_prv, CKA_LOCAL), Some(false));
+        assert_eq!(attr_bool(imp_prv, CKA_SENSITIVE), Some(true));
+        assert_eq!(
+            get_object_attr_u32(imp_prv, CKA_KEY_GEN_MECHANISM),
+            Some(CKM_UNAVAILABLE_INFORMATION)
+        );
+        assert_eq!(get_object_attr_u32(imp_prv, CKA_PARAMETER_SET), Some(CKP_ML_DSA_44));
+        assert_eq!(get_object_attr_u32(imp_prv, CKA_KEY_TYPE), Some(CKK_ML_DSA));
+
+        close_session(session).unwrap();
+    }
+
+    /// Wrong-length ML-DSA key material → CKR_ATTRIBUTE_VALUE_INVALID;
+    /// unknown parameter set → CKR_ARGUMENTS_BAD.
+    #[test]
+    fn ml_dsa_import_wrong_length_rejected() {
+        let _guard = test_lock::acquire();
+        let session = fresh_session();
+        // FIPS 204 §5 lengths for a *different* parameter set.
+        assert_eq!(
+            register_ml_dsa_private_key(session, CKP_ML_DSA_65, &vec![0u8; 2560], b"", "")
+                .unwrap_err(),
+            CKR_ATTRIBUTE_VALUE_INVALID,
+        );
+        assert_eq!(
+            register_ml_dsa_public_key(session, CKP_ML_DSA_87, &vec![0u8; 1952], b"", "")
+                .unwrap_err(),
+            CKR_ATTRIBUTE_VALUE_INVALID,
+        );
+        assert_eq!(
+            register_ml_dsa_private_key(session, 0xDEADBEEF, &vec![0u8; 2560], b"", "")
+                .unwrap_err(),
+            CKR_ARGUMENTS_BAD,
+        );
+        close_session(session).unwrap();
+    }
+
+    /// Wrong-length ML-KEM key material per FIPS 203 §7 → rejected.
+    #[test]
+    fn ml_kem_import_wrong_length_rejected() {
+        let _guard = test_lock::acquire();
+        let session = fresh_session();
+        assert_eq!(
+            register_ml_kem_private_key(session, CKP_ML_KEM_512, &vec![0u8; 2400], b"", "")
+                .unwrap_err(),
+            CKR_ATTRIBUTE_VALUE_INVALID,
+        );
+        assert_eq!(
+            register_ml_kem_public_key(session, CKP_ML_KEM_1024, &vec![0u8; 1184], b"", "")
+                .unwrap_err(),
+            CKR_ATTRIBUTE_VALUE_INVALID,
+        );
+        assert_eq!(
+            register_ml_kem_public_key(session, 0xDEADBEEF, &vec![0u8; 800], b"", "")
+                .unwrap_err(),
+            CKR_ARGUMENTS_BAD,
+        );
+        close_session(session).unwrap();
+    }
+
+    /// Wrong-length SLH-DSA key material per FIPS 205 §9.1 (sk=4n, pk=2n)
+    /// → rejected; lengths differ across the three security levels.
+    #[test]
+    fn slh_dsa_import_wrong_length_rejected() {
+        let _guard = test_lock::acquire();
+        let session = fresh_session();
+        // 128-bit level sk (64 bytes) offered as a 192-level key.
+        assert_eq!(
+            register_slh_dsa_private_key(session, CKP_SLH_DSA_SHA2_192S, &vec![0u8; 64], b"", "")
+                .unwrap_err(),
+            CKR_ATTRIBUTE_VALUE_INVALID,
+        );
+        // 256-level pk (64 bytes) offered as a 128-level key.
+        assert_eq!(
+            register_slh_dsa_public_key(session, CKP_SLH_DSA_SHAKE_128F, &vec![0u8; 64], b"", "")
+                .unwrap_err(),
+            CKR_ATTRIBUTE_VALUE_INVALID,
+        );
+        assert_eq!(
+            register_slh_dsa_private_key(session, 0xDEADBEEF, &vec![0u8; 64], b"", "").unwrap_err(),
+            CKR_ARGUMENTS_BAD,
+        );
+        close_session(session).unwrap();
+    }
+
+    /// Imported public keys carry the keygen-equivalent SPKI
+    /// (CKA_PUBLIC_KEY_INFO), byte-identical to the generated object's.
+    #[test]
+    fn imported_pqc_public_carries_spki() {
+        use crate::state::get_object_attr_bytes;
+        let _guard = test_lock::acquire();
+        let session = fresh_session();
+        let (gen_pub, _) =
+            generate_ml_kem_keypair(session, CKP_ML_KEM_512, b"\x01", "gen").unwrap();
+        let ek = get_object_value(gen_pub).unwrap();
+        let imp_pub =
+            register_ml_kem_public_key(session, CKP_ML_KEM_512, &ek, b"\x02", "imp").unwrap();
+        assert_eq!(
+            get_object_attr_bytes(imp_pub, CKA_PUBLIC_KEY_INFO),
+            get_object_attr_bytes(gen_pub, CKA_PUBLIC_KEY_INFO),
+        );
         close_session(session).unwrap();
     }
 
