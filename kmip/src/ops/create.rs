@@ -121,23 +121,15 @@ pub fn create(deps: &Deps, req: CreateRequest, correlation_id: &str) -> Result<C
         }
     }
 
-    // Plane-3: emit (Phase 7 wires the real C_GenerateKey call).
     let mech = algo.to_pkcs11_mech(PkcsOp::KeyGen).ok_or_else(|| {
         KmipError::failed(
             ResultReason::OperationNotSupported,
             format!("symmetric algorithm {resolved} has no KeyGen mechanism"),
         )
     })?;
-    emit_pkcs11(
-        deps,
-        correlation_id,
-        "C_GenerateKey",
-        Some(mech),
-        0,
-        "CKR_OK",
-    );
 
-    // Phase 7b: real bridge call when a session is wired.
+    // Plane-3: real bridge call when a session is wired. K15 — the
+    // audit record is emitted after the generate call with its real rv.
     let cka_id_bytes = Uuid::new_v4().as_bytes().to_vec();
     // K-14 — KMIP §11 `Digest`: SHA-256 over the actual key material,
     // computed inside the engine boundary at generate time (the hash
@@ -145,18 +137,29 @@ pub fn create(deps: &Deps, req: CreateRequest, correlation_id: &str) -> Result<C
     // session is wired (unit tests) — GetAttributes then omits Digest.
     let mut digest_value: Option<Vec<u8>> = None;
     if let Some(session) = deps.engine_session {
-        let result = match algo {
+        let (native_fn, result) = match algo {
             KmipAlgorithm::Aes => {
                 let bits = key_length.unwrap_or(256);
-                softhsmrustv3::native::generate_aes_key(session, bits, &cka_id_bytes, "kmip-aes")
+                (
+                    "native::generate_aes_key",
+                    softhsmrustv3::native::generate_aes_key(
+                        session,
+                        bits,
+                        &cka_id_bytes,
+                        "kmip-aes",
+                    ),
+                )
             }
             KmipAlgorithm::HmacSha256 | KmipAlgorithm::HmacSha384 | KmipAlgorithm::HmacSha512 => {
                 let bits = key_length.unwrap_or(256);
-                softhsmrustv3::native::generate_generic_secret(
-                    session,
-                    bits,
-                    &cka_id_bytes,
-                    "kmip-hmac",
+                (
+                    "native::generate_generic_secret",
+                    softhsmrustv3::native::generate_generic_secret(
+                        session,
+                        bits,
+                        &cka_id_bytes,
+                        "kmip-hmac",
+                    ),
                 )
             }
             _ => {
@@ -171,6 +174,7 @@ pub fn create(deps: &Deps, req: CreateRequest, correlation_id: &str) -> Result<C
                 ));
             }
         };
+        super::helpers::emit_pkcs11_result(deps, correlation_id, native_fn, Some(mech), &result);
         match result {
             Ok(handle) => {
                 digest_value = softhsmrustv3::native::get_value_digest_sha256(session, handle);
@@ -184,6 +188,10 @@ pub fn create(deps: &Deps, req: CreateRequest, correlation_id: &str) -> Result<C
                 ));
             }
         }
+    } else {
+        // No engine session — nothing was generated (unit-test store
+        // record only); audit names the soft path honestly.
+        emit_pkcs11(deps, correlation_id, "soft::placeholder_generate_key", Some(mech), 0, "CKR_OK");
     }
 
     // Plane-2: persist. Lift `Name` + date attributes out of the

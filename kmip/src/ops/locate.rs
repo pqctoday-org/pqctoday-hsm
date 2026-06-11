@@ -26,7 +26,7 @@ use crate::policy::{Decision, PolicyRequest};
 use crate::store::ObjectRecord;
 
 use super::deps::Deps;
-use super::helpers::{emit_pkcs11, emit_request, emit_success, fail_err};
+use super::helpers::{emit_request, emit_success, fail_err};
 use crate::error::KmipError;
 
 pub fn locate(deps: &Deps, req: LocateRequest, correlation_id: &str) -> Result<LocateResponse> {
@@ -53,15 +53,8 @@ pub fn locate(deps: &Deps, req: LocateRequest, correlation_id: &str) -> Result<L
     // Build the predicate from the request's attribute filters.
     let filters = build_filters(&req.attributes);
 
-    // Plane-3 emit (Phase 7 wires C_FindObjects* reconciliation).
-    emit_pkcs11(
-        deps,
-        correlation_id,
-        "C_FindObjectsInit",
-        None,
-        0,
-        "CKR_OK",
-    );
+    // K15 — Locate searches the Plane-2 store only; no PKCS#11 call is
+    // made, so no `Pkcs11Call` audit record is fabricated for it.
 
     // KMIP 3.0 §6.1.32 `Storage Status Mask` (§12.3 Table 608: On-line
     // 0x01, Archival 0x02, Destroyed 0x04). Every object on this server
@@ -73,7 +66,6 @@ pub fn locate(deps: &Deps, req: LocateRequest, correlation_id: &str) -> Result<L
     const STORAGE_STATUS_ONLINE: u32 = 0x0000_0001;
     if let Some(mask) = req.storage_status_mask {
         if mask & STORAGE_STATUS_ONLINE == 0 {
-            emit_pkcs11(deps, correlation_id, "C_FindObjectsFinal", None, 0, "CKR_OK");
             emit_success(deps, correlation_id, "Locate");
             return Ok(LocateResponse { uids: Vec::new() });
         }
@@ -101,7 +93,6 @@ pub fn locate(deps: &Deps, req: LocateRequest, correlation_id: &str) -> Result<L
         matches.truncate(max as usize);
     }
 
-    emit_pkcs11(deps, correlation_id, "C_FindObjectsFinal", None, 0, "CKR_OK");
     emit_success(deps, correlation_id, "Locate");
 
     Ok(LocateResponse {

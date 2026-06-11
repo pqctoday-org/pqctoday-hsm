@@ -99,8 +99,14 @@ pub fn emit_request(deps: &Deps, correlation_id: &str, op: &str, summary: String
     ));
 }
 
-/// Emit a `Pkcs11Call` audit event. Phase 7 wires the actual softhsmrustv3
-/// call alongside this emission; v0.1 just records the intent.
+/// Emit a `Pkcs11Call` audit event.
+///
+/// K15 (compliance-audit B-8) — the record is emitted AFTER the engine
+/// call executes, with the **real** return code and the **actual**
+/// entry-point name (`native::sign`, `native::encrypt_with_key_bytes`,
+/// …). Handlers that fall back to in-process crypto (no engine session
+/// and no engine-resident handle) name the path `soft::*` so the audit
+/// trail never claims an engine call that did not happen.
 pub fn emit_pkcs11(
     deps: &Deps,
     correlation_id: &str,
@@ -123,6 +129,31 @@ pub fn emit_pkcs11(
             latency_ms: 0,
         },
     ));
+}
+
+/// Audit-record name for a `CK_RV`. `CKR_OK` for 0; every other code
+/// is rendered numerically (`CKR_0x…`) — we never guess a symbolic
+/// name we can't verify.
+pub fn ckr_display_name(rv: u32) -> String {
+    if rv == 0 { "CKR_OK".to_string() } else { format!("CKR_0x{rv:08X}") }
+}
+
+/// K15 — emit a `Pkcs11Call` record for an **already-executed** native
+/// call, taking rv straight from the call's `Result`. This is the only
+/// honest emission order: the old pattern logged `rv=0 CKR_OK` before
+/// the engine ran, so failed calls were recorded as successes.
+pub fn emit_pkcs11_result<T>(
+    deps: &Deps,
+    correlation_id: &str,
+    function: &str,
+    mech: Option<u32>,
+    result: &std::result::Result<T, u32>,
+) {
+    let rv = match result {
+        Ok(_) => 0,
+        Err(rv) => *rv,
+    };
+    emit_pkcs11(deps, correlation_id, function, mech, rv, &ckr_display_name(rv));
 }
 
 /// Emit a `KmipObjectStateChanged` audit event (KMIP 3.0 §3.x lifecycle).

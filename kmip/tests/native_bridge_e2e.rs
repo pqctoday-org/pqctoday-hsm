@@ -58,6 +58,12 @@ rules: []
 "#;
 
 fn build_deps_with_real_engine() -> Deps {
+    build_deps_with_real_engine_and_ring().1
+}
+
+/// Same bootstrap, but also hands back the `RingSink` so tests can
+/// assert on the audit trail (K15 truthful Plane-3 records).
+fn build_deps_with_real_engine_and_ring() -> (Arc<RingSink>, Deps) {
     use softhsmrustv3::native::session;
 
     // Reset engine state for test isolation.
@@ -69,19 +75,20 @@ fn build_deps_with_real_engine() -> Deps {
         .expect("bootstrap real engine session");
 
     let ring = Arc::new(RingSink::new(64));
-    let sink: Arc<dyn AuditSink> = ring;
+    let sink: Arc<dyn AuditSink> = ring.clone();
     let policy_engine = Engine::with_global_sink(sink.clone());
     policy_engine
         .activate(load_from_str(PERMISSIVE_POLICY, std::path::Path::new("<e2e>")).unwrap())
         .unwrap();
 
-    Deps::new(
+    let deps = Deps::new(
         policy_engine,
         Arc::new(MemoryStore::new()),
         sink,
         DepsConfig::default(),
     )
-    .with_engine_session(engine_session)
+    .with_engine_session(engine_session);
+    (ring, deps)
 }
 
 /// Headline demo: real ML-DSA-65 keygen → sign → verify → destroy
@@ -836,6 +843,206 @@ fn k11_digest_persisted_from_real_engine_material() {
     )
     .expect("AES keys are extractable");
     assert_eq!(aes_digest, Sha256::digest(&value).to_vec());
+
+    let _ = softhsmrustv3::native::session::finalize();
+}
+
+// ── K15 — audit-log honesty against the real engine ─────────────────────────
+
+/// Pull all Plane-3 `Pkcs11Call` records `(function, rv, rv_name)` for a
+/// correlation id.
+fn p3_calls(ring: &RingSink, correlation_id: &str) -> Vec<(String, u32, String)> {
+    use pqctoday_kmip::auditlog::{EventPayload, Plane};
+    ring.filter_correlation_id(correlation_id)
+        .into_iter()
+        .filter(|e| e.plane == Plane::Pkcs11)
+        .filter_map(|e| match e.event {
+            EventPayload::Pkcs11Call { function, rv, rv_name, .. } => {
+                Some((function, rv, rv_name))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// K15 — a SUCCESSFUL engine op logs the actual native entry point and
+/// CKR_OK after the fact; a FAILED engine op logs the same entry point
+/// with the real non-zero CK_RV (the pre-K15 code logged `rv=0 CKR_OK`
+/// before the call, success or not).
+#[test]
+fn k15_audit_records_real_rv_and_native_entry_point() {
+    use pqctoday_kmip::kmip30::{ActivateRequest, CreateRequest};
+    use pqctoday_kmip::ops::activate::activate;
+    use pqctoday_kmip::ops::create::create;
+
+    let _guard = engine_test_lock();
+    let (ring, deps) = build_deps_with_real_engine_and_ring();
+
+    // ── Success: engine-generated AES key, audited after the call ───────
+    let c = create(
+        &deps,
+        CreateRequest {
+            object_type: ObjectType::SymmetricKey,
+            template_attribute: vec![
+                Attribute::CryptographicAlgorithm(KmipAlgorithm::Aes),
+                Attribute::CryptographicLength(256),
+                Attribute::CryptographicUsageMask(UsageMask::ENCRYPT),
+            ],
+        },
+        "k15-create-ok",
+    )
+    .unwrap();
+    let calls = p3_calls(&ring, "k15-create-ok");
+    assert_eq!(
+        calls,
+        vec![("native::generate_aes_key".to_string(), 0, "CKR_OK".to_string())],
+        "successful engine generate must be audited with the real entry point + CKR_OK"
+    );
+
+    // ── Failure: drive native::sign into a real engine error ────────────
+    // Relabel the engine-resident AES record as ML-DSA-65 (object_type
+    // stays SymmetricKey so the handle lookup still resolves the
+    // CKO_SECRET_KEY object). Sign then dispatches CKM_ML_DSA against a
+    // 32-byte secret-key handle — the engine rejects it, and the audit
+    // must carry that non-zero CK_RV.
+    let mut rec = deps.store.get(&c.uid).unwrap().unwrap();
+    rec.algorithm = KmipAlgorithm::MlDsa65;
+    rec.usage_mask = UsageMask::SIGN;
+    deps.store.update(rec).unwrap();
+    activate(&deps, ActivateRequest { uid: c.uid.clone() }, "k15-activate").unwrap();
+    sign(
+        &deps,
+        SignRequest {
+            uid: c.uid.clone(),
+            data: b"k15".to_vec(),
+            cryptographic_parameters: None,
+        },
+        "k15-sign-fail",
+    )
+    .expect_err("CKM_ML_DSA over an AES secret key must fail in the engine");
+    let calls = p3_calls(&ring, "k15-sign-fail");
+    assert_eq!(calls.len(), 1, "exactly one Pkcs11Call for the failed sign");
+    let (function, rv, rv_name) = &calls[0];
+    assert_eq!(function, "native::sign");
+    assert_ne!(*rv, 0, "failed engine call must NOT be logged as CKR_OK");
+    assert_ne!(rv_name, "CKR_OK");
+
+    let _ = softhsmrustv3::native::session::finalize();
+}
+
+/// K15 (B-9) — an engine-resident HMAC key (Create'd inside the engine,
+/// no `key_material` in the KMIP store) MACs through `native::sign` and
+/// verifies through `native::verify` with `CKM_SHA256_HMAC`; the audit
+/// names the engine path, and the MAC matches an independent in-process
+/// HMAC over the engine-held key bytes.
+#[test]
+fn k15_hmac_mac_and_verify_route_through_engine() {
+    use hmac::{Hmac, Mac as _};
+    use pqctoday_kmip::kmip30::{
+        ActivateRequest, CreateRequest, MacRequest, MacVerifyRequest, SignatureValidity,
+    };
+    use pqctoday_kmip::ops::activate::activate;
+    use pqctoday_kmip::ops::create::create;
+    use pqctoday_kmip::ops::mac_and_hash::{mac, mac_verify};
+    use sha2::Sha256;
+
+    let _guard = engine_test_lock();
+    let (ring, deps) = build_deps_with_real_engine_and_ring();
+
+    let c = create(
+        &deps,
+        CreateRequest {
+            object_type: ObjectType::SymmetricKey,
+            template_attribute: vec![
+                Attribute::CryptographicAlgorithm(KmipAlgorithm::HmacSha256),
+                Attribute::CryptographicLength(256),
+                Attribute::CryptographicUsageMask(
+                    UsageMask::MAC_GENERATE | UsageMask::MAC_VERIFY,
+                ),
+            ],
+        },
+        "k15-hmac-create",
+    )
+    .unwrap();
+    let rec = deps.store.get(&c.uid).unwrap().unwrap();
+    assert!(rec.key_material.is_none(), "engine-resident key: no store material");
+    activate(&deps, ActivateRequest { uid: c.uid.clone() }, "k15-hmac-activate").unwrap();
+
+    // ── MAC via the engine ───────────────────────────────────────────────
+    let data = b"K15: engine-resident HMAC".to_vec();
+    let m = mac(
+        &deps,
+        MacRequest {
+            uid: c.uid.clone(),
+            cryptographic_parameters: None,
+            data: data.clone(),
+        },
+        "k15-hmac-mac",
+    )
+    .unwrap();
+    assert_eq!(m.mac_data.len(), 32, "HMAC-SHA-256 output");
+    let calls = p3_calls(&ring, "k15-hmac-mac");
+    assert_eq!(
+        calls,
+        vec![("native::sign".to_string(), 0, "CKR_OK".to_string())],
+        "MAC over an engine-resident key must run through native::sign"
+    );
+
+    // Cross-check against an independent in-process HMAC over the
+    // engine-held key bytes (generic secrets are extractable here).
+    let session = deps.engine_session.unwrap();
+    let handle = softhsmrustv3::native::find_by_cka_id(session, &rec.pkcs11_cka_id)
+        .unwrap()
+        .expect("engine handle");
+    let key_bytes = softhsmrustv3::native::get_attribute(
+        session,
+        handle,
+        softhsmrustv3::constants::CKA_VALUE,
+    )
+    .expect("generic secret CKA_VALUE");
+    let mut h = <Hmac<Sha256> as hmac::Mac>::new_from_slice(&key_bytes).unwrap();
+    h.update(&data);
+    assert_eq!(
+        m.mac_data,
+        h.finalize().into_bytes().to_vec(),
+        "engine HMAC must equal RFC 2104 HMAC over the engine-held key"
+    );
+
+    // ── MACVerify via the engine ─────────────────────────────────────────
+    let v = mac_verify(
+        &deps,
+        MacVerifyRequest {
+            uid: c.uid.clone(),
+            cryptographic_parameters: None,
+            data: data.clone(),
+            mac_data: m.mac_data.clone(),
+        },
+        "k15-hmac-verify",
+    )
+    .unwrap();
+    assert_eq!(v.validity, SignatureValidity::Valid);
+    let calls = p3_calls(&ring, "k15-hmac-verify");
+    assert_eq!(
+        calls,
+        vec![("native::verify".to_string(), 0, "CKR_OK".to_string())],
+        "MACVerify over an engine-resident key must run through native::verify"
+    );
+
+    // Tampered MAC → Invalid via the engine path, still Success status.
+    let mut bad = m.mac_data;
+    bad[0] ^= 0xFF;
+    let v = mac_verify(
+        &deps,
+        MacVerifyRequest {
+            uid: c.uid,
+            cryptographic_parameters: None,
+            data,
+            mac_data: bad,
+        },
+        "k15-hmac-verify-bad",
+    )
+    .unwrap();
+    assert_eq!(v.validity, SignatureValidity::Invalid);
 
     let _ = softhsmrustv3::native::session::finalize();
 }

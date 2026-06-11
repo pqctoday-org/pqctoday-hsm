@@ -110,7 +110,9 @@ pub(crate) mod tags {
     pub const ResultMessage: u32          = 0x42_007d;
     pub const ResultReason: u32           = 0x42_007e;
     pub const ResultStatus: u32           = 0x42_007f;
-    pub const RevocationMessage: u32      = 0x42_0080;
+    // `Revocation Message` (0x42_0080) intentionally absent — this tag
+    // table is curated to what the codec reads/writes, and the decoder
+    // skips the optional revocation-message TextString.
     pub const RevocationReason: u32       = 0x42_0081;
     pub const RevocationReasonCode: u32   = 0x42_0082;
     pub const ServerInformation: u32      = 0x42_0088;
@@ -132,8 +134,9 @@ pub(crate) mod tags {
     /// ResponseHeader. Codepoint verified from
     /// `spec/oasis-kmip-3.0/kmip-spec-3.0-tags-enums.json`.
     pub const ServerCorrelationValue: u32 = 0x42_0106;
-    /// KMIP 3.0 §8.1.2 — `Client Correlation Value` (request side only).
-    pub const ClientCorrelationValue: u32 = 0x42_0105;
+    // `Client Correlation Value` (0x42_0105, request side only)
+    // intentionally absent — the decoder skips it; see curated-table
+    // note above.
     pub const SignatureData: u32          = 0x42_00c3;
     pub const State: u32                  = 0x42_008d;
     pub const TimeStamp: u32              = 0x42_0092;
@@ -695,7 +698,7 @@ fn response_batch_item_to_frame(bi: &ResponseBatchItem) -> TtlvFrame {
         Tag(tags::ResultStatus),
         Value::Enumeration(bi.result_status.to_wire_value()),
     ));
-    // KMIP 3.0 §9.x — `OperationUndone` (codepoint 0x02) is the
+    // KMIP 3.0 §9.x — `OperationUndone` (codepoint 0x03) is the
     // status used by the §9.5 Undo wave to relabel items whose ops
     // ran successfully but had to be reverted. The operation DID
     // produce a response payload; the payload is still returned

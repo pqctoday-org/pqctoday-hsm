@@ -26,7 +26,7 @@ use crate::policy::{Decision, PolicyRequest};
 
 use super::deps::Deps;
 use super::helpers::{
-    canonical_name, emit_pkcs11, emit_request, emit_state_change, emit_success, fail_err,
+    canonical_name, emit_request, emit_state_change, emit_success, fail_err,
     state_name,
 };
 
@@ -82,15 +82,23 @@ pub fn destroy(deps: &Deps, req: DestroyRequest, correlation_id: &str) -> Result
         ));
     }
 
-    // Phase 7b: real bridge call when a session is wired. Falls back
-    // to audit-only emission for unit tests.
-    emit_pkcs11(deps, correlation_id, "C_DestroyObject", None, 0, "CKR_OK");
+    // Phase 7b: real bridge call when a session is wired. K15 — the
+    // audit record is emitted after the call with its real rv; when no
+    // engine call happens (no session / handle already gone) no
+    // `Pkcs11Call` record is fabricated.
     if let Some(session) = deps.engine_session {
         // Best-effort: if the handle is already gone (e.g. engine restart
         // between record creation and Destroy), ignore the error — the
         // KMIP lifecycle transition still proceeds.
         if let Ok(Some(handle)) = softhsmrustv3::native::find_by_cka_id(session, &obj.pkcs11_cka_id) {
-            let _ = softhsmrustv3::native::destroy_object(session, handle);
+            let r = softhsmrustv3::native::destroy_object(session, handle);
+            super::helpers::emit_pkcs11_result(
+                deps,
+                correlation_id,
+                "native::destroy_object",
+                None,
+                &r,
+            );
         }
     }
 

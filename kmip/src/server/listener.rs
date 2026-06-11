@@ -165,23 +165,26 @@ async fn handle_conn(
         .and_then(|der| crate::ops::der_x509::extract_subject_cn(der.as_ref()))
         .map(|cn| crate::server::auth::Identity { username: cn });
     let frame_bytes = read_one_frame(&mut tls_stream).await?;
-    // KMIP 3.0 §9.10 — capture `Maximum Response Size` from the
-    // header (when present) BEFORE dispatch so we can compare it
-    // against the encoded response below.
-    let max_resp_size = decode_request_message(&frame_bytes)
-        .as_ref()
-        .ok()
-        .and_then(|r| r.header.maximum_response_size)
-        .filter(|&n| n > 0);
-    let response = match decode_request_message(&frame_bytes) {
-        Ok(request) => dispatch_with_transport_identity(&deps, request, transport_identity),
+    // Single decode (K15) — the decoded message is used both for the
+    // §9.10 `Maximum Response Size` capture and for dispatch.
+    let (response, max_resp_size) = match decode_request_message(&frame_bytes) {
+        Ok(request) => {
+            // KMIP 3.0 §9.10 — capture `Maximum Response Size` from the
+            // header (when present) BEFORE dispatch so we can compare
+            // it against the encoded response below.
+            let max_resp_size = request.header.maximum_response_size.filter(|&n| n > 0);
+            (
+                dispatch_with_transport_identity(&deps, request, transport_identity),
+                max_resp_size,
+            )
+        }
         // KMIP 3.0 §6.4: a wire-decode failure (unknown tag, unknown enum
         // value, malformed length, etc.) must produce a structured
         // `OperationFailed` response with `ResultReason = InvalidMessage`
         // — NOT a TCP/TLS connection drop. Closing the socket without a
         // response makes the client see a transport error instead of a
         // proper protocol-level rejection (and breaks OASIS conformance).
-        Err(e) => wire_error_response(&e),
+        Err(e) => (wire_error_response(&e), None),
     };
     let response_bytes = encode_response_message(&response);
     // KMIP 3.0 §9.10 — when the encoded response would exceed the

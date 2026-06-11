@@ -25,7 +25,7 @@ use uuid::Uuid;
 use crate::error::KmipError;
 use crate::kmip30::{
     ActivateRequest, CreateKeyPairRequest, CreateRequest, DecryptRequest, DestroyRequest,
-    EncryptRequest, GetAttributeListRequest, GetAttributesRequest, GetRequest, InteropRequest,
+    EncryptRequest, GetRequest,
     LocateRequest, QueryRequest, RequestBatchItem, RequestMessage,
     ResponseBatchItem, ResponseHeader, ResponseMessage, ResponsePayload, ResultStatus,
     RevokeRequest, SignRequest, SignatureVerifyRequest,
@@ -57,9 +57,9 @@ use crate::kmip30::RequestPayload;
 /// - **Stop** (default): halt at first failure; later items are NOT
 ///   processed and NOT returned.
 /// - **Continue**: process every item independently.
-/// - **Undo**: deferred — see `R7 Phase 4`. Currently treated as
-///   `Stop` for forward-compat (the test corpus needing Undo is
-///   tracked in conformance/REPLAY_REPORT.md as BL-M-2).
+/// - **Undo**: halt at first failure and roll back the earlier
+///   successful items, relabelling them `OperationUndone` (see
+///   [`undo_wave`]).
 ///
 /// Threads the §6.4 **ID Placeholder** through the batch: the
 /// most-recently-produced UID is stashed in `BatchState` and any item
@@ -1266,8 +1266,9 @@ mod tests {
     // Responses to batch items that have already been processed are
     // returned normally." Combined with §9.x Result Status: those
     // already-completed items have their `ResultStatus` switched to
-    // `Operation Undone` (codepoint `0x02`) — distinct from both
-    // `Success` (0x00) and `OperationFailed` (0x01).
+    // `Operation Undone` (codepoint `0x03`) — distinct from
+    // `Success` (0x00), `OperationFailed` (0x01) and
+    // `OperationPending` (0x02).
 
     use crate::store::ObjectRecord;
     use crate::kmip30::State;

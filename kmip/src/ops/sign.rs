@@ -162,40 +162,12 @@ pub fn sign(deps: &Deps, req: SignRequest, correlation_id: &str) -> Result<SignR
         }
     };
 
-    // ── Plane 3: emit (would call C_SignInit + C_Sign) ──────────────────
-    let mech_name = format!("CKM_0x{mech:04X}");
-    deps.sink.emit(AuditEvent::at(
-        OffsetDateTime::now_utc(),
-        Plane::Pkcs11,
-        correlation_id,
-        EventPayload::Pkcs11Call {
-            function: "C_SignInit".into(),
-            mechanism: Some(mech_name.clone()),
-            slot: Some(deps.config.pkcs11_slot),
-            session: None,
-            rv: 0,
-            rv_name: "CKR_OK".into(),
-            latency_ms: 0,
-        },
-    ));
-    deps.sink.emit(AuditEvent::at(
-        OffsetDateTime::now_utc(),
-        Plane::Pkcs11,
-        correlation_id,
-        EventPayload::Pkcs11Call {
-            function: "C_Sign".into(),
-            mechanism: Some(mech_name),
-            slot: Some(deps.config.pkcs11_slot),
-            session: None,
-            rv: 0,
-            rv_name: "CKR_OK".into(),
-            latency_ms: 0,
-        },
-    ));
-
-    // Phase 7b: real bridge call when a session is wired. Falls back to
-    // deterministic SHA-256 placeholder for unit tests that don't
-    // bootstrap an engine.
+    // ── Plane 3: real bridge call when a session is wired ──────────────
+    // K15 — the audit record is emitted AFTER `native::sign` returns,
+    // with the call's real rv (a log asserting CKR_OK on failures is
+    // worse than no log). Falls back to a deterministic SHA-256
+    // placeholder (audited as `soft::placeholder_sign`) for unit tests
+    // that don't bootstrap an engine.
     let signature = match deps.engine_session {
         Some(session) => {
             // KMIP UID → CKA_ID → engine handle → native::sign. Filter
@@ -218,10 +190,27 @@ pub fn sign(deps: &Deps, req: SignRequest, correlation_id: &str) -> Result<SignR
                 effective_cp,
             )
             .map_err(|e| fail_err(deps, correlation_id, "Sign", e))?;
-            softhsmrustv3::native::sign(session, handle, native_mech, &req.data)
-                .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Sign"))?
+            let r = softhsmrustv3::native::sign(session, handle, native_mech, &req.data);
+            super::helpers::emit_pkcs11_result(
+                deps,
+                correlation_id,
+                "native::sign",
+                Some(native_mech),
+                &r,
+            );
+            r.map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Sign"))?
         }
-        None => placeholder_signature(&req.uid, &req.data),
+        None => {
+            super::helpers::emit_pkcs11(
+                deps,
+                correlation_id,
+                "soft::placeholder_sign",
+                Some(mech),
+                0,
+                "CKR_OK",
+            );
+            placeholder_signature(&req.uid, &req.data)
+        }
     };
 
     deps.sink.emit(AuditEvent::at(
@@ -420,10 +409,16 @@ rules:
         .unwrap();
         assert_eq!(resp.uid, "urn:uid:1");
         assert_eq!(resp.signature.len(), 32); // sha256 placeholder
-        // p1 (policy activation + decision), p2 (req + resp), p3 (init + sign)
+        // p1 (policy activation + decision), p2 (req + resp), p3 (one
+        // record naming the soft fallback that actually ran — K15).
         assert!(ring.filter_plane(Plane::Agility).len() >= 2);
         assert_eq!(ring.filter_plane(Plane::Kmip).len(), 2);
-        assert_eq!(ring.filter_plane(Plane::Pkcs11).len(), 2);
+        let p3 = ring.filter_plane(Plane::Pkcs11);
+        assert_eq!(p3.len(), 1);
+        assert!(matches!(
+            &p3[0].event,
+            EventPayload::Pkcs11Call { function, rv: 0, .. } if function == "soft::placeholder_sign"
+        ));
     }
 
     #[test]

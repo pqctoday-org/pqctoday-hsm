@@ -1,8 +1,10 @@
 //! Tri-plane correlated audit trace — demonstrates the Hub-UI view of one
 //! request flowing through Plane 1 (agility engine) → Plane 2 (KMIP) →
-//! Plane 3 (PKCS#11). Plane 2 + Plane 3 emissions are STUBBED here; Phase 5
-//! (op handlers) and bridge instrumentation will replace the stubs with
-//! real emissions, but the wire format is committed in this test.
+//! Plane 3 (PKCS#11). Plane 2 + Plane 3 emissions are STUBBED here; the
+//! wire format is what this test commits. Stub `Pkcs11Call` function
+//! names follow the K15 convention the op handlers emit: the actual
+//! native entry point (`native::sign`, `native::generate_ml_dsa_keypair`,
+//! …) recorded AFTER the call with its real rv.
 //!
 //! Each plane writes to the same sink. The Hub UI reads from that sink
 //! (in production: via a Phase-7 HTTP `GET /audit/tail` endpoint; in this
@@ -97,7 +99,7 @@ fn one_request_three_planes_one_correlation_id() {
         Plane::Pkcs11,
         correlation_id,
         EventPayload::Pkcs11Call {
-            function: "C_GenerateKeyPair".into(),
+            function: "native::generate_ml_dsa_keypair".into(),
             mechanism: Some("CKM_ML_DSA_KEY_PAIR_GEN".into()),
             slot: Some(0),
             session: Some(42),
@@ -111,7 +113,7 @@ fn one_request_three_planes_one_correlation_id() {
         Plane::Pkcs11,
         correlation_id,
         EventPayload::Pkcs11Call {
-            function: "C_Sign".into(),
+            function: "native::sign".into(),
             mechanism: Some("CKM_ML_DSA".into()),
             slot: Some(0),
             session: Some(42),
@@ -212,7 +214,7 @@ fn hub_ui_can_filter_per_plane() {
             Plane::Pkcs11,
             format!("corr-{i}"),
             EventPayload::Pkcs11Call {
-                function: "C_GenerateKeyPair".into(),
+                function: "native::generate_ml_dsa_keypair".into(),
                 mechanism: Some("CKM_ML_DSA_KEY_PAIR_GEN".into()),
                 slot: Some(0),
                 session: Some(1),
@@ -261,7 +263,7 @@ fn event_payloads_serialise_to_committed_wire_format() {
         Plane::Pkcs11,
         "corr",
         EventPayload::Pkcs11Call {
-            function: "C_Sign".into(),
+            function: "native::sign".into(),
             mechanism: Some("CKM_ML_DSA".into()),
             slot: Some(0),
             session: Some(42),
@@ -273,5 +275,5 @@ fn event_payloads_serialise_to_committed_wire_format() {
     let json = serde_json::to_string(&p3).unwrap();
     assert!(json.contains("\"plane\":\"p3\""));
     assert!(json.contains("\"type\":\"Pkcs11Call\""));
-    assert!(json.contains("\"function\":\"C_Sign\""));
+    assert!(json.contains("\"function\":\"native::sign\""));
 }
