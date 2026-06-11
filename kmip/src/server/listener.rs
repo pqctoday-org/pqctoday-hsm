@@ -223,12 +223,19 @@ fn response_too_large(
 fn wire_error_response(err: &WireError) -> crate::kmip30::ResponseMessage {
     use crate::error::ResultReason;
     use crate::kmip30::{ResponseBatchItem, ResponseHeader, ResponseMessage, ResultStatus};
+    // KMIP 3.0 §11 — a recognisable-but-unsupported ProtocolVersion is
+    // `Unsupported Protocol Version` (0x3f), not `Invalid Message` (0x04)
+    // which is reserved for genuinely malformed frames (K1, finding K-3).
+    let reason = match err {
+        WireError::UnsupportedVersion { .. } => ResultReason::UnsupportedProtocolVersion,
+        _ => ResultReason::InvalidMessage,
+    };
     ResponseMessage {
         header: ResponseHeader::v3_now(),
         batch_items: vec![ResponseBatchItem {
             operation: None,
             result_status: ResultStatus::OperationFailed,
-            result_reason: Some(ResultReason::InvalidMessage as u32),
+            result_reason: Some(reason as u32),
             result_message: Some(format!("KMIP wire decode failed: {err}")),
             payload: None,
         }],
@@ -306,5 +313,31 @@ mod tests {
         let mut cursor = std::io::Cursor::new(wire.clone());
         let read_back = read_one_frame_sync(&mut cursor).unwrap();
         assert_eq!(read_back, wire);
+    }
+
+    /// K1 — protocol-version mismatch yields `Unsupported Protocol
+    /// Version` (0x3f), while a malformed frame stays `Invalid
+    /// Message` (0x04).
+    #[test]
+    fn wire_error_response_reason_codes() {
+        use crate::error::ResultReason;
+        let resp = wire_error_response(&WireError::UnsupportedVersion { major: 2, minor: 1 });
+        assert_eq!(
+            resp.batch_items[0].result_reason,
+            Some(ResultReason::UnsupportedProtocolVersion as u32)
+        );
+        assert_eq!(
+            resp.batch_items[0].result_reason,
+            Some(0x0000_003f),
+            "Unsupported Protocol Version codepoint per OASIS enums JSON"
+        );
+        let resp = wire_error_response(&WireError::Missing {
+            tag: 0x42_0077,
+            name: "Request Header",
+        });
+        assert_eq!(
+            resp.batch_items[0].result_reason,
+            Some(ResultReason::InvalidMessage as u32)
+        );
     }
 }

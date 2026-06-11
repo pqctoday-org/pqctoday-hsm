@@ -15,7 +15,7 @@
 //!   Plane 2 — dispatcher → op handler (Phase 5)
 //!              │
 //!              ▼
-//!   Plane 3 — pkcs11bridge → softhsmrustv3
+//!   Plane 3 — softhsmrustv3::native (typed in-process path)
 //! ```
 //!
 //! The engine ALWAYS runs before Plane 2 dispatch. A `Deny` short-circuits

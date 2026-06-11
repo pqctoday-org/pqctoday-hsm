@@ -377,21 +377,157 @@ pub fn find_handle_for_object(
 }
 
 /// Convert a `softhsmrustv3` `CK_RV` (`u32`) to a `KmipError`.
+///
+/// Full mapping per `docs/COMPLIANCE_FIX_PLAN.md` K1 (findings B-3, K-3):
+/// every `CKR_*` the engine emits deliberately maps to a specific
+/// `ResultReason`; the catch-all is `GeneralFailure` (0x100), NOT
+/// `CryptographicFailure` — only genuinely-cryptographic codes map to
+/// `CryptographicFailure` (0x0a).
+///
+/// Handle-invalid codes (`CKR_OBJECT_HANDLE_INVALID`, `CKR_KEY_HANDLE_INVALID`,
+/// `CKR_WRAPPING_KEY_HANDLE_INVALID`, `CKR_UNWRAPPING_KEY_HANDLE_INVALID`)
+/// stay on `KmipError::not_found` (`ItemNotFound`) for now — slice K2 does
+/// the ItemNotFound → ObjectNotFound sweep across all UID-lookup sites.
 pub fn ck_rv_to_kmip_error(rv: u32, op: &str) -> KmipError {
     use softhsmrustv3::constants as c;
     match rv {
+        // ── Permission / capability ─────────────────────────────────
         c::CKR_KEY_FUNCTION_NOT_PERMITTED => {
             KmipError::permission_denied(format!("{op}: CKA_SIGN/CKA_ENCAPSULATE/etc. denied"))
         }
-        c::CKR_OBJECT_HANDLE_INVALID => KmipError::not_found(&format!("{op}: object handle gone")),
+        // ── Missing managed object (K2 will upgrade to ObjectNotFound) ──
+        c::CKR_OBJECT_HANDLE_INVALID
+        | c::CKR_KEY_HANDLE_INVALID
+        | c::CKR_WRAPPING_KEY_HANDLE_INVALID
+        | c::CKR_UNWRAPPING_KEY_HANDLE_INVALID => {
+            KmipError::not_found(&format!("{op}: object handle gone"))
+        }
+        // ── Unsupported mechanism / parameters ──────────────────────
         c::CKR_MECHANISM_INVALID => KmipError::failed(
             crate::error::ResultReason::OperationNotSupported,
             format!("{op}: mechanism not supported by the engine"),
         ),
-        c::CKR_ARGUMENTS_BAD => KmipError::invalid_attribute_value(format!("{op}: bad arguments")),
+        c::CKR_MECHANISM_PARAM_INVALID => KmipError::unsupported_cryptographic_parameters(
+            format!("{op}: mechanism parameters not supported"),
+        ),
+        // ── Malformed request fields ────────────────────────────────
+        c::CKR_ARGUMENTS_BAD => KmipError::invalid_field(format!("{op}: bad arguments")),
+        c::CKR_DATA_LEN_RANGE => {
+            KmipError::invalid_field(format!("{op}: data length out of range"))
+        }
+        c::CKR_ENCRYPTED_DATA_LEN_RANGE => {
+            KmipError::invalid_field(format!("{op}: ciphertext length out of range"))
+        }
+        c::CKR_WRAPPED_KEY_LEN_RANGE => {
+            KmipError::invalid_field(format!("{op}: wrapped key length out of range"))
+        }
+        c::CKR_KEY_SIZE_RANGE => KmipError::invalid_field(format!("{op}: key size out of range")),
+        c::CKR_KEY_TYPE_INCONSISTENT => {
+            KmipError::invalid_field(format!("{op}: key type inconsistent with mechanism"))
+        }
+        // ── Template / attribute problems ───────────────────────────
+        c::CKR_TEMPLATE_INCOMPLETE => {
+            KmipError::invalid_attribute_value(format!("{op}: template incomplete"))
+        }
+        c::CKR_TEMPLATE_INCONSISTENT => {
+            KmipError::invalid_attribute_value(format!("{op}: template inconsistent"))
+        }
+        c::CKR_ATTRIBUTE_VALUE_INVALID => {
+            KmipError::invalid_attribute_value(format!("{op}: attribute value invalid"))
+        }
+        // ── Authentication ──────────────────────────────────────────
+        c::CKR_PIN_INCORRECT
+        | c::CKR_PIN_INVALID
+        | c::CKR_PIN_LEN_RANGE
+        | c::CKR_USER_PIN_NOT_INITIALIZED
+        | c::CKR_USER_NOT_LOGGED_IN => KmipError::failed(
+            crate::error::ResultReason::AuthenticationNotSuccessful,
+            format!("{op}: PKCS#11 authentication failed (CK_RV=0x{rv:08x})"),
+        ),
+        // ── Genuinely cryptographic failures ────────────────────────
         c::CKR_ENCRYPTED_DATA_INVALID => {
             KmipError::cryptographic_failure(format!("{op}: ciphertext authentication failed"))
         }
-        _ => KmipError::cryptographic_failure(format!("{op}: CK_RV=0x{rv:08x}")),
+        c::CKR_WRAPPED_KEY_INVALID => {
+            KmipError::cryptographic_failure(format!("{op}: wrapped key invalid"))
+        }
+        c::CKR_SIGNATURE_INVALID => {
+            KmipError::cryptographic_failure(format!("{op}: signature invalid"))
+        }
+        c::CKR_SIGNATURE_LEN_RANGE => {
+            KmipError::cryptographic_failure(format!("{op}: signature length out of range"))
+        }
+        // The engine returns CKR_FUNCTION_FAILED for crypto-primitive
+        // failures (OpenSSL-level errors), so it is cryptographic.
+        c::CKR_FUNCTION_FAILED => {
+            KmipError::cryptographic_failure(format!("{op}: cryptographic function failed"))
+        }
+        // ── Sensitivity / extractability ────────────────────────────
+        c::CKR_ATTRIBUTE_SENSITIVE => {
+            KmipError::sensitive(format!("{op}: attribute is sensitive"))
+        }
+        c::CKR_KEY_UNEXTRACTABLE => {
+            KmipError::not_extractable(format!("{op}: key is unextractable"))
+        }
+        c::CKR_KEY_NOT_WRAPPABLE => {
+            KmipError::not_extractable(format!("{op}: key is not wrappable"))
+        }
+        // ── Everything else (CKR_HOST_MEMORY, CKR_GENERAL_ERROR, …) ──
+        _ => KmipError::general_failure(format!("{op}: CK_RV=0x{rv:08x}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::ResultReason;
+    use softhsmrustv3::constants as c;
+
+    /// K1 — full CKR→ResultReason table per COMPLIANCE_FIX_PLAN.md.
+    #[test]
+    fn ckr_table_maps_to_expected_result_reasons() {
+        let cases: &[(u32, ResultReason)] = &[
+            (c::CKR_KEY_FUNCTION_NOT_PERMITTED, ResultReason::PermissionDenied),
+            // Handle-invalid family → ItemNotFound for now (K2 sweeps to ObjectNotFound).
+            (c::CKR_OBJECT_HANDLE_INVALID, ResultReason::ItemNotFound),
+            (c::CKR_KEY_HANDLE_INVALID, ResultReason::ItemNotFound),
+            (c::CKR_WRAPPING_KEY_HANDLE_INVALID, ResultReason::ItemNotFound),
+            (c::CKR_UNWRAPPING_KEY_HANDLE_INVALID, ResultReason::ItemNotFound),
+            (c::CKR_MECHANISM_INVALID, ResultReason::OperationNotSupported),
+            (c::CKR_MECHANISM_PARAM_INVALID, ResultReason::UnsupportedCryptographicParameters),
+            (c::CKR_ARGUMENTS_BAD, ResultReason::InvalidField),
+            (c::CKR_DATA_LEN_RANGE, ResultReason::InvalidField),
+            (c::CKR_ENCRYPTED_DATA_LEN_RANGE, ResultReason::InvalidField),
+            (c::CKR_WRAPPED_KEY_LEN_RANGE, ResultReason::InvalidField),
+            (c::CKR_KEY_SIZE_RANGE, ResultReason::InvalidField),
+            (c::CKR_KEY_TYPE_INCONSISTENT, ResultReason::InvalidField),
+            (c::CKR_TEMPLATE_INCOMPLETE, ResultReason::InvalidAttributeValue),
+            (c::CKR_TEMPLATE_INCONSISTENT, ResultReason::InvalidAttributeValue),
+            (c::CKR_ATTRIBUTE_VALUE_INVALID, ResultReason::InvalidAttributeValue),
+            (c::CKR_PIN_INCORRECT, ResultReason::AuthenticationNotSuccessful),
+            (c::CKR_PIN_INVALID, ResultReason::AuthenticationNotSuccessful),
+            (c::CKR_PIN_LEN_RANGE, ResultReason::AuthenticationNotSuccessful),
+            (c::CKR_USER_PIN_NOT_INITIALIZED, ResultReason::AuthenticationNotSuccessful),
+            (c::CKR_USER_NOT_LOGGED_IN, ResultReason::AuthenticationNotSuccessful),
+            (c::CKR_ENCRYPTED_DATA_INVALID, ResultReason::CryptographicFailure),
+            (c::CKR_WRAPPED_KEY_INVALID, ResultReason::CryptographicFailure),
+            (c::CKR_SIGNATURE_INVALID, ResultReason::CryptographicFailure),
+            (c::CKR_SIGNATURE_LEN_RANGE, ResultReason::CryptographicFailure),
+            (c::CKR_FUNCTION_FAILED, ResultReason::CryptographicFailure),
+            (c::CKR_ATTRIBUTE_SENSITIVE, ResultReason::Sensitive),
+            (c::CKR_KEY_UNEXTRACTABLE, ResultReason::NotExtractable),
+            (c::CKR_KEY_NOT_WRAPPABLE, ResultReason::NotExtractable),
+            // Default arm → GeneralFailure (0x100), NOT CryptographicFailure.
+            (c::CKR_HOST_MEMORY, ResultReason::GeneralFailure),
+            (c::CKR_GENERAL_ERROR, ResultReason::GeneralFailure),
+            (0xDEAD_BEEF, ResultReason::GeneralFailure),
+        ];
+        for &(rv, expected) in cases {
+            let got = ck_rv_to_kmip_error(rv, "test").result_reason();
+            assert_eq!(
+                got, expected,
+                "CK_RV=0x{rv:08x} mapped to {got:?}, expected {expected:?}"
+            );
+        }
     }
 }
