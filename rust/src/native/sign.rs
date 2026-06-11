@@ -73,7 +73,10 @@ pub fn sign(
         CKM_SHA256_HMAC | CKM_SHA384_HMAC | CKM_SHA512_HMAC | CKM_SHA3_256_HMAC
         | CKM_SHA3_512_HMAC => sign_hmac(mechanism, &sk_bytes, data),
         CKM_KMAC_128 | CKM_KMAC_256 => sign_kmac(mechanism, &sk_bytes, data),
-        CKM_SHA256_RSA_PKCS | CKM_SHA256_RSA_PKCS_PSS => sign_rsa(mechanism, &sk_bytes, data, None),
+        CKM_SHA256_RSA_PKCS | CKM_SHA384_RSA_PKCS | CKM_SHA512_RSA_PKCS
+        | CKM_SHA256_RSA_PKCS_PSS | CKM_SHA384_RSA_PKCS_PSS | CKM_SHA512_RSA_PKCS_PSS => {
+            sign_rsa(mechanism, &sk_bytes, data, None)
+        }
         CKM_ECDSA | CKM_ECDSA_SHA256 | CKM_ECDSA_SHA384 | CKM_ECDSA_SHA512 => {
             sign_ecdsa(mechanism, ps, &sk_bytes, data)
         }
@@ -135,10 +138,13 @@ pub fn verify(
                 Err(e) => Err(e),
             }
         }
-        CKM_SHA256_RSA_PKCS | CKM_SHA256_RSA_PKCS_PSS => match get_rsa_public_components(key_handle) {
-            Some((n, e)) => verify_rsa(mechanism, &n, &e, data, signature, None),
-            None => Err(CKR_KEY_TYPE_INCONSISTENT),
-        },
+        CKM_SHA256_RSA_PKCS | CKM_SHA384_RSA_PKCS | CKM_SHA512_RSA_PKCS
+        | CKM_SHA256_RSA_PKCS_PSS | CKM_SHA384_RSA_PKCS_PSS | CKM_SHA512_RSA_PKCS_PSS => {
+            match get_rsa_public_components(key_handle) {
+                Some((n, e)) => verify_rsa(mechanism, &n, &e, data, signature, None),
+                None => Err(CKR_KEY_TYPE_INCONSISTENT),
+            }
+        }
         CKM_ECDSA | CKM_ECDSA_SHA256 | CKM_ECDSA_SHA384 | CKM_ECDSA_SHA512 => {
             match get_ec_point_sec1(key_handle) {
                 Some(point) => verify_ecdsa(mechanism, ps, &point, data, signature),
@@ -290,6 +296,49 @@ mod tests {
             generate_ml_kem_keypair(session, CKP_ML_KEM_768, b"\x01", "kem-not-sig").unwrap();
         let result = sign(session, prv_h, CKM_ML_DSA, b"data");
         assert_eq!(result, Err(CKR_KEY_FUNCTION_NOT_PERMITTED));
+        close_session(session).unwrap();
+    }
+
+    /// S6 — RSA SHA-384/512 PKCS#1 v1.5 + PSS through the native dispatch:
+    /// one RSA-2048 keypair, sign/verify round-trip per mechanism, tampered
+    /// signature → Ok(false), cross-hash verify → Ok(false).
+    #[test]
+    fn s6_rsa_hash_variant_mechs_round_trip_via_native_dispatch() {
+        use crate::native::keygen::generate_rsa_keypair;
+        let _guard = test_lock::acquire();
+        let session = fresh_session();
+        let (pub_h, prv_h) = generate_rsa_keypair(session, 2048, b"\x01", "s6-rsa").unwrap();
+
+        let msg = b"S6 native dispatch round-trip";
+        let mechs = [
+            CKM_SHA384_RSA_PKCS,
+            CKM_SHA512_RSA_PKCS,
+            CKM_SHA384_RSA_PKCS_PSS,
+            CKM_SHA512_RSA_PKCS_PSS,
+        ];
+        for mech in mechs {
+            let sig = sign(session, prv_h, mech, msg).expect("sign must succeed");
+            assert_eq!(sig.len(), 256, "RSA-2048 signature is 256 bytes ({mech:#06x})");
+            assert_eq!(
+                verify(session, pub_h, mech, msg, &sig),
+                Ok(true),
+                "round-trip must verify ({mech:#06x})"
+            );
+            let mut bad = sig.clone();
+            bad[128] ^= 0xFF;
+            assert_eq!(
+                verify(session, pub_h, mech, msg, &bad),
+                Ok(false),
+                "tampered sig is Ok(false) ({mech:#06x})"
+            );
+        }
+
+        // Cross-mechanism: SHA-384 signature must not verify as SHA-512.
+        let sig384 = sign(session, prv_h, CKM_SHA384_RSA_PKCS, msg).unwrap();
+        assert_eq!(verify(session, pub_h, CKM_SHA512_RSA_PKCS, msg, &sig384), Ok(false));
+        let pss384 = sign(session, prv_h, CKM_SHA384_RSA_PKCS_PSS, msg).unwrap();
+        assert_eq!(verify(session, pub_h, CKM_SHA512_RSA_PKCS_PSS, msg, &pss384), Ok(false));
+
         close_session(session).unwrap();
     }
 

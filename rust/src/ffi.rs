@@ -723,7 +723,10 @@ pub fn C_GetMechanismInfo(_slot_id: u32, mech_type: u32, p_info: *mut u8) -> u32
 pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
     let info = match mech_type {
         CKM_RSA_PKCS_KEY_PAIR_GEN => (2048, 4096, 0x00010000u32),
-        CKM_SHA256_RSA_PKCS | CKM_SHA256_RSA_PKCS_PSS => (2048, 4096, 0x00000800 | 0x00002000),
+        CKM_SHA256_RSA_PKCS | CKM_SHA384_RSA_PKCS | CKM_SHA512_RSA_PKCS
+        | CKM_SHA256_RSA_PKCS_PSS | CKM_SHA384_RSA_PKCS_PSS | CKM_SHA512_RSA_PKCS_PSS => {
+            (2048, 4096, 0x00000800 | 0x00002000)
+        }
         CKM_RSA_PKCS_OAEP => (2048, 4096, 0x00000100 | 0x00000200),
         // PKCS#11 v3.2 §6.67–§6.69: ulMin/MaxKeySize for ML-DSA / ML-KEM /
         // SLH-DSA are PUBLIC-KEY sizes in BYTES (FIPS 203/204/205), not
@@ -852,6 +855,25 @@ mod mechanism_table_tests {
             missing.is_empty(),
             "SUPPORTED_MECHS entries without a C_GetMechanismInfo arm: {missing:#06x?}"
         );
+    }
+
+    /// S6 — the four RSA hash-variant mechanisms are advertised at
+    /// (2048, 4096) with CKF_SIGN | CKF_VERIFY.
+    #[test]
+    fn s6_rsa_hash_variant_mechs_advertised() {
+        for m in [
+            CKM_SHA384_RSA_PKCS,
+            CKM_SHA512_RSA_PKCS,
+            CKM_SHA384_RSA_PKCS_PSS,
+            CKM_SHA512_RSA_PKCS_PSS,
+        ] {
+            assert!(SUPPORTED_MECHS.contains(&m), "mech {m:#06x} not advertised");
+            assert_eq!(
+                mechanism_info(m),
+                Some((2048, 4096, 0x00000800 | 0x00002000)),
+                "mech {m:#06x}"
+            );
+        }
     }
 
     /// S1 / P-1 — PKCS#11 v3.2 §6.67–§6.69: ulMin/MaxKeySize for the PQC
@@ -2622,6 +2644,18 @@ fn check_key_usage_as(
     Ok(())
 }
 
+/// RSA-PSS mechanism → (expected CKM_* hashAlg, expected CKG_MGF1_* mgf) for
+/// CK_RSA_PKCS_PSS_PARAMS validation (§6.4.5: hashAlg/mgf must match the
+/// digest baked into the mechanism; MGF1 uses the same hash per §6.2).
+fn rsa_pss_mech_params(mech: u32) -> Option<(u32, u32)> {
+    match mech {
+        CKM_SHA256_RSA_PKCS_PSS => Some((CKM_SHA256, CKG_MGF1_SHA256)),
+        CKM_SHA384_RSA_PKCS_PSS => Some((CKM_SHA384, CKG_MGF1_SHA384)),
+        CKM_SHA512_RSA_PKCS_PSS => Some((CKM_SHA512, CKG_MGF1_SHA512)),
+        _ => None,
+    }
+}
+
 #[wasm_bindgen(js_name = _C_SignInit)]
 pub fn C_SignInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
     require_init!();
@@ -2658,7 +2692,7 @@ pub fn C_SignInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
                 Ok(v) => v,
                 Err(rv) => return rv,
             }
-        } else if mech_type == CKM_SHA256_RSA_PKCS_PSS {
+        } else if let Some((exp_hash, exp_mgf)) = rsa_pss_mech_params(mech_type) {
             // CK_RSA_PKCS_PSS_PARAMS (wasm32, 12 B): hashAlg, mgf, sLen.
             // §6.4.5 — params are caller-authoritative; hashAlg/mgf must match
             // the mechanism's digest. Absent params keep legacy defaults.
@@ -2669,7 +2703,7 @@ pub fn C_SignInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
                 let hash_alg = std::ptr::read_unaligned(pp as *const u32);
                 let mgf = std::ptr::read_unaligned((pp as *const u32).add(1));
                 let s_len = std::ptr::read_unaligned((pp as *const u32).add(2));
-                if hash_alg != CKM_SHA256 || mgf != CKG_MGF1_SHA256 {
+                if hash_alg != exp_hash || mgf != exp_mgf {
                     return CKR_MECHANISM_PARAM_INVALID;
                 }
                 // carried to C_Sign/C_Verify in the ctx vec (LE u32)
@@ -2943,8 +2977,9 @@ pub fn C_Sign(
                     sign_kmac(eff_mech, &sk_bytes, eff_msg)
                 }
             }
-            CKM_SHA256_RSA_PKCS | CKM_SHA256_RSA_PKCS_PSS => {
-                let pss_salt = if eff_mech == CKM_SHA256_RSA_PKCS_PSS && ctx_bytes.len() >= 4 {
+            CKM_SHA256_RSA_PKCS | CKM_SHA384_RSA_PKCS | CKM_SHA512_RSA_PKCS
+            | CKM_SHA256_RSA_PKCS_PSS | CKM_SHA384_RSA_PKCS_PSS | CKM_SHA512_RSA_PKCS_PSS => {
+                let pss_salt = if rsa_pss_mech_params(eff_mech).is_some() && ctx_bytes.len() >= 4 {
                     Some(u32::from_le_bytes([
                         ctx_bytes[0],
                         ctx_bytes[1],
@@ -3019,7 +3054,7 @@ pub fn C_VerifyInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
                 Ok(v) => v,
                 Err(rv) => return rv,
             }
-        } else if mech_type == CKM_SHA256_RSA_PKCS_PSS {
+        } else if let Some((exp_hash, exp_mgf)) = rsa_pss_mech_params(mech_type) {
             // CK_RSA_PKCS_PSS_PARAMS (wasm32, 12 B): hashAlg, mgf, sLen.
             // §6.4.5 — params are caller-authoritative; hashAlg/mgf must match
             // the mechanism's digest. Absent params keep legacy defaults.
@@ -3030,7 +3065,7 @@ pub fn C_VerifyInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
                 let hash_alg = std::ptr::read_unaligned(pp as *const u32);
                 let mgf = std::ptr::read_unaligned((pp as *const u32).add(1));
                 let s_len = std::ptr::read_unaligned((pp as *const u32).add(2));
-                if hash_alg != CKM_SHA256 || mgf != CKG_MGF1_SHA256 {
+                if hash_alg != exp_hash || mgf != exp_mgf {
                     return CKR_MECHANISM_PARAM_INVALID;
                 }
                 // carried to C_Sign/C_Verify in the ctx vec (LE u32)
@@ -3244,11 +3279,12 @@ pub fn C_Verify(
             },
             // PKCS#11 v3.2: RSA public key material is in CKA_MODULUS + CKA_PUBLIC_EXPONENT.
             // CKA_VALUE is NOT defined for CKO_PUBLIC_KEY/CKK_RSA objects.
-            CKM_SHA256_RSA_PKCS | CKM_SHA256_RSA_PKCS_PSS => {
+            CKM_SHA256_RSA_PKCS | CKM_SHA384_RSA_PKCS | CKM_SHA512_RSA_PKCS
+            | CKM_SHA256_RSA_PKCS_PSS | CKM_SHA384_RSA_PKCS_PSS | CKM_SHA512_RSA_PKCS_PSS => {
                 match get_rsa_public_components(hkey) {
                     Some((n, e)) => {
                         let pss_salt =
-                            if eff_mech == CKM_SHA256_RSA_PKCS_PSS && ctx_bytes.len() >= 4 {
+                            if rsa_pss_mech_params(eff_mech).is_some() && ctx_bytes.len() >= 4 {
                                 Some(u32::from_le_bytes([
                                     ctx_bytes[0],
                                     ctx_bytes[1],
@@ -3587,7 +3623,7 @@ pub fn C_VerifySignatureInit(
                 Ok(v) => v,
                 Err(rv) => return rv,
             }
-        } else if mech_type == CKM_SHA256_RSA_PKCS_PSS {
+        } else if let Some((exp_hash, exp_mgf)) = rsa_pss_mech_params(mech_type) {
             // CK_RSA_PKCS_PSS_PARAMS (wasm32, 12 B): hashAlg, mgf, sLen.
             // §6.4.5 — params are caller-authoritative; hashAlg/mgf must match
             // the mechanism's digest. Absent params keep legacy defaults.
@@ -3598,7 +3634,7 @@ pub fn C_VerifySignatureInit(
                 let hash_alg = std::ptr::read_unaligned(pp as *const u32);
                 let mgf = std::ptr::read_unaligned((pp as *const u32).add(1));
                 let s_len = std::ptr::read_unaligned((pp as *const u32).add(2));
-                if hash_alg != CKM_SHA256 || mgf != CKG_MGF1_SHA256 {
+                if hash_alg != exp_hash || mgf != exp_mgf {
                     return CKR_MECHANISM_PARAM_INVALID;
                 }
                 // carried to C_Sign/C_Verify in the ctx vec (LE u32)

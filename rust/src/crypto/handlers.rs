@@ -769,7 +769,8 @@ pub fn sign_kmac_ext(
 }
 
 /// `pss_salt_len`: caller-supplied CK_RSA_PKCS_PSS_PARAMS.sLen (bytes).
-/// `None` = the documented default (sLen = hash length = 32 for SHA-256).
+/// `None` = the documented default (PKCS#11 v3.2 §6.2: sLen = hash length —
+/// 32/48/64 for SHA-256/384/512; MGF1 uses the same hash as the mechanism).
 pub fn sign_rsa(
     mech: u32,
     sk_bytes: &[u8],
@@ -780,26 +781,36 @@ pub fn sign_rsa(
     use rsa::signature::SignatureEncoding;
     let private_key =
         rsa::RsaPrivateKey::from_pkcs8_der(sk_bytes).map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
-    match mech {
-        CKM_SHA256_RSA_PKCS => {
+    macro_rules! pkcs1v15_sign {
+        ($hash:ty) => {{
             use rsa::pkcs1v15::SigningKey;
             use rsa::signature::Signer;
-            let signing_key = SigningKey::<sha2::Sha256>::new(private_key);
+            let signing_key = SigningKey::<$hash>::new(private_key);
             let sig = signing_key.sign(msg);
             Ok(sig.to_vec())
-        }
-        CKM_SHA256_RSA_PKCS_PSS => {
+        }};
+    }
+    macro_rules! pss_sign {
+        ($hash:ty, $hash_len:expr) => {{
             use rsa::pss::BlindedSigningKey;
             use rsa::signature::RandomizedSigner;
-            let salt_len = pss_salt_len.unwrap_or(32);
+            let salt_len = pss_salt_len.unwrap_or($hash_len);
             let signing_key =
-                BlindedSigningKey::<sha2::Sha256>::new_with_salt_len(private_key, salt_len);
+                BlindedSigningKey::<$hash>::new_with_salt_len(private_key, salt_len);
             let mut rng = rand::rngs::OsRng;
             let sig = signing_key
                 .try_sign_with_rng(&mut rng, msg)
                 .map_err(|_| CKR_FUNCTION_FAILED)?;
             Ok(sig.to_vec())
-        }
+        }};
+    }
+    match mech {
+        CKM_SHA256_RSA_PKCS => pkcs1v15_sign!(sha2::Sha256),
+        CKM_SHA384_RSA_PKCS => pkcs1v15_sign!(sha2::Sha384),
+        CKM_SHA512_RSA_PKCS => pkcs1v15_sign!(sha2::Sha512),
+        CKM_SHA256_RSA_PKCS_PSS => pss_sign!(sha2::Sha256, 32),
+        CKM_SHA384_RSA_PKCS_PSS => pss_sign!(sha2::Sha384, 48),
+        CKM_SHA512_RSA_PKCS_PSS => pss_sign!(sha2::Sha512, 64),
         _ => Err(CKR_MECHANISM_INVALID),
     }
 }
@@ -1030,7 +1041,8 @@ pub fn get_sig_len(mech: u32, hkey: u32) -> u32 {
         CKM_SHA512_HMAC | CKM_SHA3_512_HMAC => 64,
         CKM_KMAC_128 => 32,
         CKM_KMAC_256 => 64,
-        CKM_SHA256_RSA_PKCS | CKM_SHA256_RSA_PKCS_PSS => 512,
+        CKM_SHA256_RSA_PKCS | CKM_SHA384_RSA_PKCS | CKM_SHA512_RSA_PKCS
+        | CKM_SHA256_RSA_PKCS_PSS | CKM_SHA384_RSA_PKCS_PSS | CKM_SHA512_RSA_PKCS_PSS => 512,
         // ECDSA — sig size = 2 × ⌈curve_bits / 8⌉, independent of the hash. The
         // SHA384/SHA3-384 hardcode for 96-byte was wrong for P-256 + P-521 etc;
         // size MUST come from the key's curve, not the hash mechanism.
@@ -1335,31 +1347,33 @@ pub fn verify_rsa(
     let e = rsa::BigUint::from_bytes_be(e_bytes);
     let public_key = rsa::RsaPublicKey::new(n, e).map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
 
-    match mech {
-        CKM_SHA256_RSA_PKCS => {
-            let vk = rsa::pkcs1v15::VerifyingKey::<sha2::Sha256>::new(public_key);
+    macro_rules! pkcs1v15_verify {
+        ($hash:ty) => {{
+            let vk = rsa::pkcs1v15::VerifyingKey::<$hash>::new(public_key);
             let sig =
                 rsa::pkcs1v15::Signature::try_from(sig_bytes).map_err(|_| CKR_SIGNATURE_INVALID)?;
             vk.verify(msg, &sig).map_err(|_| CKR_SIGNATURE_INVALID)
-        }
-        CKM_SHA256_RSA_PKCS_PSS => {
+        }};
+    }
+    macro_rules! pss_verify {
+        ($hash:ty, $hash_len:expr) => {{
             use rsa::traits::PublicKeyParts;
             let sig =
                 rsa::pss::Signature::try_from(sig_bytes).map_err(|_| CKR_SIGNATURE_INVALID)?;
             // RFC 8017 §9.1.2 — EMSA-PSS-VERIFY parameterised by salt
             // length. The `rsa` crate's default verifier pins sLen =
-            // hashLen (32). OASIS conformance signatures use sLen =
+            // hashLen. OASIS conformance signatures use sLen =
             // modulus_octets - hashLen - 2 (the "maximum" form openssl
             // exposes as `rsa_pss_saltlen:auto`). Try both so we accept
             // either convention.
             let mod_octets = public_key.size();
-            const HASH_LEN: usize = 32;
+            let hash_len: usize = $hash_len;
             let candidates: Vec<usize> = match pss_salt_len {
                 Some(s) => vec![s],
-                None => vec![HASH_LEN, mod_octets.saturating_sub(HASH_LEN + 2)],
+                None => vec![hash_len, mod_octets.saturating_sub(hash_len + 2)],
             };
             for salt_len in candidates {
-                let vk = rsa::pss::VerifyingKey::<sha2::Sha256>::new_with_salt_len(
+                let vk = rsa::pss::VerifyingKey::<$hash>::new_with_salt_len(
                     public_key.clone(),
                     salt_len,
                 );
@@ -1368,7 +1382,15 @@ pub fn verify_rsa(
                 }
             }
             Err(CKR_SIGNATURE_INVALID)
-        }
+        }};
+    }
+    match mech {
+        CKM_SHA256_RSA_PKCS => pkcs1v15_verify!(sha2::Sha256),
+        CKM_SHA384_RSA_PKCS => pkcs1v15_verify!(sha2::Sha384),
+        CKM_SHA512_RSA_PKCS => pkcs1v15_verify!(sha2::Sha512),
+        CKM_SHA256_RSA_PKCS_PSS => pss_verify!(sha2::Sha256, 32),
+        CKM_SHA384_RSA_PKCS_PSS => pss_verify!(sha2::Sha384, 48),
+        CKM_SHA512_RSA_PKCS_PSS => pss_verify!(sha2::Sha512, 64),
         _ => Err(CKR_MECHANISM_INVALID),
     }
 }
@@ -1580,5 +1602,176 @@ mod tests {
             &sig_bytes,
         );
         assert_eq!(rv, Ok(()));
+    }
+
+    // ── S6 — RSA SHA-384/512 PKCS#1 v1.5 + PSS cross-validation ────────────
+    //
+    // Fixed RSA-2048 test key + signatures generated with OpenSSL 3.6.2:
+    //   openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048
+    //   openssl dgst -sha384|-sha512 -sign key.pem msg            (v1.5)
+    //   openssl dgst -sha384|-sha512 -sign key.pem \
+    //     -sigopt rsa_padding_mode:pss -sigopt rsa_pss_saltlen:digest msg
+    // msg = "S6 RSA hash-variant KAT message".
+
+    const S6_MSG: &[u8] = b"S6 RSA hash-variant KAT message";
+
+    /// PKCS#8 DER of the RSA-2048 test private key.
+    const S6_KEY_PKCS8_HEX: &str = "\
+308204bc020100300d06092a864886f70d0101010500048204a6308204a20201000282010100d617b3c9aeeb2b114984bffe9776a5f2b47db90d5e9c11a5028f\
+ece637e4d2181fd3be5e59c29e96a179793c7b2c4f1ea6fada330ac47b79930d101db591d612cbfcd6dd1eb1d22b6b4d1de5edd760e0697bef75763a0d5ad469\
+67bcda98e10e6076b91590407fa16965f0648d0233d30f4735e8a7d67e9c8d1b9367ef77fb8d4e4477ed941b4ee05474d932f3bc03a976f2e404500f4d320327\
+e3725f9f2a76f59003ecd7e0cebfc2c35ad445c348a396cc0ff6fcbd7635892f8dd1518ecde00339b623e19dc1ef12ef06515e0bf53cc3415e51751d476904eb\
+1a66cc7904a25cc92328b5edcdaec514d4740a198559244a415622b481130779e6d1b0347ee302030100010282010021c874b4d716c1e184f5df2c07ef8f8928\
+650c5de9377c6b4ae7b62cafd63a36d752dcdfdb8f23e24611ba894a30783db080b60cc6deb153425a95d7f24e5476fbdc667557021d557fa59819afb9c44e35\
+26fae6d0a4a175db3dd4c24ec640013a4491b92edd96a63c50fb298abcb5bbd0d5de525ba5b3adf5704c06e3194e46b85b67e0f638ad33b26f515407973cf163\
+8491466f19e14e4814bb9e5761465c7b03827ea108352029410f1e99fe8a4154b9e30862a94fe8332dc965b56a9f1b893637c16ba571e6b6545ca521b9674644\
+e1540a25dc9c732994a258d16e5a73154487ce9b1b71c0cdbc84800e86314f6514193b3fbd5a60dfe1eba1ac6ea67902818100fd9ebdf767cc9b2115215f9835\
+2edd13f9d2d7c54650272a780a1ff0c0dcf500df71faa6d5e6834d9c3210e3bf3d5242a16f2c3a34a5d0dc62f7e119272d30cc6b8b777dc42174d940c12aef20\
+e9390ff06fe128ae7efc2d0c29563b5285ef76f7613751cb7ea26ed37421acaf49531d9561c4dc2e86920f0a67f5c344ba2c4902818100d81a0164f5beab523c\
+aa226c2550473b6eb1bf0faf7ef321442b4caea946c6ba3d2e2d10b2ae286f08d81a4216d3af8f16d36233bc348b94102c7eff69faeb1c920e186fcb27ad1def\
+50411044602392271afcc51dbc601ba75e63ffd08fcea528a494a3511d7e97acad9a1f0c230aac2ea3371173ef7fe2ec1b19b9d1be59cb028180250ed4e3199f\
+a3eb29933ecc96b8ca44e8f40de31d6b08ce03cc36ee8ebfba6cee39514e9f62973cf7ddb8ea0e3f7f8d8cd919b5478c1300a0d56766ad7ac4ee99a83f45792b\
+0a4fd44e655f9b87787703c2d53b8483b9853b89aeb7ec4ef5b6845f081e4385b5664c2f63dc3fa08f2c7b6f55bc766fe3579f45a17b6ec765410281804bf217\
+bb5b81fec38ffe5aca96f277963378d424b7106e71aa7b6d1f94ee02b940f7116f64dc3fe985ba2cc03d3577e559a84042de49b923f7eb2b56a7f03ee07393f0\
+92995b00441cee9f6f10189967abc6983ece0c7dda3a1fba15153ef4e8a637f0e4d48501105ce745dad3711d3715ccd67593c0ffb8c8315e0127ed35b1028180\
+569e4b3c52670f759b6dadb46bfbd47c96068d6584a06a3e881b991bc6e9840e787f606d65f401c81e51dc44729e8cad40b6d1897a65ef663185185608f8ac47\
+e2f63942788c7560167d92250a8b346fa3e75c46e35c4c0bc817c9071e188e30345cbbb39c05f9c94bcf2b83b6802f67a545e7daeb3f52e6a46ae6caf6d42d9b";
+
+    /// CKA_MODULUS of the test key (e = 65537).
+    const S6_MODULUS_HEX: &str = "\
+d617b3c9aeeb2b114984bffe9776a5f2b47db90d5e9c11a5028fece637e4d2181fd3be5e59c29e96a179793c7b2c4f1ea6fada330ac47b79930d101db591d612\
+cbfcd6dd1eb1d22b6b4d1de5edd760e0697bef75763a0d5ad46967bcda98e10e6076b91590407fa16965f0648d0233d30f4735e8a7d67e9c8d1b9367ef77fb8d\
+4e4477ed941b4ee05474d932f3bc03a976f2e404500f4d320327e3725f9f2a76f59003ecd7e0cebfc2c35ad445c348a396cc0ff6fcbd7635892f8dd1518ecde0\
+0339b623e19dc1ef12ef06515e0bf53cc3415e51751d476904eb1a66cc7904a25cc92328b5edcdaec514d4740a198559244a415622b481130779e6d1b0347ee3";
+
+    /// OpenSSL `dgst -sha384 -sign` (PKCS#1 v1.5 — deterministic).
+    const S6_SIG_SHA384_V15_HEX: &str = "\
+c37657596f2f09f61c9255bf6b5b32dc4c3938c2a850b4ad996c1df4a35c054462723b37e2e79c3c63eeaa5211d184382cd49dd60006864d89ff3e43f1fb5a76\
+e0ff3e8cee25157af90546ff73ef65e0a99b834d1d07b970ac1955df7752bba3992d7dedc8c3bb6745b9d5813a771e2c0951c2405a03b32bbb8a7598d1604ceb\
+99134afc7fa0a08ba99875c21db6b0362d9a383dea39da83610717103e7ff29421ea890448682a9902ba7dfc60e4cbb20774d8414d56dd02711b400179821e0a\
+072f1a4de653ae6a0702ba3b48589508737bb696333925ab0b7377aa605508ca5376b00d30b7c57a8a5153e177fbadbc9d378adb834ca6cfd1bac6d098066a87";
+
+    /// OpenSSL `dgst -sha512 -sign` (PKCS#1 v1.5 — deterministic).
+    const S6_SIG_SHA512_V15_HEX: &str = "\
+ca9163a016c9b58af59d823d49a0115f2831e164c704eb073a91b91e8cfeca2a2305c733870866b82903b7719a80a697f94b569493051bef81ab16d1c46a9ef0\
+f438f295565b741df993c70bf59b4aa6103a7da949a5fc3a04d03db11109071a5d5994a10325038a3b924248c74d2955652950eaab757586623cf90ceaa038eb\
+2410b37e656b24ca61b5118f4e4c4f2e0ef30d8b79e4afdff0dd1d65905d7654d0342254f8127a3aee468495f25688d40dd0df257fc66ed97d3652c983a01f3f\
+7ea7f06d3786dfa959f40ff8cfe4322d299327a0112c5c68167ad60c23f8af982c181a3869ef25744a417e62ea5cad47d17eaaf262109ccc1496a191d89aca7b";
+
+    /// OpenSSL PSS, SHA-384 + MGF1-SHA384, saltlen = digest (48).
+    const S6_SIG_SHA384_PSS_HEX: &str = "\
+56595a5e87afa7a7dc0f2a49f694c40a05c5f7ca2b4bcf854329acc70fff65c097701e9b56583aaf01de2805d404a6fa8586cc1ce47c890dbf0183da1727ec78\
+b9b6737711268ed5b1447aeb62ed24f7dcb399bed5d590f70a2b817ed2fe2785d996311bf6ec2b071dc4f6eae8eefa4e08d7e7b651970a6cdb802fcb10409301\
+5a0616adc7a1955cc2d422fecdbc68cbf13e90bbdb72f399d203b108a64d2ec5310adb83b2191c926d973c27f0a14c9cdecfeb92c3d3656cd29d6e7876cc3edf\
+97be2fcb5d106332bc38b01de6d33960d2c16c234add43a4f5e4be3e1e3b542d4359978a7666b402deda1f3c856529b8a2bc6a7b98727c009d080288cfba0879";
+
+    /// OpenSSL PSS, SHA-512 + MGF1-SHA512, saltlen = digest (64).
+    const S6_SIG_SHA512_PSS_HEX: &str = "\
+c9953b1ca32cca974e11acab07607b6e7ac852aa06395b8da8250c4d883f6b414d2b3e39273dde78b2e3c8ba0ba9b999354134d2f89fcca1fd35362f6135e0ca\
+0d01b9869ba3fe172b206c88b95a785da414b0f36231f9d45e98bb3916eb77c80d22393bb06a5612a6c59fcd29e3412aae292ef88707e7ed4b28858a5055ed23\
+e3c0089c5f7f3293edcbef738e9f39431610289a6e67fececc85a4b0897e8672c6454613a4b7fc0b22edf155265b51ec1c117958fbe4d0b5d1030777d6661de1\
+94ee5ab46aa917b07346a8ae943618cd1303491f9e4f7c989892a305de22f9ea3b3104a978cf7e51c0df04c13377cfbece97f6c531c4fd1bc7d9f32ab9e09f0c";
+
+    fn s6_key() -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+        (
+            decode_hex(S6_KEY_PKCS8_HEX),
+            decode_hex(S6_MODULUS_HEX),
+            vec![0x01, 0x00, 0x01],
+        )
+    }
+
+    /// PKCS#1 v1.5 is deterministic — our signature must byte-match OpenSSL's,
+    /// and OpenSSL's must verify (S6 KAT cross-check).
+    #[test]
+    fn s6_rsa_sha384_pkcs1v15_matches_openssl_kat() {
+        let (sk, n, e) = s6_key();
+        let kat = decode_hex(S6_SIG_SHA384_V15_HEX);
+        let sig = sign_rsa(crate::constants::CKM_SHA384_RSA_PKCS, &sk, S6_MSG, None).unwrap();
+        assert_eq!(sig, kat, "PKCS#1 v1.5 SHA-384 must byte-match OpenSSL");
+        assert_eq!(
+            verify_rsa(crate::constants::CKM_SHA384_RSA_PKCS, &n, &e, S6_MSG, &kat, None),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn s6_rsa_sha512_pkcs1v15_matches_openssl_kat() {
+        let (sk, n, e) = s6_key();
+        let kat = decode_hex(S6_SIG_SHA512_V15_HEX);
+        let sig = sign_rsa(crate::constants::CKM_SHA512_RSA_PKCS, &sk, S6_MSG, None).unwrap();
+        assert_eq!(sig, kat, "PKCS#1 v1.5 SHA-512 must byte-match OpenSSL");
+        assert_eq!(
+            verify_rsa(crate::constants::CKM_SHA512_RSA_PKCS, &n, &e, S6_MSG, &kat, None),
+            Ok(())
+        );
+    }
+
+    /// PSS is randomized — verify the OpenSSL-produced signature (MGF1 same
+    /// hash, salt = hash length per §6.2 defaults), with and without an
+    /// explicit sLen, plus a fresh sign→verify round-trip.
+    #[test]
+    fn s6_rsa_sha384_pss_verifies_openssl_signature_and_round_trips() {
+        let (sk, n, e) = s6_key();
+        let kat = decode_hex(S6_SIG_SHA384_PSS_HEX);
+        let m = crate::constants::CKM_SHA384_RSA_PKCS_PSS;
+        assert_eq!(verify_rsa(m, &n, &e, S6_MSG, &kat, None), Ok(()));
+        assert_eq!(verify_rsa(m, &n, &e, S6_MSG, &kat, Some(48)), Ok(()));
+        let sig = sign_rsa(m, &sk, S6_MSG, None).unwrap();
+        assert_eq!(verify_rsa(m, &n, &e, S6_MSG, &sig, None), Ok(()));
+    }
+
+    #[test]
+    fn s6_rsa_sha512_pss_verifies_openssl_signature_and_round_trips() {
+        let (sk, n, e) = s6_key();
+        let kat = decode_hex(S6_SIG_SHA512_PSS_HEX);
+        let m = crate::constants::CKM_SHA512_RSA_PKCS_PSS;
+        assert_eq!(verify_rsa(m, &n, &e, S6_MSG, &kat, None), Ok(()));
+        assert_eq!(verify_rsa(m, &n, &e, S6_MSG, &kat, Some(64)), Ok(()));
+        let sig = sign_rsa(m, &sk, S6_MSG, None).unwrap();
+        assert_eq!(verify_rsa(m, &n, &e, S6_MSG, &sig, None), Ok(()));
+    }
+
+    /// Cross-mechanism negative: a SHA-384 signature must not verify under
+    /// the SHA-512 mechanism (and vice versa), for both v1.5 and PSS.
+    #[test]
+    fn s6_rsa_cross_hash_verify_fails() {
+        use crate::constants::*;
+        let (sk, n, e) = s6_key();
+        let sig384 = sign_rsa(CKM_SHA384_RSA_PKCS, &sk, S6_MSG, None).unwrap();
+        let sig512 = sign_rsa(CKM_SHA512_RSA_PKCS, &sk, S6_MSG, None).unwrap();
+        assert_eq!(
+            verify_rsa(CKM_SHA512_RSA_PKCS, &n, &e, S6_MSG, &sig384, None),
+            Err(CKR_SIGNATURE_INVALID)
+        );
+        assert_eq!(
+            verify_rsa(CKM_SHA384_RSA_PKCS, &n, &e, S6_MSG, &sig512, None),
+            Err(CKR_SIGNATURE_INVALID)
+        );
+        let pss384 = sign_rsa(CKM_SHA384_RSA_PKCS_PSS, &sk, S6_MSG, None).unwrap();
+        assert_eq!(
+            verify_rsa(CKM_SHA512_RSA_PKCS_PSS, &n, &e, S6_MSG, &pss384, None),
+            Err(CKR_SIGNATURE_INVALID)
+        );
+    }
+
+    /// Tampered message → CKR_SIGNATURE_INVALID for every new mechanism.
+    #[test]
+    fn s6_rsa_tampered_message_fails_all_new_mechs() {
+        use crate::constants::*;
+        let (sk, n, e) = s6_key();
+        for m in [
+            CKM_SHA384_RSA_PKCS,
+            CKM_SHA512_RSA_PKCS,
+            CKM_SHA384_RSA_PKCS_PSS,
+            CKM_SHA512_RSA_PKCS_PSS,
+        ] {
+            let sig = sign_rsa(m, &sk, S6_MSG, None).unwrap();
+            assert_eq!(sig.len(), 256, "RSA-2048 signature is 256 bytes");
+            assert_eq!(
+                verify_rsa(m, &n, &e, b"tampered message", &sig, None),
+                Err(CKR_SIGNATURE_INVALID),
+                "mech {m:#06x}"
+            );
+        }
     }
 }
