@@ -37,6 +37,7 @@ pub use ops::{
     LocateRequest, LocateResponse,
     ModifyAttributeRequest, ModifyAttributeResponse,
     Operation,
+    ProfileInformation, CapabilityInformation,
     QueryFunction, QueryRequest, QueryResponse,
     RevokeRequest, RevokeResponse,
     RngRetrieveRequest, RngRetrieveResponse,

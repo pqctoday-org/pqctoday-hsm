@@ -178,6 +178,33 @@ struct UidSnapshot {
 /// the request to the handler.
 pub const ID_PLACEHOLDER_SENTINEL: &str = "$IDPlaceholder";
 
+/// K3 — the dispatcher's REAL operation surface: exactly the ops
+/// `handle_payload` routes to an implemented handler (one entry per
+/// non-marker `RequestPayload` match arm below — keep the two in
+/// sync; `dispatcher_surface_matches_handled_operations` in tests
+/// and `ops::query::supported_operations()` both consume this).
+/// Any other recognized Operation decodes to
+/// `RequestPayload::Unsupported` and fails its batch item with
+/// `OperationNotSupported (0x05)`.
+pub const HANDLED_OPERATIONS: &[crate::kmip30::Operation] = {
+    use crate::kmip30::Operation as Op;
+    &[
+        Op::Query, Op::Create, Op::CreateKeyPair, Op::Get,
+        Op::GetAttributes, Op::GetAttributeList,
+        Op::AddAttribute, Op::ModifyAttribute, Op::DeleteAttribute,
+        Op::SetAttribute, Op::AdjustAttribute,
+        Op::Locate, Op::Activate, Op::Revoke, Op::Destroy,
+        Op::Encrypt, Op::Decrypt, Op::Sign, Op::SignatureVerify,
+        Op::Interop, Op::Register, Op::Import, Op::Export,
+        Op::Deactivate, Op::Check, Op::Archive, Op::Recover,
+        Op::Obliterate, Op::DiscoverVersions, Op::Ping,
+        Op::MAC, Op::MACVerify, Op::Hash,
+        Op::CreateCredential, Op::CreateGroup, Op::CreateUser,
+        Op::Log, Op::Login, Op::Logout,
+        Op::RNGRetrieve, Op::RNGSeed, Op::Pkcs11,
+    ]
+};
+
 fn dispatch_one(
     deps: &Deps,
     item: RequestBatchItem,
@@ -378,6 +405,17 @@ fn handle_payload(
                 message,
             ));
         }
+        RequestPayload::Unsupported(op) => {
+            // K3 — recognized KMIP 3.0 Operation with no handler:
+            // per-batch-item `OperationFailed / OperationNotSupported
+            // (0x05)` per §9.2, naming the op. The message stays
+            // well-formed so Batch Error Continuation applies and
+            // sibling items still process.
+            return Err(KmipError::failed(
+                crate::error::ResultReason::OperationNotSupported,
+                format!("operation {op:?} is not supported by this server"),
+            ));
+        }
         RequestPayload::RngRetrieve(r) => ResponsePayload::RngRetrieve(rng_retrieve(deps, r, correlation_id)?),
         RequestPayload::RngSeed(r) => ResponsePayload::RngSeed(rng_seed(deps, r, correlation_id)?),
         RequestPayload::Pkcs11(r) => ResponsePayload::Pkcs11(pkcs11(deps, r, correlation_id)?),
@@ -514,6 +552,113 @@ mod tests {
             public_key_attributes: vec![],
         };
         assert_eq!(canonical_create_key_pair_op(&req), "CreateKeyPair:Sign");
+    }
+
+    // ── K3 — recognized-but-unsupported operations ─────────────────────────
+
+    /// A recognized KMIP 3.0 op without a handler (e.g. Certify) fails
+    /// its batch item with `OperationFailed / OperationNotSupported
+    /// (0x05)` and a message naming the op — NOT a whole-message
+    /// `InvalidMessage`.
+    #[test]
+    fn k3_unsupported_op_fails_item_with_operation_not_supported() {
+        let d = deps();
+        for op in [
+            crate::kmip30::Operation::ReKey,
+            crate::kmip30::Operation::Certify,
+            crate::kmip30::Operation::Cancel,
+            crate::kmip30::Operation::DelegatedLogin,
+        ] {
+            let req = one_off_request(RequestPayload::Unsupported(op));
+            let resp = dispatch(&d, req);
+            let bi = &resp.batch_items[0];
+            assert_eq!(bi.operation, Some(op), "Operation echo per §8.2.3");
+            assert_eq!(bi.result_status, ResultStatus::OperationFailed);
+            assert_eq!(
+                bi.result_reason,
+                Some(crate::error::ResultReason::OperationNotSupported.to_wire_value()),
+                "{op:?} must map to OperationNotSupported (0x05)",
+            );
+            let msg = bi.result_message.as_deref().unwrap_or_default();
+            assert!(
+                msg.contains(&format!("{op:?}")),
+                "result message must name the op: {msg:?}",
+            );
+            assert!(bi.payload.is_none());
+        }
+    }
+
+    /// §9.5 Continue — an unsupported-op failure mid-batch does not
+    /// poison the message: the following item still processes.
+    #[test]
+    fn k3_unsupported_op_respects_batch_continue() {
+        let d = deps();
+        let msg = crate::kmip30::RequestMessage {
+            header: crate::kmip30::RequestHeader {
+                batch_error_continuation_option:
+                    Some(crate::kmip30::BatchErrorContinuationOption::Continue),
+                ..crate::kmip30::RequestHeader::v3()
+            },
+            batch_items: vec![
+                RequestBatchItem {
+                    operation: crate::kmip30::Operation::Certify,
+                    payload: RequestPayload::Unsupported(crate::kmip30::Operation::Certify),
+                },
+                RequestBatchItem {
+                    operation: crate::kmip30::Operation::Query,
+                    payload: RequestPayload::Query(QueryRequest { functions: vec![] }),
+                },
+            ],
+        };
+        let resp = dispatch(&d, msg);
+        assert_eq!(resp.batch_items.len(), 2, "Continue keeps processing");
+        assert_eq!(resp.batch_items[0].result_status, ResultStatus::OperationFailed);
+        assert_eq!(resp.batch_items[1].result_status, ResultStatus::Success);
+    }
+
+    /// §9.5 Stop (the default) — the unsupported-op failure halts the
+    /// batch; later items are not processed or returned.
+    #[test]
+    fn k3_unsupported_op_respects_batch_stop() {
+        let d = deps();
+        let msg = crate::kmip30::RequestMessage {
+            header: crate::kmip30::RequestHeader::v3(),
+            batch_items: vec![
+                RequestBatchItem {
+                    operation: crate::kmip30::Operation::Query,
+                    payload: RequestPayload::Query(QueryRequest { functions: vec![] }),
+                },
+                RequestBatchItem {
+                    operation: crate::kmip30::Operation::ReKey,
+                    payload: RequestPayload::Unsupported(crate::kmip30::Operation::ReKey),
+                },
+                RequestBatchItem {
+                    operation: crate::kmip30::Operation::Query,
+                    payload: RequestPayload::Query(QueryRequest { functions: vec![] }),
+                },
+            ],
+        };
+        let resp = dispatch(&d, msg);
+        assert_eq!(resp.batch_items.len(), 2, "Stop drops items after the failure");
+        assert_eq!(resp.batch_items[0].result_status, ResultStatus::Success);
+        assert_eq!(resp.batch_items[1].result_status, ResultStatus::OperationFailed);
+    }
+
+    /// `HANDLED_OPERATIONS` is duplicate-free and every entry routes
+    /// to a real handler (i.e. its `RequestPayload` variant is not the
+    /// `Unsupported` marker — pinned indirectly: each handled op must
+    /// NOT appear in the query module's advertised-unimplemented set).
+    #[test]
+    fn k3_handled_operations_is_consistent() {
+        use std::collections::HashSet;
+        let set: HashSet<_> = HANDLED_OPERATIONS.iter().copied().collect();
+        assert_eq!(set.len(), HANDLED_OPERATIONS.len(), "duplicates in HANDLED_OPERATIONS");
+        for op in crate::ops::query::ADVERTISED_UNIMPLEMENTED_OPERATIONS {
+            assert!(
+                !set.contains(op),
+                "{op:?} is advertised-unimplemented but listed as handled",
+            );
+        }
     }
 
     // ── R7 multi-batch contracts ───────────────────────────────────────────

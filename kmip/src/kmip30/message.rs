@@ -256,6 +256,14 @@ pub enum RequestPayload {
         operation_echo: Option<super::ops::Operation>,
         message: String,
     },
+    /// K3 marker — the Operation codepoint is a published KMIP 3.0
+    /// value (the message is well-formed) but this server has no
+    /// handler for it. The dispatcher fails the batch item with
+    /// `OperationFailed / OperationNotSupported (0x05)` per §9.2,
+    /// so Batch Error Continuation applies and sibling items still
+    /// process. Truly-unknown codepoints keep the
+    /// [`Self::DecodeFailed`] → `InvalidMessage` path.
+    Unsupported(super::ops::Operation),
 }
 
 /// Typed response payload — one variant per supported op.
@@ -358,6 +366,9 @@ impl RequestPayload {
             Self::DecodeFailed { operation_echo, .. } => {
                 operation_echo.unwrap_or(Operation::Ping)
             }
+            // Recognized-but-unsupported — echo the real Operation so
+            // the §8.2.3 response Batch Item names what the client sent.
+            Self::Unsupported(op) => *op,
         }
     }
 
