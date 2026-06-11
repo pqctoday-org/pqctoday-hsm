@@ -64,6 +64,11 @@ lazy_static! {
     pub static ref MESSAGE_ENCRYPT_STATE: GlobalState<HashMap<u32, MsgAeadCtx>> = GlobalState::new(HashMap::new());
     pub static ref MESSAGE_DECRYPT_STATE: GlobalState<HashMap<u32, MsgAeadCtx>> = GlobalState::new(HashMap::new());
     pub static ref DIGEST_STATE: GlobalState<HashMap<u32, DigestCtx>> = GlobalState::new(HashMap::new());
+    /// Sessions whose digest op entered the multi-part phase (C_DigestUpdate
+    /// called). PKCS#11 v3.2 §5.13 convention — the one-shot C_Digest is then
+    /// CKR_OPERATION_ACTIVE until the op finishes. Maintained strictly in
+    /// lockstep with DIGEST_STATE removal/clear sites.
+    pub static ref DIGEST_MULTIPART: GlobalState<std::collections::HashSet<u32>> = GlobalState::new(std::collections::HashSet::new());
     /// C_SignMessageBegin/Next accumulator (message parts between Begin and the final Next).
     pub static ref MESSAGE_SIGN_ACC: GlobalState<HashMap<u32, Vec<u8>>> = GlobalState::new(HashMap::new());
     /// C_VerifyMessageBegin/Next accumulator.

@@ -44,6 +44,11 @@ pub const CKR_BUFFER_TOO_SMALL: u32 = 0x0000_0150;
 pub const CKR_ENCRYPTED_DATA_INVALID: u32 = 0x0000_0040;
 pub const CKR_KEY_SIZE_RANGE: u32 = 0x0000_0062;
 pub const CKR_OPERATION_ACTIVE: u32 = 0x0000_0090;
+// PKCS#11 v3.2 §5.18 wrap/unwrap return codes (values from pkcs11t.h).
+pub const CKR_UNWRAPPING_KEY_HANDLE_INVALID: u32 = 0x0000_00F0;
+pub const CKR_WRAPPED_KEY_INVALID: u32 = 0x0000_0110;
+pub const CKR_WRAPPED_KEY_LEN_RANGE: u32 = 0x0000_0112;
+pub const CKR_WRAPPING_KEY_HANDLE_INVALID: u32 = 0x0000_0113;
 
 // ── PKCS#11 Attribute Types ──────────────────────────────────────────────────
 
