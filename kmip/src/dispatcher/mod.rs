@@ -66,7 +66,48 @@ use crate::kmip30::RequestPayload;
 /// that references the placeholder sentinel
 /// [`ID_PLACEHOLDER_SENTINEL`] gets it substituted on entry.
 pub fn dispatch(deps: &Deps, request: RequestMessage) -> ResponseMessage {
+    dispatch_with_transport_identity(deps, request, None)
+}
+
+/// [`dispatch`] with an optional transport-level identity — the mTLS
+/// client-certificate subject CN the listener extracted after a
+/// successful client-cert handshake (K14). `None` for plain-TLS
+/// connections and in-process callers.
+pub fn dispatch_with_transport_identity(
+    deps: &Deps,
+    request: RequestMessage,
+    transport_identity: Option<crate::server::auth::Identity>,
+) -> ResponseMessage {
     use crate::kmip30::BatchErrorContinuationOption;
+    // K14 — KMIP 3.0 §8.1.2 `Authentication`. When a credential store
+    // is configured, every request must authenticate (header
+    // Credential verified, or mTLS-verified client identity); failure
+    // fails every batch item with `Authentication Not Successful
+    // (0x03)` — same per-item shape as the K4 async-indicator gate.
+    // Open-auth mode (no users configured — the default, which the
+    // hermetic replay harness relies on) skips enforcement entirely.
+    let auth = match authenticate_request(deps, &request.header, transport_identity) {
+        Ok(ctx) => ctx,
+        Err(()) => {
+            let items = request
+                .batch_items
+                .iter()
+                .map(|item| ResponseBatchItem {
+                    operation: Some(item.operation),
+                    result_status: ResultStatus::OperationFailed,
+                    result_reason: Some(
+                        crate::error::ResultReason::AuthenticationNotSuccessful.to_wire_value(),
+                    ),
+                    result_message: Some("authentication not successful".into()),
+                    payload: None,
+                })
+                .collect();
+            return ResponseMessage {
+                header: ResponseHeader::v3_now(),
+                batch_items: items,
+            };
+        }
+    };
     // K4 — KMIP 3.0 §8.1.2 `Asynchronous Indicator`. This server has
     // no asynchronous capability (Query reports `Asynchronous
     // Capability = false`), so a client demanding `Mandatory`
@@ -102,7 +143,7 @@ pub fn dispatch(deps: &Deps, request: RequestMessage) -> ResponseMessage {
     let mut state = BatchState::default();
     let mut items: Vec<ResponseBatchItem> = Vec::with_capacity(request.batch_items.len());
     for item in request.batch_items {
-        let response = dispatch_one(deps, item, &mut state);
+        let response = dispatch_one(deps, item, &mut state, &auth);
         let failed = response.result_status == ResultStatus::OperationFailed;
         items.push(response);
         if failed {
@@ -124,6 +165,45 @@ pub fn dispatch(deps: &Deps, request: RequestMessage) -> ResponseMessage {
         header: ResponseHeader::v3_now(),
         batch_items: items,
     }
+}
+
+/// K14 — KMIP 3.0 §8.1.2 authentication gate.
+///
+/// - **Open-auth** (no configured users — the default): every request
+///   passes; header `Authentication` content is ignored. A transport
+///   identity (mTLS subject CN) is still carried for audit/Login use.
+/// - **Configured auth**: the request authenticates iff
+///   1. any header `Credential` verifies against the config-backed
+///      store ([`ConfigVerifier`]), or
+///   2. no header credential was offered AND the TLS layer verified a
+///      client certificate (mTLS) — its subject CN is the identity.
+///   A credential that was *offered but failed* is rejected even on an
+///   mTLS connection (an explicitly-wrong credential must not silently
+///   fall back).
+fn authenticate_request(
+    deps: &Deps,
+    header: &crate::kmip30::RequestHeader,
+    transport_identity: Option<crate::server::auth::Identity>,
+) -> Result<crate::server::auth::AuthContext, ()> {
+    use crate::server::auth::{AuthContext, ConfigVerifier, CredentialVerifier};
+    if !deps.config.auth_enabled() {
+        // Open-auth — REQUIRED default for the hermetic replay harness.
+        return Ok(AuthContext { identity: transport_identity });
+    }
+    let verifier = ConfigVerifier::new(&deps.config.auth_users);
+    if let Some(identity) = header
+        .authentication
+        .iter()
+        .find_map(|c| verifier.verify(c).ok())
+    {
+        return Ok(AuthContext { identity: Some(identity) });
+    }
+    if header.authentication.is_empty() {
+        if let Some(identity) = transport_identity {
+            return Ok(AuthContext { identity: Some(identity) });
+        }
+    }
+    Err(())
 }
 
 /// KMIP 3.0 §9.5 Undo — restore the store + engine state to its
@@ -237,6 +317,7 @@ fn dispatch_one(
     deps: &Deps,
     item: RequestBatchItem,
     state: &mut BatchState,
+    auth: &crate::server::auth::AuthContext,
 ) -> ResponseBatchItem {
     let correlation_id = Uuid::new_v4().to_string();
     let op = item.operation;
@@ -257,7 +338,7 @@ fn dispatch_one(
         })
         .collect();
 
-    let result = handle_payload(deps, payload, &correlation_id);
+    let result = handle_payload(deps, payload, &correlation_id, auth);
     match result {
         Ok(payload) => {
             // After every successful UID-producing op, refresh the ID
@@ -379,6 +460,7 @@ fn handle_payload(
     deps: &Deps,
     payload: RequestPayload,
     correlation_id: &str,
+    auth: &crate::server::auth::AuthContext,
 ) -> Result<ResponsePayload, KmipError> {
     Ok(match payload {
         RequestPayload::Query(r) => ResponsePayload::Query(query(deps, r, correlation_id)?),
@@ -423,7 +505,7 @@ fn handle_payload(
         RequestPayload::CreateGroup(r) => ResponsePayload::CreateGroup(create_group(deps, r, correlation_id)?),
         RequestPayload::CreateUser(r) => ResponsePayload::CreateUser(create_user(deps, r, correlation_id)?),
         RequestPayload::Log(r) => ResponsePayload::Log(log(deps, r, correlation_id)?),
-        RequestPayload::Login(r) => ResponsePayload::Login(login(deps, r, correlation_id)?),
+        RequestPayload::Login(r) => ResponsePayload::Login(login(deps, r, auth, correlation_id)?),
         RequestPayload::Logout(r) => ResponsePayload::Logout(logout(deps, r, correlation_id)?),
         RequestPayload::DecodeFailed { message, reason, .. } => {
             // R7 Phase 1 — surface per-item decode failures as
@@ -786,6 +868,140 @@ mod tests {
                 "indicator {wire:#x} must process synchronously",
             );
         }
+    }
+
+    // ── K14 — §8.1.2 Authentication enforcement ────────────────────────
+
+    /// Deps with a configured credential store (auth ENFORCED):
+    /// alice / "correct horse".
+    fn k14_deps_with_auth() -> Deps {
+        use crate::server::auth::{sha256_hex, AuthUser};
+        let mut d = deps();
+        d.config.auth_users = vec![AuthUser {
+            username: "alice".into(),
+            password_sha256: sha256_hex("correct horse"),
+        }];
+        d
+    }
+
+    /// §8.1.2 `Authentication` header frame carrying one
+    /// Username-and-Password Credential.
+    fn k14_auth_header(username: &str, password: &str) -> Vec<crate::codec::TtlvFrame> {
+        use crate::codec::{Tag, TtlvFrame, Value};
+        use crate::kmip30::wire::tags;
+        vec![TtlvFrame::new(
+            Tag(tags::Authentication),
+            Value::Structure(vec![TtlvFrame::new(
+                Tag(tags::Credential),
+                Value::Structure(vec![
+                    TtlvFrame::new(Tag(tags::CredentialType), Value::Enumeration(0x01)),
+                    TtlvFrame::new(
+                        Tag(tags::CredentialValue),
+                        Value::Structure(vec![
+                            TtlvFrame::new(Tag(tags::Username), Value::TextString(username.into())),
+                            TtlvFrame::new(Tag(tags::Password), Value::TextString(password.into())),
+                        ]),
+                    ),
+                ]),
+            )]),
+        )]
+    }
+
+    /// K14 — auth configured + request without Authentication: EVERY
+    /// batch item fails with `Authentication Not Successful (0x03)`,
+    /// same per-item shape as the K4 async gate.
+    #[test]
+    fn k14_auth_configured_missing_credential_fails_every_item_0x03() {
+        let d = k14_deps_with_auth();
+        let msg = k4_decode(vec![], vec![k4_query_item(None), k4_query_item(None)]);
+        let resp = dispatch(&d, msg);
+        assert_eq!(resp.batch_items.len(), 2, "every batch item gets a response");
+        for item in &resp.batch_items {
+            assert_eq!(item.result_status, ResultStatus::OperationFailed);
+            assert_eq!(
+                item.result_reason,
+                Some(crate::error::ResultReason::AuthenticationNotSuccessful.to_wire_value()),
+                "must be AuthenticationNotSuccessful (0x03)",
+            );
+            assert_eq!(item.operation, Some(crate::kmip30::Operation::Query), "§8.2.3 echo");
+            assert!(item.payload.is_none());
+        }
+    }
+
+    /// K14 — auth configured + wrong password / unknown user → 0x03.
+    #[test]
+    fn k14_auth_configured_bad_credential_fails_0x03() {
+        for (user, pass) in [("alice", "wrong"), ("mallory", "correct horse")] {
+            let d = k14_deps_with_auth();
+            let msg = k4_decode(k14_auth_header(user, pass), vec![k4_query_item(None)]);
+            let resp = dispatch(&d, msg);
+            assert_eq!(
+                resp.batch_items[0].result_reason,
+                Some(crate::error::ResultReason::AuthenticationNotSuccessful.to_wire_value()),
+                "{user}/{pass} must fail with 0x03",
+            );
+        }
+    }
+
+    /// K14 — auth configured + valid credential → the request
+    /// processes normally.
+    #[test]
+    fn k14_auth_configured_good_credential_succeeds() {
+        let d = k14_deps_with_auth();
+        let msg = k4_decode(k14_auth_header("alice", "correct horse"), vec![k4_query_item(None)]);
+        let resp = dispatch(&d, msg);
+        assert_eq!(resp.batch_items[0].result_status, ResultStatus::Success);
+    }
+
+    /// K14 replay-mode regression — auth NOT configured (the default):
+    /// a credential-free request succeeds, and any Authentication
+    /// content is ignored rather than verified. The hermetic OASIS
+    /// replay harness depends on this default.
+    #[test]
+    fn k14_open_auth_default_passes_credential_free_requests() {
+        let d = deps(); // DepsConfig::default() — no auth users
+        assert!(!d.config.auth_enabled(), "default config must be open-auth");
+        let msg = k4_decode(vec![], vec![k4_query_item(None)]);
+        let resp = dispatch(&d, msg);
+        assert_eq!(resp.batch_items[0].result_status, ResultStatus::Success);
+        // Even a bogus credential is ignored in open-auth mode.
+        let msg = k4_decode(k14_auth_header("mallory", "nope"), vec![k4_query_item(None)]);
+        let resp = dispatch(&d, msg);
+        assert_eq!(resp.batch_items[0].result_status, ResultStatus::Success);
+    }
+
+    /// K14 mTLS — a transport-verified client identity (subject CN)
+    /// satisfies configured auth without a header credential.
+    #[test]
+    fn k14_mtls_transport_identity_satisfies_configured_auth() {
+        use crate::server::auth::Identity;
+        let d = k14_deps_with_auth();
+        let msg = k4_decode(vec![], vec![k4_query_item(None)]);
+        let resp = dispatch_with_transport_identity(
+            &d,
+            msg,
+            Some(Identity { username: "kmip-client".into() }),
+        );
+        assert_eq!(resp.batch_items[0].result_status, ResultStatus::Success);
+    }
+
+    /// K14 — an explicitly-offered-but-invalid header credential is
+    /// rejected even on an mTLS-verified connection (no silent
+    /// fallback past a wrong credential).
+    #[test]
+    fn k14_bad_header_credential_not_rescued_by_transport_identity() {
+        use crate::server::auth::Identity;
+        let d = k14_deps_with_auth();
+        let msg = k4_decode(k14_auth_header("alice", "wrong"), vec![k4_query_item(None)]);
+        let resp = dispatch_with_transport_identity(
+            &d,
+            msg,
+            Some(Identity { username: "kmip-client".into() }),
+        );
+        assert_eq!(
+            resp.batch_items[0].result_reason,
+            Some(crate::error::ResultReason::AuthenticationNotSuccessful.to_wire_value()),
+        );
     }
 
     /// K4 — critical Message Extension under `Continue`: the carrying

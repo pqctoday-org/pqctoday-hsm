@@ -74,6 +74,40 @@ pub struct RequestHeader {
     /// every batch item with `OperationNotSupported`; `Optional` /
     /// `Prohibited` / absent all process synchronously (K4).
     pub asynchronous_indicator: Option<AsynchronousIndicator>,
+    /// KMIP 3.0 §8.1.2 / §9.4 `Authentication` Structure — "Credential,
+    /// MAY be repeated" (spec Table 504). Empty ≡ the Authentication
+    /// field was absent from the header. K14: the dispatcher verifies
+    /// these against the config-backed credential store when auth is
+    /// configured; in open-auth mode (no users configured) they are
+    /// carried but ignored.
+    pub authentication: Vec<Credential>,
+}
+
+/// KMIP 3.0 §9.9 `Credential` — "a structure used for client
+/// identification purposes" carried inside the request header's
+/// `Authentication` structure. Shape per spec Table 509:
+/// `Credential Type` (Enumeration, required) + `Credential Value`
+/// (varies by type, required).
+///
+/// K14 supports verification of `Username and Password` (0x01) only;
+/// every other published Credential Type (Device 0x02, Attestation
+/// 0x03, One Time Password 0x04, Hashed Password 0x05, Ticket 0x06,
+/// Password 0x07, Certificate 0x08 — per
+/// `kmip-spec-3.0-tags-enums.json` `Credential Type`) is decoded and
+/// carried as [`Credential::Unsupported`] so the header decode never
+/// fails on a credential we merely can't verify.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Credential {
+    /// Credential Type `Username and Password` (0x01). Credential
+    /// Value per spec Table 510: `Username` (TextString, required) +
+    /// `Password` (TextString, optional).
+    UsernameAndPassword {
+        username: String,
+        password: Option<String>,
+    },
+    /// Any other Credential Type — tolerated on decode, never
+    /// verifiable, so under configured auth it fails verification.
+    Unsupported { credential_type: u32 },
 }
 
 /// KMIP 3.0 §8.1.2 `Asynchronous Indicator` enum (an Enumeration as of
@@ -140,6 +174,7 @@ impl RequestHeader {
             batch_error_continuation_option: None,
             maximum_response_size: None,
             asynchronous_indicator: None,
+            authentication: Vec::new(),
         }
     }
 }

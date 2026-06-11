@@ -43,6 +43,22 @@ pub struct DepsConfig {
     pub vendor_identification: String,
     /// KMIP `Server Version` for `Query → ServerInformation`.
     pub server_version: String,
+    /// K14 — configured credential store (`--auth-user
+    /// <username>:<sha256hex>`, repeatable). **Empty (the default) ≡
+    /// open-auth mode**: every request passes and the §8.1.2
+    /// `Authentication` header is ignored — required so the hermetic
+    /// OASIS replay harness (credential-free transcripts against the
+    /// default config) is unaffected. Non-empty ⇒ the dispatcher
+    /// enforces §8.1.2 authentication per batch item
+    /// (`Authentication Not Successful (0x03)` on failure).
+    pub auth_users: Vec<crate::server::auth::AuthUser>,
+}
+
+impl DepsConfig {
+    /// `true` when a credential store is configured (auth enforced).
+    pub fn auth_enabled(&self) -> bool {
+        !self.auth_users.is_empty()
+    }
 }
 
 impl Default for DepsConfig {
@@ -52,6 +68,7 @@ impl Default for DepsConfig {
             pkcs11_pin: "1234".into(), // sandbox default; production overrides
             vendor_identification: "pqctoday-hsm".into(),
             server_version: env!("CARGO_PKG_VERSION").into(),
+            auth_users: Vec::new(), // open-auth — replay harness depends on this
         }
     }
 }

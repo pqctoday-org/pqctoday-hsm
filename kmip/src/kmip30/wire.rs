@@ -255,6 +255,11 @@ pub(crate) mod tags {
     /// KMIP 3.0 §6.1.36/37 MAC Data ByteString.
     pub const MacData: u32                = 0x42_00c6;
     /// KMIP 3.0 §6.1.9/34/35 session + auth tags.
+    /// K14 — §8.1.2 / §9.4 `Authentication` header Structure
+    /// (codepoint `0x42000c` per `kmip-spec-3.0-tags-enums.json`;
+    /// `Username` is `0x420099` and `Password` is `0x4200a1` — both
+    /// verified against the same extraction).
+    pub const Authentication: u32         = 0x42_000c;
     pub const CredentialType: u32         = 0x42_0024;
     pub const Credential: u32             = 0x42_0023;
     pub const CredentialValue: u32        = 0x42_0025;
@@ -443,6 +448,7 @@ fn decode_request_header(frame: &TtlvFrame) -> Result<RequestHeader, WireError> 
     let mut becopt: Option<crate::kmip30::BatchErrorContinuationOption> = None;
     let mut max_resp_size: Option<i32> = None;
     let mut async_indicator: Option<crate::kmip30::AsynchronousIndicator> = None;
+    let mut authentication: Vec<crate::kmip30::Credential> = Vec::new();
     for child in children {
         match child.tag.0 {
             tags::ProtocolVersion => {
@@ -486,6 +492,18 @@ fn decode_request_header(frame: &TtlvFrame) -> Result<RequestHeader, WireError> 
                 async_indicator =
                     crate::kmip30::AsynchronousIndicator::from_wire_value(v);
             }
+            // K14 — KMIP 3.0 §8.1.2 / §9.4 `Authentication` Structure:
+            // "Credential, MAY be repeated" (Table 504). Each
+            // Credential decodes per §9.9 (Table 509/510); credential
+            // types other than Username and Password are carried as
+            // `Credential::Unsupported` rather than failing the header.
+            tags::Authentication => {
+                for c in expect_structure(child, "Authentication")? {
+                    if c.tag.0 == tags::Credential {
+                        authentication.push(decode_credential(c)?);
+                    }
+                }
+            }
             // Ignore optional header fields v0.1 doesn't consume.
             _ => {}
         }
@@ -499,7 +517,61 @@ fn decode_request_header(frame: &TtlvFrame) -> Result<RequestHeader, WireError> 
         batch_error_continuation_option: becopt,
         maximum_response_size: max_resp_size,
         asynchronous_indicator: async_indicator,
+        authentication,
     })
+}
+
+/// Decode one §9.9 `Credential` Structure: `Credential Type`
+/// (Enumeration, required) + `Credential Value` (shape varies).
+/// `Username and Password` (0x01) yields the typed variant; any other
+/// published type is tolerated as [`Credential::Unsupported`] so a
+/// client offering e.g. a Device credential gets a clean
+/// `Authentication Not Successful` from the verifier instead of an
+/// `Invalid Message` from the codec.
+fn decode_credential(frame: &TtlvFrame) -> Result<crate::kmip30::Credential, WireError> {
+    use crate::kmip30::Credential;
+    let children = expect_structure(frame, "Credential")?;
+    let mut credential_type: Option<u32> = None;
+    let mut value_frame: Option<&TtlvFrame> = None;
+    for c in children {
+        match c.tag.0 {
+            tags::CredentialType => credential_type = Some(expect_enum(c, "Credential Type")?),
+            tags::CredentialValue => value_frame = Some(c),
+            _ => {}
+        }
+    }
+    let credential_type = credential_type.ok_or(WireError::Missing {
+        tag: tags::CredentialType,
+        name: "Credential Type",
+    })?;
+    // 0x01 = `Username and Password` per the OASIS enums JSON
+    // (`Credential Type` enum).
+    if credential_type != 0x01 {
+        return Ok(Credential::Unsupported { credential_type });
+    }
+    let value_frame = value_frame.ok_or(WireError::Missing {
+        tag: tags::CredentialValue,
+        name: "Credential Value",
+    })?;
+    let mut username: Option<String> = None;
+    let mut password: Option<String> = None;
+    for c in expect_structure(value_frame, "Credential Value")? {
+        match c.tag.0 {
+            tags::Username => {
+                if let Value::TextString(s) = &c.value { username = Some(s.clone()); }
+            }
+            tags::Password => {
+                if let Value::TextString(s) = &c.value { password = Some(s.clone()); }
+            }
+            _ => {}
+        }
+    }
+    // §9.9 Table 510 — Username REQUIRED, Password optional.
+    let username = username.ok_or(WireError::Missing {
+        tag: tags::Username,
+        name: "Username",
+    })?;
+    Ok(Credential::UsernameAndPassword { username, password })
 }
 
 fn decode_request_batch_item(frame: &TtlvFrame) -> Result<RequestBatchItem, WireError> {
@@ -3496,6 +3568,108 @@ mod tests {
         let decoded = decode_request_message(&bytes).expect("decode");
         assert_eq!(decoded.batch_items.len(), 1);
         assert!(matches!(decoded.batch_items[0].payload, RequestPayload::Query(_)));
+    }
+
+    // ── K14 — §8.1.2 Authentication / §9.9 Credential decode ───────────
+
+    /// Build the §8.1.2 `Authentication` header Structure containing
+    /// one Credential frame.
+    fn k14_authentication(credentials: Vec<TtlvFrame>) -> TtlvFrame {
+        TtlvFrame::new(Tag(tags::Authentication), Value::Structure(credentials))
+    }
+
+    fn k14_username_password_credential(username: &str, password: Option<&str>) -> TtlvFrame {
+        let mut value_children = vec![TtlvFrame::new(
+            Tag(tags::Username),
+            Value::TextString(username.into()),
+        )];
+        if let Some(p) = password {
+            value_children.push(TtlvFrame::new(Tag(tags::Password), Value::TextString(p.into())));
+        }
+        TtlvFrame::new(
+            Tag(tags::Credential),
+            Value::Structure(vec![
+                TtlvFrame::new(Tag(tags::CredentialType), Value::Enumeration(0x01)),
+                TtlvFrame::new(Tag(tags::CredentialValue), Value::Structure(value_children)),
+            ]),
+        )
+    }
+
+    /// K14 — a Username-and-Password Credential in the request
+    /// header's Authentication structure round-trips through the
+    /// header decoder (tags verified against
+    /// `kmip-spec-3.0-tags-enums.json`: Authentication 0x42000c,
+    /// Credential 0x420023, Credential Type 0x420024, Credential
+    /// Value 0x420025, Username 0x420099, Password 0x4200a1).
+    #[test]
+    fn k14_username_and_password_credential_decoded_from_header() {
+        let bytes = k4_encode(
+            vec![k14_authentication(vec![k14_username_password_credential(
+                "alice",
+                Some("correct horse"),
+            )])],
+            vec![k4_query_item(None)],
+        );
+        let decoded = decode_request_message(&bytes).expect("decode");
+        assert_eq!(
+            decoded.header.authentication,
+            vec![crate::kmip30::Credential::UsernameAndPassword {
+                username: "alice".into(),
+                password: Some("correct horse".into()),
+            }]
+        );
+        // Absent Authentication → empty (≡ not supplied).
+        let bytes = k4_encode(vec![], vec![k4_query_item(None)]);
+        let decoded = decode_request_message(&bytes).expect("decode");
+        assert!(decoded.header.authentication.is_empty());
+    }
+
+    /// K14 — §9.9 Table 510: Password is optional on the wire; a
+    /// password-less credential still decodes (verification rejects
+    /// it later).
+    #[test]
+    fn k14_passwordless_credential_decodes() {
+        let bytes = k4_encode(
+            vec![k14_authentication(vec![k14_username_password_credential("bob", None)])],
+            vec![k4_query_item(None)],
+        );
+        let decoded = decode_request_message(&bytes).expect("decode");
+        assert_eq!(
+            decoded.header.authentication,
+            vec![crate::kmip30::Credential::UsernameAndPassword {
+                username: "bob".into(),
+                password: None,
+            }]
+        );
+    }
+
+    /// K14 — other published Credential Types (here Device = 0x02) are
+    /// tolerated as `Credential::Unsupported` instead of failing the
+    /// whole header decode.
+    #[test]
+    fn k14_unsupported_credential_type_carried_not_rejected() {
+        let device_credential = TtlvFrame::new(
+            Tag(tags::Credential),
+            Value::Structure(vec![
+                TtlvFrame::new(Tag(tags::CredentialType), Value::Enumeration(0x02)),
+                TtlvFrame::new(
+                    Tag(tags::CredentialValue),
+                    Value::Structure(vec![TtlvFrame::new(
+                        Tag(tags::Password),
+                        Value::TextString("dev-secret".into()),
+                    )]),
+                ),
+            ]),
+        );
+        let bytes = k4_encode(
+            vec![k14_authentication(vec![device_credential])],
+            vec![k4_query_item(None)],
+        );
+        let decoded = decode_request_message(&bytes).expect("decode");
+        assert_eq!(
+            decoded.header.authentication,
+            vec![crate::kmip30::Credential::Unsupported { credential_type: 0x02 }]
+        );
     }
 
     // Suppress unused warnings on intermediates referenced only in
