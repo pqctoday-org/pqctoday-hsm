@@ -252,10 +252,12 @@ pub fn state_name(s: crate::kmip30::State) -> &'static str {
 /// Map a `KmipAlgorithm` to the engine's **standard PKCS#11 v3.2** sign
 /// mechanism — what `softhsmrustv3::native::sign` / `verify` dispatch on.
 ///
-/// Different from [`crate::kmip30::KmipAlgorithm::to_pkcs11_mech`] which
-/// returns the **vendor** codepoints from the `pkcs11-mech-manifest.json`
-/// (e.g. `CKM_PQCTODAY_ML_DSA_SIGN_VERIFY = 0x4036`). The native API
-/// uses the standard codepoints (`CKM_ML_DSA = 0x1D`).
+/// Since K5 retired the pseudo-vendor 0x403x block,
+/// [`crate::kmip30::KmipAlgorithm::to_pkcs11_mech`] returns the same
+/// standard codepoints for the PQC families (`CKM_ML_DSA = 0x1D`, …).
+/// This helper differs in that it consults `CryptographicParameters`
+/// (via [`native_sign_mech_with_params`]) so classical RSA can pick
+/// PKCS1v1.5 vs PSS shim mechanisms.
 pub fn native_sign_mech(a: KmipAlgorithm) -> Option<u32> {
     native_sign_mech_with_params(a, None)
 }

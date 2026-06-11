@@ -60,8 +60,8 @@ Every design choice in the subsystem MUST map cleanly to exactly one of these th
 ║  - C_Encrypt / C_Decrypt                                            ║
 ║  - C_Encapsulate / C_Decapsulate (PKCS#11 v3.2)                     ║
 ║  - C_DeriveKey / C_WrapKey / C_UnwrapKey                            ║
-║  - Vendor mechs 0x4030–0x404F (ML-KEM, ML-DSA, SLH-DSA, HSS,        ║
-║    Falcon, HQC, BIKE, FrodoKEM, Classic McEliece, XMSS)             ║
+║  - Standard v3.2 PQC mechs (CKM_ML_KEM, CKM_ML_DSA, CKM_SLH_DSA     ║
+║    + _KEY_PAIR_GEN; param set via CKA_PARAMETER_SET)                ║
 ╚══════════════════════════════════╤══════════════════════════════════╝
                                    │ FFI: CGO → C++ engine
                                    │  or  cbindgen → Rust engine
@@ -145,10 +145,10 @@ Application:
 │  C_Login(USER, "1234")                                              │
 │  C_FindObjectsInit(template={CKA_ID = <blob from Plane 2>})         │
 │  C_FindObjects() → handle = 12345                                   │
-│  C_SignInit(handle, mech=CKM_PQCTODAY_ML_DSA_SIGN_VERIFY[0x4036])   │
+│  C_SignInit(handle, mech=CKM_ML_DSA[0x001D])                        │
 │  C_Sign(<document-hash>) → signature bytes                          │
 │  C_CloseSession()                                                   │
-│  Audit:  pkcs11_call_id = c-2d4f..., mech = 0x4036                  │
+│  Audit:  pkcs11_call_id = c-2d4f..., mech = 0x001D                  │
 └─────────────────────────────────────────────────────────────────────┘
                                    │
                                    ▼
@@ -172,7 +172,7 @@ Then:
 
 - **Plane 1** loads the new policy. All future signing requests get the composite algorithm choice.
 - **Plane 2** receives `Sign` requests addressed to a composite key UID. KMIP op handler dispatches a dual-mechanism PKCS#11 invocation.
-- **Plane 3** executes both mechanisms (`CKM_PQCTODAY_ML_DSA_SIGN_VERIFY` AND `CKM_EDDSA`), concatenates per LAMPS draft-19.
+- **Plane 3** executes both mechanisms (`CKM_ML_DSA` AND `CKM_EDDSA`), concatenates per LAMPS draft-19.
 
 **The application doesn't change.** That is crypto agility delivered by the three-plane separation.
 
