@@ -85,6 +85,17 @@ pub fn decrypt(deps: &Deps, req: DecryptRequest, correlation_id: &str) -> Result
         }
     }
 
+    // KMIP 3.0 §11 Cryptographic Usage Mask — Decrypt requires the
+    // `Decrypt` bit (0x08). The ML-KEM branch rides the Decrypt op but
+    // performs decapsulation (C_DecapsulateKey); KMIP 3.0 has no
+    // `Decapsulate` usage bit (corpus keys carry `Key Agreement`), so
+    // mask enforcement is skipped on the decap branch (K12, audit K-9).
+    if !is_ml_kem(obj.algorithm) {
+        super::helpers::enforce_usage_mask(
+            deps, correlation_id, "Decrypt", &obj, crate::kmip30::UsageMask::DECRYPT,
+        )?;
+    }
+
     // Plane-1 policy gate.
     let empty: HashMap<String, String> = HashMap::new();
     let algo = canonical_name(obj.algorithm);
@@ -324,6 +335,28 @@ mod tests {
         let p3: Vec<_> = ring.filter_plane(Plane::Pkcs11);
         assert!(p3.iter().any(|e| matches!(&e.event, EventPayload::Pkcs11Call { function, .. } if function == "C_DecapsulateKey")));
         assert!(!p3.iter().any(|e| matches!(&e.event, EventPayload::Pkcs11Call { function, .. } if function == "C_DecryptInit")));
+    }
+
+    /// K12 — §11 Cryptographic Usage Mask: a present mask lacking the
+    /// `Decrypt` bit fails with 0x29. The ML-KEM decap branch is exempt
+    /// (no Decapsulate bit exists; corpus keys carry Key Agreement) —
+    /// pinned by `ml_kem_branch_calls_decapsulate` above succeeding
+    /// with a KEY_AGREEMENT-only mask.
+    #[test]
+    fn decrypt_mask_without_decrypt_bit_is_incompatible() {
+        let (_ring, d) = deps_and_ring();
+        put(&d, "a", KmipAlgorithm::Aes, ObjectType::SymmetricKey, State::Active, UsageMask::ENCRYPT);
+        let err = decrypt(&d, DecryptRequest {
+            uid: "a".into(),
+            data: vec![0; 32],
+            iv: Some(vec![0; 12]),
+            cryptographic_parameters: None,
+            aad: None,
+        }, "c").unwrap_err();
+        assert_eq!(
+            err.result_reason(),
+            crate::error::ResultReason::IncompatibleCryptographicUsageMask
+        );
     }
 
     #[test]

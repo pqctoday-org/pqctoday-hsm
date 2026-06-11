@@ -460,13 +460,20 @@ impl KeyFormatType {
 
 // ── Locate ─────────────────────────────────────────────────────────────────
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct LocateRequest {
     /// Filter attributes — the server returns UIDs whose object satisfies
     /// ALL filters.
     pub attributes: Vec<Attribute>,
     /// `MaximumItems` — cap the response.
     pub maximum_items: Option<u32>,
+    /// `Offset Items` (tag 0x4200d4, KMIP 3.0 §6.1.32) — number of
+    /// matching identifiers to skip before filling the response page.
+    pub offset_items: Option<u32>,
+    /// `Storage Status Mask` (tag 0x42008e, §6.1.32 / §12.3 Table 608) —
+    /// bit mask of storage classes to search: On-line 0x01, Archival
+    /// 0x02, Destroyed 0x04. Omitted ⇒ On-line only.
+    pub storage_status_mask: Option<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq)]

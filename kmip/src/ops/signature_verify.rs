@@ -89,6 +89,12 @@ pub fn signature_verify(
         }
     }
 
+    // KMIP 3.0 §11 Cryptographic Usage Mask — Signature Verify requires
+    // the `Verify` bit (0x02); missing → 0x29 (K12, audit K-9).
+    super::helpers::enforce_usage_mask(
+        deps, correlation_id, "SignatureVerify", &obj, crate::kmip30::UsageMask::VERIFY,
+    )?;
+
     // Plane-1 policy gate.
     let empty: HashMap<String, String> = HashMap::new();
     let algo = canonical_name(obj.algorithm);
@@ -260,6 +266,34 @@ mod tests {
             key_format_type: None,
         ..ObjectRecord::default()
 }).unwrap();
+    }
+
+    /// K12 — §11 Cryptographic Usage Mask: a present mask lacking the
+    /// `Verify` bit (e.g. Sign-only) fails with 0x29. Positive case is
+    /// pinned by `verify_matching_signature_returns_valid` (mask =
+    /// SIGN | VERIFY).
+    #[test]
+    fn verify_mask_without_verify_bit_is_incompatible() {
+        let d = deps_with();
+        d.store.put(ObjectRecord {
+            uid: "u".into(),
+            object_type: ObjectType::PublicKey,
+            algorithm: KmipAlgorithm::MlDsa87,
+            usage_mask: UsageMask::SIGN,
+            state: State::Active,
+            activation_date: Some(OffsetDateTime::UNIX_EPOCH),
+            ..ObjectRecord::default()
+        }).unwrap();
+        let err = signature_verify(&d, SignatureVerifyRequest {
+            uid: "u".into(),
+            data: b"x".to_vec(),
+            signature: vec![0u8; 32],
+            cryptographic_parameters: None,
+        }, "c").unwrap_err();
+        assert_eq!(
+            err.result_reason(),
+            crate::error::ResultReason::IncompatibleCryptographicUsageMask
+        );
     }
 
     #[test]

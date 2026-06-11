@@ -63,8 +63,38 @@ pub fn locate(deps: &Deps, req: LocateRequest, correlation_id: &str) -> Result<L
         "CKR_OK",
     );
 
+    // KMIP 3.0 §6.1.32 `Storage Status Mask` (§12.3 Table 608: On-line
+    // 0x01, Archival 0x02, Destroyed 0x04). Every object on this server
+    // is On-line storage: Archive (§6.1.4) is acknowledged but never
+    // moves bytes, so nothing is ever in Archival storage. A mask that
+    // EXCLUDES the On-line bit therefore matches nothing → empty
+    // response. A mask including On-line — or an absent mask, which the
+    // spec defaults to On-line-only — searches normally.
+    const STORAGE_STATUS_ONLINE: u32 = 0x0000_0001;
+    if let Some(mask) = req.storage_status_mask {
+        if mask & STORAGE_STATUS_ONLINE == 0 {
+            emit_pkcs11(deps, correlation_id, "C_FindObjectsFinal", None, 0, "CKR_OK");
+            emit_success(deps, correlation_id, "Locate");
+            return Ok(LocateResponse { uids: Vec::new() });
+        }
+    }
+
     // Plane-2: store search.
     let mut matches = deps.store.find(&|r| filters.matches(r))?;
+
+    // Paging needs a stable total order — `MemoryStore::find` iterates a
+    // HashMap, so without a sort `Offset Items` would skip a *random* N.
+    // Sort on (Initial Date, UID): creation order with a deterministic
+    // tie-break.
+    matches.sort_by(|a, b| (a.initial_date, &a.uid).cmp(&(b.initial_date, &b.uid)));
+
+    // KMIP 3.0 §6.1.32 `Offset Items` — skip the first N matches, THEN
+    // cap with `Maximum Items` (offset selects the page start, max the
+    // page size).
+    if let Some(off) = req.offset_items {
+        let off = (off as usize).min(matches.len());
+        matches = matches.split_off(off);
+    }
 
     // Apply MaximumItems cap.
     if let Some(max) = req.maximum_items {
@@ -232,6 +262,7 @@ mod tests {
         let r = locate(&d, LocateRequest {
             attributes: vec![Attribute::CryptographicAlgorithm(KmipAlgorithm::MlDsa87)],
             maximum_items: None,
+            ..Default::default()
         }, "c").unwrap();
         assert_eq!(r.uids, vec!["b"]);
     }
@@ -244,6 +275,7 @@ mod tests {
         let r = locate(&d, LocateRequest {
             attributes: vec![Attribute::State(State::Active)],
             maximum_items: None,
+            ..Default::default()
         }, "c").unwrap();
         assert_eq!(r.uids, vec!["a"]);
     }
@@ -260,7 +292,8 @@ mod tests {
                 Attribute::State(State::Active),
             ],
             maximum_items: None,
-        }, "corr").unwrap();
+            ..Default::default()
+        }, "c").unwrap();
         assert_eq!(r.uids, vec!["a"]);
     }
 
@@ -273,7 +306,56 @@ mod tests {
         let r = locate(&d, LocateRequest {
             attributes: vec![],
             maximum_items: Some(2),
+            ..Default::default()
         }, "c").unwrap();
         assert_eq!(r.uids.len(), 2);
+    }
+
+    /// K12 — §6.1.32 `Offset Items` skips N matches before the
+    /// `Maximum Items` cap: 3 objects, offset 1, max 1 → exactly the
+    /// second object in the stable (InitialDate, UID) order.
+    #[test]
+    fn locate_offset_items_skips_then_caps() {
+        let d = deps_with();
+        put(&d, "a", KmipAlgorithm::Aes, ObjectType::SymmetricKey, State::Active);
+        put(&d, "b", KmipAlgorithm::Aes, ObjectType::SymmetricKey, State::Active);
+        put(&d, "c", KmipAlgorithm::Aes, ObjectType::SymmetricKey, State::Active);
+        let r = locate(&d, LocateRequest {
+            offset_items: Some(1),
+            maximum_items: Some(1),
+            ..Default::default()
+        }, "c").unwrap();
+        assert_eq!(r.uids, vec!["b"]);
+        // Offset past the end → empty, not a panic.
+        let r = locate(&d, LocateRequest {
+            offset_items: Some(9),
+            ..Default::default()
+        }, "c").unwrap();
+        assert!(r.uids.is_empty());
+    }
+
+    /// K12 — §6.1.32 `Storage Status Mask`: all objects are On-line
+    /// (Archive is a no-op), so a mask without the On-line bit (0x01)
+    /// matches nothing; a mask including it — or no mask — searches
+    /// normally.
+    #[test]
+    fn locate_storage_status_mask_filters_storage_classes() {
+        let d = deps_with();
+        put(&d, "a", KmipAlgorithm::Aes, ObjectType::SymmetricKey, State::Active);
+        // Archival-only (0x02) → empty.
+        let r = locate(&d, LocateRequest {
+            storage_status_mask: Some(0x02),
+            ..Default::default()
+        }, "c").unwrap();
+        assert!(r.uids.is_empty());
+        // On-line (0x01) → results.
+        let r = locate(&d, LocateRequest {
+            storage_status_mask: Some(0x01),
+            ..Default::default()
+        }, "c").unwrap();
+        assert_eq!(r.uids, vec!["a"]);
+        // Absent → spec default is On-line-only → results.
+        let r = locate(&d, LocateRequest::default(), "c").unwrap();
+        assert_eq!(r.uids, vec!["a"]);
     }
 }

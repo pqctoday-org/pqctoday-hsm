@@ -91,6 +91,10 @@ pub(crate) mod tags {
     pub const WrappingMethod: u32           = 0x42_009e;
     pub const EncryptionKeyInformation: u32 = 0x42_0036;
     pub const MaximumItems: u32           = 0x42_004f;
+    // KMIP 3.0 §6.1.32 Locate paging — values verified against
+    // kmip-spec-3.0-tags-enums.json.
+    pub const OffsetItems: u32            = 0x42_00d4;
+    pub const StorageStatusMask: u32      = 0x42_008e;
     pub const ObjectType: u32             = 0x42_0057;
     pub const Operation: u32              = 0x42_005c;
     pub const ProtocolVersion: u32        = 0x42_0069;
@@ -1096,6 +1100,8 @@ fn encode_get_resp(r: &GetResponse) -> Vec<TtlvFrame> {
 fn decode_locate_req(children: &[TtlvFrame]) -> Result<LocateRequest, WireError> {
     let mut attributes = Vec::new();
     let mut maximum_items = None;
+    let mut offset_items = None;
+    let mut storage_status_mask = None;
     for c in children {
         match c.tag.0 {
             // KMIP 3.0 §6.1.32: Locate request body carries an `Attributes`
@@ -1109,10 +1115,18 @@ fn decode_locate_req(children: &[TtlvFrame]) -> Result<LocateRequest, WireError>
                 }
             }
             tags::MaximumItems => maximum_items = Some(expect_integer(c, "Maximum Items")? as u32),
+            // KMIP 3.0 §6.1.32 paging — `Offset Items` (0x4200d4) skips
+            // the first N matches; `Storage Status Mask` (0x42008e)
+            // selects storage classes (§12.3: On-line 0x1 / Archival
+            // 0x2 / Destroyed 0x4).
+            tags::OffsetItems => offset_items = Some(expect_integer(c, "Offset Items")? as u32),
+            tags::StorageStatusMask => {
+                storage_status_mask = Some(expect_integer(c, "Storage Status Mask")? as u32)
+            }
             _ => {}
         }
     }
-    Ok(LocateRequest { attributes, maximum_items })
+    Ok(LocateRequest { attributes, maximum_items, offset_items, storage_status_mask })
 }
 
 fn encode_locate_resp(r: &LocateResponse) -> Vec<TtlvFrame> {

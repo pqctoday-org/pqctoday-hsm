@@ -6,9 +6,50 @@ use time::OffsetDateTime;
 
 use crate::auditlog::{AuditEvent, EventPayload, KmipOpResult, Plane};
 use crate::error::KmipError;
-use crate::kmip30::KmipAlgorithm;
+use crate::kmip30::{KmipAlgorithm, UsageMask};
 
 use super::deps::Deps;
+
+/// KMIP 3.0 §11 `Cryptographic Usage Mask` enforcement (K12, audit K-9).
+///
+/// Before engine dispatch, every crypto op verifies the target object's
+/// usage mask carries the bit the operation requires (spec Table 606:
+/// Sign 0x01, Verify 0x02, Encrypt 0x04, Decrypt 0x08, MAC Generate
+/// 0x80, MAC Verify 0x100). A present-but-missing bit fails with
+/// `Incompatible Cryptographic Usage Mask` (0x29) — same reason code
+/// `Check` (§6.1.7) pins for its mask comparison.
+///
+/// An **empty** mask is treated as unrestricted: Create / Register /
+/// CreateKeyPair default to `UsageMask::empty()` when the client omits
+/// the attribute (`usage_mask.unwrap_or_else(UsageMask::empty)`), and
+/// the store cannot distinguish "absent" from "all bits clear" — both
+/// persist as 0. Enforcing against 0 would brick every object created
+/// without an explicit mask, so absence means "no restriction recorded",
+/// mirroring how `Check` only tests the bits a client asks about.
+pub fn enforce_usage_mask(
+    deps: &Deps,
+    correlation_id: &str,
+    op: &str,
+    obj: &crate::store::ObjectRecord,
+    required: UsageMask,
+) -> crate::error::Result<()> {
+    if obj.usage_mask.is_empty() || obj.usage_mask.contains(required) {
+        return Ok(());
+    }
+    Err(fail_err(
+        deps,
+        correlation_id,
+        op,
+        KmipError::failed(
+            crate::error::ResultReason::IncompatibleCryptographicUsageMask,
+            format!(
+                "{op}: object's Cryptographic Usage Mask {:#x} lacks required bit {:#x}",
+                obj.usage_mask.bits(),
+                required.bits()
+            ),
+        ),
+    ))
+}
 
 /// Emit a `KmipResponseSent { OperationFailed }` audit event and return
 /// the error unchanged. Every handler's error path goes through this so

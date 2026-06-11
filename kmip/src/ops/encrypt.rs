@@ -94,6 +94,17 @@ pub fn encrypt(deps: &Deps, req: EncryptRequest, correlation_id: &str) -> Result
         }
     }
 
+    // KMIP 3.0 §11 Cryptographic Usage Mask — Encrypt requires the
+    // `Encrypt` bit (0x04). The ML-KEM branch rides the Encrypt op but
+    // performs encapsulation (C_EncapsulateKey); KMIP 3.0 has no
+    // `Encapsulate` usage bit (corpus keys carry `Key Agreement`), so
+    // mask enforcement is skipped on the encap branch (K12, audit K-9).
+    if !is_ml_kem(obj.algorithm) {
+        super::helpers::enforce_usage_mask(
+            deps, correlation_id, "Encrypt", &obj, crate::kmip30::UsageMask::ENCRYPT,
+        )?;
+    }
+
     // Plane-1 policy gate. The dispatcher would canonicalise the op to
     // "Encapsulate" for ML-KEM in a future revision so policies can
     // differentiate; v0.1 passes plain "Encrypt".
@@ -702,6 +713,36 @@ mod tests {
         let p3: Vec<_> = ring.filter_plane(Plane::Pkcs11);
         assert!(p3.iter().any(|e| matches!(&e.event, EventPayload::Pkcs11Call { function, .. } if function == "C_EncryptInit")));
         assert!(p3.iter().any(|e| matches!(&e.event, EventPayload::Pkcs11Call { function, .. } if function == "C_Encrypt")));
+    }
+
+    /// K12 — §11 Cryptographic Usage Mask: a present mask lacking the
+    /// `Encrypt` bit fails with 0x29 before any engine dispatch.
+    #[test]
+    fn encrypt_mask_without_encrypt_bit_is_incompatible() {
+        let (_ring, d) = deps_and_ring();
+        put(&d, "a", KmipAlgorithm::Aes, ObjectType::SymmetricKey, State::Active, UsageMask::DECRYPT);
+        let err = encrypt(&d, EncryptRequest {
+            uid: "a".into(),
+            data: b"x".to_vec(),
+            iv: Some(vec![0u8; 12]),
+            ..Default::default()
+        }, "c").unwrap_err();
+        assert_eq!(err.result_reason(), ResultReason::IncompatibleCryptographicUsageMask);
+    }
+
+    /// K12 — an EMPTY mask means the client never supplied one at
+    /// Create/Register (store can't distinguish absent from 0), so it
+    /// is treated as unrestricted, not as all-bits-denied.
+    #[test]
+    fn encrypt_empty_mask_is_unrestricted() {
+        let (_ring, d) = deps_and_ring();
+        put(&d, "a", KmipAlgorithm::Aes, ObjectType::SymmetricKey, State::Active, UsageMask::empty());
+        encrypt(&d, EncryptRequest {
+            uid: "a".into(),
+            data: b"x".to_vec(),
+            iv: Some(vec![0u8; 12]),
+            ..Default::default()
+        }, "c").expect("empty mask must not block Encrypt");
     }
 
     #[test]
