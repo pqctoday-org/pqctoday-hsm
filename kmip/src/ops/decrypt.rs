@@ -33,7 +33,10 @@ use crate::kmip30::{DecryptRequest, DecryptResponse, KmipAlgorithm, PkcsOp, Stat
 use crate::policy::{Decision, PolicyRequest};
 
 use super::deps::Deps;
-use super::helpers::{canonical_name, emit_pkcs11, emit_request, emit_success, fail_err, state_name};
+use super::helpers::{
+    canonical_name, emit_pkcs11, emit_pkcs11_result, emit_request, emit_success, fail_err,
+    state_name,
+};
 
 pub fn decrypt(deps: &Deps, req: DecryptRequest, correlation_id: &str) -> Result<DecryptResponse> {
     let started = OffsetDateTime::now_utc();
@@ -142,8 +145,8 @@ fn decrypt_ml_kem(
             format!("ML-KEM {:?} has no Decrypt mechanism", obj.algorithm),
         )
     })?;
-    emit_pkcs11(deps, correlation_id, "C_DecapsulateKey", Some(mech), 0, "CKR_OK");
 
+    // K15 — the Plane-3 record is emitted after the call with its real rv.
     let shared_secret = match deps.engine_session {
         Some(session) => {
             let handle = softhsmrustv3::native::find_by_cka_id(session, &obj.pkcs11_cka_id)
@@ -155,10 +158,14 @@ fn decrypt_ml_kem(
                     format!("no KEM mechanism for {:?}", obj.algorithm),
                 )
             })?;
-            softhsmrustv3::native::decapsulate(session, handle, native_mech, &req.data)
-                .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Decap"))?
+            let r = softhsmrustv3::native::decapsulate(session, handle, native_mech, &req.data);
+            emit_pkcs11_result(deps, correlation_id, "native::decapsulate", Some(native_mech), &r);
+            r.map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Decap"))?
         }
-        None => placeholder_bytes(&req.uid, &req.data, b"ss", 32),
+        None => {
+            emit_pkcs11(deps, correlation_id, "soft::placeholder_decapsulate", Some(mech), 0, "CKR_OK");
+            placeholder_bytes(&req.uid, &req.data, b"ss", 32)
+        }
     };
     Ok(DecryptResponse { uid: req.uid.clone(), data: shared_secret })
 }
@@ -192,8 +199,6 @@ fn decrypt_classical(
             )
         })?,
     };
-    emit_pkcs11(deps, correlation_id, "C_DecryptInit", Some(mech), 0, "CKR_OK");
-    emit_pkcs11(deps, correlation_id, "C_Decrypt", Some(mech), 0, "CKR_OK");
 
     // KMIP 3.0 §6.1.21 + §11 — IV presence/size mismatches surface
     // as `InvalidMessage` per spec (mirror of the Encrypt path).
@@ -223,8 +228,10 @@ fn decrypt_classical(
     let tag_len = effective_cp
         .and_then(|c| c.tag_length)
         .map(|n| n as usize);
+    // K15 — the Plane-3 audit record is emitted after each call with
+    // the call's real rv, naming the actual entry point that ran.
     let mut plaintext = if let Some(key_bytes) = &obj.key_material {
-        softhsmrustv3::native::decrypt_with_key_bytes(
+        let r = softhsmrustv3::native::decrypt_with_key_bytes(
             key_bytes,
             mech,
             &req.data,
@@ -232,15 +239,19 @@ fn decrypt_classical(
             oaep.as_ref(),
             aad,
             tag_len,
-        )
-        .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Decrypt"))?
+        );
+        emit_pkcs11_result(deps, correlation_id, "native::decrypt_with_key_bytes", Some(mech), &r);
+        r.map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Decrypt"))?
     } else if let Some(session) = deps.engine_session {
         let handle = softhsmrustv3::native::find_by_cka_id(session, &obj.pkcs11_cka_id)
             .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Decrypt:find"))?
             .ok_or_else(|| KmipError::object_not_found(&req.uid))?;
-        softhsmrustv3::native::decrypt(session, handle, mech, &req.data, req.iv.as_deref())
-            .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Decrypt"))?
+        let r =
+            softhsmrustv3::native::decrypt(session, handle, mech, &req.data, req.iv.as_deref());
+        emit_pkcs11_result(deps, correlation_id, "native::decrypt", Some(mech), &r);
+        r.map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Decrypt"))?
     } else {
+        emit_pkcs11(deps, correlation_id, "soft::placeholder_decrypt", Some(mech), 0, "CKR_OK");
         let mut input = req.iv.clone().unwrap_or_default();
         input.extend_from_slice(&req.data);
         placeholder_bytes(&req.uid, &input, b"dec", input.len().max(16))
@@ -332,9 +343,11 @@ mod tests {
         put(&d, "k", KmipAlgorithm::MlKem1024, ObjectType::PrivateKey, State::Active, UsageMask::KEY_AGREEMENT);
         let r = decrypt(&d, DecryptRequest { uid: "k".into(), data: vec![0u8; 1568], iv: None , cryptographic_parameters: None, aad: None}, "c").unwrap();
         assert_eq!(r.data.len(), 32, "shared secret length");
+        // K15 — no engine session: the audit names the soft decap
+        // fallback that actually ran, not the classical decrypt path.
         let p3: Vec<_> = ring.filter_plane(Plane::Pkcs11);
-        assert!(p3.iter().any(|e| matches!(&e.event, EventPayload::Pkcs11Call { function, .. } if function == "C_DecapsulateKey")));
-        assert!(!p3.iter().any(|e| matches!(&e.event, EventPayload::Pkcs11Call { function, .. } if function == "C_DecryptInit")));
+        assert!(p3.iter().any(|e| matches!(&e.event, EventPayload::Pkcs11Call { function, .. } if function == "soft::placeholder_decapsulate")));
+        assert!(!p3.iter().any(|e| matches!(&e.event, EventPayload::Pkcs11Call { function, .. } if function == "soft::placeholder_decrypt")));
     }
 
     /// K12 — §11 Cryptographic Usage Mask: a present mask lacking the
@@ -360,13 +373,13 @@ mod tests {
     }
 
     #[test]
-    fn classical_branch_calls_decrypt_init_then_decrypt() {
+    fn classical_branch_audits_soft_decrypt_path() {
         let (ring, d) = deps_and_ring();
         put(&d, "a", KmipAlgorithm::Aes, ObjectType::SymmetricKey, State::Active, UsageMask::DECRYPT);
         let _r = decrypt(&d, DecryptRequest { uid: "a".into(), data: vec![0; 32], iv: Some(vec![0; 12]) , cryptographic_parameters: None, aad: None}, "c").unwrap();
+        // K15 — no key material + no session: soft fallback is named.
         let p3: Vec<_> = ring.filter_plane(Plane::Pkcs11);
-        assert!(p3.iter().any(|e| matches!(&e.event, EventPayload::Pkcs11Call { function, .. } if function == "C_DecryptInit")));
-        assert!(p3.iter().any(|e| matches!(&e.event, EventPayload::Pkcs11Call { function, .. } if function == "C_Decrypt")));
+        assert!(p3.iter().any(|e| matches!(&e.event, EventPayload::Pkcs11Call { function, .. } if function == "soft::placeholder_decrypt")));
     }
 
     #[test]

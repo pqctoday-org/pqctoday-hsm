@@ -33,7 +33,10 @@ use crate::kmip30::{PkcsOp, SignatureValidity, SignatureVerifyRequest, Signature
 use crate::policy::{Decision, PolicyRequest};
 
 use super::deps::Deps;
-use super::helpers::{canonical_name, emit_pkcs11, emit_request, emit_success, fail_err, state_name};
+use super::helpers::{
+    canonical_name, emit_pkcs11, emit_pkcs11_result, emit_request, emit_success, fail_err,
+    state_name,
+};
 
 pub fn signature_verify(
     deps: &Deps,
@@ -117,17 +120,17 @@ pub fn signature_verify(
         ));
     }
 
-    // Plane-3: emit (Phase 7 wires C_VerifyInit + C_Verify).
     let mech = obj.algorithm.to_pkcs11_mech(PkcsOp::SignVerify).ok_or_else(|| {
         KmipError::failed(
             ResultReason::OperationNotSupported,
             format!("algorithm {:?} has no Verify mechanism", obj.algorithm),
         )
     })?;
-    emit_pkcs11(deps, correlation_id, "C_VerifyInit", Some(mech), 0, "CKR_OK");
 
-    // Phase 7b: real bridge call when a session is wired. Falls back
-    // to the SHA-256 stamp comparison for unit tests.
+    // Plane-3: real bridge call when a session is wired. K15 — the
+    // audit record is emitted after `native::verify` returns with the
+    // call's real rv. Falls back to the SHA-256 stamp comparison
+    // (audited as `soft::placeholder_verify`) for unit tests.
     let validity = match deps.engine_session {
         Some(session) => {
             let handle =
@@ -164,14 +167,11 @@ pub fn signature_verify(
                     if e.result_reason()
                         == ResultReason::UnsupportedCryptographicParameters =>
                 {
-                    emit_pkcs11(
-                        deps,
-                        correlation_id,
-                        "C_Verify",
-                        Some(mech),
-                        0,
-                        "CKR_SIGNATURE_INVALID",
-                    );
+                    // No engine call runs on this path — the pinned
+                    // hash/padding has no engine mechanism, so the
+                    // verify cannot succeed and the spec shape is
+                    // Success + Invalid. K15: no Pkcs11Call record is
+                    // fabricated for a call that never happened.
                     emit_success(deps, correlation_id, "SignatureVerify");
                     return Ok(SignatureVerifyResponse {
                         uid: req.uid,
@@ -182,13 +182,15 @@ pub fn signature_verify(
             };
             // native::verify returns Ok(true)/Ok(false) for the KMIP
             // ValidityIndicator model — exactly what we need.
-            match softhsmrustv3::native::verify(
+            let r = softhsmrustv3::native::verify(
                 session,
                 handle,
                 native_mech,
                 &req.data,
                 &req.signature,
-            ) {
+            );
+            emit_pkcs11_result(deps, correlation_id, "native::verify", Some(native_mech), &r);
+            match r {
                 Ok(true) => SignatureValidity::Valid,
                 Ok(false) => SignatureValidity::Invalid,
                 Err(rv) => return Err(super::helpers::ck_rv_to_kmip_error(rv, "Verify")),
@@ -196,6 +198,7 @@ pub fn signature_verify(
         }
         None => {
             // Unit-test fallback — re-compute the SHA-256 stamp.
+            emit_pkcs11(deps, correlation_id, "soft::placeholder_verify", Some(mech), 0, "CKR_OK");
             let expected = placeholder_signature(&req.uid, &req.data);
             if req.signature == expected {
                 SignatureValidity::Valid
@@ -204,7 +207,6 @@ pub fn signature_verify(
             }
         }
     };
-    emit_pkcs11(deps, correlation_id, "C_Verify", Some(mech), 0, "CKR_OK");
     emit_success(deps, correlation_id, "SignatureVerify");
 
     Ok(SignatureVerifyResponse { uid: req.uid, validity })

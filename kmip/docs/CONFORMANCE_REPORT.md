@@ -175,7 +175,7 @@ tracked as compliance-audit finding K-10
 |---|---|
 | Item 9 client-to-server ops: Get Constraints (0x38), Get Usage Allocation (0x11), Set Defaults (0x36), Set Endpoint Role (0x32) | Not implemented — invoking them returns `Operation Not Supported (0x05)` (decoded, honestly rejected) |
 | Item 10 server-to-client ops: Discover Versions, Notify, Put, Query, Set Endpoint Role | No server-initiated channel exists; the server is strictly request-response |
-| Item 12.a Authentication message protocol | See fix-plan K14 status below — when implemented, enforcement is config-gated; default config is open-auth so the hermetic replay harness runs unauthenticated |
+| Item 12.a Authentication message protocol | Implemented (K14): credential decode + config-gated verification + mTLS; default config is open-auth so the hermetic replay harness runs unauthenticated |
 
 The corpus never invokes any of these as requests, which is why 92/92
 and this delta coexist. If Baseline Server profile conformance becomes

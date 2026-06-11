@@ -32,7 +32,10 @@ use crate::kmip30::{EncryptRequest, EncryptResponse, KmipAlgorithm, PkcsOp, Stat
 use crate::policy::{Decision, PolicyRequest};
 
 use super::deps::Deps;
-use super::helpers::{canonical_name, emit_pkcs11, emit_request, emit_success, fail_err, state_name};
+use super::helpers::{
+    canonical_name, emit_pkcs11, emit_pkcs11_result, emit_request, emit_success, fail_err,
+    state_name,
+};
 
 pub fn encrypt(deps: &Deps, req: EncryptRequest, correlation_id: &str) -> Result<EncryptResponse> {
     let started = OffsetDateTime::now_utc();
@@ -242,11 +245,11 @@ fn encrypt_streaming(
             }
         };
         let mut cipher = cipher;
-        let ct = cipher
-            .update(&req.data)
+        // K15 — audit emitted after the call, with the call's real rv.
+        let ct_result = cipher.update(&req.data);
+        emit_pkcs11_result(deps, correlation_id, "multipart::update", Some(mech), &ct_result);
+        let ct = ct_result
             .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Encrypt:update"))?;
-        emit_pkcs11(deps, correlation_id, "C_EncryptInit", Some(mech), 0, "CKR_OK");
-        emit_pkcs11(deps, correlation_id, "C_EncryptUpdate", Some(mech), 0, "CKR_OK");
         let cv = deps.new_correlation_value();
         deps.streams.lock().unwrap().insert(
             cv.clone(),
@@ -270,18 +273,16 @@ fn encrypt_streaming(
         return Err(fail_err(deps, correlation_id, "Encrypt",
             invalid("correlation-value/uid mismatch")));
     }
-    let mut ct = ctx
-        .cipher
-        .update(&req.data)
-        .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Encrypt:update"))?;
+    let ct_result = ctx.cipher.update(&req.data);
+    emit_pkcs11_result(deps, correlation_id, "multipart::update", None, &ct_result);
+    let mut ct =
+        ct_result.map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Encrypt:update"))?;
     if req.final_indicator == Some(true) {
         let is_aead = matches!(ctx.cipher, MultipartCipher::Gcm(_));
-        let tail = ctx
-            .cipher
-            .finalize()
-            .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Encrypt:final"))?;
-        emit_pkcs11(deps, correlation_id, "C_EncryptUpdate", None, 0, "CKR_OK");
-        emit_pkcs11(deps, correlation_id, "C_EncryptFinal", None, 0, "CKR_OK");
+        let tail_result = ctx.cipher.finalize();
+        emit_pkcs11_result(deps, correlation_id, "multipart::finalize", None, &tail_result);
+        let tail =
+            tail_result.map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Encrypt:final"))?;
         // AEAD finalize emits the auth tag (own response field per
         // §6.1.21); block-mode finalize emits trailing ciphertext.
         let tag = if is_aead {
@@ -299,7 +300,6 @@ fn encrypt_streaming(
     } else {
         // Middle part — put the stream back and echo the handle.
         streams.insert(cv.clone(), ctx);
-        emit_pkcs11(deps, correlation_id, "C_EncryptUpdate", None, 0, "CKR_OK");
         Ok(EncryptResponse {
             uid: req.uid.clone(),
             ciphertext: ct,
@@ -327,9 +327,9 @@ fn encrypt_ml_kem(
             format!("ML-KEM {:?} has no Encrypt mechanism", obj.algorithm),
         )
     })?;
-    emit_pkcs11(deps, correlation_id, "C_EncapsulateKey", Some(mech), 0, "CKR_OK");
 
-    // Phase 7b: real bridge call when a session is wired.
+    // Phase 7b: real bridge call when a session is wired. K15 — the
+    // Plane-3 record is emitted after the call with its real rv.
     let (ciphertext, shared_secret) = match deps.engine_session {
         Some(session) => {
             let handle =
@@ -342,13 +342,17 @@ fn encrypt_ml_kem(
                     format!("no KEM mechanism for {:?}", obj.algorithm),
                 )
             })?;
-            softhsmrustv3::native::encapsulate(session, handle, native_mech)
-                .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Encap"))?
+            let r = softhsmrustv3::native::encapsulate(session, handle, native_mech);
+            emit_pkcs11_result(deps, correlation_id, "native::encapsulate", Some(native_mech), &r);
+            r.map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Encap"))?
         }
-        None => (
-            placeholder_bytes(&req.uid, &req.data, b"encap", 32),
-            placeholder_bytes(&req.uid, &req.data, b"ss", 32),
-        ),
+        None => {
+            emit_pkcs11(deps, correlation_id, "soft::placeholder_encapsulate", Some(mech), 0, "CKR_OK");
+            (
+                placeholder_bytes(&req.uid, &req.data, b"encap", 32),
+                placeholder_bytes(&req.uid, &req.data, b"ss", 32),
+            )
+        }
     };
     Ok(EncryptResponse {
         uid: req.uid.clone(),
@@ -389,8 +393,6 @@ fn encrypt_classical(
             )
         })?,
     };
-    emit_pkcs11(deps, correlation_id, "C_EncryptInit", Some(mech), 0, "CKR_OK");
-    emit_pkcs11(deps, correlation_id, "C_Encrypt", Some(mech), 0, "CKR_OK");
 
     // KMIP 3.0 §11 `Random IV = true` — server-side IV auto-generation.
     // When the key's CryptographicParameters carry RandomIV=true AND
@@ -511,8 +513,10 @@ fn encrypt_classical(
     let tag_len = effective_cp
         .and_then(|c| c.tag_length)
         .map(|n| n as usize);
+    // K15 — the Plane-3 audit record is emitted after each call with
+    // the call's real rv, naming the actual entry point that ran.
     let ciphertext = if let Some(key_bytes) = &obj.key_material {
-        softhsmrustv3::native::encrypt_with_key_bytes(
+        let r = softhsmrustv3::native::encrypt_with_key_bytes(
             key_bytes,
             mech,
             data_for_shim,
@@ -520,19 +524,22 @@ fn encrypt_classical(
             oaep.as_ref(),
             aad,
             tag_len,
-        )
-        .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Encrypt"))?
+        );
+        emit_pkcs11_result(deps, correlation_id, "native::encrypt_with_key_bytes", Some(mech), &r);
+        r.map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Encrypt"))?
     } else if let Some(session) = deps.engine_session {
         let handle = softhsmrustv3::native::find_by_cka_id(session, &obj.pkcs11_cka_id)
             .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Encrypt:find"))?
             .ok_or_else(|| KmipError::object_not_found(&req.uid))?;
-        softhsmrustv3::native::encrypt(session, handle, mech, data_for_shim, effective_iv)
-            .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Encrypt"))?
+        let r = softhsmrustv3::native::encrypt(session, handle, mech, data_for_shim, effective_iv);
+        emit_pkcs11_result(deps, correlation_id, "native::encrypt", Some(mech), &r);
+        r.map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Encrypt"))?
     } else {
         // No key material AND no engine session — the object is a
         // placeholder for unit tests with mock policy gates. Match
         // the legacy behaviour so unit-tests that don't exercise
         // real crypto keep passing.
+        emit_pkcs11(deps, correlation_id, "soft::placeholder_encrypt", Some(mech), 0, "CKR_OK");
         let mut input = effective_iv.map(|v| v.to_vec()).unwrap_or_default();
         input.extend_from_slice(&req.data);
         placeholder_bytes(&req.uid, &input, b"enc", input.len().max(16))
@@ -692,10 +699,11 @@ mod tests {
         let r = encrypt(&d, EncryptRequest { uid: "k".into(), ..Default::default() }, "c").unwrap();
         assert!(r.shared_secret.is_some(), "ML-KEM must return shared secret");
         assert_eq!(r.ciphertext.len(), 32);
-        // Plane-3 emit should be C_EncapsulateKey, not C_EncryptInit.
+        // K15 — no engine session: the audit names the soft fallback
+        // path that actually ran (encapsulate branch, not encrypt).
         let p3: Vec<_> = ring.filter_plane(Plane::Pkcs11);
-        assert!(p3.iter().any(|e| matches!(&e.event, EventPayload::Pkcs11Call { function, .. } if function == "C_EncapsulateKey")));
-        assert!(!p3.iter().any(|e| matches!(&e.event, EventPayload::Pkcs11Call { function, .. } if function == "C_EncryptInit")));
+        assert!(p3.iter().any(|e| matches!(&e.event, EventPayload::Pkcs11Call { function, .. } if function == "soft::placeholder_encapsulate")));
+        assert!(!p3.iter().any(|e| matches!(&e.event, EventPayload::Pkcs11Call { function, .. } if function == "soft::placeholder_encrypt")));
     }
 
     #[test]
@@ -709,10 +717,10 @@ mod tests {
             ..Default::default()
         }, "c").unwrap();
         assert!(r.shared_secret.is_none(), "classical encrypt has no shared secret");
-        // Plane-3 emit should be C_EncryptInit + C_Encrypt.
+        // K15 — no key material + no session: the audit names the soft
+        // classical-encrypt fallback that actually ran.
         let p3: Vec<_> = ring.filter_plane(Plane::Pkcs11);
-        assert!(p3.iter().any(|e| matches!(&e.event, EventPayload::Pkcs11Call { function, .. } if function == "C_EncryptInit")));
-        assert!(p3.iter().any(|e| matches!(&e.event, EventPayload::Pkcs11Call { function, .. } if function == "C_Encrypt")));
+        assert!(p3.iter().any(|e| matches!(&e.event, EventPayload::Pkcs11Call { function, .. } if function == "soft::placeholder_encrypt")));
     }
 
     /// K12 — §11 Cryptographic Usage Mask: a present mask lacking the

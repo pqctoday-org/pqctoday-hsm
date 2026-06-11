@@ -97,10 +97,6 @@ pub fn get(deps: &Deps, req: GetRequest, correlation_id: &str) -> Result<GetResp
         ));
     }
 
-    // Plane-3: emit (Phase 7 wires the real C_GetAttributeValue call for
-    // CKA_VALUE on symmetric keys / CKA_PUBLIC_KEY_INFO on public keys).
-    emit_pkcs11(deps, correlation_id, "C_GetAttributeValue", None, 0, "CKR_OK");
-
     // KMIP 3.0 §6.1.21 Get returns the managed object exactly as the
     // server holds it. Three-tier material lookup:
     //   1. Client-supplied bytes captured at Register/Import time
@@ -162,6 +158,20 @@ pub fn get(deps: &Deps, req: GetRequest, correlation_id: &str) -> Result<GetResp
                                 softhsmrustv3::constants::CKA_VALUE,
                             )
                         });
+                    // K15 — audit the engine read after it happened
+                    // (only when a value actually came back; the API
+                    // surfaces sensitive/absent values as None, not a
+                    // CK_RV we could log truthfully).
+                    if bytes.is_some() {
+                        emit_pkcs11(
+                            deps,
+                            correlation_id,
+                            "native::get_attribute(CKA_VALUE)",
+                            None,
+                            0,
+                            "CKR_OK",
+                        );
+                    }
                     match bytes {
                         Some(v) => (KeyFormatType::Raw, v),
                         None => (KeyFormatType::Raw, Vec::new()),
@@ -298,11 +308,12 @@ fn wrap_key_value(
     // Wrap target: TTLV-encoded KeyValue (default TTLV Encoding Option);
     // TTLV framing pads to 8 bytes, satisfying AES-KW's input contract.
     let plaintext = crate::kmip30::ttlv_encode_key_value(key_material);
-    emit_pkcs11(deps, correlation_id, "C_WrapKey",
-        Some(softhsmrustv3::constants::CKM_AES_KEY_WRAP), 0, "CKR_OK");
-    softhsmrustv3::native::aes_key_wrap(&kek, &plaintext)
-        .map_err(|rv| fail_err(deps, correlation_id, "Get",
-            super::helpers::ck_rv_to_kmip_error(rv, "Get:wrap")))
+    // K15 — emit after the wrap call, with its real rv.
+    let r = softhsmrustv3::native::aes_key_wrap(&kek, &plaintext);
+    super::helpers::emit_pkcs11_result(deps, correlation_id, "native::aes_key_wrap",
+        Some(softhsmrustv3::constants::CKM_AES_KEY_WRAP), &r);
+    r.map_err(|rv| fail_err(deps, correlation_id, "Get",
+        super::helpers::ck_rv_to_kmip_error(rv, "Get:wrap")))
 }
 
 #[cfg(test)]
