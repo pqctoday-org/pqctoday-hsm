@@ -1,11 +1,21 @@
 # PKCS#11 v3.2 Compliance Gap Analysis — softhsmrustv3 (Rust/WASM engine)
 
-> **Remediation status (2026-06-10).** Phases **R1 (complete)**, **R2 (complete
-> except H-4)**, the high-value subset of **R3**, and **R6.1** are implemented on
-> branch `feat/kmip-conformance-round-2`. The crate builds clean on
-> `wasm32-unknown-unknown` and the full `rust/test_kat_parity.js` suite (XMSS
-> stateful sign, ChaCha20-Poly1305, X25519/X448, SP800-108) passes. See the
-> **Remediation Status** ledger at the bottom for per-item detail and what remains.
+> **Remediation status (2026-06-10, post fix-plan execution).** SUPERSEDED IN
+> PART: the compliance audit
+> (`docs/compliance-audit-kmip30-pkcs11v32-2026-06-10.md`) verified C-1…C-5,
+> H-4/5/6/7/11/12/14, R2.x, R3.1–3.4/3.6/3.7, R5.x and R6.1 **FIXED** in code,
+> and the engine fix plan (`docs/fix-plan-rust-pkcs11-v3.2-compliance.md`,
+> slices S1–S7, commits `4c14257`…`c0659a7`) closed the audit's remaining open
+> items: PQC mechanism-info byte units (P-1), pre-init interface fns (P-2),
+> wrap-family return codes (P-3/P-4), operate-stage session validation (P-5),
+> C_CreateObject provenance (P-6), CKA_UNIQUE_ID (P-8), CKA_SEED blocking
+> (P-9/M-6), ML-KEM strictness (P-10/R3.5), null sweep (P-11/PR-4 residue),
+> ChaCha20 advertisement (P-12), SessionCancel message flags (P-13),
+> WRAP_WITH_TRUSTED/CKA_TRUSTED (P-14/M-8/H-10), C_Digest-after-Update (M-2),
+> plus new RSA SHA-384/512 mechanisms (S6) and native PQC key import (S7).
+> Still open: H-15 (static TokenInfo), Appendix B (message-encrypt multipart
+> rework, owner assigned), multi-slot FindObjects scoping, seed-deterministic
+> keygen. Historic per-item detail remains in the ledger below.
 >
 > Build note: `cargo`/`rustc` must come from the rustup toolchain, not Homebrew —
 > Homebrew's rustc lacks the wasm32 sysroot. Use

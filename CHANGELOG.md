@@ -8,6 +8,54 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Compliance — KMIP 3.0 / PKCS#11 v3.2 audit remediation (2026-06-10)
+
+Full execution of the two-track compliance fix plans
+(`docs/fix-plan-rust-pkcs11-v3.2-compliance.md` S1–S7,
+`kmip/docs/COMPLIANCE_FIX_PLAN.md` K1–K15) against the audit
+`docs/compliance-audit-kmip30-pkcs11v32-2026-06-10.md`. 22 slices, all
+gates green throughout (engine tests 135/135, constants 339/339, kmip
+tests 389/389, OASIS replay 92 PASS / 0 FAIL).
+
+- **Engine (softhsmrustv3, S1–S7)**: PQC mechanism-info sizes in
+  public-key bytes per §6.67–6.69; ChaCha20{,-Poly1305} + BIP32
+  advertised; pre-init `C_GetInterfaceList`/`C_GetInterface`;
+  `nonnull!` input-pointer sweep; honest
+  ALWAYS_SENSITIVE/NEVER_EXTRACTABLE on `C_CreateObject`; CKA_SEED in
+  the sensitive-blocked set; token-assigned `CKA_UNIQUE_ID`;
+  CKA_TRUSTED server-managed + `CKA_WRAP_WITH_TRUSTED` →
+  `CKR_KEY_NOT_WRAPPABLE`; wrap-family handle-invalid codes
+  (`CKR_WRAPPING/UNWRAPPING_KEY_HANDLE_INVALID`, AES-KW
+  `CKR_WRAPPED_KEY_INVALID`/`_LEN_RANGE`); operate-stage
+  `require_session!` (§5.2 priority); ML-KEM encap/decap key-type +
+  param-set strictness; new `CKM_SHA384/512_RSA_PKCS{,_PSS}` (OpenSSL
+  cross-validated); native ML-DSA/ML-KEM/SLH-DSA key import.
+- **KMIP server (K1–K15)**: six new ResultReasons + full CKR→reason
+  table (default GeneralFailure, not CryptographicFailure); dead
+  pkcs11bridge/attrmap modules deleted; ObjectNotFound /
+  WrongKeyLifecycleState / ObjectDestroyed precision sweep (~25 sites,
+  one corpus-pinned exception documented); all 64 op codepoints decode,
+  unimplemented ops fail per-batch-item with OperationNotSupported;
+  truthful Query + honest QueryCapabilities/QueryProfiles (and fixed
+  QueryFunction codepoints 0x0a/0x0b); AsynchronousIndicator=Mandatory
+  honored, critical MessageExtension rejected; vendor mech block
+  0x4032–0x4037 retired for standard PQC codepoints (collision with
+  CKM_HSS/CKM_XMSS*); silent algorithm substitution eliminated
+  (AES-CTR wired, CFB/OFB/PCBC/CCM/XTS → 0x3e, RSA padding + OAEP/sign
+  hashes honored-or-rejected, request-CP precedence); Sensitive (0x16)
+  / NotExtractable (0x17) enforced on Get/Export, no empty KeyBlocks;
+  KeyFormatType spec enum + no Raw coercion + TransparentRSAPrivateKey
+  parsing + requested-format conversion; PQC Register imports into the
+  engine (registered keys usable); ML-KEM shared secret on vendor tag
+  0x540001 instead of IVCounterNonce; LastChangeDate on attribute
+  mutation, real persisted Digest (engine-boundary hashing for
+  non-extractable halves), honest RNG attribute, full Links +
+  UsageLimits; usage-mask enforcement (0x29) + Locate
+  OffsetItems/StorageStatusMask; config-gated authentication
+  (UsernameAndPassword credential verify, Login validation, mTLS
+  client-CA wiring); truthful post-call audit records with native
+  entry-point names, HMAC via engine for engine-resident keys.
+
 ### Added
 
 - **kmip — KMIP-level key wrapping on `Get`: OASIS conformance 91 → 92 of 92 actionable tests (100%)** (`kmip/src/ops/get.rs`, `kmip/src/kmip30/{ops,wire,mod}.rs`, `rust/src/native/encrypt.rs`). Closes AX-M-2, the last open conformance failure — pulled forward from the v0.2 deferral. `Get` with a `KeyWrappingSpecification` (KMIP 3.0 §6.1.23: `WrappingMethod=Encrypt` + `EncryptionKeyInformation` with `BlockCipherMode=NISTKeyWrap`) now returns the KeyBlock with the TTLV-encoded `KeyValue` wrapped via AES-KW (RFC 3394) under the referenced wrap key, the `KeyValue` flipped to ByteString form, and a `KeyWrappingData` structure echoing the spec. Wrap-key gating: Active state, `WrapKey` usage mask, material from Register-supplied bytes or the engine (`CKA_VALUE`). New tags verified from the spec extract: `KeyWrappingData` 0x420046, `KeyWrappingSpecification` 0x420047, `WrappingMethod` 0x42009e, `EncryptionKeyInformation` 0x420036. Engine gains `native::aes_key_wrap` / `aes_key_unwrap` (RFC 3394, KEK 128/192/256) verified against the RFC 3394 §4.1 KAT. Register-side unwrap (importing a wrapped key) remains v0.2.
