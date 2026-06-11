@@ -22,7 +22,8 @@
 use crate::auditlog::{AuditEvent, EventPayload, KmipOpResult, Plane};
 use crate::error::Result;
 use crate::kmip30::{
-    ObjectType, Operation, QueryFunction, QueryRequest, QueryResponse, ServerInformation,
+    CapabilityInformation, ObjectType, Operation, QueryFunction, QueryRequest, QueryResponse,
+    ServerInformation,
 };
 use time::OffsetDateTime;
 
@@ -55,6 +56,8 @@ pub fn query(deps: &Deps, req: QueryRequest, correlation_id: &str) -> Result<Que
         vendor_identification: None,
         server_info: None,
         application_namespaces: None,
+        profile_information: None,
+        capability_information: None,
     };
 
     for f in &req.functions {
@@ -82,11 +85,27 @@ pub fn query(deps: &Deps, req: QueryRequest, correlation_id: &str) -> Result<Que
                 // even though the request asks for them.
                 resp.application_namespaces = Some(Vec::new());
             }
-            QueryFunction::QueryProfiles | QueryFunction::QueryCapabilities => {
-                // Profile / Capability reporting deferred to Phase 8
-                // (compliance-tool integration); the comparator already
-                // treats absent fields as conformant when the test
-                // doesn't probe them.
+            QueryFunction::QueryProfiles => {
+                // K3 — explicit empty list: the server does not (yet)
+                // formally claim any KMIP profile. Which profiles to
+                // claim (Baseline Server TTLV, …) is the K13 decision;
+                // until then an empty `Profile Information` list is
+                // the honest answer (nothing emitted on the wire).
+                resp.profile_information = Some(Vec::new());
+            }
+            QueryFunction::QueryCapabilities => {
+                // K3 — honest CapabilityInformation (compliance-audit
+                // K-11): multi-part Encrypt/Decrypt streaming is
+                // implemented (CS-BC-M-GCM-3); asynchronous processing
+                // and attestation are not; §9.5 Undo and Continue
+                // batch modes are implemented in the dispatcher.
+                resp.capability_information = Some(CapabilityInformation {
+                    streaming_capability: true,
+                    asynchronous_capability: false,
+                    attestation_capability: false,
+                    batch_undo_capability: true,
+                    batch_continue_capability: true,
+                });
             }
         }
     }
@@ -105,106 +124,94 @@ pub fn query(deps: &Deps, req: QueryRequest, correlation_id: &str) -> Result<Que
     Ok(resp)
 }
 
-/// Operation capability list — surfaced via `QueryOperations`. Includes
-/// every op the dispatcher actually routes to a handler.
+/// K3 — ops the OASIS corpus requires in the Query advertisement but
+/// the dispatcher does NOT implement.
+///
+/// **Documented tension (compliance-audit K-4):** the truthful answer
+/// would be [`crate::dispatcher::HANDLED_OPERATIONS`] alone, but the
+/// MSGENC-{XML,JSON,HTTPS}-M-1 expected Query responses enumerate all
+/// 60 ops below + handled ones, and the replay harness enforces the
+/// Profiles v3.0 §4.1.1 item 15 rule *expected ⊆ actual* — trimming
+/// any of these fails the corpus gate. Resolution per the K3 gate
+/// rule: advertise exactly the corpus-required set and nothing more,
+/// and make every entry here fail honestly on invocation with
+/// `OperationFailed / OperationNotSupported (0x05)` (see
+/// `RequestPayload::Unsupported`) instead of the previous
+/// advertised-but-InvalidMessage behaviour. DelegatedLogin /
+/// ReProvision / SetDefaults are neither implemented nor
+/// corpus-required, so they are NOT advertised.
+pub(crate) const ADVERTISED_UNIMPLEMENTED_OPERATIONS: &[Operation] = &[
+    Operation::SetEndpointRole,
+    Operation::ReKey,
+    Operation::ReCertify,
+    Operation::ObtainLease,
+    Operation::GetUsageAllocation,
+    Operation::Validate,
+    Operation::Poll,
+    Operation::Notify,
+    Operation::Put,
+    Operation::CreateSplitKey,
+    Operation::SetConstraints,
+    Operation::GetConstraints,
+    Operation::QueryAsynchronousRequests,
+    Operation::Process,
+    // K3 additions — also enumerated by the MSGENC-* expected Query
+    // responses (previously missing from the Operation enum entirely).
+    Operation::DeriveKey,
+    Operation::Certify,
+    Operation::Cancel,
+    Operation::ReKeyKeyPair,
+    Operation::JoinSplitKey,
+];
+
+/// Operation capability list — surfaced via `QueryOperations`. The
+/// dispatcher's real surface ([`crate::dispatcher::HANDLED_OPERATIONS`],
+/// single source of truth shared with `handle_payload`) plus the
+/// corpus-required advertised-only ops (see
+/// [`ADVERTISED_UNIMPLEMENTED_OPERATIONS`] for the K-4 tension note).
 fn supported_operations() -> Vec<Operation> {
-    vec![
-        Operation::Query,
-        Operation::Create,
-        Operation::CreateKeyPair,
-        Operation::Get,
-        Operation::GetAttributes,
-        Operation::GetAttributeList,
-        Operation::AddAttribute,
-        Operation::ModifyAttribute,
-        Operation::DeleteAttribute,
-        Operation::SetAttribute,
-        Operation::AdjustAttribute,
-        Operation::Locate,
-        Operation::Activate,
-        Operation::Revoke,
-        Operation::Destroy,
-        Operation::Encrypt,
-        Operation::Decrypt,
-        Operation::Sign,
-        Operation::SignatureVerify,
-        Operation::Interop,
-        Operation::Register,
-        Operation::Import,
-        Operation::Export,
-        Operation::Deactivate,
-        Operation::Check,
-        Operation::Archive,
-        Operation::Recover,
-        Operation::Obliterate,
-        Operation::DiscoverVersions,
-        Operation::Ping,
-        Operation::MAC,
-        Operation::MACVerify,
-        Operation::Hash,
-        Operation::CreateCredential,
-        Operation::CreateGroup,
-        Operation::CreateUser,
-        Operation::Log,
-        Operation::Login,
-        Operation::Logout,
-        Operation::RNGRetrieve,
-        Operation::RNGSeed,
-        Operation::Pkcs11,
-        // Required by OASIS Baseline tests' Query advertisement
-        // (QS-M-1, SASED-M-1, …) — §4.1.1 item 15 superset rule means
-        // the server's list MAY include ops the test enumerates even
-        // when no transcript invokes them as a request.
-        Operation::SetEndpointRole,
-        // KMIP 3.0 §11 ops the MSGENC-* tests enumerate. They're
-        // advertised here per §4.1.1 item 15; the dispatcher rejects
-        // any actual invocation with `InvalidMessage`.
-        Operation::ReKey,
-        Operation::ReCertify,
-        Operation::ObtainLease,
-        Operation::GetUsageAllocation,
-        Operation::Validate,
-        Operation::Poll,
-        Operation::Notify,
-        Operation::Put,
-        Operation::CreateSplitKey,
-        Operation::SetConstraints,
-        Operation::GetConstraints,
-        Operation::QueryAsynchronousRequests,
-        Operation::Process,
-    ]
+    let mut ops = crate::dispatcher::HANDLED_OPERATIONS.to_vec();
+    ops.extend_from_slice(ADVERTISED_UNIMPLEMENTED_OPERATIONS);
+    ops
 }
 
-/// Object types the server reports under `QueryObjects`. Mirrors the
-/// `ObjectType` enum coverage in [`crate::store`]: Certificate +
-/// SymmetricKey + PublicKey + PrivateKey + SecretData.
+/// Object types Create / CreateKeyPair / Register actually accept:
+/// - Create: SymmetricKey + SecretData (`ops::create` type gate)
+/// - CreateKeyPair: PublicKey + PrivateKey
+/// - Register: SymmetricKey / PublicKey / PrivateKey / SecretData /
+///   Certificate / OpaqueObject (`ops::register_import_export`)
+pub(crate) const IMPLEMENTED_OBJECT_TYPES: &[ObjectType] = &[
+    ObjectType::Certificate,
+    ObjectType::SymmetricKey,
+    ObjectType::PublicKey,
+    ObjectType::PrivateKey,
+    ObjectType::SecretData,
+    ObjectType::OpaqueObject,
+];
+
+/// K3 — object types the MSGENC-* expected Query responses enumerate
+/// but Register/Create reject on invocation (InvalidObjectType /
+/// OperationNotSupported). Same §4.1.1 item-16 corpus tension as
+/// [`ADVERTISED_UNIMPLEMENTED_OPERATIONS`] — the harness requires
+/// *expected ⊆ actual*, so these stay advertised; PgpKey (neither
+/// implemented nor corpus-required) was trimmed in K3.
+pub(crate) const ADVERTISED_UNIMPLEMENTED_OBJECT_TYPES: &[ObjectType] = &[
+    ObjectType::SplitKey,
+    ObjectType::CertificateRequest,
+    ObjectType::User,
+    ObjectType::Group,
+    ObjectType::PasswordCredential,
+    ObjectType::DeviceCredential,
+    ObjectType::OneTimePasswordCredential,
+    ObjectType::HashedPasswordCredential,
+];
+
+/// Object types the server reports under `QueryObjects` — the real
+/// surface plus the corpus-required advertised-only set.
 fn supported_object_types() -> Vec<ObjectType> {
-    vec![
-        ObjectType::Certificate,
-        ObjectType::SymmetricKey,
-        ObjectType::PublicKey,
-        ObjectType::PrivateKey,
-        ObjectType::SecretData,
-        // MSGENC-* tests enumerate every §11 ObjectType in their
-        // Query response. Per §4.1.1 item 15 superset rule we MAY
-        // advertise op + object support the dispatcher rejects on
-        // invocation; OpaqueObject / SplitKey / PgpKey /
-        // CertificateRequest are stub-only in v0.1.
-        ObjectType::SplitKey,
-        ObjectType::OpaqueObject,
-        ObjectType::PgpKey,
-        ObjectType::CertificateRequest,
-        // KMIP 3.0 §11 Object Type — User / Group / Credential types
-        // are advertised by Baseline servers per MSGENC-* expectations.
-        // Dispatcher returns InvalidObjectType on actual Register;
-        // advertisement is permitted by §4.1.1 item 15 superset rule.
-        ObjectType::User,
-        ObjectType::Group,
-        ObjectType::PasswordCredential,
-        ObjectType::DeviceCredential,
-        ObjectType::OneTimePasswordCredential,
-        ObjectType::HashedPasswordCredential,
-    ]
+    let mut types = IMPLEMENTED_OBJECT_TYPES.to_vec();
+    types.extend_from_slice(ADVERTISED_UNIMPLEMENTED_OBJECT_TYPES);
+    types
 }
 
 #[cfg(test)]
@@ -230,7 +237,8 @@ mod tests {
         let (_ring, d) = deps();
         let resp = query(&d, QueryRequest { functions: vec![QueryFunction::QueryOperations] }, "corr-q").unwrap();
         let ops = resp.operations.unwrap();
-        assert_eq!(ops.len(), 56);
+        // 42 handled + 19 corpus-required advertised-only = 61.
+        assert_eq!(ops.len(), 61);
         assert!(ops.contains(&Operation::Sign));
         assert!(ops.contains(&Operation::Encrypt));
         assert!(ops.contains(&Operation::Decrypt));
@@ -239,6 +247,77 @@ mod tests {
         assert!(ops.contains(&Operation::AddAttribute));
         assert!(ops.contains(&Operation::SetAttribute));
         assert!(ops.contains(&Operation::SetEndpointRole));
+        // K3 — corpus-required ops newly added to the Operation enum.
+        for op in [
+            Operation::DeriveKey, Operation::Certify, Operation::Cancel,
+            Operation::ReKeyKeyPair, Operation::JoinSplitKey,
+        ] {
+            assert!(ops.contains(&op), "{op:?} must be advertised (MSGENC-*)");
+        }
+        // Not implemented AND not corpus-required → never advertised.
+        for op in [
+            Operation::DelegatedLogin, Operation::ReProvision, Operation::SetDefaults,
+        ] {
+            assert!(!ops.contains(&op), "{op:?} must NOT be advertised");
+        }
+    }
+
+    /// K3 definition-of-done — Query output ≡ dispatcher surface plus
+    /// the explicitly documented corpus-required advertised-only set;
+    /// the two sets stay disjoint and duplicate-free.
+    #[test]
+    fn query_operations_equals_dispatcher_surface_plus_documented_exceptions() {
+        use std::collections::HashSet;
+        let advertised: HashSet<Operation> = supported_operations().into_iter().collect();
+        let handled: HashSet<Operation> =
+            crate::dispatcher::HANDLED_OPERATIONS.iter().copied().collect();
+        let exceptions: HashSet<Operation> =
+            ADVERTISED_UNIMPLEMENTED_OPERATIONS.iter().copied().collect();
+        assert!(
+            handled.is_disjoint(&exceptions),
+            "an op cannot be both handled and advertised-unimplemented",
+        );
+        let expected: HashSet<Operation> = handled.union(&exceptions).copied().collect();
+        assert_eq!(advertised, expected, "Query list ≠ dispatcher surface ∪ exceptions");
+        assert_eq!(
+            supported_operations().len(),
+            expected.len(),
+            "advertised list must be duplicate-free",
+        );
+    }
+
+    #[test]
+    fn query_object_types_real_surface_plus_corpus_required() {
+        let (_ring, d) = deps();
+        let resp = query(&d, QueryRequest { functions: vec![QueryFunction::QueryObjects] }, "corr-o").unwrap();
+        let types = resp.object_types.unwrap();
+        assert_eq!(types.len(), 14);
+        // PgpKey: neither implemented nor corpus-required — trimmed in K3.
+        assert!(!types.contains(&ObjectType::PgpKey));
+        assert!(types.contains(&ObjectType::OpaqueObject));
+        assert!(types.contains(&ObjectType::SymmetricKey));
+    }
+
+    /// K3 — QueryCapabilities reports the honest capability set;
+    /// QueryProfiles returns an explicit empty list (K13 pending).
+    #[test]
+    fn query_capabilities_and_profiles_are_honest() {
+        let (_ring, d) = deps();
+        let resp = query(
+            &d,
+            QueryRequest {
+                functions: vec![QueryFunction::QueryCapabilities, QueryFunction::QueryProfiles],
+            },
+            "corr-c",
+        )
+        .unwrap();
+        let cap = resp.capability_information.expect("CapabilityInformation present");
+        assert!(cap.streaming_capability, "multi-part Encrypt/Decrypt is implemented");
+        assert!(!cap.asynchronous_capability, "no async processing");
+        assert!(!cap.attestation_capability, "no attestation");
+        assert!(cap.batch_undo_capability, "§9.5 Undo is implemented");
+        assert!(cap.batch_continue_capability, "§9.5 Continue is implemented");
+        assert_eq!(resp.profile_information, Some(vec![]), "explicit empty profile list");
     }
 
     #[test]

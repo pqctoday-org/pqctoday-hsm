@@ -106,6 +106,16 @@ mod tags {
     /// KMIP 3.0 §6.1.39 — `Application Namespace` TextString (zero or
     /// more) returned for `QueryFunction::QueryApplicationNamespaces`.
     pub const ApplicationNamespace: u32   = 0x42_0003;
+    // ── K3 — Query Profiles / Capabilities reporting (§6.1.45) ─────────
+    // Codepoints verified from `kmip-spec-3.0-tags-enums.json`.
+    pub const ProfileInformation: u32     = 0x42_00eb;
+    pub const ProfileName: u32            = 0x42_00ec;
+    pub const CapabilityInformation: u32  = 0x42_00f7;
+    pub const StreamingCapability: u32    = 0x42_00ef;
+    pub const AsynchronousCapability: u32 = 0x42_00f0;
+    pub const AttestationCapability: u32  = 0x42_00f1;
+    pub const BatchUndoCapability: u32    = 0x42_00f9;
+    pub const BatchContinueCapability: u32 = 0x42_00fa;
     /// KMIP 3.0 §8.2.2 — `Server Correlation Value` echoed in every
     /// ResponseHeader. Codepoint verified from
     /// `spec/oasis-kmip-3.0/kmip-spec-3.0-tags-enums.json`.
@@ -576,17 +586,18 @@ fn decode_request_payload(op: Operation, frame: &TtlvFrame) -> Result<RequestPay
         Operation::RNGRetrieve      => RequestPayload::RngRetrieve(decode_rng_retrieve_req(children)?),
         Operation::RNGSeed          => RequestPayload::RngSeed(decode_rng_seed_req(children)?),
         Operation::Pkcs11           => RequestPayload::Pkcs11(decode_pkcs11_req(children)?),
-        // Advertised in Query for OASIS Baseline conformance (§4.1.1
-        // item 15 superset) but the request handler is unimplemented —
-        // no OASIS test in the corpus actually invokes it.
-        Operation::SetEndpointRole  => return Err(WireError::UnknownEnum {
-            field: "Operation (SetEndpointRole — advertised but no handler)",
-            value: Operation::SetEndpointRole.to_wire_value(),
-        }),
-        // KMIP 3.0 §11 advertised-only ops: enumerated in `Query` per
-        // §4.1.1 items 15-16 but no dispatcher route. Invoking them
-        // gets a structured `InvalidMessage` per §6.4.
-        Operation::ReKey
+        // K3 — recognized KMIP 3.0 Operations without a dispatcher
+        // route. The codepoint is a published §11 value, so the
+        // message is NOT malformed: decode the batch item with an
+        // `Unsupported` marker payload and let the dispatcher fail
+        // that item alone with `OperationNotSupported (0x05)` per
+        // §9.2. This keeps Batch Error Continuation semantics intact
+        // (sibling items still process). Truly-unknown codepoints
+        // never reach here — `Operation::from_wire_value` returns
+        // `None` in `decode_request_batch_item` and the message gets
+        // the `UnknownEnum` → InvalidMessage treatment.
+        Operation::SetEndpointRole
+        | Operation::ReKey
         | Operation::ReCertify
         | Operation::ObtainLease
         | Operation::GetUsageAllocation
@@ -598,10 +609,15 @@ fn decode_request_payload(op: Operation, frame: &TtlvFrame) -> Result<RequestPay
         | Operation::SetConstraints
         | Operation::GetConstraints
         | Operation::QueryAsynchronousRequests
-        | Operation::Process => return Err(WireError::UnknownEnum {
-            field: "Operation (advertised-only — no handler in v0.1)",
-            value: op.to_wire_value(),
-        }),
+        | Operation::Process
+        | Operation::DeriveKey
+        | Operation::Certify
+        | Operation::Cancel
+        | Operation::ReKeyKeyPair
+        | Operation::JoinSplitKey
+        | Operation::DelegatedLogin
+        | Operation::ReProvision
+        | Operation::SetDefaults => RequestPayload::Unsupported(op),
     })
 }
 
@@ -669,13 +685,17 @@ fn decode_query_req(children: &[TtlvFrame]) -> Result<QueryRequest, WireError> {
     for c in children {
         if c.tag.0 == tags::QueryFunction {
             let v = expect_enum(c, "Query Function")?;
+            // Codepoints per `kmip-spec-3.0-tags-enums.json`
+            // `enums."Query Function"` — Profiles = 0x0a,
+            // Capabilities = 0x0b (fixed in K3; 0x07/0x09 are Query
+            // Attestation Types / Query Validations).
             functions.push(match v {
-                1 => QueryFunction::QueryOperations,
-                2 => QueryFunction::QueryObjects,
-                3 => QueryFunction::QueryServerInformation,
-                4 => QueryFunction::QueryApplicationNamespaces,
-                7 => QueryFunction::QueryProfiles,
-                9 => QueryFunction::QueryCapabilities,
+                0x01 => QueryFunction::QueryOperations,
+                0x02 => QueryFunction::QueryObjects,
+                0x03 => QueryFunction::QueryServerInformation,
+                0x04 => QueryFunction::QueryApplicationNamespaces,
+                0x0a => QueryFunction::QueryProfiles,
+                0x0b => QueryFunction::QueryCapabilities,
                 other => return Err(WireError::UnknownEnum { field: "Query Function", value: other }),
             });
         }
@@ -719,6 +739,34 @@ fn encode_query_resp(r: &QueryResponse) -> Vec<TtlvFrame> {
                 Value::TextString(n.clone()),
             ));
         }
+    }
+    // K3 — QueryProfiles: zero or more `Profile Information`
+    // Structures (§6.1.45). An empty list encodes nothing, which is
+    // the explicit "no profiles formally claimed" answer.
+    if let Some(profiles) = &r.profile_information {
+        for p in profiles {
+            out.push(TtlvFrame::new(
+                Tag(tags::ProfileInformation),
+                Value::Structure(vec![TtlvFrame::new(
+                    Tag(tags::ProfileName),
+                    Value::Enumeration(p.profile_name),
+                )]),
+            ));
+        }
+    }
+    // K3 — QueryCapabilities: honest `Capability Information`
+    // Structure (§6.1.45, compliance-audit K-11).
+    if let Some(cap) = &r.capability_information {
+        out.push(TtlvFrame::new(
+            Tag(tags::CapabilityInformation),
+            Value::Structure(vec![
+                TtlvFrame::new(Tag(tags::StreamingCapability),     Value::Boolean(cap.streaming_capability)),
+                TtlvFrame::new(Tag(tags::AsynchronousCapability),  Value::Boolean(cap.asynchronous_capability)),
+                TtlvFrame::new(Tag(tags::AttestationCapability),   Value::Boolean(cap.attestation_capability)),
+                TtlvFrame::new(Tag(tags::BatchUndoCapability),     Value::Boolean(cap.batch_undo_capability)),
+                TtlvFrame::new(Tag(tags::BatchContinueCapability), Value::Boolean(cap.batch_continue_capability)),
+            ]),
+        ));
     }
     out
 }
@@ -2950,6 +2998,38 @@ mod tests {
     use super::*;
     use time::OffsetDateTime;
 
+    /// K3 — every published Operation codepoint (0x01–0x40) is either
+    /// routed to a typed payload decoder (dispatcher surface) or
+    /// decodes to the `Unsupported` marker. No recognized op may
+    /// poison the message with a decode error purely because it has
+    /// no handler.
+    #[test]
+    fn k3_every_recognized_op_decodes_payload_or_unsupported_marker() {
+        let handled: std::collections::HashSet<_> =
+            crate::dispatcher::HANDLED_OPERATIONS.iter().copied().collect();
+        let empty = TtlvFrame::new(Tag(tags::RequestPayload), Value::Structure(vec![]));
+        for v in 0x01u32..=0x40 {
+            let op = Operation::from_wire_value(v)
+                .unwrap_or_else(|| panic!("codepoint {v:#04x} must decode"));
+            let decoded = decode_request_payload(op, &empty);
+            if handled.contains(&op) {
+                // Implemented ops route to their typed decoder — an
+                // empty payload may legitimately fail field checks,
+                // but it must NEVER come back as `Unsupported`.
+                if let Ok(RequestPayload::Unsupported(_)) = decoded {
+                    panic!("{op:?} is handled but decoded as Unsupported");
+                }
+            } else {
+                match decoded {
+                    Ok(RequestPayload::Unsupported(echo)) => assert_eq!(echo, op),
+                    other => panic!(
+                        "{op:?} has no handler — expected Unsupported marker, got {other:?}",
+                    ),
+                }
+            }
+        }
+    }
+
     fn make_query_msg() -> RequestMessage {
         RequestMessage {
             header: RequestHeader::v3(),
@@ -2987,6 +3067,8 @@ mod tests {
                         server_version: "0.1.0".into(),
                     }),
                     application_namespaces: None,
+                    profile_information: None,
+                    capability_information: None,
                 })),
             }],
         };

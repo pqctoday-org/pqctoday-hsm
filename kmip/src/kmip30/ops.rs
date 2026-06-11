@@ -107,6 +107,22 @@ pub enum Operation {
     GetConstraints            = 0x38,
     QueryAsynchronousRequests = 0x39,
     Process                   = 0x3a,
+
+    // ── K3 — remaining KMIP 3.0 §11 Operation codepoints ──────────────────
+    // With these the enum covers all 64 published Operation values
+    // (0x01–0x40, `kmip-spec-3.0-tags-enums.json` `enums.Operation`).
+    // None has a dispatcher route — a recognized op without a handler
+    // decodes to `RequestPayload::Unsupported(op)` and the dispatcher
+    // fails that batch item with `OperationNotSupported (0x05)` per
+    // KMIP 3.0 §9.2, leaving the rest of the message intact.
+    DeriveKey                 = 0x05,
+    Certify                   = 0x06,
+    Cancel                    = 0x19,
+    ReKeyKeyPair              = 0x1d,
+    JoinSplitKey              = 0x29,
+    DelegatedLogin            = 0x2f,
+    ReProvision               = 0x35,
+    SetDefaults               = 0x36,
 }
 
 impl Operation {
@@ -172,6 +188,14 @@ impl Operation {
             0x38 => Some(Self::GetConstraints),
             0x39 => Some(Self::QueryAsynchronousRequests),
             0x3a => Some(Self::Process),
+            0x05 => Some(Self::DeriveKey),
+            0x06 => Some(Self::Certify),
+            0x19 => Some(Self::Cancel),
+            0x1d => Some(Self::ReKeyKeyPair),
+            0x29 => Some(Self::JoinSplitKey),
+            0x2f => Some(Self::DelegatedLogin),
+            0x35 => Some(Self::ReProvision),
+            0x36 => Some(Self::SetDefaults),
             _ => None,
         }
     }
@@ -186,14 +210,19 @@ pub struct QueryRequest {
     pub functions: Vec<QueryFunction>,
 }
 
+/// `Query Function` Enumeration — KMIP 3.0 §11. Codepoints verified
+/// against `kmip-spec-3.0-tags-enums.json` (`enums."Query Function"`):
+/// Profiles = 0x0a, Capabilities = 0x0b (0x07/0x09 are Query
+/// Attestation Types / Query Validations — earlier revisions of this
+/// crate had those values wrong; fixed in K3).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum QueryFunction {
     QueryOperations         = 0x01,
     QueryObjects            = 0x02,
     QueryServerInformation  = 0x03,
     QueryApplicationNamespaces = 0x04,
-    QueryProfiles           = 0x07,
-    QueryCapabilities       = 0x09,
+    QueryProfiles           = 0x0a,
+    QueryCapabilities       = 0x0b,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -213,11 +242,55 @@ pub struct QueryResponse {
     /// `QueryFunction::QueryApplicationNamespaces`. Values are variable
     /// per §4.1.1 item 14.
     pub application_namespaces: Option<Vec<String>>,
+    /// Zero or more `Profile Information` Structures (tag 0x4200eb)
+    /// per KMIP 3.0 §6.1.45 — surfaced when the client passes
+    /// `QueryFunction::QueryProfiles`. `Some(vec![])` is an explicit
+    /// "no profiles claimed" answer (nothing emitted on the wire);
+    /// the K13 decision on which profiles to formally claim is pending.
+    pub profile_information: Option<Vec<ProfileInformation>>,
+    /// `Capability Information` Structure (tag 0x4200f7) per KMIP 3.0
+    /// §6.1.45 — surfaced when the client passes
+    /// `QueryFunction::QueryCapabilities`.
+    pub capability_information: Option<CapabilityInformation>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ServerInformation {
     pub server_version: String,
+}
+
+/// `Profile Information` Structure — KMIP 3.0 §11 (tag 0x4200eb).
+/// Carries `Profile Name` (Enumeration, 0x4200ec) plus optional
+/// `Profile Version` — only the name is modelled until K13 decides
+/// which profiles the server formally claims.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProfileInformation {
+    /// `Profile Name` enumeration codepoint (spec extract
+    /// `enums."Profile Name"`).
+    pub profile_name: u32,
+}
+
+/// `Capability Information` Structure — KMIP 3.0 §11 (tag 0x4200f7).
+/// Honest server-capability report (compliance-audit K-11): the five
+/// Boolean children the codec emits. Enumeration children (Unwrap
+/// Mode / Destroy Action / Shredding Algorithm / RNG Mode) are
+/// additive when the corresponding subsystems gain explicit policies.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CapabilityInformation {
+    /// `Streaming Capability` (0x4200ef) — multi-part Encrypt/Decrypt
+    /// via Init/Final indicators + Correlation Value is implemented.
+    pub streaming_capability: bool,
+    /// `Asynchronous Capability` (0x4200f0) — not supported; the
+    /// server processes every batch item synchronously.
+    pub asynchronous_capability: bool,
+    /// `Attestation Capability` (0x4200f1) — not supported.
+    pub attestation_capability: bool,
+    /// `Batch Undo Capability` (0x4200f9) — §9.5 Undo rollback wave
+    /// is implemented in the dispatcher.
+    pub batch_undo_capability: bool,
+    /// `Batch Continue Capability` (0x4200fa) — §9.5 Continue mode is
+    /// implemented in the dispatcher.
+    pub batch_continue_capability: bool,
 }
 
 // ── Create (symmetric) ─────────────────────────────────────────────────────
@@ -1253,6 +1326,42 @@ mod tests {
         assert_eq!(Operation::Decrypt.to_wire_value(),         0x20);
         assert_eq!(Operation::Sign.to_wire_value(),            0x21);
         assert_eq!(Operation::SignatureVerify.to_wire_value(), 0x22);
+        // K3 additions — values from `enums.Operation`.
+        assert_eq!(Operation::DeriveKey.to_wire_value(),       0x05);
+        assert_eq!(Operation::Certify.to_wire_value(),         0x06);
+        assert_eq!(Operation::Cancel.to_wire_value(),          0x19);
+        assert_eq!(Operation::ReKeyKeyPair.to_wire_value(),    0x1d);
+        assert_eq!(Operation::JoinSplitKey.to_wire_value(),    0x29);
+        assert_eq!(Operation::DelegatedLogin.to_wire_value(),  0x2f);
+        assert_eq!(Operation::ReProvision.to_wire_value(),     0x35);
+        assert_eq!(Operation::SetDefaults.to_wire_value(),     0x36);
+    }
+
+    /// K3 — every published KMIP 3.0 Operation codepoint (0x01–0x40,
+    /// 64 total per `kmip-spec-3.0-tags-enums.json`) decodes, and
+    /// every decode round-trips back to the same wire value. Nothing
+    /// outside that range decodes.
+    #[test]
+    fn operation_decodes_all_64_published_codepoints() {
+        for v in 0x01u32..=0x40 {
+            let op = Operation::from_wire_value(v)
+                .unwrap_or_else(|| panic!("codepoint {v:#04x} must decode"));
+            assert_eq!(op.to_wire_value(), v, "round-trip for {v:#04x}");
+        }
+        assert_eq!(Operation::from_wire_value(0x00), None);
+        assert_eq!(Operation::from_wire_value(0x41), None);
+    }
+
+    /// KMIP 3.0 §11 — Query Function codepoints (spec extract
+    /// `enums."Query Function"`): Profiles = 0x0a, Capabilities = 0x0b.
+    #[test]
+    fn query_function_codepoints_match_spec() {
+        assert_eq!(QueryFunction::QueryOperations as u32,            0x01);
+        assert_eq!(QueryFunction::QueryObjects as u32,               0x02);
+        assert_eq!(QueryFunction::QueryServerInformation as u32,     0x03);
+        assert_eq!(QueryFunction::QueryApplicationNamespaces as u32, 0x04);
+        assert_eq!(QueryFunction::QueryProfiles as u32,              0x0a);
+        assert_eq!(QueryFunction::QueryCapabilities as u32,          0x0b);
     }
 
     #[test]
