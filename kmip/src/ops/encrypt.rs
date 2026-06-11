@@ -178,7 +178,8 @@ fn encrypt_streaming(
             .cryptographic_parameters
             .as_ref()
             .or(obj.cryptographic_parameters.as_ref());
-        let mech = super::helpers::aes_mechanism_for(effective_cp);
+        let mech = super::helpers::aes_mechanism_for(effective_cp)
+            .map_err(|e| fail_err(deps, correlation_id, "Encrypt", e))?;
         let key_bytes = obj.key_material.as_ref().ok_or_else(|| {
             fail_err(deps, correlation_id, "Encrypt",
                 KmipError::failed(
@@ -362,7 +363,14 @@ fn encrypt_classical(
         .as_ref()
         .or(obj.cryptographic_parameters.as_ref());
     let mech = match obj.algorithm {
-        KmipAlgorithm::Aes => super::helpers::aes_mechanism_for(effective_cp),
+        // K6 — both selectors are total-or-failing: unsupported
+        // BlockCipherMode / PaddingMethod combinations fail with
+        // `UnsupportedCryptographicParameters (0x3e)` instead of being
+        // silently substituted (compliance-audit B-2).
+        KmipAlgorithm::Aes => super::helpers::aes_mechanism_for(effective_cp)
+            .map_err(|e| fail_err(deps, correlation_id, "Encrypt", e))?,
+        KmipAlgorithm::Rsa => super::helpers::rsa_encrypt_mechanism_for(effective_cp)
+            .map_err(|e| fail_err(deps, correlation_id, "Encrypt", e))?,
         _ => obj.algorithm.to_pkcs11_mech(PkcsOp::Encrypt).ok_or_else(|| {
             KmipError::failed(
                 ResultReason::OperationNotSupported,
@@ -382,7 +390,8 @@ fn encrypt_classical(
     let generated_iv: Option<Vec<u8>> = if random_iv && req.iv.is_none() {
         let len = match mech {
             softhsmrustv3::constants::CKM_AES_CBC
-            | softhsmrustv3::constants::CKM_AES_CBC_PAD => 16,
+            | softhsmrustv3::constants::CKM_AES_CBC_PAD
+            | softhsmrustv3::constants::CKM_AES_CTR => 16,
             softhsmrustv3::constants::CKM_AES_GCM => 12,
             softhsmrustv3::constants::CKM_CHACHA20
             | softhsmrustv3::constants::CKM_CHACHA20_POLY1305 => 12,
@@ -454,7 +463,19 @@ fn encrypt_classical(
     //
     // The previous code fell back to a SHA-256 placeholder buffer when
     // no session was wired — that broke KAT comparisons.
-    let oaep = super::helpers::oaep_params_for(obj.cryptographic_parameters.as_ref());
+    //
+    // K6: OAEP params come from the SAME request-over-object effective
+    // CP used for mech selection above (they previously read only the
+    // object's stored CP, so a request-time OAEP profile was ignored).
+    // Only computed for the OAEP mechanism so AES/ChaCha requests that
+    // happen to carry a HashingAlgorithm aren't rejected for a field
+    // their mechanism never reads.
+    let oaep = if mech == softhsmrustv3::constants::CKM_RSA_PKCS_OAEP {
+        super::helpers::oaep_params_for(effective_cp)
+            .map_err(|e| fail_err(deps, correlation_id, "Encrypt", e))?
+    } else {
+        None
+    };
     let aad = req.aad.as_deref().unwrap_or(&[]);
     // KMIP 3.0 §11 `Padding Method = PKCS5` (codepoint 3) on AES-ECB:
     // the shim has only the plain `CKM_AES_ECB` path (which rejects
@@ -562,6 +583,10 @@ pub(crate) fn validate_iv_for_mech(
     let len = iv.map(|b| b.len());
     let valid = match mech {
         ck::CKM_AES_CBC | ck::CKM_AES_CBC_PAD => len == Some(16),
+        // PKCS#11 v3.2 §6.10 — CKM_AES_CTR takes a full 16-byte
+        // counter block (CK_AES_CTR_PARAMS.cb); KMIP carries it in
+        // IVCounterNonce.
+        ck::CKM_AES_CTR => len == Some(16),
         // NIST SP 800-38D §5.2.1.1 — GCM accepts any IV of 1..2^64-1
         // bits; non-96-bit IVs derive J0 via GHASH (§7.1 step 2b). The
         // engine handles both paths. OASIS CS-BC-M-GCM-2 pins 8- and
@@ -713,6 +738,211 @@ mod block_cipher_mode_test {
             ..ObjectRecord::default()
         };
         let m = super::super::helpers::aes_mechanism_for(rec.cryptographic_parameters.as_ref());
-        assert_eq!(m, softhsmrustv3::constants::CKM_AES_ECB);
+        assert_eq!(m.unwrap(), softhsmrustv3::constants::CKM_AES_ECB);
+    }
+}
+
+#[cfg(test)]
+mod k6_no_silent_substitution_tests {
+    use super::*;
+    use crate::kmip30::{CryptographicParameters, ObjectType, UsageMask};
+    use crate::store::ObjectRecord;
+
+    fn cp_mode(mode: u32) -> CryptographicParameters {
+        CryptographicParameters { block_cipher_mode: Some(mode), ..Default::default() }
+    }
+
+    fn put_aes_with_key(deps: &Deps, uid: &str, key: Vec<u8>) {
+        deps.store
+            .put(ObjectRecord {
+                uid: uid.into(),
+                object_type: ObjectType::SymmetricKey,
+                algorithm: KmipAlgorithm::Aes,
+                usage_mask: UsageMask::ENCRYPT | UsageMask::DECRYPT,
+                state: State::Active,
+                activation_date: Some(time::OffsetDateTime::UNIX_EPOCH),
+                key_material: Some(key),
+                ..ObjectRecord::default()
+            })
+            .unwrap();
+    }
+
+    fn test_deps() -> Deps {
+        use crate::auditlog::{AuditSink, RingSink};
+        use crate::policy::{load_from_str, Engine};
+        use crate::store::MemoryStore;
+        use std::sync::Arc;
+        let sink: Arc<dyn AuditSink> = Arc::new(RingSink::new(64));
+        let engine = Engine::with_global_sink(sink.clone());
+        engine
+            .activate(load_from_str(
+                "schema_version: 1\nmetadata: {name: t, description: t, authority: t, effective: always}\nrules: []\n",
+                std::path::Path::new("<t>"),
+            ).unwrap())
+            .unwrap();
+        Deps::new(engine, Arc::new(MemoryStore::new()), sink, super::super::deps::DepsConfig::default())
+    }
+
+    /// K6 — AES-CFB (mode 4) Encrypt must fail 0x3e, not silently run GCM.
+    #[test]
+    fn aes_cfb_encrypt_fails_unsupported_cryptographic_parameters() {
+        let d = test_deps();
+        put_aes_with_key(&d, "k", vec![0u8; 32]);
+        let err = encrypt(
+            &d,
+            EncryptRequest {
+                uid: "k".into(),
+                data: b"x".to_vec(),
+                cryptographic_parameters: Some(cp_mode(4)),
+                ..Default::default()
+            },
+            "c",
+        )
+        .unwrap_err();
+        assert_eq!(err.result_reason(), ResultReason::UnsupportedCryptographicParameters);
+    }
+
+    /// K6 — AES-CTR (mode 6) one-shot Encrypt/Decrypt round-trips with
+    /// real key material through the engine's `CKM_AES_CTR` path.
+    #[test]
+    fn aes_ctr_encrypt_decrypt_round_trip() {
+        let d = test_deps();
+        let key: Vec<u8> = (0u8..32).collect();
+        put_aes_with_key(&d, "k", key);
+        let plaintext = b"K6: CTR is wired through, not GCM-substituted".to_vec();
+        let iv = vec![0xA5u8; 16]; // full 16-byte counter block
+        let enc = encrypt(
+            &d,
+            EncryptRequest {
+                uid: "k".into(),
+                data: plaintext.clone(),
+                iv: Some(iv.clone()),
+                cryptographic_parameters: Some(cp_mode(6)),
+                ..Default::default()
+            },
+            "c-enc",
+        )
+        .unwrap();
+        assert_ne!(enc.ciphertext, plaintext);
+        assert!(enc.authenticated_encryption_tag.is_none(), "CTR is not AEAD");
+        let dec = crate::ops::decrypt::decrypt(
+            &d,
+            crate::kmip30::DecryptRequest {
+                uid: "k".into(),
+                data: enc.ciphertext,
+                iv: Some(iv),
+                cryptographic_parameters: Some(cp_mode(6)),
+                aad: None,
+            },
+            "c-dec",
+        )
+        .unwrap();
+        assert_eq!(dec.data, plaintext);
+    }
+
+    /// K6 — CTR requires a full 16-byte counter block; a 12-byte IV is
+    /// an InvalidMessage protocol failure.
+    #[test]
+    fn aes_ctr_short_iv_is_invalid_message() {
+        let d = test_deps();
+        put_aes_with_key(&d, "k", vec![0u8; 32]);
+        let err = encrypt(
+            &d,
+            EncryptRequest {
+                uid: "k".into(),
+                data: b"x".to_vec(),
+                iv: Some(vec![0u8; 12]),
+                cryptographic_parameters: Some(cp_mode(6)),
+                ..Default::default()
+            },
+            "c",
+        )
+        .unwrap_err();
+        assert_eq!(err.result_reason(), ResultReason::InvalidMessage);
+    }
+
+    /// K6 — RSA Encrypt with PKCS1 v1.5 padding (0x08): the engine has
+    /// no raw RSAES-PKCS1-v1_5 primitive, so this fails 0x3e instead of
+    /// silently running OAEP.
+    #[test]
+    fn rsa_pkcs1_v15_encrypt_fails_unsupported_cryptographic_parameters() {
+        let d = test_deps();
+        d.store
+            .put(crate::store::ObjectRecord {
+                uid: "r".into(),
+                object_type: crate::kmip30::ObjectType::PublicKey,
+                algorithm: KmipAlgorithm::Rsa,
+                usage_mask: crate::kmip30::UsageMask::ENCRYPT,
+                state: State::Active,
+                activation_date: Some(time::OffsetDateTime::UNIX_EPOCH),
+                ..crate::store::ObjectRecord::default()
+            })
+            .unwrap();
+        let err = encrypt(
+            &d,
+            EncryptRequest {
+                uid: "r".into(),
+                data: b"x".to_vec(),
+                cryptographic_parameters: Some(crate::kmip30::CryptographicParameters {
+                    padding_method: Some(0x08), // PKCS1 v1.5
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            "c",
+        )
+        .unwrap_err();
+        assert_eq!(err.result_reason(), ResultReason::UnsupportedCryptographicParameters);
+    }
+
+    /// K6 — OAEP with SHA-1 (0x04) must fail 0x3e, never default to SHA-256.
+    /// Also pins request-over-object CP precedence: the object's stored CP
+    /// carries an unsupported SHA-1 profile, but a request CP with SHA-256
+    /// wins and the op proceeds past parameter validation.
+    #[test]
+    fn rsa_oaep_sha1_fails_and_request_cp_overrides_object_cp() {
+        let d = test_deps();
+        let sha1_cp = crate::kmip30::CryptographicParameters {
+            padding_method: Some(0x02), // OAEP
+            hashing_algorithm: Some(crate::kmip30::HashingAlgorithm::Sha1),
+            ..Default::default()
+        };
+        d.store
+            .put(crate::store::ObjectRecord {
+                uid: "r".into(),
+                object_type: crate::kmip30::ObjectType::PublicKey,
+                algorithm: KmipAlgorithm::Rsa,
+                usage_mask: crate::kmip30::UsageMask::ENCRYPT,
+                state: State::Active,
+                activation_date: Some(time::OffsetDateTime::UNIX_EPOCH),
+                cryptographic_parameters: Some(sha1_cp),
+                ..crate::store::ObjectRecord::default()
+            })
+            .unwrap();
+        // No request CP → object's SHA-1 OAEP profile applies → 0x3e.
+        let err = encrypt(
+            &d,
+            EncryptRequest { uid: "r".into(), data: b"x".to_vec(), ..Default::default() },
+            "c1",
+        )
+        .unwrap_err();
+        assert_eq!(err.result_reason(), ResultReason::UnsupportedCryptographicParameters);
+        // Request CP with SHA-256 overrides the object's SHA-1 → succeeds
+        // (placeholder path: no key material, no engine session).
+        encrypt(
+            &d,
+            EncryptRequest {
+                uid: "r".into(),
+                data: b"x".to_vec(),
+                cryptographic_parameters: Some(crate::kmip30::CryptographicParameters {
+                    padding_method: Some(0x02),
+                    hashing_algorithm: Some(crate::kmip30::HashingAlgorithm::Sha256),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            "c2",
+        )
+        .expect("request CP must override object CP for OAEP params");
     }
 }

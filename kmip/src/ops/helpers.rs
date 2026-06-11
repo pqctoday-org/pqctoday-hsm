@@ -164,56 +164,143 @@ pub fn canonical_name(a: KmipAlgorithm) -> String {
 /// `Active` MUST NOT be passed; the helper returns
 /// `WrongKeyLifecycleState` so a bug doesn't masquerade as a
 /// successful response.
-/// Pick the PKCS#11 mechanism for AES Encrypt / Decrypt off the key's
-/// stored `BlockCipherMode`. KMIP 3.0 §11 `Block Cipher Mode` enum:
-/// `CBC=1, ECB=2, PCBC=3, CFB=4, OFB=5, CTR=6, CMAC=7, CCM=8,
-/// GCM=9, NIST_KEY_WRAP=10, ...`. Falls back to GCM (the only mode
-/// our shim handled before) when the key carries no params.
+/// Spec-text name for a KMIP 3.0 §11 `Block Cipher Mode` codepoint —
+/// used in `UnsupportedCryptographicParameters` messages so the client
+/// sees the mode it asked for, not just a number. Codepoints verified
+/// against `spec/oasis-kmip-3.0/kmip-spec-3.0-tags-enums.json`.
+fn block_cipher_mode_name(v: u32) -> &'static str {
+    match v {
+        0x01 => "CBC",
+        0x02 => "ECB",
+        0x03 => "PCBC",
+        0x04 => "CFB",
+        0x05 => "OFB",
+        0x06 => "CTR",
+        0x07 => "CMAC",
+        0x08 => "CCM",
+        0x09 => "GCM",
+        0x0a => "CBC-MAC",
+        0x0b => "XTS",
+        0x0c => "AESKeyWrapPadding",
+        0x0d => "NISTKeyWrap",
+        0x0e => "X9.102 AESKW",
+        0x0f => "X9.102 TDKW",
+        0x10 => "X9.102 AKW1",
+        0x11 => "X9.102 AKW2",
+        0x12 => "AEAD",
+        _ => "unknown",
+    }
+}
+
+/// Pick the PKCS#11 mechanism for AES Encrypt / Decrypt off the
+/// effective `BlockCipherMode`. KMIP 3.0 §11 `Block Cipher Mode` enum
+/// (verified against the tags-enums extract): `CBC=1, ECB=2, PCBC=3,
+/// CFB=4, OFB=5, CTR=6, CMAC=7, CCM=8, GCM=9, ..., XTS=0x0b,
+/// NISTKeyWrap=0x0d, ..., AEAD=0x12`.
+///
+/// **Total-or-failing (K6, compliance-audit B-2):** every mode either
+/// maps to a mechanism the engine implements (CBC / CBC+PKCS5-pad /
+/// ECB / CTR / GCM) or fails with
+/// `UnsupportedCryptographicParameters (0x3e)` — the server never
+/// silently substitutes another algorithm. Absent mode → GCM (the
+/// documented default for AES keys created without parameters).
 pub fn aes_mechanism_for(
     cp: Option<&crate::kmip30::CryptographicParameters>,
-) -> u32 {
-    use softhsmrustv3::constants::{CKM_AES_CBC, CKM_AES_CBC_PAD, CKM_AES_ECB, CKM_AES_GCM};
+) -> Result<u32, KmipError> {
+    use softhsmrustv3::constants::{
+        CKM_AES_CBC, CKM_AES_CBC_PAD, CKM_AES_CTR, CKM_AES_ECB, CKM_AES_GCM,
+    };
     let bcm = cp.and_then(|c| c.block_cipher_mode);
     // KMIP 3.0 §11 `Padding Method` enum — codepoint 3 = `PKCS5`
     // (synonym for PKCS#7 for AES). With BlockCipherMode=CBC this
     // selects `CKM_AES_CBC_PAD`, which permits arbitrary-length
     // plaintext (the shim's CBC_PAD path adds PKCS#7 padding).
     let pad = cp.and_then(|c| c.padding_method);
-    match (bcm, pad) {
+    Ok(match (bcm, pad) {
         (Some(1), Some(3)) => CKM_AES_CBC_PAD,
         (Some(1), _) => CKM_AES_CBC,
         (Some(2), _) => CKM_AES_ECB,
+        (Some(6), _) => CKM_AES_CTR,
         (Some(9), _) | (None, _) => CKM_AES_GCM,
-        // Unimplemented modes (PCBC / CFB / OFB / CTR / wrap) fall
-        // through to GCM which the shim already supports; callers can
-        // upgrade `aes_mechanism_for` as the shim grows.
-        _ => CKM_AES_GCM,
+        (Some(other), _) => {
+            return Err(KmipError::unsupported_cryptographic_parameters(format!(
+                "AES Encrypt/Decrypt: Block Cipher Mode {} (0x{other:02x}) is not supported",
+                block_cipher_mode_name(other),
+            )));
+        }
+    })
+}
+
+// KMIP 3.0 §11 `Padding Method` codepoints — verified against
+// `spec/oasis-kmip-3.0/kmip-spec-3.0-tags-enums.json`:
+// 0x01=None, 0x02=OAEP, 0x03=PKCS5, 0x08=PKCS1 v1.5, 0x0a=PSS.
+const PADDING_OAEP: u32 = 0x02;
+const PADDING_PKCS1_V1_5: u32 = 0x08;
+const PADDING_PSS: u32 = 0x0a;
+
+/// Pick the PKCS#11 mechanism for RSA Encrypt / Decrypt off the
+/// effective `PaddingMethod` (K6 — no silent substitution):
+///
+/// - absent → `CKM_RSA_PKCS_OAEP` — the documented server default
+///   (OAEP/SHA-256, the only RSA encryption profile the OASIS Baseline
+///   corpus exercises).
+/// - `OAEP (0x02)` → `CKM_RSA_PKCS_OAEP`.
+/// - `PKCS1 v1.5 (0x08)` → `UnsupportedCryptographicParameters (0x3e)`:
+///   the engine's encrypt/decrypt dispatch (`native::encrypt_with_key_bytes`)
+///   implements **no raw RSAES-PKCS1-v1_5 primitive** (only OAEP), so we
+///   fail up-front instead of substituting OAEP. If the engine grows
+///   `CKM_RSA_PKCS` encryption, this arm becomes `Ok(CKM_RSA_PKCS)`.
+/// - anything else → `UnsupportedCryptographicParameters (0x3e)`.
+pub fn rsa_encrypt_mechanism_for(
+    cp: Option<&crate::kmip30::CryptographicParameters>,
+) -> Result<u32, KmipError> {
+    use softhsmrustv3::constants::CKM_RSA_PKCS_OAEP;
+    match cp.and_then(|c| c.padding_method) {
+        None | Some(PADDING_OAEP) => Ok(CKM_RSA_PKCS_OAEP),
+        Some(PADDING_PKCS1_V1_5) => Err(KmipError::unsupported_cryptographic_parameters(
+            "RSA Encrypt/Decrypt: Padding Method PKCS1 v1.5 (0x08) is not supported \
+             (engine implements RSAES-OAEP only)",
+        )),
+        Some(other) => Err(KmipError::unsupported_cryptographic_parameters(format!(
+            "RSA Encrypt/Decrypt: Padding Method 0x{other:02x} is not supported",
+        ))),
     }
 }
 
 /// Map a KMIP `CryptographicParameters` onto the shim's
-/// [`softhsmrustv3::native::OaepParams`]. Returns `None` when the key
-/// carries no params (callers should treat that as "use shim default
-/// = SHA-256 / MGF1-SHA-256 / no label").
+/// [`softhsmrustv3::native::OaepParams`]. Returns `Ok(None)` when the
+/// key carries no params (callers should treat that as "use shim
+/// default = SHA-256 / MGF1-SHA-256 / no label"); an **absent** hash
+/// field inside present params likewise falls through to the shim's
+/// SHA-256 default.
+///
+/// K6 (compliance-audit B-2): a hash the engine does NOT implement
+/// (SHA-1, SHA-224, SHA3-*, …; `OaepHash` covers exactly
+/// SHA-256/384/512) fails with
+/// `UnsupportedCryptographicParameters (0x3e)` — never silently
+/// downgraded to SHA-256.
 pub fn oaep_params_for(
     cp: Option<&crate::kmip30::CryptographicParameters>,
-) -> Option<softhsmrustv3::native::OaepParams<'_>> {
+) -> Result<Option<softhsmrustv3::native::OaepParams<'_>>, KmipError> {
     use crate::kmip30::HashingAlgorithm;
     use softhsmrustv3::native::OaepHash;
-    let cp = cp?;
-    let map_hash = |h: HashingAlgorithm| -> Option<OaepHash> {
+    let Some(cp) = cp else { return Ok(None) };
+    let map_hash = |h: HashingAlgorithm| -> Result<OaepHash, KmipError> {
         match h {
-            HashingAlgorithm::Sha256 => Some(OaepHash::Sha256),
-            HashingAlgorithm::Sha384 => Some(OaepHash::Sha384),
-            HashingAlgorithm::Sha512 => Some(OaepHash::Sha512),
-            _ => None,
+            HashingAlgorithm::Sha256 => Ok(OaepHash::Sha256),
+            HashingAlgorithm::Sha384 => Ok(OaepHash::Sha384),
+            HashingAlgorithm::Sha512 => Ok(OaepHash::Sha512),
+            other => Err(KmipError::unsupported_cryptographic_parameters(format!(
+                "RSA-OAEP: Hashing Algorithm {other:?} is not supported \
+                 (supported: SHA-256, SHA-384, SHA-512)",
+            ))),
         }
     };
-    Some(softhsmrustv3::native::OaepParams {
-        hash: cp.hashing_algorithm.and_then(map_hash),
-        mgf_hash: cp.mask_generator_hashing_algorithm.and_then(map_hash),
+    Ok(Some(softhsmrustv3::native::OaepParams {
+        hash: cp.hashing_algorithm.map(map_hash).transpose()?,
+        mgf_hash: cp.mask_generator_hashing_algorithm.map(map_hash).transpose()?,
         label: cp.p_source.as_deref(),
-    })
+    }))
 }
 
 /// All §3.x lifecycle-FSM rejections surface as
@@ -249,47 +336,93 @@ pub fn state_name(s: crate::kmip30::State) -> &'static str {
 // from KMIP types (`KmipAlgorithm`) to the engine's standard `CKM_*` /
 // `CKP_*` codepoints that `softhsmrustv3::native::*` consumes.
 
-/// Map a `KmipAlgorithm` to the engine's **standard PKCS#11 v3.2** sign
-/// mechanism — what `softhsmrustv3::native::sign` / `verify` dispatch on.
+/// Map a `KmipAlgorithm` + `CryptographicParameters` to the engine's
+/// **standard PKCS#11 v3.2** sign mechanism — what
+/// `softhsmrustv3::native::sign` / `verify` dispatch on.
 ///
 /// Since K5 retired the pseudo-vendor 0x403x block,
 /// [`crate::kmip30::KmipAlgorithm::to_pkcs11_mech`] returns the same
 /// standard codepoints for the PQC families (`CKM_ML_DSA = 0x1D`, …).
 /// This helper differs in that it consults `CryptographicParameters`
-/// (via [`native_sign_mech_with_params`]) so classical RSA can pick
-/// PKCS1v1.5 vs PSS shim mechanisms.
-pub fn native_sign_mech(a: KmipAlgorithm) -> Option<u32> {
-    native_sign_mech_with_params(a, None)
-}
-
-/// Like [`native_sign_mech`] but consults `CryptographicParameters` so
-/// the RSA `PaddingMethod` (PKCS1v15 vs PSS) can pick the right shim
-/// mechanism. KMIP 3.0 §6.1.{60,61} permit either as the request's CP
-/// or as the object's stored attribute.
+/// (KMIP 3.0 §6.1.{60,61} permit them on the request or as the
+/// object's stored attribute) so classical RSA/ECDSA pick the exact
+/// padding + hash mechanism.
+///
+/// K6 (compliance-audit B-2) — no silent substitution:
+///
+/// - RSA: `PaddingMethod` absent or `PKCS1 v1.5 (0x08)` → the
+///   `CKM_SHA*_RSA_PKCS` family (PKCS#1 v1.5 is the documented sign
+///   default); `PSS (0x0a)` → `CKM_SHA*_RSA_PKCS_PSS`; any other
+///   padding → `UnsupportedCryptographicParameters (0x3e)`.
+/// - RSA/ECDSA hash: absent → SHA-256 (documented default, matches
+///   the pre-K6 behaviour the corpus pins); SHA-256/384/512 →
+///   matching engine mechanism (SHA-384/512 since engine slice S6);
+///   anything else (SHA-1, SHA-224, SHA3-*, …) → 0x3e.
+/// - PSS salt length: KMIP 3.0 `Cryptographic Parameters` carries no
+///   salt-length field (and our codec decodes none), and
+///   `native::sign`/`verify` pass `pss_salt_len = None` → the engine
+///   uses the RFC 8017 salt = hash-length default (verify also
+///   accepts the maximal salt, see `crypto::handlers::verify_rsa`).
+/// - algorithms with no sign mechanism (AES, ML-KEM, …) →
+///   `OperationNotSupported`.
 pub fn native_sign_mech_with_params(
     a: KmipAlgorithm,
     cp: Option<&crate::kmip30::CryptographicParameters>,
-) -> Option<u32> {
+) -> Result<u32, KmipError> {
+    use crate::kmip30::HashingAlgorithm as H;
     use softhsmrustv3::constants as c;
     use KmipAlgorithm::*;
-    // KMIP 3.0 §11 `Padding Method` codepoints (per
-    // spec/oasis-kmip-3.0/kmip-spec-3.0-tags-enums.json):
-    // 0x08 = `PKCS1 v1.5`, 0x0a = `PSS`.
-    const PADDING_PSS: u32 = 0x0a;
-    Some(match a {
+    let hash = cp.and_then(|p| p.hashing_algorithm);
+    let unsupported_hash = |family: &str| {
+        KmipError::unsupported_cryptographic_parameters(format!(
+            "{family} Sign/Verify: Hashing Algorithm {:?} is not supported \
+             (supported: SHA-256, SHA-384, SHA-512)",
+            hash.expect("only called for present hash"),
+        ))
+    };
+    Ok(match a {
         MlDsa44 | MlDsa65 | MlDsa87 => c::CKM_ML_DSA,
         SlhDsaSha2_128s | SlhDsaSha2_128f | SlhDsaSha2_192s | SlhDsaSha2_192f
         | SlhDsaSha2_256s | SlhDsaSha2_256f | SlhDsaShake128s | SlhDsaShake128f
         | SlhDsaShake192s | SlhDsaShake192f | SlhDsaShake256s | SlhDsaShake256f => c::CKM_SLH_DSA,
-        Rsa => match cp.and_then(|p| p.padding_method) {
-            Some(PADDING_PSS) => c::CKM_SHA256_RSA_PKCS_PSS,
-            _ => c::CKM_SHA256_RSA_PKCS,
+        Rsa => {
+            let pss = match cp.and_then(|p| p.padding_method) {
+                Some(PADDING_PSS) => true,
+                // PKCS#1 v1.5 is the documented default when no padding
+                // is supplied (matches pre-K6 behaviour + CS-AC-M-3).
+                None | Some(PADDING_PKCS1_V1_5) => false,
+                Some(other) => {
+                    return Err(KmipError::unsupported_cryptographic_parameters(format!(
+                        "RSA Sign/Verify: Padding Method 0x{other:02x} is not supported \
+                         (supported: PKCS1 v1.5, PSS)",
+                    )));
+                }
+            };
+            match (hash.unwrap_or(H::Sha256), pss) {
+                (H::Sha256, false) => c::CKM_SHA256_RSA_PKCS,
+                (H::Sha384, false) => c::CKM_SHA384_RSA_PKCS,
+                (H::Sha512, false) => c::CKM_SHA512_RSA_PKCS,
+                (H::Sha256, true) => c::CKM_SHA256_RSA_PKCS_PSS,
+                (H::Sha384, true) => c::CKM_SHA384_RSA_PKCS_PSS,
+                (H::Sha512, true) => c::CKM_SHA512_RSA_PKCS_PSS,
+                _ => return Err(unsupported_hash("RSA")),
+            }
+        }
+        Ecdsa => match hash.unwrap_or(H::Sha256) {
+            H::Sha256 => c::CKM_ECDSA_SHA256,
+            H::Sha384 => c::CKM_ECDSA_SHA384,
+            H::Sha512 => c::CKM_ECDSA_SHA512,
+            _ => return Err(unsupported_hash("ECDSA")),
         },
-        Ecdsa => c::CKM_ECDSA_SHA256,
         HmacSha256 => c::CKM_SHA256_HMAC,
         HmacSha384 => c::CKM_SHA384_HMAC,
         HmacSha512 => c::CKM_SHA512_HMAC,
-        _ => return None,
+        other => {
+            return Err(KmipError::failed(
+                crate::error::ResultReason::OperationNotSupported,
+                format!("no native sign mechanism for {other:?}"),
+            ));
+        }
     })
 }
 
@@ -532,5 +665,188 @@ mod tests {
                 "CK_RV=0x{rv:08x} mapped to {got:?}, expected {expected:?}"
             );
         }
+    }
+
+    // ── K6 — fail-or-exact mechanism selection (compliance-audit B-2) ──
+
+    fn cp(
+        mode: Option<u32>,
+        pad: Option<u32>,
+        hash: Option<crate::kmip30::HashingAlgorithm>,
+    ) -> crate::kmip30::CryptographicParameters {
+        crate::kmip30::CryptographicParameters {
+            block_cipher_mode: mode,
+            padding_method: pad,
+            hashing_algorithm: hash,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn aes_mechanism_supported_modes_map_exactly() {
+        let cases: &[(Option<u32>, Option<u32>, u32)] = &[
+            (Some(1), Some(3), c::CKM_AES_CBC_PAD),
+            (Some(1), None, c::CKM_AES_CBC),
+            (Some(2), None, c::CKM_AES_ECB),
+            (Some(6), None, c::CKM_AES_CTR),
+            (Some(9), None, c::CKM_AES_GCM),
+            (None, None, c::CKM_AES_GCM), // documented absent-mode default
+        ];
+        for &(mode, pad, expected) in cases {
+            let got = aes_mechanism_for(Some(&cp(mode, pad, None))).unwrap();
+            assert_eq!(got, expected, "mode={mode:?} pad={pad:?}");
+        }
+        assert_eq!(aes_mechanism_for(None).unwrap(), c::CKM_AES_GCM);
+    }
+
+    #[test]
+    fn aes_mechanism_unsupported_modes_fail_0x3e() {
+        // PCBC, CFB, OFB, CMAC, CCM, CBC-MAC, XTS, AESKeyWrapPadding,
+        // NISTKeyWrap, AEAD — all must fail, never fall through to GCM.
+        for mode in [3u32, 4, 5, 7, 8, 0x0a, 0x0b, 0x0c, 0x0d, 0x12] {
+            let err = aes_mechanism_for(Some(&cp(Some(mode), None, None)))
+                .expect_err(&format!("mode 0x{mode:02x} must fail"));
+            assert_eq!(
+                err.result_reason(),
+                ResultReason::UnsupportedCryptographicParameters,
+                "mode 0x{mode:02x}"
+            );
+        }
+    }
+
+    #[test]
+    fn rsa_encrypt_mechanism_padding_honored_or_rejected() {
+        // Absent → documented OAEP default; OAEP (0x02) explicit.
+        assert_eq!(rsa_encrypt_mechanism_for(None).unwrap(), c::CKM_RSA_PKCS_OAEP);
+        assert_eq!(
+            rsa_encrypt_mechanism_for(Some(&cp(None, Some(0x02), None))).unwrap(),
+            c::CKM_RSA_PKCS_OAEP
+        );
+        // PKCS1 v1.5 (0x08): engine has no raw RSAES-PKCS1-v1_5 → 0x3e.
+        assert_eq!(
+            rsa_encrypt_mechanism_for(Some(&cp(None, Some(0x08), None)))
+                .unwrap_err()
+                .result_reason(),
+            ResultReason::UnsupportedCryptographicParameters
+        );
+        // Anything else (e.g. Zeros=0x05, PSS=0x0a) → 0x3e.
+        for pad in [0x01u32, 0x05, 0x0a] {
+            assert_eq!(
+                rsa_encrypt_mechanism_for(Some(&cp(None, Some(pad), None)))
+                    .unwrap_err()
+                    .result_reason(),
+                ResultReason::UnsupportedCryptographicParameters,
+                "pad 0x{pad:02x}"
+            );
+        }
+    }
+
+    #[test]
+    fn oaep_params_unsupported_hash_fails_never_defaults() {
+        use crate::kmip30::HashingAlgorithm as H;
+        // Supported set passes through exactly.
+        for h in [H::Sha256, H::Sha384, H::Sha512] {
+            assert!(oaep_params_for(Some(&cp(None, None, Some(h)))).is_ok(), "{h:?}");
+        }
+        // SHA-1 / SHA-224 / SHA3-256 → 0x3e, not a SHA-256 substitute.
+        for h in [H::Sha1, H::Sha224, H::Sha3256] {
+            assert_eq!(
+                oaep_params_for(Some(&cp(None, None, Some(h))))
+                    .unwrap_err()
+                    .result_reason(),
+                ResultReason::UnsupportedCryptographicParameters,
+                "{h:?}"
+            );
+        }
+        // Absent CP / absent hash → engine SHA-256 default (documented).
+        assert!(oaep_params_for(None).unwrap().is_none());
+        let empty = cp(None, None, None);
+        let p = oaep_params_for(Some(&empty)).unwrap().unwrap();
+        assert!(p.hash.is_none() && p.mgf_hash.is_none());
+        // Unsupported MGF hash also fails.
+        let bad_mgf = crate::kmip30::CryptographicParameters {
+            mask_generator_hashing_algorithm: Some(H::Sha1),
+            ..Default::default()
+        };
+        assert_eq!(
+            oaep_params_for(Some(&bad_mgf)).unwrap_err().result_reason(),
+            ResultReason::UnsupportedCryptographicParameters
+        );
+    }
+
+    #[test]
+    fn sign_mech_hash_and_padding_honored() {
+        use crate::kmip30::{HashingAlgorithm as H, KmipAlgorithm as A};
+        let pkcs = |h| cp(None, Some(0x08), Some(h)); // PKCS1 v1.5
+        let pss = |h| cp(None, Some(0x0a), Some(h)); // PSS
+        // RSA — exact hash × padding matrix (SHA-384/512 since engine S6).
+        let cases: &[(crate::kmip30::CryptographicParameters, u32)] = &[
+            (pkcs(H::Sha256), c::CKM_SHA256_RSA_PKCS),
+            (pkcs(H::Sha384), c::CKM_SHA384_RSA_PKCS),
+            (pkcs(H::Sha512), c::CKM_SHA512_RSA_PKCS),
+            (pss(H::Sha256), c::CKM_SHA256_RSA_PKCS_PSS),
+            (pss(H::Sha384), c::CKM_SHA384_RSA_PKCS_PSS),
+            (pss(H::Sha512), c::CKM_SHA512_RSA_PKCS_PSS),
+        ];
+        for (p, expected) in cases {
+            assert_eq!(
+                native_sign_mech_with_params(A::Rsa, Some(p)).unwrap(),
+                *expected
+            );
+        }
+        // Documented defaults: absent CP → PKCS1v1.5/SHA-256; absent hash
+        // with PSS padding → PSS/SHA-256.
+        assert_eq!(
+            native_sign_mech_with_params(A::Rsa, None).unwrap(),
+            c::CKM_SHA256_RSA_PKCS
+        );
+        assert_eq!(
+            native_sign_mech_with_params(A::Rsa, Some(&cp(None, Some(0x0a), None))).unwrap(),
+            c::CKM_SHA256_RSA_PKCS_PSS
+        );
+        // ECDSA hash variants.
+        for (h, expected) in [
+            (H::Sha256, c::CKM_ECDSA_SHA256),
+            (H::Sha384, c::CKM_ECDSA_SHA384),
+            (H::Sha512, c::CKM_ECDSA_SHA512),
+        ] {
+            assert_eq!(
+                native_sign_mech_with_params(A::Ecdsa, Some(&cp(None, None, Some(h)))).unwrap(),
+                expected
+            );
+        }
+        assert_eq!(
+            native_sign_mech_with_params(A::Ecdsa, None).unwrap(),
+            c::CKM_ECDSA_SHA256
+        );
+    }
+
+    #[test]
+    fn sign_mech_unsupported_hash_or_padding_fails_0x3e() {
+        use crate::kmip30::{HashingAlgorithm as H, KmipAlgorithm as A};
+        // Unsupported hashes for RSA and ECDSA.
+        for h in [H::Sha1, H::Sha224, H::Sha3512] {
+            for a in [A::Rsa, A::Ecdsa] {
+                assert_eq!(
+                    native_sign_mech_with_params(a, Some(&cp(None, None, Some(h))))
+                        .unwrap_err()
+                        .result_reason(),
+                    ResultReason::UnsupportedCryptographicParameters,
+                    "{a:?} {h:?}"
+                );
+            }
+        }
+        // Unsupported RSA sign padding (OAEP makes no sense for sign).
+        assert_eq!(
+            native_sign_mech_with_params(A::Rsa, Some(&cp(None, Some(0x02), None)))
+                .unwrap_err()
+                .result_reason(),
+            ResultReason::UnsupportedCryptographicParameters
+        );
+        // Algorithms without a sign mechanism stay OperationNotSupported.
+        assert_eq!(
+            native_sign_mech_with_params(A::Aes, None).unwrap_err().result_reason(),
+            ResultReason::OperationNotSupported
+        );
     }
 }

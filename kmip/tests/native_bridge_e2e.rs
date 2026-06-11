@@ -269,6 +269,133 @@ fn ml_dsa_87_create_sign_verify_against_real_engine() {
     let _ = softhsmrustv3::native::session::finalize();
 }
 
+/// K6 — RSA sign/verify honors the requested hash (SHA-384 / SHA-512 →
+/// the S6 engine mechanisms `CKM_SHA384/512_RSA_PKCS{,_PSS}`) end-to-end
+/// through the KMIP op handlers against a real engine session:
+///
+/// - sign + verify round-trips per (hash, padding) combination;
+/// - cross-hash verify (signed SHA-384, verified SHA-512) → `Invalid`;
+/// - verify with an unrunnable hash (SHA-1) → Success + `Invalid`
+///   (CS-AC-M-3 semantics), NOT a protocol error;
+/// - sign with an unrunnable hash (SHA-1) →
+///   `UnsupportedCryptographicParameters (0x3e)`.
+#[test]
+fn k6_rsa_sha384_sha512_sign_verify_against_real_engine() {
+    use pqctoday_kmip::error::ResultReason;
+    use pqctoday_kmip::kmip30::{ActivateRequest, CryptographicParameters, HashingAlgorithm};
+
+    let _guard = engine_test_lock();
+    let deps = build_deps_with_real_engine();
+
+    let create_req = CreateKeyPairRequest {
+        common_attributes: vec![Attribute::CryptographicAlgorithm(KmipAlgorithm::Rsa)],
+        private_key_attributes: vec![Attribute::CryptographicUsageMask(UsageMask::SIGN)],
+        public_key_attributes: vec![Attribute::CryptographicUsageMask(UsageMask::VERIFY)],
+    };
+    let kp = create_key_pair(&deps, create_req, "CreateKeyPair:Sign", "k6-create").unwrap();
+    let priv_uid = kp.private_key_uid;
+    let pub_uid = kp.public_key_uid;
+    activate(&deps, ActivateRequest { uid: priv_uid.clone() }, "k6-a1").unwrap();
+    activate(&deps, ActivateRequest { uid: pub_uid.clone() }, "k6-a2").unwrap();
+
+    let cp = |hash: HashingAlgorithm, padding: Option<u32>| CryptographicParameters {
+        hashing_algorithm: Some(hash),
+        padding_method: padding,
+        ..Default::default()
+    };
+    let message = b"K6: hashes are honored, never substituted".to_vec();
+
+    // (hash, padding): PKCS1 v1.5 (0x08) and PSS (0x0a) per the verified
+    // KMIP 3.0 Padding Method enum.
+    for (hash, padding) in [
+        (HashingAlgorithm::Sha384, Some(0x08)),
+        (HashingAlgorithm::Sha512, Some(0x08)),
+        (HashingAlgorithm::Sha384, Some(0x0a)),
+        (HashingAlgorithm::Sha512, Some(0x0a)),
+    ] {
+        let sig = sign(
+            &deps,
+            SignRequest {
+                uid: priv_uid.clone(),
+                data: message.clone(),
+                cryptographic_parameters: Some(cp(hash, padding)),
+            },
+            "k6-sign",
+        )
+        .unwrap_or_else(|e| panic!("sign {hash:?}/{padding:?} failed: {e:?}"));
+        assert_eq!(sig.signature.len(), 256, "RSA-2048 signature is 256 bytes");
+
+        let ok = signature_verify(
+            &deps,
+            SignatureVerifyRequest {
+                uid: pub_uid.clone(),
+                data: message.clone(),
+                signature: sig.signature.clone(),
+                cryptographic_parameters: Some(cp(hash, padding)),
+            },
+            "k6-verify",
+        )
+        .unwrap();
+        assert_eq!(ok.validity, SignatureValidity::Valid, "{hash:?}/{padding:?}");
+
+        // Cross-hash: same signature verified under the other hash → Invalid.
+        let other = if hash == HashingAlgorithm::Sha384 {
+            HashingAlgorithm::Sha512
+        } else {
+            HashingAlgorithm::Sha384
+        };
+        let cross = signature_verify(
+            &deps,
+            SignatureVerifyRequest {
+                uid: pub_uid.clone(),
+                data: message.clone(),
+                signature: sig.signature,
+                cryptographic_parameters: Some(cp(other, padding)),
+            },
+            "k6-verify-cross",
+        )
+        .unwrap();
+        assert_eq!(
+            cross.validity,
+            SignatureValidity::Invalid,
+            "cross-hash verify must be Invalid, not silently re-hashed"
+        );
+    }
+
+    // Verify with a hash the server can't run → Success + Invalid
+    // (CS-AC-M-3 step #4 semantics).
+    let sha1_verify = signature_verify(
+        &deps,
+        SignatureVerifyRequest {
+            uid: pub_uid.clone(),
+            data: message.clone(),
+            signature: vec![0u8; 256],
+            cryptographic_parameters: Some(cp(HashingAlgorithm::Sha1, Some(0x0a))),
+        },
+        "k6-verify-sha1",
+    )
+    .unwrap();
+    assert_eq!(sha1_verify.validity, SignatureValidity::Invalid);
+
+    // Sign with a hash the server can't run → 0x3e protocol error.
+    let sha1_sign = sign(
+        &deps,
+        SignRequest {
+            uid: priv_uid.clone(),
+            data: message,
+            cryptographic_parameters: Some(cp(HashingAlgorithm::Sha1, Some(0x08))),
+        },
+        "k6-sign-sha1",
+    )
+    .unwrap_err();
+    assert_eq!(
+        sha1_sign.result_reason(),
+        ResultReason::UnsupportedCryptographicParameters
+    );
+
+    let _ = softhsmrustv3::native::session::finalize();
+}
+
 // Suppress unused-import warning when only some types are referenced in
 // the active test set.
 #[allow(dead_code)]

@@ -203,16 +203,15 @@ pub fn sign(deps: &Deps, req: SignRequest, correlation_id: &str) -> Result<SignR
                 .cryptographic_parameters
                 .as_ref()
                 .or(obj.cryptographic_parameters.as_ref());
+            // K6 — exact padding + hash selection (SHA-256/384/512 →
+            // CKM_SHA*_RSA_PKCS{,_PSS} / CKM_ECDSA_SHA*); unsupported
+            // hashes/paddings fail 0x3e instead of silently signing
+            // SHA-256 (compliance-audit B-2).
             let native_mech = super::helpers::native_sign_mech_with_params(
                 obj.algorithm,
                 effective_cp,
             )
-            .ok_or_else(|| {
-                KmipError::failed(
-                    ResultReason::OperationNotSupported,
-                    format!("Sign: no native mechanism for {:?}", obj.algorithm),
-                )
-            })?;
+            .map_err(|e| fail_err(deps, correlation_id, "Sign", e))?;
             softhsmrustv3::native::sign(session, handle, native_mech, &req.data)
                 .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Sign"))?
         }
