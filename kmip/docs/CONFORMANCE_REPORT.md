@@ -159,6 +159,30 @@ implemented surface now exceeds Path A (Baseline-profile ops plus the
 crypto-op family, streaming, KMIP-level key wrapping on `Get`, and the
 PKCS#11 passthrough). No open scope lines remain against the corpus.
 
+### 5.1 Conformance claim — scope statement
+
+**The claim this subsystem makes is "OASIS KMIP 3.0 conformance-corpus
+conformance": every actionable transcript in the official
+`kmip-profiles-v3.0.zip` test suite passes (92/92), and the TTLV codec
+round-trips the full corpus byte-exactly.**
+
+This is explicitly **not** a claim of OASIS *Baseline Server profile*
+conformance (kmip-profiles-v3.0 §5.1.2). The delta between the two,
+tracked as compliance-audit finding K-10
+(`docs/compliance-audit-kmip30-pkcs11v32-2026-06-10.md`):
+
+| Baseline §5.1.2 requirement | Status |
+|---|---|
+| Item 9 client-to-server ops: Get Constraints (0x38), Get Usage Allocation (0x11), Set Defaults (0x36), Set Endpoint Role (0x32) | Not implemented — invoking them returns `Operation Not Supported (0x05)` (decoded, honestly rejected) |
+| Item 10 server-to-client ops: Discover Versions, Notify, Put, Query, Set Endpoint Role | No server-initiated channel exists; the server is strictly request-response |
+| Item 12.a Authentication message protocol | See fix-plan K14 status below — when implemented, enforcement is config-gated; default config is open-auth so the hermetic replay harness runs unauthenticated |
+
+The corpus never invokes any of these as requests, which is why 92/92
+and this delta coexist. If Baseline Server profile conformance becomes
+a target, the fix plan's K13 step 2 (`kmip/docs/COMPLIANCE_FIX_PLAN.md`)
+describes the implementation route; the server-to-client channel is the
+architecturally significant piece.
+
 ## 6. How to re-run the codec compliance test
 
 ```bash
