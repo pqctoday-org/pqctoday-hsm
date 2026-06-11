@@ -209,11 +209,20 @@ pub fn register(
     // `<Attribute>` envelopes inside `<Attributes>`.
     let mut custom_attributes: HashMap<String, String> = HashMap::new();
     let mut links: HashMap<String, String> = HashMap::new();
+    // KMIP 3.0 §11 — Sensitive / Extractable are client-settable at
+    // Register time (BL-M-12 supplies Sensitive=true in the template);
+    // the K7 Get/Export gates read them back from the record. The
+    // server-managed Always Sensitive / Never Extractable shadows are
+    // derived from the at-birth values.
+    let mut sensitive: Option<bool> = None;
+    let mut extractable: Option<bool> = None;
     for a in &req.attributes {
         match a {
             Attribute::Custom { name, value } => {
                 custom_attributes.insert(name.clone(), value.clone());
             }
+            Attribute::Sensitive(b)   => { sensitive = Some(*b); }
+            Attribute::Extractable(b) => { extractable = Some(*b); }
             // KMIP §11 Link family — UID references the Register
             // request can stamp onto the new object. SASED-M-2
             // pins GroupLink; CS-AC tests use PublicKey/PrivateKeyLink.
@@ -266,6 +275,10 @@ pub fn register(
         usage_limits_total: x.usage_limits_total,
         usage_limits_remaining: x.usage_limits_total,
         application_specific_information: x.application_specific_information.clone(),
+        sensitive,
+        always_sensitive: sensitive,
+        extractable,
+        never_extractable: extractable.map(|b| !b),
         last_change_date: Some(now),
         original_creation_date: Some(now),
         supersedes: None,
@@ -386,6 +399,33 @@ pub fn export(
     let obj = deps.store.get(&req.uid)?.ok_or_else(|| {
         fail_err(deps, correlation_id, "Export", KmipError::object_not_found(&req.uid))
     })?;
+
+    // KMIP 3.0 §11 — `Extractable=false` blocks all material export:
+    // `Not Extractable` (0x17). Mirrors the Get check (K7 / B-4).
+    if obj.extractable == Some(false) {
+        return Err(fail_err(
+            deps,
+            correlation_id,
+            "Export",
+            KmipError::not_extractable(format!("object {} is not Extractable", req.uid)),
+        ));
+    }
+    // KMIP 3.0 §11 — `Sensitive=true` blocks plaintext export:
+    // `Sensitive` (0x16). ExportRequest carries no
+    // KeyWrappingSpecification (deferred — no corpus transcript wraps
+    // via Export), so Sensitive always fails here; when wrapping lands,
+    // gate this on its absence exactly like Get does.
+    if obj.sensitive == Some(true) {
+        return Err(fail_err(
+            deps,
+            correlation_id,
+            "Export",
+            KmipError::sensitive(format!(
+                "object {} is Sensitive; plaintext Export denied",
+                req.uid
+            )),
+        ));
+    }
 
     // Per §6.1.22: "If the Managed Object has been Destroyed then the
     // key material for the specified managed object SHALL not be
@@ -739,5 +779,86 @@ mod tests {
             key_compression_type: None,
         }, "c").unwrap();
         assert!(exp.managed_object.is_none(), "Destroyed objects MUST NOT return key material");
+    }
+
+    #[test]
+    fn register_persists_sensitive_and_extractable_from_template() {
+        let d = deps_with();
+        let r = register(&d, RegisterRequest {
+            object_type: ObjectType::SymmetricKey,
+            attributes: vec![
+                Attribute::CryptographicAlgorithm(KmipAlgorithm::Aes),
+                Attribute::CryptographicLength(128),
+                Attribute::CryptographicUsageMask(UsageMask::ENCRYPT),
+                Attribute::Sensitive(true),
+                Attribute::Extractable(false),
+            ],
+            managed_object: Some(raw_aes128_kb()),
+            protection_storage_masks: None,
+            certificate_payload: None,
+        }, "c").unwrap();
+        let rec = d.store.get(&r.uid).unwrap().unwrap();
+        assert_eq!(rec.sensitive, Some(true));
+        assert_eq!(rec.always_sensitive, Some(true));
+        assert_eq!(rec.extractable, Some(false));
+        assert_eq!(rec.never_extractable, Some(true));
+    }
+
+    fn register_aes(d: &Deps, sensitive: Option<bool>, extractable: Option<bool>) -> String {
+        let mut attributes = vec![
+            Attribute::CryptographicAlgorithm(KmipAlgorithm::Aes),
+            Attribute::CryptographicLength(128),
+            Attribute::CryptographicUsageMask(UsageMask::ENCRYPT),
+        ];
+        if let Some(b) = sensitive { attributes.push(Attribute::Sensitive(b)); }
+        if let Some(b) = extractable { attributes.push(Attribute::Extractable(b)); }
+        register(d, RegisterRequest {
+            object_type: ObjectType::SymmetricKey,
+            attributes,
+            managed_object: Some(raw_aes128_kb()),
+            protection_storage_masks: None,
+            certificate_payload: None,
+        }, "c").unwrap().uid
+    }
+
+    #[test]
+    fn export_sensitive_fails_0x16() {
+        // ExportRequest has no KeyWrappingSpecification, so plaintext
+        // Export of a Sensitive object always fails (K7 / B-4).
+        let d = deps_with();
+        let uid = register_aes(&d, Some(true), None);
+        let err = export(&d, ExportRequest {
+            uid,
+            key_format_type: None,
+            key_wrap_type: None,
+            key_compression_type: None,
+        }, "c").unwrap_err();
+        assert_eq!(err.result_reason(), ResultReason::Sensitive);
+    }
+
+    #[test]
+    fn export_not_extractable_fails_0x17() {
+        let d = deps_with();
+        let uid = register_aes(&d, None, Some(false));
+        let err = export(&d, ExportRequest {
+            uid,
+            key_format_type: None,
+            key_wrap_type: None,
+            key_compression_type: None,
+        }, "c").unwrap_err();
+        assert_eq!(err.result_reason(), ResultReason::NotExtractable);
+    }
+
+    #[test]
+    fn export_sensitive_false_extractable_true_succeeds() {
+        let d = deps_with();
+        let uid = register_aes(&d, Some(false), Some(true));
+        let exp = export(&d, ExportRequest {
+            uid,
+            key_format_type: None,
+            key_wrap_type: None,
+            key_compression_type: None,
+        }, "c").unwrap();
+        assert!(exp.managed_object.is_some());
     }
 }
