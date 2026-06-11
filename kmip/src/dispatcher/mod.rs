@@ -67,6 +67,34 @@ use crate::kmip30::RequestPayload;
 /// [`ID_PLACEHOLDER_SENTINEL`] gets it substituted on entry.
 pub fn dispatch(deps: &Deps, request: RequestMessage) -> ResponseMessage {
     use crate::kmip30::BatchErrorContinuationOption;
+    // K4 — KMIP 3.0 §8.1.2 `Asynchronous Indicator`. This server has
+    // no asynchronous capability (Query reports `Asynchronous
+    // Capability = false`), so a client demanding `Mandatory`
+    // asynchronous processing gets every batch item failed with
+    // `OperationFailed / OperationNotSupported` instead of a silent
+    // synchronous run. `Optional` / `Prohibited` / absent all proceed
+    // synchronously.
+    if request.header.asynchronous_indicator
+        == Some(crate::kmip30::AsynchronousIndicator::Mandatory)
+    {
+        let items = request
+            .batch_items
+            .iter()
+            .map(|item| ResponseBatchItem {
+                operation: Some(item.operation),
+                result_status: ResultStatus::OperationFailed,
+                result_reason: Some(
+                    crate::error::ResultReason::OperationNotSupported.to_wire_value(),
+                ),
+                result_message: Some("asynchronous processing not supported".into()),
+                payload: None,
+            })
+            .collect();
+        return ResponseMessage {
+            header: ResponseHeader::v3_now(),
+            batch_items: items,
+        };
+    }
     let mode = request
         .header
         .batch_error_continuation_option
@@ -642,6 +670,188 @@ mod tests {
         assert_eq!(resp.batch_items.len(), 2, "Stop drops items after the failure");
         assert_eq!(resp.batch_items[0].result_status, ResultStatus::Success);
         assert_eq!(resp.batch_items[1].result_status, ResultStatus::OperationFailed);
+    }
+
+    // ── K4 — message-layer SHALLs (§8.1.2 Asynchronous Indicator /
+    // §8.1.3 Message Extension) ────────────────────────────────────
+
+    /// K4 wire helper — encode a RequestMessage with optional extra
+    /// header fields and the given BatchItem frames, then decode it
+    /// through the real wire path so the tests cover decoder +
+    /// dispatcher end-to-end.
+    fn k4_decode(
+        header_extra: Vec<crate::codec::TtlvFrame>,
+        items: Vec<crate::codec::TtlvFrame>,
+    ) -> RequestMessage {
+        use crate::codec::{encode, Tag, TtlvFrame, Value};
+        use crate::kmip30::wire::tags;
+        let mut header_children = vec![TtlvFrame::new(
+            Tag(tags::ProtocolVersion),
+            Value::Structure(vec![
+                TtlvFrame::new(Tag(tags::ProtocolVersionMajor), Value::Integer(3)),
+                TtlvFrame::new(Tag(tags::ProtocolVersionMinor), Value::Integer(0)),
+            ]),
+        )];
+        header_children.extend(header_extra);
+        let mut children = vec![TtlvFrame::new(
+            Tag(tags::RequestHeader),
+            Value::Structure(header_children),
+        )];
+        children.extend(items);
+        let frame = TtlvFrame::new(Tag(tags::RequestMessage), Value::Structure(children));
+        let mut buf = bytes::BytesMut::new();
+        encode(&frame, &mut buf);
+        crate::kmip30::decode_request_message(&buf).expect("decode")
+    }
+
+    fn k4_query_item(extension: Option<crate::codec::TtlvFrame>) -> crate::codec::TtlvFrame {
+        use crate::codec::{Tag, TtlvFrame, Value};
+        use crate::kmip30::wire::tags;
+        let mut children = vec![
+            TtlvFrame::new(
+                Tag(tags::Operation),
+                Value::Enumeration(crate::kmip30::Operation::Query.to_wire_value()),
+            ),
+            TtlvFrame::new(
+                Tag(tags::RequestPayload),
+                Value::Structure(vec![TtlvFrame::new(Tag(tags::QueryFunction), Value::Enumeration(1))]),
+            ),
+        ];
+        if let Some(ext) = extension {
+            children.push(ext);
+        }
+        TtlvFrame::new(Tag(tags::BatchItem), Value::Structure(children))
+    }
+
+    fn k4_message_extension(vendor: &str, critical: bool) -> crate::codec::TtlvFrame {
+        use crate::codec::{Tag, TtlvFrame, Value};
+        use crate::kmip30::wire::tags;
+        TtlvFrame::new(
+            Tag(tags::MessageExtension),
+            Value::Structure(vec![
+                TtlvFrame::new(Tag(tags::VendorIdentification), Value::TextString(vendor.into())),
+                TtlvFrame::new(Tag(tags::CriticalityIndicator), Value::Boolean(critical)),
+                TtlvFrame::new(Tag(tags::VendorExtension), Value::Structure(vec![])),
+            ]),
+        )
+    }
+
+    /// K4 — §8.1.2 `Asynchronous Indicator = Mandatory`: this server
+    /// has no asynchronous capability, so EVERY batch item fails with
+    /// `OperationFailed / OperationNotSupported (0x05)` instead of
+    /// being silently processed synchronously.
+    #[test]
+    fn k4_async_mandatory_fails_every_batch_item() {
+        use crate::codec::{Tag, TtlvFrame, Value};
+        use crate::kmip30::wire::tags;
+        let d = deps();
+        let msg = k4_decode(
+            vec![TtlvFrame::new(Tag(tags::AsynchronousIndicator), Value::Enumeration(0x01))],
+            vec![k4_query_item(None), k4_query_item(None)],
+        );
+        let resp = dispatch(&d, msg);
+        assert_eq!(resp.batch_items.len(), 2, "every batch item gets a response");
+        for item in &resp.batch_items {
+            assert_eq!(item.result_status, ResultStatus::OperationFailed);
+            assert_eq!(
+                item.result_reason,
+                Some(crate::error::ResultReason::OperationNotSupported.to_wire_value()),
+                "must be OperationNotSupported (0x05)",
+            );
+            assert_eq!(
+                item.result_message.as_deref(),
+                Some("asynchronous processing not supported"),
+            );
+            assert_eq!(item.operation, Some(crate::kmip30::Operation::Query), "§8.2.3 echo");
+        }
+    }
+
+    /// K4 — `Asynchronous Indicator = Optional` (and `Prohibited`) →
+    /// the request processes synchronously exactly as without it.
+    #[test]
+    fn k4_async_optional_processes_synchronously() {
+        use crate::codec::{Tag, TtlvFrame, Value};
+        use crate::kmip30::wire::tags;
+        for wire in [0x02u32 /* Optional */, 0x03 /* Prohibited */] {
+            let d = deps();
+            let msg = k4_decode(
+                vec![TtlvFrame::new(Tag(tags::AsynchronousIndicator), Value::Enumeration(wire))],
+                vec![k4_query_item(None)],
+            );
+            let resp = dispatch(&d, msg);
+            assert_eq!(resp.batch_items.len(), 1);
+            assert_eq!(
+                resp.batch_items[0].result_status,
+                ResultStatus::Success,
+                "indicator {wire:#x} must process synchronously",
+            );
+        }
+    }
+
+    /// K4 — critical Message Extension under `Continue`: the carrying
+    /// item fails with `InvalidMessage` naming the vendor; the sibling
+    /// item still processes.
+    #[test]
+    fn k4_critical_message_extension_continue_spares_siblings() {
+        use crate::codec::{Tag, TtlvFrame, Value};
+        use crate::kmip30::wire::tags;
+        let d = deps();
+        let msg = k4_decode(
+            vec![TtlvFrame::new(
+                Tag(tags::BatchErrorContinuationOption),
+                Value::Enumeration(BatchErrorContinuationOption::Continue.to_wire_value()),
+            )],
+            vec![
+                k4_query_item(Some(k4_message_extension("acme-corp", true))),
+                k4_query_item(None),
+            ],
+        );
+        let resp = dispatch(&d, msg);
+        assert_eq!(resp.batch_items.len(), 2, "Continue keeps processing");
+        assert_eq!(resp.batch_items[0].result_status, ResultStatus::OperationFailed);
+        assert_eq!(
+            resp.batch_items[0].result_reason,
+            Some(crate::error::ResultReason::InvalidMessage.to_wire_value()),
+            "§9 reject rule → InvalidMessage (0x04)",
+        );
+        let message = resp.batch_items[0].result_message.as_deref().unwrap_or("");
+        assert!(message.contains("acme-corp"), "names the vendor extension: {message}");
+        assert_eq!(resp.batch_items[1].result_status, ResultStatus::Success, "sibling unaffected");
+    }
+
+    /// K4 — critical Message Extension under `Stop` (the default):
+    /// the failure halts the batch, later items are not returned.
+    #[test]
+    fn k4_critical_message_extension_stop_halts_batch() {
+        let d = deps();
+        let msg = k4_decode(
+            vec![], // no Batch Error Continuation Option → Stop default
+            vec![
+                k4_query_item(Some(k4_message_extension("acme-corp", true))),
+                k4_query_item(None),
+            ],
+        );
+        let resp = dispatch(&d, msg);
+        assert_eq!(resp.batch_items.len(), 1, "Stop drops items after the failure");
+        assert_eq!(resp.batch_items[0].result_status, ResultStatus::OperationFailed);
+        assert_eq!(
+            resp.batch_items[0].result_reason,
+            Some(crate::error::ResultReason::InvalidMessage.to_wire_value()),
+        );
+    }
+
+    /// K4 — non-critical Message Extension is skipped; the item
+    /// processes normally.
+    #[test]
+    fn k4_non_critical_message_extension_ignored() {
+        let d = deps();
+        let msg = k4_decode(
+            vec![],
+            vec![k4_query_item(Some(k4_message_extension("acme-corp", false)))],
+        );
+        let resp = dispatch(&d, msg);
+        assert_eq!(resp.batch_items.len(), 1);
+        assert_eq!(resp.batch_items[0].result_status, ResultStatus::Success);
     }
 
     /// `HANDLED_OPERATIONS` is duplicate-free and every entry routes
