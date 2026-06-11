@@ -180,42 +180,59 @@ fn attributes_from_record(r: &ObjectRecord) -> Vec<Attribute> {
     // Baseline corpus pins `Software` (0x01) on every test-created
     // managed object. BL-M-14 / SKLC-O-1 step #3 / AKLC-O-1 step #3.
     out.push(Attribute::ProtectionStorageMask(0x01));
-    // KMIP §11 `Public Key Link` / `Private Key Link` — UID refs
-    // between key-pair halves. Surfaced when the record's `links`
-    // map has the relevant entry (populated by `create_key_pair`).
-    if let Some(uid) = r.links.get("PublicKeyLink") {
-        out.push(Attribute::PublicKeyLink(uid.clone()));
-    }
-    if let Some(uid) = r.links.get("PrivateKeyLink") {
-        out.push(Attribute::PrivateKeyLink(uid.clone()));
-    }
-    if let Some(uid) = r.links.get("NextLink") {
-        out.push(Attribute::NextLink(uid.clone()));
-    }
-    if let Some(uid) = r.links.get("PreviousLink") {
-        out.push(Attribute::PreviousLink(uid.clone()));
+    // KMIP §11 Link attributes — emit EVERY entry of the record's
+    // `links` map (K-15), not a cherry-picked subset. Keys are the
+    // canonical link-type names written by `create_key_pair`,
+    // Register, and the attribute-mutation ops. Sorted for
+    // deterministic output (HashMap iteration order is random).
+    {
+        let mut link_keys: Vec<&String> = r.links.keys().collect();
+        link_keys.sort();
+        for k in link_keys {
+            let uid = r.links[k].clone();
+            match k.as_str() {
+                "PublicKeyLink"  => out.push(Attribute::PublicKeyLink(uid)),
+                "PrivateKeyLink" => out.push(Attribute::PrivateKeyLink(uid)),
+                "NextLink"       => out.push(Attribute::NextLink(uid)),
+                "PreviousLink"   => out.push(Attribute::PreviousLink(uid)),
+                "GroupLink"      => out.push(Attribute::GroupLink(uid)),
+                // Unknown link-type keys have no wire codepoint in the
+                // Attribute enum yet — nothing stored writes them today.
+                _ => {}
+            }
+        }
     }
     if let Some(n) = r.protection_period { out.push(Attribute::ProtectionPeriod(n)); }
     if let Some(n) = r.rotate_interval { out.push(Attribute::RotateInterval(n)); }
     if let Some(n) = r.rotate_offset { out.push(Attribute::RotateOffset(n)); }
     if let Some(n) = r.rotate_generation { out.push(Attribute::RotateGeneration(n)); }
-    if let Some(n) = r.usage_limits_total { out.push(Attribute::UsageLimitsTotal(n)); }
+    // KMIP §11 `Usage Limits` — full structure (K-15): Total budget,
+    // remaining Count (decremented per protect-op by `encrypt.rs`),
+    // and Unit. Unit defaults to Byte (0x01) when a budget exists
+    // without an explicit unit — the engine's accounting deducts
+    // bytes (CS-BC-M-7), so Byte is the truthful default.
+    if let Some(total) = r.usage_limits_total {
+        out.push(Attribute::UsageLimits {
+            total,
+            count: r.usage_limits_remaining,
+            unit: Some(r.usage_limits_unit.unwrap_or(0x01)),
+        });
+    }
     // Custom attributes — surface each as Attribute::Custom.
     for (name, value) in &r.custom_attributes {
         out.push(Attribute::Custom { name: name.clone(), value: value.clone() });
     }
 
-    // KMIP 3.0 §11 + Profiles v3.0 §4.1.1 item 10 — `Digest` is a
-    // server-computed structure (HashingAlgorithm + DigestValue
-    // + optional KeyFormatType). Value is variable so the comparator
-    // accepts whatever we emit; we use SHA-256 over the stored key
-    // material (or an empty hash when material isn't present).
-    {
-        use sha2::{Digest as _, Sha256};
-        let digest_bytes = match &r.key_material {
-            Some(km) => Sha256::digest(km).to_vec(),
-            None => Sha256::digest(r.uid.as_bytes()).to_vec(),
-        };
+    // KMIP 3.0 §11 + Profiles v3.0 §4.1.1 item 10 — `Digest` is the
+    // server-computed SHA-256 over the object's ACTUAL key material
+    // (K-14): persisted at creation (`digest_value` — Register hashes
+    // the supplied bytes, Create / CreateKeyPair hash the engine-held
+    // CKA_VALUE via `native::get_value_digest_sha256`), with a
+    // compute-on-read fallback for records carrying raw material.
+    // When no material was ever available the attribute is OMITTED —
+    // fabricating a digest from the UID string would violate §11
+    // (Digest = hash of the Key Material bytes).
+    if let Some(digest_bytes) = record_digest(r) {
         out.push(Attribute::Digest(crate::kmip30::DigestAttribute {
             hashing_algorithm: crate::kmip30::HashingAlgorithm::Sha256,
             digest_value: digest_bytes,
@@ -224,17 +241,37 @@ fn attributes_from_record(r: &ObjectRecord) -> Vec<Attribute> {
     }
 
     // KMIP 3.0 §11 + Profiles v3.0 §4.1 RV item 6 — `Random Number
-    // Generator` structure. Fields are variable per spec; we report a
-    // deterministic ANSI X9.31 / AES-256 entry that covers the OASIS
-    // Baseline shape (SKFF-M-11 etc. compare presence + tag-name only).
+    // Generator` structure. The engine sources all key material from
+    // the OS entropy pool (`rand::rngs::OsRng` — see
+    // `rust/src/native/keygen.rs`), not a managed DRBG, so the honest
+    // RNGAlgorithm is `Unspecified` (0x01 per the spec's `RNG
+    // Algorithm` enum). The OASIS fixtures show "ANSI X9.31 / AES-256"
+    // but the replay harness treats the whole structure as opaque
+    // (§4.1 RV item 6 — fields are variable), so honesty here is
+    // corpus-safe. (The previous hardcoded 0x02 was doubly wrong:
+    // 0x02 is "FIPS 186-2", not ANSI X9.31, and neither is what the
+    // engine uses.)
     out.push(Attribute::RandomNumberGenerator(crate::kmip30::RngAttribute {
-        rng_algorithm: 0x02, // ANSIX9_31 — see kmip-spec-3.0-tags-enums.json `enums.RNG Algorithm`
-        cryptographic_algorithm: Some(crate::kmip30::KmipAlgorithm::Aes),
-        cryptographic_length: Some(256),
+        rng_algorithm: 0x01, // Unspecified
+        cryptographic_algorithm: None,
+        cryptographic_length: None,
     }));
 
     let _ = UsageMask::empty(); // touch import so future expansion compiles cleanly
     out
+}
+
+/// K-14 — SHA-256 of the object's actual material, or `None` when the
+/// server has never seen material for this object (engine-less unit
+/// tests, value-less opaque objects). Order of preference: the digest
+/// persisted at creation, then raw `key_material` bytes, then the
+/// Certificate Value DER.
+pub(crate) fn record_digest(r: &ObjectRecord) -> Option<Vec<u8>> {
+    use sha2::{Digest as _, Sha256};
+    r.digest_value
+        .clone()
+        .or_else(|| r.key_material.as_deref().map(|b| Sha256::digest(b).to_vec()))
+        .or_else(|| r.certificate_value.as_deref().map(|b| Sha256::digest(b).to_vec()))
 }
 
 fn matches_name(attr: &Attribute, name: &str) -> bool {
@@ -307,7 +344,7 @@ pub(crate) fn canonical_attribute_name(attr: &Attribute) -> &'static str {
         Attribute::RotateInterval(_)         => "RotateInterval",
         Attribute::RotateOffset(_)           => "RotateOffset",
         Attribute::RotateGeneration(_)       => "RotateGeneration",
-        Attribute::UsageLimitsTotal(_)       => "UsageLimits",
+        Attribute::UsageLimits { .. }        => "UsageLimits",
         Attribute::CryptographicParameters(_) => "CryptographicParameters",
         Attribute::Digest(_)                  => "Digest",
         Attribute::RandomNumberGenerator(_)   => "RandomNumberGenerator",
@@ -385,6 +422,159 @@ mod tests {
         }, "c").unwrap();
         assert_eq!(r.attributes.len(), 1);
         assert!(matches!(r.attributes[0], Attribute::State(_)));
+    }
+
+    /// K-14 — Digest must be the SHA-256 of the ACTUAL key material.
+    #[test]
+    fn digest_is_sha256_of_key_material() {
+        use sha2::{Digest as _, Sha256};
+        let d = deps_with();
+        d.store.put(ObjectRecord {
+            uid: "km".into(),
+            algorithm: KmipAlgorithm::Aes,
+            cryptographic_length: 256,
+            usage_mask: UsageMask::ENCRYPT,
+            state: State::Active,
+            initial_date: OffsetDateTime::UNIX_EPOCH,
+            key_material: Some(vec![0xAA; 32]),
+            ..ObjectRecord::default()
+        }).unwrap();
+        let r = get_attributes(&d, GetAttributesRequest {
+            uid: "km".into(),
+            attribute_references: vec!["Digest".into()],
+        }, "c").unwrap();
+        assert_eq!(r.attributes.len(), 1);
+        match &r.attributes[0] {
+            Attribute::Digest(dg) => {
+                assert_eq!(dg.digest_value, Sha256::digest(vec![0xAA; 32]).to_vec());
+            }
+            other => panic!("expected Digest, got {other:?}"),
+        }
+    }
+
+    /// K-14 — a digest persisted at creation (engine-held material)
+    /// takes precedence over compute-on-read.
+    #[test]
+    fn digest_prefers_persisted_value() {
+        let d = deps_with();
+        d.store.put(ObjectRecord {
+            uid: "dv".into(),
+            algorithm: KmipAlgorithm::Aes,
+            cryptographic_length: 256,
+            usage_mask: UsageMask::ENCRYPT,
+            state: State::Active,
+            initial_date: OffsetDateTime::UNIX_EPOCH,
+            digest_value: Some(vec![0x42; 32]),
+            ..ObjectRecord::default()
+        }).unwrap();
+        let r = get_attributes(&d, GetAttributesRequest {
+            uid: "dv".into(),
+            attribute_references: vec!["Digest".into()],
+        }, "c").unwrap();
+        match &r.attributes[0] {
+            Attribute::Digest(dg) => assert_eq!(dg.digest_value, vec![0x42; 32]),
+            other => panic!("expected Digest, got {other:?}"),
+        }
+    }
+
+    /// K-14 — no material, no persisted digest → Digest is OMITTED,
+    /// never fabricated from the UID string.
+    #[test]
+    fn digest_omitted_when_material_unavailable() {
+        let d = deps_with();
+        put(&d, "u"); // key_material: None, digest_value: None
+        let r = get_attributes(&d, GetAttributesRequest {
+            uid: "u".into(),
+            attribute_references: vec![],
+        }, "c").unwrap();
+        assert!(
+            !r.attributes.iter().any(|a| matches!(a, Attribute::Digest(_))),
+            "Digest must be omitted when no material was ever available"
+        );
+    }
+
+    /// K-15 — every entry of the links map is emitted, not a
+    /// cherry-picked subset.
+    #[test]
+    fn all_stored_links_are_emitted() {
+        let d = deps_with();
+        let mut links = std::collections::HashMap::new();
+        links.insert("PublicKeyLink".to_string(), "pub-1".to_string());
+        links.insert("PrivateKeyLink".to_string(), "prv-1".to_string());
+        links.insert("NextLink".to_string(), "next-1".to_string());
+        links.insert("PreviousLink".to_string(), "prev-1".to_string());
+        links.insert("GroupLink".to_string(), "grp-1".to_string());
+        d.store.put(ObjectRecord {
+            uid: "ln".into(),
+            algorithm: KmipAlgorithm::Aes,
+            cryptographic_length: 256,
+            usage_mask: UsageMask::ENCRYPT,
+            state: State::Active,
+            initial_date: OffsetDateTime::UNIX_EPOCH,
+            links,
+            ..ObjectRecord::default()
+        }).unwrap();
+        let r = get_attributes(&d, GetAttributesRequest {
+            uid: "ln".into(),
+            attribute_references: vec![],
+        }, "c").unwrap();
+        assert!(r.attributes.iter().any(|a| matches!(a, Attribute::PublicKeyLink(u) if u == "pub-1")));
+        assert!(r.attributes.iter().any(|a| matches!(a, Attribute::PrivateKeyLink(u) if u == "prv-1")));
+        assert!(r.attributes.iter().any(|a| matches!(a, Attribute::NextLink(u) if u == "next-1")));
+        assert!(r.attributes.iter().any(|a| matches!(a, Attribute::PreviousLink(u) if u == "prev-1")));
+        assert!(r.attributes.iter().any(|a| matches!(a, Attribute::GroupLink(u) if u == "grp-1")));
+    }
+
+    /// K-15 — UsageLimits is emitted as the full structure: Total +
+    /// remaining Count + Unit (Byte default for the byte-accounting
+    /// engine).
+    #[test]
+    fn usage_limits_full_structure_emitted() {
+        let d = deps_with();
+        d.store.put(ObjectRecord {
+            uid: "ul".into(),
+            algorithm: KmipAlgorithm::Aes,
+            cryptographic_length: 256,
+            usage_mask: UsageMask::ENCRYPT,
+            state: State::Active,
+            initial_date: OffsetDateTime::UNIX_EPOCH,
+            usage_limits_total: Some(16),
+            usage_limits_remaining: Some(4),
+            ..ObjectRecord::default()
+        }).unwrap();
+        let r = get_attributes(&d, GetAttributesRequest {
+            uid: "ul".into(),
+            attribute_references: vec!["UsageLimits".into()],
+        }, "c").unwrap();
+        assert_eq!(r.attributes.len(), 1);
+        match &r.attributes[0] {
+            Attribute::UsageLimits { total, count, unit } => {
+                assert_eq!(*total, 16);
+                assert_eq!(*count, Some(4));
+                assert_eq!(*unit, Some(0x01)); // Byte
+            }
+            other => panic!("expected UsageLimits, got {other:?}"),
+        }
+    }
+
+    /// RNG honesty — the engine draws from the OS entropy pool, so the
+    /// attribute reports `Unspecified` (0x01), not a fabricated DRBG.
+    #[test]
+    fn rng_attribute_reports_unspecified() {
+        let d = deps_with();
+        put(&d, "u");
+        let r = get_attributes(&d, GetAttributesRequest {
+            uid: "u".into(),
+            attribute_references: vec!["RandomNumberGenerator".into()],
+        }, "c").unwrap();
+        match &r.attributes[0] {
+            Attribute::RandomNumberGenerator(rng) => {
+                assert_eq!(rng.rng_algorithm, 0x01);
+                assert_eq!(rng.cryptographic_algorithm, None);
+                assert_eq!(rng.cryptographic_length, None);
+            }
+            other => panic!("expected RandomNumberGenerator, got {other:?}"),
+        }
     }
 
     #[test]

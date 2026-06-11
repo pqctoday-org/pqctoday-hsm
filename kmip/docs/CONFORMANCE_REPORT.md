@@ -122,6 +122,36 @@ the shared secret was wire-ambiguous with classical RandomIV responses
 (`vendor_tags` section). No OASIS corpus transcript exercises this path,
 so corpus conformance is unaffected.
 
+### 4.2 Synthesized (corpus-pinned) attribute values (K11 / K-16)
+
+After the K11 attribute-truthfulness pass, `Last Change Date` is
+stamped by every attribute-mutation op (§11 SHALL), `Digest` is the
+SHA-256 of the **actual** key material (persisted at creation; computed
+inside the engine boundary for non-extractable private halves via
+`native::get_value_digest_sha256`, and **omitted** when no material was
+ever available instead of fabricated), all stored Link entries and the
+full `UsageLimits` structure (Total / Count / Unit) are emitted, and
+`Random Number Generator` reports `Unspecified` (0x01) — the engine
+draws from the OS entropy pool (`rand::rngs::OsRng`), not a managed
+DRBG. The harness treats Digest / RNG structure interiors as opaque
+(Profiles v3.0 §4.1.1 item 10 / §4.1 RV item 6), so honest values are
+corpus-safe.
+
+The remaining values below are **synthesized defaults pinned by the
+OASIS corpus shape**, not server-tracked state
+(`ops/get_attributes.rs::attributes_from_record`):
+
+| Attribute | Emitted value | Why |
+|---|---|---|
+| `Object Class` | `"User"` (unless explicitly set) | Baseline corpus expects `User` on every test-created object |
+| `Lease Time` | `3600` s (unless explicitly set) | BL-M-14 / AKLC-O-1 / SKLC-O-1 pin 3600 on fresh keys |
+| `Protection Storage Mask` | `0x01` (Software) | BL-M-14 / SKLC-O-1 / AKLC-O-1 step #3 pin Software |
+| `Key Format Type` | `Raw` (0x01) when the record carries none | §6.2 default for Create/CreateKeyPair (no KeyBlock); SKLC-O-1 step #3 |
+
+The OASIS fixtures display `RNGAlgorithm = ANSIX9_31 / AES / 256`, but
+that is **not** comparator-pinned (opaque structure) — the server's
+`Unspecified` report is the truthful one and replays 92/92.
+
 ## 5. Scope decision: resolved
 
 The 2026-06-08 revision proposed Paths A/B/C. Events overtook it: the

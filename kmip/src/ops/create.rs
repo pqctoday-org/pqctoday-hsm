@@ -139,6 +139,11 @@ pub fn create(deps: &Deps, req: CreateRequest, correlation_id: &str) -> Result<C
 
     // Phase 7b: real bridge call when a session is wired.
     let cka_id_bytes = Uuid::new_v4().as_bytes().to_vec();
+    // K-14 — KMIP §11 `Digest`: SHA-256 over the actual key material,
+    // computed inside the engine boundary at generate time (the hash
+    // leaves the engine, the material doesn't). `None` when no engine
+    // session is wired (unit tests) — GetAttributes then omits Digest.
+    let mut digest_value: Option<Vec<u8>> = None;
     if let Some(session) = deps.engine_session {
         let result = match algo {
             KmipAlgorithm::Aes => {
@@ -166,13 +171,18 @@ pub fn create(deps: &Deps, req: CreateRequest, correlation_id: &str) -> Result<C
                 ));
             }
         };
-        if let Err(rv) = result {
-            return Err(fail_err(
-                deps,
-                correlation_id,
-                "Create",
-                super::helpers::ck_rv_to_kmip_error(rv, "Create"),
-            ));
+        match result {
+            Ok(handle) => {
+                digest_value = softhsmrustv3::native::get_value_digest_sha256(session, handle);
+            }
+            Err(rv) => {
+                return Err(fail_err(
+                    deps,
+                    correlation_id,
+                    "Create",
+                    super::helpers::ck_rv_to_kmip_error(rv, "Create"),
+                ));
+            }
         }
     }
 
@@ -210,6 +220,7 @@ pub fn create(deps: &Deps, req: CreateRequest, correlation_id: &str) -> Result<C
         key_material: None,
 
         key_format_type: None,
+        digest_value,
         // KMIP §11 Fresh = True for server-generated objects.
         fresh: Some(true),
         application_specific_information: x.application_specific_information.clone(),

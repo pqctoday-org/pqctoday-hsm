@@ -262,6 +262,7 @@ pub(crate) mod tags {
     pub const RequestCount: u32           = 0x42_014c;
     pub const UsageLimits: u32            = 0x42_0095;
     pub const UsageLimitsTotal: u32       = 0x42_0097;
+    pub const UsageLimitsUnit: u32        = 0x42_0098;
     /// KMIP 3.0 §6.1.{54,55} RNG tags.
     pub const DataLength: u32             = 0x42_00c4;
     /// KMIP 3.0 §6.1.42 PKCS#11 passthrough tags.
@@ -1440,21 +1441,31 @@ fn decode_attribute_v3(frame: &TtlvFrame) -> Result<Option<Attribute>, WireError
         ),
         // KMIP §11 `Usage Limits` Structure — UsageLimitsTotal +
         // UsageLimitsUnit (+ UsageLimitsCount on the response side).
-        // v0.1 surfaces only the Total field so AddAttribute /
-        // Register can set the encrypt-byte budget. CS-BC-M-7 pins
-        // a 16-byte budget that two 16-byte Encrypts must exhaust.
+        // CS-BC-M-7 pins a 16-byte budget (Total + Unit=Byte) that two
+        // 16-byte Encrypts must exhaust.
         tags::UsageLimits => {
             let mut total: i64 = 0;
+            let mut count: Option<i64> = None;
+            let mut unit: Option<u32> = None;
             for inner in expect_structure(frame, "Usage Limits")? {
-                if inner.tag.0 == tags::UsageLimitsTotal {
-                    match inner.value {
+                match inner.tag.0 {
+                    tags::UsageLimitsTotal => match inner.value {
                         Value::LongInteger(n) => total = n,
                         Value::Integer(n)     => total = n as i64,
                         _ => {}
+                    },
+                    tags::UsageLimitsCount => match inner.value {
+                        Value::LongInteger(n) => count = Some(n),
+                        Value::Integer(n)     => count = Some(n as i64),
+                        _ => {}
+                    },
+                    tags::UsageLimitsUnit => {
+                        if let Value::Enumeration(u) = inner.value { unit = Some(u); }
                     }
+                    _ => {}
                 }
             }
-            Attribute::UsageLimitsTotal(total)
+            Attribute::UsageLimits { total, count, unit }
         }
         // KMIP 3.0 §11 — `Attribute` (0x420008) is the v1.x-style
         // vendor-extension envelope: VendorIdentification + AttributeName
@@ -2931,13 +2942,19 @@ fn encode_attribute_v3(a: &Attribute) -> TtlvFrame {
         Attribute::RotateInterval(n)           => TtlvFrame::new(Tag(tags::RotateInterval),           Value::Interval(*n)),
         Attribute::RotateOffset(n)             => TtlvFrame::new(Tag(tags::RotateOffset),             Value::Integer(*n)),
         Attribute::RotateGeneration(n)         => TtlvFrame::new(Tag(tags::RotateGeneration),         Value::Integer(*n)),
-        Attribute::UsageLimitsTotal(n)         => {
-            TtlvFrame::new(
-                Tag(tags::UsageLimits),
-                Value::Structure(vec![
-                    TtlvFrame::new(Tag(tags::UsageLimitsTotal), Value::LongInteger(*n)),
-                ]),
-            )
+        Attribute::UsageLimits { total, count, unit } => {
+            // Child order mirrors the OASIS XML fixtures (CS-BC-M-7):
+            // Total, Count, Unit.
+            let mut children = vec![
+                TtlvFrame::new(Tag(tags::UsageLimitsTotal), Value::LongInteger(*total)),
+            ];
+            if let Some(c) = count {
+                children.push(TtlvFrame::new(Tag(tags::UsageLimitsCount), Value::LongInteger(*c)));
+            }
+            if let Some(u) = unit {
+                children.push(TtlvFrame::new(Tag(tags::UsageLimitsUnit), Value::Enumeration(*u)));
+            }
+            TtlvFrame::new(Tag(tags::UsageLimits), Value::Structure(children))
         }
         Attribute::CryptographicParameters(cp) => encode_cryptographic_parameters(cp),
         Attribute::Digest(d) => {

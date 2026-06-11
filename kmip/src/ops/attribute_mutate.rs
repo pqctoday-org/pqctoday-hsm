@@ -96,7 +96,7 @@ pub fn add_attribute(
     }
 
     apply_attribute(&mut obj, &req.new_attribute);
-    deps.store.update(obj)?;
+    commit_mutation(deps, obj)?;
     emit_success(deps, correlation_id, "AddAttribute");
     Ok(AddAttributeResponse { uid: req.uid })
 }
@@ -160,7 +160,7 @@ pub fn modify_attribute(
     }
 
     apply_attribute(&mut obj, &req.new_attribute);
-    deps.store.update(obj)?;
+    commit_mutation(deps, obj)?;
     emit_success(deps, correlation_id, "ModifyAttribute");
     Ok(ModifyAttributeResponse { uid: req.uid })
 }
@@ -227,7 +227,7 @@ pub fn delete_attribute(
             )));
     }
 
-    deps.store.update(obj)?;
+    commit_mutation(deps, obj)?;
     emit_success(deps, correlation_id, "DeleteAttribute");
     Ok(DeleteAttributeResponse { uid: req.uid })
 }
@@ -258,7 +258,7 @@ pub fn set_attribute(
     }
 
     apply_attribute(&mut obj, &req.new_attribute);
-    deps.store.update(obj)?;
+    commit_mutation(deps, obj)?;
     emit_success(deps, correlation_id, "SetAttribute");
     Ok(SetAttributeResponse { uid: req.uid })
 }
@@ -311,12 +311,22 @@ pub fn adjust_attribute(
         }
     }
 
-    deps.store.update(obj)?;
+    commit_mutation(deps, obj)?;
     emit_success(deps, correlation_id, "AdjustAttribute");
     Ok(AdjustAttributeResponse { uid: req.uid })
 }
 
 // ── Shared helpers ─────────────────────────────────────────────────────────
+
+/// Shared commit path for all five mutation ops. KMIP 3.0 §11 — `Last
+/// Change Date` is server-set and SHALL be updated whenever any
+/// attribute of the managed object changes (K-13); stamping it here,
+/// immediately before `store.update`, guarantees no mutation op can
+/// forget it.
+fn commit_mutation(deps: &Deps, mut obj: ObjectRecord) -> Result<()> {
+    obj.last_change_date = Some(OffsetDateTime::now_utc());
+    deps.store.update(obj)
+}
 
 fn policy_gate(deps: &Deps, obj: &ObjectRecord, op: &'static str, correlation_id: &str) -> Result<()> {
     let started = OffsetDateTime::now_utc();
@@ -769,6 +779,74 @@ mod tests {
             uid: "u".into(), new_attribute: Attribute::Name("second".into()),
         }, "c").unwrap();
         assert_eq!(d.store.get("u").unwrap().unwrap().name.as_deref(), Some("second"));
+    }
+
+    /// K-13 — KMIP 3.0 §11: `Last Change Date` SHALL be updated by
+    /// every attribute-mutation op. The `put()` fixture stores
+    /// `last_change_date: None`, so any `Some(_)` after the op proves
+    /// the shared commit path stamped it.
+    #[test]
+    fn add_attribute_updates_last_change_date() {
+        let d = deps_with();
+        put(&d, "u");
+        assert!(d.store.get("u").unwrap().unwrap().last_change_date.is_none());
+        add_attribute(&d, AddAttributeRequest {
+            uid: "u".into(), new_attribute: Attribute::Name("n".into()),
+        }, "c").unwrap();
+        assert!(d.store.get("u").unwrap().unwrap().last_change_date.is_some());
+    }
+
+    #[test]
+    fn set_attribute_updates_last_change_date() {
+        let d = deps_with();
+        put(&d, "u");
+        set_attribute(&d, SetAttributeRequest {
+            uid: "u".into(), new_attribute: Attribute::Comment("c".into()),
+        }, "c").unwrap();
+        assert!(d.store.get("u").unwrap().unwrap().last_change_date.is_some());
+    }
+
+    #[test]
+    fn modify_attribute_updates_last_change_date() {
+        let d = deps_with();
+        put(&d, "u");
+        add_attribute(&d, AddAttributeRequest {
+            uid: "u".into(), new_attribute: Attribute::Name("v1".into()),
+        }, "c").unwrap();
+        let after_add = d.store.get("u").unwrap().unwrap().last_change_date.unwrap();
+        modify_attribute(&d, ModifyAttributeRequest {
+            uid: "u".into(), current_attribute: None,
+            new_attribute: Attribute::Name("v2".into()),
+        }, "c").unwrap();
+        let after_modify = d.store.get("u").unwrap().unwrap().last_change_date.unwrap();
+        assert!(after_modify >= after_add);
+    }
+
+    #[test]
+    fn delete_attribute_updates_last_change_date() {
+        let d = deps_with();
+        put(&d, "u");
+        add_attribute(&d, AddAttributeRequest {
+            uid: "u".into(), new_attribute: Attribute::Name("x".into()),
+        }, "c").unwrap();
+        delete_attribute(&d, DeleteAttributeRequest {
+            uid: "u".into(), current_attribute: None,
+            attribute_reference: Some("Name".into()),
+        }, "c").unwrap();
+        assert!(d.store.get("u").unwrap().unwrap().last_change_date.is_some());
+    }
+
+    #[test]
+    fn adjust_attribute_updates_last_change_date() {
+        let d = deps_with();
+        put(&d, "u");
+        adjust_attribute(&d, AdjustAttributeRequest {
+            uid: "u".into(),
+            attribute_reference: "Cryptographic Usage Mask".into(),
+            adjustment_type: AdjustmentType::Increment,
+            adjustment_value: Some(UsageMask::SIGN.bits() as i64),
+        }, "c").unwrap();
+        assert!(d.store.get("u").unwrap().unwrap().last_change_date.is_some());
     }
 
     #[test]

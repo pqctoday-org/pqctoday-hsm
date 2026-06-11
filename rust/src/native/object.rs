@@ -109,6 +109,22 @@ pub fn get_attribute(_session: u32, handle: u32, attr_type: u32) -> Option<Vec<u
     get_object_attr_bytes(handle, attr_type)
 }
 
+/// SHA-256 digest of an object's `CKA_VALUE` bytes, computed inside the
+/// engine boundary. Unlike [`get_attribute`] this does NOT export the
+/// material — only the 32-byte hash leaves the engine — so the
+/// PKCS#11 sensitivity policy (`CKA_SENSITIVE` / `CKA_EXTRACTABLE`)
+/// does not block it. Exists for the KMIP layer: KMIP 3.0 §11 requires
+/// the server to surface a `Digest` attribute (hash of the actual key
+/// material) on every managed cryptographic object, including
+/// non-extractable private keys.
+///
+/// Returns `None` when the object has no `CKA_VALUE` (e.g. a destroyed
+/// or value-less object).
+pub fn get_value_digest_sha256(_session: u32, handle: u32) -> Option<Vec<u8>> {
+    use sha2::{Digest, Sha256};
+    get_object_attr_bytes(handle, CKA_VALUE).map(|v| Sha256::digest(&v).to_vec())
+}
+
 /// Mutate an attribute, enforcing PKCS#11 v3.2 §4.1.1 policy: server-managed
 /// attributes are CKR_ATTRIBUTE_READ_ONLY; CKA_SENSITIVE only FALSE→TRUE;
 /// CKA_EXTRACTABLE only TRUE→FALSE. Vendor stateful-key attrs (≥0x8000_0000)
