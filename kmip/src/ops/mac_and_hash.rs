@@ -38,6 +38,11 @@ pub fn mac(deps: &Deps, req: MacRequest, correlation_id: &str) -> Result<MacResp
         fail_err(deps, correlation_id, "MAC", KmipError::object_not_found(&req.uid))
     })?;
     require_active(&obj, "MAC")?;
+    // KMIP 3.0 §11 Cryptographic Usage Mask — MAC requires the
+    // `MAC Generate` bit (0x80); missing → 0x29 (K12, audit K-9).
+    super::helpers::enforce_usage_mask(
+        deps, correlation_id, "MAC", &obj, crate::kmip30::UsageMask::MAC_GENERATE,
+    )?;
     policy_gate(deps, &obj, "MAC", started, correlation_id)?;
 
     let key_bytes = obj.key_material.as_deref().ok_or_else(|| {
@@ -79,6 +84,11 @@ pub fn mac_verify(
         fail_err(deps, correlation_id, "MACVerify", KmipError::object_not_found(&req.uid))
     })?;
     require_active(&obj, "MACVerify")?;
+    // KMIP 3.0 §11 Cryptographic Usage Mask — MAC Verify requires the
+    // `MAC Verify` bit (0x100); missing → 0x29 (K12, audit K-9).
+    super::helpers::enforce_usage_mask(
+        deps, correlation_id, "MACVerify", &obj, crate::kmip30::UsageMask::MAC_VERIFY,
+    )?;
     policy_gate(deps, &obj, "MACVerify", started, correlation_id)?;
 
     let key_bytes = obj.key_material.as_deref().ok_or_else(|| {
@@ -243,6 +253,48 @@ mod tests {
             key_format_type: Some(0x01),
         ..ObjectRecord::default()
 }).unwrap();
+    }
+
+    /// K12 — §11 Cryptographic Usage Mask: MAC requires `MAC Generate`
+    /// (0x80) and MACVerify requires `MAC Verify` (0x100); a present
+    /// mask without the bit fails 0x29. Positive case is pinned by
+    /// `mac_then_verify_round_trips` (mask = MAC_GENERATE | MAC_VERIFY).
+    #[test]
+    fn mac_ops_without_required_mask_bits_are_incompatible() {
+        let d = deps_with();
+        // Key with only MAC_VERIFY → MAC (generate) is rejected …
+        d.store.put(ObjectRecord {
+            uid: "v".into(),
+            object_type: ObjectType::SymmetricKey,
+            algorithm: KmipAlgorithm::HmacSha256,
+            usage_mask: UsageMask::MAC_VERIFY,
+            state: State::Active,
+            key_material: Some(vec![0u8; 32]),
+            ..ObjectRecord::default()
+        }).unwrap();
+        let err = mac(&d, MacRequest {
+            uid: "v".into(),
+            cryptographic_parameters: None,
+            data: b"x".to_vec(),
+        }, "c").unwrap_err();
+        assert_eq!(err.result_reason(), ResultReason::IncompatibleCryptographicUsageMask);
+        // … and a key with only MAC_GENERATE can't MACVerify.
+        d.store.put(ObjectRecord {
+            uid: "g".into(),
+            object_type: ObjectType::SymmetricKey,
+            algorithm: KmipAlgorithm::HmacSha256,
+            usage_mask: UsageMask::MAC_GENERATE,
+            state: State::Active,
+            key_material: Some(vec![0u8; 32]),
+            ..ObjectRecord::default()
+        }).unwrap();
+        let err = mac_verify(&d, MacVerifyRequest {
+            uid: "g".into(),
+            cryptographic_parameters: None,
+            data: b"x".to_vec(),
+            mac_data: vec![0u8; 32],
+        }, "c").unwrap_err();
+        assert_eq!(err.result_reason(), ResultReason::IncompatibleCryptographicUsageMask);
     }
 
     #[test]

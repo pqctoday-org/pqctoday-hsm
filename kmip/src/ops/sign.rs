@@ -88,6 +88,12 @@ pub fn sign(deps: &Deps, req: SignRequest, correlation_id: &str) -> Result<SignR
         }
     }
 
+    // KMIP 3.0 §11 Cryptographic Usage Mask — Sign requires the `Sign`
+    // bit (0x01); missing → 0x29 (K12, audit K-9).
+    super::helpers::enforce_usage_mask(
+        deps, correlation_id, "Sign", &obj, crate::kmip30::UsageMask::SIGN,
+    )?;
+
     // ── Plane 1: policy gate ────────────────────────────────────────────
     let empty: HashMap<String, String> = HashMap::new();
     let stored_algo = canonical_name(obj.algorithm);
@@ -373,6 +379,30 @@ rules:
     to: ML-DSA-87
     reason: "Upgrade signing"
 "#;
+
+    /// K12 — §11 Cryptographic Usage Mask: a present mask lacking the
+    /// `Sign` bit (e.g. Verify-only) fails with 0x29. Positive case is
+    /// pinned by `happy_path_returns_signature_and_emits_three_planes`
+    /// (mask = SIGN | VERIFY).
+    #[test]
+    fn sign_mask_without_sign_bit_is_incompatible() {
+        let (_ring, d) = deps_with(PERMISSIVE);
+        d.store.put(ObjectRecord {
+            uid: "u".into(),
+            object_type: ObjectType::PrivateKey,
+            algorithm: KmipAlgorithm::MlDsa87,
+            usage_mask: UsageMask::VERIFY,
+            state: State::Active,
+            activation_date: Some(OffsetDateTime::UNIX_EPOCH),
+            ..ObjectRecord::default()
+        }).unwrap();
+        let err = sign(&d, SignRequest {
+            uid: "u".into(),
+            data: b"x".to_vec(),
+            cryptographic_parameters: None,
+        }, "c").unwrap_err();
+        assert_eq!(err.result_reason(), ResultReason::IncompatibleCryptographicUsageMask);
+    }
 
     #[test]
     fn happy_path_returns_signature_and_emits_three_planes() {
