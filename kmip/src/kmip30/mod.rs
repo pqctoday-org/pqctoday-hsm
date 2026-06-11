@@ -71,7 +71,7 @@ pub use ops::{
     SignRequest, SignResponse,
 };
 
-pub use message::BatchErrorContinuationOption;
+pub use message::{AsynchronousIndicator, BatchErrorContinuationOption};
 pub use message::{
     RequestBatchItem, RequestHeader, RequestMessage, RequestPayload, ResponseBatchItem,
     ResponseHeader, ResponseMessage, ResponsePayload, ResultStatus, KMIP_VERSION_MAJOR,

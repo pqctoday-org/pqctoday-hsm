@@ -69,6 +69,37 @@ pub struct RequestHeader {
     /// the encoded ResponseMessage would exceed it. `None` ≡ no
     /// limit.
     pub maximum_response_size: Option<i32>,
+    /// KMIP 3.0 §8.1.2 `Asynchronous Indicator` Enumeration. This
+    /// server has no asynchronous capability, so `Mandatory` fails
+    /// every batch item with `OperationNotSupported`; `Optional` /
+    /// `Prohibited` / absent all process synchronously (K4).
+    pub asynchronous_indicator: Option<AsynchronousIndicator>,
+}
+
+/// KMIP 3.0 §8.1.2 `Asynchronous Indicator` enum (an Enumeration as of
+/// KMIP 3.0; it was a Boolean in 1.x/2.x). Codepoints verified against
+/// `kmip-spec-3.0-tags-enums.json`:
+/// - `Mandatory  = 0x01`: client requires asynchronous processing
+/// - `Optional   = 0x02`: server may choose sync or async
+/// - `Prohibited = 0x03`: server MUST process synchronously
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[repr(u32)]
+pub enum AsynchronousIndicator {
+    Mandatory  = 0x0000_0001,
+    Optional   = 0x0000_0002,
+    Prohibited = 0x0000_0003,
+}
+
+impl AsynchronousIndicator {
+    pub const fn to_wire_value(self) -> u32 { self as u32 }
+    pub const fn from_wire_value(v: u32) -> Option<Self> {
+        match v {
+            0x01 => Some(Self::Mandatory),
+            0x02 => Some(Self::Optional),
+            0x03 => Some(Self::Prohibited),
+            _ => None,
+        }
+    }
 }
 
 /// KMIP 3.0 §9.5 enum. Codepoints (verified against
@@ -108,6 +139,7 @@ impl RequestHeader {
             time_stamp: None,
             batch_error_continuation_option: None,
             maximum_response_size: None,
+            asynchronous_indicator: None,
         }
     }
 }

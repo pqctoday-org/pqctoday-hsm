@@ -53,7 +53,7 @@ impl From<crate::codec::CodecError> for WireError {
 // ── Tag table (verified against OASIS extract) ──────────────────────────────
 
 #[allow(non_upper_case_globals)]
-mod tags {
+pub(crate) mod tags {
     pub const Attribute: u32              = 0x42_0008;
     pub const AttributeName: u32          = 0x42_000a;
     pub const AttributeValue: u32         = 0x42_000b;
@@ -128,6 +128,16 @@ mod tags {
     pub const UniqueIdentifier: u32       = 0x42_0094;
     pub const ValidityIndicator: u32      = 0x42_009b;
     pub const VendorIdentification: u32   = 0x42_009d;
+    // ── K4 — message-layer SHALLs (§8.1.2 / §8.1.3). Codepoints
+    // verified from `kmip-spec-3.0-tags-enums.json`. ────────────────
+    /// §8.1.2 `Asynchronous Indicator` Enumeration (request header).
+    pub const AsynchronousIndicator: u32  = 0x42_0007;
+    /// §8.1.3 `Message Extension` Structure (per batch item).
+    pub const MessageExtension: u32       = 0x42_0051;
+    /// `Criticality Indicator` Boolean inside Message Extension.
+    pub const CriticalityIndicator: u32   = 0x42_0026;
+    /// `Vendor Extension` Structure inside Message Extension (opaque).
+    pub const VendorExtension: u32        = 0x42_009c;
     pub const CommonAttributes: u32       = 0x42_0126;
     pub const PrivateKeyAttributes: u32   = 0x42_0127;
     pub const PublicKeyAttributes: u32    = 0x42_0128;
@@ -399,6 +409,7 @@ fn decode_request_header(frame: &TtlvFrame) -> Result<RequestHeader, WireError> 
     let mut time_stamp = None;
     let mut becopt: Option<crate::kmip30::BatchErrorContinuationOption> = None;
     let mut max_resp_size: Option<i32> = None;
+    let mut async_indicator: Option<crate::kmip30::AsynchronousIndicator> = None;
     for child in children {
         match child.tag.0 {
             tags::ProtocolVersion => {
@@ -430,6 +441,18 @@ fn decode_request_header(frame: &TtlvFrame) -> Result<RequestHeader, WireError> 
             tags::MaximumResponseSize => {
                 max_resp_size = Some(expect_integer(child, "Maximum Response Size")?);
             }
+            // K4 — KMIP 3.0 §8.1.2 `Asynchronous Indicator`
+            // Enumeration (Mandatory 0x01 / Optional 0x02 /
+            // Prohibited 0x03, per `kmip-spec-3.0-tags-enums.json`).
+            // The dispatcher fails every batch item with
+            // `OperationNotSupported` when the client demands
+            // Mandatory asynchronous processing; unknown enum values
+            // are carried as `None` (≡ absent).
+            tags::AsynchronousIndicator => {
+                let v = expect_enum(child, "Asynchronous Indicator")?;
+                async_indicator =
+                    crate::kmip30::AsynchronousIndicator::from_wire_value(v);
+            }
             // Ignore optional header fields v0.1 doesn't consume.
             _ => {}
         }
@@ -442,6 +465,7 @@ fn decode_request_header(frame: &TtlvFrame) -> Result<RequestHeader, WireError> 
         time_stamp,
         batch_error_continuation_option: becopt,
         maximum_response_size: max_resp_size,
+        asynchronous_indicator: async_indicator,
     })
 }
 
@@ -449,6 +473,11 @@ fn decode_request_batch_item(frame: &TtlvFrame) -> Result<RequestBatchItem, Wire
     let children = expect_structure(frame, "Batch Item")?;
     let mut operation: Option<Operation> = None;
     let mut payload_frame: Option<&TtlvFrame> = None;
+    // K4 — vendor name of a Message Extension whose
+    // CriticalityIndicator is true. We recognise no vendor
+    // extensions, so per the §9 reject-rule the batch item MUST
+    // fail with `InvalidMessage` instead of silently ignoring it.
+    let mut critical_extension: Option<String> = None;
     for child in children {
         match child.tag.0 {
             tags::Operation => {
@@ -459,10 +488,54 @@ fn decode_request_batch_item(frame: &TtlvFrame) -> Result<RequestBatchItem, Wire
                 }
             }
             tags::RequestPayload => payload_frame = Some(child),
+            // K4 — KMIP 3.0 §8.1.3 `Message Extension` Structure:
+            // VendorIdentification (TextString), CriticalityIndicator
+            // (Boolean), VendorExtension (Structure, opaque to us).
+            // Codepoint 0x420051 per `kmip-spec-3.0-tags-enums.json`.
+            // Critical → reject the batch item; non-critical → skip.
+            tags::MessageExtension => {
+                let ext_children = expect_structure(child, "Message Extension")?;
+                let mut vendor: Option<String> = None;
+                let mut critical = false;
+                for ec in ext_children {
+                    match ec.tag.0 {
+                        tags::VendorIdentification => {
+                            if let Value::TextString(s) = &ec.value {
+                                vendor = Some(s.clone());
+                            }
+                        }
+                        tags::CriticalityIndicator => {
+                            critical = expect_boolean(ec, "Criticality Indicator")?;
+                        }
+                        // VendorExtension contents are vendor-opaque.
+                        tags::VendorExtension | _ => {}
+                    }
+                }
+                if critical {
+                    critical_extension = Some(
+                        vendor.unwrap_or_else(|| "<unidentified vendor>".into()),
+                    );
+                }
+            }
             _ => {}
         }
     }
     let operation = operation.ok_or(WireError::Missing { tag: tags::Operation, name: "Operation" })?;
+    // K4 — a critical Message Extension we don't recognise fails THIS
+    // batch item only (`OperationFailed / InvalidMessage` via the
+    // DecodeFailed sentinel), so §9.5 Batch Error Continuation still
+    // governs the sibling items.
+    if let Some(vendor) = critical_extension {
+        return Ok(RequestBatchItem {
+            operation,
+            payload: RequestPayload::DecodeFailed {
+                operation_echo: Some(operation),
+                message: format!(
+                    "critical Message Extension from vendor '{vendor}' is not supported"
+                ),
+            },
+        });
+    }
     let payload_frame = payload_frame.ok_or(WireError::Missing { tag: tags::RequestPayload, name: "Request Payload" })?;
     let payload = decode_request_payload(operation, payload_frame)?;
     Ok(RequestBatchItem { operation, payload })
@@ -3152,6 +3225,120 @@ mod tests {
         encode(&frame, &mut buf);
         let err = decode_request_message(&buf).expect_err("must reject");
         assert!(matches!(err, WireError::UnsupportedVersion { major: 2, minor: 1 }));
+    }
+
+    // ── K4 helpers — minimal RequestMessage frames ─────────────────────
+
+    fn k4_header(extra: Vec<TtlvFrame>) -> TtlvFrame {
+        let mut children = vec![TtlvFrame::new(
+            Tag(tags::ProtocolVersion),
+            Value::Structure(vec![
+                TtlvFrame::new(Tag(tags::ProtocolVersionMajor), Value::Integer(3)),
+                TtlvFrame::new(Tag(tags::ProtocolVersionMinor), Value::Integer(0)),
+            ]),
+        )];
+        children.extend(extra);
+        TtlvFrame::new(Tag(tags::RequestHeader), Value::Structure(children))
+    }
+
+    fn k4_query_item(extension: Option<TtlvFrame>) -> TtlvFrame {
+        let mut children = vec![
+            TtlvFrame::new(Tag(tags::Operation), Value::Enumeration(Operation::Query.to_wire_value())),
+            TtlvFrame::new(
+                Tag(tags::RequestPayload),
+                Value::Structure(vec![TtlvFrame::new(Tag(tags::QueryFunction), Value::Enumeration(1))]),
+            ),
+        ];
+        if let Some(ext) = extension {
+            children.push(ext);
+        }
+        TtlvFrame::new(Tag(tags::BatchItem), Value::Structure(children))
+    }
+
+    fn k4_message_extension(vendor: &str, critical: bool) -> TtlvFrame {
+        TtlvFrame::new(
+            Tag(tags::MessageExtension),
+            Value::Structure(vec![
+                TtlvFrame::new(Tag(tags::VendorIdentification), Value::TextString(vendor.into())),
+                TtlvFrame::new(Tag(tags::CriticalityIndicator), Value::Boolean(critical)),
+                TtlvFrame::new(Tag(tags::VendorExtension), Value::Structure(vec![])),
+            ]),
+        )
+    }
+
+    fn k4_encode(header_extra: Vec<TtlvFrame>, items: Vec<TtlvFrame>) -> Vec<u8> {
+        let mut children = vec![k4_header(header_extra)];
+        children.extend(items);
+        let frame = TtlvFrame::new(Tag(tags::RequestMessage), Value::Structure(children));
+        let mut buf = BytesMut::new();
+        encode(&frame, &mut buf);
+        buf.to_vec()
+    }
+
+    /// K4 — §8.1.2 `Asynchronous Indicator` (Enumeration in KMIP 3.0:
+    /// Mandatory 0x01 / Optional 0x02 / Prohibited 0x03) is decoded
+    /// and carried on the RequestHeader instead of being dropped.
+    #[test]
+    fn k4_asynchronous_indicator_decoded_from_header() {
+        use crate::kmip30::AsynchronousIndicator as AI;
+        for (wire, expect) in [
+            (0x01u32, Some(AI::Mandatory)),
+            (0x02, Some(AI::Optional)),
+            (0x03, Some(AI::Prohibited)),
+        ] {
+            let bytes = k4_encode(
+                vec![TtlvFrame::new(Tag(tags::AsynchronousIndicator), Value::Enumeration(wire))],
+                vec![k4_query_item(None)],
+            );
+            let decoded = decode_request_message(&bytes).expect("decode");
+            assert_eq!(decoded.header.asynchronous_indicator, expect, "wire value {wire:#x}");
+        }
+        // Absent → None.
+        let bytes = k4_encode(vec![], vec![k4_query_item(None)]);
+        let decoded = decode_request_message(&bytes).expect("decode");
+        assert_eq!(decoded.header.asynchronous_indicator, None);
+    }
+
+    /// K4 — a Message Extension with `CriticalityIndicator = true` on
+    /// an unrecognized vendor extension fails THAT batch item only
+    /// (DecodeFailed sentinel → `OperationFailed / InvalidMessage` in
+    /// the dispatcher, naming the vendor); the sibling item decodes.
+    #[test]
+    fn k4_critical_message_extension_fails_only_that_batch_item() {
+        let bytes = k4_encode(
+            vec![],
+            vec![
+                k4_query_item(Some(k4_message_extension("acme-corp", true))),
+                k4_query_item(None),
+            ],
+        );
+        let decoded = decode_request_message(&bytes).expect("envelope stays decodable");
+        assert_eq!(decoded.batch_items.len(), 2);
+        match &decoded.batch_items[0].payload {
+            RequestPayload::DecodeFailed { operation_echo, message } => {
+                assert_eq!(*operation_echo, Some(Operation::Query), "§8.2.3 echo");
+                assert!(message.contains("acme-corp"), "message names the vendor: {message}");
+                assert!(message.contains("Message Extension"), "{message}");
+            }
+            other => panic!("expected DecodeFailed sentinel, got {other:?}"),
+        }
+        assert!(
+            matches!(decoded.batch_items[1].payload, RequestPayload::Query(_)),
+            "sibling item unaffected"
+        );
+    }
+
+    /// K4 — `CriticalityIndicator = false` → the extension is skipped
+    /// and the batch item decodes to its real payload, as before.
+    #[test]
+    fn k4_non_critical_message_extension_ignored() {
+        let bytes = k4_encode(
+            vec![],
+            vec![k4_query_item(Some(k4_message_extension("acme-corp", false)))],
+        );
+        let decoded = decode_request_message(&bytes).expect("decode");
+        assert_eq!(decoded.batch_items.len(), 1);
+        assert!(matches!(decoded.batch_items[0].payload, RequestPayload::Query(_)));
     }
 
     // Suppress unused warnings on intermediates referenced only in
