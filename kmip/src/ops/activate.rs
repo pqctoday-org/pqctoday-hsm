@@ -13,7 +13,7 @@
 //!   rule surface is available if needed.
 //! - **Plane 2** — lifecycle FSM transition `PreActive → Active`
 //!   (`docs/IMPLEMENTATION_PLAN.md` §3.4). Any other source state is
-//!   rejected with `PermissionDenied`.
+//!   rejected with `WrongKeyLifecycleState` (0x43).
 //! - **Plane 3** — none. Activation is a KMIP-only concept; PKCS#11
 //!   has no equivalent op.
 
@@ -36,18 +36,17 @@ pub fn activate(deps: &Deps, req: ActivateRequest, correlation_id: &str) -> Resu
     let mut obj = deps
         .store
         .get(&req.uid)?
-        .ok_or_else(|| fail_err(deps, correlation_id, "Activate", KmipError::not_found(&req.uid)))?;
+        .ok_or_else(|| fail_err(deps, correlation_id, "Activate", KmipError::object_not_found(&req.uid)))?;
 
-    // KMIP 3.0 §3.x — Activate is only valid from PreActive.
+    // KMIP 3.0 §3.x — Activate is only valid from PreActive. The FSM
+    // rejection reason is `WrongKeyLifecycleState` (0x43), not the
+    // generic `PermissionDenied` (reserved for policy-engine denials).
     if obj.state != State::PreActive {
         return Err(fail_err(
             deps,
             correlation_id,
             "Activate",
-            KmipError::permission_denied(format!(
-                "Activate requires PreActive; UID {} is in {:?}",
-                req.uid, obj.state
-            )),
+            super::helpers::non_active_state_error(&req.uid, obj.state),
         ));
     }
 
@@ -186,13 +185,13 @@ mod tests {
         ..ObjectRecord::default()
 }).unwrap();
         let err = activate(&d, ActivateRequest { uid: "urn:a".into() }, "c").unwrap_err();
-        assert_eq!(err.result_reason(), crate::error::ResultReason::PermissionDenied);
+        assert_eq!(err.result_reason(), crate::error::ResultReason::WrongKeyLifecycleState);
     }
 
     #[test]
-    fn missing_uid_returns_item_not_found() {
+    fn missing_uid_returns_object_not_found() {
         let (_ring, d) = deps_with(ALLOW_ALL);
         let err = activate(&d, ActivateRequest { uid: "ghost".into() }, "c").unwrap_err();
-        assert_eq!(err.result_reason(), crate::error::ResultReason::ItemNotFound);
+        assert_eq!(err.result_reason(), crate::error::ResultReason::ObjectNotFound);
     }
 }

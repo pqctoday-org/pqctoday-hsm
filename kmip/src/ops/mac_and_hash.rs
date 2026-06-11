@@ -35,7 +35,7 @@ pub fn mac(deps: &Deps, req: MacRequest, correlation_id: &str) -> Result<MacResp
     emit_request(deps, correlation_id, "MAC", format!("uid={} data_len={}", req.uid, req.data.len()));
 
     let obj = deps.store.get(&req.uid)?.ok_or_else(|| {
-        fail_err(deps, correlation_id, "MAC", KmipError::not_found(&req.uid))
+        fail_err(deps, correlation_id, "MAC", KmipError::object_not_found(&req.uid))
     })?;
     require_active(&obj, "MAC")?;
     policy_gate(deps, &obj, "MAC", started, correlation_id)?;
@@ -76,7 +76,7 @@ pub fn mac_verify(
                  format!("uid={} data_len={} mac_len={}", req.uid, req.data.len(), req.mac_data.len()));
 
     let obj = deps.store.get(&req.uid)?.ok_or_else(|| {
-        fail_err(deps, correlation_id, "MACVerify", KmipError::not_found(&req.uid))
+        fail_err(deps, correlation_id, "MACVerify", KmipError::object_not_found(&req.uid))
     })?;
     require_active(&obj, "MACVerify")?;
     policy_gate(deps, &obj, "MACVerify", started, correlation_id)?;

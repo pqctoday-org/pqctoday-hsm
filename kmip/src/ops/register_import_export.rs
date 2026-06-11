@@ -384,7 +384,7 @@ pub fn export(
     emit_request(deps, correlation_id, "Export", format!("uid={}", req.uid));
 
     let obj = deps.store.get(&req.uid)?.ok_or_else(|| {
-        fail_err(deps, correlation_id, "Export", KmipError::not_found(&req.uid))
+        fail_err(deps, correlation_id, "Export", KmipError::object_not_found(&req.uid))
     })?;
 
     // Per §6.1.22: "If the Managed Object has been Destroyed then the

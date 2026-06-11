@@ -51,7 +51,7 @@ pub fn sign(deps: &Deps, req: SignRequest, correlation_id: &str) -> Result<SignR
     let obj = deps
         .store
         .get(&req.uid)?
-        .ok_or_else(|| fail_err(deps, correlation_id, "Sign", KmipError::not_found(&req.uid)))?;
+        .ok_or_else(|| fail_err(deps, correlation_id, "Sign", KmipError::object_not_found(&req.uid)))?;
 
     // ── Lifecycle gate (KMIP 3.0 §3.x — Sign requires Active) ───────────
     if obj.state != State::Active {
@@ -198,7 +198,7 @@ pub fn sign(deps: &Deps, req: SignRequest, correlation_id: &str) -> Result<SignR
             let handle =
                 super::helpers::find_handle_for_object(session, &obj.pkcs11_cka_id, obj.object_type)
                     .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Sign:find"))?
-                    .ok_or_else(|| KmipError::not_found(&req.uid))?;
+                    .ok_or_else(|| KmipError::object_not_found(&req.uid))?;
             let effective_cp = req
                 .cryptographic_parameters
                 .as_ref()
@@ -398,7 +398,7 @@ rules:
     }
 
     #[test]
-    fn missing_uid_returns_item_not_found() {
+    fn missing_uid_returns_object_not_found() {
         let (_ring, d) = deps_with(PERMISSIVE);
         let err = sign(
             &d,
@@ -408,7 +408,7 @@ rules:
             "corr-404",
         )
         .unwrap_err();
-        assert_eq!(err.result_reason(), ResultReason::ItemNotFound);
+        assert_eq!(err.result_reason(), ResultReason::ObjectNotFound);
     }
 
     #[test]

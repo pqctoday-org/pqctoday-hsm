@@ -41,7 +41,7 @@ pub fn revoke(deps: &Deps, req: RevokeRequest, correlation_id: &str) -> Result<R
     let mut obj = deps
         .store
         .get(&req.uid)?
-        .ok_or_else(|| fail_err(deps, correlation_id, "Revoke", KmipError::not_found(&req.uid)))?;
+        .ok_or_else(|| fail_err(deps, correlation_id, "Revoke", KmipError::object_not_found(&req.uid)))?;
 
     // KMIP 3.0 §3 state-transition list — only Revoke transitions
     // permitted (enumerated by the spec under the State attribute

@@ -386,8 +386,8 @@ pub fn find_handle_for_object(
 ///
 /// Handle-invalid codes (`CKR_OBJECT_HANDLE_INVALID`, `CKR_KEY_HANDLE_INVALID`,
 /// `CKR_WRAPPING_KEY_HANDLE_INVALID`, `CKR_UNWRAPPING_KEY_HANDLE_INVALID`)
-/// stay on `KmipError::not_found` (`ItemNotFound`) for now — slice K2 does
-/// the ItemNotFound → ObjectNotFound sweep across all UID-lookup sites.
+/// map to `KmipError::object_not_found` (`Object Not Found`, 0x37): a
+/// vanished engine handle means the managed object backing the UID is gone.
 pub fn ck_rv_to_kmip_error(rv: u32, op: &str) -> KmipError {
     use softhsmrustv3::constants as c;
     match rv {
@@ -395,12 +395,12 @@ pub fn ck_rv_to_kmip_error(rv: u32, op: &str) -> KmipError {
         c::CKR_KEY_FUNCTION_NOT_PERMITTED => {
             KmipError::permission_denied(format!("{op}: CKA_SIGN/CKA_ENCAPSULATE/etc. denied"))
         }
-        // ── Missing managed object (K2 will upgrade to ObjectNotFound) ──
+        // ── Missing managed object ──────────────────────────────────
         c::CKR_OBJECT_HANDLE_INVALID
         | c::CKR_KEY_HANDLE_INVALID
         | c::CKR_WRAPPING_KEY_HANDLE_INVALID
         | c::CKR_UNWRAPPING_KEY_HANDLE_INVALID => {
-            KmipError::not_found(&format!("{op}: object handle gone"))
+            KmipError::object_not_found(&format!("{op}: object handle gone"))
         }
         // ── Unsupported mechanism / parameters ──────────────────────
         c::CKR_MECHANISM_INVALID => KmipError::failed(
@@ -488,11 +488,12 @@ mod tests {
     fn ckr_table_maps_to_expected_result_reasons() {
         let cases: &[(u32, ResultReason)] = &[
             (c::CKR_KEY_FUNCTION_NOT_PERMITTED, ResultReason::PermissionDenied),
-            // Handle-invalid family → ItemNotFound for now (K2 sweeps to ObjectNotFound).
-            (c::CKR_OBJECT_HANDLE_INVALID, ResultReason::ItemNotFound),
-            (c::CKR_KEY_HANDLE_INVALID, ResultReason::ItemNotFound),
-            (c::CKR_WRAPPING_KEY_HANDLE_INVALID, ResultReason::ItemNotFound),
-            (c::CKR_UNWRAPPING_KEY_HANDLE_INVALID, ResultReason::ItemNotFound),
+            // Handle-invalid family → ObjectNotFound (K2 sweep): the
+            // managed object backing the UID is gone from the engine.
+            (c::CKR_OBJECT_HANDLE_INVALID, ResultReason::ObjectNotFound),
+            (c::CKR_KEY_HANDLE_INVALID, ResultReason::ObjectNotFound),
+            (c::CKR_WRAPPING_KEY_HANDLE_INVALID, ResultReason::ObjectNotFound),
+            (c::CKR_UNWRAPPING_KEY_HANDLE_INVALID, ResultReason::ObjectNotFound),
             (c::CKR_MECHANISM_INVALID, ResultReason::OperationNotSupported),
             (c::CKR_MECHANISM_PARAM_INVALID, ResultReason::UnsupportedCryptographicParameters),
             (c::CKR_ARGUMENTS_BAD, ResultReason::InvalidField),

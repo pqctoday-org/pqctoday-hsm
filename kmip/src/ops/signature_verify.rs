@@ -49,7 +49,7 @@ pub fn signature_verify(
     );
 
     let obj = deps.store.get(&req.uid)?.ok_or_else(|| {
-        fail_err(deps, correlation_id, "SignatureVerify", KmipError::not_found(&req.uid))
+        fail_err(deps, correlation_id, "SignatureVerify", KmipError::object_not_found(&req.uid))
     })?;
 
     // KMIP 3.0 §3.x lifecycle — Verify allowed in Active / Deactivated /
@@ -127,7 +127,7 @@ pub fn signature_verify(
             let handle =
                 super::helpers::find_handle_for_object(session, &obj.pkcs11_cka_id, obj.object_type)
                     .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Verify:find"))?
-                    .ok_or_else(|| KmipError::not_found(&req.uid))?;
+                    .ok_or_else(|| KmipError::object_not_found(&req.uid))?;
             // KMIP 3.0 §6.1.61 — pick padding/hash from the request's
             // CryptographicParameters, falling back to the object's
             // stored attribute. CS-AC-M-2 pins RSA-PSS / SHA-256 via

@@ -28,7 +28,7 @@ pub fn get_attribute_list(
     );
 
     let obj = deps.store.get(&req.uid)?.ok_or_else(|| {
-        fail_err(deps, correlation_id, "GetAttributeList", KmipError::not_found(&req.uid))
+        fail_err(deps, correlation_id, "GetAttributeList", KmipError::object_not_found(&req.uid))
     })?;
 
     let empty: HashMap<String, String> = HashMap::new();
