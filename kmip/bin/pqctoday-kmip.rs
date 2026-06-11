@@ -23,7 +23,7 @@ use clap::Parser;
 use pqctoday_kmip::auditlog::{AuditSink, CompositeSink, JsonlSink, RingSink};
 use pqctoday_kmip::ops::{Deps, DepsConfig};
 use pqctoday_kmip::policy::{load_from_str, Engine, PolicyStore};
-use pqctoday_kmip::server::{serve, tls_from_pem, tls_self_signed};
+use pqctoday_kmip::server::{serve, tls_from_pem, tls_mtls, tls_self_signed, AuthUser};
 use pqctoday_kmip::store::{KeyStore, MemoryStore, SqliteStore};
 
 const PERMISSIVE_FALLBACK: &str = r#"
@@ -66,6 +66,24 @@ struct Cli {
     /// Server private key (PEM). Required with `--tls-cert`.
     #[arg(long, requires = "tls_cert")]
     tls_key: Option<PathBuf>,
+
+    /// K14 mTLS — client CA bundle (PEM). When set (requires
+    /// `--tls-cert`/`--tls-key`), the listener REQUIRES a client
+    /// certificate signed by this CA and maps its subject CN to the
+    /// KMIP identity.
+    #[arg(long, requires = "tls_cert")]
+    tls_client_ca: Option<PathBuf>,
+
+    /// K14 auth — configured credential store entry, repeatable:
+    /// `<username>:<sha256hex-of-password>` (e.g.
+    /// `alice:$(printf %s 'pw' | shasum -a 256 | cut -d' ' -f1)`).
+    /// Absent (default) = open-auth mode — every request passes and the
+    /// KMIP `Authentication` header is ignored (replay harness relies
+    /// on this). Present = requests must authenticate via the §8.1.2
+    /// Authentication header (Username and Password credential) or an
+    /// mTLS-verified client certificate.
+    #[arg(long = "auth-user")]
+    auth_user: Vec<String>,
 
     /// PKCS#11 slot (single-slot v0.1).
     #[arg(long, default_value_t = 0)]
@@ -139,12 +157,25 @@ async fn main() -> anyhow::Result<()> {
         cli.slot
     );
 
+    // ── Auth config (K14) ───────────────────────────────────────────────
+    let auth_users = cli
+        .auth_user
+        .iter()
+        .map(|s| AuthUser::parse_flag(s).map_err(|e| anyhow::anyhow!(e)))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    if auth_users.is_empty() {
+        tracing::info!("no --auth-user entries — open-auth mode (Authentication header ignored)");
+    } else {
+        tracing::info!("authentication ENFORCED for {} configured user(s)", auth_users.len());
+    }
+
     // ── Deps bundle ─────────────────────────────────────────────────────
     let config = DepsConfig {
         pkcs11_slot: cli.slot,
         pkcs11_pin: cli.pin,
         vendor_identification: "pqctoday-hsm".into(),
         server_version: env!("CARGO_PKG_VERSION").into(),
+        auth_users,
     };
     let deps = Arc::new(
         Deps::new(engine, store, sink, config).with_engine_session(engine_session),
@@ -152,6 +183,22 @@ async fn main() -> anyhow::Result<()> {
 
     // ── TLS config ──────────────────────────────────────────────────────
     let tls_cfg = match (cli.tls_cert.as_ref(), cli.tls_key.as_ref()) {
+        // K14 mTLS — client CA configured: require + verify client
+        // certificates; the listener maps the subject CN to the KMIP
+        // identity.
+        (Some(c), Some(k)) if cli.tls_client_ca.is_some() => {
+            let ca = cli.tls_client_ca.as_ref().unwrap();
+            tracing::info!(
+                "mTLS: loading server cert {c:?} / key {k:?}; requiring client certs signed by {ca:?}"
+            );
+            pqctoday_kmip::server::listener::install_crypto_provider();
+            tls_mtls(
+                &std::fs::read(c)?,
+                &std::fs::read(k)?,
+                &std::fs::read(ca)?,
+            )
+            .map_err(|e| anyhow::anyhow!("mTLS config: {e}"))?
+        }
         (Some(c), Some(k)) => {
             tracing::info!("loading TLS cert from {c:?} / key from {k:?}");
             tls_from_pem(c, k).map_err(|e| anyhow::anyhow!("TLS PEM load: {e}"))?

@@ -239,6 +239,8 @@ mod tests {
     fn result_reason_codepoints_match_oasis_spec() {
         // Cross-check against kmip-spec-3.0-tags-enums.json (`Result Reason`).
         assert_eq!(ResultReason::ItemNotFound.to_wire_value(),          0x0000_0001);
+        // K14 — `Authentication Not Successful` (spec Table 584).
+        assert_eq!(ResultReason::AuthenticationNotSuccessful.to_wire_value(), 0x0000_0003);
         assert_eq!(ResultReason::OperationNotSupported.to_wire_value(), 0x0000_0005);
         assert_eq!(ResultReason::MissingData.to_wire_value(),           0x0000_0006);
         assert_eq!(ResultReason::InvalidField.to_wire_value(),          0x0000_0007);

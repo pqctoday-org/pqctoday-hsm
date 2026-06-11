@@ -19,6 +19,7 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::error::{KmipError, Result, ResultReason};
+use crate::server::auth::AuthContext;
 use crate::kmip30::{
     Attribute, CreateCredentialRequest, CreateCredentialResponse, CreateGroupRequest,
     CreateGroupResponse, CreateUserRequest, CreateUserResponse, KmipAlgorithm, LogRequest,
@@ -129,8 +130,33 @@ pub fn log(deps: &Deps, req: LogRequest, correlation_id: &str) -> Result<LogResp
 
 // ── Login / Logout ─────────────────────────────────────────────────────────
 
-pub fn login(deps: &Deps, _req: LoginRequest, correlation_id: &str) -> Result<LoginResponse> {
+pub fn login(
+    deps: &Deps,
+    _req: LoginRequest,
+    auth: &AuthContext,
+    correlation_id: &str,
+) -> Result<LoginResponse> {
     emit_request(deps, correlation_id, "Login", String::new());
+    // K14 — KMIP 3.0 §6.1.34: when a credential store is configured,
+    // a ticket is only issued to a request that authenticated. The
+    // KMIP 3.0 Login payload carries no Credential (Table 350 lists
+    // only LeaseTime / RequestCount / UsageLimits) — the credential
+    // travels in the §8.1.2 `Authentication` request-header field,
+    // which the dispatcher verifies into `auth.identity`. The
+    // dispatcher gate already fails unauthenticated requests wholesale
+    // under configured auth; this check is defence-in-depth for
+    // direct/in-process callers.
+    if deps.config.auth_enabled() && auth.identity.is_none() {
+        return Err(fail_err(
+            deps,
+            correlation_id,
+            "Login",
+            KmipError::failed(
+                ResultReason::AuthenticationNotSuccessful,
+                "Login requires a verified credential when authentication is configured",
+            ),
+        ));
+    }
     // Issue a fresh ticket. v0.1 doesn't enforce ticket presence on
     // subsequent ops; ticket validation lands when session enforcement
     // is wired (Phase 12 sandbox MVP).
@@ -262,7 +288,28 @@ mod tests {
         let d = deps_with();
         let r = login(&d, LoginRequest {
             lease_time: None, request_count: None, usage_limits: None,
-        }, "c").unwrap();
+        }, &AuthContext::open(), "c").unwrap();
+        assert!(r.ticket.starts_with("urn:pqctoday:ticket:"));
+    }
+
+    /// K14 — under configured auth, an unauthenticated Login is
+    /// `Authentication Not Successful (0x03)`, not a free ticket.
+    #[test]
+    fn login_under_configured_auth_requires_verified_identity() {
+        use crate::server::auth::{sha256_hex, AuthUser, Identity};
+        let mut d = deps_with();
+        d.config.auth_users = vec![AuthUser {
+            username: "alice".into(),
+            password_sha256: sha256_hex("pw"),
+        }];
+        let req = || LoginRequest { lease_time: None, request_count: None, usage_limits: None };
+        // No verified identity → 0x03.
+        let err = login(&d, req(), &AuthContext::open(), "c").unwrap_err();
+        assert_eq!(err.result_reason(), ResultReason::AuthenticationNotSuccessful);
+        // Verified identity (dispatcher-authenticated header credential
+        // or mTLS subject) → ticket issued.
+        let ctx = AuthContext { identity: Some(Identity { username: "alice".into() }) };
+        let r = login(&d, req(), &ctx, "c").unwrap();
         assert!(r.ticket.starts_with("urn:pqctoday:ticket:"));
     }
 

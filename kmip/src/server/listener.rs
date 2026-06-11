@@ -30,7 +30,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::TlsAcceptor;
 
-use crate::dispatcher::dispatch;
+use crate::dispatcher::dispatch_with_transport_identity;
 use crate::kmip30::{decode_request_message, encode_response_message, WireError};
 use crate::ops::Deps;
 
@@ -92,11 +92,12 @@ pub fn tls_self_signed(common_name: &str) -> Result<(Arc<ServerConfig>, String),
     Ok((Arc::new(config), cert_pem))
 }
 
-/// Convenience: build a `ServerConfig` that requires client certificates
-/// signed by the supplied CA bundle (mTLS — KMIP §3.x). Phase 7b will
-/// wire this; v0.1 only uses [`tls_self_signed`] / [`tls_from_pem`] with
-/// no client auth.
-#[allow(dead_code)]
+/// Build a `ServerConfig` that requires client certificates signed by
+/// the supplied CA bundle (mTLS). K14 wires this behind the
+/// `--tls-client-ca <pem>` flag in `bin/pqctoday-kmip.rs`; when active,
+/// [`handle_conn`] maps the verified client certificate's subject CN to
+/// the KMIP [`super::auth::Identity`], which satisfies configured
+/// authentication (see `dispatcher::authenticate_request`).
 pub fn tls_mtls(
     server_cert_pem: &[u8],
     server_key_pem: &[u8],
@@ -149,6 +150,20 @@ async fn handle_conn(
     deps: Arc<Deps>,
 ) -> Result<(), ServerError> {
     let mut tls_stream = acceptor.accept(stream).await.map_err(ServerError::Io)?;
+    // K14 mTLS — when the ServerConfig was built by [`tls_mtls`], the
+    // handshake above already verified the client certificate chain
+    // against the configured CA. Map the leaf's subject CN to the KMIP
+    // identity (reuses the §11 Certificate-attribute DER parser). A
+    // CA-verified cert without a CN yields no identity — connection
+    // still serves, but configured auth then requires a header
+    // Credential. Plain-TLS configs have no peer certificates → `None`.
+    let transport_identity = tls_stream
+        .get_ref()
+        .1
+        .peer_certificates()
+        .and_then(|certs| certs.first())
+        .and_then(|der| crate::ops::der_x509::extract_subject_cn(der.as_ref()))
+        .map(|cn| crate::server::auth::Identity { username: cn });
     let frame_bytes = read_one_frame(&mut tls_stream).await?;
     // KMIP 3.0 §9.10 — capture `Maximum Response Size` from the
     // header (when present) BEFORE dispatch so we can compare it
@@ -159,7 +174,7 @@ async fn handle_conn(
         .and_then(|r| r.header.maximum_response_size)
         .filter(|&n| n > 0);
     let response = match decode_request_message(&frame_bytes) {
-        Ok(request) => dispatch(&deps, request),
+        Ok(request) => dispatch_with_transport_identity(&deps, request, transport_identity),
         // KMIP 3.0 §6.4: a wire-decode failure (unknown tag, unknown enum
         // value, malformed length, etc.) must produce a structured
         // `OperationFailed` response with `ResultReason = InvalidMessage`
@@ -294,6 +309,45 @@ pub fn write_frame_sync<W: Write>(writer: &mut W, frame: &[u8]) -> Result<(), Se
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// K14 — the mTLS ServerConfig builds from PEM inputs (server cert
+    /// + key + client CA bundle) and requires client certificates.
+    #[test]
+    fn mtls_config_builds_with_client_ca() {
+        install_crypto_provider();
+        // Server identity (existing self-signed helper).
+        let server = rcgen::generate_simple_self_signed(vec!["kmip.test".to_string()])
+            .expect("server cert");
+        let server_cert_pem = server.cert.pem();
+        let server_key_pem = server.key_pair.serialize_pem();
+        // Client CA (CA:TRUE so webpki accepts it as a trust anchor).
+        let mut ca_params = rcgen::CertificateParams::new(Vec::<String>::new()).expect("params");
+        ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        let ca_key = rcgen::KeyPair::generate().expect("ca key");
+        let ca_cert = ca_params.self_signed(&ca_key).expect("ca cert");
+        let cfg = tls_mtls(
+            server_cert_pem.as_bytes(),
+            server_key_pem.as_bytes(),
+            ca_cert.pem().as_bytes(),
+        )
+        .expect("mTLS ServerConfig");
+        assert!(Arc::strong_count(&cfg) >= 1);
+    }
+
+    /// K14 — the identity mapping reuses the §11 DER parser: a client
+    /// cert's subject CN is what `handle_conn` turns into the KMIP
+    /// `Identity`.
+    #[test]
+    fn mtls_client_cert_subject_cn_extracts_for_identity_mapping() {
+        let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).expect("params");
+        params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, "kmip-client-7");
+        let key = rcgen::KeyPair::generate().expect("key");
+        let cert = params.self_signed(&key).expect("cert");
+        let cn = crate::ops::der_x509::extract_subject_cn(cert.der().as_ref());
+        assert_eq!(cn.as_deref(), Some("kmip-client-7"));
+    }
 
     #[test]
     fn self_signed_tls_config_builds() {
