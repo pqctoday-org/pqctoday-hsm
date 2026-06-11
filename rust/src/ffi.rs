@@ -2096,10 +2096,20 @@ pub fn C_EncapsulateKey(
             return CKR_MECHANISM_INVALID;
         }
 
+        // PKCS#11 v3.2 §5.18.8 — CKM_ML_KEM requires an ML-KEM key
+        // (compliance-audit P-10).
+        if get_object_attr_u32(h_key, CKA_KEY_TYPE) != Some(CKK_ML_KEM) {
+            return CKR_KEY_TYPE_INCONSISTENT;
+        }
         let ps = get_object_param_set(h_key);
+        // P-10: no silent ML-KEM-768 default — a key without
+        // CKA_PARAMETER_SET is an incomplete object.
+        if ps == 0 {
+            return CKR_TEMPLATE_INCOMPLETE;
+        }
         let ct_len: u32 = match ps {
             CKP_ML_KEM_512 => 768,
-            CKP_ML_KEM_768 | 0 => 1088,
+            CKP_ML_KEM_768 => 1088,
             CKP_ML_KEM_1024 => 1568,
             _ => return CKR_ARGUMENTS_BAD,
         };
@@ -2155,7 +2165,7 @@ pub fn C_EncapsulateKey(
         with_rng!(rng, {
             match ps {
                 CKP_ML_KEM_512 => encap!(ml_kem::MlKem512, &mut rng),
-                CKP_ML_KEM_768 | 0 => encap!(ml_kem::MlKem768, &mut rng),
+                CKP_ML_KEM_768 => encap!(ml_kem::MlKem768, &mut rng),
                 CKP_ML_KEM_1024 => encap!(ml_kem::MlKem1024, &mut rng),
                 _ => return CKR_ARGUMENTS_BAD,
             }
@@ -2190,10 +2200,20 @@ pub fn C_DecapsulateKey(
             return CKR_MECHANISM_INVALID;
         }
 
+        // PKCS#11 v3.2 §5.18.9 — CKM_ML_KEM requires an ML-KEM key
+        // (compliance-audit P-10).
+        if get_object_attr_u32(h_private_key, CKA_KEY_TYPE) != Some(CKK_ML_KEM) {
+            return CKR_KEY_TYPE_INCONSISTENT;
+        }
         let ps = get_object_param_set(h_private_key);
+        // P-10: no silent ML-KEM-768 default — a key without
+        // CKA_PARAMETER_SET is an incomplete object.
+        if ps == 0 {
+            return CKR_TEMPLATE_INCOMPLETE;
+        }
         let expected_ct: u32 = match ps {
             CKP_ML_KEM_512 => 768,
-            CKP_ML_KEM_768 | 0 => 1088,
+            CKP_ML_KEM_768 => 1088,
             CKP_ML_KEM_1024 => 1568,
             _ => return CKR_ARGUMENTS_BAD,
         };
@@ -2249,7 +2269,7 @@ pub fn C_DecapsulateKey(
 
         match ps {
             CKP_ML_KEM_512 => decap!(ml_kem::MlKem512),
-            CKP_ML_KEM_768 | 0 => decap!(ml_kem::MlKem768),
+            CKP_ML_KEM_768 => decap!(ml_kem::MlKem768),
             CKP_ML_KEM_1024 => decap!(ml_kem::MlKem1024),
             _ => return CKR_ARGUMENTS_BAD,
         }
@@ -8856,6 +8876,98 @@ mod return_code_ffi_tests {
                 &mut h_new,
             ),
             CKR_ENCRYPTED_DATA_INVALID,
+        );
+    }
+
+    /// S5 (compliance-audit P-10) — C_EncapsulateKey / C_DecapsulateKey on
+    /// a non-ML-KEM key (AES, with the KEM usage flags forced on so the
+    /// permission check passes) → CKR_KEY_TYPE_INCONSISTENT.
+    #[test]
+    fn encap_decap_on_aes_key_key_type_inconsistent() {
+        let _guard = test_lock::acquire();
+        setup();
+        let h_aes = 0x5334_0031;
+        install_key(h_aes, 32, &[(CKA_ENCAPSULATE, true), (CKA_DECAPSULATE, true)]);
+        let mut mech: [u32; 3] = [CKM_ML_KEM, 0, 0];
+        let mut ct = [0u8; 1088];
+        let mut ct_len: u32 = ct.len() as u32;
+        let mut h_new: u32 = 0;
+        assert_eq!(
+            C_EncapsulateKey(
+                SESSION,
+                mech.as_mut_ptr() as *mut u8,
+                h_aes,
+                std::ptr::null_mut(),
+                0,
+                ct.as_mut_ptr(),
+                &mut ct_len,
+                &mut h_new,
+            ),
+            CKR_KEY_TYPE_INCONSISTENT,
+        );
+        assert_eq!(
+            C_DecapsulateKey(
+                SESSION,
+                mech.as_mut_ptr() as *mut u8,
+                h_aes,
+                std::ptr::null_mut(),
+                0,
+                ct.as_mut_ptr(),
+                ct.len() as u32,
+                &mut h_new,
+            ),
+            CKR_KEY_TYPE_INCONSISTENT,
+        );
+    }
+
+    /// S5 (compliance-audit P-10) — an ML-KEM object with no
+    /// CKA_PARAMETER_SET no longer silently defaults to ML-KEM-768:
+    /// CKR_TEMPLATE_INCOMPLETE. Keygen always stores a param set since S3,
+    /// so the broken object is hand-built in the store.
+    #[test]
+    fn encap_decap_without_param_set_template_incomplete() {
+        let _guard = test_lock::acquire();
+        setup();
+        let h_kem = 0x5334_0032;
+        OBJECTS.with(|o| {
+            let mut attrs = Attributes::new();
+            attrs.insert(CKA_VALUE, vec![0u8; 1184]); // ML-KEM-768 ek size
+            store_ulong(&mut attrs, CKA_CLASS, CKO_PUBLIC_KEY);
+            store_ulong(&mut attrs, CKA_KEY_TYPE, CKK_ML_KEM);
+            store_bool(&mut attrs, CKA_ENCAPSULATE, true);
+            store_bool(&mut attrs, CKA_DECAPSULATE, true);
+            // Deliberately NO store_param_set().
+            o.borrow_mut().insert(h_kem, attrs);
+        });
+        let mut mech: [u32; 3] = [CKM_ML_KEM, 0, 0];
+        let mut ct = [0u8; 1088];
+        let mut ct_len: u32 = ct.len() as u32;
+        let mut h_new: u32 = 0;
+        assert_eq!(
+            C_EncapsulateKey(
+                SESSION,
+                mech.as_mut_ptr() as *mut u8,
+                h_kem,
+                std::ptr::null_mut(),
+                0,
+                ct.as_mut_ptr(),
+                &mut ct_len,
+                &mut h_new,
+            ),
+            CKR_TEMPLATE_INCOMPLETE,
+        );
+        assert_eq!(
+            C_DecapsulateKey(
+                SESSION,
+                mech.as_mut_ptr() as *mut u8,
+                h_kem,
+                std::ptr::null_mut(),
+                0,
+                ct.as_mut_ptr(),
+                ct.len() as u32,
+                &mut h_new,
+            ),
+            CKR_TEMPLATE_INCOMPLETE,
         );
     }
 }

@@ -22,7 +22,7 @@
 
 use super::CkRv;
 use crate::constants::*;
-use crate::state::{get_object_param_set, get_object_value, OBJECTS};
+use crate::state::{get_object_attr_u32, get_object_param_set, get_object_value, OBJECTS};
 
 // PKCS#11 v3.2 §5.18 — KEM permission flags. CKA_ENCAPSULATE / CKA_DECAPSULATE.
 use crate::constants::{CKA_DECAPSULATE, CKA_DECRYPT, CKA_ENCAPSULATE, CKA_ENCRYPT};
@@ -50,7 +50,17 @@ pub fn encapsulate(
         return Err(CKR_KEY_FUNCTION_NOT_PERMITTED);
     }
 
+    // PKCS#11 v3.2 §5.18.8 — CKM_ML_KEM requires an ML-KEM key
+    // (compliance-audit P-10).
+    if get_object_attr_u32(public_key_handle, CKA_KEY_TYPE) != Some(CKK_ML_KEM) {
+        return Err(CKR_KEY_TYPE_INCONSISTENT);
+    }
     let ps = get_object_param_set(public_key_handle);
+    // P-10: no silent ML-KEM-768 default — a key without
+    // CKA_PARAMETER_SET is an incomplete object.
+    if ps == 0 {
+        return Err(CKR_TEMPLATE_INCOMPLETE);
+    }
     let pub_key_bytes = get_object_value(public_key_handle).ok_or(CKR_ARGUMENTS_BAD)?;
     let mut rng = rand::rngs::OsRng;
 
@@ -63,7 +73,7 @@ pub fn encapsulate(
                 Encapsulate::encapsulate(&ek, &mut rng).map_err(|_| CKR_FUNCTION_FAILED)?;
             (ct.as_slice().to_vec(), ss.as_slice().to_vec())
         }
-        CKP_ML_KEM_768 | 0 => {
+        CKP_ML_KEM_768 => {
             let ek_enc = ml_kem::array::Array::try_from(pub_key_bytes.as_slice())
                 .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
             let ek = <ml_kem::MlKem768 as KemCore>::EncapsulationKey::from_bytes(&ek_enc);
@@ -104,10 +114,20 @@ pub fn decapsulate(
         return Err(CKR_KEY_FUNCTION_NOT_PERMITTED);
     }
 
+    // PKCS#11 v3.2 §5.18.9 — CKM_ML_KEM requires an ML-KEM key
+    // (compliance-audit P-10).
+    if get_object_attr_u32(private_key_handle, CKA_KEY_TYPE) != Some(CKK_ML_KEM) {
+        return Err(CKR_KEY_TYPE_INCONSISTENT);
+    }
     let ps = get_object_param_set(private_key_handle);
+    // P-10: no silent ML-KEM-768 default — a key without
+    // CKA_PARAMETER_SET is an incomplete object.
+    if ps == 0 {
+        return Err(CKR_TEMPLATE_INCOMPLETE);
+    }
     let expected_ct_len: usize = match ps {
         CKP_ML_KEM_512 => 768,
-        CKP_ML_KEM_768 | 0 => 1088,
+        CKP_ML_KEM_768 => 1088,
         CKP_ML_KEM_1024 => 1568,
         _ => return Err(CKR_ARGUMENTS_BAD),
     };
@@ -126,7 +146,7 @@ pub fn decapsulate(
                 ml_kem::array::Array::try_from(ciphertext).map_err(|_| CKR_ARGUMENTS_BAD)?;
             Decapsulate::decapsulate(&dk, &ct_enc).map_err(|_| CKR_FUNCTION_FAILED)?
         }
-        CKP_ML_KEM_768 | 0 => {
+        CKP_ML_KEM_768 => {
             let dk_enc = ml_kem::array::Array::try_from(prv_key_bytes.as_slice())
                 .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
             let dk = <ml_kem::MlKem768 as KemCore>::DecapsulationKey::from_bytes(&dk_enc);
@@ -983,6 +1003,66 @@ mod tests {
         // Each decapsulates to its own SS.
         assert_eq!(decapsulate(session, prv_h, CKM_ML_KEM, &ct1).unwrap(), ss1);
         assert_eq!(decapsulate(session, prv_h, CKM_ML_KEM, &ct2).unwrap(), ss2);
+        close_session(session).unwrap();
+    }
+
+    /// S5 (compliance-audit P-10): encap/decap on a non-ML-KEM key
+    /// (AES secret key with the KEM usage flags forced on so the
+    /// permission check passes) → CKR_KEY_TYPE_INCONSISTENT.
+    #[test]
+    fn encap_decap_on_aes_key_is_key_type_inconsistent() {
+        let _guard = test_lock::acquire();
+        let session = fresh_session();
+        let h_aes: u32 = 0x4E4B_0001;
+        OBJECTS.with(|o| {
+            let mut attrs = crate::crypto::handlers::Attributes::new();
+            attrs.insert(CKA_VALUE, vec![0x42u8; 32]);
+            crate::state::store_ulong(&mut attrs, CKA_CLASS, CKO_SECRET_KEY);
+            crate::state::store_ulong(&mut attrs, CKA_KEY_TYPE, CKK_AES);
+            crate::state::store_bool(&mut attrs, CKA_ENCAPSULATE, true);
+            crate::state::store_bool(&mut attrs, CKA_DECAPSULATE, true);
+            o.borrow_mut().insert(h_aes, attrs);
+        });
+        assert_eq!(
+            encapsulate(session, h_aes, CKM_ML_KEM).unwrap_err(),
+            CKR_KEY_TYPE_INCONSISTENT
+        );
+        assert_eq!(
+            decapsulate(session, h_aes, CKM_ML_KEM, &[0u8; 1088]).unwrap_err(),
+            CKR_KEY_TYPE_INCONSISTENT
+        );
+        OBJECTS.with(|o| o.borrow_mut().remove(&h_aes));
+        close_session(session).unwrap();
+    }
+
+    /// S5 (compliance-audit P-10): an ML-KEM object with no
+    /// CKA_PARAMETER_SET no longer silently defaults to ML-KEM-768 —
+    /// CKR_TEMPLATE_INCOMPLETE. Keygen always stores a param set since
+    /// S3, so the broken object is hand-built in the store.
+    #[test]
+    fn encap_decap_without_param_set_is_template_incomplete() {
+        let _guard = test_lock::acquire();
+        let session = fresh_session();
+        let h_kem: u32 = 0x4E4B_0002;
+        OBJECTS.with(|o| {
+            let mut attrs = crate::crypto::handlers::Attributes::new();
+            attrs.insert(CKA_VALUE, vec![0u8; 1184]); // ML-KEM-768 ek size
+            crate::state::store_ulong(&mut attrs, CKA_CLASS, CKO_PUBLIC_KEY);
+            crate::state::store_ulong(&mut attrs, CKA_KEY_TYPE, CKK_ML_KEM);
+            crate::state::store_bool(&mut attrs, CKA_ENCAPSULATE, true);
+            crate::state::store_bool(&mut attrs, CKA_DECAPSULATE, true);
+            // Deliberately NO store_param_set().
+            o.borrow_mut().insert(h_kem, attrs);
+        });
+        assert_eq!(
+            encapsulate(session, h_kem, CKM_ML_KEM).unwrap_err(),
+            CKR_TEMPLATE_INCOMPLETE
+        );
+        assert_eq!(
+            decapsulate(session, h_kem, CKM_ML_KEM, &[0u8; 1088]).unwrap_err(),
+            CKR_TEMPLATE_INCOMPLETE
+        );
+        OBJECTS.with(|o| o.borrow_mut().remove(&h_kem));
         close_session(session).unwrap();
     }
 
