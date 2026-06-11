@@ -40,6 +40,14 @@ pub enum WireError {
     #[error("unknown enumeration value {value:#x} for {field}")]
     UnknownEnum { field: &'static str, value: u32 },
 
+    /// K8 — a `Key Format Type` codepoint outside the KMIP 3.0 §11
+    /// table (or one this server cannot materialize). Surfaces on the
+    /// batch item as `OperationFailed / Key Format Type Not Supported
+    /// (0x10)` instead of the generic `InvalidMessage`, and never
+    /// silently coerces to `Raw`.
+    #[error("Key Format Type {value:#04x} is not supported")]
+    UnsupportedKeyFormat { value: u32 },
+
     #[error("unsupported KMIP protocol version {major}.{minor}")]
     UnsupportedVersion { major: i32, minor: i32 },
 }
@@ -155,6 +163,17 @@ pub(crate) mod tags {
     /// `KeyMaterial` when `KeyFormatType = TransparentSymmetricKey`.
     /// Codepoint `0x42003f`.
     pub const Key: u32                    = 0x42_003f;
+    // K8 — §6.2.1 `KeyMaterial` BigInteger fields for
+    // `KeyFormatType = TransparentRSAPrivateKey` (0x0A). Codepoints
+    // verified against `kmip-spec-3.0-tags-enums.json`.
+    pub const Modulus: u32                = 0x42_0052;
+    pub const PrivateExponent: u32        = 0x42_0063;
+    pub const PublicExponent: u32         = 0x42_006c;
+    pub const PrimeP: u32                 = 0x42_005e;
+    pub const PrimeQ: u32                 = 0x42_0071;
+    pub const PrimeExponentP: u32         = 0x42_0060;
+    pub const PrimeExponentQ: u32         = 0x42_0061;
+    pub const CrtCoefficient: u32         = 0x42_0027;
     pub const AttributeReference: u32     = 0x42_013b;
     /// KMIP 3.0 §6.1.{2,38,56} `New Attribute` — Structure wrapping the
     /// typed-tag attribute being added / modified / set.
@@ -384,11 +403,20 @@ fn synthetic_decode_failed_item(frame: &TtlvFrame, err: WireError) -> RequestBat
                 _ => None,
             })
     });
+    // K8 — map spec-named decode failures to their spec-listed Result
+    // Reason; everything else stays the generic `InvalidMessage`.
+    let reason = match &err {
+        WireError::UnsupportedKeyFormat { .. } => {
+            crate::error::ResultReason::KeyFormatTypeNotSupported
+        }
+        _ => crate::error::ResultReason::InvalidMessage,
+    };
     RequestBatchItem {
         operation: op.unwrap_or(Operation::Ping),
         payload: RequestPayload::DecodeFailed {
             operation_echo: op,
             message: err.to_string(),
+            reason,
         },
     }
 }
@@ -533,6 +561,7 @@ fn decode_request_batch_item(frame: &TtlvFrame) -> Result<RequestBatchItem, Wire
                 message: format!(
                     "critical Message Extension from vendor '{vendor}' is not supported"
                 ),
+                reason: crate::error::ResultReason::InvalidMessage,
             },
         });
     }
@@ -940,13 +969,24 @@ fn encode_create_key_pair_resp(r: &CreateKeyPairResponse) -> Vec<TtlvFrame> {
 
 fn decode_get_req(children: &[TtlvFrame]) -> Result<GetRequest, WireError> {
     let uid = required_uid(children)?;
+    let mut key_format_type = None;
     let mut key_wrapping_specification = None;
     for c in children {
-        if c.tag.0 == tags::KeyWrappingSpecification {
-            key_wrapping_specification = Some(decode_key_wrapping_spec(c)?);
+        match c.tag.0 {
+            // K8 — §6.1.23 requested output format. Kept as the raw
+            // codepoint: the Get handler owns the supported / 0x10
+            // decision so the failure is a per-item KMIP error, not a
+            // decode error.
+            tags::KeyFormatType => {
+                if let Value::Enumeration(v) = c.value { key_format_type = Some(v); }
+            }
+            tags::KeyWrappingSpecification => {
+                key_wrapping_specification = Some(decode_key_wrapping_spec(c)?);
+            }
+            _ => {}
         }
     }
-    Ok(GetRequest { uid, key_wrapping_specification })
+    Ok(GetRequest { uid, key_format_type, key_wrapping_specification })
 }
 
 /// TTLV-encode a cleartext `KeyValue` structure (`KeyValue { KeyMaterial
@@ -2241,14 +2281,14 @@ fn decode_managed_object(frame: &TtlvFrame) -> Result<KeyBlock, WireError> {
 ///   CryptographicAlgorithm + CryptographicLength.
 fn decode_key_block(frame: &TtlvFrame) -> Result<KeyBlock, WireError> {
     let children = expect_structure(frame, "Key Block")?;
-    let mut key_format_type = 1; // Raw
+    let mut key_format_code = 0x01u32; // Raw (spec default when absent)
     let mut algorithm = KmipAlgorithm::Aes;
     let mut length: u32 = 0;
-    let mut bytes: Vec<u8> = Vec::new();
+    let mut key_value_frame: Option<&TtlvFrame> = None;
     for c in children {
         match c.tag.0 {
             tags::KeyFormatType => {
-                if let Value::Enumeration(v) = c.value { key_format_type = v; }
+                if let Value::Enumeration(v) = c.value { key_format_code = v; }
             }
             tags::CryptographicAlgorithm => {
                 let v = expect_enum(c, "Cryptographic Algorithm")?;
@@ -2258,58 +2298,125 @@ fn decode_key_block(frame: &TtlvFrame) -> Result<KeyBlock, WireError> {
             tags::CryptographicLength => {
                 length = expect_integer(c, "Cryptographic Length")? as u32;
             }
-            tags::KeyValue => {
-                // KMIP 3.0 §6.2.1 — `KeyValue` is a Structure that
-                // contains `KeyMaterial`. Two shapes:
-                //   • `KeyFormatType = Raw` (1) — `KeyMaterial` is a
-                //     leaf ByteString.
-                //   • `KeyFormatType = TransparentSymmetricKey` (7) —
-                //     `KeyMaterial` is a Structure with one `Key`
-                //     ByteString child. We unwrap the inner Key bytes
-                //     so the rest of the engine treats the key the
-                //     same way as Raw.
-                // Other Transparent* forms (DSA/RSA/EC) need their
-                // own sub-structure extraction; tracked in R3b.
-                for inner in expect_structure(c, "Key Value")? {
-                    if inner.tag.0 == tags::KeyMaterial {
-                        match &inner.value {
-                            Value::ByteString(b) => bytes = b.clone(),
-                            Value::Structure(km_children) => {
-                                for km in km_children {
-                                    if km.tag.0 == tags::Key {
-                                        if let Value::ByteString(b) = &km.value {
-                                            bytes = b.clone();
-                                        }
-                                    }
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-            }
+            tags::KeyValue => key_value_frame = Some(c),
             _ => {}
         }
     }
+    // K8 — unknown / reserved Key Format Type codepoint fails the
+    // batch item with `Key Format Type Not Supported (0x10)` instead
+    // of silently coercing the material to `Raw` (compliance-audit B-5).
+    let key_format_type = KeyFormatType::from_wire_value(key_format_code)
+        .ok_or(WireError::UnsupportedKeyFormat { value: key_format_code })?;
+    // KMIP 3.0 §6.2.1 — `KeyValue` is a Structure that contains
+    // `KeyMaterial`. Material capture by format:
+    //   • ByteString formats (Raw / PKCS#1 / PKCS#8 / X.509 / …) —
+    //     `KeyMaterial` is a leaf ByteString, taken verbatim.
+    //   • `TransparentSymmetricKey` (0x07) — `KeyMaterial` is a
+    //     Structure with one `Key` ByteString child; we unwrap the
+    //     inner Key bytes so the rest of the engine treats the key
+    //     the same way as Raw.
+    //   • Other Transparent* forms (DSA / RSA / DH / EC) —
+    //     `KeyMaterial` is a Structure of named BigInteger fields;
+    //     K8 stores its TTLV encoding verbatim so Get / Export
+    //     round-trip the exact structure (BL-M-8/9/12/13), and the
+    //     Register path can parse typed fields out of it.
+    let mut bytes: Vec<u8> = Vec::new();
+    if let Some(kv) = key_value_frame {
+        for inner in expect_structure(kv, "Key Value")? {
+            if inner.tag.0 == tags::KeyMaterial {
+                match &inner.value {
+                    Value::ByteString(b) => bytes = b.clone(),
+                    Value::Structure(km_children) => {
+                        if key_format_type == KeyFormatType::TransparentSymmetricKey {
+                            for km in km_children {
+                                if km.tag.0 == tags::Key {
+                                    if let Value::ByteString(b) = &km.value {
+                                        bytes = b.clone();
+                                    }
+                                }
+                            }
+                        } else {
+                            let mut buf = BytesMut::new();
+                            encode(inner, &mut buf);
+                            bytes = buf.to_vec();
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
     Ok(KeyBlock {
-        key_format_type: match key_format_type {
-            0x01 => KeyFormatType::Raw,
-            0x02 => KeyFormatType::OpaqueObject,
-            0x03 => KeyFormatType::Pkcs1,
-            0x04 => KeyFormatType::Pkcs8,
-            0x05 => KeyFormatType::X509,
-            0x06 => KeyFormatType::EcPrivateKey,
-            0x07 => KeyFormatType::TransparentSymmetricKey,
-            // Other formats land in the store as Raw bytes for now;
-            // we keep the codepoint via `ObjectRecord.key_format_type`
-            // so the Get response can round-trip the original form.
-            _    => KeyFormatType::Raw,
-        },
+        key_format_type,
         cryptographic_algorithm: algorithm,
         cryptographic_length: length,
         key_value: bytes,
         key_wrapping_data: None,
     })
+}
+
+/// K8 — typed view of a `KeyFormatType = TransparentRSAPrivateKey`
+/// `KeyMaterial` Structure (KMIP 3.0 §6.2.1). Field tags verified
+/// against `kmip-spec-3.0-tags-enums.json`: Modulus `0x420052`,
+/// Private Exponent `0x420063`, Public Exponent `0x42006c`, P
+/// `0x42005e`, Q `0x420071`, Prime Exponent P `0x420060`, Prime
+/// Exponent Q `0x420061`, CRT Coefficient `0x420027` — all
+/// BigInteger (big-endian, 8-byte aligned).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TransparentRsaPrivateKeyFields {
+    pub modulus: Vec<u8>,
+    pub private_exponent: Vec<u8>,
+    pub public_exponent: Vec<u8>,
+    pub p: Vec<u8>,
+    pub q: Vec<u8>,
+    pub prime_exponent_p: Vec<u8>,
+    pub prime_exponent_q: Vec<u8>,
+    pub crt_coefficient: Vec<u8>,
+}
+
+/// Parse the TTLV-encoded `KeyMaterial` Structure captured by
+/// [`decode_key_block`] for `TransparentRSAPrivateKey` into its
+/// BigInteger fields. Modulus, Private Exponent and Public Exponent
+/// are required (the spec marks them mandatory); the CRT components
+/// are optional (the `rsa` crate recomputes them from N/E/D/P/Q).
+pub fn decode_transparent_rsa_private_key(
+    ttlv_key_material: &[u8],
+) -> Result<TransparentRsaPrivateKeyFields, WireError> {
+    let frame = decode_one(ttlv_key_material)?;
+    if frame.tag.0 != tags::KeyMaterial {
+        return Err(WireError::UnexpectedTag {
+            got: frame.tag.0,
+            expected: tags::KeyMaterial,
+            name: "Transparent RSA Private Key material",
+        });
+    }
+    let mut f = TransparentRsaPrivateKeyFields::default();
+    for c in expect_structure(&frame, "Key Material")? {
+        let dst = match c.tag.0 {
+            tags::Modulus          => &mut f.modulus,
+            tags::PrivateExponent  => &mut f.private_exponent,
+            tags::PublicExponent   => &mut f.public_exponent,
+            tags::PrimeP           => &mut f.p,
+            tags::PrimeQ           => &mut f.q,
+            tags::PrimeExponentP   => &mut f.prime_exponent_p,
+            tags::PrimeExponentQ   => &mut f.prime_exponent_q,
+            tags::CrtCoefficient   => &mut f.crt_coefficient,
+            _ => continue,
+        };
+        if let Value::BigInteger(b) = &c.value {
+            *dst = b.clone();
+        }
+    }
+    for (field, tag, name) in [
+        (&f.modulus, tags::Modulus, "Modulus"),
+        (&f.private_exponent, tags::PrivateExponent, "Private Exponent"),
+        (&f.public_exponent, tags::PublicExponent, "Public Exponent"),
+    ] {
+        if field.is_empty() {
+            return Err(WireError::Missing { tag, name });
+        }
+    }
+    Ok(f)
 }
 
 /// Encode an Export response payload per §6.1.22 / Table 317:
@@ -2355,6 +2462,19 @@ fn encode_key_block(kb: &KeyBlock) -> TtlvFrame {
                     Value::ByteString(kb.key_value.clone()),
                 )]),
             ),
+            // K8 — other Transparent* forms: `key_value` carries the
+            // TTLV-encoded `KeyMaterial` Structure captured at
+            // Register/Import time (see `decode_key_block`); re-emit
+            // it verbatim so the §6.2.1 structure round-trips
+            // byte-faithfully (BL-M-3/8/9/12/13 shape). Fall back to a
+            // ByteString leaf if the stash isn't a KeyMaterial frame
+            // (engine-generated material).
+            f if f.is_transparent_structure() => decode_one(&kb.key_value)
+                .ok()
+                .filter(|frame| frame.tag.0 == tags::KeyMaterial)
+                .unwrap_or_else(|| {
+                    TtlvFrame::new(Tag(tags::KeyMaterial), Value::ByteString(kb.key_value.clone()))
+                }),
             _ => TtlvFrame::new(Tag(tags::KeyMaterial), Value::ByteString(kb.key_value.clone())),
         };
         TtlvFrame::new(Tag(tags::KeyValue), Value::Structure(vec![key_material]))
@@ -3315,10 +3435,11 @@ mod tests {
         let decoded = decode_request_message(&bytes).expect("envelope stays decodable");
         assert_eq!(decoded.batch_items.len(), 2);
         match &decoded.batch_items[0].payload {
-            RequestPayload::DecodeFailed { operation_echo, message } => {
+            RequestPayload::DecodeFailed { operation_echo, message, reason } => {
                 assert_eq!(*operation_echo, Some(Operation::Query), "§8.2.3 echo");
                 assert!(message.contains("acme-corp"), "message names the vendor: {message}");
                 assert!(message.contains("Message Extension"), "{message}");
+                assert_eq!(*reason, crate::error::ResultReason::InvalidMessage);
             }
             other => panic!("expected DecodeFailed sentinel, got {other:?}"),
         }
@@ -3346,5 +3467,164 @@ mod tests {
     #[allow(dead_code)]
     fn _suppress_warnings() {
         let _ = make_query_msg();
+    }
+
+    // ── K8 — KeyFormatType correctness ──────────────────────────────
+
+    /// §11 Key Format Type codepoints, pinned against the enums JSON
+    /// (the pre-K8 code had 0x09/0x0A mislabeled as generic
+    /// Transparent{Private,Public}Key).
+    #[test]
+    fn k8_key_format_type_codepoints_match_spec_table() {
+        use KeyFormatType as F;
+        for (variant, code) in [
+            (F::Raw, 0x01u32),
+            (F::OpaqueObject, 0x02),
+            (F::Pkcs1, 0x03),
+            (F::Pkcs8, 0x04),
+            (F::X509, 0x05),
+            (F::EcPrivateKey, 0x06),
+            (F::TransparentSymmetricKey, 0x07),
+            (F::TransparentDsaPrivateKey, 0x08),
+            (F::TransparentDsaPublicKey, 0x09),
+            (F::TransparentRsaPrivateKey, 0x0A),
+            (F::TransparentRsaPublicKey, 0x0B),
+            (F::TransparentDhPrivateKey, 0x0C),
+            (F::TransparentDhPublicKey, 0x0D),
+            (F::TransparentEcPrivateKey, 0x14),
+            (F::TransparentEcPublicKey, 0x15),
+            (F::Pkcs12, 0x16),
+            (F::Pkcs10, 0x17),
+        ] {
+            assert_eq!(variant as u32, code, "{variant:?}");
+            assert_eq!(F::from_wire_value(code), Some(variant));
+        }
+        // Reserved band + out-of-table values map to None.
+        for code in [0x00u32, 0x0E, 0x0F, 0x10, 0x11, 0x12, 0x13, 0x18, 0x99] {
+            assert_eq!(F::from_wire_value(code), None, "{code:#x}");
+        }
+    }
+
+    fn k8_key_block_frame(format_code: u32) -> TtlvFrame {
+        TtlvFrame::new(Tag(tags::KeyBlock), Value::Structure(vec![
+            TtlvFrame::new(Tag(tags::KeyFormatType), Value::Enumeration(format_code)),
+            TtlvFrame::new(Tag(tags::KeyValue), Value::Structure(vec![
+                TtlvFrame::new(Tag(tags::KeyMaterial), Value::ByteString(vec![0x01; 16])),
+            ])),
+            TtlvFrame::new(Tag(tags::CryptographicAlgorithm), Value::Enumeration(0x03)),
+            TtlvFrame::new(Tag(tags::CryptographicLength), Value::Integer(128)),
+        ]))
+    }
+
+    #[test]
+    fn k8_decode_key_block_rejects_unknown_format_no_raw_coercion() {
+        // Reserved codepoint 0x0E must NOT silently decode as Raw.
+        let err = decode_key_block(&k8_key_block_frame(0x0E)).unwrap_err();
+        assert!(
+            matches!(err, WireError::UnsupportedKeyFormat { value: 0x0E }),
+            "got {err:?}"
+        );
+        // A known codepoint still decodes.
+        let kb = decode_key_block(&k8_key_block_frame(0x01)).unwrap();
+        assert_eq!(kb.key_format_type, KeyFormatType::Raw);
+        assert_eq!(kb.key_value, vec![0x01; 16]);
+    }
+
+    #[test]
+    fn k8_unknown_format_surfaces_0x10_on_batch_item() {
+        // synthetic_decode_failed_item threads the spec-named reason
+        // so the dispatcher emits Key Format Type Not Supported (0x10)
+        // instead of the generic InvalidMessage.
+        let frame = TtlvFrame::new(Tag(tags::BatchItem), Value::Structure(vec![
+            TtlvFrame::new(Tag(tags::Operation), Value::Enumeration(0x03)), // Register
+        ]));
+        let item = synthetic_decode_failed_item(
+            &frame,
+            WireError::UnsupportedKeyFormat { value: 0x0E },
+        );
+        match item.payload {
+            RequestPayload::DecodeFailed { reason, operation_echo, .. } => {
+                assert_eq!(reason, crate::error::ResultReason::KeyFormatTypeNotSupported);
+                assert_eq!(operation_echo, Some(Operation::Register));
+            }
+            other => panic!("expected DecodeFailed, got {other:?}"),
+        }
+        // Generic decode failures keep InvalidMessage.
+        let item = synthetic_decode_failed_item(
+            &frame,
+            WireError::Missing { tag: tags::KeyBlock, name: "Key Block" },
+        );
+        match item.payload {
+            RequestPayload::DecodeFailed { reason, .. } => {
+                assert_eq!(reason, crate::error::ResultReason::InvalidMessage);
+            }
+            other => panic!("expected DecodeFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn k8_transparent_structure_round_trips_byte_faithfully() {
+        // Non-TSK transparent forms: decode stashes the TTLV-encoded
+        // KeyMaterial Structure; encode re-emits it verbatim.
+        let key_material = TtlvFrame::new(Tag(tags::KeyMaterial), Value::Structure(vec![
+            TtlvFrame::new(Tag(tags::Modulus), Value::BigInteger(vec![0x00; 8])),
+            TtlvFrame::new(Tag(tags::PublicExponent), Value::BigInteger(vec![0x01; 8])),
+        ]));
+        let frame = TtlvFrame::new(Tag(tags::KeyBlock), Value::Structure(vec![
+            TtlvFrame::new(Tag(tags::KeyFormatType), Value::Enumeration(0x0B)),
+            TtlvFrame::new(Tag(tags::KeyValue), Value::Structure(vec![key_material.clone()])),
+            TtlvFrame::new(Tag(tags::CryptographicAlgorithm), Value::Enumeration(0x04)), // RSA
+            TtlvFrame::new(Tag(tags::CryptographicLength), Value::Integer(1024)),
+        ]));
+        let kb = decode_key_block(&frame).unwrap();
+        assert_eq!(kb.key_format_type, KeyFormatType::TransparentRsaPublicKey);
+        let mut expected = BytesMut::new();
+        encode(&key_material, &mut expected);
+        assert_eq!(kb.key_value, expected.to_vec(), "TTLV KeyMaterial stashed verbatim");
+        // Encode side re-emits the Structure (not a ByteString leaf).
+        let re_encoded = encode_key_block(&kb);
+        let kv = match &re_encoded.value {
+            Value::Structure(children) => children
+                .iter()
+                .find(|c| c.tag.0 == tags::KeyValue)
+                .expect("KeyValue present"),
+            other => panic!("KeyBlock must be a Structure, got {other:?}"),
+        };
+        let km = match &kv.value {
+            Value::Structure(children) => &children[0],
+            other => panic!("KeyValue must be a Structure, got {other:?}"),
+        };
+        assert_eq!(*km, key_material, "§6.2.1 structure round-trips");
+    }
+
+    #[test]
+    fn k8_decode_transparent_rsa_private_key_fields() {
+        let big = |tag: u32, b: Vec<u8>| TtlvFrame::new(Tag(tag), Value::BigInteger(b));
+        let frame = TtlvFrame::new(Tag(tags::KeyMaterial), Value::Structure(vec![
+            big(tags::Modulus, vec![0xAA; 16]),
+            big(tags::PrivateExponent, vec![0xBB; 16]),
+            big(tags::PublicExponent, vec![0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01]),
+            big(tags::PrimeP, vec![0xCC; 8]),
+            big(tags::PrimeQ, vec![0xDD; 8]),
+        ]));
+        let mut buf = BytesMut::new();
+        encode(&frame, &mut buf);
+        let f = decode_transparent_rsa_private_key(&buf).unwrap();
+        assert_eq!(f.modulus, vec![0xAA; 16]);
+        assert_eq!(f.private_exponent, vec![0xBB; 16]);
+        assert_eq!(f.public_exponent, vec![0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01]);
+        assert_eq!(f.p, vec![0xCC; 8]);
+        assert_eq!(f.q, vec![0xDD; 8]);
+        assert!(f.crt_coefficient.is_empty(), "optional field absent");
+        // Missing a mandatory field → Missing error.
+        let incomplete = TtlvFrame::new(Tag(tags::KeyMaterial), Value::Structure(vec![
+            big(tags::Modulus, vec![0xAA; 16]),
+        ]));
+        let mut buf = BytesMut::new();
+        encode(&incomplete, &mut buf);
+        assert!(matches!(
+            decode_transparent_rsa_private_key(&buf),
+            Err(WireError::Missing { .. })
+        ));
     }
 }

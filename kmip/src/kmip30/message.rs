@@ -287,6 +287,11 @@ pub enum RequestPayload {
     DecodeFailed {
         operation_echo: Option<super::ops::Operation>,
         message: String,
+        /// K8 — the Result Reason the dispatcher emits for this item.
+        /// `InvalidMessage` for generic decode failures; specific
+        /// reasons when the spec names one (e.g. `Key Format Type Not
+        /// Supported (0x10)` for an unknown KeyFormatType codepoint).
+        reason: crate::error::ResultReason,
     },
     /// K3 marker — the Operation codepoint is a published KMIP 3.0
     /// value (the message is well-formed) but this server has no

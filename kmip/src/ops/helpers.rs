@@ -612,6 +612,72 @@ pub fn ck_rv_to_kmip_error(rv: u32, op: &str) -> KmipError {
     }
 }
 
+/// K8 — apply the client-requested `Key Format Type` to material the
+/// server holds in `stored` format (KMIP 3.0 §6.1.23 Get / §6.1.22
+/// Export, compliance-audit B-5). Conversion table:
+///
+/// - absent → stored format, material as-is
+/// - requested == stored → as-is
+/// - `Raw` ↔ `TransparentSymmetricKey` — same bytes, different §6.2.1
+///   KeyMaterial wrapping (the wire encoder owns the shape)
+/// - `PKCS#1` ↔ `PKCS#8` for RSA private keys — re-encoded via the
+///   `rsa` crate (same DER round-trip Register already relies on)
+/// - anything else → `Key Format Type Not Supported (0x10)`; the
+///   material is NEVER silently re-labeled.
+pub fn convert_key_format(
+    stored: crate::kmip30::KeyFormatType,
+    bytes: Vec<u8>,
+    requested: Option<u32>,
+    algorithm: KmipAlgorithm,
+    object_type: crate::kmip30::ObjectType,
+) -> Result<(crate::kmip30::KeyFormatType, Vec<u8>), KmipError> {
+    use crate::kmip30::{KeyFormatType as F, ObjectType as O};
+    let Some(code) = requested else {
+        return Ok((stored, bytes));
+    };
+    let requested = F::from_wire_value(code).ok_or_else(|| {
+        KmipError::key_format_type_not_supported(format!(
+            "requested Key Format Type {code:#04x} is not a KMIP 3.0 codepoint"
+        ))
+    })?;
+    if requested == stored {
+        return Ok((stored, bytes));
+    }
+    match (stored, requested) {
+        // Symmetric material: identical bytes, different KeyMaterial
+        // wrapping on the wire.
+        (F::Raw, F::TransparentSymmetricKey) | (F::TransparentSymmetricKey, F::Raw) => {
+            Ok((requested, bytes))
+        }
+        // RSA private key DER re-encodings.
+        (F::Pkcs8, F::Pkcs1) if algorithm == KmipAlgorithm::Rsa && object_type == O::PrivateKey => {
+            use rsa::pkcs1::EncodeRsaPrivateKey;
+            use rsa::pkcs8::DecodePrivateKey;
+            rsa::RsaPrivateKey::from_pkcs8_der(&bytes)
+                .ok()
+                .and_then(|k| k.to_pkcs1_der().ok())
+                .map(|d| (requested, d.as_bytes().to_vec()))
+                .ok_or_else(|| KmipError::key_format_type_not_supported(
+                    "stored PKCS#8 material cannot be re-encoded as PKCS#1".to_string(),
+                ))
+        }
+        (F::Pkcs1, F::Pkcs8) if algorithm == KmipAlgorithm::Rsa && object_type == O::PrivateKey => {
+            use rsa::pkcs1::DecodeRsaPrivateKey;
+            use rsa::pkcs8::EncodePrivateKey;
+            rsa::RsaPrivateKey::from_pkcs1_der(&bytes)
+                .ok()
+                .and_then(|k| k.to_pkcs8_der().ok())
+                .map(|d| (requested, d.as_bytes().to_vec()))
+                .ok_or_else(|| KmipError::key_format_type_not_supported(
+                    "stored PKCS#1 material cannot be re-encoded as PKCS#8".to_string(),
+                ))
+        }
+        _ => Err(KmipError::key_format_type_not_supported(format!(
+            "cannot convert stored {stored:?} material to requested {requested:?}"
+        ))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -847,6 +913,69 @@ mod tests {
         assert_eq!(
             native_sign_mech_with_params(A::Aes, None).unwrap_err().result_reason(),
             ResultReason::OperationNotSupported
+        );
+    }
+
+    // ── K8 — convert_key_format ─────────────────────────────────────
+
+    #[test]
+    fn convert_key_format_rules() {
+        use crate::kmip30::{KeyFormatType as F, KmipAlgorithm as A, ObjectType as O};
+        let bytes = vec![0x42; 32];
+        // Absent → stored format, bytes untouched.
+        assert_eq!(
+            convert_key_format(F::TransparentSymmetricKey, bytes.clone(), None, A::Aes, O::SymmetricKey).unwrap(),
+            (F::TransparentSymmetricKey, bytes.clone()),
+        );
+        // Same as stored → as-is.
+        assert_eq!(
+            convert_key_format(F::Raw, bytes.clone(), Some(0x01), A::Aes, O::SymmetricKey).unwrap(),
+            (F::Raw, bytes.clone()),
+        );
+        // Raw ↔ TransparentSymmetricKey — both directions, same bytes.
+        assert_eq!(
+            convert_key_format(F::Raw, bytes.clone(), Some(0x07), A::Aes, O::SymmetricKey).unwrap(),
+            (F::TransparentSymmetricKey, bytes.clone()),
+        );
+        assert_eq!(
+            convert_key_format(F::TransparentSymmetricKey, bytes.clone(), Some(0x01), A::Aes, O::SymmetricKey).unwrap(),
+            (F::Raw, bytes.clone()),
+        );
+        // Unknown requested codepoint → 0x10.
+        assert_eq!(
+            convert_key_format(F::Raw, bytes.clone(), Some(0x0E), A::Aes, O::SymmetricKey)
+                .unwrap_err().result_reason(),
+            ResultReason::KeyFormatTypeNotSupported,
+        );
+        // Unsupported conversion → 0x10 (never silently re-labeled).
+        assert_eq!(
+            convert_key_format(F::Raw, bytes, Some(0x05), A::Aes, O::SymmetricKey)
+                .unwrap_err().result_reason(),
+            ResultReason::KeyFormatTypeNotSupported,
+        );
+    }
+
+    #[test]
+    fn convert_key_format_pkcs1_pkcs8_round_trip_for_rsa() {
+        use crate::kmip30::{KeyFormatType as F, KmipAlgorithm as A, ObjectType as O};
+        use rsa::pkcs1::EncodeRsaPrivateKey;
+        use rsa::pkcs8::EncodePrivateKey;
+        let key = crate::ops::test_rsa_fixture::rsa_key();
+        let pkcs1 = key.to_pkcs1_der().unwrap().as_bytes().to_vec();
+        let pkcs8 = key.to_pkcs8_der().unwrap().as_bytes().to_vec();
+        assert_eq!(
+            convert_key_format(F::Pkcs1, pkcs1.clone(), Some(0x04), A::Rsa, O::PrivateKey).unwrap(),
+            (F::Pkcs8, pkcs8.clone()),
+        );
+        assert_eq!(
+            convert_key_format(F::Pkcs8, pkcs8.clone(), Some(0x03), A::Rsa, O::PrivateKey).unwrap(),
+            (F::Pkcs1, pkcs1),
+        );
+        // Non-RSA / non-private objects don't get the DER paths.
+        assert_eq!(
+            convert_key_format(F::Pkcs8, pkcs8, Some(0x03), A::Rsa, O::PublicKey)
+                .unwrap_err().result_reason(),
+            ResultReason::KeyFormatTypeNotSupported,
         );
     }
 }

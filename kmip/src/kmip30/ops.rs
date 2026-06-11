@@ -327,6 +327,13 @@ pub struct CreateKeyPairResponse {
 #[derive(Clone, Debug, PartialEq)]
 pub struct GetRequest {
     pub uid: String,
+    /// K8 — KMIP 3.0 §6.1.23 `Key Format Type`: the format the client
+    /// wants the material returned in. Absent → stored format;
+    /// requested == stored → as-is; convertible pair → convert;
+    /// anything else → `Key Format Type Not Supported (0x10)`.
+    /// Raw codepoint so unknown values reach the handler and fail
+    /// with 0x10 instead of dying as a decode error.
+    pub key_format_type: Option<u32>,
     /// KMIP 3.0 §6.1.23 — when present, the server returns the key
     /// material wrapped under the referenced wrapping key instead of
     /// in the clear. AX-M-2 pins WrappingMethod=Encrypt with
@@ -374,18 +381,81 @@ pub struct KeyBlock {
     pub key_wrapping_data: Option<KeyWrappingSpec>,
 }
 
+/// KMIP 3.0 §11 `Key Format Type` enumeration — names and codepoints
+/// verified against the "Key Format Type" table in
+/// `spec/oasis-kmip-3.0/kmip-spec-3.0-tags-enums.json` (K8 fixed the
+/// previously mislabeled 0x09/0x0A variants: 0x09 is Transparent DSA
+/// *Public* Key and 0x0A is Transparent RSA *Private* Key).
+/// 0x0E–0x13 are (Reserved) in the spec table.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum KeyFormatType {
-    Raw                 = 0x01,
-    OpaqueObject        = 0x02,
-    Pkcs1               = 0x03,
-    Pkcs8               = 0x04,
-    X509                = 0x05,
-    EcPrivateKey        = 0x06,
-    TransparentSymmetricKey = 0x07,
-    TransparentPrivateKey   = 0x09,
-    TransparentPublicKey    = 0x0A,
-    Pkcs12              = 0x16,
+    Raw                      = 0x01,
+    OpaqueObject             = 0x02,
+    Pkcs1                    = 0x03,
+    Pkcs8                    = 0x04,
+    X509                     = 0x05,
+    EcPrivateKey             = 0x06,
+    TransparentSymmetricKey  = 0x07,
+    TransparentDsaPrivateKey = 0x08,
+    TransparentDsaPublicKey  = 0x09,
+    TransparentRsaPrivateKey = 0x0A,
+    TransparentRsaPublicKey  = 0x0B,
+    TransparentDhPrivateKey  = 0x0C,
+    TransparentDhPublicKey   = 0x0D,
+    TransparentEcPrivateKey  = 0x14,
+    TransparentEcPublicKey   = 0x15,
+    Pkcs12                   = 0x16,
+    Pkcs10                   = 0x17,
+}
+
+impl KeyFormatType {
+    /// Map a wire codepoint to the typed variant. `None` for unknown /
+    /// reserved codepoints — K8: callers MUST surface those as
+    /// `Key Format Type Not Supported (0x10)` instead of silently
+    /// coercing to `Raw`.
+    pub fn from_wire_value(v: u32) -> Option<Self> {
+        Some(match v {
+            0x01 => Self::Raw,
+            0x02 => Self::OpaqueObject,
+            0x03 => Self::Pkcs1,
+            0x04 => Self::Pkcs8,
+            0x05 => Self::X509,
+            0x06 => Self::EcPrivateKey,
+            0x07 => Self::TransparentSymmetricKey,
+            0x08 => Self::TransparentDsaPrivateKey,
+            0x09 => Self::TransparentDsaPublicKey,
+            0x0A => Self::TransparentRsaPrivateKey,
+            0x0B => Self::TransparentRsaPublicKey,
+            0x0C => Self::TransparentDhPrivateKey,
+            0x0D => Self::TransparentDhPublicKey,
+            0x14 => Self::TransparentEcPrivateKey,
+            0x15 => Self::TransparentEcPublicKey,
+            0x16 => Self::Pkcs12,
+            0x17 => Self::Pkcs10,
+            _ => return None,
+        })
+    }
+
+    /// KMIP 3.0 §6.2.1 — formats whose `KeyMaterial` is a TTLV
+    /// Structure of named fields rather than a ByteString leaf. For
+    /// `TransparentSymmetricKey` the engine stores the inner `Key`
+    /// bytes; for the other transparent forms the wire layer stores
+    /// the TTLV-encoded `KeyMaterial` Structure verbatim so Get /
+    /// Export can round-trip it byte-faithfully.
+    pub fn is_transparent_structure(self) -> bool {
+        matches!(
+            self,
+            Self::TransparentSymmetricKey
+                | Self::TransparentDsaPrivateKey
+                | Self::TransparentDsaPublicKey
+                | Self::TransparentRsaPrivateKey
+                | Self::TransparentRsaPublicKey
+                | Self::TransparentDhPrivateKey
+                | Self::TransparentDhPublicKey
+                | Self::TransparentEcPrivateKey
+                | Self::TransparentEcPublicKey
+        )
+    }
 }
 
 // ── Locate ─────────────────────────────────────────────────────────────────

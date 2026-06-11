@@ -77,4 +77,7 @@ pub use message::{
     ResponseHeader, ResponseMessage, ResponsePayload, ResultStatus, KMIP_VERSION_MAJOR,
     KMIP_VERSION_MINOR,
 };
-pub use wire::{decode_request_message, encode_response_message, ttlv_encode_key_value, WireError};
+pub use wire::{
+    decode_request_message, decode_transparent_rsa_private_key, encode_response_message,
+    ttlv_encode_key_value, TransparentRsaPrivateKeyFields, WireError,
+};

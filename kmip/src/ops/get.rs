@@ -116,24 +116,11 @@ pub fn get(deps: &Deps, req: GetRequest, correlation_id: &str) -> Result<GetResp
     // FAIL with `Sensitive`/`NotExtractable` (see below) — never a
     // zero-length KeyValue (compliance-audit B-4).
     // KMIP 3.0 §11 `Key Format Type` enum — codepoints verified
-    // against `kmip-spec-3.0-tags-enums.json`. Only the variants
-    // we have typed `KeyFormatType` enum members for are surfaced;
-    // anything else maps to `Raw` so the round-trip is at least
-    // byte-faithful (the Get response will report `Raw` instead of
-    // the original codepoint, which is a smaller protocol violation
-    // than dropping the material entirely).
-    let stored_format = obj
-        .key_format_type
-        .and_then(|n| match n {
-            0x01 => Some(KeyFormatType::Raw),
-            0x02 => Some(KeyFormatType::OpaqueObject),
-            0x03 => Some(KeyFormatType::Pkcs1),
-            0x04 => Some(KeyFormatType::Pkcs8),
-            0x05 => Some(KeyFormatType::X509),
-            0x06 => Some(KeyFormatType::EcPrivateKey),
-            0x07 => Some(KeyFormatType::TransparentSymmetricKey),
-            _ => None,
-        });
+    // against `kmip-spec-3.0-tags-enums.json`. K8: the typed enum now
+    // carries every spec codepoint and the wire decoder rejects
+    // unknown values at Register/Import time with 0x10, so the stored
+    // format is surfaced faithfully — no silent `Raw` re-labeling.
+    let stored_format = obj.key_format_type.and_then(KeyFormatType::from_wire_value);
     let (key_format, key_value) = if let Some(bytes) = &obj.key_material {
         (stored_format.unwrap_or(KeyFormatType::Raw), bytes.clone())
     } else {
@@ -184,6 +171,19 @@ pub fn get(deps: &Deps, req: GetRequest, correlation_id: &str) -> Result<GetResp
             },
         }
     };
+
+    // K8 — KMIP 3.0 §6.1.23 `Key Format Type`: honor the requested
+    // output format. Absent → stored; same → as-is; convertible pair
+    // (Raw ↔ TransparentSymmetricKey, PKCS#1 ↔ PKCS#8 for RSA) →
+    // convert; otherwise `Key Format Type Not Supported (0x10)`.
+    let (key_format, key_value) = super::helpers::convert_key_format(
+        key_format,
+        key_value,
+        req.key_format_type,
+        obj.algorithm,
+        obj.object_type,
+    )
+    .map_err(|e| fail_err(deps, correlation_id, "Get", e))?;
 
     // KMIP 3.0 §6.1.23 — `Key Wrapping Specification`: return the key
     // material wrapped under the referenced wrap key. AX-M-2 pins
@@ -359,7 +359,7 @@ mod tests {
     fn get_symmetric_returns_raw_format() {
         let d = deps_with();
         put(&d, "u", ObjectType::SymmetricKey, State::Active);
-        let r = get(&d, GetRequest { uid: "u".into(), key_wrapping_specification: None }, "c").unwrap();
+        let r = get(&d, GetRequest { uid: "u".into(), key_format_type: None, key_wrapping_specification: None }, "c").unwrap();
         assert_eq!(r.key_block.key_format_type, KeyFormatType::Raw);
         assert_eq!(r.key_block.cryptographic_length, 256);
     }
@@ -370,7 +370,7 @@ mod tests {
         // FAIL, never surface as a zero-length OpaqueObject KeyValue.
         let d = deps_with();
         put(&d, "u", ObjectType::PrivateKey, State::Active);
-        let err = get(&d, GetRequest { uid: "u".into(), key_wrapping_specification: None }, "c").unwrap_err();
+        let err = get(&d, GetRequest { uid: "u".into(), key_format_type: None, key_wrapping_specification: None }, "c").unwrap_err();
         assert_eq!(err.result_reason(), crate::error::ResultReason::NotExtractable);
     }
 
@@ -381,7 +381,7 @@ mod tests {
         let mut obj = d.store.get("u").unwrap().unwrap();
         obj.sensitive = Some(true);
         d.store.update(obj).unwrap();
-        let err = get(&d, GetRequest { uid: "u".into(), key_wrapping_specification: None }, "c").unwrap_err();
+        let err = get(&d, GetRequest { uid: "u".into(), key_format_type: None, key_wrapping_specification: None }, "c").unwrap_err();
         assert_eq!(err.result_reason(), crate::error::ResultReason::Sensitive);
     }
 
@@ -393,7 +393,7 @@ mod tests {
         obj.sensitive = Some(true);
         obj.key_material = Some(vec![0x11; 32]);
         d.store.update(obj).unwrap();
-        let err = get(&d, GetRequest { uid: "u".into(), key_wrapping_specification: None }, "c").unwrap_err();
+        let err = get(&d, GetRequest { uid: "u".into(), key_format_type: None, key_wrapping_specification: None }, "c").unwrap_err();
         assert_eq!(err.result_reason(), crate::error::ResultReason::Sensitive);
     }
 
@@ -417,7 +417,7 @@ mod tests {
             encryption_key_uid: "kek".into(),
             cryptographic_parameters: None,
         };
-        let r = get(&d, GetRequest { uid: "u".into(), key_wrapping_specification: Some(spec.clone()) }, "c").unwrap();
+        let r = get(&d, GetRequest { uid: "u".into(), key_format_type: None, key_wrapping_specification: Some(spec.clone()) }, "c").unwrap();
         assert_eq!(r.key_block.key_wrapping_data, Some(spec));
         assert!(!r.key_block.key_value.is_empty(), "wrapped material returned");
         // AES-KW output = TTLV(KeyValue) length + 8-byte integrity block.
@@ -433,7 +433,7 @@ mod tests {
         obj.key_material = Some(vec![0x11; 32]);
         d.store.update(obj).unwrap();
         // Without wrapping.
-        let err = get(&d, GetRequest { uid: "u".into(), key_wrapping_specification: None }, "c").unwrap_err();
+        let err = get(&d, GetRequest { uid: "u".into(), key_format_type: None, key_wrapping_specification: None }, "c").unwrap_err();
         assert_eq!(err.result_reason(), crate::error::ResultReason::NotExtractable);
         // With wrapping — Extractable=false is unconditional.
         let spec = crate::kmip30::KeyWrappingSpec {
@@ -441,7 +441,7 @@ mod tests {
             encryption_key_uid: "kek".into(),
             cryptographic_parameters: None,
         };
-        let err = get(&d, GetRequest { uid: "u".into(), key_wrapping_specification: Some(spec) }, "c").unwrap_err();
+        let err = get(&d, GetRequest { uid: "u".into(), key_format_type: None, key_wrapping_specification: Some(spec) }, "c").unwrap_err();
         assert_eq!(err.result_reason(), crate::error::ResultReason::NotExtractable);
     }
 
@@ -449,14 +449,94 @@ mod tests {
     fn get_destroyed_returns_object_destroyed() {
         let d = deps_with();
         put(&d, "u", ObjectType::SymmetricKey, State::Destroyed);
-        let err = get(&d, GetRequest { uid: "u".into(), key_wrapping_specification: None }, "c").unwrap_err();
+        let err = get(&d, GetRequest { uid: "u".into(), key_format_type: None, key_wrapping_specification: None }, "c").unwrap_err();
         assert_eq!(err.result_reason(), crate::error::ResultReason::ObjectDestroyed);
     }
 
     #[test]
     fn get_missing_uid() {
         let d = deps_with();
-        let err = get(&d, GetRequest { uid: "ghost".into(), key_wrapping_specification: None }, "c").unwrap_err();
+        let err = get(&d, GetRequest { uid: "ghost".into(), key_format_type: None, key_wrapping_specification: None }, "c").unwrap_err();
         assert_eq!(err.result_reason(), crate::error::ResultReason::ObjectNotFound);
+    }
+
+    // ── K8 — requested Key Format Type on Get ───────────────────────
+
+    fn put_with_material(d: &Deps, uid: &str, stored_format: u32) {
+        put(d, uid, ObjectType::SymmetricKey, State::Active);
+        let mut obj = d.store.get(uid).unwrap().unwrap();
+        obj.key_material = Some(vec![0x42; 32]);
+        obj.key_format_type = Some(stored_format);
+        d.store.update(obj).unwrap();
+    }
+
+    fn get_fmt(d: &Deps, uid: &str, requested: Option<u32>) -> Result<GetResponse> {
+        get(d, GetRequest {
+            uid: uid.into(),
+            key_format_type: requested,
+            key_wrapping_specification: None,
+        }, "c")
+    }
+
+    #[test]
+    fn get_requested_format_absent_returns_stored() {
+        let d = deps_with();
+        put_with_material(&d, "u", 0x07);
+        let r = get_fmt(&d, "u", None).unwrap();
+        assert_eq!(r.key_block.key_format_type, KeyFormatType::TransparentSymmetricKey);
+        assert_eq!(r.key_block.key_value, vec![0x42; 32]);
+    }
+
+    #[test]
+    fn get_converts_raw_to_transparent_symmetric_key() {
+        let d = deps_with();
+        put_with_material(&d, "u", 0x01);
+        let r = get_fmt(&d, "u", Some(0x07)).unwrap();
+        assert_eq!(r.key_block.key_format_type, KeyFormatType::TransparentSymmetricKey);
+        assert_eq!(r.key_block.key_value, vec![0x42; 32], "same bytes, different wrapping");
+    }
+
+    #[test]
+    fn get_converts_transparent_symmetric_key_to_raw() {
+        let d = deps_with();
+        put_with_material(&d, "u", 0x07);
+        let r = get_fmt(&d, "u", Some(0x01)).unwrap();
+        assert_eq!(r.key_block.key_format_type, KeyFormatType::Raw);
+        assert_eq!(r.key_block.key_value, vec![0x42; 32]);
+    }
+
+    #[test]
+    fn get_unsupported_conversion_fails_0x10() {
+        // Raw symmetric material cannot become PKCS#8.
+        let d = deps_with();
+        put_with_material(&d, "u", 0x01);
+        let err = get_fmt(&d, "u", Some(0x04)).unwrap_err();
+        assert_eq!(err.result_reason(), crate::error::ResultReason::KeyFormatTypeNotSupported);
+    }
+
+    #[test]
+    fn get_unknown_requested_codepoint_fails_0x10() {
+        // 0x0E is (Reserved) in the §11 Key Format Type table.
+        let d = deps_with();
+        put_with_material(&d, "u", 0x01);
+        let err = get_fmt(&d, "u", Some(0x0E)).unwrap_err();
+        assert_eq!(err.result_reason(), crate::error::ResultReason::KeyFormatTypeNotSupported);
+    }
+
+    #[test]
+    fn get_pkcs8_to_pkcs1_conversion_for_rsa_private_key() {
+        use rsa::pkcs1::EncodeRsaPrivateKey;
+        use rsa::pkcs8::EncodePrivateKey;
+        let d = deps_with();
+        put(&d, "u", ObjectType::PrivateKey, State::Active);
+        let key = crate::ops::test_rsa_fixture::rsa_key();
+        let mut obj = d.store.get("u").unwrap().unwrap();
+        obj.algorithm = KmipAlgorithm::Rsa;
+        obj.key_material = Some(key.to_pkcs8_der().unwrap().as_bytes().to_vec());
+        obj.key_format_type = Some(0x04);
+        d.store.update(obj).unwrap();
+        let r = get_fmt(&d, "u", Some(0x03)).unwrap();
+        assert_eq!(r.key_block.key_format_type, KeyFormatType::Pkcs1);
+        assert_eq!(r.key_block.key_value, key.to_pkcs1_der().unwrap().as_bytes().to_vec());
     }
 }

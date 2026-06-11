@@ -138,12 +138,57 @@ pub fn register(
     let key_format_type = key_block.map(|kb| kb.key_format_type as u32);
     let key_material = key_block.map(|kb| kb.key_value.clone());
 
+    // K8 — KMIP 3.0 §6.2.1 `Transparent RSA Private Key` (0x0A):
+    // parse the BigInteger field structure into a real RSA key. The
+    // stored `key_material` keeps the TTLV-encoded KeyMaterial
+    // Structure verbatim (faithful Get/Export round-trip, BL-M-9);
+    // the PKCS#8 re-encoding below feeds the engine import so the
+    // key is usable for Sign/Decrypt. Malformed field structures
+    // fail Register with `Key Format Type Not Supported (0x10)` —
+    // never stored as unusable/empty material (compliance-audit B-5).
+    let transparent_rsa_pkcs8: Option<Vec<u8>> = match (req.object_type, kmip_algorithm, key_format_type) {
+        (ObjectType::PrivateKey, crate::kmip30::KmipAlgorithm::Rsa, Some(0x0A)) => {
+            let material = key_material.as_deref().unwrap_or_default();
+            let pkcs8 = crate::kmip30::decode_transparent_rsa_private_key(material)
+                .map_err(|e| e.to_string())
+                .and_then(|f| {
+                    use rsa::pkcs8::EncodePrivateKey;
+                    use rsa::BigUint;
+                    let primes: Vec<BigUint> = [&f.p, &f.q]
+                        .iter()
+                        .filter(|b| !b.is_empty())
+                        .map(|b| BigUint::from_bytes_be(b))
+                        .collect();
+                    rsa::RsaPrivateKey::from_components(
+                        BigUint::from_bytes_be(&f.modulus),
+                        BigUint::from_bytes_be(&f.public_exponent),
+                        BigUint::from_bytes_be(&f.private_exponent),
+                        primes,
+                    )
+                    .map_err(|e| e.to_string())
+                    .and_then(|k| {
+                        k.to_pkcs8_der()
+                            .map(|d| d.as_bytes().to_vec())
+                            .map_err(|e| e.to_string())
+                    })
+                })
+                .map_err(|e| {
+                    fail_err(deps, correlation_id, "Register",
+                        KmipError::key_format_type_not_supported(format!(
+                            "Transparent RSA Private Key material could not be parsed: {e}"
+                        )))
+                })?;
+            Some(pkcs8)
+        }
+        _ => None,
+    };
+
     // KMIP 3.0 §6.1.48 + §6.2 — when the client supplies an RSA
-    // private key in PKCS#1 (KeyFormatType=0x03) or PKCS#8 form, we
-    // create a real engine object so subsequent Sign / Decrypt can
-    // find the handle. CS-AC-M-{1..6,8} pin this flow.
-    //
-    // KeyFormatType codepoints (KMIP §11): 3 = PKCS_1, 4 = PKCS_8.
+    // private key in PKCS#1 (KeyFormatType=0x03), PKCS#8 (0x04) or
+    // Transparent RSA Private Key (0x0A) form, we create a real
+    // engine object so subsequent Sign / Decrypt can find the
+    // handle. CS-AC-M-{1..6,8} pin the PKCS#1/PKCS#8 flow; BL-M-9
+    // Registers the transparent form.
     if let (Some(material), Some(fmt), Some(session)) =
         (key_material.as_ref(), key_format_type, deps.engine_session)
     {
@@ -151,7 +196,8 @@ pub fn register(
             (ObjectType::PrivateKey, crate::kmip30::KmipAlgorithm::Rsa) => {
                 // PKCS_1 = 3 (RSAPrivateKey), PKCS_8 = 4
                 // (PrivateKeyInfo). Both surface in `sign_rsa` via
-                // `RsaPrivateKey::from_pkcs8_der`.
+                // `RsaPrivateKey::from_pkcs8_der`. 0x0A was converted
+                // to PKCS#8 above.
                 let pkcs8_bytes: Option<Vec<u8>> = match fmt {
                     3 => {
                         use rsa::pkcs1::DecodeRsaPrivateKey;
@@ -161,6 +207,7 @@ pub fn register(
                             .and_then(|k| k.to_pkcs8_der().ok().map(|d| d.as_bytes().to_vec()))
                     }
                     4 => Some(material.clone()),
+                    0x0A => transparent_rsa_pkcs8.clone(),
                     _ => None,
                 };
                 if let Some(pkcs8) = pkcs8_bytes {
@@ -453,16 +500,35 @@ pub fn export(
         attributes.push(Attribute::Name(name.clone()));
     }
 
-    let managed_object = key_material.map(|bytes| KeyBlock {
-        key_format_type: match obj.key_format_type {
-            Some(0x01) | None => KeyFormatType::Raw,
-            Some(_)           => KeyFormatType::Raw,
-        },
-        cryptographic_algorithm: obj.algorithm,
-        cryptographic_length: obj.cryptographic_length,
-        key_value: bytes,
-        key_wrapping_data: None,
-    });
+    // K8 — surface the STORED format faithfully (the old code mapped
+    // every stored format to Raw), then honor the client-requested
+    // `Key Format Type` with the shared Get/Export conversion rules:
+    // absent → stored; same → as-is; Raw ↔ TransparentSymmetricKey /
+    // PKCS#1 ↔ PKCS#8 (RSA) → convert; otherwise 0x10.
+    let managed_object = match key_material {
+        None => None,
+        Some(bytes) => {
+            let stored_format = obj
+                .key_format_type
+                .and_then(KeyFormatType::from_wire_value)
+                .unwrap_or(KeyFormatType::Raw);
+            let (key_format_type, key_value) = super::helpers::convert_key_format(
+                stored_format,
+                bytes,
+                req.key_format_type,
+                obj.algorithm,
+                obj.object_type,
+            )
+            .map_err(|e| fail_err(deps, correlation_id, "Export", e))?;
+            Some(KeyBlock {
+                key_format_type,
+                cryptographic_algorithm: obj.algorithm,
+                cryptographic_length: obj.cryptographic_length,
+                key_value,
+                key_wrapping_data: None,
+            })
+        }
+    };
 
     emit_success(deps, correlation_id, "Export");
     Ok(ExportResponse {
@@ -860,5 +926,121 @@ mod tests {
             key_compression_type: None,
         }, "c").unwrap();
         assert!(exp.managed_object.is_some());
+    }
+
+    // ── K8 — KeyFormatType correctness ──────────────────────────────
+
+    fn register_transparent_rsa(d: &Deps) -> crate::error::Result<RegisterResponse> {
+        register(d, RegisterRequest {
+            object_type: ObjectType::PrivateKey,
+            attributes: vec![
+                Attribute::CryptographicUsageMask(UsageMask::DECRYPT),
+            ],
+            managed_object: Some(KeyBlock {
+                key_format_type: KeyFormatType::TransparentRsaPrivateKey,
+                cryptographic_algorithm: KmipAlgorithm::Rsa,
+                cryptographic_length: 1024,
+                key_value: crate::ops::test_rsa_fixture::ttlv_key_material(),
+                key_wrapping_data: None,
+            }),
+            protection_storage_masks: None,
+            certificate_payload: None,
+        }, "c")
+    }
+
+    #[test]
+    fn register_transparent_rsa_private_key_parses_and_round_trips() {
+        // BL-M-9 shape: Transparent RSA Private Key Register must
+        // parse the BigInteger structure (never store unusable /
+        // empty material) and keep the TTLV KeyMaterial verbatim so
+        // Get round-trips the §6.2.1 structure byte-faithfully.
+        let d = deps_with();
+        let r = register_transparent_rsa(&d).unwrap();
+        let rec = d.store.get(&r.uid).unwrap().unwrap();
+        assert_eq!(rec.key_format_type, Some(0x0A));
+        let stored = rec.key_material.expect("material stored");
+        assert!(!stored.is_empty(), "B-5: never store empty material");
+        assert_eq!(stored, crate::ops::test_rsa_fixture::ttlv_key_material());
+        // The stored TTLV parses back into the same components.
+        let f = crate::kmip30::decode_transparent_rsa_private_key(&stored).unwrap();
+        assert_eq!(hex::encode(&f.modulus), crate::ops::test_rsa_fixture::MODULUS);
+        assert_eq!(hex::encode(&f.public_exponent), crate::ops::test_rsa_fixture::PUBLIC_EXPONENT);
+    }
+
+    #[test]
+    fn register_transparent_rsa_private_key_malformed_fails_0x10() {
+        // Garbage that is not a TTLV KeyMaterial Structure must fail
+        // Register with Key Format Type Not Supported (0x10) — not
+        // land in the store as dead material.
+        let d = deps_with();
+        let err = register(&d, RegisterRequest {
+            object_type: ObjectType::PrivateKey,
+            attributes: vec![Attribute::CryptographicUsageMask(UsageMask::DECRYPT)],
+            managed_object: Some(KeyBlock {
+                key_format_type: KeyFormatType::TransparentRsaPrivateKey,
+                cryptographic_algorithm: KmipAlgorithm::Rsa,
+                cryptographic_length: 1024,
+                key_value: vec![0xde, 0xad, 0xbe, 0xef],
+                key_wrapping_data: None,
+            }),
+            protection_storage_masks: None,
+            certificate_payload: None,
+        }, "c").unwrap_err();
+        assert_eq!(err.result_reason(), ResultReason::KeyFormatTypeNotSupported);
+    }
+
+    fn register_tsk(d: &Deps) -> String {
+        register(d, RegisterRequest {
+            object_type: ObjectType::SymmetricKey,
+            attributes: vec![
+                Attribute::CryptographicAlgorithm(KmipAlgorithm::Aes),
+                Attribute::CryptographicLength(128),
+                Attribute::CryptographicUsageMask(UsageMask::ENCRYPT),
+            ],
+            managed_object: Some(KeyBlock {
+                key_format_type: KeyFormatType::TransparentSymmetricKey,
+                ..raw_aes128_kb()
+            }),
+            protection_storage_masks: None,
+            certificate_payload: None,
+        }, "c").unwrap().uid
+    }
+
+    #[test]
+    fn export_preserves_stored_format_not_raw() {
+        // K8 / B-5: the old Export mapped EVERY stored format to Raw.
+        let d = deps_with();
+        let uid = register_tsk(&d);
+        let exp = export(&d, ExportRequest {
+            uid,
+            key_format_type: None,
+            key_wrap_type: None,
+            key_compression_type: None,
+        }, "c").unwrap();
+        let kb = exp.managed_object.unwrap();
+        assert_eq!(kb.key_format_type, KeyFormatType::TransparentSymmetricKey);
+        assert_eq!(kb.key_value, vec![0x01; 16]);
+    }
+
+    #[test]
+    fn export_honors_requested_format_and_rejects_unsupported() {
+        let d = deps_with();
+        let uid = register_tsk(&d);
+        // TransparentSymmetricKey → Raw is a supported conversion.
+        let exp = export(&d, ExportRequest {
+            uid: uid.clone(),
+            key_format_type: Some(0x01),
+            key_wrap_type: None,
+            key_compression_type: None,
+        }, "c").unwrap();
+        assert_eq!(exp.managed_object.unwrap().key_format_type, KeyFormatType::Raw);
+        // TransparentSymmetricKey → PKCS#8 is not.
+        let err = export(&d, ExportRequest {
+            uid,
+            key_format_type: Some(0x04),
+            key_wrap_type: None,
+            key_compression_type: None,
+        }, "c").unwrap_err();
+        assert_eq!(err.result_reason(), ResultReason::KeyFormatTypeNotSupported);
     }
 }
