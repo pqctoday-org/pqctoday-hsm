@@ -17,9 +17,9 @@
 //! KMIP wire only carries `CryptographicAlgorithm = ML-DSA-65`. The mech
 //! the PKCS#11 bridge calls depends on which OPERATION is being requested:
 //!
-//! - `Create` (key generation) → `CKM_PQCTODAY_ML_DSA_KEY_PAIR_GEN` (`0x4035`)
-//! - `Sign` / `SignatureVerify` → `CKM_PQCTODAY_ML_DSA_SIGN_VERIFY` (`0x4036`)
-//! - `Encrypt` (ML-KEM encapsulation) → `CKM_PQCTODAY_ML_KEM_ENCAPSULATE` (`0x4037`)
+//! - `Create` (key generation) → `CKM_ML_DSA_KEY_PAIR_GEN` (`0x1c`)
+//! - `Sign` / `SignatureVerify` → `CKM_ML_DSA` (`0x1d`)
+//! - `Encrypt` (ML-KEM encapsulation) → `CKM_ML_KEM` (`0x17`)
 //!
 //! That's why [`KmipAlgorithm::to_pkcs11_mech`] takes a [`PkcsOp`] argument —
 //! the mapping is `(algorithm, op) → mech`, not just `algorithm → mech`.
@@ -28,17 +28,25 @@
 /// `CK_ULONG`; we model it as `u32` because every codepoint we ship fits.
 pub type CkMechanismType = u32;
 
-// ── Vendor mech codepoints (pqctoday-hsm/softhsmv3, v0.5.0 shipping set) ────
-// Authoritative source: pkcs11-mech-manifest.json
-// (sha256 of pqctoday-priv/docs/platform/data/pkcs11-vendor-mech-allocation.md
-//  is checked in `manifest_consistency_test` below).
+// ── Standard PKCS#11 v3.2 PQC mech codepoints ────────────────────────────
+// Re-exported from the engine (`softhsmrustv3::constants`) — single source
+// of truth, values per the normative pkcs11t.h.
+//
+// History (compliance-audit B-1, fixed by K5): the KMIP layer used to define
+// a "vendor" block CKM_PQCTODAY_* at 0x4032–0x4037. Those values collide
+// with the OASIS-assigned CKM_HSS_KEY_PAIR_GEN / CKM_HSS /
+// CKM_XMSS_KEY_PAIR_GEN / CKM_XMSSMT_KEY_PAIR_GEN / CKM_XMSS / CKM_XMSSMT
+// (pkcs11t.h:1218-1224) and sat below CKM_VENDOR_DEFINED (0x80000000),
+// violating the PKCS#11 vendor-extension rule. All six had standard v3.2
+// equivalents, so the vendor block is retired (codepoints stay reserved
+// forever per pkcs11-vendor-mech-allocation.md's mutation policy). Any
+// future genuinely vendor-specific mech MUST be allocated at
+// `0x8000_0000 | n`.
 
-pub const CKM_PQCTODAY_HSS_KEY_PAIR_GEN: CkMechanismType    = 0x4032;
-pub const CKM_PQCTODAY_SLH_DSA_SIGN_VERIFY: CkMechanismType = 0x4033;
-pub const CKM_PQCTODAY_ML_KEM_KEY_PAIR_GEN: CkMechanismType = 0x4034;
-pub const CKM_PQCTODAY_ML_DSA_KEY_PAIR_GEN: CkMechanismType = 0x4035;
-pub const CKM_PQCTODAY_ML_DSA_SIGN_VERIFY: CkMechanismType  = 0x4036;
-pub const CKM_PQCTODAY_ML_KEM_ENCAPSULATE: CkMechanismType  = 0x4037;
+pub use softhsmrustv3::constants::{
+    CKM_ML_DSA, CKM_ML_DSA_KEY_PAIR_GEN, CKM_ML_KEM, CKM_ML_KEM_KEY_PAIR_GEN,
+    CKM_SLH_DSA, CKM_SLH_DSA_KEY_PAIR_GEN,
+};
 
 // ── Standard PKCS#11 v3.2 mech codepoints used by classical algos ──────────
 // From src/lib/pkcs11/pkcs11t.h (in pqctoday-hsm root). These do NOT live in
@@ -239,45 +247,45 @@ impl KmipAlgorithm {
     /// is not defined for this algorithm (e.g. `KeyGen` for HMAC, `SignVerify`
     /// for ML-KEM).
     ///
-    /// The mapping is verified against [`pkcs11-mech-manifest.json`] for the
-    /// vendor codepoints in the manifest-consistency test below.
-    ///
-    /// [`pkcs11-mech-manifest.json`]: ../../pkcs11-mech-manifest.json
+    /// PQC families map to the standard PKCS#11 v3.2 mechanisms
+    /// (`CKM_ML_KEM* / CKM_ML_DSA* / CKM_SLH_DSA*`) re-exported from
+    /// `softhsmrustv3::constants` — pinned by the
+    /// `standard_codepoint_consistency_test` below.
     pub const fn to_pkcs11_mech(self, op: PkcsOp) -> Option<CkMechanismType> {
         use KmipAlgorithm::*;
         use PkcsOp::*;
         match (self, op) {
             // ── ML-KEM (FIPS 203) ─────────────────────────────────────────
             (MlKem512 | MlKem768 | MlKem1024, KeyGen) =>
-                Some(CKM_PQCTODAY_ML_KEM_KEY_PAIR_GEN),
+                Some(CKM_ML_KEM_KEY_PAIR_GEN),
             (MlKem512 | MlKem768 | MlKem1024, Encrypt | Decrypt) =>
-                Some(CKM_PQCTODAY_ML_KEM_ENCAPSULATE),
+                Some(CKM_ML_KEM),
 
             // ── ML-DSA (FIPS 204) ─────────────────────────────────────────
             (MlDsa44 | MlDsa65 | MlDsa87, KeyGen) =>
-                Some(CKM_PQCTODAY_ML_DSA_KEY_PAIR_GEN),
+                Some(CKM_ML_DSA_KEY_PAIR_GEN),
             (MlDsa44 | MlDsa65 | MlDsa87, SignVerify) =>
-                Some(CKM_PQCTODAY_ML_DSA_SIGN_VERIFY),
+                Some(CKM_ML_DSA),
 
             // ── SLH-DSA (FIPS 205) ────────────────────────────────────────
-            // Keygen is via the HSS keygen vendor codepoint per softhsmv3
-            // shipping mech table (PKCS#11 v3.2 §6.14); SLH-DSA-specific
-            // keygen would require an additional vendor mech codepoint
-            // (0x4038+) which is not in the v0.5.0 shipping set.
+            // PKCS#11 v3.2 §6.69 — CKM_SLH_DSA_KEY_PAIR_GEN covers all 12
+            // parameter sets (variant selected via CKA_PARAMETER_SET).
+            // Pre-K5 this was mislabeled as the HSS keygen codepoint
+            // (compliance-audit B-1).
             (SlhDsaSha2_128s | SlhDsaSha2_128f
                 | SlhDsaSha2_192s | SlhDsaSha2_192f
                 | SlhDsaSha2_256s | SlhDsaSha2_256f
                 | SlhDsaShake128s | SlhDsaShake128f
                 | SlhDsaShake192s | SlhDsaShake192f
                 | SlhDsaShake256s | SlhDsaShake256f, KeyGen)
-                => Some(CKM_PQCTODAY_HSS_KEY_PAIR_GEN),
+                => Some(CKM_SLH_DSA_KEY_PAIR_GEN),
             (SlhDsaSha2_128s | SlhDsaSha2_128f
                 | SlhDsaSha2_192s | SlhDsaSha2_192f
                 | SlhDsaSha2_256s | SlhDsaSha2_256f
                 | SlhDsaShake128s | SlhDsaShake128f
                 | SlhDsaShake192s | SlhDsaShake192f
                 | SlhDsaShake256s | SlhDsaShake256f, SignVerify)
-                => Some(CKM_PQCTODAY_SLH_DSA_SIGN_VERIFY),
+                => Some(CKM_SLH_DSA),
 
             // ── RSA classical ─────────────────────────────────────────────
             (Rsa, KeyGen)     => Some(CKM_RSA_PKCS_KEY_PAIR_GEN),
@@ -399,21 +407,21 @@ mod tests {
     }
 
     #[test]
-    fn ml_kem_768_keygen_dispatches_to_vendor_mech() {
+    fn ml_kem_768_keygen_dispatches_to_standard_mech() {
         assert_eq!(
             KmipAlgorithm::MlKem768.to_pkcs11_mech(PkcsOp::KeyGen),
-            Some(CKM_PQCTODAY_ML_KEM_KEY_PAIR_GEN),
+            Some(CKM_ML_KEM_KEY_PAIR_GEN),
         );
-        assert_eq!(CKM_PQCTODAY_ML_KEM_KEY_PAIR_GEN, 0x4034);
+        assert_eq!(CKM_ML_KEM_KEY_PAIR_GEN, 0x0f);
     }
 
     #[test]
-    fn ml_dsa_65_sign_verify_dispatches_to_vendor_mech() {
+    fn ml_dsa_65_sign_verify_dispatches_to_standard_mech() {
         assert_eq!(
             KmipAlgorithm::MlDsa65.to_pkcs11_mech(PkcsOp::SignVerify),
-            Some(CKM_PQCTODAY_ML_DSA_SIGN_VERIFY),
+            Some(CKM_ML_DSA),
         );
-        assert_eq!(CKM_PQCTODAY_ML_DSA_SIGN_VERIFY, 0x4036);
+        assert_eq!(CKM_ML_DSA, 0x1d);
     }
 
     #[test]
@@ -421,7 +429,7 @@ mod tests {
         let encap = KmipAlgorithm::MlKem1024.to_pkcs11_mech(PkcsOp::Encrypt);
         let decap = KmipAlgorithm::MlKem1024.to_pkcs11_mech(PkcsOp::Decrypt);
         assert_eq!(encap, decap);
-        assert_eq!(encap, Some(CKM_PQCTODAY_ML_KEM_ENCAPSULATE));
+        assert_eq!(encap, Some(CKM_ML_KEM));
     }
 
     #[test]
@@ -448,23 +456,67 @@ mod tests {
         assert_eq!(KmipAlgorithm::Aes.to_pkcs11_mech(PkcsOp::Encrypt), Some(CKM_AES_GCM));
     }
 
-    /// Pins the vendor mech codepoints to the values in
-    /// [`pkcs11-mech-manifest.json`]. If the manifest moves a codepoint, this
-    /// test fails loudly so the consumer table here can be updated in lockstep.
-    ///
-    /// [`pkcs11-mech-manifest.json`]: ../../pkcs11-mech-manifest.json
+    /// Pins the PQC mech codepoints to the **standard PKCS#11 v3.2** values
+    /// from the normative `pkcs11t.h` (mirrored by
+    /// `softhsmrustv3::constants` and by `pkcs11-mech-manifest.json`'s
+    /// `standard_pkcs11_v3_2` block). The former CKM_PQCTODAY_* vendor
+    /// block (0x4032–0x4037) was retired by K5 — those values are the
+    /// OASIS-assigned CKM_HSS/CKM_XMSS* codepoints and must never be
+    /// emitted by this layer.
     #[test]
     fn manifest_consistency_test() {
-        // Hard-coded against the active vendor codepoints in
-        // pkcs11-mech-manifest.json `active.*` block. Authority sha256 of
-        // pkcs11-vendor-mech-allocation.md is checked by the manifest's own
-        // CI gate (`consumer_contract.ci_gate`); here we check the consumer
-        // side of the contract.
-        assert_eq!(CKM_PQCTODAY_HSS_KEY_PAIR_GEN,    0x4032);
-        assert_eq!(CKM_PQCTODAY_SLH_DSA_SIGN_VERIFY, 0x4033);
-        assert_eq!(CKM_PQCTODAY_ML_KEM_KEY_PAIR_GEN, 0x4034);
-        assert_eq!(CKM_PQCTODAY_ML_DSA_KEY_PAIR_GEN, 0x4035);
-        assert_eq!(CKM_PQCTODAY_ML_DSA_SIGN_VERIFY,  0x4036);
-        assert_eq!(CKM_PQCTODAY_ML_KEM_ENCAPSULATE,  0x4037);
+        assert_eq!(CKM_ML_KEM_KEY_PAIR_GEN,  0x0f);
+        assert_eq!(CKM_ML_KEM,               0x17);
+        assert_eq!(CKM_ML_DSA_KEY_PAIR_GEN,  0x1c);
+        assert_eq!(CKM_ML_DSA,               0x1d);
+        assert_eq!(CKM_SLH_DSA_KEY_PAIR_GEN, 0x2d);
+        assert_eq!(CKM_SLH_DSA,              0x2e);
+    }
+
+    /// K5 regression — every PQC family's `(op) → mech` selection emits the
+    /// standard PKCS#11 v3.2 codepoint, never the retired 0x4032–0x4037
+    /// pseudo-vendor block (which collides with CKM_HSS/CKM_XMSS*).
+    #[test]
+    fn pqc_mech_selection_emits_standard_codepoints() {
+        use KmipAlgorithm::*;
+        use PkcsOp::*;
+
+        // ML-KEM: keygen + encapsulate (Encrypt/Decrypt).
+        for a in [MlKem512, MlKem768, MlKem1024] {
+            assert_eq!(a.to_pkcs11_mech(KeyGen), Some(0x0f), "{}", a.spec_name());
+            assert_eq!(a.to_pkcs11_mech(Encrypt), Some(0x17), "{}", a.spec_name());
+            assert_eq!(a.to_pkcs11_mech(Decrypt), Some(0x17), "{}", a.spec_name());
+        }
+
+        // ML-DSA: keygen + sign/verify.
+        for a in [MlDsa44, MlDsa65, MlDsa87] {
+            assert_eq!(a.to_pkcs11_mech(KeyGen), Some(0x1c), "{}", a.spec_name());
+            assert_eq!(a.to_pkcs11_mech(SignVerify), Some(0x1d), "{}", a.spec_name());
+        }
+
+        // SLH-DSA (all 12 parameter sets): keygen + sign/verify. Keygen was
+        // mislabeled as the HSS codepoint pre-K5 (compliance-audit B-1).
+        for a in [
+            SlhDsaSha2_128s, SlhDsaSha2_128f, SlhDsaSha2_192s, SlhDsaSha2_192f,
+            SlhDsaSha2_256s, SlhDsaSha2_256f, SlhDsaShake128s, SlhDsaShake128f,
+            SlhDsaShake192s, SlhDsaShake192f, SlhDsaShake256s, SlhDsaShake256f,
+        ] {
+            assert_eq!(a.to_pkcs11_mech(KeyGen), Some(0x2d), "{}", a.spec_name());
+            assert_eq!(a.to_pkcs11_mech(SignVerify), Some(0x2e), "{}", a.spec_name());
+        }
+
+        // No (algorithm, op) pair may emit a retired pseudo-vendor codepoint.
+        for &a in all_algos() {
+            for op in [KeyGen, SignVerify, Encrypt, Decrypt, Mac] {
+                if let Some(m) = a.to_pkcs11_mech(op) {
+                    assert!(
+                        !(0x4032..=0x4037).contains(&m),
+                        "{} {:?} emits retired pseudo-vendor mech 0x{m:04X}",
+                        a.spec_name(),
+                        op,
+                    );
+                }
+            }
+        }
     }
 }

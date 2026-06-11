@@ -98,7 +98,7 @@ fn one_request_three_planes_one_correlation_id() {
         correlation_id,
         EventPayload::Pkcs11Call {
             function: "C_GenerateKeyPair".into(),
-            mechanism: Some("CKM_PQCTODAY_ML_DSA_KEY_PAIR_GEN".into()),
+            mechanism: Some("CKM_ML_DSA_KEY_PAIR_GEN".into()),
             slot: Some(0),
             session: Some(42),
             rv: 0,
@@ -112,7 +112,7 @@ fn one_request_three_planes_one_correlation_id() {
         correlation_id,
         EventPayload::Pkcs11Call {
             function: "C_Sign".into(),
-            mechanism: Some("CKM_PQCTODAY_ML_DSA_SIGN_VERIFY".into()),
+            mechanism: Some("CKM_ML_DSA".into()),
             slot: Some(0),
             session: Some(42),
             rv: 0,
@@ -213,7 +213,7 @@ fn hub_ui_can_filter_per_plane() {
             format!("corr-{i}"),
             EventPayload::Pkcs11Call {
                 function: "C_GenerateKeyPair".into(),
-                mechanism: Some("CKM_PQCTODAY_ML_DSA_KEY_PAIR_GEN".into()),
+                mechanism: Some("CKM_ML_DSA_KEY_PAIR_GEN".into()),
                 slot: Some(0),
                 session: Some(1),
                 rv: 0,
@@ -262,7 +262,7 @@ fn event_payloads_serialise_to_committed_wire_format() {
         "corr",
         EventPayload::Pkcs11Call {
             function: "C_Sign".into(),
-            mechanism: Some("CKM_PQCTODAY_ML_DSA_SIGN_VERIFY".into()),
+            mechanism: Some("CKM_ML_DSA".into()),
             slot: Some(0),
             session: Some(42),
             rv: 0,
