@@ -171,6 +171,7 @@ pub fn C_Finalize(p_reserved: *mut u8) -> u32 {
         m.clear();
     });
     DIGEST_STATE.with(|s| s.borrow_mut().clear());
+    DIGEST_MULTIPART.with(|s| s.borrow_mut().clear());
     FIND_STATE.with(|s| s.borrow_mut().clear());
     MESSAGE_SIGN_ACC.with(|s| s.borrow_mut().clear());
     MESSAGE_VERIFY_ACC.with(|s| s.borrow_mut().clear());
@@ -361,6 +362,7 @@ pub fn C_CloseSession(h_session: u32) -> u32 {
         }
     });
     DIGEST_STATE.with(|s| s.borrow_mut().remove(&h_session));
+    DIGEST_MULTIPART.with(|s| s.borrow_mut().remove(&h_session));
     FIND_STATE.with(|s| s.borrow_mut().remove(&h_session));
     MESSAGE_SIGN_ACC.with(|s| s.borrow_mut().remove(&h_session));
     MESSAGE_VERIFY_ACC.with(|s| s.borrow_mut().remove(&h_session));
@@ -406,6 +408,7 @@ pub fn C_SessionCancel(h_session: u32, flags: u32) -> u32 {
     }
     if flags & 0x400 != 0 {
         DIGEST_STATE.with(|s| s.borrow_mut().remove(&h_session));
+        DIGEST_MULTIPART.with(|s| s.borrow_mut().remove(&h_session));
     }
     if flags & 0x800 != 0 {
         SIGN_STATE.with(|s| s.borrow_mut().remove(&h_session));
@@ -1014,7 +1017,8 @@ pub fn C_GenerateKeyPair(
                             pub_attrs.insert(CKA_VALUE, ek.as_bytes().as_slice().to_vec());
                             prv_attrs.insert(CKA_VALUE, dk.as_bytes().as_slice().to_vec());
                         }
-                        _ => return CKR_ARGUMENTS_BAD,
+                        // §4.1 — unknown CKA_PARAMETER_SET value in the template.
+                        _ => return CKR_ATTRIBUTE_VALUE_INVALID,
                     }
                 });
                 // CKA_PUBLIC_KEY_INFO (SPKI) — PKCS#11 v3.2 §4.14
@@ -1150,7 +1154,8 @@ pub fn C_GenerateKeyPair(
                             Err(_) => return CKR_FUNCTION_FAILED,
                         }
                     }
-                    _ => return CKR_ARGUMENTS_BAD,
+                    // §4.1 — unknown CKA_PARAMETER_SET value in the template.
+                    _ => return CKR_ATTRIBUTE_VALUE_INVALID,
                 }
                 // CKA_PUBLIC_KEY_INFO (SPKI) — PKCS#11 v3.2 §4.14
                 if let Some(pk_bytes) = pub_attrs.get(&CKA_VALUE).cloned() {
@@ -1333,7 +1338,8 @@ pub fn C_GenerateKeyPair(
                             prv_attrs
                         )
                     }
-                    _ => return CKR_ARGUMENTS_BAD,
+                    // §4.1 — unknown CKA_PARAMETER_SET value in the template.
+                    _ => return CKR_ATTRIBUTE_VALUE_INVALID,
                 }
                 // CKA_PUBLIC_KEY_INFO (SPKI) — PKCS#11 v3.2 §4.14
                 if let Some(pk_bytes) = pub_attrs.get(&CKA_VALUE).cloned() {
@@ -1977,8 +1983,12 @@ pub fn C_GenerateKey(
         let mech_type = *(p_mechanism as *const u32);
         match mech_type {
             CKM_AES_KEY_GEN => {
-                let key_len =
-                    get_attr_ulong(p_template, ul_count, CKA_VALUE_LEN).unwrap_or(16) as usize;
+                // PKCS#11 v3.2 §6.27.2 — CKA_VALUE_LEN is a REQUIRED template
+                // attribute for CKM_AES_KEY_GEN (no silent 16-byte default).
+                let key_len = match get_attr_ulong(p_template, ul_count, CKA_VALUE_LEN) {
+                    Some(l) => l as usize,
+                    None => return CKR_TEMPLATE_INCOMPLETE,
+                };
                 // 16/24/32 per C_GetMechanismInfo (16–32) and the native API,
                 // which already accepts AES-192.
                 if key_len != 16 && key_len != 24 && key_len != 32 {
@@ -2016,8 +2026,10 @@ pub fn C_GenerateKey(
             CKM_GENERIC_SECRET_KEY_GEN => {
                 let key_len =
                     get_attr_ulong(p_template, ul_count, CKA_VALUE_LEN).unwrap_or(32) as usize;
+                // §4.1 / §5.18.1 — an out-of-range CKA_VALUE_LEN is a bad
+                // attribute VALUE, not bad function arguments.
                 if key_len == 0 || key_len > 512 {
-                    return CKR_ARGUMENTS_BAD;
+                    return CKR_ATTRIBUTE_VALUE_INVALID;
                 }
                 let mut key = vec![0u8; key_len];
                 if getrandom::getrandom(&mut key).is_err() {
@@ -2185,8 +2197,10 @@ pub fn C_DecapsulateKey(
             CKP_ML_KEM_1024 => 1568,
             _ => return CKR_ARGUMENTS_BAD,
         };
+        // PKCS#11 v3.2 §5.18.9 — a ciphertext of the wrong length for the
+        // key's parameter set is invalid input ciphertext.
         if ul_ciphertext_len != expected_ct {
-            return CKR_ARGUMENTS_BAD;
+            return CKR_ENCRYPTED_DATA_INVALID;
         }
 
         let prv_key_bytes = match get_object_value(h_private_key) {
@@ -2562,12 +2576,25 @@ pub fn C_DestroyObject(h_session: u32, h_object: u32) -> u32 {
 ///   2. the (private) object is visible   → else CKR_KEY_HANDLE_INVALID (§4.4)
 ///   3. the usage flag is set             → else CKR_KEY_FUNCTION_NOT_PERMITTED
 fn check_key_usage(h_session: u32, h_key: u32, usage_attr: u32) -> Result<(), u32> {
+    check_key_usage_as(h_session, h_key, usage_attr, CKR_KEY_HANDLE_INVALID)
+}
+
+/// `check_key_usage` parameterized on the handle-invalid code, so the wrap
+/// family can report the role-specific codes the spec assigns:
+/// CKR_WRAPPING_KEY_HANDLE_INVALID (C_WrapKey) and
+/// CKR_UNWRAPPING_KEY_HANDLE_INVALID (C_UnwrapKey).
+fn check_key_usage_as(
+    h_session: u32,
+    h_key: u32,
+    usage_attr: u32,
+    handle_invalid_rv: u32,
+) -> Result<(), u32> {
     let attrs = match OBJECTS.with(|o| o.borrow().get(&h_key).cloned()) {
         Some(a) => a,
-        None => return Err(CKR_KEY_HANDLE_INVALID),
+        None => return Err(handle_invalid_rv),
     };
     if !crate::state::can_access_object(h_session, &attrs) {
-        return Err(CKR_KEY_HANDLE_INVALID);
+        return Err(handle_invalid_rv);
     }
     if !read_bool_attr(&attrs, usage_attr) {
         return Err(CKR_KEY_FUNCTION_NOT_PERMITTED);
@@ -2731,6 +2758,9 @@ pub fn C_Sign(
     pul_signature_len: *mut u32,
 ) -> u32 {
     require_init!();
+    // §5.2 error priority — session-handle validity outranks
+    // CKR_OPERATION_NOT_INITIALIZED and argument checks.
+    require_session!(h_session);
     if pul_signature_len.is_null() || (p_data.is_null() && ul_data_len > 0) {
         return CKR_ARGUMENTS_BAD;
     }
@@ -3042,6 +3072,8 @@ pub fn C_Verify(
     ul_signature_len: u32,
 ) -> u32 {
     require_init!();
+    // §5.2 error priority — session handle before operation state.
+    require_session!(h_session);
     if (p_data.is_null() && ul_data_len > 0) || p_signature.is_null() {
         return CKR_ARGUMENTS_BAD;
     }
@@ -3902,6 +3934,8 @@ pub fn C_Encrypt(
     pul_encrypted_data_len: *mut u32,
 ) -> u32 {
     require_init!();
+    // §5.2 error priority — session handle before operation state.
+    require_session!(h_session);
     // Remove state on entry — consumed on all paths except null-buffer size query
     let ctx = ENCRYPT_STATE.with(|s| s.borrow_mut().remove(&h_session));
     let ctx = match ctx {
@@ -4245,6 +4279,8 @@ pub fn C_Decrypt(
     pul_data_len: *mut u32,
 ) -> u32 {
     require_init!();
+    // §5.2 error priority — session handle before operation state.
+    require_session!(h_session);
     // Remove state on entry — consumed on all paths except null-buffer size query
     let ctx = DECRYPT_STATE.with(|s| s.borrow_mut().remove(&h_session));
     let ctx = match ctx {
@@ -4463,11 +4499,16 @@ pub fn C_DigestInit(h_session: u32, p_mechanism: *mut u8) -> u32 {
 #[wasm_bindgen(js_name = _C_DigestUpdate)]
 pub fn C_DigestUpdate(h_session: u32, p_part: *mut u8, ul_part_len: u32) -> u32 {
     require_init!();
+    // §5.2 error priority — session handle before operation state.
+    require_session!(h_session);
     use sha2::Digest;
     let has_state = DIGEST_STATE.with(|s| s.borrow().contains_key(&h_session));
     if !has_state {
         return CKR_OPERATION_NOT_INITIALIZED;
     }
+    // §5.13 — the op is now multi-part; a one-shot C_Digest on this session
+    // is CKR_OPERATION_ACTIVE until C_DigestFinal completes it.
+    DIGEST_MULTIPART.with(|s| s.borrow_mut().insert(h_session));
     unsafe {
         let data = std::slice::from_raw_parts(p_part, ul_part_len as usize);
         DIGEST_STATE.with(|s| {
@@ -4490,6 +4531,8 @@ pub fn C_DigestUpdate(h_session: u32, p_part: *mut u8, ul_part_len: u32) -> u32 
 #[wasm_bindgen(js_name = _C_DigestFinal)]
 pub fn C_DigestFinal(h_session: u32, p_digest: *mut u8, pul_digest_len: *mut u32) -> u32 {
     require_init!();
+    // §5.2 error priority — session handle before operation state.
+    require_session!(h_session);
     unsafe {
         // Size-only query: return expected length WITHOUT consuming state.
         // Per PKCS#11 v3.2 §5.7.2, a null pDigest must not terminate the operation.
@@ -4537,6 +4580,7 @@ pub fn C_DigestFinal(h_session: u32, p_digest: *mut u8, pul_digest_len: *mut u32
         let ctx = DIGEST_STATE
             .with(|s| s.borrow_mut().remove(&h_session))
             .expect("digest state present (checked above)");
+        DIGEST_MULTIPART.with(|s| s.borrow_mut().remove(&h_session));
         let hash = match ctx {
             DigestCtx::Sha256(h) => h.finalize().to_vec(),
             DigestCtx::Sha384(h) => h.finalize().to_vec(),
@@ -4560,6 +4604,14 @@ pub fn C_Digest(
     pul_digest_len: *mut u32,
 ) -> u32 {
     require_init!();
+    // §5.2 error priority — session handle before operation state.
+    require_session!(h_session);
+    // §5.13 convention — a digest op already in its multi-part phase
+    // (C_DigestUpdate called) must be completed with C_DigestFinal; the
+    // one-shot API is a sequencing error, not a silent append.
+    if DIGEST_MULTIPART.with(|s| s.borrow().contains(&h_session)) {
+        return CKR_OPERATION_ACTIVE;
+    }
     unsafe {
         // Size-only query: return expected length WITHOUT updating state.
         // Per PKCS#11 v3.2 §5.7.2, data must not be processed on a null-pDigest call.
@@ -4586,6 +4638,10 @@ pub fn C_Digest(
         if rv != CKR_OK {
             return rv;
         }
+        // The internal Update marked the op multi-part; the one-shot path is
+        // not — clear the marker so a §5.2 BUFFER_TOO_SMALL retry of C_Digest
+        // is not misreported as CKR_OPERATION_ACTIVE.
+        DIGEST_MULTIPART.with(|s| s.borrow_mut().remove(&h_session));
         C_DigestFinal(h_session, p_digest, pul_digest_len)
     }
 }
@@ -4651,6 +4707,8 @@ pub fn C_FindObjects(
     pul_object_count: *mut u32,
 ) -> u32 {
     require_init!();
+    // §5.2 error priority — session handle before operation state.
+    require_session!(h_session);
     // §5.10.2 — phObject and pulObjectCount are required pointers.
     nonnull!(ph_object, pul_object_count);
     FIND_STATE.with(|s| {
@@ -4863,17 +4921,13 @@ pub fn C_DeriveKey(
         let key_len =
             get_attr_ulong(p_template, ul_attribute_count, CKA_VALUE_LEN).unwrap_or(32) as usize;
 
-        // PKCS#11 v3.2 §5.18: for key-based derivation, verify CKA_DERIVE on the base key.
-        // PBKDF2 uses h_base_key=0 (password in params), so skip the check for that case.
+        // PKCS#11 v3.2 §5.18.5 — base key: handle exists + visible (login
+        // gate) → else CKR_KEY_HANDLE_INVALID; then CKA_DERIVE → else
+        // CKR_KEY_FUNCTION_NOT_PERMITTED. PBKDF2 uses h_base_key=0
+        // (password in params), so skip the check for that case.
         if h_base_key != 0 {
-            let can_derive = OBJECTS.with(|o| {
-                o.borrow()
-                    .get(&h_base_key)
-                    .map(|attrs| read_bool_attr(attrs, CKA_DERIVE))
-                    .unwrap_or(false)
-            });
-            if !can_derive {
-                return CKR_KEY_FUNCTION_NOT_PERMITTED;
+            if let Err(rv) = check_key_usage(_h_session, h_base_key, CKA_DERIVE) {
+                return rv;
             }
         }
 
@@ -5516,25 +5570,25 @@ pub fn C_WrapKey(
             return CKR_MECHANISM_INVALID;
         }
 
-        // Check CKA_WRAP on wrapping key
-        let can_wrap = OBJECTS.with(|o| {
-            o.borrow()
-                .get(&h_wrapping_key)
-                .map(|attrs| read_bool_attr(attrs, CKA_WRAP))
-                .unwrap_or(false)
-        });
-        if !can_wrap {
-            return CKR_KEY_FUNCTION_NOT_PERMITTED;
+        // PKCS#11 v3.2 §5.18.2 — wrapping key: handle exists + visible (login
+        // gate) → else CKR_WRAPPING_KEY_HANDLE_INVALID; then CKA_WRAP → else
+        // CKR_KEY_FUNCTION_NOT_PERMITTED.
+        if let Err(rv) =
+            check_key_usage_as(_h_session, h_wrapping_key, CKA_WRAP, CKR_WRAPPING_KEY_HANDLE_INVALID)
+        {
+            return rv;
         }
 
-        // Check CKA_EXTRACTABLE on target key
-        let extractable = OBJECTS.with(|o| {
-            o.borrow()
-                .get(&h_key)
-                .map(|attrs| read_bool_attr(attrs, CKA_EXTRACTABLE))
-                .unwrap_or(false)
-        });
-        if !extractable {
+        // Target key: handle exists + visible → else CKR_KEY_HANDLE_INVALID;
+        // CKR_KEY_UNEXTRACTABLE only when the key EXISTS but CKA_EXTRACTABLE=FALSE.
+        let target_attrs = match OBJECTS.with(|o| o.borrow().get(&h_key).cloned()) {
+            Some(a) => a,
+            None => return CKR_KEY_HANDLE_INVALID,
+        };
+        if !crate::state::can_access_object(_h_session, &target_attrs) {
+            return CKR_KEY_HANDLE_INVALID;
+        }
+        if !read_bool_attr(&target_attrs, CKA_EXTRACTABLE) {
             return CKR_KEY_UNEXTRACTABLE;
         }
 
@@ -5673,15 +5727,16 @@ pub fn C_UnwrapKey(
             return CKR_MECHANISM_INVALID;
         }
 
-        // Check CKA_UNWRAP on unwrapping key
-        let can_unwrap = OBJECTS.with(|o| {
-            o.borrow()
-                .get(&h_unwrapping_key)
-                .map(|attrs| read_bool_attr(attrs, CKA_UNWRAP))
-                .unwrap_or(false)
-        });
-        if !can_unwrap {
-            return CKR_KEY_FUNCTION_NOT_PERMITTED;
+        // PKCS#11 v3.2 §5.18.4 — unwrapping key: handle exists + visible
+        // (login gate) → else CKR_UNWRAPPING_KEY_HANDLE_INVALID; then
+        // CKA_UNWRAP → else CKR_KEY_FUNCTION_NOT_PERMITTED.
+        if let Err(rv) = check_key_usage_as(
+            _h_session,
+            h_unwrapping_key,
+            CKA_UNWRAP,
+            CKR_UNWRAPPING_KEY_HANDLE_INVALID,
+        ) {
+            return rv;
         }
 
         let unwrapping_key = match get_object_value(h_unwrapping_key) {
@@ -5715,9 +5770,11 @@ pub fn C_UnwrapKey(
             }
         } else if is_kwp {
             use aes::cipher::generic_array::GenericArray;
-            // AES-KWP (RFC 5649) — supports arbitrary-length data
-            if wrapped_data.len() < 16 {
-                return CKR_ARGUMENTS_BAD;
+            // AES-KWP (RFC 5649) — ciphertext must be ≥ 16 bytes and a
+            // multiple of the 8-byte semiblock. §5.18.4 / §6.16 —
+            // length violations are CKR_WRAPPED_KEY_LEN_RANGE.
+            if wrapped_data.len() < 16 || wrapped_data.len() % 8 != 0 {
+                return CKR_WRAPPED_KEY_LEN_RANGE;
             }
             let result = match unwrapping_key.len() {
                 16 => aes_kw::KekAes128::new(GenericArray::from_slice(&unwrapping_key))
@@ -5730,13 +5787,15 @@ pub fn C_UnwrapKey(
             };
             match result {
                 Ok(v) => v,
-                Err(_) => return CKR_FUNCTION_FAILED,
+                // RFC 5649 ICV/padding check failed — the wrapped key is
+                // corrupt or keyed wrong: CKR_WRAPPED_KEY_INVALID.
+                Err(_) => return CKR_WRAPPED_KEY_INVALID,
             }
         } else {
             use aes::cipher::generic_array::GenericArray;
-            // AES-KW (RFC 3394)
-            if wrapped_data.len() < 24 {
-                return CKR_ARGUMENTS_BAD;
+            // AES-KW (RFC 3394) — ciphertext is (n+1) 8-byte semiblocks, n ≥ 2.
+            if wrapped_data.len() < 24 || wrapped_data.len() % 8 != 0 {
+                return CKR_WRAPPED_KEY_LEN_RANGE;
             }
             let mut buf = vec![0u8; wrapped_data.len() - 8];
             let unwrap_ok = match unwrapping_key.len() {
@@ -5752,7 +5811,8 @@ pub fn C_UnwrapKey(
                 _ => return CKR_KEY_TYPE_INCONSISTENT,
             };
             if !unwrap_ok {
-                return CKR_FUNCTION_FAILED;
+                // RFC 3394 integrity (IV) check failed: CKR_WRAPPED_KEY_INVALID.
+                return CKR_WRAPPED_KEY_INVALID;
             }
             buf
         };
@@ -5883,25 +5943,24 @@ pub fn C_WrapKeyAuthenticated(
             Vec::new()
         };
 
-        // Check CKA_WRAP on wrapping key
-        let can_wrap = OBJECTS.with(|o| {
-            o.borrow()
-                .get(&h_wrapping_key)
-                .map(|attrs| read_bool_attr(attrs, CKA_WRAP))
-                .unwrap_or(false)
-        });
-        if !can_wrap {
-            return CKR_KEY_FUNCTION_NOT_PERMITTED;
+        // §5.18.6 — same handle/permission ordering as C_WrapKey: wrapping-key
+        // handle → CKR_WRAPPING_KEY_HANDLE_INVALID; CKA_WRAP → NOT_PERMITTED.
+        if let Err(rv) =
+            check_key_usage_as(_h_session, h_wrapping_key, CKA_WRAP, CKR_WRAPPING_KEY_HANDLE_INVALID)
+        {
+            return rv;
         }
 
-        // Check CKA_EXTRACTABLE on target key
-        let extractable = OBJECTS.with(|o| {
-            o.borrow()
-                .get(&h_key)
-                .map(|attrs| read_bool_attr(attrs, CKA_EXTRACTABLE))
-                .unwrap_or(false)
-        });
-        if !extractable {
+        // Target key: handle → CKR_KEY_HANDLE_INVALID; unextractable (exists,
+        // CKA_EXTRACTABLE=FALSE) → CKR_KEY_UNEXTRACTABLE.
+        let target_attrs = match OBJECTS.with(|o| o.borrow().get(&h_key).cloned()) {
+            Some(a) => a,
+            None => return CKR_KEY_HANDLE_INVALID,
+        };
+        if !crate::state::can_access_object(_h_session, &target_attrs) {
+            return CKR_KEY_HANDLE_INVALID;
+        }
+        if !read_bool_attr(&target_attrs, CKA_EXTRACTABLE) {
             return CKR_KEY_UNEXTRACTABLE;
         }
 
@@ -6014,15 +6073,16 @@ pub fn C_UnwrapKeyAuthenticated(
             Vec::new()
         };
 
-        // Check CKA_UNWRAP on unwrapping key
-        let can_unwrap = OBJECTS.with(|o| {
-            o.borrow()
-                .get(&h_unwrapping_key)
-                .map(|attrs| read_bool_attr(attrs, CKA_UNWRAP))
-                .unwrap_or(false)
-        });
-        if !can_unwrap {
-            return CKR_KEY_FUNCTION_NOT_PERMITTED;
+        // §5.18.7 — same handle/permission ordering as C_UnwrapKey:
+        // unwrapping-key handle → CKR_UNWRAPPING_KEY_HANDLE_INVALID;
+        // CKA_UNWRAP → CKR_KEY_FUNCTION_NOT_PERMITTED.
+        if let Err(rv) = check_key_usage_as(
+            _h_session,
+            h_unwrapping_key,
+            CKA_UNWRAP,
+            CKR_UNWRAPPING_KEY_HANDLE_INVALID,
+        ) {
+            return rv;
         }
 
         let unwrapping_key = match get_object_value(h_unwrapping_key) {
@@ -6323,6 +6383,8 @@ pub fn C_EncryptUpdate(
     pul_encrypted_part_len: *mut u32,
 ) -> u32 {
     require_init!();
+    // §5.2 error priority — session handle before operation state.
+    require_session!(h_session);
     multipart_update(
         &ENCRYPT_STATE,
         crate::crypto::multipart::CipherDirection::Encrypt,
@@ -6341,6 +6403,8 @@ pub fn C_EncryptFinal(
     pul_last_encrypted_part_len: *mut u32,
 ) -> u32 {
     require_init!();
+    // §5.2 error priority — session handle before operation state.
+    require_session!(h_session);
     multipart_final(
         &ENCRYPT_STATE,
         crate::crypto::multipart::CipherDirection::Encrypt,
@@ -6359,6 +6423,8 @@ pub fn C_DecryptUpdate(
     pul_part_len: *mut u32,
 ) -> u32 {
     require_init!();
+    // §5.2 error priority — session handle before operation state.
+    require_session!(h_session);
     multipart_update(
         &DECRYPT_STATE,
         crate::crypto::multipart::CipherDirection::Decrypt,
@@ -6405,6 +6471,8 @@ pub fn C_AsyncJoin(
 #[wasm_bindgen(js_name = _C_DecryptFinal)]
 pub fn C_DecryptFinal(h_session: u32, p_last_part: *mut u8, pul_last_part_len: *mut u32) -> u32 {
     require_init!();
+    // §5.2 error priority — session handle before operation state.
+    require_session!(h_session);
     multipart_final(
         &DECRYPT_STATE,
         crate::crypto::multipart::CipherDirection::Decrypt,
@@ -7664,6 +7732,15 @@ mod multipart_ffi_tests {
         });
     }
 
+    /// S4 — Update/Final now validate the session handle (§5.2 priority);
+    /// register the test session so the seeded ctx is reachable.
+    fn install_session(h: u32) {
+        SESSIONS.with(|s| {
+            s.borrow_mut()
+                .insert(h, crate::state::SessionState { slot_id: 0, rw_session: true });
+        });
+    }
+
     fn seed_ctx(
         state: &GlobalState<HashMap<u32, EncryptCtx>>,
         session: u32,
@@ -7734,6 +7811,7 @@ mod multipart_ffi_tests {
         let _guard = test_lock::acquire();
         let session = 0x4D50_1001;
         install_aes_key(&[0x42u8; 32]);
+        install_session(session);
         let iv = vec![0x24u8; 12];
         let aad = b"context".to_vec();
         let pt: Vec<u8> = (0..200u8).collect();
@@ -7754,6 +7832,7 @@ mod multipart_ffi_tests {
         let _guard = test_lock::acquire();
         let session = 0x4D50_1002;
         install_aes_key(&[0x42u8; 32]);
+        install_session(session);
         let iv = vec![0x07u8; 16];
         let pt = b"seventeen bytes!!".to_vec(); // 17 bytes — crosses a block
 
@@ -7770,15 +7849,27 @@ mod multipart_ffi_tests {
     fn update_without_init_is_not_initialized() {
         let _guard = test_lock::acquire();
         crate::state::set_initialized(true); // library up, but no EncryptInit
+        let session = 0x4D50_1003;
+        install_session(session);
         let mut need: u32 = 0;
         let part = [0u8; 4];
         assert_eq!(
-            C_EncryptUpdate(0x4D50_1003, part.as_ptr() as *mut u8, 4, std::ptr::null_mut(), &mut need),
+            C_EncryptUpdate(session, part.as_ptr() as *mut u8, 4, std::ptr::null_mut(), &mut need),
             CKR_OPERATION_NOT_INITIALIZED,
         );
         assert_eq!(
-            C_DecryptFinal(0x4D50_1003, std::ptr::null_mut(), &mut need),
+            C_DecryptFinal(session, std::ptr::null_mut(), &mut need),
             CKR_OPERATION_NOT_INITIALIZED,
+        );
+        // §5.2 priority — an unknown session handle outranks the
+        // operation-not-initialized error.
+        assert_eq!(
+            C_EncryptUpdate(0x4D50_1FFF, part.as_ptr() as *mut u8, 4, std::ptr::null_mut(), &mut need),
+            CKR_SESSION_HANDLE_INVALID,
+        );
+        assert_eq!(
+            C_DecryptFinal(0x4D50_1FFF, std::ptr::null_mut(), &mut need),
+            CKR_SESSION_HANDLE_INVALID,
         );
     }
 
@@ -7787,6 +7878,7 @@ mod multipart_ffi_tests {
         let _guard = test_lock::acquire();
         let session = 0x4D50_1004;
         install_aes_key(&[0x42u8; 16]);
+        install_session(session);
         seed_ctx(&ENCRYPT_STATE, session, CKM_AES_GCM, vec![1u8; 12], Vec::new(), 128);
 
         let part = [0xABu8; 20];
@@ -7812,6 +7904,7 @@ mod multipart_ffi_tests {
         let _guard = test_lock::acquire();
         let session = 0x4D50_1005;
         install_aes_key(&[0x42u8; 16]);
+        install_session(session);
         seed_ctx(&ENCRYPT_STATE, session, CKM_AES_ECB, Vec::new(), Vec::new(), 0);
 
         let part = [0u8; 5]; // not a block multiple
@@ -8383,5 +8476,386 @@ mod attr_integrity_ffi_tests {
         );
         assert_eq!(rv, CKR_OK);
         assert_eq!(wrapped_len2, 24);
+    }
+}
+
+#[cfg(test)]
+mod return_code_ffi_tests {
+    //! S4 — return-code precision: wrap-family handle codes, AES-KW unwrap
+    //! codes, operate-stage session validation, digest one-shot-after-update,
+    //! and the minor template/ciphertext code fixes.
+    use super::*;
+    use crate::native::test_lock;
+
+    /// High fixed handles, disjoint from the other ffi test modules and the
+    /// `native::*` allocators.
+    const SESSION: u32 = 0x5334_1001;
+    /// Session bound to a slot with no token state — `session_logged_in` is
+    /// false, so CKA_PRIVATE objects are invisible (§4.4 login gate).
+    const LOGGED_OUT_SESSION: u32 = 0x5334_1002;
+    const BOGUS_SESSION: u32 = 0x5334_1FFF;
+    const NO_SUCH_KEY: u32 = 0x5334_2FFF;
+
+    fn setup() {
+        crate::state::set_initialized(true);
+        SESSIONS.with(|s| {
+            let mut m = s.borrow_mut();
+            m.insert(SESSION, crate::state::SessionState { slot_id: 0, rw_session: true });
+            m.insert(
+                LOGGED_OUT_SESSION,
+                crate::state::SessionState { slot_id: 77, rw_session: true },
+            );
+        });
+        // Slot 0 token must not be logged in for the login-gate tests.
+        TOKEN_STORE.with(|ts| ts.borrow_mut().remove(&77));
+    }
+
+    /// Install an AES secret key directly in the object store.
+    fn install_key(handle: u32, len: usize, flags: &[(u32, bool)]) {
+        OBJECTS.with(|o| {
+            let mut attrs = Attributes::new();
+            attrs.insert(CKA_VALUE, vec![0x42u8; len]);
+            store_ulong(&mut attrs, CKA_CLASS, CKO_SECRET_KEY);
+            store_ulong(&mut attrs, CKA_KEY_TYPE, CKK_AES);
+            for &(attr, v) in flags {
+                store_bool(&mut attrs, attr, v);
+            }
+            o.borrow_mut().insert(handle, attrs);
+        });
+    }
+
+    fn kw_mech() -> [u32; 3] {
+        [CKM_AES_KEY_WRAP, 0, 0]
+    }
+
+    fn wrap(session: u32, h_wrap: u32, h_key: u32, out: &mut [u8], out_len: &mut u32) -> u32 {
+        let mut mech = kw_mech();
+        C_WrapKey(
+            session,
+            mech.as_mut_ptr() as *mut u8,
+            h_wrap,
+            h_key,
+            if out.is_empty() { std::ptr::null_mut() } else { out.as_mut_ptr() },
+            out_len,
+        )
+    }
+
+    fn unwrap_key(session: u32, h_unwrap: u32, wrapped: &mut [u8]) -> (u32, u32) {
+        let mut mech = kw_mech();
+        let mut h_new: u32 = 0;
+        let rv = C_UnwrapKey(
+            session,
+            mech.as_mut_ptr() as *mut u8,
+            h_unwrap,
+            wrapped.as_mut_ptr(),
+            wrapped.len() as u32,
+            std::ptr::null_mut(),
+            0,
+            &mut h_new,
+        );
+        (rv, h_new)
+    }
+
+    // ── Wrap-family handle codes ────────────────────────────────────────────
+
+    /// §5.18.2 — missing wrapping key → CKR_WRAPPING_KEY_HANDLE_INVALID, not
+    /// CKR_KEY_FUNCTION_NOT_PERMITTED.
+    #[test]
+    fn wrap_missing_wrapping_key_handle_invalid() {
+        let _guard = test_lock::acquire();
+        setup();
+        let h_tgt = 0x5334_0010;
+        install_key(h_tgt, 16, &[(CKA_EXTRACTABLE, true)]);
+        let mut len: u32 = 0;
+        assert_eq!(
+            wrap(SESSION, NO_SUCH_KEY, h_tgt, &mut [], &mut len),
+            CKR_WRAPPING_KEY_HANDLE_INVALID,
+        );
+    }
+
+    /// §5.18.2 — wrapping key exists but CKA_WRAP=FALSE →
+    /// CKR_KEY_FUNCTION_NOT_PERMITTED (checked AFTER handle validity).
+    #[test]
+    fn wrap_not_permitted_when_cka_wrap_false() {
+        let _guard = test_lock::acquire();
+        setup();
+        let (h_wrap, h_tgt) = (0x5334_0011, 0x5334_0012);
+        install_key(h_wrap, 16, &[(CKA_WRAP, false)]);
+        install_key(h_tgt, 16, &[(CKA_EXTRACTABLE, true)]);
+        let mut len: u32 = 0;
+        assert_eq!(
+            wrap(SESSION, h_wrap, h_tgt, &mut [], &mut len),
+            CKR_KEY_FUNCTION_NOT_PERMITTED,
+        );
+    }
+
+    /// §5.18.2 — missing target key → CKR_KEY_HANDLE_INVALID, not
+    /// CKR_KEY_UNEXTRACTABLE.
+    #[test]
+    fn wrap_missing_target_key_handle_invalid() {
+        let _guard = test_lock::acquire();
+        setup();
+        let h_wrap = 0x5334_0013;
+        install_key(h_wrap, 16, &[(CKA_WRAP, true)]);
+        let mut len: u32 = 0;
+        assert_eq!(
+            wrap(SESSION, h_wrap, NO_SUCH_KEY, &mut [], &mut len),
+            CKR_KEY_HANDLE_INVALID,
+        );
+    }
+
+    /// §5.18.2 — target EXISTS but CKA_EXTRACTABLE=FALSE →
+    /// CKR_KEY_UNEXTRACTABLE.
+    #[test]
+    fn wrap_unextractable_target() {
+        let _guard = test_lock::acquire();
+        setup();
+        let (h_wrap, h_tgt) = (0x5334_0014, 0x5334_0015);
+        install_key(h_wrap, 16, &[(CKA_WRAP, true)]);
+        install_key(h_tgt, 16, &[(CKA_EXTRACTABLE, false)]);
+        let mut len: u32 = 0;
+        assert_eq!(
+            wrap(SESSION, h_wrap, h_tgt, &mut [], &mut len),
+            CKR_KEY_UNEXTRACTABLE,
+        );
+    }
+
+    /// §4.4 login gate — a CKA_PRIVATE wrapping key is invisible to a
+    /// logged-out session: CKR_WRAPPING_KEY_HANDLE_INVALID (handle class),
+    /// never CKR_KEY_FUNCTION_NOT_PERMITTED (which would leak existence).
+    #[test]
+    fn wrap_private_wrapping_key_logged_out() {
+        let _guard = test_lock::acquire();
+        setup();
+        let (h_wrap, h_tgt) = (0x5334_0016, 0x5334_0017);
+        install_key(h_wrap, 16, &[(CKA_WRAP, true), (CKA_PRIVATE, true)]);
+        install_key(h_tgt, 16, &[(CKA_EXTRACTABLE, true)]);
+        let mut len: u32 = 0;
+        assert_eq!(
+            wrap(LOGGED_OUT_SESSION, h_wrap, h_tgt, &mut [], &mut len),
+            CKR_WRAPPING_KEY_HANDLE_INVALID,
+        );
+    }
+
+    /// §5.18.4 — missing unwrapping key → CKR_UNWRAPPING_KEY_HANDLE_INVALID.
+    #[test]
+    fn unwrap_missing_unwrapping_key_handle_invalid() {
+        let _guard = test_lock::acquire();
+        setup();
+        let mut wrapped = [0u8; 24];
+        let (rv, _) = unwrap_key(SESSION, NO_SUCH_KEY, &mut wrapped);
+        assert_eq!(rv, CKR_UNWRAPPING_KEY_HANDLE_INVALID);
+    }
+
+    /// §5.18.5 — missing base key in C_DeriveKey → CKR_KEY_HANDLE_INVALID,
+    /// not CKR_KEY_FUNCTION_NOT_PERMITTED.
+    #[test]
+    fn derive_missing_base_key_handle_invalid() {
+        let _guard = test_lock::acquire();
+        setup();
+        let mut mech: [u32; 3] = [CKM_BIP32_MASTER_DERIVE, 0, 0];
+        let mut h_new: u32 = 0;
+        assert_eq!(
+            C_DeriveKey(
+                SESSION,
+                mech.as_mut_ptr() as *mut u8,
+                NO_SUCH_KEY,
+                std::ptr::null_mut(),
+                0,
+                &mut h_new,
+            ),
+            CKR_KEY_HANDLE_INVALID,
+        );
+    }
+
+    // ── AES-KW unwrap codes ─────────────────────────────────────────────────
+
+    /// RFC 3394 integrity-check failure → CKR_WRAPPED_KEY_INVALID (was
+    /// CKR_FUNCTION_FAILED); valid round-trip still succeeds.
+    #[test]
+    fn aes_kw_tampered_wrapped_key_invalid() {
+        let _guard = test_lock::acquire();
+        setup();
+        let (h_kek, h_tgt) = (0x5334_0020, 0x5334_0021);
+        install_key(h_kek, 16, &[(CKA_WRAP, true), (CKA_UNWRAP, true)]);
+        install_key(h_tgt, 16, &[(CKA_EXTRACTABLE, true)]);
+
+        let mut wrapped = [0u8; 24];
+        let mut len = wrapped.len() as u32;
+        assert_eq!(wrap(SESSION, h_kek, h_tgt, &mut wrapped, &mut len), CKR_OK);
+        assert_eq!(len, 24);
+
+        // Untampered control: unwrap succeeds.
+        let (rv, h_new) = unwrap_key(SESSION, h_kek, &mut wrapped.clone());
+        assert_eq!(rv, CKR_OK);
+        assert_ne!(h_new, 0);
+
+        // Tamper one ciphertext byte → RFC 3394 IV check fails.
+        wrapped[5] ^= 0xFF;
+        let (rv, _) = unwrap_key(SESSION, h_kek, &mut wrapped);
+        assert_eq!(rv, CKR_WRAPPED_KEY_INVALID);
+    }
+
+    /// §5.18.4 — wrapped data too short (< 24) or not a semiblock multiple →
+    /// CKR_WRAPPED_KEY_LEN_RANGE (was CKR_ARGUMENTS_BAD).
+    #[test]
+    fn aes_kw_bad_length_wrapped_key_len_range() {
+        let _guard = test_lock::acquire();
+        setup();
+        let h_kek = 0x5334_0022;
+        install_key(h_kek, 16, &[(CKA_UNWRAP, true)]);
+
+        let mut short = [0u8; 16]; // < 3 semiblocks
+        let (rv, _) = unwrap_key(SESSION, h_kek, &mut short);
+        assert_eq!(rv, CKR_WRAPPED_KEY_LEN_RANGE);
+
+        let mut ragged = [0u8; 27]; // not a multiple of 8
+        let (rv, _) = unwrap_key(SESSION, h_kek, &mut ragged);
+        assert_eq!(rv, CKR_WRAPPED_KEY_LEN_RANGE);
+    }
+
+    // ── Operate-stage session validation (§5.2 priority) ────────────────────
+
+    /// A bogus session handle on the operate-stage calls →
+    /// CKR_SESSION_HANDLE_INVALID, ranked above
+    /// CKR_OPERATION_NOT_INITIALIZED.
+    #[test]
+    fn operate_stage_bogus_session_handle_invalid() {
+        let _guard = test_lock::acquire();
+        setup();
+        let mut buf = [0u8; 64];
+        let mut len: u32 = 64;
+        let data = [0u8; 4];
+
+        assert_eq!(
+            C_Sign(BOGUS_SESSION, data.as_ptr() as *mut u8, 4, buf.as_mut_ptr(), &mut len),
+            CKR_SESSION_HANDLE_INVALID,
+        );
+        assert_eq!(
+            C_Verify(BOGUS_SESSION, data.as_ptr() as *mut u8, 4, buf.as_mut_ptr(), 64),
+            CKR_SESSION_HANDLE_INVALID,
+        );
+        assert_eq!(
+            C_Encrypt(BOGUS_SESSION, data.as_ptr() as *mut u8, 4, buf.as_mut_ptr(), &mut len),
+            CKR_SESSION_HANDLE_INVALID,
+        );
+        assert_eq!(
+            C_Decrypt(BOGUS_SESSION, data.as_ptr() as *mut u8, 4, buf.as_mut_ptr(), &mut len),
+            CKR_SESSION_HANDLE_INVALID,
+        );
+        assert_eq!(
+            C_Digest(BOGUS_SESSION, data.as_ptr() as *mut u8, 4, buf.as_mut_ptr(), &mut len),
+            CKR_SESSION_HANDLE_INVALID,
+        );
+        assert_eq!(
+            C_DigestUpdate(BOGUS_SESSION, data.as_ptr() as *mut u8, 4),
+            CKR_SESSION_HANDLE_INVALID,
+        );
+        assert_eq!(
+            C_DigestFinal(BOGUS_SESSION, buf.as_mut_ptr(), &mut len),
+            CKR_SESSION_HANDLE_INVALID,
+        );
+        let mut h: u32 = 0;
+        let mut n: u32 = 0;
+        assert_eq!(
+            C_FindObjects(BOGUS_SESSION, &mut h, 1, &mut n),
+            CKR_SESSION_HANDLE_INVALID,
+        );
+    }
+
+    // ── Digest one-shot after Update (§5.13) ────────────────────────────────
+
+    /// C_Digest while the op is in its multi-part phase →
+    /// CKR_OPERATION_ACTIVE; the multi-part op stays alive and completes.
+    #[test]
+    fn digest_one_shot_after_update_operation_active() {
+        let _guard = test_lock::acquire();
+        setup();
+        let mut mech: [u32; 3] = [CKM_SHA256, 0, 0];
+        assert_eq!(C_DigestInit(SESSION, mech.as_mut_ptr() as *mut u8), CKR_OK);
+        let data = b"part one";
+        assert_eq!(
+            C_DigestUpdate(SESSION, data.as_ptr() as *mut u8, data.len() as u32),
+            CKR_OK,
+        );
+
+        let mut out = [0u8; 32];
+        let mut out_len: u32 = 32;
+        assert_eq!(
+            C_Digest(SESSION, data.as_ptr() as *mut u8, data.len() as u32, out.as_mut_ptr(), &mut out_len),
+            CKR_OPERATION_ACTIVE,
+        );
+
+        // The multi-part op is still active and finishes normally.
+        assert_eq!(C_DigestFinal(SESSION, out.as_mut_ptr(), &mut out_len), CKR_OK);
+        use sha2::Digest;
+        let expected = sha2::Sha256::digest(data);
+        assert_eq!(&out[..], expected.as_slice());
+
+        // After Final the one-shot API works again.
+        let mut out_len: u32 = 32;
+        assert_eq!(C_DigestInit(SESSION, mech.as_mut_ptr() as *mut u8), CKR_OK);
+        assert_eq!(
+            C_Digest(SESSION, data.as_ptr() as *mut u8, data.len() as u32, out.as_mut_ptr(), &mut out_len),
+            CKR_OK,
+        );
+        assert_eq!(&out[..], expected.as_slice());
+    }
+
+    // ── Minor precision codes ───────────────────────────────────────────────
+
+    /// §6.27.2 — CKM_AES_KEY_GEN without CKA_VALUE_LEN →
+    /// CKR_TEMPLATE_INCOMPLETE (no silent 16-byte default).
+    #[test]
+    fn aes_keygen_missing_value_len_template_incomplete() {
+        let _guard = test_lock::acquire();
+        setup();
+        let mut mech: [u32; 3] = [CKM_AES_KEY_GEN, 0, 0];
+        let mut h_key: u32 = 0;
+        assert_eq!(
+            C_GenerateKey(
+                SESSION,
+                mech.as_mut_ptr() as *mut u8,
+                std::ptr::null_mut(),
+                0,
+                &mut h_key,
+            ),
+            CKR_TEMPLATE_INCOMPLETE,
+        );
+    }
+
+    /// §5.18.9 — C_DecapsulateKey with a ciphertext of the wrong length for
+    /// the key's parameter set → CKR_ENCRYPTED_DATA_INVALID (was
+    /// CKR_ARGUMENTS_BAD).
+    #[test]
+    fn decapsulate_wrong_ciphertext_len_encrypted_data_invalid() {
+        let _guard = test_lock::acquire();
+        setup();
+        let h_prv = 0x5334_0030;
+        OBJECTS.with(|o| {
+            let mut attrs = Attributes::new();
+            attrs.insert(CKA_VALUE, vec![0u8; 1632]); // ML-KEM-512 dk size
+            store_ulong(&mut attrs, CKA_CLASS, CKO_PRIVATE_KEY);
+            store_ulong(&mut attrs, CKA_KEY_TYPE, CKK_ML_KEM);
+            store_bool(&mut attrs, CKA_DECAPSULATE, true);
+            store_param_set(&mut attrs, CKP_ML_KEM_512);
+            o.borrow_mut().insert(h_prv, attrs);
+        });
+        let mut mech: [u32; 3] = [CKM_ML_KEM, 0, 0];
+        let mut ct = [0u8; 10]; // ML-KEM-512 expects 768
+        let mut h_new: u32 = 0;
+        assert_eq!(
+            C_DecapsulateKey(
+                SESSION,
+                mech.as_mut_ptr() as *mut u8,
+                h_prv,
+                std::ptr::null_mut(),
+                0,
+                ct.as_mut_ptr(),
+                ct.len() as u32,
+                &mut h_new,
+            ),
+            CKR_ENCRYPTED_DATA_INVALID,
+        );
     }
 }
