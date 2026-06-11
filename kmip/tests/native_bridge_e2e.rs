@@ -752,6 +752,94 @@ fn k9_register_pqc_pkcs8_format_fails_0x10() {
     let _ = softhsmrustv3::native::session::finalize();
 }
 
+/// K11 / K-14 — Digest truthfulness against the real engine.
+///
+/// - CreateKeyPair persists a real 32-byte SHA-256 digest on BOTH
+///   halves, including the non-extractable private key (computed
+///   inside the engine boundary via `native::get_value_digest_sha256`
+///   — the material never leaves the engine, only its hash).
+/// - Create (AES) persists a digest that matches SHA-256 of the
+///   engine-held `CKA_VALUE` bytes (AES keys are extractable, so the
+///   cross-check can read the material directly).
+/// - GetAttributes surfaces the Digest attribute carrying the
+///   persisted value.
+#[test]
+fn k11_digest_persisted_from_real_engine_material() {
+    use pqctoday_kmip::kmip30::{CreateRequest, GetAttributesRequest};
+    use pqctoday_kmip::ops::create::create;
+    use pqctoday_kmip::ops::get_attributes::get_attributes;
+    use sha2::{Digest as _, Sha256};
+
+    let _guard = engine_test_lock();
+    let deps = build_deps_with_real_engine();
+
+    // ── CreateKeyPair: digest present on both halves ─────────────────────
+    let kp = create_key_pair(
+        &deps,
+        CreateKeyPairRequest {
+            common_attributes: vec![Attribute::CryptographicAlgorithm(KmipAlgorithm::MlDsa65)],
+            private_key_attributes: vec![Attribute::CryptographicUsageMask(UsageMask::SIGN)],
+            public_key_attributes: vec![Attribute::CryptographicUsageMask(UsageMask::VERIFY)],
+        },
+        "CreateKeyPair:Sign",
+        "k11-kp",
+    )
+    .unwrap();
+    let priv_rec = deps.store.get(&kp.private_key_uid).unwrap().unwrap();
+    let pub_rec = deps.store.get(&kp.public_key_uid).unwrap().unwrap();
+    let priv_digest = priv_rec.digest_value.expect("private half digest persisted");
+    let pub_digest = pub_rec.digest_value.expect("public half digest persisted");
+    assert_eq!(priv_digest.len(), 32);
+    assert_eq!(pub_digest.len(), 32);
+    assert_ne!(priv_digest, pub_digest, "halves digest different material");
+
+    // GetAttributes surfaces the persisted private-half digest (the
+    // AKLC corpus reads Digest back on the PrivateKey object).
+    let r = get_attributes(
+        &deps,
+        GetAttributesRequest {
+            uid: kp.private_key_uid.clone(),
+            attribute_references: vec!["Digest".into()],
+        },
+        "k11-ga",
+    )
+    .unwrap();
+    match &r.attributes[..] {
+        [Attribute::Digest(dg)] => assert_eq!(dg.digest_value, priv_digest),
+        other => panic!("expected exactly Digest, got {other:?}"),
+    }
+
+    // ── Create (AES): digest == SHA-256 of the engine CKA_VALUE ─────────
+    let c = create(
+        &deps,
+        CreateRequest {
+            object_type: ObjectType::SymmetricKey,
+            template_attribute: vec![
+                Attribute::CryptographicAlgorithm(KmipAlgorithm::Aes),
+                Attribute::CryptographicLength(256),
+                Attribute::CryptographicUsageMask(UsageMask::ENCRYPT | UsageMask::DECRYPT),
+            ],
+        },
+        "k11-create",
+    )
+    .unwrap();
+    let aes_rec = deps.store.get(&c.uid).unwrap().unwrap();
+    let aes_digest = aes_rec.digest_value.expect("AES digest persisted");
+    let session = deps.engine_session.unwrap();
+    let handle = softhsmrustv3::native::find_by_cka_id(session, &aes_rec.pkcs11_cka_id)
+        .unwrap()
+        .expect("engine handle");
+    let value = softhsmrustv3::native::get_attribute(
+        session,
+        handle,
+        softhsmrustv3::constants::CKA_VALUE,
+    )
+    .expect("AES keys are extractable");
+    assert_eq!(aes_digest, Sha256::digest(&value).to_vec());
+
+    let _ = softhsmrustv3::native::session::finalize();
+}
+
 // Suppress unused-import warning when only some types are referenced in
 // the active test set.
 #[allow(dead_code)]

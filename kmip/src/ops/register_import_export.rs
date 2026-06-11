@@ -384,6 +384,19 @@ pub fn register(
             _ => (None, None, None, None),
         };
 
+    // K-14 — KMIP §11 `Digest`: SHA-256 over the client-supplied
+    // material bytes (KeyMaterial for keys / secret data; Certificate
+    // Value DER for certificates), persisted on the record at Register
+    // time. `None` (e.g. OpaqueObject without a payload) → GetAttributes
+    // omits the Digest attribute rather than fabricating one.
+    let digest_value = {
+        use sha2::{Digest as _, Sha256};
+        key_material
+            .as_deref()
+            .or(certificate_value.as_deref())
+            .map(|b| Sha256::digest(b).to_vec())
+    };
+
     deps.store.put(ObjectRecord {
         uid: uid.clone(),
         object_type: req.object_type,
@@ -402,6 +415,7 @@ pub fn register(
         protect_stop_date: x.protect_stop_date,
         usage_limits_total: x.usage_limits_total,
         usage_limits_remaining: x.usage_limits_total,
+        usage_limits_unit: x.usage_limits_unit,
         application_specific_information: x.application_specific_information.clone(),
         sensitive,
         always_sensitive: sensitive,
@@ -415,6 +429,7 @@ pub fn register(
         custom_attributes,
         key_material,
         key_format_type,
+        digest_value,
         cryptographic_parameters: x.cryptographic_parameters.clone(),
         certificate_type,
         certificate_value,
@@ -490,6 +505,12 @@ pub fn import_object(
     let now = OffsetDateTime::now_utc();
     let key_material = key_block.map(|kb| kb.key_value.clone());
     let key_format_type = key_block.map(|kb| kb.key_format_type as u32);
+    // K-14 — same Digest-at-creation rule as Register: SHA-256 over
+    // the supplied KeyMaterial bytes when present, otherwise omitted.
+    let digest_value = {
+        use sha2::{Digest as _, Sha256};
+        key_material.as_deref().map(|b| Sha256::digest(b).to_vec())
+    };
 
     deps.store.put(ObjectRecord {
         uid: req.uid.clone(),
@@ -508,6 +529,7 @@ pub fn import_object(
         custom_attributes: HashMap::new(),
         key_material,
         key_format_type,
+        digest_value,
         ..ObjectRecord::default()
     })?;
 
@@ -645,6 +667,9 @@ pub(crate) struct ExtractedAttrs {
     /// Register / Create time. `None` = unlimited. CS-BC-M-7 pins
     /// a 16-byte budget that the second Encrypt should exhaust.
     pub usage_limits_total: Option<i64>,
+    /// KMIP §11 `Usage Limits Unit` — Byte (0x01) / Object (0x02),
+    /// captured alongside the Total from the UsageLimits structure.
+    pub usage_limits_unit: Option<u32>,
     /// KMIP §11 `Application Specific Information` — `(namespace,
     /// data)` pair. TL-M-2 creates a SymmetricKey with one, TL-M-3
     /// finds it via a Locate filter.
@@ -667,6 +692,7 @@ pub(crate) fn extract_attrs(attrs: &[Attribute]) -> ExtractedAttrs {
         process_start_date: None, protect_stop_date: None,
         cryptographic_parameters: None, quantum_safe: None,
         usage_limits_total: None,
+        usage_limits_unit: None,
         application_specific_information: None,
     };
     for a in attrs {
@@ -683,7 +709,10 @@ pub(crate) fn extract_attrs(attrs: &[Attribute]) -> ExtractedAttrs {
             Attribute::ProtectStopDate(t)  => out.protect_stop_date  = OffsetDateTime::from_unix_timestamp(*t).ok(),
             Attribute::CryptographicParameters(cp) => out.cryptographic_parameters = Some(cp.clone()),
             Attribute::QuantumSafe(b)              => out.quantum_safe = Some(*b),
-            Attribute::UsageLimitsTotal(n)         => out.usage_limits_total = Some(*n),
+            Attribute::UsageLimits { total, unit, .. } => {
+                out.usage_limits_total = Some(*total);
+                out.usage_limits_unit = *unit;
+            }
             Attribute::ApplicationSpecificInformation { namespace, data } => {
                 out.application_specific_information = Some((namespace.clone(), data.clone()));
             }

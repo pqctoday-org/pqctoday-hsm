@@ -317,8 +317,16 @@ pub enum Attribute {
     RotateInterval(u32),
     RotateOffset(i32),
     RotateGeneration(i32),
-    /// `Usage Limits` Structure — v0.1 carries just `Usage Limits Total`.
-    UsageLimitsTotal(i64),
+    /// `Usage Limits` Structure (KMIP 3.0 §11) — `Total` budget set at
+    /// creation, remaining `Count` (server-decremented as protect ops
+    /// consume the budget), and `Unit` (Byte = 0x01 / Object = 0x02).
+    /// Count / Unit are optional on the wire; requests typically carry
+    /// Total (+ Unit), responses carry all three when tracked.
+    UsageLimits {
+        total: i64,
+        count: Option<i64>,
+        unit: Option<u32>,
+    },
 
     /// `Cryptographic Parameters` Structure (KMIP 3.0 §11) — opaque
     /// per-key handshake parameters (RSA-OAEP padding + mask generator
@@ -352,9 +360,12 @@ pub struct DigestAttribute {
 /// optional and value-variable per Profiles §4.1 RV item 6.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RngAttribute {
-    /// Wire tag `RNG Algorithm` (0x420149) — Enumeration. We default
-    /// to `ANSIX9_31 = 0x02` to match the OASIS test expectation
-    /// shape even though the spec lets us use any value.
+    /// Wire tag `RNG Algorithm` — Enumeration per the spec's `RNG
+    /// Algorithm` table: Unspecified 0x01, FIPS 186-2 0x02, DRBG 0x03,
+    /// NRBG 0x04, ANSI X9.31 0x05, ANSI X9.62 0x06. The server reports
+    /// `Unspecified` (0x01): the engine draws from the OS entropy pool
+    /// (`OsRng`), not a managed DRBG. Replay-safe — the harness treats
+    /// the structure as opaque (Profiles §4.1 RV item 6).
     pub rng_algorithm: u32,
     pub cryptographic_algorithm: Option<KmipAlgorithm>,
     pub cryptographic_length: Option<u32>,

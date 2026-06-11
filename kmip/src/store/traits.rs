@@ -185,6 +185,20 @@ pub struct ObjectRecord {
     /// per-Encrypt byte-count accounting against it.
     pub usage_limits_total: Option<i64>,
     pub usage_limits_remaining: Option<i64>,
+    /// KMIP §11 `Usage Limits Unit` — Enumeration codepoint (Byte =
+    /// 0x01, Object = 0x02). Captured from the client-supplied
+    /// UsageLimits structure at Register time; the engine's
+    /// per-Encrypt accounting deducts bytes, so Byte is the natural
+    /// default when a budget exists without an explicit unit.
+    pub usage_limits_unit: Option<u32>,
+    /// KMIP §11 `Digest` — SHA-256 over the object's actual key
+    /// material, computed once at creation (Register digests the
+    /// supplied KeyMaterial / Certificate Value bytes; Create /
+    /// CreateKeyPair hash the engine-held `CKA_VALUE` via
+    /// `native::get_value_digest_sha256` without exporting it).
+    /// `None` means no material was available — GetAttributes then
+    /// OMITS the Digest attribute instead of fabricating one (K-14).
+    pub digest_value: Option<Vec<u8>>,
     /// KMIP §11 `Application Specific Information` Structure —
     /// `(namespace, data)` pair. TL-M-3 step #0 finds objects by it.
     pub application_specific_information: Option<(String, String)>,
@@ -270,6 +284,8 @@ impl From<BaselineDefaults> for ObjectRecord {
             random_number_generator_present: false,
             usage_limits_total: None,
             usage_limits_remaining: None,
+            usage_limits_unit: None,
+            digest_value: None,
             application_specific_information: None,
         }
     }

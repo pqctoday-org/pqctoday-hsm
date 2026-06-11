@@ -161,12 +161,24 @@ pub fn create_key_pair(
     // Phase 7b: real bridge call when a session is wired. Falls back to
     // placeholder UUIDs for unit tests.
     let mech_name = format!("CKM_0x{mech:04X}");
+    // K-14 — KMIP §11 `Digest` per half: SHA-256 over the engine-held
+    // `CKA_VALUE` bytes, computed inside the engine boundary at
+    // generate time (`native::get_value_digest_sha256` — the hash
+    // leaves the engine, the material doesn't; this is how the server
+    // can surface a truthful Digest even for the non-extractable
+    // private half, which AKLC-M-1/2/3 read back via GetAttributes).
+    let mut digest_priv: Option<Vec<u8>> = None;
+    let mut digest_pub: Option<Vec<u8>> = None;
     let (pkcs11_cka_id_priv, pkcs11_cka_id_pub) = if let Some(session) = deps.engine_session {
         // Both halves of the keypair share the same CKA_ID so
         // `find_by_cka_id` recovers both handles for subsequent ops.
         let cka_id = Uuid::new_v4().as_bytes().to_vec();
         match native_generate_keypair(session, kmip_algo, &cka_id) {
-            Ok(()) => (cka_id.clone(), cka_id),
+            Ok((pub_h, prv_h)) => {
+                digest_pub = softhsmrustv3::native::get_value_digest_sha256(session, pub_h);
+                digest_priv = softhsmrustv3::native::get_value_digest_sha256(session, prv_h);
+                (cka_id.clone(), cka_id)
+            }
             Err(err) => return fail(deps, correlation_id, op_canonical, err),
         }
     } else {
@@ -235,6 +247,7 @@ pub fn create_key_pair(
 
             key_material: None,
 
+            digest_value: digest_priv,
 
             // KMIP 3.0 §6.2 — default `KeyFormatType` depends on algo.
             // For RSA the OASIS Baseline test corpus expects PKCS#1
@@ -280,6 +293,7 @@ pub fn create_key_pair(
 
             key_material: None,
 
+            digest_value: digest_pub,
 
             // KMIP 3.0 §6.2 — default `KeyFormatType` depends on algo.
             // For RSA the OASIS Baseline test corpus expects PKCS#1
@@ -423,11 +437,14 @@ fn parse_algorithm(s: &str) -> Result<KmipAlgorithm> {
 /// right family. Engine stores the key bytes in OBJECTS keyed by handle;
 /// subsequent ops (Sign, Encrypt, etc.) recover handles via
 /// `find_by_cka_id(cka_id)`.
+/// Returns the `(public_handle, private_handle)` pair so the caller can
+/// derive per-half metadata (e.g. the KMIP §11 `Digest`) without
+/// re-finding the objects.
 fn native_generate_keypair(
     session: u32,
     algo: crate::kmip30::KmipAlgorithm,
     cka_id: &[u8],
-) -> std::result::Result<(), KmipError> {
+) -> std::result::Result<(u32, u32), KmipError> {
     use crate::kmip30::KmipAlgorithm::*;
     use softhsmrustv3::native;
     let label = "kmip-generated";
@@ -469,9 +486,7 @@ fn native_generate_keypair(
             ));
         }
     };
-    result
-        .map(|_handles| ())
-        .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "CreateKeyPair"))
+    result.map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "CreateKeyPair"))
 }
 
 fn fail<T>(deps: &Deps, correlation_id: &str, op: &str, err: KmipError) -> Result<T> {

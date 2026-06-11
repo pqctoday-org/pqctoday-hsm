@@ -109,7 +109,12 @@ pub fn get_attribute_list(
     if obj.revocation_reason_code.is_some()        { names.push("Revocation Reason".into()); }
     if obj.deactivation_reason_code.is_some()      { names.push("Deactivation Reason".into()); }
     names.push("Key Format Type".into());
-    names.push("Digest".into());
+    // K-14 — `Digest` is only surfaced when the server actually holds
+    // (or can compute) a digest of the real key material; mirrors the
+    // GetAttributes omission rule.
+    if super::get_attributes::record_digest(&obj).is_some() {
+        names.push("Digest".into());
+    }
     names.push("Random Number Generator".into());
     names.push("Last Change Date".into());
     names.push("Original Creation Date".into());
@@ -122,6 +127,13 @@ pub fn get_attribute_list(
     if obj.rotate_offset.is_some()                 { names.push("Rotate Offset".into()); }
     if obj.rotate_generation.is_some()             { names.push("Rotate Generation".into()); }
     if obj.usage_limits_total.is_some()            { names.push("Usage Limits".into()); }
+    // K-15 — every stored link type appears in the name surface,
+    // mirroring `attributes_from_record`'s full-links emission.
+    {
+        let mut link_keys: Vec<&String> = obj.links.keys().collect();
+        link_keys.sort();
+        for k in link_keys { names.push(k.clone()); }
+    }
     for k in obj.custom_attributes.keys() { names.push(k.clone()); }
 
     emit_success(deps, correlation_id, "GetAttributeList");
