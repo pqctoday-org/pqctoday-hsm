@@ -107,6 +107,21 @@ auto-bound tag placeholders, and compares responses tree-wise.
 Current standing (2026-06-10): **92 PASS / 0 FAIL / 10 deliberate
 skips** out of 102 transcripts. Per-test detail: `conformance/REPLAY_REPORT.md`.
 
+### 4.1 Vendor extension: ML-KEM shared secret (K10)
+
+KMIP 3.0 has **no Encapsulate operation**. This server overloads
+Encrypt/Decrypt for ML-KEM encapsulation/decapsulation as a documented
+vendor extension: the Encrypt response carries the encapsulation in
+`Data` and the derived shared secret under the `PQCToday-SharedSecret`
+vendor-extension tag **`0x540001`** (KMIP 3.0 §11.57 reserves
+`0x540000–0x54FFFF` for Extensions). The standard `IVCounterNonce` tag
+(`0x42003d`) is strictly an IV — the pre-K10 stopgap that reused it for
+the shared secret was wire-ambiguous with classical RandomIV responses
+(compliance-audit B-7) and has been removed. Allocation registry:
+`kmip/src/kmip30/vendor_tags.rs` + `kmip/pkcs11-mech-manifest.json`
+(`vendor_tags` section). No OASIS corpus transcript exercises this path,
+so corpus conformance is unaffected.
+
 ## 5. Scope decision: resolved
 
 The 2026-06-08 revision proposed Paths A/B/C. Events overtook it: the

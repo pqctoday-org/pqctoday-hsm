@@ -555,7 +555,9 @@ pub struct EncryptResponse {
     /// (ciphertext) bytes.
     pub ciphertext: Vec<u8>,
     /// For ML-KEM only: the derived shared secret.
-    /// `None` for classical encrypt.
+    /// `None` for classical encrypt. On the wire this rides the
+    /// `PQCToday-SharedSecret` vendor-extension tag (`0x540001`, see
+    /// [`super::vendor_tags`]) — never `IVCounterNonce` (K10 / B-7).
     pub shared_secret: Option<Vec<u8>>,
     /// AES-GCM / ChaCha20-Poly1305 authentication tag (KMIP 3.0 §11
     /// `Authenticated Encryption Tag`). Populated only when the

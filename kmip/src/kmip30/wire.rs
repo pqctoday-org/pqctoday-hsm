@@ -1246,11 +1246,16 @@ fn encode_encrypt_resp(r: &EncryptResponse) -> Vec<TtlvFrame> {
         ));
     }
     if let Some(ss) = &r.shared_secret {
-        // ML-KEM shared secret rides in IvCounterNonce slot for v0.1 — a
-        // KMIP 3.0 dedicated tag for "shared secret out-of-band of the
-        // KeyBlock" isn't in the §10 enum extract. Documented limitation;
-        // v0.2 will move to the right tag when we identify it in §9.
-        out.push(TtlvFrame::new(Tag(tags::IvCounterNonce), Value::ByteString(ss.clone())));
+        // K10 — ML-KEM encapsulation shared secret rides the
+        // `PQCToday-SharedSecret` vendor-extension tag (0x540001, §11.57
+        // Extensions range 0x540000–0x54FFFF). It previously abused the
+        // standard IvCounterNonce tag, which is wire-ambiguous with
+        // classical RandomIV responses (compliance-audit B-7).
+        // IvCounterNonce above is now strictly an IV.
+        out.push(TtlvFrame::new(
+            Tag(super::vendor_tags::PQCTODAY_SHARED_SECRET),
+            Value::ByteString(ss.clone()),
+        ));
     }
     out
 }
@@ -3626,5 +3631,78 @@ mod tests {
             decode_transparent_rsa_private_key(&buf),
             Err(WireError::Missing { .. })
         ));
+    }
+
+    /// K10 — the ML-KEM encapsulation shared secret rides the
+    /// `PQCToday-SharedSecret` vendor tag (0x540001), and the response
+    /// carries NO `IvCounterNonce` frame (B-7 wire ambiguity removed).
+    #[test]
+    fn k10_encap_shared_secret_rides_vendor_tag_not_iv_counter_nonce() {
+        let resp = EncryptResponse {
+            uid: "kem-1".into(),
+            ciphertext: vec![0xC1; 32], // the encapsulation
+            shared_secret: Some(vec![0x55; 32]),
+            ..Default::default()
+        };
+        let frames = encode_encrypt_resp(&resp);
+        let ss = frames
+            .iter()
+            .find(|f| f.tag.0 == super::super::vendor_tags::PQCTODAY_SHARED_SECRET)
+            .expect("shared secret must ride vendor tag 0x540001");
+        assert_eq!(ss.value, Value::ByteString(vec![0x55; 32]));
+        assert!(
+            frames.iter().all(|f| f.tag.0 != tags::IvCounterNonce),
+            "encap response must not emit IvCounterNonce (B-7)"
+        );
+    }
+
+    /// K10 — classical AES-GCM RandomIV responses keep the standard
+    /// `IvCounterNonce` tag and never emit the vendor tag.
+    #[test]
+    fn k10_classical_random_iv_keeps_iv_counter_nonce_no_vendor_tag() {
+        let resp = EncryptResponse {
+            uid: "aes-1".into(),
+            ciphertext: vec![0xC2; 16],
+            iv_counter_nonce: Some(vec![0x1A; 12]),
+            authenticated_encryption_tag: Some(vec![0xA7; 16]),
+            ..Default::default()
+        };
+        let frames = encode_encrypt_resp(&resp);
+        let iv = frames
+            .iter()
+            .find(|f| f.tag.0 == tags::IvCounterNonce)
+            .expect("RandomIV response must carry IvCounterNonce");
+        assert_eq!(iv.value, Value::ByteString(vec![0x1A; 12]));
+        assert!(
+            frames.iter().all(|f| f.tag.0 != super::super::vendor_tags::PQCTODAY_SHARED_SECRET),
+            "classical encrypt must not emit the vendor shared-secret tag"
+        );
+    }
+
+    /// K10 — ML-KEM decapsulation round-trip: the request decodes the
+    /// encapsulation bytes from `Data`, and the response carries the
+    /// recovered shared secret in `Data` — no IvCounterNonce, no
+    /// vendor tag (the decap output is the operation's payload).
+    #[test]
+    fn k10_decap_request_response_round_trip() {
+        let encapsulation = vec![0xE0; 32];
+        let req_children = vec![
+            TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString("kem-1".into())),
+            TtlvFrame::new(Tag(tags::Data), Value::ByteString(encapsulation.clone())),
+        ];
+        let req = decode_decrypt_req(&req_children).expect("decap request decodes");
+        assert_eq!(req.uid, "kem-1");
+        assert_eq!(req.data, encapsulation);
+        assert!(req.iv.is_none(), "decap request carries no IV");
+
+        let resp = DecryptResponse { uid: req.uid.clone(), data: vec![0x55; 32] };
+        let frames = encode_decrypt_resp(&resp);
+        let data = frames
+            .iter()
+            .find(|f| f.tag.0 == tags::Data)
+            .expect("decap response carries the shared secret as Data");
+        assert_eq!(data.value, Value::ByteString(vec![0x55; 32]));
+        assert!(frames.iter().all(|f| f.tag.0 != tags::IvCounterNonce
+            && f.tag.0 != super::super::vendor_tags::PQCTODAY_SHARED_SECRET));
     }
 }

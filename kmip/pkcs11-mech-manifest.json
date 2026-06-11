@@ -47,6 +47,17 @@
     "0x404D": {"symbol": "CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE", "operation": "encap_decap", "algorithm": "Classic McEliece"},
     "0x404E": {"symbol": "CKM_PQCTODAY_XMSS_KEY_PAIR_GEN",            "operation": "keygen_stateful", "algorithm": "XMSS / XMSS^MT"}
   },
+  "vendor_tags": {
+    "_note": "PQCToday KMIP TTLV vendor-extension tags. KMIP 3.0 §11.57 (Tag Enumeration) reserves Item Tags 0x540000–0x54FFFF for Extensions (standard tags use first byte 0x42). Allocations are append-only. Source of truth: kmip/src/kmip30/vendor_tags.rs.",
+    "0x540001": {
+      "symbol": "PQCTODAY_SHARED_SECRET",
+      "name": "PQCToday-SharedSecret",
+      "type": "ByteString",
+      "context": "Encrypt response payload (ML-KEM encapsulation only)",
+      "semantics": "The ML-KEM encapsulation shared secret. KMIP 3.0 has no Encapsulate operation — this server overloads Encrypt/Decrypt for ML-KEM encap/decap as a documented vendor extension. Replaces the pre-K10 stopgap that emitted the secret under the standard IVCounterNonce tag (0x42003d), which was wire-ambiguous with classical RandomIV responses (compliance-audit B-7). IVCounterNonce is now strictly an IV.",
+      "since": "K10 (2026-06-10)"
+    }
+  },
   "consumer_contract": {
     "ci_gate": "Any CI job that touches this manifest MUST recompute the authority sha256 and fail if it diverges from `authority.sha256` above. Mech codepoints are append-only — retired codepoints stay reserved forever per the authority file's mutation policy.",
     "downstream_consumers": [
