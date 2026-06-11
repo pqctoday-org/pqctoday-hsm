@@ -425,13 +425,13 @@ fn handle_payload(
         RequestPayload::Log(r) => ResponsePayload::Log(log(deps, r, correlation_id)?),
         RequestPayload::Login(r) => ResponsePayload::Login(login(deps, r, correlation_id)?),
         RequestPayload::Logout(r) => ResponsePayload::Logout(logout(deps, r, correlation_id)?),
-        RequestPayload::DecodeFailed { message, .. } => {
+        RequestPayload::DecodeFailed { message, reason, .. } => {
             // R7 Phase 1 — surface per-item decode failures as
-            // `OperationFailed / InvalidMessage` per KMIP 3.0 §8.2.3.
-            return Err(KmipError::failed(
-                crate::error::ResultReason::InvalidMessage,
-                message,
-            ));
+            // `OperationFailed` per KMIP 3.0 §8.2.3. The reason is
+            // `InvalidMessage` for generic failures; K8 threads the
+            // spec-named reason through when one applies (e.g.
+            // `Key Format Type Not Supported (0x10)`).
+            return Err(KmipError::failed(reason, message));
         }
         RequestPayload::Unsupported(op) => {
             // K3 — recognized KMIP 3.0 Operation with no handler:
@@ -550,7 +550,7 @@ mod tests {
     #[test]
     fn missing_uid_get_returns_operation_failed_with_reason() {
         let d = deps();
-        let req = one_off_request(RequestPayload::Get(crate::kmip30::GetRequest { uid: "ghost".into(), key_wrapping_specification: None }));
+        let req = one_off_request(RequestPayload::Get(crate::kmip30::GetRequest { uid: "ghost".into(), key_format_type: None, key_wrapping_specification: None }));
         let resp = dispatch(&d, req);
         assert_eq!(resp.batch_items[0].result_status, ResultStatus::OperationFailed);
         assert_eq!(
@@ -941,7 +941,7 @@ mod tests {
                 // Item 1: fails (Get on unknown UID).
                 RequestBatchItem {
                     operation: crate::kmip30::Operation::Get,
-                    payload: RP::Get(GetRequest { uid: "urn:ghost".into(), key_wrapping_specification: None }),
+                    payload: RP::Get(GetRequest { uid: "urn:ghost".into(), key_format_type: None, key_wrapping_specification: None }),
                 },
                 // Item 2: should NOT be processed under Stop semantics.
                 RequestBatchItem {
@@ -970,11 +970,11 @@ mod tests {
             batch_items: vec![
                 RequestBatchItem {
                     operation: crate::kmip30::Operation::Get,
-                    payload: RP::Get(GetRequest { uid: "urn:ghost-1".into(), key_wrapping_specification: None }),
+                    payload: RP::Get(GetRequest { uid: "urn:ghost-1".into(), key_format_type: None, key_wrapping_specification: None }),
                 },
                 RequestBatchItem {
                     operation: crate::kmip30::Operation::Get,
-                    payload: RP::Get(GetRequest { uid: "urn:ghost-2".into(), key_wrapping_specification: None }),
+                    payload: RP::Get(GetRequest { uid: "urn:ghost-2".into(), key_format_type: None, key_wrapping_specification: None }),
                 },
                 RequestBatchItem {
                     operation: crate::kmip30::Operation::Query,
