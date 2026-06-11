@@ -13,6 +13,7 @@ pub mod algos;
 pub mod attrs;
 pub mod message;
 pub mod ops;
+pub mod vendor_tags;
 pub mod wire;
 
 pub use algos::{CkMechanismType, KmipAlgorithm, PkcsOp};
