@@ -185,10 +185,14 @@ pub fn register(
 
     // KMIP 3.0 §6.1.48 + §6.2 — when the client supplies an RSA
     // private key in PKCS#1 (KeyFormatType=0x03), PKCS#8 (0x04) or
-    // Transparent RSA Private Key (0x0A) form, we create a real
-    // engine object so subsequent Sign / Decrypt can find the
-    // handle. CS-AC-M-{1..6,8} pin the PKCS#1/PKCS#8 flow; BL-M-9
-    // Registers the transparent form.
+    // Transparent RSA Private Key (0x0A) form, or PQC (ML-DSA /
+    // ML-KEM / SLH-DSA) key material in Raw (0x01) form, we create a
+    // real engine object so subsequent Sign / Decrypt / Verify /
+    // Encap / Decap can find the handle. CS-AC-M-{1..6,8} pin the
+    // PKCS#1/PKCS#8 flow; BL-M-9 Registers the transparent form. No
+    // corpus transcript Registers PQC material (QS-M-1 is
+    // Query-only, QS-M-2 a Create negative) — the K9 e2e tests in
+    // tests/native_bridge_e2e.rs pin the PQC flow.
     if let (Some(material), Some(fmt), Some(session)) =
         (key_material.as_ref(), key_format_type, deps.engine_session)
     {
@@ -237,6 +241,83 @@ pub fn register(
                 let _ = softhsmrustv3::native::register_generic_secret_bytes(
                     session, material, &cka_id_bytes, "kmip-register-hmac",
                 );
+            }
+            // K9 (compliance-audit B-6) — PQC families: ML-DSA /
+            // ML-KEM / SLH-DSA raw FIPS 204/203/205 key material is
+            // imported into the engine via the S7
+            // `native::register_*` functions so a subsequent Sign /
+            // SignatureVerify / Encrypt(encap) / Decrypt(decap) finds
+            // a real handle instead of failing ItemNotFound. The
+            // `CKP_*` parameter set is derived from the algorithm
+            // variant (MlDsa65 → CKP_ML_DSA_65, …).
+            //
+            // Register must NOT succeed-then-fail-at-use: a non-Raw
+            // KeyFormatType (e.g. PKCS#8 — no engine import path)
+            // fails Register with `Key Format Type Not Supported
+            // (0x10)`; wrong-length / structurally-bad material
+            // surfaces the engine's `CKR_ATTRIBUTE_VALUE_INVALID` as
+            // `InvalidAttributeValue` via `ck_rv_to_kmip_error`.
+            (ObjectType::PrivateKey | ObjectType::PublicKey | ObjectType::SecretData, alg)
+                if super::helpers::native_parameter_set(alg).is_some() =>
+            {
+                let param_set = super::helpers::native_parameter_set(alg)
+                    .expect("guard checked Some");
+                if fmt != KeyFormatType::Raw as u32 {
+                    return Err(fail_err(deps, correlation_id, "Register",
+                        KmipError::key_format_type_not_supported(format!(
+                            "{} Register: engine import supports KeyFormatType \
+                             Raw (0x01) only, got 0x{fmt:02x}",
+                            canonical_name(alg),
+                        ))));
+                }
+                // Cross-check a client-declared CryptographicLength
+                // against the supplied raw material (bits).
+                if let Some(bits) = resolved_length {
+                    if bits as usize != material.len() * 8 {
+                        return Err(fail_err(deps, correlation_id, "Register",
+                            KmipError::invalid_attribute_value(format!(
+                                "CryptographicLength {bits} does not match the \
+                                 supplied {} key material ({} bits)",
+                                canonical_name(alg),
+                                material.len() * 8,
+                            ))));
+                    }
+                }
+                use crate::kmip30::KmipAlgorithm as A;
+                let is_public = req.object_type == ObjectType::PublicKey;
+                let label = "kmip-register-pqc";
+                let import = match (alg, is_public) {
+                    (A::MlDsa44 | A::MlDsa65 | A::MlDsa87, false) => {
+                        softhsmrustv3::native::register_ml_dsa_private_key(
+                            session, param_set, material, &cka_id_bytes, label,
+                        )
+                    }
+                    (A::MlDsa44 | A::MlDsa65 | A::MlDsa87, true) => {
+                        softhsmrustv3::native::register_ml_dsa_public_key(
+                            session, param_set, material, &cka_id_bytes, label,
+                        )
+                    }
+                    (A::MlKem512 | A::MlKem768 | A::MlKem1024, false) => {
+                        softhsmrustv3::native::register_ml_kem_private_key(
+                            session, param_set, material, &cka_id_bytes, label,
+                        )
+                    }
+                    (A::MlKem512 | A::MlKem768 | A::MlKem1024, true) => {
+                        softhsmrustv3::native::register_ml_kem_public_key(
+                            session, param_set, material, &cka_id_bytes, label,
+                        )
+                    }
+                    // Guard guarantees the remaining algorithms are the
+                    // 12 SLH-DSA parameter-set variants.
+                    (_, false) => softhsmrustv3::native::register_slh_dsa_private_key(
+                        session, param_set, material, &cka_id_bytes, label,
+                    ),
+                    (_, true) => softhsmrustv3::native::register_slh_dsa_public_key(
+                        session, param_set, material, &cka_id_bytes, label,
+                    ),
+                };
+                import.map_err(|rv| fail_err(deps, correlation_id, "Register",
+                    super::helpers::ck_rv_to_kmip_error(rv, "Register:pqc-import")))?;
             }
             _ => {}
         }

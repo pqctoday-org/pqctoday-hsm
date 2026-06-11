@@ -396,6 +396,362 @@ fn k6_rsa_sha384_sha512_sign_verify_against_real_engine() {
     let _ = softhsmrustv3::native::session::finalize();
 }
 
+// ── K9 — PQC Register usability (compliance-audit B-6) ──────────────────────
+//
+// Register of raw FIPS 203/204/205 key material must create a real
+// engine object (S7 `native::register_*`) so subsequent Sign /
+// SignatureVerify / Encrypt(encap) / Decrypt(decap) find a handle.
+// Key bytes are generated in-test with the same fips204 / fips205 /
+// ml-kem crates the engine's keygen uses (the engine blocks CKA_VALUE
+// export of SENSITIVE private keys, so generate-then-export is not an
+// option at this layer).
+
+/// Register one half of a PQC keypair through the KMIP op handler.
+/// `ActivationDate=$NOW-3600` (the OASIS corpus pattern) so the object
+/// is born `Active` and crypto ops pass the lifecycle gate.
+fn register_pqc(
+    deps: &Deps,
+    object_type: ObjectType,
+    alg: KmipAlgorithm,
+    format: pqctoday_kmip::kmip30::KeyFormatType,
+    key_bytes: Vec<u8>,
+    usage: UsageMask,
+) -> pqctoday_kmip::error::Result<String> {
+    use pqctoday_kmip::kmip30::{KeyBlock, RegisterRequest};
+    use pqctoday_kmip::ops::register_import_export::register;
+    let len_bits = (key_bytes.len() * 8) as u32;
+    register(
+        deps,
+        RegisterRequest {
+            object_type,
+            attributes: vec![
+                Attribute::CryptographicAlgorithm(alg),
+                Attribute::CryptographicLength(len_bits),
+                Attribute::CryptographicUsageMask(usage),
+                Attribute::ActivationDate(
+                    OffsetDateTime::now_utc().unix_timestamp() - 3600,
+                ),
+            ],
+            managed_object: Some(KeyBlock {
+                key_format_type: format,
+                cryptographic_algorithm: alg,
+                cryptographic_length: len_bits,
+                key_value: key_bytes,
+                key_wrapping_data: None,
+            }),
+            protection_storage_masks: None,
+            certificate_payload: None,
+        },
+        "k9-register",
+    )
+    .map(|r| r.uid)
+}
+
+/// Registered ML-DSA-65 keypair (raw FIPS 204 bytes generated in-test)
+/// → KMIP Sign with the registered private → SignatureVerify with the
+/// registered public → Success + Valid. Also pins that the KMIP store
+/// copy keeps the raw material verbatim (Get/Export unchanged).
+#[test]
+fn k9_register_ml_dsa_65_sign_verify_roundtrip() {
+    use fips204::traits::SerDes;
+    use pqctoday_kmip::kmip30::KeyFormatType;
+
+    let _guard = engine_test_lock();
+    let deps = build_deps_with_real_engine();
+
+    let (vk, sk) = fips204::ml_dsa_65::try_keygen_with_rng(&mut rand::rngs::OsRng)
+        .expect("FIPS 204 keygen");
+    let sk_bytes = sk.into_bytes().to_vec();
+    let pk_bytes = vk.into_bytes().to_vec();
+
+    let priv_uid = register_pqc(
+        &deps,
+        ObjectType::PrivateKey,
+        KmipAlgorithm::MlDsa65,
+        KeyFormatType::Raw,
+        sk_bytes.clone(),
+        UsageMask::SIGN,
+    )
+    .expect("Register ML-DSA-65 private");
+    let pub_uid = register_pqc(
+        &deps,
+        ObjectType::PublicKey,
+        KmipAlgorithm::MlDsa65,
+        KeyFormatType::Raw,
+        pk_bytes,
+        UsageMask::VERIFY,
+    )
+    .expect("Register ML-DSA-65 public");
+
+    // KMIP store copy unchanged (Get/Export behaviour preserved).
+    let rec = deps.store.get(&priv_uid).unwrap().unwrap();
+    assert_eq!(rec.key_material.as_deref(), Some(&sk_bytes[..]));
+    assert_eq!(rec.state, State::Active, "past ActivationDate → born Active");
+
+    let message = b"K9: registered PQC keys are usable".to_vec();
+    let sig = sign(
+        &deps,
+        SignRequest {
+            uid: priv_uid,
+            data: message.clone(),
+            cryptographic_parameters: None,
+        },
+        "k9-sign",
+    )
+    .expect("Sign with registered ML-DSA-65 private key");
+    assert_eq!(sig.signature.len(), 3309, "FIPS 204 §5 ML-DSA-65 signature");
+
+    let verified = signature_verify(
+        &deps,
+        SignatureVerifyRequest {
+            uid: pub_uid,
+            data: message,
+            signature: sig.signature,
+            cryptographic_parameters: None,
+        },
+        "k9-verify",
+    )
+    .expect("SignatureVerify with registered ML-DSA-65 public key");
+    assert_eq!(verified.validity, SignatureValidity::Valid);
+
+    let _ = softhsmrustv3::native::session::finalize();
+}
+
+/// Registered ML-KEM-768 keypair → KMIP Encrypt (encapsulate) with the
+/// registered public → Decrypt (decapsulate) with the registered
+/// private → identical 32-byte shared secret.
+#[test]
+fn k9_register_ml_kem_768_encap_decap_roundtrip() {
+    use ml_kem::{EncodedSizeUser, KemCore};
+    use pqctoday_kmip::kmip30::{DecryptRequest, EncryptRequest, KeyFormatType};
+    use pqctoday_kmip::ops::decrypt::decrypt;
+    use pqctoday_kmip::ops::encrypt::encrypt;
+
+    let _guard = engine_test_lock();
+    let deps = build_deps_with_real_engine();
+
+    let (dk, ek) = ml_kem::MlKem768::generate(&mut rand::rngs::OsRng);
+    let dk_bytes = dk.as_bytes().as_slice().to_vec();
+    let ek_bytes = ek.as_bytes().as_slice().to_vec();
+
+    let priv_uid = register_pqc(
+        &deps,
+        ObjectType::PrivateKey,
+        KmipAlgorithm::MlKem768,
+        KeyFormatType::Raw,
+        dk_bytes,
+        UsageMask::DECRYPT,
+    )
+    .expect("Register ML-KEM-768 private");
+    let pub_uid = register_pqc(
+        &deps,
+        ObjectType::PublicKey,
+        KmipAlgorithm::MlKem768,
+        KeyFormatType::Raw,
+        ek_bytes,
+        UsageMask::ENCRYPT,
+    )
+    .expect("Register ML-KEM-768 public");
+
+    let enc = encrypt(
+        &deps,
+        EncryptRequest {
+            uid: pub_uid,
+            data: Vec::new(),
+            iv: None,
+            cryptographic_parameters: None,
+            aad: None,
+            init_indicator: None,
+            final_indicator: None,
+            correlation_value: None,
+        },
+        "k9-encap",
+    )
+    .expect("Encrypt(encapsulate) with registered ML-KEM-768 public key");
+    assert_eq!(enc.ciphertext.len(), 1088, "FIPS 203 §7 ML-KEM-768 ciphertext");
+    let ss_enc = enc.shared_secret.expect("encap returns shared secret");
+    assert_eq!(ss_enc.len(), 32);
+
+    let dec = decrypt(
+        &deps,
+        DecryptRequest {
+            uid: priv_uid,
+            data: enc.ciphertext,
+            iv: None,
+            cryptographic_parameters: None,
+            aad: None,
+        },
+        "k9-decap",
+    )
+    .expect("Decrypt(decapsulate) with registered ML-KEM-768 private key");
+    assert_eq!(dec.data, ss_enc, "decap must recover the encap shared secret");
+
+    let _ = softhsmrustv3::native::session::finalize();
+}
+
+/// Registered SLH-DSA-SHAKE-128F keypair → Sign → SignatureVerify →
+/// Success + Valid (signature is 17088 bytes per FIPS 205 §11).
+#[test]
+fn k9_register_slh_dsa_shake_128f_sign_verify_roundtrip() {
+    use fips205::traits::SerDes;
+    use pqctoday_kmip::kmip30::KeyFormatType;
+
+    let _guard = engine_test_lock();
+    let deps = build_deps_with_real_engine();
+
+    let (vk, sk) = fips205::slh_dsa_shake_128f::try_keygen_with_rng(&mut rand::rngs::OsRng)
+        .expect("FIPS 205 keygen");
+    let sk_bytes = sk.into_bytes().to_vec();
+    let pk_bytes = vk.into_bytes().to_vec();
+
+    let priv_uid = register_pqc(
+        &deps,
+        ObjectType::PrivateKey,
+        KmipAlgorithm::SlhDsaShake128f,
+        KeyFormatType::Raw,
+        sk_bytes,
+        UsageMask::SIGN,
+    )
+    .expect("Register SLH-DSA-SHAKE-128F private");
+    let pub_uid = register_pqc(
+        &deps,
+        ObjectType::PublicKey,
+        KmipAlgorithm::SlhDsaShake128f,
+        KeyFormatType::Raw,
+        pk_bytes,
+        UsageMask::VERIFY,
+    )
+    .expect("Register SLH-DSA-SHAKE-128F public");
+
+    let message = b"K9: SLH-DSA register import".to_vec();
+    let sig = sign(
+        &deps,
+        SignRequest {
+            uid: priv_uid,
+            data: message.clone(),
+            cryptographic_parameters: None,
+        },
+        "k9-slh-sign",
+    )
+    .expect("Sign with registered SLH-DSA private key");
+    assert_eq!(sig.signature.len(), 17088, "FIPS 205 §11 SLH-DSA-128f signature");
+
+    let verified = signature_verify(
+        &deps,
+        SignatureVerifyRequest {
+            uid: pub_uid,
+            data: message,
+            signature: sig.signature,
+            cryptographic_parameters: None,
+        },
+        "k9-slh-verify",
+    )
+    .expect("SignatureVerify with registered SLH-DSA public key");
+    assert_eq!(verified.validity, SignatureValidity::Valid);
+
+    let _ = softhsmrustv3::native::session::finalize();
+}
+
+/// Wrong-length PQC material → the engine rejects with
+/// `CKR_ATTRIBUTE_VALUE_INVALID` → Register fails with
+/// `InvalidAttributeValue`; nothing lands in the KMIP store.
+#[test]
+fn k9_register_pqc_wrong_length_fails_invalid_attribute_value() {
+    use pqctoday_kmip::error::ResultReason;
+    use pqctoday_kmip::kmip30::KeyFormatType;
+
+    let _guard = engine_test_lock();
+    let deps = build_deps_with_real_engine();
+
+    // 100 bytes is not a valid ML-DSA-65 sk length (2560).
+    let err = register_pqc(
+        &deps,
+        ObjectType::PrivateKey,
+        KmipAlgorithm::MlDsa65,
+        KeyFormatType::Raw,
+        vec![0u8; 100],
+        UsageMask::SIGN,
+    )
+    .expect_err("wrong-length material must fail Register");
+    assert_eq!(err.result_reason(), ResultReason::InvalidAttributeValue);
+    assert!(
+        deps.store.find(&|_| true).unwrap().is_empty(),
+        "failed Register must not leave a store record"
+    );
+
+    let _ = softhsmrustv3::native::session::finalize();
+}
+
+/// A declared CryptographicLength that contradicts the supplied raw
+/// material fails Register with `InvalidAttributeValue` before the
+/// engine import is attempted.
+#[test]
+fn k9_register_pqc_length_mismatch_fails_invalid_attribute_value() {
+    use pqctoday_kmip::error::ResultReason;
+    use pqctoday_kmip::kmip30::{KeyBlock, KeyFormatType, RegisterRequest};
+    use pqctoday_kmip::ops::register_import_export::register;
+
+    let _guard = engine_test_lock();
+    let deps = build_deps_with_real_engine();
+
+    let err = register(
+        &deps,
+        RegisterRequest {
+            object_type: ObjectType::PrivateKey,
+            attributes: vec![
+                Attribute::CryptographicAlgorithm(KmipAlgorithm::MlDsa65),
+                // Declared 65 bits ≠ 2560 bytes of material.
+                Attribute::CryptographicLength(65),
+                Attribute::CryptographicUsageMask(UsageMask::SIGN),
+            ],
+            managed_object: Some(KeyBlock {
+                key_format_type: KeyFormatType::Raw,
+                cryptographic_algorithm: KmipAlgorithm::MlDsa65,
+                cryptographic_length: 65,
+                key_value: vec![0u8; 2560],
+                key_wrapping_data: None,
+            }),
+            protection_storage_masks: None,
+            certificate_payload: None,
+        },
+        "k9-len-mismatch",
+    )
+    .expect_err("declared-length mismatch must fail Register");
+    assert_eq!(err.result_reason(), ResultReason::InvalidAttributeValue);
+
+    let _ = softhsmrustv3::native::session::finalize();
+}
+
+/// PQC Register in a KeyFormatType the engine import can't use (PKCS#8)
+/// with an engine session wired → Register fails with `Key Format Type
+/// Not Supported (0x10)` instead of succeeding unusably (B-6: no
+/// succeed-then-fail-at-first-use).
+#[test]
+fn k9_register_pqc_pkcs8_format_fails_0x10() {
+    use pqctoday_kmip::error::ResultReason;
+    use pqctoday_kmip::kmip30::KeyFormatType;
+
+    let _guard = engine_test_lock();
+    let deps = build_deps_with_real_engine();
+
+    let err = register_pqc(
+        &deps,
+        ObjectType::PrivateKey,
+        KmipAlgorithm::MlDsa65,
+        KeyFormatType::Pkcs8,
+        vec![0u8; 2560],
+        UsageMask::SIGN,
+    )
+    .expect_err("PKCS#8 PQC Register with engine session must fail");
+    assert_eq!(err.result_reason(), ResultReason::KeyFormatTypeNotSupported);
+    assert!(
+        deps.store.find(&|_| true).unwrap().is_empty(),
+        "failed Register must not leave a store record"
+    );
+
+    let _ = softhsmrustv3::native::session::finalize();
+}
+
 // Suppress unused-import warning when only some types are referenced in
 // the active test set.
 #[allow(dead_code)]
