@@ -115,6 +115,15 @@ test-case  = "3"
 assert_cmd = "2"
 predicates = "3"
 
+# K9 — the PQC-Register e2e tests (tests/native_bridge_e2e.rs) generate
+# FIPS 203/204/205 key material in-test and Register the raw bytes
+# through the KMIP op handler. Versions mirror `../rust/Cargo.toml`;
+# fips204/fips205 resolve to the local patched forks via the
+# [patch.crates-io] section below.
+fips204 = "0.4.6"
+fips205 = "0.4.1"
+ml-kem  = "0.2.3"
+
 # Mirror the patches from `pqctoday-hsm/rust/Cargo.toml` so the `softhsmrustv3`
 # path dep above gets the FIPS-204 / FIPS-205 `Ph::SHA{224,384,3_*}` / `SHAKE256`
 # variants it needs for PKCS#11 v3.2 §6.67.7 HashML-DSA + §6.69.7 HashSLH-DSA
