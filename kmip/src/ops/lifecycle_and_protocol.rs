@@ -37,19 +37,15 @@ pub fn deactivate(
     emit_request(deps, correlation_id, "Deactivate", format!("uid={}", req.uid));
 
     let mut obj = deps.store.get(&req.uid)?.ok_or_else(|| {
-        fail_err(deps, correlation_id, "Deactivate", KmipError::not_found(&req.uid))
+        fail_err(deps, correlation_id, "Deactivate", KmipError::object_not_found(&req.uid))
     })?;
 
     // Per §6.1.14: only `Active` may transition to `Deactivated`. Other
-    // source states are §6.1.14 Error Handling → WrongKeyLifecycleState
-    // (we encode as PermissionDenied since our ResultReason enum doesn't
-    // carry that explicit variant — KMIP 3.0 §11 has it as 0x12).
+    // source states are §6.1.14 Error Handling → `WrongKeyLifecycleState`
+    // (0x43).
     if obj.state != State::Active {
         return Err(fail_err(deps, correlation_id, "Deactivate",
-            KmipError::permission_denied(format!(
-                "Deactivate requires Active state; UID {} is in {:?}",
-                req.uid, obj.state
-            ))));
+            super::helpers::non_active_state_error(&req.uid, obj.state)));
     }
 
     // Plane-1 policy gate.
@@ -83,7 +79,7 @@ pub fn check(deps: &Deps, req: CheckRequest, correlation_id: &str) -> Result<Che
     emit_request(deps, correlation_id, "Check", format!("uid={}", req.uid));
 
     let obj = deps.store.get(&req.uid)?.ok_or_else(|| {
-        fail_err(deps, correlation_id, "Check", KmipError::not_found(&req.uid))
+        fail_err(deps, correlation_id, "Check", KmipError::object_not_found(&req.uid))
     })?;
 
     // Per §6.1.7: server validates the requested usage parameters against
@@ -119,7 +115,7 @@ pub fn check(deps: &Deps, req: CheckRequest, correlation_id: &str) -> Result<Che
 pub fn archive(deps: &Deps, req: ArchiveRequest, correlation_id: &str) -> Result<ArchiveResponse> {
     emit_request(deps, correlation_id, "Archive", format!("uid={}", req.uid));
     let _ = deps.store.get(&req.uid)?.ok_or_else(|| {
-        fail_err(deps, correlation_id, "Archive", KmipError::not_found(&req.uid))
+        fail_err(deps, correlation_id, "Archive", KmipError::object_not_found(&req.uid))
     })?;
     // Per §6.1.4: "This request is only an indication from a client
     // that, from its point of view, the key management system MAY
@@ -133,7 +129,7 @@ pub fn archive(deps: &Deps, req: ArchiveRequest, correlation_id: &str) -> Result
 pub fn recover(deps: &Deps, req: RecoverRequest, correlation_id: &str) -> Result<RecoverResponse> {
     emit_request(deps, correlation_id, "Recover", format!("uid={}", req.uid));
     let _ = deps.store.get(&req.uid)?.ok_or_else(|| {
-        fail_err(deps, correlation_id, "Recover", KmipError::not_found(&req.uid))
+        fail_err(deps, correlation_id, "Recover", KmipError::object_not_found(&req.uid))
     })?;
     // Per §6.1.47: recover access to an archived object. Since v0.1's
     // Archive is a no-op, Recover is also a no-op — the object is
@@ -151,7 +147,7 @@ pub fn obliterate(
 ) -> Result<ObliterateResponse> {
     emit_request(deps, correlation_id, "Obliterate", format!("uid={}", req.uid));
     let _ = deps.store.get(&req.uid)?.ok_or_else(|| {
-        fail_err(deps, correlation_id, "Obliterate", KmipError::not_found(&req.uid))
+        fail_err(deps, correlation_id, "Obliterate", KmipError::object_not_found(&req.uid))
     })?;
     // Per §6.1.39: "remove the Managed Object. All meta-data SHALL also
     // be removed from the server." Unlike Destroy (which retains
@@ -266,7 +262,7 @@ mod tests {
         let err = deactivate(&d, DeactivateRequest {
             uid: "u".into(), deactivation_reason: None, deactivation_date: None,
         }, "c").unwrap_err();
-        assert_eq!(err.result_reason(), crate::error::ResultReason::PermissionDenied);
+        assert_eq!(err.result_reason(), crate::error::ResultReason::WrongKeyLifecycleState);
     }
 
     #[test]

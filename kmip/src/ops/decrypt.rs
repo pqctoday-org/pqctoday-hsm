@@ -45,7 +45,7 @@ pub fn decrypt(deps: &Deps, req: DecryptRequest, correlation_id: &str) -> Result
     );
 
     let obj = deps.store.get(&req.uid)?.ok_or_else(|| {
-        fail_err(deps, correlation_id, "Decrypt", KmipError::not_found(&req.uid))
+        fail_err(deps, correlation_id, "Decrypt", KmipError::object_not_found(&req.uid))
     })?;
 
     // Lifecycle gate per §3.4 — Decrypt allowed in Active / Deactivated /
@@ -137,7 +137,7 @@ fn decrypt_ml_kem(
         Some(session) => {
             let handle = softhsmrustv3::native::find_by_cka_id(session, &obj.pkcs11_cka_id)
                 .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Decap:find"))?
-                .ok_or_else(|| KmipError::not_found(&req.uid))?;
+                .ok_or_else(|| KmipError::object_not_found(&req.uid))?;
             let native_mech = super::helpers::native_kem_mech(obj.algorithm).ok_or_else(|| {
                 KmipError::failed(
                     ResultReason::OperationNotSupported,
@@ -211,7 +211,7 @@ fn decrypt_classical(
     } else if let Some(session) = deps.engine_session {
         let handle = softhsmrustv3::native::find_by_cka_id(session, &obj.pkcs11_cka_id)
             .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Decrypt:find"))?
-            .ok_or_else(|| KmipError::not_found(&req.uid))?;
+            .ok_or_else(|| KmipError::object_not_found(&req.uid))?;
         softhsmrustv3::native::decrypt(session, handle, mech, &req.data, req.iv.as_deref())
             .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Decrypt"))?
     } else {

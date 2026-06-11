@@ -50,7 +50,7 @@ pub fn add_attribute(
                  format!("uid={} attr={:?}", req.uid, attribute_name(&req.new_attribute)));
 
     let mut obj = deps.store.get(&req.uid)?.ok_or_else(|| {
-        fail_err(deps, correlation_id, "AddAttribute", KmipError::not_found(&req.uid))
+        fail_err(deps, correlation_id, "AddAttribute", KmipError::object_not_found(&req.uid))
     })?;
     policy_gate(deps, &obj, "AddAttribute", correlation_id)?;
 
@@ -112,7 +112,7 @@ pub fn modify_attribute(
                  format!("uid={} attr={:?}", req.uid, attribute_name(&req.new_attribute)));
 
     let mut obj = deps.store.get(&req.uid)?.ok_or_else(|| {
-        fail_err(deps, correlation_id, "ModifyAttribute", KmipError::not_found(&req.uid))
+        fail_err(deps, correlation_id, "ModifyAttribute", KmipError::object_not_found(&req.uid))
     })?;
     policy_gate(deps, &obj, "ModifyAttribute", correlation_id)?;
 
@@ -176,7 +176,7 @@ pub fn delete_attribute(
                  format!("uid={} ref={:?}", req.uid, req.attribute_reference));
 
     let mut obj = deps.store.get(&req.uid)?.ok_or_else(|| {
-        fail_err(deps, correlation_id, "DeleteAttribute", KmipError::not_found(&req.uid))
+        fail_err(deps, correlation_id, "DeleteAttribute", KmipError::object_not_found(&req.uid))
     })?;
     policy_gate(deps, &obj, "DeleteAttribute", correlation_id)?;
 
@@ -243,7 +243,7 @@ pub fn set_attribute(
                  format!("uid={} attr={:?}", req.uid, attribute_name(&req.new_attribute)));
 
     let mut obj = deps.store.get(&req.uid)?.ok_or_else(|| {
-        fail_err(deps, correlation_id, "SetAttribute", KmipError::not_found(&req.uid))
+        fail_err(deps, correlation_id, "SetAttribute", KmipError::object_not_found(&req.uid))
     })?;
     policy_gate(deps, &obj, "SetAttribute", correlation_id)?;
 
@@ -274,7 +274,7 @@ pub fn adjust_attribute(
                  format!("uid={} ref={:?} type={:?}", req.uid, req.attribute_reference, req.adjustment_type));
 
     let mut obj = deps.store.get(&req.uid)?.ok_or_else(|| {
-        fail_err(deps, correlation_id, "AdjustAttribute", KmipError::not_found(&req.uid))
+        fail_err(deps, correlation_id, "AdjustAttribute", KmipError::object_not_found(&req.uid))
     })?;
     policy_gate(deps, &obj, "AdjustAttribute", correlation_id)?;
 

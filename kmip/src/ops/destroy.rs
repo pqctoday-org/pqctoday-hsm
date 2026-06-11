@@ -35,7 +35,7 @@ pub fn destroy(deps: &Deps, req: DestroyRequest, correlation_id: &str) -> Result
     emit_request(deps, correlation_id, "Destroy", format!("uid={}", req.uid));
 
     let mut obj = deps.store.get(&req.uid)?.ok_or_else(|| {
-        fail_err(deps, correlation_id, "Destroy", KmipError::not_found(&req.uid))
+        fail_err(deps, correlation_id, "Destroy", KmipError::object_not_found(&req.uid))
     })?;
 
     // KMIP 3.0 §3.x lifecycle — Active cannot transition directly to Destroyed;
@@ -56,11 +56,13 @@ pub fn destroy(deps: &Deps, req: DestroyRequest, correlation_id: &str) -> Result
             ));
         }
         State::Destroyed | State::DestroyedCompromised => {
+            // KMIP 3.0 §11 — `ObjectDestroyed` (0x36) is the precise
+            // reason for Destroy against an already-destroyed object.
             return Err(fail_err(
                 deps,
                 correlation_id,
                 "Destroy",
-                KmipError::object_archived(&req.uid),
+                KmipError::object_destroyed(&req.uid),
             ));
         }
     };
@@ -210,6 +212,6 @@ mod tests {
         let d = deps_with();
         put(&d, "u", State::Destroyed);
         let err = destroy(&d, DestroyRequest { uid: "u".into() }, "c").unwrap_err();
-        assert_eq!(err.result_reason(), crate::error::ResultReason::ObjectArchived);
+        assert_eq!(err.result_reason(), crate::error::ResultReason::ObjectDestroyed);
     }
 }

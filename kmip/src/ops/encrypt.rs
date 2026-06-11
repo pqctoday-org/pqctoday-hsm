@@ -44,7 +44,7 @@ pub fn encrypt(deps: &Deps, req: EncryptRequest, correlation_id: &str) -> Result
     );
 
     let obj = deps.store.get(&req.uid)?.ok_or_else(|| {
-        fail_err(deps, correlation_id, "Encrypt", KmipError::not_found(&req.uid))
+        fail_err(deps, correlation_id, "Encrypt", KmipError::object_not_found(&req.uid))
     })?;
 
     if obj.state != State::Active {
@@ -323,7 +323,7 @@ fn encrypt_ml_kem(
             let handle =
                 softhsmrustv3::native::find_by_cka_id(session, &obj.pkcs11_cka_id)
                     .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Encap:find"))?
-                    .ok_or_else(|| KmipError::not_found(&req.uid))?;
+                    .ok_or_else(|| KmipError::object_not_found(&req.uid))?;
             let native_mech = super::helpers::native_kem_mech(obj.algorithm).ok_or_else(|| {
                 KmipError::failed(
                     ResultReason::OperationNotSupported,
@@ -493,7 +493,7 @@ fn encrypt_classical(
     } else if let Some(session) = deps.engine_session {
         let handle = softhsmrustv3::native::find_by_cka_id(session, &obj.pkcs11_cka_id)
             .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Encrypt:find"))?
-            .ok_or_else(|| KmipError::not_found(&req.uid))?;
+            .ok_or_else(|| KmipError::object_not_found(&req.uid))?;
         softhsmrustv3::native::encrypt(session, handle, mech, data_for_shim, effective_iv)
             .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Encrypt"))?
     } else {

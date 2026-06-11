@@ -44,6 +44,9 @@ pub fn get_attributes(
     );
 
     let obj = deps.store.get(&req.uid)?.ok_or_else(|| {
+        // OASIS corpus BL-M-20-30.xml pins ItemNotFound here (msg #7,
+        // GetAttributes after Obliterate) — K2 keeps this site on the
+        // generic reason; do NOT sweep to ObjectNotFound.
         fail_err(deps, correlation_id, "GetAttributes", KmipError::not_found(&req.uid))
     })?;
 
@@ -391,6 +394,8 @@ mod tests {
             uid: "missing".into(),
             attribute_references: vec![],
         }, "c").unwrap_err();
+        // OASIS corpus BL-M-20-30.xml pins ItemNotFound for a missing
+        // UID on GetAttributes (corpus is authoritative over the sweep).
         assert_eq!(err.result_reason(), crate::error::ResultReason::ItemNotFound);
     }
 }
