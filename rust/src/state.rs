@@ -460,18 +460,27 @@ pub fn attr_is_sensitive_material(attr_type: u32) -> bool {
     attr_type == CKA_VALUE || attr_type == CKA_SEED
 }
 
-/// Server-managed (read-only) attributes a mutation API must refuse to change,
-/// plus the one-way transition rules (PKCS#11 v3.2 §4.1.1 Table 12):
-/// CKA_SENSITIVE may only go FALSE→TRUE; CKA_EXTRACTABLE only TRUE→FALSE.
-/// Vendor stateful-key attrs (≥0x8000_0100) and engine-internal CKA_PRIV_*
-/// (≥0xFFFF_0000) are the engine's own state channel and bypass the policy.
-pub fn set_object_attr_checked(handle: u32, attr_type: u32, value: Vec<u8>) -> Result<(), u32> {
+/// T6 — pure modifiability check behind every attribute-mutation surface
+/// (C ABI `C_SetAttributeValue`/`C_CopyObject` templates and the native
+/// `set_attribute` path, via [`set_object_attr_checked`]). Validates one
+/// proposed `(attr_type, value)` against the object's CURRENT attributes
+/// without mutating anything, so callers can run an all-or-nothing
+/// validate-then-apply pass (PKCS#11 v3.2 §4.1.3 modifiability table).
+///
+/// Policy:
+/// * server-managed / token-computed attrs → CKR_ATTRIBUTE_READ_ONLY
+///   (includes raw key material CKA_VALUE / CKA_SEED and CKA_PARAMETER_SET —
+///   key material and its domain are fixed at creation);
+/// * one-way transitions: CKA_SENSITIVE only FALSE→TRUE, CKA_EXTRACTABLE only
+///   TRUE→FALSE (the reverse direction is CKR_ATTRIBUTE_READ_ONLY). Flipping
+///   them does NOT touch CKA_ALWAYS_SENSITIVE / CKA_NEVER_EXTRACTABLE, which
+///   record history;
+/// * vendor stateful-key attrs (≥0x8000_0100) and engine-internal CKA_PRIV_*
+///   (≥0xFFFF_0000) are the engine's own state channel and bypass the policy.
+pub fn attr_mutation_allowed(attrs: &Attributes, attr_type: u32, value: &[u8]) -> Result<(), u32> {
     // engine-internal / vendor stateful channel — no policy
     if attr_type >= 0x8000_0000 {
-        if set_object_attr_bytes(handle, attr_type, value) {
-            return Ok(());
-        }
-        return Err(CKR_OBJECT_HANDLE_INVALID);
+        return Ok(());
     }
     const READ_ONLY: &[u32] = &[
         CKA_CLASS,
@@ -487,6 +496,12 @@ pub fn set_object_attr_checked(handle: u32, attr_type: u32, value: Vec<u8>) -> R
         // has no SO-session concept, so every caller set is rejected and the
         // FALSE default (apply_object_defaults) stands.
         CKA_TRUSTED,
+        // T6 — key material and its domain are fixed at creation: CKA_VALUE /
+        // CKA_SEED can never be swapped under an existing object's metadata,
+        // and CKA_PARAMETER_SET is bound to the generated key.
+        CKA_VALUE,
+        CKA_SEED,
+        CKA_PARAMETER_SET,
         CKA_MODULUS,
         CKA_PUBLIC_EXPONENT,
         CKA_EC_PARAMS,
@@ -497,31 +512,40 @@ pub fn set_object_attr_checked(handle: u32, attr_type: u32, value: Vec<u8>) -> R
     }
     if attr_type == CKA_SENSITIVE || attr_type == CKA_EXTRACTABLE {
         let new_val = value.first().copied().unwrap_or(0) != 0;
-        let cur = OBJECTS.with(|o| {
-            o.borrow()
-                .get(&handle)
-                .map(|attrs| read_bool_attr(attrs, attr_type))
-        });
-        match cur {
-            None => return Err(CKR_OBJECT_HANDLE_INVALID),
-            Some(cur_val) => {
-                let legal = if attr_type == CKA_SENSITIVE {
-                    // FALSE→TRUE only
-                    !cur_val || new_val
-                } else {
-                    // CKA_EXTRACTABLE: TRUE→FALSE only
-                    cur_val || !new_val
-                };
-                if !legal {
-                    return Err(CKR_ATTRIBUTE_READ_ONLY);
-                }
-            }
+        let cur_val = read_bool_attr(attrs, attr_type);
+        let legal = if attr_type == CKA_SENSITIVE {
+            // FALSE→TRUE only
+            !cur_val || new_val
+        } else {
+            // CKA_EXTRACTABLE: TRUE→FALSE only
+            cur_val || !new_val
+        };
+        if !legal {
+            return Err(CKR_ATTRIBUTE_READ_ONLY);
         }
     }
-    if set_object_attr_bytes(handle, attr_type, value) {
-        Ok(())
-    } else {
-        Err(CKR_OBJECT_HANDLE_INVALID)
+    Ok(())
+}
+
+/// Server-managed (read-only) attributes a mutation API must refuse to change,
+/// plus the one-way transition rules (PKCS#11 v3.2 §4.1.1 Table 12) — see
+/// [`attr_mutation_allowed`], the single source of truth this delegates to.
+pub fn set_object_attr_checked(handle: u32, attr_type: u32, value: Vec<u8>) -> Result<(), u32> {
+    let verdict = OBJECTS.with(|o| {
+        o.borrow()
+            .get(&handle)
+            .map(|attrs| attr_mutation_allowed(attrs, attr_type, &value))
+    });
+    match verdict {
+        None => Err(CKR_OBJECT_HANDLE_INVALID),
+        Some(Err(rv)) => Err(rv),
+        Some(Ok(())) => {
+            if set_object_attr_bytes(handle, attr_type, value) {
+                Ok(())
+            } else {
+                Err(CKR_OBJECT_HANDLE_INVALID)
+            }
+        }
     }
 }
 
