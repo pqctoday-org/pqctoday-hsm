@@ -1,11 +1,14 @@
 #!/bin/bash
 # build-strongswan-wasm.sh — End-to-end Emscripten WASM build for strongSwan charon.
 #
-# ⚠️  STATUS: UNVERIFIED — produces a non-functional WASM binary.
-# ⚠️  See ../strongswan-wasm-shims/STATUS.md for details.
-# ⚠️  ALWAYS run with SKIP_INSTALL_TO_HUB=1 until Phase 3 rewrite lands.
-# ⚠️  Running without the guard will overwrite the working 12 MB baseline
-# ⚠️  in pqctoday-hub/public/wasm/strongswan.wasm and break the VPN simulator.
+# STATUS: VERIFIED (2026-06-12) — produces the working v1 full-daemon build.
+# Output matches the shipped 13 MB strongswan.wasm (same wasm_* export set,
+# "strongSwan 6.0.5" banner, size within ~7%). Verified with emcc 5.0.7.
+# Capabilities included: RFC 7383 fragmentation default (WASM_FRAGMENTATION=no
+# to opt out), RFC 9370 multi-KE hybrid proposal (mlkem768 + ke1_ecp256),
+# Tier A stub kernel for real CHILD_SA negotiation (opt in via WASM_CHILDSA=1).
+# NOTE: the default install target below is pqctoday-hub — when iterating or
+# installing into a worktree, run with SKIP_INSTALL_TO_HUB=1 and copy manually.
 #
 # Pipeline:
 #   1. Fetch upstream strongSwan 6.0.5 tarball (if not cached)
