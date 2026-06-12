@@ -11,20 +11,26 @@
 import { readFileSync } from 'fs'
 import { fileURLToPath } from 'url'
 import path from 'path'
+import { createRequire } from 'module'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
-const rustJsPath = path.resolve(__dirname, '../rust/pkg/softhsmrustv3.js')
+const require = createRequire(import.meta.url)
+const rustBgJsPath = path.resolve(__dirname, '../rust/pkg/softhsmrustv3_bg.js')
 const rustWasmPath = path.resolve(__dirname, '../rust/pkg/softhsmrustv3_bg.wasm')
 
-// ── Load WASM ────────────────────────────────────────────────────────────────
-const { default: init, _C_Initialize, _C_OpenSession, _C_GenerateKeyPair,
-        _C_SignInit, _C_Sign, _C_VerifyInit, _C_Verify } = await import(rustJsPath)
-
+// ── Load WASM (bundler-target pkg — mirror rust/test_p11_conformance.js) ────
+const bg = require(rustBgJsPath)
 const wasmBytes = readFileSync(rustWasmPath)
-const wasm = await init(wasmBytes)   // returns WASM exports (memory, __wbindgen_malloc, etc.)
+const wasmInstance = new WebAssembly.Instance(new WebAssembly.Module(wasmBytes), {
+    './softhsmrustv3_bg.js': bg,
+})
+bg.__wbg_set_wasm(wasmInstance.exports)
+const wasm = wasmInstance.exports
+const { _C_Initialize, _C_OpenSession, _C_GenerateKeyPair,
+        _C_SignInit, _C_Sign, _C_VerifyInit, _C_Verify } = wasm
 
 // ── Memory helpers ───────────────────────────────────────────────────────────
-function malloc(size) { return wasm.__wbindgen_malloc(size, 1) >>> 0 }
+function malloc(size) { return wasm._malloc(size) >>> 0 }
 function view() { return new DataView(wasm.memory.buffer) }
 function heap() { return new Uint8Array(wasm.memory.buffer) }
 
@@ -85,6 +91,7 @@ const CKM_EC_KEY_PAIR_GEN = 0x1040
 const CKM_ECDSA_SHA512    = 0x1046
 const CKA_CLASS           = 0x00000000
 const CKA_TOKEN           = 0x00000001
+const CKA_PRIVATE         = 0x00000002
 const CKA_EC_PARAMS       = 0x00000180
 const CKA_SIGN            = 0x00000108
 const CKA_VERIFY          = 0x0000010A
@@ -118,6 +125,9 @@ const pubTmpl = buildTemplate([
 const prvTmpl = buildTemplate([
     { type: CKA_CLASS,      value: CKO_PRIVATE_KEY },
     { type: CKA_TOKEN,      value: false },
+    // CKA_PRIVATE=FALSE: this harness never logs in, and the engine now
+    // enforces §4.4 private-object invisibility (round-2 remediation).
+    { type: CKA_PRIVATE,    value: false },
     { type: CKA_SIGN,       value: true },
     { type: CKA_EXTRACTABLE,value: false },
 ])
@@ -144,8 +154,9 @@ const sigLen = readU32(pSigLen)
 if (sigLen === 0 || sigLen > 128) throw new Error(`Unexpected sigLen=${sigLen}`)
 console.log(`     sig buffer size = ${sigLen} bytes`)
 
-// 6. Sign — actual
-check('C_SignInit(CKM_ECDSA_SHA512) [re-init]', _C_SignInit(hSession, buildMech(CKM_ECDSA_SHA512), hPrv))
+// 6. Sign — actual. §5.2 two-call convention: the size query did NOT
+// consume the operation, so we call C_Sign again directly (a re-init here
+// would correctly fail with CKR_OPERATION_ACTIVE on the remediated engine).
 const pSig = malloc(sigLen)
 writeU32(pSigLen, sigLen)
 check('C_Sign(actual)', _C_Sign(hSession, pMsg, msg.length, pSig, pSigLen))

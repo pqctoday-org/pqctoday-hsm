@@ -114,6 +114,29 @@ let wasm_bindgen = (function(exports) {
     exports._C_AsyncJoin = _C_AsyncJoin;
 
     /**
+     * §5.21 (legacy) — always CKR_FUNCTION_NOT_PARALLEL per spec.
+     * @param {number} _h_session
+     * @returns {number}
+     */
+    function _C_CancelFunction(_h_session) {
+        const ret = wasm._C_CancelFunction(_h_session);
+        return ret >>> 0;
+    }
+    exports._C_CancelFunction = _C_CancelFunction;
+
+    /**
+     * PKCS#11 v3.2 §5.6 — close every session on the slot (op-state cleanup +
+     * session-object destruction per C_CloseSession semantics).
+     * @param {number} slot_id
+     * @returns {number}
+     */
+    function _C_CloseAllSessions(slot_id) {
+        const ret = wasm._C_CloseAllSessions(slot_id);
+        return ret >>> 0;
+    }
+    exports._C_CloseAllSessions = _C_CloseAllSessions;
+
+    /**
      * @param {number} h_session
      * @returns {number}
      */
@@ -124,15 +147,15 @@ let wasm_bindgen = (function(exports) {
     exports._C_CloseSession = _C_CloseSession;
 
     /**
-     * @param {number} _h_session
-     * @param {number} _h_object
-     * @param {number} _p_template
-     * @param {number} _ul_count
-     * @param {number} _ph_new_object
+     * @param {number} h_session
+     * @param {number} h_object
+     * @param {number} p_template
+     * @param {number} ul_count
+     * @param {number} ph_new_object
      * @returns {number}
      */
-    function _C_CopyObject(_h_session, _h_object, _p_template, _ul_count, _ph_new_object) {
-        const ret = wasm._C_CopyObject(_h_session, _h_object, _p_template, _ul_count, _ph_new_object);
+    function _C_CopyObject(h_session, h_object, p_template, ul_count, ph_new_object) {
+        const ret = wasm._C_CopyObject(h_session, h_object, p_template, ul_count, ph_new_object);
         return ret >>> 0;
     }
     exports._C_CopyObject = _C_CopyObject;
@@ -183,12 +206,26 @@ let wasm_bindgen = (function(exports) {
 
     /**
      * @param {number} _h_session
-     * @param {number} _p_last_part
-     * @param {number} _pul_last_part_len
+     * @param {number} _p_encrypted_part
+     * @param {number} _ul_encrypted_part_len
+     * @param {number} _p_part
+     * @param {number} _pul_part_len
      * @returns {number}
      */
-    function _C_DecryptFinal(_h_session, _p_last_part, _pul_last_part_len) {
-        const ret = wasm._C_DecryptFinal(_h_session, _p_last_part, _pul_last_part_len);
+    function _C_DecryptDigestUpdate(_h_session, _p_encrypted_part, _ul_encrypted_part_len, _p_part, _pul_part_len) {
+        const ret = wasm._C_DecryptDigestUpdate(_h_session, _p_encrypted_part, _ul_encrypted_part_len, _p_part, _pul_part_len);
+        return ret >>> 0;
+    }
+    exports._C_DecryptDigestUpdate = _C_DecryptDigestUpdate;
+
+    /**
+     * @param {number} h_session
+     * @param {number} p_last_part
+     * @param {number} pul_last_part_len
+     * @returns {number}
+     */
+    function _C_DecryptFinal(h_session, p_last_part, pul_last_part_len) {
+        const ret = wasm._C_DecryptFinal(h_session, p_last_part, pul_last_part_len);
         return ret >>> 0;
     }
     exports._C_DecryptFinal = _C_DecryptFinal;
@@ -255,6 +292,20 @@ let wasm_bindgen = (function(exports) {
     exports._C_DecryptMessageNext = _C_DecryptMessageNext;
 
     /**
+     * @param {number} h_session
+     * @param {number} p_encrypted_part
+     * @param {number} ul_encrypted_part_len
+     * @param {number} p_part
+     * @param {number} pul_part_len
+     * @returns {number}
+     */
+    function _C_DecryptUpdate(h_session, p_encrypted_part, ul_encrypted_part_len, p_part, pul_part_len) {
+        const ret = wasm._C_DecryptUpdate(h_session, p_encrypted_part, ul_encrypted_part_len, p_part, pul_part_len);
+        return ret >>> 0;
+    }
+    exports._C_DecryptUpdate = _C_DecryptUpdate;
+
+    /**
      * @param {number} _h_session
      * @param {number} _p_encrypted_part
      * @param {number} _ul_encrypted_part_len
@@ -262,11 +313,11 @@ let wasm_bindgen = (function(exports) {
      * @param {number} _pul_part_len
      * @returns {number}
      */
-    function _C_DecryptUpdate(_h_session, _p_encrypted_part, _ul_encrypted_part_len, _p_part, _pul_part_len) {
-        const ret = wasm._C_DecryptUpdate(_h_session, _p_encrypted_part, _ul_encrypted_part_len, _p_part, _pul_part_len);
+    function _C_DecryptVerifyUpdate(_h_session, _p_encrypted_part, _ul_encrypted_part_len, _p_part, _pul_part_len) {
+        const ret = wasm._C_DecryptVerifyUpdate(_h_session, _p_encrypted_part, _ul_encrypted_part_len, _p_part, _pul_part_len);
         return ret >>> 0;
     }
-    exports._C_DecryptUpdate = _C_DecryptUpdate;
+    exports._C_DecryptVerifyUpdate = _C_DecryptVerifyUpdate;
 
     /**
      * @param {number} _h_session
@@ -284,12 +335,12 @@ let wasm_bindgen = (function(exports) {
     exports._C_DeriveKey = _C_DeriveKey;
 
     /**
-     * @param {number} _h_session
+     * @param {number} h_session
      * @param {number} h_object
      * @returns {number}
      */
-    function _C_DestroyObject(_h_session, h_object) {
-        const ret = wasm._C_DestroyObject(_h_session, h_object);
+    function _C_DestroyObject(h_session, h_object) {
+        const ret = wasm._C_DestroyObject(h_session, h_object);
         return ret >>> 0;
     }
     exports._C_DestroyObject = _C_DestroyObject;
@@ -307,6 +358,20 @@ let wasm_bindgen = (function(exports) {
         return ret >>> 0;
     }
     exports._C_Digest = _C_Digest;
+
+    /**
+     * @param {number} _h_session
+     * @param {number} _p_part
+     * @param {number} _ul_part_len
+     * @param {number} _p_encrypted_part
+     * @param {number} _pul_encrypted_part_len
+     * @returns {number}
+     */
+    function _C_DigestEncryptUpdate(_h_session, _p_part, _ul_part_len, _p_encrypted_part, _pul_encrypted_part_len) {
+        const ret = wasm._C_DigestEncryptUpdate(_h_session, _p_part, _ul_part_len, _p_encrypted_part, _pul_encrypted_part_len);
+        return ret >>> 0;
+    }
+    exports._C_DigestEncryptUpdate = _C_DigestEncryptUpdate;
 
     /**
      * @param {number} h_session
@@ -386,13 +451,13 @@ let wasm_bindgen = (function(exports) {
     exports._C_Encrypt = _C_Encrypt;
 
     /**
-     * @param {number} _h_session
-     * @param {number} _p_last_encrypted_part
-     * @param {number} _pul_last_encrypted_part_len
+     * @param {number} h_session
+     * @param {number} p_last_encrypted_part
+     * @param {number} pul_last_encrypted_part_len
      * @returns {number}
      */
-    function _C_EncryptFinal(_h_session, _p_last_encrypted_part, _pul_last_encrypted_part_len) {
-        const ret = wasm._C_EncryptFinal(_h_session, _p_last_encrypted_part, _pul_last_encrypted_part_len);
+    function _C_EncryptFinal(h_session, p_last_encrypted_part, pul_last_encrypted_part_len) {
+        const ret = wasm._C_EncryptFinal(h_session, p_last_encrypted_part, pul_last_encrypted_part_len);
         return ret >>> 0;
     }
     exports._C_EncryptFinal = _C_EncryptFinal;
@@ -459,25 +524,25 @@ let wasm_bindgen = (function(exports) {
     exports._C_EncryptMessageNext = _C_EncryptMessageNext;
 
     /**
-     * @param {number} _h_session
-     * @param {number} _p_part
-     * @param {number} _ul_part_len
-     * @param {number} _p_encrypted_part
-     * @param {number} _pul_encrypted_part_len
+     * @param {number} h_session
+     * @param {number} p_part
+     * @param {number} ul_part_len
+     * @param {number} p_encrypted_part
+     * @param {number} pul_encrypted_part_len
      * @returns {number}
      */
-    function _C_EncryptUpdate(_h_session, _p_part, _ul_part_len, _p_encrypted_part, _pul_encrypted_part_len) {
-        const ret = wasm._C_EncryptUpdate(_h_session, _p_part, _ul_part_len, _p_encrypted_part, _pul_encrypted_part_len);
+    function _C_EncryptUpdate(h_session, p_part, ul_part_len, p_encrypted_part, pul_encrypted_part_len) {
+        const ret = wasm._C_EncryptUpdate(h_session, p_part, ul_part_len, p_encrypted_part, pul_encrypted_part_len);
         return ret >>> 0;
     }
     exports._C_EncryptUpdate = _C_EncryptUpdate;
 
     /**
-     * @param {number} _p_reserved
+     * @param {number} p_reserved
      * @returns {number}
      */
-    function _C_Finalize(_p_reserved) {
-        const ret = wasm._C_Finalize(_p_reserved);
+    function _C_Finalize(p_reserved) {
+        const ret = wasm._C_Finalize(p_reserved);
         return ret >>> 0;
     }
     exports._C_Finalize = _C_Finalize;
@@ -561,17 +626,28 @@ let wasm_bindgen = (function(exports) {
     exports._C_GenerateRandom = _C_GenerateRandom;
 
     /**
-     * @param {number} _h_session
+     * @param {number} h_session
      * @param {number} h_object
      * @param {number} p_template
      * @param {number} count
      * @returns {number}
      */
-    function _C_GetAttributeValue(_h_session, h_object, p_template, count) {
-        const ret = wasm._C_GetAttributeValue(_h_session, h_object, p_template, count);
+    function _C_GetAttributeValue(h_session, h_object, p_template, count) {
+        const ret = wasm._C_GetAttributeValue(h_session, h_object, p_template, count);
         return ret >>> 0;
     }
     exports._C_GetAttributeValue = _C_GetAttributeValue;
+
+    /**
+     * §5.21 (legacy) — always CKR_FUNCTION_NOT_PARALLEL per spec.
+     * @param {number} _h_session
+     * @returns {number}
+     */
+    function _C_GetFunctionStatus(_h_session) {
+        const ret = wasm._C_GetFunctionStatus(_h_session);
+        return ret >>> 0;
+    }
+    exports._C_GetFunctionStatus = _C_GetFunctionStatus;
 
     /**
      * CK_INFO: cryptokiVersion(2) + manufacturerID(32) + flags(4) + libraryDescription(32) + libraryVersion(2) = 72 bytes
@@ -583,6 +659,45 @@ let wasm_bindgen = (function(exports) {
         return ret >>> 0;
     }
     exports._C_GetInfo = _C_GetInfo;
+
+    /**
+     * §5.5 — C_GetInterface. NULL name/version match the default interface.
+     * Callable BEFORE C_Initialize (§5.4 — same pre-init surface as
+     * C_GetFunctionList / C_GetInterfaceList).
+     * @param {number} p_interface_name
+     * @param {number} p_version
+     * @param {number} pp_interface
+     * @param {number} _flags
+     * @returns {number}
+     */
+    function _C_GetInterface(p_interface_name, p_version, pp_interface, _flags) {
+        const ret = wasm._C_GetInterface(p_interface_name, p_version, pp_interface, _flags);
+        return ret >>> 0;
+    }
+    exports._C_GetInterface = _C_GetInterface;
+
+    /**
+     * C_GetSlotInfo: returns basic slot info for slot 0.
+     * CK_SLOT_INFO: slotDescription(64) + manufacturerID(32) + flags(4) + hardwareVersion(2) + firmwareVersion(2) = 104 bytes
+     * PKCS#11 v3.2 §5.5 — C_GetInterfaceList. Reports one interface,
+     * "PKCS 11" version 3.2. Callable BEFORE C_Initialize (§5.4: the
+     * function-list/interface getters are exempt from the init gate;
+     * CKR_CRYPTOKI_NOT_INITIALIZED is not in this function's return list).
+     * wasm constraint: exported functions are not
+     * addressable as C function pointers in linear memory, so pFunctionList
+     * points to a CK_VERSION{3,2} header only; symbol binding happens in the
+     * JS shim (each `_C_*` export), which is the function table for every
+     * real consumer of this engine. CK_INTERFACE (wasm32, 12 B):
+     * pInterfaceName, pFunctionList, flags.
+     * @param {number} p_interfaces_list
+     * @param {number} pul_count
+     * @returns {number}
+     */
+    function _C_GetInterfaceList(p_interfaces_list, pul_count) {
+        const ret = wasm._C_GetInterfaceList(p_interfaces_list, pul_count);
+        return ret >>> 0;
+    }
+    exports._C_GetInterfaceList = _C_GetInterfaceList;
 
     /**
      * @param {number} _slot_id
@@ -597,25 +712,34 @@ let wasm_bindgen = (function(exports) {
     exports._C_GetMechanismInfo = _C_GetMechanismInfo;
 
     /**
-     * @param {number} _slot_id
+     * PKCS#11 v3.2 §5.5 — C_GetMechanismList. Gated on library initialization
+     * (§5.4), validates the slot (CKR_SLOT_ID_INVALID, mirroring
+     * C_GetTokenInfo) and the required `pulCount` out-param
+     * (CKR_ARGUMENTS_BAD). NULL `pMechanismList` is the §5.2 size query.
+     * @param {number} slot_id
      * @param {number} p_mechanism_list
      * @param {number} pul_count
      * @returns {number}
      */
-    function _C_GetMechanismList(_slot_id, p_mechanism_list, pul_count) {
-        const ret = wasm._C_GetMechanismList(_slot_id, p_mechanism_list, pul_count);
+    function _C_GetMechanismList(slot_id, p_mechanism_list, pul_count) {
+        const ret = wasm._C_GetMechanismList(slot_id, p_mechanism_list, pul_count);
         return ret >>> 0;
     }
     exports._C_GetMechanismList = _C_GetMechanismList;
 
     /**
-     * @param {number} _h_session
-     * @param {number} _h_object
-     * @param {number} _pul_size
+     * PKCS#11 v3.2 §5.7.4 — "an estimate of the amount of storage the object
+     * occupies". Honest estimate: Σ(stored attribute value lengths) + a fixed
+     * 12-byte per-attribute header ([`OBJECT_SIZE_ATTR_OVERHEAD`]). The
+     * engine-internal CKA_PRIV_* bookkeeping attrs (≥0xFFFF_0000) are excluded —
+     * they are implementation plumbing, not object storage the client created.
+     * @param {number} h_session
+     * @param {number} h_object
+     * @param {number} pul_size
      * @returns {number}
      */
-    function _C_GetObjectSize(_h_session, _h_object, _pul_size) {
-        const ret = wasm._C_GetObjectSize(_h_session, _h_object, _pul_size);
+    function _C_GetObjectSize(h_session, h_object, pul_size) {
+        const ret = wasm._C_GetObjectSize(h_session, h_object, pul_size);
         return ret >>> 0;
     }
     exports._C_GetObjectSize = _C_GetObjectSize;
@@ -656,8 +780,6 @@ let wasm_bindgen = (function(exports) {
     exports._C_GetSessionValidationFlags = _C_GetSessionValidationFlags;
 
     /**
-     * C_GetSlotInfo: returns basic slot info for slot 0.
-     * CK_SLOT_INFO: slotDescription(64) + manufacturerID(32) + flags(4) + hardwareVersion(2) + firmwareVersion(2) = 104 bytes
      * @param {number} _slot_id
      * @param {number} p_info
      * @returns {number}
@@ -681,12 +803,12 @@ let wasm_bindgen = (function(exports) {
     exports._C_GetSlotList = _C_GetSlotList;
 
     /**
-     * @param {number} _slot_id
+     * @param {number} slot_id
      * @param {number} p_info
      * @returns {number}
      */
-    function _C_GetTokenInfo(_slot_id, p_info) {
-        const ret = wasm._C_GetTokenInfo(_slot_id, p_info);
+    function _C_GetTokenInfo(slot_id, p_info) {
+        const ret = wasm._C_GetTokenInfo(slot_id, p_info);
         return ret >>> 0;
     }
     exports._C_GetTokenInfo = _C_GetTokenInfo;
@@ -738,6 +860,25 @@ let wasm_bindgen = (function(exports) {
         return ret >>> 0;
     }
     exports._C_Login = _C_Login;
+
+    /**
+     * PKCS#11 v3.0+ §5.6 — C_Login with a username. This single-user token
+     * accepts only an empty username (delegates to C_Login); anything else is
+     * CKR_OPERATION_NOT_SUPPORTED... which v3.2 spells CKR_FUNCTION_NOT_SUPPORTED
+     * for an unsupported variant.
+     * @param {number} h_session
+     * @param {number} user_type
+     * @param {number} p_pin
+     * @param {number} ul_pin_len
+     * @param {number} _p_username
+     * @param {number} ul_username_len
+     * @returns {number}
+     */
+    function _C_LoginUser(h_session, user_type, p_pin, ul_pin_len, _p_username, ul_username_len) {
+        const ret = wasm._C_LoginUser(h_session, user_type, p_pin, ul_pin_len, _p_username, ul_username_len);
+        return ret >>> 0;
+    }
+    exports._C_LoginUser = _C_LoginUser;
 
     /**
      * @param {number} h_session
@@ -795,14 +936,10 @@ let wasm_bindgen = (function(exports) {
 
     /**
      * @param {number} h_session
-     * @param {number} _p_param
-     * @param {number} _ul_param_len
-     * @param {number} _p_signature
-     * @param {number} _pul_signature_len
      * @returns {number}
      */
-    function _C_MessageSignFinal(h_session, _p_param, _ul_param_len, _p_signature, _pul_signature_len) {
-        const ret = wasm._C_MessageSignFinal(h_session, _p_param, _ul_param_len, _p_signature, _pul_signature_len);
+    function _C_MessageSignFinal(h_session) {
+        const ret = wasm._C_MessageSignFinal(h_session);
         return ret >>> 0;
     }
     exports._C_MessageSignFinal = _C_MessageSignFinal;
@@ -868,14 +1005,30 @@ let wasm_bindgen = (function(exports) {
     exports._C_SeedRandom = _C_SeedRandom;
 
     /**
-     * @param {number} _h_session
-     * @param {number} _h_object
-     * @param {number} _p_template
-     * @param {number} _ul_count
+     * PKCS#11 v3.0+ §5.6 — cancel active operations selected by `flags`
+     * (CKF_ENCRYPT 0x100, CKF_DECRYPT 0x200, CKF_DIGEST 0x400, CKF_SIGN 0x800,
+     * CKF_VERIFY 0x2000, CKF_FIND_OBJECTS 0x40, CKF_MESSAGE_ENCRYPT 0x2,
+     * CKF_MESSAGE_DECRYPT 0x4, CKF_MESSAGE_SIGN 0x8, CKF_MESSAGE_VERIFY 0x10).
+     * flags == 0 cancels nothing.
+     * @param {number} h_session
+     * @param {number} flags
      * @returns {number}
      */
-    function _C_SetAttributeValue(_h_session, _h_object, _p_template, _ul_count) {
-        const ret = wasm._C_SetAttributeValue(_h_session, _h_object, _p_template, _ul_count);
+    function _C_SessionCancel(h_session, flags) {
+        const ret = wasm._C_SessionCancel(h_session, flags);
+        return ret >>> 0;
+    }
+    exports._C_SessionCancel = _C_SessionCancel;
+
+    /**
+     * @param {number} h_session
+     * @param {number} h_object
+     * @param {number} p_template
+     * @param {number} ul_count
+     * @returns {number}
+     */
+    function _C_SetAttributeValue(h_session, h_object, p_template, ul_count) {
+        const ret = wasm._C_SetAttributeValue(h_session, h_object, p_template, ul_count);
         return ret >>> 0;
     }
     exports._C_SetAttributeValue = _C_SetAttributeValue;
@@ -895,15 +1048,20 @@ let wasm_bindgen = (function(exports) {
     exports._C_SetOperationState = _C_SetOperationState;
 
     /**
-     * @param {number} _h_session
-     * @param {number} _p_old_pin
-     * @param {number} _ul_old_len
-     * @param {number} _p_new_pin
-     * @param {number} _ul_new_len
+     * PKCS#11 v3.2 §5.6.7 — C_SetPIN rotates the PIN of the user that is
+     * currently logged in (SO session → SO PIN; user session OR public session →
+     * the normal user PIN, per the spec's session-state table). Works only from
+     * a R/W session; the old PIN is verified against the stored PBKDF2 hash and
+     * the new PIN is re-salted and re-hashed (`state::hash_pin`).
+     * @param {number} h_session
+     * @param {number} p_old_pin
+     * @param {number} ul_old_len
+     * @param {number} p_new_pin
+     * @param {number} ul_new_len
      * @returns {number}
      */
-    function _C_SetPIN(_h_session, _p_old_pin, _ul_old_len, _p_new_pin, _ul_new_len) {
-        const ret = wasm._C_SetPIN(_h_session, _p_old_pin, _ul_old_len, _p_new_pin, _ul_new_len);
+    function _C_SetPIN(h_session, p_old_pin, ul_old_len, p_new_pin, ul_new_len) {
+        const ret = wasm._C_SetPIN(h_session, p_old_pin, ul_old_len, p_new_pin, ul_new_len);
         return ret >>> 0;
     }
     exports._C_SetPIN = _C_SetPIN;
@@ -924,12 +1082,26 @@ let wasm_bindgen = (function(exports) {
 
     /**
      * @param {number} _h_session
-     * @param {number} _p_signature
-     * @param {number} _pul_signature_len
+     * @param {number} _p_part
+     * @param {number} _ul_part_len
+     * @param {number} _p_encrypted_part
+     * @param {number} _pul_encrypted_part_len
      * @returns {number}
      */
-    function _C_SignFinal(_h_session, _p_signature, _pul_signature_len) {
-        const ret = wasm._C_SignFinal(_h_session, _p_signature, _pul_signature_len);
+    function _C_SignEncryptUpdate(_h_session, _p_part, _ul_part_len, _p_encrypted_part, _pul_encrypted_part_len) {
+        const ret = wasm._C_SignEncryptUpdate(_h_session, _p_part, _ul_part_len, _p_encrypted_part, _pul_encrypted_part_len);
+        return ret >>> 0;
+    }
+    exports._C_SignEncryptUpdate = _C_SignEncryptUpdate;
+
+    /**
+     * @param {number} h_session
+     * @param {number} p_signature
+     * @param {number} pul_signature_len
+     * @returns {number}
+     */
+    function _C_SignFinal(h_session, p_signature, pul_signature_len) {
+        const ret = wasm._C_SignFinal(h_session, p_signature, pul_signature_len);
         return ret >>> 0;
     }
     exports._C_SignFinal = _C_SignFinal;
@@ -963,13 +1135,71 @@ let wasm_bindgen = (function(exports) {
     exports._C_SignMessage = _C_SignMessage;
 
     /**
-     * @param {number} _h_session
-     * @param {number} _p_part
-     * @param {number} _ul_part_len
+     * §5.14 — start one multipart message inside an active message-sign op.
+     * @param {number} h_session
+     * @param {number} _p_param
+     * @param {number} _ul_param_len
      * @returns {number}
      */
-    function _C_SignUpdate(_h_session, _p_part, _ul_part_len) {
-        const ret = wasm._C_SignUpdate(_h_session, _p_part, _ul_part_len);
+    function _C_SignMessageBegin(h_session, _p_param, _ul_param_len) {
+        const ret = wasm._C_SignMessageBegin(h_session, _p_param, _ul_param_len);
+        return ret >>> 0;
+    }
+    exports._C_SignMessageBegin = _C_SignMessageBegin;
+
+    /**
+     * §5.14 — feed a message part. `pulSignatureLen == NULL` marks a non-final
+     * part; non-NULL marks the final part (then NULL `pSignature` is the §5.2
+     * length query, which does not consume the accumulated message).
+     * @param {number} h_session
+     * @param {number} _p_param
+     * @param {number} _ul_param_len
+     * @param {number} p_part
+     * @param {number} ul_part_len
+     * @param {number} p_signature
+     * @param {number} pul_signature_len
+     * @returns {number}
+     */
+    function _C_SignMessageNext(h_session, _p_param, _ul_param_len, p_part, ul_part_len, p_signature, pul_signature_len) {
+        const ret = wasm._C_SignMessageNext(h_session, _p_param, _ul_param_len, p_part, ul_part_len, p_signature, pul_signature_len);
+        return ret >>> 0;
+    }
+    exports._C_SignMessageNext = _C_SignMessageNext;
+
+    /**
+     * @param {number} _h_session
+     * @param {number} _p_data
+     * @param {number} _ul_data_len
+     * @param {number} _p_signature
+     * @param {number} _pul_signature_len
+     * @returns {number}
+     */
+    function _C_SignRecover(_h_session, _p_data, _ul_data_len, _p_signature, _pul_signature_len) {
+        const ret = wasm._C_SignRecover(_h_session, _p_data, _ul_data_len, _p_signature, _pul_signature_len);
+        return ret >>> 0;
+    }
+    exports._C_SignRecover = _C_SignRecover;
+
+    /**
+     * @param {number} _h_session
+     * @param {number} _p_mechanism
+     * @param {number} _h_key
+     * @returns {number}
+     */
+    function _C_SignRecoverInit(_h_session, _p_mechanism, _h_key) {
+        const ret = wasm._C_SignRecoverInit(_h_session, _p_mechanism, _h_key);
+        return ret >>> 0;
+    }
+    exports._C_SignRecoverInit = _C_SignRecoverInit;
+
+    /**
+     * @param {number} h_session
+     * @param {number} p_part
+     * @param {number} ul_part_len
+     * @returns {number}
+     */
+    function _C_SignUpdate(h_session, p_part, ul_part_len) {
+        const ret = wasm._C_SignUpdate(h_session, p_part, ul_part_len);
         return ret >>> 0;
     }
     exports._C_SignUpdate = _C_SignUpdate;
@@ -999,13 +1229,13 @@ let wasm_bindgen = (function(exports) {
      * @param {number} ul_wrapped_key_len
      * @param {number} p_template
      * @param {number} ul_attribute_count
-     * @param {number} _p_associated_data
-     * @param {number} _ul_associated_data_len
+     * @param {number} p_associated_data
+     * @param {number} ul_associated_data_len
      * @param {number} ph_key
      * @returns {number}
      */
-    function _C_UnwrapKeyAuthenticated(_h_session, p_mechanism, h_unwrapping_key, p_wrapped_key, ul_wrapped_key_len, p_template, ul_attribute_count, _p_associated_data, _ul_associated_data_len, ph_key) {
-        const ret = wasm._C_UnwrapKeyAuthenticated(_h_session, p_mechanism, h_unwrapping_key, p_wrapped_key, ul_wrapped_key_len, p_template, ul_attribute_count, _p_associated_data, _ul_associated_data_len, ph_key);
+    function _C_UnwrapKeyAuthenticated(_h_session, p_mechanism, h_unwrapping_key, p_wrapped_key, ul_wrapped_key_len, p_template, ul_attribute_count, p_associated_data, ul_associated_data_len, ph_key) {
+        const ret = wasm._C_UnwrapKeyAuthenticated(_h_session, p_mechanism, h_unwrapping_key, p_wrapped_key, ul_wrapped_key_len, p_template, ul_attribute_count, p_associated_data, ul_associated_data_len, ph_key);
         return ret >>> 0;
     }
     exports._C_UnwrapKeyAuthenticated = _C_UnwrapKeyAuthenticated;
@@ -1025,13 +1255,13 @@ let wasm_bindgen = (function(exports) {
     exports._C_Verify = _C_Verify;
 
     /**
-     * @param {number} _h_session
-     * @param {number} _p_signature
-     * @param {number} _ul_signature_len
+     * @param {number} h_session
+     * @param {number} p_signature
+     * @param {number} ul_signature_len
      * @returns {number}
      */
-    function _C_VerifyFinal(_h_session, _p_signature, _ul_signature_len) {
-        const ret = wasm._C_VerifyFinal(_h_session, _p_signature, _ul_signature_len);
+    function _C_VerifyFinal(h_session, p_signature, ul_signature_len) {
+        const ret = wasm._C_VerifyFinal(h_session, p_signature, ul_signature_len);
         return ret >>> 0;
     }
     exports._C_VerifyFinal = _C_VerifyFinal;
@@ -1063,6 +1293,63 @@ let wasm_bindgen = (function(exports) {
         return ret >>> 0;
     }
     exports._C_VerifyMessage = _C_VerifyMessage;
+
+    /**
+     * §5.15 — start one multipart message inside an active message-verify op.
+     * @param {number} h_session
+     * @param {number} _p_param
+     * @param {number} _ul_param_len
+     * @returns {number}
+     */
+    function _C_VerifyMessageBegin(h_session, _p_param, _ul_param_len) {
+        const ret = wasm._C_VerifyMessageBegin(h_session, _p_param, _ul_param_len);
+        return ret >>> 0;
+    }
+    exports._C_VerifyMessageBegin = _C_VerifyMessageBegin;
+
+    /**
+     * §5.15 — feed a message part. NULL `pSignature` marks a non-final part;
+     * non-NULL carries the signature and finalizes the message.
+     * @param {number} h_session
+     * @param {number} _p_param
+     * @param {number} _ul_param_len
+     * @param {number} p_part
+     * @param {number} ul_part_len
+     * @param {number} p_signature
+     * @param {number} ul_signature_len
+     * @returns {number}
+     */
+    function _C_VerifyMessageNext(h_session, _p_param, _ul_param_len, p_part, ul_part_len, p_signature, ul_signature_len) {
+        const ret = wasm._C_VerifyMessageNext(h_session, _p_param, _ul_param_len, p_part, ul_part_len, p_signature, ul_signature_len);
+        return ret >>> 0;
+    }
+    exports._C_VerifyMessageNext = _C_VerifyMessageNext;
+
+    /**
+     * @param {number} _h_session
+     * @param {number} _p_signature
+     * @param {number} _ul_signature_len
+     * @param {number} _p_data
+     * @param {number} _pul_data_len
+     * @returns {number}
+     */
+    function _C_VerifyRecover(_h_session, _p_signature, _ul_signature_len, _p_data, _pul_data_len) {
+        const ret = wasm._C_VerifyRecover(_h_session, _p_signature, _ul_signature_len, _p_data, _pul_data_len);
+        return ret >>> 0;
+    }
+    exports._C_VerifyRecover = _C_VerifyRecover;
+
+    /**
+     * @param {number} _h_session
+     * @param {number} _p_mechanism
+     * @param {number} _h_key
+     * @returns {number}
+     */
+    function _C_VerifyRecoverInit(_h_session, _p_mechanism, _h_key) {
+        const ret = wasm._C_VerifyRecoverInit(_h_session, _p_mechanism, _h_key);
+        return ret >>> 0;
+    }
+    exports._C_VerifyRecoverInit = _C_VerifyRecoverInit;
 
     /**
      * @param {number} h_session
@@ -1113,16 +1400,30 @@ let wasm_bindgen = (function(exports) {
     exports._C_VerifySignatureUpdate = _C_VerifySignatureUpdate;
 
     /**
-     * @param {number} _h_session
-     * @param {number} _p_part
-     * @param {number} _ul_part_len
+     * @param {number} h_session
+     * @param {number} p_part
+     * @param {number} ul_part_len
      * @returns {number}
      */
-    function _C_VerifyUpdate(_h_session, _p_part, _ul_part_len) {
-        const ret = wasm._C_VerifyUpdate(_h_session, _p_part, _ul_part_len);
+    function _C_VerifyUpdate(h_session, p_part, ul_part_len) {
+        const ret = wasm._C_VerifyUpdate(h_session, p_part, ul_part_len);
         return ret >>> 0;
     }
     exports._C_VerifyUpdate = _C_VerifyUpdate;
+
+    /**
+     * §5.5 — no slot events exist on this soft token. Non-blocking poll gets
+     * CKR_NO_EVENT; a blocking wait would never return, so refuse it.
+     * @param {number} flags
+     * @param {number} _p_slot
+     * @param {number} _p_reserved
+     * @returns {number}
+     */
+    function _C_WaitForSlotEvent(flags, _p_slot, _p_reserved) {
+        const ret = wasm._C_WaitForSlotEvent(flags, _p_slot, _p_reserved);
+        return ret >>> 0;
+    }
+    exports._C_WaitForSlotEvent = _C_WaitForSlotEvent;
 
     /**
      * @param {number} _h_session
@@ -1144,14 +1445,14 @@ let wasm_bindgen = (function(exports) {
      * @param {number} p_mechanism
      * @param {number} h_wrapping_key
      * @param {number} h_key
-     * @param {number} _p_associated_data
-     * @param {number} _ul_associated_data_len
+     * @param {number} p_associated_data
+     * @param {number} ul_associated_data_len
      * @param {number} p_wrapped_key
      * @param {number} pul_wrapped_key_len
      * @returns {number}
      */
-    function _C_WrapKeyAuthenticated(_h_session, p_mechanism, h_wrapping_key, h_key, _p_associated_data, _ul_associated_data_len, p_wrapped_key, pul_wrapped_key_len) {
-        const ret = wasm._C_WrapKeyAuthenticated(_h_session, p_mechanism, h_wrapping_key, h_key, _p_associated_data, _ul_associated_data_len, p_wrapped_key, pul_wrapped_key_len);
+    function _C_WrapKeyAuthenticated(_h_session, p_mechanism, h_wrapping_key, h_key, p_associated_data, ul_associated_data_len, p_wrapped_key, pul_wrapped_key_len) {
+        const ret = wasm._C_WrapKeyAuthenticated(_h_session, p_mechanism, h_wrapping_key, h_key, p_associated_data, ul_associated_data_len, p_wrapped_key, pul_wrapped_key_len);
         return ret >>> 0;
     }
     exports._C_WrapKeyAuthenticated = _C_WrapKeyAuthenticated;
