@@ -100,6 +100,36 @@ cd "$SRC_DIR"
 echo "[build] Overlaying pqctoday pkcs11 plugin from $PLUGIN_SRC..."
 cp -R "$PLUGIN_SRC"/* src/libstrongswan/plugins/pkcs11/
 
+# 5.5. SLH-DSA compat shim for 6.0.5. The shared strongswan-pkcs11/ plugin
+#      gained SLH-DSA support for the 6.0.6/v2 build (KEY_SLH_DSA_* and
+#      SIGN_SLH_DSA_* enums added to libstrongswan core by
+#      strongswan-6.0.6-pqc-slhdsa.patch). The 6.0.5 PQC patch does not add
+#      those enum values, so the overlaid plugin fails to compile. Append
+#      macro equivalents (values match the 6.0.6 enum layout exactly:
+#      key_type_t 9/10/11 after KEY_ML_DSA_87=8, signature schemes right
+#      after SIGN_ML_DSA_87) to the plugin's local pkcs11.h, which all three
+#      affected sources include. Build-tree only — repo sources untouched.
+PKCS11_PLUGIN_H="src/libstrongswan/plugins/pkcs11/pkcs11.h"
+if ! grep -q "WASM_SLHDSA_COMPAT_605" "$PKCS11_PLUGIN_H"; then
+    cat >> "$PKCS11_PLUGIN_H" <<'EOF'
+
+/* WASM_SLHDSA_COMPAT_605 — SLH-DSA key/signature enum values for the 6.0.5
+ * build (only the 6.0.6 core patch defines them in public_key.h). Values
+ * mirror strongswan-6.0.6-pqc-slhdsa.patch. */
+#ifndef KEY_SLH_DSA_SHA2_128S
+#define KEY_SLH_DSA_SHA2_128S  ((key_type_t)9)
+#define KEY_SLH_DSA_SHA2_192S  ((key_type_t)10)
+#define KEY_SLH_DSA_SHA2_256S  ((key_type_t)11)
+#define SIGN_SLH_DSA_SHA2_128S ((signature_scheme_t)(SIGN_ML_DSA_87 + 1))
+#define SIGN_SLH_DSA_SHA2_192S ((signature_scheme_t)(SIGN_ML_DSA_87 + 2))
+#define SIGN_SLH_DSA_SHA2_256S ((signature_scheme_t)(SIGN_ML_DSA_87 + 3))
+#endif
+EOF
+    echo "[build]   appended SLH-DSA 6.0.5 compat defines to $PKCS11_PLUGIN_H"
+else
+    echo "[build]   $PKCS11_PLUGIN_H already has SLH-DSA compat defines, skipping"
+fi
+
 # 6. Apply WASM patch (core emscripten plumbing + pkcs11_library static-link
 #    hooks). Applied AFTER the plugin overlay so its pkcs11_library.c hunks
 #    target the pqctoday version that's now in the tree.
