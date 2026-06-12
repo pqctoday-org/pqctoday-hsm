@@ -130,6 +130,13 @@ pub const CKA_PRIV_ALGO_FAMILY: u32 = 0xFFFF_0002;
 // 0 / absent = library scope (native/KMIP-registered objects). Session objects
 // (CKA_TOKEN=FALSE) owned by a session are destroyed when it closes (§4.4).
 pub const CKA_PRIV_OWNER_SESSION: u32 = 0xFFFF_0003;
+// Private attribute: slot id of the token that owns the object (u32 LE).
+// Stamped at creation (state::allocate_handle) from the creating session's
+// slot; absent/legacy records default to slot 0 (the primary token). Object
+// enumeration (C_FindObjects, native CKA_ID lookups) and handle visibility
+// are scoped to the session's slot via this attribute (audit: multi-slot
+// FindObjects scoping).
+pub const CKA_PRIV_SLOT_ID: u32 = 0xFFFF_0004;
 
 // ── PKCS#11 Mechanism Types ──────────────────────────────────────────────────
 
