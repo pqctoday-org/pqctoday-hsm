@@ -415,6 +415,24 @@ mod tests {
 }).unwrap();
     }
 
+    /// K22 — §6.1.24.1 Error Handling – Get Attributes does NOT list
+    /// `Object Archived`: an archived object's attributes remain
+    /// readable (only the material is off-line — Get / crypto ops are
+    /// the gated paths).
+    #[test]
+    fn archived_object_attributes_remain_readable() {
+        let d = deps_with();
+        put(&d, "u");
+        let mut rec = d.store.get("u").unwrap().unwrap();
+        rec.archived = true;
+        d.store.update(rec).unwrap();
+        let r = get_attributes(&d, GetAttributesRequest {
+            uid: "u".into(),
+            attribute_references: vec![],
+        }, "c").unwrap();
+        assert!(r.attributes.iter().any(|a| matches!(a, Attribute::CryptographicAlgorithm(_))));
+    }
+
     #[test]
     fn empty_reference_list_returns_all_attributes() {
         let d = deps_with();

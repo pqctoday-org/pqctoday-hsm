@@ -276,6 +276,16 @@ pub fn adjust_attribute(
     let mut obj = deps.store.get(&req.uid)?.ok_or_else(|| {
         fail_err(deps, correlation_id, "AdjustAttribute", KmipError::object_not_found(&req.uid))
     })?;
+
+    // K22 — §6.1.3.1 Error Handling – Adjust Attribute is the only
+    // attribute-mutation error table that lists `Object Archived`
+    // (0x0d): adjusting an archived object's attributes fails until
+    // Recover. (Add/Modify/Delete/Set Attribute tables do not list
+    // it, so those still work on archived objects.)
+    if obj.archived {
+        return Err(fail_err(deps, correlation_id, "AdjustAttribute",
+            KmipError::object_archived(&req.uid)));
+    }
     policy_gate(deps, &obj, "AdjustAttribute", correlation_id)?;
 
     // Per §6.1.3, the v0.1 store has very few numeric/boolean attributes

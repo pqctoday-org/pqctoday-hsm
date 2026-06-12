@@ -57,22 +57,27 @@ pub fn locate(deps: &Deps, req: LocateRequest, correlation_id: &str) -> Result<L
     // made, so no `Pkcs11Call` audit record is fabricated for it.
 
     // KMIP 3.0 §6.1.32 `Storage Status Mask` (§12.3 Table 608: On-line
-    // 0x01, Archival 0x02, Destroyed 0x04). Every object on this server
-    // is On-line storage: Archive (§6.1.4) is acknowledged but never
-    // moves bytes, so nothing is ever in Archival storage. A mask that
-    // EXCLUDES the On-line bit therefore matches nothing → empty
-    // response. A mask including On-line — or an absent mask, which the
-    // spec defaults to On-line-only — searches normally.
+    // 0x01, Archival 0x02, Destroyed 0x04). K22 — Archive (§6.1.4) is
+    // real now, so the mask filters actual storage status: "The server
+    // SHALL NOT return unique identifiers for objects that are archived
+    // unless the Storage Status Mask field includes the Archived
+    // Storage indicator", and "If omitted, then only on-line objects
+    // SHALL be returned". (Destroyed-state tombstones keep the existing
+    // state-filter behaviour in `LocateFilters::matches` — this server
+    // never moves them to a separate Destroyed storage class.)
     const STORAGE_STATUS_ONLINE: u32 = 0x0000_0001;
-    if let Some(mask) = req.storage_status_mask {
-        if mask & STORAGE_STATUS_ONLINE == 0 {
-            emit_success(deps, correlation_id, "Locate");
-            return Ok(LocateResponse { uids: Vec::new() });
-        }
-    }
+    const STORAGE_STATUS_ARCHIVAL: u32 = 0x0000_0002;
+    let storage_mask = req.storage_status_mask.unwrap_or(STORAGE_STATUS_ONLINE);
 
     // Plane-2: store search.
-    let mut matches = deps.store.find(&|r| filters.matches(r))?;
+    let mut matches = deps.store.find(&|r| {
+        let storage_ok = if r.archived {
+            storage_mask & STORAGE_STATUS_ARCHIVAL != 0
+        } else {
+            storage_mask & STORAGE_STATUS_ONLINE != 0
+        };
+        storage_ok && filters.matches(r)
+    })?;
 
     // Paging needs a stable total order — `MemoryStore::find` iterates a
     // HashMap, so without a sort `Offset Items` would skip a *random* N.
@@ -325,10 +330,9 @@ mod tests {
         assert!(r.uids.is_empty());
     }
 
-    /// K12 — §6.1.32 `Storage Status Mask`: all objects are On-line
-    /// (Archive is a no-op), so a mask without the On-line bit (0x01)
-    /// matches nothing; a mask including it — or no mask — searches
-    /// normally.
+    /// K12/K22 — §6.1.32 `Storage Status Mask`: with no archived
+    /// objects, a mask without the On-line bit (0x01) matches
+    /// nothing; a mask including it — or no mask — searches normally.
     #[test]
     fn locate_storage_status_mask_filters_storage_classes() {
         let d = deps_with();
@@ -348,5 +352,41 @@ mod tests {
         // Absent → spec default is On-line-only → results.
         let r = locate(&d, LocateRequest::default(), "c").unwrap();
         assert_eq!(r.uids, vec!["a"]);
+    }
+
+    /// K22 — §6.1.32: "The server SHALL NOT return unique identifiers
+    /// for objects that are archived unless the Storage Status Mask
+    /// field includes the Archived Storage indicator" + "If omitted,
+    /// then only on-line objects SHALL be returned."
+    #[test]
+    fn locate_storage_status_mask_filters_archived_objects() {
+        let d = deps_with();
+        put(&d, "online", KmipAlgorithm::Aes, ObjectType::SymmetricKey, State::Active);
+        put(&d, "arch", KmipAlgorithm::Aes, ObjectType::SymmetricKey, State::Active);
+        let mut rec = d.store.get("arch").unwrap().unwrap();
+        rec.archived = true;
+        d.store.update(rec).unwrap();
+
+        // Absent mask → On-line only: archived object excluded.
+        let r = locate(&d, LocateRequest::default(), "c").unwrap();
+        assert_eq!(r.uids, vec!["online"]);
+        // On-line only (0x01) → archived excluded.
+        let r = locate(&d, LocateRequest {
+            storage_status_mask: Some(0x01),
+            ..Default::default()
+        }, "c").unwrap();
+        assert_eq!(r.uids, vec!["online"]);
+        // Archival only (0x02) → ONLY the archived object.
+        let r = locate(&d, LocateRequest {
+            storage_status_mask: Some(0x02),
+            ..Default::default()
+        }, "c").unwrap();
+        assert_eq!(r.uids, vec!["arch"]);
+        // Both (0x03) → both, in stable (InitialDate, UID) order.
+        let r = locate(&d, LocateRequest {
+            storage_status_mask: Some(0x03),
+            ..Default::default()
+        }, "c").unwrap();
+        assert_eq!(r.uids, vec!["arch", "online"]);
     }
 }

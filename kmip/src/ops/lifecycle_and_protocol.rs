@@ -5,8 +5,8 @@
 //!
 //! - Deactivate       §6.1.14 — Active → Deactivated, set Deactivation Date
 //! - Check            §6.1.7  — policy gate; v0.1 always allows
-//! - Archive          §6.1.4  — client indicates archival; server policy decides
-//! - Recover          §6.1.47 — undo archival
+//! - Archive          §6.1.4  — move object to Archival storage (K22: real)
+//! - Recover          §6.1.47 — move object back On-line
 //! - Obliterate       §6.1.39 — remove object + all metadata
 //! - DiscoverVersions §6.1.20 — protocol version negotiation
 //! - Ping             §6.1.41 — liveness check (no payload)
@@ -114,12 +114,31 @@ pub fn check(deps: &Deps, req: CheckRequest, correlation_id: &str) -> Result<Che
 
 pub fn archive(deps: &Deps, req: ArchiveRequest, correlation_id: &str) -> Result<ArchiveResponse> {
     emit_request(deps, correlation_id, "Archive", format!("uid={}", req.uid));
-    let _ = deps.store.get(&req.uid)?.ok_or_else(|| {
+    let mut obj = deps.store.get(&req.uid)?.ok_or_else(|| {
         fail_err(deps, correlation_id, "Archive", KmipError::object_not_found(&req.uid))
     })?;
+
+    // §6.1.4.1 Error Handling – Archive lists `Object Archived` as a
+    // returnable reason: archiving an already-archived object fails
+    // with 0x0d (§11: "The object SHALL be recovered from the archive
+    // before performing the operation"). NOT idempotent per the table.
+    if obj.archived {
+        return Err(fail_err(deps, correlation_id, "Archive",
+            KmipError::object_archived(&req.uid)));
+    }
+
     // Per §6.1.4: "This request is only an indication from a client
     // that, from its point of view, the key management system MAY
-    // archive the object." v0.1 acknowledges but doesn't move bytes.
+    // archive the object." K22: this server's policy is to honour the
+    // indication immediately — the record moves to Archival storage
+    // (§12.3 mask bit 0x02) and the material goes off-line until
+    // Recover (§6.1.47). No lifecycle-state precondition: the
+    // §6.1.4.1 error table lists neither `Object Destroyed` nor
+    // `Wrong Key Lifecycle State`, so any stored object (including
+    // Destroyed tombstones) may be archived.
+    obj.archived = true;
+    obj.last_change_date = Some(OffsetDateTime::now_utc());
+    deps.store.update(obj)?;
     emit_success(deps, correlation_id, "Archive");
     Ok(ArchiveResponse { uid: req.uid })
 }
@@ -128,12 +147,22 @@ pub fn archive(deps: &Deps, req: ArchiveRequest, correlation_id: &str) -> Result
 
 pub fn recover(deps: &Deps, req: RecoverRequest, correlation_id: &str) -> Result<RecoverResponse> {
     emit_request(deps, correlation_id, "Recover", format!("uid={}", req.uid));
-    let _ = deps.store.get(&req.uid)?.ok_or_else(|| {
+    let mut obj = deps.store.get(&req.uid)?.ok_or_else(|| {
         fail_err(deps, correlation_id, "Recover", KmipError::object_not_found(&req.uid))
     })?;
-    // Per §6.1.47: recover access to an archived object. Since v0.1's
-    // Archive is a no-op, Recover is also a no-op — the object is
-    // already accessible.
+
+    // Per §6.1.47: "This operation is used to obtain access to a
+    // Managed Object that has been archived. … Once the response is
+    // received, the object is now on-line, and MAY be obtained (e.g.,
+    // via a Get operation)." Recover of an already-on-line object is
+    // idempotent success: the §6.1.47.1 error table lists no
+    // applicable reason (only Object Not Found + generics), and the
+    // postcondition — "the object is now on-line" — already holds.
+    if obj.archived {
+        obj.archived = false;
+        obj.last_change_date = Some(OffsetDateTime::now_utc());
+        deps.store.update(obj)?;
+    }
     emit_success(deps, correlation_id, "Recover");
     Ok(RecoverResponse { uid: req.uid })
 }
@@ -284,6 +313,74 @@ mod tests {
             err.result_reason(),
             crate::error::ResultReason::IncompatibleCryptographicUsageMask,
         );
+    }
+
+    /// K22 — §6.1.4: Archive moves the record to Archival storage and
+    /// stamps Last Change Date.
+    #[test]
+    fn archive_marks_record_archival() {
+        let d = deps_with();
+        put(&d, "u", State::Active);
+        let r = archive(&d, ArchiveRequest { uid: "u".into() }, "c").unwrap();
+        assert_eq!(r.uid, "u");
+        let rec = d.store.get("u").unwrap().unwrap();
+        assert!(rec.archived);
+        assert!(rec.last_change_date.is_some());
+    }
+
+    /// K22 — §6.1.4.1 error table lists `Object Archived`: archiving
+    /// an already-archived object fails with 0x0d (not idempotent).
+    #[test]
+    fn archive_of_archived_object_fails_object_archived() {
+        let d = deps_with();
+        put(&d, "u", State::Active);
+        archive(&d, ArchiveRequest { uid: "u".into() }, "c").unwrap();
+        let err = archive(&d, ArchiveRequest { uid: "u".into() }, "c").unwrap_err();
+        assert_eq!(err.result_reason(), crate::error::ResultReason::ObjectArchived);
+    }
+
+    /// K22 — §6.1.4.1 lists neither `Object Destroyed` nor `Wrong Key
+    /// Lifecycle State`: Archive of a Destroyed tombstone succeeds.
+    #[test]
+    fn archive_of_destroyed_object_succeeds() {
+        let d = deps_with();
+        put(&d, "u", State::Destroyed);
+        assert!(archive(&d, ArchiveRequest { uid: "u".into() }, "c").is_ok());
+        assert!(d.store.get("u").unwrap().unwrap().archived);
+    }
+
+    /// K22 — §6.1.47: "Once the response is received, the object is
+    /// now on-line" — Recover flips the record back.
+    #[test]
+    fn recover_restores_online_storage() {
+        let d = deps_with();
+        put(&d, "u", State::Active);
+        archive(&d, ArchiveRequest { uid: "u".into() }, "c").unwrap();
+        let r = recover(&d, RecoverRequest { uid: "u".into() }, "c").unwrap();
+        assert_eq!(r.uid, "u");
+        assert!(!d.store.get("u").unwrap().unwrap().archived);
+    }
+
+    /// K22 — §6.1.47.1 error table has no reason for "already
+    /// on-line", and the postcondition already holds → idempotent
+    /// success.
+    #[test]
+    fn recover_of_online_object_is_idempotent_success() {
+        let d = deps_with();
+        put(&d, "u", State::Active);
+        assert!(recover(&d, RecoverRequest { uid: "u".into() }, "c").is_ok());
+        assert!(!d.store.get("u").unwrap().unwrap().archived);
+    }
+
+    /// K2 — UID validation kept: Archive/Recover of a missing UID is
+    /// `ObjectNotFound` per both error tables.
+    #[test]
+    fn archive_and_recover_unknown_uid_fail_object_not_found() {
+        let d = deps_with();
+        let e = archive(&d, ArchiveRequest { uid: "nope".into() }, "c").unwrap_err();
+        assert_eq!(e.result_reason(), crate::error::ResultReason::ObjectNotFound);
+        let e = recover(&d, RecoverRequest { uid: "nope".into() }, "c").unwrap_err();
+        assert_eq!(e.result_reason(), crate::error::ResultReason::ObjectNotFound);
     }
 
     #[test]
