@@ -162,7 +162,9 @@ pub(crate) const ADVERTISED_UNIMPLEMENTED_OPERATIONS: &[Operation] = &[
     Operation::Process,
     // K3 additions — also enumerated by the MSGENC-* expected Query
     // responses (previously missing from the Operation enum entirely).
-    Operation::DeriveKey,
+    // K20 moved DeriveKey out of this list into `HANDLED_OPERATIONS`
+    // (implemented §6.1.18 handler) — no net change to the advertised
+    // set, so every MSGENC-* Query transcript keeps passing.
     Operation::Certify,
     Operation::Cancel,
     Operation::ReKeyKeyPair,
@@ -246,6 +248,8 @@ mod tests {
         // (was 42 + 19 = 61; SetEndpointRole / GetUsageAllocation /
         // GetConstraints moved between the sets, SetDefaults is newly
         // implemented and therefore newly — honestly — advertised).
+        // K20: DeriveKey moved between the sets (47 + 15) — net
+        // advertised set unchanged at 62.
         assert_eq!(ops.len(), 62);
         assert!(ops.contains(&Operation::Sign));
         assert!(ops.contains(&Operation::Encrypt));
@@ -262,7 +266,8 @@ mod tests {
         ] {
             assert!(ops.contains(&op), "{op:?} must be advertised (K19 handled)");
         }
-        // K3 — corpus-required ops newly added to the Operation enum.
+        // K3 — corpus-required ops newly added to the Operation enum
+        // (K20: DeriveKey is now advertised as a HANDLED op instead).
         for op in [
             Operation::DeriveKey, Operation::Certify, Operation::Cancel,
             Operation::ReKeyKeyPair, Operation::JoinSplitKey,

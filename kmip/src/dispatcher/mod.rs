@@ -35,6 +35,7 @@ use crate::ops::{
     allocation_and_config::{get_constraints, get_usage_allocation, set_defaults, set_endpoint_role},
     attribute_mutate::{add_attribute, adjust_attribute, delete_attribute, modify_attribute, set_attribute},
     create::create, create_key_pair::create_key_pair, decrypt::decrypt,
+    derive_key::derive_key,
     destroy::destroy, encrypt::encrypt, get::get,
     get_attribute_list::get_attribute_list, get_attributes::get_attributes,
     interop::interop,
@@ -314,6 +315,8 @@ pub const HANDLED_OPERATIONS: &[crate::kmip30::Operation] = {
         // K19 — Baseline client-to-server ops (§6.1.26/27/58/59).
         Op::GetUsageAllocation, Op::GetConstraints,
         Op::SetDefaults, Op::SetEndpointRole,
+        // K20 — §6.1.18 Derive Key.
+        Op::DeriveKey,
     ]
 };
 
@@ -386,6 +389,8 @@ fn newly_created_uids(payload: &ResponsePayload) -> Vec<String> {
         ResponsePayload::CreateCredential(r) => vec![r.uid.clone()],
         ResponsePayload::CreateGroup(r) => vec![r.uid.clone()],
         ResponsePayload::CreateUser(r) => vec![r.uid.clone()],
+        // K20 — the derived object is freshly minted (§6.1.18).
+        ResponsePayload::DeriveKey(r) => vec![r.uid.clone()],
         _ => Vec::new(),
     }
 }
@@ -434,6 +439,10 @@ fn substitute_id_placeholder(
         RequestPayload::Mac(r)             => fix(&mut r.uid, &live),
         RequestPayload::MacVerify(r)       => fix(&mut r.uid, &live),
         RequestPayload::GetUsageAllocation(r) => fix(&mut r.uid, &live),
+        // K20 — Derive Key carries a repeatable UID list (§6.1.18).
+        RequestPayload::DeriveKey(r) => {
+            for uid in &mut r.uids { fix(uid, &live); }
+        }
         // Ops that don't take a UID (Create, Locate, Query, …) skip.
         _ => {}
     }
@@ -456,6 +465,9 @@ fn update_id_placeholder(state: &mut BatchState, payload: &ResponsePayload) {
         ResponsePayload::GetAttributes(r) => Some(&r.uid),
         ResponsePayload::GetAttributeList(r) => Some(&r.uid),
         ResponsePayload::Locate(r)      => r.uids.first().map(|s| s.as_str()),
+        // K20 — §6.4: Derive Key is one of the ops that "SHALL set the
+        // ID Placeholder" to the newly derived object's UID.
+        ResponsePayload::DeriveKey(r)   => Some(&r.uid),
         _ => None,
     };
     if let Some(u) = uid { state.id_placeholder = Some(u.to_string()); }
@@ -546,6 +558,9 @@ fn handle_payload(
         }
         RequestPayload::SetEndpointRole(r) => {
             ResponsePayload::SetEndpointRole(set_endpoint_role(deps, r, correlation_id)?)
+        }
+        RequestPayload::DeriveKey(r) => {
+            ResponsePayload::DeriveKey(derive_key(deps, r, correlation_id)?)
         }
     })
 }
@@ -1259,6 +1274,100 @@ mod tests {
             Some(crate::error::ResultReason::FeatureNotSupported.to_wire_value()),
             "role switch must fail with Feature Not Supported (0x08)",
         );
+    }
+
+    /// K20 — Derive Key (§6.1.18) end-to-end over the wire: TTLV
+    /// request (Object Type + UID + Derivation Method HMAC +
+    /// Derivation Parameters + Attributes) → derived object with the
+    /// §6.1.18 link pair, then a follow-up GetAttributes via the §6.4
+    /// ID Placeholder (Derive Key SHALL set it to the new UID).
+    #[test]
+    fn k20_derive_key_via_wire_with_id_placeholder() {
+        use crate::codec::{Tag, TtlvFrame, Value};
+        use crate::kmip30::wire::tags;
+        let d = deps();
+        d.store.put(crate::store::ObjectRecord {
+            uid: "base-1".into(),
+            object_type: ObjectType::SymmetricKey,
+            algorithm: KmipAlgorithm::HmacSha256,
+            cryptographic_length: 32,
+            usage_mask: UsageMask::DERIVE_KEY,
+            state: crate::kmip30::State::Active,
+            pkcs11_cka_id: vec![9],
+            pkcs11_slot: 0,
+            initial_date: time::OffsetDateTime::now_utc(),
+            key_material: Some(b"Jefe".to_vec()),
+            ..crate::store::ObjectRecord::default()
+        }).unwrap();
+
+        let derive_item = TtlvFrame::new(Tag(tags::BatchItem), Value::Structure(vec![
+            TtlvFrame::new(
+                Tag(tags::Operation),
+                Value::Enumeration(crate::kmip30::Operation::DeriveKey.to_wire_value()),
+            ),
+            TtlvFrame::new(Tag(tags::RequestPayload), Value::Structure(vec![
+                TtlvFrame::new(
+                    Tag(tags::ObjectType),
+                    Value::Enumeration(ObjectType::SymmetricKey.to_wire_value()),
+                ),
+                TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString("base-1".into())),
+                TtlvFrame::new(
+                    Tag(tags::DerivationMethod),
+                    Value::Enumeration(crate::kmip30::DerivationMethod::Hmac.to_wire_value()),
+                ),
+                TtlvFrame::new(Tag(tags::DerivationParameters), Value::Structure(vec![
+                    TtlvFrame::new(
+                        Tag(tags::DerivationData),
+                        Value::ByteString(b"what do ya want for nothing?".to_vec()),
+                    ),
+                ])),
+                TtlvFrame::new(Tag(tags::Attributes), Value::Structure(vec![
+                    TtlvFrame::new(
+                        Tag(tags::CryptographicAlgorithm),
+                        Value::Enumeration(KmipAlgorithm::Aes.to_wire_value()),
+                    ),
+                    TtlvFrame::new(Tag(tags::CryptographicLength), Value::Integer(256)),
+                ])),
+            ])),
+        ]));
+        // Second item — GetAttributes via `IDPlaceholder` (enum 0x01):
+        // §6.4 Derive Key sets the placeholder to the derived UID.
+        let ga_item = TtlvFrame::new(Tag(tags::BatchItem), Value::Structure(vec![
+            TtlvFrame::new(
+                Tag(tags::Operation),
+                Value::Enumeration(crate::kmip30::Operation::GetAttributes.to_wire_value()),
+            ),
+            TtlvFrame::new(Tag(tags::RequestPayload), Value::Structure(vec![
+                TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::Enumeration(0x01)),
+            ])),
+        ]));
+
+        let resp = dispatch(&d, k4_decode(vec![], vec![derive_item, ga_item]));
+        assert_eq!(resp.batch_items[0].result_status, ResultStatus::Success,
+                   "{:?}", resp.batch_items[0].result_message);
+        let derived_uid = match &resp.batch_items[0].payload {
+            Some(ResponsePayload::DeriveKey(r)) => r.uid.clone(),
+            other => panic!("expected DeriveKey payload, got {other:?}"),
+        };
+        // RFC 4231 case 2 — HMAC-SHA-256("Jefe", "what do ya want for
+        // nothing?") (PRF from the base key's attributes per §7.13).
+        let rec = d.store.get(&derived_uid).unwrap().unwrap();
+        assert_eq!(
+            hex::encode(rec.key_material.as_deref().unwrap()),
+            "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
+        );
+        // §6.1.18 link pair.
+        assert_eq!(rec.links.get("DerivationBaseObjectLink").map(String::as_str), Some("base-1"));
+        let base = d.store.get("base-1").unwrap().unwrap();
+        assert_eq!(base.links.get("DerivedObjectLink"), Some(&derived_uid));
+        // ID Placeholder resolved to the derived object.
+        assert_eq!(resp.batch_items[1].result_status, ResultStatus::Success);
+        match &resp.batch_items[1].payload {
+            Some(ResponsePayload::GetAttributes(r)) => assert_eq!(r.uid, derived_uid),
+            other => panic!("expected GetAttributes payload, got {other:?}"),
+        }
+        let bytes = crate::kmip30::encode_response_message(&resp);
+        assert_eq!(bytes.len() % 8, 0, "§9.6 alignment");
     }
 
     /// `HANDLED_OPERATIONS` is duplicate-free and every entry routes
