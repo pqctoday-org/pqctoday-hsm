@@ -1337,8 +1337,11 @@ pub struct ExportRequest {
     pub key_format_type: Option<u32>,
     pub key_wrap_type: Option<u32>,
     pub key_compression_type: Option<u32>,
-    // KeyWrappingSpecification (§ - Structure) deferred — no tests
-    // in the corpus invoke it.
+    /// K16 — KMIP 3.0 §6.1.22 `Key Wrapping Specification`: when
+    /// present, the exported key material is returned wrapped under
+    /// the referenced wrapping key, exactly like `Get` (AX-M-2 shape:
+    /// WrappingMethod=Encrypt + BlockCipherMode=NISTKeyWrap / AES-KW).
+    pub key_wrapping_specification: Option<KeyWrappingSpec>,
 }
 
 #[derive(Clone, Debug, PartialEq)]

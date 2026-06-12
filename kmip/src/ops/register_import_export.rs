@@ -560,12 +560,12 @@ pub fn export(
             KmipError::not_extractable(format!("object {} is not Extractable", req.uid)),
         ));
     }
-    // KMIP 3.0 §11 — `Sensitive=true` blocks plaintext export:
-    // `Sensitive` (0x16). ExportRequest carries no
-    // KeyWrappingSpecification (deferred — no corpus transcript wraps
-    // via Export), so Sensitive always fails here; when wrapping lands,
-    // gate this on its absence exactly like Get does.
-    if obj.sensitive == Some(true) {
+    // KMIP 3.0 §11 — `Sensitive=true` blocks only PLAINTEXT export:
+    // `Sensitive` (0x16). K16: with a KeyWrappingSpecification the
+    // material leaves wrapped under the named KEK (same gate as Get;
+    // shared machinery in `helpers::wrap_key_value`). Without one,
+    // Sensitive still fails here (round-1 K7 residual).
+    if obj.sensitive == Some(true) && req.key_wrapping_specification.is_none() {
         return Err(fail_err(
             deps,
             correlation_id,
@@ -623,12 +623,31 @@ pub fn export(
                 obj.object_type,
             )
             .map_err(|e| fail_err(deps, correlation_id, "Export", e))?;
+            // K16 — §6.1.22 Key Wrapping Specification: wrap the
+            // TTLV-encoded KeyValue under the named KEK via the
+            // machinery shared with Get (KEK must be Active with
+            // WrapKey usage; AES-KW per AX-M-2). The response KeyBlock
+            // carries the wrapped bytes + KeyWrappingData, identical
+            // to Get's shape.
+            let (key_value, key_wrapping_data) = match &req.key_wrapping_specification {
+                None => (key_value, None),
+                Some(spec) => {
+                    let wrapped = super::helpers::wrap_key_value(
+                        deps,
+                        "Export",
+                        spec,
+                        &key_value,
+                        correlation_id,
+                    )?;
+                    (wrapped, Some(spec.clone()))
+                }
+            };
             Some(KeyBlock {
                 key_format_type,
                 cryptographic_algorithm: obj.algorithm,
                 cryptographic_length: obj.cryptographic_length,
                 key_value,
-                key_wrapping_data: None,
+                key_wrapping_data,
             })
         }
     };
@@ -923,6 +942,7 @@ mod tests {
             key_format_type: None,
             key_wrap_type: None,
             key_compression_type: None,
+            key_wrapping_specification: None,
         }, "c").unwrap();
         assert_eq!(exp.uid, r.uid);
         assert_eq!(exp.object_type, ObjectType::SymmetricKey);
@@ -953,6 +973,7 @@ mod tests {
             key_format_type: None,
             key_wrap_type: None,
             key_compression_type: None,
+            key_wrapping_specification: None,
         }, "c").unwrap();
         assert!(exp.managed_object.is_none(), "Destroyed objects MUST NOT return key material");
     }
@@ -999,8 +1020,8 @@ mod tests {
 
     #[test]
     fn export_sensitive_fails_0x16() {
-        // ExportRequest has no KeyWrappingSpecification, so plaintext
-        // Export of a Sensitive object always fails (K7 / B-4).
+        // K16 regression: WITHOUT a KeyWrappingSpecification, plaintext
+        // Export of a Sensitive object still fails (round-1 K7 / B-4).
         let d = deps_with();
         let uid = register_aes(&d, Some(true), None);
         let err = export(&d, ExportRequest {
@@ -1008,6 +1029,7 @@ mod tests {
             key_format_type: None,
             key_wrap_type: None,
             key_compression_type: None,
+            key_wrapping_specification: None,
         }, "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::Sensitive);
     }
@@ -1021,6 +1043,7 @@ mod tests {
             key_format_type: None,
             key_wrap_type: None,
             key_compression_type: None,
+            key_wrapping_specification: None,
         }, "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::NotExtractable);
     }
@@ -1034,8 +1057,95 @@ mod tests {
             key_format_type: None,
             key_wrap_type: None,
             key_compression_type: None,
+            key_wrapping_specification: None,
         }, "c").unwrap();
         assert!(exp.managed_object.is_some());
+    }
+
+    // ── K16 — Export with KeyWrappingSpecification ──────────────────
+
+    /// Put a KEK straight into the store (Register would land it
+    /// PreActive; the wrap gate needs explicit state/usage control).
+    fn put_kek(d: &Deps, uid: &str, state: State, usage: UsageMask) {
+        d.store.put(ObjectRecord {
+            uid: uid.into(),
+            object_type: ObjectType::SymmetricKey,
+            algorithm: KmipAlgorithm::Aes,
+            cryptographic_length: 256,
+            usage_mask: usage,
+            state,
+            key_material: Some(vec![0x22; 32]),
+            ..ObjectRecord::default()
+        }).unwrap();
+    }
+
+    fn kws(kek_uid: &str) -> crate::kmip30::KeyWrappingSpec {
+        crate::kmip30::KeyWrappingSpec {
+            wrapping_method: 0x01,
+            encryption_key_uid: kek_uid.into(),
+            cryptographic_parameters: None,
+        }
+    }
+
+    fn export_with_kws(d: &Deps, uid: String, kek_uid: &str) -> Result<ExportResponse> {
+        export(d, ExportRequest {
+            uid,
+            key_format_type: None,
+            key_wrap_type: None,
+            key_compression_type: None,
+            key_wrapping_specification: Some(kws(kek_uid)),
+        }, "c")
+    }
+
+    #[test]
+    fn export_sensitive_with_wrapping_succeeds_wrapped() {
+        // K16 — mirror of Get's AX-M-2 path: a Sensitive object leaves
+        // wrapped (AES-KW over the TTLV-encoded KeyValue) when the
+        // request carries a KeyWrappingSpecification.
+        let d = deps_with();
+        let uid = register_aes(&d, Some(true), None);
+        put_kek(&d, "kek", State::Active, UsageMask::WRAP_KEY);
+        let exp = export_with_kws(&d, uid.clone(), "kek").unwrap();
+        // Export's own response surface is preserved.
+        assert_eq!(exp.uid, uid);
+        assert_eq!(exp.object_type, ObjectType::SymmetricKey);
+        assert!(!exp.attributes.is_empty(), "Export still carries the attribute set");
+        let kb = exp.managed_object.expect("wrapped KeyBlock returned");
+        assert_eq!(kb.key_wrapping_data, Some(kws("kek")));
+        assert_ne!(kb.key_value, vec![0x01; 16], "material must not leave in the clear");
+        // Unwrap with the KEK and verify the TTLV KeyValue round-trips.
+        let plaintext = softhsmrustv3::native::aes_key_unwrap(&[0x22; 32], &kb.key_value).unwrap();
+        assert_eq!(plaintext, crate::kmip30::ttlv_encode_key_value(&[0x01; 16]));
+    }
+
+    #[test]
+    fn export_not_extractable_with_wrapping_still_fails_0x17() {
+        // Extractable=false is unconditional — a KWS does not lift it.
+        let d = deps_with();
+        let uid = register_aes(&d, None, Some(false));
+        put_kek(&d, "kek", State::Active, UsageMask::WRAP_KEY);
+        let err = export_with_kws(&d, uid, "kek").unwrap_err();
+        assert_eq!(err.result_reason(), ResultReason::NotExtractable);
+    }
+
+    #[test]
+    fn export_wrap_kek_not_active_fails_like_get() {
+        // Shared helper ⇒ same KEK lifecycle gate as Get's wrap path.
+        let d = deps_with();
+        let uid = register_aes(&d, Some(true), None);
+        put_kek(&d, "kek", State::PreActive, UsageMask::WRAP_KEY);
+        let err = export_with_kws(&d, uid, "kek").unwrap_err();
+        assert_eq!(err.result_reason(), ResultReason::WrongKeyLifecycleState);
+    }
+
+    #[test]
+    fn export_wrap_kek_lacking_wrapkey_mask_fails_like_get() {
+        // Shared helper ⇒ same KEK usage-mask gate as Get's wrap path.
+        let d = deps_with();
+        let uid = register_aes(&d, Some(true), None);
+        put_kek(&d, "kek", State::Active, UsageMask::ENCRYPT);
+        let err = export_with_kws(&d, uid, "kek").unwrap_err();
+        assert_eq!(err.result_reason(), ResultReason::PermissionDenied);
     }
 
     // ── K8 — KeyFormatType correctness ──────────────────────────────
@@ -1126,6 +1236,7 @@ mod tests {
             key_format_type: None,
             key_wrap_type: None,
             key_compression_type: None,
+            key_wrapping_specification: None,
         }, "c").unwrap();
         let kb = exp.managed_object.unwrap();
         assert_eq!(kb.key_format_type, KeyFormatType::TransparentSymmetricKey);
@@ -1142,6 +1253,7 @@ mod tests {
             key_format_type: Some(0x01),
             key_wrap_type: None,
             key_compression_type: None,
+            key_wrapping_specification: None,
         }, "c").unwrap();
         assert_eq!(exp.managed_object.unwrap().key_format_type, KeyFormatType::Raw);
         // TransparentSymmetricKey → PKCS#8 is not.
@@ -1150,6 +1262,7 @@ mod tests {
             key_format_type: Some(0x04),
             key_wrap_type: None,
             key_compression_type: None,
+            key_wrapping_specification: None,
         }, "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::KeyFormatTypeNotSupported);
     }
