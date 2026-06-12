@@ -142,68 +142,9 @@ pub fn create(deps: &Deps, mut req: CreateRequest, correlation_id: &str) -> Resu
     // Plane-3: real bridge call when a session is wired. K15 — the
     // audit record is emitted after the generate call with its real rv.
     let cka_id_bytes = Uuid::new_v4().as_bytes().to_vec();
-    // K-14 — KMIP §11 `Digest`: SHA-256 over the actual key material,
-    // computed inside the engine boundary at generate time (the hash
-    // leaves the engine, the material doesn't). `None` when no engine
-    // session is wired (unit tests) — GetAttributes then omits Digest.
-    let mut digest_value: Option<Vec<u8>> = None;
-    if let Some(session) = deps.engine_session {
-        let (native_fn, result) = match algo {
-            KmipAlgorithm::Aes => {
-                let bits = key_length.unwrap_or(256);
-                (
-                    "native::generate_aes_key",
-                    softhsmrustv3::native::generate_aes_key(
-                        session,
-                        bits,
-                        &cka_id_bytes,
-                        "kmip-aes",
-                    ),
-                )
-            }
-            KmipAlgorithm::HmacSha256 | KmipAlgorithm::HmacSha384 | KmipAlgorithm::HmacSha512 => {
-                let bits = key_length.unwrap_or(256);
-                (
-                    "native::generate_generic_secret",
-                    softhsmrustv3::native::generate_generic_secret(
-                        session,
-                        bits,
-                        &cka_id_bytes,
-                        "kmip-hmac",
-                    ),
-                )
-            }
-            _ => {
-                return Err(fail_err(
-                    deps,
-                    correlation_id,
-                    "Create",
-                    KmipError::failed(
-                        ResultReason::OperationNotSupported,
-                        format!("Create: {:?} not supported by native API", algo),
-                    ),
-                ));
-            }
-        };
-        super::helpers::emit_pkcs11_result(deps, correlation_id, native_fn, Some(mech), &result);
-        match result {
-            Ok(handle) => {
-                digest_value = softhsmrustv3::native::get_value_digest_sha256(session, handle);
-            }
-            Err(rv) => {
-                return Err(fail_err(
-                    deps,
-                    correlation_id,
-                    "Create",
-                    super::helpers::ck_rv_to_kmip_error(rv, "Create"),
-                ));
-            }
-        }
-    } else {
-        // No engine session — nothing was generated (unit-test store
-        // record only); audit names the soft path honestly.
-        emit_pkcs11(deps, correlation_id, "soft::placeholder_generate_key", Some(mech), 0, "CKR_OK");
-    }
+    let digest_value =
+        engine_generate_symmetric(deps, correlation_id, "Create", algo, key_length, mech, &cka_id_bytes)
+            .map_err(|e| fail_err(deps, correlation_id, "Create", e))?;
 
     // Plane-2: persist. Lift `Name` + date attributes out of the
     // template. KMIP 3.0 Spec §3.x lifecycle FSM means a past
@@ -252,6 +193,75 @@ pub fn create(deps: &Deps, mut req: CreateRequest, correlation_id: &str) -> Resu
         object_type: req.object_type,
         uid,
     })
+}
+
+/// Plane-3 symmetric keygen shared by Create (§6.1.8) and Re-key
+/// (§6.1.51, K21). Generates the key inside the engine when a session
+/// is wired (AES → `native::generate_aes_key`, HMAC →
+/// `native::generate_generic_secret`) and returns the K-14 engine-
+/// computed SHA-256 `Digest` over the fresh `CKA_VALUE`; without a
+/// session it audits the soft placeholder path and returns `None`
+/// (unit-test store record only). K15 — the `Pkcs11Call` audit record
+/// is emitted after the native call with its real rv; `op` names the
+/// calling KMIP operation in the error mapping.
+pub(crate) fn engine_generate_symmetric(
+    deps: &Deps,
+    correlation_id: &str,
+    op: &str,
+    algo: KmipAlgorithm,
+    key_length: Option<u32>,
+    mech: u32,
+    cka_id_bytes: &[u8],
+) -> Result<Option<Vec<u8>>> {
+    let mut digest_value: Option<Vec<u8>> = None;
+    if let Some(session) = deps.engine_session {
+        let (native_fn, result) = match algo {
+            KmipAlgorithm::Aes => {
+                let bits = key_length.unwrap_or(256);
+                (
+                    "native::generate_aes_key",
+                    softhsmrustv3::native::generate_aes_key(
+                        session,
+                        bits,
+                        cka_id_bytes,
+                        "kmip-aes",
+                    ),
+                )
+            }
+            KmipAlgorithm::HmacSha256 | KmipAlgorithm::HmacSha384 | KmipAlgorithm::HmacSha512 => {
+                let bits = key_length.unwrap_or(256);
+                (
+                    "native::generate_generic_secret",
+                    softhsmrustv3::native::generate_generic_secret(
+                        session,
+                        bits,
+                        cka_id_bytes,
+                        "kmip-hmac",
+                    ),
+                )
+            }
+            _ => {
+                return Err(KmipError::failed(
+                    ResultReason::OperationNotSupported,
+                    format!("{op}: {:?} not supported by native API", algo),
+                ));
+            }
+        };
+        super::helpers::emit_pkcs11_result(deps, correlation_id, native_fn, Some(mech), &result);
+        match result {
+            Ok(handle) => {
+                digest_value = softhsmrustv3::native::get_value_digest_sha256(session, handle);
+            }
+            Err(rv) => {
+                return Err(super::helpers::ck_rv_to_kmip_error(rv, op));
+            }
+        }
+    } else {
+        // No engine session — nothing was generated (unit-test store
+        // record only); audit names the soft path honestly.
+        emit_pkcs11(deps, correlation_id, "soft::placeholder_generate_key", Some(mech), 0, "CKR_OK");
+    }
+    Ok(digest_value)
 }
 
 fn extract_template(attrs: &[Attribute]) -> (Option<String>, Option<u32>, Option<UsageMask>) {

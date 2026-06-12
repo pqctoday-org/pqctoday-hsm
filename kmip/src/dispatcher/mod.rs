@@ -44,6 +44,7 @@ use crate::ops::{
     mac_and_hash::{hash, mac, mac_verify},
     query::query,
     register_import_export::{export, import_object, register},
+    rekey::{rekey, rekey_key_pair},
     revoke::revoke,
     rng_and_pkcs11::{pkcs11, rng_retrieve, rng_seed},
     session_and_auth::{create_credential, create_group, create_user, log, login, logout},
@@ -317,6 +318,8 @@ pub const HANDLED_OPERATIONS: &[crate::kmip30::Operation] = {
         Op::SetDefaults, Op::SetEndpointRole,
         // K20 — §6.1.18 Derive Key.
         Op::DeriveKey,
+        // K21 — §6.1.51 Re-key / §6.1.52 Re-key Key Pair.
+        Op::ReKey, Op::ReKeyKeyPair,
     ]
 };
 
@@ -391,6 +394,12 @@ fn newly_created_uids(payload: &ResponsePayload) -> Vec<String> {
         ResponsePayload::CreateUser(r) => vec![r.uid.clone()],
         // K20 — the derived object is freshly minted (§6.1.18).
         ResponsePayload::DeriveKey(r) => vec![r.uid.clone()],
+        // K21 — the replacement objects are freshly minted
+        // (§6.1.51 / §6.1.52); Undo deletes them.
+        ResponsePayload::ReKey(r) => vec![r.uid.clone()],
+        ResponsePayload::ReKeyKeyPair(r) => {
+            vec![r.private_key_uid.clone(), r.public_key_uid.clone()]
+        }
         _ => Vec::new(),
     }
 }
@@ -443,6 +452,9 @@ fn substitute_id_placeholder(
         RequestPayload::DeriveKey(r) => {
             for uid in &mut r.uids { fix(uid, &live); }
         }
+        // K21 — §6.1.51 / §6.1.52 Re-key targets.
+        RequestPayload::ReKey(r)           => fix(&mut r.uid, &live),
+        RequestPayload::ReKeyKeyPair(r)    => fix(&mut r.uid, &live),
         // Ops that don't take a UID (Create, Locate, Query, …) skip.
         _ => {}
     }
@@ -468,6 +480,12 @@ fn update_id_placeholder(state: &mut BatchState, payload: &ResponsePayload) {
         // K20 — §6.4: Derive Key is one of the ops that "SHALL set the
         // ID Placeholder" to the newly derived object's UID.
         ResponsePayload::DeriveKey(r)   => Some(&r.uid),
+        // K21 — §6.4: the replacement UID; for the pair, "the first
+        // value in the response is the Unique Identifier value with
+        // respect to ID Placeholder handling" → the Private Key
+        // Unique Identifier (Table 411 lists it first).
+        ResponsePayload::ReKey(r)        => Some(&r.uid),
+        ResponsePayload::ReKeyKeyPair(r) => Some(&r.private_key_uid),
         _ => None,
     };
     if let Some(u) = uid { state.id_placeholder = Some(u.to_string()); }
@@ -561,6 +579,11 @@ fn handle_payload(
         }
         RequestPayload::DeriveKey(r) => {
             ResponsePayload::DeriveKey(derive_key(deps, r, correlation_id)?)
+        }
+        // K21 — §6.1.51 Re-key / §6.1.52 Re-key Key Pair.
+        RequestPayload::ReKey(r) => ResponsePayload::ReKey(rekey(deps, r, correlation_id)?),
+        RequestPayload::ReKeyKeyPair(r) => {
+            ResponsePayload::ReKeyKeyPair(rekey_key_pair(deps, r, correlation_id)?)
         }
     })
 }
@@ -706,8 +729,10 @@ mod tests {
     #[test]
     fn k3_unsupported_op_fails_item_with_operation_not_supported() {
         let d = deps();
+        // K21 promoted ReKey to a real handler; ObtainLease keeps this
+        // matrix at four advertised-unimplemented ops.
         for op in [
-            crate::kmip30::Operation::ReKey,
+            crate::kmip30::Operation::ObtainLease,
             crate::kmip30::Operation::Certify,
             crate::kmip30::Operation::Cancel,
             crate::kmip30::Operation::DelegatedLogin,
@@ -772,8 +797,8 @@ mod tests {
                     payload: RequestPayload::Query(QueryRequest { functions: vec![] }),
                 },
                 RequestBatchItem {
-                    operation: crate::kmip30::Operation::ReKey,
-                    payload: RequestPayload::Unsupported(crate::kmip30::Operation::ReKey),
+                    operation: crate::kmip30::Operation::ObtainLease,
+                    payload: RequestPayload::Unsupported(crate::kmip30::Operation::ObtainLease),
                 },
                 RequestBatchItem {
                     operation: crate::kmip30::Operation::Query,
@@ -1368,6 +1393,171 @@ mod tests {
         }
         let bytes = crate::kmip30::encode_response_message(&resp);
         assert_eq!(bytes.len() % 8, 0, "§9.6 alignment");
+    }
+
+    /// K21 — Re-key (§6.1.51) end-to-end over the wire: TTLV request
+    /// (UID + Offset Interval + Attributes override) → replacement
+    /// object with the §6.1.51 link pair, then a follow-up
+    /// GetAttributes via the §6.4 ID Placeholder (Re-key SHALL set it
+    /// to the replacement UID). Pins the `Offset` tag decode
+    /// (0x420058, Interval).
+    #[test]
+    fn k21_rekey_via_wire_with_offset_and_id_placeholder() {
+        use crate::codec::{Tag, TtlvFrame, Value};
+        use crate::kmip30::wire::tags;
+        let d = deps();
+        let now = time::OffsetDateTime::now_utc();
+        d.store.put(crate::store::ObjectRecord {
+            uid: "old-aes".into(),
+            object_type: ObjectType::SymmetricKey,
+            algorithm: KmipAlgorithm::Aes,
+            cryptographic_length: 256,
+            usage_mask: UsageMask::ENCRYPT,
+            state: crate::kmip30::State::Active,
+            pkcs11_cka_id: vec![5],
+            pkcs11_slot: 0,
+            initial_date: now - time::Duration::days(2),
+            activation_date: Some(now - time::Duration::days(1)),
+            name: Some("rotating".into()),
+            ..crate::store::ObjectRecord::default()
+        }).unwrap();
+
+        let rekey_item = TtlvFrame::new(Tag(tags::BatchItem), Value::Structure(vec![
+            TtlvFrame::new(
+                Tag(tags::Operation),
+                Value::Enumeration(crate::kmip30::Operation::ReKey.to_wire_value()),
+            ),
+            TtlvFrame::new(Tag(tags::RequestPayload), Value::Structure(vec![
+                TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString("old-aes".into())),
+                // Offset = 0 seconds → AT2 = now → replacement Active,
+                // original Deactivated immediately.
+                TtlvFrame::new(Tag(tags::Offset), Value::Interval(0)),
+                TtlvFrame::new(Tag(tags::Attributes), Value::Structure(vec![
+                    TtlvFrame::new(Tag(tags::CryptographicLength), Value::Integer(128)),
+                ])),
+            ])),
+        ]));
+        // §6.4 — Re-key sets the ID Placeholder to the replacement UID.
+        let ga_item = TtlvFrame::new(Tag(tags::BatchItem), Value::Structure(vec![
+            TtlvFrame::new(
+                Tag(tags::Operation),
+                Value::Enumeration(crate::kmip30::Operation::GetAttributes.to_wire_value()),
+            ),
+            TtlvFrame::new(Tag(tags::RequestPayload), Value::Structure(vec![
+                TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::Enumeration(0x01)),
+            ])),
+        ]));
+
+        let resp = dispatch(&d, k4_decode(vec![], vec![rekey_item, ga_item]));
+        assert_eq!(resp.batch_items[0].result_status, ResultStatus::Success,
+                   "{:?}", resp.batch_items[0].result_message);
+        let new_uid = match &resp.batch_items[0].payload {
+            Some(ResponsePayload::ReKey(r)) => r.uid.clone(),
+            other => panic!("expected ReKey payload, got {other:?}"),
+        };
+        let rec = d.store.get(&new_uid).unwrap().unwrap();
+        // Inheritance + request override: algorithm copied, length
+        // overridden by the request Attributes.
+        assert_eq!(rec.algorithm, KmipAlgorithm::Aes);
+        assert_eq!(rec.cryptographic_length, 128);
+        assert_eq!(rec.name.as_deref(), Some("rotating"), "Name transfers");
+        assert_eq!(rec.state, crate::kmip30::State::Active, "Offset 0 ⇒ AT2 = now");
+        assert_eq!(rec.links.get("ReplacedObjectLink").map(String::as_str), Some("old-aes"));
+        let old = d.store.get("old-aes").unwrap().unwrap();
+        assert_eq!(old.links.get("ReplacementObjectLink"), Some(&new_uid));
+        assert_eq!(old.state, crate::kmip30::State::Deactivated);
+        assert_eq!(old.name, None);
+        // ID Placeholder resolved to the replacement.
+        assert_eq!(resp.batch_items[1].result_status, ResultStatus::Success);
+        match &resp.batch_items[1].payload {
+            Some(ResponsePayload::GetAttributes(r)) => assert_eq!(r.uid, new_uid),
+            other => panic!("expected GetAttributes payload, got {other:?}"),
+        }
+        let bytes = crate::kmip30::encode_response_message(&resp);
+        assert_eq!(bytes.len() % 8, 0, "§9.6 alignment");
+    }
+
+    /// K21 — Re-key Key Pair (§6.1.52) over the wire: response carries
+    /// the two typed UID tags (Table 411) and the §6.4 placeholder is
+    /// the PRIVATE half ("the first value in the response").
+    #[test]
+    fn k21_rekey_key_pair_via_wire_placeholder_is_private_half() {
+        use crate::codec::{Tag, TtlvFrame, Value};
+        use crate::kmip30::wire::tags;
+        let d = deps();
+        let now = time::OffsetDateTime::now_utc();
+        for (uid, ty, link_k, link_v) in [
+            ("kp-priv", ObjectType::PrivateKey, "PublicKeyLink", "kp-pub"),
+            ("kp-pub", ObjectType::PublicKey, "PrivateKeyLink", "kp-priv"),
+        ] {
+            d.store.put(crate::store::ObjectRecord {
+                uid: uid.into(),
+                object_type: ty,
+                algorithm: KmipAlgorithm::MlDsa65,
+                cryptographic_length: 0,
+                usage_mask: UsageMask::SIGN | UsageMask::VERIFY,
+                state: crate::kmip30::State::Active,
+                pkcs11_cka_id: vec![6],
+                pkcs11_slot: 0,
+                initial_date: now,
+                activation_date: Some(now),
+                links: {
+                    let mut m = std::collections::HashMap::new();
+                    m.insert(link_k.to_string(), link_v.to_string());
+                    m
+                },
+                ..crate::store::ObjectRecord::default()
+            }).unwrap();
+        }
+
+        let rekey_item = TtlvFrame::new(Tag(tags::BatchItem), Value::Structure(vec![
+            TtlvFrame::new(
+                Tag(tags::Operation),
+                Value::Enumeration(crate::kmip30::Operation::ReKeyKeyPair.to_wire_value()),
+            ),
+            TtlvFrame::new(Tag(tags::RequestPayload), Value::Structure(vec![
+                TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString("kp-priv".into())),
+            ])),
+        ]));
+        let ga_item = TtlvFrame::new(Tag(tags::BatchItem), Value::Structure(vec![
+            TtlvFrame::new(
+                Tag(tags::Operation),
+                Value::Enumeration(crate::kmip30::Operation::GetAttributes.to_wire_value()),
+            ),
+            TtlvFrame::new(Tag(tags::RequestPayload), Value::Structure(vec![
+                TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::Enumeration(0x01)),
+            ])),
+        ]));
+
+        let resp = dispatch(&d, k4_decode(vec![], vec![rekey_item, ga_item]));
+        assert_eq!(resp.batch_items[0].result_status, ResultStatus::Success,
+                   "{:?}", resp.batch_items[0].result_message);
+        let (new_priv, new_pub) = match &resp.batch_items[0].payload {
+            Some(ResponsePayload::ReKeyKeyPair(r)) => {
+                (r.private_key_uid.clone(), r.public_key_uid.clone())
+            }
+            other => panic!("expected ReKeyKeyPair payload, got {other:?}"),
+        };
+        // §6.4 — placeholder is the private (first) UID.
+        match &resp.batch_items[1].payload {
+            Some(ResponsePayload::GetAttributes(r)) => assert_eq!(r.uid, new_priv),
+            other => panic!("expected GetAttributes payload, got {other:?}"),
+        }
+        // Both halves linked both directions.
+        assert_eq!(
+            d.store.get(&new_priv).unwrap().unwrap().links.get("ReplacedObjectLink").map(String::as_str),
+            Some("kp-priv"),
+        );
+        assert_eq!(
+            d.store.get("kp-pub").unwrap().unwrap().links.get("ReplacementObjectLink"),
+            Some(&new_pub),
+        );
+        // Table 411 — wire response carries the two typed UID tags.
+        let bytes = crate::kmip30::encode_response_message(&resp);
+        assert_eq!(bytes.len() % 8, 0, "§9.6 alignment");
+        let hex = hex::encode(&bytes);
+        assert!(hex.contains("420066"), "PrivateKeyUniqueIdentifier tag on the wire");
+        assert!(hex.contains("42006f"), "PublicKeyUniqueIdentifier tag on the wire");
     }
 
     /// `HANDLED_OPERATIONS` is duplicate-free and every entry routes

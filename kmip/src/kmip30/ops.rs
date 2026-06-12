@@ -1581,6 +1581,71 @@ pub struct DeriveKeyResponse {
     pub uid: String,
 }
 
+// ── Re-key / Re-key Key Pair (K21 — KMIP 3.0 §6.1.51 / §6.1.52) ────────────
+
+/// `Re-key` request payload (KMIP 3.0 §6.1.51 Table 405).
+///
+/// > "This request is used to generate a replacement key for an
+/// > existing symmetric key. It is analogous to the Create operation,
+/// > except that attributes of the replacement key are copied from the
+/// > existing key, with the exception of the attributes listed in
+/// > Re-key Attribute Requirements." (Table 404)
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReKeyRequest {
+    /// `Unique Identifier` — "Determines the existing Symmetric Key
+    /// being re-keyed." REQUIRED per Table 405 (the §6.4
+    /// ID-placeholder enumeration form is also accepted).
+    pub uid: String,
+    /// `Offset` (0x420058, Interval seconds) — "indicating the
+    /// difference between the Initial Date and the Activation Date of
+    /// the replacement key to be created." OPTIONAL per Table 405.
+    pub offset: Option<u32>,
+    /// `Attributes` — "Specifies desired object attributes." OPTIONAL;
+    /// overrides the values inherited from the existing key.
+    pub template_attribute: Vec<Attribute>,
+}
+
+/// §6.1.51 Table 406 — "The Unique Identifier of the newly-created
+/// replacement Symmetric Key."
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReKeyResponse {
+    pub uid: String,
+}
+
+/// `Re-key Key Pair` request payload (KMIP 3.0 §6.1.52 Table 410).
+///
+/// > "This request is used to generate a replacement key pair for an
+/// > existing public/private key pair. It is analogous to the Create
+/// > Key Pair operation, except that attributes of the replacement key
+/// > pair are copied from the existing key pair …"
+///
+/// Attribute baskets mirror Create Key Pair: `Common Attributes` apply
+/// to both halves, `Private Key Attributes` / `Public Key Attributes`
+/// to one half each.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReKeyKeyPairRequest {
+    /// `Unique Identifier` — "Determines the existing Asymmetric key
+    /// pair to be re-keyed." REQUIRED per Table 410. This server
+    /// resolves either half but the canonical handle is the PRIVATE
+    /// key UID (§6.4: the pair response's first UID — the Private Key
+    /// Unique Identifier — is the placeholder value).
+    pub uid: String,
+    /// `Offset` (0x420058, Interval seconds) — same semantics as
+    /// Re-key (Table 408 date computation). OPTIONAL.
+    pub offset: Option<u32>,
+    pub common_attributes: Vec<Attribute>,
+    pub private_key_attributes: Vec<Attribute>,
+    pub public_key_attributes: Vec<Attribute>,
+}
+
+/// §6.1.52 Table 411 — the UIDs of the newly created replacement
+/// Private / Public Key objects (both REQUIRED).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReKeyKeyPairResponse {
+    pub private_key_uid: String,
+    pub public_key_uid: String,
+}
+
 /// `Endpoint Role` Enumeration (KMIP 3.0 §11; codepoints verified
 /// against `kmip-spec-3.0-tags-enums.json` `enums."Endpoint Role"`:
 /// Client = 0x01, Server = 0x02).

@@ -243,6 +243,18 @@ pub(crate) mod tags {
     /// `Derived Object Link` — on the base object, points at the
     /// object derived from it (§6.1.18).
     pub const DerivedObjectLink: u32      = 0x42_0193;
+    /// K21 — §6.1.51/§6.1.52 Re-key link pair. Codepoints verified
+    /// against `kmip-spec-3.0-tags-enums.json`: `Replaced Object
+    /// Link` 0x42019b (on the replacement, points at the existing
+    /// object), `Replacement Object Link` 0x42019c (on the existing
+    /// object, points at the replacement).
+    pub const ReplacedObjectLink: u32     = 0x42_019b;
+    pub const ReplacementObjectLink: u32  = 0x42_019c;
+    /// K21 — `Offset` Interval, §6.1.51 Table 405 / §6.1.52 Table 410:
+    /// "the difference between the Initial Date and the Activation
+    /// Date of the replacement key to be created." Codepoint 0x420058
+    /// verified against `kmip-spec-3.0-tags-enums.json`.
+    pub const Offset: u32                 = 0x42_0058;
     /// KMIP 3.0 §6.1.14 Deactivate request fields.
     pub const DeactivationReason: u32     = 0x42_01b8;
     pub const DeactivationReasonCode: u32 = 0x42_01b9;
@@ -820,6 +832,11 @@ fn decode_request_payload(op: Operation, frame: &TtlvFrame) -> Result<RequestPay
         }
         // K20 — §6.1.18 Derive Key.
         Operation::DeriveKey        => RequestPayload::DeriveKey(decode_derive_key_req(children)?),
+        // K21 — §6.1.51 Re-key / §6.1.52 Re-key Key Pair.
+        Operation::ReKey            => RequestPayload::ReKey(decode_rekey_req(children)?),
+        Operation::ReKeyKeyPair     => {
+            RequestPayload::ReKeyKeyPair(decode_rekey_key_pair_req(children)?)
+        }
         // K3 — recognized KMIP 3.0 Operations without a dispatcher
         // route. The codepoint is a published §11 value, so the
         // message is NOT malformed: decode the batch item with an
@@ -830,8 +847,9 @@ fn decode_request_payload(op: Operation, frame: &TtlvFrame) -> Result<RequestPay
         // never reach here — `Operation::from_wire_value` returns
         // `None` in `decode_request_batch_item` and the message gets
         // the `UnknownEnum` → InvalidMessage treatment.
-        Operation::ReKey
-        | Operation::ReCertify
+        // K21 moved ReKey / ReKeyKeyPair out of this arm into real
+        // §6.1.51 / §6.1.52 decode routes above.
+        Operation::ReCertify
         | Operation::ObtainLease
         | Operation::Validate
         | Operation::Poll
@@ -843,7 +861,6 @@ fn decode_request_payload(op: Operation, frame: &TtlvFrame) -> Result<RequestPay
         | Operation::Process
         | Operation::Certify
         | Operation::Cancel
-        | Operation::ReKeyKeyPair
         | Operation::JoinSplitKey
         | Operation::DelegatedLogin
         | Operation::ReProvision => RequestPayload::Unsupported(op),
@@ -914,6 +931,20 @@ fn response_payload_to_frame(payload: &ResponsePayload) -> TtlvFrame {
         )],
         // K20 — §6.1.18 Table 303: UID-only response payload.
         ResponsePayload::DeriveKey(r)        => encode_uid_only_resp(&r.uid),
+        // K21 — §6.1.51 Table 406: UID-only response payload.
+        ResponsePayload::ReKey(r)            => encode_uid_only_resp(&r.uid),
+        // K21 — §6.1.52 Table 411: distinct typed tags per half, same
+        // shape as Create Key Pair (Private first — §6.4 placeholder).
+        ResponsePayload::ReKeyKeyPair(r)     => vec![
+            TtlvFrame::new(
+                Tag(tags::PrivateKeyUniqueIdentifier),
+                Value::TextString(r.private_key_uid.clone()),
+            ),
+            TtlvFrame::new(
+                Tag(tags::PublicKeyUniqueIdentifier),
+                Value::TextString(r.public_key_uid.clone()),
+            ),
+        ],
     };
     TtlvFrame::new(Tag(tags::ResponsePayload), Value::Structure(children))
 }
@@ -1747,6 +1778,17 @@ fn decode_attribute_v3(frame: &TtlvFrame) -> Result<Option<Attribute>, WireError
                 Attribute::DerivedObjectLink(s.clone())
             } else { return Ok(None); }
         }
+        // K21 — Re-key link pair (§6.1.51 / §6.1.52).
+        tags::ReplacedObjectLink => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::ReplacedObjectLink(s.clone())
+            } else { return Ok(None); }
+        }
+        tags::ReplacementObjectLink => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::ReplacementObjectLink(s.clone())
+            } else { return Ok(None); }
+        }
         tags::ApplicationSpecificInformation => {
             // Structure containing ApplicationNamespace + ApplicationData.
             let mut ns = String::new();
@@ -2402,6 +2444,84 @@ fn decode_derivation_parameters(
         }
     }
     Ok(dp)
+}
+
+/// K21 — `Re-key` request per §6.1.51 Table 405: REQUIRED
+/// `Unique Identifier` (ID-placeholder form accepted), optional
+/// `Offset` (Interval) and `Attributes`. `Protection Storage Masks`
+/// is accepted-and-ignored (this server stores everything in
+/// Software, the only mask it advertises).
+fn decode_rekey_req(children: &[TtlvFrame]) -> Result<ReKeyRequest, WireError> {
+    let uid = required_uid(children)?;
+    let mut offset = None;
+    let mut template_attribute = Vec::new();
+    for c in children {
+        match c.tag.0 {
+            tags::Offset => {
+                if let Value::Interval(n) = c.value { offset = Some(n); }
+            }
+            tags::Attributes => {
+                for child in expect_structure(c, "Attributes")? {
+                    if let Some(a) = decode_attribute_v3(child)? {
+                        template_attribute.push(a);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(ReKeyRequest { uid, offset, template_attribute })
+}
+
+/// K21 — `Re-key Key Pair` request per §6.1.52 Table 410: REQUIRED
+/// `Unique Identifier`, optional `Offset` plus the same three
+/// attribute baskets as Create Key Pair (`Common` / `Private Key` /
+/// `Public Key` Attributes). The per-half Protection Storage Masks
+/// are accepted-and-ignored (Software-only server).
+fn decode_rekey_key_pair_req(
+    children: &[TtlvFrame],
+) -> Result<ReKeyKeyPairRequest, WireError> {
+    let uid = required_uid(children)?;
+    let mut offset = None;
+    let mut common = Vec::new();
+    let mut priv_attrs = Vec::new();
+    let mut pub_attrs = Vec::new();
+    for c in children {
+        match c.tag.0 {
+            tags::Offset => {
+                if let Value::Interval(n) = c.value { offset = Some(n); }
+            }
+            tags::CommonAttributes => {
+                for a in expect_structure(c, "Common Attributes")? {
+                    if let Some(decoded) = decode_attribute_v3(a)? {
+                        common.push(decoded);
+                    }
+                }
+            }
+            tags::PrivateKeyAttributes => {
+                for a in expect_structure(c, "Private Key Attributes")? {
+                    if let Some(decoded) = decode_attribute_v3(a)? {
+                        priv_attrs.push(decoded);
+                    }
+                }
+            }
+            tags::PublicKeyAttributes => {
+                for a in expect_structure(c, "Public Key Attributes")? {
+                    if let Some(decoded) = decode_attribute_v3(a)? {
+                        pub_attrs.push(decoded);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(ReKeyKeyPairRequest {
+        uid,
+        offset,
+        common_attributes: common,
+        private_key_attributes: priv_attrs,
+        public_key_attributes: pub_attrs,
+    })
 }
 
 /// `Set Defaults` request per §6.1.58 Table 428 — optional
@@ -3401,6 +3521,8 @@ fn encode_attribute_v3(a: &Attribute) -> TtlvFrame {
         Attribute::GroupLink(s)                => TtlvFrame::new(Tag(tags::GroupLink),                Value::TextString(s.clone())),
         Attribute::DerivationBaseObjectLink(s) => TtlvFrame::new(Tag(tags::DerivationObjectLink),     Value::TextString(s.clone())),
         Attribute::DerivedObjectLink(s)        => TtlvFrame::new(Tag(tags::DerivedObjectLink),        Value::TextString(s.clone())),
+        Attribute::ReplacedObjectLink(s)       => TtlvFrame::new(Tag(tags::ReplacedObjectLink),       Value::TextString(s.clone())),
+        Attribute::ReplacementObjectLink(s)    => TtlvFrame::new(Tag(tags::ReplacementObjectLink),    Value::TextString(s.clone())),
         Attribute::ApplicationSpecificInformation { namespace, data } => {
             TtlvFrame::new(Tag(tags::ApplicationSpecificInformation), Value::Structure(vec![
                 TtlvFrame::new(Tag(tags::ApplicationNamespace), Value::TextString(namespace.clone())),
@@ -3548,6 +3670,8 @@ fn tag_code_from_name(name: &str) -> Option<u32> {
         "GroupLink"              => tags::GroupLink,
         "DerivationBaseObjectLink" => tags::DerivationObjectLink,
         "DerivedObjectLink"      => tags::DerivedObjectLink,
+        "ReplacedObjectLink"     => tags::ReplacedObjectLink,
+        "ReplacementObjectLink"  => tags::ReplacementObjectLink,
         "ApplicationSpecificInformation" => tags::ApplicationSpecificInformation,
         "Digest"                 => tags::Digest,
         "RandomNumberGenerator"  => tags::RandomNumberGenerator,
@@ -3627,6 +3751,8 @@ fn tag_name_from_code(code: u32) -> &'static str {
         tags::GroupLink              => "Group Link",
         tags::DerivationObjectLink   => "Derivation Object Link",
         tags::DerivedObjectLink      => "Derived Object Link",
+        tags::ReplacedObjectLink     => "Replaced Object Link",
+        tags::ReplacementObjectLink  => "Replacement Object Link",
         tags::ApplicationSpecificInformation => "Application Specific Information",
         _ => "Unknown",
     }

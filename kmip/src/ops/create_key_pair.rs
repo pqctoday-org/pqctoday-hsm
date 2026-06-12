@@ -178,45 +178,16 @@ pub fn create_key_pair(
 
     // Phase 7b: real bridge call when a session is wired. Falls back to
     // placeholder UUIDs for unit tests.
-    // K-14 — KMIP §11 `Digest` per half: SHA-256 over the engine-held
-    // `CKA_VALUE` bytes, computed inside the engine boundary at
-    // generate time (`native::get_value_digest_sha256` — the hash
-    // leaves the engine, the material doesn't; this is how the server
-    // can surface a truthful Digest even for the non-extractable
-    // private half, which AKLC-M-1/2/3 read back via GetAttributes).
-    let mut digest_priv: Option<Vec<u8>> = None;
-    let mut digest_pub: Option<Vec<u8>> = None;
-    let (pkcs11_cka_id_priv, pkcs11_cka_id_pub) = if let Some(session) = deps.engine_session {
-        // Both halves of the keypair share the same CKA_ID so
-        // `find_by_cka_id` recovers both handles for subsequent ops.
-        // K15 — `native_generate_keypair` emits the Pkcs11Call audit
-        // record itself, after the native call, with the real rv and
-        // the actual entry-point name.
-        let cka_id = Uuid::new_v4().as_bytes().to_vec();
-        match native_generate_keypair(deps, correlation_id, session, kmip_algo, &cka_id, mech) {
-            Ok((pub_h, prv_h)) => {
-                digest_pub = softhsmrustv3::native::get_value_digest_sha256(session, pub_h);
-                digest_priv = softhsmrustv3::native::get_value_digest_sha256(session, prv_h);
-                (cka_id.clone(), cka_id)
-            }
-            Err(err) => return fail(deps, correlation_id, op_canonical, err),
-        }
-    } else {
-        // Unit-test fallback — UUIDs as before, no real keys generated;
-        // audit names the soft path honestly (K15).
-        super::helpers::emit_pkcs11(
-            deps,
-            correlation_id,
-            "soft::placeholder_generate_keypair",
-            Some(mech),
-            0,
-            "CKR_OK",
-        );
-        (
-            Uuid::new_v4().as_bytes().to_vec(),
-            Uuid::new_v4().as_bytes().to_vec(),
-        )
+    let generated = match engine_generate_keypair(deps, correlation_id, kmip_algo, mech) {
+        Ok(g) => g,
+        Err(err) => return fail(deps, correlation_id, op_canonical, err),
     };
+    let GeneratedKeyPair {
+        cka_id_priv: pkcs11_cka_id_priv,
+        cka_id_pub: pkcs11_cka_id_pub,
+        digest_priv,
+        digest_pub,
+    } = generated;
 
     // ── Plane 2: allocate UIDs + store records ──────────────────────────
     let priv_uid = format!("urn:pqctoday:obj:{}", Uuid::new_v4());
@@ -337,6 +308,61 @@ pub fn create_key_pair(
         private_key_uid: priv_uid,
         public_key_uid: pub_uid,
     })
+}
+
+/// Output of the Plane-3 keypair generation path shared by Create Key
+/// Pair (§6.1.11) and Re-key Key Pair (§6.1.52, K21).
+pub(crate) struct GeneratedKeyPair {
+    pub cka_id_priv: Vec<u8>,
+    pub cka_id_pub: Vec<u8>,
+    pub digest_priv: Option<Vec<u8>>,
+    pub digest_pub: Option<Vec<u8>>,
+}
+
+/// Plane-3 keypair generation shared by Create Key Pair and Re-key Key
+/// Pair. With an engine session, generates the pair in-engine (both
+/// halves share one fresh CKA_ID so `find_by_cka_id` recovers both
+/// handles for subsequent ops) and returns the K-14 per-half engine-
+/// computed SHA-256 `Digest` over each `CKA_VALUE` — this is how the
+/// server surfaces a truthful Digest even for the non-extractable
+/// private half (AKLC-M-1/2/3 read it back via GetAttributes). Without
+/// a session: placeholder UUID CKA_IDs, audited honestly as
+/// `soft::placeholder_generate_keypair` (K15).
+pub(crate) fn engine_generate_keypair(
+    deps: &Deps,
+    correlation_id: &str,
+    kmip_algo: KmipAlgorithm,
+    mech: u32,
+) -> std::result::Result<GeneratedKeyPair, KmipError> {
+    if let Some(session) = deps.engine_session {
+        // K15 — `native_generate_keypair` emits the Pkcs11Call audit
+        // record itself, after the native call, with the real rv and
+        // the actual entry-point name.
+        let cka_id = Uuid::new_v4().as_bytes().to_vec();
+        let (pub_h, prv_h) =
+            native_generate_keypair(deps, correlation_id, session, kmip_algo, &cka_id, mech)?;
+        Ok(GeneratedKeyPair {
+            cka_id_priv: cka_id.clone(),
+            cka_id_pub: cka_id,
+            digest_priv: softhsmrustv3::native::get_value_digest_sha256(session, prv_h),
+            digest_pub: softhsmrustv3::native::get_value_digest_sha256(session, pub_h),
+        })
+    } else {
+        super::helpers::emit_pkcs11(
+            deps,
+            correlation_id,
+            "soft::placeholder_generate_keypair",
+            Some(mech),
+            0,
+            "CKR_OK",
+        );
+        Ok(GeneratedKeyPair {
+            cka_id_priv: Uuid::new_v4().as_bytes().to_vec(),
+            cka_id_pub: Uuid::new_v4().as_bytes().to_vec(),
+            digest_priv: None,
+            digest_pub: None,
+        })
+    }
 }
 
 /// Pull (algorithm, length, usage) out of the merged template attributes.

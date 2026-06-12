@@ -321,6 +321,9 @@ pub enum RequestPayload {
     SetEndpointRole(super::ops::SetEndpointRoleRequest),
     /// K20 — §6.1.18 Derive Key.
     DeriveKey(super::ops::DeriveKeyRequest),
+    /// K21 — §6.1.51 Re-key / §6.1.52 Re-key Key Pair.
+    ReKey(super::ops::ReKeyRequest),
+    ReKeyKeyPair(super::ops::ReKeyKeyPairRequest),
     /// R7 Phase 1 sentinel — emitted by `decode_request_message` when
     /// a per-BatchItem payload fails to decode but the outer envelope
     /// is intact. The dispatcher recognises it and emits a per-item
@@ -397,6 +400,9 @@ pub enum ResponsePayload {
     /// K20 — §6.1.18 Derive Key.
     DeriveKey(super::ops::DeriveKeyResponse),
     SetEndpointRole(super::ops::SetEndpointRoleResponse),
+    /// K21 — §6.1.51 Re-key / §6.1.52 Re-key Key Pair.
+    ReKey(super::ops::ReKeyResponse),
+    ReKeyKeyPair(super::ops::ReKeyKeyPairResponse),
 }
 
 impl RequestPayload {
@@ -450,6 +456,8 @@ impl RequestPayload {
             Self::SetDefaults(_)      => Operation::SetDefaults,
             Self::SetEndpointRole(_)  => Operation::SetEndpointRole,
             Self::DeriveKey(_)        => Operation::DeriveKey,
+            Self::ReKey(_)            => Operation::ReKey,
+            Self::ReKeyKeyPair(_)     => Operation::ReKeyKeyPair,
             // Echo the original Operation when we were able to read it
             // before the payload decode failed; fall back to `Ping`
             // (whose handler we already special-case in the
@@ -492,6 +500,17 @@ impl RequestPayload {
             // K20 — Derive Key writes a `Derived Object Link` onto
             // every base object (§6.1.18); snapshot them for Undo.
             Self::DeriveKey(r) => r.uids.iter().map(|s| s.as_str()).collect(),
+            // K21 — Re-key mutates the existing object (Replacement
+            // Object Link + Name removal + deactivation, §6.1.51);
+            // snapshot it for §9.5 Undo. The newly-created replacement
+            // UIDs are captured post-hoc via `newly_created_uids`.
+            // Re-key Key Pair limitation (documented): only the
+            // request UID (one half) is snapshotted here — the other
+            // half's UID is resolved inside the handler via the
+            // PublicKeyLink/PrivateKeyLink and cannot be known from
+            // the payload alone.
+            Self::ReKey(r) => vec![r.uid.as_str()],
+            Self::ReKeyKeyPair(r) => vec![r.uid.as_str()],
             // Read-only / output-only — no rollback needed.
             _ => Vec::new(),
         }
