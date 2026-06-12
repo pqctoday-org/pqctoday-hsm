@@ -32,9 +32,11 @@ const CKR = {
   TEMPLATE_INCOMPLETE: 0xd0, TEMPLATE_INCONSISTENT: 0xd1,
   BUFFER_TOO_SMALL: 0x150, CRYPTOKI_NOT_INITIALIZED: 0x190,
   CRYPTOKI_ALREADY_INITIALIZED: 0x191, NO_EVENT: 0x08,
+  UNWRAPPING_KEY_HANDLE_INVALID: 0xf0, WRAPPING_KEY_HANDLE_INVALID: 0x113,
+  RANDOM_SEED_NOT_SUPPORTED: 0x120,
 };
 const CKA = {
-  CLASS: 0x000, TOKEN: 0x001, PRIVATE: 0x002, LABEL: 0x003, VALUE: 0x011,
+  CLASS: 0x000, TOKEN: 0x001, PRIVATE: 0x002, LABEL: 0x003, UNIQUE_ID: 0x004, VALUE: 0x011,
   KEY_TYPE: 0x100, SENSITIVE: 0x103, ENCRYPT: 0x104, DECRYPT: 0x105,
   WRAP: 0x106, UNWRAP: 0x107, SIGN: 0x108, VERIFY: 0x10a, DERIVE: 0x10c,
   EXTRACTABLE: 0x162, LOCAL: 0x163, NEVER_EXTRACTABLE: 0x164, ALWAYS_SENSITIVE: 0x165,
@@ -48,8 +50,11 @@ const CKM = {
   SLH_DSA_KEY_PAIR_GEN: 0x2d, SLH_DSA: 0x2e, SHA256: 0x250, SHA256_HMAC: 0x251,
   SHA256_HMAC_GENERAL: 0x252, GENERIC_SECRET_KEY_GEN: 0x350,
   AES_KEY_GEN: 0x1080, AES_ECB: 0x1081, AES_CBC: 0x1082, AES_CBC_PAD: 0x1085,
-  AES_CTR: 0x1086, AES_GCM: 0x1087, EC_KEY_PAIR_GEN: 0x1040, ECDSA: 0x1041,
-  ECDSA_SHA3_512: 0x104a, CHACHA20_POLY1305: 0x4021,
+  AES_CTR: 0x1086, AES_GCM: 0x1087, AES_KEY_WRAP: 0x2109,
+  EC_KEY_PAIR_GEN: 0x1040, ECDSA: 0x1041,
+  ECDSA_SHA3_512: 0x104a, CHACHA20: 0x1226, CHACHA20_POLY1305: 0x4021,
+  SHA384_RSA_PKCS: 0x41, SHA512_RSA_PKCS: 0x42,
+  SHA384_RSA_PKCS_PSS: 0x44, SHA512_RSA_PKCS_PSS: 0x45,
 };
 const CKF = { RW_SESSION: 2, SERIAL_SESSION: 4 };
 const CKP = { ML_DSA_65: 2, ML_KEM_768: 2 };
@@ -114,6 +119,16 @@ function gcmParams(iv, aad, tagBits) {
   return new Uint8Array(b.buffer);
 }
 
+// CK_TOKEN_INFO (wasm32) — label[32]@0, flags u32@96, ulSessionCount u32@104
+function getTokenInfo(slot = 0) {
+  const p = alloc(160);
+  const rv = w._C_GetTokenInfo(slot, p);
+  const u8 = new Uint8Array(mem().buffer, p, 160);
+  const label = Buffer.from(u8.subarray(0, 32)).toString('latin1').trimEnd();
+  const u32at = (off) => new Uint32Array(mem().buffer, p + off, 1)[0];
+  return { rv, label, flags: u32at(96), sessionCount: u32at(104), rwSessionCount: u32at(112) };
+}
+
 function openSession(flags = CKF.RW_SESSION | CKF.SERIAL_SESSION) {
   const p = alloc(4);
   const rv = w._C_OpenSession(0, flags, 0, 0, p);
@@ -159,6 +174,16 @@ const userPin = new TextEncoder().encode('user-pin-1234');
   const pSo = alloc(soPin.length); writeBytes(pSo, soPin);
   const pLabel = alloc(32); writeBytes(pLabel, label);
   check('C_InitToken → OK', w._C_InitToken(0, pSo, soPin.length, pLabel), CKR.OK);
+}
+
+section('T7 — TokenInfo flags BEFORE C_InitPIN (§5.5, round-2 regression)');
+{
+  // CKF_TOKEN_INITIALIZED (0x400) must be ON after C_InitToken, while
+  // CKF_USER_PIN_INITIALIZED (0x8) must still be OFF: no user PIN exists yet.
+  const ti = getTokenInfo();
+  check('C_GetTokenInfo → OK', ti.rv, CKR.OK);
+  check('CKF_TOKEN_INITIALIZED set after InitToken', ti.flags & 0x400, 0x400);
+  check('CKF_USER_PIN_INITIALIZED still clear before InitPIN', ti.flags & 0x8, 0);
 }
 
 section('R2.2 — session flags (§5.6)');
@@ -603,6 +628,220 @@ section('R3.7/D2 — session-object lifecycle + SessionCancel (§4.4/§5.6)');
 
   // C_CloseAllSessions: bad slot
   check('CloseAllSessions bad slot → SLOT_ID_INVALID', w._C_CloseAllSessions(99), 0x3);
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Round-2 remediation regressions (T4/T5/T6 + F1/F2 spec re-sync).
+// Every check below pins a behavior fixed in compliance round 2 so the JS/wasm
+// ABI can never silently regress to the pre-remediation engine.
+// ═════════════════════════════════════════════════════════════════════════════
+
+section('Round-2 — keygen template + RNG codes (§5.16/§5.14)');
+{
+  // AES keygen without CKA_VALUE_LEN — key length is unknowable → 0xD0.
+  const mech = buildMech(CKM.AES_KEY_GEN);
+  const tpl = buildTpl([{ type: CKA.ENCRYPT, bool: true }]);
+  const hp = alloc(4);
+  check('C_GenerateKey(AES) without CKA_VALUE_LEN → TEMPLATE_INCOMPLETE',
+    w._C_GenerateKey(hS, mech, tpl, 1, hp), CKR.TEMPLATE_INCOMPLETE);
+  // §5.14 — the engine has no seedable DRBG: CKR_RANDOM_SEED_NOT_SUPPORTED.
+  const seed = alloc(8); writeBytes(seed, new Uint8Array(8).fill(0x55));
+  check('C_SeedRandom → RANDOM_SEED_NOT_SUPPORTED',
+    w._C_SeedRandom(hS, seed, 8), CKR.RANDOM_SEED_NOT_SUPPORTED);
+}
+
+section('Round-2 — wrap/unwrap role-specific handle codes (§5.18)');
+{
+  const target = genAes(hS);
+  check('fixture: target AES key → OK', target.rv, CKR.OK);
+  // mechanism must be a valid wrap mechanism — the mechanism gate precedes
+  // the handle gate, so a bogus handle under AES-GCM would report 0x70.
+  const mech = buildMech(CKM.AES_KEY_WRAP);
+  const wl = alloc(4); writeU32(wl, 0);
+  check('C_WrapKey with bogus wrapping key → WRAPPING_KEY_HANDLE_INVALID',
+    w._C_WrapKey(hS, mech, 0x7ffffff0, target.h, 0, wl), CKR.WRAPPING_KEY_HANDLE_INVALID);
+  const tpl = buildTpl([{ type: CKA.CLASS, ulong: CKO.SECRET_KEY }, { type: CKA.KEY_TYPE, ulong: CKK.AES }]);
+  const blob = alloc(48); const hp = alloc(4);
+  check('C_UnwrapKey with bogus unwrapping key → UNWRAPPING_KEY_HANDLE_INVALID',
+    w._C_UnwrapKey(hS, mech, 0x7ffffff0, blob, 48, tpl, 2, hp), CKR.UNWRAPPING_KEY_HANDLE_INVALID);
+}
+
+section('Round-2 — operate-stage session-handle gate (§5.12.1)');
+{
+  const data = alloc(16); writeBytes(data, new Uint8Array(16).fill(1));
+  const outLen = alloc(4); writeU32(outLen, 0);
+  check('C_Sign with bogus session → SESSION_HANDLE_INVALID',
+    w._C_Sign(0xdeadbeef, data, 16, 0, outLen), CKR.SESSION_HANDLE_INVALID);
+  check('C_Encrypt with bogus session → SESSION_HANDLE_INVALID',
+    w._C_Encrypt(0xdeadbeef, data, 16, 0, outLen), CKR.SESSION_HANDLE_INVALID);
+  const found = alloc(4), cnt = alloc(4);
+  check('C_FindObjects with bogus session → SESSION_HANDLE_INVALID',
+    w._C_FindObjects(0xdeadbeef, found, 1, cnt), CKR.SESSION_HANDLE_INVALID);
+}
+
+section('Round-2 — T6 object management (Set/GetAttr, size, copy, §4.4.1/§5.7)');
+{
+  const key = genAes(hS);
+  check('fixture: AES key → OK', key.rv, CKR.OK);
+
+  // C_SetAttributeValue works: set CKA_LABEL and read it back.
+  const labelBytes = new TextEncoder().encode('round2-label');
+  check('C_SetAttributeValue(CKA_LABEL) → OK',
+    w._C_SetAttributeValue(hS, key.h, buildTpl([{ type: CKA.LABEL, bytes: labelBytes }]), 1), CKR.OK);
+  {
+    const out = buildTpl([{ type: CKA.LABEL, bytes: new Uint8Array(labelBytes.length) }]);
+    check('read back CKA_LABEL → OK', w._C_GetAttributeValue(hS, key.h, out, 1), CKR.OK);
+    const vp = readU32(out + 4), vl = readU32(out + 8);
+    const got = Buffer.from(new Uint8Array(mem().buffer, vp, vl)).toString();
+    check('CKA_LABEL round-trips byte-exact', got === 'round2-label' ? 1 : 0, 1);
+  }
+  // Read-only attribute → CKR_ATTRIBUTE_READ_ONLY (0x10).
+  check('C_SetAttributeValue(CKA_CLASS) → ATTRIBUTE_READ_ONLY',
+    w._C_SetAttributeValue(hS, key.h, buildTpl([{ type: CKA.CLASS, ulong: CKO.DATA }]), 1),
+    CKR.ATTRIBUTE_READ_ONLY);
+
+  // C_GetObjectSize returns a positive estimate.
+  const szP = alloc(4); writeU32(szP, 0);
+  check('C_GetObjectSize → OK', w._C_GetObjectSize(hS, key.h, szP), CKR.OK);
+  check('object size > 0', readU32(szP) > 0 ? 1 : 0, 1);
+
+  // CKA_UNIQUE_ID present on a generated object AND readable via the
+  // canonical OASIS attribute type 0x4 (the F1 pkcs11t.h re-sync regression).
+  function readUniqueId(h) {
+    const probe = buildTpl([{ type: 0x4 /* CKA_UNIQUE_ID per pkcs11t.h */ }]);
+    const rv1 = w._C_GetAttributeValue(hS, h, probe, 1);
+    const len = readU32(probe + 8);
+    if (rv1 !== CKR.OK || len === 0 || len === 0xffffffff) return { rv: rv1, id: null };
+    const vp = alloc(len);
+    writeU32(probe + 4, vp); writeU32(probe + 8, len);
+    const rv2 = w._C_GetAttributeValue(hS, h, probe, 1);
+    return { rv: rv2, id: Buffer.from(new Uint8Array(mem().buffer, vp, len)).toString() };
+  }
+  const uid = readUniqueId(key.h);
+  check('CKA_UNIQUE_ID readable via attribute type 0x4 → OK', uid.rv, CKR.OK);
+  check('CKA_UNIQUE_ID non-empty', uid.id && uid.id.length > 0 ? 1 : 0, 1);
+
+  // C_CopyObject round-trip: copy exists, carries a FRESH CKA_UNIQUE_ID.
+  const hCopyP = alloc(4);
+  check('C_CopyObject → OK', w._C_CopyObject(hS, key.h, 0, 0, hCopyP), CKR.OK);
+  const hCopy = readU32(hCopyP);
+  const out = buildTpl([{ type: CKA.CLASS, bytes: new Uint8Array(4) }]);
+  check('copy is a live object → OK', w._C_GetAttributeValue(hS, hCopy, out, 1), CKR.OK);
+  const uidCopy = readUniqueId(hCopy);
+  check('copy CKA_UNIQUE_ID readable → OK', uidCopy.rv, CKR.OK);
+  check('copy received a FRESH CKA_UNIQUE_ID', uidCopy.id !== uid.id ? 1 : 0, 1);
+}
+
+section('Round-2 — dynamic TokenInfo (§5.5, T7)');
+{
+  const ti = getTokenInfo();
+  check('C_GetTokenInfo → OK', ti.rv, CKR.OK);
+  check('label matches C_InitToken value', ti.label === 'conformance' ? 1 : 0, 1);
+  check('CKF_USER_PIN_INITIALIZED set after InitPIN', ti.flags & 0x8, 0x8);
+  check('CKF_TOKEN_INITIALIZED set', ti.flags & 0x400, 0x400);
+  check('ulSessionCount nonzero while a session is open', ti.sessionCount > 0 ? 1 : 0, 1);
+  check('ulRwSessionCount nonzero (hS is R/W)', ti.rwSessionCount > 0 ? 1 : 0, 1);
+}
+
+section('Round-2 — C_SignUpdate/Final ≡ one-shot C_Sign (CKM_SHA256_HMAC)');
+{
+  const tpl = buildTpl([{ type: CKA.CLASS, ulong: CKO.SECRET_KEY },
+    { type: CKA.KEY_TYPE, ulong: CKK.GENERIC_SECRET },
+    { type: CKA.VALUE, bytes: new Uint8Array(32).fill(0x42) },
+    { type: CKA.SIGN, bool: true }]);
+  const hp = alloc(4);
+  check('import HMAC key → OK', w._C_CreateObject(hS, tpl, 4, hp), CKR.OK);
+  const hKey = readU32(hp);
+  const msg = new Uint8Array(24).map((_, i) => i * 7 & 0xff);
+  const msgP = alloc(24); writeBytes(msgP, msg);
+
+  // one-shot
+  check('SignInit (one-shot) → OK', w._C_SignInit(hS, buildMech(CKM.SHA256_HMAC), hKey), CKR.OK);
+  const sl = alloc(4); writeU32(sl, 0);
+  w._C_Sign(hS, msgP, 24, 0, sl);
+  const sig1 = alloc(readU32(sl));
+  check('C_Sign (one-shot) → OK', w._C_Sign(hS, msgP, 24, sig1, sl), CKR.OK);
+  const oneShot = Buffer.from(new Uint8Array(mem().buffer, sig1, readU32(sl)));
+
+  // multipart: 10-byte + 14-byte parts
+  check('SignInit (multipart) → OK', w._C_SignInit(hS, buildMech(CKM.SHA256_HMAC), hKey), CKR.OK);
+  check('C_SignUpdate part 1 → OK', w._C_SignUpdate(hS, msgP, 10), CKR.OK);
+  check('C_SignUpdate part 2 → OK', w._C_SignUpdate(hS, msgP + 10, 14), CKR.OK);
+  const sl2 = alloc(4); writeU32(sl2, 0);
+  w._C_SignFinal(hS, 0, sl2);
+  const sig2 = alloc(readU32(sl2));
+  check('C_SignFinal → OK', w._C_SignFinal(hS, sig2, sl2), CKR.OK);
+  const multi = Buffer.from(new Uint8Array(mem().buffer, sig2, readU32(sl2)));
+  check('multipart HMAC byte-equals one-shot', oneShot.equals(multi) ? 1 : 0, 1);
+}
+
+section('Round-2 — mechanism table contents + FIPS ranges (F2/T8)');
+{
+  const cntP = alloc(4); writeU32(cntP, 0);
+  check('C_GetMechanismList count query → OK', w._C_GetMechanismList(0, 0, cntP), CKR.OK);
+  const n = readU32(cntP);
+  const listP = alloc(4 * n);
+  check('C_GetMechanismList → OK', w._C_GetMechanismList(0, listP, cntP), CKR.OK);
+  const mechs = new Set(Array.from(new Uint32Array(mem().buffer, listP, n)));
+  for (const [name, id] of [
+    ['CKM_SHA384_RSA_PKCS 0x41', CKM.SHA384_RSA_PKCS],
+    ['CKM_SHA512_RSA_PKCS 0x42', CKM.SHA512_RSA_PKCS],
+    ['CKM_SHA384_RSA_PKCS_PSS 0x44', CKM.SHA384_RSA_PKCS_PSS],
+    ['CKM_SHA512_RSA_PKCS_PSS 0x45', CKM.SHA512_RSA_PKCS_PSS],
+    ['CKM_CHACHA20 0x1226', CKM.CHACHA20],
+    ['CKM_CHACHA20_POLY1305 0x4021', CKM.CHACHA20_POLY1305],
+  ]) {
+    check(`mechanism list contains ${name}`, mechs.has(id) ? 1 : 0, 1);
+  }
+  // CKM_ML_KEM min/max are FIPS 203 ek byte sizes (800 = ML-KEM-512 … 1568 = ML-KEM-1024).
+  const info = alloc(12);
+  check('C_GetMechanismInfo(CKM_ML_KEM) → OK', w._C_GetMechanismInfo(0, CKM.ML_KEM, info), CKR.OK);
+  check('ML-KEM ulMinKeySize = 800 (FIPS 203)', readU32(info), 800);
+  check('ML-KEM ulMaxKeySize = 1568 (FIPS 203)', readU32(info + 4), 1568);
+}
+
+section('Round-2 — T5 message API ≡ one-shot GCM (§5.19)');
+{
+  const key = genAes(hS);
+  check('fixture: AES key → OK', key.rv, CKR.OK);
+  const iv = new Uint8Array(12).map((_, i) => i + 1);
+  const pt = new Uint8Array(20).map((_, i) => 0xc0 + i);
+  const ptP = alloc(20); writeBytes(ptP, pt);
+
+  // one-shot reference: C_Encrypt GCM → ciphertext(20) || tag(16)
+  check('C_EncryptInit GCM (reference) → OK',
+    w._C_EncryptInit(hS, buildMech(CKM.AES_GCM, gcmParams(iv, null, 128)), key.h), CKR.OK);
+  const refLenP = alloc(4); writeU32(refLenP, 0);
+  w._C_Encrypt(hS, ptP, 20, 0, refLenP);
+  const refLen = readU32(refLenP);
+  const refP = alloc(refLen);
+  check('C_Encrypt (reference) → OK', w._C_Encrypt(hS, ptP, 20, refP, refLenP), CKR.OK);
+  check('reference output is ct(20)+tag(16)', readU32(refLenP), 36);
+  const reference = Buffer.from(new Uint8Array(mem().buffer, refP, 36));
+
+  // message path: Init → Begin → Next(12) → Next(8, END_OF_MESSAGE) → Final
+  // CK_GCM_MESSAGE_PARAMS (wasm32, 24 B): pIv, ulIvLen, ulIvFixedBits,
+  // ivGenerator (CKG_NO_GENERATE=0), pTag, ulTagBits
+  const ivP = alloc(12); writeBytes(ivP, iv);
+  const tagP = alloc(16);
+  const gmp = alloc(24);
+  new Uint32Array(mem().buffer, gmp, 6).set([ivP, 12, 0, 0, tagP, 128]);
+  check('C_MessageEncryptInit GCM → OK',
+    w._C_MessageEncryptInit(hS, buildMech(CKM.AES_GCM), key.h), CKR.OK);
+  check('C_EncryptMessageBegin → OK', w._C_EncryptMessageBegin(hS, gmp, 24, 0, 0), CKR.OK);
+  const out1 = alloc(12); const ol1 = alloc(4); writeU32(ol1, 12);
+  check('C_EncryptMessageNext part 1 (12 B) → OK',
+    w._C_EncryptMessageNext(hS, gmp, 24, ptP, 12, out1, ol1, 0), CKR.OK);
+  const out2 = alloc(8); const ol2 = alloc(4); writeU32(ol2, 8);
+  check('C_EncryptMessageNext part 2 (8 B, END_OF_MESSAGE) → OK',
+    w._C_EncryptMessageNext(hS, gmp, 24, ptP + 12, 8, out2, ol2, 0x1), CKR.OK);
+  check('C_MessageEncryptFinal → OK', w._C_MessageEncryptFinal(hS), CKR.OK);
+  const streamed = Buffer.concat([
+    Buffer.from(new Uint8Array(mem().buffer, out1, readU32(ol1))),
+    Buffer.from(new Uint8Array(mem().buffer, out2, readU32(ol2))),
+    Buffer.from(new Uint8Array(mem().buffer, tagP, 16)),
+  ]);
+  check('streamed ct+tag byte-equals one-shot GCM', streamed.equals(reference) ? 1 : 0, 1);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
