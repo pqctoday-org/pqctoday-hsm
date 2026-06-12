@@ -588,11 +588,22 @@ pub fn C_Logout(h_session: u32) -> u32 {
     }
 }
 
+/// T6 — PIN length bounds enforced by C_InitPIN / C_SetPIN. These are the
+/// very values C_GetTokenInfo advertises (ulMinPinLen / ulMaxPinLen), so the
+/// token cannot advertise one policy and enforce another. Violations →
+/// CKR_PIN_LEN_RANGE (PKCS#11 v3.2 §5.6).
+pub const PIN_MIN_LEN: u32 = 4;
+pub const PIN_MAX_LEN: u32 = 256;
+
 #[wasm_bindgen(js_name = _C_InitPIN)]
 pub fn C_InitPIN(h_session: u32, p_pin: *mut u8, ul_pin_len: u32) -> u32 {
     require_init!();
     if p_pin.is_null() {
         return CKR_ARGUMENTS_BAD;
+    }
+    // T6 — enforce the advertised PIN bounds (see PIN_MIN_LEN/PIN_MAX_LEN).
+    if !(PIN_MIN_LEN..=PIN_MAX_LEN).contains(&ul_pin_len) {
+        return CKR_PIN_LEN_RANGE;
     }
     let session = match SESSIONS.with(|s| s.borrow().get(&h_session).cloned()) {
         Some(s) => s,
@@ -704,8 +715,8 @@ pub fn C_GetTokenInfo(slot_id: u32, p_info: *mut u8) -> u32 {
         *ptr.add(26) = session_count; // ulSessionCount @104
         *ptr.add(27) = CK_UNAVAILABLE_INFORMATION; // ulMaxRwSessionCount @108
         *ptr.add(28) = rw_session_count; // ulRwSessionCount @112
-        *ptr.add(29) = 256; // ulMaxPinLen @116
-        *ptr.add(30) = 4; // ulMinPinLen @120
+        *ptr.add(29) = PIN_MAX_LEN; // ulMaxPinLen @116 — enforced by C_InitPIN/C_SetPIN
+        *ptr.add(30) = PIN_MIN_LEN; // ulMinPinLen @120 — enforced by C_InitPIN/C_SetPIN
         // The engine does not meter object memory — report
         // CK_UNAVAILABLE_INFORMATION rather than fake numbers (§5.5).
         *ptr.add(31) = CK_UNAVAILABLE_INFORMATION; // ulTotalPublicMemory @124
@@ -7231,53 +7242,323 @@ pub fn C_DecryptVerifyUpdate(
     CKR_FUNCTION_NOT_SUPPORTED
 }
 
+/// PKCS#11 v3.2 §5.6.7 — C_SetPIN rotates the PIN of the user that is
+/// currently logged in (SO session → SO PIN; user session OR public session →
+/// the normal user PIN, per the spec's session-state table). Works only from
+/// a R/W session; the old PIN is verified against the stored PBKDF2 hash and
+/// the new PIN is re-salted and re-hashed (`state::hash_pin`).
 #[wasm_bindgen(js_name = _C_SetPIN)]
 pub fn C_SetPIN(
-    _h_session: u32,
-    _p_old_pin: *mut u8,
-    _ul_old_len: u32,
-    _p_new_pin: *mut u8,
-    _ul_new_len: u32,
+    h_session: u32,
+    p_old_pin: *mut u8,
+    ul_old_len: u32,
+    p_new_pin: *mut u8,
+    ul_new_len: u32,
 ) -> u32 {
     require_init!();
-    CKR_FUNCTION_NOT_SUPPORTED
+    // No protected authentication path on this token — both PINs must be
+    // supplied through the API.
+    nonnull!(p_old_pin, p_new_pin);
+    let session = match SESSIONS.with(|s| s.borrow().get(&h_session).cloned()) {
+        Some(s) => s,
+        None => return CKR_SESSION_HANDLE_INVALID,
+    };
+    if !session.rw_session {
+        // §5.6.7 — C_SetPIN may only be called from a read/write session.
+        return CKR_SESSION_READ_ONLY;
+    }
+    // T6 — the NEW PIN must satisfy the advertised bounds (the old one is
+    // verified against the stored hash, so its length needs no range gate).
+    if !(PIN_MIN_LEN..=PIN_MAX_LEN).contains(&ul_new_len) {
+        return CKR_PIN_LEN_RANGE;
+    }
+    let old_pin = unsafe { std::slice::from_raw_parts(p_old_pin, ul_old_len as usize) };
+    let new_pin = unsafe { std::slice::from_raw_parts(p_new_pin, ul_new_len as usize) };
+    let mut salt = [0u8; 16];
+    if getrandom::getrandom(&mut salt).is_err() {
+        return CKR_GENERAL_ERROR;
+    }
+    TOKEN_STORE.with(|ts| {
+        let mut store = ts.borrow_mut();
+        let token = match store.get_mut(&session.slot_id) {
+            Some(t) => t,
+            None => return CKR_GENERAL_ERROR,
+        };
+        match token.login_state {
+            LoginState::SO => {
+                if hash_pin(old_pin, &token.so_pin_salt) != token.so_pin_hash {
+                    return CKR_PIN_INCORRECT;
+                }
+                token.so_pin_salt = salt;
+                token.so_pin_hash = hash_pin(new_pin, &salt);
+                CKR_OK
+            }
+            // §5.6.7 table — both the user session AND the public session
+            // change the normal user PIN.
+            LoginState::User | LoginState::Public => {
+                let (cur_salt, cur_hash) = match (&token.user_pin_salt, &token.user_pin_hash) {
+                    (Some(s), Some(h)) => (*s, *h),
+                    // No user PIN exists yet (C_InitPIN never ran) — there is
+                    // nothing to verify the old PIN against.
+                    _ => return CKR_USER_PIN_NOT_INITIALIZED,
+                };
+                if hash_pin(old_pin, &cur_salt) != cur_hash {
+                    return CKR_PIN_INCORRECT;
+                }
+                token.user_pin_salt = Some(salt);
+                token.user_pin_hash = Some(hash_pin(new_pin, &salt));
+                CKR_OK
+            }
+        }
+    })
+}
+
+/// Engine core of `C_CopyObject` — clone + template overlay with §4.1.2/§4.1.3
+/// copy semantics. Split from the FFI wrapper so policy is unit-testable on
+/// 64-bit native builds (32-bit CK_ATTRIBUTE templates cannot embed native
+/// value pointers there).
+pub(crate) fn copy_object_from_attrs(
+    h_session: u32,
+    h_object: u32,
+    template: Attributes,
+) -> Result<u32, u32> {
+    let src = match OBJECTS.with(|o| o.borrow().get(&h_object).cloned()) {
+        Some(a) => a,
+        None => return Err(CKR_OBJECT_HANDLE_INVALID),
+    };
+    // §4.4 — invisible (private-while-logged-out or cross-slot) handles are
+    // invalid handles.
+    if !crate::state::can_access_object(h_session, &src) {
+        return Err(CKR_OBJECT_HANDLE_INVALID);
+    }
+    // §4.1.3 — CKA_COPYABLE=FALSE forbids C_CopyObject. Absent attr defaults
+    // TRUE (state::apply_object_defaults stamps it on every allocate path).
+    let copyable = src
+        .get(&CKA_COPYABLE)
+        .map(|v| v.first().copied().unwrap_or(0) != 0)
+        .unwrap_or(true);
+    if !copyable {
+        return Err(CKR_ACTION_PROHIBITED);
+    }
+    // §4.1.2-3 — the copy template may set CKA_TOKEN / CKA_PRIVATE /
+    // CKA_MODIFIABLE (not in the gate's read-only set) but may NOT touch
+    // server-managed attrs or weaken security (CKA_SENSITIVE TRUE→FALSE,
+    // CKA_EXTRACTABLE FALSE→TRUE). Weakening is pinned to
+    // CKR_ATTRIBUTE_READ_ONLY from C_CopyObject's §5.7.2 return list,
+    // through the same gate C_SetAttributeValue uses (single source of
+    // truth: state::attr_mutation_allowed).
+    for (t, v) in &template {
+        attr_mutation_allowed(&src, *t, v)?;
+    }
+    // §5.7.2 — a R/O session cannot produce a token object. The copy's
+    // effective CKA_TOKEN is the template's value, else the source's.
+    let token_attr = template
+        .get(&CKA_TOKEN)
+        .or_else(|| src.get(&CKA_TOKEN))
+        .map(|v| v.first().copied().unwrap_or(0) != 0)
+        .unwrap_or(false);
+    if token_attr && !crate::state::session_is_rw(h_session) {
+        return Err(CKR_SESSION_READ_ONLY);
+    }
+    // Clone the record and overlay the template. Engine-internal owner/slot
+    // tags are dropped so allocate_handle_owned re-stamps them for THIS
+    // session; CKA_UNIQUE_ID is unconditionally regenerated inside
+    // allocate_handle, so the copy never carries the source's identifier.
+    // CKA_ALWAYS_SENSITIVE / CKA_NEVER_EXTRACTABLE carry over unchanged:
+    // weakening was rejected above and strengthening (e.g. SENSITIVE
+    // FALSE→TRUE in the template) cannot rewrite history.
+    let mut new_attrs = src.clone();
+    new_attrs.remove(&CKA_PRIV_OWNER_SESSION);
+    new_attrs.remove(&CKA_PRIV_SLOT_ID);
+    for (t, v) in template {
+        new_attrs.insert(t, v);
+    }
+    let handle = allocate_handle_owned(h_session, new_attrs);
+    if handle == 0 {
+        // NEXT_HANDLE saturated — allocation refused.
+        return Err(CKR_GENERAL_ERROR);
+    }
+    Ok(handle)
 }
 
 #[wasm_bindgen(js_name = _C_CopyObject)]
 pub fn C_CopyObject(
-    _h_session: u32,
-    _h_object: u32,
-    _p_template: *mut u8,
-    _ul_count: u32,
-    _ph_new_object: *mut u32,
+    h_session: u32,
+    h_object: u32,
+    p_template: *mut u8,
+    ul_count: u32,
+    ph_new_object: *mut u32,
 ) -> u32 {
     require_init!();
-    CKR_FUNCTION_NOT_SUPPORTED
+    require_session!(h_session);
+    nonnull!(ph_new_object);
+    if p_template.is_null() && ul_count > 0 {
+        return CKR_ARGUMENTS_BAD;
+    }
+    if ul_count > 65536 {
+        return CKR_ARGUMENTS_BAD;
+    }
+    unsafe {
+        let tmpl_ptr = p_template as *mut u32;
+        let mut template = Attributes::new();
+        for i in 0..ul_count {
+            let attr_type = *tmpl_ptr.add((i * 3) as usize);
+            let val_ptr = *tmpl_ptr.add((i * 3 + 1) as usize) as usize as *const u8;
+            let val_len = *tmpl_ptr.add((i * 3 + 2) as usize);
+            if val_ptr.is_null() && val_len > 0 {
+                return CKR_ATTRIBUTE_VALUE_INVALID;
+            }
+            let mut v = vec![0u8; val_len as usize];
+            if val_len > 0 {
+                std::ptr::copy_nonoverlapping(val_ptr, v.as_mut_ptr(), val_len as usize);
+            }
+            template.insert(attr_type, v);
+        }
+        match copy_object_from_attrs(h_session, h_object, template) {
+            Ok(handle) => {
+                *ph_new_object = handle;
+                CKR_OK
+            }
+            Err(rv) => rv,
+        }
+    }
 }
 
+/// T6 — per-attribute overhead used by `C_GetObjectSize`: one CK_ATTRIBUTE
+/// header on the engine's 32-bit ABI (type + pValue + ulValueLen, 4 B each).
+const OBJECT_SIZE_ATTR_OVERHEAD: u32 = 12;
+
+/// PKCS#11 v3.2 §5.7.4 — "an estimate of the amount of storage the object
+/// occupies". Honest estimate: Σ(stored attribute value lengths) + a fixed
+/// 12-byte per-attribute header ([`OBJECT_SIZE_ATTR_OVERHEAD`]). The
+/// engine-internal CKA_PRIV_* bookkeeping attrs (≥0xFFFF_0000) are excluded —
+/// they are implementation plumbing, not object storage the client created.
 #[wasm_bindgen(js_name = _C_GetObjectSize)]
-pub fn C_GetObjectSize(_h_session: u32, _h_object: u32, _pul_size: *mut u32) -> u32 {
+pub fn C_GetObjectSize(h_session: u32, h_object: u32, pul_size: *mut u32) -> u32 {
     require_init!();
-    CKR_FUNCTION_NOT_SUPPORTED
+    require_session!(h_session);
+    nonnull!(pul_size);
+    let size = OBJECTS.with(|o| {
+        o.borrow().get(&h_object).map(|attrs| {
+            if !crate::state::can_access_object(h_session, attrs) {
+                return None;
+            }
+            Some(
+                attrs
+                    .iter()
+                    .filter(|(t, _)| **t < 0xFFFF_0000)
+                    .map(|(_, v)| v.len() as u32 + OBJECT_SIZE_ATTR_OVERHEAD)
+                    .sum::<u32>(),
+            )
+        })
+    });
+    match size.flatten() {
+        Some(sz) => {
+            unsafe { *pul_size = sz };
+            CKR_OK
+        }
+        None => CKR_OBJECT_HANDLE_INVALID,
+    }
+}
+
+/// Engine core of `C_SetAttributeValue` — two-phase (validate ALL, then
+/// apply) so a template mixing valid and invalid entries leaves the object
+/// untouched. §5.7.6 only promises "may or may not be modified" on failure;
+/// all-or-nothing is the quality bar this engine pins. `updates` preserves
+/// template order (later duplicates win, as they would applying in order).
+pub(crate) fn set_attribute_values_from_list(
+    h_session: u32,
+    h_object: u32,
+    updates: &[(u32, Vec<u8>)],
+) -> u32 {
+    let obj_attrs = match OBJECTS.with(|o| o.borrow().get(&h_object).cloned()) {
+        Some(a) => a,
+        None => return CKR_OBJECT_HANDLE_INVALID,
+    };
+    // §4.4 — invisible (private-while-logged-out or cross-slot) handles are
+    // invalid handles.
+    if !crate::state::can_access_object(h_session, &obj_attrs) {
+        return CKR_OBJECT_HANDLE_INVALID;
+    }
+    // §5.6 — token objects may only be modified from a R/W session (same
+    // gate C_CreateObject applies to creating them).
+    if read_bool_attr(&obj_attrs, CKA_TOKEN) && !crate::state::session_is_rw(h_session) {
+        return CKR_SESSION_READ_ONLY;
+    }
+    // §4.1.3 — CKA_MODIFIABLE=FALSE forbids C_SetAttributeValue entirely.
+    // Absent attr defaults TRUE (apply_object_defaults stamps it).
+    let modifiable = obj_attrs
+        .get(&CKA_MODIFIABLE)
+        .map(|v| v.first().copied().unwrap_or(0) != 0)
+        .unwrap_or(true);
+    if !modifiable {
+        return CKR_ACTION_PROHIBITED;
+    }
+    // Phase 1 — validate EVERY entry against the object's current state
+    // through the shared gate (state::attr_mutation_allowed: read-only set,
+    // one-way CKA_SENSITIVE/CKA_EXTRACTABLE transitions).
+    for (attr_type, value) in updates {
+        if let Err(rv) = crate::state::attr_mutation_allowed(&obj_attrs, *attr_type, value) {
+            return rv;
+        }
+    }
+    // Phase 2 — apply in template order. CKA_ALWAYS_SENSITIVE /
+    // CKA_NEVER_EXTRACTABLE are NOT recomputed: they record creation-time
+    // history and legal one-way flips must not alter them.
+    for (attr_type, value) in updates {
+        if !set_object_attr_bytes(h_object, *attr_type, value.clone()) {
+            return CKR_OBJECT_HANDLE_INVALID; // unreachable: existence checked above
+        }
+    }
+    CKR_OK
 }
 
 #[wasm_bindgen(js_name = _C_SetAttributeValue)]
 pub fn C_SetAttributeValue(
-    _h_session: u32,
-    _h_object: u32,
-    _p_template: *mut u8,
-    _ul_count: u32,
+    h_session: u32,
+    h_object: u32,
+    p_template: *mut u8,
+    ul_count: u32,
 ) -> u32 {
     require_init!();
-    CKR_FUNCTION_NOT_SUPPORTED
+    require_session!(h_session);
+    if p_template.is_null() && ul_count > 0 {
+        return CKR_ARGUMENTS_BAD;
+    }
+    if ul_count > 65536 {
+        return CKR_ARGUMENTS_BAD;
+    }
+    let mut updates: Vec<(u32, Vec<u8>)> = Vec::with_capacity(ul_count as usize);
+    unsafe {
+        let tmpl_ptr = p_template as *mut u32;
+        for i in 0..ul_count {
+            let attr_type = *tmpl_ptr.add((i * 3) as usize);
+            let val_ptr = *tmpl_ptr.add((i * 3 + 1) as usize) as usize as *const u8;
+            let val_len = *tmpl_ptr.add((i * 3 + 2) as usize);
+            if val_ptr.is_null() && val_len > 0 {
+                return CKR_ATTRIBUTE_VALUE_INVALID;
+            }
+            let mut v = vec![0u8; val_len as usize];
+            if val_len > 0 {
+                std::ptr::copy_nonoverlapping(val_ptr, v.as_mut_ptr(), val_len as usize);
+            }
+            updates.push((attr_type, v));
+        }
+    }
+    set_attribute_values_from_list(h_session, h_object, &updates)
 }
 
+// §5.13 — digesting a secret key into an active digest op is optional;
+// CKR_FUNCTION_NOT_SUPPORTED is the spec-legal answer (T6 audit: documented
+// optional-stub gap, same as the operation-state pair below).
 #[wasm_bindgen(js_name = _C_DigestKey)]
 pub fn C_DigestKey(_h_session: u32, _h_key: u32) -> u32 {
     require_init!();
     CKR_FUNCTION_NOT_SUPPORTED
 }
 
+// §5.6 — operation-state serialization is optional; this engine does not
+// provide it (spec-legal CKR_FUNCTION_NOT_SUPPORTED).
 #[wasm_bindgen(js_name = _C_GetOperationState)]
 pub fn C_GetOperationState(
     _h_session: u32,
@@ -7303,8 +7584,10 @@ pub fn C_SetOperationState(
 #[wasm_bindgen(js_name = _C_SeedRandom)]
 pub fn C_SeedRandom(_h_session: u32, _p_seed: *mut u8, _ul_seed_len: u32) -> u32 {
     require_init!();
-    // WASM getrandom is OS-backed; external seeding is not supported
-    CKR_FUNCTION_NOT_SUPPORTED
+    // WASM getrandom is OS-backed; external seeding is not supported. §5.14
+    // assigns this exact condition CKR_RANDOM_SEED_NOT_SUPPORTED (T6 honesty
+    // fix — previously CKR_FUNCTION_NOT_SUPPORTED).
+    CKR_RANDOM_SEED_NOT_SUPPORTED
 }
 
 // ============================================================================
@@ -8918,6 +9201,529 @@ mod attr_integrity_ffi_tests {
         );
         assert_eq!(rv, CKR_OK);
         assert_eq!(wrapped_len2, 24);
+    }
+}
+
+#[cfg(test)]
+mod object_mgmt_ffi_tests {
+    //! T6 — object-management completeness: C_SetAttributeValue modifiability
+    //! matrix (all-or-nothing), C_CopyObject copy semantics, C_GetObjectSize,
+    //! C_SetPIN lifecycle, C_SeedRandom return code.
+    use super::*;
+    use crate::native::test_lock;
+
+    /// High fixed session handles, disjoint from the other ffi test modules
+    /// and the `native::*` allocators.
+    const SESSION_RW: u32 = 0x5436_1001;
+    const SESSION_RO: u32 = 0x5436_1002;
+    const SESSION_SLOT9: u32 = 0x5436_1003;
+
+    fn setup() {
+        crate::state::set_initialized(true);
+        crate::state::ensure_slot(0);
+        SESSIONS.with(|s| {
+            let mut store = s.borrow_mut();
+            store.insert(
+                SESSION_RW,
+                crate::state::SessionState { slot_id: 0, rw_session: true },
+            );
+            store.insert(
+                SESSION_RO,
+                crate::state::SessionState { slot_id: 0, rw_session: false },
+            );
+        });
+    }
+
+    /// Minimal valid AES secret-key import template.
+    fn aes_import_attrs() -> Attributes {
+        let mut attrs = Attributes::new();
+        store_ulong(&mut attrs, CKA_CLASS, CKO_SECRET_KEY);
+        store_ulong(&mut attrs, CKA_KEY_TYPE, CKK_AES);
+        attrs.insert(CKA_VALUE, vec![0x42u8; 16]);
+        attrs
+    }
+
+    fn obj_attr(handle: u32, attr_type: u32) -> Option<Vec<u8>> {
+        OBJECTS.with(|o| o.borrow().get(&handle).and_then(|a| a.get(&attr_type).cloned()))
+    }
+
+    fn obj_bool(handle: u32, attr_type: u32) -> Option<bool> {
+        obj_attr(handle, attr_type).map(|v| !v.is_empty() && v[0] == 0x01)
+    }
+
+    // ── C_SetAttributeValue ──────────────────────────────────────────────
+
+    /// §4.1.3 — client-modifiable attrs (label, id, usage flags) are settable.
+    #[test]
+    fn set_attr_modifiable_attrs_accepted() {
+        let _guard = test_lock::acquire();
+        setup();
+        let h = create_object_from_attrs(SESSION_RW, aes_import_attrs()).unwrap();
+        let updates: Vec<(u32, Vec<u8>)> = vec![
+            (crate::native::keygen::CKA_LABEL, b"t6-label".to_vec()),
+            (crate::native::keygen::CKA_ID, b"t6-id".to_vec()),
+            (CKA_SIGN, vec![0x01]),
+            (CKA_VERIFY, vec![0x01]),
+            (CKA_ENCRYPT, vec![0x01]),
+            (CKA_DECRYPT, vec![0x00]),
+            (CKA_WRAP, vec![0x01]),
+            (CKA_UNWRAP, vec![0x01]),
+            (CKA_DERIVE, vec![0x01]),
+            (CKA_ENCAPSULATE, vec![0x01]),
+            (CKA_DECAPSULATE, vec![0x01]),
+        ];
+        assert_eq!(set_attribute_values_from_list(SESSION_RW, h, &updates), CKR_OK);
+        assert_eq!(obj_attr(h, crate::native::keygen::CKA_LABEL).unwrap(), b"t6-label");
+        assert_eq!(obj_attr(h, crate::native::keygen::CKA_ID).unwrap(), b"t6-id");
+        assert_eq!(obj_bool(h, CKA_SIGN), Some(true));
+        assert_eq!(obj_bool(h, CKA_DECRYPT), Some(false));
+        assert_eq!(obj_bool(h, CKA_ENCAPSULATE), Some(true));
+    }
+
+    /// §4.1.3 read-only loop — every server-managed attr is refused with
+    /// CKR_ATTRIBUTE_READ_ONLY and the object stays untouched.
+    #[test]
+    fn set_attr_read_only_matrix() {
+        let _guard = test_lock::acquire();
+        setup();
+        let h = create_object_from_attrs(SESSION_RW, aes_import_attrs()).unwrap();
+        let before = OBJECTS.with(|o| o.borrow().get(&h).cloned()).unwrap();
+        for ro in [
+            CKA_CLASS,
+            CKA_KEY_TYPE,
+            CKA_VALUE,
+            CKA_UNIQUE_ID,
+            CKA_LOCAL,
+            CKA_KEY_GEN_MECHANISM,
+            CKA_ALWAYS_SENSITIVE,
+            CKA_NEVER_EXTRACTABLE,
+            CKA_TRUSTED,
+            CKA_SEED,
+            CKA_PARAMETER_SET,
+            CKA_CHECK_VALUE,
+        ] {
+            let updates = vec![(ro, vec![0x01, 0x02, 0x03, 0x04])];
+            assert_eq!(
+                set_attribute_values_from_list(SESSION_RW, h, &updates),
+                CKR_ATTRIBUTE_READ_ONLY,
+                "attr 0x{ro:x} must be read-only"
+            );
+        }
+        let after = OBJECTS.with(|o| o.borrow().get(&h).cloned()).unwrap();
+        assert_eq!(before, after, "rejected sets must not mutate the object");
+    }
+
+    /// §4.1.1 Table 12 one-way transitions: SENSITIVE FALSE→TRUE ok (history
+    /// attrs untouched), TRUE→FALSE refused; EXTRACTABLE TRUE→FALSE ok,
+    /// FALSE→TRUE refused.
+    #[test]
+    fn set_attr_one_way_transitions() {
+        let _guard = test_lock::acquire();
+        setup();
+        let mut attrs = aes_import_attrs();
+        store_bool(&mut attrs, CKA_SENSITIVE, false);
+        store_bool(&mut attrs, CKA_EXTRACTABLE, true);
+        let h = create_object_from_attrs(SESSION_RW, attrs).unwrap();
+
+        // FALSE→TRUE: legal; ALWAYS_SENSITIVE (history) must NOT change.
+        let rv = set_attribute_values_from_list(SESSION_RW, h, &[(CKA_SENSITIVE, vec![0x01])]);
+        assert_eq!(rv, CKR_OK);
+        assert_eq!(obj_bool(h, CKA_SENSITIVE), Some(true));
+        assert_eq!(obj_bool(h, CKA_ALWAYS_SENSITIVE), Some(false), "history attr untouched");
+
+        // TRUE→FALSE: refused.
+        let rv = set_attribute_values_from_list(SESSION_RW, h, &[(CKA_SENSITIVE, vec![0x00])]);
+        assert_eq!(rv, CKR_ATTRIBUTE_READ_ONLY);
+        assert_eq!(obj_bool(h, CKA_SENSITIVE), Some(true));
+
+        // EXTRACTABLE TRUE→FALSE: legal; NEVER_EXTRACTABLE history untouched.
+        let rv = set_attribute_values_from_list(SESSION_RW, h, &[(CKA_EXTRACTABLE, vec![0x00])]);
+        assert_eq!(rv, CKR_OK);
+        assert_eq!(obj_bool(h, CKA_EXTRACTABLE), Some(false));
+        assert_eq!(obj_bool(h, CKA_NEVER_EXTRACTABLE), Some(false), "history attr untouched");
+
+        // FALSE→TRUE: refused.
+        let rv = set_attribute_values_from_list(SESSION_RW, h, &[(CKA_EXTRACTABLE, vec![0x01])]);
+        assert_eq!(rv, CKR_ATTRIBUTE_READ_ONLY);
+        assert_eq!(obj_bool(h, CKA_EXTRACTABLE), Some(false));
+    }
+
+    /// §5.7.6 quality bar — a template mixing a valid set with an invalid one
+    /// must leave the object completely unmodified (all-or-nothing).
+    #[test]
+    fn set_attr_all_or_nothing_on_mixed_template() {
+        let _guard = test_lock::acquire();
+        setup();
+        let h = create_object_from_attrs(SESSION_RW, aes_import_attrs()).unwrap();
+        let updates: Vec<(u32, Vec<u8>)> = vec![
+            (crate::native::keygen::CKA_LABEL, b"should-not-stick".to_vec()),
+            (CKA_CLASS, CKO_PUBLIC_KEY.to_le_bytes().to_vec()), // read-only
+        ];
+        assert_eq!(
+            set_attribute_values_from_list(SESSION_RW, h, &updates),
+            CKR_ATTRIBUTE_READ_ONLY
+        );
+        assert_eq!(
+            obj_attr(h, crate::native::keygen::CKA_LABEL),
+            None,
+            "valid entry of a failed template must not be applied"
+        );
+    }
+
+    /// §4.1.3 — CKA_MODIFIABLE=FALSE → CKR_ACTION_PROHIBITED.
+    #[test]
+    fn set_attr_unmodifiable_object_prohibited() {
+        let _guard = test_lock::acquire();
+        setup();
+        let mut attrs = aes_import_attrs();
+        store_bool(&mut attrs, CKA_MODIFIABLE, false);
+        let h = create_object_from_attrs(SESSION_RW, attrs).unwrap();
+        let updates = vec![(crate::native::keygen::CKA_LABEL, b"x".to_vec())];
+        assert_eq!(
+            set_attribute_values_from_list(SESSION_RW, h, &updates),
+            CKR_ACTION_PROHIBITED
+        );
+    }
+
+    /// §5.6 — modifying a token object from a R/O session → CKR_SESSION_READ_ONLY;
+    /// session objects stay modifiable from R/O sessions.
+    #[test]
+    fn set_attr_token_object_needs_rw_session() {
+        let _guard = test_lock::acquire();
+        setup();
+        let mut attrs = aes_import_attrs();
+        store_bool(&mut attrs, CKA_TOKEN, true);
+        let h_token = create_object_from_attrs(SESSION_RW, attrs).unwrap();
+        let updates = vec![(crate::native::keygen::CKA_LABEL, b"x".to_vec())];
+        assert_eq!(
+            set_attribute_values_from_list(SESSION_RO, h_token, &updates),
+            CKR_SESSION_READ_ONLY
+        );
+        // Session object: fine from the R/O session.
+        let h_sess = create_object_from_attrs(SESSION_RO, aes_import_attrs()).unwrap();
+        assert_eq!(set_attribute_values_from_list(SESSION_RO, h_sess, &updates), CKR_OK);
+    }
+
+    /// T3 — cross-slot handles are invalid for mutation too.
+    #[test]
+    fn set_attr_cross_slot_handle_invalid() {
+        let _guard = test_lock::acquire();
+        setup();
+        crate::state::ensure_slot(9);
+        SESSIONS.with(|s| {
+            s.borrow_mut().insert(
+                SESSION_SLOT9,
+                crate::state::SessionState { slot_id: 9, rw_session: true },
+            );
+        });
+        let h = create_object_from_attrs(SESSION_RW, aes_import_attrs()).unwrap();
+        let updates = vec![(crate::native::keygen::CKA_LABEL, b"x".to_vec())];
+        assert_eq!(
+            set_attribute_values_from_list(SESSION_SLOT9, h, &updates),
+            CKR_OBJECT_HANDLE_INVALID
+        );
+    }
+
+    // ── C_CopyObject ─────────────────────────────────────────────────────
+
+    /// Basic clone: same attributes, fresh handle, fresh CKA_UNIQUE_ID.
+    #[test]
+    fn copy_object_clones_with_fresh_identity() {
+        let _guard = test_lock::acquire();
+        setup();
+        let mut attrs = aes_import_attrs();
+        attrs.insert(crate::native::keygen::CKA_LABEL, b"orig".to_vec());
+        let h_src = create_object_from_attrs(SESSION_RW, attrs).unwrap();
+        let h_copy = copy_object_from_attrs(SESSION_RW, h_src, Attributes::new()).unwrap();
+        assert_ne!(h_src, h_copy, "fresh handle");
+        // Attribute equality, modulo the server-regenerated identity.
+        assert_eq!(obj_attr(h_copy, CKA_VALUE), obj_attr(h_src, CKA_VALUE));
+        assert_eq!(
+            obj_attr(h_copy, crate::native::keygen::CKA_LABEL).unwrap(),
+            b"orig"
+        );
+        let uid_src = obj_attr(h_src, CKA_UNIQUE_ID).unwrap();
+        let uid_copy = obj_attr(h_copy, CKA_UNIQUE_ID).unwrap();
+        assert!(uid_copy.starts_with(b"shr3-"));
+        assert_ne!(uid_src, uid_copy, "copy must not carry the source's CKA_UNIQUE_ID");
+    }
+
+    /// §4.1.2-3 — the copy template may strengthen security but never weaken
+    /// it; history attrs carry over unchanged.
+    #[test]
+    fn copy_template_strengthen_ok_weaken_rejected() {
+        let _guard = test_lock::acquire();
+        setup();
+        // Source: non-sensitive, extractable.
+        let mut attrs = aes_import_attrs();
+        store_bool(&mut attrs, CKA_SENSITIVE, false);
+        store_bool(&mut attrs, CKA_EXTRACTABLE, true);
+        let h_weak = create_object_from_attrs(SESSION_RW, attrs).unwrap();
+
+        // Strengthening: SENSITIVE FALSE→TRUE allowed; history stays FALSE.
+        let mut tmpl = Attributes::new();
+        store_bool(&mut tmpl, CKA_SENSITIVE, true);
+        let h_copy = copy_object_from_attrs(SESSION_RW, h_weak, tmpl).unwrap();
+        assert_eq!(obj_bool(h_copy, CKA_SENSITIVE), Some(true));
+        assert_eq!(
+            obj_bool(h_copy, CKA_ALWAYS_SENSITIVE),
+            Some(false),
+            "copying cannot improve history"
+        );
+
+        // Weakening: source SENSITIVE=TRUE, template FALSE → refused.
+        let mut attrs = aes_import_attrs();
+        store_bool(&mut attrs, CKA_SENSITIVE, true);
+        store_bool(&mut attrs, CKA_EXTRACTABLE, false);
+        let h_strong = create_object_from_attrs(SESSION_RW, attrs).unwrap();
+        let mut tmpl = Attributes::new();
+        store_bool(&mut tmpl, CKA_SENSITIVE, false);
+        assert_eq!(
+            copy_object_from_attrs(SESSION_RW, h_strong, tmpl).unwrap_err(),
+            CKR_ATTRIBUTE_READ_ONLY
+        );
+        // Weakening: EXTRACTABLE FALSE→TRUE → refused.
+        let mut tmpl = Attributes::new();
+        store_bool(&mut tmpl, CKA_EXTRACTABLE, true);
+        assert_eq!(
+            copy_object_from_attrs(SESSION_RW, h_strong, tmpl).unwrap_err(),
+            CKR_ATTRIBUTE_READ_ONLY
+        );
+        // Server-managed attrs equally refused in a copy template.
+        let mut tmpl = Attributes::new();
+        tmpl.insert(CKA_UNIQUE_ID, b"forged".to_vec());
+        assert_eq!(
+            copy_object_from_attrs(SESSION_RW, h_strong, tmpl).unwrap_err(),
+            CKR_ATTRIBUTE_READ_ONLY
+        );
+    }
+
+    /// §4.1.3 — CKA_COPYABLE=FALSE → CKR_ACTION_PROHIBITED.
+    #[test]
+    fn copy_uncopyable_object_prohibited() {
+        let _guard = test_lock::acquire();
+        setup();
+        let mut attrs = aes_import_attrs();
+        store_bool(&mut attrs, CKA_COPYABLE, false);
+        let h = create_object_from_attrs(SESSION_RW, attrs).unwrap();
+        assert_eq!(
+            copy_object_from_attrs(SESSION_RW, h, Attributes::new()).unwrap_err(),
+            CKR_ACTION_PROHIBITED
+        );
+    }
+
+    /// §5.7.2 — a R/O session cannot produce a token-object copy; flipping
+    /// CKA_TOKEN to FALSE in the template makes the copy legal again.
+    #[test]
+    fn copy_token_object_needs_rw_session() {
+        let _guard = test_lock::acquire();
+        setup();
+        let mut attrs = aes_import_attrs();
+        store_bool(&mut attrs, CKA_TOKEN, true);
+        let h = create_object_from_attrs(SESSION_RW, attrs).unwrap();
+        assert_eq!(
+            copy_object_from_attrs(SESSION_RO, h, Attributes::new()).unwrap_err(),
+            CKR_SESSION_READ_ONLY
+        );
+        let mut tmpl = Attributes::new();
+        store_bool(&mut tmpl, CKA_TOKEN, false);
+        let h_copy = copy_object_from_attrs(SESSION_RO, h, tmpl).unwrap();
+        assert_eq!(obj_bool(h_copy, CKA_TOKEN), Some(false));
+    }
+
+    /// T3 — copying a foreign slot's object: handle invalid.
+    #[test]
+    fn copy_cross_slot_handle_invalid() {
+        let _guard = test_lock::acquire();
+        setup();
+        crate::state::ensure_slot(9);
+        SESSIONS.with(|s| {
+            s.borrow_mut().insert(
+                SESSION_SLOT9,
+                crate::state::SessionState { slot_id: 9, rw_session: true },
+            );
+        });
+        let h = create_object_from_attrs(SESSION_RW, aes_import_attrs()).unwrap();
+        assert_eq!(
+            copy_object_from_attrs(SESSION_SLOT9, h, Attributes::new()).unwrap_err(),
+            CKR_OBJECT_HANDLE_INVALID
+        );
+    }
+
+    // ── C_GetObjectSize ──────────────────────────────────────────────────
+
+    /// Size is > 0 and grows with attribute payload (label added).
+    #[test]
+    fn get_object_size_sane_and_monotonic() {
+        let _guard = test_lock::acquire();
+        setup();
+        let h = create_object_from_attrs(SESSION_RW, aes_import_attrs()).unwrap();
+        let mut size1: u32 = 0;
+        assert_eq!(C_GetObjectSize(SESSION_RW, h, &mut size1), CKR_OK);
+        assert!(size1 > 0, "estimate must be non-zero");
+
+        let updates = vec![(crate::native::keygen::CKA_LABEL, vec![b'L'; 100])];
+        assert_eq!(set_attribute_values_from_list(SESSION_RW, h, &updates), CKR_OK);
+        let mut size2: u32 = 0;
+        assert_eq!(C_GetObjectSize(SESSION_RW, h, &mut size2), CKR_OK);
+        assert!(
+            size2 >= size1 + 100,
+            "size must grow with the 100-byte label (was {size1}, now {size2})"
+        );
+
+        // Unknown handle → CKR_OBJECT_HANDLE_INVALID; NULL out-param → ARGUMENTS_BAD.
+        let mut sz: u32 = 0;
+        assert_eq!(C_GetObjectSize(SESSION_RW, 0xDEAD_BEEF, &mut sz), CKR_OBJECT_HANDLE_INVALID);
+        assert_eq!(C_GetObjectSize(SESSION_RW, h, std::ptr::null_mut()), CKR_ARGUMENTS_BAD);
+    }
+
+    // ── C_SetPIN ─────────────────────────────────────────────────────────
+
+    const PIN_SLOT: u32 = 0x77;
+    const PIN_SESSION_RW: u32 = 0x5436_2001;
+    const PIN_SESSION_RO: u32 = 0x5436_2002;
+
+    fn pin_call(
+        session: u32,
+        old: &str,
+        new: &str,
+    ) -> u32 {
+        let mut old_b = old.as_bytes().to_vec();
+        let mut new_b = new.as_bytes().to_vec();
+        C_SetPIN(
+            session,
+            old_b.as_mut_ptr(),
+            old_b.len() as u32,
+            new_b.as_mut_ptr(),
+            new_b.len() as u32,
+        )
+    }
+
+    fn login(session: u32, user_type: u32, pin: &str) -> u32 {
+        let mut pin_b = pin.as_bytes().to_vec();
+        C_Login(session, user_type, pin_b.as_mut_ptr(), pin_b.len() as u32)
+    }
+
+    /// Full lifecycle on a dedicated slot: init token → SO PIN rotate →
+    /// InitPIN → user PIN rotate → old PINs refused → len-range → R/O
+    /// session → uninitialized-user-PIN case.
+    #[test]
+    fn set_pin_lifecycle() {
+        let _guard = test_lock::acquire();
+        crate::state::set_initialized(true);
+        crate::state::ensure_slot(PIN_SLOT);
+        // Fresh token (C_InitToken refuses while sessions are open on the slot).
+        SESSIONS.with(|s| {
+            s.borrow_mut().retain(|_, ss| ss.slot_id != PIN_SLOT);
+        });
+        let mut so_pin = b"so-pin-77".to_vec();
+        let mut label = b"t6-setpin".to_vec();
+        label.resize(32, b' ');
+        assert_eq!(
+            C_InitToken(PIN_SLOT, so_pin.as_mut_ptr(), so_pin.len() as u32, label.as_mut_ptr()),
+            CKR_OK
+        );
+        SESSIONS.with(|s| {
+            let mut store = s.borrow_mut();
+            store.insert(
+                PIN_SESSION_RW,
+                crate::state::SessionState { slot_id: PIN_SLOT, rw_session: true },
+            );
+            store.insert(
+                PIN_SESSION_RO,
+                crate::state::SessionState { slot_id: PIN_SLOT, rw_session: false },
+            );
+        });
+
+        // Public session, user PIN never initialized → CKR_USER_PIN_NOT_INITIALIZED.
+        assert_eq!(pin_call(PIN_SESSION_RW, "anything", "new-pin-1"), CKR_USER_PIN_NOT_INITIALIZED);
+
+        // R/O session refused outright (checked before PIN verification).
+        assert_eq!(pin_call(PIN_SESSION_RO, "so-pin-77", "so-pin-88"), CKR_SESSION_READ_ONLY);
+        // Drop the R/O session so CKU_SO login is not blocked by
+        // CKR_SESSION_READ_ONLY_EXISTS (§5.6 SO-login exclusivity).
+        SESSIONS.with(|s| {
+            s.borrow_mut().remove(&PIN_SESSION_RO);
+        });
+
+        // SO session: rotate the SO PIN.
+        assert_eq!(login(PIN_SESSION_RW, CKU_SO, "so-pin-77"), CKR_OK);
+        // Wrong old PIN.
+        assert_eq!(pin_call(PIN_SESSION_RW, "wrong-old", "so-pin-88"), CKR_PIN_INCORRECT);
+        // New PIN out of the advertised bounds.
+        assert_eq!(pin_call(PIN_SESSION_RW, "so-pin-77", "ab"), CKR_PIN_LEN_RANGE);
+        assert_eq!(
+            pin_call(PIN_SESSION_RW, "so-pin-77", &"x".repeat(257)),
+            CKR_PIN_LEN_RANGE
+        );
+        // Legal rotation.
+        assert_eq!(pin_call(PIN_SESSION_RW, "so-pin-77", "so-pin-88"), CKR_OK);
+        // Set the user PIN while SO, then verify rotation as the user.
+        let mut user_pin = b"user-pin-1".to_vec();
+        assert_eq!(
+            C_InitPIN(PIN_SESSION_RW, user_pin.as_mut_ptr(), user_pin.len() as u32),
+            CKR_OK
+        );
+        assert_eq!(C_Logout(PIN_SESSION_RW), CKR_OK);
+        // Old SO PIN no longer works; the new one does.
+        assert_eq!(login(PIN_SESSION_RW, CKU_SO, "so-pin-77"), CKR_PIN_INCORRECT);
+        assert_eq!(login(PIN_SESSION_RW, CKU_SO, "so-pin-88"), CKR_OK);
+        assert_eq!(C_Logout(PIN_SESSION_RW), CKR_OK);
+
+        // User session: rotate the user PIN.
+        assert_eq!(login(PIN_SESSION_RW, CKU_USER, "user-pin-1"), CKR_OK);
+        assert_eq!(pin_call(PIN_SESSION_RW, "user-pin-1", "user-pin-2"), CKR_OK);
+        assert_eq!(C_Logout(PIN_SESSION_RW), CKR_OK);
+        assert_eq!(login(PIN_SESSION_RW, CKU_USER, "user-pin-1"), CKR_PIN_INCORRECT);
+        assert_eq!(login(PIN_SESSION_RW, CKU_USER, "user-pin-2"), CKR_OK);
+        assert_eq!(C_Logout(PIN_SESSION_RW), CKR_OK);
+
+        // §5.6.7 table — a PUBLIC R/W session also changes the user PIN.
+        assert_eq!(pin_call(PIN_SESSION_RW, "user-pin-2", "user-pin-3"), CKR_OK);
+        assert_eq!(login(PIN_SESSION_RW, CKU_USER, "user-pin-3"), CKR_OK);
+        assert_eq!(C_Logout(PIN_SESSION_RW), CKR_OK);
+
+        // NULL PINs → CKR_ARGUMENTS_BAD; unknown session → handle invalid.
+        assert_eq!(
+            C_SetPIN(PIN_SESSION_RW, std::ptr::null_mut(), 0, std::ptr::null_mut(), 0),
+            CKR_ARGUMENTS_BAD
+        );
+        assert_eq!(pin_call(0xBAD_5E55, "user-pin-3", "user-pin-4"), CKR_SESSION_HANDLE_INVALID);
+    }
+
+    /// T6 — C_InitPIN enforces the same advertised bounds.
+    #[test]
+    fn init_pin_len_range() {
+        let _guard = test_lock::acquire();
+        crate::state::set_initialized(true);
+        crate::state::ensure_slot(PIN_SLOT);
+        let mut short = b"ab".to_vec();
+        // Bounds are checked before session/login state, so a R/W session
+        // suffices to observe the code.
+        SESSIONS.with(|s| {
+            s.borrow_mut().insert(
+                PIN_SESSION_RW,
+                crate::state::SessionState { slot_id: PIN_SLOT, rw_session: true },
+            );
+        });
+        assert_eq!(
+            C_InitPIN(PIN_SESSION_RW, short.as_mut_ptr(), short.len() as u32),
+            CKR_PIN_LEN_RANGE
+        );
+    }
+
+    // ── C_SeedRandom ─────────────────────────────────────────────────────
+
+    /// §5.14 — external seeding unsupported → CKR_RANDOM_SEED_NOT_SUPPORTED.
+    #[test]
+    fn seed_random_returns_seed_not_supported() {
+        let _guard = test_lock::acquire();
+        crate::state::set_initialized(true);
+        let mut seed = [0u8; 16];
+        assert_eq!(
+            C_SeedRandom(SESSION_RW, seed.as_mut_ptr(), 16),
+            CKR_RANDOM_SEED_NOT_SUPPORTED
+        );
     }
 }
 

@@ -96,6 +96,9 @@ pub const CKK_XMSSMT: u32 = 0x0000_0048; // XMSS^MT multi-tree (standard)
 pub const CKA_CLASS: u32 = 0x0000_0000;
 pub const CKA_TOKEN: u32 = 0x0000_0001;
 pub const CKA_PRIVATE: u32 = 0x0000_0002;
+// T6 — client-modifiable storage attrs (PKCS#11 v3.2 §4.5/§4.6 data objects).
+pub const CKA_APPLICATION: u32 = 0x0000_0010;
+pub const CKA_OBJECT_ID: u32 = 0x0000_0012;
 // PKCS#11 v3.2 §4.4.1 — token-generated unique object identifier (read-only,
 // assigned by the engine at object creation; see state::allocate_handle).
 pub const CKA_UNIQUE_ID: u32 = 0x0000_0017;
@@ -367,6 +370,9 @@ pub const CKR_USER_PIN_NOT_INITIALIZED: u32 = 0x0000_0102;
 pub const CKR_PIN_INCORRECT: u32 = 0x0000_00A0;
 pub const CKR_PIN_INVALID: u32 = 0x0000_00A1;
 pub const CKR_PIN_LEN_RANGE: u32 = 0x0000_00A2;
+// T6 — C_SeedRandom: the engine's RNG is OS-backed and takes no external
+// seeding (PKCS#11 v3.2 §5.14).
+pub const CKR_RANDOM_SEED_NOT_SUPPORTED: u32 = 0x0000_0120;
 pub const CKR_SLOT_ID_INVALID: u32 = 0x0000_0003;
 pub const CKU_SO: u32 = 0;
 pub const CKU_USER: u32 = 1;
