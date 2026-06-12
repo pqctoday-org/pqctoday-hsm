@@ -13,11 +13,21 @@
 > ChaCha20 advertisement (P-12), SessionCancel message flags (P-13),
 > WRAP_WITH_TRUSTED/CKA_TRUSTED (P-14/M-8/H-10), C_Digest-after-Update (M-2),
 > plus new RSA SHA-384/512 mechanisms (S6) and native PQC key import (S7).
-> Still open: multi-slot FindObjects scoping (closed by round-2 T3),
-> seed-deterministic keygen. H-15 closed by round-2 T2 (dynamic TokenInfo);
-> Appendix B closed by round-2 T5 (message-encrypt multipart rework — see the
-> per-item status in the appendix). Historic per-item detail remains in the
-> ledger below.
+> **Round 2 (2026-06-12, slices T1–T8) closed every remaining engine item**:
+> advertise/dispatch consistency residuals (T1), H-15 dynamic TokenInfo (T2),
+> multi-slot FindObjects scoping + strict cross-slot handles (T3), multi-part
+> C_Sign/C_Verify Update/Final (T4), Appendix B message-encrypt rework —
+> incremental GCM + verify-then-release decrypt (T5), C_SetAttributeValue /
+> C_CopyObject / C_GetObjectSize / C_SetPIN (T6), seed-deterministic PQC
+> keygen via CKA_SEED (T7), and native C_GetFunctionList with full
+> CK_FUNCTION_LIST{,_3_0,_3_2} adapter shims (T8). Deliberately retained
+> spec-legal stubs: C_DigestKey, C_Get/SetOperationState, dual-function ops,
+> C_SignRecover/C_VerifyRecover; C_SeedRandom returns
+> CKR_RANDOM_SEED_NOT_SUPPORTED (OsRng is non-seedable). On 64-bit native,
+> T8's exported function lists reject non-NULL embedded mechanism/attribute
+> pointers (32-bit linear-memory ABI internally) — the `native::` typed
+> surface is the supported native embedding. Historic per-item detail
+> remains in the ledger below.
 >
 > Build note: `cargo`/`rustc` must come from the rustup toolchain, not Homebrew —
 > Homebrew's rustc lacks the wasm32 sysroot. Use

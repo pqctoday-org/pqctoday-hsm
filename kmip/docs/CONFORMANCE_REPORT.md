@@ -173,15 +173,20 @@ tracked as compliance-audit finding K-10
 
 | Baseline §5.1.2 requirement | Status |
 |---|---|
-| Item 9 client-to-server ops: Get Constraints (0x38), Get Usage Allocation (0x11), Set Defaults (0x36), Set Endpoint Role (0x32) | Not implemented — invoking them returns `Operation Not Supported (0x05)` (decoded, honestly rejected) |
-| Item 10 server-to-client ops: Discover Versions, Notify, Put, Query, Set Endpoint Role | No server-initiated channel exists; the server is strictly request-response |
+| Item 9 client-to-server ops: Get Constraints (0x38), Get Usage Allocation (0x11), Set Defaults (0x36), Set Endpoint Role (0x32) | **Implemented (round-2 K19, 2026-06-12)**: GetUsageAllocation decrements the tracked usage-limit budget, GetConstraints reports the engine's real algorithm bounds, SetDefaults applies beneath client templates on Create/CreateKeyPair/Register. SetEndpointRole accepts the identity request (role=Server) and rejects the §6.2 role switch with `Feature Not Supported (0x08)` per the §6.1.59.1 error table — this server has no client-mode machinery. |
+| Item 10 server-to-client ops: Discover Versions, Notify, Put, Query, Set Endpoint Role | No server-initiated channel exists; the server is strictly request-response. **This is now the only structural Baseline delta.** |
 | Item 12.a Authentication message protocol | Implemented (K14): credential decode + config-gated verification + mTLS; default config is open-auth so the hermetic replay harness runs unauthenticated |
 
 The corpus never invokes any of these as requests, which is why 92/92
-and this delta coexist. If Baseline Server profile conformance becomes
-a target, the fix plan's K13 step 2 (`kmip/docs/COMPLIANCE_FIX_PLAN.md`)
-describes the implementation route; the server-to-client channel is the
-architecturally significant piece.
+and this delta coexist. The remaining gap to a full Baseline Server
+profile claim is the server-to-client channel (item 10) — an
+architectural addition, not an operation handler. Round-2 work
+(2026-06-12, slices K16–K22) additionally closed: Export with
+KeyWrappingSpecification, Register of wrapped key material, RSA-PSS
+Salt Length, Derive Key (HMAC/HASH/PBKDF2/SP800-108-C), Re-key and
+Re-key Key Pair with spec attribute inheritance, and real
+Archive/Recover storage status (Locate Storage Status Mask now filters
+actual state).
 
 ## 6. How to re-run the codec compliance test
 
