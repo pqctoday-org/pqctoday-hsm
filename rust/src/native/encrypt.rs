@@ -774,7 +774,9 @@ fn aes_ctr_apply(key: &[u8], iv: &[u8], data: &[u8]) -> Result<Vec<u8>, CkRv> {
 // live in the `chacha20` + `chacha20poly1305` crates already in our
 // `Cargo.toml`.
 
-fn chacha20_encrypt(key: &[u8], nonce: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, CkRv> {
+// pub(crate): the wasm FFI one-shot C_Encrypt/C_Decrypt arms (T1) reuse
+// these so the two surfaces stay byte-identical.
+pub(crate) fn chacha20_encrypt(key: &[u8], nonce: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, CkRv> {
     use chacha20::cipher::{KeyIvInit, StreamCipher};
     if key.len() != 32 {
         return Err(CKR_ARGUMENTS_BAD);
@@ -797,7 +799,7 @@ fn chacha20_encrypt(key: &[u8], nonce: &[u8], plaintext: &[u8]) -> Result<Vec<u8
     Ok(buf)
 }
 
-fn chacha20_poly1305_encrypt(
+pub(crate) fn chacha20_poly1305_encrypt(
     key: &[u8],
     nonce: &[u8],
     plaintext: &[u8],
@@ -814,7 +816,7 @@ fn chacha20_poly1305_encrypt(
         .map_err(|_| CKR_FUNCTION_FAILED)
 }
 
-fn chacha20_poly1305_decrypt(
+pub(crate) fn chacha20_poly1305_decrypt(
     key: &[u8],
     nonce: &[u8],
     ciphertext: &[u8],

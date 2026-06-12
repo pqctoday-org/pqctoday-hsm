@@ -758,7 +758,9 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
         CKM_ECDSA_SHA256 | CKM_ECDSA_SHA384 | CKM_ECDSA_SHA512 => {
             (256, 521, 0x00000800 | 0x00002000)
         }
-        CKM_ECDH1_DERIVE | CKM_ECDH1_COFACTOR_DERIVE => (256, 384, 0x00080000),
+        // T1 — C_DeriveKey dispatches P-256 / secp256k1 / P-384 / P-521 for
+        // both ECDH1 mechanisms; advertise the full dispatched range.
+        CKM_ECDH1_DERIVE | CKM_ECDH1_COFACTOR_DERIVE => (256, 521, 0x00080000),
         CKM_EC_EDWARDS_KEY_PAIR_GEN => (255, 255, 0x00010000),
         CKM_EDDSA => (255, 255, 0x00000800 | 0x00002000),
         // PKCS#11 v3.2 §6.7 — Montgomery-curve key pair generation (X25519=255-bit, X448=448-bit)
@@ -798,9 +800,11 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
         | CKM_HASH_SLH_DSA_SHA3_512
         | CKM_HASH_SLH_DSA_SHAKE128
         | CKM_HASH_SLH_DSA_SHAKE256 => (32, 64, 0x00000800 | 0x00002000),
-        // ECDSA-SHA3 variants
+        // ECDSA-SHA3 variants — T1: the sign/verify matrix now dispatches the
+        // same named curves as the SHA-2 composites (P-256 / secp256k1 /
+        // P-384 / P-521), so the range is unified with CKM_ECDSA_SHAx above.
         CKM_ECDSA_SHA3_224 | CKM_ECDSA_SHA3_256 | CKM_ECDSA_SHA3_384 | CKM_ECDSA_SHA3_512 => {
-            (256, 384, 0x00000800 | 0x00002000)
+            (256, 521, 0x00000800 | 0x00002000)
         }
         // Key derivation functions
         CKM_PKCS5_PBKD2
@@ -928,8 +932,9 @@ mod mechanism_table_tests {
         }
     }
 
-    /// S1 / P-15 — ECDSA mechanism ranges unified to P-521 (engine generates
-    /// and signs P-521; CKM_ECDSA already advertised 521).
+    /// S1 / P-15 / T1 — ECDSA + ECDH mechanism ranges unified to P-521
+    /// (the engine generates, signs, and derives over P-256 / secp256k1 /
+    /// P-384 / P-521 for every one of these mechanisms).
     #[test]
     fn ecdsa_mech_ranges_cover_p521() {
         for mech in [
@@ -938,9 +943,109 @@ mod mechanism_table_tests {
             CKM_ECDSA_SHA256,
             CKM_ECDSA_SHA384,
             CKM_ECDSA_SHA512,
+            CKM_ECDSA_SHA3_224,
+            CKM_ECDSA_SHA3_256,
+            CKM_ECDSA_SHA3_384,
+            CKM_ECDSA_SHA3_512,
+            CKM_ECDH1_DERIVE,
+            CKM_ECDH1_COFACTOR_DERIVE,
         ] {
-            let (min, max, _) = mechanism_info(mech).expect("ECDSA mech must have info");
+            let (min, max, _) = mechanism_info(mech).expect("EC mech must have info");
             assert_eq!((min, max), (256, 521), "mech {mech:#06x}");
+        }
+    }
+
+    /// T1 — advertise/dispatch consistency for the ECDSA matrix, derived
+    /// from a single curve-support table: for every hash-composite ECDSA
+    /// mechanism and every named curve whose bit size falls inside the
+    /// mechanism's advertised (ulMinKeySize, ulMaxKeySize) range, a
+    /// sign + verify round-trip through the shared handler matrix must
+    /// succeed. If a future change narrows dispatch without narrowing the
+    /// advertisement (or vice versa), this test fails immediately.
+    #[test]
+    fn t1_ecdsa_mech_curve_matrix_round_trips() {
+        use crate::crypto::handlers::{
+            sign_ecdsa, verify_ecdsa, CURVE_K256, CURVE_P256, CURVE_P384, CURVE_P521,
+        };
+
+        // Single source of truth: every named curve the engine supports,
+        // with its key size in bits (what mechanism_info ranges are
+        // expressed in). secp256k1 is a 256-bit curve.
+        let curve_table: &[(u32, u32, &str)] = &[
+            (CURVE_P256, 256, "P-256"),
+            (CURVE_K256, 256, "secp256k1"),
+            (CURVE_P384, 384, "P-384"),
+            (CURVE_P521, 521, "P-521"),
+        ];
+        let mechs = [
+            CKM_ECDSA_SHA256,
+            CKM_ECDSA_SHA384,
+            CKM_ECDSA_SHA512,
+            CKM_ECDSA_SHA3_224,
+            CKM_ECDSA_SHA3_256,
+            CKM_ECDSA_SHA3_384,
+            CKM_ECDSA_SHA3_512,
+        ];
+
+        fn gen_keypair(curve: u32) -> (Vec<u8>, Vec<u8>) {
+            let mut rng = rand::rngs::OsRng;
+            match curve {
+                CURVE_P256 => {
+                    let sk = p256::ecdsa::SigningKey::random(&mut rng);
+                    let pk = p256::ecdsa::VerifyingKey::from(&sk);
+                    (
+                        sk.to_bytes().to_vec(),
+                        pk.to_encoded_point(false).as_bytes().to_vec(),
+                    )
+                }
+                CURVE_P384 => {
+                    let sk = p384::ecdsa::SigningKey::random(&mut rng);
+                    let pk = p384::ecdsa::VerifyingKey::from(&sk);
+                    (
+                        sk.to_bytes().to_vec(),
+                        pk.to_encoded_point(false).as_bytes().to_vec(),
+                    )
+                }
+                CURVE_P521 => {
+                    let sk = p521::ecdsa::SigningKey::random(&mut rng);
+                    let pk = p521::ecdsa::VerifyingKey::from(&sk);
+                    (
+                        sk.to_bytes().to_vec(),
+                        pk.to_encoded_point(false).as_bytes().to_vec(),
+                    )
+                }
+                _ => {
+                    let sk = k256::ecdsa::SigningKey::random(&mut rng);
+                    let pk = k256::ecdsa::VerifyingKey::from(&sk);
+                    (
+                        sk.to_bytes().to_vec(),
+                        pk.to_encoded_point(false).as_bytes().to_vec(),
+                    )
+                }
+            }
+        }
+
+        let msg = b"T1 ECDSA advertise/dispatch consistency probe";
+        for &mech in &mechs {
+            let (min, max, _) = mechanism_info(mech).expect("ECDSA mech must have info");
+            for &(curve, bits, name) in curve_table {
+                if bits < min || bits > max {
+                    continue; // outside the advertised range — may reject
+                }
+                let (sk, pk) = gen_keypair(curve);
+                let sig = sign_ecdsa(mech, curve, &sk, msg).unwrap_or_else(|rv| {
+                    panic!("sign mech={mech:#06x} {name}: CKR {rv:#x} (advertised but not dispatched)")
+                });
+                verify_ecdsa(mech, curve, &pk, msg, &sig).unwrap_or_else(|rv| {
+                    panic!("verify mech={mech:#06x} {name}: CKR {rv:#x} (advertised but not dispatched)")
+                });
+                // Tampered message must NOT verify (guards against a
+                // degenerate always-Ok arm).
+                assert!(
+                    verify_ecdsa(mech, curve, &pk, b"tampered", &sig).is_err(),
+                    "tampered verify mech={mech:#06x} {name} unexpectedly passed"
+                );
+            }
         }
     }
 }
@@ -3961,6 +4066,12 @@ pub fn C_EncryptInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
                 };
                 (nonce, aad, 0)
             }
+            // T1 — plain ChaCha20 stream cipher (§6.20), advertised since
+            // round-1 S1 but previously not dispatched on the wasm path.
+            CKM_CHACHA20 => match parse_chacha20_params(p_param, ul_param_len) {
+                Ok(nonce) => (nonce, Vec::new(), 0),
+                Err(rv) => return rv,
+            },
             _ => return CKR_MECHANISM_INVALID,
         };
 
@@ -3979,6 +4090,43 @@ pub fn C_EncryptInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
         });
     }
     CKR_OK
+}
+
+/// Parse a `CK_CHACHA20_PARAMS` (PKCS#11 v3.2 §6.20, WASM32 layout —
+/// 16 bytes: pBlockCounter(u32 ptr) + blockCounterBits(u32) +
+/// pNonce(u32 ptr) + ulNonceBits(u32)) and return the nonce bytes.
+///
+/// The nonce is 64-bit (legacy / DJB original) or 96-bit (IETF), the
+/// same rule as the native engine's plain-ChaCha20 path. The keystream
+/// always starts at block 0: a non-zero initial block counter is not
+/// supported and rejected (the native path has no counter plumbing
+/// either, keeping the two surfaces byte-identical).
+///
+/// # Safety
+/// `p_param` must point to `ul_param_len` readable bytes.
+unsafe fn parse_chacha20_params(p_param: *const u8, ul_param_len: u32) -> Result<Vec<u8>, u32> {
+    if p_param.is_null() || ul_param_len < 16 {
+        return Err(CKR_ARGUMENTS_BAD);
+    }
+    let prm = p_param as *const u32;
+    let ctr_ptr = *prm as usize as *const u8;
+    let ctr_bits = *prm.add(1) as usize;
+    let nonce_ptr = *prm.add(2) as usize as *const u8;
+    let nonce_bits = *prm.add(3) as usize;
+    if nonce_ptr.is_null() || !(nonce_bits == 64 || nonce_bits == 96) {
+        return Err(CKR_MECHANISM_PARAM_INVALID);
+    }
+    if !ctr_ptr.is_null() && ctr_bits > 0 {
+        // §6.20: blockCounterBits is 32 or 64; any wider value is malformed.
+        if ctr_bits > 64 {
+            return Err(CKR_MECHANISM_PARAM_INVALID);
+        }
+        let ctr = std::slice::from_raw_parts(ctr_ptr, ctr_bits.div_ceil(8));
+        if ctr.iter().any(|&b| b != 0) {
+            return Err(CKR_MECHANISM_PARAM_INVALID); // non-zero start block unsupported
+        }
+    }
+    Ok(std::slice::from_raw_parts(nonce_ptr, nonce_bits / 8).to_vec())
 }
 
 #[wasm_bindgen(js_name = _C_Encrypt)]
@@ -4144,6 +4292,18 @@ pub fn C_Encrypt(
                     Err(_) => return CKR_FUNCTION_FAILED,
                 }
             }
+            // T1 — plain ChaCha20 (§6.20). Same primitive as the native
+            // engine path: 32-byte key, 8-byte (legacy) or 12-byte (IETF)
+            // nonce, keystream from block 0.
+            CKM_CHACHA20 => {
+                if key_bytes.len() != 32 {
+                    return CKR_KEY_SIZE_RANGE;
+                }
+                match crate::native::encrypt::chacha20_encrypt(&key_bytes, &iv, plaintext) {
+                    Ok(ct) => ct,
+                    Err(rv) => return rv,
+                }
+            }
             CKM_AES_ECB | CKM_AES_CBC => {
                 // §6.27.2/§6.27.3 — raw block modes; reuse the streaming
                 // state machines as update-then-finalize in one go.
@@ -4306,6 +4466,33 @@ pub fn C_DecryptInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
                 };
                 (label, mgf.to_le_bytes().to_vec(), hash_alg)
             }
+            // T1 — both ChaCha20 mechanisms advertise CKF_DECRYPT but were
+            // previously only dispatched on the encrypt side of the wasm path.
+            CKM_CHACHA20_POLY1305 => {
+                // CK_SALSA20_CHACHA20_POLY1305_PARAMS (WASM32, 16 bytes):
+                //   pNonce(u32 ptr) + ulNonceLen(u32) + pAAD(u32 ptr) + ulAADLen(u32)
+                if p_param.is_null() || ul_param_len < 16 {
+                    return CKR_ARGUMENTS_BAD;
+                }
+                let nonce_ptr = *(p_param as *const u32) as usize as *const u8;
+                let nonce_len = *((p_param as *const u32).add(1)) as usize;
+                let aad_ptr   = *((p_param as *const u32).add(2)) as usize as *const u8;
+                let aad_len   = *((p_param as *const u32).add(3)) as usize;
+                if nonce_len != 12 {
+                    return CKR_MECHANISM_PARAM_INVALID;
+                }
+                let nonce = std::slice::from_raw_parts(nonce_ptr, nonce_len).to_vec();
+                let aad = if !aad_ptr.is_null() && aad_len > 0 {
+                    std::slice::from_raw_parts(aad_ptr, aad_len).to_vec()
+                } else {
+                    Vec::new()
+                };
+                (nonce, aad, 0)
+            }
+            CKM_CHACHA20 => match parse_chacha20_params(p_param, ul_param_len) {
+                Ok(nonce) => (nonce, Vec::new(), 0),
+                Err(rv) => return rv,
+            },
             _ => return CKR_MECHANISM_INVALID,
         };
 
@@ -4458,6 +4645,30 @@ pub fn C_Decrypt(
                     // §6.16 — decode failure is CKR_ENCRYPTED_DATA_INVALID
                     // (uniform code, no padding-oracle distinction).
                     Err(_) => return CKR_ENCRYPTED_DATA_INVALID,
+                }
+            }
+            // T1 — ChaCha20-Poly1305 AEAD open (§6.25); tag verified before
+            // any plaintext is released.
+            CKM_CHACHA20_POLY1305 => {
+                if key_bytes.len() != 32 {
+                    return CKR_KEY_SIZE_RANGE;
+                }
+                match crate::native::encrypt::chacha20_poly1305_decrypt(
+                    &key_bytes, &iv, ciphertext, &aad,
+                ) {
+                    Ok(pt) => pt,
+                    Err(rv) => return rv,
+                }
+            }
+            // T1 — plain ChaCha20 (§6.20) is self-inverse: same keystream
+            // XOR as the encrypt direction.
+            CKM_CHACHA20 => {
+                if key_bytes.len() != 32 {
+                    return CKR_KEY_SIZE_RANGE;
+                }
+                match crate::native::encrypt::chacha20_encrypt(&key_bytes, &iv, ciphertext) {
+                    Ok(pt) => pt,
+                    Err(rv) => return rv,
                 }
             }
             CKM_AES_ECB | CKM_AES_CBC => {

@@ -77,9 +77,9 @@ pub fn sign(
         | CKM_SHA256_RSA_PKCS_PSS | CKM_SHA384_RSA_PKCS_PSS | CKM_SHA512_RSA_PKCS_PSS => {
             sign_rsa(mechanism, &sk_bytes, data, None)
         }
-        CKM_ECDSA | CKM_ECDSA_SHA256 | CKM_ECDSA_SHA384 | CKM_ECDSA_SHA512 => {
-            sign_ecdsa(mechanism, ps, &sk_bytes, data)
-        }
+        CKM_ECDSA | CKM_ECDSA_SHA256 | CKM_ECDSA_SHA384 | CKM_ECDSA_SHA512
+        | CKM_ECDSA_SHA3_224 | CKM_ECDSA_SHA3_256 | CKM_ECDSA_SHA3_384
+        | CKM_ECDSA_SHA3_512 => sign_ecdsa(mechanism, ps, &sk_bytes, data),
         CKM_EDDSA => sign_eddsa(&sk_bytes, data),
         CKM_EDDSA_PH => sign_eddsa_ph(&sk_bytes, data),
         _ => Err(CKR_MECHANISM_INVALID),
@@ -145,12 +145,12 @@ pub fn verify(
                 None => Err(CKR_KEY_TYPE_INCONSISTENT),
             }
         }
-        CKM_ECDSA | CKM_ECDSA_SHA256 | CKM_ECDSA_SHA384 | CKM_ECDSA_SHA512 => {
-            match get_ec_point_sec1(key_handle) {
-                Some(point) => verify_ecdsa(mechanism, ps, &point, data, signature),
-                None => Err(CKR_KEY_TYPE_INCONSISTENT),
-            }
-        }
+        CKM_ECDSA | CKM_ECDSA_SHA256 | CKM_ECDSA_SHA384 | CKM_ECDSA_SHA512
+        | CKM_ECDSA_SHA3_224 | CKM_ECDSA_SHA3_256 | CKM_ECDSA_SHA3_384
+        | CKM_ECDSA_SHA3_512 => match get_ec_point_sec1(key_handle) {
+            Some(point) => verify_ecdsa(mechanism, ps, &point, data, signature),
+            None => Err(CKR_KEY_TYPE_INCONSISTENT),
+        },
         CKM_EDDSA => verify_eddsa(&pk_bytes, data, signature),
         CKM_EDDSA_PH => verify_eddsa_ph(&pk_bytes, data, signature),
         _ => Err(CKR_MECHANISM_INVALID),
