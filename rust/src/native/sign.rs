@@ -44,10 +44,25 @@ use crate::constants::{CKA_SIGN, CKA_VERIFY};
 /// **Returns** the raw signature bytes — length is per FIPS spec
 /// (e.g. ML-DSA-65: 3309, ML-DSA-87: 4627).
 pub fn sign(
+    session: u32,
+    key_handle: u32,
+    mechanism: u32,
+    data: &[u8],
+) -> Result<Vec<u8>, CkRv> {
+    sign_with_pss_salt(session, key_handle, mechanism, data, None)
+}
+
+/// [`sign`] with an explicit RSA-PSS salt length (bytes) — the typed
+/// equivalent of supplying `CK_RSA_PKCS_PSS_PARAMS.sLen` on the FFI
+/// path. `None` keeps the PKCS#11 v3.2 §6.2 default (salt = hash
+/// length). Ignored for non-PSS mechanisms. KMIP slice K18 threads the
+/// `Cryptographic Parameters` `Salt Length` field through here.
+pub fn sign_with_pss_salt(
     _session: u32,
     key_handle: u32,
     mechanism: u32,
     data: &[u8],
+    pss_salt_len: Option<usize>,
 ) -> Result<Vec<u8>, CkRv> {
     // CKA_SIGN gate.
     if !check_can_sign(key_handle, CKA_SIGN) {
@@ -75,7 +90,7 @@ pub fn sign(
         CKM_KMAC_128 | CKM_KMAC_256 => sign_kmac(mechanism, &sk_bytes, data),
         CKM_SHA256_RSA_PKCS | CKM_SHA384_RSA_PKCS | CKM_SHA512_RSA_PKCS
         | CKM_SHA256_RSA_PKCS_PSS | CKM_SHA384_RSA_PKCS_PSS | CKM_SHA512_RSA_PKCS_PSS => {
-            sign_rsa(mechanism, &sk_bytes, data, None)
+            sign_rsa(mechanism, &sk_bytes, data, pss_salt_len)
         }
         CKM_ECDSA | CKM_ECDSA_SHA256 | CKM_ECDSA_SHA384 | CKM_ECDSA_SHA512
         | CKM_ECDSA_SHA3_224 | CKM_ECDSA_SHA3_256 | CKM_ECDSA_SHA3_384
@@ -97,11 +112,27 @@ pub fn sign(
 /// - `Err(_)` — protocol-level failure (wrong key type, bad mechanism,
 ///   missing key material, …).
 pub fn verify(
+    session: u32,
+    key_handle: u32,
+    mechanism: u32,
+    data: &[u8],
+    signature: &[u8],
+) -> Result<bool, CkRv> {
+    verify_with_pss_salt(session, key_handle, mechanism, data, signature, None)
+}
+
+/// [`verify`] with an explicit RSA-PSS salt length (bytes). `Some(n)`
+/// pins EMSA-PSS-VERIFY to exactly that salt (RFC 8017 §9.1.2 — the
+/// caller's parameters are authoritative); `None` keeps the historical
+/// two-candidate acceptance (salt = hash length, salt = maximal — see
+/// `crypto::handlers::verify_rsa`). Ignored for non-PSS mechanisms.
+pub fn verify_with_pss_salt(
     _session: u32,
     key_handle: u32,
     mechanism: u32,
     data: &[u8],
     signature: &[u8],
+    pss_salt_len: Option<usize>,
 ) -> Result<bool, CkRv> {
     // CKA_VERIFY gate.
     if !check_can_sign(key_handle, CKA_VERIFY) {
@@ -141,7 +172,7 @@ pub fn verify(
         CKM_SHA256_RSA_PKCS | CKM_SHA384_RSA_PKCS | CKM_SHA512_RSA_PKCS
         | CKM_SHA256_RSA_PKCS_PSS | CKM_SHA384_RSA_PKCS_PSS | CKM_SHA512_RSA_PKCS_PSS => {
             match get_rsa_public_components(key_handle) {
-                Some((n, e)) => verify_rsa(mechanism, &n, &e, data, signature, None),
+                Some((n, e)) => verify_rsa(mechanism, &n, &e, data, signature, pss_salt_len),
                 None => Err(CKR_KEY_TYPE_INCONSISTENT),
             }
         }

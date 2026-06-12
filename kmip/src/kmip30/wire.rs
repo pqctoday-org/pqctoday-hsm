@@ -253,6 +253,11 @@ pub(crate) mod tags {
     pub const TagLength: u32                        = 0x42_00ce;
     /// KMIP 3.0 §11 — `Random IV` Boolean inside CryptographicParameters.
     pub const RandomIV: u32                         = 0x42_00c5;
+    /// KMIP 3.0 §11 `Salt Length` Integer — RSA-PSS salt length in
+    /// bytes, inside CryptographicParameters. Codepoint `0x420100`
+    /// per `kmip-spec-3.0-tags-enums.json` (K18 — NOT 0x420084, which
+    /// sits in the `Server Information` region).
+    pub const SaltLength: u32                       = 0x42_0100;
     /// KMIP 3.0 §11 `Digest` family — Structure + ByteString sub-field.
     pub const Digest: u32                 = 0x42_0034;
     pub const DigestValue: u32            = 0x42_0035;
@@ -1967,6 +1972,9 @@ fn encode_cryptographic_parameters(cp: &CryptographicParameters) -> TtlvFrame {
     if let Some(v) = cp.block_cipher_mode {
         children.push(TtlvFrame::new(Tag(tags::BlockCipherMode), Value::Enumeration(v)));
     }
+    if let Some(v) = cp.salt_length {
+        children.push(TtlvFrame::new(Tag(tags::SaltLength), Value::Integer(v)));
+    }
     TtlvFrame::new(Tag(tags::CryptographicParameters), Value::Structure(children))
 }
 
@@ -2010,6 +2018,10 @@ fn decode_cryptographic_parameters(frame: &TtlvFrame) -> Result<CryptographicPar
             }
             tags::RandomIV => {
                 cp.random_iv = Some(expect_boolean(c, "Random IV")?);
+            }
+            // K18 — KMIP 3.0 §11 RSA-PSS salt length (bytes).
+            tags::SaltLength => {
+                cp.salt_length = Some(expect_integer(c, "Salt Length")?);
             }
             _ => {}
         }
@@ -4022,6 +4034,38 @@ mod tests {
             frames.iter().all(|f| f.tag.0 != super::super::vendor_tags::PQCTODAY_SHARED_SECRET),
             "classical encrypt must not emit the vendor shared-secret tag"
         );
+    }
+
+    /// K18 — `Salt Length` (0x420100, Integer) decodes into
+    /// `CryptographicParameters::salt_length` and round-trips through
+    /// the encoder; absent → `None`.
+    #[test]
+    fn k18_cryptographic_parameters_salt_length_decodes_and_round_trips() {
+        let frame = TtlvFrame::new(Tag(tags::CryptographicParameters), Value::Structure(vec![
+            TtlvFrame::new(Tag(tags::PaddingMethod), Value::Enumeration(0x0a)), // PSS
+            TtlvFrame::new(Tag(tags::HashingAlgorithm), Value::Enumeration(0x06)), // SHA-256
+            TtlvFrame::new(Tag(tags::SaltLength), Value::Integer(20)),
+        ]));
+        let cp = decode_cryptographic_parameters(&frame).unwrap();
+        assert_eq!(cp.salt_length, Some(20));
+        assert_eq!(cp.padding_method, Some(0x0a));
+
+        // Encoder round-trip: the re-encoded CP decodes to the same salt.
+        let cp2 = decode_cryptographic_parameters(&encode_cryptographic_parameters(&cp)).unwrap();
+        assert_eq!(cp2, cp);
+
+        // Absent → None (the engine keeps the §6.2 hash-length default).
+        let no_salt = TtlvFrame::new(Tag(tags::CryptographicParameters), Value::Structure(vec![
+            TtlvFrame::new(Tag(tags::PaddingMethod), Value::Enumeration(0x0a)),
+        ]));
+        assert_eq!(decode_cryptographic_parameters(&no_salt).unwrap().salt_length, None);
+
+        // Negative values survive decode (validation is the op layer's
+        // job — `ops::helpers::pss_salt_from_cp` rejects them).
+        let neg = TtlvFrame::new(Tag(tags::CryptographicParameters), Value::Structure(vec![
+            TtlvFrame::new(Tag(tags::SaltLength), Value::Integer(-1)),
+        ]));
+        assert_eq!(decode_cryptographic_parameters(&neg).unwrap().salt_length, Some(-1));
     }
 
     /// K10 — ML-KEM decapsulation round-trip: the request decodes the

@@ -403,6 +403,143 @@ fn k6_rsa_sha384_sha512_sign_verify_against_real_engine() {
     let _ = softhsmrustv3::native::session::finalize();
 }
 
+/// K18 — KMIP 3.0 §11 `Salt Length` (0x420100) threads through
+/// Sign / SignatureVerify to the engine's RSA-PSS implementation
+/// (round-1 K6 residual: it used to be silently left at the §6.2
+/// hash-length default).
+///
+/// - salt = 0 makes PSS deterministic (RFC 8017 §9.1.1 — the salt is
+///   the only randomness): two signs byte-match;
+/// - verify with an explicit salt pins EMSA-PSS-VERIFY to exactly that
+///   length (the `rsa` crate does NOT recover salt length from the
+///   padding) — a salt-0 signature is Invalid under the default
+///   candidates (hash length / maximal) and under a wrong salt;
+/// - effective-CP precedence: a request CP overrides the object's
+///   stored CP wholesale (same request-over-object rule K6 set for
+///   padding/hash);
+/// - salt on a non-PSS mechanism is ignored (CP is a grab-bag);
+/// - negative salt → `InvalidField`; oversized salt
+///   (> emLen - hLen - 2 = 222 for RSA-2048/SHA-256) →
+///   `CryptographicFailure` from the engine.
+#[test]
+fn k18_rsa_pss_salt_length_threads_to_engine() {
+    use pqctoday_kmip::error::ResultReason;
+    use pqctoday_kmip::kmip30::{ActivateRequest, CryptographicParameters, HashingAlgorithm};
+
+    let _guard = engine_test_lock();
+    let deps = build_deps_with_real_engine();
+
+    let create_req = CreateKeyPairRequest {
+        common_attributes: vec![Attribute::CryptographicAlgorithm(KmipAlgorithm::Rsa)],
+        private_key_attributes: vec![Attribute::CryptographicUsageMask(UsageMask::SIGN)],
+        public_key_attributes: vec![Attribute::CryptographicUsageMask(UsageMask::VERIFY)],
+    };
+    let kp = create_key_pair(&deps, create_req, "CreateKeyPair:Sign", "k18-create").unwrap();
+    let priv_uid = kp.private_key_uid;
+    let pub_uid = kp.public_key_uid;
+    activate(&deps, ActivateRequest { uid: priv_uid.clone() }, "k18-a1").unwrap();
+    activate(&deps, ActivateRequest { uid: pub_uid.clone() }, "k18-a2").unwrap();
+
+    let cp_pss = |salt: Option<i32>| CryptographicParameters {
+        hashing_algorithm: Some(HashingAlgorithm::Sha256),
+        padding_method: Some(0x0a), // PSS
+        salt_length: salt,
+        ..Default::default()
+    };
+    let message = b"K18: KMIP Salt Length reaches the PSS engine".to_vec();
+    let sign_with = |cp: Option<CryptographicParameters>| {
+        sign(
+            &deps,
+            SignRequest {
+                uid: priv_uid.clone(),
+                data: message.clone(),
+                cryptographic_parameters: cp,
+            },
+            "k18-sign",
+        )
+    };
+    let verify_with = |sig: Vec<u8>, cp: Option<CryptographicParameters>| {
+        signature_verify(
+            &deps,
+            SignatureVerifyRequest {
+                uid: pub_uid.clone(),
+                data: message.clone(),
+                signature: sig,
+                cryptographic_parameters: cp,
+            },
+            "k18-verify",
+        )
+        .unwrap()
+        .validity
+    };
+
+    // ── salt = 0: deterministic sign, pinned verify ─────────────────
+    let s1 = sign_with(Some(cp_pss(Some(0)))).unwrap().signature;
+    let s2 = sign_with(Some(cp_pss(Some(0)))).unwrap().signature;
+    assert_eq!(s1, s2, "PSS with salt 0 is deterministic — the salt reached the engine");
+    assert_eq!(verify_with(s1.clone(), Some(cp_pss(Some(0)))), SignatureValidity::Valid);
+    // Default verify candidates (hash length / maximal) don't include 0.
+    assert_eq!(
+        verify_with(s1.clone(), Some(cp_pss(None))),
+        SignatureValidity::Invalid,
+        "EMSA-PSS-VERIFY pins the salt length — no recovery from the padding"
+    );
+    assert_eq!(verify_with(s1, Some(cp_pss(Some(32)))), SignatureValidity::Invalid);
+
+    // ── salt = 20 round-trip ────────────────────────────────────────
+    let s20 = sign_with(Some(cp_pss(Some(20)))).unwrap().signature;
+    assert_eq!(verify_with(s20.clone(), Some(cp_pss(Some(20)))), SignatureValidity::Valid);
+    assert_eq!(verify_with(s20, Some(cp_pss(Some(0)))), SignatureValidity::Invalid);
+
+    // ── absent salt keeps the §6.2 hash-length default ──────────────
+    let sdef = sign_with(Some(cp_pss(None))).unwrap().signature;
+    assert_eq!(verify_with(sdef.clone(), Some(cp_pss(Some(32)))), SignatureValidity::Valid);
+    assert_eq!(verify_with(sdef, Some(cp_pss(None))), SignatureValidity::Valid);
+
+    // ── effective-CP precedence: request CP over object CP ──────────
+    // Store a CP with salt 0 on the private record (the Register path
+    // sets this; CreateKeyPair leaves it None).
+    let mut rec = deps.store.get(&priv_uid).unwrap().unwrap();
+    rec.cryptographic_parameters = Some(cp_pss(Some(0)));
+    deps.store.update(rec).unwrap();
+    // No request CP → the object CP applies → deterministic salt-0.
+    let o1 = sign_with(None).unwrap().signature;
+    let o2 = sign_with(None).unwrap().signature;
+    assert_eq!(o1, o2, "object CP salt 0 applies when the request carries none");
+    assert_eq!(verify_with(o1, Some(cp_pss(Some(0)))), SignatureValidity::Valid);
+    // Request CP (salt 20) overrides the object CP (salt 0) wholesale.
+    let r20 = sign_with(Some(cp_pss(Some(20)))).unwrap().signature;
+    assert_eq!(verify_with(r20.clone(), Some(cp_pss(Some(20)))), SignatureValidity::Valid);
+    assert_eq!(
+        verify_with(r20, Some(cp_pss(Some(0)))),
+        SignatureValidity::Invalid,
+        "request salt must override the object CP salt"
+    );
+
+    // ── salt on a non-PSS mechanism is ignored ──────────────────────
+    let cp_v15_salt = CryptographicParameters {
+        hashing_algorithm: Some(HashingAlgorithm::Sha256),
+        padding_method: Some(0x08), // PKCS#1 v1.5
+        salt_length: Some(20),
+        ..Default::default()
+    };
+    let v15 = sign_with(Some(cp_v15_salt.clone())).unwrap().signature;
+    assert_eq!(verify_with(v15, Some(cp_v15_salt)), SignatureValidity::Valid);
+
+    // ── negative salt → InvalidField ────────────────────────────────
+    assert_eq!(
+        sign_with(Some(cp_pss(Some(-1)))).unwrap_err().result_reason(),
+        ResultReason::InvalidField
+    );
+    // ── oversized salt → CryptographicFailure from the engine ───────
+    assert_eq!(
+        sign_with(Some(cp_pss(Some(300)))).unwrap_err().result_reason(),
+        ResultReason::CryptographicFailure
+    );
+
+    let _ = softhsmrustv3::native::session::finalize();
+}
+
 // ── K9 — PQC Register usability (compliance-audit B-6) ──────────────────────
 //
 // Register of raw FIPS 203/204/205 key material must create a real

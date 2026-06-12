@@ -430,11 +430,14 @@ pub fn state_name(s: crate::kmip30::State) -> &'static str {
 ///   the pre-K6 behaviour the corpus pins); SHA-256/384/512 →
 ///   matching engine mechanism (SHA-384/512 since engine slice S6);
 ///   anything else (SHA-1, SHA-224, SHA3-*, …) → 0x3e.
-/// - PSS salt length: KMIP 3.0 `Cryptographic Parameters` carries no
-///   salt-length field (and our codec decodes none), and
-///   `native::sign`/`verify` pass `pss_salt_len = None` → the engine
-///   uses the RFC 8017 salt = hash-length default (verify also
-///   accepts the maximal salt, see `crypto::handlers::verify_rsa`).
+/// - PSS salt length (K18, round-1 K6 residual): the KMIP 3.0
+///   `Cryptographic Parameters` `Salt Length` field (0x420100) now
+///   decodes; [`pss_salt_from_cp`] extracts it for PSS mechanisms and
+///   the op handlers thread it through
+///   `native::sign_with_pss_salt`/`verify_with_pss_salt`. Absent →
+///   `None` → the engine keeps the RFC 8017 salt = hash-length default
+///   (verify also accepts the maximal salt, see
+///   `crypto::handlers::verify_rsa`).
 /// - algorithms with no sign mechanism (AES, ML-KEM, …) →
 ///   `OperationNotSupported`.
 pub fn native_sign_mech_with_params(
@@ -496,6 +499,37 @@ pub fn native_sign_mech_with_params(
             ));
         }
     })
+}
+
+/// K18 — extract the RSA-PSS salt length to pass to
+/// `native::sign_with_pss_salt` / `verify_with_pss_salt`.
+///
+/// - `mech` is not a PSS variant, or the effective CP carries no
+///   `Salt Length` → `Ok(None)` (KMIP 3.0 §11: CryptographicParameters
+///   is a grab-bag — fields irrelevant to the operation are ignored,
+///   not an error). `None` keeps the engine's §6.2 hash-length default.
+/// - negative `Salt Length` → `InvalidField` (no valid encoding; the
+///   wire type is a signed Integer but RFC 8017 sLen is a length).
+/// - oversized salt (> emLen - hLen - 2) is NOT pre-validated here —
+///   the engine's `rsa` crate rejects it at sign time
+///   (`CKR_FUNCTION_FAILED` → `CryptographicFailure` via
+///   [`ck_rv_to_kmip_error`]).
+pub fn pss_salt_from_cp(
+    mech: u32,
+    cp: Option<&crate::kmip30::CryptographicParameters>,
+) -> Result<Option<usize>, KmipError> {
+    use softhsmrustv3::constants as c;
+    let is_pss = matches!(
+        mech,
+        c::CKM_SHA256_RSA_PKCS_PSS | c::CKM_SHA384_RSA_PKCS_PSS | c::CKM_SHA512_RSA_PKCS_PSS
+    );
+    match (is_pss, cp.and_then(|p| p.salt_length)) {
+        (true, Some(s)) if s < 0 => Err(KmipError::invalid_field(format!(
+            "Salt Length {s} is negative — RSA-PSS salt length is a byte count"
+        ))),
+        (true, Some(s)) => Ok(Some(s as usize)),
+        _ => Ok(None),
+    }
 }
 
 /// Map a `KmipAlgorithm` to the engine's KEM mechanism.
@@ -1167,6 +1201,48 @@ mod tests {
         assert_eq!(
             native_sign_mech_with_params(A::Aes, None).unwrap_err().result_reason(),
             ResultReason::OperationNotSupported
+        );
+    }
+
+    // ── K18 — pss_salt_from_cp ──────────────────────────────────────
+
+    #[test]
+    fn k18_pss_salt_from_cp_rules() {
+        let with_salt = |s: i32| crate::kmip30::CryptographicParameters {
+            padding_method: Some(PADDING_PSS),
+            salt_length: Some(s),
+            ..Default::default()
+        };
+        // PSS mech + salt → threaded verbatim (0 is a legal salt).
+        for mech in [
+            c::CKM_SHA256_RSA_PKCS_PSS,
+            c::CKM_SHA384_RSA_PKCS_PSS,
+            c::CKM_SHA512_RSA_PKCS_PSS,
+        ] {
+            assert_eq!(pss_salt_from_cp(mech, Some(&with_salt(0))).unwrap(), Some(0));
+            assert_eq!(pss_salt_from_cp(mech, Some(&with_salt(20))).unwrap(), Some(20));
+        }
+        // Absent CP / absent salt → None (engine §6.2 default).
+        assert_eq!(pss_salt_from_cp(c::CKM_SHA256_RSA_PKCS_PSS, None).unwrap(), None);
+        assert_eq!(
+            pss_salt_from_cp(
+                c::CKM_SHA256_RSA_PKCS_PSS,
+                Some(&crate::kmip30::CryptographicParameters::default()),
+            )
+            .unwrap(),
+            None
+        );
+        // Salt on a non-PSS mechanism → ignored, never an error
+        // (CryptographicParameters is a grab-bag per KMIP 3.0 §11).
+        for mech in [c::CKM_SHA256_RSA_PKCS, c::CKM_ECDSA_SHA256, c::CKM_SHA256_HMAC] {
+            assert_eq!(pss_salt_from_cp(mech, Some(&with_salt(20))).unwrap(), None);
+        }
+        // Negative salt on a PSS mech → InvalidField.
+        assert_eq!(
+            pss_salt_from_cp(c::CKM_SHA256_RSA_PKCS_PSS, Some(&with_salt(-1)))
+                .unwrap_err()
+                .result_reason(),
+            ResultReason::InvalidField
         );
     }
 
