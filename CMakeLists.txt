@@ -163,4 +163,16 @@ if(NOT EMSCRIPTEN AND BUILD_TESTS)
     # SHA-1 digest in the HSM that happens to fail in the same direction.
     target_include_directories(p11_v32_compliance_test PRIVATE ${OPENSSL_INCLUDE_DIR})
     target_link_libraries(p11_v32_compliance_test dl ${OPENSSL_LIBRARIES})
+
+    # Run the PKCS#11 v3.2 compliance suite under ctest against the freshly
+    # built engine. Hermetic: token store + softhsm2.conf + reports all live
+    # in the build directory (no /tmp or source-tree pollution). The binary
+    # exits non-zero only on unexpected FAILs (documented XFAILs do not fail
+    # the test; they are reported in cpp_compliance_report.{md,json}).
+    add_test(NAME p11_v32_compliance
+             COMMAND p11_v32_compliance_test
+                     --engine $<TARGET_FILE:softhsmv3>
+                     --workdir ${CMAKE_BINARY_DIR}/p11_v32_compliance_workdir
+                     --report ${CMAKE_BINARY_DIR}/cpp_compliance_report
+             WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 endif()

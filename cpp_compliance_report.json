@@ -28,6 +28,11 @@
             "test": "CKA_HSS_KEYS_REMAINING_Gen"
         },
         {
+            "details": "Count decreased correctly",
+            "status": "PASS",
+            "test": "CKA_HSS_KEYS_REMAINING_Consume"
+        },
+        {
             "details": "§1.21 G-ATTR1 check",
             "status": "PASS",
             "test": "ML_KEM_512_CKA_VALUE_Pub"
@@ -212,6 +217,38 @@
             "test": "C_Encrypt"
         }
     ],
+    "CkaIdRetrieval": [
+        {
+            "details": "ML-DSA-65 keypair generated with explicit CKA_ID + CKA_PRIVATE=false on pubkey",
+            "status": "PASS",
+            "test": "Setup_KeyGen"
+        },
+        {
+            "details": "C_FindObjects(CKA_CLASS=PUBLIC,CKA_ID) returned 1 object(s)",
+            "status": "PASS",
+            "test": "FindByCkaId_Pubkey_LoggedIn"
+        },
+        {
+            "details": "C_FindObjects(CKA_CLASS=PRIVATE,CKA_ID) returned 1 object(s)",
+            "status": "PASS",
+            "test": "FindByCkaId_Privkey_LoggedIn"
+        },
+        {
+            "details": "C_FindObjects(public RO,CKA_CLASS=PUBLIC,CKA_ID) returned 1 object(s); CKA_PRIVATE on hit = 0",
+            "status": "PASS",
+            "test": "FindByCkaId_Pubkey_NoLogin"
+        },
+        {
+            "details": "PKCS#11 v3.2 §4.5: pubkey CKA_PRIVATE default expected FALSE; got 0",
+            "status": "PASS",
+            "test": "Default_CkaPrivate_Pubkey"
+        },
+        {
+            "details": "Default-CKA_PRIVATE pubkey findable from no-login session: count=1",
+            "status": "PASS",
+            "test": "Default_CkaPrivate_Pubkey_NoLoginFind"
+        }
+    ],
     "Classical": [
         {
             "details": "RV=0",
@@ -331,44 +368,81 @@
             "test": "C_Verify_87_PreHash_SHA3_512"
         }
     ],
+    "DSA-CTX": [
+        {
+            "details": "ML-DSA-65 keypair generated",
+            "status": "PASS",
+            "test": "Setup_KeyGen_MLDSA65"
+        },
+        {
+            "details": "siglen=3309",
+            "status": "PASS",
+            "test": "Sign_ctxA"
+        },
+        {
+            "details": "expected CKR_OK got RV=0",
+            "status": "PASS",
+            "test": "Verify_ctxA_matching"
+        },
+        {
+            "details": "binding works; RV=192",
+            "status": "PASS",
+            "test": "Verify_ctxB_should_fail"
+        },
+        {
+            "details": "binding enforced; RV=192",
+            "status": "PASS",
+            "test": "Verify_noctx_should_fail"
+        },
+        {
+            "details": "deterministic mode produces identical signatures (FIPS 204)",
+            "status": "PASS",
+            "test": "Deterministic_byte_equal"
+        },
+        {
+            "details": "hedged mode produces distinct signatures (probabilistic)",
+            "status": "PASS",
+            "test": "Hedge_non_deterministic"
+        }
+    ],
     "Discovery": [
         {
-            "details": "PQC KEM Support",
+            "details": "PQC KEM support advertised",
             "status": "PASS",
             "test": "CKM_ML_KEM"
         },
         {
-            "details": "PQC DSA Support",
+            "details": "PQC DSA support advertised",
             "status": "PASS",
             "test": "CKM_ML_DSA"
         },
         {
-            "details": "PQC SLH-DSA Support",
+            "details": "PQC SLH-DSA support advertised",
             "status": "PASS",
             "test": "CKM_SLH_DSA"
         },
         {
-            "details": "PQC XMSS Support",
+            "details": "PQC XMSS support advertised",
             "status": "PASS",
             "test": "CKM_XMSS"
         },
         {
-            "details": "AES CTR Support (v3.2/5G)",
+            "details": "AES CTR support (v3.2/5G) advertised",
             "status": "PASS",
             "test": "CKM_AES_CTR"
         },
         {
-            "details": "ChaCha20 Support (RFC 7539)",
+            "details": "ChaCha20 support (RFC 7539) advertised",
             "status": "PASS",
             "test": "CKM_CHACHA20_POLY1305"
         },
         {
-            "details": "HKDF Support (v3.0/5G)",
+            "details": "HKDF support (v3.0/5G) advertised",
             "status": "PASS",
             "test": "CKM_HKDF_DERIVE"
         },
         {
-            "details": "RIPEMD160 Support (Strict Audit)",
+            "details": "RIPEMD160 support advertised",
             "status": "PASS",
             "test": "CKM_RIPEMD160"
         }
@@ -383,6 +457,11 @@
             "details": "RV=0",
             "status": "PASS",
             "test": "Derive_X25519"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "Derive_X25519_Cofactor"
         }
     ],
     "ECDSA": [
@@ -415,6 +494,26 @@
             "details": "RV=0",
             "status": "PASS",
             "test": "Sign_secp256k1"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "Generate_P256_SHA3_256"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "Sign_P256_SHA3_256"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "Generate_P521_SHA3_512"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "Sign_P521_SHA3_512"
         }
     ],
     "EdDSA": [
@@ -451,7 +550,7 @@
             "test": "ML-KEM_Implicit_Rejection"
         },
         {
-            "details": "RV=7",
+            "details": "ctx>255 must be rejected, RV=7",
             "status": "PASS",
             "test": "ML-DSA_Oversized_Ctx"
         }
@@ -463,6 +562,73 @@
             "test": "TokenSetup"
         }
     ],
+    "KCV": [
+        {
+            "details": "3 bytes: 9005E5",
+            "status": "PASS",
+            "test": "AES_Generate_KCV_Present"
+        },
+        {
+            "details": "HSM=9005E5 == oracle=9005E5",
+            "status": "PASS",
+            "test": "AES_Generate_KCV_Equals_OracleEcbZeroBlock"
+        },
+        {
+            "details": "3 bytes: EB0E41",
+            "status": "PASS",
+            "test": "AES_Unwrap_KCV_Present"
+        },
+        {
+            "details": "original=EB0E41 unwrapped=EB0E41",
+            "status": "PASS",
+            "test": "AES_Unwrap_KCV_Equals_Original"
+        },
+        {
+            "details": "matches AES-ECB(zero block)[0:3] oracle",
+            "status": "PASS",
+            "test": "AES_Unwrap_KCV_Equals_OracleEcbZeroBlock"
+        },
+        {
+            "details": "3 bytes: BEEF61",
+            "status": "PASS",
+            "test": "HKDF_Derive_KCV_Present"
+        },
+        {
+            "details": "HSM=BEEF61 == oracle=BEEF61",
+            "status": "PASS",
+            "test": "HKDF_Derive_KCV_Equals_OracleSha1"
+        },
+        {
+            "details": "3 bytes: 89AE12",
+            "status": "PASS",
+            "test": "PBKD2_Derive_KCV_Present"
+        },
+        {
+            "details": "HSM=89AE12 == oracle=89AE12",
+            "status": "PASS",
+            "test": "PBKD2_Derive_KCV_Equals_OracleSha1"
+        },
+        {
+            "details": "3 bytes: C2450B",
+            "status": "PASS",
+            "test": "SP800_108_Counter_Derive_KCV_Present"
+        },
+        {
+            "details": "HSM=C2450B == oracle=C2450B",
+            "status": "PASS",
+            "test": "SP800_108_Counter_Derive_KCV_Equals_OracleSha1"
+        },
+        {
+            "details": "3 bytes: 4A4E69",
+            "status": "PASS",
+            "test": "SP800_108_Feedback_Derive_KCV_Present"
+        },
+        {
+            "details": "HSM=4A4E69 == oracle=4A4E69",
+            "status": "PASS",
+            "test": "SP800_108_Feedback_Derive_KCV_Equals_OracleSha1"
+        }
+    ],
     "KDF": [
         {
             "details": "RV=0",
@@ -470,12 +636,22 @@
             "test": "CKM_PKCS5_PBKD2"
         },
         {
-            "details": "RV=0",
-            "status": "PASS",
+            "details": "ENGINE BUG: spec PRF CKM_SHA256_HMAC rejected, RV=113 (engine only accepts bare-hash PRF identifiers)",
+            "status": "XFAIL",
             "test": "CKM_SP800_108_COUNTER_KDF"
         },
         {
-            "details": "RV=0",
+            "details": "ENGINE BUG: bare CKM_SHA256 accepted as PRF (RV=0); spec requires a keyed MAC mechanism",
+            "status": "XFAIL",
+            "test": "SP800_108_BareHash_PRF_Rejected"
+        },
+        {
+            "details": "AES-CMAC PRF, RV=0",
+            "status": "PASS",
+            "test": "CKM_SP800_108_COUNTER_KDF_CMAC"
+        },
+        {
+            "details": "AES-CMAC PRF, RV=0",
             "status": "PASS",
             "test": "CKM_SP800_108_FEEDBACK_KDF"
         },
@@ -566,14 +742,170 @@
             "test": "C_SignMessageBegin"
         },
         {
-            "details": "RV=0",
+            "details": "RV=0 SigLen=128",
             "status": "PASS",
             "test": "C_SignMessageNext"
         },
         {
-            "details": "RV=113",
+            "details": "expected CKR_MECHANISM_PARAM_INVALID, got RV=113",
             "status": "PASS",
-            "test": "C_MessageSignInit_PQCContext"
+            "test": "C_MessageSignInit_RSA_RejectsSignCtxParam"
+        }
+    ],
+    "MultiPart": [
+        {
+            "details": "ML-DSA-65 key pair generated",
+            "status": "PASS",
+            "test": "Setup_KeyGen"
+        },
+        {
+            "details": "PKCS#11 v3.2 §5.2 — RV=0",
+            "status": "PASS",
+            "test": "C_SignInit"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_SignUpdate_chunk1"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_SignUpdate_chunk2"
+        },
+        {
+            "details": "SigLen=3309 RV=0",
+            "status": "PASS",
+            "test": "C_SignFinal"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_VerifyInit"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_VerifyUpdate_chunk1"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_VerifyUpdate_chunk2"
+        },
+        {
+            "details": "PKCS#11 v3.2 §5.2 round-trip — RV=0",
+            "status": "PASS",
+            "test": "C_VerifyFinal"
+        },
+        {
+            "details": "Multi-part sig matches one-shot verify — RV=0",
+            "status": "PASS",
+            "test": "C_Verify_oneshot_xcheck"
+        }
+    ],
+    "MultiPart_ECDSA": [
+        {
+            "details": "P-256 key pair generated",
+            "status": "PASS",
+            "test": "Setup_KeyGen"
+        },
+        {
+            "details": "CKM_ECDSA_SHA256 — RV=0",
+            "status": "PASS",
+            "test": "C_SignInit"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_SignUpdate_chunk1"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_SignUpdate_chunk2"
+        },
+        {
+            "details": "SigLen=64 RV=0",
+            "status": "PASS",
+            "test": "C_SignFinal"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_VerifyInit"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_VerifyUpdate_chunk1"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_VerifyUpdate_chunk2"
+        },
+        {
+            "details": "PKCS#11 v3.2 §5.2 P-256 round-trip — RV=0",
+            "status": "PASS",
+            "test": "C_VerifyFinal"
+        },
+        {
+            "details": "Multi-part sig matches one-shot verify — RV=0",
+            "status": "PASS",
+            "test": "C_Verify_oneshot_xcheck"
+        }
+    ],
+    "MultiPart_EdDSA": [
+        {
+            "details": "Ed25519 key pair generated",
+            "status": "PASS",
+            "test": "Setup_KeyGen"
+        },
+        {
+            "details": "CKM_EDDSA — RV=0",
+            "status": "PASS",
+            "test": "C_SignInit"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_SignUpdate_chunk1"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_SignUpdate_chunk2"
+        },
+        {
+            "details": "SigLen=64 RV=0",
+            "status": "PASS",
+            "test": "C_SignFinal"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_VerifyInit"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_VerifyUpdate_chunk1"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_VerifyUpdate_chunk2"
+        },
+        {
+            "details": "PKCS#11 v3.2 §5.2 Ed25519 round-trip — RV=0",
+            "status": "PASS",
+            "test": "C_VerifyFinal"
+        },
+        {
+            "details": "Multi-part sig matches one-shot verify — RV=0",
+            "status": "PASS",
+            "test": "C_Verify_oneshot_xcheck"
         }
     ],
     "Negative": [
@@ -662,6 +994,16 @@
             "details": "Visible (Compliant)",
             "status": "PASS",
             "test": "Session_Object_CrossVisibility"
+        },
+        {
+            "details": "cancel OK; post-cancel C_Sign expected CKR_OPERATION_NOT_INITIALIZED, got RV=145",
+            "status": "PASS",
+            "test": "C_SessionCancel"
+        },
+        {
+            "details": "RV=256",
+            "status": "PASS",
+            "test": "C_LoginUser"
         }
     ],
     "XMSS": [
@@ -674,6 +1016,19 @@
             "details": "RV=0",
             "status": "PASS",
             "test": "C_Sign_XMSS_SHA2_10_256"
+        },
+        {
+            "details": "Mech unavailable",
+            "status": "SKIP",
+            "test": "Generate_XMSSMT_SHA2_20_2_256"
         }
-    ]
+    ],
+    "_summary": {
+        "engine": "./build-f1/src/lib/libsofthsmv3.dylib",
+        "engine_commit": "ac480db",
+        "fail": 0,
+        "pass": 191,
+        "skip": 1,
+        "xfail_known_engine_bugs": 2
+    }
 }
