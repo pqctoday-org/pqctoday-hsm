@@ -79,6 +79,8 @@ pub use ops::{
     // K20 — Derive Key (§6.1.18 / §7.13 / §11.15).
     DerivationMethod, DerivationParameters,
     DeriveKeyRequest, DeriveKeyResponse,
+    // K21 — Re-key / Re-key Key Pair (§6.1.51 / §6.1.52).
+    ReKeyKeyPairRequest, ReKeyKeyPairResponse, ReKeyRequest, ReKeyResponse,
 };
 
 pub use message::{AsynchronousIndicator, BatchErrorContinuationOption, Credential};

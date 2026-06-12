@@ -310,6 +310,17 @@ pub enum Attribute {
     /// attribute pointing to the Symmetric Key or Secret Data object
     /// derived as a result of this operation".
     DerivedObjectLink(String),
+    /// `Replaced Object Link` (0x42019b) — K21: on the replacement
+    /// object created by Re-key / Re-key Key Pair, points at the
+    /// existing (replaced) object: §6.1.51 "For the replacement key,
+    /// the server SHALL create a Replaced Object Link attribute
+    /// pointing to the existing key."
+    ReplacedObjectLink(String),
+    /// `Replacement Object Link` (0x42019c) — K21 mirror on the
+    /// existing object: §6.1.51 "For the existing key, the server
+    /// SHALL create a Replacement Object Link attribute pointing to
+    /// the replacement key."
+    ReplacementObjectLink(String),
     /// `Application Specific Information` (0x420004) Structure —
     /// `ApplicationNamespace` + `ApplicationData` text-string pair.
     /// TL-M-3 step #0 pins a Locate filter by both fields.

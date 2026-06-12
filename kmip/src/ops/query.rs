@@ -148,8 +148,11 @@ pub fn query(deps: &Deps, req: QueryRequest, correlation_id: &str) -> Result<Que
 /// handled op (the corpus gate is *expected ⊆ actual*, so the one-op
 /// growth of the advertised set keeps every MSGENC-* Query transcript
 /// passing).
+///
+/// K21 moved ReKey + ReKeyKeyPair into `HANDLED_OPERATIONS` (§6.1.51
+/// / §6.1.52 handlers) — both were already advertised here, so the
+/// net advertised set is unchanged.
 pub(crate) const ADVERTISED_UNIMPLEMENTED_OPERATIONS: &[Operation] = &[
-    Operation::ReKey,
     Operation::ReCertify,
     Operation::ObtainLease,
     Operation::Validate,
@@ -164,10 +167,10 @@ pub(crate) const ADVERTISED_UNIMPLEMENTED_OPERATIONS: &[Operation] = &[
     // responses (previously missing from the Operation enum entirely).
     // K20 moved DeriveKey out of this list into `HANDLED_OPERATIONS`
     // (implemented §6.1.18 handler) — no net change to the advertised
-    // set, so every MSGENC-* Query transcript keeps passing.
+    // set, so every MSGENC-* Query transcript keeps passing. K21 did
+    // the same for ReKeyKeyPair (and ReKey above).
     Operation::Certify,
     Operation::Cancel,
-    Operation::ReKeyKeyPair,
     Operation::JoinSplitKey,
 ];
 
@@ -250,6 +253,8 @@ mod tests {
         // implemented and therefore newly — honestly — advertised).
         // K20: DeriveKey moved between the sets (47 + 15) — net
         // advertised set unchanged at 62.
+        // K21: ReKey + ReKeyKeyPair moved between the sets (49 + 13)
+        // — net advertised set still 62.
         assert_eq!(ops.len(), 62);
         assert!(ops.contains(&Operation::Sign));
         assert!(ops.contains(&Operation::Encrypt));
@@ -267,10 +272,11 @@ mod tests {
             assert!(ops.contains(&op), "{op:?} must be advertised (K19 handled)");
         }
         // K3 — corpus-required ops newly added to the Operation enum
-        // (K20: DeriveKey is now advertised as a HANDLED op instead).
+        // (K20: DeriveKey, K21: ReKey / ReKeyKeyPair are now
+        // advertised as HANDLED ops instead).
         for op in [
             Operation::DeriveKey, Operation::Certify, Operation::Cancel,
-            Operation::ReKeyKeyPair, Operation::JoinSplitKey,
+            Operation::ReKey, Operation::ReKeyKeyPair, Operation::JoinSplitKey,
         ] {
             assert!(ops.contains(&op), "{op:?} must be advertised (MSGENC-*)");
         }

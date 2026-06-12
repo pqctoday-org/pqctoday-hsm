@@ -1340,3 +1340,115 @@ fn _unused() {
     let _: OffsetDateTime = OffsetDateTime::UNIX_EPOCH;
     let _: ObjectType = ObjectType::PrivateKey;
 }
+
+/// K21 — Re-key (§6.1.51) against the real engine: Create an AES-256
+/// key in-engine, Activate it, Re-key it, then prove the REPLACEMENT
+/// key encrypts/decrypts through the engine path (fresh engine-held
+/// material under a fresh CKA_ID) while the original is Deactivated
+/// with the §6.1.51 link pair in place.
+#[test]
+fn k21_rekeyed_aes_key_encrypts_against_real_engine() {
+    use pqctoday_kmip::kmip30::{
+        ActivateRequest, CreateRequest, DecryptRequest, EncryptRequest, ReKeyRequest, State,
+    };
+    use pqctoday_kmip::ops::activate::activate;
+    use pqctoday_kmip::ops::create::create;
+    use pqctoday_kmip::ops::decrypt::decrypt;
+    use pqctoday_kmip::ops::encrypt::encrypt;
+    use pqctoday_kmip::ops::rekey::rekey;
+
+    let _guard = engine_test_lock();
+    let (ring, deps) = build_deps_with_real_engine_and_ring();
+
+    let c = create(
+        &deps,
+        CreateRequest {
+            object_type: ObjectType::SymmetricKey,
+            template_attribute: vec![
+                Attribute::CryptographicAlgorithm(KmipAlgorithm::Aes),
+                Attribute::CryptographicLength(256),
+                Attribute::CryptographicUsageMask(UsageMask::ENCRYPT | UsageMask::DECRYPT),
+            ],
+        },
+        "k21-create",
+    )
+    .unwrap();
+    activate(&deps, ActivateRequest { uid: c.uid.clone() }, "k21-activate").unwrap();
+
+    // ── Re-key: replacement generated through the same engine path ──
+    let r = rekey(
+        &deps,
+        ReKeyRequest { uid: c.uid.clone(), offset: None, template_attribute: vec![] },
+        "k21-rekey",
+    )
+    .unwrap();
+    assert_ne!(r.uid, c.uid);
+    let calls = p3_calls(&ring, "k21-rekey");
+    assert_eq!(
+        calls,
+        vec![("native::generate_aes_key".to_string(), 0, "CKR_OK".to_string())],
+        "Re-key must generate the replacement inside the engine (Create path)"
+    );
+
+    let new_rec = deps.store.get(&r.uid).unwrap().unwrap();
+    let old_rec = deps.store.get(&c.uid).unwrap().unwrap();
+    // Inheritance + lifecycle + links (Table 404 / §6.1.51).
+    assert_eq!(new_rec.algorithm, KmipAlgorithm::Aes);
+    assert_eq!(new_rec.cryptographic_length, 256);
+    assert_eq!(new_rec.state, State::Active, "AT copied from the Active original");
+    assert_ne!(new_rec.pkcs11_cka_id, old_rec.pkcs11_cka_id, "fresh engine object");
+    assert_eq!(
+        new_rec.links.get("ReplacedObjectLink"),
+        Some(&c.uid),
+        "Replaced Object Link on the replacement"
+    );
+    assert_eq!(
+        old_rec.links.get("ReplacementObjectLink"),
+        Some(&r.uid),
+        "Replacement Object Link on the original"
+    );
+    assert_eq!(old_rec.state, State::Deactivated, "original retires when replacement activates");
+    // K-14 Digest recomputed from the replacement's engine-held value.
+    assert!(new_rec.digest_value.is_some());
+    assert_ne!(new_rec.digest_value, old_rec.digest_value);
+
+    // ── The replacement key encrypts + decrypts via the engine ──────
+    let iv = vec![0x24u8; 12]; // AES-GCM default mechanism, 12-byte IV
+    let plaintext = b"K21: re-keyed AES must encrypt".to_vec();
+    let enc = encrypt(
+        &deps,
+        EncryptRequest {
+            uid: r.uid.clone(),
+            data: plaintext.clone(),
+            iv: Some(iv.clone()),
+            cryptographic_parameters: None,
+            aad: None,
+            init_indicator: None,
+            final_indicator: None,
+            correlation_value: None,
+        },
+        "k21-encrypt",
+    )
+    .expect("re-keyed AES key must encrypt through the engine");
+    assert_ne!(enc.ciphertext, plaintext);
+
+    let mut ct_and_tag = enc.ciphertext.clone();
+    if let Some(tag) = &enc.authenticated_encryption_tag {
+        ct_and_tag.extend_from_slice(tag);
+    }
+    let dec = decrypt(
+        &deps,
+        DecryptRequest {
+            uid: r.uid.clone(),
+            data: ct_and_tag,
+            iv: Some(iv),
+            cryptographic_parameters: None,
+            aad: None,
+        },
+        "k21-decrypt",
+    )
+    .expect("re-keyed AES key must decrypt its own ciphertext");
+    assert_eq!(dec.data, plaintext);
+
+    let _ = softhsmrustv3::native::session::finalize();
+}
