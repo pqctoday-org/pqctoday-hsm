@@ -46,6 +46,7 @@
 #include <collections/enumerator.h>
 #include <credentials/auth_cfg.h>
 #include <credentials/sets/mem_cred.h>
+#include <selectors/traffic_selector.h>
 
 /*─────────────────────────────────────────────────────────────────────*/
 /* Globals                                                             */
@@ -189,6 +190,18 @@ void wasm_setup_config(int unused)
     /* Lazy-init backend + storage. */
     if (!peer_cfgs) peer_cfgs = linked_list_create();
 
+    /* Register the Tier A stub kernel_ipsec_t backend UNCONDITIONALLY and
+     * FIRST. It used to be registered only inside the WASM_CHILDSA=1 branch
+     * below, which raced the env-var plumbing: if JS set WASM_CHILDSA after
+     * (or re-ran) setup, the initiator hit "unable to allocate SPI from
+     * kernel" because kernel_interface_t::get_spi returns NOT_SUPPORTED
+     * while this->ipsec is NULL (kernel_interface.c:177-186 — no KERNEL_NET
+     * backend is needed for the SPI path). The stub is harmless when the
+     * IKE_SA is childless, so always register it before any peer_cfg exists
+     * and thus before any CHILD_CREATE task can possibly run on either
+     * worker. wasm_kernel_register() is idempotent. */
+    wasm_kernel_register();
+
     switch (wasm_proposal_mode)
     {
         case 1: ike_prop = proposal_ike_pqc;       break;
@@ -217,17 +230,15 @@ void wasm_setup_config(int unused)
     ike_data.local_port  = 500;
     ike_data.remote_port = 500;
     /* Childless IKE_SA per RFC 6023: by default skip the piggybacked
-     * CHILD_SA in IKE_AUTH because the WASM build has no kernel IPSec
-     * interface and CHILD_SA SPI allocation fails ("unable to allocate SPI
-     * from kernel"). The hub can opt in to a real CHILD_SA negotiation via
-     * WASM_CHILDSA=1 — we then register the Tier A stub kernel backend
-     * (kernel_wasm.c) so get_spi/add_sa/add_policy succeed, and use
-     * CHILDLESS_NEVER so the CHILD_SA is negotiated in IKE_AUTH. */
+     * CHILD_SA in IKE_AUTH. The hub can opt in to a real CHILD_SA
+     * negotiation via WASM_CHILDSA=1 — the Tier A stub kernel backend
+     * (kernel_wasm.c) is always registered (top of this function) so
+     * get_spi/add_sa/add_policy succeed, and CHILDLESS_NEVER makes the
+     * CHILD_SA negotiate in IKE_AUTH. */
     {
         const char *childsa_env = getenv("WASM_CHILDSA");
         if (childsa_env && !strcmp(childsa_env, "1"))
         {
-            wasm_kernel_register();
             ike_data.childless = CHILDLESS_NEVER;
         }
         else
@@ -434,6 +445,39 @@ void wasm_setup_config(int unused)
     child_cfg = child_cfg_create("wasm-child", &child_data);
     child_cfg->add_proposal(child_cfg, proposal_create_from_string(PROTO_ESP,
                                                                    (char *)proposal_esp));
+
+    /* Role-aware traffic selectors. Without any configured TS the child_cfg's
+     * traffic_selector_list_t is empty, so the responder's narrowing in
+     * child_cfg_select_ts() (child_cfg.c) intersects the initiator's TSi/TSr
+     * against an empty set and yields zero selectors → charon logs
+     * "traffic selectors ... unacceptable" and replies N(TS_UNACCEPTABLE).
+     * Mirror how stroke/vici derive TS from leftsubnet/rightsubnet: local TS
+     * is our own /32, remote TS is the peer's /32 (matching the hard-coded
+     * ike_cfg addresses above), all protocols, all ports. The initiator
+     * proposes exactly these, and the responder's mirrored config accepts
+     * them as an exact (non-narrowed) match. */
+    {
+        const char *ts_role = getenv("WASM_ROLE");
+        bool ts_initiator = (ts_role && !strcmp(ts_role, "initiator"));
+        char *local_cidr  = ts_initiator ? "192.168.0.1/32" : "192.168.0.2/32";
+        char *remote_cidr = ts_initiator ? "192.168.0.2/32" : "192.168.0.1/32";
+        traffic_selector_t *ts_local =
+            traffic_selector_create_from_cidr(local_cidr, 0, 0, 65535);
+        traffic_selector_t *ts_remote =
+            traffic_selector_create_from_cidr(remote_cidr, 0, 0, 65535);
+
+        if (ts_local)
+        {
+            child_cfg->add_traffic_selector(child_cfg, TRUE, ts_local);
+        }
+        if (ts_remote)
+        {
+            child_cfg->add_traffic_selector(child_cfg, FALSE, ts_remote);
+        }
+        DBG1(DBG_CFG, "WASM: child_cfg traffic selectors local=%s remote=%s",
+             local_cidr, remote_cidr);
+    }
+
     peer_cfg->add_child_cfg(peer_cfg, child_cfg);
 
     peer_cfgs->insert_last(peer_cfgs, peer_cfg);
@@ -492,6 +536,11 @@ void wasm_initiate(int unused)
     enumerator_t *e;
     child_cfg_t *child_cfg = NULL;
     enumerator_t *ce;
+
+    /* Idempotent retry — guarantees the stub kernel is in place before the
+     * CHILD_CREATE task this initiate() queues can call get_spi, even if an
+     * earlier registration attempt ran before charon->kernel existed. */
+    wasm_kernel_register();
 
     if (!peer_cfgs) return;
     e = peer_cfgs->create_enumerator(peer_cfgs);
