@@ -1249,42 +1249,6 @@ typedef CK_ULONG          CK_MECHANISM_TYPE;
 
 #define CKM_VENDOR_DEFINED             0x80000000UL
 
-/* PQCToday vendor extensions
- *
- * Everything below is a PQCToday/SoftHSMv3 local invention and lives in
- * the vendor-defined space.  None of these names or values appear in the
- * canonical OASIS PKCS#11 v3.2 pkcs11t.h
- * (docs/refs/pkcs11t-canonical-v3.2.h).  Do NOT move them back into
- * OASIS-assigned ranges: 0x4033/0x4034 are CKM_HSS and
- * CKM_XMSS_KEY_PAIR_GEN, and 0x105B/0x105C, 0x1021/0x1022 are reserved
- * for future OASIS assignment.
- */
-
-/* KMAC Mechanisms (Vendor Defined for SoftHSMv3 PQC/v3.2 testing) */
-#define CKM_KMAC_128                   (CKM_VENDOR_DEFINED | 0x00000100UL)
-#define CKM_KMAC_256                   (CKM_VENDOR_DEFINED | 0x00000101UL)
-
-/* Our internal alias for Pre-hash EdDSA (phFlag=1) */
-#define CKM_EDDSA_PH                   (CKM_VENDOR_DEFINED | 0x00001057UL)
-
-/* Montgomery-curve ECDH aliases (X25519/X448 key agreement).
- * Formerly squatted on 0x4033/0x4034 (= CKM_HSS / CKM_XMSS_KEY_PAIR_GEN). */
-#define CKM_X25519                     (CKM_VENDOR_DEFINED | 0x00001058UL)
-#define CKM_X448                       (CKM_VENDOR_DEFINED | 0x00001059UL)
-
-/* BIP32 HD Derivation Mechanisms.
- * Formerly bare 0x105B/0x105C (OASIS-unassigned); the engine still accepts
- * those values at C_DeriveKey dispatch as deprecated aliases. */
-#define CKM_BIP32_MASTER_DERIVE        (CKM_VENDOR_DEFINED | 0x0000105BUL)
-#define CKM_BIP32_CHILD_DERIVE         (CKM_VENDOR_DEFINED | 0x0000105CUL)
-
-/* BIP32 Attributes (formerly bare 0x1021/0x1022 — OASIS-unassigned). */
-#define CKA_BIP32_CHAIN_CODE           (CKA_VENDOR_DEFINED | 0x00001021UL)
-#define CKA_BIP32_CHILD_INDEX          (CKA_VENDOR_DEFINED | 0x00001022UL)
-
-/* BIP32 child-derive parameter flag (param flag, not a registry codepoint) */
-#define CKF_BIP32_HARDENED             0x80000000UL
-
 typedef CK_MECHANISM_TYPE CK_PTR CK_MECHANISM_TYPE_PTR;
 
 
@@ -2130,18 +2094,6 @@ typedef struct CK_PKCS5_PBKD2_PARAMS {
 } CK_PKCS5_PBKD2_PARAMS;
 
 typedef CK_PKCS5_PBKD2_PARAMS CK_PTR CK_PKCS5_PBKD2_PARAMS_PTR;
-
-/* BIP32 Child Derivation Parameter Struct
- * (CKF_BIP32_HARDENED is defined in the PQCToday vendor extensions section) */
-typedef CK_ULONG CK_BIP32_CHILD_DERIVE_PARAMS_FLAGS;
-typedef CK_ULONG CK_BIP32_CHILD_DERIVE_PARAMS_INDEX;
-
-typedef struct CK_BIP32_CHILD_DERIVE_PARAMS {
-    CK_VOID_PTR pNext;
-    CK_BIP32_CHILD_DERIVE_PARAMS_FLAGS flags;
-    CK_BIP32_CHILD_DERIVE_PARAMS_INDEX index;
-} CK_BIP32_CHILD_DERIVE_PARAMS;
-typedef CK_BIP32_CHILD_DERIVE_PARAMS CK_PTR CK_BIP32_CHILD_DERIVE_PARAMS_PTR;
 
 /* CK_PKCS5_PBKD2_PARAMS2 is a corrected version of the CK_PKCS5_PBKD2_PARAMS
  * structure that provides the parameters to the CKM_PKCS5_PBKD2 mechanism

@@ -60,8 +60,14 @@ pub const CKA_PUBLIC_EXPONENT: u32 = 0x0000_0122; // PKCS#11 v3.2 §2.1.2 — RS
 pub const CKA_VALUE_LEN: u32 = 0x0000_0161;
 pub const CKA_EC_PARAMS: u32 = 0x0000_0180;
 pub const CKA_EC_POINT: u32 = 0x0000_0181;
-pub const CKA_BIP32_CHAIN_CODE: u32 = 0x0000_1021;
-pub const CKA_BIP32_CHILD_INDEX: u32 = 0x0000_1022;
+// PQCToday vendor attrs (CKA_VENDOR_DEFINED | 0x1021/0x1022). Formerly bare
+// 0x1021/0x1022, which squat OASIS-reserved space — see pkcs11t.h vendor
+// extensions section. Legacy bare values still accepted (CKA_BIP32_*_LEGACY).
+pub const CKA_BIP32_CHAIN_CODE: u32 = 0x8000_1021;
+pub const CKA_BIP32_CHILD_INDEX: u32 = 0x8000_1022;
+// Deprecated aliases — accepted on read paths for in-the-wild JS callers.
+pub const CKA_BIP32_CHAIN_CODE_LEGACY: u32 = 0x0000_1021;
+pub const CKA_BIP32_CHILD_INDEX_LEGACY: u32 = 0x0000_1022;
 pub const CKA_PUBLIC_KEY_INFO: u32 = 0x0000_0129; // PKCS#11 v3.2 — DER SubjectPublicKeyInfo
 pub const CKA_PARAMETER_SET: u32 = 0x0000_061d;
 // PKCS#11 v3.2 — deterministic keygen seed (ξ for ML-DSA, d‖z for ML-KEM).
@@ -101,7 +107,8 @@ pub const CKA_APPLICATION: u32 = 0x0000_0010;
 pub const CKA_OBJECT_ID: u32 = 0x0000_0012;
 // PKCS#11 v3.2 §4.4.1 — token-generated unique object identifier (read-only,
 // assigned by the engine at object creation; see state::allocate_handle).
-pub const CKA_UNIQUE_ID: u32 = 0x0000_0017;
+// Canonical OASIS value 0x4 (the local header had drifted to 0x17).
+pub const CKA_UNIQUE_ID: u32 = 0x0000_0004;
 pub const CKA_SENSITIVE: u32 = 0x0000_0103;
 pub const CKA_ENCRYPT: u32 = 0x0000_0104;
 pub const CKA_DECRYPT: u32 = 0x0000_0105;
@@ -255,8 +262,16 @@ pub const CK_SP800_108_BYTE_ARRAY: u32 = 0x0000_0004;
 
 // EC
 // ----- HD Derivation (BIP32 / SLIP10) -----
-pub const CKM_BIP32_MASTER_DERIVE: u32 = 0x0000_105B;
-pub const CKM_BIP32_CHILD_DERIVE: u32 = 0x0000_105C;
+// PQCToday vendor mechanisms (CKM_VENDOR_DEFINED | 0x105B/0x105C). Formerly
+// bare 0x105B/0x105C, which squat OASIS-reserved space — see pkcs11t.h
+// vendor extensions section. Only the vendor codepoints are advertised;
+// the legacy bare values are still ACCEPTED at C_DeriveKey dispatch as
+// deprecated aliases for in-the-wild JS callers.
+pub const CKM_BIP32_MASTER_DERIVE: u32 = 0x8000_105B;
+pub const CKM_BIP32_CHILD_DERIVE: u32 = 0x8000_105C;
+// Deprecated aliases — do NOT advertise; dispatch-accept only.
+pub const CKM_BIP32_MASTER_DERIVE_LEGACY: u32 = 0x0000_105B;
+pub const CKM_BIP32_CHILD_DERIVE_LEGACY: u32 = 0x0000_105C;
 pub const CKF_BIP32_HARDENED: u32 = 0x8000_0000;
 
 pub const CKM_EC_KEY_PAIR_GEN: u32 = 0x0000_1040;
