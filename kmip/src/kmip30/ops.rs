@@ -353,6 +353,16 @@ pub struct KeyWrappingSpec {
     /// `Encryption Key Information / Cryptographic Parameters` —
     /// `BlockCipherMode=NISTKeyWrap` selects AES-KW.
     pub cryptographic_parameters: Option<CryptographicParameters>,
+    /// §4.x `Encoding Option` — how the cleartext was encoded before
+    /// wrapping: `0x01` No Encoding (raw key material), `0x02` TTLV
+    /// Encoding (the spec default when absent). Values verified from
+    /// the "Encoding Option" enum in `kmip-spec-3.0-tags-enums.json`.
+    pub encoding_option: Option<u32>,
+    /// K17 — `MAC/Signature Key Information` was present on an inbound
+    /// `KeyWrappingData` (Register). Only Encrypt-method wrapping is
+    /// supported; the unwrap path rejects this with
+    /// `UnsupportedCryptographicParameters (0x3e)`.
+    pub mac_signature_key_information_present: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]

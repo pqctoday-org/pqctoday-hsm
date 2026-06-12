@@ -346,6 +346,8 @@ mod tests {
             wrapping_method: 0x01,
             encryption_key_uid: "kek".into(),
             cryptographic_parameters: None,
+            encoding_option: None,
+            mac_signature_key_information_present: false,
         };
         let r = get(&d, GetRequest { uid: "u".into(), key_format_type: None, key_wrapping_specification: Some(spec.clone()) }, "c").unwrap();
         assert_eq!(r.key_block.key_wrapping_data, Some(spec));
@@ -370,6 +372,8 @@ mod tests {
             wrapping_method: 0x01,
             encryption_key_uid: "kek".into(),
             cryptographic_parameters: None,
+            encoding_option: None,
+            mac_signature_key_information_present: false,
         };
         let err = get(&d, GetRequest { uid: "u".into(), key_format_type: None, key_wrapping_specification: Some(spec) }, "c").unwrap_err();
         assert_eq!(err.result_reason(), crate::error::ResultReason::NotExtractable);
