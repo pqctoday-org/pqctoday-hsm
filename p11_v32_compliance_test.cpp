@@ -7,6 +7,8 @@
 #include <vector>
 #include <iostream>
 #include <fstream>
+#include <iomanip>
+#include <ctime>
 
 // OpenSSL — independent oracle for KCV reference computation (SHA-1 + AES-ECB).
 #include <openssl/sha.h>
@@ -25,15 +27,16 @@ using json = nlohmann::json;
 
 #include "src/lib/pkcs11/pkcs11.h"
 
-// Fallback definitions for new mechanisms in case they're not in the local pkcs11.h
+// Fallback definitions for new mechanisms in case they're not in the local pkcs11.h.
+// Values MUST match the canonical OASIS PKCS#11 v3.2 pkcs11t.h.
 #ifndef CKM_ML_KEM
-#define CKM_ML_KEM 0x00001080
+#define CKM_ML_KEM 0x00000017
 #endif
 #ifndef CKM_ML_DSA
-#define CKM_ML_DSA 0x00001084
+#define CKM_ML_DSA 0x0000001d
 #endif
 #ifndef CKM_SLH_DSA
-#define CKM_SLH_DSA 0x0000108A
+#define CKM_SLH_DSA 0x0000002e
 #endif
 #ifndef CKM_AES_CTR
 #define CKM_AES_CTR 0x00001086
@@ -77,14 +80,16 @@ using json = nlohmann::json;
 #ifndef CKM_SHA3_256
 #define CKM_SHA3_256 0x000002b0UL
 #endif
+// BIP32 is not part of OASIS v3.2 — this fork carries it in vendor space
+// (see src/lib/pkcs11/pkcs11t.h: CKM_VENDOR_DEFINED | 0x105B etc.)
 #ifndef CKM_BIP32_MASTER_DERIVE
-#define CKM_BIP32_MASTER_DERIVE 0x0000105BUL
+#define CKM_BIP32_MASTER_DERIVE (0x80000000UL | 0x0000105BUL)
 #endif
 #ifndef CKM_BIP32_CHILD_DERIVE
-#define CKM_BIP32_CHILD_DERIVE 0x0000105CUL
+#define CKM_BIP32_CHILD_DERIVE (0x80000000UL | 0x0000105CUL)
 #endif
 #ifndef CKA_BIP32_CHAIN_CODE
-#define CKA_BIP32_CHAIN_CODE 0x00000201UL
+#define CKA_BIP32_CHAIN_CODE (0x80000000UL | 0x00001021UL)
 #endif
 #ifndef CKM_SP800_108_FEEDBACK_KDF
 #define CKM_SP800_108_FEEDBACK_KDF 0x000003ADUL
@@ -113,6 +118,8 @@ std::string opt_engine = "./build_fresh/src/lib/libsofthsmv3.dylib";
 std::string opt_category = "all";
 std::string opt_report = "compliance_report";
 std::string opt_pin = "1234";
+std::string opt_workdir = "/tmp/softhsm-compliance-test"; // token dir + softhsm2.conf live here
+std::string opt_engine_commit = "";                        // optional engine git commit for the report header
 
 // Token State
 CK_FUNCTION_LIST_PTR fl;
@@ -123,6 +130,10 @@ json report = json::object();
 int total_pass = 0;
 int total_fail = 0;
 int total_skip = 0;
+// XFAIL = known, documented engine non-conformance (pre-existing engine
+// behavior outside the test suite's scope to fix). Reported loudly in the
+// summary but does not flip the process exit code — only unexpected FAILs do.
+int total_xfail = 0;
 
 
 bool refresh_session() {
@@ -144,6 +155,8 @@ void print_usage() {
     printf("  --category <cat>   Test category: all, init, discovery, pqc-kem, pqc-dsa, hbs, attr (default: %s)\n", opt_category.c_str());
     printf("  --report <path>    Output bases (e.g. 'rep' creates 'rep.md' and 'rep.json') (default: %s)\n", opt_report.c_str());
     printf("  --pin <pin>        Token PIN (default: %s)\n", opt_pin.c_str());
+    printf("  --workdir <dir>    Scratch dir for softhsm2.conf + token store (default: %s)\n", opt_workdir.c_str());
+    printf("  --engine-commit <sha>  Engine git commit recorded in the report header\n");
 }
 
 void parse_args(int argc, char** argv) {
@@ -152,16 +165,20 @@ void parse_args(int argc, char** argv) {
         {"category", required_argument, 0, 'c'},
         {"report", required_argument, 0, 'r'},
         {"pin", required_argument, 0, 'p'},
+        {"workdir", required_argument, 0, 'w'},
+        {"engine-commit", required_argument, 0, 'g'},
         {"help", no_argument, 0, 'h'},
         {0, 0, 0, 0}
     };
     int opt;
-    while ((opt = getopt_long(argc, argv, "e:c:r:p:h", long_options, nullptr)) != -1) {
+    while ((opt = getopt_long(argc, argv, "e:c:r:p:w:g:h", long_options, nullptr)) != -1) {
         switch (opt) {
             case 'e': opt_engine = optarg; break;
             case 'c': opt_category = optarg; break;
             case 'r': opt_report = optarg; break;
             case 'p': opt_pin = optarg; break;
+            case 'w': opt_workdir = optarg; break;
+            case 'g': opt_engine_commit = optarg; break;
             case 'h': print_usage(); exit(0);
         }
     }
@@ -180,16 +197,43 @@ void record_result(const std::string& category, const std::string& test_name, co
     if (status == "PASS") total_pass++;
     else if (status == "FAIL") total_fail++;
     else if (status == "SKIP") total_skip++;
+    else if (status == "XFAIL") total_xfail++;
+}
+
+// ── Advertisement helpers ────────────────────────────────────────────────────
+// PASS criteria policy: a result may only count as PASS if the behavior is
+// spec-conformant for a feature the token ADVERTISES. These helpers query the
+// token's advertised mechanism list / mechanism flags so tests can decide
+// between "assert real success" (advertised) and "explicit SKIP" (not
+// advertised). "Couldn't even start the operation" must never read as PASS.
+bool mech_advertised(CK_MECHANISM_TYPE mech) {
+    CK_ULONG count = 0;
+    if (fl->C_GetMechanismList(0, NULL_PTR, &count) != CKR_OK || count == 0) return false;
+    std::vector<CK_MECHANISM_TYPE> mechs(count);
+    if (fl->C_GetMechanismList(0, mechs.data(), &count) != CKR_OK) return false;
+    for (CK_ULONG i = 0; i < count; i++) if (mechs[i] == mech) return true;
+    return false;
 }
 
 bool init_token() {
-    system("rm -rf /tmp/softhsm-compliance-test && mkdir -p /tmp/softhsm-compliance-test/tokens");
-    FILE* f = fopen("/tmp/softhsm-compliance-test/softhsm2.conf", "w");
-    fprintf(f, "directories.tokendir = /tmp/softhsm-compliance-test/tokens/\n");
+    // Fully hermetic: scratch conf + token store under opt_workdir (recreated
+    // from scratch on every run; override with --workdir for ctest isolation).
+    std::string setup = "rm -rf '" + opt_workdir + "' && mkdir -p '" + opt_workdir + "/tokens'";
+    if (system(setup.c_str()) != 0) {
+        record_result("Init", "WorkdirSetup", "FAIL", "could not create " + opt_workdir);
+        return false;
+    }
+    std::string confPath = opt_workdir + "/softhsm2.conf";
+    FILE* f = fopen(confPath.c_str(), "w");
+    if (!f) {
+        record_result("Init", "WorkdirSetup", "FAIL", "could not write " + confPath);
+        return false;
+    }
+    fprintf(f, "directories.tokendir = %s/tokens/\n", opt_workdir.c_str());
     fprintf(f, "objectstore.backend = file\nlog.level = DEBUG\nslots.removable = false\n");
-    fprintf(f, "log.backend = file\nlog.file = /tmp/softhsm-compliance-test/softhsm2.log\n");
+    fprintf(f, "log.backend = file\nlog.file = %s/softhsm2.log\n", opt_workdir.c_str());
     fclose(f);
-    setenv("SOFTHSM2_CONF", "/tmp/softhsm-compliance-test/softhsm2.conf", 1);
+    setenv("SOFTHSM2_CONF", confPath.c_str(), 1);
 
     void* handle = dlopen(opt_engine.c_str(), RTLD_NOW);
     if (!handle) {
@@ -273,22 +317,28 @@ void test_mechanism_discovery() {
         if (mechs[i] == 0x00004021 /* CKM_CHACHA20_POLY1305 */) has_chacha = true;
     }
 
-    record_result("Discovery", "CKM_ML_KEM", has_ml_kem ? "PASS" : "FAIL", "PQC KEM Support");
-    record_result("Discovery", "CKM_ML_DSA", has_ml_dsa ? "PASS" : "FAIL", "PQC DSA Support");
-    record_result("Discovery", "CKM_SLH_DSA", has_slh_dsa ? "PASS" : "FAIL", "PQC SLH-DSA Support");
-    record_result("Discovery", "CKM_XMSS", has_xmss ? "PASS" : "FAIL", "PQC XMSS Support");
-    record_result("Discovery", "CKM_AES_CTR", has_aes_ctr ? "PASS" : "FAIL", "AES CTR Support (v3.2/5G)");
-    record_result("Discovery", "CKM_CHACHA20_POLY1305", has_chacha ? "PASS" : "FAIL", "ChaCha20 Support (RFC 7539)");
-    record_result("Discovery", "CKM_HKDF_DERIVE", has_hkdf ? "PASS" : "FAIL", "HKDF Support (v3.0/5G)");
-    
-    // Explicit hard FAIL for missing RIPEMD160
-    record_result("Discovery", "CKM_RIPEMD160", has_ripmd ? "PASS" : "FAIL", "RIPEMD160 Support (Strict Audit)");
+    // PKCS#11 v3.2 mandates NO particular mechanism set — presence/absence of
+    // any individual mechanism is informational, not a conformance criterion.
+    // Advertised → PASS (informational); not advertised → SKIP, never FAIL.
+    auto report_presence = [](const char* name, bool present, const std::string& what) {
+        record_result("Discovery", name, present ? "PASS" : "SKIP",
+                      present ? what + " advertised"
+                              : what + " not advertised (informational — v3.2 mandates no mechanism set)");
+    };
+    report_presence("CKM_ML_KEM", has_ml_kem, "PQC KEM support");
+    report_presence("CKM_ML_DSA", has_ml_dsa, "PQC DSA support");
+    report_presence("CKM_SLH_DSA", has_slh_dsa, "PQC SLH-DSA support");
+    report_presence("CKM_XMSS", has_xmss, "PQC XMSS support");
+    report_presence("CKM_AES_CTR", has_aes_ctr, "AES CTR support (v3.2/5G)");
+    report_presence("CKM_CHACHA20_POLY1305", has_chacha, "ChaCha20 support (RFC 7539)");
+    report_presence("CKM_HKDF_DERIVE", has_hkdf, "HKDF support (v3.0/5G)");
+    report_presence("CKM_RIPEMD160", has_ripmd, "RIPEMD160 support");
 }
 
 void test_key_attributes() {
     CK_OBJECT_CLASS pubClass = CKO_PUBLIC_KEY;
     CK_OBJECT_CLASS privClass = CKO_PRIVATE_KEY;
-    CK_KEY_TYPE ktypeKem = 0x00000048; // CKK_ML_KEM
+    CK_KEY_TYPE ktypeKem = 0x00000049; // CKK_ML_KEM (v3.2 pkcs11t.h; 0x48 is CKK_XMSSMT)
     CK_ULONG paramSetKem = 2; // CKP_ML_KEM_768
     CK_BBOOL bTrue = CK_TRUE, bFalse = CK_FALSE;
     CK_MECHANISM mech = { CKM_ML_KEM_KEY_PAIR_GEN, NULL_PTR, 0 };
@@ -356,23 +406,26 @@ void test_key_attributes() {
             record_result("Attributes", "CKA_HSS_KEYS_REMAINING_Gen", "PASS", "Remaining=" + std::to_string(remaining1));
             
             // SoftHSM core requires we consume a key and test state decay
-            // mechanism 0x00000045UL is CKM_HSS
-            CK_MECHANISM hssSignMech = { 0x00000045UL, NULL_PTR, 0 };
+            CK_MECHANISM hssSignMech = { 0x00004033UL /* CKM_HSS (v3.2 pkcs11t.h) */, NULL_PTR, 0 };
             CK_RV rvS = fl->C_SignInit(hSess, &hssSignMech, hssPriv);
             if (rvS == CKR_OK) {
                 CK_BYTE data[] = "data";
                 CK_BYTE sig[5000]; CK_ULONG sigLen = sizeof(sig);
                 fl->C_Sign(hSess, data, 4, sig, &sigLen);
-                
+
                 CK_ULONG remaining2 = 0;
                 remAttr.pValue = &remaining2;
                 fl->C_GetAttributeValue(hSess, hssPriv, &remAttr, 1);
-                
+
                 if (remaining2 < remaining1) {
                     record_result("Attributes", "CKA_HSS_KEYS_REMAINING_Consume", "PASS", "Count decreased correctly");
                 } else {
                     record_result("Attributes", "CKA_HSS_KEYS_REMAINING_Consume", "FAIL", "Count did not decay");
                 }
+            } else {
+                // Never let "couldn't even start the operation" go unrecorded.
+                record_result("Attributes", "CKA_HSS_KEYS_REMAINING_Consume", "FAIL",
+                              "C_SignInit(CKM_HSS) failed, RV=" + std::to_string(rvS));
             }
         } else {
             record_result("Attributes", "CKA_HSS_KEYS_REMAINING", "FAIL", "Missing attribute from Private Key. RV=" + std::to_string(rv));
@@ -440,7 +493,7 @@ void check_key_profile(std::string cat, std::string runName, CK_OBJECT_HANDLE hP
 void test_pqc_kem() {
     CK_OBJECT_CLASS pubClass = CKO_PUBLIC_KEY;
     CK_OBJECT_CLASS privClass = CKO_PRIVATE_KEY;
-    CK_KEY_TYPE ktypeKem = 0x00000048; // CKK_ML_KEM
+    CK_KEY_TYPE ktypeKem = 0x00000049; // CKK_ML_KEM (v3.2 pkcs11t.h; 0x48 is CKK_XMSSMT)
     CK_BBOOL bTrue = CK_TRUE, bFalse = CK_FALSE;
     CK_MECHANISM mech = { CKM_ML_KEM_KEY_PAIR_GEN, NULL_PTR, 0 };
     
@@ -974,7 +1027,8 @@ void test_multipart_eddsa() {
     CK_OBJECT_CLASS privClass = CKO_PRIVATE_KEY;
     CK_KEY_TYPE edType = CKK_EC_EDWARDS;
     CK_BBOOL bTrue = CK_TRUE, bFalse = CK_FALSE;
-    // Ed25519 OID (DER encoded): 1.3.101.112 (RFC 8037)
+    // CKA_EC_PARAMS as DER PrintableString curve name "edwards25519"
+    // (PKCS#11 v3.2 §6.3.3 CurveName choice, RFC 8032 name — NOT the OID form)
     CK_BYTE oid_ed25519[] = { 0x13, 0x0c, 0x65, 0x64, 0x77, 0x61, 0x72, 0x64, 0x73, 0x32, 0x35, 0x35, 0x31, 0x39 };
 
     CK_ATTRIBUTE pubTmpl[] = {
@@ -1120,37 +1174,91 @@ void test_v32_kdfs() {
     rv = fl->C_DeriveKey(hSess, &pbMech, hBaseKey, deriveTmpl, 7, &hDerived1);
     record_result("KDF", "CKM_PKCS5_PBKD2", rv == CKR_OK ? "PASS" : "FAIL", "RV=" + std::to_string(rv));
     
-    // Test SP800-108 Counter
+    // Test SP800-108 Counter.
+    // Per PKCS#11 v3.2 §6.44, prfType MUST be a keyed MAC mechanism
+    // (e.g. CKM_SHA256_HMAC, CKM_AES_CMAC) — a bare hash like CKM_SHA256 is
+    // NOT a valid PRF. Data params use the spec CK_PRF_DATA_TYPE values:
+    // CK_SP800_108_ITERATION_VARIABLE (counter format) and
+    // CK_SP800_108_BYTE_ARRAY (label/context fixed input).
     CK_BYTE label[] = "label";
     CK_BYTE context[] = "context";
+    CK_SP800_108_COUNTER_FORMAT counterFmt = { CK_FALSE /* big-endian */, 32 };
     CK_PRF_DATA_PARAM prfParams[] = {
-        { 1 /* CK_SP800_108_INITIAL_COUNTER */, NULL_PTR, 0 }, 
-        { 2 /* CK_SP800_108_LABEL */, label, sizeof(label)-1 },
-        { 3 /* CK_SP800_108_CONTEXT */, context, sizeof(context)-1 }
+        { CK_SP800_108_ITERATION_VARIABLE, &counterFmt, sizeof(counterFmt) },
+        { CK_SP800_108_BYTE_ARRAY, label, sizeof(label)-1 },
+        { CK_SP800_108_BYTE_ARRAY, context, sizeof(context)-1 }
     };
+
+    // 1. Positive: spec-correct HMAC PRF (CKM_SHA256_HMAC).
     CK_SP800_108_KDF_PARAMS ctrParams = {
-        0x00000250UL /* CKM_SHA256 */,
-        3, prfParams, 0, NULL_PTR
+        CKM_SHA256_HMAC, 3, prfParams, 0, NULL_PTR
     };
-    CK_MECHANISM ctrMech = { 0x000003acUL /* CKM_SP800_108_COUNTER_KDF */, &ctrParams, sizeof(ctrParams) };
+    CK_MECHANISM ctrMech = { CKM_SP800_108_COUNTER_KDF, &ctrParams, sizeof(ctrParams) };
     CK_OBJECT_HANDLE hDerived2;
     rv = fl->C_DeriveKey(hSess, &ctrMech, hBaseKey, deriveTmpl, 7, &hDerived2);
-    if (rv == CKR_MECHANISM_INVALID || rv == CKR_FUNCTION_NOT_SUPPORTED) {
-        record_result("KDF", "CKM_SP800_108_COUNTER_KDF", "SKIP", "Mechanism unavailable");
+    if (!mech_advertised(CKM_SP800_108_COUNTER_KDF)) {
+        record_result("KDF", "CKM_SP800_108_COUNTER_KDF", "SKIP", "Mechanism not advertised");
+    } else if (rv == CKR_OK) {
+        record_result("KDF", "CKM_SP800_108_COUNTER_KDF", "PASS", "HMAC-SHA256 PRF, RV=0");
     } else {
-        record_result("KDF", "CKM_SP800_108_COUNTER_KDF", rv == CKR_OK ? "PASS" : "FAIL", "RV=" + std::to_string(rv));
+        // KNOWN ENGINE BUG: SoftHSM_keygen.cpp ckmToDigestName() maps only bare
+        // hash mechanisms (CKM_SHA256 et al.) + CKM_AES_CMAC; the spec-correct
+        // CKM_SHA256_HMAC PRF identifier is rejected with MECHANISM_PARAM_INVALID.
+        record_result("KDF", "CKM_SP800_108_COUNTER_KDF", "XFAIL",
+                      "ENGINE BUG: spec PRF CKM_SHA256_HMAC rejected, RV=" + std::to_string(rv) +
+                      " (engine only accepts bare-hash PRF identifiers)");
     }
 
-    // SP800-108 Feedback KDF
+    // 2. Negative: bare CKM_SHA256 as PRF MUST be rejected (not a keyed MAC).
+    CK_SP800_108_KDF_PARAMS ctrParamsBad = {
+        CKM_SHA256, 3, prfParams, 0, NULL_PTR
+    };
+    CK_MECHANISM ctrMechBad = { CKM_SP800_108_COUNTER_KDF, &ctrParamsBad, sizeof(ctrParamsBad) };
+    CK_OBJECT_HANDLE hDerivedBad;
+    rv = fl->C_DeriveKey(hSess, &ctrMechBad, hBaseKey, deriveTmpl, 7, &hDerivedBad);
+    if (!mech_advertised(CKM_SP800_108_COUNTER_KDF)) {
+        record_result("KDF", "SP800_108_BareHash_PRF_Rejected", "SKIP", "Mechanism not advertised");
+    } else if (rv == CKR_MECHANISM_PARAM_INVALID || rv == CKR_ARGUMENTS_BAD) {
+        record_result("KDF", "SP800_108_BareHash_PRF_Rejected", "PASS",
+                      "bare CKM_SHA256 PRF correctly rejected, RV=" + std::to_string(rv));
+    } else {
+        // KNOWN ENGINE BUG (laxity): the engine accepts a bare hash mechanism as
+        // the SP800-108 PRF. The spec requires a keyed MAC mechanism. Genuine
+        // engine non-conformance — reported, NOT fixed in this test-only slice.
+        record_result("KDF", "SP800_108_BareHash_PRF_Rejected", "XFAIL",
+                      "ENGINE BUG: bare CKM_SHA256 accepted as PRF (RV=" + std::to_string(rv) +
+                      "); spec requires a keyed MAC mechanism");
+    }
+
+    // 3. Positive with a PRF identifier the spec allows AND the engine supports:
+    //    CKM_AES_CMAC (key bytes interpreted as AES-256 from 32-byte base key).
+    CK_SP800_108_KDF_PARAMS ctrParamsCmac = {
+        CKM_AES_CMAC, 3, prfParams, 0, NULL_PTR
+    };
+    CK_MECHANISM ctrMechCmac = { CKM_SP800_108_COUNTER_KDF, &ctrParamsCmac, sizeof(ctrParamsCmac) };
+    CK_OBJECT_HANDLE hDerivedCmac;
+    rv = fl->C_DeriveKey(hSess, &ctrMechCmac, hBaseKey, deriveTmpl, 7, &hDerivedCmac);
+    if (!mech_advertised(CKM_SP800_108_COUNTER_KDF)) {
+        record_result("KDF", "CKM_SP800_108_COUNTER_KDF_CMAC", "SKIP", "Mechanism not advertised");
+    } else {
+        record_result("KDF", "CKM_SP800_108_COUNTER_KDF_CMAC", rv == CKR_OK ? "PASS" : "FAIL",
+                      "AES-CMAC PRF, RV=" + std::to_string(rv));
+    }
+
+    // SP800-108 Feedback KDF — same PRF rules apply (keyed MAC; CMAC supported).
     CK_SP800_108_FEEDBACK_KDF_PARAMS fbkParams = {
-        0x00000250UL /* CKM_SHA256 */,
-        3, prfParams,
+        CKM_AES_CMAC, 3, prfParams,
         0, NULL_PTR, 0, NULL_PTR // IV info
     };
     CK_MECHANISM fbkMech = { CKM_SP800_108_FEEDBACK_KDF, &fbkParams, sizeof(fbkParams) };
     CK_OBJECT_HANDLE hDerived3;
     rv = fl->C_DeriveKey(hSess, &fbkMech, hBaseKey, deriveTmpl, 7, &hDerived3);
-    record_result("KDF", "CKM_SP800_108_FEEDBACK_KDF", rv == CKR_OK ? "PASS" : "FAIL", "RV=" + std::to_string(rv));
+    if (!mech_advertised(CKM_SP800_108_FEEDBACK_KDF)) {
+        record_result("KDF", "CKM_SP800_108_FEEDBACK_KDF", "SKIP", "Mechanism not advertised");
+    } else {
+        record_result("KDF", "CKM_SP800_108_FEEDBACK_KDF", rv == CKR_OK ? "PASS" : "FAIL",
+                      "AES-CMAC PRF, RV=" + std::to_string(rv));
+    }
 
     // HKDF Derive
     CK_BYTE hkdfSalt[] = "salt";
@@ -1413,27 +1521,34 @@ void test_message_signatures() {
         if (rv == CKR_OK) {
             CK_BYTE msg[] = "test";
             CK_BYTE sig[5000]; CK_ULONG sigLen = sizeof(sig);
-            // v3.0 signature call for single MessageNext finishing string
+            // v3.0 signature call for single MessageNext finishing string.
             rv = SignNext(hSess, NULL_PTR, 0, msg, sizeof(msg)-1, sig, &sigLen);
-            // SoftHSM ML-DSA might reject streaming without hash, but API path returns proper PKCS11 code!
-            record_result("MsgSign", "C_SignMessageNext", (rv == CKR_OK || rv == CKR_FUNCTION_NOT_SUPPORTED || rv == CKR_MECHANISM_INVALID) ? "PASS" : "FAIL", "RV=" + std::to_string(rv));
+            // The message-based signing entry points are exported and
+            // C_MessageSignInit/C_SignMessageBegin succeeded, so the feature is
+            // available — only real success counts as PASS. An error here
+            // ("couldn't even complete the operation") is a FAIL, never PASS.
+            record_result("MsgSign", "C_SignMessageNext", rv == CKR_OK ? "PASS" : "FAIL",
+                          "RV=" + std::to_string(rv) + " SigLen=" + std::to_string(sigLen));
         }
 
-        // Test PQC Context
+        // Negative: CKM_RSA_PKCS takes NO mechanism parameter. Supplying a
+        // CK_SIGN_ADDITIONAL_CONTEXT (an ML-DSA/SLH-DSA parameter) MUST be
+        // rejected with CKR_MECHANISM_PARAM_INVALID (or CKR_ARGUMENTS_BAD).
         refresh_session();
         CK_OBJECT_HANDLE hPub2=0, hPriv2=0;
         fl->C_GenerateKeyPair(hSess, &mech, pubTmpl, 6, privTmpl, 4, &hPub2, &hPriv2);
 
         CK_BYTE ctxtData[] = "test_context";
         CK_SIGN_ADDITIONAL_CONTEXT pqcParams = {
-            0 /* CKH_HEDGE_PREFERRED */,
+            CKH_HEDGE_PREFERRED,
             ctxtData, sizeof(ctxtData)-1
         };
         CK_VOID_PTR paramsPQC = (CK_VOID_PTR)&pqcParams;
         CK_MECHANISM signMechPQC = { CKM_RSA_PKCS, paramsPQC, sizeof(pqcParams) };
         rv = SignInit(hSess, &signMechPQC, hPriv2);
-        // This exercises the v3.0 logic. PQC checks might not be enabled for RSA, but we evaluate routing success.
-        record_result("MsgSign", "C_MessageSignInit_PQCContext", (rv == CKR_OK || rv == CKR_MECHANISM_INVALID || rv == 113 /* CKR_MECHANISM_PARAM_INVALID */) ? "PASS" : "FAIL", "RV=" + std::to_string(rv));
+        record_result("MsgSign", "C_MessageSignInit_RSA_RejectsSignCtxParam",
+                      (rv == CKR_MECHANISM_PARAM_INVALID || rv == CKR_ARGUMENTS_BAD) ? "PASS" : "FAIL",
+                      "expected CKR_MECHANISM_PARAM_INVALID, got RV=" + std::to_string(rv));
     } else {
         record_result("MsgSign", "C_GenerateKeyPair", "FAIL", "RV=" + std::to_string(rvGenDsa));
     }
@@ -1547,7 +1662,7 @@ void test_classical_crypto() {
 void test_negative_paths() {
     CK_OBJECT_CLASS pubClass = CKO_PUBLIC_KEY;
     CK_OBJECT_CLASS privClass = CKO_PRIVATE_KEY;
-    CK_KEY_TYPE ktypeKem = 0x0000004c; // CKK_ML_KEM
+    CK_KEY_TYPE ktypeKem = 0x00000049; // CKK_ML_KEM (v3.2 pkcs11t.h; 0x4c is unassigned)
     CK_BBOOL bTrue = CK_TRUE, bFalse = CK_FALSE;
     CK_ULONG paramSetKem = 2; // ML-KEM-768
     
@@ -1720,7 +1835,7 @@ void test_fips_edge_constraints() {
     }
 
     // 1. ML-KEM Truncated Ciphertext Rejection & Implicit Rejection
-    CK_KEY_TYPE ktypeKem = 0x0000004c; // CKK_ML_KEM
+    CK_KEY_TYPE ktypeKem = 0x00000049; // CKK_ML_KEM (v3.2 pkcs11t.h; 0x4c is unassigned)
     CK_ULONG paramSetKem = 2; // ML-KEM-768
     CK_ATTRIBUTE kPubTmpl[] = { 
         { CKA_CLASS, &pubClass, sizeof(pubClass) }, { CKA_KEY_TYPE, &ktypeKem, sizeof(ktypeKem) },
@@ -1745,7 +1860,7 @@ void test_fips_edge_constraints() {
             // Decap Truncated
             CK_OBJECT_HANDLE hSec2 = 0;
             rv = mlkemDecap(hSess, &encapMech, hKemPriv, NULL_PTR, 0, ct, ctLen - 1, &hSec2);
-            record_result("FIPS", "ML-KEM_Truncated_CT", (rv == 274 || rv == CKR_WRAPPED_KEY_LEN_RANGE || rv == CKR_WRAPPED_KEY_INVALID || rv == CKR_ENCRYPTED_DATA_LEN_RANGE || rv == CKR_ENCRYPTED_DATA_INVALID || rv == CKR_ARGUMENTS_BAD) ? "PASS" : "FAIL", "RV=" + std::to_string(rv));
+            record_result("FIPS", "ML-KEM_Truncated_CT", (rv == CKR_WRAPPED_KEY_LEN_RANGE || rv == CKR_WRAPPED_KEY_INVALID || rv == CKR_ENCRYPTED_DATA_LEN_RANGE || rv == CKR_ENCRYPTED_DATA_INVALID || rv == CKR_ARGUMENTS_BAD) ? "PASS" : "FAIL", "RV=" + std::to_string(rv));
             
             // Decap Tampered
             ct[0] ^= 1;
@@ -1787,8 +1902,15 @@ void test_fips_edge_constraints() {
         };
         CK_MECHANISM signMech = { 0x0000001dUL /* CKM_ML_DSA */, &sigCtx, sizeof(sigCtx) };
         CK_RV rv = fl->C_SignInit(hSess, &signMech, hDsaPriv);
-        record_result("FIPS", "ML-DSA_Oversized_Ctx", rv == CKR_ARGUMENTS_BAD ? "PASS" : "FAIL", "RV=" + std::to_string(rv));
-        // SoftHSM will return CKR_ARGUMENTS_BAD when ulContextLen > 255. Force cancel in case it succeeds
+        // FIPS 204 limits the context string to 255 bytes. Both rejection codes
+        // are defensible: CKR_MECHANISM_PARAM_INVALID (the mechanism parameter
+        // CK_SIGN_ADDITIONAL_CONTEXT carries an invalid field) and
+        // CKR_ARGUMENTS_BAD (a caller-supplied argument is out of range) —
+        // the spec does not pin one. Accept either; anything else is a FAIL.
+        record_result("FIPS", "ML-DSA_Oversized_Ctx",
+                      (rv == CKR_ARGUMENTS_BAD || rv == CKR_MECHANISM_PARAM_INVALID) ? "PASS" : "FAIL",
+                      "ctx>255 must be rejected, RV=" + std::to_string(rv));
+        // Force cancel in case it (wrongly) succeeds
         if (rv == CKR_OK) fl->C_SignFinal(hSess, NULL_PTR, NULL_PTR);
     } else {
         record_result("FIPS", "ML-DSA_Generate", "FAIL", "RV=" + std::to_string(rvDsa));
@@ -2002,6 +2124,8 @@ void test_eddsa_curves() {
     CK_KEY_TYPE ecType = CKK_EC_EDWARDS;
     CK_BBOOL bTrue = CK_TRUE, bFalse = CK_FALSE;
     
+    // CKA_EC_PARAMS as DER PrintableString curve names "edwards25519"/"edwards448"
+    // (PKCS#11 v3.2 §6.3.3 CurveName choice, RFC 8032 names — NOT the OID form)
     CK_BYTE oid_ed25519[] = { 0x13, 0x0c, 0x65, 0x64, 0x77, 0x61, 0x72, 0x64, 0x73, 0x32, 0x35, 0x35, 0x31, 0x39 };
     CK_BYTE oid_ed448[] = { 0x13, 0x0a, 0x65, 0x64, 0x77, 0x61, 0x72, 0x64, 0x73, 0x34, 0x34, 0x38 };
 
@@ -2049,6 +2173,8 @@ void test_ecdh_derivations() {
     CK_KEY_TYPE ecType = CKK_EC_MONTGOMERY;
     CK_BBOOL bTrue = CK_TRUE, bFalse = CK_FALSE;
     
+    // CKA_EC_PARAMS as DER PrintableString curve name "curve25519"
+    // (PKCS#11 v3.2 §6.3.3 CurveName choice — NOT the OID form)
     CK_BYTE oid_x25519[] = { 0x13, 0x0a, 0x63, 0x75, 0x72, 0x76, 0x65, 0x32, 0x35, 0x35, 0x31, 0x39 };
 
     CK_ATTRIBUTE pubTmpl[] = {
@@ -2095,11 +2221,17 @@ void test_ecdh_derivations() {
         rv = fl->C_DeriveKey(hSess, &deriveMech, hPriv, deriveTmpl, 4, &hSecret);
         record_result("ECDH", "Derive_X25519", rv == CKR_OK ? "PASS" : "FAIL", "RV=" + std::to_string(rv));
         
-        // Inject COFACTOR
+        // Cofactor variant: only assert success if the token ADVERTISES
+        // CKM_ECDH1_COFACTOR_DERIVE; otherwise record an explicit SKIP.
+        // CKR_MECHANISM_INVALID must never silently count as PASS.
         CK_MECHANISM cofactorMech = { CKM_ECDH1_COFACTOR_DERIVE, &ecdhParams, sizeof(ecdhParams) };
         CK_OBJECT_HANDLE hSecretCofactor;
-        rv = fl->C_DeriveKey(hSess, &cofactorMech, hPriv, deriveTmpl, 4, &hSecretCofactor);
-        record_result("ECDH", "Derive_X25519_Cofactor", rv == CKR_OK || rv == CKR_MECHANISM_INVALID ? "PASS" : "FAIL", "RV=" + std::to_string(rv));
+        if (mech_advertised(CKM_ECDH1_COFACTOR_DERIVE)) {
+            rv = fl->C_DeriveKey(hSess, &cofactorMech, hPriv, deriveTmpl, 4, &hSecretCofactor);
+            record_result("ECDH", "Derive_X25519_Cofactor", rv == CKR_OK ? "PASS" : "FAIL", "RV=" + std::to_string(rv));
+        } else {
+            record_result("ECDH", "Derive_X25519_Cofactor", "SKIP", "CKM_ECDH1_COFACTOR_DERIVE not advertised");
+        }
     }
 }
 
@@ -2215,17 +2347,63 @@ void test_v30_session() {
     C_LoginUser_t LoginUserFn = (C_LoginUser_t)dlsym(dlib, "C_LoginUser");
     
     if (SessionCancelFn) {
-        CK_FLAGS cancelFlags = 0x00020000; // CKF_RW_SESSION boundary 
-        CK_RV rv = SessionCancelFn(hSess, cancelFlags);
-        record_result("Session", "C_SessionCancel", (rv == CKR_OK || rv == CKR_OPERATION_CANCEL_FAILED) ? "PASS" : "FAIL", "RV=" + std::to_string(rv));
+        // Cancel an ACTUALLY-ACTIVE sign operation with CKF_SIGN (0x800, the
+        // sign-family flag per C_SessionCancel, PKCS#11 v3.0+ §5.6.7).
+        // Previous version passed 0x00020000 — that is CKF_WRAP, not a
+        // "CKF_RW_SESSION boundary" — against an idle session and counted
+        // CKR_OPERATION_CANCEL_FAILED as PASS.
+        CK_OBJECT_CLASS secClass = CKO_SECRET_KEY;
+        CK_KEY_TYPE genType = CKK_GENERIC_SECRET;
+        CK_BBOOL bTrue = CK_TRUE, bFalse = CK_FALSE;
+        CK_ULONG keyLen = 32;
+        CK_ATTRIBUTE macTmpl[] = {
+            { CKA_CLASS, &secClass, sizeof(secClass) },
+            { CKA_KEY_TYPE, &genType, sizeof(genType) },
+            { CKA_VALUE_LEN, &keyLen, sizeof(keyLen) },
+            { CKA_TOKEN, &bFalse, sizeof(bFalse) },
+            { CKA_SIGN, &bTrue, sizeof(bTrue) }
+        };
+        CK_OBJECT_HANDLE hMacKey = 0;
+        CK_MECHANISM genMech = { CKM_GENERIC_SECRET_KEY_GEN, NULL_PTR, 0 };
+        CK_RV rv = fl->C_GenerateKey(hSess, &genMech, macTmpl, 5, &hMacKey);
+        CK_MECHANISM hmacMech = { CKM_SHA256_HMAC, NULL_PTR, 0 };
+        if (rv == CKR_OK) rv = fl->C_SignInit(hSess, &hmacMech, hMacKey);
+        if (rv != CKR_OK) {
+            record_result("Session", "C_SessionCancel", "FAIL",
+                          "could not start sign op for cancel test, RV=" + std::to_string(rv));
+        } else {
+            rv = SessionCancelFn(hSess, CKF_SIGN);
+            if (rv != CKR_OK) {
+                record_result("Session", "C_SessionCancel", "FAIL",
+                              "cancel of active sign op (CKF_SIGN) RV=" + std::to_string(rv));
+            } else {
+                // The sign operation must now be gone.
+                CK_BYTE data[] = "x";
+                CK_BYTE sig[64]; CK_ULONG sigLen = sizeof(sig);
+                CK_RV rvSign = fl->C_Sign(hSess, data, 1, sig, &sigLen);
+                record_result("Session", "C_SessionCancel",
+                              rvSign == CKR_OPERATION_NOT_INITIALIZED ? "PASS" : "FAIL",
+                              "cancel OK; post-cancel C_Sign expected CKR_OPERATION_NOT_INITIALIZED, got RV="
+                              + std::to_string(rvSign));
+            }
+        }
     } else {
         record_result("Session", "C_SessionCancel", "SKIP", "Not exported natively");
     }
-    
+
     if (LoginUserFn) {
         CK_UTF8CHAR username[] = "alice";
         CK_RV rv = LoginUserFn(hSess, CKU_USER, (CK_UTF8CHAR_PTR)opt_pin.c_str(), opt_pin.length(), username, sizeof(username)-1);
-        record_result("Session", "C_LoginUser", (rv == CKR_USER_ALREADY_LOGGED_IN || rv == CKR_OK || rv == CKR_FUNCTION_NOT_SUPPORTED) ? "PASS" : "FAIL", "RV=" + std::to_string(rv));
+        if (rv == CKR_FUNCTION_NOT_SUPPORTED) {
+            // Exported but not actually implemented — not an advertised feature.
+            record_result("Session", "C_LoginUser", "SKIP", "exported but returns CKR_FUNCTION_NOT_SUPPORTED");
+        } else {
+            // Already logged in via C_Login in the fixture → CKR_USER_ALREADY_LOGGED_IN
+            // is the spec-conformant answer; CKR_OK if the fixture wasn't logged in.
+            record_result("Session", "C_LoginUser",
+                          (rv == CKR_USER_ALREADY_LOGGED_IN || rv == CKR_OK) ? "PASS" : "FAIL",
+                          "RV=" + std::to_string(rv));
+        }
     } else {
         record_result("Session", "C_LoginUser", "SKIP", "Not exported natively");
     }
@@ -2814,13 +2992,19 @@ void test_kcv_compliance() {
             };
             CK_BYTE label[]   = "compliance-counter-label";
             CK_BYTE context[] = "compliance-counter-context";
+            // Spec CK_PRF_DATA_TYPE values (v3.2 §6.44): ITERATION_VARIABLE for
+            // the counter, BYTE_ARRAY for label/context fixed input.
+            CK_SP800_108_COUNTER_FORMAT kcvCtrFmt = { CK_FALSE /* big-endian */, 32 };
             CK_PRF_DATA_PARAM prfParams[] = {
-                { 1 /* CK_SP800_108_INITIAL_COUNTER */, NULL_PTR, 0 },
-                { 2 /* CK_SP800_108_LABEL */,           label,    sizeof(label)   - 1 },
-                { 3 /* CK_SP800_108_CONTEXT */,         context,  sizeof(context) - 1 },
+                { CK_SP800_108_ITERATION_VARIABLE, &kcvCtrFmt, sizeof(kcvCtrFmt) },
+                { CK_SP800_108_BYTE_ARRAY,         label,    sizeof(label)   - 1 },
+                { CK_SP800_108_BYTE_ARRAY,         context,  sizeof(context) - 1 },
             };
+            // PRF must be a keyed MAC mech (spec); CKM_AES_CMAC is the keyed MAC
+            // PRF this engine supports (it wrongly rejects CKM_SHA256_HMAC —
+            // covered by the dedicated KDF tests).
             CK_SP800_108_KDF_PARAMS ctrParams = {
-                CKM_SHA256, 3, prfParams, 0, NULL_PTR
+                CKM_AES_CMAC, 3, prfParams, 0, NULL_PTR
             };
             CK_MECHANISM ctrMech = { CKM_SP800_108_COUNTER_KDF, &ctrParams, sizeof(ctrParams) };
             CK_OBJECT_HANDLE hDerived = CK_INVALID_HANDLE;
@@ -2900,13 +3084,15 @@ void test_kcv_compliance() {
             };
             CK_BYTE label[]   = "compliance-feedback-label";
             CK_BYTE context[] = "compliance-feedback-context";
+            // Spec CK_PRF_DATA_TYPE values + keyed-MAC PRF (see counter KDF note).
+            CK_SP800_108_COUNTER_FORMAT kcvFbkFmt = { CK_FALSE /* big-endian */, 32 };
             CK_PRF_DATA_PARAM prfParams[] = {
-                { 1 /* CK_SP800_108_INITIAL_COUNTER */, NULL_PTR, 0 },
-                { 2 /* CK_SP800_108_LABEL */,           label,    sizeof(label)   - 1 },
-                { 3 /* CK_SP800_108_CONTEXT */,         context,  sizeof(context) - 1 },
+                { CK_SP800_108_ITERATION_VARIABLE, &kcvFbkFmt, sizeof(kcvFbkFmt) },
+                { CK_SP800_108_BYTE_ARRAY,         label,    sizeof(label)   - 1 },
+                { CK_SP800_108_BYTE_ARRAY,         context,  sizeof(context) - 1 },
             };
             CK_SP800_108_FEEDBACK_KDF_PARAMS fbkParams = {
-                CKM_SHA256, 3, prfParams,
+                CKM_AES_CMAC, 3, prfParams,
                 0, NULL_PTR,   // ulIVLen, pIV
                 0, NULL_PTR    // ulAdditionalDerivedKeys, pAdditionalDerivedKeys
             };
@@ -3016,33 +3202,56 @@ int main(int argc, char** argv) {
     
     fl->C_Finalize(NULL);
     
-    // Output JSON
+    // Output JSON (with summary totals so the JSON is self-describing)
+    report["_summary"] = {
+        {"pass", total_pass}, {"fail", total_fail},
+        {"skip", total_skip}, {"xfail_known_engine_bugs", total_xfail},
+        {"engine", opt_engine}, {"engine_commit", opt_engine_commit}
+    };
     std::string json_path = opt_report + ".json";
     std::ofstream o(json_path);
     o << std::setw(4) << report << std::endl;
     
     // Output Markdown
+    char dateBuf[64] = {0};
+    {
+        time_t now = time(nullptr);
+        struct tm tmv;
+        localtime_r(&now, &tmv);
+        strftime(dateBuf, sizeof(dateBuf), "%Y-%m-%d %H:%M:%S %Z", &tmv);
+    }
     std::string md_path = opt_report + ".md";
     std::ofstream md(md_path);
     md << "# PKCS#11 v3.2 Compliance Report\n\n";
     md << "**Engine:** `" << opt_engine << "`\n";
-    md << "**Timestamp:** Generated automatically\n\n";
+    if (!opt_engine_commit.empty())
+        md << "**Engine commit:** `" << opt_engine_commit << "`\n";
+    md << "**Date:** " << dateBuf << "\n\n";
     md << "## Summary\n";
     md << "- **Total PASS:** " << total_pass << "\n";
     md << "- **Total FAIL:** " << total_fail << "\n";
-    md << "- **Total SKIP:** " << total_skip << "\n\n";
-    
+    md << "- **Total SKIP:** " << total_skip << "\n";
+    md << "- **Total XFAIL (known engine bugs, documented in-line):** " << total_xfail << "\n\n";
+    md << "Status legend: PASS = spec-conformant behavior for an advertised feature; "
+          "FAIL = unexpected non-conformance; SKIP = feature not advertised by the token "
+          "(v3.2 mandates no particular mechanism set); XFAIL = known, pre-existing engine "
+          "non-conformance reported here but outside this suite's scope to fix.\n\n";
+
     for (auto it = report.begin(); it != report.end(); ++it) {
+        if (it.key() == "_summary") continue; // totals already rendered above
         md << "### " << it.key() << "\n\n";
         md << "| Test | Status | Details |\n|---|---|---|\n";
         for (const auto& item : it.value()) {
             std::string st = item["status"];
-            std::string icon = (st == "PASS") ? "✅" : (st == "FAIL" ? "❌" : "⚠️");
+            std::string icon = (st == "PASS") ? "✅" : (st == "FAIL" ? "❌" : (st == "XFAIL" ? "❌(known)" : "⚠️"));
             md << "| " << item["test"].get<std::string>() << " | " << icon << " " << st << " | " << item["details"].get<std::string>() << " |\n";
         }
         md << "\n";
     }
 
     printf("\nDone. Reports saved to %s and %s\n", json_path.c_str(), md_path.c_str());
+    printf("Totals: PASS=%d FAIL=%d SKIP=%d XFAIL=%d\n", total_pass, total_fail, total_skip, total_xfail);
+    // Exit code reflects UNEXPECTED failures only; XFAILs are documented
+    // known engine bugs and must not mask new regressions nor break CI.
     return total_fail > 0 ? 1 : 0;
 }
