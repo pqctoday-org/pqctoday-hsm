@@ -140,24 +140,32 @@ pub fn pad_label_32(label: &str) -> [u8; 32] {
 }
 
 pub fn init_token_store() {
+    let empty = TOKEN_STORE.with(|ts| ts.borrow().is_empty());
+    if empty {
+        // Provide an initial uninitialized token in slot 0
+        ensure_slot(0);
+    }
+}
+
+/// Multi-slot activation hook: add an uninitialized token in `slot_id` if the
+/// slot does not exist yet (no-op otherwise). The engine boots single-slot
+/// (slot 0, the primary token); embedders and tests call this BEFORE
+/// `C_InitToken` / `C_OpenSession` on the new slot to bring additional tokens
+/// online. There is no config file in this crate — this function IS the
+/// multi-slot configuration surface.
+pub fn ensure_slot(slot_id: u32) {
     TOKEN_STORE.with(|ts| {
         let mut store = ts.borrow_mut();
-        if store.is_empty() {
-            // Provide an initial uninitialized token in slot 0
-            store.insert(
-                0,
-                TokenState {
-                    slot_id: 0,
-                    initialized: false,
-                    label: pad_label_32(DEFAULT_TOKEN_LABEL),
-                    login_state: LoginState::Public,
-                    so_pin_salt: [0u8; 16],
-                    so_pin_hash: [0u8; 32],
-                    user_pin_salt: None,
-                    user_pin_hash: None,
-                },
-            );
-        }
+        store.entry(slot_id).or_insert_with(|| TokenState {
+            slot_id,
+            initialized: false,
+            label: pad_label_32(DEFAULT_TOKEN_LABEL),
+            login_state: LoginState::Public,
+            so_pin_salt: [0u8; 16],
+            so_pin_hash: [0u8; 32],
+            user_pin_salt: None,
+            user_pin_hash: None,
+        });
     });
 }
 
@@ -338,11 +346,41 @@ pub fn session_logged_in(h_session: u32) -> bool {
     }
 }
 
+/// Slot id of the token owning an object record. Objects are stamped with
+/// `CKA_PRIV_SLOT_ID` at creation ([`allocate_handle`]); records created
+/// before that (or hand-built test fixtures) default to slot 0, the primary
+/// token.
+pub fn object_slot_of(attrs: &Attributes) -> u32 {
+    attrs
+        .get(&CKA_PRIV_SLOT_ID)
+        .filter(|v| v.len() >= 4)
+        .map(|v| u32::from_le_bytes([v[0], v[1], v[2], v[3]]))
+        .unwrap_or(0)
+}
+
+/// Stamp `attrs` with the slot backing `h_session` (slot 0 — the primary
+/// token — when the session is unknown, e.g. library-scoped native/KMIP
+/// creation before any session exists).
+pub fn tag_object_slot(h_session: u32, attrs: &mut Attributes) {
+    let slot = session_slot(h_session).unwrap_or(0);
+    attrs.insert(CKA_PRIV_SLOT_ID, slot.to_le_bytes().to_vec());
+}
+
 /// PKCS#11 v3.2 §4.4 / §5.6 — a private object (CKA_PRIVATE=TRUE) may only be
 /// accessed (found, read, used, destroyed) when the session's token is logged
 /// in as User or SO. Public objects are always accessible. Objects that do not
 /// set CKA_PRIVATE are treated as public (the engine's historical default).
+///
+/// T3 (audit: multi-slot FindObjects scoping) — additionally, object handles
+/// are TOKEN-scoped per §2.4/§4.4: an object that belongs to another slot's
+/// token is not visible to this session at all (its handle is treated as
+/// invalid). Every FFI by-handle gate and the FindObjects enumeration route
+/// through this predicate, so cross-token access uniformly fails with
+/// CKR_OBJECT_HANDLE_INVALID (strict behavior, single choke point).
 pub fn can_access_object(h_session: u32, attrs: &Attributes) -> bool {
+    if object_slot_of(attrs) != session_slot(h_session).unwrap_or(0) {
+        return false;
+    }
     if !read_bool_attr(attrs, CKA_PRIVATE) {
         return true;
     }
@@ -463,6 +501,8 @@ pub fn allocate_handle_owned(owner_session: u32, mut attrs: Attributes) -> u32 {
         CKA_PRIV_OWNER_SESSION,
         owner_session.to_le_bytes().to_vec(),
     );
+    // T3 — the object belongs to the creating session's token (slot).
+    tag_object_slot(owner_session, &mut attrs);
     allocate_handle(attrs)
 }
 
@@ -497,6 +537,14 @@ pub fn destroy_session_objects(h_session: u32) {
 
 pub fn allocate_handle(mut attrs: Attributes) -> u32 {
     apply_object_defaults(&mut attrs);
+    // T3 — every object records its owning token's slot. Callers with a
+    // session context have already stamped it (allocate_handle_owned /
+    // native keygen via tag_object_slot); anything else defaults to slot 0,
+    // the primary token (KMIP's engine session and the wasm embedding both
+    // live there).
+    attrs
+        .entry(CKA_PRIV_SLOT_ID)
+        .or_insert_with(|| 0u32.to_le_bytes().to_vec());
     // PKCS#11 v3.2 §4.4.1 — every object gets a token-generated CKA_UNIQUE_ID
     // at creation. This is the single choke point through which all objects
     // enter OBJECTS, so the attribute is guaranteed on every surface (FFI,

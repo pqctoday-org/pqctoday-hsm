@@ -109,7 +109,7 @@ pub fn generate_ml_kem_keypair(
         }
     }
 
-    finalize_and_register(pub_attrs, prv_attrs)
+    finalize_and_register(_session, pub_attrs, prv_attrs)
 }
 
 // ── ML-DSA ──────────────────────────────────────────────────────────────────
@@ -174,7 +174,7 @@ pub fn generate_ml_dsa_keypair(
         }
     }
 
-    finalize_and_register(pub_attrs, prv_attrs)
+    finalize_and_register(_session, pub_attrs, prv_attrs)
 }
 
 // ── SLH-DSA ─────────────────────────────────────────────────────────────────
@@ -226,7 +226,7 @@ pub fn generate_slh_dsa_keypair(
         }
     }
 
-    finalize_and_register(pub_attrs, prv_attrs)
+    finalize_and_register(_session, pub_attrs, prv_attrs)
 }
 
 // ── Classical ───────────────────────────────────────────────────────────────
@@ -323,7 +323,7 @@ pub fn generate_rsa_keypair(
     insert_id_and_label(&mut pub_attrs, cka_id, label);
     insert_id_and_label(&mut prv_attrs, cka_id, label);
 
-    finalize_and_register(pub_attrs, prv_attrs)
+    finalize_and_register(_session, pub_attrs, prv_attrs)
 }
 
 /// Generate an ECDSA keypair. `curve` is one of:
@@ -428,7 +428,7 @@ pub fn generate_ecdsa_keypair(
     insert_id_and_label(&mut pub_attrs, cka_id, label);
     insert_id_and_label(&mut prv_attrs, cka_id, label);
 
-    finalize_and_register(pub_attrs, prv_attrs)
+    finalize_and_register(_session, pub_attrs, prv_attrs)
 }
 
 /// Generate an AES secret key. `bits` ∈ {128, 192, 256} per PKCS#11
@@ -452,7 +452,7 @@ pub fn generate_aes_key(
     let mut key = vec![0u8; bytes];
     getrandom::getrandom(&mut key).map_err(|_| CKR_FUNCTION_FAILED)?;
     let attrs = build_aes_attrs(key, bytes as u32, cka_id, label);
-    Ok(allocate_handle(finalize_secret_attrs(attrs)))
+    Ok(alloc_in_session_slot(_session, finalize_secret_attrs(attrs)))
 }
 
 /// Register an existing RSA private key supplied as PKCS#8 DER bytes.
@@ -491,7 +491,7 @@ pub fn register_rsa_private_key_pkcs8(
     store_bool(&mut attrs, CKA_ALWAYS_SENSITIVE, false);
     store_bool(&mut attrs, CKA_NEVER_EXTRACTABLE, false);
     compute_kcv(&mut attrs);
-    Ok(allocate_handle(attrs))
+    Ok(alloc_in_session_slot(_session, attrs))
 }
 
 /// Register an existing RSA public key supplied as PKCS#1 (RSAPublicKey)
@@ -533,7 +533,7 @@ pub fn register_rsa_public_key_der(
     store_bool(&mut attrs, CKA_LOCAL, false);
     store_ulong(&mut attrs, CKA_KEY_GEN_MECHANISM, CKM_UNAVAILABLE_INFORMATION);
     compute_kcv(&mut attrs);
-    Ok(allocate_handle(attrs))
+    Ok(alloc_in_session_slot(_session, attrs))
 }
 
 /// Register an existing HMAC / Generic Secret key supplied as raw key
@@ -561,7 +561,7 @@ pub fn register_generic_secret_bytes(
     store_bool(&mut attrs, CKA_ALWAYS_SENSITIVE, false);
     store_bool(&mut attrs, CKA_NEVER_EXTRACTABLE, false);
     compute_kcv(&mut attrs);
-    Ok(allocate_handle(attrs))
+    Ok(alloc_in_session_slot(_session, attrs))
 }
 
 // ── PQC key import (fix-plan S7, consumed by KMIP K9 / B-6) ─────────────────
@@ -602,6 +602,7 @@ pub fn register_ml_dsa_private_key(
     }
     validate_ml_dsa_key(parameter_set, sk_bytes, true)?;
     Ok(register_pqc_private(
+        _session,
         parameter_set,
         ALGO_ML_DSA,
         CKK_ML_DSA,
@@ -636,6 +637,7 @@ pub fn register_ml_dsa_public_key(
         _ => Vec::new(),
     };
     Ok(register_pqc_public(
+        _session,
         parameter_set,
         ALGO_ML_DSA,
         CKK_ML_DSA,
@@ -669,6 +671,7 @@ pub fn register_ml_kem_private_key(
         return Err(CKR_ATTRIBUTE_VALUE_INVALID);
     }
     Ok(register_pqc_private(
+        _session,
         parameter_set,
         ALGO_ML_KEM,
         CKK_ML_KEM,
@@ -702,6 +705,7 @@ pub fn register_ml_kem_public_key(
         _ => Vec::new(),
     };
     Ok(register_pqc_public(
+        _session,
         parameter_set,
         ALGO_ML_KEM,
         CKK_ML_KEM,
@@ -733,6 +737,7 @@ pub fn register_slh_dsa_private_key(
     }
     validate_slh_dsa_key(parameter_set, sk_bytes, true)?;
     Ok(register_pqc_private(
+        _session,
         parameter_set,
         ALGO_SLH_DSA,
         CKK_SLH_DSA,
@@ -761,6 +766,7 @@ pub fn register_slh_dsa_public_key(
     validate_slh_dsa_key(parameter_set, pk_bytes, false)?;
     let spki = build_slhdsa_spki(parameter_set, pk_bytes);
     Ok(register_pqc_public(
+        _session,
         parameter_set,
         ALGO_SLH_DSA,
         CKK_SLH_DSA,
@@ -789,7 +795,7 @@ pub fn generate_generic_secret(
     let mut key = vec![0u8; bytes];
     getrandom::getrandom(&mut key).map_err(|_| CKR_FUNCTION_FAILED)?;
     let attrs = build_generic_secret_attrs(key, bytes as u32, cka_id, label);
-    Ok(allocate_handle(finalize_secret_attrs(attrs)))
+    Ok(alloc_in_session_slot(_session, finalize_secret_attrs(attrs)))
 }
 
 /// ECDSA curve identifier used by [`generate_ecdsa_keypair`]. v0.1
@@ -1090,6 +1096,7 @@ fn validate_slh_dsa_key(parameter_set: u32, bytes: &[u8], private: bool) -> Resu
 /// NEVER_EXTRACTABLE as if the key had been born inside the token).
 #[allow(clippy::too_many_arguments)]
 fn register_pqc_private(
+    session: u32,
     parameter_set: u32,
     algo_family: u32,
     key_type: u32,
@@ -1112,7 +1119,7 @@ fn register_pqc_private(
     store_bool(&mut attrs, CKA_ALWAYS_SENSITIVE, false);
     store_bool(&mut attrs, CKA_NEVER_EXTRACTABLE, false);
     compute_kcv(&mut attrs);
-    allocate_handle(attrs)
+    alloc_in_session_slot(session, attrs)
 }
 
 /// Build + allocate an imported PQC **public**-key object: keygen
@@ -1120,6 +1127,7 @@ fn register_pqc_private(
 /// (`CKA_LOCAL=FALSE`, `CKA_KEY_GEN_MECHANISM=CK_UNAVAILABLE_INFORMATION`).
 #[allow(clippy::too_many_arguments)]
 fn register_pqc_public(
+    session: u32,
     parameter_set: u32,
     algo_family: u32,
     key_type: u32,
@@ -1144,6 +1152,16 @@ fn register_pqc_public(
     store_bool(&mut attrs, CKA_LOCAL, false);
     store_ulong(&mut attrs, CKA_KEY_GEN_MECHANISM, CKM_UNAVAILABLE_INFORMATION);
     compute_kcv(&mut attrs);
+    alloc_in_session_slot(session, attrs)
+}
+
+/// T3 (multi-slot scoping) — allocate an object stamped with the creating
+/// session's slot id so token-scoped enumeration (`C_FindObjects`,
+/// [`super::object::find_all_by_cka_id`]) attributes it to the right token.
+/// An unknown session stamps slot 0, the primary token, which preserves the
+/// single-slot KMIP/wasm behavior.
+fn alloc_in_session_slot(session: u32, mut attrs: Attributes) -> u32 {
+    crate::state::tag_object_slot(session, &mut attrs);
     allocate_handle(attrs)
 }
 
@@ -1160,14 +1178,15 @@ fn insert_id_and_label(attrs: &mut Attributes, cka_id: &[u8], label: &str) {
 /// engine object handles. Mirrors the tail of each `ffi::C_GenerateKeyPair`
 /// arm.
 fn finalize_and_register(
+    session: u32,
     mut pub_attrs: Attributes,
     mut prv_attrs: Attributes,
 ) -> Result<(u32, u32), CkRv> {
     finalize_private_key_attrs(&mut prv_attrs);
     compute_kcv(&mut pub_attrs);
     compute_kcv(&mut prv_attrs);
-    let pub_h = allocate_handle(pub_attrs);
-    let prv_h = allocate_handle(prv_attrs);
+    let pub_h = alloc_in_session_slot(session, pub_attrs);
+    let prv_h = alloc_in_session_slot(session, prv_attrs);
     Ok((pub_h, prv_h))
 }
 

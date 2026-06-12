@@ -4957,7 +4957,10 @@ pub fn C_FindObjectsInit(h_session: u32, p_template: *mut u8, ul_count: u32) -> 
             .iter()
             .filter(|(_, attrs)| {
                 // PKCS#11 v3.2 §4.4 — private objects (CKA_PRIVATE=TRUE) are
-                // invisible to sessions whose token is not logged in.
+                // invisible to sessions whose token is not logged in, AND
+                // (T3) enumeration is scoped to the session's token: objects
+                // owned by another slot never match. Both gates live in
+                // state::can_access_object.
                 crate::state::can_access_object(h_session, attrs)
                     && match_attrs
                         .iter()
@@ -9455,5 +9458,141 @@ mod token_info_tests {
         assert_eq!((buf[142], buf[143]), (0, 1));
         // utcTime[16] @144 — blank (no CKF_CLOCK_ON_TOKEN).
         assert!(buf[144..160].iter().all(|&b| b == 0x20));
+    }
+}
+
+#[cfg(test)]
+mod multi_slot_scoping_tests {
+    //! T3 (audit: multi-slot FindObjects scoping) — objects belong to the
+    //! token (slot) of the session that created them. Enumeration
+    //! (C_FindObjects) and by-handle access are scoped to the session's
+    //! slot. The engine boots single-slot; `state::ensure_slot` is the
+    //! multi-slot activation hook used here to bring slot 1 online.
+    use super::*;
+    use crate::native::test_lock;
+
+    fn reset_engine() {
+        let _ = C_Finalize(std::ptr::null_mut());
+        assert_eq!(C_Initialize(std::ptr::null_mut()), CKR_OK);
+    }
+
+    fn open(slot: u32) -> u32 {
+        let mut h = 0u32;
+        assert_eq!(
+            C_OpenSession(
+                slot,
+                CKF_SERIAL_SESSION | CKF_RW_SESSION,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut h,
+            ),
+            CKR_OK,
+            "open session on slot {slot}"
+        );
+        h
+    }
+
+    /// Public (non-private) AES-shaped object created through the session
+    /// choke point, so it carries the session's slot tag.
+    fn create_object(session: u32, label: &[u8]) -> u32 {
+        let mut attrs = Attributes::new();
+        attrs.insert(CKA_VALUE, vec![0x42u8; 32]);
+        store_ulong(&mut attrs, CKA_CLASS, CKO_SECRET_KEY);
+        store_ulong(&mut attrs, CKA_KEY_TYPE, CKK_AES);
+        attrs.insert(crate::native::keygen::CKA_LABEL, label.to_vec());
+        crate::state::allocate_handle_owned(session, attrs)
+    }
+
+    fn find_all(session: u32) -> Vec<u32> {
+        assert_eq!(C_FindObjectsInit(session, std::ptr::null_mut(), 0), CKR_OK);
+        let mut handles = [0u32; 64];
+        let mut n = 0u32;
+        assert_eq!(C_FindObjects(session, handles.as_mut_ptr(), 64, &mut n), CKR_OK);
+        assert_eq!(C_FindObjectsFinal(session), CKR_OK);
+        handles[..n as usize].to_vec()
+    }
+
+    /// FindObjects from a slot-1 session must not see slot-0 objects and
+    /// vice versa; each session enumerates exactly its own token's objects.
+    #[test]
+    fn find_objects_is_token_scoped() {
+        let _guard = test_lock::acquire();
+        reset_engine();
+        crate::state::ensure_slot(1);
+        let s0 = open(0);
+        let s1 = open(1);
+
+        let h0 = create_object(s0, b"slot0-obj");
+        let h1 = create_object(s1, b"slot1-obj");
+
+        let found0 = find_all(s0);
+        assert!(found0.contains(&h0), "slot-0 session must see its object");
+        assert!(
+            !found0.contains(&h1),
+            "slot-0 session must NOT see slot-1's object"
+        );
+
+        let found1 = find_all(s1);
+        assert!(found1.contains(&h1), "slot-1 session must see its object");
+        assert!(
+            !found1.contains(&h0),
+            "slot-1 session must NOT see slot-0's object"
+        );
+
+        assert_eq!(C_CloseSession(s0), CKR_OK);
+        assert_eq!(C_CloseSession(s1), CKR_OK);
+    }
+
+    /// Strict §2.4/§4.4 handle scoping — handles are token-scoped: using a
+    /// handle that belongs to another slot's token fails with
+    /// CKR_OBJECT_HANDLE_INVALID on by-handle access (GetAttributeValue,
+    /// DestroyObject), while same-slot access succeeds.
+    #[test]
+    fn cross_slot_handle_is_invalid() {
+        let _guard = test_lock::acquire();
+        reset_engine();
+        crate::state::ensure_slot(1);
+        let s0 = open(0);
+        let s1 = open(1);
+        let h0 = create_object(s0, b"slot0-only");
+
+        // Same-slot by-handle access works (empty template → pure gate).
+        assert_eq!(C_GetAttributeValue(s0, h0, std::ptr::null_mut(), 0), CKR_OK);
+        // Cross-slot: the handle is treated as invalid.
+        assert_eq!(
+            C_GetAttributeValue(s1, h0, std::ptr::null_mut(), 0),
+            CKR_OBJECT_HANDLE_INVALID
+        );
+        assert_eq!(C_DestroyObject(s1, h0), CKR_OBJECT_HANDLE_INVALID);
+        // The object survives the foreign destroy attempt.
+        assert_eq!(C_DestroyObject(s0, h0), CKR_OK);
+
+        assert_eq!(C_CloseSession(s0), CKR_OK);
+        assert_eq!(C_CloseSession(s1), CKR_OK);
+    }
+
+    /// Legacy/untagged records (no CKA_PRIV_SLOT_ID — e.g. objects created
+    /// before T3 or injected without a session context) belong to slot 0,
+    /// the primary token: visible there, invisible elsewhere.
+    #[test]
+    fn untagged_objects_default_to_slot_zero() {
+        let _guard = test_lock::acquire();
+        reset_engine();
+        crate::state::ensure_slot(1);
+        let s0 = open(0);
+        let s1 = open(1);
+
+        // Library-scoped creation without a session context.
+        let mut attrs = Attributes::new();
+        attrs.insert(CKA_VALUE, vec![0x24u8; 16]);
+        store_ulong(&mut attrs, CKA_CLASS, CKO_SECRET_KEY);
+        store_ulong(&mut attrs, CKA_KEY_TYPE, CKK_AES);
+        let h = crate::state::allocate_handle(attrs);
+
+        assert!(find_all(s0).contains(&h), "primary token owns untagged objects");
+        assert!(!find_all(s1).contains(&h), "slot 1 must not see them");
+
+        assert_eq!(C_CloseSession(s0), CKR_OK);
+        assert_eq!(C_CloseSession(s1), CKR_OK);
     }
 }

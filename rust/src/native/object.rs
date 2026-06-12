@@ -64,20 +64,32 @@ pub fn destroy_object(_session: u32, handle: u32) -> Result<(), CkRv> {
 /// [`super::keygen::generate_ml_dsa_keypair`]), returns the first match —
 /// callers needing per-class filtering should add a `class` arg or use
 /// [`find_all_by_cka_id`].
-pub fn find_by_cka_id(_session: u32, cka_id: &[u8]) -> Result<Option<u32>, CkRv> {
-    let handles = find_all_by_cka_id(_session, cka_id)?;
+pub fn find_by_cka_id(session: u32, cka_id: &[u8]) -> Result<Option<u32>, CkRv> {
+    let handles = find_all_by_cka_id(session, cka_id)?;
     Ok(handles.first().copied())
 }
 
 /// Same as [`find_by_cka_id`] but returns ALL handles matching the
 /// `CKA_ID`. Typical use: looking up both halves of a freshly-generated
 /// keypair (pub + prv share the CKA_ID set at keygen time).
-pub fn find_all_by_cka_id(_session: u32, cka_id: &[u8]) -> Result<Vec<u32>, CkRv> {
+///
+/// T3 (multi-slot scoping) — enumeration is TOKEN-scoped: only objects owned
+/// by `session`'s slot match (PKCS#11 v3.2 §2.4 — tokens do not see each
+/// other's objects). An unknown session scopes to slot 0, the primary token,
+/// which preserves the single-slot KMIP/wasm behavior. By-handle native
+/// accessors (`get_attribute*`, `destroy_object`) intentionally stay
+/// handle-global: handles are unique across slots and the native surface is
+/// the engine-internal trusted boundary (the KMIP server owns one session on
+/// slot 0 and never holds foreign handles).
+pub fn find_all_by_cka_id(session: u32, cka_id: &[u8]) -> Result<Vec<u32>, CkRv> {
+    let slot = crate::state::session_slot(session).unwrap_or(0);
     let matches: Vec<u32> = OBJECTS.with(|o| {
         o.borrow()
             .iter()
             .filter_map(|(handle, attrs)| match attrs.get(&CKA_ID) {
-                Some(v) if v == cka_id => Some(*handle),
+                Some(v) if v == cka_id && crate::state::object_slot_of(attrs) == slot => {
+                    Some(*handle)
+                }
                 _ => None,
             })
             .collect()
@@ -230,6 +242,35 @@ mod tests {
         let first = find_by_cka_id(session, cka_id).unwrap().unwrap();
         assert!(first == pub_h || first == prv_h);
         close_session(session).unwrap();
+    }
+
+    /// T3 — find_all_by_cka_id is token-scoped: keys created through a
+    /// slot-1 session are invisible to a slot-0 session's CKA_ID search
+    /// (and vice versa), even when both share the same CKA_ID. Slot 1 is
+    /// brought online via the `state::ensure_slot` activation hook (the
+    /// engine boots single-slot).
+    #[test]
+    fn find_by_cka_id_is_token_scoped() {
+        let _guard = test_lock::acquire();
+        let s0 = fresh_session();
+        crate::state::ensure_slot(1);
+        let s1 = bootstrap_default_token(1, "so", "user", "native-object-slot1").unwrap();
+
+        let cka_id = b"shared-id";
+        let h0 = generate_aes_key(s0, 256, cka_id, "slot0-key").unwrap();
+        let h1 = generate_aes_key(s1, 256, cka_id, "slot1-key").unwrap();
+
+        let found0 = find_all_by_cka_id(s0, cka_id).unwrap();
+        assert_eq!(found0, vec![h0], "slot-0 search sees only slot-0's key");
+        let found1 = find_all_by_cka_id(s1, cka_id).unwrap();
+        assert_eq!(found1, vec![h1], "slot-1 search sees only slot-1's key");
+
+        // By-handle native access stays handle-global (engine-internal
+        // trusted surface) — the foreign handle still resolves.
+        assert_eq!(get_attribute_u32(s0, h1, CKA_VALUE_LEN), Some(32));
+
+        close_session(s0).unwrap();
+        close_session(s1).unwrap();
     }
 
     /// find_by_cka_id returns None when no object matches.
