@@ -13,9 +13,11 @@
 > ChaCha20 advertisement (P-12), SessionCancel message flags (P-13),
 > WRAP_WITH_TRUSTED/CKA_TRUSTED (P-14/M-8/H-10), C_Digest-after-Update (M-2),
 > plus new RSA SHA-384/512 mechanisms (S6) and native PQC key import (S7).
-> Still open: H-15 (static TokenInfo), Appendix B (message-encrypt multipart
-> rework, owner assigned), multi-slot FindObjects scoping, seed-deterministic
-> keygen. Historic per-item detail remains in the ledger below.
+> Still open: multi-slot FindObjects scoping (closed by round-2 T3),
+> seed-deterministic keygen. H-15 closed by round-2 T2 (dynamic TokenInfo);
+> Appendix B closed by round-2 T5 (message-encrypt multipart rework — see the
+> per-item status in the appendix). Historic per-item detail remains in the
+> ledger below.
 >
 > Build note: `cargo`/`rustc` must come from the rustup toolchain, not Homebrew —
 > Homebrew's rustc lacks the wasm32 sysroot. Use
@@ -286,17 +288,30 @@ associated data.
 
 ## Appendix B — Findings deferred to the in-flight multipart-encryption rework
 
-(Not in the remediation plan; hand to whoever owns the `multipart.rs` work.)
-- C_Encrypt after C_EncryptUpdate silently discards streaming state and one-shots the
-  new data (spec requires failure); same for C_Decrypt.
+**Status (2026-06-12): CLOSED by round-2 slice T5** (message-encrypt rework),
+except where noted. Per-item disposition:
+
+- ~~C_Encrypt after C_EncryptUpdate silently discards streaming state and one-shots the
+  new data (spec requires failure); same for C_Decrypt.~~ **FIXED** earlier (see
+  "Encryption revisit" in the ledger): mixing now returns `CKR_OPERATION_ACTIVE`.
 - `GcmState::new` clamps tag length to 4..=16 bytes silently instead of validating the
   SP 800-38D set; align with the Init-time validation once H-18's tag-bits fix lands.
-- `aes_gcm_exec` truncated-tag decrypt (tag_bits<128) always fails — appends tag_bytes
-  but the AEAD expects 16.
-- Message-based encrypt streaming is O(n²) (re-runs GCM over the accumulated payload
-  per chunk) and releases unauthenticated plaintext chunks (§5.15 caveat).
+  **Still deferred to R5.3 by design** — the truncatable tag is the intentional KMIP
+  `CS-BC-M-GCM-1` feature (commit a08b0ff).
+- ~~`aes_gcm_exec` truncated-tag decrypt (tag_bits<128) always fails — appends tag_bytes
+  but the AEAD expects 16.~~ **FIXED (T5)**: `aes_gcm_exec` now runs on `GcmState` and
+  verifies the truncated tag prefix in constant time (SP 800-38D truncated-MSB rule).
+- ~~Message-based encrypt streaming is O(n²) (re-runs GCM over the accumulated payload
+  per chunk) and releases unauthenticated plaintext chunks (§5.15 caveat).~~ **FIXED
+  (T5)**: `C_EncryptMessageNext` streams through `GcmState::msg_update` (CTR keystream
+  carry + running GHASH, O(chunk), chunked output byte-identical to one-shot — pinned
+  by SP 800-38D KATs and a keystream-block-counter test); `C_DecryptMessageNext`
+  buffers plaintext internally and releases it only after the final part's tag
+  verifies (memory bound: one message; zeroized on mismatch, caller buffer untouched).
 - Lock-ordering note: multipart Update/Final hold ENCRYPT/DECRYPT_STATE while locking
-  OBJECTS — document the ENCRYPT_STATE→OBJECTS ordering invariant.
+  OBJECTS — document the ENCRYPT_STATE→OBJECTS ordering invariant. (T5 message paths
+  take only MESSAGE_*_STATE during crypto; the invariant note for the §5.2 paths
+  stands.)
 
 ---
 

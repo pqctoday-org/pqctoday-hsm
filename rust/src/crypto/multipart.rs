@@ -35,6 +35,7 @@ use aes::cipher::{BlockDecrypt, BlockEncrypt, KeyInit, generic_array::GenericArr
 // that `GHash::new` needs, so no separate universal-hash import.
 use ghash::{GHash, universal_hash::UniversalHash};
 use subtle::ConstantTimeEq;
+use zeroize::Zeroize;
 
 use crate::constants::{
     CKR_DATA_LEN_RANGE, CKR_ENCRYPTED_DATA_INVALID, CKR_ENCRYPTED_DATA_LEN_RANGE,
@@ -419,6 +420,25 @@ pub struct GcmState {
     /// Decrypt only: trailing `tag_len` bytes of input withheld, since
     /// the ciphertext/tag boundary is unknowable before `finalize`.
     pending: Vec<u8>,
+    /// Diagnostics: AES blocks generated for the payload keystream. Lets
+    /// tests prove the streaming paths are single-pass (an O(n²)
+    /// re-computation would inflate this quadratically).
+    ks_blocks: u64,
+}
+
+/// Best-effort cleanup of streaming-state secrets. The expanded AES round
+/// keys (`AesKey`) and the GHASH key inside `ghash` live in their own
+/// crates' types and cannot be wiped from here; everything this struct
+/// owns directly — keystream bytes, counter, E_K(J0), buffered
+/// ciphertext/plaintext residue — is zeroized.
+impl Drop for GcmState {
+    fn drop(&mut self) {
+        self.keystream.zeroize();
+        self.counter.zeroize();
+        self.ek_j0.zeroize();
+        self.ghash_buf.zeroize();
+        self.pending.zeroize();
+    }
 }
 
 impl GcmState {
@@ -475,7 +495,13 @@ impl GcmState {
             ct_len: 0,
             tag_len,
             pending: Vec::new(),
+            ks_blocks: 0,
         }
+    }
+
+    /// Payload keystream blocks generated so far (see `ks_blocks`).
+    pub fn keystream_blocks(&self) -> u64 {
+        self.ks_blocks
     }
 
     fn update_len(&self, part_len: usize) -> usize {
@@ -494,6 +520,7 @@ impl GcmState {
             self.key.encrypt_block(&mut self.keystream);
             inc_be(&mut self.counter, 4);
             self.ks_pos = 0;
+            self.ks_blocks += 1;
         }
         let b = self.keystream[self.ks_pos];
         self.ks_pos += 1;
@@ -535,6 +562,57 @@ impl GcmState {
         }
     }
 
+    /// PKCS#11 v3.2 §5.15 message-based streaming
+    /// (`C_EncryptMessageBegin/Next`, `C_DecryptMessageBegin/Next`): unlike
+    /// the §5.2 multipart convention, the authentication tag travels
+    /// out-of-band in `CK_GCM_MESSAGE_PARAMS.pTag`, so every input byte is
+    /// payload — decrypt has NO tag hold-back. Both directions are O(chunk):
+    /// the partial CTR keystream block (`keystream`/`ks_pos`) carries across
+    /// chunk boundaries that don't align to 16 bytes, and the running GHASH
+    /// absorbs the ciphertext incrementally via `ghash_buf`.
+    pub fn msg_update(&mut self, part: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(part.len());
+        match self.dir {
+            CipherDirection::Encrypt => {
+                for &pt in part {
+                    let ct = pt ^ self.next_keystream_byte();
+                    self.ghash_feed(ct);
+                    out.push(ct);
+                }
+            }
+            CipherDirection::Decrypt => {
+                for &ct in part {
+                    self.ghash_feed(ct);
+                    out.push(ct ^ self.next_keystream_byte());
+                }
+            }
+        }
+        self.ct_len += part.len() as u64;
+        out
+    }
+
+    /// Message-API encrypt finalization: the SP 800-38D §7.1 tag (lengths
+    /// block, final GHASH, E_K(J0) XOR), truncated to the `tag_bits`
+    /// requested at construction. Consumes the operation.
+    pub fn msg_compute_tag(self) -> Vec<u8> {
+        self.compute_tag()
+    }
+
+    /// Message-API decrypt finalization: verify the externally-supplied
+    /// (possibly truncated) tag in constant time. Consumes the operation;
+    /// `Err(CKR_ENCRYPTED_DATA_INVALID)` on mismatch.
+    pub fn msg_verify_tag(self, tag: &[u8]) -> Result<(), u32> {
+        let expected = self.compute_tag();
+        if !tag.is_empty()
+            && tag.len() <= expected.len()
+            && bool::from(expected[..tag.len()].ct_eq(tag))
+        {
+            Ok(())
+        } else {
+            Err(CKR_ENCRYPTED_DATA_INVALID)
+        }
+    }
+
     /// GHASH(padded CT || len64(AAD) || len64(CT)) XOR E_K(J0), truncated
     /// to `tag_len` (SP 800-38D §7.1 steps 5–8).
     fn compute_tag(mut self) -> Vec<u8> {
@@ -547,7 +625,9 @@ impl GcmState {
         len_block[..8].copy_from_slice(&(self.aad_len * 8).to_be_bytes());
         len_block[8..].copy_from_slice(&(self.ct_len * 8).to_be_bytes());
         self.ghash.update(&[len_block.into()]);
-        let s = self.ghash.finalize();
+        // Clone before the consuming `finalize` — `GcmState` has a `Drop`
+        // impl, so fields cannot be moved out of `self`.
+        let s = self.ghash.clone().finalize();
         let mut tag: Vec<u8> = self.ek_j0.iter().zip(s.iter()).map(|(a, b)| a ^ b).collect();
         tag.truncate(self.tag_len);
         tag
@@ -922,5 +1002,168 @@ mod tests {
         let mut out = dec.update(&ct).unwrap();
         out.extend_from_slice(&dec.finalize().unwrap());
         assert_eq!(out, pt);
+    }
+
+    // ── Message-API streaming (msg_update / msg_compute_tag / msg_verify_tag) ──
+
+    /// Split `data` into parts of `sizes` (cycled; 0 produces an explicit
+    /// empty part).
+    fn split<'a>(data: &'a [u8], sizes: &[usize]) -> Vec<&'a [u8]> {
+        let mut parts: Vec<&[u8]> = Vec::new();
+        let mut off = 0;
+        let mut i = 0;
+        while off < data.len() {
+            let n = sizes[i % sizes.len()].min(data.len() - off);
+            parts.push(&data[off..off + n]);
+            off += n;
+            i += 1;
+        }
+        if parts.is_empty() {
+            parts.push(&data[..0]);
+        }
+        parts
+    }
+
+    const MSG_CHUNKINGS: &[&[usize]] = &[&[1], &[16], &[7, 13], &[5, 0, 9], &[64]];
+
+    /// Message-API streaming must reproduce the SP 800-38D KATs for every
+    /// chunking (1-byte, block-aligned, odd 7/13, with empty parts) and for
+    /// truncated 96-bit tags — chunked ciphertext concatenation must
+    /// byte-match the one-shot answer.
+    #[test]
+    fn gcm_msg_streaming_matches_kats() {
+        // McGrew–Viega TC3 (no AAD), TC4 (AAD), TC5 (64-bit IV → §7.1
+        // step-2b J0 derivation) — same vectors as the §5.2 KATs above.
+        let key = hex("feffe9928665731c6d6a8f9467308308");
+        let pt_full = hex(
+            "d9313225f88406e5a55909c5aff5269a86a7a9531534f7da2e4c303d8a318a72\
+             1c3c0c95956809532fcf0e2449a6b525b16aedf5aa0de657ba637b391aafd255",
+        );
+        let aad = hex("feedfacedeadbeeffeedfacedeadbeefabaddad2");
+        let cases: &[(Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>)] = &[
+            (
+                hex("cafebabefacedbaddecaf888"),
+                Vec::new(),
+                pt_full.clone(),
+                hex(
+                    "42831ec2217774244b7221b784d0d49ce3aa212f2c02a4e035c17e2329aca12e\
+                     21d514b25466931c7d8f6a5aac84aa051ba30b396a0aac973d58e091473f5985",
+                ),
+                hex("4d5c2af327cd64a62cf35abd2ba6fab4"),
+            ),
+            (
+                hex("cafebabefacedbaddecaf888"),
+                aad.clone(),
+                pt_full[..60].to_vec(),
+                hex(
+                    "42831ec2217774244b7221b784d0d49ce3aa212f2c02a4e035c17e2329aca12e\
+                     21d514b25466931c7d8f6a5aac84aa051ba30b396a0aac973d58e091",
+                ),
+                hex("5bc94fbc3221a5db94fae95ae7121a47"),
+            ),
+            (
+                hex("cafebabefacedbad"),
+                aad.clone(),
+                pt_full[..60].to_vec(),
+                hex(
+                    "61353b4c2806934a777ff51fa22a4755699b2a714fcdc6f83766e5f97b6c7423\
+                     73806900e49f24b22b097544d4896b424989b5e1ebac0f07c23f4598",
+                ),
+                hex("3612d2e79e3b0785561be14aaca2fccb"),
+            ),
+        ];
+        for (iv, aad, pt, ct, tag) in cases {
+            for sizes in MSG_CHUNKINGS {
+                for tag_bytes in [16usize, 12] {
+                    // Encrypt: concatenated chunks == one-shot ciphertext.
+                    let mut enc = GcmState::new(
+                        AesKey::new(&key).unwrap(),
+                        iv,
+                        aad,
+                        128,
+                        CipherDirection::Encrypt,
+                    );
+                    let mut got_ct = Vec::new();
+                    for part in split(pt, sizes) {
+                        got_ct.extend_from_slice(&enc.msg_update(part));
+                    }
+                    let got_tag = enc.msg_compute_tag();
+                    assert_eq!(&got_ct, ct, "sizes={sizes:?}");
+                    assert_eq!(&got_tag[..tag_bytes], &tag[..tag_bytes], "sizes={sizes:?}");
+
+                    // Decrypt round-trip with the (possibly truncated) tag.
+                    let mut dec = GcmState::new(
+                        AesKey::new(&key).unwrap(),
+                        iv,
+                        aad,
+                        128,
+                        CipherDirection::Decrypt,
+                    );
+                    let mut got_pt = Vec::new();
+                    for part in split(ct, sizes) {
+                        got_pt.extend_from_slice(&dec.msg_update(part));
+                    }
+                    assert_eq!(&got_pt, pt, "sizes={sizes:?}");
+                    dec.msg_verify_tag(&tag[..tag_bytes]).unwrap();
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn gcm_msg_verify_rejects_tampered_or_empty_tag() {
+        let key = [0x42u8; 16];
+        let iv = [0x24u8; 12];
+        let pt = b"attack at dawn";
+        let mut enc =
+            GcmState::new(AesKey::new(&key).unwrap(), &iv, &[], 128, CipherDirection::Encrypt);
+        let ct = enc.msg_update(pt);
+        let tag = enc.msg_compute_tag();
+
+        let mut dec =
+            GcmState::new(AesKey::new(&key).unwrap(), &iv, &[], 128, CipherDirection::Decrypt);
+        dec.msg_update(&ct);
+        let mut bad = tag.clone();
+        bad[0] ^= 1;
+        assert_eq!(dec.msg_verify_tag(&bad).unwrap_err(), CKR_ENCRYPTED_DATA_INVALID);
+
+        let mut dec =
+            GcmState::new(AesKey::new(&key).unwrap(), &iv, &[], 128, CipherDirection::Decrypt);
+        dec.msg_update(&ct);
+        assert_eq!(dec.msg_verify_tag(&[]).unwrap_err(), CKR_ENCRYPTED_DATA_INVALID);
+    }
+
+    /// O(n) proof: streaming 512 × 64-byte parts must generate exactly
+    /// 32768/16 = 2048 payload keystream blocks — a quadratic re-run of the
+    /// accumulated payload (the pre-T5 ffi behavior) would generate ~525k.
+    /// Also checks the partial-block carry: misaligned 7-byte chunks must
+    /// not waste keystream.
+    #[test]
+    fn gcm_msg_streaming_is_single_pass() {
+        let mut g = GcmState::new(
+            AesKey::new(&[0x42u8; 16]).unwrap(),
+            &[9u8; 12],
+            b"aad",
+            128,
+            CipherDirection::Encrypt,
+        );
+        let part = [0xA5u8; 64];
+        for _ in 0..512 {
+            g.msg_update(&part);
+        }
+        assert_eq!(g.keystream_blocks(), 2048);
+        let _ = g.msg_compute_tag();
+
+        let mut g = GcmState::new(
+            AesKey::new(&[0x42u8; 16]).unwrap(),
+            &[9u8; 12],
+            &[],
+            128,
+            CipherDirection::Decrypt,
+        );
+        for _ in 0..10 {
+            g.msg_update(&[0u8; 7]); // 70 bytes total
+        }
+        assert_eq!(g.keystream_blocks(), 5); // ceil(70/16)
     }
 }

@@ -8,6 +8,33 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — T5 message-encrypt multipart rework (2026-06-12)
+
+`C_EncryptMessage*`/`C_DecryptMessage*` (PKCS#11 v3.2 §5.15, AES-GCM) — closes
+gap-analysis Appendix B:
+
+- **Incremental GCM streaming**: `C_EncryptMessageNext` runs O(chunk) through
+  an extended `GcmState` (CTR keystream carry across non-block-aligned chunk
+  boundaries + running GHASH; AAD folded at Begin, §7.1 J0 derivation for
+  non-96-bit IVs). Previously each part re-ran the full GCM over the
+  accumulated payload — O(n²). Chunked output is byte-identical to one-shot
+  (SP 800-38D KATs at 1/16/7-13/empty-part splits, 96/128-bit tags, 12- and
+  8-byte IVs; single-pass pinned by a keystream-block-counter test).
+- **Verify-then-release decrypt**: `C_DecryptMessageNext` buffers plaintext
+  internally (memory bound: one message) and emits it only after the final
+  part's tag verifies; on mismatch → `CKR_ENCRYPTED_DATA_INVALID`, buffered
+  plaintext zeroized, caller buffer untouched. Previously each chunk's
+  unauthenticated plaintext was released before tag verification.
+- **Truncated tags**: one-shot `C_DecryptMessage` with `ulTagBits < 128` now
+  verifies the truncated tag prefix (constant-time) instead of always failing.
+- **Zeroization**: message state (`key`, armed GCM stream, withheld plaintext)
+  wiped on `C_MessageEncrypt/DecryptFinal`, `C_CloseSession`,
+  `C_SessionCancel` (CKF_MESSAGE_ENCRYPT/DECRYPT) and `C_Finalize`;
+  `GcmState` zeroizes its keystream/counter/buffers on drop.
+- Scope: AES-GCM only — the message family dispatches `CKM_AES_GCM`
+  exclusively (ChaCha20-Poly1305 message ops are not advertised; round-1 S1
+  left `CKF_MESSAGE_*` off for it).
+
 ### Compliance — KMIP 3.0 / PKCS#11 v3.2 audit remediation (2026-06-10)
 
 Full execution of the two-track compliance fix plans

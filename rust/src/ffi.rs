@@ -155,18 +155,19 @@ pub fn C_Finalize(p_reserved: *mut u8) -> u32 {
     VERIFY_SIG_STATE.with(|s| s.borrow_mut().clear());
     ENCRYPT_STATE.with(|s| s.borrow_mut().clear());
     DECRYPT_STATE.with(|s| s.borrow_mut().clear());
-    // Message-based AEAD state holds raw key bytes — zeroize before drop.
+    // Message-based AEAD state holds raw key bytes, an armed GCM stream and
+    // (decrypt) withheld plaintext — zeroize all of it before drop.
     MESSAGE_ENCRYPT_STATE.with(|s| {
         let mut m = s.borrow_mut();
         for ctx in m.values_mut() {
-            ctx.key.zeroize();
+            ctx.wipe();
         }
         m.clear();
     });
     MESSAGE_DECRYPT_STATE.with(|s| {
         let mut m = s.borrow_mut();
         for ctx in m.values_mut() {
-            ctx.key.zeroize();
+            ctx.wipe();
         }
         m.clear();
     });
@@ -355,12 +356,12 @@ pub fn C_CloseSession(h_session: u32) -> u32 {
     DECRYPT_STATE.with(|s| s.borrow_mut().remove(&h_session));
     MESSAGE_ENCRYPT_STATE.with(|s| {
         if let Some(mut ctx) = s.borrow_mut().remove(&h_session) {
-            ctx.key.zeroize();
+            ctx.wipe();
         }
     });
     MESSAGE_DECRYPT_STATE.with(|s| {
         if let Some(mut ctx) = s.borrow_mut().remove(&h_session) {
-            ctx.key.zeroize();
+            ctx.wipe();
         }
     });
     DIGEST_STATE.with(|s| s.borrow_mut().remove(&h_session));
@@ -429,16 +430,18 @@ pub fn C_SessionCancel(h_session: u32, flags: u32) -> u32 {
         FIND_STATE.with(|s| s.borrow_mut().remove(&h_session));
     }
     if flags & 0x2 != 0 {
+        // CKF_MESSAGE_ENCRYPT — wipe key, armed GCM stream and buffers.
         MESSAGE_ENCRYPT_STATE.with(|s| {
             if let Some(mut ctx) = s.borrow_mut().remove(&h_session) {
-                ctx.key.zeroize();
+                ctx.wipe();
             }
         });
     }
     if flags & 0x4 != 0 {
+        // CKF_MESSAGE_DECRYPT — also zeroizes any withheld plaintext.
         MESSAGE_DECRYPT_STATE.with(|s| {
             if let Some(mut ctx) = s.borrow_mut().remove(&h_session) {
-                ctx.key.zeroize();
+                ctx.wipe();
             }
         });
     }
@@ -7378,10 +7381,9 @@ pub fn msg_encrypt_init_internal(
         let ctx = MsgAeadCtx {
             key: key_bytes,
             in_message: false,
-            iv: Vec::new(),
-            aad: Vec::new(),
             tag_bits: 0,
-            payload_acc: Vec::new(),
+            stream: None,
+            plaintext_acc: Vec::new(),
         };
 
         if is_encrypt {
@@ -7394,6 +7396,218 @@ pub fn msg_encrypt_init_internal(
     }
 }
 
+// ── T5 message-stream cores ─────────────────────────────────────────────────
+//
+// The C_*MessageBegin/Next entry points split into thin FFI wrappers (which
+// parse CK_GCM_MESSAGE_PARAMS — a struct of WASM32 4-byte pointers that
+// cannot be built in native 64-bit tests) and the cores below, which take
+// already-resolved slices/pointers and own all state-machine logic. Native
+// tests drive the cores directly with real pointers.
+
+/// C_EncryptMessageBegin / C_DecryptMessageBegin: fold the AAD and derive
+/// J0 up front, arming an incremental `GcmState` for the message.
+fn message_begin_core(
+    h_session: u32,
+    iv: &[u8],
+    aad: &[u8],
+    tag_bits: u32,
+    is_encrypt: bool,
+) -> u32 {
+    use crate::crypto::multipart::{AesKey, CipherDirection, GcmState};
+    let state = if is_encrypt { &*MESSAGE_ENCRYPT_STATE } else { &*MESSAGE_DECRYPT_STATE };
+    state.with(|s| {
+        let mut store = s.borrow_mut();
+        let Some(c) = store.get_mut(&h_session) else {
+            return CKR_OPERATION_NOT_INITIALIZED;
+        };
+        if c.in_message {
+            return CKR_OPERATION_ACTIVE;
+        }
+        let Some(key) = AesKey::new(&c.key) else {
+            return CKR_KEY_SIZE_RANGE;
+        };
+        // Full 128-bit tag internally; truncation to ulTagBits happens at
+        // the final Next (mirrors the one-shot path's tag handling).
+        let dir = if is_encrypt { CipherDirection::Encrypt } else { CipherDirection::Decrypt };
+        c.stream = Some(GcmState::new(key, iv, aad, 128, dir));
+        c.tag_bits = tag_bits;
+        c.plaintext_acc.clear();
+        c.in_message = true;
+        CKR_OK
+    })
+}
+
+/// C_EncryptMessageNext core: O(chunk) — CTR-encrypt the part through the
+/// session's `GcmState` (keystream remainder carries across chunk
+/// boundaries) and fold the ciphertext into the running GHASH. On
+/// CKF_END_OF_MESSAGE, write the truncated tag to `p_tag`.
+///
+/// # Safety
+/// `p_part`/`p_out`/`pul_out`/`p_tag` must be valid for the lengths
+/// involved (`p_tag` only when `end_of_message`).
+unsafe fn encrypt_message_next_core(
+    h_session: u32,
+    p_part: *const u8,
+    part_len: u32,
+    p_out: *mut u8,
+    pul_out: *mut u32,
+    end_of_message: bool,
+    p_tag: *mut u8,
+) -> u32 {
+    match MESSAGE_ENCRYPT_STATE
+        .with(|s| s.borrow().get(&h_session).map(|c| c.in_message && c.stream.is_some()))
+    {
+        None | Some(false) => return CKR_OPERATION_NOT_INITIALIZED,
+        Some(true) => {}
+    }
+    // §5.2 — NULL plaintext part with a nonzero length is invalid input.
+    if (p_part.is_null() && part_len > 0) || pul_out.is_null() {
+        return CKR_ARGUMENTS_BAD;
+    }
+    unsafe {
+        // §5.2 two-call convention: a NULL output buffer is a pure size
+        // query — it must not consume input or advance the stream.
+        if p_out.is_null() {
+            *pul_out = part_len;
+            return CKR_OK;
+        }
+        if *pul_out < part_len {
+            *pul_out = part_len;
+            return CKR_BUFFER_TOO_SMALL;
+        }
+        if end_of_message && p_tag.is_null() {
+            return CKR_ARGUMENTS_BAD;
+        }
+        let part: &[u8] =
+            if part_len == 0 { &[] } else { std::slice::from_raw_parts(p_part, part_len as usize) };
+
+        MESSAGE_ENCRYPT_STATE.with(|s| {
+            let mut store = s.borrow_mut();
+            let Some(c) = store.get_mut(&h_session) else {
+                return CKR_OPERATION_NOT_INITIALIZED;
+            };
+            let Some(stream) = c.stream.as_mut() else {
+                return CKR_OPERATION_NOT_INITIALIZED;
+            };
+            let ct = stream.msg_update(part);
+            std::ptr::copy_nonoverlapping(ct.as_ptr(), p_out, ct.len());
+            *pul_out = ct.len() as u32;
+            if end_of_message {
+                let gcm = c.stream.take().expect("stream checked above");
+                let tag = gcm.msg_compute_tag(); // full 16 bytes
+                let tag_bytes = ((c.tag_bits / 8) as usize).min(tag.len());
+                std::ptr::copy_nonoverlapping(tag.as_ptr(), p_tag, tag_bytes);
+                c.in_message = false;
+            }
+            CKR_OK
+        })
+    }
+}
+
+/// C_DecryptMessageNext core: verify-then-release. Each part is CTR-
+/// decrypted incrementally (O(chunk)) but the plaintext is buffered in
+/// `plaintext_acc`; intermediate parts emit nothing. The final part
+/// verifies the out-of-band tag and only then emits the whole message
+/// (memory bound: one message). On mismatch the buffered plaintext is
+/// zeroized and the caller's buffer is left untouched.
+///
+/// # Safety
+/// `p_part`/`p_out`/`pul_out`/`p_tag` must be valid for the lengths
+/// involved (`p_tag` only when `end_of_message`).
+unsafe fn decrypt_message_next_core(
+    h_session: u32,
+    p_part: *const u8,
+    part_len: u32,
+    p_out: *mut u8,
+    pul_out: *mut u32,
+    end_of_message: bool,
+    p_tag: *const u8,
+) -> u32 {
+    let acc_len = match MESSAGE_DECRYPT_STATE.with(|s| {
+        s.borrow()
+            .get(&h_session)
+            .filter(|c| c.in_message && c.stream.is_some())
+            .map(|c| c.plaintext_acc.len())
+    }) {
+        Some(n) => n,
+        None => return CKR_OPERATION_NOT_INITIALIZED,
+    };
+    // §5.2 — NULL ciphertext part with a nonzero length is invalid input.
+    if (p_part.is_null() && part_len > 0) || pul_out.is_null() {
+        return CKR_ARGUMENTS_BAD;
+    }
+    // Output requirement: intermediate parts release nothing, but report
+    // the part length as an upper bound (§5.2 permits over-estimates); the
+    // final part releases the whole withheld message — exact size.
+    let need: u32 =
+        if end_of_message { (acc_len + part_len as usize) as u32 } else { part_len };
+    unsafe {
+        // §5.2 two-call convention: a NULL output buffer is a pure size
+        // query — it must NOT consume input or advance the stream. Only a
+        // successful copy-out consumes.
+        if p_out.is_null() {
+            *pul_out = need;
+            return CKR_OK;
+        }
+        if *pul_out < need {
+            *pul_out = need;
+            return CKR_BUFFER_TOO_SMALL;
+        }
+        if end_of_message && p_tag.is_null() {
+            return CKR_ARGUMENTS_BAD;
+        }
+        let part: &[u8] =
+            if part_len == 0 { &[] } else { std::slice::from_raw_parts(p_part, part_len as usize) };
+
+        MESSAGE_DECRYPT_STATE.with(|s| {
+            let mut store = s.borrow_mut();
+            let Some(c) = store.get_mut(&h_session) else {
+                return CKR_OPERATION_NOT_INITIALIZED;
+            };
+            let Some(stream) = c.stream.as_mut() else {
+                return CKR_OPERATION_NOT_INITIALIZED;
+            };
+            let mut pt = stream.msg_update(part);
+            c.plaintext_acc.extend_from_slice(&pt);
+            pt.zeroize();
+            if !end_of_message {
+                *pul_out = 0;
+                return CKR_OK;
+            }
+            // Final part: verify the tag BEFORE releasing anything.
+            let gcm = c.stream.take().expect("stream checked above");
+            let tag_bytes = ((c.tag_bits / 8) as usize).min(16);
+            let tag = std::slice::from_raw_parts(p_tag, tag_bytes);
+            c.in_message = false;
+            match gcm.msg_verify_tag(tag) {
+                Ok(()) => {
+                    std::ptr::copy_nonoverlapping(
+                        c.plaintext_acc.as_ptr(),
+                        p_out,
+                        c.plaintext_acc.len(),
+                    );
+                    *pul_out = c.plaintext_acc.len() as u32;
+                    c.plaintext_acc.zeroize();
+                    CKR_OK
+                }
+                Err(e) => {
+                    // §5.15 caveat — no pre-authentication plaintext
+                    // escapes: wipe the withheld buffer, leave the
+                    // caller's output untouched.
+                    c.plaintext_acc.zeroize();
+                    e
+                }
+            }
+        })
+    }
+}
+
+/// One-shot AES-GCM for the §5.15 single-part message calls
+/// (C_EncryptMessage / C_DecryptMessage). The tag travels out-of-band:
+/// encrypt writes `tag_bits/8` bytes to `p_tag`; decrypt reads them back
+/// and verifies (truncated tags per SP 800-38D — fixes the Appendix B
+/// always-fail bug where the truncated tag was handed to a 128-bit-only
+/// AEAD). T5: backed by the same `GcmState` engine as the streaming path.
 pub fn aes_gcm_exec(
     key: &[u8],
     iv: &[u8],
@@ -7403,92 +7617,35 @@ pub fn aes_gcm_exec(
     p_tag: *mut u8,
     tag_bits: u32,
 ) -> Result<Vec<u8>, u32> {
-    use aes_gcm::aead::generic_array::GenericArray;
-    use aes_gcm::{Aes128Gcm, Aes256Gcm, KeyInit, aead::Aead};
+    use crate::crypto::multipart::{AesKey, CipherDirection, GcmState};
 
-    let tag_bytes = (tag_bits / 8) as usize;
-    let nonce = GenericArray::from_slice(iv);
-    let payload_aead = aes_gcm::aead::Payload {
-        msg: payload,
-        aad: aad,
-    };
+    // The message API supports AES-128/256 (matches C_MessageEncryptInit).
+    if key.len() != 16 && key.len() != 32 {
+        return Err(CKR_KEY_SIZE_RANGE);
+    }
+    let aes = AesKey::new(key).ok_or(CKR_KEY_SIZE_RANGE)?;
+    let tag_bytes = ((tag_bits / 8) as usize).min(16);
 
-    if key.len() == 16 {
-        let cipher = Aes128Gcm::new(GenericArray::from_slice(key));
-        if is_encrypt {
-            match cipher.encrypt(nonce, payload_aead) {
-                Ok(out) => {
-                    if out.len() < tag_bytes {
-                        return Err(CKR_GENERAL_ERROR);
-                    }
-                    let ct_len = out.len() - 16;
-                    unsafe {
-                        std::ptr::copy_nonoverlapping(
-                            out[ct_len..ct_len + tag_bytes].as_ptr(),
-                            p_tag,
-                            tag_bytes,
-                        );
-                    }
-                    Ok(out[0..ct_len].to_vec())
-                }
-                Err(_) => Err(CKR_GENERAL_ERROR),
-            }
-        } else {
-            let mut combined = payload.to_vec();
-            if tag_bytes > 0 {
-                unsafe {
-                    let tag_slice = std::slice::from_raw_parts(p_tag, tag_bytes);
-                    combined.extend_from_slice(tag_slice);
-                }
-            }
-            let dec_payload = aes_gcm::aead::Payload {
-                msg: &combined,
-                aad: aad,
-            };
-            match cipher.decrypt(nonce, dec_payload) {
-                Ok(plain) => Ok(plain),
-                Err(_) => Err(CKR_ENCRYPTED_DATA_INVALID),
-            }
+    if is_encrypt {
+        let mut gcm = GcmState::new(aes, iv, aad, 128, CipherDirection::Encrypt);
+        let ct = gcm.msg_update(payload);
+        let tag = gcm.msg_compute_tag();
+        unsafe {
+            std::ptr::copy_nonoverlapping(tag.as_ptr(), p_tag, tag_bytes);
         }
-    } else if key.len() == 32 {
-        let cipher = Aes256Gcm::new(GenericArray::from_slice(key));
-        if is_encrypt {
-            match cipher.encrypt(nonce, payload_aead) {
-                Ok(out) => {
-                    if out.len() < tag_bytes {
-                        return Err(CKR_GENERAL_ERROR);
-                    }
-                    let ct_len = out.len() - 16;
-                    unsafe {
-                        std::ptr::copy_nonoverlapping(
-                            out[ct_len..ct_len + tag_bytes].as_ptr(),
-                            p_tag,
-                            tag_bytes,
-                        );
-                    }
-                    Ok(out[0..ct_len].to_vec())
-                }
-                Err(_) => Err(CKR_GENERAL_ERROR),
-            }
-        } else {
-            let mut combined = payload.to_vec();
-            if tag_bytes > 0 {
-                unsafe {
-                    let tag_slice = std::slice::from_raw_parts(p_tag, tag_bytes);
-                    combined.extend_from_slice(tag_slice);
-                }
-            }
-            let dec_payload = aes_gcm::aead::Payload {
-                msg: &combined,
-                aad: aad,
-            };
-            match cipher.decrypt(nonce, dec_payload) {
-                Ok(plain) => Ok(plain),
-                Err(_) => Err(CKR_ENCRYPTED_DATA_INVALID),
-            }
-        }
+        Ok(ct)
     } else {
-        Err(CKR_KEY_SIZE_RANGE)
+        let mut gcm = GcmState::new(aes, iv, aad, 128, CipherDirection::Decrypt);
+        let mut pt = gcm.msg_update(payload);
+        let tag = unsafe { std::slice::from_raw_parts(p_tag, tag_bytes) };
+        match gcm.msg_verify_tag(tag) {
+            Ok(()) => Ok(pt),
+            Err(e) => {
+                // Unauthenticated plaintext must not survive.
+                pt.zeroize();
+                Err(e)
+            }
+        }
     }
 }
 
@@ -7512,11 +7669,14 @@ pub fn C_EncryptMessage(
     pul_ciphertext_len: *mut u32,
 ) -> u32 {
     require_init!();
-    let ctx = match MESSAGE_ENCRYPT_STATE.with(|s| s.borrow().get(&h_session).cloned()) {
-        Some(c) => c,
+    let (mut key, in_message) = match MESSAGE_ENCRYPT_STATE
+        .with(|s| s.borrow().get(&h_session).map(|c| (c.key.clone(), c.in_message)))
+    {
+        Some(v) => v,
         None => return CKR_OPERATION_NOT_INITIALIZED,
     };
-    if ctx.in_message {
+    if in_message {
+        key.zeroize();
         return CKR_OPERATION_ACTIVE;
     }
     // §5.2 — input pointers (AAD, plaintext) may be NULL only with zero
@@ -7524,22 +7684,28 @@ pub fn C_EncryptMessage(
     if (p_associated_data.is_null() && ul_associated_data_len > 0)
         || (p_plaintext.is_null() && ul_plaintext_len > 0)
     {
+        key.zeroize();
         return CKR_ARGUMENTS_BAD;
     }
 
-    unsafe {
+    let rv = unsafe {
         if p_ciphertext.is_null() {
             *pul_ciphertext_len = ul_plaintext_len;
+            key.zeroize();
             return CKR_OK;
         }
         if *pul_ciphertext_len < ul_plaintext_len {
             *pul_ciphertext_len = ul_plaintext_len;
+            key.zeroize();
             return CKR_BUFFER_TOO_SMALL;
         }
 
         let (iv, p_tag, tag_bits) = match parse_gcm_msg_params(p_parameter) {
             Ok(v) => v,
-            Err(e) => return e,
+            Err(e) => {
+                key.zeroize();
+                return e;
+            }
         };
         let aad: &[u8] = if p_associated_data.is_null() {
             &[]
@@ -7552,7 +7718,7 @@ pub fn C_EncryptMessage(
             std::slice::from_raw_parts(p_plaintext, ul_plaintext_len as usize)
         };
 
-        match aes_gcm_exec(&ctx.key, &iv, aad, plain, true, p_tag, tag_bits) {
+        match aes_gcm_exec(&key, &iv, aad, plain, true, p_tag, tag_bits) {
             Ok(ct) => {
                 std::ptr::copy_nonoverlapping(ct.as_ptr(), p_ciphertext, ct.len());
                 *pul_ciphertext_len = ct.len() as u32;
@@ -7560,7 +7726,9 @@ pub fn C_EncryptMessage(
             }
             Err(e) => e,
         }
-    }
+    };
+    key.zeroize();
+    rv
 }
 
 #[wasm_bindgen(js_name = _C_EncryptMessageBegin)]
@@ -7572,15 +7740,12 @@ pub fn C_EncryptMessageBegin(
     ul_associated_data_len: u32,
 ) -> u32 {
     require_init!();
-    let mut state_map_guard = MESSAGE_ENCRYPT_STATE.with(|s| s.borrow_mut().clone());
-    let ctx = match state_map_guard.get_mut(&h_session) {
-        Some(c) => c,
+    // Error priority: operation state outranks argument validation.
+    match MESSAGE_ENCRYPT_STATE.with(|s| s.borrow().get(&h_session).map(|c| c.in_message)) {
         None => return CKR_OPERATION_NOT_INITIALIZED,
-    };
-    if ctx.in_message {
-        return CKR_OPERATION_ACTIVE;
+        Some(true) => return CKR_OPERATION_ACTIVE,
+        Some(false) => {}
     }
-
     // §5.2 — NULL AAD with a nonzero length is invalid input.
     if p_associated_data.is_null() && ul_associated_data_len > 0 {
         return CKR_ARGUMENTS_BAD;
@@ -7590,24 +7755,13 @@ pub fn C_EncryptMessageBegin(
             Ok(v) => v,
             Err(e) => return e,
         };
-        let aad = if p_associated_data.is_null() {
-            Vec::new()
+        let aad: &[u8] = if p_associated_data.is_null() {
+            &[]
         } else {
-            std::slice::from_raw_parts(p_associated_data, ul_associated_data_len as usize).to_vec()
+            std::slice::from_raw_parts(p_associated_data, ul_associated_data_len as usize)
         };
-
-        MESSAGE_ENCRYPT_STATE.with(|s| {
-            let mut store = s.borrow_mut();
-            if let Some(c) = store.get_mut(&h_session) {
-                c.in_message = true;
-                c.iv = iv;
-                c.aad = aad;
-                c.tag_bits = tag_bits;
-                c.payload_acc.clear();
-            }
-        });
+        message_begin_core(h_session, &iv, aad, tag_bits, true)
     }
-    CKR_OK
 }
 
 #[wasm_bindgen(js_name = _C_EncryptMessageNext)]
@@ -7622,124 +7776,36 @@ pub fn C_EncryptMessageNext(
     flags: u32,
 ) -> u32 {
     require_init!();
-    let ctx = match MESSAGE_ENCRYPT_STATE.with(|s| s.borrow().get(&h_session).cloned()) {
-        Some(c) => c,
-        None => return CKR_OPERATION_NOT_INITIALIZED,
-    };
-    if !ctx.in_message {
-        return CKR_OPERATION_NOT_INITIALIZED;
-    }
-    // §5.2 — NULL plaintext part with a nonzero length is invalid input.
-    if p_plaintext_part.is_null() && ul_plaintext_part_len > 0 {
-        return CKR_ARGUMENTS_BAD;
-    }
-
+    let end_of_message = (flags & 0x0000_0001) != 0; // CKF_END_OF_MESSAGE
     unsafe {
-        if p_ciphertext_part.is_null() {
-            *pul_ciphertext_part_len = ul_plaintext_part_len;
-            return CKR_OK;
-        }
-        if *pul_ciphertext_part_len < ul_plaintext_part_len {
-            *pul_ciphertext_part_len = ul_plaintext_part_len;
-            return CKR_BUFFER_TOO_SMALL;
-        }
-
-        MESSAGE_ENCRYPT_STATE.with(|s| {
-            if let Some(c) = s.borrow_mut().get_mut(&h_session) {
-                if ul_plaintext_part_len > 0 {
-                    let plain_chunk = std::slice::from_raw_parts(
-                        p_plaintext_part,
-                        ul_plaintext_part_len as usize,
-                    );
-                    c.payload_acc.extend_from_slice(plain_chunk);
-                }
-            }
-        });
-
-        if (flags & 0x00000001) != 0
-        /* CKF_END_OF_MESSAGE */
-        {
-            let final_ctx =
-                match MESSAGE_ENCRYPT_STATE.with(|s| s.borrow().get(&h_session).cloned()) {
-                    Some(s) => s,
-                    None => return CKR_OPERATION_NOT_INITIALIZED,
-                };
-            let p_tag = if p_parameter.is_null() {
-                return CKR_ARGUMENTS_BAD;
-            } else {
-                *(p_parameter.add(16) as *const u32) as usize as *mut u8
-            };
-
-            match aes_gcm_exec(
-                &final_ctx.key,
-                &final_ctx.iv,
-                &final_ctx.aad,
-                &final_ctx.payload_acc,
-                true,
-                p_tag,
-                final_ctx.tag_bits,
-            ) {
-                Ok(full_ct) => {
-                    let chunk_start = full_ct.len() - ul_plaintext_part_len as usize;
-                    std::ptr::copy_nonoverlapping(
-                        full_ct[chunk_start..].as_ptr(),
-                        p_ciphertext_part,
-                        ul_plaintext_part_len as usize,
-                    );
-                    *pul_ciphertext_part_len = ul_plaintext_part_len;
-
-                    MESSAGE_ENCRYPT_STATE.with(|s| {
-                        if let Some(st) = s.borrow_mut().get_mut(&h_session) {
-                            st.in_message = false;
-                        }
-                    });
-                    CKR_OK
-                }
-                Err(e) => {
-                    MESSAGE_ENCRYPT_STATE.with(|s| {
-                        if let Some(st) = s.borrow_mut().get_mut(&h_session) {
-                            st.in_message = false;
-                        }
-                    });
-                    e
-                }
-            }
+        // The tag destination comes from CK_GCM_MESSAGE_PARAMS.pTag; it is
+        // only required (and only dereferenced) on the final part, and the
+        // core defers that check until after the §5.2 size-query handling.
+        let p_tag: *mut u8 = if end_of_message && !p_parameter.is_null() {
+            *(p_parameter.add(16) as *const u32) as usize as *mut u8
         } else {
-            let intermediate_ctx =
-                match MESSAGE_ENCRYPT_STATE.with(|s| s.borrow().get(&h_session).cloned()) {
-                    Some(s) => s,
-                    None => return CKR_OPERATION_NOT_INITIALIZED,
-                };
-            let mut fake_tag = vec![0u8; (intermediate_ctx.tag_bits / 8) as usize];
-            match aes_gcm_exec(
-                &intermediate_ctx.key,
-                &intermediate_ctx.iv,
-                &intermediate_ctx.aad,
-                &intermediate_ctx.payload_acc,
-                true,
-                fake_tag.as_mut_ptr(),
-                intermediate_ctx.tag_bits,
-            ) {
-                Ok(full_ct) => {
-                    let chunk_start = full_ct.len() - ul_plaintext_part_len as usize;
-                    std::ptr::copy_nonoverlapping(
-                        full_ct[chunk_start..].as_ptr(),
-                        p_ciphertext_part,
-                        ul_plaintext_part_len as usize,
-                    );
-                    *pul_ciphertext_part_len = ul_plaintext_part_len;
-                    CKR_OK
-                }
-                Err(e) => e,
-            }
-        }
+            std::ptr::null_mut()
+        };
+        encrypt_message_next_core(
+            h_session,
+            p_plaintext_part,
+            ul_plaintext_part_len,
+            p_ciphertext_part,
+            pul_ciphertext_part_len,
+            end_of_message,
+            p_tag,
+        )
     }
 }
 
 #[wasm_bindgen(js_name = _C_MessageEncryptFinal)]
 pub fn C_MessageEncryptFinal(h_session: u32) -> u32 {
     require_init!();
-    MESSAGE_ENCRYPT_STATE.with(|s| s.borrow_mut().remove(&h_session));
+    MESSAGE_ENCRYPT_STATE.with(|s| {
+        if let Some(mut ctx) = s.borrow_mut().remove(&h_session) {
+            ctx.wipe();
+        }
+    });
     CKR_OK
 }
 
@@ -7763,11 +7829,14 @@ pub fn C_DecryptMessage(
     pul_plaintext_len: *mut u32,
 ) -> u32 {
     require_init!();
-    let ctx = match MESSAGE_DECRYPT_STATE.with(|s| s.borrow().get(&h_session).cloned()) {
-        Some(c) => c,
+    let (mut key, in_message) = match MESSAGE_DECRYPT_STATE
+        .with(|s| s.borrow().get(&h_session).map(|c| (c.key.clone(), c.in_message)))
+    {
+        Some(v) => v,
         None => return CKR_OPERATION_NOT_INITIALIZED,
     };
-    if ctx.in_message {
+    if in_message {
+        key.zeroize();
         return CKR_OPERATION_ACTIVE;
     }
     // §5.2 — input pointers (AAD, ciphertext) may be NULL only with zero
@@ -7775,22 +7844,28 @@ pub fn C_DecryptMessage(
     if (p_associated_data.is_null() && ul_associated_data_len > 0)
         || (p_ciphertext.is_null() && ul_ciphertext_len > 0)
     {
+        key.zeroize();
         return CKR_ARGUMENTS_BAD;
     }
 
-    unsafe {
+    let rv = unsafe {
         if p_plaintext.is_null() {
             *pul_plaintext_len = ul_ciphertext_len;
+            key.zeroize();
             return CKR_OK;
         }
         if *pul_plaintext_len < ul_ciphertext_len {
             *pul_plaintext_len = ul_ciphertext_len;
+            key.zeroize();
             return CKR_BUFFER_TOO_SMALL;
         }
 
         let (iv, p_tag, tag_bits) = match parse_gcm_msg_params(p_parameter) {
             Ok(v) => v,
-            Err(e) => return e,
+            Err(e) => {
+                key.zeroize();
+                return e;
+            }
         };
         let aad: &[u8] = if p_associated_data.is_null() {
             &[]
@@ -7803,15 +7878,18 @@ pub fn C_DecryptMessage(
             std::slice::from_raw_parts(p_ciphertext, ul_ciphertext_len as usize)
         };
 
-        match aes_gcm_exec(&ctx.key, &iv, aad, ct, false, p_tag, tag_bits) {
-            Ok(plain) => {
+        match aes_gcm_exec(&key, &iv, aad, ct, false, p_tag, tag_bits) {
+            Ok(mut plain) => {
                 std::ptr::copy_nonoverlapping(plain.as_ptr(), p_plaintext, plain.len());
                 *pul_plaintext_len = plain.len() as u32;
+                plain.zeroize();
                 CKR_OK
             }
             Err(e) => e,
         }
-    }
+    };
+    key.zeroize();
+    rv
 }
 
 #[wasm_bindgen(js_name = _C_DecryptMessageBegin)]
@@ -7823,15 +7901,12 @@ pub fn C_DecryptMessageBegin(
     ul_associated_data_len: u32,
 ) -> u32 {
     require_init!();
-    let mut state_map_guard = MESSAGE_DECRYPT_STATE.with(|s| s.borrow_mut().clone());
-    let ctx = match state_map_guard.get_mut(&h_session) {
-        Some(c) => c,
+    // Error priority: operation state outranks argument validation.
+    match MESSAGE_DECRYPT_STATE.with(|s| s.borrow().get(&h_session).map(|c| c.in_message)) {
         None => return CKR_OPERATION_NOT_INITIALIZED,
-    };
-    if ctx.in_message {
-        return CKR_OPERATION_ACTIVE;
+        Some(true) => return CKR_OPERATION_ACTIVE,
+        Some(false) => {}
     }
-
     // §5.2 — NULL AAD with a nonzero length is invalid input.
     if p_associated_data.is_null() && ul_associated_data_len > 0 {
         return CKR_ARGUMENTS_BAD;
@@ -7841,24 +7916,13 @@ pub fn C_DecryptMessageBegin(
             Ok(v) => v,
             Err(e) => return e,
         };
-        let aad = if p_associated_data.is_null() {
-            Vec::new()
+        let aad: &[u8] = if p_associated_data.is_null() {
+            &[]
         } else {
-            std::slice::from_raw_parts(p_associated_data, ul_associated_data_len as usize).to_vec()
+            std::slice::from_raw_parts(p_associated_data, ul_associated_data_len as usize)
         };
-
-        MESSAGE_DECRYPT_STATE.with(|s| {
-            let mut store = s.borrow_mut();
-            if let Some(c) = store.get_mut(&h_session) {
-                c.in_message = true;
-                c.iv = iv;
-                c.aad = aad;
-                c.tag_bits = tag_bits;
-                c.payload_acc.clear();
-            }
-        });
+        message_begin_core(h_session, &iv, aad, tag_bits, false)
     }
-    CKR_OK
 }
 
 #[wasm_bindgen(js_name = _C_DecryptMessageNext)]
@@ -7873,123 +7937,36 @@ pub fn C_DecryptMessageNext(
     flags: u32,
 ) -> u32 {
     require_init!();
-    let ctx = match MESSAGE_DECRYPT_STATE.with(|s| s.borrow().get(&h_session).cloned()) {
-        Some(c) => c,
-        None => return CKR_OPERATION_NOT_INITIALIZED,
-    };
-    if !ctx.in_message {
-        return CKR_OPERATION_NOT_INITIALIZED;
-    }
-    // §5.2 — NULL ciphertext part with a nonzero length is invalid input.
-    if p_ciphertext_part.is_null() && ul_ciphertext_part_len > 0 {
-        return CKR_ARGUMENTS_BAD;
-    }
-
+    let end_of_message = (flags & 0x0000_0001) != 0; // CKF_END_OF_MESSAGE
     unsafe {
-        if p_plaintext_part.is_null() {
-            *pul_plaintext_part_len = ul_ciphertext_part_len;
-            return CKR_OK;
-        }
-        if *pul_plaintext_part_len < ul_ciphertext_part_len {
-            *pul_plaintext_part_len = ul_ciphertext_part_len;
-            return CKR_BUFFER_TOO_SMALL;
-        }
-
-        MESSAGE_DECRYPT_STATE.with(|s| {
-            if let Some(c) = s.borrow_mut().get_mut(&h_session) {
-                if ul_ciphertext_part_len > 0 {
-                    let ct_chunk = std::slice::from_raw_parts(
-                        p_ciphertext_part,
-                        ul_ciphertext_part_len as usize,
-                    );
-                    c.payload_acc.extend_from_slice(ct_chunk);
-                }
-            }
-        });
-
-        if (flags & 0x00000001) != 0
-        /* CKF_END_OF_MESSAGE */
-        {
-            let final_ctx =
-                match MESSAGE_DECRYPT_STATE.with(|s| s.borrow().get(&h_session).cloned()) {
-                    Some(s) => s,
-                    None => return CKR_OPERATION_NOT_INITIALIZED,
-                };
-            let p_tag = if p_parameter.is_null() {
-                return CKR_ARGUMENTS_BAD;
-            } else {
-                *(p_parameter.add(16) as *const u32) as usize as *mut u8
-            };
-
-            match aes_gcm_exec(
-                &final_ctx.key,
-                &final_ctx.iv,
-                &final_ctx.aad,
-                &final_ctx.payload_acc,
-                false,
-                p_tag,
-                final_ctx.tag_bits,
-            ) {
-                Ok(full_pt) => {
-                    let chunk_start = full_pt.len() - ul_ciphertext_part_len as usize;
-                    std::ptr::copy_nonoverlapping(
-                        full_pt[chunk_start..].as_ptr(),
-                        p_plaintext_part,
-                        ul_ciphertext_part_len as usize,
-                    );
-                    *pul_plaintext_part_len = ul_ciphertext_part_len;
-                    MESSAGE_DECRYPT_STATE.with(|s| {
-                        if let Some(st) = s.borrow_mut().get_mut(&h_session) {
-                            st.in_message = false;
-                        }
-                    });
-                    CKR_OK
-                }
-                Err(e) => {
-                    MESSAGE_DECRYPT_STATE.with(|s| {
-                        if let Some(st) = s.borrow_mut().get_mut(&h_session) {
-                            st.in_message = false;
-                        }
-                    });
-                    e
-                }
-            }
+        // The expected tag comes from CK_GCM_MESSAGE_PARAMS.pTag; it is
+        // only required (and only dereferenced) on the final part, and the
+        // core defers that check until after the §5.2 size-query handling.
+        let p_tag: *const u8 = if end_of_message && !p_parameter.is_null() {
+            *(p_parameter.add(16) as *const u32) as usize as *const u8
         } else {
-            let intermediate_ctx =
-                match MESSAGE_DECRYPT_STATE.with(|s| s.borrow().get(&h_session).cloned()) {
-                    Some(s) => s,
-                    None => return CKR_OPERATION_NOT_INITIALIZED,
-                };
-            let mut fake_tag = vec![0u8; (intermediate_ctx.tag_bits / 8) as usize];
-            match aes_gcm_exec(
-                &intermediate_ctx.key,
-                &intermediate_ctx.iv,
-                &intermediate_ctx.aad,
-                &intermediate_ctx.payload_acc,
-                true,
-                fake_tag.as_mut_ptr(),
-                intermediate_ctx.tag_bits,
-            ) {
-                Ok(full_pt_like) => {
-                    let chunk_start = full_pt_like.len() - ul_ciphertext_part_len as usize;
-                    std::ptr::copy_nonoverlapping(
-                        full_pt_like[chunk_start..].as_ptr(),
-                        p_plaintext_part,
-                        ul_ciphertext_part_len as usize,
-                    );
-                    *pul_plaintext_part_len = ul_ciphertext_part_len;
-                    CKR_OK
-                }
-                Err(e) => e,
-            }
-        }
+            std::ptr::null()
+        };
+        decrypt_message_next_core(
+            h_session,
+            p_ciphertext_part,
+            ul_ciphertext_part_len,
+            p_plaintext_part,
+            pul_plaintext_part_len,
+            end_of_message,
+            p_tag,
+        )
     }
 }
 
 #[wasm_bindgen(js_name = _C_MessageDecryptFinal)]
 pub fn C_MessageDecryptFinal(h_session: u32) -> u32 {
     require_init!();
-    MESSAGE_DECRYPT_STATE.with(|s| s.borrow_mut().remove(&h_session));
+    MESSAGE_DECRYPT_STATE.with(|s| {
+        if let Some(mut ctx) = s.borrow_mut().remove(&h_session) {
+            ctx.wipe();
+        }
+    });
     CKR_OK
 }
 
@@ -10314,5 +10291,509 @@ mod multipart_sign_verify_ffi_tests {
         );
 
         close_session(sess).unwrap();
+    }
+}
+
+// ----------------------------------------------------------------------------
+// T5 — Message-based AEAD streaming tests (C_EncryptMessageBegin/Next,
+// C_DecryptMessageBegin/Next)
+// ----------------------------------------------------------------------------
+//
+// CK_GCM_MESSAGE_PARAMS embeds WASM32 4-byte pointers and cannot be built in
+// native 64-bit tests, so these tests drive `message_begin_core` /
+// `encrypt_message_next_core` / `decrypt_message_next_core` — everything
+// below the params-parsing wrappers — with real pointers, plus the real
+// C_MessageEncryptInit / C_SessionCancel / C_CloseSession entry points.
+#[cfg(test)]
+mod message_stream_ffi_tests {
+    use super::*;
+    use crate::native::test_lock;
+
+    const KEY_HANDLE: u32 = 0x5435_0002;
+
+    fn hex(s: &str) -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
+    fn install_gcm_key(key: &[u8]) {
+        crate::state::set_initialized(true);
+        OBJECTS.with(|o| {
+            let mut attrs = Attributes::new();
+            attrs.insert(CKA_VALUE, key.to_vec());
+            attrs.insert(CKA_ENCRYPT, vec![1]);
+            attrs.insert(CKA_DECRYPT, vec![1]);
+            o.borrow_mut().insert(KEY_HANDLE, attrs);
+        });
+    }
+
+    fn install_session(h: u32) {
+        SESSIONS.with(|s| {
+            s.borrow_mut()
+                .insert(h, crate::state::SessionState { slot_id: 0, rw_session: true });
+        });
+    }
+
+    fn init_msg_op(session: u32, encrypt: bool) {
+        let mech = [CKM_AES_GCM, 0u32, 0u32];
+        let rv = if encrypt {
+            C_MessageEncryptInit(session, mech.as_ptr() as *mut u8, KEY_HANDLE)
+        } else {
+            C_MessageDecryptInit(session, mech.as_ptr() as *mut u8, KEY_HANDLE)
+        };
+        assert_eq!(rv, CKR_OK);
+    }
+
+    /// Split `data` into parts of `sizes` (cycled; 0 yields an explicit
+    /// empty part).
+    fn split<'a>(data: &'a [u8], sizes: &[usize]) -> Vec<&'a [u8]> {
+        let mut parts: Vec<&[u8]> = Vec::new();
+        let mut off = 0;
+        let mut i = 0;
+        while off < data.len() {
+            let n = sizes[i % sizes.len()].min(data.len() - off);
+            parts.push(&data[off..off + n]);
+            off += n;
+            i += 1;
+        }
+        if parts.is_empty() {
+            parts.push(&data[..0]);
+        }
+        parts
+    }
+
+    /// Drive Begin + one Next per part (size query first, then copy-out).
+    /// Returns (ciphertext, tag).
+    fn msg_encrypt(
+        session: u32,
+        iv: &[u8],
+        aad: &[u8],
+        tag_bits: u32,
+        parts: &[&[u8]],
+    ) -> Result<(Vec<u8>, Vec<u8>), u32> {
+        let rv = message_begin_core(session, iv, aad, tag_bits, true);
+        if rv != CKR_OK {
+            return Err(rv);
+        }
+        let mut out = Vec::new();
+        let mut tag = vec![0u8; (tag_bits / 8) as usize];
+        for (i, part) in parts.iter().enumerate() {
+            let end = i == parts.len() - 1;
+            let mut need: u32 = 0;
+            let rv = unsafe {
+                encrypt_message_next_core(
+                    session,
+                    part.as_ptr(),
+                    part.len() as u32,
+                    std::ptr::null_mut(),
+                    &mut need,
+                    end,
+                    std::ptr::null_mut(),
+                )
+            };
+            if rv != CKR_OK {
+                return Err(rv);
+            }
+            assert_eq!(need as usize, part.len(), "encrypt size query is exact");
+            let mut buf = vec![0u8; need as usize];
+            let mut len = need;
+            let rv = unsafe {
+                encrypt_message_next_core(
+                    session,
+                    part.as_ptr(),
+                    part.len() as u32,
+                    buf.as_mut_ptr(),
+                    &mut len,
+                    end,
+                    tag.as_mut_ptr(),
+                )
+            };
+            if rv != CKR_OK {
+                return Err(rv);
+            }
+            out.extend_from_slice(&buf[..len as usize]);
+        }
+        Ok((out, tag))
+    }
+
+    /// Drive decrypt Begin/Next. Asserts the verify-then-release contract:
+    /// intermediate parts emit ZERO bytes; the final part emits the whole
+    /// message only after the tag verifies.
+    fn msg_decrypt(
+        session: u32,
+        iv: &[u8],
+        aad: &[u8],
+        tag_bits: u32,
+        parts: &[&[u8]],
+        tag: &[u8],
+    ) -> Result<Vec<u8>, u32> {
+        let rv = message_begin_core(session, iv, aad, tag_bits, false);
+        if rv != CKR_OK {
+            return Err(rv);
+        }
+        let total: usize = parts.iter().map(|p| p.len()).sum();
+        let mut out = Vec::new();
+        for (i, part) in parts.iter().enumerate() {
+            let end = i == parts.len() - 1;
+            let mut need: u32 = 0;
+            let rv = unsafe {
+                decrypt_message_next_core(
+                    session,
+                    part.as_ptr(),
+                    part.len() as u32,
+                    std::ptr::null_mut(),
+                    &mut need,
+                    end,
+                    std::ptr::null(),
+                )
+            };
+            if rv != CKR_OK {
+                return Err(rv);
+            }
+            if end {
+                assert_eq!(need as usize, total, "final size query = whole message");
+            }
+            let mut buf = vec![0u8; need as usize];
+            let mut len = need;
+            let rv = unsafe {
+                decrypt_message_next_core(
+                    session,
+                    part.as_ptr(),
+                    part.len() as u32,
+                    buf.as_mut_ptr(),
+                    &mut len,
+                    end,
+                    tag.as_ptr(),
+                )
+            };
+            if rv != CKR_OK {
+                return Err(rv);
+            }
+            if !end {
+                assert_eq!(len, 0, "no plaintext may be released before the tag verifies");
+            }
+            out.extend_from_slice(&buf[..len as usize]);
+        }
+        Ok(out)
+    }
+
+    const CHUNKINGS: &[&[usize]] = &[&[1], &[16], &[7, 13], &[5, 0, 9], &[64]];
+
+    /// Chunked == one-shot: SP 800-38D KATs (McGrew–Viega TC4 with AAD and
+    /// 12-byte IV; TC5 with 8-byte IV → §7.1 J0 derivation; TC3 without
+    /// AAD) across 1-byte / block-aligned / odd / empty-part chunkings and
+    /// 96/128-bit tags, plus the decrypt round-trip for each combination.
+    #[test]
+    fn message_stream_matches_kats_chunked() {
+        let _guard = test_lock::acquire();
+        let session = 0x5435_1001;
+        let key = hex("feffe9928665731c6d6a8f9467308308");
+        install_gcm_key(&key);
+        install_session(session);
+        init_msg_op(session, true);
+        init_msg_op(session, false);
+
+        let pt_full = hex(
+            "d9313225f88406e5a55909c5aff5269a86a7a9531534f7da2e4c303d8a318a72\
+             1c3c0c95956809532fcf0e2449a6b525b16aedf5aa0de657ba637b391aafd255",
+        );
+        let aad = hex("feedfacedeadbeeffeedfacedeadbeefabaddad2");
+        let cases = [
+            // (iv, aad, pt, ct, tag)
+            (
+                hex("cafebabefacedbaddecaf888"),
+                Vec::new(),
+                pt_full.clone(),
+                hex(
+                    "42831ec2217774244b7221b784d0d49ce3aa212f2c02a4e035c17e2329aca12e\
+                     21d514b25466931c7d8f6a5aac84aa051ba30b396a0aac973d58e091473f5985",
+                ),
+                hex("4d5c2af327cd64a62cf35abd2ba6fab4"),
+            ),
+            (
+                hex("cafebabefacedbaddecaf888"),
+                aad.clone(),
+                pt_full[..60].to_vec(),
+                hex(
+                    "42831ec2217774244b7221b784d0d49ce3aa212f2c02a4e035c17e2329aca12e\
+                     21d514b25466931c7d8f6a5aac84aa051ba30b396a0aac973d58e091",
+                ),
+                hex("5bc94fbc3221a5db94fae95ae7121a47"),
+            ),
+            (
+                hex("cafebabefacedbad"), // 64-bit IV
+                aad.clone(),
+                pt_full[..60].to_vec(),
+                hex(
+                    "61353b4c2806934a777ff51fa22a4755699b2a714fcdc6f83766e5f97b6c7423\
+                     73806900e49f24b22b097544d4896b424989b5e1ebac0f07c23f4598",
+                ),
+                hex("3612d2e79e3b0785561be14aaca2fccb"),
+            ),
+        ];
+        for (iv, aad, pt, ct, tag) in &cases {
+            for sizes in CHUNKINGS {
+                for tag_bits in [128u32, 96] {
+                    let tag_bytes = (tag_bits / 8) as usize;
+                    let (got_ct, got_tag) =
+                        msg_encrypt(session, iv, aad, tag_bits, &split(pt, sizes)).unwrap();
+                    assert_eq!(&got_ct, ct, "sizes={sizes:?} tag_bits={tag_bits}");
+                    assert_eq!(got_tag, tag[..tag_bytes], "sizes={sizes:?} tag_bits={tag_bits}");
+
+                    let got_pt = msg_decrypt(
+                        session,
+                        iv,
+                        aad,
+                        tag_bits,
+                        &split(ct, sizes),
+                        &tag[..tag_bytes],
+                    )
+                    .unwrap();
+                    assert_eq!(&got_pt, pt, "sizes={sizes:?} tag_bits={tag_bits}");
+                }
+            }
+        }
+        C_MessageEncryptFinal(session);
+        C_MessageDecryptFinal(session);
+        let _ = C_CloseSession(session);
+    }
+
+    /// Streaming output must byte-match the independent one-shot `aes-gcm`
+    /// crate for AES-256, including a many-part message (512 × 64 B). The
+    /// O(n) bound itself is pinned deterministically by
+    /// `crypto::multipart::tests::gcm_msg_streaming_is_single_pass` via the
+    /// keystream-block counter (no flaky wall-clock assertion needed).
+    #[test]
+    fn message_stream_matches_one_shot_crate_many_parts() {
+        let _guard = test_lock::acquire();
+        let session = 0x5435_1002;
+        let key = [0x42u8; 32];
+        install_gcm_key(&key);
+        install_session(session);
+        init_msg_op(session, true);
+        init_msg_op(session, false);
+
+        use aes_gcm::aead::{Aead, Payload};
+        use aes_gcm::{Aes256Gcm, KeyInit as GcmKeyInit};
+        let iv = [0x24u8; 12];
+        let aad = b"stream header";
+        let pt: Vec<u8> = (0..512usize * 64).map(|i| (i * 31 % 251) as u8).collect();
+        let mut one_shot = Aes256Gcm::new_from_slice(&key)
+            .unwrap()
+            .encrypt(aes_gcm::Nonce::from_slice(&iv), Payload { msg: &pt, aad })
+            .unwrap();
+        let one_shot_tag = one_shot.split_off(one_shot.len() - 16);
+
+        let parts: Vec<&[u8]> = pt.chunks(64).collect();
+        assert_eq!(parts.len(), 512);
+        let (ct, tag) = msg_encrypt(session, &iv, aad, 128, &parts).unwrap();
+        assert_eq!(ct, one_shot);
+        assert_eq!(tag, one_shot_tag);
+
+        let ct_parts: Vec<&[u8]> = ct.chunks(64).collect();
+        let round = msg_decrypt(session, &iv, aad, 128, &ct_parts, &tag).unwrap();
+        assert_eq!(round, pt);
+
+        C_MessageEncryptFinal(session);
+        C_MessageDecryptFinal(session);
+        let _ = C_CloseSession(session);
+    }
+
+    /// Tampered tag → CKR_ENCRYPTED_DATA_INVALID, the caller's buffer is
+    /// untouched (no unauthenticated plaintext escapes), and the message
+    /// op is terminated.
+    #[test]
+    fn message_decrypt_tampered_tag_releases_nothing() {
+        let _guard = test_lock::acquire();
+        let session = 0x5435_1003;
+        let key = [0x11u8; 16];
+        install_gcm_key(&key);
+        install_session(session);
+        init_msg_op(session, true);
+        init_msg_op(session, false);
+
+        let iv = [7u8; 12];
+        let pt = b"the magic words are squeamish ossifrage";
+        let (ct, mut tag) = msg_encrypt(session, &iv, b"aad", 128, &[pt]).unwrap();
+        tag[0] ^= 0x80;
+
+        assert_eq!(message_begin_core(session, &iv, b"aad", 128, false), CKR_OK);
+        // Feed in two parts; the first must release nothing.
+        let (a, b) = ct.split_at(10);
+        let mut len: u32 = ct.len() as u32;
+        let mut buf = vec![0xAAu8; ct.len()];
+        let rv = unsafe {
+            decrypt_message_next_core(
+                session, a.as_ptr(), a.len() as u32, buf.as_mut_ptr(), &mut len, false,
+                std::ptr::null(),
+            )
+        };
+        assert_eq!(rv, CKR_OK);
+        assert_eq!(len, 0);
+        let mut len: u32 = ct.len() as u32;
+        let rv = unsafe {
+            decrypt_message_next_core(
+                session, b.as_ptr(), b.len() as u32, buf.as_mut_ptr(), &mut len, true,
+                tag.as_ptr(),
+            )
+        };
+        assert_eq!(rv, CKR_ENCRYPTED_DATA_INVALID);
+        assert!(buf.iter().all(|&x| x == 0xAA), "caller buffer must stay untouched");
+        // The withheld plaintext was zeroized and the message terminated.
+        MESSAGE_DECRYPT_STATE.with(|s| {
+            let m = s.borrow();
+            let c = m.get(&session).unwrap();
+            assert!(!c.in_message);
+            assert!(c.plaintext_acc.is_empty());
+            assert!(c.stream.is_none());
+        });
+
+        // Untampered round-trip on the same op still works afterwards.
+        tag[0] ^= 0x80;
+        let parts: Vec<&[u8]> = ct.chunks(13).collect();
+        assert_eq!(msg_decrypt(session, &iv, b"aad", 128, &parts, &tag).unwrap(), pt);
+
+        C_MessageEncryptFinal(session);
+        C_MessageDecryptFinal(session);
+        let _ = C_CloseSession(session);
+    }
+
+    /// §5.2 two-call convention on the FINAL part: a NULL-output size query
+    /// must not consume state — repeating it returns the same size, and the
+    /// copy-out call still succeeds.
+    #[test]
+    fn message_decrypt_final_size_query_does_not_consume() {
+        let _guard = test_lock::acquire();
+        let session = 0x5435_1004;
+        let key = [0x33u8; 32];
+        install_gcm_key(&key);
+        install_session(session);
+        init_msg_op(session, true);
+        init_msg_op(session, false);
+
+        let iv = [1u8; 12];
+        let pt = b"forty-two bytes of extremely secret text!";
+        let (ct, tag) = msg_encrypt(session, &iv, &[], 96, &[pt]).unwrap();
+
+        assert_eq!(message_begin_core(session, &iv, &[], 96, false), CKR_OK);
+        let (a, b) = ct.split_at(17);
+        let mut len = 64u32;
+        let mut buf = vec![0u8; 64];
+        let rv = unsafe {
+            decrypt_message_next_core(
+                session, a.as_ptr(), a.len() as u32, buf.as_mut_ptr(), &mut len, false,
+                std::ptr::null(),
+            )
+        };
+        assert_eq!((rv, len), (CKR_OK, 0));
+        // Two size queries in a row — neither consumes.
+        for _ in 0..2 {
+            let mut need = 0u32;
+            let rv = unsafe {
+                decrypt_message_next_core(
+                    session, b.as_ptr(), b.len() as u32, std::ptr::null_mut(), &mut need, true,
+                    tag.as_ptr(),
+                )
+            };
+            assert_eq!((rv, need as usize), (CKR_OK, pt.len()));
+        }
+        // CKR_BUFFER_TOO_SMALL must not consume either.
+        let mut small = 3u32;
+        let rv = unsafe {
+            decrypt_message_next_core(
+                session, b.as_ptr(), b.len() as u32, buf.as_mut_ptr(), &mut small, true,
+                tag.as_ptr(),
+            )
+        };
+        assert_eq!((rv, small as usize), (CKR_BUFFER_TOO_SMALL, pt.len()));
+        // The real copy-out still succeeds.
+        let mut len = buf.len() as u32;
+        let rv = unsafe {
+            decrypt_message_next_core(
+                session, b.as_ptr(), b.len() as u32, buf.as_mut_ptr(), &mut len, true,
+                tag.as_ptr(),
+            )
+        };
+        assert_eq!(rv, CKR_OK);
+        assert_eq!(&buf[..len as usize], pt);
+
+        C_MessageEncryptFinal(session);
+        C_MessageDecryptFinal(session);
+        let _ = C_CloseSession(session);
+    }
+
+    /// C_SessionCancel CKF_MESSAGE_ENCRYPT (0x2) / CKF_MESSAGE_DECRYPT
+    /// (0x4) and C_CloseSession clear the message state (zeroized wipe);
+    /// the next part call reports CKR_OPERATION_NOT_INITIALIZED.
+    #[test]
+    fn message_cancel_and_close_clear_state() {
+        let _guard = test_lock::acquire();
+        let session = 0x5435_1005;
+        let key = [0x55u8; 16];
+        install_gcm_key(&key);
+        install_session(session);
+        let iv = [2u8; 12];
+        let part = [9u8; 8];
+        let mut len = 16u32;
+        let mut buf = [0u8; 16];
+
+        // Mid-message cancel of the encrypt op.
+        init_msg_op(session, true);
+        assert_eq!(message_begin_core(session, &iv, &[], 128, true), CKR_OK);
+        let rv = unsafe {
+            encrypt_message_next_core(
+                session, part.as_ptr(), part.len() as u32, buf.as_mut_ptr(), &mut len, false,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(rv, CKR_OK);
+        assert_eq!(C_SessionCancel(session, 0x2), CKR_OK);
+        assert!(MESSAGE_ENCRYPT_STATE.with(|s| !s.borrow().contains_key(&session)));
+        let rv = unsafe {
+            encrypt_message_next_core(
+                session, part.as_ptr(), part.len() as u32, buf.as_mut_ptr(), &mut len, true,
+                buf.as_mut_ptr(),
+            )
+        };
+        assert_eq!(rv, CKR_OPERATION_NOT_INITIALIZED);
+
+        // Mid-message cancel of the decrypt op.
+        init_msg_op(session, false);
+        assert_eq!(message_begin_core(session, &iv, &[], 128, false), CKR_OK);
+        let rv = unsafe {
+            decrypt_message_next_core(
+                session, part.as_ptr(), part.len() as u32, buf.as_mut_ptr(), &mut len, false,
+                std::ptr::null(),
+            )
+        };
+        assert_eq!(rv, CKR_OK);
+        assert_eq!(C_SessionCancel(session, 0x4), CKR_OK);
+        assert!(MESSAGE_DECRYPT_STATE.with(|s| !s.borrow().contains_key(&session)));
+        let rv = unsafe {
+            decrypt_message_next_core(
+                session, part.as_ptr(), part.len() as u32, buf.as_mut_ptr(), &mut len, true,
+                buf.as_ptr(),
+            )
+        };
+        assert_eq!(rv, CKR_OPERATION_NOT_INITIALIZED);
+
+        // C_CloseSession mid-message clears both directions too.
+        install_session(session);
+        init_msg_op(session, true);
+        init_msg_op(session, false);
+        assert_eq!(message_begin_core(session, &iv, &[], 128, true), CKR_OK);
+        assert_eq!(message_begin_core(session, &iv, &[], 128, false), CKR_OK);
+        assert_eq!(C_CloseSession(session), CKR_OK);
+        assert!(MESSAGE_ENCRYPT_STATE.with(|s| !s.borrow().contains_key(&session)));
+        assert!(MESSAGE_DECRYPT_STATE.with(|s| !s.borrow().contains_key(&session)));
+        let rv = unsafe {
+            encrypt_message_next_core(
+                session, part.as_ptr(), part.len() as u32, buf.as_mut_ptr(), &mut len, false,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(rv, CKR_OPERATION_NOT_INITIALIZED);
     }
 }
