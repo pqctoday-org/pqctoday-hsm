@@ -89,6 +89,9 @@ const CKK_GENERIC_SECRET = 0x10;
 const CKK_CHACHA20 = 0x33;
 const CKK_EC_MONTGOMERY = 0x41;
 const CKM_SHA256 = 0x250;
+// PKCS#11 v3.2 §6.26 — the SP 800-108 PRF must be a keyed-MAC mechanism
+// (rust/src/constants.rs: CKM_SHA256_HMAC = 0x251).
+const CKM_SHA256_HMAC = 0x251;
 const CKM_CHACHA20_POLY1305 = 0x4021;
 const CKM_SP800_108_COUNTER_KDF = 0x3ac;
 // Vendor mechanism — rust/src/constants.rs: CKM_EC_MONTGOMERY_KEY_DERIVE
@@ -342,7 +345,7 @@ function run() {
             ]);
             // CK_SP800_108_KDF_PARAMS (wasm32): prfType, ulNumberOfDataParams, pDataParams
             const pParams = alloc(12);
-            new Uint32Array(wasm.memory.buffer, pParams, 3).set([CKM_SHA256, 2, pSegs]);
+            new Uint32Array(wasm.memory.buffer, pParams, 3).set([CKM_SHA256_HMAC, 2, pSegs]);
             const mech = buildMech(CKM_SP800_108_COUNTER_KDF, pParams, 12);
             const dTpl = buildTpl([
                 { type: CKA_CLASS,     value: u32LE(CKO_SECRET_KEY) },
