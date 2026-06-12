@@ -175,6 +175,8 @@ pub fn C_Finalize(p_reserved: *mut u8) -> u32 {
     FIND_STATE.with(|s| s.borrow_mut().clear());
     MESSAGE_SIGN_ACC.with(|s| s.borrow_mut().clear());
     MESSAGE_VERIFY_ACC.with(|s| s.borrow_mut().clear());
+    SIGN_MULTIPART_ACC.with(|s| s.borrow_mut().clear());
+    VERIFY_MULTIPART_ACC.with(|s| s.borrow_mut().clear());
     ACVP_RNG.with(|r| *r.borrow_mut() = None);
     SESSIONS.with(|s| s.borrow_mut().clear());
     TOKEN_STORE.with(|ts| ts.borrow_mut().clear());
@@ -366,6 +368,8 @@ pub fn C_CloseSession(h_session: u32) -> u32 {
     FIND_STATE.with(|s| s.borrow_mut().remove(&h_session));
     MESSAGE_SIGN_ACC.with(|s| s.borrow_mut().remove(&h_session));
     MESSAGE_VERIFY_ACC.with(|s| s.borrow_mut().remove(&h_session));
+    SIGN_MULTIPART_ACC.with(|s| s.borrow_mut().remove(&h_session));
+    VERIFY_MULTIPART_ACC.with(|s| s.borrow_mut().remove(&h_session));
     CKR_OK
 }
 
@@ -412,10 +416,14 @@ pub fn C_SessionCancel(h_session: u32, flags: u32) -> u32 {
     }
     if flags & 0x800 != 0 {
         SIGN_STATE.with(|s| s.borrow_mut().remove(&h_session));
+        // T4 — the multi-part accumulator dies with the sign op.
+        SIGN_MULTIPART_ACC.with(|s| s.borrow_mut().remove(&h_session));
     }
     if flags & 0x2000 != 0 {
         VERIFY_STATE.with(|s| s.borrow_mut().remove(&h_session));
         VERIFY_SIG_STATE.with(|s| s.borrow_mut().remove(&h_session));
+        // T4 — the multi-part accumulator dies with the verify op.
+        VERIFY_MULTIPART_ACC.with(|s| s.borrow_mut().remove(&h_session));
     }
     if flags & 0x40 != 0 {
         FIND_STATE.with(|s| s.borrow_mut().remove(&h_session));
@@ -2932,6 +2940,13 @@ pub fn C_Sign(
     // §5.2 error priority — session-handle validity outranks
     // CKR_OPERATION_NOT_INITIALIZED and argument checks.
     require_session!(h_session);
+    // §5.13.2 — "C_Sign ... MUST be called after C_SignInit without
+    // intervening C_SignUpdate calls". A sign op already in its multi-part
+    // phase is a sequencing error (mirror C_Digest-after-Update, round-1
+    // S4/M-2); the accumulated parts MUST NOT be consumed by this error.
+    if SIGN_MULTIPART_ACC.with(|s| s.borrow().contains_key(&h_session)) {
+        return CKR_OPERATION_ACTIVE;
+    }
     if pul_signature_len.is_null() || (p_data.is_null() && ul_data_len > 0) {
         return CKR_ARGUMENTS_BAD;
     }
@@ -3246,6 +3261,12 @@ pub fn C_Verify(
     require_init!();
     // §5.2 error priority — session handle before operation state.
     require_session!(h_session);
+    // §5.15.2 — "C_Verify ... MUST be called after C_VerifyInit without
+    // intervening C_VerifyUpdate calls" (mirror the C_Sign guard above); the
+    // accumulated parts MUST NOT be consumed by this error.
+    if VERIFY_MULTIPART_ACC.with(|s| s.borrow().contains_key(&h_session)) {
+        return CKR_OPERATION_ACTIVE;
+    }
     if (p_data.is_null() && ul_data_len > 0) || p_signature.is_null() {
         return CKR_ARGUMENTS_BAD;
     }
@@ -6470,28 +6491,190 @@ pub fn C_UnwrapKeyAuthenticated(
     CKR_OK
 }
 
+// ── Multi-part C_Sign / C_Verify (PKCS#11 v3.2 §5.13.3/§5.13.4 and
+//    §5.15.3/§5.15.4) ────────────────────────────────────────────────────────
+//
+// T4 (audit: multi-part sign gap). Update appends to a per-session
+// accumulator (SIGN_MULTIPART_ACC / VERIFY_MULTIPART_ACC — same pattern as
+// MESSAGE_SIGN_ACC and DIGEST_MULTIPART); Final computes the result through
+// the existing one-shot C_Sign / C_Verify handler over the accumulated
+// message. Follow-up (deliberately NOT this slice): stream the
+// hash-composite mechanisms into incremental digest state to bound memory
+// instead of buffering the whole message.
+
+/// True when `mech`'s sign/verify operation accepts the multi-part
+/// Update/Final flow: the hash-composite RSA/ECDSA mechanisms and the MAC
+/// families (HMAC, HMAC_GENERAL, KMAC) — anything that internally
+/// digests/MACs a streamed message. Everything else this engine dispatches
+/// is single-part only: raw CKM_RSA_PKCS / CKM_ECDSA (caller supplies the
+/// digest), ML-DSA / SLH-DSA (pure and pre-hash), EdDSA, and the stateful
+/// HSS/XMSS mechanisms.
+fn sign_mech_supports_multipart(mech: u32) -> bool {
+    matches!(
+        mech,
+        CKM_SHA256_RSA_PKCS
+            | CKM_SHA384_RSA_PKCS
+            | CKM_SHA512_RSA_PKCS
+            | CKM_SHA256_RSA_PKCS_PSS
+            | CKM_SHA384_RSA_PKCS_PSS
+            | CKM_SHA512_RSA_PKCS_PSS
+            | CKM_ECDSA_SHA256
+            | CKM_ECDSA_SHA384
+            | CKM_ECDSA_SHA512
+            | CKM_ECDSA_SHA3_224
+            | CKM_ECDSA_SHA3_256
+            | CKM_ECDSA_SHA3_384
+            | CKM_ECDSA_SHA3_512
+            | CKM_SHA256_HMAC
+            | CKM_SHA384_HMAC
+            | CKM_SHA512_HMAC
+            | CKM_SHA3_256_HMAC
+            | CKM_SHA3_512_HMAC
+            | CKM_KMAC_128
+            | CKM_KMAC_256
+    ) || hmac_general_base(mech).is_some()
+}
+
+/// Shared §5.13.3/§5.15.3 gate for the four Update/Final entry points:
+/// resolve the active op's mechanism and tear the op down if it is
+/// single-part-only.
+///
+/// Return code for the single-part-only case, pinned from the spec
+/// (docs/refs/pkcs11-spec-v3.2-csd01.pdf): the §5.13.3 C_SignUpdate and
+/// §5.15.3 C_VerifyUpdate return-value lists contain NEITHER
+/// CKR_MECHANISM_INVALID NOR CKR_FUNCTION_NOT_SUPPORTED; the listed code
+/// that fits is CKR_OPERATION_NOT_INITIALIZED, defined in §5.1 as "there is
+/// no active operation of an APPROPRIATE TYPE in the specified session" — a
+/// single-part-only sign/verify op is not of multi-part type. Per §5.13.3 /
+/// §5.15.3 ("a call to C_SignUpdate which results in an error terminates the
+/// current signature operation") the active op is terminated.
+fn multipart_op_mech(
+    h_session: u32,
+    op_state: &crate::state::GlobalState<HashMap<u32, (u32, u32, Vec<u8>, bool)>>,
+    acc: &crate::state::GlobalState<HashMap<u32, Vec<u8>>>,
+) -> Result<u32, u32> {
+    let mech = match op_state.with(|s| s.borrow().get(&h_session).map(|st| st.0)) {
+        Some(m) => m,
+        None => return Err(CKR_OPERATION_NOT_INITIALIZED),
+    };
+    if !sign_mech_supports_multipart(mech) {
+        op_state.with(|s| s.borrow_mut().remove(&h_session));
+        acc.with(|s| s.borrow_mut().remove(&h_session));
+        return Err(CKR_OPERATION_NOT_INITIALIZED);
+    }
+    Ok(mech)
+}
+
 #[wasm_bindgen(js_name = _C_SignUpdate)]
-pub fn C_SignUpdate(_h_session: u32, _p_part: *mut u8, _ul_part_len: u32) -> u32 {
+pub fn C_SignUpdate(h_session: u32, p_part: *mut u8, ul_part_len: u32) -> u32 {
     require_init!();
-    CKR_FUNCTION_NOT_SUPPORTED
+    // §5.2 error priority — session handle before operation state
+    // (operate-stage, round-1 S4).
+    require_session!(h_session);
+    // nonnull! convention (S2): pPart is a required input pointer, but a
+    // zero-length part with a NULL pointer is legal (mirror C_Sign's pData).
+    if p_part.is_null() && ul_part_len > 0 {
+        return CKR_ARGUMENTS_BAD;
+    }
+    if let Err(rv) = multipart_op_mech(h_session, &SIGN_STATE, &SIGN_MULTIPART_ACC) {
+        return rv;
+    }
+    // The op enters its multi-part phase even for an empty part — the
+    // one-shot C_Sign is CKR_OPERATION_ACTIVE until C_SignFinal (mirror
+    // DIGEST_MULTIPART).
+    SIGN_MULTIPART_ACC.with(|s| {
+        let mut m = s.borrow_mut();
+        let acc = m.entry(h_session).or_default();
+        if ul_part_len > 0 {
+            unsafe {
+                acc.extend_from_slice(std::slice::from_raw_parts(p_part, ul_part_len as usize));
+            }
+        }
+    });
+    CKR_OK
 }
 
 #[wasm_bindgen(js_name = _C_SignFinal)]
-pub fn C_SignFinal(_h_session: u32, _p_signature: *mut u8, _pul_signature_len: *mut u32) -> u32 {
+pub fn C_SignFinal(h_session: u32, p_signature: *mut u8, pul_signature_len: *mut u32) -> u32 {
     require_init!();
-    CKR_FUNCTION_NOT_SUPPORTED
+    // §5.2 error priority — session handle before operation state.
+    require_session!(h_session);
+    nonnull!(pul_signature_len);
+    if let Err(rv) = multipart_op_mech(h_session, &SIGN_STATE, &SIGN_MULTIPART_ACC) {
+        return rv;
+    }
+    // §5.13.4 — C_SignFinal with no preceding C_SignUpdate signs the empty
+    // message (legal); the accumulator entry is simply absent.
+    let msg = SIGN_MULTIPART_ACC
+        .with(|s| s.borrow_mut().remove(&h_session))
+        .unwrap_or_default();
+    // Delegate to the one-shot handler over the accumulated message (the
+    // accumulator entry was taken out above, so C_Sign's OPERATION_ACTIVE
+    // guard passes). C_Sign already implements the §5.2 two-call convention:
+    // it keeps SIGN_STATE alive on a NULL-buffer size query and on
+    // CKR_BUFFER_TOO_SMALL — restore the accumulator on exactly those paths
+    // so the multi-part op survives for the second call.
+    let rv = C_Sign(
+        h_session,
+        msg.as_ptr() as *mut u8,
+        msg.len() as u32,
+        p_signature,
+        pul_signature_len,
+    );
+    if rv == CKR_BUFFER_TOO_SMALL || (rv == CKR_OK && p_signature.is_null()) {
+        SIGN_MULTIPART_ACC.with(|s| s.borrow_mut().insert(h_session, msg));
+    }
+    rv
 }
 
 #[wasm_bindgen(js_name = _C_VerifyUpdate)]
-pub fn C_VerifyUpdate(_h_session: u32, _p_part: *mut u8, _ul_part_len: u32) -> u32 {
+pub fn C_VerifyUpdate(h_session: u32, p_part: *mut u8, ul_part_len: u32) -> u32 {
     require_init!();
-    CKR_FUNCTION_NOT_SUPPORTED
+    // §5.2 error priority — session handle before operation state.
+    require_session!(h_session);
+    if p_part.is_null() && ul_part_len > 0 {
+        return CKR_ARGUMENTS_BAD;
+    }
+    if let Err(rv) = multipart_op_mech(h_session, &VERIFY_STATE, &VERIFY_MULTIPART_ACC) {
+        return rv;
+    }
+    VERIFY_MULTIPART_ACC.with(|s| {
+        let mut m = s.borrow_mut();
+        let acc = m.entry(h_session).or_default();
+        if ul_part_len > 0 {
+            unsafe {
+                acc.extend_from_slice(std::slice::from_raw_parts(p_part, ul_part_len as usize));
+            }
+        }
+    });
+    CKR_OK
 }
 
 #[wasm_bindgen(js_name = _C_VerifyFinal)]
-pub fn C_VerifyFinal(_h_session: u32, _p_signature: *mut u8, _ul_signature_len: u32) -> u32 {
+pub fn C_VerifyFinal(h_session: u32, p_signature: *mut u8, ul_signature_len: u32) -> u32 {
     require_init!();
-    CKR_FUNCTION_NOT_SUPPORTED
+    // §5.2 error priority — session handle before operation state.
+    require_session!(h_session);
+    nonnull!(p_signature);
+    if let Err(rv) = multipart_op_mech(h_session, &VERIFY_STATE, &VERIFY_MULTIPART_ACC) {
+        return rv;
+    }
+    // §5.15.4 — "a call to C_VerifyFinal always terminates the active
+    // verification operation": take the accumulator out unconditionally and
+    // delegate to the one-shot C_Verify, which consumes VERIFY_STATE on
+    // every reachable path and returns CKR_OK / CKR_SIGNATURE_INVALID /
+    // CKR_SIGNATURE_LEN_RANGE exactly as the one-shot does. No Updates ⇒
+    // verify against the empty message (legal).
+    let msg = VERIFY_MULTIPART_ACC
+        .with(|s| s.borrow_mut().remove(&h_session))
+        .unwrap_or_default();
+    C_Verify(
+        h_session,
+        msg.as_ptr() as *mut u8,
+        msg.len() as u32,
+        p_signature,
+        ul_signature_len,
+    )
 }
 
 // ── Multi-part Encrypt/Decrypt (PKCS#11 v3.2 §5.2.6/7 and §5.2.10/11) ────────
@@ -9594,5 +9777,542 @@ mod multi_slot_scoping_tests {
 
         assert_eq!(C_CloseSession(s0), CKR_OK);
         assert_eq!(C_CloseSession(s1), CKR_OK);
+    }
+}
+
+#[cfg(test)]
+mod multipart_sign_verify_ffi_tests {
+    //! T4 (audit: multi-part sign gap) — C_SignUpdate / C_SignFinal /
+    //! C_VerifyUpdate / C_VerifyFinal: Update×N + Final equivalence with the
+    //! one-shot handlers, the §5.2/§5.13/§5.15 state-machine matrix, the
+    //! spec-pinned single-part-only code (CKR_OPERATION_NOT_INITIALIZED —
+    //! see `multipart_op_mech`), and cancel/close cleanup.
+    use super::*;
+    use crate::native::test_lock;
+
+    /// High fixed handles, disjoint from the other ffi test modules.
+    const SESSION: u32 = 0x5434_1001;
+    const BOGUS_SESSION: u32 = 0x5434_1FFF;
+    const HMAC_KEY: u32 = 0x5434_2001;
+    const HMAC_KEY_BYTES: [u8; 32] = [0x6b; 32];
+
+    fn setup() {
+        crate::state::set_initialized(true);
+        SESSIONS.with(|s| {
+            s.borrow_mut().insert(
+                SESSION,
+                crate::state::SessionState { slot_id: 0, rw_session: true },
+            );
+        });
+        // Clean slate for the op state under test.
+        SIGN_STATE.with(|s| s.borrow_mut().remove(&SESSION));
+        VERIFY_STATE.with(|s| s.borrow_mut().remove(&SESSION));
+        SIGN_MULTIPART_ACC.with(|s| s.borrow_mut().remove(&SESSION));
+        VERIFY_MULTIPART_ACC.with(|s| s.borrow_mut().remove(&SESSION));
+        // Public generic-secret HMAC key (no login gate).
+        OBJECTS.with(|o| {
+            let mut attrs = Attributes::new();
+            attrs.insert(CKA_VALUE, HMAC_KEY_BYTES.to_vec());
+            store_ulong(&mut attrs, CKA_CLASS, CKO_SECRET_KEY);
+            store_ulong(&mut attrs, CKA_KEY_TYPE, CKK_GENERIC_SECRET);
+            store_bool(&mut attrs, CKA_SIGN, true);
+            store_bool(&mut attrs, CKA_VERIFY, true);
+            o.borrow_mut().insert(HMAC_KEY, attrs);
+        });
+    }
+
+    fn sign_init(sess: u32, mech: u32, key: u32) -> u32 {
+        let mut m: [u32; 3] = [mech, 0, 0];
+        C_SignInit(sess, m.as_mut_ptr() as *mut u8, key)
+    }
+
+    fn verify_init(sess: u32, mech: u32, key: u32) -> u32 {
+        let mut m: [u32; 3] = [mech, 0, 0];
+        C_VerifyInit(sess, m.as_mut_ptr() as *mut u8, key)
+    }
+
+    fn s_update(sess: u32, part: &[u8]) -> u32 {
+        C_SignUpdate(sess, part.as_ptr() as *mut u8, part.len() as u32)
+    }
+
+    fn v_update(sess: u32, part: &[u8]) -> u32 {
+        C_VerifyUpdate(sess, part.as_ptr() as *mut u8, part.len() as u32)
+    }
+
+    /// C_SignFinal via the §5.2 two-call convention (size query, then fetch).
+    fn sign_final_vec(sess: u32) -> Result<Vec<u8>, u32> {
+        let mut len: u32 = 0;
+        let rv = C_SignFinal(sess, std::ptr::null_mut(), &mut len);
+        if rv != CKR_OK {
+            return Err(rv);
+        }
+        let mut buf = vec![0u8; len as usize];
+        let rv = C_SignFinal(sess, buf.as_mut_ptr(), &mut len);
+        if rv != CKR_OK {
+            return Err(rv);
+        }
+        buf.truncate(len as usize);
+        Ok(buf)
+    }
+
+    fn one_shot_sign(sess: u32, mech: u32, key: u32, msg: &[u8]) -> Vec<u8> {
+        assert_eq!(sign_init(sess, mech, key), CKR_OK);
+        let mut buf = vec![0u8; 1024];
+        let mut len: u32 = 1024;
+        let rv = C_Sign(sess, msg.as_ptr() as *mut u8, msg.len() as u32, buf.as_mut_ptr(), &mut len);
+        assert_eq!(rv, CKR_OK, "one-shot C_Sign mech 0x{mech:x}: 0x{rv:x}");
+        buf.truncate(len as usize);
+        buf
+    }
+
+    fn one_shot_verify(sess: u32, mech: u32, key: u32, msg: &[u8], sig: &[u8]) -> u32 {
+        assert_eq!(verify_init(sess, mech, key), CKR_OK);
+        C_Verify(
+            sess,
+            msg.as_ptr() as *mut u8,
+            msg.len() as u32,
+            sig.as_ptr() as *mut u8,
+            sig.len() as u32,
+        )
+    }
+
+    fn multipart_sign(sess: u32, mech: u32, key: u32, parts: &[&[u8]]) -> Vec<u8> {
+        assert_eq!(sign_init(sess, mech, key), CKR_OK);
+        for p in parts {
+            assert_eq!(s_update(sess, p), CKR_OK);
+        }
+        sign_final_vec(sess).expect("multi-part sign final")
+    }
+
+    fn multipart_verify(sess: u32, mech: u32, key: u32, parts: &[&[u8]], sig: &[u8]) -> u32 {
+        assert_eq!(verify_init(sess, mech, key), CKR_OK);
+        for p in parts {
+            assert_eq!(v_update(sess, p), CKR_OK);
+        }
+        C_VerifyFinal(sess, sig.as_ptr() as *mut u8, sig.len() as u32)
+    }
+
+    // ── Update×N + Final == one-shot (HMAC, byte-equal) ─────────────────────
+
+    /// HMAC SHA-256/384/512: multi-part MAC over several split patterns
+    /// (whole / ragged / empty leading+trailing parts) is byte-equal to the
+    /// one-shot C_Sign, and VerifyUpdate/Final accepts each MAC.
+    #[test]
+    fn hmac_update_final_byte_equal_one_shot() {
+        let _guard = test_lock::acquire();
+        setup();
+        let msg = b"multi-part message under test, longer than one block boundary";
+        for mech in [CKM_SHA256_HMAC, CKM_SHA384_HMAC, CKM_SHA512_HMAC] {
+            let expected = one_shot_sign(SESSION, mech, HMAC_KEY, msg);
+            let splits: [&[&[u8]]; 3] = [
+                &[&msg[..]],
+                &[&msg[..3], &msg[3..17], &msg[17..]],
+                &[&[], &msg[..], &[]],
+            ];
+            for parts in splits {
+                let sig = multipart_sign(SESSION, mech, HMAC_KEY, parts);
+                assert_eq!(sig, expected, "mech 0x{mech:x} split mismatch");
+                assert_eq!(
+                    multipart_verify(SESSION, mech, HMAC_KEY, parts, &sig),
+                    CKR_OK,
+                    "mech 0x{mech:x} multi-part verify"
+                );
+            }
+        }
+    }
+
+    /// HMAC-SHA-256 Update/Final cross-checked against the `hmac` crate
+    /// one-shot over the same key and message.
+    #[test]
+    fn hmac_update_final_matches_hmac_crate() {
+        let _guard = test_lock::acquire();
+        setup();
+        let msg = b"cross-check against RustCrypto hmac";
+        let sig = multipart_sign(
+            SESSION,
+            CKM_SHA256_HMAC,
+            HMAC_KEY,
+            &[&msg[..10], &msg[10..]],
+        );
+        use hmac::Mac;
+        let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(&HMAC_KEY_BYTES).unwrap();
+        mac.update(msg);
+        assert_eq!(sig, mac.finalize().into_bytes().to_vec());
+    }
+
+    // ── §5.13/§5.15 sequencing: one-shot after Update ───────────────────────
+
+    /// C_Sign while the sign op is in its multi-part phase →
+    /// CKR_OPERATION_ACTIVE; the accumulated parts are NOT consumed and the
+    /// op completes correctly. Same matrix for Verify.
+    #[test]
+    fn one_shot_after_update_operation_active_acc_preserved() {
+        let _guard = test_lock::acquire();
+        setup();
+        let expected = one_shot_sign(SESSION, CKM_SHA256_HMAC, HMAC_KEY, b"part one and two");
+
+        assert_eq!(sign_init(SESSION, CKM_SHA256_HMAC, HMAC_KEY), CKR_OK);
+        assert_eq!(s_update(SESSION, b"part one"), CKR_OK);
+        let mut buf = [0u8; 64];
+        let mut len: u32 = 64;
+        assert_eq!(
+            C_Sign(SESSION, buf.as_ptr() as *mut u8, 4, buf.as_mut_ptr(), &mut len),
+            CKR_OPERATION_ACTIVE,
+        );
+        // Accumulator intact — finish the op and compare.
+        assert_eq!(s_update(SESSION, b" and two"), CKR_OK);
+        assert_eq!(sign_final_vec(SESSION).unwrap(), expected);
+
+        // Verify side.
+        assert_eq!(verify_init(SESSION, CKM_SHA256_HMAC, HMAC_KEY), CKR_OK);
+        assert_eq!(v_update(SESSION, b"part one"), CKR_OK);
+        assert_eq!(
+            C_Verify(
+                SESSION,
+                buf.as_ptr() as *mut u8,
+                4,
+                expected.as_ptr() as *mut u8,
+                expected.len() as u32,
+            ),
+            CKR_OPERATION_ACTIVE,
+        );
+        assert_eq!(v_update(SESSION, b" and two"), CKR_OK);
+        assert_eq!(
+            C_VerifyFinal(SESSION, expected.as_ptr() as *mut u8, expected.len() as u32),
+            CKR_OK,
+        );
+    }
+
+    /// An empty C_SignUpdate part still enters the multi-part phase (one-shot
+    /// blocked) and C_SignFinal then signs the empty message.
+    #[test]
+    fn empty_update_enters_multipart_phase() {
+        let _guard = test_lock::acquire();
+        setup();
+        assert_eq!(sign_init(SESSION, CKM_SHA256_HMAC, HMAC_KEY), CKR_OK);
+        assert_eq!(s_update(SESSION, &[]), CKR_OK);
+        let mut buf = [0u8; 64];
+        let mut len: u32 = 64;
+        assert_eq!(
+            C_Sign(SESSION, buf.as_ptr() as *mut u8, 4, buf.as_mut_ptr(), &mut len),
+            CKR_OPERATION_ACTIVE,
+        );
+        use hmac::Mac;
+        let mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(&HMAC_KEY_BYTES)
+            .unwrap()
+            .finalize()
+            .into_bytes()
+            .to_vec();
+        assert_eq!(sign_final_vec(SESSION).unwrap(), mac);
+    }
+
+    // ── Update/Final without Init ───────────────────────────────────────────
+
+    /// §5.13.3/§5.13.4, §5.15.3/§5.15.4 — Update/Final without Init →
+    /// CKR_OPERATION_NOT_INITIALIZED; bogus session handle outranks it
+    /// (operate-stage require_session!, round-1 S4).
+    #[test]
+    fn update_final_without_init_or_session() {
+        let _guard = test_lock::acquire();
+        setup();
+        let data = [0u8; 4];
+        let mut len: u32 = 64;
+        let mut buf = [0u8; 64];
+
+        assert_eq!(s_update(SESSION, &data), CKR_OPERATION_NOT_INITIALIZED);
+        assert_eq!(
+            C_SignFinal(SESSION, buf.as_mut_ptr(), &mut len),
+            CKR_OPERATION_NOT_INITIALIZED,
+        );
+        assert_eq!(v_update(SESSION, &data), CKR_OPERATION_NOT_INITIALIZED);
+        assert_eq!(
+            C_VerifyFinal(SESSION, buf.as_mut_ptr(), 32),
+            CKR_OPERATION_NOT_INITIALIZED,
+        );
+
+        assert_eq!(
+            C_SignUpdate(BOGUS_SESSION, data.as_ptr() as *mut u8, 4),
+            CKR_SESSION_HANDLE_INVALID,
+        );
+        assert_eq!(
+            C_SignFinal(BOGUS_SESSION, buf.as_mut_ptr(), &mut len),
+            CKR_SESSION_HANDLE_INVALID,
+        );
+        assert_eq!(
+            C_VerifyUpdate(BOGUS_SESSION, data.as_ptr() as *mut u8, 4),
+            CKR_SESSION_HANDLE_INVALID,
+        );
+        assert_eq!(
+            C_VerifyFinal(BOGUS_SESSION, buf.as_mut_ptr(), 32),
+            CKR_SESSION_HANDLE_INVALID,
+        );
+    }
+
+    /// C_SignFinal/C_VerifyFinal with no preceding Update signs/verifies the
+    /// empty message (legal per §5.13.4).
+    #[test]
+    fn final_without_updates_uses_empty_message() {
+        let _guard = test_lock::acquire();
+        setup();
+        use hmac::Mac;
+        let mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(&HMAC_KEY_BYTES)
+            .unwrap()
+            .finalize()
+            .into_bytes()
+            .to_vec();
+
+        assert_eq!(sign_init(SESSION, CKM_SHA256_HMAC, HMAC_KEY), CKR_OK);
+        assert_eq!(sign_final_vec(SESSION).unwrap(), mac);
+
+        assert_eq!(verify_init(SESSION, CKM_SHA256_HMAC, HMAC_KEY), CKR_OK);
+        assert_eq!(
+            C_VerifyFinal(SESSION, mac.as_ptr() as *mut u8, mac.len() as u32),
+            CKR_OK,
+        );
+    }
+
+    // ── §5.2 two-call convention on C_SignFinal ─────────────────────────────
+
+    /// Size query (NULL output) and CKR_BUFFER_TOO_SMALL both leave the
+    /// multi-part op active; the retry completes with the correct MAC, after
+    /// which the op is consumed.
+    #[test]
+    fn sign_final_buffer_too_small_preserves_state() {
+        let _guard = test_lock::acquire();
+        setup();
+        let msg = b"two-call convention";
+        let expected = one_shot_sign(SESSION, CKM_SHA256_HMAC, HMAC_KEY, msg);
+
+        assert_eq!(sign_init(SESSION, CKM_SHA256_HMAC, HMAC_KEY), CKR_OK);
+        assert_eq!(s_update(SESSION, msg), CKR_OK);
+
+        // Size query: op untouched.
+        let mut len: u32 = 0;
+        assert_eq!(C_SignFinal(SESSION, std::ptr::null_mut(), &mut len), CKR_OK);
+        assert_eq!(len, 32);
+
+        // Short buffer: CKR_BUFFER_TOO_SMALL, required size reported, op alive.
+        let mut short = [0u8; 5];
+        let mut len: u32 = 5;
+        assert_eq!(
+            C_SignFinal(SESSION, short.as_mut_ptr(), &mut len),
+            CKR_BUFFER_TOO_SMALL,
+        );
+        assert_eq!(len, 32);
+
+        // Retry with an adequate buffer succeeds and matches the one-shot.
+        let mut buf = vec![0u8; 32];
+        let mut len: u32 = 32;
+        assert_eq!(C_SignFinal(SESSION, buf.as_mut_ptr(), &mut len), CKR_OK);
+        assert_eq!(buf, expected);
+
+        // The successful Final consumed the op.
+        let mut len: u32 = 32;
+        assert_eq!(
+            C_SignFinal(SESSION, buf.as_mut_ptr(), &mut len),
+            CKR_OPERATION_NOT_INITIALIZED,
+        );
+    }
+
+    // ── Single-part-only mechanisms ─────────────────────────────────────────
+
+    /// C_SignUpdate / C_SignFinal on an op whose mechanism is single-part-only
+    /// → CKR_OPERATION_NOT_INITIALIZED (the §5.13.3 return list has no
+    /// CKR_MECHANISM_INVALID / CKR_FUNCTION_NOT_SUPPORTED; see
+    /// `multipart_op_mech`), and the active op is terminated (a fresh
+    /// C_SignInit succeeds immediately afterwards).
+    #[test]
+    fn single_part_only_mech_returns_spec_code_and_terminates() {
+        let _guard = test_lock::acquire();
+        setup();
+        let data = [0u8; 4];
+        let mut buf = [0u8; 64];
+        let mut len: u32 = 64;
+        // 0x1 = CKM_RSA_PKCS (raw, digest-less — value from pkcs11t.h; the
+        // constant is not defined in constants.rs).
+        const CKM_RSA_PKCS_RAW: u32 = 0x0000_0001;
+        for mech in [CKM_RSA_PKCS_RAW, CKM_ECDSA, CKM_ML_DSA, CKM_SLH_DSA, CKM_EDDSA, CKM_HSS, CKM_XMSS] {
+            // SignUpdate path.
+            assert_eq!(sign_init(SESSION, mech, HMAC_KEY), CKR_OK, "mech 0x{mech:x}");
+            assert_eq!(
+                s_update(SESSION, &data),
+                CKR_OPERATION_NOT_INITIALIZED,
+                "SignUpdate mech 0x{mech:x}"
+            );
+            // The op was terminated — a new Init is not CKR_OPERATION_ACTIVE.
+            assert_eq!(sign_init(SESSION, mech, HMAC_KEY), CKR_OK, "re-init 0x{mech:x}");
+            // SignFinal path terminates too.
+            assert_eq!(
+                C_SignFinal(SESSION, buf.as_mut_ptr(), &mut len),
+                CKR_OPERATION_NOT_INITIALIZED,
+                "SignFinal mech 0x{mech:x}"
+            );
+            assert!(!SIGN_STATE.with(|s| s.borrow().contains_key(&SESSION)));
+
+            // Verify side.
+            assert_eq!(verify_init(SESSION, mech, HMAC_KEY), CKR_OK);
+            assert_eq!(
+                v_update(SESSION, &data),
+                CKR_OPERATION_NOT_INITIALIZED,
+                "VerifyUpdate mech 0x{mech:x}"
+            );
+            assert_eq!(verify_init(SESSION, mech, HMAC_KEY), CKR_OK);
+            assert_eq!(
+                C_VerifyFinal(SESSION, buf.as_mut_ptr(), 32),
+                CKR_OPERATION_NOT_INITIALIZED,
+                "VerifyFinal mech 0x{mech:x}"
+            );
+            assert!(!VERIFY_STATE.with(|s| s.borrow().contains_key(&SESSION)));
+        }
+    }
+
+    // ── Cancel / close cleanup ──────────────────────────────────────────────
+
+    /// C_SessionCancel CKF_SIGN (0x800) / CKF_VERIFY (0x2000) clears the op
+    /// state AND the new accumulators.
+    #[test]
+    fn session_cancel_clears_multipart_accumulators() {
+        let _guard = test_lock::acquire();
+        setup();
+        assert_eq!(sign_init(SESSION, CKM_SHA256_HMAC, HMAC_KEY), CKR_OK);
+        assert_eq!(s_update(SESSION, b"doomed"), CKR_OK);
+        assert_eq!(C_SessionCancel(SESSION, 0x800), CKR_OK);
+        assert!(!SIGN_MULTIPART_ACC.with(|s| s.borrow().contains_key(&SESSION)));
+        let mut buf = [0u8; 64];
+        let mut len: u32 = 64;
+        assert_eq!(
+            C_SignFinal(SESSION, buf.as_mut_ptr(), &mut len),
+            CKR_OPERATION_NOT_INITIALIZED,
+        );
+
+        assert_eq!(verify_init(SESSION, CKM_SHA256_HMAC, HMAC_KEY), CKR_OK);
+        assert_eq!(v_update(SESSION, b"doomed"), CKR_OK);
+        assert_eq!(C_SessionCancel(SESSION, 0x2000), CKR_OK);
+        assert!(!VERIFY_MULTIPART_ACC.with(|s| s.borrow().contains_key(&SESSION)));
+        assert_eq!(
+            C_VerifyFinal(SESSION, buf.as_mut_ptr(), 32),
+            CKR_OPERATION_NOT_INITIALIZED,
+        );
+    }
+
+    /// C_CloseSession terminates in-flight multi-part sign/verify ops and
+    /// drops their accumulators.
+    #[test]
+    fn close_session_clears_multipart_accumulators() {
+        let _guard = test_lock::acquire();
+        setup();
+        let doomed: u32 = 0x5434_1002;
+        SESSIONS.with(|s| {
+            s.borrow_mut().insert(
+                doomed,
+                crate::state::SessionState { slot_id: 0, rw_session: true },
+            );
+        });
+        assert_eq!(sign_init(doomed, CKM_SHA256_HMAC, HMAC_KEY), CKR_OK);
+        assert_eq!(s_update(doomed, b"bye"), CKR_OK);
+        assert_eq!(verify_init(doomed, CKM_SHA256_HMAC, HMAC_KEY), CKR_OK);
+        assert_eq!(v_update(doomed, b"bye"), CKR_OK);
+
+        assert_eq!(C_CloseSession(doomed), CKR_OK);
+        assert!(!SIGN_STATE.with(|s| s.borrow().contains_key(&doomed)));
+        assert!(!VERIFY_STATE.with(|s| s.borrow().contains_key(&doomed)));
+        assert!(!SIGN_MULTIPART_ACC.with(|s| s.borrow().contains_key(&doomed)));
+        assert!(!VERIFY_MULTIPART_ACC.with(|s| s.borrow().contains_key(&doomed)));
+    }
+
+    // ── VerifyFinal failure codes (same as one-shot) ────────────────────────
+
+    /// C_VerifyFinal returns CKR_SIGNATURE_INVALID for a tampered MAC and
+    /// CKR_SIGNATURE_LEN_RANGE for a wrong-length one, exactly like the
+    /// one-shot C_Verify.
+    #[test]
+    fn verify_final_signature_invalid_and_len_range() {
+        let _guard = test_lock::acquire();
+        setup();
+        let msg = b"verify failure codes";
+        let mut mac = one_shot_sign(SESSION, CKM_SHA256_HMAC, HMAC_KEY, msg);
+
+        mac[0] ^= 0xFF;
+        assert_eq!(
+            multipart_verify(SESSION, CKM_SHA256_HMAC, HMAC_KEY, &[&msg[..]], &mac),
+            CKR_SIGNATURE_INVALID,
+        );
+        mac[0] ^= 0xFF;
+
+        assert_eq!(
+            multipart_verify(SESSION, CKM_SHA256_HMAC, HMAC_KEY, &[&msg[..]], &mac[..31]),
+            CKR_SIGNATURE_LEN_RANGE,
+        );
+    }
+
+    // ── Hash-composite RSA / ECDSA ──────────────────────────────────────────
+
+    /// RSA + ECDSA hash-composite mechanisms through a real logged-in session:
+    /// PKCS#1 v1.5 multi-part == one-shot byte-equal (deterministic), PSS and
+    /// ECDSA multi-part signatures verify (one-shot and multi-part), in both
+    /// sign→verify directions.
+    #[test]
+    fn rsa_ecdsa_hash_composite_multipart() {
+        let _guard = test_lock::acquire();
+        use crate::native::keygen::{generate_ecdsa_keypair, generate_rsa_keypair, EccCurve};
+        use crate::native::session::{bootstrap_default_token, close_session, finalize, init};
+        let _ = finalize();
+        init().unwrap();
+        let sess = bootstrap_default_token(0, "so", "user", "t4-multipart").unwrap();
+
+        let msg = b"hash-composite multi-part message";
+        let parts: [&[u8]; 3] = [&msg[..5], &[], &msg[5..]];
+
+        // RSA PKCS#1 v1.5 — deterministic: byte-equal with the one-shot.
+        let (rsa_pub, rsa_prv) = generate_rsa_keypair(sess, 2048, b"t4-rsa", "t4-rsa").unwrap();
+        for mech in [CKM_SHA256_RSA_PKCS, CKM_SHA384_RSA_PKCS, CKM_SHA512_RSA_PKCS] {
+            let expected = one_shot_sign(sess, mech, rsa_prv, msg);
+            let sig = multipart_sign(sess, mech, rsa_prv, &parts);
+            assert_eq!(sig, expected, "PKCS#1 v1.5 mech 0x{mech:x} not byte-equal");
+            assert_eq!(
+                multipart_verify(sess, mech, rsa_pub, &parts, &sig),
+                CKR_OK,
+                "multi-part verify mech 0x{mech:x}"
+            );
+        }
+
+        // RSA-PSS — randomized salt: verify-validates in both directions.
+        let pss_sig = multipart_sign(sess, CKM_SHA256_RSA_PKCS_PSS, rsa_prv, &parts);
+        assert_eq!(
+            one_shot_verify(sess, CKM_SHA256_RSA_PKCS_PSS, rsa_pub, msg, &pss_sig),
+            CKR_OK,
+            "one-shot verify of multi-part PSS signature"
+        );
+        let pss_one_shot = one_shot_sign(sess, CKM_SHA256_RSA_PKCS_PSS, rsa_prv, msg);
+        assert_eq!(
+            multipart_verify(sess, CKM_SHA256_RSA_PKCS_PSS, rsa_pub, &parts, &pss_one_shot),
+            CKR_OK,
+            "multi-part verify of one-shot PSS signature"
+        );
+
+        // ECDSA (hashed) — randomized k: verify-validates in both directions.
+        let (ec_pub, ec_prv) =
+            generate_ecdsa_keypair(sess, EccCurve::P256, b"t4-ec", "t4-ec").unwrap();
+        let ec_sig = multipart_sign(sess, CKM_ECDSA_SHA256, ec_prv, &parts);
+        assert_eq!(
+            one_shot_verify(sess, CKM_ECDSA_SHA256, ec_pub, msg, &ec_sig),
+            CKR_OK,
+            "one-shot verify of multi-part ECDSA signature"
+        );
+        let ec_one_shot = one_shot_sign(sess, CKM_ECDSA_SHA256, ec_prv, msg);
+        assert_eq!(
+            multipart_verify(sess, CKM_ECDSA_SHA256, ec_pub, &parts, &ec_one_shot),
+            CKR_OK,
+            "multi-part verify of one-shot ECDSA signature"
+        );
+        // SHA-3 composite (T1 widened): multi-part sign → multi-part verify.
+        let ec_sig3 = multipart_sign(sess, CKM_ECDSA_SHA3_256, ec_prv, &parts);
+        assert_eq!(
+            multipart_verify(sess, CKM_ECDSA_SHA3_256, ec_pub, &parts, &ec_sig3),
+            CKR_OK,
+            "SHA3-composite ECDSA multi-part round-trip"
+        );
+
+        close_session(sess).unwrap();
     }
 }
