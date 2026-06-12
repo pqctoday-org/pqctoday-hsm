@@ -8,6 +8,52 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Compliance round 3 — spec-truth for code and tests (2026-06-12)
+
+The test-infrastructure audit found the instruments measuring compliance
+were themselves out of spec. Six slices (F1-F4 + two engine fixes), all
+against the canonical OASIS v3.2 reference now pinned at
+docs/refs/pkcs11t-canonical-v3.2.h (sha256 95738fdc…).
+
+- **F1 header re-sync**: local pkcs11t.h had drifted from canonical —
+  CKA_UNIQUE_ID was 0x17 (canonical 0x4; the rust engine served the
+  unique id under the wrong attribute type), CKM_GOSTR3410_DERIVE was
+  0x1202, and local inventions (X25519/X448, BIP32) squatted on
+  OASIS-assigned codepoints, 0x4033/0x4034 shadowing real CKM_HSS /
+  CKM_XMSS_KEY_PAIR_GEN dispatch in the C++ engine. All moved to a
+  marked vendor-extension section; rust constants follow; deprecated
+  BIP32 aliases accepted at dispatch.
+- **F2 constants gate**: constants.js (published npm surface) had 12
+  spec-wrong values (SO-PIN flags, MD2 family, XEDDSA, AES-KWP,
+  encap/decap templates) and invented non-spec names — fixed.
+  check_pkcs11_constants.py rewritten: validates rust + constants.js +
+  kmip mech manifest against the header, pins 99 formerly-whitelisted
+  IANA/vendor values, detects duplicate codepoints per class, verifies
+  the local header against the pinned canonical include. Wired into CI
+  with rust+kmip cargo test.
+- **F3 JS harnesses**: rust/pkg artifacts rebuilt (were 38+ commits
+  stale — every prior JS pass validated the pre-remediation engine);
+  fabricated X25519/SP800-108 "PASSED" outputs in test_kat_parity.js
+  replaced with real RFC 7748 / NIST CAVS KATs; CK_ATTRIBUTE layout and
+  vendor attr ids fixed; round-2 regression section added to
+  test_p11_conformance.js (now 188 assertions incl. CKA_UNIQUE_ID via
+  0x4, dynamic TokenInfo, T4/T5/T6 surfaces, message-API streaming
+  byte-equality); ECDSA-SHA512 loader un-bitrotted.
+- **F4 C++ compliance suite**: spec-wrong template constants fixed
+  (CKK_ML_KEM 0x49, CKM_HSS 0x4033, SP800-108 param types),
+  error-returns-as-PASS eliminated (advertised-feature gating +
+  SKIP/XFAIL kinds), non-spec mechanism-presence mandates dropped,
+  hermetic ctest wiring added, dead generator scripts and stale
+  binaries/reports deleted. Reproducible result: 193 PASS / 0 FAIL /
+  1 SKIP (was an unreproducible "120 PASS" claim).
+- **Engine fixes the honest tests forced**: both engines accepted a
+  bare hash as the SP800-108 KBKDF PRF and the rust engine silently
+  wrong-digested SHA-384/512 HMAC PRFs to HMAC-SHA256 — C++
+  (SoftHSM_keygen.cpp) and rust (ffi.rs KBKDF cores) now accept only
+  keyed-MAC PRF mechanisms, each mapped to its own digest, with
+  KAT-pinned references.
+
+
 ### Compliance round 2 — remaining-gap remediation (2026-06-12)
 
 Execution of the round-2 remediation (engine slices T1–T8, KMIP slices
