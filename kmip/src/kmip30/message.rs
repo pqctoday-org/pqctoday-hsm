@@ -319,6 +319,8 @@ pub enum RequestPayload {
     GetConstraints(super::ops::GetConstraintsRequest),
     SetDefaults(super::ops::SetDefaultsRequest),
     SetEndpointRole(super::ops::SetEndpointRoleRequest),
+    /// K20 — §6.1.18 Derive Key.
+    DeriveKey(super::ops::DeriveKeyRequest),
     /// R7 Phase 1 sentinel — emitted by `decode_request_message` when
     /// a per-BatchItem payload fails to decode but the outer envelope
     /// is intact. The dispatcher recognises it and emits a per-item
@@ -392,6 +394,8 @@ pub enum ResponsePayload {
     GetUsageAllocation(super::ops::GetUsageAllocationResponse),
     GetConstraints(super::ops::GetConstraintsResponse),
     SetDefaults(super::ops::SetDefaultsResponse),
+    /// K20 — §6.1.18 Derive Key.
+    DeriveKey(super::ops::DeriveKeyResponse),
     SetEndpointRole(super::ops::SetEndpointRoleResponse),
 }
 
@@ -445,6 +449,7 @@ impl RequestPayload {
             Self::GetConstraints(_)   => Operation::GetConstraints,
             Self::SetDefaults(_)      => Operation::SetDefaults,
             Self::SetEndpointRole(_)  => Operation::SetEndpointRole,
+            Self::DeriveKey(_)        => Operation::DeriveKey,
             // Echo the original Operation when we were able to read it
             // before the payload decode failed; fall back to `Ping`
             // (whose handler we already special-case in the
@@ -484,6 +489,9 @@ impl RequestPayload {
             // K19 — GetUsageAllocation decrements the object's
             // remaining Usage Limits Count; snapshot for §9.5 Undo.
             Self::GetUsageAllocation(r) => vec![r.uid.as_str()],
+            // K20 — Derive Key writes a `Derived Object Link` onto
+            // every base object (§6.1.18); snapshot them for Undo.
+            Self::DeriveKey(r) => r.uids.iter().map(|s| s.as_str()).collect(),
             // Read-only / output-only — no rollback needed.
             _ => Vec::new(),
         }

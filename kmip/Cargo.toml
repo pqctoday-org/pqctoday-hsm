@@ -74,6 +74,9 @@ tracing-subscriber = "0.3"
 rand        = "0.8"
 sha2        = "0.10"
 hmac        = "0.12"
+# K20 — Derive Key PBKDF2 method (RFC 2898 via the RustCrypto crate;
+# same version the engine uses for TokenState PIN hashing).
+pbkdf2      = "0.12"
 
 # IDs
 uuid = { version = "1", features = ["v4"] }

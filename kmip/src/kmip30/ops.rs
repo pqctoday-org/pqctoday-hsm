@@ -1480,6 +1480,107 @@ pub struct ObjectDefaults {
     pub attributes: Vec<Attribute>,
 }
 
+// ── Derive Key (K20 — KMIP 3.0 §6.1.18) ────────────────────────────────────
+
+/// `Derivation Method` Enumeration (KMIP 3.0 §11.15 Table 547). All
+/// ten codepoints verified against `kmip-spec-3.0-tags-enums.json`
+/// `enums."Derivation Method"`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum DerivationMethod {
+    /// PKCS#5 / RFC 2898 password-based KDF.
+    Pbkdf2        = 0x01,
+    /// "derives a key by computing a hash over the derivation key or
+    /// the derivation data" (Table 546).
+    Hash          = 0x02,
+    /// "derives a key by computing an HMAC over the derivation data"
+    /// (Table 546).
+    Hmac          = 0x03,
+    /// "derives a key by encrypting the derivation data" (Table 546).
+    Encrypt       = 0x04,
+    /// SP 800-108 KDF in Counter Mode.
+    Nist800_108C  = 0x05,
+    /// SP 800-108 KDF in Feedback Mode.
+    Nist800_108F  = 0x06,
+    /// SP 800-108 KDF in Double-Pipeline Iteration Mode.
+    Nist800_108Dpi = 0x07,
+    /// Asymmetric key agreement between a private and public key.
+    AsymmetricKey = 0x08,
+    /// AWS Signature Version 4 signing-key derivation.
+    AwsSigV4      = 0x09,
+    /// RFC 5869 HMAC-based Extract-and-Expand KDF.
+    Hkdf          = 0x0a,
+}
+
+impl DerivationMethod {
+    pub const fn to_wire_value(self) -> u32 { self as u32 }
+    pub const fn from_wire_value(v: u32) -> Option<Self> {
+        match v {
+            0x01 => Some(Self::Pbkdf2),
+            0x02 => Some(Self::Hash),
+            0x03 => Some(Self::Hmac),
+            0x04 => Some(Self::Encrypt),
+            0x05 => Some(Self::Nist800_108C),
+            0x06 => Some(Self::Nist800_108F),
+            0x07 => Some(Self::Nist800_108Dpi),
+            0x08 => Some(Self::AsymmetricKey),
+            0x09 => Some(Self::AwsSigV4),
+            0x0a => Some(Self::Hkdf),
+            _ => None,
+        }
+    }
+}
+
+/// `Derivation Parameters` Structure (KMIP 3.0 §7.13 Table 465) —
+/// "the parameters needed by the specified derivation method".
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DerivationParameters {
+    /// `Cryptographic Parameters` (0x42002b) — "identify the
+    /// Pseudorandom Function (PRF) or the mode of operation of the
+    /// PRF" (§7.13). "No, depends on the PRF" per Table 465.
+    pub cryptographic_parameters: Option<CryptographicParameters>,
+    /// `Initialization Vector` (0x42003a) — "No, depends on the PRF
+    /// … an empty IV is assumed if not provided" (Table 465). Decoded
+    /// for completeness; none of the implemented methods (PBKDF2 /
+    /// HASH / HMAC / NIST800-108-C) consume an IV.
+    pub initialization_vector: Option<Vec<u8>>,
+    /// `Derivation Data` (0x420030) — "the data to be encrypted,
+    /// hashed, or HMACed" (§7.13). "Yes, unless the Unique Identifier
+    /// of a Secret Data object is provided. May be repeated" — the
+    /// decoder concatenates repeats in wire order.
+    pub derivation_data: Option<Vec<u8>>,
+    /// `Salt` (0x420084) — "Yes if Derivation method is PBKDF2".
+    pub salt: Option<Vec<u8>>,
+    /// `Iteration Count` (0x42003c) — "Yes if Derivation method is
+    /// PBKDF2".
+    pub iteration_count: Option<i32>,
+}
+
+/// `Derive Key` request payload (KMIP 3.0 §6.1.18 Table 302).
+#[derive(Clone, Debug, PartialEq)]
+pub struct DeriveKeyRequest {
+    /// `Object Type` — "Determines the type of object to be created"
+    /// (SymmetricKey or SecretData per §6.1.18 body text).
+    pub object_type: ObjectType,
+    /// `Unique Identifier` — "Determines the object or objects to be
+    /// used to derive a new key" ("MAY be repeated").
+    pub uids: Vec<String>,
+    /// `Derivation Method` — REQUIRED Enumeration.
+    pub derivation_method: DerivationMethod,
+    /// `Derivation Parameters` — REQUIRED Structure.
+    pub derivation_parameters: DerivationParameters,
+    /// `Attributes` — "Specifies desired attributes to be associated
+    /// with the new object; the length and algorithm SHALL always be
+    /// specified for the creation of a symmetric key".
+    pub template_attribute: Vec<Attribute>,
+}
+
+/// §6.1.18 Table 303 — "The Unique Identifier of the newly derived
+/// key or Secret Data object".
+#[derive(Clone, Debug, PartialEq)]
+pub struct DeriveKeyResponse {
+    pub uid: String,
+}
+
 /// `Endpoint Role` Enumeration (KMIP 3.0 §11; codepoints verified
 /// against `kmip-spec-3.0-tags-enums.json` `enums."Endpoint Role"`:
 /// Client = 0x01, Server = 0x02).
@@ -1570,6 +1671,24 @@ mod tests {
         }
         assert_eq!(Operation::from_wire_value(0x00), None);
         assert_eq!(Operation::from_wire_value(0x41), None);
+    }
+
+    /// K20 — `Derivation Method` Enumeration codepoints (§11.15
+    /// Table 547; verified against `kmip-spec-3.0-tags-enums.json`).
+    #[test]
+    fn derivation_method_codepoints_match_spec() {
+        use DerivationMethod as M;
+        for (m, v) in [
+            (M::Pbkdf2, 0x01u32), (M::Hash, 0x02), (M::Hmac, 0x03),
+            (M::Encrypt, 0x04), (M::Nist800_108C, 0x05),
+            (M::Nist800_108F, 0x06), (M::Nist800_108Dpi, 0x07),
+            (M::AsymmetricKey, 0x08), (M::AwsSigV4, 0x09), (M::Hkdf, 0x0a),
+        ] {
+            assert_eq!(m.to_wire_value(), v);
+            assert_eq!(DerivationMethod::from_wire_value(v), Some(m));
+        }
+        assert_eq!(DerivationMethod::from_wire_value(0x0b), None);
+        assert_eq!(DerivationMethod::from_wire_value(0x00), None);
     }
 
     /// KMIP 3.0 §11 — Query Function codepoints (spec extract

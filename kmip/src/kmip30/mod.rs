@@ -76,6 +76,9 @@ pub use ops::{
     GetUsageAllocationRequest, GetUsageAllocationResponse,
     SetDefaultsRequest, SetDefaultsResponse,
     SetEndpointRoleRequest, SetEndpointRoleResponse,
+    // K20 — Derive Key (§6.1.18 / §7.13 / §11.15).
+    DerivationMethod, DerivationParameters,
+    DeriveKeyRequest, DeriveKeyResponse,
 };
 
 pub use message::{AsynchronousIndicator, BatchErrorContinuationOption, Credential};

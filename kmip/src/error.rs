@@ -104,6 +104,26 @@ pub enum ResultReason {
     /// recognised but not supported; maps from PKCS#11
     /// `CKR_MECHANISM_PARAM_INVALID`.
     UnsupportedCryptographicParameters = 0x0000_003e,
+    /// `Key Value Not Present` — KMIP 3.0 §11. The operation needs the
+    /// raw key bytes but the managed object carries none the server
+    /// can reach (K20 — Derive Key §6.1.18 Table 304 lists this for a
+    /// base key whose material is neither in the KMIP store nor
+    /// reachable through an engine primitive for the chosen method).
+    /// Codepoint verified from `kmip-spec-3.0-tags-enums.json`.
+    KeyValueNotPresent     = 0x0000_0013,
+    /// `Bad Cryptographic Parameters` — KMIP 3.0 §11. The supplied
+    /// CryptographicParameters are inconsistent with the operation /
+    /// object (e.g. Derive Key HASH method without the §7.13-REQUIRED
+    /// Hashing Algorithm). Distinct from
+    /// `UnsupportedCryptographicParameters` (0x3e) — there the combo
+    /// is coherent but unimplemented. Codepoint verified from
+    /// `kmip-spec-3.0-tags-enums.json`.
+    BadCryptographicParameters = 0x0000_0024,
+    /// `Invalid Object Type` — KMIP 3.0 §11. The operation cannot act
+    /// on the requested / referenced Object Type (e.g. Derive Key for
+    /// anything but SymmetricKey / SecretData per §6.1.18). Codepoint
+    /// verified from `kmip-spec-3.0-tags-enums.json`.
+    InvalidObjectType      = 0x0000_0030,
     /// `Unsupported Protocol Version` — KMIP 3.0 §11. The request
     /// header's ProtocolVersion is one the server does not speak
     /// (we only accept 3.0). Distinct from `InvalidMessage` (0x04),
@@ -239,6 +259,15 @@ impl KmipError {
     pub fn attribute_not_found(msg: impl Into<String>) -> Self {
         Self::failed(ResultReason::AttributeNotFound, msg)
     }
+    pub fn key_value_not_present(msg: impl Into<String>) -> Self {
+        Self::failed(ResultReason::KeyValueNotPresent, msg)
+    }
+    pub fn bad_cryptographic_parameters(msg: impl Into<String>) -> Self {
+        Self::failed(ResultReason::BadCryptographicParameters, msg)
+    }
+    pub fn invalid_object_type(msg: impl Into<String>) -> Self {
+        Self::failed(ResultReason::InvalidObjectType, msg)
+    }
     pub fn internal(msg: impl Into<String>) -> Self {
         Self::Internal(msg.into())
     }
@@ -286,6 +315,10 @@ mod tests {
         assert_eq!(ResultReason::UnsupportedProtocolVersion.to_wire_value(), 0x0000_003f);
         // K19 additions — `Result Reason` rows in the OASIS enums JSON.
         assert_eq!(ResultReason::FeatureNotSupported.to_wire_value(),   0x0000_0008);
+        // K20 — Derive Key (§6.1.18 Table 304) error-table reasons.
+        assert_eq!(ResultReason::KeyValueNotPresent.to_wire_value(),    0x0000_0013);
+        assert_eq!(ResultReason::BadCryptographicParameters.to_wire_value(), 0x0000_0024);
+        assert_eq!(ResultReason::InvalidObjectType.to_wire_value(),     0x0000_0030);
         assert_eq!(ResultReason::UsageLimitExceeded.to_wire_value(),    0x0000_001a);
         assert_eq!(ResultReason::AttributeNotFound.to_wire_value(),     0x0000_0021);
         assert_eq!(ResultReason::GeneralFailure.to_wire_value(),        0x0000_0100);

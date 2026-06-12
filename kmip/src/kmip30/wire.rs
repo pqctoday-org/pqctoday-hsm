@@ -220,6 +220,29 @@ pub(crate) mod tags {
     pub const ApplicationData: u32        = 0x42_0002;
     /// KMIP 3.0 §11 — `Group Link` Reference (UID of a Group object).
     pub const GroupLink: u32              = 0x42_01b3;
+    // K20 — Derive Key (§6.1.18 / §7.13). All six codepoints verified
+    // against `kmip-spec-3.0-tags-enums.json`.
+    /// `Derivation Method` Enumeration (§11.15).
+    pub const DerivationMethod: u32       = 0x42_0031;
+    /// `Derivation Parameters` Structure (§7.13 Table 465).
+    pub const DerivationParameters: u32   = 0x42_0032;
+    /// `Derivation Data` ByteString — "the data to be encrypted,
+    /// hashed, or HMACed" (§7.13). May be repeated.
+    pub const DerivationData: u32         = 0x42_0030;
+    /// `Salt` ByteString — PBKDF2 salt (§7.13; NOT `Salt Length`
+    /// 0x420100, the RSA-PSS field).
+    pub const Salt: u32                   = 0x42_0084;
+    /// `Iteration Count` Integer — PBKDF2 iteration count (§7.13).
+    pub const IterationCount: u32         = 0x42_003c;
+    /// `Initialization Vector` ByteString (§7.13 — "an empty IV is
+    /// assumed if not provided").
+    pub const InitializationVector: u32   = 0x42_003a;
+    /// §4.35.5 `Derivation Base Object Link` — wire tag `Derivation
+    /// Object Link`: on the derived object, points at the base.
+    pub const DerivationObjectLink: u32   = 0x42_0192;
+    /// `Derived Object Link` — on the base object, points at the
+    /// object derived from it (§6.1.18).
+    pub const DerivedObjectLink: u32      = 0x42_0193;
     /// KMIP 3.0 §6.1.14 Deactivate request fields.
     pub const DeactivationReason: u32     = 0x42_01b8;
     pub const DeactivationReasonCode: u32 = 0x42_01b9;
@@ -795,6 +818,8 @@ fn decode_request_payload(op: Operation, frame: &TtlvFrame) -> Result<RequestPay
         Operation::SetEndpointRole  => {
             RequestPayload::SetEndpointRole(decode_set_endpoint_role_req(children)?)
         }
+        // K20 — §6.1.18 Derive Key.
+        Operation::DeriveKey        => RequestPayload::DeriveKey(decode_derive_key_req(children)?),
         // K3 — recognized KMIP 3.0 Operations without a dispatcher
         // route. The codepoint is a published §11 value, so the
         // message is NOT malformed: decode the batch item with an
@@ -816,7 +841,6 @@ fn decode_request_payload(op: Operation, frame: &TtlvFrame) -> Result<RequestPay
         | Operation::SetConstraints
         | Operation::QueryAsynchronousRequests
         | Operation::Process
-        | Operation::DeriveKey
         | Operation::Certify
         | Operation::Cancel
         | Operation::ReKeyKeyPair
@@ -888,6 +912,8 @@ fn response_payload_to_frame(payload: &ResponsePayload) -> TtlvFrame {
             Tag(tags::EndpointRole),
             Value::Enumeration(r.endpoint_role.to_wire_value()),
         )],
+        // K20 — §6.1.18 Table 303: UID-only response payload.
+        ResponsePayload::DeriveKey(r)        => encode_uid_only_resp(&r.uid),
     };
     TtlvFrame::new(Tag(tags::ResponsePayload), Value::Structure(children))
 }
@@ -1710,6 +1736,17 @@ fn decode_attribute_v3(frame: &TtlvFrame) -> Result<Option<Attribute>, WireError
                 Attribute::GroupLink(s.clone())
             } else { return Ok(None); }
         }
+        // K20 — Derive Key link pair (§4.35.5 / §6.1.18).
+        tags::DerivationObjectLink => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::DerivationBaseObjectLink(s.clone())
+            } else { return Ok(None); }
+        }
+        tags::DerivedObjectLink => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::DerivedObjectLink(s.clone())
+            } else { return Ok(None); }
+        }
         tags::ApplicationSpecificInformation => {
             // Structure containing ApplicationNamespace + ApplicationData.
             let mut ns = String::new();
@@ -2262,6 +2299,109 @@ fn encode_get_constraints_resp(r: &GetConstraintsResponse) -> Vec<TtlvFrame> {
         })
         .collect();
     vec![TtlvFrame::new(Tag(tags::Constraints), Value::Structure(constraint_frames))]
+}
+
+/// K20 — `Derive Key` request per §6.1.18 Table 302: `Object Type`
+/// (REQUIRED), `Unique Identifier` (REQUIRED, "MAY be repeated"),
+/// `Derivation Method` (REQUIRED Enumeration), `Derivation
+/// Parameters` (REQUIRED Structure), `Attributes` (REQUIRED).
+fn decode_derive_key_req(children: &[TtlvFrame]) -> Result<DeriveKeyRequest, WireError> {
+    let mut object_type = None;
+    let mut uids: Vec<String> = Vec::new();
+    let mut derivation_method = None;
+    let mut derivation_parameters = None;
+    let mut template_attribute = Vec::new();
+    for c in children {
+        match c.tag.0 {
+            tags::ObjectType => {
+                let v = expect_enum(c, "Object Type")?;
+                object_type = Some(ObjectType::from_wire_value(v).ok_or(
+                    WireError::UnknownEnum { field: "Object Type", value: v },
+                )?);
+            }
+            tags::UniqueIdentifier => match &c.value {
+                Value::TextString(s) => uids.push(s.clone()),
+                // §6.4 ID Placeholder — same convention as `required_uid`.
+                Value::Enumeration(v) if *v == 0x00000001 => {
+                    uids.push(crate::dispatcher::ID_PLACEHOLDER_SENTINEL.to_string());
+                }
+                Value::Enumeration(v) => {
+                    return Err(WireError::UnknownEnum {
+                        field: "Unique Identifier (only IDPlaceholder=0x01 supported)",
+                        value: *v,
+                    });
+                }
+                _ => {}
+            },
+            tags::DerivationMethod => {
+                let v = expect_enum(c, "Derivation Method")?;
+                derivation_method = Some(DerivationMethod::from_wire_value(v).ok_or(
+                    WireError::UnknownEnum { field: "Derivation Method", value: v },
+                )?);
+            }
+            tags::DerivationParameters => {
+                derivation_parameters = Some(decode_derivation_parameters(c)?);
+            }
+            tags::Attributes => {
+                for child in expect_structure(c, "Attributes")? {
+                    if let Some(a) = decode_attribute_v3(child)? {
+                        template_attribute.push(a);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(DeriveKeyRequest {
+        object_type: object_type
+            .ok_or(WireError::Missing { tag: tags::ObjectType, name: "Object Type" })?,
+        uids,
+        derivation_method: derivation_method.ok_or(WireError::Missing {
+            tag: tags::DerivationMethod,
+            name: "Derivation Method",
+        })?,
+        derivation_parameters: derivation_parameters.ok_or(WireError::Missing {
+            tag: tags::DerivationParameters,
+            name: "Derivation Parameters",
+        })?,
+        template_attribute,
+    })
+}
+
+/// `Derivation Parameters` Structure per §7.13 Table 465. Repeated
+/// `Derivation Data` fields ("May be repeated") are concatenated in
+/// wire order.
+fn decode_derivation_parameters(
+    frame: &TtlvFrame,
+) -> Result<DerivationParameters, WireError> {
+    let mut dp = DerivationParameters::default();
+    for c in expect_structure(frame, "Derivation Parameters")? {
+        match c.tag.0 {
+            tags::CryptographicParameters => {
+                dp.cryptographic_parameters = Some(decode_cryptographic_parameters(c)?);
+            }
+            tags::InitializationVector => {
+                if let Value::ByteString(b) = &c.value {
+                    dp.initialization_vector = Some(b.clone());
+                }
+            }
+            tags::DerivationData => {
+                if let Value::ByteString(b) = &c.value {
+                    dp.derivation_data.get_or_insert_with(Vec::new).extend_from_slice(b);
+                }
+            }
+            tags::Salt => {
+                if let Value::ByteString(b) = &c.value {
+                    dp.salt = Some(b.clone());
+                }
+            }
+            tags::IterationCount => {
+                dp.iteration_count = Some(expect_integer(c, "Iteration Count")?);
+            }
+            _ => {}
+        }
+    }
+    Ok(dp)
 }
 
 /// `Set Defaults` request per §6.1.58 Table 428 — optional
@@ -3259,6 +3399,8 @@ fn encode_attribute_v3(a: &Attribute) -> TtlvFrame {
         Attribute::NextLink(s)                 => TtlvFrame::new(Tag(tags::NextLink),                 Value::TextString(s.clone())),
         Attribute::PreviousLink(s)             => TtlvFrame::new(Tag(tags::PreviousLink),             Value::TextString(s.clone())),
         Attribute::GroupLink(s)                => TtlvFrame::new(Tag(tags::GroupLink),                Value::TextString(s.clone())),
+        Attribute::DerivationBaseObjectLink(s) => TtlvFrame::new(Tag(tags::DerivationObjectLink),     Value::TextString(s.clone())),
+        Attribute::DerivedObjectLink(s)        => TtlvFrame::new(Tag(tags::DerivedObjectLink),        Value::TextString(s.clone())),
         Attribute::ApplicationSpecificInformation { namespace, data } => {
             TtlvFrame::new(Tag(tags::ApplicationSpecificInformation), Value::Structure(vec![
                 TtlvFrame::new(Tag(tags::ApplicationNamespace), Value::TextString(namespace.clone())),
@@ -3404,6 +3546,8 @@ fn tag_code_from_name(name: &str) -> Option<u32> {
         "PublicKeyLink"          => tags::PublicKeyLink,
         "PrivateKeyLink"         => tags::PrivateKeyLink,
         "GroupLink"              => tags::GroupLink,
+        "DerivationBaseObjectLink" => tags::DerivationObjectLink,
+        "DerivedObjectLink"      => tags::DerivedObjectLink,
         "ApplicationSpecificInformation" => tags::ApplicationSpecificInformation,
         "Digest"                 => tags::Digest,
         "RandomNumberGenerator"  => tags::RandomNumberGenerator,
@@ -3481,6 +3625,8 @@ fn tag_name_from_code(code: u32) -> &'static str {
         tags::PublicKeyLink          => "Public Key Link",
         tags::PrivateKeyLink         => "Private Key Link",
         tags::GroupLink              => "Group Link",
+        tags::DerivationObjectLink   => "Derivation Object Link",
+        tags::DerivedObjectLink      => "Derived Object Link",
         tags::ApplicationSpecificInformation => "Application Specific Information",
         _ => "Unknown",
     }
@@ -3647,6 +3793,97 @@ mod tests {
     /// Structure form ("Object Type | ObjectTypes" per §7.23 Table
     /// 475); a missing `Attributes` child is a decode error; an absent
     /// `Defaults Information` decodes to `None` (= remove all).
+    #[test]
+    fn k20_derive_key_request_decode_forms() {
+        // Full §6.1.18 Table 302 payload — every field decodes; the
+        // repeated `Derivation Data` ("May be repeated", Table 465)
+        // concatenates in wire order.
+        let full = vec![
+            TtlvFrame::new(Tag(tags::ObjectType),
+                           Value::Enumeration(ObjectType::SymmetricKey.to_wire_value())),
+            TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString("u-1".into())),
+            TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString("u-2".into())),
+            TtlvFrame::new(Tag(tags::DerivationMethod),
+                           Value::Enumeration(DerivationMethod::Nist800_108C.to_wire_value())),
+            TtlvFrame::new(Tag(tags::DerivationParameters), Value::Structure(vec![
+                TtlvFrame::new(Tag(tags::CryptographicParameters), Value::Structure(vec![
+                    TtlvFrame::new(Tag(tags::HashingAlgorithm),
+                                   Value::Enumeration(HashingAlgorithm::Sha512.to_wire_value())),
+                ])),
+                TtlvFrame::new(Tag(tags::InitializationVector), Value::ByteString(vec![0xAA])),
+                TtlvFrame::new(Tag(tags::DerivationData), Value::ByteString(b"lab".to_vec())),
+                TtlvFrame::new(Tag(tags::DerivationData), Value::ByteString(b"el".to_vec())),
+                TtlvFrame::new(Tag(tags::Salt), Value::ByteString(b"salty".to_vec())),
+                TtlvFrame::new(Tag(tags::IterationCount), Value::Integer(4096)),
+            ])),
+            TtlvFrame::new(Tag(tags::Attributes), Value::Structure(vec![
+                TtlvFrame::new(Tag(tags::CryptographicAlgorithm),
+                               Value::Enumeration(KmipAlgorithm::Aes.to_wire_value())),
+                TtlvFrame::new(Tag(tags::CryptographicLength), Value::Integer(256)),
+            ])),
+        ];
+        let req = decode_derive_key_req(&full).unwrap();
+        assert_eq!(req.object_type, ObjectType::SymmetricKey);
+        assert_eq!(req.uids, vec!["u-1".to_string(), "u-2".to_string()]);
+        assert_eq!(req.derivation_method, DerivationMethod::Nist800_108C);
+        let dp = &req.derivation_parameters;
+        assert_eq!(
+            dp.cryptographic_parameters.as_ref().unwrap().hashing_algorithm,
+            Some(HashingAlgorithm::Sha512)
+        );
+        assert_eq!(dp.initialization_vector.as_deref(), Some(&[0xAA][..]));
+        assert_eq!(dp.derivation_data.as_deref(), Some(&b"label"[..]));
+        assert_eq!(dp.salt.as_deref(), Some(&b"salty"[..]));
+        assert_eq!(dp.iteration_count, Some(4096));
+        assert_eq!(req.template_attribute.len(), 2);
+
+        // §6.4 IDPlaceholder UID form.
+        let placeholder = vec![
+            TtlvFrame::new(Tag(tags::ObjectType),
+                           Value::Enumeration(ObjectType::SecretData.to_wire_value())),
+            TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::Enumeration(0x01)),
+            TtlvFrame::new(Tag(tags::DerivationMethod),
+                           Value::Enumeration(DerivationMethod::Hash.to_wire_value())),
+            TtlvFrame::new(Tag(tags::DerivationParameters), Value::Structure(vec![])),
+        ];
+        let req = decode_derive_key_req(&placeholder).unwrap();
+        assert_eq!(req.uids, vec![crate::dispatcher::ID_PLACEHOLDER_SENTINEL.to_string()]);
+
+        // Missing REQUIRED fields → Missing (the dispatcher surfaces
+        // DecodeFailed/InvalidMessage — "Invalid Message" is in the
+        // §6.1.18.1 Table 304 reason list).
+        assert!(matches!(
+            decode_derive_key_req(&full[..4]), // no DerivationParameters
+            Err(WireError::Missing { name: "Derivation Parameters", .. })
+        ));
+        assert!(matches!(
+            decode_derive_key_req(&[]),
+            Err(WireError::Missing { name: "Object Type", .. })
+        ));
+        // Unknown Derivation Method codepoint → UnknownEnum.
+        let bad_method = vec![
+            TtlvFrame::new(Tag(tags::ObjectType),
+                           Value::Enumeration(ObjectType::SymmetricKey.to_wire_value())),
+            TtlvFrame::new(Tag(tags::DerivationMethod), Value::Enumeration(0x7F)),
+        ];
+        assert!(matches!(
+            decode_derive_key_req(&bad_method),
+            Err(WireError::UnknownEnum { field: "Derivation Method", value: 0x7F })
+        ));
+    }
+
+    /// K20 — Derive Key response payload is UID-only (Table 303).
+    #[test]
+    fn k20_derive_key_response_wire_shape() {
+        let frame = response_payload_to_frame(&ResponsePayload::DeriveKey(
+            DeriveKeyResponse { uid: "derived-1".into() },
+        ));
+        let children = expect_structure(&frame, "Response Payload").unwrap();
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].tag.0, tags::UniqueIdentifier);
+        assert_eq!(children[0].value, Value::TextString("derived-1".into()));
+    }
+
     #[test]
     fn k19_set_defaults_request_decode_forms() {
         let attrs = TtlvFrame::new(Tag(tags::Attributes), Value::Structure(vec![

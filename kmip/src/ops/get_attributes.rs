@@ -196,6 +196,11 @@ fn attributes_from_record(r: &ObjectRecord) -> Vec<Attribute> {
                 "NextLink"       => out.push(Attribute::NextLink(uid)),
                 "PreviousLink"   => out.push(Attribute::PreviousLink(uid)),
                 "GroupLink"      => out.push(Attribute::GroupLink(uid)),
+                // K20 — Derive Key link pair (§6.1.18 / §4.35.5).
+                "DerivationBaseObjectLink" => {
+                    out.push(Attribute::DerivationBaseObjectLink(uid))
+                }
+                "DerivedObjectLink" => out.push(Attribute::DerivedObjectLink(uid)),
                 // Unknown link-type keys have no wire codepoint in the
                 // Attribute enum yet — nothing stored writes them today.
                 _ => {}
@@ -331,6 +336,9 @@ pub(crate) fn canonical_attribute_name(attr: &Attribute) -> &'static str {
         Attribute::NextLink(_)               => "NextLink",
         Attribute::PreviousLink(_)           => "PreviousLink",
         Attribute::GroupLink(_)              => "GroupLink",
+        // K20 — Derive Key link pair (§6.1.18 / §4.35.5).
+        Attribute::DerivationBaseObjectLink(_) => "DerivationBaseObjectLink",
+        Attribute::DerivedObjectLink(_)      => "DerivedObjectLink",
         Attribute::ApplicationSpecificInformation { .. } => "ApplicationSpecificInformation",
         Attribute::DigitalSignatureAlgorithm(_) => "DigitalSignatureAlgorithm",
         Attribute::NistKeyType(_)            => "NistKeyType",

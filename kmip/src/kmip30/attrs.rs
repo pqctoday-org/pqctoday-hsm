@@ -299,6 +299,17 @@ pub enum Attribute {
     /// that contains this managed object. SASED-M-3 step #0 pins a
     /// Locate filter by GroupLink.
     GroupLink(String),
+    /// `Derivation Base Object Link` (§4.35.5; wire tag `Derivation
+    /// Object Link` 0x420192) — K20: on a derived Symmetric Key /
+    /// Secret Data object, "expresses an association from a derived
+    /// … object to the Managed Cryptographic Object(s) from which it
+    /// was derived".
+    DerivationBaseObjectLink(String),
+    /// `Derived Object Link` (0x420193) — K20 mirror on the base
+    /// object: §6.1.18 "the server SHALL create a Derived Object Link
+    /// attribute pointing to the Symmetric Key or Secret Data object
+    /// derived as a result of this operation".
+    DerivedObjectLink(String),
     /// `Application Specific Information` (0x420004) Structure —
     /// `ApplicationNamespace` + `ApplicationData` text-string pair.
     /// TL-M-3 step #0 pins a Locate filter by both fields.
