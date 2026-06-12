@@ -160,8 +160,17 @@ enumerator_t *wasm_create_ike_enum(backend_t *this,
 
 static const char *proposal_ike_classical = "aes256-sha256-ecp256";
 static const char *proposal_ike_pqc       = "aes256-sha256-mlkem768";
-static const char *proposal_ike_hybrid    = "aes256-sha256-mlkem768-ecp256";
+/* RFC 9370 multi-KE hybrid: ML-KEM-768 is the IKE_SA_INIT key exchange,
+ * ECP-256 runs as Additional Key Exchange 1 in a real IKE_INTERMEDIATE
+ * round. 6.0.5 parses the ke1_ prefix via additional_key_exchange_parser
+ * (key_exchange.c, registered in key_exchange_init). The previous string
+ * "...mlkem768-ecp256" merely offered both as KE alternatives. */
+static const char *proposal_ike_hybrid    = "aes256-sha256-mlkem768-ke1_ecp256";
 static const char *proposal_esp           = "aes256-sha256";
+
+/* Implemented in kernel_wasm.c — registers the Tier A stub kernel_ipsec_t
+ * backend so CHILD_SA SPI allocation / SA install succeed without a kernel. */
+extern void wasm_kernel_register(void);
 
 void wasm_setup_config(int unused)
 {
@@ -207,13 +216,40 @@ void wasm_setup_config(int unused)
     }
     ike_data.local_port  = 500;
     ike_data.remote_port = 500;
-    /* Childless IKE_SA per RFC 6023: skip the piggybacked CHILD_SA in
-     * IKE_AUTH because the WASM build has no kernel IPSec interface and
-     * CHILD_SA SPI allocation fails ("unable to allocate SPI from kernel").
-     * The IKE_SA still authenticates and reaches ESTABLISHED — which is the
-     * milestone for this in-browser demo. The responder advertises
-     * N(CHDLESS_SUP) so this is mutually negotiated. */
-    ike_data.childless   = CHILDLESS_FORCE;
+    /* Childless IKE_SA per RFC 6023: by default skip the piggybacked
+     * CHILD_SA in IKE_AUTH because the WASM build has no kernel IPSec
+     * interface and CHILD_SA SPI allocation fails ("unable to allocate SPI
+     * from kernel"). The hub can opt in to a real CHILD_SA negotiation via
+     * WASM_CHILDSA=1 — we then register the Tier A stub kernel backend
+     * (kernel_wasm.c) so get_spi/add_sa/add_policy succeed, and use
+     * CHILDLESS_NEVER so the CHILD_SA is negotiated in IKE_AUTH. */
+    {
+        const char *childsa_env = getenv("WASM_CHILDSA");
+        if (childsa_env && !strcmp(childsa_env, "1"))
+        {
+            wasm_kernel_register();
+            ike_data.childless = CHILDLESS_NEVER;
+        }
+        else
+        {
+            ike_data.childless = CHILDLESS_FORCE;
+        }
+    }
+    /* IKEv2 fragmentation (RFC 7383): enabled by default so large
+     * IKE_AUTH/IKE_INTERMEDIATE messages (ML-DSA certs, ML-KEM payloads)
+     * split per charon.fragment_size from the hub's strongswan.conf.
+     * Opt out via WASM_FRAGMENTATION=no. */
+    {
+        const char *frag_env = getenv("WASM_FRAGMENTATION");
+        if (frag_env && !strcmp(frag_env, "no"))
+        {
+            ike_data.fragmentation = FRAGMENTATION_NO;
+        }
+        else
+        {
+            ike_data.fragmentation = FRAGMENTATION_YES;
+        }
+    }
     ike_cfg = ike_cfg_create(&ike_data);
     ike_cfg->add_proposal(ike_cfg, proposal_create_from_string(PROTO_IKE,
                                                                (char *)ike_prop));

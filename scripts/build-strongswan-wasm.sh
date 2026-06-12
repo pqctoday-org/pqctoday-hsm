@@ -145,6 +145,7 @@ cp "$SHIMS_SRC"/socket_wasm.h       src/charon/
 cp "$SHIMS_SRC"/wasm_hsm_init.c     src/charon/
 cp "$SHIMS_SRC"/wasm_backend.c      src/charon/
 cp "$SHIMS_SRC"/pkcs11_wasm_rpc.c   src/charon/
+cp "$SHIMS_SRC"/kernel_wasm.c       src/charon/
 
 # 7.5. Patch Makefile.am to actually compile plugin_constructors.c into the
 #      archive. Upstream lists the generated file under BUILT_SOURCES but
