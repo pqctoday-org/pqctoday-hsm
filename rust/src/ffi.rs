@@ -669,30 +669,42 @@ pub fn C_GetTokenInfo(slot_id: u32, p_info: *mut u8) -> u32 {
         Some(t) => t,
         None => return CKR_SLOT_ID_INVALID,
     };
+    // Audit H-15 — TokenInfo is dynamic: flags derive from real token state
+    // (state::token_info_flags), the label is the per-instance token label
+    // (default "SoftHSM3-Rust", settable via native::set_token_label or
+    // C_InitToken), and session counters come from the live session table.
+    let flags = crate::state::token_info_flags(&token);
+    let (session_count, rw_session_count) = crate::state::session_counts(slot_id);
     unsafe {
+        // utcTime [144..160] stays blank-padded: no CKF_CLOCK_ON_TOKEN.
         std::ptr::write_bytes(p_info, 0x20, 160);
-        write_fixed_str(p_info, 0, "SoftHSM3-Rust", 32);
+        // label[32] @0 — already space-padded to 32 bytes in TokenState.
+        std::ptr::copy_nonoverlapping(token.label.as_ptr(), p_info, 32);
         write_fixed_str(p_info, 32, "SoftHSM project", 32);
         write_fixed_str(p_info, 64, "PQCToday", 16);
         write_fixed_str(p_info, 80, "0001", 16);
 
         let ptr = p_info as *mut u32;
-        // CKF_RNG (0x1) | CKF_LOGIN_REQUIRED (0x4) | CKF_USER_PIN_INITIALIZED
-        // (0x8) | CKF_TOKEN_INITIALIZED (0x400). The former value 0x0004040D
-        // ALSO set CKF_USER_PIN_LOCKED (0x40000), which made conformant clients
-        // refuse to attempt login — that bit is now cleared (PKCS#11 v3.2 §5.5).
-        let _ = &token; // slot validated above
-        *ptr.add(24) = 0x0000_040D;
-        *ptr.add(25) = 256;
-        *ptr.add(26) = 1;
-        *ptr.add(27) = 256;
-        *ptr.add(28) = 1;
-        *ptr.add(29) = 256;
-        *ptr.add(30) = 4;
-        *p_info.add(140) = 3;
-        *p_info.add(141) = 2;
-        *p_info.add(142) = 0;
-        *p_info.add(143) = 1;
+        *ptr.add(24) = flags; // flags @96
+        // Session limits are unbounded (C_OpenSession never refuses on
+        // count), so the max fields report CK_UNAVAILABLE_INFORMATION;
+        // the current counts are live values from SESSIONS.
+        *ptr.add(25) = CK_UNAVAILABLE_INFORMATION; // ulMaxSessionCount @100
+        *ptr.add(26) = session_count; // ulSessionCount @104
+        *ptr.add(27) = CK_UNAVAILABLE_INFORMATION; // ulMaxRwSessionCount @108
+        *ptr.add(28) = rw_session_count; // ulRwSessionCount @112
+        *ptr.add(29) = 256; // ulMaxPinLen @116
+        *ptr.add(30) = 4; // ulMinPinLen @120
+        // The engine does not meter object memory — report
+        // CK_UNAVAILABLE_INFORMATION rather than fake numbers (§5.5).
+        *ptr.add(31) = CK_UNAVAILABLE_INFORMATION; // ulTotalPublicMemory @124
+        *ptr.add(32) = CK_UNAVAILABLE_INFORMATION; // ulFreePublicMemory @128
+        *ptr.add(33) = CK_UNAVAILABLE_INFORMATION; // ulTotalPrivateMemory @132
+        *ptr.add(34) = CK_UNAVAILABLE_INFORMATION; // ulFreePrivateMemory @136
+        *p_info.add(140) = 3; // hardwareVersion.major
+        *p_info.add(141) = 2; // hardwareVersion.minor
+        *p_info.add(142) = 0; // firmwareVersion.major
+        *p_info.add(143) = 1; // firmwareVersion.minor
     }
     CKR_OK
 }
@@ -9216,5 +9228,232 @@ mod return_code_ffi_tests {
             ),
             CKR_TEMPLATE_INCOMPLETE,
         );
+    }
+}
+
+#[cfg(test)]
+mod token_info_tests {
+    //! T2 (audit H-15) — C_GetTokenInfo is dynamic: flags derive from real
+    //! token state, session counters from the live session table, and the
+    //! label is per-instance. The byte layout of CK_TOKEN_INFO (160 bytes,
+    //! 32-bit CK_ULONG ABI) is pinned by `token_info_byte_layout_unchanged`.
+    use super::*;
+    use crate::native::test_lock;
+
+    fn reset_engine() {
+        let _ = C_Finalize(std::ptr::null_mut());
+        assert_eq!(C_Initialize(std::ptr::null_mut()), CKR_OK);
+    }
+
+    /// Call C_GetTokenInfo(0) into a 4-byte-aligned 160-byte buffer (the
+    /// impl writes the CK_ULONG fields through a `*mut u32`).
+    fn get_token_info() -> [u8; 160] {
+        let mut words = [0u32; 40];
+        assert_eq!(C_GetTokenInfo(0, words.as_mut_ptr() as *mut u8), CKR_OK);
+        let mut buf = [0u8; 160];
+        for (i, w) in words.iter().enumerate() {
+            buf[i * 4..i * 4 + 4].copy_from_slice(&w.to_le_bytes());
+        }
+        buf
+    }
+
+    fn u32_at(buf: &[u8; 160], off: usize) -> u32 {
+        u32::from_le_bytes([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]])
+    }
+
+    fn flags_of(buf: &[u8; 160]) -> u32 {
+        u32_at(buf, 96)
+    }
+
+    /// H-15 — CKF_TOKEN_INITIALIZED / CKF_USER_PIN_INITIALIZED follow the
+    /// real TokenState; CKF_WRITE_PROTECTED is never set.
+    #[test]
+    fn flags_reflect_token_and_pin_state() {
+        let _guard = test_lock::acquire();
+        reset_engine();
+        // Fresh built-in token: uninitialized, no user PIN — but login is
+        // still required for private objects, so CKF_LOGIN_REQUIRED is on.
+        assert_eq!(flags_of(&get_token_info()), CKF_RNG | CKF_LOGIN_REQUIRED);
+
+        TOKEN_STORE.with(|ts| {
+            ts.borrow_mut().get_mut(&0).unwrap().initialized = true;
+        });
+        assert_eq!(
+            flags_of(&get_token_info()),
+            CKF_RNG | CKF_LOGIN_REQUIRED | CKF_TOKEN_INITIALIZED
+        );
+
+        TOKEN_STORE.with(|ts| {
+            let mut store = ts.borrow_mut();
+            let t = store.get_mut(&0).unwrap();
+            t.user_pin_salt = Some([0u8; 16]);
+            t.user_pin_hash = Some([0u8; 32]);
+        });
+        let flags = flags_of(&get_token_info());
+        assert_eq!(
+            flags,
+            CKF_RNG | CKF_LOGIN_REQUIRED | CKF_TOKEN_INITIALIZED | CKF_USER_PIN_INITIALIZED
+        );
+        assert_eq!(flags & CKF_WRITE_PROTECTED, 0, "token must not claim write protection");
+
+        // PIN cleared (C_InitToken does this) → flag drops again.
+        TOKEN_STORE.with(|ts| {
+            let mut store = ts.borrow_mut();
+            let t = store.get_mut(&0).unwrap();
+            t.user_pin_salt = None;
+            t.user_pin_hash = None;
+        });
+        assert_eq!(flags_of(&get_token_info()) & CKF_USER_PIN_INITIALIZED, 0);
+    }
+
+    /// H-15 — CKF_LOGIN_REQUIRED must tell the truth about enforcement.
+    /// Even on a PIN-less token, `can_access_object` denies a
+    /// CKA_PRIVATE=TRUE object to a logged-out session — so the flag and
+    /// the enforcement decision must agree (both "login required").
+    #[test]
+    fn login_required_flag_matches_can_access_object_enforcement() {
+        let _guard = test_lock::acquire();
+        reset_engine();
+        let mut h_session = 0u32;
+        assert_eq!(
+            C_OpenSession(
+                0,
+                CKF_SERIAL_SESSION | CKF_RW_SESSION,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut h_session,
+            ),
+            CKR_OK
+        );
+        let mut attrs = Attributes::new();
+        crate::state::store_bool(&mut attrs, CKA_PRIVATE, true);
+        let denied = !crate::state::can_access_object(h_session, &attrs);
+        let flag_set = flags_of(&get_token_info()) & CKF_LOGIN_REQUIRED != 0;
+        assert_eq!(
+            denied, flag_set,
+            "CKF_LOGIN_REQUIRED ({flag_set}) must match private-object \
+             enforcement (denied={denied})"
+        );
+        assert!(denied, "private object must be inaccessible while logged out");
+        assert_eq!(C_CloseSession(h_session), CKR_OK);
+    }
+
+    /// Label setter round-trip + §5.5 32-byte space padding + truncation.
+    #[test]
+    fn label_setter_round_trip_and_padding() {
+        let _guard = test_lock::acquire();
+        reset_engine();
+        // Default label preserved from the pre-T2 implementation.
+        assert_eq!(
+            crate::native::session::get_token_label().unwrap(),
+            crate::state::DEFAULT_TOKEN_LABEL
+        );
+        let buf = get_token_info();
+        assert_eq!(&buf[0..13], b"SoftHSM3-Rust");
+        assert!(buf[13..32].iter().all(|&b| b == 0x20), "label must be space-padded");
+
+        crate::native::session::set_token_label("pqctoday-instance-A").unwrap();
+        assert_eq!(
+            crate::native::session::get_token_label().unwrap(),
+            "pqctoday-instance-A"
+        );
+        let buf = get_token_info();
+        assert_eq!(&buf[0..19], b"pqctoday-instance-A");
+        assert!(buf[19..32].iter().all(|&b| b == 0x20), "label must be space-padded");
+
+        // Over-long labels truncate at 32 bytes.
+        crate::native::session::set_token_label(
+            "0123456789012345678901234567890123456789",
+        )
+        .unwrap();
+        assert_eq!(
+            crate::native::session::get_token_label().unwrap(),
+            "01234567890123456789012345678901"
+        );
+    }
+
+    /// ulSessionCount @104 / ulRwSessionCount @112 track open/close live.
+    #[test]
+    fn session_counters_track_open_close() {
+        let _guard = test_lock::acquire();
+        reset_engine();
+        let buf = get_token_info();
+        assert_eq!(u32_at(&buf, 104), 0, "fresh engine: no sessions");
+        assert_eq!(u32_at(&buf, 112), 0, "fresh engine: no rw sessions");
+
+        let (mut rw, mut ro) = (0u32, 0u32);
+        assert_eq!(
+            C_OpenSession(
+                0,
+                CKF_SERIAL_SESSION | CKF_RW_SESSION,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut rw,
+            ),
+            CKR_OK
+        );
+        assert_eq!(
+            C_OpenSession(
+                0,
+                CKF_SERIAL_SESSION,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut ro,
+            ),
+            CKR_OK
+        );
+        let buf = get_token_info();
+        assert_eq!(u32_at(&buf, 104), 2);
+        assert_eq!(u32_at(&buf, 112), 1);
+
+        assert_eq!(C_CloseSession(rw), CKR_OK);
+        let buf = get_token_info();
+        assert_eq!(u32_at(&buf, 104), 1);
+        assert_eq!(u32_at(&buf, 112), 0);
+        assert_eq!(C_CloseSession(ro), CKR_OK);
+    }
+
+    /// Byte-layout regression — every static field sits at the same offset
+    /// (and keeps the same value) as the pre-T2 implementation; only the
+    /// state-derived values changed. The JS/wasm side reads this struct at
+    /// fixed offsets, so this layout is ABI.
+    #[test]
+    fn token_info_byte_layout_unchanged() {
+        let _guard = test_lock::acquire();
+        reset_engine();
+        let buf = get_token_info();
+
+        // label[32] @0 (default), manufacturerID[32] @32, model[16] @64,
+        // serialNumber[16] @80 — all blank-padded.
+        assert_eq!(&buf[0..13], b"SoftHSM3-Rust");
+        let mut manufacturer = [0x20u8; 32];
+        manufacturer[..15].copy_from_slice(b"SoftHSM project");
+        assert_eq!(&buf[32..64], &manufacturer);
+        let mut model = [0x20u8; 16];
+        model[..8].copy_from_slice(b"PQCToday");
+        assert_eq!(&buf[64..80], &model);
+        let mut serial = [0x20u8; 16];
+        serial[..4].copy_from_slice(b"0001");
+        assert_eq!(&buf[80..96], &serial);
+
+        // flags @96 — equals the single-point-of-truth derivation.
+        let token = TOKEN_STORE.with(|ts| ts.borrow().get(&0).cloned()).unwrap();
+        assert_eq!(u32_at(&buf, 96), crate::state::token_info_flags(&token));
+
+        // ulMaxSessionCount @100 / ulMaxRwSessionCount @108 — unbounded.
+        assert_eq!(u32_at(&buf, 100), CK_UNAVAILABLE_INFORMATION);
+        assert_eq!(u32_at(&buf, 108), CK_UNAVAILABLE_INFORMATION);
+        // ulMaxPinLen @116 / ulMinPinLen @120 — unchanged values.
+        assert_eq!(u32_at(&buf, 116), 256);
+        assert_eq!(u32_at(&buf, 120), 4);
+        // Memory fields @124..140 — CK_UNAVAILABLE_INFORMATION, not fakes.
+        for off in [124usize, 128, 132, 136] {
+            assert_eq!(u32_at(&buf, off), CK_UNAVAILABLE_INFORMATION, "offset {off}");
+        }
+        // hardwareVersion @140-141 = 3.2, firmwareVersion @142-143 = 0.1.
+        assert_eq!((buf[140], buf[141]), (3, 2));
+        assert_eq!((buf[142], buf[143]), (0, 1));
+        // utcTime[16] @144 — blank (no CKF_CLOCK_ON_TOKEN).
+        assert!(buf[144..160].iter().all(|&b| b == 0x20));
     }
 }
