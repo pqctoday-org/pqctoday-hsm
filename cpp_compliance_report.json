@@ -564,22 +564,22 @@
     ],
     "KCV": [
         {
-            "details": "3 bytes: 9005E5",
+            "details": "3 bytes: 1B79A8",
             "status": "PASS",
             "test": "AES_Generate_KCV_Present"
         },
         {
-            "details": "HSM=9005E5 == oracle=9005E5",
+            "details": "HSM=1B79A8 == oracle=1B79A8",
             "status": "PASS",
             "test": "AES_Generate_KCV_Equals_OracleEcbZeroBlock"
         },
         {
-            "details": "3 bytes: EB0E41",
+            "details": "3 bytes: 4446AD",
             "status": "PASS",
             "test": "AES_Unwrap_KCV_Present"
         },
         {
-            "details": "original=EB0E41 unwrapped=EB0E41",
+            "details": "original=4446AD unwrapped=4446AD",
             "status": "PASS",
             "test": "AES_Unwrap_KCV_Equals_Original"
         },
@@ -636,13 +636,13 @@
             "test": "CKM_PKCS5_PBKD2"
         },
         {
-            "details": "ENGINE BUG: spec PRF CKM_SHA256_HMAC rejected, RV=113 (engine only accepts bare-hash PRF identifiers)",
-            "status": "XFAIL",
+            "details": "HMAC-SHA256 PRF, RV=0",
+            "status": "PASS",
             "test": "CKM_SP800_108_COUNTER_KDF"
         },
         {
-            "details": "ENGINE BUG: bare CKM_SHA256 accepted as PRF (RV=0); spec requires a keyed MAC mechanism",
-            "status": "XFAIL",
+            "details": "bare CKM_SHA256 PRF correctly rejected, RV=113",
+            "status": "PASS",
             "test": "SP800_108_BareHash_PRF_Rejected"
         },
         {
@@ -1025,10 +1025,10 @@
     ],
     "_summary": {
         "engine": "./build-f1/src/lib/libsofthsmv3.dylib",
-        "engine_commit": "ac480db",
+        "engine_commit": "1a60782+sp800-108-keyed-mac-prf-fix (this commit)",
         "fail": 0,
-        "pass": 191,
+        "pass": 193,
         "skip": 1,
-        "xfail_known_engine_bugs": 2
+        "xfail_known_engine_bugs": 0
     }
 }

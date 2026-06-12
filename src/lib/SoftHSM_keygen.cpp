@@ -166,6 +166,28 @@ static const char* ckmToDigestName(CK_MECHANISM_TYPE mech)
 	}
 }
 
+// SP 800-108 KDF helper: map a keyed-MAC HMAC PRF mechanism → OpenSSL digest name.
+// PKCS#11 v3.2 §6.26 (SP800-108 KDF): prfType is a CK_SP800_108_PRF_TYPE and MUST
+// be a mechanism supporting keyed MAC (e.g. CKM_SHA256_HMAC, CKM_AES_CMAC).
+// Bare hash mechanisms (CKM_SHA256 et al.) are NOT valid PRFs and map to nullptr,
+// causing the caller to return CKR_MECHANISM_PARAM_INVALID.
+// (CKM_AES_CMAC is handled separately at the call sites.)
+static const char* ckmHmacPrfToDigestName(CK_MECHANISM_TYPE mech)
+{
+	switch (mech)
+	{
+		case CKM_SHA224_HMAC:   return "SHA2-224";
+		case CKM_SHA256_HMAC:   return "SHA2-256";
+		case CKM_SHA384_HMAC:   return "SHA2-384";
+		case CKM_SHA512_HMAC:   return "SHA2-512";
+		case CKM_SHA3_224_HMAC: return "SHA3-224";
+		case CKM_SHA3_256_HMAC: return "SHA3-256";
+		case CKM_SHA3_384_HMAC: return "SHA3-384";
+		case CKM_SHA3_512_HMAC: return "SHA3-512";
+		default:                return nullptr;
+	}
+}
+
 // Encode a public EVP_PKEY as SubjectPublicKeyInfo DER (for CKA_PUBLIC_KEY_INFO per PKCS#11 v3.2 §4.14)
 static ByteString spkiFromPkey(EVP_PKEY* pkey)
 {
@@ -2729,10 +2751,10 @@ CK_RV SoftHSM::C_DeriveKey
 		const char* kbkDigestName = nullptr;
 		if (!kbkUseCmac)
 		{
-			kbkDigestName = ckmToDigestName(kp->prfType);
+			kbkDigestName = ckmHmacPrfToDigestName(kp->prfType);
 			if (kbkDigestName == nullptr)
 			{
-				ERROR_MSG("CKM_SP800_108_COUNTER_KDF: unsupported PRF 0x%08lx", (unsigned long)kp->prfType);
+				ERROR_MSG("CKM_SP800_108_COUNTER_KDF: PRF 0x%08lx is not a keyed-MAC mechanism", (unsigned long)kp->prfType);
 				return CKR_MECHANISM_PARAM_INVALID;
 			}
 		}
@@ -2970,10 +2992,10 @@ CK_RV SoftHSM::C_DeriveKey
 		const char* fbkDigestName = nullptr;
 		if (!fbkUseCmac)
 		{
-			fbkDigestName = ckmToDigestName(fp->prfType);
+			fbkDigestName = ckmHmacPrfToDigestName(fp->prfType);
 			if (fbkDigestName == nullptr)
 			{
-				ERROR_MSG("CKM_SP800_108_FEEDBACK_KDF: unsupported PRF 0x%08lx", (unsigned long)fp->prfType);
+				ERROR_MSG("CKM_SP800_108_FEEDBACK_KDF: PRF 0x%08lx is not a keyed-MAC mechanism", (unsigned long)fp->prfType);
 				return CKR_MECHANISM_PARAM_INVALID;
 			}
 		}

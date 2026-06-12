@@ -1,8 +1,8 @@
 # PKCS#11 v3.2 Compliance Report
 
 **Engine:** `./build-f1/src/lib/libsofthsmv3.dylib`
-**Engine commit:** `ac480db`
-**Date:** 2026-06-12 18:03:12 CDT
+**Engine commit:** `1a60782+sp800-108-keyed-mac-prf-fix (this commit)`
+**Date:** 2026-06-12 18:12:41 CDT
 
 > Reproduce with: `cd build-f1 && ctest -R p11_v32_compliance` (or run
 > `p11_v32_compliance_test --engine <libsofthsmv3> --workdir <scratch> --report <base>`).
@@ -10,10 +10,10 @@
 > partial run against an old engine build; deleted in the F4 test-integrity slice).
 
 ## Summary
-- **Total PASS:** 191
+- **Total PASS:** 193
 - **Total FAIL:** 0
 - **Total SKIP:** 1
-- **Total XFAIL (known engine bugs, documented in-line):** 2
+- **Total XFAIL (known engine bugs, documented in-line):** 0
 
 Status legend: PASS = spec-conformant behavior for an advertised feature; FAIL = unexpected non-conformance; SKIP = feature not advertised by the token (v3.2 mandates no particular mechanism set); XFAIL = known, pre-existing engine non-conformance reported here but outside this suite's scope to fix.
 
@@ -198,10 +198,10 @@ Status legend: PASS = spec-conformant behavior for an advertised feature; FAIL =
 
 | Test | Status | Details |
 |---|---|---|
-| AES_Generate_KCV_Present | ✅ PASS | 3 bytes: 9005E5 |
-| AES_Generate_KCV_Equals_OracleEcbZeroBlock | ✅ PASS | HSM=9005E5 == oracle=9005E5 |
-| AES_Unwrap_KCV_Present | ✅ PASS | 3 bytes: EB0E41 |
-| AES_Unwrap_KCV_Equals_Original | ✅ PASS | original=EB0E41 unwrapped=EB0E41 |
+| AES_Generate_KCV_Present | ✅ PASS | 3 bytes: 1B79A8 |
+| AES_Generate_KCV_Equals_OracleEcbZeroBlock | ✅ PASS | HSM=1B79A8 == oracle=1B79A8 |
+| AES_Unwrap_KCV_Present | ✅ PASS | 3 bytes: 4446AD |
+| AES_Unwrap_KCV_Equals_Original | ✅ PASS | original=4446AD unwrapped=4446AD |
 | AES_Unwrap_KCV_Equals_OracleEcbZeroBlock | ✅ PASS | matches AES-ECB(zero block)[0:3] oracle |
 | HKDF_Derive_KCV_Present | ✅ PASS | 3 bytes: BEEF61 |
 | HKDF_Derive_KCV_Equals_OracleSha1 | ✅ PASS | HSM=BEEF61 == oracle=BEEF61 |
@@ -217,8 +217,8 @@ Status legend: PASS = spec-conformant behavior for an advertised feature; FAIL =
 | Test | Status | Details |
 |---|---|---|
 | CKM_PKCS5_PBKD2 | ✅ PASS | RV=0 |
-| CKM_SP800_108_COUNTER_KDF | ❌(known) XFAIL | ENGINE BUG: spec PRF CKM_SHA256_HMAC rejected, RV=113 (engine only accepts bare-hash PRF identifiers) |
-| SP800_108_BareHash_PRF_Rejected | ❌(known) XFAIL | ENGINE BUG: bare CKM_SHA256 accepted as PRF (RV=0); spec requires a keyed MAC mechanism |
+| CKM_SP800_108_COUNTER_KDF | ✅ PASS | HMAC-SHA256 PRF, RV=0 |
+| SP800_108_BareHash_PRF_Rejected | ✅ PASS | bare CKM_SHA256 PRF correctly rejected, RV=113 |
 | CKM_SP800_108_COUNTER_KDF_CMAC | ✅ PASS | AES-CMAC PRF, RV=0 |
 | CKM_SP800_108_FEEDBACK_KDF | ✅ PASS | AES-CMAC PRF, RV=0 |
 | CKM_HKDF_DERIVE | ✅ PASS | RV=0 |

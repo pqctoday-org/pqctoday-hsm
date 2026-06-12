@@ -1201,12 +1201,9 @@ void test_v32_kdfs() {
     } else if (rv == CKR_OK) {
         record_result("KDF", "CKM_SP800_108_COUNTER_KDF", "PASS", "HMAC-SHA256 PRF, RV=0");
     } else {
-        // KNOWN ENGINE BUG: SoftHSM_keygen.cpp ckmToDigestName() maps only bare
-        // hash mechanisms (CKM_SHA256 et al.) + CKM_AES_CMAC; the spec-correct
-        // CKM_SHA256_HMAC PRF identifier is rejected with MECHANISM_PARAM_INVALID.
-        record_result("KDF", "CKM_SP800_108_COUNTER_KDF", "XFAIL",
-                      "ENGINE BUG: spec PRF CKM_SHA256_HMAC rejected, RV=" + std::to_string(rv) +
-                      " (engine only accepts bare-hash PRF identifiers)");
+        record_result("KDF", "CKM_SP800_108_COUNTER_KDF", "FAIL",
+                      "spec PRF CKM_SHA256_HMAC rejected, RV=" + std::to_string(rv) +
+                      " (v3.2 SP800-108: keyed-MAC PRF mechanisms must be accepted)");
     }
 
     // 2. Negative: bare CKM_SHA256 as PRF MUST be rejected (not a keyed MAC).
@@ -1222,11 +1219,8 @@ void test_v32_kdfs() {
         record_result("KDF", "SP800_108_BareHash_PRF_Rejected", "PASS",
                       "bare CKM_SHA256 PRF correctly rejected, RV=" + std::to_string(rv));
     } else {
-        // KNOWN ENGINE BUG (laxity): the engine accepts a bare hash mechanism as
-        // the SP800-108 PRF. The spec requires a keyed MAC mechanism. Genuine
-        // engine non-conformance — reported, NOT fixed in this test-only slice.
-        record_result("KDF", "SP800_108_BareHash_PRF_Rejected", "XFAIL",
-                      "ENGINE BUG: bare CKM_SHA256 accepted as PRF (RV=" + std::to_string(rv) +
+        record_result("KDF", "SP800_108_BareHash_PRF_Rejected", "FAIL",
+                      "bare CKM_SHA256 accepted as PRF (RV=" + std::to_string(rv) +
                       "); spec requires a keyed MAC mechanism");
     }
 
@@ -3000,9 +2994,9 @@ void test_kcv_compliance() {
                 { CK_SP800_108_BYTE_ARRAY,         label,    sizeof(label)   - 1 },
                 { CK_SP800_108_BYTE_ARRAY,         context,  sizeof(context) - 1 },
             };
-            // PRF must be a keyed MAC mech (spec); CKM_AES_CMAC is the keyed MAC
-            // PRF this engine supports (it wrongly rejects CKM_SHA256_HMAC —
-            // covered by the dedicated KDF tests).
+            // PRF must be a keyed MAC mech (spec); CKM_AES_CMAC exercises the
+            // CMAC PRF path here (the HMAC PRF path is covered by the dedicated
+            // KDF tests).
             CK_SP800_108_KDF_PARAMS ctrParams = {
                 CKM_AES_CMAC, 3, prfParams, 0, NULL_PTR
             };
