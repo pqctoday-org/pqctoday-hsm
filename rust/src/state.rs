@@ -192,14 +192,35 @@ pub struct EncryptCtx {
     pub multipart: Option<crate::crypto::multipart::MultipartCipher>,
 }
 
-#[derive(Clone)]
+/// PKCS#11 v3.2 §5.15 message-based AEAD state (C_MessageEncryptInit …
+/// C_MessageEncryptFinal, and the decrypt mirror). One ctx per session per
+/// direction; `stream`/`plaintext_acc` are live only between
+/// C_*MessageBegin and the CKF_END_OF_MESSAGE C_*MessageNext.
 pub struct MsgAeadCtx {
     pub key: Vec<u8>,
     pub in_message: bool,
-    pub iv: Vec<u8>,
-    pub aad: Vec<u8>,
+    /// CK_GCM_MESSAGE_PARAMS.ulTagBits from Begin — the tag is computed in
+    /// full and truncated to this width at the final Next.
     pub tag_bits: u32,
-    pub payload_acc: Vec<u8>,
+    /// T5 — incremental GCM state (CTR keystream carry + running GHASH);
+    /// AAD is folded in at Begin. Each C_*MessageNext is O(chunk).
+    pub stream: Option<crate::crypto::multipart::GcmState>,
+    /// Decrypt only: verify-then-release buffer. Plaintext produced by the
+    /// parts is withheld here until the final part's tag verifies, then
+    /// emitted in one piece (zeroized on mismatch) — an HSM must not hand
+    /// out unauthenticated plaintext. Memory bound: one full message.
+    pub plaintext_acc: Vec<u8>,
+}
+
+impl MsgAeadCtx {
+    /// Zeroize everything sensitive before drop (key bytes, withheld
+    /// plaintext; `GcmState`'s own `Drop` wipes its keystream/buffers).
+    pub fn wipe(&mut self) {
+        use zeroize::Zeroize;
+        self.key.zeroize();
+        self.plaintext_acc.zeroize();
+        self.stream = None;
+    }
 }
 
 #[derive(Clone)]
