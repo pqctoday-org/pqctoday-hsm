@@ -1000,8 +1000,11 @@ ULONGDEF(CK_XMSS_PARAMETER_SET_TYPE);
 #define CKM_XMSSMT 0x00004037UL
 #define CKM_ECDH_X_AES_KEY_WRAP 0x00004038UL
 #define CKM_ECDH_COF_AES_KEY_WRAP 0x00004039UL
-#define CKM_X25519 0x00004033UL
-#define CKM_X448 0x00004034UL
+/* PQCToday vendor extension values — must match src/lib/pkcs11/pkcs11t.h.
+ * Formerly 0x4033/0x4034, which collide with the canonical OASIS
+ * CKM_HSS / CKM_XMSS_KEY_PAIR_GEN above (F1 re-sync). */
+#define CKM_X25519 0x80001058UL
+#define CKM_X448 0x80001059UL
 #define CKM_PUB_KEY_FROM_PRIV_KEY 0x0000403AUL
 #define CKM_VENDOR_DEFINED 0x80000000UL
 /* Deprecated */
