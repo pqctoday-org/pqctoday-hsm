@@ -136,6 +136,37 @@ jobs:
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
+  constants-gate:
+    name: PKCS#11 Constants Gate
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check PKCS#11 constants (rust + js + kmip manifest vs pkcs11t.h)
+        run: python3 scripts/check_pkcs11_constants.py
+
+  rust-test:
+    name: Rust Tests (engine + KMIP)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust/target
+            kmip/target
+          key: ${{ runner.os }}-cargo-test-${{ hashFiles('rust/Cargo.lock', 'kmip/Cargo.lock') }}
+      - name: Run engine tests
+        run: cd rust && cargo test
+      - name: Run KMIP tests
+        run: cd kmip && cargo test --quiet
+
   rust-audit:
     name: Rust Dependency Audit
     runs-on: ubuntu-24.04

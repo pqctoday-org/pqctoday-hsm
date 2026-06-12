@@ -1,114 +1,461 @@
 #!/usr/bin/env python3
-"""CI guard: diff rust/src/constants.rs CK* values against the normative
-src/lib/pkcs11/pkcs11t.h. Prevents the C-3 class of bug (wrong mechanism IDs
-sourced from non-normative manifests) permanently.
+"""CI guard for PKCS#11 constant integrity across every surface of this repo.
 
-Exit 0 = clean; exit 1 = any spec-name value mismatch.
-Vendor/internal constants are allowed via WHITELIST below.
+Validated sources (all diffed against the normative src/lib/pkcs11/pkcs11t.h):
+  1. rust/src/constants.rs           — engine constants (u32)
+  2. constants.js                    — published npm surface (@pqctoday/softhsm-wasm)
+  3. kmip/pkcs11-mech-manifest.json  — `standard_pkcs11_v3_2` block
+  4. src/lib/pkcs11/pkcs11t.h itself — diffed against the pinned canonical
+     OASIS v3.2 include (docs/refs/pkcs11t-canonical-v3.2.h, sha256-pinned)
+
+Rules:
+  * Every CK* name in a source must either match the header value exactly or
+    appear in PINNED below with the exact pinned value (no blanket regex
+    whitelist — drift in formerly-whitelisted IANA/vendor constants FAILS).
+  * PINNED entries of kind "vendor" must live in vendor space (>= 0x80000000).
+  * Duplicate codepoints within a registry-style CK class (header AND each
+    source) fail unless the colliding names form a known spec alias group.
+  * The local header may only differ from the canonical OASIS header by
+    vendor-space (>= 0x80000000) additions.
+
+Exit 0 = clean; exit 1 = any failure. Per-source summary printed.
 """
+import hashlib
+import json
 import re
 import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 RUST = REPO / "rust" / "src" / "constants.rs"
+JS = REPO / "constants.js"
 HEADER = REPO / "src" / "lib" / "pkcs11" / "pkcs11t.h"
+CANONICAL = REPO / "docs" / "refs" / "pkcs11t-canonical-v3.2.h"
+MANIFEST = REPO / "kmip" / "pkcs11-mech-manifest.json"
 
-# Intentional vendor / internal / IANA-sourced names that do NOT exist in
-# pkcs11t.h (or intentionally differ). Each entry is a regex on the full name.
-WHITELIST = [
-    r"^CKA_PRIV_",                # engine-internal attrs (0xFFFF....)
-    r"^CKA_STATEFUL_KEY_STATE$",  # vendor stateful-key attrs (0x800001xx)
-    r"^CKA_LMS_PARAM_SET$", r"^CKA_LMOTS_PARAM_SET$",
-    r"^CKA_XMSS_PARAM_SET$", r"^CKA_XMSSMT_PARAM_SET$",
-    r"^CKA_LEAF_INDEX$", r"^CKA_XMSS_KEYS_REMAINING$",
-    r"^CKM_KECCAK_256$",          # vendor digest (0x80000010)
-    r"^CKM_EC_MONTGOMERY_KEY_DERIVE$",  # vendor alias (0x80000011)
-    r"^CKM_AES_KEY_WRAP_PAD_LEGACY$",   # removed; keep tolerant if re-added
-    r"^CKM_BIP32_",               # BIP32 vendor mechanisms
-    r"^CKA_BIP32_",
-    r"^CKF_BIP32_HARDENED$",
-    r"^CKP_LMS_", r"^CKP_LMOTS_",  # IANA LMS registry values (RFC 8554)
-    r"^CKP_XMSS_", r"^CKP_XMSSMT_",  # RFC 8391 OID values
-    r"^CKP_PBKDF2_HMAC_",         # naming drift, values correct (spec: CKP_PKCS5_PBKD2_HMAC_*)
-    r"^CKM_UNAVAILABLE_INFORMATION$",  # naming drift (spec: CK_UNAVAILABLE_INFORMATION)
-    # spec defines it as (~0UL) — not a parseable literal; rust pins
-    # 0xFFFFFFFF, which IS (~0UL) on the engine's 32-bit CK_ULONG ABI.
-    r"^CK_UNAVAILABLE_INFORMATION$",
-    r"^CK_SP800_108_BYTE_ARRAY$",  # spec name without CKx_ prefix pattern
-    r"^CKF_HKDF_SALT_DATA$",
-    r"^CKD_SHA3_",                # present in spec; parser may miss CKD block
+# sha256 of the canonical OASIS PKCS#11 v3.2 pkcs11t.h pinned in F1.
+# https://docs.oasis-open.org/pkcs11/pkcs11-spec/v3.2/include/pkcs11-v3.2/pkcs11t.h
+CANONICAL_SHA256 = "95738fdcd9b5c9c73f55f9132aefa87354556cec1c46f681b8a2000b8b5dbccb"
+
+VENDOR_BASE = 0x80000000
+
+# ── Pinned constants ─────────────────────────────────────────────────────────
+# Names that intentionally do NOT exist in pkcs11t.h. Each is pinned to an
+# exact value so any future drift fails. kind:
+#   iana   — IANA-registered numeric IDs (RFC 8554 / RFC 8391 / SP 800-208);
+#            values feed CKA_HSS_LMS_TYPE / vendor *_PARAM_SET attributes.
+#   vendor — pqctoday vendor space; MUST be >= 0x80000000 (structural rule).
+#   legacy — pre-vendor-migration compat codepoints kept for old tokens.
+#   drift  — naming drift from a spec constant; value equals the spec one.
+#   abi    — wasm32 ABI struct sizes exported on the JS surface only.
+PINNED = {
+    # LMS tree parameter sets (IANA "LMS" registry, RFC 8554 §5 + SP 800-208 §4)
+    "CKP_LMS_SHA256_M32_H5": (0x05, "iana"),
+    "CKP_LMS_SHA256_M32_H10": (0x06, "iana"),
+    "CKP_LMS_SHA256_M32_H15": (0x07, "iana"),
+    "CKP_LMS_SHA256_M32_H20": (0x08, "iana"),
+    "CKP_LMS_SHA256_M32_H25": (0x09, "iana"),
+    "CKP_LMS_SHA256_M24_H5": (0x0A, "iana"),
+    "CKP_LMS_SHA256_M24_H10": (0x0B, "iana"),
+    "CKP_LMS_SHA256_M24_H15": (0x0C, "iana"),
+    "CKP_LMS_SHA256_M24_H20": (0x0D, "iana"),
+    "CKP_LMS_SHA256_M24_H25": (0x0E, "iana"),
+    "CKP_LMS_SHAKE_M32_H5": (0x0F, "iana"),
+    "CKP_LMS_SHAKE_M32_H10": (0x10, "iana"),
+    "CKP_LMS_SHAKE_M32_H15": (0x11, "iana"),
+    "CKP_LMS_SHAKE_M32_H20": (0x12, "iana"),
+    "CKP_LMS_SHAKE_M32_H25": (0x13, "iana"),
+    "CKP_LMS_SHAKE_M24_H5": (0x14, "iana"),
+    "CKP_LMS_SHAKE_M24_H10": (0x15, "iana"),
+    "CKP_LMS_SHAKE_M24_H15": (0x16, "iana"),
+    "CKP_LMS_SHAKE_M24_H20": (0x17, "iana"),
+    "CKP_LMS_SHAKE_M24_H25": (0x18, "iana"),
+    # LM-OTS parameter sets (IANA "LM-OTS" registry, RFC 8554 §4 + SP 800-208 §4)
+    "CKP_LMOTS_SHA256_N32_W1": (0x01, "iana"),
+    "CKP_LMOTS_SHA256_N32_W2": (0x02, "iana"),
+    "CKP_LMOTS_SHA256_N32_W4": (0x03, "iana"),
+    "CKP_LMOTS_SHA256_N32_W8": (0x04, "iana"),
+    "CKP_LMOTS_SHA256_N24_W1": (0x05, "iana"),
+    "CKP_LMOTS_SHA256_N24_W2": (0x06, "iana"),
+    "CKP_LMOTS_SHA256_N24_W4": (0x07, "iana"),
+    "CKP_LMOTS_SHA256_N24_W8": (0x08, "iana"),
+    "CKP_LMOTS_SHAKE_N32_W1": (0x09, "iana"),
+    "CKP_LMOTS_SHAKE_N32_W2": (0x0A, "iana"),
+    "CKP_LMOTS_SHAKE_N32_W4": (0x0B, "iana"),
+    "CKP_LMOTS_SHAKE_N32_W8": (0x0C, "iana"),
+    "CKP_LMOTS_SHAKE_N24_W1": (0x0D, "iana"),
+    "CKP_LMOTS_SHAKE_N24_W2": (0x0E, "iana"),
+    "CKP_LMOTS_SHAKE_N24_W4": (0x0F, "iana"),
+    "CKP_LMOTS_SHAKE_N24_W8": (0x10, "iana"),
+    # XMSS parameter sets (engine values; SHA2 block matches RFC 8391 §8,
+    # SHAKE block is the engine's historical numbering — pinned as-is so
+    # any silent change still fails; see rust/src/constants.rs).
+    "CKP_XMSS_SHA2_10_256": (0x01, "iana"),
+    "CKP_XMSS_SHA2_16_256": (0x02, "iana"),
+    "CKP_XMSS_SHA2_20_256": (0x03, "iana"),
+    "CKP_XMSS_SHAKE_10_256": (0x11, "iana"),
+    "CKP_XMSS_SHAKE_16_256": (0x12, "iana"),
+    "CKP_XMSS_SHAKE_20_256": (0x13, "iana"),
+    # XMSS-MT parameter sets (RFC 8391 §8 numeric IDs, matching C++
+    # xmssmt_parse_oid)
+    "CKP_XMSSMT_SHA2_20_2_256": (0x01, "iana"),
+    "CKP_XMSSMT_SHA2_20_4_256": (0x02, "iana"),
+    "CKP_XMSSMT_SHA2_40_2_256": (0x03, "iana"),
+    "CKP_XMSSMT_SHA2_40_4_256": (0x04, "iana"),
+    "CKP_XMSSMT_SHA2_40_8_256": (0x05, "iana"),
+    "CKP_XMSSMT_SHA2_60_3_256": (0x06, "iana"),
+    "CKP_XMSSMT_SHA2_60_6_256": (0x07, "iana"),
+    "CKP_XMSSMT_SHA2_60_12_256": (0x08, "iana"),
+    "CKP_XMSSMT_SHA2_20_2_512": (0x09, "iana"),
+    "CKP_XMSSMT_SHA2_20_4_512": (0x0A, "iana"),
+    "CKP_XMSSMT_SHA2_40_2_512": (0x0B, "iana"),
+    "CKP_XMSSMT_SHA2_40_4_512": (0x0C, "iana"),
+    "CKP_XMSSMT_SHA2_40_8_512": (0x0D, "iana"),
+    "CKP_XMSSMT_SHA2_60_3_512": (0x0E, "iana"),
+    "CKP_XMSSMT_SHA2_60_6_512": (0x0F, "iana"),
+    "CKP_XMSSMT_SHA2_60_12_512": (0x10, "iana"),
+    "CKP_XMSSMT_SHAKE_20_2_256": (0x11, "iana"),
+    "CKP_XMSSMT_SHAKE_20_4_256": (0x12, "iana"),
+    "CKP_XMSSMT_SHAKE_40_2_256": (0x13, "iana"),
+    "CKP_XMSSMT_SHAKE_40_4_256": (0x14, "iana"),
+    "CKP_XMSSMT_SHAKE_40_8_256": (0x15, "iana"),
+    "CKP_XMSSMT_SHAKE_60_3_256": (0x16, "iana"),
+    "CKP_XMSSMT_SHAKE_60_6_256": (0x17, "iana"),
+    "CKP_XMSSMT_SHAKE_60_12_256": (0x18, "iana"),
+    "CKP_XMSSMT_SHAKE_20_2_512": (0x19, "iana"),
+    "CKP_XMSSMT_SHAKE_20_4_512": (0x1A, "iana"),
+    "CKP_XMSSMT_SHAKE_40_2_512": (0x1B, "iana"),
+    "CKP_XMSSMT_SHAKE_40_4_512": (0x1C, "iana"),
+    "CKP_XMSSMT_SHAKE_40_8_512": (0x1D, "iana"),
+    "CKP_XMSSMT_SHAKE_60_3_512": (0x1E, "iana"),
+    "CKP_XMSSMT_SHAKE_60_6_512": (0x1F, "iana"),
+    "CKP_XMSSMT_SHAKE_60_12_512": (0x20, "iana"),
+    # pqctoday vendor attributes / mechanisms (must sit in vendor space)
+    "CKA_PRIV_PARAM_SET": (0xFFFF0001, "vendor"),
+    "CKA_PRIV_ALGO_FAMILY": (0xFFFF0002, "vendor"),
+    "CKA_PRIV_OWNER_SESSION": (0xFFFF0003, "vendor"),
+    "CKA_PRIV_SLOT_ID": (0xFFFF0004, "vendor"),
+    "CKA_STATEFUL_KEY_STATE": (0x80000101, "vendor"),
+    "CKA_LMS_PARAM_SET": (0x80000102, "vendor"),
+    "CKA_LMOTS_PARAM_SET": (0x80000103, "vendor"),
+    "CKA_XMSS_PARAM_SET": (0x80000104, "vendor"),
+    "CKA_LEAF_INDEX": (0x80000105, "vendor"),
+    "CKA_XMSS_KEYS_REMAINING": (0x80000106, "vendor"),
+    "CKA_XMSSMT_PARAM_SET": (0x80000107, "vendor"),
+    "CKM_KECCAK_256": (0x80000010, "vendor"),
+    "CKM_EC_MONTGOMERY_KEY_DERIVE": (0x80000011, "vendor"),
+    # legacy bare BIP32 codepoints (pre vendor-space migration, still accepted)
+    "CKA_BIP32_CHAIN_CODE_LEGACY": (0x1021, "legacy"),
+    "CKA_BIP32_CHILD_INDEX_LEGACY": (0x1022, "legacy"),
+    "CKM_BIP32_MASTER_DERIVE_LEGACY": (0x105B, "legacy"),
+    "CKM_BIP32_CHILD_DERIVE_LEGACY": (0x105C, "legacy"),
+    # naming drift from spec constants (values equal the spec ones)
+    "CKP_PBKDF2_HMAC_SHA256": (0x04, "drift"),  # = CKP_PKCS5_PBKD2_HMAC_SHA256
+    "CKP_PBKDF2_HMAC_SHA384": (0x05, "drift"),  # = CKP_PKCS5_PBKD2_HMAC_SHA384
+    "CKP_PBKDF2_HMAC_SHA512": (0x06, "drift"),  # = CKP_PKCS5_PBKD2_HMAC_SHA512
+    "CKM_UNAVAILABLE_INFORMATION": (0xFFFFFFFF, "drift"),  # = CK_UNAVAILABLE_INFORMATION
+    # spec defines CK_UNAVAILABLE_INFORMATION as (~0UL) — not a parseable
+    # literal; 0xFFFFFFFF IS (~0UL) on the engine's 32-bit CK_ULONG ABI.
+    "CK_UNAVAILABLE_INFORMATION": (0xFFFFFFFF, "drift"),
+    # wasm32 ABI struct sizes published on the JS surface
+    "CK_ATTRIBUTE_SIZE": (12, "abi"),
+    "CK_MECHANISM_SIZE": (12, "abi"),
+    "CK_SIGN_ADDITIONAL_CONTEXT_SIZE": (12, "abi"),
+}
+
+# Cross-check: drift pins must equal their spec counterpart in the header.
+DRIFT_SPEC_TWIN = {
+    "CKP_PBKDF2_HMAC_SHA256": "CKP_PKCS5_PBKD2_HMAC_SHA256",
+    "CKP_PBKDF2_HMAC_SHA384": "CKP_PKCS5_PBKD2_HMAC_SHA384",
+    "CKP_PBKDF2_HMAC_SHA512": "CKP_PKCS5_PBKD2_HMAC_SHA512",
+}
+
+# ── Duplicate-codepoint policy ───────────────────────────────────────────────
+# Registry-style classes: one codepoint = one meaning, duplicates are bugs
+# unless the names form a spec alias group below.
+DUP_CHECK_CLASSES = ("CKM_", "CKA_", "CKR_", "CKK_", "CKO_", "CKU_",
+                     "CKC_", "CKD_", "CKN_")
+# CKF_/CKP_/CKH_/CKG_/CKS_/CKZ_ are context-scoped families where the spec
+# itself reuses codepoints across unrelated domains (e.g. session flags vs
+# token flags, profiles vs parameter sets, MGFs vs generators) — a global
+# duplicate scan over those prefixes is meaningless and is skipped.
+
+# Spec-legitimate aliases (same codepoint, both names normative).
+ALIAS_GROUPS = [
+    {"CKK_EC", "CKK_ECDSA"},
+    {"CKK_CAST128", "CKK_CAST5"},
+    {"CKA_EC_PARAMS", "CKA_ECDSA_PARAMS"},
+    {"CKA_SUBPRIME_BITS", "CKA_SUB_PRIME_BITS"},
+    {"CKM_EC_KEY_PAIR_GEN", "CKM_ECDSA_KEY_PAIR_GEN"},
+    # original spec misspelling kept as a compat alias since v2.40
+    {"CKM_DSA_PROBABILISTIC_PARAMETER_GEN", "CKM_DSA_PROBABLISTIC_PARAMETER_GEN"},
+    {"CKM_CAST128_KEY_GEN", "CKM_CAST5_KEY_GEN"},
+    {"CKM_CAST128_ECB", "CKM_CAST5_ECB"},
+    {"CKM_CAST128_CBC", "CKM_CAST5_CBC"},
+    {"CKM_CAST128_MAC", "CKM_CAST5_MAC"},
+    {"CKM_CAST128_MAC_GENERAL", "CKM_CAST5_MAC_GENERAL"},
+    {"CKM_CAST128_CBC_PAD", "CKM_CAST5_CBC_PAD"},
+    {"CKM_PBE_MD5_CAST128_CBC", "CKM_PBE_MD5_CAST5_CBC"},
+    {"CKM_PBE_SHA1_CAST128_CBC", "CKM_PBE_SHA1_CAST5_CBC"},
+    {"CKM_SHA3_224_KEY_DERIVATION", "CKM_SHA3_224_KEY_DERIVE"},
+    {"CKM_SHA3_256_KEY_DERIVATION", "CKM_SHA3_256_KEY_DERIVE"},
+    {"CKM_SHA3_384_KEY_DERIVATION", "CKM_SHA3_384_KEY_DERIVE"},
+    {"CKM_SHA3_512_KEY_DERIVATION", "CKM_SHA3_512_KEY_DERIVE"},
+    {"CKM_SHAKE_128_KEY_DERIVATION", "CKM_SHAKE_128_KEY_DERIVE"},
+    {"CKM_SHAKE_256_KEY_DERIVATION", "CKM_SHAKE_256_KEY_DERIVE"},
 ]
-WHITELIST_RE = [re.compile(p) for p in WHITELIST]
 
 
-def parse_rust(path: Path) -> dict[str, int]:
-    out = {}
-    pat = re.compile(
-        r"pub const (CK[A-Z0-9_]*)\s*:\s*u32\s*=\s*(0x[0-9a-fA-F_]+|\d+)\s*;"
-    )
-    for m in pat.finditer(path.read_text()):
-        name, raw = m.group(1), m.group(2).replace("_", "")
-        out[name] = int(raw, 16) if raw.lower().startswith("0x") else int(raw)
-    return out
-
-
-def parse_header(path: Path) -> dict[str, int]:
+# ── Parsers ──────────────────────────────────────────────────────────────────
+def parse_header(path: Path) -> dict:
+    """Parse all numeric #define CK* entries, resolving (SYM | lit) and pure
+    symbol aliases (#define A B) in extra passes."""
     out = {}
     text = path.read_text(errors="replace")
     pat = re.compile(
-        r"#define\s+(CK[A-Za-z0-9_]+)\s+\(?((?:0x[0-9a-fA-F]+|\d+)(?:UL|U|L)?"
-        r"(?:\s*\|\s*0x[0-9a-fA-F]+(?:UL|U|L)?)?)\)?"
+        r"^\s*#define\s+(CK[A-Za-z0-9_]+)\s+\(?\s*"
+        r"((?:0x[0-9a-fA-F]+|\d+))(?:UL|U|L)?\s*\)?\s*(?:/\*.*)?$",
+        re.M,
     )
     for m in pat.finditer(text):
-        name, expr = m.group(1), m.group(2)
-        expr = expr.replace("UL", "").replace("L", "")
-        try:
-            val = 0
-            for part in expr.split("|"):
-                part = part.strip()
-                # resolve CKM_VENDOR_DEFINED-style symbol refs if present
-                val |= int(part, 16) if part.lower().startswith("0x") else int(part)
-            out[name] = val
-        except ValueError:
-            continue  # non-numeric defines (CK_PTR etc.)
-    # second pass: resolve `#define X (CKM_VENDOR_DEFINED | 0x...)` forms
+        out[m.group(1)] = int(m.group(2), 0)
+    # `#define X (CKM_VENDOR_DEFINED | 0x...)` forms
     pat2 = re.compile(
-        r"#define\s+(CK[A-Za-z0-9_]+)\s+\(\s*(CK[A-Za-z0-9_]+)\s*\|\s*"
-        r"(0x[0-9a-fA-F]+)UL?\s*\)"
+        r"^\s*#define\s+(CK[A-Za-z0-9_]+)\s+\(\s*(CK[A-Za-z0-9_]+)\s*\|\s*"
+        r"(0x[0-9a-fA-F]+)(?:UL|U|L)?\s*\)",
+        re.M,
     )
-    for m in pat2.finditer(text):
-        name, sym, lit = m.groups()
-        if sym in out:
-            out[name] = out[sym] | int(lit, 16)
+    # pure aliases: `#define CKA_SUB_PRIME_BITS CKA_SUBPRIME_BITS`
+    pat3 = re.compile(
+        r"^\s*#define\s+(CK[A-Za-z0-9_]+)\s+(CK[A-Za-z0-9_]+)\s*(?:/\*.*)?$",
+        re.M,
+    )
+    for _ in range(3):  # fixed-point over chained aliases
+        for m in pat2.finditer(text):
+            name, sym, lit = m.groups()
+            if sym in out:
+                out[name] = out[sym] | int(lit, 16)
+        for m in pat3.finditer(text):
+            name, sym = m.groups()
+            if sym in out:
+                out[name] = out[sym]
     return out
 
 
-def whitelisted(name: str) -> bool:
-    return any(r.match(name) for r in WHITELIST_RE)
+def parse_rust(path: Path) -> dict:
+    out = {}
+    text = path.read_text()
+    pat = re.compile(
+        r"^pub const (CK[A-Z0-9_]*)\s*:\s*u32\s*=\s*(0x[0-9a-fA-F_]+|\d+)\s*;",
+        re.M,
+    )
+    for m in pat.finditer(text):
+        name, raw = m.group(1), m.group(2).replace("_", "")
+        out[name] = int(raw, 16) if raw.lower().startswith("0x") else int(raw)
+    # parser hardening: every `pub const CK...` line must have been parsed
+    declared = len(re.findall(r"^pub const CK", text, re.M))
+    if declared != len(out):
+        raise SystemExit(
+            f"PARSER ERROR: {path.name} declares {declared} `pub const CK*` "
+            f"lines but only {len(out)} were parsed as u32 constants — "
+            f"update parse_rust() to cover the new form."
+        )
+    return out
+
+
+def parse_js(path: Path):
+    """Returns (constants, errors). Duplicate object keys are errors — JS
+    silently lets the last one win."""
+    out, errors = {}, []
+    text = path.read_text()
+    pat = re.compile(r"^\s*(CK[A-Za-z0-9_]+)\s*:\s*(0x[0-9a-fA-F]+|\d+)\s*,", re.M)
+    occurrences = 0
+    for m in pat.finditer(text):
+        name, raw = m.group(1), m.group(2)
+        occurrences += 1
+        val = int(raw, 0)
+        if name in out:
+            errors.append(
+                f"DUPLICATE-KEY  {name}: defined twice "
+                f"(0x{out[name]:x} then 0x{val:x}) — later key silently wins in JS"
+            )
+        out[name] = val
+    # parser hardening: every `CKNAME:` line must have been parsed
+    declared = len(re.findall(r"^\s*CK[A-Za-z0-9_]+\s*:", text, re.M))
+    if declared != occurrences:
+        raise SystemExit(
+            f"PARSER ERROR: {path.name} has {declared} `CK*:` entries but "
+            f"only {occurrences} were parsed as numeric constants — "
+            f"update parse_js() to cover the new form."
+        )
+    return out, errors
+
+
+# ── Checks ───────────────────────────────────────────────────────────────────
+def check_source(label: str, consts: dict, spec: dict) -> list:
+    errors = []
+    for name, val in sorted(consts.items()):
+        if name in spec:
+            if spec[name] != val:
+                errors.append(
+                    f"MISMATCH  {name}: {label}=0x{val:08x} spec=0x{spec[name]:08x}"
+                )
+        elif name in PINNED:
+            pinned_val, kind = PINNED[name]
+            if val != pinned_val:
+                errors.append(
+                    f"PIN-DRIFT  {name}: {label}=0x{val:08x} "
+                    f"pinned({kind})=0x{pinned_val:08x}"
+                )
+            if kind == "vendor" and val < VENDOR_BASE:
+                errors.append(
+                    f"VENDOR-SPACE  {name}=0x{val:08x} is kind=vendor but "
+                    f"below CKx_VENDOR_DEFINED (0x{VENDOR_BASE:08x})"
+                )
+        else:
+            errors.append(
+                f"NOT-IN-SPEC (not pinned)  {name} = 0x{val:08x} — add to the "
+                f"header or to PINNED with a justification"
+            )
+    return errors
+
+
+def check_duplicates(label: str, consts: dict) -> list:
+    errors = []
+    for cls in DUP_CHECK_CLASSES:
+        byval = {}
+        for name, val in consts.items():
+            if name.startswith(cls):
+                byval.setdefault(val, []).append(name)
+        for val, names in sorted(byval.items()):
+            if len(names) < 2:
+                continue
+            names = sorted(names)
+            if any(set(names) <= g for g in ALIAS_GROUPS):
+                continue
+            errors.append(
+                f"DUPLICATE-CODEPOINT  {label} {cls.rstrip('_')} 0x{val:08x}: "
+                f"{', '.join(names)} (add to ALIAS_GROUPS only if the spec "
+                f"defines both)"
+            )
+    return errors
+
+
+def check_pinned_hygiene(spec: dict) -> list:
+    """PINNED must not shadow names the header now defines, and vendor pins
+    must structurally sit in vendor space."""
+    errors = []
+    for name, (val, kind) in sorted(PINNED.items()):
+        if name in spec:
+            errors.append(
+                f"PIN-SHADOWS-SPEC  {name} is now in pkcs11t.h "
+                f"(0x{spec[name]:08x}) — remove it from PINNED"
+            )
+        if kind == "vendor" and val < VENDOR_BASE:
+            errors.append(
+                f"VENDOR-SPACE  PINNED {name}=0x{val:08x} is kind=vendor but "
+                f"below 0x{VENDOR_BASE:08x}"
+            )
+    for drift, twin in DRIFT_SPEC_TWIN.items():
+        if twin not in spec:
+            errors.append(f"DRIFT-TWIN-MISSING  {twin} not found in header")
+        elif spec[twin] != PINNED[drift][0]:
+            errors.append(
+                f"DRIFT-TWIN-MISMATCH  {drift}=0x{PINNED[drift][0]:08x} but "
+                f"{twin}=0x{spec[twin]:08x}"
+            )
+    return errors
+
+
+def check_canonical(spec: dict) -> list:
+    errors = []
+    if not CANONICAL.exists():
+        return [f"CANONICAL-MISSING  {CANONICAL} not found"]
+    digest = hashlib.sha256(CANONICAL.read_bytes()).hexdigest()
+    if digest != CANONICAL_SHA256:
+        return [
+            f"CANONICAL-SHA256  {CANONICAL.name} hash {digest} != pinned "
+            f"{CANONICAL_SHA256} — the canonical reference must never change "
+            f"without re-pinning"
+        ]
+    canon = parse_header(CANONICAL)
+    for name, val in sorted(canon.items()):
+        if name not in spec:
+            errors.append(f"CANONICAL-DELTA  {name} (0x{val:08x}) missing from local header")
+        elif spec[name] != val:
+            errors.append(
+                f"CANONICAL-DELTA  {name}: local=0x{spec[name]:08x} "
+                f"canonical=0x{val:08x}"
+            )
+    for name, val in sorted(spec.items()):
+        if name not in canon and val < VENDOR_BASE:
+            errors.append(
+                f"CANONICAL-DELTA  local-only {name}=0x{val:08x} is outside "
+                f"vendor space (only >= 0x{VENDOR_BASE:08x} additions allowed)"
+            )
+    return errors
+
+
+def check_manifest(spec: dict) -> list:
+    errors = []
+    if not MANIFEST.exists():
+        return [f"MANIFEST-MISSING  {MANIFEST} not found"]
+    data = json.loads(MANIFEST.read_text())
+    block = data.get("standard_pkcs11_v3_2", {})
+    checked = 0
+    for codepoint, entry in block.items():
+        if codepoint.startswith("_"):
+            continue
+        symbol = entry.get("symbol")
+        val = int(codepoint, 16)
+        checked += 1
+        if symbol not in spec:
+            errors.append(f"MANIFEST  {symbol} ({codepoint}) not in pkcs11t.h")
+        elif spec[symbol] != val:
+            errors.append(
+                f"MANIFEST  {symbol}: manifest={codepoint} "
+                f"spec=0x{spec[symbol]:08x}"
+            )
+    if checked == 0:
+        errors.append("MANIFEST  standard_pkcs11_v3_2 block is empty — "
+                      "nothing validated (parser or manifest broken?)")
+    return errors
 
 
 def main() -> int:
-    rust = parse_rust(RUST)
     spec = parse_header(HEADER)
-    mismatches, missing = [], []
-    for name, val in sorted(rust.items()):
-        if name in spec:
-            if spec[name] != val:
-                mismatches.append((name, val, spec[name]))
-        elif not whitelisted(name):
-            missing.append((name, val))
+    if len(spec) < 900:
+        print(f"PARSER ERROR: only {len(spec)} defines parsed from "
+              f"{HEADER.name} — expected ~1050; parser or header is broken.")
+        return 1
 
-    for name, rv, sv in mismatches:
-        print(f"MISMATCH  {name}: rust=0x{rv:08x} spec=0x{sv:08x}")
-    for name, rv in missing:
-        print(f"NOT-IN-SPEC (not whitelisted)  {name} = 0x{rv:08x}")
+    rust = parse_rust(RUST)
+    js, js_errors = parse_js(JS)
 
-    total = len(rust)
-    ok = total - len(mismatches) - len(missing)
-    print(f"\nchecked {total} constants: {ok} ok, "
-          f"{len(mismatches)} mismatched, {len(missing)} unlisted")
-    return 1 if mismatches or missing else 0
+    sections = [
+        ("pkcs11t.h vs canonical OASIS v3.2 (sha256-pinned)", check_canonical(spec)),
+        ("pkcs11t.h duplicate codepoints", check_duplicates("header", spec)),
+        ("PINNED hygiene", check_pinned_hygiene(spec)),
+        (f"rust/src/constants.rs ({len(rust)} constants)",
+         check_source("rust", rust, spec) + check_duplicates("rust", rust)),
+        (f"constants.js ({len(js)} constants)",
+         js_errors + check_source("js", js, spec) + check_duplicates("js", js)),
+        ("kmip/pkcs11-mech-manifest.json (standard_pkcs11_v3_2)",
+         check_manifest(spec)),
+    ]
+
+    total_errors = 0
+    for title, errors in sections:
+        status = "OK" if not errors else f"FAIL ({len(errors)})"
+        print(f"[{status:>9}] {title}")
+        for e in errors:
+            print(f"    {e}")
+        total_errors += len(errors)
+
+    print(f"\nheader defines parsed: {len(spec)}; "
+          f"rust: {len(rust)}; js: {len(js)}; "
+          f"pinned: {len(PINNED)}; failures: {total_errors}")
+    return 1 if total_errors else 0
 
 
 if __name__ == "__main__":
