@@ -59,6 +59,15 @@ pub fn encrypt(deps: &Deps, req: EncryptRequest, correlation_id: &str) -> Result
         ));
     }
 
+    // K22 — KMIP 3.0 §11 `Object Archived` (0x0d): "The object SHALL
+    // be recovered from the archive before performing the operation."
+    // Archived material is off-line (§6.1.4 / §6.1.47), so crypto ops
+    // fail until Recover.
+    if obj.archived {
+        return Err(fail_err(deps, correlation_id, "Encrypt",
+            KmipError::object_archived(&req.uid)));
+    }
+
     // KMIP 3.0 §11 `Usage Limits` — Encrypt SHALL be rejected with
     // `PermissionDenied` once the byte-count budget is exhausted.
     // CS-BC-M-7 pins a 16-byte budget that the second Encrypt
@@ -762,6 +771,22 @@ mod tests {
         // an archive state. CS-AC-M-8 pins WrongKeyLifecycleState
         // for crypto-ops against Destroyed keys.
         assert_eq!(err.result_reason(), ResultReason::WrongKeyLifecycleState);
+    }
+
+    /// K22 — §11 `Object Archived` (0x0d): "The object SHALL be
+    /// recovered from the archive before performing the operation."
+    /// Encrypt against an archived (but Active) key fails 0x0d, NOT
+    /// WrongKeyLifecycleState — storage status is orthogonal to the
+    /// lifecycle FSM.
+    #[test]
+    fn encrypt_on_archived_returns_object_archived() {
+        let (_ring, d) = deps_and_ring();
+        put(&d, "a", KmipAlgorithm::Aes, ObjectType::SymmetricKey, State::Active, UsageMask::ENCRYPT);
+        let mut rec = d.store.get("a").unwrap().unwrap();
+        rec.archived = true;
+        d.store.update(rec).unwrap();
+        let err = encrypt(&d, EncryptRequest { uid: "a".into(), ..Default::default() }, "c").unwrap_err();
+        assert_eq!(err.result_reason(), ResultReason::ObjectArchived);
     }
 }
 

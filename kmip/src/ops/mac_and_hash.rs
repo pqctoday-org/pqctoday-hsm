@@ -203,6 +203,13 @@ fn require_active(obj: &ObjectRecord, _op: &'static str) -> Result<()> {
     if obj.state != State::Active {
         return Err(super::helpers::non_active_state_error(&obj.uid, obj.state));
     }
+    // K22 — KMIP 3.0 §11 `Object Archived` (0x0d): "The object SHALL
+    // be recovered from the archive before performing the operation."
+    // Archived material is off-line (§6.1.4 / §6.1.47), so MAC /
+    // MACVerify fail until Recover.
+    if obj.archived {
+        return Err(KmipError::object_archived(&obj.uid));
+    }
     Ok(())
 }
 

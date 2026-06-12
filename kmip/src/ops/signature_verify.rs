@@ -70,6 +70,13 @@ pub fn signature_verify(
         }
     }
 
+    // K22 — KMIP 3.0 §11 `Object Archived` (0x0d): "The object SHALL
+    // be recovered from the archive before performing the operation."
+    if obj.archived {
+        return Err(fail_err(deps, correlation_id, "SignatureVerify",
+            KmipError::object_archived(&req.uid)));
+    }
+
     // KMIP 3.0 §3.4 — `Process Start Date` / `Protect Stop Date`
     // window gating, mirror of `sign.rs` / `encrypt.rs` / `decrypt.rs`.
     // CS-AC-M-8 step #3 pins this with ProcessStartDate=future.

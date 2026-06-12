@@ -53,6 +53,25 @@ pub fn get(deps: &Deps, req: GetRequest, correlation_id: &str) -> Result<GetResp
         ));
     }
 
+    // K22 — storage status gate. §6.1.47 Recover: "Once the response
+    // is received, the object is now on-line, and MAY be obtained
+    // (e.g., via a Get operation)" — i.e. while in Archival storage
+    // the material is off-line and NOT obtainable. The §11 description
+    // of `Object Archived` (0x0d) is the permitting text: "The object
+    // SHALL be recovered from the archive before performing the
+    // operation." (Get's own §6.1.23.1 error table only lists the
+    // Wrapping variant, but this server emulates material that is
+    // genuinely off-line, so the honest answer is 0x0d — never an
+    // auto-recover or fabricated bytes.)
+    if obj.archived {
+        return Err(fail_err(
+            deps,
+            correlation_id,
+            "Get",
+            KmipError::object_archived(&req.uid),
+        ));
+    }
+
     // Plane-1 policy gate.
     let empty: HashMap<String, String> = HashMap::new();
     let algo = canonical_name(obj.algorithm);
@@ -283,6 +302,30 @@ mod tests {
             key_format_type: None,
         ..ObjectRecord::default()
 }).unwrap();
+    }
+
+    /// K22 — archived material is off-line: Get fails `ObjectArchived`
+    /// (0x0d, §11: "The object SHALL be recovered from the archive
+    /// before performing the operation"); once back On-line (§6.1.47)
+    /// Get works again.
+    #[test]
+    fn get_archived_object_fails_object_archived_until_recovered() {
+        let d = deps_with();
+        put(&d, "u", ObjectType::SymmetricKey, State::Active);
+        let mut rec = d.store.get("u").unwrap().unwrap();
+        rec.archived = true;
+        d.store.update(rec).unwrap();
+        let err = get(&d, GetRequest {
+            uid: "u".into(), key_format_type: None, key_wrapping_specification: None,
+        }, "c").unwrap_err();
+        assert_eq!(err.result_reason(), crate::error::ResultReason::ObjectArchived);
+        // Recover semantics: storage status back On-line → Get succeeds.
+        let mut rec = d.store.get("u").unwrap().unwrap();
+        rec.archived = false;
+        d.store.update(rec).unwrap();
+        assert!(get(&d, GetRequest {
+            uid: "u".into(), key_format_type: None, key_wrapping_specification: None,
+        }, "c").is_ok());
     }
 
     #[test]

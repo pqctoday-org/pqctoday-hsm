@@ -194,9 +194,11 @@ impl KmipError {
         Self::failed(ResultReason::MissingData, msg)
     }
     pub fn object_archived(uid: &str) -> Self {
+        // KMIP 3.0 §11 `Object Archived`: "The object SHALL be
+        // recovered from the archive before performing the operation."
         Self::failed(
             ResultReason::ObjectArchived,
-            format!("UID {uid:?} not in usable lifecycle state"),
+            format!("UID {uid:?} is archived; Recover it before performing this operation"),
         )
     }
     pub fn object_destroyed(uid: &str) -> Self {

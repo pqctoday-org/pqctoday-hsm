@@ -202,6 +202,16 @@ pub struct ObjectRecord {
     /// KMIP §11 `Application Specific Information` Structure —
     /// `(namespace, data)` pair. TL-M-3 step #0 finds objects by it.
     pub application_specific_information: Option<(String, String)>,
+    /// Storage status — KMIP 3.0 §6.1.4 Archive / §6.1.47 Recover.
+    /// `true` = Archival storage (§12.3 Storage Status Mask bit
+    /// 0x02): the material is off-line, so Get and cryptographic
+    /// operations fail with `ObjectArchived` (0x0d, §11: "The object
+    /// SHALL be recovered from the archive before performing the
+    /// operation") until Recover flips it back. Attributes remain
+    /// readable. `false` = On-line storage (mask bit 0x01). Not a
+    /// KMIP *attribute* — the spec only exposes it as the Locate
+    /// Storage Status Mask filter (K22).
+    pub archived: bool,
 }
 
 impl ObjectRecord {
@@ -287,6 +297,7 @@ impl From<BaselineDefaults> for ObjectRecord {
             usage_limits_unit: None,
             digest_value: None,
             application_specific_information: None,
+            archived: false,
         }
     }
 }
