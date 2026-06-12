@@ -750,6 +750,95 @@ pub fn convert_key_format(
     }
 }
 
+/// K16 — AES-KW wrap of the TTLV-encoded KeyValue under the wrap key
+/// named by a request's `KeyWrappingSpecification`. Shared by `Get`
+/// (§6.1.23, AX-M-2) and `Export` (§6.1.22) so both ops enforce the
+/// same KEK lifecycle (Active) + usage-mask (WrapKey) gates and emit
+/// the same wrapped shape; `op` names the caller for audit events.
+pub fn wrap_key_value(
+    deps: &Deps,
+    op: &str,
+    spec: &crate::kmip30::KeyWrappingSpec,
+    key_material: &[u8],
+    correlation_id: &str,
+) -> crate::error::Result<Vec<u8>> {
+    use crate::error::ResultReason;
+    // §11 Wrapping Method — only `Encrypt` (0x01) is implemented.
+    if spec.wrapping_method != 0x01 {
+        return Err(fail_err(deps, correlation_id, op,
+            KmipError::failed(
+                ResultReason::OperationNotSupported,
+                format!("Wrapping Method {:#x} not supported (only Encrypt)", spec.wrapping_method),
+            )));
+    }
+    // §11 Block Cipher Mode — NISTKeyWrap (0x0d) selects AES-KW. Absent
+    // CP defaults to NISTKeyWrap as well (the only supported wrap mode).
+    let mode = spec
+        .cryptographic_parameters
+        .as_ref()
+        .and_then(|cp| cp.block_cipher_mode)
+        .unwrap_or(0x0d);
+    if mode != 0x0d {
+        return Err(fail_err(deps, correlation_id, op,
+            KmipError::failed(
+                ResultReason::OperationNotSupported,
+                format!("Block Cipher Mode {mode:#x} not supported for wrapping (only NISTKeyWrap)"),
+            )));
+    }
+    let wrap_key = deps
+        .store
+        .get(&spec.encryption_key_uid)?
+        .ok_or_else(|| fail_err(deps, correlation_id, op,
+            KmipError::object_not_found(&spec.encryption_key_uid)))?;
+    // §3.4 lifecycle + §11 usage — the wrap key must be usable for WrapKey.
+    if wrap_key.state != crate::kmip30::State::Active {
+        return Err(fail_err(deps, correlation_id, op,
+            non_active_state_error(&spec.encryption_key_uid, wrap_key.state)));
+    }
+    if !wrap_key.usage_mask.contains(crate::kmip30::UsageMask::WRAP_KEY) {
+        return Err(fail_err(deps, correlation_id, op,
+            KmipError::permission_denied(
+                format!("wrap key {} lacks WrapKey usage", spec.encryption_key_uid),
+            )));
+    }
+    // KEK lookup mirrors Get's material tiers: Register-supplied bytes
+    // first, then the engine (Create-generated keys live behind
+    // CKA_VALUE — AX-M-2's wrap key is Created, not Registered).
+    let kek: Vec<u8> = match &wrap_key.key_material {
+        Some(bytes) => bytes.clone(),
+        None => deps
+            .engine_session
+            .and_then(|session| {
+                softhsmrustv3::native::find_by_cka_id(session, &wrap_key.pkcs11_cka_id)
+                    .ok()
+                    .flatten()
+                    .and_then(|h| {
+                        softhsmrustv3::native::get_attribute(
+                            session,
+                            h,
+                            softhsmrustv3::constants::CKA_VALUE,
+                        )
+                    })
+            })
+            .ok_or_else(|| {
+                fail_err(deps, correlation_id, op,
+                    KmipError::failed(
+                        ResultReason::OperationNotSupported,
+                        "wrap key has no exportable material".to_string(),
+                    ))
+            })?,
+    };
+    // Wrap target: TTLV-encoded KeyValue (default TTLV Encoding Option);
+    // TTLV framing pads to 8 bytes, satisfying AES-KW's input contract.
+    let plaintext = crate::kmip30::ttlv_encode_key_value(key_material);
+    // K15 — emit after the wrap call, with its real rv.
+    let r = softhsmrustv3::native::aes_key_wrap(&kek, &plaintext);
+    emit_pkcs11_result(deps, correlation_id, "native::aes_key_wrap",
+        Some(softhsmrustv3::constants::CKM_AES_KEY_WRAP), &r);
+    r.map_err(|rv| fail_err(deps, correlation_id, op,
+        ck_rv_to_kmip_error(rv, &format!("{op}:wrap"))))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

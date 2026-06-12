@@ -2351,6 +2351,7 @@ fn decode_export_req(children: &[TtlvFrame]) -> Result<ExportRequest, WireError>
     let mut key_format_type = None;
     let mut key_wrap_type = None;
     let mut key_compression_type = None;
+    let mut key_wrapping_specification = None;
     for c in children {
         match c.tag.0 {
             tags::KeyFormatType => {
@@ -2362,10 +2363,21 @@ fn decode_export_req(children: &[TtlvFrame]) -> Result<ExportRequest, WireError>
             tags::KeyCompressionType => {
                 if let Value::Enumeration(v) = c.value { key_compression_type = Some(v); }
             }
+            // K16 — §6.1.22 Key Wrapping Specification, same shape as
+            // Get's (decode_key_wrapping_spec is shared).
+            tags::KeyWrappingSpecification => {
+                key_wrapping_specification = Some(decode_key_wrapping_spec(c)?);
+            }
             _ => {}
         }
     }
-    Ok(ExportRequest { uid, key_format_type, key_wrap_type, key_compression_type })
+    Ok(ExportRequest {
+        uid,
+        key_format_type,
+        key_wrap_type,
+        key_compression_type,
+        key_wrapping_specification,
+    })
 }
 
 /// Decode a `Any Object (Section 2)` payload — i.e. a SymmetricKey /
