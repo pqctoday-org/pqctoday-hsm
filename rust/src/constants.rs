@@ -335,6 +335,17 @@ pub const CKS_RW_SO_FUNCTIONS: u32 = 4;
 
 pub const CKF_SERIAL_SESSION: u32 = 0x0000_0004;
 pub const CKF_RW_SESSION: u32 = 0x0000_0002;
+
+// PKCS#11 v3.2 §5.5 — CK_TOKEN_INFO.flags (pkcs11t.h "token information flags")
+pub const CKF_RNG: u32 = 0x0000_0001;
+pub const CKF_WRITE_PROTECTED: u32 = 0x0000_0002;
+pub const CKF_LOGIN_REQUIRED: u32 = 0x0000_0004;
+pub const CKF_USER_PIN_INITIALIZED: u32 = 0x0000_0008;
+pub const CKF_TOKEN_INITIALIZED: u32 = 0x0000_0400;
+/// PKCS#11 v3.2 §4.2 — `CK_UNAVAILABLE_INFORMATION` is `(~0UL)`, i.e.
+/// 0xFFFF_FFFF on this 32-bit (wasm) CK_ULONG ABI. Used by C_GetTokenInfo
+/// for unbounded session limits and untracked memory counters.
+pub const CK_UNAVAILABLE_INFORMATION: u32 = 0xFFFF_FFFF;
 pub const CKR_SESSION_HANDLE_INVALID: u32 = 0x0000_00B3;
 pub const CKR_SESSION_EXISTS: u32 = 0x0000_00B6;
 pub const CKR_SESSION_READ_ONLY: u32 = 0x0000_00B5;

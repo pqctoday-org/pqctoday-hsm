@@ -32,6 +32,9 @@ WHITELIST = [
     r"^CKP_XMSS_", r"^CKP_XMSSMT_",  # RFC 8391 OID values
     r"^CKP_PBKDF2_HMAC_",         # naming drift, values correct (spec: CKP_PKCS5_PBKD2_HMAC_*)
     r"^CKM_UNAVAILABLE_INFORMATION$",  # naming drift (spec: CK_UNAVAILABLE_INFORMATION)
+    # spec defines it as (~0UL) — not a parseable literal; rust pins
+    # 0xFFFFFFFF, which IS (~0UL) on the engine's 32-bit CK_ULONG ABI.
+    r"^CK_UNAVAILABLE_INFORMATION$",
     r"^CK_SP800_108_BYTE_ARRAY$",  # spec name without CKx_ prefix pattern
     r"^CKF_HKDF_SALT_DATA$",
     r"^CKD_SHA3_",                # present in spec; parser may miss CKD block

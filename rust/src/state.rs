@@ -109,12 +109,34 @@ pub struct SessionState {
     pub rw_session: bool,
 }
 
+/// PIN-at-rest hashing: salted PBKDF2-HMAC-SHA256, 10k iterations.
+///
+/// Caveat (consistent with the KMIP credential store, `kmip/src/server/
+/// auth.rs`): a production credential store wants a memory-hard KDF
+/// (argon2id) instead. This soft token holds session-scoped dev/test PINs
+/// for an in-process engine — PBKDF2-SHA256 is the deliberate trade-off to
+/// keep the wasm binary small and dependency-light.
 pub fn hash_pin(pin: &[u8], salt: &[u8; 16]) -> [u8; 32] {
     use pbkdf2::pbkdf2_hmac;
     use sha2::Sha256;
     let mut hash = [0u8; 32];
     pbkdf2_hmac::<Sha256>(pin, salt, 10000, &mut hash);
     hash
+}
+
+/// Default CK_TOKEN_INFO label for the built-in slot-0 token. Embedders can
+/// override it via `native::set_token_label` (or PKCS#11's own C_InitToken)
+/// to distinguish engine instances.
+pub const DEFAULT_TOKEN_LABEL: &str = "SoftHSM3-Rust";
+
+/// Space-pad (and truncate) a UTF-8 label to PKCS#11 v3.2 §5.5's fixed
+/// 32-byte, blank-padded CK_TOKEN_INFO.label encoding.
+pub fn pad_label_32(label: &str) -> [u8; 32] {
+    let mut out = [0x20u8; 32];
+    let bytes = label.as_bytes();
+    let n = bytes.len().min(32);
+    out[..n].copy_from_slice(&bytes[..n]);
+    out
 }
 
 pub fn init_token_store() {
@@ -127,7 +149,7 @@ pub fn init_token_store() {
                 TokenState {
                     slot_id: 0,
                     initialized: false,
-                    label: [0x20; 32],
+                    label: pad_label_32(DEFAULT_TOKEN_LABEL),
                     login_state: LoginState::Public,
                     so_pin_salt: [0u8; 16],
                     so_pin_hash: [0u8; 32],
@@ -246,6 +268,65 @@ pub fn token_logged_in(slot_id: u32) -> bool {
             .get(&slot_id)
             .map(|t| t.login_state != LoginState::Public)
             .unwrap_or(false)
+    })
+}
+
+/// PKCS#11 v3.2 §5.5 — single point of truth for CKF_TOKEN_INITIALIZED
+/// (audit H-15). The engine ships a built-in soft token in slot 0, but it
+/// starts UNinitialized: `C_Login` refuses with CKR_OPERATION_NOT_INITIALIZED
+/// until `C_InitToken` has run. The flag therefore derives from the real
+/// `TokenState::initialized` bit (set by C_InitToken, cleared only by
+/// C_Finalize wiping the store) instead of being hardwired on — it must
+/// tell the truth about what C_Login will enforce.
+pub fn token_initialized(token: &TokenState) -> bool {
+    token.initialized
+}
+
+/// PKCS#11 v3.2 §5.5 — single point of truth for CKF_USER_PIN_INITIALIZED.
+/// True once an SO session has set the normal-user PIN via C_InitPIN
+/// (salted PBKDF2 hash stored in `TokenState::user_pin_hash`). While unset,
+/// `C_Login(CKU_USER, ..)` returns CKR_USER_PIN_NOT_INITIALIZED.
+pub fn user_pin_initialized(token: &TokenState) -> bool {
+    token.user_pin_hash.is_some()
+}
+
+/// PKCS#11 v3.2 §5.5 — compose CK_TOKEN_INFO.flags from real token state
+/// (audit H-15; previously hardcoded 0x040D regardless of state).
+///
+/// * `CKF_RNG` — always: the engine has a real CSPRNG (getrandom/OsRng).
+/// * `CKF_LOGIN_REQUIRED` — ALWAYS set, deliberately: `can_access_object`
+///   gates CKA_PRIVATE=TRUE objects on `session_logged_in()`
+///   unconditionally, i.e. login is required for private-object access
+///   even before a user PIN exists (such objects are simply unreachable
+///   until C_InitPIN + C_Login). The flag matches that enforcement.
+/// * `CKF_TOKEN_INITIALIZED` — from [`token_initialized`].
+/// * `CKF_USER_PIN_INITIALIZED` — from [`user_pin_initialized`].
+/// * `CKF_WRITE_PROTECTED` — never set: the token is writable.
+pub fn token_info_flags(token: &TokenState) -> u32 {
+    let mut flags = CKF_RNG | CKF_LOGIN_REQUIRED;
+    if token_initialized(token) {
+        flags |= CKF_TOKEN_INITIALIZED;
+    }
+    if user_pin_initialized(token) {
+        flags |= CKF_USER_PIN_INITIALIZED;
+    }
+    flags
+}
+
+/// Live (total, read-write) session counts for a slot, from the session
+/// table — backs CK_TOKEN_INFO.ulSessionCount / ulRwSessionCount.
+pub fn session_counts(slot_id: u32) -> (u32, u32) {
+    SESSIONS.with(|s| {
+        let store = s.borrow();
+        let mut total = 0u32;
+        let mut rw = 0u32;
+        for ss in store.values().filter(|ss| ss.slot_id == slot_id) {
+            total += 1;
+            if ss.rw_session {
+                rw += 1;
+            }
+        }
+        (total, rw)
     })
 }
 

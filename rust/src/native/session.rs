@@ -150,6 +150,48 @@ pub fn init_pin(session: u32, user_pin: &str) -> Result<(), CkRv> {
     if rv == CKR_OK { Ok(()) } else { Err(rv) }
 }
 
+/// Override the slot-0 token label emitted by `C_GetTokenInfo` (and read
+/// back by [`get_token_label`]) so embedders can distinguish engine
+/// instances. Default is `state::DEFAULT_TOKEN_LABEL` ("SoftHSM3-Rust").
+///
+/// The label is truncated/space-padded to PKCS#11 v3.2 §5.5's 32-byte
+/// blank-padded encoding. Unlike `C_InitToken` this does NOT reset PINs,
+/// login state, or the initialized bit — it only renames the token.
+/// Requires the engine to be initialized ([`init`]).
+pub fn set_token_label(label: &str) -> Result<(), CkRv> {
+    use crate::constants::{CKR_CRYPTOKI_NOT_INITIALIZED, CKR_SLOT_ID_INVALID};
+    if !crate::state::is_initialized() {
+        return Err(CKR_CRYPTOKI_NOT_INITIALIZED);
+    }
+    let padded = crate::state::pad_label_32(label);
+    let found = crate::state::TOKEN_STORE.with(|ts| {
+        ts.borrow_mut()
+            .get_mut(&0)
+            .map(|t| t.label = padded)
+            .is_some()
+    });
+    if found { Ok(()) } else { Err(CKR_SLOT_ID_INVALID) }
+}
+
+/// Read back the slot-0 token label as a string, with the §5.5 blank
+/// padding trimmed. Counterpart of [`set_token_label`].
+pub fn get_token_label() -> Result<String, CkRv> {
+    use crate::constants::{CKR_CRYPTOKI_NOT_INITIALIZED, CKR_SLOT_ID_INVALID};
+    if !crate::state::is_initialized() {
+        return Err(CKR_CRYPTOKI_NOT_INITIALIZED);
+    }
+    crate::state::TOKEN_STORE.with(|ts| {
+        ts.borrow()
+            .get(&0)
+            .map(|t| {
+                String::from_utf8_lossy(&t.label)
+                    .trim_end_matches(' ')
+                    .to_string()
+            })
+            .ok_or(CKR_SLOT_ID_INVALID)
+    })
+}
+
 /// Convenience: full first-boot sequence on a fresh engine.
 ///
 /// 1. [`init`] — initialise the engine.
