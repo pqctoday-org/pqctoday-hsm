@@ -180,14 +180,21 @@ pub fn signature_verify(
                 }
                 Err(e) => return Err(e),
             };
+            // K18 — KMIP 3.0 §11 `Salt Length`: an explicit RSA-PSS
+            // salt pins EMSA-PSS-VERIFY to exactly that length (the
+            // caller's parameters are authoritative); absent keeps the
+            // engine's two-candidate default (hash length / maximal).
+            let pss_salt =
+                super::helpers::pss_salt_from_cp(native_mech, effective_cp)?;
             // native::verify returns Ok(true)/Ok(false) for the KMIP
             // ValidityIndicator model — exactly what we need.
-            let r = softhsmrustv3::native::verify(
+            let r = softhsmrustv3::native::verify_with_pss_salt(
                 session,
                 handle,
                 native_mech,
                 &req.data,
                 &req.signature,
+                pss_salt,
             );
             emit_pkcs11_result(deps, correlation_id, "native::verify", Some(native_mech), &r);
             match r {

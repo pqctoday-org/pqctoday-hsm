@@ -1077,6 +1077,13 @@ pub struct CryptographicParameters {
     /// Encrypt and return it via the response payload's
     /// `IVCounterNonce` field. CS-BC-M-13 pins this on AES-CBC-PAD.
     pub random_iv: Option<bool>,
+    /// Wire tag `Salt Length` (0x42_0100) — Integer (bytes). KMIP 3.0
+    /// §11: the RSA-PSS salt length (RFC 8017 sLen). K18 — when present
+    /// on a PSS sign/verify, it is passed to the engine verbatim;
+    /// absent keeps the PKCS#11 v3.2 §6.2 default (salt = hash length).
+    /// Ignored for non-PSS mechanisms (CryptographicParameters is a
+    /// grab-bag; irrelevant fields are not an error).
+    pub salt_length: Option<i32>,
 }
 
 /// `Hashing Algorithm` Enumeration — KMIP 3.0 §11. Codepoints from the

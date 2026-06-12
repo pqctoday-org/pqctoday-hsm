@@ -190,7 +190,19 @@ pub fn sign(deps: &Deps, req: SignRequest, correlation_id: &str) -> Result<SignR
                 effective_cp,
             )
             .map_err(|e| fail_err(deps, correlation_id, "Sign", e))?;
-            let r = softhsmrustv3::native::sign(session, handle, native_mech, &req.data);
+            // K18 — KMIP 3.0 §11 `Salt Length`: explicit RSA-PSS salt
+            // from the effective CP (same request-over-object
+            // precedence as the mechanism selection above). `None`
+            // keeps the engine's §6.2 hash-length default.
+            let pss_salt = super::helpers::pss_salt_from_cp(native_mech, effective_cp)
+                .map_err(|e| fail_err(deps, correlation_id, "Sign", e))?;
+            let r = softhsmrustv3::native::sign_with_pss_salt(
+                session,
+                handle,
+                native_mech,
+                &req.data,
+                pss_salt,
+            );
             super::helpers::emit_pkcs11_result(
                 deps,
                 correlation_id,

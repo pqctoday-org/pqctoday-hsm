@@ -1890,6 +1890,58 @@ e3c0089c5f7f3293edcbef738e9f39431610289a6e67fececc85a4b0897e8672c6454613a4b7fc0b
         assert_eq!(verify_rsa(m, &n, &e, S6_MSG, &sig, None), Ok(()));
     }
 
+    /// OpenSSL PSS, SHA-256 + MGF1-SHA256, saltlen = 0 (K18 KAT):
+    ///   openssl dgst -sha256 -sign key.pem \
+    ///     -sigopt rsa_padding_mode:pss -sigopt rsa_pss_saltlen:0 msg
+    /// PSS with a zero-length salt is DETERMINISTIC (RFC 8017 §9.1.1 —
+    /// the only randomness is the salt), so our signature must
+    /// byte-match OpenSSL's.
+    const K18_SIG_SHA256_PSS_SALT0_HEX: &str = "\
+cfb60dbd1706a95d149004631b7b6e49672331cdd99a55561fd95e22016c74389763b9996c5ac95640482cb7712571ae35e4d9062c36bb6db622bb21900f13af\
+3e48b390a9bacb892e3bbf336531f14e6c6809b72a2514e19d1052af00a8ff01fc735322c9e6fb3558a9117a8ba4895ca2048157cc7d44470c248ce8fcb8c2cb\
+1f8029c232b17d653902dfb8dc56c8fb716aec5913728c02889fe538eb25691988ad26e32e13401e62cfd840333bf2e5e820578e9340e578cc46a3dd3f3be671\
+6782527238e219d2ad51ccb210b152eb8781371c3dbf4f4c74305ba5d20bb2e1eb91ec4e289ada28824cea168372cd6fa8536b1f7c48ffd42f91d3dabeaabe9f";
+
+    /// K18 — explicit PSS salt length end-to-end at the handler layer:
+    /// salt = 0 is deterministic and byte-matches the OpenSSL KAT;
+    /// verify with an explicit salt pins EMSA-PSS-VERIFY to exactly
+    /// that length (the `rsa` crate does NOT recover the salt length
+    /// from the padding); `None` keeps the two-candidate default,
+    /// which does NOT include 0; oversized salt (> emLen - hLen - 2 =
+    /// 222 for RSA-2048/SHA-256) errors at sign time.
+    #[test]
+    fn k18_rsa_pss_explicit_salt_len_matches_openssl_salt0_kat() {
+        let (sk, n, e) = s6_key();
+        let m = crate::constants::CKM_SHA256_RSA_PKCS_PSS;
+        let kat = decode_hex(K18_SIG_SHA256_PSS_SALT0_HEX);
+
+        let sig = sign_rsa(m, &sk, S6_MSG, Some(0)).unwrap();
+        assert_eq!(sig, kat, "PSS salt=0 is deterministic, must byte-match OpenSSL");
+        assert_eq!(verify_rsa(m, &n, &e, S6_MSG, &sig, Some(0)), Ok(()));
+        // Default verify candidates are {hashLen, maximal} — 0 is not
+        // among them, so a salt-0 signature needs the explicit salt.
+        assert_eq!(
+            verify_rsa(m, &n, &e, S6_MSG, &sig, None),
+            Err(CKR_SIGNATURE_INVALID)
+        );
+        // Wrong explicit salt → invalid.
+        assert_eq!(
+            verify_rsa(m, &n, &e, S6_MSG, &sig, Some(32)),
+            Err(CKR_SIGNATURE_INVALID)
+        );
+
+        // salt = 20 round-trip: randomized, pinned verify succeeds.
+        let sig20 = sign_rsa(m, &sk, S6_MSG, Some(20)).unwrap();
+        assert_eq!(verify_rsa(m, &n, &e, S6_MSG, &sig20, Some(20)), Ok(()));
+        assert_eq!(
+            verify_rsa(m, &n, &e, S6_MSG, &sig20, Some(0)),
+            Err(CKR_SIGNATURE_INVALID)
+        );
+
+        // Oversized salt: RSA-2048 + SHA-256 → emLen - hLen - 2 = 222.
+        assert_eq!(sign_rsa(m, &sk, S6_MSG, Some(300)), Err(CKR_FUNCTION_FAILED));
+    }
+
     /// Cross-mechanism negative: a SHA-384 signature must not verify under
     /// the SHA-512 mechanism (and vice versa), for both v1.5 and PSS.
     #[test]
