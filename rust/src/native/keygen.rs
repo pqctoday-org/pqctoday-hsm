@@ -57,7 +57,40 @@ pub fn generate_ml_kem_keypair(
     cka_id: &[u8],
     label: &str,
 ) -> Result<(u32, u32), CkRv> {
+    ml_kem_keypair_impl(_session, parameter_set, None, cka_id, label)
+}
+
+/// T7 — deterministic ML-KEM keygen from a caller-supplied `CKA_SEED`
+/// (`d ‖ z`, 64 bytes), per FIPS 203 Algorithm 16
+/// `ML-KEM.KeyGen_internal(d, z)` (`ml-kem` crate `deterministic`
+/// feature). The seed is stored on the private object under `CKA_SEED`
+/// (sensitive-blocked readback set). Wrong seed length →
+/// `CKR_ATTRIBUTE_VALUE_INVALID`.
+pub fn generate_ml_kem_keypair_from_seed(
+    _session: u32,
+    parameter_set: u32,
+    seed: &[u8],
+    cka_id: &[u8],
+    label: &str,
+) -> Result<(u32, u32), CkRv> {
+    ml_kem_keypair_impl(_session, parameter_set, Some(seed), cka_id, label)
+}
+
+fn ml_kem_keypair_impl(
+    _session: u32,
+    parameter_set: u32,
+    seed: Option<&[u8]>,
+    cka_id: &[u8],
+    label: &str,
+) -> Result<(u32, u32), CkRv> {
     use ml_kem::{EncodedSizeUser, KemCore};
+
+    if let Some(s) = seed {
+        // FIPS 203 §7.1 — seed material is d ‖ z, 32 bytes each.
+        if s.len() != 64 {
+            return Err(CKR_ATTRIBUTE_VALUE_INVALID);
+        }
+    }
 
     let mut pub_attrs: Attributes = HashMap::new();
     let mut prv_attrs: Attributes = HashMap::new();
@@ -75,25 +108,32 @@ pub fn generate_ml_kem_keypair(
     insert_id_and_label(&mut pub_attrs, cka_id, label);
     insert_id_and_label(&mut prv_attrs, cka_id, label);
 
-    // Crypto keygen.
-    let mut rng = rand::rngs::OsRng;
+    // Crypto keygen — deterministic from d ‖ z when a seed is supplied
+    // (FIPS 203 Algorithm 16), OsRng otherwise.
+    macro_rules! mlkem_gen {
+        ($t:ty) => {{
+            let (dk, ek) = match seed {
+                Some(s) => {
+                    let d = ml_kem::B32::try_from(&s[..32]).expect("length checked");
+                    let z = ml_kem::B32::try_from(&s[32..64]).expect("length checked");
+                    <$t>::generate_deterministic(&d, &z)
+                }
+                None => <$t>::generate(&mut rand::rngs::OsRng),
+            };
+            pub_attrs.insert(CKA_VALUE, ek.as_bytes().as_slice().to_vec());
+            prv_attrs.insert(CKA_VALUE, dk.as_bytes().as_slice().to_vec());
+        }};
+    }
     match parameter_set {
-        CKP_ML_KEM_512 => {
-            let (dk, ek) = ml_kem::MlKem512::generate(&mut rng);
-            pub_attrs.insert(CKA_VALUE, ek.as_bytes().as_slice().to_vec());
-            prv_attrs.insert(CKA_VALUE, dk.as_bytes().as_slice().to_vec());
-        }
-        CKP_ML_KEM_768 => {
-            let (dk, ek) = ml_kem::MlKem768::generate(&mut rng);
-            pub_attrs.insert(CKA_VALUE, ek.as_bytes().as_slice().to_vec());
-            prv_attrs.insert(CKA_VALUE, dk.as_bytes().as_slice().to_vec());
-        }
-        CKP_ML_KEM_1024 => {
-            let (dk, ek) = ml_kem::MlKem1024::generate(&mut rng);
-            pub_attrs.insert(CKA_VALUE, ek.as_bytes().as_slice().to_vec());
-            prv_attrs.insert(CKA_VALUE, dk.as_bytes().as_slice().to_vec());
-        }
+        CKP_ML_KEM_512 => mlkem_gen!(ml_kem::MlKem512),
+        CKP_ML_KEM_768 => mlkem_gen!(ml_kem::MlKem768),
+        CKP_ML_KEM_1024 => mlkem_gen!(ml_kem::MlKem1024),
         _ => return Err(CKR_ARGUMENTS_BAD),
+    }
+    // Engine-side seed storage — sensitive-blocked readback set
+    // (state::attr_is_sensitive_material).
+    if let Some(s) = seed {
+        prv_attrs.insert(CKA_SEED, s.to_vec());
     }
 
     // SPKI — PKCS#11 v3.2 §4.14.
@@ -122,6 +162,38 @@ pub fn generate_ml_dsa_keypair(
     cka_id: &[u8],
     label: &str,
 ) -> Result<(u32, u32), CkRv> {
+    ml_dsa_keypair_impl(_session, parameter_set, None, cka_id, label)
+}
+
+/// T7 — deterministic ML-DSA keygen from a caller-supplied `CKA_SEED`
+/// (ξ, 32 bytes), per FIPS 204 Algorithm 6 `ML-DSA.KeyGen_internal(ξ)`
+/// (patched fips204 `KeyGen::keygen_from_seed`). The seed is stored on
+/// the private object under `CKA_SEED` (sensitive-blocked readback set).
+/// Wrong seed length → `CKR_ATTRIBUTE_VALUE_INVALID`.
+pub fn generate_ml_dsa_keypair_from_seed(
+    _session: u32,
+    parameter_set: u32,
+    seed: &[u8],
+    cka_id: &[u8],
+    label: &str,
+) -> Result<(u32, u32), CkRv> {
+    ml_dsa_keypair_impl(_session, parameter_set, Some(seed), cka_id, label)
+}
+
+fn ml_dsa_keypair_impl(
+    _session: u32,
+    parameter_set: u32,
+    seed: Option<&[u8]>,
+    cka_id: &[u8],
+    label: &str,
+) -> Result<(u32, u32), CkRv> {
+    if let Some(s) = seed {
+        // FIPS 204 §3.6.1 — ξ is exactly 32 bytes.
+        if s.len() != 32 {
+            return Err(CKR_ATTRIBUTE_VALUE_INVALID);
+        }
+    }
+
     let mut pub_attrs: Attributes = HashMap::new();
     let mut prv_attrs: Attributes = HashMap::new();
 
@@ -136,30 +208,38 @@ pub fn generate_ml_dsa_keypair(
     insert_id_and_label(&mut pub_attrs, cka_id, label);
     insert_id_and_label(&mut prv_attrs, cka_id, label);
 
-    let mut rng = rand::rngs::OsRng;
+    // Crypto keygen — deterministic from ξ when a seed is supplied
+    // (FIPS 204 Algorithm 6), OsRng otherwise.
+    macro_rules! mldsa_gen {
+        ($m:ident) => {{
+            use fips204::traits::{KeyGen, SerDes};
+            match seed {
+                Some(s) => {
+                    let xi: &[u8; 32] = s.try_into().expect("length checked");
+                    let (vk, sk) = fips204::$m::KG::keygen_from_seed(xi);
+                    pub_attrs.insert(CKA_VALUE, SerDes::into_bytes(vk).to_vec());
+                    prv_attrs.insert(CKA_VALUE, SerDes::into_bytes(sk).to_vec());
+                }
+                None => match fips204::$m::try_keygen_with_rng(&mut rand::rngs::OsRng) {
+                    Ok((vk, sk)) => {
+                        pub_attrs.insert(CKA_VALUE, SerDes::into_bytes(vk).to_vec());
+                        prv_attrs.insert(CKA_VALUE, SerDes::into_bytes(sk).to_vec());
+                    }
+                    Err(_) => return Err(CKR_FUNCTION_FAILED),
+                },
+            }
+        }};
+    }
     match parameter_set {
-        CKP_ML_DSA_44 => match fips204::ml_dsa_44::try_keygen_with_rng(&mut rng) {
-            Ok((vk, sk)) => {
-                pub_attrs.insert(CKA_VALUE, fips204::traits::SerDes::into_bytes(vk).to_vec());
-                prv_attrs.insert(CKA_VALUE, fips204::traits::SerDes::into_bytes(sk).to_vec());
-            }
-            Err(_) => return Err(CKR_FUNCTION_FAILED),
-        },
-        CKP_ML_DSA_65 => match fips204::ml_dsa_65::try_keygen_with_rng(&mut rng) {
-            Ok((vk, sk)) => {
-                pub_attrs.insert(CKA_VALUE, fips204::traits::SerDes::into_bytes(vk).to_vec());
-                prv_attrs.insert(CKA_VALUE, fips204::traits::SerDes::into_bytes(sk).to_vec());
-            }
-            Err(_) => return Err(CKR_FUNCTION_FAILED),
-        },
-        CKP_ML_DSA_87 => match fips204::ml_dsa_87::try_keygen_with_rng(&mut rng) {
-            Ok((vk, sk)) => {
-                pub_attrs.insert(CKA_VALUE, fips204::traits::SerDes::into_bytes(vk).to_vec());
-                prv_attrs.insert(CKA_VALUE, fips204::traits::SerDes::into_bytes(sk).to_vec());
-            }
-            Err(_) => return Err(CKR_FUNCTION_FAILED),
-        },
+        CKP_ML_DSA_44 => mldsa_gen!(ml_dsa_44),
+        CKP_ML_DSA_65 => mldsa_gen!(ml_dsa_65),
+        CKP_ML_DSA_87 => mldsa_gen!(ml_dsa_87),
         _ => return Err(CKR_ARGUMENTS_BAD),
+    }
+    // Engine-side seed storage — sensitive-blocked readback set
+    // (state::attr_is_sensitive_material).
+    if let Some(s) = seed {
+        prv_attrs.insert(CKA_SEED, s.to_vec());
     }
 
     if let Some(pk_bytes) = pub_attrs.get(&CKA_VALUE).cloned() {
@@ -187,8 +267,32 @@ pub fn generate_slh_dsa_keypair(
     cka_id: &[u8],
     label: &str,
 ) -> Result<(u32, u32), CkRv> {
-    use fips205::traits::SerDes;
+    slh_dsa_keypair_impl(_session, parameter_set, None, cka_id, label)
+}
 
+/// T7 — deterministic SLH-DSA keygen from a caller-supplied `CKA_SEED`
+/// (`SK.seed ‖ SK.prf ‖ PK.seed`, 3n bytes; n = 16/24/32 per param set),
+/// per FIPS 205 Algorithm 18 `slh_keygen_internal` (fips205
+/// `KeyGen::keygen_with_seeds`). The seed is stored on the private object
+/// under `CKA_SEED` (sensitive-blocked readback set). Wrong seed length →
+/// `CKR_ATTRIBUTE_VALUE_INVALID`.
+pub fn generate_slh_dsa_keypair_from_seed(
+    _session: u32,
+    parameter_set: u32,
+    seed: &[u8],
+    cka_id: &[u8],
+    label: &str,
+) -> Result<(u32, u32), CkRv> {
+    slh_dsa_keypair_impl(_session, parameter_set, Some(seed), cka_id, label)
+}
+
+fn slh_dsa_keypair_impl(
+    _session: u32,
+    parameter_set: u32,
+    seed: Option<&[u8]>,
+    cka_id: &[u8],
+    label: &str,
+) -> Result<(u32, u32), CkRv> {
     let mut pub_attrs: Attributes = HashMap::new();
     let mut prv_attrs: Attributes = HashMap::new();
 
@@ -202,21 +306,25 @@ pub fn generate_slh_dsa_keypair(
     insert_id_and_label(&mut pub_attrs, cka_id, label);
     insert_id_and_label(&mut prv_attrs, cka_id, label);
 
-    let mut rng = rand::rngs::OsRng;
     match parameter_set {
-        CKP_SLH_DSA_SHA2_128S => slh_keygen!(fips205::slh_dsa_sha2_128s::try_keygen_with_rng, rng, pub_attrs, prv_attrs),
-        CKP_SLH_DSA_SHAKE_128S => slh_keygen!(fips205::slh_dsa_shake_128s::try_keygen_with_rng, rng, pub_attrs, prv_attrs),
-        CKP_SLH_DSA_SHA2_128F => slh_keygen!(fips205::slh_dsa_sha2_128f::try_keygen_with_rng, rng, pub_attrs, prv_attrs),
-        CKP_SLH_DSA_SHAKE_128F => slh_keygen!(fips205::slh_dsa_shake_128f::try_keygen_with_rng, rng, pub_attrs, prv_attrs),
-        CKP_SLH_DSA_SHA2_192S => slh_keygen!(fips205::slh_dsa_sha2_192s::try_keygen_with_rng, rng, pub_attrs, prv_attrs),
-        CKP_SLH_DSA_SHAKE_192S => slh_keygen!(fips205::slh_dsa_shake_192s::try_keygen_with_rng, rng, pub_attrs, prv_attrs),
-        CKP_SLH_DSA_SHA2_192F => slh_keygen!(fips205::slh_dsa_sha2_192f::try_keygen_with_rng, rng, pub_attrs, prv_attrs),
-        CKP_SLH_DSA_SHAKE_192F => slh_keygen!(fips205::slh_dsa_shake_192f::try_keygen_with_rng, rng, pub_attrs, prv_attrs),
-        CKP_SLH_DSA_SHA2_256S => slh_keygen!(fips205::slh_dsa_sha2_256s::try_keygen_with_rng, rng, pub_attrs, prv_attrs),
-        CKP_SLH_DSA_SHAKE_256S => slh_keygen!(fips205::slh_dsa_shake_256s::try_keygen_with_rng, rng, pub_attrs, prv_attrs),
-        CKP_SLH_DSA_SHA2_256F => slh_keygen!(fips205::slh_dsa_sha2_256f::try_keygen_with_rng, rng, pub_attrs, prv_attrs),
-        CKP_SLH_DSA_SHAKE_256F => slh_keygen!(fips205::slh_dsa_shake_256f::try_keygen_with_rng, rng, pub_attrs, prv_attrs),
+        CKP_SLH_DSA_SHA2_128S => slh_keygen!(slh_dsa_sha2_128s, seed, pub_attrs, prv_attrs),
+        CKP_SLH_DSA_SHAKE_128S => slh_keygen!(slh_dsa_shake_128s, seed, pub_attrs, prv_attrs),
+        CKP_SLH_DSA_SHA2_128F => slh_keygen!(slh_dsa_sha2_128f, seed, pub_attrs, prv_attrs),
+        CKP_SLH_DSA_SHAKE_128F => slh_keygen!(slh_dsa_shake_128f, seed, pub_attrs, prv_attrs),
+        CKP_SLH_DSA_SHA2_192S => slh_keygen!(slh_dsa_sha2_192s, seed, pub_attrs, prv_attrs),
+        CKP_SLH_DSA_SHAKE_192S => slh_keygen!(slh_dsa_shake_192s, seed, pub_attrs, prv_attrs),
+        CKP_SLH_DSA_SHA2_192F => slh_keygen!(slh_dsa_sha2_192f, seed, pub_attrs, prv_attrs),
+        CKP_SLH_DSA_SHAKE_192F => slh_keygen!(slh_dsa_shake_192f, seed, pub_attrs, prv_attrs),
+        CKP_SLH_DSA_SHA2_256S => slh_keygen!(slh_dsa_sha2_256s, seed, pub_attrs, prv_attrs),
+        CKP_SLH_DSA_SHAKE_256S => slh_keygen!(slh_dsa_shake_256s, seed, pub_attrs, prv_attrs),
+        CKP_SLH_DSA_SHA2_256F => slh_keygen!(slh_dsa_sha2_256f, seed, pub_attrs, prv_attrs),
+        CKP_SLH_DSA_SHAKE_256F => slh_keygen!(slh_dsa_shake_256f, seed, pub_attrs, prv_attrs),
         _ => return Err(CKR_ARGUMENTS_BAD),
+    }
+    // Engine-side seed storage — sensitive-blocked readback set
+    // (state::attr_is_sensitive_material).
+    if let Some(s) = seed {
+        prv_attrs.insert(CKA_SEED, s.to_vec());
     }
 
     if let Some(pk_bytes) = pub_attrs.get(&CKA_VALUE).cloned() {
@@ -1190,18 +1298,39 @@ fn finalize_and_register(
     Ok((pub_h, prv_h))
 }
 
-/// SLH-DSA keygen — wraps the `fips205::*::try_keygen_with_rng` calls
-/// with the same shape so the per-variant match stays a single line.
-/// `$func` is the fully-qualified keygen path; `$rng` is `OsRng`;
-/// `$pub_attrs` / `$prv_attrs` are the maps to populate with `CKA_VALUE`.
+/// SLH-DSA keygen — wraps the `fips205` per-variant calls with the same
+/// shape so the per-variant match stays a single line. `$m` is the
+/// `fips205` parameter-set module; `$seed` is `Option<&[u8]>` — `Some`
+/// runs FIPS 205 Algorithm 18 `slh_keygen_internal(SK.seed, SK.prf,
+/// PK.seed)` deterministically from a `3n`-byte seed (wrong length →
+/// `CKR_ATTRIBUTE_VALUE_INVALID`), `None` keeps the OsRng path
+/// (Algorithm 21). `$pub_attrs` / `$prv_attrs` are the maps to populate
+/// with `CKA_VALUE`. Mirrors the C-ABI `crate::slh_dsa_keygen!` macro.
 macro_rules! slh_keygen {
-    ($func:path, $rng:ident, $pub_attrs:expr, $prv_attrs:expr) => {{
-        match $func(&mut $rng) {
-            Ok((vk, sk)) => {
-                $pub_attrs.insert(CKA_VALUE, vk.into_bytes().to_vec());
-                $prv_attrs.insert(CKA_VALUE, sk.into_bytes().to_vec());
+    ($m:ident, $seed:expr, $pub_attrs:expr, $prv_attrs:expr) => {{
+        use fips205::traits::{KeyGen, SerDes};
+        const N: usize = fips205::$m::N;
+        match $seed {
+            Some(s) => {
+                if s.len() != 3 * N {
+                    return Err(CKR_ATTRIBUTE_VALUE_INVALID);
+                }
+                // FIPS 205 §9.1 — CKA_SEED = SK.seed ‖ SK.prf ‖ PK.seed.
+                let (vk, sk) = fips205::$m::KG::keygen_with_seeds::<N>(
+                    s[..N].try_into().expect("length checked"),
+                    s[N..2 * N].try_into().expect("length checked"),
+                    s[2 * N..].try_into().expect("length checked"),
+                );
+                $pub_attrs.insert(CKA_VALUE, SerDes::into_bytes(vk).to_vec());
+                $prv_attrs.insert(CKA_VALUE, SerDes::into_bytes(sk).to_vec());
             }
-            Err(_) => return Err(CKR_FUNCTION_FAILED),
+            None => match fips205::$m::try_keygen_with_rng(&mut rand::rngs::OsRng) {
+                Ok((vk, sk)) => {
+                    $pub_attrs.insert(CKA_VALUE, SerDes::into_bytes(vk).to_vec());
+                    $prv_attrs.insert(CKA_VALUE, SerDes::into_bytes(sk).to_vec());
+                }
+                Err(_) => return Err(CKR_FUNCTION_FAILED),
+            },
         }
     }};
 }
@@ -1736,6 +1865,297 @@ mod tests {
         let mut bad = mac.clone();
         bad[0] ^= 0xFF;
         assert_eq!(verify(session, handle, CKM_SHA256_HMAC, b"data", &bad), Ok(false));
+        close_session(session).unwrap();
+    }
+
+    // ── T7 — seed-deterministic PQC keygen (CKA_SEED) ───────────────────────
+
+    fn hex_decode(s: &str) -> Vec<u8> {
+        assert_eq!(s.len() % 2, 0, "odd hex length");
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).expect("valid hex"))
+            .collect()
+    }
+
+    /// NIST ACVP ML-DSA keyGen KATs (FIPS 204 Algorithm 6
+    /// `ML-DSA.KeyGen_internal(ξ)`): for every parameter set, seed ξ from
+    /// the official vector file must reproduce the expected pk and sk
+    /// byte-for-byte through `generate_ml_dsa_keypair_from_seed`.
+    /// Vector source: fips204-patched/tests/nist_vectors/ML-DSA-keyGen-FIPS204.
+    #[test]
+    fn ml_dsa_keygen_from_seed_matches_acvp_kats() {
+        let _guard = test_lock::acquire();
+        let session = fresh_session();
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/fips204-patched/tests/nist_vectors/ML-DSA-keyGen-FIPS204/internalProjection.json"
+        );
+        let doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).expect("vector file"))
+                .expect("vector json");
+        let mut covered = 0;
+        for group in doc["testGroups"].as_array().expect("testGroups") {
+            let ps = match group["parameterSet"].as_str().unwrap() {
+                "ML-DSA-44" => CKP_ML_DSA_44,
+                "ML-DSA-65" => CKP_ML_DSA_65,
+                "ML-DSA-87" => CKP_ML_DSA_87,
+                other => panic!("unknown parameterSet {other}"),
+            };
+            // ≥1 vector per parameter set (first three of each group keeps
+            // the suite fast — full-file replay lives in the fork's tests).
+            for tc in group["tests"].as_array().unwrap().iter().take(3) {
+                let seed = hex_decode(tc["seed"].as_str().unwrap());
+                let (pub_h, prv_h) =
+                    generate_ml_dsa_keypair_from_seed(session, ps, &seed, b"\x01", "kat").unwrap();
+                assert_eq!(
+                    get_object_value(pub_h).unwrap(),
+                    hex_decode(tc["pk"].as_str().unwrap()),
+                    "pk mismatch ps=0x{ps:x} tcId={}",
+                    tc["tcId"]
+                );
+                assert_eq!(
+                    get_object_value(prv_h).unwrap(),
+                    hex_decode(tc["sk"].as_str().unwrap()),
+                    "sk mismatch ps=0x{ps:x} tcId={}",
+                    tc["tcId"]
+                );
+                covered += 1;
+            }
+        }
+        assert!(covered >= 9, "all three ML-DSA parameter sets covered");
+        close_session(session).unwrap();
+    }
+
+    /// NIST ACVP SLH-DSA keyGen KATs (FIPS 205 Algorithm 18
+    /// `slh_keygen_internal(SK.seed, SK.prf, PK.seed)`): CKA_SEED =
+    /// skSeed ‖ skPrf ‖ pkSeed must reproduce the expected pk/sk. The
+    /// in-repo vector file covers 4 of the 12 parameter sets
+    /// (SHA2-128s, SHA2-192f, SHAKE-192s, SHAKE-256f); the remaining 8
+    /// are covered by the determinism test below.
+    /// Vector source: fips205-patched/tests/nist_acvp_vectors/SLH-DSA-keyGen-FIPS205.
+    #[test]
+    fn slh_dsa_keygen_from_seed_matches_acvp_kats() {
+        let _guard = test_lock::acquire();
+        let session = fresh_session();
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/fips205-patched/tests/nist_acvp_vectors/SLH-DSA-keyGen-FIPS205/internalProjection.json"
+        );
+        let doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).expect("vector file"))
+                .expect("vector json");
+        let mut covered = 0;
+        for group in doc["testGroups"].as_array().expect("testGroups") {
+            let ps = match group["parameterSet"].as_str().unwrap() {
+                "SLH-DSA-SHA2-128s" => CKP_SLH_DSA_SHA2_128S,
+                "SLH-DSA-SHA2-192f" => CKP_SLH_DSA_SHA2_192F,
+                "SLH-DSA-SHAKE-192s" => CKP_SLH_DSA_SHAKE_192S,
+                "SLH-DSA-SHAKE-256f" => CKP_SLH_DSA_SHAKE_256F,
+                other => panic!("unknown parameterSet {other}"),
+            };
+            for tc in group["tests"].as_array().unwrap().iter().take(2) {
+                let mut seed = hex_decode(tc["skSeed"].as_str().unwrap());
+                seed.extend(hex_decode(tc["skPrf"].as_str().unwrap()));
+                seed.extend(hex_decode(tc["pkSeed"].as_str().unwrap()));
+                let (pub_h, prv_h) =
+                    generate_slh_dsa_keypair_from_seed(session, ps, &seed, b"\x01", "kat")
+                        .unwrap();
+                assert_eq!(
+                    get_object_value(pub_h).unwrap(),
+                    hex_decode(tc["pk"].as_str().unwrap()),
+                    "pk mismatch ps=0x{ps:x} tcId={}",
+                    tc["tcId"]
+                );
+                assert_eq!(
+                    get_object_value(prv_h).unwrap(),
+                    hex_decode(tc["sk"].as_str().unwrap()),
+                    "sk mismatch ps=0x{ps:x} tcId={}",
+                    tc["tcId"]
+                );
+                covered += 1;
+            }
+        }
+        assert!(covered >= 8, "all four vectored SLH-DSA parameter sets covered");
+        close_session(session).unwrap();
+    }
+
+    /// ML-KEM seed determinism (FIPS 203 Algorithm 16 — no official keyGen
+    /// vectors with d‖z are in-repo, so this asserts the deterministic
+    /// contract instead): same d‖z twice → identical ek/dk for every
+    /// parameter set; different seed → different keys; and the
+    /// deterministic keypair encap/decap round-trips.
+    #[test]
+    fn ml_kem_keygen_from_seed_deterministic_and_round_trips() {
+        use crate::native::encrypt::{decapsulate, encapsulate};
+        let _guard = test_lock::acquire();
+        let session = fresh_session();
+        let seed_a = [0x42u8; 64];
+        let seed_b = [0x43u8; 64];
+        for ps in [CKP_ML_KEM_512, CKP_ML_KEM_768, CKP_ML_KEM_1024] {
+            let (pub1, prv1) =
+                generate_ml_kem_keypair_from_seed(session, ps, &seed_a, b"\x01", "det").unwrap();
+            let (pub2, prv2) =
+                generate_ml_kem_keypair_from_seed(session, ps, &seed_a, b"\x02", "det").unwrap();
+            let (pub3, _) =
+                generate_ml_kem_keypair_from_seed(session, ps, &seed_b, b"\x03", "det").unwrap();
+            assert_eq!(
+                get_object_value(pub1).unwrap(),
+                get_object_value(pub2).unwrap(),
+                "same seed → same ek (ps=0x{ps:x})"
+            );
+            assert_eq!(
+                get_object_value(prv1).unwrap(),
+                get_object_value(prv2).unwrap(),
+                "same seed → same dk (ps=0x{ps:x})"
+            );
+            assert_ne!(
+                get_object_value(pub1).unwrap(),
+                get_object_value(pub3).unwrap(),
+                "different seed → different ek (ps=0x{ps:x})"
+            );
+            // Functional: deterministic keypair encap/decap round-trips.
+            let (ct, ss_enc) = encapsulate(session, pub1, CKM_ML_KEM).unwrap();
+            let ss_dec = decapsulate(session, prv2, CKM_ML_KEM, &ct).unwrap();
+            assert_eq!(ss_enc, ss_dec, "encap/decap shared secret (ps=0x{ps:x})");
+        }
+        close_session(session).unwrap();
+    }
+
+    /// ML-DSA / SLH-DSA seed determinism ×2 runs + functional sign/verify
+    /// on the deterministic keypair. Covers the 8 SLH-DSA parameter sets
+    /// that have no in-repo ACVP keyGen vectors (and one vectored one as a
+    /// control), plus ML-DSA-44 (KATs cover byte-exactness above).
+    #[test]
+    fn dsa_keygen_from_seed_deterministic_and_functional() {
+        use crate::native::sign::{sign, verify};
+        let _guard = test_lock::acquire();
+        let session = fresh_session();
+
+        // ML-DSA: ξ = 32 bytes.
+        let xi = [0xA5u8; 32];
+        let (pub1, prv1) =
+            generate_ml_dsa_keypair_from_seed(session, CKP_ML_DSA_44, &xi, b"\x01", "d").unwrap();
+        let (pub2, _) =
+            generate_ml_dsa_keypair_from_seed(session, CKP_ML_DSA_44, &xi, b"\x02", "d").unwrap();
+        assert_eq!(get_object_value(pub1).unwrap(), get_object_value(pub2).unwrap());
+        let sig = sign(session, prv1, CKM_ML_DSA, b"t7-data").unwrap();
+        assert!(verify(session, pub2, CKM_ML_DSA, b"t7-data", &sig).unwrap());
+
+        // SLH-DSA: 3n bytes; all 12 parameter sets (uses the fast 'f'
+        // variants' sign only on one set to keep runtime sane).
+        for (ps, n) in [
+            (CKP_SLH_DSA_SHA2_128S, 16usize),
+            (CKP_SLH_DSA_SHAKE_128S, 16),
+            (CKP_SLH_DSA_SHA2_128F, 16),
+            (CKP_SLH_DSA_SHAKE_128F, 16),
+            (CKP_SLH_DSA_SHA2_192S, 24),
+            (CKP_SLH_DSA_SHAKE_192S, 24),
+            (CKP_SLH_DSA_SHA2_192F, 24),
+            (CKP_SLH_DSA_SHAKE_192F, 24),
+            (CKP_SLH_DSA_SHA2_256S, 32),
+            (CKP_SLH_DSA_SHAKE_256S, 32),
+            (CKP_SLH_DSA_SHA2_256F, 32),
+            (CKP_SLH_DSA_SHAKE_256F, 32),
+        ] {
+            let seed = vec![0x5Au8; 3 * n];
+            let (p1, _) =
+                generate_slh_dsa_keypair_from_seed(session, ps, &seed, b"\x01", "s").unwrap();
+            let (p2, _) =
+                generate_slh_dsa_keypair_from_seed(session, ps, &seed, b"\x02", "s").unwrap();
+            assert_eq!(
+                get_object_value(p1).unwrap(),
+                get_object_value(p2).unwrap(),
+                "same seed → same pk (ps=0x{ps:x})"
+            );
+        }
+        // Functional sign/verify on one deterministic SLH-DSA keypair.
+        let seed = vec![0x77u8; 48];
+        let (spub, sprv) =
+            generate_slh_dsa_keypair_from_seed(session, CKP_SLH_DSA_SHA2_128F, &seed, b"\x03", "s")
+                .unwrap();
+        let sig = sign(session, sprv, CKM_SLH_DSA, b"t7-slh").unwrap();
+        assert!(verify(session, spub, CKM_SLH_DSA, b"t7-slh", &sig).unwrap());
+
+        close_session(session).unwrap();
+    }
+
+    /// Per-family / per-param-set seed length validation:
+    /// CKR_ATTRIBUTE_VALUE_INVALID on any wrong length (ξ ≠ 32,
+    /// d‖z ≠ 64, SLH ≠ 3n with n per param set).
+    #[test]
+    fn keygen_from_seed_rejects_wrong_lengths() {
+        let _guard = test_lock::acquire();
+        let session = fresh_session();
+        for bad in [0usize, 31, 33, 64] {
+            assert_eq!(
+                generate_ml_dsa_keypair_from_seed(
+                    session,
+                    CKP_ML_DSA_65,
+                    &vec![0u8; bad],
+                    b"\x01",
+                    "bad"
+                )
+                .unwrap_err(),
+                CKR_ATTRIBUTE_VALUE_INVALID,
+                "ML-DSA seed len {bad}"
+            );
+        }
+        for bad in [0usize, 32, 63, 65] {
+            assert_eq!(
+                generate_ml_kem_keypair_from_seed(
+                    session,
+                    CKP_ML_KEM_768,
+                    &vec![0u8; bad],
+                    b"\x01",
+                    "bad"
+                )
+                .unwrap_err(),
+                CKR_ATTRIBUTE_VALUE_INVALID,
+                "ML-KEM seed len {bad}"
+            );
+        }
+        // SLH-DSA: 3n is param-set dependent — a 48-byte seed is valid for
+        // n=16 but invalid for n=24/32, and vice versa.
+        for (ps, wrong) in [
+            (CKP_SLH_DSA_SHA2_128S, 72usize),
+            (CKP_SLH_DSA_SHA2_192S, 48),
+            (CKP_SLH_DSA_SHAKE_256F, 72),
+            (CKP_SLH_DSA_SHAKE_128F, 47),
+        ] {
+            assert_eq!(
+                generate_slh_dsa_keypair_from_seed(
+                    session,
+                    ps,
+                    &vec![0u8; wrong],
+                    b"\x01",
+                    "bad"
+                )
+                .unwrap_err(),
+                CKR_ATTRIBUTE_VALUE_INVALID,
+                "SLH-DSA ps=0x{ps:x} seed len {wrong}"
+            );
+        }
+        close_session(session).unwrap();
+    }
+
+    /// No CKA_SEED → OsRng path unchanged: two random generations differ
+    /// (per family).
+    #[test]
+    fn keygen_without_seed_remains_random() {
+        let _guard = test_lock::acquire();
+        let session = fresh_session();
+        let (a, _) = generate_ml_dsa_keypair(session, CKP_ML_DSA_44, b"\x01", "r").unwrap();
+        let (b, _) = generate_ml_dsa_keypair(session, CKP_ML_DSA_44, b"\x02", "r").unwrap();
+        assert_ne!(get_object_value(a).unwrap(), get_object_value(b).unwrap());
+        let (a, _) = generate_ml_kem_keypair(session, CKP_ML_KEM_512, b"\x03", "r").unwrap();
+        let (b, _) = generate_ml_kem_keypair(session, CKP_ML_KEM_512, b"\x04", "r").unwrap();
+        assert_ne!(get_object_value(a).unwrap(), get_object_value(b).unwrap());
+        let (a, _) =
+            generate_slh_dsa_keypair(session, CKP_SLH_DSA_SHA2_128F, b"\x05", "r").unwrap();
+        let (b, _) =
+            generate_slh_dsa_keypair(session, CKP_SLH_DSA_SHA2_128F, b"\x06", "r").unwrap();
+        assert_ne!(get_object_value(a).unwrap(), get_object_value(b).unwrap());
         close_session(session).unwrap();
     }
 }

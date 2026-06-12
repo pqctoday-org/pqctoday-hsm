@@ -1161,27 +1161,52 @@ pub fn C_GenerateKeyPair(
                 store_bool(&mut prv_attrs, CKA_DERIVE, false);
                 store_bool(&mut prv_attrs, CKA_LOCAL, true);
 
-                with_rng!(rng, {
-                    match ps {
-                        CKP_ML_KEM_512 => {
-                            let (dk, ek) = ml_kem::MlKem512::generate(&mut rng);
-                            pub_attrs.insert(CKA_VALUE, ek.as_bytes().as_slice().to_vec());
-                            prv_attrs.insert(CKA_VALUE, dk.as_bytes().as_slice().to_vec());
-                        }
-                        CKP_ML_KEM_768 => {
-                            let (dk, ek) = ml_kem::MlKem768::generate(&mut rng);
-                            pub_attrs.insert(CKA_VALUE, ek.as_bytes().as_slice().to_vec());
-                            prv_attrs.insert(CKA_VALUE, dk.as_bytes().as_slice().to_vec());
-                        }
-                        CKP_ML_KEM_1024 => {
-                            let (dk, ek) = ml_kem::MlKem1024::generate(&mut rng);
-                            pub_attrs.insert(CKA_VALUE, ek.as_bytes().as_slice().to_vec());
-                            prv_attrs.insert(CKA_VALUE, dk.as_bytes().as_slice().to_vec());
-                        }
-                        // §4.1 — unknown CKA_PARAMETER_SET value in the template.
-                        _ => return CKR_ATTRIBUTE_VALUE_INVALID,
-                    }
+                // T7 — PKCS#11 v3.2 §6.68.2: CKA_SEED (d ‖ z, 64 bytes) in the
+                // keygen template selects deterministic generation per FIPS 203
+                // Algorithm 16 `ML-KEM.KeyGen_internal(d, z)`. The seed is read
+                // explicitly because `absorb_template_attrs` deliberately skips
+                // CKA_SEED (sensitive-material class). CKA_SEED is an attribute
+                // of the private key; the public template is honored as a
+                // fallback rather than silently ignoring an explicit seed.
+                let seed = get_attr_bytes(
+                    p_private_key_template,
+                    ul_private_key_attribute_count,
+                    CKA_SEED,
+                )
+                .or_else(|| {
+                    get_attr_bytes(p_public_key_template, ul_public_key_attribute_count, CKA_SEED)
                 });
+                if let Some(ref s) = seed {
+                    if s.len() != 64 {
+                        return CKR_ATTRIBUTE_VALUE_INVALID;
+                    }
+                }
+                macro_rules! mlkem_gen {
+                    ($t:ty) => {{
+                        let (dk, ek) = match seed.as_deref() {
+                            Some(s) => {
+                                let d = ml_kem::B32::try_from(&s[..32]).expect("length checked");
+                                let z = ml_kem::B32::try_from(&s[32..64]).expect("length checked");
+                                <$t>::generate_deterministic(&d, &z)
+                            }
+                            None => with_rng!(rng, { <$t>::generate(&mut rng) }),
+                        };
+                        pub_attrs.insert(CKA_VALUE, ek.as_bytes().as_slice().to_vec());
+                        prv_attrs.insert(CKA_VALUE, dk.as_bytes().as_slice().to_vec());
+                    }};
+                }
+                match ps {
+                    CKP_ML_KEM_512 => mlkem_gen!(ml_kem::MlKem512),
+                    CKP_ML_KEM_768 => mlkem_gen!(ml_kem::MlKem768),
+                    CKP_ML_KEM_1024 => mlkem_gen!(ml_kem::MlKem1024),
+                    // §4.1 — unknown CKA_PARAMETER_SET value in the template.
+                    _ => return CKR_ATTRIBUTE_VALUE_INVALID,
+                }
+                // Store the seed on the private object — engine-side, in the
+                // sensitive-blocked readback set (state::attr_is_sensitive_material).
+                if let Some(s) = seed {
+                    prv_attrs.insert(CKA_SEED, s);
+                }
                 // CKA_PUBLIC_KEY_INFO (SPKI) — PKCS#11 v3.2 §4.14
                 if let Some(pk_bytes) = pub_attrs.get(&CKA_VALUE).cloned() {
                     let spki = match ps {
@@ -1266,57 +1291,61 @@ pub fn C_GenerateKeyPair(
                 store_bool(&mut prv_attrs, CKA_DERIVE, false);
                 store_bool(&mut prv_attrs, CKA_LOCAL, true);
 
+                // T7 — PKCS#11 v3.2 §6.67.2: CKA_SEED (ξ, 32 bytes) in the keygen
+                // template selects deterministic generation per FIPS 204
+                // Algorithm 6 `ML-DSA.KeyGen_internal(ξ)` (patched fips204
+                // `KeyGen::keygen_from_seed`). Read explicitly —
+                // `absorb_template_attrs` skips CKA_SEED (sensitive-material
+                // class). Private-key attribute; public template is a fallback.
+                let seed = get_attr_bytes(
+                    p_private_key_template,
+                    ul_private_key_attribute_count,
+                    CKA_SEED,
+                )
+                .or_else(|| {
+                    get_attr_bytes(p_public_key_template, ul_public_key_attribute_count, CKA_SEED)
+                });
+                if let Some(ref s) = seed {
+                    if s.len() != 32 {
+                        return CKR_ATTRIBUTE_VALUE_INVALID;
+                    }
+                }
+                macro_rules! mldsa_gen {
+                    ($m:ident) => {{
+                        use fips204::traits::{KeyGen, SerDes};
+                        match seed.as_deref() {
+                            Some(s) => {
+                                let xi: &[u8; 32] = s.try_into().expect("length checked");
+                                let (vk, sk) = fips204::$m::KG::keygen_from_seed(xi);
+                                pub_attrs.insert(CKA_VALUE, SerDes::into_bytes(vk).to_vec());
+                                prv_attrs.insert(CKA_VALUE, SerDes::into_bytes(sk).to_vec());
+                            }
+                            None => {
+                                let mut rng = rand::rngs::OsRng;
+                                match fips204::$m::try_keygen_with_rng(&mut rng) {
+                                    Ok((vk, sk)) => {
+                                        pub_attrs
+                                            .insert(CKA_VALUE, SerDes::into_bytes(vk).to_vec());
+                                        prv_attrs
+                                            .insert(CKA_VALUE, SerDes::into_bytes(sk).to_vec());
+                                    }
+                                    Err(_) => return CKR_FUNCTION_FAILED,
+                                }
+                            }
+                        }
+                    }};
+                }
                 match ps {
-                    CKP_ML_DSA_44 => {
-                        let mut rng = rand::rngs::OsRng;
-                        match fips204::ml_dsa_44::try_keygen_with_rng(&mut rng) {
-                            Ok((vk, sk)) => {
-                                pub_attrs.insert(
-                                    CKA_VALUE,
-                                    fips204::traits::SerDes::into_bytes(vk).to_vec(),
-                                );
-                                prv_attrs.insert(
-                                    CKA_VALUE,
-                                    fips204::traits::SerDes::into_bytes(sk).to_vec(),
-                                );
-                            }
-                            Err(_) => return CKR_FUNCTION_FAILED,
-                        }
-                    }
-                    CKP_ML_DSA_65 => {
-                        let mut rng = rand::rngs::OsRng;
-                        match fips204::ml_dsa_65::try_keygen_with_rng(&mut rng) {
-                            Ok((vk, sk)) => {
-                                pub_attrs.insert(
-                                    CKA_VALUE,
-                                    fips204::traits::SerDes::into_bytes(vk).to_vec(),
-                                );
-                                prv_attrs.insert(
-                                    CKA_VALUE,
-                                    fips204::traits::SerDes::into_bytes(sk).to_vec(),
-                                );
-                            }
-                            Err(_) => return CKR_FUNCTION_FAILED,
-                        }
-                    }
-                    CKP_ML_DSA_87 => {
-                        let mut rng = rand::rngs::OsRng;
-                        match fips204::ml_dsa_87::try_keygen_with_rng(&mut rng) {
-                            Ok((vk, sk)) => {
-                                pub_attrs.insert(
-                                    CKA_VALUE,
-                                    fips204::traits::SerDes::into_bytes(vk).to_vec(),
-                                );
-                                prv_attrs.insert(
-                                    CKA_VALUE,
-                                    fips204::traits::SerDes::into_bytes(sk).to_vec(),
-                                );
-                            }
-                            Err(_) => return CKR_FUNCTION_FAILED,
-                        }
-                    }
+                    CKP_ML_DSA_44 => mldsa_gen!(ml_dsa_44),
+                    CKP_ML_DSA_65 => mldsa_gen!(ml_dsa_65),
+                    CKP_ML_DSA_87 => mldsa_gen!(ml_dsa_87),
                     // §4.1 — unknown CKA_PARAMETER_SET value in the template.
                     _ => return CKR_ATTRIBUTE_VALUE_INVALID,
+                }
+                // Store the seed on the private object — engine-side, in the
+                // sensitive-blocked readback set (state::attr_is_sensitive_material).
+                if let Some(s) = seed {
+                    prv_attrs.insert(CKA_SEED, s);
                 }
                 // CKA_PUBLIC_KEY_INFO (SPKI) — PKCS#11 v3.2 §4.14
                 if let Some(pk_bytes) = pub_attrs.get(&CKA_VALUE).cloned() {
@@ -1402,105 +1431,66 @@ pub fn C_GenerateKeyPair(
                 store_bool(&mut prv_attrs, CKA_DERIVE, false);
                 store_bool(&mut prv_attrs, CKA_LOCAL, true);
 
+                // T7 — PKCS#11 v3.2 §6.69.2: CKA_SEED (SK.seed ‖ SK.prf ‖
+                // PK.seed, 3n bytes) in the keygen template selects
+                // deterministic generation per FIPS 205 Algorithm 18
+                // `slh_keygen_internal` (fips205 `KeyGen::keygen_with_seeds`).
+                // Read explicitly — `absorb_template_attrs` skips CKA_SEED
+                // (sensitive-material class). Private-key attribute; public
+                // template is a fallback. Per-param-set length validation
+                // (3n = 48/72/96) lives in the `slh_dsa_keygen!` macro.
+                let seed = get_attr_bytes(
+                    p_private_key_template,
+                    ul_private_key_attribute_count,
+                    CKA_SEED,
+                )
+                .or_else(|| {
+                    get_attr_bytes(p_public_key_template, ul_public_key_attribute_count, CKA_SEED)
+                });
                 match ps {
                     CKP_SLH_DSA_SHA2_128S => {
-                        slh_dsa_keygen!(
-                            fips205::slh_dsa_sha2_128s::try_keygen_with_rng,
-                            16,
-                            pub_attrs,
-                            prv_attrs
-                        )
+                        slh_dsa_keygen!(slh_dsa_sha2_128s, seed.as_deref(), pub_attrs, prv_attrs)
                     }
                     CKP_SLH_DSA_SHAKE_128S => {
-                        slh_dsa_keygen!(
-                            fips205::slh_dsa_shake_128s::try_keygen_with_rng,
-                            16,
-                            pub_attrs,
-                            prv_attrs
-                        )
+                        slh_dsa_keygen!(slh_dsa_shake_128s, seed.as_deref(), pub_attrs, prv_attrs)
                     }
                     CKP_SLH_DSA_SHA2_128F => {
-                        slh_dsa_keygen!(
-                            fips205::slh_dsa_sha2_128f::try_keygen_with_rng,
-                            16,
-                            pub_attrs,
-                            prv_attrs
-                        )
+                        slh_dsa_keygen!(slh_dsa_sha2_128f, seed.as_deref(), pub_attrs, prv_attrs)
                     }
                     CKP_SLH_DSA_SHAKE_128F => {
-                        slh_dsa_keygen!(
-                            fips205::slh_dsa_shake_128f::try_keygen_with_rng,
-                            16,
-                            pub_attrs,
-                            prv_attrs
-                        )
+                        slh_dsa_keygen!(slh_dsa_shake_128f, seed.as_deref(), pub_attrs, prv_attrs)
                     }
                     CKP_SLH_DSA_SHA2_192S => {
-                        slh_dsa_keygen!(
-                            fips205::slh_dsa_sha2_192s::try_keygen_with_rng,
-                            24,
-                            pub_attrs,
-                            prv_attrs
-                        )
+                        slh_dsa_keygen!(slh_dsa_sha2_192s, seed.as_deref(), pub_attrs, prv_attrs)
                     }
                     CKP_SLH_DSA_SHAKE_192S => {
-                        slh_dsa_keygen!(
-                            fips205::slh_dsa_shake_192s::try_keygen_with_rng,
-                            24,
-                            pub_attrs,
-                            prv_attrs
-                        )
+                        slh_dsa_keygen!(slh_dsa_shake_192s, seed.as_deref(), pub_attrs, prv_attrs)
                     }
                     CKP_SLH_DSA_SHA2_192F => {
-                        slh_dsa_keygen!(
-                            fips205::slh_dsa_sha2_192f::try_keygen_with_rng,
-                            24,
-                            pub_attrs,
-                            prv_attrs
-                        )
+                        slh_dsa_keygen!(slh_dsa_sha2_192f, seed.as_deref(), pub_attrs, prv_attrs)
                     }
                     CKP_SLH_DSA_SHAKE_192F => {
-                        slh_dsa_keygen!(
-                            fips205::slh_dsa_shake_192f::try_keygen_with_rng,
-                            24,
-                            pub_attrs,
-                            prv_attrs
-                        )
+                        slh_dsa_keygen!(slh_dsa_shake_192f, seed.as_deref(), pub_attrs, prv_attrs)
                     }
                     CKP_SLH_DSA_SHA2_256S => {
-                        slh_dsa_keygen!(
-                            fips205::slh_dsa_sha2_256s::try_keygen_with_rng,
-                            32,
-                            pub_attrs,
-                            prv_attrs
-                        )
+                        slh_dsa_keygen!(slh_dsa_sha2_256s, seed.as_deref(), pub_attrs, prv_attrs)
                     }
                     CKP_SLH_DSA_SHAKE_256S => {
-                        slh_dsa_keygen!(
-                            fips205::slh_dsa_shake_256s::try_keygen_with_rng,
-                            32,
-                            pub_attrs,
-                            prv_attrs
-                        )
+                        slh_dsa_keygen!(slh_dsa_shake_256s, seed.as_deref(), pub_attrs, prv_attrs)
                     }
                     CKP_SLH_DSA_SHA2_256F => {
-                        slh_dsa_keygen!(
-                            fips205::slh_dsa_sha2_256f::try_keygen_with_rng,
-                            32,
-                            pub_attrs,
-                            prv_attrs
-                        )
+                        slh_dsa_keygen!(slh_dsa_sha2_256f, seed.as_deref(), pub_attrs, prv_attrs)
                     }
                     CKP_SLH_DSA_SHAKE_256F => {
-                        slh_dsa_keygen!(
-                            fips205::slh_dsa_shake_256f::try_keygen_with_rng,
-                            32,
-                            pub_attrs,
-                            prv_attrs
-                        )
+                        slh_dsa_keygen!(slh_dsa_shake_256f, seed.as_deref(), pub_attrs, prv_attrs)
                     }
                     // §4.1 — unknown CKA_PARAMETER_SET value in the template.
                     _ => return CKR_ATTRIBUTE_VALUE_INVALID,
+                }
+                // Store the seed on the private object — engine-side, in the
+                // sensitive-blocked readback set (state::attr_is_sensitive_material).
+                if let Some(s) = seed {
+                    prv_attrs.insert(CKA_SEED, s);
                 }
                 // CKA_PUBLIC_KEY_INFO (SPKI) — PKCS#11 v3.2 §4.14
                 if let Some(pk_bytes) = pub_attrs.get(&CKA_VALUE).cloned() {

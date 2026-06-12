@@ -47,7 +47,10 @@ hmac = "0.12.1"
 sp800-185 = "0.2.0"
 pbkdf2 = "0.12"
 hkdf = "0.12"
-ml-kem = "0.2.3"
+# `deterministic` exposes `KemCore::generate_deterministic(d, z)` — FIPS 203
+# Algorithm 16 `ML-KEM.KeyGen_internal(d, z)` — used by the T7 CKA_SEED
+# deterministic-keygen path (PKCS#11 v3.2 §6.68.2).
+ml-kem = { version = "0.2.3", features = ["deterministic"] }
 p256 = { version = "0.13", features = ["ecdsa", "ecdh"] }
 p384 = { version = "0.13", features = ["ecdsa", "ecdh"] }
 p521 = { version = "0.13", features = ["ecdsa", "ecdh"] }
@@ -75,6 +78,11 @@ xmss = "0.1.0-pre.0"
 # full PKCS#11 v3.2 §6.67.7 HashML-DSA and §6.69.7 HashSLH-DSA coverage
 fips204 = "0.4.6"
 fips205 = "0.4.1"
+
+[dev-dependencies]
+# NIST ACVP keyGen KAT parsing (T7 seed-deterministic keygen tests reads
+# the internalProjection.json vector files shipped with the patched forks).
+serde_json = "1"
 
 [patch.crates-io]
 fips204 = { path = "fips204-patched" }
