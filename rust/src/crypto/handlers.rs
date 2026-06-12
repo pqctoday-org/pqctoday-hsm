@@ -203,17 +203,41 @@ pub unsafe fn write_fixed_str(buf: *mut u8, offset: usize, s: &str, max_len: usi
 
 // ── SLH-DSA Macros ──────────────────────────────────────────────────────────
 
+/// SLH-DSA keygen for the C ABI (`ffi::C_GenerateKeyPair`). `$m` is the
+/// `fips205` parameter-set module; `$seed` is `Option<&[u8]>` — `Some` runs
+/// FIPS 205 Algorithm 18 `slh_keygen_internal(SK.seed, SK.prf, PK.seed)`
+/// deterministically from a `3n`-byte `CKA_SEED` (PKCS#11 v3.2 §6.69.2),
+/// `None` keeps the random path (Algorithm 21 via OsRng). A wrong-length
+/// seed returns `CKR_ATTRIBUTE_VALUE_INVALID` (n is per-param-set: 16/24/32).
 #[macro_export]
 macro_rules! slh_dsa_keygen {
-    ($func:path, $n:expr, $pub_attrs:expr, $prv_attrs:expr) => {{
-        let mut rng = rand::rngs::OsRng;
-        match $func(&mut rng) {
-            Ok((vk, sk)) => {
-                use fips205::traits::SerDes;
-                $pub_attrs.insert(CKA_VALUE, fips205::traits::SerDes::into_bytes(vk).to_vec());
-                $prv_attrs.insert(CKA_VALUE, fips205::traits::SerDes::into_bytes(sk).to_vec());
+    ($m:ident, $seed:expr, $pub_attrs:expr, $prv_attrs:expr) => {{
+        use fips205::traits::{KeyGen, SerDes};
+        const N: usize = fips205::$m::N;
+        match $seed {
+            Some(s) => {
+                if s.len() != 3 * N {
+                    return CKR_ATTRIBUTE_VALUE_INVALID;
+                }
+                // FIPS 205 §9.1 — CKA_SEED = SK.seed ‖ SK.prf ‖ PK.seed.
+                let (vk, sk) = fips205::$m::KG::keygen_with_seeds::<N>(
+                    s[..N].try_into().expect("length checked"),
+                    s[N..2 * N].try_into().expect("length checked"),
+                    s[2 * N..].try_into().expect("length checked"),
+                );
+                $pub_attrs.insert(CKA_VALUE, SerDes::into_bytes(vk).to_vec());
+                $prv_attrs.insert(CKA_VALUE, SerDes::into_bytes(sk).to_vec());
             }
-            Err(_) => return CKR_FUNCTION_FAILED,
+            None => {
+                let mut rng = rand::rngs::OsRng;
+                match fips205::$m::try_keygen_with_rng(&mut rng) {
+                    Ok((vk, sk)) => {
+                        $pub_attrs.insert(CKA_VALUE, SerDes::into_bytes(vk).to_vec());
+                        $prv_attrs.insert(CKA_VALUE, SerDes::into_bytes(sk).to_vec());
+                    }
+                    Err(_) => return CKR_FUNCTION_FAILED,
+                }
+            }
         }
     }};
 }

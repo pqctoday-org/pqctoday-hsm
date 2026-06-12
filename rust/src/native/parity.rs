@@ -64,7 +64,10 @@
 #![cfg(test)]
 
 use crate::constants::*;
-use crate::native::keygen::{generate_generic_secret, generate_ml_dsa_keypair};
+use crate::native::keygen::{
+    generate_generic_secret, generate_ml_dsa_keypair, generate_ml_dsa_keypair_from_seed,
+    generate_ml_kem_keypair_from_seed, generate_slh_dsa_keypair_from_seed,
+};
 use crate::native::object::destroy_object;
 use crate::native::session::{bootstrap_default_token, close_session, finalize, init};
 use crate::native::sign::{sign, verify};
@@ -307,6 +310,57 @@ fn seed_blocked_on_sensitive_key_in_both_apis() {
     let rv = ffi::C_GetAttributeValue(session, prv_h, tmpl.as_mut_ptr() as *mut u8, 1);
     assert_eq!(rv, CKR_ATTRIBUTE_SENSITIVE);
     assert_eq!(tmpl[2], 0xFFFF_FFFF);
+    close_session(session).unwrap();
+}
+
+/// S3 × T7 — a CKA_SEED stored by **deterministic keygen** lands on the
+/// private object engine-side AND is blocked through both readback surfaces
+/// (`native::object::get_attribute` → None, `ffi::C_GetAttributeValue` →
+/// CKR_ATTRIBUTE_SENSITIVE). Checked for all three PQC families.
+#[test]
+fn deterministic_keygen_seed_stored_but_blocked_in_both_apis() {
+    use crate::native::object::get_attribute;
+    let _guard = test_lock::acquire();
+    let session = fresh_session();
+
+    let xi = [0x11u8; 32];
+    let dz = [0x22u8; 64];
+    let slh = [0x33u8; 48];
+    let (_, dsa_prv) =
+        generate_ml_dsa_keypair_from_seed(session, CKP_ML_DSA_44, &xi, b"\x01", "t7").unwrap();
+    let (_, kem_prv) =
+        generate_ml_kem_keypair_from_seed(session, CKP_ML_KEM_512, &dz, b"\x02", "t7").unwrap();
+    let (_, slh_prv) = generate_slh_dsa_keypair_from_seed(
+        session,
+        CKP_SLH_DSA_SHA2_128F,
+        &slh,
+        b"\x03",
+        "t7",
+    )
+    .unwrap();
+
+    for (prv_h, seed) in [
+        (dsa_prv, &xi[..]),
+        (kem_prv, &dz[..]),
+        (slh_prv, &slh[..]),
+    ] {
+        // Engine-side: the seed IS stored on the private object…
+        let stored = crate::state::OBJECTS
+            .with(|o| o.borrow().get(&prv_h).and_then(|a| a.get(&CKA_SEED).cloned()));
+        assert_eq!(stored.as_deref(), Some(seed), "seed stored engine-side");
+
+        // …but is NOT exportable: native::get_attribute is blocked
+        // (keygen'd private keys are CKA_SENSITIVE=TRUE / EXTRACTABLE=FALSE),
+        assert!(
+            get_attribute(session, prv_h, CKA_SEED).is_none(),
+            "native CKA_SEED readback must be blocked (h={prv_h})"
+        );
+        // …and the C ABI size query reports CKR_ATTRIBUTE_SENSITIVE.
+        let mut tmpl: [u32; 3] = [CKA_SEED, 0, 0];
+        let rv = ffi::C_GetAttributeValue(session, prv_h, tmpl.as_mut_ptr() as *mut u8, 1);
+        assert_eq!(rv, CKR_ATTRIBUTE_SENSITIVE);
+        assert_eq!(tmpl[2], 0xFFFF_FFFF);
+    }
     close_session(session).unwrap();
 }
 
