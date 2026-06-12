@@ -63,6 +63,16 @@ pub fn register(
         }
     }
 
+    // K19 — KMIP 3.0 §6.1.58 Set Defaults: Register is a factory
+    // operation, so the stored per-Object-Type defaults fill any
+    // attributes the client omitted (client attributes win).
+    super::allocation_and_config::apply_object_defaults(
+        deps,
+        req.object_type,
+        &[],
+        &mut req.attributes,
+    );
+
     // Per §6.1.48 Table 395: if the object is cryptographic, certain
     // attributes are REQUIRED. CryptographicAlgorithm + Length may be
     // omitted only if encapsulated in the KeyBlock. Our handler accepts

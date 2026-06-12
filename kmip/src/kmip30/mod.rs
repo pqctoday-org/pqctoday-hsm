@@ -70,6 +70,12 @@ pub use ops::{
     SignatureValidity,
     SignatureVerifyRequest, SignatureVerifyResponse,
     SignRequest, SignResponse,
+    // K19 — Baseline client-to-server ops (§6.1.26/27/58/59).
+    Constraint, EndpointRole, ObjectDefaults,
+    GetConstraintsRequest, GetConstraintsResponse,
+    GetUsageAllocationRequest, GetUsageAllocationResponse,
+    SetDefaultsRequest, SetDefaultsResponse,
+    SetEndpointRoleRequest, SetEndpointRoleResponse,
 };
 
 pub use message::{AsynchronousIndicator, BatchErrorContinuationOption, Credential};

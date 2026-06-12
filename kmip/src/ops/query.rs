@@ -138,21 +138,26 @@ pub fn query(deps: &Deps, req: QueryRequest, correlation_id: &str) -> Result<Que
 /// `OperationFailed / OperationNotSupported (0x05)` (see
 /// `RequestPayload::Unsupported`) instead of the previous
 /// advertised-but-InvalidMessage behaviour. DelegatedLogin /
-/// ReProvision / SetDefaults are neither implemented nor
-/// corpus-required, so they are NOT advertised.
+/// ReProvision are neither implemented nor corpus-required, so they
+/// are NOT advertised.
+///
+/// K19 moved SetEndpointRole / GetUsageAllocation / GetConstraints out
+/// of this list into `HANDLED_OPERATIONS` (no net change to the
+/// advertised set), and implemented SetDefaults — which was previously
+/// neither implemented nor advertised — so it is now advertised as a
+/// handled op (the corpus gate is *expected ⊆ actual*, so the one-op
+/// growth of the advertised set keeps every MSGENC-* Query transcript
+/// passing).
 pub(crate) const ADVERTISED_UNIMPLEMENTED_OPERATIONS: &[Operation] = &[
-    Operation::SetEndpointRole,
     Operation::ReKey,
     Operation::ReCertify,
     Operation::ObtainLease,
-    Operation::GetUsageAllocation,
     Operation::Validate,
     Operation::Poll,
     Operation::Notify,
     Operation::Put,
     Operation::CreateSplitKey,
     Operation::SetConstraints,
-    Operation::GetConstraints,
     Operation::QueryAsynchronousRequests,
     Operation::Process,
     // K3 additions — also enumerated by the MSGENC-* expected Query
@@ -237,8 +242,11 @@ mod tests {
         let (_ring, d) = deps();
         let resp = query(&d, QueryRequest { functions: vec![QueryFunction::QueryOperations] }, "corr-q").unwrap();
         let ops = resp.operations.unwrap();
-        // 42 handled + 19 corpus-required advertised-only = 61.
-        assert_eq!(ops.len(), 61);
+        // K19: 46 handled + 16 corpus-required advertised-only = 62
+        // (was 42 + 19 = 61; SetEndpointRole / GetUsageAllocation /
+        // GetConstraints moved between the sets, SetDefaults is newly
+        // implemented and therefore newly — honestly — advertised).
+        assert_eq!(ops.len(), 62);
         assert!(ops.contains(&Operation::Sign));
         assert!(ops.contains(&Operation::Encrypt));
         assert!(ops.contains(&Operation::Decrypt));
@@ -246,7 +254,14 @@ mod tests {
         assert!(ops.contains(&Operation::Interop));
         assert!(ops.contains(&Operation::AddAttribute));
         assert!(ops.contains(&Operation::SetAttribute));
-        assert!(ops.contains(&Operation::SetEndpointRole));
+        // K19 — the four Baseline client-to-server ops are handled
+        // (and therefore advertised).
+        for op in [
+            Operation::SetEndpointRole, Operation::GetUsageAllocation,
+            Operation::GetConstraints, Operation::SetDefaults,
+        ] {
+            assert!(ops.contains(&op), "{op:?} must be advertised (K19 handled)");
+        }
         // K3 — corpus-required ops newly added to the Operation enum.
         for op in [
             Operation::DeriveKey, Operation::Certify, Operation::Cancel,
@@ -255,9 +270,7 @@ mod tests {
             assert!(ops.contains(&op), "{op:?} must be advertised (MSGENC-*)");
         }
         // Not implemented AND not corpus-required → never advertised.
-        for op in [
-            Operation::DelegatedLogin, Operation::ReProvision, Operation::SetDefaults,
-        ] {
+        for op in [Operation::DelegatedLogin, Operation::ReProvision] {
             assert!(!ops.contains(&op), "{op:?} must NOT be advertised");
         }
     }

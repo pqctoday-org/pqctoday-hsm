@@ -74,10 +74,11 @@ pub enum Operation {
     Interop          = 0x34,
     AdjustAttribute  = 0x30,
     SetAttribute     = 0x31,
-    /// KMIP 3.0 §6.1 — cluster-role configuration op. Advertised in
-    /// Query so OASIS Baseline tests pass §4.1.1 item 15 superset
-    /// check, but the request handler is a stub (no managed-object
-    /// effect). Codepoint 0x32 per the spec extraction.
+    /// KMIP 3.0 §6.1.59 — endpoint-role configuration op. K19: handled
+    /// — `role=Server` is acknowledged (the server keeps the role it
+    /// already has); `role=Client` (the §6.2 role switch) is rejected
+    /// with `FeatureNotSupported` (see `ops::allocation_and_config`).
+    /// Codepoint 0x32 per the spec extraction.
     SetEndpointRole  = 0x32,
     Ping             = 0x3b,
     CreateGroup      = 0x3c,
@@ -97,6 +98,8 @@ pub enum Operation {
     ReKey                     = 0x04,
     ReCertify                 = 0x07,
     ObtainLease               = 0x10,
+    /// K19 — handled (§6.1.27): grants a usage allocation by
+    /// decrementing the object's tracked `Usage Limits Count`.
     GetUsageAllocation        = 0x11,
     Validate                  = 0x17,
     Poll                      = 0x1a,
@@ -104,6 +107,8 @@ pub enum Operation {
     Put                       = 0x1c,
     CreateSplitKey            = 0x28,
     SetConstraints            = 0x37,
+    /// K19 — handled (§6.1.26): reports the static engine-backed
+    /// constraint table.
     GetConstraints            = 0x38,
     QueryAsynchronousRequests = 0x39,
     Process                   = 0x3a,
@@ -122,6 +127,9 @@ pub enum Operation {
     JoinSplitKey              = 0x29,
     DelegatedLogin            = 0x2f,
     ReProvision               = 0x35,
+    /// K19 — handled (§6.1.58): stores per-Object-Type default
+    /// attributes applied beneath client templates on Create /
+    /// CreateKeyPair / Register.
     SetDefaults               = 0x36,
 }
 
@@ -1396,6 +1404,119 @@ pub struct InteropRequest {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct InteropResponse;
+
+// ── K19 — Baseline client-to-server ops (§5.1.2 item 9) ────────────────────
+
+/// `Get Usage Allocation` (KMIP 3.0 §6.1.27 / Table 329) — obtain an
+/// allocation from the object's current `Usage Limits` value before
+/// applying cryptographic protection with it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GetUsageAllocationRequest {
+    /// "The Unique Identifier of the object." REQUIRED per Table 329
+    /// (the §6.4 ID-placeholder enumeration form is also accepted).
+    pub uid: String,
+    /// `Usage Limits Count` (0x420096, LongInteger) — "The number of
+    /// Usage Limits Units to be protected." REQUIRED per Table 329.
+    pub usage_limits_count: i64,
+}
+
+/// §6.1.27 / Table 330 — UID-only response.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GetUsageAllocationResponse {
+    pub uid: String,
+}
+
+/// `Get Constraints` (KMIP 3.0 §6.1.26 / Table 326) — the request
+/// payload is empty per the spec table.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GetConstraintsRequest;
+
+/// §6.1.26 / Table 327 — response carries the `Constraints` Structure
+/// (0x420168, §7.7 Table 458): a set of `Constraint` Structures.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GetConstraintsResponse {
+    pub constraints: Vec<Constraint>,
+}
+
+/// `Constraint` Structure (KMIP 3.0 §7.6 / Table 457) — "details of a
+/// constraint that is applied to operations that create Managed
+/// Objects". Children: `Object Types` (§7.25, optional), `Object
+/// Groups` (optional — not modelled; this server tracks no object
+/// groups) and `Attributes` (optional).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Constraint {
+    /// `Object Types` (0x420167) — empty ⇒ omitted on the wire.
+    pub object_types: Vec<ObjectType>,
+    /// `Attributes` (0x420125) — the constrained attribute values.
+    pub attributes: Vec<Attribute>,
+}
+
+/// `Set Defaults` (KMIP 3.0 §6.1.58 / Table 428) — "set the default
+/// attributes that will be applied to Managed Objects during factory
+/// operations if the client does not supply values".
+#[derive(Clone, Debug, PartialEq)]
+pub struct SetDefaultsRequest {
+    /// `Defaults Information` (0x420152, §7.12 Table 464) — the set of
+    /// Object Defaults to begin using. `None` ⇒ "remove all Object
+    /// Defaults from the server" per Table 428.
+    pub defaults_information: Option<Vec<ObjectDefaults>>,
+}
+
+/// §6.1.58 / Table 429 — the response payload is empty per the spec.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SetDefaultsResponse;
+
+/// `Object Defaults` Structure (KMIP 3.0 §7.23 / Table 475) — the
+/// attribute values the server uses when the client omits them on
+/// factory methods, keyed by Object Type. The spec allows either a
+/// single `Object Type` Enumeration or an `Object Types` Structure
+/// ("Object Type | ObjectTypes — Enumeration | Structure — Yes");
+/// both decode into `object_types`. `Object Groups` (optional) is not
+/// modelled — this server tracks no object groups.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ObjectDefaults {
+    pub object_types: Vec<ObjectType>,
+    /// `Attributes` (0x420125) — REQUIRED per Table 475.
+    pub attributes: Vec<Attribute>,
+}
+
+/// `Endpoint Role` Enumeration (KMIP 3.0 §11; codepoints verified
+/// against `kmip-spec-3.0-tags-enums.json` `enums."Endpoint Role"`:
+/// Client = 0x01, Server = 0x02).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EndpointRole {
+    Client = 0x01,
+    Server = 0x02,
+}
+
+impl EndpointRole {
+    pub const fn to_wire_value(self) -> u32 { self as u32 }
+    pub const fn from_wire_value(v: u32) -> Option<Self> {
+        match v {
+            0x01 => Some(Self::Client),
+            0x02 => Some(Self::Server),
+            _ => None,
+        }
+    }
+}
+
+/// `Set Endpoint Role` (KMIP 3.0 §6.1.59 / Table 431) — request that
+/// the server apply the given endpoint role for subsequent traffic on
+/// the current channel ("After successful completion of the operation
+/// the server assumes the client role, and the client assumes the
+/// server role").
+#[derive(Clone, Debug, PartialEq)]
+pub struct SetEndpointRoleRequest {
+    /// "The endpoint role for the server to apply." REQUIRED.
+    pub endpoint_role: EndpointRole,
+}
+
+/// §6.1.59 / Table 432 — "The accepted endpoint role as applied by
+/// the server." REQUIRED.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SetEndpointRoleResponse {
+    pub endpoint_role: EndpointRole,
+}
 
 #[cfg(test)]
 mod tests {

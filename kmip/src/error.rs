@@ -20,7 +20,22 @@ pub enum ResultReason {
     OperationNotSupported = 0x0000_0005,
     MissingData           = 0x0000_0006,
     InvalidField          = 0x0000_0007,
+    /// `Feature Not Supported` — KMIP 3.0 §9.2 / §11. The request is
+    /// well-formed and the operation is implemented, but it asks for a
+    /// capability this server does not provide (e.g. Set Endpoint Role
+    /// requesting the §6.2 role switch — K19). Listed in the §6.1.59
+    /// Table 433 error table.
+    FeatureNotSupported   = 0x0000_0008,
     CryptographicFailure  = 0x0000_000a,
+    /// `Usage Limit Exceeded` — KMIP 3.0 §11. A Get Usage Allocation
+    /// (§6.1.27, Table 331) asked for more Usage Limits Units than the
+    /// object's remaining `Usage Limits Count` can grant.
+    UsageLimitExceeded    = 0x0000_001a,
+    /// `Attribute Not Found` — KMIP 3.0 §11. The operation requires an
+    /// attribute the object does not carry (e.g. Get Usage Allocation
+    /// against an object with no Usage Limits attribute — §6.1.27
+    /// Table 331 error table).
+    AttributeNotFound     = 0x0000_0021,
     PermissionDenied      = 0x0000_000c,
     ObjectArchived        = 0x0000_000d,
     ObjectAlreadyExists   = 0x0000_0018,
@@ -215,6 +230,15 @@ impl KmipError {
     pub fn general_failure(msg: impl Into<String>) -> Self {
         Self::failed(ResultReason::GeneralFailure, msg)
     }
+    pub fn feature_not_supported(msg: impl Into<String>) -> Self {
+        Self::failed(ResultReason::FeatureNotSupported, msg)
+    }
+    pub fn usage_limit_exceeded(msg: impl Into<String>) -> Self {
+        Self::failed(ResultReason::UsageLimitExceeded, msg)
+    }
+    pub fn attribute_not_found(msg: impl Into<String>) -> Self {
+        Self::failed(ResultReason::AttributeNotFound, msg)
+    }
     pub fn internal(msg: impl Into<String>) -> Self {
         Self::Internal(msg.into())
     }
@@ -260,6 +284,10 @@ mod tests {
         assert_eq!(ResultReason::InvalidDataType.to_wire_value(),       0x0000_001c);
         assert_eq!(ResultReason::UnsupportedCryptographicParameters.to_wire_value(), 0x0000_003e);
         assert_eq!(ResultReason::UnsupportedProtocolVersion.to_wire_value(), 0x0000_003f);
+        // K19 additions — `Result Reason` rows in the OASIS enums JSON.
+        assert_eq!(ResultReason::FeatureNotSupported.to_wire_value(),   0x0000_0008);
+        assert_eq!(ResultReason::UsageLimitExceeded.to_wire_value(),    0x0000_001a);
+        assert_eq!(ResultReason::AttributeNotFound.to_wire_value(),     0x0000_0021);
         assert_eq!(ResultReason::GeneralFailure.to_wire_value(),        0x0000_0100);
     }
 
