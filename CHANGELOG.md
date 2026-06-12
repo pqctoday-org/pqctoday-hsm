@@ -8,6 +8,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — strongSwan-wasm: IKEv2 fragmentation, multi-KE, CHILD_SA stub kernel (2026-06-12)
+
+(`feat/wasm-vpn-frag-multike-childsa` track; CHANGELOG entry added at
+consolidation — the work landed in four commits without entries.)
+
+- **RFC 7383 IKEv2 message fragmentation + RFC 9370 multiple key
+  exchanges** wired through the wasm strongSwan build, with a Tier A
+  CHILD_SA stub kernel (`strongswan-wasm-shims/kernel_wasm.c`, new) so
+  CHILD_SA negotiation completes against the in-browser stack.
+- **CHILD_SA traffic selectors + race-free stub-kernel registration**
+  (`kernel_wasm.c`, `wasm_backend.c`).
+- **SLH-DSA 6.0.5 compat defines** for the shared strongswan-pkcs11
+  overlay so one overlay serves both strongSwan series.
+- v1 strongSwan wasm build pipeline marked VERIFIED
+  (`docs/wasm-charon-phase-3b-plus-roadmap.md`).
+
+
 ### Compliance round 3 — spec-truth for code and tests (2026-06-12)
 
 The test-infrastructure audit found the instruments measuring compliance
