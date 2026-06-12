@@ -8,6 +8,50 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Compliance round 2 — remaining-gap remediation (2026-06-12)
+
+Execution of the round-2 remediation (engine slices T1–T8, KMIP slices
+K16–K22) closing the gaps left after the 2026-06-10 audit remediation.
+All gates green throughout: engine tests 197/197, constants 349/349,
+kmip tests 426/426, OASIS replay 92 PASS / 0 FAIL.
+
+- **Engine (softhsmrustv3, T1–T8)**: advertise/dispatch holes closed
+  (P-521 under all hash-ECDSA mechs with FIPS 186-5 digest truncation,
+  wasm ChaCha20{,-Poly1305} encrypt/decrypt dispatch, SHA3-ECDSA/ECDH
+  ranges) — T1; dynamic TokenInfo (flags from real PIN/init state,
+  settable label, live session counters) — T2; token-scoped object
+  enumeration with strict cross-slot handle invalidation — T3;
+  multi-part C_Sign/C_Verify Update/Final for hash-composite and HMAC
+  mechanisms — T4; message-encrypt rework (see detailed T5 entry
+  below); C_SetAttributeValue (§4.1.3 modifiability, all-or-nothing),
+  C_CopyObject (CKA_COPYABLE, no security weakening), C_GetObjectSize,
+  C_SetPIN (PBKDF2 rotation), C_SeedRandom →
+  CKR_RANDOM_SEED_NOT_SUPPORTED — T6; seed-deterministic PQC keygen via
+  CKA_SEED (FIPS 203 d‖z via ml-kem generate_deterministic, FIPS 204 ξ
+  via fips204 keygen_from_seed, FIPS 205 3-seed via fips205
+  keygen_with_seeds; ACVP keyGen KATs byte-exact where vectors exist) —
+  T7; native C_GetFunctionList — real CK_FUNCTION_LIST{,_3_0,_3_2}
+  (104 entries) via checked-narrowing ABI adapter shims on non-wasm
+  targets — T8.
+- **KMIP server (K16–K22)**: Export honors KeyWrappingSpecification
+  (shares Get's AES-KW machinery) — K16; Register accepts wrapped key
+  material (KeyWrappingData → KEK UnwrapKey-mask gate → AES-KW unwrap →
+  TTLV/raw KeyValue decode → normal pipeline) — K17; RSA-PSS Salt
+  Length decoded from CryptographicParameters and threaded to the
+  engine (salt-0 byte-matches OpenSSL) — K18; Baseline §5.1.2 item-9
+  ops implemented (GetUsageAllocation against the real usage budget,
+  GetConstraints from engine truth, SetDefaults applied beneath client
+  templates, SetEndpointRole identity-accept/switch-reject per
+  §6.1.59.1) — K19; Derive Key (HMAC/HASH/PBKDF2/NIST 800-108-C per
+  the §7.13 constructions, derivation links both directions,
+  unsupported methods → the spec-listed reason) — K20; Re-key + Re-key
+  Key Pair (§6.1.51/52 attribute inheritance incl. Name transfer,
+  Offset date shifts, Replaced/Replacement links, original
+  deactivation) — K21; Archive/Recover now real (storage status
+  enforced: Get/crypto ops on archived objects → Object Archived 0x0d,
+  attributes stay readable, Locate Storage Status Mask filters actual
+  state) — K22.
+
 ### Fixed — T5 message-encrypt multipart rework (2026-06-12)
 
 `C_EncryptMessage*`/`C_DecryptMessage*` (PKCS#11 v3.2 §5.15, AES-GCM) — closes
