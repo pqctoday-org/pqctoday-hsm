@@ -34,7 +34,7 @@ use super::helpers::{canonical_name, emit_request, emit_success, fail_err};
 
 pub fn register(
     deps: &Deps,
-    req: RegisterRequest,
+    mut req: RegisterRequest,
     correlation_id: &str,
 ) -> Result<RegisterResponse> {
     let started = OffsetDateTime::now_utc();
@@ -44,6 +44,24 @@ pub fn register(
         "Register",
         format!("object_type={:?} attrs={}", req.object_type, req.attributes.len()),
     );
+
+    // K17 — §2.1.5 / §6.1.48: a KeyBlock carrying `KeyWrappingData`
+    // holds AES-KW-wrapped material. Resolve the KEK (Active +
+    // UnwrapKey usage), unwrap, decode the plaintext per Encoding
+    // Option, and continue through the pipeline below exactly as if
+    // the client had sent the material in the clear. Per §6.1.48 the
+    // server MAY instead store the object wrapped-as-received; we
+    // deliberately unwrap-and-store (the simpler conformant choice) so
+    // digest computation (K11), engine import (K9/RSA/HMAC), and later
+    // Get/Export all see real key material — the stored object carries
+    // no KeyWrappingData.
+    if let Some(kb) = req.managed_object.as_mut() {
+        if let Some(kwd) = kb.key_wrapping_data.take() {
+            kb.key_value = super::helpers::unwrap_key_value(
+                deps, "Register", &kwd, &kb.key_value, correlation_id,
+            )?;
+        }
+    }
 
     // Per §6.1.48 Table 395: if the object is cryptographic, certain
     // attributes are REQUIRED. CryptographicAlgorithm + Length may be
@@ -1084,6 +1102,8 @@ mod tests {
             wrapping_method: 0x01,
             encryption_key_uid: kek_uid.into(),
             cryptographic_parameters: None,
+            encoding_option: None,
+            mac_signature_key_information_present: false,
         }
     }
 
@@ -1146,6 +1166,124 @@ mod tests {
         put_kek(&d, "kek", State::Active, UsageMask::ENCRYPT);
         let err = export_with_kws(&d, uid, "kek").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::PermissionDenied);
+    }
+
+    // ── K17 — Register with KeyWrappingData (unwrap on Register) ────
+
+    /// Register a SymmetricKey whose KeyBlock carries wrapped bytes +
+    /// the given `KeyWrappingData`.
+    fn register_wrapped(
+        d: &Deps,
+        wrapped: Vec<u8>,
+        kwd: crate::kmip30::KeyWrappingSpec,
+    ) -> Result<RegisterResponse> {
+        register(d, RegisterRequest {
+            object_type: ObjectType::SymmetricKey,
+            attributes: vec![
+                Attribute::CryptographicAlgorithm(KmipAlgorithm::Aes),
+                Attribute::CryptographicLength(128),
+                Attribute::CryptographicUsageMask(UsageMask::ENCRYPT | UsageMask::DECRYPT),
+            ],
+            managed_object: Some(KeyBlock {
+                key_format_type: KeyFormatType::Raw,
+                cryptographic_algorithm: KmipAlgorithm::Aes,
+                cryptographic_length: 128,
+                key_value: wrapped,
+                key_wrapping_data: Some(kwd),
+            }),
+            protection_storage_masks: None,
+            certificate_payload: None,
+        }, "c")
+    }
+
+    #[test]
+    fn register_wrapped_round_trip_restores_original_material() {
+        // Full round trip on the existing machinery: Register a key,
+        // Export it wrapped under a KEK, then Register the wrapped
+        // KeyBlock back with KeyWrappingData naming the same KEK —
+        // the new object's stored material equals the original.
+        let d = deps_with();
+        let uid = register_aes(&d, None, None);
+        put_kek(&d, "kek", State::Active, UsageMask::WRAP_KEY | UsageMask::UNWRAP_KEY);
+        let exp = export_with_kws(&d, uid, "kek").unwrap();
+        let kb = exp.managed_object.expect("wrapped KeyBlock");
+        let resp = register_wrapped(&d, kb.key_value, kws("kek")).unwrap();
+        let rec = d.store.get(&resp.uid).unwrap().unwrap();
+        // Unwrapped-and-stored: original cleartext, no wrapping residue.
+        assert_eq!(rec.key_material.as_deref(), Some(&[0x01; 16][..]));
+        // K11 digest is computed over the UNWRAPPED material.
+        use sha2::{Digest as _, Sha256};
+        assert_eq!(rec.digest_value.as_deref(),
+                   Some(Sha256::digest([0x01u8; 16]).as_slice()));
+    }
+
+    #[test]
+    fn register_wrapped_no_encoding_takes_raw_material() {
+        // Encoding Option = No Encoding (0x01): the AES-KW plaintext IS
+        // the key material — no TTLV KeyValue framing.
+        let d = deps_with();
+        put_kek(&d, "kek", State::Active, UsageMask::UNWRAP_KEY);
+        let material = vec![0x5a; 16];
+        let wrapped = softhsmrustv3::native::aes_key_wrap(&[0x22; 32], &material).unwrap();
+        let mut kwd = kws("kek");
+        kwd.encoding_option = Some(0x01);
+        let resp = register_wrapped(&d, wrapped, kwd).unwrap();
+        let rec = d.store.get(&resp.uid).unwrap().unwrap();
+        assert_eq!(rec.key_material.as_deref(), Some(&material[..]));
+    }
+
+    #[test]
+    fn register_wrapped_tampered_bytes_fail_cryptographic_failure() {
+        // AES-KW integrity check: CKR_WRAPPED_KEY_INVALID maps to
+        // CryptographicFailure via ck_rv_to_kmip_error.
+        let d = deps_with();
+        let uid = register_aes(&d, None, None);
+        put_kek(&d, "kek", State::Active, UsageMask::WRAP_KEY | UsageMask::UNWRAP_KEY);
+        let mut wrapped = export_with_kws(&d, uid, "kek").unwrap()
+            .managed_object.unwrap().key_value;
+        wrapped[0] ^= 0xff;
+        let err = register_wrapped(&d, wrapped, kws("kek")).unwrap_err();
+        assert_eq!(err.result_reason(), ResultReason::CryptographicFailure);
+    }
+
+    #[test]
+    fn register_wrapped_kek_lacking_unwrapkey_mask_fails_permission_denied() {
+        // The unwrap direction requires UnwrapKey (0x20) — WrapKey alone
+        // is NOT sufficient. Same PermissionDenied convention as the
+        // wrap path's WrapKey gate (shared resolve_kek helper).
+        let d = deps_with();
+        let uid = register_aes(&d, None, None);
+        put_kek(&d, "kek", State::Active, UsageMask::WRAP_KEY | UsageMask::UNWRAP_KEY);
+        let wrapped = export_with_kws(&d, uid, "kek").unwrap()
+            .managed_object.unwrap().key_value;
+        // KEK able to wrap but not unwrap.
+        put_kek(&d, "kek-wrap-only", State::Active, UsageMask::WRAP_KEY);
+        let err = register_wrapped(&d, wrapped, kws("kek-wrap-only")).unwrap_err();
+        assert_eq!(err.result_reason(), ResultReason::PermissionDenied);
+    }
+
+    #[test]
+    fn register_wrapped_kek_not_active_fails_lifecycle() {
+        let d = deps_with();
+        let uid = register_aes(&d, None, None);
+        put_kek(&d, "kek", State::Active, UsageMask::WRAP_KEY | UsageMask::UNWRAP_KEY);
+        let wrapped = export_with_kws(&d, uid, "kek").unwrap()
+            .managed_object.unwrap().key_value;
+        put_kek(&d, "kek-preactive", State::PreActive, UsageMask::UNWRAP_KEY);
+        let err = register_wrapped(&d, wrapped, kws("kek-preactive")).unwrap_err();
+        assert_eq!(err.result_reason(), ResultReason::WrongKeyLifecycleState);
+    }
+
+    #[test]
+    fn register_wrapped_mac_signature_info_fails_0x3e() {
+        // Encrypt-method wrapping only — MAC/Signature Key Information
+        // is rejected with UnsupportedCryptographicParameters (0x3e).
+        let d = deps_with();
+        put_kek(&d, "kek", State::Active, UsageMask::UNWRAP_KEY);
+        let mut kwd = kws("kek");
+        kwd.mac_signature_key_information_present = true;
+        let err = register_wrapped(&d, vec![0u8; 24], kwd).unwrap_err();
+        assert_eq!(err.result_reason(), ResultReason::UnsupportedCryptographicParameters);
     }
 
     // ── K8 — KeyFormatType correctness ──────────────────────────────

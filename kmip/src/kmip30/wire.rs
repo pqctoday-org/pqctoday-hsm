@@ -90,6 +90,11 @@ pub(crate) mod tags {
     pub const KeyWrappingSpecification: u32 = 0x42_0047;
     pub const WrappingMethod: u32           = 0x42_009e;
     pub const EncryptionKeyInformation: u32 = 0x42_0036;
+    // K17 — inbound KeyWrappingData (Register). Codepoints verified
+    // from kmip-spec-3.0-tags-enums.json: "Encoding Option" 0x4200a3,
+    // "MAC/Signature Key Information" 0x42004e.
+    pub const EncodingOption: u32              = 0x42_00a3;
+    pub const MacSignatureKeyInformation: u32  = 0x42_004e;
     pub const MaximumItems: u32           = 0x42_004f;
     // KMIP 3.0 §6.1.32 Locate paging — values verified against
     // kmip-spec-3.0-tags-enums.json.
@@ -1087,13 +1092,43 @@ pub fn ttlv_encode_key_value(key_material: &[u8]) -> Vec<u8> {
     buf.to_vec()
 }
 
-/// Decode a §4.x `Key Wrapping Specification`:
-/// `WrappingMethod` (Enumeration) + `EncryptionKeyInformation`
-/// { `UniqueIdentifier`, `CryptographicParameters`? }.
+/// K17 — decode counterpart of [`ttlv_encode_key_value`]: parse an
+/// AES-KW-unwrapped plaintext as the TTLV `KeyValue { KeyMaterial
+/// (ByteString) }` structure (default TTLV Encoding Option) and return
+/// the inner key material bytes. This is the exact shape the wrap path
+/// produces, so a wrapped Get/Export output Registers back losslessly.
+pub fn ttlv_decode_key_value(buf: &[u8]) -> Result<Vec<u8>, WireError> {
+    let frame = decode_one(buf)?;
+    if frame.tag.0 != tags::KeyValue {
+        return Err(WireError::UnexpectedTag {
+            got: frame.tag.0,
+            expected: tags::KeyValue,
+            name: "Key Value",
+        });
+    }
+    for c in expect_structure(&frame, "Key Value")? {
+        if c.tag.0 == tags::KeyMaterial {
+            if let Value::ByteString(b) = &c.value {
+                return Ok(b.clone());
+            }
+        }
+    }
+    Err(WireError::Missing { tag: tags::KeyMaterial, name: "Key Material" })
+}
+
+/// Decode a §4.x `Key Wrapping Specification` (Get/Export requests) or
+/// `Key Wrapping Data` (K17 — inbound on a Register KeyBlock; same
+/// shape): `WrappingMethod` (Enumeration) + `EncryptionKeyInformation`
+/// { `UniqueIdentifier`, `CryptographicParameters`? } + optional
+/// `EncodingOption` (Enumeration). A `MAC/Signature Key Information`
+/// child is captured as a presence flag — the op layer rejects it with
+/// `UnsupportedCryptographicParameters` (Encrypt-method wrapping only).
 fn decode_key_wrapping_spec(frame: &TtlvFrame) -> Result<KeyWrappingSpec, WireError> {
     let mut wrapping_method = 0u32;
     let mut encryption_key_uid = String::new();
     let mut cp = None;
+    let mut encoding_option = None;
+    let mut mac_signature_key_information_present = false;
     for c in expect_structure(frame, "Key Wrapping Specification")? {
         match c.tag.0 {
             tags::WrappingMethod => wrapping_method = expect_enum(c, "Wrapping Method")?,
@@ -1112,6 +1147,12 @@ fn decode_key_wrapping_spec(frame: &TtlvFrame) -> Result<KeyWrappingSpec, WireEr
                     }
                 }
             }
+            tags::EncodingOption => {
+                encoding_option = Some(expect_enum(c, "Encoding Option")?);
+            }
+            tags::MacSignatureKeyInformation => {
+                mac_signature_key_information_present = true;
+            }
             _ => {}
         }
     }
@@ -1121,7 +1162,13 @@ fn decode_key_wrapping_spec(frame: &TtlvFrame) -> Result<KeyWrappingSpec, WireEr
             name: "Encryption Key Information / Unique Identifier",
         });
     }
-    Ok(KeyWrappingSpec { wrapping_method, encryption_key_uid, cryptographic_parameters: cp })
+    Ok(KeyWrappingSpec {
+        wrapping_method,
+        encryption_key_uid,
+        cryptographic_parameters: cp,
+        encoding_option,
+        mac_signature_key_information_present,
+    })
 }
 
 /// Encode a KMIP 3.0 §6.1.18 `Get` Response Payload.
@@ -2402,6 +2449,7 @@ fn decode_key_block(frame: &TtlvFrame) -> Result<KeyBlock, WireError> {
     let mut algorithm = KmipAlgorithm::Aes;
     let mut length: u32 = 0;
     let mut key_value_frame: Option<&TtlvFrame> = None;
+    let mut key_wrapping_data: Option<KeyWrappingSpec> = None;
     for c in children {
         match c.tag.0 {
             tags::KeyFormatType => {
@@ -2416,6 +2464,12 @@ fn decode_key_block(frame: &TtlvFrame) -> Result<KeyBlock, WireError> {
                 length = expect_integer(c, "Cryptographic Length")? as u32;
             }
             tags::KeyValue => key_value_frame = Some(c),
+            // K17 — inbound `KeyWrappingData` (Register §6.1.48): the
+            // KeyValue is AES-KW-wrapped ciphertext, and this structure
+            // (same shape as a KeyWrappingSpecification) names the KEK.
+            tags::KeyWrappingData => {
+                key_wrapping_data = Some(decode_key_wrapping_spec(c)?);
+            }
             _ => {}
         }
     }
@@ -2438,6 +2492,22 @@ fn decode_key_block(frame: &TtlvFrame) -> Result<KeyBlock, WireError> {
     //     round-trip the exact structure (BL-M-8/9/12/13), and the
     //     Register path can parse typed fields out of it.
     let mut bytes: Vec<u8> = Vec::new();
+    // K17 — with KeyWrappingData present, `KeyValue` is the AES-KW
+    // ciphertext on the wire as a leaf ByteString (the same flip the
+    // encode side performs for wrapped Get/Export responses). Capture
+    // it verbatim; the Register handler unwraps before storage.
+    if let (Some(kv), true) = (key_value_frame, key_wrapping_data.is_some()) {
+        if let Value::ByteString(b) = &kv.value {
+            bytes = b.clone();
+            return Ok(KeyBlock {
+                key_format_type,
+                cryptographic_algorithm: algorithm,
+                cryptographic_length: length,
+                key_value: bytes,
+                key_wrapping_data,
+            });
+        }
+    }
     if let Some(kv) = key_value_frame {
         for inner in expect_structure(kv, "Key Value")? {
             if inner.tag.0 == tags::KeyMaterial {
@@ -2468,7 +2538,7 @@ fn decode_key_block(frame: &TtlvFrame) -> Result<KeyBlock, WireError> {
         cryptographic_algorithm: algorithm,
         cryptographic_length: length,
         key_value: bytes,
-        key_wrapping_data: None,
+        key_wrapping_data,
     })
 }
 
@@ -3739,6 +3809,61 @@ mod tests {
             TtlvFrame::new(Tag(tags::CryptographicAlgorithm), Value::Enumeration(0x03)),
             TtlvFrame::new(Tag(tags::CryptographicLength), Value::Integer(128)),
         ]))
+    }
+
+    #[test]
+    fn k17_decode_key_block_captures_inbound_key_wrapping_data() {
+        // Register §6.1.48 — KeyValue is a leaf ByteString (the AES-KW
+        // ciphertext) and KeyWrappingData names the KEK. The decoder
+        // must capture both verbatim, including EncodingOption.
+        let frame = TtlvFrame::new(Tag(tags::KeyBlock), Value::Structure(vec![
+            TtlvFrame::new(Tag(tags::KeyFormatType), Value::Enumeration(0x01)),
+            TtlvFrame::new(Tag(tags::KeyValue), Value::ByteString(vec![0xAA; 24])),
+            TtlvFrame::new(Tag(tags::CryptographicAlgorithm), Value::Enumeration(0x03)),
+            TtlvFrame::new(Tag(tags::CryptographicLength), Value::Integer(128)),
+            TtlvFrame::new(Tag(tags::KeyWrappingData), Value::Structure(vec![
+                TtlvFrame::new(Tag(tags::WrappingMethod), Value::Enumeration(0x01)),
+                TtlvFrame::new(Tag(tags::EncryptionKeyInformation), Value::Structure(vec![
+                    TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString("kek-1".into())),
+                ])),
+                TtlvFrame::new(Tag(tags::EncodingOption), Value::Enumeration(0x02)),
+            ])),
+        ]));
+        let kb = decode_key_block(&frame).unwrap();
+        assert_eq!(kb.key_value, vec![0xAA; 24], "wrapped bytes captured verbatim");
+        let kwd = kb.key_wrapping_data.expect("KeyWrappingData captured");
+        assert_eq!(kwd.wrapping_method, 0x01);
+        assert_eq!(kwd.encryption_key_uid, "kek-1");
+        assert_eq!(kwd.encoding_option, Some(0x02));
+        assert!(!kwd.mac_signature_key_information_present);
+    }
+
+    #[test]
+    fn k17_decode_key_wrapping_data_flags_mac_signature_info() {
+        // MAC/Signature Key Information (0x42004e) is captured as a
+        // presence flag; the op layer rejects it with 0x3e.
+        let frame = TtlvFrame::new(Tag(tags::KeyWrappingData), Value::Structure(vec![
+            TtlvFrame::new(Tag(tags::WrappingMethod), Value::Enumeration(0x01)),
+            TtlvFrame::new(Tag(tags::EncryptionKeyInformation), Value::Structure(vec![
+                TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString("kek-1".into())),
+            ])),
+            TtlvFrame::new(Tag(tags::MacSignatureKeyInformation), Value::Structure(vec![
+                TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString("mac-key".into())),
+            ])),
+        ]));
+        let kwd = decode_key_wrapping_spec(&frame).unwrap();
+        assert!(kwd.mac_signature_key_information_present);
+    }
+
+    #[test]
+    fn k17_ttlv_key_value_codec_round_trips() {
+        // ttlv_decode_key_value is the exact inverse of
+        // ttlv_encode_key_value (the wrap path's plaintext shape).
+        let material = vec![0x42; 32];
+        let encoded = ttlv_encode_key_value(&material);
+        assert_eq!(ttlv_decode_key_value(&encoded).unwrap(), material);
+        // Garbage fails decode instead of yielding fake material.
+        assert!(ttlv_decode_key_value(&[0xde, 0xad, 0xbe, 0xef]).is_err());
     }
 
     #[test]

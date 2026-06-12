@@ -785,31 +785,60 @@ pub fn wrap_key_value(
                 format!("Block Cipher Mode {mode:#x} not supported for wrapping (only NISTKeyWrap)"),
             )));
     }
-    let wrap_key = deps
+    let kek = resolve_kek(
+        deps, op, &spec.encryption_key_uid,
+        crate::kmip30::UsageMask::WRAP_KEY, "WrapKey",
+        correlation_id,
+    )?;
+    // Wrap target: TTLV-encoded KeyValue (default TTLV Encoding Option);
+    // TTLV framing pads to 8 bytes, satisfying AES-KW's input contract.
+    let plaintext = crate::kmip30::ttlv_encode_key_value(key_material);
+    // K15 — emit after the wrap call, with its real rv.
+    let r = softhsmrustv3::native::aes_key_wrap(&kek, &plaintext);
+    emit_pkcs11_result(deps, correlation_id, "native::aes_key_wrap",
+        Some(softhsmrustv3::constants::CKM_AES_KEY_WRAP), &r);
+    r.map_err(|rv| fail_err(deps, correlation_id, op,
+        ck_rv_to_kmip_error(rv, &format!("{op}:wrap"))))
+}
+
+/// K17 — resolve a KEK by UID and gate it for a wrap-family operation:
+/// the object must exist, be `Active` (§3.4 lifecycle), and carry the
+/// direction-appropriate usage bit (§11 Cryptographic Usage Mask —
+/// `WrapKey 0x10` for wrapping, `UnwrapKey 0x20` for unwrapping; the
+/// bit values are pinned by the `attrs.rs` UsageMask tests). Returns
+/// the raw KEK bytes via the same material tiers as Get:
+/// Register-supplied bytes first, then the engine's `CKA_VALUE` behind
+/// the stored CKA_ID (Create-generated KEKs live in the engine).
+fn resolve_kek(
+    deps: &Deps,
+    op: &str,
+    kek_uid: &str,
+    required_usage: crate::kmip30::UsageMask,
+    usage_name: &str,
+    correlation_id: &str,
+) -> crate::error::Result<Vec<u8>> {
+    use crate::error::ResultReason;
+    let kek_obj = deps
         .store
-        .get(&spec.encryption_key_uid)?
+        .get(kek_uid)?
         .ok_or_else(|| fail_err(deps, correlation_id, op,
-            KmipError::object_not_found(&spec.encryption_key_uid)))?;
-    // §3.4 lifecycle + §11 usage — the wrap key must be usable for WrapKey.
-    if wrap_key.state != crate::kmip30::State::Active {
+            KmipError::object_not_found(kek_uid)))?;
+    if kek_obj.state != crate::kmip30::State::Active {
         return Err(fail_err(deps, correlation_id, op,
-            non_active_state_error(&spec.encryption_key_uid, wrap_key.state)));
+            non_active_state_error(kek_uid, kek_obj.state)));
     }
-    if !wrap_key.usage_mask.contains(crate::kmip30::UsageMask::WRAP_KEY) {
+    if !kek_obj.usage_mask.contains(required_usage) {
         return Err(fail_err(deps, correlation_id, op,
             KmipError::permission_denied(
-                format!("wrap key {} lacks WrapKey usage", spec.encryption_key_uid),
+                format!("wrap key {kek_uid} lacks {usage_name} usage"),
             )));
     }
-    // KEK lookup mirrors Get's material tiers: Register-supplied bytes
-    // first, then the engine (Create-generated keys live behind
-    // CKA_VALUE — AX-M-2's wrap key is Created, not Registered).
-    let kek: Vec<u8> = match &wrap_key.key_material {
-        Some(bytes) => bytes.clone(),
+    match &kek_obj.key_material {
+        Some(bytes) => Ok(bytes.clone()),
         None => deps
             .engine_session
             .and_then(|session| {
-                softhsmrustv3::native::find_by_cka_id(session, &wrap_key.pkcs11_cka_id)
+                softhsmrustv3::native::find_by_cka_id(session, &kek_obj.pkcs11_cka_id)
                     .ok()
                     .flatten()
                     .and_then(|h| {
@@ -826,17 +855,81 @@ pub fn wrap_key_value(
                         ResultReason::OperationNotSupported,
                         "wrap key has no exportable material".to_string(),
                     ))
-            })?,
-    };
-    // Wrap target: TTLV-encoded KeyValue (default TTLV Encoding Option);
-    // TTLV framing pads to 8 bytes, satisfying AES-KW's input contract.
-    let plaintext = crate::kmip30::ttlv_encode_key_value(key_material);
-    // K15 — emit after the wrap call, with its real rv.
-    let r = softhsmrustv3::native::aes_key_wrap(&kek, &plaintext);
-    emit_pkcs11_result(deps, correlation_id, "native::aes_key_wrap",
+            }),
+    }
+}
+
+/// K17 — AES-KW unwrap of a Register KeyBlock's wrapped `KeyValue`
+/// (§2.1.5 / §6.1.48: KeyWrappingData present on an inbound KeyBlock).
+/// Reverse of [`wrap_key_value`] with the unwrap-direction gates: the
+/// KEK must be `Active` and carry `UnwrapKey (0x20)` — NOT `WrapKey`.
+/// Validates WrappingMethod=Encrypt + BlockCipherMode=NISTKeyWrap
+/// (others → `UnsupportedCryptographicParameters 0x3e`), AES-KW-unwraps
+/// (an integrity failure surfaces the engine's `CKR_WRAPPED_KEY_INVALID`
+/// as `CryptographicFailure` via `ck_rv_to_kmip_error`), then decodes
+/// the plaintext per §4.x `Encoding Option`: TTLV Encoding (the default
+/// when absent) parses the `KeyValue { KeyMaterial }` structure the
+/// wrap path emits; No Encoding returns the plaintext as raw material.
+pub fn unwrap_key_value(
+    deps: &Deps,
+    op: &str,
+    kwd: &crate::kmip30::KeyWrappingSpec,
+    wrapped: &[u8],
+    correlation_id: &str,
+) -> crate::error::Result<Vec<u8>> {
+    // MAC/Signature Key Information — we support Encrypt-method
+    // wrapping only; there is no MAC/sign verification path.
+    if kwd.mac_signature_key_information_present {
+        return Err(fail_err(deps, correlation_id, op,
+            KmipError::unsupported_cryptographic_parameters(
+                "MAC/Signature Key Information is not supported (Encrypt-method wrapping only)",
+            )));
+    }
+    // §11 Wrapping Method — only `Encrypt` (0x01).
+    if kwd.wrapping_method != 0x01 {
+        return Err(fail_err(deps, correlation_id, op,
+            KmipError::unsupported_cryptographic_parameters(format!(
+                "Wrapping Method {:#x} not supported (only Encrypt)", kwd.wrapping_method,
+            ))));
+    }
+    // §11 Block Cipher Mode — NISTKeyWrap (0x0d) selects AES-KW;
+    // absent CP defaults to it (the only supported wrap mode).
+    let mode = kwd
+        .cryptographic_parameters
+        .as_ref()
+        .and_then(|cp| cp.block_cipher_mode)
+        .unwrap_or(0x0d);
+    if mode != 0x0d {
+        return Err(fail_err(deps, correlation_id, op,
+            KmipError::unsupported_cryptographic_parameters(format!(
+                "Block Cipher Mode {mode:#x} not supported for unwrapping (only NISTKeyWrap)",
+            ))));
+    }
+    let kek = resolve_kek(
+        deps, op, &kwd.encryption_key_uid,
+        crate::kmip30::UsageMask::UNWRAP_KEY, "UnwrapKey",
+        correlation_id,
+    )?;
+    let r = softhsmrustv3::native::aes_key_unwrap(&kek, wrapped);
+    emit_pkcs11_result(deps, correlation_id, "native::aes_key_unwrap",
         Some(softhsmrustv3::constants::CKM_AES_KEY_WRAP), &r);
-    r.map_err(|rv| fail_err(deps, correlation_id, op,
-        ck_rv_to_kmip_error(rv, &format!("{op}:wrap"))))
+    let plaintext = r.map_err(|rv| fail_err(deps, correlation_id, op,
+        ck_rv_to_kmip_error(rv, &format!("{op}:unwrap"))))?;
+    // §4.x Encoding Option — values verified from the "Encoding Option"
+    // enum in kmip-spec-3.0-tags-enums.json: 0x01 No Encoding (raw key
+    // material), 0x02 TTLV Encoding (the spec default when absent).
+    match kwd.encoding_option {
+        Some(0x01) => Ok(plaintext),
+        None | Some(0x02) => crate::kmip30::ttlv_decode_key_value(&plaintext)
+            .map_err(|e| fail_err(deps, correlation_id, op,
+                KmipError::invalid_field(format!(
+                    "unwrapped plaintext is not a TTLV KeyValue structure: {e}",
+                )))),
+        Some(other) => Err(fail_err(deps, correlation_id, op,
+            KmipError::unsupported_cryptographic_parameters(format!(
+                "Encoding Option {other:#x} is not a KMIP 3.0 codepoint",
+            )))),
+    }
 }
 
 #[cfg(test)]

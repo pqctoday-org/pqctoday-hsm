@@ -80,5 +80,5 @@ pub use message::{
 };
 pub use wire::{
     decode_request_message, decode_transparent_rsa_private_key, encode_response_message,
-    ttlv_encode_key_value, TransparentRsaPrivateKeyFields, WireError,
+    ttlv_decode_key_value, ttlv_encode_key_value, TransparentRsaPrivateKeyFields, WireError,
 };

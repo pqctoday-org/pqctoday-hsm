@@ -1047,6 +1047,154 @@ fn k15_hmac_mac_and_verify_route_through_engine() {
     let _ = softhsmrustv3::native::session::finalize();
 }
 
+/// K17 — Register accepts wrapped key material end-to-end: an HMAC key
+/// Exported wrapped under an AES KEK (AES-KW over the TTLV KeyValue) is
+/// Registered back with `KeyWrappingData` naming the KEK. The handler
+/// unwraps, stores the cleartext, and feeds the existing engine-import
+/// arm (`register_generic_secret_bytes`) — so a subsequent MAC op on
+/// the re-registered key produces the same RFC 2104 HMAC as the
+/// original material.
+#[test]
+fn k17_register_wrapped_hmac_key_then_mac_against_real_engine() {
+    use hmac::{Hmac, Mac as _};
+    use pqctoday_kmip::kmip30::{
+        ActivateRequest, ExportRequest, KeyBlock, KeyFormatType, KeyWrappingSpec, MacRequest,
+        RegisterRequest,
+    };
+    use pqctoday_kmip::ops::mac_and_hash::mac;
+    use pqctoday_kmip::ops::register_import_export::{export, register};
+    use sha2::Sha256;
+
+    let _guard = engine_test_lock();
+    let deps = build_deps_with_real_engine();
+
+    let register_symmetric = |alg: KmipAlgorithm,
+                              bits: u32,
+                              usage: UsageMask,
+                              kb: KeyBlock,
+                              cid: &str|
+     -> String {
+        let uid = register(
+            &deps,
+            RegisterRequest {
+                object_type: ObjectType::SymmetricKey,
+                attributes: vec![
+                    Attribute::CryptographicAlgorithm(alg),
+                    Attribute::CryptographicLength(bits),
+                    Attribute::CryptographicUsageMask(usage),
+                ],
+                managed_object: Some(kb),
+                protection_storage_masks: None,
+                certificate_payload: None,
+            },
+            cid,
+        )
+        .unwrap()
+        .uid;
+        activate(&deps, ActivateRequest { uid: uid.clone() }, cid).unwrap();
+        uid
+    };
+
+    // KEK: AES-256, allowed to wrap AND unwrap.
+    let kek_material = vec![0x6b; 32];
+    let kek_uid = register_symmetric(
+        KmipAlgorithm::Aes,
+        256,
+        UsageMask::WRAP_KEY | UsageMask::UNWRAP_KEY,
+        KeyBlock {
+            key_format_type: KeyFormatType::Raw,
+            cryptographic_algorithm: KmipAlgorithm::Aes,
+            cryptographic_length: 256,
+            key_value: kek_material.clone(),
+            key_wrapping_data: None,
+        },
+        "k17-kek",
+    );
+
+    // Original HMAC-SHA-256 key.
+    let hmac_material = vec![0x37; 32];
+    let hmac_uid = register_symmetric(
+        KmipAlgorithm::HmacSha256,
+        256,
+        UsageMask::MAC_GENERATE,
+        KeyBlock {
+            key_format_type: KeyFormatType::Raw,
+            cryptographic_algorithm: KmipAlgorithm::HmacSha256,
+            cryptographic_length: 256,
+            key_value: hmac_material.clone(),
+            key_wrapping_data: None,
+        },
+        "k17-hmac-orig",
+    );
+
+    // Export the HMAC key wrapped under the KEK (existing K16 machinery).
+    let kws = KeyWrappingSpec {
+        wrapping_method: 0x01,
+        encryption_key_uid: kek_uid,
+        cryptographic_parameters: None,
+        encoding_option: None,
+        mac_signature_key_information_present: false,
+    };
+    let exp = export(
+        &deps,
+        ExportRequest {
+            uid: hmac_uid,
+            key_format_type: None,
+            key_wrap_type: None,
+            key_compression_type: None,
+            key_wrapping_specification: Some(kws.clone()),
+        },
+        "k17-export-wrapped",
+    )
+    .unwrap();
+    let wrapped_kb = exp.managed_object.expect("wrapped KeyBlock");
+    assert!(wrapped_kb.key_wrapping_data.is_some());
+    assert_ne!(wrapped_kb.key_value, hmac_material, "material left wrapped");
+
+    // Register the wrapped KeyBlock back — KeyWrappingData names the KEK.
+    let reimported_uid = register_symmetric(
+        KmipAlgorithm::HmacSha256,
+        256,
+        UsageMask::MAC_GENERATE,
+        KeyBlock {
+            key_format_type: KeyFormatType::Raw,
+            cryptographic_algorithm: KmipAlgorithm::HmacSha256,
+            cryptographic_length: 256,
+            key_value: wrapped_kb.key_value,
+            key_wrapping_data: Some(kws),
+        },
+        "k17-register-wrapped",
+    );
+    let rec = deps.store.get(&reimported_uid).unwrap().unwrap();
+    assert_eq!(
+        rec.key_material.as_deref(),
+        Some(&hmac_material[..]),
+        "unwrap-and-store: re-registered material equals the original"
+    );
+
+    // Crypto op on the re-registered key works (engine import path).
+    let data = b"K17: wrapped Register round-trip".to_vec();
+    let m = mac(
+        &deps,
+        MacRequest {
+            uid: reimported_uid,
+            cryptographic_parameters: None,
+            data: data.clone(),
+        },
+        "k17-mac",
+    )
+    .unwrap();
+    let mut h = <Hmac<Sha256> as hmac::Mac>::new_from_slice(&hmac_material).unwrap();
+    h.update(&data);
+    assert_eq!(
+        m.mac_data,
+        h.finalize().into_bytes().to_vec(),
+        "MAC over the re-registered key must equal HMAC over the original material"
+    );
+
+    let _ = softhsmrustv3::native::session::finalize();
+}
+
 // Suppress unused-import warning when only some types are referenced in
 // the active test set.
 #[allow(dead_code)]
