@@ -73,6 +73,17 @@ lazy_static! {
     pub static ref MESSAGE_SIGN_ACC: GlobalState<HashMap<u32, Vec<u8>>> = GlobalState::new(HashMap::new());
     /// C_VerifyMessageBegin/Next accumulator.
     pub static ref MESSAGE_VERIFY_ACC: GlobalState<HashMap<u32, Vec<u8>>> = GlobalState::new(HashMap::new());
+    /// T4 — C_SignUpdate accumulator. Presence of a session key marks the
+    /// sign op as having entered its multi-part phase (the one-shot C_Sign is
+    /// then CKR_OPERATION_ACTIVE until C_SignFinal — mirrors
+    /// DIGEST_MULTIPART); the Vec carries the concatenated parts that
+    /// C_SignFinal hands to the one-shot handler. Maintained strictly in
+    /// lockstep with SIGN_STATE removal/clear sites. Follow-up (NOT this
+    /// slice): stream the hash-composite mechanisms into an incremental
+    /// digest to bound memory instead of accumulating the whole message.
+    pub static ref SIGN_MULTIPART_ACC: GlobalState<HashMap<u32, Vec<u8>>> = GlobalState::new(HashMap::new());
+    /// T4 — C_VerifyUpdate accumulator (see SIGN_MULTIPART_ACC).
+    pub static ref VERIFY_MULTIPART_ACC: GlobalState<HashMap<u32, Vec<u8>>> = GlobalState::new(HashMap::new());
     pub static ref FIND_STATE: GlobalState<HashMap<u32, FindCtx>> = GlobalState::new(HashMap::new());
     /// Persistent ACVP deterministic RNG — created once in C_Initialize, advances
     /// across all operations, cleared in C_Finalize. Uses IETF ChaCha20 (RFC 8439)
