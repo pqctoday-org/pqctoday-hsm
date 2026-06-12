@@ -11,6 +11,11 @@
 // SoftHSMv2 C bindings minimal.
 #![allow(unsafe_op_in_unsafe_fn)]
 
+/// Native pkcs11.h-conformant C ABI (CK_FUNCTION_LIST + adapter shims).
+/// wasm32 keeps the documented JS-shim function table instead — exported
+/// C function pointers cannot cross wasm-bindgen (audit H-1 residual).
+#[cfg(not(target_arch = "wasm32"))]
+pub mod ck_abi;
 pub mod constants;
 pub mod crypto;
 pub mod ffi;
