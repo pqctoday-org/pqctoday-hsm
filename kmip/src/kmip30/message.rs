@@ -314,6 +314,11 @@ pub enum RequestPayload {
     RngRetrieve(super::ops::RngRetrieveRequest),
     RngSeed(super::ops::RngSeedRequest),
     Pkcs11(super::ops::Pkcs11Request),
+    // K19 — Baseline client-to-server ops (§6.1.26/27/58/59).
+    GetUsageAllocation(super::ops::GetUsageAllocationRequest),
+    GetConstraints(super::ops::GetConstraintsRequest),
+    SetDefaults(super::ops::SetDefaultsRequest),
+    SetEndpointRole(super::ops::SetEndpointRoleRequest),
     /// R7 Phase 1 sentinel — emitted by `decode_request_message` when
     /// a per-BatchItem payload fails to decode but the outer envelope
     /// is intact. The dispatcher recognises it and emits a per-item
@@ -383,6 +388,11 @@ pub enum ResponsePayload {
     RngRetrieve(super::ops::RngRetrieveResponse),
     RngSeed(super::ops::RngSeedResponse),
     Pkcs11(super::ops::Pkcs11Response),
+    // K19 — Baseline client-to-server ops (§6.1.26/27/58/59).
+    GetUsageAllocation(super::ops::GetUsageAllocationResponse),
+    GetConstraints(super::ops::GetConstraintsResponse),
+    SetDefaults(super::ops::SetDefaultsResponse),
+    SetEndpointRole(super::ops::SetEndpointRoleResponse),
 }
 
 impl RequestPayload {
@@ -431,6 +441,10 @@ impl RequestPayload {
             Self::RngRetrieve(_)      => Operation::RNGRetrieve,
             Self::RngSeed(_)          => Operation::RNGSeed,
             Self::Pkcs11(_)           => Operation::Pkcs11,
+            Self::GetUsageAllocation(_) => Operation::GetUsageAllocation,
+            Self::GetConstraints(_)   => Operation::GetConstraints,
+            Self::SetDefaults(_)      => Operation::SetDefaults,
+            Self::SetEndpointRole(_)  => Operation::SetEndpointRole,
             // Echo the original Operation when we were able to read it
             // before the payload decode failed; fall back to `Ping`
             // (whose handler we already special-case in the
@@ -467,6 +481,9 @@ impl RequestPayload {
             // — the server-allocated case is captured post-hoc in
             // `created_uids_after`.
             Self::Import(r)           => vec![r.uid.as_str()],
+            // K19 — GetUsageAllocation decrements the object's
+            // remaining Usage Limits Count; snapshot for §9.5 Undo.
+            Self::GetUsageAllocation(r) => vec![r.uid.as_str()],
             // Read-only / output-only — no rollback needed.
             _ => Vec::new(),
         }

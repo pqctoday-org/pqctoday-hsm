@@ -41,6 +41,7 @@
 //! `Decrypt`. The handler branches on key algorithm.
 
 pub mod activate;
+pub mod allocation_and_config;
 pub mod attribute_mutate;
 pub mod create;
 pub mod create_key_pair;

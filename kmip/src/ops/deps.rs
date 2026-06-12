@@ -96,6 +96,14 @@ pub struct Deps {
     pub streams: Mutex<HashMap<Vec<u8>, StreamCtx>>,
     /// Monotonic source for fresh correlation values.
     pub next_correlation: std::sync::atomic::AtomicU64,
+    /// K19 — KMIP 3.0 §6.1.58 `Set Defaults` state: per-Object-Type
+    /// default attributes applied to factory operations (Create /
+    /// CreateKeyPair / Register) beneath the client template (client
+    /// template > Set Defaults > server hardcoded). In-memory only —
+    /// server-config state, not a managed object, so it is not
+    /// persisted in the object store and is reset on restart.
+    pub object_defaults:
+        Mutex<HashMap<crate::kmip30::ObjectType, Vec<crate::kmip30::Attribute>>>,
 }
 
 impl Deps {
@@ -113,6 +121,7 @@ impl Deps {
             engine_session: None,
             streams: Mutex::new(HashMap::new()),
             next_correlation: std::sync::atomic::AtomicU64::new(1),
+            object_defaults: Mutex::new(HashMap::new()),
         }
     }
 

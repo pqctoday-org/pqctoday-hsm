@@ -45,7 +45,7 @@ use super::deps::Deps;
 /// canonicalisation convention.
 pub fn create_key_pair(
     deps: &Deps,
-    req: CreateKeyPairRequest,
+    mut req: CreateKeyPairRequest,
     op_canonical: &str,
     correlation_id: &str,
 ) -> Result<CreateKeyPairResponse> {
@@ -65,6 +65,23 @@ pub fn create_key_pair(
             client_cn: None,
         },
     ));
+
+    // K19 — KMIP 3.0 §6.1.58 Set Defaults: fill attributes the client
+    // omitted from the stored per-Object-Type defaults, per half. A
+    // default yields to a client attribute of the same kind in either
+    // the half-specific basket OR the Common Attributes basket.
+    super::allocation_and_config::apply_object_defaults(
+        deps,
+        ObjectType::PrivateKey,
+        &req.common_attributes,
+        &mut req.private_key_attributes,
+    );
+    super::allocation_and_config::apply_object_defaults(
+        deps,
+        ObjectType::PublicKey,
+        &req.common_attributes,
+        &mut req.public_key_attributes,
+    );
 
     // KMIP 3.0 Spec §6.1.10 CreateKeyPair — three distinct attribute
     // baskets: `CommonAttributes` is merged into BOTH halves;

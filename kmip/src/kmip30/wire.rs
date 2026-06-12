@@ -285,6 +285,14 @@ pub(crate) mod tags {
     pub const UsageLimits: u32            = 0x42_0095;
     pub const UsageLimitsTotal: u32       = 0x42_0097;
     pub const UsageLimitsUnit: u32        = 0x42_0098;
+    // K19 — Baseline client-to-server ops (§6.1.26/27/58/59).
+    // Codepoints verified against `kmip-spec-3.0-tags-enums.json`.
+    pub const EndpointRole: u32           = 0x42_0151;
+    pub const DefaultsInformation: u32    = 0x42_0152;
+    pub const ObjectDefaults: u32         = 0x42_0153;
+    pub const ObjectTypes: u32            = 0x42_0167;
+    pub const Constraints: u32            = 0x42_0168;
+    pub const Constraint: u32             = 0x42_0169;
     /// KMIP 3.0 §6.1.{54,55} RNG tags.
     pub const DataLength: u32             = 0x42_00c4;
     /// KMIP 3.0 §6.1.42 PKCS#11 passthrough tags.
@@ -778,6 +786,15 @@ fn decode_request_payload(op: Operation, frame: &TtlvFrame) -> Result<RequestPay
         Operation::RNGRetrieve      => RequestPayload::RngRetrieve(decode_rng_retrieve_req(children)?),
         Operation::RNGSeed          => RequestPayload::RngSeed(decode_rng_seed_req(children)?),
         Operation::Pkcs11           => RequestPayload::Pkcs11(decode_pkcs11_req(children)?),
+        // K19 — Baseline client-to-server ops (§6.1.26/27/58/59).
+        Operation::GetUsageAllocation => {
+            RequestPayload::GetUsageAllocation(decode_get_usage_allocation_req(children)?)
+        }
+        Operation::GetConstraints   => RequestPayload::GetConstraints(GetConstraintsRequest),
+        Operation::SetDefaults      => RequestPayload::SetDefaults(decode_set_defaults_req(children)?),
+        Operation::SetEndpointRole  => {
+            RequestPayload::SetEndpointRole(decode_set_endpoint_role_req(children)?)
+        }
         // K3 — recognized KMIP 3.0 Operations without a dispatcher
         // route. The codepoint is a published §11 value, so the
         // message is NOT malformed: decode the batch item with an
@@ -788,18 +805,15 @@ fn decode_request_payload(op: Operation, frame: &TtlvFrame) -> Result<RequestPay
         // never reach here — `Operation::from_wire_value` returns
         // `None` in `decode_request_batch_item` and the message gets
         // the `UnknownEnum` → InvalidMessage treatment.
-        Operation::SetEndpointRole
-        | Operation::ReKey
+        Operation::ReKey
         | Operation::ReCertify
         | Operation::ObtainLease
-        | Operation::GetUsageAllocation
         | Operation::Validate
         | Operation::Poll
         | Operation::Notify
         | Operation::Put
         | Operation::CreateSplitKey
         | Operation::SetConstraints
-        | Operation::GetConstraints
         | Operation::QueryAsynchronousRequests
         | Operation::Process
         | Operation::DeriveKey
@@ -808,8 +822,7 @@ fn decode_request_payload(op: Operation, frame: &TtlvFrame) -> Result<RequestPay
         | Operation::ReKeyKeyPair
         | Operation::JoinSplitKey
         | Operation::DelegatedLogin
-        | Operation::ReProvision
-        | Operation::SetDefaults => RequestPayload::Unsupported(op),
+        | Operation::ReProvision => RequestPayload::Unsupported(op),
     })
 }
 
@@ -866,6 +879,15 @@ fn response_payload_to_frame(payload: &ResponsePayload) -> TtlvFrame {
             TtlvFrame::new(Tag(tags::DataLength), Value::Integer(r.data_length)),
         ],
         ResponsePayload::Pkcs11(r)           => encode_pkcs11_resp(r),
+        // K19 — Baseline client-to-server ops (§6.1.26/27/58/59).
+        ResponsePayload::GetUsageAllocation(r) => encode_uid_only_resp(&r.uid),
+        ResponsePayload::GetConstraints(r)   => encode_get_constraints_resp(r),
+        // §6.1.58 Table 429 — Set Defaults response payload is empty.
+        ResponsePayload::SetDefaults(_)      => vec![],
+        ResponsePayload::SetEndpointRole(r)  => vec![TtlvFrame::new(
+            Tag(tags::EndpointRole),
+            Value::Enumeration(r.endpoint_role.to_wire_value()),
+        )],
     };
     TtlvFrame::new(Tag(tags::ResponsePayload), Value::Structure(children))
 }
@@ -2172,6 +2194,152 @@ fn decode_check_req(children: &[TtlvFrame]) -> Result<CheckRequest, WireError> {
     })
 }
 
+// ── K19 — Baseline client-to-server op codecs (§6.1.26/27/58/59) ────────────
+
+/// `Get Usage Allocation` request per §6.1.27 Table 329:
+/// `Unique Identifier` (REQUIRED) + `Usage Limits Count` (REQUIRED,
+/// LongInteger per the §4.x Usage Limits attribute encoding).
+fn decode_get_usage_allocation_req(
+    children: &[TtlvFrame],
+) -> Result<GetUsageAllocationRequest, WireError> {
+    let uid = required_uid(children)?;
+    let mut usage_limits_count = None;
+    for c in children {
+        if c.tag.0 == tags::UsageLimitsCount {
+            match c.value {
+                Value::LongInteger(n) => usage_limits_count = Some(n),
+                Value::Integer(n) => usage_limits_count = Some(n as i64),
+                _ => {
+                    return Err(WireError::BadType {
+                        tag: c.tag.0,
+                        name: "Usage Limits Count",
+                        msg: "expected LongInteger".into(),
+                    })
+                }
+            }
+        }
+    }
+    let usage_limits_count = usage_limits_count.ok_or(WireError::Missing {
+        tag: tags::UsageLimitsCount,
+        name: "Usage Limits Count",
+    })?;
+    Ok(GetUsageAllocationRequest { uid, usage_limits_count })
+}
+
+/// `Get Constraints` response per §6.1.26 Table 327 — one
+/// `Constraints` Structure (§7.7 Table 458) of repeated `Constraint`
+/// Structures (§7.6 Table 457: Object Types / Object Groups /
+/// Attributes, all optional).
+fn encode_get_constraints_resp(r: &GetConstraintsResponse) -> Vec<TtlvFrame> {
+    let constraint_frames: Vec<TtlvFrame> = r
+        .constraints
+        .iter()
+        .map(|c| {
+            let mut children = Vec::new();
+            if !c.object_types.is_empty() {
+                // §7.25 Table 477 — Object Types is a Structure of
+                // repeated `Object Type` Enumerations.
+                children.push(TtlvFrame::new(
+                    Tag(tags::ObjectTypes),
+                    Value::Structure(
+                        c.object_types
+                            .iter()
+                            .map(|ot| TtlvFrame::new(
+                                Tag(tags::ObjectType),
+                                Value::Enumeration(ot.to_wire_value()),
+                            ))
+                            .collect(),
+                    ),
+                ));
+            }
+            if !c.attributes.is_empty() {
+                children.push(TtlvFrame::new(
+                    Tag(tags::Attributes),
+                    Value::Structure(c.attributes.iter().map(encode_attribute_v3).collect()),
+                ));
+            }
+            TtlvFrame::new(Tag(tags::Constraint), Value::Structure(children))
+        })
+        .collect();
+    vec![TtlvFrame::new(Tag(tags::Constraints), Value::Structure(constraint_frames))]
+}
+
+/// `Set Defaults` request per §6.1.58 Table 428 — optional
+/// `Defaults Information` Structure (§7.12 Table 464) of repeated
+/// `Object Defaults` Structures (§7.23 Table 475). Absent
+/// `Defaults Information` ⇒ `None` (= remove all Object Defaults).
+fn decode_set_defaults_req(children: &[TtlvFrame]) -> Result<SetDefaultsRequest, WireError> {
+    let mut defaults_information = None;
+    for c in children {
+        if c.tag.0 == tags::DefaultsInformation {
+            let mut object_defaults = Vec::new();
+            for od in expect_structure(c, "Defaults Information")? {
+                if od.tag.0 == tags::ObjectDefaults {
+                    object_defaults.push(decode_object_defaults(od)?);
+                }
+            }
+            defaults_information = Some(object_defaults);
+        }
+    }
+    Ok(SetDefaultsRequest { defaults_information })
+}
+
+/// One `Object Defaults` Structure per §7.23 Table 475 — the object
+/// type is carried as EITHER a single `Object Type` Enumeration or an
+/// `Object Types` Structure ("Object Type | ObjectTypes" in the spec
+/// table); `Attributes` is REQUIRED.
+fn decode_object_defaults(frame: &TtlvFrame) -> Result<ObjectDefaults, WireError> {
+    let mut object_types = Vec::new();
+    let mut attributes = None;
+    for c in expect_structure(frame, "Object Defaults")? {
+        match c.tag.0 {
+            tags::ObjectType => {
+                let v = expect_enum(c, "Object Type")?;
+                object_types.push(ObjectType::from_wire_value(v).ok_or(
+                    WireError::UnknownEnum { field: "Object Type", value: v },
+                )?);
+            }
+            tags::ObjectTypes => {
+                for ot in expect_structure(c, "Object Types")? {
+                    if ot.tag.0 == tags::ObjectType {
+                        let v = expect_enum(ot, "Object Type")?;
+                        object_types.push(ObjectType::from_wire_value(v).ok_or(
+                            WireError::UnknownEnum { field: "Object Type", value: v },
+                        )?);
+                    }
+                }
+            }
+            tags::Attributes => attributes = Some(decode_attributes_block(c)?),
+            _ => {}
+        }
+    }
+    if object_types.is_empty() {
+        return Err(WireError::Missing { tag: tags::ObjectType, name: "Object Type" });
+    }
+    let attributes = attributes.ok_or(WireError::Missing {
+        tag: tags::Attributes,
+        name: "Attributes",
+    })?;
+    Ok(ObjectDefaults { object_types, attributes })
+}
+
+/// `Set Endpoint Role` request per §6.1.59 Table 431 — one REQUIRED
+/// `Endpoint Role` Enumeration (Client = 0x01, Server = 0x02 per the
+/// OASIS extraction).
+fn decode_set_endpoint_role_req(
+    children: &[TtlvFrame],
+) -> Result<SetEndpointRoleRequest, WireError> {
+    for c in children {
+        if c.tag.0 == tags::EndpointRole {
+            let v = expect_enum(c, "Endpoint Role")?;
+            let endpoint_role = EndpointRole::from_wire_value(v)
+                .ok_or(WireError::UnknownEnum { field: "Endpoint Role", value: v })?;
+            return Ok(SetEndpointRoleRequest { endpoint_role });
+        }
+    }
+    Err(WireError::Missing { tag: tags::EndpointRole, name: "Endpoint Role" })
+}
+
 fn decode_discover_versions_req(children: &[TtlvFrame]) -> Result<DiscoverVersionsRequest, WireError> {
     let mut versions = Vec::new();
     for c in children {
@@ -3426,6 +3594,130 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// K19 — Get Constraints response shape per §6.1.26 Table 327 +
+    /// §7.6/§7.7: one `Constraints` Structure (0x420168) of repeated
+    /// `Constraint` Structures (0x420169) carrying `Object Types`
+    /// (0x420167, repeated Object Type Enumerations) and `Attributes`
+    /// (0x420125). Set Endpoint Role response = one `Endpoint Role`
+    /// Enumeration (0x420151); Set Defaults response = empty payload
+    /// per Table 429.
+    #[test]
+    fn k19_response_payload_wire_shapes() {
+        // Get Constraints.
+        let frame = response_payload_to_frame(&ResponsePayload::GetConstraints(
+            GetConstraintsResponse {
+                constraints: vec![Constraint {
+                    object_types: vec![ObjectType::SymmetricKey],
+                    attributes: vec![
+                        Attribute::CryptographicAlgorithm(KmipAlgorithm::Aes),
+                        Attribute::CryptographicLength(256),
+                    ],
+                }],
+            },
+        ));
+        let children = expect_structure(&frame, "Response Payload").unwrap();
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].tag.0, tags::Constraints);
+        let constraints = expect_structure(&children[0], "Constraints").unwrap();
+        assert_eq!(constraints[0].tag.0, tags::Constraint);
+        let constraint = expect_structure(&constraints[0], "Constraint").unwrap();
+        assert_eq!(constraint[0].tag.0, tags::ObjectTypes);
+        let ots = expect_structure(&constraint[0], "Object Types").unwrap();
+        assert_eq!(ots[0].tag.0, tags::ObjectType);
+        assert_eq!(constraint[1].tag.0, tags::Attributes);
+
+        // Set Endpoint Role.
+        let frame = response_payload_to_frame(&ResponsePayload::SetEndpointRole(
+            SetEndpointRoleResponse { endpoint_role: EndpointRole::Server },
+        ));
+        let children = expect_structure(&frame, "Response Payload").unwrap();
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].tag.0, tags::EndpointRole);
+        assert_eq!(expect_enum(&children[0], "Endpoint Role").unwrap(), 0x02);
+
+        // Set Defaults — empty response payload per Table 429.
+        let frame = response_payload_to_frame(&ResponsePayload::SetDefaults(SetDefaultsResponse));
+        assert!(expect_structure(&frame, "Response Payload").unwrap().is_empty());
+    }
+
+    /// K19 — Set Defaults request decode: Object Defaults accepts both
+    /// the single `Object Type` Enumeration and the `Object Types`
+    /// Structure form ("Object Type | ObjectTypes" per §7.23 Table
+    /// 475); a missing `Attributes` child is a decode error; an absent
+    /// `Defaults Information` decodes to `None` (= remove all).
+    #[test]
+    fn k19_set_defaults_request_decode_forms() {
+        let attrs = TtlvFrame::new(Tag(tags::Attributes), Value::Structure(vec![
+            TtlvFrame::new(Tag(tags::CryptographicUsageMask), Value::Integer(0x0c)),
+        ]));
+        // Enumeration form.
+        let enum_form = vec![TtlvFrame::new(Tag(tags::DefaultsInformation), Value::Structure(vec![
+            TtlvFrame::new(Tag(tags::ObjectDefaults), Value::Structure(vec![
+                TtlvFrame::new(Tag(tags::ObjectType), Value::Enumeration(0x02)),
+                attrs.clone(),
+            ])),
+        ]))];
+        let req = decode_set_defaults_req(&enum_form).unwrap();
+        let ods = req.defaults_information.unwrap();
+        assert_eq!(ods[0].object_types, vec![ObjectType::SymmetricKey]);
+        assert_eq!(ods[0].attributes.len(), 1);
+        // Structure form fans out to several types.
+        let struct_form = vec![TtlvFrame::new(Tag(tags::DefaultsInformation), Value::Structure(vec![
+            TtlvFrame::new(Tag(tags::ObjectDefaults), Value::Structure(vec![
+                TtlvFrame::new(Tag(tags::ObjectTypes), Value::Structure(vec![
+                    TtlvFrame::new(Tag(tags::ObjectType), Value::Enumeration(0x03)),
+                    TtlvFrame::new(Tag(tags::ObjectType), Value::Enumeration(0x04)),
+                ])),
+                attrs,
+            ])),
+        ]))];
+        let req = decode_set_defaults_req(&struct_form).unwrap();
+        assert_eq!(
+            req.defaults_information.unwrap()[0].object_types,
+            vec![ObjectType::PublicKey, ObjectType::PrivateKey],
+        );
+        // Attributes is REQUIRED per Table 475.
+        let missing_attrs = vec![TtlvFrame::new(Tag(tags::DefaultsInformation), Value::Structure(vec![
+            TtlvFrame::new(Tag(tags::ObjectDefaults), Value::Structure(vec![
+                TtlvFrame::new(Tag(tags::ObjectType), Value::Enumeration(0x02)),
+            ])),
+        ]))];
+        assert!(matches!(
+            decode_set_defaults_req(&missing_attrs),
+            Err(WireError::Missing { name: "Attributes", .. }),
+        ));
+        // Absent Defaults Information ⇒ None (remove-all semantic).
+        assert_eq!(
+            decode_set_defaults_req(&[]).unwrap(),
+            SetDefaultsRequest { defaults_information: None },
+        );
+    }
+
+    /// K19 — Get Usage Allocation request decode per Table 329: both
+    /// UID and Usage Limits Count are REQUIRED; the count accepts the
+    /// LongInteger encoding.
+    #[test]
+    fn k19_get_usage_allocation_request_decode() {
+        let full = vec![
+            TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString("u".into())),
+            TtlvFrame::new(Tag(tags::UsageLimitsCount), Value::LongInteger(42)),
+        ];
+        let req = decode_get_usage_allocation_req(&full).unwrap();
+        assert_eq!(req.uid, "u");
+        assert_eq!(req.usage_limits_count, 42);
+        let no_count = vec![
+            TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString("u".into())),
+        ];
+        assert!(matches!(
+            decode_get_usage_allocation_req(&no_count),
+            Err(WireError::Missing { name: "Usage Limits Count", .. }),
+        ));
+        assert!(matches!(
+            decode_get_usage_allocation_req(&[]),
+            Err(WireError::Missing { name: "Unique Identifier", .. }),
+        ));
     }
 
     fn make_query_msg() -> RequestMessage {

@@ -31,7 +31,7 @@ use crate::store::ObjectRecord;
 use super::deps::Deps;
 use super::helpers::{emit_pkcs11, emit_request, emit_success, fail_err};
 
-pub fn create(deps: &Deps, req: CreateRequest, correlation_id: &str) -> Result<CreateResponse> {
+pub fn create(deps: &Deps, mut req: CreateRequest, correlation_id: &str) -> Result<CreateResponse> {
     let started = OffsetDateTime::now_utc();
     emit_request(
         deps,
@@ -57,6 +57,17 @@ pub fn create(deps: &Deps, req: CreateRequest, correlation_id: &str) -> Result<C
             )),
         ));
     }
+
+    // K19 — KMIP 3.0 §6.1.58 Set Defaults: fill attributes the client
+    // omitted from the stored per-Object-Type defaults. Merge order:
+    // client template > Set Defaults > the hardcoded fallbacks below
+    // (policy algorithm_default, usage-mask default, …).
+    super::allocation_and_config::apply_object_defaults(
+        deps,
+        req.object_type,
+        &[],
+        &mut req.template_attribute,
+    );
 
     let (algorithm_in, key_length, usage_mask) = extract_template(&req.template_attribute);
 

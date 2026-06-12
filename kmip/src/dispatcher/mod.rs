@@ -32,6 +32,7 @@ use crate::kmip30::{
 };
 use crate::ops::{
     activate::activate,
+    allocation_and_config::{get_constraints, get_usage_allocation, set_defaults, set_endpoint_role},
     attribute_mutate::{add_attribute, adjust_attribute, delete_attribute, modify_attribute, set_attribute},
     create::create, create_key_pair::create_key_pair, decrypt::decrypt,
     destroy::destroy, encrypt::encrypt, get::get,
@@ -310,6 +311,9 @@ pub const HANDLED_OPERATIONS: &[crate::kmip30::Operation] = {
         Op::CreateCredential, Op::CreateGroup, Op::CreateUser,
         Op::Log, Op::Login, Op::Logout,
         Op::RNGRetrieve, Op::RNGSeed, Op::Pkcs11,
+        // K19 — Baseline client-to-server ops (§6.1.26/27/58/59).
+        Op::GetUsageAllocation, Op::GetConstraints,
+        Op::SetDefaults, Op::SetEndpointRole,
     ]
 };
 
@@ -429,6 +433,7 @@ fn substitute_id_placeholder(
         RequestPayload::Obliterate(r)      => fix(&mut r.uid, &live),
         RequestPayload::Mac(r)             => fix(&mut r.uid, &live),
         RequestPayload::MacVerify(r)       => fix(&mut r.uid, &live),
+        RequestPayload::GetUsageAllocation(r) => fix(&mut r.uid, &live),
         // Ops that don't take a UID (Create, Locate, Query, …) skip.
         _ => {}
     }
@@ -529,6 +534,19 @@ fn handle_payload(
         RequestPayload::RngRetrieve(r) => ResponsePayload::RngRetrieve(rng_retrieve(deps, r, correlation_id)?),
         RequestPayload::RngSeed(r) => ResponsePayload::RngSeed(rng_seed(deps, r, correlation_id)?),
         RequestPayload::Pkcs11(r) => ResponsePayload::Pkcs11(pkcs11(deps, r, correlation_id)?),
+        // K19 — Baseline client-to-server ops (§6.1.26/27/58/59).
+        RequestPayload::GetUsageAllocation(r) => {
+            ResponsePayload::GetUsageAllocation(get_usage_allocation(deps, r, correlation_id)?)
+        }
+        RequestPayload::GetConstraints(r) => {
+            ResponsePayload::GetConstraints(get_constraints(deps, r, correlation_id)?)
+        }
+        RequestPayload::SetDefaults(r) => {
+            ResponsePayload::SetDefaults(set_defaults(deps, r, correlation_id)?)
+        }
+        RequestPayload::SetEndpointRole(r) => {
+            ResponsePayload::SetEndpointRole(set_endpoint_role(deps, r, correlation_id)?)
+        }
     })
 }
 
@@ -1068,6 +1086,179 @@ mod tests {
         let resp = dispatch(&d, msg);
         assert_eq!(resp.batch_items.len(), 1);
         assert_eq!(resp.batch_items[0].result_status, ResultStatus::Success);
+    }
+
+    // ── K19 — Baseline client-to-server ops through real wire bytes ────
+
+    /// K19 — Get Usage Allocation (§6.1.27) end-to-end: TTLV request
+    /// bytes → decode → dispatch → the store's remaining Usage Limits
+    /// budget is decremented by the granted allocation; the response
+    /// echoes the UID and survives response encoding.
+    #[test]
+    fn k19_get_usage_allocation_via_wire_decrements_budget() {
+        use crate::codec::{Tag, TtlvFrame, Value};
+        use crate::kmip30::wire::tags;
+        let d = deps();
+        d.store.put(crate::store::ObjectRecord {
+            uid: "k-usage".into(),
+            object_type: ObjectType::SymmetricKey,
+            algorithm: KmipAlgorithm::Aes,
+            cryptographic_length: 256,
+            usage_mask: UsageMask::ENCRYPT,
+            state: crate::kmip30::State::Active,
+            initial_date: time::OffsetDateTime::UNIX_EPOCH,
+            usage_limits_total: Some(100),
+            usage_limits_remaining: Some(100),
+            usage_limits_unit: Some(0x01),
+            ..crate::store::ObjectRecord::default()
+        }).unwrap();
+        let item = TtlvFrame::new(Tag(tags::BatchItem), Value::Structure(vec![
+            TtlvFrame::new(
+                Tag(tags::Operation),
+                Value::Enumeration(crate::kmip30::Operation::GetUsageAllocation.to_wire_value()),
+            ),
+            TtlvFrame::new(Tag(tags::RequestPayload), Value::Structure(vec![
+                TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString("k-usage".into())),
+                TtlvFrame::new(Tag(tags::UsageLimitsCount), Value::LongInteger(25)),
+            ])),
+        ]));
+        let resp = dispatch(&d, k4_decode(vec![], vec![item]));
+        assert_eq!(resp.batch_items[0].result_status, ResultStatus::Success);
+        match &resp.batch_items[0].payload {
+            Some(ResponsePayload::GetUsageAllocation(r)) => assert_eq!(r.uid, "k-usage"),
+            other => panic!("expected GetUsageAllocation payload, got {other:?}"),
+        }
+        assert_eq!(
+            d.store.get("k-usage").unwrap().unwrap().usage_limits_remaining,
+            Some(75),
+            "the granted allocation is reserved against the remaining budget",
+        );
+        let bytes = crate::kmip30::encode_response_message(&resp);
+        assert_eq!(bytes.len() % 8, 0, "§9.6 alignment");
+    }
+
+    /// K19 — Get Constraints (§6.1.26) end-to-end: empty request
+    /// payload per Table 326; Success with a non-empty Constraints set.
+    #[test]
+    fn k19_get_constraints_via_wire_returns_constraint_table() {
+        use crate::codec::{Tag, TtlvFrame, Value};
+        use crate::kmip30::wire::tags;
+        let d = deps();
+        let item = TtlvFrame::new(Tag(tags::BatchItem), Value::Structure(vec![
+            TtlvFrame::new(
+                Tag(tags::Operation),
+                Value::Enumeration(crate::kmip30::Operation::GetConstraints.to_wire_value()),
+            ),
+            TtlvFrame::new(Tag(tags::RequestPayload), Value::Structure(vec![])),
+        ]));
+        let resp = dispatch(&d, k4_decode(vec![], vec![item]));
+        assert_eq!(resp.batch_items[0].result_status, ResultStatus::Success);
+        match &resp.batch_items[0].payload {
+            Some(ResponsePayload::GetConstraints(r)) => {
+                assert!(!r.constraints.is_empty(), "Constraints REQUIRED per Table 327");
+            }
+            other => panic!("expected GetConstraints payload, got {other:?}"),
+        }
+        let bytes = crate::kmip30::encode_response_message(&resp);
+        assert_eq!(bytes.len() % 8, 0, "§9.6 alignment");
+    }
+
+    /// K19 — Set Defaults (§6.1.58) end-to-end: the wire-decoded
+    /// Object Defaults are stored and a subsequent Create that omits
+    /// the defaulted attribute picks it up (a client-supplied value
+    /// would win — pinned in `ops::allocation_and_config` tests).
+    #[test]
+    fn k19_set_defaults_via_wire_applies_on_subsequent_create() {
+        use crate::codec::{Tag, TtlvFrame, Value};
+        use crate::kmip30::wire::tags;
+        let d = deps();
+        let item = TtlvFrame::new(Tag(tags::BatchItem), Value::Structure(vec![
+            TtlvFrame::new(
+                Tag(tags::Operation),
+                Value::Enumeration(crate::kmip30::Operation::SetDefaults.to_wire_value()),
+            ),
+            TtlvFrame::new(Tag(tags::RequestPayload), Value::Structure(vec![
+                TtlvFrame::new(Tag(tags::DefaultsInformation), Value::Structure(vec![
+                    TtlvFrame::new(Tag(tags::ObjectDefaults), Value::Structure(vec![
+                        TtlvFrame::new(
+                            Tag(tags::ObjectType),
+                            Value::Enumeration(ObjectType::SymmetricKey.to_wire_value()),
+                        ),
+                        TtlvFrame::new(Tag(tags::Attributes), Value::Structure(vec![
+                            TtlvFrame::new(
+                                Tag(tags::CryptographicUsageMask),
+                                Value::Integer((UsageMask::ENCRYPT | UsageMask::DECRYPT).bits() as i32),
+                            ),
+                        ])),
+                    ])),
+                ])),
+            ])),
+        ]));
+        let resp = dispatch(&d, k4_decode(vec![], vec![item]));
+        assert_eq!(resp.batch_items[0].result_status, ResultStatus::Success);
+        assert!(matches!(
+            resp.batch_items[0].payload,
+            Some(ResponsePayload::SetDefaults(_)),
+        ));
+        // Subsequent Create omits the usage mask → the stored default
+        // fills it.
+        let create = one_off_request(RP::Create(CreateRequest {
+            object_type: ObjectType::SymmetricKey,
+            template_attribute: vec![
+                Attribute::CryptographicAlgorithm(KmipAlgorithm::Aes),
+                Attribute::CryptographicLength(128),
+            ],
+        }));
+        let resp = dispatch(&d, create);
+        assert_eq!(resp.batch_items[0].result_status, ResultStatus::Success);
+        let uid = match &resp.batch_items[0].payload {
+            Some(ResponsePayload::Create(r)) => r.uid.clone(),
+            other => panic!("expected Create payload, got {other:?}"),
+        };
+        assert_eq!(
+            d.store.get(&uid).unwrap().unwrap().usage_mask,
+            UsageMask::ENCRYPT | UsageMask::DECRYPT,
+            "Set Defaults mask applied when the client template omits one",
+        );
+    }
+
+    /// K19 — Set Endpoint Role (§6.1.59) end-to-end: `Server` (the
+    /// identity request) is acknowledged with the accepted role per
+    /// Table 432; `Client` (the §6.2 role switch we don't support) is
+    /// rejected with `Feature Not Supported (0x08)` per Table 433.
+    #[test]
+    fn k19_set_endpoint_role_via_wire() {
+        use crate::codec::{Tag, TtlvFrame, Value};
+        use crate::kmip30::wire::tags;
+        let item = |role: u32| TtlvFrame::new(Tag(tags::BatchItem), Value::Structure(vec![
+            TtlvFrame::new(
+                Tag(tags::Operation),
+                Value::Enumeration(crate::kmip30::Operation::SetEndpointRole.to_wire_value()),
+            ),
+            TtlvFrame::new(Tag(tags::RequestPayload), Value::Structure(vec![
+                TtlvFrame::new(Tag(tags::EndpointRole), Value::Enumeration(role)),
+            ])),
+        ]));
+        // Server (0x02) — accepted, role echoed.
+        let d = deps();
+        let resp = dispatch(&d, k4_decode(vec![], vec![item(0x02)]));
+        assert_eq!(resp.batch_items[0].result_status, ResultStatus::Success);
+        match &resp.batch_items[0].payload {
+            Some(ResponsePayload::SetEndpointRole(r)) => {
+                assert_eq!(r.endpoint_role, crate::kmip30::EndpointRole::Server);
+            }
+            other => panic!("expected SetEndpointRole payload, got {other:?}"),
+        }
+        let bytes = crate::kmip30::encode_response_message(&resp);
+        assert_eq!(bytes.len() % 8, 0, "§9.6 alignment");
+        // Client (0x01) — the unsupported role switch.
+        let resp = dispatch(&d, k4_decode(vec![], vec![item(0x01)]));
+        assert_eq!(resp.batch_items[0].result_status, ResultStatus::OperationFailed);
+        assert_eq!(
+            resp.batch_items[0].result_reason,
+            Some(crate::error::ResultReason::FeatureNotSupported.to_wire_value()),
+            "role switch must fail with Feature Not Supported (0x08)",
+        );
     }
 
     /// `HANDLED_OPERATIONS` is duplicate-free and every entry routes
