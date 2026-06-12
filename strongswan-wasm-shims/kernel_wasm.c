@@ -20,8 +20,13 @@
  *   - get_cpi      : NOT_SUPPORTED (no IPComp)
  *   - bypass_socket / enable_udp_decap                : TRUE no-ops
  *
- * Registration: wasm_kernel_register() is called from wasm_setup_config()
- * (wasm_backend.c) when the hub opts in via WASM_CHILDSA=1. It uses
+ * Registration: wasm_kernel_register() is called unconditionally at the
+ * top of wasm_setup_config() (wasm_backend.c) — i.e. at charon init on
+ * both workers, before any peer_cfg exists and therefore before any
+ * CHILD_CREATE task can run. The stub is harmless when the IKE_SA is
+ * childless (WASM_CHILDSA unset), and registering it independently of the
+ * WASM_CHILDSA env read removes the race that intermittently produced
+ * "unable to allocate SPI from kernel" on the initiator. It uses
  * kernel_interface_t::add_ipsec_interface, which instantiates the backend
  * immediately — the same registration path the kernel-netlink/libipsec
  * plugins use via PLUGIN_REGISTER(KERNEL_IPSEC, ...), minus the plugin
@@ -217,14 +222,22 @@ kernel_ipsec_t *kernel_wasm_ipsec_create(void)
 /**
  * Register the stub backend on charon's kernel interface. Idempotent —
  * add_ipsec_interface refuses a second backend and we guard locally too.
- * Called from wasm_setup_config() when WASM_CHILDSA=1.
+ * Called unconditionally from wasm_setup_config().
  */
 void wasm_kernel_register(void)
 {
 	static bool registered = FALSE;
 
-	if (registered || !charon || !charon->kernel)
+	if (registered)
 	{
+		return;
+	}
+	if (!charon || !charon->kernel)
+	{
+		/* Never silent: if this fires, registration was attempted before
+		 * libcharon_init and CHILD_SA SPI allocation WILL fail later. */
+		DBG1(DBG_KNL, "WASM stub kernel: charon->kernel not ready, "
+			 "registration skipped");
 		return;
 	}
 	if (charon->kernel->add_ipsec_interface(charon->kernel,
