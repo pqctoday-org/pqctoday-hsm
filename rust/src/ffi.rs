@@ -5229,6 +5229,115 @@ fn sp800_108_iter_input(segs: &[Sp800Seg], counter: u32) -> Vec<Vec<u8>> {
     pieces
 }
 
+/// Counter-mode KBKDF core: K(i) = PRF(base_key, iter_input(segs, i)).
+fn sp800_108_run_counter<M>(
+    base_key: &[u8],
+    segs: &[Sp800Seg],
+    key_len: usize,
+) -> Result<Vec<u8>, u32>
+where
+    M: hmac::Mac + hmac::digest::KeyInit,
+{
+    use hmac::Mac;
+    let mut out = Vec::new();
+    let mut counter: u32 = 1;
+    while out.len() < key_len {
+        let mut mac = <M as Mac>::new_from_slice(base_key).map_err(|_| CKR_FUNCTION_FAILED)?;
+        for piece in sp800_108_iter_input(segs, counter) {
+            mac.update(&piece);
+        }
+        out.extend_from_slice(&mac.finalize().into_bytes());
+        counter += 1;
+    }
+    out.truncate(key_len);
+    Ok(out)
+}
+
+/// Feedback-mode KBKDF core: K(i) = PRF(base_key, K(i-1) ‖ feedback_input(segs, i)),
+/// K(0) = IV.
+fn sp800_108_run_feedback<M>(
+    base_key: &[u8],
+    iv: &[u8],
+    segs: &[Sp800Seg],
+    key_len: usize,
+) -> Result<Vec<u8>, u32>
+where
+    M: hmac::Mac + hmac::digest::KeyInit,
+{
+    use hmac::Mac;
+    let mut k_prev = iv.to_vec();
+    let mut out = Vec::new();
+    let mut counter: u32 = 1;
+    while out.len() < key_len {
+        let mut mac = <M as Mac>::new_from_slice(base_key).map_err(|_| CKR_FUNCTION_FAILED)?;
+        mac.update(&k_prev);
+        // Feedback mode: an absent ITERATION_VARIABLE means NO counter
+        // (unlike counter mode), so only emit explicitly-requested segments.
+        for piece in sp800_108_feedback_input(segs, counter) {
+            mac.update(&piece);
+        }
+        k_prev = mac.finalize().into_bytes().to_vec();
+        out.extend_from_slice(&k_prev);
+        counter += 1;
+    }
+    out.truncate(key_len);
+    Ok(out)
+}
+
+/// PKCS#11 v3.2 §6.26 — the SP 800-108 PRF must be a keyed-MAC mechanism
+/// (HMAC/CMAC). Bare hashes (CKM_SHA256 etc.) and any unrecognised mechanism
+/// fail with CKR_MECHANISM_PARAM_INVALID. AES-CMAC is not implemented by
+/// this engine, so only the HMAC mechanisms it supports are accepted.
+fn sp800_108_counter_kbkdf(
+    prf_type: u32,
+    base_key: &[u8],
+    segs: &[Sp800Seg],
+    key_len: usize,
+) -> Result<Vec<u8>, u32> {
+    use hmac::Hmac;
+    match prf_type {
+        CKM_SHA256_HMAC => sp800_108_run_counter::<Hmac<sha2::Sha256>>(base_key, segs, key_len),
+        CKM_SHA384_HMAC => sp800_108_run_counter::<Hmac<sha2::Sha384>>(base_key, segs, key_len),
+        CKM_SHA512_HMAC => sp800_108_run_counter::<Hmac<sha2::Sha512>>(base_key, segs, key_len),
+        CKM_SHA3_256_HMAC => {
+            sp800_108_run_counter::<Hmac<sha3::Sha3_256>>(base_key, segs, key_len)
+        }
+        CKM_SHA3_512_HMAC => {
+            sp800_108_run_counter::<Hmac<sha3::Sha3_512>>(base_key, segs, key_len)
+        }
+        _ => Err(CKR_MECHANISM_PARAM_INVALID),
+    }
+}
+
+/// Feedback-mode twin of [`sp800_108_counter_kbkdf`]; same PRF policy.
+fn sp800_108_feedback_kbkdf(
+    prf_type: u32,
+    base_key: &[u8],
+    iv: &[u8],
+    segs: &[Sp800Seg],
+    key_len: usize,
+) -> Result<Vec<u8>, u32> {
+    use hmac::Hmac;
+    match prf_type {
+        CKM_SHA256_HMAC => {
+            sp800_108_run_feedback::<Hmac<sha2::Sha256>>(base_key, iv, segs, key_len)
+        }
+        CKM_SHA384_HMAC => {
+            sp800_108_run_feedback::<Hmac<sha2::Sha384>>(base_key, iv, segs, key_len)
+        }
+        CKM_SHA512_HMAC => {
+            sp800_108_run_feedback::<Hmac<sha2::Sha512>>(base_key, iv, segs, key_len)
+        }
+        CKM_SHA3_256_HMAC => {
+            sp800_108_run_feedback::<Hmac<sha3::Sha3_256>>(base_key, iv, segs, key_len)
+        }
+        CKM_SHA3_512_HMAC => {
+            sp800_108_run_feedback::<Hmac<sha3::Sha3_512>>(base_key, iv, segs, key_len)
+        }
+        _ => Err(CKR_MECHANISM_PARAM_INVALID),
+    }
+}
+
 #[wasm_bindgen(js_name = _C_DeriveKey)]
 pub fn C_DeriveKey(
     _h_session: u32,
@@ -5724,7 +5833,6 @@ pub fn C_DeriveKey(
 
             // ── SP 800-108 Counter KBKDF ─────────────────────────────────────
             CKM_SP800_108_COUNTER_KDF => {
-                use hmac::{Hmac, Mac};
                 let base_key = match get_object_value(h_base_key) {
                     Some(v) => v,
                     None => return CKR_ARGUMENTS_BAD,
@@ -5745,37 +5853,14 @@ pub fn C_DeriveKey(
                     Ok(s) => s,
                     Err(rv) => return rv,
                 };
-                macro_rules! kbkdf_counter {
-                    ($HmacType:ty) => {{
-                        let mut out = Vec::new();
-                        let mut counter: u32 = 1;
-                        while out.len() < key_len {
-                            let mut mac = match <$HmacType>::new_from_slice(&base_key) {
-                                Ok(m) => m,
-                                Err(_) => return CKR_FUNCTION_FAILED,
-                            };
-                            for piece in sp800_108_iter_input(&segs, counter) {
-                                mac.update(&piece);
-                            }
-                            out.extend_from_slice(&mac.finalize().into_bytes());
-                            counter += 1;
-                        }
-                        out.truncate(key_len);
-                        out
-                    }};
-                }
-                match prf_type {
-                    CKM_SHA384 => kbkdf_counter!(Hmac<sha2::Sha384>),
-                    CKM_SHA512 => kbkdf_counter!(Hmac<sha2::Sha512>),
-                    CKM_SHA3_256 => kbkdf_counter!(Hmac<sha3::Sha3_256>),
-                    CKM_SHA3_512 => kbkdf_counter!(Hmac<sha3::Sha3_512>),
-                    _ => kbkdf_counter!(Hmac<sha2::Sha256>), // SHA-256 default
+                match sp800_108_counter_kbkdf(prf_type, &base_key, &segs, key_len) {
+                    Ok(v) => v,
+                    Err(rv) => return rv,
                 }
             }
 
             // ── SP 800-108 Feedback KBKDF ────────────────────────────────────
             CKM_SP800_108_FEEDBACK_KDF => {
-                use hmac::{Hmac, Mac};
                 let base_key = match get_object_value(h_base_key) {
                     Some(v) => v,
                     None => return CKR_ARGUMENTS_BAD,
@@ -5801,37 +5886,9 @@ pub fn C_DeriveKey(
                     Err(rv) => return rv,
                 };
                 // K(i) = PRF(base_key, K(i-1) || [i] || fixed || [L])
-                macro_rules! kbkdf_feedback {
-                    ($HmacType:ty) => {{
-                        let mut k_prev = iv.clone();
-                        let mut out = Vec::new();
-                        let mut counter: u32 = 1;
-                        while out.len() < key_len {
-                            let mut mac = match <$HmacType>::new_from_slice(&base_key) {
-                                Ok(m) => m,
-                                Err(_) => return CKR_FUNCTION_FAILED,
-                            };
-                            mac.update(&k_prev);
-                            // Feedback mode: an absent ITERATION_VARIABLE means
-                            // NO counter (unlike counter mode), so only emit the
-                            // explicitly-requested segments here.
-                            for piece in sp800_108_feedback_input(&segs, counter) {
-                                mac.update(&piece);
-                            }
-                            k_prev = mac.finalize().into_bytes().to_vec();
-                            out.extend_from_slice(&k_prev);
-                            counter += 1;
-                        }
-                        out.truncate(key_len);
-                        out
-                    }};
-                }
-                match prf_type {
-                    CKM_SHA384 => kbkdf_feedback!(Hmac<sha2::Sha384>),
-                    CKM_SHA512 => kbkdf_feedback!(Hmac<sha2::Sha512>),
-                    CKM_SHA3_256 => kbkdf_feedback!(Hmac<sha3::Sha3_256>),
-                    CKM_SHA3_512 => kbkdf_feedback!(Hmac<sha3::Sha3_512>),
-                    _ => kbkdf_feedback!(Hmac<sha2::Sha256>),
+                match sp800_108_feedback_kbkdf(prf_type, &base_key, &iv, &segs, key_len) {
+                    Ok(v) => v,
+                    Err(rv) => return rv,
                 }
             }
 
@@ -9976,6 +10033,61 @@ mod return_code_ffi_tests {
                 "mech {legacy:#010x} did not reach the BIP32 dispatch arm"
             );
         }
+    }
+
+    // ── SP 800-108 KBKDF PRF policy (§6.26) ─────────────────────────────────
+
+    /// PKCS#11 v3.2 §6.26 — the SP 800-108 PRF must be a keyed-MAC
+    /// mechanism. Bare hashes (CKM_SHA256 etc.) and unknown mechanisms must
+    /// fail CKR_MECHANISM_PARAM_INVALID in BOTH counter and feedback modes
+    /// (regression: they used to silently default to HMAC-SHA256).
+    #[test]
+    fn sp800_108_bare_hash_prf_rejected() {
+        let key = [0x42u8; 32];
+        for prf in [
+            CKM_SHA256,
+            CKM_SHA384,
+            CKM_SHA512,
+            CKM_SHA3_256,
+            CKM_SHA3_512,
+            0xdead_beef,
+        ] {
+            assert_eq!(
+                sp800_108_counter_kbkdf(prf, &key, &[], 32),
+                Err(CKR_MECHANISM_PARAM_INVALID),
+                "counter KBKDF accepted non-keyed-MAC PRF {prf:#x}"
+            );
+            assert_eq!(
+                sp800_108_feedback_kbkdf(prf, &key, &[], &[], 32),
+                Err(CKR_MECHANISM_PARAM_INVALID),
+                "feedback KBKDF accepted non-keyed-MAC PRF {prf:#x}"
+            );
+        }
+    }
+
+    /// CKM_SHA384_HMAC PRF output matches an independently built
+    /// counter-mode reference (legacy default fixed input: 32-bit BE
+    /// counter prefix, nothing else), and differs from the HMAC-SHA256
+    /// output for identical inputs — pinning that the digest is actually
+    /// switched rather than silently defaulted.
+    #[test]
+    fn sp800_108_sha384_hmac_matches_reference() {
+        use hmac::{Hmac, Mac};
+        let key = [0x42u8; 32];
+        let derived = sp800_108_counter_kbkdf(CKM_SHA384_HMAC, &key, &[], 32).unwrap();
+        let mut reference = Vec::new();
+        let mut i: u32 = 1;
+        while reference.len() < 32 {
+            let mut mac = <Hmac<sha2::Sha384> as Mac>::new_from_slice(&key).unwrap();
+            mac.update(&i.to_be_bytes());
+            reference.extend_from_slice(&mac.finalize().into_bytes());
+            i += 1;
+        }
+        reference.truncate(32);
+        assert_eq!(derived, reference);
+
+        let derived_256 = sp800_108_counter_kbkdf(CKM_SHA256_HMAC, &key, &[], 32).unwrap();
+        assert_ne!(derived, derived_256, "SHA-384 PRF produced the SHA-256 KO");
     }
 
     // ── AES-KW unwrap codes ─────────────────────────────────────────────────

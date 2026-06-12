@@ -48,7 +48,8 @@ const CKK = { AES: 0x1f, GENERIC_SECRET: 0x10, ML_KEM: 0x49, ML_DSA: 0x4a, SLH_D
 const CKM = {
   ML_KEM_KEY_PAIR_GEN: 0x0f, ML_KEM: 0x17, ML_DSA_KEY_PAIR_GEN: 0x1c, ML_DSA: 0x1d,
   SLH_DSA_KEY_PAIR_GEN: 0x2d, SLH_DSA: 0x2e, SHA256: 0x250, SHA256_HMAC: 0x251,
-  SHA256_HMAC_GENERAL: 0x252, GENERIC_SECRET_KEY_GEN: 0x350,
+  SHA256_HMAC_GENERAL: 0x252, SHA384_HMAC: 0x261, GENERIC_SECRET_KEY_GEN: 0x350,
+  SP800_108_COUNTER_KDF: 0x3ac,
   AES_KEY_GEN: 0x1080, AES_ECB: 0x1081, AES_CBC: 0x1082, AES_CBC_PAD: 0x1085,
   AES_CTR: 0x1086, AES_GCM: 0x1087, AES_KEY_WRAP: 0x2109,
   EC_KEY_PAIR_GEN: 0x1040, ECDSA: 0x1041,
@@ -842,6 +843,71 @@ section('Round-2 — T5 message API ≡ one-shot GCM (§5.19)');
     Buffer.from(new Uint8Array(mem().buffer, tagP, 16)),
   ]);
   check('streamed ct+tag byte-equals one-shot GCM', streamed.equals(reference) ? 1 : 0, 1);
+}
+
+section('Round-2 — SP800-108 KBKDF PRF must be a keyed-MAC mechanism (§6.26)');
+{
+  const crypto = require('crypto');
+  const baseVal = new Uint8Array(32).map((_, i) => (i * 11 + 3) & 0xff);
+  const tpl = buildTpl([
+    { type: CKA.CLASS, ulong: CKO.SECRET_KEY },
+    { type: CKA.KEY_TYPE, ulong: CKK.GENERIC_SECRET },
+    { type: CKA.VALUE, bytes: baseVal },
+    { type: CKA.DERIVE, bool: true }]);
+  const hp = alloc(4);
+  check('import KBKDF base key → OK', w._C_CreateObject(hS, tpl, 4, hp), CKR.OK);
+  const hBase = readU32(hp);
+
+  // CK_SP800_108_KDF_PARAMS (wasm32, 12 B): prfType, ulNumberOfDataParams=0,
+  // pDataParams=NULL — the engine's legacy default fixed-input is then a
+  // 32-bit BE counter prefix and nothing else.
+  const derive = (prf) => {
+    const params = new Uint8Array(new Uint32Array([prf, 0, 0]).buffer);
+    const dTpl = buildTpl([
+      { type: CKA.CLASS, ulong: CKO.SECRET_KEY },
+      { type: CKA.KEY_TYPE, ulong: CKK.GENERIC_SECRET },
+      { type: CKA.VALUE_LEN, ulong: 32 }]);
+    const hd = alloc(4); writeU32(hd, 0);
+    const rv = w._C_DeriveKey(hS, buildMech(CKM.SP800_108_COUNTER_KDF, params), hBase, dTpl, 3, hd);
+    return { rv, h: readU32(hd) };
+  };
+  const readValue = (h) => {
+    const out = buildTpl([{ type: CKA.VALUE, bytes: new Uint8Array(32) }]);
+    const rv = w._C_GetAttributeValue(hS, h, out, 1);
+    return { rv, value: Buffer.from(new Uint8Array(mem().buffer, readU32(out + 4), readU32(out + 8))) };
+  };
+
+  // A bare hash is NOT a PRF (PKCS#11 v3.2 §6.26 — keyed-MAC mechanisms only).
+  check('C_DeriveKey SP800-108 with bare CKM_SHA256 PRF → MECHANISM_PARAM_INVALID',
+    derive(CKM.SHA256).rv, CKR.MECHANISM_PARAM_INVALID);
+
+  // HMAC-SHA384 PRF byte-compares against an independent Node-crypto
+  // counter-mode reference: KO = ⌈L/48⌉ blocks of HMAC-SHA384(K, BE32(i)).
+  const r384 = derive(CKM.SHA384_HMAC);
+  check('C_DeriveKey SP800-108 with CKM_SHA384_HMAC PRF → OK', r384.rv, CKR.OK);
+  if (r384.rv === CKR.OK) {
+    const got384 = readValue(r384.h);
+    check('read SHA384-PRF derived CKA_VALUE → OK', got384.rv, CKR.OK);
+    let ref = Buffer.alloc(0);
+    for (let i = 1; ref.length < 32; i++) {
+      const ctr = Buffer.alloc(4); ctr.writeUInt32BE(i);
+      ref = Buffer.concat([ref,
+        crypto.createHmac('sha384', Buffer.from(baseVal)).update(ctr).digest()]);
+    }
+    check('SHA384-PRF KBKDF byte-equals Node-crypto counter-mode reference',
+      got384.value.equals(ref.subarray(0, 32)) ? 1 : 0, 1);
+
+    // Cross-digest: identical inputs under HMAC-SHA256 must produce a
+    // DIFFERENT KO (proves the digest is actually switched, not defaulted).
+    const r256 = derive(CKM.SHA256_HMAC);
+    check('C_DeriveKey SP800-108 with CKM_SHA256_HMAC PRF → OK', r256.rv, CKR.OK);
+    if (r256.rv === CKR.OK) {
+      const got256 = readValue(r256.h);
+      check('read SHA256-PRF derived CKA_VALUE → OK', got256.rv, CKR.OK);
+      check('SHA384-PRF output differs from SHA256-PRF output (no silent default)',
+        got384.value.equals(got256.value) ? 0 : 1, 1);
+    }
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
