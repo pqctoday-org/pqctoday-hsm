@@ -1,7 +1,7 @@
 diff --git a/src/charon/Makefile.am b/src/charon/Makefile.am
 --- a/src/charon/Makefile.am	2025-11-07 13:05:36
 +++ b/src/charon/Makefile.am	2026-04-18 19:34:14
-@@ -1,12 +1,17 @@
+@@ -1,12 +1,18 @@
  ipsec_PROGRAMS = charon
  
  charon_SOURCES = \
@@ -10,7 +10,8 @@ diff --git a/src/charon/Makefile.am b/src/charon/Makefile.am
 +socket_wasm.c \
 +wasm_hsm_init.c \
 +wasm_backend.c \
-+pkcs11_wasm_rpc.c
++pkcs11_wasm_rpc.c \
++kernel_wasm.c
  
  charon.o :	$(top_builddir)/config.status
  
