@@ -79,27 +79,40 @@ CK_RV SoftHSM::C_Initialize(CK_VOID_PTR pInitArgs)
 	{
 		args = (CK_C_INITIALIZE_ARGS_PTR)pInitArgs;
 
-		// Must be set to NULL_PTR in this version of PKCS#11, OR used for ACVP bypass!
+		// Per PKCS#11, pInitArgs->pReserved SHALL be NULL_PTR; a non-NULL value
+		// is CKR_ARGUMENTS_BAD (V-20).  The previous build dereferenced any
+		// pReserved >= 4096 as an ACVP test-seed struct, which both violates the
+		// spec and is a crash/UB risk on arbitrary caller pointers.  The ACVP
+		// deterministic-seed backdoor is now compiled out by default and only
+		// reachable behind WITH_ACVP_SEED for the conformance harness.
 		if (args->pReserved != NULL_PTR)
 		{
-			// Compliance tests often pass (void*)1 to verify CKR_ARGUMENTS_BAD
-			if ((uintptr_t)args->pReserved < 4096)
+#ifdef WITH_ACVP_SEED
+			// Guarded ACVP seed injection — NOT part of a normal build.
+			// pReserved points to {CK_ULONG seedPtr, CK_ULONG seedLen(==32)}.
+			if ((uintptr_t)args->pReserved >= 4096)
 			{
-				ERROR_MSG("pReserved must be set to NULL_PTR or valid ACVP args");
-				return CKR_ARGUMENTS_BAD;
-			}
-
-			CK_ULONG* acvpArgs = (CK_ULONG*)args->pReserved;
-			if (acvpArgs[0] != 0 && acvpArgs[1] == 32)
-			{
-				extern void OSSLRNG_enableACVP(unsigned char* seed);
-				OSSLRNG_enableACVP((unsigned char*)(uintptr_t)acvpArgs[0]);
+				CK_ULONG* acvpArgs = (CK_ULONG*)args->pReserved;
+				if (acvpArgs[0] != 0 && acvpArgs[1] == 32)
+				{
+					extern void OSSLRNG_enableACVP(unsigned char* seed);
+					OSSLRNG_enableACVP((unsigned char*)(uintptr_t)acvpArgs[0]);
+				}
+				else
+				{
+					ERROR_MSG("pReserved must be NULL_PTR (or valid ACVP args under WITH_ACVP_SEED)");
+					return CKR_ARGUMENTS_BAD;
+				}
 			}
 			else
 			{
-				ERROR_MSG("pReserved must be set to NULL_PTR or valid ACVP args");
+				ERROR_MSG("pReserved must be set to NULL_PTR");
 				return CKR_ARGUMENTS_BAD;
 			}
+#else
+			ERROR_MSG("pInitArgs->pReserved must be set to NULL_PTR");
+			return CKR_ARGUMENTS_BAD;
+#endif
 		}
 
 		// Can we spawn our own threads?

@@ -152,7 +152,7 @@ void print_usage() {
     printf("Usage: p11_v32_compliance_test [options]\n");
     printf("Options:\n");
     printf("  --engine <path>    Path to the PKCS#11 library (default: %s)\n", opt_engine.c_str());
-    printf("  --category <cat>   Test category: all, init, discovery, pqc-kem, pqc-dsa, hbs, attr, g1-security, g2-mechtable, g3-keygen (default: %s)\n", opt_category.c_str());
+    printf("  --category <cat>   Test category: all, init, discovery, pqc-kem, pqc-dsa, hbs, attr, g1-security, g2-mechtable, g3-keygen, g4-retcodes (default: %s)\n", opt_category.c_str());
     printf("  --report <path>    Output bases (e.g. 'rep' creates 'rep.md' and 'rep.json') (default: %s)\n", opt_report.c_str());
     printf("  --pin <pin>        Token PIN (default: %s)\n", opt_pin.c_str());
     printf("  --workdir <dir>    Scratch dir for softhsm2.conf + token store (default: %s)\n", opt_workdir.c_str());
@@ -251,6 +251,36 @@ bool init_token() {
     if (!fl) {
         record_result("Init", "FunctionListPtr", "FAIL", "Null returned");
         return false;
+    }
+
+    // ── G4 pre-init checks (must run BEFORE C_Initialize) ────────────────────
+    if (opt_category == "all" || opt_category == "g4-retcodes") {
+        // V-19: C_GetSessionValidationFlags before C_Initialize →
+        // CKR_CRYPTOKI_NOT_INITIALIZED.
+        typedef CK_RV (*C_GSVF_t)(CK_SESSION_HANDLE, CK_SESSION_VALIDATION_FLAGS_TYPE, CK_FLAGS_PTR);
+        C_GSVF_t GSVF = (C_GSVF_t)dlsym(handle, "C_GetSessionValidationFlags");
+        if (GSVF) {
+            CK_FLAGS f = 0xdead;
+            CK_RV rvg = GSVF(hSess, 0x00000001UL /*CKS_LAST_VALIDATION_OK*/, &f);
+            record_result("G4Retcodes", "V19_GSVF_pre_init",
+                          rvg == CKR_CRYPTOKI_NOT_INITIALIZED ? "PASS" : "FAIL",
+                          "expect CKR_CRYPTOKI_NOT_INITIALIZED, RV=" + std::to_string(rvg));
+        } else {
+            record_result("G4Retcodes", "V19_GSVF_pre_init", "SKIP", "unavailable");
+        }
+    }
+
+    // V-20: C_Initialize with pInitArgs->pReserved != NULL → CKR_ARGUMENTS_BAD.
+    // This must precede the real C_Initialize(NULL) in this process.
+    if (opt_category == "all" || opt_category == "g4-retcodes") {
+        CK_C_INITIALIZE_ARGS badArgs;
+        memset(&badArgs, 0, sizeof(badArgs));
+        badArgs.flags = CKF_OS_LOCKING_OK;
+        badArgs.pReserved = (CK_VOID_PTR)(uintptr_t)0x1; // non-NULL
+        CK_RV rvi = fl->C_Initialize(&badArgs);
+        record_result("G4Retcodes", "V20_Initialize_pReserved_nonNULL",
+                      rvi == CKR_ARGUMENTS_BAD ? "PASS" : "FAIL",
+                      "expect CKR_ARGUMENTS_BAD(0x7), RV=" + std::to_string(rvi));
     }
 
     CK_RV rv = fl->C_Initialize(NULL_PTR);
@@ -3920,6 +3950,368 @@ void test_g3_keygen() {
     cbcWrapCase("AES_CBC_PAD_wrap_unwrap", CKM_AES_CBC_PAD, 20);
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// G4: return-code precision + error discipline
+// ─────────────────────────────────────────────────────────────────────────────
+void test_g4_retcodes() {
+    const char* CAT = "G4Retcodes";
+    CK_BBOOL bTrue = CK_TRUE, bFalse = CK_FALSE;
+
+    void* dlib = dlopen(opt_engine.c_str(), RTLD_NOW);
+
+    // ── V-7: AES-KW unwrap of a TAMPERED blob → CKR_WRAPPED_KEY_INVALID ───────
+    {
+        CK_OBJECT_CLASS cls = CKO_SECRET_KEY;
+        CK_KEY_TYPE kt = CKK_AES;
+        CK_ULONG klen = 32;
+        CK_ATTRIBUTE kekTpl[] = {
+            { CKA_CLASS, &cls, sizeof(cls) },
+            { CKA_KEY_TYPE, &kt, sizeof(kt) },
+            { CKA_VALUE_LEN, &klen, sizeof(klen) },
+            { CKA_TOKEN, &bFalse, sizeof(bFalse) },
+            { CKA_WRAP, &bTrue, sizeof(bTrue) },
+            { CKA_UNWRAP, &bTrue, sizeof(bTrue) },
+            { CKA_EXTRACTABLE, &bTrue, sizeof(bTrue) },
+        };
+        CK_MECHANISM genMech = { CKM_AES_KEY_GEN, NULL_PTR, 0 };
+        CK_OBJECT_HANDLE hKek = 0, hDek = 0;
+        CK_RV rv = fl->C_GenerateKey(hSess, &genMech, kekTpl, 7, &hKek);
+        if (rv == CKR_OK) rv = fl->C_GenerateKey(hSess, &genMech, kekTpl, 7, &hDek);
+        if (rv != CKR_OK) {
+            record_result(CAT, "V7_AESKW_tampered_unwrap", "FAIL", "key setup RV=" + std::to_string(rv));
+        } else {
+            CK_MECHANISM wrapMech = { CKM_AES_KEY_WRAP, NULL_PTR, 0 };
+            CK_BYTE wrapped[64] = {0};
+            CK_ULONG wrappedLen = sizeof(wrapped);
+            rv = fl->C_WrapKey(hSess, &wrapMech, hKek, hDek, wrapped, &wrappedLen);
+            if (rv != CKR_OK) {
+                record_result(CAT, "V7_AESKW_tampered_unwrap", "FAIL", "C_WrapKey RV=" + std::to_string(rv));
+            } else {
+                // Flip a byte in the middle of the wrapped blob → integrity fails.
+                wrapped[wrappedLen / 2] ^= 0xFF;
+                CK_OBJECT_HANDLE hRec = 0;
+                CK_ATTRIBUTE unwrapTpl[] = {
+                    { CKA_CLASS, &cls, sizeof(cls) },
+                    { CKA_KEY_TYPE, &kt, sizeof(kt) },
+                    { CKA_TOKEN, &bFalse, sizeof(bFalse) },
+                    { CKA_EXTRACTABLE, &bTrue, sizeof(bTrue) },
+                };
+                rv = fl->C_UnwrapKey(hSess, &wrapMech, hKek, wrapped, wrappedLen,
+                                     unwrapTpl, 4, &hRec);
+                record_result(CAT, "V7_AESKW_tampered_unwrap",
+                              rv == CKR_WRAPPED_KEY_INVALID ? "PASS" : "FAIL",
+                              "expect CKR_WRAPPED_KEY_INVALID(0x110), RV=" + std::to_string(rv));
+                if (rv == CKR_OK) fl->C_DestroyObject(hSess, hRec);
+            }
+        }
+        if (hDek) fl->C_DestroyObject(hSess, hDek);
+        if (hKek) fl->C_DestroyObject(hSess, hKek);
+    }
+
+    // Helper: make a generic-secret HMAC key.
+    auto makeMacKey = [&]() -> CK_OBJECT_HANDLE {
+        CK_OBJECT_CLASS secClass = CKO_SECRET_KEY;
+        CK_KEY_TYPE genType = CKK_GENERIC_SECRET;
+        CK_ULONG keyLen = 32;
+        CK_ATTRIBUTE macTmpl[] = {
+            { CKA_CLASS, &secClass, sizeof(secClass) },
+            { CKA_KEY_TYPE, &genType, sizeof(genType) },
+            { CKA_VALUE_LEN, &keyLen, sizeof(keyLen) },
+            { CKA_TOKEN, &bFalse, sizeof(bFalse) },
+            { CKA_SIGN, &bTrue, sizeof(bTrue) },
+            { CKA_VERIFY, &bTrue, sizeof(bTrue) },
+        };
+        CK_OBJECT_HANDLE hKey = 0;
+        CK_MECHANISM genMech = { CKM_GENERIC_SECRET_KEY_GEN, NULL_PTR, 0 };
+        fl->C_GenerateKey(hSess, &genMech, macTmpl, 6, &hKey);
+        return hKey;
+    };
+
+    // ── V-16: C_SessionCancel semantics ──────────────────────────────────────
+    typedef CK_RV (*C_SessionCancel_t)(CK_SESSION_HANDLE, CK_FLAGS);
+    typedef CK_RV (*C_MessageSignInit_t)(CK_SESSION_HANDLE, CK_MECHANISM_PTR, CK_OBJECT_HANDLE);
+    C_SessionCancel_t Cancel = (C_SessionCancel_t)dlsym(dlib, "C_SessionCancel");
+    C_MessageSignInit_t MsgSignInit = (C_MessageSignInit_t)dlsym(dlib, "C_MessageSignInit");
+
+    if (Cancel) {
+        // (a) flags==0 → CKR_OK no-op even with no active op.
+        CK_RV rv = Cancel(hSess, 0);
+        record_result(CAT, "V16_SessionCancel_flags0_noop",
+                      rv == CKR_OK ? "PASS" : "FAIL",
+                      "flags==0 expect CKR_OK no-op, RV=" + std::to_string(rv));
+
+        // (b) flag set for an op that is NOT active → ignore, CKR_OK.
+        CK_OBJECT_HANDLE hMac = makeMacKey();
+        CK_MECHANISM hmacMech = { CKM_SHA256_HMAC, NULL_PTR, 0 };
+        rv = fl->C_SignInit(hSess, &hmacMech, hMac);
+        if (rv == CKR_OK) {
+            // Sign op is active; cancel with CKF_DECRYPT (not active) → ignore.
+            CK_RV rvc = Cancel(hSess, CKF_DECRYPT);
+            record_result(CAT, "V16_SessionCancel_unmatched_ignored",
+                          rvc == CKR_OK ? "PASS" : "FAIL",
+                          "unmatched flag expect CKR_OK ignore, RV=" + std::to_string(rvc));
+            // The sign op must still be active (cancel ignored it): finish it.
+            CK_BYTE data[] = "x";
+            CK_BYTE sig[64]; CK_ULONG sigLen = sizeof(sig);
+            CK_RV rvs = fl->C_Sign(hSess, data, 1, sig, &sigLen);
+            record_result(CAT, "V16_SessionCancel_unmatched_keeps_op",
+                          rvs == CKR_OK ? "PASS" : "FAIL",
+                          "sign op survives unmatched cancel, RV=" + std::to_string(rvs));
+        } else {
+            record_result(CAT, "V16_SessionCancel_unmatched_ignored", "FAIL",
+                          "C_SignInit RV=" + std::to_string(rv));
+        }
+
+        // (c) CKF_MESSAGE_SIGN cancels an active message-sign op. The message
+        //     sign API is asymmetric-only, so use an EC (ECDSA) signing key.
+        if (MsgSignInit) {
+            CK_OBJECT_CLASS pubC = CKO_PUBLIC_KEY, privC = CKO_PRIVATE_KEY;
+            CK_KEY_TYPE ecT = CKK_EC;
+            CK_BYTE oid_p256[] = { 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07 };
+            CK_ATTRIBUTE pubTpl[] = {
+                { CKA_CLASS, &pubC, sizeof(pubC) },
+                { CKA_KEY_TYPE, &ecT, sizeof(ecT) },
+                { CKA_TOKEN, &bFalse, sizeof(bFalse) },
+                { CKA_VERIFY, &bTrue, sizeof(bTrue) },
+                { CKA_EC_PARAMS, oid_p256, sizeof(oid_p256) },
+            };
+            CK_ATTRIBUTE privTpl[] = {
+                { CKA_CLASS, &privC, sizeof(privC) },
+                { CKA_KEY_TYPE, &ecT, sizeof(ecT) },
+                { CKA_TOKEN, &bFalse, sizeof(bFalse) },
+                { CKA_SIGN, &bTrue, sizeof(bTrue) },
+            };
+            CK_MECHANISM kpMech = { CKM_EC_KEY_PAIR_GEN, NULL_PTR, 0 };
+            CK_OBJECT_HANDLE hEcPub = 0, hEcPriv = 0;
+            CK_RV rvk = fl->C_GenerateKeyPair(hSess, &kpMech, pubTpl, 5, privTpl, 4, &hEcPub, &hEcPriv);
+            if (rvk == CKR_OK) {
+                CK_MECHANISM ecdsaMech = { CKM_ECDSA, NULL_PTR, 0 };
+                CK_RV rvm = MsgSignInit(hSess, &ecdsaMech, hEcPriv);
+                if (rvm == CKR_OK) {
+                    CK_RV rvc = Cancel(hSess, CKF_MESSAGE_SIGN);
+                    record_result(CAT, "V16_SessionCancel_CKF_MESSAGE_SIGN",
+                                  rvc == CKR_OK ? "PASS" : "FAIL",
+                                  "cancel active message-sign expect CKR_OK, RV=" + std::to_string(rvc));
+                } else {
+                    record_result(CAT, "V16_SessionCancel_CKF_MESSAGE_SIGN", "SKIP",
+                                  "C_MessageSignInit RV=" + std::to_string(rvm));
+                    refresh_session();
+                }
+            } else {
+                record_result(CAT, "V16_SessionCancel_CKF_MESSAGE_SIGN", "SKIP",
+                              "EC keypair gen RV=" + std::to_string(rvk));
+            }
+        } else {
+            record_result(CAT, "V16_SessionCancel_CKF_MESSAGE_SIGN", "SKIP", "C_MessageSignInit unavailable");
+        }
+        refresh_session();
+    } else {
+        record_result(CAT, "V16_SessionCancel", "SKIP", "C_SessionCancel unavailable");
+    }
+
+    // ── V-17: C_Digest after C_DigestUpdate → CKR_OPERATION_ACTIVE ────────────
+    {
+        refresh_session();
+        CK_MECHANISM dMech = { CKM_SHA256, NULL_PTR, 0 };
+        CK_RV rv = fl->C_DigestInit(hSess, &dMech);
+        if (rv == CKR_OK) {
+            CK_BYTE part[] = "hello";
+            rv = fl->C_DigestUpdate(hSess, part, sizeof(part) - 1);
+        }
+        if (rv == CKR_OK) {
+            CK_BYTE data[] = "world";
+            CK_BYTE dig[32]; CK_ULONG digLen = sizeof(dig);
+            CK_RV rvd = fl->C_Digest(hSess, data, sizeof(data) - 1, dig, &digLen);
+            record_result(CAT, "V17_Digest_after_DigestUpdate",
+                          rvd == CKR_OPERATION_ACTIVE ? "PASS" : "FAIL",
+                          "expect CKR_OPERATION_ACTIVE(0x90), RV=" + std::to_string(rvd));
+            // Op must survive: C_DigestFinal should still work.
+            CK_BYTE dig2[32]; CK_ULONG dig2Len = sizeof(dig2);
+            CK_RV rvf = fl->C_DigestFinal(hSess, dig2, &dig2Len);
+            record_result(CAT, "V17_Digest_op_survives",
+                          rvf == CKR_OK ? "PASS" : "FAIL",
+                          "C_DigestFinal after rejected one-shot, RV=" + std::to_string(rvf));
+        } else {
+            record_result(CAT, "V17_Digest_after_DigestUpdate", "FAIL",
+                          "digest setup RV=" + std::to_string(rv));
+        }
+    }
+
+    // ── V-17: one-shot C_Sign after C_SignUpdate → CKR_OPERATION_ACTIVE ───────
+    {
+        refresh_session();
+        CK_OBJECT_HANDLE hMac = makeMacKey();
+        CK_MECHANISM hmacMech = { CKM_SHA256_HMAC, NULL_PTR, 0 };
+        CK_RV rv = fl->C_SignInit(hSess, &hmacMech, hMac);
+        if (rv == CKR_OK) {
+            CK_BYTE part[] = "abc";
+            rv = fl->C_SignUpdate(hSess, part, sizeof(part) - 1);
+        }
+        if (rv == CKR_OK) {
+            CK_BYTE data[] = "xyz";
+            CK_BYTE sig[64]; CK_ULONG sigLen = sizeof(sig);
+            CK_RV rvs = fl->C_Sign(hSess, data, sizeof(data) - 1, sig, &sigLen);
+            record_result(CAT, "V17_Sign_after_SignUpdate",
+                          rvs == CKR_OPERATION_ACTIVE ? "PASS" : "FAIL",
+                          "expect CKR_OPERATION_ACTIVE(0x90), RV=" + std::to_string(rvs));
+            // Op must survive: C_SignFinal still works.
+            CK_BYTE sig2[64]; CK_ULONG sig2Len = sizeof(sig2);
+            CK_RV rvf = fl->C_SignFinal(hSess, sig2, &sig2Len);
+            record_result(CAT, "V17_Sign_op_survives",
+                          rvf == CKR_OK ? "PASS" : "FAIL",
+                          "C_SignFinal after rejected one-shot, RV=" + std::to_string(rvf));
+        } else {
+            record_result(CAT, "V17_Sign_after_SignUpdate", "FAIL",
+                          "sign setup RV=" + std::to_string(rv));
+        }
+        refresh_session();
+    }
+
+    // ── V-18: C_WrapKeyAuthenticated too-small buffer sets the length ─────────
+    {
+        typedef CK_RV (*C_WrapKeyAuthenticated_t)(CK_SESSION_HANDLE, CK_MECHANISM_PTR,
+            CK_OBJECT_HANDLE, CK_OBJECT_HANDLE, CK_BYTE_PTR, CK_ULONG, CK_BYTE_PTR, CK_ULONG_PTR);
+        C_WrapKeyAuthenticated_t WrapAuth =
+            (C_WrapKeyAuthenticated_t)dlsym(dlib, "C_WrapKeyAuthenticated");
+        if (!WrapAuth) {
+            record_result(CAT, "V18_WrapAuth_buffer_too_small_sets_len", "SKIP",
+                          "C_WrapKeyAuthenticated unavailable");
+        } else {
+            // KEK (AES) + target key.
+            CK_OBJECT_CLASS cls = CKO_SECRET_KEY;
+            CK_KEY_TYPE kt = CKK_AES;
+            CK_ULONG klen = 32;
+            CK_ATTRIBUTE kekTpl[] = {
+                { CKA_CLASS, &cls, sizeof(cls) },
+                { CKA_KEY_TYPE, &kt, sizeof(kt) },
+                { CKA_VALUE_LEN, &klen, sizeof(klen) },
+                { CKA_TOKEN, &bFalse, sizeof(bFalse) },
+                { CKA_WRAP, &bTrue, sizeof(bTrue) },
+                { CKA_EXTRACTABLE, &bTrue, sizeof(bTrue) },
+            };
+            CK_MECHANISM genMech = { CKM_AES_KEY_GEN, NULL_PTR, 0 };
+            CK_OBJECT_HANDLE hKek = 0, hTgt = 0;
+            CK_RV rv = fl->C_GenerateKey(hSess, &genMech, kekTpl, 6, &hKek);
+            if (rv == CKR_OK) rv = fl->C_GenerateKey(hSess, &genMech, kekTpl, 6, &hTgt);
+            if (rv != CKR_OK) {
+                record_result(CAT, "V18_WrapAuth_buffer_too_small_sets_len", "FAIL",
+                              "key setup RV=" + std::to_string(rv));
+            } else {
+                CK_BYTE iv[12] = {1,2,3,4,5,6,7,8,9,10,11,12};
+                CK_GCM_PARAMS gcm = {};
+                gcm.pIv = iv; gcm.ulIvLen = sizeof(iv); gcm.ulIvBits = sizeof(iv) * 8;
+                gcm.pAAD = NULL_PTR; gcm.ulAADLen = 0; gcm.ulTagBits = 128;
+                CK_MECHANISM wrapMech = { CKM_AES_GCM, &gcm, sizeof(gcm) };
+                // First, size query (NULL output).
+                CK_ULONG needLen = 0;
+                rv = WrapAuth(hSess, &wrapMech, hKek, hTgt, NULL_PTR, 0, NULL_PTR, &needLen);
+                bool sizeOK = (rv == CKR_OK && needLen > 0);
+                // Now offer a too-small buffer and confirm the length is set.
+                CK_ULONG tooSmall = 1;
+                CK_BYTE outBuf[4] = {0};
+                CK_ULONG outLen = tooSmall;
+                CK_RV rv2 = WrapAuth(hSess, &wrapMech, hKek, hTgt, NULL_PTR, 0, outBuf, &outLen);
+                bool pass = (rv2 == CKR_BUFFER_TOO_SMALL) && (outLen == needLen) && sizeOK;
+                record_result(CAT, "V18_WrapAuth_buffer_too_small_sets_len",
+                              pass ? "PASS" : "FAIL",
+                              "expect CKR_BUFFER_TOO_SMALL + outLen==" + std::to_string((unsigned long)needLen) +
+                              ", got RV=" + std::to_string(rv2) + " outLen=" + std::to_string((unsigned long)outLen));
+            }
+            if (hTgt) fl->C_DestroyObject(hSess, hTgt);
+            if (hKek) fl->C_DestroyObject(hSess, hKek);
+        }
+    }
+
+    // ── V-19: C_GetSessionValidationFlags init-gate + handle + type ───────────
+    {
+        typedef CK_RV (*C_GSVF_t)(CK_SESSION_HANDLE, CK_SESSION_VALIDATION_FLAGS_TYPE, CK_FLAGS_PTR);
+        C_GSVF_t GSVF = (C_GSVF_t)dlsym(dlib, "C_GetSessionValidationFlags");
+        const CK_SESSION_VALIDATION_FLAGS_TYPE LAST_OK = 0x00000001UL; // CKS_LAST_VALIDATION_OK
+        if (!GSVF) {
+            record_result(CAT, "V19_GetSessionValidationFlags", "SKIP", "unavailable");
+        } else {
+            // Bad handle while initialized → CKR_SESSION_HANDLE_INVALID.
+            CK_FLAGS f = 0xdead;
+            CK_RV rv = GSVF((CK_SESSION_HANDLE)0xFFFFFFF0UL, LAST_OK, &f);
+            record_result(CAT, "V19_GSVF_bad_handle",
+                          rv == CKR_SESSION_HANDLE_INVALID ? "PASS" : "FAIL",
+                          "expect CKR_SESSION_HANDLE_INVALID, RV=" + std::to_string(rv));
+            // Valid handle + valid type → CKR_OK, *pFlags == 0.
+            CK_FLAGS f2 = 0xdead;
+            CK_RV rv2 = GSVF(hSess, LAST_OK, &f2);
+            record_result(CAT, "V19_GSVF_valid",
+                          (rv2 == CKR_OK && f2 == 0) ? "PASS" : "FAIL",
+                          "expect CKR_OK + flags=0, RV=" + std::to_string(rv2) + " flags=" + std::to_string((unsigned long)f2));
+            // Bad type → CKR_ARGUMENTS_BAD.
+            CK_FLAGS f3 = 0;
+            CK_RV rv3 = GSVF(hSess, 0x12345678UL, &f3);
+            record_result(CAT, "V19_GSVF_bad_type",
+                          rv3 == CKR_ARGUMENTS_BAD ? "PASS" : "FAIL",
+                          "expect CKR_ARGUMENTS_BAD, RV=" + std::to_string(rv3));
+            // NOTE: the pre-init gate is exercised by the dedicated standalone
+            // C_GetSessionValidationFlags-before-Initialize check below in main.
+        }
+    }
+
+    // V-20 (pInitArgs->pReserved != NULL → CKR_ARGUMENTS_BAD) is exercised by the
+    // dedicated pre-init harness in init_token() — there is only one
+    // C_Initialize per process.
+
+    // ── GAP 2.4: C_EncapsulateKey bad public-key handle → CKR_KEY_HANDLE_INVALID
+    {
+        typedef CK_RV (*C_EncapsulateKey_t)(CK_SESSION_HANDLE, CK_MECHANISM_PTR, CK_OBJECT_HANDLE,
+            CK_ATTRIBUTE_PTR, CK_ULONG, CK_BYTE_PTR, CK_ULONG_PTR, CK_OBJECT_HANDLE_PTR);
+        C_EncapsulateKey_t Encap = (C_EncapsulateKey_t)dlsym(dlib, "C_EncapsulateKey");
+        const CK_MECHANISM_TYPE M_ML_KEM = 0x00000017UL; // CKM_ML_KEM
+        if (!Encap) {
+            record_result(CAT, "GAP24_Encap_bad_pubkey", "SKIP", "C_EncapsulateKey unavailable");
+        } else {
+            CK_OBJECT_CLASS secC = CKO_SECRET_KEY;
+            CK_KEY_TYPE aesT = CKK_AES;
+            CK_ULONG vlen = 32;
+            CK_ATTRIBUTE outTpl[] = {
+                { CKA_CLASS, &secC, sizeof(secC) },
+                { CKA_KEY_TYPE, &aesT, sizeof(aesT) },
+                { CKA_VALUE_LEN, &vlen, sizeof(vlen) },
+                { CKA_TOKEN, &bFalse, sizeof(bFalse) },
+            };
+            CK_MECHANISM m = { M_ML_KEM, NULL_PTR, 0 };
+            CK_BYTE ct[2048]; CK_ULONG ctLen = sizeof(ct);
+            CK_OBJECT_HANDLE hOut = 0;
+            CK_RV rv = Encap(hSess, &m, (CK_OBJECT_HANDLE)0xFFFFFFF0UL, outTpl, 4, ct, &ctLen, &hOut);
+            record_result(CAT, "GAP24_Encap_bad_pubkey",
+                          rv == CKR_KEY_HANDLE_INVALID ? "PASS" : "FAIL",
+                          "expect CKR_KEY_HANDLE_INVALID(0x60), RV=" + std::to_string(rv));
+            if (rv == CKR_OK && hOut) fl->C_DestroyObject(hSess, hOut);
+        }
+    }
+
+    // ── GAP 6.5: C_DeriveKey bad base key → CKR_KEY_HANDLE_INVALID ────────────
+    {
+        // Use an HKDF-style derive mechanism; the base-key handle is invalid so
+        // the handle check fires before any mechanism processing.
+        CK_MECHANISM deriveMech = { CKM_SP800_108_COUNTER_KDF, NULL_PTR, 0 };
+        CK_OBJECT_CLASS secC = CKO_SECRET_KEY;
+        CK_KEY_TYPE genT = CKK_GENERIC_SECRET;
+        CK_ULONG vlen = 32;
+        CK_ATTRIBUTE dTpl[] = {
+            { CKA_CLASS, &secC, sizeof(secC) },
+            { CKA_KEY_TYPE, &genT, sizeof(genT) },
+            { CKA_VALUE_LEN, &vlen, sizeof(vlen) },
+            { CKA_TOKEN, &bFalse, sizeof(bFalse) },
+        };
+        CK_OBJECT_HANDLE hOut = 0;
+        CK_RV rv = fl->C_DeriveKey(hSess, &deriveMech, (CK_OBJECT_HANDLE)0xFFFFFFF0UL,
+                                   dTpl, 4, &hOut);
+        record_result(CAT, "GAP65_DeriveKey_bad_base",
+                      rv == CKR_KEY_HANDLE_INVALID ? "PASS" : "FAIL",
+                      "expect CKR_KEY_HANDLE_INVALID(0x60), RV=" + std::to_string(rv));
+        if (rv == CKR_OK && hOut) fl->C_DestroyObject(hSess, hOut);
+    }
+
+    refresh_session();
+}
+
 int main(int argc, char** argv) {
     parse_args(argc, argv);
 
@@ -3980,7 +4372,10 @@ int main(int argc, char** argv) {
     if (opt_category == "all" || opt_category == "g3-keygen") {
         refresh_session(); test_g3_keygen();
     }
-    
+    if (opt_category == "all" || opt_category == "g4-retcodes") {
+        refresh_session(); test_g4_retcodes();
+    }
+
     if (opt_category == "all" || opt_category == "classical") {
         refresh_session(); test_ecdsa_curves();
     }

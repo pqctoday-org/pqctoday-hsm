@@ -244,9 +244,21 @@ CK_RV SoftHSM::C_LoginUser(CK_SESSION_HANDLE hSession, CK_USER_TYPE userType,
 }
 
 // C_SessionCancel — Cancel one or more active cryptographic operations in the
-// session (PKCS#11 v3.0 §5.6.7).  flags is a bitmask of CKF_* operation types
-// (0 = cancel all).  softhsmv3 supports exactly one active operation per
-// session, so all active operations are always cancelled together if the type matches.
+// session (PKCS#11 v3.2 §5.6.5).  flags is a bitmask naming the operation
+// type(s) to cancel.
+//
+// V-16 semantics:
+//   - flags == 0          → no-op, return CKR_OK (nothing requested).
+//   - a flag whose op is   → ignore the flag (the spec says only the requested
+//     not active             operations that are active get cancelled; an
+//                            unmatched flag is not an error).
+//   - matched flag         → cancel the active op.
+//
+// softhsmv3 supports exactly one active operation per session, so cancelling
+// any matching flag cancels that single operation.  We honour both the legacy
+// CKF_ENCRYPT/DECRYPT/SIGN/VERIFY/DIGEST flags and the v3.0/3.2 message flags
+// (CKF_MESSAGE_*) and CKF_FIND_OBJECTS so message-session ops and Find can be
+// cancelled.
 CK_RV SoftHSM::C_SessionCancel(CK_SESSION_HANDLE hSession, CK_FLAGS flags)
 {
 	if (!isInitialised) return CKR_CRYPTOKI_NOT_INITIALIZED;
@@ -255,44 +267,88 @@ CK_RV SoftHSM::C_SessionCancel(CK_SESSION_HANDLE hSession, CK_FLAGS flags)
 	Session* session = sessionGuard.get();
 	if (session == NULL) return CKR_SESSION_HANDLE_INVALID;
 
+	// flags == 0: nothing was requested → no-op success.
+	if (flags == 0)
+		return CKR_OK;
+
 	int opType = session->getOpType();
-	if (opType == SESSION_OP_NONE)
-		return CKR_OPERATION_CANCEL_FAILED;
 
+	// Determine whether any set flag names the operation currently active. If
+	// the named op is not active we silently ignore that flag (spec: only the
+	// active requested operations are cancelled; an unmatched flag is not an
+	// error).
 	bool match = false;
-	if (flags == 0) {
+
+	// Encrypt family (single-part, message, and dual ops).
+	if ((flags & (CKF_ENCRYPT | CKF_MESSAGE_ENCRYPT)) &&
+	    (opType == SESSION_OP_ENCRYPT || opType == SESSION_OP_MESSAGE_ENCRYPT ||
+	     opType == SESSION_OP_MESSAGE_ENCRYPT_BEGIN ||
+	     opType == SESSION_OP_DIGEST_ENCRYPT || opType == SESSION_OP_SIGN_ENCRYPT))
 		match = true;
-	} else {
-		// Map SoftHSM operational types to PKCS#11 CKF_* bitmasks
-		if ((flags & CKF_ENCRYPT) && (opType == SESSION_OP_ENCRYPT || opType == SESSION_OP_MESSAGE_ENCRYPT || opType == SESSION_OP_MESSAGE_ENCRYPT_BEGIN))
-			match = true;
-		if ((flags & CKF_DECRYPT) && (opType == SESSION_OP_DECRYPT || opType == SESSION_OP_MESSAGE_DECRYPT || opType == SESSION_OP_MESSAGE_DECRYPT_BEGIN))
-			match = true;
-		if ((flags & CKF_SIGN) && (opType == SESSION_OP_SIGN || opType == SESSION_OP_MESSAGE_SIGN || opType == SESSION_OP_MESSAGE_SIGN_BEGIN || opType == SESSION_OP_SIGN_RECOVER))
-			match = true;
-		if ((flags & CKF_VERIFY) && (opType == SESSION_OP_VERIFY || opType == SESSION_OP_MESSAGE_VERIFY || opType == SESSION_OP_MESSAGE_VERIFY_BEGIN || opType == SESSION_OP_VERIFY_RECOVER || opType == SESSION_OP_VERIFY_SIGNATURE))
-			match = true;
-		if ((flags & CKF_DIGEST) && (opType == SESSION_OP_DIGEST))
-			match = true;
 
-		// Dual operations map to both layers simultaneously
-		if ((flags & CKF_DIGEST) && (opType == SESSION_OP_DIGEST_ENCRYPT || opType == SESSION_OP_DECRYPT_DIGEST))
-			match = true;
-		if ((flags & CKF_ENCRYPT) && (opType == SESSION_OP_DIGEST_ENCRYPT || opType == SESSION_OP_SIGN_ENCRYPT))
-			match = true;
-		if ((flags & CKF_DECRYPT) && (opType == SESSION_OP_DECRYPT_DIGEST || opType == SESSION_OP_DECRYPT_VERIFY))
-			match = true;
-		if ((flags & CKF_SIGN) && (opType == SESSION_OP_SIGN_ENCRYPT))
-			match = true;
-		if ((flags & CKF_VERIFY) && (opType == SESSION_OP_DECRYPT_VERIFY))
-			match = true;
-	}
+	// Decrypt family.
+	if ((flags & (CKF_DECRYPT | CKF_MESSAGE_DECRYPT)) &&
+	    (opType == SESSION_OP_DECRYPT || opType == SESSION_OP_MESSAGE_DECRYPT ||
+	     opType == SESSION_OP_MESSAGE_DECRYPT_BEGIN ||
+	     opType == SESSION_OP_DECRYPT_DIGEST || opType == SESSION_OP_DECRYPT_VERIFY))
+		match = true;
 
+	// Sign family.
+	if ((flags & (CKF_SIGN | CKF_MESSAGE_SIGN)) &&
+	    (opType == SESSION_OP_SIGN || opType == SESSION_OP_MESSAGE_SIGN ||
+	     opType == SESSION_OP_MESSAGE_SIGN_BEGIN || opType == SESSION_OP_SIGN_RECOVER ||
+	     opType == SESSION_OP_SIGN_ENCRYPT))
+		match = true;
+
+	// Verify family.
+	if ((flags & (CKF_VERIFY | CKF_MESSAGE_VERIFY)) &&
+	    (opType == SESSION_OP_VERIFY || opType == SESSION_OP_MESSAGE_VERIFY ||
+	     opType == SESSION_OP_MESSAGE_VERIFY_BEGIN || opType == SESSION_OP_VERIFY_RECOVER ||
+	     opType == SESSION_OP_VERIFY_SIGNATURE || opType == SESSION_OP_DECRYPT_VERIFY))
+		match = true;
+
+	// Digest family.
+	if ((flags & CKF_DIGEST) &&
+	    (opType == SESSION_OP_DIGEST || opType == SESSION_OP_DIGEST_ENCRYPT ||
+	     opType == SESSION_OP_DECRYPT_DIGEST))
+		match = true;
+
+	// Find objects.
+	if ((flags & CKF_FIND_OBJECTS) && (opType == SESSION_OP_FIND))
+		match = true;
+
+	// No requested operation is active → ignore (success, nothing to cancel).
 	if (!match)
-		return CKR_OPERATION_CANCEL_FAILED;
+		return CKR_OK;
 
 	session->resetOp();
 
+	return CKR_OK;
+}
+
+// C_GetSessionValidationFlags — Report the session's validation state flags
+// (PKCS#11 v3.2 §5.6.11).  V-19: must honour the init gate and validate the
+// session handle and the requested validation-flags type.  This software token
+// performs no FIPS/CC validation of operations, so *pFlags = 0 ("no validation
+// performed / no validation state recorded") is the honest answer once the
+// arguments are accepted.
+CK_RV SoftHSM::C_GetSessionValidationFlags(CK_SESSION_HANDLE hSession,
+	CK_SESSION_VALIDATION_FLAGS_TYPE type, CK_FLAGS_PTR pFlags)
+{
+	if (!isInitialised) return CKR_CRYPTOKI_NOT_INITIALIZED;
+
+	if (pFlags == NULL_PTR) return CKR_ARGUMENTS_BAD;
+
+	// Validate the requested flags type. The only defined query state is
+	// CKS_LAST_VALIDATION_OK; anything else is a bad argument.
+	if (type != CKS_LAST_VALIDATION_OK) return CKR_ARGUMENTS_BAD;
+
+	auto sessionGuard = handleManager->getSessionShared(hSession);
+	Session* session = sessionGuard.get();
+	if (session == NULL) return CKR_SESSION_HANDLE_INVALID;
+
+	// No validation constraints recorded for a software token.
+	*pFlags = 0;
 	return CKR_OK;
 }
 

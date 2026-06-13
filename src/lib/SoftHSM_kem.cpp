@@ -142,8 +142,10 @@ CK_RV SoftHSM::C_EncapsulateKey
 	if (token == NULL) return CKR_GENERAL_ERROR;
 
 	// Get the public key object
+	// GAP 2.4: an invalid encapsulation (public) key handle is
+	// CKR_KEY_HANDLE_INVALID per §5.18.8, not CKR_OBJECT_HANDLE_INVALID.
 	OSObject* keyObj = (OSObject*)handleManager->getObject(hPublicKey);
-	if (keyObj == NULL_PTR || !keyObj->isValid()) return CKR_OBJECT_HANDLE_INVALID;
+	if (keyObj == NULL_PTR || !keyObj->isValid()) return CKR_KEY_HANDLE_INVALID;
 
 	CK_BBOOL isKeyOnToken = keyObj->getBooleanValue(CKA_TOKEN, false);
 	CK_BBOOL isKeyPrivate = keyObj->getBooleanValue(CKA_PRIVATE, false);
@@ -350,8 +352,10 @@ CK_RV SoftHSM::C_DecapsulateKey
 	if (token == NULL) return CKR_GENERAL_ERROR;
 
 	// Get the private key object
+	// GAP 2.4: an invalid decapsulation (private) key handle is
+	// CKR_UNWRAPPING_KEY_HANDLE_INVALID per §5.18.9, not CKR_OBJECT_HANDLE_INVALID.
 	OSObject* keyObj = (OSObject*)handleManager->getObject(hPrivateKey);
-	if (keyObj == NULL_PTR || !keyObj->isValid()) return CKR_OBJECT_HANDLE_INVALID;
+	if (keyObj == NULL_PTR || !keyObj->isValid()) return CKR_UNWRAPPING_KEY_HANDLE_INVALID;
 
 	CK_BBOOL isKeyOnToken = keyObj->getBooleanValue(CKA_TOKEN, false);
 	CK_BBOOL isKeyPrivate = keyObj->getBooleanValue(CKA_PRIVATE, true);
