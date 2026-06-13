@@ -5,8 +5,63 @@
 Used by:
 
 - `tests/kat_replay.rs` — replays every TTLV byte pair in `ttlv-wire/` and OASIS XML test cases.
-- `tests/acvp_roundtrip.rs` — drives NIST ACVP vectors through `Create` + crypto op; asserts byte-exact match.
+- `tests/acvp_roundtrip.rs` — drives the `softhsmrustv3` engine directly with the NIST/ACVP
+  vector inputs and asserts byte-exact match (or expected pass/fail for sigVer KATs). See
+  the coverage matrix below.
 - `compliance/profiles/*` — references vector files for profile-driven conformance runs.
+
+## `tests/acvp_roundtrip.rs` — what it actually covers
+
+The KMIP crypto ops dispatch to `softhsmrustv3::{native,crypto}`. ACVP KATs need
+deterministic inputs (fixed key/IV/seed/signature) that the KMIP op layer would otherwise
+generate server-side, so the test drives the engine API directly — that's the level which
+accepts explicit key material.
+
+**Integrity gate:** `manifest_integrity_gate` recomputes the sha256 of every file listed in
+`manifest.sha256` (all 128, JSON + XML) and fails loudly on any mismatch before KATs run.
+
+**No silent orphans:** `no_orphan_vector_files` asserts every `*.json` under `kat/` (excluding
+the `ttlv-wire/` provenance index) is either consumed by a test or listed in the test's
+`KNOWN_UNCONSUMED` set with a reason — a newly-added vector cannot be silently ignored.
+
+| Family (file) | Coverage | Engine entry point |
+|---|---|---|
+| `sha/sha256,sha384,sha512` | digest == md (byte-exact) | sha2 crate (engine's digest impl) |
+| `sha/sha3-256,sha3-512` | digest == md (byte-exact) | sha3 crate (engine's digest impl) |
+| `sha/kmac` | mac == expected (byte-exact) | `crypto::sign_kmac_ext` |
+| `hmac/hmac-sha256,384,512` | mac == expected (byte-exact) | `crypto::sign_hmac` |
+| `aes/aes-cbc` | enc/dec == ct/pt (PKCS#7-padded) | `native::encrypt/decrypt_with_key_bytes` (CKM_AES_CBC_PAD) |
+| `aes/aes-ctr` | enc/dec == ct/pt | `native::encrypt/decrypt_with_key_bytes` |
+| `aes/aes-gcm` | ct‖tag + tag-verified decrypt | `native::encrypt/decrypt_with_key_bytes` |
+| `aes/aes-kw` | wrap/unwrap == wrapped/keyData | `native::aes_key_wrap/unwrap` |
+| `rsa/rsa-pss` | sigVer == expected pass/fail | `crypto::verify_rsa` |
+| `rsa/rsa-oaep` | decrypt == pt (byte-exact) | `native::decrypt_with_key_bytes` (PKCS#8 assembled from n/e/d/p/q) |
+| `ecdsa/ecdsa-p256,p384,p521` | sigVer == expected | `crypto::verify_ecdsa` |
+| `ecdsa/ed25519` | sigVer == expected | `crypto::verify_eddsa` |
+| `ml-kem/ml-kem` (512/768/1024) | decap shared secret == ss (byte-exact) | `native::register_ml_kem_private_key` + `native::decapsulate` |
+| `ml-dsa/ml-dsa` (44/65/87) | sigVer: published sig verifies | `crypto::verify_ml_dsa` |
+| `slh-dsa/slh-dsa` (SHA2-128f) | sigVer byte-verified; sigGen determinism+validity | `crypto::verify_slh_dsa` / `crypto::sign_slh_dsa` |
+
+ML-DSA vectors are sigGen-mode but ML-DSA's default signing is hedged (randomized), so we run
+the deterministic verify side (each published signature must verify). ML-KEM decapsulation is
+deterministic, so it's a genuine byte-exact KAT.
+
+**Deferred (engine lacks a usable entry point — listed in `KNOWN_UNCONSUMED`, not faked):**
+
+| File | Reason |
+|---|---|
+| `aes/aes-cmac-acvp.json` | engine exposes no AES-CMAC primitive |
+| `sha/hkdf-acvp.json` | engine exposes no HKDF primitive |
+| `ecdsa/ed448-acvp.json` | engine has no Ed448 implementation (only Ed25519) |
+| `ml-dsa/composite-sigs-acvp.json` | self-pinned JOSE composite fixture (not ACVP `testGroups`); no engine composite-signature entry point |
+
+**Known corpus defect:** the `sha/kmac-acvp.json` KMAC256 vector declares `macLen=512` but its
+`mac` field is only 63 bytes (truncated one byte + zero-padded). KMAC output length is
+determined by `macLen`, so it can never byte-match; that single case is skipped with an explicit
+in-test assertion (the well-formed KMAC128 vector carries the byte-exact check). The SLH-DSA
+`sigGen` `signature` does not byte-match the engine's deterministic output (generator-specific
+`opt_rand`/addrnd wiring); the engine's determinism + signature validity are asserted instead,
+and byte-exact sigGen against this fixture is deferred.
 
 The full sha256 manifest is `manifest.sha256` — regenerate after any addition with `find . -type f \( -name "*.json" -o -name "*.xml" \) | sort | xargs shasum -a 256 > manifest.sha256`.
 
