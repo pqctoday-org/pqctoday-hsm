@@ -842,7 +842,10 @@ CK_RV SoftHSM::C_GetMechanismInfo(CK_SLOT_ID slotID, CK_MECHANISM_TYPE type, CK_
 			pInfo->flags = CKF_UNWRAP | CKF_WRAP;
 			/* FALLTHROUGH */
 		case CKM_AES_CBC:
-			pInfo->flags |= CKF_WRAP;
+			// Real AES-CBC(-PAD) key wrap AND unwrap are implemented
+			// (audit V-5/V-6), so advertise both directions to match
+			// the C_WrapKey/C_UnwrapKey dispatch.
+			pInfo->flags |= CKF_WRAP | CKF_UNWRAP;
 			/* FALLTHROUGH */
 		case CKM_AES_ECB:
 		case CKM_AES_CTR:

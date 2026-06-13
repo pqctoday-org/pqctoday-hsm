@@ -201,6 +201,69 @@ static ByteString spkiFromPkey(EVP_PKEY* pkey)
 	return spki;
 }
 
+// Map an LMS parameter set (IANA / draft-mcgrew lms_algorithm_type) to its
+// Merkle tree height h (audit V-21). The registry lays the H5/H10/H15/H20/H25
+// variants out in dense runs of 5 within each (hash,n) group:
+//   0x05-0x09 SHA256_N32, 0x0A-0x0E SHA256_N24,
+//   0x0F-0x13 SHAKE_N32,  0x14-0x18 SHAKE_N24
+// so height = 5 * (((type - 5) % 5) + 1). Returns 0 for unknown types.
+static unsigned lmsTreeHeight(param_set_t lmsType)
+{
+	unsigned t = (unsigned)lmsType;
+	if (t < 0x05 || t > 0x18) return 0;
+	return 5u * (((t - 0x05u) % 5u) + 1u);
+}
+
+// Number of one-time signatures (and hence remaining signatures at generation)
+// for an HSS key = product over all levels of 2^h_i, where h_i is the LMS tree
+// height of level i (RFC 8554 §2: an L-level HSS key signs 2^(h_1+...+h_L)
+// messages). Saturates at CK_ULONG max for very tall trees.
+static CK_ULONG hssTotalSignatures(unsigned levels, const param_set_t* lmType)
+{
+	unsigned totalHeight = 0;
+	for (unsigned i = 0; i < levels; ++i)
+	{
+		unsigned h = lmsTreeHeight(lmType[i]);
+		if (h == 0) return 0; // unknown LMS type
+		totalHeight += h;
+	}
+	if (totalHeight >= sizeof(CK_ULONG) * 8)
+		return (CK_ULONG)-1; // saturate
+	return ((CK_ULONG)1) << totalHeight;
+}
+
+// Extract and strictly validate CKA_PARAMETER_SET from a PQC keygen template
+// (audit V-3). The spec requires CKA_PARAMETER_SET on ML-DSA/SLH-DSA/ML-KEM
+// keygen — it MUST NOT silently default. Errors:
+//   • absent                     → CKR_TEMPLATE_INCOMPLETE
+//   • present with wrong size    → CKR_ATTRIBUTE_VALUE_INVALID
+//   • present with invalid value → CKR_ATTRIBUTE_VALUE_INVALID
+// validMin/validMax bound the accepted CKP_* range for the family (the CKP_*
+// enums are dense per pkcs11t.h §CKP).
+static CK_RV extractParameterSet(CK_ATTRIBUTE_PTR pTemplate, CK_ULONG ulCount,
+                                 CK_ULONG validMin, CK_ULONG validMax,
+                                 CK_ULONG& parameterSetOut)
+{
+	bool found = false;
+	CK_ULONG parameterSet = 0;
+	for (CK_ULONG i = 0; i < ulCount; i++)
+	{
+		if (pTemplate[i].type != CKA_PARAMETER_SET)
+			continue;
+		found = true;
+		if (pTemplate[i].ulValueLen != sizeof(CK_ULONG) || pTemplate[i].pValue == NULL_PTR)
+			return CKR_ATTRIBUTE_VALUE_INVALID;
+		parameterSet = *(CK_ULONG*)pTemplate[i].pValue;
+		break;
+	}
+	if (!found)
+		return CKR_TEMPLATE_INCOMPLETE;
+	if (parameterSet < validMin || parameterSet > validMax)
+		return CKR_ATTRIBUTE_VALUE_INVALID;
+	parameterSetOut = parameterSet;
+	return CKR_OK;
+}
+
 // Generate a secret key or a domain parameter set using the specified mechanism
 CK_RV SoftHSM::C_GenerateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechanism, CK_ATTRIBUTE_PTR pTemplate, CK_ULONG ulCount, CK_OBJECT_HANDLE_PTR phKey)
 {
@@ -253,6 +316,9 @@ CK_RV SoftHSM::C_GenerateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMecha
 		return CKR_TEMPLATE_INCONSISTENT;
 	if (pMechanism->mechanism == CKM_GENERIC_SECRET_KEY_GEN &&
 	    (objClass != CKO_SECRET_KEY || keyType != CKK_GENERIC_SECRET))
+		return CKR_TEMPLATE_INCONSISTENT;
+	if (pMechanism->mechanism == CKM_CHACHA20_KEY_GEN &&
+	    (objClass != CKO_SECRET_KEY || keyType != CKK_CHACHA20))
 		return CKR_TEMPLATE_INCONSISTENT;
 
 	// Check authorization
@@ -348,6 +414,9 @@ CK_RV SoftHSM::C_GenerateKeyPair
 		case CKM_XMSS_KEY_PAIR_GEN:
 			keyType = CKK_XMSS;
 			break;
+		case CKM_XMSSMT_KEY_PAIR_GEN:
+			keyType = CKK_XMSSMT;
+			break;
 		default:
 			return CKR_MECHANISM_INVALID;
 	}
@@ -373,6 +442,16 @@ CK_RV SoftHSM::C_GenerateKeyPair
 		return CKR_TEMPLATE_INCONSISTENT;
 	if (pMechanism->mechanism == CKM_SLH_DSA_KEY_PAIR_GEN && keyType != CKK_SLH_DSA)
 		return CKR_TEMPLATE_INCONSISTENT;
+	if (pMechanism->mechanism == CKM_ML_KEM_KEY_PAIR_GEN && keyType != CKK_ML_KEM)
+		return CKR_TEMPLATE_INCONSISTENT;
+	if (pMechanism->mechanism == CKM_EC_KEY_PAIR_GEN && keyType != CKK_EC)
+		return CKR_TEMPLATE_INCONSISTENT;
+	if (pMechanism->mechanism == CKM_HSS_KEY_PAIR_GEN && keyType != CKK_HSS)
+		return CKR_TEMPLATE_INCONSISTENT;
+	if (pMechanism->mechanism == CKM_XMSS_KEY_PAIR_GEN && keyType != CKK_XMSS)
+		return CKR_TEMPLATE_INCONSISTENT;
+	if (pMechanism->mechanism == CKM_XMSSMT_KEY_PAIR_GEN && keyType != CKK_XMSSMT)
+		return CKR_TEMPLATE_INCONSISTENT;
 
 	// Extract information from the private key template that is needed to create the object.
 	CK_OBJECT_CLASS privateKeyClass = CKO_PRIVATE_KEY;
@@ -393,6 +472,16 @@ CK_RV SoftHSM::C_GenerateKeyPair
 	if (pMechanism->mechanism == CKM_ML_DSA_KEY_PAIR_GEN && keyType != CKK_ML_DSA)
 		return CKR_TEMPLATE_INCONSISTENT;
 	if (pMechanism->mechanism == CKM_SLH_DSA_KEY_PAIR_GEN && keyType != CKK_SLH_DSA)
+		return CKR_TEMPLATE_INCONSISTENT;
+	if (pMechanism->mechanism == CKM_ML_KEM_KEY_PAIR_GEN && keyType != CKK_ML_KEM)
+		return CKR_TEMPLATE_INCONSISTENT;
+	if (pMechanism->mechanism == CKM_EC_KEY_PAIR_GEN && keyType != CKK_EC)
+		return CKR_TEMPLATE_INCONSISTENT;
+	if (pMechanism->mechanism == CKM_HSS_KEY_PAIR_GEN && keyType != CKK_HSS)
+		return CKR_TEMPLATE_INCONSISTENT;
+	if (pMechanism->mechanism == CKM_XMSS_KEY_PAIR_GEN && keyType != CKK_XMSS)
+		return CKR_TEMPLATE_INCONSISTENT;
+	if (pMechanism->mechanism == CKM_XMSSMT_KEY_PAIR_GEN && keyType != CKK_XMSSMT)
 		return CKR_TEMPLATE_INCONSISTENT;
 
 	// Check user credentials
@@ -475,7 +564,7 @@ CK_RV SoftHSM::C_GenerateKeyPair
 	// xmss-reference C libraries for cross-validation generation logic.
 	if (pMechanism->mechanism == CKM_HSS_KEY_PAIR_GEN || 
 	    pMechanism->mechanism == CKM_XMSS_KEY_PAIR_GEN ||
-		pMechanism->mechanism == 0x00004035 /* CKM_XMSSMT_KEY_PAIR_GEN */)
+		pMechanism->mechanism == CKM_XMSSMT_KEY_PAIR_GEN)
 	{
 		CK_RV rv = CKR_OK;
 		
@@ -492,7 +581,7 @@ CK_RV SoftHSM::C_GenerateKeyPair
 		const CK_ATTRIBUTE_TYPE ATTR_CKA_HSS_KEYS_REMAINING = 0x0000061cUL;
 		
 		CK_ULONG parameterSet = 0x00000001UL;
-		if (pMechanism->mechanism == CKM_XMSS_KEY_PAIR_GEN || pMechanism->mechanism == 0x00004035) {
+		if (pMechanism->mechanism == CKM_XMSS_KEY_PAIR_GEN || pMechanism->mechanism == CKM_XMSSMT_KEY_PAIR_GEN) {
 			if (pMechanism->pParameter != NULL_PTR && pMechanism->ulParameterLen >= sizeof(CK_ULONG))
 				parameterSet = *(CK_ULONG*)pMechanism->pParameter;
 		}
@@ -530,7 +619,7 @@ CK_RV SoftHSM::C_GenerateKeyPair
 			pub_len = XMSS_OID_LEN + params.pk_bytes;
 			priv_len = XMSS_OID_LEN + params.sk_bytes;
 		}
-		else if (pMechanism->mechanism == 0x00004035) {
+		else if (pMechanism->mechanism == CKM_XMSSMT_KEY_PAIR_GEN) {
 			keyType = CKK_XMSSMT; // 0x00000048UL
 			xmss_params params;
 			if (xmssmt_parse_oid(&params, parameterSet)) return CKR_FUNCTION_FAILED;
@@ -565,6 +654,11 @@ CK_RV SoftHSM::C_GenerateKeyPair
 			pub_len = hss_get_public_key_len(hss_levels, lm_type, lm_ots_type);
 			priv_len = hss_get_private_key_len(hss_levels, lm_type, lm_ots_type);
 			if (pub_len == 0 || priv_len == 0) return CKR_FUNCTION_FAILED;
+
+			// CKA_HSS_KEYS_REMAINING = total OTS signatures available =
+			// 2^(sum of LMS tree heights) (audit V-21). Reject unknown LMS types.
+			remainingSigs = hssTotalSignatures(hss_levels, lm_type);
+			if (remainingSigs == 0) return CKR_MECHANISM_PARAM_INVALID;
 
 			priv_key_vec.resize(priv_len);
 			pub_key_vec.resize(pub_len);
@@ -681,7 +775,7 @@ CK_RV SoftHSM::C_GenerateKeyPair
 				bool bOK = osPub->setAttribute(CKA_LOCAL, true);
 				bOK = bOK && osPub->setAttribute(CKA_KEY_GEN_MECHANISM, pMechanism->mechanism);
 				osPub->setAttribute(CKA_VALUE, pubValue);
-				if (pMechanism->mechanism == CKM_XMSS_KEY_PAIR_GEN || pMechanism->mechanism == 0x00004035) {
+				if (pMechanism->mechanism == CKM_XMSS_KEY_PAIR_GEN || pMechanism->mechanism == CKM_XMSSMT_KEY_PAIR_GEN) {
 					osPub->setAttribute(CKA_PARAMETER_SET_M, (unsigned long)parameterSet);
 				}
 				if (pMechanism->mechanism == CKM_HSS_KEY_PAIR_GEN) {
@@ -693,7 +787,7 @@ CK_RV SoftHSM::C_GenerateKeyPair
 				bool bOK = osPriv->setAttribute(CKA_LOCAL, true);
 				bOK = bOK && osPriv->setAttribute(CKA_KEY_GEN_MECHANISM, pMechanism->mechanism);
 				osPriv->setAttribute(CKA_VALUE, privValue);
-				if (pMechanism->mechanism == CKM_XMSS_KEY_PAIR_GEN || pMechanism->mechanism == 0x00004035) {
+				if (pMechanism->mechanism == CKM_XMSS_KEY_PAIR_GEN || pMechanism->mechanism == CKM_XMSSMT_KEY_PAIR_GEN) {
 					osPriv->setAttribute(CKA_PARAMETER_SET_M, (unsigned long)parameterSet);
 				}
 				if (pMechanism->mechanism == CKM_HSS_KEY_PAIR_GEN) {
@@ -814,18 +908,16 @@ CK_RV SoftHSM::WrapKeySym
 			mode = SymWrap::AES_KEYWRAP_PAD;
 			break;
 #endif
+		// CKM_AES_CBC / CKM_AES_CBC_PAD: real AES-CBC key wrap with the caller's
+		// IV (audit V-5/V-6). These do NOT use the AES-KW SymWrap path — that
+		// silently substituted RFC 3394 key-wrap (ignoring the IV) and, for
+		// CBC_PAD, double-padded (PKCS#7 then KWP), corrupting round-tripped
+		// keys. Handled separately below via the block-cipher encrypt path.
 		case CKM_AES_CBC:
+		case CKM_AES_CBC_PAD:
 			algo = SymAlgo::AES;
-			mode = SymWrap::AES_KEYWRAP;
 			break;
 
-		case CKM_AES_CBC_PAD:
-			blocksize = 16;
-			wrappedlen = RFC5652Pad(keydata, blocksize);
-			algo = SymAlgo::AES;
-			mode = SymWrap::AES_KEYWRAP_PAD;
-			break;
-			
 		default:
 			return CKR_MECHANISM_INVALID;
 	}
@@ -847,18 +939,49 @@ CK_RV SoftHSM::WrapKeySym
 	ByteString iv;
 	ByteString encryptedFinal;
 
-	switch(pMechanism->mechanism) {
+	if (pMechanism->mechanism == CKM_AES_CBC || pMechanism->mechanism == CKM_AES_CBC_PAD)
+	{
+		// Real AES-CBC wrap (audit V-5/V-6): encrypt the key bytes with the
+		// supplied 16-byte IV. CKM_AES_CBC requires block-aligned plaintext
+		// (no padding); CKM_AES_CBC_PAD applies PKCS#7 padding so any length
+		// round-trips byte-exact through the matching unwrap.
+		if (pMechanism->pParameter == NULL_PTR || pMechanism->ulParameterLen != 16)
+		{
+			cipher->recycleKey(wrappingkey);
+			CryptoFactory::i()->recycleSymmetricAlgorithm(cipher);
+			return CKR_MECHANISM_PARAM_INVALID;
+		}
+		iv.resize(16);
+		memcpy(&iv[0], pMechanism->pParameter, 16);
 
-		case CKM_AES_CBC:
-	        case CKM_AES_CBC_PAD:
-		default:
-			// Wrap the key
-			if (!cipher->wrapKey(wrappingkey, mode, keydata, wrapped))
-			{
-				cipher->recycleKey(wrappingkey);
-				CryptoFactory::i()->recycleSymmetricAlgorithm(cipher);
-				return CKR_GENERAL_ERROR;
-			}
+		bool padding = (pMechanism->mechanism == CKM_AES_CBC_PAD);
+		if (!padding && (keydata.size() == 0 || (keydata.size() % 16) != 0))
+		{
+			cipher->recycleKey(wrappingkey);
+			CryptoFactory::i()->recycleSymmetricAlgorithm(cipher);
+			return CKR_KEY_SIZE_RANGE;
+		}
+
+		ByteString encryptedData;
+		if (!cipher->encryptInit(wrappingkey, SymMode::CBC, iv, padding) ||
+		    !cipher->encryptUpdate(keydata, encryptedData) ||
+		    !cipher->encryptFinal(encryptedFinal))
+		{
+			cipher->recycleKey(wrappingkey);
+			CryptoFactory::i()->recycleSymmetricAlgorithm(cipher);
+			return CKR_GENERAL_ERROR;
+		}
+		wrapped = encryptedData + encryptedFinal;
+	}
+	else
+	{
+		// Wrap the key (AES-KW / AES-KWP)
+		if (!cipher->wrapKey(wrappingkey, mode, keydata, wrapped))
+		{
+			cipher->recycleKey(wrappingkey);
+			CryptoFactory::i()->recycleSymmetricAlgorithm(cipher);
+			return CKR_GENERAL_ERROR;
+		}
 	}
 
 	cipher->recycleKey(wrappingkey);
@@ -1368,11 +1491,12 @@ CK_RV SoftHSM::UnwrapKeySym
 			mode = SymWrap::AES_KEYWRAP_PAD;
 			break;
 #endif
-	        case CKM_AES_CBC_PAD:
+		// CKM_AES_CBC / CKM_AES_CBC_PAD: real AES-CBC unwrap matching the
+		// WrapKeySym CBC path (audit V-5/V-6). Decryption with the IV happens
+		// below, not via the AES-KW SymWrap path.
+		case CKM_AES_CBC:
+		case CKM_AES_CBC_PAD:
 			algo = SymAlgo::AES;
-			mode = SymWrap::AES_KEYWRAP_PAD;
-			// Block-size validation (multiples of AES_BLOCK_BYTES) was
-			// already enforced in C_UnwrapKey before this helper is called.
 			break;
 
 		default:
@@ -1397,13 +1521,43 @@ CK_RV SoftHSM::UnwrapKeySym
 	ByteString iv;
 	ByteString decryptedFinal;
 	CK_RV rv = CKR_OK;
-	
-	switch(pMechanism->mechanism) {
 
-	case CKM_AES_CBC_PAD:
-	default:
-		// Unwrap the key
-		rv = CKR_OK;
+	if (pMechanism->mechanism == CKM_AES_CBC || pMechanism->mechanism == CKM_AES_CBC_PAD)
+	{
+		// Real AES-CBC unwrap with the caller's 16-byte IV. CKM_AES_CBC_PAD
+		// strips PKCS#7 padding; CKM_AES_CBC returns the block-aligned bytes
+		// verbatim — byte-exact with the wrap.
+		if (pMechanism->pParameter == NULL_PTR || pMechanism->ulParameterLen != 16)
+		{
+			cipher->recycleKey(unwrappingkey);
+			CryptoFactory::i()->recycleSymmetricAlgorithm(cipher);
+			return CKR_MECHANISM_PARAM_INVALID;
+		}
+		iv.resize(16);
+		memcpy(&iv[0], pMechanism->pParameter, 16);
+
+		bool padding = (pMechanism->mechanism == CKM_AES_CBC_PAD);
+		if (wrapped.size() == 0 || (wrapped.size() % 16) != 0)
+		{
+			cipher->recycleKey(unwrappingkey);
+			CryptoFactory::i()->recycleSymmetricAlgorithm(cipher);
+			return CKR_WRAPPED_KEY_LEN_RANGE;
+		}
+
+		ByteString decryptedData;
+		if (!cipher->decryptInit(unwrappingkey, SymMode::CBC, iv, padding) ||
+		    !cipher->decryptUpdate(wrapped, decryptedData) ||
+		    !cipher->decryptFinal(decryptedFinal))
+		{
+			cipher->recycleKey(unwrappingkey);
+			CryptoFactory::i()->recycleSymmetricAlgorithm(cipher);
+			return CKR_GENERAL_ERROR;
+		}
+		keydata = decryptedData + decryptedFinal;
+	}
+	else
+	{
+		// Unwrap the key (AES-KW / AES-KWP)
 		if (!cipher->unwrapKey(unwrappingkey, mode, wrapped, keydata))
 			rv = CKR_GENERAL_ERROR;
 	}
@@ -1681,9 +1835,11 @@ CK_RV SoftHSM::C_UnwrapKey
 				return rv;
 			break;
 
+		case CKM_AES_CBC:
 	        case CKM_AES_CBC_PAD:
 			// Ciphertext must be a non-empty multiple of the AES block size (16 bytes).
-			// PKCS#7 padding means at least one full block is always present.
+			// CKM_AES_CBC_PAD always carries at least one full PKCS#7 pad block;
+			// CKM_AES_CBC requires the plaintext to have been block-aligned.
 			if ((ulWrappedKeyLen < 16) || ((ulWrappedKeyLen % 16) != 0))
 				return CKR_WRAPPED_KEY_LEN_RANGE;
 			// IV is mandatory and must be exactly one AES block (16 bytes).
@@ -4672,15 +4828,13 @@ CK_RV SoftHSM::generateMLDSA
 	if (token == NULL)
 		return CKR_GENERAL_ERROR;
 
-	// Extract desired key information: CKA_PARAMETER_SET selects the ML-DSA variant
-	CK_ULONG parameterSet = CKP_ML_DSA_44;  // default
-	for (CK_ULONG i = 0; i < ulPublicKeyAttributeCount; i++)
+	// Extract desired key information: CKA_PARAMETER_SET selects the ML-DSA variant.
+	// Mandatory per spec — no silent default (audit V-3).
+	CK_ULONG parameterSet = 0;
 	{
-		if (pPublicKeyTemplate[i].type == CKA_PARAMETER_SET && pPublicKeyTemplate[i].ulValueLen == sizeof(CK_ULONG))
-		{
-			parameterSet = *(CK_ULONG*)pPublicKeyTemplate[i].pValue;
-			break;
-		}
+		CK_RV psrv = extractParameterSet(pPublicKeyTemplate, ulPublicKeyAttributeCount,
+		                                 CKP_ML_DSA_44, CKP_ML_DSA_87, parameterSet);
+		if (psrv != CKR_OK) return psrv;
 	}
 
 	// Set the parameters
@@ -4898,15 +5052,13 @@ CK_RV SoftHSM::generateSLHDSA
 	if (token == NULL)
 		return CKR_GENERAL_ERROR;
 
-	// Extract desired key information: CKA_PARAMETER_SET selects the SLH-DSA variant
-	CK_ULONG parameterSet = CKP_SLH_DSA_SHA2_128S;  // default
-	for (CK_ULONG i = 0; i < ulPublicKeyAttributeCount; i++)
+	// Extract desired key information: CKA_PARAMETER_SET selects the SLH-DSA variant.
+	// Mandatory per spec — no silent default (audit V-3).
+	CK_ULONG parameterSet = 0;
 	{
-		if (pPublicKeyTemplate[i].type == CKA_PARAMETER_SET && pPublicKeyTemplate[i].ulValueLen == sizeof(CK_ULONG))
-		{
-			parameterSet = *(CK_ULONG*)pPublicKeyTemplate[i].pValue;
-			break;
-		}
+		CK_RV psrv = extractParameterSet(pPublicKeyTemplate, ulPublicKeyAttributeCount,
+		                                 CKP_SLH_DSA_SHA2_128S, CKP_SLH_DSA_SHAKE_256F, parameterSet);
+		if (psrv != CKR_OK) return psrv;
 	}
 
 	// Set the parameters
@@ -6742,15 +6894,13 @@ CK_RV SoftHSM::generateMLKEM
 	if (token == NULL)
 		return CKR_GENERAL_ERROR;
 
-	// Extract desired key information: CKA_PARAMETER_SET selects the ML-KEM variant
-	CK_ULONG parameterSet = CKP_ML_KEM_768;  // default
-	for (CK_ULONG i = 0; i < ulPublicKeyAttributeCount; i++)
+	// Extract desired key information: CKA_PARAMETER_SET selects the ML-KEM variant.
+	// Mandatory per spec — no silent default (audit V-3).
+	CK_ULONG parameterSet = 0;
 	{
-		if (pPublicKeyTemplate[i].type == CKA_PARAMETER_SET && pPublicKeyTemplate[i].ulValueLen == sizeof(CK_ULONG))
-		{
-			parameterSet = *(CK_ULONG*)pPublicKeyTemplate[i].pValue;
-			break;
-		}
+		CK_RV psrv = extractParameterSet(pPublicKeyTemplate, ulPublicKeyAttributeCount,
+		                                 CKP_ML_KEM_512, CKP_ML_KEM_1024, parameterSet);
+		if (psrv != CKR_OK) return psrv;
 	}
 
 	// Set the parameters
