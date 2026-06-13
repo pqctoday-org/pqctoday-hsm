@@ -91,3 +91,66 @@ raw r‖s ECDSA, ECDH/HKDF KDFs.
 - **G4 return-code precision (mirror rust S4)**: V-7, V-16, V-17, V-18, V-19, V-20, V-22 + the GAP batch.
 - **G5 attributes/feature (mirror rust S3/T6/T7)**: V-14/V-15 (UNIQUE_ID copy/derive), CKA_SEED, 0x17→0x4 migration shim.
 - Refresh `docs/gap-analysis-pkcs11-v3.2.md` G7/G8/G9.
+
+---
+
+## Remediation status (round 4)
+
+Branch `fix/cpp-pkcs11-v3.2-compliance`. Remediation landed in six commits:
+**G1** `74fa6f3`, **G2** `6ee89ed`, **G3** `11d7c56`, **G4** `0e00701`,
+**G5** `4c6bf74`, **Part-A** `520bff4`. Verification gate: `ctest` 8/8 suites
+pass; the `p11_v32_compliance_test` binary reports **268 PASS / 0 FAIL / 1 SKIP**.
+
+| Finding | Status | Fixing commit |
+|---|---|---|
+| C++C-1 zero-IV GCM/ChaCha substitution | FIXED | G1 `74fa6f3` |
+| C++C-2 SET_IVLEN return ignored / ChaCha20 12-byte nonce | FIXED | G1 `74fa6f3` |
+| C++C-3 XMSS/XMSSMT stack-buffer overflow | FIXED | G1 `74fa6f3` |
+| C++C-4 RIPEMD160 → SHA-1 silent substitution | FIXED | G1 `74fa6f3` |
+| V-1 ML-DSA mechanism-info sizes | FIXED | G2 `6ee89ed` |
+| V-2 SLH-DSA mechanism-info sizes | FIXED | G2 `6ee89ed` |
+| V-3 silent CKA_PARAMETER_SET defaults | FIXED | G3 `11d7c56` |
+| V-4 keygen CKA_KEY_TYPE not validated | FIXED | G3 `11d7c56` |
+| V-5 AES-CBC wrap is secretly AES-KW | FIXED | G3 `11d7c56` |
+| V-6 AES-CBC-PAD double padding | FIXED | G3 `11d7c56` |
+| V-7 unwrap integrity → CKR_GENERAL_ERROR | FIXED | G4 `0e00701` |
+| V-8 XMSSMT keygen unreachable | FIXED | G3 `11d7c56` |
+| V-9 XMSSMT sign unreachable (0x4036→0x4037) | FIXED | G3 `11d7c56` |
+| V-10 CKM_CHACHA20 advertised, zero dispatch | FIXED | G2 `6ee89ed` |
+| V-11 CKM_RIPEMD160_HMAC advertised, rejected | FIXED | G2 `6ee89ed` |
+| V-12 ChaCha20 keygen mislabeled as AES | FIXED | G2 `6ee89ed` |
+| V-13 HSS/XMSS private CKA_VALUE plaintext | FIXED | G1 `74fa6f3` |
+| V-14 CKA_UNIQUE_ID duplicated on C_CopyObject | FIXED | G5 `4c6bf74` |
+| V-15 CKA_UNIQUE_ID settable via template/derive | FIXED | G5 `4c6bf74` |
+| V-16 C_SessionCancel semantics | FIXED | G4 `0e00701` |
+| V-17 one-shot-after-Update → OPERATION_ACTIVE | FIXED | G4 `0e00701` |
+| V-18 C_WrapKeyAuthenticated two-call convention | FIXED | G4 `0e00701` |
+| V-19 C_GetSessionValidationFlags init/session gate | FIXED | G4 `0e00701` |
+| V-20 C_Initialize pReserved≠NULL → ARGUMENTS_BAD | FIXED | G4 `0e00701` |
+| V-21 CKA_HSS_KEYS_REMAINING hardcoded 32 | FIXED | G3 `11d7c56` |
+| V-22 KEM shims lack try/catch firewall | FIXED | G4 `0e00701` |
+| GAP CKA_SEED absent (deterministic PQC keygen) | FIXED | G5 `4c6bf74` |
+| GAP CKF_MESSAGE_* not advertised | FIXED | G2 `6ee89ed` |
+| GAP ChaCha20/SHA3-384-RSA/MD5/raw-PSS/Keccak/X25519/X448/BIP32 advertise↔dispatch | FIXED | G2 `6ee89ed` |
+| GAP stateful-sig no key-level locking / commit-before-release | FIXED | G1 `74fa6f3` |
+| GAP EncapsulateKey/DeriveKey handle codes | FIXED | G4 `0e00701` |
+| GAP return-code precision (unwrap len, StatefulVerify len, StatefulSign error distinction) | FIXED | G4 `0e00701` |
+| GAP 0x17→0x4 store migration shim | FIXED | G5 `4c6bf74` |
+| Part-A CKA_UNIQUE_ID unreadable on private/sensitive objects | FIXED | Part-A `520bff4` |
+
+### Deferred (explicitly out of scope)
+
+- **G8 dual-function combined ops** — `C_DigestEncryptUpdate`, `C_DecryptDigestUpdate`,
+  `C_SignEncryptUpdate`, `C_DecryptVerifyUpdate` remain stubs. Upstream SoftHSM2 v2.7.0
+  also omits them; no PQC algorithm requires them. (Note: `C_SignRecover`/`C_VerifyRecover`
+  — the other half of the old G8 entry — are now fully implemented, not stubs.)
+- **G9 / CKM_RIPEMD160 in WASM** — the `no-module` OpenSSL WASM build disables the legacy
+  provider; RIPEMD-160 lives there. Native engine now returns the correct
+  `CKR_MECHANISM_INVALID` (C++C-4) rather than SHA-1. WASM availability deferred to a
+  size-budget review.
+- **HandleManager cross-token reach** (audit object §6 OBS) — a handle minted on token A is
+  usable from a session on token B. Upstream-inherited; not addressed in round 4.
+- **G7 async ops** (`C_AsyncComplete`/`GetID`/`Join`) — remain unimplemented; the audit
+  corrected the gap-analysis claim (they return `CKR_OPERATION_NOT_INITIALIZED`, not
+  `CKR_FUNCTION_NOT_SUPPORTED`, because no async session is ever started). Out of scope —
+  no PQC tooling requires async sessions.

@@ -1,6 +1,25 @@
-# PKCS#11 v3.2 Compliance Gap Analysis — softhsmv3 (v16)
+# PKCS#11 v3.2 Compliance Gap Analysis — softhsmv3 (v17)
 
-**Updated:** 2026-04-14 (v16 — Critical `DBObject::attributeKind()` fix: `CKA_PUBLIC_KEY_INFO` was returning `akUnknown`, silently aborting every token-object transaction that included it; fixed to `akBinary`. This resolved a cascade of 12 failures across all PQC key types (ML-DSA, ML-KEM, SLH-DSA, HSS — all variants) and the FIPS token-object generation RV=112 errors. `SoftHSM_digest.cpp`: `CKM_RIPEMD160` case now falls through to `default→CKR_MECHANISM_INVALID` instead of referencing non-existent `HashAlgo::RIPEMD160` (OpenSSL legacy provider disabled). `SoftHSM_sign.cpp`: `C_SignRecoverInit`/`C_VerifyRecoverInit` key-loading corrected to use `asymCrypto->newPrivateKey()`, `getRSAPrivateKey()`, `recyclePrivateKey()` — the previous code used `new RSAPrivateKey()`, `getPrivateKey()`, `recycleKey()` which do not exist in this codebase. Compliance suite results are tracked in the reproducible `cpp_compliance_report.md` (regenerated 2026-06-12 via `ctest -R p11_v32_compliance`: 191 PASS / 0 FAIL / 1 SKIP / 2 XFAIL-known-engine-bugs — the historical “120 PASS” figure predates the F4 test-integrity fixes and is no longer citable).)
+**Updated:** 2026-06-12 (v17 — **Round-4 C++ engine remediation complete.** The C++
+`src/lib/` engine — deliberately scoped out of compliance rounds 1–3 (rust was the focus) —
+underwent a full PKCS#11 v3.2 audit (`docs/compliance-audit-cpp-pkcs11-v3.2-2026-06-12.md`)
+and a six-commit remediation on branch `fix/cpp-pkcs11-v3.2-compliance` (G1 `74fa6f3`,
+G2 `6ee89ed`, G3 `11d7c56`, G4 `0e00701`, G5 `4c6bf74`, Part-A `520bff4`). Fixed: 4 criticals
+(zero-IV GCM/ChaCha substitution, XMSS/XMSSMT stack overflow, RIPEMD160→SHA-1 substitution,
+plaintext HSS/XMSS stateful keys), PQC mechanism-info byte sizes (ML-DSA 1312/2592,
+SLH-DSA 32/64), advertise↔dispatch reconciliation (bare CKM_CHACHA20, RIPEMD160_HMAC,
+Keccak-256, raw-PSS, MD5, SHA3-384-RSA, X25519/X448/BIP32-derive), keygen template
+validation (CKA_KEY_TYPE → TEMPLATE_INCONSISTENT, CKA_PARAMETER_SET → TEMPLATE_INCOMPLETE),
+XMSSMT keygen+sign enablement, real AES-CBC/CBC-PAD wrap, return-code precision
+(wrap/handle/op-active/SessionCancel/validation-flags/init-args/KEM-firewall),
+CKA_UNIQUE_ID copy/derive integrity + private/sensitive-read fix + 0x17→0x4 store migration,
+and CKA_SEED deterministic ML-DSA/ML-KEM/SLH-DSA keygen (OpenSSL 3.6.2 seed OSSL_PARAM).
+Verification: `ctest` 8/8 suites pass; the `p11_v32_compliance_test` binary reports
+**268 PASS / 0 FAIL / 1 SKIP** (`ctest -R p11_v32_compliance`).
+**The stale v16 banner figures below ("191 PASS", "120 PASS" historical) are superseded; the
+v16 G7/G8/G9 "intentional omission" entries were found stale by the audit and are corrected
+in §3.1–§3.3.**)
+**Prior:** 2026-04-14 (v16 — Critical `DBObject::attributeKind()` fix: `CKA_PUBLIC_KEY_INFO` was returning `akUnknown`, silently aborting every token-object transaction that included it; fixed to `akBinary`. This resolved a cascade of 12 failures across all PQC key types (ML-DSA, ML-KEM, SLH-DSA, HSS — all variants) and the FIPS token-object generation RV=112 errors. `SoftHSM_digest.cpp`: `CKM_RIPEMD160` case now falls through to `default→CKR_MECHANISM_INVALID` instead of referencing non-existent `HashAlgo::RIPEMD160` (OpenSSL legacy provider disabled). `SoftHSM_sign.cpp`: `C_SignRecoverInit`/`C_VerifyRecoverInit` key-loading corrected to use `asymCrypto->newPrivateKey()`, `getRSAPrivateKey()`, `recyclePrivateKey()` — the previous code used `new RSAPrivateKey()`, `getPrivateKey()`, `recycleKey()` which do not exist in this codebase. Compliance suite results are tracked in the reproducible `cpp_compliance_report.md` (regenerated 2026-06-12 via `ctest -R p11_v32_compliance`: 191 PASS / 0 FAIL / 1 SKIP / 2 XFAIL-known-engine-bugs — the historical “120 PASS” figure predates the F4 test-integrity fixes and is no longer citable).)
 **Prior:** 2026-04-12 (v15 — SP 800-208 SHAKE-256 LMS/LMOTS full parameter set support in C++ engine (`hash-sigs` submodule `pqctoday/hash-sigs@23d3e58`); WASM-layer HSS test suite added (§12.1–§12.3 + §CC cross-check); `CKM_HSS_KEY_PAIR_GEN`, `CKM_HSS`, all `CKP_LMS_*`/`CKP_LMOTS_*`/`CKA_LMS_PARAM_SET`/`CKA_LMOTS_PARAM_SET` exported in `constants.js`/`constants.d.ts`)
 **Prior:** 2026-04-12 (v14 — `C_Initialize` pReserved pointer guard: small sentinel values (< 4096) now return `CKR_ARGUMENTS_BAD` before ACVP dispatch, preventing null-pointer dereference in compliance test suites; `CKF_TOKEN_PRESENT` unconditionally set — `Slot::getSlotInfo()` / `Slot::isTokenPresent()` no longer conditional on `token->isInitialized()`, fixing `C_GetSlotList(tokenPresent=CK_TRUE)` returning empty on uninitialised tokens; ChaCha20-Poly1305 test state isolation fix)
 **Prior:** 2026-04-08 (v13 — KEM output key attribute compliance: `CKA_LOCAL=CK_FALSE`, `CKA_ALWAYS_SENSITIVE=CK_FALSE`, `CKA_NEVER_EXTRACTABLE=CK_FALSE` per §5.18.8/§5.18.9; `C_DecapsulateKey` error codes corrected to `CKR_WRAPPED_KEY_*` family; debug printf removed)
@@ -64,9 +83,9 @@ FIPS 205 §10) implemented across the full stack:
 | --- | --- | --- |
 | C_* function stubs (in scope) | 0 | All G1–G6 + G-DA1/G-DA2 + G-5G1/5G2/5G3 + G-PUB1/G-PK1/G-PK2/G-PK4 + G-KMAC1/KMAC2 resolved |
 | CKM_* mechanisms (in scope) | 0 | AES-CTR, HKDF, X9.63 KDF, SP 800-108 Counter+Feedback KDF, ECDH1 Cofactor, KMAC-128/256 added |
-| CKA_* attribute stubs (in scope) | 3 | CKA_VALUE `ck1\|ck4` missing on ML-DSA/SLH-DSA/ML-KEM public key objects — see §1.21 |
-| Out-of-scope stubs | 2 | Async (G7), Recovery/Combined ops (G8) |
-| Out-of-scope mechanisms | 1 | CKM_RIPEMD160 (WASM `no-module` constraint, G9) |
+| CKA_* attribute stubs (in scope) | 0 | CKA_VALUE `ck1\|ck4` on PQC public keys resolved (v11). CKA_UNIQUE_ID now readable on private/sensitive objects (round-4 Part-A). |
+| Out-of-scope stubs | 2 | Async (G7 — `C_Async*`); the 4 dual-function combined ops (`C_DigestEncryptUpdate`/`C_DecryptDigestUpdate`/`C_SignEncryptUpdate`/`C_DecryptVerifyUpdate`). **`C_SignRecover`/`C_VerifyRecover` are now fully implemented — see §3.2.** |
+| Out-of-scope mechanisms | 1 | CKM_RIPEMD160 in the **WASM** build only (`no-module` legacy-provider constraint, §3.6). Native engine returns CKR_MECHANISM_INVALID. |
 
 ---
 
@@ -324,26 +343,37 @@ See v2 document section §1 for the complete list.
 
 ### 3.1 G7 — Async operations
 
-`C_AsyncComplete` (`main.cpp:1812`), `C_AsyncGetID` (`main.cpp:1818`), `C_AsyncJoin` (`main.cpp:1824`)
+`C_AsyncComplete`, `C_AsyncGetID`, `C_AsyncJoin` (`main.cpp`).
 
-Return `CKR_FUNCTION_NOT_SUPPORTED`. Requires `CKF_ASYNC_SESSION` mode and thread-safe
-promise-based state machine. No PQC tooling requires this. Omission is acceptable per
-PKCS#11 v3.2 §3.4 which marks async as optional when not advertised.
+**Corrected (v17):** the prior "returns `CKR_FUNCTION_NOT_SUPPORTED`" claim was stale. With
+no async session ever started these entry points return `CKR_OPERATION_NOT_INITIALIZED`. They
+remain **intentionally unimplemented** — async requires `CKF_ASYNC_SESSION` mode and a
+thread-safe promise-based state machine, no async session is ever advertised/opened, and no
+PQC tooling requires it. Omission is acceptable per PKCS#11 v3.2 §3.4 (async optional when
+not advertised).
 
 ### 3.2 G8 — Recovery and combined operations
 
-`C_SignRecoverInit`, `C_SignRecover` (`SoftHSM_sign.cpp:1181, 1194`)
-`C_VerifyRecoverInit`, `C_VerifyRecover` (`SoftHSM_sign.cpp:2790, 2803`)
-`C_DigestEncryptUpdate`, `C_DecryptDigestUpdate`, `C_SignEncryptUpdate`, `C_DecryptVerifyUpdate`
-(`SoftHSM_sign.cpp:2818–2875`)
+**Corrected (v17):** `C_SignRecoverInit`/`C_SignRecover` and
+`C_VerifyRecoverInit`/`C_VerifyRecover` are **now fully implemented** (RSA key-loading via
+`asymCrypto->newPrivateKey()`/`getRSAPrivateKey()`/`recyclePrivateKey()`, audit
+"Verified-conformant"). The v16 entry listing them as `CKR_FUNCTION_NOT_SUPPORTED` stubs is
+struck.
 
-Return `CKR_FUNCTION_NOT_SUPPORTED`. Optional combined/recovery operations from PKCS#11 v2.0.
-SoftHSM2 v2.7.0 also omits them. No PQC algorithm requires them.
+The **only remaining stubs** in this group are the 4 dual-function combined ops —
+`C_DigestEncryptUpdate`, `C_DecryptDigestUpdate`, `C_SignEncryptUpdate`,
+`C_DecryptVerifyUpdate` — which return `CKR_FUNCTION_NOT_SUPPORTED`. These are optional v2.0
+combined operations that upstream SoftHSM2 v2.7.0 also omits; no PQC algorithm requires them.
+**Genuinely-intentional omission retained.**
 
 ### 3.3 G9 — Session validation flags (v3.2)
 
-`C_GetSessionValidationFlags` (`main.cpp:1802`) returns `CKR_FUNCTION_NOT_SUPPORTED`.
-New in v3.2 §5.22. Not required for PQC operations.
+**Corrected (v17):** `C_GetSessionValidationFlags` (v3.2 §5.22) is **implemented, not a stub.**
+The v16 claim that it returns `CKR_FUNCTION_NOT_SUPPORTED` was stale; the audit (V-19) found
+the real defect was the opposite — it returned `CKR_OK`/`*pFlags=0` before `C_Initialize` and
+for invalid session handles, bypassing the init/session gate. **Fixed in round-4 G4
+(`0e00701`):** it now gates on init + session validity and honors the `type` argument. No
+longer an out-of-scope item.
 
 ### 3.4 G10 — Stateful hash-based signatures (HSS/XMSS/XMSSMT) ✓ RESOLVED
 
