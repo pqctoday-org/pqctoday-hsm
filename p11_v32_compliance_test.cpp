@@ -152,7 +152,7 @@ void print_usage() {
     printf("Usage: p11_v32_compliance_test [options]\n");
     printf("Options:\n");
     printf("  --engine <path>    Path to the PKCS#11 library (default: %s)\n", opt_engine.c_str());
-    printf("  --category <cat>   Test category: all, init, discovery, pqc-kem, pqc-dsa, hbs, attr (default: %s)\n", opt_category.c_str());
+    printf("  --category <cat>   Test category: all, init, discovery, pqc-kem, pqc-dsa, hbs, attr, g1-security, g2-mechtable, g3-keygen (default: %s)\n", opt_category.c_str());
     printf("  --report <path>    Output bases (e.g. 'rep' creates 'rep.md' and 'rep.json') (default: %s)\n", opt_report.c_str());
     printf("  --pin <pin>        Token PIN (default: %s)\n", opt_pin.c_str());
     printf("  --workdir <dir>    Scratch dir for softhsm2.conf + token store (default: %s)\n", opt_workdir.c_str());
@@ -1388,14 +1388,33 @@ void test_pqc_xmss() {
         record_result("XMSS", "C_SignInit_XMSS_SHA2_10_256", "FAIL", "RV=" + std::to_string(rv));
     }
 
-    // XMSS-MT validation
+    // XMSS-MT validation. Use CKK_XMSSMT in the templates — the XMSS templates
+    // above carry CKK_XMSS, which the keygen mechanism↔key-type consistency
+    // check (audit V-4) correctly rejects with CKR_TEMPLATE_INCONSISTENT.
     CK_MECHANISM mechMT = { CKM_XMSSMT_KEY_PAIR_GEN, NULL_PTR, 0 };
     CK_ULONG paramSetXmssMT = 0x00000001UL; // CKP_XMSSMT_SHA2_20_2_256
     mechMT.pParameter = &paramSetXmssMT;
     mechMT.ulParameterLen = sizeof(paramSetXmssMT);
 
+    CK_KEY_TYPE ktypeXmssMT = 0x00000048UL; // CKK_XMSSMT
+    CK_ATTRIBUTE pubTmplMT[] = {
+        { CKA_CLASS,         &pubClass,   sizeof(pubClass) },
+        { CKA_KEY_TYPE,      &ktypeXmssMT, sizeof(ktypeXmssMT) },
+        { CKA_VERIFY,        &bTrue,      sizeof(bTrue) },
+        { CKA_TOKEN,         &bTrue,      sizeof(bTrue) },
+        { CKA_LABEL,         label,       sizeof(label)-1 }
+    };
+    CK_ATTRIBUTE privTmplMT[] = {
+        { CKA_CLASS,         &privClass,  sizeof(privClass) },
+        { CKA_KEY_TYPE,      &ktypeXmssMT, sizeof(ktypeXmssMT) },
+        { CKA_SIGN,          &bTrue,      sizeof(bTrue) },
+        { CKA_TOKEN,         &bTrue,      sizeof(bTrue) },
+        { CKA_PRIVATE,       &bTrue,      sizeof(bTrue) },
+        { CKA_LABEL,         label,       sizeof(label)-1 }
+    };
+
     CK_OBJECT_HANDLE hPubMT = 0, hPrivMT = 0;
-    rv = fl->C_GenerateKeyPair(hSess, &mechMT, pubTmpl, 5, privTmpl, 6, &hPubMT, &hPrivMT);
+    rv = fl->C_GenerateKeyPair(hSess, &mechMT, pubTmplMT, 5, privTmplMT, 6, &hPubMT, &hPrivMT);
     if (rv == CKR_MECHANISM_INVALID || rv == CKR_FUNCTION_NOT_SUPPORTED) {
         record_result("XMSS", "Generate_XMSSMT_SHA2_20_2_256", "SKIP", "Mech unavailable");
     } else if (rv != CKR_OK) {
@@ -3612,6 +3631,295 @@ void test_g2_derive_reachable() {
                   " (must not be CKR_MECHANISM_INVALID)");
 }
 
+// ─── G3: keygen template validation + XMSSMT enablement + real AES-CBC wrap ──
+// Covers audit V-4 (CKA_KEY_TYPE↔mechanism consistency), V-3 (CKA_PARAMETER_SET
+// mandatory for ML-DSA/ML-KEM/SLH-DSA), V-8/V-9 (XMSSMT keygen+sign reachable),
+// V-21 (CKA_HSS_KEYS_REMAINING = 2^h), V-5/V-6 (real AES-CBC(-PAD) wrap/unwrap).
+void test_g3_keygen() {
+    CK_BBOOL bTrue = CK_TRUE, bFalse = CK_FALSE;
+
+    // Constant fallbacks (values from src/lib/pkcs11/pkcs11t.h).
+    const CK_MECHANISM_TYPE M_ML_KEM_KP   = 0x0000000fUL; // CKM_ML_KEM_KEY_PAIR_GEN
+    const CK_MECHANISM_TYPE M_ML_DSA_KP   = 0x0000001cUL; // CKM_ML_DSA_KEY_PAIR_GEN
+    const CK_MECHANISM_TYPE M_SLH_DSA_KP  = 0x0000002dUL; // CKM_SLH_DSA_KEY_PAIR_GEN
+    const CK_MECHANISM_TYPE M_EC_KP       = 0x00001040UL; // CKM_EC_KEY_PAIR_GEN
+    const CK_MECHANISM_TYPE M_XMSS_KP     = 0x00004034UL; // CKM_XMSS_KEY_PAIR_GEN
+    const CK_MECHANISM_TYPE M_XMSSMT_KP   = 0x00004035UL; // CKM_XMSSMT_KEY_PAIR_GEN
+    const CK_MECHANISM_TYPE M_CHACHA20_KG = 0x00001225UL; // CKM_CHACHA20_KEY_GEN
+    const CK_KEY_TYPE       KT_ML_KEM     = 0x00000049UL; // CKK_ML_KEM
+    const CK_KEY_TYPE       KT_HSS        = 0x00000046UL; // CKK_HSS
+    const CK_KEY_TYPE       KT_XMSS       = 0x00000047UL; // CKK_XMSS
+    const CK_KEY_TYPE       KT_XMSSMT     = 0x00000048UL; // CKK_XMSSMT
+    const CK_MECHANISM_TYPE M_XMSSMT_SIGN = 0x00004037UL; // CKM_XMSSMT
+    const CK_OBJECT_CLASS   pubC = CKO_PUBLIC_KEY, privC = CKO_PRIVATE_KEY;
+
+    // ── V-4: CKA_KEY_TYPE that disagrees with the mechanism → INCONSISTENT ────
+    // Helper: build pub/priv templates with a *wrong* CKK and a valid param set,
+    // assert CKR_TEMPLATE_INCONSISTENT.
+    auto wrongKeyTypeCase = [&](const char* name, CK_MECHANISM_TYPE mech,
+                                CK_KEY_TYPE wrongKT, bool needsParamSet) {
+        CK_KEY_TYPE kt = wrongKT;
+        CK_ULONG paramSet = 1; // any in-range CKP_* for the family
+        std::vector<CK_ATTRIBUTE> pubT = {
+            { CKA_CLASS, (void*)&pubC, sizeof(pubC) },
+            { CKA_KEY_TYPE, &kt, sizeof(kt) },
+            { CKA_TOKEN, &bFalse, sizeof(bFalse) },
+        };
+        std::vector<CK_ATTRIBUTE> privT = {
+            { CKA_CLASS, (void*)&privC, sizeof(privC) },
+            { CKA_KEY_TYPE, &kt, sizeof(kt) },
+            { CKA_TOKEN, &bFalse, sizeof(bFalse) },
+        };
+        if (needsParamSet) {
+            pubT.push_back({ CKA_PARAMETER_SET, &paramSet, sizeof(paramSet) });
+            privT.push_back({ CKA_PARAMETER_SET, &paramSet, sizeof(paramSet) });
+        }
+        CK_MECHANISM m = { mech, NULL_PTR, 0 };
+        CK_OBJECT_HANDLE hPub = 0, hPriv = 0;
+        CK_RV rv = fl->C_GenerateKeyPair(hSess, &m,
+                       pubT.data(), (CK_ULONG)pubT.size(),
+                       privT.data(), (CK_ULONG)privT.size(), &hPub, &hPriv);
+        record_result("G3Keygen", std::string("V4_wrongKeyType_") + name,
+                      rv == CKR_TEMPLATE_INCONSISTENT ? "PASS" : "FAIL",
+                      "expect CKR_TEMPLATE_INCONSISTENT, RV=" + std::to_string(rv));
+        if (rv == CKR_OK) { fl->C_DestroyObject(hSess, hPub); fl->C_DestroyObject(hSess, hPriv); }
+    };
+    // ML-KEM mech with CKK_XMSSMT (the F4-proven hole), EC with CKK_ML_KEM,
+    // HSS/XMSS/XMSSMT each with a foreign CKK.
+    wrongKeyTypeCase("ML_KEM_vs_XMSSMT", M_ML_KEM_KP, KT_XMSSMT, true);
+    wrongKeyTypeCase("EC_vs_ML_KEM",     M_EC_KP,     KT_ML_KEM, false);
+    wrongKeyTypeCase("HSS_vs_XMSS",      0x00004032UL /*CKM_HSS_KEY_PAIR_GEN*/, KT_XMSS, false);
+    wrongKeyTypeCase("XMSS_vs_HSS",      M_XMSS_KP,   KT_HSS,    false);
+    wrongKeyTypeCase("XMSSMT_vs_XMSS",   M_XMSSMT_KP, KT_XMSS,   false);
+
+    // ChaCha20 secret-key gen with a wrong CKK (CKK_AES) → INCONSISTENT.
+    {
+        CK_OBJECT_CLASS secC = CKO_SECRET_KEY;
+        CK_KEY_TYPE wrongKT = CKK_AES;
+        CK_ULONG vlen = 32;
+        CK_ATTRIBUTE t[] = {
+            { CKA_CLASS, &secC, sizeof(secC) },
+            { CKA_KEY_TYPE, &wrongKT, sizeof(wrongKT) },
+            { CKA_VALUE_LEN, &vlen, sizeof(vlen) },
+            { CKA_TOKEN, &bFalse, sizeof(bFalse) },
+        };
+        CK_MECHANISM m = { M_CHACHA20_KG, NULL_PTR, 0 };
+        CK_OBJECT_HANDLE h = 0;
+        CK_RV rv = fl->C_GenerateKey(hSess, &m, t, 4, &h);
+        record_result("G3Keygen", "V4_wrongKeyType_ChaCha20_vs_AES",
+                      rv == CKR_TEMPLATE_INCONSISTENT ? "PASS" : "FAIL",
+                      "expect CKR_TEMPLATE_INCONSISTENT, RV=" + std::to_string(rv));
+        if (rv == CKR_OK) fl->C_DestroyObject(hSess, h);
+    }
+
+    // ── V-3: missing CKA_PARAMETER_SET on ML-DSA/ML-KEM/SLH-DSA → INCOMPLETE ──
+    auto missingParamSetCase = [&](const char* name, CK_MECHANISM_TYPE mech,
+                                   CK_KEY_TYPE kt) {
+        CK_KEY_TYPE keyType = kt;
+        CK_ATTRIBUTE pubT[] = {
+            { CKA_CLASS, (void*)&pubC, sizeof(pubC) },
+            { CKA_KEY_TYPE, &keyType, sizeof(keyType) },
+            { CKA_TOKEN, &bFalse, sizeof(bFalse) },
+        };
+        CK_ATTRIBUTE privT[] = {
+            { CKA_CLASS, (void*)&privC, sizeof(privC) },
+            { CKA_KEY_TYPE, &keyType, sizeof(keyType) },
+            { CKA_TOKEN, &bFalse, sizeof(bFalse) },
+        };
+        CK_MECHANISM m = { mech, NULL_PTR, 0 };
+        CK_OBJECT_HANDLE hPub = 0, hPriv = 0;
+        CK_RV rv = fl->C_GenerateKeyPair(hSess, &m, pubT, 3, privT, 3, &hPub, &hPriv);
+        record_result("G3Keygen", std::string("V3_missingParamSet_") + name,
+                      rv == CKR_TEMPLATE_INCOMPLETE ? "PASS" : "FAIL",
+                      "expect CKR_TEMPLATE_INCOMPLETE, RV=" + std::to_string(rv));
+        if (rv == CKR_OK) { fl->C_DestroyObject(hSess, hPub); fl->C_DestroyObject(hSess, hPriv); }
+    };
+    missingParamSetCase("ML_DSA",  M_ML_DSA_KP,  0x0000004aUL /*CKK_ML_DSA*/);
+    missingParamSetCase("ML_KEM",  M_ML_KEM_KP,  KT_ML_KEM);
+    missingParamSetCase("SLH_DSA", M_SLH_DSA_KP, 0x0000004bUL /*CKK_SLH_DSA*/);
+
+    // ── V-8 + V-9: XMSSMT keygen → sign → verify round-trip ──────────────────
+    {
+        CK_KEY_TYPE kt = KT_XMSSMT;
+        CK_ULONG paramSet = 0x00000001UL; // CKP_XMSSMT_SHA2_20_2_256
+        CK_MECHANISM kpMech = { M_XMSSMT_KP, &paramSet, sizeof(paramSet) };
+        CK_ATTRIBUTE pubT[] = {
+            { CKA_CLASS, (void*)&pubC, sizeof(pubC) },
+            { CKA_KEY_TYPE, &kt, sizeof(kt) },
+            { CKA_VERIFY, &bTrue, sizeof(bTrue) },
+            { CKA_TOKEN, &bFalse, sizeof(bFalse) },
+        };
+        CK_ATTRIBUTE privT[] = {
+            { CKA_CLASS, (void*)&privC, sizeof(privC) },
+            { CKA_KEY_TYPE, &kt, sizeof(kt) },
+            { CKA_SIGN, &bTrue, sizeof(bTrue) },
+            { CKA_TOKEN, &bFalse, sizeof(bFalse) },
+            { CKA_PRIVATE, &bTrue, sizeof(bTrue) },
+        };
+        CK_OBJECT_HANDLE hPub = 0, hPriv = 0;
+        CK_RV rv = fl->C_GenerateKeyPair(hSess, &kpMech, pubT, 4, privT, 5, &hPub, &hPriv);
+        if (rv != CKR_OK) {
+            record_result("G3Keygen", "V8_XMSSMT_keygen",
+                          "FAIL", "keygen RV=" + std::to_string(rv) +
+                          " (V-8 expected reachable PASS)");
+        } else {
+            record_result("G3Keygen", "V8_XMSSMT_keygen", "PASS", "XMSSMT key generated");
+
+            CK_BYTE msg[] = "xmssmt round-trip";
+            CK_MECHANISM signMech = { M_XMSSMT_SIGN, NULL_PTR, 0 };
+            CK_RV rvSi = fl->C_SignInit(hSess, &signMech, hPriv);
+            if (rvSi != CKR_OK) {
+                record_result("G3Keygen", "V9_XMSSMT_SignInit",
+                              "FAIL", "SignInit RV=" + std::to_string(rvSi) +
+                              " (V-9 0x4036→0x4037 fix expected)");
+            } else {
+                CK_BYTE sig[10000];
+                CK_ULONG sigLen = sizeof(sig);
+                CK_RV rvS = fl->C_Sign(hSess, msg, sizeof(msg)-1, sig, &sigLen);
+                if (rvS != CKR_OK) {
+                    record_result("G3Keygen", "V9_XMSSMT_Sign",
+                                  "FAIL", "Sign RV=" + std::to_string(rvS));
+                } else {
+                    CK_RV rvVi = fl->C_VerifyInit(hSess, &signMech, hPub);
+                    CK_RV rvV = (rvVi == CKR_OK)
+                                  ? fl->C_Verify(hSess, msg, sizeof(msg)-1, sig, sigLen)
+                                  : rvVi;
+                    record_result("G3Keygen", "V9_XMSSMT_sign_verify_roundtrip",
+                                  rvV == CKR_OK ? "PASS" : "FAIL",
+                                  "Verify RV=" + std::to_string(rvV));
+                }
+            }
+            fl->C_DestroyObject(hSess, hPub);
+            fl->C_DestroyObject(hSess, hPriv);
+        }
+    }
+
+    // ── V-21: CKA_HSS_KEYS_REMAINING = 2^h for the chosen LMS param set ───────
+    // Default single-level HSS uses LMS_SHA256_N32_H5 (h=5) → 2^5 = 32.
+    {
+        CK_KEY_TYPE kt = KT_HSS;
+        CK_MECHANISM kpMech = { 0x00004032UL /*CKM_HSS_KEY_PAIR_GEN*/, NULL_PTR, 0 };
+        CK_ATTRIBUTE pubT[] = {
+            { CKA_CLASS, (void*)&pubC, sizeof(pubC) },
+            { CKA_KEY_TYPE, &kt, sizeof(kt) },
+            { CKA_VERIFY, &bTrue, sizeof(bTrue) },
+            { CKA_TOKEN, &bFalse, sizeof(bFalse) },
+        };
+        CK_ATTRIBUTE privT[] = {
+            { CKA_CLASS, (void*)&privC, sizeof(privC) },
+            { CKA_KEY_TYPE, &kt, sizeof(kt) },
+            { CKA_SIGN, &bTrue, sizeof(bTrue) },
+            { CKA_TOKEN, &bFalse, sizeof(bFalse) },
+            { CKA_PRIVATE, &bTrue, sizeof(bTrue) },
+        };
+        CK_OBJECT_HANDLE hPub = 0, hPriv = 0;
+        CK_RV rv = fl->C_GenerateKeyPair(hSess, &kpMech, pubT, 4, privT, 5, &hPub, &hPriv);
+        if (rv != CKR_OK) {
+            record_result("G3Keygen", "V21_HSS_keys_remaining", "SKIP",
+                          "HSS keygen unavailable, RV=" + std::to_string(rv));
+        } else {
+            // CKA_HSS_KEYS_REMAINING == 0x0000061c (pkcs11t.h)
+            CK_ULONG remaining = 0;
+            CK_ATTRIBUTE q[] = { { CKA_HSS_KEYS_REMAINING, &remaining, sizeof(remaining) } };
+            CK_RV rvg = fl->C_GetAttributeValue(hSess, hPriv, q, 1);
+            record_result("G3Keygen", "V21_HSS_keys_remaining",
+                          (rvg == CKR_OK && remaining == 32) ? "PASS" : "FAIL",
+                          "expect 2^5=32 for default LMS_SHA256_N32_H5, got " +
+                          std::to_string(remaining) + " (RV=" + std::to_string(rvg) + ")");
+            fl->C_DestroyObject(hSess, hPub);
+            fl->C_DestroyObject(hSess, hPriv);
+        }
+    }
+
+    // ── V-5 + V-6: real AES-CBC and AES-CBC-PAD wrap → unwrap round-trip ──────
+    // Wrap a known secret key with the KEK, unwrap, confirm byte-exact recovery
+    // with no trailing pad bytes. CKM_AES_CBC needs block-aligned plaintext;
+    // CKM_AES_CBC_PAD applies/strips PKCS#7 so any length round-trips.
+    auto cbcWrapCase = [&](const char* name, CK_MECHANISM_TYPE wrapMech,
+                           CK_ULONG targetLen) {
+        // KEK: AES-256, WRAP+UNWRAP.
+        CK_OBJECT_CLASS secC = CKO_SECRET_KEY;
+        CK_KEY_TYPE aesKT = CKK_AES;
+        CK_BYTE kekBytes[32];
+        for (int i = 0; i < 32; i++) kekBytes[i] = (CK_BYTE)(0x10 + i);
+        CK_ATTRIBUTE kekT[] = {
+            { CKA_CLASS, &secC, sizeof(secC) }, { CKA_KEY_TYPE, &aesKT, sizeof(aesKT) },
+            { CKA_TOKEN, &bFalse, sizeof(bFalse) }, { CKA_WRAP, &bTrue, sizeof(bTrue) },
+            { CKA_UNWRAP, &bTrue, sizeof(bTrue) }, { CKA_VALUE, kekBytes, sizeof(kekBytes) },
+        };
+        CK_OBJECT_HANDLE hKek = 0;
+        if (fl->C_CreateObject(hSess, kekT, 6, &hKek) != CKR_OK) {
+            record_result("G3Keygen", std::string("V5V6_") + name, "FAIL", "KEK create failed");
+            return;
+        }
+        // Target generic-secret key with known, extractable bytes.
+        std::vector<CK_BYTE> targetBytes(targetLen);
+        for (CK_ULONG i = 0; i < targetLen; i++) targetBytes[i] = (CK_BYTE)(0xA0 + i);
+        CK_KEY_TYPE genKT = CKK_GENERIC_SECRET;
+        CK_ATTRIBUTE tgtT[] = {
+            { CKA_CLASS, &secC, sizeof(secC) }, { CKA_KEY_TYPE, &genKT, sizeof(genKT) },
+            { CKA_TOKEN, &bFalse, sizeof(bFalse) }, { CKA_EXTRACTABLE, &bTrue, sizeof(bTrue) },
+            { CKA_SENSITIVE, &bFalse, sizeof(bFalse) },
+            { CKA_VALUE, targetBytes.data(), (CK_ULONG)targetBytes.size() },
+        };
+        CK_OBJECT_HANDLE hTarget = 0;
+        if (fl->C_CreateObject(hSess, tgtT, 6, &hTarget) != CKR_OK) {
+            record_result("G3Keygen", std::string("V5V6_") + name, "FAIL", "target create failed");
+            fl->C_DestroyObject(hSess, hKek);
+            return;
+        }
+
+        CK_BYTE iv[16];
+        for (int i = 0; i < 16; i++) iv[i] = (CK_BYTE)(0x30 + i);
+        CK_MECHANISM m = { wrapMech, iv, sizeof(iv) };
+
+        CK_BYTE wrapped[256];
+        CK_ULONG wrappedLen = sizeof(wrapped);
+        CK_RV rvW = fl->C_WrapKey(hSess, &m, hKek, hTarget, wrapped, &wrappedLen);
+        if (rvW != CKR_OK) {
+            record_result("G3Keygen", std::string("V5V6_") + name, "FAIL",
+                          "C_WrapKey RV=" + std::to_string(rvW));
+            fl->C_DestroyObject(hSess, hKek); fl->C_DestroyObject(hSess, hTarget);
+            return;
+        }
+
+        CK_OBJECT_HANDLE hUnwrapped = 0;
+        CK_ATTRIBUTE uwT[] = {
+            { CKA_CLASS, &secC, sizeof(secC) }, { CKA_KEY_TYPE, &genKT, sizeof(genKT) },
+            { CKA_TOKEN, &bFalse, sizeof(bFalse) }, { CKA_EXTRACTABLE, &bTrue, sizeof(bTrue) },
+            { CKA_SENSITIVE, &bFalse, sizeof(bFalse) },
+        };
+        CK_RV rvU = fl->C_UnwrapKey(hSess, &m, hKek, wrapped, wrappedLen, uwT, 5, &hUnwrapped);
+        if (rvU != CKR_OK) {
+            record_result("G3Keygen", std::string("V5V6_") + name, "FAIL",
+                          "C_UnwrapKey RV=" + std::to_string(rvU));
+            fl->C_DestroyObject(hSess, hKek); fl->C_DestroyObject(hSess, hTarget);
+            return;
+        }
+
+        CK_BYTE recovered[256] = {0};
+        CK_ATTRIBUTE rq[] = { { CKA_VALUE, recovered, sizeof(recovered) } };
+        CK_RV rvg = fl->C_GetAttributeValue(hSess, hUnwrapped, rq, 1);
+        bool exact = (rvg == CKR_OK) &&
+                     (rq[0].ulValueLen == targetLen) &&
+                     (memcmp(recovered, targetBytes.data(), targetLen) == 0);
+        record_result("G3Keygen", std::string("V5V6_") + name,
+                      exact ? "PASS" : "FAIL",
+                      "round-trip byte-exact; recoveredLen=" +
+                      std::to_string((unsigned long)rq[0].ulValueLen) +
+                      " expected=" + std::to_string(targetLen) +
+                      " (RV=" + std::to_string(rvg) + ")");
+        fl->C_DestroyObject(hSess, hKek);
+        fl->C_DestroyObject(hSess, hTarget);
+        fl->C_DestroyObject(hSess, hUnwrapped);
+    };
+    // CKM_AES_CBC: target MUST be block-aligned (32 bytes = 2 blocks).
+    cbcWrapCase("AES_CBC_wrap_unwrap", CKM_AES_CBC, 32);
+    // CKM_AES_CBC_PAD: non-block-aligned length (20 bytes) must still round-trip
+    // byte-exact with the PKCS#7 pad fully stripped (no trailing pad bytes).
+    cbcWrapCase("AES_CBC_PAD_wrap_unwrap", CKM_AES_CBC_PAD, 20);
+}
+
 int main(int argc, char** argv) {
     parse_args(argc, argv);
 
@@ -3668,6 +3976,9 @@ int main(int argc, char** argv) {
         refresh_session(); test_g2_mech_table();
         refresh_session(); test_g2_chacha20_bare();
         refresh_session(); test_g2_derive_reachable();
+    }
+    if (opt_category == "all" || opt_category == "g3-keygen") {
+        refresh_session(); test_g3_keygen();
     }
     
     if (opt_category == "all" || opt_category == "classical") {

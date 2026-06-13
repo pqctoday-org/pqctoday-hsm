@@ -1159,8 +1159,8 @@ CK_RV SoftHSM::StatefulSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMe
 		mechanism = (AsymMech::Type)1000; // Custom flag for HSS
 	} else if (pMechanism->mechanism == CKM_XMSS) {
 		mechanism = (AsymMech::Type)1001; // Custom flag for XMSS
-	} else if (pMechanism->mechanism == 0x00004036 /* CKM_XMSS_MT */) {
-		mechanism = (AsymMech::Type)1002;
+	} else if (pMechanism->mechanism == CKM_XMSSMT) {
+		mechanism = (AsymMech::Type)1002; // Custom flag for XMSS^MT
 	} else {
 		return CKR_MECHANISM_INVALID;
 	}
@@ -1181,7 +1181,7 @@ CK_RV SoftHSM::C_SignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechanis
 	if (isMacMechanism(pMechanism))
 		return MacSignInit(hSession, pMechanism, hKey);
 	else if (pMechanism->mechanism == CKM_HSS ||
-	         pMechanism->mechanism == CKM_XMSS || pMechanism->mechanism == 0x00004036)
+	         pMechanism->mechanism == CKM_XMSS || pMechanism->mechanism == CKM_XMSSMT)
 		return StatefulSignInit(hSession, pMechanism, hKey);
 	else
 		return AsymSignInit(hSession, pMechanism, hKey);
@@ -2628,9 +2628,9 @@ CK_RV SoftHSM::StatefulVerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR p
 	AsymMech::Type mechanism = AsymMech::Unknown;
 	if (pMechanism->mechanism == CKM_HSS) {
 		mechanism = (AsymMech::Type)1000;
-	} else if (pMechanism->mechanism == CKM_XMSS || pMechanism->mechanism == 0x00004036) {
+	} else if (pMechanism->mechanism == CKM_XMSS) {
 		mechanism = (AsymMech::Type)1001;
-	} else if (pMechanism->mechanism == 0x00004037) { // CKM_XMSSMT
+	} else if (pMechanism->mechanism == CKM_XMSSMT) {
 		mechanism = (AsymMech::Type)1002;
 	} else {
 		return CKR_MECHANISM_INVALID;
@@ -2713,8 +2713,7 @@ CK_RV SoftHSM::C_VerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 	if (isMacMechanism(pMechanism))
 		return MacVerifyInit(hSession, pMechanism, hKey);
 	else if (pMechanism->mechanism == CKM_HSS ||
-	         pMechanism->mechanism == CKM_XMSS || pMechanism->mechanism == 0x00004036 ||
-	         pMechanism->mechanism == 0x00004037)
+	         pMechanism->mechanism == CKM_XMSS || pMechanism->mechanism == CKM_XMSSMT)
 		return StatefulVerifyInit(hSession, pMechanism, hKey);
 	else
 		return AsymVerifyInit(hSession, pMechanism, hKey);
