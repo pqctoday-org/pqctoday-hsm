@@ -64,6 +64,40 @@ its G7/G8/G9 "intentional omission" entries are corrected in
 intentional omissions retained are the 4 dual-function combined ops and
 RIPEMD-160 in the WASM build (`no-module` legacy-provider constraint).
 
+### Fixed — C++ engine PKCS#11 v3.2 compliance, round 5 close-out (2026-06-12)
+
+Closes every item the round-4 audit left as "deferred / intentionally out of
+scope." Five commits on branch `fix/cpp-pkcs11-v3.2-compliance`
+(R5-1 `38357a4`, R5-2 `4bce9ef`, R5-3 `7432b2f`, R5-4 `b9f6cd3`,
+R5-5 `a6d2614`). gap-analysis bumped to **v18**.
+
+- **R5-1 — SHA3-384-RSA family completed (`38357a4`):** `CKM_SHA3_384_RSA_PKCS`
+  and `CKM_SHA3_384_RSA_PKCS_PSS` now sign/verify end-to-end, closing the
+  one-family hole in the SHA3-RSA signature set (round 4 had only reconciled the
+  advertise↔dispatch table entry).
+- **R5-2 — dual-function combined ops (`4bce9ef`):** `C_DigestEncryptUpdate`,
+  `C_DecryptDigestUpdate`, `C_SignEncryptUpdate`, `C_DecryptVerifyUpdate` are now
+  implemented; these were the last `CKR_FUNCTION_NOT_SUPPORTED` stubs in the
+  engine.
+- **R5-3 — async conformance (`7432b2f`):** `C_OpenSession` now rejects
+  `CKF_ASYNC_SESSION`, and the `C_Async*` entry points gate on init then return
+  `CKR_FUNCTION_NOT_SUPPORTED` (replacing the stale
+  `CKR_OPERATION_NOT_INITIALIZED`). Async stays a deliberate non-feature, but the
+  engine no longer mis-reports its state.
+- **R5-4 — cross-token handle isolation (`b9f6cd3`):** a handle minted on token A
+  is no longer usable from a session bound to token B (upstream-inherited defect
+  from audit object §6 OBS).
+- **R5-5 — RIPEMD-160 via the native legacy provider (`a6d2614`):** the native
+  engine exposes `CKM_RIPEMD160` through the OpenSSL legacy provider, gated behind
+  a build option. RIPEMD-160 stays **off by design in the WASM build**
+  (`no-module` disables the legacy provider; Bitcoin HASH160 is computed
+  client-side via `@noble/hashes/ripemd160`).
+
+Verification: all 8 `ctest` suites pass (8/8); the `p11_v32_compliance_test`
+binary reports **308 PASS / 0 FAIL / 0 SKIP**. The only items still intentionally
+out of scope are `CKM_RIPEMD160_RSA_PKCS` (RSA-over-RIPEMD-160 was not added —
+only the bare digest mechanism) and RIPEMD-160 in the WASM build.
+
 ### Added — strongSwan-wasm: IKEv2 fragmentation, multi-KE, CHILD_SA stub kernel (2026-06-12)
 
 (`feat/wasm-vpn-frag-multike-childsa` track; CHANGELOG entry added at
