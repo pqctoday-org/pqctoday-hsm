@@ -151,6 +151,32 @@ CK_RV SoftHSM::C_SetOperationState(CK_SESSION_HANDLE hSession, CK_BYTE_PTR /*pOp
 	return CKR_FUNCTION_NOT_SUPPORTED;
 }
 
+// PKCS#11 v3.2 asynchronous operations (§5.21/§5.22).
+// This token does not support asynchronous operations (CKF_ASYNC_SESSION_SUPPORTED
+// is not advertised, and C_OpenSession rejects CKF_ASYNC_SESSION). The functions are
+// therefore genuinely not implemented: gate C_Initialize first, then report that the
+// function is not supported by this token.
+CK_RV SoftHSM::C_AsyncComplete(CK_SESSION_HANDLE /*hSession*/, CK_UTF8CHAR_PTR /*pFunctionName*/, CK_ASYNC_DATA_PTR /*pResult*/)
+{
+	if (!isInitialised) return CKR_CRYPTOKI_NOT_INITIALIZED;
+
+	return CKR_FUNCTION_NOT_SUPPORTED;
+}
+
+CK_RV SoftHSM::C_AsyncGetID(CK_SESSION_HANDLE /*hSession*/, CK_UTF8CHAR_PTR /*pFunctionName*/, CK_ULONG_PTR /*pulID*/)
+{
+	if (!isInitialised) return CKR_CRYPTOKI_NOT_INITIALIZED;
+
+	return CKR_FUNCTION_NOT_SUPPORTED;
+}
+
+CK_RV SoftHSM::C_AsyncJoin(CK_SESSION_HANDLE /*hSession*/, CK_UTF8CHAR_PTR /*pFunctionName*/, CK_ULONG /*ulID*/, CK_BYTE_PTR /*pData*/, CK_ULONG /*ulData*/)
+{
+	if (!isInitialised) return CKR_CRYPTOKI_NOT_INITIALIZED;
+
+	return CKR_FUNCTION_NOT_SUPPORTED;
+}
+
 // Login on the token in the specified session
 CK_RV SoftHSM::C_Login(CK_SESSION_HANDLE hSession, CK_USER_TYPE userType, CK_UTF8CHAR_PTR pPin, CK_ULONG ulPinLen)
 {
