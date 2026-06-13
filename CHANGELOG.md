@@ -8,6 +8,55 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — KMIP 3.0 coverage Phase 2: implementable spec-surface gaps (2026-06-13)
+
+Closes the implementable spec-surface gaps from `kmip/docs/COVERAGE_GAP_PLAN.md`,
+on top of Phase 1's CI-gated safety net. OASIS replay held at 92/0/10 throughout;
+kmip suite 554 tests green.
+
+- **P2.4 — spec-correct result reasons** (`31421ca`). Added emit paths for
+  Wrapping Object Not Found / Archived / Destroyed (on Get/Register wrap KEK
+  resolution) and Circular Link Error (self / direct-reciprocal Link mutation),
+  each with negative tests. MissingInitializationVector and Constraint Violation
+  deferred (the former's reachable condition is corpus-pinned to InvalidMessage;
+  the latter has no enforcement site without inventing a feature).
+- **P2.1 — Object Group + group-membership Locate** (`83533da`). Multi-valued
+  Object Group attribute stored at Create/Register; Locate filters by group. The
+  capability behind the 2 SASED-M-3/TL-M-3 precondition transcripts (which stay
+  SKIP due to hermetic cross-transcript isolation, now with the filter
+  implemented + e2e-tested). Also fixed a P2.4 over-match where the circular-link
+  check wrongly flagged legitimate inverse link pairs (Next/Previous,
+  Public/Private), which had deterministically broken AX-M.
+- **P2.5 — ML-KEM through the KMIP op surface + AES-XTS status** (`807635d`).
+  ML-KEM encap/decap now exercised through the dispatcher Encrypt/Decrypt path
+  (512/768/1024 round-trip shared-secret recovery + tampered-ct negative + FIPS
+  203 implicit rejection), not just the engine bridge. AES-XTS confirmed
+  engine-unsupported → honest UnsupportedCryptographicParameters (0x3e), tested.
+  Corrected the audit's mislabel: the AX-M profile is AES key-wrap + rotation
+  links, not AES-XTS.
+- **P2.2 — Validate operation** (`47923fb`). §6.1 certificate-chain Validate via
+  real `x509-parser`+`ring` (parse + validity-date + issuer/subject chain-link +
+  signature verification where the issuer is available), with an honest
+  Valid/Invalid/Unknown contract — never a false Valid. Moved into
+  HANDLED_OPERATIONS.
+- **P2.3 — Certify / Re-certify: a PQC-capable certificate authority**
+  (`75083d1`, `fa74831`). Implements §6.1.6 Certify and §6.1.50 Re-certify
+  (reversing the prior KMIP-as-CA out-of-scope decision). Parses PKCS#10 CSRs
+  (rcgen), builds the TBSCertificate via `x509-cert` with arbitrary
+  AlgorithmIdentifiers, and signs it in the engine via `native::sign` for RSA,
+  ECDSA (raw r‖s → DER `Ecdsa-Sig-Value`), **and ML-DSA** (id-ml-dsa-44/65/87) —
+  the CA private key never leaves the engine, and ML-DSA-signed certs are
+  issuable (rcgen alone cannot). CA key designated by config; Re-certify
+  recomputes validity from Offset + sets Replaced/Replacement links. The CA cert
+  carries BasicConstraints CA:TRUE + KeyUsage keyCertSign per RFC 5280.
+  **External cross-check**: `openssl_cert_crosscheck.rs` validates issued certs
+  with an independent OpenSSL 3.6 toolchain — `openssl x509 -text` parses the DER
+  and confirms the AlgorithmIdentifier (incl. `ML-DSA-65`), and `openssl verify`
+  independently confirms the CA signature our engine produced for all three
+  algorithms (the ML-DSA-65 signature verified by a separate FIPS-204
+  implementation). Cert format confirmed consistent with the hub playground's
+  PQC OIDs where they overlap.
+
 ### Added — KMIP 3.0 coverage Phase 1: test rigor & regression safety net (2026-06-13)
 
 Closes the test-rigor gaps found by the KMIP 3.0 spec-coverage audit (see
