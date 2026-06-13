@@ -3365,6 +3365,253 @@ void test_g1_security() {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// G2 — mechanism-table accuracy + advertise/dispatch consistency (audit round 4)
+//   * PQC mechanism-info sizes are public-key BYTES (ML-DSA 1312/2592,
+//     SLH-DSA 32/64) — not 128/256 security bits.
+//   * advertise == dispatch: RIPEMD160 / RIPEMD160_HMAC / Keccak-256 are NOT
+//     advertised; CKM_CHACHA20 / X25519 / X448 / BIP32-derive ARE reachable.
+//   * CKF_MESSAGE_* advertised where the message API dispatches.
+// ─────────────────────────────────────────────────────────────────────────────
+#ifndef CKM_RIPEMD160_HMAC
+#define CKM_RIPEMD160_HMAC 0x00000241UL
+#endif
+#ifndef CKM_KECCAK_256
+#define CKM_KECCAK_256 (0x80000000UL | 0x00000051UL)
+#endif
+#ifndef CKM_X448
+#define CKM_X448 (0x80000000UL | 0x00001059UL)
+#endif
+#ifndef CKF_MESSAGE_ENCRYPT
+#define CKF_MESSAGE_ENCRYPT 0x00000002UL
+#define CKF_MESSAGE_DECRYPT 0x00000004UL
+#define CKF_MESSAGE_SIGN    0x00000008UL
+#define CKF_MESSAGE_VERIFY  0x00000010UL
+#endif
+
+static void check_mech_size(CK_MECHANISM_TYPE mech, const char* name,
+                            CK_ULONG expMin, CK_ULONG expMax) {
+    CK_MECHANISM_INFO info;
+    CK_RV rv = fl->C_GetMechanismInfo(0, mech, &info);
+    if (rv != CKR_OK) {
+        record_result("G2MechTable", std::string("Size_") + name, "FAIL",
+                      "C_GetMechanismInfo RV=" + std::to_string(rv));
+        return;
+    }
+    bool ok = (info.ulMinKeySize == expMin && info.ulMaxKeySize == expMax);
+    record_result("G2MechTable", std::string("Size_") + name, ok ? "PASS" : "FAIL",
+                  "min=" + std::to_string(info.ulMinKeySize) +
+                  " max=" + std::to_string(info.ulMaxKeySize) +
+                  " expected " + std::to_string(expMin) + "/" + std::to_string(expMax));
+}
+
+static void check_mech_flag(CK_MECHANISM_TYPE mech, const char* name,
+                            CK_FLAGS wantFlags) {
+    CK_MECHANISM_INFO info;
+    CK_RV rv = fl->C_GetMechanismInfo(0, mech, &info);
+    if (rv != CKR_OK) {
+        record_result("G2MechTable", std::string("Flag_") + name, "FAIL",
+                      "C_GetMechanismInfo RV=" + std::to_string(rv));
+        return;
+    }
+    bool ok = (info.flags & wantFlags) == wantFlags;
+    record_result("G2MechTable", std::string("Flag_") + name, ok ? "PASS" : "FAIL",
+                  "flags=0x" + std::to_string(info.flags) +
+                  " want 0x" + std::to_string(wantFlags));
+}
+
+static void check_not_advertised(CK_MECHANISM_TYPE mech, const char* name) {
+    bool present = mech_advertised(mech);
+    record_result("G2MechTable", std::string("NotAdvertised_") + name,
+                  present ? "FAIL" : "PASS",
+                  present ? "mechanism advertised but has no dispatch"
+                          : "correctly absent from C_GetMechanismList");
+}
+
+void test_g2_mech_table() {
+    // ── V-1 / V-2: PQC mechanism-info sizes are public-key BYTES ─────────────
+    check_mech_size(CKM_ML_DSA_KEY_PAIR_GEN, "ML_DSA_KEY_PAIR_GEN", 1312, 2592);
+    check_mech_size(CKM_ML_DSA,              "ML_DSA",              1312, 2592);
+    check_mech_size(CKM_SLH_DSA_KEY_PAIR_GEN,"SLH_DSA_KEY_PAIR_GEN",  32,   64);
+    check_mech_size(CKM_SLH_DSA,             "SLH_DSA",               32,   64);
+
+    // ── V-11 / G3: unimplemented mechs must NOT be advertised ────────────────
+    check_not_advertised(CKM_RIPEMD160,       "CKM_RIPEMD160");
+    check_not_advertised(CKM_RIPEMD160_HMAC,  "CKM_RIPEMD160_HMAC");
+    check_not_advertised(CKM_KECCAK_256,      "CKM_KECCAK_256");
+
+    // ── G4 / G6: implemented mechs MUST be advertised (advertise ⊆ dispatch) ─
+    record_result("G2MechTable", "Advertised_CKM_CHACHA20",
+                  mech_advertised(CKM_CHACHA20) ? "PASS" : "FAIL",
+                  "bare ChaCha20 stream dispatched");
+    record_result("G2MechTable", "Advertised_CKM_X25519",
+                  mech_advertised(CKM_X25519) ? "PASS" : "FAIL", "X25519 derive");
+    record_result("G2MechTable", "Advertised_CKM_X448",
+                  mech_advertised(CKM_X448) ? "PASS" : "FAIL", "X448 derive");
+    record_result("G2MechTable", "Advertised_CKM_BIP32_MASTER_DERIVE",
+                  mech_advertised(CKM_BIP32_MASTER_DERIVE) ? "PASS" : "FAIL", "BIP32 derive");
+#ifdef CKM_RSA_PKCS_PSS
+    record_result("G2MechTable", "Advertised_CKM_RSA_PKCS_PSS",
+                  mech_advertised(CKM_RSA_PKCS_PSS) ? "PASS" : "FAIL", "raw RSA-PSS");
+#endif
+
+    // ── mech G1 / G2: CKF_MESSAGE_* where the message API dispatches ─────────
+    check_mech_flag(CKM_AES_GCM, "AES_GCM_MESSAGE",
+                    CKF_MESSAGE_ENCRYPT | CKF_MESSAGE_DECRYPT);
+    check_mech_flag(CKM_ML_DSA, "ML_DSA_MESSAGE",
+                    CKF_MESSAGE_SIGN | CKF_MESSAGE_VERIFY);
+    check_mech_flag(CKM_SLH_DSA, "SLH_DSA_MESSAGE",
+                    CKF_MESSAGE_SIGN | CKF_MESSAGE_VERIFY);
+
+    // ── advertise ⊆ dispatch: every advertised mech must yield mechanism-info
+    //    (i.e. it is recognized by the engine, not advertised-then-rejected). ─
+    CK_ULONG count = 0;
+    if (fl->C_GetMechanismList(0, NULL_PTR, &count) == CKR_OK && count > 0) {
+        std::vector<CK_MECHANISM_TYPE> mechs(count);
+        if (fl->C_GetMechanismList(0, mechs.data(), &count) == CKR_OK) {
+            int bad = 0;
+            for (CK_ULONG i = 0; i < count; i++) {
+                CK_MECHANISM_INFO info;
+                if (fl->C_GetMechanismInfo(0, mechs[i], &info) != CKR_OK) bad++;
+            }
+            record_result("G2MechTable", "AdvertiseSubsetDispatch",
+                          bad == 0 ? "PASS" : "FAIL",
+                          std::to_string(count) + " advertised, " +
+                          std::to_string(bad) + " rejected by C_GetMechanismInfo");
+        }
+    }
+}
+
+// ── V-10 / V-12: bare ChaCha20 round-trip + ChaCha20 keygen key type ─────────
+void test_g2_chacha20_bare() {
+    CK_BBOOL bTrue = CK_TRUE, bFalse = CK_FALSE;
+
+    // V-12: keygen must produce a CKK_CHACHA20 key (not CKK_AES).
+    CK_MECHANISM kgMech = { CKM_CHACHA20_KEY_GEN, NULL_PTR, 0 };
+    CK_OBJECT_CLASS secClass = CKO_SECRET_KEY;
+    CK_ATTRIBUTE kgTmpl[] = {
+        { CKA_CLASS,       &secClass, sizeof(secClass) },
+        { CKA_TOKEN,       &bFalse,   sizeof(bFalse) },
+        { CKA_ENCRYPT,     &bTrue,    sizeof(bTrue) },
+        { CKA_DECRYPT,     &bTrue,    sizeof(bTrue) },
+        { CKA_EXTRACTABLE, &bTrue,    sizeof(bTrue) },
+    };
+    CK_OBJECT_HANDLE hKey = 0;
+    CK_RV rv = fl->C_GenerateKey(hSess, &kgMech, kgTmpl, 5, &hKey);
+    if (rv != CKR_OK) {
+        record_result("G2ChaCha20", "Keygen", "FAIL", "C_GenerateKey RV=" + std::to_string(rv));
+        return;
+    }
+    CK_KEY_TYPE kt = 0;
+    CK_ATTRIBUTE q = { CKA_KEY_TYPE, &kt, sizeof(kt) };
+    fl->C_GetAttributeValue(hSess, hKey, &q, 1);
+    record_result("G2ChaCha20", "Keygen_KeyType",
+                  kt == CKK_CHACHA20 ? "PASS" : "FAIL",
+                  "CKA_KEY_TYPE=0x" + std::to_string(kt) + " want CKK_CHACHA20(0x33)");
+
+    CK_ULONG kgm = 0;
+    CK_ATTRIBUTE qg = { CKA_KEY_GEN_MECHANISM, &kgm, sizeof(kgm) };
+    fl->C_GetAttributeValue(hSess, hKey, &qg, 1);
+    record_result("G2ChaCha20", "Keygen_GenMech",
+                  kgm == CKM_CHACHA20_KEY_GEN ? "PASS" : "FAIL",
+                  "CKA_KEY_GEN_MECHANISM=0x" + std::to_string(kgm));
+
+    // V-10: bare ChaCha20 encrypt → decrypt round-trip.
+    #pragma pack(push, 1)
+    struct LOCAL_CK_CHACHA20_PARAMS {
+        CK_BYTE_PTR pBlockCounter; CK_ULONG blockCounterBits;
+        CK_BYTE_PTR pNonce;        CK_ULONG ulNonceBits;
+    };
+    #pragma pack(pop)
+    CK_BYTE counter[4] = {0, 0, 0, 0};
+    CK_BYTE nonce[12]  = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
+    LOCAL_CK_CHACHA20_PARAMS cp = { counter, 32, nonce, 96 };
+    CK_MECHANISM cMech = { CKM_CHACHA20, &cp, sizeof(cp) };
+
+    rv = fl->C_EncryptInit(hSess, &cMech, hKey);
+    if (rv != CKR_OK) {
+        record_result("G2ChaCha20", "EncryptInit", "FAIL", "RV=" + std::to_string(rv));
+        return;
+    }
+    CK_BYTE pt[] = "bare ChaCha20 stream cipher round-trip";
+    CK_BYTE ct[256]; CK_ULONG ctLen = sizeof(ct);
+    rv = fl->C_Encrypt(hSess, pt, sizeof(pt) - 1, ct, &ctLen);
+    if (rv != CKR_OK) {
+        record_result("G2ChaCha20", "Encrypt", "FAIL", "RV=" + std::to_string(rv));
+        return;
+    }
+    record_result("G2ChaCha20", "Encrypt", "PASS",
+                  "ctLen=" + std::to_string(ctLen));
+
+    rv = fl->C_DecryptInit(hSess, &cMech, hKey);
+    CK_BYTE dt[256]; CK_ULONG dtLen = sizeof(dt);
+    if (rv == CKR_OK)
+        rv = fl->C_Decrypt(hSess, ct, ctLen, dt, &dtLen);
+    bool roundtrip = (rv == CKR_OK && dtLen == sizeof(pt) - 1 &&
+                      memcmp(dt, pt, dtLen) == 0);
+    record_result("G2ChaCha20", "RoundTrip", roundtrip ? "PASS" : "FAIL",
+                  roundtrip ? "decrypt matched plaintext"
+                            : "RV=" + std::to_string(rv) + " dtLen=" + std::to_string(dtLen));
+}
+
+// ── G6: X25519 / BIP32 derive must be reachable (not MECHANISM_INVALID) ──────
+void test_g2_derive_reachable() {
+    // We only assert the mechanism is reachable: a derive Init/op must not be
+    // rejected with CKR_MECHANISM_INVALID (which is what an unadvertised mech
+    // returns via isMechanismPermitted). Other failures (bad base key etc.)
+    // still prove the dispatch path is live.
+    CK_BBOOL bTrue = CK_TRUE, bFalse = CK_FALSE;
+
+    // Build a throwaway X25519 keypair to use as the base for derive.
+    CK_OBJECT_CLASS pubC = CKO_PUBLIC_KEY, privC = CKO_PRIVATE_KEY;
+    CK_KEY_TYPE montKT = CKK_EC_MONTGOMERY;
+    CK_BYTE x25519Oid[] = {0x06, 0x03, 0x2B, 0x65, 0x6E}; // 1.3.101.110
+    CK_MECHANISM kpMech = { CKM_EC_MONTGOMERY_KEY_PAIR_GEN, NULL_PTR, 0 };
+    CK_ATTRIBUTE pubT[] = {
+        { CKA_CLASS, &pubC, sizeof(pubC) }, { CKA_KEY_TYPE, &montKT, sizeof(montKT) },
+        { CKA_EC_PARAMS, x25519Oid, sizeof(x25519Oid) }, { CKA_TOKEN, &bFalse, sizeof(bFalse) },
+    };
+    CK_ATTRIBUTE privT[] = {
+        { CKA_CLASS, &privC, sizeof(privC) }, { CKA_KEY_TYPE, &montKT, sizeof(montKT) },
+        { CKA_DERIVE, &bTrue, sizeof(bTrue) }, { CKA_TOKEN, &bFalse, sizeof(bFalse) },
+    };
+    CK_OBJECT_HANDLE hPub = 0, hPriv = 0;
+    CK_RV rv = fl->C_GenerateKeyPair(hSess, &kpMech, pubT, 4, privT, 4, &hPub, &hPriv);
+    if (rv != CKR_OK) {
+        record_result("G2Derive", "X25519_KeyGen", "SKIP",
+                      "could not generate X25519 base key, RV=" + std::to_string(rv));
+    } else {
+        // Attempt an X25519 derive with a dummy peer point; we only require that
+        // the engine does NOT answer CKR_MECHANISM_INVALID.
+        CK_BYTE peer[32] = {0};
+        CK_ECDH1_DERIVE_PARAMS dp;
+        memset(&dp, 0, sizeof(dp));
+        dp.kdf = CKD_NULL; dp.pPublicData = peer; dp.ulPublicDataLen = sizeof(peer);
+        CK_MECHANISM dMech = { CKM_X25519, &dp, sizeof(dp) };
+        CK_OBJECT_CLASS secC = CKO_SECRET_KEY; CK_KEY_TYPE genKT = CKK_GENERIC_SECRET;
+        CK_ULONG vlen = 32;
+        CK_ATTRIBUTE dt[] = {
+            { CKA_CLASS, &secC, sizeof(secC) }, { CKA_KEY_TYPE, &genKT, sizeof(genKT) },
+            { CKA_VALUE_LEN, &vlen, sizeof(vlen) }, { CKA_TOKEN, &bFalse, sizeof(bFalse) },
+        };
+        CK_OBJECT_HANDLE hDer = 0;
+        rv = fl->C_DeriveKey(hSess, &dMech, hPriv, dt, 4, &hDer);
+        record_result("G2Derive", "X25519_Reachable",
+                      rv != CKR_MECHANISM_INVALID ? "PASS" : "FAIL",
+                      "C_DeriveKey RV=" + std::to_string(rv) +
+                      " (must not be CKR_MECHANISM_INVALID)");
+    }
+
+    // BIP32 master derive reachability from an HMAC seed key.
+    CK_MECHANISM bipMech = { CKM_BIP32_MASTER_DERIVE, NULL_PTR, 0 };
+    CK_OBJECT_HANDLE hMaster = 0;
+    rv = fl->C_DeriveKey(hSess, &bipMech, CK_INVALID_HANDLE, NULL_PTR, 0, &hMaster);
+    record_result("G2Derive", "BIP32_Reachable",
+                  rv != CKR_MECHANISM_INVALID ? "PASS" : "FAIL",
+                  "C_DeriveKey RV=" + std::to_string(rv) +
+                  " (must not be CKR_MECHANISM_INVALID)");
+}
+
 int main(int argc, char** argv) {
     parse_args(argc, argv);
 
@@ -3416,6 +3663,11 @@ int main(int argc, char** argv) {
     }
     if (opt_category == "all" || opt_category == "g1-security") {
         refresh_session(); test_g1_security();
+    }
+    if (opt_category == "all" || opt_category == "g2-mechtable") {
+        refresh_session(); test_g2_mech_table();
+        refresh_session(); test_g2_chacha20_bare();
+        refresh_session(); test_g2_derive_reachable();
     }
     
     if (opt_category == "all" || opt_category == "classical") {

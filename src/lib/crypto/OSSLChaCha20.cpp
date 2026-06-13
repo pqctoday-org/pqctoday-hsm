@@ -64,6 +64,13 @@ const EVP_CIPHER* OSSLChaCha20::getCipher() const
 	{
 		return EVP_chacha20_poly1305();
 	}
+	if (currentCipherMode == SymMode::CHACHA)
+	{
+		// Bare ChaCha20 stream cipher (CKM_CHACHA20). OpenSSL's EVP_chacha20
+		// takes a 16-byte IV laid out as counter[4] || nonce[12]; the PKCS#11
+		// layer assembles that from CK_CHACHA20_PARAMS before calling us.
+		return EVP_chacha20();
+	}
 
 	ERROR_MSG("Invalid ChaCha20 cipher mode %i", currentCipherMode);
 

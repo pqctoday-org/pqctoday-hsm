@@ -358,8 +358,15 @@ CK_RV SoftHSM::C_GetTokenInfo(CK_SLOT_ID slotID, CK_TOKEN_INFO_PTR pInfo)
 
 void SoftHSM::prepareSupportedMechanisms(std::map<std::string, CK_MECHANISM_TYPE> &t)
 {
-	// Hash algorithms (RIPEMD, SHA-1, SHA-2 + SHA-3)
-	t["CKM_RIPEMD160"]		= CKM_RIPEMD160;
+	// Hash algorithms (SHA-1, SHA-2 + SHA-3)
+	// CKM_RIPEMD160 is NOT advertised: the engine has no RIPEMD-160 backend
+	// (C_DigestInit returns CKR_MECHANISM_INVALID), so advertising it would
+	// be advertise-without-dispatch (audit V-11).
+#ifndef WITH_FIPS
+	// MD5 digest is accepted by C_DigestInit in non-FIPS builds; advertise it
+	// so C_GetMechanismList matches dispatch (audit G5).
+	t["CKM_MD5"]			= CKM_MD5;
+#endif
 	t["CKM_SHA_1"]			= CKM_SHA_1;
 	t["CKM_SHA224"]			= CKM_SHA224;
 	t["CKM_SHA256"]			= CKM_SHA256;
@@ -370,8 +377,14 @@ void SoftHSM::prepareSupportedMechanisms(std::map<std::string, CK_MECHANISM_TYPE
 	t["CKM_SHA3_384"]		= CKM_SHA3_384;
 	t["CKM_SHA3_512"]		= CKM_SHA3_512;
 
-	// HMAC (RIPEMD, SHA-1, SHA-2 + SHA-3)
-	t["CKM_RIPEMD160_HMAC"]		= CKM_RIPEMD160_HMAC;
+	// HMAC (SHA-1, SHA-2 + SHA-3)
+	// CKM_RIPEMD160_HMAC is NOT advertised: it is absent from isMacMechanism /
+	// kMacMechTable, so every C_SignInit / C_VerifyInit rejects it. Advertising
+	// it would be advertise-without-dispatch (audit V-11).
+#ifndef WITH_FIPS
+	// MD5-HMAC dispatches via resolveMacMech() in non-FIPS builds (audit G5).
+	t["CKM_MD5_HMAC"]		= CKM_MD5_HMAC;
+#endif
 	t["CKM_SHA_1_HMAC"]		= CKM_SHA_1_HMAC;
 	t["CKM_SHA224_HMAC"]		= CKM_SHA224_HMAC;
 	t["CKM_SHA256_HMAC"]		= CKM_SHA256_HMAC;
@@ -392,10 +405,19 @@ void SoftHSM::prepareSupportedMechanisms(std::map<std::string, CK_MECHANISM_TYPE
 	t["CKM_SP800_108_COUNTER_KDF"]	= CKM_SP800_108_COUNTER_KDF;
 	t["CKM_SP800_108_FEEDBACK_KDF"]	= CKM_SP800_108_FEEDBACK_KDF;
 
-	// RSA (MD5-RSA-PKCS removed)
+	// RSA
 	t["CKM_RSA_PKCS_KEY_PAIR_GEN"]	= CKM_RSA_PKCS_KEY_PAIR_GEN;
 	t["CKM_RSA_PKCS"]		= CKM_RSA_PKCS;
 	t["CKM_RSA_X_509"]		= CKM_RSA_X_509;
+#ifndef WITH_FIPS
+	// MD5-RSA-PKCS dispatches in non-FIPS builds (audit G5).
+	t["CKM_MD5_RSA_PKCS"]		= CKM_MD5_RSA_PKCS;
+#endif
+#ifdef WITH_RAW_PSS
+	// Raw RSA-PSS (CKM_RSA_PKCS_PSS) is accepted by Sign/Verify Init and
+	// GetMechanismInfo; advertise it so C_GetMechanismList matches (audit G4).
+	t["CKM_RSA_PKCS_PSS"]		= CKM_RSA_PKCS_PSS;
+#endif
 	t["CKM_SHA1_RSA_PKCS"]		= CKM_SHA1_RSA_PKCS;
 	t["CKM_RSA_PKCS_OAEP"]		= CKM_RSA_PKCS_OAEP;
 	t["CKM_RSA_AES_KEY_WRAP"]	= CKM_RSA_AES_KEY_WRAP;
@@ -431,7 +453,8 @@ void SoftHSM::prepareSupportedMechanisms(std::map<std::string, CK_MECHANISM_TYPE
 	t["CKM_AES_CBC_ENCRYPT_DATA"]	= CKM_AES_CBC_ENCRYPT_DATA;
 	t["CKM_AES_CMAC"]		= CKM_AES_CMAC;
 
-	// ChaCha20
+	// ChaCha20 — bare stream (CKM_CHACHA20) and AEAD (CKM_CHACHA20_POLY1305)
+	// are both dispatched (audit V-10 fixed by implementing the bare stream).
 	t["CKM_CHACHA20_KEY_GEN"]	= CKM_CHACHA20_KEY_GEN;
 	t["CKM_CHACHA20_POLY1305"]	= CKM_CHACHA20_POLY1305;
 	t["CKM_CHACHA20"]		= CKM_CHACHA20;
@@ -454,6 +477,15 @@ void SoftHSM::prepareSupportedMechanisms(std::map<std::string, CK_MECHANISM_TYPE
 	t["CKM_ECDSA_SHA3_512"]		= CKM_ECDSA_SHA3_512;
 	t["CKM_ECDH1_DERIVE"]		= CKM_ECDH1_DERIVE;
 	t["CKM_ECDH1_COFACTOR_DERIVE"]	= CKM_ECDH1_COFACTOR_DERIVE;
+
+	// Montgomery X25519/X448 derive + BIP32 hierarchical derive (audit G6).
+	// These are handled by the C_DeriveKey switch but were absent from the
+	// advertised table, so isMechanismPermitted always rejected them. Values
+	// are now vendor-spaced post-F1 (CKM_VENDOR_DEFINED | …).
+	t["CKM_X25519"]			= CKM_X25519;
+	t["CKM_X448"]			= CKM_X448;
+	t["CKM_BIP32_MASTER_DERIVE"]	= CKM_BIP32_MASTER_DERIVE;
+	t["CKM_BIP32_CHILD_DERIVE"]	= CKM_BIP32_CHILD_DERIVE;
 
 	// EdDSA / Montgomery
 	t["CKM_EC_EDWARDS_KEY_PAIR_GEN"]    = CKM_EC_EDWARDS_KEY_PAIR_GEN;
@@ -504,8 +536,9 @@ void SoftHSM::prepareSupportedMechanisms(std::map<std::string, CK_MECHANISM_TYPE
 	t["CKM_XMSS"]                   = 0x00004036;
 	t["CKM_XMSSMT"]                 = 0x00004037;
 
-	// Keccak-256 (G11 — vendor, Rust engine only; C++ returns CKR_MECHANISM_INVALID)
-	t["CKM_KECCAK_256"]		= CKM_KECCAK_256;
+	// CKM_KECCAK_256 is NOT advertised: C_DigestInit returns
+	// CKR_MECHANISM_INVALID for it (Rust engine only). Advertising it would be
+	// advertise-without-dispatch (audit G3).
 
 	t["CKM_CONCATENATE_DATA_AND_BASE"] = CKM_CONCATENATE_DATA_AND_BASE;
 	t["CKM_CONCATENATE_BASE_AND_DATA"] = CKM_CONCATENATE_BASE_AND_DATA;
@@ -680,7 +713,6 @@ CK_RV SoftHSM::C_GetMechanismInfo(CK_SLOT_ID slotID, CK_MECHANISM_TYPE type, CK_
 #ifndef WITH_FIPS
 		case CKM_MD5:
 #endif
-		case CKM_RIPEMD160:
 		case CKM_SHA_1:
 		case CKM_SHA224:
 		case CKM_SHA256:
@@ -702,11 +734,6 @@ CK_RV SoftHSM::C_GetMechanismInfo(CK_SLOT_ID slotID, CK_MECHANISM_TYPE type, CK_
 			pInfo->flags = CKF_SIGN | CKF_VERIFY;
 			break;
 #endif
-		case CKM_RIPEMD160_HMAC:
-			pInfo->ulMinKeySize = 20;
-			pInfo->ulMaxKeySize = MAX_HMAC_KEY_BYTES;
-			pInfo->flags = CKF_SIGN | CKF_VERIFY;
-			break;
 		case CKM_SHA_1_HMAC:
 			pInfo->ulMinKeySize = 20;
 			pInfo->ulMaxKeySize = MAX_HMAC_KEY_BYTES;
@@ -789,9 +816,12 @@ CK_RV SoftHSM::C_GetMechanismInfo(CK_SLOT_ID slotID, CK_MECHANISM_TYPE type, CK_
 		case CKM_SHA3_224_RSA_PKCS_PSS:
 		case CKM_SHA3_256_RSA_PKCS_PSS:
 		case CKM_SHA3_512_RSA_PKCS_PSS:
+			// CKF_MESSAGE_SIGN/VERIFY: the message sign API delegates to
+			// AsymSignInit, which accepts these RSA mechanisms (audit mech G2).
 			pInfo->ulMinKeySize = rsaMinSize;
 			pInfo->ulMaxKeySize = rsaMaxSize;
-			pInfo->flags = CKF_SIGN | CKF_VERIFY;
+			pInfo->flags = CKF_SIGN | CKF_VERIFY |
+			               CKF_MESSAGE_SIGN | CKF_MESSAGE_VERIFY;
 			break;
 		case CKM_RSA_PKCS_OAEP:
 			pInfo->ulMinKeySize = rsaMinSize;
@@ -816,10 +846,18 @@ CK_RV SoftHSM::C_GetMechanismInfo(CK_SLOT_ID slotID, CK_MECHANISM_TYPE type, CK_
 			/* FALLTHROUGH */
 		case CKM_AES_ECB:
 		case CKM_AES_CTR:
-		case CKM_AES_GCM:
 			pInfo->ulMinKeySize = 16;
 			pInfo->ulMaxKeySize = 32;
 			pInfo->flags |= CKF_ENCRYPT | CKF_DECRYPT;
+			break;
+		case CKM_AES_GCM:
+			// The message API (C_MessageEncryptInit / C_MessageDecryptInit)
+			// dispatches AES-GCM, so advertise CKF_MESSAGE_ENCRYPT/DECRYPT
+			// (audit mech G1).
+			pInfo->ulMinKeySize = 16;
+			pInfo->ulMaxKeySize = 32;
+			pInfo->flags |= CKF_ENCRYPT | CKF_DECRYPT |
+			                CKF_MESSAGE_ENCRYPT | CKF_MESSAGE_DECRYPT;
 			break;
 		case CKM_CHACHA20_KEY_GEN:
 			pInfo->ulMinKeySize = 32;
@@ -889,9 +927,12 @@ CK_RV SoftHSM::C_GetMechanismInfo(CK_SLOT_ID slotID, CK_MECHANISM_TYPE type, CK_
 		case CKM_ECDSA_SHA3_256:
 		case CKM_ECDSA_SHA3_384:
 		case CKM_ECDSA_SHA3_512:
+			// CKF_MESSAGE_SIGN/VERIFY: the message sign API delegates to
+			// AsymSignInit, which accepts ECDSA mechanisms (audit mech G2).
 			pInfo->ulMinKeySize = ecdsaMinSize;
 			pInfo->ulMaxKeySize = ecdsaMaxSize;
-			pInfo->flags = CKF_SIGN | CKF_VERIFY | CKF_EC_COMMOM;
+			pInfo->flags = CKF_SIGN | CKF_VERIFY | CKF_EC_COMMOM |
+			               CKF_MESSAGE_SIGN | CKF_MESSAGE_VERIFY;
 			break;
 #endif
 #if defined(WITH_ECC) || defined(WITH_EDDSA)
@@ -902,6 +943,17 @@ CK_RV SoftHSM::C_GetMechanismInfo(CK_SLOT_ID slotID, CK_MECHANISM_TYPE type, CK_
 			pInfo->flags = CKF_DERIVE;
 			break;
 #endif
+		// Montgomery X25519/X448 + BIP32 derive (audit mech G6). These are
+		// dispatched by C_DeriveKey but were unreachable because the advertised
+		// table omitted them (isMechanismPermitted rejected them).
+		case CKM_X25519:
+		case CKM_X448:
+		case CKM_BIP32_MASTER_DERIVE:
+		case CKM_BIP32_CHILD_DERIVE:
+			pInfo->ulMinKeySize = 0;
+			pInfo->ulMaxKeySize = 0;
+			pInfo->flags = CKF_DERIVE;
+			break;
 #ifdef WITH_EDDSA
 		case CKM_EC_EDWARDS_KEY_PAIR_GEN:
 			pInfo->ulMinKeySize = eddsaMinSize;
@@ -924,10 +976,11 @@ CK_RV SoftHSM::C_GetMechanismInfo(CK_SLOT_ID slotID, CK_MECHANISM_TYPE type, CK_
 			pInfo->flags = CKF_SIGN | CKF_VERIFY;
 			break;
 #endif
-		// ML-DSA (FIPS 204)
+		// ML-DSA (FIPS 204) — ulMin/MaxKeySize are public-key BYTES per
+		// PKCS#11 v3.2 §6.67: ML-DSA-44 pk=1312, ML-DSA-87 pk=2592 (audit V-1).
 		case CKM_ML_DSA_KEY_PAIR_GEN:
-			pInfo->ulMinKeySize = 128;
-			pInfo->ulMaxKeySize = 256;
+			pInfo->ulMinKeySize = 1312;
+			pInfo->ulMaxKeySize = 2592;
 			pInfo->flags = CKF_GENERATE_KEY_PAIR;
 			break;
 		case CKM_ML_DSA:
@@ -942,14 +995,18 @@ CK_RV SoftHSM::C_GetMechanismInfo(CK_SLOT_ID slotID, CK_MECHANISM_TYPE type, CK_
 		case CKM_HASH_ML_DSA_SHA3_512:
 		case CKM_HASH_ML_DSA_SHAKE128:
 		case CKM_HASH_ML_DSA_SHAKE256:
-			pInfo->ulMinKeySize = 128;
-			pInfo->ulMaxKeySize = 256;
-			pInfo->flags = CKF_SIGN | CKF_VERIFY;
+			// CKF_MESSAGE_SIGN/VERIFY: the message API (C_MessageSignInit)
+			// delegates to AsymSignInit which accepts ML-DSA (audit mech G2).
+			pInfo->ulMinKeySize = 1312;
+			pInfo->ulMaxKeySize = 2592;
+			pInfo->flags = CKF_SIGN | CKF_VERIFY |
+			               CKF_MESSAGE_SIGN | CKF_MESSAGE_VERIFY;
 			break;
-		// SLH-DSA (FIPS 205)
+		// SLH-DSA (FIPS 205) — ulMin/MaxKeySize are public-key BYTES per
+		// PKCS#11 v3.2 §6.69: pk = 2n, n = 16..32 → 32..64 bytes (audit V-2).
 		case CKM_SLH_DSA_KEY_PAIR_GEN:
-			pInfo->ulMinKeySize = 128;
-			pInfo->ulMaxKeySize = 256;
+			pInfo->ulMinKeySize = 32;
+			pInfo->ulMaxKeySize = 64;
 			pInfo->flags = CKF_GENERATE_KEY_PAIR;
 			break;
 		case CKM_SLH_DSA:
@@ -964,9 +1021,10 @@ CK_RV SoftHSM::C_GetMechanismInfo(CK_SLOT_ID slotID, CK_MECHANISM_TYPE type, CK_
 		case CKM_HASH_SLH_DSA_SHA3_512:
 		case CKM_HASH_SLH_DSA_SHAKE128:
 		case CKM_HASH_SLH_DSA_SHAKE256:
-			pInfo->ulMinKeySize = 128;
-			pInfo->ulMaxKeySize = 256;
-			pInfo->flags = CKF_SIGN | CKF_VERIFY;
+			pInfo->ulMinKeySize = 32;
+			pInfo->ulMaxKeySize = 64;
+			pInfo->flags = CKF_SIGN | CKF_VERIFY |
+			               CKF_MESSAGE_SIGN | CKF_MESSAGE_VERIFY;
 			break;
 		// ML-KEM (FIPS 203) — sizes are encapsulation key bytes (not security bits)
 		// ML-KEM-512=800B, ML-KEM-768=1184B, ML-KEM-1024=1568B
@@ -1004,12 +1062,7 @@ CK_RV SoftHSM::C_GetMechanismInfo(CK_SLOT_ID slotID, CK_MECHANISM_TYPE type, CK_
 			pInfo->ulMaxKeySize = 0;
 			pInfo->flags = CKF_SIGN | CKF_VERIFY;
 			break;
-		// Keccak-256 (G11 — vendor, Rust engine only)
-		case CKM_KECCAK_256:
-			pInfo->ulMinKeySize = 0;
-			pInfo->ulMaxKeySize = 0;
-			pInfo->flags = CKF_DIGEST;
-			break;
+		// CKM_KECCAK_256 removed: not dispatched (Rust engine only) — audit G3.
 	    case CKM_CONCATENATE_DATA_AND_BASE:
 	    case CKM_CONCATENATE_BASE_AND_DATA:
 	    case CKM_CONCATENATE_BASE_AND_KEY:

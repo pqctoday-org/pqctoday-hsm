@@ -116,7 +116,9 @@ bool OSSLEVPSymmetricAlgorithm::encryptInit(const SymmetricKey* key, const SymMo
 	}
 
 	// Check the IV
-	if (mode != SymMode::GCM && mode != SymMode::CHACHA_POLY1305 && (IV.size() > 0) && (IV.size() != getBlockSize()))
+	// Bare ChaCha20 (SymMode::CHACHA) uses a 16-byte IV (counter||nonce), not
+	// getBlockSize() (which is 1 for the stream cipher); skip the block-IV check.
+	if (mode != SymMode::GCM && mode != SymMode::CHACHA_POLY1305 && mode != SymMode::CHACHA && (IV.size() > 0) && (IV.size() != getBlockSize()))
 	{
 		ERROR_MSG("Invalid IV size (%d bytes, expected %d bytes)", IV.size(), getBlockSize());
 
@@ -347,7 +349,9 @@ bool OSSLEVPSymmetricAlgorithm::decryptInit(const SymmetricKey* key, const SymMo
 	}
 
 	// Check the IV
-	if (mode != SymMode::GCM && mode != SymMode::CHACHA_POLY1305 && (IV.size() > 0) && (IV.size() != getBlockSize()))
+	// Bare ChaCha20 (SymMode::CHACHA) uses a 16-byte IV (counter||nonce), not
+	// getBlockSize() (which is 1 for the stream cipher); skip the block-IV check.
+	if (mode != SymMode::GCM && mode != SymMode::CHACHA_POLY1305 && mode != SymMode::CHACHA && (IV.size() > 0) && (IV.size() != getBlockSize()))
 	{
 		ERROR_MSG("Invalid IV size (%d bytes, expected %d bytes)", IV.size(), getBlockSize());
 
