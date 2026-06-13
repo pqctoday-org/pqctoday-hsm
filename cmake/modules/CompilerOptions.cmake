@@ -20,8 +20,10 @@ function(enable_cxx_compiler_flag_if_supported flag)
     endif()
 endfunction()
 
-# Configures C++11
-set(CMAKE_CXX_STANDARD 11)
+# Configures C++17 (softhsmv3 is C++17 per CLAUDE.md; the top-level CMakeLists.txt
+# also sets 17). C++17 is required for [[nodiscard]] enforcement on
+# Token::encrypt/decrypt and the std::optional / structured-binding conventions.
+set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(HAVE_CXX11 1)
 

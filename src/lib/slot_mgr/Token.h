@@ -89,11 +89,13 @@ public:
 	// Insert all token objects into the given set.
 	void getObjects(std::set<OSObject *> &objects);
 
-	// Decrypt the supplied data
-	bool decrypt(const ByteString& encrypted, ByteString& plaintext);
+	// Decrypt the supplied data. Returns false (and wipes plaintext) on failure;
+	// [[nodiscard]] because ignoring the result commits garbage/empty key material.
+	[[nodiscard]] bool decrypt(const ByteString& encrypted, ByteString& plaintext);
 
-	// Encrypt the supplied data
-	bool encrypt(const ByteString& plaintext, ByteString& encrypted);
+	// Encrypt the supplied data. Returns false (and wipes encrypted) on failure;
+	// [[nodiscard]] because ignoring the result commits garbage/empty key material.
+	[[nodiscard]] bool encrypt(const ByteString& plaintext, ByteString& encrypted);
 
 private:
 	// Token validity

@@ -1206,7 +1206,18 @@ CK_RV SoftHSM::WrapMechRsaAesKw
 	// Get the AES emph key data
 	ByteString emphkeydata;
 	ByteString emphKeyValue = emphKey->getByteStringValue(CKA_VALUE);
-	token->decrypt(emphKeyValue, emphkeydata);
+	// token->decrypt() returns false (output wiped) on AES/not-logged-in failure;
+	// the recovered AES key feeds the outer RSA-OAEP wrap, so a failure must abort
+	// rather than wrap with empty/garbage key material.
+	if (!token->decrypt(emphKeyValue, emphkeydata))
+	{
+		handleManager->destroyObject(hEmphKey);
+		emphKey->destroyObject();
+		hEmphKey = CK_INVALID_HANDLE;
+		emphkeydata.wipe();
+		emphKeyValue.wipe();
+		return CKR_GENERAL_ERROR;
+	}
 
 	// Remove the emph key handle.
 	handleManager->destroyObject(hEmphKey);
@@ -1721,7 +1732,11 @@ CK_RV SoftHSM::UnwrapMechRsaAesKw
 	CK_BBOOL isUnwrapKeyPrivate = unwrapKey->getBooleanValue(CKA_PRIVATE, true);
 	if(isUnwrapKeyPrivate)
 	{
-		token->decrypt(modulusValue, modulus);
+		// token->decrypt() returns false (output wiped) on AES/not-logged-in failure;
+		// modulus.size() below splits the wrapped blob, so a failure must abort rather
+		// than compute a bogus split from an empty modulus.
+		if (!token->decrypt(modulusValue, modulus))
+			return CKR_GENERAL_ERROR;
 	}
 	else
 	{
@@ -2752,7 +2767,9 @@ CK_RV SoftHSM::C_DeriveKey
 		pbkdSymKey.setBitLen(pbkdKeyLen);
 		ByteString pbkdValue;
 		if (pbkdPrivate)
-			pbkdToken->encrypt(pbkdSymKey.getKeyBits(), pbkdValue);
+			// Fold encrypt() into pbkdOK: false (output wiped) on RNG/AES/not-logged-in
+			// failure must abort, not commit an empty CKA_VALUE.
+			pbkdOK = pbkdOK && pbkdToken->encrypt(pbkdSymKey.getKeyBits(), pbkdValue);
 		else
 			pbkdValue = pbkdSymKey.getKeyBits();
 		pbkdOK = pbkdOK && pbkdObj->setAttribute(CKA_VALUE, pbkdValue);
@@ -2915,8 +2932,10 @@ CK_RV SoftHSM::C_DeriveKey
 		svOk = svOk && nObj->setAttribute(CKA_EC_PARAMS, rawOid);
 		
 #ifdef WITH_ECC
-		// Set OpenSSL structural keys natively if CKK_EC
-		setECPrivateKey(nObj, privKeyBytes, token, true);
+		// Set OpenSSL structural keys natively if CKK_EC. setECPrivateKey() returns
+		// false if token->encrypt() fails (output wiped); fold into svOk so the derive
+		// aborts rather than committing empty key material.
+		svOk = svOk && setECPrivateKey(nObj, privKeyBytes, token, true);
 #endif
 
 		if (svOk) nObj->commitTransaction(); else nObj->abortTransaction();
@@ -3831,7 +3850,9 @@ CK_RV SoftHSM::generateGeneric
 			symKey.setBitLen(keyLen);
 			if (isPrivate)
 			{
-				token->encrypt(symKey.getKeyBits(), value);
+				// Fold token->encrypt() into bOK: false (output wiped) on RNG/AES/not-logged-in
+				// failure must abort the transaction, not commit empty key material.
+				bOK = bOK && token->encrypt(symKey.getKeyBits(), value);
 			}
 			else
 			{
@@ -4043,7 +4064,9 @@ CK_RV SoftHSM::generateAES
 			ByteString kcv;
 			if (isPrivate)
 			{
-				token->encrypt(key->getKeyBits(), value);
+				// Fold token->encrypt() into bOK: false (output wiped) on RNG/AES/not-logged-in
+				// failure must abort the transaction, not commit empty key material.
+				bOK = bOK && token->encrypt(key->getKeyBits(), value);
 			}
 			else
 			{
@@ -4225,8 +4248,11 @@ CK_RV SoftHSM::generateRSA
 				ByteString publicExponent;
 				if (isPublicKeyPrivate)
 				{
-					token->encrypt(pub->getN(), modulus);
-					token->encrypt(pub->getE(), publicExponent);
+					// token->encrypt() returns false (wiping the output) on RNG/AES/
+					// not-logged-in failure without throwing; fold into bOK so a failure
+					// aborts the transaction instead of committing empty key material.
+					bOK = bOK && token->encrypt(pub->getN(), modulus);
+					bOK = bOK && token->encrypt(pub->getE(), publicExponent);
 				}
 				else
 				{
@@ -4324,14 +4350,17 @@ CK_RV SoftHSM::generateRSA
 				ByteString coefficient;
 				if (isPrivateKeyPrivate)
 				{
-					token->encrypt(priv->getN(), modulus);
-					token->encrypt(priv->getE(), publicExponent);
-					token->encrypt(priv->getD(), privateExponent);
-					token->encrypt(priv->getP(), prime1);
-					token->encrypt(priv->getQ(), prime2);
-					token->encrypt(priv->getDP1(), exponent1);
-					token->encrypt(priv->getDQ1(), exponent2);
-					token->encrypt(priv->getPQ(), coefficient);
+					// token->encrypt() returns false (wiping the output) on RNG/AES/
+					// not-logged-in failure without throwing; fold into bOK so a failure
+					// aborts the transaction instead of committing empty key material.
+					bOK = bOK && token->encrypt(priv->getN(), modulus);
+					bOK = bOK && token->encrypt(priv->getE(), publicExponent);
+					bOK = bOK && token->encrypt(priv->getD(), privateExponent);
+					bOK = bOK && token->encrypt(priv->getP(), prime1);
+					bOK = bOK && token->encrypt(priv->getQ(), prime2);
+					bOK = bOK && token->encrypt(priv->getDP1(), exponent1);
+					bOK = bOK && token->encrypt(priv->getDQ1(), exponent2);
+					bOK = bOK && token->encrypt(priv->getPQ(), coefficient);
 				}
 				else
 				{
@@ -4503,7 +4532,9 @@ CK_RV SoftHSM::generateEC
 				ByteString point;
 				if (isPublicKeyPrivate)
 				{
-					token->encrypt(pub->getQ(), point);
+					// Fold token->encrypt() into bOK: false (output wiped) on RNG/AES/
+					// not-logged-in failure must abort, not commit empty key material.
+					bOK = bOK && token->encrypt(pub->getQ(), point);
 				}
 				else
 				{
@@ -4593,8 +4624,12 @@ CK_RV SoftHSM::generateEC
 				ByteString value;
 				if (isPrivateKeyPrivate)
 				{
-					token->encrypt(priv->getEC(), group);
-					token->encrypt(priv->getD(), value);
+					// Fold token->encrypt() into bOK: false (output wiped) on RNG/AES/not-logged-in
+					// failure must abort the transaction, not commit empty key material.
+					bOK = bOK && token->encrypt(priv->getEC(), group);
+					// Fold token->encrypt() into bOK: false (output wiped) on RNG/AES/not-logged-in
+					// failure must abort the transaction, not commit empty key material.
+					bOK = bOK && token->encrypt(priv->getD(), value);
 				}
 				else
 				{
@@ -4766,7 +4801,9 @@ CK_RV SoftHSM::generateED
 				ByteString value;
 				if (isPublicKeyPrivate)
 				{
-					token->encrypt(pub->getA(), value);
+					// Fold token->encrypt() into bOK: false (output wiped) on RNG/AES/not-logged-in
+					// failure must abort the transaction, not commit empty key material.
+					bOK = bOK && token->encrypt(pub->getA(), value);
 				}
 				else
 				{
@@ -4854,8 +4891,12 @@ CK_RV SoftHSM::generateED
 				ByteString value;
 				if (isPrivateKeyPrivate)
 				{
-					token->encrypt(priv->getEC(), group);
-					token->encrypt(priv->getK(), value);
+					// Fold token->encrypt() into bOK: false (output wiped) on RNG/AES/not-logged-in
+					// failure must abort the transaction, not commit empty key material.
+					bOK = bOK && token->encrypt(priv->getEC(), group);
+					// Fold token->encrypt() into bOK: false (output wiped) on RNG/AES/not-logged-in
+					// failure must abort the transaction, not commit empty key material.
+					bOK = bOK && token->encrypt(priv->getK(), value);
 				}
 				else
 				{
@@ -5011,7 +5052,9 @@ CK_RV SoftHSM::generateMLDSA
 				bOK = bOK && osobject->setAttribute(CKA_PARAMETER_SET, (unsigned long)pub->getParameterSet());
 				ByteString pubValue;
 				if (isPublicKeyPrivate)
-					token->encrypt(pub->getValue(), pubValue);
+					// Fold token->encrypt() into bOK: false (output wiped) on RNG/AES/not-logged-in
+					// failure must abort the transaction, not commit empty key material.
+					bOK = bOK && token->encrypt(pub->getValue(), pubValue);
 				else
 					pubValue = pub->getValue();
 				bOK = bOK && osobject->setAttribute(CKA_VALUE, pubValue);
@@ -5094,7 +5137,9 @@ CK_RV SoftHSM::generateMLDSA
 				bOK = bOK && osobject->setAttribute(CKA_PARAMETER_SET, (unsigned long)priv->getParameterSet());
 				ByteString privValue;
 				if (isPrivateKeyPrivate)
-					token->encrypt(priv->getValue(), privValue);
+					// Fold token->encrypt() into bOK: false (output wiped) on RNG/AES/not-logged-in
+					// failure must abort the transaction, not commit empty key material.
+					bOK = bOK && token->encrypt(priv->getValue(), privValue);
 				else
 					privValue = priv->getValue();
 				bOK = bOK && osobject->setAttribute(CKA_VALUE, privValue);
@@ -5246,7 +5291,9 @@ CK_RV SoftHSM::generateSLHDSA
 				bOK = bOK && osobject->setAttribute(CKA_PARAMETER_SET, (unsigned long)pub->getParameterSet());
 				ByteString pubValue;
 				if (isPublicKeyPrivate)
-					token->encrypt(pub->getValue(), pubValue);
+					// Fold token->encrypt() into bOK: false (output wiped) on RNG/AES/not-logged-in
+					// failure must abort the transaction, not commit empty key material.
+					bOK = bOK && token->encrypt(pub->getValue(), pubValue);
 				else
 					pubValue = pub->getValue();
 				bOK = bOK && osobject->setAttribute(CKA_VALUE, pubValue);
@@ -5329,7 +5376,9 @@ CK_RV SoftHSM::generateSLHDSA
 				bOK = bOK && osobject->setAttribute(CKA_PARAMETER_SET, (unsigned long)priv->getParameterSet());
 				ByteString privValue;
 				if (isPrivateKeyPrivate)
-					token->encrypt(priv->getValue(), privValue);
+					// Fold token->encrypt() into bOK: false (output wiped) on RNG/AES/not-logged-in
+					// failure must abort the transaction, not commit empty key material.
+					bOK = bOK && token->encrypt(priv->getValue(), privValue);
 				else
 					privValue = priv->getValue();
 				bOK = bOK && osobject->setAttribute(CKA_VALUE, privValue);
@@ -5746,7 +5795,9 @@ CK_RV SoftHSM::deriveECDH
 
 				if (isPrivate)
 				{
-					token->encrypt(secretValue, value);
+					// Fold token->encrypt() into bOK: false (output wiped) on RNG/AES/not-logged-in
+					// failure must abort the transaction, not commit empty key material.
+					bOK = bOK && token->encrypt(secretValue, value);
 				}
 				else
 				{
@@ -6128,7 +6179,9 @@ CK_RV SoftHSM::deriveEDDSA
 
 				if (isPrivate)
 				{
-					token->encrypt(secretValue, value);
+					// Fold token->encrypt() into bOK: false (output wiped) on RNG/AES/not-logged-in
+					// failure must abort the transaction, not commit empty key material.
+					bOK = bOK && token->encrypt(secretValue, value);
 				}
 				else
 				{
@@ -6613,7 +6666,9 @@ CK_RV SoftHSM::deriveSymmetric
 
 				if (isPrivate)
 				{
-					token->encrypt(secretValue, value);
+					// Fold token->encrypt() into bOK: false (output wiped) on RNG/AES/not-logged-in
+					// failure must abort the transaction, not commit empty key material.
+					bOK = bOK && token->encrypt(secretValue, value);
 				}
 				else
 				{
@@ -7101,7 +7156,9 @@ CK_RV SoftHSM::generateMLKEM
 				bOK = bOK && osobject->setAttribute(CKA_PARAMETER_SET, (unsigned long)pub->getParameterSet());
 				ByteString pubValue;
 				if (isPublicKeyPrivate)
-					token->encrypt(pub->getValue(), pubValue);
+					// Fold token->encrypt() into bOK: false (output wiped) on RNG/AES/not-logged-in
+					// failure must abort the transaction, not commit empty key material.
+					bOK = bOK && token->encrypt(pub->getValue(), pubValue);
 				else
 					pubValue = pub->getValue();
 				bOK = bOK && osobject->setAttribute(CKA_VALUE, pubValue);
@@ -7187,7 +7244,9 @@ CK_RV SoftHSM::generateMLKEM
 				bOK = bOK && osobject->setAttribute(CKA_PARAMETER_SET, (unsigned long)priv->getParameterSet());
 				ByteString privValue;
 				if (isPrivateKeyPrivate)
-					token->encrypt(priv->getValue(), privValue);
+					// Fold token->encrypt() into bOK: false (output wiped) on RNG/AES/not-logged-in
+					// failure must abort the transaction, not commit empty key material.
+					bOK = bOK && token->encrypt(priv->getValue(), privValue);
 				else
 					privValue = priv->getValue();
 				bOK = bOK && osobject->setAttribute(CKA_VALUE, privValue);
@@ -7355,16 +7414,19 @@ bool SoftHSM::setRSAPrivateKey(OSObject* key, const ByteString &ber, Token* toke
 	ByteString exponent1;
 	ByteString exponent2;
 	ByteString coefficient;
+	bool bOK = true;
 	if (isPrivate)
 	{
-		token->encrypt(((RSAPrivateKey*)priv)->getN(), modulus);
-		token->encrypt(((RSAPrivateKey*)priv)->getE(), publicExponent);
-		token->encrypt(((RSAPrivateKey*)priv)->getD(), privateExponent);
-		token->encrypt(((RSAPrivateKey*)priv)->getP(), prime1);
-		token->encrypt(((RSAPrivateKey*)priv)->getQ(), prime2);
-		token->encrypt(((RSAPrivateKey*)priv)->getDP1(), exponent1);
-		token->encrypt(((RSAPrivateKey*)priv)->getDQ1(), exponent2);
-		token->encrypt(((RSAPrivateKey*)priv)->getPQ(), coefficient);
+		// Fold token->encrypt() into bOK: false (output wiped) on RNG/AES/not-logged-in
+		// failure must fail the load, not store empty key material under CKA_*.
+		bOK = bOK && token->encrypt(((RSAPrivateKey*)priv)->getN(), modulus);
+		bOK = bOK && token->encrypt(((RSAPrivateKey*)priv)->getE(), publicExponent);
+		bOK = bOK && token->encrypt(((RSAPrivateKey*)priv)->getD(), privateExponent);
+		bOK = bOK && token->encrypt(((RSAPrivateKey*)priv)->getP(), prime1);
+		bOK = bOK && token->encrypt(((RSAPrivateKey*)priv)->getQ(), prime2);
+		bOK = bOK && token->encrypt(((RSAPrivateKey*)priv)->getDP1(), exponent1);
+		bOK = bOK && token->encrypt(((RSAPrivateKey*)priv)->getDQ1(), exponent2);
+		bOK = bOK && token->encrypt(((RSAPrivateKey*)priv)->getPQ(), coefficient);
 	}
 	else
 	{
@@ -7377,7 +7439,6 @@ bool SoftHSM::setRSAPrivateKey(OSObject* key, const ByteString &ber, Token* toke
 		exponent2 = ((RSAPrivateKey*)priv)->getDQ1();
 		coefficient = ((RSAPrivateKey*)priv)->getPQ();
 	}
-	bool bOK = true;
 	bOK = bOK && key->setAttribute(CKA_MODULUS, modulus);
 	bOK = bOK && key->setAttribute(CKA_PUBLIC_EXPONENT, publicExponent);
 	bOK = bOK && key->setAttribute(CKA_PRIVATE_EXPONENT, privateExponent);
@@ -7408,7 +7469,12 @@ bool SoftHSM::setECPrivateKey(OSObject* key, const ByteString &ber, Token* token
 	{
 		ByteString value;
 		if (isPrivate)
-			token->encrypt(ber, value);
+		{
+			// token->encrypt() returns false (output wiped) on RNG/AES/not-logged-in
+			// failure; fail the load rather than store an empty CKA_VALUE.
+			if (!token->encrypt(ber, value))
+				return false;
+		}
 		else
 			value = ber;
 		return key->setAttribute(CKA_VALUE, value);
@@ -7432,17 +7498,19 @@ bool SoftHSM::setECPrivateKey(OSObject* key, const ByteString &ber, Token* token
 	// EC Private Key Attributes
 	ByteString group;
 	ByteString value;
+	bool bOK = true;
 	if (isPrivate)
 	{
-		token->encrypt(((ECPrivateKey*)priv)->getEC(), group);
-		token->encrypt(((ECPrivateKey*)priv)->getD(), value);
+		// Fold token->encrypt() into bOK: false (output wiped) on RNG/AES/not-logged-in
+		// failure must fail the load, not store empty key material under CKA_*.
+		bOK = bOK && token->encrypt(((ECPrivateKey*)priv)->getEC(), group);
+		bOK = bOK && token->encrypt(((ECPrivateKey*)priv)->getD(), value);
 	}
 	else
 	{
 		group = ((ECPrivateKey*)priv)->getEC();
 		value = ((ECPrivateKey*)priv)->getD();
 	}
-	bool bOK = true;
 	bOK = bOK && key->setAttribute(CKA_EC_PARAMS, group);
 	bOK = bOK && key->setAttribute(CKA_VALUE, value);
 
@@ -7472,17 +7540,19 @@ bool SoftHSM::setEDPrivateKey(OSObject* key, const ByteString &ber, Token* token
 	// EC Private Key Attributes
 	ByteString group;
 	ByteString value;
+	bool bOK = true;
 	if (isPrivate)
 	{
-		token->encrypt(((EDPrivateKey*)priv)->getEC(), group);
-		token->encrypt(((EDPrivateKey*)priv)->getK(), value);
+		// Fold token->encrypt() into bOK: false (output wiped) on RNG/AES/not-logged-in
+		// failure must fail the load, not store empty key material under CKA_*.
+		bOK = bOK && token->encrypt(((EDPrivateKey*)priv)->getEC(), group);
+		bOK = bOK && token->encrypt(((EDPrivateKey*)priv)->getK(), value);
 	}
 	else
 	{
 		group = ((EDPrivateKey*)priv)->getEC();
 		value = ((EDPrivateKey*)priv)->getK();
 	}
-	bool bOK = true;
 	bOK = bOK && key->setAttribute(CKA_EC_PARAMS, group);
 	bOK = bOK && key->setAttribute(CKA_VALUE, value);
 
