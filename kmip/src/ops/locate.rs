@@ -84,8 +84,32 @@ pub fn locate(deps: &Deps, req: LocateRequest, correlation_id: &str) -> Result<L
     // persistent-SQLite + volatile-engine restart case where store
     // metadata outlives the token. Runs before paging so `Offset Items`
     // and `Maximum Items` operate on live records only.
+    //
+    // The probe applies ONLY to records whose key bytes live exclusively
+    // inside the engine (`key_material == None` — Create / CreateKeyPair,
+    // see `ObjectRecord::key_material` doc). For those a vanished handle
+    // is a genuine orphan: the object can no longer be served at all
+    // (`Get` falls through to the engine — get.rs §"engine-held"), so
+    // returning its UID from Locate would be a dangling reference.
+    //
+    // Records that carry their own `key_material` (Register / Import of
+    // Raw symmetric keys, certificates, secret data, …) are store-backed:
+    // `Get` serves them straight from the store without touching the
+    // engine, so they remain valid and locatable even when no engine
+    // handle exists. Many were never engine-imported in the first place
+    // (e.g. AES Register has no import branch in register_import_export),
+    // so probing them would spuriously drop legitimately store-only
+    // objects — the Phase 7b.1 regression (OASIS BL-M-1/4/14: a freshly
+    // Registered AES key vanished from its own Locate). Gating on
+    // `key_material.is_none()` keeps the orphan guard sound for the
+    // engine-resident case it was written for while leaving store-backed
+    // objects locatable.
     if let Some(session) = deps.engine_session {
         matches.retain(|r| {
+            if r.key_material.is_some() {
+                // Store-backed: locatable regardless of engine state.
+                return true;
+            }
             matches!(
                 super::helpers::find_handle_for_object(session, &r.pkcs11_cka_id, r.object_type),
                 Ok(Some(_))
@@ -366,6 +390,54 @@ mod tests {
         // Absent → spec default is On-line-only → results.
         let r = locate(&d, LocateRequest::default(), "c").unwrap();
         assert_eq!(r.uids, vec!["a"]);
+    }
+
+    /// Regression guard (Phase 7b.1 orphan-filter): a store-backed
+    /// object — one that carries its own `key_material` (e.g. a Register
+    /// of a Raw AES SymmetricKey, as in OASIS BL-M-1/4/14) — must remain
+    /// locatable even when an engine session is present and the engine
+    /// holds no handle for it. The orphan filter (added by 9176662)
+    /// dropped EVERY record whose PKCS#11 handle was absent, wrongly
+    /// removing legitimately store-only objects and regressing
+    /// conformance 92→89. The `key_material.is_some()` short-circuit
+    /// keeps such records present without ever probing the (here-bogus)
+    /// engine session.
+    #[test]
+    fn locate_keeps_store_backed_object_with_engine_session_present() {
+        let mut d = deps_with();
+        // Simulate a real engine being wired (the conformance/default
+        // server path). The session id is never dereferenced because the
+        // record below carries `key_material`, so the filter short-circuits.
+        d.engine_session = Some(1);
+
+        // A Registered Raw AES key: store-backed, no engine import.
+        d.store
+            .put(ObjectRecord {
+                uid: "store-only".into(),
+                object_type: ObjectType::SymmetricKey,
+                algorithm: KmipAlgorithm::Aes,
+                state: State::Active,
+                pkcs11_cka_id: vec![9, 9, 9],
+                key_material: Some(vec![0u8; 32]),
+                initial_date: OffsetDateTime::UNIX_EPOCH,
+                ..ObjectRecord::default()
+            })
+            .unwrap();
+
+        let r = locate(
+            &d,
+            LocateRequest {
+                attributes: vec![Attribute::CryptographicAlgorithm(KmipAlgorithm::Aes)],
+                ..Default::default()
+            },
+            "c",
+        )
+        .unwrap();
+        assert_eq!(
+            r.uids,
+            vec!["store-only"],
+            "a store-backed object must survive Locate even with an engine session present"
+        );
     }
 
     /// K22 — §6.1.32: "The server SHALL NOT return unique identifiers
