@@ -8,6 +8,29 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — C++ engine: token encrypt/decrypt hardening + C++17 enforcement (2026-06-13)
+
+A security hardening sweep over all 111 `Token::encrypt`/`decrypt` call sites in
+`src/lib`, closing the round-6 bug *class* in the pre-existing key-serialization
+paths (from the H1 file-split) rather than one bug at a time. Commit `5e1183e`;
+compliance suite 315 PASS / 0 FAIL / 0 SKIP, ctest 8/8.
+
+- **Every discarded return now handled.** 45 bare-statement `encrypt`/`decrypt`
+  sites (RSA/EC/EdDSA/ML-DSA/ML-KEM/SLH-DSA/AES/generic-secret keygen, ML-KEM
+  encap/decap, PBKD2 derive, set\*PrivateKey unwrap helpers, BIP32 derive, and
+  two RSA-AES-KW unwrap decrypts) were ignoring the bool return — on an
+  encryption failure they would commit empty/garbage key material. Each now
+  folds into the in-scope `bOK` flag (aborting the transaction with cleanup) or
+  returns `CKR_GENERAL_ERROR`, so a failed `encrypt`/`decrypt` aborts the
+  operation instead of producing a silently corrupt key.
+- **The class is now unrepresentable.** `Token::encrypt`/`decrypt` and the
+  underlying `SecureDataManager::encrypt`/`decrypt` are marked `[[nodiscard]]`,
+  so an ignored return is a compile error — the bug cannot be reintroduced.
+- **C++17 is now actually enforced.** `cmake/modules/CompilerOptions.cmake` had
+  been forcing `-std=c++11`, silently overriding the top-level C++17 setting the
+  project (and CLAUDE.md) assumes — which is why `[[nodiscard]]` had no effect
+  engine-wide. Corrected to C++17; full rebuild clean, all suites green.
+
 ### Fixed — C++ engine round 6: review-confirmed bugs (2026-06-13)
 
 A high-effort code review of the round 4–5 changes confirmed four bugs, two
