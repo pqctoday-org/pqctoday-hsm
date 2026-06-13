@@ -156,6 +156,11 @@ struct LocateFilters {
     /// KMIP 3.0 §11 `Group Link` filter — UID reference. SASED-M-3
     /// step #0 finds a previously Registered SecretData by it.
     group_link: Option<String>,
+    /// KMIP `Object Group` (0x420056) filter — group-membership label.
+    /// An object matches when ANY of its `object_groups` memberships
+    /// equals this value (Object Group is multi-instance). This is the
+    /// capability behind SASED-M-3 step #0's group-membership Locate.
+    object_group: Option<String>,
 }
 
 impl LocateFilters {
@@ -207,6 +212,14 @@ impl LocateFilters {
                 _ => return false,
             }
         }
+        // KMIP `Object Group` membership — multi-instance, so the
+        // record matches when ANY of its group labels equals the
+        // requested one (AND-combined with the other filters above).
+        if let Some(want_group) = &self.object_group {
+            if !r.object_groups.iter().any(|g| g == want_group) {
+                return false;
+            }
+        }
         true
     }
 }
@@ -219,6 +232,7 @@ fn build_filters(attrs: &[Attribute]) -> LocateFilters {
         name: None,
         application_specific_information: None,
         group_link: None,
+        object_group: None,
     };
     for a in attrs {
         match a {
@@ -231,6 +245,9 @@ fn build_filters(attrs: &[Attribute]) -> LocateFilters {
             }
             Attribute::GroupLink(uid) => {
                 f.group_link = Some(uid.clone());
+            }
+            Attribute::ObjectGroup(g) => {
+                f.object_group = Some(g.clone());
             }
             _ => {}
         }
@@ -286,6 +303,94 @@ mod tests {
             key_format_type: None,
         ..ObjectRecord::default()
 }).unwrap();
+    }
+
+    /// Like `put`, but stamps the object into the given Object Group
+    /// memberships (multi-instance Object Group attribute).
+    fn put_groups(deps: &Deps, uid: &str, groups: &[&str]) {
+        deps.store.put(ObjectRecord {
+            uid: uid.into(),
+            object_type: ObjectType::SecretData,
+            algorithm: KmipAlgorithm::Aes,
+            state: State::Active,
+            initial_date: OffsetDateTime::UNIX_EPOCH,
+            object_groups: groups.iter().map(|s| s.to_string()).collect(),
+            ..ObjectRecord::default()
+        }).unwrap();
+    }
+
+    /// P2.1 — Object Group group-membership Locate. Two objects in
+    /// "G1", one in "G2": Locate by G1 returns exactly the two, by G2
+    /// the one, by an unknown group nothing. This is the underlying
+    /// capability behind SASED-M-3 / TL-M-3 (which stay SKIP under the
+    /// hermetic replay harness's cross-transcript state wipe).
+    #[test]
+    fn locate_filters_by_object_group() {
+        let d = deps_with();
+        put_groups(&d, "a", &["G1"]);
+        put_groups(&d, "b", &["G1"]);
+        put_groups(&d, "c", &["G2"]);
+
+        let mut g1 = locate(&d, LocateRequest {
+            attributes: vec![Attribute::ObjectGroup("G1".into())],
+            ..Default::default()
+        }, "cid").unwrap().uids;
+        g1.sort();
+        assert_eq!(g1, vec!["a", "b"]);
+
+        let g2 = locate(&d, LocateRequest {
+            attributes: vec![Attribute::ObjectGroup("G2".into())],
+            ..Default::default()
+        }, "cid").unwrap().uids;
+        assert_eq!(g2, vec!["c"]);
+
+        let none = locate(&d, LocateRequest {
+            attributes: vec![Attribute::ObjectGroup("nope".into())],
+            ..Default::default()
+        }, "cid").unwrap().uids;
+        assert!(none.is_empty());
+    }
+
+    /// Multi-instance: an object in BOTH "G1" and "G2" is located by
+    /// either of its memberships.
+    #[test]
+    fn locate_multi_group_object_found_by_either() {
+        let d = deps_with();
+        put_groups(&d, "multi", &["G1", "G2"]);
+        for g in ["G1", "G2"] {
+            let r = locate(&d, LocateRequest {
+                attributes: vec![Attribute::ObjectGroup(g.into())],
+                ..Default::default()
+            }, "cid").unwrap();
+            assert_eq!(r.uids, vec!["multi"], "should be found by group {g}");
+        }
+    }
+
+    /// Object Group AND-combines with other filters: a G1 Locate that
+    /// also pins ObjectType=SymmetricKey must skip a SecretData member.
+    #[test]
+    fn locate_object_group_and_object_type() {
+        let d = deps_with();
+        // "a" is SecretData in G1 (via put_groups); "b" is a SymmetricKey
+        // in G1 we build by hand.
+        put_groups(&d, "a", &["G1"]);
+        d.store.put(ObjectRecord {
+            uid: "b".into(),
+            object_type: ObjectType::SymmetricKey,
+            algorithm: KmipAlgorithm::Aes,
+            state: State::Active,
+            initial_date: OffsetDateTime::UNIX_EPOCH,
+            object_groups: vec!["G1".into()],
+            ..ObjectRecord::default()
+        }).unwrap();
+        let r = locate(&d, LocateRequest {
+            attributes: vec![
+                Attribute::ObjectGroup("G1".into()),
+                Attribute::ObjectType(ObjectType::SymmetricKey),
+            ],
+            ..Default::default()
+        }, "cid").unwrap();
+        assert_eq!(r.uids, vec!["b"]);
     }
 
     #[test]

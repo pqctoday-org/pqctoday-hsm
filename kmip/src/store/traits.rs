@@ -59,6 +59,14 @@ pub struct ObjectRecord {
     /// AddAttribute / SetAttribute; surfaced by GetAttributes /
     /// GetAttributeList.
     pub custom_attributes: std::collections::HashMap<String, String>,
+    /// KMIP `Object Group` (0x420056) memberships — **multi-instance**:
+    /// an object may belong to several groups, so this is a list of
+    /// group-name labels rather than a single value. Populated from the
+    /// template at Create / Register and mutated by AddAttribute /
+    /// DeleteAttribute; Locate's Object Group filter matches when ANY
+    /// element equals the requested group (SASED-M-3 step #0). Empty =
+    /// not a member of any group.
+    pub object_groups: Vec<String>,
     /// Raw KMIP `Key Material` bytes (KMIP 3.0 §6.2 KeyBlock →
     /// KeyValue → KeyMaterial). Populated by Register / Import when
     /// a client-supplied key payload arrives; surfaced by Get / Export.
@@ -246,6 +254,7 @@ impl From<BaselineDefaults> for ObjectRecord {
             name: None,
             links: std::collections::HashMap::new(),
             custom_attributes: std::collections::HashMap::new(),
+            object_groups: Vec::new(),
             key_material: None,
             key_format_type: None,
             cryptographic_parameters: None,

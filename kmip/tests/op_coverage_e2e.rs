@@ -34,9 +34,10 @@ use pqctoday_kmip::kmip30::{
     CreateKeyPairRequest, CreateRequest, DeactivateRequest, DerivationMethod,
     DerivationParameters, DeriveKeyRequest, DiscoverVersionsRequest, EndpointRole, ExportRequest,
     GetAttributesRequest, GetConstraintsRequest, GetRequest, GetUsageAllocationRequest,
-    ImportRequest, KeyBlock, KeyFormatType, KmipAlgorithm, LoginRequest, LogoutRequest,
-    ObjectDefaults, ObjectType, PingRequest, ReKeyKeyPairRequest, ReKeyRequest, RecoverRequest,
-    SetAttributeRequest, SetDefaultsRequest, SetEndpointRoleRequest, State, UsageMask,
+    ImportRequest, KeyBlock, KeyFormatType, KmipAlgorithm, LocateRequest, LoginRequest,
+    LogoutRequest, ObjectDefaults, ObjectType, PingRequest, ReKeyKeyPairRequest, ReKeyRequest,
+    RecoverRequest, SetAttributeRequest, SetDefaultsRequest, SetEndpointRoleRequest, State,
+    UsageMask,
 };
 use pqctoday_kmip::ops::allocation_and_config::{
     get_constraints, get_usage_allocation, set_defaults, set_endpoint_role,
@@ -50,6 +51,7 @@ use pqctoday_kmip::ops::get_attributes::get_attributes;
 use pqctoday_kmip::ops::lifecycle_and_protocol::{
     archive, deactivate, discover_versions, ping, recover,
 };
+use pqctoday_kmip::ops::locate::locate;
 use pqctoday_kmip::ops::register_import_export::{export, import_object};
 use pqctoday_kmip::ops::rekey::{rekey, rekey_key_pair};
 use pqctoday_kmip::ops::session_and_auth::{login, logout};
@@ -283,6 +285,80 @@ fn import_material_round_trips_through_get_and_export() {
     assert_eq!(kb.key_value, material, "Export round-trips the same material bytes");
     // Export also carries the attribute set with the matching UID.
     assert!(e.attributes.iter().any(|a| matches!(a, Attribute::UniqueIdentifier(u) if u == &uid)));
+
+    let _ = softhsmrustv3::native::session::finalize();
+}
+
+// ── Object Group: Register/Create-into-group → Locate-by-group (P2.1) ─────────
+
+/// P2.1 — the capability behind the SASED-M-3-30 / TL-M-3-30 OASIS
+/// precondition transcripts: Register (here Create) an object into an
+/// Object Group, then Locate it back by that group's membership label,
+/// within ONE session.
+///
+/// NOTE: SASED-M-3-30.xml and TL-M-3-30.xml remain SKIP_PRECONDITION in
+/// the conformance replay (`conformance/harness/dispatcher_replay.py`).
+/// That is a *harness-isolation* property — the hermetic replay wipes
+/// store state between transcripts, so the object Registered into the
+/// group in transcript N is gone before the Locate-by-group in N+1. The
+/// underlying group-membership filter exercised here is now real and
+/// tested; the transcripts stay skipped only because of cross-transcript
+/// state isolation, not a missing capability.
+#[test]
+fn object_group_create_into_group_then_locate_by_group_in_one_session() {
+    let _guard = engine_test_lock();
+    let deps = build_deps_with_real_engine();
+
+    // Two keys into "G1", one into "G2", one with no group.
+    let a = create_aes(&deps, vec![Attribute::ObjectGroup("G1".into())], "og-a");
+    let b = create_aes(&deps, vec![Attribute::ObjectGroup("G1".into())], "og-b");
+    let c = create_aes(&deps, vec![Attribute::ObjectGroup("G2".into())], "og-c");
+    let _ungrouped = create_aes(&deps, vec![], "og-none");
+
+    // Locate by G1 → exactly {a, b}.
+    let mut g1 = locate(
+        &deps,
+        LocateRequest { attributes: vec![Attribute::ObjectGroup("G1".into())], ..Default::default() },
+        "og-loc-g1",
+    )
+    .unwrap()
+    .uids;
+    g1.sort();
+    let mut want = vec![a.clone(), b.clone()];
+    want.sort();
+    assert_eq!(g1, want, "Locate by G1 returns exactly the two G1 members");
+
+    // Locate by G2 → exactly {c}.
+    let g2 = locate(
+        &deps,
+        LocateRequest { attributes: vec![Attribute::ObjectGroup("G2".into())], ..Default::default() },
+        "og-loc-g2",
+    )
+    .unwrap()
+    .uids;
+    assert_eq!(g2, vec![c], "Locate by G2 returns the single G2 member");
+
+    // Locate by an unknown group → empty.
+    let none = locate(
+        &deps,
+        LocateRequest { attributes: vec![Attribute::ObjectGroup("ghost".into())], ..Default::default() },
+        "og-loc-ghost",
+    )
+    .unwrap()
+    .uids;
+    assert!(none.is_empty(), "Locate by an unknown group returns nothing");
+
+    // GetAttributes surfaces the membership back to the client.
+    let ga = get_attributes(
+        &deps,
+        GetAttributesRequest { uid: a.clone(), attribute_references: vec!["ObjectGroup".into()] },
+        "og-ga",
+    )
+    .unwrap();
+    assert!(
+        ga.attributes.iter().any(|x| matches!(x, Attribute::ObjectGroup(g) if g == "G1")),
+        "GetAttributes round-trips the Object Group membership"
+    );
 
     let _ = softhsmrustv3::native::session::finalize();
 }

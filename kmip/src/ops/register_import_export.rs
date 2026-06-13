@@ -455,6 +455,7 @@ pub fn register(
         name,
         links,
         custom_attributes,
+        object_groups: x.object_groups.clone(),
         key_material,
         key_format_type,
         digest_value,
@@ -730,6 +731,10 @@ pub(crate) struct ExtractedAttrs {
     /// reject the request when the claim contradicts the actual
     /// algorithm (e.g. AES + `QuantumSafe=true`). QS-M-2 pins this.
     pub quantum_safe: Option<bool>,
+    /// `Object Group` (KMIP §11, 0x420056) memberships supplied in the
+    /// template — multi-instance, so a list. SASED-M-2 registers an
+    /// object into a group; SASED-M-3 then Locates it by that group.
+    pub object_groups: Vec<String>,
 }
 
 pub(crate) fn extract_attrs(attrs: &[Attribute]) -> ExtractedAttrs {
@@ -741,6 +746,7 @@ pub(crate) fn extract_attrs(attrs: &[Attribute]) -> ExtractedAttrs {
         usage_limits_total: None,
         usage_limits_unit: None,
         application_specific_information: None,
+        object_groups: Vec::new(),
     };
     for a in attrs {
         match a {
@@ -762,6 +768,13 @@ pub(crate) fn extract_attrs(attrs: &[Attribute]) -> ExtractedAttrs {
             }
             Attribute::ApplicationSpecificInformation { namespace, data } => {
                 out.application_specific_information = Some((namespace.clone(), data.clone()));
+            }
+            // Multi-instance: accumulate every Object Group label so an
+            // object Registered into several groups is locatable by any.
+            Attribute::ObjectGroup(g) => {
+                if !out.object_groups.contains(g) {
+                    out.object_groups.push(g.clone());
+                }
             }
             _ => {}
         }

@@ -438,6 +438,11 @@ fn attribute_present(obj: &ObjectRecord, a: &Attribute) -> bool {
         Attribute::PreviousLink(_)           => obj.links.contains_key("PreviousLink"),
         Attribute::PublicKeyLink(_)          => obj.links.contains_key("PublicKeyLink"),
         Attribute::PrivateKeyLink(_)         => obj.links.contains_key("PrivateKeyLink"),
+        // KMIP `Object Group` is multi-instance: "present" means THIS
+        // exact membership already exists. AddAttribute may add further
+        // distinct groups; re-adding the same one trips the §6.1.2
+        // already-present guard.
+        Attribute::ObjectGroup(g)            => obj.object_groups.iter().any(|x| x == g),
         // Baseline Server attributes — presence depends on the typed
         // field actually being populated on the record. AddAttribute
         // MUST succeed when none of these is yet set (BL-M-5 step #3
@@ -495,13 +500,43 @@ fn link_target(a: &Attribute) -> Option<(&'static str, &str)> {
     }
 }
 
+/// KMIP §11 defines several link types as *inverse pairs* — the back
+/// edge of a legitimate bidirectional relationship, NOT a cycle:
+/// NextLink↔PreviousLink (rotation chain), PublicKeyLink↔PrivateKeyLink
+/// (key-pair halves), ReplacedObjectLink↔ReplacementObjectLink (re-key),
+/// DerivationBaseObjectLink↔DerivedObjectLink (derive). A reciprocal
+/// link that uses the matching inverse type is spec-correct and must
+/// NOT be flagged as a `Circular Link Error`. Returns the canonical
+/// inverse key of `key`, if any.
+fn inverse_link_key(key: &str) -> Option<&'static str> {
+    Some(match key {
+        "NextLink"                 => "PreviousLink",
+        "PreviousLink"             => "NextLink",
+        "PublicKeyLink"            => "PrivateKeyLink",
+        "PrivateKeyLink"           => "PublicKeyLink",
+        "ReplacedObjectLink"       => "ReplacementObjectLink",
+        "ReplacementObjectLink"    => "ReplacedObjectLink",
+        "DerivationBaseObjectLink" => "DerivedObjectLink",
+        "DerivedObjectLink"        => "DerivationBaseObjectLink",
+        _ => return None,
+    })
+}
+
 /// P2.4 — detect link cycles before storing a Link attribute and emit
 /// `Circular Link Error` (KMIP 3.0 §11, 0x4d) instead of silently
 /// storing the cycle (the previous behaviour). Scope: the directly
 /// cheap cases — a self-link (A→A) and an immediate reciprocal 2-cycle
-/// (adding A→B while B already carries any link back to A). Deeper
-/// (N>2) cycle detection would require a full link-graph walk across
-/// the store and is left as future work.
+/// (adding A→B while B already carries a link back to A). Deeper (N>2)
+/// cycle detection would require a full link-graph walk across the
+/// store and is left as future work.
+///
+/// P2.1 correction: a reciprocal link via the spec-defined *inverse*
+/// link type (NextLink↔PreviousLink, PublicKeyLink↔PrivateKeyLink, …)
+/// is the legitimate back edge of a bidirectional relationship, not a
+/// cycle — the original P2.4 heuristic wrongly rejected it, breaking
+/// AX-M-1/2 (which stitch a rotation chain with NextLink then the
+/// reciprocal PreviousLink). Only a back-link via a NON-inverse type
+/// (or the same type) is a true cycle.
 fn check_circular_link(
     deps: &Deps,
     op: &str,
@@ -509,16 +544,22 @@ fn check_circular_link(
     a: &Attribute,
     correlation_id: &str,
 ) -> Result<()> {
-    let Some((_key, target)) = link_target(a) else { return Ok(()) };
+    let Some((key, target)) = link_target(a) else { return Ok(()) };
     // Self-link: A → A.
     if target == src_uid {
         return Err(fail_err(deps, correlation_id, op,
             KmipError::circular_link_error(format!(
                 "Link on {src_uid} targets itself ({target})"))));
     }
-    // Direct reciprocal 2-cycle: target already links back to src.
+    // Direct reciprocal 2-cycle: target already links back to src via a
+    // link type that is NOT the spec inverse of the one being added.
+    let inverse = inverse_link_key(key);
     if let Ok(Some(target_obj)) = deps.store.get(target) {
-        if target_obj.links.values().any(|v| v == src_uid) {
+        let true_cycle = target_obj
+            .links
+            .iter()
+            .any(|(back_key, v)| v == src_uid && Some(back_key.as_str()) != inverse);
+        if true_cycle {
             return Err(fail_err(deps, correlation_id, op,
                 KmipError::circular_link_error(format!(
                     "Link {src_uid}→{target} closes a reciprocal cycle ({target} already links back to {src_uid})"))));
@@ -549,6 +590,14 @@ fn apply_attribute(obj: &mut ObjectRecord, a: &Attribute) {
         Attribute::PublicKeyLink(uid)        => { obj.links.insert("PublicKeyLink".into(), uid.clone()); }
         Attribute::PrivateKeyLink(uid)       => { obj.links.insert("PrivateKeyLink".into(), uid.clone()); }
         Attribute::GroupLink(uid)            => { obj.links.insert("GroupLink".into(), uid.clone()); }
+        // KMIP `Object Group` (0x420056) — multi-instance: AddAttribute
+        // appends a fresh membership; SetAttribute reuses this path so a
+        // repeated value is idempotent (deduped).
+        Attribute::ObjectGroup(g)            => {
+            if !obj.object_groups.contains(g) {
+                obj.object_groups.push(g.clone());
+            }
+        }
         Attribute::ApplicationSpecificInformation { namespace, data } => {
             obj.application_specific_information = Some((namespace.clone(), data.clone()));
         }
@@ -595,6 +644,9 @@ fn remove_attribute_by_value(obj: &mut ObjectRecord, a: &Attribute) {
         Attribute::CryptographicLength(_)    => obj.cryptographic_length = 0,
         Attribute::CryptographicUsageMask(_) => obj.usage_mask = UsageMask::empty(),
         Attribute::Custom { name, .. }       => { obj.custom_attributes.remove(name); }
+        // KMIP `Object Group` multi-instance — drop just the named
+        // membership, leaving the object in any other groups.
+        Attribute::ObjectGroup(g)            => { obj.object_groups.retain(|x| x != g); }
         // Required / Read-Only attributes guarded earlier.
         _ => {}
     }
@@ -940,24 +992,62 @@ mod tests {
         assert!(d.store.get("u").unwrap().unwrap().links.is_empty());
     }
 
-    /// A direct reciprocal 2-cycle: B already links to A, so adding
-    /// A → B closes the cycle → `CircularLinkError`.
+    /// A direct reciprocal 2-cycle via a NON-inverse link type is a
+    /// true cycle: B already NextLinks to A, so adding A NextLink B
+    /// closes a same-relation loop → `CircularLinkError`.
     #[test]
     fn add_reciprocal_link_returns_circular_link_error() {
         let d = deps_with();
         put(&d, "a");
         put(&d, "b");
-        // b → a first (no cycle yet).
+        // b → a via NextLink first (no cycle yet).
         add_attribute(&d, AddAttributeRequest {
             uid: "b".into(),
-            new_attribute: Attribute::PreviousLink("a".into()),
+            new_attribute: Attribute::NextLink("a".into()),
         }, "c").unwrap();
-        // a → b now closes the 2-cycle.
+        // a → b via NextLink now closes a same-type 2-cycle.
         let err = add_attribute(&d, AddAttributeRequest {
             uid: "a".into(),
             new_attribute: Attribute::NextLink("b".into()),
         }, "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::CircularLinkError);
+    }
+
+    /// P2.1 correction: a reciprocal link via the spec INVERSE type is
+    /// the legitimate back edge of a bidirectional relationship — NOT a
+    /// cycle. This is the AX-M-1/2 pattern: A NextLink B, then B
+    /// PreviousLink A. Both SHALL succeed (the original P2.4 heuristic
+    /// wrongly rejected the second, breaking AX-M).
+    #[test]
+    fn add_inverse_reciprocal_link_pair_succeeds() {
+        let d = deps_with();
+        put(&d, "a");
+        put(&d, "b");
+        // a → b via NextLink (forward edge of the rotation chain).
+        add_attribute(&d, AddAttributeRequest {
+            uid: "a".into(),
+            new_attribute: Attribute::NextLink("b".into()),
+        }, "c").unwrap();
+        // b → a via PreviousLink (the spec inverse — the back edge).
+        add_attribute(&d, AddAttributeRequest {
+            uid: "b".into(),
+            new_attribute: Attribute::PreviousLink("a".into()),
+        }, "c").unwrap();
+        assert_eq!(
+            d.store.get("b").unwrap().unwrap().links.get("PreviousLink").map(String::as_str),
+            Some("a")
+        );
+        // PublicKeyLink ↔ PrivateKeyLink is likewise a valid inverse pair.
+        put(&d, "pub");
+        put(&d, "priv");
+        add_attribute(&d, AddAttributeRequest {
+            uid: "priv".into(),
+            new_attribute: Attribute::PublicKeyLink("pub".into()),
+        }, "c").unwrap();
+        add_attribute(&d, AddAttributeRequest {
+            uid: "pub".into(),
+            new_attribute: Attribute::PrivateKeyLink("priv".into()),
+        }, "c").unwrap();
     }
 
     /// A non-cyclic link (A → B with no back-link) is accepted.
