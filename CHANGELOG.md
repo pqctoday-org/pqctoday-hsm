@@ -8,6 +8,37 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — C++ engine round 6: review-confirmed bugs (2026-06-13)
+
+A high-effort code review of the round 4–5 changes confirmed four bugs, two
+of them introduced by this branch's own fixes. All resolved in commit
+`94532bc`; compliance suite 308 → **315 PASS / 0 FAIL / 0 SKIP**, ctest 8/8.
+
+- **Digest dual-op NULL-deref (crash/DoS), introduced by R5-2.** In a §5.13
+  dual op (`C_EncryptInit` + `C_DigestInit`), finalizing the digest half first
+  freed `digestOp` but left the session's `operation` stale at
+  `SESSION_OP_DIGEST` (the cipher partner survived), so a following
+  `C_DigestUpdate`/`C_Digest` dereferenced a NULL op. Fixed at the root:
+  `Session::endOpFamily` now tracks both dual-op families and advances
+  `operation` to the surviving partner instead of leaving it stale; plus
+  defense-in-depth NULL guards on `C_Digest`/`C_DigestUpdate`/`C_DigestKey`.
+- **Unchecked `token->encrypt()` → silent private-key corruption, introduced
+  by the V-13 fix.** `token->encrypt()` returns `false` (wiping its output) on
+  RNG/AES failure without throwing; several keygen sites committed the empty
+  result as a private `CKA_VALUE`, yielding a key that fails only at first use.
+  The return is now checked at the HSS/XMSS keypair site (both halves torn
+  down + `CKR_FUNCTION_FAILED`) and the five KDF/unwrap sites. (~30 further
+  discarded-return sites in pre-existing upstream serialization paths are noted
+  for a separate hardening pass.)
+- **StatefulSign two-call-convention violation.** A `C_Sign(pSignature=NULL)`
+  size query computed and then discarded the full stateful signature. It now
+  answers from the known signature length (`hss_get_signature_len_from_working_key`
+  / parsed OID `sig_bytes`) without signing; the no-leaf-burn-on-too-small
+  guarantee and mutex/commit ordering are preserved.
+- **Unique-id migration robustness.** The 0x17→0x4 `CKA_UNIQUE_ID` migration is
+  now best-effort: a read-only / write-refusing store no longer fails object
+  `init()`; the in-memory id is retained.
+
 ### Fixed — C++ engine PKCS#11 v3.2 compliance, round 4 (2026-06-12)
 
 Full v3.2 remediation of the C++ `src/lib/` engine, which rounds 1–3 had
