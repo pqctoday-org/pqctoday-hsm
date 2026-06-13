@@ -1460,6 +1460,53 @@ void test_pqc_xmss() {
         record_result("XMSS", "C_SignInit_XMSS_SHA2_10_256", "FAIL", "RV=" + std::to_string(rv));
     }
 
+    // R6 BUG-3: StatefulSign must answer the two-call size query WITHOUT burning
+    // a one-time leaf. Two C_Sign(NULL) queries must return the same size and
+    // CKR_OK (idempotent, no state change); a too-small buffer must return
+    // CKR_BUFFER_TOO_SMALL without signing; and a subsequent correct call must
+    // still produce a verifiable signature (the leaf was not consumed early).
+    {
+        CK_RV rvI = fl->C_SignInit(hSess, &signMech, hPriv);
+        if (rvI == CKR_OK) {
+            // (1) size query #1
+            CK_ULONG q1 = 0;
+            CK_RV r1 = fl->C_Sign(hSess, msg, sizeof(msg)-1, NULL_PTR, &q1);
+            // (2) size query #2 — must be idempotent (same size, op still active)
+            CK_ULONG q2 = 0;
+            CK_RV r2 = fl->C_Sign(hSess, msg, sizeof(msg)-1, NULL_PTR, &q2);
+            record_result("XMSS", "StatefulSign_size_query_idempotent",
+                          (r1 == CKR_OK && r2 == CKR_OK && q1 != 0 && q1 == q2) ? "PASS" : "FAIL",
+                          "two C_Sign(NULL) → same size " + std::to_string(q1) +
+                          " RV1=" + std::to_string(r1) + " RV2=" + std::to_string(r2));
+
+            // (3) too-small buffer must not burn the leaf
+            CK_BYTE tiny[8]; CK_ULONG tinyLen = sizeof(tiny);
+            CK_RV r3 = fl->C_Sign(hSess, msg, sizeof(msg)-1, tiny, &tinyLen);
+            record_result("XMSS", "StatefulSign_buffer_too_small",
+                          (r3 == CKR_BUFFER_TOO_SMALL && tinyLen == q1) ? "PASS" : "FAIL",
+                          "too-small buffer → CKR_BUFFER_TOO_SMALL(0x150), size echoed, RV=" + std::to_string(r3));
+
+            // (4) real sign with adequate buffer — leaf was NOT burned by the
+            //     size queries / too-small attempt, so this still succeeds.
+            CK_BYTE sig2[5000]; CK_ULONG sig2Len = sizeof(sig2);
+            CK_RV r4 = fl->C_Sign(hSess, msg, sizeof(msg)-1, sig2, &sig2Len);
+            bool sigOK = (r4 == CKR_OK && sig2Len == q1);
+            // (5) verify the produced signature against the public key.
+            CK_RV r5 = CKR_FUNCTION_FAILED;
+            if (r4 == CKR_OK) {
+                r5 = fl->C_VerifyInit(hSess, &signMech, hPub);
+                if (r5 == CKR_OK) r5 = fl->C_Verify(hSess, msg, sizeof(msg)-1, sig2, sig2Len);
+            }
+            record_result("XMSS", "StatefulSign_signs_after_queries",
+                          (sigOK && r5 == CKR_OK) ? "PASS" : "FAIL",
+                          "real C_Sign after queries verifies (leaf not burned) signRV=" +
+                          std::to_string(r4) + " verifyRV=" + std::to_string(r5));
+        } else {
+            record_result("XMSS", "StatefulSign_two_call", "FAIL",
+                          "C_SignInit for two-call test RV=" + std::to_string(rvI));
+        }
+    }
+
     // XMSS-MT validation. Use CKK_XMSSMT in the templates — the XMSS templates
     // above carry CKK_XMSS, which the keygen mechanism↔key-type consistency
     // check (audit V-4) correctly rejects with CKR_TEMPLATE_INCONSISTENT.
@@ -5120,6 +5167,104 @@ void test_g8_dual_functions() {
                       rvu == CKR_OPERATION_NOT_INITIALIZED ? "PASS" : "FAIL",
                       "expect CKR_OPERATION_NOT_INITIALIZED(0x91) RV=" + std::to_string(rvu));
         (void)rv;
+        // The encrypt-only op is still active (the rejected dual update did not
+        // reset it). Finalise it with a real buffer to return to a clean slate
+        // for the R6 BUG-1 sub-tests below.
+        CK_BYTE ef[32]; CK_ULONG efl = sizeof(ef); fl->C_EncryptFinal(hSess, ef, &efl);
+    }
+
+    // ── 6. R6 BUG-1: after DigestFinal ends the digest half of a dual op, the
+    //    freed digest context must NOT be reachable via C_DigestUpdate /
+    //    C_Digest. Pre-fix, endOpFamily() left `operation` stale at
+    //    SESSION_OP_DIGEST while digestOp was freed, so these passed their
+    //    getOpType() guard and dereferenced a NULL context → crash/DoS.
+    //    Now endOpFamily() advances `operation` to the surviving cipher family
+    //    and the entry points also NULL-guard the context. ─────────────────────
+    {
+        // (a) EncryptInit → DigestInit → DigestFinal → C_DigestUpdate
+        CK_MECHANISM em = { CKM_AES_CBC, iv, sizeof(iv) };
+        CK_MECHANISM dm = { CKM_SHA256, NULL_PTR, 0 };
+        CK_RV rv = fl->C_EncryptInit(hSess, &em, hAes);
+        if (rv == CKR_OK) rv = fl->C_DigestInit(hSess, &dm);
+        CK_BYTE dig[32]; CK_ULONG digLen = sizeof(dig);
+        if (rv == CKR_OK) rv = fl->C_DigestFinal(hSess, dig, &digLen); // ends digest half
+        CK_RV rvU = fl->C_DigestUpdate(hSess, chunk1, c1);              // must not crash
+        record_result(CAT, "DigestFinal_then_DigestUpdate_safe",
+                      rvU == CKR_OPERATION_NOT_INITIALIZED ? "PASS" : "FAIL",
+                      "freed digest half: C_DigestUpdate must return 0x91, not crash, RV=" + std::to_string(rvU));
+        // The cipher half still survives — finalise it cleanly.
+        if (rv == CKR_OK) { CK_BYTE ef[32]; CK_ULONG efl = sizeof(ef); fl->C_EncryptFinal(hSess, ef, &efl); }
+    }
+    {
+        // (b) EncryptInit → DigestInit → DigestFinal → C_Digest (one-shot)
+        CK_MECHANISM em = { CKM_AES_CBC, iv, sizeof(iv) };
+        CK_MECHANISM dm = { CKM_SHA256, NULL_PTR, 0 };
+        CK_RV rv = fl->C_EncryptInit(hSess, &em, hAes);
+        if (rv == CKR_OK) rv = fl->C_DigestInit(hSess, &dm);
+        CK_BYTE dig[32]; CK_ULONG digLen = sizeof(dig);
+        if (rv == CKR_OK) rv = fl->C_DigestFinal(hSess, dig, &digLen);
+        CK_BYTE od[32]; CK_ULONG odLen = sizeof(od);
+        CK_RV rvD = fl->C_Digest(hSess, chunk1, c1, od, &odLen);       // must not crash
+        record_result(CAT, "DigestFinal_then_Digest_safe",
+                      rvD == CKR_OPERATION_NOT_INITIALIZED ? "PASS" : "FAIL",
+                      "freed digest half: one-shot C_Digest must return 0x91, not crash, RV=" + std::to_string(rvD));
+        if (rv == CKR_OK) { CK_BYTE ef[32]; CK_ULONG efl = sizeof(ef); fl->C_EncryptFinal(hSess, ef, &efl); }
+    }
+    {
+        // (c) Surviving cipher half finalises correctly AFTER the digest half
+        //     ended: EncryptInit+DigestInit → DigestEncryptUpdate → DigestFinal
+        //     → EncryptFinal → ciphertext must equal the standalone reference.
+        CK_MECHANISM dm = { CKM_SHA256, NULL_PTR, 0 };
+        CK_MECHANISM em = { CKM_AES_CBC, iv, sizeof(iv) };
+        CK_RV rv = fl->C_DigestInit(hSess, &dm);
+        if (rv == CKR_OK) rv = fl->C_EncryptInit(hSess, &em, hAes);
+        CK_BYTE survCt[64]; CK_ULONG survLen = 0;
+        if (rv == CKR_OK) {
+            CK_BYTE out[64]; CK_ULONG outLen = sizeof(out);
+            rv = fl->C_DigestEncryptUpdate(hSess, chunk1, c1, out, &outLen);
+            if (rv == CKR_OK) { memcpy(survCt + survLen, out, outLen); survLen += outLen; }
+            outLen = sizeof(out);
+            if (rv == CKR_OK) rv = fl->C_DigestEncryptUpdate(hSess, chunk2, c2, out, &outLen);
+            if (rv == CKR_OK) { memcpy(survCt + survLen, out, outLen); survLen += outLen; }
+            // End the DIGEST half FIRST, then finalise the surviving cipher.
+            CK_BYTE dig[32]; CK_ULONG digLen = sizeof(dig);
+            if (rv == CKR_OK) rv = fl->C_DigestFinal(hSess, dig, &digLen);
+            CK_BYTE encFin[32]; CK_ULONG encFinLen = sizeof(encFin);
+            if (rv == CKR_OK) rv = fl->C_EncryptFinal(hSess, encFin, &encFinLen);
+            if (rv == CKR_OK) { memcpy(survCt + survLen, encFin, encFinLen); survLen += encFinLen; }
+        }
+        bool ctMatch = (survLen == refCtLen) && (memcmp(survCt, refCt, refCtLen) == 0);
+        record_result(CAT, "DigestFinal_then_EncryptFinal_correct",
+                      (rv == CKR_OK && ctMatch) ? "PASS" : "FAIL",
+                      "surviving cipher half finalises to correct ciphertext after digest ended, RV=" + std::to_string(rv));
+    }
+    {
+        // (d) Reverse order: EncryptFinal FIRST, then DigestFinal still works.
+        CK_MECHANISM dm = { CKM_SHA256, NULL_PTR, 0 };
+        CK_MECHANISM em = { CKM_AES_CBC, iv, sizeof(iv) };
+        CK_RV rv = fl->C_DigestInit(hSess, &dm);
+        if (rv == CKR_OK) rv = fl->C_EncryptInit(hSess, &em, hAes);
+        CK_BYTE survCt[64]; CK_ULONG survLen = 0;
+        CK_BYTE dig[32]; CK_ULONG digLen = sizeof(dig);
+        if (rv == CKR_OK) {
+            CK_BYTE out[64]; CK_ULONG outLen = sizeof(out);
+            rv = fl->C_DigestEncryptUpdate(hSess, chunk1, c1, out, &outLen);
+            if (rv == CKR_OK) { memcpy(survCt + survLen, out, outLen); survLen += outLen; }
+            outLen = sizeof(out);
+            if (rv == CKR_OK) rv = fl->C_DigestEncryptUpdate(hSess, chunk2, c2, out, &outLen);
+            if (rv == CKR_OK) { memcpy(survCt + survLen, out, outLen); survLen += outLen; }
+            // EncryptFinal FIRST.
+            CK_BYTE encFin[32]; CK_ULONG encFinLen = sizeof(encFin);
+            if (rv == CKR_OK) rv = fl->C_EncryptFinal(hSess, encFin, &encFinLen);
+            if (rv == CKR_OK) { memcpy(survCt + survLen, encFin, encFinLen); survLen += encFinLen; }
+            // Then DigestFinal — must still return the correct digest.
+            if (rv == CKR_OK) rv = fl->C_DigestFinal(hSess, dig, &digLen);
+        }
+        bool ctMatch  = (survLen == refCtLen)  && (memcmp(survCt, refCt, refCtLen) == 0);
+        bool digMatch = (digLen == refDigLen)  && (memcmp(dig, refDig, refDigLen) == 0);
+        record_result(CAT, "EncryptFinal_then_DigestFinal_correct",
+                      (rv == CKR_OK && ctMatch && digMatch) ? "PASS" : "FAIL",
+                      "reverse-order finalise: cipher then digest both correct, RV=" + std::to_string(rv));
     }
 
     fl->C_DestroyObject(hSess, hAes);

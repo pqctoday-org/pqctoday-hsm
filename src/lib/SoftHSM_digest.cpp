@@ -146,6 +146,11 @@ CK_RV SoftHSM::C_Digest(CK_SESSION_HANDLE hSession, CK_BYTE_PTR pData, CK_ULONG 
 	// Check if we are doing the correct operation
 	if (session->getOpType() != SESSION_OP_DIGEST) return CKR_OPERATION_NOT_INITIALIZED;
 
+	// Defense-in-depth: even with the op type matching, the digest context must
+	// be live. A §5.13 dual op whose digest half was already finalised could
+	// otherwise reach the getHashSize() deref below on a NULL context.
+	if (session->getDigestOp() == NULL) return CKR_OPERATION_NOT_INITIALIZED;
+
 	// V-17: C_Digest must be a single-part call. If C_DigestUpdate/C_DigestKey has
 	// already fed data, reject the one-shot with CKR_OPERATION_ACTIVE rather than
 	// silently digesting update||data. The multi-part op is left intact for C_DigestFinal.
@@ -215,6 +220,10 @@ CK_RV SoftHSM::C_DigestUpdate(CK_SESSION_HANDLE hSession, CK_BYTE_PTR pPart, CK_
 	// Check if we are doing the correct operation
 	if (session->getOpType() != SESSION_OP_DIGEST) return CKR_OPERATION_NOT_INITIALIZED;
 
+	// Defense-in-depth: the digest context must be live (a §5.13 dual op whose
+	// digest half was finalised first could otherwise deref a NULL context).
+	if (session->getDigestOp() == NULL) return CKR_OPERATION_NOT_INITIALIZED;
+
 	// Get the data
 	ByteString data(pPart, ulPartLen);
 
@@ -243,6 +252,9 @@ CK_RV SoftHSM::C_DigestKey(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject)
 
 	// Check if we are doing the correct operation
 	if (session->getOpType() != SESSION_OP_DIGEST) return CKR_OPERATION_NOT_INITIALIZED;
+
+	// Defense-in-depth: the digest context must be live before we hashUpdate it.
+	if (session->getDigestOp() == NULL) return CKR_OPERATION_NOT_INITIALIZED;
 
 	// Get the token
 	Token* token = session->getToken();

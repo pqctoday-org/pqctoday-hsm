@@ -44,6 +44,8 @@ Session::Session(Slot* inSlot, bool inIsReadWrite, bool inIsAsync, CK_VOID_PTR i
 	pApplication = inPApplication;
 	notify = inNotify;
 	operation = SESSION_OP_NONE;
+	dualOp1 = SESSION_OP_NONE;
+	dualOp2 = SESSION_OP_NONE;
 	findOp = NULL;
 	digestOp = NULL;
 	hashAlgo = HashAlgo::Unknown;
@@ -74,6 +76,8 @@ Session::Session()
 	pApplication = NULL;
 	notify = NULL;
 	operation = SESSION_OP_NONE;
+	dualOp1 = SESSION_OP_NONE;
+	dualOp2 = SESSION_OP_NONE;
 	findOp = NULL;
 	digestOp = NULL;
 	hashAlgo = HashAlgo::Unknown;
@@ -185,9 +189,37 @@ Token* Session::getToken()
 	return token;
 }
 
+// Returns true for the five crypto families that can take part in a §5.13
+// dual-function operation, and which endOpFamily() knows how to release.
+static bool isDualOpFamily(int op)
+{
+	return op == SESSION_OP_DIGEST  || op == SESSION_OP_ENCRYPT ||
+	       op == SESSION_OP_DECRYPT || op == SESSION_OP_SIGN    ||
+	       op == SESSION_OP_VERIFY;
+}
+
 // Set the operation type
 void Session::setOpType(int inOperation)
 {
+	// Detect the formation of a §5.13 dual-function op: a complementary second
+	// Init while a first crypto family is already active. Record both families
+	// so endOpFamily() can advance `operation` to the survivor when the first
+	// half finalises. (The actual pairing legality is enforced earlier by
+	// SoftHSM::isComplementaryDualOp(); here we only need to remember the two.)
+	if (isDualOpFamily(operation) && isDualOpFamily(inOperation) &&
+	    operation != inOperation)
+	{
+		dualOp1 = operation;
+		dualOp2 = inOperation;
+	}
+	else if (inOperation != operation)
+	{
+		// Any other transition (single-op init, state-machine move, reset)
+		// clears the dual-op record so a stale pairing can't leak forward.
+		dualOp1 = SESSION_OP_NONE;
+		dualOp2 = SESSION_OP_NONE;
+	}
+
 	operation = inOperation;
 }
 
@@ -272,15 +304,21 @@ void Session::resetOp()
 	}
 
 	operation = SESSION_OP_NONE;
+	dualOp1 = SESSION_OP_NONE;
+	dualOp2 = SESSION_OP_NONE;
 	reAuthentication = false;
 }
 
 // Release only the crypto context(s) for one operation family. During a §5.13
 // dual-function operation two contexts are live at once; the *Final functions
 // call this so finishing one half leaves the other half intact for its own
-// Final. After releasing the requested family, operation is set to the
-// surviving family if one remains, else SESSION_OP_NONE — matching the
-// single-op resetOp() contract when there is no dual partner.
+// Final. After releasing the requested family, `operation` is advanced to the
+// surviving family (the dual partner recorded at init time) if a context
+// remains, else SESSION_OP_NONE — matching the single-op resetOp() contract
+// when there is no dual partner. Advancing (rather than leaving `operation`
+// stale at the just-freed family) is what stops a finalised half's Update /
+// one-shot entry points from passing their getOpType() guard and dereferencing
+// the now-NULL context.
 void Session::endOpFamily(int family)
 {
 	switch (family)
@@ -349,9 +387,11 @@ void Session::endOpFamily(int family)
 	}
 
 	// If no crypto context remains live the operation is fully done; clear the
-	// slate exactly like resetOp(). Otherwise a dual partner survives — leave
-	// operation as-is; the partner's *Final accepts the call on the basis of
-	// its context being non-NULL (see the relaxed guards in SoftHSM_*).
+	// slate exactly like resetOp(). Otherwise a dual partner survives, so
+	// advance `operation` to the surviving family (the partner recorded when
+	// the dual op formed) — never leave it pointing at the family we just
+	// freed, or the freed half's Update/one-shot would pass its getOpType()
+	// guard and deref a NULL context.
 	if (digestOp == NULL && symmetricCryptoOp == NULL && asymmetricCryptoOp == NULL && macOp == NULL)
 	{
 		msgBuffer.wipe();
@@ -363,7 +403,30 @@ void Session::endOpFamily(int family)
 			paramLen = 0;
 		}
 		operation = SESSION_OP_NONE;
+		dualOp1 = SESSION_OP_NONE;
+		dualOp2 = SESSION_OP_NONE;
 		reAuthentication = false;
+	}
+	else
+	{
+		// A context survives: pick the surviving family. The dual op recorded
+		// its two families (dualOp1/dualOp2); the survivor is whichever is not
+		// the one being released. Fall back to leaving `operation` unchanged
+		// only if no dual pairing was recorded (shouldn't happen for a real
+		// dual-survivor, but stay defensive rather than guess a wrong family).
+		int survivor = SESSION_OP_NONE;
+		if (dualOp1 == family && dualOp2 != SESSION_OP_NONE)
+			survivor = dualOp2;
+		else if (dualOp2 == family && dualOp1 != SESSION_OP_NONE)
+			survivor = dualOp1;
+
+		if (survivor != SESSION_OP_NONE)
+			operation = survivor;
+		// The dual pairing is now half-consumed; the survivor is a plain
+		// single op from here on. Clear the record so its own Final/reset
+		// behaves like an ordinary single-op teardown.
+		dualOp1 = SESSION_OP_NONE;
+		dualOp2 = SESSION_OP_NONE;
 	}
 }
 
