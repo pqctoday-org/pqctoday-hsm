@@ -179,8 +179,10 @@ CK_RV SoftHSM::MacSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechani
 
 	std::shared_ptr<Session> sessionGuard;
 	Session* session; Token* token; OSObject* key;
+	// SESSION_OP_SIGN lets a Sign init pair with an already-active Encrypt op
+	// for C_SignEncryptUpdate (§5.13).
 	CK_RV rv = acquireSessionTokenKey(hSession, hKey, CKA_SIGN, pMechanism,
-	                                   sessionGuard, session, token, key);
+	                                   sessionGuard, session, token, key, SESSION_OP_SIGN);
 	if (rv != CKR_OK) return rv;
 
 	// Get key info
@@ -447,8 +449,10 @@ CK_RV SoftHSM::AsymSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 
 	std::shared_ptr<Session> sessionGuard;
 	Session* session; Token* token; OSObject* key;
+	// SESSION_OP_SIGN lets a Sign init pair with an already-active Encrypt op
+	// for C_SignEncryptUpdate (§5.13).
 	CK_RV rv = acquireSessionTokenKey(hSession, hKey, CKA_SIGN, pMechanism,
-	                                   sessionGuard, session, token, key);
+	                                   sessionGuard, session, token, key, SESSION_OP_SIGN);
 	if (rv != CKR_OK) return rv;
 
 	// Get key info
@@ -1174,8 +1178,10 @@ CK_RV SoftHSM::StatefulSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMe
 
 	std::shared_ptr<Session> sessionGuard;
 	Session* session; Token* token; OSObject* key;
+	// SESSION_OP_SIGN lets a Sign init pair with an already-active Encrypt op
+	// for C_SignEncryptUpdate (§5.13).
 	CK_RV rv = acquireSessionTokenKey(hSession, hKey, CKA_SIGN, pMechanism,
-	                                   sessionGuard, session, token, key);
+	                                   sessionGuard, session, token, key, SESSION_OP_SIGN);
 	if (rv != CKR_OK) return rv;
 
 	session->setOpType(SESSION_OP_SIGN);
@@ -1758,7 +1764,8 @@ static CK_RV AsymSignFinal(Session* session, CK_BYTE_PTR pSignature, CK_ULONG_PT
 	memcpy(pSignature, signature.byte_str(), size);
 	*pulSignatureLen = size;
 
-	session->resetOp();
+	// Release only the sign half; a dual cipher partner (if any) survives.
+	session->endOpFamily(SESSION_OP_SIGN);
 	return CKR_OK;
 }
 
@@ -1774,8 +1781,11 @@ CK_RV SoftHSM::C_SignFinal(CK_SESSION_HANDLE hSession, CK_BYTE_PTR pSignature, C
 	Session* session = sessionGuard.get();
 	if (session == NULL) return CKR_SESSION_HANDLE_INVALID;
 
-	// Check if we are doing the correct operation
-	if (session->getOpType() != SESSION_OP_SIGN || !session->getAllowMultiPartOp())
+	// Accept a standalone sign op, or the (asymmetric) sign half of a §5.13
+	// C_SignEncryptUpdate dual op whose cipher partner was finalised first
+	// (op then lingers at SESSION_OP_ENCRYPT while asymmetricCryptoOp is live).
+	bool dualSignSurvivor = (session->getOpType() == SESSION_OP_ENCRYPT && session->getAsymmetricCryptoOp() != NULL);
+	if ((session->getOpType() != SESSION_OP_SIGN && !dualSignSurvivor) || !session->getAllowMultiPartOp())
 		return CKR_OPERATION_NOT_INITIALIZED;
 
 	if (session->getMacOp() != NULL)
@@ -1916,8 +1926,10 @@ CK_RV SoftHSM::MacVerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMecha
 
 	std::shared_ptr<Session> sessionGuard;
 	Session* session; Token* token; OSObject* key;
+	// SESSION_OP_VERIFY lets a Verify init pair with an already-active Decrypt
+	// op for C_DecryptVerifyUpdate (§5.13).
 	CK_RV rv = acquireSessionTokenKey(hSession, hKey, CKA_VERIFY, pMechanism,
-	                                   sessionGuard, session, token, key);
+	                                   sessionGuard, session, token, key, SESSION_OP_VERIFY);
 	if (rv != CKR_OK) return rv;
 
 	// Get key info
@@ -1979,8 +1991,10 @@ CK_RV SoftHSM::AsymVerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 
 	std::shared_ptr<Session> sessionGuard;
 	Session* session; Token* token; OSObject* key;
+	// SESSION_OP_VERIFY lets a Verify init pair with an already-active Decrypt
+	// op for C_DecryptVerifyUpdate (§5.13).
 	CK_RV rv = acquireSessionTokenKey(hSession, hKey, CKA_VERIFY, pMechanism,
-	                                   sessionGuard, session, token, key);
+	                                   sessionGuard, session, token, key, SESSION_OP_VERIFY);
 	if (rv != CKR_OK) return rv;
 
 	// Get key info
@@ -2698,8 +2712,10 @@ CK_RV SoftHSM::StatefulVerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR p
 
 	std::shared_ptr<Session> sessionGuard;
 	Session* session; Token* token; OSObject* key;
+	// SESSION_OP_VERIFY lets a Verify init pair with an already-active Decrypt
+	// op for C_DecryptVerifyUpdate (§5.13).
 	CK_RV rv = acquireSessionTokenKey(hSession, hKey, CKA_VERIFY, pMechanism,
-	                                   sessionGuard, session, token, key);
+	                                   sessionGuard, session, token, key, SESSION_OP_VERIFY);
 	if (rv != CKR_OK) return rv;
 
 	session->setOpType(SESSION_OP_VERIFY);
@@ -3107,7 +3123,8 @@ static CK_RV AsymVerifyFinal(Session* session, CK_BYTE_PTR pSignature, CK_ULONG 
 		return CKR_SIGNATURE_INVALID;
 	}
 
-	session->resetOp();
+	// Release only the verify half; a dual decrypt partner (if any) survives.
+	session->endOpFamily(SESSION_OP_VERIFY);
 	return CKR_OK;
 }
 
@@ -3123,8 +3140,11 @@ CK_RV SoftHSM::C_VerifyFinal(CK_SESSION_HANDLE hSession, CK_BYTE_PTR pSignature,
 	Session* session = sessionGuard.get();
 	if (session == NULL) return CKR_SESSION_HANDLE_INVALID;
 
-	// Check if we are doing the correct operation
-	if (session->getOpType() != SESSION_OP_VERIFY || !session->getAllowMultiPartOp())
+	// Accept a standalone verify op, or the (asymmetric) verify half of a §5.13
+	// C_DecryptVerifyUpdate dual op whose decrypt partner was finalised first
+	// (op then lingers at SESSION_OP_DECRYPT while asymmetricCryptoOp is live).
+	bool dualVerifySurvivor = (session->getOpType() == SESSION_OP_DECRYPT && session->getAsymmetricCryptoOp() != NULL);
+	if ((session->getOpType() != SESSION_OP_VERIFY && !dualVerifySurvivor) || !session->getAllowMultiPartOp())
 		return CKR_OPERATION_NOT_INITIALIZED;
 
 	if (session->getMacOp() != NULL)
@@ -3814,64 +3834,169 @@ CK_RV SoftHSM::C_VerifyRecover(CK_SESSION_HANDLE hSession, CK_BYTE_PTR pSignatur
 }
 */
 
-// Update a running multi-part encryption and digesting operation
-CK_RV SoftHSM::C_DigestEncryptUpdate(CK_SESSION_HANDLE hSession, CK_BYTE_PTR /*pPart*/, CK_ULONG /*ulPartLen*/, CK_BYTE_PTR /*pEncryptedPart*/, CK_ULONG_PTR /*pulEncryptedPartLen*/)
+// ───────────────────────────────────────────────────────────────────────────
+// §5.13 dual-function cryptographic operations.
+//
+// Each runs two independent session contexts in lockstep on the same buffer:
+// the symmetric-cipher context (symmetricCryptoOp) plus a digest, sign or
+// verify context. The two were set up by two successive C_*Init calls, which
+// coexist because acquireSession()/isComplementaryDualOp() relaxes the
+// single-op CKR_OPERATION_ACTIVE guard for these pairings, and resetOp() now
+// releases every live context independently.
+//
+// The cipher output honours the standard two-call convention (NULL out → size;
+// short buffer → CKR_BUFFER_TOO_SMALL with the op left intact). The companion
+// digest/sign/verify state is advanced ONLY on the data-producing call, so a
+// preceding size query does not double-feed it.
+// ───────────────────────────────────────────────────────────────────────────
+
+// Update a running multi-part encryption and digesting operation.
+// Requires an active C_DigestInit AND C_EncryptInit (symmetric cipher).
+CK_RV SoftHSM::C_DigestEncryptUpdate(CK_SESSION_HANDLE hSession, CK_BYTE_PTR pPart, CK_ULONG ulPartLen, CK_BYTE_PTR pEncryptedPart, CK_ULONG_PTR pulEncryptedPartLen)
 {
 	if (!isInitialised) return CKR_CRYPTOKI_NOT_INITIALIZED;
+
+	if (pPart == NULL_PTR || pulEncryptedPartLen == NULL_PTR) return CKR_ARGUMENTS_BAD;
 
 	// Get the session
 	auto sessionGuard = handleManager->getSessionShared(hSession);
 	Session* session = sessionGuard.get();
 	if (session == NULL) return CKR_SESSION_HANDLE_INVALID;
 
-	// Combined multi-part operations are not planned in the current Phase 0â6 roadmap.
-	// Track as a future enhancement: https://github.com/pqctoday/softhsmv3/issues
-	return CKR_FUNCTION_NOT_SUPPORTED;
+	// Both halves must be initialised: a digest op and a symmetric encrypt op.
+	HashAlgorithm* digest = session->getDigestOp();
+	SymmetricAlgorithm* cipher = session->getSymmetricCryptoOp();
+	if (digest == NULL || cipher == NULL) return CKR_OPERATION_NOT_INITIALIZED;
+
+	// Encrypt half (handles the two-call convention; leaves the op intact on a
+	// size query or short buffer).
+	CK_RV rv = symEncryptUpdateRaw(session, pPart, ulPartLen, pEncryptedPart, pulEncryptedPartLen);
+	if (rv != CKR_OK) return rv;
+	if (pEncryptedPart == NULL_PTR) return CKR_OK;  // size query — digest untouched
+
+	// Digest half: feed the plaintext exactly once, now that ciphertext is produced.
+	ByteString data(pPart, ulPartLen);
+	if (!digest->hashUpdate(data))
+	{
+		session->resetOp();
+		return CKR_GENERAL_ERROR;
+	}
+	session->setAllowSinglePartOp(false);
+	return CKR_OK;
 }
 
-// Update a running multi-part decryption and digesting operation
-CK_RV SoftHSM::C_DecryptDigestUpdate(CK_SESSION_HANDLE hSession, CK_BYTE_PTR /*pPart*/, CK_ULONG /*ulPartLen*/, CK_BYTE_PTR /*pDecryptedPart*/, CK_ULONG_PTR /*pulDecryptedPartLen*/)
+// Update a running multi-part decryption and digesting operation.
+// Requires an active C_DecryptInit (symmetric cipher) AND C_DigestInit.
+CK_RV SoftHSM::C_DecryptDigestUpdate(CK_SESSION_HANDLE hSession, CK_BYTE_PTR pEncryptedPart, CK_ULONG ulEncryptedPartLen, CK_BYTE_PTR pDecryptedPart, CK_ULONG_PTR pulDecryptedPartLen)
 {
 	if (!isInitialised) return CKR_CRYPTOKI_NOT_INITIALIZED;
+
+	if (pEncryptedPart == NULL_PTR || pulDecryptedPartLen == NULL_PTR) return CKR_ARGUMENTS_BAD;
 
 	// Get the session
 	auto sessionGuard = handleManager->getSessionShared(hSession);
 	Session* session = sessionGuard.get();
 	if (session == NULL) return CKR_SESSION_HANDLE_INVALID;
 
-	// Combined multi-part operations are not planned in the current Phase 0â6 roadmap.
-	// Track as a future enhancement: https://github.com/pqctoday/softhsmv3/issues
-	return CKR_FUNCTION_NOT_SUPPORTED;
+	HashAlgorithm* digest = session->getDigestOp();
+	SymmetricAlgorithm* cipher = session->getSymmetricCryptoOp();
+	if (digest == NULL || cipher == NULL) return CKR_OPERATION_NOT_INITIALIZED;
+
+	// Decrypt half (two-call convention preserved).
+	CK_RV rv = symDecryptUpdateRaw(session, pEncryptedPart, ulEncryptedPartLen, pDecryptedPart, pulDecryptedPartLen);
+	if (rv != CKR_OK) return rv;
+	if (pDecryptedPart == NULL_PTR) return CKR_OK;  // size query — digest untouched
+
+	// Digest half: feed the recovered plaintext exactly once.
+	ByteString plain(pDecryptedPart, *pulDecryptedPartLen);
+	if (!digest->hashUpdate(plain))
+	{
+		session->resetOp();
+		return CKR_GENERAL_ERROR;
+	}
+	session->setAllowSinglePartOp(false);
+	return CKR_OK;
 }
 
-// Update a running multi-part signing and encryption operation
-CK_RV SoftHSM::C_SignEncryptUpdate(CK_SESSION_HANDLE hSession, CK_BYTE_PTR /*pPart*/, CK_ULONG /*ulPartLen*/, CK_BYTE_PTR /*pEncryptedPart*/, CK_ULONG_PTR /*pulEncryptedPartLen*/)
+// Update a running multi-part signing and encryption operation.
+// Requires an active C_SignInit AND C_EncryptInit (symmetric cipher).
+// The sign half must be an asymmetric signer; an HMAC signer and a symmetric
+// cipher both claim the session's single symmetric-key slot, so that
+// combination is rejected as uninitialised.
+CK_RV SoftHSM::C_SignEncryptUpdate(CK_SESSION_HANDLE hSession, CK_BYTE_PTR pPart, CK_ULONG ulPartLen, CK_BYTE_PTR pEncryptedPart, CK_ULONG_PTR pulEncryptedPartLen)
 {
 	if (!isInitialised) return CKR_CRYPTOKI_NOT_INITIALIZED;
+
+	if (pPart == NULL_PTR || pulEncryptedPartLen == NULL_PTR) return CKR_ARGUMENTS_BAD;
 
 	// Get the session
 	auto sessionGuard = handleManager->getSessionShared(hSession);
 	Session* session = sessionGuard.get();
 	if (session == NULL) return CKR_SESSION_HANDLE_INVALID;
 
-	// Combined multi-part operations are not planned in the current Phase 0â6 roadmap.
-	// Track as a future enhancement: https://github.com/pqctoday/softhsmv3/issues
-	return CKR_FUNCTION_NOT_SUPPORTED;
+	AsymmetricAlgorithm* asymSign = session->getAsymmetricCryptoOp();
+	SymmetricAlgorithm* cipher = session->getSymmetricCryptoOp();
+	if (asymSign == NULL || cipher == NULL || !session->getAllowMultiPartOp())
+		return CKR_OPERATION_NOT_INITIALIZED;
+
+	// Re-authentication (CKA_ALWAYS_AUTHENTICATE) must be honoured before
+	// feeding more data to the signer, mirroring AsymSignUpdate.
+	if (session->getReAuthentication())
+	{
+		session->resetOp();
+		return CKR_USER_NOT_LOGGED_IN;
+	}
+
+	// Encrypt half (two-call convention preserved).
+	CK_RV rv = symEncryptUpdateRaw(session, pPart, ulPartLen, pEncryptedPart, pulEncryptedPartLen);
+	if (rv != CKR_OK) return rv;
+	if (pEncryptedPart == NULL_PTR) return CKR_OK;  // size query - signer untouched
+
+	// Sign half: feed the plaintext exactly once.
+	ByteString data(pPart, ulPartLen);
+	if (!asymSign->signUpdate(data))
+	{
+		session->resetOp();
+		return CKR_GENERAL_ERROR;
+	}
+	session->setAllowSinglePartOp(false);
+	return CKR_OK;
 }
 
-// Update a running multi-part decryption and verification operation
-CK_RV SoftHSM::C_DecryptVerifyUpdate(CK_SESSION_HANDLE hSession, CK_BYTE_PTR /*pEncryptedPart*/, CK_ULONG /*ulEncryptedPartLen*/, CK_BYTE_PTR /*pPart*/, CK_ULONG_PTR /*pulPartLen*/)
+// Update a running multi-part decryption and verification operation.
+// Requires an active C_DecryptInit (symmetric cipher) AND C_VerifyInit.
+// The verify half must be an asymmetric verifier (see C_SignEncryptUpdate for
+// the HMAC key-slot collision rationale).
+CK_RV SoftHSM::C_DecryptVerifyUpdate(CK_SESSION_HANDLE hSession, CK_BYTE_PTR pEncryptedPart, CK_ULONG ulEncryptedPartLen, CK_BYTE_PTR pPart, CK_ULONG_PTR pulPartLen)
 {
 	if (!isInitialised) return CKR_CRYPTOKI_NOT_INITIALIZED;
+
+	if (pEncryptedPart == NULL_PTR || pulPartLen == NULL_PTR) return CKR_ARGUMENTS_BAD;
 
 	// Get the session
 	auto sessionGuard = handleManager->getSessionShared(hSession);
 	Session* session = sessionGuard.get();
 	if (session == NULL) return CKR_SESSION_HANDLE_INVALID;
 
-	// Combined multi-part operations are not planned in the current Phase 0â6 roadmap.
-	// Track as a future enhancement: https://github.com/pqctoday/softhsmv3/issues
-	return CKR_FUNCTION_NOT_SUPPORTED;
+	AsymmetricAlgorithm* asymVerify = session->getAsymmetricCryptoOp();
+	SymmetricAlgorithm* cipher = session->getSymmetricCryptoOp();
+	if (asymVerify == NULL || cipher == NULL || !session->getAllowMultiPartOp())
+		return CKR_OPERATION_NOT_INITIALIZED;
+
+	// Decrypt half (two-call convention preserved).
+	CK_RV rv = symDecryptUpdateRaw(session, pEncryptedPart, ulEncryptedPartLen, pPart, pulPartLen);
+	if (rv != CKR_OK) return rv;
+	if (pPart == NULL_PTR) return CKR_OK;  // size query - verifier untouched
+
+	// Verify half: feed the recovered plaintext exactly once.
+	ByteString plain(pPart, *pulPartLen);
+	if (!asymVerify->verifyUpdate(plain))
+	{
+		session->resetOp();
+		return CKR_GENERAL_ERROR;
+	}
+	session->setAllowSinglePartOp(false);
+	return CKR_OK;
 }
 
 

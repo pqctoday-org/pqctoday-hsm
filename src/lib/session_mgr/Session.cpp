@@ -213,17 +213,24 @@ void Session::resetOp()
 		paramLen = 0;
 	}
 
+	// Each crypto-context member is released independently rather than via an
+	// else-if chain, because a §5.13 dual-function operation keeps two contexts
+	// live at once (e.g. a digest op plus a symmetric-cipher op). The old
+	// else-if chain would free only the first non-NULL context and leak the
+	// rest. findOp remains exclusive — it never coexists with a crypto context.
+	if (findOp != NULL)
+	{
+		findOp->recycle();
+		findOp = NULL;
+	}
+
 	if (digestOp != NULL)
 	{
 		CryptoFactory::i()->recycleHashAlgorithm(digestOp);
 		digestOp = NULL;
 	}
-	else if (findOp != NULL)
-	{
-		findOp->recycle();
-		findOp = NULL;
-	}
-	else if (asymmetricCryptoOp != NULL)
+
+	if (asymmetricCryptoOp != NULL)
 	{
 		if (publicKey != NULL)
 		{
@@ -238,7 +245,11 @@ void Session::resetOp()
 		CryptoFactory::i()->recycleAsymmetricAlgorithm(asymmetricCryptoOp);
 		asymmetricCryptoOp = NULL;
 	}
-	else if (symmetricCryptoOp != NULL)
+
+	// symmetricKey is shared between a symmetric-cipher op and a MAC op, but a
+	// dual-function pairing never combines those two families, so exactly one
+	// owner recycles it.
+	if (symmetricCryptoOp != NULL)
 	{
 		if (symmetricKey != NULL)
 		{
@@ -248,7 +259,8 @@ void Session::resetOp()
 		CryptoFactory::i()->recycleSymmetricAlgorithm(symmetricCryptoOp);
 		symmetricCryptoOp = NULL;
 	}
-	else if (macOp != NULL)
+
+	if (macOp != NULL)
 	{
 		if (symmetricKey != NULL)
 		{
@@ -261,6 +273,98 @@ void Session::resetOp()
 
 	operation = SESSION_OP_NONE;
 	reAuthentication = false;
+}
+
+// Release only the crypto context(s) for one operation family. During a §5.13
+// dual-function operation two contexts are live at once; the *Final functions
+// call this so finishing one half leaves the other half intact for its own
+// Final. After releasing the requested family, operation is set to the
+// surviving family if one remains, else SESSION_OP_NONE — matching the
+// single-op resetOp() contract when there is no dual partner.
+void Session::endOpFamily(int family)
+{
+	switch (family)
+	{
+		case SESSION_OP_DIGEST:
+			if (digestOp != NULL)
+			{
+				CryptoFactory::i()->recycleHashAlgorithm(digestOp);
+				digestOp = NULL;
+			}
+			break;
+
+		case SESSION_OP_ENCRYPT:
+		case SESSION_OP_DECRYPT:
+			// Symmetric ciphers own symmetricCryptoOp (+ symmetricKey); asym
+			// ciphers own asymmetricCryptoOp (+ its keys). A dual op only ever
+			// pairs a symmetric cipher with a digest/sign/verify half, but
+			// release whichever cipher context is live for completeness.
+			if (symmetricCryptoOp != NULL)
+			{
+				if (symmetricKey != NULL)
+				{
+					symmetricCryptoOp->recycleKey(symmetricKey);
+					symmetricKey = NULL;
+				}
+				CryptoFactory::i()->recycleSymmetricAlgorithm(symmetricCryptoOp);
+				symmetricCryptoOp = NULL;
+			}
+			else if (asymmetricCryptoOp != NULL)
+			{
+				if (publicKey != NULL)  { asymmetricCryptoOp->recyclePublicKey(publicKey);  publicKey = NULL; }
+				if (privateKey != NULL) { asymmetricCryptoOp->recyclePrivateKey(privateKey); privateKey = NULL; }
+				CryptoFactory::i()->recycleAsymmetricAlgorithm(asymmetricCryptoOp);
+				asymmetricCryptoOp = NULL;
+			}
+			break;
+
+		case SESSION_OP_SIGN:
+		case SESSION_OP_VERIFY:
+			// Asymmetric signer/verifier owns asymmetricCryptoOp (+ keys); an
+			// HMAC signer owns macOp (+ symmetricKey). Dual ops only use the
+			// asymmetric variant, but handle both.
+			if (asymmetricCryptoOp != NULL)
+			{
+				if (publicKey != NULL)  { asymmetricCryptoOp->recyclePublicKey(publicKey);  publicKey = NULL; }
+				if (privateKey != NULL) { asymmetricCryptoOp->recyclePrivateKey(privateKey); privateKey = NULL; }
+				CryptoFactory::i()->recycleAsymmetricAlgorithm(asymmetricCryptoOp);
+				asymmetricCryptoOp = NULL;
+			}
+			else if (macOp != NULL)
+			{
+				if (symmetricKey != NULL)
+				{
+					macOp->recycleKey(symmetricKey);
+					symmetricKey = NULL;
+				}
+				CryptoFactory::i()->recycleMacAlgorithm(macOp);
+				macOp = NULL;
+			}
+			break;
+
+		default:
+			// Unknown family: fall back to a full reset.
+			resetOp();
+			return;
+	}
+
+	// If no crypto context remains live the operation is fully done; clear the
+	// slate exactly like resetOp(). Otherwise a dual partner survives — leave
+	// operation as-is; the partner's *Final accepts the call on the basis of
+	// its context being non-NULL (see the relaxed guards in SoftHSM_*).
+	if (digestOp == NULL && symmetricCryptoOp == NULL && asymmetricCryptoOp == NULL && macOp == NULL)
+	{
+		msgBuffer.wipe();
+		if (param != NULL)
+		{
+			memset(param, 0, paramLen);
+			free(param);
+			param = NULL;
+			paramLen = 0;
+		}
+		operation = SESSION_OP_NONE;
+		reAuthentication = false;
+	}
 }
 
 void Session::setFindOp(FindOperation *inFindOp)

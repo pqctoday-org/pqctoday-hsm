@@ -111,8 +111,10 @@ CK_RV SoftHSM::SymEncryptInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 
 	std::shared_ptr<Session> sessionGuard;
 	Session* session; Token* token; OSObject* key;
+	// SESSION_OP_ENCRYPT lets an Encrypt init pair with an already-active
+	// Digest/Sign op for C_DigestEncryptUpdate / C_SignEncryptUpdate (§5.13).
 	CK_RV rv = acquireSessionTokenKey(hSession, hKey, CKA_ENCRYPT, pMechanism,
-	                                   sessionGuard, session, token, key);
+	                                   sessionGuard, session, token, key, SESSION_OP_ENCRYPT);
 	if (rv != CKR_OK) return rv;
 
 	// Get key info
@@ -326,8 +328,10 @@ CK_RV SoftHSM::AsymEncryptInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMec
 
 	std::shared_ptr<Session> sessionGuard;
 	Session* session; Token* token; OSObject* key;
+	// SESSION_OP_ENCRYPT lets an Encrypt init pair with an already-active
+	// Digest/Sign op for C_DigestEncryptUpdate / C_SignEncryptUpdate (§5.13).
 	CK_RV rv = acquireSessionTokenKey(hSession, hKey, CKA_ENCRYPT, pMechanism,
-	                                   sessionGuard, session, token, key);
+	                                   sessionGuard, session, token, key, SESSION_OP_ENCRYPT);
 	if (rv != CKR_OK) return rv;
 
 	// Get key info
@@ -594,8 +598,10 @@ CK_RV SoftHSM::C_Encrypt(CK_SESSION_HANDLE hSession, CK_BYTE_PTR pData, CK_ULONG
 				   pEncryptedData, pulEncryptedDataLen);
 }
 
-// SymAlgorithm version of C_EncryptUpdate
-static CK_RV SymEncryptUpdate(Session* session, CK_BYTE_PTR pData, CK_ULONG ulDataLen, CK_BYTE_PTR pEncryptedData, CK_ULONG_PTR pulEncryptedDataLen)
+// SymAlgorithm version of C_EncryptUpdate. Shared with the §5.13 dual-function
+// updates via SoftHSM::symEncryptUpdateRaw — it inspects only the symmetric
+// cipher context, never the session op type.
+CK_RV SoftHSM::symEncryptUpdateRaw(Session* session, CK_BYTE_PTR pData, CK_ULONG ulDataLen, CK_BYTE_PTR pEncryptedData, CK_ULONG_PTR pulEncryptedDataLen)
 {
 	SymmetricAlgorithm* cipher = session->getSymmetricCryptoOp();
 	if (cipher == NULL || !session->getAllowMultiPartOp())
@@ -698,7 +704,7 @@ CK_RV SoftHSM::C_EncryptUpdate(CK_SESSION_HANDLE hSession, CK_BYTE_PTR pData, CK
 		return CKR_OPERATION_NOT_INITIALIZED;
 
 	if (session->getSymmetricCryptoOp() != NULL)
-		return SymEncryptUpdate(session, pData, ulDataLen,
+		return symEncryptUpdateRaw(session, pData, ulDataLen,
 				  pEncryptedData, pulEncryptedDataLen);
 	else
 		return CKR_FUNCTION_NOT_SUPPORTED;
@@ -773,7 +779,8 @@ static CK_RV SymEncryptFinal(Session* session, CK_BYTE_PTR pEncryptedData, CK_UL
 	}
 	*pulEncryptedDataLen = encryptedFinal.size();
 
-	session->resetOp();
+	// Release only the encrypt half; a dual digest/sign partner (if any) survives.
+	session->endOpFamily(SESSION_OP_ENCRYPT);
 	return CKR_OK;
 }
 
@@ -794,8 +801,11 @@ CK_RV SoftHSM::C_EncryptFinal(CK_SESSION_HANDLE hSession, CK_BYTE_PTR pEncrypted
 		return CKR_ARGUMENTS_BAD;
 	}
 
-	// Check if we are doing the correct operation
-	if (session->getOpType() != SESSION_OP_ENCRYPT) return CKR_OPERATION_NOT_INITIALIZED;
+	// Accept a standalone encrypt op or the encrypt half of a §5.13 dual-function
+	// op (a digest/sign partner may have been finalised first, leaving op no
+	// longer == SESSION_OP_ENCRYPT while the cipher context is still live).
+	if (session->getOpType() != SESSION_OP_ENCRYPT && session->getSymmetricCryptoOp() == NULL)
+		return CKR_OPERATION_NOT_INITIALIZED;
 
 	if (session->getSymmetricCryptoOp() != NULL)
 		return SymEncryptFinal(session, pEncryptedData, pulEncryptedDataLen);
@@ -812,8 +822,10 @@ CK_RV SoftHSM::SymDecryptInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 
 	std::shared_ptr<Session> sessionGuard;
 	Session* session; Token* token; OSObject* key;
+	// SESSION_OP_DECRYPT lets a Decrypt init pair with an already-active
+	// Digest/Verify op for C_DecryptDigestUpdate / C_DecryptVerifyUpdate (§5.13).
 	CK_RV rv = acquireSessionTokenKey(hSession, hKey, CKA_DECRYPT, pMechanism,
-	                                   sessionGuard, session, token, key);
+	                                   sessionGuard, session, token, key, SESSION_OP_DECRYPT);
 	if (rv != CKR_OK) return rv;
 
 	// Get key info
@@ -1026,8 +1038,10 @@ CK_RV SoftHSM::AsymDecryptInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMec
 
 	std::shared_ptr<Session> sessionGuard;
 	Session* session; Token* token; OSObject* key;
+	// SESSION_OP_DECRYPT lets a Decrypt init pair with an already-active
+	// Digest/Verify op for C_DecryptDigestUpdate / C_DecryptVerifyUpdate (§5.13).
 	CK_RV rv = acquireSessionTokenKey(hSession, hKey, CKA_DECRYPT, pMechanism,
-	                                   sessionGuard, session, token, key);
+	                                   sessionGuard, session, token, key, SESSION_OP_DECRYPT);
 	if (rv != CKR_OK) return rv;
 
 	// Get key info
@@ -1295,7 +1309,10 @@ CK_RV SoftHSM::C_Decrypt(CK_SESSION_HANDLE hSession, CK_BYTE_PTR pEncryptedData,
 }
 
 // SymAlgorithm version of C_DecryptUpdate
-static CK_RV SymDecryptUpdate(Session* session, CK_BYTE_PTR pEncryptedData, CK_ULONG ulEncryptedDataLen, CK_BYTE_PTR pData, CK_ULONG_PTR pDataLen)
+// SymAlgorithm version of C_DecryptUpdate. Shared with the §5.13 dual-function
+// updates via SoftHSM::symDecryptUpdateRaw — it inspects only the symmetric
+// cipher context, never the session op type.
+CK_RV SoftHSM::symDecryptUpdateRaw(Session* session, CK_BYTE_PTR pEncryptedData, CK_ULONG ulEncryptedDataLen, CK_BYTE_PTR pData, CK_ULONG_PTR pDataLen)
 {
 	SymmetricAlgorithm* cipher = session->getSymmetricCryptoOp();
 	if (cipher == NULL || !session->getAllowMultiPartOp())
@@ -1402,7 +1419,7 @@ CK_RV SoftHSM::C_DecryptUpdate(CK_SESSION_HANDLE hSession, CK_BYTE_PTR pEncrypte
 		return CKR_OPERATION_NOT_INITIALIZED;
 
 	if (session->getSymmetricCryptoOp() != NULL)
-		return SymDecryptUpdate(session, pEncryptedData, ulEncryptedDataLen,
+		return symDecryptUpdateRaw(session, pEncryptedData, ulEncryptedDataLen,
 				  pData, pDataLen);
 	else
 		return CKR_FUNCTION_NOT_SUPPORTED;
@@ -1476,7 +1493,8 @@ static CK_RV SymDecryptFinal(Session* session, CK_BYTE_PTR pDecryptedData, CK_UL
 	}
 	*pulDecryptedDataLen = decryptedFinal.size();
 
-	session->resetOp();
+	// Release only the decrypt half; a dual digest/verify partner (if any) survives.
+	session->endOpFamily(SESSION_OP_DECRYPT);
 	return CKR_OK;
 }
 
@@ -1497,8 +1515,10 @@ CK_RV SoftHSM::C_DecryptFinal(CK_SESSION_HANDLE hSession, CK_BYTE_PTR pData, CK_
 		return CKR_ARGUMENTS_BAD;
 	}
 
-	// Check if we are doing the correct operation
-	if (session->getOpType() != SESSION_OP_DECRYPT) return CKR_OPERATION_NOT_INITIALIZED;
+	// Accept a standalone decrypt op or the decrypt half of a §5.13 dual-function
+	// op (its digest/verify partner may have been finalised first).
+	if (session->getOpType() != SESSION_OP_DECRYPT && session->getSymmetricCryptoOp() == NULL)
+		return CKR_OPERATION_NOT_INITIALIZED;
 
 	if (session->getSymmetricCryptoOp() != NULL)
 		return SymDecryptFinal(session, pData, pDataLen);

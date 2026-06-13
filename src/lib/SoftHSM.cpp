@@ -106,24 +106,55 @@
 // Session acquisition helpers (H2)
 // ---------------------------------------------------------------------------
 
+// Returns true when initialising newOp is permitted while activeOp is already
+// running, because the two together form one of the four §5.13 dual-function
+// pairings: Digest+Encrypt, Decrypt+Digest, Sign+Encrypt, Decrypt+Verify.
+// Any other combination (notably a second op of the same family) is rejected,
+// preserving the strict single-op CKR_OPERATION_ACTIVE contract.
+bool SoftHSM::isComplementaryDualOp(int activeOp, int newOp)
+{
+	switch (activeOp)
+	{
+		case SESSION_OP_DIGEST:
+			// C_DigestInit already done → allow Encrypt or Decrypt init.
+			return newOp == SESSION_OP_ENCRYPT || newOp == SESSION_OP_DECRYPT;
+		case SESSION_OP_SIGN:
+			return newOp == SESSION_OP_ENCRYPT;
+		case SESSION_OP_VERIFY:
+			return newOp == SESSION_OP_DECRYPT;
+		case SESSION_OP_ENCRYPT:
+			// Cipher init already done → allow the digest/sign companion.
+			return newOp == SESSION_OP_DIGEST || newOp == SESSION_OP_SIGN;
+		case SESSION_OP_DECRYPT:
+			return newOp == SESSION_OP_DIGEST || newOp == SESSION_OP_VERIFY;
+		default:
+			return false;
+	}
+}
+
 CK_RV SoftHSM::acquireSession(CK_SESSION_HANDLE hSession,
                                std::shared_ptr<Session>& outGuard,
-                               Session*& outSession)
+                               Session*& outSession,
+                               int incomingOp)
 {
 	if (!isInitialised) return CKR_CRYPTOKI_NOT_INITIALIZED;
 	outGuard   = handleManager->getSessionShared(hSession);
 	outSession = outGuard.get();
 	if (outSession == NULL) return CKR_SESSION_HANDLE_INVALID;
-	if (outSession->getOpType() != SESSION_OP_NONE) return CKR_OPERATION_ACTIVE;
+	int activeOp = outSession->getOpType();
+	if (activeOp != SESSION_OP_NONE &&
+	    !(incomingOp != SESSION_OP_NONE && isComplementaryDualOp(activeOp, incomingOp)))
+		return CKR_OPERATION_ACTIVE;
 	return CKR_OK;
 }
 
 CK_RV SoftHSM::acquireSessionToken(CK_SESSION_HANDLE hSession,
                                     std::shared_ptr<Session>& outGuard,
                                     Session*& outSession,
-                                    Token*& outToken)
+                                    Token*& outToken,
+                                    int incomingOp)
 {
-	CK_RV rv = acquireSession(hSession, outGuard, outSession);
+	CK_RV rv = acquireSession(hSession, outGuard, outSession, incomingOp);
 	if (rv != CKR_OK) return rv;
 	outToken = outSession->getToken();
 	if (outToken == NULL) return CKR_GENERAL_ERROR;
@@ -137,9 +168,10 @@ CK_RV SoftHSM::acquireSessionTokenKey(CK_SESSION_HANDLE hSession,
                                        std::shared_ptr<Session>& outGuard,
                                        Session*& outSession,
                                        Token*& outToken,
-                                       OSObject*& outKey)
+                                       OSObject*& outKey,
+                                       int incomingOp)
 {
-	CK_RV rv = acquireSessionToken(hSession, outGuard, outSession, outToken);
+	CK_RV rv = acquireSessionToken(hSession, outGuard, outSession, outToken, incomingOp);
 	if (rv != CKR_OK) return rv;
 	outKey = (OSObject*)handleManager->getObject(hKey);
 	if (outKey == NULL_PTR || !outKey->isValid()) return CKR_OBJECT_HANDLE_INVALID;

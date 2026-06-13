@@ -91,6 +91,15 @@ public:
 	void setOpType(int inOperation);
 	void resetOp();
 
+	// Release only the crypto contexts belonging to one operation family
+	// (one of SESSION_OP_DIGEST / _ENCRYPT / _DECRYPT / _SIGN / _VERIFY).
+	// Used by the *Final functions so that, during a §5.13 dual-function
+	// operation, finishing one half does not tear down the other half that
+	// the caller still needs to finalise. When no complementary context
+	// remains live this is equivalent to resetOp() (operation → NONE);
+	// otherwise operation is left pointing at the surviving family.
+	void endOpFamily(int family);
+
 	// Find
 	void setFindOp(FindOperation *inFindOp);
 	FindOperation *getFindOp();

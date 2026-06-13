@@ -528,16 +528,23 @@ private:
 	// across ~76 C_* functions.  outGuard must outlive the raw pointer it guards;
 	// always declare it before outSession/outToken/outKey at each call site.
 	// -------------------------------------------------------------------------
+	// incomingOp identifies the operation being initialised. When it is the
+	// complementary half of an already-active dual-function pairing (§5.13,
+	// e.g. an Encrypt init while a Digest op is active) the otherwise-fatal
+	// CKR_OPERATION_ACTIVE guard is relaxed so the two ops can coexist.
+	// SESSION_OP_NONE (the default) keeps the strict single-op behaviour.
 	CK_RV acquireSession(
 		CK_SESSION_HANDLE           hSession,
 		std::shared_ptr<Session>&   outGuard,
-		Session*&                   outSession);
+		Session*&                   outSession,
+		int                         incomingOp = SESSION_OP_NONE);
 
 	CK_RV acquireSessionToken(
 		CK_SESSION_HANDLE           hSession,
 		std::shared_ptr<Session>&   outGuard,
 		Session*&                   outSession,
-		Token*&                     outToken);
+		Token*&                     outToken,
+		int                         incomingOp = SESSION_OP_NONE);
 
 	CK_RV acquireSessionTokenKey(
 		CK_SESSION_HANDLE           hSession,
@@ -547,7 +554,20 @@ private:
 		std::shared_ptr<Session>&   outGuard,
 		Session*&                   outSession,
 		Token*&                     outToken,
-		OSObject*&                  outKey);
+		OSObject*&                  outKey,
+		int                         incomingOp = SESSION_OP_NONE);
+
+	// Returns true when an init of newOp may proceed even though activeOp is
+	// already running, because they form one of the four §5.13 dual pairings.
+	static bool isComplementaryDualOp(int activeOp, int newOp);
+
+	// Symmetric multi-part cipher primitives, shared between the single-op
+	// C_EncryptUpdate / C_DecryptUpdate paths and the §5.13 dual-function
+	// updates. They operate on the session's symmetric-cipher context only and
+	// do NOT check the session op type, so the dual ops can drive them while a
+	// digest/sign/verify op is the nominal active op.
+	static CK_RV symEncryptUpdateRaw(Session* session, CK_BYTE_PTR pData, CK_ULONG ulDataLen, CK_BYTE_PTR pEncryptedData, CK_ULONG_PTR pulEncryptedDataLen);
+	static CK_RV symDecryptUpdateRaw(Session* session, CK_BYTE_PTR pEncryptedData, CK_ULONG ulEncryptedDataLen, CK_BYTE_PTR pData, CK_ULONG_PTR pDataLen);
 
 	/// Recycles algorithm/key-pair objects and destroys both key handles if rv != CKR_OK.
 	void cleanupKeyPair(
