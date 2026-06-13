@@ -325,8 +325,9 @@ CK_RV SoftHSM::C_CopyObject(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject
 	Token* token = session->getToken();
 	if (token == NULL_PTR) return CKR_GENERAL_ERROR;
 
-	// Check the object handle.
-	OSObject *object = (OSObject *)handleManager->getObject(hObject);
+	// Check the object handle (§2.4: scoped to this session's slot — a handle minted
+	// on another token is not reachable here).
+	OSObject *object = (OSObject *)handleManager->getObject(hObject, slot->getSlotID());
 	if (object == NULL_PTR || !object->isValid()) return CKR_OBJECT_HANDLE_INVALID;
 
 	CK_BBOOL wasOnToken = object->getBooleanValue(CKA_TOKEN, false);
@@ -506,8 +507,8 @@ CK_RV SoftHSM::C_DestroyObject(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObj
 	Token* token = session->getToken();
 	if (token == NULL_PTR) return CKR_GENERAL_ERROR;
 
-	// Check the object handle.
-	OSObject *object = (OSObject *)handleManager->getObject(hObject);
+	// Check the object handle (§2.4: scoped to this session's slot).
+	OSObject *object = (OSObject *)handleManager->getObject(hObject, session->getSlot()->getSlotID());
 	if (object == NULL_PTR || !object->isValid()) return CKR_OBJECT_HANDLE_INVALID;
 
 	CK_BBOOL isOnToken = object->getBooleanValue(CKA_TOKEN, false);
@@ -555,8 +556,8 @@ CK_RV SoftHSM::C_GetObjectSize(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObj
 	Token* token = session->getToken();
 	if (token == NULL_PTR) return CKR_GENERAL_ERROR;
 
-	// Check the object handle.
-	OSObject *object = (OSObject *)handleManager->getObject(hObject);
+	// Check the object handle (§2.4: scoped to this session's slot).
+	OSObject *object = (OSObject *)handleManager->getObject(hObject, session->getSlot()->getSlotID());
 	if (object == NULL_PTR || !object->isValid()) return CKR_OBJECT_HANDLE_INVALID;
 
 	*pulSize = CK_UNAVAILABLE_INFORMATION;
@@ -580,8 +581,8 @@ CK_RV SoftHSM::C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE 
 	Token* token = session->getToken();
 	if (token == NULL) return CKR_GENERAL_ERROR;
 
-	// Check the object handle.
-	OSObject *object = (OSObject *)handleManager->getObject(hObject);
+	// Check the object handle (§2.4: scoped to this session's slot).
+	OSObject *object = (OSObject *)handleManager->getObject(hObject, session->getSlot()->getSlotID());
 	if (object == NULL_PTR || !object->isValid()) return CKR_OBJECT_HANDLE_INVALID;
 
 	CK_BBOOL isOnToken = object->getBooleanValue(CKA_TOKEN, false);
@@ -628,8 +629,8 @@ CK_RV SoftHSM::C_SetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE 
 	Token* token = session->getToken();
 	if (token == NULL) return CKR_GENERAL_ERROR;
 
-	// Check the object handle.
-	OSObject *object = (OSObject *)handleManager->getObject(hObject);
+	// Check the object handle (§2.4: scoped to this session's slot).
+	OSObject *object = (OSObject *)handleManager->getObject(hObject, session->getSlot()->getSlotID());
 	if (object == NULL_PTR || !object->isValid()) return CKR_OBJECT_HANDLE_INVALID;
 
 	CK_BBOOL isOnToken = object->getBooleanValue(CKA_TOKEN, false);

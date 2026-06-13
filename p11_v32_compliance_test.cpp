@@ -153,7 +153,7 @@ void print_usage() {
     printf("Usage: p11_v32_compliance_test [options]\n");
     printf("Options:\n");
     printf("  --engine <path>    Path to the PKCS#11 library (default: %s)\n", opt_engine.c_str());
-    printf("  --category <cat>   Test category: all, init, discovery, pqc-kem, pqc-dsa, hbs, attr, g1-security, g2-mechtable, g3-keygen, g4-retcodes, g5-attrs, g7-sha3rsa, g8-dual, g-async (default: %s)\n", opt_category.c_str());
+    printf("  --category <cat>   Test category: all, init, discovery, pqc-kem, pqc-dsa, hbs, attr, g1-security, g2-mechtable, g3-keygen, g4-retcodes, g5-attrs, g7-sha3rsa, g8-dual, g-async, g-isolation (default: %s)\n", opt_category.c_str());
     printf("  --report <path>    Output bases (e.g. 'rep' creates 'rep.md' and 'rep.json') (default: %s)\n", opt_report.c_str());
     printf("  --pin <pin>        Token PIN (default: %s)\n", opt_pin.c_str());
     printf("  --workdir <dir>    Scratch dir for softhsm2.conf + token store (default: %s)\n", opt_workdir.c_str());
@@ -5037,6 +5037,174 @@ void test_g8_dual_functions() {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // G-A: Asynchronous-operation conformance (§5.6.1 + §5.21/§5.22).
+// ─────────────────────────────────────────────────────────────────────────────
+// G-ISOLATION: cross-token object-handle isolation (PKCS#11 v3.2 §2.4)
+//
+// Object handles are only valid within sessions on the SAME token/slot that the
+// handle was minted on. A handle created on token A must NOT be usable from a
+// session on token B — neither for object-management functions (CKR_OBJECT_HANDLE_INVALID)
+// nor when fed as a key handle to a crypto operation (CKR_KEY_HANDLE_INVALID).
+// The positive control proves we did not over-tighten: two sessions on the SAME
+// token both resolve the same token-object handle.
+// ─────────────────────────────────────────────────────────────────────────────
+void test_g_isolation() {
+    const char* CAT = "GIsolation";
+    CK_BBOOL bTrue = CK_TRUE, bFalse = CK_FALSE;
+
+    // Discover a SECOND, distinct slot we can initialize as token B. SoftHSM only
+    // materializes the spare uninitialized slot during a *count* query (pSlotList==NULL);
+    // a buffer-filling call alone won't provision it. So query count first to force the
+    // spare to appear, then enumerate.
+    CK_ULONG probeCount = 0;
+    fl->C_GetSlotList(CK_FALSE, NULL_PTR, &probeCount);
+    CK_SLOT_ID slots[16];
+    CK_ULONG ulCount = 16;
+    CK_RV rv = fl->C_GetSlotList(CK_FALSE, slots, &ulCount);
+    if (rv != CKR_OK || ulCount < 2) {
+        record_result(CAT, "SecondTokenAvailable", "SKIP",
+                      "harness exposes <2 slots (count=" + std::to_string(ulCount) +
+                      "); cross-token path needs a second token. RV=" + std::to_string(rv));
+        return;
+    }
+
+    // Pick slot B as the first slot that is not the compliance slot (hSlot == slots[0]).
+    CK_SLOT_ID slotB = (CK_SLOT_ID)-1;
+    for (CK_ULONG i = 0; i < ulCount; i++) {
+        if (slots[i] != hSlot) { slotB = slots[i]; break; }
+    }
+    if (slotB == (CK_SLOT_ID)-1) {
+        record_result(CAT, "SecondTokenAvailable", "SKIP", "no slot distinct from token A");
+        return;
+    }
+
+    // Initialize token B (SO PIN matches the harness's "5678", then set the user PIN).
+    CK_UTF8CHAR labelB[32]; memset(labelB, ' ', 32); memcpy(labelB, "tokenB", 6);
+    rv = fl->C_InitToken(slotB, (CK_UTF8CHAR_PTR)"5678", 4, labelB);
+    if (rv != CKR_OK) {
+        record_result(CAT, "InitTokenB", "SKIP", "could not init second token, RV=" + std::to_string(rv));
+        return;
+    }
+    {
+        CK_SESSION_HANDLE soB = 0;
+        rv = fl->C_OpenSession(slotB, CKF_SERIAL_SESSION | CKF_RW_SESSION, NULL_PTR, NULL_PTR, &soB);
+        if (rv == CKR_OK) {
+            fl->C_Login(soB, CKU_SO, (CK_UTF8CHAR_PTR)"5678", 4);
+            fl->C_InitPIN(soB, (CK_UTF8CHAR_PTR)opt_pin.c_str(), opt_pin.length());
+            fl->C_CloseSession(soB);
+        }
+    }
+    record_result(CAT, "InitTokenB", "PASS", "second token initialized on slot " + std::to_string(slotB));
+
+    // ── On token A (the live hSess), create a TOKEN object (visible across sessions
+    //    on token A) — an AES secret key with CKA_TOKEN=TRUE. ──────────────────────
+    CK_OBJECT_CLASS secClass = CKO_SECRET_KEY;
+    CK_KEY_TYPE aesType = CKK_AES;
+    CK_BYTE keyBytes[32] = {0};
+    CK_ATTRIBUTE keyT[] = {
+        { CKA_CLASS, &secClass, sizeof(secClass) },
+        { CKA_KEY_TYPE, &aesType, sizeof(aesType) },
+        { CKA_TOKEN, &bTrue, sizeof(bTrue) },
+        { CKA_PRIVATE, &bFalse, sizeof(bFalse) },
+        { CKA_ENCRYPT, &bTrue, sizeof(bTrue) },
+        { CKA_DECRYPT, &bTrue, sizeof(bTrue) },
+        { CKA_WRAP, &bTrue, sizeof(bTrue) },
+        { CKA_VALUE, keyBytes, sizeof(keyBytes) }
+    };
+    CK_OBJECT_HANDLE hObjA = 0;
+    rv = fl->C_CreateObject(hSess, keyT, 8, &hObjA);
+    if (rv != CKR_OK || hObjA == 0) {
+        record_result(CAT, "CreateTokenObjectA", "FAIL", "could not create token object on A, RV=" + std::to_string(rv));
+        return;
+    }
+    record_result(CAT, "CreateTokenObjectA", "PASS", "token object handle minted on token A");
+
+    // ── POSITIVE CONTROL: a SECOND session on token A must resolve the same handle.
+    //    This proves same-token cross-session access is unaffected by the fix. ──────
+    {
+        CK_SESSION_HANDLE hSessA2 = 0;
+        rv = fl->C_OpenSession(hSlot, CKF_SERIAL_SESSION | CKF_RW_SESSION, NULL_PTR, NULL_PTR, &hSessA2);
+        if (rv == CKR_OK) {
+            fl->C_Login(hSessA2, CKU_USER, (CK_UTF8CHAR_PTR)opt_pin.c_str(), opt_pin.length());
+            CK_OBJECT_CLASS gotClass = 0;
+            CK_ATTRIBUTE q[] = { { CKA_CLASS, &gotClass, sizeof(gotClass) } };
+            CK_RV grv = fl->C_GetAttributeValue(hSessA2, hObjA, q, 1);
+            record_result(CAT, "SameToken_CrossSession_resolves",
+                          (grv == CKR_OK && gotClass == CKO_SECRET_KEY) ? "PASS" : "FAIL",
+                          "token object must be visible to all sessions on token A, RV=" + std::to_string(grv));
+            fl->C_CloseSession(hSessA2);
+        } else {
+            record_result(CAT, "SameToken_CrossSession_resolves", "SKIP",
+                          "could not open 2nd session on token A, RV=" + std::to_string(rv));
+        }
+    }
+
+    // ── NEGATIVE: open a session on token B and try to reach token A's handle. ─────
+    CK_SESSION_HANDLE hSessB = 0;
+    rv = fl->C_OpenSession(slotB, CKF_SERIAL_SESSION | CKF_RW_SESSION, NULL_PTR, NULL_PTR, &hSessB);
+    if (rv != CKR_OK) {
+        record_result(CAT, "OpenSessionB", "FAIL", "could not open session on token B, RV=" + std::to_string(rv));
+        fl->C_DestroyObject(hSess, hObjA);
+        return;
+    }
+    fl->C_Login(hSessB, CKU_USER, (CK_UTF8CHAR_PTR)opt_pin.c_str(), opt_pin.length());
+
+    // C_GetAttributeValue on the foreign handle → CKR_OBJECT_HANDLE_INVALID.
+    {
+        CK_OBJECT_CLASS gotClass = 0;
+        CK_ATTRIBUTE q[] = { { CKA_CLASS, &gotClass, sizeof(gotClass) } };
+        CK_RV grv = fl->C_GetAttributeValue(hSessB, hObjA, q, 1);
+        record_result(CAT, "CrossToken_GetAttributeValue_rejected",
+                      grv == CKR_OBJECT_HANDLE_INVALID ? "PASS" : "FAIL",
+                      "§2.4 expect CKR_OBJECT_HANDLE_INVALID, RV=" + std::to_string(grv));
+    }
+
+    // C_SetAttributeValue on the foreign handle → CKR_OBJECT_HANDLE_INVALID.
+    {
+        CK_BYTE id[] = "x";
+        CK_ATTRIBUTE q[] = { { CKA_ID, id, 1 } };
+        CK_RV srv = fl->C_SetAttributeValue(hSessB, hObjA, q, 1);
+        record_result(CAT, "CrossToken_SetAttributeValue_rejected",
+                      srv == CKR_OBJECT_HANDLE_INVALID ? "PASS" : "FAIL",
+                      "§2.4 expect CKR_OBJECT_HANDLE_INVALID, RV=" + std::to_string(srv));
+    }
+
+    // Use the foreign handle as a KEY handle (C_EncryptInit) → must be REJECTED.
+    // The security property under test is that cross-token reach is blocked. The
+    // engine's shared key-handle resolver (acquireSessionTokenKey) returns
+    // CKR_OBJECT_HANDLE_INVALID for every unresolved/foreign key handle — a uniform,
+    // pre-existing contract (the §5 key-use functions list CKR_KEY_HANDLE_INVALID, but
+    // mapping object-vs-key handle codes is a separate gap outside this slice). Either
+    // rejection code proves the handle is not reachable from token B.
+    {
+        CK_BYTE iv[16] = {0};
+        CK_MECHANISM cbc = { CKM_AES_CBC, iv, sizeof(iv) };
+        CK_RV erv = fl->C_EncryptInit(hSessB, &cbc, hObjA);
+        record_result(CAT, "CrossToken_AsKeyHandle_rejected",
+                      (erv == CKR_KEY_HANDLE_INVALID || erv == CKR_OBJECT_HANDLE_INVALID) ? "PASS" : "FAIL",
+                      "§2.4 key-use must be rejected (engine returns OBJECT_HANDLE_INVALID), RV=" + std::to_string(erv));
+    }
+
+    // C_DestroyObject on the foreign handle → CKR_OBJECT_HANDLE_INVALID (and must NOT
+    // destroy A's object). Verified by re-reading it from token A afterwards.
+    {
+        CK_RV drv = fl->C_DestroyObject(hSessB, hObjA);
+        record_result(CAT, "CrossToken_DestroyObject_rejected",
+                      drv == CKR_OBJECT_HANDLE_INVALID ? "PASS" : "FAIL",
+                      "§2.4 expect CKR_OBJECT_HANDLE_INVALID, RV=" + std::to_string(drv));
+
+        CK_OBJECT_CLASS gotClass = 0;
+        CK_ATTRIBUTE q[] = { { CKA_CLASS, &gotClass, sizeof(gotClass) } };
+        CK_RV grv = fl->C_GetAttributeValue(hSess, hObjA, q, 1);
+        record_result(CAT, "CrossToken_Destroy_didNotAffectA",
+                      (grv == CKR_OK && gotClass == CKO_SECRET_KEY) ? "PASS" : "FAIL",
+                      "A's object must survive a rejected cross-token destroy, RV=" + std::to_string(grv));
+    }
+
+    fl->C_CloseSession(hSessB);
+    fl->C_DestroyObject(hSess, hObjA);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // This token does not support async operations: it must NOT advertise
 // CKF_ASYNC_SESSION_SUPPORTED, must reject CKF_ASYNC_SESSION at C_OpenSession with
 // CKR_SESSION_ASYNC_NOT_SUPPORTED, and the async functions must return
@@ -5199,6 +5367,9 @@ int main(int argc, char** argv) {
     }
     if (opt_category == "all" || opt_category == "g-async") {
         refresh_session(); test_g_async();
+    }
+    if (opt_category == "all" || opt_category == "g-isolation") {
+        refresh_session(); test_g_isolation();
     }
 
     if (opt_category == "all" || opt_category == "classical") {

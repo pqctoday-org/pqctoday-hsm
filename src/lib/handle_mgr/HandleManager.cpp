@@ -174,6 +174,21 @@ CK_VOID_PTR HandleManager::getObject(const CK_OBJECT_HANDLE hObject)
 	return it->second.object;
 }
 
+// Slot-scoped resolution (PKCS#11 v3.2 §2.4). Identical to getObject() but additionally
+// rejects handles whose owning slot differs from the calling session's slot — a handle
+// minted on token A and presented from a session on token B resolves to NULL_PTR, so the
+// caller reports CKR_OBJECT_HANDLE_INVALID / CKR_KEY_HANDLE_INVALID. Token objects carry
+// their token's slotID, so all sessions on that same token still resolve them.
+CK_VOID_PTR HandleManager::getObject(const CK_OBJECT_HANDLE hObject, CK_SLOT_ID slotID)
+{
+	MutexLocker lock(handlesMutex);
+
+	std::map< CK_ULONG, Handle>::iterator it = handles.find(hObject);
+	if (it == handles.end() || CKH_OBJECT != it->second.kind || slotID != it->second.slotID)
+		return NULL_PTR;
+	return it->second.object;
+}
+
 CK_OBJECT_HANDLE HandleManager::getObjectHandle(CK_VOID_PTR object)
 {
 	MutexLocker lock(handlesMutex);

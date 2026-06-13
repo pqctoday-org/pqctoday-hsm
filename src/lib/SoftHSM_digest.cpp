@@ -241,8 +241,8 @@ CK_RV SoftHSM::C_DigestKey(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject)
 	Token* token = session->getToken();
 	if (token == NULL) return CKR_GENERAL_ERROR;
 
-	// Check the key handle.
-	OSObject *key = (OSObject *)handleManager->getObject(hObject);
+	// Check the key handle (§2.4: scoped to this session's slot).
+	OSObject *key = (OSObject *)handleManager->getObject(hObject, session->getSlot()->getSlotID());
 	if (key == NULL_PTR || !key->isValid()) return CKR_KEY_HANDLE_INVALID;
 
 	CK_BBOOL isOnToken = key->getBooleanValue(CKA_TOKEN, false);
