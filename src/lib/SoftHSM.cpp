@@ -173,7 +173,9 @@ CK_RV SoftHSM::acquireSessionTokenKey(CK_SESSION_HANDLE hSession,
 {
 	CK_RV rv = acquireSessionToken(hSession, outGuard, outSession, outToken, incomingOp);
 	if (rv != CKR_OK) return rv;
-	outKey = (OSObject*)handleManager->getObject(hKey);
+	// §2.4: resolve the key handle scoped to the calling session's slot — a handle minted
+	// on another token must not be reachable here (cross-token reach -> handle invalid).
+	outKey = (OSObject*)handleManager->getObject(hKey, outSession->getSlot()->getSlotID());
 	if (outKey == NULL_PTR || !outKey->isValid()) return CKR_OBJECT_HANDLE_INVALID;
 	CK_BBOOL isOnToken = outKey->getBooleanValue(CKA_TOKEN,   false);
 	CK_BBOOL isPrivate = outKey->getBooleanValue(CKA_PRIVATE, true);

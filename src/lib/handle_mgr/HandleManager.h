@@ -73,6 +73,15 @@ public:
     // Get the object pointer associated with the given object handle.
     CK_VOID_PTR getObject(const CK_OBJECT_HANDLE hObject);
 
+    // Slot-scoped resolution (PKCS#11 v3.2 §2.4): object handles are only valid
+    // within sessions on the SAME token/slot that the handle was minted on. When the
+    // handle's owning slot does not match the calling session's slot, returns NULL_PTR
+    // so the caller reports CKR_OBJECT_HANDLE_INVALID / CKR_KEY_HANDLE_INVALID — this
+    // blocks cross-token handle reach. Token objects remain visible to every session on
+    // the same token (their handle carries that token's slotID), so legitimate same-token
+    // cross-session access is unaffected.
+    CK_VOID_PTR getObject(const CK_OBJECT_HANDLE hObject, CK_SLOT_ID slotID);
+
     // Get the object handle for the object pointer that has been previously registered.
     // When the object is not found CK_INVALID_HANDLE is returned.
     CK_OBJECT_HANDLE getObjectHandle(CK_VOID_PTR object);

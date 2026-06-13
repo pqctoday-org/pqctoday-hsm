@@ -1280,8 +1280,8 @@ CK_RV SoftHSM::C_WrapKey
 	Token* token = session->getToken();
 	if (token == NULL) return CKR_GENERAL_ERROR;
 
-	// Check the wrapping key handle.
-	OSObject *wrapKey = (OSObject *)handleManager->getObject(hWrappingKey);
+	// Check the wrapping key handle (§2.4: scoped to this session's slot).
+	OSObject *wrapKey = (OSObject *)handleManager->getObject(hWrappingKey, session->getSlot()->getSlotID());
 	if (wrapKey == NULL_PTR || !wrapKey->isValid()) return CKR_WRAPPING_KEY_HANDLE_INVALID;
 
 	CK_BBOOL isWrapKeyOnToken = wrapKey->getBooleanValue(CKA_TOKEN, false);
@@ -1320,8 +1320,8 @@ CK_RV SoftHSM::C_WrapKey
 	if (!isMechanismPermitted(wrapKey, pMechanism->mechanism))
 		return CKR_MECHANISM_INVALID;
 
-	// Check the to be wrapped key handle.
-	OSObject *key = (OSObject *)handleManager->getObject(hKey);
+	// Check the to be wrapped key handle (§2.4: scoped to this session's slot).
+	OSObject *key = (OSObject *)handleManager->getObject(hKey, session->getSlot()->getSlotID());
 	if (key == NULL_PTR || !key->isValid()) return CKR_KEY_HANDLE_INVALID;
 
 	CK_BBOOL isKeyOnToken = key->getBooleanValue(CKA_TOKEN, false);
@@ -1914,8 +1914,8 @@ CK_RV SoftHSM::C_UnwrapKey
 	Token* token = session->getToken();
 	if (token == NULL) return CKR_GENERAL_ERROR;
 
-	// Check the unwrapping key handle.
-	OSObject *unwrapKey = (OSObject *)handleManager->getObject(hUnwrappingKey);
+	// Check the unwrapping key handle (§2.4: scoped to this session's slot).
+	OSObject *unwrapKey = (OSObject *)handleManager->getObject(hUnwrappingKey, session->getSlot()->getSlotID());
 	if (unwrapKey == NULL_PTR || !unwrapKey->isValid()) return CKR_UNWRAPPING_KEY_HANDLE_INVALID;
 
 	CK_BBOOL isUnwrapKeyOnToken = unwrapKey->getBooleanValue(CKA_TOKEN, false);
@@ -2228,8 +2228,8 @@ CK_RV SoftHSM::C_WrapKeyAuthenticated
 	Token* token = session->getToken();
 	if (token == NULL) return CKR_GENERAL_ERROR;
 
-	// Validate wrapping key
-	OSObject* wrapKey = (OSObject*)handleManager->getObject(hWrappingKey);
+	// Validate wrapping key (§2.4: scoped to this session's slot).
+	OSObject* wrapKey = (OSObject*)handleManager->getObject(hWrappingKey, session->getSlot()->getSlotID());
 	if (wrapKey == NULL_PTR || !wrapKey->isValid()) return CKR_WRAPPING_KEY_HANDLE_INVALID;
 	if (wrapKey->getUnsignedLongValue(CKA_CLASS, CKO_VENDOR_DEFINED) != CKO_SECRET_KEY)
 		return CKR_WRAPPING_KEY_TYPE_INCONSISTENT;
@@ -2244,8 +2244,8 @@ CK_RV SoftHSM::C_WrapKeyAuthenticated
 		if (rv2 != CKR_OK) return rv2;
 	}
 
-	// Validate key-to-be-wrapped
-	OSObject* key = (OSObject*)handleManager->getObject(hKey);
+	// Validate key-to-be-wrapped (§2.4: scoped to this session's slot).
+	OSObject* key = (OSObject*)handleManager->getObject(hKey, session->getSlot()->getSlotID());
 	if (key == NULL_PTR || !key->isValid()) return CKR_KEY_HANDLE_INVALID;
 	{
 		CK_OBJECT_CLASS kc = key->getUnsignedLongValue(CKA_CLASS, CKO_VENDOR_DEFINED);
@@ -2369,8 +2369,8 @@ CK_RV SoftHSM::C_UnwrapKeyAuthenticated
 	Token* token = session->getToken();
 	if (token == NULL) return CKR_GENERAL_ERROR;
 
-	// Validate unwrapping key
-	OSObject* unwrapKey = (OSObject*)handleManager->getObject(hUnwrappingKey);
+	// Validate unwrapping key (§2.4: scoped to this session's slot).
+	OSObject* unwrapKey = (OSObject*)handleManager->getObject(hUnwrappingKey, session->getSlot()->getSlotID());
 	if (unwrapKey == NULL_PTR || !unwrapKey->isValid()) return CKR_UNWRAPPING_KEY_HANDLE_INVALID;
 	if (unwrapKey->getUnsignedLongValue(CKA_CLASS, CKO_VENDOR_DEFINED) != CKO_SECRET_KEY)
 		return CKR_UNWRAPPING_KEY_TYPE_INCONSISTENT;
@@ -2760,10 +2760,10 @@ CK_RV SoftHSM::C_DeriveKey
 	Token* token = session->getToken();
 	if (token == NULL) return CKR_GENERAL_ERROR;
 
-	// Check the key handle.
+	// Check the key handle (§2.4: scoped to this session's slot).
 	// GAP 6.5: an invalid base key handle is CKR_KEY_HANDLE_INVALID per the
 	// C_DeriveKey return-code list, not CKR_OBJECT_HANDLE_INVALID.
-	OSObject *key = (OSObject *)handleManager->getObject(hBaseKey);
+	OSObject *key = (OSObject *)handleManager->getObject(hBaseKey, session->getSlot()->getSlotID());
 	if (key == NULL_PTR || !key->isValid()) return CKR_KEY_HANDLE_INVALID;
 
 	CK_BBOOL isKeyOnToken = key->getBooleanValue(CKA_TOKEN, false);
@@ -5466,8 +5466,8 @@ CK_RV SoftHSM::deriveECDH
 			return CKR_ATTRIBUTE_VALUE_INVALID;
 	}
 
-	// Get the base key handle
-	OSObject *baseKey = (OSObject *)handleManager->getObject(hBaseKey);
+	// Get the base key handle (§2.4: scoped to this session's slot).
+	OSObject *baseKey = (OSObject *)handleManager->getObject(hBaseKey, session->getSlot()->getSlotID());
 	if (baseKey == NULL || !baseKey->isValid())
 		return CKR_KEY_HANDLE_INVALID;
 
@@ -5867,8 +5867,8 @@ CK_RV SoftHSM::deriveEDDSA
 			return CKR_ATTRIBUTE_VALUE_INVALID;
 	}
 
-	// Get the base key handle
-	OSObject *baseKey = (OSObject *)handleManager->getObject(hBaseKey);
+	// Get the base key handle (§2.4: scoped to this session's slot).
+	OSObject *baseKey = (OSObject *)handleManager->getObject(hBaseKey, session->getSlot()->getSlotID());
 	if (baseKey == NULL || !baseKey->isValid())
 		return CKR_KEY_HANDLE_INVALID;
 
@@ -6253,8 +6253,8 @@ CK_RV SoftHSM::deriveSymmetric
 
 	// Extract another key
 	if (pMechanism->mechanism == CKM_CONCATENATE_BASE_AND_KEY) {
-		// Check the key handle.
-		otherKey = (OSObject *)handleManager->getObject(*phOtherKey);
+		// Check the key handle (§2.4: scoped to this session's slot).
+		otherKey = (OSObject *)handleManager->getObject(*phOtherKey, session->getSlot()->getSlotID());
 		if (otherKey == NULL_PTR || !otherKey->isValid()) return CKR_OBJECT_HANDLE_INVALID;
 		if (otherKey->getBooleanValue(CKA_PRIVATE, true)) {
 			bool bOK = token->decrypt(otherKey->getByteStringValue(CKA_VALUE), data);
@@ -6344,8 +6344,8 @@ CK_RV SoftHSM::deriveSymmetric
 			return CKR_MECHANISM_INVALID;
 	}
 
-	// Check the key handle
-	OSObject *baseKey = (OSObject *)handleManager->getObject(hBaseKey);
+	// Check the key handle (§2.4: scoped to this session's slot).
+	OSObject *baseKey = (OSObject *)handleManager->getObject(hBaseKey, session->getSlot()->getSlotID());
 	if (baseKey == NULL_PTR || !baseKey->isValid()) return CKR_OBJECT_HANDLE_INVALID;
 
     // Get the data

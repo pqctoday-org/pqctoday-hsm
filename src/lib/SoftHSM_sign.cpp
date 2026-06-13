@@ -1376,7 +1376,7 @@ CK_RV SoftHSM::StatefulSign(Session* session, CK_BYTE_PTR pData, CK_ULONG ulData
 	}
 
 	CK_OBJECT_HANDLE hKey = session->getSignKeyHandle();
-	OSObject* osObj = (OSObject*)handleManager->getObject(hKey);
+	OSObject* osObj = (OSObject*)handleManager->getObject(hKey, session->getSlot()->getSlotID());
 	if (!osObj) {
 		session->resetOp();
 		return CKR_KEY_HANDLE_INVALID;
@@ -2749,7 +2749,7 @@ CK_RV SoftHSM::StatefulVerify(Session* session, CK_BYTE_PTR pData, CK_ULONG ulDa
 	}
 
 	CK_OBJECT_HANDLE hKey = session->getVerifyKeyHandle();
-	OSObject* osObj = (OSObject*)handleManager->getObject(hKey);
+	OSObject* osObj = (OSObject*)handleManager->getObject(hKey, session->getSlot()->getSlotID());
 	if (!osObj) {
 		session->resetOp();
 		return CKR_KEY_HANDLE_INVALID;
