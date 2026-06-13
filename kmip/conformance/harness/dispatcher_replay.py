@@ -1189,6 +1189,20 @@ def main(argv: list[str]) -> int:
     write_report(results, out)
     print(f"\nreport: {out}")
     print(f"        {out.with_suffix('.json')}")
+
+    # Exit non-zero if any test FAILed or ERRORed. The replay is a
+    # conformance GATE: a 92->89 Locate regression once shipped because
+    # this harness always returned 0 and CI never ran it. Returning the
+    # FAIL+ERROR count makes the process exit non-zero so CI fails loudly.
+    n_fail = sum(1 for r in results if r.status == "FAIL")
+    n_err = sum(1 for r in results if r.status == "ERROR")
+    if n_fail or n_err:
+        print(
+            f"\nFAIL: {n_fail} test(s) failed, {n_err} errored — "
+            f"see {out} for details",
+            file=sys.stderr,
+        )
+        return 1
     return 0
 
 
