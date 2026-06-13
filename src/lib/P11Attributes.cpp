@@ -815,11 +815,30 @@ bool P11AttrUniqueId::init()
 	    osobject->attributeExists(LEGACY_TYPE) == true)
 	{
 		OSAttribute legacy = osobject->getAttribute(LEGACY_TYPE);
-		if (!osobject->setAttribute(type, legacy))
-			return false;
-		// Remove the orphaned legacy blob so raw find-matching and future
-		// loads see only the canonical id.
-		osobject->deleteAttribute(LEGACY_TYPE);
+		// Best-effort migration: a read-only token (or an OSObject that refuses
+		// the write) can fail setAttribute()/deleteAttribute(). The persisted id
+		// must NOT become a hard init() failure that bricks an otherwise-valid
+		// legacy object — the original id is still readable under LEGACY_TYPE,
+		// so keep the object usable.
+		if (osobject->setAttribute(type, legacy))
+		{
+			// Canonical id persisted — remove the orphaned legacy blob so raw
+			// find-matching and future loads see only the canonical id. If the
+			// delete itself fails (read-only) that is harmless: both copies hold
+			// the same id and the canonical one is now authoritative.
+			osobject->deleteAttribute(LEGACY_TYPE);
+		}
+		else
+		{
+			// Could not persist the canonical id (e.g. read-only token). Fall
+			// back to the in-memory legacy value: the object stays usable and
+			// reports its original id. Do NOT fall through to P11Attribute::init(),
+			// which would see type absent and mint a *new* UUID — silently
+			// changing the supposedly-immutable id.
+			INFO_MSG("CKA_UNIQUE_ID 0x17->0x4 migration could not persist (read-only store?); "
+			         "retaining the legacy id in memory");
+			return true;
+		}
 	}
 
 	return P11Attribute::init();

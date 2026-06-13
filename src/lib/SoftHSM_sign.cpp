@@ -1423,38 +1423,91 @@ CK_RV SoftHSM::StatefulSign(Session* session, CK_BYTE_PTR pData, CK_ULONG ulData
 	unsigned char* sig = NULL;
 	unsigned long long sig_len = 0;
 
+	// The stateful signers (hss_generate_signature / xmss_sign / xmssmt_sign)
+	// each burn a one-time leaf and are expensive. The PKCS#11 two-call
+	// convention requires answering a NULL-pSignature size query (and rejecting
+	// a too-small buffer) WITHOUT producing a signature — mirroring AsymSign,
+	// which sizes from getOutputLength() before signing. So we first determine
+	// the signature length per mechanism, satisfy the size-query / buffer-too-
+	// small checks, and only sign when given a real, adequately sized buffer.
+	// HSS needs its working key both to size and to sign, so we load it here and
+	// keep it for the signing branch below (freeing it on every early return).
+	struct hss_working_key* hss_wk = NULL;        // HSS only; NULL otherwise
+	xmss_params xmssParams;                       // XMSS/XMSSMT only
+
 	if (mechanism == (AsymMech::Type)1000) { // HSS
-		struct hss_working_key* working_key = hss_load_private_key(
+		hss_wk = hss_load_private_key(
 			NULL,
 			(void*)privKeyBytes.byte_str(),
 			0, // minimal memory target
 			NULL, 0, NULL
 		);
-		if (!working_key) {
+		if (!hss_wk) {
 			session->resetOp();
 			return CKR_FUNCTION_FAILED;
 		}
+		// HSS does not append the message; length = exact signature length.
+		sig_len = hss_get_signature_len_from_working_key(hss_wk);
+	} else if (mechanism == (AsymMech::Type)1001 || mechanism == (AsymMech::Type)1002) { // XMSS / XMSSMT
+		// xmss_sign()/xmssmt_sign() return sm = [signature || message]; the
+		// signature length is params.sig_bytes, derived from the OID embedded
+		// in the (decrypted) private key — no signing needed to know the size.
+		if (privKeyBytes.size() < XMSS_OID_LEN) {
+			session->resetOp();
+			return CKR_GENERAL_ERROR;
+		}
+		uint32_t oid = 0;
+		for (unsigned int i = 0; i < XMSS_OID_LEN; i++) {
+			oid |= ((uint32_t)privKeyBytes.const_byte_str()[XMSS_OID_LEN - i - 1]) << (i * 8);
+		}
+		int prv = (mechanism == (AsymMech::Type)1001)
+		          ? xmss_parse_oid(&xmssParams, oid)
+		          : xmssmt_parse_oid(&xmssParams, oid);
+		if (prv != 0) {
+			session->resetOp();
+			return CKR_GENERAL_ERROR;
+		}
+		sig_len = (unsigned long long)xmssParams.sig_bytes;
+	} else {
+		session->resetOp();
+		return CKR_MECHANISM_INVALID;
+	}
 
-		size_t exact_sig_len = hss_get_signature_len_from_working_key(working_key);
+	// Two-call size query: report the length without burning a leaf. The op
+	// stays active (state untouched) so a subsequent call with a buffer signs.
+	if (pSignature == NULL_PTR) {
+		if (hss_wk) hss_free_working_key(hss_wk);
+		*pulSignatureLen = sig_len;
+		return CKR_OK;
+	}
 
-		// HSS does not append the message; buffer = exact signature length.
-		sigBuf.resize(exact_sig_len);
+	if (*pulSignatureLen < sig_len) {
+		// Buffer too small: do NOT sign and do NOT commit the mutated state, so
+		// the leaf is not burned (audit-confirmed burn-after-validation guard).
+		if (hss_wk) hss_free_working_key(hss_wk);
+		*pulSignatureLen = sig_len;
+		return CKR_BUFFER_TOO_SMALL;
+	}
+
+	// A real, adequately sized buffer was provided — now actually sign.
+	if (mechanism == (AsymMech::Type)1000) { // HSS
+		sigBuf.resize((size_t)sig_len);
 		sig = &sigBuf[0];
 
 		struct hss_extra_info hssInfo;
 		hss_init_extra_info(&hssInfo);
 		bool ok = hss_generate_signature(
-			working_key,
+			hss_wk,
 			NULL, // update_private_key callback
 			(void*)privKeyBytes.byte_str(), // context (memory to mutate)
 			pData, ulDataLen,
 			sig, sigBuf.size(), &hssInfo
 		);
-		sig_len = exact_sig_len;
 
 		enum hss_error_code hssErr = hss_extra_info_test_error_code(&hssInfo);
 
-		hss_free_working_key(working_key);
+		hss_free_working_key(hss_wk);
+		hss_wk = NULL;
 
 		if (!ok) {
 			session->resetOp();
@@ -1466,28 +1519,8 @@ CK_RV SoftHSM::StatefulSign(Session* session, CK_BYTE_PTR pData, CK_ULONG ulData
 				return CKR_KEY_EXHAUSTED;
 			return CKR_DEVICE_ERROR;
 		}
-	} else if (mechanism == (AsymMech::Type)1001 || mechanism == (AsymMech::Type)1002) { // XMSS / XMSSMT
-		// xmss_sign()/xmssmt_sign() return sm = [signature || message],
-		// smlen = sig_bytes + msg_len. Derive sig_bytes from the OID embedded
-		// in the (decrypted) private key so the buffer is exactly sized.
-		if (privKeyBytes.size() < XMSS_OID_LEN) {
-			session->resetOp();
-			return CKR_GENERAL_ERROR;
-		}
-		uint32_t oid = 0;
-		for (unsigned int i = 0; i < XMSS_OID_LEN; i++) {
-			oid |= ((uint32_t)privKeyBytes.const_byte_str()[XMSS_OID_LEN - i - 1]) << (i * 8);
-		}
-		xmss_params params;
-		int prv = (mechanism == (AsymMech::Type)1001)
-		          ? xmss_parse_oid(&params, oid)
-		          : xmssmt_parse_oid(&params, oid);
-		if (prv != 0) {
-			session->resetOp();
-			return CKR_GENERAL_ERROR;
-		}
-
-		sigBuf.resize((size_t)params.sig_bytes + ulDataLen);
+	} else { // XMSS / XMSSMT
+		sigBuf.resize((size_t)xmssParams.sig_bytes + ulDataLen);
 		sig = &sigBuf[0];
 
 		int ret = (mechanism == (AsymMech::Type)1001)
@@ -1505,21 +1538,6 @@ CK_RV SoftHSM::StatefulSign(Session* session, CK_BYTE_PTR pData, CK_ULONG ulData
 		// Per PKCS#11 v3.2, C_Sign returns only the signature portion.
 		// Strip the appended message: sig_len = sig_bytes + ulDataLen.
 		sig_len -= ulDataLen;
-	} else {
-		session->resetOp();
-		return CKR_MECHANISM_INVALID;
-	}
-
-	if (pSignature == NULL_PTR) {
-		*pulSignatureLen = sig_len;
-		return CKR_OK;
-	}
-
-	if (*pulSignatureLen < sig_len) {
-		// Buffer too small: do NOT commit the mutated state, so the leaf is
-		// not burned (audit-confirmed burn-after-validation behaviour).
-		*pulSignatureLen = sig_len;
-		return CKR_BUFFER_TOO_SMALL;
 	}
 
 	// Persist the updated private key state (CKA_VALUE with mutated leaf idx)

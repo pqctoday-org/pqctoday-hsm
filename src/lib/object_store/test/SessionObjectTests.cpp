@@ -43,6 +43,43 @@
 
 CPPUNIT_TEST_SUITE_REGISTRATION(SessionObjectTests);
 
+// R6 BUG-6 fixture: an OSObject that behaves like a read-only / write-refusing
+// store. Reads delegate to a backing SessionObject; once locked, every write
+// (setAttribute / deleteAttribute / transactions) fails — modelling a read-only
+// token. Used to prove P11AttrUniqueId::init() degrades gracefully when the
+// 0x17->0x4 migration cannot persist, instead of failing init() outright.
+class WriteRefusingObject : public OSObject
+{
+public:
+	WriteRefusingObject() : locked(false) {}
+	void lock() { locked = true; }
+
+	// Reads always delegate.
+	bool attributeExists(CK_ATTRIBUTE_TYPE type) { return backing.attributeExists(type); }
+	OSAttribute getAttribute(CK_ATTRIBUTE_TYPE type) { return backing.getAttribute(type); }
+	bool getBooleanValue(CK_ATTRIBUTE_TYPE type, bool val) { return backing.getBooleanValue(type, val); }
+	unsigned long getUnsignedLongValue(CK_ATTRIBUTE_TYPE type, unsigned long val) { return backing.getUnsignedLongValue(type, val); }
+	ByteString getByteStringValue(CK_ATTRIBUTE_TYPE type) { return backing.getByteStringValue(type); }
+	CK_ATTRIBUTE_TYPE nextAttributeType(CK_ATTRIBUTE_TYPE type) { return backing.nextAttributeType(type); }
+	bool isValid() { return backing.isValid(); }
+
+	// Writes succeed only while unlocked (so the test can seed the legacy id),
+	// then are refused to simulate the read-only token.
+	bool setAttribute(CK_ATTRIBUTE_TYPE type, const OSAttribute& attribute)
+	{ return locked ? false : backing.setAttribute(type, attribute); }
+	bool deleteAttribute(CK_ATTRIBUTE_TYPE type)
+	{ return locked ? false : backing.deleteAttribute(type); }
+	bool startTransaction(Access access = ReadWrite)
+	{ return locked ? false : backing.startTransaction(access); }
+	bool commitTransaction() { return locked ? false : backing.commitTransaction(); }
+	bool abortTransaction() { return locked ? false : backing.abortTransaction(); }
+	bool destroyObject() { return false; }
+
+private:
+	SessionObject backing{NULL, 1, 1};
+	bool locked;
+};
+
 void SessionObjectTests::setUp()
 {
 }
@@ -493,6 +530,34 @@ void SessionObjectTests::testUniqueIdMigration()
 		CPPUNIT_ASSERT(uid.init());
 		// 0x4 untouched (migration only fires when 0x4 is absent).
 		CPPUNIT_ASSERT(mixedObject.getAttribute(CKA_UNIQUE_ID).getByteStringValue() == canonical);
+	}
+
+	// (4) R6 BUG-6: a legacy object with ONLY 0x17 on a write-refusing
+	//     (read-only) store must still init() successfully and keep its id —
+	//     the migration cannot persist 0x4, but init() must NOT fail (which
+	//     would brick the object) and must NOT mint a fresh UUID. It falls back
+	//     to the in-memory legacy value.
+	{
+		WriteRefusingObject roObject;
+		CPPUNIT_ASSERT(roObject.isValid());
+
+		ByteString legacyId("fedcba9876543210fedcba9876543210fedc"); // 36-byte UUID-shaped blob
+		// Seed the legacy id while writes are still allowed, then lock the store.
+		CPPUNIT_ASSERT(roObject.setAttribute(P11AttrUniqueId::LEGACY_TYPE, OSAttribute(legacyId)));
+		CPPUNIT_ASSERT(!roObject.attributeExists(CKA_UNIQUE_ID));
+		roObject.lock(); // from here every write fails (read-only token)
+
+		P11AttrUniqueId uid(&roObject);
+		// init() must succeed despite the failed migration write.
+		CPPUNIT_ASSERT(uid.init());
+		// The object still reports its original id (under the legacy type, since
+		// the canonical write was refused) — it was neither lost nor replaced
+		// with a freshly minted UUID.
+		CPPUNIT_ASSERT(roObject.attributeExists(P11AttrUniqueId::LEGACY_TYPE));
+		CPPUNIT_ASSERT(roObject.getAttribute(P11AttrUniqueId::LEGACY_TYPE).getByteStringValue() == legacyId);
+		// No fresh canonical UUID was minted (that write would also have failed,
+		// but more importantly init() must not have attempted to mint).
+		CPPUNIT_ASSERT(!roObject.attributeExists(CKA_UNIQUE_ID));
 	}
 }
 

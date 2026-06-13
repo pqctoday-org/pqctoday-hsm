@@ -179,6 +179,13 @@ private:
 	// Operations
 	int operation;
 
+	// §5.13 dual-function op tracking. When a complementary second Init forms a
+	// dual op (e.g. EncryptInit then DigestInit), dualOp1/dualOp2 record the two
+	// live families so endOpFamily() can advance `operation` to the surviving
+	// family when one half is finalised. Both SESSION_OP_NONE when no dual op.
+	int dualOp1;
+	int dualOp2;
+
 	// Find
 	FindOperation *findOp;
 

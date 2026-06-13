@@ -808,7 +808,21 @@ CK_RV SoftHSM::C_GenerateKeyPair
 			Token* token = session->getToken();
 			ByteString privValue;
 			if (isprivateKeyPrivate && token != NULL)
-				token->encrypt(privPlain, privValue);
+			{
+				// token->encrypt() returns false (and wipes privValue) on an
+				// RNG/AES failure without throwing. Committing the empty result
+				// would silently store a corrupt private CKA_VALUE that only
+				// fails at first use, so abort and tear down BOTH half-created
+				// keys instead.
+				if (!token->encrypt(privPlain, privValue))
+				{
+					handleManager->destroyObject(*phPrivateKey);
+					if (osPriv) osPriv->destroyObject();
+					handleManager->destroyObject(*phPublicKey);
+					if (osPub) osPub->destroyObject();
+					return CKR_FUNCTION_FAILED;
+				}
+			}
 			else
 				privValue = privPlain;
 
@@ -1779,9 +1793,12 @@ CK_RV SoftHSM::UnwrapMechRsaAesKw
 		// Common Secret Key Attributes
 		bOK = bOK && emphKey->setAttribute(CKA_ALWAYS_SENSITIVE, false);
 		bOK = bOK && emphKey->setAttribute(CKA_NEVER_EXTRACTABLE, false);
-		// Secret Attributes
+		// Secret Attributes. token->encrypt() returns false (wiping the output)
+		// on RNG/AES failure without throwing; fold its result into bOK so a
+		// failure aborts the transaction below instead of committing an empty
+		// CKA_VALUE.
 		ByteString emphKeyValue;
-		token->encrypt(emphkeydata, emphKeyValue);
+		bOK = bOK && token->encrypt(emphkeydata, emphKeyValue);
 		bOK = bOK && emphKey->setAttribute(CKA_VALUE, emphKeyValue);
 
 		if (bOK)
@@ -2123,7 +2140,10 @@ CK_RV SoftHSM::C_UnwrapKey
 			{
 				ByteString value;
 				if (isPrivate)
-					token->encrypt(keydata, value);
+					// Fold token->encrypt()'s bool result into bOK: on RNG/AES
+					// failure it wipes `value` without throwing, and committing
+					// the empty CKA_VALUE would silently corrupt the key.
+					bOK = bOK && token->encrypt(keydata, value);
 				else
 					value = keydata;
 				bOK = bOK && osobject->setAttribute(CKA_VALUE, value);
@@ -2488,7 +2508,10 @@ CK_RV SoftHSM::C_UnwrapKeyAuthenticated
 			{
 				ByteString value;
 				if (isPrivate)
-					token->encrypt(keydata, value);
+					// Fold token->encrypt()'s bool result into bOK: a failure
+					// wipes `value` without throwing; committing the empty
+					// CKA_VALUE would silently corrupt the key.
+					bOK = bOK && token->encrypt(keydata, value);
 				else
 					value = keydata;
 				bOK = bOK && osobject->setAttribute(CKA_VALUE, value);
@@ -3184,7 +3207,9 @@ CK_RV SoftHSM::C_DeriveKey
 		kbkSymKey.setBitLen(kbkKeyLen * 8);
 		ByteString kbkValue;
 		if (kbkPrivate)
-			token->encrypt(kbkSymKey.getKeyBits(), kbkValue);
+			// Fold the bool result in: a token->encrypt() failure wipes
+			// kbkValue without throwing, so committing it would corrupt the key.
+			kbkOK = kbkOK && token->encrypt(kbkSymKey.getKeyBits(), kbkValue);
 		else
 			kbkValue = kbkSymKey.getKeyBits();
 		kbkOK = kbkOK && kbkObj->setAttribute(CKA_VALUE, kbkValue);
@@ -3410,7 +3435,9 @@ CK_RV SoftHSM::C_DeriveKey
 		fbkSymKey.setBitLen(fbkKeyLen * 8);
 		ByteString fbkValue;
 		if (fbkPrivate)
-			token->encrypt(fbkSymKey.getKeyBits(), fbkValue);
+			// Fold the bool result in: a token->encrypt() failure wipes
+			// fbkValue without throwing; committing it would corrupt the key.
+			fbkOK = fbkOK && token->encrypt(fbkSymKey.getKeyBits(), fbkValue);
 		else
 			fbkValue = fbkSymKey.getKeyBits();
 		fbkOK = fbkOK && fbkObj->setAttribute(CKA_VALUE, fbkValue);
@@ -3618,7 +3645,9 @@ CK_RV SoftHSM::C_DeriveKey
 		hkdfSymKey.setBitLen(hkdfKeyLen * 8);
 		ByteString hkdfValue;
 		if (hkdfPrivate)
-			token->encrypt(hkdfSymKey.getKeyBits(), hkdfValue);
+			// Fold the bool result in: a token->encrypt() failure wipes
+			// hkdfValue without throwing; committing it would corrupt the key.
+			hkdfOK = hkdfOK && token->encrypt(hkdfSymKey.getKeyBits(), hkdfValue);
 		else
 			hkdfValue = hkdfSymKey.getKeyBits();
 		hkdfOK = hkdfOK && hkdfObj->setAttribute(CKA_VALUE, hkdfValue);
