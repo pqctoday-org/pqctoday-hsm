@@ -105,9 +105,11 @@ impl ObjectType {
 
 /// KMIP managed-object lifecycle state.
 ///
-/// Transitions in [`Self::can_transition_to`] mirror the FSM in
-/// `docs/IMPLEMENTATION_PLAN.md` §3.4. Phase 6 ([`crate::store::lifecycle`])
-/// owns the enforcement; this module just defines the type.
+/// Transitions in [`Self::can_transition_to`] are authoritative against the
+/// KMIP 3.0 §3.2 numbered state diagram and the §6.1.19 Destroy constraint;
+/// `docs/IMPLEMENTATION_PLAN.md` §3.4 mirrors the same edges. Phase 6
+/// ([`crate::store::lifecycle`]) owns the enforcement; this module just
+/// defines the type.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum State {
     PreActive    = 0x01,
@@ -138,12 +140,28 @@ impl State {
     /// `true` if `self → next` is a legal KMIP lifecycle transition per
     /// the FSM. Reference enforcement table; the store layer wraps this
     /// with audit logging when transitioning persisted objects.
+    ///
+    /// Edges are taken verbatim from the KMIP 3.0 §3.2 numbered state
+    /// diagram (transitions cross-referenced in §4 Initial/Activation/
+    /// Deactivation/Destroy/Compromise Date attribute rules) and the
+    /// §6.1.19 Destroy constraint:
+    ///
+    /// - **PreActive** → {Active (t1 activation), Compromised (t3),
+    ///   Destroyed (t2)} — there is **no** PreActive→Deactivated edge;
+    ///   Deactivation is the §3.2 transition 6 (Active→Deactivated) only.
+    /// - **Active** → {Deactivated (t6), Compromised (t5)} — **not**
+    ///   Destroyed directly: §6.1.19 states "Objects SHALL only be
+    ///   destroyed if they are in either Pre-Active or Deactivated state".
+    /// - **Deactivated** → {Compromised (t8), Destroyed (t7)}.
+    /// - **Compromised** → {DestroyedCompromised}.
+    /// - **Destroyed** → {DestroyedCompromised (t10)}.
+    /// - **DestroyedCompromised** → {} (terminal).
     pub const fn can_transition_to(self, next: State) -> bool {
         use State::*;
         matches!(
             (self, next),
-            (PreActive,   Active | Deactivated | Compromised | Destroyed)
-                | (Active,       Deactivated | Compromised | Destroyed)
+            (PreActive,   Active | Compromised | Destroyed)
+                | (Active,       Deactivated | Compromised)
                 | (Deactivated,  Compromised | Destroyed)
                 | (Compromised,  DestroyedCompromised)
                 | (Destroyed,    DestroyedCompromised)
@@ -454,12 +472,16 @@ mod tests {
 
     #[test]
     fn state_transitions_are_normal_forward() {
-        // Pre-active can move to all of Active, Deactivated, Compromised,
-        // Destroyed.
+        // §3.2: Pre-Active can move to Active (t1), Compromised (t3), or
+        // Destroyed (t2) — but NOT Deactivated (no such §3.2 edge;
+        // Deactivation is transition 6, Active→Deactivated, only).
         assert!(State::PreActive.can_transition_to(State::Active));
-        assert!(State::PreActive.can_transition_to(State::Deactivated));
+        assert!(State::PreActive.can_transition_to(State::Destroyed));
+        assert!(!State::PreActive.can_transition_to(State::Deactivated));
 
-        // Active → Deactivated → Destroyed is the textbook flow.
+        // §3.2: Active → Deactivated (t6); then Deactivated → Destroyed (t7)
+        // is the textbook flow. (Active → Destroyed directly is forbidden by
+        // §6.1.19 — see state_transitions_reject_illegal_*.)
         assert!(State::Active.can_transition_to(State::Deactivated));
         assert!(State::Deactivated.can_transition_to(State::Destroyed));
 
@@ -471,9 +493,12 @@ mod tests {
     fn state_transitions_reject_illegal_backwards_or_sideways_moves() {
         // Cannot go back to PreActive.
         assert!(!State::Active.can_transition_to(State::PreActive));
-        // Cannot skip from Active straight to Destroyed without Deactivate?
-        // KMIP allows it per §10.2 lifecycle — let's check.
-        assert!(State::Active.can_transition_to(State::Destroyed));
+        // §6.1.19: "Objects SHALL only be destroyed if they are in either
+        // Pre-Active or Deactivated state." Active → Destroyed is therefore
+        // NOT a legal edge — an Active object must be Revoked/Deactivated
+        // first. (§3.2 has no Active→Destroyed arrow; the only destroy
+        // arrows are t2 PreActive→Destroyed and t7 Deactivated→Destroyed.)
+        assert!(!State::Active.can_transition_to(State::Destroyed));
         // But Active cannot become DestroyedCompromised without going
         // through Compromised first.
         assert!(!State::Active.can_transition_to(State::DestroyedCompromised));
