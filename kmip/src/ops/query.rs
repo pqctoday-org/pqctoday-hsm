@@ -155,7 +155,9 @@ pub fn query(deps: &Deps, req: QueryRequest, correlation_id: &str) -> Result<Que
 pub(crate) const ADVERTISED_UNIMPLEMENTED_OPERATIONS: &[Operation] = &[
     Operation::ReCertify,
     Operation::ObtainLease,
-    Operation::Validate,
+    // P2.2 moved Validate into `HANDLED_OPERATIONS` (§6.1.62 handler) —
+    // it was already advertised here, so the net advertised set is
+    // unchanged (the corpus gate is *expected ⊆ actual*).
     Operation::Poll,
     Operation::Notify,
     Operation::Put,

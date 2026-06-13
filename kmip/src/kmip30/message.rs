@@ -291,6 +291,8 @@ pub enum RequestPayload {
     Decrypt(super::ops::DecryptRequest),
     Sign(super::ops::SignRequest),
     SignatureVerify(super::ops::SignatureVerifyRequest),
+    /// P2.2 — §6.1.62 Validate (certificate-chain validation).
+    Validate(super::ops::ValidateRequest),
     Interop(super::ops::InteropRequest),
     Register(super::ops::RegisterRequest),
     Import(super::ops::ImportRequest),
@@ -370,6 +372,8 @@ pub enum ResponsePayload {
     Decrypt(super::ops::DecryptResponse),
     Sign(super::ops::SignResponse),
     SignatureVerify(super::ops::SignatureVerifyResponse),
+    /// P2.2 — §6.1.62 Validate.
+    Validate(super::ops::ValidateResponse),
     Interop(super::ops::InteropResponse),
     Register(super::ops::RegisterResponse),
     Import(super::ops::ImportResponse),
@@ -428,6 +432,7 @@ impl RequestPayload {
             Self::Decrypt(_)          => Operation::Decrypt,
             Self::Sign(_)             => Operation::Sign,
             Self::SignatureVerify(_)  => Operation::SignatureVerify,
+            Self::Validate(_)         => Operation::Validate,
             Self::Interop(_)          => Operation::Interop,
             Self::Register(_)         => Operation::Register,
             Self::Import(_)           => Operation::Import,

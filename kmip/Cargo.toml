@@ -94,7 +94,11 @@ anyhow    = "1"
 # blob with no parsing; the KMIP layer is responsible for the §11 attribute
 # surface. x509-parser is a no-std-compatible RFC 5280 parser used widely
 # (rustls-adjacent, Sequoia, ~7M/month downloads), MIT/Apache.
-x509-parser = "0.16"
+# P2.2 — the `verify` feature pulls in `ring`-backed `verify_signature`
+# so the §6.1.62 Validate op can actually check certificate signatures
+# (RSA-PKCS1v15 + ECDSA over SHA-256/384/512) where the issuer is in the
+# supplied/stored chain, rather than returning a hollow Valid.
+x509-parser = { version = "0.16", features = ["verify"] }
 
 # RSA — KMIP 3.0 §6.1.48 Register accepts client-supplied RSA private
 # keys in PKCS#1 (KeyFormatType=0x03) or PKCS#8 (0x04) DER form. The

@@ -67,6 +67,7 @@ pub mod rng_and_pkcs11;
 pub mod session_and_auth;
 pub mod sign;
 pub mod signature_verify;
+pub mod validate;
 
 pub use deps::{Deps, DepsConfig};
 

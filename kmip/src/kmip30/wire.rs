@@ -146,6 +146,10 @@ pub(crate) mod tags {
     pub const State: u32                  = 0x42_008d;
     pub const TimeStamp: u32              = 0x42_0092;
     pub const UniqueIdentifier: u32       = 0x42_0094;
+    /// KMIP 3.0 §6.1.62 — `Validity Date` (DateTime) in the Validate
+    /// request payload. Codepoint verified from
+    /// `kmip-spec-3.0-tags-enums.json` (`Validity Date` → 0x42009a).
+    pub const ValidityDate: u32           = 0x42_009a;
     pub const ValidityIndicator: u32      = 0x42_009b;
     pub const VendorIdentification: u32   = 0x42_009d;
     // ── K4 — message-layer SHALLs (§8.1.2 / §8.1.3). Codepoints
@@ -800,6 +804,8 @@ fn decode_request_payload(op: Operation, frame: &TtlvFrame) -> Result<RequestPay
         Operation::Decrypt          => RequestPayload::Decrypt(decode_decrypt_req(children)?),
         Operation::Sign             => RequestPayload::Sign(decode_sign_req(children)?),
         Operation::SignatureVerify  => RequestPayload::SignatureVerify(decode_sigverify_req(children)?),
+        // P2.2 — §6.1.62 Validate (certificate-chain validation).
+        Operation::Validate         => RequestPayload::Validate(decode_validate_req(children)?),
         Operation::Interop          => RequestPayload::Interop(decode_interop_req(children)?),
         Operation::AddAttribute     => RequestPayload::AddAttribute(decode_add_attribute_req(children)?),
         Operation::ModifyAttribute  => RequestPayload::ModifyAttribute(decode_modify_attribute_req(children)?),
@@ -858,7 +864,6 @@ fn decode_request_payload(op: Operation, frame: &TtlvFrame) -> Result<RequestPay
         // §6.1.51 / §6.1.52 decode routes above.
         Operation::ReCertify
         | Operation::ObtainLease
-        | Operation::Validate
         | Operation::Poll
         | Operation::Notify
         | Operation::Put
@@ -890,6 +895,7 @@ fn response_payload_to_frame(payload: &ResponsePayload) -> TtlvFrame {
         ResponsePayload::Decrypt(r)          => encode_decrypt_resp(r),
         ResponsePayload::Sign(r)             => encode_sign_resp(r),
         ResponsePayload::SignatureVerify(r)  => encode_sigverify_resp(r),
+        ResponsePayload::Validate(r)         => encode_validate_resp(r),
         ResponsePayload::Interop(_)          => vec![],
         // Group B wave 2 — Add/Modify/Delete/Set/Adjust Attribute all
         // return the same single-field UniqueIdentifier payload per
@@ -1575,6 +1581,64 @@ fn encode_sigverify_resp(r: &SignatureVerifyResponse) -> Vec<TtlvFrame> {
         TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString(r.uid.clone())),
         TtlvFrame::new(Tag(tags::ValidityIndicator), Value::Enumeration(r.validity as u32)),
     ]
+}
+
+/// P2.2 — decode the §6.1.62 Validate Request Payload (Table 440).
+///
+/// Each `Certificate` (0x420013) child is an outer Structure carrying a
+/// `Certificate Value` (0x42001e) ByteString of DER bytes — we pull the
+/// DER out (a Certificate with no Certificate Value is skipped). Each
+/// `Unique Identifier` (0x420094) is a stored Certificate object's UID.
+/// Both lists MAY be repeated and together compose one chain. The
+/// OPTIONAL `Validity Date` (0x42009a) is a DateTime.
+fn decode_validate_req(children: &[TtlvFrame]) -> Result<ValidateRequest, WireError> {
+    let mut certificates = Vec::new();
+    let mut uids = Vec::new();
+    let mut validity_date = None;
+    for c in children {
+        match c.tag.0 {
+            tags::Certificate => {
+                // Outer Certificate Structure → inner Certificate Value DER.
+                if let Value::Structure(inner) = &c.value {
+                    for f in inner {
+                        if f.tag.0 == tags::CertificateValue {
+                            if let Value::ByteString(b) = &f.value {
+                                certificates.push(b.clone());
+                            }
+                        }
+                    }
+                }
+            }
+            tags::UniqueIdentifier => {
+                if let Value::TextString(s) = &c.value {
+                    uids.push(s.clone());
+                }
+            }
+            tags::ValidityDate => {
+                let secs = expect_datetime(c, "Validity Date")?;
+                validity_date = Some(
+                    time::OffsetDateTime::from_unix_timestamp(secs).map_err(|_| {
+                        WireError::BadType {
+                            tag: c.tag.0,
+                            name: "Validity Date",
+                            msg: "DateTime out of range".into(),
+                        }
+                    })?,
+                );
+            }
+            _ => {}
+        }
+    }
+    Ok(ValidateRequest { certificates, uids, validity_date })
+}
+
+/// P2.2 — encode the §6.1.62 Validate Response Payload (Table 441):
+/// a single `Validity Indicator` (0x42009b) Enumeration.
+fn encode_validate_resp(r: &ValidateResponse) -> Vec<TtlvFrame> {
+    vec![TtlvFrame::new(
+        Tag(tags::ValidityIndicator),
+        Value::Enumeration(r.validity as u32),
+    )]
 }
 
 // ── Attribute codec ─────────────────────────────────────────────────────────
@@ -4205,6 +4269,98 @@ mod tests {
             }
             other => panic!("expected Query, got {other:?}"),
         }
+    }
+
+    /// P2.2 — §6.1.62 Validate request decodes (inline Certificate DER +
+    /// stored UID + Validity Date) and the response (Validity Indicator)
+    /// encodes, proving the codec round-trips both directions.
+    #[test]
+    fn validate_request_response_wire_round_trip() {
+        let der = vec![0x30u8, 0x03, 0x01, 0x02, 0x03]; // opaque DER stand-in
+        let frame = TtlvFrame::new(
+            Tag(tags::RequestMessage),
+            Value::Structure(vec![
+                TtlvFrame::new(
+                    Tag(tags::RequestHeader),
+                    Value::Structure(vec![TtlvFrame::new(
+                        Tag(tags::ProtocolVersion),
+                        Value::Structure(vec![
+                            TtlvFrame::new(Tag(tags::ProtocolVersionMajor), Value::Integer(3)),
+                            TtlvFrame::new(Tag(tags::ProtocolVersionMinor), Value::Integer(0)),
+                        ]),
+                    )]),
+                ),
+                TtlvFrame::new(
+                    Tag(tags::BatchItem),
+                    Value::Structure(vec![
+                        TtlvFrame::new(
+                            Tag(tags::Operation),
+                            Value::Enumeration(Operation::Validate.to_wire_value()),
+                        ),
+                        TtlvFrame::new(
+                            Tag(tags::RequestPayload),
+                            Value::Structure(vec![
+                                // Inline Certificate → Certificate Value DER.
+                                TtlvFrame::new(
+                                    Tag(tags::Certificate),
+                                    Value::Structure(vec![TtlvFrame::new(
+                                        Tag(tags::CertificateValue),
+                                        Value::ByteString(der.clone()),
+                                    )]),
+                                ),
+                                // Stored Certificate object reference.
+                                TtlvFrame::new(
+                                    Tag(tags::UniqueIdentifier),
+                                    Value::TextString("cert-uid-1".into()),
+                                ),
+                                // Validity Date.
+                                TtlvFrame::new(
+                                    Tag(tags::ValidityDate),
+                                    Value::DateTime(1_700_000_000),
+                                ),
+                            ]),
+                        ),
+                    ]),
+                ),
+            ]),
+        );
+        let mut buf = BytesMut::new();
+        encode(&frame, &mut buf);
+        let decoded = decode_request_message(&buf).expect("decode");
+        match &decoded.batch_items[0].payload {
+            RequestPayload::Validate(v) => {
+                assert_eq!(v.certificates, vec![der]);
+                assert_eq!(v.uids, vec!["cert-uid-1".to_string()]);
+                assert_eq!(
+                    v.validity_date.map(|t| t.unix_timestamp()),
+                    Some(1_700_000_000)
+                );
+            }
+            other => panic!("expected Validate, got {other:?}"),
+        }
+
+        // Response side — Validity Indicator (Valid) round-trips into the
+        // §8.2 response envelope.
+        let resp = ResponseMessage {
+            header: ResponseHeader {
+                protocol_version_major: 3,
+                protocol_version_minor: 0,
+                time_stamp: OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap(),
+                server_correlation_value: None,
+            },
+            batch_items: vec![ResponseBatchItem {
+                operation: Some(Operation::Validate),
+                result_status: ResultStatus::Success,
+                result_reason: None,
+                result_message: None,
+                payload: Some(ResponsePayload::Validate(ValidateResponse {
+                    validity: SignatureValidity::Valid,
+                })),
+            }],
+        };
+        let bytes = encode_response_message(&resp);
+        assert_eq!(bytes.len() % 8, 0, "KMIP §9.6 8-byte alignment");
+        assert!(bytes.len() >= 8);
     }
 
     #[test]
