@@ -95,6 +95,7 @@ pub fn add_attribute(
             )));
     }
 
+    check_circular_link(deps, "AddAttribute", &req.uid, &req.new_attribute, correlation_id)?;
     apply_attribute(&mut obj, &req.new_attribute);
     commit_mutation(deps, obj)?;
     emit_success(deps, correlation_id, "AddAttribute");
@@ -159,6 +160,7 @@ pub fn modify_attribute(
         }
     }
 
+    check_circular_link(deps, "ModifyAttribute", &req.uid, &req.new_attribute, correlation_id)?;
     apply_attribute(&mut obj, &req.new_attribute);
     commit_mutation(deps, obj)?;
     emit_success(deps, correlation_id, "ModifyAttribute");
@@ -257,6 +259,7 @@ pub fn set_attribute(
             )));
     }
 
+    check_circular_link(deps, "SetAttribute", &req.uid, &req.new_attribute, correlation_id)?;
     apply_attribute(&mut obj, &req.new_attribute);
     commit_mutation(deps, obj)?;
     emit_success(deps, correlation_id, "SetAttribute");
@@ -476,6 +479,52 @@ fn attribute_name_present(obj: &ObjectRecord, name: &str) -> bool {
         "ObjectType" | "State" | "UniqueIdentifier" => true,
         _ => obj.custom_attributes.contains_key(name) || obj.links.contains_key(name),
     }
+}
+
+/// P2.4 — extract `(canonical-link-key, target-UID)` for the Link
+/// attribute variants, else `None`. The key matches the `obj.links`
+/// map keys written by [`apply_attribute`].
+fn link_target(a: &Attribute) -> Option<(&'static str, &str)> {
+    match a {
+        Attribute::NextLink(uid)       => Some(("NextLink", uid)),
+        Attribute::PreviousLink(uid)   => Some(("PreviousLink", uid)),
+        Attribute::PublicKeyLink(uid)  => Some(("PublicKeyLink", uid)),
+        Attribute::PrivateKeyLink(uid) => Some(("PrivateKeyLink", uid)),
+        Attribute::GroupLink(uid)      => Some(("GroupLink", uid)),
+        _ => None,
+    }
+}
+
+/// P2.4 — detect link cycles before storing a Link attribute and emit
+/// `Circular Link Error` (KMIP 3.0 §11, 0x4d) instead of silently
+/// storing the cycle (the previous behaviour). Scope: the directly
+/// cheap cases — a self-link (A→A) and an immediate reciprocal 2-cycle
+/// (adding A→B while B already carries any link back to A). Deeper
+/// (N>2) cycle detection would require a full link-graph walk across
+/// the store and is left as future work.
+fn check_circular_link(
+    deps: &Deps,
+    op: &str,
+    src_uid: &str,
+    a: &Attribute,
+    correlation_id: &str,
+) -> Result<()> {
+    let Some((_key, target)) = link_target(a) else { return Ok(()) };
+    // Self-link: A → A.
+    if target == src_uid {
+        return Err(fail_err(deps, correlation_id, op,
+            KmipError::circular_link_error(format!(
+                "Link on {src_uid} targets itself ({target})"))));
+    }
+    // Direct reciprocal 2-cycle: target already links back to src.
+    if let Ok(Some(target_obj)) = deps.store.get(target) {
+        if target_obj.links.values().any(|v| v == src_uid) {
+            return Err(fail_err(deps, correlation_id, op,
+                KmipError::circular_link_error(format!(
+                    "Link {src_uid}→{target} closes a reciprocal cycle ({target} already links back to {src_uid})"))));
+        }
+    }
+    Ok(())
 }
 
 /// Write the attribute value into the right slot on `obj`. Used by Add /
@@ -872,5 +921,58 @@ mod tests {
         let rec = d.store.get("u").unwrap().unwrap();
         assert!(rec.usage_mask.contains(UsageMask::ENCRYPT));
         assert!(rec.usage_mask.contains(UsageMask::SIGN));
+    }
+
+    // ── P2.4 — Circular Link Error (KMIP 3.0 §11, 0x4d) ─────────────
+
+    /// A self-link (A → A) is the simplest cycle and must be rejected
+    /// with `CircularLinkError`, not silently stored.
+    #[test]
+    fn add_self_link_returns_circular_link_error() {
+        let d = deps_with();
+        put(&d, "u");
+        let err = add_attribute(&d, AddAttributeRequest {
+            uid: "u".into(),
+            new_attribute: Attribute::NextLink("u".into()),
+        }, "c").unwrap_err();
+        assert_eq!(err.result_reason(), ResultReason::CircularLinkError);
+        // The link must not have been committed.
+        assert!(d.store.get("u").unwrap().unwrap().links.is_empty());
+    }
+
+    /// A direct reciprocal 2-cycle: B already links to A, so adding
+    /// A → B closes the cycle → `CircularLinkError`.
+    #[test]
+    fn add_reciprocal_link_returns_circular_link_error() {
+        let d = deps_with();
+        put(&d, "a");
+        put(&d, "b");
+        // b → a first (no cycle yet).
+        add_attribute(&d, AddAttributeRequest {
+            uid: "b".into(),
+            new_attribute: Attribute::PreviousLink("a".into()),
+        }, "c").unwrap();
+        // a → b now closes the 2-cycle.
+        let err = add_attribute(&d, AddAttributeRequest {
+            uid: "a".into(),
+            new_attribute: Attribute::NextLink("b".into()),
+        }, "c").unwrap_err();
+        assert_eq!(err.result_reason(), ResultReason::CircularLinkError);
+    }
+
+    /// A non-cyclic link (A → B with no back-link) is accepted.
+    #[test]
+    fn add_acyclic_link_succeeds() {
+        let d = deps_with();
+        put(&d, "a");
+        put(&d, "b");
+        add_attribute(&d, AddAttributeRequest {
+            uid: "a".into(),
+            new_attribute: Attribute::NextLink("b".into()),
+        }, "c").unwrap();
+        assert_eq!(
+            d.store.get("a").unwrap().unwrap().links.get("NextLink").map(String::as_str),
+            Some("b")
+        );
     }
 }

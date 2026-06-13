@@ -129,6 +129,33 @@ pub enum ResultReason {
     /// (we only accept 3.0). Distinct from `InvalidMessage` (0x04),
     /// which signals a malformed frame.
     UnsupportedProtocolVersion = 0x0000_003f,
+    /// `Wrapping Object Archived` — KMIP 3.0 §11. The KEK named by a
+    /// Get `KeyWrappingSpecification` (K16, §6.1.23) or a Register
+    /// `KeyWrappingData` (K17, §6.1.48) has been moved off-line by the
+    /// `Archive` op and must be `Recover`-ed before it can wrap/unwrap.
+    /// Distinct from the data object's own `ObjectArchived` (0x0d) —
+    /// this names the *wrapping* object. Codepoint verified from
+    /// `kmip-spec-3.0-tags-enums.json` (`Result Reason` 0x40).
+    WrappingObjectArchived = 0x0000_0040,
+    /// `Wrapping Object Destroyed` — KMIP 3.0 §11. The wrap/unwrap KEK
+    /// has transitioned to `Destroyed` / `DestroyedCompromised`; its
+    /// cryptographic material is gone. Distinct from the data object's
+    /// `ObjectDestroyed` (0x36). Codepoint verified from
+    /// `kmip-spec-3.0-tags-enums.json` (`Result Reason` 0x41).
+    WrappingObjectDestroyed = 0x0000_0041,
+    /// `Wrapping Object Not Found` — KMIP 3.0 §11. The KEK UID named by
+    /// a `KeyWrappingSpecification` / `KeyWrappingData` does not resolve
+    /// to a managed object. Distinct from the data object's
+    /// `ObjectNotFound` (0x37). Codepoint verified from
+    /// `kmip-spec-3.0-tags-enums.json` (`Result Reason` 0x42).
+    WrappingObjectNotFound = 0x0000_0042,
+    /// `Circular Link Error` — KMIP 3.0 §11. An Add/Modify/Set of a
+    /// `Link` attribute (§6.1.x attribute mutation) would create a
+    /// cycle in the object-link graph: a self-link (A→A) or a direct
+    /// reciprocal 2-cycle (A→B while B→A already exists). Distinct from
+    /// the generic `InvalidAttributeValue` (0x2d). Codepoint verified
+    /// from `kmip-spec-3.0-tags-enums.json` (`Result Reason` 0x4d).
+    CircularLinkError = 0x0000_004d,
     GeneralFailure        = 0x0000_0100,
 }
 
@@ -270,6 +297,29 @@ impl KmipError {
     pub fn invalid_object_type(msg: impl Into<String>) -> Self {
         Self::failed(ResultReason::InvalidObjectType, msg)
     }
+    pub fn wrapping_object_not_found(uid: &str) -> Self {
+        // KMIP 3.0 §11 — the *wrapping* object (KEK) UID does not
+        // resolve. Distinct from the data object's `ObjectNotFound`.
+        Self::failed(
+            ResultReason::WrappingObjectNotFound,
+            format!("wrapping key (KEK) UID {uid:?} not found"),
+        )
+    }
+    pub fn wrapping_object_archived(uid: &str) -> Self {
+        Self::failed(
+            ResultReason::WrappingObjectArchived,
+            format!("wrapping key (KEK) UID {uid:?} is archived; Recover it before wrapping/unwrapping"),
+        )
+    }
+    pub fn wrapping_object_destroyed(uid: &str) -> Self {
+        Self::failed(
+            ResultReason::WrappingObjectDestroyed,
+            format!("wrapping key (KEK) UID {uid:?} has been destroyed"),
+        )
+    }
+    pub fn circular_link_error(msg: impl Into<String>) -> Self {
+        Self::failed(ResultReason::CircularLinkError, msg)
+    }
     pub fn internal(msg: impl Into<String>) -> Self {
         Self::Internal(msg.into())
     }
@@ -323,6 +373,11 @@ mod tests {
         assert_eq!(ResultReason::InvalidObjectType.to_wire_value(),     0x0000_0030);
         assert_eq!(ResultReason::UsageLimitExceeded.to_wire_value(),    0x0000_001a);
         assert_eq!(ResultReason::AttributeNotFound.to_wire_value(),     0x0000_0021);
+        // P2.4 additions — `Result Reason` rows in the OASIS enums JSON.
+        assert_eq!(ResultReason::WrappingObjectArchived.to_wire_value(),  0x0000_0040);
+        assert_eq!(ResultReason::WrappingObjectDestroyed.to_wire_value(), 0x0000_0041);
+        assert_eq!(ResultReason::WrappingObjectNotFound.to_wire_value(),  0x0000_0042);
+        assert_eq!(ResultReason::CircularLinkError.to_wire_value(),       0x0000_004d);
         assert_eq!(ResultReason::GeneralFailure.to_wire_value(),        0x0000_0100);
     }
 
@@ -348,5 +403,21 @@ mod tests {
             ResultReason::UnsupportedProtocolVersion
         );
         assert_eq!(KmipError::general_failure("x").result_reason(), ResultReason::GeneralFailure);
+        assert_eq!(
+            KmipError::wrapping_object_not_found("u1").result_reason(),
+            ResultReason::WrappingObjectNotFound
+        );
+        assert_eq!(
+            KmipError::wrapping_object_archived("u1").result_reason(),
+            ResultReason::WrappingObjectArchived
+        );
+        assert_eq!(
+            KmipError::wrapping_object_destroyed("u1").result_reason(),
+            ResultReason::WrappingObjectDestroyed
+        );
+        assert_eq!(
+            KmipError::circular_link_error("x").result_reason(),
+            ResultReason::CircularLinkError
+        );
     }
 }
