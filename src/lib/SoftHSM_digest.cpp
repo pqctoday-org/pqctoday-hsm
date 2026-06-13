@@ -114,6 +114,9 @@ CK_RV SoftHSM::C_DigestInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 	session->setOpType(SESSION_OP_DIGEST);
 	session->setDigestOp(hash);
 	session->setHashAlgo(algo);
+	// V-17: track single-part eligibility; cleared once C_DigestUpdate/C_DigestKey
+	// feeds data, so a later one-shot C_Digest is rejected with CKR_OPERATION_ACTIVE.
+	session->setAllowSinglePartOp(true);
 
 	return CKR_OK;
 }
@@ -133,6 +136,12 @@ CK_RV SoftHSM::C_Digest(CK_SESSION_HANDLE hSession, CK_BYTE_PTR pData, CK_ULONG 
 
 	// Check if we are doing the correct operation
 	if (session->getOpType() != SESSION_OP_DIGEST) return CKR_OPERATION_NOT_INITIALIZED;
+
+	// V-17: C_Digest must be a single-part call. If C_DigestUpdate/C_DigestKey has
+	// already fed data, reject the one-shot with CKR_OPERATION_ACTIVE rather than
+	// silently digesting update||data. The multi-part op is left intact for C_DigestFinal.
+	if (!session->getAllowSinglePartOp())
+		return CKR_OPERATION_ACTIVE;
 
 	// Return size
 	CK_ULONG size = session->getDigestOp()->getHashSize();
@@ -206,6 +215,9 @@ CK_RV SoftHSM::C_DigestUpdate(CK_SESSION_HANDLE hSession, CK_BYTE_PTR pPart, CK_
 		session->resetOp();
 		return CKR_GENERAL_ERROR;
 	}
+
+	// V-17: data has been fed multi-part; a later one-shot C_Digest is now invalid.
+	session->setAllowSinglePartOp(false);
 
 	return CKR_OK;
 }
@@ -281,6 +293,9 @@ CK_RV SoftHSM::C_DigestKey(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject)
 		session->resetOp();
 		return CKR_GENERAL_ERROR;
 	}
+
+	// V-17: data has been fed multi-part; a later one-shot C_Digest is now invalid.
+	session->setAllowSinglePartOp(false);
 
 	return CKR_OK;
 }

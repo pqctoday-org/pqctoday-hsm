@@ -1745,8 +1745,13 @@ PKCS_API CK_RV C_EncapsulateKey(CK_SESSION_HANDLE hSession,
 	CK_BYTE_PTR pCiphertext, CK_ULONG_PTR pulCiphertextLen,
 	CK_OBJECT_HANDLE_PTR phKey)
 {
-	return SoftHSM::i()->C_EncapsulateKey(hSession, pMechanism, hPublicKey,
-		pTemplate, ulAttributeCount, pCiphertext, pulCiphertextLen, phKey);
+	// V-22: firewall the C ABI — a C++ exception escaping into the caller is UB.
+	try {
+		return SoftHSM::i()->C_EncapsulateKey(hSession, pMechanism, hPublicKey,
+			pTemplate, ulAttributeCount, pCiphertext, pulCiphertextLen, phKey);
+	}
+	catch (...) { FatalException(); }
+	return CKR_FUNCTION_FAILED;
 }
 
 PKCS_API CK_RV C_DecapsulateKey(CK_SESSION_HANDLE hSession,
@@ -1755,8 +1760,13 @@ PKCS_API CK_RV C_DecapsulateKey(CK_SESSION_HANDLE hSession,
 	CK_BYTE_PTR pCiphertext, CK_ULONG ulCiphertextLen,
 	CK_OBJECT_HANDLE_PTR phKey)
 {
-	return SoftHSM::i()->C_DecapsulateKey(hSession, pMechanism, hPrivateKey,
-		pTemplate, ulAttributeCount, pCiphertext, ulCiphertextLen, phKey);
+	// V-22: firewall the C ABI — a C++ exception escaping into the caller is UB.
+	try {
+		return SoftHSM::i()->C_DecapsulateKey(hSession, pMechanism, hPrivateKey,
+			pTemplate, ulAttributeCount, pCiphertext, ulCiphertextLen, phKey);
+	}
+	catch (...) { FatalException(); }
+	return CKR_FUNCTION_FAILED;
 }
 
 // ---------------------------------------------------------------------------
@@ -1800,12 +1810,11 @@ PKCS_API CK_RV C_VerifySignatureFinal(CK_SESSION_HANDLE hSession)
 // ---------------------------------------------------------------------------
 
 PKCS_API CK_RV C_GetSessionValidationFlags(CK_SESSION_HANDLE hSession,
-	CK_SESSION_VALIDATION_FLAGS_TYPE /*type*/, CK_FLAGS_PTR pFlags)
+	CK_SESSION_VALIDATION_FLAGS_TYPE type, CK_FLAGS_PTR pFlags)
 {
-	if (pFlags == NULL_PTR) return CKR_ARGUMENTS_BAD;
-	// Software token has no validation constraints — return 0 flags per §5.22
-	*pFlags = 0;
-	return CKR_OK;
+	try { return SoftHSM::i()->C_GetSessionValidationFlags(hSession, type, pFlags); }
+	catch (...) { FatalException(); }
+	return CKR_FUNCTION_FAILED;
 }
 
 // ---------------------------------------------------------------------------

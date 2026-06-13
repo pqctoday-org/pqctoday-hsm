@@ -1191,11 +1191,15 @@ CK_RV SoftHSM::C_SignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechanis
 static CK_RV MacSign(Session* session, CK_BYTE_PTR pData, CK_ULONG ulDataLen, CK_BYTE_PTR pSignature, CK_ULONG_PTR pulSignatureLen)
 {
 	MacAlgorithm* mac = session->getMacOp();
-	if (mac == NULL || !session->getAllowSinglePartOp())
+	if (mac == NULL)
 	{
 		session->resetOp();
 		return CKR_OPERATION_NOT_INITIALIZED;
 	}
+	// V-17: a one-shot C_Sign after C_SignUpdate must report CKR_OPERATION_ACTIVE
+	// without destroying the multi-part op (the caller can still C_SignFinal).
+	if (!session->getAllowSinglePartOp())
+		return CKR_OPERATION_ACTIVE;
 
 	// Size of the signature
 	CK_ULONG size = mac->getMacSize();
@@ -1252,11 +1256,15 @@ static CK_RV AsymSign(Session* session, CK_BYTE_PTR pData, CK_ULONG ulDataLen, C
 	PrivateKey* privateKey = session->getPrivateKey();
 	size_t paramLen;
 	void* param = session->getParameters(paramLen);
-	if (asymCrypto == NULL || !session->getAllowSinglePartOp() || privateKey == NULL)
+	if (asymCrypto == NULL || privateKey == NULL)
 	{
 		session->resetOp();
 		return CKR_OPERATION_NOT_INITIALIZED;
 	}
+	// V-17: a one-shot C_Sign after C_SignUpdate must report CKR_OPERATION_ACTIVE
+	// without destroying the multi-part op (the caller can still C_SignFinal).
+	if (!session->getAllowSinglePartOp())
+		return CKR_OPERATION_ACTIVE;
 
 	// Check if re-authentication is required
 	if (session->getReAuthentication())
@@ -1392,20 +1400,30 @@ CK_RV SoftHSM::StatefulSign(Session* session, CK_BYTE_PTR pData, CK_ULONG ulData
 		sigBuf.resize(exact_sig_len);
 		sig = &sigBuf[0];
 
+		struct hss_extra_info hssInfo;
+		hss_init_extra_info(&hssInfo);
 		bool ok = hss_generate_signature(
 			working_key,
 			NULL, // update_private_key callback
 			(void*)privKeyBytes.byte_str(), // context (memory to mutate)
 			pData, ulDataLen,
-			sig, sigBuf.size(), NULL
+			sig, sigBuf.size(), &hssInfo
 		);
 		sig_len = exact_sig_len;
+
+		enum hss_error_code hssErr = hss_extra_info_test_error_code(&hssInfo);
 
 		hss_free_working_key(working_key);
 
 		if (!ok) {
 			session->resetOp();
-			return CKR_KEY_EXHAUSTED;
+			// GAP 4.5: only report CKR_KEY_EXHAUSTED when the leaves are
+			// genuinely used up; map all other backend failures (bad params,
+			// RNG, NVRAM write, internal) to CKR_DEVICE_ERROR.
+			if (hssErr == hss_error_private_key_expired ||
+			    hssErr == hss_error_not_that_many_sigs_left)
+				return CKR_KEY_EXHAUSTED;
+			return CKR_DEVICE_ERROR;
 		}
 	} else if (mechanism == (AsymMech::Type)1001 || mechanism == (AsymMech::Type)1002) { // XMSS / XMSSMT
 		// xmss_sign()/xmssmt_sign() return sm = [signature || message],
@@ -1436,7 +1454,12 @@ CK_RV SoftHSM::StatefulSign(Session* session, CK_BYTE_PTR pData, CK_ULONG ulData
 		          : xmssmt_sign(privKeyBytes.byte_str(), sig, &sig_len, pData, ulDataLen);
 		if (ret != 0) {
 			session->resetOp();
-			return CKR_KEY_EXHAUSTED;
+			// GAP 4.5: the xmss-reference core returns -2 specifically when all
+			// one-time keys are used up; any other nonzero return is a genuine
+			// processing/parameter error, not exhaustion.
+			if (ret == -2)
+				return CKR_KEY_EXHAUSTED;
+			return CKR_DEVICE_ERROR;
 		}
 		// Per PKCS#11 v3.2, C_Sign returns only the signature portion.
 		// Strip the appended message: sig_len = sig_bytes + ulDataLen.
@@ -2663,6 +2686,32 @@ CK_RV SoftHSM::StatefulVerify(Session* session, CK_BYTE_PTR pData, CK_ULONG ulDa
 	AsymMech::Type mechanism = session->getMechanism();
 	ByteString pubKeyBytes = osObj->getByteStringValue(CKA_VALUE);
 
+	// GAP 4.6: pre-check the signature length so a malformed length reports
+	// CKR_SIGNATURE_LEN_RANGE (matching MacVerify / AsymVerify), not the
+	// catch-all CKR_SIGNATURE_INVALID. An empty signature is always malformed.
+	if (pSignature == NULL_PTR || ulSignatureLen == 0) {
+		session->resetOp();
+		return CKR_SIGNATURE_LEN_RANGE;
+	}
+	if (mechanism == (AsymMech::Type)1001 || mechanism == (AsymMech::Type)1002) {
+		// XMSS/XMSSMT signatures are fixed-length for the param set encoded in
+		// the public key OID; any other length is out of range.
+		if (pubKeyBytes.size() >= XMSS_OID_LEN) {
+			uint32_t oid = 0;
+			for (unsigned int i = 0; i < XMSS_OID_LEN; i++) {
+				oid |= ((uint32_t)pubKeyBytes.const_byte_str()[XMSS_OID_LEN - i - 1]) << (i * 8);
+			}
+			xmss_params params;
+			int prv = (mechanism == (AsymMech::Type)1001)
+			          ? xmss_parse_oid(&params, oid)
+			          : xmssmt_parse_oid(&params, oid);
+			if (prv == 0 && ulSignatureLen != (CK_ULONG)params.sig_bytes) {
+				session->resetOp();
+				return CKR_SIGNATURE_LEN_RANGE;
+			}
+		}
+	}
+
 	bool verified = false;
 
 	if (mechanism == (AsymMech::Type)1000) { // HSS / LMS
@@ -2723,11 +2772,15 @@ CK_RV SoftHSM::C_VerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 static CK_RV MacVerify(Session* session, CK_BYTE_PTR pData, CK_ULONG ulDataLen, CK_BYTE_PTR pSignature, CK_ULONG ulSignatureLen)
 {
 	MacAlgorithm* mac = session->getMacOp();
-	if (mac == NULL || !session->getAllowSinglePartOp())
+	if (mac == NULL)
 	{
 		session->resetOp();
 		return CKR_OPERATION_NOT_INITIALIZED;
 	}
+	// V-17: a one-shot C_Verify after C_VerifyUpdate must report CKR_OPERATION_ACTIVE
+	// without destroying the multi-part op (the caller can still C_VerifyFinal).
+	if (!session->getAllowSinglePartOp())
+		return CKR_OPERATION_ACTIVE;
 
 	// Size of the signature
 	CK_ULONG size = mac->getMacSize();
@@ -2772,11 +2825,15 @@ static CK_RV AsymVerify(Session* session, CK_BYTE_PTR pData, CK_ULONG ulDataLen,
 	PublicKey* publicKey = session->getPublicKey();
 	size_t paramLen;
 	void* param = session->getParameters(paramLen);
-	if (asymCrypto == NULL || !session->getAllowSinglePartOp() || publicKey == NULL)
+	if (asymCrypto == NULL || publicKey == NULL)
 	{
 		session->resetOp();
 		return CKR_OPERATION_NOT_INITIALIZED;
 	}
+	// V-17: a one-shot C_Verify after C_VerifyUpdate must report CKR_OPERATION_ACTIVE
+	// without destroying the multi-part op (the caller can still C_VerifyFinal).
+	if (!session->getAllowSinglePartOp())
+		return CKR_OPERATION_ACTIVE;
 
 	// Size of the signature
 	CK_ULONG size = publicKey->getOutputLength();

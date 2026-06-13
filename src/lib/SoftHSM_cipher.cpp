@@ -422,11 +422,15 @@ CK_RV SoftHSM::C_EncryptInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMecha
 static CK_RV SymEncrypt(Session* session, CK_BYTE_PTR pData, CK_ULONG ulDataLen, CK_BYTE_PTR pEncryptedData, CK_ULONG_PTR pulEncryptedDataLen)
 {
 	SymmetricAlgorithm* cipher = session->getSymmetricCryptoOp();
-	if (cipher == NULL || !session->getAllowSinglePartOp())
+	if (cipher == NULL)
 	{
 		session->resetOp();
 		return CKR_OPERATION_NOT_INITIALIZED;
 	}
+	// V-17: a one-shot C_Encrypt after C_EncryptUpdate must report CKR_OPERATION_ACTIVE
+	// without destroying the multi-part op (the caller can still C_EncryptFinal).
+	if (!session->getAllowSinglePartOp())
+		return CKR_OPERATION_ACTIVE;
 
 	// Check data size
 	CK_ULONG maxSize = ulDataLen + cipher->getTagBytes();
@@ -502,11 +506,15 @@ static CK_RV AsymEncrypt(Session* session, CK_BYTE_PTR pData, CK_ULONG ulDataLen
 	AsymmetricAlgorithm* asymCrypto = session->getAsymmetricCryptoOp();
 	AsymMech::Type mechanism = session->getMechanism();
 	PublicKey* publicKey = session->getPublicKey();
-	if (asymCrypto == NULL || !session->getAllowSinglePartOp() || publicKey == NULL)
+	if (asymCrypto == NULL || publicKey == NULL)
 	{
 		session->resetOp();
 		return CKR_OPERATION_NOT_INITIALIZED;
 	}
+	// V-17: a one-shot C_Encrypt after C_EncryptUpdate must report CKR_OPERATION_ACTIVE
+	// without destroying the multi-part op (the caller can still C_EncryptFinal).
+	if (!session->getAllowSinglePartOp())
+		return CKR_OPERATION_ACTIVE;
 
 	// Size of the encrypted data
 	CK_ULONG size = publicKey->getOutputLength();
@@ -660,6 +668,10 @@ static CK_RV SymEncryptUpdate(Session* session, CK_BYTE_PTR pData, CK_ULONG ulDa
 		memcpy(pEncryptedData, encryptedData.byte_str(), encryptedData.size());
 	}
 	*pulEncryptedDataLen = encryptedData.size();
+
+	// V-17: a multi-part op is now in progress; a subsequent one-shot C_Encrypt
+	// must be rejected with CKR_OPERATION_ACTIVE rather than silently allowed.
+	session->setAllowSinglePartOp(false);
 
 	return CKR_OK;
 }
@@ -1116,11 +1128,15 @@ CK_RV SoftHSM::C_DecryptInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMecha
 static CK_RV SymDecrypt(Session* session, CK_BYTE_PTR pEncryptedData, CK_ULONG ulEncryptedDataLen, CK_BYTE_PTR pData, CK_ULONG_PTR pulDataLen)
 {
 	SymmetricAlgorithm* cipher = session->getSymmetricCryptoOp();
-	if (cipher == NULL || !session->getAllowSinglePartOp())
+	if (cipher == NULL)
 	{
 		session->resetOp();
 		return CKR_OPERATION_NOT_INITIALIZED;
 	}
+	// V-17: a one-shot C_Decrypt after C_DecryptUpdate must report CKR_OPERATION_ACTIVE
+	// without destroying the multi-part op (the caller can still C_DecryptFinal).
+	if (!session->getAllowSinglePartOp())
+		return CKR_OPERATION_ACTIVE;
 
 	// Check encrypted data size
 	if (cipher->isBlockCipher() && ulEncryptedDataLen % cipher->getBlockSize() != 0)
@@ -1188,11 +1204,15 @@ static CK_RV AsymDecrypt(Session* session, CK_BYTE_PTR pEncryptedData, CK_ULONG 
 	AsymmetricAlgorithm* asymCrypto = session->getAsymmetricCryptoOp();
 	AsymMech::Type mechanism = session->getMechanism();
 	PrivateKey* privateKey = session->getPrivateKey();
-	if (asymCrypto == NULL || !session->getAllowSinglePartOp() || privateKey == NULL)
+	if (asymCrypto == NULL || privateKey == NULL)
 	{
 		session->resetOp();
 		return CKR_OPERATION_NOT_INITIALIZED;
 	}
+	// V-17: a one-shot C_Decrypt after C_DecryptUpdate must report CKR_OPERATION_ACTIVE
+	// without destroying the multi-part op (the caller can still C_DecryptFinal).
+	if (!session->getAllowSinglePartOp())
+		return CKR_OPERATION_ACTIVE;
 
 	// Check if re-authentication is required
 	if (session->getReAuthentication())
@@ -1351,6 +1371,10 @@ static CK_RV SymDecryptUpdate(Session* session, CK_BYTE_PTR pEncryptedData, CK_U
 		memcpy(pData, decryptedData.byte_str(), decryptedData.size());
 	}
 	*pDataLen = decryptedData.size();
+
+	// V-17: a multi-part op is now in progress; a subsequent one-shot C_Decrypt
+	// must be rejected with CKR_OPERATION_ACTIVE rather than silently allowed.
+	session->setAllowSinglePartOp(false);
 
 	return CKR_OK;
 }

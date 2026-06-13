@@ -1551,15 +1551,18 @@ CK_RV SoftHSM::UnwrapKeySym
 		{
 			cipher->recycleKey(unwrappingkey);
 			CryptoFactory::i()->recycleSymmetricAlgorithm(cipher);
-			return CKR_GENERAL_ERROR;
+			// V-7: a decrypt/padding failure on the wrapped blob is an integrity
+			// failure of the wrapped key, not an internal error.
+			return CKR_WRAPPED_KEY_INVALID;
 		}
 		keydata = decryptedData + decryptedFinal;
 	}
 	else
 	{
-		// Unwrap the key (AES-KW / AES-KWP)
+		// Unwrap the key (AES-KW / AES-KWP). V-7: an AES-KW/KWP integrity-check
+		// failure on the wrapped blob must be reported as CKR_WRAPPED_KEY_INVALID.
 		if (!cipher->unwrapKey(unwrappingkey, mode, wrapped, keydata))
-			rv = CKR_GENERAL_ERROR;
+			rv = CKR_WRAPPED_KEY_INVALID;
 	}
 
 	cipher->recycleKey(unwrappingkey);
@@ -1620,9 +1623,23 @@ CK_RV SoftHSM::UnwrapKeyAsym
 			return CKR_MECHANISM_INVALID;
 	}
 
-	// Unwrap the key
+	// GAP 1.6: pre-check the wrapped-blob length. RSA ciphertext is exactly the
+	// modulus byte length; a mismatch is a malformed wrapped key and must be
+	// reported as CKR_WRAPPED_KEY_LEN_RANGE rather than a generic decrypt error.
+	{
+		size_t modBytes = ((RSAPrivateKey*)unwrappingkey)->getOutputLength();
+		if (modBytes != 0 && wrapped.size() != modBytes)
+		{
+			cipher->recyclePrivateKey(unwrappingkey);
+			CryptoFactory::i()->recycleAsymmetricAlgorithm(cipher);
+			return CKR_WRAPPED_KEY_LEN_RANGE;
+		}
+	}
+
+	// Unwrap the key. V-7: an RSA decrypt failure on the wrapped blob (bad
+	// PKCS#1 / OAEP integrity) must be reported as CKR_WRAPPED_KEY_INVALID.
 	if (!cipher->unwrapKey(unwrappingkey, wrapped, keydata, mode))
-		rv = CKR_GENERAL_ERROR;
+		rv = CKR_WRAPPED_KEY_INVALID;
 	cipher->recyclePrivateKey(unwrappingkey);
 	CryptoFactory::i()->recycleAsymmetricAlgorithm(cipher);
 	return rv;
@@ -2265,7 +2282,13 @@ CK_RV SoftHSM::C_WrapKeyAuthenticated
 	if (!ok) return CKR_FUNCTION_FAILED;
 
 	ByteString wrapped = cipherOut + tagOut;
-	if (*pulWrappedKeyLen < wrapped.size()) return CKR_BUFFER_TOO_SMALL;
+	// V-18: honour the two-call convention — set the required length on the
+	// CKR_BUFFER_TOO_SMALL path (mirrors the NULL size-query path above).
+	if (*pulWrappedKeyLen < wrapped.size())
+	{
+		*pulWrappedKeyLen = static_cast<CK_ULONG>(wrapped.size());
+		return CKR_BUFFER_TOO_SMALL;
+	}
 	memcpy(pWrappedKey, wrapped.byte_str(), wrapped.size());
 	*pulWrappedKeyLen = static_cast<CK_ULONG>(wrapped.size());
 	return CKR_OK;
@@ -2697,8 +2720,10 @@ CK_RV SoftHSM::C_DeriveKey
 	if (token == NULL) return CKR_GENERAL_ERROR;
 
 	// Check the key handle.
+	// GAP 6.5: an invalid base key handle is CKR_KEY_HANDLE_INVALID per the
+	// C_DeriveKey return-code list, not CKR_OBJECT_HANDLE_INVALID.
 	OSObject *key = (OSObject *)handleManager->getObject(hBaseKey);
-	if (key == NULL_PTR || !key->isValid()) return CKR_OBJECT_HANDLE_INVALID;
+	if (key == NULL_PTR || !key->isValid()) return CKR_KEY_HANDLE_INVALID;
 
 	CK_BBOOL isKeyOnToken = key->getBooleanValue(CKA_TOKEN, false);
 	CK_BBOOL isKeyPrivate = key->getBooleanValue(CKA_PRIVATE, true);

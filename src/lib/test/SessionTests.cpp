@@ -189,39 +189,53 @@ void SessionTests::testSessionCancel()
 	rv = CRYPTOKI_F_PTR( C_OpenSession(m_initializedTokenSlotID, CKF_SERIAL_SESSION, NULL_PTR, NULL_PTR, &hSession) );
 	CPPUNIT_ASSERT(rv == CKR_OK);
 
-	// 1. Empty abort: Session has no active operations
+	CK_BYTE data[] = "test";
+	CK_BYTE digest[32];
+	CK_ULONG digestLen = sizeof(digest);
+
+	// 1. flags==0 with no active operation: spec §5.6.5 says nothing was
+	//    requested, so this is a no-op that returns CKR_OK (V-16).
 	rv = CRYPTOKI_F_PTR( C_SessionCancel(hSession, 0) );
-	CPPUNIT_ASSERT(rv == CKR_OPERATION_CANCEL_FAILED);
+	CPPUNIT_ASSERT(rv == CKR_OK);
 
 	// Initialize a Digest operation
 	CK_MECHANISM mechanism = { CKM_SHA256, NULL_PTR, 0 };
 	rv = CRYPTOKI_F_PTR( C_DigestInit(hSession, &mechanism) );
 	CPPUNIT_ASSERT(rv == CKR_OK);
 
-	// 2. Mismatch abort: cancelling ENCRYPT when only DIGEST is running
+	// 2. Unmatched flag: cancelling ENCRYPT while only DIGEST is running must
+	//    be ignored (CKR_OK) and the DIGEST op must remain active (V-16).
 	rv = CRYPTOKI_F_PTR( C_SessionCancel(hSession, CKF_ENCRYPT) );
-	CPPUNIT_ASSERT(rv == CKR_OPERATION_CANCEL_FAILED);
+	CPPUNIT_ASSERT(rv == CKR_OK);
 
-	// 3. Strict abort: cancel DIGEST
+	// The digest op survived the unmatched cancel — it can still complete.
+	digestLen = sizeof(digest);
+	rv = CRYPTOKI_F_PTR( C_Digest(hSession, data, sizeof(data) - 1, digest, &digestLen) );
+	CPPUNIT_ASSERT(rv == CKR_OK);
+
+	// 3. Matched cancel: start a new DIGEST and cancel it with CKF_DIGEST.
+	rv = CRYPTOKI_F_PTR( C_DigestInit(hSession, &mechanism) );
+	CPPUNIT_ASSERT(rv == CKR_OK);
+
 	rv = CRYPTOKI_F_PTR( C_SessionCancel(hSession, CKF_DIGEST) );
 	CPPUNIT_ASSERT(rv == CKR_OK);
 
-	// Digest should now fail because it was cancelled
-	CK_BYTE data[] = "test";
-	CK_BYTE digest[32];
-	CK_ULONG digestLen = sizeof(digest);
+	// Digest should now fail because it was cancelled.
+	digestLen = sizeof(digest);
 	rv = CRYPTOKI_F_PTR( C_Digest(hSession, data, sizeof(data) - 1, digest, &digestLen) );
 	CPPUNIT_ASSERT(rv == CKR_OPERATION_NOT_INITIALIZED);
 
-	// 4. Universal abort
+	// 4. flags==0 is always a no-op: an active op must NOT be cancelled by it.
 	rv = CRYPTOKI_F_PTR( C_DigestInit(hSession, &mechanism) );
 	CPPUNIT_ASSERT(rv == CKR_OK);
 
 	rv = CRYPTOKI_F_PTR( C_SessionCancel(hSession, 0) );
 	CPPUNIT_ASSERT(rv == CKR_OK);
 
+	// The op survives flags==0; complete it to prove it is still active.
+	digestLen = sizeof(digest);
 	rv = CRYPTOKI_F_PTR( C_Digest(hSession, data, sizeof(data) - 1, digest, &digestLen) );
-	CPPUNIT_ASSERT(rv == CKR_OPERATION_NOT_INITIALIZED);
+	CPPUNIT_ASSERT(rv == CKR_OK);
 
 	rv = CRYPTOKI_F_PTR( C_CloseSession(hSession) );
 	CPPUNIT_ASSERT(rv == CKR_OK);
