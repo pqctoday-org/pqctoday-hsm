@@ -73,7 +73,47 @@ fast (the high-confidence 771); I4 is the bulk (siggen, deterministic-sign
 threading); I5 is the one uncertain category (encaps) — feasibility-gated; I6
 gates + documents. Effort: S ≤½d · M 1–2d · L multi-day.
 
-### I1 — Corpus ingestion + harness adaptation (S–M) — ENABLER
+### I0 — softhsmrustv3 engine must reproduce the answers FIRST (M) — FOUNDATION
+
+**Precondition for everything else.** Before any KMIP transcript wiring, prove
+the `softhsmrustv3` engine itself produces the EXACT interop answers at the
+`native` level — because a transcript can only pass if the engine reproduces the
+deterministic value byte-for-byte. If the engine is wrong, no KMIP plumbing
+fixes it; if the engine is right, the KMIP layer is "just" wiring.
+
+- **Extract the (input → expected-output) pairs** from the 1452 transcripts:
+  keygen = `Seed` → expected `KeyMaterial`; siggen = key + `Data` +
+  `Deterministic=true` → expected signature; sigver = key + sig + data →
+  Valid/Invalid; decap = dk + ct → expected shared secret; encap = ek (+ coins)
+  → expected ct + ss. These are concrete; harvest them into engine-level test
+  vectors (a small extractor over the XML, or reuse the raw ACVP JSON the set is
+  derived from — the NIST ACVP files are linked from kmip-interop.org).
+- **Drive `softhsmrustv3::native` DIRECTLY** (no KMIP, no dispatcher) and assert
+  byte-exact against the expected output, per family/param-set:
+  - keygen: `generate_{ml_dsa,ml_kem,slh_dsa}_keypair_from_seed(seed)` → pk/sk
+    bytes == expected.
+  - siggen: `native::sign(..., deterministic)` → signature == expected.
+  - sigver: `native::verify(...)` → matches expected validity.
+  - decap: `native::decapsulate(dk, ct)` → ss == expected.
+  - encap: deterministic encaps with coins → ct/ss == expected (the I5-gated
+    capability — assess here at the engine level first).
+- This **extends P1.2's `acvp_roundtrip.rs`** (which already drives
+  `softhsmrustv3::native` against NIST ACVP vectors byte-exact for ML-KEM decap,
+  ML-DSA sigVer, etc., with siggen/SLH-DSA caveats). I0 closes those caveats
+  against the SPECIFIC vectors the interop set uses (deterministic ML-DSA
+  siggen, SLH-DSA siggen, ML-KEM keygen-from-d‖z, encaps-with-coins) — fixing or
+  patching `softhsmrustv3` where it diverges.
+- **Honest engine baseline**: report the per-category byte-exact pass rate of
+  `softhsmrustv3` against the interop vectors. THIS number is the ceiling for
+  the KMIP transcript pass rate (I1–I6 can't exceed what the engine produces).
+- Any engine divergence is fixed IN `softhsmrustv3` (or its vendored fips20x/
+  ml-kem forks) — never compensated for in the KMIP layer.
+
+**Gate**: engine-level KATs (in `rust/` or `kmip/tests/` driving `native`) pass
+byte-exact for every reachable family; divergences documented with the specific
+`softhsmrustv3` cause. Only when the engine is proven correct do I1+ proceed.
+
+### I1 — Corpus ingestion + harness adaptation (S–M) — ENABLER (after I0)
 
 1. **Vendor the corpus**: extract the 1452 transcripts into
    `kmip/conformance/pqc_interop_corpus/` (mirror how `oasis_corpus` is vendored)
@@ -197,6 +237,9 @@ deferral with the engine blocker); profiles replay unchanged.
 ## Sequencing & definition of done
 
 ```
+I0 (FOUNDATION: softhsmrustv3 native reproduces the exact answers — engine KATs)
+   │  ← nothing below can pass what the engine can't produce; fix divergences IN softhsmrustv3
+   ▼
 I1 (enabler: ingest + #-strip + baseline) ──►
   I2 keygen (Seed threading) ─┐
   I3 sigver + decap           ├─ the high-confidence 771; can run in parallel after I1
@@ -204,6 +247,10 @@ I1 (enabler: ingest + #-strip + baseline) ──►
   I5 encapsulation (feasibility-gated; may defer 75)
   I6 CI gate + report + docs
 ```
+
+I0 is the gate: it proves **softhsmrustv3** is interop-correct in isolation, so
+I1–I6 become wiring + byte-encoding reconciliation, not a hunt for crypto bugs
+buried under the KMIP layer.
 
 **Honest reporting throughout** (the rule this whole effort has followed): every
 run reports the REAL pass count; no placeholder-masked passes (the values are
