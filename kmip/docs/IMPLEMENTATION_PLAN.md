@@ -178,17 +178,31 @@ CREATE INDEX IF NOT EXISTS idx_audit_log_correlation_id ON audit_log(correlation
 
 ### 3.4 Lifecycle FSM
 
-State transitions allowed (rejected otherwise with KMIP `PermissionDenied`):
+State transitions allowed per KMIP 3.0 §3.2 (numbered state diagram) and
+§6.1.19 (Destroy constraint); rejected otherwise with `PermissionDenied`
+(store FSM) / `WrongKeyLifecycleState` (op handler). §3.2 transition
+numbers in parentheses. Authoritative encoding lives in
+`State::can_transition_to` and the exhaustive matrix test in
+`src/store/lifecycle.rs`.
 
 ```text
-PreActive → Active        (Activate op)
-PreActive → Destroyed     (Destroy op while never-activated)
-Active    → Deactivated   (Revoke op)
-Active    → Compromised   (Revoke op, reason=Compromise)
-Deactivated → Destroyed   (Destroy op)
-Compromised → Destroyed   (Destroy op)
-Destroyed   → (terminal)
+PreActive   → Active                (t1, Activate op)
+PreActive   → Compromised           (t3, Revoke op, reason=Compromise)
+PreActive   → Destroyed             (t2, Destroy op while never-activated)
+Active      → Deactivated           (t6, Revoke/Deactivate op)
+Active      → Compromised           (t5, Revoke op, reason=Compromise)
+Deactivated → Compromised           (t8, Revoke op, reason=Compromise)
+Deactivated → Destroyed             (t7, Destroy op)
+Compromised → DestroyedCompromised  (Destroy op)
+Destroyed   → DestroyedCompromised  (t10, Revoke op, reason=Compromise)
+DestroyedCompromised → (terminal)
 ```
+
+Forbidden edges (latent-bug guard): **Active → Destroyed** is NOT allowed —
+§6.1.19: "Objects SHALL only be destroyed if they are in either Pre-Active
+or Deactivated state" (an Active key must be Revoked/Deactivated first); and
+**PreActive → Deactivated** is NOT allowed — §3.2 has no such arrow
+(Deactivation is transition 6, Active→Deactivated, only).
 
 Per-state op allowance:
 
