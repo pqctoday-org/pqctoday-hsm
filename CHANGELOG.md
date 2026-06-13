@@ -8,6 +8,62 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — C++ engine PKCS#11 v3.2 compliance, round 4 (2026-06-12)
+
+Full v3.2 remediation of the C++ `src/lib/` engine, which rounds 1–3 had
+scoped out (rust was the focus). Driven by
+`docs/compliance-audit-cpp-pkcs11-v3.2-2026-06-12.md`; six commits on branch
+`fix/cpp-pkcs11-v3.2-compliance` (G1 `74fa6f3`, G2 `6ee89ed`, G3 `11d7c56`,
+G4 `0e00701`, G5 `4c6bf74`, Part-A `520bff4`).
+
+- **G1 — 4 criticals (security):** reject zero-length IV/nonce
+  (`CKR_MECHANISM_PARAM_INVALID`) and remove the OSSL all-zero-IV fallback for
+  GCM/ChaCha20-Poly1305 (catastrophic nonce reuse); enforce the
+  ChaCha20-Poly1305 12-byte nonce and check `SET_IVLEN`; heap-size the
+  XMSS/XMSSMT signature buffer to fix a stack-buffer overflow on large C_Sign;
+  `CKM_RIPEMD160` now returns `CKR_MECHANISM_INVALID` instead of silently
+  computing SHA-1; HSS/XMSS private `CKA_VALUE` is now token-encrypted like
+  every other private key; stateful sign serialized with state committed before
+  the signature is released (leaf-reuse race).
+- **G2 — mechanism table:** ML-DSA/SLH-DSA `C_GetMechanismInfo` report
+  public-key byte sizes (1312/2592, 32/64); advertise↔dispatch reconciled
+  (bare `CKM_CHACHA20` wired, `RIPEMD160_HMAC`/Keccak-256 dropped, raw RSA-PSS /
+  MD5 / SHA3-384-RSA / X25519/X448/BIP32-derive reconciled); ChaCha20 keygen no
+  longer mislabels keys as AES; `CKF_MESSAGE_*` advertised where the message API
+  dispatches.
+- **G3 — keygen/template validation:** mismatched `CKA_KEY_TYPE` →
+  `CKR_TEMPLATE_INCONSISTENT`; missing `CKA_PARAMETER_SET` →
+  `CKR_TEMPLATE_INCOMPLETE` (no more silent ML-DSA/ML-KEM/SLH-DSA defaults);
+  XMSSMT keygen and sign (0x4036→0x4037 stale literal) now reachable;
+  `CKA_HSS_KEYS_REMAINING` reports the real 2^h leaf count; AES-CBC/CBC-PAD wrap
+  is real CBC encryption with the caller IV (not disguised AES-KW).
+- **G4 — return-code precision:** `CKR_WRAPPED_KEY_INVALID` on unwrap integrity
+  failure; spec-correct `C_SessionCancel` (flags==0 no-op, ignore-unmatched,
+  honor `CKF_MESSAGE_*`/FIND); one-shot-after-Update → `CKR_OPERATION_ACTIVE`
+  incl. the missing `C_Digest` guard; `C_WrapKeyAuthenticated` sets the length on
+  `CKR_BUFFER_TOO_SMALL`; `C_GetSessionValidationFlags` gates init+session;
+  `pInitArgs->pReserved != NULL` → `CKR_ARGUMENTS_BAD`; try/catch firewall on the
+  KEM C-ABI shims; KEM/derive handle codes and Stateful sign/verify
+  length/error distinctions corrected.
+- **G5 + Part-A — attributes:** `C_CopyObject` mints a fresh `CKA_UNIQUE_ID`
+  instead of duplicating the source's; `CKA_UNIQUE_ID` is strictly
+  token-assigned (rejected in every template incl. derive); load-time shim
+  migrates legacy objects from the pre-resync type `0x17` to canonical `0x4`;
+  `CKA_UNIQUE_ID` is now readable on private/sensitive objects (it was stored in
+  plaintext but `retrieve()` tried to decrypt it → `CKR_GENERAL_ERROR`); `CKA_SEED`
+  is a sensitive-protected PQC private-key attribute enabling deterministic
+  ML-DSA/ML-KEM/SLH-DSA keygen via the OpenSSL 3.6.2 keygen "seed" `OSSL_PARAM`.
+
+Verification: all 8 `ctest` suites pass; the `p11_v32_compliance_test` binary
+reports **268 PASS / 0 FAIL / 1 SKIP**. The stale gap-analysis v16 banner and
+its G7/G8/G9 "intentional omission" entries are corrected in
+`docs/gap-analysis-pkcs11-v3.2.md` (v17): async ops return
+`CKR_OPERATION_NOT_INITIALIZED` (not `FUNCTION_NOT_SUPPORTED`),
+`C_SignRecover`/`C_VerifyRecover` are fully implemented, and
+`C_GetSessionValidationFlags` was defective (now fixed). The only genuinely
+intentional omissions retained are the 4 dual-function combined ops and
+RIPEMD-160 in the WASM build (`no-module` legacy-provider constraint).
+
 ### Added — strongSwan-wasm: IKEv2 fragmentation, multi-KE, CHILD_SA stub kernel (2026-06-12)
 
 (`feat/wasm-vpn-frag-multike-childsa` track; CHANGELOG entry added at
