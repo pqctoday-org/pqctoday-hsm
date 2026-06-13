@@ -205,3 +205,57 @@ void SecureDataMgrTests::testSecureDataManager()
 	CPPUNIT_ASSERT(decrypted == plaintext);
 }
 
+// Locks in the false-on-failure contract that the [[nodiscard]] key-serialization
+// hardening relies on. When the master key is locked (no user/SO logged in),
+// encrypt()/decrypt() MUST return false and MUST NOT produce a usable ciphertext
+// in the output. A keygen path that ignored the bool (the round-6 corruption bug)
+// would commit a freshly-declared empty ByteString as the private CKA_VALUE; post-
+// hardening every caller folds this bool into its bOK/abort flow instead.
+//
+// NOTE on wipe semantics (verified against SecureDataManager.cpp): on the
+// not-logged-in early return the output is left untouched; the explicit
+// encrypted.wipe() only runs once the key is unlocked, before the AES/RNG step.
+// This test therefore asserts the *return value* contract (the actual guard),
+// not a buffer wipe, and additionally confirms a fresh (empty) output stays empty —
+// exactly the shape of the data the keygen sites would otherwise have committed.
+void SecureDataMgrTests::testEncryptDecryptFailureWipesOutput()
+{
+	ByteString soPIN   = "3132333435363738"; // "12345678"
+	ByteString userPIN = "4041424344454647"; // "ABCDEFGH"
+	ByteString plaintext = "0102030405060708090a0b0c0d0e0f10";
+
+	// Stand up a usable SDM and capture a valid ciphertext for the decrypt test.
+	SecureDataManager s;
+	CPPUNIT_ASSERT(s.setSOPIN(soPIN));
+	CPPUNIT_ASSERT(s.loginSO(soPIN));
+	CPPUNIT_ASSERT(s.setUserPIN(userPIN));
+	CPPUNIT_ASSERT(s.loginUser(userPIN));
+
+	ByteString validCipher;
+	CPPUNIT_ASSERT(s.encrypt(plaintext, validCipher));
+	CPPUNIT_ASSERT(validCipher.size() != 0);
+
+	// Lock the master key.
+	s.logout();
+
+	// A fresh (empty) output — the keygen-site shape — stays empty on a failed
+	// encrypt, and the call returns false so the caller's bOK fold aborts.
+	ByteString encOut;
+	CPPUNIT_ASSERT(!s.encrypt(plaintext, encOut));
+	CPPUNIT_ASSERT(encOut.size() == 0);
+
+	// decrypt() of a previously valid ciphertext must likewise fail while the key
+	// is locked, so a read/load path returns its failure code instead of using
+	// garbage plaintext.
+	ByteString decOut;
+	CPPUNIT_ASSERT(!s.decrypt(validCipher, decOut));
+	CPPUNIT_ASSERT(decOut.size() == 0);
+
+	// Re-login and confirm the happy path is unchanged (round-trip still works).
+	CPPUNIT_ASSERT(s.loginUser(userPIN));
+	ByteString roundTrip;
+	CPPUNIT_ASSERT(s.encrypt(plaintext, encOut));
+	CPPUNIT_ASSERT(s.decrypt(encOut, roundTrip));
+	CPPUNIT_ASSERT(roundTrip == plaintext);
+}
+

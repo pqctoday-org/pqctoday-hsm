@@ -293,7 +293,9 @@ CK_RV SoftHSM::C_EncapsulateKey
 	// Store the shared secret as CKA_VALUE (encrypted if isPrivate)
 	ByteString storedValue;
 	if (isPrivate)
-		token->encrypt(sharedSecret, storedValue);
+		// Fold token->encrypt() into bOK: false (output wiped) on RNG/AES/not-logged-in
+		// failure must abort, not commit an empty CKA_VALUE shared secret.
+		bOK = bOK && token->encrypt(sharedSecret, storedValue);
 	else
 		storedValue = sharedSecret;
 	bOK = bOK && osobject->setAttribute(CKA_VALUE, storedValue);
@@ -482,7 +484,9 @@ CK_RV SoftHSM::C_DecapsulateKey
 	// Store the shared secret as CKA_VALUE (encrypted if isPrivate)
 	ByteString storedValue;
 	if (isPrivate)
-		token->encrypt(sharedSecret, storedValue);
+		// Fold token->encrypt() into bOK: false (output wiped) on RNG/AES/not-logged-in
+		// failure must abort, not commit an empty CKA_VALUE shared secret.
+		bOK = bOK && token->encrypt(sharedSecret, storedValue);
 	else
 		storedValue = sharedSecret;
 	bOK = bOK && osobject->setAttribute(CKA_VALUE, storedValue);

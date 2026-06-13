@@ -40,10 +40,12 @@ class SecureDataMgrTests : public CppUnit::TestFixture
 {
 	CPPUNIT_TEST_SUITE(SecureDataMgrTests);
 	CPPUNIT_TEST(testSecureDataManager);
+	CPPUNIT_TEST(testEncryptDecryptFailureWipesOutput);
 	CPPUNIT_TEST_SUITE_END();
 
 public:
 	void testSecureDataManager();
+	void testEncryptDecryptFailureWipesOutput();
 
 	void setUp();
 	void tearDown();

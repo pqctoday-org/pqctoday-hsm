@@ -143,8 +143,11 @@ public:
 	 * @param encrypted  Cipher-text blob (IV prepended by encrypt()).
 	 * @param plaintext  Output buffer receiving the recovered plain-text.
 	 * @return true on success.
+	 *
+	 * [[nodiscard]]: this is the choke point behind Token::decrypt(); ignoring the
+	 * result lets garbage/empty plaintext flow into key material.
 	 */
-	bool decrypt(const ByteString& encrypted, ByteString& plaintext);
+	[[nodiscard]] bool decrypt(const ByteString& encrypted, ByteString& plaintext);
 
 	/**
 	 * @brief Encrypt an attribute value using the master key.
@@ -153,8 +156,11 @@ public:
 	 * @param plaintext  Data to protect.
 	 * @param encrypted  Output buffer receiving IV + cipher-text.
 	 * @return true on success.
+	 *
+	 * [[nodiscard]]: this is the choke point behind Token::encrypt(); ignoring the
+	 * result lets garbage/empty cipher-text be committed as key material.
 	 */
-	bool encrypt(const ByteString& plaintext, ByteString& encrypted);
+	[[nodiscard]] bool encrypt(const ByteString& plaintext, ByteString& encrypted);
 
 	/** @return The SO PIN-encrypted master key blob for persistent storage. */
 	ByteString getSOPINBlob();
