@@ -8,6 +8,51 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — KMIP 3.0 coverage Phase 1: test rigor & regression safety net (2026-06-13)
+
+Closes the test-rigor gaps found by the KMIP 3.0 spec-coverage audit (see
+`kmip/docs/COVERAGE_GAP_PLAN.md`). Four slices, no behavior change except one
+spec-correctness FSM fix the new exhaustive matrix surfaced.
+
+- **CI-gate the OASIS conformance replay** (`2adc4df`). New `kmip-conformance`
+  CI job builds the release server, runs the 102-transcript replay, and fails on
+  `FAIL>0` / `PASS<92` / skip-set drift. Fixed a harness bug where
+  `dispatcher_replay.py main()` returned 0 unconditionally regardless of FAILs —
+  exactly why the 92→89 Locate regression shipped past manual runs. Added a
+  report-staleness guard that fails CI if the committed `REPLAY_REPORT` differs
+  from a fresh run (timestamp-normalized), so the checked-in report can no
+  longer go stale and hide a regression. The replay is now a real gate, not a
+  manual step.
+- **Execute the NIST/ACVP KAT vectors** (`ef2289c`). The `kat/*-acvp.json`
+  vectors were checked in and manifest-hashed but never run (the consumer
+  `tests/acvp_roundtrip.rs` the README referenced did not exist). New
+  `acvp_roundtrip.rs`: 17 manifest-integrity-gated known-answer tests driving
+  `softhsmrustv3::native` byte-exact against published NIST outputs — SHA2/SHA3,
+  HMAC/KMAC128, AES-CBC/CTR/GCM/KW, RSA-PSS/OAEP, ECDSA P-256/384/521, Ed25519,
+  ML-KEM 512/768/1024 decap, ML-DSA 44/65/87 sigVer, SLH-DSA. Turns crypto
+  coverage from self-consistency round-trips into published-known-answer
+  correctness. A no-orphan guard fails if any `kat/` vector is neither consumed
+  nor explicitly listed unconsumed (4 deferred for missing engine primitives:
+  AES-CMAC, HKDF, Ed448, composite-sigs). Surfaced two corpus defects honestly
+  (a truncated KMAC256 vector; generator-specific SLH-DSA sigGen).
+- **Full-round-trip e2e for the 18 corpus-uncovered ops** (`d6dc53e`).
+  `op_coverage_e2e.rs`: real-engine e2e for Archive/Recover, Deactivate,
+  Import/Export, Set/AdjustAttribute, DeriveKey, ReKey(+KeyPair),
+  GetUsageAllocation, GetConstraints, SetDefaults, SetEndpointRole,
+  DiscoverVersions, Ping, Login/Logout — each asserting a substantive outcome
+  (state, material bytes, links, error reason), not just success. Plus a
+  coverage meta-test asserting every one of the 49 `HANDLED_OPERATIONS` has a
+  covering test, so a new op can't ship uncovered.
+- **Exhaustive 6×6 object-state transition matrix + FSM fix** (`352effc`). The
+  matrix (all 36 `(from,to)` cells vs the §3.2 diagram / §6.1.19) found
+  `State::can_transition_to` allowed two edges the spec forbids: **Active→
+  Destroyed** (§6.1.19: destroy only from Pre-Active/Deactivated) and
+  **PreActive→Deactivated** (no §3.2 edge). Latent — the Destroy/Deactivate op
+  handlers already gated these — but the predicate contradicted both the spec
+  and its own handlers. Both edges removed, the tests that encoded them
+  corrected, IMPLEMENTATION_PLAN §3.4 updated; matrix passes 36/36 as the
+  regression guard. OASIS replay unchanged at 92/0/10.
+
 ### Fixed — KMIP Locate orphan filter regressed OASIS conformance 92→89 (2026-06-13)
 
 A conformance-harness accuracy/completeness audit found `main` was at **89 PASS
