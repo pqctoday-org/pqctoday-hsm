@@ -44,10 +44,12 @@
 use std::str::FromStr;
 use time::OffsetDateTime;
 
-use der::asn1::{BitString, UintRef};
+use der::asn1::{BitString, OctetString, UintRef};
 use der::{Decode, Encode, Sequence};
 use spki::{AlgorithmIdentifierOwned, SubjectPublicKeyInfoOwned};
 use x509_cert::certificate::{Certificate, TbsCertificate, Version};
+use x509_cert::ext::pkix::{BasicConstraints, KeyUsage, KeyUsages};
+use x509_cert::ext::Extension;
 use x509_cert::name::Name;
 use x509_cert::serial_number::SerialNumber;
 use x509_cert::time::{Time, Validity};
@@ -509,6 +511,43 @@ fn subject_cn(der: &[u8]) -> Option<String> {
     super::der_x509::extract_subject_cn(der)
 }
 
+/// Build the X.509v3 extensions a self-signed **CA** certificate needs so
+/// independent verifiers (e.g. `openssl verify`) will accept it as a chain
+/// anchor for the certs it issues:
+///
+/// - **BasicConstraints** `cA:TRUE`, marked *critical* — RFC 5280 §4.2.1.9:
+///   a CA cert MUST assert `cA = TRUE`, and the extension SHOULD be critical.
+///   Without it, `openssl verify` rejects the issuer with
+///   `invalid CA certificate`.
+/// - **KeyUsage** `keyCertSign | cRLSign`, marked *critical* — RFC 5280
+///   §4.2.1.3: a cert whose key signs other certs MUST set `keyCertSign`;
+///   when KeyUsage is present it SHOULD be critical. `cRLSign` is included
+///   so the same key may sign CRLs.
+///
+/// Both extension OIDs come from the types' `AssociatedOid` impls.
+fn ca_extensions() -> Result<Vec<Extension>> {
+    use const_oid::AssociatedOid;
+
+    let basic = BasicConstraints { ca: true, path_len_constraint: None };
+    let basic_der = basic.to_der().map_err(der_err)?;
+
+    let key_usage = KeyUsage(KeyUsages::KeyCertSign | KeyUsages::CRLSign);
+    let ku_der = key_usage.to_der().map_err(der_err)?;
+
+    Ok(vec![
+        Extension {
+            extn_id: BasicConstraints::OID,
+            critical: true,
+            extn_value: OctetString::new(basic_der).map_err(der_err)?,
+        },
+        Extension {
+            extn_id: KeyUsage::OID,
+            critical: true,
+            extn_value: OctetString::new(ku_der).map_err(der_err)?,
+        },
+    ])
+}
+
 // ── CA bootstrap ─────────────────────────────────────────────────────────────
 
 /// Build + store a self-signed CA certificate for a stored CA PrivateKey,
@@ -590,7 +629,10 @@ pub fn bootstrap_ca_certificate(
         subject_public_key_info: spki,
         issuer_unique_id: None,
         subject_unique_id: None,
-        extensions: None,
+        // A root CA cert MUST carry BasicConstraints CA:TRUE +
+        // KeyUsage keyCertSign so chains it signs verify externally
+        // (RFC 5280 §4.2.1.9 / §4.2.1.3).
+        extensions: Some(ca_extensions()?),
     };
     let tbs_der = tbs.to_der().map_err(der_err)?;
     let raw = softhsmrustv3::native::sign(session, prv_h, mech, &tbs_der)
