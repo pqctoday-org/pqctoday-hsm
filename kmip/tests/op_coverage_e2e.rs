@@ -58,7 +58,9 @@ use pqctoday_kmip::ops::session_and_auth::{login, logout};
 use pqctoday_kmip::ops::{Deps, DepsConfig};
 use pqctoday_kmip::policy::{load_from_str, Engine};
 use pqctoday_kmip::server::auth::AuthContext;
-use pqctoday_kmip::store::MemoryStore;
+use pqctoday_kmip::kmip30::{SignatureValidity, ValidateRequest};
+use pqctoday_kmip::ops::validate::validate;
+use pqctoday_kmip::store::{MemoryStore, ObjectRecord};
 
 // ── Harness (mirrors native_bridge_e2e.rs) ──────────────────────────────────
 
@@ -834,6 +836,130 @@ fn login_validates_credential_issues_ticket_then_logout() {
     let _ = softhsmrustv3::native::session::finalize();
 }
 
+/// P2.2 — §6.1.62 Validate end-to-end against the live store. A stored
+/// self-signed Certificate validates to `Valid`; an inline expired cert
+/// → `Invalid`; a leaf whose issuer isn't supplied → `Unknown`; a UID
+/// that doesn't exist → `Object Not Found`; a UID naming a non-cert
+/// object → `Invalid Object Type`. Validate needs no engine session —
+/// it works off the stored/inline DER + `x509-parser`.
+#[test]
+fn validate_stored_self_signed_cert_returns_valid_and_error_paths() {
+    let ring = Arc::new(RingSink::new(64));
+    let sink: Arc<dyn AuditSink> = ring.clone();
+    let deps = Deps::new(
+        Engine::permissive(),
+        Arc::new(MemoryStore::new()),
+        sink,
+        DepsConfig::default(),
+    );
+
+    // rcgen `CertificateParams::new(SAN)` leaves the *distinguished
+    // name* empty; the chain-link check matches Issuer DN ⟷ Subject DN,
+    // so give each cert a CommonName.
+    fn params_cn(cn: &str) -> rcgen::CertificateParams {
+        let mut p = rcgen::CertificateParams::new(vec![format!("{cn}.e2e")]).unwrap();
+        p.distinguished_name.push(rcgen::DnType::CommonName, cn);
+        let now = OffsetDateTime::now_utc();
+        p.not_before = now - time::Duration::days(1);
+        p.not_after = now + time::Duration::days(365 * 5);
+        p
+    }
+
+    // A self-signed CA (ECDSA-P256), CN="root".
+    let ca_key = rcgen::KeyPair::generate().unwrap();
+    let ca_der = params_cn("root").self_signed(&ca_key).unwrap().der().to_vec();
+
+    // Store it as a Certificate object.
+    deps.store
+        .put(ObjectRecord {
+            uid: "cert-ca".into(),
+            object_type: ObjectType::Certificate,
+            algorithm: KmipAlgorithm::Ecdsa,
+            usage_mask: UsageMask::VERIFY,
+            state: State::Active,
+            key_material: Some(ca_der.clone()),
+            ..ObjectRecord::default()
+        })
+        .unwrap();
+
+    // (1) Stored self-signed cert → Valid.
+    let r = validate(
+        &deps,
+        ValidateRequest { certificates: vec![], uids: vec!["cert-ca".into()], validity_date: None },
+        "v-valid",
+    )
+    .unwrap();
+    assert_eq!(r.validity, SignatureValidity::Valid, "self-signed CA validates");
+
+    // (2) Inline cert validated at a far-future instant (past not_after)
+    // → Invalid (expired window).
+    let r = validate(
+        &deps,
+        ValidateRequest {
+            certificates: vec![ca_der.clone()],
+            uids: vec![],
+            validity_date: Some(OffsetDateTime::now_utc() + time::Duration::days(365 * 100)),
+        },
+        "v-expired",
+    )
+    .unwrap();
+    assert_eq!(r.validity, SignatureValidity::Invalid, "expired window → Invalid");
+
+    // (3) A leaf signed by a CA, validated ALONE (issuer absent) → Unknown.
+    let leaf_key = rcgen::KeyPair::generate().unwrap();
+    let ca2_key = rcgen::KeyPair::generate().unwrap();
+    let ca2_cert = params_cn("issuer-ca").self_signed(&ca2_key).unwrap();
+    let leaf = params_cn("leaf").signed_by(&leaf_key, &ca2_cert, &ca2_key).unwrap();
+    let r = validate(
+        &deps,
+        ValidateRequest { certificates: vec![leaf.der().to_vec()], uids: vec![], validity_date: None },
+        "v-unknown",
+    )
+    .unwrap();
+    assert_eq!(r.validity, SignatureValidity::Unknown, "missing issuer → Unknown");
+
+    // (3b) Leaf + its CA together → Valid.
+    let r = validate(
+        &deps,
+        ValidateRequest {
+            certificates: vec![leaf.der().to_vec(), ca2_cert.der().to_vec()],
+            uids: vec![],
+            validity_date: None,
+        },
+        "v-chain",
+    )
+    .unwrap();
+    assert_eq!(r.validity, SignatureValidity::Valid, "leaf + CA chain → Valid");
+
+    // (4) Unknown UID → Object Not Found.
+    let err = validate(
+        &deps,
+        ValidateRequest { certificates: vec![], uids: vec!["ghost".into()], validity_date: None },
+        "v-nf",
+    )
+    .unwrap_err();
+    assert_eq!(err.result_reason(), ResultReason::ObjectNotFound);
+
+    // (5) Non-Certificate UID → Invalid Object Type.
+    deps.store
+        .put(ObjectRecord {
+            uid: "sym".into(),
+            object_type: ObjectType::SymmetricKey,
+            algorithm: KmipAlgorithm::Aes,
+            usage_mask: UsageMask::ENCRYPT,
+            state: State::Active,
+            ..ObjectRecord::default()
+        })
+        .unwrap();
+    let err = validate(
+        &deps,
+        ValidateRequest { certificates: vec![], uids: vec!["sym".into()], validity_date: None },
+        "v-iot",
+    )
+    .unwrap_err();
+    assert_eq!(err.result_reason(), ResultReason::InvalidObjectType);
+}
+
 // ── Coverage meta-test ───────────────────────────────────────────────────────
 //
 // Every op in `dispatcher::HANDLED_OPERATIONS` MUST be referenced by at
@@ -869,6 +995,8 @@ fn coverage_map() -> std::collections::HashMap<pqctoday_kmip::kmip30::Operation,
         (Op::Ping, "e2e:op_coverage(ping_returns_success)"),
         (Op::Login, "e2e:op_coverage(login_validates_credential_issues_ticket_then_logout)"),
         (Op::Logout, "e2e:op_coverage(login_validates_credential_issues_ticket_then_logout)"),
+        // P2.2 — §6.1.62 Validate (certificate-chain validation).
+        (Op::Validate, "e2e:op_coverage(validate_stored_self_signed_cert_returns_valid_and_error_paths)"),
         // ── Real-engine e2e (native_bridge_e2e.rs) ──
         (Op::CreateKeyPair, "e2e:native_bridge(ml_dsa_65_create_sign_verify_destroy_against_real_engine)"),
         (Op::Sign, "e2e:native_bridge(ml_dsa_65_create_sign_verify_destroy_against_real_engine)"),
@@ -926,5 +1054,5 @@ fn coverage_map_covers_every_handled_operation() {
         stale.is_empty(),
         "coverage_map references ops that are not in HANDLED_OPERATIONS: {stale:?}"
     );
-    assert_eq!(handled.len(), 49, "HANDLED_OPERATIONS count changed — review coverage");
+    assert_eq!(handled.len(), 50, "HANDLED_OPERATIONS count changed — review coverage");
 }

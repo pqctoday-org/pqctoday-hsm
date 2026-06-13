@@ -48,7 +48,7 @@ use crate::ops::{
     revoke::revoke,
     rng_and_pkcs11::{pkcs11, rng_retrieve, rng_seed},
     session_and_auth::{create_credential, create_group, create_user, log, login, logout},
-    sign::sign, signature_verify::signature_verify, Deps,
+    sign::sign, signature_verify::signature_verify, validate::validate, Deps,
 };
 
 use crate::kmip30::RequestPayload;
@@ -320,6 +320,8 @@ pub const HANDLED_OPERATIONS: &[crate::kmip30::Operation] = {
         Op::DeriveKey,
         // K21 — §6.1.51 Re-key / §6.1.52 Re-key Key Pair.
         Op::ReKey, Op::ReKeyKeyPair,
+        // P2.2 — §6.1.62 Validate (certificate-chain validation).
+        Op::Validate,
     ]
 };
 
@@ -434,6 +436,10 @@ fn substitute_id_placeholder(
         RequestPayload::Decrypt(r)         => fix(&mut r.uid, &live),
         RequestPayload::Sign(r)            => fix(&mut r.uid, &live),
         RequestPayload::SignatureVerify(r) => fix(&mut r.uid, &live),
+        // P2.2 — Validate carries a repeatable UID list (§6.1.62).
+        RequestPayload::Validate(r) => {
+            for uid in &mut r.uids { fix(uid, &live); }
+        }
         RequestPayload::AddAttribute(r)    => fix(&mut r.uid, &live),
         RequestPayload::ModifyAttribute(r) => fix(&mut r.uid, &live),
         RequestPayload::DeleteAttribute(r) => fix(&mut r.uid, &live),
@@ -517,6 +523,7 @@ fn handle_payload(
         RequestPayload::SignatureVerify(r) => {
             ResponsePayload::SignatureVerify(signature_verify(deps, r, correlation_id)?)
         }
+        RequestPayload::Validate(r) => ResponsePayload::Validate(validate(deps, r, correlation_id)?),
         RequestPayload::Interop(r) => ResponsePayload::Interop(interop(deps, r, correlation_id)?),
         RequestPayload::AddAttribute(r) => ResponsePayload::AddAttribute(add_attribute(deps, r, correlation_id)?),
         RequestPayload::ModifyAttribute(r) => ResponsePayload::ModifyAttribute(modify_attribute(deps, r, correlation_id)?),

@@ -70,6 +70,7 @@ pub use ops::{
     SignatureValidity,
     SignatureVerifyRequest, SignatureVerifyResponse,
     SignRequest, SignResponse,
+    ValidateRequest, ValidateResponse,
     // K19 — Baseline client-to-server ops (§6.1.26/27/58/59).
     Constraint, EndpointRole, ObjectDefaults,
     GetConstraintsRequest, GetConstraintsResponse,

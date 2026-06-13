@@ -668,6 +668,35 @@ pub enum SignatureValidity {
     Unknown     = 0x03,
 }
 
+// ── Validate (§6.1.62) ─────────────────────────────────────────────────────
+
+/// `Validate` request (KMIP 3.0 §6.1.62, Table 440). The request MAY
+/// carry inline `Certificate` DER blobs and/or `Unique Identifier`s of
+/// stored Certificate objects — together they compose one certificate
+/// chain to validate — plus an OPTIONAL `Validity Date`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ValidateRequest {
+    /// Inline `Certificate` (0x420013) DER blobs supplied in the request
+    /// (the `Certificate Value` of each — see `decode_validate_req`).
+    /// MAY be repeated.
+    pub certificates: Vec<Vec<u8>>,
+    /// `Unique Identifier` (0x420094)s of stored Certificate objects.
+    /// MAY be repeated.
+    pub uids: Vec<String>,
+    /// OPTIONAL `Validity Date` (0x42009a). When `None` the server
+    /// assumes "now" per §6.1.62.
+    pub validity_date: Option<time::OffsetDateTime>,
+}
+
+/// `Validate` response (KMIP 3.0 §6.1.62, Table 441) — a single
+/// `Validity Indicator` (Valid / Invalid / Unknown). Reuses
+/// [`SignatureValidity`] since it is the identical 0x42009b enum
+/// (Valid=1 / Invalid=2 / Unknown=3).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ValidateResponse {
+    pub validity: SignatureValidity,
+}
+
 // ── Group B: attribute family (KMIP 3.0 §6.1) ──────────────────────────────
 
 /// `GetAttributes` (§6.1.21) — read named attributes from one managed
