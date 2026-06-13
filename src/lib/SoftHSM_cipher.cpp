@@ -159,6 +159,14 @@ CK_RV SoftHSM::SymEncryptInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 				DEBUG_MSG("GCM mode requires parameters");
 				return CKR_ARGUMENTS_BAD;
 			}
+			// A zero-length IV would cause the OSSL layer to substitute a
+			// fixed all-zero nonce, producing catastrophic nonce reuse. Reject
+			// it here per the spec (ulIvLen >= 1).
+			if (CK_GCM_PARAMS_PTR(pMechanism->pParameter)->ulIvLen == 0)
+			{
+				DEBUG_MSG("GCM ulIvLen is zero");
+				return CKR_MECHANISM_PARAM_INVALID;
+			}
 			// Validate embedded pointers before dereferencing
 			if (CK_GCM_PARAMS_PTR(pMechanism->pParameter)->ulIvLen > 0 &&
 			    CK_GCM_PARAMS_PTR(pMechanism->pParameter)->pIv == NULL_PTR)
@@ -196,6 +204,14 @@ CK_RV SoftHSM::SymEncryptInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 			{
 				DEBUG_MSG("CHACHA20_POLY1305 mode requires parameters");
 				return CKR_ARGUMENTS_BAD;
+			}
+			// ChaCha20-Poly1305 requires a 96-bit (12-byte) nonce per RFC 7539.
+			// A zero-length nonce would let the OSSL layer substitute a fixed
+			// all-zero nonce (catastrophic reuse); enforce the exact length.
+			if (CK_SALSA20_CHACHA20_POLY1305_PARAMS_PTR(pMechanism->pParameter)->ulNonceLen != 12)
+			{
+				DEBUG_MSG("CHACHA20_POLY1305 ulNonceLen must be 12 bytes");
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 			if (CK_SALSA20_CHACHA20_POLY1305_PARAMS_PTR(pMechanism->pParameter)->ulNonceLen > 0 &&
 			    CK_SALSA20_CHACHA20_POLY1305_PARAMS_PTR(pMechanism->pParameter)->pNonce == NULL_PTR)
@@ -820,6 +836,14 @@ CK_RV SoftHSM::SymDecryptInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 				DEBUG_MSG("GCM mode requires parameters");
 				return CKR_ARGUMENTS_BAD;
 			}
+			// A zero-length IV would cause the OSSL layer to substitute a
+			// fixed all-zero nonce, producing catastrophic nonce reuse. Reject
+			// it here per the spec (ulIvLen >= 1).
+			if (CK_GCM_PARAMS_PTR(pMechanism->pParameter)->ulIvLen == 0)
+			{
+				DEBUG_MSG("GCM ulIvLen is zero");
+				return CKR_MECHANISM_PARAM_INVALID;
+			}
 			// Validate embedded pointers before dereferencing
 			if (CK_GCM_PARAMS_PTR(pMechanism->pParameter)->ulIvLen > 0 &&
 			    CK_GCM_PARAMS_PTR(pMechanism->pParameter)->pIv == NULL_PTR)
@@ -857,6 +881,14 @@ CK_RV SoftHSM::SymDecryptInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 			{
 				DEBUG_MSG("CHACHA20_POLY1305 mode requires parameters");
 				return CKR_ARGUMENTS_BAD;
+			}
+			// ChaCha20-Poly1305 requires a 96-bit (12-byte) nonce per RFC 7539.
+			// A zero-length nonce would let the OSSL layer substitute a fixed
+			// all-zero nonce (catastrophic reuse); enforce the exact length.
+			if (CK_SALSA20_CHACHA20_POLY1305_PARAMS_PTR(pMechanism->pParameter)->ulNonceLen != 12)
+			{
+				DEBUG_MSG("CHACHA20_POLY1305 ulNonceLen must be 12 bytes");
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 			if (CK_SALSA20_CHACHA20_POLY1305_PARAMS_PTR(pMechanism->pParameter)->ulNonceLen > 0 &&
 			    CK_SALSA20_CHACHA20_POLY1305_PARAMS_PTR(pMechanism->pParameter)->pNonce == NULL_PTR)

@@ -661,8 +661,18 @@ CK_RV SoftHSM::C_GenerateKeyPair
 			OSObject* osPriv = (OSObject*)handleManager->getObject(*phPrivateKey);
 			
 			ByteString pubValue(pub_key, pub_len);
-			ByteString privValue(priv_key, priv_len);
-			
+			ByteString privPlain(priv_key, priv_len);
+
+			// V-13: like every other private key type, encrypt the private
+			// CKA_VALUE with the token key when CKA_PRIVATE=TRUE. The stateful
+			// sign path decrypts it symmetrically before use.
+			Token* token = session->getToken();
+			ByteString privValue;
+			if (isprivateKeyPrivate && token != NULL)
+				token->encrypt(privPlain, privValue);
+			else
+				privValue = privPlain;
+
 			if (osPub && osPub->startTransaction()) {
 				bool bOK = osPub->setAttribute(CKA_LOCAL, true);
 				bOK = bOK && osPub->setAttribute(CKA_KEY_GEN_MECHANISM, pMechanism->mechanism);
