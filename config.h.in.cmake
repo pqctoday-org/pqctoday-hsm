@@ -160,6 +160,9 @@
 /* Compile with raw RSA PKCS PSS */
 #cmakedefine WITH_RAW_PSS @WITH_RAW_PSS@
 
+/* Compile with RIPEMD-160 (native legacy provider; OFF for WASM/FIPS) */
+#cmakedefine WITH_RIPEMD160 @WITH_RIPEMD160@
+
 /*
  * Remainder is specific for Windows build to
  * set some default that aren't configured from

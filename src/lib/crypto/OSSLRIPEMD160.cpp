@@ -25,62 +25,27 @@
  */
 
 /*****************************************************************************
- HashAlgorithm.h
+ OSSLRIPEMD160.cpp
 
- Base class for hash algorithm classes
+ OpenSSL RIPEMD-160 implementation (native-only, WITH_RIPEMD160). The legacy
+ provider is loaded by OSSLCryptoFactory so EVP_ripemd160() resolves.
  *****************************************************************************/
 
-#ifndef _SOFTHSM_V2_HASHALGORITHM_H
-#define _SOFTHSM_V2_HASHALGORITHM_H
-
 #include "config.h"
-#include "ByteString.h"
 
-struct HashAlgo
+#ifdef WITH_RIPEMD160
+
+#include "OSSLRIPEMD160.h"
+#include <openssl/evp.h>
+
+int OSSLRIPEMD160::getHashSize()
 {
-	enum Type
-	{
-		Unknown,
-		MD5,
-		RIPEMD160,
-		SHA1,
-		SHA224,
-		SHA256,
-		SHA384,
-		SHA512,
-		SHA3_224,
-		SHA3_256,
-		SHA3_384,
-		SHA3_512,
-		SHAKE128,
-		SHAKE256
-	};
-};
+	return 20;
+}
 
-class HashAlgorithm
+const EVP_MD* OSSLRIPEMD160::getEVPHash() const
 {
-public:
-	// Base constructors
-	HashAlgorithm();
+	return EVP_ripemd160();
+}
 
-	// Destructor
-	virtual ~HashAlgorithm() { }
-
-	// Hashing functions
-	virtual bool hashInit();
-	virtual bool hashUpdate(const ByteString& data);
-	virtual bool hashFinal(ByteString& hashedData);
-
-	virtual int getHashSize() = 0;
-protected:
-	// The current operation
-	enum
-	{
-		NONE,
-		HASHING
-	}
-	currentOperation;
-};
-
-#endif // !_SOFTHSM_V2_HASHALGORITHM_H
-
+#endif // WITH_RIPEMD160

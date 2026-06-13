@@ -372,13 +372,16 @@ CK_RV SoftHSM::C_GetTokenInfo(CK_SLOT_ID slotID, CK_TOKEN_INFO_PTR pInfo)
 void SoftHSM::prepareSupportedMechanisms(std::map<std::string, CK_MECHANISM_TYPE> &t)
 {
 	// Hash algorithms (SHA-1, SHA-2 + SHA-3)
-	// CKM_RIPEMD160 is NOT advertised: the engine has no RIPEMD-160 backend
-	// (C_DigestInit returns CKR_MECHANISM_INVALID), so advertising it would
-	// be advertise-without-dispatch (audit V-11).
 #ifndef WITH_FIPS
 	// MD5 digest is accepted by C_DigestInit in non-FIPS builds; advertise it
 	// so C_GetMechanismList matches dispatch (audit G5).
 	t["CKM_MD5"]			= CKM_MD5;
+#endif
+#ifdef WITH_RIPEMD160
+	// RIPEMD-160 digest: native builds load the OpenSSL legacy provider, so
+	// C_DigestInit dispatches it (G-DA-X). The WASM/no-legacy build omits this
+	// (advertise == dispatch — C_DigestInit returns CKR_MECHANISM_INVALID, G1).
+	t["CKM_RIPEMD160"]		= CKM_RIPEMD160;
 #endif
 	t["CKM_SHA_1"]			= CKM_SHA_1;
 	t["CKM_SHA224"]			= CKM_SHA224;
@@ -391,12 +394,14 @@ void SoftHSM::prepareSupportedMechanisms(std::map<std::string, CK_MECHANISM_TYPE
 	t["CKM_SHA3_512"]		= CKM_SHA3_512;
 
 	// HMAC (SHA-1, SHA-2 + SHA-3)
-	// CKM_RIPEMD160_HMAC is NOT advertised: it is absent from isMacMechanism /
-	// kMacMechTable, so every C_SignInit / C_VerifyInit rejects it. Advertising
-	// it would be advertise-without-dispatch (audit V-11).
 #ifndef WITH_FIPS
 	// MD5-HMAC dispatches via resolveMacMech() in non-FIPS builds (audit G5).
 	t["CKM_MD5_HMAC"]		= CKM_MD5_HMAC;
+#endif
+#ifdef WITH_RIPEMD160
+	// HMAC-RIPEMD-160 dispatches via kMacMechTable on native builds (G-DA-X);
+	// absent (== rejected) on the WASM/no-legacy build (advertise == dispatch).
+	t["CKM_RIPEMD160_HMAC"]		= CKM_RIPEMD160_HMAC;
 #endif
 	t["CKM_SHA_1_HMAC"]		= CKM_SHA_1_HMAC;
 	t["CKM_SHA224_HMAC"]		= CKM_SHA224_HMAC;
@@ -728,6 +733,9 @@ CK_RV SoftHSM::C_GetMechanismInfo(CK_SLOT_ID slotID, CK_MECHANISM_TYPE type, CK_
 #ifndef WITH_FIPS
 		case CKM_MD5:
 #endif
+#ifdef WITH_RIPEMD160
+		case CKM_RIPEMD160:
+#endif
 		case CKM_SHA_1:
 		case CKM_SHA224:
 		case CKM_SHA256:
@@ -745,6 +753,13 @@ CK_RV SoftHSM::C_GetMechanismInfo(CK_SLOT_ID slotID, CK_MECHANISM_TYPE type, CK_
 #ifndef WITH_FIPS
 		case CKM_MD5_HMAC:
 			pInfo->ulMinKeySize = 16;
+			pInfo->ulMaxKeySize = MAX_HMAC_KEY_BYTES;
+			pInfo->flags = CKF_SIGN | CKF_VERIFY;
+			break;
+#endif
+#ifdef WITH_RIPEMD160
+		case CKM_RIPEMD160_HMAC:
+			pInfo->ulMinKeySize = 20;
 			pInfo->ulMaxKeySize = MAX_HMAC_KEY_BYTES;
 			pInfo->flags = CKF_SIGN | CKF_VERIFY;
 			break;

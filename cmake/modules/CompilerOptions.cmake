@@ -433,6 +433,17 @@ elseif(WITH_CRYPTO_BACKEND STREQUAL "openssl")
     # Compile with AES_GCM
     set(WITH_AES_GCM 1)
 
+    # RIPEMD-160 (FIPS-disabled, native-only). RIPEMD-160 lives in OpenSSL's
+    # LEGACY provider, which the WASM build omits (no-module / size budget).
+    # On native builds the legacy provider is loadable, so CKM_RIPEMD160
+    # (+ _HMAC) can be genuinely supported (G-DA-X). WASM keeps it OFF so
+    # C_DigestInit/C_SignInit return CKR_MECHANISM_INVALID (G1) — no SHA-1
+    # substitution, no WASM bloat. FIPS forbids RIPEMD-160 entirely.
+    if(NOT ENABLE_FIPS)
+        set(WITH_RIPEMD160 1)
+        message(STATUS "OpenSSL: RIPEMD-160 enabled (native legacy provider)")
+    endif()
+
     endif() # NOT EMSCRIPTEN feature tests
 
 else()

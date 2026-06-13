@@ -81,6 +81,14 @@ private:
 
 	// The one-and-only RNG instance
 	RNG* rng;
+
+#ifdef WITH_RIPEMD160
+	// Explicitly-loaded OpenSSL providers (native only). The legacy provider
+	// supplies RIPEMD-160; the default provider is reloaded explicitly because
+	// any explicit OSSL_PROVIDER_load() suppresses the implicit default.
+	struct ossl_provider_st* legacyProvider  = nullptr;
+	struct ossl_provider_st* defaultProvider = nullptr;
+#endif
 };
 
 #endif // !_SOFTHSM_V2_OSSLCRYPTOFACTORY_H

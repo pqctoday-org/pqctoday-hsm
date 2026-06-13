@@ -44,6 +44,16 @@ protected:
 	virtual size_t getMacSize() const;
 };
 
+#ifdef WITH_RIPEMD160
+// HMAC-RIPEMD-160 (native-only; RIPEMD-160 lives in the OpenSSL legacy provider)
+class OSSLHMACRIPEMD160 : public OSSLEVPMacAlgorithm
+{
+protected:
+	virtual const EVP_MD* getEVPHash() const;
+	virtual size_t getMacSize() const;
+};
+#endif
+
 class OSSLHMACSHA1 : public OSSLEVPMacAlgorithm
 {
 protected:

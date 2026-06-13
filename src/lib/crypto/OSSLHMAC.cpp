@@ -43,6 +43,18 @@ size_t OSSLHMACMD5::getMacSize() const
 	return 16;
 }
 
+#ifdef WITH_RIPEMD160
+const EVP_MD* OSSLHMACRIPEMD160::getEVPHash() const
+{
+	return EVP_ripemd160();
+}
+
+size_t OSSLHMACRIPEMD160::getMacSize() const
+{
+	return 20;
+}
+#endif
+
 const EVP_MD* OSSLHMACSHA1::getEVPHash() const
 {
 	return EVP_sha1();

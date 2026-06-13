@@ -55,6 +55,9 @@
 #include "OSSLMLDSA.h"
 #include "OSSLSLHDSA.h"
 #include "OSSLMLKEM.h"
+#ifdef WITH_RIPEMD160
+#include "OSSLRIPEMD160.h"
+#endif
 
 #include <mutex>
 #include <string.h>
@@ -62,10 +65,26 @@
 #include <openssl/crypto.h>
 #include <openssl/err.h>
 #include <openssl/rand.h>
+#ifdef WITH_RIPEMD160
+#include <openssl/provider.h>
+#endif
 
 // Constructor
 OSSLCryptoFactory::OSSLCryptoFactory()
 {
+#ifdef WITH_RIPEMD160
+	// RIPEMD-160 (and HMAC-RIPEMD-160) live in the OpenSSL LEGACY provider,
+	// which is not loaded into the default library context by default. Native
+	// builds load it here so EVP_ripemd160() resolves. Both default and legacy
+	// must be loaded explicitly once any explicit OSSL_PROVIDER_load() is done,
+	// otherwise the implicit default provider is dropped. The WASM build omits
+	// the legacy provider entirely (WITH_RIPEMD160 unset) — no size bloat. A
+	// failed load is non-fatal: G1 already returns CKR_MECHANISM_INVALID, so
+	// the worst case degrades to the no-legacy behavior rather than crashing.
+	legacyProvider  = OSSL_PROVIDER_load(NULL, "legacy");
+	defaultProvider = OSSL_PROVIDER_load(NULL, "default");
+#endif
+
 	// Initialise the one-and-only RNG
 	rng = new OSSLRNG();
 }
@@ -75,6 +94,12 @@ OSSLCryptoFactory::~OSSLCryptoFactory()
 {
 	// Destroy the one-and-only RNG
 	delete rng;
+
+#ifdef WITH_RIPEMD160
+	// Release the explicitly-loaded providers (native only).
+	if (legacyProvider != NULL)  OSSL_PROVIDER_unload(legacyProvider);
+	if (defaultProvider != NULL) OSSL_PROVIDER_unload(defaultProvider);
+#endif
 }
 
 // Return the one-and-only instance
@@ -145,6 +170,10 @@ HashAlgorithm* OSSLCryptoFactory::getHashAlgorithm(HashAlgo::Type algorithm)
 {
 	switch (algorithm)
 	{
+#ifdef WITH_RIPEMD160
+		case HashAlgo::RIPEMD160:
+			return new OSSLRIPEMD160();
+#endif
 		case HashAlgo::SHA1:
 			return new OSSLSHA1();
 		case HashAlgo::SHA224:
@@ -177,6 +206,10 @@ MacAlgorithm* OSSLCryptoFactory::getMacAlgorithm(MacAlgo::Type algorithm)
 {
 	switch (algorithm)
 	{
+#ifdef WITH_RIPEMD160
+		case MacAlgo::HMAC_RIPEMD160:
+			return new OSSLHMACRIPEMD160();
+#endif
 		case MacAlgo::HMAC_SHA1:
 			return new OSSLHMACSHA1();
 		case MacAlgo::HMAC_SHA224:
