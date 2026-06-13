@@ -852,6 +852,17 @@ bool P11AttrUniqueId::setDefault()
 	return osobject->setAttribute(type, attr);
 }
 
+// CKA_UNIQUE_ID is public, token-assigned metadata (PKCS#11 v3.2 §4.4.1): it is
+// present and always readable on EVERY object — including private and sensitive
+// keys — and is never secret. setDefault() stores the 36-byte UUID in plaintext,
+// so the base retrieve() must NOT attempt token->decrypt() on private objects
+// (which would yield garbage / CKR_GENERAL_ERROR). Delegate with isPrivate=false
+// so the stored plaintext is returned verbatim regardless of CKA_PRIVATE.
+CK_RV P11AttrUniqueId::retrieve(Token* token, bool /*isPrivate*/, CK_VOID_PTR pValue, CK_ULONG_PTR pulValueLen)
+{
+	return P11Attribute::retrieve(token, false, pValue, pulValueLen);
+}
+
 // CKA_UNIQUE_ID is assigned exclusively by the token (setDefault mints a fresh
 // UUID). A caller-supplied value is never honoured — on any object operation,
 // including C_DeriveKey/C_CopyObject which pass unknown template attributes

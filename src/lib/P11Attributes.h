@@ -312,6 +312,12 @@ protected:
 	// Set the default value of the attribute (generates UUID)
 	virtual bool setDefault();
 
+	// CKA_UNIQUE_ID is public, token-assigned metadata that is always
+	// readable in clear regardless of CKA_PRIVATE. setDefault() stores the
+	// UUID in plaintext, so retrieve() must not attempt to decrypt it on
+	// private objects. PKCS#11 v3.2 §4.4.1.
+	virtual CK_RV retrieve(Token* token, bool isPrivate, CK_VOID_PTR pValue, CK_ULONG_PTR pulValueLen);
+
 	// Strictly token-assigned: reject any caller-supplied value on every
 	// op (create/generate/unwrap/derive/copy/set). PKCS#11 v3.2 §4.4.1.
 	virtual CK_RV updateAttr(Token *token, bool isPrivate, CK_VOID_PTR pValue, CK_ULONG ulValueLen, int op);
