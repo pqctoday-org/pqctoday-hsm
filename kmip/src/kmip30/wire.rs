@@ -388,6 +388,26 @@ pub(crate) mod tags {
     pub const CertificateValue: u32              = 0x42_001e;
     /// KMIP 3.0 §11 — Certificate Subject CN extracted from the DER.
     pub const CertificateSubjectCN: u32          = 0x42_0108;
+    /// P2.3 — §6.1.6 Certify / §6.1.50 Re-certify `Certificate Request`
+    /// ByteString: the inline CSR (PKCS#10 / PEM / CRMF) bytes. The
+    /// §6.1.6 payload table names the item "Certificate Request Value",
+    /// but the KMIP TTLV encoding carries the inline CSR under the
+    /// `Certificate Request` tag (0x420018); `Certificate Request Value`
+    /// (0x420140) is the §11 attribute on a stored CertificateRequest
+    /// object. The decoder accepts EITHER tag as the CSR bytes.
+    /// Codepoints verified against `kmip-spec-3.0-tags-enums.json`.
+    pub const CertificateRequest: u32            = 0x42_0018;
+    /// P2.3 — `Certificate Request Type` Enumeration (CRMF=1 / PKCS#10=2
+    /// / PEM=3). REQUIRED when a Certificate Request is present.
+    pub const CertificateRequestType: u32        = 0x42_0019;
+    /// P2.3 — `Certificate Request Value` §11 attribute / alt CSR tag.
+    pub const CertificateRequestValue: u32       = 0x42_0140;
+    /// P2.3 — `Certificate Request Unique Identifier` (Re-certify
+    /// Table 400): UID of a stored CertificateRequest object.
+    pub const CertificateRequestUniqueIdentifier: u32 = 0x42_0139;
+    /// P2.3 — §11 `Certificate Link`: on a PublicKey, points at the
+    /// Certificate issued over it. Codepoint 0x420190.
+    pub const CertificateLink: u32               = 0x42_0190;
     /// KMIP 3.0 §6.2 — SecretData / OpaqueObject outer Structure tags.
     pub const SecretData: u32                    = 0x42_0085;
     pub const SecretDataType: u32                = 0x42_0086;
@@ -806,6 +826,9 @@ fn decode_request_payload(op: Operation, frame: &TtlvFrame) -> Result<RequestPay
         Operation::SignatureVerify  => RequestPayload::SignatureVerify(decode_sigverify_req(children)?),
         // P2.2 — §6.1.62 Validate (certificate-chain validation).
         Operation::Validate         => RequestPayload::Validate(decode_validate_req(children)?),
+        // P2.3 — §6.1.6 Certify / §6.1.50 Re-certify.
+        Operation::Certify          => RequestPayload::Certify(decode_certify_req(children)?),
+        Operation::ReCertify        => RequestPayload::ReCertify(decode_recertify_req(children)?),
         Operation::Interop          => RequestPayload::Interop(decode_interop_req(children)?),
         Operation::AddAttribute     => RequestPayload::AddAttribute(decode_add_attribute_req(children)?),
         Operation::ModifyAttribute  => RequestPayload::ModifyAttribute(decode_modify_attribute_req(children)?),
@@ -862,8 +885,7 @@ fn decode_request_payload(op: Operation, frame: &TtlvFrame) -> Result<RequestPay
         // the `UnknownEnum` → InvalidMessage treatment.
         // K21 moved ReKey / ReKeyKeyPair out of this arm into real
         // §6.1.51 / §6.1.52 decode routes above.
-        Operation::ReCertify
-        | Operation::ObtainLease
+        Operation::ObtainLease
         | Operation::Poll
         | Operation::Notify
         | Operation::Put
@@ -871,7 +893,6 @@ fn decode_request_payload(op: Operation, frame: &TtlvFrame) -> Result<RequestPay
         | Operation::SetConstraints
         | Operation::QueryAsynchronousRequests
         | Operation::Process
-        | Operation::Certify
         | Operation::Cancel
         | Operation::JoinSplitKey
         | Operation::DelegatedLogin
@@ -896,6 +917,9 @@ fn response_payload_to_frame(payload: &ResponsePayload) -> TtlvFrame {
         ResponsePayload::Sign(r)             => encode_sign_resp(r),
         ResponsePayload::SignatureVerify(r)  => encode_sigverify_resp(r),
         ResponsePayload::Validate(r)         => encode_validate_resp(r),
+        // P2.3 — Certify / Re-certify return the new Certificate's UID.
+        ResponsePayload::Certify(r)          => encode_uid_only_resp(&r.uid),
+        ResponsePayload::ReCertify(r)        => encode_uid_only_resp(&r.uid),
         ResponsePayload::Interop(_)          => vec![],
         // Group B wave 2 — Add/Modify/Delete/Set/Adjust Attribute all
         // return the same single-field UniqueIdentifier payload per
@@ -1639,6 +1663,84 @@ fn encode_validate_resp(r: &ValidateResponse) -> Vec<TtlvFrame> {
         Tag(tags::ValidityIndicator),
         Value::Enumeration(r.validity as u32),
     )]
+}
+
+/// P2.3 — decode the §6.1.6 Certify Request Payload (Table 264). All
+/// items are OPTIONAL. The inline CSR may arrive under either the
+/// `Certificate Request` (0x420018) or `Certificate Request Value`
+/// (0x420140) tag (see the `tags::CertificateRequest` doc); both are
+/// accepted as the CSR ByteString. `Certificate Request Type`
+/// (0x420019) is an Enumeration; an unknown codepoint is surfaced as
+/// `UnknownEnum` → the dispatcher's `InvalidMessage`.
+fn decode_certify_req(children: &[TtlvFrame]) -> Result<CertifyRequest, WireError> {
+    let mut req = CertifyRequest::default();
+    for c in children {
+        match c.tag.0 {
+            tags::UniqueIdentifier => {
+                if let Value::TextString(s) = &c.value { req.uid = Some(s.clone()); }
+            }
+            tags::CertificateRequestType => {
+                let v = expect_enum(c, "Certificate Request Type")?;
+                req.certificate_request_type = Some(
+                    crate::kmip30::CertificateRequestType::from_wire_value(v).ok_or(
+                        WireError::UnknownEnum { field: "Certificate Request Type", value: v },
+                    )?,
+                );
+            }
+            tags::CertificateRequest | tags::CertificateRequestValue => {
+                if let Value::ByteString(b) = &c.value { req.certificate_request = Some(b.clone()); }
+            }
+            tags::Attributes => {
+                for a in expect_structure(c, "Attributes")? {
+                    if let Some(decoded) = decode_attribute_v3(a)? {
+                        req.attributes.push(decoded);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(req)
+}
+
+/// P2.3 — decode the §6.1.50 Re-certify Request Payload (Table 400).
+/// `Unique Identifier` (the existing Certificate) is REQUIRED; `Offset`
+/// is an Interval (seconds); the CSR / type / attributes mirror Certify.
+fn decode_recertify_req(children: &[TtlvFrame]) -> Result<ReCertifyRequest, WireError> {
+    let uid = required_uid(children)?;
+    let mut req = ReCertifyRequest { uid, ..ReCertifyRequest::default() };
+    for c in children {
+        match c.tag.0 {
+            tags::CertificateRequestUniqueIdentifier => {
+                if let Value::TextString(s) = &c.value { req.certificate_request_uid = Some(s.clone()); }
+            }
+            tags::CertificateRequestType => {
+                let v = expect_enum(c, "Certificate Request Type")?;
+                req.certificate_request_type = Some(
+                    crate::kmip30::CertificateRequestType::from_wire_value(v).ok_or(
+                        WireError::UnknownEnum { field: "Certificate Request Type", value: v },
+                    )?,
+                );
+            }
+            tags::CertificateRequest | tags::CertificateRequestValue => {
+                if let Value::ByteString(b) = &c.value { req.certificate_request = Some(b.clone()); }
+            }
+            tags::Offset => match c.value {
+                Value::Interval(n) => req.offset = Some(n as i64),
+                Value::Integer(n)  => req.offset = Some(n as i64),
+                _ => {}
+            },
+            tags::Attributes => {
+                for a in expect_structure(c, "Attributes")? {
+                    if let Some(decoded) = decode_attribute_v3(a)? {
+                        req.attributes.push(decoded);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(req)
 }
 
 // ── Attribute codec ─────────────────────────────────────────────────────────
@@ -4361,6 +4463,109 @@ mod tests {
         let bytes = encode_response_message(&resp);
         assert_eq!(bytes.len() % 8, 0, "KMIP §9.6 8-byte alignment");
         assert!(bytes.len() >= 8);
+    }
+
+    /// P2.3 — §6.1.6 Certify + §6.1.50 Re-certify request/response wire
+    /// round-trip. Certify carries a Certificate Request Type + inline
+    /// CSR ByteString; Re-certify carries a UID + Offset Interval. Both
+    /// responses encode the new Certificate's UID.
+    #[test]
+    fn certify_recertify_request_response_wire_round_trip() {
+        fn envelope(op: Operation, payload_children: Vec<TtlvFrame>) -> Vec<u8> {
+            let frame = TtlvFrame::new(
+                Tag(tags::RequestMessage),
+                Value::Structure(vec![
+                    TtlvFrame::new(
+                        Tag(tags::RequestHeader),
+                        Value::Structure(vec![TtlvFrame::new(
+                            Tag(tags::ProtocolVersion),
+                            Value::Structure(vec![
+                                TtlvFrame::new(Tag(tags::ProtocolVersionMajor), Value::Integer(3)),
+                                TtlvFrame::new(Tag(tags::ProtocolVersionMinor), Value::Integer(0)),
+                            ]),
+                        )]),
+                    ),
+                    TtlvFrame::new(
+                        Tag(tags::BatchItem),
+                        Value::Structure(vec![
+                            TtlvFrame::new(Tag(tags::Operation), Value::Enumeration(op.to_wire_value())),
+                            TtlvFrame::new(Tag(tags::RequestPayload), Value::Structure(payload_children)),
+                        ]),
+                    ),
+                ]),
+            );
+            let mut buf = BytesMut::new();
+            encode(&frame, &mut buf);
+            buf.to_vec()
+        }
+
+        // ── Certify request ──────────────────────────────────────────────
+        let csr = vec![0x30u8, 0x05, 0x02, 0x01, 0x2a, 0x05, 0x00];
+        let bytes = envelope(
+            Operation::Certify,
+            vec![
+                TtlvFrame::new(
+                    Tag(tags::CertificateRequestType),
+                    Value::Enumeration(crate::kmip30::CertificateRequestType::Pkcs10.to_wire_value()),
+                ),
+                TtlvFrame::new(Tag(tags::CertificateRequest), Value::ByteString(csr.clone())),
+            ],
+        );
+        match &decode_request_message(&bytes).expect("decode certify").batch_items[0].payload {
+            RequestPayload::Certify(c) => {
+                assert_eq!(
+                    c.certificate_request_type,
+                    Some(crate::kmip30::CertificateRequestType::Pkcs10)
+                );
+                assert_eq!(c.certificate_request.as_deref(), Some(csr.as_slice()));
+                assert!(c.uid.is_none());
+            }
+            other => panic!("expected Certify, got {other:?}"),
+        }
+
+        // ── Re-certify request ───────────────────────────────────────────
+        let bytes = envelope(
+            Operation::ReCertify,
+            vec![
+                TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString("cert-old".into())),
+                TtlvFrame::new(Tag(tags::Offset), Value::Interval(3600)),
+            ],
+        );
+        match &decode_request_message(&bytes).expect("decode recertify").batch_items[0].payload {
+            RequestPayload::ReCertify(c) => {
+                assert_eq!(c.uid, "cert-old");
+                assert_eq!(c.offset, Some(3600));
+            }
+            other => panic!("expected ReCertify, got {other:?}"),
+        }
+
+        // ── Responses (UID-only) round-trip into the §8.2 envelope ───────
+        for payload in [
+            ResponsePayload::Certify(CertifyResponse { uid: "cert-new".into() }),
+            ResponsePayload::ReCertify(ReCertifyResponse { uid: "cert-new2".into() }),
+        ] {
+            let op = match &payload {
+                ResponsePayload::Certify(_) => Operation::Certify,
+                _ => Operation::ReCertify,
+            };
+            let resp = ResponseMessage {
+                header: ResponseHeader {
+                    protocol_version_major: 3,
+                    protocol_version_minor: 0,
+                    time_stamp: OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap(),
+                    server_correlation_value: None,
+                },
+                batch_items: vec![ResponseBatchItem {
+                    operation: Some(op),
+                    result_status: ResultStatus::Success,
+                    result_reason: None,
+                    result_message: None,
+                    payload: Some(payload),
+                }],
+            };
+            let bytes = encode_response_message(&resp);
+            assert_eq!(bytes.len() % 8, 0, "KMIP §9.6 8-byte alignment");
+        }
     }
 
     #[test]

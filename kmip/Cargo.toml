@@ -41,7 +41,30 @@ rustls-pemfile = "2"
 
 # Self-signed cert auto-gen for sandbox / dev runs (Phase 7).
 # Production deployments mount real certs via --tls-cert / --tls-key.
-rcgen = { version = "0.13", default-features = false, features = ["aws_lc_rs", "pem"] }
+# P2.3 — the `x509-parser` feature adds
+# `CertificateSigningRequestParams::from_der`, which parses + verifies
+# PKCS#10 CSRs (subject DN, SubjectPublicKeyInfo, self-signature) for
+# the §6.1.6 Certify CSR path. rcgen alone cannot ISSUE ML-DSA-signed
+# certs (no ML-DSA in its SignatureAlgorithm table) — issuance goes
+# through x509-cert + the engine — but it is a fine CSR PARSER.
+rcgen = { version = "0.13", default-features = false, features = ["aws_lc_rs", "pem", "x509-parser"] }
+
+# P2.3 — KMIP 3.0 §6.1.6 Certify / §6.1.50 Re-certify: the server acts as
+# a PQC-capable X.509 CA. rcgen 0.13 can parse CSRs and issue RSA/ECDSA/
+# Ed25519 certs, but its SignatureAlgorithm table has NO ML-DSA, so it
+# CANNOT issue PQC-signed certs. We need a lower-level X.509 builder that
+# accepts ARBITRARY AlgorithmIdentifiers (id-ml-dsa-* OIDs) so the
+# TBSCertificate can be signed in the engine for every algorithm. The
+# RustCrypto `x509-cert` crate (MIT/Apache, well-maintained) builds
+# `TbsCertificate{version, serial, signature alg, issuer, validity,
+# subject, SPKI, extensions}` and `Certificate{tbs, sigAlg, signature}`
+# with custom alg OIDs and encodes via `der`. Versions pinned to the set
+# already resolved in Cargo.lock via `rsa` / `x509-parser` / `ecdsa`
+# (der 0.7, spki 0.7, const-oid 0.9) so no second copy is pulled in.
+x509-cert = { version = "0.2", default-features = false, features = ["builder"] }
+der       = { version = "0.7", features = ["oid", "alloc"] }
+spki      = { version = "0.7", features = ["alloc"] }
+const-oid = { version = "0.9", features = ["db"] }
 
 # Persistence
 rusqlite           = { version = "0.32", features = ["bundled"] }

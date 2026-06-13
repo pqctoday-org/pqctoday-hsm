@@ -92,6 +92,18 @@ struct Cli {
     /// PKCS#11 user PIN.
     #[arg(long, default_value = "1234")]
     pin: String,
+
+    /// P2.3 — designate the CA signing key for §6.1.6 Certify /
+    /// §6.1.50 Re-certify: the UID of a stored PrivateKey (RSA / ECDSA /
+    /// ML-DSA). Requires `--ca-cert`. Absent ⇒ the server is not a CA
+    /// and every Certify request fails Permission Denied.
+    #[arg(long = "ca-key", requires = "ca_cert")]
+    ca_key: Option<String>,
+
+    /// P2.3 — UID of the stored CA Certificate whose subject DN becomes
+    /// the issuer DN of every issued certificate. Requires `--ca-key`.
+    #[arg(long = "ca-cert", requires = "ca_key")]
+    ca_cert: Option<String>,
 }
 
 #[tokio::main]
@@ -170,12 +182,26 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // ── Deps bundle ─────────────────────────────────────────────────────
+    let ca_key = match (cli.ca_key.as_ref(), cli.ca_cert.as_ref()) {
+        (Some(priv_uid), Some(cert_uid)) => {
+            tracing::info!("CA configured: signing key {priv_uid:?}, issuer cert {cert_uid:?}");
+            Some(pqctoday_kmip::ops::deps::CaKeyDesignation {
+                private_key_uid: priv_uid.clone(),
+                certificate_uid: cert_uid.clone(),
+            })
+        }
+        _ => {
+            tracing::info!("no --ca-key — Certify / Re-certify disabled (not a CA)");
+            None
+        }
+    };
     let config = DepsConfig {
         pkcs11_slot: cli.slot,
         pkcs11_pin: cli.pin,
         vendor_identification: "pqctoday-hsm".into(),
         server_version: env!("CARGO_PKG_VERSION").into(),
         auth_users,
+        ca_key,
     };
     let deps = Arc::new(
         Deps::new(engine, store, sink, config).with_engine_session(engine_session),

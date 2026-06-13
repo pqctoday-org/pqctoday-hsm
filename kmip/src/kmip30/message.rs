@@ -293,6 +293,9 @@ pub enum RequestPayload {
     SignatureVerify(super::ops::SignatureVerifyRequest),
     /// P2.2 — §6.1.62 Validate (certificate-chain validation).
     Validate(super::ops::ValidateRequest),
+    /// P2.3 — §6.1.6 Certify / §6.1.50 Re-certify (PQC-capable CA).
+    Certify(super::ops::CertifyRequest),
+    ReCertify(super::ops::ReCertifyRequest),
     Interop(super::ops::InteropRequest),
     Register(super::ops::RegisterRequest),
     Import(super::ops::ImportRequest),
@@ -374,6 +377,9 @@ pub enum ResponsePayload {
     SignatureVerify(super::ops::SignatureVerifyResponse),
     /// P2.2 — §6.1.62 Validate.
     Validate(super::ops::ValidateResponse),
+    /// P2.3 — §6.1.6 Certify / §6.1.50 Re-certify.
+    Certify(super::ops::CertifyResponse),
+    ReCertify(super::ops::ReCertifyResponse),
     Interop(super::ops::InteropResponse),
     Register(super::ops::RegisterResponse),
     Import(super::ops::ImportResponse),
@@ -433,6 +439,8 @@ impl RequestPayload {
             Self::Sign(_)             => Operation::Sign,
             Self::SignatureVerify(_)  => Operation::SignatureVerify,
             Self::Validate(_)         => Operation::Validate,
+            Self::Certify(_)          => Operation::Certify,
+            Self::ReCertify(_)        => Operation::ReCertify,
             Self::Interop(_)          => Operation::Interop,
             Self::Register(_)         => Operation::Register,
             Self::Import(_)           => Operation::Import,
@@ -516,6 +524,12 @@ impl RequestPayload {
             // the payload alone.
             Self::ReKey(r) => vec![r.uid.as_str()],
             Self::ReKeyKeyPair(r) => vec![r.uid.as_str()],
+            // P2.3 — Re-certify mutates the existing Certificate
+            // (Replacement Object Link + Name removal + deactivation,
+            // §6.1.50); snapshot it for §9.5 Undo. The newly-minted
+            // certificate UID is captured post-hoc via
+            // `newly_created_uids`. (Certify is output-only.)
+            Self::ReCertify(r) => vec![r.uid.as_str()],
             // Read-only / output-only — no rollback needed.
             _ => Vec::new(),
         }

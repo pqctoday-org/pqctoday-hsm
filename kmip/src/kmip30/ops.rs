@@ -697,6 +697,89 @@ pub struct ValidateResponse {
     pub validity: SignatureValidity,
 }
 
+// ── Certify (§6.1.6) / Re-certify (§6.1.50) ────────────────────────────────
+
+/// KMIP 3.0 §11 `Certificate Request Type` Enumeration — the encoding of
+/// the inline `Certificate Request` ByteString. Values verified against
+/// `spec/oasis-kmip-3.0/kmip-spec-3.0-tags-enums.json`
+/// (`Certificate Request Type`: CRMF=1, PKCS#10=2, PEM=3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CertificateRequestType {
+    Crmf   = 0x01,
+    Pkcs10 = 0x02,
+    Pem    = 0x03,
+}
+
+impl CertificateRequestType {
+    pub const fn to_wire_value(self) -> u32 {
+        self as u32
+    }
+    pub const fn from_wire_value(v: u32) -> Option<Self> {
+        Some(match v {
+            0x01 => Self::Crmf,
+            0x02 => Self::Pkcs10,
+            0x03 => Self::Pem,
+            _ => return None,
+        })
+    }
+}
+
+/// `Certify` request (KMIP 3.0 §6.1.6, Table 264). All items are
+/// OPTIONAL: either supply a CSR (`certificate_request_type` +
+/// `certificate_request`) to certify, or name an existing PublicKey /
+/// CertificateRequest by `uid` to certify its key. `attributes` carries
+/// desired object attributes (e.g. the requested validity window via
+/// Activation/Deactivation Date).
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct CertifyRequest {
+    /// `Unique Identifier` of the PublicKey (or CertificateRequest)
+    /// being certified, when no inline CSR is supplied.
+    pub uid: Option<String>,
+    /// `Certificate Request Type` — REQUIRED if `certificate_request` is
+    /// present.
+    pub certificate_request_type: Option<CertificateRequestType>,
+    /// `Certificate Request` ByteString — the inline CSR bytes.
+    pub certificate_request: Option<Vec<u8>>,
+    /// Desired object `Attributes` for the new Certificate.
+    pub attributes: Vec<Attribute>,
+}
+
+/// `Certify` response (KMIP 3.0 §6.1.6, Table 265) — the UID of the
+/// generated Certificate object.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CertifyResponse {
+    pub uid: String,
+}
+
+/// `Re-certify` request (KMIP 3.0 §6.1.50, Table 400). `uid` (REQUIRED)
+/// names the existing Certificate being renewed. An OPTIONAL `offset`
+/// (Interval, seconds) shifts the new Activation Date relative to the
+/// new Initial Date per the §6.1.50 date table.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct ReCertifyRequest {
+    /// `Unique Identifier` of the existing Certificate being renewed.
+    pub uid: String,
+    /// `Certificate Request Unique Identifier` — UID of a stored
+    /// CertificateRequest (OPTIONAL).
+    pub certificate_request_uid: Option<String>,
+    /// `Certificate Request Type` — REQUIRED if a CSR is present.
+    pub certificate_request_type: Option<CertificateRequestType>,
+    /// Inline `Certificate Request` ByteString (OPTIONAL).
+    pub certificate_request: Option<Vec<u8>>,
+    /// `Offset` Interval (seconds) — difference between the new cert's
+    /// Initial Date and its Activation Date.
+    pub offset: Option<i64>,
+    /// Desired object `Attributes` for the new Certificate.
+    pub attributes: Vec<Attribute>,
+}
+
+/// `Re-certify` response (KMIP 3.0 §6.1.50, Table 401) — the UID of the
+/// new Certificate object.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReCertifyResponse {
+    pub uid: String,
+}
+
 // ── Group B: attribute family (KMIP 3.0 §6.1) ──────────────────────────────
 
 /// `GetAttributes` (§6.1.21) — read named attributes from one managed

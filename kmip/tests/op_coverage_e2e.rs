@@ -960,6 +960,93 @@ fn validate_stored_self_signed_cert_returns_valid_and_error_paths() {
     assert_eq!(err.result_reason(), ResultReason::InvalidObjectType);
 }
 
+/// P2.3 — §6.1.6 Certify end-to-end against a real engine: generate an
+/// ECDSA CA key pair (CreateKeyPair), mint a self-signed CA cert
+/// (`bootstrap_ca_certificate`), designate the CA on Deps, Certify a
+/// client PKCS#10 CSR, then assert the returned Certificate is Get-able
+/// and carries the server-derived §11 attributes + the Public Key Link.
+#[test]
+fn certify_issues_certificate_get_able_with_links() {
+    use pqctoday_kmip::ops::certify::{bootstrap_ca_certificate, certify};
+    use pqctoday_kmip::kmip30::{CertificateRequestType, CertifyRequest};
+
+    let _guard = engine_test_lock();
+
+    // Bootstrap a real engine session.
+    use softhsmrustv3::native::session;
+    let _ = session::finalize();
+    session::init().expect("engine init");
+    let engine_session = session::bootstrap_default_token(0, "so-pin", "user-pin", "p2.3-e2e")
+        .expect("bootstrap session");
+
+    let ring = Arc::new(RingSink::new(64));
+    let sink: Arc<dyn AuditSink> = ring.clone();
+    let policy = Engine::with_global_sink(sink.clone());
+    policy
+        .activate(load_from_str(
+            "schema_version: 1\nmetadata: { name: p, description: p, authority: t, effective: \"always\" }\nrules: []\n",
+            std::path::Path::new("<e2e>"),
+        ).unwrap())
+        .unwrap();
+    let deps = Deps::new(policy, Arc::new(MemoryStore::new()), sink, DepsConfig::default())
+        .with_engine_session(engine_session)
+        .with_ca_key("urn:ca-priv-e2e", "urn:ca-cert-e2e");
+
+    // ── CreateKeyPair → ECDSA CA key (born PreActive). ──
+    use pqctoday_kmip::kmip30::{Attribute, CreateKeyPairRequest, KmipAlgorithm, UsageMask};
+    let kp = create_key_pair(
+        &deps,
+        CreateKeyPairRequest {
+            common_attributes: vec![Attribute::CryptographicAlgorithm(KmipAlgorithm::Ecdsa)],
+            private_key_attributes: vec![Attribute::CryptographicUsageMask(UsageMask::SIGN)],
+            public_key_attributes: vec![Attribute::CryptographicUsageMask(UsageMask::VERIFY)],
+        },
+        "CreateKeyPair",
+        "e2e-ca-keygen",
+    )
+    .unwrap();
+
+    // Re-home the generated CA private key under the designated UID by
+    // copying its store record (the CA model designates UIDs).
+    let mut ca_priv = deps.store.get(&kp.private_key_uid).unwrap().unwrap();
+    ca_priv.uid = "urn:ca-priv-e2e".into();
+    ca_priv.state = State::Active;
+    deps.store.put(ca_priv).unwrap();
+
+    // Mint the self-signed CA cert (signs its TBS in the engine).
+    bootstrap_ca_certificate(&deps, "urn:ca-priv-e2e", "urn:ca-cert-e2e", "E2E Root CA", 3650)
+        .expect("bootstrap CA cert");
+
+    // ── Client CSR → Certify. ──
+    let subj_kp = rcgen::KeyPair::generate().unwrap();
+    let mut params = rcgen::CertificateParams::new(vec!["client.e2e".into()]).unwrap();
+    params.distinguished_name.push(rcgen::DnType::CommonName, "e2e-client");
+    let csr = params.serialize_request(&subj_kp).unwrap();
+
+    let resp = certify(
+        &deps,
+        CertifyRequest {
+            certificate_request_type: Some(CertificateRequestType::Pkcs10),
+            certificate_request: Some(csr.der().to_vec()),
+            ..CertifyRequest::default()
+        },
+        "e2e-certify",
+    )
+    .unwrap();
+
+    // ── The issued Certificate is Get-able with §11 attrs. ──
+    let g = get(&deps, GetRequest { uid: resp.uid.clone(), key_format_type: None, key_wrapping_specification: None }, "e2e-get").unwrap();
+    assert_eq!(g.object_type, ObjectType::Certificate);
+    assert!(!g.key_block.key_value.is_empty(), "issued cert DER is returned by Get");
+
+    let rec = deps.store.get(&resp.uid).unwrap().unwrap();
+    assert_eq!(rec.certificate_subject_cn.as_deref(), Some("e2e-client"),
+        "server-derived §11 CertificateSubjectCN");
+    assert_eq!(rec.certificate_length, Some(g.key_block.key_value.len() as i32));
+
+    let _ = session::finalize();
+}
+
 // ── Coverage meta-test ───────────────────────────────────────────────────────
 //
 // Every op in `dispatcher::HANDLED_OPERATIONS` MUST be referenced by at
@@ -997,6 +1084,9 @@ fn coverage_map() -> std::collections::HashMap<pqctoday_kmip::kmip30::Operation,
         (Op::Logout, "e2e:op_coverage(login_validates_credential_issues_ticket_then_logout)"),
         // P2.2 — §6.1.62 Validate (certificate-chain validation).
         (Op::Validate, "e2e:op_coverage(validate_stored_self_signed_cert_returns_valid_and_error_paths)"),
+        // P2.3 — §6.1.6 Certify / §6.1.50 Re-certify (PQC-capable CA).
+        (Op::Certify, "e2e:op_coverage(certify_issues_certificate_get_able_with_links) + unit:ops::certify (RSA/ECDSA/ML-DSA issuance+verify)"),
+        (Op::ReCertify, "unit:ops::certify(recertify_*) — new window + Replaced/Replacement links + old retired"),
         // ── Real-engine e2e (native_bridge_e2e.rs) ──
         (Op::CreateKeyPair, "e2e:native_bridge(ml_dsa_65_create_sign_verify_destroy_against_real_engine)"),
         (Op::Sign, "e2e:native_bridge(ml_dsa_65_create_sign_verify_destroy_against_real_engine)"),
@@ -1054,5 +1144,5 @@ fn coverage_map_covers_every_handled_operation() {
         stale.is_empty(),
         "coverage_map references ops that are not in HANDLED_OPERATIONS: {stale:?}"
     );
-    assert_eq!(handled.len(), 50, "HANDLED_OPERATIONS count changed — review coverage");
+    assert_eq!(handled.len(), 52, "HANDLED_OPERATIONS count changed — review coverage");
 }

@@ -48,7 +48,9 @@ use crate::ops::{
     revoke::revoke,
     rng_and_pkcs11::{pkcs11, rng_retrieve, rng_seed},
     session_and_auth::{create_credential, create_group, create_user, log, login, logout},
-    sign::sign, signature_verify::signature_verify, validate::validate, Deps,
+    sign::sign, signature_verify::signature_verify, validate::validate,
+    certify::{certify, recertify},
+    Deps,
 };
 
 use crate::kmip30::RequestPayload;
@@ -322,6 +324,8 @@ pub const HANDLED_OPERATIONS: &[crate::kmip30::Operation] = {
         Op::ReKey, Op::ReKeyKeyPair,
         // P2.2 — §6.1.62 Validate (certificate-chain validation).
         Op::Validate,
+        // P2.3 — §6.1.6 Certify / §6.1.50 Re-certify (PQC-capable CA).
+        Op::Certify, Op::ReCertify,
     ]
 };
 
@@ -402,6 +406,10 @@ fn newly_created_uids(payload: &ResponsePayload) -> Vec<String> {
         ResponsePayload::ReKeyKeyPair(r) => {
             vec![r.private_key_uid.clone(), r.public_key_uid.clone()]
         }
+        // P2.3 — the issued / renewed certificate is freshly minted
+        // (§6.1.6 / §6.1.50); Undo deletes it.
+        ResponsePayload::Certify(r) => vec![r.uid.clone()],
+        ResponsePayload::ReCertify(r) => vec![r.uid.clone()],
         _ => Vec::new(),
     }
 }
@@ -461,6 +469,10 @@ fn substitute_id_placeholder(
         // K21 — §6.1.51 / §6.1.52 Re-key targets.
         RequestPayload::ReKey(r)           => fix(&mut r.uid, &live),
         RequestPayload::ReKeyKeyPair(r)    => fix(&mut r.uid, &live),
+        // P2.3 — Certify MAY name a PublicKey by UID (Option); Re-certify
+        // always names the existing Certificate.
+        RequestPayload::Certify(r)         => { if let Some(u) = &mut r.uid { fix(u, &live); } }
+        RequestPayload::ReCertify(r)       => fix(&mut r.uid, &live),
         // Ops that don't take a UID (Create, Locate, Query, …) skip.
         _ => {}
     }
@@ -492,6 +504,10 @@ fn update_id_placeholder(state: &mut BatchState, payload: &ResponsePayload) {
         // Unique Identifier (Table 411 lists it first).
         ResponsePayload::ReKey(r)        => Some(&r.uid),
         ResponsePayload::ReKeyKeyPair(r) => Some(&r.private_key_uid),
+        // P2.3 — §6.4: the new Certificate's UID becomes the ID
+        // Placeholder for the rest of the batch.
+        ResponsePayload::Certify(r)      => Some(&r.uid),
+        ResponsePayload::ReCertify(r)    => Some(&r.uid),
         _ => None,
     };
     if let Some(u) = uid { state.id_placeholder = Some(u.to_string()); }
@@ -524,6 +540,9 @@ fn handle_payload(
             ResponsePayload::SignatureVerify(signature_verify(deps, r, correlation_id)?)
         }
         RequestPayload::Validate(r) => ResponsePayload::Validate(validate(deps, r, correlation_id)?),
+        // P2.3 — §6.1.6 Certify / §6.1.50 Re-certify (PQC-capable CA).
+        RequestPayload::Certify(r) => ResponsePayload::Certify(certify(deps, r, correlation_id)?),
+        RequestPayload::ReCertify(r) => ResponsePayload::ReCertify(recertify(deps, r, correlation_id)?),
         RequestPayload::Interop(r) => ResponsePayload::Interop(interop(deps, r, correlation_id)?),
         RequestPayload::AddAttribute(r) => ResponsePayload::AddAttribute(add_attribute(deps, r, correlation_id)?),
         RequestPayload::ModifyAttribute(r) => ResponsePayload::ModifyAttribute(modify_attribute(deps, r, correlation_id)?),
