@@ -4753,6 +4753,251 @@ void test_g5_attrs() {
     refresh_session();
 }
 
+// ── G8: §5.13 dual-function cryptographic operations ───────────────────────
+// Exercises C_DigestEncryptUpdate, C_DecryptDigestUpdate, C_SignEncryptUpdate,
+// C_DecryptVerifyUpdate. Each runs two ops in lockstep; we cross-check the
+// dual output against the equivalent standalone single-op output.
+void test_g8_dual_functions() {
+    const char* CAT = "G8Dual";
+    CK_BBOOL bTrue = CK_TRUE, bFalse = CK_FALSE;
+
+    // 32-byte (two AES blocks) message, split into two 16-byte chunks.
+    CK_BYTE msg[32];
+    for (int i = 0; i < 32; ++i) msg[i] = (CK_BYTE)(i * 7 + 1);
+    CK_BYTE* chunk1 = msg;          CK_ULONG c1 = 16;
+    CK_BYTE* chunk2 = msg + 16;     CK_ULONG c2 = 16;
+    CK_BYTE iv[16] = {0};
+
+    // AES-256 key usable for both encrypt and decrypt.
+    CK_OBJECT_CLASS secClass = CKO_SECRET_KEY;
+    CK_KEY_TYPE aesType = CKK_AES;
+    CK_BYTE keyBytes[32]; for (int i = 0; i < 32; ++i) keyBytes[i] = (CK_BYTE)(i + 3);
+    CK_ATTRIBUTE aesT[] = {
+        { CKA_CLASS, &secClass, sizeof(secClass) },
+        { CKA_KEY_TYPE, &aesType, sizeof(aesType) },
+        { CKA_TOKEN, &bFalse, sizeof(bFalse) },
+        { CKA_PRIVATE, &bFalse, sizeof(bFalse) },
+        { CKA_ENCRYPT, &bTrue, sizeof(bTrue) },
+        { CKA_DECRYPT, &bTrue, sizeof(bTrue) },
+        { CKA_VALUE, keyBytes, sizeof(keyBytes) }
+    };
+    CK_OBJECT_HANDLE hAes = 0;
+    if (fl->C_CreateObject(hSess, aesT, 7, &hAes) != CKR_OK || hAes == 0) {
+        record_result(CAT, "Setup_AES", "FAIL", "could not create AES-256 key");
+        return;
+    }
+
+    // ── Reference: standalone AES-CBC encrypt of the full message ───────────
+    CK_BYTE refCt[64]; CK_ULONG refCtLen = sizeof(refCt);
+    {
+        CK_MECHANISM m = { CKM_AES_CBC, iv, sizeof(iv) };
+        CK_RV rv = fl->C_EncryptInit(hSess, &m, hAes);
+        if (rv == CKR_OK) rv = fl->C_Encrypt(hSess, msg, sizeof(msg), refCt, &refCtLen);
+        if (rv != CKR_OK) { record_result(CAT, "Setup_RefEncrypt", "FAIL", "RV=" + std::to_string(rv)); fl->C_DestroyObject(hSess, hAes); return; }
+    }
+    // Reference: standalone SHA-256 of the full message.
+    CK_BYTE refDig[32]; CK_ULONG refDigLen = sizeof(refDig);
+    {
+        CK_MECHANISM m = { CKM_SHA256, NULL_PTR, 0 };
+        CK_RV rv = fl->C_DigestInit(hSess, &m);
+        if (rv == CKR_OK) rv = fl->C_Digest(hSess, msg, sizeof(msg), refDig, &refDigLen);
+        if (rv != CKR_OK) { record_result(CAT, "Setup_RefDigest", "FAIL", "RV=" + std::to_string(rv)); fl->C_DestroyObject(hSess, hAes); return; }
+    }
+
+    // ── 1. C_DigestEncryptUpdate: DigestInit + EncryptInit, dual update ─────
+    CK_BYTE dualCt[64]; CK_ULONG dualCtLen = 0;
+    {
+        CK_MECHANISM dm = { CKM_SHA256, NULL_PTR, 0 };
+        CK_MECHANISM em = { CKM_AES_CBC, iv, sizeof(iv) };
+        CK_RV rv = fl->C_DigestInit(hSess, &dm);
+        // Second init must be permitted (complementary dual pairing).
+        if (rv == CKR_OK) rv = fl->C_EncryptInit(hSess, &em, hAes);
+        record_result(CAT, "DigestEncrypt_dual_init",
+                      rv == CKR_OK ? "PASS" : "FAIL",
+                      "DigestInit+EncryptInit must coexist (§5.13) RV=" + std::to_string(rv));
+        if (rv == CKR_OK) {
+            CK_BYTE out[64]; CK_ULONG outLen = sizeof(out);
+            rv = fl->C_DigestEncryptUpdate(hSess, chunk1, c1, out, &outLen);
+            if (rv == CKR_OK) { memcpy(dualCt + dualCtLen, out, outLen); dualCtLen += outLen; }
+            outLen = sizeof(out);
+            if (rv == CKR_OK) rv = fl->C_DigestEncryptUpdate(hSess, chunk2, c2, out, &outLen);
+            if (rv == CKR_OK) { memcpy(dualCt + dualCtLen, out, outLen); dualCtLen += outLen; }
+            // Finalize both halves.
+            CK_BYTE encFin[32]; CK_ULONG encFinLen = sizeof(encFin);
+            if (rv == CKR_OK) rv = fl->C_EncryptFinal(hSess, encFin, &encFinLen);
+            if (rv == CKR_OK) { memcpy(dualCt + dualCtLen, encFin, encFinLen); dualCtLen += encFinLen; }
+            CK_BYTE dig[32]; CK_ULONG digLen = sizeof(dig);
+            if (rv == CKR_OK) rv = fl->C_DigestFinal(hSess, dig, &digLen);
+            bool ctMatch = (dualCtLen == refCtLen) && (memcmp(dualCt, refCt, refCtLen) == 0);
+            bool digMatch = (digLen == refDigLen) && (memcmp(dig, refDig, refDigLen) == 0);
+            record_result(CAT, "DigestEncrypt_ciphertext_matches",
+                          (rv == CKR_OK && ctMatch) ? "PASS" : "FAIL",
+                          "dual ciphertext == standalone encrypt, RV=" + std::to_string(rv));
+            record_result(CAT, "DigestEncrypt_digest_matches",
+                          (rv == CKR_OK && digMatch) ? "PASS" : "FAIL",
+                          "dual digest == standalone SHA-256, RV=" + std::to_string(rv));
+        }
+    }
+
+    // ── 2. C_DecryptDigestUpdate: DecryptInit + DigestInit over dualCt ──────
+    {
+        CK_MECHANISM dec = { CKM_AES_CBC, iv, sizeof(iv) };
+        CK_MECHANISM dm = { CKM_SHA256, NULL_PTR, 0 };
+        CK_RV rv = fl->C_DecryptInit(hSess, &dec, hAes);
+        if (rv == CKR_OK) rv = fl->C_DigestInit(hSess, &dm);
+        record_result(CAT, "DecryptDigest_dual_init",
+                      rv == CKR_OK ? "PASS" : "FAIL",
+                      "DecryptInit+DigestInit must coexist (§5.13) RV=" + std::to_string(rv));
+        if (rv == CKR_OK && dualCtLen > 0) {
+            // dualCt is 48 bytes (two data blocks + one pad block). Feed in two parts.
+            CK_BYTE pt[64]; CK_ULONG ptLen = sizeof(pt); CK_ULONG ptTot = 0;
+            CK_ULONG half = 16;
+            rv = fl->C_DecryptDigestUpdate(hSess, dualCt, half, pt, &ptLen);
+            if (rv == CKR_OK) ptTot += ptLen;
+            ptLen = sizeof(pt) - ptTot;
+            if (rv == CKR_OK) rv = fl->C_DecryptDigestUpdate(hSess, dualCt + half, dualCtLen - half, pt + ptTot, &ptLen);
+            if (rv == CKR_OK) ptTot += ptLen;
+            CK_BYTE decFin[32]; CK_ULONG decFinLen = sizeof(decFin);
+            if (rv == CKR_OK) rv = fl->C_DecryptFinal(hSess, decFin, &decFinLen);
+            CK_BYTE dig[32]; CK_ULONG digLen = sizeof(dig);
+            if (rv == CKR_OK) rv = fl->C_DigestFinal(hSess, dig, &digLen);
+            // Digest of recovered plaintext must equal the original message digest.
+            bool digMatch = (digLen == refDigLen) && (memcmp(dig, refDig, refDigLen) == 0);
+            record_result(CAT, "DecryptDigest_digest_roundtrip",
+                          (rv == CKR_OK && digMatch) ? "PASS" : "FAIL",
+                          "digest of decrypted plaintext == original digest, RV=" + std::to_string(rv));
+        }
+    }
+
+    // ── 3. C_SignEncryptUpdate: EC sign + AES encrypt ───────────────────────
+    {
+        CK_OBJECT_CLASS pubClass = CKO_PUBLIC_KEY, privClass = CKO_PRIVATE_KEY;
+        CK_KEY_TYPE ecType = CKK_EC;
+        CK_BYTE oid_p256[] = { 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07 };
+        CK_ATTRIBUTE pubT[] = {
+            { CKA_CLASS, &pubClass, sizeof(pubClass) }, { CKA_KEY_TYPE, &ecType, sizeof(ecType) },
+            { CKA_TOKEN, &bFalse, sizeof(bFalse) }, { CKA_VERIFY, &bTrue, sizeof(bTrue) },
+            { CKA_EC_PARAMS, oid_p256, sizeof(oid_p256) }
+        };
+        CK_ATTRIBUTE privT[] = {
+            { CKA_CLASS, &privClass, sizeof(privClass) }, { CKA_KEY_TYPE, &ecType, sizeof(ecType) },
+            { CKA_TOKEN, &bFalse, sizeof(bFalse) }, { CKA_PRIVATE, &bTrue, sizeof(bTrue) },
+            { CKA_SIGN, &bTrue, sizeof(bTrue) }
+        };
+        CK_MECHANISM gen = { CKM_EC_KEY_PAIR_GEN, NULL_PTR, 0 };
+        CK_OBJECT_HANDLE hPub = 0, hPriv = 0;
+        CK_RV rv = fl->C_GenerateKeyPair(hSess, &gen, pubT, 5, privT, 5, &hPub, &hPriv);
+        if (rv != CKR_OK) {
+            record_result(CAT, "SignEncrypt_setup", "SKIP", "EC keygen unavailable RV=" + std::to_string(rv));
+        } else {
+            CK_MECHANISM sm = { CKM_ECDSA_SHA256, NULL_PTR, 0 };  // hash-and-sign the streamed data
+            CK_MECHANISM em = { CKM_AES_CBC, iv, sizeof(iv) };
+            rv = fl->C_SignInit(hSess, &sm, hPriv);
+            if (rv == CKR_OK) rv = fl->C_EncryptInit(hSess, &em, hAes);
+            record_result(CAT, "SignEncrypt_dual_init",
+                          rv == CKR_OK ? "PASS" : "FAIL",
+                          "SignInit+EncryptInit must coexist (§5.13) RV=" + std::to_string(rv));
+            CK_BYTE seCt[64]; CK_ULONG seCtLen = 0;
+            CK_BYTE sig[256]; CK_ULONG sigLen = sizeof(sig);
+            if (rv == CKR_OK) {
+                CK_BYTE out[64]; CK_ULONG outLen = sizeof(out);
+                rv = fl->C_SignEncryptUpdate(hSess, chunk1, c1, out, &outLen);
+                if (rv == CKR_OK) { memcpy(seCt + seCtLen, out, outLen); seCtLen += outLen; }
+                outLen = sizeof(out);
+                if (rv == CKR_OK) rv = fl->C_SignEncryptUpdate(hSess, chunk2, c2, out, &outLen);
+                if (rv == CKR_OK) { memcpy(seCt + seCtLen, out, outLen); seCtLen += outLen; }
+                CK_BYTE encFin[32]; CK_ULONG encFinLen = sizeof(encFin);
+                if (rv == CKR_OK) rv = fl->C_EncryptFinal(hSess, encFin, &encFinLen);
+                if (rv == CKR_OK) { memcpy(seCt + seCtLen, encFin, encFinLen); seCtLen += encFinLen; }
+                if (rv == CKR_OK) rv = fl->C_SignFinal(hSess, sig, &sigLen);
+                bool ctMatch = (seCtLen == refCtLen) && (memcmp(seCt, refCt, refCtLen) == 0);
+                record_result(CAT, "SignEncrypt_ciphertext_matches",
+                              (rv == CKR_OK && ctMatch) ? "PASS" : "FAIL",
+                              "dual ciphertext == standalone encrypt, RV=" + std::to_string(rv));
+            }
+            // Verify the produced signature over the full message (one-shot).
+            if (rv == CKR_OK) {
+                CK_MECHANISM vm = { CKM_ECDSA_SHA256, NULL_PTR, 0 };
+                CK_RV rvv = fl->C_VerifyInit(hSess, &vm, hPub);
+                if (rvv == CKR_OK) rvv = fl->C_Verify(hSess, msg, sizeof(msg), sig, sigLen);
+                record_result(CAT, "SignEncrypt_signature_verifies",
+                              rvv == CKR_OK ? "PASS" : "FAIL",
+                              "ECDSA signature over streamed data verifies RV=" + std::to_string(rvv));
+            }
+            fl->C_DestroyObject(hSess, hPriv);
+            fl->C_DestroyObject(hSess, hPub);
+        }
+    }
+
+    // ── 4. C_DecryptVerifyUpdate: AES decrypt + EC verify round-trip ────────
+    {
+        CK_OBJECT_CLASS pubClass = CKO_PUBLIC_KEY, privClass = CKO_PRIVATE_KEY;
+        CK_KEY_TYPE ecType = CKK_EC;
+        CK_BYTE oid_p256[] = { 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07 };
+        CK_ATTRIBUTE pubT[] = {
+            { CKA_CLASS, &pubClass, sizeof(pubClass) }, { CKA_KEY_TYPE, &ecType, sizeof(ecType) },
+            { CKA_TOKEN, &bFalse, sizeof(bFalse) }, { CKA_VERIFY, &bTrue, sizeof(bTrue) },
+            { CKA_EC_PARAMS, oid_p256, sizeof(oid_p256) }
+        };
+        CK_ATTRIBUTE privT[] = {
+            { CKA_CLASS, &privClass, sizeof(privClass) }, { CKA_KEY_TYPE, &ecType, sizeof(ecType) },
+            { CKA_TOKEN, &bFalse, sizeof(bFalse) }, { CKA_PRIVATE, &bTrue, sizeof(bTrue) },
+            { CKA_SIGN, &bTrue, sizeof(bTrue) }
+        };
+        CK_MECHANISM gen = { CKM_EC_KEY_PAIR_GEN, NULL_PTR, 0 };
+        CK_OBJECT_HANDLE hPub = 0, hPriv = 0;
+        CK_RV rv = fl->C_GenerateKeyPair(hSess, &gen, pubT, 5, privT, 5, &hPub, &hPriv);
+        if (rv != CKR_OK) {
+            record_result(CAT, "DecryptVerify_setup", "SKIP", "EC keygen unavailable RV=" + std::to_string(rv));
+        } else {
+            // Sign the plaintext message normally to get a reference signature.
+            CK_MECHANISM sm = { CKM_ECDSA_SHA256, NULL_PTR, 0 };
+            CK_BYTE sig[256]; CK_ULONG sigLen = sizeof(sig);
+            rv = fl->C_SignInit(hSess, &sm, hPriv);
+            if (rv == CKR_OK) rv = fl->C_Sign(hSess, msg, sizeof(msg), sig, &sigLen);
+            // Decrypt refCt while feeding plaintext to the verify op.
+            CK_MECHANISM dec = { CKM_AES_CBC, iv, sizeof(iv) };
+            CK_MECHANISM vm = { CKM_ECDSA_SHA256, NULL_PTR, 0 };
+            if (rv == CKR_OK) rv = fl->C_DecryptInit(hSess, &dec, hAes);
+            if (rv == CKR_OK) rv = fl->C_VerifyInit(hSess, &vm, hPub);
+            record_result(CAT, "DecryptVerify_dual_init",
+                          rv == CKR_OK ? "PASS" : "FAIL",
+                          "DecryptInit+VerifyInit must coexist (§5.13) RV=" + std::to_string(rv));
+            if (rv == CKR_OK) {
+                CK_BYTE pt[64]; CK_ULONG ptLen = sizeof(pt); CK_ULONG ptTot = 0;
+                CK_ULONG half = 16;
+                rv = fl->C_DecryptVerifyUpdate(hSess, refCt, half, pt, &ptLen);
+                if (rv == CKR_OK) ptTot += ptLen;
+                ptLen = sizeof(pt) - ptTot;
+                if (rv == CKR_OK) rv = fl->C_DecryptVerifyUpdate(hSess, refCt + half, refCtLen - half, pt + ptTot, &ptLen);
+                if (rv == CKR_OK) ptTot += ptLen;
+                CK_BYTE decFin[32]; CK_ULONG decFinLen = sizeof(decFin);
+                if (rv == CKR_OK) rv = fl->C_DecryptFinal(hSess, decFin, &decFinLen);
+                CK_RV rvv = (rv == CKR_OK) ? fl->C_VerifyFinal(hSess, sig, sigLen) : rv;
+                record_result(CAT, "DecryptVerify_roundtrip",
+                              rvv == CKR_OK ? "PASS" : "FAIL",
+                              "verify of decrypted plaintext succeeds RV=" + std::to_string(rvv));
+            }
+            fl->C_DestroyObject(hSess, hPriv);
+            fl->C_DestroyObject(hSess, hPub);
+        }
+    }
+
+    // ── 5. Negative: missing second op → CKR_OPERATION_NOT_INITIALIZED ──────
+    {
+        CK_MECHANISM em = { CKM_AES_CBC, iv, sizeof(iv) };
+        CK_RV rv = fl->C_EncryptInit(hSess, &em, hAes);  // only encrypt, no digest
+        CK_BYTE out[64]; CK_ULONG outLen = sizeof(out);
+        CK_RV rvu = fl->C_DigestEncryptUpdate(hSess, chunk1, c1, out, &outLen);
+        record_result(CAT, "DigestEncrypt_missing_digest_rejected",
+                      rvu == CKR_OPERATION_NOT_INITIALIZED ? "PASS" : "FAIL",
+                      "expect CKR_OPERATION_NOT_INITIALIZED(0x91) RV=" + std::to_string(rvu));
+        (void)rv;
+    }
+
+    fl->C_DestroyObject(hSess, hAes);
+}
+
 int main(int argc, char** argv) {
     parse_args(argc, argv);
 
@@ -4821,6 +5066,9 @@ int main(int argc, char** argv) {
     }
     if (opt_category == "all" || opt_category == "g7-sha3rsa") {
         refresh_session(); test_g7_sha3_384_rsa();
+    }
+    if (opt_category == "all" || opt_category == "g8-dual") {
+        refresh_session(); test_g8_dual_functions();
     }
 
     if (opt_category == "all" || opt_category == "classical") {

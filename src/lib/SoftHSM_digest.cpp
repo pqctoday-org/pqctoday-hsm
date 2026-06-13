@@ -50,7 +50,9 @@ CK_RV SoftHSM::C_DigestInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 	if (pMechanism == NULL_PTR) return CKR_ARGUMENTS_BAD;
 
 	std::shared_ptr<Session> sessionGuard; Session* session;
-	CK_RV rv = acquireSession(hSession, sessionGuard, session);
+	// SESSION_OP_DIGEST lets a Digest init pair with an already-active
+	// Encrypt/Decrypt op for C_DigestEncryptUpdate / C_DecryptDigestUpdate (§5.13).
+	CK_RV rv = acquireSession(hSession, sessionGuard, session, SESSION_OP_DIGEST);
 	if (rv != CKR_OK) return rv;
 
 	// Get the mechanism
@@ -312,8 +314,11 @@ CK_RV SoftHSM::C_DigestFinal(CK_SESSION_HANDLE hSession, CK_BYTE_PTR pDigest, CK
 	Session* session = sessionGuard.get();
 	if (session == NULL) return CKR_SESSION_HANDLE_INVALID;
 
-	// Check if we are doing the correct operation
-	if (session->getOpType() != SESSION_OP_DIGEST) return CKR_OPERATION_NOT_INITIALIZED;
+	// Accept either a standalone digest op (op == SESSION_OP_DIGEST) or the
+	// digest half of a §5.13 dual-function op (digestOp still live while the
+	// cipher half is the nominal active op). Either way the digest context
+	// must be present.
+	if (session->getDigestOp() == NULL) return CKR_OPERATION_NOT_INITIALIZED;
 
 	// Return size
 	CK_ULONG size = session->getDigestOp()->getHashSize();
@@ -348,7 +353,8 @@ CK_RV SoftHSM::C_DigestFinal(CK_SESSION_HANDLE hSession, CK_BYTE_PTR pDigest, CK
 	memcpy(pDigest, digest.byte_str(), size);
 	*pulDigestLen = size;
 
-	session->resetOp();
+	// Release only the digest half; a dual cipher partner (if any) survives.
+	session->endOpFamily(SESSION_OP_DIGEST);
 
 	return CKR_OK;
 }
