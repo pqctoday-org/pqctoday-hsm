@@ -8,6 +8,32 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — KMIP Locate orphan filter regressed OASIS conformance 92→89 (2026-06-13)
+
+A conformance-harness accuracy/completeness audit found `main` was at **89 PASS
+/ 3 FAIL**, not the claimed 92/0 — a regression hidden by a stale
+`conformance/REPLAY_REPORT.md` (a 1-test partial run). The Phase 7b.1 "Locate
+orphan filter" (`9176662`) dropped every Locate result whose PKCS#11 handle was
+absent from the engine, including legitimately **store-only** objects (Raw AES /
+cert / secret-data Registers that are never engine-imported) — so a freshly
+Registered key vanished from its own Locate (BL-M-1/4/14: empty payload where a
+UniqueIdentifier was expected). The filter now keys on `ObjectRecord.key_material`:
+store-backed objects (`Some`) stay locatable; only true engine-only orphans
+(`None` + missing handle) are hidden, preserving the persistent-store/volatile-
+engine guard the filter was written for. Replay restored to **92 PASS / 0 FAIL /
+10 SKIP**; `REPLAY_REPORT` regenerated from a full run.
+
+Audit findings (no code change, recorded for accuracy): the replay harness is
+sound — it drives the real compiled server over TLS with exact tree-wise
+comparison and no error-as-PASS path, and all 10 SKIPs are legitimate
+(5 deprecated DES/3DES/DSA, 2 cross-transcript precondition, 3 mutually-exclusive
+RNG policy variants). The checked-in corpus is the **complete** official OASIS
+KMIP 3.0 package (102/102 transcripts, 1234/1234 messages, byte-identical). Two
+honest scope limits: (1) crypto outputs (signature/ciphertext/MAC/digest) are
+placeholder-bound, not KAT-verified — the claim is protocol/structural/status
+conformance, not cryptographic-correctness; (2) the replay is **not CI-gated**,
+which is how this regression slipped in — wiring it is recommended follow-up.
+
 ### Fixed — C++ engine: token encrypt/decrypt hardening + C++17 enforcement (2026-06-13)
 
 A security hardening sweep over all 111 `Token::encrypt`/`decrypt` call sites in
