@@ -4332,6 +4332,93 @@ void test_g5_attrs() {
         return std::string((char*)buf, a.ulValueLen);
     };
 
+    // Read CKA_UNIQUE_ID and report the raw RV so we can distinguish a clean
+    // 36-byte read from the CKR_GENERAL_ERROR decrypt-on-plaintext bug.
+    auto readUniqueIdRV = [&](CK_OBJECT_HANDLE h, std::string& out) -> CK_RV {
+        CK_BYTE buf[128] = {0};
+        CK_ATTRIBUTE a = { CKA_UNIQUE_ID, buf, sizeof(buf) };
+        CK_RV rv = fl->C_GetAttributeValue(hSess, h, &a, 1);
+        if (rv == CKR_OK && a.ulValueLen != CK_UNAVAILABLE_INFORMATION)
+            out.assign((char*)buf, a.ulValueLen);
+        else
+            out.clear();
+        return rv;
+    };
+
+    // ── CKA_UNIQUE_ID is public metadata: it must read back in clear on a
+    //    PRIVATE key and on a SENSITIVE secret key (audit Part-A fix). The bug
+    //    was that retrieve() ran token->decrypt() on the plaintext UUID for
+    //    private objects → CKR_GENERAL_ERROR. §4.4.1. ─────────────────────────
+    {
+        // Private (and sensitive) RSA private key.
+        CK_MECHANISM rsaMech = { CKM_RSA_PKCS_KEY_PAIR_GEN, NULL_PTR, 0 };
+        CK_ULONG modBits = 2048;
+        CK_BYTE pubExp[] = { 0x01, 0x00, 0x01 };
+        CK_OBJECT_CLASS pubC = CKO_PUBLIC_KEY, privC = CKO_PRIVATE_KEY;
+        CK_ATTRIBUTE pubT[] = {
+            { CKA_CLASS, &pubC, sizeof(pubC) },
+            { CKA_TOKEN, &bFalse, sizeof(bFalse) },
+            { CKA_MODULUS_BITS, &modBits, sizeof(modBits) },
+            { CKA_PUBLIC_EXPONENT, pubExp, sizeof(pubExp) },
+            { CKA_VERIFY, &bTrue, sizeof(bTrue) },
+        };
+        CK_ATTRIBUTE privT[] = {
+            { CKA_CLASS, &privC, sizeof(privC) },
+            { CKA_TOKEN, &bFalse, sizeof(bFalse) },
+            { CKA_PRIVATE, &bTrue, sizeof(bTrue) },
+            { CKA_SENSITIVE, &bTrue, sizeof(bTrue) },
+            { CKA_SIGN, &bTrue, sizeof(bTrue) },
+        };
+        CK_OBJECT_HANDLE hPub = 0, hPriv = 0;
+        CK_RV rv = fl->C_GenerateKeyPair(hSess, &rsaMech, pubT, 5, privT, 5, &hPub, &hPriv);
+        if (rv != CKR_OK) {
+            record_result(CAT, "UniqueId_readable_on_private_key", "FAIL",
+                          "RSA keygen RV=" + std::to_string(rv));
+        } else {
+            std::string id;
+            CK_RV grv = readUniqueIdRV(hPriv, id);
+            bool ok = (grv == CKR_OK) && id.size() == 36;
+            record_result(CAT, "UniqueId_readable_on_private_key",
+                          ok ? "PASS" : "FAIL",
+                          "CKA_UNIQUE_ID on a PRIVATE/SENSITIVE key must read in "
+                          "clear (36-byte UUID), expect RV=CKR_OK; got RV=" +
+                          std::to_string(grv) + " len=" + std::to_string(id.size()));
+            fl->C_DestroyObject(hSess, hPriv);
+            fl->C_DestroyObject(hSess, hPub);
+        }
+    }
+    {
+        // Sensitive secret (AES) key.
+        CK_MECHANISM aesMech = { CKM_AES_KEY_GEN, NULL_PTR, 0 };
+        CK_OBJECT_CLASS secC = CKO_SECRET_KEY;
+        CK_KEY_TYPE aesKT = CKK_AES;
+        CK_ULONG vlen = 32;
+        CK_ATTRIBUTE keyT[] = {
+            { CKA_CLASS, &secC, sizeof(secC) },
+            { CKA_KEY_TYPE, &aesKT, sizeof(aesKT) },
+            { CKA_TOKEN, &bFalse, sizeof(bFalse) },
+            { CKA_PRIVATE, &bTrue, sizeof(bTrue) },
+            { CKA_SENSITIVE, &bTrue, sizeof(bTrue) },
+            { CKA_VALUE_LEN, &vlen, sizeof(vlen) },
+        };
+        CK_OBJECT_HANDLE hKey = 0;
+        CK_RV rv = fl->C_GenerateKey(hSess, &aesMech, keyT, 6, &hKey);
+        if (rv != CKR_OK) {
+            record_result(CAT, "UniqueId_readable_on_sensitive_secret", "FAIL",
+                          "AES keygen RV=" + std::to_string(rv));
+        } else {
+            std::string id;
+            CK_RV grv = readUniqueIdRV(hKey, id);
+            bool ok = (grv == CKR_OK) && id.size() == 36;
+            record_result(CAT, "UniqueId_readable_on_sensitive_secret",
+                          ok ? "PASS" : "FAIL",
+                          "CKA_UNIQUE_ID on a SENSITIVE secret key must read in "
+                          "clear (36-byte UUID), expect RV=CKR_OK; got RV=" +
+                          std::to_string(grv) + " len=" + std::to_string(id.size()));
+            fl->C_DestroyObject(hSess, hKey);
+        }
+    }
+
     // ── V-14: C_CopyObject must mint a FRESH CKA_UNIQUE_ID ────────────────────
     {
         // Public data object so CKA_UNIQUE_ID (stored in clear) reads back
