@@ -68,6 +68,7 @@ pub mod session_and_auth;
 pub mod sign;
 pub mod signature_verify;
 pub mod validate;
+pub mod certify;
 
 pub use deps::{Deps, DepsConfig};
 

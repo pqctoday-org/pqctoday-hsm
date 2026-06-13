@@ -156,6 +156,14 @@ pub enum ResultReason {
     /// the generic `InvalidAttributeValue` (0x2d). Codepoint verified
     /// from `kmip-spec-3.0-tags-enums.json` (`Result Reason` 0x4d).
     CircularLinkError = 0x0000_004d,
+    /// `Invalid CSR` — KMIP 3.0 §11. The Certificate Request Value
+    /// supplied to a §6.1.6 Certify / §6.1.50 Re-certify request could
+    /// not be parsed as the declared `Certificate Request Type`, or its
+    /// embedded self-signature failed to verify (a tampered / malformed
+    /// PKCS#10 CSR). Codepoint `0x2f` verified from
+    /// `kmip-spec-3.0-tags-enums.json` (`Result Reason` → `Invalid CSR`)
+    /// and the §6.1.6.1 / §6.1.50.1 error-handling tables.
+    InvalidCsr            = 0x0000_002f,
     GeneralFailure        = 0x0000_0100,
 }
 
@@ -296,6 +304,12 @@ impl KmipError {
     }
     pub fn invalid_object_type(msg: impl Into<String>) -> Self {
         Self::failed(ResultReason::InvalidObjectType, msg)
+    }
+    /// KMIP 3.0 §6.1.6.1 / §6.1.50.1 — `Invalid CSR` (0x2f): the
+    /// Certificate Request Value is malformed, of an unexpected
+    /// `Certificate Request Type`, or its self-signature is invalid.
+    pub fn invalid_csr(msg: impl Into<String>) -> Self {
+        Self::failed(ResultReason::InvalidCsr, msg)
     }
     pub fn wrapping_object_not_found(uid: &str) -> Self {
         // KMIP 3.0 §11 — the *wrapping* object (KEK) UID does not

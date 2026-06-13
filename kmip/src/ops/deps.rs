@@ -52,6 +52,49 @@ pub struct DepsConfig {
     /// enforces §8.1.2 authentication per batch item
     /// (`Authentication Not Successful (0x03)` on failure).
     pub auth_users: Vec<crate::server::auth::AuthUser>,
+
+    /// P2.3 — the server-configured Certificate Authority used by the
+    /// §6.1.6 Certify / §6.1.50 Re-certify operations. `None` (the
+    /// default) means **the server is not configured as a CA**: every
+    /// Certify request fails `Permission Denied` (there is no key
+    /// authorised to sign issuances). Set via `--ca-key <PRIV_UID>
+    /// --ca-cert <CERT_UID>` on the production binary, or
+    /// [`Deps::with_ca_key`] in tests. See the module doc on
+    /// [`CaKeyDesignation`] for the authorisation model.
+    pub ca_key: Option<CaKeyDesignation>,
+}
+
+/// P2.3 — designates the single key/cert pair the server may use as a
+/// Certificate Authority for §6.1.6 Certify / §6.1.50 Re-certify.
+///
+/// ## CA-key authorisation model (the net-new infra for this slice)
+///
+/// The pragmatic MVP is a *server-configured* CA, not a per-request CA
+/// reference: the operator names exactly one stored PrivateKey UID
+/// (`private_key_uid`) plus its companion CA Certificate UID
+/// (`certificate_uid`). The Certify handler:
+///
+/// 1. resolves `private_key_uid` → the engine key handle and signs the
+///    TBSCertificate **in the engine** (the CA private key never leaves
+///    the cryptographic boundary);
+/// 2. takes the issuer Distinguished Name from the stored CA
+///    Certificate's subject (`certificate_uid`), so issued certs chain
+///    to it;
+/// 3. **authorisation gate** — only `private_key_uid` may sign an
+///    issuance. A Certify request can name no other key; there is no
+///    way to coerce an arbitrary stored private key into signing certs.
+///    (The §6.1.6 spec also lets a client name a CA via an
+///    `X.509 Certificate Issuer` attribute; that is a future extension —
+///    the configured CA is the testable MVP.)
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CaKeyDesignation {
+    /// UID of the stored **PrivateKey** object that signs issuances. Its
+    /// `algorithm` (RSA / ECDSA / ML-DSA-*) selects the X.509 signature
+    /// AlgorithmIdentifier + the engine sign mechanism.
+    pub private_key_uid: String,
+    /// UID of the stored **Certificate** object whose subject DN becomes
+    /// the issuer DN of every certificate this CA issues.
+    pub certificate_uid: String,
 }
 
 impl DepsConfig {
@@ -69,6 +112,7 @@ impl Default for DepsConfig {
             vendor_identification: "pqctoday-hsm".into(),
             server_version: env!("CARGO_PKG_VERSION").into(),
             auth_users: Vec::new(), // open-auth — replay harness depends on this
+            ca_key: None,           // not a CA unless explicitly configured
         }
     }
 }
@@ -137,6 +181,17 @@ impl Deps {
     /// the production binary.
     pub fn with_engine_session(mut self, session: u32) -> Self {
         self.engine_session = Some(session);
+        self
+    }
+
+    /// P2.3 — designate the CA key/cert pair this server signs issuances
+    /// with (see [`CaKeyDesignation`]). Used by tests and the production
+    /// binary's `--ca-key` / `--ca-cert` flags.
+    pub fn with_ca_key(mut self, private_key_uid: impl Into<String>, certificate_uid: impl Into<String>) -> Self {
+        self.config.ca_key = Some(CaKeyDesignation {
+            private_key_uid: private_key_uid.into(),
+            certificate_uid: certificate_uid.into(),
+        });
         self
     }
 }

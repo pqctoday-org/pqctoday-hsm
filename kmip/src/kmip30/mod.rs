@@ -71,6 +71,10 @@ pub use ops::{
     SignatureVerifyRequest, SignatureVerifyResponse,
     SignRequest, SignResponse,
     ValidateRequest, ValidateResponse,
+    // P2.3 — Certify (§6.1.6) / Re-certify (§6.1.50).
+    CertificateRequestType,
+    CertifyRequest, CertifyResponse,
+    ReCertifyRequest, ReCertifyResponse,
     // K19 — Baseline client-to-server ops (§6.1.26/27/58/59).
     Constraint, EndpointRole, ObjectDefaults,
     GetConstraintsRequest, GetConstraintsResponse,

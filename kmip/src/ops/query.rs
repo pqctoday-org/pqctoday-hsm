@@ -153,7 +153,6 @@ pub fn query(deps: &Deps, req: QueryRequest, correlation_id: &str) -> Result<Que
 /// / §6.1.52 handlers) — both were already advertised here, so the
 /// net advertised set is unchanged.
 pub(crate) const ADVERTISED_UNIMPLEMENTED_OPERATIONS: &[Operation] = &[
-    Operation::ReCertify,
     Operation::ObtainLease,
     // P2.2 moved Validate into `HANDLED_OPERATIONS` (§6.1.62 handler) —
     // it was already advertised here, so the net advertised set is
@@ -171,7 +170,9 @@ pub(crate) const ADVERTISED_UNIMPLEMENTED_OPERATIONS: &[Operation] = &[
     // (implemented §6.1.18 handler) — no net change to the advertised
     // set, so every MSGENC-* Query transcript keeps passing. K21 did
     // the same for ReKeyKeyPair (and ReKey above).
-    Operation::Certify,
+    // P2.3 moved Certify + Re-certify into `HANDLED_OPERATIONS`
+    // (§6.1.6 / §6.1.50 PQC-capable CA handlers) — both were already
+    // advertised here, so the net advertised set is unchanged.
     Operation::Cancel,
     Operation::JoinSplitKey,
 ];
@@ -256,6 +257,8 @@ mod tests {
         // K20: DeriveKey moved between the sets (47 + 15) — net
         // advertised set unchanged at 62.
         // K21: ReKey + ReKeyKeyPair moved between the sets (49 + 13)
+        // — net advertised set still 62.
+        // P2.3: Certify + Re-certify moved between the sets (52 + 10)
         // — net advertised set still 62.
         assert_eq!(ops.len(), 62);
         assert!(ops.contains(&Operation::Sign));
