@@ -1818,31 +1818,56 @@ PKCS_API CK_RV C_GetSessionValidationFlags(CK_SESSION_HANDLE hSession,
 }
 
 // ---------------------------------------------------------------------------
-// v3.2 additions — §5.23 Asynchronous operations
-// Async is not applicable to a software token; validate arguments then return
-// CKR_FUNCTION_NOT_SUPPORTED per spec.
+// v3.2 additions — §5.21/§5.22 Asynchronous operations
+// This token does not support asynchronous operations (CKF_ASYNC_SESSION_SUPPORTED
+// is not advertised and C_OpenSession rejects CKF_ASYNC_SESSION). The SoftHSM
+// methods gate C_Initialize, then return CKR_FUNCTION_NOT_SUPPORTED.
 // ---------------------------------------------------------------------------
 
-PKCS_API CK_RV C_AsyncComplete(CK_SESSION_HANDLE /*hSession*/,
+PKCS_API CK_RV C_AsyncComplete(CK_SESSION_HANDLE hSession,
 	CK_UTF8CHAR_PTR pFunctionName, CK_ASYNC_DATA_PTR pResult)
 {
-	if (pFunctionName == NULL_PTR || pResult == NULL_PTR) return CKR_ARGUMENTS_BAD;
-	return CKR_OPERATION_NOT_INITIALIZED;
+	try
+	{
+		return SoftHSM::i()->C_AsyncComplete(hSession, pFunctionName, pResult);
+	}
+	catch (...)
+	{
+		FatalException();
+	}
+
+	return CKR_FUNCTION_FAILED;
 }
 
-PKCS_API CK_RV C_AsyncGetID(CK_SESSION_HANDLE /*hSession*/,
+PKCS_API CK_RV C_AsyncGetID(CK_SESSION_HANDLE hSession,
 	CK_UTF8CHAR_PTR pFunctionName, CK_ULONG_PTR pulID)
 {
-	if (pFunctionName == NULL_PTR || pulID == NULL_PTR) return CKR_ARGUMENTS_BAD;
-	return CKR_OPERATION_NOT_INITIALIZED;
+	try
+	{
+		return SoftHSM::i()->C_AsyncGetID(hSession, pFunctionName, pulID);
+	}
+	catch (...)
+	{
+		FatalException();
+	}
+
+	return CKR_FUNCTION_FAILED;
 }
 
-PKCS_API CK_RV C_AsyncJoin(CK_SESSION_HANDLE /*hSession*/,
-	CK_UTF8CHAR_PTR pFunctionName, CK_ULONG /*ulID*/,
-	CK_BYTE_PTR /*pData*/, CK_ULONG /*ulData*/)
+PKCS_API CK_RV C_AsyncJoin(CK_SESSION_HANDLE hSession,
+	CK_UTF8CHAR_PTR pFunctionName, CK_ULONG ulID,
+	CK_BYTE_PTR pData, CK_ULONG ulData)
 {
-	if (pFunctionName == NULL_PTR) return CKR_ARGUMENTS_BAD;
-	return CKR_OPERATION_NOT_INITIALIZED;
+	try
+	{
+		return SoftHSM::i()->C_AsyncJoin(hSession, pFunctionName, ulID, pData, ulData);
+	}
+	catch (...)
+	{
+		FatalException();
+	}
+
+	return CKR_FUNCTION_FAILED;
 }
 
 // ---------------------------------------------------------------------------

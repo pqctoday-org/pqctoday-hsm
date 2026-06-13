@@ -124,6 +124,7 @@ std::string opt_engine_commit = "";                        // optional engine gi
 // Token State
 CK_FUNCTION_LIST_PTR fl;
 CK_SESSION_HANDLE hSess;
+CK_SLOT_ID hSlot = 0;    // slot holding the initialized compliance token
 
 // JSON Report
 json report = json::object();
@@ -152,7 +153,7 @@ void print_usage() {
     printf("Usage: p11_v32_compliance_test [options]\n");
     printf("Options:\n");
     printf("  --engine <path>    Path to the PKCS#11 library (default: %s)\n", opt_engine.c_str());
-    printf("  --category <cat>   Test category: all, init, discovery, pqc-kem, pqc-dsa, hbs, attr, g1-security, g2-mechtable, g3-keygen, g4-retcodes, g5-attrs, g7-sha3rsa (default: %s)\n", opt_category.c_str());
+    printf("  --category <cat>   Test category: all, init, discovery, pqc-kem, pqc-dsa, hbs, attr, g1-security, g2-mechtable, g3-keygen, g4-retcodes, g5-attrs, g7-sha3rsa, g8-dual, g-async (default: %s)\n", opt_category.c_str());
     printf("  --report <path>    Output bases (e.g. 'rep' creates 'rep.md' and 'rep.json') (default: %s)\n", opt_report.c_str());
     printf("  --pin <pin>        Token PIN (default: %s)\n", opt_pin.c_str());
     printf("  --workdir <dir>    Scratch dir for softhsm2.conf + token store (default: %s)\n", opt_workdir.c_str());
@@ -268,6 +269,41 @@ bool init_token() {
         } else {
             record_result("G4Retcodes", "V19_GSVF_pre_init", "SKIP", "unavailable");
         }
+
+        // G-A: async functions before C_Initialize → CKR_CRYPTOKI_NOT_INITIALIZED.
+        typedef CK_RV (*C_AC_t)(CK_SESSION_HANDLE, CK_UTF8CHAR_PTR, CK_ASYNC_DATA_PTR);
+        typedef CK_RV (*C_AG_t)(CK_SESSION_HANDLE, CK_UTF8CHAR_PTR, CK_ULONG_PTR);
+        typedef CK_RV (*C_AJ_t)(CK_SESSION_HANDLE, CK_UTF8CHAR_PTR, CK_ULONG, CK_BYTE_PTR, CK_ULONG);
+        C_AC_t AC = (C_AC_t)dlsym(handle, "C_AsyncComplete");
+        C_AG_t AG = (C_AG_t)dlsym(handle, "C_AsyncGetID");
+        C_AJ_t AJ = (C_AJ_t)dlsym(handle, "C_AsyncJoin");
+        if (AC) {
+            CK_ASYNC_DATA ad; memset(&ad, 0, sizeof(ad));
+            CK_RV r = AC(hSess, (CK_UTF8CHAR_PTR)"C_Sign", &ad);
+            record_result("G4Retcodes", "GA_AsyncComplete_pre_init",
+                          r == CKR_CRYPTOKI_NOT_INITIALIZED ? "PASS" : "FAIL",
+                          "expect CKR_CRYPTOKI_NOT_INITIALIZED, RV=" + std::to_string(r));
+        } else {
+            record_result("G4Retcodes", "GA_AsyncComplete_pre_init", "SKIP", "unavailable");
+        }
+        if (AG) {
+            CK_ULONG id = 0;
+            CK_RV r = AG(hSess, (CK_UTF8CHAR_PTR)"C_Sign", &id);
+            record_result("G4Retcodes", "GA_AsyncGetID_pre_init",
+                          r == CKR_CRYPTOKI_NOT_INITIALIZED ? "PASS" : "FAIL",
+                          "expect CKR_CRYPTOKI_NOT_INITIALIZED, RV=" + std::to_string(r));
+        } else {
+            record_result("G4Retcodes", "GA_AsyncGetID_pre_init", "SKIP", "unavailable");
+        }
+        if (AJ) {
+            CK_BYTE buf[8] = {0};
+            CK_RV r = AJ(hSess, (CK_UTF8CHAR_PTR)"C_Sign", 0, buf, sizeof(buf));
+            record_result("G4Retcodes", "GA_AsyncJoin_pre_init",
+                          r == CKR_CRYPTOKI_NOT_INITIALIZED ? "PASS" : "FAIL",
+                          "expect CKR_CRYPTOKI_NOT_INITIALIZED, RV=" + std::to_string(r));
+        } else {
+            record_result("G4Retcodes", "GA_AsyncJoin_pre_init", "SKIP", "unavailable");
+        }
     }
 
     // V-20: C_Initialize with pInitArgs->pReserved != NULL → CKR_ARGUMENTS_BAD.
@@ -297,6 +333,7 @@ bool init_token() {
         return false;
     }
 
+    hSlot = slots[0];
     CK_UTF8CHAR label[32]; memset(label, ' ', 32); memcpy(label, "compliance", 10);
     rv = fl->C_InitToken(slots[0], (CK_UTF8CHAR_PTR)"5678", 4, label);
     if (rv != CKR_OK) {
@@ -4998,6 +5035,96 @@ void test_g8_dual_functions() {
     fl->C_DestroyObject(hSess, hAes);
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// G-A: Asynchronous-operation conformance (§5.6.1 + §5.21/§5.22).
+// This token does not support async operations: it must NOT advertise
+// CKF_ASYNC_SESSION_SUPPORTED, must reject CKF_ASYNC_SESSION at C_OpenSession with
+// CKR_SESSION_ASYNC_NOT_SUPPORTED, and the async functions must return
+// CKR_FUNCTION_NOT_SUPPORTED (after the C_Initialize gate, exercised pre-init in G4).
+// ─────────────────────────────────────────────────────────────────────────────
+void test_g_async() {
+    const char* CAT = "GAsync";
+
+    // Token info must not advertise async-session support.
+    CK_TOKEN_INFO ti;
+    memset(&ti, 0, sizeof(ti));
+    CK_RV rvt = fl->C_GetTokenInfo(hSlot, &ti);
+    if (rvt == CKR_OK) {
+        record_result(CAT, "TokenInfo_no_async_support",
+                      (ti.flags & CKF_ASYNC_SESSION_SUPPORTED) == 0 ? "PASS" : "FAIL",
+                      "CKF_ASYNC_SESSION_SUPPORTED must not be set, flags=0x" + std::to_string(ti.flags));
+    } else {
+        record_result(CAT, "TokenInfo_no_async_support", "FAIL", "C_GetTokenInfo RV=" + std::to_string(rvt));
+    }
+
+    // C_OpenSession with CKF_ASYNC_SESSION → CKR_SESSION_ASYNC_NOT_SUPPORTED (§5.6.1).
+    {
+        CK_SESSION_HANDLE hAsync = 0;
+        CK_RV rv = fl->C_OpenSession(hSlot,
+                                     CKF_SERIAL_SESSION | CKF_ASYNC_SESSION,
+                                     NULL, NULL, &hAsync);
+        record_result(CAT, "OpenSession_async_rejected",
+                      rv == CKR_SESSION_ASYNC_NOT_SUPPORTED ? "PASS" : "FAIL",
+                      "expect CKR_SESSION_ASYNC_NOT_SUPPORTED(0x205), RV=" + std::to_string(rv));
+        if (rv == CKR_OK && hAsync != 0) fl->C_CloseSession(hAsync);
+    }
+
+    // Regression: the same open WITHOUT the async flag still succeeds.
+    {
+        CK_SESSION_HANDLE hSync = 0;
+        CK_RV rv = fl->C_OpenSession(hSlot,
+                                     CKF_SERIAL_SESSION, NULL, NULL, &hSync);
+        record_result(CAT, "OpenSession_sync_ok",
+                      rv == CKR_OK ? "PASS" : "FAIL",
+                      "expect CKR_OK, RV=" + std::to_string(rv));
+        if (rv == CKR_OK && hSync != 0) fl->C_CloseSession(hSync);
+    }
+
+    // Async functions, post-init → CKR_FUNCTION_NOT_SUPPORTED.
+    void* dlib = dlopen(opt_engine.c_str(), RTLD_NOW);
+    if (dlib) {
+        typedef CK_RV (*C_AC_t)(CK_SESSION_HANDLE, CK_UTF8CHAR_PTR, CK_ASYNC_DATA_PTR);
+        typedef CK_RV (*C_AG_t)(CK_SESSION_HANDLE, CK_UTF8CHAR_PTR, CK_ULONG_PTR);
+        typedef CK_RV (*C_AJ_t)(CK_SESSION_HANDLE, CK_UTF8CHAR_PTR, CK_ULONG, CK_BYTE_PTR, CK_ULONG);
+        C_AC_t AC = (C_AC_t)dlsym(dlib, "C_AsyncComplete");
+        C_AG_t AG = (C_AG_t)dlsym(dlib, "C_AsyncGetID");
+        C_AJ_t AJ = (C_AJ_t)dlsym(dlib, "C_AsyncJoin");
+
+        if (AC) {
+            CK_ASYNC_DATA ad; memset(&ad, 0, sizeof(ad));
+            CK_RV rv = AC(hSess, (CK_UTF8CHAR_PTR)"C_Sign", &ad);
+            record_result(CAT, "C_AsyncComplete_not_supported",
+                          rv == CKR_FUNCTION_NOT_SUPPORTED ? "PASS" : "FAIL",
+                          "expect CKR_FUNCTION_NOT_SUPPORTED(0x54), RV=" + std::to_string(rv));
+        } else {
+            record_result(CAT, "C_AsyncComplete_not_supported", "SKIP", "symbol unavailable");
+        }
+
+        if (AG) {
+            CK_ULONG id = 0;
+            CK_RV rv = AG(hSess, (CK_UTF8CHAR_PTR)"C_Sign", &id);
+            record_result(CAT, "C_AsyncGetID_not_supported",
+                          rv == CKR_FUNCTION_NOT_SUPPORTED ? "PASS" : "FAIL",
+                          "expect CKR_FUNCTION_NOT_SUPPORTED(0x54), RV=" + std::to_string(rv));
+        } else {
+            record_result(CAT, "C_AsyncGetID_not_supported", "SKIP", "symbol unavailable");
+        }
+
+        if (AJ) {
+            CK_BYTE buf[8] = {0};
+            CK_RV rv = AJ(hSess, (CK_UTF8CHAR_PTR)"C_Sign", 0, buf, sizeof(buf));
+            record_result(CAT, "C_AsyncJoin_not_supported",
+                          rv == CKR_FUNCTION_NOT_SUPPORTED ? "PASS" : "FAIL",
+                          "expect CKR_FUNCTION_NOT_SUPPORTED(0x54), RV=" + std::to_string(rv));
+        } else {
+            record_result(CAT, "C_AsyncJoin_not_supported", "SKIP", "symbol unavailable");
+        }
+        dlclose(dlib);
+    } else {
+        record_result(CAT, "AsyncFns_not_supported", "SKIP", "dlopen failed");
+    }
+}
+
 int main(int argc, char** argv) {
     parse_args(argc, argv);
 
@@ -5069,6 +5196,9 @@ int main(int argc, char** argv) {
     }
     if (opt_category == "all" || opt_category == "g8-dual") {
         refresh_session(); test_g8_dual_functions();
+    }
+    if (opt_category == "all" || opt_category == "g-async") {
+        refresh_session(); test_g_async();
     }
 
     if (opt_category == "all" || opt_category == "classical") {

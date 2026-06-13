@@ -65,6 +65,11 @@ CK_RV SessionManager::openSession
 	if (slot == NULL) return CKR_SLOT_ID_INVALID;
 	if ((flags & CKF_SERIAL_SESSION) == 0) return CKR_SESSION_PARALLEL_NOT_SUPPORTED;
 
+	// This token does not support asynchronous sessions (CKF_ASYNC_SESSION_SUPPORTED
+	// is not advertised in CK_TOKEN_INFO). Per PKCS#11 v3.2 §5.6.1, reject a request
+	// for an async session rather than silently downgrading it.
+	if ((flags & CKF_ASYNC_SESSION) != 0) return CKR_SESSION_ASYNC_NOT_SUPPORTED;
+
 	// Lock access to the vector
 	MutexLocker lock(sessionsMutex);
 
