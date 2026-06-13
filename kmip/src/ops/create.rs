@@ -176,6 +176,7 @@ pub fn create(deps: &Deps, mut req: CreateRequest, correlation_id: &str) -> Resu
         name: x.name.clone(),
         links: std::collections::HashMap::new(),
         custom_attributes: std::collections::HashMap::new(),
+        object_groups: x.object_groups.clone(),
 
         key_material: None,
 

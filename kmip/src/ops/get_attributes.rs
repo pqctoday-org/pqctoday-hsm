@@ -233,6 +233,13 @@ fn attributes_from_record(r: &ObjectRecord) -> Vec<Attribute> {
         out.push(Attribute::Custom { name: name.clone(), value: value.clone() });
     }
 
+    // KMIP `Object Group` (0x420056) — multi-instance: emit one
+    // attribute per group membership so GetAttributes round-trips the
+    // full set. Empty list → nothing emitted.
+    for g in &r.object_groups {
+        out.push(Attribute::ObjectGroup(g.clone()));
+    }
+
     // KMIP 3.0 §11 + Profiles v3.0 §4.1.1 item 10 — `Digest` is the
     // server-computed SHA-256 over the object's ACTUAL key material
     // (K-14): persisted at creation (`digest_value` — Register hashes
@@ -341,6 +348,7 @@ pub(crate) fn canonical_attribute_name(attr: &Attribute) -> &'static str {
         Attribute::NextLink(_)               => "NextLink",
         Attribute::PreviousLink(_)           => "PreviousLink",
         Attribute::GroupLink(_)              => "GroupLink",
+        Attribute::ObjectGroup(_)            => "ObjectGroup",
         // K20 — Derive Key link pair (§6.1.18 / §4.35.5).
         Attribute::DerivationBaseObjectLink(_) => "DerivationBaseObjectLink",
         Attribute::DerivedObjectLink(_)      => "DerivedObjectLink",

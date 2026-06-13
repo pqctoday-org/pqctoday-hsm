@@ -317,6 +317,14 @@ pub enum Attribute {
     /// that contains this managed object. SASED-M-3 step #0 pins a
     /// Locate filter by GroupLink.
     GroupLink(String),
+    /// `Object Group` (0x420056) — a group-membership label. KMIP's
+    /// Object Group attribute is **multi-instance**: an object may
+    /// belong to several groups, so it appears once per membership in
+    /// an attribute list. Carries the group name (a `Name Reference`
+    /// in the KMIP 3.0 `Object Groups` model — SASED-M-3 step #0 pins
+    /// a Locate filter by it). Persisted onto the record at
+    /// Create / Register and matched by Locate (any membership hits).
+    ObjectGroup(String),
     /// `Derivation Base Object Link` (§4.35.5; wire tag `Derivation
     /// Object Link` 0x420192) — K20: on a derived Symmetric Key /
     /// Secret Data object, "expresses an association from a derived
