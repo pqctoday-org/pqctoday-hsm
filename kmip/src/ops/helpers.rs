@@ -852,12 +852,35 @@ fn resolve_kek(
     correlation_id: &str,
 ) -> crate::error::Result<Vec<u8>> {
     use crate::error::ResultReason;
+    // P2.4 — the KEK is the *wrapping* object, so its resolution
+    // failures carry the wrapping-specific KMIP 3.0 §11 reasons
+    // (`Wrapping Object Not Found/Archived/Destroyed`, 0x42/0x40/0x41)
+    // rather than the data object's generic `ObjectNotFound` (0x37) /
+    // `WrongKeyLifecycleState` (0x43). The spec reserves these codes
+    // precisely for KeyWrappingSpecification / KeyWrappingData KEK
+    // resolution; verified against `kmip-spec-3.0-tags-enums.json`.
+    use crate::kmip30::State;
     let kek_obj = deps
         .store
         .get(kek_uid)?
         .ok_or_else(|| fail_err(deps, correlation_id, op,
-            KmipError::object_not_found(kek_uid)))?;
-    if kek_obj.state != crate::kmip30::State::Active {
+            KmipError::wrapping_object_not_found(kek_uid)))?;
+    // Archived (off-line via the Archive op) takes precedence over the
+    // lifecycle FSM — the material is unreachable until Recover.
+    if kek_obj.archived {
+        return Err(fail_err(deps, correlation_id, op,
+            KmipError::wrapping_object_archived(kek_uid)));
+    }
+    if kek_obj.state != State::Active {
+        // Destroyed KEK material is gone → the wrapping-specific
+        // `Wrapping Object Destroyed`. Other non-Active states
+        // (PreActive / Deactivated / Compromised) keep the generic
+        // lifecycle reason — the spec has no wrapping-specific code
+        // for those.
+        if matches!(kek_obj.state, State::Destroyed | State::DestroyedCompromised) {
+            return Err(fail_err(deps, correlation_id, op,
+                KmipError::wrapping_object_destroyed(kek_uid)));
+        }
         return Err(fail_err(deps, correlation_id, op,
             non_active_state_error(kek_uid, kek_obj.state)));
     }
@@ -1307,5 +1330,87 @@ mod tests {
                 .unwrap_err().result_reason(),
             ResultReason::KeyFormatTypeNotSupported,
         );
+    }
+
+    // ── P2.4 — Wrapping Object Not Found / Archived / Destroyed ─────
+    //
+    // `wrap_key_value` (Get K16) / `unwrap_key_value` (Register K17)
+    // resolve the KEK by UID through `resolve_kek`. The wrapping object
+    // carries the wrapping-specific KMIP 3.0 §11 reasons (0x42/0x40/
+    // 0x41), not the data object's generic ObjectNotFound (0x37) /
+    // WrongKeyLifecycleState (0x43).
+
+    fn wrap_deps() -> Deps {
+        use crate::auditlog::{AuditSink, RingSink};
+        use crate::policy::{load_from_str, Engine};
+        use crate::store::MemoryStore;
+        use std::sync::Arc;
+        let ring = Arc::new(RingSink::new(64));
+        let sink: Arc<dyn AuditSink> = ring.clone();
+        let engine = Engine::with_global_sink(sink.clone());
+        engine.activate(load_from_str(
+            "schema_version: 1\nmetadata: {name: t, description: t, authority: t, effective: always}\nrules: []\n",
+            std::path::Path::new("<t>"),
+        ).unwrap()).unwrap();
+        Deps::new(engine, Arc::new(MemoryStore::new()), sink, crate::ops::deps::DepsConfig::default())
+    }
+
+    fn put_kek(d: &Deps, uid: &str, state: crate::kmip30::State, archived: bool) {
+        use crate::store::ObjectRecord;
+        d.store.put(ObjectRecord {
+            uid: uid.into(),
+            object_type: crate::kmip30::ObjectType::SymmetricKey,
+            algorithm: crate::kmip30::KmipAlgorithm::Aes,
+            cryptographic_length: 256,
+            usage_mask: crate::kmip30::UsageMask::WRAP_KEY,
+            state,
+            archived,
+            key_material: Some(vec![0x11; 32]),
+            ..ObjectRecord::default()
+        }).unwrap();
+    }
+
+    fn wrap_spec(kek_uid: &str) -> crate::kmip30::KeyWrappingSpec {
+        crate::kmip30::KeyWrappingSpec {
+            wrapping_method: 0x01,
+            encryption_key_uid: kek_uid.into(),
+            cryptographic_parameters: None,
+            encoding_option: None,
+            mac_signature_key_information_present: false,
+        }
+    }
+
+    #[test]
+    fn wrap_kek_missing_returns_wrapping_object_not_found() {
+        let d = wrap_deps();
+        let err = wrap_key_value(&d, "Get", &wrap_spec("nope"), &[0u8; 32], "c").unwrap_err();
+        assert_eq!(err.result_reason(), ResultReason::WrappingObjectNotFound);
+    }
+
+    #[test]
+    fn wrap_kek_archived_returns_wrapping_object_archived() {
+        let d = wrap_deps();
+        put_kek(&d, "kek", crate::kmip30::State::Active, true);
+        let err = wrap_key_value(&d, "Get", &wrap_spec("kek"), &[0u8; 32], "c").unwrap_err();
+        assert_eq!(err.result_reason(), ResultReason::WrappingObjectArchived);
+    }
+
+    #[test]
+    fn wrap_kek_destroyed_returns_wrapping_object_destroyed() {
+        let d = wrap_deps();
+        put_kek(&d, "kek", crate::kmip30::State::Destroyed, false);
+        let err = wrap_key_value(&d, "Get", &wrap_spec("kek"), &[0u8; 32], "c").unwrap_err();
+        assert_eq!(err.result_reason(), ResultReason::WrappingObjectDestroyed);
+    }
+
+    #[test]
+    fn wrap_kek_deactivated_keeps_generic_lifecycle_reason() {
+        // Non-archived, non-destroyed but non-Active KEK keeps the
+        // generic WrongKeyLifecycleState — the spec has no wrapping-
+        // specific reason for Deactivated/Compromised/PreActive.
+        let d = wrap_deps();
+        put_kek(&d, "kek", crate::kmip30::State::Deactivated, false);
+        let err = wrap_key_value(&d, "Get", &wrap_spec("kek"), &[0u8; 32], "c").unwrap_err();
+        assert_eq!(err.result_reason(), ResultReason::WrongKeyLifecycleState);
     }
 }
