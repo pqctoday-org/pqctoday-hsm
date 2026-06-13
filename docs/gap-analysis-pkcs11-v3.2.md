@@ -1,6 +1,17 @@
-# PKCS#11 v3.2 Compliance Gap Analysis — softhsmv3 (v17)
+# PKCS#11 v3.2 Compliance Gap Analysis — softhsmv3 (v18)
 
-**Updated:** 2026-06-12 (v17 — **Round-4 C++ engine remediation complete.** The C++
+**Updated:** 2026-06-12 (v18 — **Round-5 C++ close-out: all documented-deferred items
+closed.** The four items the round-4 audit left as "intentionally out of scope" were
+remediated in five commits on `fix/cpp-pkcs11-v3.2-compliance`: **R5-1** `38357a4`
+(SHA3-384-RSA family completion — `CKM_SHA3_384_RSA_PKCS{,_PSS}` now sign/verify), **R5-2**
+`4bce9ef` (the 4 dual-function combined ops — §3.2), **R5-3** `7432b2f` (async conformance —
+`CKF_ASYNC_SESSION` rejected at session open, async fns gate-then-`CKR_FUNCTION_NOT_SUPPORTED`
+— §3.1), **R5-4** `b9f6cd3` (cross-token handle isolation), **R5-5** `a6d2614` (RIPEMD-160 via
+the native OpenSSL legacy provider, build-gated — §3.6). Verification: `ctest` 8/8 suites
+pass; the `p11_v32_compliance_test` binary reports **308 PASS / 0 FAIL / 0 SKIP**. Only
+`CKM_RIPEMD160_RSA_PKCS` (RSA-over-RIPEMD-160 not added) and RIPEMD-160 in the **WASM** build
+(`no-module` legacy-provider constraint, off by design) remain intentionally out of scope.)
+**Prior:** 2026-06-12 (v17 — **Round-4 C++ engine remediation complete.** The C++
 `src/lib/` engine — deliberately scoped out of compliance rounds 1–3 (rust was the focus) —
 underwent a full PKCS#11 v3.2 audit (`docs/compliance-audit-cpp-pkcs11-v3.2-2026-06-12.md`)
 and a six-commit remediation on branch `fix/cpp-pkcs11-v3.2-compliance` (G1 `74fa6f3`,
@@ -84,8 +95,8 @@ FIPS 205 §10) implemented across the full stack:
 | C_* function stubs (in scope) | 0 | All G1–G6 + G-DA1/G-DA2 + G-5G1/5G2/5G3 + G-PUB1/G-PK1/G-PK2/G-PK4 + G-KMAC1/KMAC2 resolved |
 | CKM_* mechanisms (in scope) | 0 | AES-CTR, HKDF, X9.63 KDF, SP 800-108 Counter+Feedback KDF, ECDH1 Cofactor, KMAC-128/256 added |
 | CKA_* attribute stubs (in scope) | 0 | CKA_VALUE `ck1\|ck4` on PQC public keys resolved (v11). CKA_UNIQUE_ID now readable on private/sensitive objects (round-4 Part-A). |
-| Out-of-scope stubs | 2 | Async (G7 — `C_Async*`); the 4 dual-function combined ops (`C_DigestEncryptUpdate`/`C_DecryptDigestUpdate`/`C_SignEncryptUpdate`/`C_DecryptVerifyUpdate`). **`C_SignRecover`/`C_VerifyRecover` are now fully implemented — see §3.2.** |
-| Out-of-scope mechanisms | 1 | CKM_RIPEMD160 in the **WASM** build only (`no-module` legacy-provider constraint, §3.6). Native engine returns CKR_MECHANISM_INVALID. |
+| Out-of-scope stubs | 0 | **Round 5 closed the last two.** The 4 dual-function combined ops are now implemented (R5-2 `4bce9ef`, §3.2); async (G7) is now spec-conformant — `CKF_ASYNC_SESSION` rejected at session open + async fns gate-then-`CKR_FUNCTION_NOT_SUPPORTED` (R5-3 `7432b2f`, §3.1). `C_SignRecover`/`C_VerifyRecover` were already implemented. |
+| Out-of-scope mechanisms | 1 | RIPEMD-160 in the **WASM** build only (`no-module` legacy-provider constraint, §3.6) — off by design. **Native CKM_RIPEMD160 now works via the legacy provider (R5-5 `a6d2614`).** Only `CKM_RIPEMD160_RSA_PKCS` (RSA-over-RIPEMD-160) remains deferred. |
 
 ---
 
@@ -352,6 +363,14 @@ thread-safe promise-based state machine, no async session is ever advertised/ope
 PQC tooling requires it. Omission is acceptable per PKCS#11 v3.2 §3.4 (async optional when
 not advertised).
 
+**Resolved (v18, R5-3 `7432b2f`):** async behaviour is now spec-conformant.
+`C_OpenSession` explicitly **rejects `CKF_ASYNC_SESSION`** (returns
+`CKR_SESSION_PARALLEL_NOT_SUPPORTED`), so no async session can ever be opened, and the
+`C_Async*` entry points now gate on `C_Initialize` and then return
+`CKR_FUNCTION_NOT_SUPPORTED` — replacing the stale `CKR_OPERATION_NOT_INITIALIZED`. Async
+remains a deliberate non-feature (no PQC tooling needs it), but the engine no longer
+mis-reports its state.
+
 ### 3.2 G8 — Recovery and combined operations
 
 **Corrected (v17):** `C_SignRecoverInit`/`C_SignRecover` and
@@ -360,11 +379,13 @@ not advertised).
 "Verified-conformant"). The v16 entry listing them as `CKR_FUNCTION_NOT_SUPPORTED` stubs is
 struck.
 
-The **only remaining stubs** in this group are the 4 dual-function combined ops —
+**Resolved (v18, R5-2 `4bce9ef`):** the 4 dual-function combined ops —
 `C_DigestEncryptUpdate`, `C_DecryptDigestUpdate`, `C_SignEncryptUpdate`,
-`C_DecryptVerifyUpdate` — which return `CKR_FUNCTION_NOT_SUPPORTED`. These are optional v2.0
-combined operations that upstream SoftHSM2 v2.7.0 also omits; no PQC algorithm requires them.
-**Genuinely-intentional omission retained.**
+`C_DecryptVerifyUpdate` — were the last `CKR_FUNCTION_NOT_SUPPORTED` stubs in the engine and
+are now **fully implemented** (each runs the paired digest/sign and cipher operations over a
+single input buffer). Round 4 had retained them as an intentional omission; round 5 closed the
+gap. There are no remaining function stubs in scope or out of scope (see the dimension table
+above).
 
 ### 3.3 G9 — Session validation flags (v3.2)
 
@@ -406,13 +427,33 @@ return `CKR_FUNCTION_NOT_SUPPORTED`. Not relevant for PQC operations.
 
 `CKM_RIPEMD160` (`0x00000240`) — defined in PKCS#11 v3.2 (marked "Historical").
 
-**Blocker:** The OpenSSL WASM build (`scripts/build-openssl-wasm.sh`) uses `no-module` which
-disables the OpenSSL legacy provider. RIPEMD-160 lives in the legacy provider and is not
-accessible in the WASM build. Enabling it would require adding `enable-legacy` to the WASM
-build flags and verifying size impact (~+50 KB estimated). The Digital Assets module currently
-computes Bitcoin HASH160 via `@noble/hashes/ripemd160` client-side.
+**Native — resolved (v18, R5-5 `a6d2614`):** the **native** engine now exposes
+`CKM_RIPEMD160` via the OpenSSL legacy provider, gated behind a build option. The native
+digest path no longer returns `CKR_MECHANISM_INVALID`.
 
-**Decision:** Deferred. No `no-module` removal planned until WASM size budget allows.
+**WASM — off by design:** The OpenSSL WASM build (`scripts/build-openssl-wasm.sh`) uses
+`no-module` which disables the OpenSSL legacy provider. RIPEMD-160 lives in the legacy
+provider and is therefore not accessible in the WASM build. Enabling it would require
+`enable-legacy` and a WASM size-budget review (~+50 KB estimated). The Digital Assets module
+computes Bitcoin HASH160 client-side via `@noble/hashes/ripemd160`, so the WASM gap has no
+functional impact. **Decision: WASM RIPEMD-160 stays off — intentional.**
+
+**Still deferred:** `CKM_RIPEMD160_RSA_PKCS` (RSA signatures over RIPEMD-160) was **not** added
+in R5-5 — only the bare `CKM_RIPEMD160` digest mechanism was legacy-gated. RIPEMD-160 is a
+Historical mechanism; no PQC tooling requires RSA-over-RIPEMD-160. Deferred.
+
+### 3.7 G7 mechanism — SHA3-384-RSA family ✓ RESOLVED (v18, R5-1 `38357a4`)
+
+`CKM_SHA3_384_RSA_PKCS` and `CKM_SHA3_384_RSA_PKCS_PSS` were the one-family hole in the
+SHA3-RSA signature set: round 4 (`6ee89ed`) reconciled the advertise↔dispatch table entry, but
+the mechanisms did not actually sign/verify end-to-end. Round 5 (R5-1 `38357a4`) completed the
+implementation; the family now signs and verifies, matching the other SHA3-RSA mechanisms.
+
+### 3.8 HandleManager cross-token isolation ✓ RESOLVED (v18, R5-4 `b9f6cd3`)
+
+Audit object §6 OBS noted an upstream-inherited defect: a handle minted on token A was usable
+from a session bound to token B. Round 5 (R5-4 `b9f6cd3`) enforces cross-token handle
+isolation — handles are now validated against the session's token before use.
 
 ---
 
