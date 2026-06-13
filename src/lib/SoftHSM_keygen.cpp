@@ -264,6 +264,47 @@ static CK_RV extractParameterSet(CK_ATTRIBUTE_PTR pTemplate, CK_ULONG ulCount,
 	return CKR_OK;
 }
 
+// SLH-DSA security parameter n (bytes) per parameter set; the deterministic
+// keygen seed is SK.seed||SK.prf||PK.seed = 3n bytes (FIPS 205).
+static size_t slhdsaSeedN(CK_ULONG paramSet)
+{
+	switch (paramSet)
+	{
+		case CKP_SLH_DSA_SHA2_128S: case CKP_SLH_DSA_SHAKE_128S:
+		case CKP_SLH_DSA_SHA2_128F: case CKP_SLH_DSA_SHAKE_128F:
+			return 16;
+		case CKP_SLH_DSA_SHA2_192S: case CKP_SLH_DSA_SHAKE_192S:
+		case CKP_SLH_DSA_SHA2_192F: case CKP_SLH_DSA_SHAKE_192F:
+			return 24;
+		case CKP_SLH_DSA_SHA2_256S: case CKP_SLH_DSA_SHAKE_256S:
+		case CKP_SLH_DSA_SHA2_256F: case CKP_SLH_DSA_SHAKE_256F:
+			return 32;
+		default:
+			return 0;
+	}
+}
+
+// Extract an optional CKA_SEED from a keygen template for deterministic PQC
+// key generation. Absent → seedOut is left empty (random keygen). Present but
+// wrong length for the family/param-set → CKR_ATTRIBUTE_VALUE_INVALID
+// (audit object 4.3 / crypto 5.6). expectedLen is the required byte length:
+//   ML-DSA xi = 32, ML-KEM d||z = 64, SLH-DSA SK.seed||SK.prf||PK.seed = 3n.
+static CK_RV extractSeed(CK_ATTRIBUTE_PTR pTemplate, CK_ULONG ulCount,
+                         size_t expectedLen, ByteString& seedOut)
+{
+	for (CK_ULONG i = 0; i < ulCount; i++)
+	{
+		if (pTemplate[i].type != CKA_SEED)
+			continue;
+		if (pTemplate[i].pValue == NULL_PTR || pTemplate[i].ulValueLen != expectedLen)
+			return CKR_ATTRIBUTE_VALUE_INVALID;
+		seedOut = ByteString((unsigned char*)pTemplate[i].pValue, pTemplate[i].ulValueLen);
+		return CKR_OK;
+	}
+	seedOut.wipe();
+	return CKR_OK;
+}
+
 // Generate a secret key or a domain parameter set using the specified mechanism
 CK_RV SoftHSM::C_GenerateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechanism, CK_ATTRIBUTE_PTR pTemplate, CK_ULONG ulCount, CK_OBJECT_HANDLE_PTR phKey)
 {
@@ -4862,9 +4903,19 @@ CK_RV SoftHSM::generateMLDSA
 		if (psrv != CKR_OK) return psrv;
 	}
 
+	// Optional deterministic-keygen seed (FIPS 204 xi, 32 bytes), supplied on
+	// the private-key template. Absent → random keygen; present-but-wrong-len
+	// → CKR_ATTRIBUTE_VALUE_INVALID (audit CKA_SEED gap).
+	ByteString seed;
+	{
+		CK_RV srv = extractSeed(pPrivateKeyTemplate, ulPrivateKeyAttributeCount, 32, seed);
+		if (srv != CKR_OK) return srv;
+	}
+
 	// Set the parameters
 	MLDSAParameters p;
 	p.setParameterSet(parameterSet);
+	p.setSeed(seed);
 
 	// Generate key pair
 	AsymmetricKeyPair* kp = NULL;
@@ -5086,9 +5137,20 @@ CK_RV SoftHSM::generateSLHDSA
 		if (psrv != CKR_OK) return psrv;
 	}
 
+	// Optional deterministic-keygen seed (FIPS 205 SK.seed||SK.prf||PK.seed,
+	// 3n bytes), supplied on the private-key template. Absent → random keygen;
+	// present-but-wrong-len → CKR_ATTRIBUTE_VALUE_INVALID.
+	ByteString seed;
+	{
+		CK_RV srv = extractSeed(pPrivateKeyTemplate, ulPrivateKeyAttributeCount,
+		                        3 * slhdsaSeedN(parameterSet), seed);
+		if (srv != CKR_OK) return srv;
+	}
+
 	// Set the parameters
 	SLHDSAParameters p;
 	p.setParameterSet(parameterSet);
+	p.setSeed(seed);
 
 	// Generate key pair
 	AsymmetricKeyPair* kp = NULL;
@@ -6928,9 +6990,19 @@ CK_RV SoftHSM::generateMLKEM
 		if (psrv != CKR_OK) return psrv;
 	}
 
+	// Optional deterministic-keygen seed (FIPS 203 d||z, 64 bytes), supplied on
+	// the private-key template. Absent → random keygen; present-but-wrong-len
+	// → CKR_ATTRIBUTE_VALUE_INVALID.
+	ByteString seed;
+	{
+		CK_RV srv = extractSeed(pPrivateKeyTemplate, ulPrivateKeyAttributeCount, 64, seed);
+		if (srv != CKR_OK) return srv;
+	}
+
 	// Set the parameters
 	MLKEMParameters p;
 	p.setParameterSet(parameterSet);
+	p.setSeed(seed);
 
 	// Generate key pair
 	AsymmetricKeyPair* kp = NULL;

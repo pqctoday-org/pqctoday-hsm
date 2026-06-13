@@ -51,6 +51,10 @@ public:
 	void setParameterSet(CK_ULONG inParamSet);
 	CK_ULONG getParameterSet() const;
 
+	// Optional deterministic-keygen seed (SK.seed||SK.prf||PK.seed, 3n bytes).
+	void setSeed(const ByteString& inSeed);
+	const ByteString& getSeed() const;
+
 	// Are the parameters of the given type?
 	virtual bool areOfType(const char* inType);
 
@@ -60,6 +64,7 @@ public:
 
 private:
 	CK_ULONG parameterSet;
+	ByteString seed;
 };
 
 #endif // !_SOFTHSM_V2_SLHDSAPARAMETERS_H

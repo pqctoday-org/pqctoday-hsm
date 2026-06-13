@@ -40,6 +40,16 @@ CK_ULONG MLKEMParameters::getParameterSet() const
 	return parameterSet;
 }
 
+void MLKEMParameters::setSeed(const ByteString& inSeed)
+{
+	seed = inSeed;
+}
+
+const ByteString& MLKEMParameters::getSeed() const
+{
+	return seed;
+}
+
 bool MLKEMParameters::areOfType(const char* inType)
 {
 	return !strcmp(type, inType);

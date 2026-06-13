@@ -40,6 +40,16 @@ CK_ULONG MLDSAParameters::getParameterSet() const
 	return parameterSet;
 }
 
+void MLDSAParameters::setSeed(const ByteString& inSeed)
+{
+	seed = inSeed;
+}
+
+const ByteString& MLDSAParameters::getSeed() const
+{
+	return seed;
+}
+
 bool MLDSAParameters::areOfType(const char* inType)
 {
 	return !strcmp(type, inType);

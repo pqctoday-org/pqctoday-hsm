@@ -556,6 +556,25 @@ bool OSSLSLHDSA::generateKeyPair(AsymmetricKeyPair** ppKeyPair,
 		EVP_PKEY_CTX_free(ctx);
 		return false;
 	}
+
+	// Deterministic generation from a caller-supplied seed
+	// (FIPS 205 SK.seed||SK.prf||PK.seed, 3n B). The provider rejects an
+	// out-of-range length here.
+	const ByteString& seed = params->getSeed();
+	if (seed.size() != 0)
+	{
+		OSSL_PARAM seedParams[2];
+		seedParams[0] = OSSL_PARAM_construct_octet_string(
+			OSSL_PKEY_PARAM_SLH_DSA_SEED, (void*)seed.const_byte_str(), seed.size());
+		seedParams[1] = OSSL_PARAM_construct_end();
+		if (EVP_PKEY_CTX_set_params(ctx, seedParams) != 1)
+		{
+			ERROR_MSG("SLH-DSA seed param rejected (0x%08X)", ERR_get_error());
+			EVP_PKEY_CTX_free(ctx);
+			return false;
+		}
+	}
+
 	if (EVP_PKEY_keygen(ctx, &pkey) != 1)
 	{
 		ERROR_MSG("SLH-DSA keygen failed (0x%08X)", ERR_get_error());

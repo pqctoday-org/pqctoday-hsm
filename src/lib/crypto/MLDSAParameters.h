@@ -51,6 +51,11 @@ public:
 	void setParameterSet(CK_ULONG inParamSet);
 	CK_ULONG getParameterSet() const;
 
+	// Set/get the optional deterministic-keygen seed (xi, 32 bytes).
+	// When non-empty, generateKeyPair() derives the key deterministically.
+	void setSeed(const ByteString& inSeed);
+	const ByteString& getSeed() const;
+
 	// Are the parameters of the given type?
 	virtual bool areOfType(const char* inType);
 
@@ -60,6 +65,7 @@ public:
 
 private:
 	CK_ULONG parameterSet;
+	ByteString seed;
 };
 
 #endif // !_SOFTHSM_V2_MLDSAPARAMETERS_H

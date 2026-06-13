@@ -53,7 +53,7 @@ public:
 	virtual ~P11Attribute();
 
 	// Initialize the attribute
-	bool init();
+	virtual bool init();
 
 	// Return the attribute type
 	CK_ATTRIBUTE_TYPE getType();
@@ -296,12 +296,25 @@ protected:
 class P11AttrUniqueId : public P11Attribute
 {
 public:
+	// The numeric type CKA_UNIQUE_ID was persisted under before the v3.2
+	// header re-sync (F1). Legacy tokens hold the immutable id under this
+	// value; init() migrates it to the canonical CKA_UNIQUE_ID (0x4).
+	static const CK_ATTRIBUTE_TYPE LEGACY_TYPE = 0x00000017UL;
+
 	// Constructor — read-only after creation (ck2 = not settable by user)
 	P11AttrUniqueId(OSObject* inobject) : P11Attribute(inobject) { type = CKA_UNIQUE_ID; checks = ck2|ck4|ck6; }
+
+	// One-time load-time migration of the legacy 0x17 id to 0x4, then the
+	// normal init() (which mints a fresh UUID only when none is present).
+	virtual bool init();
 
 protected:
 	// Set the default value of the attribute (generates UUID)
 	virtual bool setDefault();
+
+	// Strictly token-assigned: reject any caller-supplied value on every
+	// op (create/generate/unwrap/derive/copy/set). PKCS#11 v3.2 §4.4.1.
+	virtual CK_RV updateAttr(Token *token, bool isPrivate, CK_VOID_PTR pValue, CK_ULONG ulValueLen, int op);
 };
 
 /*****************************************
@@ -419,6 +432,30 @@ protected:
 	virtual bool setDefault();
 
 	// Update the value if allowed
+	virtual CK_RV updateAttr(Token *token, bool isPrivate, CK_VOID_PTR pValue, CK_ULONG ulValueLen, int op);
+};
+
+/*****************************************
+ * CKA_SEED (PKCS#11 v3.2 §4.x — PQC deterministic keygen seed)
+ *
+ * Deterministic generation seed for ML-DSA (xi, 32 B), ML-KEM (d||z, 64 B)
+ * and SLH-DSA (SK.seed||SK.prf||PK.seed, 3n B). Stored on the PQC private
+ * key, sensitive-protected (ck7 -> CKR_ATTRIBUTE_SENSITIVE on a sensitive
+ * key) and encrypted at rest like CKA_VALUE; never modifiable after the
+ * generating/creating call.
+ *****************************************/
+
+class P11AttrSeed : public P11Attribute
+{
+public:
+	// Constructor
+	P11AttrSeed(OSObject* inobject, CK_ULONG inchecks) : P11Attribute(inobject) { type = CKA_SEED; checks = inchecks; }
+
+protected:
+	// Set the default value of the attribute (empty — no seed supplied)
+	virtual bool setDefault();
+
+	// Update the value if allowed (encrypts on private objects, like CKA_VALUE)
 	virtual CK_RV updateAttr(Token *token, bool isPrivate, CK_VOID_PTR pValue, CK_ULONG ulValueLen, int op);
 };
 

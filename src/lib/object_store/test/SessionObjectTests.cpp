@@ -39,6 +39,7 @@
 #include "Directory.h"
 #include "OSAttribute.h"
 #include "cryptoki.h"
+#include "P11Attributes.h"
 
 CPPUNIT_TEST_SUITE_REGISTRATION(SessionObjectTests);
 
@@ -432,5 +433,66 @@ void SessionObjectTests::testDestroyObjectFails()
 	OSObject* testIF = (OSObject*) &testObject;
 
 	CPPUNIT_ASSERT(!testIF->destroyObject());
+}
+
+// Audit object §1.4 — CKA_UNIQUE_ID 0x17->0x4 load-time migration.
+// A pre-v3.2-resync object holds its immutable id under the OLD numeric
+// type 0x17. After the header fix the canonical type is CKA_UNIQUE_ID (0x4).
+// P11AttrUniqueId::init() must move 0x17->0x4 PRESERVING the original id
+// (not mint a fresh UUID) and delete the orphaned 0x17 blob.
+void SessionObjectTests::testUniqueIdMigration()
+{
+	// (1) Legacy object carrying ONLY the 0x17 id → migrated, id preserved.
+	{
+		SessionObject legacyObject(NULL, 1, 1);
+		CPPUNIT_ASSERT(legacyObject.isValid());
+
+		ByteString legacyId("0123456789abcdef0123456789abcdef0123"); // 36-byte UUID-shaped blob
+		OSAttribute legacyAttr(legacyId);
+		CPPUNIT_ASSERT(legacyObject.setAttribute(P11AttrUniqueId::LEGACY_TYPE, legacyAttr));
+		CPPUNIT_ASSERT(!legacyObject.attributeExists(CKA_UNIQUE_ID));
+
+		P11AttrUniqueId uid(&legacyObject);
+		CPPUNIT_ASSERT(uid.init());
+
+		// Canonical id now present and equal to the legacy value.
+		CPPUNIT_ASSERT(legacyObject.attributeExists(CKA_UNIQUE_ID));
+		CPPUNIT_ASSERT(legacyObject.getAttribute(CKA_UNIQUE_ID).getByteStringValue() == legacyId);
+		// Orphaned legacy blob removed.
+		CPPUNIT_ASSERT(!legacyObject.attributeExists(P11AttrUniqueId::LEGACY_TYPE));
+
+		// Idempotent: a second init() is a no-op and keeps the id.
+		P11AttrUniqueId uid2(&legacyObject);
+		CPPUNIT_ASSERT(uid2.init());
+		CPPUNIT_ASSERT(legacyObject.getAttribute(CKA_UNIQUE_ID).getByteStringValue() == legacyId);
+	}
+
+	// (2) Fresh object with no id at all → init() mints a new UUID (no 0x17).
+	{
+		SessionObject freshObject(NULL, 1, 1);
+		CPPUNIT_ASSERT(freshObject.isValid());
+		CPPUNIT_ASSERT(!freshObject.attributeExists(CKA_UNIQUE_ID));
+
+		P11AttrUniqueId uid(&freshObject);
+		CPPUNIT_ASSERT(uid.init());
+		CPPUNIT_ASSERT(freshObject.attributeExists(CKA_UNIQUE_ID));
+		CPPUNIT_ASSERT(freshObject.getAttribute(CKA_UNIQUE_ID).getByteStringValue().size() == 36);
+		CPPUNIT_ASSERT(!freshObject.attributeExists(P11AttrUniqueId::LEGACY_TYPE));
+	}
+
+	// (3) Object already on 0x4 with a stray 0x17 → keeps 0x4 (idempotent).
+	{
+		SessionObject mixedObject(NULL, 1, 1);
+		CPPUNIT_ASSERT(mixedObject.isValid());
+		ByteString canonical("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+		ByteString stray("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+		CPPUNIT_ASSERT(mixedObject.setAttribute(CKA_UNIQUE_ID, OSAttribute(canonical)));
+		CPPUNIT_ASSERT(mixedObject.setAttribute(P11AttrUniqueId::LEGACY_TYPE, OSAttribute(stray)));
+
+		P11AttrUniqueId uid(&mixedObject);
+		CPPUNIT_ASSERT(uid.init());
+		// 0x4 untouched (migration only fires when 0x4 is absent).
+		CPPUNIT_ASSERT(mixedObject.getAttribute(CKA_UNIQUE_ID).getByteStringValue() == canonical);
+	}
 }
 
