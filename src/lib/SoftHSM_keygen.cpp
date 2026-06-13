@@ -268,10 +268,14 @@ CK_RV SoftHSM::C_GenerateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMecha
 	}
 
 
-	// Generate AES secret key
+	// Generate AES / ChaCha20 secret key. Both use the generateAES path but the
+	// key type and CKA_KEY_GEN_MECHANISM differ — pass the mechanism through so
+	// ChaCha20 keys are CKK_CHACHA20 with CKM_CHACHA20_KEY_GEN, not mislabeled
+	// as AES (audit V-12).
 	if (pMechanism->mechanism == CKM_AES_KEY_GEN || pMechanism->mechanism == CKM_CHACHA20_KEY_GEN)
 	{
-		return this->generateAES(hSession, pTemplate, ulCount, phKey, isOnToken, isPrivate);
+		return this->generateAES(hSession, pTemplate, ulCount, phKey, isOnToken, isPrivate,
+		                         pMechanism->mechanism);
 	}
 
 	// Generate generic secret key
@@ -3622,9 +3626,15 @@ CK_RV SoftHSM::generateAES
 	CK_ULONG ulCount,
 	CK_OBJECT_HANDLE_PTR phKey,
 	CK_BBOOL isOnToken,
-	CK_BBOOL isPrivate)
+	CK_BBOOL isPrivate,
+	CK_MECHANISM_TYPE keyGenMech)
 {
 	*phKey = CK_INVALID_HANDLE;
+
+	// ChaCha20 keys are CKK_CHACHA20 (PKCS#11 v3.2), 256-bit only. AES keys are
+	// CKK_AES with 128/192/256-bit lengths. The two diverge only in key type,
+	// CKA_KEY_GEN_MECHANISM, and the allowed length set (audit V-12).
+	const bool isChaCha = (keyGenMech == CKM_CHACHA20_KEY_GEN);
 
 	// Get the session
 	auto sessionGuard = handleManager->getSessionShared(hSession);
@@ -3665,18 +3675,33 @@ CK_RV SoftHSM::generateAES
 		}
 	}
 
-	// CKA_VALUE_LEN must be specified
-	if (keyLen == 0)
+	if (isChaCha)
 	{
-		INFO_MSG("Missing CKA_VALUE_LEN in pTemplate");
-		return CKR_TEMPLATE_INCOMPLETE;
+		// ChaCha20 keys are fixed 256-bit. CKA_VALUE_LEN is optional; default
+		// to 32 bytes, but if supplied it must be exactly 32.
+		if (keyLen == 0)
+			keyLen = 32;
+		if (keyLen != 32)
+		{
+			INFO_MSG("ChaCha20 keys must be 32 bytes");
+			return CKR_ATTRIBUTE_VALUE_INVALID;
+		}
 	}
-
-	// keyLen must be 16, 24, or 32
-	if (keyLen != AES_KEY_BYTES_128 && keyLen != AES_KEY_BYTES_192 && keyLen != AES_KEY_BYTES_256)
+	else
 	{
-		INFO_MSG("bad AES key length");
-		return CKR_ATTRIBUTE_VALUE_INVALID;
+		// CKA_VALUE_LEN must be specified
+		if (keyLen == 0)
+		{
+			INFO_MSG("Missing CKA_VALUE_LEN in pTemplate");
+			return CKR_TEMPLATE_INCOMPLETE;
+		}
+
+		// keyLen must be 16, 24, or 32
+		if (keyLen != AES_KEY_BYTES_128 && keyLen != AES_KEY_BYTES_192 && keyLen != AES_KEY_BYTES_256)
+		{
+			INFO_MSG("bad AES key length");
+			return CKR_ATTRIBUTE_VALUE_INVALID;
+		}
 	}
 
 	// Generate the secret key
@@ -3709,7 +3734,7 @@ CK_RV SoftHSM::generateAES
 	// Create the secret key object using C_CreateObject
 	const CK_ULONG maxAttribs = 32;
 	CK_OBJECT_CLASS objClass = CKO_SECRET_KEY;
-	CK_KEY_TYPE keyType = CKK_AES;
+	CK_KEY_TYPE keyType = isChaCha ? CKK_CHACHA20 : CKK_AES;
 	CK_ATTRIBUTE keyAttribs[maxAttribs] = {
 		{ CKA_CLASS, &objClass, sizeof(objClass) },
 		{ CKA_TOKEN, &isOnToken, sizeof(isOnToken) },
@@ -3753,7 +3778,7 @@ CK_RV SoftHSM::generateAES
 
 			// Common Attributes
 			bOK = bOK && osobject->setAttribute(CKA_LOCAL,true);
-			CK_ULONG ulKeyGenMechanism = (CK_ULONG)CKM_AES_KEY_GEN;
+			CK_ULONG ulKeyGenMechanism = (CK_ULONG)keyGenMech;
 			bOK = bOK && osobject->setAttribute(CKA_KEY_GEN_MECHANISM,ulKeyGenMechanism);
 
 			// Common Secret Key Attributes

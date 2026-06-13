@@ -61,7 +61,8 @@ struct SymMode
 		ECB,
 		GCM,
 		OFB,
-		CHACHA_POLY1305
+		CHACHA_POLY1305,
+		CHACHA		///< bare ChaCha20 stream cipher (CKM_CHACHA20)
 	};
 };
 
