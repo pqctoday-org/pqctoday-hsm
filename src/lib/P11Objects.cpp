@@ -1889,22 +1889,27 @@ bool P11MLDSAPrivateKeyObj::init(OSObject *inobject)
 	// Create parent
 	if (!P11PrivateKeyObj::init(inobject)) return false;
 
-	// Create attributes
+	// Create attributes. CKA_SEED is the optional deterministic-keygen seed
+	// (ML-DSA xi, 32 B): settable on create/generate, sensitive-protected
+	// (ck7), read-only afterwards.
 	P11Attribute* attrParamSet = new P11AttrParameterSet(osobject, P11Attribute::ck1|P11Attribute::ck4|P11Attribute::ck6);
 	P11Attribute* attrValue    = new P11AttrValue(osobject, P11Attribute::ck1 | P11Attribute::ck4 | P11Attribute::ck6 | P11Attribute::ck7);
+	P11Attribute* attrSeed     = new P11AttrSeed(osobject, P11Attribute::ck7);
 
 	// Initialize the attributes
-	if (!attrParamSet->init() || !attrValue->init())
+	if (!attrParamSet->init() || !attrValue->init() || !attrSeed->init())
 	{
 		ERROR_MSG("Could not initialize the attribute");
 		delete attrParamSet;
 		delete attrValue;
+		delete attrSeed;
 		return false;
 	}
 
 	// Add them to the map
 	attributes[attrParamSet->getType()] = attrParamSet;
 	attributes[attrValue->getType()]    = attrValue;
+	attributes[attrSeed->getType()]     = attrSeed;
 
 	initialized = true;
 	return true;
@@ -1977,22 +1982,27 @@ bool P11SLHDSAPrivateKeyObj::init(OSObject *inobject)
 	// Create parent
 	if (!P11PrivateKeyObj::init(inobject)) return false;
 
-	// Create attributes
+	// Create attributes. CKA_SEED is the optional deterministic-keygen seed
+	// (SLH-DSA SK.seed||SK.prf||PK.seed, 3n B): settable on create/generate,
+	// sensitive-protected (ck7), read-only afterwards.
 	P11Attribute* attrParamSet = new P11AttrParameterSet(osobject, P11Attribute::ck1|P11Attribute::ck4|P11Attribute::ck6);
 	P11Attribute* attrValue    = new P11AttrValue(osobject, P11Attribute::ck1 | P11Attribute::ck4 | P11Attribute::ck6 | P11Attribute::ck7);
+	P11Attribute* attrSeed     = new P11AttrSeed(osobject, P11Attribute::ck7);
 
 	// Initialize the attributes
-	if (!attrParamSet->init() || !attrValue->init())
+	if (!attrParamSet->init() || !attrValue->init() || !attrSeed->init())
 	{
 		ERROR_MSG("Could not initialize the attribute");
 		delete attrParamSet;
 		delete attrValue;
+		delete attrSeed;
 		return false;
 	}
 
 	// Add them to the map
 	attributes[attrParamSet->getType()] = attrParamSet;
 	attributes[attrValue->getType()]    = attrValue;
+	attributes[attrSeed->getType()]     = attrSeed;
 
 	initialized = true;
 	return true;
@@ -2068,18 +2078,22 @@ bool P11MLKEMPrivateKeyObj::init(OSObject *inobject)
 	// Create parent
 	if (!P11PrivateKeyObj::init(inobject)) return false;
 
-	// Create attributes
+	// Create attributes. CKA_SEED is the optional deterministic-keygen seed
+	// (ML-KEM d||z, 64 B): settable on create/generate, sensitive-protected
+	// (ck7), read-only afterwards.
 	P11Attribute* attrParamSet    = new P11AttrParameterSet(osobject, P11Attribute::ck1|P11Attribute::ck4|P11Attribute::ck6);
 	P11Attribute* attrValue       = new P11AttrValue(osobject, P11Attribute::ck1 | P11Attribute::ck4 | P11Attribute::ck6 | P11Attribute::ck7);
 	P11Attribute* attrDecapsulate = new P11AttrDecapsulate(osobject);
+	P11Attribute* attrSeed        = new P11AttrSeed(osobject, P11Attribute::ck7);
 
 	// Initialize the attributes
-	if (!attrParamSet->init() || !attrValue->init() || !attrDecapsulate->init())
+	if (!attrParamSet->init() || !attrValue->init() || !attrDecapsulate->init() || !attrSeed->init())
 	{
 		ERROR_MSG("Could not initialize the attribute");
 		delete attrParamSet;
 		delete attrValue;
 		delete attrDecapsulate;
+		delete attrSeed;
 		return false;
 	}
 
@@ -2087,6 +2101,7 @@ bool P11MLKEMPrivateKeyObj::init(OSObject *inobject)
 	attributes[attrParamSet->getType()]    = attrParamSet;
 	attributes[attrValue->getType()]       = attrValue;
 	attributes[attrDecapsulate->getType()] = attrDecapsulate;
+	attributes[attrSeed->getType()]        = attrSeed;
 
 	initialized = true;
 	return true;

@@ -47,6 +47,7 @@ class SessionObjectTests : public CppUnit::TestFixture
 	CPPUNIT_TEST(testDoubleAttr);
 	CPPUNIT_TEST(testCloseSession);
 	CPPUNIT_TEST(testDestroyObjectFails);
+	CPPUNIT_TEST(testUniqueIdMigration);
 	CPPUNIT_TEST_SUITE_END();
 
 public:
@@ -59,6 +60,7 @@ public:
 	void testDoubleAttr();
 	void testCloseSession();
 	void testDestroyObjectFails();
+	void testUniqueIdMigration();
 
 	void setUp();
 	void tearDown();

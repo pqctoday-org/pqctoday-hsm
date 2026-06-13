@@ -40,6 +40,16 @@ CK_ULONG SLHDSAParameters::getParameterSet() const
 	return parameterSet;
 }
 
+void SLHDSAParameters::setSeed(const ByteString& inSeed)
+{
+	seed = inSeed;
+}
+
+const ByteString& SLHDSAParameters::getSeed() const
+{
+	return seed;
+}
+
 bool SLHDSAParameters::areOfType(const char* inType)
 {
 	return !strcmp(type, inType);

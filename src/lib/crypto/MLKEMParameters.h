@@ -52,11 +52,16 @@ public:
 	void setParameterSet(CK_ULONG ps);
 	CK_ULONG getParameterSet() const;
 
+	// Optional deterministic-keygen seed (d||z, 64 bytes).
+	void setSeed(const ByteString& inSeed);
+	const ByteString& getSeed() const;
+
 	virtual ByteString serialise() const;
 	virtual bool deserialise(ByteString& serialised);
 
 private:
 	CK_ULONG parameterSet;
+	ByteString seed;
 };
 
 #endif // !_SOFTHSM_V2_MLKEMPARAMETERS_H

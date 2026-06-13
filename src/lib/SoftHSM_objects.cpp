@@ -407,6 +407,17 @@ CK_RV SoftHSM::C_CopyObject(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject
 			break;
 		}
 
+		// CKA_UNIQUE_ID is strictly token-assigned and immutable. Do NOT clone
+		// it from the source — the new object's P11Object::init()/setDefault()
+		// mints a fresh UUID so the copy gets its own distinct identity
+		// (audit V-14). Cloning it would make init() see it already present and
+		// skip regeneration, leaving source and copy sharing one id.
+		if (attrType == CKA_UNIQUE_ID)
+		{
+			attrType = object->nextAttributeType(attrType);
+			continue;
+		}
+
 		OSAttribute attr = object->getAttribute(attrType);
 
 		// Upgrade privacy has to encrypt byte strings

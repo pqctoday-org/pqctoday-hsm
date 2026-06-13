@@ -797,6 +797,34 @@ CK_RV P11AttrDestroyable::updateAttr(Token* /*token*/, bool /*isPrivate*/, CK_VO
  * CKA_UNIQUE_ID (PKCS#11 v3.0 §4.4)
  *****************************************/
 
+// Load-time migration shim (audit object §1.4 / 0x17->0x4):
+// pre-v3.2-resync tokens persisted CKA_UNIQUE_ID under the old numeric type
+// 0x17. After the header fix the canonical type is 0x4, so on a legacy object
+// attributeExists(0x4) is false and the base init() would mint a *new* UUID —
+// silently changing the "immutable" id and orphaning the 0x17 blob (still
+// matchable in raw C_FindObjects matching). Here, before defaulting, we copy
+// the legacy 0x17 attribute to 0x4 (preserving the original id and its
+// encryption state — the raw blob is moved verbatim) and delete the 0x17 blob.
+// Idempotent: once 0x4 exists, or no 0x17 is present, this is a no-op. Works
+// for both file-based and in-memory stores via the OSObject attribute API.
+bool P11AttrUniqueId::init()
+{
+	if (osobject == NULL) return false;
+
+	if (osobject->attributeExists(type) == false &&
+	    osobject->attributeExists(LEGACY_TYPE) == true)
+	{
+		OSAttribute legacy = osobject->getAttribute(LEGACY_TYPE);
+		if (!osobject->setAttribute(type, legacy))
+			return false;
+		// Remove the orphaned legacy blob so raw find-matching and future
+		// loads see only the canonical id.
+		osobject->deleteAttribute(LEGACY_TYPE);
+	}
+
+	return P11Attribute::init();
+}
+
 // Set default value — generate a UUID v4 string
 bool P11AttrUniqueId::setDefault()
 {
@@ -822,6 +850,15 @@ bool P11AttrUniqueId::setDefault()
 
 	OSAttribute attr(ByteString((unsigned char*)uuid_str, 36));
 	return osobject->setAttribute(type, attr);
+}
+
+// CKA_UNIQUE_ID is assigned exclusively by the token (setDefault mints a fresh
+// UUID). A caller-supplied value is never honoured — on any object operation,
+// including C_DeriveKey/C_CopyObject which pass unknown template attributes
+// through the base update() path (audit V-15). PKCS#11 v3.2 §4.4.1.
+CK_RV P11AttrUniqueId::updateAttr(Token* /*token*/, bool /*isPrivate*/, CK_VOID_PTR /*pValue*/, CK_ULONG /*ulValueLen*/, int /*op*/)
+{
+	return CKR_ATTRIBUTE_READ_ONLY;
 }
 
 /*****************************************
@@ -1111,6 +1148,40 @@ CK_RV P11AttrValue::updateAttr(Token *token, bool isPrivate, CK_VOID_PTR pValue,
 			osobject->setAttribute(CKA_CHECK_VALUE, checkValue);
 	}
 
+	return CKR_OK;
+}
+
+/*****************************************
+ * CKA_SEED (PQC deterministic keygen seed)
+ *****************************************/
+
+// Set default value — empty (no seed)
+bool P11AttrSeed::setDefault()
+{
+	OSAttribute attr(ByteString(""));
+	return osobject->setAttribute(type, attr);
+}
+
+// Update the value if allowed. Stored verbatim, encrypted at rest on a
+// private object exactly like CKA_VALUE so a seed-carrying key round-trips;
+// read-back protection (ck7) is enforced by the base retrieve().
+CK_RV P11AttrSeed::updateAttr(Token *token, bool isPrivate, CK_VOID_PTR pValue, CK_ULONG ulValueLen, int /*op*/)
+{
+	ByteString plaintext((unsigned char*)pValue, ulValueLen);
+	ByteString value;
+
+	if (isPrivate)
+	{
+		if (!token->encrypt(plaintext, value))
+			return CKR_GENERAL_ERROR;
+	}
+	else
+		value = plaintext;
+
+	if (value.size() < ulValueLen)
+		return CKR_GENERAL_ERROR;
+
+	osobject->setAttribute(type, value);
 	return CKR_OK;
 }
 

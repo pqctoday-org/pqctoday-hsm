@@ -152,7 +152,7 @@ void print_usage() {
     printf("Usage: p11_v32_compliance_test [options]\n");
     printf("Options:\n");
     printf("  --engine <path>    Path to the PKCS#11 library (default: %s)\n", opt_engine.c_str());
-    printf("  --category <cat>   Test category: all, init, discovery, pqc-kem, pqc-dsa, hbs, attr, g1-security, g2-mechtable, g3-keygen, g4-retcodes (default: %s)\n", opt_category.c_str());
+    printf("  --category <cat>   Test category: all, init, discovery, pqc-kem, pqc-dsa, hbs, attr, g1-security, g2-mechtable, g3-keygen, g4-retcodes, g5-attrs (default: %s)\n", opt_category.c_str());
     printf("  --report <path>    Output bases (e.g. 'rep' creates 'rep.md' and 'rep.json') (default: %s)\n", opt_report.c_str());
     printf("  --pin <pin>        Token PIN (default: %s)\n", opt_pin.c_str());
     printf("  --workdir <dir>    Scratch dir for softhsm2.conf + token store (default: %s)\n", opt_workdir.c_str());
@@ -4312,6 +4312,249 @@ void test_g4_retcodes() {
     refresh_session();
 }
 
+// ─── G5: attribute semantics + deterministic-seed feature ────────────────────
+// Covers audit V-14 (CKA_UNIQUE_ID duplicated on C_CopyObject), V-15
+// (CKA_UNIQUE_ID settable via derive/create template) and the CKA_SEED gap
+// (deterministic ML-DSA/ML-KEM/SLH-DSA keygen + sensitive protection).
+// The 0x17->0x4 store migration is unit-tested in objstoretest
+// (SessionObjectTests::testUniqueIdMigration) since it lives below the
+// PKCS#11 boundary.
+void test_g5_attrs() {
+    const char* CAT = "G5Attrs";
+    CK_BBOOL bTrue = CK_TRUE, bFalse = CK_FALSE;
+
+    // Read CKA_UNIQUE_ID into a string (empty on failure).
+    auto readUniqueId = [&](CK_OBJECT_HANDLE h) -> std::string {
+        CK_BYTE buf[128] = {0};
+        CK_ATTRIBUTE a = { CKA_UNIQUE_ID, buf, sizeof(buf) };
+        if (fl->C_GetAttributeValue(hSess, h, &a, 1) != CKR_OK) return std::string();
+        if (a.ulValueLen == CK_UNAVAILABLE_INFORMATION || a.ulValueLen == 0) return std::string();
+        return std::string((char*)buf, a.ulValueLen);
+    };
+
+    // ── V-14: C_CopyObject must mint a FRESH CKA_UNIQUE_ID ────────────────────
+    {
+        // Public data object so CKA_UNIQUE_ID (stored in clear) reads back
+        // without the private-attribute decrypt path.
+        CK_OBJECT_CLASS dataClass = CKO_DATA;
+        CK_BYTE label[] = "g5-copy-src";
+        CK_BYTE value[] = "payload";
+        CK_ATTRIBUTE srcTpl[] = {
+            { CKA_CLASS, &dataClass, sizeof(dataClass) },
+            { CKA_TOKEN, &bFalse, sizeof(bFalse) },
+            { CKA_PRIVATE, &bFalse, sizeof(bFalse) },
+            { CKA_LABEL, label, sizeof(label) - 1 },
+            { CKA_VALUE, value, sizeof(value) - 1 },
+        };
+        CK_OBJECT_HANDLE hSrc = 0, hCopy = 0;
+        CK_RV rv = fl->C_CreateObject(hSess, srcTpl, 4, &hSrc);
+        if (rv != CKR_OK) {
+            record_result(CAT, "V14_CopyObject_freshUniqueId", "FAIL",
+                          "source create RV=" + std::to_string(rv));
+        } else {
+            std::string srcId = readUniqueId(hSrc);
+            // Copy with a minimal (non-NULL) extra template — the engine
+            // requires a non-NULL pTemplate.
+            CK_BYTE copyLabel[] = "g5-copy-dst";
+            CK_ATTRIBUTE copyTpl[] = { { CKA_LABEL, copyLabel, sizeof(copyLabel) - 1 } };
+            rv = fl->C_CopyObject(hSess, hSrc, copyTpl, 1, &hCopy);
+            if (rv != CKR_OK) {
+                record_result(CAT, "V14_CopyObject_freshUniqueId", "FAIL",
+                              "C_CopyObject RV=" + std::to_string(rv));
+            } else {
+                std::string copyId = readUniqueId(hCopy);
+                bool ok = !srcId.empty() && !copyId.empty() && srcId != copyId;
+                record_result(CAT, "V14_CopyObject_freshUniqueId",
+                              ok ? "PASS" : "FAIL",
+                              "src and copy must each have a distinct CKA_UNIQUE_ID "
+                              "(src len=" + std::to_string(srcId.size()) +
+                              " copy len=" + std::to_string(copyId.size()) +
+                              " distinct=" + (srcId != copyId ? "yes" : "no") + ")");
+                fl->C_DestroyObject(hSess, hCopy);
+            }
+            fl->C_DestroyObject(hSess, hSrc);
+        }
+    }
+
+    // ── V-15a: CKA_UNIQUE_ID in a C_CreateObject template → READ_ONLY ─────────
+    {
+        CK_OBJECT_CLASS dataClass = CKO_DATA;
+        CK_BYTE forged[] = "deadbeefdeadbeefdeadbeefdeadbeef0000";
+        CK_BYTE value[] = "x";
+        CK_ATTRIBUTE tpl[] = {
+            { CKA_CLASS, &dataClass, sizeof(dataClass) },
+            { CKA_TOKEN, &bFalse, sizeof(bFalse) },
+            { CKA_VALUE, value, sizeof(value) - 1 },
+            { CKA_UNIQUE_ID, forged, sizeof(forged) - 1 },
+        };
+        CK_OBJECT_HANDLE h = 0;
+        CK_RV rv = fl->C_CreateObject(hSess, tpl, 4, &h);
+        record_result(CAT, "V15_CreateObject_uniqueId_readonly",
+                      rv == CKR_ATTRIBUTE_READ_ONLY ? "PASS" : "FAIL",
+                      "caller-supplied CKA_UNIQUE_ID must be rejected, "
+                      "expect CKR_ATTRIBUTE_READ_ONLY(0x10) RV=" + std::to_string(rv));
+        if (rv == CKR_OK && h) fl->C_DestroyObject(hSess, h);
+    }
+
+    // ── V-15b: CKA_UNIQUE_ID in a C_DeriveKey template — token-assigned only.
+    // Per §4.4.1 the value must NOT come from the caller: either the derive is
+    // rejected (READ_ONLY) or it succeeds but the forged id is ignored and a
+    // fresh one assigned. A silently-honored forged id is the bug → FAIL.
+    {
+        CK_OBJECT_CLASS pubC = CKO_PUBLIC_KEY, privC = CKO_PRIVATE_KEY;
+        CK_KEY_TYPE montKT = CKK_EC_MONTGOMERY;
+        // CKA_EC_PARAMS as DER PrintableString "curve25519" (matches the
+        // engine's working ECDH path, not the OID form).
+        CK_BYTE curve25519[] = { 0x13, 0x0a, 0x63, 0x75, 0x72, 0x76, 0x65, 0x32, 0x35, 0x35, 0x31, 0x39 };
+        CK_MECHANISM kpMech = { CKM_EC_MONTGOMERY_KEY_PAIR_GEN, NULL_PTR, 0 };
+        CK_ATTRIBUTE pubT[] = {
+            { CKA_CLASS, &pubC, sizeof(pubC) }, { CKA_KEY_TYPE, &montKT, sizeof(montKT) },
+            { CKA_EC_PARAMS, curve25519, sizeof(curve25519) }, { CKA_TOKEN, &bFalse, sizeof(bFalse) },
+        };
+        CK_ATTRIBUTE privT[] = {
+            { CKA_CLASS, &privC, sizeof(privC) }, { CKA_KEY_TYPE, &montKT, sizeof(montKT) },
+            { CKA_DERIVE, &bTrue, sizeof(bTrue) }, { CKA_TOKEN, &bFalse, sizeof(bFalse) },
+        };
+        CK_OBJECT_HANDLE hPub = 0, hPriv = 0;
+        CK_RV rv = fl->C_GenerateKeyPair(hSess, &kpMech, pubT, 4, privT, 4, &hPub, &hPriv);
+        if (rv != CKR_OK) {
+            record_result(CAT, "V15_DeriveKey_uniqueId_tokenAssigned", "SKIP",
+                          "X25519 base keygen RV=" + std::to_string(rv));
+        } else {
+            // Use the public peer's own EC point as the derive peer data.
+            CK_ATTRIBUTE ptAttr = { CKA_EC_POINT, NULL_PTR, 0 };
+            fl->C_GetAttributeValue(hSess, hPub, &ptAttr, 1);
+            std::vector<CK_BYTE> peer(ptAttr.ulValueLen);
+            ptAttr.pValue = peer.data();
+            fl->C_GetAttributeValue(hSess, hPub, &ptAttr, 1);
+
+            CK_ECDH1_DERIVE_PARAMS dp = { CKD_NULL, 0, NULL_PTR, 0, NULL_PTR };
+            dp.pPublicData = peer.data(); dp.ulPublicDataLen = peer.size();
+            CK_MECHANISM dMech = { CKM_ECDH1_DERIVE, &dp, sizeof(dp) };
+            CK_OBJECT_CLASS secC = CKO_SECRET_KEY; CK_KEY_TYPE genKT = CKK_GENERIC_SECRET;
+            CK_ULONG vlen = 32;
+            CK_BYTE forged[] = "feedfacefeedfacefeedfacefeedface1111";
+            CK_ATTRIBUTE dt[] = {
+                { CKA_CLASS, &secC, sizeof(secC) }, { CKA_KEY_TYPE, &genKT, sizeof(genKT) },
+                { CKA_VALUE_LEN, &vlen, sizeof(vlen) }, { CKA_EXTRACTABLE, &bTrue, sizeof(bTrue) },
+                { CKA_UNIQUE_ID, forged, sizeof(forged) - 1 },
+            };
+            CK_OBJECT_HANDLE hDer = 0;
+            rv = fl->C_DeriveKey(hSess, &dMech, hPriv, dt, 5, &hDer);
+            if (rv == CKR_ATTRIBUTE_READ_ONLY) {
+                record_result(CAT, "V15_DeriveKey_uniqueId_tokenAssigned", "PASS",
+                              "forged CKA_UNIQUE_ID rejected with CKR_ATTRIBUTE_READ_ONLY");
+            } else if (rv == CKR_OK) {
+                std::string derId = readUniqueId(hDer);
+                std::string forgedStr((char*)forged, sizeof(forged) - 1);
+                bool ok = (derId != forgedStr); // token must NOT have honored the forged id
+                record_result(CAT, "V15_DeriveKey_uniqueId_tokenAssigned",
+                              ok ? "PASS" : "FAIL",
+                              std::string("derive succeeded; forged id must be ignored "
+                              "(assigned=") + (ok ? "fresh" : "FORGED!") + ")");
+                fl->C_DestroyObject(hSess, hDer);
+            } else {
+                // Some other failure (e.g. mechanism path) — not the unique-id bug.
+                record_result(CAT, "V15_DeriveKey_uniqueId_tokenAssigned", "SKIP",
+                              "derive path RV=" + std::to_string(rv) + " (not unique-id specific)");
+            }
+            fl->C_DestroyObject(hSess, hPriv);
+            fl->C_DestroyObject(hSess, hPub);
+        }
+    }
+
+    // ── CKA_SEED: deterministic keygen + length + sensitive protection ────────
+    // Each entry: (keygen-mech, key-type, param-set, seed-length, sign-or-kem).
+    struct SeedCase { CK_MECHANISM_TYPE mech; CK_KEY_TYPE kt; CK_ULONG ps; CK_ULONG seedLen; const char* name; };
+    SeedCase cases[] = {
+        { CKM_ML_DSA_KEY_PAIR_GEN, CKK_ML_DSA, CKP_ML_DSA_44,         32, "ML_DSA_44" },
+        { CKM_ML_KEM_KEY_PAIR_GEN, CKK_ML_KEM, CKP_ML_KEM_768,        64, "ML_KEM_768" },
+        { CKM_SLH_DSA_KEY_PAIR_GEN, CKK_SLH_DSA, CKP_SLH_DSA_SHA2_128S, 48, "SLH_DSA_128s" },
+    };
+
+    for (const auto& c : cases) {
+        CK_OBJECT_CLASS pubClass = CKO_PUBLIC_KEY, privClass = CKO_PRIVATE_KEY;
+        CK_KEY_TYPE kt = c.kt;
+        CK_ULONG ps = c.ps;
+        CK_MECHANISM mech = { c.mech, NULL_PTR, 0 };
+
+        // Fixed deterministic seed.
+        std::vector<CK_BYTE> seed(c.seedLen, 0x5A);
+
+        auto genWithSeed = [&](const CK_BYTE* sd, CK_ULONG sdLen,
+                               CK_OBJECT_HANDLE& hPub, CK_OBJECT_HANDLE& hPriv) -> CK_RV {
+            CK_ATTRIBUTE pubTpl[] = {
+                { CKA_CLASS, &pubClass, sizeof(pubClass) },
+                { CKA_KEY_TYPE, &kt, sizeof(kt) },
+                { CKA_PARAMETER_SET, &ps, sizeof(ps) },
+                { CKA_TOKEN, &bFalse, sizeof(bFalse) },
+            };
+            CK_ATTRIBUTE privTpl[] = {
+                { CKA_CLASS, &privClass, sizeof(privClass) },
+                { CKA_KEY_TYPE, &kt, sizeof(kt) },
+                { CKA_PARAMETER_SET, &ps, sizeof(ps) },
+                { CKA_TOKEN, &bFalse, sizeof(bFalse) },
+                { CKA_SENSITIVE, &bTrue, sizeof(bTrue) },
+                { CKA_SEED, (CK_VOID_PTR)sd, sdLen },
+            };
+            return fl->C_GenerateKeyPair(hSess, &mech, pubTpl, 4, privTpl, 6, &hPub, &hPriv);
+        };
+
+        // Same seed twice → identical public keys (deterministic).
+        CK_OBJECT_HANDLE hPubA = 0, hPrivA = 0, hPubB = 0, hPrivB = 0;
+        CK_RV rvA = genWithSeed(seed.data(), c.seedLen, hPubA, hPrivA);
+        CK_RV rvB = genWithSeed(seed.data(), c.seedLen, hPubB, hPrivB);
+        if (rvA == CKR_FUNCTION_NOT_SUPPORTED || rvA == CKR_MECHANISM_INVALID) {
+            record_result(CAT, std::string("CKA_SEED_deterministic_") + c.name, "SKIP",
+                          "keygen mech not supported RV=" + std::to_string(rvA));
+        } else if (rvA != CKR_OK || rvB != CKR_OK) {
+            record_result(CAT, std::string("CKA_SEED_deterministic_") + c.name, "FAIL",
+                          "seeded keygen RV A=" + std::to_string(rvA) + " B=" + std::to_string(rvB));
+        } else {
+            CK_BYTE pa[4096] = {0}, pb[4096] = {0};
+            CK_ATTRIBUTE va = { CKA_VALUE, pa, sizeof(pa) };
+            CK_ATTRIBUTE vb = { CKA_VALUE, pb, sizeof(pb) };
+            CK_RV ra = fl->C_GetAttributeValue(hSess, hPubA, &va, 1);
+            CK_RV rb = fl->C_GetAttributeValue(hSess, hPubB, &vb, 1);
+            bool ok = ra == CKR_OK && rb == CKR_OK &&
+                      va.ulValueLen == vb.ulValueLen && va.ulValueLen > 0 &&
+                      memcmp(pa, pb, va.ulValueLen) == 0;
+            record_result(CAT, std::string("CKA_SEED_deterministic_") + c.name,
+                          ok ? "PASS" : "FAIL",
+                          "same seed must yield identical public key "
+                          "(lenA=" + std::to_string(va.ulValueLen) +
+                          " lenB=" + std::to_string(vb.ulValueLen) + ")");
+
+            // Seed readback on a sensitive key → CKR_ATTRIBUTE_SENSITIVE.
+            CK_BYTE sbuf[128] = {0};
+            CK_ATTRIBUTE sa = { CKA_SEED, sbuf, sizeof(sbuf) };
+            CK_RV rs = fl->C_GetAttributeValue(hSess, hPrivA, &sa, 1);
+            record_result(CAT, std::string("CKA_SEED_sensitive_") + c.name,
+                          rs == CKR_ATTRIBUTE_SENSITIVE ? "PASS" : "FAIL",
+                          "seed on a sensitive key must not leak, "
+                          "expect CKR_ATTRIBUTE_SENSITIVE(0x11) RV=" + std::to_string(rs));
+        }
+        if (hPrivA) fl->C_DestroyObject(hSess, hPrivA);
+        if (hPubA)  fl->C_DestroyObject(hSess, hPubA);
+        if (hPrivB) fl->C_DestroyObject(hSess, hPrivB);
+        if (hPubB)  fl->C_DestroyObject(hSess, hPubB);
+
+        // Wrong seed length → CKR_ATTRIBUTE_VALUE_INVALID.
+        if (rvA != CKR_FUNCTION_NOT_SUPPORTED && rvA != CKR_MECHANISM_INVALID) {
+            std::vector<CK_BYTE> badSeed(c.seedLen - 1, 0x5A); // one byte short
+            CK_OBJECT_HANDLE hPubW = 0, hPrivW = 0;
+            CK_RV rvW = genWithSeed(badSeed.data(), (CK_ULONG)badSeed.size(), hPubW, hPrivW);
+            record_result(CAT, std::string("CKA_SEED_wronglen_") + c.name,
+                          rvW == CKR_ATTRIBUTE_VALUE_INVALID ? "PASS" : "FAIL",
+                          "wrong seed length must be rejected, "
+                          "expect CKR_ATTRIBUTE_VALUE_INVALID(0x13) RV=" + std::to_string(rvW));
+            if (rvW == CKR_OK) { if (hPrivW) fl->C_DestroyObject(hSess, hPrivW); if (hPubW) fl->C_DestroyObject(hSess, hPubW); }
+        }
+    }
+
+    refresh_session();
+}
+
 int main(int argc, char** argv) {
     parse_args(argc, argv);
 
@@ -4374,6 +4617,9 @@ int main(int argc, char** argv) {
     }
     if (opt_category == "all" || opt_category == "g4-retcodes") {
         refresh_session(); test_g4_retcodes();
+    }
+    if (opt_category == "all" || opt_category == "g5-attrs") {
+        refresh_session(); test_g5_attrs();
     }
 
     if (opt_category == "all" || opt_category == "classical") {
