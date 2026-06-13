@@ -152,7 +152,7 @@ void print_usage() {
     printf("Usage: p11_v32_compliance_test [options]\n");
     printf("Options:\n");
     printf("  --engine <path>    Path to the PKCS#11 library (default: %s)\n", opt_engine.c_str());
-    printf("  --category <cat>   Test category: all, init, discovery, pqc-kem, pqc-dsa, hbs, attr, g1-security, g2-mechtable, g3-keygen, g4-retcodes, g5-attrs (default: %s)\n", opt_category.c_str());
+    printf("  --category <cat>   Test category: all, init, discovery, pqc-kem, pqc-dsa, hbs, attr, g1-security, g2-mechtable, g3-keygen, g4-retcodes, g5-attrs, g7-sha3rsa (default: %s)\n", opt_category.c_str());
     printf("  --report <path>    Output bases (e.g. 'rep' creates 'rep.md' and 'rep.json') (default: %s)\n", opt_report.c_str());
     printf("  --pin <pin>        Token PIN (default: %s)\n", opt_pin.c_str());
     printf("  --workdir <dir>    Scratch dir for softhsm2.conf + token store (default: %s)\n", opt_workdir.c_str());
@@ -1656,6 +1656,117 @@ void test_message_encryption() {
         run_msg_test("C_EncryptMessageBegin_IV8", iv8, sizeof(iv8)-1);
     } else {
         record_result("MsgCrypt", "C_GenerateKey", "FAIL", "RV=" + std::to_string(rvGen));
+    }
+}
+
+/* ---------------------------------------------------------------------------
+ * test_g7_sha3_384_rsa  (audit gap G7)
+ *
+ * The SHA3-224/256/512 RSA sign/verify variants were already supported, but
+ * CKM_SHA3_384_RSA_PKCS / CKM_SHA3_384_RSA_PKCS_PSS were absent from the
+ * mechanism table, C_GetMechanismInfo, and the sign/verify dispatch. This
+ * exercise proves the now-complete SHA3-RSA family end-to-end:
+ *   - both mechs appear in C_GetMechanismList
+ *   - CKM_SHA3_384_RSA_PKCS sign→verify round-trip (RSA-2048)
+ *   - CKM_SHA3_384_RSA_PKCS_PSS round-trip with correct PSS params
+ *   - PSS with a mismatched hashAlg is rejected (CKR_ARGUMENTS_BAD /
+ *     CKR_MECHANISM_PARAM_INVALID), mirroring the SHA3-256 sibling.
+ * ------------------------------------------------------------------------- */
+void test_g7_sha3_384_rsa() {
+    // 1. Both new mechs advertised in C_GetMechanismList
+    record_result("G7Sha3Rsa", "Advertised_CKM_SHA3_384_RSA_PKCS",
+                  mech_advertised(CKM_SHA3_384_RSA_PKCS) ? "PASS" : "FAIL",
+                  "SHA3-384 RSA PKCS#1 v1.5");
+    record_result("G7Sha3Rsa", "Advertised_CKM_SHA3_384_RSA_PKCS_PSS",
+                  mech_advertised(CKM_SHA3_384_RSA_PKCS_PSS) ? "PASS" : "FAIL",
+                  "SHA3-384 RSA-PSS");
+
+    // 2. Generate an RSA-2048 key pair
+    CK_OBJECT_CLASS pubClass = CKO_PUBLIC_KEY;
+    CK_OBJECT_CLASS privClass = CKO_PRIVATE_KEY;
+    CK_KEY_TYPE ktypeRsa = CKK_RSA;
+    CK_BBOOL bTrue = CK_TRUE, bFalse = CK_FALSE;
+    CK_ULONG modulusBits = 2048;
+    CK_BYTE pubExp[] = { 0x01, 0x00, 0x01 };
+
+    CK_ATTRIBUTE pubTmpl[] = {
+        { CKA_CLASS, &pubClass, sizeof(pubClass) },
+        { CKA_KEY_TYPE, &ktypeRsa, sizeof(ktypeRsa) },
+        { CKA_VERIFY, &bTrue, sizeof(bTrue) },
+        { CKA_MODULUS_BITS, &modulusBits, sizeof(modulusBits) },
+        { CKA_PUBLIC_EXPONENT, pubExp, sizeof(pubExp) },
+        { CKA_TOKEN, &bFalse, sizeof(bFalse) }
+    };
+    CK_ATTRIBUTE privTmpl[] = {
+        { CKA_CLASS, &privClass, sizeof(privClass) },
+        { CKA_KEY_TYPE, &ktypeRsa, sizeof(ktypeRsa) },
+        { CKA_SIGN, &bTrue, sizeof(bTrue) },
+        { CKA_TOKEN, &bFalse, sizeof(bFalse) }
+    };
+
+    CK_OBJECT_HANDLE hPub = 0, hPriv = 0;
+    CK_MECHANISM kpMech = { CKM_RSA_PKCS_KEY_PAIR_GEN, NULL_PTR, 0 };
+    CK_RV rv = fl->C_GenerateKeyPair(hSess, &kpMech, pubTmpl, 6, privTmpl, 4, &hPub, &hPriv);
+    record_result("G7Sha3Rsa", "Generate_RSA_2048", rv == CKR_OK ? "PASS" : "FAIL",
+                  "RV=" + std::to_string(rv));
+    if (rv != CKR_OK) return;
+
+    CK_BYTE msg[] = "SHA3-384 RSA round-trip test message";
+
+    // 3. CKM_SHA3_384_RSA_PKCS sign → verify round-trip
+    {
+        CK_MECHANISM signMech = { CKM_SHA3_384_RSA_PKCS, NULL_PTR, 0 };
+        rv = fl->C_SignInit(hSess, &signMech, hPriv);
+        record_result("G7Sha3Rsa", "C_SignInit_PKCS", rv == CKR_OK ? "PASS" : "FAIL",
+                      "RV=" + std::to_string(rv));
+        if (rv == CKR_OK) {
+            CK_BYTE sig[256];
+            CK_ULONG sigLen = sizeof(sig);
+            rv = fl->C_Sign(hSess, msg, sizeof(msg)-1, sig, &sigLen);
+            record_result("G7Sha3Rsa", "C_Sign_PKCS", rv == CKR_OK ? "PASS" : "FAIL",
+                          "RV=" + std::to_string(rv));
+            if (rv == CKR_OK) {
+                rv = fl->C_VerifyInit(hSess, &signMech, hPub);
+                if (rv == CKR_OK)
+                    rv = fl->C_Verify(hSess, msg, sizeof(msg)-1, sig, sigLen);
+                record_result("G7Sha3Rsa", "C_Verify_PKCS", rv == CKR_OK ? "PASS" : "FAIL",
+                              "RV=" + std::to_string(rv));
+            }
+        }
+    }
+
+    // 4. CKM_SHA3_384_RSA_PKCS_PSS round-trip with correct PSS params
+    {
+        CK_RSA_PKCS_PSS_PARAMS pssParams = { CKM_SHA3_384, CKG_MGF1_SHA3_384, 48 };
+        CK_MECHANISM signMech = { CKM_SHA3_384_RSA_PKCS_PSS, &pssParams, sizeof(pssParams) };
+        rv = fl->C_SignInit(hSess, &signMech, hPriv);
+        record_result("G7Sha3Rsa", "C_SignInit_PSS", rv == CKR_OK ? "PASS" : "FAIL",
+                      "RV=" + std::to_string(rv));
+        if (rv == CKR_OK) {
+            CK_BYTE sig[256];
+            CK_ULONG sigLen = sizeof(sig);
+            rv = fl->C_Sign(hSess, msg, sizeof(msg)-1, sig, &sigLen);
+            record_result("G7Sha3Rsa", "C_Sign_PSS", rv == CKR_OK ? "PASS" : "FAIL",
+                          "RV=" + std::to_string(rv));
+            if (rv == CKR_OK) {
+                rv = fl->C_VerifyInit(hSess, &signMech, hPub);
+                if (rv == CKR_OK)
+                    rv = fl->C_Verify(hSess, msg, sizeof(msg)-1, sig, sigLen);
+                record_result("G7Sha3Rsa", "C_Verify_PSS", rv == CKR_OK ? "PASS" : "FAIL",
+                              "RV=" + std::to_string(rv));
+            }
+        }
+    }
+
+    // 5. Negative: PSS params with the WRONG hashAlg must be rejected
+    {
+        CK_RSA_PKCS_PSS_PARAMS badParams = { CKM_SHA3_256, CKG_MGF1_SHA3_256, 32 };
+        CK_MECHANISM signMech = { CKM_SHA3_384_RSA_PKCS_PSS, &badParams, sizeof(badParams) };
+        rv = fl->C_SignInit(hSess, &signMech, hPriv);
+        bool rejected = (rv == CKR_ARGUMENTS_BAD || rv == CKR_MECHANISM_PARAM_INVALID);
+        record_result("G7Sha3Rsa", "C_SignInit_PSS_wrong_hashAlg",
+                      rejected ? "PASS" : "FAIL",
+                      "expected ARGUMENTS_BAD/MECHANISM_PARAM_INVALID, RV=" + std::to_string(rv));
     }
 }
 
@@ -4707,6 +4818,9 @@ int main(int argc, char** argv) {
     }
     if (opt_category == "all" || opt_category == "g5-attrs") {
         refresh_session(); test_g5_attrs();
+    }
+    if (opt_category == "all" || opt_category == "g7-sha3rsa") {
+        refresh_session(); test_g7_sha3_384_rsa();
     }
 
     if (opt_category == "all" || opt_category == "classical") {
