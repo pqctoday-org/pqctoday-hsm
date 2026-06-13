@@ -10,6 +10,11 @@
 #include <iomanip>
 #include <ctime>
 
+// Build configuration — exposes WITH_RIPEMD160 so the RIPEMD-160 KAT test is
+// compiled in only on native (legacy-provider) builds (R5-5 / G-DA-X) and the
+// G1 rejection contract is kept on the WASM/no-legacy build.
+#include "config.h"
+
 // OpenSSL — independent oracle for KCV reference computation (SHA-1 + AES-ECB).
 #include <openssl/sha.h>
 #include <openssl/evp.h>
@@ -2485,6 +2490,48 @@ void test_sha3_hashes() {
     record_result("SHA-3", "DigestInit_256", rv == CKR_OK ? "PASS" : "FAIL", "RV=" + std::to_string(rv));
 }
 
+#ifdef WITH_RIPEMD160
+// HMAC-RIPEMD-160 sign/verify round-trip (native legacy-provider build, G-DA-X).
+void test_ripemd160_hmac() {
+    CK_MECHANISM genMech = { CKM_GENERIC_SECRET_KEY_GEN, NULL_PTR, 0 };
+    CK_ULONG keyLen = 20;
+    CK_OBJECT_CLASS secClass = CKO_SECRET_KEY;
+    CK_KEY_TYPE keyType = CKK_GENERIC_SECRET;
+    CK_BBOOL bTrue = CK_TRUE;
+    CK_ATTRIBUTE tmpl[] = {
+        { CKA_CLASS, &secClass, sizeof(secClass) },
+        { CKA_KEY_TYPE, &keyType, sizeof(keyType) },
+        { CKA_VALUE_LEN, &keyLen, sizeof(keyLen) },
+        { CKA_SIGN, &bTrue, sizeof(bTrue) },
+        { CKA_VERIFY, &bTrue, sizeof(bTrue) }
+    };
+    CK_OBJECT_HANDLE hKey;
+    CK_RV rv = fl->C_GenerateKey(hSess, &genMech, tmpl, 5, &hKey);
+    if (rv != CKR_OK) {
+        record_result("G-DA-X", "RIPEMD160_HMAC_roundtrip", "FAIL",
+                      "key gen failed RV=" + std::to_string(rv));
+        return;
+    }
+    CK_MECHANISM macMech = { CKM_RIPEMD160_HMAC, NULL_PTR, 0 };
+    CK_BYTE msg[] = "abc";
+    CK_BYTE mac[64]; CK_ULONG macLen = sizeof(mac);
+    rv = fl->C_SignInit(hSess, &macMech, hKey);
+    if (rv == CKR_OK) rv = fl->C_Sign(hSess, msg, 3, mac, &macLen);
+    bool signOk = (rv == CKR_OK) && (macLen == 20);
+    if (!signOk) {
+        record_result("G-DA-X", "RIPEMD160_HMAC_roundtrip", "FAIL",
+                      "sign failed RV=" + std::to_string(rv) + " len=" + std::to_string(macLen));
+        return;
+    }
+    rv = fl->C_VerifyInit(hSess, &macMech, hKey);
+    if (rv == CKR_OK) rv = fl->C_Verify(hSess, msg, 3, mac, macLen);
+    record_result("G-DA-X", "RIPEMD160_HMAC_roundtrip",
+                  rv == CKR_OK ? "PASS" : "FAIL",
+                  rv == CKR_OK ? "HMAC-RIPEMD-160 sign/verify round-trip OK (20-byte MAC)"
+                               : "verify failed RV=" + std::to_string(rv));
+}
+#endif
+
 void test_bip32_wallets() {
     // Generate Master Node
     CK_MECHANISM genMech = { CKM_AES_KEY_GEN, NULL_PTR, 0 };
@@ -3436,10 +3483,39 @@ void test_g1_security() {
         }
     }
 
-    // ── C++C-4: RIPEMD160 digest must NOT silently compute SHA-1 ────────────
+    // ── C++C-4: RIPEMD160 digest ────────────────────────────────────────────
+    // Two distinct contracts depending on the build gate:
+    //   WITH_RIPEMD160 (native, legacy provider loaded, R5-5/G-DA-X): the digest
+    //     is genuinely supported and MUST produce the RIPEMD-160 KAT, not SHA-1.
+    //   no-legacy/WASM build (G1): the mechanism MUST be rejected with
+    //     CKR_MECHANISM_INVALID — no silent SHA-1 substitution, no bloat.
     {
         CK_MECHANISM ripeMech = { CKM_RIPEMD160, NULL_PTR, 0 };
         CK_RV rv = fl->C_DigestInit(hSess, &ripeMech);
+#ifdef WITH_RIPEMD160
+        // RIPEMD-160("abc") = 8eb208f7e05d987a9b044a8e98c6b087f15a0bfc (FIPS-free KAT)
+        static const CK_BYTE kKat[20] = {
+            0x8e,0xb2,0x08,0xf7,0xe0,0x5d,0x98,0x7a,0x9b,0x04,
+            0x4a,0x8e,0x98,0xc6,0xb0,0x87,0xf1,0x5a,0x0b,0xfc };
+        // SHA-1("abc") = a9993e364706816aba3e25717850c26c9cd0d89d (must NOT match)
+        static const CK_BYTE kSha1[20] = {
+            0xa9,0x99,0x3e,0x36,0x47,0x06,0x81,0x6a,0xba,0x3e,
+            0x25,0x71,0x78,0x50,0xc2,0x6c,0x9c,0xd0,0xd8,0x9d };
+        if (rv != CKR_OK) {
+            record_result("G-DA-X", "RIPEMD160_digest_KAT", "FAIL",
+                          "DigestInit failed under WITH_RIPEMD160, RV=" + std::to_string(rv));
+        } else {
+            CK_BYTE data[] = "abc"; CK_BYTE dig[64]; CK_ULONG digLen = sizeof(dig);
+            rv = fl->C_Digest(hSess, data, 3, dig, &digLen);
+            bool katOk  = (rv == CKR_OK) && (digLen == 20) && (memcmp(dig, kKat, 20) == 0);
+            bool notSha1 = (digLen != 20) || (memcmp(dig, kSha1, 20) != 0);
+            record_result("G-DA-X", "RIPEMD160_digest_KAT",
+                          (katOk && notSha1) ? "PASS" : "FAIL",
+                          katOk ? "RIPEMD-160(abc) matches KAT, distinct from SHA-1"
+                                : "RIPEMD-160(abc) KAT mismatch, RV=" + std::to_string(rv)
+                                  + " len=" + std::to_string(digLen));
+        }
+#else
         if (rv == CKR_MECHANISM_INVALID) {
             record_result("G1Security", "RIPEMD160_digest_rejected", "PASS",
                           "C++C-4 CKR_MECHANISM_INVALID (no SHA-1 substitution)");
@@ -3455,6 +3531,7 @@ void test_g1_security() {
                           rv == CKR_MECHANISM_PARAM_INVALID ? "PASS" : "FAIL",
                           "expect rejection, RV=" + std::to_string(rv));
         }
+#endif
     }
 
     // ── C++C-3: large-message XMSS sign must not smash the stack ────────────
@@ -3633,8 +3710,21 @@ void test_g2_mech_table() {
     check_mech_size(CKM_SLH_DSA,             "SLH_DSA",               32,   64);
 
     // ── V-11 / G3: unimplemented mechs must NOT be advertised ────────────────
+#ifdef WITH_RIPEMD160
+    // R5-5 / G-DA-X: native builds load the legacy provider, so RIPEMD-160
+    // (+ _HMAC) are genuinely dispatched and therefore MUST be advertised
+    // (advertise == dispatch). On the WASM/no-legacy build (#else) they stay
+    // absent, preserving the G1 not-advertised/MECHANISM_INVALID contract.
+    record_result("G2MechTable", "Advertised_CKM_RIPEMD160",
+                  mech_advertised(CKM_RIPEMD160) ? "PASS" : "FAIL",
+                  "RIPEMD-160 digest dispatched (legacy provider)");
+    record_result("G2MechTable", "Advertised_CKM_RIPEMD160_HMAC",
+                  mech_advertised(CKM_RIPEMD160_HMAC) ? "PASS" : "FAIL",
+                  "HMAC-RIPEMD-160 dispatched (legacy provider)");
+#else
     check_not_advertised(CKM_RIPEMD160,       "CKM_RIPEMD160");
     check_not_advertised(CKM_RIPEMD160_HMAC,  "CKM_RIPEMD160_HMAC");
+#endif
     check_not_advertised(CKM_KECCAK_256,      "CKM_KECCAK_256");
 
     // ── G4 / G6: implemented mechs MUST be advertised (advertise ⊆ dispatch) ─
@@ -5381,6 +5471,9 @@ int main(int argc, char** argv) {
         refresh_session(); test_aes_ctr();
         refresh_session(); test_kmac();
         refresh_session(); test_sha3_hashes();
+#ifdef WITH_RIPEMD160
+        refresh_session(); test_ripemd160_hmac();
+#endif
         refresh_session(); test_bip32_wallets();
     }
     

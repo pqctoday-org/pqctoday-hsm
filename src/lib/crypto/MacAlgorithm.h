@@ -44,6 +44,7 @@ struct MacAlgo
 	{
 		Unknown,
 		HMAC_MD5,
+		HMAC_RIPEMD160,
 		HMAC_SHA1,
 		HMAC_SHA224,
 		HMAC_SHA256,

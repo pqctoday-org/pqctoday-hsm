@@ -84,6 +84,7 @@ set(SOURCES
     OSSLRSAKeyPair.cpp
     OSSLRSAPrivateKey.cpp
     OSSLRSAPublicKey.cpp
+    OSSLRIPEMD160.cpp
     OSSLSHA1.cpp
     OSSLSHA224.cpp
     OSSLSHA256.cpp

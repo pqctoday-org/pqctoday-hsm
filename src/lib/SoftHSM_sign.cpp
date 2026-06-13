@@ -77,6 +77,9 @@ static bool isMacMechanism(CK_MECHANISM_PTR pMechanism)
 
 	switch(pMechanism->mechanism) {
 		case CKM_MD5_HMAC:
+#ifdef WITH_RIPEMD160
+		case CKM_RIPEMD160_HMAC:
+#endif
 		case CKM_SHA_1_HMAC:
 		case CKM_SHA224_HMAC:
 		case CKM_SHA256_HMAC:
@@ -114,6 +117,10 @@ struct MacMechInfo {
 };
 
 static const MacMechInfo kMacMechTable[] = {
+#ifdef WITH_RIPEMD160
+	// HMAC-RIPEMD-160 (native-only; legacy provider). Mirrors SHA-1-HMAC sizing.
+	{ CKM_RIPEMD160_HMAC,CKK_RIPEMD160_HMAC,true,  20, MacAlgo::HMAC_RIPEMD160},
+#endif
 	{ CKM_SHA_1_HMAC,    CKK_SHA_1_HMAC,    true,  20, MacAlgo::HMAC_SHA1     },
 	{ CKM_SHA224_HMAC,   CKK_SHA224_HMAC,   true,  28, MacAlgo::HMAC_SHA224   },
 	{ CKM_SHA256_HMAC,   CKK_SHA256_HMAC,   true,  32, MacAlgo::HMAC_SHA256   },
