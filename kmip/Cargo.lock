@@ -1830,6 +1830,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "sha2",
+ "sha3",
  "softhsmrustv3",
  "test-case",
  "thiserror 1.0.69",
