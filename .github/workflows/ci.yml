@@ -167,6 +167,49 @@ jobs:
       - name: Run KMIP tests
         run: cd kmip && cargo test --quiet
 
+  kmip-conformance:
+    name: KMIP OASIS Conformance Replay
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust/target
+            kmip/target
+          key: ${{ runner.os }}-cargo-test-${{ hashFiles('rust/Cargo.lock', 'kmip/Cargo.lock') }}
+      - name: Verify python3 (stdlib only — no pip deps)
+        run: python3 --version
+      - name: Build release KMIP server
+        run: cd kmip && cargo build --release --bin pqctoday-kmip
+
+      # The OASIS replay drives all 102 transcripts through the real
+      # release server over TLS (self-signed cert auto-generated at
+      # startup in --store-memory mode — fully hermetic, no cert files).
+      # The harness exits non-zero on FAIL/ERROR (primary gate).
+      - name: Run OASIS conformance replay
+        run: cd kmip && python3 conformance/harness/dispatcher_replay.py
+
+      # Belt-and-suspenders: assert the JSON summary matches the
+      # documented 92/0/10 baseline (5 deprecated + 2 precondition +
+      # 3 policy-variant). A NEW skip silently appearing shrinks the
+      # pass denominator and hides a regression — fail on skip-set drift.
+      - name: Assert replay baseline (92 PASS / 0 FAIL / 10 SKIP)
+        run: cd kmip && python3 conformance/assert_replay_report.py
+
+      # Staleness guard: the committed REPLAY_REPORT.{md,json} must match
+      # the fresh run just produced (timestamp excluded). This is the gate
+      # whose absence let a stale 1-test report hide a 92->89 regression.
+      - name: Assert committed report is not stale
+        run: cd kmip && python3 conformance/check_report_fresh.py
+
   rust-audit:
     name: Rust Dependency Audit
     runs-on: ubuntu-24.04
