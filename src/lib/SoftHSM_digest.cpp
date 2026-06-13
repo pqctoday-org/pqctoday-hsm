@@ -62,8 +62,11 @@ CK_RV SoftHSM::C_DigestInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 			break;
 #endif
 		case CKM_RIPEMD160:
-			// RIPEMD160 requires the OpenSSL legacy provider (disabled in this build — see G-DA-X)
-			// Fall through to default → CKR_MECHANISM_INVALID
+			// RIPEMD160 requires the OpenSSL legacy provider (disabled in this
+			// build — see G-DA-X). The previous code fell through into CKM_SHA_1,
+			// silently computing a 20-byte SHA-1 digest labelled RIPEMD-160.
+			// Return CKR_MECHANISM_INVALID rather than substitute another hash.
+			return CKR_MECHANISM_INVALID;
 		case CKM_SHA_1:
 			algo = HashAlgo::SHA1;
 			break;

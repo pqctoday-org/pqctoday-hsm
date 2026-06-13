@@ -126,6 +126,21 @@ bool OSSLEVPSymmetricAlgorithm::encryptInit(const SymmetricKey* key, const SymMo
 		return false;
 	}
 
+	// For AEAD modes (GCM / ChaCha20-Poly1305) an empty IV must never be
+	// silently replaced by an all-zero nonce — that is catastrophic nonce
+	// reuse. The PKCS#11 layer already rejects zero-length IVs, but defend in
+	// depth here: fail rather than zero-fill if an AEAD mode reaches this
+	// point without an IV.
+	if ((mode == SymMode::GCM || mode == SymMode::CHACHA_POLY1305) && IV.size() == 0)
+	{
+		ERROR_MSG("Refusing to use an all-zero IV for an AEAD mode");
+
+		ByteString dummy;
+		SymmetricAlgorithm::encryptFinal(dummy);
+
+		return false;
+	}
+
 	ByteString iv;
 
 	if (IV.size() > 0)
@@ -172,10 +187,28 @@ bool OSSLEVPSymmetricAlgorithm::encryptInit(const SymmetricKey* key, const SymMo
 	{
 		rv = EVP_EncryptInit_ex(pCurCTX, cipher, NULL, NULL, NULL);
 
+		// ChaCha20-Poly1305 mandates a 96-bit (12-byte) nonce (RFC 7539).
+		// OpenSSL would otherwise silently fall back to its 12-byte default
+		// while reading the wrong bytes for any other length.
+		if (rv && mode == SymMode::CHACHA_POLY1305 && iv.size() != 12)
+		{
+			ERROR_MSG("ChaCha20-Poly1305 requires a 12-byte nonce");
+			rv = 0;
+		}
+
 		if (rv)
 		{
-			EVP_CIPHER_CTX_ctrl(pCurCTX, EVP_CTRL_GCM_SET_IVLEN, iv.size(), NULL);
-			rv = EVP_EncryptInit_ex(pCurCTX, NULL, NULL, (unsigned char*) currentKey->getKeyBits().const_byte_str(), iv.byte_str());
+			// A failed SET_IVLEN leaves the context using OpenSSL's default
+			// IV length, reading the wrong bytes — must be treated as fatal.
+			if (!EVP_CIPHER_CTX_ctrl(pCurCTX, EVP_CTRL_GCM_SET_IVLEN, iv.size(), NULL))
+			{
+				ERROR_MSG("Failed to set IV length: %s", ERR_error_string(ERR_get_error(), NULL));
+				rv = 0;
+			}
+			else
+			{
+				rv = EVP_EncryptInit_ex(pCurCTX, NULL, NULL, (unsigned char*) currentKey->getKeyBits().const_byte_str(), iv.byte_str());
+			}
 		}
 	}
 	else
@@ -324,6 +357,21 @@ bool OSSLEVPSymmetricAlgorithm::decryptInit(const SymmetricKey* key, const SymMo
 		return false;
 	}
 
+	// For AEAD modes (GCM / ChaCha20-Poly1305) an empty IV must never be
+	// silently replaced by an all-zero nonce — that is catastrophic nonce
+	// reuse. The PKCS#11 layer already rejects zero-length IVs, but defend in
+	// depth here: fail rather than zero-fill if an AEAD mode reaches this
+	// point without an IV.
+	if ((mode == SymMode::GCM || mode == SymMode::CHACHA_POLY1305) && IV.size() == 0)
+	{
+		ERROR_MSG("Refusing to use an all-zero IV for an AEAD mode");
+
+		ByteString dummy;
+		SymmetricAlgorithm::decryptFinal(dummy);
+
+		return false;
+	}
+
 	ByteString iv;
 
 	if (IV.size() > 0)
@@ -370,10 +418,28 @@ bool OSSLEVPSymmetricAlgorithm::decryptInit(const SymmetricKey* key, const SymMo
 	{
 		rv = EVP_DecryptInit_ex(pCurCTX, cipher, NULL, NULL, NULL);
 
+		// ChaCha20-Poly1305 mandates a 96-bit (12-byte) nonce (RFC 7539).
+		// OpenSSL would otherwise silently fall back to its 12-byte default
+		// while reading the wrong bytes for any other length.
+		if (rv && mode == SymMode::CHACHA_POLY1305 && iv.size() != 12)
+		{
+			ERROR_MSG("ChaCha20-Poly1305 requires a 12-byte nonce");
+			rv = 0;
+		}
+
 		if (rv)
 		{
-			EVP_CIPHER_CTX_ctrl(pCurCTX, EVP_CTRL_GCM_SET_IVLEN, iv.size(), NULL);
-			rv = EVP_DecryptInit_ex(pCurCTX, NULL, NULL, (unsigned char*) currentKey->getKeyBits().const_byte_str(), iv.byte_str());
+			// A failed SET_IVLEN leaves the context using OpenSSL's default
+			// IV length, reading the wrong bytes — must be treated as fatal.
+			if (!EVP_CIPHER_CTX_ctrl(pCurCTX, EVP_CTRL_GCM_SET_IVLEN, iv.size(), NULL))
+			{
+				ERROR_MSG("Failed to set IV length: %s", ERR_error_string(ERR_get_error(), NULL));
+				rv = 0;
+			}
+			else
+			{
+				rv = EVP_DecryptInit_ex(pCurCTX, NULL, NULL, (unsigned char*) currentKey->getKeyBits().const_byte_str(), iv.byte_str());
+			}
 		}
 	}
 	else

@@ -3132,6 +3132,239 @@ void test_kcv_compliance() {
     }
 }
 
+// ── G1 security-critical regression tests ────────────────────────────────────
+// Locks in the slice G1 fixes: zero-IV GCM/ChaCha rejection (C++C-1/C++C-2),
+// RIPEMD160→SHA-1 substitution removal (C++C-4), large-message XMSS sign
+// (C++C-3 stack overflow), and the HSS keygen→sign→verify round-trip that
+// proves the V-13 encrypt-on-write / decrypt-on-read symmetry.
+static CK_OBJECT_HANDLE g1_create_aes256(const char* keyName) {
+    CK_OBJECT_CLASS secClass = CKO_SECRET_KEY;
+    CK_KEY_TYPE aesType = CKK_AES;
+    CK_BBOOL bTrue = CK_TRUE, bFalse = CK_FALSE;
+    CK_BYTE keyBytes[32] = {0};
+    CK_ATTRIBUTE tmpl[] = {
+        { CKA_CLASS, &secClass, sizeof(secClass) },
+        { CKA_KEY_TYPE, &aesType, sizeof(aesType) },
+        { CKA_TOKEN, &bFalse, sizeof(bFalse) },
+        { CKA_PRIVATE, &bFalse, sizeof(bFalse) },
+        { CKA_ENCRYPT, &bTrue, sizeof(bTrue) },
+        { CKA_DECRYPT, &bTrue, sizeof(bTrue) },
+        { CKA_VALUE, keyBytes, sizeof(keyBytes) }
+    };
+    CK_OBJECT_HANDLE h = 0;
+    if (fl->C_CreateObject(hSess, tmpl, 7, &h) != CKR_OK) return 0;
+    (void)keyName;
+    return h;
+}
+
+void test_g1_security() {
+    CK_BBOOL bTrue = CK_TRUE, bFalse = CK_FALSE;
+
+    // ── C++C-1: zero-IV AES-GCM must be rejected at the PKCS#11 layer ────────
+    CK_OBJECT_HANDLE hAes = g1_create_aes256("g1-aes");
+    if (hAes == 0) {
+        record_result("G1Security", "AES_key_create", "FAIL", "Could not create AES-256 key");
+    } else {
+        // Encrypt init with ulIvLen==0 → CKR_MECHANISM_PARAM_INVALID
+        CK_GCM_PARAMS zeroIvParams = { NULL_PTR, 0, 0, NULL_PTR, 0, 128 };
+        CK_MECHANISM gcmMech = { CKM_AES_GCM, &zeroIvParams, sizeof(zeroIvParams) };
+        CK_RV rv = fl->C_EncryptInit(hSess, &gcmMech, hAes);
+        record_result("G1Security", "GCM_zeroIV_EncryptInit_rejected",
+                      rv == CKR_MECHANISM_PARAM_INVALID ? "PASS" : "FAIL",
+                      "C++C-1 expect CKR_MECHANISM_PARAM_INVALID, RV=" + std::to_string(rv));
+
+        // Decrypt init with ulIvLen==0 → CKR_MECHANISM_PARAM_INVALID
+        rv = fl->C_DecryptInit(hSess, &gcmMech, hAes);
+        record_result("G1Security", "GCM_zeroIV_DecryptInit_rejected",
+                      rv == CKR_MECHANISM_PARAM_INVALID ? "PASS" : "FAIL",
+                      "C++C-1 expect CKR_MECHANISM_PARAM_INVALID, RV=" + std::to_string(rv));
+
+        // Sanity: a valid 12-byte IV is still accepted (range preserved).
+        CK_BYTE iv12[12] = {0,1,2,3,4,5,6,7,8,9,10,11};
+        CK_GCM_PARAMS okParams = { iv12, sizeof(iv12), 0, NULL_PTR, 0, 128 };
+        CK_MECHANISM gcmOk = { CKM_AES_GCM, &okParams, sizeof(okParams) };
+        rv = fl->C_EncryptInit(hSess, &gcmOk, hAes);
+        record_result("G1Security", "GCM_validIV_EncryptInit_accepted",
+                      rv == CKR_OK ? "PASS" : "FAIL",
+                      "valid 12-byte IV must still work, RV=" + std::to_string(rv));
+        if (rv == CKR_OK) {
+            // Finish the op so the session is clean for subsequent tests.
+            CK_BYTE pt[] = "hello"; CK_BYTE ct[64]; CK_ULONG ctLen = sizeof(ct);
+            fl->C_Encrypt(hSess, pt, sizeof(pt)-1, ct, &ctLen);
+        }
+        fl->C_DestroyObject(hSess, hAes);
+    }
+
+    // ── C++C-2: ChaCha20-Poly1305 wrong nonce length must be rejected ───────
+    {
+        CK_OBJECT_CLASS secClass = CKO_SECRET_KEY;
+        CK_KEY_TYPE chachaKT = 0x00000033UL; /* CKK_CHACHA20 */
+        CK_BYTE chachaKey[32] = {0};
+        CK_ATTRIBUTE chachaT[] = {
+            { CKA_CLASS, &secClass, sizeof(secClass) },
+            { CKA_KEY_TYPE, &chachaKT, sizeof(chachaKT) },
+            { CKA_TOKEN, &bFalse, sizeof(bFalse) },
+            { CKA_PRIVATE, &bFalse, sizeof(bFalse) },
+            { CKA_ENCRYPT, &bTrue, sizeof(bTrue) },
+            { CKA_VALUE, chachaKey, sizeof(chachaKey) }
+        };
+        CK_OBJECT_HANDLE hChaCha = 0;
+        CK_RV rv = fl->C_CreateObject(hSess, chachaT, 6, &hChaCha);
+        if (rv != CKR_OK) {
+            record_result("G1Security", "ChaCha_key_create", "SKIP", "ChaCha20 unsupported, RV=" + std::to_string(rv));
+        } else {
+            #pragma pack(push, 1)
+            struct LOCAL_CHACHA_PARAMS {
+                CK_BYTE_PTR pNonce; CK_ULONG ulNonceLen;
+                CK_BYTE_PTR pAAD;   CK_ULONG ulAADLen;
+            };
+            #pragma pack(pop)
+            // 8-byte nonce (wrong: RFC 7539 mandates 12) → must be rejected.
+            CK_BYTE badNonce[8] = {0,1,2,3,4,5,6,7};
+            LOCAL_CHACHA_PARAMS badParams = { badNonce, sizeof(badNonce), NULL_PTR, 0 };
+            CK_MECHANISM badMech = { 0x00004021UL /* CKM_CHACHA20_POLY1305 */, &badParams, sizeof(badParams) };
+            rv = fl->C_EncryptInit(hSess, &badMech, hChaCha);
+            record_result("G1Security", "ChaCha_wrongNonce_rejected",
+                          rv == CKR_MECHANISM_PARAM_INVALID ? "PASS" : "FAIL",
+                          "C++C-2 expect CKR_MECHANISM_PARAM_INVALID for 8-byte nonce, RV=" + std::to_string(rv));
+
+            // Zero-length nonce → also rejected.
+            LOCAL_CHACHA_PARAMS zeroParams = { NULL_PTR, 0, NULL_PTR, 0 };
+            CK_MECHANISM zeroMech = { 0x00004021UL, &zeroParams, sizeof(zeroParams) };
+            rv = fl->C_EncryptInit(hSess, &zeroMech, hChaCha);
+            record_result("G1Security", "ChaCha_zeroNonce_rejected",
+                          rv == CKR_MECHANISM_PARAM_INVALID ? "PASS" : "FAIL",
+                          "C++C-1/2 expect CKR_MECHANISM_PARAM_INVALID for 0-byte nonce, RV=" + std::to_string(rv));
+            fl->C_DestroyObject(hSess, hChaCha);
+        }
+    }
+
+    // ── C++C-4: RIPEMD160 digest must NOT silently compute SHA-1 ────────────
+    {
+        CK_MECHANISM ripeMech = { CKM_RIPEMD160, NULL_PTR, 0 };
+        CK_RV rv = fl->C_DigestInit(hSess, &ripeMech);
+        if (rv == CKR_MECHANISM_INVALID) {
+            record_result("G1Security", "RIPEMD160_digest_rejected", "PASS",
+                          "C++C-4 CKR_MECHANISM_INVALID (no SHA-1 substitution)");
+        } else if (rv == CKR_OK) {
+            // If it (wrongly) initialised, prove it is NOT producing a 20-byte
+            // SHA-1 output silently — either way this is a FAIL.
+            CK_BYTE data[] = "abc"; CK_BYTE dig[64]; CK_ULONG digLen = sizeof(dig);
+            fl->C_Digest(hSess, data, 3, dig, &digLen);
+            record_result("G1Security", "RIPEMD160_digest_rejected", "FAIL",
+                          "C++C-4 DigestInit unexpectedly succeeded (likely SHA-1 substitution), digLen=" + std::to_string(digLen));
+        } else {
+            record_result("G1Security", "RIPEMD160_digest_rejected",
+                          rv == CKR_MECHANISM_PARAM_INVALID ? "PASS" : "FAIL",
+                          "expect rejection, RV=" + std::to_string(rv));
+        }
+    }
+
+    // ── C++C-3: large-message XMSS sign must not smash the stack ────────────
+    {
+        CK_OBJECT_CLASS pubClass = CKO_PUBLIC_KEY, privClass = CKO_PRIVATE_KEY;
+        CK_KEY_TYPE ktypeXmss = 0x00000047UL; // CKK_XMSS
+        CK_MECHANISM mech = { 0x00004034UL /* CKM_XMSS_KEY_PAIR_GEN */, NULL_PTR, 0 };
+        CK_ULONG paramSetXmss = 0x00000001UL; // CKP_XMSS_SHA2_10_256
+        mech.pParameter = &paramSetXmss; mech.ulParameterLen = sizeof(paramSetXmss);
+        CK_ATTRIBUTE pubTmpl[] = {
+            { CKA_CLASS, &pubClass, sizeof(pubClass) },
+            { CKA_KEY_TYPE, &ktypeXmss, sizeof(ktypeXmss) },
+            { CKA_VERIFY, &bTrue, sizeof(bTrue) },
+            { CKA_TOKEN, &bTrue, sizeof(bTrue) }
+        };
+        CK_ATTRIBUTE privTmpl[] = {
+            { CKA_CLASS, &privClass, sizeof(privClass) },
+            { CKA_KEY_TYPE, &ktypeXmss, sizeof(ktypeXmss) },
+            { CKA_SIGN, &bTrue, sizeof(bTrue) },
+            { CKA_TOKEN, &bTrue, sizeof(bTrue) },
+            { CKA_PRIVATE, &bTrue, sizeof(bTrue) }
+        };
+        CK_OBJECT_HANDLE hPub = 0, hPriv = 0;
+        CK_RV rv = fl->C_GenerateKeyPair(hSess, &mech, pubTmpl, 4, privTmpl, 5, &hPub, &hPriv);
+        if (rv != CKR_OK) {
+            record_result("G1Security", "XMSS_largeMsg_sign", "SKIP", "XMSS unavailable, RV=" + std::to_string(rv));
+        } else {
+            // 64 KiB message — far exceeds the old 8000-byte stack buffer; the
+            // signer writes [sig || message], so this previously overflowed.
+            std::vector<CK_BYTE> bigMsg(64 * 1024, 0x5A);
+            CK_MECHANISM signMech = { 0x00004036UL /* CKM_XMSS */, NULL_PTR, 0 };
+            rv = fl->C_SignInit(hSess, &signMech, hPriv);
+            if (rv == CKR_OK) {
+                // First query the size, then sign into an exact buffer.
+                CK_ULONG sigLen = 0;
+                rv = fl->C_Sign(hSess, bigMsg.data(), bigMsg.size(), NULL_PTR, &sigLen);
+                if (rv == CKR_OK && sigLen > 0) {
+                    std::vector<CK_BYTE> sig(sigLen);
+                    rv = fl->C_Sign(hSess, bigMsg.data(), bigMsg.size(), sig.data(), &sigLen);
+                    record_result("G1Security", "XMSS_largeMsg_sign",
+                                  rv == CKR_OK ? "PASS" : "FAIL",
+                                  "C++C-3 64KiB message sign, RV=" + std::to_string(rv));
+                } else {
+                    record_result("G1Security", "XMSS_largeMsg_sign", "FAIL",
+                                  "C++C-3 size query failed, RV=" + std::to_string(rv));
+                }
+            } else {
+                record_result("G1Security", "XMSS_largeMsg_sign", "FAIL",
+                              "C_SignInit(XMSS) failed, RV=" + std::to_string(rv));
+            }
+        }
+    }
+
+    // ── V-13: HSS keygen → sign → verify round-trip (proves encrypt/decrypt) ─
+    {
+        CK_OBJECT_CLASS pubClass = CKO_PUBLIC_KEY, privClass = CKO_PRIVATE_KEY;
+        CK_KEY_TYPE hssKT = 0x00000046UL; // CKK_HSS
+        CK_MECHANISM hssMech = { CKM_HSS_KEY_PAIR_GEN, NULL_PTR, 0 };
+        // Private key with CKA_PRIVATE=TRUE → CKA_VALUE is token-encrypted.
+        CK_ATTRIBUTE hssPubTmpl[] = {
+            { CKA_CLASS, &pubClass, sizeof(pubClass) },
+            { CKA_KEY_TYPE, &hssKT, sizeof(hssKT) },
+            { CKA_TOKEN, &bTrue, sizeof(bTrue) },
+            { CKA_VERIFY, &bTrue, sizeof(bTrue) }
+        };
+        CK_ATTRIBUTE hssPrivTmpl[] = {
+            { CKA_CLASS, &privClass, sizeof(privClass) },
+            { CKA_KEY_TYPE, &hssKT, sizeof(hssKT) },
+            { CKA_TOKEN, &bTrue, sizeof(bTrue) },
+            { CKA_PRIVATE, &bTrue, sizeof(bTrue) },
+            { CKA_SIGN, &bTrue, sizeof(bTrue) }
+        };
+        CK_OBJECT_HANDLE hPub = 0, hPriv = 0;
+        CK_RV rv = fl->C_GenerateKeyPair(hSess, &hssMech, hssPubTmpl, 4, hssPrivTmpl, 5, &hPub, &hPriv);
+        if (rv != CKR_OK) {
+            record_result("G1Security", "HSS_private_roundtrip", "FAIL",
+                          "V-13 HSS keygen failed, RV=" + std::to_string(rv));
+        } else {
+            CK_MECHANISM hssSignMech = { 0x00004033UL /* CKM_HSS */, NULL_PTR, 0 };
+            rv = fl->C_SignInit(hSess, &hssSignMech, hPriv);
+            CK_BYTE msg[] = "V-13 encrypted stateful key round-trip";
+            CK_BYTE sig[5000]; CK_ULONG sigLen = sizeof(sig);
+            bool signed_ok = false;
+            if (rv == CKR_OK) {
+                rv = fl->C_Sign(hSess, msg, sizeof(msg)-1, sig, &sigLen);
+                signed_ok = (rv == CKR_OK);
+            }
+            if (!signed_ok) {
+                // If decrypt-on-read were broken, the signer could not load the key.
+                record_result("G1Security", "HSS_private_roundtrip", "FAIL",
+                              "V-13 sign with encrypted private key failed, RV=" + std::to_string(rv));
+            } else {
+                CK_RV vrv = fl->C_VerifyInit(hSess, &hssSignMech, hPub);
+                if (vrv == CKR_OK) {
+                    vrv = fl->C_Verify(hSess, msg, sizeof(msg)-1, sig, sigLen);
+                    record_result("G1Security", "HSS_private_roundtrip",
+                                  vrv == CKR_OK ? "PASS" : "FAIL",
+                                  "V-13 keygen→sign→verify, verify RV=" + std::to_string(vrv));
+                } else {
+                    record_result("G1Security", "HSS_private_roundtrip", "FAIL",
+                                  "V-13 C_VerifyInit failed, RV=" + std::to_string(vrv));
+                }
+            }
+        }
+    }
+}
+
 int main(int argc, char** argv) {
     parse_args(argc, argv);
 
@@ -3180,6 +3413,9 @@ int main(int argc, char** argv) {
     }
     if (opt_category == "all" || opt_category == "kcv") {
         refresh_session(); test_kcv_compliance();
+    }
+    if (opt_category == "all" || opt_category == "g1-security") {
+        refresh_session(); test_g1_security();
     }
     
     if (opt_category == "all" || opt_category == "classical") {

@@ -46,6 +46,7 @@
 #include "CryptoFactory.h"
 #include "cryptoki.h"
 #include "MacAlgorithm.h"
+#include "MutexFactory.h"
 #include "AsymmetricAlgorithm.h"
 #include "RSAPublicKey.h"
 #include "RSAPrivateKey.h"
@@ -1340,15 +1341,43 @@ CK_RV SoftHSM::StatefulSign(Session* session, CK_BYTE_PTR pData, CK_ULONG ulData
 	}
 
 	AsymMech::Type mechanism = session->getMechanism();
-	ByteString privKeyBytes = osObj->getByteStringValue(CKA_VALUE);
 
-	unsigned char sig[8000] = {0}; // max XMSSMT sig ~ 5000 bytes
+	// Leaf-reuse race (audit API-dimension V5): two sessions signing the same
+	// stateful key both read CKA_VALUE before either commits, releasing two
+	// signatures from the same one-time leaf. Serialize the whole
+	// read → sign → commit critical section for all stateful keys. The state
+	// is persisted BEFORE the signature is released to the caller; if the
+	// commit fails the signature is never handed out.
+	static Mutex* statefulSignMutex = MutexFactory::i()->getMutex();
+	MutexLocker statefulSignLock(statefulSignMutex);
+
+	// V-13: private CKA_VALUE is stored token-encrypted (matching every other
+	// private key type). Decrypt before use; re-encrypt the mutated state on
+	// write-back. Public keys (CKA_PRIVATE=FALSE) store the value in clear.
+	Token* token = session->getToken();
+	bool isPrivate = osObj->getBooleanValue(CKA_PRIVATE, true);
+	ByteString storedValue = osObj->getByteStringValue(CKA_VALUE);
+	ByteString privKeyBytes;
+	if (isPrivate) {
+		if (token == NULL || !token->decrypt(storedValue, privKeyBytes)) {
+			session->resetOp();
+			return CKR_GENERAL_ERROR;
+		}
+	} else {
+		privKeyBytes = storedValue;
+	}
+
+	// Heap-size the output buffer to sig_bytes + ulDataLen. xmss_sign() /
+	// xmssmt_sign() write [signature || message]; the old fixed 8000-byte
+	// stack array overflowed on large messages (audit C++C-3).
+	ByteString sigBuf;
+	unsigned char* sig = NULL;
 	unsigned long long sig_len = 0;
 
 	if (mechanism == (AsymMech::Type)1000) { // HSS
 		struct hss_working_key* working_key = hss_load_private_key(
-			NULL, 
-			(void*)privKeyBytes.byte_str(), 
+			NULL,
+			(void*)privKeyBytes.byte_str(),
 			0, // minimal memory target
 			NULL, 0, NULL
 		);
@@ -1359,38 +1388,58 @@ CK_RV SoftHSM::StatefulSign(Session* session, CK_BYTE_PTR pData, CK_ULONG ulData
 
 		size_t exact_sig_len = hss_get_signature_len_from_working_key(working_key);
 
+		// HSS does not append the message; buffer = exact signature length.
+		sigBuf.resize(exact_sig_len);
+		sig = &sigBuf[0];
+
 		bool ok = hss_generate_signature(
 			working_key,
 			NULL, // update_private_key callback
 			(void*)privKeyBytes.byte_str(), // context (memory to mutate)
 			pData, ulDataLen,
-			sig, sizeof(sig), NULL
+			sig, sigBuf.size(), NULL
 		);
 		sig_len = exact_sig_len;
-		
+
 		hss_free_working_key(working_key);
 
 		if (!ok) {
 			session->resetOp();
 			return CKR_KEY_EXHAUSTED;
 		}
-	} else if (mechanism == (AsymMech::Type)1001) { // XMSS
-		// xmss_sign() returns sm = [signature || message], smlen = sig_bytes + msg_len
-		// Per PKCS#11 v3.2, C_Sign must return only the signature portion
-		int ret = xmss_sign(privKeyBytes.byte_str(), sig, &sig_len, pData, ulDataLen);
+	} else if (mechanism == (AsymMech::Type)1001 || mechanism == (AsymMech::Type)1002) { // XMSS / XMSSMT
+		// xmss_sign()/xmssmt_sign() return sm = [signature || message],
+		// smlen = sig_bytes + msg_len. Derive sig_bytes from the OID embedded
+		// in the (decrypted) private key so the buffer is exactly sized.
+		if (privKeyBytes.size() < XMSS_OID_LEN) {
+			session->resetOp();
+			return CKR_GENERAL_ERROR;
+		}
+		uint32_t oid = 0;
+		for (unsigned int i = 0; i < XMSS_OID_LEN; i++) {
+			oid |= ((uint32_t)privKeyBytes.const_byte_str()[XMSS_OID_LEN - i - 1]) << (i * 8);
+		}
+		xmss_params params;
+		int prv = (mechanism == (AsymMech::Type)1001)
+		          ? xmss_parse_oid(&params, oid)
+		          : xmssmt_parse_oid(&params, oid);
+		if (prv != 0) {
+			session->resetOp();
+			return CKR_GENERAL_ERROR;
+		}
+
+		sigBuf.resize((size_t)params.sig_bytes + ulDataLen);
+		sig = &sigBuf[0];
+
+		int ret = (mechanism == (AsymMech::Type)1001)
+		          ? xmss_sign(privKeyBytes.byte_str(), sig, &sig_len, pData, ulDataLen)
+		          : xmssmt_sign(privKeyBytes.byte_str(), sig, &sig_len, pData, ulDataLen);
 		if (ret != 0) {
 			session->resetOp();
 			return CKR_KEY_EXHAUSTED;
 		}
-		// Strip appended message: sig_len currently = sig_bytes + ulDataLen
-		sig_len -= ulDataLen;
-	} else if (mechanism == (AsymMech::Type)1002) { // XMSSMT
-		int ret = xmssmt_sign(privKeyBytes.byte_str(), sig, &sig_len, pData, ulDataLen);
-		if (ret != 0) {
-			session->resetOp();
-			return CKR_KEY_EXHAUSTED;
-		}
-		// Strip appended message: same as XMSS
+		// Per PKCS#11 v3.2, C_Sign returns only the signature portion.
+		// Strip the appended message: sig_len = sig_bytes + ulDataLen.
 		sig_len -= ulDataLen;
 	} else {
 		session->resetOp();
@@ -1403,32 +1452,51 @@ CK_RV SoftHSM::StatefulSign(Session* session, CK_BYTE_PTR pData, CK_ULONG ulData
 	}
 
 	if (*pulSignatureLen < sig_len) {
+		// Buffer too small: do NOT commit the mutated state, so the leaf is
+		// not burned (audit-confirmed burn-after-validation behaviour).
 		*pulSignatureLen = sig_len;
 		return CKR_BUFFER_TOO_SMALL;
 	}
 
-	memcpy(pSignature, sig, sig_len);
-	*pulSignatureLen = sig_len;
+	// Persist the updated private key state (CKA_VALUE with mutated leaf idx)
+	// BEFORE releasing the signature. The stateful signers mutated
+	// privKeyBytes in place; re-encrypt it for private keys.
+	ByteString writeBack;
+	if (isPrivate) {
+		if (token == NULL || !token->encrypt(privKeyBytes, writeBack)) {
+			session->resetOp();
+			return CKR_DEVICE_ERROR;
+		}
+	} else {
+		writeBack = privKeyBytes;
+	}
 
-	// Commit updated private key state (CKA_VALUE mutating leaf idx) back to database atomically
 	if (osObj->startTransaction()) {
-		osObj->setAttribute(CKA_VALUE, privKeyBytes);
-		
+		bool bOK = osObj->setAttribute(CKA_VALUE, writeBack);
+
 		// Decrement the keys remaining counter
 		const CK_ATTRIBUTE_TYPE ATTR_CKA_HSS_KEYS_REMAINING = 0x0000061cUL;
 		if (osObj->attributeExists(ATTR_CKA_HSS_KEYS_REMAINING)) {
 			CK_ULONG remainingSigs = osObj->getUnsignedLongValue(ATTR_CKA_HSS_KEYS_REMAINING, 0);
 			if (remainingSigs > 0) {
 				remainingSigs--;
-				osObj->setAttribute(ATTR_CKA_HSS_KEYS_REMAINING, remainingSigs);
+				bOK = bOK && osObj->setAttribute(ATTR_CKA_HSS_KEYS_REMAINING, remainingSigs);
 			}
 		}
-		
-		osObj->commitTransaction();
+
+		if (!bOK || !osObj->commitTransaction()) {
+			osObj->abortTransaction();
+			session->resetOp();
+			return CKR_DEVICE_ERROR;
+		}
 	} else {
 		session->resetOp();
 		return CKR_DEVICE_ERROR;
 	}
+
+	// State committed — now it is safe to release the signature to the caller.
+	memcpy(pSignature, sig, sig_len);
+	*pulSignatureLen = sig_len;
 
 	session->resetOp();
 	return CKR_OK;
