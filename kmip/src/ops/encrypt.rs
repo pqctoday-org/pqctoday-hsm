@@ -37,7 +37,7 @@ use super::helpers::{
     state_name,
 };
 
-pub fn encrypt(deps: &Deps, req: EncryptRequest, correlation_id: &str) -> Result<EncryptResponse> {
+pub fn encrypt(deps: &Deps, mut req: EncryptRequest, correlation_id: &str) -> Result<EncryptResponse> {
     let started = OffsetDateTime::now_utc();
     emit_request(
         deps,
@@ -136,7 +136,12 @@ pub fn encrypt(deps: &Deps, req: EncryptRequest, correlation_id: &str) -> Result
             .as_ref()
             .or(obj.cryptographic_parameters.as_ref()),
     );
-    match deps.engine.evaluate(&p_req) {
+    let decision = deps.engine.evaluate(&p_req);
+    // W2.1 — a forcing rule (mechanism_parameter_default) may mandate the mode /
+    // padding; merge it into req.cryptographic_parameters so every downstream
+    // path (classical / ML-KEM / streaming) honors it.
+    let forced_cp = decision.cp_override().cloned();
+    match decision {
         Decision::Allow { .. } => {}
         Decision::Deny { human, .. } => {
             return Err(fail_err(
@@ -159,6 +164,12 @@ pub fn encrypt(deps: &Deps, req: EncryptRequest, correlation_id: &str) -> Result
                 ),
             ));
         }
+    }
+    if let Some(ov) = forced_cp.as_ref() {
+        req.cryptographic_parameters = Some(super::helpers::merge_cp_override(
+            req.cryptographic_parameters.as_ref(),
+            ov,
+        ));
     }
 
     // KMIP 3.0 §6.1.21 multi-part streaming — `Init Indicator` opens a

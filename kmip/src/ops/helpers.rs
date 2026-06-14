@@ -1196,6 +1196,30 @@ mod tests {
     }
 
     #[test]
+    fn merge_cp_override_applies_forced_fields() {
+        use crate::kmip30::HashingAlgorithm;
+        use crate::policy::CpOverride;
+        // Base mode = CBC (0x01); a forcing rule mandates GCM (0x09).
+        let base = cp(Some(0x01), None, None);
+        let merged = merge_cp_override(
+            Some(&base),
+            &CpOverride { block_cipher_mode: Some(0x09), ..Default::default() },
+        );
+        assert_eq!(merged.block_cipher_mode, Some(0x09));
+        // Force deterministic + hash onto an empty base.
+        let merged2 = merge_cp_override(
+            None,
+            &CpOverride {
+                deterministic: Some(true),
+                hashing_algorithm: Some(0x06), // KMIP SHA-256
+                ..Default::default()
+            },
+        );
+        assert_eq!(merged2.deterministic, Some(true));
+        assert_eq!(merged2.hashing_algorithm, Some(HashingAlgorithm::Sha256));
+    }
+
+    #[test]
     fn mechanism_params_projects_cp_and_resolves_canonical_mech() {
         use crate::kmip30::{HashingAlgorithm, KmipAlgorithm, PkcsOp};
         let c0 = crate::kmip30::CryptographicParameters {

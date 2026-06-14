@@ -852,8 +852,10 @@ fn padding_method_name_to_code(name: &str) -> Option<u32> {
 /// the source of truth per CLAUDE.md) — never hardcoded here. Curated to the
 /// mechanisms relevant to policy gating: AES modes, RSA/ECDSA sign variants,
 /// PQC, HMAC/KMAC, KDFs. Unknown → `None` (loader rejects unknown up-front).
-/// NOTE: `CKM_KMAC_*` are in the vendor-defined range in constants.rs; re-verify
-/// against pkcs11t.h if relied upon for a hard gate.
+/// NOTE: `CKM_KMAC_*` use the vendor-defined codepoint (`CKM_VENDOR_DEFINED |
+/// 0x100`). Verified: KMIP/PKCS#11 v3.2 does NOT standardize KMAC (absent from
+/// the canonical OASIS v3.2 `pkcs11t.h`), so vendor-defined is correct, and it
+/// is consistent across `src/lib/pkcs11/pkcs11t.h` + `rust/src/constants.rs`.
 fn ckm_name_to_code(name: &str) -> Option<u32> {
     use softhsmrustv3::constants as c;
     Some(match name {
@@ -881,7 +883,33 @@ fn ckm_name_to_code(name: &str) -> Option<u32> {
         "CKM_SHA512_HMAC" => c::CKM_SHA512_HMAC,
         "CKM_KMAC_128" => c::CKM_KMAC_128,
         "CKM_KMAC_256" => c::CKM_KMAC_256,
+        // W2.3 — broaden toward the full PKCS#11 v3.2 surface the engine
+        // supports. Hashes:
+        "CKM_SHA256" => c::CKM_SHA256,
+        "CKM_SHA384" => c::CKM_SHA384,
+        "CKM_SHA512" => c::CKM_SHA512,
+        "CKM_SHA3_256" => c::CKM_SHA3_256,
+        "CKM_SHA3_512" => c::CKM_SHA3_512,
+        "CKM_SHA3_256_HMAC" => c::CKM_SHA3_256_HMAC,
+        "CKM_SHA3_512_HMAC" => c::CKM_SHA3_512_HMAC,
+        // ECDSA pre-hash SHA-3 variants + EdDSA (pure / pre-hash):
+        "CKM_ECDSA_SHA3_224" => c::CKM_ECDSA_SHA3_224,
+        "CKM_ECDSA_SHA3_256" => c::CKM_ECDSA_SHA3_256,
+        "CKM_ECDSA_SHA3_384" => c::CKM_ECDSA_SHA3_384,
+        "CKM_ECDSA_SHA3_512" => c::CKM_ECDSA_SHA3_512,
+        "CKM_EDDSA" => c::CKM_EDDSA,
+        "CKM_EDDSA_PH" => c::CKM_EDDSA_PH,
+        // ChaCha20 family + AES key-wrap modes:
+        "CKM_CHACHA20" => c::CKM_CHACHA20,
+        "CKM_CHACHA20_POLY1305" => c::CKM_CHACHA20_POLY1305,
+        "CKM_AES_KEY_WRAP" => c::CKM_AES_KEY_WRAP,
+        "CKM_AES_KEY_WRAP_PAD" => c::CKM_AES_KEY_WRAP_PAD,
+        "CKM_AES_KEY_WRAP_KWP" => c::CKM_AES_KEY_WRAP_KWP,
+        // KDFs:
         "CKM_HKDF_DERIVE" => c::CKM_HKDF_DERIVE,
+        "CKM_PKCS5_PBKD2" => c::CKM_PKCS5_PBKD2,
+        "CKM_SP800_108_COUNTER_KDF" => c::CKM_SP800_108_COUNTER_KDF,
+        "CKM_SP800_108_FEEDBACK_KDF" => c::CKM_SP800_108_FEEDBACK_KDF,
         _ => return None,
     })
 }
