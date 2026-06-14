@@ -61,11 +61,48 @@ fn all_shipped_policies_parse() {
         "fips-only.yaml",
         "hybrid-migration-window.yaml",
         "cnsa-2.0.yaml",
+        // Mechanism-dimension examples (crypto-policy gaps plan P2–P3).
+        "fips-hashing.yaml",
+        "aead-only.yaml",
+        "deterministic-signing.yaml",
     ] {
         let path = policies_dir().join(name);
         assert!(path.exists(), "{} should exist", path.display());
         let _ = load_from_file(&path).unwrap_or_else(|e| panic!("{name}: {e}"));
     }
+}
+
+// ── Mechanism-dimension example policies enforce (gaps plan P2–P3) ──────────
+#[test]
+fn mechanism_dimension_examples_enforce() {
+    let attrs = HashMap::new();
+
+    // fips-hashing: SHA-1 (0x04) on Sign denied; SHA-256 (0x06) allowed.
+    let eng = engine_for("fips-hashing.yaml");
+    let mut sha1 = req("Sign", Some("RSA"), &attrs);
+    sha1.mechanism.hashing_algorithm = Some(0x04);
+    assert!(eng.evaluate(&sha1).is_deny(), "SHA-1 must be denied");
+    let mut sha256 = req("Sign", Some("RSA"), &attrs);
+    sha256.mechanism.hashing_algorithm = Some(0x06);
+    assert!(eng.evaluate(&sha256).is_allow(), "SHA-256 must be allowed");
+
+    // aead-only: AES Encrypt CBC (0x01) denied; GCM (0x09) allowed.
+    let eng2 = engine_for("aead-only.yaml");
+    let mut cbc = req("Encrypt", Some("AES"), &attrs);
+    cbc.mechanism.block_cipher_mode = Some(0x01);
+    assert!(eng2.evaluate(&cbc).is_deny(), "AES-CBC must be denied");
+    let mut gcm = req("Encrypt", Some("AES"), &attrs);
+    gcm.mechanism.block_cipher_mode = Some(0x09);
+    assert!(eng2.evaluate(&gcm).is_allow(), "AES-GCM must be allowed");
+
+    // deterministic-signing: forces the Deterministic flag on Sign.
+    let eng3 = engine_for("deterministic-signing.yaml");
+    let d = eng3.evaluate(&req("Sign", Some("ML-DSA-65"), &attrs));
+    assert_eq!(
+        d.cp_override().and_then(|o| o.deterministic),
+        Some(true),
+        "policy must force deterministic signing"
+    );
 }
 
 // ── §2: training-permissive allows the three flows ──────────────────────────

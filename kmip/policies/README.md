@@ -15,6 +15,9 @@ Loaded at server start via `pqctoday-kmip --policy-file policies/<name>.yaml`. T
 | [`fips-only.yaml`](fips-only.yaml) | FIPS 140-3 mode: only FIPS 203 (ML-KEM), FIPS 204 (ML-DSA), FIPS 205 (SLH-DSA) plus FIPS-validated classical. |
 | [`hybrid-migration-window.yaml`](hybrid-migration-window.yaml) | Dual-signing enforced during 2026–2029 migration window: every signature is ML-DSA-65 + Ed25519 composite per LAMPS draft-19. |
 | [`cnsa-2.0.yaml`](cnsa-2.0.yaml) | NSA Commercial National Security Algorithm Suite 2.0 (CNSA 2.0): ML-KEM-1024 + ML-DSA-87 + AES-256 + SHA-384. |
+| [`fips-hashing.yaml`](fips-hashing.yaml) | **Mechanism dimension (hashing).** Restrict Sign/Verify hashing to FIPS SHA-2/SHA-3; deny SHA-1 — gates the KMIP `Hashing Algorithm`, not just the key algorithm. |
+| [`aead-only.yaml`](aead-only.yaml) | **Mechanism dimension (mode/padding).** AES Encrypt/Decrypt must be GCM/CCM; RSA must be OAEP — gates KMIP `Block Cipher Mode` / `Padding Method`. |
+| [`deterministic-signing.yaml`](deterministic-signing.yaml) | **Mechanism forcing.** Forces deterministic ML-DSA/SLH-DSA via the WD19 `Deterministic` flag — policy *sets* the mechanism param, transparent to the app. |
 
 ## Headline-demo dropdown (Hub scenario UI)
 
