@@ -152,8 +152,27 @@ class CodepointTable:
         # - `Operation` is missing post-spec-3.0 op names like ReKey.
         for tag, additions in _SPEC_EXTRACT_PATCHES.items():
             t.enum_name_to_value.setdefault(tag, {}).update(additions)
+        # WD19 PQC tags absent from the published-3.0 JSON.
+        for name, code in _SPEC_EXTRACT_TAG_PATCHES.items():
+            t.tag_name_to_code[name] = code
+            t.tag_code_to_name.setdefault(code, name)
         return t
 
+
+# Tag-name → 3-byte codepoint patches for tags absent from the published-3.0
+# spec JSON. The PQC CryptographicParameters / keygen tags are KMIP 3.0 WD19
+# (PQC Updates), codepoints from kmip-spec-v3.0-wd19-clean.pdf (mirrored in the
+# Rust wire.rs + this repo's memory). Keys are :func:`_norm` form (alphanum).
+_SPEC_EXTRACT_TAG_PATCHES: dict[str, int] = {
+    "KEMAlgorithm":     0x42_01C3,
+    "Deterministic":    0x42_01C4,
+    "ContextString":    0x42_01C5,
+    "Seed":             0x42_01C6,
+    "InputKeyMaterial": 0x42_01C7,
+    "Internal":         0x42_01C8,
+    "ExternalMu":       0x42_01C9,
+    "Random":           0x42_01CA,
+}
 
 # Patches against ``spec/oasis-kmip-3.0/kmip-spec-3.0-tags-enums.json``.
 # Each entry adds (or repairs) enum members the extractor missed. Values
@@ -162,6 +181,9 @@ class CodepointTable:
 _SPEC_EXTRACT_PATCHES: dict[str, dict[str, int]] = {
     # MaskGenerator: spec uses MGF1, extractor saw "MFG1".
     "MaskGenerator": {"MGF1": 0x00000001},
+    # KeyFormatType: SeedPrivateKey is KMIP 3.0 WD19 (§3.4, Table 575) — the
+    # seed-based private-key format; absent from published-3.0 (max PKCS10=0x17).
+    "KeyFormatType": {"SeedPrivateKey": 0x00000018},
     # CredentialType: extractor missed UsernameAndPassword (spec §11.x).
     "CredentialType": {
         "UsernameAndPassword": 0x00000001,
@@ -179,10 +201,14 @@ _SPEC_EXTRACT_PATCHES: dict[str, dict[str, int]] = {
         "RC4":  0x00000005,
     },
     # Operation: alternative spelling "ReKey" (extractor has "Rekey" from "Re-key").
+    # Encapsulate/Decapsulate are KMIP 3.0 WD19 (PQC Updates) ops — not in the
+    # published-3.0 enum; values from kmip-spec-v3.0-wd19-clean.pdf.
     "Operation": {
         "ReKey":      0x00000004,
         "ReKeyKeyPair": 0x0000001E,
         "ReCertify":  0x00000007,
+        "Encapsulate": 0x00000041,
+        "Decapsulate": 0x00000042,
     },
     # OpaqueDataType: OASIS uses vendor-extension hex codepoints; codec
     # accepts numeric literals so empty map suffices.
@@ -289,6 +315,14 @@ def parse_transcript_xml(path: Path) -> list[TtlvNode]:
     wrap them in a synthetic ``<KMIP>`` root for ElementTree.
     """
     text = path.read_text()
+    # The OASIS PQC corpus prefixes each file with a ``# <filename>`` comment
+    # line (and may interleave others); these are not valid XML, so drop any
+    # line whose first non-blank char is ``#``. The published-3.0 corpus has
+    # none, so this is a no-op there.
+    if "#" in text:
+        text = "\n".join(
+            ln for ln in text.splitlines() if not ln.lstrip().startswith("#")
+        )
     # The OASIS files use <KMIP> as the wrapper. Some have it, some don't.
     if "<KMIP>" not in text:
         text = f"<KMIP>{text}</KMIP>"

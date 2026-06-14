@@ -166,7 +166,8 @@ mod tests {
         .unwrap();
         let ss_rec = d.store.get(&resp.uid).unwrap().unwrap();
         assert_eq!(ss_rec.object_type, ObjectType::SecretData);
-        assert_eq!(ss_rec.state, State::Active);
+        // Born PreActive — see encapsulate::store_shared_secret rationale.
+        assert_eq!(ss_rec.state, State::PreActive);
         assert!(ss_rec.key_material.is_some());
         assert_ne!(resp.uid, "sk");
     }
