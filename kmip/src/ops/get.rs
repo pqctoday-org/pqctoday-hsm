@@ -240,6 +240,13 @@ pub fn get(deps: &Deps, req: GetRequest, correlation_id: &str) -> Result<GetResp
         _ => None,
     };
 
+    // KMIP 3.0 §6.2 — echo the stored SecretDataType for SecretData
+    // objects (ML-KEM shared secrets carry Seed = 0x02).
+    let secret_data_type = match obj.object_type {
+        ObjectType::SecretData => obj.secret_data_type,
+        _ => None,
+    };
+
     Ok(GetResponse {
         object_type: obj.object_type,
         uid: req.uid,
@@ -251,6 +258,7 @@ pub fn get(deps: &Deps, req: GetRequest, correlation_id: &str) -> Result<GetResp
             key_wrapping_data,
         },
         opaque_data_type,
+        secret_data_type,
     })
 }
 

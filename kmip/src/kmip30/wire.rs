@@ -1335,10 +1335,14 @@ fn encode_get_resp(r: &GetResponse) -> Vec<TtlvFrame> {
         ObjectType::PrivateKey => TtlvFrame::new(Tag(tags::PrivateKey), Value::Structure(vec![kb])),
         ObjectType::SecretData => {
             // KMIP 3.0 §6.2 SecretData Structure: SecretDataType
-            // (Enumeration) + KeyBlock. v0.1 defaults the data type
-            // to `Password` (0x01) — matches BL-M-4 expectation.
+            // (Enumeration) + KeyBlock. Defaults to `Password` (0x01)
+            // when unset (BL-M-4); ML-KEM shared secrets carry
+            // `Seed` (0x02) per the OASIS PQC interop KATs.
             TtlvFrame::new(Tag(tags::SecretData), Value::Structure(vec![
-                TtlvFrame::new(Tag(tags::SecretDataType), Value::Enumeration(0x01)),
+                TtlvFrame::new(
+                    Tag(tags::SecretDataType),
+                    Value::Enumeration(r.secret_data_type.unwrap_or(0x01)),
+                ),
                 kb,
             ]))
         }

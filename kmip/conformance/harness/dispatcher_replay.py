@@ -44,6 +44,7 @@ Usage (from ``kmip/``):
 from __future__ import annotations
 
 import json
+import os
 import re
 import socket
 import ssl
@@ -96,6 +97,8 @@ IMPLEMENTED_OPS: set[str] = {
     "Log", "Login", "Logout",
     # PR #87 (Group G): RNG + PKCS#11 passthrough — closes SKIP_OP universe.
     "RNGRetrieve", "RNGSeed", "PKCS_11",
+    # KMIP 3.0 WD19 (PQC interop): ML-KEM encapsulation / decapsulation.
+    "Encapsulate", "Decapsulate",
 }
 
 
@@ -1161,10 +1164,17 @@ def write_report(results: list[TestResult], path: Path) -> None:
 
 def main(argv: list[str]) -> int:
     target_name = argv[1] if len(argv) > 1 else None
-    paths = sorted(
-        list((CORPUS_DIR / "mandatory").glob("*.xml")) +
-        list((CORPUS_DIR / "optional").glob("*.xml"))
-    )
+    # ``KMIP_REPLAY_CORPUS`` points the harness at an alternate, flat corpus
+    # directory (e.g. the OASIS 3.0 PQC interop set) instead of the built-in
+    # mandatory/optional split. Used by the PQC replay gate.
+    alt = os.environ.get("KMIP_REPLAY_CORPUS")
+    if alt:
+        paths = sorted(Path(alt).glob("*.xml"))
+    else:
+        paths = sorted(
+            list((CORPUS_DIR / "mandatory").glob("*.xml")) +
+            list((CORPUS_DIR / "optional").glob("*.xml"))
+        )
     if target_name:
         paths = [p for p in paths if p.name == target_name]
         if not paths:
@@ -1177,7 +1187,12 @@ def main(argv: list[str]) -> int:
     # Cost: ~0.5 s startup × N tests; for the full corpus that's ~50 s.
     results: list[TestResult] = []
     for i, path in enumerate(paths, 1):
-        srv = start_server()
+        # Cycle the listen port per test. Re-binding a single fixed port
+        # hundreds of times in quick succession exhausts TIME_WAIT slots on
+        # some platforms (macOS), making `start_server` time out mid-run.
+        # A rotating port over a wide range avoids the collision; the range
+        # is bounded so it stays inside the ephemeral space.
+        srv = start_server(port=10000 + (i % 5000))
         try:
             r = run_test(srv, path)
         finally:

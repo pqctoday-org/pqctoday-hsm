@@ -80,6 +80,14 @@ pub struct ObjectRecord {
     /// when other formats land.
     pub key_format_type: Option<u32>,
 
+    /// KMIP 3.0 §6.2 `SecretDataType` — the Enumeration carried by a
+    /// `SecretData` managed object (Password = 0x01, Seed = 0x02). Only
+    /// meaningful when `object_type == SecretData`; `None` renders as the
+    /// `Password` default for back-compat (BL-M-4). ML-KEM
+    /// Encapsulate/Decapsulate set this to `Seed` (0x02) so the derived
+    /// shared secret round-trips as the OASIS PQC interop KATs expect.
+    pub secret_data_type: Option<u32>,
+
     /// KMIP 3.0 §11 `Cryptographic Parameters` attached to the key.
     /// Drives the Plane-3 mechanism choice — most importantly the
     /// RSA-OAEP family (PaddingMethod / HashingAlgorithm / MaskGenerator
@@ -257,6 +265,7 @@ impl From<BaselineDefaults> for ObjectRecord {
             object_groups: Vec::new(),
             key_material: None,
             key_format_type: None,
+            secret_data_type: None,
             cryptographic_parameters: None,
             last_change_date: None,
             original_creation_date: None,

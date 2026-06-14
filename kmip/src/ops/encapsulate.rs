@@ -185,23 +185,36 @@ pub(crate) fn store_shared_secret(
 ) -> Result<String> {
     let uid = format!("urn:pqctoday:obj:{}", Uuid::new_v4());
     let now = OffsetDateTime::now_utc();
-    let len_bits = (shared_secret.len() * 8) as u32;
     deps.store.put(ObjectRecord {
         uid: uid.clone(),
         object_type: ObjectType::SecretData,
         // The shared secret is opaque bytes; record the source KEM
         // algorithm for provenance in attribute queries.
         algorithm: source_algorithm,
-        cryptographic_length: len_bits,
-        state: State::Active,
+        // KMIP 3.0 §6.2 — a `SecretData` KeyBlock carries no
+        // CryptographicAlgorithm/Length (the OASIS PQC interop KATs
+        // expect a 2-child KeyBlock: KeyFormatType + KeyValue). The
+        // wire encoder uses `cryptographic_length == 0` as the
+        // "omit crypto metadata" sentinel (same as BL-M-4).
+        cryptographic_length: 0,
+        // KMIP 3.0 §3.x lifecycle — the derived shared secret is born
+        // PreActive (never Activated). The OASIS PQC interop KATs Get it
+        // then Destroy it directly; PreActive → Destroyed is a legal FSM
+        // edge whereas Active is not (Active would require Revoke first,
+        // as the KATs do for the key pair but NOT for the shared secret).
+        state: State::PreActive,
         pkcs11_cka_id: Uuid::new_v4().as_bytes().to_vec(),
         pkcs11_slot: deps.config.pkcs11_slot,
         initial_date: now,
-        activation_date: Some(now),
+        activation_date: None,
         last_change_date: Some(now),
         original_creation_date: Some(now),
         key_material: Some(shared_secret),
         key_format_type: Some(KeyFormatType::Raw as u32),
+        // KMIP 3.0 §6.2 — the ML-KEM shared secret is keying seed
+        // material; the OASIS PQC interop KATs serve it back as
+        // SecretDataType=Seed (0x02), not the Password default.
+        secret_data_type: Some(0x02),
         extractable: Some(true),
         sensitive: Some(false),
         fresh: Some(true),
@@ -270,7 +283,9 @@ mod tests {
         assert_eq!(resp.data.len(), 32, "placeholder ciphertext");
         let ss_rec = d.store.get(&resp.uid).unwrap().unwrap();
         assert_eq!(ss_rec.object_type, ObjectType::SecretData);
-        assert_eq!(ss_rec.state, State::Active);
+        // Born PreActive so a subsequent Destroy (without Revoke) is a
+        // legal FSM edge — matches the OASIS PQC interop KAT flow.
+        assert_eq!(ss_rec.state, State::PreActive);
         assert!(ss_rec.key_material.is_some(), "shared secret persisted");
         assert_ne!(resp.uid, "pk", "a NEW object UID is returned");
     }

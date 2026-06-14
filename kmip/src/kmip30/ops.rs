@@ -395,6 +395,10 @@ pub struct GetResponse {
     /// `OpaqueDataType` codepoint stashed at Register time, echoed
     /// in the Get response wrapper. `None` for non-Opaque objects.
     pub opaque_data_type: Option<u32>,
+    /// KMIP 3.0 §6.2 `SecretDataType` for a `SecretData` object
+    /// (Password = 0x01, Seed = 0x02). `None` renders as the Password
+    /// default. Only meaningful when `object_type == SecretData`.
+    pub secret_data_type: Option<u32>,
 }
 
 /// `KeyBlock` (KMIP 3.0 §4.x) — the wrapped key material returned by `Get`
