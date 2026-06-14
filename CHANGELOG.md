@@ -8,6 +8,43 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — KMIP PQC interop (full 1452 byte-exact) + crypto-policy completeness + sandbox-dev client (2026-06-14)
+
+Three PRs completing the crypto-agility layer's interop claim and its first
+integration. KMIP suite 472 tests green throughout; OASIS replay held at 92/0/10.
+
+- **Crypto-policy completeness** (`3dc86e1`, PR #107). W2: Encrypt now applies a
+  policy-forced `Decision.cp_override` (mechanism-parameter *forcing*, not just
+  gating); the keyless Hash op is policy-gated (`hash_algorithm_allowlist`); the
+  canonical `CKM_*` map expanded (SHA-2/3 hashes, ECDSA-SHA3, EdDSA, ChaCha20,
+  KWP, KDFs); confirmed `CKM_KMAC_*` is vendor-defined (OASIS v3.2 standardises
+  no codepoint). Closes W2 of `CRYPTO_POLICY_GAPS_IMPLEMENTATION_PLAN.md`.
+- **OASIS KMIP 3.0 PQC interop — 1452/1452 byte-exact through the live server**
+  (`9626e6a`, `46e2f8c`, `c7c907f`, PR #108). W1/I4: the full OASIS PQC interop
+  set (keygen, encapsulate/decapsulate, sign/verify across ML-DSA 44/65/87,
+  ML-KEM 512/768/1024, all 12 SLH-DSA parameter sets) now replays **byte-exact**
+  through the real `pqctoday-kmip` server over TLS. Taught the replay codec the
+  KMIP 3.0 WD19 PQC tags + `SeedPrivateKey` KeyFormatType (`0x18`) +
+  Encapsulate/Decapsulate ops, with per-test port cycling for large local
+  sweeps. Server side: the ML-KEM shared secret is served as
+  `SecretDataType=Seed` in a 2-child KeyBlock, born `PreActive`; keygen serves
+  `Get` of `SeedPrivateKey` (`{Seed, Key}`) + `Raw` via born-extractable seeded
+  keygen (`generate_{ml_dsa,ml_kem,slh_dsa}_keypair_from_seed_extractable`) gated
+  by the KMIP `Extractable` attribute; `Get` resolves the engine handle by
+  PKCS#11 class. New `KMIP PQC Interop Replay` CI job over a vendored
+  42-transcript subset (`kmip/conformance/pqc_corpus/`); the full 1452-case set
+  stays unvendored (`KMIP_REPLAY_CORPUS=<dir>`).
+- **pykmip sandbox-dev client + ML-KEM ops through the policy engine** (PR #109).
+  First sandbox-dev integration: a Python KMIP client (`kmip/pykmip/`) that
+  drives the agile server and a correlator that renders the `--audit-log` as
+  per-request three-plane trails (p1 policy / p2 KMIP / p3 PKCS#11). Building it
+  surfaced + fixed two findings in the WD19 ML-KEM ops: Encapsulate/Decapsulate
+  now resolve the engine handle by PKCS#11 class (a `CreateKeyPair` pair shares
+  one CKA_ID → the bare lookup hit the wrong half →
+  `CKR_KEY_FUNCTION_NOT_PERMITTED`), and they now route through the Plane-1
+  policy engine (emit a p1 decision + enforce allow/deny) instead of bypassing
+  it — closing a crypto-agility blind spot for KEM operations.
+
 ### Added — KMIP 3.0 coverage Phase 2: implementable spec-surface gaps (2026-06-13)
 
 Closes the implementable spec-surface gaps from `kmip/docs/COVERAGE_GAP_PLAN.md`,
