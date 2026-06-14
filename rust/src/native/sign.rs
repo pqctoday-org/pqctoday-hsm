@@ -18,8 +18,10 @@ use super::CkRv;
 use crate::constants::*;
 use crate::crypto::handlers::{
     is_prehash_ml_dsa, is_prehash_slh_dsa, sign_ecdsa, sign_eddsa, sign_eddsa_ph, sign_hmac,
-    sign_kmac, sign_ml_dsa, sign_rsa, sign_slh_dsa, verify_ecdsa, verify_eddsa, verify_eddsa_ph,
-    verify_hmac, verify_ml_dsa, verify_rsa, verify_slh_dsa,
+    sign_kmac, sign_ml_dsa, sign_ml_dsa_external_mu, sign_ml_dsa_external_rnd, sign_ml_dsa_internal,
+    sign_rsa, sign_slh_dsa, sign_slh_dsa_external_rnd, sign_slh_dsa_internal, verify_ecdsa,
+    verify_eddsa, verify_eddsa_ph, verify_hmac, verify_ml_dsa, verify_ml_dsa_external_mu,
+    verify_ml_dsa_internal, verify_rsa, verify_slh_dsa, verify_slh_dsa_internal,
 };
 use crate::state::{
     get_ec_point_sec1, get_object_attr_u32, get_object_param_set, get_object_value,
@@ -199,6 +201,101 @@ pub fn verify_with_pss_salt(
 
 /// Check `CKA_SIGN` (for sign) or `CKA_VERIFY` (for verify) on the key.
 /// Returns `false` if the key is missing or the flag is not set.
+/// PQC sign with the full KMIP 3.0 WD19 / ACVP interface knobs:
+/// `internal` selects `*.Sign_internal` (no domain framing), `external_mu`
+/// treats `data` as the 64-byte message representative µ, `deterministic`
+/// picks the deterministic randomizer, and `random` supplies the explicit
+/// hedge randomizer (ML-DSA rnd / SLH-DSA addrnd) when not deterministic.
+#[allow(clippy::too_many_arguments)]
+pub fn sign_pqc(
+    _session: u32,
+    key_handle: u32,
+    mechanism: u32,
+    data: &[u8],
+    ctx: &[u8],
+    deterministic: bool,
+    internal: bool,
+    external_mu: bool,
+    random: Option<&[u8]>,
+) -> Result<Vec<u8>, CkRv> {
+    if !check_can_sign(key_handle, CKA_SIGN) {
+        return Err(CKR_KEY_FUNCTION_NOT_PERMITTED);
+    }
+    let sk = get_object_value(key_handle).ok_or(CKR_ARGUMENTS_BAD)?;
+    let ps = get_object_param_set(key_handle);
+    match mechanism {
+        m if m == CKM_ML_DSA || is_prehash_ml_dsa(m) => {
+            let mut rnd = [0u8; 32];
+            if !deterministic {
+                let r = random.ok_or(CKR_ARGUMENTS_BAD)?;
+                if r.len() != 32 {
+                    return Err(CKR_ARGUMENTS_BAD);
+                }
+                rnd.copy_from_slice(r);
+            }
+            if external_mu {
+                sign_ml_dsa_external_mu(ps, &sk, data, rnd)
+            } else if internal {
+                sign_ml_dsa_internal(ps, &sk, data, ctx, rnd)
+            } else {
+                sign_ml_dsa_external_rnd(ps, &sk, data, ctx, rnd)
+            }
+        }
+        m if m == CKM_SLH_DSA || is_prehash_slh_dsa(m) => {
+            let addrnd = if deterministic {
+                None
+            } else {
+                Some(random.ok_or(CKR_ARGUMENTS_BAD)?)
+            };
+            if internal {
+                sign_slh_dsa_internal(ps, &sk, data, addrnd)
+            } else {
+                sign_slh_dsa_external_rnd(ps, &sk, data, ctx, addrnd)
+            }
+        }
+        _ => Err(CKR_MECHANISM_INVALID),
+    }
+}
+
+/// PQC verify counterpart to [`sign_pqc`]. `external_mu` ⇒ `data` is the
+/// 64-byte µ; `internal` ⇒ `*.Verify_internal`.
+#[allow(clippy::too_many_arguments)]
+pub fn verify_pqc(
+    _session: u32,
+    key_handle: u32,
+    mechanism: u32,
+    data: &[u8],
+    signature: &[u8],
+    ctx: &[u8],
+    internal: bool,
+    external_mu: bool,
+) -> Result<(), CkRv> {
+    if !check_can_sign(key_handle, CKA_VERIFY) {
+        return Err(CKR_KEY_FUNCTION_NOT_PERMITTED);
+    }
+    let pk = get_object_value(key_handle).ok_or(CKR_ARGUMENTS_BAD)?;
+    let ps = get_object_param_set(key_handle);
+    match mechanism {
+        m if m == CKM_ML_DSA || is_prehash_ml_dsa(m) => {
+            if external_mu {
+                verify_ml_dsa_external_mu(ps, &pk, data, signature)
+            } else if internal {
+                verify_ml_dsa_internal(ps, &pk, data, signature, ctx)
+            } else {
+                verify_ml_dsa(m, ps, &pk, data, signature, ctx)
+            }
+        }
+        m if m == CKM_SLH_DSA || is_prehash_slh_dsa(m) => {
+            if internal {
+                verify_slh_dsa_internal(ps, &pk, data, signature)
+            } else {
+                verify_slh_dsa(m, ps, &pk, data, signature, ctx)
+            }
+        }
+        _ => Err(CKR_MECHANISM_INVALID),
+    }
+}
+
 fn check_can_sign(key_handle: u32, attr_type: u32) -> bool {
     // PKCS#11 v3.2 §5.12.4 — single-byte CK_BBOOL: 0x01 = true.
     OBJECTS.with(|o| {

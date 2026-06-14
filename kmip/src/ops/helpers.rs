@@ -440,6 +440,18 @@ pub fn state_name(s: crate::kmip30::State) -> &'static str {
 ///   `crypto::handlers::verify_rsa`).
 /// - algorithms with no sign mechanism (AES, ML-KEM, …) →
 ///   `OperationNotSupported`.
+/// True for ML-DSA / SLH-DSA sign mechanisms (pure or pre-hash). These honor
+/// the PQC interface knobs (Internal / External Mu / Deterministic / Context
+/// String / Random) via `native::sign_pqc` instead of the classical
+/// RSA-PSS-salt bridge.
+pub fn is_pqc_sign_mech(mech: u32) -> bool {
+    use softhsmrustv3::constants::{CKM_ML_DSA, CKM_SLH_DSA};
+    mech == CKM_ML_DSA
+        || mech == CKM_SLH_DSA
+        || softhsmrustv3::crypto::is_prehash_ml_dsa(mech)
+        || softhsmrustv3::crypto::is_prehash_slh_dsa(mech)
+}
+
 pub fn native_sign_mech_with_params(
     a: KmipAlgorithm,
     cp: Option<&crate::kmip30::CryptographicParameters>,

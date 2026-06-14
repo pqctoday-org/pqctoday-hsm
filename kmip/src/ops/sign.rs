@@ -203,13 +203,30 @@ pub fn sign(deps: &Deps, req: SignRequest, correlation_id: &str) -> Result<SignR
             // keeps the engine's §6.2 hash-length default.
             let pss_salt = super::helpers::pss_salt_from_cp(native_mech, effective_cp)
                 .map_err(|e| fail_err(deps, correlation_id, "Sign", e))?;
-            let r = softhsmrustv3::native::sign_with_pss_salt(
-                session,
-                handle,
-                native_mech,
-                &req.data,
-                pss_salt,
-            );
+            // I4 — ML-DSA / SLH-DSA honor the PQC interface knobs from
+            // CryptographicParameters (KMIP 3.0 WD19): Deterministic, Internal,
+            // External Mu, Context String, Random. Classical mechanisms keep
+            // the RSA-PSS-salt bridge.
+            let r = if super::helpers::is_pqc_sign_mech(native_mech) {
+                let det = effective_cp.and_then(|c| c.deterministic).unwrap_or(false);
+                let internal = effective_cp.and_then(|c| c.internal).unwrap_or(false);
+                let ext_mu = effective_cp.and_then(|c| c.external_mu).unwrap_or(false);
+                let ctx = effective_cp
+                    .and_then(|c| c.context_string.as_deref())
+                    .unwrap_or(&[]);
+                let random = effective_cp.and_then(|c| c.random.as_deref());
+                softhsmrustv3::native::sign_pqc(
+                    session, handle, native_mech, &req.data, ctx, det, internal, ext_mu, random,
+                )
+            } else {
+                softhsmrustv3::native::sign_with_pss_salt(
+                    session,
+                    handle,
+                    native_mech,
+                    &req.data,
+                    pss_salt,
+                )
+            };
             super::helpers::emit_pkcs11_result(
                 deps,
                 correlation_id,
