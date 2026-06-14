@@ -14,6 +14,23 @@ mostly quick) > **W4** (operability) > **W3** (alternate backend, large/optional
 
 ---
 
+## Status — updated 2026-06-14
+
+| Track | State | Where |
+| --- | --- | --- |
+| **W1 — full 1452 transcript replay** | ✅ **DONE** | PR #108. All 1452 OASIS PQC interop transcripts replay **byte-exact** through the live `pqctoday-kmip` TLS server (keygen `SeedPrivateKey`+`Raw` export, ML-KEM encap/decap, ML-DSA/SLH-DSA sign/verify). New `KMIP PQC Interop Replay` CI gate over a vendored 42-transcript subset (`conformance/pqc_corpus/`); full set via `KMIP_REPLAY_CORPUS`. |
+| **W2 — crypto-policy completeness** | ✅ **DONE** | PR #107. Encrypt mechanism-param forcing (`cp_override`), Hash-op gating, `CKM_*` map expansion, `CKM_KMAC_*` vendor-defined confirmed. |
+| **W4 — operability** | ↪️ **REDIRECTED + partially done** | Re-scoped from a wasm/HTTP policy-mgmt facade to a **sandbox-dev integration**: `pykmip` Python KMIP client + audit-log three-plane correlator + demo (PR #109, *observe-only*). A **live HTTP admin facade** (read/write/activate policies over the network) remains **parked** — separate, security-sensitive decision. WASM was dropped (the sandbox runs the server natively). |
+| **KEM policy blind spot** | ✅ **CLOSED** | PR #109. Encapsulate/Decapsulate now resolve the engine handle by PKCS#11 class (`find_handle_for_object`) and route through the Plane-1 policy engine (p1 decision + allow/deny). |
+| **W3 — alternate C++/OpenSSL backend** | ⏸️ **PARKED** | Large/optional; start only if a second backend becomes a product requirement. |
+
+The per-track detail below is the original plan; W1/W2 are retained as the
+historical record of what was built. See
+[CRYPTO_AGILITY_CONFIGURATION.md](CRYPTO_AGILITY_CONFIGURATION.md) for the
+current operator guide.
+
+---
+
 ## W1 — Full KMIP transcript replay of the 1452 set  *(highest value, largest)*
 
 **Goal:** drive the 1452 OASIS transcripts as live KMIP request/response
