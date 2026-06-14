@@ -1204,6 +1204,22 @@ pub struct CryptographicParameters {
     /// Ignored for non-PSS mechanisms (CryptographicParameters is a
     /// grab-bag; irrelevant fields are not an error).
     pub salt_length: Option<i32>,
+    // ── PQC fields (KMIP 3.0 WD19; tags 0x4201C4–0x4201CA) ──────────────
+    /// `Deterministic` (0x4201C4) — Boolean. ML-DSA/SLH-DSA deterministic
+    /// signing variant (rnd←0^32 / addrnd←PK.seed) when `true`.
+    pub deterministic: Option<bool>,
+    /// `Context String` (0x4201C5) — ByteString. FIPS 204/205 signing
+    /// context (the `ctx` in the `(0‖|ctx|‖ctx)` framing).
+    pub context_string: Option<Vec<u8>>,
+    /// `Internal` (0x4201C8) — Boolean. When `true`, use the
+    /// `*.Sign_internal` interface (no external domain framing).
+    pub internal: Option<bool>,
+    /// `External Mu` (0x4201C9) — Boolean. When `true`, the signing `Data`
+    /// is the 64-byte message representative µ, not the message.
+    pub external_mu: Option<bool>,
+    /// `Random` (0x4201CA) — ByteString. Explicit signing randomizer for the
+    /// hedged (non-deterministic) variant, making it reproducible.
+    pub random: Option<Vec<u8>>,
 }
 
 /// `Hashing Algorithm` Enumeration — KMIP 3.0 §11. Codepoints from the

@@ -270,6 +270,18 @@ pub(crate) mod tags {
     pub const DeactivationReason: u32     = 0x42_01b8;
     pub const DeactivationReasonCode: u32 = 0x42_01b9;
     pub const DeactivationDate: u32       = 0x42_002f;
+    // PQC CryptographicParameters / keygen fields. Defined in KMIP 3.0
+    // Working Draft 19 (PQC Updates) — NOT the published 3.0 spec, which tops
+    // out at 0x4201C2 (NIST Security Category). The OASIS PQC interop set
+    // (ProtocolVersion 3.0) uses these. Source: kmip-spec-v3.0-wd19-clean.pdf.
+    pub const KemAlgorithm: u32           = 0x42_01c3; // Enumeration
+    pub const Deterministic: u32          = 0x42_01c4; // Boolean
+    pub const ContextString: u32          = 0x42_01c5; // ByteString
+    pub const PqcSeed: u32                = 0x42_01c6; // ByteString (keygen seed)
+    pub const InputKeyMaterial: u32       = 0x42_01c7; // ByteString (KEM coins)
+    pub const Internal: u32               = 0x42_01c8; // Boolean
+    pub const ExternalMu: u32             = 0x42_01c9; // Boolean
+    pub const PqcRandom: u32              = 0x42_01ca; // ByteString (hedge rnd)
     /// KMIP 3.0 §6.1.7 Check request fields.
     pub const UsageLimitsCount: u32       = 0x42_0096;
     pub const LeaseTime: u32              = 0x42_0049;
@@ -2304,6 +2316,27 @@ fn decode_cryptographic_parameters(frame: &TtlvFrame) -> Result<CryptographicPar
             // K18 — KMIP 3.0 §11 RSA-PSS salt length (bytes).
             tags::SaltLength => {
                 cp.salt_length = Some(expect_integer(c, "Salt Length")?);
+            }
+            // PQC signing fields (KMIP 3.0 WD19). Previously fell through the
+            // `_ => {}` arm and were silently dropped — now honored.
+            tags::Deterministic => {
+                cp.deterministic = Some(expect_boolean(c, "Deterministic")?);
+            }
+            tags::ContextString => {
+                if let Value::ByteString(b) = &c.value {
+                    cp.context_string = Some(b.clone());
+                }
+            }
+            tags::Internal => {
+                cp.internal = Some(expect_boolean(c, "Internal")?);
+            }
+            tags::ExternalMu => {
+                cp.external_mu = Some(expect_boolean(c, "External Mu")?);
+            }
+            tags::PqcRandom => {
+                if let Value::ByteString(b) = &c.value {
+                    cp.random = Some(b.clone());
+                }
             }
             _ => {}
         }

@@ -29,7 +29,10 @@ use softhsmrustv3::crypto::{
     sign_slh_dsa_internal, verify_ml_dsa, verify_ml_dsa_external_mu, verify_ml_dsa_internal,
     verify_slh_dsa, verify_slh_dsa_internal,
 };
-use softhsmrustv3::native::{decapsulate, register_ml_kem_private_key, session};
+use softhsmrustv3::native::{
+    decapsulate, register_ml_dsa_private_key, register_ml_kem_private_key,
+    register_slh_dsa_private_key, session, sign_pqc,
+};
 
 // ── transcript location ────────────────────────────────────────────────────
 
@@ -349,6 +352,69 @@ fn ml_dsa_external_mu_byte_exact() {
     verify_ml_dsa_external_mu(CKP_ML_DSA_44, &pk, &mu, &want)
         .expect("verify_ml_dsa_external_mu must accept the published signature");
     eprintln!("[I0] {name}: ML-DSA external-µ siggen byte-exact ({} B)", want.len());
+}
+
+/// I4 bridge check: drive `native::sign_pqc` (the entry the KMIP Sign op calls)
+/// through a registered key handle, for internal / external-µ / hedged, and
+/// confirm byte-exact vs the transcript. This proves the KMIP→engine bridge
+/// dispatches the interface flags correctly (the op layer just extracts these
+/// flags from CryptographicParameters and forwards them).
+#[test]
+fn native_sign_pqc_bridge_byte_exact() {
+    let Some(dir) = interop_dir() else {
+        eprintln!("[I4] INTEROP_KAT_DIR absent — skipping sign_pqc bridge proof");
+        return;
+    };
+    let _ = session::finalize();
+    let sess = session::bootstrap_default_token(0, "so-pin", "user-pin", "i4-signpqc")
+        .expect("bootstrap session");
+
+    let load = |name: &str| std::fs::read_to_string(dir.join(name)).ok();
+
+    // ML-DSA-44 internal (deterministic) — siggen-106.
+    if let Some(xml) = load("ML-DSA-44-siggen-106-30.xml") {
+        let (sk, ctx, msg, want) = siggen_vector(&xml, 2560).unwrap();
+        let h = register_ml_dsa_private_key(sess, CKP_ML_DSA_44, &sk, b"i4a", "i4")
+            .expect("register ml-dsa sk");
+        let got = sign_pqc(sess, h, CKM_ML_DSA, &msg, &ctx, true, true, false, None)
+            .expect("sign_pqc internal");
+        assert_eq!(got, want, "sign_pqc ML-DSA internal NOT byte-exact");
+        eprintln!("[I4] sign_pqc ML-DSA-44 internal byte-exact");
+    }
+    // ML-DSA-44 external-µ (deterministic) — siggen-100 (Data = 64-byte µ).
+    if let Some(xml) = load("ML-DSA-44-siggen-100-30.xml") {
+        let sk = key_material_of_len(&xml, 2560).unwrap();
+        let mu = hexd(&ordered_values(&xml, "Data").into_iter().next().unwrap());
+        let want = hexd(&ordered_values(&xml, "SignatureData").into_iter().next().unwrap());
+        let h = register_ml_dsa_private_key(sess, CKP_ML_DSA_44, &sk, b"i4b", "i4")
+            .expect("register ml-dsa sk");
+        let got = sign_pqc(sess, h, CKM_ML_DSA, &mu, &[], true, false, true, None)
+            .expect("sign_pqc external-mu");
+        assert_eq!(got, want, "sign_pqc ML-DSA external-µ NOT byte-exact");
+        eprintln!("[I4] sign_pqc ML-DSA-44 external-µ byte-exact");
+    }
+    // ML-DSA-44 hedged external (explicit <Random>) — siggen-181.
+    if let Some(xml) = load("ML-DSA-44-siggen-181-30.xml") {
+        let (sk, ctx, msg, want) = siggen_vector(&xml, 2560).unwrap();
+        let rnd = hexd(&ordered_values(&xml, "Random").into_iter().next().expect("Random"));
+        let h = register_ml_dsa_private_key(sess, CKP_ML_DSA_44, &sk, b"i4c", "i4")
+            .expect("register ml-dsa sk");
+        let got = sign_pqc(sess, h, CKM_ML_DSA, &msg, &ctx, false, false, false, Some(&rnd))
+            .expect("sign_pqc hedged");
+        assert_eq!(got, want, "sign_pqc ML-DSA hedged NOT byte-exact");
+        eprintln!("[I4] sign_pqc ML-DSA-44 hedged external byte-exact");
+    }
+    // SLH-DSA-SHA2-128f internal (deterministic) — siggen-115.
+    if let Some(xml) = load("SLH-DSA-SHA2-128f-siggen-115-30.xml") {
+        let (sk, _ctx, msg, want) = siggen_vector(&xml, 64).unwrap();
+        let h = register_slh_dsa_private_key(sess, CKP_SLH_DSA_SHA2_128F, &sk, b"i4d", "i4")
+            .expect("register slh-dsa sk");
+        let got = sign_pqc(sess, h, CKM_SLH_DSA, &msg, &[], true, true, false, None)
+            .expect("sign_pqc slh internal");
+        assert_eq!(got, want, "sign_pqc SLH-DSA internal NOT byte-exact");
+        eprintln!("[I4] sign_pqc SLH-DSA-128f internal byte-exact");
+    }
+    let _ = session::finalize();
 }
 
 // ── ML-KEM decapsulation: dk + ct → shared secret (deterministic, no coins) ─

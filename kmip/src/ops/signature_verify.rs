@@ -195,14 +195,41 @@ pub fn signature_verify(
                 super::helpers::pss_salt_from_cp(native_mech, effective_cp)?;
             // native::verify returns Ok(true)/Ok(false) for the KMIP
             // ValidityIndicator model — exactly what we need.
-            let r = softhsmrustv3::native::verify_with_pss_salt(
-                session,
-                handle,
-                native_mech,
-                &req.data,
-                &req.signature,
-                pss_salt,
-            );
+            // I4 — ML-DSA / SLH-DSA honor the PQC interface knobs (Internal,
+            // External Mu, Context String) from CryptographicParameters. The
+            // engine's verify_pqc returns Ok(())=valid / Err(SIGNATURE_INVALID)
+            // =invalid; map that onto the Ok(bool) ValidityIndicator model so a
+            // bad signature is "Invalid", not an operation error.
+            let r = if super::helpers::is_pqc_sign_mech(native_mech) {
+                let internal = effective_cp.and_then(|c| c.internal).unwrap_or(false);
+                let ext_mu = effective_cp.and_then(|c| c.external_mu).unwrap_or(false);
+                let ctx = effective_cp
+                    .and_then(|c| c.context_string.as_deref())
+                    .unwrap_or(&[]);
+                match softhsmrustv3::native::verify_pqc(
+                    session,
+                    handle,
+                    native_mech,
+                    &req.data,
+                    &req.signature,
+                    ctx,
+                    internal,
+                    ext_mu,
+                ) {
+                    Ok(()) => Ok(true),
+                    Err(rv) if rv == softhsmrustv3::constants::CKR_SIGNATURE_INVALID => Ok(false),
+                    Err(rv) => Err(rv),
+                }
+            } else {
+                softhsmrustv3::native::verify_with_pss_salt(
+                    session,
+                    handle,
+                    native_mech,
+                    &req.data,
+                    &req.signature,
+                    pss_salt,
+                )
+            };
             emit_pkcs11_result(deps, correlation_id, "native::verify", Some(native_mech), &r);
             match r {
                 Ok(true) => SignatureValidity::Valid,
