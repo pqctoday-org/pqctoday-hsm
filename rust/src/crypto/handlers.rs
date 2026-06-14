@@ -294,6 +294,147 @@ macro_rules! slh_dsa_verify {
     }};
 }
 
+#[macro_export]
+macro_rules! slh_dsa_sign_internal {
+    ($ps:ty, $sk_bytes:expr, $msg:expr, $addrnd:expr) => {{
+        use fips205::traits::Signer;
+        let sk_arr: &<$ps as fips205::traits::SerDes>::ByteArray = $sk_bytes
+            .try_into()
+            .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+        let sk = <$ps as fips205::traits::SerDes>::try_from_bytes(sk_arr)
+            .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+        // `_test_only_raw_sign` is FIPS 205 `slh_sign_internal(M, SK, addrnd)`:
+        // it signs the bare message (no `(0‖|ctx|‖ctx)` framing). `addrnd =
+        // None` ⇒ the deterministic variant (addrnd = PK.seed); `Some(r)` ⇒
+        // the hedged variant with the explicit ACVP/OASIS `<Random>` addrnd.
+        match $addrnd {
+            Some(r) => sk._test_only_raw_sign(&mut crate::crypto::handlers::FixedRng::new(r), $msg, true),
+            None => sk._test_only_raw_sign(&mut rand::rngs::OsRng, $msg, false),
+        }
+        .map_err(|_| CKR_FUNCTION_FAILED)
+        .map(|s| Into::<Vec<u8>>::into(s))
+    }};
+}
+
+#[macro_export]
+macro_rules! slh_dsa_sign_external_rnd {
+    ($ps:ty, $sk_bytes:expr, $msg:expr, $ctx:expr, $addrnd:expr) => {{
+        use fips205::traits::Signer;
+        let sk_arr: &<$ps as fips205::traits::SerDes>::ByteArray = $sk_bytes
+            .try_into()
+            .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+        let sk = <$ps as fips205::traits::SerDes>::try_from_bytes(sk_arr)
+            .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+        // External `SLH-DSA.Sign` (with `(0‖|ctx|‖ctx)` framing). `addrnd =
+        // None` ⇒ deterministic (hedged=false → addrnd = PK.seed); `Some(r)` ⇒
+        // hedged with the explicit `<Random>` addrnd drawn from `FixedRng`.
+        match $addrnd {
+            Some(r) => sk.try_sign_with_rng(&mut crate::crypto::handlers::FixedRng::new(r), $msg, $ctx, true),
+            None => sk.try_sign_with_rng(&mut rand::rngs::OsRng, $msg, $ctx, false),
+        }
+        .map_err(|_| CKR_FUNCTION_FAILED)
+        .map(|s| Into::<Vec<u8>>::into(s))
+    }};
+}
+
+#[macro_export]
+macro_rules! slh_dsa_verify_internal {
+    ($ps:ty, $pk_bytes:expr, $msg:expr, $sig_bytes:expr) => {{
+        use fips205::traits::Verifier;
+        let pk_arr: &<$ps as fips205::traits::SerDes>::ByteArray = $pk_bytes
+            .try_into()
+            .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+        let vk = <$ps as fips205::traits::SerDes>::try_from_bytes(pk_arr)
+            .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+        let sig: <$ps as fips205::traits::Verifier>::Signature =
+            $sig_bytes.try_into().map_err(|_| CKR_SIGNATURE_INVALID)?;
+        match vk._test_only_raw_verify($msg, &sig) {
+            Ok(true) => Ok(()),
+            _ => Err(CKR_SIGNATURE_INVALID),
+        }
+    }};
+}
+
+/// SLH-DSA **internal-interface** signing (ACVP `signatureInterface="internal"`
+/// / OASIS interop `<Internal value="true"/>`, FIPS 205 `slh_sign_internal`):
+/// signs `msg` directly without the external `(0‖|ctx|‖ctx)` framing applied
+/// by [`sign_slh_dsa`]. `deterministic` ⇒ addrnd = PK.seed.
+pub fn sign_slh_dsa_internal(
+    ps: u32,
+    sk_bytes: &[u8],
+    msg: &[u8],
+    addrnd: Option<&[u8]>,
+) -> Result<Vec<u8>, u32> {
+    match ps {
+        CKP_SLH_DSA_SHA2_128S => slh_dsa_sign_internal!(fips205::slh_dsa_sha2_128s::PrivateKey, sk_bytes, msg, addrnd),
+        CKP_SLH_DSA_SHAKE_128S => slh_dsa_sign_internal!(fips205::slh_dsa_shake_128s::PrivateKey, sk_bytes, msg, addrnd),
+        CKP_SLH_DSA_SHA2_128F => slh_dsa_sign_internal!(fips205::slh_dsa_sha2_128f::PrivateKey, sk_bytes, msg, addrnd),
+        CKP_SLH_DSA_SHAKE_128F => slh_dsa_sign_internal!(fips205::slh_dsa_shake_128f::PrivateKey, sk_bytes, msg, addrnd),
+        CKP_SLH_DSA_SHA2_192S => slh_dsa_sign_internal!(fips205::slh_dsa_sha2_192s::PrivateKey, sk_bytes, msg, addrnd),
+        CKP_SLH_DSA_SHAKE_192S => slh_dsa_sign_internal!(fips205::slh_dsa_shake_192s::PrivateKey, sk_bytes, msg, addrnd),
+        CKP_SLH_DSA_SHA2_192F => slh_dsa_sign_internal!(fips205::slh_dsa_sha2_192f::PrivateKey, sk_bytes, msg, addrnd),
+        CKP_SLH_DSA_SHAKE_192F => slh_dsa_sign_internal!(fips205::slh_dsa_shake_192f::PrivateKey, sk_bytes, msg, addrnd),
+        CKP_SLH_DSA_SHA2_256S => slh_dsa_sign_internal!(fips205::slh_dsa_sha2_256s::PrivateKey, sk_bytes, msg, addrnd),
+        CKP_SLH_DSA_SHAKE_256S => slh_dsa_sign_internal!(fips205::slh_dsa_shake_256s::PrivateKey, sk_bytes, msg, addrnd),
+        CKP_SLH_DSA_SHA2_256F => slh_dsa_sign_internal!(fips205::slh_dsa_sha2_256f::PrivateKey, sk_bytes, msg, addrnd),
+        CKP_SLH_DSA_SHAKE_256F => slh_dsa_sign_internal!(fips205::slh_dsa_shake_256f::PrivateKey, sk_bytes, msg, addrnd),
+        _ => Err(CKR_KEY_TYPE_INCONSISTENT),
+    }
+}
+
+/// SLH-DSA **external-interface** signing with explicit `addrnd` — the
+/// rnd-aware form of [`sign_slh_dsa`] (full `SLH-DSA.Sign` with the
+/// `(0‖|ctx|‖ctx)` framing). `addrnd = None` ⇒ deterministic (addrnd =
+/// PK.seed); `Some(r)` ⇒ hedged with the explicit ACVP/OASIS `<Random>`.
+pub fn sign_slh_dsa_external_rnd(
+    ps: u32,
+    sk_bytes: &[u8],
+    msg: &[u8],
+    ctx: &[u8],
+    addrnd: Option<&[u8]>,
+) -> Result<Vec<u8>, u32> {
+    match ps {
+        CKP_SLH_DSA_SHA2_128S => slh_dsa_sign_external_rnd!(fips205::slh_dsa_sha2_128s::PrivateKey, sk_bytes, msg, ctx, addrnd),
+        CKP_SLH_DSA_SHAKE_128S => slh_dsa_sign_external_rnd!(fips205::slh_dsa_shake_128s::PrivateKey, sk_bytes, msg, ctx, addrnd),
+        CKP_SLH_DSA_SHA2_128F => slh_dsa_sign_external_rnd!(fips205::slh_dsa_sha2_128f::PrivateKey, sk_bytes, msg, ctx, addrnd),
+        CKP_SLH_DSA_SHAKE_128F => slh_dsa_sign_external_rnd!(fips205::slh_dsa_shake_128f::PrivateKey, sk_bytes, msg, ctx, addrnd),
+        CKP_SLH_DSA_SHA2_192S => slh_dsa_sign_external_rnd!(fips205::slh_dsa_sha2_192s::PrivateKey, sk_bytes, msg, ctx, addrnd),
+        CKP_SLH_DSA_SHAKE_192S => slh_dsa_sign_external_rnd!(fips205::slh_dsa_shake_192s::PrivateKey, sk_bytes, msg, ctx, addrnd),
+        CKP_SLH_DSA_SHA2_192F => slh_dsa_sign_external_rnd!(fips205::slh_dsa_sha2_192f::PrivateKey, sk_bytes, msg, ctx, addrnd),
+        CKP_SLH_DSA_SHAKE_192F => slh_dsa_sign_external_rnd!(fips205::slh_dsa_shake_192f::PrivateKey, sk_bytes, msg, ctx, addrnd),
+        CKP_SLH_DSA_SHA2_256S => slh_dsa_sign_external_rnd!(fips205::slh_dsa_sha2_256s::PrivateKey, sk_bytes, msg, ctx, addrnd),
+        CKP_SLH_DSA_SHAKE_256S => slh_dsa_sign_external_rnd!(fips205::slh_dsa_shake_256s::PrivateKey, sk_bytes, msg, ctx, addrnd),
+        CKP_SLH_DSA_SHA2_256F => slh_dsa_sign_external_rnd!(fips205::slh_dsa_sha2_256f::PrivateKey, sk_bytes, msg, ctx, addrnd),
+        CKP_SLH_DSA_SHAKE_256F => slh_dsa_sign_external_rnd!(fips205::slh_dsa_shake_256f::PrivateKey, sk_bytes, msg, ctx, addrnd),
+        _ => Err(CKR_KEY_TYPE_INCONSISTENT),
+    }
+}
+
+/// SLH-DSA internal-interface verification — counterpart to
+/// [`sign_slh_dsa_internal`] (`slh_verify_internal`).
+pub fn verify_slh_dsa_internal(
+    ps: u32,
+    pk_bytes: &[u8],
+    msg: &[u8],
+    sig_bytes: &[u8],
+) -> Result<(), u32> {
+    match ps {
+        CKP_SLH_DSA_SHA2_128S => slh_dsa_verify_internal!(fips205::slh_dsa_sha2_128s::PublicKey, pk_bytes, msg, sig_bytes),
+        CKP_SLH_DSA_SHAKE_128S => slh_dsa_verify_internal!(fips205::slh_dsa_shake_128s::PublicKey, pk_bytes, msg, sig_bytes),
+        CKP_SLH_DSA_SHA2_128F => slh_dsa_verify_internal!(fips205::slh_dsa_sha2_128f::PublicKey, pk_bytes, msg, sig_bytes),
+        CKP_SLH_DSA_SHAKE_128F => slh_dsa_verify_internal!(fips205::slh_dsa_shake_128f::PublicKey, pk_bytes, msg, sig_bytes),
+        CKP_SLH_DSA_SHA2_192S => slh_dsa_verify_internal!(fips205::slh_dsa_sha2_192s::PublicKey, pk_bytes, msg, sig_bytes),
+        CKP_SLH_DSA_SHAKE_192S => slh_dsa_verify_internal!(fips205::slh_dsa_shake_192s::PublicKey, pk_bytes, msg, sig_bytes),
+        CKP_SLH_DSA_SHA2_192F => slh_dsa_verify_internal!(fips205::slh_dsa_sha2_192f::PublicKey, pk_bytes, msg, sig_bytes),
+        CKP_SLH_DSA_SHAKE_192F => slh_dsa_verify_internal!(fips205::slh_dsa_shake_192f::PublicKey, pk_bytes, msg, sig_bytes),
+        CKP_SLH_DSA_SHA2_256S => slh_dsa_verify_internal!(fips205::slh_dsa_sha2_256s::PublicKey, pk_bytes, msg, sig_bytes),
+        CKP_SLH_DSA_SHAKE_256S => slh_dsa_verify_internal!(fips205::slh_dsa_shake_256s::PublicKey, pk_bytes, msg, sig_bytes),
+        CKP_SLH_DSA_SHA2_256F => slh_dsa_verify_internal!(fips205::slh_dsa_sha2_256f::PublicKey, pk_bytes, msg, sig_bytes),
+        CKP_SLH_DSA_SHAKE_256F => slh_dsa_verify_internal!(fips205::slh_dsa_shake_256f::PublicKey, pk_bytes, msg, sig_bytes),
+        _ => Err(CKR_KEY_TYPE_INCONSISTENT),
+    }
+}
+
 // ── SubjectPublicKeyInfo (SPKI) DER Builders ─────────────────────────────────
 //
 // These functions construct DER-encoded SubjectPublicKeyInfo (RFC 5480 / RFC 8410)
@@ -573,6 +714,44 @@ impl rand::RngCore for ZeroRng {
 }
 impl rand::CryptoRng for ZeroRng {}
 
+/// RNG that replays a fixed byte string — used to inject an explicit signing
+/// randomizer (ACVP/OASIS hedged `<Random>` value): the signer draws its
+/// `rnd` (ML-DSA, 32 B) / `addrnd` (SLH-DSA, n B) from this instead of the OS
+/// RNG, making the hedged signature byte-exactly reproducible. Bytes past the
+/// supplied buffer read as zero (a single fixed-size draw never exhausts it).
+pub(crate) struct FixedRng {
+    bytes: Vec<u8>,
+    pos: usize,
+}
+impl FixedRng {
+    pub(crate) fn new(bytes: &[u8]) -> Self {
+        Self { bytes: bytes.to_vec(), pos: 0 }
+    }
+}
+impl rand::RngCore for FixedRng {
+    fn next_u32(&mut self) -> u32 {
+        let mut b = [0u8; 4];
+        self.fill_bytes(&mut b);
+        u32::from_le_bytes(b)
+    }
+    fn next_u64(&mut self) -> u64 {
+        let mut b = [0u8; 8];
+        self.fill_bytes(&mut b);
+        u64::from_le_bytes(b)
+    }
+    fn fill_bytes(&mut self, out: &mut [u8]) {
+        for o in out.iter_mut() {
+            *o = self.bytes.get(self.pos).copied().unwrap_or(0);
+            self.pos += 1;
+        }
+    }
+    fn try_fill_bytes(&mut self, out: &mut [u8]) -> Result<(), rand::Error> {
+        self.fill_bytes(out);
+        Ok(())
+    }
+}
+impl rand::CryptoRng for FixedRng {}
+
 /// Sign with ML-DSA, honoring the PKCS#11 v3.2 CK_SIGN_ADDITIONAL_CONTEXT
 /// parameters: `ctx` is the FIPS 204 context string (≤255 bytes, validated at
 /// C_SignInit), `deterministic` selects the §5.2 deterministic variant
@@ -609,6 +788,174 @@ pub fn sign_ml_dsa(
         CKP_ML_DSA_44 => ml_dsa_sign!(fips204::ml_dsa_44::KG),
         CKP_ML_DSA_65 | 0 => ml_dsa_sign!(fips204::ml_dsa_65::KG),
         CKP_ML_DSA_87 => ml_dsa_sign!(fips204::ml_dsa_87::KG),
+        _ => Err(CKR_KEY_TYPE_INCONSISTENT),
+    }
+}
+
+/// ML-DSA **internal-interface** signing — ACVP `signatureInterface="internal"`
+/// / OASIS interop `<Internal value="true"/>` (FIPS 204 `ML-DSA.Sign_internal`):
+/// signs `message` directly as M′, WITHOUT the external
+/// `(IntegerToBytes(0,1) ‖ IntegerToBytes(|ctx|,1) ‖ ctx)` domain framing that
+/// [`sign_ml_dsa`] prepends. `rnd` is the 32-byte signing randomizer:
+/// `[0u8; 32]` for the deterministic variant, or the explicit ACVP/OASIS
+/// hedged `<Random>` value.
+pub fn sign_ml_dsa_internal(
+    ps: u32,
+    sk_bytes: &[u8],
+    message: &[u8],
+    ctx: &[u8],
+    rnd: [u8; 32],
+) -> Result<Vec<u8>, u32> {
+    macro_rules! sign_with {
+        ($m:ident) => {{
+            use fips204::traits::SerDes;
+            let arr: &<fips204::$m::PrivateKey as SerDes>::ByteArray =
+                sk_bytes.try_into().map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+            let sk = <fips204::$m::PrivateKey as SerDes>::try_from_bytes(*arr)
+                .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+            #[allow(deprecated)]
+            fips204::$m::_internal_sign(&sk, message, ctx, rnd)
+                .map(|s| s.to_vec())
+                .map_err(|_| CKR_FUNCTION_FAILED)
+        }};
+    }
+    match ps {
+        CKP_ML_DSA_44 => sign_with!(ml_dsa_44),
+        CKP_ML_DSA_65 | 0 => sign_with!(ml_dsa_65),
+        CKP_ML_DSA_87 => sign_with!(ml_dsa_87),
+        _ => Err(CKR_KEY_TYPE_INCONSISTENT),
+    }
+}
+
+/// ML-DSA internal-interface verification — counterpart to
+/// [`sign_ml_dsa_internal`] (`ML-DSA.Verify_internal`).
+pub fn verify_ml_dsa_internal(
+    ps: u32,
+    pk_bytes: &[u8],
+    message: &[u8],
+    sig_bytes: &[u8],
+    ctx: &[u8],
+) -> Result<(), u32> {
+    use fips204::traits::Verifier;
+    macro_rules! ver {
+        ($m:ident) => {{
+            use fips204::traits::SerDes;
+            let arr: &<fips204::$m::PublicKey as SerDes>::ByteArray =
+                pk_bytes.try_into().map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+            let pk = <fips204::$m::PublicKey as SerDes>::try_from_bytes(*arr)
+                .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+            let sig: <fips204::$m::PublicKey as Verifier>::Signature =
+                sig_bytes.try_into().map_err(|_| CKR_SIGNATURE_INVALID)?;
+            #[allow(deprecated)]
+            if fips204::$m::_internal_verify(&pk, message, &sig, ctx) {
+                Ok(())
+            } else {
+                Err(CKR_SIGNATURE_INVALID)
+            }
+        }};
+    }
+    match ps {
+        CKP_ML_DSA_44 => ver!(ml_dsa_44),
+        CKP_ML_DSA_65 | 0 => ver!(ml_dsa_65),
+        CKP_ML_DSA_87 => ver!(ml_dsa_87),
+        _ => Err(CKR_KEY_TYPE_INCONSISTENT),
+    }
+}
+
+/// ML-DSA **external-µ** signing (ACVP `externalMu=true` / OASIS interop
+/// `<ExternalMu value="true"/>`): the caller supplies the 64-byte message
+/// representative µ directly (the `Data` field carries µ = H(tr‖M′), not the
+/// message). FIPS 204 IPD external-mu mode. `deterministic` ⇒ rnd←0^32.
+pub fn sign_ml_dsa_external_mu(
+    ps: u32,
+    sk_bytes: &[u8],
+    mu: &[u8],
+    rnd: [u8; 32],
+) -> Result<Vec<u8>, u32> {
+    let mu64: [u8; 64] = mu.try_into().map_err(|_| CKR_ARGUMENTS_BAD)?;
+    macro_rules! sign_with {
+        ($m:ident) => {{
+            use fips204::traits::SerDes;
+            let arr: &<fips204::$m::PrivateKey as SerDes>::ByteArray =
+                sk_bytes.try_into().map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+            let sk = <fips204::$m::PrivateKey as SerDes>::try_from_bytes(*arr)
+                .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+            #[allow(deprecated)]
+            fips204::$m::_internal_sign_external_mu(&sk, &mu64, rnd)
+                .map(|s| s.to_vec())
+                .map_err(|_| CKR_FUNCTION_FAILED)
+        }};
+    }
+    match ps {
+        CKP_ML_DSA_44 => sign_with!(ml_dsa_44),
+        CKP_ML_DSA_65 | 0 => sign_with!(ml_dsa_65),
+        CKP_ML_DSA_87 => sign_with!(ml_dsa_87),
+        _ => Err(CKR_KEY_TYPE_INCONSISTENT),
+    }
+}
+
+/// ML-DSA external-µ verification — counterpart to [`sign_ml_dsa_external_mu`].
+pub fn verify_ml_dsa_external_mu(
+    ps: u32,
+    pk_bytes: &[u8],
+    mu: &[u8],
+    sig_bytes: &[u8],
+) -> Result<(), u32> {
+    use fips204::traits::Verifier;
+    let mu64: [u8; 64] = mu.try_into().map_err(|_| CKR_ARGUMENTS_BAD)?;
+    macro_rules! ver {
+        ($m:ident) => {{
+            use fips204::traits::SerDes;
+            let arr: &<fips204::$m::PublicKey as SerDes>::ByteArray =
+                pk_bytes.try_into().map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+            let pk = <fips204::$m::PublicKey as SerDes>::try_from_bytes(*arr)
+                .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+            let sig: <fips204::$m::PublicKey as Verifier>::Signature =
+                sig_bytes.try_into().map_err(|_| CKR_SIGNATURE_INVALID)?;
+            #[allow(deprecated)]
+            if fips204::$m::_internal_verify_external_mu(&pk, &mu64, &sig) {
+                Ok(())
+            } else {
+                Err(CKR_SIGNATURE_INVALID)
+            }
+        }};
+    }
+    match ps {
+        CKP_ML_DSA_44 => ver!(ml_dsa_44),
+        CKP_ML_DSA_65 | 0 => ver!(ml_dsa_65),
+        CKP_ML_DSA_87 => ver!(ml_dsa_87),
+        _ => Err(CKR_KEY_TYPE_INCONSISTENT),
+    }
+}
+
+/// ML-DSA **external-interface** signing with an explicit 32-byte randomizer —
+/// the rnd-aware form of [`sign_ml_dsa`] (full `ML-DSA.Sign` with the
+/// `(0‖|ctx|‖ctx)` framing). `rnd = [0u8; 32]` reproduces the deterministic
+/// variant; a non-zero `rnd` reproduces the ACVP/OASIS hedged `<Random>`
+/// signature byte-exact.
+pub fn sign_ml_dsa_external_rnd(
+    ps: u32,
+    sk_bytes: &[u8],
+    message: &[u8],
+    ctx: &[u8],
+    rnd: [u8; 32],
+) -> Result<Vec<u8>, u32> {
+    use fips204::traits::{SerDes, Signer};
+    macro_rules! sign_with {
+        ($m:ident) => {{
+            let arr: &<fips204::$m::PrivateKey as SerDes>::ByteArray =
+                sk_bytes.try_into().map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+            let sk = <fips204::$m::PrivateKey as SerDes>::try_from_bytes(*arr)
+                .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+            sk.try_sign_with_rng(&mut FixedRng::new(&rnd), message, ctx)
+                .map(|s| Into::<Vec<u8>>::into(s))
+                .map_err(|_| CKR_FUNCTION_FAILED)
+        }};
+    }
+    match ps {
+        CKP_ML_DSA_44 => sign_with!(ml_dsa_44),
+        CKP_ML_DSA_65 | 0 => sign_with!(ml_dsa_65),
+        CKP_ML_DSA_87 => sign_with!(ml_dsa_87),
         _ => Err(CKR_KEY_TYPE_INCONSISTENT),
     }
 }

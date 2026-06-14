@@ -94,6 +94,80 @@ pub fn encapsulate(
     Ok((ct, ss))
 }
 
+/// ML-KEM **deterministic** encapsulation with caller-supplied coins
+/// (FIPS 203 §7.2 `ML-KEM.Encaps_internal(ek, m)`).
+///
+/// Identical to [`encapsulate`] except the 32-byte message `m` (the
+/// encapsulation randomness) is supplied by the caller instead of drawn from
+/// the OS RNG. This is the entry point the OASIS KMIP 3.0 PQC interop
+/// encapsulation vectors require: each provides a fixed `m` and expects a
+/// fixed ciphertext + shared secret. The randomized [`encapsulate`] cannot
+/// reproduce those — only this `_internal` form can.
+///
+/// SECURITY: `m` MUST be uniformly random for the KEM to be IND-CCA2 secure
+/// (FIPS 203 §3.3). This entry point exists for KAT/interop reproducibility
+/// and deterministic-coins KMIP requests; production encapsulation must use
+/// [`encapsulate`], which samples `m` from the OS RNG.
+///
+/// `coins` must be exactly 32 bytes → otherwise `CKR_ARGUMENTS_BAD`.
+pub fn encapsulate_deterministic(
+    _session: u32,
+    public_key_handle: u32,
+    mechanism: u32,
+    coins: &[u8],
+) -> Result<(Vec<u8>, Vec<u8>), CkRv> {
+    use ml_kem::{EncapsulateDeterministic, EncodedSizeUser, KemCore};
+
+    if mechanism != CKM_ML_KEM {
+        return Err(CKR_MECHANISM_INVALID);
+    }
+    if !check_flag(public_key_handle, CKA_ENCAPSULATE) {
+        return Err(CKR_KEY_FUNCTION_NOT_PERMITTED);
+    }
+    if get_object_attr_u32(public_key_handle, CKA_KEY_TYPE) != Some(CKK_ML_KEM) {
+        return Err(CKR_KEY_TYPE_INCONSISTENT);
+    }
+    let ps = get_object_param_set(public_key_handle);
+    if ps == 0 {
+        return Err(CKR_TEMPLATE_INCOMPLETE);
+    }
+    // FIPS 203 §7.2 — m is exactly 32 bytes.
+    let m = ml_kem::B32::try_from(coins).map_err(|_| CKR_ARGUMENTS_BAD)?;
+    let pub_key_bytes = get_object_value(public_key_handle).ok_or(CKR_ARGUMENTS_BAD)?;
+
+    let (ct, ss) = match ps {
+        CKP_ML_KEM_512 => {
+            let ek_enc = ml_kem::array::Array::try_from(pub_key_bytes.as_slice())
+                .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+            let ek = <ml_kem::MlKem512 as KemCore>::EncapsulationKey::from_bytes(&ek_enc);
+            let (ct, ss) = ek
+                .encapsulate_deterministic(&m)
+                .map_err(|_| CKR_FUNCTION_FAILED)?;
+            (ct.as_slice().to_vec(), ss.as_slice().to_vec())
+        }
+        CKP_ML_KEM_768 => {
+            let ek_enc = ml_kem::array::Array::try_from(pub_key_bytes.as_slice())
+                .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+            let ek = <ml_kem::MlKem768 as KemCore>::EncapsulationKey::from_bytes(&ek_enc);
+            let (ct, ss) = ek
+                .encapsulate_deterministic(&m)
+                .map_err(|_| CKR_FUNCTION_FAILED)?;
+            (ct.as_slice().to_vec(), ss.as_slice().to_vec())
+        }
+        CKP_ML_KEM_1024 => {
+            let ek_enc = ml_kem::array::Array::try_from(pub_key_bytes.as_slice())
+                .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+            let ek = <ml_kem::MlKem1024 as KemCore>::EncapsulationKey::from_bytes(&ek_enc);
+            let (ct, ss) = ek
+                .encapsulate_deterministic(&m)
+                .map_err(|_| CKR_FUNCTION_FAILED)?;
+            (ct.as_slice().to_vec(), ss.as_slice().to_vec())
+        }
+        _ => return Err(CKR_ARGUMENTS_BAD),
+    };
+    Ok((ct, ss))
+}
+
 /// ML-KEM decapsulation. Returns the recovered shared secret.
 ///
 /// `private_key_handle` MUST refer to an ML-KEM private-key object with

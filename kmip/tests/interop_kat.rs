@@ -24,7 +24,11 @@
 use std::path::PathBuf;
 
 use softhsmrustv3::constants::*;
-use softhsmrustv3::crypto::{sign_ml_dsa, sign_slh_dsa, verify_ml_dsa, verify_slh_dsa};
+use softhsmrustv3::crypto::{
+    sign_ml_dsa, sign_ml_dsa_external_mu, sign_ml_dsa_internal, sign_slh_dsa,
+    sign_slh_dsa_internal, verify_ml_dsa, verify_ml_dsa_external_mu, verify_ml_dsa_internal,
+    verify_slh_dsa, verify_slh_dsa_internal,
+};
 use softhsmrustv3::native::{decapsulate, register_ml_kem_private_key, session};
 
 // ── transcript location ────────────────────────────────────────────────────
@@ -248,6 +252,103 @@ fn sigver_matches_validity_indicator() {
         n += 1;
     }
     assert_eq!(n, 6, "expected all 6 sigver stems covered in {dir:?}");
+}
+
+/// Focused check: ML-DSA *internal-interface* (`Internal=true`,
+/// `ExternalMu=false`) siggen reproduces SignatureData byte-exact via the new
+/// `sign_ml_dsa_internal`, and `verify_ml_dsa_internal` accepts it. Uses
+/// ML-DSA-44-siggen-106 (a confirmed internal-only vector).
+#[test]
+fn ml_dsa_internal_interface_byte_exact() {
+    let Some(dir) = interop_dir() else {
+        eprintln!("[I0] INTEROP_KAT_DIR absent — skipping ML-DSA internal proof");
+        return;
+    };
+    let name = "ML-DSA-44-siggen-106-30.xml";
+    let Some(xml) = std::fs::read_to_string(dir.join(name)).ok() else {
+        eprintln!("[I0] {name} absent — skipping");
+        return;
+    };
+    assert!(
+        ordered_values(&xml, "Internal").iter().any(|v| v.eq_ignore_ascii_case("true")),
+        "{name}: expected Internal=true"
+    );
+    assert!(
+        !ordered_values(&xml, "ExternalMu").iter().any(|v| v.eq_ignore_ascii_case("true")),
+        "{name}: expected ExternalMu=false"
+    );
+    let (sk, ctx, msg, want) = siggen_vector(&xml, 2560).expect("extract internal siggen vector");
+    let got = sign_ml_dsa_internal(CKP_ML_DSA_44, &sk, &msg, &ctx, [0u8; 32])
+        .unwrap_or_else(|e| panic!("{name}: sign_ml_dsa_internal CK_RV=0x{e:x}"));
+    assert_eq!(got, want, "{name}: ML-DSA internal-interface signature NOT byte-exact");
+    verify_ml_dsa_internal(CKP_ML_DSA_44, &{
+        // public key = the pk-length KeyMaterial in the transcript
+        key_material_of_len(&xml, 1312).expect("pk")
+    }, &msg, &want, &ctx)
+    .expect("verify_ml_dsa_internal must accept the published signature");
+    eprintln!("[I0] {name}: ML-DSA internal-interface siggen byte-exact ({} B)", want.len());
+}
+
+/// Focused check: SLH-DSA *internal-interface* siggen reproduces SignatureData
+/// byte-exact via `sign_slh_dsa_internal`, and `verify_slh_dsa_internal`
+/// accepts it. Uses SLH-DSA-SHA2-128f-siggen-115 (a confirmed internal vector
+/// — exactly one of the cases the external-interface path got wrong).
+#[test]
+fn slh_dsa_internal_interface_byte_exact() {
+    let Some(dir) = interop_dir() else {
+        eprintln!("[I0] INTEROP_KAT_DIR absent — skipping SLH-DSA internal proof");
+        return;
+    };
+    let name = "SLH-DSA-SHA2-128f-siggen-115-30.xml";
+    let Some(xml) = std::fs::read_to_string(dir.join(name)).ok() else {
+        eprintln!("[I0] {name} absent — skipping");
+        return;
+    };
+    assert!(
+        ordered_values(&xml, "Internal").iter().any(|v| v.eq_ignore_ascii_case("true")),
+        "{name}: expected Internal=true"
+    );
+    let (sk, _ctx, msg, want) = siggen_vector(&xml, 64).expect("extract internal siggen vector");
+    let got = sign_slh_dsa_internal(CKP_SLH_DSA_SHA2_128F, &sk, &msg, None)
+        .unwrap_or_else(|e| panic!("{name}: sign_slh_dsa_internal CK_RV=0x{e:x}"));
+    assert_eq!(got, want, "{name}: SLH-DSA internal-interface signature NOT byte-exact");
+    let pk = key_material_of_len(&xml, 32).expect("pk");
+    verify_slh_dsa_internal(CKP_SLH_DSA_SHA2_128F, &pk, &msg, &want)
+        .expect("verify_slh_dsa_internal must accept the published signature");
+    eprintln!("[I0] {name}: SLH-DSA internal-interface siggen byte-exact ({} B)", want.len());
+}
+
+/// Focused check: ML-DSA *external-µ* siggen reproduces SignatureData
+/// byte-exact via `sign_ml_dsa_external_mu` (and verify accepts it). The
+/// transcript `Data` is the 64-byte µ, not a message. Uses
+/// ML-DSA-44-siggen-100 (a confirmed ExternalMu vector). This is the one case
+/// that required patching the fips204 crypto crate.
+#[test]
+fn ml_dsa_external_mu_byte_exact() {
+    let Some(dir) = interop_dir() else {
+        eprintln!("[I0] INTEROP_KAT_DIR absent — skipping ML-DSA external-µ proof");
+        return;
+    };
+    let name = "ML-DSA-44-siggen-100-30.xml";
+    let Some(xml) = std::fs::read_to_string(dir.join(name)).ok() else {
+        eprintln!("[I0] {name} absent — skipping");
+        return;
+    };
+    assert!(
+        ordered_values(&xml, "ExternalMu").iter().any(|v| v.eq_ignore_ascii_case("true")),
+        "{name}: expected ExternalMu=true"
+    );
+    let sk = key_material_of_len(&xml, 2560).expect("sk");
+    let mu = hexd(&ordered_values(&xml, "Data").into_iter().next().expect("Data=µ"));
+    assert_eq!(mu.len(), 64, "{name}: external-µ Data must be 64 bytes");
+    let want = hexd(&ordered_values(&xml, "SignatureData").into_iter().next().expect("sig"));
+    let got = sign_ml_dsa_external_mu(CKP_ML_DSA_44, &sk, &mu, [0u8; 32])
+        .unwrap_or_else(|e| panic!("{name}: sign_ml_dsa_external_mu CK_RV=0x{e:x}"));
+    assert_eq!(got, want, "{name}: ML-DSA external-µ signature NOT byte-exact");
+    let pk = key_material_of_len(&xml, 1312).expect("pk");
+    verify_ml_dsa_external_mu(CKP_ML_DSA_44, &pk, &mu, &want)
+        .expect("verify_ml_dsa_external_mu must accept the published signature");
+    eprintln!("[I0] {name}: ML-DSA external-µ siggen byte-exact ({} B)", want.len());
 }
 
 // ── ML-KEM decapsulation: dk + ct → shared secret (deterministic, no coins) ─

@@ -288,7 +288,7 @@ macro_rules! functionality {
                 // 10: 𝑀 ′ ← BytesToBits(IntegerToBytes(0, 1) ∥ IntegerToBytes(|𝑐𝑡𝑥|, 1) ∥ 𝑐𝑡𝑥) ∥ 𝑀
                 // 11: 𝜎 ← ML-DSA.Sign_internal(𝑠𝑘, 𝑀 ′ , 𝑟𝑛𝑑)
                 let sig = ml_dsa::sign_internal::<CTEST, K, L, LAMBDA_DIV4, SIG_LEN, SK_LEN, W1_LEN>(
-                    BETA, GAMMA1, GAMMA2, OMEGA, TAU, &self, message, ctx, &[], &[], rnd, false
+                    BETA, GAMMA1, GAMMA2, OMEGA, TAU, &self, message, ctx, &[], &[], rnd, false, None
                 );
 
                 // 12: return 𝜎
@@ -334,7 +334,7 @@ macro_rules! functionality {
                 // 23: 𝑀 ′ ← BytesToBits(IntegerToBytes(1, 1) ∥ IntegerToBytes(|𝑐𝑡𝑥|, 1) ∥ 𝑐𝑡𝑥 ∥ OID ∥ PH𝑀 )
                 // 24: 𝜎 ← ML-DSA.Sign_internal(𝑠𝑘, 𝑀 ′ , 𝑟𝑛𝑑)
                 let sig = ml_dsa::sign_internal::<CTEST, K, L, LAMBDA_DIV4, SIG_LEN, SK_LEN, W1_LEN>(
-                    BETA, GAMMA1, GAMMA2, OMEGA, TAU, &self, message, ctx, &oid, &phm[0..phm_len], rnd, false
+                    BETA, GAMMA1, GAMMA2, OMEGA, TAU, &self, message, ctx, &oid, &phm[0..phm_len], rnd, false, None
                 );
 
                 // 25: return 𝜎
@@ -375,7 +375,7 @@ macro_rules! functionality {
                 // 5: 𝑀′ ← BytesToBits(IntegerToBytes(0, 1) ∥ IntegerToBytes(|ctx|, 1) ∥ ctx) ∥ 𝑀
                 // 6: return ML-DSA.Verify_internal(pk, 𝑀′, 𝜎)
                 ml_dsa::verify_internal::<CTEST, K, L, LAMBDA_DIV4, PK_LEN, SIG_LEN, W1_LEN>(
-                    BETA, GAMMA1, GAMMA2, OMEGA, TAU, &self, &message, &sig, ctx, &[], &[], false
+                    BETA, GAMMA1, GAMMA2, OMEGA, TAU, &self, &message, &sig, ctx, &[], &[], false, None
                 )
             }
 
@@ -406,7 +406,7 @@ macro_rules! functionality {
                 // 18: 𝑀′ ← BytesToBits(IntegerToBytes(1, 1) ∥ IntegerToBytes(|ctx|, 1) ∥ ctx ∥ OID ∥ PH𝑀 )
                 // 19: return ML-DSA.Verify_internal(𝑝𝑘, 𝑀′ , 𝜎)
                 ml_dsa::verify_internal::<CTEST, K, L, LAMBDA_DIV4, PK_LEN, SIG_LEN, W1_LEN>(
-                    BETA, GAMMA1, GAMMA2, OMEGA, TAU, &self, &message, &sig, ctx, &oid, &phm[0..phm_len], false
+                    BETA, GAMMA1, GAMMA2, OMEGA, TAU, &self, &message, &sig, ctx, &oid, &phm[0..phm_len], false, None
                 )
             }
         }
@@ -568,7 +568,7 @@ macro_rules! functionality {
             let mut rnd = [0u8; 32];
             rng.try_fill_bytes(&mut rnd).map_err(|_| "Random number generator failed")?;
             let sig = ml_dsa::sign_internal::<true, K, L, LAMBDA_DIV4, SIG_LEN, SK_LEN, W1_LEN>(
-                BETA, GAMMA1, GAMMA2, OMEGA, TAU, &sk, message, &[1], &[2], &[3], rnd, true
+                BETA, GAMMA1, GAMMA2, OMEGA, TAU, &sk, message, &[1], &[2], &[3], rnd, true, None
             );
             Ok(sig)
         }
@@ -588,7 +588,23 @@ macro_rules! functionality {
         ) -> Result<[u8; SIG_LEN], &'static str> {
             helpers::ensure!(ctx.len() < 256, "_internal_sign: ctx too long");
             let sig = ml_dsa::sign_internal::<CTEST, K, L, LAMBDA_DIV4, SIG_LEN, SK_LEN, W1_LEN>(
-                BETA, GAMMA1, GAMMA2, OMEGA, TAU, sk, message, ctx, &[], &[], rnd, true
+                BETA, GAMMA1, GAMMA2, OMEGA, TAU, sk, message, ctx, &[], &[], rnd, true, None
+            );
+            Ok(sig)
+        }
+
+        #[deprecated = "Temporary function to allow application of external-mu test vectors; will be removed"]
+        /// ACVP / OASIS-interop **external-mu** signing: the caller supplies the
+        /// 64-byte message representative µ directly (FIPS 204 IPD external-mu
+        /// mode), so `sign_internal` skips its `µ ← H(tr ‖ M′)` step. `rnd ← 0^32`
+        /// for the deterministic variant.
+        /// # Errors
+        /// Propagates errors from the underlying signing path.
+        pub fn _internal_sign_external_mu(
+            sk: &PrivateKey, mu: &[u8; 64], rnd: [u8; 32]
+        ) -> Result<[u8; SIG_LEN], &'static str> {
+            let sig = ml_dsa::sign_internal::<CTEST, K, L, LAMBDA_DIV4, SIG_LEN, SK_LEN, W1_LEN>(
+                BETA, GAMMA1, GAMMA2, OMEGA, TAU, sk, &[], &[], &[], &[], rnd, true, Some(*mu)
             );
             Ok(sig)
         }
@@ -607,7 +623,17 @@ macro_rules! functionality {
                 return false;
             };
             ml_dsa::verify_internal::<CTEST, K, L, LAMBDA_DIV4, PK_LEN, SIG_LEN, W1_LEN>(
-                BETA, GAMMA1, GAMMA2, OMEGA, TAU, pk, &message, &sig, ctx, &[], &[], true
+                BETA, GAMMA1, GAMMA2, OMEGA, TAU, pk, &message, &sig, ctx, &[], &[], true, None
+            )
+        }
+
+        #[deprecated = "Temporary function to allow application of external-mu test vectors; will be removed"]
+        #[must_use]
+        /// ACVP / OASIS-interop **external-mu** verification — counterpart to
+        /// [`_internal_sign_external_mu`]: verifies against a caller-supplied µ.
+        pub fn _internal_verify_external_mu(pk: &PublicKey, mu: &[u8; 64], sig: &[u8; SIG_LEN]) -> bool {
+            ml_dsa::verify_internal::<CTEST, K, L, LAMBDA_DIV4, PK_LEN, SIG_LEN, W1_LEN>(
+                BETA, GAMMA1, GAMMA2, OMEGA, TAU, pk, &[], &sig, &[], &[], &[], true, Some(*mu)
             )
         }
     };
