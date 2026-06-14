@@ -36,7 +36,9 @@ softhsmrustv3 = { path = "../rust" }
 # Async runtime + I/O
 tokio        = { version = "1", features = ["full"] }
 tokio-rustls = "0.26"
-rustls       = { version = "0.23", features = ["ring"] }
+# `ring` backs the KMIP listener; `aws_lc_rs` backs the cryptopolicy-manager
+# admin facade (the only provider exposing the X25519MLKEM768 PQC hybrid KEX).
+rustls       = { version = "0.23", features = ["ring", "aws_lc_rs"] }
 rustls-pemfile = "2"
 
 # Self-signed cert auto-gen for sandbox / dev runs (Phase 7).

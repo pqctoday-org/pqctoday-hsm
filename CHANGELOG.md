@@ -8,6 +8,39 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — cryptopolicy-manager: quantum-safe-mTLS HTTP policy-admin facade (2026-06-14)
+
+The W4 server-side admin facade for the crypto-agility plane (`kmip/cryptopolicy-manager/`),
+enabled with `--admin-listen`. A JSON HTTP API over the existing `PolicyStore`
+so out-of-band tooling (the dev-sandbox policy-management UI) can list / load /
+validate / dry-run / save / **activate** crypto-agility policies on the
+**running** server — never on the KMIP surface (separation of duties; there is
+no KMIP "reboot/reload" op, and inventing one would breach that boundary).
+
+- **In-process, live hot-swap.** Compiled into the `pqctoday-kmip` crate via a
+  `#[path]` module; the server spawns the admin listener with a clone of the
+  live `policy::Engine` (`Arc<RwLock>` inside), so `POST /policies/{name}/activate`
+  changes the policy the KMIP dispatcher enforces on the very next request —
+  no restart.
+- **Quantum-safe mTLS.** `X25519MLKEM768`-only key exchange (ML-KEM-768 hybrid,
+  TLS 1.3) via the rustls **aws-lc-rs** provider (the KMIP listener's `ring`
+  default is untouched), plus **required client certificates**. Client/server
+  certs stay classical (ECDSA/Ed25519) — rustls 0.23 has no ML-DSA *certificate*
+  support, so the quantum-safety is in the session KEX (harvest-now-decrypt-later
+  resistance), documented as such.
+- **Routes:** `GET /policies`, `GET /policies/{name}` (incl. raw YAML for an
+  editor), `GET /active`, `POST /validate` (line/col errors for live lint),
+  `POST /dry-run`, `PUT /policies/{name}`, `POST /policies/{name}/activate`.
+  Activations are audited with the mTLS client-cert CN
+  (`admin: LIVE policy activated name=… by cn=…`).
+- New server flags: `--admin-listen`, `--admin-tls-cert/key`, `--admin-client-ca`
+  (mTLS, requires `--policy-dir`). rustls gains the `aws_lc_rs` feature.
+
+Verified manually against an OpenSSL 3.6.2 client: `Negotiated TLS1.3 group:
+X25519MLKEM768`, certless client rejected, all seven routes correct, live
+activation reflected immediately in `GET /active`. Unit tests cover the router
++ the PQC-mTLS config build; KMIP suite 477 tests green.
+
 ### Added — KMIP PQC interop (full 1452 byte-exact) + crypto-policy completeness + sandbox-dev client (2026-06-14)
 
 Three PRs completing the crypto-agility layer's interop claim and its first
