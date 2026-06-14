@@ -210,6 +210,40 @@ jobs:
       - name: Assert committed report is not stale
         run: cd kmip && python3 conformance/check_report_fresh.py
 
+  kmip-pqc-conformance:
+    name: KMIP PQC Interop Replay
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust/target
+            kmip/target
+          key: ${{ runner.os }}-cargo-test-${{ hashFiles('rust/Cargo.lock', 'kmip/Cargo.lock') }}
+      - name: Verify python3 (stdlib only — no pip deps)
+        run: python3 --version
+      - name: Build release KMIP server
+        run: cd kmip && cargo build --release --bin pqctoday-kmip
+
+      # Drives a vendored, structurally-complete subset of the OASIS KMIP
+      # 3.0 PQC interop set (kmip-3-0-pqc-tests-03.zip) through the real
+      # release server over TLS: keygen (ML-DSA/ML-KEM/SLH-DSA, all param
+      # sets, SeedPrivateKey + Raw export), ML-KEM encapsulate/decapsulate,
+      # and ML-DSA/SLH-DSA sign/verify — byte-exact. The full 1452-case
+      # corpus is not vendored (several MB); point KMIP_REPLAY_CORPUS at a
+      # local checkout to replay it all. The slow SLH-DSA "s" siggen
+      # transcripts are intentionally excluded to keep CI fast.
+      - name: Run PQC interop replay (vendored subset)
+        run: cd kmip && KMIP_REPLAY_CORPUS=conformance/pqc_corpus python3 conformance/harness/dispatcher_replay.py
+
   rust-audit:
     name: Rust Dependency Audit
     runs-on: ubuntu-24.04
