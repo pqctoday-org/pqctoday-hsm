@@ -225,6 +225,26 @@ pub enum Rule {
         deterministic: Option<bool>,
         reason: String,
     },
+
+    // ── PKCS#11 CKM_* mechanism dialect (plan P4) — gates the FULL PKCS#11
+    // v3.2 mechanism surface, incl. mechanisms with no KMIP codification
+    // (KMAC, KDFs). Gates on the request's *canonical* mechanism
+    // (`PolicyRequest.mechanism.canonical_mech`, P0/P1), so a rule means the
+    // same thing whether the request arrived via a standard KMIP op or the
+    // PKCS#11 passthrough (§6.1.42) — bypass-proof by construction. Mechanisms
+    // are PKCS#11 `CKM_*` names resolved from pkcs11t.h (via constants.rs). ──
+    /// `op ∈ ops` AND the request's canonical `CKM_*` ∉ `mechanisms` → Deny.
+    MechanismAllowlist {
+        ops: Vec<String>,
+        mechanisms: Vec<String>,
+        reason: String,
+    },
+    /// `op ∈ ops` AND the request's canonical `CKM_*` ∈ `mechanisms` → Deny.
+    MechanismDenylist {
+        ops: Vec<String>,
+        mechanisms: Vec<String>,
+        reason: String,
+    },
 }
 
 /// Either the literal string `"always"` or an ISO 8601 date `"YYYY-MM-DD"`.
@@ -715,6 +735,48 @@ impl Rule {
                     Some(_) => None,
                 }
             }
+
+            Rule::MechanismAllowlist {
+                ops,
+                mechanisms,
+                reason,
+            } => {
+                if !ops.iter().any(|o| o == req.op) {
+                    return None;
+                }
+                match req.mechanism.canonical_mech {
+                    // Not canonicalizable (no mechanism resolved) → not gated.
+                    None => None,
+                    Some(code)
+                        if !mechanisms.iter().any(|n| ckm_name_to_code(n) == Some(code)) =>
+                    {
+                        Some(GatingDeny {
+                            kmip_reason: DenyReason::PermissionDenied,
+                            human: reason.clone(),
+                        })
+                    }
+                    Some(_) => None,
+                }
+            }
+
+            Rule::MechanismDenylist {
+                ops,
+                mechanisms,
+                reason,
+            } => {
+                if !ops.iter().any(|o| o == req.op) {
+                    return None;
+                }
+                match req.mechanism.canonical_mech {
+                    Some(code) if mechanisms.iter().any(|n| ckm_name_to_code(n) == Some(code)) => {
+                        Some(GatingDeny {
+                            kmip_reason: DenyReason::PermissionDenied,
+                            human: reason.clone(),
+                        })
+                    }
+                    _ => None,
+                }
+            }
         }
     }
 }
@@ -781,6 +843,45 @@ fn padding_method_name_to_code(name: &str) -> Option<u32> {
         "PKCS1 v1.5" => 0x08,
         "X9.31" => 0x09,
         "PSS" => 0x0a,
+        _ => return None,
+    })
+}
+
+/// PKCS#11 `CKM_*` mechanism name → codepoint. Values come from
+/// `softhsmrustv3::constants` (the in-repo mirror of `src/lib/pkcs11/pkcs11t.h`,
+/// the source of truth per CLAUDE.md) — never hardcoded here. Curated to the
+/// mechanisms relevant to policy gating: AES modes, RSA/ECDSA sign variants,
+/// PQC, HMAC/KMAC, KDFs. Unknown → `None` (loader rejects unknown up-front).
+/// NOTE: `CKM_KMAC_*` are in the vendor-defined range in constants.rs; re-verify
+/// against pkcs11t.h if relied upon for a hard gate.
+fn ckm_name_to_code(name: &str) -> Option<u32> {
+    use softhsmrustv3::constants as c;
+    Some(match name {
+        "CKM_AES_ECB" => c::CKM_AES_ECB,
+        "CKM_AES_CBC" => c::CKM_AES_CBC,
+        "CKM_AES_CBC_PAD" => c::CKM_AES_CBC_PAD,
+        "CKM_AES_CTR" => c::CKM_AES_CTR,
+        "CKM_AES_GCM" => c::CKM_AES_GCM,
+        "CKM_RSA_PKCS_OAEP" => c::CKM_RSA_PKCS_OAEP,
+        "CKM_SHA256_RSA_PKCS" => c::CKM_SHA256_RSA_PKCS,
+        "CKM_SHA384_RSA_PKCS" => c::CKM_SHA384_RSA_PKCS,
+        "CKM_SHA512_RSA_PKCS" => c::CKM_SHA512_RSA_PKCS,
+        "CKM_SHA256_RSA_PKCS_PSS" => c::CKM_SHA256_RSA_PKCS_PSS,
+        "CKM_SHA384_RSA_PKCS_PSS" => c::CKM_SHA384_RSA_PKCS_PSS,
+        "CKM_SHA512_RSA_PKCS_PSS" => c::CKM_SHA512_RSA_PKCS_PSS,
+        "CKM_ECDSA" => c::CKM_ECDSA,
+        "CKM_ECDSA_SHA256" => c::CKM_ECDSA_SHA256,
+        "CKM_ECDSA_SHA384" => c::CKM_ECDSA_SHA384,
+        "CKM_ECDSA_SHA512" => c::CKM_ECDSA_SHA512,
+        "CKM_ML_DSA" => c::CKM_ML_DSA,
+        "CKM_ML_KEM" => c::CKM_ML_KEM,
+        "CKM_SLH_DSA" => c::CKM_SLH_DSA,
+        "CKM_SHA256_HMAC" => c::CKM_SHA256_HMAC,
+        "CKM_SHA384_HMAC" => c::CKM_SHA384_HMAC,
+        "CKM_SHA512_HMAC" => c::CKM_SHA512_HMAC,
+        "CKM_KMAC_128" => c::CKM_KMAC_128,
+        "CKM_KMAC_256" => c::CKM_KMAC_256,
+        "CKM_HKDF_DERIVE" => c::CKM_HKDF_DERIVE,
         _ => return None,
     })
 }
@@ -986,6 +1087,36 @@ mod tests {
         assert!(rule
             .resolve_cp(&req("Encrypt", Some("RSA"), &attrs), Some("RSA"))
             .is_none());
+    }
+
+    #[test]
+    fn ckm_mechanism_dialect_gates_on_canonical_mech() {
+        use softhsmrustv3::constants as c;
+        let attrs = HashMap::new();
+        // Denylist CKM_AES_CBC / ECB for Encrypt (no unauthenticated AES).
+        let deny_rule = Rule::MechanismDenylist {
+            ops: vec!["Encrypt".into()],
+            mechanisms: vec!["CKM_AES_CBC".into(), "CKM_AES_ECB".into()],
+            reason: "AEAD only".into(),
+        };
+        let mut r = req("Encrypt", Some("AES"), &attrs);
+        r.mechanism.canonical_mech = Some(c::CKM_AES_CBC);
+        assert!(deny_rule.check_pass2(&r, Some("AES")).is_some());
+        let mut r2 = req("Encrypt", Some("AES"), &attrs);
+        r2.mechanism.canonical_mech = Some(c::CKM_AES_GCM);
+        assert!(deny_rule.check_pass2(&r2, Some("AES")).is_none());
+        // Allowlist: only the ML-DSA mechanism for Sign.
+        let allow_rule = Rule::MechanismAllowlist {
+            ops: vec!["Sign".into()],
+            mechanisms: vec!["CKM_ML_DSA".into()],
+            reason: "PQC signature mechanisms only".into(),
+        };
+        let mut r3 = req("Sign", Some("ML-DSA-65"), &attrs);
+        r3.mechanism.canonical_mech = Some(c::CKM_ML_DSA);
+        assert!(allow_rule.check_pass2(&r3, Some("ML-DSA-65")).is_none());
+        let mut r4 = req("Sign", Some("ECDSA"), &attrs);
+        r4.mechanism.canonical_mech = Some(c::CKM_ECDSA_SHA256);
+        assert!(allow_rule.check_pass2(&r4, Some("ECDSA")).is_some());
     }
 
     #[test]
