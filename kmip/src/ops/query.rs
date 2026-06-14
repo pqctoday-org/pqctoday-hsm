@@ -260,10 +260,15 @@ mod tests {
         // — net advertised set still 62.
         // P2.3: Certify + Re-certify moved between the sets (52 + 10)
         // — net advertised set still 62.
-        assert_eq!(ops.len(), 62);
+        // WD19: Encapsulate + Decapsulate are newly handled (and
+        // therefore honestly advertised) → 54 + 10 = 64.
+        assert_eq!(ops.len(), 64);
         assert!(ops.contains(&Operation::Sign));
         assert!(ops.contains(&Operation::Encrypt));
         assert!(ops.contains(&Operation::Decrypt));
+        // WD19 — first-class ML-KEM KEM ops.
+        assert!(ops.contains(&Operation::Encapsulate));
+        assert!(ops.contains(&Operation::Decapsulate));
         assert!(ops.contains(&Operation::GetAttributes));
         assert!(ops.contains(&Operation::Interop));
         assert!(ops.contains(&Operation::AddAttribute));

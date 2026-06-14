@@ -1337,6 +1337,301 @@ fn k17_register_wrapped_hmac_key_then_mac_against_real_engine() {
     let _ = softhsmrustv3::native::session::finalize();
 }
 
+// ── KMIP 3.0 WD19 Encapsulate / Decapsulate (first-class KEM ops) ───────────
+//
+// These prove the new `Encapsulate` (0x41) / `Decapsulate` (0x42) op
+// handlers against the real softhsmrustv3 engine. Unlike the
+// Encrypt/Decrypt overload, the new ops create a NEW managed SecretData
+// object holding the shared secret and return its UID; a subsequent Get
+// retrieves the 32-byte secret. The proof is byte-exact:
+//
+//   * deterministic encapsulation with fixed coins `m` is reproducible —
+//     two Encapsulate calls with the same `m` yield identical ciphertext
+//     AND identical shared secret;
+//   * Decapsulate(ciphertext) recovers exactly the encapsulated shared
+//     secret (KEM correctness, byte-for-byte);
+//   * Get(returned UID) returns exactly that 32-byte shared secret.
+//
+// `pqctoday_kmip`'s `ml-kem` dependency does not enable the
+// `deterministic` feature, so the test cannot recompute the expected
+// vector in-process; instead it pins byte-exactness via the engine's own
+// determinism + KEM correctness (the engine's deterministic encaps is
+// itself ACVP/KAT byte-verified — see rust/src/native/encrypt.rs).
+
+/// Register an ML-KEM-768 keypair (raw FIPS 203 bytes generated in-test)
+/// and return `(private_uid, public_uid)`.
+fn register_ml_kem_768_pair(deps: &Deps) -> (String, String) {
+    use ml_kem::{EncodedSizeUser, KemCore};
+    use pqctoday_kmip::kmip30::KeyFormatType;
+
+    let (dk, ek) = ml_kem::MlKem768::generate(&mut rand::rngs::OsRng);
+    let dk_bytes = dk.as_bytes().as_slice().to_vec();
+    let ek_bytes = ek.as_bytes().as_slice().to_vec();
+
+    let priv_uid = register_pqc(
+        deps,
+        ObjectType::PrivateKey,
+        KmipAlgorithm::MlKem768,
+        KeyFormatType::Raw,
+        dk_bytes,
+        UsageMask::DECRYPT,
+    )
+    .expect("Register ML-KEM-768 private");
+    let pub_uid = register_pqc(
+        deps,
+        ObjectType::PublicKey,
+        KmipAlgorithm::MlKem768,
+        KeyFormatType::Raw,
+        ek_bytes,
+        UsageMask::ENCRYPT,
+    )
+    .expect("Register ML-KEM-768 public");
+    (priv_uid, pub_uid)
+}
+
+/// Get a SecretData object's KeyMaterial (the shared secret bytes).
+fn get_shared_secret(deps: &Deps, uid: &str) -> Vec<u8> {
+    use pqctoday_kmip::kmip30::GetRequest;
+    use pqctoday_kmip::ops::get::get;
+    let r = get(
+        deps,
+        GetRequest { uid: uid.to_string(), key_format_type: None, key_wrapping_specification: None },
+        "kem-get-ss",
+    )
+    .expect("Get shared-secret object");
+    r.key_block.key_value
+}
+
+/// WD19 Encapsulate → Get(UID)==shared secret, and the deterministic
+/// ciphertext is reproducible byte-for-byte across two calls with the
+/// same coins. Then Decapsulate(ciphertext) → Get(UID) recovers exactly
+/// that shared secret. All byte-exact.
+#[test]
+fn wd19_encapsulate_decapsulate_byte_exact_against_real_engine() {
+    use pqctoday_kmip::kmip30::{DecapsulateRequest, EncapsulateRequest};
+    use pqctoday_kmip::ops::decapsulate::decapsulate;
+    use pqctoday_kmip::ops::encapsulate::encapsulate;
+
+    let _guard = engine_test_lock();
+    let deps = build_deps_with_real_engine();
+
+    let (priv_uid, pub_uid) = register_ml_kem_768_pair(&deps);
+
+    // FIPS 203 §7.2 deterministic coins `m` (exactly 32 bytes).
+    let coins: Vec<u8> = (0u8..32).collect();
+
+    // ── Encapsulate (deterministic) ─────────────────────────────────────
+    let enc1 = encapsulate(
+        &deps,
+        EncapsulateRequest {
+            uid: pub_uid.clone(),
+            input_key_material: Some(coins.clone()),
+            cryptographic_parameters: None,
+        },
+        "wd19-encap-1",
+    )
+    .expect("Encapsulate with ML-KEM-768 public key");
+    assert_eq!(enc1.data.len(), 1088, "FIPS 203 §7 ML-KEM-768 ciphertext is 1088 bytes");
+    assert_ne!(enc1.uid, pub_uid, "Encapsulate returns a NEW managed object UID");
+
+    let ss1 = get_shared_secret(&deps, &enc1.uid);
+    assert_eq!(ss1.len(), 32, "ML-KEM shared secret is 32 bytes");
+
+    // ── Determinism: same coins → byte-identical ciphertext + secret ────
+    let enc2 = encapsulate(
+        &deps,
+        EncapsulateRequest {
+            uid: pub_uid.clone(),
+            input_key_material: Some(coins.clone()),
+            cryptographic_parameters: None,
+        },
+        "wd19-encap-2",
+    )
+    .expect("second deterministic Encapsulate");
+    assert_eq!(
+        enc1.data, enc2.data,
+        "deterministic encapsulation: same coins MUST yield byte-identical ciphertext"
+    );
+    let ss2 = get_shared_secret(&deps, &enc2.uid);
+    assert_eq!(ss1, ss2, "deterministic encapsulation: same coins MUST yield the same secret");
+
+    // ── Decapsulate(ciphertext) → recovers exactly the encap secret ─────
+    let dec = decapsulate(
+        &deps,
+        DecapsulateRequest {
+            uid: priv_uid.clone(),
+            data: enc1.data.clone(),
+            cryptographic_parameters: None,
+        },
+        "wd19-decap",
+    )
+    .expect("Decapsulate with ML-KEM-768 private key");
+    assert_ne!(dec.uid, priv_uid, "Decapsulate returns a NEW managed object UID");
+    let ss_dec = get_shared_secret(&deps, &dec.uid);
+    assert_eq!(
+        ss_dec, ss1,
+        "Decapsulate MUST recover the exact shared secret the Encapsulate produced (byte-exact)"
+    );
+
+    // Different coins → different ciphertext + secret (sanity).
+    let enc3 = encapsulate(
+        &deps,
+        EncapsulateRequest {
+            uid: pub_uid,
+            input_key_material: Some(vec![0xAB; 32]),
+            cryptographic_parameters: None,
+        },
+        "wd19-encap-3",
+    )
+    .unwrap();
+    assert_ne!(enc3.data, enc1.data, "different coins MUST yield a different ciphertext");
+    assert_ne!(get_shared_secret(&deps, &enc3.uid), ss1, "different coins → different secret");
+
+    let _ = softhsmrustv3::native::session::finalize();
+}
+
+/// WD19 byte-exact proof against the published OASIS KMIP 3.0 PQC interop
+/// vectors when `INTEROP_KAT_DIR` (or the default
+/// `/tmp/kmip-pqc/kmip-3-0-pqc-tests`) is present. SKIPS cleanly when the
+/// transcript directory is absent (like `tests/interop_kat.rs`).
+#[test]
+fn wd19_encapsulate_matches_oasis_transcript_vectors() {
+    use std::path::PathBuf;
+
+    fn interop_dir() -> Option<PathBuf> {
+        let p = PathBuf::from(
+            std::env::var("INTEROP_KAT_DIR")
+                .unwrap_or_else(|_| "/tmp/kmip-pqc/kmip-3-0-pqc-tests".to_string()),
+        );
+        if p.is_dir() {
+            Some(p)
+        } else {
+            None
+        }
+    }
+
+    let dir = match interop_dir() {
+        Some(d) => d,
+        None => {
+            eprintln!(
+                "[WD19] INTEROP_KAT_DIR absent — skipping OASIS transcript byte-exact proof; \
+                 in-engine determinism + KEM-correctness byte-exactness is covered by \
+                 wd19_encapsulate_decapsulate_byte_exact_against_real_engine"
+            );
+            return;
+        }
+    };
+
+    // Hex-decode helper for the transcript ByteString fields.
+    fn hexd(s: &str) -> Vec<u8> {
+        let s: String = s.chars().filter(|c| !c.is_whitespace()).collect();
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
+    // Pull all `<TagName ... value="...">` occurrences for an element. The
+    // OASIS XML uses the tag NAME as the element name (not a name="" attr).
+    fn values(xml: &str, tag: &str) -> Vec<String> {
+        let needle = format!("<{tag} ");
+        let mut out = Vec::new();
+        for seg in xml.split(&needle).skip(1) {
+            // Stay within this element: only look before the next '>'.
+            let elem = seg.split('>').next().unwrap_or(seg);
+            if let Some(vi) = elem.find("value=\"") {
+                let rest = &elem[vi + 7..];
+                if let Some(end) = rest.find('"') {
+                    out.push(rest[..end].to_string());
+                }
+            }
+        }
+        out
+    }
+
+    let stem = "ML-KEM-512-encapsulation-1-30.xml";
+    let path = dir.join(stem);
+    let xml = match std::fs::read_to_string(&path) {
+        Ok(x) => x,
+        Err(_) => {
+            eprintln!("[WD19] {stem} not found in transcript dir — skipping");
+            return;
+        }
+    };
+
+    let _guard = engine_test_lock();
+    let deps = build_deps_with_real_engine();
+
+    // Encapsulation key (the public key the transcript Registers/uses),
+    // the input coins, the expected ciphertext, and the expected shared
+    // secret. Tag names follow the WD19 XML transcript vocabulary.
+    // ML-KEM-512: ek = 800 B (the encapsulation key — NOT the 1632-B dk the
+    // transcript also Registers), coins = 32 B, ct = 768 B.
+    let ek = values(&xml, "KeyMaterial")
+        .into_iter()
+        .map(|s| hexd(&s))
+        .find(|b| b.len() == 800);
+    let coins = values(&xml, "InputKeyMaterial")
+        .into_iter()
+        .map(|s| hexd(&s))
+        .find(|b| b.len() == 32);
+    let expect_ct = values(&xml, "Data")
+        .into_iter()
+        .map(|s| hexd(&s))
+        .find(|b| b.len() == 768);
+    // The 32-byte KeyMaterial in the transcript is the expected shared secret
+    // (returned by the follow-up Get on the encapsulated-secret object).
+    let expect_ss = values(&xml, "KeyMaterial")
+        .into_iter()
+        .map(|s| hexd(&s))
+        .find(|b| b.len() == 32);
+
+    let (ek, coins, expect_ct) = match (ek, coins, expect_ct) {
+        (Some(a), Some(b), Some(c)) => (a, b, c),
+        _ => {
+            eprintln!("[WD19] transcript {stem} missing PublicKey/InputKeyMaterial/Data — skipping");
+            return;
+        }
+    };
+
+    let pub_uid = register_pqc(
+        &deps,
+        ObjectType::PublicKey,
+        KmipAlgorithm::MlKem512,
+        pqctoday_kmip::kmip30::KeyFormatType::Raw,
+        ek,
+        UsageMask::ENCRYPT,
+    )
+    .expect("Register transcript ML-KEM-512 public key");
+
+    let enc = pqctoday_kmip::ops::encapsulate::encapsulate(
+        &deps,
+        pqctoday_kmip::kmip30::EncapsulateRequest {
+            uid: pub_uid,
+            input_key_material: Some(coins),
+            cryptographic_parameters: None,
+        },
+        "wd19-transcript-encap",
+    )
+    .expect("transcript Encapsulate");
+    assert_eq!(enc.data, expect_ct, "ciphertext MUST byte-match the OASIS transcript");
+
+    // The Encapsulate response UID points at a NEW shared-secret object; its
+    // stored material MUST byte-match the transcript's expected shared secret
+    // (what the transcript's follow-up Get returns).
+    if let Some(expect_ss) = expect_ss {
+        let rec = deps.store.get(&enc.uid).unwrap().unwrap();
+        assert_eq!(
+            rec.key_material.as_deref(),
+            Some(&expect_ss[..]),
+            "shared secret MUST byte-match the OASIS transcript"
+        );
+        eprintln!("[WD19] {stem}: Encapsulate ct + shared secret byte-exact vs OASIS transcript");
+    }
+
+    let _ = softhsmrustv3::native::session::finalize();
+}
+
 // Suppress unused-import warning when only some types are referenced in
 // the active test set.
 #[allow(dead_code)]

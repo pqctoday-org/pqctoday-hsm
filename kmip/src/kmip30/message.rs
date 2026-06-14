@@ -289,6 +289,9 @@ pub enum RequestPayload {
     Destroy(super::ops::DestroyRequest),
     Encrypt(super::ops::EncryptRequest),
     Decrypt(super::ops::DecryptRequest),
+    /// KMIP 3.0 WD19 — ML-KEM Encapsulate / Decapsulate.
+    Encapsulate(super::ops::EncapsulateRequest),
+    Decapsulate(super::ops::DecapsulateRequest),
     Sign(super::ops::SignRequest),
     SignatureVerify(super::ops::SignatureVerifyRequest),
     /// P2.2 — §6.1.62 Validate (certificate-chain validation).
@@ -373,6 +376,9 @@ pub enum ResponsePayload {
     Destroy(super::ops::DestroyResponse),
     Encrypt(super::ops::EncryptResponse),
     Decrypt(super::ops::DecryptResponse),
+    /// KMIP 3.0 WD19 — ML-KEM Encapsulate / Decapsulate.
+    Encapsulate(super::ops::EncapsulateResponse),
+    Decapsulate(super::ops::DecapsulateResponse),
     Sign(super::ops::SignResponse),
     SignatureVerify(super::ops::SignatureVerifyResponse),
     /// P2.2 — §6.1.62 Validate.
@@ -436,6 +442,8 @@ impl RequestPayload {
             Self::Destroy(_)          => Operation::Destroy,
             Self::Encrypt(_)          => Operation::Encrypt,
             Self::Decrypt(_)          => Operation::Decrypt,
+            Self::Encapsulate(_)      => Operation::Encapsulate,
+            Self::Decapsulate(_)      => Operation::Decapsulate,
             Self::Sign(_)             => Operation::Sign,
             Self::SignatureVerify(_)  => Operation::SignatureVerify,
             Self::Validate(_)         => Operation::Validate,

@@ -1099,6 +1099,9 @@ fn coverage_map() -> std::collections::HashMap<pqctoday_kmip::kmip30::Operation,
         (Op::Register, "e2e:native_bridge(k9_register_ml_dsa_65_sign_verify_roundtrip)"),
         (Op::Encrypt, "e2e:native_bridge(k9_register_ml_kem_768_encap_decap_roundtrip)"),
         (Op::Decrypt, "e2e:native_bridge(k9_register_ml_kem_768_encap_decap_roundtrip)"),
+        // ── WD19 first-class ML-KEM KEM ops ──
+        (Op::Encapsulate, "e2e:native_bridge(wd19_encapsulate_decapsulate_byte_exact_against_real_engine) + unit:ops::encapsulate"),
+        (Op::Decapsulate, "e2e:native_bridge(wd19_encapsulate_decapsulate_byte_exact_against_real_engine) + unit:ops::decapsulate"),
         (Op::Create, "e2e:native_bridge(k11_digest_persisted_from_real_engine_material)"),
         (Op::GetAttributes, "e2e:native_bridge(k11_digest_persisted_from_real_engine_material)"),
         (Op::MAC, "e2e:native_bridge(k15_hmac_mac_and_verify_route_through_engine)"),
@@ -1146,5 +1149,5 @@ fn coverage_map_covers_every_handled_operation() {
         stale.is_empty(),
         "coverage_map references ops that are not in HANDLED_OPERATIONS: {stale:?}"
     );
-    assert_eq!(handled.len(), 52, "HANDLED_OPERATIONS count changed — review coverage");
+    assert_eq!(handled.len(), 54, "HANDLED_OPERATIONS count changed — review coverage");
 }
