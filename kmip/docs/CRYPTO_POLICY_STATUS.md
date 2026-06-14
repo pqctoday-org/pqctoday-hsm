@@ -18,6 +18,19 @@
 > a v0.1 stub — Phase 7). The §3 gap list below is retained as the historical
 > assessment that motivated the work.
 
+> **UPDATE 2026-06-14 (post-W2 / PR #107 + #109).** Two items above advanced:
+> - **Encrypt mechanism-param *forcing*** is now implemented (W2.1, PR #107):
+>   Encrypt applies `Decision.cp_override`, so a policy can *force* the block
+>   cipher mode / padding, not only gate it. The "remaining/deferred" note above
+>   is superseded.
+> - **KEM was not actually policy-gated until PR #109.** Encapsulate/Decapsulate
+>   previously bypassed `engine.evaluate()` entirely (no p1 decision) — the
+>   "KEM ✅" above was aspirational. They are now routed through the Plane-1
+>   engine (emit a p1 `PolicyDecided`, enforce allow/deny) **and** resolve the
+>   engine handle by PKCS#11 class, so **KEM ✅ is now literally true**.
+>
+> Operator guide: [CRYPTO_AGILITY_CONFIGURATION.md](CRYPTO_AGILITY_CONFIGURATION.md).
+
 ## Goal (target state)
 
 > Enable crypto-agility through **crypto-policy definitions**, such that
