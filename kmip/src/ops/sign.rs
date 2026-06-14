@@ -115,6 +115,15 @@ pub fn sign(deps: &Deps, req: SignRequest, correlation_id: &str) -> Result<SignR
     p_req.state = Some("Active");
     p_req.current_object_algorithm = Some(&stored_algo);
     p_req.target_uid = Some(&req.uid);
+    // P1 — surface the mechanism dimension (hash/padding/PQC flags + canonical
+    // CKM_*) so mechanism/hash policy rules can gate Sign, not just the algorithm.
+    p_req.mechanism = super::helpers::mechanism_params_from_cp(
+        obj.algorithm,
+        crate::kmip30::PkcsOp::SignVerify,
+        req.cryptographic_parameters
+            .as_ref()
+            .or(obj.cryptographic_parameters.as_ref()),
+    );
 
     let mech = match deps.engine.evaluate(&p_req) {
         Decision::Allow { algorithm_override: None, .. } => {
