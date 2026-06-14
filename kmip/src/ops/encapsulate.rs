@@ -90,6 +90,48 @@ pub fn encapsulate(
         ));
     }
 
+    // ── Plane 1: policy gate ────────────────────────────────────────────
+    // Route Encapsulate through the agility engine like Sign / Encrypt so the
+    // policy plane governs ML-KEM operations too — `engine.evaluate` emits the
+    // p1 `PolicyDecided` audit event and enforces allow / deny. Without this,
+    // KEM ops were a blind spot in the crypto-agility layer.
+    let started = OffsetDateTime::now_utc();
+    let empty: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let stored_algo = super::helpers::canonical_name(obj.algorithm);
+    let mut p_req = crate::policy::PolicyRequest::minimal(
+        "Encapsulate",
+        Some(&stored_algo),
+        started,
+        correlation_id,
+        &empty,
+    );
+    p_req.usage_mask = Some(obj.usage_mask);
+    p_req.state = Some("Active");
+    p_req.current_object_algorithm = Some(&stored_algo);
+    p_req.target_uid = Some(&req.uid);
+    match deps.engine.evaluate(&p_req) {
+        crate::policy::Decision::Allow { .. } => {}
+        crate::policy::Decision::Deny { human, .. } => {
+            return Err(fail_err(
+                deps,
+                correlation_id,
+                "Encapsulate",
+                KmipError::permission_denied(human),
+            ));
+        }
+        crate::policy::Decision::RekeyAndProceed { .. } => {
+            return Err(fail_err(
+                deps,
+                correlation_id,
+                "Encapsulate",
+                KmipError::failed(
+                    ResultReason::OperationNotSupported,
+                    "Encapsulate: policy requires rekey, which is not supported inline".to_string(),
+                ),
+            ));
+        }
+    }
+
     let mech = obj.algorithm.to_pkcs11_mech(PkcsOp::Encrypt).ok_or_else(|| {
         KmipError::failed(
             ResultReason::OperationNotSupported,
@@ -103,9 +145,18 @@ pub fn encapsulate(
 
     let (ciphertext, shared_secret) = match deps.engine_session {
         Some(session) => {
-            let handle = softhsmrustv3::native::find_by_cka_id(session, &obj.pkcs11_cka_id)
-                .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Encap:find"))?
-                .ok_or_else(|| KmipError::object_not_found(&req.uid))?;
+            // Resolve the handle by PKCS#11 class: a CreateKeyPair-generated
+            // ML-KEM pair stores BOTH halves under one shared CKA_ID, so a
+            // bare `find_by_cka_id` can return the private half (which has
+            // CKA_ENCAPSULATE=false → CKR_KEY_FUNCTION_NOT_PERMITTED).
+            // Encapsulate needs the PUBLIC key. (Same fix as Get/Sign.)
+            let handle = super::helpers::find_handle_for_object(
+                session,
+                &obj.pkcs11_cka_id,
+                ObjectType::PublicKey,
+            )
+            .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Encap:find"))?
+            .ok_or_else(|| KmipError::object_not_found(&req.uid))?;
             let native_mech = super::helpers::native_kem_mech(obj.algorithm).ok_or_else(|| {
                 KmipError::failed(
                     ResultReason::OperationNotSupported,
