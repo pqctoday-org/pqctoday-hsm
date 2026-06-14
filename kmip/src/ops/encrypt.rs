@@ -127,6 +127,15 @@ pub fn encrypt(deps: &Deps, req: EncryptRequest, correlation_id: &str) -> Result
     p_req.state = Some(state_name(obj.state));
     p_req.current_object_algorithm = Some(&algo);
     p_req.target_uid = Some(&req.uid);
+    // P1/P2 — surface the mechanism dimension (block-cipher mode / padding +
+    // canonical CKM_*) so MechanismParameterConstraint rules can gate Encrypt.
+    p_req.mechanism = super::helpers::mechanism_params_from_cp(
+        obj.algorithm,
+        crate::kmip30::PkcsOp::Encrypt,
+        req.cryptographic_parameters
+            .as_ref()
+            .or(obj.cryptographic_parameters.as_ref()),
+    );
     match deps.engine.evaluate(&p_req) {
         Decision::Allow { .. } => {}
         Decision::Deny { human, .. } => {

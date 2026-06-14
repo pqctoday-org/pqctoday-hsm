@@ -155,6 +155,52 @@ pub enum Rule {
         ops: Vec<String>,
         reason: String,
     },
+
+    // ── Mechanism-dimension gating rules (Pass 2) — crypto-policy gaps plan ──
+    /// `op ∈ ops` AND the request's `Hashing Algorithm` ∉ `hashing_algorithms`
+    /// → Deny. Names are KMIP `Hashing Algorithm` enum names ("SHA-256",
+    /// "SHA-384", "SHA-512", "SHA3-256", …). Closes the hashing-agility gap
+    /// (G1) on the gating side: e.g. forbid SHA-1, or FIPS-only SHA-2/3. A
+    /// request with no hash carried (`mechanism.hashing_algorithm == None`) is
+    /// not gated — irrelevant params are not an error (KMIP §11).
+    HashAlgorithmAllowlist {
+        ops: Vec<String>,
+        hashing_algorithms: Vec<String>,
+        reason: String,
+        #[serde(default)]
+        effective_from: Option<TimeBound>,
+        #[serde(default)]
+        effective_until: Option<TimeBound>,
+    },
+
+    /// Constrain KMIP `CryptographicParameters` per op (G2/G4). Any *present*
+    /// field whose value is not in its allowed set → Deny; an empty/omitted set
+    /// leaves that field unconstrained. `algorithm` (optional) narrows the rule
+    /// to one algorithm. Names are the KMIP enum names: `Block Cipher Mode`
+    /// ("GCM", "CBC", "CCM", …) and `Padding Method` ("OAEP", "PSS", "PKCS1 v1.5",
+    /// …). `require_deterministic` gates the WD19 PQC `Deterministic` flag.
+    MechanismParameterConstraint {
+        ops: Vec<String>,
+        #[serde(default)]
+        algorithm: Option<String>,
+        #[serde(default)]
+        allowed_block_cipher_modes: Vec<String>,
+        #[serde(default)]
+        allowed_padding_methods: Vec<String>,
+        #[serde(default)]
+        require_deterministic: Option<bool>,
+        reason: String,
+    },
+
+    /// Gate the MAC mechanism family (G1, MAC side). `op ∈ ops` AND the
+    /// resolved algorithm ∉ `mac_algorithms` → Deny. Names are KMIP
+    /// CryptographicAlgorithm names ("HMAC-SHA256", "HMAC-SHA384", …). KMAC has
+    /// no KMIP codification → gate it via the `CKM_*` dialect (plan P4).
+    MacMechanismPolicy {
+        ops: Vec<String>,
+        mac_algorithms: Vec<String>,
+        reason: String,
+    },
 }
 
 /// Either the literal string `"always"` or an ISO 8601 date `"YYYY-MM-DD"`.
@@ -504,6 +550,109 @@ impl Rule {
             // denies on its own — compliance tool in Phase 8 reads this
             // variant to map a policy back to its profile name.
             Rule::ComplianceProfileGate { .. } => None,
+
+            // ── Mechanism-dimension gating (crypto-policy gaps plan, P2) ──
+            Rule::HashAlgorithmAllowlist {
+                ops,
+                hashing_algorithms,
+                reason,
+                effective_from,
+                effective_until,
+            } => {
+                if !window_active(effective_from.as_ref(), effective_until.as_ref(), req.ts) {
+                    return None;
+                }
+                if !ops.iter().any(|o| o == req.op) {
+                    return None;
+                }
+                match req.mechanism.hashing_algorithm {
+                    // No hash carried on this request → nothing to gate.
+                    None => None,
+                    Some(code)
+                        if !hashing_algorithms
+                            .iter()
+                            .any(|n| hash_name_to_code(n) == Some(code)) =>
+                    {
+                        Some(GatingDeny {
+                            kmip_reason: DenyReason::PermissionDenied,
+                            human: reason.clone(),
+                        })
+                    }
+                    Some(_) => None,
+                }
+            }
+
+            Rule::MechanismParameterConstraint {
+                ops,
+                algorithm,
+                allowed_block_cipher_modes,
+                allowed_padding_methods,
+                require_deterministic,
+                reason,
+            } => {
+                if !ops.iter().any(|o| o == req.op) {
+                    return None;
+                }
+                if let Some(a) = algorithm {
+                    if resolved_algorithm != Some(a.as_str()) {
+                        return None;
+                    }
+                }
+                let deny = || {
+                    Some(GatingDeny {
+                        kmip_reason: DenyReason::InvalidCryptographicParameters,
+                        human: reason.clone(),
+                    })
+                };
+                // A present field whose value isn't in its (non-empty) allowed
+                // set → Deny. Empty set = unconstrained for that field.
+                if !allowed_block_cipher_modes.is_empty() {
+                    if let Some(mode) = req.mechanism.block_cipher_mode {
+                        if !allowed_block_cipher_modes
+                            .iter()
+                            .any(|n| block_cipher_mode_name_to_code(n) == Some(mode))
+                        {
+                            return deny();
+                        }
+                    }
+                }
+                if !allowed_padding_methods.is_empty() {
+                    if let Some(pad) = req.mechanism.padding_method {
+                        if !allowed_padding_methods
+                            .iter()
+                            .any(|n| padding_method_name_to_code(n) == Some(pad))
+                        {
+                            return deny();
+                        }
+                    }
+                }
+                // require_deterministic = Some(true): the request's PQC
+                // Deterministic flag MUST equal it (fail-closed if absent).
+                if let Some(want) = require_deterministic {
+                    if req.mechanism.deterministic != Some(*want) {
+                        return deny();
+                    }
+                }
+                None
+            }
+
+            Rule::MacMechanismPolicy {
+                ops,
+                mac_algorithms,
+                reason,
+            } => {
+                if !ops.iter().any(|o| o == req.op) {
+                    return None;
+                }
+                match resolved_algorithm {
+                    None => None,
+                    Some(algo) if !mac_algorithms.iter().any(|a| a == algo) => Some(GatingDeny {
+                        kmip_reason: DenyReason::PermissionDenied,
+                        human: reason.clone(),
+                    }),
+                    Some(_) => None,
+                }
+            }
         }
     }
 }
@@ -523,6 +672,55 @@ fn window_active(
     let after_ok = from.map_or(true, |b| b.matches_at_or_after(ts));
     let before_ok = until.map_or(true, |b| b.matches_at_or_before(ts));
     after_ok && before_ok
+}
+
+/// KMIP `Hashing Algorithm` name → enum codepoint. Values verified against
+/// `spec/oasis-kmip-3.0/kmip-spec-3.0-tags-enums.json` (§11). Unknown → `None`
+/// (the loader rejects unknown names up-front; this is defence in depth).
+fn hash_name_to_code(name: &str) -> Option<u32> {
+    Some(match name {
+        "SHA-1" => 0x04,
+        "SHA-224" => 0x05,
+        "SHA-256" => 0x06,
+        "SHA-384" => 0x07,
+        "SHA-512" => 0x08,
+        "SHA-512/224" => 0x0c,
+        "SHA-512/256" => 0x0d,
+        "SHA3-224" => 0x0e,
+        "SHA3-256" => 0x0f,
+        "SHA3-384" => 0x10,
+        "SHA3-512" => 0x11,
+        _ => return None,
+    })
+}
+
+/// KMIP `Block Cipher Mode` name → enum codepoint (spec §11, verified).
+fn block_cipher_mode_name_to_code(name: &str) -> Option<u32> {
+    Some(match name {
+        "CBC" => 0x01,
+        "ECB" => 0x02,
+        "CFB" => 0x04,
+        "OFB" => 0x05,
+        "CTR" => 0x06,
+        "CMAC" => 0x07,
+        "CCM" => 0x08,
+        "GCM" => 0x09,
+        "XTS" => 0x0b,
+        _ => return None,
+    })
+}
+
+/// KMIP `Padding Method` name → enum codepoint (spec §11, verified).
+fn padding_method_name_to_code(name: &str) -> Option<u32> {
+    Some(match name {
+        "None" => 0x01,
+        "OAEP" => 0x02,
+        "PKCS5" => 0x03,
+        "PKCS1 v1.5" => 0x08,
+        "X9.31" => 0x09,
+        "PSS" => 0x0a,
+        _ => return None,
+    })
 }
 
 /// `true` if every `flag` is present in `mask`. Unknown flag names are
@@ -583,6 +781,97 @@ mod tests {
 
     fn req<'a>(op: &'a str, algo: Option<&'a str>, attrs: &'a HashMap<String, String>) -> PolicyRequest<'a> {
         PolicyRequest::minimal(op, algo, OffsetDateTime::UNIX_EPOCH, "corr-1", attrs)
+    }
+
+    // ── P2: mechanism-dimension gating rules ──────────────────────────────
+    #[test]
+    fn hash_allowlist_denies_disallowed_hash() {
+        let attrs = HashMap::new();
+        let rule = Rule::HashAlgorithmAllowlist {
+            ops: vec!["Sign".into()],
+            hashing_algorithms: vec!["SHA-256".into(), "SHA-384".into()],
+            reason: "approved hashes only".into(),
+            effective_from: None,
+            effective_until: None,
+        };
+        // SHA-1 (0x04) → deny.
+        let mut r = req("Sign", Some("RSA"), &attrs);
+        r.mechanism.hashing_algorithm = Some(0x04);
+        assert!(rule.check_pass2(&r, Some("RSA")).is_some());
+        // SHA-256 (0x06) → allow.
+        let mut r2 = req("Sign", Some("RSA"), &attrs);
+        r2.mechanism.hashing_algorithm = Some(0x06);
+        assert!(rule.check_pass2(&r2, Some("RSA")).is_none());
+        // No hash carried → not gated (irrelevant param).
+        assert!(rule.check_pass2(&req("Sign", Some("RSA"), &attrs), Some("RSA")).is_none());
+        // Different op → not gated.
+        let mut r4 = req("Encrypt", Some("RSA"), &attrs);
+        r4.mechanism.hashing_algorithm = Some(0x04);
+        assert!(rule.check_pass2(&r4, Some("RSA")).is_none());
+    }
+
+    #[test]
+    fn mechanism_param_constraint_modes_and_padding() {
+        let attrs = HashMap::new();
+        let rule = Rule::MechanismParameterConstraint {
+            ops: vec!["Encrypt".into()],
+            algorithm: Some("AES".into()),
+            allowed_block_cipher_modes: vec!["GCM".into(), "CCM".into()],
+            allowed_padding_methods: vec![],
+            require_deterministic: None,
+            reason: "AEAD only".into(),
+        };
+        // CBC (0x01) → deny.
+        let mut r = req("Encrypt", Some("AES"), &attrs);
+        r.mechanism.block_cipher_mode = Some(0x01);
+        assert!(rule.check_pass2(&r, Some("AES")).is_some());
+        // GCM (0x09) → allow.
+        let mut r2 = req("Encrypt", Some("AES"), &attrs);
+        r2.mechanism.block_cipher_mode = Some(0x09);
+        assert!(rule.check_pass2(&r2, Some("AES")).is_none());
+        // Rule scoped to AES → RSA request not gated.
+        let mut r3 = req("Encrypt", Some("RSA"), &attrs);
+        r3.mechanism.block_cipher_mode = Some(0x01);
+        assert!(rule.check_pass2(&r3, Some("RSA")).is_none());
+    }
+
+    #[test]
+    fn mechanism_param_constraint_requires_deterministic() {
+        let attrs = HashMap::new();
+        let rule = Rule::MechanismParameterConstraint {
+            ops: vec!["Sign".into()],
+            algorithm: None,
+            allowed_block_cipher_modes: vec![],
+            allowed_padding_methods: vec![],
+            require_deterministic: Some(true),
+            reason: "deterministic signing required".into(),
+        };
+        // deterministic=true → allow.
+        let mut r = req("Sign", Some("ML-DSA-65"), &attrs);
+        r.mechanism.deterministic = Some(true);
+        assert!(rule.check_pass2(&r, Some("ML-DSA-65")).is_none());
+        // absent → deny (fail-closed).
+        assert!(rule.check_pass2(&req("Sign", Some("ML-DSA-65"), &attrs), Some("ML-DSA-65")).is_some());
+        // deterministic=false → deny.
+        let mut r3 = req("Sign", Some("ML-DSA-65"), &attrs);
+        r3.mechanism.deterministic = Some(false);
+        assert!(rule.check_pass2(&r3, Some("ML-DSA-65")).is_some());
+    }
+
+    #[test]
+    fn mac_mechanism_policy_gates_family() {
+        let attrs = HashMap::new();
+        let rule = Rule::MacMechanismPolicy {
+            ops: vec!["MAC".into()],
+            mac_algorithms: vec!["HMAC-SHA256".into(), "HMAC-SHA384".into()],
+            reason: "approved MACs only".into(),
+        };
+        assert!(rule
+            .check_pass2(&req("MAC", Some("HMAC-SHA256"), &attrs), Some("HMAC-SHA256"))
+            .is_none());
+        assert!(rule
+            .check_pass2(&req("MAC", Some("HMAC-MD5"), &attrs), Some("HMAC-MD5"))
+            .is_some());
     }
 
     #[test]
