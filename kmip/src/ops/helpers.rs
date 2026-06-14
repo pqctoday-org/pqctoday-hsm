@@ -575,6 +575,34 @@ pub fn mechanism_params_from_cp(
     }
 }
 
+/// P3 (crypto-policy gaps plan) — merge a policy [`crate::policy::CpOverride`]
+/// over the request's effective `CryptographicParameters`. Each forced field
+/// (hash / block-cipher mode / padding / deterministic) overrides the base; the
+/// rest are preserved. Lets a policy transparently *mandate* a mechanism
+/// (e.g. AES-GCM, RSA-OAEP-SHA256, deterministic ML-DSA) before the op resolves
+/// the PKCS#11 mechanism. Codepoints are KMIP enum values (no re-encoding).
+pub fn merge_cp_override(
+    base: Option<&crate::kmip30::CryptographicParameters>,
+    ov: &crate::policy::CpOverride,
+) -> crate::kmip30::CryptographicParameters {
+    let mut cp = base.cloned().unwrap_or_default();
+    if let Some(h) = ov.hashing_algorithm {
+        if let Some(ha) = crate::kmip30::HashingAlgorithm::from_wire_value(h) {
+            cp.hashing_algorithm = Some(ha);
+        }
+    }
+    if let Some(m) = ov.block_cipher_mode {
+        cp.block_cipher_mode = Some(m);
+    }
+    if let Some(p) = ov.padding_method {
+        cp.padding_method = Some(p);
+    }
+    if let Some(d) = ov.deterministic {
+        cp.deterministic = Some(d);
+    }
+    cp
+}
+
 /// K18 — extract the RSA-PSS salt length to pass to
 /// `native::sign_with_pss_salt` / `verify_with_pss_salt`.
 ///

@@ -23,7 +23,7 @@
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
-use super::{decision::DenyReason, request::PolicyRequest};
+use super::{decision::CpOverride, decision::DenyReason, request::PolicyRequest};
 
 /// One row in the policy file's `rules:` list. The `#[serde(tag = "type")]`
 /// pattern matches the YAML shape exactly (see `policies/*.yaml`).
@@ -201,6 +201,30 @@ pub enum Rule {
         mac_algorithms: Vec<String>,
         reason: String,
     },
+
+    // ── Mechanism-dimension FORCING rule (plan P3) ────────────────────────
+    /// Force mechanism parameters (the forcing counterpart to
+    /// `MechanismParameterConstraint`). When `op ∈ ops` (and the resolved
+    /// `algorithm` matches, if set), supply hash / block-cipher mode / padding
+    /// / deterministic — the dispatcher merges them into the effective
+    /// `CryptographicParameters`, so a policy can *mandate* AES-GCM,
+    /// RSA-OAEP-SHA256, or deterministic ML-DSA transparently. Names are the
+    /// KMIP enum names (verified maps). Emits a [`super::CpOverride`] from
+    /// `resolve_cp`; never denies.
+    MechanismParameterDefault {
+        ops: Vec<String>,
+        #[serde(default)]
+        algorithm: Option<String>,
+        #[serde(default)]
+        hashing_algorithm: Option<String>,
+        #[serde(default)]
+        block_cipher_mode: Option<String>,
+        #[serde(default)]
+        padding_method: Option<String>,
+        #[serde(default)]
+        deterministic: Option<bool>,
+        reason: String,
+    },
 }
 
 /// Either the literal string `"always"` or an ISO 8601 date `"YYYY-MM-DD"`.
@@ -346,6 +370,42 @@ impl Rule {
         }
     }
 
+    /// Pass 1b (plan P3): resolve forced mechanism parameters. Returns the
+    /// `CpOverride` this rule mandates for the request, or `None`. Only
+    /// `MechanismParameterDefault` produces one; the engine merges across rules
+    /// (last-match-wins per field) and attaches the result to `Allow`.
+    pub fn resolve_cp(
+        &self,
+        req: &PolicyRequest,
+        resolved_algorithm: Option<&str>,
+    ) -> Option<CpOverride> {
+        match self {
+            Rule::MechanismParameterDefault {
+                ops,
+                algorithm,
+                hashing_algorithm,
+                block_cipher_mode,
+                padding_method,
+                deterministic,
+                ..
+            } if ops.iter().any(|o| o == req.op)
+                && algorithm
+                    .as_deref()
+                    .map_or(true, |a| resolved_algorithm == Some(a)) =>
+            {
+                Some(CpOverride {
+                    hashing_algorithm: hashing_algorithm.as_deref().and_then(hash_name_to_code),
+                    block_cipher_mode: block_cipher_mode
+                        .as_deref()
+                        .and_then(block_cipher_mode_name_to_code),
+                    padding_method: padding_method.as_deref().and_then(padding_method_name_to_code),
+                    deterministic: *deterministic,
+                })
+            }
+            _ => None,
+        }
+    }
+
     /// Pass 2: gating evaluation against the resolved request.
     /// `resolved_algorithm` is what came out of Pass 1.
     pub fn check_pass2(
@@ -354,7 +414,9 @@ impl Rule {
         resolved_algorithm: Option<&str>,
     ) -> Option<GatingDeny> {
         match self {
-            Rule::AlgorithmDefault { .. } | Rule::AlgorithmSubstitution { .. } => None,
+            Rule::AlgorithmDefault { .. }
+            | Rule::AlgorithmSubstitution { .. }
+            | Rule::MechanismParameterDefault { .. } => None,
 
             Rule::AlgorithmAllowlist {
                 ops,
@@ -872,6 +934,58 @@ mod tests {
         assert!(rule
             .check_pass2(&req("MAC", Some("HMAC-MD5"), &attrs), Some("HMAC-MD5"))
             .is_some());
+    }
+
+    #[test]
+    fn mechanism_param_default_forces_deterministic() {
+        let attrs = HashMap::new();
+        let rule = Rule::MechanismParameterDefault {
+            ops: vec!["Sign".into()],
+            algorithm: None,
+            hashing_algorithm: None,
+            block_cipher_mode: None,
+            padding_method: None,
+            deterministic: Some(true),
+            reason: "force deterministic".into(),
+        };
+        let cp = rule
+            .resolve_cp(&req("Sign", Some("ML-DSA-65"), &attrs), Some("ML-DSA-65"))
+            .expect("forcing rule fires");
+        assert_eq!(cp.deterministic, Some(true));
+        // Different op → no forcing.
+        assert!(rule
+            .resolve_cp(&req("Encrypt", Some("AES"), &attrs), Some("AES"))
+            .is_none());
+        // Gating rules never produce a CpOverride.
+        assert!(Rule::MacMechanismPolicy {
+            ops: vec!["MAC".into()],
+            mac_algorithms: vec![],
+            reason: "x".into(),
+        }
+        .resolve_cp(&req("MAC", Some("HMAC-SHA256"), &attrs), Some("HMAC-SHA256"))
+        .is_none());
+    }
+
+    #[test]
+    fn mechanism_param_default_forces_aes_gcm_by_name() {
+        let attrs = HashMap::new();
+        let rule = Rule::MechanismParameterDefault {
+            ops: vec!["Encrypt".into()],
+            algorithm: Some("AES".into()),
+            hashing_algorithm: None,
+            block_cipher_mode: Some("GCM".into()),
+            padding_method: None,
+            deterministic: None,
+            reason: "force AEAD".into(),
+        };
+        let cp = rule
+            .resolve_cp(&req("Encrypt", Some("AES"), &attrs), Some("AES"))
+            .unwrap();
+        assert_eq!(cp.block_cipher_mode, Some(0x09)); // KMIP GCM codepoint
+        // Algorithm-scoped: RSA Encrypt is untouched.
+        assert!(rule
+            .resolve_cp(&req("Encrypt", Some("RSA"), &attrs), Some("RSA"))
+            .is_none());
     }
 
     #[test]

@@ -91,6 +91,7 @@ impl PolicyAudit {
             Decision::Allow {
                 algorithm_override,
                 substituted_by_rule,
+                cp_override: _,
             } => DecisionSummary::Allow {
                 algorithm_override: algorithm_override.clone(),
                 substituted_by_rule: *substituted_by_rule,
@@ -231,6 +232,7 @@ mod tests {
             &Decision::Allow {
                 algorithm_override: None,
                 substituted_by_rule: None,
+                cp_override: None,
             },
             "sha256:fp",
         );

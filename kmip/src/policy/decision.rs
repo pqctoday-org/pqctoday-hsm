@@ -37,6 +37,50 @@ pub enum DenyReason {
     PolicyNotLoaded,
 }
 
+/// Mechanism parameters a policy *forces* onto a request (plan P3). The
+/// dispatcher merges any `Some(_)` field into the effective KMIP
+/// `CryptographicParameters` before resolving the PKCS#11 mechanism — so a
+/// policy can transparently mandate e.g. AES-GCM, RSA-OAEP, or deterministic
+/// ML-DSA with zero application change. Values are KMIP enum codepoints
+/// (HashingAlgorithm / BlockCipherMode / PaddingMethod); `deterministic` is the
+/// WD19 PQC flag. Parallel to `Decision::Allow::algorithm_override`, but for
+/// the mechanism dimension.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CpOverride {
+    pub hashing_algorithm: Option<u32>,
+    pub block_cipher_mode: Option<u32>,
+    pub padding_method: Option<u32>,
+    pub deterministic: Option<bool>,
+}
+
+impl CpOverride {
+    /// `true` when nothing is forced (used to keep `Allow.cp_override == None`).
+    pub fn is_empty(&self) -> bool {
+        self.hashing_algorithm.is_none()
+            && self.block_cipher_mode.is_none()
+            && self.padding_method.is_none()
+            && self.deterministic.is_none()
+    }
+
+    /// Merge `other` over `self`, per field, last-match-wins (mirrors the
+    /// algorithm-resolution semantics: a later forcing rule overrides an
+    /// earlier one for the same field; untouched fields are preserved).
+    pub fn merge(&mut self, other: CpOverride) {
+        if other.hashing_algorithm.is_some() {
+            self.hashing_algorithm = other.hashing_algorithm;
+        }
+        if other.block_cipher_mode.is_some() {
+            self.block_cipher_mode = other.block_cipher_mode;
+        }
+        if other.padding_method.is_some() {
+            self.padding_method = other.padding_method;
+        }
+        if other.deterministic.is_some() {
+            self.deterministic = other.deterministic;
+        }
+    }
+}
+
 /// Outcome of [`super::Engine::evaluate`].
 ///
 /// Three variants — the third is the agility engine's signature capability
@@ -59,6 +103,9 @@ pub enum Decision {
         /// Index of the rule that supplied the override (1-based) — `None`
         /// when no substitution fired.
         substituted_by_rule: Option<usize>,
+        /// Mechanism parameters the policy forces (hash / mode / padding /
+        /// deterministic). `None` when no forcing rule fired (plan P3).
+        cp_override: Option<CpOverride>,
     },
 
     /// Policy says the request should proceed under a different algorithm
@@ -102,6 +149,7 @@ impl Decision {
         Decision::Allow {
             algorithm_override: None,
             substituted_by_rule: None,
+            cp_override: None,
         }
     }
 
@@ -131,6 +179,18 @@ impl Decision {
             _ => None,
         }
     }
+
+    /// Forced mechanism parameters the dispatcher should merge into the
+    /// effective `CryptographicParameters` (plan P3), or `None`.
+    pub fn cp_override(&self) -> Option<&CpOverride> {
+        match self {
+            Decision::Allow {
+                cp_override: Some(ov),
+                ..
+            } => Some(ov),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -150,6 +210,7 @@ mod tests {
         let d = Decision::Allow {
             algorithm_override: Some("ML-KEM-1024".into()),
             substituted_by_rule: Some(3),
+            cp_override: None,
         };
         assert_eq!(d.algorithm_override(), Some("ML-KEM-1024"));
     }
