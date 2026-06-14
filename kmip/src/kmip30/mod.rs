@@ -27,6 +27,8 @@ pub use ops::{
     CreateKeyPairRequest, CreateKeyPairResponse,
     CreateRequest, CreateResponse,
     DecryptRequest, DecryptResponse,
+    EncapsulateRequest, EncapsulateResponse,
+    DecapsulateRequest, DecapsulateResponse,
     DeleteAttributeRequest, DeleteAttributeResponse,
     DestroyRequest, DestroyResponse,
     EncryptRequest, EncryptResponse,

@@ -87,6 +87,13 @@ pub enum Operation {
     CreateCredential = 0x3f,
     Deactivate       = 0x40,
 
+    // ── KMIP 3.0 WD19 (PQC Updates) — KEM ops ─────────────────────────────
+    // ML-KEM encapsulation / decapsulation as first-class operations.
+    // Codepoints confirmed from the WD19 Operation enum (right after
+    // Deactivate = 0x40).
+    Encapsulate      = 0x41,
+    Decapsulate      = 0x42,
+
     // ── KMIP 3.0 §11 — Advertised-only ops ────────────────────────────────
     // Operations the OASIS Baseline corpus requires the server to
     // enumerate in `Query` (per §4.1.1 items 15-16 superset rule) but
@@ -183,6 +190,8 @@ impl Operation {
             0x3e => Some(Self::CreateUser),
             0x3f => Some(Self::CreateCredential),
             0x40 => Some(Self::Deactivate),
+            0x41 => Some(Self::Encapsulate),
+            0x42 => Some(Self::Decapsulate),
             0x04 => Some(Self::ReKey),
             0x07 => Some(Self::ReCertify),
             0x10 => Some(Self::ObtainLease),
@@ -626,6 +635,61 @@ pub struct DecryptResponse {
     /// For classical decrypt: the plaintext. For ML-KEM decapsulation: the
     /// derived shared secret.
     pub data: Vec<u8>,
+}
+
+// ── Encapsulate / Decapsulate (KMIP 3.0 WD19, PQC Updates) ──────────────────
+//
+// First-class ML-KEM KEM operations. Unlike the Encrypt/Decrypt overload
+// (which returns the shared secret inline), these create a NEW managed
+// Secret-Data object holding the derived shared secret and return its UID;
+// a subsequent Get on that UID retrieves the 32-byte shared secret.
+
+/// `Encapsulate` request (KMIP 3.0 WD19) — the public/encapsulation key
+/// UID plus, inside `CryptographicParameters`, the optional 32-byte
+/// `InputKeyMaterial` (the FIPS 203 §7.2 coins `m`). When the coins are
+/// present, encapsulation is deterministic (interop / KAT reproducibility);
+/// when absent, the server samples `m` from its RNG.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct EncapsulateRequest {
+    pub uid: String,
+    /// `InputKeyMaterial` (0x4201C7, ByteString) — the 32-byte coins `m`.
+    /// Nested inside `CryptographicParameters` on the wire; surfaced here
+    /// hoisted for the handler's convenience.
+    pub input_key_material: Option<Vec<u8>>,
+    /// Per-op `CryptographicParameters` (carries the nested
+    /// `InputKeyMaterial`). Retained so the handler can inspect any other
+    /// KEM parameters the request supplied.
+    pub cryptographic_parameters: Option<CryptographicParameters>,
+}
+
+/// `Encapsulate` response (KMIP 3.0 WD19) — the UID of the NEW managed
+/// shared-secret object the server created, plus the ciphertext (the
+/// encapsulation) in `Data`. A subsequent `Get` on `uid` returns the
+/// shared secret as KeyMaterial.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct EncapsulateResponse {
+    pub uid: String,
+    /// `Data` (0x4200C2, ByteString) — the ML-KEM ciphertext / encapsulation.
+    pub data: Vec<u8>,
+}
+
+/// `Decapsulate` request (KMIP 3.0 WD19) — the private/decapsulation key
+/// UID plus the ciphertext (the encapsulation) in `Data`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DecapsulateRequest {
+    pub uid: String,
+    /// `Data` (0x4200C2, ByteString) — the ML-KEM ciphertext to decapsulate.
+    pub data: Vec<u8>,
+    /// Per-op `CryptographicParameters` (OPTIONAL).
+    pub cryptographic_parameters: Option<CryptographicParameters>,
+}
+
+/// `Decapsulate` response (KMIP 3.0 WD19) — the UID of the NEW managed
+/// shared-secret object the server created. A subsequent `Get` on `uid`
+/// returns the recovered shared secret as KeyMaterial.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DecapsulateResponse {
+    pub uid: String,
 }
 
 // ── Sign / SignatureVerify ─────────────────────────────────────────────────
@@ -1857,17 +1921,24 @@ mod tests {
 
     /// K3 — every published KMIP 3.0 Operation codepoint (0x01–0x40,
     /// 64 total per `kmip-spec-3.0-tags-enums.json`) decodes, and
-    /// every decode round-trips back to the same wire value. Nothing
-    /// outside that range decodes.
+    /// every decode round-trips back to the same wire value. The WD19
+    /// PQC-Updates KEM ops (`Encapsulate = 0x41`, `Decapsulate = 0x42`)
+    /// also decode and round-trip; the first unknown codepoint is 0x43.
     #[test]
     fn operation_decodes_all_64_published_codepoints() {
+        // Published KMIP 3.0 range.
         for v in 0x01u32..=0x40 {
             let op = Operation::from_wire_value(v)
                 .unwrap_or_else(|| panic!("codepoint {v:#04x} must decode"));
             assert_eq!(op.to_wire_value(), v, "round-trip for {v:#04x}");
         }
+        // WD19 PQC-Updates KEM ops.
+        assert_eq!(Operation::from_wire_value(0x41), Some(Operation::Encapsulate));
+        assert_eq!(Operation::from_wire_value(0x42), Some(Operation::Decapsulate));
+        assert_eq!(Operation::Encapsulate.to_wire_value(), 0x41);
+        assert_eq!(Operation::Decapsulate.to_wire_value(), 0x42);
         assert_eq!(Operation::from_wire_value(0x00), None);
-        assert_eq!(Operation::from_wire_value(0x41), None);
+        assert_eq!(Operation::from_wire_value(0x43), None);
     }
 
     /// K20 — `Derivation Method` Enumeration codepoints (§11.15

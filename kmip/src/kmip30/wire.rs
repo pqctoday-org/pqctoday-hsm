@@ -834,6 +834,8 @@ fn decode_request_payload(op: Operation, frame: &TtlvFrame) -> Result<RequestPay
         Operation::Destroy          => RequestPayload::Destroy(decode_destroy_req(children)?),
         Operation::Encrypt          => RequestPayload::Encrypt(decode_encrypt_req(children)?),
         Operation::Decrypt          => RequestPayload::Decrypt(decode_decrypt_req(children)?),
+        Operation::Encapsulate      => RequestPayload::Encapsulate(decode_encapsulate_req(children)?),
+        Operation::Decapsulate      => RequestPayload::Decapsulate(decode_decapsulate_req(children)?),
         Operation::Sign             => RequestPayload::Sign(decode_sign_req(children)?),
         Operation::SignatureVerify  => RequestPayload::SignatureVerify(decode_sigverify_req(children)?),
         // P2.2 — §6.1.62 Validate (certificate-chain validation).
@@ -926,6 +928,8 @@ fn response_payload_to_frame(payload: &ResponsePayload) -> TtlvFrame {
         ResponsePayload::Destroy(r)          => encode_destroy_resp(r),
         ResponsePayload::Encrypt(r)          => encode_encrypt_resp(r),
         ResponsePayload::Decrypt(r)          => encode_decrypt_resp(r),
+        ResponsePayload::Encapsulate(r)      => encode_encapsulate_resp(r),
+        ResponsePayload::Decapsulate(r)      => encode_decapsulate_resp(r),
         ResponsePayload::Sign(r)             => encode_sign_resp(r),
         ResponsePayload::SignatureVerify(r)  => encode_sigverify_resp(r),
         ResponsePayload::Validate(r)         => encode_validate_resp(r),
@@ -1577,6 +1581,78 @@ fn encode_decrypt_resp(r: &DecryptResponse) -> Vec<TtlvFrame> {
         TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString(r.uid.clone())),
         TtlvFrame::new(Tag(tags::Data), Value::ByteString(r.data.clone())),
     ]
+}
+
+// ── Encapsulate / Decapsulate (KMIP 3.0 WD19) ───────────────────────────────
+
+/// Decode an `Encapsulate` request payload (KMIP 3.0 WD19):
+/// `{ UniqueIdentifier, CryptographicParameters? }` where the optional
+/// `CryptographicParameters` Structure nests the 32-byte
+/// `InputKeyMaterial` (0x4201C7, the deterministic coins `m`).
+fn decode_encapsulate_req(children: &[TtlvFrame]) -> Result<EncapsulateRequest, WireError> {
+    let uid = required_uid(children)?;
+    let mut cp = None;
+    let mut input_key_material = None;
+    for c in children {
+        match c.tag.0 {
+            tags::CryptographicParameters => {
+                cp = Some(decode_cryptographic_parameters(c)?);
+                // InputKeyMaterial rides inside CryptographicParameters
+                // per the WD19 transcript; it is not a field of the
+                // CryptographicParameters struct, so pull it out here.
+                for cc in expect_structure(c, "Cryptographic Parameters")? {
+                    if cc.tag.0 == tags::InputKeyMaterial {
+                        if let Value::ByteString(b) = &cc.value {
+                            input_key_material = Some(b.clone());
+                        }
+                    }
+                }
+            }
+            // Tolerate a top-level InputKeyMaterial too (defensive).
+            tags::InputKeyMaterial => {
+                if let Value::ByteString(b) = &c.value {
+                    input_key_material = Some(b.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(EncapsulateRequest { uid, input_key_material, cryptographic_parameters: cp })
+}
+
+/// Encode an `Encapsulate` response payload (KMIP 3.0 WD19):
+/// `{ UniqueIdentifier (new shared-secret object), Data (ciphertext) }`.
+fn encode_encapsulate_resp(r: &EncapsulateResponse) -> Vec<TtlvFrame> {
+    vec![
+        TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString(r.uid.clone())),
+        TtlvFrame::new(Tag(tags::Data), Value::ByteString(r.data.clone())),
+    ]
+}
+
+/// Decode a `Decapsulate` request payload (KMIP 3.0 WD19):
+/// `{ UniqueIdentifier, Data (ciphertext), CryptographicParameters? }`.
+fn decode_decapsulate_req(children: &[TtlvFrame]) -> Result<DecapsulateRequest, WireError> {
+    let uid = required_uid(children)?;
+    let mut data = Vec::new();
+    let mut cp = None;
+    for c in children {
+        match c.tag.0 {
+            tags::Data => {
+                if let Value::ByteString(b) = &c.value { data = b.clone(); }
+            }
+            tags::CryptographicParameters => {
+                cp = Some(decode_cryptographic_parameters(c)?);
+            }
+            _ => {}
+        }
+    }
+    Ok(DecapsulateRequest { uid, data, cryptographic_parameters: cp })
+}
+
+/// Encode a `Decapsulate` response payload (KMIP 3.0 WD19):
+/// `{ UniqueIdentifier (new shared-secret object) }`.
+fn encode_decapsulate_resp(r: &DecapsulateResponse) -> Vec<TtlvFrame> {
+    vec![TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString(r.uid.clone()))]
 }
 
 fn decode_sign_req(children: &[TtlvFrame]) -> Result<SignRequest, WireError> {

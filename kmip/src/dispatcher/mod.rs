@@ -36,7 +36,7 @@ use crate::ops::{
     attribute_mutate::{add_attribute, adjust_attribute, delete_attribute, modify_attribute, set_attribute},
     create::create, create_key_pair::create_key_pair, decrypt::decrypt,
     derive_key::derive_key,
-    destroy::destroy, encrypt::encrypt, get::get,
+    destroy::destroy, encrypt::encrypt, encapsulate::encapsulate, decapsulate::decapsulate, get::get,
     get_attribute_list::get_attribute_list, get_attributes::get_attributes,
     interop::interop,
     lifecycle_and_protocol::{archive, check, deactivate, discover_versions, obliterate, ping, recover},
@@ -308,6 +308,8 @@ pub const HANDLED_OPERATIONS: &[crate::kmip30::Operation] = {
         Op::SetAttribute, Op::AdjustAttribute,
         Op::Locate, Op::Activate, Op::Revoke, Op::Destroy,
         Op::Encrypt, Op::Decrypt, Op::Sign, Op::SignatureVerify,
+        // KMIP 3.0 WD19 — first-class ML-KEM Encapsulate / Decapsulate.
+        Op::Encapsulate, Op::Decapsulate,
         Op::Interop, Op::Register, Op::Import, Op::Export,
         Op::Deactivate, Op::Check, Op::Archive, Op::Recover,
         Op::Obliterate, Op::DiscoverVersions, Op::Ping,
@@ -442,6 +444,8 @@ fn substitute_id_placeholder(
         RequestPayload::Destroy(r)         => fix(&mut r.uid, &live),
         RequestPayload::Encrypt(r)         => fix(&mut r.uid, &live),
         RequestPayload::Decrypt(r)         => fix(&mut r.uid, &live),
+        RequestPayload::Encapsulate(r)     => fix(&mut r.uid, &live),
+        RequestPayload::Decapsulate(r)     => fix(&mut r.uid, &live),
         RequestPayload::Sign(r)            => fix(&mut r.uid, &live),
         RequestPayload::SignatureVerify(r) => fix(&mut r.uid, &live),
         // P2.2 — Validate carries a repeatable UID list (§6.1.62).
@@ -535,6 +539,12 @@ fn handle_payload(
         RequestPayload::Destroy(r) => ResponsePayload::Destroy(destroy(deps, r, correlation_id)?),
         RequestPayload::Encrypt(r) => ResponsePayload::Encrypt(encrypt(deps, r, correlation_id)?),
         RequestPayload::Decrypt(r) => ResponsePayload::Decrypt(decrypt(deps, r, correlation_id)?),
+        RequestPayload::Encapsulate(r) => {
+            ResponsePayload::Encapsulate(encapsulate(deps, r, correlation_id)?)
+        }
+        RequestPayload::Decapsulate(r) => {
+            ResponsePayload::Decapsulate(decapsulate(deps, r, correlation_id)?)
+        }
         RequestPayload::Sign(r) => ResponsePayload::Sign(sign(deps, r, correlation_id)?),
         RequestPayload::SignatureVerify(r) => {
             ResponsePayload::SignatureVerify(signature_verify(deps, r, correlation_id)?)
