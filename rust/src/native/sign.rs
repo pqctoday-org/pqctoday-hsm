@@ -221,18 +221,22 @@ pub fn sign_pqc(
     if !check_can_sign(key_handle, CKA_SIGN) {
         return Err(CKR_KEY_FUNCTION_NOT_PERMITTED);
     }
+    use rand::RngCore;
     let sk = get_object_value(key_handle).ok_or(CKR_ARGUMENTS_BAD)?;
     let ps = get_object_param_set(key_handle);
     match mechanism {
         m if m == CKM_ML_DSA || is_prehash_ml_dsa(m) => {
-            let mut rnd = [0u8; 32];
-            if !deterministic {
-                let r = random.ok_or(CKR_ARGUMENTS_BAD)?;
-                if r.len() != 32 {
-                    return Err(CKR_ARGUMENTS_BAD);
-                }
-                rnd.copy_from_slice(r);
-            }
+            // rnd: deterministic ⇒ 0^32; hedged ⇒ explicit <Random> (must be
+            // 32 bytes) or, when absent, drawn from the OS RNG (normal hedge).
+            let rnd: [u8; 32] = if deterministic {
+                [0u8; 32]
+            } else if let Some(r) = random {
+                r.try_into().map_err(|_| CKR_ARGUMENTS_BAD)?
+            } else {
+                let mut b = [0u8; 32];
+                rand::rngs::OsRng.fill_bytes(&mut b);
+                b
+            };
             if external_mu {
                 sign_ml_dsa_external_mu(ps, &sk, data, rnd)
             } else if internal {
@@ -242,11 +246,18 @@ pub fn sign_pqc(
             }
         }
         m if m == CKM_SLH_DSA || is_prehash_slh_dsa(m) => {
-            let addrnd = if deterministic {
+            // addrnd: deterministic ⇒ None (PK.seed); hedged ⇒ explicit
+            // <Random> or, when absent, n OS-random bytes (normal hedge).
+            let addrnd_buf: Option<Vec<u8>> = if deterministic {
                 None
+            } else if let Some(r) = random {
+                Some(r.to_vec())
             } else {
-                Some(random.ok_or(CKR_ARGUMENTS_BAD)?)
+                let mut b = vec![0u8; slh_dsa_n(ps)];
+                rand::rngs::OsRng.fill_bytes(&mut b);
+                Some(b)
             };
+            let addrnd = addrnd_buf.as_deref();
             if internal {
                 sign_slh_dsa_internal(ps, &sk, data, addrnd)
             } else {
@@ -254,6 +265,18 @@ pub fn sign_pqc(
             }
         }
         _ => Err(CKR_MECHANISM_INVALID),
+    }
+}
+
+/// SLH-DSA security parameter `n` (addrnd / hash length, bytes) per parameter
+/// set — 16/24/32 for the 128/192/256 levels (FIPS 205 Table 2).
+fn slh_dsa_n(ps: u32) -> usize {
+    match ps {
+        CKP_SLH_DSA_SHA2_128S | CKP_SLH_DSA_SHA2_128F | CKP_SLH_DSA_SHAKE_128S
+        | CKP_SLH_DSA_SHAKE_128F => 16,
+        CKP_SLH_DSA_SHA2_192S | CKP_SLH_DSA_SHA2_192F | CKP_SLH_DSA_SHAKE_192S
+        | CKP_SLH_DSA_SHAKE_192F => 24,
+        _ => 32,
     }
 }
 
