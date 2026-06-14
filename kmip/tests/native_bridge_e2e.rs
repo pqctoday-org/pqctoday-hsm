@@ -110,6 +110,7 @@ fn ml_dsa_65_create_sign_verify_destroy_against_real_engine() {
         common_attributes: vec![Attribute::CryptographicAlgorithm(KmipAlgorithm::MlDsa65)],
         private_key_attributes: vec![Attribute::CryptographicUsageMask(UsageMask::SIGN)],
         public_key_attributes: vec![Attribute::CryptographicUsageMask(UsageMask::VERIFY)],
+    seed: None,
     };
     let kp_resp =
         create_key_pair(&deps, create_req, "CreateKeyPair:Sign", "e2e-create").unwrap();
@@ -233,6 +234,7 @@ fn ml_dsa_87_create_sign_verify_against_real_engine() {
         common_attributes: vec![Attribute::CryptographicAlgorithm(KmipAlgorithm::MlDsa87)],
         private_key_attributes: vec![Attribute::CryptographicUsageMask(UsageMask::SIGN)],
         public_key_attributes: vec![Attribute::CryptographicUsageMask(UsageMask::VERIFY)],
+    seed: None,
     };
     let kp_resp =
         create_key_pair(&deps, create_req, "CreateKeyPair:Sign", "e2e87-create").unwrap();
@@ -298,6 +300,7 @@ fn k6_rsa_sha384_sha512_sign_verify_against_real_engine() {
         common_attributes: vec![Attribute::CryptographicAlgorithm(KmipAlgorithm::Rsa)],
         private_key_attributes: vec![Attribute::CryptographicUsageMask(UsageMask::SIGN)],
         public_key_attributes: vec![Attribute::CryptographicUsageMask(UsageMask::VERIFY)],
+    seed: None,
     };
     let kp = create_key_pair(&deps, create_req, "CreateKeyPair:Sign", "k6-create").unwrap();
     let priv_uid = kp.private_key_uid;
@@ -433,6 +436,7 @@ fn k18_rsa_pss_salt_length_threads_to_engine() {
         common_attributes: vec![Attribute::CryptographicAlgorithm(KmipAlgorithm::Rsa)],
         private_key_attributes: vec![Attribute::CryptographicUsageMask(UsageMask::SIGN)],
         public_key_attributes: vec![Attribute::CryptographicUsageMask(UsageMask::VERIFY)],
+    seed: None,
     };
     let kp = create_key_pair(&deps, create_req, "CreateKeyPair:Sign", "k18-create").unwrap();
     let priv_uid = kp.private_key_uid;
@@ -924,6 +928,7 @@ fn k11_digest_persisted_from_real_engine_material() {
             common_attributes: vec![Attribute::CryptographicAlgorithm(KmipAlgorithm::MlDsa65)],
             private_key_attributes: vec![Attribute::CryptographicUsageMask(UsageMask::SIGN)],
             public_key_attributes: vec![Attribute::CryptographicUsageMask(UsageMask::VERIFY)],
+        seed: None,
         },
         "CreateKeyPair:Sign",
         "k11-kp",
@@ -1468,6 +1473,7 @@ fn rsa_create_respects_cryptographic_length_attribute() {
         ],
         private_key_attributes: vec![Attribute::CryptographicUsageMask(UsageMask::SIGN)],
         public_key_attributes: vec![Attribute::CryptographicUsageMask(UsageMask::VERIFY)],
+    seed: None,
     };
     let kp = create_key_pair(&deps, create_req, "CreateKeyPair:Sign", "rsa-len").unwrap();
     let priv_rec = deps.store.get(&kp.private_key_uid).unwrap().unwrap();
@@ -1491,6 +1497,7 @@ fn rsa_create_rejects_unsupported_length() {
         ],
         private_key_attributes: vec![Attribute::CryptographicUsageMask(UsageMask::SIGN)],
         public_key_attributes: vec![Attribute::CryptographicUsageMask(UsageMask::VERIFY)],
+    seed: None,
     };
     let err = create_key_pair(&deps, create_req, "CreateKeyPair:Sign", "rsa-bad")
         .expect_err("RSA-1024 must be rejected");
@@ -1515,6 +1522,7 @@ fn ecdsa_create_respects_cryptographic_length_attribute() {
         ],
         private_key_attributes: vec![Attribute::CryptographicUsageMask(UsageMask::SIGN)],
         public_key_attributes: vec![Attribute::CryptographicUsageMask(UsageMask::VERIFY)],
+    seed: None,
     };
     let kp = create_key_pair(&deps, create_req, "CreateKeyPair:Sign", "ec-384").unwrap();
     let priv_rec = deps.store.get(&kp.private_key_uid).unwrap().unwrap();
@@ -1542,6 +1550,7 @@ fn locate_drops_orphans_when_engine_handle_is_gone() {
         common_attributes: vec![Attribute::CryptographicAlgorithm(KmipAlgorithm::MlDsa65)],
         private_key_attributes: vec![Attribute::CryptographicUsageMask(UsageMask::SIGN)],
         public_key_attributes: vec![Attribute::CryptographicUsageMask(UsageMask::VERIFY)],
+    seed: None,
     };
     let _ = create_key_pair(&deps, create_req, "CreateKeyPair:Sign", "loc-create").unwrap();
 

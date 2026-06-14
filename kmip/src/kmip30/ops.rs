@@ -322,6 +322,10 @@ pub struct CreateKeyPairRequest {
     pub common_attributes: Vec<Attribute>,
     pub private_key_attributes: Vec<Attribute>,
     pub public_key_attributes: Vec<Attribute>,
+    /// `Seed` (0x4201C6, KMIP 3.0 WD19) — ByteString. When present, the key
+    /// pair is generated deterministically from this seed (FIPS 204 ξ /
+    /// FIPS 203 d‖z / FIPS 205 SK.seed‖SK.prf‖PK.seed) instead of the RNG.
+    pub seed: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
