@@ -513,6 +513,68 @@ pub fn native_sign_mech_with_params(
     })
 }
 
+/// P0 (crypto-policy gaps plan) — the **single** "request → canonical
+/// PKCS#11 `CKM_*` mechanism" resolver, accounting for the effective KMIP
+/// `CryptographicParameters` (hash / block-cipher mode / padding), not just the
+/// key algorithm. This is the identity the policy engine gates on, so a rule
+/// means the same thing whether the request arrives via a standard KMIP op or
+/// the PKCS#11 passthrough. It simply unifies the existing per-op resolvers
+/// (`native_sign_mech_with_params`, `aes_mechanism_for`, `rsa_encrypt_mechanism_for`,
+/// `KmipAlgorithm::to_pkcs11_mech`) — no new mechanism values are introduced.
+///
+/// Returns `None` when the (algorithm, op, params) triple has no resolvable
+/// mechanism; the policy treats that as "not canonicalizable" (it still gates
+/// on the algorithm), and the op handler's own resolver remains the authority
+/// that errors on genuinely unsupported parameters.
+pub fn canonical_mechanism(
+    algo: KmipAlgorithm,
+    op: crate::kmip30::PkcsOp,
+    cp: Option<&crate::kmip30::CryptographicParameters>,
+) -> Option<u32> {
+    use crate::kmip30::PkcsOp::*;
+    use KmipAlgorithm::*;
+    match op {
+        SignVerify => native_sign_mech_with_params(algo, cp).ok(),
+        Encrypt | Decrypt => match algo {
+            Aes => aes_mechanism_for(cp).ok(),
+            Rsa => rsa_encrypt_mechanism_for(cp).ok(),
+            // ML-KEM (encaps/decaps), ChaCha20 families, etc. are
+            // parameter-agnostic at the mechanism level.
+            _ => algo.to_pkcs11_mech(op),
+        },
+        // HMAC variants carry the hash in the algorithm itself; CMAC/KMAC
+        // (no KMIP CryptographicAlgorithm) are handled in the CKM_* dialect
+        // (plan P4), so fall through to the algorithm map here.
+        Mac => algo.to_pkcs11_mech(Mac),
+        KeyGen => algo.to_pkcs11_mech(KeyGen),
+    }
+}
+
+/// P1 (crypto-policy gaps plan) — build the policy [`MechanismParams`] from the
+/// effective KMIP `CryptographicParameters` + the canonical `CKM_*` (P0). This
+/// is what the dispatcher hands the policy engine so mechanism/hash rules can
+/// gate on the *mechanism*, not just the key algorithm. Pure projection: it
+/// copies the already-decoded CP fields and resolves the canonical mechanism —
+/// no values are minted here.
+pub fn mechanism_params_from_cp(
+    algo: KmipAlgorithm,
+    op: crate::kmip30::PkcsOp,
+    cp: Option<&crate::kmip30::CryptographicParameters>,
+) -> crate::policy::MechanismParams {
+    crate::policy::MechanismParams {
+        hashing_algorithm: cp.and_then(|c| c.hashing_algorithm).map(|h| h as u32),
+        block_cipher_mode: cp.and_then(|c| c.block_cipher_mode),
+        padding_method: cp.and_then(|c| c.padding_method),
+        mask_generator: cp.and_then(|c| c.mask_generator),
+        tag_length: cp.and_then(|c| c.tag_length),
+        salt_length: cp.and_then(|c| c.salt_length),
+        deterministic: cp.and_then(|c| c.deterministic),
+        internal: cp.and_then(|c| c.internal),
+        external_mu: cp.and_then(|c| c.external_mu),
+        canonical_mech: canonical_mechanism(algo, op, cp),
+    }
+}
+
 /// K18 — extract the RSA-PSS salt length to pass to
 /// `native::sign_with_pss_salt` / `verify_with_pss_salt`.
 ///
@@ -1069,6 +1131,56 @@ mod tests {
             hashing_algorithm: hash,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn canonical_mechanism_unifies_param_aware_resolution() {
+        use crate::kmip30::{HashingAlgorithm, KmipAlgorithm::*, PkcsOp};
+        // AES encrypt: block-cipher mode / padding → exact CKM_*.
+        assert_eq!(
+            canonical_mechanism(Aes, PkcsOp::Encrypt, Some(&cp(Some(9), None, None))),
+            Some(c::CKM_AES_GCM)
+        );
+        assert_eq!(
+            canonical_mechanism(Aes, PkcsOp::Encrypt, Some(&cp(Some(1), Some(3), None))),
+            Some(c::CKM_AES_CBC_PAD)
+        );
+        // RSA sign: padding + hash → PSS vs PKCS1, hash-specific.
+        assert_eq!(
+            canonical_mechanism(
+                Rsa,
+                PkcsOp::SignVerify,
+                Some(&cp(None, Some(0x0a), Some(HashingAlgorithm::Sha256)))
+            ),
+            Some(c::CKM_SHA256_RSA_PKCS_PSS)
+        );
+        assert_eq!(
+            canonical_mechanism(
+                Rsa,
+                PkcsOp::SignVerify,
+                Some(&cp(None, Some(0x08), Some(HashingAlgorithm::Sha384)))
+            ),
+            Some(c::CKM_SHA384_RSA_PKCS)
+        );
+        // PQC: parameter-agnostic at the mechanism level.
+        assert_eq!(canonical_mechanism(MlDsa65, PkcsOp::SignVerify, None), Some(c::CKM_ML_DSA));
+        assert_eq!(canonical_mechanism(MlKem768, PkcsOp::Encrypt, None), Some(c::CKM_ML_KEM));
+    }
+
+    #[test]
+    fn mechanism_params_projects_cp_and_resolves_canonical_mech() {
+        use crate::kmip30::{HashingAlgorithm, KmipAlgorithm, PkcsOp};
+        let c0 = crate::kmip30::CryptographicParameters {
+            hashing_algorithm: Some(HashingAlgorithm::Sha256),
+            padding_method: Some(0x0a), // PSS
+            deterministic: Some(true),
+            ..Default::default()
+        };
+        let mp = mechanism_params_from_cp(KmipAlgorithm::Rsa, PkcsOp::SignVerify, Some(&c0));
+        assert_eq!(mp.hashing_algorithm, Some(0x06)); // KMIP SHA-256 codepoint
+        assert_eq!(mp.padding_method, Some(0x0a));
+        assert_eq!(mp.deterministic, Some(true));
+        assert_eq!(mp.canonical_mech, Some(c::CKM_SHA256_RSA_PKCS_PSS));
     }
 
     #[test]

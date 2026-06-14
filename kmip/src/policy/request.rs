@@ -37,6 +37,38 @@ use time::OffsetDateTime;
 
 use super::super::kmip30::UsageMask;
 
+/// The mechanism dimension of a request (KMIP 3.0 `CryptographicParameters`),
+/// plus the resolved canonical PKCS#11 `CKM_*` mechanism. Populated by the
+/// dispatcher from the *effective* CryptographicParameters the op already
+/// computes (see `ops::helpers::mechanism_params_from_cp`); all-`None` for ops
+/// that carry no parameters. Codepoints are the KMIP enum values
+/// (HashingAlgorithm `0x420038`, BlockCipherMode `0x420013`, PaddingMethod
+/// `0x42005f`, MaskGenerator `0x420054`) — never re-encoded here.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MechanismParams {
+    /// KMIP `Hashing Algorithm` enum value (e.g. SHA-256 = `0x06`).
+    pub hashing_algorithm: Option<u32>,
+    /// KMIP `Block Cipher Mode` enum value (e.g. GCM = `0x09`, CBC = `0x01`).
+    pub block_cipher_mode: Option<u32>,
+    /// KMIP `Padding Method` enum value (e.g. OAEP = `0x02`, PSS = `0x0a`).
+    pub padding_method: Option<u32>,
+    /// KMIP `Mask Generator` enum value (MGF1 = `0x01`).
+    pub mask_generator: Option<u32>,
+    /// KMIP `Tag Length` (AEAD auth-tag length, bytes).
+    pub tag_length: Option<i32>,
+    /// KMIP `Salt Length` (RSA-PSS sLen, bytes).
+    pub salt_length: Option<i32>,
+    /// WD19 PQC signing flags.
+    pub deterministic: Option<bool>,
+    pub internal: Option<bool>,
+    pub external_mu: Option<bool>,
+    /// Canonical PKCS#11 `CKM_*` mechanism this request resolves to
+    /// (`ops::helpers::canonical_mechanism`). The bypass-proof enforcement key:
+    /// the same value whether the request arrived via a standard op or the
+    /// PKCS#11 passthrough.
+    pub canonical_mech: Option<u32>,
+}
+
 /// Normalised request as seen by the policy engine. Borrowed where possible
 /// — the engine never persists the request.
 #[derive(Debug, Clone)]
@@ -92,6 +124,12 @@ pub struct PolicyRequest<'a> {
 
     /// Correlation ID shared across Plane 1 / 2 / 3 audit entries.
     pub correlation_id: &'a str,
+
+    /// Mechanism dimension (hash / mode / padding / MGF / tag / salt / PQC
+    /// flags + canonical `CKM_*`). Default (all-`None`) for ops without
+    /// CryptographicParameters; populated by the dispatcher otherwise. The
+    /// mechanism/hash rule types (plan P2) read this.
+    pub mechanism: MechanismParams,
 }
 
 impl<'a> PolicyRequest<'a> {
@@ -117,6 +155,7 @@ impl<'a> PolicyRequest<'a> {
             caller_cn: None,
             ts,
             correlation_id,
+            mechanism: MechanismParams::default(),
         }
     }
 }

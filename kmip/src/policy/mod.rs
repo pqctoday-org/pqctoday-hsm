@@ -90,6 +90,6 @@ pub use decision::{Decision, DenyReason};
 pub use engine::{ActivePolicy, Engine};
 pub use loader::{load_from_file, load_from_str, validate, LoadedPolicy, LoaderError};
 pub use policy::{ComplianceMapping, Metadata, Policy};
-pub use request::PolicyRequest;
+pub use request::{MechanismParams, PolicyRequest};
 pub use rule::{AttrPredicate, GatingDeny, Rule, Substitution, TimeBound};
 pub use store::{ActiveMarker, PolicyStore, StoreError, POLICY_STORE_ACTIVE_FILE};
