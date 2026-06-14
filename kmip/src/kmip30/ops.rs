@@ -399,6 +399,10 @@ pub struct GetResponse {
     /// (Password = 0x01, Seed = 0x02). `None` renders as the Password
     /// default. Only meaningful when `object_type == SecretData`.
     pub secret_data_type: Option<u32>,
+    /// KMIP 3.0 WD19 §3.4 — the generation seed, present only when the
+    /// client requested `KeyFormatType=SeedPrivateKey`. The wire encoder
+    /// emits the `KeyMaterial` as a `{ Seed, Key }` structure.
+    pub seed: Option<Vec<u8>>,
 }
 
 /// `KeyBlock` (KMIP 3.0 §4.x) — the wrapped key material returned by `Get`
@@ -441,6 +445,10 @@ pub enum KeyFormatType {
     TransparentEcPublicKey   = 0x15,
     Pkcs12                   = 0x16,
     Pkcs10                   = 0x17,
+    /// KMIP 3.0 WD19 §3.4 (Table 575) — seed-based private-key format
+    /// for algorithms with a deterministic seed (ML-DSA ξ, ML-KEM d‖z,
+    /// SLH-DSA seed). `KeyMaterial` is a Structure of `Seed` + `Key`.
+    SeedPrivateKey           = 0x18,
 }
 
 impl KeyFormatType {
@@ -467,6 +475,7 @@ impl KeyFormatType {
             0x15 => Self::TransparentEcPublicKey,
             0x16 => Self::Pkcs12,
             0x17 => Self::Pkcs10,
+            0x18 => Self::SeedPrivateKey,
             _ => return None,
         })
     }

@@ -57,7 +57,7 @@ pub fn generate_ml_kem_keypair(
     cka_id: &[u8],
     label: &str,
 ) -> Result<(u32, u32), CkRv> {
-    ml_kem_keypair_impl(_session, parameter_set, None, cka_id, label)
+    ml_kem_keypair_impl(_session, parameter_set, None, cka_id, label, false)
 }
 
 /// T7 — deterministic ML-KEM keygen from a caller-supplied `CKA_SEED`
@@ -73,7 +73,19 @@ pub fn generate_ml_kem_keypair_from_seed(
     cka_id: &[u8],
     label: &str,
 ) -> Result<(u32, u32), CkRv> {
-    ml_kem_keypair_impl(_session, parameter_set, Some(seed), cka_id, label)
+    ml_kem_keypair_impl(_session, parameter_set, Some(seed), cka_id, label, false)
+}
+
+/// Like [`generate_ml_kem_keypair_from_seed`] but the private key is born
+/// extractable (see [`generate_ml_dsa_keypair_from_seed_extractable`]).
+pub fn generate_ml_kem_keypair_from_seed_extractable(
+    _session: u32,
+    parameter_set: u32,
+    seed: &[u8],
+    cka_id: &[u8],
+    label: &str,
+) -> Result<(u32, u32), CkRv> {
+    ml_kem_keypair_impl(_session, parameter_set, Some(seed), cka_id, label, true)
 }
 
 fn ml_kem_keypair_impl(
@@ -82,6 +94,7 @@ fn ml_kem_keypair_impl(
     seed: Option<&[u8]>,
     cka_id: &[u8],
     label: &str,
+    extractable: bool,
 ) -> Result<(u32, u32), CkRv> {
     use ml_kem::{EncodedSizeUser, KemCore};
 
@@ -98,6 +111,7 @@ fn ml_kem_keypair_impl(
     // PKCS#11 v3.2 defaults — mirrors ffi::C_GenerateKeyPair @ ML-KEM arm.
     set_common_pub_attrs(&mut pub_attrs, parameter_set, ALGO_ML_KEM, CKK_ML_KEM, CKM_ML_KEM_KEY_PAIR_GEN);
     set_common_prv_attrs(&mut prv_attrs, parameter_set, ALGO_ML_KEM, CKK_ML_KEM, CKM_ML_KEM_KEY_PAIR_GEN);
+    apply_extractable_override(&mut prv_attrs, extractable);
     // ML-KEM-specific flags: encapsulate / decapsulate, NOT sign / verify.
     store_bool(&mut pub_attrs, CKA_VERIFY, false);
     store_bool(&mut pub_attrs, CKA_ENCAPSULATE, true);
@@ -162,7 +176,7 @@ pub fn generate_ml_dsa_keypair(
     cka_id: &[u8],
     label: &str,
 ) -> Result<(u32, u32), CkRv> {
-    ml_dsa_keypair_impl(_session, parameter_set, None, cka_id, label)
+    ml_dsa_keypair_impl(_session, parameter_set, None, cka_id, label, false)
 }
 
 /// T7 — deterministic ML-DSA keygen from a caller-supplied `CKA_SEED`
@@ -177,7 +191,22 @@ pub fn generate_ml_dsa_keypair_from_seed(
     cka_id: &[u8],
     label: &str,
 ) -> Result<(u32, u32), CkRv> {
-    ml_dsa_keypair_impl(_session, parameter_set, Some(seed), cka_id, label)
+    ml_dsa_keypair_impl(_session, parameter_set, Some(seed), cka_id, label, false)
+}
+
+/// Like [`generate_ml_dsa_keypair_from_seed`] but the private key is born
+/// `CKA_EXTRACTABLE=TRUE` / `CKA_SENSITIVE=FALSE` so its material can be
+/// read back via `get_attribute(CKA_VALUE)`. For the KMIP 3.0 WD19 PQC
+/// interop profile, where deterministic-from-seed keygen exists precisely
+/// so the generated key can be Got and checked byte-for-byte.
+pub fn generate_ml_dsa_keypair_from_seed_extractable(
+    _session: u32,
+    parameter_set: u32,
+    seed: &[u8],
+    cka_id: &[u8],
+    label: &str,
+) -> Result<(u32, u32), CkRv> {
+    ml_dsa_keypair_impl(_session, parameter_set, Some(seed), cka_id, label, true)
 }
 
 fn ml_dsa_keypair_impl(
@@ -186,6 +215,7 @@ fn ml_dsa_keypair_impl(
     seed: Option<&[u8]>,
     cka_id: &[u8],
     label: &str,
+    extractable: bool,
 ) -> Result<(u32, u32), CkRv> {
     if let Some(s) = seed {
         // FIPS 204 §3.6.1 — ξ is exactly 32 bytes.
@@ -199,6 +229,7 @@ fn ml_dsa_keypair_impl(
 
     set_common_pub_attrs(&mut pub_attrs, parameter_set, ALGO_ML_DSA, CKK_ML_DSA, CKM_ML_DSA_KEY_PAIR_GEN);
     set_common_prv_attrs(&mut prv_attrs, parameter_set, ALGO_ML_DSA, CKK_ML_DSA, CKM_ML_DSA_KEY_PAIR_GEN);
+    apply_extractable_override(&mut prv_attrs, extractable);
     // ML-DSA: sign / verify, NOT encapsulate / decapsulate.
     store_bool(&mut pub_attrs, CKA_VERIFY, true);
     store_bool(&mut pub_attrs, CKA_ENCAPSULATE, false);
@@ -267,7 +298,7 @@ pub fn generate_slh_dsa_keypair(
     cka_id: &[u8],
     label: &str,
 ) -> Result<(u32, u32), CkRv> {
-    slh_dsa_keypair_impl(_session, parameter_set, None, cka_id, label)
+    slh_dsa_keypair_impl(_session, parameter_set, None, cka_id, label, false)
 }
 
 /// T7 — deterministic SLH-DSA keygen from a caller-supplied `CKA_SEED`
@@ -283,7 +314,19 @@ pub fn generate_slh_dsa_keypair_from_seed(
     cka_id: &[u8],
     label: &str,
 ) -> Result<(u32, u32), CkRv> {
-    slh_dsa_keypair_impl(_session, parameter_set, Some(seed), cka_id, label)
+    slh_dsa_keypair_impl(_session, parameter_set, Some(seed), cka_id, label, false)
+}
+
+/// Like [`generate_slh_dsa_keypair_from_seed`] but the private key is born
+/// extractable (see [`generate_ml_dsa_keypair_from_seed_extractable`]).
+pub fn generate_slh_dsa_keypair_from_seed_extractable(
+    _session: u32,
+    parameter_set: u32,
+    seed: &[u8],
+    cka_id: &[u8],
+    label: &str,
+) -> Result<(u32, u32), CkRv> {
+    slh_dsa_keypair_impl(_session, parameter_set, Some(seed), cka_id, label, true)
 }
 
 fn slh_dsa_keypair_impl(
@@ -292,12 +335,14 @@ fn slh_dsa_keypair_impl(
     seed: Option<&[u8]>,
     cka_id: &[u8],
     label: &str,
+    extractable: bool,
 ) -> Result<(u32, u32), CkRv> {
     let mut pub_attrs: Attributes = HashMap::new();
     let mut prv_attrs: Attributes = HashMap::new();
 
     set_common_pub_attrs(&mut pub_attrs, parameter_set, ALGO_SLH_DSA, CKK_SLH_DSA, CKM_SLH_DSA_KEY_PAIR_GEN);
     set_common_prv_attrs(&mut prv_attrs, parameter_set, ALGO_SLH_DSA, CKK_SLH_DSA, CKM_SLH_DSA_KEY_PAIR_GEN);
+    apply_extractable_override(&mut prv_attrs, extractable);
     store_bool(&mut pub_attrs, CKA_VERIFY, true);
     store_bool(&mut pub_attrs, CKA_ENCAPSULATE, false);
     store_bool(&mut prv_attrs, CKA_SIGN, true);
@@ -962,6 +1007,20 @@ fn set_common_prv_attrs(
     store_bool(attrs, CKA_UNWRAP, false);
     store_bool(attrs, CKA_DERIVE, false);
     store_bool(attrs, CKA_LOCAL, true);
+}
+
+/// Flip a freshly-built private-key attribute set to be exportable
+/// (`CKA_SENSITIVE=FALSE`, `CKA_EXTRACTABLE=TRUE`) when `extractable` is
+/// set. Applied at creation time — the PKCS#11 v3.2 §4.9/§4.10 one-way
+/// policy (set_attribute only allows SENSITIVE FALSE→TRUE and EXTRACTABLE
+/// TRUE→FALSE) forbids relaxing these after the object exists, so callers
+/// that need an exportable key MUST request it here. No-op when false, so
+/// the secure default (sensitive, non-extractable) is preserved.
+fn apply_extractable_override(attrs: &mut Attributes, extractable: bool) {
+    if extractable {
+        store_bool(attrs, CKA_SENSITIVE, false);
+        store_bool(attrs, CKA_EXTRACTABLE, true);
+    }
 }
 
 /// Shared ECDSA public-key attribute defaults — mirrors `ffi::C_GenerateKeyPair @
