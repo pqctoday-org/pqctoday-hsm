@@ -194,7 +194,10 @@ fn all_json_vectors() -> BTreeSet<String> {
             } else if p.extension().and_then(|e| e.to_str()) == Some("json") {
                 // ttlv-wire/manifest.json is a provenance index, not a crypto vector.
                 let rel = p.strip_prefix(root).unwrap().to_string_lossy().replace('\\', "/");
-                if rel.starts_with("ttlv-wire/") {
+                // ttlv-wire/ is a provenance index; pqc-interop/ is the OASIS
+                // interop vector set consumed by tests/pqc_interop_engine.rs —
+                // neither is an ACVP crypto vector for this file's orphan guard.
+                if rel.starts_with("ttlv-wire/") || rel.starts_with("pqc-interop/") {
                     continue;
                 }
                 out.insert(rel);
