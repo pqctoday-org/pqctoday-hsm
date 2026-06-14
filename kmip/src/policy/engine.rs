@@ -200,6 +200,18 @@ rules: []
             }
         }
 
+        // ── Pass 1b: resolve forced mechanism parameters (plan P3) ───────
+        // Last-match-wins per field, like algorithm resolution. Attached to
+        // Allow so the dispatcher merges it into the effective
+        // CryptographicParameters before calling the engine.
+        let mut cp = super::CpOverride::default();
+        for rule in snapshot.policy.rules.iter() {
+            if let Some(forced) = rule.resolve_cp(req, resolved_view) {
+                cp.merge(forced);
+            }
+        }
+        let cp_override = if cp.is_empty() { None } else { Some(cp) };
+
         // ── Allow / RekeyAndProceed branch selection ─────────────────────
         let d = match (substituted_by, &resolved, req.current_object_algorithm, req.target_uid) {
             // Substitution fired, request targets an existing object, and
@@ -221,10 +233,15 @@ rules: []
                 Decision::Allow {
                     algorithm_override: Some(new_algo.clone()),
                     substituted_by_rule: substituted_by,
+                    cp_override,
                 }
             }
-            // No substitution; pure allow.
-            _ => Decision::allow(),
+            // No algorithm substitution; allow (possibly with a forced CP).
+            _ => Decision::Allow {
+                algorithm_override: None,
+                substituted_by_rule: None,
+                cp_override,
+            },
         };
         self.audit.record_decision(req, &d, &snapshot.source_fingerprint);
         d
@@ -292,6 +309,34 @@ rules:
         assert!(eng.evaluate(&bad).is_deny());
         let good = PolicyRequest::minimal("Create", Some("AES-256"), ts(), "c-4", &attrs);
         assert!(eng.evaluate(&good).is_allow());
+    }
+
+    #[test]
+    fn forcing_rule_attaches_cp_override() {
+        let yaml = r#"
+schema_version: 1
+metadata:
+  name: deterministic-signing
+  description: force deterministic ML-DSA
+  authority: test
+  effective: "always"
+rules:
+  - type: mechanism_parameter_default
+    ops: [Sign]
+    deterministic: true
+    reason: "deterministic signatures required"
+"#;
+        let eng = Engine::deny_all();
+        eng.activate(load_from_str(yaml, Path::new("<test>")).unwrap()).unwrap();
+        let attrs = HashMap::new();
+        let req = PolicyRequest::minimal("Sign", Some("ML-DSA-65"), ts(), "c-cp", &attrs);
+        let d = eng.evaluate(&req);
+        assert!(d.is_allow());
+        let ov = d.cp_override().expect("forcing rule attaches cp_override");
+        assert_eq!(ov.deterministic, Some(true));
+        // A request the rule doesn't match carries no override.
+        let other = PolicyRequest::minimal("Encrypt", Some("AES-256"), ts(), "c-cp2", &attrs);
+        assert!(eng.evaluate(&other).cp_override().is_none());
     }
 
     #[test]

@@ -86,7 +86,7 @@ pub mod rule;
 pub mod store;
 
 pub use audit::PolicyAudit;
-pub use decision::{Decision, DenyReason};
+pub use decision::{CpOverride, Decision, DenyReason};
 pub use engine::{ActivePolicy, Engine};
 pub use loader::{load_from_file, load_from_str, validate, LoadedPolicy, LoaderError};
 pub use policy::{ComplianceMapping, Metadata, Policy};

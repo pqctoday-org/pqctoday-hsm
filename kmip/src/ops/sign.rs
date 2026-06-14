@@ -125,7 +125,11 @@ pub fn sign(deps: &Deps, req: SignRequest, correlation_id: &str) -> Result<SignR
             .or(obj.cryptographic_parameters.as_ref()),
     );
 
-    let mech = match deps.engine.evaluate(&p_req) {
+    let decision = deps.engine.evaluate(&p_req);
+    // P3 — capture any policy-forced mechanism parameters (hash / padding /
+    // deterministic) to merge into the effective CryptographicParameters below.
+    let forced_cp = decision.cp_override().cloned();
+    let mech = match decision {
         Decision::Allow { algorithm_override: None, .. } => {
             // Pass-through — use stored algorithm.
             obj.algorithm.to_pkcs11_mech(PkcsOp::SignVerify).ok_or_else(|| {
@@ -193,10 +197,21 @@ pub fn sign(deps: &Deps, req: SignRequest, correlation_id: &str) -> Result<SignR
                 super::helpers::find_handle_for_object(session, &obj.pkcs11_cka_id, obj.object_type)
                     .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Sign:find"))?
                     .ok_or_else(|| KmipError::object_not_found(&req.uid))?;
-            let effective_cp = req
+            let base_cp = req
                 .cryptographic_parameters
                 .as_ref()
                 .or(obj.cryptographic_parameters.as_ref());
+            // P3 — a forcing rule (MechanismParameterDefault) may mandate the
+            // hash / padding / deterministic; merge it over the base so the
+            // mechanism resolution and the sign_pqc flags below honor it.
+            let merged_cp;
+            let effective_cp = match forced_cp.as_ref() {
+                Some(ov) => {
+                    merged_cp = super::helpers::merge_cp_override(base_cp, ov);
+                    Some(&merged_cp)
+                }
+                None => base_cp,
+            };
             // K6 — exact padding + hash selection (SHA-256/384/512 →
             // CKM_SHA*_RSA_PKCS{,_PSS} / CKM_ECDSA_SHA*); unsupported
             // hashes/paddings fail 0x3e instead of silently signing
