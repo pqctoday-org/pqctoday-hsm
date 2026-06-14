@@ -189,6 +189,24 @@ pub fn hash(deps: &Deps, req: HashRequest, correlation_id: &str) -> Result<HashR
         ))
     })?;
 
+    // W2.2 — Plane-1 gate for the keyless Hash op: surface the requested
+    // Hashing Algorithm so `hash_algorithm_allowlist` can restrict it (e.g.
+    // deny SHA-1). No managed object, so the request carries no algorithm/key.
+    {
+        let empty: HashMap<String, String> = HashMap::new();
+        let mut p_req = PolicyRequest::minimal(
+            "Hash",
+            None,
+            OffsetDateTime::now_utc(),
+            correlation_id,
+            &empty,
+        );
+        p_req.mechanism.hashing_algorithm = Some(algo as u32);
+        if let Decision::Deny { human, .. } = deps.engine.evaluate(&p_req) {
+            return Err(fail_err(deps, correlation_id, "Hash", KmipError::permission_denied(human)));
+        }
+    }
+
     let bytes = compute_hash(algo, &req.data).map_err(|e| {
         fail_err(deps, correlation_id, "Hash", e)
     })?;
