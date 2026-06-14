@@ -161,6 +161,7 @@ pub(crate) fn sign_internal<
 >(
     beta: i32, gamma1: i32, gamma2: i32, omega: i32, tau: i32, esk: &PrivateKey<K, L>,
     message: &[u8], ctx: &[u8], oid: &[u8], phm: &[u8], rnd: [u8; 32], nist: bool,
+    ext_mu: Option<[u8; 64]>,
 ) -> [u8; SIG_LEN] {
     //
     // 1: (ρ, K, tr, s_1, s_2, t_0) ← skDecode(sk)
@@ -181,19 +182,25 @@ pub(crate) fn sign_internal<
     let cap_a_hat: [[T; L]; K] = expand_a::<CTEST, K, L>(rho);
 
     // 6: 𝜇 ← H(BytesToBits(𝑡𝑟)||𝑀 , 64)    ▷ Compute message representative µ
-    // Calculate mu based on which of the three different paths led us here
-    let mut h6 = if nist {
-        // 6a. NIST vectors are being applied to "internal" functions
-        h256_xof(&[tr, message])
-    } else if oid.is_empty() {
-        // 6b. From ML-DSA.Sign():  𝑀′ ← BytesToBits(IntegerToBytes(0,1) ∥ IntegerToBytes(|𝑐𝑡𝑥|,1) ∥ 𝑐𝑡𝑥) ∥ 𝑀
-        h256_xof(&[tr, &[0u8], &[ctx.len().to_le_bytes()[0]], ctx, message])
-    } else {
-        // 6c. From HashML-DSA.Sign(): 𝑀′ ← BytesToBits(IntegerToBytes(1,1) ∥ IntegerToBytes(|𝑐𝑡𝑥|,1) ∥ 𝑐𝑡𝑥 ∥ OID ∥ PH𝑀 )
-        h256_xof(&[tr, &[1u8], &[ctx.len().to_le_bytes()[0]], ctx, oid, phm])
-    };
+    // Calculate mu based on which of the three different paths led us here.
+    // `ext_mu` short-circuits this: the caller supplied µ directly (ACVP
+    // "external mu" / FIPS 204 IPD pre-hash-µ mode), so skip the H(tr||M′) step.
     let mut mu = [0u8; 64];
-    h6.read(&mut mu);
+    if let Some(ext) = ext_mu {
+        mu = ext;
+    } else {
+        let mut h6 = if nist {
+            // 6a. NIST vectors are being applied to "internal" functions
+            h256_xof(&[tr, message])
+        } else if oid.is_empty() {
+            // 6b. From ML-DSA.Sign():  𝑀′ ← BytesToBits(IntegerToBytes(0,1) ∥ IntegerToBytes(|𝑐𝑡𝑥|,1) ∥ 𝑐𝑡𝑥) ∥ 𝑀
+            h256_xof(&[tr, &[0u8], &[ctx.len().to_le_bytes()[0]], ctx, message])
+        } else {
+            // 6c. From HashML-DSA.Sign(): 𝑀′ ← BytesToBits(IntegerToBytes(1,1) ∥ IntegerToBytes(|𝑐𝑡𝑥|,1) ∥ 𝑐𝑡𝑥 ∥ OID ∥ PH𝑀 )
+            h256_xof(&[tr, &[1u8], &[ctx.len().to_le_bytes()[0]], ctx, oid, phm])
+        };
+        h6.read(&mut mu);
+    }
 
     // 7: ρ′' ← H(K || rnd || µ, 64)    ▷ Compute private random seed
     let mut h7 = h256_xof(&[cap_k, &rnd, &mu]);
@@ -359,6 +366,7 @@ pub(crate) fn verify_internal<
 >(
     beta: i32, gamma1: i32, gamma2: i32, omega: i32, tau: i32, epk: &PublicKey<K, L>, m: &[u8],
     sig: &[u8; SIG_LEN], ctx: &[u8], oid: &[u8], phm: &[u8], nist: bool,
+    ext_mu: Option<[u8; 64]>,
 ) -> bool {
     //
     // 1: (ro, t_1) ← pkDecode(pk)  pull out pre-computed elements
@@ -382,19 +390,24 @@ pub(crate) fn verify_internal<
     // --> extracted from public key pre-computes in step 1 above
 
     // 7: 𝜇 ← (H(BytesToBits(tr)||𝑀′, 64))    ▷ Compute message representative µ
-    // Calculate mu based on which of the three different paths led us here
-    let mut h7 = if nist {
-        // 7a. NIST vectors are being applied to "internal" functions
-        h256_xof(&[tr, m])
-    } else if oid.is_empty() {
-        // 7b. From ML-DSA.Verify(): 5: 𝑀′ ← BytesToBits(IntegerToBytes(0,1) ∥ IntegerToBytes(|𝑐𝑡𝑥|,1) ∥ 𝑐𝑡𝑥) ∥ 𝑀
-        h256_xof(&[tr, &[0u8], &[ctx.len().to_le_bytes()[0]], ctx, m])
-    } else {
-        // 7c. From HashML-DSA.Verify(): 18: 𝑀′ ← BytesToBits(IntegerToBytes(1,1) ∥ IntegerToBytes(|𝑐𝑡𝑥|,1) ∥ 𝑐𝑡𝑥 ∥ OID ∥ PH𝑀 )
-        h256_xof(&[tr, &[1u8], &[ctx.len().to_le_bytes()[0]], ctx, oid, phm])
-    };
+    // Calculate mu based on which of the three different paths led us here.
+    // `ext_mu` short-circuits this with a caller-supplied µ (external-mu mode).
     let mut mu = [0u8; 64];
-    h7.read(&mut mu);
+    if let Some(ext) = ext_mu {
+        mu = ext;
+    } else {
+        let mut h7 = if nist {
+            // 7a. NIST vectors are being applied to "internal" functions
+            h256_xof(&[tr, m])
+        } else if oid.is_empty() {
+            // 7b. From ML-DSA.Verify(): 5: 𝑀′ ← BytesToBits(IntegerToBytes(0,1) ∥ IntegerToBytes(|𝑐𝑡𝑥|,1) ∥ 𝑐𝑡𝑥) ∥ 𝑀
+            h256_xof(&[tr, &[0u8], &[ctx.len().to_le_bytes()[0]], ctx, m])
+        } else {
+            // 7c. From HashML-DSA.Verify(): 18: 𝑀′ ← BytesToBits(IntegerToBytes(1,1) ∥ IntegerToBytes(|𝑐𝑡𝑥|,1) ∥ 𝑐𝑡𝑥 ∥ OID ∥ PH𝑀 )
+            h256_xof(&[tr, &[1u8], &[ctx.len().to_le_bytes()[0]], ctx, oid, phm])
+        };
+        h7.read(&mut mu);
+    }
 
     // 8: c ∈ 𝑅𝑞 ← SampleInBall(c_tilde_1)    ▷ Compute verifier’s challenge from c_tilde
     let c: R = sample_in_ball::<false>(tau, &c_tilde); // CTEST is always false (as no CT guarantees)
