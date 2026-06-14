@@ -21,12 +21,13 @@ restarting it.
 | HTTP (proposed) | `PolicyStore` primitive | Effect |
 |---|---|---|
 | `GET /policies` | `list()` | enumerate policies |
-| `GET /policies/{name}` | `load()` | read one |
-| `POST /policies/validate` | `validate_draft(yaml)` | parse + validate, no disk |
-| `POST /policies/dry-run` | `dry_run(yaml, req)` | evaluate a sample request, no side effects |
+| `GET /policies/{name}` | `load()` + raw YAML | read one (for an editor) |
+| `GET /active` | `read_active()` | what's active now |
+| `GET /audit?limit=N` | `RingSink.snapshot()` | the three-plane audit trail (p1/p2/p3), newest last — the "inspect logs" source |
+| `POST /validate` | `validate_draft(yaml)` | parse + validate, no disk (live lint) |
+| `POST /dry-run` | `dry_run(yaml, {op,algorithm})` | evaluate a sample request, no side effects |
 | `PUT /policies/{name}` | `save(name, yaml)` | persist (atomic) |
 | `POST /policies/{name}/activate` | `activate_with_engine(name, engine)` | **swap the live enforcement policy** |
-| `GET /active` | `read_active()` | what's active now |
 
 ## Consumers
 
@@ -108,6 +109,9 @@ printf 'POST /policies/pqc/activate HTTP/1.1\r\nConnection: close\r\n\r\n' | \
 - `GET /policies`, `GET /active`, `POST /validate` (clean line/col error),
   `POST /dry-run` (`{"decision":{"outcome":"allow"}}`), `PUT /policies/{name}`,
   and **`POST /policies/{name}/activate`** all return correct JSON.
+- **`GET /audit`** returns the live three-plane trail — a pykmip-driven
+  CreateKeyPair shows up as p1 PolicyDecided + p2 KmipRequestReceived/Sent +
+  p3 Pkcs11Call, consumed via the same mTLS admin interface.
 - Live activation flips the running engine (`/active` reflects it immediately)
   and is audited with the client-cert CN:
   `admin: LIVE policy activated name="pqc" fp=… by cn="policy-admin-alice"`.

@@ -8,6 +8,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — cryptopolicy-manager `GET /audit` (three-plane log inspection) (2026-06-14)
+
+The admin facade gains `GET /audit?limit=N`, returning the in-memory `RingSink`
+snapshot (the p1 policy / p2 KMIP / p3 PKCS#11 audit trail, newest last) as
+JSON over the same mTLS interface. This is the "inspect logs" data source for
+the dev-sandbox UI: a `pykmip`-driven op shows up as p1 `PolicyDecided` +
+p2 `KmipRequestReceived`/`KmipResponseSent` + p3 `Pkcs11Call`, all correlated
+by `correlation_id`. `serve_admin` now takes the `RingSink`; unit test added.
+
 ### Added — cryptopolicy-manager: quantum-safe-mTLS HTTP policy-admin facade (2026-06-14)
 
 The W4 server-side admin facade for the crypto-agility plane (`kmip/cryptopolicy-manager/`),

@@ -217,10 +217,17 @@ async fn main() -> anyhow::Result<()> {
         )
         .map_err(|e| anyhow::anyhow!("admin mTLS config: {e}"))?;
         let admin_engine = engine.clone();
+        let admin_ring = ring.clone();
         tracing::info!("cryptopolicy-manager admin facade enabled on {addr} (mTLS, X25519MLKEM768)");
         tokio::spawn(async move {
-            if let Err(e) =
-                pqctoday_kmip::cryptopolicy_manager::serve_admin(addr, policy_dir, admin_engine, tls).await
+            if let Err(e) = pqctoday_kmip::cryptopolicy_manager::serve_admin(
+                addr,
+                policy_dir,
+                admin_engine,
+                admin_ring,
+                tls,
+            )
+            .await
             {
                 tracing::error!("admin facade exited: {e}");
             }
