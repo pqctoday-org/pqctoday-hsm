@@ -153,6 +153,39 @@ rules:
     }
 
     #[test]
+    fn parses_mechanism_dimension_rules() {
+        let yaml = r#"
+schema_version: 1
+metadata:
+  name: mech-dim
+  description: mechanism-dimension rules
+  authority: test
+  effective: "always"
+rules:
+  - type: hash_algorithm_allowlist
+    ops: [Sign]
+    hashing_algorithms: [SHA-256, SHA-384, SHA3-256]
+    reason: "approved hashes only"
+  - type: mechanism_parameter_constraint
+    ops: [Encrypt]
+    algorithm: AES
+    allowed_block_cipher_modes: [GCM, CCM]
+    reason: "AEAD only"
+  - type: mac_mechanism_policy
+    ops: [MAC]
+    mac_algorithms: [HMAC-SHA256, HMAC-SHA384]
+    reason: "approved MACs only"
+"#;
+        let loaded = load_from_str(yaml, Path::new("<test>")).expect("must parse");
+        assert_eq!(loaded.policy.rules.len(), 3);
+        assert!(loaded.warnings.is_empty(), "new rule types are not stubs");
+        use crate::policy::Rule;
+        assert!(matches!(loaded.policy.rules[0], Rule::HashAlgorithmAllowlist { .. }));
+        assert!(matches!(loaded.policy.rules[1], Rule::MechanismParameterConstraint { .. }));
+        assert!(matches!(loaded.policy.rules[2], Rule::MacMechanismPolicy { .. }));
+    }
+
+    #[test]
     fn rejects_unknown_schema_version() {
         let yaml = r#"
 schema_version: 99
