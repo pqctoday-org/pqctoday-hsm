@@ -88,6 +88,13 @@ pub struct ObjectRecord {
     /// shared secret round-trips as the OASIS PQC interop KATs expect.
     pub secret_data_type: Option<u32>,
 
+    /// KMIP 3.0 WD19 §3.4 — the deterministic generation seed (ML-DSA ξ,
+    /// ML-KEM d‖z, SLH-DSA seed) supplied to `CreateKeyPair`. Stored on
+    /// the private-key record so `Get` with `KeyFormatType=SeedPrivateKey`
+    /// can return the `{ Seed, Key }` KeyMaterial structure. `None` for
+    /// randomly-generated (non-seeded) keys.
+    pub pqc_seed: Option<Vec<u8>>,
+
     /// KMIP 3.0 §11 `Cryptographic Parameters` attached to the key.
     /// Drives the Plane-3 mechanism choice — most importantly the
     /// RSA-OAEP family (PaddingMethod / HashingAlgorithm / MaskGenerator
@@ -266,6 +273,7 @@ impl From<BaselineDefaults> for ObjectRecord {
             key_material: None,
             key_format_type: None,
             secret_data_type: None,
+            pqc_seed: None,
             cryptographic_parameters: None,
             last_change_date: None,
             original_creation_date: None,

@@ -139,65 +139,76 @@ pub fn get(deps: &Deps, req: GetRequest, correlation_id: &str) -> Result<GetResp
     let (key_format, key_value) = if let Some(bytes) = &obj.key_material {
         (stored_format.unwrap_or(KeyFormatType::Raw), bytes.clone())
     } else {
-        match obj.object_type {
-            // Engine-held private key: the material lives behind the
-            // PKCS#11 CKA_SENSITIVE gate and is never extractable in
-            // the clear. compliance-audit B-4: fail instead of the old
-            // zero-length OpaqueObject KeyValue hack. Not corpus-pinned:
-            // no transcript Gets an engine-held private key (BL-M-13
-            // Gets a Registered DSA key whose material is
-            // client-supplied, and is skipped as deprecated anyway).
-            ObjectType::PrivateKey => {
-                return Err(fail_err(
-                    deps,
-                    correlation_id,
-                    "Get",
-                    if obj.sensitive == Some(true) {
-                        KmipError::sensitive(format!(
-                            "private key {} material is held by the engine and is Sensitive",
-                            req.uid
-                        ))
-                    } else {
-                        KmipError::not_extractable(format!(
-                            "private key {} material is held by the engine and is not extractable",
-                            req.uid
-                        ))
-                    },
-                ));
-            }
-            _ => match deps.engine_session {
-                Some(session) => {
-                    let bytes = softhsmrustv3::native::find_by_cka_id(session, &obj.pkcs11_cka_id)
-                        .ok()
-                        .flatten()
-                        .and_then(|h| {
-                            softhsmrustv3::native::get_attribute(
-                                session,
-                                h,
-                                softhsmrustv3::constants::CKA_VALUE,
-                            )
-                        });
-                    // K15 — audit the engine read after it happened
-                    // (only when a value actually came back; the API
-                    // surfaces sensitive/absent values as None, not a
-                    // CK_RV we could log truthfully).
-                    if bytes.is_some() {
-                        emit_pkcs11(
-                            deps,
-                            correlation_id,
-                            "native::get_attribute(CKA_VALUE)",
-                            None,
-                            0,
-                            "CKR_OK",
-                        );
-                    }
-                    match bytes {
-                        Some(v) => (KeyFormatType::Raw, v),
-                        None => (KeyFormatType::Raw, Vec::new()),
-                    }
+        // Engine-held private key: the material lives behind the PKCS#11
+        // CKA_SENSITIVE gate and is normally never extractable in the
+        // clear (compliance-audit B-4: fail instead of the old
+        // zero-length OpaqueObject hack). The KMIP 3.0 WD19 PQC interop
+        // profile is the carve-out: a CreateKeyPair-from-seed key is
+        // marked Extractable && !Sensitive (KMIP §4 Extractable), so its
+        // generated material can be Got for byte-exact verification.
+        if obj.object_type == ObjectType::PrivateKey
+            && !(obj.extractable == Some(true) && obj.sensitive != Some(true))
+        {
+            return Err(fail_err(
+                deps,
+                correlation_id,
+                "Get",
+                if obj.sensitive == Some(true) {
+                    KmipError::sensitive(format!(
+                        "private key {} material is held by the engine and is Sensitive",
+                        req.uid
+                    ))
+                } else {
+                    KmipError::not_extractable(format!(
+                        "private key {} material is held by the engine and is not extractable",
+                        req.uid
+                    ))
+                },
+            ));
+        }
+        match deps.engine_session {
+            Some(session) => {
+                // CreateKeyPair stores BOTH halves under one shared CKA_ID,
+                // so a bare `find_by_cka_id` would return whichever the
+                // engine enumerates first (the public key). Resolve the
+                // handle by the object's PKCS#11 class so a PrivateKey Get
+                // returns the private material (2560-byte ML-DSA-44 sk),
+                // not the 1312-byte public key. (Sign uses the same
+                // class-aware helper.)
+                let bytes = super::helpers::find_handle_for_object(
+                    session,
+                    &obj.pkcs11_cka_id,
+                    obj.object_type,
+                )
+                .ok()
+                .flatten()
+                .and_then(|h| {
+                    softhsmrustv3::native::get_attribute(
+                        session,
+                        h,
+                        softhsmrustv3::constants::CKA_VALUE,
+                    )
+                });
+                // K15 — audit the engine read after it happened
+                // (only when a value actually came back; the API
+                // surfaces sensitive/absent values as None, not a
+                // CK_RV we could log truthfully).
+                if bytes.is_some() {
+                    emit_pkcs11(
+                        deps,
+                        correlation_id,
+                        "native::get_attribute(CKA_VALUE)",
+                        None,
+                        0,
+                        "CKR_OK",
+                    );
                 }
-                None => (KeyFormatType::Raw, Vec::new()),
-            },
+                match bytes {
+                    Some(v) => (KeyFormatType::Raw, v),
+                    None => (KeyFormatType::Raw, Vec::new()),
+                }
+            }
+            None => (KeyFormatType::Raw, Vec::new()),
         }
     };
 
@@ -205,14 +216,50 @@ pub fn get(deps: &Deps, req: GetRequest, correlation_id: &str) -> Result<GetResp
     // output format. Absent → stored; same → as-is; convertible pair
     // (Raw ↔ TransparentSymmetricKey, PKCS#1 ↔ PKCS#8 for RSA) →
     // convert; otherwise `Key Format Type Not Supported (0x10)`.
-    let (key_format, key_value) = super::helpers::convert_key_format(
-        key_format,
-        key_value,
-        req.key_format_type,
-        obj.algorithm,
-        obj.object_type,
-    )
-    .map_err(|e| fail_err(deps, correlation_id, "Get", e))?;
+    //
+    // SeedPrivateKey (KMIP 3.0 WD19 §3.4) is handled here rather than in
+    // `convert_key_format` because its `KeyMaterial` pairs the engine's
+    // raw private bytes (the `Key` leaf) with the generation `Seed`
+    // stored on the record — `convert_key_format` only sees the bytes.
+    let seed_export = req.key_format_type == Some(KeyFormatType::SeedPrivateKey as u32);
+    let (key_format, key_value, seed) = if seed_export {
+        let seed = obj.pqc_seed.clone().ok_or_else(|| {
+            fail_err(
+                deps,
+                correlation_id,
+                "Get",
+                KmipError::key_format_type_not_supported(format!(
+                    "object {} has no stored seed to satisfy a SeedPrivateKey Get",
+                    req.uid
+                )),
+            )
+        })?;
+        (KeyFormatType::SeedPrivateKey, key_value, Some(seed))
+    } else {
+        let (f, v) = super::helpers::convert_key_format(
+            key_format,
+            key_value,
+            req.key_format_type,
+            obj.algorithm,
+            obj.object_type,
+        )
+        .map_err(|e| fail_err(deps, correlation_id, "Get", e))?;
+        (f, v, None)
+    };
+
+    // KMIP 3.0 §6.2 CryptographicLength — a CreateKeyPair-from-seed
+    // record stores no explicit length, so fall back to the actual
+    // material length for asymmetric keys (e.g. ML-DSA-44 private =
+    // 2560 B → 20480 bits, the value the OASIS PQC KATs expect). The
+    // `Key` leaf drives the length even for SeedPrivateKey. SecretData
+    // keeps its 0 sentinel (no crypto metadata in the KeyBlock).
+    let crypto_len = if obj.cryptographic_length == 0
+        && matches!(obj.object_type, ObjectType::PrivateKey | ObjectType::PublicKey)
+    {
+        (key_value.len() * 8) as u32
+    } else {
+        obj.cryptographic_length
+    };
 
     // KMIP 3.0 §6.1.23 — `Key Wrapping Specification`: return the key
     // material wrapped under the referenced wrap key. AX-M-2 pins
@@ -253,12 +300,13 @@ pub fn get(deps: &Deps, req: GetRequest, correlation_id: &str) -> Result<GetResp
         key_block: KeyBlock {
             key_format_type: key_format,
             cryptographic_algorithm: obj.algorithm,
-            cryptographic_length: obj.cryptographic_length,
+            cryptographic_length: crypto_len,
             key_value,
             key_wrapping_data,
         },
         opaque_data_type,
         secret_data_type,
+        seed,
     })
 }
 

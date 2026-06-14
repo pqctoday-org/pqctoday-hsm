@@ -249,6 +249,16 @@ pub fn create_key_pair(
                 crate::kmip30::KmipAlgorithm::Rsa => Some(0x03),
                 _ => None,
             },
+            // KMIP 3.0 WD19 §3.4 — persist the deterministic seed so a
+            // later Get(SeedPrivateKey) can return the {Seed,Key}
+            // KeyMaterial. Only the seeded (interop) path carries one.
+            pqc_seed: req.seed.clone(),
+            // PQC interop profile: a seeded CreateKeyPair produces an
+            // EXPORTABLE key pair (the KATs Get both Raw and SeedPrivateKey
+            // forms to verify generation). Randomly-generated keys keep
+            // the production default (Extractable unset → Get blocked).
+            extractable: req.seed.as_ref().map(|_| true),
+            sensitive: req.seed.as_ref().map(|_| false),
             // KMIP §11 Fresh = True for server-generated objects.
             fresh: Some(true),
     ..ObjectRecord::default()
@@ -530,9 +540,11 @@ fn native_generate_keypair(
                 )
             })?;
             match seed {
+                // Seeded keygen is the PQC interop profile: born extractable
+                // so the generated material can be Got + checked byte-exact.
                 Some(s) => (
-                    "native::generate_ml_kem_keypair_from_seed",
-                    native::generate_ml_kem_keypair_from_seed(session, ps, s, cka_id, label),
+                    "native::generate_ml_kem_keypair_from_seed_extractable",
+                    native::generate_ml_kem_keypair_from_seed_extractable(session, ps, s, cka_id, label),
                 ),
                 None => (
                     "native::generate_ml_kem_keypair",
@@ -544,8 +556,8 @@ fn native_generate_keypair(
             let ps = super::helpers::native_parameter_set(algo).unwrap();
             match seed {
                 Some(s) => (
-                    "native::generate_ml_dsa_keypair_from_seed",
-                    native::generate_ml_dsa_keypair_from_seed(session, ps, s, cka_id, label),
+                    "native::generate_ml_dsa_keypair_from_seed_extractable",
+                    native::generate_ml_dsa_keypair_from_seed_extractable(session, ps, s, cka_id, label),
                 ),
                 None => (
                     "native::generate_ml_dsa_keypair",
@@ -559,8 +571,8 @@ fn native_generate_keypair(
             let ps = super::helpers::native_parameter_set(algo).unwrap();
             match seed {
                 Some(s) => (
-                    "native::generate_slh_dsa_keypair_from_seed",
-                    native::generate_slh_dsa_keypair_from_seed(session, ps, s, cka_id, label),
+                    "native::generate_slh_dsa_keypair_from_seed_extractable",
+                    native::generate_slh_dsa_keypair_from_seed_extractable(session, ps, s, cka_id, label),
                 ),
                 None => (
                     "native::generate_slh_dsa_keypair",

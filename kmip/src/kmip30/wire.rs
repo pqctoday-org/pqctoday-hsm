@@ -1329,7 +1329,7 @@ fn encode_get_resp(r: &GetResponse) -> Vec<TtlvFrame> {
     // `KeyFormatType` — delegate to `encode_key_block` so the
     // TransparentSymmetricKey / Transparent*Key paths get the same
     // wrapping as `encode_export_resp`.
-    let kb = encode_key_block(&r.key_block);
+    let kb = encode_key_block(&r.key_block, r.seed.as_deref());
     let managed_object = match r.object_type {
         ObjectType::PublicKey  => TtlvFrame::new(Tag(tags::PublicKey),  Value::Structure(vec![kb])),
         ObjectType::PrivateKey => TtlvFrame::new(Tag(tags::PrivateKey), Value::Structure(vec![kb])),
@@ -3361,7 +3361,9 @@ fn encode_export_resp(r: &ExportResponse) -> Vec<TtlvFrame> {
         Value::Structure(r.attributes.iter().map(encode_attribute_v3).collect()),
     ));
     if let Some(kb) = &r.managed_object {
-        let kb_frame = encode_key_block(kb);
+        // Export does not emit the WD19 SeedPrivateKey form (it returns
+        // the stored Raw/transparent material), so no seed is threaded.
+        let kb_frame = encode_key_block(kb, None);
         let managed_object_tag = match r.object_type {
             ObjectType::PublicKey  => tags::PublicKey,
             ObjectType::PrivateKey => tags::PrivateKey,
@@ -3376,7 +3378,7 @@ fn encode_export_resp(r: &ExportResponse) -> Vec<TtlvFrame> {
 /// `KeyMaterial` shape depends on `KeyFormatType` per KMIP 3.0 §6.2.1:
 /// `Raw` ⇒ leaf ByteString; `TransparentSymmetricKey` ⇒ Structure
 /// containing one `Key` ByteString sub-element.
-fn encode_key_block(kb: &KeyBlock) -> TtlvFrame {
+fn encode_key_block(kb: &KeyBlock, seed: Option<&[u8]>) -> TtlvFrame {
     // KMIP 3.0 §4.x — when KeyWrappingData is present, KeyValue is the
     // wrapped (AES-KW) ciphertext of the TTLV-encoded KeyValue structure
     // and goes on the wire as a ByteString, not a Structure (AX-M-2).
@@ -3384,6 +3386,23 @@ fn encode_key_block(kb: &KeyBlock) -> TtlvFrame {
         TtlvFrame::new(Tag(tags::KeyValue), Value::ByteString(kb.key_value.clone()))
     } else {
         let key_material = match kb.key_format_type {
+            // KMIP 3.0 WD19 §3.4 — SeedPrivateKey KeyMaterial is a
+            // Structure of `Seed` (the generation seed) + `Key` (the raw
+            // private bytes), in that order.
+            KeyFormatType::SeedPrivateKey => {
+                let mut fields = Vec::new();
+                if let Some(s) = seed {
+                    fields.push(TtlvFrame::new(
+                        Tag(tags::PqcSeed),
+                        Value::ByteString(s.to_vec()),
+                    ));
+                }
+                fields.push(TtlvFrame::new(
+                    Tag(tags::Key),
+                    Value::ByteString(kb.key_value.clone()),
+                ));
+                TtlvFrame::new(Tag(tags::KeyMaterial), Value::Structure(fields))
+            }
             KeyFormatType::TransparentSymmetricKey => TtlvFrame::new(
                 Tag(tags::KeyMaterial),
                 Value::Structure(vec![TtlvFrame::new(
@@ -4970,12 +4989,14 @@ mod tests {
             (F::TransparentEcPublicKey, 0x15),
             (F::Pkcs12, 0x16),
             (F::Pkcs10, 0x17),
+            // KMIP 3.0 WD19 §3.4 — seed-based private-key format.
+            (F::SeedPrivateKey, 0x18),
         ] {
             assert_eq!(variant as u32, code, "{variant:?}");
             assert_eq!(F::from_wire_value(code), Some(variant));
         }
         // Reserved band + out-of-table values map to None.
-        for code in [0x00u32, 0x0E, 0x0F, 0x10, 0x11, 0x12, 0x13, 0x18, 0x99] {
+        for code in [0x00u32, 0x0E, 0x0F, 0x10, 0x11, 0x12, 0x13, 0x99] {
             assert_eq!(F::from_wire_value(code), None, "{code:#x}");
         }
     }
@@ -5112,7 +5133,7 @@ mod tests {
         encode(&key_material, &mut expected);
         assert_eq!(kb.key_value, expected.to_vec(), "TTLV KeyMaterial stashed verbatim");
         // Encode side re-emits the Structure (not a ByteString leaf).
-        let re_encoded = encode_key_block(&kb);
+        let re_encoded = encode_key_block(&kb, None);
         let kv = match &re_encoded.value {
             Value::Structure(children) => children
                 .iter()
