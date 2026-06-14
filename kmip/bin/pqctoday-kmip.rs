@@ -74,6 +74,26 @@ struct Cli {
     #[arg(long, requires = "tls_cert")]
     tls_client_ca: Option<PathBuf>,
 
+    /// cryptopolicy-manager admin facade listen address (e.g.
+    /// `127.0.0.1:5697`). When set, serves the out-of-band HTTP policy-admin
+    /// API (list/load/validate/dry-run/save/activate) over **mTLS with the
+    /// X25519MLKEM768 PQC hybrid key exchange**, sharing this server's live
+    /// engine so an activation takes effect with no restart. Requires
+    /// `--admin-tls-cert/key`, `--admin-client-ca`, and `--policy-dir`.
+    #[arg(long)]
+    admin_listen: Option<SocketAddr>,
+
+    /// Admin facade server cert / key (PEM). Required with `--admin-listen`.
+    #[arg(long, requires = "admin_listen")]
+    admin_tls_cert: Option<PathBuf>,
+    #[arg(long, requires = "admin_listen")]
+    admin_tls_key: Option<PathBuf>,
+
+    /// Admin facade client-CA bundle (PEM): admin mTLS client certs must be
+    /// signed by it. Required with `--admin-listen`.
+    #[arg(long, requires = "admin_listen")]
+    admin_client_ca: Option<PathBuf>,
+
     /// K14 auth — configured credential store entry, repeatable:
     /// `<username>:<sha256hex-of-password>` (e.g.
     /// `alice:$(printf %s 'pw' | shasum -a 256 | cut -d' ' -f1)`).
@@ -179,6 +199,32 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("no --auth-user entries — open-auth mode (Authentication header ignored)");
     } else {
         tracing::info!("authentication ENFORCED for {} configured user(s)", auth_users.len());
+    }
+
+    // ── cryptopolicy-manager admin facade (W4, optional) ───────────────
+    // Spawn BEFORE `engine` is moved into Deps — `Engine` is Clone over a
+    // shared `Arc<RwLock>`, so the facade's clone enforces activations on the
+    // running dispatcher with no restart. mTLS + X25519MLKEM768 PQC KEX.
+    if let Some(addr) = cli.admin_listen {
+        let cert = cli.admin_tls_cert.clone().ok_or_else(|| anyhow::anyhow!("--admin-listen requires --admin-tls-cert"))?;
+        let key = cli.admin_tls_key.clone().ok_or_else(|| anyhow::anyhow!("--admin-listen requires --admin-tls-key"))?;
+        let ca = cli.admin_client_ca.clone().ok_or_else(|| anyhow::anyhow!("--admin-listen requires --admin-client-ca"))?;
+        let policy_dir = cli.policy_dir.clone().ok_or_else(|| anyhow::anyhow!("--admin-listen requires --policy-dir (the policy store root)"))?;
+        let tls = pqctoday_kmip::cryptopolicy_manager::pqc_mtls_config(
+            &std::fs::read(&cert)?,
+            &std::fs::read(&key)?,
+            &std::fs::read(&ca)?,
+        )
+        .map_err(|e| anyhow::anyhow!("admin mTLS config: {e}"))?;
+        let admin_engine = engine.clone();
+        tracing::info!("cryptopolicy-manager admin facade enabled on {addr} (mTLS, X25519MLKEM768)");
+        tokio::spawn(async move {
+            if let Err(e) =
+                pqctoday_kmip::cryptopolicy_manager::serve_admin(addr, policy_dir, admin_engine, tls).await
+            {
+                tracing::error!("admin facade exited: {e}");
+            }
+        });
     }
 
     // ── Deps bundle ─────────────────────────────────────────────────────

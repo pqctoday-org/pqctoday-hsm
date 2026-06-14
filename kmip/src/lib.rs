@@ -26,4 +26,10 @@ pub mod auditlog;
 pub mod types;
 pub mod error;
 
+// W4 — out-of-band HTTP admin facade for the Plane-1 policy plane. Source
+// lives in the `cryptopolicy-manager/` sibling dir (its own component) but is
+// compiled into the crate so it can share the live `policy::Engine`.
+#[path = "../cryptopolicy-manager/manager.rs"]
+pub mod cryptopolicy_manager;
+
 pub use error::KmipError;
