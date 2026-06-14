@@ -731,6 +731,7 @@ mod tests {
             common_attributes: vec![Attribute::CryptographicUsageMask(UsageMask::KEY_AGREEMENT)],
             private_key_attributes: vec![],
             public_key_attributes: vec![],
+            seed: None,
         };
         assert_eq!(canonical_create_key_pair_op(&req), "CreateKeyPair:KeyAgreement");
     }
@@ -742,6 +743,7 @@ mod tests {
             common_attributes: vec![],
             private_key_attributes: vec![Attribute::CryptographicUsageMask(UsageMask::SIGN | UsageMask::VERIFY)],
             public_key_attributes: vec![],
+            seed: None,
         };
         assert_eq!(canonical_create_key_pair_op(&req), "CreateKeyPair:Sign");
     }

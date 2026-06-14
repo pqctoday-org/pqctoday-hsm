@@ -314,6 +314,7 @@ pub fn rekey_key_pair(
         algo,
         key_length,
         mech,
+        None, // rekey generates fresh material, never from a client seed
     )
     .map_err(&fail)?;
 

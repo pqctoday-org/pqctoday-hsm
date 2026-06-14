@@ -178,8 +178,14 @@ pub fn create_key_pair(
 
     // Phase 7b: real bridge call when a session is wired. Falls back to
     // placeholder UUIDs for unit tests.
-    let generated = match engine_generate_keypair(deps, correlation_id, kmip_algo, key_length, mech)
-    {
+    let generated = match engine_generate_keypair(
+        deps,
+        correlation_id,
+        kmip_algo,
+        key_length,
+        mech,
+        req.seed.as_deref(),
+    ) {
         Ok(g) => g,
         Err(err) => return fail(deps, correlation_id, op_canonical, err),
     };
@@ -335,6 +341,7 @@ pub(crate) fn engine_generate_keypair(
     kmip_algo: KmipAlgorithm,
     key_length: Option<u32>,
     mech: u32,
+    seed: Option<&[u8]>,
 ) -> std::result::Result<GeneratedKeyPair, KmipError> {
     if let Some(session) = deps.engine_session {
         // K15 — `native_generate_keypair` emits the Pkcs11Call audit
@@ -349,6 +356,7 @@ pub(crate) fn engine_generate_keypair(
             key_length,
             &cka_id,
             mech,
+            seed,
         )?;
         Ok(GeneratedKeyPair {
             cka_id_priv: cka_id.clone(),
@@ -498,6 +506,7 @@ fn parse_algorithm(s: &str) -> Result<KmipAlgorithm> {
 ///
 /// K15 — emits the `Pkcs11Call` audit record AFTER the native call with
 /// the raw `CK_RV` (success or failure) and the actual entry-point name.
+#[allow(clippy::too_many_arguments)]
 fn native_generate_keypair(
     deps: &Deps,
     correlation_id: &str,
@@ -506,6 +515,7 @@ fn native_generate_keypair(
     key_length: Option<u32>,
     cka_id: &[u8],
     mech: u32,
+    seed: Option<&[u8]>,
 ) -> std::result::Result<(u32, u32), KmipError> {
     use crate::kmip30::KmipAlgorithm::*;
     use softhsmrustv3::native;
@@ -519,26 +529,44 @@ fn native_generate_keypair(
                     format!("no parameter-set codepoint for {:?}", algo),
                 )
             })?;
-            (
-                "native::generate_ml_kem_keypair",
-                native::generate_ml_kem_keypair(session, ps, cka_id, label),
-            )
+            match seed {
+                Some(s) => (
+                    "native::generate_ml_kem_keypair_from_seed",
+                    native::generate_ml_kem_keypair_from_seed(session, ps, s, cka_id, label),
+                ),
+                None => (
+                    "native::generate_ml_kem_keypair",
+                    native::generate_ml_kem_keypair(session, ps, cka_id, label),
+                ),
+            }
         }
         MlDsa44 | MlDsa65 | MlDsa87 => {
             let ps = super::helpers::native_parameter_set(algo).unwrap();
-            (
-                "native::generate_ml_dsa_keypair",
-                native::generate_ml_dsa_keypair(session, ps, cka_id, label),
-            )
+            match seed {
+                Some(s) => (
+                    "native::generate_ml_dsa_keypair_from_seed",
+                    native::generate_ml_dsa_keypair_from_seed(session, ps, s, cka_id, label),
+                ),
+                None => (
+                    "native::generate_ml_dsa_keypair",
+                    native::generate_ml_dsa_keypair(session, ps, cka_id, label),
+                ),
+            }
         }
         SlhDsaSha2_128s | SlhDsaSha2_128f | SlhDsaSha2_192s | SlhDsaSha2_192f
         | SlhDsaSha2_256s | SlhDsaSha2_256f | SlhDsaShake128s | SlhDsaShake128f
         | SlhDsaShake192s | SlhDsaShake192f | SlhDsaShake256s | SlhDsaShake256f => {
             let ps = super::helpers::native_parameter_set(algo).unwrap();
-            (
-                "native::generate_slh_dsa_keypair",
-                native::generate_slh_dsa_keypair(session, ps, cka_id, label),
-            )
+            match seed {
+                Some(s) => (
+                    "native::generate_slh_dsa_keypair_from_seed",
+                    native::generate_slh_dsa_keypair_from_seed(session, ps, s, cka_id, label),
+                ),
+                None => (
+                    "native::generate_slh_dsa_keypair",
+                    native::generate_slh_dsa_keypair(session, ps, cka_id, label),
+                ),
+            }
         }
         Rsa => {
             let bits = key_length.unwrap_or(2048);
@@ -653,6 +681,7 @@ rules:
             common_attributes: vec![],
             private_key_attributes: vec![],
             public_key_attributes: vec![],
+            seed: None,
         }
     }
 

@@ -1132,6 +1132,7 @@ fn decode_create_key_pair_req(children: &[TtlvFrame]) -> Result<CreateKeyPairReq
     let mut common = Vec::new();
     let mut priv_attrs = Vec::new();
     let mut pub_attrs = Vec::new();
+    let mut seed = None;
     // KMIP 3.0 §6.1.7 `Create Key Pair` — `Common Attributes`,
     // `Private Key Attributes`, `Public Key Attributes` are each
     // wrapping Structures whose children are direct typed tags (no 1.x
@@ -1159,6 +1160,12 @@ fn decode_create_key_pair_req(children: &[TtlvFrame]) -> Result<CreateKeyPairReq
                     }
                 }
             }
+            // `Seed` (0x4201C6) — KMIP 3.0 WD19 deterministic keygen.
+            tags::PqcSeed => {
+                if let Value::ByteString(b) = &c.value {
+                    seed = Some(b.clone());
+                }
+            }
             _ => {}
         }
     }
@@ -1166,6 +1173,7 @@ fn decode_create_key_pair_req(children: &[TtlvFrame]) -> Result<CreateKeyPairReq
         common_attributes: common,
         private_key_attributes: priv_attrs,
         public_key_attributes: pub_attrs,
+        seed,
     })
 }
 
