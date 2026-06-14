@@ -103,6 +103,7 @@ pub async fn serve_admin(
     addr: SocketAddr,
     store_root: PathBuf,
     engine: Engine,
+    ring: Arc<crate::auditlog::RingSink>,
     tls: Arc<ServerConfig>,
 ) -> Result<(), AdminError> {
     let listener = TcpListener::bind(addr).await?;
@@ -121,8 +122,9 @@ pub async fn serve_admin(
         let acceptor = acceptor.clone();
         let store_root = store_root.clone();
         let engine = engine.clone();
+        let ring = ring.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_conn(tcp, acceptor, store_root, engine).await {
+            if let Err(e) = handle_conn(tcp, acceptor, store_root, engine, ring).await {
                 tracing::warn!("admin conn from {peer} ended: {e}");
             }
         });
@@ -134,6 +136,7 @@ async fn handle_conn(
     acceptor: TlsAcceptor,
     store_root: PathBuf,
     engine: Engine,
+    ring: Arc<crate::auditlog::RingSink>,
 ) -> Result<(), AdminError> {
     let mut tls = acceptor.accept(tcp).await?;
     // mTLS already enforced the client cert in the handshake; capture its CN
@@ -150,7 +153,8 @@ async fn handle_conn(
     };
 
     let store = PolicyStore::new(&store_root);
-    let (status, value) = route(&store, &store_root, &engine, &method, &path, &body, client_cn.as_deref());
+    let (status, value) =
+        route(&store, &store_root, &engine, &ring, &method, &path, &body, client_cn.as_deref());
     let resp = http_json(status, &value);
     tls.write_all(&resp).await?;
     tls.shutdown().await.ok();
@@ -163,6 +167,7 @@ fn route(
     store: &PolicyStore,
     store_root: &std::path::Path,
     engine: &Engine,
+    ring: &crate::auditlog::RingSink,
     method: &str,
     path: &str,
     body: &[u8],
@@ -173,6 +178,24 @@ fn route(
             Ok(names) => (200, json!({ "policies": names })),
             Err(e) => store_err(e),
         },
+        // Inspect logs — the three-plane audit trail (p1 policy / p2 KMIP /
+        // p3 PKCS#11) from the in-memory ring, newest events last. The UI's
+        // "inspect logs" section consumes this (correlate by correlation_id).
+        // Optional `?limit=N` caps the tail (default 200).
+        ("GET", p) if p == "/audit" || p.starts_with("/audit?") => {
+            let limit = p
+                .split_once("limit=")
+                .and_then(|(_, v)| v.split('&').next())
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(200)
+                .min(2000);
+            let all = ring.snapshot();
+            let tail = &all[all.len().saturating_sub(limit)..];
+            match serde_json::to_value(tail) {
+                Ok(events) => (200, json!({ "events": events, "total": all.len() })),
+                Err(e) => (500, json!({ "error": e.to_string() })),
+            }
+        }
         ("GET", "/active") => match store.read_active() {
             Ok(Some(m)) => (200, json!({ "name": m.name, "fingerprint": m.fingerprint })),
             Ok(None) => (200, Value::Null),
@@ -389,7 +412,8 @@ mod tests {
     #[test]
     fn route_list_includes_policy() {
         let (dir, store) = store_with("list");
-        let (status, body) = route(&store, &dir, &Engine::deny_all(), "GET", "/policies", b"", None);
+        let ring = crate::auditlog::RingSink::new(8);
+        let (status, body) = route(&store, &dir, &Engine::deny_all(), &ring, "GET", "/policies", b"", None);
         assert_eq!(status, 200);
         assert!(body["policies"].as_array().unwrap().iter().any(|v| v == "p"));
         let _ = std::fs::remove_dir_all(&dir);
@@ -398,7 +422,8 @@ mod tests {
     #[test]
     fn route_unknown_path_404() {
         let (dir, store) = store_with("404");
-        let (status, _) = route(&store, &dir, &Engine::deny_all(), "GET", "/nope", b"", None);
+        let ring = crate::auditlog::RingSink::new(8);
+        let (status, _) = route(&store, &dir, &Engine::deny_all(), &ring, "GET", "/nope", b"", None);
         assert_eq!(status, 404);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -406,8 +431,9 @@ mod tests {
     #[test]
     fn route_validate_rejects_bad_yaml_400() {
         let (dir, store) = store_with("validate");
+        let ring = crate::auditlog::RingSink::new(8);
         let (status, body) =
-            route(&store, &dir, &Engine::deny_all(), "POST", "/validate", b"not: a policy", None);
+            route(&store, &dir, &Engine::deny_all(), &ring, "POST", "/validate", b"not: a policy", None);
         assert_eq!(status, 400);
         assert!(body["error"].is_string());
         let _ = std::fs::remove_dir_all(&dir);
@@ -416,9 +442,21 @@ mod tests {
     #[test]
     fn route_active_none_is_null() {
         let (dir, store) = store_with("active");
-        let (status, body) = route(&store, &dir, &Engine::deny_all(), "GET", "/active", b"", None);
+        let ring = crate::auditlog::RingSink::new(8);
+        let (status, body) = route(&store, &dir, &Engine::deny_all(), &ring, "GET", "/active", b"", None);
         assert_eq!(status, 200);
         assert!(body.is_null());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn route_audit_empty_ring() {
+        let (dir, store) = store_with("audit");
+        let ring = crate::auditlog::RingSink::new(8);
+        let (status, body) = route(&store, &dir, &Engine::deny_all(), &ring, "GET", "/audit", b"", None);
+        assert_eq!(status, 200);
+        assert_eq!(body["total"], 0);
+        assert!(body["events"].as_array().unwrap().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
