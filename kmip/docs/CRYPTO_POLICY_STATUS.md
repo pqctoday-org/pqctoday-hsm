@@ -3,6 +3,21 @@
 **Subsystem**: `kmip/src/policy/` (Plane-1 policy engine, on top of the KMIP 3.0 dispatcher)
 **Assessed against the stated goal** (below). **Date**: 2026-06-14.
 
+> **UPDATE (implemented in this PR).** The gaps G1–G4 below were the *pre-work*
+> assessment. They are now closed by the mechanism-dimension implementation
+> (plan `CRYPTO_POLICY_GAPS_IMPLEMENTATION_PLAN.md`, phases P0–P5):
+> - **G1 (hashing)** — `hash_algorithm_allowlist` gates it; `mechanism_parameter_default` forces it.
+> - **G2 (mechanism params)** — `mechanism_parameter_constraint` gates mode/padding/deterministic; forced via `mechanism_parameter_default`.
+> - **G3 (PKCS#11 granularity)** — `mechanism_allowlist`/`mechanism_denylist` gate on the canonical `CKM_*` (full mechanism surface, incl. KMAC), bypass-proof by construction.
+> - **G4 (symmetric mode)** — gated + forceable.
+>
+> Four categories now: **signing ✅ · KEM ✅ · encryption ✅ · hashing ✅.**
+> Remaining/deferred: Encrypt mechanism-param *forcing* (AES-GCM is the default;
+> the meaningful encryption control is the gating, which is done), and parsing
+> the raw `CKM_*` out of the PKCS#11 *passthrough* `input_parameters` (the op is
+> a v0.1 stub — Phase 7). The §3 gap list below is retained as the historical
+> assessment that motivated the work.
+
 ## Goal (target state)
 
 > Enable crypto-agility through **crypto-policy definitions**, such that
