@@ -7,10 +7,13 @@ support to the Authenticode / PKCS#7 signing path, against **OpenSSL 3.6**
 - Patch: [`osslsigncode-pqc.patch`](../osslsigncode-pqc.patch)
 - Master plan row: `pqctoday-sandbox/tasks/scenario-claims-fix-plan-06032026.md`
   §P2-OSSLSIGNCODE (Scenario 17), table rows 77 / 603.
-- Status: **VALIDATED SLICE** — patched `osslsigncode` signs a real PE32+ with an
-  ML-DSA-65 software key and embeds a cryptographically-valid ML-DSA signature in
-  the Authenticode PKCS#7 structure. HSM/PKCS#11-resident keys and PQC-aware
-  `osslsigncode verify` are finish-plan items (below).
+- Status: **COMPLETE (sign + verify), validated in the production Linux image.**
+  Patched `osslsigncode` signs a real PE32+ with an ML-DSA-44/65/87 key, embeds a
+  cryptographically-valid ML-DSA signature in the Authenticode PKCS#7 (with the
+  **messageDigest authenticated attribute binding the content** — see §2/§3.6),
+  and `osslsigncode verify` returns **ok** for it (tampered content + wrong CA
+  rejected). HSM/PKCS#11-resident keys via the OpenSSL pkcs11-provider remain the
+  one finish item (§5/§7). The fundamental Windows-trust caveat (§4) is unchanged.
 
 ---
 
@@ -171,26 +174,33 @@ EVP_DigestVerify (pure ML-DSA over signed attrs) => VALID
 This proves the signature is a **genuine, valid ML-DSA-65 signature** over the
 Authenticode authenticated attributes — not a stub, not a fallback, not RSA/EC.
 
-### 3.6 Known limitation in this slice — `osslsigncode verify`
+### 3.6 `osslsigncode verify` — now green (verify-side branch added)
 
-```
+```console
 $ osslsigncode verify -in signed.exe -CAfile signer.pem
 ...
-Message digest algorithm  : SHA256
-Current message digest    : 2D2C7B38...A7A4
-Calculated message digest : 2D2C7B38...A7A4         # content digest MATCHES
-...
-Signing certificate chain verified using: ...        # ML-DSA-65 chain VERIFIES
-...:error:1080006C:PKCS7 routines:PKCS7_signatureVerify:unable to find message digest
-Signature verification: failed
-(exit 1)
+Calculated message digest : 2D2C7B38...A7A4          # content digest MATCHES
+Signing certificate chain verified using: ...         # ML-DSA-65 chain VERIFIES
+Signature verification: ok
+Number of verified signatures: 1
+(exit 0)
+
+# tampered content or wrong CA -> exit 1 (rejected)
 ```
 
-`osslsigncode verify` uses OpenSSL's **legacy `PKCS7_verify`**, which — exactly
-mirroring the sign-side blocker — cannot process a pure ML-DSA SignerInfo. The
-content digest matches and the certificate chain verifies; only the legacy
-signature-verify primitive trips. The signature itself **is** valid (§3.5). A
-matching verify-side branch is the first finish-plan item (§7).
+The patch adds an ML-DSA branch to `verify_pkcs7_data` (`verify_pkcs7_data_mldsa`):
+the cert chain is verified via `PKCS7_verify(..., PKCS7_NOSIGS)`, the
+**messageDigest authenticated attribute is checked against `digest(content)`**,
+and the signature over the SET OF authenticated attributes is verified with the
+pure one-shot `EVP_DigestVerify` (`md == NULL`). The classic `PKCS7_verify` path
+is used for every non-ML-DSA SignerInfo.
+
+> **Binding fix (found while building the verify side).** The sign-only slice did
+> *not* add the `messageDigest` attribute (the bypassed `PKCS7_dataFinal()`
+> normally does), so the signature was over attributes that did **not** bind the
+> content. The patch now adds `messageDigest` during ML-DSA signing, so the
+> signature genuinely binds the signed PE — and verify enforces it (a tampered
+> PE is rejected).
 
 ---
 
@@ -298,21 +308,21 @@ embed succeeds, so:
 
 ---
 
-## 7. Remaining work + effort estimate
+## 7. Remaining work + status
 
-| # | Item | Effort | Notes |
-|---|---|---|---|
-| 1 | **PQC-aware `verify`** — add an ML-DSA branch to osslsigncode's verify path that re-encodes the signed attributes and calls `EVP_DigestVerify` (md=NULL), so `osslsigncode verify` returns 0 for ML-DSA PEs (§3.6). | **S–M** | Mirror of `pkcs7_sign_content_mldsa()` on the verify side; OpenSSL legacy `PKCS7_verify` must be bypassed for ML-DSA SignerInfos. |
-| 2 | **PKCS#11 / softhsmv3 backing** — wire `pkcs11-provider` → softhsmv3 ML-DSA, validate `-key pkcs11:…` (§5). | **M** | No C change to the patch; depends on softhsmv3 ML-DSA mechanism (Phases 2–3) + provider ML-DSA mapping. |
-| 3 | **CLI ergonomics** — optional `-algorithm mldsa65` flag (explicit), since key-type auto-detect already works. | **S** | Cosmetic; matches the master-plan UX. |
-| 4 | **ML-DSA-44/87 + parameter coverage** — already handled by `pkey_is_mldsa()`; add explicit tests. | **S** | Code is parameterized; just test matrix. |
-| 5 | **Dockerfile pin + patch apply** in sandbox (§6); de-fallback `tests/17` (§6). | **S** | Sandbox repo edit. |
-| 6 | **Upstream/fork hygiene** — host as `pqctoday-org/osslsigncode` fork at tag 2.13 + this patch, README with the §4 caveat. | **S** | Per master plan rows 450/603. |
+| # | Item | Status |
+|---|---|---|
+| 1 | **PQC-aware `verify`** — ML-DSA branch in `verify_pkcs7_data` (§3.6) | ✅ done — `osslsigncode verify` returns ok; tampered/wrong-CA rejected |
+| 2 | **messageDigest content binding** in the ML-DSA sign path | ✅ done (the binding fix, §3.6) |
+| 3 | **ML-DSA-44/87 coverage** | ✅ done — `pkey_is_mldsa()` covers all three; ML-DSA-87 round-trip verified (OID .19) |
+| 4 | **Dockerfile pin 2.13 + patch + valid PE fixture; de-fallback `tests/17`** | ✅ done in `pqctoday-sandbox`; validated in-container |
+| 5 | **PKCS#11 / softhsmv3 backing** — `-key pkcs11:…` via the OpenSSL pkcs11-provider | ⬜ pending: the code path is key-agnostic (signs/verifies on the loaded `EVP_PKEY`), so it needs no C change — only the OpenSSL **pkcs11-provider's ML-DSA mapping** to softhsmv3 (external to this fork). step-ca/cosign already prove HSM-resident ML-DSA via direct PKCS#11. |
+| 6 | **CLI ergonomics** — optional `-algorithm mldsa65` flag (auto-detect already works) | optional/cosmetic |
 
-**Total to fully close Scenario 17 (real Authenticode-with-ML-DSA, HSM-resident
-key, both sign and verify green): ~M (≈ 1–2 days).** The hard part (emitting a
-valid ML-DSA Authenticode signature) is done and proven in this slice; the
-remainder is the symmetric verify branch plus environment wiring.
+**Scenario 17 is real and complete for sign + verify with a software ML-DSA key.**
+The only open item is HSM-resident keys, which is gated on the OpenSSL
+pkcs11-provider exposing ML-DSA (a component outside osslsigncode). The Windows
+PQC-Authenticode profile gap (§4) is a permanent ecosystem caveat, not a fork item.
 
 ---
 
