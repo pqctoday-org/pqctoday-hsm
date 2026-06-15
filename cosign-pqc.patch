@@ -1,49 +1,114 @@
-# cosign PQC patch — ML-DSA-65 (FIPS 204) artifact signing
+# cosign PQC patch — ML-DSA-65 (FIPS 204) artifact signing, real CLI
 #
 # Fork of sigstore/cosign. Adds a self-contained ML-DSA-65 signer/verifier that
-# satisfies sigstore's signature.SignerVerifier interface — the exact seam cosign
-# uses for ECDSA/RSA/Ed25519 keys — so ML-DSA can sign/verify blobs and artifacts
-# without disturbing the rest of the codebase.
+# satisfies sigstore's signature.SignerVerifier interface (the seam cosign uses
+# for ECDSA/RSA/Ed25519) AND wires it through the real `cosign sign-blob` /
+# `verify-blob` / `generate-key-pair` CLI so ML-DSA artifacts sign+verify
+# end-to-end on the binary.
 #
-# Backend (validated slice): cloudflare/circl pure-Go ML-DSA-65.
+# Backend (this patch): cloudflare/circl pure-Go ML-DSA-65 (key in a file).
 # Backend (finish-plan lead): HSM-resident key via miekg/pkcs11 -> softhsmv3,
-#   which plugs in at this same interface. See docs/COSIGN_PQC_FORK.md.
+#   plugging in at the same signature.SignerVerifier seam. See docs/COSIGN_PQC_FORK.md.
 #
 # Upstream pin:
 #   repo : github.com/sigstore/cosign  (module github.com/sigstore/cosign/v3)
 #   tag  : v3.0.6
 #   rev  : f1ad3ee952313be5d74a49d67ba0aa8d0d5e351f
-#   go   : 1.25.7 (go.mod) — built & tested with go1.26.4 darwin/arm64
+#   go   : 1.25.7 (go.mod) — built & tested with go1.26.4
 #   dep  : github.com/cloudflare/circl v1.6.3
 #
 # Apply from the cosign source tree root:
-#   git apply cosign-pqc.patch
-#   go mod tidy            # materialize circl in the module graph
-#   go test ./pkg/signature/mldsa/   # proves ML-DSA-65 sign+verify
+#   git apply cosign-pqc.patch          # (git apply ignores .gitignore; the
+#                                       #  pkg/signature/mldsa files land fine)
+#   go build ./cmd/cosign
 #
 # Files (relative to cosign source tree root):
-#   go.mod                                (+ cloudflare/circl v1.6.3)
-#   go.sum                                (+ circl checksums)
-#   pkg/signature/mldsa/mldsa65.go        (NEW — ML-DSA-65 SignerVerifier, CIRCL)
+#   go.mod / go.sum                       (+ cloudflare/circl v1.6.3)
+#   pkg/signature/mldsa/mldsa65.go        (NEW — ML-DSA-65 SignerVerifier, CIRCL,
+#                                          custom PEM types, RawPublicKey helper)
 #   pkg/signature/mldsa/mldsa65_test.go   (NEW — sign/verify/tamper/PEM tests)
+#   pkg/signature/keys.go                 (ML-DSA branches: VerifierForKeyRef +
+#                                          loadKey + PublicKeyPem)
+#   internal/key/svkeypair.go             (ML-DSA branch in NewSignerVerifierKeypair
+#                                          + GetHashAlgorithm + GetPublicKeyPem —
+#                                          no x509/registry dependency for ML-DSA)
+#   cmd/cosign/cli/generate/generate_key_pair.go
+#                                         (COSIGN_KEY_ALGORITHM=ml-dsa-65 keygen)
 #
-# Validated-slice evidence: docs/COSIGN_PQC_FORK.md §4 (verbatim go test output).
-# CLI wiring (cosign sign-blob/verify-blob) is documented as remaining work in
-# docs/COSIGN_PQC_FORK.md §7-§8 (v3.0.6 keypair layer needs x509/registry support
-# for ML-DSA before the binary CLI accepts it; the interface slice is proven now).
+# Real-CLI usage (keypair, no transparency log — Rekor has no ML-DSA type yet,
+# see docs/COSIGN_PQC_FORK.md §5):
+#   COSIGN_KEY_ALGORITHM=ml-dsa-65 COSIGN_PASSWORD= cosign generate-key-pair
+#   cosign sign-blob   --key cosign.key --use-signing-config=false \
+#                      --new-bundle-format=false --tlog-upload=false \
+#                      --output-signature blob.sig --yes artifact
+#   cosign verify-blob --key cosign.pub --insecure-ignore-tlog \
+#                      --signature blob.sig artifact     # -> Verified OK (3309-byte sig)
 #
+# HSM path (miekg/pkcs11 -> softhsmv3, CKM_ML_DSA) is the next finish item.
+#
+diff --git a/cmd/cosign/cli/generate/generate_key_pair.go b/cmd/cosign/cli/generate/generate_key_pair.go
+index 3e729eb..5dfeb59 100644
+--- a/cmd/cosign/cli/generate/generate_key_pair.go
++++ b/cmd/cosign/cli/generate/generate_key_pair.go
+@@ -33,8 +33,11 @@ import (
+ 	"github.com/sigstore/cosign/v3/internal/ui"
+ 	"github.com/sigstore/cosign/v3/pkg/cosign"
+ 	"github.com/sigstore/cosign/v3/pkg/cosign/kubernetes"
++	"github.com/sigstore/cosign/v3/pkg/signature/mldsa"
+ 	"github.com/sigstore/sigstore/pkg/cryptoutils"
+ 	"github.com/sigstore/sigstore/pkg/signature/kms"
++
++	"crypto/rand"
+ )
+ 
+ var (
+@@ -47,6 +50,34 @@ func GenerateKeyPairCmd(ctx context.Context, kmsVal string, outputKeyPrefixVal s
+ 	privateKeyFileName := outputKeyPrefixVal + ".key"
+ 	publicKeyFileName := outputKeyPrefixVal + ".pub"
+ 
++	// PQC: COSIGN_KEY_ALGORITHM=ml-dsa-65 generates an ML-DSA-65 (FIPS 204) key
++	// pair. The keys use the mldsa package's custom (unencrypted) PEM types
++	// because crypto/x509 has no ML-DSA OID; the HSM-resident path is preferred
++	// in production (see docs/COSIGN_PQC_FORK.md).
++	if alg := os.Getenv("COSIGN_KEY_ALGORITHM"); alg == mldsa.AlgorithmName {
++		sv, err := mldsa.GenerateKeyPair(rand.Reader)
++		if err != nil {
++			return fmt.Errorf("generating ml-dsa-65 key pair: %w", err)
++		}
++		privPEM, err := sv.MarshalPrivateKeyPEM()
++		if err != nil {
++			return err
++		}
++		pubPEM, err := sv.MarshalPublicKeyPEM()
++		if err != nil {
++			return err
++		}
++		if err := os.WriteFile(privateKeyFileName, privPEM, 0600); err != nil {
++			return err
++		}
++		fmt.Fprintln(os.Stderr, "Private key (ML-DSA-65) written to", privateKeyFileName)
++		if err := os.WriteFile(publicKeyFileName, pubPEM, 0644); err != nil { //nolint: gosec
++			return err
++		}
++		fmt.Fprintln(os.Stderr, "Public key (ML-DSA-65) written to", publicKeyFileName)
++		return nil
++	}
++
+ 	if kmsVal != "" {
+ 		k, err := kms.Get(ctx, kmsVal, crypto.SHA256)
+ 		if err != nil {
 diff --git a/go.mod b/go.mod
-index 0eb0c6c..3450abf 100644
+index 0eb0c6c..5a637b8 100644
 --- a/go.mod
 +++ b/go.mod
-@@ -134,6 +134,7 @@ require (
- 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
- 	github.com/chzyer/readline v1.5.1 // indirect
- 	github.com/clbanning/mxj/v2 v2.7.0 // indirect
-+	github.com/cloudflare/circl v1.6.3 // indirect
- 	github.com/cockroachdb/apd/v3 v3.2.1 // indirect
- 	github.com/common-nighthawk/go-figure v0.0.0-20210622060536-734e95fb86be // indirect
- 	github.com/containerd/stargz-snapshotter/estargz v0.18.2 // indirect
+@@ -9,6 +9,7 @@ require (
+ 	github.com/awslabs/amazon-ecr-credential-helper/ecr-login v0.12.0
+ 	github.com/buildkite/agent/v3 v3.118.0
+ 	github.com/chrismellard/docker-credential-acr-env v0.0.0-20230304212654-82a0ddb27589
++	github.com/cloudflare/circl v1.6.3
+ 	github.com/cyberphone/json-canonicalization v0.0.0-20241213102144-19d51d7fe467
+ 	github.com/depcheck-test/depcheck-test v0.0.0-20220607135614-199033aaa936
+ 	github.com/digitorus/timestamp v0.0.0-20231217203849-220c5c2851b7
 diff --git a/go.sum b/go.sum
 index 5b23165..72c77b4 100644
 --- a/go.sum
@@ -57,12 +122,133 @@ index 5b23165..72c77b4 100644
  github.com/cncf/udpa/go v0.0.0-20191209042840-269d4d468f6f/go.mod h1:M8M6+tZqaGXZJjfX53e64911xZQV5JYwmTeXPW+k8Sc=
  github.com/cncf/xds/go v0.0.0-20251210132809-ee656c7534f5 h1:6xNmx7iTtyBRev0+D/Tv1FZd4SCg8axKApyNyRsAt/w=
  github.com/cncf/xds/go v0.0.0-20251210132809-ee656c7534f5/go.mod h1:KdCmV+x/BuvyMxRnYBlmVaq4OLiKW6iRQfvC62cvdkI=
+diff --git a/internal/key/svkeypair.go b/internal/key/svkeypair.go
+index eee7d2e..fa90161 100644
+--- a/internal/key/svkeypair.go
++++ b/internal/key/svkeypair.go
+@@ -28,6 +28,7 @@ import (
+ 	"fmt"
+ 
+ 	"github.com/sigstore/cosign/v3/pkg/cosign"
++	"github.com/sigstore/cosign/v3/pkg/signature/mldsa"
+ 	protocommon "github.com/sigstore/protobuf-specs/gen/pb-go/common/v1"
+ 	"github.com/sigstore/sigstore/pkg/cryptoutils"
+ 	"github.com/sigstore/sigstore/pkg/signature"
+@@ -37,10 +38,11 @@ import (
+ // SignerVerifierKeypair is a wrapper around a SignerVerifier that implements
+ // sigstore-go's Keypair interface.
+ type SignerVerifierKeypair struct {
+-	sv     signature.SignerVerifier
+-	hint   []byte
+-	keyAlg string
+-	sigAlg signature.AlgorithmDetails
++	sv      signature.SignerVerifier
++	hint    []byte
++	keyAlg  string
++	sigAlg  signature.AlgorithmDetails
++	isMLDSA bool // PQC: ML-DSA-65 has no x509 OID / algorithm-registry entry
+ }
+ 
+ // NewSignerVerifierKeypair creates a new SignerVerifierKeypair from a SignerVerifier.
+@@ -49,6 +51,22 @@ func NewSignerVerifierKeypair(sv signature.SignerVerifier, defaultLoadOptions *[
+ 	if err != nil {
+ 		return nil, fmt.Errorf("getting public key: %w", err)
+ 	}
++
++	// PQC: ML-DSA-65 keys cannot be x509-marshalled and are absent from the
++	// signature algorithm registry, so derive the hint from the raw FIPS 204
++	// public-key bytes and skip GetDefaultAlgorithmDetails. The blob-signing
++	// path uses sv.SignMessage directly; the new-bundle/Fulcio path (which needs
++	// sigAlg/keyAlg registry support) is out of scope for ML-DSA (no tlog yet).
++	if rawPub, ok := mldsa.RawPublicKey(pubKey); ok {
++		hashedBytes := sha256.Sum256(rawPub)
++		return &SignerVerifierKeypair{
++			sv:      sv,
++			hint:    []byte(base64.StdEncoding.EncodeToString(hashedBytes[:])),
++			keyAlg:  "ML-DSA-65",
++			isMLDSA: true,
++		}, nil
++	}
++
+ 	pubKeyBytes, err := x509.MarshalPKIXPublicKey(pubKey)
+ 	if err != nil {
+ 		return nil, fmt.Errorf("marshalling public key: %w", err)
+@@ -83,6 +101,12 @@ func NewSignerVerifierKeypair(sv signature.SignerVerifier, defaultLoadOptions *[
+ 
+ // GetHashAlgorithm returns the hash algorithm to generate the digest to be signed.
+ func (k *SignerVerifierKeypair) GetHashAlgorithm() protocommon.HashAlgorithm {
++	if k.isMLDSA {
++		// ML-DSA hashes the message internally (no external pre-hash); report
++		// SHA2_256 so the blob-signing payload/digest path stays on the
++		// SHA256 default (sv.SignMessage still signs the raw message).
++		return protocommon.HashAlgorithm_SHA2_256
++	}
+ 	return k.sigAlg.GetProtoHashType()
+ }
+ 
+@@ -116,6 +140,9 @@ func (k *SignerVerifierKeypair) GetPublicKeyPem() (string, error) {
+ 	if err != nil {
+ 		return "", err
+ 	}
++	if pemBytes, ok := mldsa.MarshalPublicKeyPEMFor(pubKey); ok {
++		return string(pemBytes), nil
++	}
+ 	pemBytes, err := cryptoutils.MarshalPublicKeyToPEM(pubKey)
+ 	if err != nil {
+ 		return "", err
+diff --git a/pkg/signature/keys.go b/pkg/signature/keys.go
+index 3b7879a..aea88fe 100644
+--- a/pkg/signature/keys.go
++++ b/pkg/signature/keys.go
+@@ -27,6 +27,7 @@ import (
+ 	"github.com/sigstore/cosign/v3/pkg/cosign/git/gitlab"
+ 	"github.com/sigstore/cosign/v3/pkg/cosign/kubernetes"
+ 	"github.com/sigstore/cosign/v3/pkg/cosign/pkcs11key"
++	"github.com/sigstore/cosign/v3/pkg/signature/mldsa"
+ 	"github.com/sigstore/sigstore/pkg/cryptoutils"
+ 	"github.com/sigstore/sigstore/pkg/signature"
+ 
+@@ -63,6 +64,12 @@ func VerifierForKeyRef(ctx context.Context, keyRef string, hashAlgorithm crypto.
+ 		return nil, err
+ 	}
+ 
++	// PQC: ML-DSA-65 public keys use a custom PEM type (crypto/x509 has no ML-DSA
++	// OID), so branch before the x509-based UnmarshalPEMToPublicKey.
++	if mldsa.IsPublicKeyPEM(raw) {
++		return mldsa.LoadVerifierPEM(raw)
++	}
++
+ 	// PEM encoded file.
+ 	pubKey, err := cryptoutils.UnmarshalPEMToPublicKey(raw)
+ 	if err != nil {
+@@ -77,6 +84,11 @@ func loadKey(keyPath string, pf cosign.PassFunc, defaultLoadOptions *[]signature
+ 	if err != nil {
+ 		return nil, err
+ 	}
++	// PQC: ML-DSA-65 private keys use a custom (unencrypted) PEM type, loaded by
++	// the in-tree mldsa package rather than cosign's encrypted-key/x509 path.
++	if mldsa.IsPrivateKeyPEM(kb) {
++		return mldsa.LoadPrivateKeyPEM(kb)
++	}
+ 	pass := []byte{}
+ 	if pf != nil {
+ 		pass, err = pf(false)
+@@ -231,5 +243,9 @@ func PublicKeyPem(key signature.PublicKeyProvider, pkOpts ...signature.PublicKey
+ 	if err != nil {
+ 		return nil, err
+ 	}
++	// PQC: ML-DSA-65 has no x509 OID; emit the custom PEM block instead.
++	if pemBytes, ok := mldsa.MarshalPublicKeyPEMFor(pub); ok {
++		return pemBytes, nil
++	}
+ 	return cryptoutils.MarshalPublicKeyToPEM(pub)
+ }
 diff --git a/pkg/signature/mldsa/mldsa65.go b/pkg/signature/mldsa/mldsa65.go
 new file mode 100644
-index 0000000..6b54b9d
+index 0000000..a5b5492
 --- /dev/null
 +++ b/pkg/signature/mldsa/mldsa65.go
-@@ -0,0 +1,193 @@
+@@ -0,0 +1,218 @@
 +// Copyright 2026 The PQC Today Authors.
 +//
 +// Licensed under the Apache License, Version 2.0 (the "License");
@@ -255,6 +441,31 @@ index 0000000..6b54b9d
 +func IsPublicKeyPEM(data []byte) bool {
 +	block, _ := pem.Decode(data)
 +	return block != nil && block.Type == PublicKeyPemType
++}
++
++// RawPublicKey returns the raw FIPS 204 packed bytes of an ML-DSA-65 public key,
++// and whether pub is one. cosign's keypair adapter uses this to derive a key
++// hint without crypto/x509 (which has no ML-DSA OID).
++func RawPublicKey(pub crypto.PublicKey) ([]byte, bool) {
++	p, ok := pub.(*mldsa65.PublicKey)
++	if !ok {
++		return nil, false
++	}
++	raw, err := p.MarshalBinary()
++	if err != nil {
++		return nil, false
++	}
++	return raw, true
++}
++
++// MarshalPublicKeyPEMFor serializes any ML-DSA-65 public key to the custom PEM
++// block, for callers holding a crypto.PublicKey (e.g. the keypair adapter).
++func MarshalPublicKeyPEMFor(pub crypto.PublicKey) ([]byte, bool) {
++	raw, ok := RawPublicKey(pub)
++	if !ok {
++		return nil, false
++	}
++	return pem.EncodeToMemory(&pem.Block{Type: PublicKeyPemType, Bytes: raw}), true
 +}
 diff --git a/pkg/signature/mldsa/mldsa65_test.go b/pkg/signature/mldsa/mldsa65_test.go
 new file mode 100644
