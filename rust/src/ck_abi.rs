@@ -2587,7 +2587,7 @@ mod tests {
     /// must refuse (CKR_FUNCTION_FAILED) instead of truncating into UB.
     #[cfg(target_pointer_width = "64")]
     #[test]
-    fn embedded_pointer_refused_on_64_bit() {
+    fn embedded_pointer_marshaled_on_64_bit() {
         let _guard = crate::native::test_lock::acquire();
         unsafe {
             crate::state::set_initialized(true);
@@ -2604,11 +2604,15 @@ mod tests {
                 pParameter: iv.as_mut_ptr() as CK_VOID_PTR,
                 ulParameterLen: iv.len() as CK_ULONG,
             };
+            // Native 64-bit re-plumb: a non-NULL mechanism parameter carrying a
+            // 64-bit stack pointer is now marshaled at native width (no longer
+            // refused or truncated), so the operation initialises successfully.
             assert_eq!(
                 C_DigestInit(session, &mut mech),
-                rv(CKR_FUNCTION_FAILED),
-                "stack pointer above 4 GiB must be refused, not truncated"
+                rv(CKR_OK),
+                "64-bit stack pointer in pParameter must be handled, not refused"
             );
+            C_SessionCancel(session, 0xFFFF_FFFF as CK_FLAGS); // clear digest op
             // NULL-parameter mechanisms translate exactly.
             mech.pParameter = std::ptr::null_mut();
             mech.ulParameterLen = 0;

@@ -95,7 +95,7 @@ fn hmac_sha256_byte_exact_parity() {
     assert_eq!(mac_native.len(), 32);
 
     // FFI path: CK_MECHANISM { mech_type: CKM_SHA256_HMAC, p_param: 0, len: 0 }
-    let mut mech: [u32; 3] = [CKM_SHA256_HMAC, 0, 0];
+    let mut mech: [usize; 3] = [CKM_SHA256_HMAC as usize, 0, 0];
     let rv = ffi::C_SignInit(session, mech.as_mut_ptr() as *mut u8, key);
     assert_eq!(rv, CKR_OK, "ffi::C_SignInit HMAC: 0x{rv:x}");
 
@@ -133,7 +133,7 @@ fn ml_dsa_65_native_sign_then_ffi_verify_succeeds() {
     assert_eq!(sig.len(), 3309, "FIPS 204 §5 ML-DSA-65 sig = 3309 bytes");
 
     // FFI verify.
-    let mut mech: [u32; 3] = [CKM_ML_DSA, 0, 0];
+    let mut mech: [usize; 3] = [CKM_ML_DSA as usize, 0, 0];
     let rv = ffi::C_VerifyInit(session, mech.as_mut_ptr() as *mut u8, pub_h);
     assert_eq!(rv, CKR_OK, "ffi::C_VerifyInit: 0x{rv:x}");
 
@@ -160,7 +160,7 @@ fn ml_dsa_65_ffi_sign_then_native_verify_succeeds() {
     let message = b"reverse direction";
 
     // FFI sign.
-    let mut mech: [u32; 3] = [CKM_ML_DSA, 0, 0];
+    let mut mech: [usize; 3] = [CKM_ML_DSA as usize, 0, 0];
     let rv = ffi::C_SignInit(session, mech.as_mut_ptr() as *mut u8, prv_h);
     assert_eq!(rv, CKR_OK);
 
@@ -200,7 +200,7 @@ fn hmac_tampered_tag_rejected_by_both_apis() {
     );
 
     // FFI: returns CKR_SIGNATURE_INVALID.
-    let mut mech: [u32; 3] = [CKM_SHA256_HMAC, 0, 0];
+    let mut mech: [usize; 3] = [CKM_SHA256_HMAC as usize, 0, 0];
     let rv = ffi::C_VerifyInit(session, mech.as_mut_ptr() as *mut u8, key);
     assert_eq!(rv, CKR_OK);
     let mut data_buf = message.to_vec();
@@ -276,7 +276,7 @@ fn sign_after_destroy_fails_in_both_apis() {
     // FFI sign on destroyed handle — CKR_KEY_HANDLE_INVALID. PKCS#11 v3.2
     // §5.1 error priority: the object-handle check fires before any
     // attribute gate (CKA_SIGN), and a destroyed handle no longer exists.
-    let mut mech: [u32; 3] = [CKM_ML_DSA, 0, 0];
+    let mut mech: [usize; 3] = [CKM_ML_DSA as usize, 0, 0];
     let rv = ffi::C_SignInit(session, mech.as_mut_ptr() as *mut u8, prv_h);
     assert_eq!(rv, CKR_KEY_HANDLE_INVALID);
     close_session(session).unwrap();
@@ -306,10 +306,10 @@ fn seed_blocked_on_sensitive_key_in_both_apis() {
 
     // FFI path: CK_ATTRIBUTE { CKA_SEED, NULL, 0 } size query — blocked with
     // CKR_ATTRIBUTE_SENSITIVE and ulValueLen = CK_UNAVAILABLE_INFORMATION.
-    let mut tmpl: [u32; 3] = [CKA_SEED, 0, 0];
+    let mut tmpl: [usize; 3] = [CKA_SEED as usize, 0, 0];
     let rv = ffi::C_GetAttributeValue(session, prv_h, tmpl.as_mut_ptr() as *mut u8, 1);
     assert_eq!(rv, CKR_ATTRIBUTE_SENSITIVE);
-    assert_eq!(tmpl[2], 0xFFFF_FFFF);
+    assert_eq!(tmpl[2], usize::MAX);
     close_session(session).unwrap();
 }
 
@@ -356,10 +356,10 @@ fn deterministic_keygen_seed_stored_but_blocked_in_both_apis() {
             "native CKA_SEED readback must be blocked (h={prv_h})"
         );
         // …and the C ABI size query reports CKR_ATTRIBUTE_SENSITIVE.
-        let mut tmpl: [u32; 3] = [CKA_SEED, 0, 0];
+        let mut tmpl: [usize; 3] = [CKA_SEED as usize, 0, 0];
         let rv = ffi::C_GetAttributeValue(session, prv_h, tmpl.as_mut_ptr() as *mut u8, 1);
         assert_eq!(rv, CKR_ATTRIBUTE_SENSITIVE);
-        assert_eq!(tmpl[2], 0xFFFF_FFFF);
+        assert_eq!(tmpl[2], usize::MAX);
     }
     close_session(session).unwrap();
 }
@@ -384,7 +384,7 @@ fn unique_id_present_and_distinct_on_generated_objects() {
 
     // FFI readback (size query): CKA_UNIQUE_ID is NOT sensitive-blocked even
     // on the sensitive private key — it is metadata, not key material.
-    let mut tmpl: [u32; 3] = [CKA_UNIQUE_ID, 0, 0];
+    let mut tmpl: [usize; 3] = [CKA_UNIQUE_ID as usize, 0, 0];
     let rv = ffi::C_GetAttributeValue(session, prv_h, tmpl.as_mut_ptr() as *mut u8, 1);
     assert_eq!(rv, CKR_OK);
     assert_eq!(tmpl[2] as usize, uid_prv.len());

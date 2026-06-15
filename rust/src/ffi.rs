@@ -9646,10 +9646,10 @@ mod attr_integrity_ffi_tests {
 
         // CK_ATTRIBUTE { type, pValue = NULL, ulValueLen } — size query form,
         // safe on 64-bit native (no embedded value pointers).
-        let mut tmpl: [u32; 3] = [CKA_SEED, 0, 0];
+        let mut tmpl: [usize; 3] = [CKA_SEED as usize, 0, 0];
         let rv = C_GetAttributeValue(SESSION, h, tmpl.as_mut_ptr() as *mut u8, 1);
         assert_eq!(rv, CKR_ATTRIBUTE_SENSITIVE);
-        assert_eq!(tmpl[2], 0xFFFF_FFFF, "ulValueLen = CK_UNAVAILABLE_INFORMATION");
+        assert_eq!(tmpl[2], usize::MAX, "ulValueLen = CK_UNAVAILABLE_INFORMATION");
 
         // Non-sensitive + extractable key: CKA_SEED length is readable.
         let mut attrs = aes_import_attrs();
@@ -9657,7 +9657,7 @@ mod attr_integrity_ffi_tests {
         store_bool(&mut attrs, CKA_SENSITIVE, false);
         store_bool(&mut attrs, CKA_EXTRACTABLE, true);
         let h2 = create_object_from_attrs(SESSION, attrs).unwrap();
-        let mut tmpl2: [u32; 3] = [CKA_SEED, 0, 0];
+        let mut tmpl2: [usize; 3] = [CKA_SEED as usize, 0, 0];
         let rv = C_GetAttributeValue(SESSION, h2, tmpl2.as_mut_ptr() as *mut u8, 1);
         assert_eq!(rv, CKR_OK);
         assert_eq!(tmpl2[2], 32);
@@ -9734,7 +9734,7 @@ mod attr_integrity_ffi_tests {
         let h_tgt = create_object_from_attrs(SESSION, tgt_attrs).unwrap();
 
         // CK_MECHANISM { CKM_AES_KEY_WRAP, NULL, 0 }; length-query call form.
-        let mut mech: [u32; 3] = [CKM_AES_KEY_WRAP, 0, 0];
+        let mut mech: [usize; 3] = [CKM_AES_KEY_WRAP as usize, 0, 0];
         let mut wrapped_len: u32 = 0;
 
         // 1. WWT=TRUE, wrapping key lacks CKA_TRUSTED → CKR_KEY_NOT_WRAPPABLE.
@@ -10356,8 +10356,8 @@ mod return_code_ffi_tests {
         });
     }
 
-    fn kw_mech() -> [u32; 3] {
-        [CKM_AES_KEY_WRAP, 0, 0]
+    fn kw_mech() -> [usize; 3] {
+        [CKM_AES_KEY_WRAP as usize, 0, 0]
     }
 
     fn wrap(session: u32, h_wrap: u32, h_key: u32, out: &mut [u8], out_len: &mut u32) -> u32 {
@@ -10485,7 +10485,7 @@ mod return_code_ffi_tests {
     fn derive_missing_base_key_handle_invalid() {
         let _guard = test_lock::acquire();
         setup();
-        let mut mech: [u32; 3] = [CKM_BIP32_MASTER_DERIVE, 0, 0];
+        let mut mech: [usize; 3] = [CKM_BIP32_MASTER_DERIVE as usize, 0, 0];
         let mut h_new: u32 = 0;
         assert_eq!(
             C_DeriveKey(
@@ -10517,7 +10517,7 @@ mod return_code_ffi_tests {
             CKM_BIP32_MASTER_DERIVE,
             CKM_BIP32_CHILD_DERIVE,
         ] {
-            let mut mech: [u32; 3] = [legacy, 0, 0];
+            let mut mech: [usize; 3] = [legacy as usize, 0, 0];
             let mut h_new: u32 = 0;
             assert_eq!(
                 C_DeriveKey(
@@ -10692,7 +10692,7 @@ mod return_code_ffi_tests {
     fn digest_one_shot_after_update_operation_active() {
         let _guard = test_lock::acquire();
         setup();
-        let mut mech: [u32; 3] = [CKM_SHA256, 0, 0];
+        let mut mech: [usize; 3] = [CKM_SHA256 as usize, 0, 0];
         assert_eq!(C_DigestInit(SESSION, mech.as_mut_ptr() as *mut u8), CKR_OK);
         let data = b"part one";
         assert_eq!(
@@ -10731,7 +10731,7 @@ mod return_code_ffi_tests {
     fn aes_keygen_missing_value_len_template_incomplete() {
         let _guard = test_lock::acquire();
         setup();
-        let mut mech: [u32; 3] = [CKM_AES_KEY_GEN, 0, 0];
+        let mut mech: [usize; 3] = [CKM_AES_KEY_GEN as usize, 0, 0];
         let mut h_key: u32 = 0;
         assert_eq!(
             C_GenerateKey(
@@ -10762,7 +10762,7 @@ mod return_code_ffi_tests {
             store_param_set(&mut attrs, CKP_ML_KEM_512);
             o.borrow_mut().insert(h_prv, attrs);
         });
-        let mut mech: [u32; 3] = [CKM_ML_KEM, 0, 0];
+        let mut mech: [usize; 3] = [CKM_ML_KEM as usize, 0, 0];
         let mut ct = [0u8; 10]; // ML-KEM-512 expects 768
         let mut h_new: u32 = 0;
         assert_eq!(
@@ -10789,7 +10789,7 @@ mod return_code_ffi_tests {
         setup();
         let h_aes = 0x5334_0031;
         install_key(h_aes, 32, &[(CKA_ENCAPSULATE, true), (CKA_DECAPSULATE, true)]);
-        let mut mech: [u32; 3] = [CKM_ML_KEM, 0, 0];
+        let mut mech: [usize; 3] = [CKM_ML_KEM as usize, 0, 0];
         let mut ct = [0u8; 1088];
         let mut ct_len: u32 = ct.len() as u32;
         let mut h_new: u32 = 0;
@@ -10840,7 +10840,7 @@ mod return_code_ffi_tests {
             // Deliberately NO store_param_set().
             o.borrow_mut().insert(h_kem, attrs);
         });
-        let mut mech: [u32; 3] = [CKM_ML_KEM, 0, 0];
+        let mut mech: [usize; 3] = [CKM_ML_KEM as usize, 0, 0];
         let mut ct = [0u8; 1088];
         let mut ct_len: u32 = ct.len() as u32;
         let mut h_new: u32 = 0;
@@ -11278,12 +11278,12 @@ mod multipart_sign_verify_ffi_tests {
     }
 
     fn sign_init(sess: u32, mech: u32, key: u32) -> u32 {
-        let mut m: [u32; 3] = [mech, 0, 0];
+        let mut m: [usize; 3] = [mech as usize, 0, 0];
         C_SignInit(sess, m.as_mut_ptr() as *mut u8, key)
     }
 
     fn verify_init(sess: u32, mech: u32, key: u32) -> u32 {
-        let mut m: [u32; 3] = [mech, 0, 0];
+        let mut m: [usize; 3] = [mech as usize, 0, 0];
         C_VerifyInit(sess, m.as_mut_ptr() as *mut u8, key)
     }
 
@@ -11587,7 +11587,10 @@ mod multipart_sign_verify_ffi_tests {
         // 0x1 = CKM_RSA_PKCS (raw, digest-less — value from pkcs11t.h; the
         // constant is not defined in constants.rs).
         const CKM_RSA_PKCS_RAW: u32 = 0x0000_0001;
-        for mech in [CKM_RSA_PKCS_RAW, CKM_ECDSA, CKM_ML_DSA, CKM_SLH_DSA, CKM_EDDSA, CKM_HSS, CKM_XMSS] {
+        // Genuinely single-part: raw RSA/ECDSA (caller supplies the digest) and
+        // the stateful HSS/XMSS schemes. Pure ML-DSA / SLH-DSA / EdDSA are NOT
+        // listed — they gained multi-part buffering (sign_mech_supports_multipart).
+        for mech in [CKM_RSA_PKCS_RAW, CKM_ECDSA, CKM_HSS, CKM_XMSS] {
             // SignUpdate path.
             assert_eq!(sign_init(SESSION, mech, HMAC_KEY), CKR_OK, "mech 0x{mech:x}");
             assert_eq!(
