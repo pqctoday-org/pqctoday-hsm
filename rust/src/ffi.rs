@@ -6658,12 +6658,13 @@ pub fn C_UnwrapKeyAuthenticated(
 // instead of buffering the whole message.
 
 /// True when `mech`'s sign/verify operation accepts the multi-part
-/// Update/Final flow: the hash-composite RSA/ECDSA mechanisms and the MAC
-/// families (HMAC, HMAC_GENERAL, KMAC) — anything that internally
-/// digests/MACs a streamed message. Everything else this engine dispatches
-/// is single-part only: raw CKM_RSA_PKCS / CKM_ECDSA (caller supplies the
-/// digest), ML-DSA / SLH-DSA (pure and pre-hash), EdDSA, and the stateful
-/// HSS/XMSS mechanisms.
+/// Update/Final flow: the hash-composite RSA/ECDSA mechanisms, the MAC
+/// families (HMAC, HMAC_GENERAL, KMAC), and pure ML-DSA / SLH-DSA / EdDSA —
+/// anything whose signature is a deterministic function of the full message,
+/// so the accumulator can buffer the streamed parts and Final delegates to the
+/// one-shot handler over the concatenation. Still single-part only: raw
+/// CKM_RSA_PKCS / CKM_ECDSA (caller supplies the digest), the pre-hash ML-DSA /
+/// SLH-DSA / EdDSA-ph variants, and the stateful HSS/XMSS mechanisms.
 fn sign_mech_supports_multipart(mech: u32) -> bool {
     matches!(
         mech,
@@ -6689,6 +6690,9 @@ fn sign_mech_supports_multipart(mech: u32) -> bool {
             | CKM_SHA3_512_HMAC
             | CKM_KMAC_128
             | CKM_KMAC_256
+            | CKM_ML_DSA
+            | CKM_SLH_DSA
+            | CKM_EDDSA
     ) || hmac_general_base(mech).is_some()
 }
 
