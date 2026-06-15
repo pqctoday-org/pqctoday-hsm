@@ -1,6 +1,6 @@
 use cryptoki::mechanism::Mechanism;
 use cryptoki::object::{Attribute, CertificateType, ObjectClass, ObjectHandle};
-use openpgp_x509_sequoia::types::{AlgorithmId, PublicKeyInfo};
+use crate::x509::types::{AlgorithmId, PublicKeyInfo};
 use p256::elliptic_curve::zeroize::Zeroizing;
 use sequoia_openpgp::crypto::mpi;
 use sequoia_openpgp::packet::key::{SecretKeyMaterial, SecretParts, UnspecifiedRole};
@@ -264,7 +264,7 @@ impl Op11Session {
                 .map_err(|e| e.into())
         };
 
-        let cert = openpgp_x509_sequoia::self_sign_x509(tbs_cert, algo_id, &mut signer)?;
+        let cert = crate::x509::self_sign_x509(tbs_cert, algo_id, &mut signer)?;
 
         Ok(cert)
     }
