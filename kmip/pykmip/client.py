@@ -176,6 +176,21 @@ class KmipClient:
             payload.append(leaf("KeyFormatType", "Enumeration", key_format_type))
         return self.request("Get", *payload)
 
+    def locate(self, *, maximum_items: Optional[int] = None) -> KmipResult:
+        """Locate managed objects. With no filters the server returns every
+        on-line object's UniqueIdentifier (KMIP 3.0 §6.1.32). Pull them with
+        `codec.find_all(result.payload, "UniqueIdentifier")`."""
+        payload = []
+        if maximum_items is not None:
+            payload.append(leaf("MaximumItems", "Integer", maximum_items))
+        return self.request("Locate", *payload)
+
+    def get_attributes(self, uid: str) -> KmipResult:
+        """GetAttributes for `uid` (KMIP 3.0 §6.1.21). No AttributeReference
+        children → the server returns every attribute it knows, wrapped in an
+        `Attributes` structure under the ResponsePayload."""
+        return self.request("GetAttributes", leaf("UniqueIdentifier", "TextString", uid))
+
     def encrypt(
         self,
         uid: str,
