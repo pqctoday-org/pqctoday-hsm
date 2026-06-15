@@ -653,15 +653,16 @@ mod live_composite_tests {
 
         // 5a) Byte-level wire assertion: parse the signature packet, assert v6 +
         //     algorithm 30 (the on-the-wire proof, strictly the spike's check on
-        //     an HSM-produced signature).
+        //     an HSM-produced signature) and that the composite MPI decomposes
+        //     into a 64-byte Ed25519 + 3309-byte ML-DSA-65 half (acceptance §8).
         let pile = PacketPile::from_bytes(&sig).expect("re-parse signature");
         let mut found = None;
         for p in pile.descendants() {
             if let Packet::Signature(s) = p {
-                found = Some((s.version(), s.pk_algo()));
+                found = Some((s.version(), s.pk_algo(), s.mpis().clone()));
             }
         }
-        let (version, pk_algo) = found.expect("a Signature packet");
+        let (version, pk_algo, mpis) = found.expect("a Signature packet");
         assert_eq!(version, 6, "composite signature must be a v6 packet (RFC 9580)");
         assert_eq!(
             u8::from(pk_algo),
@@ -669,6 +670,27 @@ mod live_composite_tests {
             "HSM composite signature pk_algo must be 30 (MLDSA65_Ed25519)"
         );
         assert_eq!(pk_algo, PublicKeyAlgorithm::MLDSA65_Ed25519);
+        match &mpis {
+            sequoia_openpgp::crypto::mpi::Signature::MLDSA65_Ed25519 { eddsa, mldsa } => {
+                assert_eq!(eddsa.len(), 64, "Ed25519 half must be 64 bytes");
+                assert_eq!(mldsa.len(), 3309, "ML-DSA-65 half must be 3309 bytes");
+            }
+            other => panic!("expected MLDSA65_Ed25519 composite MPI, got {other:?}"),
+        }
+
+        // Wire-byte cross-check (the spike's offset-5 proof, on an HSM signature):
+        // de-armor and confirm the v6 packet carries 0x1e (=30) at the spec offset.
+        {
+            let mut der = sequoia_openpgp::armor::Reader::from_bytes(
+                &sig,
+                sequoia_openpgp::armor::ReaderMode::Tolerant(None),
+            );
+            let mut raw = Vec::new();
+            std::io::copy(&mut der, &mut raw).expect("de-armor");
+            // new-format Signature: [c2][len..][06=version][type][1e=pk-algo]...
+            assert_eq!(raw[3], 0x06, "wire version octet must be 0x06 (v6)");
+            assert_eq!(raw[5], 0x1e, "wire pk-algo octet must be 0x1e (30)");
+        }
 
         // 5b) Cryptographic interop: a sequoia 2.x verifier validates the
         //     HSM-produced signature against the same cert.
