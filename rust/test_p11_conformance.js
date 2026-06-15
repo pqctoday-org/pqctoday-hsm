@@ -429,7 +429,10 @@ check('C_CancelFunction → FUNCTION_NOT_PARALLEL', w._C_CancelFunction(hS), CKR
 check('C_WaitForSlotEvent(DONT_BLOCK) → NO_EVENT', w._C_WaitForSlotEvent(1, 0, 0), CKR.NO_EVENT);
 check('C_WaitForSlotEvent(blocking) → FUNCTION_NOT_SUPPORTED', w._C_WaitForSlotEvent(0, 0, 0), CKR.FUNCTION_NOT_SUPPORTED);
 check('C_SignRecoverInit → FUNCTION_NOT_SUPPORTED', w._C_SignRecoverInit(hS, 0, 0), CKR.FUNCTION_NOT_SUPPORTED);
-check('C_DigestEncryptUpdate → FUNCTION_NOT_SUPPORTED', w._C_DigestEncryptUpdate(hS, 0, 0, 0, 0), CKR.FUNCTION_NOT_SUPPORTED);
+// Dual-function ops are now IMPLEMENTED (not stubs): with neither a digest nor
+// an encrypt operation active, C_DigestEncryptUpdate returns
+// OPERATION_NOT_INITIALIZED (§5.16), not FUNCTION_NOT_SUPPORTED.
+check('C_DigestEncryptUpdate (no active ops) → OPERATION_NOT_INITIALIZED', w._C_DigestEncryptUpdate(hS, 0, 0, 0, 0), CKR.OPERATION_NOT_INITIALIZED);
 
 section('F1 — mechanism table reconciliation (R6.2)');
 {

@@ -188,15 +188,15 @@ export function _C_Decrypt(h_session, p_encrypted_data, ul_encrypted_data_len, p
 }
 
 /**
- * @param {number} _h_session
- * @param {number} _p_encrypted_part
- * @param {number} _ul_encrypted_part_len
- * @param {number} _p_part
- * @param {number} _pul_part_len
+ * @param {number} h_session
+ * @param {number} p_encrypted_part
+ * @param {number} ul_encrypted_part_len
+ * @param {number} p_part
+ * @param {number} pul_part_len
  * @returns {number}
  */
-export function _C_DecryptDigestUpdate(_h_session, _p_encrypted_part, _ul_encrypted_part_len, _p_part, _pul_part_len) {
-    const ret = wasm._C_DecryptDigestUpdate(_h_session, _p_encrypted_part, _ul_encrypted_part_len, _p_part, _pul_part_len);
+export function _C_DecryptDigestUpdate(h_session, p_encrypted_part, ul_encrypted_part_len, p_part, pul_part_len) {
+    const ret = wasm._C_DecryptDigestUpdate(h_session, p_encrypted_part, ul_encrypted_part_len, p_part, pul_part_len);
     return ret >>> 0;
 }
 
@@ -282,15 +282,15 @@ export function _C_DecryptUpdate(h_session, p_encrypted_part, ul_encrypted_part_
 }
 
 /**
- * @param {number} _h_session
- * @param {number} _p_encrypted_part
- * @param {number} _ul_encrypted_part_len
- * @param {number} _p_part
- * @param {number} _pul_part_len
+ * @param {number} h_session
+ * @param {number} p_encrypted_part
+ * @param {number} ul_encrypted_part_len
+ * @param {number} p_part
+ * @param {number} pul_part_len
  * @returns {number}
  */
-export function _C_DecryptVerifyUpdate(_h_session, _p_encrypted_part, _ul_encrypted_part_len, _p_part, _pul_part_len) {
-    const ret = wasm._C_DecryptVerifyUpdate(_h_session, _p_encrypted_part, _ul_encrypted_part_len, _p_part, _pul_part_len);
+export function _C_DecryptVerifyUpdate(h_session, p_encrypted_part, ul_encrypted_part_len, p_part, pul_part_len) {
+    const ret = wasm._C_DecryptVerifyUpdate(h_session, p_encrypted_part, ul_encrypted_part_len, p_part, pul_part_len);
     return ret >>> 0;
 }
 
@@ -332,15 +332,15 @@ export function _C_Digest(h_session, p_data, ul_data_len, p_digest, pul_digest_l
 }
 
 /**
- * @param {number} _h_session
- * @param {number} _p_part
- * @param {number} _ul_part_len
- * @param {number} _p_encrypted_part
- * @param {number} _pul_encrypted_part_len
+ * @param {number} h_session
+ * @param {number} p_part
+ * @param {number} ul_part_len
+ * @param {number} p_encrypted_part
+ * @param {number} pul_encrypted_part_len
  * @returns {number}
  */
-export function _C_DigestEncryptUpdate(_h_session, _p_part, _ul_part_len, _p_encrypted_part, _pul_encrypted_part_len) {
-    const ret = wasm._C_DigestEncryptUpdate(_h_session, _p_part, _ul_part_len, _p_encrypted_part, _pul_encrypted_part_len);
+export function _C_DigestEncryptUpdate(h_session, p_part, ul_part_len, p_encrypted_part, pul_encrypted_part_len) {
+    const ret = wasm._C_DigestEncryptUpdate(h_session, p_part, ul_part_len, p_encrypted_part, pul_encrypted_part_len);
     return ret >>> 0;
 }
 
@@ -710,13 +710,13 @@ export function _C_GetSessionInfo(h_session, p_info) {
 }
 
 /**
- * @param {number} _h_session
- * @param {number} _type
- * @param {number} _p_flags
+ * @param {number} h_session
+ * @param {number} type_
+ * @param {number} p_flags
  * @returns {number}
  */
-export function _C_GetSessionValidationFlags(_h_session, _type, _p_flags) {
-    const ret = wasm._C_GetSessionValidationFlags(_h_session, _type, _p_flags);
+export function _C_GetSessionValidationFlags(h_session, type_, p_flags) {
+    const ret = wasm._C_GetSessionValidationFlags(h_session, type_, p_flags);
     return ret >>> 0;
 }
 
@@ -805,11 +805,11 @@ export function _C_Login(h_session, user_type, p_pin, ul_pin_len) {
  * @param {number} p_pin
  * @param {number} ul_pin_len
  * @param {number} _p_username
- * @param {number} ul_username_len
+ * @param {number} _ul_username_len
  * @returns {number}
  */
-export function _C_LoginUser(h_session, user_type, p_pin, ul_pin_len, _p_username, ul_username_len) {
-    const ret = wasm._C_LoginUser(h_session, user_type, p_pin, ul_pin_len, _p_username, ul_username_len);
+export function _C_LoginUser(h_session, user_type, p_pin, ul_pin_len, _p_username, _ul_username_len) {
+    const ret = wasm._C_LoginUser(h_session, user_type, p_pin, ul_pin_len, _p_username, _ul_username_len);
     return ret >>> 0;
 }
 
@@ -998,15 +998,15 @@ export function _C_Sign(h_session, p_data, ul_data_len, p_signature, pul_signatu
 }
 
 /**
- * @param {number} _h_session
- * @param {number} _p_part
- * @param {number} _ul_part_len
- * @param {number} _p_encrypted_part
- * @param {number} _pul_encrypted_part_len
+ * @param {number} h_session
+ * @param {number} p_part
+ * @param {number} ul_part_len
+ * @param {number} p_encrypted_part
+ * @param {number} pul_encrypted_part_len
  * @returns {number}
  */
-export function _C_SignEncryptUpdate(_h_session, _p_part, _ul_part_len, _p_encrypted_part, _pul_encrypted_part_len) {
-    const ret = wasm._C_SignEncryptUpdate(_h_session, _p_part, _ul_part_len, _p_encrypted_part, _pul_encrypted_part_len);
+export function _C_SignEncryptUpdate(h_session, p_part, ul_part_len, p_encrypted_part, pul_encrypted_part_len) {
+    const ret = wasm._C_SignEncryptUpdate(h_session, p_part, ul_part_len, p_encrypted_part, pul_encrypted_part_len);
     return ret >>> 0;
 }
 
