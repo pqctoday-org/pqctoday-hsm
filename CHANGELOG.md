@@ -8,6 +8,51 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — softhsmrustv3 native PKCS#11 v3.2 C-ABI compliance: 28 → 314 PASS / 0 FAIL (2026-06-15)
+
+The Rust engine's C ABI (`rust/src/ck_abi.rs` + `ffi.rs`) was architecturally
+32-bit/WASM-shaped — it marshaled every attribute template and `CK_MECHANISM`
+(and nested param structs) as `u32` triples and reconstructed pointers from
+`u32`. On native 64-bit this truncated pointers (`CKR_FUNCTION_FAILED`/heap
+corruption), so `p11_v32_compliance_test -c all` scored only **28 PASS**. The
+validated KMIP/ACVP path was unaffected (it bypasses the C ABI via
+`softhsmrustv3::native::*`). Re-plumbed to native width and wired the
+remaining functionality to **314 PASS / 0 FAIL / 1 SKIP**, on the isolated
+branch `feat/cabi-native-64bit`, with the **1452-case KMIP interop + KAT replay
+staying 15/15** as the gate after every commit.
+
+- **Width re-plumb (`u32 → usize`).** Portable: `usize` == `u32` on wasm32,
+  `u64` on native; nested C structs read at `size_of::<usize>()` offsets so the
+  same code is correct on both. Covers templates, `CK_MECHANISM`/params,
+  `store_ulong` (native CK_ULONG width — fixes `C_FindObjects` byte-exact
+  matching), HKDF/PBKDF2/SP800-108/GCM/ECDH/RSA-PSS/auth-wrap param structs, and
+  the `C_GetAttributeValue` length write-back (`CK_UNAVAILABLE_INFORMATION` =
+  `usize::MAX`).
+- **Crypto wired through the C ABI:** X25519/X448 ECDH derive, AES-CBC(-PAD) key
+  wrap, ChaCha20 keygen, AES-CMAC SP800-108 PRF, RIPEMD-160 digest+HMAC,
+  SHA3-384-RSA (PKCS#1 v1.5 + PSS), raw `CKM_RSA_PKCS` sign/verify, the four
+  dual-function ops, ML-DSA/SLH-DSA/EdDSA multi-part, HSS/LMS keygen+sign (with
+  `CKA_HSS_KEYS_REMAINING` decrement), and XMSS^MT keygen/sign/verify (worked
+  around an `xmss 0.1.0-pre.0` serialized-key OID round-trip bug).
+- **Conformance behaviors:** keygen `CKA_KEY_TYPE`-vs-mechanism validation
+  (`CKR_TEMPLATE_INCONSISTENT`), `CKA_PUBLIC_KEY_INFO` (SPKI) on private PQC
+  keys, `CKA_UNIQUE_ID` as a 36-char UUID, RSA-PSS hashAlg validation,
+  generic-secret KCV via **SHA-1** (not SHA-256), `CKF_ASYNC_SESSION` rejected
+  with `CKR_SESSION_ASYNC_NOT_SUPPORTED`, RSA private-component sensitivity.
+- **Function exports:** all `C_*` are now exported as `#[unsafe(no_mangle)]`
+  symbols (standard PKCS#11 module behavior), lighting up the async,
+  session-cancel, ML-KEM encapsulate/decapsulate, authenticated-wrap, and v3.0
+  message-based (`C_MessageSign*`/`C_MessageEncrypt*`) APIs.
+- **Constants:** every `CK*` value added was verified against the normative
+  `src/lib/pkcs11/pkcs11t.h`. XMSS^MT keygen now exposes the standard
+  `CKA_PARAMETER_SET` (0x61d), not only the legacy vendor attribute.
+- **Tests:** in-process `cargo test --lib` restored to green (201/0) — the old
+  `[u32;3]` test scaffolding (which SIGSEGV'd against the now-usize ABI) was
+  converted to `[usize;3]`.
+- **Not merged to `main`.** The validated checkout's `rust/` tree is unchanged;
+  full per-commit table and rationale in `rust/CK_ABI_NATIVE_COMPLIANCE_PLAN.md`.
+  The lone SKIP is username-based `C_LoginUser` (NOT_SUPPORTED by design).
+
 ### Added — cryptopolicy-manager `GET /audit` (three-plane log inspection) (2026-06-14)
 
 The admin facade gains `GET /audit?limit=N`, returning the in-memory `RingSink`
