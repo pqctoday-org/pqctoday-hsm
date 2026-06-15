@@ -1182,6 +1182,8 @@ pub fn sign_rsa(
         CKM_SHA256_RSA_PKCS_PSS => pss_sign!(sha2::Sha256, 32),
         CKM_SHA384_RSA_PKCS_PSS => pss_sign!(sha2::Sha384, 48),
         CKM_SHA512_RSA_PKCS_PSS => pss_sign!(sha2::Sha512, 64),
+        CKM_SHA3_384_RSA_PKCS => pkcs1v15_sign!(sha3::Sha3_384),
+        CKM_SHA3_384_RSA_PKCS_PSS => pss_sign!(sha3::Sha3_384, 48),
         _ => Err(CKR_MECHANISM_INVALID),
     }
 }
@@ -1499,7 +1501,8 @@ pub fn get_sig_len(mech: u32, hkey: u32) -> u32 {
         CKM_KMAC_128 => 32,
         CKM_KMAC_256 => 64,
         CKM_SHA256_RSA_PKCS | CKM_SHA384_RSA_PKCS | CKM_SHA512_RSA_PKCS
-        | CKM_SHA256_RSA_PKCS_PSS | CKM_SHA384_RSA_PKCS_PSS | CKM_SHA512_RSA_PKCS_PSS => 512,
+        | CKM_SHA256_RSA_PKCS_PSS | CKM_SHA384_RSA_PKCS_PSS | CKM_SHA512_RSA_PKCS_PSS
+        | CKM_SHA3_384_RSA_PKCS | CKM_SHA3_384_RSA_PKCS_PSS => 512,
         // ECDSA — sig size = 2 × ⌈curve_bits / 8⌉, independent of the hash. The
         // SHA384/SHA3-384 hardcode for 96-byte was wrong for P-256 + P-521 etc;
         // size MUST come from the key's curve, not the hash mechanism.
@@ -1848,6 +1851,8 @@ pub fn verify_rsa(
         CKM_SHA256_RSA_PKCS_PSS => pss_verify!(sha2::Sha256, 32),
         CKM_SHA384_RSA_PKCS_PSS => pss_verify!(sha2::Sha384, 48),
         CKM_SHA512_RSA_PKCS_PSS => pss_verify!(sha2::Sha512, 64),
+        CKM_SHA3_384_RSA_PKCS => pkcs1v15_verify!(sha3::Sha3_384),
+        CKM_SHA3_384_RSA_PKCS_PSS => pss_verify!(sha3::Sha3_384, 48),
         _ => Err(CKR_MECHANISM_INVALID),
     }
 }

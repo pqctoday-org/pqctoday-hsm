@@ -159,6 +159,11 @@ pub const CKM_SHA512_RSA_PKCS: u32 = 0x0000_0042;
 pub const CKM_SHA256_RSA_PKCS_PSS: u32 = 0x0000_0043;
 pub const CKM_SHA384_RSA_PKCS_PSS: u32 = 0x0000_0044;
 pub const CKM_SHA512_RSA_PKCS_PSS: u32 = 0x0000_0045;
+// Raw RSA-PSS (caller supplies the pre-computed hash) — advertised in §6.4.
+pub const CKM_RSA_PKCS_PSS: u32 = 0x0000_000D;
+// SHA3-384 RSA composite sign mechanisms (§6.4).
+pub const CKM_SHA3_384_RSA_PKCS: u32 = 0x0000_0061;
+pub const CKM_SHA3_384_RSA_PKCS_PSS: u32 = 0x0000_0064;
 
 // PQC - KEM
 pub const CKM_ML_KEM_KEY_PAIR_GEN: u32 = 0x0000_000F;
@@ -180,6 +185,7 @@ pub const CKM_SHA256: u32 = 0x0000_0250;
 pub const CKM_SHA384: u32 = 0x0000_0260;
 pub const CKM_SHA512: u32 = 0x0000_0270;
 pub const CKM_SHA3_256: u32 = 0x0000_02B0;
+pub const CKM_SHA3_384: u32 = 0x0000_02C0;
 pub const CKM_SHA3_512: u32 = 0x0000_02D0;
 
 // HMAC
@@ -200,6 +206,7 @@ pub const CKG_MGF1_SHA1: u32 = 0x0000_0001;
 pub const CKG_MGF1_SHA256: u32 = 0x0000_0002;
 pub const CKG_MGF1_SHA384: u32 = 0x0000_0003;
 pub const CKG_MGF1_SHA512: u32 = 0x0000_0004;
+pub const CKG_MGF1_SHA3_384: u32 = 0x0000_0008;
 // OAEP source type
 pub const CKZ_DATA_SPECIFIED: u32 = 0x0000_0001;
 // SP 800-108 data-param types (beyond BYTE_ARRAY below)
@@ -412,6 +419,9 @@ pub const SUPPORTED_MECHS: &[u32] = &[
     CKM_SHA256_RSA_PKCS_PSS,
     CKM_SHA384_RSA_PKCS_PSS,
     CKM_SHA512_RSA_PKCS_PSS,
+    CKM_RSA_PKCS_PSS,
+    CKM_SHA3_384_RSA_PKCS,
+    CKM_SHA3_384_RSA_PKCS_PSS,
     // ML-KEM (FIPS 203)
     CKM_ML_KEM_KEY_PAIR_GEN,
     CKM_ML_KEM,

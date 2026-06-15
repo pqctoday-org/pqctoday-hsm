@@ -763,7 +763,8 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
     let info = match mech_type {
         CKM_RSA_PKCS_KEY_PAIR_GEN => (2048, 4096, 0x00010000u32),
         CKM_SHA256_RSA_PKCS | CKM_SHA384_RSA_PKCS | CKM_SHA512_RSA_PKCS
-        | CKM_SHA256_RSA_PKCS_PSS | CKM_SHA384_RSA_PKCS_PSS | CKM_SHA512_RSA_PKCS_PSS => {
+        | CKM_SHA256_RSA_PKCS_PSS | CKM_SHA384_RSA_PKCS_PSS | CKM_SHA512_RSA_PKCS_PSS
+        | CKM_RSA_PKCS_PSS | CKM_SHA3_384_RSA_PKCS | CKM_SHA3_384_RSA_PKCS_PSS => {
             (2048, 4096, 0x00000800 | 0x00002000)
         }
         CKM_RSA_PKCS_OAEP => (2048, 4096, 0x00000100 | 0x00000200),
@@ -2837,6 +2838,7 @@ fn rsa_pss_mech_params(mech: u32) -> Option<(u32, u32)> {
         CKM_SHA256_RSA_PKCS_PSS => Some((CKM_SHA256, CKG_MGF1_SHA256)),
         CKM_SHA384_RSA_PKCS_PSS => Some((CKM_SHA384, CKG_MGF1_SHA384)),
         CKM_SHA512_RSA_PKCS_PSS => Some((CKM_SHA512, CKG_MGF1_SHA512)),
+        CKM_SHA3_384_RSA_PKCS_PSS => Some((CKM_SHA3_384, CKG_MGF1_SHA3_384)),
         _ => None,
     }
 }
@@ -2878,16 +2880,18 @@ pub fn C_SignInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
                 Err(rv) => return rv,
             }
         } else if let Some((exp_hash, exp_mgf)) = rsa_pss_mech_params(mech_type) {
-            // CK_RSA_PKCS_PSS_PARAMS (wasm32, 12 B): hashAlg, mgf, sLen.
+            // CK_RSA_PKCS_PSS_PARAMS — 3 CK_ULONG fields (hashAlg, mgf, sLen) at
+            // native width (size_of::<usize>(): 12 B wasm32, 24 B native).
             // §6.4.5 — params are caller-authoritative; hashAlg/mgf must match
             // the mechanism's digest. Absent params keep legacy defaults.
             let p_param = *((p_mechanism as *const usize).add(1));
             let param_len = *((p_mechanism as *const usize).add(2));
-            if p_param != 0 && param_len >= 12 {
-                let pp = p_param as *const u8;
-                let hash_alg = std::ptr::read_unaligned(pp as *const u32);
-                let mgf = std::ptr::read_unaligned((pp as *const u32).add(1));
-                let s_len = std::ptr::read_unaligned((pp as *const u32).add(2));
+            let usz = core::mem::size_of::<usize>();
+            if p_param != 0 && param_len >= 3 * usz {
+                let pp = p_param as *const usize;
+                let hash_alg = std::ptr::read_unaligned(pp) as u32;
+                let mgf = std::ptr::read_unaligned(pp.add(1)) as u32;
+                let s_len = std::ptr::read_unaligned(pp.add(2)) as u32;
                 if hash_alg != exp_hash || mgf != exp_mgf {
                     return CKR_MECHANISM_PARAM_INVALID;
                 }
@@ -3173,7 +3177,8 @@ pub fn C_Sign(
                 }
             }
             CKM_SHA256_RSA_PKCS | CKM_SHA384_RSA_PKCS | CKM_SHA512_RSA_PKCS
-            | CKM_SHA256_RSA_PKCS_PSS | CKM_SHA384_RSA_PKCS_PSS | CKM_SHA512_RSA_PKCS_PSS => {
+            | CKM_SHA256_RSA_PKCS_PSS | CKM_SHA384_RSA_PKCS_PSS | CKM_SHA512_RSA_PKCS_PSS
+            | CKM_SHA3_384_RSA_PKCS | CKM_SHA3_384_RSA_PKCS_PSS => {
                 let pss_salt = if rsa_pss_mech_params(eff_mech).is_some() && ctx_bytes.len() >= 4 {
                     Some(u32::from_le_bytes([
                         ctx_bytes[0],
@@ -3250,16 +3255,18 @@ pub fn C_VerifyInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
                 Err(rv) => return rv,
             }
         } else if let Some((exp_hash, exp_mgf)) = rsa_pss_mech_params(mech_type) {
-            // CK_RSA_PKCS_PSS_PARAMS (wasm32, 12 B): hashAlg, mgf, sLen.
+            // CK_RSA_PKCS_PSS_PARAMS — 3 CK_ULONG fields (hashAlg, mgf, sLen) at
+            // native width (size_of::<usize>(): 12 B wasm32, 24 B native).
             // §6.4.5 — params are caller-authoritative; hashAlg/mgf must match
             // the mechanism's digest. Absent params keep legacy defaults.
             let p_param = *((p_mechanism as *const usize).add(1));
             let param_len = *((p_mechanism as *const usize).add(2));
-            if p_param != 0 && param_len >= 12 {
-                let pp = p_param as *const u8;
-                let hash_alg = std::ptr::read_unaligned(pp as *const u32);
-                let mgf = std::ptr::read_unaligned((pp as *const u32).add(1));
-                let s_len = std::ptr::read_unaligned((pp as *const u32).add(2));
+            let usz = core::mem::size_of::<usize>();
+            if p_param != 0 && param_len >= 3 * usz {
+                let pp = p_param as *const usize;
+                let hash_alg = std::ptr::read_unaligned(pp) as u32;
+                let mgf = std::ptr::read_unaligned(pp.add(1)) as u32;
+                let s_len = std::ptr::read_unaligned(pp.add(2)) as u32;
                 if hash_alg != exp_hash || mgf != exp_mgf {
                     return CKR_MECHANISM_PARAM_INVALID;
                 }
@@ -3481,7 +3488,8 @@ pub fn C_Verify(
             // PKCS#11 v3.2: RSA public key material is in CKA_MODULUS + CKA_PUBLIC_EXPONENT.
             // CKA_VALUE is NOT defined for CKO_PUBLIC_KEY/CKK_RSA objects.
             CKM_SHA256_RSA_PKCS | CKM_SHA384_RSA_PKCS | CKM_SHA512_RSA_PKCS
-            | CKM_SHA256_RSA_PKCS_PSS | CKM_SHA384_RSA_PKCS_PSS | CKM_SHA512_RSA_PKCS_PSS => {
+            | CKM_SHA256_RSA_PKCS_PSS | CKM_SHA384_RSA_PKCS_PSS | CKM_SHA512_RSA_PKCS_PSS
+            | CKM_SHA3_384_RSA_PKCS | CKM_SHA3_384_RSA_PKCS_PSS => {
                 match get_rsa_public_components(hkey) {
                     Some((n, e)) => {
                         let pss_salt =
@@ -3825,16 +3833,18 @@ pub fn C_VerifySignatureInit(
                 Err(rv) => return rv,
             }
         } else if let Some((exp_hash, exp_mgf)) = rsa_pss_mech_params(mech_type) {
-            // CK_RSA_PKCS_PSS_PARAMS (wasm32, 12 B): hashAlg, mgf, sLen.
+            // CK_RSA_PKCS_PSS_PARAMS — 3 CK_ULONG fields (hashAlg, mgf, sLen) at
+            // native width (size_of::<usize>(): 12 B wasm32, 24 B native).
             // §6.4.5 — params are caller-authoritative; hashAlg/mgf must match
             // the mechanism's digest. Absent params keep legacy defaults.
             let p_param = *((p_mechanism as *const usize).add(1));
             let param_len = *((p_mechanism as *const usize).add(2));
-            if p_param != 0 && param_len >= 12 {
-                let pp = p_param as *const u8;
-                let hash_alg = std::ptr::read_unaligned(pp as *const u32);
-                let mgf = std::ptr::read_unaligned((pp as *const u32).add(1));
-                let s_len = std::ptr::read_unaligned((pp as *const u32).add(2));
+            let usz = core::mem::size_of::<usize>();
+            if p_param != 0 && param_len >= 3 * usz {
+                let pp = p_param as *const usize;
+                let hash_alg = std::ptr::read_unaligned(pp) as u32;
+                let mgf = std::ptr::read_unaligned(pp.add(1)) as u32;
+                let s_len = std::ptr::read_unaligned(pp.add(2)) as u32;
                 if hash_alg != exp_hash || mgf != exp_mgf {
                     return CKR_MECHANISM_PARAM_INVALID;
                 }
@@ -6663,6 +6673,8 @@ fn sign_mech_supports_multipart(mech: u32) -> bool {
             | CKM_SHA256_RSA_PKCS_PSS
             | CKM_SHA384_RSA_PKCS_PSS
             | CKM_SHA512_RSA_PKCS_PSS
+            | CKM_SHA3_384_RSA_PKCS
+            | CKM_SHA3_384_RSA_PKCS_PSS
             | CKM_ECDSA_SHA256
             | CKM_ECDSA_SHA384
             | CKM_ECDSA_SHA512
