@@ -807,6 +807,9 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
         CKM_EC_MONTGOMERY_KEY_PAIR_GEN => (255, 448, 0x00010000),
         // PKCS#11 v3.2 §6.7 — Montgomery key derivation (X25519 or X448)
         CKM_EC_MONTGOMERY_KEY_DERIVE => (255, 448, 0x00080000),
+        // PKCS#11 v3.2 §6.7 — dedicated X25519 / X448 Diffie-Hellman (CKF_DERIVE)
+        CKM_X25519 => (255, 255, 0x00080000),
+        CKM_X448 => (448, 448, 0x00080000),
         CKM_AES_KEY_GEN => (16, 32, 0x00008000),
         // AES-GCM additionally has C_EncryptMessage/C_DecryptMessage support
         // (CKF_MESSAGE_ENCRYPT 0x2 | CKF_MESSAGE_DECRYPT 0x4, pkcs11t.h).
@@ -5534,14 +5537,19 @@ pub fn C_DeriveKey(
 
         let key_value: Vec<u8> = match mech_type {
             // ── ECDH ────────────────────────────────────────────────────────
-            CKM_ECDH1_DERIVE | CKM_ECDH1_COFACTOR_DERIVE | CKM_EC_MONTGOMERY_KEY_DERIVE => {
-                let p_param = *((p_mechanism as *const usize).add(1)) as usize as *const u32;
+            CKM_ECDH1_DERIVE | CKM_ECDH1_COFACTOR_DERIVE | CKM_EC_MONTGOMERY_KEY_DERIVE
+            | CKM_X25519 | CKM_X448 => {
+                // CK_ECDH1_DERIVE_PARAMS — 5 CK_ULONG/pointer fields read at
+                // native width (size_of::<usize>()): [kdf, ulSharedDataLen,
+                // pSharedData, ulPublicDataLen, pPublicData]. Reading them as
+                // u32 at WASM offsets truncated ulPublicDataLen/pPublicData to
+                // the wrong words on 64-bit (→ peer_pk_len 0 → ARGUMENTS_BAD).
+                let p_param = *((p_mechanism as *const usize).add(1)) as *const usize;
                 if p_param.is_null() {
                     return CKR_ARGUMENTS_BAD;
                 }
-                // CK_ECDH1_DERIVE_PARAMS: [kdf, ulSharedDataLen, pSharedData, ulPublicDataLen, pPublicData]
-                let peer_pk_len = *p_param.add(3) as usize;
-                let peer_pk_ptr = *p_param.add(4) as usize as *const u8;
+                let peer_pk_len = *p_param.add(3);
+                let peer_pk_ptr = *p_param.add(4) as *const u8;
                 if peer_pk_ptr.is_null() || peer_pk_len == 0 {
                     return CKR_ARGUMENTS_BAD;
                 }
@@ -5682,9 +5690,9 @@ pub fn C_DeriveKey(
                         }
                     }
                 };
-                let kdf = *p_param.add(0);
-                let shared_data_len = *p_param.add(1) as usize;
-                let shared_data_ptr = *p_param.add(2) as usize as *const u8;
+                let kdf = *p_param.add(0) as u32;
+                let shared_data_len = *p_param.add(1);
+                let shared_data_ptr = *p_param.add(2) as *const u8;
                 let shared_data = if !shared_data_ptr.is_null() && shared_data_len > 0 {
                     std::slice::from_raw_parts(shared_data_ptr, shared_data_len)
                 } else {

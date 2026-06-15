@@ -300,6 +300,11 @@ pub const CKM_EDDSA: u32 = 0x0000_1057;
 // range (0x80000000+) — the former 0x1058 squatted unassigned spec-reserved
 // space adjacent to CKM_EDDSA and risked a future OASIS collision.
 pub const CKM_EC_MONTGOMERY_KEY_DERIVE: u32 = 0x8000_0011;
+// PKCS#11 v3.2 §6.7 dedicated Montgomery-curve DH mechanisms, in the
+// CKM_VENDOR_DEFINED (0x80000000) range per the spec header:
+// CKM_X25519 = CKM_VENDOR_DEFINED | 0x1058, CKM_X448 = | 0x1059.
+pub const CKM_X25519: u32 = 0x8000_1058;
+pub const CKM_X448: u32 = 0x8000_1059;
 // Ed25519ph (prehashed). This is the real PKCS#11 v3.2 mechanism value
 // (pkcs11t.h: CKM_EDDSA_PH = 0x80001057); the engine also dispatches to it
 // internally when CK_EDDSA_PARAMS.phFlag is set on a plain CKM_EDDSA op.
@@ -490,6 +495,8 @@ pub const SUPPORTED_MECHS: &[u32] = &[
     CKM_EC_EDWARDS_KEY_PAIR_GEN,
     CKM_EC_MONTGOMERY_KEY_PAIR_GEN,
     CKM_EC_MONTGOMERY_KEY_DERIVE,
+    CKM_X25519,
+    CKM_X448,
     CKM_EDDSA,
     CKM_EDDSA_PH,
     // AES
