@@ -360,6 +360,10 @@ pub const CKS_RW_SO_FUNCTIONS: u32 = 4;
 
 pub const CKF_SERIAL_SESSION: u32 = 0x0000_0004;
 pub const CKF_RW_SESSION: u32 = 0x0000_0002;
+// PKCS#11 v3.2 §5.6 — async sessions. We do not support async, so the token
+// never advertises CKF_ASYNC_SESSION_SUPPORTED and C_OpenSession rejects the
+// CKF_ASYNC_SESSION request flag.
+pub const CKF_ASYNC_SESSION: u32 = 0x0000_0008;
 
 // PKCS#11 v3.2 §5.5 — CK_TOKEN_INFO.flags (pkcs11t.h "token information flags")
 pub const CKF_RNG: u32 = 0x0000_0001;
@@ -376,6 +380,9 @@ pub const CKR_SESSION_EXISTS: u32 = 0x0000_00B6;
 pub const CKR_SESSION_READ_ONLY: u32 = 0x0000_00B5;
 pub const CKR_SESSION_READ_ONLY_EXISTS: u32 = 0x0000_00B7;
 pub const CKR_SESSION_READ_WRITE_SO_EXISTS: u32 = 0x0000_00B8;
+// PKCS#11 v3.2 §5.6.1 — returned when CKF_ASYNC_SESSION is requested but the
+// token does not support async sessions.
+pub const CKR_SESSION_ASYNC_NOT_SUPPORTED: u32 = 0x0000_0205;
 pub const CKR_USER_TYPE_INVALID: u32 = 0x0000_0103;
 pub const CKR_USER_ANOTHER_ALREADY_LOGGED_IN: u32 = 0x0000_0104;
 pub const CKR_USER_TOO_MANY_TYPES: u32 = 0x0000_0105;

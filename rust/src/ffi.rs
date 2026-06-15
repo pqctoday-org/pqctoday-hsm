@@ -306,6 +306,11 @@ pub fn C_OpenSession(
     if (flags & CKF_SERIAL_SESSION) == 0 {
         return CKR_SESSION_PARALLEL_NOT_SUPPORTED;
     }
+    // §5.6.1 — async sessions are not supported; the token does not advertise
+    // CKF_ASYNC_SESSION_SUPPORTED, so the request flag must be rejected.
+    if (flags & CKF_ASYNC_SESSION) != 0 {
+        return CKR_SESSION_ASYNC_NOT_SUPPORTED;
+    }
     // Check if SO is logged in and trying to open a RO session
     let so_logged_in = TOKEN_STORE.with(|ts| {
         ts.borrow()

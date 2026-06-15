@@ -788,9 +788,15 @@ pub fn store_bool(attrs: &mut Attributes, attr_type: u32, value: bool) {
     attrs.insert(attr_type, vec![if value { 0x01 } else { 0x00 }]);
 }
 
-/// Store a CK_ULONG attribute (4-byte little-endian).
+/// Store a CK_ULONG attribute at native CK_ULONG width (4 bytes on wasm32,
+/// 8 bytes on 64-bit native — `size_of::<usize>()`, matching the C-ABI
+/// marshaling). This keeps generated objects byte-compatible with caller
+/// templates: a `CKA_CLASS`/`CKA_KEY_TYPE` find-filter supplied as a native
+/// CK_ULONG compares byte-exact in `C_FindObjects`, and the value reads back at
+/// native width through `C_GetAttributeValue`. All map readers take the low
+/// 4 bytes (`from_le_bytes([v[0..3]])`), so widening is backward-compatible.
 pub fn store_ulong(attrs: &mut Attributes, attr_type: u32, value: u32) {
-    attrs.insert(attr_type, value.to_le_bytes().to_vec());
+    attrs.insert(attr_type, (value as usize).to_le_bytes().to_vec());
 }
 
 /// Read a CK_BBOOL attribute back from an attrs HashMap (returns false if absent).
