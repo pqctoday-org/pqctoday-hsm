@@ -362,22 +362,19 @@ impl Op11Session {
                 | PublicKeyAlgorithm::MLKEM1024_X448
         );
 
-        // Base template: all private-key objects for this id.
-        let usage = match pkt {
-            PgpKeyType::Sign | PgpKeyType::Auth => Attribute::Sign(true),
-            // FIXME: ECDH/ML-KEM may need Derive instead of Decrypt; softhsmv3
-            // accepts Decrypt(true) on the ML-KEM/X25519 private objects.
-            PgpKeyType::Encrypt => Attribute::Decrypt(true),
-        };
-        let base_template = vec![
-            Attribute::Token(true),
-            Attribute::Private(true),
-            usage,
-            Attribute::Id(id.to_vec()),
-            Attribute::Class(ObjectClass::PRIVATE_KEY),
-        ];
-
         if !is_composite {
+            // Classical single-handle path: select by usage attribute.
+            let usage = match pkt {
+                PgpKeyType::Sign | PgpKeyType::Auth => Attribute::Sign(true),
+                PgpKeyType::Encrypt => Attribute::Decrypt(true),
+            };
+            let base_template = vec![
+                Attribute::Token(true),
+                Attribute::Private(true),
+                usage,
+                Attribute::Id(id.to_vec()),
+                Attribute::Class(ObjectClass::PRIVATE_KEY),
+            ];
             let priv_key_handle = self.session.find_objects(&base_template)?;
             return if priv_key_handle.len() == 1 {
                 Ok(Op11KeyPair::new(
@@ -393,7 +390,13 @@ impl Op11Session {
             };
         }
 
-        // Composite: resolve the two component handles by CKA_KEY_TYPE.
+        // Composite: resolve the two component handles by CKA_KEY_TYPE alone.
+        // The two halves carry DIFFERENT usage attributes that depend on the
+        // composite role — Ed25519=Sign / ML-DSA=Sign for a signing key, but
+        // X25519=Derive / ML-KEM=Decapsulate (NOT Decrypt) for an encryption key
+        // — so a single usage filter cannot match both. CKA_KEY_TYPE + CKA_ID +
+        // CKO_PRIVATE_KEY already uniquely identifies each component, so the
+        // composite path selects on key type and omits the usage attribute.
         let (trad_kt, pqc_kt) = match key.pk_algo() {
             PublicKeyAlgorithm::MLDSA65_Ed25519 | PublicKeyAlgorithm::MLDSA87_Ed448 => {
                 (cryptoki::object::KeyType::EC_EDWARDS, cryptoki::object::KeyType::ML_DSA)
@@ -405,8 +408,15 @@ impl Op11Session {
             _ => unreachable!("is_composite implies a composite pk_algo"),
         };
 
+        let composite_base = vec![
+            Attribute::Token(true),
+            Attribute::Private(true),
+            Attribute::Id(id.to_vec()),
+            Attribute::Class(ObjectClass::PRIVATE_KEY),
+        ];
+
         let find_one = |kt| -> Result<ObjectHandle> {
-            let mut tmpl = base_template.clone();
+            let mut tmpl = composite_base.clone();
             tmpl.push(Attribute::KeyType(kt));
             let handles = self.session.find_objects(&tmpl)?;
             if handles.len() == 1 {
@@ -1005,6 +1015,120 @@ mod live_composite_tests {
         );
 
         // keypair() consumed s2's session; clean up via a fresh session.
+        purge_id(&open_session(&e), id);
+    }
+
+    /// TASK 2 gate — end-to-end ML-KEM encrypt -> decrypt through the bridge.
+    ///
+    /// Build a MLKEM768_X25519 v6 encryption key, provision its TWO private
+    /// halves (X25519 + ML-KEM-768) into softhsmv3, ENCRYPT a message to the
+    /// public cert with sequoia's software encryptor (producer side), then
+    /// DECRYPT it through the bridge — which performs C_DeriveKey (X25519 ECDH) +
+    /// C_DecapsulateKey (ML-KEM-768) on the token-resident halves, runs the draft
+    /// KEM combiner, and AES-256 key-unwraps the ESK (plan task 2 / §4). Asserts
+    /// the recovered plaintext is byte-identical to the original.
+    ///
+    /// The decrypt side reloads the keypair from the token alone (cert=None),
+    /// exercising the task-1 composite public-key reload too.
+    #[test]
+    fn live_composite_mlkem768_x25519_encrypt_decrypt() {
+        let Some(e) = env() else {
+            eprintln!("SKIP live_composite_*: set OP11_MODULE to run against softhsmv3");
+            return;
+        };
+
+        let policy = &StandardPolicy::new();
+
+        // 1) Build a composite cert and pull out its MLKEM768_X25519 ENCRYPTION
+        //    subkey (the MLDSA65_Ed25519 suite's encryption subkey is ML-KEM).
+        let (cert, _rev) = CertBuilder::new()
+            .set_profile(Profile::RFC9580)
+            .expect("RFC9580 profile")
+            .set_cipher_suite(CipherSuite::MLDSA65_Ed25519)
+            .add_userid("composite-kem@pqctoday.test")
+            .add_transport_encryption_subkey()
+            .generate()
+            .expect("composite cert with ML-KEM encryption subkey");
+
+        let enc = cert
+            .keys()
+            .with_policy(policy, None)
+            .alive()
+            .revoked(false)
+            .for_transport_encryption()
+            .secret()
+            .next()
+            .expect("encryption-capable secret subkey")
+            .key()
+            .clone();
+        assert_eq!(
+            enc.pk_algo(),
+            PublicKeyAlgorithm::MLKEM768_X25519,
+            "encryption subkey must be MLKEM768_X25519 (algo 35)"
+        );
+        assert_eq!(u8::from(enc.pk_algo()), 35);
+
+        // 2) Provision the TWO private halves (and the public DATA object).
+        let id = b"\x05composite-kem";
+        {
+            let s1 = open_session(&e);
+            purge_id(&s1, id);
+            s1.upload_composite_private(id, &enc)
+                .expect("composite ML-KEM upload");
+        }
+
+        // 3) Producer side: software-encrypt a message to the public cert.
+        let plaintext = b"pqctoday task2: ML-KEM-768 + X25519 hybrid decrypt, HSM-backed.";
+        let recipients = cert
+            .keys()
+            .with_policy(policy, None)
+            .alive()
+            .revoked(false)
+            .for_transport_encryption()
+            .map(|ka| {
+                // Anonymous recipient (None handle), default features (None).
+                sequoia_openpgp::serialize::stream::Recipient::new(None, None, ka.key())
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(recipients.len(), 1, "exactly one ML-KEM recipient expected");
+
+        let mut ciphertext = Vec::new();
+        {
+            use sequoia_openpgp::serialize::stream::{Armorer, Encryptor, LiteralWriter, Message};
+            let message = Message::new(&mut ciphertext);
+            let message = Armorer::new(message).build().expect("armorer");
+            let message = Encryptor::for_recipients(message, recipients)
+                .build()
+                .expect("encryptor build");
+            let mut w = LiteralWriter::new(message).build().expect("literal writer");
+            std::io::copy(&mut &plaintext[..], &mut w).expect("write plaintext");
+            w.finalize().expect("finalize encryption");
+        }
+        eprintln!(
+            "    software-encrypted {} B plaintext -> {} B armored ML-KEM message",
+            plaintext.len(),
+            ciphertext.len()
+        );
+
+        // 4) Consumer side: decrypt THROUGH THE BRIDGE using the token-resident
+        //    halves. cert=None -> the bridge reloads the composite public key
+        //    from the token (task 1) and resolves both custody handles.
+        let s2 = open_session(&e);
+        let mut recovered = Vec::new();
+        s2.decrypt(id, &mut &ciphertext[..], &mut recovered, None)
+            .expect("bridge ML-KEM decrypt (C_DecapsulateKey + combiner + AES-KW)");
+
+        assert_eq!(
+            recovered.as_slice(),
+            &plaintext[..],
+            "recovered plaintext must match the original byte-for-byte"
+        );
+
+        eprintln!(
+            "PASS live_composite ML-KEM e2e: software-encrypt -> HSM decrypt \
+             (X25519 ECDH + ML-KEM-768 decap + combiner + AES-256 KW) -> plaintext MATCH"
+        );
+
         purge_id(&open_session(&e), id);
     }
 }
