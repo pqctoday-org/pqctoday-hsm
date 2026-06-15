@@ -175,7 +175,7 @@ pub fn xmssmt_keygen(xmssmt_param: u32) -> Result<(Vec<u8>, Vec<u8>), ()> {
             ))
         }};
     }
-    match xmssmt_param {
+    let result: Result<(Vec<u8>, Vec<u8>), ()> = match xmssmt_param {
         1 => dispatch!(XmssMtSha2_20_2_256),
         2 => dispatch!(XmssMtSha2_20_4_256),
         3 => dispatch!(XmssMtSha2_40_2_256),
@@ -233,7 +233,23 @@ pub fn xmssmt_keygen(xmssmt_param: u32) -> Result<(Vec<u8>, Vec<u8>), ()> {
         55 => dispatch!(XmssMtShake256_60_6_192),
         56 => dispatch!(XmssMtShake256_60_12_192),
         _ => Err(()),
-    }
+    };
+    // Workaround for xmss 0.1.0-pre.0: the serialized key carries the RFC OID
+    // (1..=56), which parse_oid_and_params resolves to the SINGLE-TREE XMSS
+    // namespace first (OID 1 == XmssSha2_10_256), so an MT key cannot
+    // round-trip through `try_from`. Rewrite the 4-byte big-endian OID prefix
+    // to the crate's internal XMSSMT repr (0x0001_0000 | rfc_oid) so a reload
+    // selects the MT variant. Both the public and signing keys carry the OID.
+    result.map(|(mut pk, mut sk)| {
+        let internal = (0x0001_0000u32 | xmssmt_param).to_be_bytes();
+        if pk.len() >= 4 {
+            pk[..4].copy_from_slice(&internal);
+        }
+        if sk.len() >= 4 {
+            sk[..4].copy_from_slice(&internal);
+        }
+        (pk, sk)
+    })
 }
 
 pub fn xmssmt_sign(
