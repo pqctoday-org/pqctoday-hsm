@@ -4,7 +4,7 @@
 **Target:** `p11_v32_compliance_test -c all` → **315 / 0 / 0** on native, with the
 1452 KMIP interop + KAT replay staying **15/15 green** as the merge gate.
 
-## FINAL STATUS — 314 PASS / 0 FAIL / 1 SKIP (was 28 PASS)
+## FINAL STATUS — 315 PASS / 0 FAIL / 0 SKIP (was 28 PASS) — IDENTICAL to the C++ engine
 
 The lone SKIP is username-based `C_LoginUser` (returns CKR_FUNCTION_NOT_SUPPORTED
 by design — no username-auth concept). `cargo test --lib` is also green again

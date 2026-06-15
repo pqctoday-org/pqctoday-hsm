@@ -476,12 +476,14 @@ pub fn C_LoginUser(
     p_pin: *mut u8,
     ul_pin_len: u32,
     _p_username: *mut u8,
-    ul_username_len: u32,
+    _ul_username_len: u32,
 ) -> u32 {
     require_init!();
-    if ul_username_len > 0 {
-        return CKR_FUNCTION_NOT_SUPPORTED;
-    }
+    // PKCS#11 v3.2 §5.6 — this token has no distinct-named-user concept (only
+    // the single CKU_USER / CKU_SO roles), so pUsername is advisory and
+    // ignored; C_LoginUser behaves exactly as C_Login. (Matches the C++ engine,
+    // which returns CKR_USER_ALREADY_LOGGED_IN when a session is already
+    // logged in, rather than refusing a named login outright.)
     C_Login(h_session, user_type, p_pin, ul_pin_len)
 }
 

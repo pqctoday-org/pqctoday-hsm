@@ -8,7 +8,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-### Fixed — softhsmrustv3 native PKCS#11 v3.2 C-ABI compliance: 28 → 314 PASS / 0 FAIL (2026-06-15)
+### Fixed — softhsmrustv3 native PKCS#11 v3.2 C-ABI compliance: 28 → 315 PASS / 0 FAIL (2026-06-15)
 
 The Rust engine's C ABI (`rust/src/ck_abi.rs` + `ffi.rs`) was architecturally
 32-bit/WASM-shaped — it marshaled every attribute template and `CK_MECHANISM`
@@ -17,7 +17,7 @@ The Rust engine's C ABI (`rust/src/ck_abi.rs` + `ffi.rs`) was architecturally
 corruption), so `p11_v32_compliance_test -c all` scored only **28 PASS**. The
 validated KMIP/ACVP path was unaffected (it bypasses the C ABI via
 `softhsmrustv3::native::*`). Re-plumbed to native width and wired the
-remaining functionality to **314 PASS / 0 FAIL / 1 SKIP**, on the isolated
+remaining functionality to **315 PASS / 0 FAIL / 0 SKIP — byte-for-byte identical to the C++ engine**, on the isolated
 branch `feat/cabi-native-64bit`, with the **1452-case KMIP interop + KAT replay
 staying 15/15** as the gate after every commit.
 
@@ -51,7 +51,7 @@ staying 15/15** as the gate after every commit.
   converted to `[usize;3]`.
 - **Not merged to `main`.** The validated checkout's `rust/` tree is unchanged;
   full per-commit table and rationale in `rust/CK_ABI_NATIVE_COMPLIANCE_PLAN.md`.
-  The lone SKIP is username-based `C_LoginUser` (NOT_SUPPORTED by design).
+  
 
 ### Added — cryptopolicy-manager `GET /audit` (three-plane log inspection) (2026-06-14)
 
