@@ -1,5 +1,18 @@
 # Sequoia 1.x → 2.x PQC Migration
 
+> ⚠️ **SUPERSEDED (2026-06-14).** This is the original 2026-06-07 scoping note,
+> written before any code was run. It has been replaced by the build-validated
+> [**PQC OpenPGP Implementation Plan**](./PQC_PGP_IMPLEMENTATION_PLAN.md), which
+> is grounded in an executed feasibility spike (algorithm ID 30 PROVEN on the
+> wire), a real trial compile, and a source-level read of the actual upstream
+> APIs. Several specifics below turned out to be **wrong** and are corrected in
+> the new plan — notably: the HSM dispatch is `cryptoki 0.12`'s native
+> `Mechanism::MlDsa` → standard `CKM_ML_DSA = 0x1D` (NOT `Mechanism::Custom`
+> with the `0x40xx` vendor codepoints, which were retired 2026-06-10); the API
+> break list is rewritten from observed compiler output; composite signing
+> needs **two** component signatures (a complexity missed here); and the effort
+> is **6–9 PD**, not 2–3. **Read the new plan, not this.** Kept for history.
+
 Scoping document for migrating the `openpgp-pkcs11-sequoia` bridge from
 classical-only Sequoia 1.x to PQC-capable Sequoia 2.x, retiring the
 current EdDSA-disguise hack and unblocking real RFC 9580 + draft-ietf-openpgp-pqc
