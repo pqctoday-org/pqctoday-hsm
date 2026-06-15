@@ -311,40 +311,32 @@ unsafe fn ulong_array_two_call(
 /// misparsed (native struct layouts differ) — so a non-NULL embedded
 /// pointer is refused with `CKR_FUNCTION_FAILED` (documented H-1
 /// residual) rather than risking UB.
+/// Native-pointer-width embed of a caller pointer (usize == u32 on wasm32,
+/// u64 on native) — carries the full pointer instead of truncating it.
 #[inline]
-fn embed_ptr(p: *mut c_void) -> Result<u32, CK_RV> {
-    if p.is_null() {
-        return Ok(0);
-    }
-    #[cfg(target_pointer_width = "32")]
-    {
-        Ok(p as usize as u32)
-    }
-    #[cfg(not(target_pointer_width = "32"))]
-    {
-        Err(rv(CKR_FUNCTION_FAILED))
-    }
+fn embed_ptr(p: *mut c_void) -> usize {
+    p as usize
 }
 
-/// Re-pack a native CK_MECHANISM into the engine's 12-byte wasm shape
-/// `[type, pParameter, ulParameterLen]` (3 × u32).
-unsafe fn xlate_mech(p: CK_MECHANISM_PTR) -> Result<Option<[u32; 3]>, CK_RV> {
+/// Re-pack a native CK_MECHANISM into `[type, pParameter, ulParameterLen]`
+/// at native pointer width (3 × usize).
+unsafe fn xlate_mech(p: CK_MECHANISM_PTR) -> Result<Option<[usize; 3]>, CK_RV> {
     if p.is_null() {
         return Ok(None); // engine produces its own CKR_ARGUMENTS_BAD
     }
     let m = &*p;
     let t = narrow(m.mechanism).ok_or(rv(CKR_MECHANISM_INVALID))?;
-    let pv = embed_ptr(m.pParameter)?;
+    let pv = embed_ptr(m.pParameter);
     let ln = if m.pParameter.is_null() {
-        0
+        0usize
     } else {
-        narrow(m.ulParameterLen).ok_or(rv(CKR_ARGUMENTS_BAD))?
+        narrow(m.ulParameterLen).ok_or(rv(CKR_ARGUMENTS_BAD))? as usize
     };
-    Ok(Some([t, pv, ln]))
+    Ok(Some([t as usize, pv, ln]))
 }
 
 #[inline]
-fn mech_ptr(m: &mut Option<[u32; 3]>) -> *mut u8 {
+fn mech_ptr(m: &mut Option<[usize; 3]>) -> *mut u8 {
     match m {
         Some(b) => b.as_mut_ptr() as *mut u8,
         None => std::ptr::null_mut(),

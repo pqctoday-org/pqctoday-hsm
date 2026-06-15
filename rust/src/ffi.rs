@@ -1982,8 +1982,8 @@ pub fn C_GenerateKeyPair(
             CKM_HSS_KEY_PAIR_GEN => {
                 // CK_MECHANISM layout (WASM32): mechType(4) + pParameter(4) + ulParameterLen(4)
                 // CK_HSS_KEY_PAIR_GEN_PARAMS: ulLevels(4) + ulLmsParamSet[8](32) + ulLmotsParamSet[8](32) = 68B
-                let p_param_ptr = *(p_mechanism.add(4) as *const u32) as usize as *const u32;
-                let param_len = *(p_mechanism.add(8) as *const u32);
+                let p_param_ptr = *((p_mechanism as *const usize).add(1)) as usize as *const u32;
+                let param_len = *((p_mechanism as *const usize).add(2));
                 if p_param_ptr.is_null() || param_len < 68 {
                     return CKR_MECHANISM_PARAM_INVALID;
                 }
@@ -2058,8 +2058,8 @@ pub fn C_GenerateKeyPair(
             // ── XMSS single-level keygen (PKCS#11 v3.2 §6.14 CKM_XMSS_KEY_PAIR_GEN) ─
             CKM_XMSS_KEY_PAIR_GEN => {
                 // CK_MECHANISM layout: mechType(4) + pParameter(4) + ulParameterLen(4)
-                let p_param_ptr = *(p_mechanism.add(4) as *const u32) as usize as *const u32;
-                let param_len = *(p_mechanism.add(8) as *const u32);
+                let p_param_ptr = *((p_mechanism as *const usize).add(1)) as usize as *const u32;
+                let param_len = *((p_mechanism as *const usize).add(2));
                 let mut param_code = 0;
                 if !p_param_ptr.is_null() && param_len >= 4 {
                     // Typical PKCS11 may pass CK_XMSS_PARAMS struct. For now, read the first word
@@ -2824,8 +2824,8 @@ pub fn C_SignInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
         let mut mech_type = *(p_mechanism as *const u32);
         // Parse CK_EDDSA_PARAMS: if phFlag is set, use internal CKM_EDDSA_PH
         if mech_type == CKM_EDDSA {
-            let p_param = *(p_mechanism.add(4) as *const u32) as usize as *const u8;
-            let ul_param_len = *(p_mechanism.add(8) as *const u32);
+            let p_param = *((p_mechanism as *const usize).add(1)) as usize as *const u8;
+            let ul_param_len = *((p_mechanism as *const usize).add(2));
             if !p_param.is_null() && ul_param_len >= 4 {
                 let ph_flag = *(p_param as *const u32);
                 if ph_flag != 0 {
@@ -2845,8 +2845,8 @@ pub fn C_SignInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
             // CK_RSA_PKCS_PSS_PARAMS (wasm32, 12 B): hashAlg, mgf, sLen.
             // §6.4.5 — params are caller-authoritative; hashAlg/mgf must match
             // the mechanism's digest. Absent params keep legacy defaults.
-            let p_param = *(p_mechanism.add(4) as *const u32);
-            let param_len = *(p_mechanism.add(8) as *const u32);
+            let p_param = *((p_mechanism as *const usize).add(1));
+            let param_len = *((p_mechanism as *const usize).add(2));
             if p_param != 0 && param_len >= 12 {
                 let pp = p_param as *const u8;
                 let hash_alg = std::ptr::read_unaligned(pp as *const u32);
@@ -2863,8 +2863,8 @@ pub fn C_SignInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
         } else if mech_type == CKM_KMAC_128 || mech_type == CKM_KMAC_256 {
             // Vendor KMAC params (wasm32, 12 B): pCustomization(u32),
             // ulCustomizationLen(u32), ulOutputLen(u32). Absent → defaults.
-            let p_param = *(p_mechanism.add(4) as *const u32);
-            let param_len = *(p_mechanism.add(8) as *const u32);
+            let p_param = *((p_mechanism as *const usize).add(1));
+            let param_len = *((p_mechanism as *const usize).add(2));
             if p_param != 0 && param_len >= 12 {
                 let pp = p_param as *const u8;
                 let s_ptr = std::ptr::read_unaligned(pp as *const u32);
@@ -2884,8 +2884,8 @@ pub fn C_SignInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
         } else if let Some((_, digest_len)) = hmac_general_base(mech_type) {
             // CK_MAC_GENERAL_PARAMS = single CK_ULONG ulMacLength (§6.x).
             // 1..=digest_len; carried to C_Sign/C_Verify in the ctx vec (LE).
-            let p_param = *(p_mechanism.add(4) as *const u32);
-            let param_len = *(p_mechanism.add(8) as *const u32);
+            let p_param = *((p_mechanism as *const usize).add(1));
+            let param_len = *((p_mechanism as *const usize).add(2));
             if p_param == 0 || param_len < 4 {
                 return CKR_MECHANISM_PARAM_INVALID;
             }
@@ -2924,15 +2924,18 @@ fn takes_sign_additional_ctx(mech: u32) -> bool {
 /// - unknown hedge variant value.
 unsafe fn parse_sign_additional_ctx(p_mechanism: *const u8) -> Result<(Vec<u8>, bool), u32> {
     // CK_MECHANISM layout (WASM32): mechType(4) + pParameter(4) + ulParameterLen(4)
-    let p_param = *(p_mechanism.add(4) as *const u32);
-    let param_len = *(p_mechanism.add(8) as *const u32);
-    if p_param == 0 || param_len < 12 {
+    let p_param = *((p_mechanism as *const usize).add(1));
+    let param_len = *((p_mechanism as *const usize).add(2));
+    let usz = core::mem::size_of::<usize>();
+    if p_param == 0 || param_len < 3 * usz {
         return Ok((Vec::new(), false));
     }
     let p_param = p_param as *const u8;
-    let hedge = *(p_param as *const u32);
-    let ctx_ptr = *((p_param as *const u32).add(1));
-    let ctx_len = *((p_param as *const u32).add(2)) as usize;
+    // CK_SIGN_ADDITIONAL_CONTEXT at native width: hedgeVariant@0,
+    // pContext@usz, ulContextLen@2*usz (CK_ULONG/pointer = usz bytes each).
+    let hedge = *(p_param as *const usize) as u32;
+    let ctx_ptr = *(p_param.add(usz) as *const usize);
+    let ctx_len = *(p_param.add(2 * usz) as *const usize);
     // CKH_HEDGE_PREFERRED(0) / CKH_HEDGE_REQUIRED(1) both sign hedged here
     // (hedging is always available); CKH_DETERMINISTIC_REQUIRED(2) selects
     // the deterministic variant.
@@ -3193,8 +3196,8 @@ pub fn C_VerifyInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
         let mut mech_type = *(p_mechanism as *const u32);
         // Parse CK_EDDSA_PARAMS: if phFlag is set, use internal CKM_EDDSA_PH
         if mech_type == CKM_EDDSA {
-            let p_param = *(p_mechanism.add(4) as *const u32) as usize as *const u8;
-            let ul_param_len = *(p_mechanism.add(8) as *const u32);
+            let p_param = *((p_mechanism as *const usize).add(1)) as usize as *const u8;
+            let ul_param_len = *((p_mechanism as *const usize).add(2));
             if !p_param.is_null() && ul_param_len >= 4 {
                 let ph_flag = *(p_param as *const u32);
                 if ph_flag != 0 {
@@ -3214,8 +3217,8 @@ pub fn C_VerifyInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
             // CK_RSA_PKCS_PSS_PARAMS (wasm32, 12 B): hashAlg, mgf, sLen.
             // §6.4.5 — params are caller-authoritative; hashAlg/mgf must match
             // the mechanism's digest. Absent params keep legacy defaults.
-            let p_param = *(p_mechanism.add(4) as *const u32);
-            let param_len = *(p_mechanism.add(8) as *const u32);
+            let p_param = *((p_mechanism as *const usize).add(1));
+            let param_len = *((p_mechanism as *const usize).add(2));
             if p_param != 0 && param_len >= 12 {
                 let pp = p_param as *const u8;
                 let hash_alg = std::ptr::read_unaligned(pp as *const u32);
@@ -3232,8 +3235,8 @@ pub fn C_VerifyInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
         } else if mech_type == CKM_KMAC_128 || mech_type == CKM_KMAC_256 {
             // Vendor KMAC params (wasm32, 12 B): pCustomization(u32),
             // ulCustomizationLen(u32), ulOutputLen(u32). Absent → defaults.
-            let p_param = *(p_mechanism.add(4) as *const u32);
-            let param_len = *(p_mechanism.add(8) as *const u32);
+            let p_param = *((p_mechanism as *const usize).add(1));
+            let param_len = *((p_mechanism as *const usize).add(2));
             if p_param != 0 && param_len >= 12 {
                 let pp = p_param as *const u8;
                 let s_ptr = std::ptr::read_unaligned(pp as *const u32);
@@ -3253,8 +3256,8 @@ pub fn C_VerifyInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
         } else if let Some((_, digest_len)) = hmac_general_base(mech_type) {
             // CK_MAC_GENERAL_PARAMS = single CK_ULONG ulMacLength (§6.x).
             // 1..=digest_len; carried to C_Sign/C_Verify in the ctx vec (LE).
-            let p_param = *(p_mechanism.add(4) as *const u32);
-            let param_len = *(p_mechanism.add(8) as *const u32);
+            let p_param = *((p_mechanism as *const usize).add(1));
+            let param_len = *((p_mechanism as *const usize).add(2));
             if p_param == 0 || param_len < 4 {
                 return CKR_MECHANISM_PARAM_INVALID;
             }
@@ -3769,8 +3772,8 @@ pub fn C_VerifySignatureInit(
         }
         let mut mech_type = *(p_mechanism as *const u32);
         if mech_type == CKM_EDDSA {
-            let p_param = *(p_mechanism.add(4) as *const u32) as usize as *const u8;
-            let ul_param_len = *(p_mechanism.add(8) as *const u32);
+            let p_param = *((p_mechanism as *const usize).add(1)) as usize as *const u8;
+            let ul_param_len = *((p_mechanism as *const usize).add(2));
             if !p_param.is_null() && ul_param_len >= 4 {
                 let ph_flag = *(p_param as *const u32);
                 if ph_flag != 0 {
@@ -3789,8 +3792,8 @@ pub fn C_VerifySignatureInit(
             // CK_RSA_PKCS_PSS_PARAMS (wasm32, 12 B): hashAlg, mgf, sLen.
             // §6.4.5 — params are caller-authoritative; hashAlg/mgf must match
             // the mechanism's digest. Absent params keep legacy defaults.
-            let p_param = *(p_mechanism.add(4) as *const u32);
-            let param_len = *(p_mechanism.add(8) as *const u32);
+            let p_param = *((p_mechanism as *const usize).add(1));
+            let param_len = *((p_mechanism as *const usize).add(2));
             if p_param != 0 && param_len >= 12 {
                 let pp = p_param as *const u8;
                 let hash_alg = std::ptr::read_unaligned(pp as *const u32);
@@ -3807,8 +3810,8 @@ pub fn C_VerifySignatureInit(
         } else if mech_type == CKM_KMAC_128 || mech_type == CKM_KMAC_256 {
             // Vendor KMAC params (wasm32, 12 B): pCustomization(u32),
             // ulCustomizationLen(u32), ulOutputLen(u32). Absent → defaults.
-            let p_param = *(p_mechanism.add(4) as *const u32);
-            let param_len = *(p_mechanism.add(8) as *const u32);
+            let p_param = *((p_mechanism as *const usize).add(1));
+            let param_len = *((p_mechanism as *const usize).add(2));
             if p_param != 0 && param_len >= 12 {
                 let pp = p_param as *const u8;
                 let s_ptr = std::ptr::read_unaligned(pp as *const u32);
@@ -3828,8 +3831,8 @@ pub fn C_VerifySignatureInit(
         } else if let Some((_, digest_len)) = hmac_general_base(mech_type) {
             // CK_MAC_GENERAL_PARAMS = single CK_ULONG ulMacLength (§6.x).
             // 1..=digest_len; carried to C_Sign/C_Verify in the ctx vec (LE).
-            let p_param = *(p_mechanism.add(4) as *const u32);
-            let param_len = *(p_mechanism.add(8) as *const u32);
+            let p_param = *((p_mechanism as *const usize).add(1));
+            let param_len = *((p_mechanism as *const usize).add(2));
             if p_param == 0 || param_len < 4 {
                 return CKR_MECHANISM_PARAM_INVALID;
             }
@@ -4017,8 +4020,8 @@ pub fn C_EncryptInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
             return rv;
         }
         let mech_type = *(p_mechanism as *const u32);
-        let p_param = *(p_mechanism.add(4) as *const u32) as usize as *const u8;
-        let ul_param_len = *(p_mechanism.add(8) as *const u32);
+        let p_param = *((p_mechanism as *const usize).add(1)) as usize as *const u8;
+        let ul_param_len = *((p_mechanism as *const usize).add(2));
 
         let (iv, aad, tag_bits) = match mech_type {
             CKM_AES_GCM => {
@@ -4096,7 +4099,7 @@ pub fn C_EncryptInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
             CKM_RSA_PKCS_OAEP => {
                 // Full CK_RSA_PKCS_OAEP_PARAMS (§6.4.4). EncryptCtx packing:
                 // tag_bits = hashAlg, aad = LE u32 mgf, iv = label bytes.
-                let (hash_alg, mgf, label) = match parse_oaep_params(p_param, ul_param_len) {
+                let (hash_alg, mgf, label) = match parse_oaep_params(p_param, ul_param_len as u32) {
                     Ok(v) => v,
                     Err(rv) => return rv,
                 };
@@ -4125,7 +4128,7 @@ pub fn C_EncryptInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
             }
             // T1 — plain ChaCha20 stream cipher (§6.20), advertised since
             // round-1 S1 but previously not dispatched on the wasm path.
-            CKM_CHACHA20 => match parse_chacha20_params(p_param, ul_param_len) {
+            CKM_CHACHA20 => match parse_chacha20_params(p_param, ul_param_len as u32) {
                 Ok(nonce) => (nonce, Vec::new(), 0),
                 Err(rv) => return rv,
             },
@@ -4438,8 +4441,8 @@ pub fn C_DecryptInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
             return rv;
         }
         let mech_type = *(p_mechanism as *const u32);
-        let p_param = *(p_mechanism.add(4) as *const u32) as usize as *const u8;
-        let ul_param_len = *(p_mechanism.add(8) as *const u32);
+        let p_param = *((p_mechanism as *const usize).add(1)) as usize as *const u8;
+        let ul_param_len = *((p_mechanism as *const usize).add(2));
 
         let (iv, aad, tag_bits) = match mech_type {
             CKM_AES_GCM => {
@@ -4517,7 +4520,7 @@ pub fn C_DecryptInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
             CKM_RSA_PKCS_OAEP => {
                 // Full CK_RSA_PKCS_OAEP_PARAMS (§6.4.4). EncryptCtx packing:
                 // tag_bits = hashAlg, aad = LE u32 mgf, iv = label bytes.
-                let (hash_alg, mgf, label) = match parse_oaep_params(p_param, ul_param_len) {
+                let (hash_alg, mgf, label) = match parse_oaep_params(p_param, ul_param_len as u32) {
                     Ok(v) => v,
                     Err(rv) => return rv,
                 };
@@ -4546,7 +4549,7 @@ pub fn C_DecryptInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
                 };
                 (nonce, aad, 0)
             }
-            CKM_CHACHA20 => match parse_chacha20_params(p_param, ul_param_len) {
+            CKM_CHACHA20 => match parse_chacha20_params(p_param, ul_param_len as u32) {
                 Ok(nonce) => (nonce, Vec::new(), 0),
                 Err(rv) => return rv,
             },
@@ -5432,7 +5435,7 @@ pub fn C_DeriveKey(
                     return CKR_KEY_TYPE_INCONSISTENT;
                 }
 
-                let p_param = *(p_mechanism.add(4) as *const u32) as usize as *const u32;
+                let p_param = *((p_mechanism as *const usize).add(1)) as usize as *const u32;
                 if p_param.is_null() {
                     return CKR_ARGUMENTS_BAD;
                 }
@@ -5484,7 +5487,7 @@ pub fn C_DeriveKey(
         let key_value: Vec<u8> = match mech_type {
             // ── ECDH ────────────────────────────────────────────────────────
             CKM_ECDH1_DERIVE | CKM_ECDH1_COFACTOR_DERIVE | CKM_EC_MONTGOMERY_KEY_DERIVE => {
-                let p_param = *(p_mechanism.add(4) as *const u32) as usize as *const u32;
+                let p_param = *((p_mechanism as *const usize).add(1)) as usize as *const u32;
                 if p_param.is_null() {
                     return CKR_ARGUMENTS_BAD;
                 }
@@ -5704,7 +5707,7 @@ pub fn C_DeriveKey(
 
             // ── PBKDF2 ──────────────────────────────────────────────────────
             CKM_PKCS5_PBKD2 => {
-                let p_param = *(p_mechanism.add(4) as *const u32) as usize as *const u32;
+                let p_param = *((p_mechanism as *const usize).add(1)) as usize as *const u32;
                 if p_param.is_null() {
                     return CKR_ARGUMENTS_BAD;
                 }
@@ -5751,20 +5754,24 @@ pub fn C_DeriveKey(
                     Some(v) => v,
                     None => return CKR_ARGUMENTS_BAD,
                 };
-                let p_param = *(p_mechanism.add(4) as *const u32) as usize as *const u32;
+                let p_param = *((p_mechanism as *const usize).add(1)) as *const usize;
                 if p_param.is_null() {
                     return CKR_ARGUMENTS_BAD;
                 }
-                // CK_HKDF_PARAMS: bExtract(b0), bExpand(b1), pad(b2-3), prf(4), saltType(8),
-                //                  pSalt(12), ulSaltLen(16), hSaltKey(20), pInfo(24), ulInfoLen(28)
+                // CK_HKDF_PARAMS read at native pointer width. The CK_ULONG /
+                // pointer fields sit at the same logical word indices on wasm32
+                // (4-byte) and 64-bit native (8-byte) — only the element WIDTH
+                // differs, so reading as *const usize is correct on both:
+                // word0 = bExtract|bExpand|pad, prf@1, saltType@2, pSalt@3,
+                // ulSaltLen@4, hSaltKey@5, pInfo@6, ulInfoLen@7.
                 let first_word = *p_param.add(0);
                 let b_expand = ((first_word >> 8) & 0xFF) != 0;
-                let prf = *p_param.add(1);
-                let salt_type = *p_param.add(2);
-                let salt_ptr = *p_param.add(3) as usize as *const u8;
-                let salt_len = *p_param.add(4) as usize;
-                let info_ptr = *p_param.add(6) as usize as *const u8;
-                let info_len = *p_param.add(7) as usize;
+                let prf = *p_param.add(1) as u32;
+                let salt_type = *p_param.add(2) as u32;
+                let salt_ptr = *p_param.add(3) as *const u8;
+                let salt_len = *p_param.add(4);
+                let info_ptr = *p_param.add(6) as *const u8;
+                let info_len = *p_param.add(7);
                 let salt_opt =
                     if salt_type == CKF_HKDF_SALT_DATA && !salt_ptr.is_null() && salt_len > 0 {
                         Some(std::slice::from_raw_parts(salt_ptr, salt_len))
@@ -5837,7 +5844,7 @@ pub fn C_DeriveKey(
                     Some(v) => v,
                     None => return CKR_ARGUMENTS_BAD,
                 };
-                let p_param = *(p_mechanism.add(4) as *const u32) as usize as *const u32;
+                let p_param = *((p_mechanism as *const usize).add(1)) as usize as *const u32;
                 if p_param.is_null() {
                     return CKR_ARGUMENTS_BAD;
                 }
@@ -5865,7 +5872,7 @@ pub fn C_DeriveKey(
                     Some(v) => v,
                     None => return CKR_ARGUMENTS_BAD,
                 };
-                let p_param = *(p_mechanism.add(4) as *const u32) as usize as *const u32;
+                let p_param = *((p_mechanism as *const usize).add(1)) as usize as *const u32;
                 if p_param.is_null() {
                     return CKR_ARGUMENTS_BAD;
                 }
@@ -6012,9 +6019,9 @@ pub fn C_WrapKey(
         let wrapped = if is_rsa_oaep {
             // RSA-OAEP wrapping — encrypt key value with RSA public key.
             // Full CK_RSA_PKCS_OAEP_PARAMS (§6.4.4): hash, MGF, label.
-            let p_param = *(p_mechanism.add(4) as *const u32) as usize as *const u8;
-            let ul_param_len = *(p_mechanism.add(8) as *const u32);
-            let (hash_alg, mgf, label) = match parse_oaep_params(p_param, ul_param_len) {
+            let p_param = *((p_mechanism as *const usize).add(1)) as usize as *const u8;
+            let ul_param_len = *((p_mechanism as *const usize).add(2));
+            let (hash_alg, mgf, label) = match parse_oaep_params(p_param, ul_param_len as u32) {
                 Ok(v) => v,
                 Err(rv) => return rv,
             };
@@ -6150,9 +6157,9 @@ pub fn C_UnwrapKey(
         let key_value = if is_rsa_oaep {
             // RSA-OAEP unwrapping — decrypt wrapped key with RSA private key.
             // Full CK_RSA_PKCS_OAEP_PARAMS (§6.4.4): hash, MGF, label.
-            let p_param = *(p_mechanism.add(4) as *const u32) as usize as *const u8;
-            let ul_param_len = *(p_mechanism.add(8) as *const u32);
-            let (hash_alg, mgf, label) = match parse_oaep_params(p_param, ul_param_len) {
+            let p_param = *((p_mechanism as *const usize).add(1)) as usize as *const u8;
+            let ul_param_len = *((p_mechanism as *const usize).add(2));
+            let (hash_alg, mgf, label) = match parse_oaep_params(p_param, ul_param_len as u32) {
                 Ok(v) => v,
                 Err(rv) => return rv,
             };
@@ -6319,8 +6326,8 @@ pub fn C_WrapKeyAuthenticated(
         }
 
         // Parse CK_GCM_PARAMS from mechanism parameter
-        let p_param = *(p_mechanism.add(4) as *const u32) as usize as *const u8;
-        let ul_param_len = *(p_mechanism.add(8) as *const u32);
+        let p_param = *((p_mechanism as *const usize).add(1)) as usize as *const u8;
+        let ul_param_len = *((p_mechanism as *const usize).add(2));
         if p_param.is_null() || ul_param_len < 20 {
             return CKR_ARGUMENTS_BAD;
         }
@@ -6450,8 +6457,8 @@ pub fn C_UnwrapKeyAuthenticated(
         }
 
         // Parse CK_GCM_PARAMS from mechanism parameter
-        let p_param = *(p_mechanism.add(4) as *const u32) as usize as *const u8;
-        let ul_param_len = *(p_mechanism.add(8) as *const u32);
+        let p_param = *((p_mechanism as *const usize).add(1)) as usize as *const u8;
+        let ul_param_len = *((p_mechanism as *const usize).add(2));
         if p_param.is_null() || ul_param_len < 20 {
             return CKR_ARGUMENTS_BAD;
         }
