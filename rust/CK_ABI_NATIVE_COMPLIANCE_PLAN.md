@@ -4,7 +4,7 @@
 **Target:** `p11_v32_compliance_test -c all` → **315 / 0 / 0** on native, with the
 1452 KMIP interop + KAT replay staying **15/15 green** as the merge gate.
 
-## FINAL STATUS — 294 PASS / 3 FAIL / 10 SKIP (was 28 PASS)
+## FINAL STATUS — 301 PASS / 0 FAIL / 8 SKIP (was 28 PASS)
 
 All width-fix and feature groups landed, each gated (interop 8+2+5 = 15/15, no
 crash) and committed on `feat/cabi-native-64bit`:
@@ -25,20 +25,21 @@ crash) and committed on `feat/cabi-native-64bit`:
 | `8d7d6a4` | RIPEMD-160 digest + HMAC | 239→244 |
 | `9c3be35` | export v3.2 fns + auth-wrap width + GSVF | 244→291 |
 | `7c3b010` | V4 keytype check for HSS/XMSS/XMSSMT | 291→294 |
+| `367ce64` | HSS keygen defaults + XMSS^MT keygen/sign/verify (**0 FAIL**) | 294→301 |
 
-### Remaining 3 FAIL — intentionally deferred (stateful HBS)
-`CKA_HSS_KEYS_REMAINING`, `HSS_private_roundtrip`, `V8_XMSSMT_keygen` all need
-stateful hash-based-signature keygen+sign (HSS/LMS RFC 8554, XMSS^MT RFC 8391).
-This is a separate, security-critical effort: each one-time leaf key must be
-consumed exactly once and the remaining-key state persisted — getting it wrong
-silently destroys the signature scheme's security. Deferred per the original
-Group E recommendation; not attempted to avoid risking the validated engine.
+### 0 FAIL — stateful HBS (HSS/LMS + XMSS^MT) now fully wired
+The native crypto already existed (`crypto::lms`, `crypto::xmss_bridge`); the
+C ABI just needed: HSS keygen defaulting to a single-level LMS when no params
+are supplied; CKM_XMSSMT_KEY_PAIR_GEN keygen + sign/verify dispatch; and a
+workaround for an `xmss` 0.1.0-pre.0 round-trip bug (the serialized MT key's
+RFC OID collides with the single-tree namespace, so the OID prefix is rewritten
+to the crate's internal XMSSMT repr at keygen). HSS sign decrements
+CKA_HSS_KEYS_REMAINING; XMSS^MT sign/verify round-trips byte-exact.
 
-### Remaining 10 SKIP
-HSS-dependent policy tests (Boolean_Policy_Violation, Extraction_Constraint,
-Signature_*; gated on the deferred HSS keygen), v3.0 validation-authority APIs,
-C_MessageSignInit (CKF_MESSAGE_SIGN cancel sub-test), and username-based
-C_LoginUser (returns CKR_FUNCTION_NOT_SUPPORTED by design — no username auth).
+### Remaining 8 SKIP — unimplemented but graceful (not failures)
+v3.0 validation-authority APIs, C_MessageSignInit (the CKF_MESSAGE_SIGN cancel
+sub-test), and username-based C_LoginUser (returns CKR_FUNCTION_NOT_SUPPORTED by
+design — no username auth). Each SKIPs cleanly; none is a conformance failure.
 
 **Merge note:** nothing is merged to `main`. The user runs their full validation
 before merge. The `rust/` tree in the validated checkout stayed at 0 changes.
