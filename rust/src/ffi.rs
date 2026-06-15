@@ -1145,6 +1145,12 @@ pub fn C_GenerateKeyPair(
             CKM_SLH_DSA_KEY_PAIR_GEN => Some(CKK_SLH_DSA),
             CKM_RSA_PKCS_KEY_PAIR_GEN => Some(CKK_RSA),
             CKM_EC_KEY_PAIR_GEN => Some(CKK_EC),
+            // Stateful HBS keygen is not implemented, but the keytype-vs-mech
+            // consistency rule (V4) still applies up-front: a contradictory
+            // CKA_KEY_TYPE is CKR_TEMPLATE_INCONSISTENT before any keygen work.
+            CKM_HSS_KEY_PAIR_GEN => Some(CKK_HSS),
+            CKM_XMSS_KEY_PAIR_GEN => Some(CKK_XMSS),
+            CKM_XMSSMT_KEY_PAIR_GEN => Some(CKK_XMSSMT),
             _ => None,
         };
         if let Some(exp) = expected_kt {
