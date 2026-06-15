@@ -59,9 +59,9 @@ pub unsafe fn get_attr_ulong(template: *mut u8, count: u32, attr_type: u32) -> O
     if count > 65536 {
         return None; // Guard against malformed templates with huge count values
     }
-    let ptr = template as *mut u32;
+    let ptr = template as *mut usize;
     for i in 0..count {
-        let t = *ptr.add((i * 3) as usize);
+        let t = *ptr.add((i * 3) as usize) as u32;
         if t == attr_type {
             let val_ptr = *ptr.add((i * 3 + 1) as usize) as usize as *const u32;
             if !val_ptr.is_null() {
@@ -82,9 +82,9 @@ pub unsafe fn get_attr_bytes(template: *mut u8, count: u32, attr_type: u32) -> O
     if count > 65536 {
         return None; // Guard against malformed templates with huge count values
     }
-    let ptr = template as *mut u32;
+    let ptr = template as *mut usize;
     for i in 0..count {
-        let t = *ptr.add((i * 3) as usize);
+        let t = *ptr.add((i * 3) as usize) as u32;
         if t == attr_type {
             let val_ptr = *ptr.add((i * 3 + 1) as usize) as usize as *const u8;
             let val_len = *ptr.add((i * 3 + 2) as usize) as usize;
@@ -143,9 +143,9 @@ pub unsafe fn absorb_template_attrs(attrs: &mut Attributes, template: *mut u8, c
     if template.is_null() || count == 0 || count > 65536 {
         return;
     }
-    let ptr = template as *mut u32;
+    let ptr = template as *mut usize;
     for i in 0..count {
-        let attr_type = *ptr.add((i * 3) as usize);
+        let attr_type = *ptr.add((i * 3) as usize) as u32;
         let val_ptr = *ptr.add((i * 3 + 1) as usize) as usize as *const u8;
         let val_len = *ptr.add((i * 3 + 2) as usize) as usize;
         // Skip key/seed material, internal private attrs, and server-managed attrs.

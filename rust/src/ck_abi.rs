@@ -356,30 +356,33 @@ fn mech_ptr(m: &mut Option<[u32; 3]>) -> *mut u8 {
 unsafe fn xlate_template(
     p: CK_ATTRIBUTE_PTR,
     count: CK_ULONG,
-) -> Result<(Option<Vec<u32>>, u32), CK_RV> {
+) -> Result<(Option<Vec<usize>>, u32), CK_RV> {
     let n = narrow(count).ok_or(rv(CKR_ARGUMENTS_BAD))?;
     if p.is_null() {
         return Ok((None, n));
     }
-    let mut v = Vec::with_capacity(n as usize * 3);
+    // Native-pointer-width triples [type, pValue, ulValueLen]. usize == u32 on
+    // wasm32 (byte-identical to the old layout) and u64 on native, so this
+    // carries the full pValue instead of truncating it (the embed_ptr/H-1 fix).
+    let mut v: Vec<usize> = Vec::with_capacity(n as usize * 3);
     for i in 0..n as usize {
         let a = &*p.add(i);
         let t = narrow(a.attrType).ok_or(rv(CKR_ATTRIBUTE_TYPE_INVALID))?;
-        let pv = embed_ptr(a.pValue)?;
+        let pv = a.pValue as usize;
         // ulValueLen may be the native CK_UNAVAILABLE_INFORMATION sentinel
-        // (a caller re-using an output template) — map it to the 32-bit one.
+        // (a caller re-using an output template) — carry it at native width.
         let ln = if a.ulValueLen == CK_UNAVAILABLE_INFORMATION_NATIVE {
-            0xFFFF_FFFF
+            usize::MAX
         } else {
-            narrow(a.ulValueLen).ok_or(rv(CKR_ARGUMENTS_BAD))?
+            narrow(a.ulValueLen).ok_or(rv(CKR_ARGUMENTS_BAD))? as usize
         };
-        v.extend_from_slice(&[t, pv, ln]);
+        v.extend_from_slice(&[t as usize, pv, ln]);
     }
     Ok((Some(v), n))
 }
 
 #[inline]
-fn tmpl_ptr(t: &mut Option<Vec<u32>>) -> *mut u8 {
+fn tmpl_ptr(t: &mut Option<Vec<usize>>) -> *mut u8 {
     match t {
         Some(v) => v.as_mut_ptr() as *mut u8,
         None => std::ptr::null_mut(),
@@ -880,7 +883,9 @@ pub unsafe extern "C" fn C_GetAttributeValue(
     if let Some(v) = &tmpl {
         if !pTemplate.is_null() {
             for i in 0..n as usize {
-                (*pTemplate.add(i)).ulValueLen = widen(v[i * 3 + 2]);
+                // v[..] is native-width usize already (usize::MAX == native
+                // CK_UNAVAILABLE_INFORMATION), so write it straight through.
+                (*pTemplate.add(i)).ulValueLen = v[i * 3 + 2] as CK_ULONG;
             }
         }
     }

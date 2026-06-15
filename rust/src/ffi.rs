@@ -2481,33 +2481,33 @@ pub fn C_GetAttributeValue(h_session: u32, h_object: u32, p_template: *mut u8, c
         let mut had_sensitive = false;
         let mut had_small = false;
         unsafe {
-            let tmpl_ptr = p_template as *mut u32;
+            let tmpl_ptr = p_template as *mut usize;
             for i in 0..count {
-                let attr_type = *tmpl_ptr.add((i * 3) as usize);
-                let val_ptr = *tmpl_ptr.add((i * 3 + 1) as usize) as usize as *mut u8;
-                let val_len_ptr = tmpl_ptr.add((i * 3 + 2) as usize);
+                let attr_type = *tmpl_ptr.add((i * 3) as usize) as u32;
+                let val_ptr = *tmpl_ptr.add((i * 3 + 1) as usize) as *mut u8;
+                let val_len_ptr = tmpl_ptr.add((i * 3 + 2) as usize); // *mut usize (native width)
                 // Block CKA_VALUE / CKA_SEED (raw secret material — see
                 // state::attr_is_sensitive_material) for sensitive or
                 // non-extractable private/secret keys → CKR_ATTRIBUTE_SENSITIVE.
                 if attr_is_sensitive_material(attr_type) && (sensitive || !extractable) {
-                    *val_len_ptr = 0xFFFFFFFF; // CK_UNAVAILABLE_INFORMATION
+                    *val_len_ptr = usize::MAX; // CK_UNAVAILABLE_INFORMATION (native width)
                     had_sensitive = true;
                     continue;
                 }
                 if let Some(val) = obj_attrs.get(&attr_type) {
                     if val_ptr.is_null() {
-                        *val_len_ptr = val.len() as u32;
-                    } else if *val_len_ptr >= val.len() as u32 {
+                        *val_len_ptr = val.len();
+                    } else if *val_len_ptr >= val.len() {
                         std::ptr::copy_nonoverlapping(val.as_ptr(), val_ptr, val.len());
-                        *val_len_ptr = val.len() as u32;
+                        *val_len_ptr = val.len();
                     } else {
                         // §5.7.5 — record, set length, keep processing the rest.
-                        *val_len_ptr = val.len() as u32;
+                        *val_len_ptr = val.len();
                         had_small = true;
                     }
                 } else {
                     // §5.7.5 — attribute not present → CK_UNAVAILABLE_INFORMATION.
-                    *val_len_ptr = 0xFFFFFFFF;
+                    *val_len_ptr = usize::MAX;
                     had_missing = true;
                 }
             }
@@ -2703,12 +2703,12 @@ pub fn C_CreateObject(
         if count > 65536 {
             return CKR_ARGUMENTS_BAD;
         }
-        let tmpl_ptr = p_template as *mut u32;
+        let tmpl_ptr = p_template as *mut usize;
         let mut new_attrs = HashMap::new();
         for i in 0..count {
-            let attr_type = *tmpl_ptr.add((i * 3) as usize);
+            let attr_type = *tmpl_ptr.add((i * 3) as usize) as u32;
             let val_ptr = *tmpl_ptr.add((i * 3 + 1) as usize) as usize as *const u8;
-            let val_len = *tmpl_ptr.add((i * 3 + 2) as usize);
+            let val_len = *tmpl_ptr.add((i * 3 + 2) as usize) as u32;
             if !val_ptr.is_null() && val_len > 0 {
                 let mut v = vec![0u8; val_len as usize];
                 std::ptr::copy_nonoverlapping(val_ptr, v.as_mut_ptr(), val_len as usize);
@@ -4983,9 +4983,9 @@ pub fn C_FindObjectsInit(h_session: u32, p_template: *mut u8, ul_count: u32) -> 
     let mut match_attrs: Vec<(u32, Vec<u8>)> = Vec::new();
     unsafe {
         if !p_template.is_null() && ul_count > 0 && ul_count <= 65536 {
-            let tmpl_ptr = p_template as *mut u32;
+            let tmpl_ptr = p_template as *mut usize;
             for i in 0..ul_count {
-                let attr_type = *tmpl_ptr.add((i * 3) as usize);
+                let attr_type = *tmpl_ptr.add((i * 3) as usize) as u32;
                 let val_ptr = *tmpl_ptr.add((i * 3 + 1) as usize) as usize as *const u8;
                 let val_len = *tmpl_ptr.add((i * 3 + 2) as usize) as usize;
                 if !val_ptr.is_null() && val_len > 0 {
@@ -5379,11 +5379,11 @@ pub fn C_DeriveKey(
 
         if mech_type == CKM_BIP32_MASTER_DERIVE || mech_type == CKM_BIP32_CHILD_DERIVE {
             let mut attrs = std::collections::HashMap::new();
-            let tmpl_ptr = p_template as *mut u32;
+            let tmpl_ptr = p_template as *mut usize;
             for i in 0..ul_attribute_count {
-                let attr_type = *tmpl_ptr.add((i * 3) as usize);
+                let attr_type = *tmpl_ptr.add((i * 3) as usize) as u32;
                 let val_ptr = *tmpl_ptr.add((i * 3 + 1) as usize) as usize as *const u8;
-                let val_len = *tmpl_ptr.add((i * 3 + 2) as usize);
+                let val_len = *tmpl_ptr.add((i * 3 + 2) as usize) as u32;
                 if !val_ptr.is_null() && val_len > 0 {
                     let mut v = vec![0u8; val_len as usize];
                     std::ptr::copy_nonoverlapping(val_ptr, v.as_mut_ptr(), val_len as usize);
@@ -6223,11 +6223,11 @@ pub fn C_UnwrapKey(
         // Parse template attributes (if provided)
         let mut attrs = HashMap::new();
         if !p_template.is_null() && ul_attribute_count > 0 {
-            let tmpl_ptr = p_template as *mut u32;
+            let tmpl_ptr = p_template as *mut usize;
             for i in 0..ul_attribute_count {
-                let attr_type = *tmpl_ptr.add((i * 3) as usize);
+                let attr_type = *tmpl_ptr.add((i * 3) as usize) as u32;
                 let val_ptr = *tmpl_ptr.add((i * 3 + 1) as usize) as usize as *const u8;
-                let val_len = *tmpl_ptr.add((i * 3 + 2) as usize);
+                let val_len = *tmpl_ptr.add((i * 3 + 2) as usize) as u32;
                 // Skip CKA_VALUE — it comes from the unwrap operation
                 if attr_type == CKA_VALUE {
                     continue;
@@ -6529,11 +6529,11 @@ pub fn C_UnwrapKeyAuthenticated(
         // Parse template attributes (same as C_UnwrapKey)
         let mut attrs = HashMap::new();
         if !p_template.is_null() && ul_attribute_count > 0 {
-            let tmpl_ptr = p_template as *mut u32;
+            let tmpl_ptr = p_template as *mut usize;
             for i in 0..ul_attribute_count {
-                let attr_type = *tmpl_ptr.add((i * 3) as usize);
+                let attr_type = *tmpl_ptr.add((i * 3) as usize) as u32;
                 let val_ptr = *tmpl_ptr.add((i * 3 + 1) as usize) as usize as *const u8;
-                let val_len = *tmpl_ptr.add((i * 3 + 2) as usize);
+                let val_len = *tmpl_ptr.add((i * 3 + 2) as usize) as u32;
                 if attr_type == CKA_VALUE {
                     continue;
                 }
@@ -7484,12 +7484,12 @@ pub fn C_CopyObject(
         return CKR_ARGUMENTS_BAD;
     }
     unsafe {
-        let tmpl_ptr = p_template as *mut u32;
+        let tmpl_ptr = p_template as *mut usize;
         let mut template = Attributes::new();
         for i in 0..ul_count {
-            let attr_type = *tmpl_ptr.add((i * 3) as usize);
+            let attr_type = *tmpl_ptr.add((i * 3) as usize) as u32;
             let val_ptr = *tmpl_ptr.add((i * 3 + 1) as usize) as usize as *const u8;
-            let val_len = *tmpl_ptr.add((i * 3 + 2) as usize);
+            let val_len = *tmpl_ptr.add((i * 3 + 2) as usize) as u32;
             if val_ptr.is_null() && val_len > 0 {
                 return CKR_ATTRIBUTE_VALUE_INVALID;
             }
@@ -7615,11 +7615,11 @@ pub fn C_SetAttributeValue(
     }
     let mut updates: Vec<(u32, Vec<u8>)> = Vec::with_capacity(ul_count as usize);
     unsafe {
-        let tmpl_ptr = p_template as *mut u32;
+        let tmpl_ptr = p_template as *mut usize;
         for i in 0..ul_count {
-            let attr_type = *tmpl_ptr.add((i * 3) as usize);
+            let attr_type = *tmpl_ptr.add((i * 3) as usize) as u32;
             let val_ptr = *tmpl_ptr.add((i * 3 + 1) as usize) as usize as *const u8;
-            let val_len = *tmpl_ptr.add((i * 3 + 2) as usize);
+            let val_len = *tmpl_ptr.add((i * 3 + 2) as usize) as u32;
             if val_ptr.is_null() && val_len > 0 {
                 return CKR_ATTRIBUTE_VALUE_INVALID;
             }
