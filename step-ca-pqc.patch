@@ -1,10 +1,11 @@
-# step-ca PQC Patch — ML-DSA-65 (FIPS 204) X.509 issuance
+# step-ca PQC Patch — ML-DSA-65 (FIPS 204) X.509 issuance, HSM-backed
 #
 # Upstream:  github.com/smallstep/certificates
 # Tag:       v0.30.2
 # Rev:       6e8ec61405239cf3f37b2bbf260a587b7d2e4e31
-# Toolchain: Go 1.25+ (validated on go1.26.4 darwin/arm64)
-# Backend:   cloudflare/circl v1.6.3 (sign/mldsa/mldsa65), pure-Go signer
+# Toolchain: Go 1.25+ (validated on go1.26.4 darwin/arm64), CGO_ENABLED=1
+# Backends:  cloudflare/circl v1.6.3 (sign/mldsa/mldsa65) for in-process keys;
+#            miekg/pkcs11 v1.1.2 for HSM-resident keys (softhsmv3).
 #
 # WHY A PATCH AND NOT A CONFIG FLAG
 # ---------------------------------
@@ -12,8 +13,8 @@
 # go.step.sm/crypto x509util.CreateCertificate -> crypto/x509.CreateCertificate.
 # The Go stdlib has no x509.SignatureAlgorithm for ML-DSA (it stops at Ed25519,
 # enum value 16; verified on go1.26.4), so it can neither encode the ML-DSA
-# AlgorithmIdentifier (2.16.840.1.101.3.4.3.18) nor drive a circl ML-DSA signer,
-# and crypto/x509.MarshalPKIXPublicKey cannot encode an ML-DSA SubjectPublicKeyInfo.
+# AlgorithmIdentifier (2.16.840.1.101.3.4.3.18) nor drive an ML-DSA signer, and
+# crypto/x509.MarshalPKIXPublicKey cannot encode an ML-DSA SubjectPublicKeyInfo.
 # This is the same class of problem the strongSwan PQC patch solves by emitting
 # ASN.1 by hand for algorithms the host crypto stack does not natively encode.
 #
@@ -24,38 +25,41 @@
 #                               instead of x509util.CreateCertificate.
 #   cas/softcas/mldsa.go        NEW. Hand-assembles the RFC 5280 TBSCertificate
 #                               with the ML-DSA-65 AlgorithmIdentifier (no params,
-#                               per RFC 9881), signs the TBS with pure ML-DSA
-#                               (no pre-hash, empty context) via a crypto.Signer,
-#                               and wraps it in the outer Certificate SEQUENCE.
+#                               per RFC 9881), signs the TBS via a crypto.Signer
+#                               (pure ML-DSA, no pre-hash, empty context), and
+#                               wraps it in the outer Certificate SEQUENCE.
 #                               subjectPublicKeyInfo() also hand-encodes an
-#                               ML-DSA-65 SubjectPublicKeyInfo, so a *fully*
-#                               post-quantum chain is possible: an ML-DSA root
-#                               whose own subject key + signature are ML-DSA,
-#                               issuing ML-DSA leaves. CreateMLDSACertificate is
-#                               exported for CA bootstrap (self-issue a root
-#                               before a SoftCAS chain exists).
+#                               ML-DSA-65 SubjectPublicKeyInfo, enabling a *fully*
+#                               post-quantum chain (ML-DSA root whose own subject
+#                               key + signature are ML-DSA, issuing ML-DSA leaves).
+#                               CreateMLDSACertificate is exported for CA bootstrap.
+#   cas/softcas/pkcs11mldsa.go  NEW. PKCS11MLDSASigner: a crypto.Signer whose
+#                               ML-DSA-65 private key is generated in, and never
+#                               leaves, a PKCS#11 token (CKA_SENSITIVE,
+#                               CKA_EXTRACTABLE=false). Every signature is a
+#                               C_Sign(CKM_ML_DSA = 0x1D) inside the module. The
+#                               keygen template (CKM_ML_DSA_KEY_PAIR_GEN = 0x1C,
+#                               CKA_PARAMETER_SET = CKP_ML_DSA_65) mirrors the
+#                               platform's verified PyKCS11 path. Because the
+#                               dispatch keys on the *public* key type, the same
+#                               cert-assembly code serves software and HSM custody.
 #   cas/softcas/mldsa_test.go   NEW. Drives SoftCAS.CreateCertificate end-to-end
-#                               with an ML-DSA-65 issuer and asserts the leaf's
-#                               signatureAlgorithm OID + ML-DSA signature verify.
+#                               with an ML-DSA-65 issuer; asserts the OID + verify.
 #   cmd/mldsa-issue/main.go     NEW (demo only, not upstream surface). Self-signs
-#                               an ML-DSA-65 root CA (-algo mldsa65) or EC P-256
-#                               root (-algo ec) and issues a leaf through the real
-#                               SoftCAS engine, writing both as PEM (-ca-out, -out)
-#                               so the chain is `openssl verify`-able end-to-end.
-#                               Drives sandbox scenario 18.
-#   go.mod / go.sum             add github.com/cloudflare/circl v1.6.3.
-#
-# Because createMLDSACertificate signs through a crypto.Signer, an HSM-backed
-# ML-DSA signer (softhsmv3 over PKCS#11, CKM_ML_DSA = 0x1D) drops in at the same
-# seam with no change to the certificate-assembly code — that is the remaining
-# finish-plan item; see docs/STEPCA_PQC_FORK.md.
+#                               an ML-DSA-65 root + issues a leaf via real SoftCAS,
+#                               writing both PEMs (-ca-out/-out) for end-to-end
+#                               `openssl verify`. -hsm keeps the CA key in
+#                               softhsmv3 over PKCS#11; -algo ec exercises the
+#                               classical path. Drives sandbox scenario 18.
+#   go.mod / go.sum             add cloudflare/circl v1.6.3 + miekg/pkcs11 v1.1.2.
+#                               (step-ca already links miekg/pkcs11 via its
+#                               PKCS#11 KMS, so CGO was already required.)
 #
 # WHAT THIS PATCH INTENTIONALLY DOES NOT DO (see docs/STEPCA_PQC_FORK.md)
 # ----------------------------------------------------------------------
-#  * No HSM/PKCS#11 custody yet — the circl key is in-process. (The crypto.Signer
-#    seam above is ready for it.)
 #  * No ML-DSA-44/87, no provisioner/template plumbing to *select* ML-DSA from a
-#    running `step ca` server, no ACME/SCEP path.
+#    running `step ca` server, no ACME/SCEP path. The HSM-backed issuance is
+#    exercised through cmd/mldsa-issue (SoftCAS engine), not the full HTTP server.
 #
 # Apply from the cloned step-ca v0.30.2 tree root:  git apply step-ca-pqc.patch
 # then:  go mod tidy && go build ./cmd/step-ca ./cmd/mldsa-issue
@@ -63,10 +67,10 @@
 # ====================================================================
 diff --git a/cas/softcas/mldsa.go b/cas/softcas/mldsa.go
 new file mode 100644
-index 0000000..7b992a5
+index 0000000..f9008ac
 --- /dev/null
 +++ b/cas/softcas/mldsa.go
-@@ -0,0 +1,172 @@
+@@ -0,0 +1,178 @@
 +package softcas
 +
 +// PQC ML-DSA-65 (FIPS 204) issuance support for SoftCAS.
@@ -129,10 +133,16 @@ index 0000000..7b992a5
 +	SignatureValue     asn1.BitString
 +}
 +
-+// isMLDSASigner reports whether signer is a circl ML-DSA-65 private key.
-+func isMLDSASigner(signer crypto.Signer) (*mldsa65.PrivateKey, bool) {
-+	sk, ok := signer.(*mldsa65.PrivateKey)
-+	return sk, ok
++// isMLDSASigner reports whether signer produces ML-DSA-65 signatures, by
++// inspecting its public key. This matches both the in-process circl key
++// (*mldsa65.PrivateKey) and an HSM-backed *PKCS11MLDSASigner, so the same
++// certificate-assembly path serves software and hardware custody.
++func isMLDSASigner(signer crypto.Signer) bool {
++	if signer == nil {
++		return false
++	}
++	_, ok := signer.Public().(*mldsa65.PublicKey)
++	return ok
 +}
 +
 +// subjectPublicKeyInfo encodes pub as an RFC 5280 SubjectPublicKeyInfo. For a
@@ -167,14 +177,14 @@ index 0000000..7b992a5
 +// bootstrap, cmd/mldsa-issue). For leaf issuance the unexported dispatch in
 +// createCertificate calls the same code path. Pass parent == template to
 +// self-sign a root.
-+func CreateMLDSACertificate(template, parent *x509.Certificate, pub crypto.PublicKey, signer *mldsa65.PrivateKey) (*x509.Certificate, error) {
++func CreateMLDSACertificate(template, parent *x509.Certificate, pub crypto.PublicKey, signer crypto.Signer) (*x509.Certificate, error) {
 +	return createMLDSACertificate(template, parent, pub, signer)
 +}
 +
 +// createMLDSACertificate signs template with an ML-DSA-65 issuer key, building
 +// the certificate DER by hand and returning a parsed *x509.Certificate. The
 +// returned certificate's SignatureAlgorithm OID is 2.16.840.1.101.3.4.3.18.
-+func createMLDSACertificate(template, parent *x509.Certificate, pub crypto.PublicKey, signer *mldsa65.PrivateKey) (*x509.Certificate, error) {
++func createMLDSACertificate(template, parent *x509.Certificate, pub crypto.PublicKey, signer crypto.Signer) (*x509.Certificate, error) {
 +	algoID := pkix.AlgorithmIdentifier{Algorithm: oidSignatureMLDSA65} // absent params per RFC 9881
 +
 +	spki, err := subjectPublicKeyInfo(pub)
@@ -328,18 +338,283 @@ index 0000000..002c921
 +	t.Logf("signatureAlgorithm OID = %v (ML-DSA-65)", parsed.SignatureAlgorithm.Algorithm)
 +	t.Logf("signature length = %d bytes", len(parsed.SignatureValue.Bytes))
 +}
+diff --git a/cas/softcas/pkcs11mldsa.go b/cas/softcas/pkcs11mldsa.go
+new file mode 100644
+index 0000000..16c61ed
+--- /dev/null
++++ b/cas/softcas/pkcs11mldsa.go
+@@ -0,0 +1,217 @@
++//go:build cgo
++
++package softcas
++
++// HSM-backed ML-DSA-65 issuance for SoftCAS.
++//
++// PKCS11MLDSASigner is a crypto.Signer whose ML-DSA-65 private key lives in a
++// PKCS#11 token (softhsmv3 in the pqctoday platform) and never leaves it: the
++// key is generated on the token as CKA_SENSITIVE + CKA_EXTRACTABLE=false, and
++// every signature is produced by C_Sign(CKM_ML_DSA) inside the module. It plugs
++// into the same createMLDSACertificate seam as the in-process circl key, so a
++// CA can keep its root-of-trust key in hardware while still issuing the
++// hand-assembled ML-DSA-65 certificates (Go crypto/x509 has no ML-DSA support).
++//
++// The keygen attribute template mirrors the platform's verified PyKCS11 path
++// (pqctoday-sandbox tests/_ssh_seed.sh): CKM_ML_DSA_KEY_PAIR_GEN with
++// CKA_PARAMETER_SET = CKP_ML_DSA_65 on both public and private templates.
++
++import (
++	"crypto"
++	"fmt"
++	"io"
++	"strings"
++
++	"github.com/cloudflare/circl/sign/mldsa/mldsa65"
++	"github.com/miekg/pkcs11"
++)
++
++// PKCS#11 v3.2 PQC codepoints. miekg/pkcs11 predates v3.2, so they are declared
++// locally; values are from the normative pkcs11t.h (verified against
++// pqctoday-hsm/src/lib/pkcs11/pkcs11t.h).
++const (
++	ckmMLDSAKeyPairGen = 0x0000001c // CKM_ML_DSA_KEY_PAIR_GEN
++	ckmMLDSA           = 0x0000001d // CKM_ML_DSA
++	ckkMLDSA           = 0x0000004a // CKK_ML_DSA
++	ckaParameterSet    = 0x0000061d // CKA_PARAMETER_SET
++	ckpMLDSA65         = 0x00000002 // CKP_ML_DSA_65 (FIPS 204, Category 3)
++)
++
++// PKCS11MLDSASigner signs with an ML-DSA-65 key held in a PKCS#11 token.
++type PKCS11MLDSASigner struct {
++	ctx     *pkcs11.Ctx
++	session pkcs11.SessionHandle
++	priv    pkcs11.ObjectHandle
++	pub     *mldsa65.PublicKey
++}
++
++// Public returns the ML-DSA-65 public key as a *circl* public key, which is what
++// subjectPublicKeyInfo / isMLDSASigner expect.
++func (s *PKCS11MLDSASigner) Public() crypto.PublicKey { return s.pub }
++
++// Sign produces a pure ML-DSA-65 signature (no pre-hash, empty context, per
++// RFC 9881) over msg via C_Sign(CKM_ML_DSA) inside the token. The crypto.Signer
++// digest/opts arguments are ignored because ML-DSA signs the message directly.
++func (s *PKCS11MLDSASigner) Sign(_ io.Reader, msg []byte, _ crypto.SignerOpts) ([]byte, error) {
++	mech := []*pkcs11.Mechanism{pkcs11.NewMechanism(ckmMLDSA, nil)}
++	if err := s.ctx.SignInit(s.session, mech, s.priv); err != nil {
++		return nil, fmt.Errorf("C_SignInit(CKM_ML_DSA): %w", err)
++	}
++	sig, err := s.ctx.Sign(s.session, msg)
++	if err != nil {
++		return nil, fmt.Errorf("C_Sign(CKM_ML_DSA): %w", err)
++	}
++	return sig, nil
++}
++
++// Close logs out, closes the session, and finalizes/destroys the module.
++func (s *PKCS11MLDSASigner) Close() {
++	if s.ctx == nil {
++		return
++	}
++	_ = s.ctx.Logout(s.session)
++	_ = s.ctx.CloseSession(s.session)
++	_ = s.ctx.Finalize()
++	s.ctx.Destroy()
++}
++
++// NewPKCS11MLDSASigner loads modulePath, opens the token labelled tokenLabel,
++// logs in with pin, finds the ML-DSA-65 key pair labelled keyLabel (generating a
++// non-extractable one on the token if absent), and returns a ready signer.
++func NewPKCS11MLDSASigner(modulePath, tokenLabel, pin, keyLabel string) (signer *PKCS11MLDSASigner, err error) {
++	ctx := pkcs11.New(modulePath)
++	if ctx == nil {
++		return nil, fmt.Errorf("pkcs11: cannot load module %q", modulePath)
++	}
++	if err = ctx.Initialize(); err != nil {
++		ctx.Destroy()
++		return nil, fmt.Errorf("C_Initialize: %w", err)
++	}
++	// On any error after this point, tear the module down.
++	defer func() {
++		if err != nil && ctx != nil {
++			_ = ctx.Finalize()
++			ctx.Destroy()
++		}
++	}()
++
++	slot, err := findSlot(ctx, tokenLabel)
++	if err != nil {
++		return nil, err
++	}
++	session, err := ctx.OpenSession(slot, pkcs11.CKF_SERIAL_SESSION|pkcs11.CKF_RW_SESSION)
++	if err != nil {
++		return nil, fmt.Errorf("C_OpenSession: %w", err)
++	}
++	if err = ctx.Login(session, pkcs11.CKU_USER, pin); err != nil {
++		return nil, fmt.Errorf("C_Login: %w", err)
++	}
++
++	priv, pub, err := findOrGenerateKeyPair(ctx, session, keyLabel)
++	if err != nil {
++		return nil, err
++	}
++
++	rawPub, err := getAttr(ctx, session, pub, pkcs11.CKA_VALUE)
++	if err != nil {
++		return nil, fmt.Errorf("read ML-DSA public key (CKA_VALUE): %w", err)
++	}
++	mlpub := new(mldsa65.PublicKey)
++	if err = mlpub.UnmarshalBinary(rawPub); err != nil {
++		return nil, fmt.Errorf("decode ML-DSA-65 public key (%d bytes): %w", len(rawPub), err)
++	}
++
++	return &PKCS11MLDSASigner{ctx: ctx, session: session, priv: priv, pub: mlpub}, nil
++}
++
++// findSlot returns the slot whose token label matches tokenLabel. softhsmv3
++// assigns dynamic slot IDs, so the label is the stable handle.
++func findSlot(ctx *pkcs11.Ctx, tokenLabel string) (uint, error) {
++	slots, err := ctx.GetSlotList(true)
++	if err != nil {
++		return 0, fmt.Errorf("C_GetSlotList: %w", err)
++	}
++	for _, s := range slots {
++		ti, err := ctx.GetTokenInfo(s)
++		if err != nil {
++			continue
++		}
++		if strings.TrimRight(ti.Label, " \x00") == tokenLabel {
++			return s, nil
++		}
++	}
++	return 0, fmt.Errorf("pkcs11: no token labelled %q", tokenLabel)
++}
++
++// findOrGenerateKeyPair finds an ML-DSA-65 key pair by label, or generates a new
++// token-resident, non-extractable one.
++func findOrGenerateKeyPair(ctx *pkcs11.Ctx, session pkcs11.SessionHandle, keyLabel string) (priv, pub pkcs11.ObjectHandle, err error) {
++	priv, okPriv, err := findObject(ctx, session, pkcs11.CKO_PRIVATE_KEY, keyLabel)
++	if err != nil {
++		return 0, 0, err
++	}
++	pub, okPub, err := findObject(ctx, session, pkcs11.CKO_PUBLIC_KEY, keyLabel)
++	if err != nil {
++		return 0, 0, err
++	}
++	if okPriv && okPub {
++		return priv, pub, nil
++	}
++
++	pubTmpl := []*pkcs11.Attribute{
++		pkcs11.NewAttribute(pkcs11.CKA_KEY_TYPE, uint(ckkMLDSA)),
++		pkcs11.NewAttribute(uint(ckaParameterSet), uint(ckpMLDSA65)),
++		pkcs11.NewAttribute(pkcs11.CKA_TOKEN, true),
++		pkcs11.NewAttribute(pkcs11.CKA_PRIVATE, false),
++		pkcs11.NewAttribute(pkcs11.CKA_VERIFY, true),
++		pkcs11.NewAttribute(pkcs11.CKA_LABEL, keyLabel),
++	}
++	privTmpl := []*pkcs11.Attribute{
++		pkcs11.NewAttribute(pkcs11.CKA_KEY_TYPE, uint(ckkMLDSA)),
++		pkcs11.NewAttribute(uint(ckaParameterSet), uint(ckpMLDSA65)),
++		pkcs11.NewAttribute(pkcs11.CKA_TOKEN, true),
++		pkcs11.NewAttribute(pkcs11.CKA_PRIVATE, true),
++		pkcs11.NewAttribute(pkcs11.CKA_SIGN, true),
++		pkcs11.NewAttribute(pkcs11.CKA_SENSITIVE, true),
++		pkcs11.NewAttribute(pkcs11.CKA_EXTRACTABLE, false),
++		pkcs11.NewAttribute(pkcs11.CKA_LABEL, keyLabel),
++	}
++	mech := []*pkcs11.Mechanism{pkcs11.NewMechanism(ckmMLDSAKeyPairGen, nil)}
++	pub, priv, err = ctx.GenerateKeyPair(session, mech, pubTmpl, privTmpl)
++	if err != nil {
++		return 0, 0, fmt.Errorf("C_GenerateKeyPair(CKM_ML_DSA_KEY_PAIR_GEN): %w", err)
++	}
++	return priv, pub, nil
++}
++
++// findObject returns the first object of the given class with the given label.
++func findObject(ctx *pkcs11.Ctx, session pkcs11.SessionHandle, class uint, label string) (pkcs11.ObjectHandle, bool, error) {
++	tmpl := []*pkcs11.Attribute{
++		pkcs11.NewAttribute(pkcs11.CKA_CLASS, class),
++		pkcs11.NewAttribute(pkcs11.CKA_LABEL, label),
++	}
++	if err := ctx.FindObjectsInit(session, tmpl); err != nil {
++		return 0, false, fmt.Errorf("C_FindObjectsInit: %w", err)
++	}
++	objs, _, err := ctx.FindObjects(session, 1)
++	_ = ctx.FindObjectsFinal(session)
++	if err != nil {
++		return 0, false, fmt.Errorf("C_FindObjects: %w", err)
++	}
++	if len(objs) == 0 {
++		return 0, false, nil
++	}
++	return objs[0], true, nil
++}
++
++// getAttr reads a single attribute value from an object.
++func getAttr(ctx *pkcs11.Ctx, session pkcs11.SessionHandle, obj pkcs11.ObjectHandle, attr uint) ([]byte, error) {
++	res, err := ctx.GetAttributeValue(session, obj, []*pkcs11.Attribute{pkcs11.NewAttribute(attr, nil)})
++	if err != nil {
++		return nil, err
++	}
++	if len(res) == 0 {
++		return nil, fmt.Errorf("attribute 0x%x not present", attr)
++	}
++	return res[0].Value, nil
++}
+diff --git a/cas/softcas/pkcs11mldsa_nocgo.go b/cas/softcas/pkcs11mldsa_nocgo.go
+new file mode 100644
+index 0000000..86ac4af
+--- /dev/null
++++ b/cas/softcas/pkcs11mldsa_nocgo.go
+@@ -0,0 +1,36 @@
++//go:build !cgo
++
++package softcas
++
++// Non-cgo stub for the HSM-backed ML-DSA-65 signer. miekg/pkcs11 requires cgo
++// (it dlopen()s the PKCS#11 module), so a CGO_ENABLED=0 build of step-ca (its
++// default `make build`) cannot include the real PKCS11MLDSASigner. This stub
++// keeps the cas/softcas package compiling without cgo; the in-process circl
++// path (mldsa.go) is unaffected, and a cgo build of cmd/mldsa-issue gets the
++// real signer from pkcs11mldsa.go.
++
++import (
++	"crypto"
++	"errors"
++	"io"
++)
++
++// errNoCGO is returned when HSM custody is requested from a non-cgo build.
++var errNoCGO = errors.New("softcas: HSM-backed ML-DSA signer requires a cgo build (CGO_ENABLED=1)")
++
++// PKCS11MLDSASigner is a build-time stub; the real implementation lives in
++// pkcs11mldsa.go behind the cgo build tag.
++type PKCS11MLDSASigner struct{}
++
++func (s *PKCS11MLDSASigner) Public() crypto.PublicKey { return nil }
++
++func (s *PKCS11MLDSASigner) Sign(io.Reader, []byte, crypto.SignerOpts) ([]byte, error) {
++	return nil, errNoCGO
++}
++
++func (s *PKCS11MLDSASigner) Close() {}
++
++// NewPKCS11MLDSASigner always errors in a non-cgo build.
++func NewPKCS11MLDSASigner(modulePath, tokenLabel, pin, keyLabel string) (*PKCS11MLDSASigner, error) {
++	return nil, errNoCGO
++}
 diff --git a/cas/softcas/softcas.go b/cas/softcas/softcas.go
-index 1e590ef..50b52f7 100644
+index 1e590ef..f340ee9 100644
 --- a/cas/softcas/softcas.go
 +++ b/cas/softcas/softcas.go
 @@ -268,6 +268,12 @@ func (c *SoftCAS) createSigner(req *kmsapi.CreateSignerRequest) (crypto.Signer,
  // createCertificate sets the SignatureAlgorithm of the template if necessary
  // and calls x509util.CreateCertificate.
  func createCertificate(template, parent *x509.Certificate, pub crypto.PublicKey, signer crypto.Signer) (*x509.Certificate, error) {
-+	// PQC: when the issuer key is a circl ML-DSA-65 key, crypto/x509 cannot
-+	// encode the signature, so assemble the certificate DER by hand.
-+	if sk, ok := isMLDSASigner(signer); ok {
-+		return createMLDSACertificate(template, parent, pub, sk)
++	// PQC: when the issuer key is an ML-DSA-65 key (in-process or HSM-backed),
++	// crypto/x509 cannot encode the signature, so assemble the cert DER by hand.
++	if isMLDSASigner(signer) {
++		return createMLDSACertificate(template, parent, pub, signer)
 +	}
 +
  	// Signers can specify the signature algorithm. This is especially important
@@ -347,10 +622,10 @@ index 1e590ef..50b52f7 100644
  	if template.SignatureAlgorithm == 0 {
 diff --git a/cmd/mldsa-issue/main.go b/cmd/mldsa-issue/main.go
 new file mode 100644
-index 0000000..ceb3228
+index 0000000..8a4961f
 --- /dev/null
 +++ b/cmd/mldsa-issue/main.go
-@@ -0,0 +1,201 @@
+@@ -0,0 +1,263 @@
 +// Command mldsa-issue drives the patched step-ca SoftCAS engine to issue a full
 +// certificate chain (root CA + leaf) through the *real* cas/softcas code path.
 +//
@@ -391,37 +666,71 @@ index 0000000..ceb3228
 +	"github.com/smallstep/certificates/cas/softcas"
 +)
 +
++type config struct {
++	algo, caOut, leafOut         string
++	hsm                          bool
++	module, token, pin, keyLabel string
++}
++
 +func main() {
-+	algo := flag.String("algo", "mldsa65", "issuer algorithm: mldsa65 | ec")
-+	caOut := flag.String("ca-out", "/tmp/stepca-mldsa-ca.pem", "root CA certificate PEM output path")
-+	leafOut := flag.String("out", "/tmp/stepca-mldsa-leaf.pem", "leaf certificate PEM output path")
++	var c config
++	flag.StringVar(&c.algo, "algo", "mldsa65", "issuer algorithm: mldsa65 | ec")
++	flag.StringVar(&c.caOut, "ca-out", "/tmp/stepca-mldsa-ca.pem", "root CA certificate PEM output path")
++	flag.StringVar(&c.leafOut, "out", "/tmp/stepca-mldsa-leaf.pem", "leaf certificate PEM output path")
++	flag.BoolVar(&c.hsm, "hsm", false, "keep the ML-DSA-65 CA key in a PKCS#11 token (softhsmv3) — root-of-trust never leaves the HSM")
++	flag.StringVar(&c.module, "module", envOr("PKCS11_MODULE", "/usr/local/lib/softhsm/libsofthsmv3.so"), "PKCS#11 module path (-hsm)")
++	flag.StringVar(&c.token, "token", envOr("PKCS11_TOKEN", "pqc-playground"), "PKCS#11 token label (-hsm)")
++	flag.StringVar(&c.pin, "pin", envOr("PKCS11_PIN", "1234"), "PKCS#11 user PIN (-hsm)")
++	flag.StringVar(&c.keyLabel, "key-label", envOr("PKCS11_KEY_LABEL", "stepca-mldsa-ca"), "PKCS#11 CA key label (-hsm)")
 +	flag.Parse()
-+	if err := run(*algo, *caOut, *leafOut); err != nil {
++	if err := run(c); err != nil {
 +		fmt.Fprintln(os.Stderr, "error:", err)
 +		os.Exit(1)
 +	}
 +}
 +
-+func run(algo, caOut, leafOut string) error {
++func envOr(key, def string) string {
++	if v := os.Getenv(key); v != "" {
++		return v
++	}
++	return def
++}
++
++func run(c config) error {
 +	now := time.Now()
 +	var (
-+		caCert *x509.Certificate
-+		signer crypto.Signer
-+		err    error
++		caCert  *x509.Certificate
++		signer  crypto.Signer
++		custody = "in-process (cloudflare/circl)"
++		err     error
 +	)
-+	switch algo {
++	switch c.algo {
 +	case "mldsa65", "ml-dsa-65", "ML-DSA-65":
-+		algo = "mldsa65"
-+		caCert, signer, err = mldsaRoot(now)
++		c.algo = "mldsa65"
++		if c.hsm {
++			var hsmSigner *softcas.PKCS11MLDSASigner
++			caCert, hsmSigner, err = mldsaRootHSM(now, c)
++			if hsmSigner != nil {
++				defer hsmSigner.Close()
++				signer = hsmSigner
++			}
++			custody = fmt.Sprintf("PKCS#11 token %q via %s (CKM_ML_DSA, non-extractable)", c.token, c.module)
++		} else {
++			caCert, signer, err = mldsaRoot(now)
++		}
 +	case "ec", "ecdsa", "p256", "P-256":
-+		algo = "ec"
++		c.algo = "ec"
++		if c.hsm {
++			return fmt.Errorf("-hsm requires -algo mldsa65 (classical EC custody is out of scope)")
++		}
 +		caCert, signer, err = ecRoot(now)
 +	default:
-+		return fmt.Errorf("unknown -algo %q (want mldsa65 | ec)", algo)
++		return fmt.Errorf("unknown -algo %q (want mldsa65 | ec)", c.algo)
 +	}
 +	if err != nil {
 +		return err
 +	}
++	algo, caOut, leafOut := c.algo, c.caOut, c.leafOut
 +
 +	// Issue the leaf through the real SoftCAS engine.
 +	cas, err := softcas.New(context.Background(), apiv1.Options{
@@ -452,8 +761,36 @@ index 0000000..ceb3228
 +		return err
 +	}
 +	fmt.Printf("algo=%s root_ca=%q leaf=%q serial=%s\n", algo, caCert.Subject.CommonName, leaf.Subject.CommonName, leaf.SerialNumber)
++	fmt.Printf("ca_key_custody=%s\n", custody)
 +	fmt.Printf("wrote %s (%d B) and %s (%d B)\n", caOut, len(caCert.Raw), leafOut, len(leaf.Raw))
 +	return nil
++}
++
++// mldsaRootHSM self-signs an ML-DSA-65 root CA whose private key lives in (and
++// never leaves) a PKCS#11 token. The signature is produced by C_Sign(CKM_ML_DSA)
++// inside the HSM; only the cert assembly happens in-process.
++func mldsaRootHSM(now time.Time, c config) (*x509.Certificate, *softcas.PKCS11MLDSASigner, error) {
++	signer, err := softcas.NewPKCS11MLDSASigner(c.module, c.token, c.pin, c.keyLabel)
++	if err != nil {
++		return nil, nil, err
++	}
++	rawSubject, err := asn1.Marshal(pkix.Name{CommonName: "PQC ML-DSA-65 Root CA (HSM)"}.ToRDNSequence())
++	if err != nil {
++		return nil, signer, err
++	}
++	tmpl := &x509.Certificate{
++		SerialNumber:    big.NewInt(1),
++		Subject:         pkix.Name{CommonName: "PQC ML-DSA-65 Root CA (HSM)"},
++		RawSubject:      rawSubject,
++		NotBefore:       now.Add(-time.Hour),
++		NotAfter:        now.Add(24 * time.Hour),
++		ExtraExtensions: caExtensions(),
++	}
++	caCert, err := softcas.CreateMLDSACertificate(tmpl, tmpl, signer.Public(), signer)
++	if err != nil {
++		return nil, signer, err
++	}
++	return caCert, signer, nil
 +}
 +
 +// mldsaRoot self-signs an ML-DSA-65 root CA whose subject key and signature are
@@ -553,17 +890,33 @@ index 0000000..ceb3228
 +	return os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o644)
 +}
 diff --git a/go.mod b/go.mod
-index 282e285..11d3765 100644
+index 282e285..e9584a6 100644
 --- a/go.mod
 +++ b/go.mod
-@@ -88,6 +88,7 @@ require (
- 	github.com/cespare/xxhash v1.1.0 // indirect
- 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
- 	github.com/chzyer/readline v1.5.1 // indirect
-+	github.com/cloudflare/circl v1.6.3 // indirect
- 	github.com/cpuguy83/go-md2man/v2 v2.0.7 // indirect
- 	github.com/davecgh/go-spew v1.1.1 // indirect
- 	github.com/dgraph-io/ristretto v0.1.0 // indirect
+@@ -7,6 +7,7 @@ require (
+ 	cloud.google.com/go/security v1.19.2
+ 	github.com/Masterminds/sprig/v3 v3.3.0
+ 	github.com/ccoveille/go-safecast/v2 v2.0.0
++	github.com/cloudflare/circl v1.6.3
+ 	github.com/coreos/go-oidc/v3 v3.17.0
+ 	github.com/coreos/go-systemd/v22 v22.7.0
+ 	github.com/dgraph-io/badger v1.6.2
+@@ -22,6 +23,7 @@ require (
+ 	github.com/hashicorp/vault/api/auth/approle v0.11.0
+ 	github.com/hashicorp/vault/api/auth/aws v0.11.0
+ 	github.com/hashicorp/vault/api/auth/kubernetes v0.10.0
++	github.com/miekg/pkcs11 v1.1.2
+ 	github.com/newrelic/go-agent/v3 v3.42.0
+ 	github.com/pkg/errors v0.9.1
+ 	github.com/prometheus/client_golang v1.23.2
+@@ -134,7 +136,6 @@ require (
+ 	github.com/mattn/go-colorable v0.1.14 // indirect
+ 	github.com/mattn/go-isatty v0.0.20 // indirect
+ 	github.com/mgutz/ansi v0.0.0-20200706080929-d51e80ef957d // indirect
+-	github.com/miekg/pkcs11 v1.1.2 // indirect
+ 	github.com/mitchellh/copystructure v1.2.0 // indirect
+ 	github.com/mitchellh/go-homedir v1.1.0 // indirect
+ 	github.com/mitchellh/mapstructure v1.5.0 // indirect
 diff --git a/go.sum b/go.sum
 index d682425..ebcee41 100644
 --- a/go.sum

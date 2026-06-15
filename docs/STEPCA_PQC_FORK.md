@@ -1,7 +1,9 @@
-# step-ca PQC Fork — ML-DSA-65 Certificate Issuance (Sandbox Scenario 18)
+# step-ca PQC Fork — HSM-backed ML-DSA-65 CA (Sandbox Scenario 18)
 
-Strong-style patch fork of `smallstep/certificates` (step-ca) that makes the CA
-issue X.509 certificates **signed with ML-DSA-65** (FIPS 204). Companion patch:
+strongSwan-style patch fork of `smallstep/certificates` (step-ca) that makes the
+CA issue a **fully post-quantum X.509 chain** — a self-signed **ML-DSA-65 root**
+(FIPS 204) issuing **ML-DSA-65 leaves** — with the root key held in (and never
+leaving) a **softhsmv3 PKCS#11 token**. Companion patch:
 [`../step-ca-pqc.patch`](../step-ca-pqc.patch).
 
 ## Status
@@ -9,119 +11,128 @@ issue X.509 certificates **signed with ML-DSA-65** (FIPS 204). Companion patch:
 | Milestone | State |
 |-----------|-------|
 | Upstream pinned | ✅ v0.30.2 (rev `6e8ec61405239cf3f37b2bbf260a587b7d2e4e31`) |
-| Patch drafted | ✅ `step-ca-pqc.patch` (6 files, +416) |
-| Builds | ✅ `go build ./cas/softcas/...` green |
-| ML-DSA issuance proven | ✅ unit test + demo issuer + openssl-confirmed (see §3) |
-| Finish plan written | ✅ this doc |
+| Patch | ✅ `step-ca-pqc.patch` (8 files, +749) |
+| Builds (CGO=0 step-ca + CGO=1 mldsa-issue) | ✅ from a pristine v0.30.2 clone |
+| ML-DSA issuance proven | ✅ unit test + `openssl verify` of a full ML-DSA chain (§3) |
+| Fully-PQC chain (ML-DSA subject key + sig) | ✅ root **and** leaf are ML-DSA-65 |
+| **HSM-backed CA key (softhsmv3, non-extractable)** | ✅ verified against the native module (§4) |
+| Sandbox wired (`tests/18` + Dockerfile) | ✅ real forked step-ca, HSM-first (§5) |
+| `step ca` ACME/provisioner ML-DSA surface | ⬜ remaining finish item (§7) |
 
 ## 1. Pinned version
 
-- Upstream: `github.com/smallstep/certificates`
-- Tag: `v0.30.2`, rev `6e8ec61405239cf3f37b2bbf260a587b7d2e4e31`
-- ML-DSA backend (slice): `cloudflare/circl v1.6.3` (`sign/mldsa/mldsa65`, pure Go)
-- Built/verified with Go (darwin/arm64) against OpenSSL 3.6 (for the openssl cert check only)
-- Sandbox baseline: `pqctoday-sandbox/docker/Dockerfile.network` currently clones
-  `smallstep/certificates` `--depth 1` at **HEAD of `master` (unpinned)`; this fork
-  pins **v0.30.2** and records the rev for reproducibility.
+- Upstream: `github.com/smallstep/certificates`, tag `v0.30.2`, rev `6e8ec61…`
+- Software ML-DSA backend: `cloudflare/circl v1.6.3` (`sign/mldsa/mldsa65`, pure Go)
+- HSM ML-DSA backend: `miekg/pkcs11 v1.1.2` → softhsmv3 (`CKM_ML_DSA`). step-ca
+  already links `miekg/pkcs11` via its PKCS#11 KMS, so CGO was already required.
+- Built/verified with go1.26.4 (darwin/arm64) against OpenSSL 3.6 and the native
+  `libsofthsmv3` module.
+- Sandbox baseline before this fork: `Dockerfile.network` cloned step-ca
+  `--depth 1` at **HEAD of `master` (unpinned)** and `tests/18_test_stepca.sh`
+  faked PQC with raw `openssl` — step-ca was built but **never issued anything**.
 
-## 2. Patch surface (`step-ca-pqc.patch`, 6 files, +416)
+## 2. Patch surface (`step-ca-pqc.patch`, 8 files, +749)
 
 | File | Change |
 |------|--------|
-| `cas/softcas/mldsa.go` (NEW) | ML-DSA-65 signer over `cloudflare/circl`; builds + self-signs/leaf-signs a `*x509.Certificate` by hand-assembling the TBS + ML-DSA `signatureAlgorithm` (OID `2.16.840.1.101.3.4.3.18`), bypassing Go's `x509` algorithm whitelist (Go has no ML-DSA OID yet) |
-| `cas/softcas/mldsa_test.go` (NEW) | `TestSoftCAS_CreateCertificate_MLDSA65` — issues a leaf, asserts the signature-algorithm OID + the 3309-byte signature length |
-| `cas/softcas/softcas.go` | ~6-line dispatch: when the CA signer is an ML-DSA key, route `CreateCertificate` through the new ML-DSA path instead of Go's stdlib `x509.CreateCertificate` |
-| `cmd/mldsa-issue/main.go` (NEW) | standalone demo: builds an ML-DSA-65 CA via softcas, issues a leaf, writes the PEM — the validated-slice harness |
-| `go.mod` / `go.sum` | add `github.com/cloudflare/circl v1.6.3` |
+| `cas/softcas/softcas.go` | 6-line dispatch: when the issuer signer's **public key** is ML-DSA-65, route `CreateCertificate` through `createMLDSACertificate` instead of Go's `x509.CreateCertificate`. Keying on the public-key type means software and HSM signers share the path. |
+| `cas/softcas/mldsa.go` (NEW) | Hand-assembles the RFC 5280 TBSCertificate with the ML-DSA-65 `AlgorithmIdentifier` (OID `2.16.840.1.101.3.4.3.18`, no params per RFC 9881), signs the TBS through a `crypto.Signer` (pure ML-DSA, empty context). `subjectPublicKeyInfo()` also hand-encodes an ML-DSA-65 `SubjectPublicKeyInfo` (Go's `MarshalPKIXPublicKey` can't), enabling a fully-PQC chain. `CreateMLDSACertificate` exported for root self-issuance. |
+| `cas/softcas/pkcs11mldsa.go` (NEW, `//go:build cgo`) | `PKCS11MLDSASigner`: a `crypto.Signer` whose ML-DSA-65 key is generated on a PKCS#11 token as `CKA_SENSITIVE` + `CKA_EXTRACTABLE=false`; `Sign` is `C_Sign(CKM_ML_DSA=0x1D)` inside the module. Keygen template (`CKM_ML_DSA_KEY_PAIR_GEN=0x1C`, `CKA_PARAMETER_SET=CKP_ML_DSA_65`) mirrors the platform's verified PyKCS11 path (`tests/_ssh_seed.sh`). |
+| `cas/softcas/pkcs11mldsa_nocgo.go` (NEW, `//go:build !cgo`) | Stub so `cas/softcas` compiles under step-ca's default `CGO_ENABLED=0 make build`; `NewPKCS11MLDSASigner` returns a clear "requires cgo" error. |
+| `cas/softcas/mldsa_test.go` (NEW) | `TestSoftCAS_CreateCertificate_MLDSA65` — drives SoftCAS end-to-end, asserts the OID + ML-DSA signature verify. |
+| `cmd/mldsa-issue/main.go` (NEW, demo only) | Self-signs an ML-DSA-65 root and issues a leaf via the real SoftCAS engine, writing both PEMs (`-ca-out`/`-out`). `-hsm` keeps the CA key in softhsmv3; `-algo ec` exercises the classical path. Drives sandbox scenario 18. |
+| `go.mod` / `go.sum` | add `cloudflare/circl v1.6.3` + `miekg/pkcs11 v1.1.2` (minimal; no other module perturbed). |
 
-Classic RSA/EC/Ed25519 issuance paths are untouched.
+Classical RSA/EC/Ed25519 issuance paths are untouched (the dispatch only diverts
+ML-DSA issuers).
 
-## 3. Validated-slice evidence (verbatim, re-run from a clean v0.30.2 clone)
+## 3. Validated-slice evidence (verbatim, from a clean v0.30.2 clone, no `go mod tidy`)
 
-```
-$ go build ./cas/softcas/...
-BUILD OK
-
-$ go test ./cas/softcas/ -run MLDSA -v
-=== RUN   TestSoftCAS_CreateCertificate_MLDSA65
-    mldsa_test.go:80: issued leaf CN="leaf.pqc.test" serial=1234567890
-    mldsa_test.go:81: signatureAlgorithm OID = 2.16.840.1.101.3.4.3.18 (ML-DSA-65)
-    mldsa_test.go:82: signature length = 3309 bytes
---- PASS: TestSoftCAS_CreateCertificate_MLDSA65 (0.00s)
+```console
+$ git apply step-ca-pqc.patch && make build            # step-ca, CGO_ENABLED=0
+Build Complete!
+$ go test ./cas/softcas/ -run MLDSA
 ok  github.com/smallstep/certificates/cas/softcas
 
-$ go run ./cmd/mldsa-issue/
-issued leaf CN="leaf.pqc.test" ...
-wrote /tmp/stepca-mldsa-leaf.pem
-
-$ openssl x509 -in /tmp/stepca-mldsa-leaf.pem -text -noout | grep 'Signature Algorithm'
-        Signature Algorithm: ML-DSA-65
-    Signature Algorithm: ML-DSA-65
+$ CGO_ENABLED=1 go build -o mldsa-issue ./cmd/mldsa-issue
+$ ./mldsa-issue -algo mldsa65 -ca-out ca.pem -out leaf.pem
+algo=mldsa65 root_ca="PQC ML-DSA-65 Root CA" leaf="leaf.pqc.test" ...
+$ openssl x509 -in ca.pem   -noout -text | grep -m1 'Public Key Algorithm'   # ML-DSA-65
+$ openssl x509 -in leaf.pem -noout -text | grep -m1 'Signature Algorithm'    # ML-DSA-65
+$ openssl verify -CAfile ca.pem leaf.pem
+leaf.pem: OK
 ```
 
-3309 bytes is the exact FIPS 204 ML-DSA-65 signature size, and an **independent
-OpenSSL 3.6** parse of the emitted cert confirms `Signature Algorithm: ML-DSA-65`.
+The root CA's **subject key and signature are both ML-DSA-65**, the leaf is
+ML-DSA-65-signed, and an **independent OpenSSL 3.6** verifies the whole chain.
 
-> **Scope nuance (not a gap):** the slice proves ML-DSA **issuance** — the CA
-> *signs* the leaf with its ML-DSA-65 key. The leaf's *own* subject key in the
-> demo is EC/P-256 (`id-ecPublicKey`). Issuing certs whose **subject key** is
-> ML-DSA is a finish item (§5), independent of the signing proof.
+## 4. HSM-backed CA key — verified
 
-## 4. HSM-backing path (lead finish item)
+The CA's ML-DSA-65 private key is generated in, and never leaves, a softhsmv3
+PKCS#11 token. Verified against the **native `libsofthsmv3`** module + an
+initialized token:
 
-The slice signs in-process with `cloudflare/circl`. The HSM-backed target keeps
-the CA's ML-DSA private key in **softhsmv3** (the platform's HSM-first directive):
+```console
+$ softhsm2-util --module libsofthsmv3.* --init-token --slot 0 \
+    --label pqc-playground --so-pin 123456 --pin 1234
+$ ./mldsa-issue -hsm -module libsofthsmv3.* -token pqc-playground -pin 1234 \
+    -ca-out ca.pem -out leaf.pem
+ca_key_custody=PKCS#11 token "pqc-playground" ... (CKM_ML_DSA, non-extractable)
+$ openssl verify -CAfile ca.pem leaf.pem
+leaf.pem: OK
+```
 
-- step-ca already has a `kms` abstraction with a **PKCS#11** provider; the CA
-  signer is a `crypto.Signer`. Replace the in-software circl signer with a
-  PKCS#11-backed ML-DSA signer that calls softhsmv3 `CKM_ML_DSA` (**0x1D**) via
-  `miekg/pkcs11` (softhsmv3 already implements ML-DSA-65 — no HSM-side crypto work).
-- The same Go-`x509`-has-no-ML-DSA-OID bypass used in the slice (hand-assembled
-  `signatureAlgorithm`) carries over; only the signing call changes from circl to
-  the PKCS#11 `C_Sign`.
-- Estimate: ~3–5 d (the `miekg/pkcs11` ML-DSA mechanism plumbing in step-ca's
-  pkcs11 kms wrapper is the bulk; mirrors the cosign HSM finish item).
+- **Token residency proof:** a second `-hsm` run produces the *identical* CA
+  public key (same SHA-256) — the key persists on the token (`CKA_TOKEN=true`)
+  and is reused, not regenerated.
+- **Non-extractable:** generated with `CKA_SENSITIVE=true`, `CKA_EXTRACTABLE=false`
+  (softhsmv3 enforces these; the private key value cannot be read out).
+- **Signing happens in the HSM:** every cert signature is a `C_Sign(CKM_ML_DSA)`
+  call into the module; only TBS assembly happens in-process.
+- softhsmv3 already implements ML-DSA-65 (`OSSLMLDSA.cpp`, `SoftHSM_sign.cpp`
+  `CKM_ML_DSA` → `AsymMech::MLDSA`) — no HSM-side crypto work was needed.
 
-## 5. Sandbox wiring (scenario 18)
+## 5. Sandbox wiring (scenario 18) — done
 
-**Today's gap (confirmed):** `pqctoday-sandbox/tests/18_test_stepca.sh` fakes the
-PQC path — it builds the CA cert and leaf with raw `openssl genpkey -algorithm
-mldsa65` + `openssl req -x509`/`openssl x509 -req`, and only *mentions*
-`step ca init --key-type` in the `config_applied` string. **step-ca is built in
-the image but never performs the ML-DSA issuance.** This fork makes it real.
-
-Steps to flip scenario 18 to `_simulated:false`:
-1. `docker/Dockerfile.network` — pin the step-ca clone to **v0.30.2** and apply
-   `pqctoday-hsm/step-ca-pqc.patch` (strongSwan-style: COPY patch + `git apply`)
-   before `make build`. (Go build already present in the image.)
-2. `tests/18_test_stepca.sh` — drive **real step-ca** ML-DSA issuance (the
-   `cmd/mldsa-issue` path, or `step ca` proper once the kms/provisioner surface
-   accepts ML-DSA) instead of the openssl simulation; verify the issued cert's
-   `signatureAlgorithm` is ML-DSA-65 via openssl; emit `_simulated:false`,
-   `signature_algo:"ML-DSA-65"`, `ca_engine:"step-ca (forked)"`.
-3. README scenario-18 row + `docs/18-*.md` — describe real step-ca ML-DSA issuance.
+- `docker/Dockerfile.network`: step-ca clone pinned to **v0.30.2**, applies
+  `pqctoday-hsm/step-ca-pqc.patch` (COPY + `git apply`), `make build`, and builds
+  `mldsa-issue` with `CGO_ENABLED=1`. The token `pqc-playground` (PIN `1234`) is
+  already initialized earlier in the image, and the module installs at
+  `/usr/local/lib/softhsm/libsofthsmv3.so` — exactly the defaults `mldsa-issue`
+  uses, so `-hsm` works in-image with no extra config.
+- `tests/18_test_stepca.sh`: layered, honest issuance —
+  1. **pqc** → `mldsa-issue -hsm` (HSM-backed ML-DSA-65 chain) → `hsm_backed:true`,
+     `_simulated:false`;
+  2. if the token is unavailable → in-software forked step-ca (`hsm_backed:false`,
+     still `_simulated:false`, custody note says "software fallback");
+  3. **classical** → `mldsa-issue -algo ec` (EC P-256, step-ca's default);
+  4. if `mldsa-issue` is absent (image not rebuilt) → openssl fallback, honestly
+     `_simulated:true` (does **not** claim step-ca did the work).
+  Every path verifies the chain with `openssl verify` and emits `ca_engine`,
+  `issuance_path`, `key_custody`, `hsm_backed`.
 
 ## 6. Standardization caveat
 
-ML-DSA in X.509 certificates is governed by the emerging IETF LAMPS work
-(`draft-ietf-lamps-dilithium-certificates` and the PKIX algorithm-identifier
-drafts). The OID `2.16.840.1.101.3.4.3.18` (NIST CSOR, ML-DSA-65) is stable, but
-broad client/library support (incl. Go's `crypto/x509`) is still landing — hence
-the hand-assembled signatureAlgorithm. This fork is forward-looking; it proves
-the CA tooling + crypto are ready.
+ML-DSA in X.509 is governed by emerging IETF LAMPS work
+(`draft-ietf-lamps-dilithium-certificates` + PKIX algorithm-id drafts). The OID
+`2.16.840.1.101.3.4.3.18` (NIST CSOR, ML-DSA-65) is stable, but broad
+client/library support — incl. Go's `crypto/x509` — is still landing, hence the
+hand-assembled `signatureAlgorithm`/SPKI (same approach as the strongSwan PQC
+patch). OpenSSL 3.6 verifies the emitted chains today.
 
-## 7. Remaining work to fully close scenario 18
+## 7. Remaining work
 
 | Item | Effort |
 |------|--------|
-| HSM-backed CA signer (softhsmv3 via `miekg/pkcs11`, `CKM_ML_DSA` 0x1D) — §4 | 3–5 d |
-| ML-DSA **subject-key** issuance (not just ML-DSA-signed) + CSR path | 1–2 d |
-| Wire the `step ca` / provisioner surface (vs the demo `cmd/mldsa-issue`) to accept ML-DSA | 1–2 d |
-| Sandbox: Dockerfile pin+patch, `tests/18` rewrite, README/docs — §5 | 1–2 d |
-| **Total** | **~L (6–11 d)** — aligns with the master plan's "L" estimate |
+| Wire the running `step ca` server / provisioner + ACME to **select** ML-DSA (vs the `cmd/mldsa-issue` SoftCAS harness) | 1–2 d |
+| ML-DSA-44/87 parameter sets | 0.5 d |
+| CSR-driven leaf issuance (subject CSR path) through the HSM signer | 1 d |
+| `docker build` of the full pqc-network image + in-container scenario-18 run (verified here by replaying the build steps on a pristine clone + against the native module; full image build not yet run) | 0.5 d |
 
 ## 8. Status
 
-Validated slice committed; patch verified to apply cleanly to a pristine v0.30.2
-clone and to build + issue an ML-DSA-65-signed cert (openssl-confirmed). No push,
-no PR, no `pqctoday-org` repo. Sandbox wiring is deferred (§5).
+Patch verified to apply cleanly to a pristine v0.30.2 clone and to build
+(`make build` CGO=0 for step-ca; `CGO_ENABLED=1` for `mldsa-issue`), pass the
+unit test, and issue a **fully post-quantum, HSM-backed** ML-DSA-65 chain that
+OpenSSL 3.6 verifies. Sandbox scenario 18 is wired to it (HSM-first, honest
+fallbacks). No push, no PR, no `pqctoday-org` repo; full image build deferred.
