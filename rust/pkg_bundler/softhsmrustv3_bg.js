@@ -1632,3 +1632,11 @@ let wasm;
 export function __wbg_set_wasm(val) {
     wasm = val;
 }
+
+// Post-build shim — wasm-bindgen no longer auto-exports __wbg_get_memory.
+// The hub loader builds HEAPU8/getValue/setValue from WebAssembly.Memory via
+// this. wasm.memory is the linear memory exported by the .wasm binary, valid
+// after __wbg_set_wasm runs. Re-applied automatically by build-wasm-bundle.sh.
+export function __wbg_get_memory() {
+    return wasm.memory;
+}
