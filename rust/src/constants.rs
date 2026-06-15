@@ -159,8 +159,14 @@ pub const CKM_SHA512_RSA_PKCS: u32 = 0x0000_0042;
 pub const CKM_SHA256_RSA_PKCS_PSS: u32 = 0x0000_0043;
 pub const CKM_SHA384_RSA_PKCS_PSS: u32 = 0x0000_0044;
 pub const CKM_SHA512_RSA_PKCS_PSS: u32 = 0x0000_0045;
+// Raw RSA PKCS#1 v1.5 sign/verify/encrypt (caller supplies the data; no hash).
+pub const CKM_RSA_PKCS: u32 = 0x0000_0001;
 // Raw RSA-PSS (caller supplies the pre-computed hash) — advertised in §6.4.
 pub const CKM_RSA_PKCS_PSS: u32 = 0x0000_000D;
+// RSA private-key CRT components (§2.1.3) — sensitive material, never extractable
+// in clear from a sensitive key. CKA_PRIVATE_EXPONENT .. CKA_COEFFICIENT.
+pub const CKA_PRIVATE_EXPONENT: u32 = 0x0000_0123;
+pub const CKA_COEFFICIENT: u32 = 0x0000_0128;
 // SHA3-384 RSA composite sign mechanisms (§6.4).
 pub const CKM_SHA3_384_RSA_PKCS: u32 = 0x0000_0061;
 pub const CKM_SHA3_384_RSA_PKCS_PSS: u32 = 0x0000_0064;
@@ -432,6 +438,7 @@ pub const SUPPORTED_MECHS: &[u32] = &[
     CKM_SHA256_RSA_PKCS_PSS,
     CKM_SHA384_RSA_PKCS_PSS,
     CKM_SHA512_RSA_PKCS_PSS,
+    CKM_RSA_PKCS,
     CKM_RSA_PKCS_PSS,
     CKM_SHA3_384_RSA_PKCS,
     CKM_SHA3_384_RSA_PKCS_PSS,

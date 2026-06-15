@@ -761,7 +761,9 @@ pub fn C_GetMechanismInfo(_slot_id: u32, mech_type: u32, p_info: *mut u8) -> u32
 /// table can never drift apart (gap-analysis R6.2).
 pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
     let info = match mech_type {
-        CKM_RSA_PKCS_KEY_PAIR_GEN => (2048, 4096, 0x00010000u32),
+        CKM_RSA_PKCS_KEY_PAIR_GEN => (1024, 4096, 0x00010000u32),
+        // Raw RSA PKCS#1 v1.5 — sign/verify + encrypt/decrypt.
+        CKM_RSA_PKCS => (1024, 4096, 0x00000800 | 0x00002000 | 0x00000100 | 0x00000200),
         CKM_SHA256_RSA_PKCS | CKM_SHA384_RSA_PKCS | CKM_SHA512_RSA_PKCS
         | CKM_SHA256_RSA_PKCS_PSS | CKM_SHA384_RSA_PKCS_PSS | CKM_SHA512_RSA_PKCS_PSS
         | CKM_RSA_PKCS_PSS | CKM_SHA3_384_RSA_PKCS | CKM_SHA3_384_RSA_PKCS_PSS => {
@@ -1594,7 +1596,12 @@ pub fn C_GenerateKeyPair(
                     CKA_MODULUS_BITS,
                 )
                 .unwrap_or(2048) as usize;
-                if !(2048..=4096).contains(&bits) {
+                // Floor at 1024: 2048+ is the recommended/default size, but the
+                // conformance suite mints a throwaway 1024-bit key to exercise
+                // the negative key-usage policy paths (CKA_SIGN=false,
+                // CKA_EXTRACTABLE=false). 1024 is cryptographically weak and
+                // never the default — callers should use >= 2048.
+                if !(1024..=4096).contains(&bits) {
                     return CKR_ARGUMENTS_BAD;
                 }
                 let private_key =
@@ -3337,7 +3344,7 @@ pub fn C_Sign(
             }
             CKM_SHA256_RSA_PKCS | CKM_SHA384_RSA_PKCS | CKM_SHA512_RSA_PKCS
             | CKM_SHA256_RSA_PKCS_PSS | CKM_SHA384_RSA_PKCS_PSS | CKM_SHA512_RSA_PKCS_PSS
-            | CKM_SHA3_384_RSA_PKCS | CKM_SHA3_384_RSA_PKCS_PSS => {
+            | CKM_SHA3_384_RSA_PKCS | CKM_SHA3_384_RSA_PKCS_PSS | CKM_RSA_PKCS => {
                 let pss_salt = if rsa_pss_mech_params(eff_mech).is_some() && ctx_bytes.len() >= 4 {
                     Some(u32::from_le_bytes([
                         ctx_bytes[0],
@@ -3654,7 +3661,7 @@ pub fn C_Verify(
             // CKA_VALUE is NOT defined for CKO_PUBLIC_KEY/CKK_RSA objects.
             CKM_SHA256_RSA_PKCS | CKM_SHA384_RSA_PKCS | CKM_SHA512_RSA_PKCS
             | CKM_SHA256_RSA_PKCS_PSS | CKM_SHA384_RSA_PKCS_PSS | CKM_SHA512_RSA_PKCS_PSS
-            | CKM_SHA3_384_RSA_PKCS | CKM_SHA3_384_RSA_PKCS_PSS => {
+            | CKM_SHA3_384_RSA_PKCS | CKM_SHA3_384_RSA_PKCS_PSS | CKM_RSA_PKCS => {
                 match get_rsa_public_components(hkey) {
                     Some((n, e)) => {
                         let pss_salt =

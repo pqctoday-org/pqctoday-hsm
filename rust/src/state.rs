@@ -457,7 +457,12 @@ pub fn value_is_blocked(attrs: &Attributes) -> bool {
 /// `ffi::C_GetAttributeValue` and `native::object::get_attribute` use this
 /// predicate so the two surfaces cannot drift.
 pub fn attr_is_sensitive_material(attr_type: u32) -> bool {
-    attr_type == CKA_VALUE || attr_type == CKA_SEED
+    // CKA_VALUE / CKA_SEED, plus the RSA private CRT components
+    // (CKA_PRIVATE_EXPONENT 0x123 .. CKA_COEFFICIENT 0x128): on a sensitive or
+    // unextractable key these read back as CKR_ATTRIBUTE_SENSITIVE, never in clear.
+    attr_type == CKA_VALUE
+        || attr_type == CKA_SEED
+        || (CKA_PRIVATE_EXPONENT..=CKA_COEFFICIENT).contains(&attr_type)
 }
 
 /// T6 — pure modifiability check behind every attribute-mutation surface
