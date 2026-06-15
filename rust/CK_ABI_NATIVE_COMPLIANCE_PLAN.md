@@ -6,10 +6,12 @@
 
 ## FINAL STATUS — 315 PASS / 0 FAIL / 0 SKIP (was 28 PASS) — IDENTICAL to the C++ engine
 
-The lone SKIP is username-based `C_LoginUser` (returns CKR_FUNCTION_NOT_SUPPORTED
-by design — no username-auth concept). `cargo test --lib` is also green again
-(201/0). All `CK*` constant values added in this work were verified against
-`src/lib/pkcs11/pkcs11t.h` (the spec source of truth), not guessed.
+`p11_v32_compliance_test -c all` is **315/0/0 for both** the Rust
+(`libsofthsmrustv3.dylib`) and C++ (`libsofthsmv3.dylib`) engines, and the two
+reports are **byte-for-byte identical per test** (diff of the 315 result lines is
+empty). `cargo test --lib` is green again (201/0). All `CK*` constant values
+added in this work were verified against `src/lib/pkcs11/pkcs11t.h` (the spec
+source of truth), not guessed.
 
 All width-fix and feature groups landed, each gated (interop 8+2+5 = 15/15, no
 crash) and committed on `feat/cabi-native-64bit`:
@@ -44,11 +46,12 @@ RFC OID collides with the single-tree namespace, so the OID prefix is rewritten
 to the crate's internal XMSSMT repr at keygen). HSS sign decrements
 CKA_HSS_KEYS_REMAINING; XMSS^MT sign/verify round-trips byte-exact.
 
-### Remaining 1 SKIP — intentional (not a failure)
-Username-based `C_LoginUser` returns CKR_FUNCTION_NOT_SUPPORTED by design (this
-token has no username-auth concept), so the test SKIPs. The earlier SKIPs (v3.0
-message API, validation, RSA negative-policy keygen) are now PASS — see the
-`d6d038c`/`924b6ee` rows.
+### 0 SKIP — full parity with the C++ engine
+The last divergence was `C_LoginUser` with a username: the C++ engine ignores
+the advisory `pUsername` (no distinct-named-user concept) and logs in, while
+Rust hard-rejected it with CKR_FUNCTION_NOT_SUPPORTED (→ test SKIP). Rust now
+ignores the username and delegates to C_Login (commit after `c8eedb3`), so the
+two engines produce **byte-for-byte identical** per-test results: 315/0/0.
 
 **Merge note:** nothing is merged to `main`. The user runs their full validation
 before merge. The `rust/` tree in the validated checkout stayed at 0 changes.
