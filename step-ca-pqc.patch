@@ -75,10 +75,10 @@
 # ====================================================================
 diff --git a/cas/softcas/mldsa.go b/cas/softcas/mldsa.go
 new file mode 100644
-index 0000000..146aba5
+index 0000000..0cfdfbc
 --- /dev/null
 +++ b/cas/softcas/mldsa.go
-@@ -0,0 +1,184 @@
+@@ -0,0 +1,222 @@
 +package softcas
 +
 +// PQC ML-DSA-65 (FIPS 204) issuance support for SoftCAS.
@@ -105,13 +105,49 @@ index 0000000..146aba5
 +	"math/big"
 +	"time"
 +
++	"github.com/cloudflare/circl/sign/mldsa/mldsa44"
 +	"github.com/cloudflare/circl/sign/mldsa/mldsa65"
++	"github.com/cloudflare/circl/sign/mldsa/mldsa87"
 +	"github.com/pkg/errors"
 +)
 +
-+// oidSignatureMLDSA65 is the FIPS 204 ML-DSA-65 algorithm identifier
-+// (NIST CSOR id-ml-dsa-65), per RFC 9881.
-+var oidSignatureMLDSA65 = asn1.ObjectIdentifier{2, 16, 840, 1, 101, 3, 4, 3, 18}
++// FIPS 204 ML-DSA AlgorithmIdentifier OIDs (NIST CSOR id-ml-dsa-44/65/87, RFC 9881).
++var (
++	oidMLDSA44 = asn1.ObjectIdentifier{2, 16, 840, 1, 101, 3, 4, 3, 17}
++	oidMLDSA65 = asn1.ObjectIdentifier{2, 16, 840, 1, 101, 3, 4, 3, 18}
++	oidMLDSA87 = asn1.ObjectIdentifier{2, 16, 840, 1, 101, 3, 4, 3, 19}
++)
++
++// mldsaOID returns the ML-DSA AlgorithmIdentifier OID for an ML-DSA public key
++// (any parameter set), and whether pub is an ML-DSA key at all. It recognizes
++// the circl key types returned by both the in-process and HSM-backed signers.
++func mldsaOID(pub crypto.PublicKey) (asn1.ObjectIdentifier, bool) {
++	switch pub.(type) {
++	case *mldsa44.PublicKey:
++		return oidMLDSA44, true
++	case *mldsa65.PublicKey:
++		return oidMLDSA65, true
++	case *mldsa87.PublicKey:
++		return oidMLDSA87, true
++	}
++	return nil, false
++}
++
++// mldsaRawPublicKey returns the raw FIPS-204 public-key encoding for an ML-DSA key.
++func mldsaRawPublicKey(pub crypto.PublicKey) ([]byte, bool) {
++	switch k := pub.(type) {
++	case *mldsa44.PublicKey:
++		b, _ := k.MarshalBinary()
++		return b, true
++	case *mldsa65.PublicKey:
++		b, _ := k.MarshalBinary()
++		return b, true
++	case *mldsa87.PublicKey:
++		b, _ := k.MarshalBinary()
++		return b, true
++	}
++	return nil, false
++}
 +
 +type mldsaTBSCertificate struct {
 +	Raw                asn1.RawContent
@@ -141,32 +177,30 @@ index 0000000..146aba5
 +	SignatureValue     asn1.BitString
 +}
 +
-+// isMLDSASigner reports whether signer produces ML-DSA-65 signatures, by
-+// inspecting its public key. This matches both the in-process circl key
-+// (*mldsa65.PrivateKey) and an HSM-backed *PKCS11MLDSASigner, so the same
-+// certificate-assembly path serves software and hardware custody.
++// isMLDSASigner reports whether signer produces ML-DSA signatures (any of
++// ML-DSA-44/65/87), by inspecting its public key. This matches both the
++// in-process circl key (*mldsaNN.PrivateKey) and an HSM-backed
++// *PKCS11MLDSASigner, so the same certificate-assembly path serves software and
++// hardware custody across every parameter set.
 +func isMLDSASigner(signer crypto.Signer) bool {
 +	if signer == nil {
 +		return false
 +	}
-+	_, ok := signer.Public().(*mldsa65.PublicKey)
++	_, ok := mldsaOID(signer.Public())
 +	return ok
 +}
 +
 +// subjectPublicKeyInfo encodes pub as an RFC 5280 SubjectPublicKeyInfo. For a
-+// circl ML-DSA-65 public key it hand-assembles the SPKI (algorithm id-ml-dsa-65
-+// with absent parameters per RFC 9881, raw public key as the BIT STRING) because
-+// crypto/x509.MarshalPKIXPublicKey has no ML-DSA support; for any classical key
-+// it defers to the stdlib marshaler. This is what lets a fully-ML-DSA chain
-+// (ML-DSA root *and* ML-DSA leaf subject keys) be issued.
++// circl ML-DSA public key (any parameter set) it hand-assembles the SPKI
++// (id-ml-dsa-44/65/87 with absent parameters per RFC 9881, raw public key as the
++// BIT STRING) because crypto/x509.MarshalPKIXPublicKey has no ML-DSA support; for
++// any classical key it defers to the stdlib marshaler. This is what lets a
++// fully-ML-DSA chain (ML-DSA root *and* ML-DSA leaf subject keys) be issued.
 +func subjectPublicKeyInfo(pub crypto.PublicKey) (mldsaPublicKeyInfo, error) {
 +	var info mldsaPublicKeyInfo
-+	if mlpub, ok := pub.(*mldsa65.PublicKey); ok {
-+		raw, err := mlpub.MarshalBinary()
-+		if err != nil {
-+			return info, errors.Wrap(err, "error marshaling ML-DSA-65 public key")
-+		}
-+		info.Algorithm = pkix.AlgorithmIdentifier{Algorithm: oidSignatureMLDSA65}
++	if oid, ok := mldsaOID(pub); ok {
++		raw, _ := mldsaRawPublicKey(pub)
++		info.Algorithm = pkix.AlgorithmIdentifier{Algorithm: oid}
 +		info.PublicKey = asn1.BitString{Bytes: raw, BitLength: len(raw) * 8}
 +		return info, nil
 +	}
@@ -181,7 +215,7 @@ index 0000000..146aba5
 +}
 +
 +// CreateMLDSACertificate is the exported entry point for tooling that must
-+// self-issue an ML-DSA-65 root certificate before a SoftCAS chain exists (CA
++// self-issue an ML-DSA root certificate before a SoftCAS chain exists (CA
 +// bootstrap, cmd/mldsa-issue). For leaf issuance the unexported dispatch in
 +// createCertificate calls the same code path. Pass parent == template to
 +// self-sign a root.
@@ -189,11 +223,15 @@ index 0000000..146aba5
 +	return createMLDSACertificate(template, parent, pub, signer)
 +}
 +
-+// createMLDSACertificate signs template with an ML-DSA-65 issuer key, building
-+// the certificate DER by hand and returning a parsed *x509.Certificate. The
-+// returned certificate's SignatureAlgorithm OID is 2.16.840.1.101.3.4.3.18.
++// createMLDSACertificate signs template with an ML-DSA issuer key (the parameter
++// set is taken from the signer's public key: ML-DSA-44/65/87), building the
++// certificate DER by hand and returning a parsed *x509.Certificate.
 +func createMLDSACertificate(template, parent *x509.Certificate, pub crypto.PublicKey, signer crypto.Signer) (*x509.Certificate, error) {
-+	algoID := pkix.AlgorithmIdentifier{Algorithm: oidSignatureMLDSA65} // absent params per RFC 9881
++	sigOID, ok := mldsaOID(signer.Public())
++	if !ok {
++		return nil, errors.New("softcas: signer is not an ML-DSA key")
++	}
++	algoID := pkix.AlgorithmIdentifier{Algorithm: sigOID} // absent params per RFC 9881
 +
 +	spki, err := subjectPublicKeyInfo(pub)
 +	if err != nil {
@@ -354,10 +392,10 @@ index 0000000..002c921
 +}
 diff --git a/cas/softcas/pkcs11mldsa.go b/cas/softcas/pkcs11mldsa.go
 new file mode 100644
-index 0000000..3e02425
+index 0000000..50130b2
 --- /dev/null
 +++ b/cas/softcas/pkcs11mldsa.go
-@@ -0,0 +1,222 @@
+@@ -0,0 +1,261 @@
 +//go:build cgo
 +
 +package softcas
@@ -382,7 +420,9 @@ index 0000000..3e02425
 +	"io"
 +	"strings"
 +
++	"github.com/cloudflare/circl/sign/mldsa/mldsa44"
 +	"github.com/cloudflare/circl/sign/mldsa/mldsa65"
++	"github.com/cloudflare/circl/sign/mldsa/mldsa87"
 +	"github.com/miekg/pkcs11"
 +)
 +
@@ -394,19 +434,54 @@ index 0000000..3e02425
 +	ckmMLDSA           = 0x0000001d // CKM_ML_DSA
 +	ckkMLDSA           = 0x0000004a // CKK_ML_DSA
 +	ckaParameterSet    = 0x0000061d // CKA_PARAMETER_SET
++	ckpMLDSA44         = 0x00000001 // CKP_ML_DSA_44 (FIPS 204, Category 2)
 +	ckpMLDSA65         = 0x00000002 // CKP_ML_DSA_65 (FIPS 204, Category 3)
++	ckpMLDSA87         = 0x00000003 // CKP_ML_DSA_87 (FIPS 204, Category 5)
 +)
 +
-+// PKCS11MLDSASigner signs with an ML-DSA-65 key held in a PKCS#11 token.
++// ckpForParamSet maps an ML-DSA parameter-set name ("44"/"65"/"87", with or
++// without the "ML-DSA-"/"mldsa" prefix) to its CKP_ML_DSA_* codepoint; defaults
++// to ML-DSA-65.
++func ckpForParamSet(s string) uint {
++	switch {
++	case strings.Contains(s, "44"):
++		return ckpMLDSA44
++	case strings.Contains(s, "87"):
++		return ckpMLDSA87
++	default:
++		return ckpMLDSA65
++	}
++}
++
++// mldsaPublicFromRaw decodes a raw FIPS-204 public key into the circl key type
++// matching its parameter set (selected by length).
++func mldsaPublicFromRaw(raw []byte) (crypto.PublicKey, error) {
++	switch len(raw) {
++	case mldsa44.PublicKeySize:
++		p := new(mldsa44.PublicKey)
++		return p, p.UnmarshalBinary(raw)
++	case mldsa65.PublicKeySize:
++		p := new(mldsa65.PublicKey)
++		return p, p.UnmarshalBinary(raw)
++	case mldsa87.PublicKeySize:
++		p := new(mldsa87.PublicKey)
++		return p, p.UnmarshalBinary(raw)
++	}
++	return nil, fmt.Errorf("unexpected ML-DSA public key length %d (want %d/%d/%d)",
++		len(raw), mldsa44.PublicKeySize, mldsa65.PublicKeySize, mldsa87.PublicKeySize)
++}
++
++// PKCS11MLDSASigner signs with an ML-DSA key (any parameter set) held in a
++// PKCS#11 token.
 +type PKCS11MLDSASigner struct {
 +	ctx     *pkcs11.Ctx
 +	session pkcs11.SessionHandle
 +	priv    pkcs11.ObjectHandle
-+	pub     *mldsa65.PublicKey
++	pub     crypto.PublicKey // *mldsa44/65/87.PublicKey
 +}
 +
-+// Public returns the ML-DSA-65 public key as a *circl* public key, which is what
-+// subjectPublicKeyInfo / isMLDSASigner expect.
++// Public returns the ML-DSA public key as the matching circl key type, which is
++// what subjectPublicKeyInfo / isMLDSASigner / mldsaOID expect.
 +func (s *PKCS11MLDSASigner) Public() crypto.PublicKey { return s.pub }
 +
 +// Sign produces a pure ML-DSA-65 signature (no pre-hash, empty context, per
@@ -436,9 +511,11 @@ index 0000000..3e02425
 +}
 +
 +// NewPKCS11MLDSASigner loads modulePath, opens the token labelled tokenLabel,
-+// logs in with pin, finds the ML-DSA-65 key pair labelled keyLabel (generating a
-+// non-extractable one on the token if absent), and returns a ready signer.
-+func NewPKCS11MLDSASigner(modulePath, tokenLabel, pin, keyLabel string) (signer *PKCS11MLDSASigner, err error) {
++// logs in with pin, finds the ML-DSA key pair labelled keyLabel (generating a
++// non-extractable one with parameter set paramSet — "44"/"65"/"87", default 65 —
++// if absent), and returns a ready signer. An existing key's parameter set is
++// inferred from its public-key length, so paramSet only matters when generating.
++func NewPKCS11MLDSASigner(modulePath, tokenLabel, pin, keyLabel, paramSet string) (signer *PKCS11MLDSASigner, err error) {
 +	ctx := pkcs11.New(modulePath)
 +	if ctx == nil {
 +		return nil, fmt.Errorf("pkcs11: cannot load module %q", modulePath)
@@ -472,7 +549,7 @@ index 0000000..3e02425
 +		return nil, fmt.Errorf("C_Login: %w", err)
 +	}
 +
-+	priv, pub, err := findOrGenerateKeyPair(ctx, session, keyLabel)
++	priv, pub, err := findOrGenerateKeyPair(ctx, session, keyLabel, ckpForParamSet(paramSet))
 +	if err != nil {
 +		return nil, err
 +	}
@@ -481,9 +558,9 @@ index 0000000..3e02425
 +	if err != nil {
 +		return nil, fmt.Errorf("read ML-DSA public key (CKA_VALUE): %w", err)
 +	}
-+	mlpub := new(mldsa65.PublicKey)
-+	if err = mlpub.UnmarshalBinary(rawPub); err != nil {
-+		return nil, fmt.Errorf("decode ML-DSA-65 public key (%d bytes): %w", len(rawPub), err)
++	mlpub, err := mldsaPublicFromRaw(rawPub)
++	if err != nil {
++		return nil, fmt.Errorf("decode ML-DSA public key: %w", err)
 +	}
 +
 +	return &PKCS11MLDSASigner{ctx: ctx, session: session, priv: priv, pub: mlpub}, nil
@@ -508,9 +585,9 @@ index 0000000..3e02425
 +	return 0, fmt.Errorf("pkcs11: no token labelled %q", tokenLabel)
 +}
 +
-+// findOrGenerateKeyPair finds an ML-DSA-65 key pair by label, or generates a new
-+// token-resident, non-extractable one.
-+func findOrGenerateKeyPair(ctx *pkcs11.Ctx, session pkcs11.SessionHandle, keyLabel string) (priv, pub pkcs11.ObjectHandle, err error) {
++// findOrGenerateKeyPair finds an ML-DSA key pair by label, or generates a new
++// token-resident, non-extractable one with the given CKP_ML_DSA_* parameter set.
++func findOrGenerateKeyPair(ctx *pkcs11.Ctx, session pkcs11.SessionHandle, keyLabel string, ckpParamSet uint) (priv, pub pkcs11.ObjectHandle, err error) {
 +	priv, okPriv, err := findObject(ctx, session, pkcs11.CKO_PRIVATE_KEY, keyLabel)
 +	if err != nil {
 +		return 0, 0, err
@@ -525,7 +602,7 @@ index 0000000..3e02425
 +
 +	pubTmpl := []*pkcs11.Attribute{
 +		pkcs11.NewAttribute(pkcs11.CKA_KEY_TYPE, uint(ckkMLDSA)),
-+		pkcs11.NewAttribute(uint(ckaParameterSet), uint(ckpMLDSA65)),
++		pkcs11.NewAttribute(uint(ckaParameterSet), ckpParamSet),
 +		pkcs11.NewAttribute(pkcs11.CKA_TOKEN, true),
 +		pkcs11.NewAttribute(pkcs11.CKA_PRIVATE, false),
 +		pkcs11.NewAttribute(pkcs11.CKA_VERIFY, true),
@@ -533,7 +610,7 @@ index 0000000..3e02425
 +	}
 +	privTmpl := []*pkcs11.Attribute{
 +		pkcs11.NewAttribute(pkcs11.CKA_KEY_TYPE, uint(ckkMLDSA)),
-+		pkcs11.NewAttribute(uint(ckaParameterSet), uint(ckpMLDSA65)),
++		pkcs11.NewAttribute(uint(ckaParameterSet), ckpParamSet),
 +		pkcs11.NewAttribute(pkcs11.CKA_TOKEN, true),
 +		pkcs11.NewAttribute(pkcs11.CKA_PRIVATE, true),
 +		pkcs11.NewAttribute(pkcs11.CKA_SIGN, true),
@@ -582,7 +659,7 @@ index 0000000..3e02425
 +}
 diff --git a/cas/softcas/pkcs11mldsa_nocgo.go b/cas/softcas/pkcs11mldsa_nocgo.go
 new file mode 100644
-index 0000000..86ac4af
+index 0000000..bb71ccb
 --- /dev/null
 +++ b/cas/softcas/pkcs11mldsa_nocgo.go
 @@ -0,0 +1,36 @@
@@ -619,7 +696,7 @@ index 0000000..86ac4af
 +func (s *PKCS11MLDSASigner) Close() {}
 +
 +// NewPKCS11MLDSASigner always errors in a non-cgo build.
-+func NewPKCS11MLDSASigner(modulePath, tokenLabel, pin, keyLabel string) (*PKCS11MLDSASigner, error) {
++func NewPKCS11MLDSASigner(modulePath, tokenLabel, pin, keyLabel, paramSet string) (*PKCS11MLDSASigner, error) {
 +	return nil, errNoCGO
 +}
 diff --git a/cas/softcas/softcas.go b/cas/softcas/softcas.go
@@ -641,10 +718,10 @@ index 1e590ef..f340ee9 100644
  	if template.SignatureAlgorithm == 0 {
 diff --git a/cmd/mldsa-issue/main.go b/cmd/mldsa-issue/main.go
 new file mode 100644
-index 0000000..9ce7ba8
+index 0000000..89df89f
 --- /dev/null
 +++ b/cmd/mldsa-issue/main.go
-@@ -0,0 +1,316 @@
+@@ -0,0 +1,379 @@
 +// Command mldsa-issue drives the patched step-ca SoftCAS engine to issue a full
 +// certificate chain (root CA + leaf) through the *real* cas/softcas code path.
 +//
@@ -677,23 +754,28 @@ index 0000000..9ce7ba8
 +	"fmt"
 +	"math/big"
 +	"os"
++	"strings"
 +	"time"
 +
++	"github.com/cloudflare/circl/sign/mldsa/mldsa44"
 +	"github.com/cloudflare/circl/sign/mldsa/mldsa65"
++	"github.com/cloudflare/circl/sign/mldsa/mldsa87"
 +
 +	"github.com/smallstep/certificates/cas/apiv1"
 +	"github.com/smallstep/certificates/cas/softcas"
 +)
 +
 +type config struct {
-+	algo, caOut, leafOut, intOut string
++	algo, leafAlgo               string
++	caOut, leafOut, intOut       string
 +	hsm, bootstrapCA             bool
 +	module, token, pin, keyLabel string
 +}
 +
 +func main() {
 +	var c config
-+	flag.StringVar(&c.algo, "algo", "mldsa65", "issuer algorithm: mldsa65 | ec")
++	flag.StringVar(&c.algo, "algo", "mldsa65", "CA signature algorithm: mldsa44 | mldsa65 | mldsa87 | ec")
++	flag.StringVar(&c.leafAlgo, "leaf-algo", "", "leaf subject-key algorithm: mldsa44 | mldsa65 | mldsa87 | ec (default: match -algo)")
 +	flag.StringVar(&c.caOut, "ca-out", "/tmp/stepca-mldsa-ca.pem", "root CA certificate PEM output path")
 +	flag.StringVar(&c.leafOut, "out", "/tmp/stepca-mldsa-leaf.pem", "leaf certificate PEM output path")
 +	flag.StringVar(&c.intOut, "int-out", "/tmp/stepca-mldsa-int.pem", "intermediate CA certificate PEM output path (-bootstrap-ca)")
@@ -721,25 +803,31 @@ index 0000000..9ce7ba8
 +// key never leaves the HSM.
 +func bootstrapCA(c config) error {
 +	now := time.Now()
++	c.algo = normAlgo(c.algo)
++	if !strings.HasPrefix(c.algo, "mldsa") {
++		c.algo = "mldsa65"
++	}
++	ps := normParamSet(c.algo)
 +
-+	hsm, err := softcas.NewPKCS11MLDSASigner(c.module, c.token, c.pin, c.keyLabel)
++	hsm, err := softcas.NewPKCS11MLDSASigner(c.module, c.token, c.pin, c.keyLabel, c.algo)
 +	if err != nil {
 +		return err
 +	}
 +	defer hsm.Close()
 +
-+	rootCert, rootSigner, err := mldsaRoot(now)
++	rootCert, rootSigner, err := mldsaRoot(now, c.algo)
 +	if err != nil {
 +		return err
 +	}
 +
-+	rawSubject, err := asn1.Marshal(pkix.Name{CommonName: "PQC ML-DSA-65 Intermediate CA (HSM)"}.ToRDNSequence())
++	cn := "PQC ML-DSA-" + ps + " Intermediate CA (HSM)"
++	rawSubject, err := asn1.Marshal(pkix.Name{CommonName: cn}.ToRDNSequence())
 +	if err != nil {
 +		return err
 +	}
 +	intTmpl := &x509.Certificate{
 +		SerialNumber:    big.NewInt(2),
-+		Subject:         pkix.Name{CommonName: "PQC ML-DSA-65 Intermediate CA (HSM)"},
++		Subject:         pkix.Name{CommonName: cn},
 +		RawSubject:      rawSubject,
 +		NotBefore:       now.Add(-time.Hour),
 +		NotAfter:        now.Add(24 * time.Hour),
@@ -776,9 +864,9 @@ index 0000000..9ce7ba8
 +		custody = "in-process (cloudflare/circl)"
 +		err     error
 +	)
-+	switch c.algo {
-+	case "mldsa65", "ml-dsa-65", "ML-DSA-65":
-+		c.algo = "mldsa65"
++	c.algo = normAlgo(c.algo)
++	switch {
++	case strings.HasPrefix(c.algo, "mldsa"):
 +		if c.hsm {
 +			var hsmSigner *softcas.PKCS11MLDSASigner
 +			caCert, hsmSigner, err = mldsaRootHSM(now, c)
@@ -786,21 +874,25 @@ index 0000000..9ce7ba8
 +				defer hsmSigner.Close()
 +				signer = hsmSigner
 +			}
-+			custody = fmt.Sprintf("PKCS#11 token %q via %s (CKM_ML_DSA, non-extractable)", c.token, c.module)
++			custody = fmt.Sprintf("PKCS#11 token %q via %s (CKM_ML_DSA, ML-DSA-%s, non-extractable)", c.token, c.module, normParamSet(c.algo))
 +		} else {
-+			caCert, signer, err = mldsaRoot(now)
++			caCert, signer, err = mldsaRoot(now, c.algo)
 +		}
-+	case "ec", "ecdsa", "p256", "P-256":
-+		c.algo = "ec"
++	case c.algo == "ec":
 +		if c.hsm {
-+			return fmt.Errorf("-hsm requires -algo mldsa65 (classical EC custody is out of scope)")
++			return fmt.Errorf("-hsm requires -algo mldsa44|mldsa65|mldsa87 (classical EC custody is out of scope)")
 +		}
 +		caCert, signer, err = ecRoot(now)
 +	default:
-+		return fmt.Errorf("unknown -algo %q (want mldsa65 | ec)", c.algo)
++		return fmt.Errorf("unknown -algo %q (want mldsa44 | mldsa65 | mldsa87 | ec)", c.algo)
 +	}
 +	if err != nil {
 +		return err
++	}
++	// Resolve the leaf subject-key algorithm: default to matching the CA.
++	leafAlgo := normAlgo(c.leafAlgo)
++	if leafAlgo == "" {
++		leafAlgo = c.algo
 +	}
 +	algo, caOut, leafOut := c.algo, c.caOut, c.leafOut
 +
@@ -813,7 +905,7 @@ index 0000000..9ce7ba8
 +		return err
 +	}
 +
-+	leafTmpl, err := leafTemplate(algo, now)
++	leafTmpl, err := leafTemplate(leafAlgo, now)
 +	if err != nil {
 +		return err
 +	}
@@ -832,7 +924,7 @@ index 0000000..9ce7ba8
 +	if err := writePEM(leafOut, leaf.Raw); err != nil {
 +		return err
 +	}
-+	fmt.Printf("algo=%s root_ca=%q leaf=%q serial=%s\n", algo, caCert.Subject.CommonName, leaf.Subject.CommonName, leaf.SerialNumber)
++	fmt.Printf("ca_algo=%s leaf_algo=%s root_ca=%q leaf=%q serial=%s\n", algo, leafAlgo, caCert.Subject.CommonName, leaf.Subject.CommonName, leaf.SerialNumber)
 +	fmt.Printf("ca_key_custody=%s\n", custody)
 +	fmt.Printf("wrote %s (%d B) and %s (%d B)\n", caOut, len(caCert.Raw), leafOut, len(leaf.Raw))
 +	return nil
@@ -842,17 +934,18 @@ index 0000000..9ce7ba8
 +// never leaves) a PKCS#11 token. The signature is produced by C_Sign(CKM_ML_DSA)
 +// inside the HSM; only the cert assembly happens in-process.
 +func mldsaRootHSM(now time.Time, c config) (*x509.Certificate, *softcas.PKCS11MLDSASigner, error) {
-+	signer, err := softcas.NewPKCS11MLDSASigner(c.module, c.token, c.pin, c.keyLabel)
++	signer, err := softcas.NewPKCS11MLDSASigner(c.module, c.token, c.pin, c.keyLabel, c.algo)
 +	if err != nil {
 +		return nil, nil, err
 +	}
-+	rawSubject, err := asn1.Marshal(pkix.Name{CommonName: "PQC ML-DSA-65 Root CA (HSM)"}.ToRDNSequence())
++	cn := "PQC ML-DSA-" + normParamSet(c.algo) + " Root CA (HSM)"
++	rawSubject, err := asn1.Marshal(pkix.Name{CommonName: cn}.ToRDNSequence())
 +	if err != nil {
 +		return nil, signer, err
 +	}
 +	tmpl := &x509.Certificate{
 +		SerialNumber:    big.NewInt(1),
-+		Subject:         pkix.Name{CommonName: "PQC ML-DSA-65 Root CA (HSM)"},
++		Subject:         pkix.Name{CommonName: cn},
 +		RawSubject:      rawSubject,
 +		NotBefore:       now.Add(-time.Hour),
 +		NotAfter:        now.Add(24 * time.Hour),
@@ -865,20 +958,21 @@ index 0000000..9ce7ba8
 +	return caCert, signer, nil
 +}
 +
-+// mldsaRoot self-signs an ML-DSA-65 root CA whose subject key and signature are
-+// both ML-DSA-65, via the exported SoftCAS hand-assembler.
-+func mldsaRoot(now time.Time) (*x509.Certificate, crypto.Signer, error) {
-+	pub, priv, err := mldsa65.GenerateKey(rand.Reader)
++// mldsaRoot self-signs an ML-DSA root CA (parameter set from algo) whose subject
++// key and signature are both that ML-DSA variant, via the exported hand-assembler.
++func mldsaRoot(now time.Time, algo string) (*x509.Certificate, crypto.Signer, error) {
++	pub, priv, err := genMLDSAKey(algo)
 +	if err != nil {
 +		return nil, nil, err
 +	}
-+	rawSubject, err := asn1.Marshal(pkix.Name{CommonName: "PQC ML-DSA-65 Root CA"}.ToRDNSequence())
++	cn := "PQC ML-DSA-" + normParamSet(algo) + " Root CA"
++	rawSubject, err := asn1.Marshal(pkix.Name{CommonName: cn}.ToRDNSequence())
 +	if err != nil {
 +		return nil, nil, err
 +	}
 +	tmpl := &x509.Certificate{
 +		SerialNumber:    big.NewInt(1),
-+		Subject:         pkix.Name{CommonName: "PQC ML-DSA-65 Root CA"},
++		Subject:         pkix.Name{CommonName: cn},
 +		RawSubject:      rawSubject,
 +		NotBefore:       now.Add(-time.Hour),
 +		NotAfter:        now.Add(24 * time.Hour),
@@ -889,6 +983,51 @@ index 0000000..9ce7ba8
 +		return nil, nil, err
 +	}
 +	return caCert, priv, nil
++}
++
++// normAlgo canonicalizes an algorithm flag to mldsa44|mldsa65|mldsa87|ec ("" stays "").
++func normAlgo(s string) string {
++	n := strings.ToLower(strings.ReplaceAll(s, "-", ""))
++	switch {
++	case n == "":
++		return ""
++	case strings.HasPrefix(n, "ec") || n == "p256" || n == "ecdsa":
++		return "ec"
++	case strings.Contains(n, "44"):
++		return "mldsa44"
++	case strings.Contains(n, "87"):
++		return "mldsa87"
++	case strings.Contains(n, "mldsa") || strings.Contains(n, "65"):
++		return "mldsa65"
++	}
++	return n
++}
++
++// normParamSet returns the bare ML-DSA parameter-set digits for an algo string.
++func normParamSet(algo string) string {
++	switch {
++	case strings.Contains(algo, "44"):
++		return "44"
++	case strings.Contains(algo, "87"):
++		return "87"
++	default:
++		return "65"
++	}
++}
++
++// genMLDSAKey generates a circl ML-DSA key pair of the parameter set named by algo.
++func genMLDSAKey(algo string) (crypto.PublicKey, crypto.Signer, error) {
++	switch normParamSet(algo) {
++	case "44":
++		pub, priv, err := mldsa44.GenerateKey(rand.Reader)
++		return pub, priv, err
++	case "87":
++		pub, priv, err := mldsa87.GenerateKey(rand.Reader)
++		return pub, priv, err
++	default:
++		pub, priv, err := mldsa65.GenerateKey(rand.Reader)
++		return pub, priv, err
++	}
 +}
 +
 +// ecRoot self-signs a classical EC P-256 root CA with stock crypto/x509.
@@ -917,17 +1056,18 @@ index 0000000..9ce7ba8
 +	return cert, key, nil
 +}
 +
-+// leafTemplate builds the leaf certificate template, with an ML-DSA-65 or EC
-+// P-256 subject key matching the chain algorithm.
-+func leafTemplate(algo string, now time.Time) (*x509.Certificate, error) {
++// leafTemplate builds the leaf certificate template with the requested subject-
++// key algorithm (mldsa44|mldsa65|mldsa87 or ec). This is the "CSR subject-key
++// selection" knob: a caller picks the leaf key type independently of the CA's.
++func leafTemplate(leafAlgo string, now time.Time) (*x509.Certificate, error) {
 +	tmpl := &x509.Certificate{
 +		SerialNumber: big.NewInt(now.UnixNano()),
 +		Subject:      pkix.Name{CommonName: "leaf.pqc.test"},
 +		NotBefore:    now.Add(-time.Minute),
 +		NotAfter:     now.Add(time.Hour),
 +	}
-+	if algo == "mldsa65" {
-+		pub, _, err := mldsa65.GenerateKey(rand.Reader)
++	if strings.HasPrefix(leafAlgo, "mldsa") {
++		pub, _, err := genMLDSAKey(leafAlgo)
 +		if err != nil {
 +			return nil, err
 +		}
@@ -1018,10 +1158,10 @@ index d682425..ebcee41 100644
  github.com/coreos/etcd v3.3.10+incompatible/go.mod h1:uF7uidLiAD3TWHmW31ZFd/JWoc32PjwdhPthX9715RE=
 diff --git a/kms/mldsahsm/mldsahsm.go b/kms/mldsahsm/mldsahsm.go
 new file mode 100644
-index 0000000..29e72fb
+index 0000000..0d1f2f8
 --- /dev/null
 +++ b/kms/mldsahsm/mldsahsm.go
-@@ -0,0 +1,138 @@
+@@ -0,0 +1,141 @@
 +// Package mldsahsm registers an in-repo step-ca KMS that fronts an ML-DSA-65
 +// signing key held in a PKCS#11 token (softhsmv3). It exists so a *running*
 +// step-ca server can use an ML-DSA-65 issuing CA whose private key never leaves
@@ -1102,7 +1242,7 @@ index 0000000..29e72fb
 +// signerFor opens (and, if needed, generates) the ML-DSA-65 key named by the
 +// per-key URI, layered over the KMS-level defaults.
 +func (k *MLDSAHSM) signerFor(keyURI string) (*softcas.PKCS11MLDSASigner, error) {
-+	module, token, pin, object := k.module, k.token, k.pin, defaultObject
++	module, token, pin, object, paramSet := k.module, k.token, k.pin, defaultObject, "65"
 +	if keyURI != "" {
 +		u, err := uri.ParseWithScheme(Scheme, keyURI)
 +		if err != nil {
@@ -1117,11 +1257,14 @@ index 0000000..29e72fb
 +		if v := u.Get("object"); v != "" {
 +			object = v
 +		}
++		if v := u.Get("param-set"); v != "" {
++			paramSet = v
++		}
 +		if p := u.Pin(); p != "" {
 +			pin = p
 +		}
 +	}
-+	return softcas.NewPKCS11MLDSASigner(module, token, pin, object)
++	return softcas.NewPKCS11MLDSASigner(module, token, pin, object, paramSet)
 +}
 +
 +// CreateSigner returns the long-lived CA signer (keeps its PKCS#11 session open).

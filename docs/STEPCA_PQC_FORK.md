@@ -1,10 +1,12 @@
-# step-ca PQC Fork — HSM-backed ML-DSA-65 CA + running server (Sandbox Scenario 18)
+# step-ca PQC Fork — HSM-backed ML-DSA CA + running server (Sandbox Scenario 18)
 
 strongSwan-style patch fork of `smallstep/certificates` (step-ca) that makes the
-CA issue a **fully post-quantum X.509 chain** — a self-signed **ML-DSA-65 root**
-(FIPS 204) issuing **ML-DSA-65 leaves** — with the issuing key held in (and never
-leaving) a **softhsmv3 PKCS#11 token**, and a **running `step-ca` server** that
-boots on that HSM-backed ML-DSA CA and serves HTTPS + ACME. Companion patch:
+CA issue a **fully post-quantum X.509 chain** — a self-signed **ML-DSA root**
+(FIPS 204, **ML-DSA-44/65/87**) issuing **ML-DSA leaves** — with the issuing key
+held in (and never leaving) a **softhsmv3 PKCS#11 token**, and a **running
+`step-ca` server** that boots on that HSM-backed ML-DSA CA and serves HTTPS +
+ACME. The leaf subject-key algorithm is selectable independently of the CA
+(any ML-DSA parameter set or classical EC). Companion patch:
 [`../step-ca-pqc.patch`](../step-ca-pqc.patch).
 
 ## Status
@@ -12,10 +14,11 @@ boots on that HSM-backed ML-DSA CA and serves HTTPS + ACME. Companion patch:
 | Milestone | State |
 |-----------|-------|
 | Upstream pinned | ✅ v0.30.2 (rev `6e8ec61405239cf3f37b2bbf260a587b7d2e4e31`) |
-| Patch | ✅ `step-ca-pqc.patch` (10 files, +992) |
+| Patch | ✅ `step-ca-pqc.patch` (10 files, +1135) |
 | Builds (CGO=0 step-ca + CGO=1 mldsa-issue; CGO=1 step-ca for the server) | ✅ from a pristine v0.30.2 clone |
-| ML-DSA issuance proven | ✅ unit test + `openssl verify` of a full ML-DSA chain (§3) |
-| Fully-PQC chain (ML-DSA subject key + sig) | ✅ root **and** leaf are ML-DSA-65 |
+| ML-DSA-44/65/87 issuance | ✅ all three; software + HSM, each `openssl verify` OK (§3) |
+| Leaf subject-key selection (any ML-DSA set or EC, independent of CA) | ✅ verified (e.g. ML-DSA-87 CA → EC leaf; ML-DSA-65 CA → ML-DSA-44 leaf) |
+| Fully-PQC chain (ML-DSA subject key + sig) | ✅ root **and** leaf are ML-DSA |
 | **HSM-backed CA key (softhsmv3, non-extractable)** | ✅ verified against the native module (§4) |
 | **Running `step-ca` server (HSM ML-DSA CA, HTTPS + ACME)** | ✅ boots + issues; openssl-verified (§6) |
 | Sandbox wired (`tests/18` + Dockerfile) | ✅ real forked step-ca, HSM-first (§5) |
@@ -166,19 +169,21 @@ the OID `2.16.840.1.101.3.4.3.18` (NIST CSOR) is stable.
 
 ## 8. Remaining work
 
-| Item | Effort |
-|------|--------|
-| ML-DSA-44/87 parameter sets | 0.5 d |
-| Provisioner template to let an external CSR *select* ML-DSA leaf **subject keys** | 1 d |
-| In-sandbox server-mode demo (boot `step-ca` + issue over the API), pending an ML-DSA-capable client | 1 d |
-| `docker build` of the full pqc-network image (verified here by replaying build steps on a pristine clone + native module; full image build not yet run) | 0.5 d |
+| Item | Status / Effort |
+|------|-----------------|
+| ML-DSA-44/87 parameter sets | ✅ done (§3) |
+| Selectable leaf **subject-key** algorithm (CSR key selection) | ✅ done — `-leaf-algo`; any ML-DSA set or EC |
+| In-sandbox server-mode demo (`tests/18b_test_stepca_server.sh` + `/api/run/stepca-server`) | ✅ done; verifies the live chain with an OpenSSL-3.6 client |
+| Issuing leaves whose subject key is ML-DSA **from an externally-submitted CSR** | ⬜ blocked: Go can't parse an ML-DSA CSR SPKI (we self-generate the leaf key; classical CSRs work) |
+| `docker build` of the full pqc-network image + in-container scenario run | in progress (Linux image build) |
 
 ## 9. Status
 
 Patch verified to apply cleanly to a pristine v0.30.2 clone and to build
 (`make build` CGO=0 and `make build GOFLAGS=""` CGO=1 for step-ca; `CGO_ENABLED=1`
-for `mldsa-issue`), pass the unit test, issue a **fully post-quantum, HSM-backed**
-ML-DSA-65 chain that OpenSSL 3.6 verifies, and run as a **live `step-ca` server**
-on the HSM-backed ML-DSA CA (HTTPS + ACME, openssl-verified). Sandbox scenario 18
-is wired to the issuance path (HSM-first, honest fallbacks). No push, no PR, no
-`pqctoday-org` repo; full image build deferred.
+for `mldsa-issue`), pass the unit test, issue **fully post-quantum, HSM-backed**
+ML-DSA-44/65/87 chains that OpenSSL 3.6 verifies, and run as a **live `step-ca`
+server** on the HSM-backed ML-DSA CA (HTTPS + ACME, openssl-verified). Sandbox
+scenario 18 is wired to the issuance path (HSM-first, honest fallbacks);
+`tests/18b` boots the live server in-image. No push, no PR, no `pqctoday-org`
+repo.
