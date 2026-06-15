@@ -7339,50 +7339,117 @@ pub fn C_VerifyRecover(
     CKR_FUNCTION_NOT_SUPPORTED
 }
 
-// §5.16 — dual-function cryptographic operations: not provided.
+// §5.16 — dual-function cryptographic operations. Each composes the two
+// already-validated single-part streaming primitives in lockstep. Both
+// component operations must be active (else CKR_OPERATION_NOT_INITIALIZED);
+// the operations keep their own independent state slots, so the complementary
+// inits coexist. A NULL output buffer is a length query and must not advance
+// either operation, so it delegates to the cipher half alone.
 #[wasm_bindgen(js_name = _C_DigestEncryptUpdate)]
 pub fn C_DigestEncryptUpdate(
-    _h_session: u32,
-    _p_part: *mut u8,
-    _ul_part_len: u32,
-    _p_encrypted_part: *mut u8,
-    _pul_encrypted_part_len: *mut u32,
+    h_session: u32,
+    p_part: *mut u8,
+    ul_part_len: u32,
+    p_encrypted_part: *mut u8,
+    pul_encrypted_part_len: *mut u32,
 ) -> u32 {
     require_init!();
-    CKR_FUNCTION_NOT_SUPPORTED
+    require_session!(h_session);
+    if !DIGEST_STATE.with(|s| s.borrow().contains_key(&h_session))
+        || !ENCRYPT_STATE.with(|s| s.borrow().contains_key(&h_session))
+    {
+        return CKR_OPERATION_NOT_INITIALIZED;
+    }
+    // Length query — advance neither operation.
+    if p_encrypted_part.is_null() {
+        return C_EncryptUpdate(h_session, p_part, ul_part_len, p_encrypted_part, pul_encrypted_part_len);
+    }
+    // Encrypt the plaintext part (output → ciphertext), then digest the same
+    // plaintext. Encrypt first so a cipher error does not advance the digest.
+    let rv = C_EncryptUpdate(h_session, p_part, ul_part_len, p_encrypted_part, pul_encrypted_part_len);
+    if rv != CKR_OK {
+        return rv;
+    }
+    C_DigestUpdate(h_session, p_part, ul_part_len)
 }
 #[wasm_bindgen(js_name = _C_DecryptDigestUpdate)]
 pub fn C_DecryptDigestUpdate(
-    _h_session: u32,
-    _p_encrypted_part: *mut u8,
-    _ul_encrypted_part_len: u32,
-    _p_part: *mut u8,
-    _pul_part_len: *mut u32,
+    h_session: u32,
+    p_encrypted_part: *mut u8,
+    ul_encrypted_part_len: u32,
+    p_part: *mut u8,
+    pul_part_len: *mut u32,
 ) -> u32 {
     require_init!();
-    CKR_FUNCTION_NOT_SUPPORTED
+    require_session!(h_session);
+    if !DECRYPT_STATE.with(|s| s.borrow().contains_key(&h_session))
+        || !DIGEST_STATE.with(|s| s.borrow().contains_key(&h_session))
+    {
+        return CKR_OPERATION_NOT_INITIALIZED;
+    }
+    if p_part.is_null() {
+        return C_DecryptUpdate(h_session, p_encrypted_part, ul_encrypted_part_len, p_part, pul_part_len);
+    }
+    // Decrypt the ciphertext part (output → recovered plaintext), then digest
+    // exactly the recovered plaintext bytes.
+    let rv = C_DecryptUpdate(h_session, p_encrypted_part, ul_encrypted_part_len, p_part, pul_part_len);
+    if rv != CKR_OK {
+        return rv;
+    }
+    let plaintext_len = unsafe { *pul_part_len };
+    C_DigestUpdate(h_session, p_part, plaintext_len)
 }
 #[wasm_bindgen(js_name = _C_SignEncryptUpdate)]
 pub fn C_SignEncryptUpdate(
-    _h_session: u32,
-    _p_part: *mut u8,
-    _ul_part_len: u32,
-    _p_encrypted_part: *mut u8,
-    _pul_encrypted_part_len: *mut u32,
+    h_session: u32,
+    p_part: *mut u8,
+    ul_part_len: u32,
+    p_encrypted_part: *mut u8,
+    pul_encrypted_part_len: *mut u32,
 ) -> u32 {
     require_init!();
-    CKR_FUNCTION_NOT_SUPPORTED
+    require_session!(h_session);
+    if !SIGN_STATE.with(|s| s.borrow().contains_key(&h_session))
+        || !ENCRYPT_STATE.with(|s| s.borrow().contains_key(&h_session))
+    {
+        return CKR_OPERATION_NOT_INITIALIZED;
+    }
+    if p_encrypted_part.is_null() {
+        return C_EncryptUpdate(h_session, p_part, ul_part_len, p_encrypted_part, pul_encrypted_part_len);
+    }
+    // Encrypt the plaintext part, then feed the same plaintext to the signer.
+    let rv = C_EncryptUpdate(h_session, p_part, ul_part_len, p_encrypted_part, pul_encrypted_part_len);
+    if rv != CKR_OK {
+        return rv;
+    }
+    C_SignUpdate(h_session, p_part, ul_part_len)
 }
 #[wasm_bindgen(js_name = _C_DecryptVerifyUpdate)]
 pub fn C_DecryptVerifyUpdate(
-    _h_session: u32,
-    _p_encrypted_part: *mut u8,
-    _ul_encrypted_part_len: u32,
-    _p_part: *mut u8,
-    _pul_part_len: *mut u32,
+    h_session: u32,
+    p_encrypted_part: *mut u8,
+    ul_encrypted_part_len: u32,
+    p_part: *mut u8,
+    pul_part_len: *mut u32,
 ) -> u32 {
     require_init!();
-    CKR_FUNCTION_NOT_SUPPORTED
+    require_session!(h_session);
+    if !DECRYPT_STATE.with(|s| s.borrow().contains_key(&h_session))
+        || !VERIFY_STATE.with(|s| s.borrow().contains_key(&h_session))
+    {
+        return CKR_OPERATION_NOT_INITIALIZED;
+    }
+    if p_part.is_null() {
+        return C_DecryptUpdate(h_session, p_encrypted_part, ul_encrypted_part_len, p_part, pul_part_len);
+    }
+    // Decrypt the ciphertext part, then feed the recovered plaintext to the
+    // verifier.
+    let rv = C_DecryptUpdate(h_session, p_encrypted_part, ul_encrypted_part_len, p_part, pul_part_len);
+    if rv != CKR_OK {
+        return rv;
+    }
+    let plaintext_len = unsafe { *pul_part_len };
+    C_VerifyUpdate(h_session, p_part, plaintext_len)
 }
 
 /// PKCS#11 v3.2 §5.6.7 — C_SetPIN rotates the PIN of the user that is
