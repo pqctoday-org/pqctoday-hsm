@@ -1,0 +1,26 @@
+# SPDX-License-Identifier: CC0
+#
+# Throwaway feasibility spike for P0-SEQUOIA-PQC-05.
+# Goal: prove the upstream sequoia `pqc` branch emits wire-correct PQC OpenPGP
+#       (signature packet public-key-algorithm == 30 == MLDSA65_Ed25519,
+#        per draft-ietf-openpgp-pqc v17). HSM backing intentionally OUT of scope
+#        for the spike — this proves the upstream wire format only.
+#
+# This crate is NOT part of the openpgp/ workspace (it lives outside members).
+
+# Standalone crate — keep it out of the openpgp/ workspace so its bleeding-edge
+# git dep does not contaminate the bridge's Cargo.lock.
+[workspace]
+
+[package]
+name = "spike-pqc"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+# Pinned to a specific commit on the upstream `pqc` branch for reproducibility.
+# Branch HEAD as of 2026-06-14: 3d05138bf1536e63886e7a079fa50aeb080ab573
+# PQC needs the OpenSSL backend (nettle, the default, has no ML-DSA/ML-KEM).
+sequoia-openpgp = { git = "https://gitlab.com/sequoia-pgp/sequoia", rev = "3d05138bf1536e63886e7a079fa50aeb080ab573", default-features = false, features = ["crypto-openssl", "compression"] }
+anyhow = "1"
