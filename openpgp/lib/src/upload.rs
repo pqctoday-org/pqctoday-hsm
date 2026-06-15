@@ -7,11 +7,12 @@ use crate::x509::types::{AlgorithmId, PublicKeyInfo};
 use openssl::pkey::{KeyType as OsslKeyType, PKey};
 use p256::elliptic_curve::zeroize::Zeroizing;
 use sequoia_openpgp::crypto::mpi;
-use sequoia_openpgp::packet::key::{SecretKeyMaterial, SecretParts, UnspecifiedRole};
+use sequoia_openpgp::packet::key::{PublicParts, SecretKeyMaterial, SecretParts, UnspecifiedRole};
 use sequoia_openpgp::packet::Key;
+use sequoia_openpgp::serialize::MarshalInto;
 use sequoia_openpgp::types::{Curve, PublicKeyAlgorithm};
 
-use crate::Op11Session;
+use crate::{Op11Session, COMPOSITE_PUBKEY_LABEL};
 
 // DER encoding of the Edwards/Montgomery curve OIDs stored as CKA_EC_PARAMS in
 // softhsmv3 (OSSLEDPrivateKey::setEC -> OSSL::byteString2oid). Proven by the
@@ -199,6 +200,12 @@ impl Op11Session {
         };
         let secret = unenc.map(|mpis| mpis.clone());
 
+        // Store the composite *public* key as a token-resident OpenPGP packet so
+        // the key can be reloaded purely from token data (plan §1 / task 1,
+        // option b). The X.509 self-sign metadata flow is RSA/ECC-only and can't
+        // carry a composite public MPI, so we persist the public key directly.
+        self.store_composite_public(id, &key.parts_as_public().clone())?;
+
         match (key.pk_algo(), secret) {
             (
                 PublicKeyAlgorithm::MLDSA65_Ed25519,
@@ -254,6 +261,49 @@ impl Op11Session {
                 "composite upload: unsupported / mismatched composite algorithm {algo:?}"
             )),
         }
+    }
+
+    /// Persist a composite key's *public* half as a token-resident `CKO_DATA`
+    /// object so it can be reloaded purely from token data — no out-of-band
+    /// `Cert` and no X.509 cert custody (plan task 1, option b).
+    ///
+    /// The X.509 self-sign path (`upload_self_sign_x509`) only knows RSA/ECC and
+    /// cannot encode/sign a composite public key, so we store the public key
+    /// directly as a serialized OpenPGP public-key packet. On reload, `key()`
+    /// reads this `CKO_DATA` value and re-parses the exact composite public MPI
+    /// (`MLDSA65_Ed25519` / `MLKEM768_X25519`), so the bridge never has to
+    /// reconstruct a PQC public key from an X.509 descriptor it can't express.
+    ///
+    /// The id is carried in `CKA_APPLICATION` (softhsmv3 rejects `CKA_ID` on a
+    /// `CKO_DATA` object — that attribute is not in its DATA template; see
+    /// `P11DataObj::init`). A fixed `CKA_LABEL` (`COMPOSITE_PUBKEY_LABEL`) marks
+    /// the object so `key()` can find exactly one for a given id.
+    pub(crate) fn store_composite_public(
+        &self,
+        id: &[u8],
+        public: &Key<PublicParts, UnspecifiedRole>,
+    ) -> anyhow::Result<ObjectHandle> {
+        // Serialize as a full OpenPGP public-key packet (tag + framing), so the
+        // value round-trips through `PacketPile::from_bytes` on reload. A primary
+        // role is used purely as the serialization vehicle; the reload converts
+        // back to UnspecifiedRole.
+        let packet: sequoia_openpgp::Packet = public.clone().role_into_primary().into();
+        let bytes = packet
+            .to_vec()
+            .map_err(|e| anyhow::anyhow!("serialize composite public key packet failed: {e}"))?;
+
+        let template = vec![
+            Attribute::Class(ObjectClass::DATA),
+            // CKA_APPLICATION carries the key id (CKA_ID is not allowed on DATA).
+            Attribute::Application(id.to_vec()),
+            Attribute::Label(COMPOSITE_PUBKEY_LABEL.to_vec()),
+            Attribute::Value(bytes),
+            Attribute::Token(true),
+            Attribute::Private(false),
+        ];
+        let handle = self.session.create_object(&template)?;
+        log::debug!("stored composite public-key DATA object {:x?}", handle);
+        Ok(handle)
     }
 
     /// Create an Edwards/Montgomery private-key object (raw scalar + curve OID).

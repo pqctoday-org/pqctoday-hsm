@@ -54,6 +54,16 @@ pub mod x509;
 // bridge's own modules use `PgpKeyType` through these paths.
 pub use crate::x509::types::PgpKeyType;
 
+/// `CKA_LABEL` of the token-resident `CKO_DATA` object that carries a composite
+/// PQC key's serialized OpenPGP *public* key (plan task 1, option b).
+///
+/// Composite keys (`MLDSA65_Ed25519` / `MLKEM768_X25519`) cannot ride the
+/// RSA/ECC-only X.509 self-sign custody path, so `upload_composite_private`
+/// stores the composite public key directly as a `CKO_DATA` value sharing the
+/// key's `CKA_ID`, and `key()` reloads it from the token alone — no out-of-band
+/// `Cert` required.
+pub(crate) const COMPOSITE_PUBKEY_LABEL: &[u8] = b"pqctoday-composite-pgp-pubkey";
+
 /// OpenPGP PKCS #11 context
 pub struct Op11 {
     pkcs11: Pkcs11,
@@ -159,9 +169,19 @@ impl Op11Session {
     pub fn login(&self, pin: &str) -> Result<()> {
         // cryptoki 0.12: login takes Option<&AuthPin> (a SecretString), not
         // Option<&str> (plan §5 — cryptoki migration).
-        self.session
-            .login(UserType::User, Some(&AuthPin::new(pin.to_string().into())))?;
-        Ok(())
+        //
+        // PKCS#11 login state is per-token across all sessions of an
+        // application, so a second session on the same token returns
+        // CKR_USER_ALREADY_LOGGED_IN. That is a benign no-op for us (the token
+        // is already in the desired logged-in state), so we treat it as success.
+        match self
+            .session
+            .login(UserType::User, Some(&AuthPin::new(pin.to_string().into())))
+        {
+            Ok(()) => Ok(()),
+            Err(cryptoki::error::Error::Pkcs11(RvError::UserAlreadyLoggedIn, _)) => Ok(()),
+            Err(e) => Err(e.into()),
+        }
     }
 
     /// Log in as UserType::So
@@ -186,6 +206,14 @@ impl Op11Session {
         pkt: PgpKeyType,
         cert: Option<Cert>,
     ) -> Result<Key<PublicParts, UnspecifiedRole>> {
+        // Composite PQC keys carry their public half as a token-resident
+        // CKO_DATA object (no X.509 cert custody — plan task 1, option b). Check
+        // for it FIRST so a composite key reloads purely from token data, with
+        // no out-of-band Cert and even when no X.509 certificate object exists.
+        if let Some(public) = self.load_composite_public(id)? {
+            return Ok(public);
+        }
+
         let x509cert = util::x509_cert(&self.session, id)?;
 
         // If we have a Cert, we expect to find a matching key in it, and use that
@@ -248,6 +276,69 @@ impl Op11Session {
         }
 
         Ok(k4.into())
+    }
+
+    /// Reload a composite key's public half from its token-resident `CKO_DATA`
+    /// object (plan task 1, option b), if present. Returns `Ok(None)` when there
+    /// is no such object (i.e. a classical key that uses the X.509 cert path).
+    ///
+    /// This is what makes a composite key reload *purely from token data*: the
+    /// stored value is the serialized OpenPGP public-key packet written by
+    /// `store_composite_public`, so the exact composite public MPI
+    /// (`MLDSA65_Ed25519` / `MLKEM768_X25519`) is recovered byte-for-byte with no
+    /// out-of-band `Cert` and no X.509 reconstruction.
+    fn load_composite_public(
+        &self,
+        id: &[u8],
+    ) -> Result<Option<Key<PublicParts, UnspecifiedRole>>> {
+        use cryptoki::object::AttributeType;
+        use sequoia_openpgp::packet::Packet;
+        use sequoia_openpgp::PacketPile;
+
+        // The id is stored in CKA_APPLICATION (CKA_ID is not a valid attribute
+        // on a CKO_DATA object in softhsmv3 — see store_composite_public).
+        let objs = self.session.find_objects(&[
+            Attribute::Class(ObjectClass::DATA),
+            Attribute::Application(id.to_vec()),
+            Attribute::Label(COMPOSITE_PUBKEY_LABEL.to_vec()),
+        ])?;
+        let handle = match objs.len() {
+            0 => return Ok(None),
+            1 => objs[0],
+            n => {
+                return Err(anyhow::anyhow!(
+                    "expected at most one composite public-key DATA object for id {id:x?}, found {n}"
+                ))
+            }
+        };
+
+        let mut value = None;
+        for attr in self.session.get_attributes(handle, &[AttributeType::Value])? {
+            if let Attribute::Value(v) = attr {
+                value = Some(v);
+            }
+        }
+        let value = value
+            .ok_or_else(|| anyhow::anyhow!("composite public-key DATA object has no CKA_VALUE"))?;
+
+        // Re-parse the serialized OpenPGP public-key packet.
+        let pile = PacketPile::from_bytes(&value)
+            .map_err(|e| anyhow::anyhow!("parse composite public-key packet failed: {e}"))?;
+        let packets: Vec<Packet> = pile.into();
+        for p in packets {
+            match p {
+                Packet::PublicKey(k) => {
+                    return Ok(Some(k.parts_into_public().role_into_unspecified()))
+                }
+                Packet::PublicSubkey(k) => {
+                    return Ok(Some(k.parts_into_public().role_into_unspecified()))
+                }
+                _ => {}
+            }
+        }
+        Err(anyhow::anyhow!(
+            "composite public-key DATA object did not contain a public-key packet"
+        ))
     }
 
     /// Get an [`Op11KeyPair`] that can perform decryption and signing operations.
@@ -571,6 +662,29 @@ mod live_composite_tests {
         op11_session
     }
 
+    /// Destroy every token object sharing `id` so live tests are idempotent
+    /// (composite provisioning writes token-resident objects that otherwise
+    /// accumulate across runs and break the "exactly one handle" resolution).
+    fn purge_id(s: &Op11Session, id: &[u8]) {
+        // Private-key / cert objects key off CKA_ID.
+        let mut objs = s
+            .session
+            .find_objects(&[Attribute::Id(id.to_vec())])
+            .expect("find_objects(id)");
+        // The composite public-key CKO_DATA object keys off CKA_APPLICATION.
+        objs.extend(
+            s.session
+                .find_objects(&[
+                    Attribute::Class(ObjectClass::DATA),
+                    Attribute::Application(id.to_vec()),
+                ])
+                .expect("find_objects(data application)"),
+        );
+        for h in objs {
+            let _ = s.session.destroy_object(h);
+        }
+    }
+
     /// End-to-end composite gate: generate a MLDSA65_Ed25519 v6 cert in software,
     /// provision its TWO private halves into softhsmv3 via the composite upload
     /// path, resolve the two custody handles, sign a message through the bridge
@@ -618,6 +732,7 @@ mod live_composite_tests {
         //    is per-token, so a second login would return CKR_USER_ALREADY_...).
         let id = b"\x05composite-live";
         let sign_session = open_session(&e);
+        purge_id(&sign_session, id); // idempotent across reruns
         sign_session
             .upload_composite_private(id, &signing)
             .expect("composite upload");
@@ -741,5 +856,155 @@ mod live_composite_tests {
              verified by sequoia 2.x ({} bytes armored)",
             sig.len()
         );
+
+        purge_id(&open_session(&e), id);
+    }
+
+    /// TASK 1 gate — composite public-key reconstruction *purely from the token*.
+    ///
+    /// This is the strict reload test the prior session's "remaining work" called
+    /// out: provision a composite key, then in a SEPARATE freshly-opened session,
+    /// reload the keypair via `keypair(id, Sign, cert=None)` — i.e. with NO
+    /// out-of-band Cert and NO X.509 certificate object — relying solely on the
+    /// token-resident CKO_DATA public-key object (plan task 1, option b). Then
+    /// sign through the reloaded keypair and verify the signature against the
+    /// original cert. If `key()` could not rebuild the composite public MPI from
+    /// token data alone, `keypair()` would fail here.
+    #[test]
+    fn live_composite_provision_then_reload_from_token_sign_verify() {
+        let Some(e) = env() else {
+            eprintln!("SKIP live_composite_*: set OP11_MODULE to run against softhsmv3");
+            return;
+        };
+
+        let policy = &StandardPolicy::new();
+        let (cert, _rev) = CertBuilder::new()
+            .set_profile(Profile::RFC9580)
+            .expect("RFC9580 profile")
+            .set_cipher_suite(CipherSuite::MLDSA65_Ed25519)
+            .add_userid("composite-reload@pqctoday.test")
+            .add_signing_subkey()
+            .generate()
+            .expect("composite cert generation");
+
+        let signing = cert
+            .keys()
+            .with_policy(policy, None)
+            .alive()
+            .revoked(false)
+            .for_signing()
+            .secret()
+            .next()
+            .expect("signing-capable secret key")
+            .key()
+            .clone();
+        let expected_fp = signing.fingerprint();
+
+        let id = b"\x05composite-reload";
+
+        // --- Provision in session #1, then DROP it entirely. ---
+        {
+            let s1 = open_session(&e);
+            purge_id(&s1, id);
+            s1.upload_composite_private(id, &signing)
+                .expect("composite upload (provision)");
+            // s1 dropped here: the only state that survives is on the token.
+        }
+
+        // --- Reload in a brand-new session #2 from the token ALONE. ---
+        // cert = None: no out-of-band metadata. keypair() -> key() must rebuild
+        // the composite public key from the token-resident CKO_DATA object.
+        let s2 = open_session(&e);
+        let public_reloaded = s2
+            .key(id, PgpKeyType::Sign, None)
+            .expect("reload composite public key from token alone (no cert)");
+        assert_eq!(
+            u8::from(public_reloaded.pk_algo()),
+            EXPECTED_ALGO_ID,
+            "reloaded public key must be MLDSA65_Ed25519 (algo 30)"
+        );
+        assert_eq!(
+            public_reloaded.fingerprint(),
+            expected_fp,
+            "reloaded public key fingerprint must match the provisioned key exactly"
+        );
+
+        let kp = s2
+            .keypair(id, PgpKeyType::Sign, None)
+            .expect("reload composite keypair from token alone (no cert)");
+
+        // Sign through the token-reloaded keypair.
+        let msg = b"pqctoday task1: composite reloaded from token, signed in HSM";
+        let mut sig = Vec::new();
+        crate::signer::sign_on_card(kp, &mut &msg[..], &mut sig).expect("sign_on_card (reloaded)");
+
+        // Wire + component assertions.
+        let pile = PacketPile::from_bytes(&sig).expect("re-parse signature");
+        let mut found = None;
+        for p in pile.descendants() {
+            if let Packet::Signature(s) = p {
+                found = Some((s.version(), s.pk_algo(), s.mpis().clone()));
+            }
+        }
+        let (version, pk_algo, mpis) = found.expect("a Signature packet");
+        assert_eq!(version, 6, "reloaded-key signature must be v6");
+        assert_eq!(u8::from(pk_algo), EXPECTED_ALGO_ID);
+        match &mpis {
+            sequoia_openpgp::crypto::mpi::Signature::MLDSA65_Ed25519 { eddsa, mldsa } => {
+                assert_eq!(eddsa.len(), 64);
+                assert_eq!(mldsa.len(), 3309);
+            }
+            other => panic!("expected MLDSA65_Ed25519 composite MPI, got {other:?}"),
+        }
+
+        // Cryptographic verification against the original cert.
+        struct Helper(Cert);
+        impl sequoia_openpgp::parse::stream::VerificationHelper for Helper {
+            fn get_certs(
+                &mut self,
+                _ids: &[sequoia_openpgp::KeyHandle],
+            ) -> sequoia_openpgp::Result<Vec<Cert>> {
+                Ok(vec![self.0.clone()])
+            }
+            fn check(
+                &mut self,
+                structure: sequoia_openpgp::parse::stream::MessageStructure,
+            ) -> sequoia_openpgp::Result<()> {
+                use sequoia_openpgp::parse::stream::{MessageLayer, VerificationError};
+                let mut good = 0usize;
+                for layer in structure.into_iter() {
+                    if let MessageLayer::SignatureGroup { results } = layer {
+                        for r in results {
+                            match r {
+                                Ok(_) => good += 1,
+                                Err(VerificationError::MissingKey { .. }) => {}
+                                Err(e) => return Err(anyhow::anyhow!("bad signature: {e}")),
+                            }
+                        }
+                    }
+                }
+                if good >= 1 {
+                    Ok(())
+                } else {
+                    Err(anyhow::anyhow!("no good signatures"))
+                }
+            }
+        }
+        let mut verifier =
+            sequoia_openpgp::parse::stream::DetachedVerifierBuilder::from_bytes(&sig)
+                .expect("DetachedVerifierBuilder")
+                .with_policy(policy, None, Helper(cert.clone()))
+                .expect("verifier with_policy");
+        verifier
+            .verify_bytes(msg)
+            .expect("sequoia 2.x must verify the signature from the token-reloaded keypair");
+
+        eprintln!(
+            "PASS live_composite reload-from-token: provision -> fresh session -> \
+             keypair(cert=None) reload -> sign -> verify OK (fp {expected_fp})"
+        );
+
+        // keypair() consumed s2's session; clean up via a fresh session.
+        purge_id(&open_session(&e), id);
     }
 }
