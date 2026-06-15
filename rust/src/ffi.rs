@@ -1124,6 +1124,28 @@ pub fn C_GenerateKeyPair(
     }
     unsafe {
         let mech_type = *(p_mechanism as *const u32);
+        // V4 — a CKA_KEY_TYPE in either template that contradicts the key-pair
+        // mechanism is CKR_TEMPLATE_INCONSISTENT, not silently overwritten.
+        let expected_kt = match mech_type {
+            CKM_ML_KEM_KEY_PAIR_GEN => Some(CKK_ML_KEM),
+            CKM_ML_DSA_KEY_PAIR_GEN => Some(CKK_ML_DSA),
+            CKM_SLH_DSA_KEY_PAIR_GEN => Some(CKK_SLH_DSA),
+            CKM_RSA_PKCS_KEY_PAIR_GEN => Some(CKK_RSA),
+            CKM_EC_KEY_PAIR_GEN => Some(CKK_EC),
+            _ => None,
+        };
+        if let Some(exp) = expected_kt {
+            for (t, n) in [
+                (p_public_key_template, ul_public_key_attribute_count),
+                (p_private_key_template, ul_private_key_attribute_count),
+            ] {
+                if let Some(kt) = get_attr_ulong(t, n, CKA_KEY_TYPE) {
+                    if kt != exp {
+                        return CKR_TEMPLATE_INCONSISTENT;
+                    }
+                }
+            }
+        }
         match mech_type {
             CKM_ML_KEM_KEY_PAIR_GEN => {
                 use ml_kem::{EncodedSizeUser, KemCore};
@@ -1236,7 +1258,10 @@ pub fn C_GenerateKeyPair(
                         _ => Vec::new(),
                     };
                     if !spki.is_empty() {
-                        pub_attrs.insert(CKA_PUBLIC_KEY_INFO, spki);
+                        // §4.14 — CKA_PUBLIC_KEY_INFO is exposed on BOTH halves:
+                        // a private key carries its own public-key info (SPKI).
+                        pub_attrs.insert(CKA_PUBLIC_KEY_INFO, spki.clone());
+                        prv_attrs.insert(CKA_PUBLIC_KEY_INFO, spki);
                     }
                 }
                 absorb_template_attrs(
@@ -1376,7 +1401,10 @@ pub fn C_GenerateKeyPair(
                         _ => Vec::new(),
                     };
                     if !spki.is_empty() {
-                        pub_attrs.insert(CKA_PUBLIC_KEY_INFO, spki);
+                        // §4.14 — CKA_PUBLIC_KEY_INFO is exposed on BOTH halves:
+                        // a private key carries its own public-key info (SPKI).
+                        pub_attrs.insert(CKA_PUBLIC_KEY_INFO, spki.clone());
+                        prv_attrs.insert(CKA_PUBLIC_KEY_INFO, spki);
                     }
                 }
                 absorb_template_attrs(
@@ -1516,7 +1544,10 @@ pub fn C_GenerateKeyPair(
                 if let Some(pk_bytes) = pub_attrs.get(&CKA_VALUE).cloned() {
                     let spki = build_slhdsa_spki(ps, &pk_bytes);
                     if !spki.is_empty() {
-                        pub_attrs.insert(CKA_PUBLIC_KEY_INFO, spki);
+                        // §4.14 — CKA_PUBLIC_KEY_INFO is exposed on BOTH halves:
+                        // a private key carries its own public-key info (SPKI).
+                        pub_attrs.insert(CKA_PUBLIC_KEY_INFO, spki.clone());
+                        prv_attrs.insert(CKA_PUBLIC_KEY_INFO, spki);
                     }
                 }
                 absorb_template_attrs(
@@ -9223,8 +9254,8 @@ mod attr_integrity_ffi_tests {
         let h2 = create_object_from_attrs(SESSION, aes_import_attrs()).unwrap();
         let id1 = obj_attr(h1, CKA_UNIQUE_ID).expect("object 1 has CKA_UNIQUE_ID");
         let id2 = obj_attr(h2, CKA_UNIQUE_ID).expect("object 2 has CKA_UNIQUE_ID");
-        assert!(id1.starts_with(b"shr3-"), "token-format unique id");
-        assert!(id2.starts_with(b"shr3-"));
+        assert_eq!(id1.len(), 36, "canonical 36-char UUID unique id");
+        assert_eq!(id2.len(), 36, "canonical 36-char UUID unique id");
         assert_ne!(id1, id2, "unique ids must differ across objects");
     }
 
@@ -9544,7 +9575,7 @@ mod object_mgmt_ffi_tests {
         );
         let uid_src = obj_attr(h_src, CKA_UNIQUE_ID).unwrap();
         let uid_copy = obj_attr(h_copy, CKA_UNIQUE_ID).unwrap();
-        assert!(uid_copy.starts_with(b"shr3-"));
+        assert_eq!(uid_copy.len(), 36, "canonical 36-char UUID unique id");
         assert_ne!(uid_src, uid_copy, "copy must not carry the source's CKA_UNIQUE_ID");
     }
 

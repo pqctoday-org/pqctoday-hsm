@@ -612,7 +612,16 @@ pub fn allocate_handle(mut attrs: Attributes) -> u32 {
         *c += 1;
         v
     });
-    attrs.insert(CKA_UNIQUE_ID, format!("shr3-{uid}").into_bytes());
+    // §4.4.1 — render the monotonic counter as a canonical 36-char UUID
+    // (8-4-4-4-12, v4 version/variant nibbles) so CKA_UNIQUE_ID is a portable,
+    // fixed-width identifier. The KMIP store keeps its own UniqueIdentifier, so
+    // this format is independent of the KMIP wire contract.
+    let uuid = format!(
+        "{:08x}-0000-4000-8000-{:012x}",
+        (uid >> 48) as u32,
+        uid & 0xffff_ffff_ffff,
+    );
+    attrs.insert(CKA_UNIQUE_ID, uuid.into_bytes());
     NEXT_HANDLE.with(|h| {
         let mut handle = h.borrow_mut();
         if *handle == u32::MAX {

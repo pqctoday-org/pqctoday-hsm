@@ -378,8 +378,8 @@ fn unique_id_present_and_distinct_on_generated_objects() {
     // Native readback.
     let uid_pub = get_attribute(session, pub_h, CKA_UNIQUE_ID).expect("pub has CKA_UNIQUE_ID");
     let uid_prv = get_attribute(session, prv_h, CKA_UNIQUE_ID).expect("prv has CKA_UNIQUE_ID");
-    assert!(uid_pub.starts_with(b"shr3-"));
-    assert!(uid_prv.starts_with(b"shr3-"));
+    assert_eq!(uid_pub.len(), 36, "CKA_UNIQUE_ID is a 36-char UUID");
+    assert_eq!(uid_prv.len(), 36, "CKA_UNIQUE_ID is a 36-char UUID");
     assert_ne!(uid_pub, uid_prv, "unique ids must differ across objects");
 
     // FFI readback (size query): CKA_UNIQUE_ID is NOT sensitive-blocked even
