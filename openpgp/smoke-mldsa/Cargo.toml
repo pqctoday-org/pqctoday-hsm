@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: CC0
+#
+# P0-SEQUOIA-PQC-05 — §5.4 LIVE HSM SMOKE TEST harness.
+#
+# Standalone crate (own [workspace]) — proves softhsmv3 accepts a cryptoki-0.12
+# `Mechanism::MlDsa` C_Sign and returns a 3309-byte ML-DSA-65 signature.
+# This GATES the whole bridge migration: if softhsmv3 rejects the
+# CK_SIGN_ADDITIONAL_CONTEXT param block, the native HSM dispatch can't be built.
+#
+# Kept out of the openpgp/ workspace so its dep set doesn't touch the bridge lock.
+[workspace]
+
+[package]
+name = "smoke-mldsa"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+cryptoki = "0.12"
+anyhow = "1"
