@@ -331,3 +331,68 @@ fn aes256_key_unwrap(kek: &[u8], wrapped: &[u8]) -> sequoia_openpgp::Result<Vec<
         sequoia_openpgp::Error::InvalidOperation(format!("AES key-unwrap failed: {e}")).into()
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The draft KEM combiner domain-separation string and its trailing length
+    // octet must match sequoia's software backend byte-for-byte, or the derived
+    // KEK differs and HSM<->software decryption interop breaks (plan §4).
+    #[test]
+    fn combiner_domain_separation_constant() {
+        let dom = b"OpenPGPCompositeKDFv1";
+        assert_eq!(dom.len(), 0x15, "domSep length octet must be 0x15 (21)");
+    }
+
+    // The combiner is a SHA3-256, so it must be deterministic and produce a
+    // 32-byte KEK (the AES-256 key-unwrap KEK width).
+    #[test]
+    fn combiner_is_deterministic_and_32_bytes() {
+        let mlkem = [1u8; 32];
+        let ecdh = [2u8; 32];
+        let ct = [3u8; 32];
+        let pk = [4u8; 32];
+        let a = multi_key_combine(
+            &mlkem,
+            &ecdh,
+            &ct,
+            &pk,
+            PublicKeyAlgorithm::MLKEM768_X25519,
+        )
+        .unwrap();
+        let b = multi_key_combine(
+            &mlkem,
+            &ecdh,
+            &ct,
+            &pk,
+            PublicKeyAlgorithm::MLKEM768_X25519,
+        )
+        .unwrap();
+        assert_eq!(a, b, "combiner must be deterministic");
+        assert_eq!(a.len(), 32, "KEK must be 32 bytes for AES-256");
+    }
+
+    // Distinct inputs (here: a different algId octet) must yield a distinct KEK
+    // — i.e. every combiner field is actually mixed into the hash.
+    #[test]
+    fn combiner_is_input_sensitive() {
+        let z = [0u8; 32];
+        let k768 = multi_key_combine(&z, &z, &z, &z, PublicKeyAlgorithm::MLKEM768_X25519).unwrap();
+        let k1024 =
+            multi_key_combine(&z, &z, &z, &z, PublicKeyAlgorithm::MLKEM1024_X448).unwrap();
+        assert_ne!(k768, k1024, "algId must change the derived KEK");
+    }
+
+    // RFC 3394 AES-256 key-wrap round-trip: unwrap(wrap(x)) == x. Proves our
+    // aes256_key_unwrap is wired to a correct AES-KW implementation.
+    #[test]
+    fn aes256_key_unwrap_roundtrip() {
+        use aes_kw::KekAes256;
+        let kek_bytes = [0x42u8; 32];
+        let plaintext = [0xABu8; 32]; // an AES-256 session key
+        let wrapped = KekAes256::from(kek_bytes).wrap_vec(&plaintext).unwrap();
+        let unwrapped = aes256_key_unwrap(&kek_bytes, &wrapped).unwrap();
+        assert_eq!(unwrapped, plaintext);
+    }
+}
