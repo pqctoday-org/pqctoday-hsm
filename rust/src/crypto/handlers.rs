@@ -41,6 +41,8 @@ pub enum DigestCtx {
     Sha3_512(sha3::Sha3_512),
     /// G11 — Keccak-256 (vendor CKM_KECCAK_256). Buffers data for single-shot finalize.
     Keccak256(Vec<u8>),
+    /// Historical RIPEMD-160 (CKM_RIPEMD160) — 20-byte digest.
+    Ripemd160(ripemd::Ripemd160),
 }
 
 pub struct FindCtx {
@@ -1102,6 +1104,12 @@ pub fn sign_hmac(mech: u32, key_bytes: &[u8], msg: &[u8]) -> Result<Vec<u8>, u32
             mac.update(msg);
             Ok(mac.finalize().into_bytes().to_vec())
         }
+        CKM_RIPEMD160_HMAC => {
+            let mut mac = Hmac::<ripemd::Ripemd160>::new_from_slice(key_bytes)
+                .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+            mac.update(msg);
+            Ok(mac.finalize().into_bytes().to_vec())
+        }
         _ => Err(CKR_MECHANISM_INVALID),
     }
 }
@@ -1496,6 +1504,7 @@ pub fn get_sig_len(mech: u32, hkey: u32) -> u32 {
             hss_sig_len(levels, lms_param, lmots_param)
         }
         CKM_SHA256_HMAC | CKM_SHA3_256_HMAC => 32,
+        CKM_RIPEMD160_HMAC => 20,
         CKM_SHA384_HMAC => 48,
         CKM_SHA512_HMAC | CKM_SHA3_512_HMAC => 64,
         CKM_KMAC_128 => 32,

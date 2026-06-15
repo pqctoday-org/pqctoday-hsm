@@ -43,6 +43,8 @@ cmac = "0.7"
 # SHA-1 — used ONLY for the CKA_CHECK_VALUE of generic-secret keys
 # (PKCS#11 v3.2 §6.8.2: first 3 bytes of SHA-1(value)). Not a signing primitive.
 sha1 = "0.10"
+# RIPEMD-160 — historical digest + HMAC (CKM_RIPEMD160 / _HMAC, §6.x).
+ripemd = "0.1"
 # Incremental GHASH (NIST SP 800-38D §6.4) — needed to implement
 # multi-part `C_EncryptUpdate` / `C_DecryptUpdate` for `CKM_AES_GCM`
 # per PKCS#11 v3.2 §6.27.7. The high-level `aes-gcm` crate is

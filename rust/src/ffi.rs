@@ -783,8 +783,10 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
         CKM_SLH_DSA_KEY_PAIR_GEN => (32, 64, 0x00010000),
         CKM_SLH_DSA => (32, 64, 0x00000800 | 0x00002000 | 0x0008 | 0x0010),
         CKM_SHA256 | CKM_SHA384 | CKM_SHA512 | CKM_SHA3_256 | CKM_SHA3_512 => (0, 0, 0x00000400),
+        // Historical RIPEMD-160 digest (CKF_DIGEST).
+        CKM_RIPEMD160 => (0, 0, 0x00000400),
         CKM_SHA256_HMAC | CKM_SHA384_HMAC | CKM_SHA512_HMAC | CKM_SHA3_256_HMAC
-        | CKM_SHA3_512_HMAC => (16, 64, 0x00000800 | 0x00002000),
+        | CKM_SHA3_512_HMAC | CKM_RIPEMD160_HMAC => (16, 64, 0x00000800 | 0x00002000),
         CKM_SHA256_HMAC_GENERAL
         | CKM_SHA384_HMAC_GENERAL
         | CKM_SHA512_HMAC_GENERAL
@@ -3199,7 +3201,7 @@ pub fn C_Sign(
                 sign_slh_dsa(m, ps, &sk_bytes, msg, &ctx_bytes, deterministic)
             }
             CKM_SHA256_HMAC | CKM_SHA384_HMAC | CKM_SHA512_HMAC | CKM_SHA3_256_HMAC
-            | CKM_SHA3_512_HMAC => sign_hmac(eff_mech, &sk_bytes, eff_msg),
+            | CKM_SHA3_512_HMAC | CKM_RIPEMD160_HMAC => sign_hmac(eff_mech, &sk_bytes, eff_msg),
             m if hmac_general_base(m).is_some() => {
                 let (base, _) = hmac_general_base(m).unwrap();
                 let mac_len = if ctx_bytes.len() >= 4 {
@@ -3486,7 +3488,9 @@ pub fn C_Verify(
                 verify_slh_dsa(m, ps, &pk_bytes, msg, sig_bytes, &ctx_bytes)
             }
             CKM_SHA256_HMAC | CKM_SHA384_HMAC | CKM_SHA512_HMAC | CKM_SHA3_256_HMAC
-            | CKM_SHA3_512_HMAC => verify_hmac(eff_mech, &pk_bytes, eff_msg, sig_bytes),
+            | CKM_SHA3_512_HMAC | CKM_RIPEMD160_HMAC => {
+                verify_hmac(eff_mech, &pk_bytes, eff_msg, sig_bytes)
+            }
             m if hmac_general_base(m).is_some() => {
                 let (base, _) = hmac_general_base(m).unwrap();
                 let mac_len = if ctx_bytes.len() >= 4 {
@@ -4918,6 +4922,7 @@ pub fn C_DigestInit(h_session: u32, p_mechanism: *mut u8) -> u32 {
             CKM_SHA3_256 => DigestCtx::Sha3_256(sha3::Sha3_256::new()),
             CKM_SHA3_512 => DigestCtx::Sha3_512(sha3::Sha3_512::new()),
             CKM_KECCAK_256 => DigestCtx::Keccak256(Vec::new()),
+            CKM_RIPEMD160 => DigestCtx::Ripemd160(ripemd::Ripemd160::new()),
             _ => return CKR_MECHANISM_INVALID,
         };
         DIGEST_STATE.with(|s| {
@@ -4952,6 +4957,7 @@ pub fn C_DigestUpdate(h_session: u32, p_part: *mut u8, ul_part_len: u32) -> u32 
                     DigestCtx::Sha3_256(h) => h.update(data),
                     DigestCtx::Sha3_512(h) => h.update(data),
                     DigestCtx::Keccak256(buf) => crate::crypto::keccak::keccak256_update(buf, data),
+                    DigestCtx::Ripemd160(h) => h.update(data),
                 }
             }
         });
@@ -4976,6 +4982,7 @@ pub fn C_DigestFinal(h_session: u32, p_digest: *mut u8, pul_digest_len: *mut u32
                     DigestCtx::Sha3_256(_) => 32,
                     DigestCtx::Sha3_512(_) => 64,
                     DigestCtx::Keccak256(_) => 32,
+                    DigestCtx::Ripemd160(_) => 20,
                 })
             });
             return match len {
@@ -4997,6 +5004,7 @@ pub fn C_DigestFinal(h_session: u32, p_digest: *mut u8, pul_digest_len: *mut u32
                 DigestCtx::Sha3_256(_) => 32,
                 DigestCtx::Sha3_512(_) => 64,
                 DigestCtx::Keccak256(_) => 32,
+                DigestCtx::Ripemd160(_) => 20,
             })
         });
         let expected_len = match expected_len {
@@ -5019,6 +5027,7 @@ pub fn C_DigestFinal(h_session: u32, p_digest: *mut u8, pul_digest_len: *mut u32
             DigestCtx::Sha3_256(h) => h.finalize().to_vec(),
             DigestCtx::Sha3_512(h) => h.finalize().to_vec(),
             DigestCtx::Keccak256(buf) => crate::crypto::keccak::keccak256_finalize(&buf).to_vec(),
+            DigestCtx::Ripemd160(h) => h.finalize().to_vec(),
         };
         std::ptr::copy_nonoverlapping(hash.as_ptr(), p_digest, hash.len());
         *pul_digest_len = hash.len() as u32;
@@ -5055,6 +5064,7 @@ pub fn C_Digest(
                     DigestCtx::Sha3_256(_) => 32,
                     DigestCtx::Sha3_512(_) => 64,
                     DigestCtx::Keccak256(_) => 32,
+                    DigestCtx::Ripemd160(_) => 20,
                 })
             });
             return match len {
