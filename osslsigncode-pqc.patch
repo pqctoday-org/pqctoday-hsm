@@ -1,0 +1,260 @@
+# osslsigncode PQC (ML-DSA / FIPS 204) Authenticode patch
+#
+# Target:  mtrojnar/osslsigncode tag 2.13
+#          commit 97a9ade6ec71c4dd41e199079643465af3ee6096 (annotated tag object
+#          cb129129236e7d014b52ae3131f7387df9c53a6d)
+# Backend: OpenSSL >= 3.5 (validated against OpenSSL 3.6.2) — ML-DSA is native
+#          (provider "default"), so NO third-party PQC library is required.
+#
+# What this patch does
+# --------------------
+# osslsigncode 2.13 emits its Authenticode PKCS#7 signature through OpenSSL's
+# *legacy* PKCS7 stack: PKCS7_add_signature() -> PKCS7_SIGNER_INFO_set() at
+# sign-prep time, and PKCS7_dataFinal() -> PKCS7_SIGNER_INFO_sign() at seal
+# time. Both reject ML-DSA:
+#   * PKCS7_SIGNER_INFO_set() has a key-type whitelist -> "signing not
+#     supported for this key type" (pk7_lib.c).
+#   * PKCS7_SIGNER_INFO_sign() calls EVP_DigestSignInit(ctx, NULL, md, ...)
+#     with a non-NULL message digest; ML-DSA is a *pure* scheme and requires
+#     md == NULL.
+#
+# This patch adds a narrow ML-DSA branch in helpers.c that leaves every
+# classic (RSA/EC/EdDSA) code path byte-for-byte unchanged:
+#   1. pkey_is_mldsa()                 — EVP_PKEY_is_a("ML-DSA-44/65/87").
+#   2. pkcs7_signer_info_set_mldsa()   — builds the SignerInfo by hand:
+#        - issuerAndSerialNumber from the signer cert,
+#        - digestAlgorithm = the content hash (SHA-256, Authenticode default),
+#        - digestEncryptionAlgorithm = the ML-DSA key OID (e.g. ML-DSA-65 =
+#          2.16.840.1.101.3.4.3.18) with absent parameters,
+#        then PKCS7_add_signer(). (EVP_PKEY_get_id() is -1 for the provider
+#        ML-DSA key, so the OID is resolved from the type name.)
+#   3. pkcs7_sign_content_mldsa()      — re-encodes the SET OF authenticated
+#        attributes (ASN1_item_i2d + PKCS7_ATTR_SIGN) and signs them with the
+#        pure one-shot EVP_DigestSign (md == NULL), storing the 3309-byte
+#        ML-DSA-65 signature into enc_digest.
+#
+# The resulting signed PE is a well-formed Authenticode/PKCS#7 SignedData whose
+# SignerInfo.signatureAlgorithm is ML-DSA-65 and whose signature validates with
+# EVP_DigestVerify against the signer's ML-DSA public key.
+#
+# Scope of the validated slice: software ML-DSA key via OpenSSL 3.6 genpkey.
+# HSM/PKCS#11-resident keys (softhsmv3 via pkcs11-provider) and a PQC-aware
+# `osslsigncode verify` are finish-plan items — see
+# docs/OSSLSIGNCODE_PQC_FORK.md.
+#
+# Apply with:  git apply osslsigncode-pqc.patch   (from the osslsigncode 2.13 tree)
+#
+--- a/helpers.c
++++ b/helpers.c
+@@ -19,6 +19,21 @@
+ static int X509_compare(const X509 *const *a, const X509 *const *b);
+ static void sk_X509_remove_duplicates(STACK_OF(X509) *chain);
+ 
++/* PQC (ML-DSA / FIPS 204) Authenticode support
++ * --------------------------------------------------------------------------
++ * OpenSSL's legacy PKCS7 signing stack (PKCS7_SIGNER_INFO_set /
++ * PKCS7_dataFinal -> PKCS7_SIGNER_INFO_sign) only knows the classic
++ * RSA/DSA/EC/EdDSA key types and uses EVP_DigestSignInit() with a non-NULL
++ * message digest. ML-DSA is a "pure" signature scheme: EVP_DigestSignInit()
++ * must be called with md == NULL and the signature OID is the key OID itself
++ * (no rsaEncryption-style wrapper, no separate hash). The two helpers below
++ * build the SignerInfo and sign the authenticated attributes the modern way
++ * without disturbing the classic code path. */
++static int pkey_is_mldsa(EVP_PKEY *pkey);
++static PKCS7_SIGNER_INFO *pkcs7_signer_info_set_mldsa(PKCS7 *p7, X509 *signcert,
++    EVP_PKEY *pkey, const EVP_MD *md);
++static int pkcs7_sign_content_mldsa(PKCS7 *p7);
++
+ /*
+  * Common functions
+  */
+@@ -181,7 +196,15 @@
+         X509 *signcert = sk_X509_value(ctx->options->certs, i);
+ 
+         if (X509_check_private_key(signcert, ctx->options->pkey)) {
+-            si = PKCS7_add_signature(p7, signcert, ctx->options->pkey, ctx->options->md);
++            if (pkey_is_mldsa(ctx->options->pkey)) {
++                /* FIPS 204 ML-DSA: build the SignerInfo manually because the
++                 * classic PKCS7_add_signature() -> PKCS7_SIGNER_INFO_set()
++                 * rejects this key type ("signing not supported"). */
++                si = pkcs7_signer_info_set_mldsa(p7, signcert, ctx->options->pkey,
++                    ctx->options->md);
++            } else {
++                si = PKCS7_add_signature(p7, signcert, ctx->options->pkey, ctx->options->md);
++            }
+             signer = i;
+             if (signer > 0)
+                 printf("Warning: For optimal performance, consider placing the signer certificate at the beginning of the certificate chain.\n");
+@@ -391,7 +414,22 @@
+ int pkcs7_sign_content(PKCS7 *p7, const u_char *data, int len)
+ {
+     BIO *p7bio;
++    STACK_OF(PKCS7_SIGNER_INFO) *sinfos;
++    PKCS7_SIGNER_INFO *si;
+ 
++    /* FIPS 204 ML-DSA: the classic PKCS7_dataFinal() path drives
++     * PKCS7_SIGNER_INFO_sign() with a non-NULL message digest, which the
++     * pure ML-DSA EVP_DigestSign machinery rejects. Detect the ML-DSA
++     * SignerInfo and sign its authenticated attributes the modern way. */
++    sinfos = PKCS7_get_signer_info(p7);
++    si = sinfos ? sk_PKCS7_SIGNER_INFO_value(sinfos, 0) : NULL;
++    if (si && si->pkey && pkey_is_mldsa(si->pkey)) {
++        /* The content digest (messageDigest signed attribute) is filled in by
++         * sign_spc_indirect_data_content()/the format layer before this call;
++         * here we just need to seal the SET OF authenticated attributes. */
++        return pkcs7_sign_content_mldsa(p7);
++    }
++
+     if ((p7bio = PKCS7_dataInit(p7, NULL)) == NULL) {
+         fprintf(stderr, "PKCS7_dataInit failed\n");
+         return 0; /* FAILED */
+@@ -405,8 +443,149 @@
+     }
+     BIO_free_all(p7bio);
+     return 1; /* OK */
++}
++
++/*
++ * Return 1 if the key is an ML-DSA (FIPS 204) key, 0 otherwise.
++ * [in] pkey: private key
++ * [returns] 1 for ML-DSA, 0 otherwise
++ */
++static int pkey_is_mldsa(EVP_PKEY *pkey)
++{
++    if (!pkey)
++        return 0;
++    return EVP_PKEY_is_a(pkey, "ML-DSA-44")
++        || EVP_PKEY_is_a(pkey, "ML-DSA-65")
++        || EVP_PKEY_is_a(pkey, "ML-DSA-87");
+ }
+ 
++/*
++ * Manually build a PKCS#7 SignerInfo for an ML-DSA key and add it to p7.
++ * Mirrors OpenSSL's PKCS7_SIGNER_INFO_set() / PKCS7_add_signature() but sets
++ * digest_enc_alg to the ML-DSA key OID and skips the key-type whitelist that
++ * rejects post-quantum keys.
++ * [in, out] p7: PKCS#7 signed structure
++ * [in] signcert: signer certificate
++ * [in] pkey: ML-DSA private key
++ * [in] md: message digest used to hash the signed content (e.g. SHA-256)
++ * [returns] pointer to the new SignerInfo, or NULL on error
++ */
++static PKCS7_SIGNER_INFO *pkcs7_signer_info_set_mldsa(PKCS7 *p7, X509 *signcert,
++    EVP_PKEY *pkey, const EVP_MD *md)
++{
++    PKCS7_SIGNER_INFO *si = PKCS7_SIGNER_INFO_new();
++    int pkey_nid;
++
++    if (!si)
++        return NULL; /* FAILED */
++    if (!ASN1_INTEGER_set(si->version, 1))
++        goto err;
++    if (!X509_NAME_set(&si->issuer_and_serial->issuer,
++            X509_get_issuer_name(signcert)))
++        goto err;
++    ASN1_INTEGER_free(si->issuer_and_serial->serial);
++    if (!(si->issuer_and_serial->serial =
++            ASN1_INTEGER_dup(X509_get0_serialNumber(signcert))))
++        goto err;
++
++    /* digestAlgorithm: the content message digest (Authenticode keeps a
++     * classic hash here even for PQC signatures). */
++    X509_ALGOR_set_md(si->digest_alg, md);
++
++    /* digestEncryptionAlgorithm: the ML-DSA key OID with absent parameters
++     * (FIPS 204 / draft-ietf-lamps-dilithium-certificates).
++     * ML-DSA is a provider-only key so EVP_PKEY_get_id() returns -1; resolve
++     * the OID from the algorithm type name ("ML-DSA-65" -> 2.16.840.1.101.3.4.3.18). */
++    pkey_nid = EVP_PKEY_get_id(pkey);
++    if (pkey_nid <= 0) {
++        const char *name = EVP_PKEY_get0_type_name(pkey);
++        if (name)
++            pkey_nid = OBJ_txt2nid(name);
++    }
++    if (pkey_nid <= 0) {
++        fprintf(stderr, "Unable to resolve ML-DSA algorithm OID\n");
++        goto err;
++    }
++    if (!X509_ALGOR_set0(si->digest_enc_alg, OBJ_nid2obj(pkey_nid),
++            V_ASN1_UNDEF, NULL))
++        goto err;
++
++    EVP_PKEY_up_ref(pkey);
++    si->pkey = pkey;
++
++    if (!PKCS7_add_signer(p7, si))
++        goto err;
++    /* The content message-digest algorithm is registered at the SignedData
++     * level automatically by PKCS7_add_signer() (via si->digest_alg); do NOT
++     * call PKCS7_set_digest() here -- by this point the PKCS#7 content type is
++     * already spcIndirectData, not "data", and that call would fail. */
++    return si; /* OK */
++err:
++    PKCS7_SIGNER_INFO_free(si);
++    return NULL; /* FAILED */
++}
++
++/*
++ * Sign the authenticated attributes of the (single) ML-DSA SignerInfo using
++ * the pure EVP_DigestSign one-shot interface (md == NULL).
++ * [in, out] p7: PKCS#7 signed structure carrying an ML-DSA SignerInfo
++ * [returns] 0 on error or 1 on success
++ */
++static int pkcs7_sign_content_mldsa(PKCS7 *p7)
++{
++    STACK_OF(PKCS7_SIGNER_INFO) *sinfos;
++    PKCS7_SIGNER_INFO *si;
++    EVP_MD_CTX *mctx = NULL;
++    u_char *abuf = NULL, *sig = NULL;
++    int alen;
++    size_t siglen = 0;
++    int ret = 0;
++
++    sinfos = PKCS7_get_signer_info(p7);
++    si = sinfos ? sk_PKCS7_SIGNER_INFO_value(sinfos, 0) : NULL;
++    if (!si || !si->pkey) {
++        fprintf(stderr, "No ML-DSA SignerInfo to sign\n");
++        return 0; /* FAILED */
++    }
++    /* Serialize the SET OF authenticated attributes (implicit [0] is encoded
++     * as a real SET for the signature, per PKCS#7 / CMS rules). */
++    alen = ASN1_item_i2d((ASN1_VALUE *)si->auth_attr, &abuf,
++        ASN1_ITEM_rptr(PKCS7_ATTR_SIGN));
++    if (alen <= 0 || !abuf) {
++        fprintf(stderr, "Failed to encode signed attributes\n");
++        goto err;
++    }
++    mctx = EVP_MD_CTX_new();
++    if (!mctx)
++        goto err;
++    /* Pure ML-DSA: md == NULL. */
++    if (EVP_DigestSignInit(mctx, NULL, NULL, NULL, si->pkey) <= 0) {
++        fprintf(stderr, "EVP_DigestSignInit (ML-DSA) failed\n");
++        goto err;
++    }
++    if (EVP_DigestSign(mctx, NULL, &siglen, abuf, (size_t)alen) <= 0) {
++        fprintf(stderr, "EVP_DigestSign (ML-DSA) size query failed\n");
++        goto err;
++    }
++    sig = OPENSSL_malloc(siglen);
++    if (!sig)
++        goto err;
++    if (EVP_DigestSign(mctx, sig, &siglen, abuf, (size_t)alen) <= 0) {
++        fprintf(stderr, "EVP_DigestSign (ML-DSA) failed\n");
++        goto err;
++    }
++    if (!ASN1_STRING_set(si->enc_digest, sig, (int)siglen)) {
++        fprintf(stderr, "Failed to store ML-DSA signature\n");
++        goto err;
++    }
++    ret = 1; /* OK */
++err:
++    OPENSSL_free(abuf);
++    OPENSSL_free(sig);
++    EVP_MD_CTX_free(mctx);
++    return ret;
++}
++
+ /* Return the header length (tag and length octets) of the ASN.1 type
+  * [in] p: ASN.1 data
+  * [in] len: ASN.1 data length
