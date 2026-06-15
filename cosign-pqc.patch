@@ -1,13 +1,378 @@
 # cosign PQC patch — ML-DSA-65 (FIPS 204) artifact signing
-# Fork of sigstore/cosign. Adds an ML-DSA-65 signer/verifier (cloudflare/circl backend)
-# behind cosign's signature.Signer / signature.Verifier interfaces.
 #
-# STATUS: SCAFFOLD — patch body filled in incrementally; do not apply yet.
+# Fork of sigstore/cosign. Adds a self-contained ML-DSA-65 signer/verifier that
+# satisfies sigstore's signature.SignerVerifier interface — the exact seam cosign
+# uses for ECDSA/RSA/Ed25519 keys — so ML-DSA can sign/verify blobs and artifacts
+# without disturbing the rest of the codebase.
 #
-# Upstream pin: TBD (recorded in docs/COSIGN_PQC_FORK.md once cloned)
-# Patch surface (planned):
-#   - new package implementing signature.SignerVerifier for ML-DSA-65 (CIRCL)
-#   - cosign sign-blob / verify-blob wiring to select ML-DSA when key is ML-DSA
+# Backend (validated slice): cloudflare/circl pure-Go ML-DSA-65.
+# Backend (finish-plan lead): HSM-resident key via miekg/pkcs11 -> softhsmv3,
+#   which plugs in at this same interface. See docs/COSIGN_PQC_FORK.md.
 #
-# Finish-plan (HSM-backed via miekg/pkcs11 -> softhsmv3) lives in:
-#   docs/COSIGN_PQC_FORK.md
+# Upstream pin:
+#   repo : github.com/sigstore/cosign  (module github.com/sigstore/cosign/v3)
+#   tag  : v3.0.6
+#   rev  : f1ad3ee952313be5d74a49d67ba0aa8d0d5e351f
+#   go   : 1.25.7 (go.mod) — built & tested with go1.26.4 darwin/arm64
+#   dep  : github.com/cloudflare/circl v1.6.3
+#
+# Apply from the cosign source tree root:
+#   git apply cosign-pqc.patch
+#   go mod tidy            # materialize circl in the module graph
+#   go test ./pkg/signature/mldsa/   # proves ML-DSA-65 sign+verify
+#
+# Files (relative to cosign source tree root):
+#   go.mod                                (+ cloudflare/circl v1.6.3)
+#   go.sum                                (+ circl checksums)
+#   pkg/signature/mldsa/mldsa65.go        (NEW — ML-DSA-65 SignerVerifier, CIRCL)
+#   pkg/signature/mldsa/mldsa65_test.go   (NEW — sign/verify/tamper/PEM tests)
+#
+# Validated-slice evidence: docs/COSIGN_PQC_FORK.md §4 (verbatim go test output).
+# CLI wiring (cosign sign-blob/verify-blob) is documented as remaining work in
+# docs/COSIGN_PQC_FORK.md §7-§8 (v3.0.6 keypair layer needs x509/registry support
+# for ML-DSA before the binary CLI accepts it; the interface slice is proven now).
+#
+diff --git a/go.mod b/go.mod
+index 0eb0c6c..3450abf 100644
+--- a/go.mod
++++ b/go.mod
+@@ -134,6 +134,7 @@ require (
+ 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
+ 	github.com/chzyer/readline v1.5.1 // indirect
+ 	github.com/clbanning/mxj/v2 v2.7.0 // indirect
++	github.com/cloudflare/circl v1.6.3 // indirect
+ 	github.com/cockroachdb/apd/v3 v3.2.1 // indirect
+ 	github.com/common-nighthawk/go-figure v0.0.0-20210622060536-734e95fb86be // indirect
+ 	github.com/containerd/stargz-snapshotter/estargz v0.18.2 // indirect
+diff --git a/go.sum b/go.sum
+index 5b23165..72c77b4 100644
+--- a/go.sum
++++ b/go.sum
+@@ -202,6 +202,8 @@ github.com/clbanning/mxj/v2 v2.5.5/go.mod h1:hNiWqW14h+kc+MdF9C6/YoRfjEJoR3ou6tn
+ github.com/clbanning/mxj/v2 v2.7.0 h1:WA/La7UGCanFe5NpHF0Q3DNtnCsVoxbPKuyBNHWRyME=
+ github.com/clbanning/mxj/v2 v2.7.0/go.mod h1:hNiWqW14h+kc+MdF9C6/YoRfjEJoR3ou6tn/Qo+ve2s=
+ github.com/client9/misspell v0.3.4/go.mod h1:qj6jICC3Q7zFZvVWo7KLAzC3yx5G7kyvSDkc90ppPyw=
++github.com/cloudflare/circl v1.6.3 h1:9GPOhQGF9MCYUeXyMYlqTR6a5gTrgR/fBLXvUgtVcg8=
++github.com/cloudflare/circl v1.6.3/go.mod h1:2eXP6Qfat4O/Yhh8BznvKnJ+uzEoTQ6jVKJRn81BiS4=
+ github.com/cncf/udpa/go v0.0.0-20191209042840-269d4d468f6f/go.mod h1:M8M6+tZqaGXZJjfX53e64911xZQV5JYwmTeXPW+k8Sc=
+ github.com/cncf/xds/go v0.0.0-20251210132809-ee656c7534f5 h1:6xNmx7iTtyBRev0+D/Tv1FZd4SCg8axKApyNyRsAt/w=
+ github.com/cncf/xds/go v0.0.0-20251210132809-ee656c7534f5/go.mod h1:KdCmV+x/BuvyMxRnYBlmVaq4OLiKW6iRQfvC62cvdkI=
+diff --git a/pkg/signature/mldsa/mldsa65.go b/pkg/signature/mldsa/mldsa65.go
+new file mode 100644
+index 0000000..6b54b9d
+--- /dev/null
++++ b/pkg/signature/mldsa/mldsa65.go
+@@ -0,0 +1,193 @@
++// Copyright 2026 The PQC Today Authors.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++// Package mldsa implements an ML-DSA-65 (FIPS 204) signer/verifier that
++// satisfies sigstore's signature.SignerVerifier interface, the same seam
++// cosign uses for ECDSA/RSA/Ed25519 keys.
++//
++// Backend: cloudflare/circl (pure-Go ML-DSA). This is the validated-slice
++// backend; the production target is an HSM-resident key reached via
++// miekg/pkcs11 -> softhsmv3 (see docs/COSIGN_PQC_FORK.md), which plugs in at
++// this exact interface without touching the rest of cosign.
++//
++// Key material is carried in PEM blocks with custom types because Go's
++// crypto/x509 has no ML-DSA OID support as of Go 1.26; we serialize the raw
++// FIPS 204 packed key bytes (mldsa65.PublicKeySize / PrivateKeySize).
++package mldsa
++
++import (
++	"crypto"
++	"encoding/pem"
++	"errors"
++	"fmt"
++	"io"
++
++	"github.com/cloudflare/circl/sign/mldsa/mldsa65"
++	"github.com/sigstore/sigstore/pkg/signature"
++)
++
++const (
++	// AlgorithmName is the cosign-facing identifier for this scheme.
++	AlgorithmName = "ml-dsa-65"
++
++	// PublicKeyPemType / PrivateKeyPemType are the PEM block headers used to
++	// carry raw FIPS 204 packed key bytes. Distinct from cosign's existing
++	// "ENCRYPTED COSIGN PRIVATE KEY" so the loader can branch unambiguously.
++	PublicKeyPemType  = "ML-DSA-65 PUBLIC KEY"
++	PrivateKeyPemType = "ML-DSA-65 PRIVATE KEY"
++)
++
++// emptyContext is the FIPS 204 signing context. cosign signs application
++// payloads with no domain-separation context, matching the empty-context
++// default used for ECDSA/Ed25519 blob signing.
++var emptyContext = []byte{}
++
++// SignerVerifier implements signature.SignerVerifier (PublicKey + SignMessage +
++// VerifySignature) for ML-DSA-65 over the cloudflare/circl backend.
++type SignerVerifier struct {
++	pub  *mldsa65.PublicKey
++	priv *mldsa65.PrivateKey // nil for verify-only instances
++}
++
++// Compile-time interface checks.
++var (
++	_ signature.Signer         = (*SignerVerifier)(nil)
++	_ signature.Verifier       = (*SignerVerifier)(nil)
++	_ signature.SignerVerifier = (*SignerVerifier)(nil)
++)
++
++// GenerateKeyPair creates a fresh ML-DSA-65 key pair.
++func GenerateKeyPair(rand io.Reader) (*SignerVerifier, error) {
++	pub, priv, err := mldsa65.GenerateKey(rand)
++	if err != nil {
++		return nil, fmt.Errorf("generating ml-dsa-65 key: %w", err)
++	}
++	return &SignerVerifier{pub: pub, priv: priv}, nil
++}
++
++// PublicKey returns the crypto.PublicKey (a *mldsa65.PublicKey).
++func (s *SignerVerifier) PublicKey(_ ...signature.PublicKeyOption) (crypto.PublicKey, error) {
++	if s.pub == nil {
++		return nil, errors.New("ml-dsa-65: no public key")
++	}
++	return s.pub, nil
++}
++
++// SignMessage reads the full message and produces a FIPS 204 (pure ML-DSA-65)
++// signature. ML-DSA hashes the message internally, so the entire message is
++// consumed here rather than a pre-computed digest.
++func (s *SignerVerifier) SignMessage(message io.Reader, _ ...signature.SignOption) ([]byte, error) {
++	if s.priv == nil {
++		return nil, errors.New("ml-dsa-65: no private key for signing")
++	}
++	msg, err := io.ReadAll(message)
++	if err != nil {
++		return nil, fmt.Errorf("ml-dsa-65: reading message: %w", err)
++	}
++	sig := make([]byte, mldsa65.SignatureSize)
++	// randomized=true => hedged signing per FIPS 204 (default, recommended).
++	if err := mldsa65.SignTo(s.priv, msg, emptyContext, true, sig); err != nil {
++		return nil, fmt.Errorf("ml-dsa-65: signing: %w", err)
++	}
++	return sig, nil
++}
++
++// VerifySignature checks a FIPS 204 ML-DSA-65 signature over the message.
++func (s *SignerVerifier) VerifySignature(sig, message io.Reader, _ ...signature.VerifyOption) error {
++	if s.pub == nil {
++		return errors.New("ml-dsa-65: no public key for verification")
++	}
++	sigBytes, err := io.ReadAll(sig)
++	if err != nil {
++		return fmt.Errorf("ml-dsa-65: reading signature: %w", err)
++	}
++	msg, err := io.ReadAll(message)
++	if err != nil {
++		return fmt.Errorf("ml-dsa-65: reading message: %w", err)
++	}
++	if !mldsa65.Verify(s.pub, msg, emptyContext, sigBytes) {
++		return errors.New("ml-dsa-65: signature verification failed")
++	}
++	return nil
++}
++
++// MarshalPrivateKeyPEM serializes the private key (raw FIPS 204 packed bytes)
++// in a PEM block. NOTE: unencrypted; the production path keeps keys in the HSM.
++func (s *SignerVerifier) MarshalPrivateKeyPEM() ([]byte, error) {
++	if s.priv == nil {
++		return nil, errors.New("ml-dsa-65: no private key")
++	}
++	raw, err := s.priv.MarshalBinary()
++	if err != nil {
++		return nil, err
++	}
++	return pem.EncodeToMemory(&pem.Block{Type: PrivateKeyPemType, Bytes: raw}), nil
++}
++
++// MarshalPublicKeyPEM serializes the public key (raw FIPS 204 packed bytes).
++func (s *SignerVerifier) MarshalPublicKeyPEM() ([]byte, error) {
++	if s.pub == nil {
++		return nil, errors.New("ml-dsa-65: no public key")
++	}
++	raw, err := s.pub.MarshalBinary()
++	if err != nil {
++		return nil, err
++	}
++	return pem.EncodeToMemory(&pem.Block{Type: PublicKeyPemType, Bytes: raw}), nil
++}
++
++// LoadPrivateKeyPEM parses an ML-DSA-65 private-key PEM block and returns a
++// full SignerVerifier (private + derived public key).
++func LoadPrivateKeyPEM(data []byte) (*SignerVerifier, error) {
++	block, _ := pem.Decode(data)
++	if block == nil || block.Type != PrivateKeyPemType {
++		return nil, fmt.Errorf("ml-dsa-65: expected PEM type %q", PrivateKeyPemType)
++	}
++	priv := new(mldsa65.PrivateKey)
++	if err := priv.UnmarshalBinary(block.Bytes); err != nil {
++		return nil, fmt.Errorf("ml-dsa-65: unmarshalling private key: %w", err)
++	}
++	pub, ok := priv.Public().(*mldsa65.PublicKey)
++	if !ok {
++		return nil, errors.New("ml-dsa-65: unexpected public key type")
++	}
++	return &SignerVerifier{pub: pub, priv: priv}, nil
++}
++
++// LoadVerifierPEM parses an ML-DSA-65 public-key PEM block into a verify-only
++// SignerVerifier.
++func LoadVerifierPEM(data []byte) (*SignerVerifier, error) {
++	block, _ := pem.Decode(data)
++	if block == nil || block.Type != PublicKeyPemType {
++		return nil, fmt.Errorf("ml-dsa-65: expected PEM type %q", PublicKeyPemType)
++	}
++	pub := new(mldsa65.PublicKey)
++	if err := pub.UnmarshalBinary(block.Bytes); err != nil {
++		return nil, fmt.Errorf("ml-dsa-65: unmarshalling public key: %w", err)
++	}
++	return &SignerVerifier{pub: pub}, nil
++}
++
++// IsPrivateKeyPEM reports whether data is an ML-DSA-65 private-key PEM block.
++// cosign's key loader uses this to branch before falling back to x509/PKCS8.
++func IsPrivateKeyPEM(data []byte) bool {
++	block, _ := pem.Decode(data)
++	return block != nil && block.Type == PrivateKeyPemType
++}
++
++// IsPublicKeyPEM reports whether data is an ML-DSA-65 public-key PEM block.
++func IsPublicKeyPEM(data []byte) bool {
++	block, _ := pem.Decode(data)
++	return block != nil && block.Type == PublicKeyPemType
++}
+diff --git a/pkg/signature/mldsa/mldsa65_test.go b/pkg/signature/mldsa/mldsa65_test.go
+new file mode 100644
+index 0000000..197e7ba
+--- /dev/null
++++ b/pkg/signature/mldsa/mldsa65_test.go
+@@ -0,0 +1,114 @@
++// Copyright 2026 The PQC Today Authors.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package mldsa
++
++import (
++	"bytes"
++	"crypto/rand"
++	"testing"
++
++	"github.com/cloudflare/circl/sign/mldsa/mldsa65"
++	"github.com/sigstore/sigstore/pkg/signature"
++)
++
++// TestSignVerifyRoundTrip proves the validated slice: generate an ML-DSA-65
++// key, sign a blob, and verify it through the signature.SignerVerifier seam.
++func TestSignVerifyRoundTrip(t *testing.T) {
++	sv, err := GenerateKeyPair(rand.Reader)
++	if err != nil {
++		t.Fatalf("GenerateKeyPair: %v", err)
++	}
++
++	// Used as a signature.SignerVerifier, exactly like cosign loads keys.
++	var signer signature.Signer = sv
++	var verifier signature.Verifier = sv
++
++	blob := []byte("post-quantum supply-chain artifact: cosign + ML-DSA-65 (FIPS 204)")
++
++	sig, err := signer.SignMessage(bytes.NewReader(blob))
++	if err != nil {
++		t.Fatalf("SignMessage: %v", err)
++	}
++	if len(sig) != mldsa65.SignatureSize {
++		t.Fatalf("signature size = %d, want %d", len(sig), mldsa65.SignatureSize)
++	}
++	t.Logf("ML-DSA-65 signature: %d bytes (FIPS 204 SignatureSize=%d)", len(sig), mldsa65.SignatureSize)
++
++	if err := verifier.VerifySignature(bytes.NewReader(sig), bytes.NewReader(blob)); err != nil {
++		t.Fatalf("VerifySignature (good): %v", err)
++	}
++	t.Log("verify OK: ML-DSA-65 sign->verify round-trip succeeded")
++}
++
++// TestTamperedMessageFails proves verification rejects a modified payload.
++func TestTamperedMessageFails(t *testing.T) {
++	sv, err := GenerateKeyPair(rand.Reader)
++	if err != nil {
++		t.Fatalf("GenerateKeyPair: %v", err)
++	}
++	blob := []byte("original artifact")
++	sig, err := sv.SignMessage(bytes.NewReader(blob))
++	if err != nil {
++		t.Fatalf("SignMessage: %v", err)
++	}
++	tampered := []byte("original artifacx") // one-byte change ('t' -> 'x')
++	if err := sv.VerifySignature(bytes.NewReader(sig), bytes.NewReader(tampered)); err == nil {
++		t.Fatal("verify of tampered message succeeded; expected failure")
++	}
++	t.Log("verify correctly rejected tampered message")
++}
++
++// TestPEMRoundTrip proves a key survives PEM marshal -> load, and that a
++// verify-only key loaded from the public PEM verifies a fresh signature.
++func TestPEMRoundTrip(t *testing.T) {
++	sv, err := GenerateKeyPair(rand.Reader)
++	if err != nil {
++		t.Fatalf("GenerateKeyPair: %v", err)
++	}
++
++	privPEM, err := sv.MarshalPrivateKeyPEM()
++	if err != nil {
++		t.Fatalf("MarshalPrivateKeyPEM: %v", err)
++	}
++	pubPEM, err := sv.MarshalPublicKeyPEM()
++	if err != nil {
++		t.Fatalf("MarshalPublicKeyPEM: %v", err)
++	}
++	if !IsPrivateKeyPEM(privPEM) {
++		t.Fatal("IsPrivateKeyPEM = false for private PEM")
++	}
++	if !IsPublicKeyPEM(pubPEM) {
++		t.Fatal("IsPublicKeyPEM = false for public PEM")
++	}
++
++	loadedSigner, err := LoadPrivateKeyPEM(privPEM)
++	if err != nil {
++		t.Fatalf("LoadPrivateKeyPEM: %v", err)
++	}
++	loadedVerifier, err := LoadVerifierPEM(pubPEM)
++	if err != nil {
++		t.Fatalf("LoadVerifierPEM: %v", err)
++	}
++
++	blob := []byte("PEM-loaded key signing path")
++	sig, err := loadedSigner.SignMessage(bytes.NewReader(blob))
++	if err != nil {
++		t.Fatalf("SignMessage (loaded): %v", err)
++	}
++	if err := loadedVerifier.VerifySignature(bytes.NewReader(sig), bytes.NewReader(blob)); err != nil {
++		t.Fatalf("VerifySignature (loaded pub key): %v", err)
++	}
++	t.Log("verify OK: PEM marshal/load round-trip, pub-only key verified signer's signature")
++}
