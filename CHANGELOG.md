@@ -8,6 +8,33 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — PQC tooling forks: step-ca, cosign, osslsigncode (ML-DSA, HSM-backed) (2026-06-15)
+
+Three strongSwan-style fork patches (each `<tool>-pqc.patch` + a
+`docs/<TOOL>_PQC_FORK.md` finish plan), consolidated on `feat/pqc-tooling-forks`
+(PR #114) and validated end-to-end in the `pqc-network` Linux image. Upstreams
+are unmodified in-tree; the patch is the source of truth.
+
+- **step-ca** (smallstep/certificates v0.30.2) — `step-ca-pqc.patch`: SoftCAS
+  issues a fully post-quantum ML-DSA-44/65/87 chain (FIPS 204; a hand-assembled
+  TBSCertificate + SubjectPublicKeyInfo work around Go's lack of an ML-DSA OID).
+  The issuing key is HSM-resident in softhsmv3 (non-extractable,
+  `C_Sign(CKM_ML_DSA)`) via a new in-repo `mldsahsm` KMS, and a running `step-ca`
+  server boots on it serving HTTPS + ACME. (Sandbox scenario 18.)
+- **cosign** (sigstore/cosign v3.0.6) — `cosign-pqc.patch`: real
+  `sign-blob` / `verify-blob` / `generate-key-pair` with ML-DSA-65, key either
+  HSM-resident (`mldsa-pkcs11:` → softhsmv3) or in-process (cloudflare/circl).
+  Transparency-log upload left off (Rekor has no ML-DSA entry type yet).
+  (Sandbox scenario 34.)
+- **osslsigncode** (mtrojnar/osslsigncode 2.13) — `osslsigncode-pqc.patch`:
+  ML-DSA Authenticode PKCS#7 **sign and verify** over OpenSSL 3.6 native ML-DSA,
+  including a content-binding (`messageDigest`) fix found while building the
+  verify side. (Sandbox scenario 17.)
+
+Honest boundaries documented per fork: no Microsoft PQC Authenticode profile
+(Windows won't trust ML-DSA-signed PEs), Rekor PQC support pending, and Go/LibreSSL
+clients cannot verify ML-DSA chains (OpenSSL ≥ 3.5 can).
+
 ### Added — cryptopolicy-manager `GET /audit` (three-plane log inspection) (2026-06-14)
 
 The admin facade gains `GET /audit?limit=N`, returning the in-memory `RingSink`
