@@ -406,6 +406,7 @@ macro_rules! xlate_tmpl_or {
 /// (hSession) -> CK_RV
 macro_rules! shim_session_only {
     ($($name:ident),+ $(,)?) => {$(
+        #[unsafe(no_mangle)]
         pub unsafe extern "C" fn $name(hSession: CK_SESSION_HANDLE) -> CK_RV {
             let h = narrow_or!(hSession, CKR_SESSION_HANDLE_INVALID);
             rv(crate::ffi::$name(h))
@@ -416,6 +417,7 @@ macro_rules! shim_session_only {
 /// (hSession, CK_BYTE_PTR, CK_ULONG) -> CK_RV — buffer passes through.
 macro_rules! shim_sess_buf {
     ($($name:ident),+ $(,)?) => {$(
+        #[unsafe(no_mangle)]
         pub unsafe extern "C" fn $name(
             hSession: CK_SESSION_HANDLE,
             pData: CK_BYTE_PTR,
@@ -431,6 +433,7 @@ macro_rules! shim_sess_buf {
 /// (hSession, in_ptr, in_len, out_ptr, out_len_ptr) -> CK_RV
 macro_rules! shim_sess_in_outlen {
     ($($name:ident),+ $(,)?) => {$(
+        #[unsafe(no_mangle)]
         pub unsafe extern "C" fn $name(
             hSession: CK_SESSION_HANDLE,
             pIn: CK_BYTE_PTR,
@@ -448,6 +451,7 @@ macro_rules! shim_sess_in_outlen {
 /// (hSession, out_ptr, out_len_ptr) -> CK_RV
 macro_rules! shim_sess_outlen {
     ($($name:ident),+ $(,)?) => {$(
+        #[unsafe(no_mangle)]
         pub unsafe extern "C" fn $name(
             hSession: CK_SESSION_HANDLE,
             pOut: CK_BYTE_PTR,
@@ -462,6 +466,7 @@ macro_rules! shim_sess_outlen {
 /// (hSession, in_ptr, in_len, in2_ptr, in2_len) -> CK_RV
 macro_rules! shim_sess_buf_buf {
     ($($name:ident),+ $(,)?) => {$(
+        #[unsafe(no_mangle)]
         pub unsafe extern "C" fn $name(
             hSession: CK_SESSION_HANDLE,
             pA: CK_BYTE_PTR,
@@ -480,6 +485,7 @@ macro_rules! shim_sess_buf_buf {
 /// (hSession, CK_MECHANISM_PTR, hKey) -> CK_RV
 macro_rules! shim_mech_key {
     ($($name:ident),+ $(,)?) => {$(
+        #[unsafe(no_mangle)]
         pub unsafe extern "C" fn $name(
             hSession: CK_SESSION_HANDLE,
             pMechanism: CK_MECHANISM_PTR,
@@ -497,6 +503,7 @@ macro_rules! shim_mech_key {
 /// (message sign/verify family) → opaque pass-through.
 macro_rules! shim_msg_param_only {
     ($($name:ident),+ $(,)?) => {$(
+        #[unsafe(no_mangle)]
         pub unsafe extern "C" fn $name(
             hSession: CK_SESSION_HANDLE,
             pParameter: CK_VOID_PTR,
@@ -513,6 +520,7 @@ macro_rules! shim_msg_param_only {
 /// sign-message shape (param ignored by the engine).
 macro_rules! shim_msg_sign {
     ($($name:ident),+ $(,)?) => {$(
+        #[unsafe(no_mangle)]
         pub unsafe extern "C" fn $name(
             hSession: CK_SESSION_HANDLE,
             pParameter: CK_VOID_PTR,
@@ -536,6 +544,7 @@ macro_rules! shim_msg_sign {
 /// verify-message shape (param ignored by the engine).
 macro_rules! shim_msg_verify {
     ($($name:ident),+ $(,)?) => {$(
+        #[unsafe(no_mangle)]
         pub unsafe extern "C" fn $name(
             hSession: CK_SESSION_HANDLE,
             pParameter: CK_VOID_PTR,
@@ -554,15 +563,15 @@ macro_rules! shim_msg_verify {
     )+};
 }
 
-/// Guard for the AES-GCM message family parameter: the engine PARSES
-/// `pParameter` as wasm-layout CK_GCM_MESSAGE_PARAMS with embedded 32-bit
-/// pIv/pTag pointers — translatable only where layouts coincide (32-bit).
+/// Formerly bailed CKR_FUNCTION_FAILED on 64-bit because CK_GCM_MESSAGE_PARAMS
+/// was parsed as a wasm (32-bit) layout. parse_gcm_msg_params (read) and the
+/// pTag writeback in C_EncryptMessageNext/Final (native usize word 4) now both
+/// operate at native pointer width, so the AES-GCM message family works on
+/// 64-bit — this guard is a no-op (kept as a seam in case re-gating is needed).
 macro_rules! guard_gcm_msg_param {
-    ($p:expr) => {
-        if !$p.is_null() && cfg!(not(target_pointer_width = "32")) {
-            return rv(CKR_FUNCTION_FAILED); // documented H-1 residual
-        }
-    };
+    ($p:expr) => {{
+        let _ = &$p;
+    }};
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -1143,6 +1152,7 @@ pub unsafe extern "C" fn C_SessionCancel(hSession: CK_SESSION_HANDLE, flags: CK_
 
 shim_mech_key!(C_MessageEncryptInit, C_MessageDecryptInit);
 
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn C_EncryptMessage(
     hSession: CK_SESSION_HANDLE,
     pParameter: CK_VOID_PTR,
@@ -1174,6 +1184,7 @@ pub unsafe extern "C" fn C_EncryptMessage(
     })
 }
 
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn C_EncryptMessageBegin(
     hSession: CK_SESSION_HANDLE,
     pParameter: CK_VOID_PTR,
@@ -1194,6 +1205,7 @@ pub unsafe extern "C" fn C_EncryptMessageBegin(
     ))
 }
 
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn C_EncryptMessageNext(
     hSession: CK_SESSION_HANDLE,
     pParameter: CK_VOID_PTR,

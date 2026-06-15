@@ -2209,11 +2209,22 @@ pub fn C_GenerateKeyPair(
                 if !p_param_ptr.is_null() && param_len >= core::mem::size_of::<usize>() {
                     param_code = *p_param_ptr as u32;
                 }
+                // §6.x — the parameter set is carried in the standard
+                // CKA_PARAMETER_SET (0x61d, verified vs pkcs11t.h); accept the
+                // legacy vendor CKA_XMSSMT_PARAM_SET and the mechanism parameter
+                // word as fallbacks.
                 let mut mt_param = get_attr_ulong(
                     p_public_key_template,
                     ul_public_key_attribute_count,
-                    CKA_XMSSMT_PARAM_SET,
+                    CKA_PARAMETER_SET,
                 )
+                .or_else(|| {
+                    get_attr_ulong(
+                        p_public_key_template,
+                        ul_public_key_attribute_count,
+                        CKA_XMSSMT_PARAM_SET,
+                    )
+                })
                 .unwrap_or(param_code);
                 if mt_param == 0 {
                     mt_param = CKP_XMSSMT_SHA2_20_2_256;
@@ -2227,6 +2238,7 @@ pub fn C_GenerateKeyPair(
                 let mut prv_attrs = HashMap::new();
                 store_ulong(&mut pub_attrs, CKA_CLASS, CKO_PUBLIC_KEY);
                 store_ulong(&mut pub_attrs, CKA_KEY_TYPE, CKK_XMSSMT);
+                store_ulong(&mut pub_attrs, CKA_PARAMETER_SET, mt_param);
                 store_ulong(&mut pub_attrs, CKA_XMSSMT_PARAM_SET, mt_param);
                 store_ulong(&mut pub_attrs, CKA_KEY_GEN_MECHANISM, CKM_XMSSMT_KEY_PAIR_GEN);
                 store_bool(&mut pub_attrs, CKA_TOKEN, false);
@@ -2237,6 +2249,7 @@ pub fn C_GenerateKeyPair(
                 pub_attrs.insert(CKA_VALUE, pub_bytes);
                 store_ulong(&mut prv_attrs, CKA_CLASS, CKO_PRIVATE_KEY);
                 store_ulong(&mut prv_attrs, CKA_KEY_TYPE, CKK_XMSSMT);
+                store_ulong(&mut prv_attrs, CKA_PARAMETER_SET, mt_param);
                 store_ulong(&mut prv_attrs, CKA_XMSSMT_PARAM_SET, mt_param);
                 store_ulong(&mut prv_attrs, CKA_KEY_GEN_MECHANISM, CKM_XMSSMT_KEY_PAIR_GEN);
                 store_bool(&mut prv_attrs, CKA_TOKEN, false);
@@ -3001,6 +3014,16 @@ pub fn C_SignInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
             return rv;
         }
         let mut mech_type = *(p_mechanism as *const u32);
+        // §6.4 — raw CKM_RSA_PKCS takes NO mechanism parameter; a supplied one
+        // (e.g. a CK_SIGN_ADDITIONAL_CONTEXT meant for ML-DSA/SLH-DSA) is
+        // CKR_MECHANISM_PARAM_INVALID.
+        if mech_type == CKM_RSA_PKCS {
+            let pp = *((p_mechanism as *const usize).add(1));
+            let pl = *((p_mechanism as *const usize).add(2));
+            if pp != 0 && pl > 0 {
+                return CKR_MECHANISM_PARAM_INVALID;
+            }
+        }
         // Parse CK_EDDSA_PARAMS: if phFlag is set, use internal CKM_EDDSA_PH
         if mech_type == CKM_EDDSA {
             let p_param = *((p_mechanism as *const usize).add(1)) as usize as *const u8;
