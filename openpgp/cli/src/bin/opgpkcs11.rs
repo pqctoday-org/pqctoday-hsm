@@ -5,7 +5,7 @@ use anyhow::Result;
 use clap::Parser;
 use cryptoki::object::{Attribute, AttributeType};
 use openpgp_pkcs11_sequoia::Op11;
-use openpgp_x509_sequoia::types::PgpKeyType;
+use openpgp_pkcs11_sequoia::PgpKeyType;
 use sequoia_openpgp::cert::prelude::ValidErasedKeyAmalgamation;
 use sequoia_openpgp::packet::key::SecretParts;
 use sequoia_openpgp::parse::Parse;

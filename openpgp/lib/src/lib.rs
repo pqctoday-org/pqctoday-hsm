@@ -34,7 +34,6 @@ use cryptoki::error::RvError;
 use cryptoki::object::{Attribute, ObjectClass, ObjectHandle};
 use cryptoki::session::{Session, UserType};
 use cryptoki::slot::Slot;
-use openpgp_x509_sequoia::types::PgpKeyType;
 use sequoia_openpgp::packet::key::{PublicParts, SecretParts, UnspecifiedRole};
 use sequoia_openpgp::packet::Key;
 use sequoia_openpgp::parse::stream::DecryptorBuilder;
@@ -47,6 +46,12 @@ pub(crate) mod decryptor;
 pub(crate) mod signer;
 mod upload;
 mod util;
+pub mod x509;
+
+// Re-export the inlined X.509/OpenPGP helper types (formerly the abandoned
+// `openpgp-x509-sequoia` crate, now inlined — see plan §2.3). The CLI and the
+// bridge's own modules use `PgpKeyType` through these paths.
+pub use crate::x509::types::PgpKeyType;
 
 /// OpenPGP PKCS #11 context
 pub struct Op11 {
@@ -177,7 +182,7 @@ impl Op11Session {
 
         // If we have a Cert, we expect to find a matching key in it, and use that
         if let Some(c) = cert {
-            return openpgp_x509_sequoia::find_key_by_x509cert(&x509cert, &c);
+            return crate::x509::find_key_by_x509cert(&x509cert, &c);
         }
 
         let x509_cert = x509_certificate::rfc5280::Certificate::from(x509cert.clone());
@@ -194,11 +199,11 @@ impl Op11Session {
 
         // Get subkey fingerprint from x509 cert extension, if set
         let extension_subkey_fp =
-            openpgp_x509_sequoia::experimental::extension_fingerprint(&x509_cert)?;
+            crate::x509::experimental::extension_fingerprint(&x509_cert)?;
 
         // Get kdf_kek params from x509 cert extension, if set
         let extension_kdf_kek: Option<[u8; 4]> =
-            openpgp_x509_sequoia::experimental::extension_kdf_kek(&x509_cert)?;
+            crate::x509::experimental::extension_kdf_kek(&x509_cert)?;
 
         // - If we have an extension_subkey_fp, we expect to match its FP,
         // - Otherwise, we expect the serial to match the FP.
@@ -343,7 +348,7 @@ impl Op11Session {
         self.upload_pki(&pub_key_info)?;
 
         // Generate x.509 certificate
-        let tbs_cert = openpgp_x509_sequoia::generate_x509(&pub_key_info, key, common_name, &[]);
+        let tbs_cert = crate::x509::generate_x509(&pub_key_info, key, common_name, &[]);
 
         // Self-sign x.509 certificate
         let cert = self.upload_self_sign_x509(priv_key, tbs_cert, pub_key_info.algorithm())?;
