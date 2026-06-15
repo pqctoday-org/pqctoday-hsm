@@ -2,8 +2,9 @@ use std::path::PathBuf;
 use std::str::FromStr;
 
 use anyhow::Result;
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use cryptoki::object::{Attribute, AttributeType};
+use openpgp_pkcs11_sequoia::CompositeAlgo;
 use openpgp_pkcs11_sequoia::Op11;
 use openpgp_pkcs11_sequoia::PgpKeyType;
 use sequoia_openpgp::cert::prelude::ValidErasedKeyAmalgamation;
@@ -20,6 +21,24 @@ struct Cli {
 
     #[clap(long, default_value = "/usr/lib64/libykcs11.so")]
     pub module: String,
+}
+
+/// Composite PQC algorithm for the in-HSM `generate` command.
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum GenAlgo {
+    /// MLDSA65_Ed25519 (signing).
+    MlDsa65Ed25519,
+    /// MLKEM768_X25519 (encryption).
+    MlKem768X25519,
+}
+
+impl From<GenAlgo> for CompositeAlgo {
+    fn from(a: GenAlgo) -> Self {
+        match a {
+            GenAlgo::MlDsa65Ed25519 => CompositeAlgo::MlDsa65Ed25519,
+            GenAlgo::MlKem768X25519 => CompositeAlgo::MlKem768X25519,
+        }
+    }
 }
 
 #[derive(Parser, Debug)]
@@ -101,7 +120,40 @@ pub enum Command {
         cert: Option<PathBuf>,
     },
 
-    /// Upload an OpenPGP component key to a PKCS #11 card
+    /// Generate a composite PQC key directly INSIDE the HSM (default, recommended).
+    ///
+    /// Both private halves are created in-HSM via C_GenerateKeyPair and marked
+    /// non-extractable (CKA_SENSITIVE=true, CKA_EXTRACTABLE=false) — the private
+    /// key material never exists in software ("keys never leave the HSM"). The
+    /// composite public key is stored on the token so the key reloads without a
+    /// cert. This is the preferred provisioning path; use `upload` only to import
+    /// an externally-generated bring-your-own-key.
+    Generate {
+        /// PKCS #11 device serial
+        #[clap(long)]
+        serial: String,
+
+        /// Object ID
+        #[clap(long)]
+        id: u8,
+
+        /// User PIN
+        #[clap(long)]
+        pin: Option<String>,
+
+        /// SO PIN (only needed on cards that require it for object creation)
+        #[clap(long)]
+        so_pin: Option<String>,
+
+        /// Composite algorithm to generate.
+        #[clap(long, value_enum, default_value_t = GenAlgo::MlDsa65Ed25519)]
+        algo: GenAlgo,
+    },
+
+    /// Import an externally-generated OpenPGP component key (bring-your-own-key).
+    ///
+    /// This is the BYOK path: the private key is generated in software and
+    /// imported. For the demo, prefer `generate` (keys never leave the HSM).
     Upload {
         /// PKCS #11 device serial
         #[clap(long)]
@@ -285,6 +337,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             session.login(&pin)?;
 
             session.decrypt(&[id], &mut std::io::stdin(), &mut std::io::stdout(), cert)?;
+        }
+
+        Command::Generate {
+            serial,
+            id,
+            pin,
+            so_pin,
+            algo,
+        } => {
+            let mut pkcs11 = Op11::open(&args.module)?;
+            let slot = pkcs11.slot(&serial)?;
+            let session = slot.open_rw_session()?;
+            if let Some(pin) = pin {
+                session.login(&pin)?;
+            }
+            if let Some(so_pin) = so_pin {
+                session.login_so(&so_pin)?;
+            }
+
+            let public = session.generate_composite_in_hsm(&[id], algo.into())?;
+
+            println!();
+            println!(
+                "Generated composite {:?} key IN-HSM (non-extractable)\n\
+                 fingerprint {}\nto serial '{}', PKCS#11 slot {}",
+                algo,
+                public.fingerprint(),
+                serial,
+                id
+            );
         }
 
         Command::Upload {

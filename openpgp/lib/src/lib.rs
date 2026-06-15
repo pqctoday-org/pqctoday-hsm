@@ -54,6 +54,23 @@ pub mod x509;
 // bridge's own modules use `PgpKeyType` through these paths.
 pub use crate::x509::types::PgpKeyType;
 
+/// Composite PQC key algorithms the bridge can custody.
+///
+/// Used by the generate-in-HSM provisioning path
+/// ([`Op11Session::generate_composite_in_hsm`]) — the **default** custody mode
+/// for the demo, in which both private halves are generated *inside* the HSM via
+/// `C_GenerateKeyPair` and never exist in software (plan task 3). The
+/// import/bring-your-own-key path ([`Op11Session::upload_key`]) accepts any
+/// composite key sequoia can produce; this enum names the two the bridge
+/// generates natively.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CompositeAlgo {
+    /// `MLDSA65_Ed25519` (draft-ietf-openpgp-pqc algorithm 30) — signing.
+    MlDsa65Ed25519,
+    /// `MLKEM768_X25519` (draft-ietf-openpgp-pqc algorithm 35) — encryption.
+    MlKem768X25519,
+}
+
 /// `CKA_LABEL` of the token-resident `CKO_DATA` object that carries a composite
 /// PQC key's serialized OpenPGP *public* key (plan task 1, option b).
 ///
@@ -1127,6 +1144,234 @@ mod live_composite_tests {
         eprintln!(
             "PASS live_composite ML-KEM e2e: software-encrypt -> HSM decrypt \
              (X25519 ECDH + ML-KEM-768 decap + combiner + AES-256 KW) -> plaintext MATCH"
+        );
+
+        purge_id(&open_session(&e), id);
+    }
+
+    /// TASK 3 gate — generate-in-HSM custody: keys never leave the HSM.
+    ///
+    /// Generate a composite MLDSA65_Ed25519 key's two halves DIRECTLY inside the
+    /// HSM via C_GenerateKeyPair (non-extractable: CKA_SENSITIVE=true,
+    /// CKA_EXTRACTABLE=false), reload the keypair purely from the token, sign,
+    /// and verify the signature against the in-HSM-generated public key (no
+    /// secret key ever existed in software). Then CONFIRM both private halves are
+    /// non-extractable: CKA_VALUE is refused by the HSM, and the sensitive /
+    /// non-extractable flags are set.
+    #[test]
+    fn live_composite_generate_in_hsm_sign_verify_nonextractable() {
+        let Some(e) = env() else {
+            eprintln!("SKIP live_composite_*: set OP11_MODULE to run against softhsmv3");
+            return;
+        };
+
+        let id = b"\x05composite-genhsm";
+
+        // 1) GENERATE both halves in-HSM (default custody). No software secret.
+        let s1 = open_session(&e);
+        purge_id(&s1, id);
+        let generated_public = s1
+            .generate_composite_in_hsm(id, CompositeAlgo::MlDsa65Ed25519)
+            .expect("generate composite in HSM");
+        assert_eq!(
+            u8::from(generated_public.pk_algo()),
+            EXPECTED_ALGO_ID,
+            "generated key must be MLDSA65_Ed25519 (algo 30)"
+        );
+        let expected_fp = generated_public.fingerprint();
+        drop(s1);
+
+        // 2) Reload from the token alone and sign.
+        let s2 = open_session(&e);
+        let public_reloaded = s2
+            .key(id, PgpKeyType::Sign, None)
+            .expect("reload generated public key from token");
+        assert_eq!(
+            public_reloaded.fingerprint(),
+            expected_fp,
+            "reloaded fingerprint must match the generated key"
+        );
+        let kp = s2
+            .keypair(id, PgpKeyType::Sign, None)
+            .expect("reload generated keypair from token");
+        let msg = b"pqctoday task3: composite key generated in-HSM, signed in-HSM";
+        let mut sig = Vec::new();
+        crate::signer::sign_on_card(kp, &mut &msg[..], &mut sig).expect("sign_on_card (generated)");
+
+        // 3) Verify the HSM signature against the in-HSM-generated public key
+        //    (no Cert: Signature::verify_message verifies a detached signature
+        //    directly with the public key).
+        let pile = PacketPile::from_bytes(&sig).expect("re-parse signature");
+        let mut sig_packet = None;
+        for p in pile.descendants() {
+            if let Packet::Signature(s) = p {
+                sig_packet = Some(s.clone());
+            }
+        }
+        let sig_packet = sig_packet.expect("a Signature packet");
+        assert_eq!(sig_packet.version(), 6, "must be v6");
+        assert_eq!(u8::from(sig_packet.pk_algo()), EXPECTED_ALGO_ID);
+        match sig_packet.mpis() {
+            sequoia_openpgp::crypto::mpi::Signature::MLDSA65_Ed25519 { eddsa, mldsa } => {
+                assert_eq!(eddsa.len(), 64);
+                assert_eq!(mldsa.len(), 3309);
+            }
+            other => panic!("expected MLDSA65_Ed25519 composite MPI, got {other:?}"),
+        }
+        sig_packet
+            .verify_message(&public_reloaded, msg)
+            .expect("HSM-generated composite signature must verify against the generated public key");
+
+        // 4) CONFIRM non-extractability of BOTH private halves (keypair()
+        //    consumed s2's session, so use a fresh session).
+        let s3 = open_session(&e);
+        let base = vec![
+            Attribute::Token(true),
+            Attribute::Private(true),
+            Attribute::Id(id.to_vec()),
+            Attribute::Class(ObjectClass::PRIVATE_KEY),
+        ];
+        let find_one = |kt: cryptoki::object::KeyType| -> ObjectHandle {
+            let mut t = base.clone();
+            t.push(Attribute::KeyType(kt));
+            let h = s3.session.find_objects(&t).expect("find_objects");
+            assert_eq!(h.len(), 1, "expected exactly one {kt:?} private handle");
+            h[0]
+        };
+        for (name, kt) in [
+            ("Ed25519", cryptoki::object::KeyType::EC_EDWARDS),
+            ("ML-DSA-65", cryptoki::object::KeyType::ML_DSA),
+        ] {
+            let h = find_one(kt);
+            // CKA_VALUE must NOT be releasable.
+            let value_released = s3
+                .session
+                .get_attributes(h, &[cryptoki::object::AttributeType::Value])
+                .map(|attrs| {
+                    attrs.iter().any(|a| {
+                        matches!(a, Attribute::Value(v) if !v.is_empty())
+                    })
+                })
+                .unwrap_or(false);
+            assert!(
+                !value_released,
+                "{name} private CKA_VALUE was released — key IS extractable (must not be)"
+            );
+            // And the flags must say so.
+            let mut sensitive = None;
+            let mut extractable = None;
+            for a in s3
+                .session
+                .get_attributes(
+                    h,
+                    &[
+                        cryptoki::object::AttributeType::Sensitive,
+                        cryptoki::object::AttributeType::Extractable,
+                    ],
+                )
+                .expect("get sensitive/extractable")
+            {
+                match a {
+                    Attribute::Sensitive(x) => sensitive = Some(x),
+                    Attribute::Extractable(x) => extractable = Some(x),
+                    _ => {}
+                }
+            }
+            assert_eq!(sensitive, Some(true), "{name} CKA_SENSITIVE must be true");
+            assert_eq!(extractable, Some(false), "{name} CKA_EXTRACTABLE must be false");
+            eprintln!("    {name}: CKA_VALUE refused, SENSITIVE=true, EXTRACTABLE=false");
+        }
+
+        eprintln!(
+            "PASS live_composite generate-in-HSM: in-HSM C_GenerateKeyPair -> reload -> \
+             sign -> verify OK; both private halves NON-EXTRACTABLE (fp {expected_fp})"
+        );
+
+        let _ = s3; // (s3 dropped here)
+        purge_id(&open_session(&e), id);
+    }
+
+    /// TASK 3 (ML-KEM half) — generate the MLKEM768_X25519 key in-HSM, then run
+    /// the full encrypt->decrypt round-trip against it. Covers the X25519 +
+    /// ML-KEM-768 generate-in-HSM path and confirms its private halves are
+    /// non-extractable. The producer encrypts to the in-HSM-generated public key
+    /// (read back from the token); the consumer decrypts through the bridge.
+    #[test]
+    fn live_composite_generate_in_hsm_mlkem_encrypt_decrypt_nonextractable() {
+        let Some(e) = env() else {
+            eprintln!("SKIP live_composite_*: set OP11_MODULE to run against softhsmv3");
+            return;
+        };
+
+        let policy = &StandardPolicy::new();
+        let id = b"\x05composite-genkem";
+
+        // 1) GENERATE the ML-KEM composite in-HSM; get its public key.
+        let s1 = open_session(&e);
+        purge_id(&s1, id);
+        let generated_public = s1
+            .generate_composite_in_hsm(id, CompositeAlgo::MlKem768X25519)
+            .expect("generate ML-KEM composite in HSM");
+        assert_eq!(
+            generated_public.pk_algo(),
+            PublicKeyAlgorithm::MLKEM768_X25519,
+            "generated key must be MLKEM768_X25519"
+        );
+
+        // Confirm non-extractability of both private halves.
+        for (name, kt) in [
+            ("X25519", cryptoki::object::KeyType::EC_MONTGOMERY),
+            ("ML-KEM-768", cryptoki::object::KeyType::ML_KEM),
+        ] {
+            let h = s1
+                .session
+                .find_objects(&[
+                    Attribute::Token(true),
+                    Attribute::Private(true),
+                    Attribute::Id(id.to_vec()),
+                    Attribute::Class(ObjectClass::PRIVATE_KEY),
+                    Attribute::KeyType(kt),
+                ])
+                .expect("find_objects")[0];
+            let released = s1
+                .session
+                .get_attributes(h, &[cryptoki::object::AttributeType::Value])
+                .map(|a| a.iter().any(|x| matches!(x, Attribute::Value(v) if !v.is_empty())))
+                .unwrap_or(false);
+            assert!(!released, "{name} private CKA_VALUE released (must be non-extractable)");
+        }
+
+        // 2) Producer: software-encrypt to the in-HSM-generated public key. Wrap
+        //    it as a transient single-subkey Cert via a minimal recipient.
+        let plaintext = b"pqctoday task3 ML-KEM: encrypt to an in-HSM-generated key.";
+        let mut ciphertext = Vec::new();
+        {
+            use sequoia_openpgp::serialize::stream::{
+                Armorer, Encryptor, LiteralWriter, Message, Recipient,
+            };
+            let recipient = Recipient::new(None, None, &generated_public);
+            let message = Message::new(&mut ciphertext);
+            let message = Armorer::new(message).build().expect("armorer");
+            let message = Encryptor::for_recipients(message, vec![recipient])
+                .build()
+                .expect("encryptor");
+            let mut w = LiteralWriter::new(message).build().expect("literal writer");
+            std::io::copy(&mut &plaintext[..], &mut w).expect("write");
+            w.finalize().expect("finalize");
+        }
+        drop(s1);
+
+        // 3) Consumer: decrypt through the bridge (cert=None -> token reload).
+        let s2 = open_session(&e);
+        let mut recovered = Vec::new();
+        s2.decrypt(id, &mut &ciphertext[..], &mut recovered, None)
+            .expect("bridge decrypt of message to in-HSM-generated ML-KEM key");
+        assert_eq!(recovered.as_slice(), &plaintext[..], "plaintext must match");
+
+        let _ = policy;
+        eprintln!(
+            "PASS live_composite generate-in-HSM ML-KEM: in-HSM C_GenerateKeyPair -> \
+             encrypt -> HSM decrypt -> plaintext MATCH; private halves NON-EXTRACTABLE"
         );
 
         purge_id(&open_session(&e), id);
