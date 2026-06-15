@@ -35,6 +35,11 @@ picky-asn1-der = "0.4"
 picky-asn1-x509 = "0.9"
 rsa = "0.7"
 sha2 = "0.10"
+# ML-KEM composite KEM combiner (plan §4, draft-ietf-openpgp-pqc §4.2.1):
+# SHA3-256 for the KEK derivation and RFC 3394 AES key-unwrap for the ESK.
+sha3 = "0.10"
+aes-kw = { version = "0.2", features = ["std"] }
+aes = "0.8"
 zeroize = "1"
 # Sequoia pqc branch (2.2.0-pqc.1), pinned commit. crypto-openssl is mandatory:
 # the default Nettle backend has no ML-DSA/ML-KEM. See plan §1/§2.1.

@@ -40,7 +40,7 @@ use sequoia_openpgp::packet::Key;
 use sequoia_openpgp::parse::stream::DecryptorBuilder;
 use sequoia_openpgp::parse::Parse;
 use sequoia_openpgp::policy::NullPolicy;
-use sequoia_openpgp::types::Timestamp;
+use sequoia_openpgp::types::{PublicKeyAlgorithm, Timestamp};
 use sequoia_openpgp::{Cert, Fingerprint};
 
 pub(crate) mod decryptor;
@@ -253,45 +253,92 @@ impl Op11Session {
     /// Get an [`Op11KeyPair`] that can perform decryption and signing operations.
     ///
     /// The optional `cert` is used as source of OpenPGP metadata, if available.
+    ///
+    /// For a composite PQC key (`MLDSA65_Ed25519` / `MLKEM768_X25519`) this
+    /// resolves **two** private-key handles sharing the `CKA_ID` — the
+    /// traditional component and the post-quantum component — and returns a
+    /// two-handle [`Op11KeyPair`] (plan §4/§5). For a classical key it resolves
+    /// the single handle as before.
     pub fn keypair(self, id: &[u8], pkt: PgpKeyType, cert: Option<Cert>) -> Result<Op11KeyPair> {
         // get public key for id
         let key = self.key(id, pkt, cert)?;
 
-        let priv_key_template = match pkt {
-            PgpKeyType::Sign | PgpKeyType::Auth => {
-                vec![
-                    Attribute::Token(true),
-                    Attribute::Private(true),
-                    Attribute::Sign(true),
-                    Attribute::Id(id.to_vec()),
-                    Attribute::Class(ObjectClass::PRIVATE_KEY),
-                ]
+        let is_composite = matches!(
+            key.pk_algo(),
+            PublicKeyAlgorithm::MLDSA65_Ed25519
+                | PublicKeyAlgorithm::MLDSA87_Ed448
+                | PublicKeyAlgorithm::MLKEM768_X25519
+                | PublicKeyAlgorithm::MLKEM1024_X448
+        );
+
+        // Base template: all private-key objects for this id.
+        let usage = match pkt {
+            PgpKeyType::Sign | PgpKeyType::Auth => Attribute::Sign(true),
+            // FIXME: ECDH/ML-KEM may need Derive instead of Decrypt; softhsmv3
+            // accepts Decrypt(true) on the ML-KEM/X25519 private objects.
+            PgpKeyType::Encrypt => Attribute::Decrypt(true),
+        };
+        let base_template = vec![
+            Attribute::Token(true),
+            Attribute::Private(true),
+            usage,
+            Attribute::Id(id.to_vec()),
+            Attribute::Class(ObjectClass::PRIVATE_KEY),
+        ];
+
+        if !is_composite {
+            let priv_key_handle = self.session.find_objects(&base_template)?;
+            return if priv_key_handle.len() == 1 {
+                Ok(Op11KeyPair::new(
+                    key,
+                    priv_key_handle[0],
+                    Arc::new(Mutex::new(self.session)),
+                ))
+            } else {
+                Err(anyhow::anyhow!(
+                    "Unexpected number of private keys found: {}",
+                    priv_key_handle.len()
+                ))
+            };
+        }
+
+        // Composite: resolve the two component handles by CKA_KEY_TYPE.
+        let (trad_kt, pqc_kt) = match key.pk_algo() {
+            PublicKeyAlgorithm::MLDSA65_Ed25519 | PublicKeyAlgorithm::MLDSA87_Ed448 => {
+                (cryptoki::object::KeyType::EC_EDWARDS, cryptoki::object::KeyType::ML_DSA)
             }
-            PgpKeyType::Encrypt => {
-                vec![
-                    Attribute::Token(true),
-                    Attribute::Private(true),
-                    Attribute::Decrypt(true), // FIXME: or Derive for ECC?!
-                    Attribute::Id(id.to_vec()),
-                    Attribute::Class(ObjectClass::PRIVATE_KEY),
-                ]
+            PublicKeyAlgorithm::MLKEM768_X25519 | PublicKeyAlgorithm::MLKEM1024_X448 => {
+                // X25519 lives as a CKK_EC_MONTGOMERY object in softhsmv3.
+                (cryptoki::object::KeyType::EC_MONTGOMERY, cryptoki::object::KeyType::ML_KEM)
+            }
+            _ => unreachable!("is_composite implies a composite pk_algo"),
+        };
+
+        let find_one = |kt| -> Result<ObjectHandle> {
+            let mut tmpl = base_template.clone();
+            tmpl.push(Attribute::KeyType(kt));
+            let handles = self.session.find_objects(&tmpl)?;
+            if handles.len() == 1 {
+                Ok(handles[0])
+            } else {
+                Err(anyhow::anyhow!(
+                    "Composite custody: expected exactly one {:?} private key for id {:x?}, found {}",
+                    kt,
+                    id,
+                    handles.len()
+                ))
             }
         };
 
-        let priv_key_handle = self.session.find_objects(&priv_key_template)?;
+        let trad_handle = find_one(trad_kt)?;
+        let pqc_handle = find_one(pqc_kt)?;
 
-        if priv_key_handle.len() == 1 {
-            Ok(Op11KeyPair::new(
-                key,
-                priv_key_handle[0],
-                Arc::new(Mutex::new(self.session)),
-            ))
-        } else {
-            Err(anyhow::anyhow!(
-                "Unexpected number of private keys found: {}",
-                priv_key_handle.len()
-            ))
-        }
+        Ok(Op11KeyPair::new_composite(
+            key,
+            trad_handle,
+            pqc_handle,
+            Arc::new(Mutex::new(self.session)),
+        ))
     }
 
     /// Perform a decryption operation on a card.
@@ -386,13 +433,36 @@ impl Op11Session {
 /// and [`sequoia_openpgp::crypto::Decryptor`], as well as
 /// [`sequoia_openpgp::parse::stream::DecryptionHelper`] and
 /// [`sequoia_openpgp::parse::stream::VerificationHelper`].
+///
+/// # Composite PQC custody (plan §4/§5)
+///
+/// A composite key — `MLDSA65_Ed25519` (sign) or `MLKEM768_X25519` (encrypt) —
+/// is **two** cryptographic objects that live as **two** PKCS#11 private-key
+/// handles sharing one `CKA_ID`:
+///
+/// - `private` holds the *traditional* component (Ed25519 for `MLDSA65_Ed25519`,
+///   X25519 for `MLKEM768_X25519`, or the single RSA/ECDSA/ECDH handle for a
+///   classical key).
+/// - `pqc` holds the *post-quantum* component (ML-DSA-65 / ML-KEM-768), and is
+///   `None` for classical keys.
+///
+/// Producing a composite signature is therefore two `C_Sign` calls (one per
+/// handle) over the same message digest, assembled into a single
+/// `mpi::Signature::MLDSA65_Ed25519 { eddsa, mldsa }` — see `signer.rs`. A
+/// composite decapsulation is an X25519 ECDH op plus an ML-KEM-768 decap,
+/// combined per the draft KEM combiner — see `decryptor.rs`.
 pub struct Op11KeyPair {
     pub public: Key<PublicParts, UnspecifiedRole>,
+    /// Traditional component handle (Ed25519/X25519/RSA/ECDSA/ECDH).
     pub private: ObjectHandle,
+    /// Post-quantum component handle (ML-DSA / ML-KEM). `None` for classical
+    /// keys; `Some` for composite PQC keys (the second custody handle).
+    pub pqc: Option<ObjectHandle>,
     pub session: Arc<Mutex<Session>>,
 }
 
 impl Op11KeyPair {
+    /// Construct a classical (single-handle) keypair.
     pub fn new(
         public: Key<PublicParts, UnspecifiedRole>,
         private: ObjectHandle,
@@ -401,6 +471,23 @@ impl Op11KeyPair {
         Self {
             public,
             private,
+            pqc: None,
+            session,
+        }
+    }
+
+    /// Construct a composite (two-handle) PQC keypair: `private` is the
+    /// traditional component, `pqc` is the post-quantum component.
+    pub fn new_composite(
+        public: Key<PublicParts, UnspecifiedRole>,
+        private: ObjectHandle,
+        pqc: ObjectHandle,
+        session: Arc<Mutex<Session>>,
+    ) -> Self {
+        Self {
+            public,
+            private,
+            pqc: Some(pqc),
             session,
         }
     }
