@@ -1,0 +1,13 @@
+# cosign PQC patch — ML-DSA-65 (FIPS 204) artifact signing
+# Fork of sigstore/cosign. Adds an ML-DSA-65 signer/verifier (cloudflare/circl backend)
+# behind cosign's signature.Signer / signature.Verifier interfaces.
+#
+# STATUS: SCAFFOLD — patch body filled in incrementally; do not apply yet.
+#
+# Upstream pin: TBD (recorded in docs/COSIGN_PQC_FORK.md once cloned)
+# Patch surface (planned):
+#   - new package implementing signature.SignerVerifier for ML-DSA-65 (CIRCL)
+#   - cosign sign-blob / verify-blob wiring to select ML-DSA when key is ML-DSA
+#
+# Finish-plan (HSM-backed via miekg/pkcs11 -> softhsmv3) lives in:
+#   docs/COSIGN_PQC_FORK.md
