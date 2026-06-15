@@ -1,17 +1,22 @@
 # cosign PQC Fork — ML-DSA-65 Artifact Signing (Scenario 34)
 
 strongSwan-pattern fork of `sigstore/cosign`: a minimal diff against a pinned
-upstream tag, validated locally, shipped as a `.patch` (`cosign-pqc.patch`) plus
-this finish plan. No push, no PR, no GitHub repo. Master plan reference:
+upstream tag, shipped as a `.patch` (`cosign-pqc.patch`) plus this finish plan.
+No push, no PR, no GitHub repo. Master plan reference:
 `pqctoday-sandbox/tasks/scenario-claims-fix-plan-06032026.md` §P2-COSIGN.
 
-## 1. Goal — validated slice
+**Status: complete + validated in the production Linux image (§10).** The real
+`cosign sign-blob`/`verify-blob` CLI signs OCI manifests and SBOMs with ML-DSA-65
+(FIPS 204), with the signing key held in **softhsmv3** (HSM-resident,
+non-extractable) via the `mldsa-pkcs11:` scheme, or in-process via CIRCL.
 
-A cosign that signs a blob with **ML-DSA-65 (FIPS 204)** and verifies it, proven
-locally. The slice plugs ML-DSA into cosign's `signature.SignerVerifier`
-interface — the exact seam cosign uses for ECDSA/RSA/Ed25519 — using the
-pure-Go `cloudflare/circl` backend. **HSM-backed signing (softhsmv3 via
-`miekg/pkcs11`)** is the lead finish-plan item and plugs in at the same seam.
+## 1. Goal
+
+A cosign that signs a blob with **ML-DSA-65 (FIPS 204)** and verifies it, on the
+real binary. ML-DSA plugs into cosign's `signature.SignerVerifier` interface —
+the exact seam cosign uses for ECDSA/RSA/Ed25519 — with two backends: pure-Go
+`cloudflare/circl` (file key) and **HSM-resident `softhsmv3` via `miekg/pkcs11`**
+(`C_Sign(CKM_ML_DSA)`, key never leaves the token).
 
 ## 2. Pinned upstream
 
@@ -187,23 +192,44 @@ These are mechanical but touch sigstore-vendored expectations (the keypair
 adapter assumes x509-marshalable keys), which is why the validated slice stops
 at the interface and proves it there rather than fabricating a CLI run.
 
-## 8. Remaining work + effort
+## 8. Remaining work — status
 
-| Item | Scope | Effort |
-|---|---|---|
-| ✅ ML-DSA-65 `SignerVerifier` (CIRCL) + tests | DONE (this patch) | — |
-| CLI wiring: `keys.go` loader branches + `svkeypair.go` ML-DSA adapter + `generate-key-pair` enum | so `cosign sign-blob/verify-blob --key file:…` works on the binary | 2–3 d |
-| HSM path: `miekg/pkcs11` ML-DSA mech (`CKM_ML_DSA`/vendor `0x4036`) in the pkcs11key wrapper → softhsmv3 | **lead item**, HSM-resident keys | 3–5 d |
-| Rekor: ship tlog-disabled now; track upstream PQC support | doc + sandbox README label | 0.5 d (doc only) |
-| Sandbox wiring: Dockerfile.network build swap + tests/34 rewrite | in the sandbox repo (separate task) | 1–2 d |
-| **Total to a working PQC cosign binary in the sandbox** | | **~7–11 d** |
+| Item | Status |
+|---|---|
+| ML-DSA-65 `SignerVerifier` (CIRCL) + tests | ✅ done |
+| CLI wiring: `keys.go` loader branches (`VerifierForKeyRef`/`loadKey`/`PublicKeyPem`) + `svkeypair.go` ML-DSA adapter + `generate-key-pair` (`COSIGN_KEY_ALGORITHM=ml-dsa-65`) | ✅ done — `cosign sign-blob/verify-blob --key file:…` works on the binary |
+| HSM path: `miekg/pkcs11` `CKM_ML_DSA` → softhsmv3 via the in-tree `mldsa-pkcs11:` `signature.SignerVerifier` | ✅ done — key generated non-extractable on the token; sign = `C_Sign` in the HSM |
+| Rekor: tlog-disabled, tracked upstream | ✅ shipped disabled (honest), documented (§5) |
+| Sandbox wiring: `Dockerfile.network` build-from-source (CGO=1) + `tests/34` rewrite | ✅ done; validated in-container (§10) |
+| ML-DSA leaf **subject key from an externally-submitted CSR** | ⬜ blocked: Go can't parse an ML-DSA CSR SPKI (we self-generate keys; HSM keys live on the token) |
+| ML-DSA-44/87 parameter sets via `mldsa-pkcs11:param-set=` | partial: HSM keygen honors the param set; the CIRCL file-key path is ML-DSA-65 only |
 
-Aligns with the master plan's "L" / "8–14 PD" estimate for the P2 Go forks.
+> Note: HSM-backing was implemented as an **in-tree** `mldsa-pkcs11:` SignerVerifier
+> (cosign repo), not by patching the sigstore-vendored `pkcs11key` wrapper — it
+> reuses cosign's `signature.SignerVerifier` seam and avoids a `replace` against
+> `go.step.sm`/`sigstore`. The PKCS#11 ML-DSA codepoint is the **standard**
+> `CKM_ML_DSA = 0x1D` (the earlier `0x4036` vendor codepoint was retired).
 
 ## 9. Provenance / reproducibility
 
-- Throwaway build trees lived in `/tmp/cosign-pqc-build` and `/tmp/cosign-verify`
-  (not committed). Only `cosign-pqc.patch` + this doc are committed in
-  `pqctoday-hsm`.
-- The patch's leading `#` comment header is ignored by `git apply`; the diff
-  body applies cleanly to a pristine `v3.0.6` checkout (verified).
+- Only `cosign-pqc.patch` + this doc are committed in `pqctoday-hsm`.
+- cosign's `.gitignore` has a bare `signature` entry that hides
+  `pkg/signature/mldsa/`; `git apply` ignores `.gitignore`, so the patch lands
+  the files correctly (verified from a pristine `v3.0.6` clone).
+
+## 10. Status — validated in the production Linux image
+
+Built the full `pqc-network` image (`docker compose build`, Debian/aarch64) with
+the cosign block rebuilt from `v3.0.6` + this patch (`CGO_ENABLED=1`). In-container
+`tests/34_test_supply_chain_signing.sh`:
+
+- **PQC:** real forked `cosign v3.0.6` signs the OCI manifest **and** a real
+  `syft` SPDX SBOM with an **HSM-resident ML-DSA-65 key** (softhsmv3 token
+  `pqc-playground`, non-extractable, `C_Sign(CKM_ML_DSA)`); both `verify-blob`
+  → OK. `hsm_backed:true`, `_simulated:false`, `quantum_safe:true`,
+  transparency-log honestly disabled.
+- **Classical:** real cosign ECDSA-P256 sign/verify of manifest + SBOM.
+
+Also verified from a pristine `v3.0.6` clone (apply → cgo+nocgo build → slice
+unit test → file-key and HSM sign/verify, 3309-byte FIPS 204 signatures,
+tamper rejected). No push, no PR, no `pqctoday-org` repo.
