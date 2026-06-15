@@ -28,17 +28,14 @@ impl sequoia_openpgp::crypto::Decryptor for Op11KeyPair {
             sequoia_openpgp::crypto::mpi::Ciphertext::ECDH { ref e, .. } => {
                 let field_sz = 256; // FIXME?
 
-                use cryptoki::mechanism::elliptic_curve::*;
+                use cryptoki::mechanism::elliptic_curve::{Ecdh1DeriveParams, EcKdf};
 
                 let bytes = e.value();
 
-                let params = Ecdh1DeriveParams {
-                    kdf: EcKdfType::NULL,
-                    shared_data_len: 0_usize.try_into()?,
-                    shared_data: std::ptr::null(),
-                    public_data_len: (*bytes).len().try_into()?,
-                    public_data: bytes.as_ptr() as *const std::ffi::c_void,
-                };
+                // cryptoki 0.12: Ecdh1DeriveParams has private fields and is
+                // built via ::new(kdf, public_data). The old struct-literal form
+                // (EcKdfType::NULL + raw c_void pointer) is gone (plan §5).
+                let params = Ecdh1DeriveParams::new(EcKdf::null(), bytes);
 
                 let res = self.session.lock().unwrap().derive_key(
                     &Mechanism::Ecdh1Derive(params),
@@ -75,10 +72,14 @@ impl sequoia_openpgp::crypto::Decryptor for Op11KeyPair {
                         value.insert(0, 0);
                     }
 
+                    // sequoia 2.x: decrypt_unwrap gained a 4th arg, the
+                    // plaintext-length hint (plan §3, error 1). We have no hint,
+                    // so pass None.
                     let ret = sequoia_openpgp::crypto::ecdh::decrypt_unwrap(
                         self.public(),
                         &value.into(),
                         ciphertext,
+                        None,
                     );
                     if let Err(ref e) = ret {
                         println!("Err = {e:?}");
@@ -116,28 +117,32 @@ impl VerificationHelper for Op11KeyPair {
 }
 
 impl DecryptionHelper for Op11KeyPair {
-    fn decrypt<D>(
+    // sequoia 2.x rewrote this trait method (plan §3, errors 2-4):
+    //   - no `<D>` type parameter; the callback is a `&mut dyn FnMut`
+    //   - the callback's first arg is `Option<SymmetricAlgorithm>` (v6 PKESK
+    //     packets do not carry the symmetric algorithm; it comes from the SEIPD)
+    //   - returns `Result<Option<Cert>>` (the recipient Cert), not
+    //     `Result<Option<Fingerprint>>`
+    fn decrypt(
         &mut self,
         pkesks: &[sequoia_openpgp::packet::PKESK],
         _skesks: &[sequoia_openpgp::packet::SKESK],
         sym_algo: Option<SymmetricAlgorithm>,
-        mut decrypt: D,
-    ) -> sequoia_openpgp::Result<Option<sequoia_openpgp::Fingerprint>>
-    where
-        D: FnMut(SymmetricAlgorithm, &SessionKey) -> bool,
-    {
+        decrypt: &mut dyn FnMut(Option<SymmetricAlgorithm>, &SessionKey) -> bool,
+    ) -> sequoia_openpgp::Result<Option<sequoia_openpgp::Cert>> {
         let mut pair = Op11KeyPair {
             public: self.public.clone(),
             session: self.session.clone(),
             private: self.private,
         };
 
+        // PKESK::decrypt now returns Option<(Option<SymmetricAlgorithm>,
+        // SessionKey)>; pass the Option straight through to the callback.
         pkesks[0]
             .decrypt(&mut pair, sym_algo)
             .map(|(algo, session_key)| decrypt(algo, &session_key));
 
-        // XXX: In production code, return the Fingerprint of the
-        // recipient's Cert here
+        // XXX: In production code, return the recipient's Cert here.
         Ok(None)
     }
 }

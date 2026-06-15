@@ -29,11 +29,12 @@
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
-use cryptoki::context::Pkcs11;
+use cryptoki::context::{CInitializeArgs, CInitializeFlags, Pkcs11};
 use cryptoki::error::RvError;
 use cryptoki::object::{Attribute, ObjectClass, ObjectHandle};
 use cryptoki::session::{Session, UserType};
 use cryptoki::slot::Slot;
+use cryptoki::types::AuthPin;
 use sequoia_openpgp::packet::key::{PublicParts, SecretParts, UnspecifiedRole};
 use sequoia_openpgp::packet::Key;
 use sequoia_openpgp::parse::stream::DecryptorBuilder;
@@ -61,11 +62,14 @@ pub struct Op11 {
 impl Op11 {
     /// Open and initialize PKCS #11 context
     pub fn open(module: &str) -> Result<Self> {
-        let mut pkcs11 = Pkcs11::new(module)?;
+        let pkcs11 = Pkcs11::new(module)?;
 
-        let res = pkcs11.initialize(cryptoki::context::CInitializeArgs::OsThreads);
+        // cryptoki 0.12: CInitializeArgs::OsThreads is gone; build args from
+        // the OS-locking flag instead (plan §5 — cryptoki 0.4->0.12 migration).
+        let res = pkcs11.initialize(CInitializeArgs::new(CInitializeFlags::OS_LOCKING_OK));
         match res {
-            Err(cryptoki::error::Error::Pkcs11(RvError::CryptokiAlreadyInitialized)) => {
+            // cryptoki 0.12: Error::Pkcs11 now carries (RvError, Function).
+            Err(cryptoki::error::Error::Pkcs11(RvError::CryptokiAlreadyInitialized, _)) => {
                 // Ignore multiple initializations
 
                 // If a program calls Op11::open more than once, each
@@ -153,13 +157,17 @@ pub struct Op11Session {
 impl Op11Session {
     /// Log in as UserType::User
     pub fn login(&self, pin: &str) -> Result<()> {
-        self.session.login(UserType::User, Some(pin))?;
+        // cryptoki 0.12: login takes Option<&AuthPin> (a SecretString), not
+        // Option<&str> (plan §5 — cryptoki migration).
+        self.session
+            .login(UserType::User, Some(&AuthPin::new(pin.to_string().into())))?;
         Ok(())
     }
 
     /// Log in as UserType::So
     pub fn login_so(&self, pin: &str) -> Result<()> {
-        self.session.login(UserType::So, Some(pin))?;
+        self.session
+            .login(UserType::So, Some(&AuthPin::new(pin.to_string().into())))?;
         Ok(())
     }
 
@@ -212,7 +220,9 @@ impl Op11Session {
         } else {
             let serial = x509_cert.tbs_certificate.serial_number.as_slice();
             let serial = &serial[serial.len() - 20..]; // FIXME
-            Fingerprint::from_bytes(serial)
+            // sequoia 2.x: Fingerprint::from_bytes now takes a version (u8) and
+            // returns Result. A 20-byte serial is a v4 fingerprint (plan §3).
+            Fingerprint::from_bytes(4, serial)?
         };
 
         let k4 = if let Ok(rsa_pub) = x509cert.rsa_public_key_data() {
@@ -297,7 +307,13 @@ impl Op11Session {
         let op11kp = self.keypair(id, PgpKeyType::Encrypt, cert)?;
 
         // Now, create a decryptor with a helper using the given Certs.
-        let policy = &NullPolicy::new();
+        // sequoia 2.x hardened NullPolicy::new() to `unsafe` because a null
+        // policy accepts every algorithm/parameter unconditionally. That is
+        // acceptable here: this is an HSM-custody decrypt path where the caller
+        // supplies the message and the key handle out-of-band, and the bridge
+        // is not making trust decisions about third-party material (plan §3).
+        let policy = unsafe { NullPolicy::new() };
+        let policy = &policy;
         let mut decryptor =
             DecryptorBuilder::from_reader(input)?.with_policy(policy, None, op11kp)?;
 
