@@ -1,9 +1,52 @@
 # softhsmrustv3 — native PKCS#11 v3.2 C-ABI compliance plan (166 → 315)
 
 **Branch:** `feat/cabi-native-64bit` (isolated; `main`/validated engine untouched).
-**State:** `f5fe09a` (templates, 28→139) + `52040fc` (mech params, 139→166, crash fixed).
 **Target:** `p11_v32_compliance_test -c all` → **315 / 0 / 0** on native, with the
 1452 KMIP interop + KAT replay staying **15/15 green** as the merge gate.
+
+## FINAL STATUS — 294 PASS / 3 FAIL / 10 SKIP (was 28 PASS)
+
+All width-fix and feature groups landed, each gated (interop 8+2+5 = 15/15, no
+crash) and committed on `feat/cabi-native-64bit`:
+
+| Commit | What | PASS |
+|---|---|---|
+| (earlier) | templates u32→usize | 28→139 |
+| (earlier) | mech params, crash fixed | 139→166 |
+| `3683125` | Group A — nested param structs | 166→169 |
+| `000e5f5` | Group C — keytype/SPKI/UUID | 169→177 |
+| `376d131` | Group D.1 — async-reject + CKA_ID find (store_ulong width) | 177→182 |
+| `c68ecb0` | Group D.2 — SHA3-384-RSA + RSA-PSS param width | 182→190 |
+| `77a852c` | Group D.3 — dual-function ops | 190→204 |
+| `f59407f` | Group D.4 — ML-DSA/SLH-DSA/EdDSA multipart | 204→220 |
+| `3afebbc` | Group B — X25519/X448 ECDH derive | 220→226 |
+| `8cce381` | GCM IV + SP800-108 (CMAC PRF) + generic-secret KCV (SHA-1) | 226→235 |
+| `3ca83b9` | AES-CBC key wrap + ChaCha20 keygen | 235→239 |
+| `8d7d6a4` | RIPEMD-160 digest + HMAC | 239→244 |
+| `9c3be35` | export v3.2 fns + auth-wrap width + GSVF | 244→291 |
+| `7c3b010` | V4 keytype check for HSS/XMSS/XMSSMT | 291→294 |
+
+### Remaining 3 FAIL — intentionally deferred (stateful HBS)
+`CKA_HSS_KEYS_REMAINING`, `HSS_private_roundtrip`, `V8_XMSSMT_keygen` all need
+stateful hash-based-signature keygen+sign (HSS/LMS RFC 8554, XMSS^MT RFC 8391).
+This is a separate, security-critical effort: each one-time leaf key must be
+consumed exactly once and the remaining-key state persisted — getting it wrong
+silently destroys the signature scheme's security. Deferred per the original
+Group E recommendation; not attempted to avoid risking the validated engine.
+
+### Remaining 10 SKIP
+HSS-dependent policy tests (Boolean_Policy_Violation, Extraction_Constraint,
+Signature_*; gated on the deferred HSS keygen), v3.0 validation-authority APIs,
+C_MessageSignInit (CKF_MESSAGE_SIGN cancel sub-test), and username-based
+C_LoginUser (returns CKR_FUNCTION_NOT_SUPPORTED by design — no username auth).
+
+**Merge note:** nothing is merged to `main`. The user runs their full validation
+before merge. The `rust/` tree in the validated checkout stayed at 0 changes.
+
+---
+
+## Original plan (history)
+**State:** `f5fe09a` (templates, 28→139) + `52040fc` (mech params, 139→166, crash fixed).
 
 ## Method (unchanged — proven)
 - **Width fix pattern:** marshaled blobs/structs are 32-bit (WASM) shaped; widen
