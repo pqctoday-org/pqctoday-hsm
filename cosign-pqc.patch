@@ -197,7 +197,7 @@ index eee7d2e..fa90161 100644
  	if err != nil {
  		return "", err
 diff --git a/pkg/signature/keys.go b/pkg/signature/keys.go
-index 3b7879a..aea88fe 100644
+index 3b7879a..cd40c67 100644
 --- a/pkg/signature/keys.go
 +++ b/pkg/signature/keys.go
 @@ -27,6 +27,7 @@ import (
@@ -208,7 +208,19 @@ index 3b7879a..aea88fe 100644
  	"github.com/sigstore/sigstore/pkg/cryptoutils"
  	"github.com/sigstore/sigstore/pkg/signature"
  
-@@ -63,6 +64,12 @@ func VerifierForKeyRef(ctx context.Context, keyRef string, hashAlgorithm crypto.
+@@ -41,6 +42,11 @@ func LoadPublicKey(ctx context.Context, keyRef string) (verifier signature.Verif
+ // VerifierForKeyRef parses the given keyRef, loads the key and returns an appropriate
+ // verifier using the provided hash algorithm
+ func VerifierForKeyRef(ctx context.Context, keyRef string, hashAlgorithm crypto.Hash) (verifier signature.Verifier, err error) {
++	// PQC: HSM-resident ML-DSA-65 key (softhsmv3 over PKCS#11). Verify locally
++	// against the token's exported public key.
++	if strings.HasPrefix(keyRef, mldsa.PKCS11Scheme) {
++		return mldsa.NewPKCS11SignerVerifier(keyRef, false)
++	}
+ 	// The key could be plaintext, in a file, at a URL, or in KMS.
+ 	var perr *kms.ProviderNotFoundError
+ 	kmsKey, err := kms.Get(ctx, keyRef, hashAlgorithm)
+@@ -63,6 +69,12 @@ func VerifierForKeyRef(ctx context.Context, keyRef string, hashAlgorithm crypto.
  		return nil, err
  	}
  
@@ -221,7 +233,7 @@ index 3b7879a..aea88fe 100644
  	// PEM encoded file.
  	pubKey, err := cryptoutils.UnmarshalPEMToPublicKey(raw)
  	if err != nil {
-@@ -77,6 +84,11 @@ func loadKey(keyPath string, pf cosign.PassFunc, defaultLoadOptions *[]signature
+@@ -77,6 +89,11 @@ func loadKey(keyPath string, pf cosign.PassFunc, defaultLoadOptions *[]signature
  	if err != nil {
  		return nil, err
  	}
@@ -233,7 +245,19 @@ index 3b7879a..aea88fe 100644
  	pass := []byte{}
  	if pf != nil {
  		pass, err = pf(false)
-@@ -231,5 +243,9 @@ func PublicKeyPem(key signature.PublicKeyProvider, pkOpts ...signature.PublicKey
+@@ -102,6 +119,11 @@ func SignerFromKeyRef(ctx context.Context, keyRef string, pf cosign.PassFunc) (s
+ 
+ func SignerVerifierFromKeyRef(ctx context.Context, keyRef string, pf cosign.PassFunc, defaultLoadOptions *[]signature.LoadOption) (signature.SignerVerifier, error) {
+ 	switch {
++	case strings.HasPrefix(keyRef, mldsa.PKCS11Scheme):
++		// PQC: HSM-resident ML-DSA-65 key (softhsmv3). The private key never
++		// leaves the token; signing is C_Sign(CKM_ML_DSA). Generated on the
++		// token (non-extractable) if absent.
++		return mldsa.NewPKCS11SignerVerifier(keyRef, true)
+ 	case strings.HasPrefix(keyRef, pkcs11key.ReferenceScheme):
+ 		pkcs11UriConfig := pkcs11key.NewPkcs11UriConfig()
+ 		err := pkcs11UriConfig.Parse(keyRef)
+@@ -231,5 +253,9 @@ func PublicKeyPem(key signature.PublicKeyProvider, pkOpts ...signature.PublicKey
  	if err != nil {
  		return nil, err
  	}
@@ -586,4 +610,403 @@ index 0000000..197e7ba
 +		t.Fatalf("VerifySignature (loaded pub key): %v", err)
 +	}
 +	t.Log("verify OK: PEM marshal/load round-trip, pub-only key verified signer's signature")
++}
+diff --git a/pkg/signature/mldsa/pkcs11.go b/pkg/signature/mldsa/pkcs11.go
+new file mode 100644
+index 0000000..f085d46
+--- /dev/null
++++ b/pkg/signature/mldsa/pkcs11.go
+@@ -0,0 +1,330 @@
++//go:build cgo
++
++// Copyright 2026 The PQC Today Authors.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++// HSM-backed ML-DSA-65 signing for cosign.
++//
++// PKCS11SignerVerifier is a signature.SignerVerifier whose ML-DSA-65 private key
++// lives in (and never leaves) a PKCS#11 token — softhsmv3 in the pqctoday
++// platform. SignMessage drives C_Sign(CKM_ML_DSA = 0x1D) inside the module;
++// the key is generated CKA_SENSITIVE + CKA_EXTRACTABLE=false. It plugs into the
++// exact same signature.SignerVerifier seam as the in-process CIRCL backend, so
++// `cosign sign-blob/verify-blob` work unchanged. Verification is a local CIRCL
++// check against the token's exported public key.
++//
++// Key URI (scheme PKCS11Scheme):
++//
++//	mldsa-pkcs11:module-path=/usr/local/lib/softhsm/libsofthsmv3.so;token=pqc-playground;object=oci-signer;param-set=65?pin-value=1234
++
++package mldsa
++
++import (
++	"crypto"
++	"errors"
++	"fmt"
++	"io"
++	"strings"
++
++	"github.com/cloudflare/circl/sign/mldsa/mldsa65"
++	"github.com/miekg/pkcs11"
++	"github.com/sigstore/sigstore/pkg/signature"
++)
++
++// PKCS11Scheme is the cosign key-ref scheme for an HSM-resident ML-DSA-65 key.
++const PKCS11Scheme = "mldsa-pkcs11:"
++
++// PKCS#11 v3.2 PQC codepoints (from the normative pkcs11t.h; miekg/pkcs11
++// predates v3.2). Matches pqctoday-hsm/src/lib/pkcs11/pkcs11t.h.
++const (
++	ckmMLDSAKeyPairGen = 0x0000001c // CKM_ML_DSA_KEY_PAIR_GEN
++	ckmMLDSA           = 0x0000001d // CKM_ML_DSA
++	ckkMLDSA           = 0x0000004a // CKK_ML_DSA
++	ckaParameterSet    = 0x0000061d // CKA_PARAMETER_SET
++	ckpMLDSA44         = 0x00000001
++	ckpMLDSA65         = 0x00000002
++	ckpMLDSA87         = 0x00000003
++)
++
++// PKCS11SignerVerifier signs/verifies with an ML-DSA-65 key held in a PKCS#11 token.
++type PKCS11SignerVerifier struct {
++	ctx     *pkcs11.Ctx
++	session pkcs11.SessionHandle
++	priv    pkcs11.ObjectHandle // 0 for verify-only
++	pub     *mldsa65.PublicKey
++}
++
++var (
++	_ signature.Signer         = (*PKCS11SignerVerifier)(nil)
++	_ signature.Verifier       = (*PKCS11SignerVerifier)(nil)
++	_ signature.SignerVerifier = (*PKCS11SignerVerifier)(nil)
++)
++
++// PublicKey returns the ML-DSA-65 public key (a *mldsa65.PublicKey), which is
++// what cosign's keypair adapter / PublicKeyPem branch recognize.
++func (s *PKCS11SignerVerifier) PublicKey(_ ...signature.PublicKeyOption) (crypto.PublicKey, error) {
++	if s.pub == nil {
++		return nil, errors.New("ml-dsa-65 pkcs11: no public key")
++	}
++	return s.pub, nil
++}
++
++// SignMessage produces a pure ML-DSA-65 signature (no pre-hash, empty context)
++// over the whole message via C_Sign(CKM_ML_DSA) inside the token.
++func (s *PKCS11SignerVerifier) SignMessage(message io.Reader, _ ...signature.SignOption) ([]byte, error) {
++	if s.priv == 0 {
++		return nil, errors.New("ml-dsa-65 pkcs11: no private key for signing")
++	}
++	msg, err := io.ReadAll(message)
++	if err != nil {
++		return nil, fmt.Errorf("ml-dsa-65 pkcs11: reading message: %w", err)
++	}
++	mech := []*pkcs11.Mechanism{pkcs11.NewMechanism(ckmMLDSA, nil)}
++	if err := s.ctx.SignInit(s.session, mech, s.priv); err != nil {
++		return nil, fmt.Errorf("C_SignInit(CKM_ML_DSA): %w", err)
++	}
++	sig, err := s.ctx.Sign(s.session, msg)
++	if err != nil {
++		return nil, fmt.Errorf("C_Sign(CKM_ML_DSA): %w", err)
++	}
++	return sig, nil
++}
++
++// VerifySignature verifies the FIPS 204 signature locally with CIRCL against the
++// token's exported public key (empty context), matching the in-process backend.
++func (s *PKCS11SignerVerifier) VerifySignature(sig, message io.Reader, _ ...signature.VerifyOption) error {
++	if s.pub == nil {
++		return errors.New("ml-dsa-65 pkcs11: no public key for verification")
++	}
++	sigBytes, err := io.ReadAll(sig)
++	if err != nil {
++		return fmt.Errorf("ml-dsa-65 pkcs11: reading signature: %w", err)
++	}
++	msg, err := io.ReadAll(message)
++	if err != nil {
++		return fmt.Errorf("ml-dsa-65 pkcs11: reading message: %w", err)
++	}
++	if !mldsa65.Verify(s.pub, msg, emptyContext, sigBytes) {
++		return errors.New("ml-dsa-65: signature verification failed")
++	}
++	return nil
++}
++
++// Close logs out and tears down the module.
++func (s *PKCS11SignerVerifier) Close() {
++	if s.ctx == nil {
++		return
++	}
++	_ = s.ctx.Logout(s.session)
++	_ = s.ctx.CloseSession(s.session)
++	_ = s.ctx.Finalize()
++	s.ctx.Destroy()
++}
++
++type pkcs11Config struct {
++	module, token, pin, object string
++	ckpParamSet                uint
++}
++
++// parsePKCS11URI parses an mldsa-pkcs11: key URI into its components, applying
++// the pqctoday-sandbox softhsmv3 defaults.
++func parsePKCS11URI(rawURI string) (pkcs11Config, error) {
++	c := pkcs11Config{
++		module:      "/usr/local/lib/softhsm/libsofthsmv3.so",
++		token:       "pqc-playground",
++		pin:         "1234",
++		object:      "cosign-mldsa",
++		ckpParamSet: ckpMLDSA65,
++	}
++	body := strings.TrimPrefix(rawURI, PKCS11Scheme)
++	attrs, query := body, ""
++	if i := strings.IndexByte(body, '?'); i >= 0 {
++		attrs, query = body[:i], body[i+1:]
++	}
++	for _, kv := range strings.Split(attrs, ";") {
++		k, v, ok := strings.Cut(kv, "=")
++		if !ok {
++			continue
++		}
++		switch strings.TrimSpace(k) {
++		case "module-path", "module":
++			c.module = v
++		case "token":
++			c.token = v
++		case "object", "id", "label":
++			c.object = v
++		case "param-set":
++			switch {
++			case strings.Contains(v, "44"):
++				c.ckpParamSet = ckpMLDSA44
++			case strings.Contains(v, "87"):
++				c.ckpParamSet = ckpMLDSA87
++			default:
++				c.ckpParamSet = ckpMLDSA65
++			}
++		}
++	}
++	for _, kv := range strings.Split(query, "&") {
++		if k, v, ok := strings.Cut(kv, "="); ok && (k == "pin-value" || k == "pin") {
++			c.pin = v
++		}
++	}
++	return c, nil
++}
++
++// NewPKCS11SignerVerifier opens the token named in rawURI and returns a
++// SignerVerifier. When needPrivate is true the ML-DSA-65 key pair is generated
++// on the token (non-extractable) if absent; otherwise only the public key is
++// loaded (verify-only).
++func NewPKCS11SignerVerifier(rawURI string, needPrivate bool) (sv *PKCS11SignerVerifier, err error) {
++	c, err := parsePKCS11URI(rawURI)
++	if err != nil {
++		return nil, err
++	}
++	ctx := pkcs11.New(c.module)
++	if ctx == nil {
++		return nil, fmt.Errorf("pkcs11: cannot load module %q", c.module)
++	}
++	if err = ctx.Initialize(); err != nil {
++		if pe, ok := err.(pkcs11.Error); !ok || pe != pkcs11.CKR_CRYPTOKI_ALREADY_INITIALIZED {
++			ctx.Destroy()
++			return nil, fmt.Errorf("C_Initialize: %w", err)
++		}
++		err = nil
++	}
++	defer func() {
++		if err != nil && ctx != nil {
++			_ = ctx.Finalize()
++			ctx.Destroy()
++		}
++	}()
++
++	slot, err := findSlotByToken(ctx, c.token)
++	if err != nil {
++		return nil, err
++	}
++	session, err := ctx.OpenSession(slot, pkcs11.CKF_SERIAL_SESSION|pkcs11.CKF_RW_SESSION)
++	if err != nil {
++		return nil, fmt.Errorf("C_OpenSession: %w", err)
++	}
++	if err = ctx.Login(session, pkcs11.CKU_USER, c.pin); err != nil {
++		return nil, fmt.Errorf("C_Login: %w", err)
++	}
++
++	var priv pkcs11.ObjectHandle
++	pubObj, okPub, err := findObject(ctx, session, pkcs11.CKO_PUBLIC_KEY, c.object)
++	if err != nil {
++		return nil, err
++	}
++	if needPrivate {
++		var okPriv bool
++		priv, okPriv, err = findObject(ctx, session, pkcs11.CKO_PRIVATE_KEY, c.object)
++		if err != nil {
++			return nil, err
++		}
++		if !okPriv || !okPub {
++			priv, pubObj, err = generateKeyPair(ctx, session, c.object, c.ckpParamSet)
++			if err != nil {
++				return nil, err
++			}
++		}
++	} else if !okPub {
++		return nil, fmt.Errorf("pkcs11: public key %q not found on token %q", c.object, c.token)
++	}
++
++	rawPub, err := getAttrValue(ctx, session, pubObj, pkcs11.CKA_VALUE)
++	if err != nil {
++		return nil, fmt.Errorf("read ML-DSA public key (CKA_VALUE): %w", err)
++	}
++	pub := new(mldsa65.PublicKey)
++	if err = pub.UnmarshalBinary(rawPub); err != nil {
++		return nil, fmt.Errorf("decode ML-DSA-65 public key (%d bytes): %w", len(rawPub), err)
++	}
++
++	return &PKCS11SignerVerifier{ctx: ctx, session: session, priv: priv, pub: pub}, nil
++}
++
++func findSlotByToken(ctx *pkcs11.Ctx, tokenLabel string) (uint, error) {
++	slots, err := ctx.GetSlotList(true)
++	if err != nil {
++		return 0, fmt.Errorf("C_GetSlotList: %w", err)
++	}
++	for _, s := range slots {
++		ti, err := ctx.GetTokenInfo(s)
++		if err != nil {
++			continue
++		}
++		if strings.TrimRight(ti.Label, " \x00") == tokenLabel {
++			return s, nil
++		}
++	}
++	return 0, fmt.Errorf("pkcs11: no token labelled %q", tokenLabel)
++}
++
++func findObject(ctx *pkcs11.Ctx, session pkcs11.SessionHandle, class uint, label string) (pkcs11.ObjectHandle, bool, error) {
++	tmpl := []*pkcs11.Attribute{
++		pkcs11.NewAttribute(pkcs11.CKA_CLASS, class),
++		pkcs11.NewAttribute(pkcs11.CKA_LABEL, label),
++	}
++	if err := ctx.FindObjectsInit(session, tmpl); err != nil {
++		return 0, false, fmt.Errorf("C_FindObjectsInit: %w", err)
++	}
++	objs, _, err := ctx.FindObjects(session, 1)
++	_ = ctx.FindObjectsFinal(session)
++	if err != nil {
++		return 0, false, fmt.Errorf("C_FindObjects: %w", err)
++	}
++	if len(objs) == 0 {
++		return 0, false, nil
++	}
++	return objs[0], true, nil
++}
++
++func generateKeyPair(ctx *pkcs11.Ctx, session pkcs11.SessionHandle, label string, ckpParamSet uint) (priv, pub pkcs11.ObjectHandle, err error) {
++	pubTmpl := []*pkcs11.Attribute{
++		pkcs11.NewAttribute(pkcs11.CKA_KEY_TYPE, uint(ckkMLDSA)),
++		pkcs11.NewAttribute(uint(ckaParameterSet), ckpParamSet),
++		pkcs11.NewAttribute(pkcs11.CKA_TOKEN, true),
++		pkcs11.NewAttribute(pkcs11.CKA_PRIVATE, false),
++		pkcs11.NewAttribute(pkcs11.CKA_VERIFY, true),
++		pkcs11.NewAttribute(pkcs11.CKA_LABEL, label),
++	}
++	privTmpl := []*pkcs11.Attribute{
++		pkcs11.NewAttribute(pkcs11.CKA_KEY_TYPE, uint(ckkMLDSA)),
++		pkcs11.NewAttribute(uint(ckaParameterSet), ckpParamSet),
++		pkcs11.NewAttribute(pkcs11.CKA_TOKEN, true),
++		pkcs11.NewAttribute(pkcs11.CKA_PRIVATE, true),
++		pkcs11.NewAttribute(pkcs11.CKA_SIGN, true),
++		pkcs11.NewAttribute(pkcs11.CKA_SENSITIVE, true),
++		pkcs11.NewAttribute(pkcs11.CKA_EXTRACTABLE, false),
++		pkcs11.NewAttribute(pkcs11.CKA_LABEL, label),
++	}
++	mech := []*pkcs11.Mechanism{pkcs11.NewMechanism(ckmMLDSAKeyPairGen, nil)}
++	pub, priv, err = ctx.GenerateKeyPair(session, mech, pubTmpl, privTmpl)
++	if err != nil {
++		return 0, 0, fmt.Errorf("C_GenerateKeyPair(CKM_ML_DSA_KEY_PAIR_GEN): %w", err)
++	}
++	return priv, pub, nil
++}
++
++func getAttrValue(ctx *pkcs11.Ctx, session pkcs11.SessionHandle, obj pkcs11.ObjectHandle, attr uint) ([]byte, error) {
++	res, err := ctx.GetAttributeValue(session, obj, []*pkcs11.Attribute{pkcs11.NewAttribute(attr, nil)})
++	if err != nil {
++		return nil, err
++	}
++	if len(res) == 0 {
++		return nil, fmt.Errorf("attribute 0x%x not present", attr)
++	}
++	return res[0].Value, nil
++}
+diff --git a/pkg/signature/mldsa/pkcs11_nocgo.go b/pkg/signature/mldsa/pkcs11_nocgo.go
+new file mode 100644
+index 0000000..36c2f2b
+--- /dev/null
++++ b/pkg/signature/mldsa/pkcs11_nocgo.go
+@@ -0,0 +1,57 @@
++//go:build !cgo
++
++// Copyright 2026 The PQC Today Authors.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++// Non-cgo stub for the HSM-backed ML-DSA-65 signer. miekg/pkcs11 needs cgo
++// (it dlopen()s the PKCS#11 module), so a CGO_ENABLED=0 build cannot include
++// the real PKCS11SignerVerifier. The in-process CIRCL backend is unaffected.
++
++package mldsa
++
++import (
++	"crypto"
++	"errors"
++	"io"
++
++	"github.com/sigstore/sigstore/pkg/signature"
++)
++
++// PKCS11Scheme is the cosign key-ref scheme for an HSM-resident ML-DSA-65 key.
++const PKCS11Scheme = "mldsa-pkcs11:"
++
++var errNoCGO = errors.New("ml-dsa-65 pkcs11: HSM signing requires a cgo build (CGO_ENABLED=1)")
++
++// PKCS11SignerVerifier is a build-time stub; the real implementation lives in
++// pkcs11.go behind the cgo build tag.
++type PKCS11SignerVerifier struct{}
++
++func (s *PKCS11SignerVerifier) PublicKey(_ ...signature.PublicKeyOption) (crypto.PublicKey, error) {
++	return nil, errNoCGO
++}
++
++func (s *PKCS11SignerVerifier) SignMessage(io.Reader, ...signature.SignOption) ([]byte, error) {
++	return nil, errNoCGO
++}
++
++func (s *PKCS11SignerVerifier) VerifySignature(_, _ io.Reader, _ ...signature.VerifyOption) error {
++	return errNoCGO
++}
++
++func (s *PKCS11SignerVerifier) Close() {}
++
++// NewPKCS11SignerVerifier always errors in a non-cgo build.
++func NewPKCS11SignerVerifier(string, bool) (*PKCS11SignerVerifier, error) {
++	return nil, errNoCGO
 +}
