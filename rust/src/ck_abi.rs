@@ -1118,6 +1118,7 @@ pub unsafe extern "C" fn C_WaitForSlotEvent(
 // C_GetInterfaceList / C_GetInterface — defined below with the statics
 // (exported symbols).
 
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn C_LoginUser(
     hSession: CK_SESSION_HANDLE,
     userType: CK_USER_TYPE,
@@ -1133,6 +1134,7 @@ pub unsafe extern "C" fn C_LoginUser(
     rv(crate::ffi::C_LoginUser(h, ut, pPin, pl, pUsername, ul))
 }
 
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn C_SessionCancel(hSession: CK_SESSION_HANDLE, flags: CK_FLAGS) -> CK_RV {
     let h = narrow_or!(hSession, CKR_SESSION_HANDLE_INVALID);
     let fl = narrow_or!(flags, CKR_ARGUMENTS_BAD);
@@ -1313,6 +1315,7 @@ shim_msg_verify!(C_VerifyMessage, C_VerifyMessageNext);
 // Shims — PKCS#11 v3.2 additions (12 functions)
 // ─────────────────────────────────────────────────────────────────────────
 
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn C_EncapsulateKey(
     hSession: CK_SESSION_HANDLE,
     pMechanism: CK_MECHANISM_PTR,
@@ -1348,6 +1351,7 @@ pub unsafe extern "C" fn C_EncapsulateKey(
     code
 }
 
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn C_DecapsulateKey(
     hSession: CK_SESSION_HANDLE,
     pMechanism: CK_MECHANISM_PTR,
@@ -1400,6 +1404,7 @@ pub unsafe extern "C" fn C_VerifySignatureInit(
 shim_sess_buf!(C_VerifySignature, C_VerifySignatureUpdate);
 shim_session_only!(C_VerifySignatureFinal);
 
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn C_GetSessionValidationFlags(
     hSession: CK_SESSION_HANDLE,
     flagsType: CK_SESSION_VALIDATION_FLAGS_TYPE,
@@ -1415,6 +1420,7 @@ pub unsafe extern "C" fn C_GetSessionValidationFlags(
     rv(code)
 }
 
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn C_AsyncComplete(
     hSession: CK_SESSION_HANDLE,
     pFunctionName: CK_UTF8CHAR_PTR,
@@ -1425,6 +1431,7 @@ pub unsafe extern "C" fn C_AsyncComplete(
     rv(crate::ffi::C_AsyncComplete(h, pFunctionName, pResult as *mut u8))
 }
 
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn C_AsyncGetID(
     hSession: CK_SESSION_HANDLE,
     pFunctionName: CK_UTF8CHAR_PTR,
@@ -1439,6 +1446,7 @@ pub unsafe extern "C" fn C_AsyncGetID(
     rv(code)
 }
 
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn C_AsyncJoin(
     hSession: CK_SESSION_HANDLE,
     pFunctionName: CK_UTF8CHAR_PTR,
@@ -1452,6 +1460,7 @@ pub unsafe extern "C" fn C_AsyncJoin(
     rv(crate::ffi::C_AsyncJoin(h, pFunctionName, id, pData, dl))
 }
 
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn C_WrapKeyAuthenticated(
     hSession: CK_SESSION_HANDLE,
     pMechanism: CK_MECHANISM_PTR,
@@ -1481,6 +1490,7 @@ pub unsafe extern "C" fn C_WrapKeyAuthenticated(
     })
 }
 
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn C_UnwrapKeyAuthenticated(
     hSession: CK_SESSION_HANDLE,
     pMechanism: CK_MECHANISM_PTR,

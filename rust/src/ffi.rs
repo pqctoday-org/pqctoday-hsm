@@ -6585,9 +6585,12 @@ pub fn C_WrapKeyAuthenticated(
         if p_param.is_null() || ul_param_len < 20 {
             return CKR_ARGUMENTS_BAD;
         }
-        let gcm = p_param as *const u32;
-        let iv_ptr = *gcm as usize as *const u8;
-        let iv_len = *gcm.add(1) as usize;
+        // CK_GCM_PARAMS at native width — pIv, ulIvLen are CK_ULONG/pointer
+        // sized; reading them as u32 truncated pIv and put garbage in ulIvLen
+        // on 64-bit, so a valid 12-byte IV was rejected (RV=113).
+        let gcm = p_param as *const usize;
+        let iv_ptr = *gcm as *const u8;
+        let iv_len = *gcm.add(1);
         // PKCS#11 v3.2 §6.27.7 / SP 800-38D §8 — IV required and unique per
         // (key, encryption); never substitute a fixed zero nonce.
         if iv_ptr.is_null() || iv_len == 0 {
@@ -6716,9 +6719,12 @@ pub fn C_UnwrapKeyAuthenticated(
         if p_param.is_null() || ul_param_len < 20 {
             return CKR_ARGUMENTS_BAD;
         }
-        let gcm = p_param as *const u32;
-        let iv_ptr = *gcm as usize as *const u8;
-        let iv_len = *gcm.add(1) as usize;
+        // CK_GCM_PARAMS at native width — pIv, ulIvLen are CK_ULONG/pointer
+        // sized; reading them as u32 truncated pIv and put garbage in ulIvLen
+        // on 64-bit, so a valid 12-byte IV was rejected (RV=113).
+        let gcm = p_param as *const usize;
+        let iv_ptr = *gcm as *const u8;
+        let iv_len = *gcm.add(1);
         // PKCS#11 v3.2 §6.27.7 / SP 800-38D §8 — IV required and unique.
         if iv_ptr.is_null() || iv_len == 0 {
             return CKR_MECHANISM_PARAM_INVALID;
@@ -7270,9 +7276,22 @@ pub fn C_DecryptUpdate(
 // ── PKCS#11 v3.2 Asynchronous and Session Flag Stubs ────────────────────────
 
 #[wasm_bindgen(js_name = _C_GetSessionValidationFlags)]
-pub fn C_GetSessionValidationFlags(_h_session: u32, _type: u32, _p_flags: *mut u32) -> u32 {
+pub fn C_GetSessionValidationFlags(h_session: u32, type_: u32, p_flags: *mut u32) -> u32 {
     require_init!();
-    CKR_FUNCTION_NOT_SUPPORTED
+    require_session!(h_session);
+    if p_flags.is_null() {
+        return CKR_ARGUMENTS_BAD;
+    }
+    // PKCS#11 v3.2 §5.6.9 — the only defined type is CKS_LAST_VALIDATION_OK (1).
+    if type_ != 1 {
+        return CKR_ARGUMENTS_BAD;
+    }
+    // This token performs no FIPS/validation-authority checks, so the
+    // validation-flags set is empty.
+    unsafe {
+        *p_flags = 0;
+    }
+    CKR_OK
 }
 
 #[wasm_bindgen(js_name = _C_AsyncComplete)]
