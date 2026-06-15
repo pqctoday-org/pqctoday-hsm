@@ -337,6 +337,9 @@ pub const CKM_AES_KEY_WRAP_KWP: u32 = 0x0000_210B;
 /// `CKM_CHACHA20` — IETF ChaCha20 stream cipher. 32-byte key, 12-byte
 /// nonce. Distinct from the older 8-byte-nonce variant.
 pub const CKM_CHACHA20: u32 = 0x0000_1226;
+pub const CKM_CHACHA20_KEY_GEN: u32 = 0x0000_1225;
+// CKK_CHACHA20 key type (§6.20) — a 256-bit ChaCha20 stream-cipher key.
+pub const CKK_CHACHA20: u32 = 0x0000_0033;
 /// `CKM_CHACHA20_POLY1305` — IETF ChaCha20-Poly1305 AEAD (RFC 8439).
 /// 32-byte key, 12-byte nonce, 16-byte tag.
 pub const CKM_CHACHA20_POLY1305: u32 = 0x0000_4021;
@@ -514,6 +517,7 @@ pub const SUPPORTED_MECHS: &[u32] = &[
     // ChaCha20 stream cipher + ChaCha20-Poly1305 AEAD (S1 — were implemented
     // but not advertised; values verified against pkcs11t.h 0x1226 / 0x4021)
     CKM_CHACHA20,
+    CKM_CHACHA20_KEY_GEN,
     CKM_CHACHA20_POLY1305,
     // Key derivation
     CKM_PKCS5_PBKD2,

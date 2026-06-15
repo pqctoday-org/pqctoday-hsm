@@ -811,6 +811,8 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
         CKM_X25519 => (255, 255, 0x00080000),
         CKM_X448 => (448, 448, 0x00080000),
         CKM_AES_KEY_GEN => (16, 32, 0x00008000),
+        // §6.20 — ChaCha20 key generation (fixed 256-bit key, CKF_GENERATE).
+        CKM_CHACHA20_KEY_GEN => (32, 32, 0x00008000),
         // AES-GCM additionally has C_EncryptMessage/C_DecryptMessage support
         // (CKF_MESSAGE_ENCRYPT 0x2 | CKF_MESSAGE_DECRYPT 0x4, pkcs11t.h).
         CKM_AES_GCM => (16, 32, 0x00000100 | 0x00000200 | 0x0002 | 0x0004),
@@ -2192,7 +2194,52 @@ pub fn C_GenerateKey(
     nonnull!(p_mechanism, ph_key);
     unsafe {
         let mech_type = *(p_mechanism as *const u32);
+        // V4 — a CKA_KEY_TYPE in the template that contradicts the secret-key
+        // generation mechanism is CKR_TEMPLATE_INCONSISTENT.
+        let expected_kt = match mech_type {
+            CKM_AES_KEY_GEN => Some(CKK_AES),
+            CKM_CHACHA20_KEY_GEN => Some(CKK_CHACHA20),
+            CKM_GENERIC_SECRET_KEY_GEN => Some(CKK_GENERIC_SECRET),
+            _ => None,
+        };
+        if let Some(exp) = expected_kt {
+            if let Some(kt) = get_attr_ulong(p_template, ul_count, CKA_KEY_TYPE) {
+                if kt != exp {
+                    return CKR_TEMPLATE_INCONSISTENT;
+                }
+            }
+        }
         match mech_type {
+            CKM_CHACHA20_KEY_GEN => {
+                // §6.20 — ChaCha20 keys are always 256-bit (32 bytes).
+                let mut key = vec![0u8; 32];
+                if getrandom::getrandom(&mut key).is_err() {
+                    return CKR_FUNCTION_FAILED;
+                }
+                let mut attrs = HashMap::new();
+                attrs.insert(CKA_VALUE, key);
+                store_ulong(&mut attrs, CKA_CLASS, CKO_SECRET_KEY);
+                store_ulong(&mut attrs, CKA_KEY_TYPE, CKK_CHACHA20);
+                store_ulong(&mut attrs, CKA_VALUE_LEN, 32);
+                store_bool(&mut attrs, CKA_TOKEN, false);
+                store_bool(&mut attrs, CKA_PRIVATE, false);
+                store_bool(&mut attrs, CKA_SENSITIVE, false);
+                store_bool(&mut attrs, CKA_EXTRACTABLE, false);
+                store_bool(&mut attrs, CKA_ENCRYPT, true);
+                store_bool(&mut attrs, CKA_DECRYPT, true);
+                store_bool(&mut attrs, CKA_WRAP, false);
+                store_bool(&mut attrs, CKA_UNWRAP, false);
+                store_bool(&mut attrs, CKA_SIGN, false);
+                store_bool(&mut attrs, CKA_VERIFY, false);
+                store_bool(&mut attrs, CKA_DERIVE, false);
+                store_bool(&mut attrs, CKA_LOCAL, true);
+                store_ulong(&mut attrs, CKA_KEY_GEN_MECHANISM, CKM_CHACHA20_KEY_GEN);
+                absorb_template_attrs(&mut attrs, p_template, ul_count);
+                finalize_private_key_attrs(&mut attrs);
+                compute_kcv(&mut attrs);
+                *ph_key = allocate_handle_owned(_h_session, attrs);
+                CKR_OK
+            }
             CKM_AES_KEY_GEN => {
                 // PKCS#11 v3.2 §6.27.2 — CKA_VALUE_LEN is a REQUIRED template
                 // attribute for CKM_AES_KEY_GEN (no silent 16-byte default).
@@ -6040,6 +6087,83 @@ fn wrap_with_trusted_violation(h_wrapping_key: u32, h_key: u32) -> bool {
     })
 }
 
+/// AES-CBC key wrap (CKM_AES_CBC / CKM_AES_CBC_PAD, PKCS#11 v3.2 §6.27): the
+/// target key bytes are encrypted under the KEK with the caller IV. `pad` ⇒
+/// PKCS#7 (arbitrary length); otherwise the data must already be a multiple of
+/// the 16-byte block (CKM_AES_CBC). The AES variant is fixed by the KEK length.
+unsafe fn aes_cbc_encrypt_wrap(kek: &[u8], iv: &[u8], data: &[u8], pad: bool) -> Result<Vec<u8>, u32> {
+    use aes::cipher::{
+        block_padding::{NoPadding, Pkcs7},
+        BlockEncryptMut, KeyIvInit,
+    };
+    if iv.len() != 16 {
+        return Err(CKR_MECHANISM_PARAM_INVALID);
+    }
+    if !pad && data.len() % 16 != 0 {
+        return Err(CKR_DATA_LEN_RANGE);
+    }
+    let buf_len = if pad {
+        data.len() + 16 - (data.len() % 16)
+    } else {
+        data.len()
+    };
+    let mut buf = vec![0u8; buf_len];
+    buf[..data.len()].copy_from_slice(data);
+    macro_rules! enc {
+        ($t:ty) => {{
+            let c = <cbc::Encryptor<$t>>::new_from_slices(kek, iv)
+                .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+            let ct = if pad {
+                c.encrypt_padded_mut::<Pkcs7>(&mut buf, data.len())
+            } else {
+                c.encrypt_padded_mut::<NoPadding>(&mut buf, data.len())
+            }
+            .map_err(|_| CKR_FUNCTION_FAILED)?;
+            ct.to_vec()
+        }};
+    }
+    match kek.len() {
+        16 => Ok(enc!(aes::Aes128)),
+        24 => Ok(enc!(aes::Aes192)),
+        32 => Ok(enc!(aes::Aes256)),
+        _ => Err(CKR_KEY_TYPE_INCONSISTENT),
+    }
+}
+
+/// AES-CBC key unwrap — inverse of [`aes_cbc_encrypt_wrap`].
+unsafe fn aes_cbc_decrypt_unwrap(kek: &[u8], iv: &[u8], ct: &[u8], pad: bool) -> Result<Vec<u8>, u32> {
+    use aes::cipher::{
+        block_padding::{NoPadding, Pkcs7},
+        BlockDecryptMut, KeyIvInit,
+    };
+    if iv.len() != 16 {
+        return Err(CKR_MECHANISM_PARAM_INVALID);
+    }
+    if ct.is_empty() || ct.len() % 16 != 0 {
+        return Err(CKR_WRAPPED_KEY_LEN_RANGE);
+    }
+    let mut buf = ct.to_vec();
+    macro_rules! dec {
+        ($t:ty) => {{
+            let c = <cbc::Decryptor<$t>>::new_from_slices(kek, iv)
+                .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+            let pt = if pad {
+                c.decrypt_padded_mut::<Pkcs7>(&mut buf)
+            } else {
+                c.decrypt_padded_mut::<NoPadding>(&mut buf)
+            }
+            .map_err(|_| CKR_WRAPPED_KEY_INVALID)?;
+            pt.to_vec()
+        }};
+    }
+    match kek.len() {
+        16 => Ok(dec!(aes::Aes128)),
+        24 => Ok(dec!(aes::Aes192)),
+        32 => Ok(dec!(aes::Aes256)),
+        _ => Err(CKR_KEY_TYPE_INCONSISTENT),
+    }
+}
+
 #[wasm_bindgen(js_name = _C_WrapKey)]
 pub fn C_WrapKey(
     _h_session: u32,
@@ -6059,7 +6183,8 @@ pub fn C_WrapKey(
         let is_kwp = mech_type == CKM_AES_KEY_WRAP_KWP || mech_type == CKM_AES_KEY_WRAP_PAD;
         let is_aes_wrap = mech_type == CKM_AES_KEY_WRAP || is_kwp;
         let is_rsa_oaep = mech_type == CKM_RSA_PKCS_OAEP;
-        if !is_aes_wrap && !is_rsa_oaep {
+        let is_aes_cbc = mech_type == CKM_AES_CBC || mech_type == CKM_AES_CBC_PAD;
+        if !is_aes_wrap && !is_rsa_oaep && !is_aes_cbc {
             return CKR_MECHANISM_INVALID;
         }
 
@@ -6100,7 +6225,24 @@ pub fn C_WrapKey(
             None => return CKR_ARGUMENTS_BAD,
         };
 
-        let wrapped = if is_rsa_oaep {
+        let wrapped = if is_aes_cbc {
+            // AES-CBC(-PAD) wrap — IV is the 16-byte mechanism parameter.
+            let iv_ptr = *((p_mechanism as *const usize).add(1)) as *const u8;
+            let iv_len = *((p_mechanism as *const usize).add(2));
+            if iv_ptr.is_null() || iv_len != 16 {
+                return CKR_MECHANISM_PARAM_INVALID;
+            }
+            let iv = std::slice::from_raw_parts(iv_ptr, 16);
+            match aes_cbc_encrypt_wrap(
+                &wrapping_key,
+                iv,
+                &key_to_wrap,
+                mech_type == CKM_AES_CBC_PAD,
+            ) {
+                Ok(v) => v,
+                Err(rv) => return rv,
+            }
+        } else if is_rsa_oaep {
             // RSA-OAEP wrapping — encrypt key value with RSA public key.
             // Full CK_RSA_PKCS_OAEP_PARAMS (§6.4.4): hash, MGF, label.
             let p_param = *((p_mechanism as *const usize).add(1)) as usize as *const u8;
@@ -6216,7 +6358,8 @@ pub fn C_UnwrapKey(
         let is_kwp = mech_type == CKM_AES_KEY_WRAP_KWP || mech_type == CKM_AES_KEY_WRAP_PAD;
         let is_aes_wrap = mech_type == CKM_AES_KEY_WRAP || is_kwp;
         let is_rsa_oaep = mech_type == CKM_RSA_PKCS_OAEP;
-        if !is_aes_wrap && !is_rsa_oaep {
+        let is_aes_cbc = mech_type == CKM_AES_CBC || mech_type == CKM_AES_CBC_PAD;
+        if !is_aes_wrap && !is_rsa_oaep && !is_aes_cbc {
             return CKR_MECHANISM_INVALID;
         }
 
@@ -6238,7 +6381,24 @@ pub fn C_UnwrapKey(
         };
         let wrapped_data = std::slice::from_raw_parts(p_wrapped_key, ul_wrapped_key_len as usize);
 
-        let key_value = if is_rsa_oaep {
+        let key_value = if is_aes_cbc {
+            // AES-CBC(-PAD) unwrap — IV is the 16-byte mechanism parameter.
+            let iv_ptr = *((p_mechanism as *const usize).add(1)) as *const u8;
+            let iv_len = *((p_mechanism as *const usize).add(2));
+            if iv_ptr.is_null() || iv_len != 16 {
+                return CKR_MECHANISM_PARAM_INVALID;
+            }
+            let iv = std::slice::from_raw_parts(iv_ptr, 16);
+            match aes_cbc_decrypt_unwrap(
+                &unwrapping_key,
+                iv,
+                wrapped_data,
+                mech_type == CKM_AES_CBC_PAD,
+            ) {
+                Ok(v) => v,
+                Err(rv) => return rv,
+            }
+        } else if is_rsa_oaep {
             // RSA-OAEP unwrapping — decrypt wrapped key with RSA private key.
             // Full CK_RSA_PKCS_OAEP_PARAMS (§6.4.4): hash, MGF, label.
             let p_param = *((p_mechanism as *const usize).add(1)) as usize as *const u8;
