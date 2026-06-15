@@ -4111,10 +4111,10 @@ pub fn C_EncryptInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
                 if p_param.is_null() || ul_param_len < 16 {
                     return CKR_ARGUMENTS_BAD;
                 }
-                let nonce_ptr = *(p_param as *const u32) as usize as *const u8;
-                let nonce_len = *((p_param as *const u32).add(1)) as usize;
-                let aad_ptr   = *((p_param as *const u32).add(2)) as usize as *const u8;
-                let aad_len   = *((p_param as *const u32).add(3)) as usize;
+                let nonce_ptr = *(p_param as *const usize) as *const u8;
+                let nonce_len = *((p_param as *const usize).add(1));
+                let aad_ptr   = *((p_param as *const usize).add(2)) as *const u8;
+                let aad_len   = *((p_param as *const usize).add(3));
                 if nonce_len != 12 {
                     return CKR_MECHANISM_PARAM_INVALID;
                 }
@@ -4165,14 +4165,16 @@ pub fn C_EncryptInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
 /// # Safety
 /// `p_param` must point to `ul_param_len` readable bytes.
 unsafe fn parse_chacha20_params(p_param: *const u8, ul_param_len: u32) -> Result<Vec<u8>, u32> {
-    if p_param.is_null() || ul_param_len < 16 {
+    if p_param.is_null() || (ul_param_len as usize) < 4 * core::mem::size_of::<usize>() {
         return Err(CKR_ARGUMENTS_BAD);
     }
-    let prm = p_param as *const u32;
-    let ctr_ptr = *prm as usize as *const u8;
-    let ctr_bits = *prm.add(1) as usize;
-    let nonce_ptr = *prm.add(2) as usize as *const u8;
-    let nonce_bits = *prm.add(3) as usize;
+    // CK_CHACHA20_PARAMS at native width: pBlockCounter@0, blockCounterBits@1,
+    // pNonce@2, ulNonceBits@3 (same word indices on wasm32 / 64-bit native).
+    let prm = p_param as *const usize;
+    let ctr_ptr = *prm as *const u8;
+    let ctr_bits = *prm.add(1);
+    let nonce_ptr = *prm.add(2) as *const u8;
+    let nonce_bits = *prm.add(3);
     if nonce_ptr.is_null() || !(nonce_bits == 64 || nonce_bits == 96) {
         return Err(CKR_MECHANISM_PARAM_INVALID);
     }
@@ -4534,10 +4536,10 @@ pub fn C_DecryptInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
                 if p_param.is_null() || ul_param_len < 16 {
                     return CKR_ARGUMENTS_BAD;
                 }
-                let nonce_ptr = *(p_param as *const u32) as usize as *const u8;
-                let nonce_len = *((p_param as *const u32).add(1)) as usize;
-                let aad_ptr   = *((p_param as *const u32).add(2)) as usize as *const u8;
-                let aad_len   = *((p_param as *const u32).add(3)) as usize;
+                let nonce_ptr = *(p_param as *const usize) as *const u8;
+                let nonce_len = *((p_param as *const usize).add(1));
+                let aad_ptr   = *((p_param as *const usize).add(2)) as *const u8;
+                let aad_len   = *((p_param as *const usize).add(3));
                 if nonce_len != 12 {
                     return CKR_MECHANISM_PARAM_INVALID;
                 }
@@ -5707,21 +5709,22 @@ pub fn C_DeriveKey(
 
             // ── PBKDF2 ──────────────────────────────────────────────────────
             CKM_PKCS5_PBKD2 => {
-                let p_param = *((p_mechanism as *const usize).add(1)) as usize as *const u32;
+                let p_param = *((p_mechanism as *const usize).add(1)) as *const usize;
                 if p_param.is_null() {
                     return CKR_ARGUMENTS_BAD;
                 }
-                // CK_PKCS5_PBKD2_PARAMS2: [saltSource, pSaltData, ulSaltDataLen, iterations, prf,
-                //                           pPrfData, ulPrfDataLen, pPassword, ulPasswordLen]
-                let salt_ptr = *p_param.add(1) as usize as *const u8;
-                let salt_len = *p_param.add(2) as usize;
-                let iterations = *p_param.add(3);
+                // CK_PKCS5_PBKD2_PARAMS2 at native width (usize words):
+                // [saltSource, pSaltData, ulSaltDataLen, iterations, prf,
+                //  pPrfData, ulPrfDataLen, pPassword, ulPasswordLen]
+                let salt_ptr = *p_param.add(1) as *const u8;
+                let salt_len = *p_param.add(2);
+                let iterations = *p_param.add(3) as u32;
                 if iterations < 1000 {
                     return CKR_ARGUMENTS_BAD;
                 }
-                let prf = *p_param.add(4);
-                let pass_ptr = *p_param.add(7) as usize as *const u8;
-                let pass_len = *p_param.add(8) as usize;
+                let prf = *p_param.add(4) as u32;
+                let pass_ptr = *p_param.add(7) as *const u8;
+                let pass_len = *p_param.add(8);
                 let salt = if !salt_ptr.is_null() && salt_len > 0 {
                     std::slice::from_raw_parts(salt_ptr, salt_len)
                 } else {
@@ -7691,11 +7694,14 @@ fn parse_gcm_msg_params(p: *mut u8) -> Result<(Vec<u8>, *mut u8, u32), u32> {
         return Err(CKR_ARGUMENTS_BAD);
     }
     unsafe {
-        let p_iv = *(p as *const u32) as usize as *mut u8;
-        let ul_iv_len = *(p.add(4) as *const u32);
-        let iv_gen = *(p.add(12) as *const u32);
-        let p_tag = *(p.add(16) as *const u32) as usize as *mut u8;
-        let ul_tag_bits = *(p.add(20) as *const u32);
+        // CK_GCM_MESSAGE_PARAMS at native width (usize words): pIv@0, ulIvLen@1,
+        // ulIvBits@2 (skipped), ivGenerator@3, pTag@4, ulTagBits@5.
+        let pu = p as *const usize;
+        let p_iv = *pu as *mut u8;
+        let ul_iv_len = *pu.add(1) as u32;
+        let iv_gen = *pu.add(3) as u32;
+        let p_tag = *pu.add(4) as *mut u8;
+        let ul_tag_bits = *pu.add(5) as u32;
 
         if p_iv.is_null() || ul_iv_len == 0 {
             return Err(CKR_MECHANISM_PARAM_INVALID);
@@ -8157,7 +8163,8 @@ pub fn C_EncryptMessageNext(
         // only required (and only dereferenced) on the final part, and the
         // core defers that check until after the §5.2 size-query handling.
         let p_tag: *mut u8 = if end_of_message && !p_parameter.is_null() {
-            *(p_parameter.add(16) as *const u32) as usize as *mut u8
+            // CK_GCM_MESSAGE_PARAMS.pTag at native width = usize word 4.
+            *((p_parameter as *const usize).add(4)) as *mut u8
         } else {
             std::ptr::null_mut()
         };
@@ -8318,7 +8325,8 @@ pub fn C_DecryptMessageNext(
         // only required (and only dereferenced) on the final part, and the
         // core defers that check until after the §5.2 size-query handling.
         let p_tag: *const u8 = if end_of_message && !p_parameter.is_null() {
-            *(p_parameter.add(16) as *const u32) as usize as *const u8
+            // CK_GCM_MESSAGE_PARAMS.pTag at native width = usize word 4.
+            *((p_parameter as *const usize).add(4)) as *const u8
         } else {
             std::ptr::null()
         };
