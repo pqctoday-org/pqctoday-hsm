@@ -12,48 +12,61 @@
 # go.step.sm/crypto x509util.CreateCertificate -> crypto/x509.CreateCertificate.
 # The Go stdlib has no x509.SignatureAlgorithm for ML-DSA (it stops at Ed25519,
 # enum value 16; verified on go1.26.4), so it can neither encode the ML-DSA
-# AlgorithmIdentifier (2.16.840.1.101.3.4.3.18) nor drive a circl ML-DSA signer.
+# AlgorithmIdentifier (2.16.840.1.101.3.4.3.18) nor drive a circl ML-DSA signer,
+# and crypto/x509.MarshalPKIXPublicKey cannot encode an ML-DSA SubjectPublicKeyInfo.
 # This is the same class of problem the strongSwan PQC patch solves by emitting
 # ASN.1 by hand for algorithms the host crypto stack does not natively encode.
 #
 # PATCH SURFACE (relative to repo root)
 # -------------------------------------
-#   cas/softcas/softcas.go      6-line dispatch: when the CA signer is a circl
-#                               ML-DSA-65 key, call createMLDSACertificate
+#   cas/softcas/softcas.go      6-line dispatch: when the CA signer's public key
+#                               is an ML-DSA-65 key, call createMLDSACertificate
 #                               instead of x509util.CreateCertificate.
 #   cas/softcas/mldsa.go        NEW. Hand-assembles the RFC 5280 TBSCertificate
 #                               with the ML-DSA-65 AlgorithmIdentifier (no params,
 #                               per RFC 9881), signs the TBS with pure ML-DSA
-#                               (no pre-hash, empty context), wraps it in the
-#                               outer Certificate SEQUENCE, and returns a parsed
-#                               *x509.Certificate.
+#                               (no pre-hash, empty context) via a crypto.Signer,
+#                               and wraps it in the outer Certificate SEQUENCE.
+#                               subjectPublicKeyInfo() also hand-encodes an
+#                               ML-DSA-65 SubjectPublicKeyInfo, so a *fully*
+#                               post-quantum chain is possible: an ML-DSA root
+#                               whose own subject key + signature are ML-DSA,
+#                               issuing ML-DSA leaves. CreateMLDSACertificate is
+#                               exported for CA bootstrap (self-issue a root
+#                               before a SoftCAS chain exists).
 #   cas/softcas/mldsa_test.go   NEW. Drives SoftCAS.CreateCertificate end-to-end
 #                               with an ML-DSA-65 issuer and asserts the leaf's
 #                               signatureAlgorithm OID + ML-DSA signature verify.
-#   cmd/mldsa-issue/main.go     NEW (demo only, not upstream surface). Emits a
-#                               leaf PEM/DER for openssl inspection.
+#   cmd/mldsa-issue/main.go     NEW (demo only, not upstream surface). Self-signs
+#                               an ML-DSA-65 root CA (-algo mldsa65) or EC P-256
+#                               root (-algo ec) and issues a leaf through the real
+#                               SoftCAS engine, writing both as PEM (-ca-out, -out)
+#                               so the chain is `openssl verify`-able end-to-end.
+#                               Drives sandbox scenario 18.
 #   go.mod / go.sum             add github.com/cloudflare/circl v1.6.3.
 #
-# WHAT THIS SLICE INTENTIONALLY DOES NOT DO (see docs/STEPCA_PQC_FORK.md)
+# Because createMLDSACertificate signs through a crypto.Signer, an HSM-backed
+# ML-DSA signer (softhsmv3 over PKCS#11, CKM_ML_DSA = 0x1D) drops in at the same
+# seam with no change to the certificate-assembly code — that is the remaining
+# finish-plan item; see docs/STEPCA_PQC_FORK.md.
+#
+# WHAT THIS PATCH INTENTIONALLY DOES NOT DO (see docs/STEPCA_PQC_FORK.md)
 # ----------------------------------------------------------------------
-#  * No HSM/PKCS#11 custody yet — the circl key is in-process. The lead
-#    finish-plan item is a kms KeyManager that fronts softhsmv3 over
-#    miekg/pkcs11 using CKM_ML_DSA (0x1D) so the private key never leaves
-#    the token; the createMLDSACertificate dispatch already takes a
-#    crypto.Signer, so an HSM-backed signer drops in at the same seam.
-#  * No ML-DSA-44/87, no provisioner/template plumbing to *select* ML-DSA,
-#    no ACME/SCEP path, no CA-cert (root/intermediate) self-issuance in ML-DSA.
+#  * No HSM/PKCS#11 custody yet — the circl key is in-process. (The crypto.Signer
+#    seam above is ready for it.)
+#  * No ML-DSA-44/87, no provisioner/template plumbing to *select* ML-DSA from a
+#    running `step ca` server, no ACME/SCEP path.
 #
 # Apply from the cloned step-ca v0.30.2 tree root:  git apply step-ca-pqc.patch
-# then:  go mod tidy && go build ./cmd/step-ca
+# then:  go mod tidy && go build ./cmd/step-ca ./cmd/mldsa-issue
 #
 # ====================================================================
 diff --git a/cas/softcas/mldsa.go b/cas/softcas/mldsa.go
 new file mode 100644
-index 0000000..537d4a3
+index 0000000..7b992a5
 --- /dev/null
 +++ b/cas/softcas/mldsa.go
-@@ -0,0 +1,140 @@
+@@ -0,0 +1,172 @@
 +package softcas
 +
 +// PQC ML-DSA-65 (FIPS 204) issuance support for SoftCAS.
@@ -122,19 +135,51 @@ index 0000000..537d4a3
 +	return sk, ok
 +}
 +
++// subjectPublicKeyInfo encodes pub as an RFC 5280 SubjectPublicKeyInfo. For a
++// circl ML-DSA-65 public key it hand-assembles the SPKI (algorithm id-ml-dsa-65
++// with absent parameters per RFC 9881, raw public key as the BIT STRING) because
++// crypto/x509.MarshalPKIXPublicKey has no ML-DSA support; for any classical key
++// it defers to the stdlib marshaler. This is what lets a fully-ML-DSA chain
++// (ML-DSA root *and* ML-DSA leaf subject keys) be issued.
++func subjectPublicKeyInfo(pub crypto.PublicKey) (mldsaPublicKeyInfo, error) {
++	var info mldsaPublicKeyInfo
++	if mlpub, ok := pub.(*mldsa65.PublicKey); ok {
++		raw, err := mlpub.MarshalBinary()
++		if err != nil {
++			return info, errors.Wrap(err, "error marshaling ML-DSA-65 public key")
++		}
++		info.Algorithm = pkix.AlgorithmIdentifier{Algorithm: oidSignatureMLDSA65}
++		info.PublicKey = asn1.BitString{Bytes: raw, BitLength: len(raw) * 8}
++		return info, nil
++	}
++	der, err := x509.MarshalPKIXPublicKey(pub)
++	if err != nil {
++		return info, errors.Wrap(err, "error marshaling subject public key")
++	}
++	if _, err := asn1.Unmarshal(der, &info); err != nil {
++		return info, errors.Wrap(err, "error parsing subject public key")
++	}
++	return info, nil
++}
++
++// CreateMLDSACertificate is the exported entry point for tooling that must
++// self-issue an ML-DSA-65 root certificate before a SoftCAS chain exists (CA
++// bootstrap, cmd/mldsa-issue). For leaf issuance the unexported dispatch in
++// createCertificate calls the same code path. Pass parent == template to
++// self-sign a root.
++func CreateMLDSACertificate(template, parent *x509.Certificate, pub crypto.PublicKey, signer *mldsa65.PrivateKey) (*x509.Certificate, error) {
++	return createMLDSACertificate(template, parent, pub, signer)
++}
++
 +// createMLDSACertificate signs template with an ML-DSA-65 issuer key, building
 +// the certificate DER by hand and returning a parsed *x509.Certificate. The
 +// returned certificate's SignatureAlgorithm OID is 2.16.840.1.101.3.4.3.18.
 +func createMLDSACertificate(template, parent *x509.Certificate, pub crypto.PublicKey, signer *mldsa65.PrivateKey) (*x509.Certificate, error) {
 +	algoID := pkix.AlgorithmIdentifier{Algorithm: oidSignatureMLDSA65} // absent params per RFC 9881
 +
-+	spkiDER, err := x509.MarshalPKIXPublicKey(pub)
++	spki, err := subjectPublicKeyInfo(pub)
 +	if err != nil {
-+		return nil, errors.Wrap(err, "error marshaling subject public key")
-+	}
-+	var spki mldsaPublicKeyInfo
-+	if _, err := asn1.Unmarshal(spkiDER, &spki); err != nil {
-+		return nil, errors.Wrap(err, "error parsing subject public key")
++		return nil, err
 +	}
 +
 +	// Use parent.RawSubject as the issuer DN; encode the subject DN.
@@ -302,18 +347,31 @@ index 1e590ef..50b52f7 100644
  	if template.SignatureAlgorithm == 0 {
 diff --git a/cmd/mldsa-issue/main.go b/cmd/mldsa-issue/main.go
 new file mode 100644
-index 0000000..ec183a5
+index 0000000..ceb3228
 --- /dev/null
 +++ b/cmd/mldsa-issue/main.go
-@@ -0,0 +1,83 @@
-+// Command mldsa-issue is a thin demonstrator that drives the patched SoftCAS
-+// to issue an ML-DSA-65 signed leaf certificate and writes it to disk.
-+// It is NOT part of the upstream surface; it exists only to produce the
-+// validated-slice evidence for the PQC fork.
+@@ -0,0 +1,201 @@
++// Command mldsa-issue drives the patched step-ca SoftCAS engine to issue a full
++// certificate chain (root CA + leaf) through the *real* cas/softcas code path.
++//
++//   -algo mldsa65 (default): self-signs an ML-DSA-65 root CA (subject key AND
++//     signature are ML-DSA-65, OID 2.16.840.1.101.3.4.3.18, FIPS 204) and issues
++//     an ML-DSA-65 leaf signed by that root — a fully post-quantum chain.
++//   -algo ec: the same flow with EC P-256, exercising the SoftCAS classical path
++//     unmodified — proving the PQC dispatch only diverts ML-DSA issuers.
++//
++// Both the CA and the leaf are written as PEM (-ca-out, -out) so the emitted
++// chain can be verified end-to-end with `openssl verify -CAfile`.
++//
++// It is NOT part of the upstream surface: it produces the validated-slice
++// evidence and, in the pqctoday-sandbox, drives scenario 18 ("Automated CA —
++// Step-CA") with real SoftCAS issuance — without the full ACME/provisioner HTTP
++// server (that surface is the next finish-plan item; see docs/STEPCA_PQC_FORK.md).
 +package main
 +
 +import (
 +	"context"
++	"crypto"
 +	"crypto/ecdsa"
 +	"crypto/elliptic"
 +	"crypto/rand"
@@ -321,6 +379,7 @@ index 0000000..ec183a5
 +	"crypto/x509/pkix"
 +	"encoding/asn1"
 +	"encoding/pem"
++	"flag"
 +	"fmt"
 +	"math/big"
 +	"os"
@@ -333,61 +392,165 @@ index 0000000..ec183a5
 +)
 +
 +func main() {
-+	if err := run(); err != nil {
++	algo := flag.String("algo", "mldsa65", "issuer algorithm: mldsa65 | ec")
++	caOut := flag.String("ca-out", "/tmp/stepca-mldsa-ca.pem", "root CA certificate PEM output path")
++	leafOut := flag.String("out", "/tmp/stepca-mldsa-leaf.pem", "leaf certificate PEM output path")
++	flag.Parse()
++	if err := run(*algo, *caOut, *leafOut); err != nil {
 +		fmt.Fprintln(os.Stderr, "error:", err)
 +		os.Exit(1)
 +	}
 +}
 +
-+func run() error {
-+	_, caPriv, err := mldsa65.GenerateKey(rand.Reader)
++func run(algo, caOut, leafOut string) error {
++	now := time.Now()
++	var (
++		caCert *x509.Certificate
++		signer crypto.Signer
++		err    error
++	)
++	switch algo {
++	case "mldsa65", "ml-dsa-65", "ML-DSA-65":
++		algo = "mldsa65"
++		caCert, signer, err = mldsaRoot(now)
++	case "ec", "ecdsa", "p256", "P-256":
++		algo = "ec"
++		caCert, signer, err = ecRoot(now)
++	default:
++		return fmt.Errorf("unknown -algo %q (want mldsa65 | ec)", algo)
++	}
 +	if err != nil {
 +		return err
-+	}
-+	rawSubject, err := asn1.Marshal(pkix.Name{CommonName: "PQC ML-DSA-65 CA"}.ToRDNSequence())
-+	if err != nil {
-+		return err
-+	}
-+	caCert := &x509.Certificate{
-+		Subject:    pkix.Name{CommonName: "PQC ML-DSA-65 CA"},
-+		RawSubject: rawSubject,
 +	}
 +
++	// Issue the leaf through the real SoftCAS engine.
 +	cas, err := softcas.New(context.Background(), apiv1.Options{
 +		CertificateChain: []*x509.Certificate{caCert},
-+		Signer:           caPriv,
++		Signer:           signer,
 +	})
 +	if err != nil {
 +		return err
 +	}
 +
-+	leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
++	leafTmpl, err := leafTemplate(algo, now)
 +	if err != nil {
 +		return err
 +	}
 +	resp, err := cas.CreateCertificate(&apiv1.CreateCertificateRequest{
-+		Template: &x509.Certificate{
-+			SerialNumber: big.NewInt(time.Now().UnixNano()),
-+			Subject:      pkix.Name{CommonName: "leaf.pqc.test"},
-+			PublicKey:    &leafKey.PublicKey,
-+		},
++		Template: leafTmpl,
 +		Lifetime: time.Hour,
 +	})
 +	if err != nil {
 +		return err
 +	}
-+
 +	leaf := resp.Certificate
-+	out := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leaf.Raw})
-+	if err := os.WriteFile("/tmp/stepca-mldsa-leaf.pem", out, 0o644); err != nil {
++
++	if err := writePEM(caOut, caCert.Raw); err != nil {
 +		return err
 +	}
-+	if err := os.WriteFile("/tmp/stepca-mldsa-leaf.der", leaf.Raw, 0o644); err != nil {
++	if err := writePEM(leafOut, leaf.Raw); err != nil {
 +		return err
 +	}
-+	fmt.Printf("issued leaf CN=%q serial=%s\n", leaf.Subject.CommonName, leaf.SerialNumber)
-+	fmt.Printf("wrote /tmp/stepca-mldsa-leaf.pem (%d byte DER)\n", len(leaf.Raw))
++	fmt.Printf("algo=%s root_ca=%q leaf=%q serial=%s\n", algo, caCert.Subject.CommonName, leaf.Subject.CommonName, leaf.SerialNumber)
++	fmt.Printf("wrote %s (%d B) and %s (%d B)\n", caOut, len(caCert.Raw), leafOut, len(leaf.Raw))
 +	return nil
++}
++
++// mldsaRoot self-signs an ML-DSA-65 root CA whose subject key and signature are
++// both ML-DSA-65, via the exported SoftCAS hand-assembler.
++func mldsaRoot(now time.Time) (*x509.Certificate, crypto.Signer, error) {
++	pub, priv, err := mldsa65.GenerateKey(rand.Reader)
++	if err != nil {
++		return nil, nil, err
++	}
++	rawSubject, err := asn1.Marshal(pkix.Name{CommonName: "PQC ML-DSA-65 Root CA"}.ToRDNSequence())
++	if err != nil {
++		return nil, nil, err
++	}
++	tmpl := &x509.Certificate{
++		SerialNumber:    big.NewInt(1),
++		Subject:         pkix.Name{CommonName: "PQC ML-DSA-65 Root CA"},
++		RawSubject:      rawSubject,
++		NotBefore:       now.Add(-time.Hour),
++		NotAfter:        now.Add(24 * time.Hour),
++		ExtraExtensions: caExtensions(),
++	}
++	caCert, err := softcas.CreateMLDSACertificate(tmpl, tmpl, pub, priv)
++	if err != nil {
++		return nil, nil, err
++	}
++	return caCert, priv, nil
++}
++
++// ecRoot self-signs a classical EC P-256 root CA with stock crypto/x509.
++func ecRoot(now time.Time) (*x509.Certificate, crypto.Signer, error) {
++	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
++	if err != nil {
++		return nil, nil, err
++	}
++	tmpl := &x509.Certificate{
++		SerialNumber:          big.NewInt(1),
++		Subject:               pkix.Name{CommonName: "Classical EC P-256 Root CA"},
++		NotBefore:             now.Add(-time.Hour),
++		NotAfter:              now.Add(24 * time.Hour),
++		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
++		BasicConstraintsValid: true,
++		IsCA:                  true,
++	}
++	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
++	if err != nil {
++		return nil, nil, err
++	}
++	cert, err := x509.ParseCertificate(der)
++	if err != nil {
++		return nil, nil, err
++	}
++	return cert, key, nil
++}
++
++// leafTemplate builds the leaf certificate template, with an ML-DSA-65 or EC
++// P-256 subject key matching the chain algorithm.
++func leafTemplate(algo string, now time.Time) (*x509.Certificate, error) {
++	tmpl := &x509.Certificate{
++		SerialNumber: big.NewInt(now.UnixNano()),
++		Subject:      pkix.Name{CommonName: "leaf.pqc.test"},
++		NotBefore:    now.Add(-time.Minute),
++		NotAfter:     now.Add(time.Hour),
++	}
++	if algo == "mldsa65" {
++		pub, _, err := mldsa65.GenerateKey(rand.Reader)
++		if err != nil {
++			return nil, err
++		}
++		tmpl.PublicKey = pub
++	} else {
++		key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
++		if err != nil {
++			return nil, err
++		}
++		tmpl.PublicKey = &key.PublicKey
++	}
++	return tmpl, nil
++}
++
++// caExtensions returns the RFC 5280 basicConstraints (cA:TRUE, critical) and
++// keyUsage (keyCertSign|cRLSign, critical) extensions for a root CA, encoded by
++// hand because the ML-DSA root is assembled outside crypto/x509.
++func caExtensions() []pkix.Extension {
++	// basicConstraints ::= SEQUENCE { cA BOOLEAN }
++	bc, _ := asn1.Marshal(struct {
++		CA bool `asn1:"optional"`
++	}{CA: true})
++	// keyUsage BIT STRING: keyCertSign (bit 5) | cRLSign (bit 6).
++	ku, _ := asn1.Marshal(asn1.BitString{Bytes: []byte{0x06}, BitLength: 7})
++	return []pkix.Extension{
++		{Id: asn1.ObjectIdentifier{2, 5, 29, 19}, Critical: true, Value: bc},
++		{Id: asn1.ObjectIdentifier{2, 5, 29, 15}, Critical: true, Value: ku},
++	}
++}
++
++func writePEM(path string, der []byte) error {
++	return os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o644)
 +}
 diff --git a/go.mod b/go.mod
 index 282e285..11d3765 100644
