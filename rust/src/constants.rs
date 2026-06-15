@@ -305,6 +305,8 @@ pub const CKM_EC_MONTGOMERY_KEY_DERIVE: u32 = 0x8000_0011;
 // CKM_X25519 = CKM_VENDOR_DEFINED | 0x1058, CKM_X448 = | 0x1059.
 pub const CKM_X25519: u32 = 0x8000_1058;
 pub const CKM_X448: u32 = 0x8000_1059;
+// AES-CMAC (PKCS#11 v3.2 §6.43) — also a valid SP 800-108 KBKDF PRF.
+pub const CKM_AES_CMAC: u32 = 0x0000_108A;
 // Ed25519ph (prehashed). This is the real PKCS#11 v3.2 mechanism value
 // (pkcs11t.h: CKM_EDDSA_PH = 0x80001057); the engine also dispatches to it
 // internally when CK_EDDSA_PARAMS.phFlag is set on a plain CKM_EDDSA op.

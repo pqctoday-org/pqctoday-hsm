@@ -860,8 +860,9 @@ pub fn compute_kcv(attrs: &mut Attributes) {
                     }
                 }
                 CKK_GENERIC_SECRET => {
-                    // PKCS#11 v3.2: SHA-256 of key value, first 3 bytes
-                    let hash = Sha256::digest(&key_value);
+                    // PKCS#11 v3.2 §6.8.2 — generic-secret KCV is the first
+                    // 3 bytes of SHA-1(value) (NOT SHA-256).
+                    let hash = sha1::Sha1::digest(&key_value);
                     hash[..3].to_vec()
                 }
                 _ => return,

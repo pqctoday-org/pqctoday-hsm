@@ -4074,19 +4074,22 @@ pub fn C_EncryptInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
 
         let (iv, aad, tag_bits) = match mech_type {
             CKM_AES_GCM => {
-                // CK_GCM_PARAMS (24 bytes, WASM32):
-                //   pIv(u32 ptr)   + ulIvLen(u32)   + ulIvBits(u32)
-                //   pAAD(u32 ptr)  + ulAADLen(u32)  + ulTagBits(u32)
-                if p_param.is_null() || ul_param_len < 24 {
+                // CK_GCM_PARAMS — 6 CK_ULONG/pointer fields (pIv, ulIvLen,
+                // ulIvBits, pAAD, ulAADLen, ulTagBits) read at native width
+                // (size_of::<usize>(): 24 B wasm32, 48 B native). Reading them
+                // as u32 truncated pIv and shifted ulIvLen onto the pointer's
+                // high half on 64-bit, so a valid 12-byte IV looked invalid.
+                let usz = core::mem::size_of::<usize>();
+                if p_param.is_null() || ul_param_len < 6 * usz {
                     return CKR_ARGUMENTS_BAD;
                 }
-                let gcm = p_param as *const u32;
-                let iv_ptr  = *gcm        as usize as *const u8;
-                let iv_len  = *gcm.add(1) as usize;
-                let iv_bits = *gcm.add(2);
-                let aad_ptr = *gcm.add(3) as usize as *const u8;
-                let aad_len = *gcm.add(4) as usize;
-                let tag_bits = *gcm.add(5);
+                let gcm = p_param as *const usize;
+                let iv_ptr  = *gcm        as *const u8;
+                let iv_len  = *gcm.add(1);
+                let iv_bits = *gcm.add(2) as u32;
+                let aad_ptr = *gcm.add(3) as *const u8;
+                let aad_len = *gcm.add(4);
+                let tag_bits = *gcm.add(5) as u32;
                 // SP 800-38D §5.2.1.2 — permitted tag lengths {128,120,112,
                 // 104,96} plus {64,32} for special applications (KMIP's
                 // truncatable-tag feature uses these). 0 ⇒ default 128.
@@ -4497,19 +4500,22 @@ pub fn C_DecryptInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
 
         let (iv, aad, tag_bits) = match mech_type {
             CKM_AES_GCM => {
-                // CK_GCM_PARAMS (24 bytes, WASM32):
-                //   pIv(u32 ptr)   + ulIvLen(u32)   + ulIvBits(u32)
-                //   pAAD(u32 ptr)  + ulAADLen(u32)  + ulTagBits(u32)
-                if p_param.is_null() || ul_param_len < 24 {
+                // CK_GCM_PARAMS — 6 CK_ULONG/pointer fields (pIv, ulIvLen,
+                // ulIvBits, pAAD, ulAADLen, ulTagBits) read at native width
+                // (size_of::<usize>(): 24 B wasm32, 48 B native). Reading them
+                // as u32 truncated pIv and shifted ulIvLen onto the pointer's
+                // high half on 64-bit, so a valid 12-byte IV looked invalid.
+                let usz = core::mem::size_of::<usize>();
+                if p_param.is_null() || ul_param_len < 6 * usz {
                     return CKR_ARGUMENTS_BAD;
                 }
-                let gcm = p_param as *const u32;
-                let iv_ptr  = *gcm        as usize as *const u8;
-                let iv_len  = *gcm.add(1) as usize;
-                let iv_bits = *gcm.add(2);
-                let aad_ptr = *gcm.add(3) as usize as *const u8;
-                let aad_len = *gcm.add(4) as usize;
-                let tag_bits = *gcm.add(5);
+                let gcm = p_param as *const usize;
+                let iv_ptr  = *gcm        as *const u8;
+                let iv_len  = *gcm.add(1);
+                let iv_bits = *gcm.add(2) as u32;
+                let aad_ptr = *gcm.add(3) as *const u8;
+                let aad_len = *gcm.add(4);
+                let tag_bits = *gcm.add(5) as u32;
                 // SP 800-38D §5.2.1.2 — permitted tag lengths {128,120,112,
                 // 104,96} plus {64,32} for special applications (KMIP's
                 // truncatable-tag feature uses these). 0 ⇒ default 128.
@@ -5153,31 +5159,34 @@ enum Sp800Seg {
     Bytes(Vec<u8>),
 }
 
-/// Parse CK_PRF_DATA_PARAM[] (wasm32: type u32, pValue u32, ulValueLen u32).
-/// `key_len` is the requested DKM length in bytes (used to encode [L]).
+/// Parse CK_PRF_DATA_PARAM[] — { type: CK_PRF_DATA_TYPE, pValue, ulValueLen },
+/// all CK_ULONG/pointer-width, so the array stride and the nested COUNTER /
+/// DKM_LENGTH format-struct field offsets are taken at size_of::<usize>()
+/// (4 B wasm32, 8 B native). `key_len` is the requested DKM length in bytes.
 unsafe fn parse_sp800_108_segments(
-    p_segs: *const u32,
+    p_segs: *const usize,
     num_segs: usize,
     key_len: usize,
 ) -> Result<Vec<Sp800Seg>, u32> {
+    let usz = core::mem::size_of::<usize>();
     let mut out = Vec::new();
     if p_segs.is_null() {
         return Ok(out);
     }
     for i in 0..num_segs.min(64) {
-        let seg_type = *p_segs.add(i * 3);
-        let val_ptr = *p_segs.add(i * 3 + 1) as usize as *const u8;
-        let val_len = *p_segs.add(i * 3 + 2) as usize;
+        let seg_type = *p_segs.add(i * 3) as u32;
+        let val_ptr = *p_segs.add(i * 3 + 1) as *const u8;
+        let val_len = *p_segs.add(i * 3 + 2);
         match seg_type {
             t if t == CK_SP800_108_ITERATION_VARIABLE => {
                 // pValue → CK_SP800_108_COUNTER_FORMAT { bLittleEndian: CK_BBOOL,
-                // ulWidthInBits: CK_ULONG } (wasm32: 1 byte + 3 pad + 4).
-                if val_ptr.is_null() || val_len < 8 {
+                // ulWidthInBits: CK_ULONG } — width at one CK_ULONG offset.
+                if val_ptr.is_null() || val_len < 2 * usz {
                     return Err(CKR_MECHANISM_PARAM_INVALID);
                 }
                 let le = *val_ptr != 0;
                 let width_bits =
-                    std::ptr::read_unaligned(val_ptr.add(4) as *const u32);
+                    std::ptr::read_unaligned(val_ptr.add(usz) as *const usize) as u32;
                 if !matches!(width_bits, 8 | 16 | 24 | 32) {
                     return Err(CKR_MECHANISM_PARAM_INVALID);
                 }
@@ -5185,18 +5194,17 @@ unsafe fn parse_sp800_108_segments(
             }
             t if t == CK_SP800_108_DKM_LENGTH => {
                 // pValue → CK_SP800_108_DKM_LENGTH_FORMAT { method: CK_ULONG,
-                // bLittleEndian: CK_BBOOL, ulWidthInBits: CK_ULONG }
-                // (wasm32: 4 + 1 + 3 pad + 4 = 12).
-                if val_ptr.is_null() || val_len < 12 {
+                // bLittleEndian: CK_BBOOL, ulWidthInBits: CK_ULONG }.
+                if val_ptr.is_null() || val_len < 3 * usz {
                     return Err(CKR_MECHANISM_PARAM_INVALID);
                 }
-                let method = std::ptr::read_unaligned(val_ptr as *const u32);
+                let method = std::ptr::read_unaligned(val_ptr as *const usize) as u32;
                 if method != CK_SP800_108_DKM_LENGTH_SUM_OF_KEYS {
                     return Err(CKR_MECHANISM_PARAM_INVALID);
                 }
-                let le = *val_ptr.add(4) != 0;
+                let le = *val_ptr.add(usz) != 0;
                 let width_bits =
-                    std::ptr::read_unaligned(val_ptr.add(8) as *const u32);
+                    std::ptr::read_unaligned(val_ptr.add(2 * usz) as *const usize) as u32;
                 if !matches!(width_bits, 8 | 16 | 32 | 64) {
                     return Err(CKR_MECHANISM_PARAM_INVALID);
                 }
@@ -5359,6 +5367,13 @@ fn sp800_108_counter_kbkdf(
         CKM_SHA3_512_HMAC => {
             sp800_108_run_counter::<Hmac<sha3::Sha3_512>>(base_key, segs, key_len)
         }
+        // AES-CMAC PRF — the AES variant is fixed by the base key length.
+        CKM_AES_CMAC => match base_key.len() {
+            16 => sp800_108_run_counter::<cmac::Cmac<aes::Aes128>>(base_key, segs, key_len),
+            24 => sp800_108_run_counter::<cmac::Cmac<aes::Aes192>>(base_key, segs, key_len),
+            32 => sp800_108_run_counter::<cmac::Cmac<aes::Aes256>>(base_key, segs, key_len),
+            _ => Err(CKR_KEY_SIZE_RANGE),
+        },
         _ => Err(CKR_MECHANISM_PARAM_INVALID),
     }
 }
@@ -5388,6 +5403,13 @@ fn sp800_108_feedback_kbkdf(
         CKM_SHA3_512_HMAC => {
             sp800_108_run_feedback::<Hmac<sha3::Sha3_512>>(base_key, iv, segs, key_len)
         }
+        // AES-CMAC PRF — the AES variant is fixed by the base key length.
+        CKM_AES_CMAC => match base_key.len() {
+            16 => sp800_108_run_feedback::<cmac::Cmac<aes::Aes128>>(base_key, iv, segs, key_len),
+            24 => sp800_108_run_feedback::<cmac::Cmac<aes::Aes192>>(base_key, iv, segs, key_len),
+            32 => sp800_108_run_feedback::<cmac::Cmac<aes::Aes256>>(base_key, iv, segs, key_len),
+            _ => Err(CKR_KEY_SIZE_RANGE),
+        },
         _ => Err(CKR_MECHANISM_PARAM_INVALID),
     }
 }
@@ -5901,13 +5923,15 @@ pub fn C_DeriveKey(
                     Some(v) => v,
                     None => return CKR_ARGUMENTS_BAD,
                 };
-                let p_param = *((p_mechanism as *const usize).add(1)) as usize as *const u32;
+                // CK_SP800_108_KDF_PARAMS — CK_ULONG/pointer fields at native
+                // width: prfType, ulNumberOfDataParams, pDataParams.
+                let p_param = *((p_mechanism as *const usize).add(1)) as *const usize;
                 if p_param.is_null() {
                     return CKR_ARGUMENTS_BAD;
                 }
-                let prf_type = *p_param.add(0);
-                let num_segs = *p_param.add(1) as usize;
-                let p_segs = *p_param.add(2) as usize as *const u32;
+                let prf_type = *p_param.add(0) as u32;
+                let num_segs = *p_param.add(1);
+                let p_segs = *p_param.add(2) as *const usize;
                 // SP 800-108 §4.1 / PKCS#11 §6.x — process the data params IN
                 // ORDER. Supported segment types: ITERATION_VARIABLE (counter
                 // at caller-specified width/endianness), DKM_LENGTH ([L]
@@ -5929,15 +5953,18 @@ pub fn C_DeriveKey(
                     Some(v) => v,
                     None => return CKR_ARGUMENTS_BAD,
                 };
-                let p_param = *((p_mechanism as *const usize).add(1)) as usize as *const u32;
+                // CK_SP800_108_FEEDBACK_KDF_PARAMS — CK_ULONG/pointer fields at
+                // native width: prfType, ulNumberOfDataParams, pDataParams,
+                // ulIVLen, pIV.
+                let p_param = *((p_mechanism as *const usize).add(1)) as *const usize;
                 if p_param.is_null() {
                     return CKR_ARGUMENTS_BAD;
                 }
-                let prf_type = *p_param.add(0);
-                let num_segs = *p_param.add(1) as usize;
-                let p_segs = *p_param.add(2) as usize as *const u32;
-                let iv_len = *p_param.add(3) as usize;
-                let iv_ptr = *p_param.add(4) as usize as *const u8;
+                let prf_type = *p_param.add(0) as u32;
+                let num_segs = *p_param.add(1);
+                let p_segs = *p_param.add(2) as *const usize;
+                let iv_len = *p_param.add(3);
+                let iv_ptr = *p_param.add(4) as *const u8;
                 let iv = if !iv_ptr.is_null() && iv_len > 0 {
                     std::slice::from_raw_parts(iv_ptr, iv_len).to_vec()
                 } else {
