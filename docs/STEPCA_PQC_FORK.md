@@ -156,34 +156,44 @@ $ openssl s_client -connect 127.0.0.1:9443 -CAfile root.crt </dev/null
   the provisioner layer is pure authorization.
 - Verified end-to-end from a **pristine v0.30.2 clone** (`make build GOFLAGS=""`).
 
-## 7. Boundary (Go / ecosystem — not this fork)
+## 7. Clients (ecosystem note)
 
-Go's `crypto/tls` + `crypto/x509` cannot **verify** an ML-DSA chain, so Go-based
-clients (the `step` CLI, `lego`) and LibreSSL (macOS `curl`) cannot complete an
-issuance/bootstrap flow against this server — **OpenSSL 3.5+ can** (shown above).
-This is a client-tooling gap, independent of the server, which issues correctly.
-The hand-assembled `signatureAlgorithm`/SPKI (same approach as the strongSwan PQC
+ML-DSA chain *verification* needs OpenSSL ≥ 3.5. The **pqc-network image ships
+`curl 8.5.0` linked against the custom OpenSSL 3.6.2** (`libssl.so.3 =>
+/usr/local/ssl/lib`), so **plain `curl --cacert root.crt https://…` verifies the
+ML-DSA chain in-container** (confirmed against the live server, §6). What does
+*not* work: Go's `crypto/tls`+`crypto/x509` (the `step` CLI, `lego`) and LibreSSL
+(e.g. the macOS system curl) — they can't verify ML-DSA chains. This is purely a
+client-side ecosystem gap; the server issues correctly regardless. The
+hand-assembled `signatureAlgorithm`/SPKI (same approach as the strongSwan PQC
 patch) exists because the Go stdlib has no ML-DSA support; ML-DSA in X.509 is
 still landing in IETF LAMPS (`draft-ietf-lamps-dilithium-certificates`), though
-the OID `2.16.840.1.101.3.4.3.18` (NIST CSOR) is stable.
+the OIDs `2.16.840.1.101.3.4.3.17/18/19` (NIST CSOR) are stable.
 
 ## 8. Remaining work
 
-| Item | Status / Effort |
-|------|-----------------|
-| ML-DSA-44/87 parameter sets | ✅ done (§3) |
+| Item | Status |
+|------|--------|
+| ML-DSA-44/87 parameter sets | ✅ done (§3); verified in-container |
 | Selectable leaf **subject-key** algorithm (CSR key selection) | ✅ done — `-leaf-algo`; any ML-DSA set or EC |
-| In-sandbox server-mode demo (`tests/18b_test_stepca_server.sh` + `/api/run/stepca-server`) | ✅ done; verifies the live chain with an OpenSSL-3.6 client |
+| In-sandbox server-mode demo (`tests/18b_test_stepca_server.sh` + `/api/run/stepca-server`) | ✅ done; in-container chain verified by **curl (OpenSSL 3.6.2)** |
+| Full pqc-network `docker build` + in-container scenario run | ✅ done (see §9) |
 | Issuing leaves whose subject key is ML-DSA **from an externally-submitted CSR** | ⬜ blocked: Go can't parse an ML-DSA CSR SPKI (we self-generate the leaf key; classical CSRs work) |
-| `docker build` of the full pqc-network image + in-container scenario run | in progress (Linux image build) |
 
-## 9. Status
+## 9. Status — validated in the production Linux image
 
-Patch verified to apply cleanly to a pristine v0.30.2 clone and to build
-(`make build` CGO=0 and `make build GOFLAGS=""` CGO=1 for step-ca; `CGO_ENABLED=1`
-for `mldsa-issue`), pass the unit test, issue **fully post-quantum, HSM-backed**
-ML-DSA-44/65/87 chains that OpenSSL 3.6 verifies, and run as a **live `step-ca`
-server** on the HSM-backed ML-DSA CA (HTTPS + ACME, openssl-verified). Sandbox
-scenario 18 is wired to the issuance path (HSM-first, honest fallbacks);
-`tests/18b` boots the live server in-image. No push, no PR, no `pqctoday-org`
+Built the full `pqc-network` image (`docker compose build`, Debian/aarch64,
+step-ca via `make build GOFLAGS=""`). In-container results:
+
+- **Scenario 18 (issuance):** `mldsa-issue -hsm` → `hsm_backed:true`,
+  `chain_verified:true`, `_simulated:false`, ML-DSA-65 from the softhsmv3 token;
+  classical mode → ECDSA-P256, verified.
+- **Scenario 18b (live server):** the forked `step-ca` boots on the HSM-backed
+  ML-DSA CA via the `mldsahsm` KMS and serves HTTPS + ACME; the chain is verified
+  by **`curl (OpenSSL 3.6.2)`** in-container — `server_boot:true`,
+  `chain_verified:true`, `acme_directory_ok:true` — for both ML-DSA-65 and
+  ML-DSA-87 issuing CAs.
+
+Also verified from a pristine v0.30.2 clone (apply → build both CGO modes → unit
+test → openssl-verified chains, software + HSM). No push, no PR, no `pqctoday-org`
 repo.
