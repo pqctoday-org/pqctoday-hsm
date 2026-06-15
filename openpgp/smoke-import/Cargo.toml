@@ -1,0 +1,29 @@
+# SPDX-License-Identifier: CC0
+#
+# P0-SEQUOIA-PQC-05 — composite-half PRIVATE-KEY IMPORT probe.
+#
+# Proves the seed -> PKCS#8 DER -> softhsmv3 C_CreateObject -> C_Sign/C_Decap
+# pipeline that the composite `upload_key` path (upload.rs, plan §5 custody)
+# relies on. sequoia stores each composite PQC half as a *seed* (ML-DSA xi = 32 B,
+# ML-KEM d||z = 64 B). softhsmv3 reconstructs an ML-DSA/ML-KEM private key from
+# CKA_VALUE interpreted as PKCS#8 DER (OSSLMLDSAPrivateKey::createOSSLKey ->
+# d2i_PKCS8_PRIV_KEY_INFO). So importing a composite half = build the OpenSSL
+# EVP_PKEY from the seed and DER-encode PKCS#8, then store as CKA_VALUE.
+#
+# This probe does exactly that conversion (via the `openssl` crate's
+# PKey::private_key_from_seed + private_key_to_pkcs8) and confirms softhsmv3 then
+# signs (ML-DSA) / decapsulates (ML-KEM) with the imported object.
+#
+# Standalone crate (own [workspace]) so its dep set does not touch the bridge lock.
+[workspace]
+
+[package]
+name = "smoke-import"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+cryptoki = "0.12"
+openssl = "0.10"
+anyhow = "1"
