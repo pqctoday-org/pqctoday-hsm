@@ -302,7 +302,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let vc = cert.with_policy(&sp, None)?;
             let user_id = vc.primary_userid()?;
 
-            let cn = String::from_utf8_lossy(user_id.value());
+            // sequoia 2.x: reach the UserID through .userid() before .value()
+            // (plan §3 — amalgamation API churn).
+            let cn = String::from_utf8_lossy(user_id.userid().value());
 
             let subkey = if let Some(fp) = fp {
                 let fp = Fingerprint::from_str(&fp)?;
@@ -316,7 +318,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .into());
             };
 
-            log::info!("will upload {} to id {id}", subkey.fingerprint());
+            // sequoia 2.x: fingerprint() lives on the Key, reached via .key()
+            // (plan §3).
+            log::info!("will upload {} to id {id}", subkey.key().fingerprint());
 
             let mut pkcs11 = Op11::open(&args.module)?;
             let slot = pkcs11.slot(&serial)?;
@@ -333,12 +337,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 session.login_so(&so_pin)?;
             }
 
-            session.upload_key(&[id], &subkey, &cn)?;
+            session.upload_key(&[id], subkey.key(), &cn)?;
 
             println!();
             println!(
                 "Uploaded component key {}\nto serial '{}', PKCS#11 slot {}",
-                subkey.fingerprint(),
+                subkey.key().fingerprint(),
                 serial,
                 id
             );
@@ -366,7 +370,8 @@ fn get_subkey_by_fp(
         .secret()
         .alive()
         .revoked(false)
-        .filter(|c| c.fingerprint() == fp);
+        // sequoia 2.x: fingerprint() is on the Key, via .key() (plan §3).
+        .filter(|c| c.key().fingerprint() == fp);
 
     // Only return key if we found *exactly* one match for the requested functionality.
     let mut vkas: Vec<_> = valid_ka.collect();

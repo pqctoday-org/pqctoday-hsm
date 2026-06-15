@@ -86,8 +86,10 @@ pub(crate) fn sign_on_card(
     let message = sequoia_openpgp::serialize::stream::Armorer::new(message).build()?;
 
     // Now, create a signer that emits the signature(s).
-    let mut signer = sequoia_openpgp::serialize::stream::Signer::new(message, op11kp);
-    signer = signer.hash_algo(HashAlgorithm::SHA512)?;
+    // sequoia 2.x: Signer::new returns Result; hash_algo returns Result<Self>
+    // (plan §3, errors 5 & 6).
+    let signer = sequoia_openpgp::serialize::stream::Signer::new(message, op11kp)?;
+    let signer = signer.hash_algo(HashAlgorithm::SHA512)?;
     let mut signer = signer.detached().build()?;
 
     // Process all input data.

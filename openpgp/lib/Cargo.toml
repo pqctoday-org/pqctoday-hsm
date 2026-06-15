@@ -13,6 +13,10 @@ edition = "2021"
 [dependencies]
 anyhow = "1"
 chrono = "0.4"
+# clap is needed by the inlined x509 module: PgpKeyType derives ValueEnum
+# (so the CLI can accept it as a --pkt argument). Was a dep of
+# openpgp-x509-sequoia before inlining (plan §2.3).
+clap = { version = "4", features = ["derive"] }
 log = "0.4"
 
 # openpgp-x509-sequoia (0.2.0, abandoned, sequoia-1.x-pinned) is inlined into
