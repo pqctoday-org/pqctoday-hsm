@@ -405,6 +405,24 @@ impl Op11Session {
         key: &Key<SecretParts, UnspecifiedRole>,
         common_name: &str,
     ) -> Result<()> {
+        // Composite PQC keys (MLDSA65_Ed25519 / MLKEM768_X25519) custody TWO
+        // private halves; provision them through the dedicated two-object path
+        // (plan §4/§5). The classical X.509 self-sign metadata flow below is
+        // RSA/ECC-only (AlgorithmId + Mechanism::{RsaPkcs,Ecdsa}) and cannot sign
+        // with a PQC key, so composite keys skip it — the bridge resolves a
+        // composite keypair by CKA_KEY_TYPE in `keypair()`, not via an X.509
+        // cert. (Composite X.509 metadata encoding is future work; see report.)
+        if matches!(
+            key.pk_algo(),
+            PublicKeyAlgorithm::MLDSA65_Ed25519
+                | PublicKeyAlgorithm::MLDSA87_Ed448
+                | PublicKeyAlgorithm::MLKEM768_X25519
+                | PublicKeyAlgorithm::MLKEM1024_X448
+        ) {
+            let (_trad, _pqc) = self.upload_composite_private(id, key)?;
+            return Ok(());
+        }
+
         let priv_key = self.upload_private(id, key)?;
 
         let pub_key_info = Self::upload_gen_pki(key)?;
@@ -490,5 +508,216 @@ impl Op11KeyPair {
             pqc: Some(pqc),
             session,
         }
+    }
+}
+
+/// Live HSM integration tests for the composite PQC custody path.
+///
+/// These self-skip (print "SKIP" and pass) unless `OP11_MODULE` is set, so
+/// `cargo test --workspace` stays green on hosts with no softhsmv3 module. Run
+/// them live with, e.g.:
+///
+/// ```bash
+/// SOFTHSM2_CONF=build/smoke-softhsm2.conf \
+/// OP11_MODULE=build/src/lib/libsofthsmv3.dylib OP11_LABEL=test OP11_PIN=1234 \
+///   cargo test -p openpgp-pkcs11-sequoia --lib live_composite -- --nocapture --test-threads=1
+/// ```
+#[cfg(test)]
+mod live_composite_tests {
+    use super::*;
+    use sequoia_openpgp::cert::{CertBuilder, CipherSuite};
+    use sequoia_openpgp::packet::Packet;
+    use sequoia_openpgp::parse::Parse;
+    use sequoia_openpgp::policy::StandardPolicy;
+    use sequoia_openpgp::types::PublicKeyAlgorithm;
+    use sequoia_openpgp::{PacketPile, Profile};
+
+    /// draft-ietf-openpgp-pqc v17 codepoint for MLDSA65_Ed25519.
+    const EXPECTED_ALGO_ID: u8 = 30;
+
+    struct Env {
+        module: String,
+        label: String,
+        pin: String,
+    }
+
+    fn env() -> Option<Env> {
+        let module = std::env::var("OP11_MODULE").ok()?;
+        Some(Env {
+            module,
+            label: std::env::var("OP11_LABEL").unwrap_or_else(|_| "test".into()),
+            pin: std::env::var("OP11_PIN").unwrap_or_else(|_| "1234".into()),
+        })
+    }
+
+    /// Open an RW session on the slot whose token has `label`, logged in as user.
+    fn open_session(e: &Env) -> Op11Session {
+        let mut op11 = Op11::open(&e.module).expect("Op11::open");
+        let pkcs11 = op11.pkcs11();
+        let slot = pkcs11
+            .get_slots_with_token()
+            .expect("get_slots_with_token")
+            .into_iter()
+            .find(|s| {
+                pkcs11
+                    .get_token_info(*s)
+                    .map(|ti| ti.label().trim() == e.label)
+                    .unwrap_or(false)
+            })
+            .unwrap_or_else(|| panic!("no slot with token label '{}'", e.label));
+        let session = pkcs11.open_rw_session(slot).expect("open_rw_session");
+        let op11_session = Op11Session { session };
+        op11_session.login(&e.pin).expect("login");
+        op11_session
+    }
+
+    /// End-to-end composite gate: generate a MLDSA65_Ed25519 v6 cert in software,
+    /// provision its TWO private halves into softhsmv3 via the composite upload
+    /// path, resolve the two custody handles, sign a message through the bridge
+    /// (two C_Sign calls assembled into a composite MPI), then verify the
+    /// signature with a sequoia 2.x verifier and assert it is v6 + algorithm 30.
+    #[test]
+    fn live_composite_mldsa65_ed25519_upload_sign_verify() {
+        let Some(e) = env() else {
+            eprintln!("SKIP live_composite_*: set OP11_MODULE to run against softhsmv3");
+            return;
+        };
+
+        // 1) Software composite cert with a signing subkey + extract that
+        //    subkey's secret. PQC suites require the RFC 9580 (v6) profile.
+        let policy = &StandardPolicy::new();
+        let (cert, _rev) = CertBuilder::new()
+            .set_profile(Profile::RFC9580)
+            .expect("RFC9580 profile")
+            .set_cipher_suite(CipherSuite::MLDSA65_Ed25519)
+            .add_userid("composite-live@pqctoday.test")
+            .add_signing_subkey()
+            .generate()
+            .expect("composite cert generation");
+
+        let signing = cert
+            .keys()
+            .with_policy(policy, None)
+            .alive()
+            .revoked(false)
+            .for_signing()
+            .secret()
+            .next()
+            .expect("signing-capable secret key")
+            .key()
+            .clone();
+        assert_eq!(
+            u8::from(signing.pk_algo()),
+            EXPECTED_ALGO_ID,
+            "test key must be MLDSA65_Ed25519 (algo 30)"
+        );
+        let public: Key<PublicParts, UnspecifiedRole> = signing.clone().parts_into_public();
+
+        // 2) Provision the TWO private halves into softhsmv3. A single logged-in
+        //    session is reused for upload + resolve + sign (PKCS#11 login state
+        //    is per-token, so a second login would return CKR_USER_ALREADY_...).
+        let id = b"\x05composite-live";
+        let sign_session = open_session(&e);
+        sign_session
+            .upload_composite_private(id, &signing)
+            .expect("composite upload");
+
+        // 3) Resolve the two custody handles by CKA_KEY_TYPE (mirrors keypair()).
+        let base = vec![
+            Attribute::Token(true),
+            Attribute::Private(true),
+            Attribute::Sign(true),
+            Attribute::Id(id.to_vec()),
+            Attribute::Class(ObjectClass::PRIVATE_KEY),
+        ];
+        let find_one = |kt: cryptoki::object::KeyType| -> ObjectHandle {
+            let mut tmpl = base.clone();
+            tmpl.push(Attribute::KeyType(kt));
+            let h = sign_session.session.find_objects(&tmpl).expect("find_objects");
+            assert_eq!(h.len(), 1, "expected exactly one {kt:?} handle for id");
+            h[0]
+        };
+        let ed_handle = find_one(cryptoki::object::KeyType::EC_EDWARDS);
+        let mldsa_handle = find_one(cryptoki::object::KeyType::ML_DSA);
+
+        // 4) Build the two-handle composite keypair and sign via the bridge.
+        let kp = Op11KeyPair::new_composite(
+            public,
+            ed_handle,
+            mldsa_handle,
+            Arc::new(Mutex::new(sign_session.session)),
+        );
+        let msg = b"pqctoday composite live: HSM-backed MLDSA65_Ed25519 sign+verify";
+        let mut sig = Vec::new();
+        crate::signer::sign_on_card(kp, &mut &msg[..], &mut sig).expect("sign_on_card");
+
+        // 5a) Byte-level wire assertion: parse the signature packet, assert v6 +
+        //     algorithm 30 (the on-the-wire proof, strictly the spike's check on
+        //     an HSM-produced signature).
+        let pile = PacketPile::from_bytes(&sig).expect("re-parse signature");
+        let mut found = None;
+        for p in pile.descendants() {
+            if let Packet::Signature(s) = p {
+                found = Some((s.version(), s.pk_algo()));
+            }
+        }
+        let (version, pk_algo) = found.expect("a Signature packet");
+        assert_eq!(version, 6, "composite signature must be a v6 packet (RFC 9580)");
+        assert_eq!(
+            u8::from(pk_algo),
+            EXPECTED_ALGO_ID,
+            "HSM composite signature pk_algo must be 30 (MLDSA65_Ed25519)"
+        );
+        assert_eq!(pk_algo, PublicKeyAlgorithm::MLDSA65_Ed25519);
+
+        // 5b) Cryptographic interop: a sequoia 2.x verifier validates the
+        //     HSM-produced signature against the same cert.
+        struct Helper(Cert);
+        impl sequoia_openpgp::parse::stream::VerificationHelper for Helper {
+            fn get_certs(
+                &mut self,
+                _ids: &[sequoia_openpgp::KeyHandle],
+            ) -> sequoia_openpgp::Result<Vec<Cert>> {
+                Ok(vec![self.0.clone()])
+            }
+            fn check(
+                &mut self,
+                structure: sequoia_openpgp::parse::stream::MessageStructure,
+            ) -> sequoia_openpgp::Result<()> {
+                use sequoia_openpgp::parse::stream::{MessageLayer, VerificationError};
+                let mut good = 0usize;
+                for layer in structure.into_iter() {
+                    if let MessageLayer::SignatureGroup { results } = layer {
+                        for r in results {
+                            match r {
+                                Ok(_) => good += 1,
+                                Err(VerificationError::MissingKey { .. }) => {}
+                                Err(e) => return Err(anyhow::anyhow!("bad signature: {e}")),
+                            }
+                        }
+                    }
+                }
+                if good >= 1 {
+                    Ok(())
+                } else {
+                    Err(anyhow::anyhow!("no good signatures"))
+                }
+            }
+        }
+
+        let mut verifier =
+            sequoia_openpgp::parse::stream::DetachedVerifierBuilder::from_bytes(&sig)
+                .expect("DetachedVerifierBuilder")
+                .with_policy(policy, None, Helper(cert.clone()))
+                .expect("verifier with_policy");
+        verifier
+            .verify_bytes(msg)
+            .expect("sequoia 2.x must verify the HSM-backed composite signature");
+
+        eprintln!(
+            "PASS live_composite: HSM MLDSA65_Ed25519 signature is v6 + algo {EXPECTED_ALGO_ID}, \
+             verified by sequoia 2.x ({} bytes armored)",
+            sig.len()
+        );
     }
 }

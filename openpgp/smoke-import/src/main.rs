@@ -66,11 +66,14 @@ fn main() -> Result<()> {
 
     test_mldsa_import(&session)?;
     test_mlkem_import(&session)?;
+    test_ed25519_import(&session)?;
+    test_x25519_import(&session)?;
 
     println!("\n=== ASSERTION ===");
     println!(
-        "PASS: both composite PQC halves import from seed->PKCS#8 DER and operate in softhsmv3 \
-         (ML-DSA-65 C_Sign 3309 B; ML-KEM-768 decap secret matches encap)."
+        "PASS: all four composite component halves import and operate in softhsmv3 \
+         (ML-DSA-65 C_Sign 3309 B; ML-KEM-768 decap matches encap; Ed25519 C_Sign 64 B; \
+         X25519 ECDH derive 32 B)."
     );
     Ok(())
 }
@@ -199,6 +202,99 @@ fn test_mlkem_import(session: &Session) -> Result<()> {
         );
     }
     println!("    [B] PASS (shared secret = {})", hex(&decap_secret));
+    Ok(())
+}
+
+// DER encoding of the curve OID stored as CKA_EC_PARAMS in softhsmv3
+// (OSSL{ED}PrivateKey::setEC -> byteString2oid).
+const ED25519_OID_DER: &[u8] = &[0x06, 0x03, 0x2B, 0x65, 0x70]; // 1.3.101.112
+const X25519_OID_DER: &[u8] = &[0x06, 0x03, 0x2B, 0x65, 0x6E]; // 1.3.101.110
+
+/// [C] Ed25519 (the MLDSA65_Ed25519 traditional half): import the raw 32-byte
+/// scalar as a CKK_EC_EDWARDS private object and sign — expecting 64 bytes.
+fn test_ed25519_import(session: &Session) -> Result<()> {
+    println!("\n--- [C] Ed25519 import (traditional half of MLDSA65_Ed25519) ---");
+    // Get a real Ed25519 scalar from OpenSSL so the key is valid.
+    let pkey = PKey::generate_ed25519().context("generate Ed25519 failed")?;
+    let raw = pkey.raw_private_key().context("raw_private_key (Ed25519) failed")?;
+    println!("    raw scalar {} B", raw.len());
+
+    let template = vec![
+        Attribute::Class(ObjectClass::PRIVATE_KEY),
+        Attribute::KeyType(KeyType::EC_EDWARDS),
+        Attribute::EcParams(ED25519_OID_DER.to_vec()),
+        Attribute::Value(raw),
+        Attribute::Token(false),
+        Attribute::Private(true),
+        Attribute::Sign(true),
+        Attribute::Label(b"import-ed25519-priv".to_vec()),
+    ];
+    let handle = session
+        .create_object(&template)
+        .context("C_CreateObject(Ed25519 private) failed")?;
+    println!("    C_CreateObject OK -> {handle:?}");
+
+    use cryptoki::mechanism::eddsa::{EddsaParams, EddsaSignatureScheme};
+    let params = EddsaParams::new(EddsaSignatureScheme::Ed25519);
+    let sig = session
+        .sign(&Mechanism::Eddsa(params), handle, b"pqctoday import probe: ed25519")
+        .context("C_Sign(Mechanism::Eddsa) on imported key failed")?;
+    println!("    C_Sign OK -> {} byte signature", sig.len());
+    if sig.len() != 64 {
+        bail!("Ed25519 signature is {} bytes, expected 64", sig.len());
+    }
+    println!("    [C] PASS");
+    Ok(())
+}
+
+/// [D] X25519 (the MLKEM768_X25519 traditional half): import the raw 32-byte
+/// scalar as a CKK_EC_MONTGOMERY private object and ECDH-derive against a peer
+/// public — expecting a 32-byte shared secret.
+fn test_x25519_import(session: &Session) -> Result<()> {
+    println!("\n--- [D] X25519 import (traditional half of MLKEM768_X25519) ---");
+    let pkey = PKey::generate_x25519().context("generate X25519 failed")?;
+    let raw = pkey.raw_private_key().context("raw_private_key (X25519) failed")?;
+    let peer = PKey::generate_x25519().context("generate X25519 peer failed")?;
+    let peer_pub = peer.raw_public_key().context("raw_public_key (X25519 peer) failed")?;
+    println!("    raw scalar {} B, peer pub {} B", raw.len(), peer_pub.len());
+
+    let template = vec![
+        Attribute::Class(ObjectClass::PRIVATE_KEY),
+        Attribute::KeyType(KeyType::EC_MONTGOMERY),
+        Attribute::EcParams(X25519_OID_DER.to_vec()),
+        Attribute::Value(raw),
+        Attribute::Token(false),
+        Attribute::Private(true),
+        Attribute::Derive(true),
+        Attribute::Label(b"import-x25519-priv".to_vec()),
+    ];
+    let handle = session
+        .create_object(&template)
+        .context("C_CreateObject(X25519 private) failed")?;
+    println!("    C_CreateObject OK -> {handle:?}");
+
+    use cryptoki::mechanism::elliptic_curve::{EcKdf, Ecdh1DeriveParams};
+    let params = Ecdh1DeriveParams::new(EcKdf::null(), &peer_pub);
+    let derived = session
+        .derive_key(
+            &Mechanism::Ecdh1Derive(params),
+            handle,
+            &[
+                Attribute::Class(ObjectClass::SECRET_KEY),
+                Attribute::KeyType(KeyType::GENERIC_SECRET),
+                Attribute::Token(false),
+                Attribute::Sensitive(false),
+                Attribute::Extractable(true),
+                Attribute::ValueLen(32u64.into()),
+            ],
+        )
+        .context("C_DeriveKey(Mechanism::Ecdh1Derive) on imported X25519 key failed")?;
+    let shared = read_value(session, derived)?;
+    println!("    C_DeriveKey OK -> {} byte shared secret", shared.len());
+    if shared.len() != 32 {
+        bail!("X25519 ECDH shared secret is {} bytes, expected 32", shared.len());
+    }
+    println!("    [D] PASS (shared = {})", hex(&shared));
     Ok(())
 }
 

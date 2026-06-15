@@ -1,13 +1,40 @@
 use cryptoki::mechanism::Mechanism;
-use cryptoki::object::{Attribute, CertificateType, ObjectClass, ObjectHandle};
+use cryptoki::object::{
+    Attribute, CertificateType, KeyType, MlDsaParameterSetType, MlKemParameterSetType, ObjectClass,
+    ObjectHandle, ParameterSetType,
+};
 use crate::x509::types::{AlgorithmId, PublicKeyInfo};
+use openssl::pkey::{KeyType as OsslKeyType, PKey};
 use p256::elliptic_curve::zeroize::Zeroizing;
 use sequoia_openpgp::crypto::mpi;
 use sequoia_openpgp::packet::key::{SecretKeyMaterial, SecretParts, UnspecifiedRole};
 use sequoia_openpgp::packet::Key;
-use sequoia_openpgp::types::Curve;
+use sequoia_openpgp::types::{Curve, PublicKeyAlgorithm};
 
 use crate::Op11Session;
+
+// DER encoding of the Edwards/Montgomery curve OIDs stored as CKA_EC_PARAMS in
+// softhsmv3 (OSSLEDPrivateKey::setEC -> OSSL::byteString2oid). Proven by the
+// smoke-import probe ([C]/[D]).
+const ED25519_OID_DER: &[u8] = &[0x06, 0x03, 0x2B, 0x65, 0x70]; // 1.3.101.112
+const X25519_OID_DER: &[u8] = &[0x06, 0x03, 0x2B, 0x65, 0x6E]; // 1.3.101.110
+
+/// Turn a raw FIPS deterministic seed (ML-DSA xi, 32 B; ML-KEM d||z, 64 B) into
+/// the PKCS#8 DER softhsmv3 stores as `CKA_VALUE` for an ML-DSA/ML-KEM private
+/// object (OSSL{MLDSA,MLKEM}PrivateKey::createOSSLKey -> d2i_PKCS8_PRIV_KEY_INFO).
+///
+/// sequoia keeps each composite PQC half as a *seed* (see sequoia crypto/mpi.rs
+/// `SecretKeyMaterial::{MLDSA65_Ed25519,MLKEM768_X25519}`); softhsmv3 wants the
+/// reconstructed PKCS#8 key. OpenSSL >= 3.5 derives the key reproducibly from the
+/// seed via `PKey::private_key_from_seed`. Proven end-to-end by the smoke-import
+/// probe ([A]/[B]). See PQC_PGP_IMPLEMENTATION_PLAN.md §5.
+fn seed_to_pkcs8_der(seed: &[u8], key_type: OsslKeyType) -> anyhow::Result<Vec<u8>> {
+    let pkey = PKey::private_key_from_seed(None, key_type, None, seed).map_err(|e| {
+        anyhow::anyhow!("PKey::private_key_from_seed failed (needs OpenSSL >= 3.5): {e}")
+    })?;
+    pkey.private_key_to_pkcs8()
+        .map_err(|e| anyhow::anyhow!("private_key_to_pkcs8 failed: {e}"))
+}
 
 impl Op11Session {
     pub(crate) fn upload_private(
@@ -142,6 +169,143 @@ impl Op11Session {
         log::debug!("created priv_key object {:x?}", priv_key);
 
         Ok(priv_key)
+    }
+
+    /// Store the TWO component private halves of a composite PQC key as two
+    /// PKCS#11 private-key objects that share one `CKA_ID`, tagged with the
+    /// `CKA_KEY_TYPE`s `keypair()` resolves by (plan §4/§5 two-handle custody):
+    ///
+    /// - `MLDSA65_Ed25519`: an Ed25519 (`CKK_EC_EDWARDS`) object + an ML-DSA-65
+    ///   (`CKK_ML_DSA`) object.
+    /// - `MLKEM768_X25519`: an X25519 (`CKK_EC_MONTGOMERY`) object + an
+    ///   ML-KEM-768 (`CKK_ML_KEM`) object.
+    ///
+    /// The traditional half is imported as a raw scalar (`CKA_VALUE`) + curve OID
+    /// (`CKA_EC_PARAMS`); the PQC half is imported as PKCS#8 DER derived from
+    /// sequoia's stored seed (`seed_to_pkcs8_der`). Every shape here is proven
+    /// against live softhsmv3 by the `smoke-import` probe. Returns
+    /// `(traditional_handle, pqc_handle)`.
+    pub(crate) fn upload_composite_private(
+        &self,
+        id: &[u8],
+        key: &Key<SecretParts, UnspecifiedRole>,
+    ) -> anyhow::Result<(ObjectHandle, ObjectHandle)> {
+        let unenc = if let SecretKeyMaterial::Unencrypted(ref u) = key.secret() {
+            u
+        } else {
+            return Err(anyhow::anyhow!(
+                "composite upload: private key material is encrypted"
+            ));
+        };
+        let secret = unenc.map(|mpis| mpis.clone());
+
+        match (key.pk_algo(), secret) {
+            (
+                PublicKeyAlgorithm::MLDSA65_Ed25519,
+                mpi::SecretKeyMaterial::MLDSA65_Ed25519 { eddsa, mldsa },
+            ) => {
+                // Traditional: Ed25519 raw 32-byte scalar.
+                let trad = self.create_eddsa_object(
+                    id,
+                    KeyType::EC_EDWARDS,
+                    ED25519_OID_DER,
+                    &eddsa,
+                    Attribute::Sign(true),
+                    b"mldsa65-ed25519-eddsa",
+                )?;
+                // PQC: ML-DSA-65 seed (xi, 32 B) -> PKCS#8 DER.
+                let der = seed_to_pkcs8_der(&mldsa, OsslKeyType::ML_DSA_65)?;
+                let pqc = self.create_ml_object(
+                    id,
+                    KeyType::ML_DSA,
+                    MlDsaParameterSetType::ML_DSA_65.into(),
+                    der,
+                    Attribute::Sign(true),
+                    b"mldsa65-ed25519-mldsa",
+                )?;
+                Ok((trad, pqc))
+            }
+            (
+                PublicKeyAlgorithm::MLKEM768_X25519,
+                mpi::SecretKeyMaterial::MLKEM768_X25519 { ecdh, mlkem },
+            ) => {
+                // Traditional: X25519 raw 32-byte scalar.
+                let trad = self.create_eddsa_object(
+                    id,
+                    KeyType::EC_MONTGOMERY,
+                    X25519_OID_DER,
+                    &ecdh,
+                    Attribute::Derive(true),
+                    b"mlkem768-x25519-ecdh",
+                )?;
+                // PQC: ML-KEM-768 seed (d||z, 64 B) -> PKCS#8 DER.
+                let der = seed_to_pkcs8_der(&mlkem, OsslKeyType::ML_KEM_768)?;
+                let pqc = self.create_ml_object(
+                    id,
+                    KeyType::ML_KEM,
+                    MlKemParameterSetType::ML_KEM_768.into(),
+                    der,
+                    Attribute::Decapsulate(true),
+                    b"mlkem768-x25519-mlkem",
+                )?;
+                Ok((trad, pqc))
+            }
+            (algo, _) => Err(anyhow::anyhow!(
+                "composite upload: unsupported / mismatched composite algorithm {algo:?}"
+            )),
+        }
+    }
+
+    /// Create an Edwards/Montgomery private-key object (raw scalar + curve OID).
+    fn create_eddsa_object(
+        &self,
+        id: &[u8],
+        key_type: KeyType,
+        oid_der: &[u8],
+        scalar: &[u8],
+        usage: Attribute,
+        label: &[u8],
+    ) -> anyhow::Result<ObjectHandle> {
+        let template = vec![
+            Attribute::Class(ObjectClass::PRIVATE_KEY),
+            Attribute::Id(id.to_vec()),
+            Attribute::KeyType(key_type),
+            Attribute::EcParams(oid_der.to_vec()),
+            Attribute::Value(scalar.to_vec()),
+            usage,
+            Attribute::Token(true),
+            Attribute::Private(true),
+            Attribute::Label(label.to_vec()),
+        ];
+        let handle = self.session.create_object(&template)?;
+        log::debug!("created composite traditional object {:x?}", handle);
+        Ok(handle)
+    }
+
+    /// Create an ML-DSA/ML-KEM private-key object (PKCS#8 DER + parameter set).
+    fn create_ml_object(
+        &self,
+        id: &[u8],
+        key_type: KeyType,
+        param_set: ParameterSetType,
+        pkcs8_der: Vec<u8>,
+        usage: Attribute,
+        label: &[u8],
+    ) -> anyhow::Result<ObjectHandle> {
+        let template = vec![
+            Attribute::Class(ObjectClass::PRIVATE_KEY),
+            Attribute::Id(id.to_vec()),
+            Attribute::KeyType(key_type),
+            Attribute::ParameterSet(param_set),
+            Attribute::Value(pkcs8_der),
+            usage,
+            Attribute::Token(true),
+            Attribute::Private(true),
+            Attribute::Label(label.to_vec()),
+        ];
+        let handle = self.session.create_object(&template)?;
+        log::debug!("created composite PQC object {:x?}", handle);
+        Ok(handle)
     }
 
     /// Generate PublicKeyInfo

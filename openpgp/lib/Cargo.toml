@@ -33,6 +33,12 @@ p384 = "0.13"
 p521 = "0.13"
 picky-asn1-der = "0.4"
 picky-asn1-x509 = "0.9"
+# rust-openssl: used by the composite upload path to turn a sequoia-supplied PQC
+# *seed* (ML-DSA xi / ML-KEM d||z) into the PKCS#8 DER softhsmv3 imports as
+# CKA_VALUE (PKey::private_key_from_seed + private_key_to_pkcs8, OpenSSL >= 3.5).
+# Distinct from the `ossl` crate sequoia's crypto-openssl backend uses; both
+# dynamically link the same libcrypto. See PQC_PGP_IMPLEMENTATION_PLAN.md §5.
+openssl = "0.10"
 rsa = "0.7"
 sha2 = "0.10"
 # ML-KEM composite KEM combiner (plan §4, draft-ietf-openpgp-pqc §4.2.1):
