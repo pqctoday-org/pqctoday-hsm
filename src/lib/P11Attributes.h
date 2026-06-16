@@ -1231,8 +1231,10 @@ protected:
 class P11AttrValueLen : public P11Attribute
 {
 public:
-	// Constructor
-	P11AttrValueLen(OSObject* inobject, CK_ULONG inchecks = 0) : P11Attribute(inobject) { type = CKA_VALUE_LEN; size = sizeof(CK_ULONG); checks = ck2|ck3|inchecks; }
+	// Constructor. Default checks ck2|ck3 (MUST NOT for C_CreateObject; MUST for
+	// C_GenerateKey) match AES / generic-secret. Fixed-length keys (e.g. ChaCha20)
+	// pass ck2 alone so CKA_VALUE_LEN is readable + accepted but OPTIONAL for keygen.
+	P11AttrValueLen(OSObject* inobject, CK_ULONG inchecks = ck2|ck3) : P11Attribute(inobject) { type = CKA_VALUE_LEN; size = sizeof(CK_ULONG); checks = inchecks; }
 
 protected:
 	// Set the default value of the attribute

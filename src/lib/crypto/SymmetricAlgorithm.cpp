@@ -121,7 +121,11 @@ bool SymmetricAlgorithm::decryptUpdate(const ByteString& encryptedData, ByteStri
 	}
 
 	currentBufferSize += encryptedData.size();
-	if (currentCipherMode == SymMode::GCM) {
+	// AEAD modes buffer the whole ciphertext (incl. trailing tag) until final,
+	// where the tag is split off and verified. ChaCha20-Poly1305 is AEAD too —
+	// gating only on GCM left its buffer empty, so decryptFinal could not locate
+	// the tag and returned CKR_ENCRYPTED_DATA_INVALID.
+	if (currentCipherMode == SymMode::GCM || currentCipherMode == SymMode::CHACHA_POLY1305) {
 		currentAEADBuffer += encryptedData;
 	}
 
