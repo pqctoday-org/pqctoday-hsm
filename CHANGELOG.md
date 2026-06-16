@@ -8,6 +8,35 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — C++ ChaCha20-Poly1305 full AEAD round-trip + spec CKA_VALUE_LEN (2026-06-15)
+
+`CKM_CHACHA20_POLY1305` was bolted onto the GCM AEAD path with several GCM-only /
+AES-shaped gates left unadjusted, so an encrypt→decrypt round-trip failed and key
+generation rejected the spec-mandated template attribute. Four scoped fixes, all
+in the C++ engine; native `p11_v32_compliance_test -c all` stays **315 / 0 / 0**
+and the hub dual-engine ACVP matrix is fully green (C++ 54/54, Rust 55/55). The
+1452-case KMIP interop + KAT replay stays **15/15**.
+
+- **`P11Objects.cpp` — register `CKA_VALUE_LEN` on `P11ChaCha20SecretKeyObj`.**
+  PKCS#11 v3.2 §6.58.2 Table 254 defines it for ChaCha20; without it
+  `C_GenerateKey` rejected the keygen template with `CKR_ATTRIBUTE_TYPE_INVALID`.
+  Registered `ck2`-only (NOT `ck3`) — ChaCha20 is fixed 256-bit so the attribute
+  is OPTIONAL for keygen (the AES default `ck2|ck3` would wrongly make it
+  mandatory and break the conformance suite's keygen test). `P11AttrValueLen`'s
+  constructor now takes its checks as a parameter (default `ck2|ck3`, so AES /
+  generic-secret are unchanged).
+- **`crypto/SymmetricAlgorithm.cpp` `decryptUpdate`** — buffer the ciphertext into
+  `currentAEADBuffer` for `CHACHA_POLY1305` too (was GCM-only); otherwise the
+  buffer is empty and `decryptFinal` cannot locate the tag →
+  `CKR_ENCRYPTED_DATA_INVALID`.
+- **`crypto/OSSLEVPSymmetricAlgorithm.cpp` `decryptUpdate`** — defer plaintext and
+  withhold the tag for `CHACHA_POLY1305` too (was GCM-only).
+
+GCM and all non-ChaCha20 paths are untouched (changes are strictly
+`CHACHA_POLY1305`/ChaCha20-scoped). AES-GCM in the conformance harness is
+decrypt-KAT-only, so the AEAD encrypt+round-trip path was exercised only by
+ChaCha20 — which is why these defects were latent.
+
 ### Fixed — softhsmrustv3 native PKCS#11 v3.2 C-ABI compliance: 28 → 315 PASS / 0 FAIL (2026-06-15)
 
 The Rust engine's C ABI (`rust/src/ck_abi.rs` + `ffi.rs`) was architecturally
