@@ -37,6 +37,7 @@
 #define _SOFTHSM_V2_OSSLCRYPTOFACTORY_H
 
 #include "config.h"
+#include "LeakingPtr.h"
 #include "CryptoFactory.h"
 #include "SymmetricAlgorithm.h"
 #include "AsymmetricAlgorithm.h"
@@ -76,8 +77,8 @@ private:
 	// Constructor
 	OSSLCryptoFactory();
 
-	// The one-and-only instance
-	static std::unique_ptr<OSSLCryptoFactory> instance;
+	// The one-and-only instance (leaked at process exit — see LeakingPtr.h)
+	static LeakingPtr<OSSLCryptoFactory> instance;
 
 	// The one-and-only RNG instance
 	RNG* rng;

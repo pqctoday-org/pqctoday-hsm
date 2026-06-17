@@ -33,6 +33,7 @@
  *****************************************************************************/
 
 #include "config.h"
+#include "LeakingPtr.h"
 #include "log.h"
 #include "cryptoki.h"
 #include "SessionObjectStore.h"
@@ -245,12 +246,8 @@ private:
 	// Constructor
 	SoftHSM();
 
-	// The one-and-only instance
-#ifdef HAVE_CXX11
-	static std::unique_ptr<SoftHSM> instance;
-#else
-	static std::auto_ptr<SoftHSM> instance;
-#endif
+	// The one-and-only instance (leaked at process exit — see LeakingPtr.h)
+	static LeakingPtr<SoftHSM> instance;
 
 	// Is the SoftHSM PKCS #11 library initialised?
 	bool isInitialised;
