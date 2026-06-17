@@ -1,0 +1,25 @@
+# Academic papers — large binaries, re-downloadable (see papers/README via TEST_PLAN refs)
+papers/
+
+# Python / chart caches
+**/__pycache__/
+**/*.svg.png
+bench/logs/
+
+# Compiled test binaries (rebuild from source: each .swift / refgen *.c)
+bench/mlxpqc_bench
+mldsa/gpu/mldsa_keygen
+mldsa/gpu/mldsa_sign
+mldsa/gpu/mldsa_verify
+mldsa/gpu/mldsa_ntt
+mldsa/gpu/mldsa_shake
+mldsa/gpu/mldsa_sample
+mldsa/gpu/mldsa_matvec
+mldsa/gpu/mldsa_signprim
+mldsa/gpu/refgen/ref_harness
+mldsa/gpu/refgen/sign_harness
+mldsa/gpu/refgen/sk_harness
+mldsa/gpu/refgen/bench
+mldsa/gpu/refgen/bench_verify
+mldsa/gpu/refgen/bench_sign
+*.o

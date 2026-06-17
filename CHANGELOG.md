@@ -8,6 +8,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — mlxpqc: standalone ML-DSA-65 Metal acceleration benchmark (2026-06-17)
+
+New self-contained `mlxpqc/` subfolder — a small, **independent** research/benchmark
+tool for GPU-accelerated ML-DSA-65 on Apple Metal. It does not touch the softhsm
+library or the hub; it is reference ML-DSA code + a Metal port + benchmarks, with
+its own `NOTICE.md`/`LICENSE`. The Apple corecrypto reference (`arm/`) is
+`.gitignore`d — its license forbids redistribution, so it is never committed.
+
 ### Fixed — pkcs11-provider no longer crashes the host at process exit (2026-06-17)
 
 A program that loads softhsmv3 as an OpenSSL provider (our pkcs11-provider) could
