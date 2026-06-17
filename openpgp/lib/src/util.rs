@@ -3,7 +3,7 @@ use std::time::SystemTime;
 use anyhow::Result;
 use cryptoki::object::{Attribute, AttributeType, ObjectClass};
 use cryptoki::session::Session;
-use openpgp_x509_sequoia::types::PgpKeyType;
+use crate::x509::types::PgpKeyType;
 use sequoia_openpgp::crypto::mpi;
 use sequoia_openpgp::packet::key::{Key4, PublicParts, UnspecifiedRole};
 use sequoia_openpgp::types::{HashAlgorithm, PublicKeyAlgorithm, SymmetricAlgorithm};

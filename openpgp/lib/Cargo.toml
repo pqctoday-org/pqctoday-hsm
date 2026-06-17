@@ -13,18 +13,42 @@ edition = "2021"
 [dependencies]
 anyhow = "1"
 chrono = "0.4"
+# clap is needed by the inlined x509 module: PgpKeyType derives ValueEnum
+# (so the CLI can accept it as a --pkt argument). Was a dep of
+# openpgp-x509-sequoia before inlining (plan §2.3).
+clap = { version = "4", features = ["derive"] }
 log = "0.4"
 
-openpgp-x509-sequoia = "0.2"
+# openpgp-x509-sequoia (0.2.0, abandoned, sequoia-1.x-pinned) is inlined into
+# src/x509.rs — see PQC_PGP_IMPLEMENTATION_PLAN.md §2.3.
 
 asn1-rs = "0.5"
-cryptoki = "0.4"
+# cryptoki 0.12 is required for native ML-DSA (Mechanism::MlDsa -> CKM_ML_DSA);
+# 0.4 has no PQC mechanism at all. See plan §5.
+cryptoki = "0.12"
+cookie-factory = "0.3"
+elliptic-curve = "0.13"
 p256 = "0.13"
 p384 = "0.13"
 p521 = "0.13"
 picky-asn1-der = "0.4"
 picky-asn1-x509 = "0.9"
+# rust-openssl: used by the composite upload path to turn a sequoia-supplied PQC
+# *seed* (ML-DSA xi / ML-KEM d||z) into the PKCS#8 DER softhsmv3 imports as
+# CKA_VALUE (PKey::private_key_from_seed + private_key_to_pkcs8, OpenSSL >= 3.5).
+# Distinct from the `ossl` crate sequoia's crypto-openssl backend uses; both
+# dynamically link the same libcrypto. See PQC_PGP_IMPLEMENTATION_PLAN.md §5.
+openssl = "0.10"
 rsa = "0.7"
-sequoia-openpgp = "1.21"
+sha2 = "0.10"
+# ML-KEM composite KEM combiner (plan §4, draft-ietf-openpgp-pqc §4.2.1):
+# SHA3-256 for the KEK derivation and RFC 3394 AES key-unwrap for the ESK.
+sha3 = "0.10"
+aes-kw = { version = "0.2", features = ["std"] }
+aes = "0.8"
+zeroize = "1"
+# Sequoia pqc branch (2.2.0-pqc.1), pinned commit. crypto-openssl is mandatory:
+# the default Nettle backend has no ML-DSA/ML-KEM. See plan §1/§2.1.
+sequoia-openpgp = { git = "https://gitlab.com/sequoia-pgp/sequoia", rev = "3d05138bf1536e63886e7a079fa50aeb080ab573", default-features = false, features = ["crypto-openssl", "compression"] }
 x509 = "0.2"
 x509-certificate = "0.20"

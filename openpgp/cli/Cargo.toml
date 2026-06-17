@@ -13,10 +13,15 @@ edition = "2021"
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive", "cargo", "help"] }
-cryptoki = "0.4"
+# cryptoki 0.12 (native ML-DSA) — must match the lib crate's version so the
+# workspace resolves a single cryptoki. See plan §2.2/§5.
+cryptoki = "0.12"
 env_logger = "0.10"
 log = "0.4"
-sequoia-openpgp = "1"
+# Same git source + rev as the lib crate so the workspace has a single
+# sequoia-openpgp in the graph. See plan §2.2.
+sequoia-openpgp = { git = "https://gitlab.com/sequoia-pgp/sequoia", rev = "3d05138bf1536e63886e7a079fa50aeb080ab573", default-features = false, features = ["crypto-openssl", "compression"] }
 
 openpgp-pkcs11-sequoia = { version = "0.2", path = "../lib" }
-openpgp-x509-sequoia = "0.2"
+# openpgp-x509-sequoia removed — PgpKeyType now re-exported from the lib crate's
+# inlined x509 module (see plan §2.3).
