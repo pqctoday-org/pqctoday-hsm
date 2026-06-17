@@ -64,3 +64,7 @@ rust/pkg_bundler_new/
 rust/pkg_bundler_p521/
 rust/pkg_bundler_v3/
 rust/pkg_nomod/
+
+# --- mlxpqc (Metal PQC research) ---
+# Apple corecrypto: license forbids redistribution — NEVER commit/push
+/arm/
