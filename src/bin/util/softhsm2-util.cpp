@@ -68,26 +68,13 @@
 
 // Initialise the one-and-only instance
 
-#ifdef HAVE_CXX11
-
-std::unique_ptr<MutexFactory> MutexFactory::instance(nullptr);
-std::unique_ptr<SecureMemoryRegistry> SecureMemoryRegistry::instance(nullptr);
+// Leaked at process exit — see LeakingPtr.h (singletons must outlive static destruction)
+LeakingPtr<MutexFactory> MutexFactory::instance(NULL);
+LeakingPtr<SecureMemoryRegistry> SecureMemoryRegistry::instance(NULL);
 #if defined(WITH_OPENSSL)
-std::unique_ptr<OSSLCryptoFactory> OSSLCryptoFactory::instance(nullptr);
+LeakingPtr<OSSLCryptoFactory> OSSLCryptoFactory::instance(NULL);
 #else
-std::unique_ptr<BotanCryptoFactory> BotanCryptoFactory::instance(nullptr);
-#endif
-
-#else
-
-std::auto_ptr<MutexFactory> MutexFactory::instance(NULL);
-std::auto_ptr<SecureMemoryRegistry> SecureMemoryRegistry::instance(NULL);
-#if defined(WITH_OPENSSL)
-std::auto_ptr<OSSLCryptoFactory> OSSLCryptoFactory::instance(NULL);
-#else
-std::auto_ptr<BotanCryptoFactory> BotanCryptoFactory::instance(NULL);
-#endif
-
+LeakingPtr<BotanCryptoFactory> BotanCryptoFactory::instance(NULL);
 #endif
 
 // Display the usage

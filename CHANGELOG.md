@@ -8,6 +8,33 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — pkcs11-provider no longer crashes the host at process exit (2026-06-17)
+
+A program that loads softhsmv3 as an OpenSSL provider (our pkcs11-provider) could
+**segfault at process exit** — intermittently, about two in three `openssl req`
+ML-DSA signing runs. The signing itself always succeeded and the certificate was
+written; the crash came afterwards, during OpenSSL's `atexit` cleanup, so it
+showed up as a non-zero exit code on an otherwise-good operation.
+
+Root cause was a C++ **static-destruction-order** problem, not the crypto.
+OpenSSL's `OPENSSL_cleanup` tears the provider down and calls back into the
+module (`C_CloseSession`, `C_Finalize`) *after* softhsm's global singletons had
+already been destroyed by C++ static destruction — dereferencing freed memory
+(`HandleManager::getSessionShared`), and later a NULL OpenSSL RAND lock.
+
+- **`LeakingPtr`** (new — `src/lib/common/LeakingPtr.h`) replaces the
+  `std::unique_ptr` singletons (`SoftHSM`, `MutexFactory`, `OSSLCryptoFactory`,
+  `SecureMemoryRegistry`). Its destructor does not free, so the module outlives
+  C++ static destruction and stays valid for OpenSSL's late callbacks; `reset()`
+  still frees, so `C_Finalize`/fork do **not** leak during normal operation.
+- **`C_Finalize` process-exit guard** (`SoftHSM_slots.cpp`): an `atexit` sentinel
+  registered in `C_Initialize` (which runs before OpenSSL's cleanup) lets
+  `C_Finalize` skip OpenSSL-touching teardown (RAND / EVP / provider unload)
+  during exit, where those globals are already gone.
+
+Verified: **20/20 clean** `openssl req` ML-DSA certificate generations, was 4/6
+crashing. Long-running servers (`s_server`) were never affected.
+
 ### Added — PQC tooling forks: step-ca, cosign, osslsigncode (ML-DSA, HSM-backed) (2026-06-15)
 
 Three strongSwan-style fork patches (each `<tool>-pqc.patch` + a

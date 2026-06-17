@@ -58,6 +58,23 @@
 #include "BotanCryptoFactory.h"
 #endif
 
+#include <cstdlib>
+
+// Set by an atexit() handler so C_Finalize can tell it is being called during
+// process teardown. The pkcs11-provider unloads us from OpenSSL's OPENSSL_cleanup
+// (an atexit handler), which calls C_Finalize. By then OpenSSL's own globals
+// (RAND method locks, EVP fetch tables) are already being freed, so any teardown
+// that reaches back into OpenSSL — RAND_set_rand_method, EVP_MD_free, provider
+// unload via CryptoFactory::reset — dereferences freed state and crashes.
+//
+// SoftHSM is initialised AFTER OpenSSL, so this handler is registered after
+// OpenSSL's cleanup and therefore runs BEFORE it (atexit is LIFO). When the
+// provider's C_Finalize then runs, the flag is already set and we skip the
+// OpenSSL-touching teardown — the OS reclaims everything at exit. This is the
+// companion to the LeakingPtr singleton-lifetime fix (see LeakingPtr.h).
+static bool g_processExiting = false;
+static void softhsm_mark_exiting() { g_processExiting = true; }
+
 /*****************************************************************************
  Implementation of PKCS #11 functions
  *****************************************************************************/
@@ -66,6 +83,15 @@
 CK_RV SoftHSM::C_Initialize(CK_VOID_PTR pInitArgs)
 {
 	CK_C_INITIALIZE_ARGS_PTR args;
+
+	// Register the process-teardown sentinel once. Done here (after OpenSSL is
+	// up) so it runs before OpenSSL's atexit cleanup — see g_processExiting.
+	static bool exitHandlerRegistered = false;
+	if (!exitHandlerRegistered)
+	{
+		atexit(softhsm_mark_exiting);
+		exitHandlerRegistered = true;
+	}
 
 	// Check if PKCS#11 is already initialized
 	if (isInitialised)
@@ -262,6 +288,17 @@ CK_RV SoftHSM::C_Finalize(CK_VOID_PTR pReserved)
 
 	// Must be set to NULL_PTR in this version of PKCS#11
 	if (pReserved != NULL_PTR) return CKR_ARGUMENTS_BAD;
+
+	// During process teardown (OpenSSL's atexit cleanup unloading the provider),
+	// OpenSSL's globals are already being freed. The cleanup below reaches back
+	// into OpenSSL (RAND_set_rand_method, EVP_MD_free, provider unload), which
+	// would dereference freed state and crash. Skip it — the OS reclaims all of
+	// it at exit. See g_processExiting and LeakingPtr.h.
+	if (g_processExiting)
+	{
+		isInitialised = false;
+		return CKR_OK;
+	}
 
 	if (handleManager != NULL) delete handleManager;
 	handleManager = NULL;

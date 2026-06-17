@@ -223,29 +223,18 @@ void SoftHSM::cleanupKeyPair(AsymmetricAlgorithm* algo,
 
 // Initialise the one-and-only instance
 
-#ifdef HAVE_CXX11
-
-std::unique_ptr<MutexFactory> MutexFactory::instance(nullptr);
-std::unique_ptr<SecureMemoryRegistry> SecureMemoryRegistry::instance(nullptr);
+// Intentionally leaked at process exit (LeakingPtr) so the PKCS#11 module
+// survives C++ static-destruction ordering and stays valid for late atexit
+// callbacks from OpenSSL provider teardown (C_CloseSession / C_Finalize).
+// reset() still frees, so explicit teardown (C_Finalize, fork) does not leak.
+LeakingPtr<MutexFactory> MutexFactory::instance(NULL);
+LeakingPtr<SecureMemoryRegistry> SecureMemoryRegistry::instance(NULL);
 #if defined(WITH_OPENSSL)
-std::unique_ptr<OSSLCryptoFactory> OSSLCryptoFactory::instance(nullptr);
+LeakingPtr<OSSLCryptoFactory> OSSLCryptoFactory::instance(NULL);
 #else
-std::unique_ptr<BotanCryptoFactory> BotanCryptoFactory::instance(nullptr);
+LeakingPtr<BotanCryptoFactory> BotanCryptoFactory::instance(NULL);
 #endif
-std::unique_ptr<SoftHSM> SoftHSM::instance(nullptr);
-
-#else
-
-std::auto_ptr<MutexFactory> MutexFactory::instance(NULL);
-std::auto_ptr<SecureMemoryRegistry> SecureMemoryRegistry::instance(NULL);
-#if defined(WITH_OPENSSL)
-std::auto_ptr<OSSLCryptoFactory> OSSLCryptoFactory::instance(NULL);
-#else
-std::auto_ptr<BotanCryptoFactory> BotanCryptoFactory::instance(NULL);
-#endif
-std::auto_ptr<SoftHSM> SoftHSM::instance(NULL);
-
-#endif
+LeakingPtr<SoftHSM> SoftHSM::instance(NULL);
 
 
 /*****************************************************************************
