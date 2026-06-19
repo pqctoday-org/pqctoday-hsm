@@ -31,6 +31,9 @@ pqctoday-kmip = "pqctoday_kmip.__main__:main"
 [project.urls]
 Homepage = "https://github.com/pqctoday/pqctoday-cacp"
 
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
 [tool.setuptools.packages.find]
 where = ["src"]
 

@@ -9,7 +9,7 @@ but not needed for the client.
 from __future__ import annotations
 
 import json
-import struct
+import struct as _struct
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
@@ -266,20 +266,20 @@ def _encode_value(node: TtlvNode) -> bytes:
                         f"unknown {node.tag_name} flag {flag!r}; known: {sorted(mask)[:6]}…"
                     )
                 acc |= mask[flag]
-            return struct.pack(">i", acc)
-        return struct.pack(">i", int(sv, 0))
+            return _struct.pack(">i", acc)
+        return _struct.pack(">i", int(sv, 0))
     if t == "LongInteger":
-        return struct.pack(">q", int(str(v), 0))
+        return _struct.pack(">q", int(str(v), 0))
     if t == "Enumeration":
         tag_norm = _norm(node.tag_name)
         if tag_norm == "AttributeReference":
             tag_code = table().tag_name_to_code.get(_norm(str(v)))
             if tag_code is None:
                 raise EncodeError(f"AttributeReference: unknown tag name {v!r}")
-            return struct.pack(">I", tag_code)
+            return _struct.pack(">I", tag_code)
         sv = str(v)
         if sv.startswith("0x") or sv.lstrip("-").isdigit():
-            return struct.pack(">I", int(sv, 0))
+            return _struct.pack(">I", int(sv, 0))
         enum_map = table().enum_name_to_value.get(tag_norm)
         if enum_map is None:
             raise EncodeError(f"no enum definition for tag {node.tag_name!r} (value {v!r})")
@@ -290,9 +290,9 @@ def _encode_value(node: TtlvNode) -> bytes:
                 f"unknown enum member {v!r} for {node.tag_name!r}; "
                 f"known: {sorted(enum_map.keys())[:6]}…"
             )
-        return struct.pack(">I", code)
+        return _struct.pack(">I", code)
     if t == "Boolean":
-        return struct.pack(">Q", 1 if str(v).lower() in ("true", "1") else 0)
+        return _struct.pack(">Q", 1 if str(v).lower() in ("true", "1") else 0)
     if t == "TextString":
         return str(v).encode("utf-8")
     if t == "ByteString":
@@ -300,12 +300,12 @@ def _encode_value(node: TtlvNode) -> bytes:
     if t == "DateTime":
         sv = str(v)
         if sv.lstrip("-").isdigit():
-            return struct.pack(">q", int(sv, 0))
+            return _struct.pack(">q", int(sv, 0))
         from datetime import datetime
         dt = datetime.fromisoformat(sv)
-        return struct.pack(">q", int(dt.timestamp()))
+        return _struct.pack(">q", int(dt.timestamp()))
     if t == "Interval":
-        return struct.pack(">I", int(str(v), 0))
+        return _struct.pack(">I", int(str(v), 0))
     if t == "BigInteger":
         sv = str(v)
         if all(c in "0123456789abcdefABCDEF" for c in sv) and len(sv) % 2 == 0:
@@ -314,7 +314,7 @@ def _encode_value(node: TtlvNode) -> bytes:
         byte_len = max(1, (n.bit_length() + 8) // 8)
         return n.to_bytes(byte_len, "big", signed=True)
     if t == "DateTimeExtended":
-        return struct.pack(">q", int(str(v), 0))
+        return _struct.pack(">q", int(str(v), 0))
 
     raise EncodeError(f"unsupported TTLV type {t!r} on {node.tag_name!r}")
 
@@ -335,8 +335,8 @@ def encode_node(node: TtlvNode) -> bytes:
         pad = _pad8(body_len) - body_len
         body = body + b"\x00" * pad
 
-    tag_bytes = struct.pack(">I", tag)[1:]
-    header = tag_bytes + bytes([type_byte]) + struct.pack(">I", body_len)
+    tag_bytes = _struct.pack(">I", tag)[1:]
+    header = tag_bytes + bytes([type_byte]) + _struct.pack(">I", body_len)
     return header + body
 
 
@@ -357,7 +357,7 @@ def decode_one(buf: bytes, offset: int = 0) -> tuple[TtlvNode, int]:
         raise DecodeError(f"truncated header at offset {offset}")
     tag = int.from_bytes(b"\x00" + buf[offset : offset + 3], "big")
     type_byte = buf[offset + 3]
-    body_len = struct.unpack(">I", buf[offset + 4 : offset + 8])[0]
+    body_len = _struct.unpack(">I", buf[offset + 4 : offset + 8])[0]
     padded_len = _pad8(body_len)
     body = buf[offset + 8 : offset + 8 + body_len]
     if len(body) != body_len:
@@ -379,21 +379,21 @@ def decode_one(buf: bytes, offset: int = 0) -> tuple[TtlvNode, int]:
         return TtlvNode(tag_name=tag_name, ttlv_type="Structure", children=children), next_off
 
     if type_name == "Integer":
-        value = struct.unpack(">i", body)[0]
+        value = _struct.unpack(">i", body)[0]
     elif type_name == "LongInteger":
-        value = struct.unpack(">q", body)[0]
+        value = _struct.unpack(">q", body)[0]
     elif type_name == "Enumeration":
-        value = struct.unpack(">I", body)[0]
+        value = _struct.unpack(">I", body)[0]
     elif type_name == "Boolean":
-        value = bool(struct.unpack(">Q", body)[0])
+        value = bool(_struct.unpack(">Q", body)[0])
     elif type_name == "TextString":
         value = body.decode("utf-8")
     elif type_name == "ByteString":
         value = body.hex()
     elif type_name in ("DateTime", "DateTimeExtended"):
-        value = struct.unpack(">q", body)[0]
+        value = _struct.unpack(">q", body)[0]
     elif type_name == "Interval":
-        value = struct.unpack(">I", body)[0]
+        value = _struct.unpack(">I", body)[0]
     elif type_name == "BigInteger":
         value = int.from_bytes(body, "big", signed=True)
     else:
