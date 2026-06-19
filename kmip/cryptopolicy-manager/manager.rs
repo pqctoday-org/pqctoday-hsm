@@ -18,16 +18,24 @@
 //! classical (ECDSA/Ed25519): rustls 0.23 has no ML-DSA certificate support
 //! yet (see [`pqc_mtls_config`]). Client certs are required + verified (mTLS).
 //!
-//! ## Routes (JSON over HTTP/1.1, `Connection: close`)
+//! ## Routes (A1 — versioned `/api/v1/`; RFC 7807 problem errors)
 //! ```text
-//! GET    /policies                 list()            → ["aead-only", …]
-//! GET    /policies/{name}          load() + raw yaml → {name, metadata, yaml}
-//! GET    /active                   read_active()     → {name, fingerprint} | null
-//! POST   /validate        body=yaml                  → {ok} | 400 {error}
-//! POST   /dry-run         body={yaml,op,algorithm?}  → {decision, …}
-//! PUT    /policies/{name} body=yaml  save()          → {saved}
-//! POST   /policies/{name}/activate   activate()      → {activated, fingerprint}
+//! GET    /healthz                                       → {status:"ok"}
+//! GET    /version                                       → {version, git_sha}
+//! GET    /openapi.yaml                                  → OpenAPI 3.1 spec
+//! GET    /api/v1/policies                               → {policies:[…]}
+//! POST   /api/v1/policies      body=yaml               → 201 {saved}
+//! GET    /api/v1/policies/{n}                           → {name, yaml}
+//! PUT    /api/v1/policies/{n}  body=yaml               → {saved}
+//! GET    /api/v1/active                                 → {name,fingerprint}|null
+//! PUT    /api/v1/active        body={"name":"…"}       → {activated,fingerprint}
+//! POST   /api/v1/validate      body=yaml               → {ok, name}
+//! POST   /api/v1/dry-run       body={yaml,op,algo?}    → {decision}
+//! GET    /api/v1/audit[?limit=N]                       → {events:[…], total}
 //! ```
+//!
+//! Error shape — `Content-Type: application/problem+json` (RFC 7807):
+//! `{"type":"urn:pqctoday:cacp:problem/<code>","title":"…","status":N,"detail":"…"}`
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -45,6 +53,9 @@ use crate::policy::{Decision, Engine, PolicyRequest, PolicyStore, StoreError};
 
 /// Cap on a single admin request (headers + body). Policies are small YAML.
 const MAX_REQUEST: usize = 1 << 20; // 1 MiB
+
+/// OpenAPI 3.1 spec, embedded at compile time; served at `GET /openapi.yaml`.
+const OPENAPI_YAML: &str = include_str!("openapi.yaml");
 
 #[derive(Debug, thiserror::Error)]
 pub enum AdminError {
@@ -139,8 +150,6 @@ async fn handle_conn(
     ring: Arc<crate::auditlog::RingSink>,
 ) -> Result<(), AdminError> {
     let mut tls = acceptor.accept(tcp).await?;
-    // mTLS already enforced the client cert in the handshake; capture its CN
-    // for the audit trail of who changed policy.
     let client_cn = client_cert_cn(tls.get_ref().1);
 
     let (method, path, body) = match read_request(&mut tls).await {
@@ -152,6 +161,14 @@ async fn handle_conn(
         }
     };
 
+    // Special: OpenAPI spec served as raw YAML (no JSON wrapper).
+    if method == "GET" && path == "/openapi.yaml" {
+        tls.write_all(&http_raw(200, "OK", "application/yaml", OPENAPI_YAML.as_bytes()))
+            .await?;
+        tls.shutdown().await.ok();
+        return Ok(());
+    }
+
     let store = PolicyStore::new(&store_root);
     let (status, value) =
         route(&store, &store_root, &engine, &ring, &method, &path, &body, client_cn.as_deref());
@@ -161,7 +178,8 @@ async fn handle_conn(
     Ok(())
 }
 
-/// Dispatch one request to a `PolicyStore` primitive. Returns `(status, json)`.
+/// Dispatch one request. Returns `(status, json)`.
+/// Success responses use `application/json`; errors use `application/problem+json` (RFC 7807).
 #[allow(clippy::too_many_arguments)]
 fn route(
     store: &PolicyStore,
@@ -173,17 +191,108 @@ fn route(
     body: &[u8],
     client_cn: Option<&str>,
 ) -> (u16, Value) {
-    match (method, path) {
-        ("GET", "/policies") => match store.list() {
+    // Strip query string for matching; keep full path for handlers that parse it.
+    let path_base = path.split('?').next().unwrap_or(path);
+
+    match (method, path_base) {
+        // ── Infrastructure ───────────────────────────────────────────────────
+        ("GET", "/healthz") => (200, json!({ "status": "ok" })),
+
+        ("GET", "/version") => (200, json!({
+            "version": env!("CARGO_PKG_VERSION"),
+            "git_sha": option_env!("GIT_SHA").unwrap_or("unknown"),
+        })),
+
+        // ── Policy collection ────────────────────────────────────────────────
+        ("GET", "/api/v1/policies") => match store.list() {
             Ok(names) => (200, json!({ "policies": names })),
             Err(e) => store_err(e),
         },
-        // Inspect logs — the three-plane audit trail (p1 policy / p2 KMIP /
-        // p3 PKCS#11) from the in-memory ring, newest events last. The UI's
-        // "inspect logs" section consumes this (correlate by correlation_id).
-        // Optional `?limit=N` caps the tail (default 200).
-        ("GET", p) if p == "/audit" || p.starts_with("/audit?") => {
-            let limit = p
+
+        // Create — policy name is derived from the YAML metadata.name field.
+        ("POST", "/api/v1/policies") => match std::str::from_utf8(body) {
+            Ok(yaml) => match store.validate_draft(yaml) {
+                Ok(p) => {
+                    let name = p.policy.metadata.name.clone();
+                    match store.save(&name, yaml) {
+                        Ok(()) => {
+                            tracing::info!("admin: policy {name:?} created by cn={client_cn:?}");
+                            (201, json!({ "saved": name }))
+                        }
+                        Err(e) => store_err(e),
+                    }
+                }
+                Err(e) => store_err(e),
+            },
+            Err(_) => problem(400, "body is not valid UTF-8 YAML"),
+        },
+
+        // ── Policy item ──────────────────────────────────────────────────────
+        ("GET", p) if p.starts_with("/api/v1/policies/") => {
+            let name = &p["/api/v1/policies/".len()..];
+            get_policy(store, store_root, name)
+        }
+
+        ("PUT", p) if p.starts_with("/api/v1/policies/") => {
+            let name = &p["/api/v1/policies/".len()..];
+            match std::str::from_utf8(body) {
+                Ok(yaml) => match store.save(name, yaml) {
+                    Ok(()) => {
+                        tracing::info!("admin: policy {name:?} saved by cn={client_cn:?}");
+                        (200, json!({ "saved": name }))
+                    }
+                    Err(e) => store_err(e),
+                },
+                Err(_) => problem(400, "body is not valid UTF-8 YAML"),
+            }
+        }
+
+        // ── Active policy ────────────────────────────────────────────────────
+        ("GET", "/api/v1/active") => match store.read_active() {
+            Ok(Some(m)) => (200, json!({ "name": m.name, "fingerprint": m.fingerprint })),
+            Ok(None) => (200, Value::Null),
+            Err(e) => store_err(e),
+        },
+
+        // Activate — replaces POST /policies/{name}/activate.
+        // Body: {"name": "<policy-name>"}
+        // Security-critical: swaps the LIVE enforcement policy with no restart.
+        ("PUT", "/api/v1/active") => {
+            match serde_json::from_slice::<Value>(body) {
+                Ok(req) => match req.get("name").and_then(Value::as_str).map(str::to_owned) {
+                    Some(name) => match store.activate_with_engine(&name, engine) {
+                        Ok(_prior) => {
+                            let fp =
+                                store.read_active().ok().flatten().map(|m| m.fingerprint);
+                            tracing::warn!(
+                                "admin: LIVE policy activated name={name:?} fp={fp:?} by cn={client_cn:?}"
+                            );
+                            (200, json!({ "activated": name, "fingerprint": fp }))
+                        }
+                        Err(e) => store_err(e),
+                    },
+                    None => problem(400, r#"missing "name" field"#),
+                },
+                Err(_) => problem(400, r#"body must be JSON {"name":"<policy-name>"}"#),
+            }
+        }
+
+        // ── Validation & dry-run ─────────────────────────────────────────────
+        ("POST", "/api/v1/validate") => match std::str::from_utf8(body) {
+            Ok(yaml) => match store.validate_draft(yaml) {
+                Ok(p) => (200, json!({ "ok": true, "name": p.policy.metadata.name })),
+                Err(e) => store_err(e),
+            },
+            Err(_) => problem(400, "body is not valid UTF-8 YAML"),
+        },
+
+        ("POST", "/api/v1/dry-run") => dry_run(store, body),
+
+        // ── Audit ────────────────────────────────────────────────────────────
+        // Three-plane audit trail (p1 policy / p2 KMIP / p3 PKCS#11) from the
+        // in-memory ring, newest events last. `?limit=N` caps the tail (max 2000).
+        ("GET", "/api/v1/audit") => {
+            let limit = path
                 .split_once("limit=")
                 .and_then(|(_, v)| v.split('&').next())
                 .and_then(|v| v.parse::<usize>().ok())
@@ -193,63 +302,17 @@ fn route(
             let tail = &all[all.len().saturating_sub(limit)..];
             match serde_json::to_value(tail) {
                 Ok(events) => (200, json!({ "events": events, "total": all.len() })),
-                Err(e) => (500, json!({ "error": e.to_string() })),
+                Err(e) => problem(500, &e.to_string()),
             }
         }
-        ("GET", "/active") => match store.read_active() {
-            Ok(Some(m)) => (200, json!({ "name": m.name, "fingerprint": m.fingerprint })),
-            Ok(None) => (200, Value::Null),
-            Err(e) => store_err(e),
-        },
-        ("POST", "/validate") => match std::str::from_utf8(body) {
-            Ok(yaml) => match store.validate_draft(yaml) {
-                Ok(p) => (200, json!({ "ok": true, "name": p.policy.metadata.name })),
-                Err(e) => store_err(e),
-            },
-            Err(_) => (400, json!({ "error": "body is not valid UTF-8 YAML" })),
-        },
-        ("POST", "/dry-run") => dry_run(store, body),
-        ("GET", p) if p.starts_with("/policies/") => {
-            let name = &p["/policies/".len()..];
-            get_policy(store, store_root, name)
-        }
-        ("PUT", p) if p.starts_with("/policies/") => {
-            let name = &p["/policies/".len()..];
-            match std::str::from_utf8(body) {
-                Ok(yaml) => match store.save(name, yaml) {
-                    Ok(()) => {
-                        tracing::info!("admin: policy {name:?} saved by cn={client_cn:?}");
-                        (200, json!({ "saved": name }))
-                    }
-                    Err(e) => store_err(e),
-                },
-                Err(_) => (400, json!({ "error": "body is not valid UTF-8 YAML" })),
-            }
-        }
-        ("POST", p) if p.starts_with("/policies/") && p.ends_with("/activate") => {
-            let name = &p["/policies/".len()..p.len() - "/activate".len()];
-            // The security-critical mutation: swap the LIVE enforcement policy.
-            match store.activate_with_engine(name, engine) {
-                Ok(_prior) => {
-                    // `activate_with_engine` returns the PRIOR marker; read the
-                    // freshly-written one for the new policy's fingerprint.
-                    let fp = store.read_active().ok().flatten().map(|m| m.fingerprint);
-                    tracing::warn!(
-                        "admin: LIVE policy activated name={name:?} fp={fp:?} by cn={client_cn:?}"
-                    );
-                    (200, json!({ "activated": name, "fingerprint": fp }))
-                }
-                Err(e) => store_err(e),
-            }
-        }
-        _ => (404, json!({ "error": "no such route", "method": method, "path": path })),
+
+        _ => problem(404, &format!("no route for {method} {path}")),
     }
 }
 
 fn get_policy(store: &PolicyStore, root: &std::path::Path, name: &str) -> (u16, Value) {
     match store.load(name) {
         Ok(p) => {
-            // Include the raw YAML so a UI editor can round-trip it.
             let yaml = std::fs::read_to_string(root.join(format!("{name}.yaml"))).ok();
             (200, json!({ "name": p.policy.metadata.name, "yaml": yaml }))
         }
@@ -259,11 +322,13 @@ fn get_policy(store: &PolicyStore, root: &std::path::Path, name: &str) -> (u16, 
 
 fn dry_run(store: &PolicyStore, body: &[u8]) -> (u16, Value) {
     let Ok(req): Result<Value, _> = serde_json::from_slice(body) else {
-        return (400, json!({ "error": "body must be JSON {yaml, op, algorithm?}" }));
+        return problem(400, r#"body must be JSON {"yaml":"…","op":"…","algorithm":"…"}"#);
     };
-    let (Some(yaml), Some(op)) = (req.get("yaml").and_then(Value::as_str), req.get("op").and_then(Value::as_str))
-    else {
-        return (400, json!({ "error": "missing 'yaml' or 'op'" }));
+    let (Some(yaml), Some(op)) = (
+        req.get("yaml").and_then(Value::as_str),
+        req.get("op").and_then(Value::as_str),
+    ) else {
+        return problem(400, r#"missing required fields "yaml" and/or "op""#);
     };
     let algorithm = req.get("algorithm").and_then(Value::as_str);
     let empty = std::collections::HashMap::new();
@@ -275,8 +340,7 @@ fn dry_run(store: &PolicyStore, body: &[u8]) -> (u16, Value) {
     }
 }
 
-/// Decision has no `Serialize` impl (it carries non-serde internals); project
-/// it to a stable JSON shape for the UI.
+/// Decision has no `Serialize` impl; project it to a stable JSON shape for the UI.
 fn decision_json(d: &Decision) -> Value {
     match d {
         Decision::Allow { .. } => json!({ "outcome": "allow" }),
@@ -288,15 +352,31 @@ fn decision_json(d: &Decision) -> Value {
 }
 
 fn store_err(e: StoreError) -> (u16, Value) {
-    // Loader (YAML) errors + bad names are client mistakes → 400; rest 500.
     let status = match &e {
         StoreError::Loader(_) | StoreError::BadName(_) => 400,
         _ => 500,
     };
-    (status, json!({ "error": e.to_string() }))
+    problem(status, &e.to_string())
 }
 
-// ── minimal HTTP/1.1 over the TLS stream ────────────────────────────────────
+// ── RFC 7807 problem helpers ─────────────────────────────────────────────────
+
+fn problem(status: u16, detail: &str) -> (u16, Value) {
+    (status, problem_value(status, detail))
+}
+
+fn problem_value(status: u16, detail: &str) -> Value {
+    let (urn, title) = match status {
+        400 => ("urn:pqctoday:cacp:problem/bad-request", "Bad Request"),
+        404 => ("urn:pqctoday:cacp:problem/not-found", "Not Found"),
+        405 => ("urn:pqctoday:cacp:problem/method-not-allowed", "Method Not Allowed"),
+        413 => ("urn:pqctoday:cacp:problem/payload-too-large", "Payload Too Large"),
+        _ => ("urn:pqctoday:cacp:problem/internal-error", "Internal Server Error"),
+    };
+    json!({ "type": urn, "title": title, "status": status, "detail": detail })
+}
+
+// ── Minimal HTTP/1.1 over the TLS stream ─────────────────────────────────────
 
 /// Read one request: returns `(method, path, body)` or an error response to
 /// send verbatim. `Connection: close` semantics — one request per connection.
@@ -306,18 +386,19 @@ where
 {
     let mut buf = Vec::with_capacity(2048);
     let mut tmp = [0u8; 4096];
-    // Read until end-of-headers (\r\n\r\n).
     let header_end = loop {
         if let Some(pos) = find_subslice(&buf, b"\r\n\r\n") {
             break pos;
         }
         if buf.len() > MAX_REQUEST {
-            return Err(http_json(413, &json!({ "error": "request too large" })));
+            return Err(http_json(413, &problem_value(413, "request too large")));
         }
         match tls.read(&mut tmp).await {
-            Ok(0) => return Err(http_json(400, &json!({ "error": "connection closed mid-request" }))),
+            Ok(0) => {
+                return Err(http_json(400, &problem_value(400, "connection closed mid-request")))
+            }
             Ok(n) => buf.extend_from_slice(&tmp[..n]),
-            Err(_) => return Err(http_json(400, &json!({ "error": "read error" }))),
+            Err(_) => return Err(http_json(400, &problem_value(400, "read error"))),
         }
     };
 
@@ -328,28 +409,28 @@ where
     let method = parts.next().unwrap_or("").to_string();
     let path = parts.next().unwrap_or("").to_string();
     if method.is_empty() || path.is_empty() {
-        return Err(http_json(400, &json!({ "error": "malformed request line" })));
+        return Err(http_json(400, &problem_value(400, "malformed request line")));
     }
 
     let content_len: usize = lines
         .find_map(|l| {
             let (k, v) = l.split_once(':')?;
-            k.trim().eq_ignore_ascii_case("content-length")
+            k.trim()
+                .eq_ignore_ascii_case("content-length")
                 .then(|| v.trim().parse().ok())
                 .flatten()
         })
         .unwrap_or(0);
     if content_len > MAX_REQUEST {
-        return Err(http_json(413, &json!({ "error": "body too large" })));
+        return Err(http_json(413, &problem_value(413, "body too large")));
     }
 
-    // Body = bytes already buffered past the header + whatever's left to read.
     let mut body = buf[header_end + 4..].to_vec();
     while body.len() < content_len {
         match tls.read(&mut tmp).await {
             Ok(0) => break,
             Ok(n) => body.extend_from_slice(&tmp[..n]),
-            Err(_) => return Err(http_json(400, &json!({ "error": "body read error" }))),
+            Err(_) => return Err(http_json(400, &problem_value(400, "body read error"))),
         }
     }
     body.truncate(content_len);
@@ -360,23 +441,35 @@ fn find_subslice(hay: &[u8], needle: &[u8]) -> Option<usize> {
     hay.windows(needle.len()).position(|w| w == needle)
 }
 
+/// Serialize `value` as HTTP/1.1.
+/// Uses `application/problem+json` for 4xx/5xx (RFC 7807), `application/json` for 2xx.
 fn http_json(status: u16, value: &Value) -> Vec<u8> {
-    let reason = match status {
-        200 => "OK",
-        400 => "Bad Request",
-        404 => "Not Found",
-        413 => "Payload Too Large",
-        500 => "Internal Server Error",
-        _ => "Status",
-    };
+    let ct = if status >= 400 { "application/problem+json" } else { "application/json" };
     let body = serde_json::to_vec(value).unwrap_or_default();
+    http_raw(status, http_reason(status), ct, &body)
+}
+
+fn http_raw(status: u16, reason: &str, content_type: &str, body: &[u8]) -> Vec<u8> {
     let mut out = format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
     )
     .into_bytes();
-    out.extend_from_slice(&body);
+    out.extend_from_slice(body);
     out
+}
+
+fn http_reason(status: u16) -> &'static str {
+    match status {
+        200 => "OK",
+        201 => "Created",
+        400 => "Bad Request",
+        404 => "Not Found",
+        405 => "Method Not Allowed",
+        413 => "Payload Too Large",
+        500 => "Internal Server Error",
+        _ => "Status",
+    }
 }
 
 /// Extract the leaf client certificate's subject CN (best-effort) for audit.
@@ -413,7 +506,8 @@ mod tests {
     fn route_list_includes_policy() {
         let (dir, store) = store_with("list");
         let ring = crate::auditlog::RingSink::new(8);
-        let (status, body) = route(&store, &dir, &Engine::deny_all(), &ring, "GET", "/policies", b"", None);
+        let (status, body) =
+            route(&store, &dir, &Engine::deny_all(), &ring, "GET", "/api/v1/policies", b"", None);
         assert_eq!(status, 200);
         assert!(body["policies"].as_array().unwrap().iter().any(|v| v == "p"));
         let _ = std::fs::remove_dir_all(&dir);
@@ -423,8 +517,10 @@ mod tests {
     fn route_unknown_path_404() {
         let (dir, store) = store_with("404");
         let ring = crate::auditlog::RingSink::new(8);
-        let (status, _) = route(&store, &dir, &Engine::deny_all(), &ring, "GET", "/nope", b"", None);
+        let (status, body) =
+            route(&store, &dir, &Engine::deny_all(), &ring, "GET", "/nope", b"", None);
         assert_eq!(status, 404);
+        assert_eq!(body["status"], 404);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -432,10 +528,18 @@ mod tests {
     fn route_validate_rejects_bad_yaml_400() {
         let (dir, store) = store_with("validate");
         let ring = crate::auditlog::RingSink::new(8);
-        let (status, body) =
-            route(&store, &dir, &Engine::deny_all(), &ring, "POST", "/validate", b"not: a policy", None);
+        let (status, body) = route(
+            &store,
+            &dir,
+            &Engine::deny_all(),
+            &ring,
+            "POST",
+            "/api/v1/validate",
+            b"not: a policy",
+            None,
+        );
         assert_eq!(status, 400);
-        assert!(body["error"].is_string());
+        assert!(body["detail"].is_string());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -443,7 +547,8 @@ mod tests {
     fn route_active_none_is_null() {
         let (dir, store) = store_with("active");
         let ring = crate::auditlog::RingSink::new(8);
-        let (status, body) = route(&store, &dir, &Engine::deny_all(), &ring, "GET", "/active", b"", None);
+        let (status, body) =
+            route(&store, &dir, &Engine::deny_all(), &ring, "GET", "/api/v1/active", b"", None);
         assert_eq!(status, 200);
         assert!(body.is_null());
         let _ = std::fs::remove_dir_all(&dir);
@@ -453,7 +558,8 @@ mod tests {
     fn route_audit_empty_ring() {
         let (dir, store) = store_with("audit");
         let ring = crate::auditlog::RingSink::new(8);
-        let (status, body) = route(&store, &dir, &Engine::deny_all(), &ring, "GET", "/audit", b"", None);
+        let (status, body) =
+            route(&store, &dir, &Engine::deny_all(), &ring, "GET", "/api/v1/audit", b"", None);
         assert_eq!(status, 200);
         assert_eq!(body["total"], 0);
         assert!(body["events"].as_array().unwrap().is_empty());
@@ -461,10 +567,58 @@ mod tests {
     }
 
     #[test]
+    fn route_healthz() {
+        let (dir, store) = store_with("healthz");
+        let ring = crate::auditlog::RingSink::new(8);
+        let (status, body) =
+            route(&store, &dir, &Engine::deny_all(), &ring, "GET", "/healthz", b"", None);
+        assert_eq!(status, 200);
+        assert_eq!(body["status"], "ok");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn route_version_has_semver() {
+        let (dir, store) = store_with("version");
+        let ring = crate::auditlog::RingSink::new(8);
+        let (status, body) =
+            route(&store, &dir, &Engine::deny_all(), &ring, "GET", "/version", b"", None);
+        assert_eq!(status, 200);
+        assert!(body["version"].as_str().unwrap().contains('.'));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn route_activate_missing_name_400() {
+        let (dir, store) = store_with("activate-bad");
+        let ring = crate::auditlog::RingSink::new(8);
+        let (status, body) = route(
+            &store,
+            &dir,
+            &Engine::deny_all(),
+            &ring,
+            "PUT",
+            "/api/v1/active",
+            b"{}",
+            None,
+        );
+        assert_eq!(status, 400);
+        assert!(body["detail"].as_str().unwrap().contains("name"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn problem_shape_is_rfc7807() {
+        let (status, v) = problem(404, "not here");
+        assert_eq!(status, 404);
+        assert_eq!(v["status"], 404);
+        assert!(v["type"].as_str().unwrap().starts_with("urn:pqctoday:cacp:problem/"));
+        assert!(v["title"].is_string());
+        assert_eq!(v["detail"], "not here");
+    }
+
+    #[test]
     fn pqc_mtls_config_builds_with_x25519mlkem768() {
-        // rcgen self-signed doubles as server cert + client CA for the builder
-        // smoke (chain validation happens at handshake time, not here). This
-        // proves the aws-lc-rs provider + X25519MLKEM768 group config is valid.
         let c = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
         let cert_pem = c.cert.pem();
         let key_pem = c.key_pair.serialize_pem();
