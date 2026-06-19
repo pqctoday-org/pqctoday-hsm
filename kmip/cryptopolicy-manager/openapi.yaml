@@ -266,6 +266,22 @@ paths:
                     type: integer
                     description: Total events in the ring (may exceed limit)
 
+  /api/v1/audit/stream:
+    get:
+      operationId: streamAudit
+      summary: |
+        Server-Sent Events stream of live audit events. The connection is kept
+        open; each event is emitted as `data: {json}\n\n`. A `: heartbeat\n\n`
+        comment is sent every 30 s to keep proxies alive. Slow consumers that
+        fall more than 1 024 events behind receive a `event: lag` comment.
+      responses:
+        "200":
+          description: SSE stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+
 components:
   schemas:
     VersionInfo:

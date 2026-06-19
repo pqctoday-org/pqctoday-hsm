@@ -10,8 +10,11 @@
 //!
 //! ```text
 //!   Plane 1 ── emit() ─┐
-//!   Plane 2 ── emit() ─┼─► Arc<dyn AuditSink> ─► CompositeSink ─┬─► RingSink   (Hub UI tail)
-//!   Plane 3 ── emit() ─┘                                        └─► JsonlSink  (durable file)
+//!   Plane 2 ── emit() ─┼─► Arc<dyn AuditSink> ─► CompositeSink ─┬─► RingSink    (admin GET /audit)
+//!   Plane 3 ── emit() ─┘                                        ├─► SseSink     (SSE stream)
+//!                                                                ├─► JsonlSink   (durable file)
+//!                                                                ├─► SyslogSink  (UDP syslog)
+//!                                                                └─► OtlpSink    (OTLP/HTTP)
 //! ```
 //!
 //! Each plane is constructed with an `Arc<dyn AuditSink>`. Production
@@ -33,11 +36,17 @@
 pub mod composite;
 pub mod event;
 pub mod jsonl;
+pub mod otlp;
 pub mod ring;
 pub mod sink;
+pub mod sse;
+pub mod syslog;
 
 pub use composite::CompositeSink;
 pub use event::{AuditEvent, CorrelationId, DecisionSummary, EventPayload, KmipOpResult, Plane};
 pub use jsonl::JsonlSink;
+pub use otlp::OtlpSink;
 pub use ring::RingSink;
 pub use sink::{AuditSink, NullSink};
+pub use sse::SseSink;
+pub use syslog::SyslogSink;

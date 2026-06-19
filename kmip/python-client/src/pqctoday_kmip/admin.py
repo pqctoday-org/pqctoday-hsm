@@ -219,3 +219,42 @@ class AdminClient:
     def get_audit(self, limit: int = 200) -> dict:
         """``GET /api/v1/audit?limit=N`` — recent audit events from the server."""
         return self._request("GET", f"/api/v1/audit?limit={limit}")
+
+    def stream_audit(self):
+        """``GET /api/v1/audit/stream`` — yield parsed audit event dicts as they arrive.
+
+        Generator; iterate it to consume the live SSE stream::
+
+            for event in client.stream_audit():
+                print(event["plane"], event["event"]["type"])
+
+        Heartbeat comments (``: heartbeat``) are silently skipped.
+        The connection stays open until the caller breaks or the server closes.
+        """
+        conn = http.client.HTTPSConnection(
+            self._host, self._port, context=self._ctx, timeout=None
+        )
+        conn.request("GET", "/api/v1/audit/stream")
+        resp = conn.getresponse()
+        if resp.status != 200:
+            raw = resp.read().decode("utf-8", errors="replace")
+            conn.close()
+            raise AdminError(resp.status, raw)
+        buf = b""
+        try:
+            while True:
+                chunk = resp.read(4096)
+                if not chunk:
+                    break
+                buf += chunk
+                while b"\n\n" in buf:
+                    frame, buf = buf.split(b"\n\n", 1)
+                    for line in frame.split(b"\n"):
+                        text = line.decode("utf-8", errors="replace")
+                        if text.startswith("data: "):
+                            try:
+                                yield json.loads(text[6:])
+                            except json.JSONDecodeError:
+                                pass
+        finally:
+            conn.close()

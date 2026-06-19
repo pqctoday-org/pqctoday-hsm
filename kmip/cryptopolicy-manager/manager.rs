@@ -32,6 +32,7 @@
 //! POST   /api/v1/validate      body=yaml               → {ok, name}
 //! POST   /api/v1/dry-run       body={yaml,op,algo?}    → {decision}
 //! GET    /api/v1/audit[?limit=N]                       → {events:[…], total}
+//! GET    /api/v1/audit/stream                          → text/event-stream (SSE)
 //! ```
 //!
 //! Error shape — `Content-Type: application/problem+json` (RFC 7807):
@@ -120,12 +121,13 @@ pub async fn serve_admin(
     store_root: PathBuf,
     engine: Engine,
     ring: Arc<crate::auditlog::RingSink>,
+    sse: Arc<crate::auditlog::SseSink>,
     tls: Arc<ServerConfig>,
 ) -> Result<(), AdminError> {
     let listener = TcpListener::bind(addr).await?;
     let acceptor = TlsAcceptor::from(tls);
     tracing::info!(
-        "cryptopolicy-manager admin facade listening on {addr} (mTLS, X25519MLKEM768)"
+        "cryptopolicy-manager admin facade listening on {addr} (mTLS, X25519MLKEM768+X25519)"
     );
     loop {
         let (tcp, peer) = match listener.accept().await {
@@ -139,8 +141,9 @@ pub async fn serve_admin(
         let store_root = store_root.clone();
         let engine = engine.clone();
         let ring = ring.clone();
+        let sse = sse.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_conn(tcp, acceptor, store_root, engine, ring).await {
+            if let Err(e) = handle_conn(tcp, acceptor, store_root, engine, ring, sse).await {
                 tracing::warn!("admin conn from {peer} ended: {e}");
             }
         });
@@ -153,6 +156,7 @@ async fn handle_conn(
     store_root: PathBuf,
     engine: Engine,
     ring: Arc<crate::auditlog::RingSink>,
+    sse: Arc<crate::auditlog::SseSink>,
 ) -> Result<(), AdminError> {
     let mut tls = acceptor.accept(tcp).await?;
     crate::metrics::record_tls_handshake("admin");
@@ -175,6 +179,12 @@ async fn handle_conn(
         return Ok(());
     }
 
+    // Special: SSE audit stream — keeps connection open until client disconnects.
+    if method == "GET" && path == "/api/v1/audit/stream" {
+        crate::metrics::record_admin_request("GET", "/api/v1/audit/stream", 200);
+        return serve_sse(tls, &sse).await;
+    }
+
     let store = PolicyStore::new(&store_root);
     let path_base = path.split('?').next().unwrap_or(&path);
     let (status, value) =
@@ -182,6 +192,51 @@ async fn handle_conn(
     crate::metrics::record_admin_request(&method, admin_route_pattern(path_base), status);
     let resp = http_json(status, &value);
     tls.write_all(&resp).await?;
+    tls.shutdown().await.ok();
+    Ok(())
+}
+
+/// Stream audit events as Server-Sent Events until the client disconnects.
+async fn serve_sse<S>(mut tls: S, sse: &crate::auditlog::SseSink) -> Result<(), AdminError>
+where
+    S: AsyncReadExt + AsyncWriteExt + Unpin,
+{
+    // HTTP/1.1 streaming response headers — no Content-Length (chunked).
+    let headers = b"HTTP/1.1 200 OK\r\n\
+        Content-Type: text/event-stream\r\n\
+        Cache-Control: no-cache\r\n\
+        Connection: keep-alive\r\n\
+        X-Accel-Buffering: no\r\n\
+        \r\n";
+    tls.write_all(headers).await?;
+
+    let mut rx = sse.subscribe();
+    let heartbeat = tokio::time::Duration::from_secs(30);
+
+    loop {
+        tokio::select! {
+            result = rx.recv() => {
+                match result {
+                    Ok(json) => {
+                        let frame = format!("data: {json}\n\n");
+                        if tls.write_all(frame.as_bytes()).await.is_err() {
+                            break; // client disconnected
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        let comment = format!(": lag {n} events dropped\n\n");
+                        let _ = tls.write_all(comment.as_bytes()).await;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+            _ = tokio::time::sleep(heartbeat) => {
+                if tls.write_all(b": heartbeat\n\n").await.is_err() {
+                    break;
+                }
+            }
+        }
+    }
     tls.shutdown().await.ok();
     Ok(())
 }
@@ -198,6 +253,7 @@ fn admin_route_pattern(path: &str) -> &'static str {
         "/api/v1/validate" => "/api/v1/validate",
         "/api/v1/dry-run" => "/api/v1/dry-run",
         "/api/v1/audit" => "/api/v1/audit",
+        "/api/v1/audit/stream" => "/api/v1/audit/stream",
         p if p.starts_with("/api/v1/policies/") => "/api/v1/policies/{name}",
         _ => "unknown",
     }

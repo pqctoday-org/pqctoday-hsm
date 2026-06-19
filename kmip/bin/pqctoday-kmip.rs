@@ -9,8 +9,9 @@
 //!   `--store-memory` (sandbox volatile).
 //! - **Plane 3** — `softhsmrustv3` bridge (initialised lazily by the
 //!   Phase-4 `Session` wrapper).
-//! - **All planes** — `auditlog::CompositeSink(RingSink, JsonlSink)` at
-//!   `--audit-log <path>`; `RingSink` only when `--audit-log` is omitted.
+//! - **All planes** — `auditlog::CompositeSink` fanning to: `RingSink` (always),
+//!   `SseSink` (SSE stream; always), plus optional `JsonlSink` (`--audit-log`),
+//!   `SyslogSink` (`--syslog`), and `OtlpSink` (`--otlp-endpoint`).
 //! - **Network** — TLS listener on `--listen <addr>`. Cert from
 //!   `--tls-cert / --tls-key`, or auto-generated self-signed for sandbox.
 
@@ -20,7 +21,7 @@ use std::sync::Arc;
 
 use clap::Parser;
 
-use pqctoday_kmip::auditlog::{AuditSink, CompositeSink, JsonlSink, RingSink};
+use pqctoday_kmip::auditlog::{AuditSink, CompositeSink, JsonlSink, OtlpSink, RingSink, SseSink, SyslogSink};
 use pqctoday_kmip::cert_init::init_certs_if_missing;
 use pqctoday_kmip::ops::{Deps, DepsConfig};
 use pqctoday_kmip::policy::{load_from_str, Engine, PolicyStore};
@@ -59,6 +60,16 @@ struct Cli {
     /// Append-only JSONL audit log. Combined with the in-memory ring via CompositeSink.
     #[arg(long)]
     audit_log: Option<PathBuf>,
+
+    /// Forward audit events to a UDP syslog target (RFC 5424).
+    /// Example: `127.0.0.1:514`
+    #[arg(long)]
+    syslog: Option<SocketAddr>,
+
+    /// Export audit events via OTLP/HTTP JSON to this endpoint.
+    /// Example: `http://127.0.0.1:4318`
+    #[arg(long)]
+    otlp_endpoint: Option<String>,
 
     /// Server cert (PEM). If omitted with `--tls-key`, auto-generates self-signed for sandbox.
     #[arg(long, requires = "tls_key")]
@@ -172,12 +183,21 @@ async fn main() -> anyhow::Result<()> {
 
     // ── Audit sink ──────────────────────────────────────────────────────
     let ring = Arc::new(RingSink::new(16_384));
-    let sink: Arc<dyn AuditSink> = if let Some(path) = cli.audit_log.as_ref() {
-        let jsonl = Arc::new(JsonlSink::open(path)?);
-        Arc::new(CompositeSink::new(vec![ring.clone(), jsonl]))
-    } else {
-        ring.clone()
-    };
+    let sse  = Arc::new(SseSink::new());
+    let mut sink_legs: Vec<Arc<dyn AuditSink>> = vec![ring.clone(), sse.clone()];
+    if let Some(path) = cli.audit_log.as_ref() {
+        sink_legs.push(Arc::new(JsonlSink::open(path)?));
+        tracing::info!("audit log → JSONL at {path:?}");
+    }
+    if let Some(addr) = cli.syslog {
+        sink_legs.push(Arc::new(SyslogSink::open(addr)?));
+        tracing::info!("audit log → syslog UDP {addr}");
+    }
+    if let Some(ref url) = cli.otlp_endpoint {
+        sink_legs.push(Arc::new(OtlpSink::spawn(url)?));
+        tracing::info!("audit log → OTLP/HTTP {url}");
+    }
+    let sink: Arc<dyn AuditSink> = Arc::new(CompositeSink::new(sink_legs));
 
     // ── Engine + initial policy ─────────────────────────────────────────
     let engine = Engine::with_global_sink(sink.clone());
@@ -257,13 +277,15 @@ async fn main() -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("admin mTLS config: {e}"))?;
         let admin_engine = engine.clone();
         let admin_ring = ring.clone();
-        tracing::info!("cryptopolicy-manager admin facade enabled on {addr} (mTLS, X25519MLKEM768)");
+        let admin_sse = sse.clone();
+        tracing::info!("cryptopolicy-manager admin facade enabled on {addr} (mTLS, X25519MLKEM768+X25519)");
         tokio::spawn(async move {
             if let Err(e) = pqctoday_kmip::cryptopolicy_manager::serve_admin(
                 addr,
                 policy_dir,
                 admin_engine,
                 admin_ring,
+                admin_sse,
                 tls,
             )
             .await
