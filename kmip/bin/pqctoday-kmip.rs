@@ -95,6 +95,12 @@ struct Cli {
     #[arg(long, requires = "admin_listen")]
     admin_client_ca: Option<PathBuf>,
 
+    /// D1 — Prometheus `/metrics` scrape endpoint (plain HTTP, no mTLS — use
+    /// network policy to restrict access). Default `127.0.0.1:9095`; set to
+    /// `0.0.0.0:9095` to expose to an off-pod Prometheus scraper.
+    #[arg(long, value_name = "ADDR", default_value = "127.0.0.1:9095")]
+    metrics_listen: SocketAddr,
+
     /// C0 — generate admin mTLS certs into this directory on first boot (if
     /// `<dir>/ca.crt` is absent) and wire them into `--admin-tls-cert/key` +
     /// `--admin-client-ca` automatically. Replaces the `openssl`-CLI shelling
@@ -139,6 +145,12 @@ struct Cli {
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
     let mut cli = Cli::parse();
+
+    // D1 — metrics registry init + scrape endpoint (starts before any task that
+    // could call record_* helpers; the endpoint itself runs forever in a task).
+    pqctoday_kmip::metrics::init();
+    let metrics_addr = cli.metrics_listen;
+    tokio::spawn(pqctoday_kmip::metrics::serve_metrics_forever(metrics_addr));
 
     // ── C0: internalized cert minting ───────────────────────────────────────
     // If --init-certs <dir> is given, generate the admin mTLS CA + server +

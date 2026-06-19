@@ -23,6 +23,7 @@ pub mod server;
 
 // Cross-plane infrastructure
 pub mod auditlog;
+pub mod metrics;
 pub mod types;
 pub mod error;
 

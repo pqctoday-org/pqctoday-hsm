@@ -149,6 +149,13 @@ pub fn dispatch_with_transport_identity(
     let mut items: Vec<ResponseBatchItem> = Vec::with_capacity(request.batch_items.len());
     for item in request.batch_items {
         let response = dispatch_one(deps, item, &mut state, &auth);
+        // D1 — KMIP request counter (operation × success/error)
+        if let Some(op) = response.operation {
+            crate::metrics::record_kmip_request(
+                op.metric_label(),
+                response.result_status == ResultStatus::Success,
+            );
+        }
         let failed = response.result_status == ResultStatus::OperationFailed;
         items.push(response);
         if failed {

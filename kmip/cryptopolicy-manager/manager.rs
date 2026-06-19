@@ -150,6 +150,7 @@ async fn handle_conn(
     ring: Arc<crate::auditlog::RingSink>,
 ) -> Result<(), AdminError> {
     let mut tls = acceptor.accept(tcp).await?;
+    crate::metrics::record_tls_handshake("admin");
     let client_cn = client_cert_cn(tls.get_ref().1);
 
     let (method, path, body) = match read_request(&mut tls).await {
@@ -170,12 +171,31 @@ async fn handle_conn(
     }
 
     let store = PolicyStore::new(&store_root);
+    let path_base = path.split('?').next().unwrap_or(&path);
     let (status, value) =
         route(&store, &store_root, &engine, &ring, &method, &path, &body, client_cn.as_deref());
+    crate::metrics::record_admin_request(&method, admin_route_pattern(path_base), status);
     let resp = http_json(status, &value);
     tls.write_all(&resp).await?;
     tls.shutdown().await.ok();
     Ok(())
+}
+
+/// Map a raw path to a stable Prometheus `route` label.
+/// Never use raw paths as labels — `/api/v1/policies/{name}` has unbounded cardinality.
+fn admin_route_pattern(path: &str) -> &'static str {
+    match path {
+        "/healthz" => "/healthz",
+        "/version" => "/version",
+        "/openapi.yaml" => "/openapi.yaml",
+        "/api/v1/policies" => "/api/v1/policies",
+        "/api/v1/active" => "/api/v1/active",
+        "/api/v1/validate" => "/api/v1/validate",
+        "/api/v1/dry-run" => "/api/v1/dry-run",
+        "/api/v1/audit" => "/api/v1/audit",
+        p if p.starts_with("/api/v1/policies/") => "/api/v1/policies/{name}",
+        _ => "unknown",
+    }
 }
 
 /// Dispatch one request. Returns `(status, json)`.

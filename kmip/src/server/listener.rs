@@ -150,6 +150,7 @@ async fn handle_conn(
     deps: Arc<Deps>,
 ) -> Result<(), ServerError> {
     let mut tls_stream = acceptor.accept(stream).await.map_err(ServerError::Io)?;
+    crate::metrics::record_tls_handshake("kmip");
     // K14 mTLS — when the ServerConfig was built by [`tls_mtls`], the
     // handshake above already verified the client certificate chain
     // against the configured CA. Map the leaf's subject CN to the KMIP
