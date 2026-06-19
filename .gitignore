@@ -65,6 +65,13 @@ rust/pkg_bundler_p521/
 rust/pkg_bundler_v3/
 rust/pkg_nomod/
 
+# Python package build artifacts
+*.egg-info/
+__pycache__/
+*.pyc
+dist/
+.venv/
+
 # --- mlxpqc (Metal PQC research) ---
 # Apple corecrypto: license forbids redistribution — NEVER commit/push
 /arm/
