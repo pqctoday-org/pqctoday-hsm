@@ -21,6 +21,7 @@ use std::sync::Arc;
 use clap::Parser;
 
 use pqctoday_kmip::auditlog::{AuditSink, CompositeSink, JsonlSink, RingSink};
+use pqctoday_kmip::cert_init::init_certs_if_missing;
 use pqctoday_kmip::ops::{Deps, DepsConfig};
 use pqctoday_kmip::policy::{load_from_str, Engine, PolicyStore};
 use pqctoday_kmip::server::{serve, tls_from_pem, tls_mtls, tls_self_signed, AuthUser};
@@ -94,6 +95,14 @@ struct Cli {
     #[arg(long, requires = "admin_listen")]
     admin_client_ca: Option<PathBuf>,
 
+    /// C0 — generate admin mTLS certs into this directory on first boot (if
+    /// `<dir>/ca.crt` is absent) and wire them into `--admin-tls-cert/key` +
+    /// `--admin-client-ca` automatically. Replaces the `openssl`-CLI shelling
+    /// in `kmip-entrypoint.sh`, enabling distroless / no-shell images.
+    /// If the directory already contains certs, generation is skipped (idempotent).
+    #[arg(long, value_name = "DIR")]
+    init_certs: Option<PathBuf>,
+
     /// K14 auth — configured credential store entry, repeatable:
     /// `<username>:<sha256hex-of-password>` (e.g.
     /// `alice:$(printf %s 'pw' | shasum -a 256 | cut -d' ' -f1)`).
@@ -129,7 +138,25 @@ struct Cli {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
+
+    // ── C0: internalized cert minting ───────────────────────────────────────
+    // If --init-certs <dir> is given, generate the admin mTLS CA + server +
+    // client certs into that directory on first boot (idempotent). The returned
+    // paths auto-populate --admin-tls-cert/key and --admin-client-ca so the
+    // caller does not need to repeat them on the command line.
+    if let Some(ref cert_dir) = cli.init_certs.clone() {
+        let certs = init_certs_if_missing(cert_dir)?;
+        if cli.admin_tls_cert.is_none() {
+            cli.admin_tls_cert = Some(certs.server_cert);
+        }
+        if cli.admin_tls_key.is_none() {
+            cli.admin_tls_key = Some(certs.server_key);
+        }
+        if cli.admin_client_ca.is_none() {
+            cli.admin_client_ca = Some(certs.ca_cert);
+        }
+    }
 
     // ── Audit sink ──────────────────────────────────────────────────────
     let ring = Arc::new(RingSink::new(16_384));
