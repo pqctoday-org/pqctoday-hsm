@@ -7,7 +7,9 @@ Usage::
     pqctoday-kmip admin --ca CA --cert CERT --key KEY [--host HOST] [--port PORT] <subcommand>
 
 Admin subcommands: healthz, version, list-policies, get-policy NAME,
-                   active, activate NAME, validate YAML_FILE, audit
+                   active, activate NAME, validate YAML_FILE,
+                   dry-run YAML_FILE --op OP [--algorithm ALG],
+                   audit [--limit N], stream [--count N]
 
 """
 from __future__ import annotations
@@ -117,9 +119,27 @@ def _admin_cmd(args: argparse.Namespace) -> int:
         elif sub == "validate":
             yaml_text = open(args.yaml_file).read()
             print(json.dumps(client.validate(yaml_text), indent=2))
+        elif sub == "dry-run":
+            yaml_text = open(args.yaml_file).read()
+            print(json.dumps(
+                client.dry_run(yaml_text, args.op, algorithm=getattr(args, "algorithm", None)),
+                indent=2,
+            ))
         elif sub == "audit":
             result = client.get_audit(limit=getattr(args, "limit", 200))
             print(json.dumps(result, indent=2))
+        elif sub == "stream":
+            count = getattr(args, "count", 0)
+            seen = 0
+            try:
+                for event in client.stream_audit():
+                    print(json.dumps(event))
+                    sys.stdout.flush()
+                    seen += 1
+                    if count and seen >= count:
+                        break
+            except KeyboardInterrupt:
+                pass
         else:
             print(f"unknown admin subcommand: {sub}", file=sys.stderr)
             return 2
@@ -168,8 +188,18 @@ def main(argv=None) -> int:
     act.add_argument("name")
     val = admin_sub.add_parser("validate")
     val.add_argument("yaml_file")
-    aud = admin_sub.add_parser("audit")
+    dr = admin_sub.add_parser("dry-run",
+                               help="evaluate a policy YAML against one operation")
+    dr.add_argument("yaml_file", metavar="YAML_FILE")
+    dr.add_argument("--op", required=True, help="KMIP operation name, e.g. Sign")
+    dr.add_argument("--algorithm", metavar="ALG",
+                    help="CryptographicAlgorithm, e.g. ML_DSA_65")
+    aud = admin_sub.add_parser("audit", help="recent audit events (ring buffer)")
     aud.add_argument("--limit", type=int, default=200)
+    strm = admin_sub.add_parser("stream",
+                                 help="tail live audit events via SSE (Ctrl-C to stop)")
+    strm.add_argument("--count", type=int, default=0,
+                      metavar="N", help="stop after N events (default: run forever)")
 
     args = ap.parse_args(argv)
     if args.cmd == "demo":

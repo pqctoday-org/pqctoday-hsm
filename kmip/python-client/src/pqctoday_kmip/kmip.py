@@ -258,3 +258,19 @@ class KmipClient:
 
     def destroy(self, uid: str) -> KmipResult:
         return self.request("Destroy", _leaf("UniqueIdentifier", "TextString", uid))
+
+    def revoke(self, uid: str, reason: str = "Unspecified") -> KmipResult:
+        return self.request(
+            "Revoke",
+            _leaf("UniqueIdentifier", "TextString", uid),
+            _struct("RevocationReason",
+                    _leaf("RevocationReasonCode", "Enumeration", reason)),
+        )
+
+    def locate(self) -> KmipResult:
+        """KMIP Locate — returns all managed-object UIDs visible to this session."""
+        return self.request("Locate")
+
+    def get_attributes(self, uid: str) -> KmipResult:
+        """KMIP GetAttributes for a single UID."""
+        return self.request("GetAttributes", _leaf("UniqueIdentifier", "TextString", uid))

@@ -12,7 +12,7 @@ import json
 import struct
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 from xml.etree import ElementTree as ET
 
 # Named bit-flag tables for Integer-typed mask fields.
@@ -400,3 +400,44 @@ def decode_one(buf: bytes, offset: int = 0) -> tuple[TtlvNode, int]:
         value = body.hex()
 
     return TtlvNode(tag_name=tag_name, ttlv_type=type_name, value=value), next_off
+
+
+# ── Public traversal helpers ────────────────────────────────────────────────
+# Usable by callers that receive a TtlvNode (e.g. KmipResult.payload).
+
+def find(node: TtlvNode, tag: str) -> Optional[TtlvNode]:
+    """Return the first descendant (BFS) whose tag_name matches ``tag``
+    (punctuation-insensitive), or ``None``."""
+    from collections import deque
+    want = _norm(tag)
+    dq: deque[TtlvNode] = deque([node])
+    while dq:
+        n = dq.popleft()
+        if _norm(n.tag_name) == want:
+            return n
+        dq.extend(n.children)
+    return None
+
+
+def find_all(node: TtlvNode, tag: str) -> list[TtlvNode]:
+    """Return all descendants (BFS) whose tag_name matches ``tag``."""
+    from collections import deque
+    want = _norm(tag)
+    result: list[TtlvNode] = []
+    dq: deque[TtlvNode] = deque([node])
+    while dq:
+        n = dq.popleft()
+        if _norm(n.tag_name) == want:
+            result.append(n)
+        dq.extend(n.children)
+    return result
+
+
+def leaf(tag: str, ttlv_type: str, value) -> TtlvNode:
+    """Convenience: construct a leaf TtlvNode."""
+    return TtlvNode(tag_name=tag, ttlv_type=ttlv_type, value=value)
+
+
+def struct(tag: str, *children: TtlvNode) -> TtlvNode:
+    """Convenience: construct a Structure TtlvNode."""
+    return TtlvNode(tag_name=tag, ttlv_type="Structure", children=list(children))
