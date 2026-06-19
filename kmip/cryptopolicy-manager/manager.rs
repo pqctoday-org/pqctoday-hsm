@@ -76,9 +76,14 @@ pub fn pqc_mtls_config(
 ) -> Result<Arc<ServerConfig>, AdminError> {
     use rustls::crypto::aws_lc_rs;
 
-    // Force the post-quantum hybrid KEM group. X25519MLKEM768 is TLS 1.3 only.
+    // Prefer the PQC hybrid KEM; also accept classical X25519 so Python's
+    // stdlib ssl (which lacks group selection) can connect for dev/tooling.
+    // X25519MLKEM768 is TLS 1.3 only; X25519 is the classical fallback.
     let mut provider = aws_lc_rs::default_provider();
-    provider.kx_groups = vec![aws_lc_rs::kx_group::X25519MLKEM768];
+    provider.kx_groups = vec![
+        aws_lc_rs::kx_group::X25519MLKEM768,
+        aws_lc_rs::kx_group::X25519,
+    ];
     let provider = Arc::new(provider);
 
     let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut &server_cert_pem[..])

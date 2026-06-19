@@ -1,0 +1,2 @@
+[console_scripts]
+pqctoday-kmip = pqctoday_kmip.__main__:main
