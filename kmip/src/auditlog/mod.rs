@@ -36,17 +36,23 @@
 pub mod composite;
 pub mod event;
 pub mod jsonl;
+// OTLP/HTTP + SSE sinks are async (tokio) — `native` only. The wasm core
+// fans audit events into the in-memory `RingSink`.
+#[cfg(feature = "native")]
 pub mod otlp;
 pub mod ring;
 pub mod sink;
+#[cfg(feature = "native")]
 pub mod sse;
 pub mod syslog;
 
 pub use composite::CompositeSink;
 pub use event::{AuditEvent, CorrelationId, DecisionSummary, EventPayload, KmipOpResult, Plane};
 pub use jsonl::JsonlSink;
+#[cfg(feature = "native")]
 pub use otlp::OtlpSink;
 pub use ring::RingSink;
 pub use sink::{AuditSink, NullSink};
+#[cfg(feature = "native")]
 pub use sse::SseSink;
 pub use syslog::SyslogSink;

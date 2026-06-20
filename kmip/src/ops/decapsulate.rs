@@ -87,6 +87,7 @@ pub fn decapsulate(
     p_req.state = Some("Active");
     p_req.current_object_algorithm = Some(&stored_algo);
     p_req.target_uid = Some(&req.uid);
+    p_req.object_activation_date = obj.activation_date; // F-3 — max_key_age_days
     match deps.engine.evaluate(&p_req) {
         crate::policy::Decision::Allow { .. } => {}
         crate::policy::Decision::Deny { human, .. } => {
@@ -141,15 +142,27 @@ pub fn decapsulate(
             r.map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Decap"))?
         }
         None => {
-            emit_pkcs11(
-                deps,
-                correlation_id,
-                "soft::placeholder_decapsulate",
-                Some(mech),
-                0,
-                "CKR_OK",
-            );
-            placeholder_bytes(&req.uid, &req.data, b"ss", 32)
+            // S-2 hardening: no engine session ⇒ fail rather than emit a fake
+            // shared secret. Placeholder kept only for the crate tests.
+            #[cfg(not(test))]
+            {
+                return Err(crate::error::KmipError::failed(
+                    crate::error::ResultReason::CryptographicFailure,
+                    "no engine session — cannot decapsulate without key material",
+                ));
+            }
+            #[cfg(test)]
+            {
+                emit_pkcs11(
+                    deps,
+                    correlation_id,
+                    "soft::placeholder_decapsulate",
+                    Some(mech),
+                    0,
+                    "CKR_OK",
+                );
+                placeholder_bytes(&req.uid, &req.data, b"ss", 32)
+            }
         }
     };
 

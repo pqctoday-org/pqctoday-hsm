@@ -51,6 +51,12 @@ pub struct CpOverride {
     pub block_cipher_mode: Option<u32>,
     pub padding_method: Option<u32>,
     pub deterministic: Option<bool>,
+    /// F-5 — MGF function (KMIP `MaskGenerator` codepoint; MGF1 = `0x01`).
+    pub mask_generator: Option<u32>,
+    /// F-5 — AEAD authentication-tag length, bytes (KMIP `Tag Length`).
+    pub tag_length: Option<i32>,
+    /// F-5 — RSA-PSS salt length, bytes (KMIP `Salt Length`).
+    pub salt_length: Option<i32>,
 }
 
 impl CpOverride {
@@ -60,6 +66,9 @@ impl CpOverride {
             && self.block_cipher_mode.is_none()
             && self.padding_method.is_none()
             && self.deterministic.is_none()
+            && self.mask_generator.is_none()
+            && self.tag_length.is_none()
+            && self.salt_length.is_none()
     }
 
     /// Merge `other` over `self`, per field, last-match-wins (mirrors the
@@ -77,6 +86,15 @@ impl CpOverride {
         }
         if other.deterministic.is_some() {
             self.deterministic = other.deterministic;
+        }
+        if other.mask_generator.is_some() {
+            self.mask_generator = other.mask_generator;
+        }
+        if other.tag_length.is_some() {
+            self.tag_length = other.tag_length;
+        }
+        if other.salt_length.is_some() {
+            self.salt_length = other.salt_length;
         }
     }
 }

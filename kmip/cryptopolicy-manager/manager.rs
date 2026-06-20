@@ -123,11 +123,23 @@ pub async fn serve_admin(
     ring: Arc<crate::auditlog::RingSink>,
     sse: Arc<crate::auditlog::SseSink>,
     tls: Arc<ServerConfig>,
+    write_cns: Vec<String>,
 ) -> Result<(), AdminError> {
     let listener = TcpListener::bind(addr).await?;
     let acceptor = TlsAcceptor::from(tls);
+    // S-1 — CN allowlist for policy-mutating routes. Empty ⇒ all writes denied.
+    if write_cns.is_empty() {
+        tracing::warn!(
+            "admin facade: no --admin-write-cn configured — ALL policy-mutating \
+             routes (POST/PUT /policies, PUT /active) will be denied (403)"
+        );
+    }
+    let write_cns = Arc::new(write_cns);
+    // S-5 — bound concurrent connections (the most security-sensitive surface)
+    // so a flood can't exhaust memory/fds/tasks.
+    let sem = Arc::new(tokio::sync::Semaphore::new(MAX_ADMIN_CONNS));
     tracing::info!(
-        "cryptopolicy-manager admin facade listening on {addr} (mTLS, X25519MLKEM768+X25519)"
+        "cryptopolicy-manager admin facade listening on {addr} (mTLS, X25519MLKEM768+X25519, max {MAX_ADMIN_CONNS} conns)"
     );
     loop {
         let (tcp, peer) = match listener.accept().await {
@@ -137,18 +149,34 @@ pub async fn serve_admin(
                 continue;
             }
         };
+        // S-5 — at the concurrency cap, drop the new connection rather than queue
+        // it (queued sockets are still a resource a flood can exhaust).
+        let permit = match sem.clone().try_acquire_owned() {
+            Ok(p) => p,
+            Err(_) => {
+                tracing::warn!("admin: connection cap ({MAX_ADMIN_CONNS}) reached — dropping {peer}");
+                continue;
+            }
+        };
         let acceptor = acceptor.clone();
         let store_root = store_root.clone();
         let engine = engine.clone();
         let ring = ring.clone();
         let sse = sse.clone();
+        let write_cns = write_cns.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_conn(tcp, acceptor, store_root, engine, ring, sse).await {
+            let _permit = permit; // held for the connection's lifetime
+            if let Err(e) = handle_conn(tcp, acceptor, store_root, engine, ring, sse, write_cns).await {
                 tracing::warn!("admin conn from {peer} ended: {e}");
             }
         });
     }
 }
+
+/// S-5 — admin-facade DoS bounds.
+const MAX_ADMIN_CONNS: usize = 256;
+const ADMIN_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const ADMIN_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 async fn handle_conn(
     tcp: tokio::net::TcpStream,
@@ -157,19 +185,58 @@ async fn handle_conn(
     engine: Engine,
     ring: Arc<crate::auditlog::RingSink>,
     sse: Arc<crate::auditlog::SseSink>,
+    write_cns: Arc<Vec<String>>,
 ) -> Result<(), AdminError> {
-    let mut tls = acceptor.accept(tcp).await?;
+    // S-5 — bound the handshake so a client that never completes TLS can't hold
+    // a connection (and its semaphore permit) open indefinitely.
+    let mut tls = match tokio::time::timeout(ADMIN_HANDSHAKE_TIMEOUT, acceptor.accept(tcp)).await {
+        Ok(Ok(t)) => t,
+        Ok(Err(e)) => return Err(e.into()),
+        Err(_) => {
+            tracing::warn!("admin: TLS handshake timed out");
+            return Ok(());
+        }
+    };
     crate::metrics::record_tls_handshake("admin");
     let client_cn = client_cert_cn(tls.get_ref().1);
 
-    let (method, path, body) = match read_request(&mut tls).await {
-        Ok(v) => v,
-        Err(resp) => {
+    // S-5 — bound the request read (slow-loris: dribbling headers forever).
+    let (method, path, body) = match tokio::time::timeout(ADMIN_READ_TIMEOUT, read_request(&mut tls)).await {
+        Ok(Ok(v)) => v,
+        Ok(Err(resp)) => {
             tls.write_all(&resp).await?;
             tls.shutdown().await.ok();
             return Ok(());
         }
+        Err(_) => {
+            tracing::warn!("admin: request read timed out (slow-loris?)");
+            tls.shutdown().await.ok();
+            return Ok(());
+        }
     };
+
+    // S-1 — AUTHORIZATION on policy-mutating routes. mTLS authenticates the
+    // caller; this authorizes WRITES. Default-deny: a mutating request requires
+    // the verified client-cert CN to be in the configured allowlist
+    // (`--admin-write-cn`). Reads stay open to any authenticated client.
+    let path_for_authz = path.split('?').next().unwrap_or(&path);
+    if is_mutating(&method, path_for_authz) && !write_authorized(client_cn.as_deref(), &write_cns) {
+        crate::metrics::record_admin_request(&method, admin_route_pattern(path_for_authz), 403);
+        let resp = http_json(
+            403,
+            &problem_value(
+                403,
+                "policy-mutating requests require an authorized client certificate \
+                 (configure --admin-write-cn)",
+            ),
+        );
+        tls.write_all(&resp).await?;
+        tls.shutdown().await.ok();
+        tracing::warn!(
+            "admin: DENIED {method} {path_for_authz} from cn={client_cn:?} (not in write allowlist)"
+        );
+        return Ok(());
+    }
 
     // Special: OpenAPI spec served as raw YAML (no JSON wrapper).
     if method == "GET" && path == "/openapi.yaml" {
@@ -449,12 +516,27 @@ fn problem(status: u16, detail: &str) -> (u16, Value) {
 fn problem_value(status: u16, detail: &str) -> Value {
     let (urn, title) = match status {
         400 => ("urn:pqctoday:cacp:problem/bad-request", "Bad Request"),
+        403 => ("urn:pqctoday:cacp:problem/forbidden", "Forbidden"),
         404 => ("urn:pqctoday:cacp:problem/not-found", "Not Found"),
         405 => ("urn:pqctoday:cacp:problem/method-not-allowed", "Method Not Allowed"),
         413 => ("urn:pqctoday:cacp:problem/payload-too-large", "Payload Too Large"),
         _ => ("urn:pqctoday:cacp:problem/internal-error", "Internal Server Error"),
     };
     json!({ "type": urn, "title": title, "status": status, "detail": detail })
+}
+
+/// S-1 — is this a policy-MUTATING admin route (requires write authorization)?
+fn is_mutating(method: &str, path: &str) -> bool {
+    matches!(
+        (method, path),
+        ("POST", "/api/v1/policies") | ("PUT", "/api/v1/active")
+    ) || (method == "PUT" && path.starts_with("/api/v1/policies/"))
+}
+
+/// S-1 — is the verified client-cert CN allowed to perform writes? Default-deny:
+/// an empty allowlist (or an absent CN) authorizes nothing.
+fn write_authorized(client_cn: Option<&str>, write_cns: &[String]) -> bool {
+    matches!(client_cn, Some(cn) if write_cns.iter().any(|w| w == cn))
 }
 
 // ── Minimal HTTP/1.1 over the TLS stream ─────────────────────────────────────
@@ -696,6 +778,23 @@ mod tests {
         assert!(v["type"].as_str().unwrap().starts_with("urn:pqctoday:cacp:problem/"));
         assert!(v["title"].is_string());
         assert_eq!(v["detail"], "not here");
+    }
+
+    /// S-1 — only policy-mutating routes are gated, and writes are default-deny.
+    #[test]
+    fn s1_write_authorization() {
+        assert!(is_mutating("POST", "/api/v1/policies"));
+        assert!(is_mutating("PUT", "/api/v1/active"));
+        assert!(is_mutating("PUT", "/api/v1/policies/pqc"));
+        assert!(!is_mutating("GET", "/api/v1/policies"));
+        assert!(!is_mutating("POST", "/api/v1/validate"));
+        assert!(!is_mutating("POST", "/api/v1/dry-run"));
+
+        let allow = vec!["admin".to_string()];
+        assert!(write_authorized(Some("admin"), &allow));
+        assert!(!write_authorized(Some("intruder"), &allow), "unlisted CN denied");
+        assert!(!write_authorized(None, &allow), "no CN denied");
+        assert!(!write_authorized(Some("admin"), &[]), "empty allowlist = default-deny");
     }
 
     #[test]

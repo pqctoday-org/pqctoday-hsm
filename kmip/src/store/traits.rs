@@ -14,18 +14,38 @@ use time::OffsetDateTime;
 /// shape; the dispatcher allocates one per Create / CreateKeyPair.
 pub type Uid = String;
 
+/// Serde adapter for [`UsageMask`] (a `bitflags` type with no derived serde) —
+/// round-trips via the raw `u32` bits. Used by `ObjectRecord`'s D-1 full-record
+/// JSON persistence.
+mod usage_mask_bits {
+    use super::UsageMask;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(m: &UsageMask, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_u32(m.bits())
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<UsageMask, D::Error> {
+        let bits = u32::deserialize(d)?;
+        Ok(UsageMask::from_bits_truncate(bits))
+    }
+}
+
 /// One managed object as the store sees it. Key material itself stays in
 /// `softhsmrustv3`; the store keeps the KMIP-level metadata + the stable
 /// PKCS#11 `CKA_ID` we use to find the object back inside the token.
 // `CryptographicParameters` carries optional `HashingAlgorithm` enums
 // that don't implement `Eq` — drop the `Eq` bound; PartialEq is what
 // the store-parity tests actually need.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ObjectRecord {
     pub uid: Uid,
     pub object_type: ObjectType,
     pub algorithm: KmipAlgorithm,
     pub cryptographic_length: u32,
+    /// `UsageMask` is a `bitflags` type with no derived serde; persist it as its
+    /// raw `u32` bits (D-1 full-record persistence).
+    #[serde(with = "usage_mask_bits")]
     pub usage_mask: UsageMask,
     pub state: State,
     /// PKCS#11 `CKA_ID` (bytes). The bridge uses this with `C_FindObjects`

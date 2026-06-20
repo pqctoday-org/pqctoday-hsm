@@ -69,7 +69,13 @@ pub mod rng_and_pkcs11;
 pub mod session_and_auth;
 pub mod sign;
 pub mod signature_verify;
+// §6.1.62 Validate (ring-backed cert-chain verification) and §6.1.6/§6.1.50
+// Certify / Re-certify (rcgen + aws_lc_rs PQC CA issuance) are `native` only —
+// their crypto backends do not cross-compile to wasm32. The wasm dispatcher
+// answers these operations with `OperationNotSupported`.
+#[cfg(feature = "native")]
 pub mod validate;
+#[cfg(feature = "native")]
 pub mod certify;
 
 pub use deps::{Deps, DepsConfig};

@@ -134,6 +134,13 @@ rules: []
             warnings,
         } = loaded;
         let now = OffsetDateTime::now_utc();
+        // S-7 — refuse to activate a policy whose `effective:` date is still in
+        // the future (it would silently enforce while appearing dormant).
+        if is_future_effective(&policy.metadata.effective, now) {
+            return Err(ActivateError::NotYetEffective {
+                effective: policy.metadata.effective.clone(),
+            });
+        }
         let active = ActivePolicy {
             source_fingerprint: Policy::fingerprint(&source),
             policy: Arc::new(policy),
@@ -175,12 +182,27 @@ rules: []
             }
         };
 
-        // ── Pass 1: resolve algorithm ────────────────────────────────────
+        // ── Pass 0: resolve algorithm_default ────────────────────────────
+        // A default only fills a request that specified NO algorithm. Resolve it
+        // FIRST (F-2) so substitutions (Pass 1) always see the defaulted value —
+        // making resolution independent of the order defaults and substitutions
+        // appear in the policy. First matching default wins.
         let mut resolved: Option<String> = req.algorithm.map(|s| s.to_string());
         let mut substituted_by: Option<usize> = None;
+        if resolved.is_none() {
+            for (i, rule) in snapshot.policy.rules.iter().enumerate() {
+                if let Some(def) = rule.resolve_default(req) {
+                    resolved = Some(def.new_algorithm);
+                    substituted_by = Some(i + 1);
+                    break;
+                }
+            }
+        }
+
+        // ── Pass 1: apply substitutions to the (default-)resolved algorithm ──
         for (i, rule) in snapshot.policy.rules.iter().enumerate() {
             let current_view: Option<&str> = resolved.as_deref();
-            if let Some(sub) = rule.resolve_pass1(req, current_view) {
+            if let Some(sub) = rule.resolve_substitution(req, current_view) {
                 resolved = Some(sub.new_algorithm);
                 substituted_by = Some(i + 1);
             }
@@ -252,6 +274,33 @@ rules: []
 pub enum ActivateError {
     #[error("engine state mutex poisoned: {0}")]
     Poisoned(String),
+    /// S-7 — the policy's `effective:` date is in the future; activating it now
+    /// would enforce it immediately while it looks dormant. Refused.
+    #[error("policy is not yet effective (effective: {effective}); refusing to activate")]
+    NotYetEffective { effective: String },
+}
+
+/// S-7 — is a policy-level `effective:` value a FUTURE date? `"always"`, empty,
+/// past/today dates, and unparseable values are NOT future (we don't block on a
+/// malformed date — S-6 governs malformed policy fields).
+fn is_future_effective(effective: &str, now: OffsetDateTime) -> bool {
+    if effective.is_empty() || effective.eq_ignore_ascii_case("always") {
+        return false;
+    }
+    let date_part = effective.split('T').next().unwrap_or(effective);
+    let p: Vec<&str> = date_part.split('-').collect();
+    if p.len() >= 3 {
+        if let (Ok(y), Ok(m), Ok(d)) =
+            (p[0].parse::<i32>(), p[1].parse::<u8>(), p[2].parse::<u8>())
+        {
+            if let Ok(month) = time::Month::try_from(m) {
+                if let Ok(eff) = time::Date::from_calendar_date(y, month, d) {
+                    return eff > now.date();
+                }
+            }
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -264,6 +313,25 @@ mod tests {
 
     fn ts() -> OffsetDateTime {
         OffsetDateTime::from_unix_timestamp(1_750_000_000).unwrap() // mid-2025
+    }
+
+    /// S-7 — a future-effective policy must NOT activate.
+    #[test]
+    fn refuses_future_effective_policy() {
+        let yaml = "schema_version: 1\nmetadata: { name: f, description: d, authority: a, effective: \"2999-01-01\" }\nrules: []\n";
+        let loaded = load_from_str(yaml, Path::new("<t>")).unwrap();
+        let err = Engine::deny_all().activate(loaded).unwrap_err();
+        assert!(matches!(err, ActivateError::NotYetEffective { .. }), "got {err:?}");
+    }
+
+    /// S-7 — `always` and past dates activate normally.
+    #[test]
+    fn accepts_always_and_past_effective() {
+        for eff in ["always", "2020-01-01"] {
+            let yaml = format!("schema_version: 1\nmetadata: {{ name: p, description: d, authority: a, effective: \"{eff}\" }}\nrules: []\n");
+            let loaded = load_from_str(&yaml, Path::new("<t>")).unwrap();
+            Engine::deny_all().activate(loaded).unwrap_or_else(|e| panic!("{eff}: {e}"));
+        }
     }
 
     #[test]
@@ -451,6 +519,44 @@ rules:
         let req = PolicyRequest::minimal("CreateKeyPair", None, ts(), "c-8", &attrs);
         let d = eng.evaluate(&req);
         assert_eq!(d.algorithm_override(), Some("ML-DSA-87"));
+    }
+
+    /// F-2 — resolution must be ORDER-INDEPENDENT: a default and a substitution
+    /// that chains off it produce the same result no matter which is listed
+    /// first. Here the substitution is listed BEFORE the default; pre-fix, the
+    /// substitution saw `None` (request had no algo), never fired, and the result
+    /// collapsed to the bare default. Post-fix (Pass 0 resolves the default
+    /// first), the substitution chains: ML-DSA-65 → ML-DSA-87.
+    #[test]
+    fn default_resolves_before_substitution_regardless_of_order() {
+        let yaml = r#"
+schema_version: 1
+metadata:
+  name: precedence
+  description: substitution listed before the default it chains off
+  authority: test
+  effective: "always"
+rules:
+  - type: algorithm_substitution
+    ops: [CreateKeyPair]
+    from: ML-DSA-65
+    to: ML-DSA-87
+    reason: "upgrade 65 → 87"
+  - type: algorithm_default
+    ops: [CreateKeyPair]
+    default_algorithm: ML-DSA-65
+    reason: "PQC default"
+"#;
+        let eng = Engine::deny_all();
+        eng.activate(load_from_str(yaml, Path::new("<test>")).unwrap()).unwrap();
+        let attrs = HashMap::new();
+        let req = PolicyRequest::minimal("CreateKeyPair", None, ts(), "c-prec", &attrs);
+        let d = eng.evaluate(&req);
+        assert_eq!(
+            d.algorithm_override(),
+            Some("ML-DSA-87"),
+            "default must resolve first so the substitution can chain off it"
+        );
     }
 
     #[test]

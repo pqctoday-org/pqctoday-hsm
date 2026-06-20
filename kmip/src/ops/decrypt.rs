@@ -114,6 +114,7 @@ pub fn decrypt(deps: &Deps, req: DecryptRequest, correlation_id: &str) -> Result
     p_req.state = Some(state_name(obj.state));
     p_req.current_object_algorithm = Some(&algo);
     p_req.target_uid = Some(&req.uid);
+    p_req.object_activation_date = obj.activation_date; // F-3 — max_key_age_days
     if let Decision::Deny { human, .. } = deps.engine.evaluate(&p_req) {
         return Err(fail_err(
             deps,
@@ -170,8 +171,20 @@ fn decrypt_ml_kem(
             r.map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Decap"))?
         }
         None => {
-            emit_pkcs11(deps, correlation_id, "soft::placeholder_decapsulate", Some(mech), 0, "CKR_OK");
-            placeholder_bytes(&req.uid, &req.data, b"ss", 32)
+            // S-2 hardening: no engine session ⇒ fail rather than emit a fake
+            // shared secret. Placeholder kept only for the crate tests.
+            #[cfg(not(test))]
+            {
+                return Err(crate::error::KmipError::failed(
+                    crate::error::ResultReason::CryptographicFailure,
+                    "no engine session — cannot decapsulate without key material",
+                ));
+            }
+            #[cfg(test)]
+            {
+                emit_pkcs11(deps, correlation_id, "soft::placeholder_decapsulate", Some(mech), 0, "CKR_OK");
+                placeholder_bytes(&req.uid, &req.data, b"ss", 32)
+            }
         }
     };
     Ok(DecryptResponse { uid: req.uid.clone(), data: shared_secret })

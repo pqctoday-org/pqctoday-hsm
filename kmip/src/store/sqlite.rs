@@ -30,6 +30,21 @@
 //! doesn't need them yet. They land when Phase 8 (compliance) +
 //! Phase 9 (audit CLI) require them.
 //!
+//! ## D-1 — full-record persistence (RESOLVED, schema v2)
+//!
+//! Schema v1 persisted only 11 of [`ObjectRecord`]'s ~60 fields, silently
+//! dropping key material, name, custom attributes, the mechanism profile, and
+//! most lifecycle dates on reopen. Schema **v2** adds an `attributes_json` BLOB
+//! holding a serde dump of the WHOLE record; on read it is the source of truth
+//! (the typed columns remain a denormalised projection for indexing/inspection,
+//! kept in sync on every write). `ObjectRecord` and its KMIP type tree
+//! (`KmipAlgorithm`/`ObjectType`/`State`/`HashingAlgorithm`/
+//! `CryptographicParameters`, plus a `UsageMask` bits adapter) derive
+//! `Serialize`/`Deserialize`. Round-trip fidelity is pinned by the
+//! `full_record_survives_reopen` test (asserts `loaded == original` after a real
+//! close+reopen). Legacy v1 rows (NULL `attributes_json`) still decode via the
+//! typed-column fallback in `row_to_record`.
+//!
 //! ## Lifecycle enforcement
 //!
 //! Every [`Self::update`] that changes `state` runs through
@@ -58,6 +73,17 @@ impl SqliteStore {
     /// `path` may be `:memory:` for tests.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let mut conn = Connection::open(path).map_err(map_sqlite_err)?;
+        // D-1 — durability + concurrency PRAGMAs. `foreign_keys` and
+        // `busy_timeout` are per-connection (must be set every open);
+        // `journal_mode=WAL` persists in the file. WAL is a no-op on `:memory:`
+        // (it stays in memory), so this is safe for the in-memory test path too.
+        conn.execute_batch(
+            "PRAGMA journal_mode = WAL;
+             PRAGMA synchronous = NORMAL;
+             PRAGMA busy_timeout = 5000;
+             PRAGMA foreign_keys = ON;",
+        )
+        .map_err(map_sqlite_err)?;
         Self::migrate(&mut conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
@@ -71,7 +97,7 @@ impl SqliteStore {
     }
 
     fn migrate(conn: &mut Connection) -> Result<()> {
-        let migrations = Migrations::new(vec![M::up(SCHEMA_V1)]);
+        let migrations = Migrations::new(vec![M::up(SCHEMA_V1), M::up(SCHEMA_V2)]);
         migrations
             .to_latest(conn)
             .map_err(|e| KmipError::internal(format!("schema migration failed: {e}")))
@@ -100,13 +126,26 @@ CREATE INDEX idx_objects_state     ON objects(state);
 CREATE INDEX idx_objects_algorithm ON objects(algorithm);
 "#;
 
+/// D-1 — full-record persistence. The 11 typed columns above stay (for indexing
+/// and human-readable inspection), but the WHOLE [`ObjectRecord`] is also dumped
+/// to this JSON blob so NO field is lost on reopen (key_material, name,
+/// custom_attributes, cryptographic_parameters, every lifecycle date, …). On
+/// read the blob is the source of truth; the typed columns are a denormalised
+/// projection kept in sync on every write.
+const SCHEMA_V2: &str = r#"
+ALTER TABLE objects ADD COLUMN attributes_json BLOB;
+"#;
+
 impl KeyStore for SqliteStore {
     fn put(&self, record: ObjectRecord) -> Result<()> {
         let conn = self.lock();
+        let json = serde_json::to_vec(&record)
+            .map_err(|e| KmipError::internal(format!("record serialise failed: {e}")))?;
         let result = conn.execute(
             "INSERT INTO objects (uid, pkcs11_cka_id, pkcs11_slot, object_type, algorithm,
-                 cryptographic_length, state, usage_mask, supersedes, created_at, activated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                 cryptographic_length, state, usage_mask, supersedes, created_at, activated_at,
+                 attributes_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 record.uid,
                 record.pkcs11_cka_id,
@@ -119,6 +158,7 @@ impl KeyStore for SqliteStore {
                 record.supersedes,
                 fmt_ts(record.initial_date),
                 record.activation_date.map(fmt_ts),
+                json,
             ],
         );
         match result {
@@ -141,7 +181,7 @@ impl KeyStore for SqliteStore {
             .prepare(
                 "SELECT uid, pkcs11_cka_id, pkcs11_slot, object_type, algorithm,
                         cryptographic_length, state, usage_mask, supersedes,
-                        created_at, activated_at
+                        created_at, activated_at, attributes_json
                    FROM objects WHERE uid = ?1",
             )
             .map_err(map_sqlite_err)?;
@@ -173,6 +213,8 @@ impl KeyStore for SqliteStore {
             .ok_or_else(|| KmipError::internal(format!("unknown stored state {current_state:?}")))?;
         enforce_transition(from, record.state)?;
 
+        let json = serde_json::to_vec(&record)
+            .map_err(|e| KmipError::internal(format!("record serialise failed: {e}")))?;
         let n = conn
             .execute(
                 "UPDATE objects SET
@@ -184,7 +226,8 @@ impl KeyStore for SqliteStore {
                      state = ?7,
                      usage_mask = ?8,
                      supersedes = ?9,
-                     activated_at = ?10
+                     activated_at = ?10,
+                     attributes_json = ?11
                  WHERE uid = ?1",
                 params![
                     record.uid,
@@ -197,6 +240,7 @@ impl KeyStore for SqliteStore {
                     record.usage_mask.bits(),
                     record.supersedes,
                     record.activation_date.map(fmt_ts),
+                    json,
                 ],
             )
             .map_err(map_sqlite_err)?;
@@ -223,7 +267,7 @@ impl KeyStore for SqliteStore {
             .prepare(
                 "SELECT uid, pkcs11_cka_id, pkcs11_slot, object_type, algorithm,
                         cryptographic_length, state, usage_mask, supersedes,
-                        created_at, activated_at FROM objects",
+                        created_at, activated_at, attributes_json FROM objects",
             )
             .map_err(map_sqlite_err)?;
         let rows = stmt
@@ -256,6 +300,15 @@ fn parse_ts(s: &str) -> Option<OffsetDateTime> {
 }
 
 fn row_to_record(row: &Row) -> rusqlite::Result<Result<ObjectRecord>> {
+    // D-1 — the full-record JSON (column 11) is the source of truth when present.
+    // Legacy v1 rows (written before the attributes_json column) have NULL here
+    // and fall back to the typed-column reconstruction below.
+    let attributes_json: Option<Vec<u8>> = row.get(11)?;
+    if let Some(blob) = attributes_json {
+        return Ok(serde_json::from_slice::<ObjectRecord>(&blob)
+            .map_err(|e| KmipError::internal(format!("record deserialise failed: {e}"))));
+    }
+
     let uid: String = row.get(0)?;
     let pkcs11_cka_id: Vec<u8> = row.get(1)?;
     let pkcs11_slot: u32 = row.get::<_, i64>(2)? as u32;
@@ -445,6 +498,58 @@ mod tests {
         let _store = SqliteStore::in_memory().unwrap();
         // Open succeeds → migration ran. Subsequent ops will fail if the
         // schema is wrong; covered by the round-trip tests below.
+    }
+
+    /// D-1 — full-record persistence: the WHOLE `ObjectRecord` survives a real
+    /// close+reopen, including fields that used to be dropped (key_material,
+    /// name, custom_attributes, …). Pinned by asserting equality with the
+    /// original after a fresh-connection reopen.
+    #[test]
+    fn full_record_survives_reopen() {
+        let path = std::env::temp_dir().join("kmip_d1_reopen.db");
+        let wal = std::path::PathBuf::from(format!("{}-wal", path.display()));
+        let shm = std::path::PathBuf::from(format!("{}-shm", path.display()));
+        let cleanup = || {
+            let _ = std::fs::remove_file(&path);
+            let _ = std::fs::remove_file(&wal);
+            let _ = std::fs::remove_file(&shm);
+        };
+        cleanup(); // start from a clean slate
+
+        let mut original = rec("d1-uid", State::Active);
+        original.activation_date = Some(OffsetDateTime::UNIX_EPOCH);
+        original.cryptographic_length = 256;
+        original.name = Some("my-signing-key".into()); // NOT persisted (D-1)
+        original.key_material = Some(vec![9, 8, 7, 6]); // NOT persisted (D-1)
+        original
+            .custom_attributes
+            .insert("env".into(), "prod".into()); // NOT persisted (D-1)
+
+        {
+            let store = SqliteStore::open(&path).unwrap();
+            store.put(original.clone()).unwrap();
+        } // store dropped → connection closed → flushed to disk
+
+        let store = SqliteStore::open(&path).unwrap();
+        let loaded = store.get("d1-uid").unwrap().expect("record must survive reopen");
+
+        // Persisted columns survive the reopen.
+        assert_eq!(loaded.uid, "d1-uid");
+        assert_eq!(loaded.state, State::Active);
+        assert_eq!(loaded.algorithm, KmipAlgorithm::MlDsa87);
+        assert_eq!(loaded.cryptographic_length, 256);
+        assert_eq!(loaded.usage_mask, UsageMask::SIGN | UsageMask::VERIFY);
+        assert_eq!(loaded.activation_date, Some(OffsetDateTime::UNIX_EPOCH));
+        assert_eq!(loaded.pkcs11_cka_id, vec![1, 2, 3, 4]);
+
+        // D-1 — previously-dropped fields now survive the reopen.
+        assert_eq!(loaded.name, Some("my-signing-key".into()));
+        assert_eq!(loaded.key_material, Some(vec![9, 8, 7, 6]));
+        assert_eq!(loaded.custom_attributes.get("env"), Some(&"prod".to_string()));
+        // The ENTIRE record round-trips byte-for-byte.
+        assert_eq!(loaded, original, "full-record round-trip must be lossless");
+
+        cleanup();
     }
 
     #[test]

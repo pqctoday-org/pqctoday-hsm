@@ -48,10 +48,14 @@ use crate::ops::{
     revoke::revoke,
     rng_and_pkcs11::{pkcs11, rng_retrieve, rng_seed},
     session_and_auth::{create_credential, create_group, create_user, log, login, logout},
-    sign::sign, signature_verify::signature_verify, validate::validate,
-    certify::{certify, recertify},
+    sign::sign, signature_verify::signature_verify,
     Deps,
 };
+// Certify / Re-certify / Validate handlers compile only in the `native`
+// build (see `ops/mod.rs`); the wasm dispatcher answers those operations
+// with `OperationNotSupported` via the `not(native)` match arms below.
+#[cfg(feature = "native")]
+use crate::ops::{validate::validate, certify::{certify, recertify}};
 
 use crate::kmip30::RequestPayload;
 
@@ -149,7 +153,9 @@ pub fn dispatch_with_transport_identity(
     let mut items: Vec<ResponseBatchItem> = Vec::with_capacity(request.batch_items.len());
     for item in request.batch_items {
         let response = dispatch_one(deps, item, &mut state, &auth);
-        // D1 — KMIP request counter (operation × success/error)
+        // D1 — KMIP request counter (operation × success/error). `native` only —
+        // the wasm core has no Prometheus registry (`crate::metrics` is gated out).
+        #[cfg(feature = "native")]
         if let Some(op) = response.operation {
             crate::metrics::record_kmip_request(
                 op.metric_label(),
@@ -233,10 +239,13 @@ fn undo_wave(deps: &Deps, state: &mut BatchState, items: &mut [ResponseBatchItem
         for snap in bucket.0.into_iter().rev() {
             match snap.pre {
                 Some(rec) => {
-                    // Restore the pre-state by overwriting. We use
-                    // `update` rather than `put` because the UID
-                    // still exists in the store.
-                    let _ = deps.store.update(rec);
+                    // Restore the pre-op snapshot. This is a SYSTEM rollback, not
+                    // a client lifecycle op, so it may be a reverse transition the
+                    // forward FSM legitimately rejects (e.g. Active→PreActive after
+                    // undoing an Activate). Bypass the store-layer FSM gate (S-10)
+                    // by remove + put rather than `update` (which now enforces it).
+                    let _ = deps.store.remove(&rec.uid);
+                    let _ = deps.store.put(rec);
                 }
                 None => {
                     // The UID didn't exist before the op — remove it
@@ -556,10 +565,22 @@ fn handle_payload(
         RequestPayload::SignatureVerify(r) => {
             ResponsePayload::SignatureVerify(signature_verify(deps, r, correlation_id)?)
         }
+        #[cfg(feature = "native")]
         RequestPayload::Validate(r) => ResponsePayload::Validate(validate(deps, r, correlation_id)?),
         // P2.3 — §6.1.6 Certify / §6.1.50 Re-certify (PQC-capable CA).
+        #[cfg(feature = "native")]
         RequestPayload::Certify(r) => ResponsePayload::Certify(certify(deps, r, correlation_id)?),
+        #[cfg(feature = "native")]
         RequestPayload::ReCertify(r) => ResponsePayload::ReCertify(recertify(deps, r, correlation_id)?),
+        // wasm core: the ring/rcgen-backed CA + chain-validation ops are not
+        // compiled in. Answer them like any recognized-but-unhandled op.
+        #[cfg(not(feature = "native"))]
+        RequestPayload::Validate(_) | RequestPayload::Certify(_) | RequestPayload::ReCertify(_) => {
+            return Err(KmipError::failed(
+                crate::error::ResultReason::OperationNotSupported,
+                "this build does not include certificate issuance / validation",
+            ));
+        }
         RequestPayload::Interop(r) => ResponsePayload::Interop(interop(deps, r, correlation_id)?),
         RequestPayload::AddAttribute(r) => ResponsePayload::AddAttribute(add_attribute(deps, r, correlation_id)?),
         RequestPayload::ModifyAttribute(r) => ResponsePayload::ModifyAttribute(modify_attribute(deps, r, correlation_id)?),

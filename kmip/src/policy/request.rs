@@ -110,6 +110,13 @@ pub struct PolicyRequest<'a> {
     /// object to rekey. `None` for ops that don't target an existing object.
     pub target_uid: Option<&'a str>,
 
+    /// F-3 — `Activation Date` of the stored object this op targets, set by the
+    /// dispatcher from the looked-up record. Drives `max_key_age_days`: the rule
+    /// denies when `ts - object_activation_date > days`. `None` for `Create`,
+    /// for objects never activated, or for ops that don't target an object — in
+    /// which case the age rule cannot fire (can't enforce an unknown age).
+    pub object_activation_date: Option<OffsetDateTime>,
+
     /// Custom attributes attached to the request (KMIP `x-*` namespace).
     /// Keys MUST be the bare name without the `x-` prefix (loader strips it).
     pub custom_attrs: &'a HashMap<String, String>,
@@ -151,6 +158,7 @@ impl<'a> PolicyRequest<'a> {
             state: None,
             current_object_algorithm: None,
             target_uid: None,
+            object_activation_date: None,
             custom_attrs,
             caller_cn: None,
             ts,

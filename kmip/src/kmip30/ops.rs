@@ -1287,7 +1287,7 @@ pub struct HashResponse {
 /// (PaddingMethod / MaskGenerator / MaskGeneratorHashingAlgorithm /
 /// PSource). The spec defines ~30 more sub-fields; the rest are
 /// additive when an op needs them.
-#[derive(Clone, Debug, PartialEq, Default)]
+#[derive(Clone, Debug, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct CryptographicParameters {
     /// Wire tag `Hashing Algorithm` (0x420038) — Enumeration.
     pub hashing_algorithm: Option<HashingAlgorithm>,
@@ -1352,7 +1352,7 @@ pub struct CryptographicParameters {
 /// spec extract (`enums.Hashing Algorithm`). SHA-2 family is what the
 /// OASIS corpus tests; SHA-1 is here for completeness even though it's
 /// deprecated.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum HashingAlgorithm {
     Md2     = 0x01,
     Md4     = 0x02,

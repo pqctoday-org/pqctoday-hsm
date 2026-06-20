@@ -55,7 +55,7 @@ bitflags::bitflags! {
 /// `Object Type` enum value. v0.1 covers the four types touched by the op
 /// set; the spec has more (e.g. `Split Key`, `Opaque Object`) — add when an
 /// op handler needs them.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum ObjectType {
     Certificate              = 0x01,
     SymmetricKey             = 0x02,
@@ -110,7 +110,7 @@ impl ObjectType {
 /// `docs/IMPLEMENTATION_PLAN.md` §3.4 mirrors the same edges. Phase 6
 /// ([`crate::store::lifecycle`]) owns the enforcement; this module just
 /// defines the type.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum State {
     PreActive    = 0x01,
     Active       = 0x02,

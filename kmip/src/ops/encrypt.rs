@@ -127,6 +127,7 @@ pub fn encrypt(deps: &Deps, mut req: EncryptRequest, correlation_id: &str) -> Re
     p_req.state = Some(state_name(obj.state));
     p_req.current_object_algorithm = Some(&algo);
     p_req.target_uid = Some(&req.uid);
+    p_req.object_activation_date = obj.activation_date; // F-3 — max_key_age_days
     // P1/P2 — surface the mechanism dimension (block-cipher mode / padding +
     // canonical CKM_*) so MechanismParameterConstraint rules can gate Encrypt.
     p_req.mechanism = super::helpers::mechanism_params_from_cp(
@@ -376,11 +377,23 @@ fn encrypt_ml_kem(
             r.map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Encap"))?
         }
         None => {
-            emit_pkcs11(deps, correlation_id, "soft::placeholder_encapsulate", Some(mech), 0, "CKR_OK");
-            (
-                placeholder_bytes(&req.uid, &req.data, b"encap", 32),
-                placeholder_bytes(&req.uid, &req.data, b"ss", 32),
-            )
+            // S-2 hardening: no engine session ⇒ fail rather than emit fake
+            // ciphertext/shared-secret. Placeholder kept only for the crate tests.
+            #[cfg(not(test))]
+            {
+                return Err(crate::error::KmipError::failed(
+                    crate::error::ResultReason::CryptographicFailure,
+                    "no engine session — cannot encapsulate without key material",
+                ));
+            }
+            #[cfg(test)]
+            {
+                emit_pkcs11(deps, correlation_id, "soft::placeholder_encapsulate", Some(mech), 0, "CKR_OK");
+                (
+                    placeholder_bytes(&req.uid, &req.data, b"encap", 32),
+                    placeholder_bytes(&req.uid, &req.data, b"ss", 32),
+                )
+            }
         }
     };
     Ok(EncryptResponse {

@@ -106,6 +106,13 @@ struct Cli {
     #[arg(long, requires = "admin_listen")]
     admin_client_ca: Option<PathBuf>,
 
+    /// S-1 — client-cert CN(s) AUTHORIZED to perform policy-mutating admin
+    /// requests (POST/PUT `/api/v1/policies`, PUT `/api/v1/active`). Repeatable.
+    /// mTLS authenticates every caller; this authorizes WRITES. Empty (the
+    /// default) ⇒ ALL writes are denied (403) — fail closed.
+    #[arg(long, requires = "admin_listen")]
+    admin_write_cn: Vec<String>,
+
     /// D1 — Prometheus `/metrics` scrape endpoint (plain HTTP, no mTLS — use
     /// network policy to restrict access). Default `127.0.0.1:9095`; set to
     /// `0.0.0.0:9095` to expose to an off-pod Prometheus scraper.
@@ -278,6 +285,7 @@ async fn main() -> anyhow::Result<()> {
         let admin_engine = engine.clone();
         let admin_ring = ring.clone();
         let admin_sse = sse.clone();
+        let admin_write_cn = cli.admin_write_cn.clone();
         tracing::info!("cryptopolicy-manager admin facade enabled on {addr} (mTLS, X25519MLKEM768+X25519)");
         tokio::spawn(async move {
             if let Err(e) = pqctoday_kmip::cryptopolicy_manager::serve_admin(
@@ -287,6 +295,7 @@ async fn main() -> anyhow::Result<()> {
                 admin_ring,
                 admin_sse,
                 tls,
+                admin_write_cn,
             )
             .await
             {

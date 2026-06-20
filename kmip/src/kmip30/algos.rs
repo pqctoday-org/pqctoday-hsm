@@ -104,7 +104,7 @@ pub enum PkcsOp {
 /// Wire-format `Enumeration` codepoint comes from OASIS KMIP 3.0 §10.2.6,
 /// extracted into `spec/oasis-kmip-3.0/kmip-spec-3.0-tags-enums.json`.
 /// Symbolic names follow the OASIS spec's hyphenation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub enum KmipAlgorithm {
     // ── Classical baseline ────────────────────────────────────────────────
     // Deprecated symmetric primitives (DES=0x01, 3DES=0x02) and the

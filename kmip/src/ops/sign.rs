@@ -103,7 +103,11 @@ pub fn sign(deps: &Deps, req: SignRequest, correlation_id: &str) -> Result<SignR
 
     // ── Plane 1: policy gate ────────────────────────────────────────────
     let empty: HashMap<String, String> = HashMap::new();
-    let stored_algo = canonical_name(obj.algorithm);
+    // Curve/size-QUALIFIED name (e.g. "ECDSA-P256") so the shipped policies'
+    // qualified `from:`/denylist entries actually match this stored key — the
+    // coarse `canonical_name` ("ECDSA") never matched, leaving the rekey rules
+    // dead (cacp-wasm-remediation-plan §W1/#2).
+    let stored_algo = super::helpers::qualified_name(obj.algorithm, obj.cryptographic_length);
     let mut p_req = PolicyRequest::minimal(
         "Sign",
         Some(&stored_algo),
@@ -115,6 +119,7 @@ pub fn sign(deps: &Deps, req: SignRequest, correlation_id: &str) -> Result<SignR
     p_req.state = Some("Active");
     p_req.current_object_algorithm = Some(&stored_algo);
     p_req.target_uid = Some(&req.uid);
+    p_req.object_activation_date = obj.activation_date; // F-3 — max_key_age_days
     // P1 — surface the mechanism dimension (hash/padding/PQC flags + canonical
     // CKM_*) so mechanism/hash policy rules can gate Sign, not just the algorithm.
     p_req.mechanism = super::helpers::mechanism_params_from_cp(
@@ -160,25 +165,13 @@ pub fn sign(deps: &Deps, req: SignRequest, correlation_id: &str) -> Result<SignR
                 KmipError::permission_denied(human),
             ));
         }
-        Decision::RekeyAndProceed { new_algorithm, original_uid, .. } => {
-            // Policy demands rekey before sign. Phase 5 op bodies do not
-            // execute the multi-op rekey transaction (that's a dispatcher
-            // concern in Phase 6/7). Surface a typed error so the caller
-            // knows to either run the rekey transaction or bail.
-            return Err(fail_err(
-                deps,
-                correlation_id,
-                "Sign",
-                KmipError::failed(
-                    ResultReason::PermissionDenied,
-                    format!(
-                        "rekey required: policy substitutes {} → {} for UID {}",
-                        canonical_name(obj.algorithm),
-                        new_algorithm,
-                        original_uid,
-                    ),
-                ),
-            ));
+        Decision::RekeyAndProceed { new_algorithm, .. } => {
+            // Crypto agility: the active policy substitutes this key's algorithm
+            // for a new one. Execute the transparent rekey transaction (new key
+            // → activate → deactivate+supersede the old → re-issue the Sign) and
+            // return the signature under the migrated algorithm. The application
+            // signed with an unchanged call; the engine migrated the key.
+            return rekey_and_sign(deps, &req, &obj, &new_algorithm, correlation_id);
         }
     };
 
@@ -261,15 +254,35 @@ pub fn sign(deps: &Deps, req: SignRequest, correlation_id: &str) -> Result<SignR
             r.map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Sign"))?
         }
         None => {
-            super::helpers::emit_pkcs11(
-                deps,
-                correlation_id,
-                "soft::placeholder_sign",
-                Some(mech),
-                0,
-                "CKR_OK",
-            );
-            placeholder_signature(&req.uid, &req.data)
+            // S-2 hardening: NO engine session ⇒ no key material to sign with.
+            // Production (any non-test build, incl. the server bin and the wasm
+            // bundle) MUST fail — never emit a deterministic SHA-256 stand-in as
+            // a "signature". The placeholder survives only for the crate's own
+            // unit tests, which don't bootstrap an engine.
+            #[cfg(not(test))]
+            {
+                return Err(fail_err(
+                    deps,
+                    correlation_id,
+                    "Sign",
+                    KmipError::failed(
+                        ResultReason::CryptographicFailure,
+                        "no engine session — cannot sign without key material",
+                    ),
+                ));
+            }
+            #[cfg(test)]
+            {
+                super::helpers::emit_pkcs11(
+                    deps,
+                    correlation_id,
+                    "soft::placeholder_sign",
+                    Some(mech),
+                    0,
+                    "CKR_OK",
+                );
+                placeholder_signature(&req.uid, &req.data)
+            }
         }
     };
 
@@ -288,6 +301,92 @@ pub fn sign(deps: &Deps, req: SignRequest, correlation_id: &str) -> Result<SignR
         uid: req.uid,
         signature,
     })
+}
+
+/// Transparent auto-rekey transaction (KMIP 3.0 crypto agility, plan §W1/#3).
+///
+/// The active policy substituted the stored key's algorithm, so: (1) generate a
+/// fresh signing key pair under `new_algorithm`, (2) activate both halves, (3)
+/// deactivate + supersede the old key (KMIP has no "Deprecated" state — the
+/// §3.2 Active→Deactivated transition is the move for a superseded key, linked
+/// via `x-pqctoday-supersedes`), and (4) re-issue the Sign against the new key.
+///
+/// The caller (an application using the original UID) gets a valid signature
+/// under the migrated PQC algorithm with no code change; it can discover the new
+/// UID by following the supersedes link on the old object. The new algorithm is
+/// the substitution target, so the re-issued Sign is allowed without
+/// re-substituting (no recursion).
+fn rekey_and_sign(
+    deps: &Deps,
+    req: &SignRequest,
+    old: &crate::store::ObjectRecord,
+    new_algorithm: &str,
+    correlation_id: &str,
+) -> Result<SignResponse> {
+    use crate::kmip30::{ActivateRequest, Attribute, CreateKeyPairRequest, UsageMask};
+
+    let new_alg = super::create_key_pair::parse_algorithm(new_algorithm)
+        .map_err(|e| fail_err(deps, correlation_id, "Sign", e))?;
+
+    // 1. Generate the replacement signing key pair under the policy's target.
+    let ckp = super::create_key_pair::create_key_pair(
+        deps,
+        CreateKeyPairRequest {
+            common_attributes: vec![
+                Attribute::CryptographicAlgorithm(new_alg),
+                Attribute::CryptographicUsageMask(UsageMask::SIGN | UsageMask::VERIFY),
+            ],
+            private_key_attributes: vec![],
+            public_key_attributes: vec![],
+            seed: None,
+        },
+        "CreateKeyPair:Sign",
+        correlation_id,
+    )?;
+
+    // 2. Activate both halves so the re-issued Sign / future Verify can use them.
+    super::activate::activate(
+        deps,
+        ActivateRequest { uid: ckp.private_key_uid.clone() },
+        correlation_id,
+    )?;
+    super::activate::activate(
+        deps,
+        ActivateRequest { uid: ckp.public_key_uid.clone() },
+        correlation_id,
+    )?;
+
+    // 3. Deactivate + supersede the old key.
+    let mut old_rec = old.clone();
+    let from_state = format!("{:?}", old_rec.state);
+    old_rec.state = State::Deactivated;
+    old_rec.supersedes = Some(ckp.private_key_uid.clone());
+    old_rec
+        .links
+        .insert("x-pqctoday-supersedes".to_string(), ckp.private_key_uid.clone());
+    deps.store.update(old_rec)?;
+    deps.sink.emit(AuditEvent::at(
+        OffsetDateTime::now_utc(),
+        Plane::Kmip,
+        correlation_id,
+        EventPayload::KmipObjectStateChanged {
+            uid: old.uid.clone(),
+            from_state,
+            to_state: "Deactivated".into(),
+            reason: format!("superseded by {} (agility rekey → {})", ckp.private_key_uid, new_algorithm),
+        },
+    ));
+
+    // 4. Re-issue the original Sign against the migrated key.
+    sign(
+        deps,
+        SignRequest {
+            uid: ckp.private_key_uid,
+            data: req.data.clone(),
+            cryptographic_parameters: req.cryptographic_parameters.clone(),
+        },
+        correlation_id,
+    )
 }
 
 fn placeholder_signature(uid: &str, data: &[u8]) -> Vec<u8> {
@@ -424,7 +523,7 @@ metadata: { name: rk, description: rekey, authority: t, effective: "always" }
 rules:
   - type: algorithm_substitution
     ops: [Sign]
-    from: ECDSA
+    from: ECDSA-P256
     to: ML-DSA-87
     reason: "Upgrade signing"
 "#;
@@ -533,23 +632,32 @@ rules:
     }
 
     #[test]
-    fn rekey_required_surfaces_permission_denied_with_hint() {
+    fn rekey_transparently_migrates_and_signs() {
         let (_ring, d) = deps_with(REKEY_POLICY);
-        // Existing ECDSA key — policy says substitute to ML-DSA-87 → engine
-        // emits RekeyAndProceed → handler returns PermissionDenied with
-        // an actionable message.
+        // Existing ECDSA-P256 key — policy substitutes to ML-DSA-87 → engine
+        // emits RekeyAndProceed → the handler runs the transparent rekey
+        // transaction and returns a signature under the migrated PQC key.
         make_active_key(&d, "urn:ecdsa", KmipAlgorithm::Ecdsa);
-        let err = sign(
+        let resp = sign(
             &d,
             SignRequest { uid: "urn:ecdsa".into(), data: b"x".to_vec(),
             cryptographic_parameters: None,
         },
             "corr-rk",
         )
-        .unwrap_err();
-        assert_eq!(err.result_reason(), ResultReason::PermissionDenied);
-        let s = err.to_string();
-        assert!(s.contains("rekey required"));
-        assert!(s.contains("ML-DSA-87"));
+        .unwrap();
+        // The signature is keyed on the NEW (migrated) private key, not the old UID.
+        assert_ne!(resp.uid, "urn:ecdsa");
+        let new_priv = d.store.get(&resp.uid).unwrap().unwrap();
+        assert_eq!(new_priv.algorithm, KmipAlgorithm::MlDsa87);
+        assert_eq!(new_priv.state, State::Active);
+        // The old key is deactivated and superseded by the new one.
+        let old = d.store.get("urn:ecdsa").unwrap().unwrap();
+        assert_eq!(old.state, State::Deactivated);
+        assert_eq!(old.supersedes.as_deref(), Some(resp.uid.as_str()));
+        assert_eq!(
+            old.links.get("x-pqctoday-supersedes").map(String::as_str),
+            Some(resp.uid.as_str())
+        );
     }
 }
