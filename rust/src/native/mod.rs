@@ -62,6 +62,12 @@ pub type CkRv = u32;
 mod parity;
 
 #[cfg(test)]
+mod prehash_kat;
+
+#[cfg(test)]
+mod prehash_kat_slh;
+
+#[cfg(test)]
 pub(crate) mod test_lock {
     //! Shared mutex serialising every test in `native::*` that touches
     //! engine state.
