@@ -472,18 +472,32 @@ fn sign_tbs_in_engine(
             r.map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, op))
         }
         None => {
-            super::helpers::emit_pkcs11(
-                deps,
-                correlation_id,
-                "soft::placeholder_ca_sign",
-                Some(ca.mechanism),
-                0,
-                "CKR_OK",
-            );
-            // Deterministic placeholder so the unit-test surface (no
-            // engine) can still build a structurally-valid Certificate.
-            use sha2::{Digest, Sha256};
-            Ok(Sha256::digest(tbs_der).to_vec())
+            // S-2 hardening: NO engine session ⇒ the CA private key is
+            // unavailable, so we cannot produce a real certificate signature.
+            // Production MUST fail rather than emit a SHA-256 stand-in that
+            // looks like a signed cert but will never verify.
+            #[cfg(not(test))]
+            {
+                return Err(KmipError::failed(
+                    ResultReason::CryptographicFailure,
+                    "no engine session — cannot sign certificate (CA key unavailable)",
+                ));
+            }
+            #[cfg(test)]
+            {
+                super::helpers::emit_pkcs11(
+                    deps,
+                    correlation_id,
+                    "soft::placeholder_ca_sign",
+                    Some(ca.mechanism),
+                    0,
+                    "CKR_OK",
+                );
+                // Deterministic placeholder so the unit-test surface (no
+                // engine) can still build a structurally-valid Certificate.
+                use sha2::{Digest, Sha256};
+                Ok(Sha256::digest(tbs_der).to_vec())
+            }
         }
     }
 }

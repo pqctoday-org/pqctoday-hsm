@@ -71,7 +71,8 @@ pub const CKA_BIP32_CHILD_INDEX_LEGACY: u32 = 0x0000_1022;
 pub const CKA_PUBLIC_KEY_INFO: u32 = 0x0000_0129; // PKCS#11 v3.2 — DER SubjectPublicKeyInfo
 pub const CKA_PARAMETER_SET: u32 = 0x0000_061d;
 // PKCS#11 v3.2 — deterministic keygen seed (ξ for ML-DSA, d‖z for ML-KEM).
-// NOTE: deterministic seeded keygen is not yet wired; see gap analysis R3.6.
+// Wired: native::keygen + ffi consume CKA_SEED for FIPS 203/204 deterministic
+// keygen (ML-KEM KeyGen_internal(d,z); ML-DSA KeyGen from ξ).
 pub const CKA_SEED: u32 = 0x0000_0637;
 
 // ── PKCS#11 Object Classes ────────────────────────────────────────────────────

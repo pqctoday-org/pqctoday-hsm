@@ -375,20 +375,34 @@ pub(crate) fn engine_generate_keypair(
             digest_pub: softhsmrustv3::native::get_value_digest_sha256(session, pub_h),
         })
     } else {
-        super::helpers::emit_pkcs11(
-            deps,
-            correlation_id,
-            "soft::placeholder_generate_keypair",
-            Some(mech),
-            0,
-            "CKR_OK",
-        );
-        Ok(GeneratedKeyPair {
-            cka_id_priv: Uuid::new_v4().as_bytes().to_vec(),
-            cka_id_pub: Uuid::new_v4().as_bytes().to_vec(),
-            digest_priv: None,
-            digest_pub: None,
-        })
+        // S-2 hardening: NO engine session ⇒ no key pair was generated.
+        // Production MUST fail rather than persist phantom public/private
+        // records with fabricated CKA_IDs and no key material. The soft path
+        // survives only for the crate's own (engine-less) unit tests.
+        #[cfg(not(test))]
+        {
+            return Err(KmipError::failed(
+                ResultReason::CryptographicFailure,
+                "no engine session — cannot generate key pair material",
+            ));
+        }
+        #[cfg(test)]
+        {
+            super::helpers::emit_pkcs11(
+                deps,
+                correlation_id,
+                "soft::placeholder_generate_keypair",
+                Some(mech),
+                0,
+                "CKR_OK",
+            );
+            Ok(GeneratedKeyPair {
+                cka_id_priv: Uuid::new_v4().as_bytes().to_vec(),
+                cka_id_pub: Uuid::new_v4().as_bytes().to_vec(),
+                digest_priv: None,
+                digest_pub: None,
+            })
+        }
     }
 }
 
