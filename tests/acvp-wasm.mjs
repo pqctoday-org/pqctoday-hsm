@@ -28,6 +28,7 @@ import {
   importECPublicKey,
   importMLDSAPublicKey,
   importMLKEMPrivateKey,
+  importMLKEMPublicKey,
   generateAESKey,
   generateMLDSAKeyPair,
   generateMLKEMKeyPair,
@@ -807,7 +808,7 @@ if (engines.length > 1 && !jsonOut) {
 // ── §CC Cross-check: C++ sign → Rust verify, Rust sign → C++ verify ──────────
 if (engines.length > 1 && !jsonOut) {
   console.log('\n' + '='.repeat(70))
-  console.log('  §CC CROSS-CHECK: HSS SHA-256 C++ ↔ Rust interoperability')
+  console.log('  §CC CROSS-CHECK: PQC C++ ↔ Rust interop (ML-DSA, SLH-DSA, ML-KEM, HSS)')
   console.log('='.repeat(70))
 
   // SHA-256 params (RFC 8554 type codes 0x05/0x04) used because hbs-lms 0.1.1
@@ -859,8 +860,94 @@ if (engines.length > 1 && !jsonOut) {
     }
   }
 
-  await runCrossCheck('cpp', 'rust')   // §CC-1
-  await runCrossCheck('rust', 'cpp')   // §CC-2
+  // ── §CC-3/4 ML-DSA-65: one engine signs, the other imports the public key
+  //    and verifies. Exercises the PQC signature interop the HSS check misses.
+  async function runMLDSACrossCheck(signEngineName, verifyEngineName) {
+    const label = `§CC ML-DSA-65 ${signEngineName.toUpperCase()} sign → ${verifyEngineName.toUpperCase()} verify`
+    try {
+      const Ms = await loadEngine(signEngineName)
+      const Mv = await loadEngine(verifyEngineName)
+      const { hSession: ss } = initializeEngine(Ms)
+      const { hSession: vs } = initializeEngine(Mv)
+      const msg = 'ML-DSA-65 cross-engine interoperability test'
+      const { pubHandle, privHandle } = generateMLDSAKeyPair(Ms, ss, 65)
+      const sig = sign(Ms, ss, privHandle, msg, CK.CKM_ML_DSA)
+      const pk = extractKeyValue(Ms, ss, pubHandle)
+      const vPub = importMLDSAPublicKey(Mv, vs, 65, pk)
+      const ok = verify(Mv, vs, vPub, msg, sig, CK.CKM_ML_DSA)
+      finalizeEngine(Ms, ss)
+      finalizeEngine(Mv, vs)
+      if (!ok) ccFail++
+      console.log(`  ${label}: ${ok ? 'PASS' : 'FAIL'}  sig[${sig.length}B] pk[${pk.length}B]`)
+    } catch (e) {
+      ccFail++
+      console.log(`  ${label}: FAIL — ${e.message}`)
+    }
+  }
+
+  // ── §CC-5/6 SLH-DSA-128f: one engine signs, the other imports + verifies.
+  async function runSLHDSACrossCheck(signEngineName, verifyEngineName) {
+    const label = `§CC SLH-DSA-128f ${signEngineName.toUpperCase()} sign → ${verifyEngineName.toUpperCase()} verify`
+    try {
+      const Ms = await loadEngine(signEngineName)
+      const Mv = await loadEngine(verifyEngineName)
+      const { hSession: ss } = initializeEngine(Ms)
+      const { hSession: vs } = initializeEngine(Mv)
+      const msg = 'SLH-DSA-128f cross-engine interoperability test'
+      const { pubHandle, privHandle } = generateSLHDSAKeyPair(Ms, ss, CK.CKP_SLH_DSA_SHA2_128F)
+      const sig = slhdsaSign(Ms, ss, privHandle, msg)
+      const pk = extractKeyValue(Ms, ss, pubHandle)
+      const vPub = importSLHDSAPublicKey(Mv, vs, CK.CKP_SLH_DSA_SHA2_128F, pk)
+      const ok = slhdsaVerify(Mv, vs, vPub, msg, sig)
+      finalizeEngine(Ms, ss)
+      finalizeEngine(Mv, vs)
+      if (!ok) ccFail++
+      console.log(`  ${label}: ${ok ? 'PASS' : 'FAIL'}  sig[${sig.length}B] pk[${pk.length}B]`)
+    } catch (e) {
+      ccFail++
+      console.log(`  ${label}: FAIL — ${e.message}`)
+    }
+  }
+
+  // ── §CC-7/8 ML-KEM-768: one engine encapsulates, the other decapsulates the
+  //    SAME key and must derive the identical shared secret. The decap engine
+  //    owns the key pair and exports only its (non-sensitive) public key; the
+  //    encap engine imports that and encapsulates. No private material moves.
+  async function runMLKEMCrossCheck(encapEngineName, decapEngineName) {
+    const label = `§CC ML-KEM-768 ${encapEngineName.toUpperCase()} encap → ${decapEngineName.toUpperCase()} decap`
+    try {
+      const Me = await loadEngine(encapEngineName)
+      const Md = await loadEngine(decapEngineName)
+      const { hSession: es } = initializeEngine(Me)
+      const { hSession: ds } = initializeEngine(Md)
+      const { pubHandle, privHandle } = generateMLKEMKeyPair(Md, ds, 768)
+      const ek = extractKeyValue(Md, ds, pubHandle)
+      const ePub = importMLKEMPublicKey(Me, es, 768, ek)
+      const { ciphertextBytes, secretHandle } = encapsulate(Me, es, ePub, 768)
+      const ssEncap = extractKeyValue(Me, es, secretHandle)
+      const dSecret = decapsulate(Md, ds, privHandle, ciphertextBytes, 768)
+      const ssDecap = extractKeyValue(Md, ds, dSecret)
+      finalizeEngine(Me, es)
+      finalizeEngine(Md, ds)
+      const ok =
+        ssEncap.length === ssDecap.length && ssEncap.every((b, i) => b === ssDecap[i])
+      if (!ok) ccFail++
+      console.log(
+        `  ${label}: ${ok ? 'PASS' : 'FAIL'}  ss[${ssEncap.length}B] ct[${ciphertextBytes.length}B]`)
+    } catch (e) {
+      ccFail++
+      console.log(`  ${label}: FAIL — ${e.message}`)
+    }
+  }
+
+  await runCrossCheck('cpp', 'rust')   // §CC-1  HSS  C++→Rust
+  await runCrossCheck('rust', 'cpp')   // §CC-2  HSS  Rust→C++
+  await runMLDSACrossCheck('cpp', 'rust')   // §CC-3  ML-DSA  C++→Rust
+  await runMLDSACrossCheck('rust', 'cpp')   // §CC-4  ML-DSA  Rust→C++
+  await runSLHDSACrossCheck('cpp', 'rust')  // §CC-5  SLH-DSA C++→Rust
+  await runSLHDSACrossCheck('rust', 'cpp')  // §CC-6  SLH-DSA Rust→C++
+  await runMLKEMCrossCheck('cpp', 'rust')   // §CC-7  ML-KEM  C++ encap→Rust decap
+  await runMLKEMCrossCheck('rust', 'cpp')   // §CC-8  ML-KEM  Rust encap→C++ decap
 
   console.log(`\n  Cross-check result: ${ccFail === 0 ? 'ALL PASS' : ccFail + ' FAILURE(S)'}`)
   console.log('='.repeat(70) + '\n')

@@ -398,6 +398,33 @@ export function importMLKEMPrivateKey(M, hSession, variant, skBytes) {
   return handle
 }
 
+/** Import an ML-KEM encapsulation (public) key from raw `ek` bytes.
+ *  Public keys are non-sensitive, so this lets the cross-engine check move a
+ *  key without exporting any private material: the decap engine generates the
+ *  pair and exports its public key, the encap engine imports it here. */
+export function importMLKEMPublicKey(M, hSession, variant, pkBytes) {
+  const ckp =
+    variant === 512
+      ? CK.CKP_ML_KEM_512
+      : variant === 768
+        ? CK.CKP_ML_KEM_768
+        : CK.CKP_ML_KEM_1024
+  const tpl = buildTemplate(M, [
+    { type: CK.CKA_CLASS, value: CK.CKO_PUBLIC_KEY },
+    { type: CK.CKA_KEY_TYPE, value: CK.CKK_ML_KEM },
+    { type: CK.CKA_TOKEN, value: false },
+    { type: CK.CKA_ENCAPSULATE, value: true },
+    { type: CK.CKA_PARAMETER_SET, value: ckp },
+    { type: CK.CKA_VALUE, value: pkBytes },
+  ])
+  const hPtr = allocUlong(M)
+  check('C_CreateObject(ML-KEM-Pub)', M._C_CreateObject(hSession, tpl.arrPtr, tpl.count, hPtr))
+  const handle = readUlong(M, hPtr)
+  freeTemplate(M, tpl)
+  freePtr(M, hPtr)
+  return handle
+}
+
 // ── Key Generation ──────────────────────────────────────────────────────────
 
 export function generateAESKey(
