@@ -121,7 +121,7 @@ pub fn emit_pkcs11(
         correlation_id,
         EventPayload::Pkcs11Call {
             function: function.into(),
-            mechanism: mech.map(|m| format!("CKM_0x{m:04X}")),
+            mechanism: mech.map(ckm_name),
             slot: Some(deps.config.pkcs11_slot),
             session: None,
             rv,
@@ -131,11 +131,65 @@ pub fn emit_pkcs11(
     ));
 }
 
-/// Audit-record name for a `CK_RV`. `CKR_OK` for 0; every other code
-/// is rendered numerically (`CKR_0x…`) — we never guess a symbolic
-/// name we can't verify.
+/// Best-effort friendly name for a PKCS#11 `CKM_*` mechanism, for the audit
+/// trail. Maps the engine's OWN verified constants (no guessing) and falls back
+/// to `CKM_0x{hex}` for anything unmapped — so the cross-plane audit reads
+/// `CKM_ML_DSA_KEY_PAIR_GEN` instead of `CKM_0x001C`.
+pub fn ckm_name(m: u32) -> String {
+    use softhsmrustv3::constants as ck;
+    let name = match m {
+        ck::CKM_RSA_PKCS_KEY_PAIR_GEN => "CKM_RSA_PKCS_KEY_PAIR_GEN",
+        ck::CKM_RSA_PKCS_OAEP => "CKM_RSA_PKCS_OAEP",
+        ck::CKM_SHA256_RSA_PKCS => "CKM_SHA256_RSA_PKCS",
+        ck::CKM_SHA384_RSA_PKCS => "CKM_SHA384_RSA_PKCS",
+        ck::CKM_SHA512_RSA_PKCS => "CKM_SHA512_RSA_PKCS",
+        ck::CKM_SHA256_RSA_PKCS_PSS => "CKM_SHA256_RSA_PKCS_PSS",
+        ck::CKM_SHA384_RSA_PKCS_PSS => "CKM_SHA384_RSA_PKCS_PSS",
+        ck::CKM_SHA512_RSA_PKCS_PSS => "CKM_SHA512_RSA_PKCS_PSS",
+        ck::CKM_ML_KEM_KEY_PAIR_GEN => "CKM_ML_KEM_KEY_PAIR_GEN",
+        ck::CKM_ML_KEM => "CKM_ML_KEM",
+        ck::CKM_ML_DSA_KEY_PAIR_GEN => "CKM_ML_DSA_KEY_PAIR_GEN",
+        ck::CKM_ML_DSA => "CKM_ML_DSA",
+        ck::CKM_HASH_ML_DSA => "CKM_HASH_ML_DSA",
+        ck::CKM_SLH_DSA_KEY_PAIR_GEN => "CKM_SLH_DSA_KEY_PAIR_GEN",
+        ck::CKM_SLH_DSA => "CKM_SLH_DSA",
+        ck::CKM_HASH_SLH_DSA => "CKM_HASH_SLH_DSA",
+        ck::CKM_EC_KEY_PAIR_GEN => "CKM_EC_KEY_PAIR_GEN",
+        ck::CKM_ECDSA => "CKM_ECDSA",
+        ck::CKM_ECDSA_SHA256 => "CKM_ECDSA_SHA256",
+        ck::CKM_ECDSA_SHA384 => "CKM_ECDSA_SHA384",
+        ck::CKM_ECDSA_SHA512 => "CKM_ECDSA_SHA512",
+        ck::CKM_AES_KEY_GEN => "CKM_AES_KEY_GEN",
+        ck::CKM_AES_GCM => "CKM_AES_GCM",
+        ck::CKM_AES_CBC => "CKM_AES_CBC",
+        ck::CKM_AES_CBC_PAD => "CKM_AES_CBC_PAD",
+        ck::CKM_AES_CTR => "CKM_AES_CTR",
+        ck::CKM_AES_KEY_WRAP => "CKM_AES_KEY_WRAP",
+        ck::CKM_SHA256 => "CKM_SHA256",
+        ck::CKM_SHA384 => "CKM_SHA384",
+        ck::CKM_SHA512 => "CKM_SHA512",
+        ck::CKM_SHA256_HMAC => "CKM_SHA256_HMAC",
+        ck::CKM_SHA384_HMAC => "CKM_SHA384_HMAC",
+        ck::CKM_SHA512_HMAC => "CKM_SHA512_HMAC",
+        _ => return format!("CKM_0x{m:04X}"),
+    };
+    name.to_string()
+}
+
+/// Audit-record name for a `CK_RV`. `CKR_OK` for 0; common codes get their
+/// symbolic name; anything else is rendered numerically (`CKR_0x…`).
 pub fn ckr_display_name(rv: u32) -> String {
-    if rv == 0 { "CKR_OK".to_string() } else { format!("CKR_0x{rv:08X}") }
+    use softhsmrustv3::constants as ck;
+    let name = match rv {
+        0 => "CKR_OK",
+        ck::CKR_SIGNATURE_INVALID => "CKR_SIGNATURE_INVALID",
+        ck::CKR_MECHANISM_INVALID => "CKR_MECHANISM_INVALID",
+        ck::CKR_KEY_TYPE_INCONSISTENT => "CKR_KEY_TYPE_INCONSISTENT",
+        ck::CKR_ARGUMENTS_BAD => "CKR_ARGUMENTS_BAD",
+        ck::CKR_KEY_HANDLE_INVALID => "CKR_KEY_HANDLE_INVALID",
+        _ => return format!("CKR_0x{rv:08X}"),
+    };
+    name.to_string()
 }
 
 /// K15 — emit a `Pkcs11Call` record for an **already-executed** native
@@ -218,6 +272,38 @@ pub fn canonical_name(a: KmipAlgorithm) -> String {
         SlhDsaShake256f => "SLH-DSA-SHAKE-256f",
     }
     .into()
+}
+
+/// Curve/size-**qualified** algorithm name for policy evaluation, reconstructed
+/// from the stored coarse [`KmipAlgorithm`] + its `cryptographic_length`. The
+/// `KmipAlgorithm` enum collapses every EC curve to `Ecdsa`/`Ecdh` and every
+/// RSA/AES size to one variant (`algos.rs:117`), so [`canonical_name`] alone
+/// yields the bare `"ECDSA"`/`"RSA"`/`"AES"` — which never matches the
+/// curve/size-qualified `from:`/allowlist/denylist entries the shipped policies
+/// use (`pqc.yaml` `from: ECDSA-P256`, `cnsa-2.0.yaml` `ECDSA-P384`, …). This
+/// reproduces the qualified form (`"ECDSA-P256"`, `"RSA-3072"`, `"AES-256"`) so
+/// `algorithm_substitution` (and the auto-rekey path) actually fires on stored
+/// keys. PQC + hash-based algorithms are already fully qualified by
+/// `canonical_name`, so they pass through unchanged.
+pub fn qualified_name(a: KmipAlgorithm, length: u32) -> String {
+    use KmipAlgorithm::*;
+    match a {
+        Ecdsa => format!("ECDSA-P{}", ec_curve_bits(length)),
+        Ecdh => format!("ECDH-P{}", ec_curve_bits(length)),
+        Rsa => format!("RSA-{}", if length == 0 { 2048 } else { length }),
+        Aes => format!("AES-{}", if length == 0 { 256 } else { length }),
+        other => canonical_name(other),
+    }
+}
+
+/// Map a stored EC key length to its NIST curve bit-label (P-256 / P-384 /
+/// P-521). Mirrors `create_key_pair::ecdsa_curve_from_length` (256/384/521).
+fn ec_curve_bits(length: u32) -> u32 {
+    match length {
+        384 => 384,
+        512 | 521 => 521,
+        _ => 256,
+    }
 }
 
 /// State name string for the engine's `state` field — mirrors KMIP 3.0
@@ -599,6 +685,16 @@ pub fn merge_cp_override(
     }
     if let Some(d) = ov.deterministic {
         cp.deterministic = Some(d);
+    }
+    // F-5 — MGF function / AEAD tag length / RSA-PSS salt length.
+    if let Some(m) = ov.mask_generator {
+        cp.mask_generator = Some(m);
+    }
+    if let Some(t) = ov.tag_length {
+        cp.tag_length = Some(t);
+    }
+    if let Some(s) = ov.salt_length {
+        cp.salt_length = Some(s);
     }
     cp
 }

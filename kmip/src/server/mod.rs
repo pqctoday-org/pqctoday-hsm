@@ -17,7 +17,13 @@
 //! and closes.
 
 pub mod auth;
+// The TLS listener is `native` only (tokio + rustls). The `auth` types it
+// produces (`Identity`, `AuthContext`, `AuthUser`, the credential verifiers)
+// are pure Rust and stay available to the wasm core — the dispatcher signature
+// and `DepsConfig` reference them regardless of transport.
+#[cfg(feature = "native")]
 pub mod listener;
 
 pub use auth::{AuthContext, AuthUser, ConfigVerifier, CredentialVerifier, Identity};
+#[cfg(feature = "native")]
 pub use listener::{serve, tls_from_pem, tls_mtls, tls_self_signed, ServerError};

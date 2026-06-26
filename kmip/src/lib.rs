@@ -23,12 +23,22 @@ pub mod server;
 
 // Cross-plane infrastructure
 pub mod auditlog;
+// Prometheus `/metrics` — `native` only (the wasm core has no scrape endpoint).
+#[cfg(feature = "native")]
+pub mod metrics;
 pub mod types;
 pub mod error;
+
+// C0 — internalized admin mTLS cert minting (no shell / openssl CLI dependency).
+// `native` only — rcgen/aws_lc_rs does not cross-compile to wasm32.
+#[cfg(feature = "native")]
+pub mod cert_init;
 
 // W4 — out-of-band HTTP admin facade for the Plane-1 policy plane. Source
 // lives in the `cryptopolicy-manager/` sibling dir (its own component) but is
 // compiled into the crate so it can share the live `policy::Engine`.
+// `native` only — it is a tokio + rustls TLS HTTP server.
+#[cfg(feature = "native")]
 #[path = "../cryptopolicy-manager/manager.rs"]
 pub mod cryptopolicy_manager;
 

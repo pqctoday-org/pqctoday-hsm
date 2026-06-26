@@ -298,3 +298,27 @@ jobs:
           else
             echo "OK: No deprecated OpenSSL API usage found."
           fi
+
+  python-client:
+    name: Python client tests (pqctoday-kmip-client)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install package + dev deps
+        run: pip install -e "kmip/python-client[dev]"
+      - name: Run unit tests
+        run: python -m pytest kmip/python-client/tests/ -v --tb=short
+      - name: Build wheel (smoke check — no deprecation warnings)
+        run: |
+          pip install build
+          cd kmip/python-client
+          python -m build --wheel 2>&1 | tee /tmp/build.log
+          if grep -i "DeprecationWarning\|SetuptoolsDeprecationWarning" /tmp/build.log; then
+            echo "ERROR: Deprecation warnings in wheel build."
+            exit 1
+          fi
+          echo "Clean build."

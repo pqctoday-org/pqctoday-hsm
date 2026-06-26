@@ -9,6 +9,7 @@
 //! (or by subscribing to a future SSE wrapper, separate workstream).
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use super::event::{AuditEvent, Plane};
@@ -17,6 +18,11 @@ use super::sink::AuditSink;
 pub struct RingSink {
     inner: Mutex<VecDeque<AuditEvent>>,
     capacity: usize,
+    /// S-9 — count of events silently evicted because the ring was full. A
+    /// non-zero value means the audit trail has a GAP (a burst — possibly one
+    /// masking a real event — overran the buffer). Surfaced via `dropped()` so
+    /// the loss is observable instead of invisible.
+    dropped: AtomicU64,
 }
 
 impl RingSink {
@@ -26,7 +32,13 @@ impl RingSink {
         Self {
             inner: Mutex::new(VecDeque::with_capacity(capacity.min(1024))),
             capacity,
+            dropped: AtomicU64::new(0),
         }
+    }
+
+    /// S-9 — number of events evicted because the ring was full (an audit GAP).
+    pub fn dropped(&self) -> u64 {
+        self.dropped.load(Ordering::Relaxed)
     }
 
     /// Snapshot the current ring. Cheap-ish — clones the deque.
@@ -66,6 +78,7 @@ impl RingSink {
     /// Drain the ring (used by tests that want a fresh state).
     pub fn clear(&self) {
         self.inner.lock().expect("ring poisoned").clear();
+        self.dropped.store(0, Ordering::Relaxed);
     }
 
     /// Current size of the ring.
@@ -83,6 +96,7 @@ impl AuditSink for RingSink {
         let mut q = self.inner.lock().expect("ring poisoned");
         if q.len() == self.capacity {
             q.pop_front();
+            self.dropped.fetch_add(1, Ordering::Relaxed);
         }
         q.push_back(event);
     }

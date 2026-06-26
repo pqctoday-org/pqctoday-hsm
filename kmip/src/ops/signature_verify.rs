@@ -238,13 +238,25 @@ pub fn signature_verify(
             }
         }
         None => {
-            // Unit-test fallback — re-compute the SHA-256 stamp.
-            emit_pkcs11(deps, correlation_id, "soft::placeholder_verify", Some(mech), 0, "CKR_OK");
-            let expected = placeholder_signature(&req.uid, &req.data);
-            if req.signature == expected {
-                SignatureValidity::Valid
-            } else {
-                SignatureValidity::Invalid
+            // S-2 hardening: NO engine session ⇒ no key material. Production MUST
+            // fail rather than verify against a deterministic SHA-256 stamp (which
+            // a caller could forge). Placeholder kept only for the crate's tests.
+            #[cfg(not(test))]
+            {
+                return Err(crate::error::KmipError::failed(
+                    crate::error::ResultReason::CryptographicFailure,
+                    "no engine session — cannot verify without key material",
+                ));
+            }
+            #[cfg(test)]
+            {
+                emit_pkcs11(deps, correlation_id, "soft::placeholder_verify", Some(mech), 0, "CKR_OK");
+                let expected = placeholder_signature(&req.uid, &req.data);
+                if req.signature == expected {
+                    SignatureValidity::Valid
+                } else {
+                    SignatureValidity::Invalid
+                }
             }
         }
     };

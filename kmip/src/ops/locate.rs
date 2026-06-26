@@ -67,11 +67,23 @@ pub fn locate(deps: &Deps, req: LocateRequest, correlation_id: &str) -> Result<L
     // never moves them to a separate Destroyed storage class.)
     const STORAGE_STATUS_ONLINE: u32 = 0x0000_0001;
     const STORAGE_STATUS_ARCHIVAL: u32 = 0x0000_0002;
+    const STORAGE_STATUS_DESTROYED: u32 = 0x0000_0004;
     let storage_mask = req.storage_status_mask.unwrap_or(STORAGE_STATUS_ONLINE);
 
     // Plane-2: store search.
     let mut matches = deps.store.find(&|r| {
-        let storage_ok = if r.archived {
+        // §6.1.32 storage-status gate. Destroyed / DestroyedCompromised are
+        // tombstones: returned only when the client asks for them — via the
+        // Destroyed storage-status bit (0x04, F-4) OR an explicit Destroyed
+        // state filter (backward-compatible path). Archived objects need the
+        // Archival bit; everything else is On-line.
+        let storage_ok = if matches!(r.state, State::Destroyed | State::DestroyedCompromised) {
+            storage_mask & STORAGE_STATUS_DESTROYED != 0
+                || matches!(
+                    filters.state,
+                    Some(State::Destroyed) | Some(State::DestroyedCompromised)
+                )
+        } else if r.archived {
             storage_mask & STORAGE_STATUS_ARCHIVAL != 0
         } else {
             storage_mask & STORAGE_STATUS_ONLINE != 0
@@ -165,20 +177,10 @@ struct LocateFilters {
 
 impl LocateFilters {
     fn matches(&self, r: &ObjectRecord) -> bool {
-        // KMIP 3.0 §6.1.32 — by default Locate filters out objects in
-        // the `Destroyed` / `DestroyedCompromised` states (the
-        // `StorageStatusMask` default value is `Online` only). A client
-        // who wants tombstones must request them explicitly via the
-        // mask — not yet wired through the codec; until it is, the
-        // strict default applies.
-        if matches!(r.state, State::Destroyed | State::DestroyedCompromised) {
-            // Override the default only when the client explicitly
-            // filtered by one of those states.
-            if !matches!(self.state, Some(State::Destroyed) | Some(State::DestroyedCompromised)) {
-                return false;
-            }
-        }
-
+        // KMIP 3.0 §6.1.32 storage-status visibility (Destroyed tombstones /
+        // archived objects) is decided by the `StorageStatusMask` gate in
+        // `locate()` before this runs (F-4). `matches` is now purely the
+        // attribute filter set.
         if let Some(a) = self.algorithm {
             if r.algorithm != a {
                 return false;
@@ -579,5 +581,31 @@ mod tests {
             ..Default::default()
         }, "c").unwrap();
         assert_eq!(r.uids, vec!["arch", "online"]);
+    }
+
+    /// F-4 — §6.1.32 Destroyed storage-status bit (0x04): tombstones are
+    /// returned only when the mask includes the Destroyed indicator; the
+    /// default On-line mask hides them.
+    #[test]
+    fn locate_storage_status_mask_destroyed_bit() {
+        let d = deps_with();
+        put(&d, "live", KmipAlgorithm::Aes, ObjectType::SymmetricKey, State::Active);
+        put(&d, "dead", KmipAlgorithm::Aes, ObjectType::SymmetricKey, State::Destroyed);
+
+        // Default (On-line) → tombstone hidden.
+        let r = locate(&d, LocateRequest::default(), "c").unwrap();
+        assert_eq!(r.uids, vec!["live"]);
+        // Destroyed bit (0x04) alone → only the tombstone.
+        let r = locate(&d, LocateRequest {
+            storage_status_mask: Some(0x04),
+            ..Default::default()
+        }, "c").unwrap();
+        assert_eq!(r.uids, vec!["dead"]);
+        // On-line + Destroyed (0x05) → both, in stable (InitialDate, UID) order.
+        let r = locate(&d, LocateRequest {
+            storage_status_mask: Some(0x05),
+            ..Default::default()
+        }, "c").unwrap();
+        assert_eq!(r.uids, vec!["dead", "live"]);
     }
 }

@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pqctoday-kmip-client"
+version = "0.1.0"
+description = "Python client for the pqctoday KMIP 3.0 PQC key management server"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [{ name = "PQCToday" }]
+keywords = ["kmip", "pqc", "post-quantum", "cryptography", "key-management"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Security :: Cryptography",
+    "Typing :: Typed",
+]
+# stdlib-only: ssl, socket, http.client, json, importlib.resources
+dependencies = []
+
+[project.scripts]
+pqctoday-kmip = "pqctoday_kmip.__main__:main"
+
+[project.urls]
+Homepage = "https://github.com/pqctoday/pqctoday-cacp"
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+pqctoday_kmip = ["data/*.json", "py.typed"]

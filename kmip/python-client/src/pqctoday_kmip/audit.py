@@ -1,18 +1,17 @@
 """Correlate the agile KMIP server's audit log into per-request trails.
 
-The server (run with `--audit-log <path>`) appends one JSON object per
-line, each tagged with a `plane` and a `correlation_id` that is shared by
-every event for one inbound request:
+The server (run with ``--audit-log <path>``) appends one JSON object per
+line, each tagged with a ``plane`` and a ``correlation_id`` shared by every
+event for one inbound request:
 
     p1 — Crypto-Agility engine  (PolicyDecided: allow / deny / rekey)
     p2 — KMIP dispatcher        (KmipResponseSent: op + result)
     p3 — PKCS#11 bridge         (Pkcs11Call: C_Sign / C_EncapsulateKey / …)
 
-Grouping by `correlation_id` reconstructs, for each request, the full
-three-plane story: what the policy decided, what KMIP did, and which
-PKCS#11 engine calls (if any) actually ran. A *denied* request shows a p1
-Deny and **no** p3 call — visible proof the agility layer stopped it before
-the engine.
+Grouping by ``correlation_id`` reconstructs, for each request, the full
+three-plane story: what the policy decided, what KMIP did, and which PKCS#11
+engine calls (if any) actually ran.  A *denied* request shows a p1 Deny and
+**no** p3 call — visible proof the agility layer stopped it before the engine.
 """
 from __future__ import annotations
 
@@ -27,24 +26,22 @@ PLANE_LABEL = {"p1": "policy", "p2": "kmip", "p3": "pkcs11"}
 class RequestTrail:
     correlation_id: str
     op: Optional[str] = None
-    decision: Optional[str] = None  # "Allow" | "Deny" | "Rekey"
+    decision: Optional[str] = None
     decision_detail: str = ""
-    kmip_result: Optional[str] = None  # "Success" | "OperationFailed: …"
-    pkcs11_calls: list = field(default_factory=list)  # (function, mechanism, rv_name)
-    policy_loaded: Optional[str] = None  # set for a PolicyActivated (startup) event
-    events: list = field(default_factory=list)  # raw events in arrival order
+    kmip_result: Optional[str] = None
+    pkcs11_calls: list = field(default_factory=list)
+    policy_loaded: Optional[str] = None
+    events: list = field(default_factory=list)
 
     @property
     def is_request(self) -> bool:
-        """True for a real KMIP request (has an op / decision / engine call);
-        False for envelope events like the startup PolicyActivated."""
         return bool(self.op or self.decision or self.pkcs11_calls)
 
 
 def load_events(path: str) -> list[dict]:
     """Read a JSONL audit log into a list of event dicts (order preserved)."""
     events = []
-    with open(path, "r") as fh:
+    with open(path) as fh:
         for line in fh:
             line = line.strip()
             if line:
@@ -53,8 +50,7 @@ def load_events(path: str) -> list[dict]:
 
 
 def group(events: list[dict]) -> list[RequestTrail]:
-    """Group events by correlation_id into ordered RequestTrails (first-seen
-    correlation order). Each trail summarises the p1/p2/p3 story."""
+    """Group events by correlation_id into ordered RequestTrails."""
     trails: dict[str, RequestTrail] = {}
     order: list[str] = []
     for ev in events:
@@ -124,10 +120,7 @@ def format_trail(t: RequestTrail, *, color: bool = True) -> str:
 
 
 def format_log(path: str, *, color: bool = True) -> str:
-    """Load, group, and format an entire audit log as correlated trails.
-
-    Startup `PolicyActivated` envelope events render as a one-line banner;
-    every real KMIP request renders as a three-plane block."""
+    """Load, group, and format an entire audit log as correlated trails."""
     def c(code: str, s: str) -> str:
         return f"\033[{code}m{s}\033[0m" if color else s
 
@@ -138,12 +131,3 @@ def format_log(path: str, *, color: bool = True) -> str:
         elif t.is_request:
             blocks.append(format_trail(t, color=color))
     return "\n\n".join(blocks)
-
-
-if __name__ == "__main__":
-    import sys
-
-    if len(sys.argv) != 2:
-        print("usage: python -m pykmip.audit <audit-log.jsonl>", file=sys.stderr)
-        raise SystemExit(2)
-    print(format_log(sys.argv[1]))

@@ -817,6 +817,551 @@ fn response_batch_item_to_frame(bi: &ResponseBatchItem) -> TtlvFrame {
     TtlvFrame::new(Tag(tags::BatchItem), Value::Structure(children))
 }
 
+// ── Request encoders (F-6) — client-side, the mirror of the request decoders ─
+//
+// Typed decode is intentionally LOSSY (it drops header/payload fields the server
+// doesn't model and folds the §6.4 IDPlaceholder enum to a sentinel string), so
+// `encode_request_message(decode_request_message(x)) == x` byte-for-byte only
+// when the message carried nothing the typed model dropped. It is ALWAYS
+// decode-stable: `decode(encode(decode(x))) == decode(x)`. The encoder returns
+// `None` for any header field or operation payload whose encoder is not yet
+// implemented, so callers surface the gap instead of emitting wrong bytes.
+// Primary consumer: the Rust→WASM playground acting as an in-browser KMIP client
+// (encode a request → hand the bytes to the in-process server → decode the reply).
+
+/// Encode a typed [`RequestMessage`] to KMIP 3.0 TTLV wire bytes. Returns `None`
+/// when a header field or operation payload is not yet supported by the encoder.
+pub fn encode_request_message(msg: &RequestMessage) -> Option<Vec<u8>> {
+    let frame = request_message_to_frame(msg)?;
+    let mut buf = BytesMut::new();
+    encode(&frame, &mut buf);
+    Some(buf.to_vec())
+}
+
+fn request_message_to_frame(msg: &RequestMessage) -> Option<TtlvFrame> {
+    let mut children = vec![request_header_to_frame(&msg.header)?];
+    for bi in &msg.batch_items {
+        children.push(request_batch_item_to_frame(bi)?);
+    }
+    Some(TtlvFrame::new(Tag(tags::RequestMessage), Value::Structure(children)))
+}
+
+fn request_header_to_frame(h: &RequestHeader) -> Option<TtlvFrame> {
+    let pv = TtlvFrame::new(
+        Tag(tags::ProtocolVersion),
+        Value::Structure(vec![
+            TtlvFrame::new(Tag(tags::ProtocolVersionMajor), Value::Integer(h.protocol_version_major)),
+            TtlvFrame::new(Tag(tags::ProtocolVersionMinor), Value::Integer(h.protocol_version_minor)),
+        ]),
+    );
+    let mut children = vec![pv];
+    if let Some(n) = h.maximum_response_size {
+        children.push(TtlvFrame::new(Tag(tags::MaximumResponseSize), Value::Integer(n)));
+    }
+    if let Some(ai) = h.asynchronous_indicator {
+        children.push(TtlvFrame::new(Tag(tags::AsynchronousIndicator), Value::Enumeration(ai.to_wire_value())));
+    }
+    // §7.2 Authentication — a Structure of Credentials. Bail if any credential
+    // is an unsupported type we can't faithfully re-emit.
+    if !h.authentication.is_empty() {
+        let creds: Option<Vec<TtlvFrame>> = h.authentication.iter().map(encode_credential).collect();
+        children.push(TtlvFrame::new(Tag(tags::Authentication), Value::Structure(creds?)));
+    }
+    if let Some(b) = h.batch_error_continuation_option {
+        children.push(TtlvFrame::new(
+            Tag(tags::BatchErrorContinuationOption),
+            Value::Enumeration(b.to_wire_value()),
+        ));
+    }
+    if let Some(ts) = h.time_stamp {
+        children.push(TtlvFrame::new(Tag(tags::TimeStamp), Value::DateTime(ts.unix_timestamp())));
+    }
+    Some(TtlvFrame::new(Tag(tags::RequestHeader), Value::Structure(children)))
+}
+
+/// Encode one §9.9 `Credential` Structure (mirror of `decode_credential`).
+/// `None` for credential types we can't faithfully re-emit.
+fn encode_credential(c: &crate::kmip30::Credential) -> Option<TtlvFrame> {
+    use crate::kmip30::Credential;
+    match c {
+        Credential::UsernameAndPassword { username, password } => {
+            let mut value = vec![TtlvFrame::new(Tag(tags::Username), Value::TextString(username.clone()))];
+            if let Some(p) = password {
+                value.push(TtlvFrame::new(Tag(tags::Password), Value::TextString(p.clone())));
+            }
+            Some(TtlvFrame::new(
+                Tag(tags::Credential),
+                Value::Structure(vec![
+                    TtlvFrame::new(Tag(tags::CredentialType), Value::Enumeration(0x01)),
+                    TtlvFrame::new(Tag(tags::CredentialValue), Value::Structure(value)),
+                ]),
+            ))
+        }
+        Credential::Unsupported { .. } => None,
+    }
+}
+
+fn request_batch_item_to_frame(bi: &RequestBatchItem) -> Option<TtlvFrame> {
+    let payload = request_payload_to_frame(&bi.payload)?;
+    Some(TtlvFrame::new(
+        Tag(tags::BatchItem),
+        Value::Structure(vec![
+            TtlvFrame::new(Tag(tags::Operation), Value::Enumeration(bi.operation.to_wire_value())),
+            payload,
+        ]),
+    ))
+}
+
+fn uid_frame(uid: &str) -> TtlvFrame {
+    TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString(uid.to_string()))
+}
+
+/// Encode a §6.2 `KeyWrappingSpecification` (mirror of `decode_key_wrapping_spec`).
+fn encode_key_wrapping_spec(s: &KeyWrappingSpec) -> TtlvFrame {
+    let mut eki = vec![TtlvFrame::new(
+        Tag(tags::UniqueIdentifier),
+        Value::TextString(s.encryption_key_uid.clone()),
+    )];
+    if let Some(cp) = &s.cryptographic_parameters {
+        eki.push(encode_cryptographic_parameters(cp));
+    }
+    let mut kids = vec![
+        TtlvFrame::new(Tag(tags::WrappingMethod), Value::Enumeration(s.wrapping_method)),
+        TtlvFrame::new(Tag(tags::EncryptionKeyInformation), Value::Structure(eki)),
+    ];
+    if let Some(eo) = s.encoding_option {
+        kids.push(TtlvFrame::new(Tag(tags::EncodingOption), Value::Enumeration(eo)));
+    }
+    if s.mac_signature_key_information_present {
+        kids.push(TtlvFrame::new(Tag(tags::MacSignatureKeyInformation), Value::Structure(vec![])));
+    }
+    TtlvFrame::new(Tag(tags::KeyWrappingSpecification), Value::Structure(kids))
+}
+
+fn data_frame(d: &[u8]) -> TtlvFrame {
+    TtlvFrame::new(Tag(tags::Data), Value::ByteString(d.to_vec()))
+}
+
+/// Encode a list of attributes as the KMIP 3.0 §6.x `Attributes` block.
+fn attributes_block(attrs: &[Attribute]) -> TtlvFrame {
+    TtlvFrame::new(
+        Tag(tags::Attributes),
+        Value::Structure(attrs.iter().map(encode_attribute_v3).collect()),
+    )
+}
+
+/// Encode an `AttributeReference` (§11). A spec tag-name → the Enumeration form;
+/// a custom name (no codepoint) → the `{ AttributeName }` Structure form. Mirror
+/// of the dual-shape decode in `decode_get_attributes_req` / `decode_delete_attribute_req`.
+fn attribute_reference_frame(name: &str) -> TtlvFrame {
+    match tag_code_from_name(name) {
+        Some(code) => TtlvFrame::new(Tag(tags::AttributeReference), Value::Enumeration(code)),
+        None => TtlvFrame::new(
+            Tag(tags::AttributeReference),
+            Value::Structure(vec![TtlvFrame::new(
+                Tag(tags::AttributeName),
+                Value::TextString(name.to_string()),
+            )]),
+        ),
+    }
+}
+
+fn revocation_reason_code(r: RevocationReason) -> u32 {
+    match r {
+        RevocationReason::Unspecified => 1,
+        RevocationReason::KeyCompromise => 2,
+        RevocationReason::CaCompromise => 3,
+        RevocationReason::AffiliationChanged => 4,
+        RevocationReason::Superseded => 5,
+        RevocationReason::CessationOfOperation => 6,
+        RevocationReason::PrivilegeWithdrawn => 7,
+    }
+}
+
+fn interop_function_code(f: InteropFunction) -> u32 {
+    match f {
+        InteropFunction::Begin => 0x01,
+        InteropFunction::End => 0x02,
+    }
+}
+
+fn query_function_code(q: QueryFunction) -> u32 {
+    match q {
+        QueryFunction::QueryOperations => 0x01,
+        QueryFunction::QueryObjects => 0x02,
+        QueryFunction::QueryServerInformation => 0x03,
+        QueryFunction::QueryApplicationNamespaces => 0x04,
+        QueryFunction::QueryProfiles => 0x0a,
+        QueryFunction::QueryCapabilities => 0x0b,
+    }
+}
+
+fn deactivation_reason_code(r: DeactivationReason) -> u32 {
+    match r {
+        DeactivationReason::Unspecified => 0x01,
+        DeactivationReason::KeyCompromise => 0x02,
+        DeactivationReason::CACompromise => 0x03,
+        DeactivationReason::AffiliationChanged => 0x04,
+        DeactivationReason::Superseded => 0x05,
+        DeactivationReason::CessationOfOperation => 0x06,
+        DeactivationReason::PrivilegeWithdrawn => 0x07,
+    }
+}
+
+/// Dispatch a `RequestPayload` to its TTLV encoder. `None` = operation not yet
+/// implemented (the gate test reports these rather than failing).
+fn request_payload_to_frame(p: &RequestPayload) -> Option<TtlvFrame> {
+    let kids: Vec<TtlvFrame> = match p {
+        RequestPayload::Activate(r) => vec![uid_frame(&r.uid)],
+        RequestPayload::Destroy(r) => vec![uid_frame(&r.uid)],
+        RequestPayload::Archive(r) => vec![uid_frame(&r.uid)],
+        RequestPayload::Recover(r) => vec![uid_frame(&r.uid)],
+        RequestPayload::Obliterate(r) => vec![uid_frame(&r.uid)],
+        RequestPayload::Revoke(r) => vec![
+            uid_frame(&r.uid),
+            TtlvFrame::new(
+                Tag(tags::RevocationReason),
+                Value::Structure(vec![TtlvFrame::new(
+                    Tag(tags::RevocationReasonCode),
+                    Value::Enumeration(revocation_reason_code(r.reason)),
+                )]),
+            ),
+        ],
+        RequestPayload::Get(r) => {
+            let mut k = vec![uid_frame(&r.uid)];
+            if let Some(kft) = r.key_format_type {
+                k.push(TtlvFrame::new(Tag(tags::KeyFormatType), Value::Enumeration(kft)));
+            }
+            if let Some(spec) = &r.key_wrapping_specification {
+                k.push(encode_key_wrapping_spec(spec));
+            }
+            k
+        }
+        RequestPayload::GetAttributeList(r) => vec![uid_frame(&r.uid)],
+        RequestPayload::Interop(r) => vec![
+            TtlvFrame::new(
+                Tag(tags::InteropFunction),
+                Value::Enumeration(interop_function_code(r.function)),
+            ),
+            TtlvFrame::new(Tag(tags::InteropIdentifier), Value::TextString(r.identifier.clone())),
+        ],
+        RequestPayload::Query(r) => r
+            .functions
+            .iter()
+            .map(|f| TtlvFrame::new(Tag(tags::QueryFunction), Value::Enumeration(query_function_code(*f))))
+            .collect(),
+        RequestPayload::Deactivate(r) => {
+            let mut k = vec![uid_frame(&r.uid)];
+            if let Some(reason) = r.deactivation_reason {
+                k.push(TtlvFrame::new(
+                    Tag(tags::DeactivationReason),
+                    Value::Structure(vec![TtlvFrame::new(
+                        Tag(tags::DeactivationReasonCode),
+                        Value::Enumeration(deactivation_reason_code(reason)),
+                    )]),
+                ));
+            }
+            if let Some(date) = r.deactivation_date {
+                k.push(TtlvFrame::new(Tag(tags::DeactivationDate), Value::DateTime(date)));
+            }
+            k
+        }
+        RequestPayload::GetAttributes(r) => {
+            let mut k = vec![uid_frame(&r.uid)];
+            for name in &r.attribute_references {
+                k.push(attribute_reference_frame(name));
+            }
+            k
+        }
+        // §6.1.21 Encrypt / §6.1.22 Decrypt share the request shape. Spec child
+        // order: UID, [CryptographicParameters], Data, [IV], [CorrelationValue],
+        // [InitIndicator], [FinalIndicator], [AAD].
+        RequestPayload::Encrypt(r) => {
+            let mut k = vec![uid_frame(&r.uid)];
+            if let Some(cp) = &r.cryptographic_parameters {
+                k.push(encode_cryptographic_parameters(cp));
+            }
+            k.push(TtlvFrame::new(Tag(tags::Data), Value::ByteString(r.data.clone())));
+            if let Some(iv) = &r.iv {
+                k.push(TtlvFrame::new(Tag(tags::IvCounterNonce), Value::ByteString(iv.clone())));
+            }
+            if let Some(cv) = &r.correlation_value {
+                k.push(TtlvFrame::new(Tag(tags::CorrelationValue), Value::ByteString(cv.clone())));
+            }
+            if let Some(b) = r.init_indicator {
+                k.push(TtlvFrame::new(Tag(tags::InitIndicator), Value::Boolean(b)));
+            }
+            if let Some(b) = r.final_indicator {
+                k.push(TtlvFrame::new(Tag(tags::FinalIndicator), Value::Boolean(b)));
+            }
+            if let Some(aad) = &r.aad {
+                k.push(TtlvFrame::new(
+                    Tag(tags::AuthenticatedEncryptionAdditionalData),
+                    Value::ByteString(aad.clone()),
+                ));
+            }
+            k
+        }
+        RequestPayload::Decrypt(r) => {
+            let mut k = vec![uid_frame(&r.uid)];
+            if let Some(cp) = &r.cryptographic_parameters {
+                k.push(encode_cryptographic_parameters(cp));
+            }
+            k.push(TtlvFrame::new(Tag(tags::Data), Value::ByteString(r.data.clone())));
+            if let Some(iv) = &r.iv {
+                k.push(TtlvFrame::new(Tag(tags::IvCounterNonce), Value::ByteString(iv.clone())));
+            }
+            if let Some(aad) = &r.aad {
+                k.push(TtlvFrame::new(
+                    Tag(tags::AuthenticatedEncryptionAdditionalData),
+                    Value::ByteString(aad.clone()),
+                ));
+            }
+            k
+        }
+        // §6.1.x signing / MAC / hash — UID, [CryptographicParameters], Data[, extra].
+        RequestPayload::Sign(r) => {
+            let mut k = vec![uid_frame(&r.uid)];
+            if let Some(cp) = &r.cryptographic_parameters {
+                k.push(encode_cryptographic_parameters(cp));
+            }
+            k.push(data_frame(&r.data));
+            k
+        }
+        RequestPayload::SignatureVerify(r) => {
+            let mut k = vec![uid_frame(&r.uid)];
+            if let Some(cp) = &r.cryptographic_parameters {
+                k.push(encode_cryptographic_parameters(cp));
+            }
+            k.push(data_frame(&r.data));
+            k.push(TtlvFrame::new(Tag(tags::SignatureData), Value::ByteString(r.signature.clone())));
+            k
+        }
+        RequestPayload::Mac(r) => {
+            let mut k = vec![uid_frame(&r.uid)];
+            if let Some(cp) = &r.cryptographic_parameters {
+                k.push(encode_cryptographic_parameters(cp));
+            }
+            k.push(data_frame(&r.data));
+            k
+        }
+        RequestPayload::MacVerify(r) => {
+            let mut k = vec![uid_frame(&r.uid)];
+            if let Some(cp) = &r.cryptographic_parameters {
+                k.push(encode_cryptographic_parameters(cp));
+            }
+            k.push(data_frame(&r.data));
+            k.push(TtlvFrame::new(Tag(tags::MacData), Value::ByteString(r.mac_data.clone())));
+            k
+        }
+        RequestPayload::Hash(r) => vec![
+            encode_cryptographic_parameters(&r.cryptographic_parameters),
+            data_frame(&r.data),
+        ],
+        RequestPayload::RngRetrieve(r) => {
+            vec![TtlvFrame::new(Tag(tags::DataLength), Value::Integer(r.data_length))]
+        }
+        RequestPayload::RngSeed(r) => vec![data_frame(&r.data)],
+        // §6.1.42 PKCS#11 passthrough.
+        RequestPayload::Pkcs11(r) => {
+            let mut k = Vec::new();
+            if let Some(iface) = &r.interface {
+                k.push(TtlvFrame::new(Tag(tags::Pkcs11Interface), Value::TextString(iface.clone())));
+            }
+            k.push(TtlvFrame::new(Tag(tags::Pkcs11Function), Value::Enumeration(r.function)));
+            if let Some(cv) = &r.correlation_value {
+                k.push(TtlvFrame::new(Tag(tags::CorrelationValue), Value::ByteString(cv.clone())));
+            }
+            if let Some(ip) = &r.input_parameters {
+                k.push(TtlvFrame::new(
+                    Tag(tags::Pkcs11InputParameters),
+                    Value::ByteString(ip.clone()),
+                ));
+            }
+            k
+        }
+        // §6.1.10 Create / §6.1.31 Locate / group / user / log — Attributes blocks.
+        RequestPayload::Create(r) => vec![
+            TtlvFrame::new(Tag(tags::ObjectType), Value::Enumeration(r.object_type.to_wire_value())),
+            attributes_block(&r.template_attribute),
+        ],
+        RequestPayload::Locate(r) => {
+            let mut k = Vec::new();
+            if let Some(n) = r.maximum_items {
+                k.push(TtlvFrame::new(Tag(tags::MaximumItems), Value::Integer(n as i32)));
+            }
+            if let Some(n) = r.offset_items {
+                k.push(TtlvFrame::new(Tag(tags::OffsetItems), Value::Integer(n as i32)));
+            }
+            if let Some(m) = r.storage_status_mask {
+                k.push(TtlvFrame::new(Tag(tags::StorageStatusMask), Value::Integer(m as i32)));
+            }
+            k.push(attributes_block(&r.attributes));
+            k
+        }
+        RequestPayload::CreateGroup(r) => vec![attributes_block(&r.attributes)],
+        RequestPayload::CreateUser(r) => vec![attributes_block(&r.attributes)],
+        RequestPayload::Log(r) => {
+            vec![TtlvFrame::new(Tag(tags::LogMessage), Value::TextString(r.message.clone()))]
+        }
+        // §6.1.2 / §6.1.34 / §6.1.13 attribute mutation — UID + wrapped attrs.
+        RequestPayload::AddAttribute(r) => vec![
+            uid_frame(&r.uid),
+            TtlvFrame::new(
+                Tag(tags::NewAttribute),
+                Value::Structure(vec![encode_attribute_v3(&r.new_attribute)]),
+            ),
+        ],
+        RequestPayload::ModifyAttribute(r) => {
+            let mut k = vec![uid_frame(&r.uid)];
+            if let Some(cur) = &r.current_attribute {
+                k.push(TtlvFrame::new(
+                    Tag(tags::CurrentAttribute),
+                    Value::Structure(vec![encode_attribute_v3(cur)]),
+                ));
+            }
+            k.push(TtlvFrame::new(
+                Tag(tags::NewAttribute),
+                Value::Structure(vec![encode_attribute_v3(&r.new_attribute)]),
+            ));
+            k
+        }
+        RequestPayload::DeleteAttribute(r) => {
+            let mut k = vec![uid_frame(&r.uid)];
+            if let Some(cur) = &r.current_attribute {
+                k.push(TtlvFrame::new(
+                    Tag(tags::CurrentAttribute),
+                    Value::Structure(vec![encode_attribute_v3(cur)]),
+                ));
+            }
+            if let Some(name) = &r.attribute_reference {
+                k.push(attribute_reference_frame(name));
+            }
+            k
+        }
+        // §6.1.9 CreateCredential — CredentialType + Attributes + opt PasswordCredential.
+        RequestPayload::CreateCredential(r) => {
+            let mut k = vec![TtlvFrame::new(
+                Tag(tags::CredentialType),
+                Value::Enumeration(r.credential_type),
+            )];
+            if let Some(pc) = &r.password_credential {
+                let mut val =
+                    vec![TtlvFrame::new(Tag(tags::Username), Value::TextString(pc.username.clone()))];
+                if let Some(p) = &pc.password {
+                    val.push(TtlvFrame::new(Tag(tags::Password), Value::TextString(p.clone())));
+                }
+                k.push(TtlvFrame::new(Tag(tags::PasswordCredential), Value::Structure(val)));
+            }
+            if !r.attributes.is_empty() {
+                k.push(attributes_block(&r.attributes));
+            }
+            k
+        }
+        // §6.1.10 CreateKeyPair — three per-half Attributes baskets + opt seed.
+        RequestPayload::CreateKeyPair(r) => {
+            let mut k = Vec::new();
+            if !r.common_attributes.is_empty() {
+                k.push(TtlvFrame::new(
+                    Tag(tags::CommonAttributes),
+                    Value::Structure(r.common_attributes.iter().map(encode_attribute_v3).collect()),
+                ));
+            }
+            if !r.private_key_attributes.is_empty() {
+                k.push(TtlvFrame::new(
+                    Tag(tags::PrivateKeyAttributes),
+                    Value::Structure(r.private_key_attributes.iter().map(encode_attribute_v3).collect()),
+                ));
+            }
+            if !r.public_key_attributes.is_empty() {
+                k.push(TtlvFrame::new(
+                    Tag(tags::PublicKeyAttributes),
+                    Value::Structure(r.public_key_attributes.iter().map(encode_attribute_v3).collect()),
+                ));
+            }
+            if let Some(seed) = &r.seed {
+                k.push(TtlvFrame::new(Tag(tags::PqcSeed), Value::ByteString(seed.clone())));
+            }
+            k
+        }
+        // §6.1.4 Check — UID + optional usage/limit gates.
+        RequestPayload::Check(r) => {
+            let mut k = vec![uid_frame(&r.uid)];
+            if let Some(n) = r.usage_limits_count {
+                k.push(TtlvFrame::new(Tag(tags::UsageLimitsCount), Value::LongInteger(n)));
+            }
+            if let Some(m) = r.cryptographic_usage_mask {
+                k.push(TtlvFrame::new(Tag(tags::CryptographicUsageMask), Value::Integer(m as i32)));
+            }
+            if let Some(lt) = r.lease_time {
+                k.push(TtlvFrame::new(Tag(tags::LeaseTime), Value::Interval(lt)));
+            }
+            k
+        }
+        // §6.1.48 Register — ObjectType + Attributes + the managed object,
+        // wrapped per type (mirror of decode_register_req's six branches).
+        RequestPayload::Register(r) => {
+            let mut k = vec![
+                TtlvFrame::new(Tag(tags::ObjectType), Value::Enumeration(r.object_type.to_wire_value())),
+                attributes_block(&r.attributes),
+            ];
+            let object = match r.object_type {
+                ObjectType::PrivateKey => TtlvFrame::new(
+                    Tag(tags::PrivateKey),
+                    Value::Structure(vec![encode_key_block(r.managed_object.as_ref()?, None)]),
+                ),
+                ObjectType::PublicKey => TtlvFrame::new(
+                    Tag(tags::PublicKey),
+                    Value::Structure(vec![encode_key_block(r.managed_object.as_ref()?, None)]),
+                ),
+                ObjectType::SymmetricKey => TtlvFrame::new(
+                    Tag(tags::SymmetricKey),
+                    Value::Structure(vec![encode_key_block(r.managed_object.as_ref()?, None)]),
+                ),
+                ObjectType::SecretData => TtlvFrame::new(
+                    Tag(tags::SecretData),
+                    Value::Structure(vec![encode_key_block(r.managed_object.as_ref()?, None)]),
+                ),
+                ObjectType::OpaqueObject => {
+                    let kb = r.managed_object.as_ref()?;
+                    let otype = r.certificate_payload.as_ref().map(|c| c.0).unwrap_or(0x01);
+                    TtlvFrame::new(
+                        Tag(tags::OpaqueObject),
+                        Value::Structure(vec![
+                            TtlvFrame::new(Tag(tags::OpaqueDataType), Value::Enumeration(otype)),
+                            TtlvFrame::new(Tag(tags::OpaqueDataValue), Value::ByteString(kb.key_value.clone())),
+                        ]),
+                    )
+                }
+                ObjectType::Certificate => {
+                    let (ct, cv) = r.certificate_payload.as_ref()?;
+                    TtlvFrame::new(
+                        Tag(tags::Certificate),
+                        Value::Structure(vec![
+                            TtlvFrame::new(Tag(tags::CertificateType), Value::Enumeration(*ct)),
+                            TtlvFrame::new(Tag(tags::CertificateValue), Value::ByteString(cv.clone())),
+                        ]),
+                    )
+                }
+                _ => return None,
+            };
+            k.push(object);
+            if let Some(m) = r.protection_storage_masks {
+                k.push(TtlvFrame::new(
+                    Tag(tags::ProtectionStorageMasks),
+                    Value::Structure(vec![TtlvFrame::new(
+                        Tag(tags::ProtectionStorageMask),
+                        Value::Integer(m as i32),
+                    )]),
+                ));
+            }
+            k
+        }
+        _ => return None,
+    };
+    Some(TtlvFrame::new(Tag(tags::RequestPayload), Value::Structure(kids)))
+}
+
 // ── Request payload dispatch ────────────────────────────────────────────────
 
 fn decode_request_payload(op: Operation, frame: &TtlvFrame) -> Result<RequestPayload, WireError> {

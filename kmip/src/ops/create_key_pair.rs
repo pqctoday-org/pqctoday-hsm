@@ -460,7 +460,7 @@ fn canonical_name(a: KmipAlgorithm) -> String {
 
 /// Reverse mapping. Accepts the size-suffixed canonical names policies use
 /// (e.g. `"AES-256"`, `"ECDSA-P256"`) by stripping the suffix when needed.
-fn parse_algorithm(s: &str) -> Result<KmipAlgorithm> {
+pub(crate) fn parse_algorithm(s: &str) -> Result<KmipAlgorithm> {
     use KmipAlgorithm::*;
     let base = s
         .split('-')

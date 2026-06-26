@@ -223,6 +223,15 @@ pub enum Rule {
         padding_method: Option<String>,
         #[serde(default)]
         deterministic: Option<bool>,
+        /// F-5 — MGF function name (e.g. `MGF1`) → KMIP `MaskGenerator` codepoint.
+        #[serde(default)]
+        mask_generator: Option<String>,
+        /// F-5 — AEAD auth-tag length, bytes.
+        #[serde(default)]
+        tag_length: Option<i32>,
+        /// F-5 — RSA-PSS salt length, bytes.
+        #[serde(default)]
+        salt_length: Option<i32>,
         reason: String,
     },
 
@@ -353,26 +362,35 @@ pub struct GatingDeny {
 }
 
 impl Rule {
-    /// Pass 1: try to resolve / substitute the request's algorithm.
-    /// Returns `Some(Substitution)` for `AlgorithmDefault` /
-    /// `AlgorithmSubstitution` when applicable; `None` for every other
-    /// rule type and for non-matching resolution rules.
-    pub fn resolve_pass1(
-        &self,
-        req: &PolicyRequest,
-        current_algorithm: Option<&str>,
-    ) -> Option<Substitution> {
+    /// Pass 0 (F-2): resolve `AlgorithmDefault` — fill the request's algorithm
+    /// when the request specified none. The engine runs this BEFORE substitutions
+    /// (the caller only invokes it while the algorithm is still unresolved), so a
+    /// substitution always operates on the defaulted value regardless of the order
+    /// defaults and substitutions appear in the policy. Returns `None` for every
+    /// other rule type and for non-matching ops.
+    pub fn resolve_default(&self, req: &PolicyRequest) -> Option<Substitution> {
         match self {
             Rule::AlgorithmDefault {
                 ops,
                 default_algorithm,
                 reason,
-            } if current_algorithm.is_none() && ops.iter().any(|o| o == req.op) => {
-                Some(Substitution {
-                    new_algorithm: default_algorithm.clone(),
-                    reason: reason.clone(),
-                })
-            }
+            } if ops.iter().any(|o| o == req.op) => Some(Substitution {
+                new_algorithm: default_algorithm.clone(),
+                reason: reason.clone(),
+            }),
+            _ => None,
+        }
+    }
+
+    /// Pass 1: apply `AlgorithmSubstitution` — rewrite `from` → `to` when the
+    /// (already default-resolved) algorithm matches `from`. Returns `None` for
+    /// every other rule type and for non-matching substitutions.
+    pub fn resolve_substitution(
+        &self,
+        req: &PolicyRequest,
+        current_algorithm: Option<&str>,
+    ) -> Option<Substitution> {
+        match self {
             Rule::AlgorithmSubstitution {
                 ops,
                 from,
@@ -407,6 +425,9 @@ impl Rule {
                 block_cipher_mode,
                 padding_method,
                 deterministic,
+                mask_generator,
+                tag_length,
+                salt_length,
                 ..
             } if ops.iter().any(|o| o == req.op)
                 && algorithm
@@ -420,6 +441,9 @@ impl Rule {
                         .and_then(block_cipher_mode_name_to_code),
                     padding_method: padding_method.as_deref().and_then(padding_method_name_to_code),
                     deterministic: *deterministic,
+                    mask_generator: mask_generator.as_deref().and_then(mgf_name_to_code),
+                    tag_length: *tag_length,
+                    salt_length: *salt_length,
                 })
             }
             _ => None,
@@ -503,9 +527,25 @@ impl Rule {
                 _ => None,
             },
 
-            // Stub — needs Phase 6 store to expose activated_at. Never fires
-            // in Phase 4.5; documented behavior in loader's warnings.
-            Rule::MaxKeyAgeDays { .. } => None,
+            // F-3 — deny when the target key is older than `days`. Fires only
+            // when the dispatcher supplied the object's Activation Date (i.e. an
+            // op that targets an activated key — Sign/Encrypt/…); an op with no
+            // age reference (Create, or a never-activated object) can't be aged
+            // out, so it passes.
+            Rule::MaxKeyAgeDays { ops, days, reason } => {
+                if !ops.iter().any(|o| o == req.op) {
+                    return None;
+                }
+                match req.object_activation_date {
+                    Some(activated) if (req.ts - activated).whole_days() > i64::from(*days) => {
+                        Some(GatingDeny {
+                            kmip_reason: DenyReason::KeyExpired,
+                            human: reason.clone(),
+                        })
+                    }
+                    _ => None,
+                }
+            }
 
             Rule::RequireUsageMask {
                 algorithm,
@@ -834,6 +874,15 @@ fn block_cipher_mode_name_to_code(name: &str) -> Option<u32> {
     })
 }
 
+/// F-5 — KMIP `Mask Generator` (MGF) name → enum codepoint (spec §11). Only MGF1
+/// is defined in KMIP 3.0.
+fn mgf_name_to_code(name: &str) -> Option<u32> {
+    match name.to_ascii_uppercase().as_str() {
+        "MGF1" => Some(0x01),
+        _ => None,
+    }
+}
+
 /// KMIP `Padding Method` name → enum codepoint (spec §11, verified).
 fn padding_method_name_to_code(name: &str) -> Option<u32> {
     Some(match name {
@@ -1075,6 +1124,9 @@ mod tests {
             block_cipher_mode: None,
             padding_method: None,
             deterministic: Some(true),
+            mask_generator: None,
+            tag_length: None,
+            salt_length: None,
             reason: "force deterministic".into(),
         };
         let cp = rule
@@ -1105,6 +1157,9 @@ mod tests {
             block_cipher_mode: Some("GCM".into()),
             padding_method: None,
             deterministic: None,
+            mask_generator: None,
+            tag_length: None,
+            salt_length: None,
             reason: "force AEAD".into(),
         };
         let cp = rule
@@ -1115,6 +1170,34 @@ mod tests {
         assert!(rule
             .resolve_cp(&req("Encrypt", Some("RSA"), &attrs), Some("RSA"))
             .is_none());
+    }
+
+    /// F-5 — a forcing rule can mandate MGF1, AEAD tag length, and PSS salt
+    /// length, and they reach the resolved `CpOverride`.
+    #[test]
+    fn mechanism_param_default_forces_mgf_tag_salt() {
+        let attrs = HashMap::new();
+        let rule = Rule::MechanismParameterDefault {
+            ops: vec!["Encrypt".into(), "Sign".into()],
+            algorithm: None,
+            hashing_algorithm: None,
+            block_cipher_mode: None,
+            padding_method: None,
+            deterministic: None,
+            mask_generator: Some("MGF1".into()),
+            tag_length: Some(16),
+            salt_length: Some(32),
+            reason: "mandate MGF1 + 128-bit tag + 32-byte PSS salt".into(),
+        };
+        let cp = rule
+            .resolve_cp(&req("Encrypt", Some("RSA"), &attrs), Some("RSA"))
+            .expect("forcing rule fires");
+        assert_eq!(cp.mask_generator, Some(0x01)); // KMIP MGF1
+        assert_eq!(cp.tag_length, Some(16));
+        assert_eq!(cp.salt_length, Some(32));
+        assert!(!cp.is_empty());
+        // Unknown MGF name resolves to None (not silently 0).
+        assert_eq!(mgf_name_to_code("MGF99"), None);
     }
 
     #[test]
@@ -1213,7 +1296,7 @@ mod tests {
             reason: "Upgrade classical to PQC".into(),
         };
         let req = req("CreateKeyPair", Some("ECDSA-P256"), &attrs);
-        let sub = r.resolve_pass1(&req, Some("ECDSA-P256")).expect("must substitute");
+        let sub = r.resolve_substitution(&req, Some("ECDSA-P256")).expect("must substitute");
         assert_eq!(sub.new_algorithm, "ML-DSA-65");
     }
 
@@ -1226,14 +1309,51 @@ mod tests {
             reason: "PQC default for signing".into(),
         };
         let req = req("CreateKeyPair", None, &attrs);
-        let sub = r.resolve_pass1(&req, None).expect("must default");
+        let sub = r.resolve_default(&req).expect("must default");
         assert_eq!(sub.new_algorithm, "ML-DSA-87");
 
-        // Already-specified algorithm: default does NOT fire.
+        // Wrong op: default does NOT fire (the engine guards the None-algo
+        // precondition; resolve_default only matches on ops).
         let req2 = req;
-        let _req2 = PolicyRequest { algorithm: Some("ECDSA-P256"), ..req2 };
-        let no_sub = r.resolve_pass1(&_req2, Some("ECDSA-P256"));
-        assert!(no_sub.is_none());
+        let _req2 = PolicyRequest { op: "Encrypt", ..req2 };
+        assert!(r.resolve_default(&_req2).is_none());
+    }
+
+    /// F-3 — `max_key_age_days` denies an op on a key older than `days`, allows a
+    /// young key, and is inert when the age is unknown or the op isn't listed.
+    #[test]
+    fn max_key_age_days_enforced() {
+        use time::Duration;
+        let attrs = HashMap::new();
+        let r = Rule::MaxKeyAgeDays {
+            ops: vec!["Sign".into()],
+            days: 90,
+            reason: "key past 90-day rotation window".into(),
+        };
+        let activated = OffsetDateTime::UNIX_EPOCH;
+        let aged = |op: &'static str, age_days: i64, with_date: bool| {
+            let mut q = PolicyRequest::minimal(
+                op,
+                Some("ML-DSA-87"),
+                activated + Duration::days(age_days),
+                "c-age",
+                &attrs,
+            );
+            if with_date {
+                q.object_activation_date = Some(activated);
+            }
+            q
+        };
+
+        // 100 days old, op listed, date known → DENY KeyExpired.
+        let d = r.check_pass2(&aged("Sign", 100, true), Some("ML-DSA-87"));
+        assert!(matches!(d, Some(g) if matches!(g.kmip_reason, DenyReason::KeyExpired)));
+        // 30 days old → within window → allow.
+        assert!(r.check_pass2(&aged("Sign", 30, true), Some("ML-DSA-87")).is_none());
+        // Old but activation date unknown → cannot age out → allow.
+        assert!(r.check_pass2(&aged("Sign", 100, false), Some("ML-DSA-87")).is_none());
+        // Old but op not in the rule's `ops` → rule inert → allow.
+        assert!(r.check_pass2(&aged("Encrypt", 100, true), Some("ML-DSA-87")).is_none());
     }
 
     #[test]

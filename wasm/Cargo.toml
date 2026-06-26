@@ -1,0 +1,56 @@
+[package]
+name        = "pqctoday-kmip-wasm"
+version     = "0.1.0"
+edition     = "2024"
+license     = "MIT"
+description = "In-browser (WebAssembly) build of the pqctoday-kmip crypto-agile KMIP 3.0 control plane bundled with the softhsmrustv3 PKCS#11 v3.2 engine — drives real KMIP TTLV requests through the dispatcher with no server, network, or filesystem."
+repository  = "https://github.com/pqctoday-org/pqctoday-hsm"
+
+[lib]
+# `cdylib` → the wasm artifact wasm-bindgen post-processes; `rlib` → lets the
+# crate be unit-tested natively (`cargo test`) without a wasm host.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# wasm-bindgen — pinned EXACT so the whole graph (incl. softhsmrustv3) links one
+# wasm-bindgen and the schema matches the `wasm-bindgen-cli` that generates the
+# JS shim. `^0.2.117` floats up to a newer schema the pinned CLI can't read.
+wasm-bindgen = "=0.2.117"
+console_error_panic_hook = "0.1.7"
+
+# JSON bridge — the wasm surface hands the UI structured JSON (op results,
+# decoded TTLV trees, keystore listings, audit events). KMIP message types are
+# not serde-derived, so we hand-build these via serde_json::json!; audit events
+# ARE serde-derived and serialize directly.
+serde_json = "1"
+
+# Plane 1+2 — the transport-free library core (no tokio/rustls/rusqlite/rcgen).
+pqctoday-kmip = { path = "../kmip", default-features = false }
+# Plane 3 — the PKCS#11 engine, the same crate that compiles to the standalone
+# in-browser HSM. We call its typed `native::*` API directly (no FFI).
+softhsmrustv3 = { path = "../rust" }
+
+# ── wasm randomness + clock (feature unification across the whole graph) ──
+# `uuid` (per-request correlation IDs) needs an explicit randomness source on
+# wasm32-unknown-unknown; `getrandom/js` wires browser crypto for it and for
+# the engine's RNG; `time/wasm-bindgen` makes `OffsetDateTime::now_utc()` (KMIP
+# response timestamps) read `js_sys::Date` instead of panicking on `SystemTime`.
+uuid      = { version = "1", features = ["js"] }
+getrandom = { version = "0.2", features = ["js"] }
+time      = { version = "0.3", features = ["wasm-bindgen"] }
+
+# Mirror the FIPS-204/205 + HSS/LMS patches from pqctoday-hsm/rust/Cargo.toml.
+# `[patch]` does not propagate across standalone crates, so each build root
+# that pulls softhsmrustv3 must repeat them (same pattern as kmip/Cargo.toml).
+[patch.crates-io]
+fips204 = { path = "../rust/fips204-patched" }
+fips205 = { path = "../rust/fips205-patched" }
+hbs-lms = { path = "../rust/hbs-lms-patched" }
+
+[profile.release]
+# Match the engine's wasm profile: optimize for size + LTO.
+opt-level = "s"
+lto       = true
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
