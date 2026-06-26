@@ -495,8 +495,12 @@ bool OSSLEVPSymmetricAlgorithm::decryptUpdate(const ByteString& encryptedData, B
 		return false;
 	}
 
-	// AEAD ciphers should not return decrypted data until final is called
-	if (currentCipherMode == SymMode::GCM)
+	// AEAD ciphers should not return decrypted data until final is called.
+	// Both GCM and ChaCha20-Poly1305 defer plaintext and withhold the trailing
+	// tag bytes (buffered by the base decryptUpdate) until decryptFinal verifies
+	// the tag — handling only GCM here fed the tag through as ciphertext and made
+	// ChaCha20-Poly1305 decrypt fail with CKR_ENCRYPTED_DATA_INVALID.
+	if (currentCipherMode == SymMode::GCM || currentCipherMode == SymMode::CHACHA_POLY1305)
 	{
 		data.resize(0);
 		return true;

@@ -159,6 +159,17 @@ pub const CKM_SHA512_RSA_PKCS: u32 = 0x0000_0042;
 pub const CKM_SHA256_RSA_PKCS_PSS: u32 = 0x0000_0043;
 pub const CKM_SHA384_RSA_PKCS_PSS: u32 = 0x0000_0044;
 pub const CKM_SHA512_RSA_PKCS_PSS: u32 = 0x0000_0045;
+// Raw RSA PKCS#1 v1.5 sign/verify/encrypt (caller supplies the data; no hash).
+pub const CKM_RSA_PKCS: u32 = 0x0000_0001;
+// Raw RSA-PSS (caller supplies the pre-computed hash) — advertised in §6.4.
+pub const CKM_RSA_PKCS_PSS: u32 = 0x0000_000D;
+// RSA private-key CRT components (§2.1.3) — sensitive material, never extractable
+// in clear from a sensitive key. CKA_PRIVATE_EXPONENT .. CKA_COEFFICIENT.
+pub const CKA_PRIVATE_EXPONENT: u32 = 0x0000_0123;
+pub const CKA_COEFFICIENT: u32 = 0x0000_0128;
+// SHA3-384 RSA composite sign mechanisms (§6.4).
+pub const CKM_SHA3_384_RSA_PKCS: u32 = 0x0000_0061;
+pub const CKM_SHA3_384_RSA_PKCS_PSS: u32 = 0x0000_0064;
 
 // PQC - KEM
 pub const CKM_ML_KEM_KEY_PAIR_GEN: u32 = 0x0000_000F;
@@ -180,7 +191,11 @@ pub const CKM_SHA256: u32 = 0x0000_0250;
 pub const CKM_SHA384: u32 = 0x0000_0260;
 pub const CKM_SHA512: u32 = 0x0000_0270;
 pub const CKM_SHA3_256: u32 = 0x0000_02B0;
+pub const CKM_SHA3_384: u32 = 0x0000_02C0;
 pub const CKM_SHA3_512: u32 = 0x0000_02D0;
+// RIPEMD-160 (historical) — digest + HMAC.
+pub const CKM_RIPEMD160: u32 = 0x0000_0240;
+pub const CKM_RIPEMD160_HMAC: u32 = 0x0000_0241;
 
 // HMAC
 pub const CKM_SHA256_HMAC: u32 = 0x0000_0251;
@@ -200,6 +215,7 @@ pub const CKG_MGF1_SHA1: u32 = 0x0000_0001;
 pub const CKG_MGF1_SHA256: u32 = 0x0000_0002;
 pub const CKG_MGF1_SHA384: u32 = 0x0000_0003;
 pub const CKG_MGF1_SHA512: u32 = 0x0000_0004;
+pub const CKG_MGF1_SHA3_384: u32 = 0x0000_0008;
 // OAEP source type
 pub const CKZ_DATA_SPECIFIED: u32 = 0x0000_0001;
 // SP 800-108 data-param types (beyond BYTE_ARRAY below)
@@ -293,6 +309,13 @@ pub const CKM_EDDSA: u32 = 0x0000_1057;
 // range (0x80000000+) — the former 0x1058 squatted unassigned spec-reserved
 // space adjacent to CKM_EDDSA and risked a future OASIS collision.
 pub const CKM_EC_MONTGOMERY_KEY_DERIVE: u32 = 0x8000_0011;
+// PKCS#11 v3.2 §6.7 dedicated Montgomery-curve DH mechanisms, in the
+// CKM_VENDOR_DEFINED (0x80000000) range per the spec header:
+// CKM_X25519 = CKM_VENDOR_DEFINED | 0x1058, CKM_X448 = | 0x1059.
+pub const CKM_X25519: u32 = 0x8000_1058;
+pub const CKM_X448: u32 = 0x8000_1059;
+// AES-CMAC (PKCS#11 v3.2 §6.43) — also a valid SP 800-108 KBKDF PRF.
+pub const CKM_AES_CMAC: u32 = 0x0000_108A;
 // Ed25519ph (prehashed). This is the real PKCS#11 v3.2 mechanism value
 // (pkcs11t.h: CKM_EDDSA_PH = 0x80001057); the engine also dispatches to it
 // internally when CK_EDDSA_PARAMS.phFlag is set on a plain CKM_EDDSA op.
@@ -323,6 +346,9 @@ pub const CKM_AES_KEY_WRAP_KWP: u32 = 0x0000_210B;
 /// `CKM_CHACHA20` — IETF ChaCha20 stream cipher. 32-byte key, 12-byte
 /// nonce. Distinct from the older 8-byte-nonce variant.
 pub const CKM_CHACHA20: u32 = 0x0000_1226;
+pub const CKM_CHACHA20_KEY_GEN: u32 = 0x0000_1225;
+// CKK_CHACHA20 key type (§6.20) — a 256-bit ChaCha20 stream-cipher key.
+pub const CKK_CHACHA20: u32 = 0x0000_0033;
 /// `CKM_CHACHA20_POLY1305` — IETF ChaCha20-Poly1305 AEAD (RFC 8439).
 /// 32-byte key, 12-byte nonce, 16-byte tag.
 pub const CKM_CHACHA20_POLY1305: u32 = 0x0000_4021;
@@ -360,6 +386,10 @@ pub const CKS_RW_SO_FUNCTIONS: u32 = 4;
 
 pub const CKF_SERIAL_SESSION: u32 = 0x0000_0004;
 pub const CKF_RW_SESSION: u32 = 0x0000_0002;
+// PKCS#11 v3.2 §5.6 — async sessions. We do not support async, so the token
+// never advertises CKF_ASYNC_SESSION_SUPPORTED and C_OpenSession rejects the
+// CKF_ASYNC_SESSION request flag.
+pub const CKF_ASYNC_SESSION: u32 = 0x0000_0008;
 
 // PKCS#11 v3.2 §5.5 — CK_TOKEN_INFO.flags (pkcs11t.h "token information flags")
 pub const CKF_RNG: u32 = 0x0000_0001;
@@ -376,6 +406,9 @@ pub const CKR_SESSION_EXISTS: u32 = 0x0000_00B6;
 pub const CKR_SESSION_READ_ONLY: u32 = 0x0000_00B5;
 pub const CKR_SESSION_READ_ONLY_EXISTS: u32 = 0x0000_00B7;
 pub const CKR_SESSION_READ_WRITE_SO_EXISTS: u32 = 0x0000_00B8;
+// PKCS#11 v3.2 §5.6.1 — returned when CKF_ASYNC_SESSION is requested but the
+// token does not support async sessions.
+pub const CKR_SESSION_ASYNC_NOT_SUPPORTED: u32 = 0x0000_0205;
 pub const CKR_USER_TYPE_INVALID: u32 = 0x0000_0103;
 pub const CKR_USER_ANOTHER_ALREADY_LOGGED_IN: u32 = 0x0000_0104;
 pub const CKR_USER_TOO_MANY_TYPES: u32 = 0x0000_0105;
@@ -405,6 +438,10 @@ pub const SUPPORTED_MECHS: &[u32] = &[
     CKM_SHA256_RSA_PKCS_PSS,
     CKM_SHA384_RSA_PKCS_PSS,
     CKM_SHA512_RSA_PKCS_PSS,
+    CKM_RSA_PKCS,
+    CKM_RSA_PKCS_PSS,
+    CKM_SHA3_384_RSA_PKCS,
+    CKM_SHA3_384_RSA_PKCS_PSS,
     // ML-KEM (FIPS 203)
     CKM_ML_KEM_KEY_PAIR_GEN,
     CKM_ML_KEM,
@@ -442,12 +479,14 @@ pub const SUPPORTED_MECHS: &[u32] = &[
     CKM_SHA512,
     CKM_SHA3_256,
     CKM_SHA3_512,
+    CKM_RIPEMD160,
     // HMAC
     CKM_SHA256_HMAC,
     CKM_SHA384_HMAC,
     CKM_SHA512_HMAC,
     CKM_SHA3_256_HMAC,
     CKM_SHA3_512_HMAC,
+    CKM_RIPEMD160_HMAC,
     CKM_SHA256_HMAC_GENERAL,
     CKM_SHA384_HMAC_GENERAL,
     CKM_SHA512_HMAC_GENERAL,
@@ -473,6 +512,8 @@ pub const SUPPORTED_MECHS: &[u32] = &[
     CKM_EC_EDWARDS_KEY_PAIR_GEN,
     CKM_EC_MONTGOMERY_KEY_PAIR_GEN,
     CKM_EC_MONTGOMERY_KEY_DERIVE,
+    CKM_X25519,
+    CKM_X448,
     CKM_EDDSA,
     CKM_EDDSA_PH,
     // AES
@@ -488,6 +529,7 @@ pub const SUPPORTED_MECHS: &[u32] = &[
     // ChaCha20 stream cipher + ChaCha20-Poly1305 AEAD (S1 — were implemented
     // but not advertised; values verified against pkcs11t.h 0x1226 / 0x4021)
     CKM_CHACHA20,
+    CKM_CHACHA20_KEY_GEN,
     CKM_CHACHA20_POLY1305,
     // Key derivation
     CKM_PKCS5_PBKD2,

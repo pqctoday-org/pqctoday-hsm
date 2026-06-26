@@ -2408,20 +2408,28 @@ bool P11ChaCha20SecretKeyObj::init(OSObject *inobject)
 	if (!P11SecretKeyObj::init(inobject)) return false;
 
 	// Create attributes
-	// Per PKCS#11 v3.2 §2.21: CKA_VALUE_LEN does NOT exist for ChaCha20 keys.
-	// ChaCha20 has a fixed 256-bit (32-byte) key. Only AES (variable-length) uses it.
+	// PKCS#11 v3.2 §6.58.2 Table 254 defines BOTH CKA_VALUE and CKA_VALUE_LEN for
+	// ChaCha20 secret keys, so the object MUST register CKA_VALUE_LEN or a keygen/
+	// create template carrying it is rejected with CKR_ATTRIBUTE_TYPE_INVALID.
+	// Unlike AES (variable length), ChaCha20 is fixed 256-bit, so CKA_VALUE_LEN is
+	// registered ck2-only (NOT ck3): readable + accepted but OPTIONAL for keygen —
+	// SoftHSM_keygen defaults it to 32. Using the AES default (ck2|ck3) would make
+	// it required and break keygen templates that omit it.
 	P11Attribute* attrValue = new P11AttrValue(osobject,P11Attribute::ck1|P11Attribute::ck4|P11Attribute::ck6|P11Attribute::ck7);
+	P11Attribute* attrValueLen = new P11AttrValueLen(osobject, P11Attribute::ck2);
 
 	// Initialize the attributes
-	if (!attrValue->init())
+	if (!attrValue->init() || !attrValueLen->init())
 	{
 		ERROR_MSG("Could not initialize the attribute");
 		delete attrValue;
+		delete attrValueLen;
 		return false;
 	}
 
 	// Add them to the map
 	attributes[attrValue->getType()] = attrValue;
+	attributes[attrValueLen->getType()] = attrValueLen;
 
 	initialized = true;
 	return true;

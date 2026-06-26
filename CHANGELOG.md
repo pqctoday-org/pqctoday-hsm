@@ -8,6 +8,78 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — C++ ChaCha20-Poly1305 full AEAD round-trip + spec CKA_VALUE_LEN (2026-06-15)
+
+`CKM_CHACHA20_POLY1305` was bolted onto the GCM AEAD path with several GCM-only /
+AES-shaped gates left unadjusted, so an encrypt→decrypt round-trip failed and key
+generation rejected the spec-mandated template attribute. Four scoped fixes, all
+in the C++ engine; native `p11_v32_compliance_test -c all` stays **315 / 0 / 0**
+and the hub dual-engine ACVP matrix is fully green (C++ 54/54, Rust 55/55). The
+1452-case KMIP interop + KAT replay stays **15/15**.
+
+- **`P11Objects.cpp` — register `CKA_VALUE_LEN` on `P11ChaCha20SecretKeyObj`.**
+  PKCS#11 v3.2 §6.58.2 Table 254 defines it for ChaCha20; without it
+  `C_GenerateKey` rejected the keygen template with `CKR_ATTRIBUTE_TYPE_INVALID`.
+  Registered `ck2`-only (NOT `ck3`) — ChaCha20 is fixed 256-bit so the attribute
+  is OPTIONAL for keygen (the AES default `ck2|ck3` would wrongly make it
+  mandatory and break the conformance suite's keygen test). `P11AttrValueLen`'s
+  constructor now takes its checks as a parameter (default `ck2|ck3`, so AES /
+  generic-secret are unchanged).
+- **`crypto/SymmetricAlgorithm.cpp` `decryptUpdate`** — buffer the ciphertext into
+  `currentAEADBuffer` for `CHACHA_POLY1305` too (was GCM-only); otherwise the
+  buffer is empty and `decryptFinal` cannot locate the tag →
+  `CKR_ENCRYPTED_DATA_INVALID`.
+- **`crypto/OSSLEVPSymmetricAlgorithm.cpp` `decryptUpdate`** — defer plaintext and
+  withhold the tag for `CHACHA_POLY1305` too (was GCM-only).
+
+GCM and all non-ChaCha20 paths are untouched (changes are strictly
+`CHACHA_POLY1305`/ChaCha20-scoped). AES-GCM in the conformance harness is
+decrypt-KAT-only, so the AEAD encrypt+round-trip path was exercised only by
+ChaCha20 — which is why these defects were latent.
+
+### Fixed — softhsmrustv3 native PKCS#11 v3.2 C-ABI compliance: 28 → 315 PASS / 0 FAIL (2026-06-15)
+
+The Rust engine's C ABI (`rust/src/ck_abi.rs` + `ffi.rs`) was architecturally
+32-bit/WASM-shaped — it marshaled every attribute template and `CK_MECHANISM`
+(and nested param structs) as `u32` triples and reconstructed pointers from
+`u32`. On native 64-bit this truncated pointers (`CKR_FUNCTION_FAILED`/heap
+corruption), so `p11_v32_compliance_test -c all` scored only **28 PASS**. The
+validated KMIP/ACVP path was unaffected (it bypasses the C ABI via
+`softhsmrustv3::native::*`). Re-plumbed to native width and wired the
+remaining functionality to **315 PASS / 0 FAIL / 0 SKIP — byte-for-byte identical to the C++ engine**, on the isolated
+branch `feat/cabi-native-64bit`, with the **1452-case KMIP interop + KAT replay
+staying 15/15** as the gate after every commit.
+
+- **Width re-plumb (`u32 → usize`).** Portable: `usize` == `u32` on wasm32,
+  `u64` on native; nested C structs read at `size_of::<usize>()` offsets so the
+  same code is correct on both. Covers templates, `CK_MECHANISM`/params,
+  `store_ulong` (native CK_ULONG width — fixes `C_FindObjects` byte-exact
+  matching), HKDF/PBKDF2/SP800-108/GCM/ECDH/RSA-PSS/auth-wrap param structs, and
+  the `C_GetAttributeValue` length write-back (`CK_UNAVAILABLE_INFORMATION` =
+  `usize::MAX`).
+- **Crypto wired through the C ABI:** X25519/X448 ECDH derive, AES-CBC(-PAD) key
+  wrap, ChaCha20 keygen, AES-CMAC SP800-108 PRF, RIPEMD-160 digest+HMAC,
+  SHA3-384-RSA (PKCS#1 v1.5 + PSS), raw `CKM_RSA_PKCS` sign/verify, the four
+  dual-function ops, ML-DSA/SLH-DSA/EdDSA multi-part, HSS/LMS keygen+sign (with
+  `CKA_HSS_KEYS_REMAINING` decrement), and XMSS^MT keygen/sign/verify (worked
+  around an `xmss 0.1.0-pre.0` serialized-key OID round-trip bug).
+- **Conformance behaviors:** keygen `CKA_KEY_TYPE`-vs-mechanism validation
+  (`CKR_TEMPLATE_INCONSISTENT`), `CKA_PUBLIC_KEY_INFO` (SPKI) on private PQC
+  keys, `CKA_UNIQUE_ID` as a 36-char UUID, RSA-PSS hashAlg validation,
+  generic-secret KCV via **SHA-1** (not SHA-256), `CKF_ASYNC_SESSION` rejected
+  with `CKR_SESSION_ASYNC_NOT_SUPPORTED`, RSA private-component sensitivity.
+- **Function exports:** all `C_*` are now exported as `#[unsafe(no_mangle)]`
+  symbols (standard PKCS#11 module behavior), lighting up the async,
+  session-cancel, ML-KEM encapsulate/decapsulate, authenticated-wrap, and v3.0
+  message-based (`C_MessageSign*`/`C_MessageEncrypt*`) APIs.
+- **Constants:** every `CK*` value added was verified against the normative
+  `src/lib/pkcs11/pkcs11t.h`. XMSS^MT keygen now exposes the standard
+  `CKA_PARAMETER_SET` (0x61d), not only the legacy vendor attribute.
+- **Tests:** in-process `cargo test --lib` restored to green (201/0) — the old
+  `[u32;3]` test scaffolding (which SIGSEGV'd against the now-usize ABI) was
+  converted to `[usize;3]`.
+- **Not merged to `main`.** The validated checkout's `rust/` tree is unchanged;
+  full per-commit table and rationale in `rust/CK_ABI_NATIVE_COMPLIANCE_PLAN.md`.
 ### Added — KMIP request-wire encoder + OASIS bidirectional conformance gate; policy/store/persistence hardening (2026-06-20)
 
 The CACP engine could already **read** KMIP requests and **write** responses (the

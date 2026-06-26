@@ -457,7 +457,12 @@ pub fn value_is_blocked(attrs: &Attributes) -> bool {
 /// `ffi::C_GetAttributeValue` and `native::object::get_attribute` use this
 /// predicate so the two surfaces cannot drift.
 pub fn attr_is_sensitive_material(attr_type: u32) -> bool {
-    attr_type == CKA_VALUE || attr_type == CKA_SEED
+    // CKA_VALUE / CKA_SEED, plus the RSA private CRT components
+    // (CKA_PRIVATE_EXPONENT 0x123 .. CKA_COEFFICIENT 0x128): on a sensitive or
+    // unextractable key these read back as CKR_ATTRIBUTE_SENSITIVE, never in clear.
+    attr_type == CKA_VALUE
+        || attr_type == CKA_SEED
+        || (CKA_PRIVATE_EXPONENT..=CKA_COEFFICIENT).contains(&attr_type)
 }
 
 /// T6 — pure modifiability check behind every attribute-mutation surface
@@ -612,7 +617,16 @@ pub fn allocate_handle(mut attrs: Attributes) -> u32 {
         *c += 1;
         v
     });
-    attrs.insert(CKA_UNIQUE_ID, format!("shr3-{uid}").into_bytes());
+    // §4.4.1 — render the monotonic counter as a canonical 36-char UUID
+    // (8-4-4-4-12, v4 version/variant nibbles) so CKA_UNIQUE_ID is a portable,
+    // fixed-width identifier. The KMIP store keeps its own UniqueIdentifier, so
+    // this format is independent of the KMIP wire contract.
+    let uuid = format!(
+        "{:08x}-0000-4000-8000-{:012x}",
+        (uid >> 48) as u32,
+        uid & 0xffff_ffff_ffff,
+    );
+    attrs.insert(CKA_UNIQUE_ID, uuid.into_bytes());
     NEXT_HANDLE.with(|h| {
         let mut handle = h.borrow_mut();
         if *handle == u32::MAX {
@@ -779,9 +793,15 @@ pub fn store_bool(attrs: &mut Attributes, attr_type: u32, value: bool) {
     attrs.insert(attr_type, vec![if value { 0x01 } else { 0x00 }]);
 }
 
-/// Store a CK_ULONG attribute (4-byte little-endian).
+/// Store a CK_ULONG attribute at native CK_ULONG width (4 bytes on wasm32,
+/// 8 bytes on 64-bit native — `size_of::<usize>()`, matching the C-ABI
+/// marshaling). This keeps generated objects byte-compatible with caller
+/// templates: a `CKA_CLASS`/`CKA_KEY_TYPE` find-filter supplied as a native
+/// CK_ULONG compares byte-exact in `C_FindObjects`, and the value reads back at
+/// native width through `C_GetAttributeValue`. All map readers take the low
+/// 4 bytes (`from_le_bytes([v[0..3]])`), so widening is backward-compatible.
 pub fn store_ulong(attrs: &mut Attributes, attr_type: u32, value: u32) {
-    attrs.insert(attr_type, value.to_le_bytes().to_vec());
+    attrs.insert(attr_type, (value as usize).to_le_bytes().to_vec());
 }
 
 /// Read a CK_BBOOL attribute back from an attrs HashMap (returns false if absent).
@@ -845,8 +865,9 @@ pub fn compute_kcv(attrs: &mut Attributes) {
                     }
                 }
                 CKK_GENERIC_SECRET => {
-                    // PKCS#11 v3.2: SHA-256 of key value, first 3 bytes
-                    let hash = Sha256::digest(&key_value);
+                    // PKCS#11 v3.2 §6.8.2 — generic-secret KCV is the first
+                    // 3 bytes of SHA-1(value) (NOT SHA-256).
+                    let hash = sha1::Sha1::digest(&key_value);
                     hash[..3].to_vec()
                 }
                 _ => return,

@@ -41,6 +41,8 @@ pub enum DigestCtx {
     Sha3_512(sha3::Sha3_512),
     /// G11 — Keccak-256 (vendor CKM_KECCAK_256). Buffers data for single-shot finalize.
     Keccak256(Vec<u8>),
+    /// Historical RIPEMD-160 (CKM_RIPEMD160) — 20-byte digest.
+    Ripemd160(ripemd::Ripemd160),
 }
 
 pub struct FindCtx {
@@ -59,9 +61,9 @@ pub unsafe fn get_attr_ulong(template: *mut u8, count: u32, attr_type: u32) -> O
     if count > 65536 {
         return None; // Guard against malformed templates with huge count values
     }
-    let ptr = template as *mut u32;
+    let ptr = template as *mut usize;
     for i in 0..count {
-        let t = *ptr.add((i * 3) as usize);
+        let t = *ptr.add((i * 3) as usize) as u32;
         if t == attr_type {
             let val_ptr = *ptr.add((i * 3 + 1) as usize) as usize as *const u32;
             if !val_ptr.is_null() {
@@ -82,9 +84,9 @@ pub unsafe fn get_attr_bytes(template: *mut u8, count: u32, attr_type: u32) -> O
     if count > 65536 {
         return None; // Guard against malformed templates with huge count values
     }
-    let ptr = template as *mut u32;
+    let ptr = template as *mut usize;
     for i in 0..count {
-        let t = *ptr.add((i * 3) as usize);
+        let t = *ptr.add((i * 3) as usize) as u32;
         if t == attr_type {
             let val_ptr = *ptr.add((i * 3 + 1) as usize) as usize as *const u8;
             let val_len = *ptr.add((i * 3 + 2) as usize) as usize;
@@ -143,9 +145,9 @@ pub unsafe fn absorb_template_attrs(attrs: &mut Attributes, template: *mut u8, c
     if template.is_null() || count == 0 || count > 65536 {
         return;
     }
-    let ptr = template as *mut u32;
+    let ptr = template as *mut usize;
     for i in 0..count {
-        let attr_type = *ptr.add((i * 3) as usize);
+        let attr_type = *ptr.add((i * 3) as usize) as u32;
         let val_ptr = *ptr.add((i * 3 + 1) as usize) as usize as *const u8;
         let val_len = *ptr.add((i * 3 + 2) as usize) as usize;
         // Skip key/seed material, internal private attrs, and server-managed attrs.
@@ -1102,6 +1104,12 @@ pub fn sign_hmac(mech: u32, key_bytes: &[u8], msg: &[u8]) -> Result<Vec<u8>, u32
             mac.update(msg);
             Ok(mac.finalize().into_bytes().to_vec())
         }
+        CKM_RIPEMD160_HMAC => {
+            let mut mac = Hmac::<ripemd::Ripemd160>::new_from_slice(key_bytes)
+                .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+            mac.update(msg);
+            Ok(mac.finalize().into_bytes().to_vec())
+        }
         _ => Err(CKR_MECHANISM_INVALID),
     }
 }
@@ -1182,6 +1190,13 @@ pub fn sign_rsa(
         CKM_SHA256_RSA_PKCS_PSS => pss_sign!(sha2::Sha256, 32),
         CKM_SHA384_RSA_PKCS_PSS => pss_sign!(sha2::Sha384, 48),
         CKM_SHA512_RSA_PKCS_PSS => pss_sign!(sha2::Sha512, 64),
+        CKM_SHA3_384_RSA_PKCS => pkcs1v15_sign!(sha3::Sha3_384),
+        CKM_SHA3_384_RSA_PKCS_PSS => pss_sign!(sha3::Sha3_384, 48),
+        // Raw PKCS#1 v1.5: the caller supplies the bytes (already a DigestInfo
+        // or arbitrary data); no hashing, no DigestInfo prefix.
+        CKM_RSA_PKCS => private_key
+            .sign(rsa::Pkcs1v15Sign::new_unprefixed(), msg)
+            .map_err(|_| CKR_FUNCTION_FAILED),
         _ => Err(CKR_MECHANISM_INVALID),
     }
 }
@@ -1494,12 +1509,14 @@ pub fn get_sig_len(mech: u32, hkey: u32) -> u32 {
             hss_sig_len(levels, lms_param, lmots_param)
         }
         CKM_SHA256_HMAC | CKM_SHA3_256_HMAC => 32,
+        CKM_RIPEMD160_HMAC => 20,
         CKM_SHA384_HMAC => 48,
         CKM_SHA512_HMAC | CKM_SHA3_512_HMAC => 64,
         CKM_KMAC_128 => 32,
         CKM_KMAC_256 => 64,
         CKM_SHA256_RSA_PKCS | CKM_SHA384_RSA_PKCS | CKM_SHA512_RSA_PKCS
-        | CKM_SHA256_RSA_PKCS_PSS | CKM_SHA384_RSA_PKCS_PSS | CKM_SHA512_RSA_PKCS_PSS => 512,
+        | CKM_SHA256_RSA_PKCS_PSS | CKM_SHA384_RSA_PKCS_PSS | CKM_SHA512_RSA_PKCS_PSS
+        | CKM_SHA3_384_RSA_PKCS | CKM_SHA3_384_RSA_PKCS_PSS | CKM_RSA_PKCS => 512,
         // ECDSA — sig size = 2 × ⌈curve_bits / 8⌉, independent of the hash. The
         // SHA384/SHA3-384 hardcode for 96-byte was wrong for P-256 + P-521 etc;
         // size MUST come from the key's curve, not the hash mechanism.
@@ -1848,6 +1865,12 @@ pub fn verify_rsa(
         CKM_SHA256_RSA_PKCS_PSS => pss_verify!(sha2::Sha256, 32),
         CKM_SHA384_RSA_PKCS_PSS => pss_verify!(sha2::Sha384, 48),
         CKM_SHA512_RSA_PKCS_PSS => pss_verify!(sha2::Sha512, 64),
+        CKM_SHA3_384_RSA_PKCS => pkcs1v15_verify!(sha3::Sha3_384),
+        CKM_SHA3_384_RSA_PKCS_PSS => pss_verify!(sha3::Sha3_384, 48),
+        // Raw PKCS#1 v1.5 — caller-supplied bytes, no DigestInfo prefix.
+        CKM_RSA_PKCS => public_key
+            .verify(rsa::Pkcs1v15Sign::new_unprefixed(), msg, sig_bytes)
+            .map_err(|_| CKR_SIGNATURE_INVALID),
         _ => Err(CKR_MECHANISM_INVALID),
     }
 }

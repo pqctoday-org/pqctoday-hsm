@@ -311,40 +311,32 @@ unsafe fn ulong_array_two_call(
 /// misparsed (native struct layouts differ) — so a non-NULL embedded
 /// pointer is refused with `CKR_FUNCTION_FAILED` (documented H-1
 /// residual) rather than risking UB.
+/// Native-pointer-width embed of a caller pointer (usize == u32 on wasm32,
+/// u64 on native) — carries the full pointer instead of truncating it.
 #[inline]
-fn embed_ptr(p: *mut c_void) -> Result<u32, CK_RV> {
-    if p.is_null() {
-        return Ok(0);
-    }
-    #[cfg(target_pointer_width = "32")]
-    {
-        Ok(p as usize as u32)
-    }
-    #[cfg(not(target_pointer_width = "32"))]
-    {
-        Err(rv(CKR_FUNCTION_FAILED))
-    }
+fn embed_ptr(p: *mut c_void) -> usize {
+    p as usize
 }
 
-/// Re-pack a native CK_MECHANISM into the engine's 12-byte wasm shape
-/// `[type, pParameter, ulParameterLen]` (3 × u32).
-unsafe fn xlate_mech(p: CK_MECHANISM_PTR) -> Result<Option<[u32; 3]>, CK_RV> {
+/// Re-pack a native CK_MECHANISM into `[type, pParameter, ulParameterLen]`
+/// at native pointer width (3 × usize).
+unsafe fn xlate_mech(p: CK_MECHANISM_PTR) -> Result<Option<[usize; 3]>, CK_RV> {
     if p.is_null() {
         return Ok(None); // engine produces its own CKR_ARGUMENTS_BAD
     }
     let m = &*p;
     let t = narrow(m.mechanism).ok_or(rv(CKR_MECHANISM_INVALID))?;
-    let pv = embed_ptr(m.pParameter)?;
+    let pv = embed_ptr(m.pParameter);
     let ln = if m.pParameter.is_null() {
-        0
+        0usize
     } else {
-        narrow(m.ulParameterLen).ok_or(rv(CKR_ARGUMENTS_BAD))?
+        narrow(m.ulParameterLen).ok_or(rv(CKR_ARGUMENTS_BAD))? as usize
     };
-    Ok(Some([t, pv, ln]))
+    Ok(Some([t as usize, pv, ln]))
 }
 
 #[inline]
-fn mech_ptr(m: &mut Option<[u32; 3]>) -> *mut u8 {
+fn mech_ptr(m: &mut Option<[usize; 3]>) -> *mut u8 {
     match m {
         Some(b) => b.as_mut_ptr() as *mut u8,
         None => std::ptr::null_mut(),
@@ -356,30 +348,33 @@ fn mech_ptr(m: &mut Option<[u32; 3]>) -> *mut u8 {
 unsafe fn xlate_template(
     p: CK_ATTRIBUTE_PTR,
     count: CK_ULONG,
-) -> Result<(Option<Vec<u32>>, u32), CK_RV> {
+) -> Result<(Option<Vec<usize>>, u32), CK_RV> {
     let n = narrow(count).ok_or(rv(CKR_ARGUMENTS_BAD))?;
     if p.is_null() {
         return Ok((None, n));
     }
-    let mut v = Vec::with_capacity(n as usize * 3);
+    // Native-pointer-width triples [type, pValue, ulValueLen]. usize == u32 on
+    // wasm32 (byte-identical to the old layout) and u64 on native, so this
+    // carries the full pValue instead of truncating it (the embed_ptr/H-1 fix).
+    let mut v: Vec<usize> = Vec::with_capacity(n as usize * 3);
     for i in 0..n as usize {
         let a = &*p.add(i);
         let t = narrow(a.attrType).ok_or(rv(CKR_ATTRIBUTE_TYPE_INVALID))?;
-        let pv = embed_ptr(a.pValue)?;
+        let pv = a.pValue as usize;
         // ulValueLen may be the native CK_UNAVAILABLE_INFORMATION sentinel
-        // (a caller re-using an output template) — map it to the 32-bit one.
+        // (a caller re-using an output template) — carry it at native width.
         let ln = if a.ulValueLen == CK_UNAVAILABLE_INFORMATION_NATIVE {
-            0xFFFF_FFFF
+            usize::MAX
         } else {
-            narrow(a.ulValueLen).ok_or(rv(CKR_ARGUMENTS_BAD))?
+            narrow(a.ulValueLen).ok_or(rv(CKR_ARGUMENTS_BAD))? as usize
         };
-        v.extend_from_slice(&[t, pv, ln]);
+        v.extend_from_slice(&[t as usize, pv, ln]);
     }
     Ok((Some(v), n))
 }
 
 #[inline]
-fn tmpl_ptr(t: &mut Option<Vec<u32>>) -> *mut u8 {
+fn tmpl_ptr(t: &mut Option<Vec<usize>>) -> *mut u8 {
     match t {
         Some(v) => v.as_mut_ptr() as *mut u8,
         None => std::ptr::null_mut(),
@@ -411,6 +406,7 @@ macro_rules! xlate_tmpl_or {
 /// (hSession) -> CK_RV
 macro_rules! shim_session_only {
     ($($name:ident),+ $(,)?) => {$(
+        #[unsafe(no_mangle)]
         pub unsafe extern "C" fn $name(hSession: CK_SESSION_HANDLE) -> CK_RV {
             let h = narrow_or!(hSession, CKR_SESSION_HANDLE_INVALID);
             rv(crate::ffi::$name(h))
@@ -421,6 +417,7 @@ macro_rules! shim_session_only {
 /// (hSession, CK_BYTE_PTR, CK_ULONG) -> CK_RV — buffer passes through.
 macro_rules! shim_sess_buf {
     ($($name:ident),+ $(,)?) => {$(
+        #[unsafe(no_mangle)]
         pub unsafe extern "C" fn $name(
             hSession: CK_SESSION_HANDLE,
             pData: CK_BYTE_PTR,
@@ -436,6 +433,7 @@ macro_rules! shim_sess_buf {
 /// (hSession, in_ptr, in_len, out_ptr, out_len_ptr) -> CK_RV
 macro_rules! shim_sess_in_outlen {
     ($($name:ident),+ $(,)?) => {$(
+        #[unsafe(no_mangle)]
         pub unsafe extern "C" fn $name(
             hSession: CK_SESSION_HANDLE,
             pIn: CK_BYTE_PTR,
@@ -453,6 +451,7 @@ macro_rules! shim_sess_in_outlen {
 /// (hSession, out_ptr, out_len_ptr) -> CK_RV
 macro_rules! shim_sess_outlen {
     ($($name:ident),+ $(,)?) => {$(
+        #[unsafe(no_mangle)]
         pub unsafe extern "C" fn $name(
             hSession: CK_SESSION_HANDLE,
             pOut: CK_BYTE_PTR,
@@ -467,6 +466,7 @@ macro_rules! shim_sess_outlen {
 /// (hSession, in_ptr, in_len, in2_ptr, in2_len) -> CK_RV
 macro_rules! shim_sess_buf_buf {
     ($($name:ident),+ $(,)?) => {$(
+        #[unsafe(no_mangle)]
         pub unsafe extern "C" fn $name(
             hSession: CK_SESSION_HANDLE,
             pA: CK_BYTE_PTR,
@@ -485,6 +485,7 @@ macro_rules! shim_sess_buf_buf {
 /// (hSession, CK_MECHANISM_PTR, hKey) -> CK_RV
 macro_rules! shim_mech_key {
     ($($name:ident),+ $(,)?) => {$(
+        #[unsafe(no_mangle)]
         pub unsafe extern "C" fn $name(
             hSession: CK_SESSION_HANDLE,
             pMechanism: CK_MECHANISM_PTR,
@@ -502,6 +503,7 @@ macro_rules! shim_mech_key {
 /// (message sign/verify family) → opaque pass-through.
 macro_rules! shim_msg_param_only {
     ($($name:ident),+ $(,)?) => {$(
+        #[unsafe(no_mangle)]
         pub unsafe extern "C" fn $name(
             hSession: CK_SESSION_HANDLE,
             pParameter: CK_VOID_PTR,
@@ -518,6 +520,7 @@ macro_rules! shim_msg_param_only {
 /// sign-message shape (param ignored by the engine).
 macro_rules! shim_msg_sign {
     ($($name:ident),+ $(,)?) => {$(
+        #[unsafe(no_mangle)]
         pub unsafe extern "C" fn $name(
             hSession: CK_SESSION_HANDLE,
             pParameter: CK_VOID_PTR,
@@ -541,6 +544,7 @@ macro_rules! shim_msg_sign {
 /// verify-message shape (param ignored by the engine).
 macro_rules! shim_msg_verify {
     ($($name:ident),+ $(,)?) => {$(
+        #[unsafe(no_mangle)]
         pub unsafe extern "C" fn $name(
             hSession: CK_SESSION_HANDLE,
             pParameter: CK_VOID_PTR,
@@ -559,15 +563,15 @@ macro_rules! shim_msg_verify {
     )+};
 }
 
-/// Guard for the AES-GCM message family parameter: the engine PARSES
-/// `pParameter` as wasm-layout CK_GCM_MESSAGE_PARAMS with embedded 32-bit
-/// pIv/pTag pointers — translatable only where layouts coincide (32-bit).
+/// Formerly bailed CKR_FUNCTION_FAILED on 64-bit because CK_GCM_MESSAGE_PARAMS
+/// was parsed as a wasm (32-bit) layout. parse_gcm_msg_params (read) and the
+/// pTag writeback in C_EncryptMessageNext/Final (native usize word 4) now both
+/// operate at native pointer width, so the AES-GCM message family works on
+/// 64-bit — this guard is a no-op (kept as a seam in case re-gating is needed).
 macro_rules! guard_gcm_msg_param {
-    ($p:expr) => {
-        if !$p.is_null() && cfg!(not(target_pointer_width = "32")) {
-            return rv(CKR_FUNCTION_FAILED); // documented H-1 residual
-        }
-    };
+    ($p:expr) => {{
+        let _ = &$p;
+    }};
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -880,7 +884,9 @@ pub unsafe extern "C" fn C_GetAttributeValue(
     if let Some(v) = &tmpl {
         if !pTemplate.is_null() {
             for i in 0..n as usize {
-                (*pTemplate.add(i)).ulValueLen = widen(v[i * 3 + 2]);
+                // v[..] is native-width usize already (usize::MAX == native
+                // CK_UNAVAILABLE_INFORMATION), so write it straight through.
+                (*pTemplate.add(i)).ulValueLen = v[i * 3 + 2] as CK_ULONG;
             }
         }
     }
@@ -1121,6 +1127,7 @@ pub unsafe extern "C" fn C_WaitForSlotEvent(
 // C_GetInterfaceList / C_GetInterface — defined below with the statics
 // (exported symbols).
 
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn C_LoginUser(
     hSession: CK_SESSION_HANDLE,
     userType: CK_USER_TYPE,
@@ -1136,6 +1143,7 @@ pub unsafe extern "C" fn C_LoginUser(
     rv(crate::ffi::C_LoginUser(h, ut, pPin, pl, pUsername, ul))
 }
 
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn C_SessionCancel(hSession: CK_SESSION_HANDLE, flags: CK_FLAGS) -> CK_RV {
     let h = narrow_or!(hSession, CKR_SESSION_HANDLE_INVALID);
     let fl = narrow_or!(flags, CKR_ARGUMENTS_BAD);
@@ -1144,6 +1152,7 @@ pub unsafe extern "C" fn C_SessionCancel(hSession: CK_SESSION_HANDLE, flags: CK_
 
 shim_mech_key!(C_MessageEncryptInit, C_MessageDecryptInit);
 
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn C_EncryptMessage(
     hSession: CK_SESSION_HANDLE,
     pParameter: CK_VOID_PTR,
@@ -1175,6 +1184,7 @@ pub unsafe extern "C" fn C_EncryptMessage(
     })
 }
 
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn C_EncryptMessageBegin(
     hSession: CK_SESSION_HANDLE,
     pParameter: CK_VOID_PTR,
@@ -1195,6 +1205,7 @@ pub unsafe extern "C" fn C_EncryptMessageBegin(
     ))
 }
 
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn C_EncryptMessageNext(
     hSession: CK_SESSION_HANDLE,
     pParameter: CK_VOID_PTR,
@@ -1316,6 +1327,7 @@ shim_msg_verify!(C_VerifyMessage, C_VerifyMessageNext);
 // Shims — PKCS#11 v3.2 additions (12 functions)
 // ─────────────────────────────────────────────────────────────────────────
 
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn C_EncapsulateKey(
     hSession: CK_SESSION_HANDLE,
     pMechanism: CK_MECHANISM_PTR,
@@ -1351,6 +1363,7 @@ pub unsafe extern "C" fn C_EncapsulateKey(
     code
 }
 
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn C_DecapsulateKey(
     hSession: CK_SESSION_HANDLE,
     pMechanism: CK_MECHANISM_PTR,
@@ -1403,6 +1416,7 @@ pub unsafe extern "C" fn C_VerifySignatureInit(
 shim_sess_buf!(C_VerifySignature, C_VerifySignatureUpdate);
 shim_session_only!(C_VerifySignatureFinal);
 
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn C_GetSessionValidationFlags(
     hSession: CK_SESSION_HANDLE,
     flagsType: CK_SESSION_VALIDATION_FLAGS_TYPE,
@@ -1418,6 +1432,7 @@ pub unsafe extern "C" fn C_GetSessionValidationFlags(
     rv(code)
 }
 
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn C_AsyncComplete(
     hSession: CK_SESSION_HANDLE,
     pFunctionName: CK_UTF8CHAR_PTR,
@@ -1428,6 +1443,7 @@ pub unsafe extern "C" fn C_AsyncComplete(
     rv(crate::ffi::C_AsyncComplete(h, pFunctionName, pResult as *mut u8))
 }
 
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn C_AsyncGetID(
     hSession: CK_SESSION_HANDLE,
     pFunctionName: CK_UTF8CHAR_PTR,
@@ -1442,6 +1458,7 @@ pub unsafe extern "C" fn C_AsyncGetID(
     rv(code)
 }
 
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn C_AsyncJoin(
     hSession: CK_SESSION_HANDLE,
     pFunctionName: CK_UTF8CHAR_PTR,
@@ -1455,6 +1472,7 @@ pub unsafe extern "C" fn C_AsyncJoin(
     rv(crate::ffi::C_AsyncJoin(h, pFunctionName, id, pData, dl))
 }
 
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn C_WrapKeyAuthenticated(
     hSession: CK_SESSION_HANDLE,
     pMechanism: CK_MECHANISM_PTR,
@@ -1484,6 +1502,7 @@ pub unsafe extern "C" fn C_WrapKeyAuthenticated(
     })
 }
 
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn C_UnwrapKeyAuthenticated(
     hSession: CK_SESSION_HANDLE,
     pMechanism: CK_MECHANISM_PTR,
@@ -2568,7 +2587,7 @@ mod tests {
     /// must refuse (CKR_FUNCTION_FAILED) instead of truncating into UB.
     #[cfg(target_pointer_width = "64")]
     #[test]
-    fn embedded_pointer_refused_on_64_bit() {
+    fn embedded_pointer_marshaled_on_64_bit() {
         let _guard = crate::native::test_lock::acquire();
         unsafe {
             crate::state::set_initialized(true);
@@ -2585,11 +2604,15 @@ mod tests {
                 pParameter: iv.as_mut_ptr() as CK_VOID_PTR,
                 ulParameterLen: iv.len() as CK_ULONG,
             };
+            // Native 64-bit re-plumb: a non-NULL mechanism parameter carrying a
+            // 64-bit stack pointer is now marshaled at native width (no longer
+            // refused or truncated), so the operation initialises successfully.
             assert_eq!(
                 C_DigestInit(session, &mut mech),
-                rv(CKR_FUNCTION_FAILED),
-                "stack pointer above 4 GiB must be refused, not truncated"
+                rv(CKR_OK),
+                "64-bit stack pointer in pParameter must be handled, not refused"
             );
+            C_SessionCancel(session, 0xFFFF_FFFF as CK_FLAGS); // clear digest op
             // NULL-parameter mechanisms translate exactly.
             mech.pParameter = std::ptr::null_mut();
             mech.ulParameterLen = 0;
