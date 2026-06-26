@@ -22,7 +22,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"          # …/pqctoday-hsm
 WASM_CRATE="$ROOT/wasm"
-HUB="$(cd "$ROOT/.." && pwd)/pqctoday-hub"          # sibling checkout
+HUB="${HUB:-$(cd "$ROOT/.." && pwd)/pqctoday-hub}"  # sibling checkout (override: HUB=… )
 WASM_BINDGEN_VERSION="0.2.117"                       # MUST match wasm/Cargo.toml
 
 # Hub staging targets (mirrors the engine layout: shim in src/, binary in public/).

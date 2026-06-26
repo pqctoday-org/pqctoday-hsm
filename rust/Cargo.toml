@@ -10,10 +10,17 @@ crate-type = ["cdylib", "rlib"]
 [features]
 # Vendor ACVP known-answer-test hook: lets C_Initialize seed a deterministic
 # ChaCha20 RNG via the CK_C_INITIALIZE_ARGS.pReserved field. This is a spec
-# violation (PKCS#11 §5.6 requires pReserved == NULL → CKR_ARGUMENTS_BAD), so
-# production/release builds MUST disable it with `--no-default-features`.
-# Enabled by default to keep the KAT/compliance harness working unchanged.
-default = ["acvp"]
+# violation (PKCS#11 v3.2 §5.6 requires pReserved == NULL → CKR_ARGUMENTS_BAD).
+#
+# OPT-IN, NOT default. Every SHIPPED artifact (the `pqctoday-kmip` server
+# binary, the in-browser wasm playground bundle, this crate's cdylib) builds
+# WITHOUT it and is therefore §5.6-conformant by default. The KAT / ACVP /
+# conformance harnesses that need deterministic RNG must opt in explicitly:
+#   cargo test --features acvp          # engine's own FIPS KAT tests
+#   cargo build --features acvp ...     # an authorized ACVP-lab submission
+# (Was `default = ["acvp"]`; flipped to opt-in per the 2026-06-21 compliance
+# audit — shipping a release build with this hook on is a §5.6 violation.)
+default = []
 acvp = []
 
 [dependencies]

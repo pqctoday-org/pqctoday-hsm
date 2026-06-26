@@ -24,23 +24,31 @@ rules:
     reason: "AES-256 default"
 "#;
 
-fn deps_for(store: Arc<dyn KeyStore>) -> Deps {
+fn deps_for(store: Arc<dyn KeyStore>, engine_session: u32) -> Deps {
     let ring = Arc::new(RingSink::new(64));
     let sink: Arc<dyn AuditSink> = ring;
     let engine = Engine::with_global_sink(sink.clone());
     engine.activate(load_from_str(POLICY, std::path::Path::new("<t>")).unwrap()).unwrap();
-    Deps::new(engine, store, sink, DepsConfig::default())
+    // S-2 hardening makes Create fail-closed without an engine session, so the
+    // parity test drives a real engine. The caller bootstraps the slot-0 token
+    // ONCE and shares the session across both backends — a second C_InitToken
+    // while a session is still open returns CKR_SESSION_EXISTS (0xB6).
+    Deps::new(engine, store, sink, DepsConfig::default()).with_engine_session(engine_session)
 }
 
 #[test]
 fn create_then_activate_then_sign_works_on_both_backends() {
+    use softhsmrustv3::native::session;
+    // One token / one session, reused for both store backends (see deps_for).
+    let engine_session = session::bootstrap_default_token(0, "so-pin", "user-pin", "store-parity")
+        .expect("bootstrap engine token for store-parity");
     for backend_name in ["memory", "sqlite"] {
         let store: Arc<dyn KeyStore> = match backend_name {
             "memory" => Arc::new(MemoryStore::new()),
             "sqlite" => Arc::new(SqliteStore::in_memory().unwrap()),
             _ => unreachable!(),
         };
-        let d = deps_for(store.clone());
+        let d = deps_for(store.clone(), engine_session);
 
         // Create a symmetric AES key.
         let resp = create(

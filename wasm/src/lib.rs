@@ -34,10 +34,11 @@ use pqctoday_kmip::auditlog::{AuditSink, RingSink};
 use pqctoday_kmip::codec::{decode_one, TtlvFrame, Value as Ttlv};
 use pqctoday_kmip::dispatcher::{dispatch, one_off_request};
 use pqctoday_kmip::kmip30::{
-    decode_request_message, encode_response_message, ActivateRequest, Attribute, CreateKeyPairRequest,
-    CreateRequest, DecapsulateRequest, DecryptRequest, DestroyRequest, EncapsulateRequest,
-    EncryptRequest, GetRequest, KmipAlgorithm, LocateRequest, ObjectType, QueryFunction,
-    QueryRequest, RequestPayload, ResponseBatchItem, ResponseHeader, ResponseMessage,
+    decode_request_message, encode_response_message, ActivateRequest, Attribute,
+    BatchErrorContinuationOption, CreateKeyPairRequest, CreateRequest, DecapsulateRequest,
+    DecryptRequest, DestroyRequest, EncapsulateRequest, EncryptRequest, GetRequest, KmipAlgorithm,
+    LocateRequest, ObjectType, QueryFunction, QueryRequest, RequestBatchItem, RequestHeader,
+    RequestMessage, RequestPayload, ResponseBatchItem, ResponseHeader, ResponseMessage,
     ResponsePayload, ResultStatus, RevocationReason, RevokeRequest, SignRequest,
     SignatureVerifyRequest, UsageMask, WireError,
 };
@@ -170,6 +171,118 @@ impl KmipPlayground {
             "resultReason": item.result_reason,
             "message": item.result_message,
             "summary": summary,
+            "responseWireHex": to_hex(&wire),
+            "responseWireLen": wire.len(),
+            "responseTree": frame_json_from_bytes(&wire),
+            "audit": delta,
+        })
+        .to_string()
+    }
+
+    /// High-level **batch** driver: build ONE KMIP 3.0 `Request Message` carrying
+    /// many operations and dispatch it through the identical decode → dispatch →
+    /// encode path `submit`/`run_op` use. This is a *real* on-the-wire batch (one
+    /// request, N `Batch Item`s), not N separate requests. `spec_json`:
+    ///
+    /// ```json
+    /// {
+    ///   "errorContinuation": "Stop" | "Continue" | "Undo",   // optional, default Stop
+    ///   "items": [
+    ///     {"op":"CreateKeyPair","intent":"sign"},
+    ///     {"op":"Activate","uid":"$IDPlaceholder"},
+    ///     {"op":"Sign","uid":"$IDPlaceholder","text":"hello"}
+    ///   ]
+    /// }
+    /// ```
+    ///
+    /// `$IDPlaceholder` in any `uid` resolves to the UID the previous
+    /// UID-producing item created (KMIP §6.4 ID Placeholder) — so Create →
+    /// Activate → Sign chains in a single round trip. `errorContinuation`
+    /// controls failure handling (§9.5): `Continue` runs every item, `Stop`
+    /// halts after the first failure, `Undo` halts AND rolls earlier successes
+    /// back (reported as `OperationUndone`).
+    ///
+    /// Returns `{ ok, errorContinuation, requested, returned, items[], audit,
+    /// responseWireHex, responseWireLen, responseTree }` where each `items[]`
+    /// entry mirrors a `run_op` result minus the wire (the wire is the one shared
+    /// Response Message).
+    #[wasm_bindgen]
+    pub fn run_batch(&self, spec_json: &str) -> String {
+        let spec: Json = match serde_json::from_str(spec_json) {
+            Ok(v) => v,
+            Err(e) => return error_json(&format!("invalid batch spec: {e}")),
+        };
+        // §9.5 Batch Error Continuation Option (absent ≡ Stop, applied downstream).
+        let cont = match spec.get("errorContinuation").and_then(|v| v.as_str()) {
+            Some("Continue") => Some(BatchErrorContinuationOption::Continue),
+            Some("Undo") => Some(BatchErrorContinuationOption::Undo),
+            Some("Stop") => Some(BatchErrorContinuationOption::Stop),
+            _ => None,
+        };
+        let items_json = match spec.get("items").and_then(|v| v.as_array()) {
+            Some(a) if !a.is_empty() => a,
+            _ => return error_json("batch spec needs a non-empty \"items\" array"),
+        };
+
+        let mut batch_items = Vec::with_capacity(items_json.len());
+        for it in items_json {
+            let op = it.get("op").and_then(|v| v.as_str()).unwrap_or("");
+            match build_payload(op, it) {
+                Ok(payload) => batch_items.push(RequestBatchItem {
+                    operation: payload.operation(),
+                    payload,
+                }),
+                Err(e) => return error_json(&e),
+            }
+        }
+
+        let requested = batch_items.len();
+        let request = RequestMessage {
+            header: RequestHeader {
+                batch_error_continuation_option: cont,
+                ..RequestHeader::v3()
+            },
+            batch_items,
+        };
+
+        let before = self.ring.len();
+        let response = dispatch(&self.deps, request);
+        let wire = encode_response_message(&response);
+
+        let items_out: Vec<Json> = response
+            .batch_items
+            .iter()
+            .map(|item| {
+                let status = match item.result_status {
+                    ResultStatus::Success => "Success",
+                    ResultStatus::OperationFailed => "OperationFailed",
+                    ResultStatus::OperationPending => "OperationPending",
+                    ResultStatus::OperationUndone => "OperationUndone",
+                };
+                json!({
+                    "ok": item.result_status == ResultStatus::Success,
+                    "operation": item.operation.map(|o| format!("{o:?}")),
+                    "status": status,
+                    "resultReason": item.result_reason,
+                    "message": item.result_message,
+                    "summary": item.payload.as_ref().map(summarize).unwrap_or(Json::Null),
+                })
+            })
+            .collect();
+
+        let snap = self.ring.snapshot();
+        let delta: Vec<_> = snap.into_iter().skip(before).collect();
+        let all_ok = response
+            .batch_items
+            .iter()
+            .all(|i| i.result_status == ResultStatus::Success);
+
+        json!({
+            "ok": all_ok,
+            "errorContinuation": cont.map(|c| format!("{c:?}")).unwrap_or_else(|| "Stop".into()),
+            "requested": requested,
+            "returned": response.batch_items.len(),
+            "items": items_out,
             "responseWireHex": to_hex(&wire),
             "responseWireLen": wire.len(),
             "responseTree": frame_json_from_bytes(&wire),

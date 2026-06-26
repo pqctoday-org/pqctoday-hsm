@@ -173,6 +173,8 @@ pub fn decapsulate(
     Ok(DecapsulateResponse { uid: ss_uid })
 }
 
+/// Test-only stand-in for the engine-less unit tests; production fails closed.
+#[cfg(test)]
 fn placeholder_bytes(uid: &str, input: &[u8], domain: &[u8], len: usize) -> Vec<u8> {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();

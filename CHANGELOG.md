@@ -8,6 +8,47 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — three new crypto-agility policies: auto-migrate-on-use, pkcs11-mechanism-lockdown, bsi-tr-02102 (2026-06-26)
+
+Three bundled policy presets for the CACP policy engine:
+
+- **`auto-migrate-on-use`** — transparently upgrades a classical key/algorithm to
+  its PQC successor the first time it is used.
+- **`pkcs11-mechanism-lockdown`** — restricts the PKCS#11 mechanism surface to an
+  explicit allow-list (deny-by-default).
+- **`bsi-tr-02102`** — a preset aligned to the BSI TR-02102 cryptographic
+  recommendations.
+
+### Added — in-browser KMIP batch entry point (`run_batch`) (2026-06-26)
+
+The WASM bundle gains `run_batch` — a real on-the-wire KMIP batch entry point, so
+the in-browser playground can submit a batched `RequestMessage` and decode the
+batched reply through the same codec the server uses.
+
+### Added — fail-closed hardening of the PKCS#11 / KMIP edges; ACVP hook opt-in (2026-06-21)
+
+The PKCS#11 and KMIP boundaries now **fail closed** (reject on any ambiguous or
+unsupported input rather than degrading silently), the ACVP test hook is now
+**opt-in** instead of always-compiled, and dead code was removed.
+
+### Added — NIST ACVP KAT coverage for HashML-DSA / HashSLH-DSA pre-hash variants; C++↔Rust dual-engine cross-check (2026-06-21)
+
+- NIST ACVP known-answer-test vectors now cover the added **HashML-DSA** and
+  **HashSLH-DSA** pre-hash signature variants.
+- The C++↔Rust dual-engine cross-check (both engines must produce identical
+  output) was extended to **ML-DSA, SLH-DSA, and ML-KEM**.
+
+### Added — KMIP server: RESTful admin API v1 + OpenAPI 3.1, Prometheus metrics, audit→SIEM streaming, self-minted admin certs (2026-06-19)
+
+The `pqctoday-kmip` server gained its operational control/observability surface:
+
+- **A1+A2 — RESTful admin API v1 + OpenAPI 3.1 spec** for the cryptopolicy-manager.
+- **D1 — Prometheus `/metrics`** scrape endpoint on **:9095**.
+- **D2 — audit → SIEM**: live audit streaming via **SSE**, **syslog (UDP)**, and
+  **OTLP/HTTP** exporters.
+- **C0 — `--init-certs`**: the server now mints its own admin mTLS certificates on
+  first start, so no externally-supplied cert material is needed.
+
 ### Fixed — C++ ChaCha20-Poly1305 full AEAD round-trip + spec CKA_VALUE_LEN (2026-06-15)
 
 `CKM_CHACHA20_POLY1305` was bolted onto the GCM AEAD path with several GCM-only /

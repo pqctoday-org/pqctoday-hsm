@@ -14,8 +14,8 @@
 //! - **Plane 3** — calls `C_GetAttributeValue` (PKCS#11 v3.2 §C.5.9) to
 //!   read `CKA_VALUE` for symmetric / `CKA_PUBLIC_KEY_INFO` for public
 //!   keys; private-key material is sensitive (`CKA_SENSITIVE = true`)
-//!   and never extracted. Phase 7 wires the real call; v0.1 returns a
-//!   deterministic placeholder so the response builder is exercised.
+//!   and never extracted. The handler performs the real engine read via
+//!   `softhsmrustv3::native::get_attribute(CKA_VALUE)`.
 
 use std::collections::HashMap;
 use time::OffsetDateTime;

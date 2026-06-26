@@ -22,8 +22,10 @@
 //!   legacy signatures is required even after key rotation).
 //! - **Plane 3** — would call `C_VerifyInit` (PKCS#11 v3.2 §C.6.7) +
 //!   `C_Verify` (§C.6.8). Signatures verified against
-//!   `rust/src/ffi.rs::{C_VerifyInit, C_Verify}`. v0.1 placeholder
-//!   re-runs the SHA-256 stamp from `sign.rs` to determine validity.
+//!   `rust/src/ffi.rs::{C_VerifyInit, C_Verify}`. The handler drives the real
+//!   engine (`softhsmrustv3::native::verify_pqc` / `verify_with_pss_salt`);
+//!   with no engine session it fails closed — a SHA-256 stand-in survives only
+//!   under `#[cfg(test)]` for the engine-less unit tests.
 
 use std::collections::HashMap;
 use time::OffsetDateTime;
@@ -265,6 +267,8 @@ pub fn signature_verify(
     Ok(SignatureVerifyResponse { uid: req.uid, validity })
 }
 
+/// Test-only stand-in for the engine-less unit tests; production fails closed.
+#[cfg(test)]
 fn placeholder_signature(uid: &str, data: &[u8]) -> Vec<u8> {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();

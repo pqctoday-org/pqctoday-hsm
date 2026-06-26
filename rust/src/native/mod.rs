@@ -20,9 +20,9 @@
 //!
 //! ## Status
 //!
-//! **Skeleton** (this commit). All functions are `unimplemented!()` stubs.
-//! Implementations land in the follow-up commits enumerated in §9 of the
-//! scoping doc — one sub-module per commit, each with focused tests.
+//! **Implemented.** Each sub-module (keygen / sign / encrypt / object /
+//! session / parity) drives the real PKCS#11 engine and is covered by
+//! focused tests — no `unimplemented!()` stubs remain on this surface.
 //!
 //! ## Architectural relationship to `ffi`
 //!
@@ -60,6 +60,12 @@ pub type CkRv = u32;
 
 #[cfg(test)]
 mod parity;
+
+#[cfg(test)]
+mod prehash_kat;
+
+#[cfg(test)]
+mod prehash_kat_slh;
 
 #[cfg(test)]
 pub(crate) mod test_lock {

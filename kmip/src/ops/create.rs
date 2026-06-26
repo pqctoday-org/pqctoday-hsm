@@ -29,7 +29,7 @@ use crate::policy::{Decision, PolicyRequest};
 use crate::store::ObjectRecord;
 
 use super::deps::Deps;
-use super::helpers::{emit_pkcs11, emit_request, emit_success, fail_err};
+use super::helpers::{emit_request, emit_success, fail_err};
 
 pub fn create(deps: &Deps, mut req: CreateRequest, correlation_id: &str) -> Result<CreateResponse> {
     let started = OffsetDateTime::now_utc();
@@ -258,9 +258,23 @@ pub(crate) fn engine_generate_symmetric(
             }
         }
     } else {
-        // No engine session — nothing was generated (unit-test store
-        // record only); audit names the soft path honestly.
-        emit_pkcs11(deps, correlation_id, "soft::placeholder_generate_key", Some(mech), 0, "CKR_OK");
+        // S-2 hardening: NO engine session ⇒ no key material was generated.
+        // Production (any non-test build, incl. the server bin and the wasm
+        // bundle) MUST fail rather than persist a keyless phantom record and
+        // return success. The store-only soft path survives only for the
+        // crate's own unit tests, which don't bootstrap an engine. Matches the
+        // fail-closed guard on Sign/Decrypt/Encapsulate.
+        #[cfg(not(test))]
+        {
+            return Err(KmipError::failed(
+                ResultReason::CryptographicFailure,
+                "no engine session — cannot generate key material",
+            ));
+        }
+        #[cfg(test)]
+        {
+            super::helpers::emit_pkcs11(deps, correlation_id, "soft::placeholder_generate_key", Some(mech), 0, "CKR_OK");
+        }
     }
     Ok(digest_value)
 }

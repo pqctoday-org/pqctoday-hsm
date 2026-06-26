@@ -20,9 +20,10 @@
 //!   `Active` state may sign — see `docs/IMPLEMENTATION_PLAN.md` §3.4).
 //! - **Plane 3** — would call `C_SignInit` (PKCS#11 v3.2 §C.6.5) and
 //!   `C_Sign` (§C.6.6). Signatures verified against
-//!   `rust/src/ffi.rs::{C_SignInit, C_Sign}`. v0.1 produces a deterministic
-//!   placeholder signature so the response builder can be exercised;
-//!   Phase 7 wires the real bridge call.
+//!   `rust/src/ffi.rs::{C_SignInit, C_Sign}`. The handler drives the real
+//!   engine (`softhsmrustv3::native::sign_pqc` / `sign_with_pss_salt`); with
+//!   no engine session it fails closed — a SHA-256 stand-in survives only
+//!   under `#[cfg(test)]` for the engine-less unit tests.
 
 use std::collections::HashMap;
 use time::OffsetDateTime;
@@ -389,6 +390,10 @@ fn rekey_and_sign(
     )
 }
 
+/// Test-only stand-in used by the engine-less unit tests below. Production
+/// builds fail closed (see the `#[cfg(not(test))]` guard in `sign`), so this
+/// never compiles into a shipped artifact.
+#[cfg(test)]
 fn placeholder_signature(uid: &str, data: &[u8]) -> Vec<u8> {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
@@ -411,43 +416,6 @@ fn fail_err(deps: &Deps, correlation_id: &str, op: &str, err: KmipError) -> Kmip
         },
     ));
     err
-}
-
-/// Mirror of `create_key_pair::canonical_name` — duplicated here to keep
-/// the op file self-contained (each op is ≤ ~250 LOC per the plan).
-/// A future refactor can lift this into `kmip30::algos`.
-fn canonical_name(a: crate::kmip30::KmipAlgorithm) -> String {
-    use crate::kmip30::KmipAlgorithm::*;
-    match a {
-        Aes => "AES",
-        Rsa => "RSA",
-        Ecdsa => "ECDSA",
-        HmacSha256 => "HMAC-SHA-256",
-        HmacSha384 => "HMAC-SHA-384",
-        HmacSha512 => "HMAC-SHA-512",
-        Ecdh => "ECDH",
-        ChaCha20 => "ChaCha20",
-        ChaCha20Poly1305 => "ChaCha20-Poly1305",
-        MlKem512 => "ML-KEM-512",
-        MlKem768 => "ML-KEM-768",
-        MlKem1024 => "ML-KEM-1024",
-        MlDsa44 => "ML-DSA-44",
-        MlDsa65 => "ML-DSA-65",
-        MlDsa87 => "ML-DSA-87",
-        SlhDsaSha2_128s => "SLH-DSA-SHA2-128s",
-        SlhDsaSha2_128f => "SLH-DSA-SHA2-128f",
-        SlhDsaSha2_192s => "SLH-DSA-SHA2-192s",
-        SlhDsaSha2_192f => "SLH-DSA-SHA2-192f",
-        SlhDsaSha2_256s => "SLH-DSA-SHA2-256s",
-        SlhDsaSha2_256f => "SLH-DSA-SHA2-256f",
-        SlhDsaShake128s => "SLH-DSA-SHAKE-128s",
-        SlhDsaShake128f => "SLH-DSA-SHAKE-128f",
-        SlhDsaShake192s => "SLH-DSA-SHAKE-192s",
-        SlhDsaShake192f => "SLH-DSA-SHAKE-192f",
-        SlhDsaShake256s => "SLH-DSA-SHAKE-256s",
-        SlhDsaShake256f => "SLH-DSA-SHAKE-256f",
-    }
-    .into()
 }
 
 #[cfg(test)]
