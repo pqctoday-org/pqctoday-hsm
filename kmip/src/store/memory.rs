@@ -58,9 +58,18 @@ impl KeyStore for MemoryStore {
 
     fn update(&self, record: ObjectRecord) -> Result<()> {
         let mut map = self.inner.write().expect("store poisoned");
-        if !map.contains_key(&record.uid) {
-            return Err(KmipError::not_found(&record.uid));
-        }
+        // S-10: enforce the lifecycle FSM on the default (and wasm) backend too,
+        // at parity with SqliteStore — illegal state transitions (e.g.
+        // Destroyed→Active) are rejected, not silently accepted. Initial /
+        // original-creation dates are immutable across updates (KMIP §3).
+        let (from_state, initial_date, original_creation_date) = match map.get(&record.uid) {
+            Some(e) => (e.state, e.initial_date, e.original_creation_date),
+            None => return Err(KmipError::not_found(&record.uid)),
+        };
+        super::lifecycle::enforce_transition(from_state, record.state)?;
+        let mut record = record;
+        record.initial_date = initial_date;
+        record.original_creation_date = original_creation_date;
         map.insert(record.uid.clone(), record);
         Ok(())
     }

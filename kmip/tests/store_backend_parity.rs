@@ -105,22 +105,15 @@ fn lifecycle_fsm_enforced_at_store_layer_on_both_backends() {
 }).unwrap();
 
         // Try Active → PreActive (illegal per §3.4 FSM).
-        // MemoryStore doesn't enforce yet — only SqliteStore does. So the
-        // assertion differs by backend; document the gap.
+        // S-10: both backends now enforce the lifecycle FSM at the store layer,
+        // so an illegal transition must be rejected regardless of backend.
         let mut bad = store.get("u").unwrap().unwrap();
         bad.state = State::PreActive;
         let result = store.update(bad);
-        match backend_name {
-            "sqlite" => assert!(result.is_err(), "sqlite must reject illegal transition"),
-            "memory" => {
-                // MemoryStore presently accepts (handler layer enforces).
-                // Documented gap — Phase 6 follow-up can lift the FSM
-                // check into the trait default. Leaving as-is so the
-                // backend-parity matrix is honest.
-                assert!(result.is_ok(), "memory backend accepts (handler layer enforces)");
-            }
-            _ => unreachable!(),
-        }
+        assert!(
+            result.is_err(),
+            "{backend_name} backend must reject illegal transition at store layer"
+        );
     }
 }
 

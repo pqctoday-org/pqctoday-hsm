@@ -150,6 +150,7 @@ async fn handle_conn(
     deps: Arc<Deps>,
 ) -> Result<(), ServerError> {
     let mut tls_stream = acceptor.accept(stream).await.map_err(ServerError::Io)?;
+    crate::metrics::record_tls_handshake("kmip");
     // K14 mTLS — when the ServerConfig was built by [`tls_mtls`], the
     // handshake above already verified the client certificate chain
     // against the configured CA. Map the leaf's subject CN to the KMIP
@@ -173,10 +174,17 @@ async fn handle_conn(
             // header (when present) BEFORE dispatch so we can compare
             // it against the encoded response below.
             let max_resp_size = request.header.maximum_response_size.filter(|&n| n > 0);
-            (
-                dispatch_with_transport_identity(&deps, request, transport_identity),
-                max_resp_size,
-            )
+            // S-8 — the dispatch is synchronous and does real crypto (ML-DSA /
+            // ML-KEM, plus the engine's global mutex). Run it on the blocking
+            // pool so a slow op can't stall the tokio reactor and starve other
+            // connections.
+            let deps = Arc::clone(&deps);
+            let response = tokio::task::spawn_blocking(move || {
+                dispatch_with_transport_identity(&deps, request, transport_identity)
+            })
+            .await
+            .map_err(|e| ServerError::Io(std::io::Error::other(format!("dispatch task failed: {e}"))))?;
+            (response, max_resp_size)
         }
         // KMIP 3.0 §6.4: a wire-decode failure (unknown tag, unknown enum
         // value, malformed length, etc.) must produce a structured
@@ -260,6 +268,20 @@ fn wire_error_response(err: &WireError) -> crate::kmip30::ResponseMessage {
     }
 }
 
+/// S-4 — upper bound on a single inbound TTLV frame. The 32-bit length prefix is
+/// attacker-controlled and read BEFORE any TTLV validation, so without a cap a
+/// single 8-byte header advertising ~4 GiB triggers a ~4 GiB pre-auth
+/// allocation. 16 MiB comfortably covers real KMIP requests (key material /
+/// certs are KB-scale) while bounding the amplification.
+const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
+
+fn frame_too_large(length: usize) -> ServerError {
+    ServerError::Io(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        format!("KMIP frame length {length} exceeds {MAX_FRAME_BYTES}-byte cap"),
+    ))
+}
+
 /// Read exactly one TTLV frame from `stream`. KMIP §9.6 frame layout:
 ///   bytes 0-2  : tag (3 BE bytes)
 ///   byte 3     : item type
@@ -272,6 +294,9 @@ where
     let mut header = [0u8; 8];
     stream.read_exact(&mut header).await?;
     let length = u32::from_be_bytes([header[4], header[5], header[6], header[7]]) as usize;
+    if length > MAX_FRAME_BYTES {
+        return Err(frame_too_large(length));
+    }
     let padded = (length + 7) & !7;
     let mut value = vec![0u8; padded];
     if padded > 0 {
@@ -291,6 +316,9 @@ pub fn read_one_frame_sync<R: Read>(reader: &mut R) -> Result<Vec<u8>, ServerErr
     let mut header = [0u8; 8];
     reader.read_exact(&mut header)?;
     let length = u32::from_be_bytes([header[4], header[5], header[6], header[7]]) as usize;
+    if length > MAX_FRAME_BYTES {
+        return Err(frame_too_large(length));
+    }
     let padded = (length + 7) & !7;
     let mut value = vec![0u8; padded];
     if padded > 0 {

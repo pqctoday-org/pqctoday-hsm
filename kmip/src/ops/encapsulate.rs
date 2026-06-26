@@ -109,6 +109,7 @@ pub fn encapsulate(
     p_req.state = Some("Active");
     p_req.current_object_algorithm = Some(&stored_algo);
     p_req.target_uid = Some(&req.uid);
+    p_req.object_activation_date = obj.activation_date; // F-3 — max_key_age_days
     match deps.engine.evaluate(&p_req) {
         crate::policy::Decision::Allow { .. } => {}
         crate::policy::Decision::Deny { human, .. } => {
@@ -194,20 +195,30 @@ pub fn encapsulate(
             }
         }
         None => {
-            // Unit-test fallback (no engine session): deterministic
-            // placeholder bytes so the store/UID plumbing can be exercised.
-            emit_pkcs11(
-                deps,
-                correlation_id,
-                "soft::placeholder_encapsulate",
-                Some(mech),
-                0,
-                "CKR_OK",
-            );
-            (
-                placeholder_bytes(&req.uid, coins.as_deref().unwrap_or_default(), b"encap", 32),
-                placeholder_bytes(&req.uid, coins.as_deref().unwrap_or_default(), b"ss", 32),
-            )
+            // S-2 hardening: no engine session ⇒ fail rather than emit fake
+            // ciphertext/shared-secret. Placeholder kept only for the crate tests.
+            #[cfg(not(test))]
+            {
+                return Err(crate::error::KmipError::failed(
+                    crate::error::ResultReason::CryptographicFailure,
+                    "no engine session — cannot encapsulate without key material",
+                ));
+            }
+            #[cfg(test)]
+            {
+                emit_pkcs11(
+                    deps,
+                    correlation_id,
+                    "soft::placeholder_encapsulate",
+                    Some(mech),
+                    0,
+                    "CKR_OK",
+                );
+                (
+                    placeholder_bytes(&req.uid, coins.as_deref().unwrap_or_default(), b"encap", 32),
+                    placeholder_bytes(&req.uid, coins.as_deref().unwrap_or_default(), b"ss", 32),
+                )
+            }
         }
     };
 

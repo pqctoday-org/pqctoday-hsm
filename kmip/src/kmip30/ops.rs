@@ -145,6 +145,51 @@ impl Operation {
         self as u32
     }
 
+    /// Short stable label for Prometheus `operation` dimensions.
+    pub const fn metric_label(self) -> &'static str {
+        match self {
+            Self::Create => "Create",
+            Self::CreateKeyPair => "CreateKeyPair",
+            Self::Register => "Register",
+            Self::Get => "Get",
+            Self::GetAttributes => "GetAttributes",
+            Self::GetAttributeList => "GetAttributeList",
+            Self::AddAttribute => "AddAttribute",
+            Self::ModifyAttribute => "ModifyAttribute",
+            Self::DeleteAttribute => "DeleteAttribute",
+            Self::SetAttribute => "SetAttribute",
+            Self::AdjustAttribute => "AdjustAttribute",
+            Self::Locate => "Locate",
+            Self::Activate => "Activate",
+            Self::Revoke => "Revoke",
+            Self::Destroy => "Destroy",
+            Self::Archive => "Archive",
+            Self::Recover => "Recover",
+            Self::Query => "Query",
+            Self::DiscoverVersions => "DiscoverVersions",
+            Self::Encrypt => "Encrypt",
+            Self::Decrypt => "Decrypt",
+            Self::Sign => "Sign",
+            Self::SignatureVerify => "SignatureVerify",
+            Self::MAC => "MAC",
+            Self::MACVerify => "MACVerify",
+            Self::Hash => "Hash",
+            Self::RNGRetrieve => "RNGRetrieve",
+            Self::RNGSeed => "RNGSeed",
+            Self::Import => "Import",
+            Self::Export => "Export",
+            Self::Encapsulate => "Encapsulate",
+            Self::Decapsulate => "Decapsulate",
+            Self::ReKey => "ReKey",
+            Self::ReCertify => "ReCertify",
+            Self::Certify => "Certify",
+            Self::Validate => "Validate",
+            Self::Ping => "Ping",
+            Self::Check => "Check",
+            _ => "Other",
+        }
+    }
+
     pub const fn from_wire_value(v: u32) -> Option<Self> {
         match v {
             0x01 => Some(Self::Create),
@@ -1242,7 +1287,7 @@ pub struct HashResponse {
 /// (PaddingMethod / MaskGenerator / MaskGeneratorHashingAlgorithm /
 /// PSource). The spec defines ~30 more sub-fields; the rest are
 /// additive when an op needs them.
-#[derive(Clone, Debug, PartialEq, Default)]
+#[derive(Clone, Debug, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct CryptographicParameters {
     /// Wire tag `Hashing Algorithm` (0x420038) — Enumeration.
     pub hashing_algorithm: Option<HashingAlgorithm>,
@@ -1307,7 +1352,7 @@ pub struct CryptographicParameters {
 /// spec extract (`enums.Hashing Algorithm`). SHA-2 family is what the
 /// OASIS corpus tests; SHA-1 is here for completeness even though it's
 /// deprecated.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum HashingAlgorithm {
     Md2     = 0x01,
     Md4     = 0x02,

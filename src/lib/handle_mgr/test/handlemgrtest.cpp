@@ -49,9 +49,9 @@
 #include "MutexFactory.h"
 
 #ifdef HAVE_CXX11
-std::unique_ptr<MutexFactory> MutexFactory::instance(nullptr);
+LeakingPtr<MutexFactory> MutexFactory::instance(nullptr);
 #else
-std::auto_ptr<MutexFactory> MutexFactory::instance(NULL);
+LeakingPtr<MutexFactory> MutexFactory::instance(NULL);
 #endif
 
 class MyProgressListener : public CppUnit::TextTestProgressListener

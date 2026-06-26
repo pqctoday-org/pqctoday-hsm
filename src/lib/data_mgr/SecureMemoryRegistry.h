@@ -39,6 +39,7 @@
 #include <map>
 #include <memory>
 #include "MutexFactory.h"
+#include "LeakingPtr.h"
 
 class SecureMemoryRegistry
 {
@@ -58,11 +59,8 @@ public:
 	void wipe();
 
 private:
-#ifdef HAVE_CXX11
-	static std::unique_ptr<SecureMemoryRegistry> instance;
-#else
-	static std::auto_ptr<SecureMemoryRegistry> instance;
-#endif
+	// Leaked at process exit — see LeakingPtr.h
+	static LeakingPtr<SecureMemoryRegistry> instance;
 
 	std::map<void*, size_t> registry;
 

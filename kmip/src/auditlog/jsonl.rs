@@ -11,6 +11,7 @@
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use super::event::AuditEvent;
@@ -19,6 +20,10 @@ use super::sink::AuditSink;
 pub struct JsonlSink {
     path: PathBuf,
     file: Mutex<File>,
+    /// S-9 — count of events that failed to DURABLY write (serialise / I/O /
+    /// fsync error). Previously these were only `tracing::error!`-logged and
+    /// silently lost; surfaced via `write_errors()` so the loss is observable.
+    write_errors: AtomicU64,
 }
 
 impl JsonlSink {
@@ -32,7 +37,13 @@ impl JsonlSink {
         Ok(Self {
             path,
             file: Mutex::new(file),
+            write_errors: AtomicU64::new(0),
         })
+    }
+
+    /// S-9 — number of audit events that failed to durably persist.
+    pub fn write_errors(&self) -> u64 {
+        self.write_errors.load(Ordering::Relaxed)
     }
 
     /// Underlying file path. Hub UI / operators reference this when
@@ -48,6 +59,7 @@ impl AuditSink for JsonlSink {
             Ok(s) => s,
             Err(e) => {
                 tracing::error!(target: "audit", "serialise failed: {e}");
+                self.write_errors.fetch_add(1, Ordering::Relaxed);
                 return;
             }
         };
@@ -55,11 +67,17 @@ impl AuditSink for JsonlSink {
             Ok(f) => f,
             Err(_) => {
                 tracing::error!(target: "audit", "jsonl sink mutex poisoned");
+                self.write_errors.fetch_add(1, Ordering::Relaxed);
                 return;
             }
         };
-        if let Err(e) = writeln!(file, "{line}") {
-            tracing::error!(target: "audit", "jsonl write failed: {e}");
+        // S-9 — write AND fsync. A "durable forensic record" that is never
+        // synced is lost on a crash / power-cut; per-event `sync_data` is the
+        // safe default for an audit sink (low volume; durability is the point).
+        let r = writeln!(file, "{line}").and_then(|()| file.sync_data());
+        if let Err(e) = r {
+            tracing::error!(target: "audit", "jsonl durable-write failed: {e}");
+            self.write_errors.fetch_add(1, Ordering::Relaxed);
         }
     }
 }

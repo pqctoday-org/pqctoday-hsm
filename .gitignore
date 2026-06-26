@@ -64,3 +64,20 @@ rust/pkg_bundler_new/
 rust/pkg_bundler_p521/
 rust/pkg_bundler_v3/
 rust/pkg_nomod/
+
+# Generated wasm-bindgen output for the kmip wasm crate — produced by
+# scripts/build-kmip-wasm.sh; the app consumes the copies under the hub repo.
+wasm/pkg_bundler/
+wasm/pkg_node/
+wasm/target/
+
+# Python package build artifacts
+*.egg-info/
+__pycache__/
+*.pyc
+dist/
+.venv/
+
+# --- mlxpqc (Metal PQC research) ---
+# Apple corecrypto: license forbids redistribution — NEVER commit/push
+/arm/

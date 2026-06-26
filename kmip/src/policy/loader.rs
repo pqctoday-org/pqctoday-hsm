@@ -82,6 +82,25 @@ pub fn load_from_str(yaml: &str, display_path: &Path) -> Result<LoadedPolicy, Lo
         });
     }
 
+    // S-6 — fail CLOSED on unknown rule fields. `Rule` is an internally-tagged
+    // enum, so serde silently DROPS a typo'd field (`algoritms:` → an empty
+    // `algorithms`), turning a deny rule into a no-op — the policy fails OPEN.
+    // serde can't `deny_unknown_fields` on internally-tagged enums, so we detect
+    // drops by round-tripping each rule: any raw key the typed rule does NOT
+    // serialize back is unknown → reject the whole policy.
+    if let Some(unknown) = first_unknown_rule_field(yaml) {
+        return Err(LoaderError::Parse {
+            path: display_path.to_path_buf(),
+            line: 0,
+            col: 0,
+            msg: format!(
+                "rule #{}: unknown field {:?} — a typo'd field is silently dropped \
+                 and would disable the rule (policy rejected to fail closed)",
+                unknown.0, unknown.1
+            ),
+        });
+    }
+
     let warnings = check_rules(&policy.rules);
 
     Ok(LoadedPolicy {
@@ -89,6 +108,40 @@ pub fn load_from_str(yaml: &str, display_path: &Path) -> Result<LoadedPolicy, Lo
         source: yaml.to_string(),
         warnings,
     })
+}
+
+/// S-6 helper — returns `(rule_index_1_based, field_name)` of the first rule key
+/// that the typed [`Rule`] does not round-trip back (i.e. an unknown/typo'd
+/// field serde dropped), or `None` if every rule field is recognised.
+fn first_unknown_rule_field(yaml: &str) -> Option<(usize, String)> {
+    // Union of every field name used by any `Rule` variant (policy/rule.rs),
+    // plus the `type` tag. A rule key outside this set is a field serde would
+    // silently drop. A union (rather than per-`type` precision) keeps this
+    // maintenance-light while still catching every misspelling — the fail-open
+    // footgun. NOTE: keep in sync when a new rule field is added to rule.rs.
+    const KNOWN: &[&str] = &[
+        "type", "after", "algorithm", "algorithm_class", "algorithms",
+        "allowed_block_cipher_modes", "allowed_padding_methods", "allowed_states",
+        "attribute_name", "block_cipher_mode", "composite_oid", "days",
+        "default_algorithm", "deterministic", "effective_from", "effective_until",
+        "exception_custom_attribute", "flags", "from", "hashing_algorithm",
+        "hashing_algorithms", "mac_algorithms", "mask_generator", "mechanisms",
+        "min_bits", "op", "ops", "ops_affected", "padding_method", "primary",
+        "profile", "reason", "require_deterministic", "salt_length", "secondary",
+        "tag_length", "to", "triggered_by_custom_attribute",
+    ];
+    let top: serde_yaml::Value = serde_yaml::from_str(yaml).ok()?;
+    let rules = top.get("rules")?.as_sequence()?;
+    for (i, raw) in rules.iter().enumerate() {
+        if let Some(map) = raw.as_mapping() {
+            for k in map.keys().filter_map(|k| k.as_str()) {
+                if !KNOWN.contains(&k) {
+                    return Some((i + 1, k.to_string()));
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Read `path` from disk and delegate to [`load_from_str`].
@@ -114,7 +167,9 @@ fn check_rules(rules: &[Rule]) -> Vec<String> {
         let idx = i + 1;
         match rule {
             Rule::MaxKeyAgeDays { .. } => warnings.push(format!(
-                "rule {idx}: max_key_age_days is a Phase-4.5 stub — needs Phase 6 store. Rule will never fire."
+                "rule {idx}: max_key_age_days fires only for ops that target an \
+                 activated key (the dispatcher supplies its Activation Date); \
+                 Create and never-activated objects are not aged out."
             )),
             Rule::ComplianceProfileGate { .. } => warnings.push(format!(
                 "rule {idx}: compliance_profile_gate is documentational only; \
@@ -129,6 +184,41 @@ fn check_rules(rules: &[Rule]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// S-6 — every shipped policy must still load (the unknown-field guard must
+    /// not false-positive on a canonical rule field).
+    #[test]
+    fn all_shipped_policies_load() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("policies");
+        for entry in std::fs::read_dir(&dir).expect("policies/ dir") {
+            let p = entry.unwrap().path();
+            if p.extension().and_then(|e| e.to_str()) == Some("yaml") {
+                let yaml = std::fs::read_to_string(&p).unwrap();
+                load_from_str(&yaml, &p).unwrap_or_else(|e| panic!("{} failed to load: {e}", p.display()));
+            }
+        }
+    }
+
+    /// S-6 — an unknown/typo'd rule field is rejected (fails closed) rather than
+    /// silently dropped into a no-op rule. (Required-field typos like
+    /// `algoritms` already fail via serde's missing-field error; this covers the
+    /// dangerous case — an EXTRA field that serde would silently ignore.)
+    #[test]
+    fn unknown_rule_field_is_rejected() {
+        let yaml = r#"
+schema_version: 1
+metadata: { name: t, description: d, authority: a, effective: "always" }
+rules:
+  - type: algorithm_denylist
+    ops: [Sign]
+    algorithms: [RSA]
+    reason: deny RSA
+    bogus_field: oops
+"#;
+        assert_eq!(first_unknown_rule_field(yaml), Some((1, "bogus_field".to_string())));
+        let err = load_from_str(yaml, std::path::Path::new("<t>")).unwrap_err();
+        assert!(err.to_string().contains("unknown field"), "got: {err}");
+    }
 
     #[test]
     fn parses_minimal_policy() {

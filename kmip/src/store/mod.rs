@@ -14,9 +14,13 @@
 
 pub mod lifecycle;
 pub mod memory;
+// Durable SQLite backend — `native` only (bundled SQLite C does not
+// cross-compile to wasm32; the wasm core uses `MemoryStore`).
+#[cfg(feature = "native")]
 pub mod sqlite;
 pub mod traits;
 
 pub use memory::MemoryStore;
+#[cfg(feature = "native")]
 pub use sqlite::SqliteStore;
 pub use traits::{KeyStore, ObjectRecord, Uid};

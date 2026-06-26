@@ -29,17 +29,46 @@ path = "bin/pqctoday-kmip-compliance.rs"
 name = "extract-kmip-spec"
 path = "tools/extract_kmip_spec.rs"
 
+[features]
+# `native` = the full server surface. Everything gated here either does NOT
+# compile to `wasm32-unknown-unknown` — the TLS transport (tokio + rustls),
+# the bundled-SQLite durable store (rusqlite), the rcgen/aws_lc_rs PQC CA
+# issuance path (Certify/Re-certify), the ring-backed certificate-chain
+# Validate, and the async OTLP/SSE audit legs — or is only needed by the
+# server binaries (Prometheus `/metrics`, the OASIS spec-extractor's HTML
+# scraper).
+#
+# Disable with `--no-default-features` to build the lean, transport-free
+# library core that the in-browser wasm bundle (`../wasm`) links against:
+# codec + kmip30/wire + dispatcher + policy + ops (minus Certify/Validate) +
+# the in-memory `MemoryStore`, driving `softhsmrustv3` directly. The native
+# server build (`cargo build`, the three shipping `[[bin]]`s) keeps the
+# default features on and is completely unchanged.
+default = ["native"]
+native = [
+    "dep:tokio",
+    "dep:tokio-rustls",
+    "dep:rustls",
+    "dep:rustls-pemfile",
+    "dep:rcgen",
+    "dep:rusqlite",
+    "dep:rusqlite_migration",
+    "dep:prometheus",
+    "dep:scraper",
+    "x509-parser/verify",
+]
+
 [dependencies]
 # Plane 3 — direct Rust dependency on the engine, NO FFI
 softhsmrustv3 = { path = "../rust" }
 
-# Async runtime + I/O
-tokio        = { version = "1", features = ["full"] }
-tokio-rustls = "0.26"
+# Async runtime + I/O — `native` only (no wasm transport).
+tokio        = { version = "1", features = ["full"], optional = true }
+tokio-rustls = { version = "0.26", optional = true }
 # `ring` backs the KMIP listener; `aws_lc_rs` backs the cryptopolicy-manager
 # admin facade (the only provider exposing the X25519MLKEM768 PQC hybrid KEX).
-rustls       = { version = "0.23", features = ["ring", "aws_lc_rs"] }
-rustls-pemfile = "2"
+rustls       = { version = "0.23", features = ["ring", "aws_lc_rs"], optional = true }
+rustls-pemfile = { version = "2", optional = true }
 
 # Self-signed cert auto-gen for sandbox / dev runs (Phase 7).
 # Production deployments mount real certs via --tls-cert / --tls-key.
@@ -49,7 +78,7 @@ rustls-pemfile = "2"
 # the §6.1.6 Certify CSR path. rcgen alone cannot ISSUE ML-DSA-signed
 # certs (no ML-DSA in its SignatureAlgorithm table) — issuance goes
 # through x509-cert + the engine — but it is a fine CSR PARSER.
-rcgen = { version = "0.13", default-features = false, features = ["aws_lc_rs", "pem", "x509-parser"] }
+rcgen = { version = "0.13", default-features = false, features = ["aws_lc_rs", "pem", "x509-parser"], optional = true }
 
 # P2.3 — KMIP 3.0 §6.1.6 Certify / §6.1.50 Re-certify: the server acts as
 # a PQC-capable X.509 CA. rcgen 0.13 can parse CSRs and issue RSA/ECDSA/
@@ -68,9 +97,10 @@ der       = { version = "0.7", features = ["oid", "alloc"] }
 spki      = { version = "0.7", features = ["alloc"] }
 const-oid = { version = "0.9", features = ["db"] }
 
-# Persistence
-rusqlite           = { version = "0.32", features = ["bundled"] }
-rusqlite_migration = "1"
+# Persistence — `native` only (bundled SQLite C will not cross-compile to
+# wasm32; the wasm build uses the in-memory `store::MemoryStore`).
+rusqlite           = { version = "0.32", features = ["bundled"], optional = true }
+rusqlite_migration = { version = "1", optional = true }
 
 # Phase 2 — TTLV codec buffer ops. `bytes::BytesMut` matches the
 # `fn encode(value: &Value, buf: &mut BytesMut)` signature in
@@ -94,6 +124,9 @@ clap = { version = "4", features = ["derive"] }
 # Observability
 tracing            = "0.1"
 tracing-subscriber = "0.3"
+# D1 — Prometheus /metrics scrape endpoint for the CACP management plane.
+# `native` only — the wasm build compiles `crate::metrics` out entirely.
+prometheus = { version = "0.13", default-features = false, optional = true }
 
 # Crypto helpers (NOT for PQC — that's softhsmrustv3 — only for TLS bootstrap)
 rand        = "0.8"
@@ -122,8 +155,11 @@ anyhow    = "1"
 # P2.2 — the `verify` feature pulls in `ring`-backed `verify_signature`
 # so the §6.1.62 Validate op can actually check certificate signatures
 # (RSA-PKCS1v15 + ECDSA over SHA-256/384/512) where the issuer is in the
-# supplied/stored chain, rather than returning a hollow Valid.
-x509-parser = { version = "0.16", features = ["verify"] }
+# supplied/stored chain, rather than returning a hollow Valid. `ring` does
+# not build for wasm32-unknown-unknown, so the `verify` feature is enabled
+# only by `native` (the wasm build gates the Validate op out); the base
+# RFC-5280 parser used for the §11 Certificate attributes stays available.
+x509-parser = { version = "0.16" }
 
 # RSA — KMIP 3.0 §6.1.48 Register accepts client-supplied RSA private
 # keys in PKCS#1 (KeyFormatType=0x03) or PKCS#8 (0x04) DER form. The
@@ -137,8 +173,8 @@ rsa = "0.9"
 # (tools/extract_kmip_spec.rs). The OASIS KMIP 3.0 spec ships as Word-converted
 # HTML with deeply nested span trees that defy regex-based extraction; a real
 # DOM walker is the reliable path. Kept as a regular dep (not dev-) so the
-# tool builds in normal `cargo build`.
-scraper = "0.20"
+# tool builds in normal `cargo build`. `native` only (bin-tool dependency).
+scraper = { version = "0.20", optional = true }
 
 [dev-dependencies]
 proptest   = "1"

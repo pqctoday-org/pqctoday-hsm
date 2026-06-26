@@ -36,6 +36,7 @@
 #include "config.h"
 #include "osmutex.h"
 #include "cryptoki.h"
+#include "LeakingPtr.h"
 #include <memory>
 
 class Mutex
@@ -112,12 +113,8 @@ private:
 	CK_RV LockMutex(CK_VOID_PTR mutex);
 	CK_RV UnlockMutex(CK_VOID_PTR mutex);
 
-	// The one-and-only instance
-#ifdef HAVE_CXX11
-	static std::unique_ptr<MutexFactory> instance;
-#else
-	static std::auto_ptr<MutexFactory> instance;
-#endif
+	// The one-and-only instance (leaked at process exit — see LeakingPtr.h)
+	static LeakingPtr<MutexFactory> instance;
 
 	// The function pointers
 	CK_CREATEMUTEX createMutex;

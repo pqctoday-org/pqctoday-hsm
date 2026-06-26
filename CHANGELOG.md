@@ -80,6 +80,82 @@ staying 15/15** as the gate after every commit.
   converted to `[usize;3]`.
 - **Not merged to `main`.** The validated checkout's `rust/` tree is unchanged;
   full per-commit table and rationale in `rust/CK_ABI_NATIVE_COMPLIANCE_PLAN.md`.
+### Added — KMIP request-wire encoder + OASIS bidirectional conformance gate; policy/store/persistence hardening (2026-06-20)
+
+The CACP engine could already **read** KMIP requests and **write** responses (the
+server halves) but could not **write** requests. This batch adds the missing
+mirror and tightens the policy/store/persistence layers around it. Full kmip
+suite green: **492 lib tests + integration suites** (incl. the new OASIS
+round-trip and spec-crosscheck gates).
+
+- **F-6 — `encode_request_message` (client-side TTLV request encoder).** The
+  byte-for-byte mirror of the request decoder, so the Rust→WASM playground can
+  act as an in-browser KMIP client: encode a typed `RequestMessage` → hand the
+  bytes to the in-process server → decode the reply. The encoder returns `None`
+  for any header field / operation payload it cannot yet emit, so callers surface
+  the gap instead of shipping wrong bytes. Typed decode stays intentionally lossy,
+  so the guarantee is decode-stability (`decode(encode(decode(x))) == decode(x)`),
+  not raw byte-identity.
+- **OASIS conformance gate** — the 95 in-repo OASIS KMIP 3.0 *mandatory* cases
+  now run as a permanent bidirectional test (`oasis_request_roundtrip`,
+  `oasis_typed_decode`, `spec_crosscheck`): round-trip every operation **plus**
+  byte-exact-vs-OASIS for every operation the corpus covers, validating both the
+  new request-encode and the existing response-encode.
+- **F-2 — algorithm-default resolution made order-independent.** Defaults now
+  resolve in a dedicated Pass 0 *before* substitutions, so a substitution always
+  operates on the defaulted value regardless of the order defaults and
+  substitutions appear in a policy.
+- **F-5 — AEAD / RSA-PSS parameters flow through the policy.** Crypto-parameter
+  rules now carry `mask_generator` (MGF), `tag_length` (AEAD auth tag), and
+  `salt_length` (PSS salt), wired through sign / encrypt.
+- **S-10 — lifecycle-FSM parity across store backends.** `MemoryStore` (the
+  default and WASM backend) now enforces the §3.4 state-transition FSM at the
+  store layer, at parity with `SqliteStore`; illegal transitions (e.g.
+  `Active→PreActive`) are rejected rather than silently accepted, and
+  initial/original-creation dates are immutable across updates.
+- **D-1 — full-record persistence.** `ObjectRecord` is now serde-serialisable
+  (with a `UsageMask` bits adapter) for complete metadata round-trips.
+
+### Removed — legacy `kmip/pykmip/` Python client (2026-06-20)
+
+The hand-rolled `pykmip/` sandbox-dev client is replaced by the packaged
+`kmip/python-client/` (`pqctoday_kmip`, 38 unit tests + wheel smoke check).
+Downstream references (sandbox docs / UI labels / proxy) updated to match.
+
+### Added — mlxpqc: standalone ML-DSA-65 Metal acceleration benchmark (2026-06-17)
+
+New self-contained `mlxpqc/` subfolder — a small, **independent** research/benchmark
+tool for GPU-accelerated ML-DSA-65 on Apple Metal. It does not touch the softhsm
+library or the hub; it is reference ML-DSA code + a Metal port + benchmarks, with
+its own `NOTICE.md`/`LICENSE`. The Apple corecrypto reference (`arm/`) is
+`.gitignore`d — its license forbids redistribution, so it is never committed.
+
+### Fixed — pkcs11-provider no longer crashes the host at process exit (2026-06-17)
+
+A program that loads softhsmv3 as an OpenSSL provider (our pkcs11-provider) could
+**segfault at process exit** — intermittently, about two in three `openssl req`
+ML-DSA signing runs. The signing itself always succeeded and the certificate was
+written; the crash came afterwards, during OpenSSL's `atexit` cleanup, so it
+showed up as a non-zero exit code on an otherwise-good operation.
+
+Root cause was a C++ **static-destruction-order** problem, not the crypto.
+OpenSSL's `OPENSSL_cleanup` tears the provider down and calls back into the
+module (`C_CloseSession`, `C_Finalize`) *after* softhsm's global singletons had
+already been destroyed by C++ static destruction — dereferencing freed memory
+(`HandleManager::getSessionShared`), and later a NULL OpenSSL RAND lock.
+
+- **`LeakingPtr`** (new — `src/lib/common/LeakingPtr.h`) replaces the
+  `std::unique_ptr` singletons (`SoftHSM`, `MutexFactory`, `OSSLCryptoFactory`,
+  `SecureMemoryRegistry`). Its destructor does not free, so the module outlives
+  C++ static destruction and stays valid for OpenSSL's late callbacks; `reset()`
+  still frees, so `C_Finalize`/fork do **not** leak during normal operation.
+- **`C_Finalize` process-exit guard** (`SoftHSM_slots.cpp`): an `atexit` sentinel
+  registered in `C_Initialize` (which runs before OpenSSL's cleanup) lets
+  `C_Finalize` skip OpenSSL-touching teardown (RAND / EVP / provider unload)
+  during exit, where those globals are already gone.
+
+Verified: **20/20 clean** `openssl req` ML-DSA certificate generations, was 4/6
+crashing. Long-running servers (`s_server`) were never affected.
 
 ### Added — PQC tooling forks: step-ca, cosign, osslsigncode (ML-DSA, HSM-backed) (2026-06-15)
 
