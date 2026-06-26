@@ -10,6 +10,7 @@
 
 set(CMAKE_SYSTEM_NAME Emscripten)
 set(CMAKE_SYSTEM_VERSION 1)
+set(EMSCRIPTEN 1)
 
 # Locate emcc — must be in PATH (provided by emcmake wrapper or manual source)
 find_program(EMCC emcc REQUIRED)
