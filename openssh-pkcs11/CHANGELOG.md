@@ -7,8 +7,51 @@ file. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/
 
 ## [Unreleased]
 
+### Added — the WASM bundle now runs a real, end-to-end post-quantum SSH handshake (2026-06-27)
+
+The OpenSSH WASM build is no longer a scaffold: it links cleanly and runs a
+genuine post-quantum SSH session entirely in the browser sandbox, with both
+private keys staying inside the in-WASM software HSM the whole time. Proven by
+the `sm1-smoke.cjs` node harness in four steps:
+
+- **SM1 — real ML-DSA-65 signature from the token.** The bundle brings up
+  softhsmv3 in-instance (init token, SO/USER login, `C_GenerateKeyPair` for an
+  ML-DSA-65 host key), then produces a 3,309-byte signature via `CKM_ML_DSA`
+  `C_Sign`. The private key is generated on, and never leaves, the token.
+- **SM2 — real key exchange to NEWKEYS.** A genuine in-process
+  `mlkem768x25519-sha256` (ML-KEM-768 + X25519) key exchange runs OpenSSH's own
+  KEX state machine to NEWKEYS on both client and server sides.
+- **SM3 — the handshake is host-authenticated by the HSM.** The `ssh-mldsa-65`
+  host key is fetched from the token through OpenSSH's **real `ssh-pkcs11.c`
+  provider path** (not a bypass), and the exchange-hash signature is produced by
+  the token's `C_Sign` — the demo's whole point: the server proves its identity
+  with a key it cannot read.
+- **SM4 — real publickey login to USERAUTH_SUCCESS.** A genuine RFC 4252
+  publickey userauth completes: the user's ML-DSA-65 key (also on the token)
+  signs the real signed-data blob via `C_Sign` (3,329-byte SSH wire format), the
+  server verifies it with `sshkey_verify`, and the exchange reaches
+  `USERAUTH_SUCCESS`.
+
+Honest scope: every security-critical operation is real OpenSSH code (the
+signed-data format, both `C_Sign` signatures, `sshkey_verify`, the KEX). Only
+the message orchestration and a minimal accept policy are driven by the shim,
+because OpenSSH's auth loop is bound to an OS (PAM, privsep, accounts) that does
+not exist in a browser. No PTY/shell — handshake-only by design.
+
 ### Changed
 
+- **`scripts/build-wasm.sh` — link wall cleared; bundle now builds.** The
+  remaining wasm-ld failures were resolved: a `setproctitle` cache override, a
+  Step 3.5 strip of 13 leaked `HAVE_*` link symbols, compiling the shims through
+  the Makefile's own `.c.o` rule (so `<sys/queue.h>` and the build CFLAGS
+  resolve), and linking `sshd` with the static softhsm archive,
+  `--pre-js softhsm_pre.js` (writes the softhsmv3 config + token dirs into
+  MEMFS), `-Wl,--wrap,lib_contains_symbol`, and `___wrap_main` as the exported
+  entry (native `main()` is GC'd; the harness calls it via `ccall`).
+- **`wasm-shims/pkcs11_static.c` — returns the real function-list handle.**
+  The dlopen-static bridge now hands back `(void*)C_GetFunctionList` (the HSM's
+  genuine handle) instead of a placeholder, so OpenSSH's provider walks the real
+  PKCS#11 entry point.
 - **Relocated into `pqctoday-hsm` as `openssh-pkcs11/`.** Previously maintained
   in the standalone `pqctoday/pqctoday-openssh` repo; consolidated alongside
   the other PKCS#11 connectors (`strongswan-pkcs11/`, `JavaJCE/`, `openpgp/`,
@@ -38,18 +81,16 @@ file. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/
 
 ### Known Issues
 
-- **Full WASM build does not complete yet.** Build gets through sshd
-  `emconfigure` cleanly and into `emmake`, but stops with `dns.c` errors
-  complaining that `struct rrsetinfo`, `ERRSET_*`, and `RRSET_VALIDATED` are
-  undeclared. The `ac_cv_func_getrrsetbyname=no` cache override was silently
-  ignored by autoconf (`config.h` still shows `HAVE_GETRRSETBYNAME 1`) — the
-  check is gated by a non-cached probe that needs further investigation.
-  Possible follow-ups: patch `dns.c` to unconditionally include
-  `openbsd-compat/getrrsetbyname.h`, or compile with `-DHAVE_GETRRSETBYNAME=0`
-  and adjust the `openbsd-compat/Makefile.in` to include the replacement.
-  Additional BSD-specific quirks may surface once `dns.c` compiles. Artifacts
-  in `pqctoday-hub/public/wasm/openssh-{client,server}.{js,wasm}` are still
-  the pre-move build; hub UI shows "Build in progress" notice.
+- **Not yet wired into the hub playground.** The real handshake is proven by
+  the node smoke harness (`sm1-smoke.cjs`) against the freshly built
+  `dist/openssh-server.{js,wasm}`, but the hub's SSH playground still runs the
+  old TypeScript model. Integration is the next step: produce the bundle into
+  `pqctoday-hub/public/wasm/` under the hub's naming + provenance-manifest
+  convention and swap the loader (`src/wasm/openssh.ts`) onto the real path.
+- **`dns.c` BSD-compat build quirk (resolved during the link work).** The
+  earlier `dns.c` failure (`struct rrsetinfo` / `ERRSET_*` undeclared, from the
+  ignored `ac_cv_func_getrrsetbyname=no` cache override) no longer blocks the
+  build; the `sshd` link path used by the WASM bundle does not pull it in.
 
 ### Added
 

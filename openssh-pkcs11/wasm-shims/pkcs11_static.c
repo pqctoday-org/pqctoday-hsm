@@ -16,19 +16,23 @@
 #include "includes.h"
 #include <dlfcn.h>
 #include <string.h>
+#include "pkcs11.h"   /* CK_RV, CK_FUNCTION_LIST_PTR_PTR (softhsm headers, on the build -I path) */
 
 /* Forward-declare softhsmv3's function-list entry point. */
 extern CK_RV C_GetFunctionList(CK_FUNCTION_LIST_PTR_PTR ppFunctionList);
 
-/* Sentinel handle that ssh-pkcs11.c will pass back to dlsym/dlclose. */
-#define SOFTHSM_FAKE_HANDLE  ((void *)0xSHSM)
-
+/* There is no .so to load in WASM (softhsm is statically linked), and softhsm has
+ * no involvement in the dynamic-linker "handle" that dlopen() normally returns.
+ * Rather than fabricate a magic constant, hand back the REAL, statically-linked
+ * C_GetFunctionList address as the handle: it is a genuine non-NULL pointer that
+ * ssh-pkcs11.c only ever passes opaquely back to dlsym(). dlsym() then returns that
+ * same real entry point — so the caller gets softhsm's actual C_GetFunctionList. */
 void *dlopen(const char *filename, int flags) {
     (void)flags;
     /* Accept any name that looks like softhsmv3 */
     if (filename &&
         (strstr(filename, "softhsm") || strstr(filename, "libpkcs11"))) {
-        return SOFTHSM_FAKE_HANDLE;
+        return (void *)C_GetFunctionList;
     }
     /* For anything else (e.g. OpenSSL providers loaded by pkcs11-provider)
      * return NULL — they are not needed in the WASM build. */
@@ -36,7 +40,7 @@ void *dlopen(const char *filename, int flags) {
 }
 
 void *dlsym(void *handle, const char *symbol) {
-    if (handle == SOFTHSM_FAKE_HANDLE &&
+    if (handle == (void *)C_GetFunctionList &&
         symbol && strcmp(symbol, "C_GetFunctionList") == 0) {
         return (void *)C_GetFunctionList;
     }
@@ -48,8 +52,9 @@ int dlclose(void *handle) {
     return 0;
 }
 
-const char *dlerror(void) {
-    return NULL;
-}
+/* NOTE: dlerror() is intentionally NOT defined here — emscripten's libc already
+ * provides it (and pulls it in unconditionally), so defining our own causes a
+ * wasm-ld "duplicate symbol: dlerror". ssh-pkcs11.c only calls dlerror() on the
+ * dlopen/dlsym failure paths, which our shim never takes for the softhsm provider. */
 
 #endif /* __EMSCRIPTEN__ && SOFTHSM_STATIC_LINKED */

@@ -144,6 +144,7 @@ mkdir -p "$ROOT/build/sshd-wasm"
         ac_cv_func_strtonum=no \
         ac_cv_func_timingsafe_bcmp=no \
         ac_cv_func_getrrsetbyname=no \
+        ac_cv_func_setproctitle=no \
         ac_cv_header_libutil_h=no \
         ac_cv_header_nlist_h=no \
         ac_cv_header_readpassphrase_h=no \
@@ -178,6 +179,7 @@ mkdir -p "$ROOT/build/ssh-wasm"
         ac_cv_func_strtonum=no \
         ac_cv_func_timingsafe_bcmp=no \
         ac_cv_func_getrrsetbyname=no \
+        ac_cv_func_setproctitle=no \
         ac_cv_header_libutil_h=no \
         ac_cv_header_nlist_h=no \
         ac_cv_header_readpassphrase_h=no \
@@ -193,23 +195,64 @@ mkdir -p "$ROOT/build/ssh-wasm"
         LDFLAGS="${SHARED_LDFLAGS[*]} -s EXPORT_NAME=createSshModule ${COMMON_LIBS}")
 
 # ── Step 3.5: Patch generated config.h ────────────────────────────────────────
-# OpenSSH's configure incorrectly defines HAVE_GETRRSETBYNAME=1 under emscripten
-# despite ac_cv_func_getrrsetbyname=no being set in the env above. The cache
-# variable name disagrees with the AC_CHECK_DECL test that ultimately writes
-# the #define, so the override leaks. With HAVE_GETRRSETBYNAME defined the
-# openbsd-compat shim (which provides ERRSET_*, struct rrsetinfo, RRSET_*) is
-# skipped and dns.c fails to compile. Strip it post-configure.
+# Emscripten's musl DECLARES many libc/compat functions in its headers (so OpenSSH's
+# AC_CHECK_FUNC compile-test passes and configure writes HAVE_<FN>=1) but does NOT
+# provide a linkable definition for them. The override also leaks past the
+# ac_cv_func_* env vars (the cache var name disagrees with the AC_CHECK_DECL test that
+# writes the #define). With HAVE_<FN> defined, OpenSSH's openbsd-compat shim is skipped,
+# so the symbol is absent at link -> wasm-ld "undefined symbol" (or, for setproctitle,
+# a "function signature mismatch" because callers fall back to an implicit declaration).
+# Strip the leaked defines post-configure so openbsd-compat compiles its own
+# implementation / no-op for each. Every function listed has an openbsd-compat source:
+# getrrsetbyname.c, setproctitle.c, daemon.c, bsd-getpeereid.c, bsd-misc.c (pledge),
+# bsd-closefrom.c (close_range), base64.c (b64_*), blowfish.c (Blowfish_*/blf_enc).
+LEAKED_HAVE_DEFINES=(
+    GETRRSETBYNAME SETPROCTITLE
+    DAEMON GETPEEREID PLEDGE CLOSE_RANGE
+    B64_NTOP B64_PTON __B64_NTOP __B64_PTON
+    BLF_ENC BLOWFISH_INITSTATE BLOWFISH_EXPANDSTATE BLOWFISH_EXPAND0STATE BLOWFISH_STREAM2WORD
+)
 for cfg in "$ROOT/build/sshd-wasm/config.h" "$ROOT/build/ssh-wasm/config.h"; do
-    if [[ -f "$cfg" ]] && grep -q '^#define HAVE_GETRRSETBYNAME 1' "$cfg"; then
-        echo "[openssh-pkcs11] Patching out HAVE_GETRRSETBYNAME in $cfg"
-        sed -i.bak 's|^#define HAVE_GETRRSETBYNAME 1|/* #undef HAVE_GETRRSETBYNAME */|' "$cfg"
-    fi
+    [[ -f "$cfg" ]] || continue
+    for d in "${LEAKED_HAVE_DEFINES[@]}"; do
+        if grep -q "^#define HAVE_$d 1" "$cfg"; then
+            echo "[openssh-pkcs11] Patching out HAVE_$d in $cfg"
+            sed -i.bak "s|^#define HAVE_$d 1|/* #undef HAVE_$d */|" "$cfg"
+        fi
+    done
 done
 
 # ── Step 4: Build ─────────────────────────────────────────────────────────────
 NCPU=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
 echo "[openssh-pkcs11] Building sshd WASM with ${NCPU} jobs..."
-(cd "$ROOT/build/sshd-wasm" && emmake make -j"$NCPU" sshd)
+
+# ── Step 4a: Compile the shim via the Makefile .c.o rule (same CFLAGS as packet.o,
+# so <sys/queue.h> + all OpenSSH headers resolve) and link the already-built ssh_api.o
+# (the privsep-free KEX state machine; in SSHOBJS, not SSHDOBJS, so add it explicitly).
+cp "$ROOT/wasm-shims/sshd_wasm_main.c" "$OPENSSH_SRC/"   # latest shims into the build tree (VPATH)
+cp "$ROOT/wasm-shims/pkcs11_static.c"  "$OPENSSH_SRC/"   # dlopen->static-softhsm bridge (SM3)
+# ssh_api.o = KEX driver; pkcs11_static.o = dlopen bridge; ssh-pkcs11.o = the REAL PKCS#11
+# signer (pkcs11_sign_mldsa -> C_Sign) that replaces the fork/exec ssh-pkcs11-client.o stub.
+(cd "$ROOT/build/sshd-wasm" && emmake make sshd_wasm_main.o ssh_api.o pkcs11_static.o ssh-pkcs11.o)
+SSHD_SHIM_OBJS="$ROOT/build/sshd-wasm/sshd_wasm_main.o $ROOT/build/sshd-wasm/ssh_api.o $ROOT/build/sshd-wasm/pkcs11_static.o"
+
+# ── Step 4b: Link sshd with the shim entry exported (called via ccall) ─────────
+# The native main() (sshd.c:1287) re-execs into sshd-session, useless in WASM; we
+# DON'T export/call it, so --gc-sections drops it. Our entry __wrap_main is exported
+# directly (___wrap_main) and invoked from JS via ccall. No --wrap,main needed
+# (exporting _main fails: with --wrap the `main` symbol is renamed away).
+# P11OBJS=ssh-pkcs11.o swaps the fork/exec helper stub (ssh-pkcs11-client.o) for the
+# real in-process PKCS#11 signer in $(SSHDOBJS). --wrap,lib_contains_symbol skips the
+# .so file-scan (misc.c) that can't work against a statically-linked provider.
+(cd "$ROOT/build/sshd-wasm" && emmake make -j"$NCPU" sshd \
+    P11OBJS=ssh-pkcs11.o \
+    LDFLAGS="${SHARED_LDFLAGS[*]} -s EXPORT_NAME=createSshdModule \
+        --pre-js ${HSM_ROOT}/src/wasm/softhsm_pre.js \
+        -L. -Lopenbsd-compat/ -L${OPENSSL_WASM}/lib \
+        ${SSHD_SHIM_OBJS} \
+        -Wl,--wrap,lib_contains_symbol \
+        -s EXPORTED_FUNCTIONS=['___wrap_main','_C_GetFunctionList'] \
+        ${COMMON_LIBS}")
 
 echo "[openssh-pkcs11] Building ssh WASM with ${NCPU} jobs..."
 (cd "$ROOT/build/ssh-wasm" && emmake make -j"$NCPU" ssh)
