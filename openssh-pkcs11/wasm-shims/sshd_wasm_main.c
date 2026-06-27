@@ -188,6 +188,10 @@ static int sm1_provision(void) {
         priv_tmpl, sizeof priv_tmpl / sizeof priv_tmpl[0],
         &hPub, &hPriv);
     if (rv != CKR_OK) { emit_rv("C_GenerateKeyPair", rv); return -1; }
+    /* PKCS#11 trace: the host keypair is generated ON the token (shim-direct call,
+     * so it isn't seen by the provider-path tap in pkcs11_static.c — emit it here). */
+    wasm_emit_event("pkcs11",
+        "{\"op\":\"C_GenerateKeyPair\",\"mech\":28,\"key\":\"ML-DSA-65 host key\"}");
     wasm_emit_event("provisioned", "{\"key\":\"sshd-host-key\"}");
     return 0;
 }
