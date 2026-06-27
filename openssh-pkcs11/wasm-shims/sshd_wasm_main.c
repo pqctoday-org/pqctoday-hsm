@@ -35,11 +35,15 @@
 #include "pkcs11.h"
 extern CK_RV C_GetFunctionList(CK_FUNCTION_LIST_PTR_PTR);
 
-/* NOTE: OpenSSH internal headers (ssh2.h/packet.h/kex.h/sshkey.h/ssh_api.h/...) are
- * NOT included for SM1 — it is pure PKCS#11. They pull <sys/queue.h> which is absent
- * from the emscripten sysroot in a standalone shim compile. SM2 (the KEX driver) will
- * re-add the specific headers it needs (ssh_api.h, kex.h, sshkey.h) with the right
- * openbsd-compat include path. */
+/* SM2: OpenSSH KEX driver headers. These pull <sys/queue.h>; resolved because this
+ * shim is now compiled via the Makefile's .c.o rule (same CFLAGS as packet.o), not a
+ * standalone emcc. ssh_api.c is the privsep-free single-process embedding of the KEX
+ * state machine (mirrors regress/unittests/kex/test_kex.c). */
+#include "ssh_api.h"
+#include "sshkey.h"
+#include "ssherr.h"
+#include "kex.h"
+#include "myproposal.h"
 
 /* NOTE: getpwnam/getpwuid stubs removed — emscripten musl already provides them
  * (they collided: wasm-ld "duplicate symbol"). SM1 never calls them; if SM2's auth
@@ -214,19 +218,79 @@ static int sm1_prove_sign(void) {
     return 0;
 }
 
+/* ── SM2: in-process mlkem768x25519 KEX to NEWKEYS ────────────────────────────
+ * Mirrors regress/unittests/kex/test_kex.c (do_send_and_receive / run_kex): drive a
+ * real OpenSSH client + server in ONE process via ssh_api.c, pumping framed output
+ * from one side into the other's input until both reach NEWKEYS. SM2 uses an IN-MEMORY
+ * ML-DSA-65 host key (sshkey_generate); SM3 swaps the server's sign to PKCS#11 C_Sign. */
+static int sm2_pump(struct ssh *from, struct ssh *to) {
+    u_char type;
+    for (;;) {
+        int r = ssh_packet_next(from, &type);              /* ssh_api.c:255 */
+        if (r != 0) { emit_rv("ssh_packet_next", (CK_RV)r); return -1; }
+        if (type != 0) return 0;                            /* delivered a msg; let caller swap sides */
+        size_t len; const u_char *buf = ssh_output_ptr(from, &len);   /* ssh_api.c:313 */
+        if (len == 0) return 0;
+        if ((r = ssh_output_consume(from, len)) != 0 ||
+            (r = ssh_input_append(to, buf, len)) != 0) { emit_rv("pump io", (CK_RV)r); return -1; }
+    }
+}
+
+static int drive_kex(void) {
+    struct ssh *client = NULL, *server = NULL;
+    struct sshkey *priv = NULL, *pub = NULL;
+    struct kex_params kp;
+    char *base[PROPOSAL_MAX] = { KEX_CLIENT };
+    int r;
+
+    /* SM2 uses an in-memory ssh-ed25519 host key — OpenSSH's ssh-mldsa.c implements
+     * sign/verify but NOT keygen (ML-DSA keys come from the HSM by design, returns
+     * SSH_ERR_FEATURE_UNSUPPORTED). SM3 replaces this with the TOKEN ML-DSA-65 host key
+     * whose KEX signature is produced via PKCS#11 C_Sign. SM2 only needs the KEX itself
+     * to reach NEWKEYS; the host-key algorithm is independent of mlkem768x25519. */
+    r = sshkey_generate(KEY_ED25519, 0, &priv);
+    if (r != 0) { emit_rv("sshkey_generate(ED25519)", (CK_RV)r); return -1; }
+    r = sshkey_from_private(priv, &pub);
+    if (r != 0) { emit_rv("sshkey_from_private", (CK_RV)r); return -1; }
+
+    memset(&kp, 0, sizeof kp);
+    memcpy(kp.proposal, base, sizeof base);
+    kp.proposal[PROPOSAL_KEX_ALGS] = "mlkem768x25519-sha256";
+    kp.proposal[PROPOSAL_SERVER_HOST_KEY_ALGS] = "ssh-ed25519";
+
+    if ((r = ssh_init(&client, 0, &kp)) != 0) { emit_rv("ssh_init(client)", (CK_RV)r); return -1; }
+    if ((r = ssh_init(&server, 1, &kp)) != 0) { emit_rv("ssh_init(server)", (CK_RV)r); return -1; }
+    if ((r = ssh_add_hostkey(server, priv)) != 0) { emit_rv("ssh_add_hostkey(server)", (CK_RV)r); return -1; }
+    if ((r = ssh_add_hostkey(client, pub)) != 0)  { emit_rv("ssh_add_hostkey(client)", (CK_RV)r); return -1; }
+
+    wasm_emit_event("kex_start", "{\"kex\":\"mlkem768x25519-sha256\",\"hostkey\":\"ssh-ed25519\"}");
+    int guard = 0;
+    while ((!server->kex->done || !client->kex->done) && guard++ < 64) {
+        if (sm2_pump(server, client) != 0) return -1;
+        if (sm2_pump(client, server) != 0) return -1;
+    }
+    if (server->kex->done && client->kex->done) {
+        wasm_emit_event("newkeys", "{\"server\":1,\"client\":1}");
+        return 0;
+    }
+    wasm_emit_event("error", "kex did not converge");
+    return -1;
+}
+
 /* ── Privsep-free WASM entry: wraps main() (sshd.c:1287; no `sshd_main` symbol). ──
- * SM1 scope: bring up softhsm in-instance, provision an ML-DSA-65 host key, find it,
- * and prove ONE host-key C_Sign. No KEX/transport yet (that's SM2+). The native main()
- * is reachable as __real_main() but is never called (it fork/execv's into sshd-session). */
+ * SM1: bring up softhsm in-instance, provision an ML-DSA-65 host key, prove ONE C_Sign.
+ * SM2: drive a real in-process mlkem768x25519 handshake to NEWKEYS (in-memory host key).
+ * The native main() is reachable as __real_main() but never called (it fork/execv's). */
 int __wrap_main(int argc, char **argv) {
     (void)argc; (void)argv;
 
     wasm_emit_event("start", "sshd WASM starting");
-    if (pkcs11_bootstrap() != 0)     return 1;
+    if (pkcs11_bootstrap() != 0)     return 1;   /* SM1 */
     if (sm1_provision() != 0)        return 1;
     if (pkcs11_find_host_key() != 0) return 1;
     if (sm1_prove_sign() != 0)       return 1;
-    wasm_emit_event("done", "{\"connection_ok\":false,\"note\":\"SM1 ok\"}");
+    if (drive_kex() != 0)            return 1;   /* SM2 */
+    wasm_emit_event("done", "{\"connection_ok\":true,\"note\":\"SM2 ok\"}");
     return 0;
 }
 

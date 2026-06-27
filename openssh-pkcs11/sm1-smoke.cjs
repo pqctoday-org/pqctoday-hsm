@@ -34,7 +34,14 @@ if (typeof factory !== 'function' && factory && typeof factory.default === 'func
   assert(sign, 'host_key_sign event missing')
   const sigLen = JSON.parse(sign.payload).sig_len
   assert(sigLen === 3309, 'wrong ML-DSA-65 sig_len: ' + sigLen)
-  console.log('SM1 PASS — host-key C_Sign produced', sigLen, 'bytes from the token')
+  console.log('SM1 OK — host-key C_Sign produced', sigLen, 'bytes from the token')
+
+  // SM2: a real in-process mlkem768x25519 + ssh-mldsa-65 handshake reached NEWKEYS
+  const nk = events.find((e) => e.type === 'newkeys')
+  assert(nk, 'newkeys event missing (KEX did not reach NEWKEYS)')
+  const j = JSON.parse(nk.payload)
+  assert(j.server === 1 && j.client === 1, 'both sides did not reach NEWKEYS: ' + nk.payload)
+  console.log('SM2 PASS — real mlkem768x25519 KEX reached NEWKEYS (client+server)')
 })().catch((e) => {
   console.error('SM1 FAIL:', e && e.message ? e.message : e)
   process.exit(1)
