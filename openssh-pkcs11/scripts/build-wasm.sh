@@ -225,7 +225,32 @@ done
 # ── Step 4: Build ─────────────────────────────────────────────────────────────
 NCPU=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
 echo "[openssh-pkcs11] Building sshd WASM with ${NCPU} jobs..."
-(cd "$ROOT/build/sshd-wasm" && emmake make -j"$NCPU" sshd)
+
+# ── Step 4a: Pre-compile WASM shim object(s) (config.h exists after Step 3.5) ──
+# SM1: only the entry shim. socket_wasm.c (transport) is added in SM2.
+SHIM_OBJDIR="$ROOT/build/shim-obj"; mkdir -p "$SHIM_OBJDIR"
+SHIM_INCLUDES="-I$OPENSSH_SRC -I$OPENSSH_SRC/openbsd-compat \
+    -I$ROOT/build/sshd-wasm -I${OPENSSL_WASM}/include \
+    -I${HSM_ROOT}/src/lib -I${HSM_ROOT}/src/lib/pkcs11"
+emcc -O2 -c "$ROOT/wasm-shims/sshd_wasm_main.c" -o "$SHIM_OBJDIR/sshd_wasm_main.o" \
+    -DWASM_OPENSSH -DWASM_SSHD_MAIN -DSOFTHSM_STATIC_LINKED -D__EMSCRIPTEN__ \
+    -Wno-implicit-function-declaration -Wno-incompatible-pointer-types \
+    -Wno-incompatible-function-pointer-types \
+    $SHIM_INCLUDES
+SSHD_SHIM_OBJS="$SHIM_OBJDIR/sshd_wasm_main.o"
+
+# ── Step 4b: Link sshd with the shim entry exported (called via ccall) ─────────
+# The native main() (sshd.c:1287) re-execs into sshd-session, useless in WASM; we
+# DON'T export/call it, so --gc-sections drops it. Our entry __wrap_main is exported
+# directly (___wrap_main) and invoked from JS via ccall. No --wrap,main needed
+# (exporting _main fails: with --wrap the `main` symbol is renamed away).
+(cd "$ROOT/build/sshd-wasm" && emmake make -j"$NCPU" sshd \
+    LDFLAGS="${SHARED_LDFLAGS[*]} -s EXPORT_NAME=createSshdModule \
+        --pre-js ${HSM_ROOT}/src/wasm/softhsm_pre.js \
+        -L. -Lopenbsd-compat/ -L${OPENSSL_WASM}/lib \
+        ${SSHD_SHIM_OBJS} \
+        -s EXPORTED_FUNCTIONS=['___wrap_main','_C_GetFunctionList'] \
+        ${COMMON_LIBS}")
 
 echo "[openssh-pkcs11] Building ssh WASM with ${NCPU} jobs..."
 (cd "$ROOT/build/ssh-wasm" && emmake make -j"$NCPU" ssh)
