@@ -45,6 +45,9 @@ extern CK_RV C_GetFunctionList(CK_FUNCTION_LIST_PTR_PTR);
 #include "kex.h"
 #include "myproposal.h"
 #include "ssh-pkcs11.h"   /* pkcs11_add_provider — SM3 host key from the token */
+#include "packet.h"       /* sshpkt_* — SM4 userauth exchange */
+#include "sshbuf.h"
+#include "ssh2.h"         /* SSH2_MSG_USERAUTH_REQUEST / _SUCCESS */
 
 /* WASM: the PKCS#11 provider is STATICALLY linked (no .so to nlist/mmap-scan), so
  * route OpenSSH's lib_contains_symbol() pre-check (misc.c) to an always-OK stub via
@@ -242,6 +245,95 @@ static int sm2_pump(struct ssh *from, struct ssh *to) {
     }
 }
 
+/* Move all queued output bytes from one side's transport into the other's input. */
+static void deliver_all(struct ssh *from, struct ssh *to) {
+    size_t len;
+    const u_char *buf;
+    while ((buf = ssh_output_ptr(from, &len)) != NULL && len > 0) {
+        ssh_input_append(to, buf, len);
+        ssh_output_consume(from, len);
+    }
+}
+
+/* SM4 (Option b): real publickey userauth to USERAUTH_SUCCESS.
+ * REAL OpenSSH: the RFC 4252 signed-data format, the signature (sshkey_sign ->
+ * pkcs11_sign_mldsa -> C_Sign; user key never leaves the token), and the verify
+ * (sshkey_verify). DRIVEN here (not auth2.c's loop, which needs PAM/privsep/accounts
+ * that don't exist in a browser): the request/success message orchestration and a
+ * minimal "is this the authorized key" accept policy. SERVICE_REQUEST is skipped
+ * (no crypto value); the same token key is used for the user role as the host role. */
+static int do_userauth(struct ssh *client, struct ssh *server, struct sshkey *authkey) {
+    struct sshbuf *b = NULL;
+    u_char *sig = NULL, *pkblob = NULL, *rsig = NULL, have_sig = 0, type = 0;
+    size_t slen = 0, pklen = 0, rsiglen = 0, skip = 0;
+    char *user = NULL, *service = NULL, *method = NULL, *alg = NULL;
+    struct sshkey *recv_key = NULL;
+    int r, g, ret = -1;
+    const char *U = "pqcuser", *SVC = "ssh-connection", *M = "publickey", *A = "ssh-mldsa-65";
+
+    if ((b = sshbuf_new()) == NULL) { wasm_emit_event("error", "userauth sshbuf_new"); return -1; }
+
+    /* client: assemble the signed data exactly as sshconnect2.c does, sign via C_Sign. */
+    if ((r = sshbuf_put_stringb(b, client->kex->session_id)) != 0) { emit_rv("ua put session_id", (CK_RV)r); goto out; }
+    skip = sshbuf_len(b);
+    if ((r = sshbuf_put_u8(b, SSH2_MSG_USERAUTH_REQUEST)) != 0 ||
+        (r = sshbuf_put_cstring(b, U)) != 0 ||
+        (r = sshbuf_put_cstring(b, SVC)) != 0 ||
+        (r = sshbuf_put_cstring(b, M)) != 0 ||
+        (r = sshbuf_put_u8(b, 1)) != 0 ||
+        (r = sshbuf_put_cstring(b, A)) != 0 ||
+        (r = sshkey_puts(authkey, b)) != 0) { emit_rv("ua assemble", (CK_RV)r); goto out; }
+    if ((r = sshkey_sign(authkey, &sig, &slen, sshbuf_ptr(b), sshbuf_len(b),
+        A, NULL, NULL, client->compat)) != 0) { emit_rv("ua sshkey_sign", (CK_RV)r); goto out; }
+    { char e[64]; snprintf(e, sizeof e, "{\"user_sig_len\":%zu}", slen); wasm_emit_event("user_key_sign", e); }
+    if ((r = sshbuf_put_string(b, sig, slen)) != 0) { emit_rv("ua append sig", (CK_RV)r); goto out; }
+    if ((r = sshbuf_consume(b, skip + 1)) != 0) { emit_rv("ua consume", (CK_RV)r); goto out; }
+    if ((r = sshpkt_start(client, SSH2_MSG_USERAUTH_REQUEST)) != 0 ||
+        (r = sshpkt_putb(client, b)) != 0 ||
+        (r = sshpkt_send(client)) != 0) { emit_rv("ua send request", (CK_RV)r); goto out; }
+    deliver_all(client, server);
+
+    /* server: receive USERAUTH_REQUEST, verify the signature with real sshkey_verify. */
+    for (g = 0; g < 8; g++) { if ((r = ssh_packet_next(server, &type)) != 0) { emit_rv("ua srv next", (CK_RV)r); goto out; } if (type != 0) break; }
+    if (type != SSH2_MSG_USERAUTH_REQUEST) { char e[48]; snprintf(e, sizeof e, "{\"got_type\":%d}", type); wasm_emit_event("error", e); goto out; }
+    if ((r = sshpkt_get_cstring(server, &user, NULL)) != 0 ||
+        (r = sshpkt_get_cstring(server, &service, NULL)) != 0 ||
+        (r = sshpkt_get_cstring(server, &method, NULL)) != 0 ||
+        (r = sshpkt_get_u8(server, &have_sig)) != 0 ||
+        (r = sshpkt_get_cstring(server, &alg, NULL)) != 0 ||
+        (r = sshpkt_get_string(server, &pkblob, &pklen)) != 0 ||
+        (r = sshpkt_get_string(server, &rsig, &rsiglen)) != 0) { emit_rv("ua parse", (CK_RV)r); goto out; }
+    if ((r = sshkey_from_blob(pkblob, pklen, &recv_key)) != 0) { emit_rv("ua from_blob", (CK_RV)r); goto out; }
+    sshbuf_reset(b);
+    if ((r = sshbuf_put_stringb(b, server->kex->session_id)) != 0 ||
+        (r = sshbuf_put_u8(b, SSH2_MSG_USERAUTH_REQUEST)) != 0 ||
+        (r = sshbuf_put_cstring(b, user)) != 0 ||
+        (r = sshbuf_put_cstring(b, service)) != 0 ||
+        (r = sshbuf_put_cstring(b, method)) != 0 ||
+        (r = sshbuf_put_u8(b, 1)) != 0 ||
+        (r = sshbuf_put_cstring(b, alg)) != 0 ||
+        (r = sshkey_puts(recv_key, b)) != 0) { emit_rv("ua rebuild", (CK_RV)r); goto out; }
+    if ((r = sshkey_verify(recv_key, rsig, rsiglen, sshbuf_ptr(b), sshbuf_len(b),
+        alg, server->compat, NULL)) != 0) { emit_rv("ua sshkey_verify", (CK_RV)r); goto out; }
+    if (!sshkey_equal_public(recv_key, authkey)) { wasm_emit_event("error", "ua key not authorized"); goto out; }
+    wasm_emit_event("userauth_verified", "{\"method\":\"publickey\",\"alg\":\"ssh-mldsa-65\",\"verify\":\"sshkey_verify\"}");
+    if ((r = sshpkt_start(server, SSH2_MSG_USERAUTH_SUCCESS)) != 0 ||
+        (r = sshpkt_send(server)) != 0) { emit_rv("ua send success", (CK_RV)r); goto out; }
+    deliver_all(server, client);
+
+    /* client: receive USERAUTH_SUCCESS. */
+    type = 0;
+    for (g = 0; g < 8; g++) { if ((r = ssh_packet_next(client, &type)) != 0) { emit_rv("ua cli next", (CK_RV)r); goto out; } if (type != 0) break; }
+    if (type != SSH2_MSG_USERAUTH_SUCCESS) { char e[48]; snprintf(e, sizeof e, "{\"got_type\":%d}", type); wasm_emit_event("error", e); goto out; }
+    wasm_emit_event("userauth_success", "{\"user\":\"pqcuser\",\"method\":\"publickey\",\"usersign\":\"C_Sign\"}");
+    ret = 0;
+out:
+    sshbuf_free(b); free(sig); free(pkblob); free(rsig);
+    free(user); free(service); free(method); free(alg);
+    sshkey_free(recv_key);
+    return ret;
+}
+
 static int drive_kex(void) {
     struct ssh *client = NULL, *server = NULL;
     struct sshkey **keys = NULL, *hostkey = NULL, *pub = NULL;
@@ -290,7 +382,9 @@ static int drive_kex(void) {
         /* Server reached NEWKEYS: its exchange-hash signature was produced by the token's
          * C_Sign and verified by the client under the host public key. */
         wasm_emit_event("newkeys", "{\"server\":1,\"client\":1,\"hostsign\":\"C_Sign\"}");
-        return 0;
+        /* SM4: continue into real publickey userauth. Same token key serves the user role
+         * (its signature also via C_Sign), proving BOTH host- and user-auth are HSM-backed. */
+        return do_userauth(client, server, hostkey);
     }
     wasm_emit_event("error", "kex did not converge");
     return -1;
@@ -312,8 +406,8 @@ int __wrap_main(int argc, char **argv) {
      * C_Initialize and treats CKR_CRYPTOKI_ALREADY_INITIALIZED as fatal. The file-backed
      * token (objectstore.backend=file) persists the provisioned host key across finalize. */
     if (g_p11) g_p11->C_Finalize(NULL_PTR);
-    if (drive_kex() != 0)            return 1;   /* SM3: KEX host-sign via provider -> C_Sign */
-    wasm_emit_event("done", "{\"connection_ok\":true,\"note\":\"SM3 ok\"}");
+    if (drive_kex() != 0)            return 1;   /* SM3 KEX host-sign + SM4 userauth via C_Sign */
+    wasm_emit_event("done", "{\"connection_ok\":true,\"note\":\"SM4 ok\"}");
     return 0;
 }
 

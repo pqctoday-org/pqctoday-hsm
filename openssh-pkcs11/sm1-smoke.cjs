@@ -46,7 +46,18 @@ if (typeof factory !== 'function' && factory && typeof factory.default === 'func
   const j = JSON.parse(nk.payload)
   assert(j.server === 1 && j.client === 1, 'both sides did not reach NEWKEYS: ' + nk.payload)
   assert(j.hostsign === 'C_Sign', 'host signature not via C_Sign: ' + nk.payload)
-  console.log('SM3 PASS — mlkem768x25519 KEX reached NEWKEYS; ssh-mldsa-65 host sign via token C_Sign')
+  console.log('SM3 OK — mlkem768x25519 KEX reached NEWKEYS; ssh-mldsa-65 host sign via token C_Sign')
+
+  // SM4: real publickey userauth reached USERAUTH_SUCCESS; the USER key signature
+  // was produced by the token's C_Sign and verified by the server's sshkey_verify.
+  // sshkey_sign returns the SSH wire-format blob: string "ssh-mldsa-65" (4+12) +
+  // string signature (4 + 3309 raw) = 3329 bytes (vs the raw 3309 from a direct C_Sign).
+  const uks = events.find((e) => e.type === 'user_key_sign')
+  assert(uks && JSON.parse(uks.payload).user_sig_len === 3329, 'user-key C_Sign missing/wrong size')
+  assert(events.some((e) => e.type === 'userauth_verified'), 'server did not verify the user signature')
+  const ua = events.find((e) => e.type === 'userauth_success')
+  assert(ua && JSON.parse(ua.payload).usersign === 'C_Sign', 'USERAUTH_SUCCESS via C_Sign missing')
+  console.log('SM4 PASS — publickey userauth → USERAUTH_SUCCESS; user key signed via token C_Sign')
 })().catch((e) => {
   console.error('SM1 FAIL:', e && e.message ? e.message : e)
   process.exit(1)
