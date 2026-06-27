@@ -229,20 +229,28 @@ echo "[openssh-pkcs11] Building sshd WASM with ${NCPU} jobs..."
 # ── Step 4a: Compile the shim via the Makefile .c.o rule (same CFLAGS as packet.o,
 # so <sys/queue.h> + all OpenSSH headers resolve) and link the already-built ssh_api.o
 # (the privsep-free KEX state machine; in SSHOBJS, not SSHDOBJS, so add it explicitly).
-cp "$ROOT/wasm-shims/sshd_wasm_main.c" "$OPENSSH_SRC/"   # latest shim into the build tree (VPATH)
-(cd "$ROOT/build/sshd-wasm" && emmake make sshd_wasm_main.o ssh_api.o)
-SSHD_SHIM_OBJS="$ROOT/build/sshd-wasm/sshd_wasm_main.o $ROOT/build/sshd-wasm/ssh_api.o"
+cp "$ROOT/wasm-shims/sshd_wasm_main.c" "$OPENSSH_SRC/"   # latest shims into the build tree (VPATH)
+cp "$ROOT/wasm-shims/pkcs11_static.c"  "$OPENSSH_SRC/"   # dlopen->static-softhsm bridge (SM3)
+# ssh_api.o = KEX driver; pkcs11_static.o = dlopen bridge; ssh-pkcs11.o = the REAL PKCS#11
+# signer (pkcs11_sign_mldsa -> C_Sign) that replaces the fork/exec ssh-pkcs11-client.o stub.
+(cd "$ROOT/build/sshd-wasm" && emmake make sshd_wasm_main.o ssh_api.o pkcs11_static.o ssh-pkcs11.o)
+SSHD_SHIM_OBJS="$ROOT/build/sshd-wasm/sshd_wasm_main.o $ROOT/build/sshd-wasm/ssh_api.o $ROOT/build/sshd-wasm/pkcs11_static.o"
 
 # ── Step 4b: Link sshd with the shim entry exported (called via ccall) ─────────
 # The native main() (sshd.c:1287) re-execs into sshd-session, useless in WASM; we
 # DON'T export/call it, so --gc-sections drops it. Our entry __wrap_main is exported
 # directly (___wrap_main) and invoked from JS via ccall. No --wrap,main needed
 # (exporting _main fails: with --wrap the `main` symbol is renamed away).
+# P11OBJS=ssh-pkcs11.o swaps the fork/exec helper stub (ssh-pkcs11-client.o) for the
+# real in-process PKCS#11 signer in $(SSHDOBJS). --wrap,lib_contains_symbol skips the
+# .so file-scan (misc.c) that can't work against a statically-linked provider.
 (cd "$ROOT/build/sshd-wasm" && emmake make -j"$NCPU" sshd \
+    P11OBJS=ssh-pkcs11.o \
     LDFLAGS="${SHARED_LDFLAGS[*]} -s EXPORT_NAME=createSshdModule \
         --pre-js ${HSM_ROOT}/src/wasm/softhsm_pre.js \
         -L. -Lopenbsd-compat/ -L${OPENSSL_WASM}/lib \
         ${SSHD_SHIM_OBJS} \
+        -Wl,--wrap,lib_contains_symbol \
         -s EXPORTED_FUNCTIONS=['___wrap_main','_C_GetFunctionList'] \
         ${COMMON_LIBS}")
 

@@ -44,6 +44,12 @@ extern CK_RV C_GetFunctionList(CK_FUNCTION_LIST_PTR_PTR);
 #include "ssherr.h"
 #include "kex.h"
 #include "myproposal.h"
+#include "ssh-pkcs11.h"   /* pkcs11_add_provider — SM3 host key from the token */
+
+/* WASM: the PKCS#11 provider is STATICALLY linked (no .so to nlist/mmap-scan), so
+ * route OpenSSH's lib_contains_symbol() pre-check (misc.c) to an always-OK stub via
+ * -Wl,--wrap,lib_contains_symbol. dlopen()/dlsym() are handled by pkcs11_static.c. */
+int __wrap_lib_contains_symbol(const char *path, const char *s) { (void)path; (void)s; return 0; }
 
 /* NOTE: getpwnam/getpwuid stubs removed — emscripten musl already provides them
  * (they collided: wasm-ld "duplicate symbol"). SM1 never calls them; if SM2's auth
@@ -238,39 +244,52 @@ static int sm2_pump(struct ssh *from, struct ssh *to) {
 
 static int drive_kex(void) {
     struct ssh *client = NULL, *server = NULL;
-    struct sshkey *priv = NULL, *pub = NULL;
+    struct sshkey **keys = NULL, *hostkey = NULL, *pub = NULL;
+    char **labels = NULL;
     struct kex_params kp;
     char *base[PROPOSAL_MAX] = { KEX_CLIENT };
-    int r;
+    int nkeys, i, r;
 
-    /* SM2 uses an in-memory ssh-ed25519 host key — OpenSSH's ssh-mldsa.c implements
-     * sign/verify but NOT keygen (ML-DSA keys come from the HSM by design, returns
-     * SSH_ERR_FEATURE_UNSUPPORTED). SM3 replaces this with the TOKEN ML-DSA-65 host key
-     * whose KEX signature is produced via PKCS#11 C_Sign. SM2 only needs the KEX itself
-     * to reach NEWKEYS; the host-key algorithm is independent of mlkem768x25519. */
-    r = sshkey_generate(KEY_ED25519, 0, &priv);
-    if (r != 0) { emit_rv("sshkey_generate(ED25519)", (CK_RV)r); return -1; }
-    r = sshkey_from_private(priv, &pub);
-    if (r != 0) { emit_rv("sshkey_from_private", (CK_RV)r); return -1; }
+    /* SM3 (the crux): fetch the TOKEN's ML-DSA-65 host key as a PKCS#11-backed (EXT)
+     * sshkey via OpenSSH's REAL provider path (pkcs11_add_provider -> dlopen-static
+     * shim -> softhsm). The server's KEX host-key signature then runs through OpenSSH's
+     * own sshkey_sign -> pkcs11_sign -> pkcs11_sign_mldsa -> C_Sign: the private key
+     * never leaves the token. Provider id "softhsm" matches the dlopen-static shim. */
+    /* MUST run before pkcs11_add_provider: it TAILQ_INIT()s pkcs11_providers/pkcs11_keys.
+     * Without it the registry head is zeroed; the record-key INSERT writes through a NULL
+     * tqh_last — which segfaults on native but silently corrupts in WASM (address 0 is
+     * writable), leaving the list empty so pkcs11_lookup_key fails at sign time. */
+    pkcs11_init(0);
+    nkeys = pkcs11_add_provider("softhsm", SM1_USER_PIN, &keys, &labels);
+    if (nkeys <= 0) { emit_rv("pkcs11_add_provider", (CK_RV)(long)nkeys); return -1; }
+    { char b[48]; snprintf(b, sizeof b, "{\"nkeys\":%d}", nkeys); wasm_emit_event("provider", b); }
+    for (i = 0; i < nkeys; i++) {
+        if (keys[i] != NULL && keys[i]->type == KEY_MLDSA_65) { hostkey = keys[i]; break; }
+    }
+    if (hostkey == NULL) { wasm_emit_event("error", "no ML-DSA-65 key returned by token"); return -1; }
+    if ((r = sshkey_from_private(hostkey, &pub)) != 0) { emit_rv("sshkey_from_private", (CK_RV)r); return -1; }
 
     memset(&kp, 0, sizeof kp);
     memcpy(kp.proposal, base, sizeof base);
     kp.proposal[PROPOSAL_KEX_ALGS] = "mlkem768x25519-sha256";
-    kp.proposal[PROPOSAL_SERVER_HOST_KEY_ALGS] = "ssh-ed25519";
+    kp.proposal[PROPOSAL_SERVER_HOST_KEY_ALGS] = "ssh-mldsa-65";
 
     if ((r = ssh_init(&client, 0, &kp)) != 0) { emit_rv("ssh_init(client)", (CK_RV)r); return -1; }
     if ((r = ssh_init(&server, 1, &kp)) != 0) { emit_rv("ssh_init(server)", (CK_RV)r); return -1; }
-    if ((r = ssh_add_hostkey(server, priv)) != 0) { emit_rv("ssh_add_hostkey(server)", (CK_RV)r); return -1; }
-    if ((r = ssh_add_hostkey(client, pub)) != 0)  { emit_rv("ssh_add_hostkey(client)", (CK_RV)r); return -1; }
+    if ((r = ssh_add_hostkey(server, hostkey)) != 0) { emit_rv("ssh_add_hostkey(server)", (CK_RV)r); return -1; }
+    if ((r = ssh_add_hostkey(client, pub)) != 0)     { emit_rv("ssh_add_hostkey(client)", (CK_RV)r); return -1; }
 
-    wasm_emit_event("kex_start", "{\"kex\":\"mlkem768x25519-sha256\",\"hostkey\":\"ssh-ed25519\"}");
+    wasm_emit_event("kex_start",
+        "{\"kex\":\"mlkem768x25519-sha256\",\"hostkey\":\"ssh-mldsa-65\",\"sign\":\"C_Sign\"}");
     int guard = 0;
     while ((!server->kex->done || !client->kex->done) && guard++ < 64) {
         if (sm2_pump(server, client) != 0) return -1;
         if (sm2_pump(client, server) != 0) return -1;
     }
     if (server->kex->done && client->kex->done) {
-        wasm_emit_event("newkeys", "{\"server\":1,\"client\":1}");
+        /* Server reached NEWKEYS: its exchange-hash signature was produced by the token's
+         * C_Sign and verified by the client under the host public key. */
+        wasm_emit_event("newkeys", "{\"server\":1,\"client\":1,\"hostsign\":\"C_Sign\"}");
         return 0;
     }
     wasm_emit_event("error", "kex did not converge");
@@ -285,12 +304,16 @@ int __wrap_main(int argc, char **argv) {
     (void)argc; (void)argv;
 
     wasm_emit_event("start", "sshd WASM starting");
-    if (pkcs11_bootstrap() != 0)     return 1;   /* SM1 */
-    if (sm1_provision() != 0)        return 1;
+    if (pkcs11_bootstrap() != 0)     return 1;   /* SM1: init token + SO/USER login */
+    if (sm1_provision() != 0)        return 1;   /* SM1: ML-DSA-65 host key on the token */
     if (pkcs11_find_host_key() != 0) return 1;
-    if (sm1_prove_sign() != 0)       return 1;
-    if (drive_kex() != 0)            return 1;   /* SM2 */
-    wasm_emit_event("done", "{\"connection_ok\":true,\"note\":\"SM2 ok\"}");
+    if (sm1_prove_sign() != 0)       return 1;   /* SM1: prove one direct C_Sign */
+    /* Finalize our bootstrap session: OpenSSH's pkcs11_add_provider runs its own
+     * C_Initialize and treats CKR_CRYPTOKI_ALREADY_INITIALIZED as fatal. The file-backed
+     * token (objectstore.backend=file) persists the provisioned host key across finalize. */
+    if (g_p11) g_p11->C_Finalize(NULL_PTR);
+    if (drive_kex() != 0)            return 1;   /* SM3: KEX host-sign via provider -> C_Sign */
+    wasm_emit_event("done", "{\"connection_ok\":true,\"note\":\"SM3 ok\"}");
     return 0;
 }
 

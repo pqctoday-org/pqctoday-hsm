@@ -36,12 +36,17 @@ if (typeof factory !== 'function' && factory && typeof factory.default === 'func
   assert(sigLen === 3309, 'wrong ML-DSA-65 sig_len: ' + sigLen)
   console.log('SM1 OK — host-key C_Sign produced', sigLen, 'bytes from the token')
 
-  // SM2: a real in-process mlkem768x25519 + ssh-mldsa-65 handshake reached NEWKEYS
+  // SM2/SM3: a real in-process mlkem768x25519 handshake reached NEWKEYS, with the
+  // ssh-mldsa-65 host key fetched from the TOKEN via the real provider and its
+  // exchange-hash signature produced by C_Sign (private key never left the token).
+  const prov = events.find((e) => e.type === 'provider')
+  assert(prov && JSON.parse(prov.payload).nkeys >= 1, 'provider returned no token keys (SM3)')
   const nk = events.find((e) => e.type === 'newkeys')
   assert(nk, 'newkeys event missing (KEX did not reach NEWKEYS)')
   const j = JSON.parse(nk.payload)
   assert(j.server === 1 && j.client === 1, 'both sides did not reach NEWKEYS: ' + nk.payload)
-  console.log('SM2 PASS — real mlkem768x25519 KEX reached NEWKEYS (client+server)')
+  assert(j.hostsign === 'C_Sign', 'host signature not via C_Sign: ' + nk.payload)
+  console.log('SM3 PASS — mlkem768x25519 KEX reached NEWKEYS; ssh-mldsa-65 host sign via token C_Sign')
 })().catch((e) => {
   console.error('SM1 FAIL:', e && e.message ? e.message : e)
   process.exit(1)
