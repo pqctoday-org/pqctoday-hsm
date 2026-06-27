@@ -251,7 +251,7 @@ SSHD_SHIM_OBJS="$ROOT/build/sshd-wasm/sshd_wasm_main.o $ROOT/build/sshd-wasm/ssh
         -L. -Lopenbsd-compat/ -L${OPENSSL_WASM}/lib \
         ${SSHD_SHIM_OBJS} \
         -Wl,--wrap,lib_contains_symbol \
-        -s EXPORTED_FUNCTIONS=['___wrap_main','_C_GetFunctionList'] \
+        -s EXPORTED_FUNCTIONS=['___wrap_main','_set_handshake_config','_C_GetFunctionList'] \
         ${COMMON_LIBS}")
 
 echo "[openssh-pkcs11] Building ssh WASM with ${NCPU} jobs..."

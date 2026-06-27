@@ -97,6 +97,40 @@ static CK_OBJECT_HANDLE   g_host_key = CK_INVALID_HANDLE;
 #define SM1_SO_PIN   "12345678"
 #define SM1_USER_PIN "1234"
 
+/* EC / ECDSA constants (classical host-key profile). Values from PKCS#11 v3.2
+ * pkcs11t.h; guards are belt-and-suspenders for header drift. */
+#ifndef CKK_EC
+#define CKK_EC 0x00000003UL
+#endif
+#ifndef CKM_EC_KEY_PAIR_GEN
+#define CKM_EC_KEY_PAIR_GEN 0x00001040UL
+#endif
+#ifndef CKM_ECDSA
+#define CKM_ECDSA 0x00001041UL
+#endif
+/* DER OID for prime256v1 / NIST P-256 (1.2.840.10045.3.1.7). */
+static const CK_BYTE EC_PARAMS_P256[] = {
+    0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07
+};
+
+/* ── Handshake config (set from JS via set_handshake_config before __wrap_main) ──
+ * Selects the KEX and the host-key profile. Defaults reproduce the original
+ * hardcoded PQC run (mlkem768x25519-sha256 + ssh-mldsa-65). */
+enum { HOSTKEY_MLDSA65 = 0, HOSTKEY_ECDSA_P256 = 1 };
+static char g_cfg_kex[64]     = "mlkem768x25519-sha256";
+static char g_cfg_hostalg[40] = "ssh-mldsa-65";
+static int  g_cfg_keytype     = HOSTKEY_MLDSA65;
+
+EMSCRIPTEN_KEEPALIVE
+void set_handshake_config(const char *kex, const char *hostalg) {
+    if (kex && *kex)     { strncpy(g_cfg_kex, kex, sizeof g_cfg_kex - 1);
+                           g_cfg_kex[sizeof g_cfg_kex - 1] = '\0'; }
+    if (hostalg && *hostalg) { strncpy(g_cfg_hostalg, hostalg, sizeof g_cfg_hostalg - 1);
+                               g_cfg_hostalg[sizeof g_cfg_hostalg - 1] = '\0'; }
+    g_cfg_keytype = (strcmp(g_cfg_hostalg, "ecdsa-sha2-nistp256") == 0)
+                        ? HOSTKEY_ECDSA_P256 : HOSTKEY_MLDSA65;
+}
+
 static void emit_rv(const char *ctx, CK_RV rv) {
     char buf[96];
     snprintf(buf, sizeof buf, "%s rv=0x%lx", ctx, (unsigned long)rv);
@@ -158,40 +192,72 @@ static int pkcs11_bootstrap(void) {
 static int sm1_provision(void) {
     CK_OBJECT_CLASS pub_cls  = CKO_PUBLIC_KEY;
     CK_OBJECT_CLASS priv_cls = CKO_PRIVATE_KEY;
-    CK_KEY_TYPE     kt        = CKK_ML_DSA;
-    CK_ULONG        pset      = CKP_ML_DSA_65;
     CK_BBOOL        yes       = CK_TRUE;
     CK_BBOOL        no        = CK_FALSE;
     static const CK_BYTE host_id[] = { 's','s','h','d','-','h','o','s','t','-','k','e','y' };
 
-    CK_ATTRIBUTE pub_tmpl[] = {
-        { CKA_CLASS,         &pub_cls, sizeof pub_cls },
-        { CKA_KEY_TYPE,      &kt,      sizeof kt      },
-        { CKA_TOKEN,         &yes,     sizeof yes     },
-        { CKA_VERIFY,        &yes,     sizeof yes     },
-        { CKA_PARAMETER_SET, &pset,    sizeof pset    },
-        { CKA_ID,            (void*)host_id, sizeof host_id },
-    };
-    CK_ATTRIBUTE priv_tmpl[] = {
-        { CKA_CLASS,       &priv_cls, sizeof priv_cls },
-        { CKA_KEY_TYPE,    &kt,       sizeof kt       },
-        { CKA_TOKEN,       &yes,      sizeof yes      },
-        { CKA_PRIVATE,     &yes,      sizeof yes      },
-        { CKA_SIGN,        &yes,      sizeof yes      },
-        { CKA_EXTRACTABLE, &no,       sizeof no       },
-        { CKA_ID,          (void*)host_id, sizeof host_id },
-    };
-    CK_MECHANISM gen = { CKM_ML_DSA_KEY_PAIR_GEN, NULL_PTR, 0 };
+    /* Key-type-specific bits. */
+    CK_KEY_TYPE  kt;
+    CK_ULONG     pset = CKP_ML_DSA_65;       /* ML-DSA only */
+    CK_MECHANISM gen;
+    const char  *trace_key;
+    long         trace_mech;
+
+    /* Pub/priv templates are built per type below (ML-DSA uses CKA_PARAMETER_SET;
+     * ECDSA uses CKA_EC_PARAMS). */
+    CK_ATTRIBUTE pub_tmpl[6];
+    CK_ATTRIBUTE priv_tmpl[7];
+    CK_ULONG npub, npriv;
+
+    if (g_cfg_keytype == HOSTKEY_ECDSA_P256) {
+        kt = CKK_EC;
+        gen.mechanism = CKM_EC_KEY_PAIR_GEN; gen.pParameter = NULL_PTR; gen.ulParameterLen = 0;
+        trace_key = "ECDSA P-256 host key"; trace_mech = (long)CKM_EC_KEY_PAIR_GEN;
+        CK_ATTRIBUTE p[] = {
+            { CKA_CLASS,     &pub_cls, sizeof pub_cls },
+            { CKA_KEY_TYPE,  &kt,      sizeof kt      },
+            { CKA_TOKEN,     &yes,     sizeof yes     },
+            { CKA_VERIFY,    &yes,     sizeof yes     },
+            { CKA_EC_PARAMS, (void*)EC_PARAMS_P256, sizeof EC_PARAMS_P256 },
+            { CKA_ID,        (void*)host_id, sizeof host_id },
+        };
+        memcpy(pub_tmpl, p, sizeof p); npub = 6;
+    } else {
+        kt = CKK_ML_DSA;
+        gen.mechanism = CKM_ML_DSA_KEY_PAIR_GEN; gen.pParameter = NULL_PTR; gen.ulParameterLen = 0;
+        trace_key = "ML-DSA-65 host key"; trace_mech = (long)CKM_ML_DSA_KEY_PAIR_GEN;
+        CK_ATTRIBUTE p[] = {
+            { CKA_CLASS,         &pub_cls, sizeof pub_cls },
+            { CKA_KEY_TYPE,      &kt,      sizeof kt      },
+            { CKA_TOKEN,         &yes,     sizeof yes     },
+            { CKA_VERIFY,        &yes,     sizeof yes     },
+            { CKA_PARAMETER_SET, &pset,    sizeof pset    },
+            { CKA_ID,            (void*)host_id, sizeof host_id },
+        };
+        memcpy(pub_tmpl, p, sizeof p); npub = 6;
+    }
+    {
+        CK_ATTRIBUTE pr[] = {
+            { CKA_CLASS,       &priv_cls, sizeof priv_cls },
+            { CKA_KEY_TYPE,    &kt,       sizeof kt       },
+            { CKA_TOKEN,       &yes,      sizeof yes      },
+            { CKA_PRIVATE,     &yes,      sizeof yes      },
+            { CKA_SIGN,        &yes,      sizeof yes      },
+            { CKA_EXTRACTABLE, &no,       sizeof no       },
+            { CKA_ID,          (void*)host_id, sizeof host_id },
+        };
+        memcpy(priv_tmpl, pr, sizeof pr); npriv = 7;
+    }
+
     CK_OBJECT_HANDLE hPub = CK_INVALID_HANDLE, hPriv = CK_INVALID_HANDLE;
-    CK_RV rv = g_p11->C_GenerateKeyPair(g_session, &gen,
-        pub_tmpl,  sizeof pub_tmpl  / sizeof pub_tmpl[0],
-        priv_tmpl, sizeof priv_tmpl / sizeof priv_tmpl[0],
+    CK_RV rv = g_p11->C_GenerateKeyPair(g_session, &gen, pub_tmpl, npub, priv_tmpl, npriv,
         &hPub, &hPriv);
     if (rv != CKR_OK) { emit_rv("C_GenerateKeyPair", rv); return -1; }
     /* PKCS#11 trace: the host keypair is generated ON the token (shim-direct call,
      * so it isn't seen by the provider-path tap in pkcs11_static.c — emit it here). */
-    wasm_emit_event("pkcs11",
-        "{\"op\":\"C_GenerateKeyPair\",\"mech\":28,\"key\":\"ML-DSA-65 host key\"}");
+    { char b[96]; snprintf(b, sizeof b,
+        "{\"op\":\"C_GenerateKeyPair\",\"mech\":%ld,\"key\":\"%s\"}", trace_mech, trace_key);
+      wasm_emit_event("pkcs11", b); }
     wasm_emit_event("provisioned", "{\"key\":\"sshd-host-key\"}");
     return 0;
 }
@@ -213,9 +279,12 @@ static int pkcs11_find_host_key(void) {
     return 0;
 }
 
-/* SM1 proof: one single-part ML-DSA C_Sign with the token host key. */
+/* SM1 proof: one single-part C_Sign with the token host key (mechanism per the
+ * selected host-key profile). For ECDSA the input is a 32-byte digest; for
+ * ML-DSA (pure) it is the message itself. */
 static int sm1_prove_sign(void) {
-    CK_MECHANISM mech = { CKM_ML_DSA, NULL_PTR, 0 };
+    CK_MECHANISM mech = { (g_cfg_keytype == HOSTKEY_ECDSA_P256) ? CKM_ECDSA : CKM_ML_DSA,
+                          NULL_PTR, 0 };
     CK_BYTE data[32]; memset(data, 0xA5, sizeof data);
     CK_RV rv = g_p11->C_SignInit(g_session, &mech, g_host_key);
     if (rv != CKR_OK) { emit_rv("C_SignInit", rv); return -1; }
@@ -273,7 +342,7 @@ static int do_userauth(struct ssh *client, struct ssh *server, struct sshkey *au
     char *user = NULL, *service = NULL, *method = NULL, *alg = NULL;
     struct sshkey *recv_key = NULL;
     int r, g, ret = -1;
-    const char *U = "pqcuser", *SVC = "ssh-connection", *M = "publickey", *A = "ssh-mldsa-65";
+    const char *U = "pqcuser", *SVC = "ssh-connection", *M = "publickey", *A = g_cfg_hostalg;
 
     if ((b = sshbuf_new()) == NULL) { wasm_emit_event("error", "userauth sshbuf_new"); return -1; }
 
@@ -320,7 +389,9 @@ static int do_userauth(struct ssh *client, struct ssh *server, struct sshkey *au
     if ((r = sshkey_verify(recv_key, rsig, rsiglen, sshbuf_ptr(b), sshbuf_len(b),
         alg, server->compat, NULL)) != 0) { emit_rv("ua sshkey_verify", (CK_RV)r); goto out; }
     if (!sshkey_equal_public(recv_key, authkey)) { wasm_emit_event("error", "ua key not authorized"); goto out; }
-    wasm_emit_event("userauth_verified", "{\"method\":\"publickey\",\"alg\":\"ssh-mldsa-65\",\"verify\":\"sshkey_verify\"}");
+    { char e[120]; snprintf(e, sizeof e,
+        "{\"method\":\"publickey\",\"alg\":\"%s\",\"verify\":\"sshkey_verify\"}", g_cfg_hostalg);
+      wasm_emit_event("userauth_verified", e); }
     if ((r = sshpkt_start(server, SSH2_MSG_USERAUTH_SUCCESS)) != 0 ||
         (r = sshpkt_send(server)) != 0) { emit_rv("ua send success", (CK_RV)r); goto out; }
     deliver_all(server, client);
@@ -359,24 +430,27 @@ static int drive_kex(void) {
     nkeys = pkcs11_add_provider("softhsm", SM1_USER_PIN, &keys, &labels);
     if (nkeys <= 0) { emit_rv("pkcs11_add_provider", (CK_RV)(long)nkeys); return -1; }
     { char b[48]; snprintf(b, sizeof b, "{\"nkeys\":%d}", nkeys); wasm_emit_event("provider", b); }
+    /* Pick the host key matching the configured profile. */
+    int want_type = (g_cfg_keytype == HOSTKEY_ECDSA_P256) ? KEY_ECDSA : KEY_MLDSA_65;
     for (i = 0; i < nkeys; i++) {
-        if (keys[i] != NULL && keys[i]->type == KEY_MLDSA_65) { hostkey = keys[i]; break; }
+        if (keys[i] != NULL && keys[i]->type == want_type) { hostkey = keys[i]; break; }
     }
-    if (hostkey == NULL) { wasm_emit_event("error", "no ML-DSA-65 key returned by token"); return -1; }
+    if (hostkey == NULL) { wasm_emit_event("error", "configured host key not returned by token"); return -1; }
     if ((r = sshkey_from_private(hostkey, &pub)) != 0) { emit_rv("sshkey_from_private", (CK_RV)r); return -1; }
 
     memset(&kp, 0, sizeof kp);
     memcpy(kp.proposal, base, sizeof base);
-    kp.proposal[PROPOSAL_KEX_ALGS] = "mlkem768x25519-sha256";
-    kp.proposal[PROPOSAL_SERVER_HOST_KEY_ALGS] = "ssh-mldsa-65";
+    kp.proposal[PROPOSAL_KEX_ALGS] = g_cfg_kex;
+    kp.proposal[PROPOSAL_SERVER_HOST_KEY_ALGS] = g_cfg_hostalg;
 
     if ((r = ssh_init(&client, 0, &kp)) != 0) { emit_rv("ssh_init(client)", (CK_RV)r); return -1; }
     if ((r = ssh_init(&server, 1, &kp)) != 0) { emit_rv("ssh_init(server)", (CK_RV)r); return -1; }
     if ((r = ssh_add_hostkey(server, hostkey)) != 0) { emit_rv("ssh_add_hostkey(server)", (CK_RV)r); return -1; }
     if ((r = ssh_add_hostkey(client, pub)) != 0)     { emit_rv("ssh_add_hostkey(client)", (CK_RV)r); return -1; }
 
-    wasm_emit_event("kex_start",
-        "{\"kex\":\"mlkem768x25519-sha256\",\"hostkey\":\"ssh-mldsa-65\",\"sign\":\"C_Sign\"}");
+    { char b[160]; snprintf(b, sizeof b,
+        "{\"kex\":\"%s\",\"hostkey\":\"%s\",\"sign\":\"C_Sign\"}", g_cfg_kex, g_cfg_hostalg);
+      wasm_emit_event("kex_start", b); }
     int guard = 0;
     while ((!server->kex->done || !client->kex->done) && guard++ < 64) {
         if (sm2_pump(server, client) != 0) return -1;
