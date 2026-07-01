@@ -440,7 +440,9 @@ fn build_payload(op: &str, spec: &Json) -> Result<RequestPayload, String> {
             ],
         }),
         "Create" => {
-            let alg = alg_from_spec(spec).unwrap_or(KmipAlgorithm::Aes);
+            // H1 — a present-but-unknown algorithm name is an error, not a
+            // silent fallback to AES. Absent → AES (symmetric default).
+            let alg = alg_from_spec_checked(spec)?.unwrap_or(KmipAlgorithm::Aes);
             let mut attrs = vec![
                 Attribute::CryptographicAlgorithm(alg),
                 Attribute::CryptographicUsageMask(UsageMask::ENCRYPT | UsageMask::DECRYPT),
@@ -460,7 +462,9 @@ fn build_payload(op: &str, spec: &Json) -> Result<RequestPayload, String> {
             // resolves to a different algorithm). The dispatcher canonicalises
             // the usage mask into `CreateKeyPair:{Sign,KeyAgreement,Encrypt}`,
             // the op-string the policies key their defaults on.
-            let alg = alg_from_spec(spec);
+            // H1 — a present-but-unknown algorithm name is an error, not a
+            // silent fall-through to the default signing keypair.
+            let alg = alg_from_spec_checked(spec)?;
             let intent = spec.get("intent").and_then(|v| v.as_str());
             let usage = match (alg, intent) {
                 (Some(a), _) if is_kem(a) => UsageMask::ENCRYPT | UsageMask::DECRYPT,
@@ -555,8 +559,22 @@ fn spec_bytes(spec: &Json, hex_key: &str, text_key: &str) -> Vec<u8> {
     Vec::new()
 }
 
-fn alg_from_spec(spec: &Json) -> Option<KmipAlgorithm> {
-    spec.get("algorithm").and_then(|v| v.as_str()).and_then(alg_from_name)
+/// Resolve the spec's `algorithm` field, distinguishing "absent" (Ok(None) —
+/// the policy-default path) from "present but not implemented" (Err) (H1).
+///
+/// The old silent-drop behaviour meant a spec naming an algorithm the engine
+/// doesn't implement (e.g. `FrodoKEM-1344`) fell through to a default: Create
+/// became an AES key and CreateKeyPair a signing keypair — so "Run for real"
+/// exercised a *different* request than the UI displayed, and the policy verdict
+/// shown was for the wrong request. Surfacing an error keeps Preview (which
+/// dry-runs the raw string) and Run-for-real honest about each other.
+fn alg_from_spec_checked(spec: &Json) -> Result<Option<KmipAlgorithm>, String> {
+    match spec.get("algorithm").and_then(|v| v.as_str()) {
+        None => Ok(None),
+        Some(name) => alg_from_name(name).map(Some).ok_or_else(|| {
+            format!("unknown algorithm '{name}' — not a KMIP spec name this engine implements")
+        }),
+    }
 }
 
 /// Map a KMIP spec-name string (e.g. "ML-DSA-65") to the algorithm enum.
