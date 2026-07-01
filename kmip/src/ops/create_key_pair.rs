@@ -24,7 +24,6 @@
 //!   engine session (unit tests) the soft fallback allocates UUIDs and
 //!   is audited as `soft::placeholder_generate_keypair`.
 
-use std::collections::HashMap;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
@@ -114,13 +113,26 @@ pub fn create_key_pair(
     let _ = (priv_x.algorithm, pub_x.algorithm); // silence unused; merged via extract_template
 
     // ── Plane 1: policy gate ────────────────────────────────────────────
-    let empty_attrs: HashMap<String, String> = HashMap::new();
+    // Y1: custom attributes may ride on any of the three attribute groups —
+    // combine them so `require_custom_attribute` sees the classification tag.
+    // Y3: qualify the bare algorithm ("RSA" → "RSA-3072", "ECDSA" → "ECDSA-P384").
+    let all_attrs: Vec<Attribute> = req
+        .common_attributes
+        .iter()
+        .chain(req.private_key_attributes.iter())
+        .chain(req.public_key_attributes.iter())
+        .cloned()
+        .collect();
+    let custom_attrs = super::helpers::custom_attrs_from(&all_attrs);
+    let qualified_algo = algorithm_in
+        .as_deref()
+        .map(|a| super::helpers::qualify_algorithm_str(a, key_length));
     let mut p_req = PolicyRequest::minimal(
         op_canonical,
-        algorithm_in.as_deref(),
+        qualified_algo.as_deref(),
         started,
         correlation_id,
-        &empty_attrs,
+        &custom_attrs,
     );
     p_req.key_length = key_length;
     p_req.usage_mask = usage_mask;
@@ -234,7 +246,10 @@ pub fn create_key_pair(
                 m
             },
 
-            custom_attributes: std::collections::HashMap::new(),
+            // Y1 — persist the request's custom attributes (e.g. the CNSA
+            // classification tag) on the private key so use-time policy gates
+            // (Sign/Encrypt) can read the classification back off the object.
+            custom_attributes: super::helpers::raw_custom_attrs(&all_attrs),
 
 
             key_material: None,

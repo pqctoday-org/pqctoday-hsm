@@ -74,14 +74,15 @@ pub fn decapsulate(
     // policy plane governs ML-KEM operations — emits the p1 PolicyDecided
     // audit event and enforces allow / deny.
     let started = time::OffsetDateTime::now_utc();
-    let empty: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-    let stored_algo = super::helpers::canonical_name(obj.algorithm);
+    // Y1 — stored classification tag off the KEM key.
+    let stored_attrs = super::helpers::strip_x_prefixes(&obj.custom_attributes);
+    let stored_algo = super::helpers::qualified_name(obj.algorithm, obj.cryptographic_length);
     let mut p_req = crate::policy::PolicyRequest::minimal(
         "Decapsulate",
         Some(&stored_algo),
         started,
         correlation_id,
-        &empty,
+        &stored_attrs,
     );
     p_req.usage_mask = Some(obj.usage_mask);
     p_req.state = Some("Active");

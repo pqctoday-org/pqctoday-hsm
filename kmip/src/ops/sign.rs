@@ -25,7 +25,6 @@
 //!   no engine session it fails closed — a SHA-256 stand-in survives only
 //!   under `#[cfg(test)]` for the engine-less unit tests.
 
-use std::collections::HashMap;
 use time::OffsetDateTime;
 
 use crate::auditlog::{AuditEvent, EventPayload, KmipOpResult, Plane};
@@ -103,7 +102,9 @@ pub fn sign(deps: &Deps, req: SignRequest, correlation_id: &str) -> Result<SignR
     )?;
 
     // ── Plane 1: policy gate ────────────────────────────────────────────
-    let empty: HashMap<String, String> = HashMap::new();
+    // Y1 — read the classification tag off the stored key so a
+    // `require_custom_attribute` gate applies at use-time too.
+    let stored_attrs = super::helpers::strip_x_prefixes(&obj.custom_attributes);
     // Curve/size-QUALIFIED name (e.g. "ECDSA-P256") so the shipped policies'
     // qualified `from:`/denylist entries actually match this stored key — the
     // coarse `canonical_name` ("ECDSA") never matched, leaving the rekey rules
@@ -114,7 +115,7 @@ pub fn sign(deps: &Deps, req: SignRequest, correlation_id: &str) -> Result<SignR
         Some(&stored_algo),
         started,
         correlation_id,
-        &empty,
+        &stored_attrs,
     );
     p_req.usage_mask = Some(obj.usage_mask);
     p_req.state = Some("Active");

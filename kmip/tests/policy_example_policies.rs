@@ -183,21 +183,24 @@ fn pqc_migration_2030_temporal_cutoff_kicks_in_post_2030() {
     let eng = engine_for("pqc-migration-2030.yaml");
     let attrs = HashMap::new();
 
-    // Pre-2030: classical signing creates allowed (migration window).
+    // ECDSA is asymmetric, so its creation op is `CreateKeyPair:Sign`, not the
+    // symmetric `Create` (Y2). Rule 3's ECDSA cutoff is 2027-01-01.
+    // Pre-2027: classical ECDSA key-pair creation allowed (migration window).
     let ts_pre = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap(); // 2023
-    let mut pre_req = req("Create", Some("ECDSA-P256"), &attrs);
+    let mut pre_req = req("CreateKeyPair:Sign", Some("ECDSA-P256"), &attrs);
     pre_req.ts = ts_pre;
     let d_pre = eng.evaluate(&pre_req);
-    // Either allow (no rule fires) or deny depending on the file's wording —
-    // assert it's at minimum not a panic and the engine produces a decision.
-    assert!(d_pre.is_allow() || d_pre.is_deny());
+    assert!(
+        d_pre.is_allow(),
+        "pre-cutoff classical ECDSA key-pair creation must be allowed (migration window)"
+    );
 
-    // Post-2030: classical Create must be denied.
+    // Post-cutoff: classical ECDSA key-pair creation must be denied.
     let ts_post = OffsetDateTime::from_unix_timestamp(2_000_000_000).unwrap(); // 2033
-    let mut post_req = req("Create", Some("ECDSA-P256"), &attrs);
+    let mut post_req = req("CreateKeyPair:Sign", Some("ECDSA-P256"), &attrs);
     post_req.ts = ts_post;
     let d_post = eng.evaluate(&post_req);
-    assert!(d_post.is_deny(), "post-2030 classical Create must be denied");
+    assert!(d_post.is_deny(), "post-2027 classical ECDSA CreateKeyPair must be denied");
 }
 
 // ── §6: hybrid-migration-window — composite required mid-window ─────────────

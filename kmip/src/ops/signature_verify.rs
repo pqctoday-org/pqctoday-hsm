@@ -27,7 +27,6 @@
 //!   with no engine session it fails closed — a SHA-256 stand-in survives only
 //!   under `#[cfg(test)]` for the engine-less unit tests.
 
-use std::collections::HashMap;
 use time::OffsetDateTime;
 
 use crate::error::{KmipError, Result, ResultReason};
@@ -36,7 +35,7 @@ use crate::policy::{Decision, PolicyRequest};
 
 use super::deps::Deps;
 use super::helpers::{
-    canonical_name, emit_pkcs11, emit_pkcs11_result, emit_request, emit_success, fail_err,
+    emit_pkcs11, emit_pkcs11_result, emit_request, emit_success, fail_err,
     state_name,
 };
 
@@ -107,15 +106,15 @@ pub fn signature_verify(
         deps, correlation_id, "SignatureVerify", &obj, crate::kmip30::UsageMask::VERIFY,
     )?;
 
-    // Plane-1 policy gate.
-    let empty: HashMap<String, String> = HashMap::new();
-    let algo = canonical_name(obj.algorithm);
+    // Plane-1 policy gate. Y1 stored classification; Y3 qualified name.
+    let stored_attrs = super::helpers::strip_x_prefixes(&obj.custom_attributes);
+    let algo = super::helpers::qualified_name(obj.algorithm, obj.cryptographic_length);
     let mut p_req = PolicyRequest::minimal(
         "SignatureVerify",
         Some(&algo),
         started,
         correlation_id,
-        &empty,
+        &stored_attrs,
     );
     p_req.usage_mask = Some(obj.usage_mask);
     p_req.state = Some(state_name(obj.state));

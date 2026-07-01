@@ -17,7 +17,6 @@
 //! - **Plane 3** — calls `C_GenerateKey` (PKCS#11 v3.2 §C.7.1).
 //!   Signature verified at `rust/src/ffi.rs::C_GenerateKey`.
 
-use std::collections::HashMap;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
@@ -71,10 +70,21 @@ pub fn create(deps: &Deps, mut req: CreateRequest, correlation_id: &str) -> Resu
 
     let (algorithm_in, key_length, usage_mask) = extract_template(&req.template_attribute);
 
-    // Plane-1 policy gate.
-    let empty: HashMap<String, String> = HashMap::new();
-    let mut p_req =
-        PolicyRequest::minimal("Create", algorithm_in.as_deref(), started, correlation_id, &empty);
+    // Plane-1 policy gate. Y1: surface the request's custom attributes so
+    // `require_custom_attribute` can actually see the classification tag.
+    // Y3: qualify the bare algorithm name ("AES" → "AES-256") so size-specific
+    // allow/deny rules match.
+    let custom_attrs = super::helpers::custom_attrs_from(&req.template_attribute);
+    let qualified_algo = algorithm_in
+        .as_deref()
+        .map(|a| super::helpers::qualify_algorithm_str(a, key_length));
+    let mut p_req = PolicyRequest::minimal(
+        "Create",
+        qualified_algo.as_deref(),
+        started,
+        correlation_id,
+        &custom_attrs,
+    );
     p_req.key_length = key_length;
     p_req.usage_mask = usage_mask;
 
@@ -175,7 +185,9 @@ pub fn create(deps: &Deps, mut req: CreateRequest, correlation_id: &str) -> Resu
         supersedes: None,
         name: x.name.clone(),
         links: std::collections::HashMap::new(),
-        custom_attributes: std::collections::HashMap::new(),
+        // Y1 — persist the request's custom attributes so use-time gates read
+        // the classification tag off the stored symmetric key.
+        custom_attributes: super::helpers::raw_custom_attrs(&req.template_attribute),
         object_groups: x.object_groups.clone(),
 
         key_material: None,

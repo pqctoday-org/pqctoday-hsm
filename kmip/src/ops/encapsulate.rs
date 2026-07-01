@@ -96,14 +96,15 @@ pub fn encapsulate(
     // p1 `PolicyDecided` audit event and enforces allow / deny. Without this,
     // KEM ops were a blind spot in the crypto-agility layer.
     let started = OffsetDateTime::now_utc();
-    let empty: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-    let stored_algo = super::helpers::canonical_name(obj.algorithm);
+    // Y1 — stored classification tag off the KEM key.
+    let stored_attrs = super::helpers::strip_x_prefixes(&obj.custom_attributes);
+    let stored_algo = super::helpers::qualified_name(obj.algorithm, obj.cryptographic_length);
     let mut p_req = crate::policy::PolicyRequest::minimal(
         "Encapsulate",
         Some(&stored_algo),
         started,
         correlation_id,
-        &empty,
+        &stored_attrs,
     );
     p_req.usage_mask = Some(obj.usage_mask);
     p_req.state = Some("Active");

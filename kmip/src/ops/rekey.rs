@@ -100,7 +100,7 @@ use crate::policy::{Decision, PolicyRequest};
 use crate::store::ObjectRecord;
 
 use super::deps::Deps;
-use super::helpers::{canonical_name, emit_request, emit_success, fail_err, state_name};
+use super::helpers::{emit_request, emit_success, fail_err, state_name};
 use super::register_import_export::ExtractedAttrs;
 
 /// Links-map keys (canonical attribute names; wire tags `Replaced
@@ -147,10 +147,10 @@ pub fn rekey(deps: &Deps, req: ReKeyRequest, correlation_id: &str) -> Result<ReK
 
     // Plane-1 policy gate against the object being replaced.
     {
-        let empty: HashMap<String, String> = HashMap::new();
-        let algo_name = canonical_name(algo);
+        let stored_attrs = super::helpers::strip_x_prefixes(&orig.custom_attributes);
+        let algo_name = super::helpers::qualified_name(algo, length);
         let mut p_req =
-            PolicyRequest::minimal("ReKey", Some(&algo_name), started, correlation_id, &empty);
+            PolicyRequest::minimal("ReKey", Some(&algo_name), started, correlation_id, &stored_attrs);
         p_req.key_length = Some(length);
         p_req.usage_mask = Some(usage);
         p_req.state = Some(state_name(orig.state));
@@ -281,14 +281,14 @@ pub fn rekey_key_pair(
 
     // Plane-1 policy gate against the private half being replaced.
     {
-        let empty: HashMap<String, String> = HashMap::new();
-        let algo_name = canonical_name(algo);
+        let stored_attrs = super::helpers::strip_x_prefixes(&old_priv.custom_attributes);
+        let algo_name = super::helpers::qualified_name(algo, old_priv.cryptographic_length);
         let mut p_req = PolicyRequest::minimal(
             "ReKeyKeyPair",
             Some(&algo_name),
             started,
             correlation_id,
-            &empty,
+            &stored_attrs,
         );
         p_req.state = Some(state_name(old_priv.state));
         p_req.target_uid = Some(&old_priv.uid);

@@ -24,7 +24,6 @@
 //!
 //! Encrypt requires `Active`. Other states rejected with `ObjectArchived`.
 
-use std::collections::HashMap;
 use time::OffsetDateTime;
 
 use crate::error::{KmipError, Result, ResultReason};
@@ -33,7 +32,7 @@ use crate::policy::{Decision, PolicyRequest};
 
 use super::deps::Deps;
 use super::helpers::{
-    canonical_name, emit_pkcs11, emit_pkcs11_result, emit_request, emit_success, fail_err,
+    emit_pkcs11, emit_pkcs11_result, emit_request, emit_success, fail_err,
     state_name,
 };
 
@@ -120,9 +119,12 @@ pub fn encrypt(deps: &Deps, mut req: EncryptRequest, correlation_id: &str) -> Re
     // Plane-1 policy gate. The dispatcher would canonicalise the op to
     // "Encapsulate" for ML-KEM in a future revision so policies can
     // differentiate; v0.1 passes plain "Encrypt".
-    let empty: HashMap<String, String> = HashMap::new();
-    let algo = canonical_name(obj.algorithm);
-    let mut p_req = PolicyRequest::minimal("Encrypt", Some(&algo), started, correlation_id, &empty);
+    // Y1 — stored classification tag; Y3 — curve/size-qualified name so
+    // size-specific allow/deny rules match (was bare `canonical_name`).
+    let stored_attrs = super::helpers::strip_x_prefixes(&obj.custom_attributes);
+    let algo = super::helpers::qualified_name(obj.algorithm, obj.cryptographic_length);
+    let mut p_req =
+        PolicyRequest::minimal("Encrypt", Some(&algo), started, correlation_id, &stored_attrs);
     p_req.usage_mask = Some(obj.usage_mask);
     p_req.state = Some(state_name(obj.state));
     p_req.current_object_algorithm = Some(&algo);

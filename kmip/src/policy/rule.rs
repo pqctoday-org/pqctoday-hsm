@@ -374,7 +374,7 @@ impl Rule {
                 ops,
                 default_algorithm,
                 reason,
-            } if ops.iter().any(|o| o == req.op) => Some(Substitution {
+            } if ops.iter().any(|o| op_matches(o, req.op)) => Some(Substitution {
                 new_algorithm: default_algorithm.clone(),
                 reason: reason.clone(),
             }),
@@ -396,8 +396,8 @@ impl Rule {
                 from,
                 to,
                 reason,
-            } if current_algorithm == Some(from.as_str())
-                && ops.iter().any(|o| o == req.op) =>
+            } if current_algorithm.is_some_and(|c| algo_matches(from, c))
+                && ops.iter().any(|o| op_matches(o, req.op)) =>
             {
                 Some(Substitution {
                     new_algorithm: to.clone(),
@@ -429,10 +429,10 @@ impl Rule {
                 tag_length,
                 salt_length,
                 ..
-            } if ops.iter().any(|o| o == req.op)
+            } if ops.iter().any(|o| op_matches(o, req.op))
                 && algorithm
                     .as_deref()
-                    .map_or(true, |a| resolved_algorithm == Some(a)) =>
+                    .map_or(true, |a| resolved_algorithm.is_some_and(|r| algo_matches(a, r))) =>
             {
                 Some(CpOverride {
                     hashing_algorithm: hashing_algorithm.as_deref().and_then(hash_name_to_code),
@@ -472,15 +472,17 @@ impl Rule {
                 if !window_active(effective_from.as_ref(), effective_until.as_ref(), req.ts) {
                     return None;
                 }
-                if !ops.iter().any(|o| o == req.op) {
+                if !ops.iter().any(|o| op_matches(o, req.op)) {
                     return None;
                 }
                 match resolved_algorithm {
                     None => None, // No algorithm to check yet (e.g. raw Locate)
-                    Some(algo) if !algorithms.iter().any(|a| a == algo) => Some(GatingDeny {
-                        kmip_reason: DenyReason::PermissionDenied,
-                        human: reason.clone(),
-                    }),
+                    Some(algo) if !algorithms.iter().any(|a| algo_matches(a, algo)) => {
+                        Some(GatingDeny {
+                            kmip_reason: DenyReason::PermissionDenied,
+                            human: reason.clone(),
+                        })
+                    }
                     Some(_) => None,
                 }
             }
@@ -496,7 +498,7 @@ impl Rule {
                 if !window_active(effective_from.as_ref(), effective_until.as_ref(), req.ts) {
                     return None;
                 }
-                if !ops.iter().any(|o| o == req.op) {
+                if !ops.iter().any(|o| op_matches(o, req.op)) {
                     return None;
                 }
                 if let Some(exc) = exception_custom_attribute.as_ref() {
@@ -505,10 +507,12 @@ impl Rule {
                     }
                 }
                 match resolved_algorithm {
-                    Some(algo) if algorithms.iter().any(|a| a == algo) => Some(GatingDeny {
-                        kmip_reason: DenyReason::PermissionDenied,
-                        human: reason.clone(),
-                    }),
+                    Some(algo) if algorithms.iter().any(|a| algo_matches(a, algo)) => {
+                        Some(GatingDeny {
+                            kmip_reason: DenyReason::PermissionDenied,
+                            human: reason.clone(),
+                        })
+                    }
                     _ => None,
                 }
             }
@@ -518,7 +522,7 @@ impl Rule {
                 min_bits,
                 reason,
             } => match (resolved_algorithm, req.key_length) {
-                (Some(algo), Some(bits)) if algo == algorithm && bits < *min_bits => {
+                (Some(algo), Some(bits)) if algo_matches(algorithm, algo) && bits < *min_bits => {
                     Some(GatingDeny {
                         kmip_reason: DenyReason::InvalidCryptographicParameters,
                         human: reason.clone(),
@@ -533,7 +537,7 @@ impl Rule {
             // age reference (Create, or a never-activated object) can't be aged
             // out, so it passes.
             Rule::MaxKeyAgeDays { ops, days, reason } => {
-                if !ops.iter().any(|o| o == req.op) {
+                if !ops.iter().any(|o| op_matches(o, req.op)) {
                     return None;
                 }
                 match req.object_activation_date {
@@ -552,7 +556,7 @@ impl Rule {
                 flags,
                 reason,
             } => {
-                if resolved_algorithm != Some(algorithm.as_str()) {
+                if !resolved_algorithm.is_some_and(|a| algo_matches(algorithm, a)) {
                     return None;
                 }
                 let Some(mask) = req.usage_mask else {
@@ -579,7 +583,7 @@ impl Rule {
                 reason,
             } => match resolved_algorithm {
                 Some(algo)
-                    if algorithms.iter().any(|a| a == algo)
+                    if algorithms.iter().any(|a| algo_matches(a, algo))
                         && !req.custom_attrs.contains_key(attribute_name) =>
                 {
                     Some(GatingDeny {
@@ -597,14 +601,14 @@ impl Rule {
                 after,
                 reason,
             } => {
-                if req.op != op.as_str() {
+                if !op_matches(op, req.op) {
                     return None;
                 }
                 if !after.matches_at_or_after(req.ts) {
                     return None;
                 }
                 let Some(algo) = resolved_algorithm else { return None; };
-                if !algorithms.is_empty() && !algorithms.iter().any(|a| a == algo) {
+                if !algorithms.is_empty() && !algorithms.iter().any(|a| algo_matches(a, algo)) {
                     return None;
                 }
                 if matches_class(algo, algorithm_class) {
@@ -622,7 +626,7 @@ impl Rule {
                 allowed_states,
                 reason,
             } => {
-                if req.op != op.as_str() {
+                if !op_matches(op, req.op) {
                     return None;
                 }
                 match req.state {
@@ -647,13 +651,24 @@ impl Rule {
                 if !window_active(Some(effective_from), Some(effective_until), req.ts) {
                     return None;
                 }
-                if !ops_affected.iter().any(|o| o == req.op) {
+                if !ops_affected.iter().any(|o| op_matches(o, req.op)) {
                     return None;
                 }
                 if let Some(pred) = triggered_by_custom_attribute.as_ref() {
                     if !pred.matches(req) {
                         return None;
                     }
+                }
+                // A dual-*signature* requirement only judges signature-capable
+                // requests. Symmetric key creation (AES, ChaCha20, HMAC) in the
+                // migration window must pass — otherwise a hybrid-window policy
+                // silently bricks all AES Create (Y7/Y12). A request with no
+                // resolved algorithm yet (e.g. bare Locate) likewise can't be a
+                // composite signature and is left to other rules.
+                match resolved_algorithm {
+                    None => return None,
+                    Some(a) if matches_class(a, "symmetric") => return None,
+                    Some(_) => {}
                 }
                 let composite = format!("{}-{}", primary, secondary.to_uppercase());
                 let composite_alt =
@@ -684,7 +699,7 @@ impl Rule {
                 if !window_active(effective_from.as_ref(), effective_until.as_ref(), req.ts) {
                     return None;
                 }
-                if !ops.iter().any(|o| o == req.op) {
+                if !ops.iter().any(|o| op_matches(o, req.op)) {
                     return None;
                 }
                 match req.mechanism.hashing_algorithm {
@@ -712,11 +727,11 @@ impl Rule {
                 require_deterministic,
                 reason,
             } => {
-                if !ops.iter().any(|o| o == req.op) {
+                if !ops.iter().any(|o| op_matches(o, req.op)) {
                     return None;
                 }
                 if let Some(a) = algorithm {
-                    if resolved_algorithm != Some(a.as_str()) {
+                    if !resolved_algorithm.is_some_and(|r| algo_matches(a, r)) {
                         return None;
                     }
                 }
@@ -763,15 +778,17 @@ impl Rule {
                 mac_algorithms,
                 reason,
             } => {
-                if !ops.iter().any(|o| o == req.op) {
+                if !ops.iter().any(|o| op_matches(o, req.op)) {
                     return None;
                 }
                 match resolved_algorithm {
                     None => None,
-                    Some(algo) if !mac_algorithms.iter().any(|a| a == algo) => Some(GatingDeny {
-                        kmip_reason: DenyReason::PermissionDenied,
-                        human: reason.clone(),
-                    }),
+                    Some(algo) if !mac_algorithms.iter().any(|a| algo_matches(a, algo)) => {
+                        Some(GatingDeny {
+                            kmip_reason: DenyReason::PermissionDenied,
+                            human: reason.clone(),
+                        })
+                    }
                     Some(_) => None,
                 }
             }
@@ -781,7 +798,7 @@ impl Rule {
                 mechanisms,
                 reason,
             } => {
-                if !ops.iter().any(|o| o == req.op) {
+                if !ops.iter().any(|o| op_matches(o, req.op)) {
                     return None;
                 }
                 match req.mechanism.canonical_mech {
@@ -804,7 +821,7 @@ impl Rule {
                 mechanisms,
                 reason,
             } => {
-                if !ops.iter().any(|o| o == req.op) {
+                if !ops.iter().any(|o| op_matches(o, req.op)) {
                     return None;
                 }
                 match req.mechanism.canonical_mech {
@@ -822,6 +839,54 @@ impl Rule {
 }
 
 // ── helpers ────────────────────────────────────────────────────────────────
+
+/// Match a policy rule's `op`/`ops` entry against a request's canonical op.
+///
+/// The dispatcher canonicalises `CreateKeyPair` into `CreateKeyPair:<purpose>`
+/// (`CreateKeyPair:Sign` / `:Encrypt` / `:KeyAgreement`) so a policy can
+/// discriminate KEM vs signing intent (see `dispatcher::canonical_create_key_pair_op`).
+/// A policy that gates the bare family name `CreateKeyPair` must therefore match
+/// every `CreateKeyPair:*` request — but `Create` (symmetric) must NOT be caught
+/// by a `CreateKeyPair` gate, nor vice-versa.
+///
+/// Rules (Y2):
+/// - exact string match → true (`CreateKeyPair:Sign` gate matches only that purpose);
+/// - the request op is a colon-suffixed refinement of the rule op → true
+///   (`CreateKeyPair` gate matches `CreateKeyPair:Sign`);
+/// - otherwise false. `Create` never matches `CreateKeyPair:Sign` because
+///   `"CreateKeyPair:Sign".strip_prefix("Create")` = `"KeyPair:Sign"`, which does
+///   not begin with `':'`.
+pub fn op_matches(rule_op: &str, req_op: &str) -> bool {
+    rule_op == req_op
+        || req_op
+            .strip_prefix(rule_op)
+            .is_some_and(|rest| rest.starts_with(':'))
+}
+
+/// Match a policy `algorithms` entry against a request's (qualified) algorithm.
+///
+/// Policies mix *family* names (`AES`, `RSA`, `ECDSA`, `ECDH`) and *qualified*
+/// names (`AES-256`, `RSA-3072`, `ECDSA-P384`, `ML-DSA-87`). The dispatcher now
+/// qualifies every request algorithm (Y3, `helpers::qualify_algorithm_str`), so
+/// the request side is always specific; only the policy entry may be a family.
+///
+/// An entry *covers* a request when (Y3):
+/// - it equals the request exactly (`AES-256` covers `AES-256`), or
+/// - it is a family prefix and the request is a hyphen-suffixed member
+///   (`AES` covers `AES-256`; `ECDSA` covers `ECDSA-P256`).
+///
+/// It does NOT match in the reverse direction: `AES-256` never covers a bare
+/// `AES`, and `AES-128` never covers `AES-256`. Using the same predicate for
+/// allowlists and denylists therefore gives the intuitive result in both:
+/// denylisting `AES-128` leaves `AES-256` allowed; allowlisting the family
+/// `AES` admits every AES size; denylisting the family `SLH-DSA` catches every
+/// parameter set.
+pub fn algo_matches(policy_entry: &str, request_algo: &str) -> bool {
+    policy_entry == request_algo
+        || request_algo
+            .strip_prefix(policy_entry)
+            .is_some_and(|rest| rest.starts_with('-'))
+}
 
 /// `true` if `ts` falls within `[from, until]`. Either bound may be absent.
 ///
@@ -996,9 +1061,25 @@ fn usage_mask_has_all(
     true
 }
 
-/// Crude algorithm classifier — `"classical"` or `"pqc"`. Conservative:
-/// unknown names default to `"classical"` so a `temporal_cutoff` on
-/// `classical` denies them by default after the cutoff (safe direction).
+/// Algorithm classifier over three disjoint classes: `"pqc"`, `"symmetric"`,
+/// and `"classical"` (Y4).
+///
+/// The distinction matters for `temporal_cutoff`: a migration deadline that
+/// bans `classical` public-key crypto after Q-day must NOT sweep up AES or
+/// HMAC — symmetric primitives are quantum-safe (Grover only halves the
+/// effective key strength, covered by moving to 256-bit keys) and IR 8547
+/// scopes the deprecation to quantum-vulnerable *public-key* algorithms.
+/// Before this fix `matches_class` treated everything non-PQC as classical,
+/// so `pqc-migration-2030` silently banned AES-256 encryption from 2030.
+///
+/// - `pqc`       — ML-KEM / ML-DSA / SLH-DSA / LMS / HSS / XMSS / Falcon / HQC /
+///                 BIKE / FrodoKEM / Classic-McEliece and composite PQC names.
+/// - `symmetric` — AES / ChaCha20 / HMAC / KMAC / SHA (quantum-safe primitives).
+/// - `classical` — quantum-vulnerable public-key: RSA / ECDSA / ECDH / DSA /
+///                 DH / Ed25519 / Ed448 / X25519 / X448 (the deprecation target).
+///
+/// Unknown names fall into `classical` — the safe direction for a cutoff (a
+/// name the engine can't place is treated as legacy and denied after Q-day).
 fn matches_class(algorithm: &str, class: &str) -> bool {
     let is_pqc = algorithm.starts_with("ML-KEM")
         || algorithm.starts_with("ML-DSA")
@@ -1006,10 +1087,24 @@ fn matches_class(algorithm: &str, class: &str) -> bool {
         || algorithm.starts_with("HSS")
         || algorithm.starts_with("LMS")
         || algorithm.starts_with("XMSS")
-        || algorithm.starts_with("Falcon");
+        || algorithm.starts_with("Falcon")
+        || algorithm.starts_with("HQC")
+        || algorithm.starts_with("BIKE")
+        || algorithm.starts_with("FrodoKEM")
+        || algorithm.starts_with("Classic-McEliece")
+        // composite PQC names carry a PQC primary, e.g. ML-DSA-65-ED25519
+        || algorithm.contains("ML-DSA")
+        || algorithm.contains("ML-KEM");
+    let is_symmetric = algorithm.starts_with("AES")
+        || algorithm.starts_with("ChaCha20")
+        || algorithm.starts_with("HMAC")
+        || algorithm.starts_with("KMAC")
+        || algorithm.starts_with("SHA");
     match class {
         "pqc" => is_pqc,
-        "classical" => !is_pqc,
+        "symmetric" => is_symmetric && !is_pqc,
+        // classical = quantum-vulnerable public-key = not PQC and not symmetric.
+        "classical" => !is_pqc && !is_symmetric,
         _ => false,
     }
 }
@@ -1021,6 +1116,75 @@ mod tests {
 
     fn req<'a>(op: &'a str, algo: Option<&'a str>, attrs: &'a HashMap<String, String>) -> PolicyRequest<'a> {
         PolicyRequest::minimal(op, algo, OffsetDateTime::UNIX_EPOCH, "corr-1", attrs)
+    }
+
+    // ── Y2: op_matches — CreateKeyPair:<purpose> vs family names ──────────
+    #[test]
+    fn op_matches_truth_table() {
+        // Exact matches.
+        assert!(op_matches("Sign", "Sign"));
+        assert!(op_matches("CreateKeyPair:Sign", "CreateKeyPair:Sign"));
+        // Family gate matches every colon-suffixed purpose.
+        assert!(op_matches("CreateKeyPair", "CreateKeyPair:Sign"));
+        assert!(op_matches("CreateKeyPair", "CreateKeyPair:Encrypt"));
+        assert!(op_matches("CreateKeyPair", "CreateKeyPair:KeyAgreement"));
+        // A specific purpose gate does NOT match a different purpose.
+        assert!(!op_matches("CreateKeyPair:Sign", "CreateKeyPair:Encrypt"));
+        // `Create` (symmetric) must NOT be caught by CreateKeyPair traffic,
+        // and vice-versa — the fail-open bug this whole change closes (Y2).
+        assert!(!op_matches("Create", "CreateKeyPair:Sign"));
+        assert!(!op_matches("CreateKeyPair", "Create"));
+        assert!(!op_matches("Sign", "SignatureVerify"));
+    }
+
+    // ── Y3: algo_matches — family entries cover qualified requests ────────
+    #[test]
+    fn algo_matches_truth_table() {
+        // Exact.
+        assert!(algo_matches("AES-256", "AES-256"));
+        assert!(algo_matches("ML-DSA-87", "ML-DSA-87"));
+        // Family entry covers a qualified member (allowlist family / denylist family).
+        assert!(algo_matches("AES", "AES-256"));
+        assert!(algo_matches("AES", "AES-128"));
+        assert!(algo_matches("ECDSA", "ECDSA-P256"));
+        assert!(algo_matches("RSA", "RSA-3072"));
+        assert!(algo_matches("SLH-DSA", "SLH-DSA-SHAKE-128f"));
+        // A specific entry does NOT cover a different size — denylisting
+        // AES-128 leaves AES-256 allowed.
+        assert!(!algo_matches("AES-128", "AES-256"));
+        // Never matches the reverse direction (a bare request under a
+        // specific entry) — requests are always qualified post-Y3, so this
+        // just documents the guarantee.
+        assert!(!algo_matches("AES-256", "AES"));
+        // Prefix that isn't a hyphen boundary must not match.
+        assert!(!algo_matches("AES", "AESX"));
+        // Exact family-name request matches its own family entry.
+        assert!(algo_matches("LMS", "LMS"));
+    }
+
+    // ── Y4: three-way classifier (symmetric ≠ classical) ──────────────────
+    #[test]
+    fn matches_class_three_way() {
+        // Symmetric primitives are their own class — NOT classical.
+        assert!(matches_class("AES-256", "symmetric"));
+        assert!(matches_class("HMAC-SHA-256", "symmetric"));
+        assert!(matches_class("ChaCha20-Poly1305", "symmetric"));
+        assert!(!matches_class("AES-256", "classical"));
+        assert!(!matches_class("AES-256", "pqc"));
+        // Classical = quantum-vulnerable public-key.
+        assert!(matches_class("RSA-3072", "classical"));
+        assert!(matches_class("ECDSA-P256", "classical"));
+        assert!(matches_class("Ed25519", "classical"));
+        assert!(!matches_class("RSA-3072", "symmetric"));
+        // PQC.
+        assert!(matches_class("ML-DSA-87", "pqc"));
+        assert!(matches_class("ML-KEM-1024", "pqc"));
+        assert!(!matches_class("ML-DSA-87", "classical"));
+        // Composite PQC name classifies as pqc, not classical.
+        assert!(matches_class("ML-DSA-65-ED25519", "pqc"));
+        assert!(!matches_class("ML-DSA-65-ED25519", "classical"));
+        // Unknown → classical (safe cutoff direction).
+        assert!(matches_class("MysteryAlg", "classical"));
     }
 
     // ── P2: mechanism-dimension gating rules ──────────────────────────────
