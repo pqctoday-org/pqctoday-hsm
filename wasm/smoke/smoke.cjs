@@ -107,6 +107,19 @@ assert.ok(audit.length > 0 && audit.every(e => e.plane && e.event), 'audit snaps
 const tree = JSON.parse(decode(sig.responseWireHex));
 console.log(`[smoke]   ✓ list_objects=${objs.length}, policy="${pol.name}", audit=${audit.length} events`);
 
+// ── Step 6 — H1: a present-but-unknown algorithm must fail, not silently
+// fall back to a default (which would test a different request than the UI
+// shows). CreateKeyPair with an algorithm the engine doesn't implement.
+console.log('[smoke] CreateKeyPair with an unimplemented algorithm (FrodoKEM-1344) …');
+const bogus = runOp({ op: 'CreateKeyPair', algorithm: 'FrodoKEM-1344' });
+assert.ok(!bogus.ok, 'unknown algorithm must produce a failed OpResult, not a silent default keypair');
+assert.ok(/unknown algorithm/i.test(bogus.message || ''),
+  `error names the unknown algorithm (got: ${bogus.message})`);
+const objsAfter = JSON.parse(pg.list_objects());
+assert.strictEqual(objsAfter.length, objs.length,
+  'a rejected unknown-algorithm request creates no object');
+console.log(`[smoke]   ✓ rejected: "${bogus.message}" (keystore unchanged at ${objsAfter.length})`);
+
 console.log('\n[smoke] PASS — the KMIP+PKCS#11 control plane runs end-to-end in wasm.');
 
 // decode helper: turn the hex response wire back into a TTLV tree via the wasm decoder.
