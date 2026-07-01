@@ -32,9 +32,13 @@ TC="$HOME/.rustup/toolchains/$TOOLCHAIN/bin"
 [[ -x "$TC/cargo" ]] || { echo "rustup toolchain not found at $TC" >&2; exit 1; }
 
 echo "▶ wasm-pack build ($PROFILE, target=bundler, toolchain=$TOOLCHAIN) → $OUT/"
+# --features acvp is required: without it C_Initialize rejects a non-null pReserved
+# (returns CKR_ARGUMENTS_BAD 0x07), which breaks all ACVP KAT seeding.
+# The acvp feature was removed from [default] on 2026-06-21 for compliance builds;
+# it must be explicitly requested here for the playground WASM bundle.
 PATH="$TC:$PATH" RUSTC="$TC/rustc" RUSTUP_TOOLCHAIN="$TOOLCHAIN" \
   ${EXTRA_RUSTFLAGS:+RUSTFLAGS="$EXTRA_RUSTFLAGS"} \
-  wasm-pack build --target bundler --out-dir "$OUT" --"$PROFILE"
+  wasm-pack build --target bundler --out-dir "$OUT" --"$PROFILE" -- --features acvp
 
 # ── Re-apply the __wbg_get_memory post-build shim (idempotent) ───────────────
 BG="$OUT/softhsmrustv3_bg.js"

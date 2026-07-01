@@ -7,6 +7,23 @@ file. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/
 
 ## [Unreleased]
 
+### Added — selectable KEX + host-key profile and an in-WASM PKCS#11 trace tap (2026-06-27)
+
+For the hub playground integration:
+
+- **`set_handshake_config(kex, hostalg)`** — the driver now runs a selectable
+  profile instead of the hardcoded combo. Two host-key types provision on the
+  token and sign via the real provider path: `ssh-mldsa-65` (ML-DSA-65,
+  `CKM_ML_DSA`) and `ecdsa-sha2-nistp256` (ECDSA P-256, `CKM_ECDSA`); KEX is any
+  compiled algorithm (`mlkem768x25519-sha256`, `curve25519-sha256`,
+  `ecdh-sha2-nistp*`). Enables a real-vs-real classical/PQC comparison in the UI.
+- **PKCS#11 trace tap** — `pkcs11_static.c` hands OpenSSH's provider a wrapped
+  function list that emits a `pkcs11` event per `C_Login` / `C_FindObjects` /
+  `C_GetAttributeValue` / `C_SignInit` / `C_Sign` before delegating to softhsm,
+  so the hub can render the genuine call sequence (including the two `C_Sign`
+  operations) without touching the generated OpenSSH source. The provisioning
+  `C_GenerateKeyPair` is emitted from the shim.
+
 ### Added — the WASM bundle now runs a real, end-to-end post-quantum SSH handshake (2026-06-27)
 
 The OpenSSH WASM build is no longer a scaffold: it links cleanly and runs a
