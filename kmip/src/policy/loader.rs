@@ -61,6 +61,23 @@ pub struct LoadedPolicy {
 /// is the path included in errors (use `PathBuf::from("<inline>")` for the
 /// Hub UI dry-run case).
 pub fn load_from_str(yaml: &str, display_path: &Path) -> Result<LoadedPolicy, LoaderError> {
+    load_from_str_impl(yaml, display_path, false)
+}
+
+/// Strict variant of [`load_from_str`]: value-lint findings that are advisory
+/// in normal mode (unknown *allowlist* algorithm names) become hard errors
+/// (WP2.1). The local gate and the `cryptopolicy-manager` `/validate` route run
+/// strict so a typo in a shipped policy is caught at authoring time, not in
+/// production where it silently changes enforcement.
+pub fn load_from_str_strict(yaml: &str, display_path: &Path) -> Result<LoadedPolicy, LoaderError> {
+    load_from_str_impl(yaml, display_path, true)
+}
+
+fn load_from_str_impl(
+    yaml: &str,
+    display_path: &Path,
+    strict: bool,
+) -> Result<LoadedPolicy, LoaderError> {
     let policy: Policy = serde_yaml::from_str(yaml).map_err(|e| {
         let (line, col) = e
             .location()
@@ -101,7 +118,25 @@ pub fn load_from_str(yaml: &str, display_path: &Path) -> Result<LoadedPolicy, Lo
         });
     }
 
-    let warnings = check_rules(&policy.rules);
+    // WP2.1 (Y6) — value-level lint. Fatal findings (unknown mechanism/hash/
+    // state/mode/class names anywhere, and unknown algorithm names in a
+    // deny-family position where a typo silently disables the rule) reject the
+    // policy. Advisory findings (unknown allowlist algorithm names) surface as
+    // warnings unless `strict`.
+    let findings = super::lint::lint_rules(&policy.rules, strict);
+    let mut warnings = check_rules(&policy.rules);
+    let (fatal, advisory): (Vec<_>, Vec<_>) = findings.into_iter().partition(|f| f.fatal);
+    if let Some(f) = fatal.first() {
+        return Err(LoaderError::Invalid {
+            path: display_path.to_path_buf(),
+            msg: format!("rule #{} field `{}`: {}", f.rule_index, f.field, f.message),
+        });
+    }
+    warnings.extend(
+        advisory
+            .into_iter()
+            .map(|f| format!("rule {} field `{}`: {}", f.rule_index, f.field, f.message)),
+    );
 
     Ok(LoadedPolicy {
         policy,
@@ -159,6 +194,13 @@ pub fn validate(yaml: &str) -> Result<LoadedPolicy, LoaderError> {
     load_from_str(yaml, Path::new("<draft>"))
 }
 
+/// Strict validate — used by `cryptopolicy-manager`'s `/validate` route and the
+/// local gate so unknown allowlist algorithm names are rejected, not just warned
+/// (WP2.1).
+pub fn validate_strict(yaml: &str) -> Result<LoadedPolicy, LoaderError> {
+    load_from_str_strict(yaml, Path::new("<draft>"))
+}
+
 /// Non-fatal warning generation. The list of conditions is deliberately
 /// small in Phase 4.5; extend as the engine grows enforcement.
 fn check_rules(rules: &[Rule]) -> Vec<String> {
@@ -197,6 +239,26 @@ mod tests {
                 load_from_str(&yaml, &p).unwrap_or_else(|e| panic!("{} failed to load: {e}", p.display()));
             }
         }
+    }
+
+    /// WP2.1 (Y6) — every shipped policy must pass the STRICT value lint (no
+    /// unknown algorithm/mechanism/hash/state/mode/flag names anywhere). This is
+    /// the authoring-time gate the local `local-gate.sh` runs; a typo in a
+    /// shipped policy fails here, not silently in production.
+    #[test]
+    fn all_shipped_policies_pass_strict_lint() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("policies");
+        let mut failures = Vec::new();
+        for entry in std::fs::read_dir(&dir).expect("policies/ dir") {
+            let p = entry.unwrap().path();
+            if p.extension().and_then(|e| e.to_str()) == Some("yaml") {
+                let yaml = std::fs::read_to_string(&p).unwrap();
+                if let Err(e) = load_from_str_strict(&yaml, &p) {
+                    failures.push(format!("{}: {e}", p.file_name().unwrap().to_string_lossy()));
+                }
+            }
+        }
+        assert!(failures.is_empty(), "policies failed strict lint:\n{}", failures.join("\n"));
     }
 
     /// S-6 — an unknown/typo'd rule field is rejected (fails closed) rather than
@@ -263,7 +325,7 @@ rules:
     reason: "AEAD only"
   - type: mac_mechanism_policy
     ops: [MAC]
-    mac_algorithms: [HMAC-SHA256, HMAC-SHA384]
+    mac_algorithms: [HMAC-SHA-256, HMAC-SHA-384]
     reason: "approved MACs only"
 "#;
         let loaded = load_from_str(yaml, Path::new("<test>")).expect("must parse");

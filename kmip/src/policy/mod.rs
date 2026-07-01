@@ -79,6 +79,7 @@
 pub mod audit;
 pub mod decision;
 pub mod engine;
+pub mod lint;
 pub mod loader;
 pub mod policy;
 pub mod request;
@@ -88,7 +89,11 @@ pub mod store;
 pub use audit::PolicyAudit;
 pub use decision::{CpOverride, Decision, DenyReason};
 pub use engine::{ActivePolicy, Engine};
-pub use loader::{load_from_file, load_from_str, validate, LoadedPolicy, LoaderError};
+pub use lint::{lint_rules, Finding};
+pub use loader::{
+    load_from_file, load_from_str, load_from_str_strict, validate, validate_strict, LoadedPolicy,
+    LoaderError,
+};
 pub use policy::{ComplianceMapping, Metadata, Policy};
 pub use request::{MechanismParams, PolicyRequest};
 pub use rule::{AttrPredicate, GatingDeny, Rule, Substitution, TimeBound};

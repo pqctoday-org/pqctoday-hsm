@@ -1071,6 +1071,55 @@ fn ckm_family(code: u32) -> Option<u32> {
     })
 }
 
+// ── Value-lint predicates (WP2.1 / Y6) ───────────────────────────────────────
+// These expose the engine's bounded vocabularies so the loader can reject a
+// policy that references a name the engine will never match (a silent no-op —
+// fail-open for denylists). Algorithm names are validated separately (see
+// `lint::is_known_algorithm_name`) because a denylist may legitimately name a
+// real-but-unimplemented algorithm.
+
+/// `true` if `name` resolves to a PKCS#11 `CKM_*` the engine knows (Y6).
+pub fn is_known_ckm_name(name: &str) -> bool {
+    ckm_name_to_code(name).is_some()
+}
+
+/// `true` if `name` is a KMIP Hashing Algorithm the engine knows (Y6).
+pub fn is_known_hash_name(name: &str) -> bool {
+    hash_name_to_code(name).is_some()
+}
+
+/// `true` if `name` is a KMIP Block Cipher Mode the engine knows (Y6).
+pub fn is_known_block_cipher_mode(name: &str) -> bool {
+    block_cipher_mode_name_to_code(name).is_some()
+}
+
+/// `true` if `name` is a KMIP Padding Method the engine knows (Y6).
+pub fn is_known_padding_method(name: &str) -> bool {
+    padding_method_name_to_code(name).is_some()
+}
+
+/// `true` if `name` is a Mask Generator the engine knows (Y6).
+pub fn is_known_mask_generator(name: &str) -> bool {
+    mgf_name_to_code(name).is_some()
+}
+
+/// `true` if `class` is one of the three classifier classes (Y4/Y6).
+pub fn is_known_algorithm_class(class: &str) -> bool {
+    matches!(class, "pqc" | "symmetric" | "classical")
+}
+
+/// `true` if `flag` is a KMIP Cryptographic Usage Mask flag name (Y6).
+/// Mirrors the names accepted by `usage_mask_has_all`.
+pub fn is_known_usage_flag(flag: &str) -> bool {
+    matches!(
+        flag,
+        "Sign" | "Verify" | "Encrypt" | "Decrypt" | "WrapKey" | "UnwrapKey"
+            | "Export" | "MacGenerate" | "MacVerify" | "DeriveKey"
+            | "ContentCommitment" | "KeyAgreement" | "CertificateSign"
+            | "CrlSign" | "Authenticate"
+    )
+}
+
 /// `true` if the request's canonical mechanism `code` matches any policy
 /// mechanism name in `names` — exactly, or via [`ckm_family`] (Y14). Unknown
 /// names in `names` contribute nothing (the Phase-2 loader lint rejects them).
