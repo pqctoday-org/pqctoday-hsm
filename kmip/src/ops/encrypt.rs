@@ -155,14 +155,21 @@ pub fn encrypt(deps: &Deps, mut req: EncryptRequest, correlation_id: &str) -> Re
             ));
         }
         Decision::RekeyAndProceed { new_algorithm, original_uid, .. } => {
+            // Y5 — the Encrypt path does not (yet) execute a rekey. The shipped
+            // policies no longer carry an Encrypt-side substitution (the KEM
+            // auto-migration lands with the Encapsulate rekey work in Phase 5);
+            // a custom policy that adds one gets an honest, actionable error
+            // rather than a silent pretend-success.
             return Err(fail_err(
                 deps,
                 correlation_id,
                 "Encrypt",
                 KmipError::failed(
-                    ResultReason::PermissionDenied,
+                    ResultReason::OperationNotSupported,
                     format!(
-                        "rekey required: policy substitutes {algo} → {new_algorithm} for UID {original_uid}"
+                        "policy substitutes {algo} → {new_algorithm} for UID {original_uid}, but \
+                         Encrypt-side auto-rekey is not implemented; rekey the object explicitly \
+                         (ReKey/ReKeyKeyPair) or scope the substitution to Sign"
                     ),
                 ),
             ));

@@ -804,9 +804,7 @@ impl Rule {
                 match req.mechanism.canonical_mech {
                     // Not canonicalizable (no mechanism resolved) → not gated.
                     None => None,
-                    Some(code)
-                        if !mechanisms.iter().any(|n| ckm_name_to_code(n) == Some(code)) =>
-                    {
+                    Some(code) if !mechanism_list_matches(mechanisms, code) => {
                         Some(GatingDeny {
                             kmip_reason: DenyReason::PermissionDenied,
                             human: reason.clone(),
@@ -825,7 +823,7 @@ impl Rule {
                     return None;
                 }
                 match req.mechanism.canonical_mech {
-                    Some(code) if mechanisms.iter().any(|n| ckm_name_to_code(n) == Some(code)) => {
+                    Some(code) if mechanism_list_matches(mechanisms, code) => {
                         Some(GatingDeny {
                             kmip_reason: DenyReason::PermissionDenied,
                             human: reason.clone(),
@@ -973,6 +971,15 @@ fn padding_method_name_to_code(name: &str) -> Option<u32> {
 fn ckm_name_to_code(name: &str) -> Option<u32> {
     use softhsmrustv3::constants as c;
     Some(match name {
+        // Key-pair / key generation mechanisms (Y14 — these were missing, so a
+        // lockdown allowlisting them contributed nothing).
+        "CKM_ML_DSA_KEY_PAIR_GEN" => c::CKM_ML_DSA_KEY_PAIR_GEN,
+        "CKM_ML_KEM_KEY_PAIR_GEN" => c::CKM_ML_KEM_KEY_PAIR_GEN,
+        "CKM_SLH_DSA_KEY_PAIR_GEN" => c::CKM_SLH_DSA_KEY_PAIR_GEN,
+        "CKM_EC_KEY_PAIR_GEN" => c::CKM_EC_KEY_PAIR_GEN,
+        "CKM_AES_KEY_GEN" => c::CKM_AES_KEY_GEN,
+        "CKM_RSA_PKCS_PSS" => c::CKM_RSA_PKCS_PSS,
+        "CKM_RSA_PKCS" => c::CKM_RSA_PKCS,
         "CKM_AES_ECB" => c::CKM_AES_ECB,
         "CKM_AES_CBC" => c::CKM_AES_CBC,
         "CKM_AES_CBC_PAD" => c::CKM_AES_CBC_PAD,
@@ -1026,6 +1033,52 @@ fn ckm_name_to_code(name: &str) -> Option<u32> {
         "CKM_SP800_108_FEEDBACK_KDF" => c::CKM_SP800_108_FEEDBACK_KDF,
         _ => return None,
     })
+}
+
+/// Map a hash-qualified signing mechanism to its base mechanism *family* (Y14).
+///
+/// A Sign request canonicalises to a hash-qualified mechanism — e.g. RSA-PSS
+/// over SHA-256 resolves to `CKM_SHA256_RSA_PKCS_PSS`, ECDSA over SHA-256 to
+/// `CKM_ECDSA_SHA256`. A lockdown policy naturally allowlists the *family*
+/// (`CKM_RSA_PKCS_PSS`, `CKM_ECDSA`), so without this mapping the specific
+/// canonical mechanism was never on the list and legitimate RSA-PSS / ECDSA
+/// signing was falsely denied. `mechanism_list_matches` treats a request as
+/// matching a policy entry when the entry is either the exact mechanism or the
+/// request's family. Returns `None` for a mechanism that is already a base
+/// family (or has no family notion).
+fn ckm_family(code: u32) -> Option<u32> {
+    use softhsmrustv3::constants as c;
+    Some(match code {
+        x if x == c::CKM_SHA256_RSA_PKCS_PSS
+            || x == c::CKM_SHA384_RSA_PKCS_PSS
+            || x == c::CKM_SHA512_RSA_PKCS_PSS =>
+        {
+            c::CKM_RSA_PKCS_PSS
+        }
+        x if x == c::CKM_SHA256_RSA_PKCS
+            || x == c::CKM_SHA384_RSA_PKCS
+            || x == c::CKM_SHA512_RSA_PKCS =>
+        {
+            c::CKM_RSA_PKCS
+        }
+        x if x == c::CKM_ECDSA_SHA256
+            || x == c::CKM_ECDSA_SHA384
+            || x == c::CKM_ECDSA_SHA512 =>
+        {
+            c::CKM_ECDSA
+        }
+        _ => return None,
+    })
+}
+
+/// `true` if the request's canonical mechanism `code` matches any policy
+/// mechanism name in `names` — exactly, or via [`ckm_family`] (Y14). Unknown
+/// names in `names` contribute nothing (the Phase-2 loader lint rejects them).
+fn mechanism_list_matches(names: &[String], code: u32) -> bool {
+    names
+        .iter()
+        .filter_map(|n| ckm_name_to_code(n))
+        .any(|entry| entry == code || ckm_family(code) == Some(entry))
 }
 
 /// `true` if every `flag` is present in `mask`. Unknown flag names are

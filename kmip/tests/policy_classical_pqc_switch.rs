@@ -129,10 +129,16 @@ fn existing_ecdsa_key_rekeys_on_sign_under_pqc() {
     }
 }
 
-// ── §6: existing RSA encrypt key auto-rekeys to ML-KEM-1024 ────────────────
-
+// ── §6: encrypt-side KEM auto-rekey is DEFERRED to Phase 5 (Y5) ────────────
+//
+// RSA key-transport → ML-KEM is a cross-primitive migration the Encrypt path
+// cannot execute, so pqc.yaml no longer carries an `ops: [Encrypt]`
+// substitution (it would have promised a rekey the engine rejects). Until the
+// Encapsulate rekey path lands, an Encrypt against a legacy RSA key is simply
+// allowed (not silently pretend-migrated). The live crypto-agility demo is the
+// Sign-side rekey asserted in §5 above.
 #[test]
-fn existing_rsa_key_rekeys_on_encrypt_under_pqc() {
+fn encrypt_side_kem_rekey_is_deferred_under_pqc() {
     let attrs = HashMap::new();
     let mut req = PolicyRequest::minimal("Encrypt", Some("RSA-3072"), ts(), "rekey-enc", &attrs);
     req.current_object_algorithm = Some("RSA-3072");
@@ -140,17 +146,14 @@ fn existing_rsa_key_rekeys_on_encrypt_under_pqc() {
 
     let pqc = engine_for("pqc.yaml");
     let d = pqc.evaluate(&req);
-    match d {
-        Decision::RekeyAndProceed {
-            from_algorithm,
-            new_algorithm,
-            ..
-        } => {
-            assert_eq!(from_algorithm, "RSA-3072");
-            assert_eq!(new_algorithm, "ML-KEM-1024");
-        }
-        other => panic!("expected RekeyAndProceed, got {other:?}"),
-    }
+    assert!(
+        d.is_allow(),
+        "Encrypt of a legacy RSA key should be allowed (no phantom encrypt-side rekey), got {d:?}"
+    );
+    assert!(
+        !matches!(d, Decision::RekeyAndProceed { .. }),
+        "encrypt-side rekey must NOT fire — it is deferred to Phase 5"
+    );
 }
 
 // ── §7: explicit PQC Create under classical policy is denied ───────────────
