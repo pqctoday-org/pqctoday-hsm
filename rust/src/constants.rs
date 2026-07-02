@@ -446,10 +446,16 @@ pub const SUPPORTED_MECHS: &[u32] = &[
     // ML-KEM (FIPS 203)
     CKM_ML_KEM_KEY_PAIR_GEN,
     CKM_ML_KEM,
-    // ML-DSA (FIPS 204) — pure + pre-hash
+    // ML-DSA (FIPS 204) — pure + pre-hash.
+    // NOTE: the GENERIC CKM_HASH_ML_DSA (0x1F) is intentionally NOT advertised
+    // (P1): it selects the pre-hash via the CK_HASH_SIGN_ADDITIONAL_CONTEXT.hash
+    // param, which the sign path does not yet parse — advertising it would be
+    // advertise-and-fail (C_SignInit ok, C_Sign → CKR_MECHANISM_INVALID). The
+    // hash-SPECIFIC variants below (CKM_HASH_ML_DSA_SHA256 …) provide the same
+    // capability and ARE implemented. Re-add 0x1F when the generic param parse
+    // lands. Its GetMechanismInfo arm is kept so a client can still probe it.
     CKM_ML_DSA_KEY_PAIR_GEN,
     CKM_ML_DSA,
-    CKM_HASH_ML_DSA,
     CKM_HASH_ML_DSA_SHA224,
     CKM_HASH_ML_DSA_SHA256,
     CKM_HASH_ML_DSA_SHA384,
@@ -460,10 +466,11 @@ pub const SUPPORTED_MECHS: &[u32] = &[
     CKM_HASH_ML_DSA_SHA3_512,
     CKM_HASH_ML_DSA_SHAKE128,
     CKM_HASH_ML_DSA_SHAKE256,
-    // SLH-DSA (FIPS 205) — pure + pre-hash
+    // SLH-DSA (FIPS 205) — pure + pre-hash.
+    // Generic CKM_HASH_SLH_DSA (0x34) unadvertised for the same reason as
+    // CKM_HASH_ML_DSA above (P1); the hash-specific variants are implemented.
     CKM_SLH_DSA_KEY_PAIR_GEN,
     CKM_SLH_DSA,
-    CKM_HASH_SLH_DSA,
     CKM_HASH_SLH_DSA_SHA224,
     CKM_HASH_SLH_DSA_SHA256,
     CKM_HASH_SLH_DSA_SHA384,

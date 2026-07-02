@@ -912,6 +912,33 @@ mod mechanism_table_tests {
         );
     }
 
+    /// P1 — the GENERIC pre-hash sign mechanisms must NOT be advertised while
+    /// their sign path is unimplemented (advertise-and-fail is worse than
+    /// not-advertising for a conformant client). The hash-SPECIFIC variants,
+    /// which are implemented, MUST be advertised so the capability is reachable.
+    #[test]
+    fn p1_generic_hash_sign_mechs_not_advertised_specific_are() {
+        assert!(
+            !SUPPORTED_MECHS.contains(&CKM_HASH_ML_DSA),
+            "generic CKM_HASH_ML_DSA (0x1F) is advertise-and-fail — must stay unadvertised until the \
+             CK_HASH_SIGN_ADDITIONAL_CONTEXT.hash param is parsed"
+        );
+        assert!(
+            !SUPPORTED_MECHS.contains(&CKM_HASH_SLH_DSA),
+            "generic CKM_HASH_SLH_DSA (0x34) is advertise-and-fail — must stay unadvertised"
+        );
+        // The hash-specific variants (which the sign path DOES implement) remain
+        // advertised so pre-hash ML-DSA / SLH-DSA is still reachable.
+        for m in [
+            CKM_HASH_ML_DSA_SHA256,
+            CKM_HASH_ML_DSA_SHA512,
+            CKM_HASH_SLH_DSA_SHA256,
+            CKM_HASH_SLH_DSA_SHA512,
+        ] {
+            assert!(SUPPORTED_MECHS.contains(&m), "hash-specific mech {m:#06x} must stay advertised");
+        }
+    }
+
     /// S6 — the four RSA hash-variant mechanisms are advertised at
     /// (2048, 4096) with CKF_SIGN | CKF_VERIFY.
     #[test]
