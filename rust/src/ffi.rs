@@ -1260,7 +1260,7 @@ pub fn C_GenerateKeyPair(
                 // CKA_SEED (sensitive-material class). CKA_SEED is an attribute
                 // of the private key; the public template is honored as a
                 // fallback rather than silently ignoring an explicit seed.
-                let seed = get_attr_bytes(
+                let mut seed = get_attr_bytes(
                     p_private_key_template,
                     ul_private_key_attribute_count,
                     CKA_SEED,
@@ -1273,16 +1273,22 @@ pub fn C_GenerateKeyPair(
                         return CKR_ATTRIBUTE_VALUE_INVALID;
                     }
                 }
+                // P5 (PKCS#11 v3.2 §6.68.4 / FIPS 203): keygen CONTRIBUTES CKA_SEED
+                // (d ‖ z) to the private key. On the random path, sample the
+                // 64-byte seed explicitly and expand it deterministically —
+                // functionally identical to generate() but the seed is retained.
+                if seed.is_none() {
+                    use rand::RngCore;
+                    let mut dz = [0u8; 64];
+                    rand::rngs::OsRng.fill_bytes(&mut dz);
+                    seed = Some(dz.to_vec());
+                }
                 macro_rules! mlkem_gen {
                     ($t:ty) => {{
-                        let (dk, ek) = match seed.as_deref() {
-                            Some(s) => {
-                                let d = ml_kem::B32::try_from(&s[..32]).expect("length checked");
-                                let z = ml_kem::B32::try_from(&s[32..64]).expect("length checked");
-                                <$t>::generate_deterministic(&d, &z)
-                            }
-                            None => with_rng!(rng, { <$t>::generate(&mut rng) }),
-                        };
+                        let s = seed.as_deref().expect("seed set above");
+                        let d = ml_kem::B32::try_from(&s[..32]).expect("length checked");
+                        let z = ml_kem::B32::try_from(&s[32..64]).expect("length checked");
+                        let (dk, ek) = <$t>::generate_deterministic(&d, &z);
                         pub_attrs.insert(CKA_VALUE, ek.as_bytes().as_slice().to_vec());
                         prv_attrs.insert(CKA_VALUE, dk.as_bytes().as_slice().to_vec());
                     }};
@@ -1392,7 +1398,7 @@ pub fn C_GenerateKeyPair(
                 // `KeyGen::keygen_from_seed`). Read explicitly —
                 // `absorb_template_attrs` skips CKA_SEED (sensitive-material
                 // class). Private-key attribute; public template is a fallback.
-                let seed = get_attr_bytes(
+                let mut seed = get_attr_bytes(
                     p_private_key_template,
                     ul_private_key_attribute_count,
                     CKA_SEED,
@@ -1405,29 +1411,27 @@ pub fn C_GenerateKeyPair(
                         return CKR_ATTRIBUTE_VALUE_INVALID;
                     }
                 }
+                // P5 (PKCS#11 v3.2 §6.67.4 / FIPS 204): key generation CONTRIBUTES
+                // CKA_SEED to the new private key. On the random path (no caller
+                // seed) generate the 32-byte ξ explicitly and expand it via
+                // keygen_from_seed — functionally identical to try_keygen_with_rng
+                // (FIPS 204 KeyGen samples ξ then expands) but the seed is now
+                // retained so the private key carries CKA_SEED (stored below,
+                // sensitive/non-extractable) and can be backed up / re-derived.
+                if seed.is_none() {
+                    use rand::RngCore;
+                    let mut xi = [0u8; 32];
+                    rand::rngs::OsRng.fill_bytes(&mut xi);
+                    seed = Some(xi.to_vec());
+                }
                 macro_rules! mldsa_gen {
                     ($m:ident) => {{
                         use fips204::traits::{KeyGen, SerDes};
-                        match seed.as_deref() {
-                            Some(s) => {
-                                let xi: &[u8; 32] = s.try_into().expect("length checked");
-                                let (vk, sk) = fips204::$m::KG::keygen_from_seed(xi);
-                                pub_attrs.insert(CKA_VALUE, SerDes::into_bytes(vk).to_vec());
-                                prv_attrs.insert(CKA_VALUE, SerDes::into_bytes(sk).to_vec());
-                            }
-                            None => {
-                                let mut rng = rand::rngs::OsRng;
-                                match fips204::$m::try_keygen_with_rng(&mut rng) {
-                                    Ok((vk, sk)) => {
-                                        pub_attrs
-                                            .insert(CKA_VALUE, SerDes::into_bytes(vk).to_vec());
-                                        prv_attrs
-                                            .insert(CKA_VALUE, SerDes::into_bytes(sk).to_vec());
-                                    }
-                                    Err(_) => return CKR_FUNCTION_FAILED,
-                                }
-                            }
-                        }
+                        let s = seed.as_deref().expect("seed set above");
+                        let xi: &[u8; 32] = s.try_into().expect("length checked");
+                        let (vk, sk) = fips204::$m::KG::keygen_from_seed(xi);
+                        pub_attrs.insert(CKA_VALUE, SerDes::into_bytes(vk).to_vec());
+                        prv_attrs.insert(CKA_VALUE, SerDes::into_bytes(sk).to_vec());
                     }};
                 }
                 match ps {

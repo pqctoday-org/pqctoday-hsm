@@ -231,14 +231,27 @@ macro_rules! slh_dsa_keygen {
                 $prv_attrs.insert(CKA_VALUE, SerDes::into_bytes(sk).to_vec());
             }
             None => {
+                // P5 (PKCS#11 v3.2 §6.69.4 / FIPS 205): keygen CONTRIBUTES
+                // CKA_SEED (SK.seed ‖ SK.prf ‖ PK.seed, 3N bytes) to the private
+                // key. Sample the seed explicitly and expand deterministically —
+                // functionally identical to try_keygen_with_rng — then retain it
+                // as CKA_SEED so the private key carries its seed.
+                use rand::RngCore;
+                let mut sk_seed = [0u8; N];
+                let mut sk_prf = [0u8; N];
+                let mut pk_seed = [0u8; N];
                 let mut rng = rand::rngs::OsRng;
-                match fips205::$m::try_keygen_with_rng(&mut rng) {
-                    Ok((vk, sk)) => {
-                        $pub_attrs.insert(CKA_VALUE, SerDes::into_bytes(vk).to_vec());
-                        $prv_attrs.insert(CKA_VALUE, SerDes::into_bytes(sk).to_vec());
-                    }
-                    Err(_) => return CKR_FUNCTION_FAILED,
-                }
+                rng.fill_bytes(&mut sk_seed);
+                rng.fill_bytes(&mut sk_prf);
+                rng.fill_bytes(&mut pk_seed);
+                let (vk, sk) = fips205::$m::KG::keygen_with_seeds::<N>(&sk_seed, &sk_prf, &pk_seed);
+                $pub_attrs.insert(CKA_VALUE, SerDes::into_bytes(vk).to_vec());
+                $prv_attrs.insert(CKA_VALUE, SerDes::into_bytes(sk).to_vec());
+                let mut seed = Vec::with_capacity(3 * N);
+                seed.extend_from_slice(&sk_seed);
+                seed.extend_from_slice(&sk_prf);
+                seed.extend_from_slice(&pk_seed);
+                $prv_attrs.insert(CKA_SEED, seed);
             }
         }
     }};
