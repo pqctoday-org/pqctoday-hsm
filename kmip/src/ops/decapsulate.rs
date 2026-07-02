@@ -39,14 +39,15 @@ pub fn decapsulate(
         fail_err(deps, correlation_id, "Decapsulate", KmipError::object_not_found(&req.uid))
     })?;
 
-    if !is_ml_kem(obj.algorithm) {
+    // K6 — Decapsulate accepts ML-KEM and the hybrid KEMs.
+    if !is_ml_kem(obj.algorithm) && !obj.algorithm.is_hybrid_kem() {
         return Err(fail_err(
             deps,
             correlation_id,
             "Decapsulate",
             KmipError::failed(
                 ResultReason::OperationNotSupported,
-                format!("Decapsulate requires an ML-KEM key; {:?} is not", obj.algorithm),
+                format!("Decapsulate requires an ML-KEM or hybrid KEM key; {:?} is not", obj.algorithm),
             ),
         ));
     }
@@ -110,6 +111,31 @@ pub fn decapsulate(
                 ),
             ));
         }
+    }
+
+    // K6 — hybrid KEM: split the composite ciphertext, ML-KEM-decaps + classical
+    // ECDH against the stored composite PRIVATE key, combine per the algorithm's
+    // order (crate::hybrid_kem). ML-KEM implicit rejection is preserved.
+    if let Some(hybrid) = obj.algorithm.hybrid_kem() {
+        let private = obj.key_material.as_deref().ok_or_else(|| {
+            KmipError::failed(
+                ResultReason::CryptographicFailure,
+                "hybrid KEM private key has no stored material".to_string(),
+            )
+        })?;
+        let shared_secret =
+            crate::hybrid_kem::decapsulate(hybrid, private, &req.data).map_err(|e| {
+                fail_err(
+                    deps,
+                    correlation_id,
+                    "Decapsulate",
+                    KmipError::failed(ResultReason::CryptographicFailure, e),
+                )
+            })?;
+        emit_pkcs11(deps, correlation_id, "soft::hybrid_kem_decapsulate", None, 0, "CKR_OK");
+        let ss_uid = store_shared_secret(deps, obj.algorithm, shared_secret)?;
+        emit_success(deps, correlation_id, "Decapsulate");
+        return Ok(DecapsulateResponse { uid: ss_uid });
     }
 
     let mech = obj.algorithm.to_pkcs11_mech(PkcsOp::Decrypt).ok_or_else(|| {

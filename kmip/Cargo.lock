@@ -1856,6 +1856,7 @@ dependencies = [
  "hex",
  "hmac",
  "ml-kem",
+ "p256",
  "pbkdf2",
  "predicates",
  "prometheus",
@@ -1883,6 +1884,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "x25519-dalek",
  "x509-cert",
  "x509-parser",
 ]

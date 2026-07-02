@@ -181,26 +181,55 @@ pub fn create_key_pair(
     //                     pPrivateKeyTemplate, ulPrivateKeyAttributeCount,
     //                     phPublicKey, phPrivateKey)
     // softhsmrustv3 export verified at rust/src/ffi.rs::C_GenerateKeyPair.
-    let mech = kmip_algo.to_pkcs11_mech(PkcsOp::KeyGen).ok_or_else(|| {
-        KmipError::failed(
-            ResultReason::OperationNotSupported,
-            format!("algorithm {resolved_algorithm} has no KeyGen mechanism"),
-        )
-    })?;
-
-    // Phase 7b: real bridge call when a session is wired. Falls back to
-    // placeholder UUIDs for unit tests.
-    let generated = match engine_generate_keypair(
-        deps,
-        correlation_id,
-        kmip_algo,
-        key_length,
-        mech,
-        req.seed.as_deref(),
-    ) {
-        Ok(g) => g,
-        Err(err) => return fail(deps, correlation_id, op_canonical, err),
-    };
+    // K6 — hybrid KEMs (X25519MLKEM768 / SecP256r1MLKEM768) have no single
+    // PKCS#11 mechanism; the composite key is generated in-process
+    // (`crate::hybrid_kem`) and its raw material is stored on the records
+    // (`key_material`) rather than as engine CKA_IDs.
+    let (generated, hybrid_pub_material, hybrid_priv_material) =
+        if let Some(hybrid) = kmip_algo.hybrid_kem() {
+            let kp = match crate::hybrid_kem::keygen(hybrid) {
+                Ok(kp) => kp,
+                Err(e) => {
+                    return fail(
+                        deps,
+                        correlation_id,
+                        op_canonical,
+                        KmipError::failed(ResultReason::CryptographicFailure, e),
+                    )
+                }
+            };
+            super::helpers::emit_pkcs11(deps, correlation_id, "soft::hybrid_kem_keygen", None, 0, "CKR_OK");
+            (
+                GeneratedKeyPair {
+                    cka_id_priv: Vec::new(),
+                    cka_id_pub: Vec::new(),
+                    digest_priv: None,
+                    digest_pub: None,
+                },
+                Some(kp.public),
+                Some(kp.private),
+            )
+        } else {
+            let mech = kmip_algo.to_pkcs11_mech(PkcsOp::KeyGen).ok_or_else(|| {
+                KmipError::failed(
+                    ResultReason::OperationNotSupported,
+                    format!("algorithm {resolved_algorithm} has no KeyGen mechanism"),
+                )
+            })?;
+            // Phase 7b: real bridge call when a session is wired. Falls back to
+            // placeholder UUIDs for unit tests.
+            match engine_generate_keypair(
+                deps,
+                correlation_id,
+                kmip_algo,
+                key_length,
+                mech,
+                req.seed.as_deref(),
+            ) {
+                Ok(g) => (g, None, None),
+                Err(err) => return fail(deps, correlation_id, op_canonical, err),
+            }
+        };
     let GeneratedKeyPair {
         cka_id_priv: pkcs11_cka_id_priv,
         cka_id_pub: pkcs11_cka_id_pub,
@@ -252,7 +281,9 @@ pub fn create_key_pair(
             custom_attributes: super::helpers::raw_custom_attrs(&all_attrs),
 
 
-            key_material: None,
+            // K6 — composite private key material for a hybrid KEM (None for
+            // engine-backed keys, which live behind a CKA_ID).
+            key_material: hybrid_priv_material,
 
             digest_value: digest_priv,
 
@@ -308,7 +339,8 @@ pub fn create_key_pair(
             custom_attributes: std::collections::HashMap::new(),
 
 
-            key_material: None,
+            // K6 — composite public key material for a hybrid KEM.
+            key_material: hybrid_pub_material,
 
             digest_value: digest_pub,
 
@@ -483,6 +515,8 @@ fn canonical_name(a: KmipAlgorithm) -> String {
         SlhDsaShake192f => "SLH-DSA-SHAKE-192f",
         SlhDsaShake256s => "SLH-DSA-SHAKE-256s",
         SlhDsaShake256f => "SLH-DSA-SHAKE-256f",
+        X25519MlKem768 => "X25519MLKEM768",
+        SecP256r1MlKem768 => "SecP256r1MLKEM768",
     }
     .into()
 }
@@ -514,6 +548,9 @@ pub(crate) fn parse_algorithm(s: &str) -> Result<KmipAlgorithm> {
         "SLH-DSA-SHAKE-192f" => SlhDsaShake192f,
         "SLH-DSA-SHAKE-256s" => SlhDsaShake256s,
         "SLH-DSA-SHAKE-256f" => SlhDsaShake256f,
+        // K6 hybrid KEMs (no '-' split; exact names).
+        "X25519MLKEM768" => X25519MlKem768,
+        "SecP256r1MLKEM768" => SecP256r1MlKem768,
         // Size-suffixed classical algos collapse to their base enum.
         _ => match base {
             "AES" => Aes,

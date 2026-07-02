@@ -151,6 +151,13 @@ pub enum KmipAlgorithm {
     SlhDsaShake192f,  // 0x48
     SlhDsaShake256s,  // 0x49
     SlhDsaShake256f,  // 0x4a
+
+    // ── KMIP 3.0 WD19 hybrid KEMs (K6) ────────────────────────────────────
+    // ML-KEM-768 composed with a classical ECDH per draft-ietf-tls-ecdhe-mlkem.
+    // These do NOT map to a single PKCS#11 mechanism — the KMIP op handlers
+    // compose them in-process (see `crate::hybrid_kem`).
+    X25519MlKem768,   // 0x5c
+    SecP256r1MlKem768, // 0x5d
 }
 
 impl KmipAlgorithm {
@@ -187,6 +194,8 @@ impl KmipAlgorithm {
             SlhDsaShake192f  => 0x00000048,
             SlhDsaShake256s  => 0x00000049,
             SlhDsaShake256f  => 0x0000004a,
+            X25519MlKem768    => 0x0000005c,
+            SecP256r1MlKem768 => 0x0000005d,
         }
     }
 
@@ -222,8 +231,25 @@ impl KmipAlgorithm {
             0x00000048 => SlhDsaShake192f,
             0x00000049 => SlhDsaShake256s,
             0x0000004a => SlhDsaShake256f,
+            0x0000005c => X25519MlKem768,
+            0x0000005d => SecP256r1MlKem768,
             _ => return None,
         })
+    }
+
+    /// `true` if this is a KMIP 3.0 WD19 hybrid KEM (K6), composed in-process
+    /// from ML-KEM-768 + a classical ECDH rather than a single PKCS#11 mech.
+    pub const fn is_hybrid_kem(self) -> bool {
+        matches!(self, KmipAlgorithm::X25519MlKem768 | KmipAlgorithm::SecP256r1MlKem768)
+    }
+
+    /// Map to the [`crate::hybrid_kem::Hybrid`] combiner, or `None` if not hybrid.
+    pub const fn hybrid_kem(self) -> Option<crate::hybrid_kem::Hybrid> {
+        match self {
+            KmipAlgorithm::X25519MlKem768 => Some(crate::hybrid_kem::Hybrid::X25519MlKem768),
+            KmipAlgorithm::SecP256r1MlKem768 => Some(crate::hybrid_kem::Hybrid::SecP256r1MlKem768),
+            _ => None,
+        }
     }
 
     /// `true` if this algorithm is one of the NIST FIPS PQC standards
@@ -353,6 +379,8 @@ impl KmipAlgorithm {
             SlhDsaShake192f  => "SLH-DSA-SHAKE-192f",
             SlhDsaShake256s  => "SLH-DSA-SHAKE-256s",
             SlhDsaShake256f  => "SLH-DSA-SHAKE-256f",
+            X25519MlKem768    => "X25519MLKEM768",
+            SecP256r1MlKem768 => "SecP256r1MLKEM768",
         }
     }
 }
@@ -375,6 +403,7 @@ mod tests {
             SlhDsaShake128s, SlhDsaShake128f,
             SlhDsaShake192s, SlhDsaShake192f,
             SlhDsaShake256s, SlhDsaShake256f,
+            X25519MlKem768, SecP256r1MlKem768,
         ]
     }
 
