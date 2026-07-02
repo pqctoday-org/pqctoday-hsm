@@ -15,6 +15,7 @@
 #   5. wasm  smoke.cjs                         — CACP bundle boots + round-trips
 #   6. (--cpp)  C++ ctest incl. the v3.2 compliance harness  [opt-in, slow]
 #   7. (--acvp-wasm)  20-suite ACVP wasm harness              [opt-in, slow]
+#   8. (--rust-p11)  Rust engine PKCS#11 v3.2 conformance (188 checks) [opt-in]
 #
 # On success it writes .gate-ok-<HEAD-sha> so a pre-push hook can verify the
 # gate ran on the current commit.
@@ -38,11 +39,13 @@ AG_RUST="/ag/pqctoday-hsm/rust"
 
 RUN_CPP=0
 RUN_ACVP_WASM=0
+RUN_RUST_P11=0
 for arg in "$@"; do
   case "$arg" in
     --cpp) RUN_CPP=1 ;;
     --acvp-wasm) RUN_ACVP_WASM=1 ;;
-    --all) RUN_CPP=1; RUN_ACVP_WASM=1 ;;
+    --rust-p11) RUN_RUST_P11=1 ;;
+    --all) RUN_CPP=1; RUN_ACVP_WASM=1; RUN_RUST_P11=1 ;;
     *) echo "unknown flag: $arg" >&2; exit 2 ;;
   esac
 done
@@ -113,6 +116,20 @@ fi
 if [[ $RUN_ACVP_WASM == 1 ]]; then
   run_step "ACVP wasm harness (20 suites, cross-engine)" \
     "cd /ag/pqctoday-hsm && npm run test:acvp 2>&1 | tail -5"
+fi
+
+if [[ $RUN_RUST_P11 == 1 ]]; then
+  # Build the Rust engine's wasm pkg (dev + acvp + larger stack) then drive its
+  # real PKCS#11 ABI through the v3.2 conformance matrix. This is the Rust-engine
+  # conformance evidence (report gap P2/T1) — the wasm build runs in the
+  # container, the node driver on the host.
+  STEP=$((STEP+1)); say "step $STEP: Rust PKCS#11 v3.2 conformance (188 checks)"
+  if dexec "cd $AG_RUST && RUSTFLAGS='-C link-arg=-zstack-size=2097152' wasm-pack build --target bundler --out-dir pkg --dev -- --features acvp >/dev/null 2>&1" \
+     && ( cd "$ROOT/rust" && node test_p11_conformance.js 2>&1 | grep -q 'RESULT: .* 0 failed' ); then
+    ok "Rust PKCS#11 v3.2 conformance"
+  else
+    bad "Rust PKCS#11 v3.2 conformance"
+  fi
 fi
 
 # ── verdict ─────────────────────────────────────────────────────────────────
