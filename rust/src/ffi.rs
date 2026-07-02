@@ -2165,11 +2165,24 @@ pub fn C_GenerateKeyPair(
                     param_code = *p_param_ptr;
                 }
 
+                // P4 — the parameter set is carried in the STANDARD
+                // CKA_PARAMETER_SET (0x61d, PKCS#11 v3.2 Table 273); accept the
+                // legacy vendor CKA_XMSS_PARAM_SET and the mechanism-parameter
+                // word as fallbacks. Previously only the vendor attr + mech word
+                // were read, so a conformant client's CKA_PARAMETER_SET was
+                // ignored (inconsistent with XMSSMT above).
                 let mut xmss_param = get_attr_ulong(
                     p_public_key_template,
                     ul_public_key_attribute_count,
-                    CKA_XMSS_PARAM_SET,
+                    CKA_PARAMETER_SET,
                 )
+                .or_else(|| {
+                    get_attr_ulong(
+                        p_public_key_template,
+                        ul_public_key_attribute_count,
+                        CKA_XMSS_PARAM_SET,
+                    )
+                })
                 .unwrap_or(param_code);
 
                 if xmss_param == 0 {
@@ -2191,6 +2204,10 @@ pub fn C_GenerateKeyPair(
                 // the raw param_code. xmss_sign / xmss_verify read this attr
                 // and dispatch on it; a stored 0 falls into the catch-all
                 // `_ => Err(CKR_FUNCTION_FAILED)` arm and breaks every sign.
+                // P4 — expose the param set under the STANDARD CKA_PARAMETER_SET
+                // (what a conformant client reads back) as well as the legacy
+                // vendor attr the sign/verify path dispatches on.
+                store_ulong(&mut pub_attrs, CKA_PARAMETER_SET, xmss_param);
                 store_ulong(&mut pub_attrs, CKA_XMSS_PARAM_SET, xmss_param);
                 store_ulong(&mut pub_attrs, CKA_KEY_GEN_MECHANISM, CKM_XMSS_KEY_PAIR_GEN);
                 store_bool(&mut pub_attrs, CKA_TOKEN, false);
@@ -2202,6 +2219,7 @@ pub fn C_GenerateKeyPair(
                 // Private key attributes
                 store_ulong(&mut prv_attrs, CKA_CLASS, CKO_PRIVATE_KEY);
                 store_ulong(&mut prv_attrs, CKA_KEY_TYPE, CKK_XMSS);
+                store_ulong(&mut prv_attrs, CKA_PARAMETER_SET, xmss_param);
                 store_ulong(&mut prv_attrs, CKA_XMSS_PARAM_SET, xmss_param);
                 store_ulong(&mut prv_attrs, CKA_KEY_GEN_MECHANISM, CKM_XMSS_KEY_PAIR_GEN);
                 store_bool(&mut prv_attrs, CKA_TOKEN, false);
