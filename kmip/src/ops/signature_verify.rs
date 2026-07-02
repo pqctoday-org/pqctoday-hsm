@@ -119,6 +119,15 @@ pub fn signature_verify(
     p_req.usage_mask = Some(obj.usage_mask);
     p_req.state = Some(state_name(obj.state));
     p_req.target_uid = Some(&req.uid);
+    // Y16 — surface the mechanism dimension so hash/mechanism rules gate
+    // SignatureVerify too (was a silent no-op on this op).
+    p_req.mechanism = super::helpers::mechanism_params_from_cp(
+        obj.algorithm,
+        crate::kmip30::PkcsOp::SignVerify,
+        req.cryptographic_parameters
+            .as_ref()
+            .or(obj.cryptographic_parameters.as_ref()),
+    );
     if let Decision::Deny { human, .. } = deps.engine.evaluate(&p_req) {
         return Err(fail_err(
             deps,

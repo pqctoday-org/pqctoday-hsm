@@ -115,6 +115,15 @@ pub fn decrypt(deps: &Deps, req: DecryptRequest, correlation_id: &str) -> Result
     p_req.current_object_algorithm = Some(&algo);
     p_req.target_uid = Some(&req.uid);
     p_req.object_activation_date = obj.activation_date; // F-3 — max_key_age_days
+    // Y16 — surface the mechanism dimension so mechanism/hash/mode rules gate
+    // Decrypt too (was a silent no-op — populated only on Sign/Encrypt before).
+    p_req.mechanism = super::helpers::mechanism_params_from_cp(
+        obj.algorithm,
+        crate::kmip30::PkcsOp::Encrypt,
+        req.cryptographic_parameters
+            .as_ref()
+            .or(obj.cryptographic_parameters.as_ref()),
+    );
     if let Decision::Deny { human, .. } = deps.engine.evaluate(&p_req) {
         return Err(fail_err(
             deps,
