@@ -586,12 +586,15 @@ fn alg_from_name(name: &str) -> Option<KmipAlgorithm> {
         SlhDsaSha2_128s, SlhDsaSha2_128f, SlhDsaSha2_192s, SlhDsaSha2_192f, SlhDsaSha2_256s,
         SlhDsaSha2_256f, SlhDsaShake128s, SlhDsaShake128f, SlhDsaShake192s, SlhDsaShake192f,
         SlhDsaShake256s, SlhDsaShake256f,
+        // K6 hybrid KEMs.
+        X25519MlKem768, SecP256r1MlKem768,
     ];
     ALL.iter().copied().find(|a| a.spec_name().eq_ignore_ascii_case(name))
 }
 
 fn is_kem(alg: KmipAlgorithm) -> bool {
     matches!(alg, KmipAlgorithm::MlKem512 | KmipAlgorithm::MlKem768 | KmipAlgorithm::MlKem1024)
+        || alg.is_hybrid_kem()
 }
 
 // ── response summary ───────────────────────────────────────────────────────────
