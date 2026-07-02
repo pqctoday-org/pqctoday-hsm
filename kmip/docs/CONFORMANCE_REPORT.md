@@ -109,7 +109,8 @@ skips** out of 102 transcripts. Per-test detail: `conformance/REPLAY_REPORT.md`.
 
 ### 4.1 Vendor extension: ML-KEM shared secret (K10)
 
-KMIP 3.0 has **no Encapsulate operation**. This server overloads
+KMIP 3.0 WD19 adds native `Encapsulate`/`Decapsulate` ops (this server
+implements them). For pre-WD19 clients the server ALSO overloads
 Encrypt/Decrypt for ML-KEM encapsulation/decapsulation as a documented
 vendor extension: the Encrypt response carries the encapsulation in
 `Data` and the derived shared secret under the `PQCToday-SharedSecret`

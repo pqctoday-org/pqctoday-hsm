@@ -14,13 +14,13 @@
 //! encrypt, decrypt, sign, signature_verify
 //! ```
 //!
-//! KMIP 3.0 does NOT add separate `Encapsulate` / `Decapsulate` ops — ML-KEM
-//! encapsulation reuses `Encrypt`; ML-KEM decapsulation reuses `Decrypt`.
-//! The op handler branches on `key.algorithm` to dispatch to the right
-//! PKCS#11 mech (see `algos::KmipAlgorithm::to_pkcs11_mech`).
-//!
-//! Phase-3 deliverable: struct skeletons + serde-friendly fields. Phase 5
-//! wires them into the dispatcher and op handlers.
+//! KMIP 3.0 WD19 (PQC Updates) DOES add native `Encapsulate` (0x41) /
+//! `Decapsulate` (0x42) ops, and this server implements them (see the
+//! Encapsulate/Decapsulate structs below and `ops::encapsulate` /
+//! `ops::decapsulate`). For backward compatibility with pre-WD19 clients the
+//! ML-KEM flow ALSO rides `Encrypt`/`Decrypt` (the handler branches on
+//! `key.algorithm`; the shared secret is returned under the
+//! `PQCToday-SharedSecret` vendor tag — see `docs/CONFORMANCE_REPORT.md`).
 
 use super::algos::KmipAlgorithm;
 use super::attrs::{Attribute, ObjectType, RevocationReason, State};

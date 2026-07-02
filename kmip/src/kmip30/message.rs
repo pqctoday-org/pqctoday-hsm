@@ -47,8 +47,9 @@ pub const KMIP_VERSION_MINOR: i32 = 0;
 #[derive(Clone, Debug, PartialEq)]
 pub struct RequestMessage {
     pub header: RequestHeader,
-    /// v0.1 ships one batch item per message; the field type is `Vec` to
-    /// match the spec shape so v0.2 multi-op batching is an additive change.
+    /// Multi-item batches are fully supported — the dispatcher processes each
+    /// item with Batch Error Continuation Stop/Continue/Undo and the §6.4 ID
+    /// Placeholder. Most OASIS conformance transcripts are single-item.
     pub batch_items: Vec<RequestBatchItem>,
 }
 
