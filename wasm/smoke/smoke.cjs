@@ -120,6 +120,18 @@ assert.strictEqual(objsAfter.length, objs.length,
   'a rejected unknown-algorithm request creates no object');
 console.log(`[smoke]   ✓ rejected: "${bogus.message}" (keystore unchanged at ${objsAfter.length})`);
 
+// ── Step 7 — K6: hybrid KEM X25519MLKEM768 end-to-end in wasm.
+console.log('[smoke] hybrid KEM X25519MLKEM768: CreateKeyPair → Activate → Encapsulate → Decapsulate …');
+const hkp = runOp({ op: 'CreateKeyPair', intent: 'kem', algorithm: 'X25519MLKEM768' });
+assert.ok(hkp.ok, `hybrid CreateKeyPair ok (msg=${hkp.message})`);
+const hPriv = hkp.summary.privateKeyUid, hPub = hkp.summary.publicKeyUid;
+assert.ok(runOp({ op: 'Activate', uid: hPriv }).ok && runOp({ op: 'Activate', uid: hPub }).ok, 'activate hybrid halves');
+const encap = runOp({ op: 'Encapsulate', uid: hPub });
+assert.ok(encap.ok, `Encapsulate ok (msg=${encap.message})`);
+const decap = runOp({ op: 'Decapsulate', uid: hPriv, data: encap.summary.ciphertextHex });
+assert.ok(decap.ok, `Decapsulate ok (msg=${decap.message})`);
+console.log(`[smoke]   ✓ hybrid KEM round-trip: encapsulated + decapsulated a shared secret in wasm`);
+
 console.log('\n[smoke] PASS — the KMIP+PKCS#11 control plane runs end-to-end in wasm.');
 
 // decode helper: turn the hex response wire back into a TTLV tree via the wasm decoder.
