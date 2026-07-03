@@ -8,6 +8,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-07-02
+
+This release consolidates the KMIP / crypto-agility hardening wave: the KMIP server
+gains a real admin API, metrics, and audit streaming; the PKCS#11 and KMIP edges
+fail closed; the Rust engine reaches full PKCS#11 v3.2 conformance; and the KMIP
+wire format is validated against the OASIS conformance suite. It is the version now
+consumed by the pqctoday-sandbox 0.5.0 dev-sandbox (whose KMIP/CACP sample and
+per-language HSM-backed samples run against this engine and its `pqctoday-kmip-client`).
+
 ### Added — three new crypto-agility policies: auto-migrate-on-use, pkcs11-mechanism-lockdown, bsi-tr-02102 (2026-06-26)
 
 Three bundled policy presets for the CACP policy engine:
