@@ -54,6 +54,7 @@ use super::{
     loader::LoadedPolicy,
     policy::Policy,
     request::PolicyRequest,
+    rule::GatingDeny,
 };
 
 /// Engine state. Cheap to `.clone()` — the policy + audit live behind `Arc`.
@@ -169,6 +170,17 @@ rules: []
 
     /// Heart of Plane 1. See module docs for the two-pass semantics.
     pub fn evaluate(&self, req: &PolicyRequest) -> Decision {
+        self.evaluate_traced(req).0
+    }
+
+    /// Like [`Self::evaluate`], but also returns a per-rule execution trace
+    /// reflecting what the engine ACTUALLY did this pass — which rules resolved
+    /// an algorithm (defaults/substitutions/forced params), which rule denied,
+    /// which were evaluated and passed, and which were skipped after the
+    /// decision short-circuited. The Hub's visual simulator drives its node
+    /// highlighting from this, so what the graph shows is engine-truth, not a
+    /// re-implemented approximation.
+    pub fn evaluate_traced(&self, req: &PolicyRequest) -> (Decision, Vec<TraceEntry>) {
         let snapshot = match self.active() {
             Some(s) => s,
             None => {
@@ -178,9 +190,13 @@ rules: []
                     fired_rule_index: 0,
                 };
                 self.audit.record_decision(req, &d, "<no-policy>");
-                return d;
+                return (d, Vec::new());
             }
         };
+
+        // Per-rule "this rule resolved an algorithm/param" notes, filled by the
+        // resolve passes below; drives the `resolve` effect in the trace.
+        let mut resolver_note: Vec<Option<String>> = vec![None; snapshot.policy.rules.len()];
 
         // ── Pass 0: resolve algorithm_default ────────────────────────────
         // A default only fills a request that specified NO algorithm. Resolve it
@@ -192,6 +208,7 @@ rules: []
         if resolved.is_none() {
             for (i, rule) in snapshot.policy.rules.iter().enumerate() {
                 if let Some(def) = rule.resolve_default(req) {
+                    resolver_note[i] = Some(format!("default → {}", def.new_algorithm));
                     resolved = Some(def.new_algorithm);
                     substituted_by = Some(i + 1);
                     break;
@@ -203,23 +220,31 @@ rules: []
         for (i, rule) in snapshot.policy.rules.iter().enumerate() {
             let current_view: Option<&str> = resolved.as_deref();
             if let Some(sub) = rule.resolve_substitution(req, current_view) {
+                resolver_note[i] =
+                    Some(format!("{} → {}", current_view.unwrap_or_default(), sub.new_algorithm));
                 resolved = Some(sub.new_algorithm);
                 substituted_by = Some(i + 1);
             }
         }
 
-        // ── Pass 2: gating ──────────────────────────────────────────────
+        // ── Pass 2: gating (first deny wins) ─────────────────────────────
         let resolved_view: Option<&str> = resolved.as_deref();
+        let mut fired: Option<(usize, GatingDeny)> = None;
         for (i, rule) in snapshot.policy.rules.iter().enumerate() {
             if let Some(deny) = rule.check_pass2(req, resolved_view) {
-                let d = Decision::Deny {
-                    kmip_reason: deny.kmip_reason,
-                    human: deny.human,
-                    fired_rule_index: i + 1,
-                };
-                self.audit.record_decision(req, &d, &snapshot.source_fingerprint);
-                return d;
+                fired = Some((i, deny));
+                break;
             }
+        }
+        if let Some((i, deny)) = fired {
+            let trace = build_trace(&resolver_note, Some(i), Some(&deny.human));
+            let d = Decision::Deny {
+                kmip_reason: deny.kmip_reason,
+                human: deny.human,
+                fired_rule_index: i + 1,
+            };
+            self.audit.record_decision(req, &d, &snapshot.source_fingerprint);
+            return (d, trace);
         }
 
         // ── Pass 1b: resolve forced mechanism parameters (plan P3) ───────
@@ -227,8 +252,11 @@ rules: []
         // Allow so the dispatcher merges it into the effective
         // CryptographicParameters before calling the engine.
         let mut cp = super::CpOverride::default();
-        for rule in snapshot.policy.rules.iter() {
+        for (i, rule) in snapshot.policy.rules.iter().enumerate() {
             if let Some(forced) = rule.resolve_cp(req, resolved_view) {
+                if resolver_note[i].is_none() {
+                    resolver_note[i] = Some("forces mechanism params".into());
+                }
                 cp.merge(forced);
             }
         }
@@ -265,9 +293,49 @@ rules: []
                 cp_override,
             },
         };
+        let trace = build_trace(&resolver_note, None, None);
         self.audit.record_decision(req, &d, &snapshot.source_fingerprint);
-        d
+        (d, trace)
     }
+}
+
+/// A per-rule execution-trace entry (1-based `index`) for the Hub visual
+/// simulator, so graph highlighting reflects the ENGINE's actual pass.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TraceEntry {
+    /// 1-based rule number (matches `Decision`'s `fired_rule_index`).
+    pub index: usize,
+    /// `"resolve"` (default/substitution/forced-param fired) · `"deny"` (the
+    /// rule that fired the Deny) · `"pass"` (evaluated, did not fire) · `"skip"`
+    /// (not reached — evaluation short-circuited at the Deny above it).
+    pub effect: &'static str,
+    /// Human note (resolve morph `X → Y`, or the deny reason).
+    pub note: String,
+}
+
+/// Classify every rule into a [`TraceEntry`] from what the engine computed:
+/// resolver notes (Pass 0/1/1b), the fired-deny index, and the short-circuit.
+fn build_trace(
+    resolver_note: &[Option<String>],
+    fired_idx: Option<usize>,
+    deny_human: Option<&str>,
+) -> Vec<TraceEntry> {
+    resolver_note
+        .iter()
+        .enumerate()
+        .map(|(i, note)| {
+            let index = i + 1;
+            if let Some(note) = note {
+                TraceEntry { index, effect: "resolve", note: note.clone() }
+            } else if fired_idx == Some(i) {
+                TraceEntry { index, effect: "deny", note: deny_human.unwrap_or_default().to_string() }
+            } else if fired_idx.is_some_and(|d| i > d) {
+                TraceEntry { index, effect: "skip", note: "after decision".into() }
+            } else {
+                TraceEntry { index, effect: "pass", note: String::new() }
+            }
+        })
+        .collect()
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -377,6 +445,54 @@ rules:
         assert!(eng.evaluate(&bad).is_deny());
         let good = PolicyRequest::minimal("Create", Some("AES-256"), ts(), "c-4", &attrs);
         assert!(eng.evaluate(&good).is_allow());
+    }
+
+    #[test]
+    fn evaluate_traced_reports_resolve_deny_skip() {
+        let yaml = r#"
+schema_version: 1
+metadata:
+  name: trace-test
+  description: exercise the per-rule trace
+  authority: test
+  effective: "always"
+rules:
+  - type: algorithm_default
+    ops: ["CreateKeyPair:Sign"]
+    default_algorithm: ECDSA-P256
+    reason: "classical default"
+  - type: algorithm_denylist
+    ops: [CreateKeyPair, "CreateKeyPair:Sign"]
+    algorithms: [ECDSA-P256]
+    reason: "no classical ecdsa"
+  - type: algorithm_allowlist
+    ops: [CreateKeyPair]
+    algorithms: [ML-DSA-87]
+    reason: "allowlist"
+"#;
+        let eng = Engine::deny_all();
+        eng.activate(load_from_str(yaml, Path::new("<test>")).unwrap()).unwrap();
+        let attrs = HashMap::new();
+
+        // No algorithm → default resolves ECDSA-P256 (rule 1), denylist fires
+        // (rule 2), rule 3 never reached (short-circuit).
+        let req = PolicyRequest::minimal("CreateKeyPair:Sign", None, ts(), "c-t1", &attrs);
+        let (d, trace) = eng.evaluate_traced(&req);
+        assert!(d.is_deny());
+        assert_eq!(
+            trace.iter().map(|t| t.effect).collect::<Vec<_>>(),
+            vec!["resolve", "deny", "skip"]
+        );
+        assert_eq!(trace[0].index, 1);
+
+        // Explicit ML-DSA-87 → nothing resolves, both gates evaluate and pass.
+        let ok = PolicyRequest::minimal("CreateKeyPair", Some("ML-DSA-87"), ts(), "c-t2", &attrs);
+        let (d2, trace2) = eng.evaluate_traced(&ok);
+        assert!(d2.is_allow());
+        assert_eq!(
+            trace2.iter().map(|t| t.effect).collect::<Vec<_>>(),
+            vec!["pass", "pass", "pass"]
+        );
     }
 
     #[test]

@@ -428,7 +428,8 @@ impl KmipPlayground {
             pr.mechanism.canonical_mech = ms("mech").and_then(ckm_name_to_code);
         }
 
-        let out = match self.deps.engine.evaluate(&pr) {
+        let (decision, trace) = self.deps.engine.evaluate_traced(&pr);
+        let mut out = match decision {
             Decision::Allow { algorithm_override, substituted_by_rule, .. } => json!({
                 "kind": "Allow", "algorithm": algorithm_override, "rule": substituted_by_rule,
             }),
@@ -441,6 +442,15 @@ impl KmipPlayground {
                 "rule": triggered_by_rule, "reason": human,
             }),
         };
+        // Per-rule engine trace (1-based `index`) so the Hub visual simulator
+        // highlights exactly what the engine did — not a re-derived guess.
+        let trace_json: Vec<Json> = trace
+            .iter()
+            .map(|t| json!({ "index": t.index, "effect": t.effect, "note": t.note }))
+            .collect();
+        if let Some(obj) = out.as_object_mut() {
+            obj.insert("trace".into(), Json::Array(trace_json));
+        }
         out.to_string()
     }
 

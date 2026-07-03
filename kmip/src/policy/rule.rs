@@ -670,11 +670,14 @@ impl Rule {
                     Some(a) if matches_class(a, "symmetric") => return None,
                     Some(_) => {}
                 }
-                let composite = format!("{}-{}", primary, secondary.to_uppercase());
-                let composite_alt =
-                    format!("{}-{}", primary.to_uppercase(), secondary.to_uppercase());
+                // Composite name follows the KMIP 3.0 `CryptographicAlgorithm`
+                // spelling — component names keep their spec casing (`Ed25519`,
+                // per OASIS KMIP 3.0 §11 / RFC 8032; NOT `ED25519`). Match
+                // case-insensitively so a request that spells the composite with
+                // any casing still satisfies the mandate.
+                let composite = format!("{}-{}", primary, secondary);
                 match resolved_algorithm {
-                    Some(a) if a == composite || a == composite_alt => None,
+                    Some(a) if a.eq_ignore_ascii_case(&composite) => None,
                     _ => Some(GatingDeny {
                         kmip_reason: DenyReason::PermissionDenied,
                         human: reason.clone(),
@@ -1685,7 +1688,9 @@ mod tests {
         req.ts = OffsetDateTime::from_unix_timestamp(1_800_000_000).unwrap(); // 2027
         // Pure ML-DSA-65 inside window → deny (composite required).
         assert!(r.check_pass2(&req, Some("ML-DSA-65")).is_some());
-        // Composite name → allow.
+        // KMIP 3.0-cased composite name → allow (canonical spelling).
+        assert!(r.check_pass2(&req, Some("ML-DSA-65-Ed25519")).is_none());
+        // Case-insensitive: the legacy uppercase spelling is still accepted.
         assert!(r.check_pass2(&req, Some("ML-DSA-65-ED25519")).is_none());
     }
 

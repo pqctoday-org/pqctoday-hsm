@@ -88,7 +88,7 @@ pub mod store;
 
 pub use audit::PolicyAudit;
 pub use decision::{CpOverride, Decision, DenyReason};
-pub use engine::{ActivePolicy, Engine};
+pub use engine::{ActivePolicy, Engine, TraceEntry};
 pub use lint::{lint_rules, Finding};
 pub use loader::{
     load_from_file, load_from_str, load_from_str_strict, validate, validate_strict, LoadedPolicy,

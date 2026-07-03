@@ -266,7 +266,10 @@ pub fn is_known_algorithm_name(name: &str) -> bool {
 }
 
 /// ML-DSA suffix: a bare level (`44`/`65`/`87`) or a composite tail
-/// (`65-ED25519`, `87-ECDSA-P384`) LAMPS names use.
+/// (`65-Ed25519`, `87-ECDSA-P384`) LAMPS names use. The classical tail is
+/// matched case-insensitively so the KMIP 3.0 spelling (`Ed25519`, per RFC 8032)
+/// and the legacy uppercase (`ED25519`) both validate — the engine likewise
+/// matches composites case-insensitively.
 fn is_ml_dsa_suffix(s: &str) -> bool {
     match s {
         "44" | "65" | "87" => true,
@@ -274,10 +277,10 @@ fn is_ml_dsa_suffix(s: &str) -> bool {
         _ => {
             let mut parts = s.splitn(2, '-');
             let level = parts.next().unwrap_or("");
-            let tail = parts.next().unwrap_or("");
+            let tail = parts.next().unwrap_or("").to_ascii_uppercase();
             matches!(level, "44" | "65" | "87")
                 && matches!(
-                    tail,
+                    tail.as_str(),
                     "ED25519" | "ED448" | "ECDSA-P256" | "ECDSA-P384" | "ECDSA-P521"
                 )
         }
@@ -305,7 +308,8 @@ mod tests {
     fn known_algorithm_names_accepts_real_and_qualified() {
         for ok in [
             "AES", "AES-256", "RSA-3072", "ECDSA-P384", "ECDH-P256", "ML-KEM-1024",
-            "ML-DSA-87", "ML-DSA-65-ED25519", "ML-DSA-87-ECDSA-P384", "SLH-DSA-SHA2-128s",
+            "ML-DSA-87", "ML-DSA-65-Ed25519", "ML-DSA-65-ED25519", "ML-DSA-87-ECDSA-P384",
+            "SLH-DSA-SHA2-128s",
             "SLH-DSA-SHAKE-256f", "HMAC-SHA-256", "LMS", "HSS", "XMSS", "XMSS-MT",
             "Falcon-1024", "HQC-192", "BIKE-L3", "FrodoKEM-1344", "Classic-McEliece-8192128",
             "Ed25519", "X25519", "SHA-256", "RSA-PKCS1-v1_5", "ECDSA-SHA1",
