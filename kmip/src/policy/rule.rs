@@ -904,7 +904,7 @@ fn window_active(
 /// KMIP `Hashing Algorithm` name → enum codepoint. Values verified against
 /// `spec/oasis-kmip-3.0/kmip-spec-3.0-tags-enums.json` (§11). Unknown → `None`
 /// (the loader rejects unknown names up-front; this is defence in depth).
-fn hash_name_to_code(name: &str) -> Option<u32> {
+pub fn hash_name_to_code(name: &str) -> Option<u32> {
     Some(match name {
         "SHA-1" => 0x04,
         "SHA-224" => 0x05,
@@ -922,7 +922,7 @@ fn hash_name_to_code(name: &str) -> Option<u32> {
 }
 
 /// KMIP `Block Cipher Mode` name → enum codepoint (spec §11, verified).
-fn block_cipher_mode_name_to_code(name: &str) -> Option<u32> {
+pub fn block_cipher_mode_name_to_code(name: &str) -> Option<u32> {
     Some(match name {
         "CBC" => 0x01,
         "ECB" => 0x02,
@@ -947,7 +947,7 @@ fn mgf_name_to_code(name: &str) -> Option<u32> {
 }
 
 /// KMIP `Padding Method` name → enum codepoint (spec §11, verified).
-fn padding_method_name_to_code(name: &str) -> Option<u32> {
+pub fn padding_method_name_to_code(name: &str) -> Option<u32> {
     Some(match name {
         "None" => 0x01,
         "OAEP" => 0x02,
@@ -968,7 +968,7 @@ fn padding_method_name_to_code(name: &str) -> Option<u32> {
 /// 0x100`). Verified: KMIP/PKCS#11 v3.2 does NOT standardize KMAC (absent from
 /// the canonical OASIS v3.2 `pkcs11t.h`), so vendor-defined is correct, and it
 /// is consistent across `src/lib/pkcs11/pkcs11t.h` + `rust/src/constants.rs`.
-fn ckm_name_to_code(name: &str) -> Option<u32> {
+pub fn ckm_name_to_code(name: &str) -> Option<u32> {
     use softhsmrustv3::constants as c;
     Some(match name {
         // Key-pair / key generation mechanisms (Y14 — these were missing, so a
@@ -1130,31 +1130,41 @@ fn mechanism_list_matches(names: &[String], code: u32) -> bool {
         .any(|entry| entry == code || ckm_family(code) == Some(entry))
 }
 
+/// Policy-grammar usage-flag name → `UsageMask` bit. The single source of
+/// truth for flag naming, shared by `require_usage_mask` gating and the WASM
+/// dry-run facade (WP4b) so a UI-supplied flag list resolves exactly like a
+/// policy's `flags:` list. Unknown → `None`.
+pub fn usage_flag_name_to_bit(name: &str) -> Option<super::super::kmip30::UsageMask> {
+    use super::super::kmip30::UsageMask as M;
+    Some(match name {
+        "Sign"               => M::SIGN,
+        "Verify"             => M::VERIFY,
+        "Encrypt"            => M::ENCRYPT,
+        "Decrypt"            => M::DECRYPT,
+        "WrapKey"            => M::WRAP_KEY,
+        "UnwrapKey"          => M::UNWRAP_KEY,
+        "Export"             => M::EXPORT,
+        "MacGenerate"        => M::MAC_GENERATE,
+        "MacVerify"          => M::MAC_VERIFY,
+        "DeriveKey"          => M::DERIVE_KEY,
+        "ContentCommitment"  => M::CONTENT_COMMITMENT,
+        "KeyAgreement"       => M::KEY_AGREEMENT,
+        "CertificateSign"    => M::CERTIFICATE_SIGN,
+        "CrlSign"            => M::CRL_SIGN,
+        "Authenticate"       => M::AUTHENTICATE,
+        _ => return None,
+    })
+}
+
 /// `true` if every `flag` is present in `mask`. Unknown flag names are
 /// rejected (loader rejects them up-front, but defence in depth).
 fn usage_mask_has_all(
     mask: super::super::kmip30::UsageMask,
     flags: &[String],
 ) -> bool {
-    use super::super::kmip30::UsageMask as M;
     for f in flags {
-        let bit = match f.as_str() {
-            "Sign"               => M::SIGN,
-            "Verify"             => M::VERIFY,
-            "Encrypt"            => M::ENCRYPT,
-            "Decrypt"            => M::DECRYPT,
-            "WrapKey"            => M::WRAP_KEY,
-            "UnwrapKey"          => M::UNWRAP_KEY,
-            "Export"             => M::EXPORT,
-            "MacGenerate"        => M::MAC_GENERATE,
-            "MacVerify"          => M::MAC_VERIFY,
-            "DeriveKey"          => M::DERIVE_KEY,
-            "ContentCommitment"  => M::CONTENT_COMMITMENT,
-            "KeyAgreement"       => M::KEY_AGREEMENT,
-            "CertificateSign"    => M::CERTIFICATE_SIGN,
-            "CrlSign"            => M::CRL_SIGN,
-            "Authenticate"       => M::AUTHENTICATE,
-            _ => return false,
+        let Some(bit) = usage_flag_name_to_bit(f) else {
+            return false;
         };
         if !mask.contains(bit) {
             return false;

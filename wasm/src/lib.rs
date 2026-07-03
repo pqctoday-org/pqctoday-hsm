@@ -329,12 +329,23 @@ impl KmipPlayground {
     /// policy WOULD decide for an operation, without executing it or touching the
     /// store. Unlike the REST facade's dry-run (which uses a minimal request that
     /// can never produce a rekey or min-key-length decision), this passes the
-    /// full request fields. spec:
-    /// `{"op":"Sign","algorithm":"ML-DSA-65","length":?,"currentAlgorithm":"ECDSA-P256","state":"Active"}`
+    /// full request fields (WP4b: date, custom attrs, usage mask, mechanism
+    /// params, and key activation date, so temporal / attribute / mechanism
+    /// rules evaluate exactly like the production dispatcher path). spec:
+    /// `{"op":"Sign","algorithm":"ML-DSA-65","length":?,"currentAlgorithm":"ECDSA-P256",
+    ///   "state":"Active","date":"2027-06-01","attrs":{"pqctoday-purpose":"research"},
+    ///   "usageMask":["Sign","Verify"],"activationDate":"2026-01-15",
+    ///   "mechanism":{"hash":"SHA-256","blockMode":"GCM","padding":"OAEP",
+    ///                "deterministic":true,"mech":"CKM_AES_GCM"}}`
+    /// Names resolve through the SAME tables the policy loader validates against
+    /// (`policy::hash_name_to_code` etc.) — never a second hand-rolled mapping.
     /// Returns `{ kind: Allow|Deny|Rekey, algorithm?, from?, to?, rule?, reason? }`.
     #[wasm_bindgen]
     pub fn dry_run(&self, spec_json: &str) -> String {
-        use pqctoday_kmip::policy::{Decision, PolicyRequest};
+        use pqctoday_kmip::policy::{
+            block_cipher_mode_name_to_code, ckm_name_to_code, hash_name_to_code,
+            padding_method_name_to_code, usage_flag_name_to_bit, Decision, PolicyRequest,
+        };
         let spec: Json = match serde_json::from_str(spec_json) {
             Ok(v) => v,
             Err(e) => return error_json(&format!("invalid spec: {e}")),
@@ -348,8 +359,38 @@ impl KmipPlayground {
         let algorithm = s("algorithm").or_else(|| current.clone());
         let state = s("state").unwrap_or_else(|| "Active".into());
         let length = spec.get("length").and_then(|v| v.as_u64()).map(|n| n as u32);
-        let attrs = std::collections::HashMap::new();
-        let now = time::OffsetDateTime::now_utc();
+
+        // `date` — the simulated request clock. Absent/invalid → now (back-compat).
+        let parse_day = |v: &str| -> Option<time::OffsetDateTime> {
+            let p: Vec<&str> = v.split('T').next().unwrap_or(v).split('-').collect();
+            if p.len() < 3 {
+                return None;
+            }
+            let y: i32 = p[0].parse().ok()?;
+            let m: u8 = p[1].parse().ok()?;
+            let d: u8 = p[2].parse().ok()?;
+            let date = time::Date::from_calendar_date(y, time::Month::try_from(m).ok()?, d).ok()?;
+            Some(date.midnight().assume_utc())
+        };
+        let now = s("date")
+            .as_deref()
+            .and_then(parse_day)
+            .unwrap_or_else(time::OffsetDateTime::now_utc);
+
+        // `attrs` — custom x-attributes ({name: value}, x- prefix optional; the
+        // engine stores bare names, loader-style).
+        let attrs: std::collections::HashMap<String, String> = spec
+            .get("attrs")
+            .and_then(|v| v.as_object())
+            .map(|o| {
+                o.iter()
+                    .map(|(k, v)| {
+                        let name = k.strip_prefix("x-").unwrap_or(k).to_string();
+                        (name, v.as_str().unwrap_or_default().to_string())
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
 
         let mut pr = PolicyRequest::minimal(&op, algorithm.as_deref(), now, "dry-run", &attrs);
         pr.key_length = length;
@@ -359,6 +400,32 @@ impl KmipPlayground {
         // a substitution against `currentAlgorithm` surfaces as a Rekey decision.
         if current.is_some() {
             pr.target_uid = Some("dry-run-object");
+        }
+
+        // `usageMask` — flag names resolved by the engine's own table. Absent →
+        // None (require_usage_mask then fails closed, exactly like a Create that
+        // declared no mask).
+        pr.usage_mask = spec.get("usageMask").and_then(|v| v.as_array()).map(|flags| {
+            flags
+                .iter()
+                .filter_map(|f| f.as_str())
+                .filter_map(usage_flag_name_to_bit)
+                .fold(UsageMask::empty(), |acc, b| acc | b)
+        });
+
+        // `activationDate` — drives max_key_age_days (age = date − activation).
+        pr.object_activation_date = s("activationDate").as_deref().and_then(parse_day);
+
+        // `mechanism` — the hash/mode/padding/deterministic/CKM dimension,
+        // mapped through the same name tables the loader validates against.
+        if let Some(m) = spec.get("mechanism").and_then(|v| v.as_object()) {
+            let ms = |k: &str| m.get(k).and_then(|v| v.as_str());
+            pr.mechanism.hashing_algorithm = ms("hash").and_then(hash_name_to_code);
+            pr.mechanism.block_cipher_mode =
+                ms("blockMode").and_then(block_cipher_mode_name_to_code);
+            pr.mechanism.padding_method = ms("padding").and_then(padding_method_name_to_code);
+            pr.mechanism.deterministic = m.get("deterministic").and_then(|v| v.as_bool());
+            pr.mechanism.canonical_mech = ms("mech").and_then(ckm_name_to_code);
         }
 
         let out = match self.deps.engine.evaluate(&pr) {

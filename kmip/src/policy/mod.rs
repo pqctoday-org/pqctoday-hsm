@@ -96,5 +96,9 @@ pub use loader::{
 };
 pub use policy::{ComplianceMapping, Metadata, Policy};
 pub use request::{MechanismParams, PolicyRequest};
-pub use rule::{AttrPredicate, GatingDeny, Rule, Substitution, TimeBound};
+pub use rule::{
+    block_cipher_mode_name_to_code, ckm_name_to_code, hash_name_to_code,
+    padding_method_name_to_code, usage_flag_name_to_bit, AttrPredicate, GatingDeny, Rule,
+    Substitution, TimeBound,
+};
 pub use store::{ActiveMarker, PolicyStore, StoreError, POLICY_STORE_ACTIVE_FILE};
