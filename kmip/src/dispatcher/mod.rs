@@ -355,7 +355,18 @@ fn dispatch_one(
 ) -> ResponseBatchItem {
     let correlation_id = Uuid::new_v4().to_string();
     let op = item.operation;
-    let payload = substitute_id_placeholder(item.payload, state);
+    let payload = match substitute_id_placeholder(item.payload, state) {
+        Ok(p) => p,
+        Err(err) => {
+            return ResponseBatchItem {
+                operation: Some(op),
+                result_status: ResultStatus::OperationFailed,
+                result_reason: Some(err.result_reason().to_wire_value()),
+                result_message: Some(err.to_string()),
+                payload: None,
+            };
+        }
+    };
 
     // R7 Phase 4 — snapshot every input UID BEFORE the handler runs
     // so the §9.5 Undo wave (if triggered later in this batch) can
@@ -445,66 +456,77 @@ fn newly_created_uids(payload: &ResponsePayload) -> Vec<String> {
 /// `uid` field on every payload that consumes a single UID; multi-UID
 /// payloads (none of the OASIS Baseline tests use them so far) can be
 /// added as the corpus grows.
+///
+/// Errs with [`KmipError::id_placeholder_unset`] when an item actually
+/// references the sentinel but no live placeholder exists yet (typically
+/// because the item that was supposed to produce one — e.g.
+/// `CreateKeyPair` — failed earlier in this batch). Without this check the
+/// sentinel string passed through unresolved and the downstream store
+/// lookup failed with a confusing "UID \"$IDPlaceholder\" not found".
 fn substitute_id_placeholder(
     payload: RequestPayload,
     state: &BatchState,
-) -> RequestPayload {
-    let live = match &state.id_placeholder {
-        Some(s) => s.clone(),
-        None => return payload, // nothing to substitute against
-    };
-    fn fix(s: &mut String, live: &str) {
+) -> Result<RequestPayload, KmipError> {
+    let live = state.id_placeholder.as_deref();
+    let mut missing = false;
+    fn fix(s: &mut String, live: Option<&str>, missing: &mut bool) {
         if s == ID_PLACEHOLDER_SENTINEL {
-            *s = live.to_string();
+            match live {
+                Some(l) => *s = l.to_string(),
+                None => *missing = true,
+            }
         }
     }
     let mut p = payload;
     match &mut p {
-        RequestPayload::Get(r)             => fix(&mut r.uid, &live),
-        RequestPayload::GetAttributes(r)   => fix(&mut r.uid, &live),
-        RequestPayload::GetAttributeList(r)=> fix(&mut r.uid, &live),
-        RequestPayload::Activate(r)        => fix(&mut r.uid, &live),
-        RequestPayload::Revoke(r)          => fix(&mut r.uid, &live),
-        RequestPayload::Destroy(r)         => fix(&mut r.uid, &live),
-        RequestPayload::Encrypt(r)         => fix(&mut r.uid, &live),
-        RequestPayload::Decrypt(r)         => fix(&mut r.uid, &live),
-        RequestPayload::Encapsulate(r)     => fix(&mut r.uid, &live),
-        RequestPayload::Decapsulate(r)     => fix(&mut r.uid, &live),
-        RequestPayload::Sign(r)            => fix(&mut r.uid, &live),
-        RequestPayload::SignatureVerify(r) => fix(&mut r.uid, &live),
+        RequestPayload::Get(r)             => fix(&mut r.uid, live, &mut missing),
+        RequestPayload::GetAttributes(r)   => fix(&mut r.uid, live, &mut missing),
+        RequestPayload::GetAttributeList(r)=> fix(&mut r.uid, live, &mut missing),
+        RequestPayload::Activate(r)        => fix(&mut r.uid, live, &mut missing),
+        RequestPayload::Revoke(r)          => fix(&mut r.uid, live, &mut missing),
+        RequestPayload::Destroy(r)         => fix(&mut r.uid, live, &mut missing),
+        RequestPayload::Encrypt(r)         => fix(&mut r.uid, live, &mut missing),
+        RequestPayload::Decrypt(r)         => fix(&mut r.uid, live, &mut missing),
+        RequestPayload::Encapsulate(r)     => fix(&mut r.uid, live, &mut missing),
+        RequestPayload::Decapsulate(r)     => fix(&mut r.uid, live, &mut missing),
+        RequestPayload::Sign(r)            => fix(&mut r.uid, live, &mut missing),
+        RequestPayload::SignatureVerify(r) => fix(&mut r.uid, live, &mut missing),
         // P2.2 — Validate carries a repeatable UID list (§6.1.62).
         RequestPayload::Validate(r) => {
-            for uid in &mut r.uids { fix(uid, &live); }
+            for uid in &mut r.uids { fix(uid, live, &mut missing); }
         }
-        RequestPayload::AddAttribute(r)    => fix(&mut r.uid, &live),
-        RequestPayload::ModifyAttribute(r) => fix(&mut r.uid, &live),
-        RequestPayload::DeleteAttribute(r) => fix(&mut r.uid, &live),
-        RequestPayload::SetAttribute(r)    => fix(&mut r.uid, &live),
-        RequestPayload::AdjustAttribute(r) => fix(&mut r.uid, &live),
-        RequestPayload::Export(r)          => fix(&mut r.uid, &live),
-        RequestPayload::Deactivate(r)      => fix(&mut r.uid, &live),
-        RequestPayload::Check(r)           => fix(&mut r.uid, &live),
-        RequestPayload::Archive(r)         => fix(&mut r.uid, &live),
-        RequestPayload::Recover(r)         => fix(&mut r.uid, &live),
-        RequestPayload::Obliterate(r)      => fix(&mut r.uid, &live),
-        RequestPayload::Mac(r)             => fix(&mut r.uid, &live),
-        RequestPayload::MacVerify(r)       => fix(&mut r.uid, &live),
-        RequestPayload::GetUsageAllocation(r) => fix(&mut r.uid, &live),
+        RequestPayload::AddAttribute(r)    => fix(&mut r.uid, live, &mut missing),
+        RequestPayload::ModifyAttribute(r) => fix(&mut r.uid, live, &mut missing),
+        RequestPayload::DeleteAttribute(r) => fix(&mut r.uid, live, &mut missing),
+        RequestPayload::SetAttribute(r)    => fix(&mut r.uid, live, &mut missing),
+        RequestPayload::AdjustAttribute(r) => fix(&mut r.uid, live, &mut missing),
+        RequestPayload::Export(r)          => fix(&mut r.uid, live, &mut missing),
+        RequestPayload::Deactivate(r)      => fix(&mut r.uid, live, &mut missing),
+        RequestPayload::Check(r)           => fix(&mut r.uid, live, &mut missing),
+        RequestPayload::Archive(r)         => fix(&mut r.uid, live, &mut missing),
+        RequestPayload::Recover(r)         => fix(&mut r.uid, live, &mut missing),
+        RequestPayload::Obliterate(r)      => fix(&mut r.uid, live, &mut missing),
+        RequestPayload::Mac(r)             => fix(&mut r.uid, live, &mut missing),
+        RequestPayload::MacVerify(r)       => fix(&mut r.uid, live, &mut missing),
+        RequestPayload::GetUsageAllocation(r) => fix(&mut r.uid, live, &mut missing),
         // K20 — Derive Key carries a repeatable UID list (§6.1.18).
         RequestPayload::DeriveKey(r) => {
-            for uid in &mut r.uids { fix(uid, &live); }
+            for uid in &mut r.uids { fix(uid, live, &mut missing); }
         }
         // K21 — §6.1.51 / §6.1.52 Re-key targets.
-        RequestPayload::ReKey(r)           => fix(&mut r.uid, &live),
-        RequestPayload::ReKeyKeyPair(r)    => fix(&mut r.uid, &live),
+        RequestPayload::ReKey(r)           => fix(&mut r.uid, live, &mut missing),
+        RequestPayload::ReKeyKeyPair(r)    => fix(&mut r.uid, live, &mut missing),
         // P2.3 — Certify MAY name a PublicKey by UID (Option); Re-certify
         // always names the existing Certificate.
-        RequestPayload::Certify(r)         => { if let Some(u) = &mut r.uid { fix(u, &live); } }
-        RequestPayload::ReCertify(r)       => fix(&mut r.uid, &live),
+        RequestPayload::Certify(r)         => { if let Some(u) = &mut r.uid { fix(u, live, &mut missing); } }
+        RequestPayload::ReCertify(r)       => fix(&mut r.uid, live, &mut missing),
         // Ops that don't take a UID (Create, Locate, Query, …) skip.
         _ => {}
     }
-    p
+    if missing {
+        return Err(KmipError::id_placeholder_unset());
+    }
+    Ok(p)
 }
 
 /// After a successful op, refresh the per-batch ID Placeholder with
@@ -1813,6 +1835,50 @@ mod tests {
             resp.batch_items[1].result_status,
             ResultStatus::Success,
             "Destroy with IDPlaceholder must resolve to Create's UID",
+        );
+    }
+
+    /// If the item that was supposed to produce a UID never succeeds (here:
+    /// a `Destroy` on a UID that was never created), a later item chained
+    /// via `$IDPlaceholder` must fail with a clear explanation — not the
+    /// raw sentinel leaking into a generic `UID "$IDPlaceholder" not
+    /// found` (reported against the CACP KMIP playground's Batch tab: a
+    /// denied `CreateKeyPair` cascaded into a confusing `ObjectNotFound`
+    /// on the chained `Activate`/`Sign`).
+    #[test]
+    fn id_placeholder_unset_gives_clear_message_not_raw_sentinel() {
+        let d = deps();
+        let msg = crate::kmip30::RequestMessage {
+            header: RequestHeader {
+                batch_error_continuation_option: Some(BatchErrorContinuationOption::Continue),
+                ..RequestHeader::v3()
+            },
+            batch_items: vec![
+                RequestBatchItem {
+                    operation: crate::kmip30::Operation::Destroy,
+                    payload: RP::Destroy(DestroyRequest { uid: "urn:never-existed".into() }),
+                },
+                RequestBatchItem {
+                    operation: crate::kmip30::Operation::Activate,
+                    payload: RP::Activate(crate::kmip30::ActivateRequest {
+                        uid: ID_PLACEHOLDER_SENTINEL.to_string(),
+                    }),
+                },
+            ],
+        };
+        let resp = dispatch(&d, msg);
+        assert_eq!(resp.batch_items.len(), 2, "Continue keeps processing");
+        assert_eq!(resp.batch_items[0].result_status, ResultStatus::OperationFailed);
+        let second = &resp.batch_items[1];
+        assert_eq!(second.result_status, ResultStatus::OperationFailed);
+        let text = second.result_message.as_deref().unwrap_or("");
+        assert!(
+            text.contains("ID Placeholder not set"),
+            "expected a clear ID-Placeholder message, got: {text}"
+        );
+        assert!(
+            !text.contains(ID_PLACEHOLDER_SENTINEL),
+            "the raw sentinel must not leak into the user-facing message: {text}"
         );
     }
 

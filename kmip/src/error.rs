@@ -216,6 +216,19 @@ impl KmipError {
         // `Item Not Found` (0x01). BL-M-4 step #5 pins this code.
         Self::failed(ResultReason::ObjectNotFound, format!("UID {uid:?} not found"))
     }
+    /// A batch item references `$IDPlaceholder` (§6.4) but no earlier item
+    /// in this batch has produced a UID yet — typically because the item
+    /// that was supposed to (e.g. `CreateKeyPair`) failed. Same wire code
+    /// as [`Self::object_not_found`] (0x37 — nothing by that name exists
+    /// in the store either way); only the message differs, so a client
+    /// sees why instead of the raw `$IDPlaceholder` sentinel.
+    pub fn id_placeholder_unset() -> Self {
+        Self::failed(
+            ResultReason::ObjectNotFound,
+            "ID Placeholder not set — no earlier item in this batch produced a UID \
+             (an earlier item likely failed)",
+        )
+    }
     pub fn invalid_field(msg: impl Into<String>) -> Self {
         Self::failed(ResultReason::InvalidField, msg)
     }
