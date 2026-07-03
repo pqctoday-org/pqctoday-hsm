@@ -34,13 +34,13 @@ use pqctoday_kmip::auditlog::{AuditSink, RingSink};
 use pqctoday_kmip::codec::{decode_one, TtlvFrame, Value as Ttlv};
 use pqctoday_kmip::dispatcher::{dispatch, one_off_request};
 use pqctoday_kmip::kmip30::{
-    decode_request_message, encode_response_message, ActivateRequest, Attribute,
-    BatchErrorContinuationOption, CreateKeyPairRequest, CreateRequest, DecapsulateRequest,
-    DecryptRequest, DestroyRequest, EncapsulateRequest, EncryptRequest, GetRequest, KmipAlgorithm,
-    LocateRequest, ObjectType, QueryFunction, QueryRequest, RequestBatchItem, RequestHeader,
-    RequestMessage, RequestPayload, ResponseBatchItem, ResponseHeader, ResponseMessage,
-    ResponsePayload, ResultStatus, RevocationReason, RevokeRequest, SignRequest,
-    SignatureVerifyRequest, UsageMask, WireError,
+    decode_request_message, encode_request_message, encode_response_message, ActivateRequest,
+    Attribute, BatchErrorContinuationOption, CreateKeyPairRequest, CreateRequest,
+    DecapsulateRequest, DecryptRequest, DestroyRequest, EncapsulateRequest, EncryptRequest,
+    GetRequest, KmipAlgorithm, LocateRequest, ObjectType, QueryFunction, QueryRequest,
+    RequestBatchItem, RequestHeader, RequestMessage, RequestPayload, ResponseBatchItem,
+    ResponseHeader, ResponseMessage, ResponsePayload, ResultStatus, RevocationReason,
+    RevokeRequest, SignRequest, SignatureVerifyRequest, UsageMask, WireError,
 };
 use pqctoday_kmip::ops::{Deps, DepsConfig};
 use pqctoday_kmip::policy::Engine;
@@ -203,9 +203,10 @@ impl KmipPlayground {
     /// back (reported as `OperationUndone`).
     ///
     /// Returns `{ ok, errorContinuation, requested, returned, items[], audit,
-    /// responseWireHex, responseWireLen, responseTree }` where each `items[]`
-    /// entry mirrors a `run_op` result minus the wire (the wire is the one shared
-    /// Response Message).
+    /// requestWireHex, requestWireLen, responseWireHex, responseWireLen,
+    /// responseTree }` where each `items[]` entry mirrors a `run_op` result
+    /// minus the wire (the wire is the one shared Request + Response Message —
+    /// the actual "N operations, ONE request" proof).
     #[wasm_bindgen]
     pub fn run_batch(&self, spec_json: &str) -> String {
         let spec: Json = match serde_json::from_str(spec_json) {
@@ -245,6 +246,11 @@ impl KmipPlayground {
             batch_items,
         };
 
+        // Encode the REQUEST wire before `dispatch` consumes `request` — this is
+        // the "ONE request, many items" proof the Batch tab shows Expert users
+        // alongside the shared response (A-grade review C7).
+        let request_wire = encode_request_message(&request).unwrap_or_default();
+
         let before = self.ring.len();
         let response = dispatch(&self.deps, request);
         let wire = encode_response_message(&response);
@@ -283,6 +289,8 @@ impl KmipPlayground {
             "requested": requested,
             "returned": response.batch_items.len(),
             "items": items_out,
+            "requestWireHex": to_hex(&request_wire),
+            "requestWireLen": request_wire.len(),
             "responseWireHex": to_hex(&wire),
             "responseWireLen": wire.len(),
             "responseTree": frame_json_from_bytes(&wire),
@@ -586,10 +594,15 @@ fn build_payload(op: &str, spec: &Json) -> Result<RequestPayload, String> {
             data: spec_bytes(spec, "data", "_"),
             cryptographic_parameters: None,
         }),
+        // `ivHex` threads the IV between the two calls of a symmetric round trip
+        // (the UI carries it from Encrypt's `ivHex` response field back into
+        // Decrypt's `ivHex` request field — this engine doesn't auto-generate one
+        // unless the key's stored CryptographicParameters set `RandomIV=true`,
+        // which the generic `Create` op above doesn't set).
         "Encrypt" => RequestPayload::Encrypt(EncryptRequest {
             uid: uid(),
             data: data(),
-            iv: None,
+            iv: spec_hex_opt(spec, "ivHex"),
             cryptographic_parameters: None,
             aad: None,
             init_indicator: None,
@@ -599,7 +612,7 @@ fn build_payload(op: &str, spec: &Json) -> Result<RequestPayload, String> {
         "Decrypt" => RequestPayload::Decrypt(DecryptRequest {
             uid: uid(),
             data: spec_bytes(spec, "data", "_"),
-            iv: None,
+            iv: spec_hex_opt(spec, "ivHex"),
             cryptographic_parameters: None,
             aad: None,
         }),
@@ -634,6 +647,13 @@ fn spec_bytes(spec: &Json, hex_key: &str, text_key: &str) -> Vec<u8> {
         return t.as_bytes().to_vec();
     }
     Vec::new()
+}
+
+/// Optional hex-encoded bytes (e.g. the IV a symmetric Encrypt/Decrypt round
+/// trip carries between calls — `None` when the spec omits the key, distinct
+/// from `spec_bytes`' "absent → empty Vec" for required fields).
+fn spec_hex_opt(spec: &Json, hex_key: &str) -> Option<Vec<u8>> {
+    spec.get(hex_key).and_then(|v| v.as_str()).and_then(from_hex)
 }
 
 /// Resolve the spec's `algorithm` field, distinguishing "absent" (Ok(None) —
@@ -687,6 +707,11 @@ fn summarize(payload: &ResponsePayload) -> Json {
         ResponsePayload::Activate(r) => json!({ "uid": r.uid, "state": format!("{:?}", r.state) }),
         ResponsePayload::Sign(r) => json!({
             "uid": r.uid, "signatureHex": to_hex(&r.signature), "signatureLen": r.signature.len(),
+            "rekeyed": r.rekeyed.as_ref().map(|k| json!({
+                "oldUid": k.old_uid,
+                "newPrivateKeyUid": k.new_private_key_uid,
+                "newPublicKeyUid": k.new_public_key_uid,
+            })),
         }),
         ResponsePayload::SignatureVerify(r) => json!({
             "uid": r.uid, "validity": format!("{:?}", r.validity),

@@ -302,6 +302,7 @@ pub fn sign(deps: &Deps, req: SignRequest, correlation_id: &str) -> Result<SignR
     Ok(SignResponse {
         uid: req.uid,
         signature,
+        rekeyed: None,
     })
 }
 
@@ -379,16 +380,25 @@ fn rekey_and_sign(
         },
     ));
 
-    // 4. Re-issue the original Sign against the migrated key.
-    sign(
+    // 4. Re-issue the original Sign against the migrated key, then stamp the
+    // response with the rekey details (R7 Phase 4 — so the dispatcher's §9.5
+    // Undo wave can find and delete both halves of the new key pair on
+    // rollback; see `SignResponse::rekeyed`).
+    let mut resp = sign(
         deps,
         SignRequest {
-            uid: ckp.private_key_uid,
+            uid: ckp.private_key_uid.clone(),
             data: req.data.clone(),
             cryptographic_parameters: req.cryptographic_parameters.clone(),
         },
         correlation_id,
-    )
+    )?;
+    resp.rekeyed = Some(crate::kmip30::SignRekeyInfo {
+        old_uid: old.uid.clone(),
+        new_private_key_uid: ckp.private_key_uid,
+        new_public_key_uid: ckp.public_key_uid,
+    });
+    Ok(resp)
 }
 
 /// Test-only stand-in used by the engine-less unit tests below. Production

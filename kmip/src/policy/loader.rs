@@ -157,7 +157,7 @@ fn first_unknown_rule_field(yaml: &str) -> Option<(usize, String)> {
     const KNOWN: &[&str] = &[
         "type", "after", "algorithm", "algorithm_class", "algorithms",
         "allowed_block_cipher_modes", "allowed_padding_methods", "allowed_states",
-        "attribute_name", "block_cipher_mode", "composite_oid", "days",
+        "attribute_name", "block_cipher_mode", "clause", "composite_oid", "days",
         "default_algorithm", "deterministic", "effective_from", "effective_until",
         "exception_custom_attribute", "flags", "from", "hashing_algorithm",
         "hashing_algorithms", "mac_algorithms", "mask_generator", "mechanisms",

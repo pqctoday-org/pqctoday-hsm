@@ -428,6 +428,14 @@ fn newly_created_uids(payload: &ResponsePayload) -> Vec<String> {
         // (§6.1.6 / §6.1.50); Undo deletes it.
         ResponsePayload::Certify(r) => vec![r.uid.clone()],
         ResponsePayload::ReCertify(r) => vec![r.uid.clone()],
+        // R7 Phase 4 fix — a rekey-on-use policy can make Sign mint a whole
+        // new key pair inline (`ops::sign::rekey_and_sign`); both halves
+        // didn't exist before this batch item, so Undo must delete them.
+        // `rekeyed` is `None` on the ordinary (ordinary Sign) path.
+        ResponsePayload::Sign(r) => match &r.rekeyed {
+            Some(info) => vec![info.new_private_key_uid.clone(), info.new_public_key_uid.clone()],
+            None => Vec::new(),
+        },
         _ => Vec::new(),
     }
 }
@@ -1964,6 +1972,110 @@ mod tests {
             rec.state,
             State::Active,
             "Stop mode preserves the Activate's effect",
+        );
+    }
+
+    // ── R7 Phase 4 fix — Undo must reverse a Sign-triggered rekey ──────────
+    //
+    // Regression test for the gap found during the CACP A-grade review
+    // (2026-07-03): a rekey-on-use policy makes `Sign` mint a whole new key
+    // pair inline (`ops::sign::rekey_and_sign`), but `touched_uids` /
+    // `newly_created_uids` had no `Sign` arm, so under `Undo` the new key
+    // pair was never deleted and the old key's Deactivated+supersede
+    // mutation was never reverted. See `SignResponse::rekeyed`.
+
+    fn deps_with_policy(yaml: &str) -> Deps {
+        let ring = Arc::new(RingSink::new(64));
+        let sink: Arc<dyn AuditSink> = ring;
+        let engine = Engine::with_global_sink(sink.clone());
+        engine
+            .activate(load_from_str(yaml, std::path::Path::new("<t>")).unwrap())
+            .unwrap();
+        Deps::new(engine, Arc::new(MemoryStore::new()), sink, DepsConfig::default())
+    }
+
+    const REKEY_ON_USE_POLICY: &str = r#"
+schema_version: 1
+metadata: { name: rk, description: rekey, authority: t, effective: "always" }
+rules:
+  - type: algorithm_substitution
+    ops: [Sign]
+    from: ECDSA
+    to: ML-DSA-87
+    reason: "Upgrade signing"
+"#;
+
+    #[test]
+    fn r7_phase4_undo_reverts_sign_triggered_rekey_inside_batch() {
+        let d = deps_with_policy(REKEY_ON_USE_POLICY);
+        d.store.put(ObjectRecord {
+            uid: "urn:legacy".into(),
+            object_type: ObjectType::PrivateKey,
+            algorithm: KmipAlgorithm::Ecdsa,
+            cryptographic_length: 0,
+            usage_mask: UsageMask::SIGN | UsageMask::VERIFY,
+            state: State::Active,
+            activation_date: Some(time::OffsetDateTime::UNIX_EPOCH),
+            initial_date: time::OffsetDateTime::UNIX_EPOCH,
+            ..ObjectRecord::default()
+        }).unwrap();
+
+        let msg = crate::kmip30::RequestMessage {
+            header: RequestHeader {
+                batch_error_continuation_option: Some(BatchErrorContinuationOption::Undo),
+                ..RequestHeader::v3()
+            },
+            batch_items: vec![
+                RequestBatchItem {
+                    operation: crate::kmip30::Operation::Sign,
+                    payload: RP::Sign(crate::kmip30::SignRequest {
+                        uid: "urn:legacy".into(),
+                        data: b"agility-lesson".to_vec(),
+                        cryptographic_parameters: None,
+                    }),
+                },
+                RequestBatchItem {
+                    operation: crate::kmip30::Operation::Destroy,
+                    payload: RP::Destroy(DestroyRequest { uid: "urn:ghost".into() }),
+                },
+            ],
+        };
+
+        let resp = dispatch(&d, msg);
+        assert_eq!(resp.batch_items.len(), 2);
+        assert_eq!(
+            resp.batch_items[0].result_status,
+            ResultStatus::OperationUndone,
+            "the rekeying Sign must be relabelled OperationUndone",
+        );
+        assert_eq!(resp.batch_items[1].result_status, ResultStatus::OperationFailed);
+
+        // The response payload is still returned per spec — only the status
+        // changes — so we can recover exactly which UIDs the rekey minted.
+        let (new_priv_uid, new_pub_uid) = match &resp.batch_items[0].payload {
+            Some(ResponsePayload::Sign(r)) => {
+                let info = r.rekeyed.as_ref().expect("Sign must report the rekey it performed");
+                (info.new_private_key_uid.clone(), info.new_public_key_uid.clone())
+            }
+            other => panic!("expected a Sign payload, got {other:?}"),
+        };
+        assert_ne!(new_priv_uid, "urn:legacy");
+
+        // The old key must be restored to exactly its pre-rekey shape.
+        let old = d.store.get("urn:legacy").unwrap().unwrap();
+        assert_eq!(old.state, State::Active, "Undo must restore the pre-rekey Active state");
+        assert!(old.supersedes.is_none(), "Undo must clear the supersedes link the rekey set");
+        assert!(!old.links.contains_key("x-pqctoday-supersedes"));
+
+        // The freshly-minted replacement key pair must be gone entirely —
+        // Undo deletes anything that didn't exist before the batch item ran.
+        assert!(
+            d.store.get(&new_priv_uid).unwrap().is_none(),
+            "Undo must delete the newly-minted replacement private key",
+        );
+        assert!(
+            d.store.get(&new_pub_uid).unwrap().is_none(),
+            "Undo must delete the newly-minted replacement public key",
         );
     }
 }

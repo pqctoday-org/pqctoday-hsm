@@ -334,6 +334,7 @@ mod tests {
             ops: vec!["Create".into()],
             algorithms: algos.iter().map(|s| s.to_string()).collect(),
             reason: "t".into(),
+            clause: None,
             effective_from: None,
             effective_until: None,
             exception_custom_attribute: None,
@@ -345,6 +346,7 @@ mod tests {
             ops: vec!["Create".into()],
             algorithms: algos.iter().map(|s| s.to_string()).collect(),
             reason: "t".into(),
+            clause: None,
             effective_from: None,
             effective_until: None,
         }
@@ -375,6 +377,7 @@ mod tests {
             ops: vec!["Sign".into()],
             mechanisms: vec!["CKM_RSA_PKCS_PSS".into(), "CKM_TYPO".into()],
             reason: "t".into(),
+            clause: None,
         };
         let findings = lint_rules(&[rule], false);
         assert!(findings.iter().any(|f| f.fatal && f.value == "CKM_TYPO"),
@@ -389,6 +392,7 @@ mod tests {
             algorithms: vec![],
             after: TimeBound::Always,
             reason: "t".into(),
+            clause: None,
         };
         assert!(lint_rules(&[cutoff], false).iter().any(|f| f.fatal && f.value == "quantum"));
 
@@ -396,6 +400,7 @@ mod tests {
             op: "Sign".into(),
             allowed_states: vec!["Alive".into()], // not a KMIP state
             reason: "t".into(),
+            clause: None,
         };
         assert!(lint_rules(&[gate], false).iter().any(|f| f.fatal && f.value == "Alive"));
     }
