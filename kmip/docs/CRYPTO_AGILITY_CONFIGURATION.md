@@ -5,7 +5,7 @@ How to configure, apply, and observe the crypto-agility layer of the
 the deeper design rationale lives in
 [THREE_PLANE_ARCHITECTURE.md](THREE_PLANE_ARCHITECTURE.md), the policy YAML
 library in [../policies/README.md](../policies/README.md), and the client/
-observability tooling in [../pykmip/README.md](../pykmip/README.md).
+observability tooling in [../python-client/README.md](../python-client/README.md).
 
 ---
 
@@ -46,7 +46,7 @@ CreateKeyPair { CommonAttributes: { CryptographicUsageMask: Sign|Verify } }
 Under a classical policy this resolves to ECDSA; flip to a PQC policy and the
 identical call returns an ML-DSA key (`algorithm_default` rule, §4). For
 driving the server + reading back the decision trail from Python, see
-[`pykmip`](../pykmip/README.md).
+[the `pqctoday-kmip` client](../python-client/README.md).
 
 ---
 
@@ -180,7 +180,7 @@ p2 — KmipResponseSent{ op, result: Success|OperationFailed }
 p3 — Pkcs11Call      { function, mechanism: CKM_*, rv_name }
 ```
 
-[`pykmip.audit`](../pykmip/audit.py) groups the log into per-request trails.
+`python -m pqctoday_kmip audit <log>` (module `pqctoday_kmip.audit`) groups the log into per-request trails.
 A **denied** request shows a p1 Deny and **no** p3 call — visible proof the
 agility layer stopped it before the engine.
 
@@ -194,7 +194,7 @@ DENY   Encrypt   p1: Deny "AES must    p2: OperationFailed  p3: (no engine call)
 
 Identical client code; the policy alone decides. Swap `--policy aead-only` for
 `--policy training-permissive` and both Encrypts are allowed. That is the
-agility story end-to-end. See [`pykmip/demo.py`](../pykmip/demo.py).
+agility story end-to-end. See `python -m pqctoday_kmip demo` ([../python-client/README.md](../python-client/README.md)).
 
 ---
 
@@ -203,4 +203,4 @@ agility story end-to-end. See [`pykmip/demo.py`](../pykmip/demo.py).
 - [THREE_PLANE_ARCHITECTURE.md](THREE_PLANE_ARCHITECTURE.md) — design rationale.
 - [../policies/README.md](../policies/README.md) — the policy library.
 - [CRYPTO_POLICY_STATUS.md](CRYPTO_POLICY_STATUS.md) — capabilities & limits.
-- [../pykmip/README.md](../pykmip/README.md) — drive it + read the trail.
+- [../python-client/README.md](../python-client/README.md) — drive it + read the trail.
