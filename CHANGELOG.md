@@ -8,6 +8,175 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-07-03
+
+Closes the 2026-07-01 CACP/KMIP/PKCS#11 gap audit: the policy engine's
+fail-open enforcement seams are shut across three phases, the engine gains
+hybrid KEM support (X25519MLKEM768 / SecP256r1MLKEM768), several KMIP 3.0 and
+PKCS#11 v3.2 conformance gaps are closed, and the Rust engine gets its own
+checked-in PKCS#11 v3.2 conformance evidence (previously only the C++ engine
+had one, despite CACP shipping on Rust).
+
+### Fixed — policy engine fail-open enforcement seams, Phase 1–3 (Y1–Y22) (2026-07-03)
+
+The CACP gap audit found the compliance policies' YAML frequently said one
+thing and enforced another — a class of fail-open bugs, not isolated typos:
+
+- **Y1–Y4 (Phase 1 core)**: custom-attribute gates (`require_custom_attribute`)
+  always denied because op handlers never threaded request attrs through to
+  storage (Y1); key-pair creation didn't match `[Create]`-gated policies at
+  all, so `cnsa-2.0`/`fips-only` silently **allowed** classical RSA/ECDSA
+  keygen (Y2); only `Sign` passed size/curve-qualified algorithm names, so
+  qualified allow/deny entries elsewhere were dead and a bare `AES` allowlist
+  entry was bricked by an `AES-256`-qualified one (Y3); AES/HMAC were
+  classified "classical", so `pqc-migration-2030` would have banned
+  AES-256 encryption from 2030 (Y4).
+- **Y5 / Y14**: `pkcs11-mechanism-lockdown`'s allowlist didn't match real
+  requests in either direction — missing key-gen mechanism entries made
+  allowlisting them a no-op, and legitimate RSA-PSS/ECDSA signing was denied
+  because a `Sign` request canonicalises to a hash-qualified mechanism the
+  YAML didn't express as a family. The shipped Encrypt-side substitutions
+  were all cross-primitive (RSA/ECDH → ML-KEM), which the Encrypt path
+  cannot execute — removed with a Phase-5 deferral note rather than left
+  silently broken.
+- **Y6**: load-time value lint (`src/policy/lint.rs`) — a typo'd algorithm,
+  mechanism, hash, or usage-flag name in a deny-family position previously
+  became a silent no-op (fail open); it's now a hard load error. Typos in an
+  allow-family position are advisory (over-broad deny) unless strict mode is
+  set. `store.save()` now validates strictly, so a typo can never be persisted.
+- **Y7**: `Register`/`Import` are now gated by `cnsa-2.0`/`fips-only` alongside
+  `Create`/`CreateKeyPair` — a banned algorithm could previously enter the
+  keystore out-of-band via those two ops.
+- **Y9–Y13 (standards accuracy)**: every cited fact re-verified against its
+  authoritative source. `cnsa-2.0` no longer allows HSS/XMSS^MT (CNSA 2.0
+  approves only single-tree LMS/XMSS for firmware/software signing);
+  `fips-only` now allows all 12 SLH-DSA parameter sets including SHAKE
+  variants (FIPS 205 §11 approves both SHA2 and SHAKE) plus Ed25519/Ed448 and
+  AES-192; composite signature OIDs corrected to the verified LAMPS IANA arc;
+  the `pqc-migration-2030` 2030 hard-stop is now documented as stricter than
+  its cited (draft) IR 8547 source.
+- **Y16**: `Decrypt` and `SignatureVerify` now populate the policy request's
+  mechanism dimension — previously only `Sign`/`Encrypt` did, so hash/mode
+  rules gating those two ops (e.g. `fips-hashing`'s `SignatureVerify`
+  allowlist) were silent no-ops.
+- **Y22**: new op-layer conformance suite (`tests/policy_op_layer.rs`) drives
+  real `Create`/`CreateKeyPair` requests through the actual op handlers with
+  each shipped policy mounted — the layer where the fail-open bugs actually
+  lived, and which no prior test covered.
+- Also: batch Undo now correctly reverses a `Sign`-triggered rekey inside a
+  batch; `algo_matches` is case-insensitive (a policy authored as `Ed25519`
+  no longer silently fails to match `ED25519`); rules can carry a `clause`
+  field citing the framework clause they implement; six shipped policy
+  presets had their YAML brought back in line with their own descriptions
+  (Phase-3 consistency pass).
+
+All 612–619 kmip tests green throughout; no CI changes (this phase runs via
+the new local gate, not GitHub Actions — see below).
+
+### Added — hybrid KEM support: X25519MLKEM768 / SecP256r1MLKEM768 (K6) (2026-07-03)
+
+KMIP 3.0 WD19 assigns these two hybrid KEMs codepoints `0x5C`/`0x5D`; the
+engine previously rejected both as `InvalidMessage`. A new self-contained
+`crate::hybrid_kem` composes ML-KEM-768 with classical ECDH per
+`draft-ietf-tls-ecdhe-mlkem`'s (verified) combiner order — ML-KEM-first for
+X25519MLKEM768, ECDHE-first for SecP256r1MLKEM768, raw concatenation, no
+KEM-layer KDF (callers apply their own, as KMIP already does for plain
+ML-KEM). `CreateKeyPair → Encapsulate → Decapsulate` now works end-to-end;
+the two names are recognised by the policy value-lint and the wasm
+playground (`build_payload`), and the wasm smoke test proves a full
+X25519MLKEM768 round-trip through the in-browser bundle. Additive — no
+existing path touched. 626 kmip tests + OASIS replay 92/0/10 green.
+
+### Added — per-rule dry-run trace + richer wasm dry_run inputs (WP4b) (2026-07-03)
+
+`Engine::evaluate_traced` returns the decision alongside a per-rule trace
+(resolve/deny/pass/skip, built from the real evaluation pass) so the CACP
+visual editor's node highlighting reflects actual engine behaviour rather
+than a simulated approximation; `evaluate()` now delegates to it, so the
+decision path is provably unchanged. The wasm `dry_run` entry point gained
+optional `date`, `attrs`, `usageMask`, `activationDate`, and `mechanism`
+fields — previously hardcoded to empty/`now`, so temporal, attribute,
+usage-mask, and hash/mode/padding/mechanism rules could never be evaluated
+by the authoritative verdict. All names resolve through the engine's own
+loader tables; absent fields keep prior behaviour.
+
+### Fixed — KMIP 3.0 conformance corrections (K3, K4, K9) (2026-07-03)
+
+- **K3**: `GetAttributes` emitted group membership as the reserved singular
+  `Object Group` tag (`0x420056`, absent from the KMIP 3.0 tag registry)
+  instead of the strict 3.0 `Object Groups`/`Group Link` (`0x4201b3`)
+  representation. Now emits Group Link only; the reserved tag is still
+  accepted on input for KMIP-2.x compatibility.
+- **K4**: `CreateUser`/`CreateGroup`/`CreateCredential` persisted their
+  records as `ObjectType::SecretData` instead of the correct `User`/`Group`/
+  credential-subtype values, so `GetAttributes`/`Locate` reported the wrong
+  type for these KMIP 3.0 system objects.
+- **K9**: corrected stale doc comments claiming Encapsulate/Decapsulate and
+  multi-item batching weren't implemented — both are — in the files an
+  auditor reads first (`kmip30/ops.rs`, `ops/mod.rs`, `kmip30/message.rs`,
+  `CONFORMANCE_REPORT.md`).
+- A batch item chained via `$IDPlaceholder` after an earlier item failed
+  (producing no UID) surfaced a confusing raw `"$IDPlaceholder" not found`
+  error instead of a clear one.
+
+620 kmip tests + OASIS replay 92/0/10 green throughout.
+
+### Fixed — PKCS#11 v3.2 conformance gaps (P1, P4, P5) (2026-07-03)
+
+- **P4**: XMSS keygen only read the vendor `CKA_XMSS_PARAM_SET` attribute,
+  ignoring a conformant client's standard `CKA_PARAMETER_SET` (XMSSMT
+  already accepted it). Now accepts the standard attribute first and stores
+  the param set back under both attributes.
+- **P5**: PKCS#11 v3.2 §6.67.4/§6.68.4/§6.69.4 require key generation to
+  contribute `CKA_SEED` to the new private key; the random-keygen path hid
+  the seed internally, so `CKA_SEED` was absent (only the deterministic path
+  set it). The random path now samples the seed explicitly and expands it
+  deterministically, enabling spec-conformant seed-based key backup.
+- **P1**: `CKM_HASH_ML_DSA`/`CKM_HASH_SLH_DSA` were advertised with
+  `CKF_SIGN|CKF_VERIFY` but the sign path doesn't yet parse the parameter
+  that selects their pre-hash, so `C_SignInit` succeeded and `C_Sign` always
+  failed. Unadvertised until that parsing lands; the hash-specific variants
+  (`CKM_HASH_ML_DSA_SHA256`, …) provide the same capability today.
+
+rust 206 tests + Rust PKCS#11 conformance 188/0 green throughout.
+
+### Fixed — wasm rejects unknown algorithm names instead of silently substituting one (H1) (2026-07-03)
+
+`build_payload` silently fell back to AES (for `Create`) or a default
+signing keypair (for `CreateKeyPair`) when given a present-but-unimplemented
+algorithm name, so the CACP playground's "Run for real" could silently
+exercise a different request than the one shown in the UI. A present-but-
+unknown name is now a hard error instead of a fallback; the wasm smoke test
+covers a `FrodoKEM-1344` probe to prove no object is created.
+
+### Added — Rust engine PKCS#11 v3.2 conformance evidence (WP4.1, P2, T1) (2026-07-03)
+
+The only checked-in compliance artifact (`cpp_compliance_report.md`) targeted
+the C++ engine, while CACP ships the Rust engine (`softhsmrustv3`) — Rust
+conformance rested on prose, not evidence. Wired the existing (previously
+unused) `test_p11_conformance.js` negative-path + KAT matrix against the real
+Rust engine: 188 passed / 0 failed across 36 sections, committed as
+`RUST_P11_V32_CONFORMANCE_REPORT.md` and available as opt-in
+`scripts/local-gate.sh --rust-p11`.
+
+### Added — `scripts/local-gate.sh`: the pre-push validation entry point (WP2.0) (2026-07-03)
+
+Per the 2026-07-01 project directive that new test suites run locally rather
+than in GitHub CI, this is the single command that runs them: kmip `cargo
+test` plus its `--include-ignored` local-only suites (including the new
+op-layer policy conformance tests), the Rust engine's own `cargo test`, the
+OASIS KMIP 3.0 replay with baseline and staleness guards (92/0/10), and the
+wasm CACP smoke test. `--cpp`, `--acvp-wasm`, and `--rust-p11` add the
+slower opt-in suites. Writes a `.gate-ok-<sha>` marker so a pre-push hook can
+confirm the gate ran on the current commit.
+
+### Fixed — vendor PKCS#11 type-source ABI correction (WP4.4, H3) (2026-07-03)
+
+The vendor type-source `index.d.ts` declared `_C_MessageSignFinal` with 5
+arguments; PKCS#11 v3.2, `pkcs11f.h`, and the actual Rust FFI take only
+`hSession`. The hub's vendor copy was already corrected — this fixes the
+sync source so the next vendor sync doesn't reintroduce the wrong ABI.
+
 ## [0.7.0] — 2026-07-02
 
 This release consolidates the KMIP / crypto-agility hardening wave: the KMIP server
