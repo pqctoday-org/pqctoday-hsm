@@ -1,8 +1,19 @@
-# strongswan-wasm-shims — STATUS: UNVERIFIED, DO NOT SHIP
+# strongswan-wasm-shims — STATUS
 
-**Last updated:** 2026-04-18
+> **Update 2026-07-03 — this is the actively-maintained WASM shim tree.** The
+> "DO NOT SHIP / superseded by strongswan-wasm-v2-shims" framing below is from
+> the 2026-04-18 reconstruction and is now **out of date**. Per `git log`, this
+> directory received the most recent development (2026-06-12: RFC 7383
+> fragmentation, RFC 9370 multi-KE, Tier A CHILD_SA stub kernel, race-free stub
+> kernel registration), while `../strongswan-wasm-v2-shims/` has had no changes
+> since 2026-05-20. Treat this tree — plus `../strongswan-6.0.5-wasm.patch` — as
+> the current path and `git log`/the root `CHANGELOG.md` as the source of truth.
+> The historical failure-mode notes below predate the June fixes; do not read
+> them as the present state. (A full runtime re-verification is still owed.)
 
-## Summary
+---
+
+## Summary (historical — 2026-04-18)
 
 The files in this directory are a **partial, non-functional reconstruction** of
 custom C shims that were used in a prior session to build the working 12 MB

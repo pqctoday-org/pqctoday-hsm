@@ -43,7 +43,18 @@ src/bin/
 
 **Retained algorithms**: RSA, ECDSA, ECDH, EdDSA, AES, SHA-1/224/256/384/512, HMAC, CMAC.
 
-**PQC additions (Phase 2+)**: ML-DSA-44/65/87, ML-KEM-512/768/1024.
+**PQC additions**: ML-DSA-44/65/87, ML-KEM-512/768/1024, SLH-DSA (SHA2/SHAKE × 12
+param sets), stateful HSS/LMS and XMSS/XMSS-MT, and hybrid KEMs
+(X25519MLKEM768 / SecP256r1MLKEM768, exposed via KMIP/CACP).
+
+**Second engine**: a Rust engine (`softhsmrustv3`, in `rust/`) provides the WASM
+crypto path and is the production backend for the KMIP server and CACP policy
+engine. It has its own checked-in PKCS#11 v3.2 conformance evidence
+(`rust/RUST_P11_V32_CONFORMANCE_REPORT.md`).
+
+**Beyond the PKCS#11 core**: a KMIP 3.0 server + crypto-agility policy engine
+(`kmip/`, CACP), and protocol wrappers (`openssh-pkcs11/`, `openpgp/`,
+`openmls-provider/`, `strongswan-pkcs11/`, `JavaJCE/`).
 
 ## Coding Conventions
 
@@ -56,17 +67,15 @@ src/bin/
 - New mechanisms registered in `SoftHSM::prepareSupportedMechanisms()`
 - New key types registered in `OSSLCryptoFactory::getAsymmetricAlgorithm()`
 
-## Phase Roadmap
+## Status
 
-| Phase | Issue | Status | Description |
-|-------|-------|--------|-------------|
-| 0 | #1 | In Progress | Import SoftHSMv2 v2.7.0 + PKCS#11 v3.2 + strip legacy |
-| 1 | #2 | Pending | OpenSSL 3.x EVP API migration |
-| 2 | #3 | Pending | ML-DSA (FIPS 204, PKCS#11 v3.2) |
-| 3 | #4 | Pending | ML-KEM + C_EncapsulateKey / C_DecapsulateKey |
-| 4 | #5 | Pending | Emscripten WASM build |
-| 5 | #6 | Pending | npm package (@pqctoday/softhsm-wasm) |
-| 6 | #7 | Pending | PQC Timeline App integration |
+The original Phase 0–6 roadmap (import + strip legacy, OpenSSL 3.x EVP
+migration, ML-DSA, ML-KEM, Emscripten WASM, npm package, app integration) is
+**complete**, as is the later hardening/conformance work. Current release is
+tracked in `CHANGELOG.md` (**0.8.0**, 2026-07-03). Recent programs: PKCS#11 v3.2
++ KMIP 3.0 conformance evidence, the CACP crypto-agility policy engine (with
+its fail-open enforcement seams closed), and hybrid KEMs. See `CHANGELOG.md`
+for the authoritative per-release history rather than this file.
 
 ## Key PKCS#11 v3.2 Constants (PQC)
 

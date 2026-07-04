@@ -1,10 +1,17 @@
 # strongswan-wasm-v2-shims
 
+> **Update 2026-07-03 — not the active tree.** This clean-slate rewrite was
+> started 2026-04/05, but subsequent development (through 2026-06-12: RFC 7383
+> fragmentation, RFC 9370 multi-KE, CHILD_SA) landed in the **v1**
+> `../strongswan-wasm-shims/` tree instead, together with
+> `../strongswan-6.0.5-wasm.patch`. So the "Supersedes v1" line below did not
+> play out — v1 is the currently-maintained path. This directory is kept for the
+> ASYNCIFY/MODULARIZE approach it prototypes. Check `git log` before choosing a
+> tree.
+
 Clean-slate Emscripten shims for strongSwan charon, modeled on the proven
 `openssh-pkcs11/wasm-shims/` pattern (ASYNCIFY + MODULARIZE, single-thread
 per WASM instance, SAB+Atomics ring buffer between two Web Workers).
-
-Supersedes the (broken) `../strongswan-wasm-shims/` reconstruction.
 
 ## Files
 
