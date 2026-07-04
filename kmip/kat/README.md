@@ -71,8 +71,8 @@ The full sha256 manifest is `manifest.sha256` — regenerate after any addition 
 |---|---|---|---|
 | `oasis-kmip-3.0/mandatory/` | OASIS KMIP Profiles v3.0 ZIP, extracted from `kmip-profiles-v3.0.zip` (2023-11-30) | 95 | OASIS-published mandatory conformance test cases for KMIP 3.0 protocol (classical-only) |
 | `oasis-kmip-3.0/optional/` | Same source | 7 | Optional KMIP 3.0 conformance tests (AKLC, CS-RNG, OMOS, SKLC) |
-| `oasis-kmip-2.1/` | Reserved | 0 | KMIP 2.1 fallback test cases (download as needed for legacy-mode validation) |
-| `ttlv-wire/` | To be generated | 0 | KMIP 3.0 PQC-specific TTLV byte vectors (hand-crafted, codec round-trip) — populated during Phase 2 of the implementation plan |
+| `oasis-kmip-2.1/` | Download on demand | — (dir not present) | KMIP 2.1 fallback test cases (created only when downloaded for legacy-mode validation) |
+| `ttlv-wire/` | Shipped | 6 `.bin` + `manifest.json` | KMIP 3.0 PQC-specific TTLV byte vectors (hand-crafted, codec round-trip) |
 | `ml-kem/` | Copy of `pqctoday-hub/src/data/acvp/mlkem_test.json` | 1 | NIST ACVP ML-KEM-512/768/1024 vectors |
 | `ml-dsa/` | Copy of `pqctoday-hub/src/data/acvp/mldsa_test.json` + `composite-sigs-jose-kat.json` | 2 | NIST ACVP ML-DSA-44/65/87 + LAMPS draft-19 composite vectors |
 | `slh-dsa/` | Copy of `pqctoday-hub/src/data/acvp/slhdsa_ctx_test.json` | 1 | NIST ACVP SLH-DSA SHA2 + SHAKE family with context vectors |
@@ -82,7 +82,7 @@ The full sha256 manifest is `manifest.sha256` — regenerate after any addition 
 | `hmac/` | Copy of `pqctoday-hub/src/data/acvp/hmac{,_sha384,_sha512}_test.json` | 3 | NIST ACVP HMAC vectors |
 | `sha/` | Copy of `pqctoday-hub/src/data/acvp/{sha256,sha384,sha512,sha3_256,sha3_512,kmac,hkdf}_test.json` | 7 | NIST ACVP digest + KDF vectors |
 
-**Note on `oasis-kmip-2.1/`:** Empty by intent. The KMIP 3.0 mandatory profile already covers the classical surface; v2.1 fallback vectors are downloaded on demand from `https://docs.oasis-open.org/kmip/kmip-testcases/v2.1/`. See `spec/oasis-kmip-2.1/kmip-spec-v2.1-os.pdf` for the reference.
+**Note on `oasis-kmip-2.1/`:** Not present by intent (the directory is created only when needed). The KMIP 3.0 mandatory profile already covers the classical surface; v2.1 fallback vectors are downloaded on demand from `https://docs.oasis-open.org/kmip/kmip-testcases/v2.1/`. See `../spec/oasis-kmip-2.1/kmip-spec-v2.1-os.pdf` for the reference.
 
 ## What OASIS provides for KMIP 3.0 (and what it doesn't)
 

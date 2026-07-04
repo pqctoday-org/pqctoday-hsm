@@ -9,13 +9,13 @@ Local copies of the OASIS KMIP + PKCS#11 specification documents that the wrappe
 | `oasis-kmip-3.0/kmip-profiles-v3.0.pdf` | 1 142 181 | `https://docs.oasis-open.org/kmip/kmip-profiles/v3.0/kmip-profiles-v3.0.pdf` | 2023-11-30 |
 | `oasis-kmip-3.0/kmip-profiles-v3.0.zip` | 8 389 246 | `https://docs.oasis-open.org/kmip/kmip-profiles/v3.0/kmip-profiles-v3.0.zip` | 2023-11-30 |
 | `oasis-kmip-2.1/kmip-spec-v2.1-os.pdf` | 6 796 775 | `https://docs.oasis-open.org/kmip/kmip-spec/v2.1/os/kmip-spec-v2.1-os.pdf` | 2020-12-14 |
-| `oasis-pkcs11-3.2/` | TBD | `https://docs.oasis-open.org/pkcs11/pkcs11-spec/v3.2/` | TBD |
+| `oasis-pkcs11-3.2/` | _not yet downloaded_ | `https://docs.oasis-open.org/pkcs11/pkcs11-spec/v3.2/` | — |
 
 All files have `.sha256` companions next to them; regenerate after any refresh.
 
 ## Use
 
-- **KMIP 3.0 spec** — authoritative source for tag/enum/operation codepoints. The `src/kmip30/spec_source.json` file is derived from this PDF (Phase 1 of the implementation plan: `caffeinate -i ollama run qwen3.6:27b` extraction).
+- **KMIP 3.0 spec** — authoritative source for tag/enum/operation codepoints. The derived tag/enum artifact is `oasis-kmip-3.0/kmip-spec-3.0-tags-enums.json` (see `../docs/KMIP_3_0_DELTA.md`).
 - **KMIP 3.0 profiles ZIP** — bundles the OASIS-published conformance test cases (extracted into `../kat/oasis-kmip-3.0/`).
 - **KMIP 2.1 OS** — fallback reference for legacy-mode clients.
 - **PKCS#11 v3.2** — referenced from `pqctoday-priv/docs/platform/data/pkcs11-vendor-mech-allocation.md` for vendor mech allocation rationale.

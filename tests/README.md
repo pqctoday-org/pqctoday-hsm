@@ -62,14 +62,14 @@ automatically using the supplied `--so-pin` and `--user-pin` values.
 
 ```bash
 # Basic
-./pqc_validate ./build/src/lib/libsofthsm2.so
+./pqc_validate ./build/src/lib/libsofthsmv3.so
 
 # Custom PINs and verbose output
-./pqc_validate ./build/src/lib/libsofthsm2.so \
+./pqc_validate ./build/src/lib/libsofthsmv3.so \
     --so-pin 1234 --user-pin 5678 --verbose
 
 # Custom ops file and output directory
-./pqc_validate ./build/src/lib/libsofthsm2.so \
+./pqc_validate ./build/src/lib/libsofthsmv3.so \
     --ops-file tests/pqc_validate_ops.json \
     --output-dir /tmp/pqc-results
 ```
@@ -174,7 +174,9 @@ Exit code `0` is expected in all phases — SKIPs do not count as failures.
 ```
 tests/
 ├── pqc_validate.cpp          Main validation program
-├── pqc_validate_ops.json     Operations template (static — shipped)
+├── pqc_validate_ops.json     Operations template — REQUIRED by pqc_validate, but
+│                             NOT currently committed; supply your own before running
+│                             (the program exits with "cannot open ops file" if absent)
 ├── json.hpp                  nlohmann/json v3.11.3 (download via curl)
 └── README.md                 This file
 ```
