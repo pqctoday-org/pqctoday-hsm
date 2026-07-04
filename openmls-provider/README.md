@@ -221,10 +221,10 @@ end-to-end against the canonical `openmls` library:
 - **[`interop/`](interop/)** — `tonic`-based gRPC server speaking the
   IETF `mls_client.MLSClient` contract from
   [`mlswg/mls-implementations`](https://github.com/mlswg/mls-implementations).
-  The `Name` and `SupportedCiphersuites` RPCs are implemented; the
-  remaining 32 RPCs return `UNIMPLEMENTED` pending a port from
-  `openmls/interop_client`. Smoke test in `interop/tests/grpc_smoke.rs`
-  proves the wire-level protobuf contract is correct end-to-end.
+  21 of 34 RPCs are implemented (full parity with `openmls/interop_client`);
+  the remaining 13 return `UNIMPLEMENTED`. Smoke test in
+  `interop/tests/grpc_smoke.rs` proves the wire-level protobuf contract is
+  correct end-to-end.
 
 Run everything:
 

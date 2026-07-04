@@ -1,3 +1,9 @@
+> **Superseded — historical baseline (2026-06-09).** Every figure below (0 pass,
+> 83 skip-op, 16 fail) describes the *initial* replay run. Current standing is
+> **92 PASS / 0 FAIL / 0 SKIP_OP / 10 deliberate skips** — see
+> `../conformance/REPLAY_REPORT.md` and `CONFORMANCE_REPORT.md`. Kept only to show
+> the starting point.
+
 # OASIS KMIP 3.0 Dispatcher Replay — Baseline Analysis
 
 **Generated**: 2026-06-09

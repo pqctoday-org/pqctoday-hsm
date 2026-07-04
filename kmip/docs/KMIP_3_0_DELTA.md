@@ -140,8 +140,8 @@ KMIP 3.0 publication or KAT corpus carrying PQC test vectors.
 | `kmip-spec/v3.0/kmip-spec-v3.0.pdf` | 2023-11-30 | 2024-08-23 | No (byte-identical sha256 `e95f0ed9…`). |
 | `kmip-profiles/v3.0/` (KMIP 3.0 KAT corpus) | 2023-11-30 | **2023-11-30** (unchanged) | n/a — directory has not been republished since first release. **No PQC test vectors have been added by OASIS.** |
 
-The `from-2023-11-30.json` artifact in the same directory preserves the
-prior extraction for byte-exact diff against the current run.
+The `kmip-spec-3.0-tags-enums-from-2023-11-30.json` artifact in the same
+directory preserves the prior extraction for byte-exact diff against the current run.
 
 **Practical conclusion:** OASIS has neither corrected the spec nor added
 PQC test cases between Nov-2023 and Aug-2024. Our extracted codepoints

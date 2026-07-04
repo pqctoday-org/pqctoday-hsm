@@ -399,7 +399,7 @@ The `softhsmv3` implementations maintain strict compliance with current ACVP tes
 
 - **ACVP Testing (v0.4.21+)**: Both the C++ and Rust engines pass all ACVP algorithm test vectors with **zero failures and zero skips** across all implemented mechanisms in dual HSM mode. The test suite covers: ML-KEM (Decapsulate KAT + Round-Trip, all 3 variants), ML-DSA (SigVer KAT + Functional, all 3 variants), HashML-DSA (SHA-256/SHA-512, 3 variants), SLH-DSA (Functional 2 param sets + SigGen KAT), HashSLH-DSA (SHA2-128f-SHA256, SHA2-256f-SHA512), LMS/HSS SHA-256 + SHAKE-256 (sign+verify round-trips; NIST ACVP LMS sigVer KAT, 20 SHAKE groups per engine — newly passing on both engines as of v0.4.21), AES-GCM/CBC/CTR/KW/KWP, HMAC-SHA256/384/512, RSA-PSS, ECDSA P-256/P-384, EdDSA Ed25519, **Ed25519ph / `CKM_EDDSA_PH` (C++ + Rust, both engines as of v0.4.21)**, SHA-256 (3 vectors), SHA3-256 (empty-string vector), PBKDF2, and HKDF. C++↔Rust cross-engine HSS signing verification available in dual mode.
 - **NIST ACVP LMS sigVer**: **320/320** official NIST ACVP demo vectors validated against `lm_validate_signature()` — all 80 SP 800-208 parameter combinations (SHA-256 M32/M24 + SHAKE-256 M32/M24 × 5 tree heights × 4 Winternitz params). Source: [usnistgov/ACVP-Server](https://github.com/usnistgov/ACVP-Server/tree/master/gen-val/json-files/LMS-sigVer-1.0).
-- **PKCS#11 v3.2 Semantics (C++)**: The standalone C++ compliance validator (`p11_v32_compliance_test`) passes **127/127** tests (0 failures, 0 skips) with the legacy RIPEMD-160 suite falling through properly, covering PQC round-trips, classical algorithms (ECDSA, EdDSA, ECDH, RSA), KDFs (PBKDF2, HKDF, SP800-108), negative boundary paths (policy violation, extraction constraint, template completeness, signature forgery), and v3.2 session/message APIs against the compiled `libsofthsmv3.dylib`.
+- **PKCS#11 v3.2 Semantics (C++)**: The standalone C++ compliance validator (`p11_v32_compliance_test`) passes **193 / 0 / 1** (193 pass, 0 fail, 1 documented skip — the legacy RIPEMD-160 case), covering PQC round-trips, classical algorithms (ECDSA, EdDSA, ECDH, RSA), KDFs (PBKDF2, HKDF, SP800-108), negative boundary paths (policy violation, extraction constraint, template completeness, signature forgery), and v3.2 session/message APIs against the compiled `libsofthsmv3.dylib`. Full report: [`cpp_compliance_report.md`](cpp_compliance_report.md).
 - **PKCS#11 v3.2 Conformance (Rust)**: The Rust engine carries its own checked-in evidence — **188/188** checks across 36 sections (exact `CKR_*` codes in spec priority order, PQC keygen/param-set, SP800-108 KBKDF, message-based crypto). See [`rust/RUST_P11_V32_CONFORMANCE_REPORT.md`](rust/RUST_P11_V32_CONFORMANCE_REPORT.md); regenerate with `scripts/local-gate.sh --rust-p11`.
 - **KMIP 3.0 Conformance**: The KMIP server is validated by the Rust integration suite (`kmip/ cargo test` — TLS e2e, hybrid KEM, OASIS codec, interop KATs) and the OASIS replay harness (`kmip/conformance/harness/dispatcher_replay.py`). See [`kmip/docs/CONFORMANCE_REPORT.md`](kmip/docs/CONFORMANCE_REPORT.md) and the deprecated-algorithm skip rationale in [`kmip/DEPRECATED.md`](kmip/DEPRECATED.md).
 - **Playground E2E**: End-to-end token integration and ACVP matrix execution are verified via automated Playwright continuous integration (`playground-softhsm-acvp.spec.ts`) in dual HSM mode.
@@ -409,7 +409,7 @@ The `softhsmv3` implementations maintain strict compliance with current ACVP tes
 
 A formal security audit was conducted in March 2026 covering C++ memory safety, PKCS#11 API validation, cryptographic implementation, WASM/JS bindings, Rust PKCS#11, and build/supply chain. A subsequent hardening sweep occurred in April 2026 focusing on bounds control.
 
-**v0.4.24 status: all HIGH and MEDIUM findings resolved, remaining LOW findings patched.**
+**As of the v0.4.24 hardening sweep (April 2026): all HIGH and MEDIUM findings resolved, remaining LOW findings patched.** Security-relevant work since then is recorded in `CHANGELOG.md` (through v0.8.0).
 
 | Severity | Original | Fixed in v0.4.24 | Remaining |
 | --- | --- | --- | --- |
@@ -609,6 +609,13 @@ SoftHSMv3 introduces a **Tri-Mode Storage Architecture** to support ephemeral, f
 
 - **Stateful hash-based signatures**: HSS/LMS (keygen, sign, verify) and XMSS/XMSS^MT (keygen, sign, verify) are implemented in both C++ and Rust engines. All SP 800-208 parameter sets supported (SHA-256 N32/N24, SHAKE-256 N32/N24). Validated against 320 NIST ACVP LMS sigVer demo vectors. State persistence is in-memory per session — the host application must manage durable state for production use if using the memory model.
 - **Single-threaded**: The WASM target is single-threaded (no SharedArrayBuffer worker pool).
+
+## Roadmap (PKCS#11 engine, Phases 0–19)
+
+The phase checklist below tracked the PKCS#11 engine build through **v0.4.24**
+(April 2026). The later program — v0.5.0–v0.8.0: the KMIP 3.0 server, CACP
+crypto-agility policy engine, hybrid KEMs, and the Rust native API — is recorded
+in **`CHANGELOG.md`**, not here.
 
 - [x] Phase 0: Import SoftHSM2 + PKCS#11 v3.2 headers + strip legacy ([#1](https://github.com/pqctoday-org/pqctoday-hsm/issues/1))
 - [x] Phase 1: OpenSSL 3.x API migration ([#2](https://github.com/pqctoday-org/pqctoday-hsm/issues/2))

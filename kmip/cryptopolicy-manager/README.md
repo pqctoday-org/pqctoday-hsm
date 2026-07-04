@@ -18,7 +18,7 @@ tooling can **read, author, validate, dry-run, and activate** crypto-agility
 policies on a *running* server — without editing files on the box or
 restarting it.
 
-| HTTP (proposed) | `PolicyStore` primitive | Effect |
+| HTTP route | `PolicyStore` primitive | Effect |
 |---|---|---|
 | `GET /policies` | `list()` | enumerate policies |
 | `GET /policies/{name}` | `load()` + raw YAML | read one (for an editor) |
@@ -39,8 +39,8 @@ against a sample request (`POST /policies/dry-run` — the side-effect-free
 on the running server (`POST .../activate`). So the API is a stable JSON
 contract: clean request/response shapes, explicit error bodies (carry the YAML
 line/column from `validate_draft` where available), and CORS for the sandbox
-origin. The sandbox section is a downstream piece (separate repo) built against
-this API once it exists.
+origin. The sandbox section is a downstream piece (separate repo) that consumes
+this API.
 
 ## The architectural constraint (why this is in-process)
 
@@ -51,7 +51,7 @@ the same process** as the KMIP server, sharing that `Engine` handle, on a
 
 A fully separate process could only do *file-based* management (write the YAML
 + flip the `.active` marker) and would still need the server to reload — no
-live hot-swap. So the plan is: this folder holds the admin-facade code
+live hot-swap. So the design is: this folder holds the admin-facade code
 (handlers + router + auth), and the `pqctoday-kmip` server binary opts into a
 second listener (`--admin-listen <addr>`) that mounts it against the shared
 `Engine` + `PolicyStore`.

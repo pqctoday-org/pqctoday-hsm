@@ -1,8 +1,11 @@
 # `softhsmrustv3::native` — typed Rust API for native callers
 
-> **Status**: scoping document (this commit) + module skeleton.
-> Implementations land in follow-up commits.
-> **Branch**: `feat/rust-native-api`.
+> **Status**: **implemented and shipped.** The `pub mod native` API described
+> below is live in `src/native/` (`session`, `keygen`, `sign`, `encrypt`,
+> `object`, `parity`) with no `unimplemented!()` stubs remaining, and it backs
+> the production KMIP server (e.g. `softhsmrustv3::native::session::bootstrap_default_token`
+> in `kmip/bin/pqctoday-kmip.rs`). The "this commit / follow-up commits" framing
+> in §9 below is historical — the plan it describes is complete.
 
 ## 1. Why this module exists
 
@@ -260,32 +263,23 @@ native API is a parallel surface backed by the same internal logic.
 | Thread-local OBJECTS map needs Mutex for native | Low | Option A (pinned thread) deferred to caller — KMIP `Session: !Send` already aligns |
 | RNG state — engine uses thread-local CSPRNG | Low | Same as thread-local OBJECTS; pinned-thread caller handles it |
 
-## 9. This commit's scope
+## 9. Delivery history (complete)
 
-This first commit ships **only the scoping doc + module skeleton**. The
-skeleton:
+The API was delivered as the staged plan below — **all stages have shipped**.
+Every sub-module in `src/native/` is fully implemented (`session`, `keygen` for
+ML-DSA/ML-KEM/SLH-DSA + classical RSA/ECDSA/AES, `sign`, `encrypt`, `object`)
+with cross-validation in `src/native/parity.rs`, and the surface is exercised by
+the KMIP integration tests and the production server.
 
-- Adds `pub mod native;` to `src/lib.rs`.
-- Creates `src/native/mod.rs` with the function signatures from §3 as
-  `unimplemented!()` stubs.
-- Creates `src/native/{session,keygen,sign,encrypt,object}.rs` as empty
-  modules.
-
-**No implementations yet.** Follow-up commits land each
-sub-module's real impl + tests:
-
-| Commit | Sub-module | Tests |
+| Stage | Sub-module | Status |
 |---|---|---|
-| 2 | `native/session.rs` | `tests/native_session.rs` |
-| 3 | `native/keygen.rs` (ML-DSA + ML-KEM first) | `tests/native_keygen_pqc.rs` |
-| 4 | `native/sign.rs` | `tests/native_sign_verify.rs` |
-| 5 | `native/encrypt.rs` | `tests/native_encap_decap.rs` |
-| 6 | `native/keygen.rs` (classical: RSA, ECDSA, AES) | `tests/native_keygen_classical.rs` |
-| 7 | `native/object.rs` | `tests/native_object.rs` |
-| 8 | `tests/native_parity.rs` | (cross-validation) |
-
-Roughly **6–8 follow-up commits**, each ~150 LOC + a focused test. Each
-commit independently verifiable; CI gates against wasm32 regressions.
+| `native/session.rs` | session lifecycle / token bootstrap | ✅ shipped |
+| `native/keygen.rs` (ML-DSA + ML-KEM) | PQC keygen | ✅ shipped |
+| `native/sign.rs` | sign / verify | ✅ shipped |
+| `native/encrypt.rs` | encapsulate / decapsulate | ✅ shipped |
+| `native/keygen.rs` (classical: RSA, ECDSA, AES) | classical keygen | ✅ shipped |
+| `native/object.rs` | object attributes | ✅ shipped |
+| `native/parity.rs` | cross-validation vs the PKCS#11 path | ✅ shipped |
 
 ## 10. Out of scope
 

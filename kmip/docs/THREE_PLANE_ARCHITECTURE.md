@@ -207,10 +207,8 @@ Direction terminology:
 
 - OASIS KMIP 2.1 specification: `spec/oasis-kmip-2.1/`
 - OASIS KMIP 3.0 specification: `spec/oasis-kmip-3.0/`
-- OASIS PKCS#11 v3.2 specification: `spec/oasis-pkcs11-3.2/`
-- pqctoday-hsm PKCS#11 vendor mechanism allocation: [`pqctoday-priv/docs/platform/data/pkcs11-vendor-mech-allocation.md`](../../../../pqctoday-priv/docs/platform/data/pkcs11-vendor-mech-allocation.md)
+- PKCS#11 v3.2 specification: `../../docs/refs/` (repo-root refs)
 - This subsystem's implementation plan: [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md)
-- Subsystem boundary doc: [`SUBSYSTEM_BOUNDARY.md`](SUBSYSTEM_BOUNDARY.md)
 
 ## 10. Status
 

@@ -1,3 +1,6 @@
+> **Historical record.** This fix plan is complete — see `CONFORMANCE_REPORT.md`
+> and the root `CHANGELOG.md` for current standing. Kept for provenance.
+
 # Compliance Fix Plan — pqctoday-kmip (KMIP 3.0 server + PKCS#11 bridge)
 
 **Date**: 2026-06-10 · **Base branch**: `feat/kmip-conformance-round-2` (HEAD `7142333`)
