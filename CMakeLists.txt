@@ -36,8 +36,8 @@ set(PACKAGE_NAME "SoftHSMv3")
 set(PACKAGE_VERSION "${VERSION}")
 set(PACKAGE_STRING "${PACKAGE_NAME} ${PACKAGE_VERSION}")
 set(PACKAGE_TARNAME "${PACKAGE}")
-set(PACKAGE_BUGREPORT "https://github.com/pqctoday/softhsmv3/issues")
-set(PACKAGE_URL "https://github.com/pqctoday/softhsmv3")
+set(PACKAGE_BUGREPORT "https://github.com/pqctoday-org/pqctoday-hsm/issues")
+set(PACKAGE_URL "https://github.com/pqctoday-org/pqctoday-hsm")
 
 # ---- Paths ------------------------------------------------------------------
 

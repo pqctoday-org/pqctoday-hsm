@@ -18,12 +18,34 @@ This module acts as a lightweight interceptor wrapper residing physically adjace
 
 ```text
 JavaJCE/
-├── JavaJCESofthsmv3.md            (This Architecture Document)
-├── src/com/pqctoday/jce/
-│   ├── SoftHSMJCEProvider.java    (The JCA Service Registry)
-│   ├── PQC11SignatureSpi.java     (The PKCS#11 Translation Engine)
-│   └── PQC11KeyFactorySpi.java    (The Public/Private Key Reconstructor)
-└── build.gradle                   (Compilation Map)
+├── JavaJCESofthsmv3.md                              (This Architecture Document)
+├── src/main/java/org/softhsmv3/jce/
+│   ├── SoftHSMJCEProvider.java   (JCA Provider "SoftHSMv3-PQC" — service registry)
+│   ├── MLDSASignatureSpi.java    (SignatureSpi: ML-DSA-44/65/87, SLH-DSA)
+│   ├── MLKEMKeyAgreementSpi.java (KeyAgreementSpi: ML-KEM-512/768/1024)
+│   └── ClassicalSignatureSpi.java (SignatureSpi: SHA256withRSA etc.)
+└── src/test/java/org/softhsmv3/jce/
+    └── PKCS11IntegrationTest.java (has a `main()` — runs the SPIs vs a token)
+```
+
+There is **no** `build.gradle`; the package is `org.softhsmv3.jce` (not
+`com.pqctoday.jce`). Registered services (see `SoftHSMJCEProvider`):
+`Signature.ML-DSA-{44,65,87}`, `KeyAgreement.ML-KEM-{512,768,1024}`,
+`Signature.SLH-DSA-*`, and classical `Signature.SHA256withRSA`.
+
+## Building and testing
+
+Compiled with `javac` inside the patched-JRE Docker container (no standalone
+build system in-tree). To build and run the integration test against a
+softhsmv3 token:
+
+```bash
+# inside the patched-JRE container, from JavaJCE/
+javac -d out $(find src/main/java -name '*.java')
+javac -d out -cp out $(find src/test/java -name '*.java')
+
+# PKCS11IntegrationTest.main() registers SoftHSMJCEProvider and drives the SPIs
+java -cp out org.softhsmv3.jce.PKCS11IntegrationTest
 ```
 
 ## Integration with Docker Context

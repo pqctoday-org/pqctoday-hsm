@@ -1,3 +1,7 @@
+> **Historical record (2026-06).** The policy-layer limits/gaps described here
+> were substantially addressed in the 0.8.0 CACP fail-open remediation (see the
+> root `CHANGELOG.md`). For current policy behavior use `../policies/README.md`.
+
 # Crypto-Agility Policy Layer — Capabilities, Limits & Gaps
 
 **Subsystem**: `kmip/src/policy/` (Plane-1 policy engine, on top of the KMIP 3.0 dispatcher)

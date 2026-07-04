@@ -62,6 +62,30 @@ import CK from '@pqctoday/softhsm-wasm/constants'
 
 ---
 
+## Documentation & components
+
+The npm package above is the PKCS#11 WASM engine. This repository also contains a
+networked KMIP server, a crypto-agility policy engine, and several protocol
+wrappers — each with its own README.
+
+**Guides (start here):**
+
+| Audience | Guide |
+| --- | --- |
+| Developer — build + write a client | [`docs/softhsmv3devguide.md`](docs/softhsmv3devguide.md) |
+| Ops / integrator — deploy + integrate | [`docs/softhsmv3opsguide.md`](docs/softhsmv3opsguide.md) |
+| Anyone — build and **test** the token | [`docs/howtotestsofthsmv3.md`](docs/howtotestsofthsmv3.md) |
+
+**Components:**
+
+| Component | Path | What |
+| --- | --- | --- |
+| PKCS#11 engines (C++ + Rust) | `src/`, [`rust/`](rust/README.md) | The token; two interchangeable engines. Rust also has a 188/0 [PKCS#11 v3.2 conformance report](rust/RUST_P11_V32_CONFORMANCE_REPORT.md) |
+| KMIP 3.0 server + CACP policy engine | [`kmip/`](kmip/README.md) | Networked key management + crypto-agility policies; ML-KEM/ML-DSA/SLH-DSA + **hybrid KEMs** (X25519MLKEM768 / SecP256r1MLKEM768) |
+| Wrappers | see the [Integration Interfaces](#integration-interfaces) table | OpenSSL provider, OpenSSH, OpenPGP, MLS, strongSwan, JavaJCE, WebRPC |
+
+---
+
 ## What's New vs SoftHSM2
 
 | Feature | SoftHSM2 (v2.7.0) | SoftHSMv3 |
@@ -375,7 +399,9 @@ The `softhsmv3` implementations maintain strict compliance with current ACVP tes
 
 - **ACVP Testing (v0.4.21+)**: Both the C++ and Rust engines pass all ACVP algorithm test vectors with **zero failures and zero skips** across all implemented mechanisms in dual HSM mode. The test suite covers: ML-KEM (Decapsulate KAT + Round-Trip, all 3 variants), ML-DSA (SigVer KAT + Functional, all 3 variants), HashML-DSA (SHA-256/SHA-512, 3 variants), SLH-DSA (Functional 2 param sets + SigGen KAT), HashSLH-DSA (SHA2-128f-SHA256, SHA2-256f-SHA512), LMS/HSS SHA-256 + SHAKE-256 (sign+verify round-trips; NIST ACVP LMS sigVer KAT, 20 SHAKE groups per engine — newly passing on both engines as of v0.4.21), AES-GCM/CBC/CTR/KW/KWP, HMAC-SHA256/384/512, RSA-PSS, ECDSA P-256/P-384, EdDSA Ed25519, **Ed25519ph / `CKM_EDDSA_PH` (C++ + Rust, both engines as of v0.4.21)**, SHA-256 (3 vectors), SHA3-256 (empty-string vector), PBKDF2, and HKDF. C++↔Rust cross-engine HSS signing verification available in dual mode.
 - **NIST ACVP LMS sigVer**: **320/320** official NIST ACVP demo vectors validated against `lm_validate_signature()` — all 80 SP 800-208 parameter combinations (SHA-256 M32/M24 + SHAKE-256 M32/M24 × 5 tree heights × 4 Winternitz params). Source: [usnistgov/ACVP-Server](https://github.com/usnistgov/ACVP-Server/tree/master/gen-val/json-files/LMS-sigVer-1.0).
-- **PKCS#11 v3.2 Semantics**: The standalone C++ compliance validator (`p11_v32_compliance_test`) passes **127/127** tests (0 failures, 0 skips) with the legacy RIPEMD-160 suite falling through properly, covering PQC round-trips, classical algorithms (ECDSA, EdDSA, ECDH, RSA), KDFs (PBKDF2, HKDF, SP800-108), negative boundary paths (policy violation, extraction constraint, template completeness, signature forgery), and v3.2 session/message APIs against the compiled `libsofthsmv3.dylib`.
+- **PKCS#11 v3.2 Semantics (C++)**: The standalone C++ compliance validator (`p11_v32_compliance_test`) passes **127/127** tests (0 failures, 0 skips) with the legacy RIPEMD-160 suite falling through properly, covering PQC round-trips, classical algorithms (ECDSA, EdDSA, ECDH, RSA), KDFs (PBKDF2, HKDF, SP800-108), negative boundary paths (policy violation, extraction constraint, template completeness, signature forgery), and v3.2 session/message APIs against the compiled `libsofthsmv3.dylib`.
+- **PKCS#11 v3.2 Conformance (Rust)**: The Rust engine carries its own checked-in evidence — **188/188** checks across 36 sections (exact `CKR_*` codes in spec priority order, PQC keygen/param-set, SP800-108 KBKDF, message-based crypto). See [`rust/RUST_P11_V32_CONFORMANCE_REPORT.md`](rust/RUST_P11_V32_CONFORMANCE_REPORT.md); regenerate with `scripts/local-gate.sh --rust-p11`.
+- **KMIP 3.0 Conformance**: The KMIP server is validated by the Rust integration suite (`kmip/ cargo test` — TLS e2e, hybrid KEM, OASIS codec, interop KATs) and the OASIS replay harness (`kmip/conformance/harness/dispatcher_replay.py`). See [`kmip/docs/CONFORMANCE_REPORT.md`](kmip/docs/CONFORMANCE_REPORT.md) and the deprecated-algorithm skip rationale in [`kmip/DEPRECATED.md`](kmip/DEPRECATED.md).
 - **Playground E2E**: End-to-end token integration and ACVP matrix execution are verified via automated Playwright continuous integration (`playground-softhsm-acvp.spec.ts`) in dual HSM mode.
 - **Security Audit (March 2026)**: Full remediation of all HIGH and MEDIUM findings. See [`docs/security_audit_03222026.md`](docs/security_audit_03222026.md).
 
@@ -584,28 +610,28 @@ SoftHSMv3 introduces a **Tri-Mode Storage Architecture** to support ephemeral, f
 - **Stateful hash-based signatures**: HSS/LMS (keygen, sign, verify) and XMSS/XMSS^MT (keygen, sign, verify) are implemented in both C++ and Rust engines. All SP 800-208 parameter sets supported (SHA-256 N32/N24, SHAKE-256 N32/N24). Validated against 320 NIST ACVP LMS sigVer demo vectors. State persistence is in-memory per session — the host application must manage durable state for production use if using the memory model.
 - **Single-threaded**: The WASM target is single-threaded (no SharedArrayBuffer worker pool).
 
-- [x] Phase 0: Import SoftHSM2 + PKCS#11 v3.2 headers + strip legacy ([#1](https://github.com/pqctoday/softhsmv3/issues/1))
-- [x] Phase 1: OpenSSL 3.x API migration ([#2](https://github.com/pqctoday/softhsmv3/issues/2))
-- [x] Phase 2: ML-DSA support ([#3](https://github.com/pqctoday/softhsmv3/issues/3))
-- [x] Phase 3: ML-KEM + C_EncapsulateKey/C_DecapsulateKey ([#4](https://github.com/pqctoday/softhsmv3/issues/4))
-- [x] Phase 4: Emscripten WASM build ([#5](https://github.com/pqctoday/softhsmv3/issues/5))
-- [x] Phase 5: npm package `@pqctoday/softhsm-wasm` ([#6](https://github.com/pqctoday/softhsmv3/issues/6))
-- [x] Phase 6: PQC Timeline App integration ([#7](https://github.com/pqctoday/softhsmv3/issues/7))
+- [x] Phase 0: Import SoftHSM2 + PKCS#11 v3.2 headers + strip legacy ([#1](https://github.com/pqctoday-org/pqctoday-hsm/issues/1))
+- [x] Phase 1: OpenSSL 3.x API migration ([#2](https://github.com/pqctoday-org/pqctoday-hsm/issues/2))
+- [x] Phase 2: ML-DSA support ([#3](https://github.com/pqctoday-org/pqctoday-hsm/issues/3))
+- [x] Phase 3: ML-KEM + C_EncapsulateKey/C_DecapsulateKey ([#4](https://github.com/pqctoday-org/pqctoday-hsm/issues/4))
+- [x] Phase 4: Emscripten WASM build ([#5](https://github.com/pqctoday-org/pqctoday-hsm/issues/5))
+- [x] Phase 5: npm package `@pqctoday/softhsm-wasm` ([#6](https://github.com/pqctoday-org/pqctoday-hsm/issues/6))
+- [x] Phase 6: PQC Timeline App integration ([#7](https://github.com/pqctoday-org/pqctoday-hsm/issues/7))
 - [x] Phase 7: PKCS#11 v3.2 compliance gaps
-  - [x] `C_GetInterfaceList` / `C_GetInterface` ([#8](https://github.com/pqctoday/softhsmv3/issues/8))
-  - [x] `CKK_ML_DSA` + `CKM_ML_DSA*` mechanisms ([#12](https://github.com/pqctoday/softhsmv3/issues/12))
-  - [x] `CKA_PARAMETER_SET` — PQC variant selection ([#11](https://github.com/pqctoday/softhsmv3/issues/11))
-  - [x] `C_SignMessage` / `C_VerifyMessage` one-shot message signing ([#10](https://github.com/pqctoday/softhsmv3/issues/10))
-  - [x] `CKK_SLH_DSA` + `CKM_SLH_DSA*` mechanisms ([#13](https://github.com/pqctoday/softhsmv3/issues/13))
-  - [x] `CKK_ML_KEM` + `CKM_ML_KEM*` mechanisms ([#14](https://github.com/pqctoday/softhsmv3/issues/14))
-  - [x] `CKA_ENCAPSULATE` / `CKA_DECAPSULATE` attributes ([#15](https://github.com/pqctoday/softhsmv3/issues/15))
-  - [x] `CKM_HASH_SLH_DSA*` — 11 pre-hash SLH-DSA variants ([#16](https://github.com/pqctoday/softhsmv3/issues/16))
-  - [x] `C_SignMessageBegin` / `C_SignMessageNext` / `C_VerifyMessageBegin` / `C_VerifyMessageNext` ([#17](https://github.com/pqctoday/softhsmv3/issues/17))
-  - [x] Message Encrypt/Decrypt API — AES-GCM per-message AEAD (10 functions) ([#18](https://github.com/pqctoday/softhsmv3/issues/18))
-  - [x] `C_VerifySignatureInit` / `C_VerifySignature` — pre-bound verification ([#19](https://github.com/pqctoday/softhsmv3/issues/19))
-  - [x] `C_WrapKeyAuthenticated` / `C_UnwrapKeyAuthenticated` ([#20](https://github.com/pqctoday/softhsmv3/issues/20))
-  - [x] `C_LoginUser` / `C_SessionCancel` — v3.0 session management ([#21](https://github.com/pqctoday/softhsmv3/issues/21))
-  - [x] `C_VerifySignatureFinal` / `C_VerifySignatureUpdate` multi-part pre-bound verify ([#22](https://github.com/pqctoday/softhsmv3/issues/22))
+  - [x] `C_GetInterfaceList` / `C_GetInterface` ([#8](https://github.com/pqctoday-org/pqctoday-hsm/issues/8))
+  - [x] `CKK_ML_DSA` + `CKM_ML_DSA*` mechanisms ([#12](https://github.com/pqctoday-org/pqctoday-hsm/issues/12))
+  - [x] `CKA_PARAMETER_SET` — PQC variant selection ([#11](https://github.com/pqctoday-org/pqctoday-hsm/issues/11))
+  - [x] `C_SignMessage` / `C_VerifyMessage` one-shot message signing ([#10](https://github.com/pqctoday-org/pqctoday-hsm/issues/10))
+  - [x] `CKK_SLH_DSA` + `CKM_SLH_DSA*` mechanisms ([#13](https://github.com/pqctoday-org/pqctoday-hsm/issues/13))
+  - [x] `CKK_ML_KEM` + `CKM_ML_KEM*` mechanisms ([#14](https://github.com/pqctoday-org/pqctoday-hsm/issues/14))
+  - [x] `CKA_ENCAPSULATE` / `CKA_DECAPSULATE` attributes ([#15](https://github.com/pqctoday-org/pqctoday-hsm/issues/15))
+  - [x] `CKM_HASH_SLH_DSA*` — 11 pre-hash SLH-DSA variants ([#16](https://github.com/pqctoday-org/pqctoday-hsm/issues/16))
+  - [x] `C_SignMessageBegin` / `C_SignMessageNext` / `C_VerifyMessageBegin` / `C_VerifyMessageNext` ([#17](https://github.com/pqctoday-org/pqctoday-hsm/issues/17))
+  - [x] Message Encrypt/Decrypt API — AES-GCM per-message AEAD (10 functions) ([#18](https://github.com/pqctoday-org/pqctoday-hsm/issues/18))
+  - [x] `C_VerifySignatureInit` / `C_VerifySignature` — pre-bound verification ([#19](https://github.com/pqctoday-org/pqctoday-hsm/issues/19))
+  - [x] `C_WrapKeyAuthenticated` / `C_UnwrapKeyAuthenticated` ([#20](https://github.com/pqctoday-org/pqctoday-hsm/issues/20))
+  - [x] `C_LoginUser` / `C_SessionCancel` — v3.0 session management ([#21](https://github.com/pqctoday-org/pqctoday-hsm/issues/21))
+  - [x] `C_VerifySignatureFinal` / `C_VerifySignatureUpdate` multi-part pre-bound verify ([#22](https://github.com/pqctoday-org/pqctoday-hsm/issues/22))
   - [x] `CKM_HKDF_DERIVE` — HMAC-based KDF (RFC 5869) via OpenSSL EVP HKDF
   - [x] `CKM_SP800_108_COUNTER_KDF` / `CKM_SP800_108_FEEDBACK_KDF` — NIST SP 800-108 counter and feedback KBKDF
   - [x] `CKM_ECDH1_COFACTOR_DERIVE` — cofactor ECDH via `EVP_PKEY_CTX_set_ecdh_cofactor_mode`
@@ -704,15 +730,19 @@ SoftHSMv3 introduces a **Tri-Mode Storage Architecture** to support ephemeral, f
 
 ## Integration Interfaces
 
-SoftHSMv3 exposes five integration interfaces that cover the full stack from browser WASM to enterprise infrastructure:
+SoftHSMv3 exposes integration interfaces that cover the full stack from browser WASM to enterprise infrastructure. Each wrapper has its own README with build + test steps:
 
 | Interface | Location | Use case |
 | --- | --- | --- |
-| **Direct PKCS#11** | `libsofthsm3.so` / npm | Native C/C++ / Node.js — load via `dlopen` + `C_GetFunctionList` |
+| **Direct PKCS#11** | `libsofthsmv3.so` / npm | Native C/C++ / Node.js — load via `dlopen` + `C_GetFunctionList` |
 | **OpenSSL 3.x Provider** | `src/vendor/pkcs11-provider/` | Transparent routing from any `openssl` CLI or linked app |
-| **StrongSwan Adapter** | `strongswan-pkcs11/` | IKEv2 VPN — ML-KEM-768 key exchange + ML-DSA signing |
-| **Java JCE Layer** | `JavaJCE/` | Hyperledger Besu and JCA-based apps — ML-DSA-65 / ML-KEM-768 |
-| **OpenSSH Connector** | `openssh-pkcs11/` | ML-DSA-65 ssh / sshd (draft-sfluhrer-ssh-mldsa-06); WASM build for in-browser demos |
+| **KMIP 3.0 server + CACP** | [`kmip/`](kmip/README.md) | Networked key management (TTLV/TLS) + crypto-agility policy engine; ML-KEM/ML-DSA/SLH-DSA + hybrid KEMs |
+| **StrongSwan Adapter** | [`strongswan-pkcs11/`](strongswan-pkcs11/README.md) | IKEv2 VPN — ML-KEM-768 key exchange + ML-DSA signing |
+| **Java JCE Layer** | [`JavaJCE/`](JavaJCE/JavaJCESofthsmv3.md) | Hyperledger Besu and JCA-based apps — ML-DSA-65 / ML-KEM-768 |
+| **OpenSSH Connector** | [`openssh-pkcs11/`](openssh-pkcs11/README.md) | ML-DSA-65 ssh / sshd (draft-sfluhrer-ssh-mldsa-06); WASM build runs a real PQ SSH handshake |
+| **OpenPGP Connector** | [`openpgp/`](openpgp/README.md) | OpenPGP signing / decryption with keys held on the token (ML-DSA / ML-KEM) |
+| **MLS Provider** | [`openmls-provider/`](openmls-provider/README.md) | OpenMLS crypto provider backed by the token |
+| **WebRPC** | [`webrpc/`](webrpc/README.md) | Roadmap — REST gateway to the module (not yet extracted) |
 
 ---
 
@@ -802,7 +832,7 @@ Standard Java lacks frontend translation logic to convert high-level strings lik
 | `SoftHSMJCEProvider.java` | Registers the provider with the JCA `Security` framework |
 | `MLDSASignatureSpi.java` | Intercepts `Signature.getInstance("ML-DSA-65")`, translates to `CKM_ML_DSA` (0x1d) + `C_SignInit` |
 | `MLKEMKeyAgreementSpi.java` | Intercepts `KeyAgreement.getInstance("ML-KEM-768")`, routes to `C_EncapsulateKey` / `C_DecapsulateKey` |
-| `PKCS11IntegrationTest.java` | Integration test validating round-trips against the compiled `libsofthsm3.so` |
+| `PKCS11IntegrationTest.java` | Integration test validating round-trips against the compiled `libsofthsmv3.so` |
 
 ### Usage
 
@@ -869,7 +899,7 @@ See `openssh-pkcs11/README.md` for details and environment overrides
 ## Building (Native)
 
 ```bash
-# Requires OpenSSL >= 3.6 (for ML-DSA and SLH-DSA EVP support)
+# Requires OpenSSL >= 3.5 (for ML-KEM/ML-DSA/SLH-DSA EVP support; 3.5.0 enforced)
 mkdir build && cd build
 cmake .. -DWITH_CRYPTO_BACKEND=openssl -DENABLE_MLKEM=ON -DENABLE_MLDSA=ON
 make
@@ -893,7 +923,7 @@ ninja -C build install
 ## Building (WASM — C++/Emscripten)
 
 ```bash
-# Requires Emscripten SDK + OpenSSL 3.6 cross-compiled for WASM
+# Requires Emscripten SDK + OpenSSL >= 3.5 cross-compiled for WASM
 mkdir build-wasm && cd build-wasm
 emcmake cmake .. -DWITH_CRYPTO_BACKEND=openssl -DENABLE_MLKEM=ON -DENABLE_MLDSA=ON
 emmake make

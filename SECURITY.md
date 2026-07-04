@@ -13,7 +13,7 @@
 
 Please report security issues via **GitHub's private security advisory** feature:
 
-1. Go to <https://github.com/pqctoday/softhsmv3/security/advisories>
+1. Go to <https://github.com/pqctoday-org/pqctoday-hsm/security/advisories>
 2. Click **"New draft security advisory"**
 3. Fill in the title, severity, description, and steps to reproduce
 

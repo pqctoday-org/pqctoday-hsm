@@ -1,3 +1,7 @@
+> **Historical record (2026-06).** The gaps planned here were closed in the
+> 0.7.0/0.8.0 KMIP + CACP waves — for current status see `CONFORMANCE_REPORT.md`
+> and the root `CHANGELOG.md`. Kept for provenance, not an open to-do list.
+
 # Remaining Gaps — Implementation Plan
 
 Covers the gaps open after: engine reproduces all 1452 OASIS PQC interop KATs

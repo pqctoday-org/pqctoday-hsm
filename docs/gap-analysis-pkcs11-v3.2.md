@@ -1,3 +1,8 @@
+> **Historical record (2026-06).** The gaps analyzed here have since been
+> closed (see this doc's own close-out notes; shipped through v0.8.0). Kept for
+> provenance — for current status use `../cpp_compliance_report.md` and the root
+> `CHANGELOG.md`. Not an open to-do list.
+
 # PKCS#11 v3.2 Compliance Gap Analysis — softhsmv3 (v18)
 
 **Updated:** 2026-06-12 (v18 — **Round-5 C++ close-out: all documented-deferred items
