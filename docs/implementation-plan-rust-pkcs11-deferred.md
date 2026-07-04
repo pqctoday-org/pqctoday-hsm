@@ -1,3 +1,7 @@
+> **Historical record (2026-06).** The deferred work planned here has shipped
+> (through v0.8.0; see `../rust/RUST_P11_V32_CONFORMANCE_REPORT.md`). Kept for
+> provenance, not an open to-do list.
+
 # Implementation Plan — softhsmrustv3 PKCS#11 v3.2 Deferred Work
 
 **Date:** 2026-06-10

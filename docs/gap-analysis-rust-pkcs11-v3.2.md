@@ -1,3 +1,7 @@
+> **Historical record (2026-06).** These gaps are closed — the Rust engine now
+> passes its own 188/0 PKCS#11 v3.2 conformance suite (`../rust/RUST_P11_V32_CONFORMANCE_REPORT.md`),
+> shipped through v0.8.0. Kept for provenance, not an open to-do list.
+
 # PKCS#11 v3.2 Compliance Gap Analysis — softhsmrustv3 (Rust/WASM engine)
 
 > **Remediation status (2026-06-10, post fix-plan execution).** SUPERSEDED IN

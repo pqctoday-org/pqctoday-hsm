@@ -1,3 +1,6 @@
+> **Historical record (2026-06).** This plan is complete — see
+> `../rust/RUST_P11_V32_CONFORMANCE_REPORT.md` (188/0). Kept for provenance.
+
 # Fix Plan — softhsmrustv3 PKCS#11 v3.2 Compliance
 
 **Date**: 2026-06-10 · **Base branch**: `feat/kmip-conformance-round-2` (HEAD `7142333`)
