@@ -409,7 +409,7 @@ The `softhsmv3` implementations maintain strict compliance with current ACVP tes
 
 A formal security audit was conducted in March 2026 covering C++ memory safety, PKCS#11 API validation, cryptographic implementation, WASM/JS bindings, Rust PKCS#11, and build/supply chain. A subsequent hardening sweep occurred in April 2026 focusing on bounds control.
 
-**v0.4.24 status: all HIGH and MEDIUM findings resolved, remaining LOW findings patched.**
+**As of the v0.4.24 hardening sweep (April 2026): all HIGH and MEDIUM findings resolved, remaining LOW findings patched.** Security-relevant work since then is recorded in `CHANGELOG.md` (through v0.8.0).
 
 | Severity | Original | Fixed in v0.4.24 | Remaining |
 | --- | --- | --- | --- |
@@ -609,6 +609,13 @@ SoftHSMv3 introduces a **Tri-Mode Storage Architecture** to support ephemeral, f
 
 - **Stateful hash-based signatures**: HSS/LMS (keygen, sign, verify) and XMSS/XMSS^MT (keygen, sign, verify) are implemented in both C++ and Rust engines. All SP 800-208 parameter sets supported (SHA-256 N32/N24, SHAKE-256 N32/N24). Validated against 320 NIST ACVP LMS sigVer demo vectors. State persistence is in-memory per session — the host application must manage durable state for production use if using the memory model.
 - **Single-threaded**: The WASM target is single-threaded (no SharedArrayBuffer worker pool).
+
+## Roadmap (PKCS#11 engine, Phases 0–19)
+
+The phase checklist below tracked the PKCS#11 engine build through **v0.4.24**
+(April 2026). The later program — v0.5.0–v0.8.0: the KMIP 3.0 server, CACP
+crypto-agility policy engine, hybrid KEMs, and the Rust native API — is recorded
+in **`CHANGELOG.md`**, not here.
 
 - [x] Phase 0: Import SoftHSM2 + PKCS#11 v3.2 headers + strip legacy ([#1](https://github.com/pqctoday-org/pqctoday-hsm/issues/1))
 - [x] Phase 1: OpenSSL 3.x API migration ([#2](https://github.com/pqctoday-org/pqctoday-hsm/issues/2))

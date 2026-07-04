@@ -1,3 +1,7 @@
+> **Historical record.** These policy-layer gaps were addressed in the 0.8.0
+> CACP remediation — see `../policies/README.md` and the root `CHANGELOG.md`.
+> Kept for provenance, not an open to-do list.
+
 # Crypto-Policy Gaps — Implementation Plan
 
 **Goal**: extend the Plane-1 crypto-agility policy engine (`kmip/src/policy/`) so

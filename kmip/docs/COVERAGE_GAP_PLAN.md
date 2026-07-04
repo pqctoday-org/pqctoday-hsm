@@ -1,3 +1,7 @@
+> **Historical record.** These coverage gaps were closed in the 0.7.0/0.8.0
+> KMIP waves — see `CONFORMANCE_REPORT.md` and the root `CHANGELOG.md`. Kept for
+> provenance, not an open to-do list.
+
 # KMIP 3.0 Coverage-Gap Implementation & Test Plan
 
 **Date**: 2026-06-13 · **Base**: `main` @ `03bd0b6` (post compliance rounds + PR #97 Locate fix)

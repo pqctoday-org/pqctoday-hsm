@@ -1,3 +1,25 @@
+# openpgp-pkcs11 — PQC OpenPGP over softhsmv3 (pqctoday fork)
+
+> **This is the pqctoday fork.** It extends the upstream
+> [`heiko/openpgp-pkcs11`](https://codeberg.org/heiko/openpgp-pkcs11) Sequoia
+> bridge with **post-quantum OpenPGP** (ML-DSA-65 signing, ML-KEM decryption)
+> where the private key stays inside the **softhsmv3** PKCS#11 token. The
+> original upstream README follows below for reference — note its examples use
+> upstream SoftHSMv2 (`/usr/lib64/softhsm/libsofthsm.so`, YubiKey); in this repo
+> the module is **`libsofthsmv3`** and the PQC path is what's exercised.
+>
+> **How to test the PQC bridge against softhsmv3** (real HSM smoke tests):
+> - `openpgp/smoke-mldsa/` — proves softhsmv3 `C_Sign` returns a 3309-byte
+>   ML-DSA-65 signature (see its README for the exact `softhsm2-util` +
+>   `cargo run` commands; requires `cmake --build build` first).
+> - `openpgp/smoke-mlkem/` — ML-KEM decapsulation path.
+> - `openpgp/smoke-import/` — key import/custody.
+> - `openpgp/spike-pqc/` — the wire-format spike (RFC 9580 v6, algorithm ID 30).
+> - Design: `openpgp/docs/PQC_PGP_IMPLEMENTATION_PLAN.md` (authoritative;
+>   supersedes `SEQUOIA_PQC_MIGRATION.md`).
+
+---
+
 # Using PKCS #&#8203;11 hardware security devices for OpenPGP operations
 
 [![status-badge](https://ci.codeberg.org/api/badges/heiko/openpgp-pkcs11/status.svg)](https://ci.codeberg.org/heiko/openpgp-pkcs11)

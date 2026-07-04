@@ -1,3 +1,7 @@
+> **Historical record.** This build plan is complete — the KMIP subsystem
+> shipped through v0.8.0. For current status see `../README.md`,
+> `CONFORMANCE_REPORT.md`, and the root `CHANGELOG.md`. Not an open to-do list.
+
 # `pqctoday-hsm/kmip/` Subsystem — Implementation Plan (Rust)
 
 Focused implementation plan for the **KMIP 3.0 PKCS#11 wrapper** subsystem of `pqctoday-hsm`. Written in **Rust**.

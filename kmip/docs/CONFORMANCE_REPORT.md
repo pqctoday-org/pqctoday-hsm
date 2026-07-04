@@ -1,5 +1,10 @@
 # KMIP 3.0 Conformance Report
 
+> **Current as of v0.8.0.** The replay figures below are regenerated per run via
+> `../conformance/harness/dispatcher_replay.py` (`cargo test` in CI also gates
+> them); the dated stamps below are when the prose was last edited, not a ceiling
+> on validity.
+
 **Generated**: 2026-06-08 · **Updated**: 2026-06-10 (dispatcher replay results)
 **Subsystem**: `pqctoday-kmip` (`kmip/` crate)
 **Spec**: OASIS Key Management Interoperability Protocol v3.0 CSD01
