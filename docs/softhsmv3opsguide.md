@@ -1,71 +1,127 @@
 # Systems Operations & Integration Guide
 
-Welcome to the SoftHSMv3 Operations Guide. This document is intended for Systems Administrators, DevOps Engineers, and SREs looking to integrate `libsofthsm3.so` natively into third-party infrastructure components like OpenSSL, NGINX, strongSwan, or Hyperledger Besu.
+Welcome to the SoftHSMv3 Operations Guide. This document is for Systems
+Administrators, DevOps Engineers, and SREs who want to **integrate and test**
+the softhsmv3 PKCS#11 module (`libsofthsmv3.so` / `.dylib`) against third‑party
+infrastructure such as OpenSSL, NGINX, strongSwan, OpenSSH, or Java (JCA/JCE)
+applications.
 
-Because SoftHSMv3 was heavily modernized to support WebAssembly (WASM) and purely ephemeral cryptographic boundaries, its runtime architecture differs significantly from the legacy file-backed SoftHSMv2.
+> **Library name.** The PKCS#11 module is `libsofthsmv3` — `libsofthsmv3.so`
+> on Linux, `libsofthsmv3.dylib` on macOS, `libsofthsmv3.wasm` for the browser
+> build. (Do **not** use `libsofthsm2` or `libsofthsm3` — those names are
+> wrong.) The default install path is
+> `${libdir}/softhsm/libsofthsmv3${suffix}`.
+
+> **Configuration file.** For SoftHSMv2 compatibility the loader still reads the
+> `SOFTHSM2_CONF` environment variable. It points at a `softhsmv3.conf`
+> (installed by default to `${sysconfdir}/softhsmv3.conf`). All processes that
+> must share a token **must point `SOFTHSM2_CONF` at the same file** so they see
+> the same `directories.tokendir`.
 
 ---
 
-## 1. Critical Architectural Limitations
+## 1. Storage Architecture — where tokens actually live
 
-Before deploying SoftHSMv3 into a production pipeline, operators must understand the following structural shifts:
+softhsmv3 has two distinct storage worlds. Pick the right mental model for the
+build you are deploying.
 
-### A. Dual-Model Storage Architecture (RAM vs File-Backed)
+### A. Native build — persistent by default
 
-* **WASM / Default Native (Memory Model):** By default, the token vault exists **exclusively in RAM**. If the host process attached to `libsofthsm3.so` terminates, the vault and all cryptographic materials inside it are instantly destroyed.
-* **Persistent Native (File-Based Model):** You can compile the daemon utilizing `-DWITH_FILE_STORE=ON`. This natively attaches a persistent flat-file proxy mapped to `/var/lib/softhsm/tokens/` via `softhsm2.conf`. This behaves identically to SoftHSMv2, keeping Native Integration Testing parity intact and permanently saving CLI operations.
+For a native (`.so` / `.dylib`) build the token store is **persistent to disk
+by default**. Persistence is controlled by the `objectstore.backend` key in the
+config file, not by any build flag:
 
-### B. Stateful Signature Crash-Resilience
+| `objectstore.backend` | Backing store | Build requirement |
+|---|---|---|
+| `file` *(default)* | Flat‑file store under `directories.tokendir` (default `/var/lib/softhsmv3/tokens/`) | none — always available |
+| `db` | Single SQLite3 database (transactional, better for high‑concurrency native IT) | build with `-DWITH_OBJECTSTORE_BACKEND_DB=ON` |
 
-For systems deploying XMSS or LMS operations, SoftHSMv3 actively flushes the `CKA_HSS_KEYS_REMAINING` attribute natively to disk (if `WITH_FILE_STORE=ON` is active) immediately upon generating a signature. This ensures the remaining state limits strictly survive unpredicted daemon crashes and subsequent process restarts.
+A minimal `softhsmv3.conf`:
 
-### C. CLI Workflows Under the Memory Model
-
-If you compile SoftHSMv3 **without** the flat-file persistence logic flag, using standalone command-line executions to configure the HSM will not work:
-
-```bash
-# THIS WILL CREATE A TOKEN THAT IMMEDIATELY DIES:
-softhsm2-util --init-token --slot 0 --label "ProdToken"
-pkcs11-tool --module libsofthsm3.so --keypairgen ...
+```ini
+directories.tokendir = /var/lib/softhsmv3/tokens
+objectstore.backend  = file
+log.level            = INFO
 ```
 
-When `pkcs11-tool` or `softhsm2-util` exits, the RAM boundary dies. If NGINX subsequently loads `libsofthsm3.so`, it boots into a completely blank, empty vault.
+Because the native store is on disk, a token created with `softhsm2-util` /
+`pkcs11-tool` **survives process exit**. NGINX, strongSwan, or Besu started
+later — pointed at the same `SOFTHSM2_CONF` — will see the same keys. There is
+no "vault dies on exit" problem for native deployments.
+
+> There is **no `-DWITH_FILE_STORE=ON` flag** and **no `-DENABLE_MLKEM` /
+> `-DENABLE_MLDSA` flags** — PQC is always compiled in with the OpenSSL backend.
+> The only persistence‑related build flag is `-DWITH_OBJECTSTORE_BACKEND_DB=ON`,
+> which *adds* the optional SQLite backend; the flat‑file backend is always
+> built.
+
+### B. WASM build — RAM‑only
+
+The Emscripten/WASM build (`libsofthsmv3.wasm`, used for the in‑browser HSM)
+runs against an in‑memory filesystem: there is **no host disk**, so token
+material lives **exclusively in RAM** and is destroyed when the module is torn
+down, unless the embedding page wires an IndexedDB (or equivalent) persistence
+layer. The native `file` and `db` backends are compiled out of the WASM
+pipeline to keep the JS bundle small. The RAM‑lifetime concerns below apply to
+this build (and to any deliberately ephemeral native config), **not** to a
+standard on‑disk native deployment.
+
+### C. Stateful‑signature crash resilience (XMSS / LMS / HSS)
+
+For hash‑based stateful signatures, the `CKA_HSS_KEYS_REMAINING` counter is
+flushed to the object store immediately after each signature so the remaining
+one‑time‑key count survives a crash and never reuses a state — provided you are
+running a **persistent (native) backend**. Under the WASM/RAM model the counter
+is only as durable as the embedding page's persistence layer, so never drive
+production stateful signing from an ephemeral token.
 
 ---
 
-## 2. Daemonizing SoftHSMv3 via p11-kit
+## 2. Sharing one token across stateless processes (p11-kit)
 
-To use SoftHSMv3 with stateless third-party software (like a web server or short-lived scripts), you must wrap the library inside a dedicated, long-running daemon process. This daemon maps the RAM vault and serves it securely over a UNIX socket to your applications.
+For a **native, on‑disk** deployment you usually do **not** need a daemon: point
+every process at the same `SOFTHSM2_CONF` and they all read the same on‑disk
+token. Reach for `p11-kit` when you want a single mediated PKCS#11 endpoint —
+for example to serve a WASM/RAM token to multiple clients, to centralise access
+control, or to keep one long‑lived module instance.
 
 ### 2.1 Register the module with p11-kit
 
 Create `/etc/pkcs11/modules/softhsmv3.module`:
 
 ```ini
-module: /usr/local/lib/libsofthsm3.so
+module: /usr/local/lib/softhsm/libsofthsmv3.so
 managed: no
 ```
 
 ### 2.2 Start a persistent p11-kit server
 
 ```bash
-# Submit to a systemd service for production use
-p11-kit server --provider /usr/local/lib/libsofthsm3.so \
+# Wrap in a systemd service for production use
+p11-kit server --provider /usr/local/lib/softhsm/libsofthsmv3.so \
     --name "softhsmv3-daemon" \
-    pkcs11:
+    "pkcs11:"
 ```
 
 ### 2.3 Configure client processes
 
-The `p11-kit server` will emit a `PKCS11_MODULE_PATH` environment variable pointing to its socket bridge. Inject this variable into NGINX, OpenVPN, or OpenSSL. Those applications will now transparently talk to the daemon's persistent RAM boundary over IPC rather than spinning up empty local vaults.
+The `p11-kit server` prints a `P11_KIT_SERVER_ADDRESS` / `PKCS11_MODULE_PATH`
+pointing at its UNIX socket. Inject it into NGINX, OpenVPN, or OpenSSL and those
+applications talk to the shared module over IPC rather than loading their own
+copy.
 
 ---
 
 ## 3. OpenSSL 3.x Provider Integration
 
-SoftHSMv2 historically utilized `engine_pkcs11`, which is now strictly deprecated in OpenSSL 3.0+. SoftHSMv3 mandates **OpenSSL 3.6+** compliance, requiring the modern `pkcs11-provider` architecture.
+SoftHSMv2 historically used `engine_pkcs11`, which is deprecated in OpenSSL
+3.0+. softhsmv3 targets the modern **`pkcs11-provider`** architecture and
+enforces **OpenSSL ≥ 3.5** at build time.
 
-SoftHSMv3 vendors the [Latchset pkcs11-provider](https://github.com/latchset/pkcs11-provider) at `src/vendor/latchset/` with ML-KEM and ML-DSA support already integrated. Build and install it directly from the repo rather than pulling the upstream package.
+softhsmv3 vendors the [Latchset pkcs11-provider](https://github.com/latchset/pkcs11-provider)
+under `src/vendor/pkcs11-provider/` (sources also mirrored at
+`src/vendor/latchset/`) with ML‑KEM and ML‑DSA support already integrated.
+Build it from the repo rather than pulling the upstream package.
 
 ### 3.1 Build and install the vendored provider
 
@@ -76,16 +132,14 @@ ninja -C build
 ninja -C build install
 ```
 
-If OpenSSL is installed to a non-system prefix, override the module directory:
+If OpenSSL is installed to a non‑system prefix, override the module directory:
 
 ```bash
-meson setup build -Dopenssl_modulesdir=/opt/openssl-3.6/lib/ossl-modules
+meson setup build -Dopenssl_modulesdir=/opt/openssl-3.5/lib/ossl-modules
 ninja -C build install
 ```
 
 ### 3.2 Update `openssl.cnf`
-
-Add the provider to your global OpenSSL configuration:
 
 ```ini
 [provider_sect]
@@ -94,28 +148,31 @@ pkcs11  = pkcs11_sect
 
 [pkcs11_sect]
 module = /usr/lib64/ossl-modules/pkcs11.so
-pkcs11-module-path = /usr/local/lib/libsofthsm3.so
+pkcs11-module-path = /usr/local/lib/softhsm/libsofthsmv3.so
 ```
 
-### 3.3 PKCS#11 URIs
+### 3.3 Smoke test the provider
 
-Once the OpenSSL provider is active, all 3.x compatible utilities (like NGINX) can reference key material purely by URI:
-
-```text
-ssl_certificate_key "pkcs11:token=ProdToken;object=MyPQCKey;type=private;";
+```bash
+export SOFTHSM2_CONF=/etc/softhsmv3.conf
+# The provider should load and list softhsmv3 as a PKCS#11 store:
+openssl list -providers -provider pkcs11 -provider default
+# Reference a key purely by URI (e.g. in NGINX):
+#   ssl_certificate_key "pkcs11:token=ProdToken;object=MyPQCKey;type=private;";
 ```
 
 ---
 
 ## 4. StrongSwan IKEv2 Integration
 
-The `strongswan-pkcs11/` adapter enables ML-KEM-768 key exchange and ML-DSA signing inside IKEv2 sessions without patching strongSwan core.
+The `strongswan-pkcs11/` adapter enables ML‑KEM‑768 key exchange and ML‑DSA
+signing inside IKEv2 sessions.
 
 ### Prerequisites
 
 * strongSwan built with `--enable-pkcs11`
-* `libsofthsm3.so` accessible to the strongSwan process
-* Token initialized and keys pre-generated (or bootstrapped via the p11-kit daemon approach in §2)
+* `libsofthsmv3.so` accessible to the strongSwan process
+* A token initialized with keys pre‑generated, on a shared `SOFTHSM2_CONF`
 
 ### Configuration (`strongswan.conf`)
 
@@ -125,7 +182,7 @@ charon {
         pkcs11 {
             modules {
                 softhsmv3 {
-                    path = /usr/local/lib/libsofthsm3.so
+                    path = /usr/local/lib/softhsm/libsofthsmv3.so
                 }
             }
         }
@@ -135,15 +192,16 @@ charon {
 
 ### ML-KEM Key Exchange
 
-The adapter's `pkcs11_kem_t` uses `C_EncapsulateKey` / `C_DecapsulateKey` (PKCS#11 v3.2 §5.17) for the IKEv2 KE payload. The `token=` keyword in the PKCS#11 URI selects which softhsmv3 token slot to use. No additional configuration is required — the adapter resolves the ML-KEM mechanism automatically when the peer negotiates a PQC key exchange group.
+The adapter's `pkcs11_kem_t` uses `C_EncapsulateKey` / `C_DecapsulateKey`
+(PKCS#11 v3.2 §5.17) for the IKEv2 KE payload. The `token=` keyword in the
+PKCS#11 URI selects which softhsmv3 token slot to use; the ML‑KEM mechanism is
+resolved automatically when the peer negotiates a PQC key‑exchange group.
 
 ### ML-DSA Authentication
 
-Generate an ML-DSA key pair in softhsmv3 and reference it in the IKEv2 peer connection:
-
 ```bash
-# Generate ML-DSA-65 keypair inside softhsmv3
-pkcs11-tool --module /usr/local/lib/libsofthsm3.so \
+# Generate an ML-DSA-65 keypair inside softhsmv3
+pkcs11-tool --module /usr/local/lib/softhsm/libsofthsmv3.so \
     --keypairgen --key-type ML-DSA:65 \
     --id 01 --label "ike-mldsa-auth" --token-label "IKEv2Token"
 ```
@@ -153,7 +211,7 @@ pkcs11-tool --module /usr/local/lib/libsofthsm3.so \
 connections {
     peer {
         local {
-            auth = pubkey
+            auth  = pubkey
             certs = "pkcs11:token=IKEv2Token;id=01;type=cert"
         }
     }
@@ -164,34 +222,59 @@ connections {
 
 ## 5. Java JCE Integration (Hyperledger Besu / JCA Apps)
 
-The `JavaJCE/` module bridges standard JCA calls (`Signature`, `KeyAgreement`) to softhsmv3 PKCS#11 v3.2. This is required because the standard SunPKCS11 provider does not translate `"ML-DSA-65"` algorithm names to the `CKM_ML_DSA` (0x1d) mechanism constant without help.
+The `JavaJCE/` module bridges standard JCA calls (`Signature`, `KeyAgreement`)
+to softhsmv3 PKCS#11 v3.2, because the stock SunPKCS11 provider does not map
+`"ML-DSA-65"` to `CKM_ML_DSA` (0x1d) on its own. See
+`JavaJCE/JavaJCESofthsmv3.md` for the build and the exact provider class name.
 
 ### Deployment
-
-Compile and install the JAR inside the patched JRE environment (see `JavaJCE/JavaJCESofthsmv3.md` for the full Docker build sequence), then register the provider at startup:
 
 ```java
 Security.addProvider(new org.softhsmv3.jce.SoftHSMJCEProvider());
 ```
 
-After registration, all `Signature.getInstance("ML-DSA-65")` and `KeyAgreement.getInstance("ML-KEM-768")` calls transparently route through `libsofthsm3.so`. No application code changes are required beyond provider registration.
+After registration, `Signature.getInstance("ML-DSA-65")` and
+`KeyAgreement.getInstance("ML-KEM-768")` route through `libsofthsmv3.so`.
 
-### Key import for JCA
+### Key material for JCA
 
-Keys generated via `pkcs11-tool` against the softhsmv3 token are immediately visible to SunPKCS11 and therefore to the JCE layer:
+Keys generated via `pkcs11-tool` against the softhsmv3 token are visible to the
+JCE layer:
 
 ```bash
-pkcs11-tool --module /usr/local/lib/libsofthsm3.so \
+pkcs11-tool --module /usr/local/lib/softhsm/libsofthsmv3.so \
     --keypairgen --key-type ML-DSA:65 \
     --id 02 --label "besu-auth" --token-label "BesuToken"
 ```
 
 ---
 
-## 6. Workarounds for Key Import (Memory Model Only)
+## 6. KMIP server and other wrappers
 
-If you chose to ignore `WITH_FILE_STORE=ON`, because keys are lost on restart, Ops architectures currently demand a "bootstrapper" process:
+softhsmv3 also ships a full **KMIP 3.0 / crypto‑agility server** and several
+protocol wrappers. Their operational runbooks live with each component:
 
-1. The `p11-kit` server starts.
-2. A bootstrap script uses `pkcs11-tool` against the daemon socket to inject static keys or generate fresh keypairs.
-3. The dependent application (NGINX, Besu, strongSwan) is subsequently launched.
+| Component | Runbook |
+|---|---|
+| KMIP server + client (build, TLS/mTLS, create/encrypt/locate, policies) | `kmip/README.md`, `kmip/python-client/README.md` |
+| CACP compliance policy engine | `kmip/policies/README.md`, `kmip/cryptopolicy-manager/README.md` |
+| OpenSSH over PKCS#11 | `openssh-pkcs11/README.md` |
+| OpenPGP over PKCS#11 | `openpgp/README.md` (+ `openpgp/smoke-*/`) |
+| MLS provider | `openmls-provider/README.md` |
+| Rust engine (softhsmrustv3) conformance | `rust/README.md`, `rust/RUST_P11_V32_CONFORMANCE_REPORT.md` |
+
+---
+
+## 7. Ephemeral‑token workarounds (WASM / RAM model only)
+
+If you are deliberately running an ephemeral token (the WASM build, or a native
+config fronted by a RAM‑lifetime daemon), keys are lost when the module tears
+down. In that case bootstrap keys at start‑up:
+
+1. Start the `p11-kit` server (or load the WASM module).
+2. A bootstrap script uses `pkcs11-tool` against the endpoint to inject or
+   generate keypairs.
+3. Launch the dependent application (NGINX, Besu, strongSwan).
+
+For any durable native deployment, prefer the on‑disk `file` or `db` backend in
+§1.A instead — it removes the need for a bootstrapper entirely.

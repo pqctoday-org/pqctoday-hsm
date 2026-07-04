@@ -288,7 +288,12 @@ g++ -o pqc_validate tests/pqc_validate.cpp \
   ✓ SHA-256 Digest — NIST vector ("abc")
 
 ══ ml-kem-512-001 — ML-KEM-512 — encapsulate/decapsulate round-trip ══
-  ⊘ SKIP: CKR_MECHANISM_INVALID — not yet implemented
+  ✓ ML-KEM-512 encapsulate/decapsulate round-trip
+
+> **Note (v0.8.0):** ML-KEM, ML-DSA and SLH-DSA are now fully implemented and
+> pass on both engines. A `SKIP: not yet implemented` for any of these is no
+> longer expected — it now indicates a build/link problem or a regression, not
+> normal output. The phase tables in §7 are retained for historical context.
 
 ╔══ Summary ══╗
   Total:   70
@@ -369,6 +374,11 @@ SKIPs are expected and **do not count as failures** (exit code `0`).
 ---
 
 ## 7. Phase-by-Phase Expectations
+
+> **Current status (v0.8.0):** all phases below are complete. Classical, ML-DSA,
+> ML-KEM and SLH-DSA all **PASS** on both the C++ and Rust engines. The tables
+> are kept as a historical map of how the suite grew; today the expected result
+> is the bottom row (everything PASS). A PQC `SKIP` now signals a regression.
 
 ### p11test (CppUnit)
 

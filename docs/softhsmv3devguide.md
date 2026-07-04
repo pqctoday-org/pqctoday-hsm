@@ -34,7 +34,7 @@ major extensions:
 
 | Dimension | SoftHSM2 | softhsmv3 |
 | --- | --- | --- |
-| Crypto backend | OpenSSL 1.x / Botan | OpenSSL ≥ 3.6 only (EVP API exclusively — no ENGINE, no legacy provider) |
+| Crypto backend | OpenSSL 1.x / Botan | OpenSSL ≥ 3.5 only (EVP API exclusively — no ENGINE, no legacy provider) |
 | PKCS#11 version | 3.0 | **3.2 (CSD01, April 2025)** |
 | PQC algorithms | None | ML-KEM-512/768/1024, ML-DSA-44/65/87, SLH-DSA-SHA2/SHAKE × 4 variants × 3 security levels |
 | Build targets | Shared library | Shared library **+ Emscripten WASM** (`@pqctoday/softhsm-wasm` npm package) |
@@ -44,9 +44,9 @@ major extensions:
 - **Single compilation unit per feature area** — `SoftHSM_sign.cpp`, `SoftHSM_cipher.cpp`,
   `SoftHSM_keygen.cpp`, `SoftHSM_kem.cpp`, `SoftHSM_slots.cpp` each handle one concern.
   `SoftHSM.cpp` holds shared helpers (e.g. `acquireSessionTokenKey`).
-- **Dual-Model Storage Architecture**:
-  - **Memory Model:** The default `ObjectStore` lives purely in RAM. Token state does not survive a process exit or WASM compile. This is heavily optimized for zero-FS browser and serverless javascript sandbox execution.
-  - **File-Based Model:** You can compile `libsofthsm2.so` via `cmake` utilizing `-DWITH_FILE_STORE=ON`. This natively attaches a persistent flat-file proxy mapped to `/var/lib/softhsm/tokens/` via `softhsm2.conf`. This behaves identically to SoftHSMv2, keeping Native Integration Testing parity intact.
+- **Dual-Model Storage Architecture** (the module is `libsofthsmv3`, not `libsofthsm2`):
+  - **Native (persistent) model:** A native `.so`/`.dylib` build persists tokens to disk. The backend is chosen by `objectstore.backend` in the config file (pointed to by `SOFTHSM2_CONF`): `file` (default — a flat‑file store under `directories.tokendir`, default `/var/lib/softhsmv3/tokens/`) or `db` (SQLite, requires building with `-DWITH_OBJECTSTORE_BACKEND_DB=ON`). Token state survives process exit. There is no `-DWITH_FILE_STORE=ON` flag; the file backend is always built.
+  - **WASM (memory) model:** The Emscripten build runs on an in‑memory FS with no host disk, so token state lives purely in RAM and does not survive teardown unless the embedding page adds an IndexedDB persistence layer. This is optimized for zero‑FS browser and serverless sandbox execution.
 - **Single-threaded WASM target** — the Emscripten build has no SharedArrayBuffer worker pool.
   The native build is thread-safe.
 - **No ENGINE, no deprecated API** — every crypto operation goes through `EVP_PKEY_*` or
@@ -149,15 +149,14 @@ via `C_DeriveKey`. All use OpenSSL EVP KDF / `EVP_PKEY_CTX` APIs — no legacy p
 
   Key exhaustion: once all one-time signing slots are consumed, `C_Sign` returns
   `CKR_KEY_EXHAUSTED`. The remaining-use counter is tracked in `CKA_HSS_KEYS_REMAINING`
-  (`0x61c`). This attribute is **strictly persisted** across process boundaries directly to the flat-file backend whenever `-DWITH_FILE_STORE=ON` is enabled in native builds, successfully surviving system crashes. In memory-only environments (e.g. WASM without IndexedDB backing), state is destroyed on exit.
+  (`0x61c`). On a native build this attribute is **persisted** across process boundaries to the configured object store (`file` or `db` backend), so the remaining‑use count survives a crash. In memory-only environments (e.g. WASM without IndexedDB backing), state is destroyed on exit — never drive production stateful signing from an ephemeral token.
 
 - **Single-threaded WASM build.** The Emscripten target does not use a SharedArrayBuffer worker
   pool. Crypto-intensive operations (especially SLH-DSA-SHA2-256s key generation and signing)
   may block the main thread for several seconds on constrained hardware.
 
-- **Non-persistent token (Memory Model).** When compiling without `-DWITH_FILE_STORE=ON`, all token state (objects, PIN, label) lives strictly in RAM. Reloading the
-  WASM module or restarting the native process loses all objects. Callers that need persistence under the Memory Model
-  must serialize objects with `C_GetAttributeValue(CKA_VALUE)` and re-import on next session.
+- **Non-persistent token (WASM memory model).** In the WASM build all token state (objects, PIN, label) lives strictly in RAM, so reloading the
+  module loses all objects. Callers that need persistence in the browser must serialize objects with `C_GetAttributeValue(CKA_VALUE)` and re-import on next session, or wire an IndexedDB backing store. (Native builds persist automatically via the `file`/`db` object store.)
 
 - **`C_CopyObject`, `C_CreateObject` for PQC keys are partially supported.** Importing raw PQC
   key material via `C_CreateObject` works for AES and RSA; PQC import is not yet implemented.
@@ -183,30 +182,33 @@ export OPENSSL_ROOT_DIR=$(brew --prefix openssl@3)
 
 **Linux (Debian/Ubuntu):**
 ```bash
-# OpenSSL 3.6 must be built from source if your distro ships an older version.
+# OpenSSL 3.5+ must be built from source if your distro ships an older version.
 sudo apt-get install build-essential cmake
 ```
 
 ### 4.2 Native build
 
 ```bash
-# From the softhsmv3 repository root:
+# From the softhsmv3 repository root.
+# PQC (ML-KEM/ML-DSA/SLH-DSA) is always compiled in with the openssl backend —
+# there are no -DENABLE_MLKEM / -DENABLE_MLDSA flags. Add -DBUILD_TESTS=ON to
+# build p11test, and -DWITH_OBJECTSTORE_BACKEND_DB=ON for the SQLite backend.
 cmake -B build \
     -DCMAKE_BUILD_TYPE=Release \
     -DWITH_CRYPTO_BACKEND=openssl \
-    -DENABLE_MLKEM=ON \
-    -DENABLE_MLDSA=ON \
+    -DBUILD_TESTS=ON \
     -DOPENSSL_ROOT_DIR="$OPENSSL_ROOT_DIR"   # macOS only
 
 cmake --build build -j$(nproc 2>/dev/null || sysctl -n hw.logicalcpu)
 ```
 
-The shared library is produced at `build/src/lib/libsofthsm2.so` (Linux) or
-`build/src/lib/libsofthsm2.dylib` (macOS).
+The shared library is produced at `build/src/lib/libsofthsmv3.so` (Linux) or
+`build/src/lib/libsofthsmv3.dylib` (macOS).
 
 ### 4.3 Running the test suite
 
 ```bash
+# Requires the -DBUILD_TESTS=ON from §4.2 (p11test is off by default)
 cmake --build build --target p11test
 ./build/src/lib/test/p11test
 ```
@@ -217,14 +219,12 @@ See `docs/howtotestsofthsmv3.md` for the full testing workflow including the
 ### 4.4 WASM build
 
 ```bash
-# Requires Emscripten SDK and OpenSSL 3.6 cross-compiled for wasm32
+# Requires Emscripten SDK and OpenSSL 3.5+ cross-compiled for wasm32
 source /path/to/emsdk/emsdk_env.sh
 
 cmake -B build-wasm \
     -DCMAKE_TOOLCHAIN_FILE="$EMSDK/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake" \
-    -DWITH_CRYPTO_BACKEND=openssl \
-    -DENABLE_MLKEM=ON \
-    -DENABLE_MLDSA=ON
+    -DWITH_CRYPTO_BACKEND=openssl
 
 emmake cmake --build build-wasm -j$(nproc 2>/dev/null || sysctl -n hw.logicalcpu)
 ```
@@ -255,7 +255,7 @@ softhsmv3 is a standard PKCS#11 shared library. Load it with `dlopen` and resolv
 
 int main() {
     /* Load the shared library */
-    void* lib = dlopen("./libsofthsm2.so", RTLD_LAZY);
+    void* lib = dlopen("./libsofthsmv3.so", RTLD_LAZY);
     assert(lib && "dlopen failed");
 
     /* Resolve C_GetFunctionList */
@@ -833,7 +833,7 @@ MLDSASignatureSpi (JavaJCE/src/…/MLDSASignatureSpi.java)
 SunPKCS11 (patched JNI — accepts 0x1c/0x1d PKCS#11 v3.2 constants)
     │ C_SignInit / C_Sign
     ▼
-libsofthsm3.so
+libsofthsmv3.so
 ```
 
 ### 8.2 Registration
