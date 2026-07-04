@@ -128,16 +128,26 @@ impl PolicyStore {
     }
 
     /// Parse + validate a draft YAML string without touching the disk.
-    /// The Hub UI uses this on every keystroke for live syntax checking.
+    /// The Hub UI uses this on every keystroke for live syntax checking, so it
+    /// is lenient (unknown allowlist algorithm names surface as warnings, not
+    /// errors — don't red-flag a half-typed name).
     pub fn validate_draft(&self, yaml: &str) -> Result<LoadedPolicy, StoreError> {
         Ok(load_from_str(yaml, Path::new("<draft>"))?)
+    }
+
+    /// Strict validate — the authoring-time gate used before a policy is
+    /// persisted or activated (WP2.1). Unknown allowlist algorithm names are
+    /// hard errors here so a typo can never reach production.
+    pub fn validate_draft_strict(&self, yaml: &str) -> Result<LoadedPolicy, StoreError> {
+        Ok(super::loader::load_from_str_strict(yaml, Path::new("<draft>"))?)
     }
 
     /// Save a (presumably already-validated) draft to disk under `name`.
     /// Atomic on POSIX: writes to a tempfile, then renames.
     pub fn save(&self, name: &str, yaml: &str) -> Result<(), StoreError> {
-        // Validate before touching the disk — never write garbage.
-        let _ = self.validate_draft(yaml)?;
+        // Validate STRICTLY before touching the disk — never persist a policy
+        // with a typo'd algorithm/mechanism name that would silently misfire.
+        let _ = self.validate_draft_strict(yaml)?;
         let target = self.path_for(name)?;
         let tmp = target.with_extension("yaml.tmp");
         std::fs::write(&tmp, yaml).map_err(|source| StoreError::Io {

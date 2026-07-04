@@ -19,6 +19,7 @@ pub mod kmip30;
 pub mod dispatcher;
 pub mod ops;
 pub mod store;
+pub mod hybrid_kem;
 pub mod server;
 
 // Cross-plane infrastructure

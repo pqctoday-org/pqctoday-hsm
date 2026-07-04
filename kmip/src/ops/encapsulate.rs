@@ -60,14 +60,16 @@ pub fn encapsulate(
         fail_err(deps, correlation_id, "Encapsulate", KmipError::object_not_found(&req.uid))
     })?;
 
-    if !is_ml_kem(obj.algorithm) {
+    // K6 — Encapsulate accepts ML-KEM and the hybrid KEMs (X25519MLKEM768 /
+    // SecP256r1MLKEM768).
+    if !is_ml_kem(obj.algorithm) && !obj.algorithm.is_hybrid_kem() {
         return Err(fail_err(
             deps,
             correlation_id,
             "Encapsulate",
             KmipError::failed(
                 ResultReason::OperationNotSupported,
-                format!("Encapsulate requires an ML-KEM key; {:?} is not", obj.algorithm),
+                format!("Encapsulate requires an ML-KEM or hybrid KEM key; {:?} is not", obj.algorithm),
             ),
         ));
     }
@@ -96,14 +98,15 @@ pub fn encapsulate(
     // p1 `PolicyDecided` audit event and enforces allow / deny. Without this,
     // KEM ops were a blind spot in the crypto-agility layer.
     let started = OffsetDateTime::now_utc();
-    let empty: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-    let stored_algo = super::helpers::canonical_name(obj.algorithm);
+    // Y1 — stored classification tag off the KEM key.
+    let stored_attrs = super::helpers::strip_x_prefixes(&obj.custom_attributes);
+    let stored_algo = super::helpers::qualified_name(obj.algorithm, obj.cryptographic_length);
     let mut p_req = crate::policy::PolicyRequest::minimal(
         "Encapsulate",
         Some(&stored_algo),
         started,
         correlation_id,
-        &empty,
+        &stored_attrs,
     );
     p_req.usage_mask = Some(obj.usage_mask);
     p_req.state = Some("Active");
@@ -131,6 +134,30 @@ pub fn encapsulate(
                 ),
             ));
         }
+    }
+
+    // K6 — hybrid KEM: compose ML-KEM-768 + classical ECDH in-process against
+    // the stored composite PUBLIC key material (no engine handle). The combined
+    // shared secret is stored as a SecretData object like the ML-KEM path.
+    if let Some(hybrid) = obj.algorithm.hybrid_kem() {
+        let public = obj.key_material.as_deref().ok_or_else(|| {
+            KmipError::failed(
+                ResultReason::CryptographicFailure,
+                "hybrid KEM public key has no stored material".to_string(),
+            )
+        })?;
+        let enc = crate::hybrid_kem::encapsulate(hybrid, public).map_err(|e| {
+            fail_err(
+                deps,
+                correlation_id,
+                "Encapsulate",
+                KmipError::failed(ResultReason::CryptographicFailure, e),
+            )
+        })?;
+        emit_pkcs11(deps, correlation_id, "soft::hybrid_kem_encapsulate", None, 0, "CKR_OK");
+        let ss_uid = store_shared_secret(deps, obj.algorithm, enc.shared_secret)?;
+        emit_success(deps, correlation_id, "Encapsulate");
+        return Ok(EncapsulateResponse { uid: ss_uid, data: enc.ciphertext });
     }
 
     let mech = obj.algorithm.to_pkcs11_mech(PkcsOp::Encrypt).ok_or_else(|| {

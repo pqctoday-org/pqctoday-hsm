@@ -14,13 +14,13 @@
 //! encrypt, decrypt, sign, signature_verify
 //! ```
 //!
-//! KMIP 3.0 does NOT add separate `Encapsulate` / `Decapsulate` ops — ML-KEM
-//! encapsulation reuses `Encrypt`; ML-KEM decapsulation reuses `Decrypt`.
-//! The op handler branches on `key.algorithm` to dispatch to the right
-//! PKCS#11 mech (see `algos::KmipAlgorithm::to_pkcs11_mech`).
-//!
-//! Phase-3 deliverable: struct skeletons + serde-friendly fields. Phase 5
-//! wires them into the dispatcher and op handlers.
+//! KMIP 3.0 WD19 (PQC Updates) DOES add native `Encapsulate` (0x41) /
+//! `Decapsulate` (0x42) ops, and this server implements them (see the
+//! Encapsulate/Decapsulate structs below and `ops::encapsulate` /
+//! `ops::decapsulate`). For backward compatibility with pre-WD19 clients the
+//! ML-KEM flow ALSO rides `Encrypt`/`Decrypt` (the handler branches on
+//! `key.algorithm`; the shared secret is returned under the
+//! `PQCToday-SharedSecret` vendor tag — see `docs/CONFORMANCE_REPORT.md`).
 
 use super::algos::KmipAlgorithm;
 use super::attrs::{Attribute, ObjectType, RevocationReason, State};
@@ -766,6 +766,24 @@ pub struct SignRequest {
 pub struct SignResponse {
     pub uid: String,
     pub signature: Vec<u8>,
+    /// Set when the active policy triggered a transparent crypto-agility
+    /// rekey (`Decision::RekeyAndProceed`) during this Sign — i.e. `uid`
+    /// above is the freshly-minted replacement key, not the one the caller
+    /// asked for. Lets the dispatcher's §9.5 Undo wave find and delete both
+    /// halves of the new key pair on rollback. `None` on the ordinary
+    /// (no-rekey) path. Internal-only: never encoded onto the wire (see
+    /// `wire.rs::encode_sign_resp`, which reads only `uid` + `signature`).
+    pub rekeyed: Option<SignRekeyInfo>,
+}
+
+/// See [`SignResponse::rekeyed`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct SignRekeyInfo {
+    /// The original key's UID — now Deactivated + superseded.
+    pub old_uid: String,
+    /// The new key pair's private-key UID (same value as `SignResponse::uid`).
+    pub new_private_key_uid: String,
+    pub new_public_key_uid: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]

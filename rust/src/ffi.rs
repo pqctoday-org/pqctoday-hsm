@@ -912,6 +912,33 @@ mod mechanism_table_tests {
         );
     }
 
+    /// P1 — the GENERIC pre-hash sign mechanisms must NOT be advertised while
+    /// their sign path is unimplemented (advertise-and-fail is worse than
+    /// not-advertising for a conformant client). The hash-SPECIFIC variants,
+    /// which are implemented, MUST be advertised so the capability is reachable.
+    #[test]
+    fn p1_generic_hash_sign_mechs_not_advertised_specific_are() {
+        assert!(
+            !SUPPORTED_MECHS.contains(&CKM_HASH_ML_DSA),
+            "generic CKM_HASH_ML_DSA (0x1F) is advertise-and-fail — must stay unadvertised until the \
+             CK_HASH_SIGN_ADDITIONAL_CONTEXT.hash param is parsed"
+        );
+        assert!(
+            !SUPPORTED_MECHS.contains(&CKM_HASH_SLH_DSA),
+            "generic CKM_HASH_SLH_DSA (0x34) is advertise-and-fail — must stay unadvertised"
+        );
+        // The hash-specific variants (which the sign path DOES implement) remain
+        // advertised so pre-hash ML-DSA / SLH-DSA is still reachable.
+        for m in [
+            CKM_HASH_ML_DSA_SHA256,
+            CKM_HASH_ML_DSA_SHA512,
+            CKM_HASH_SLH_DSA_SHA256,
+            CKM_HASH_SLH_DSA_SHA512,
+        ] {
+            assert!(SUPPORTED_MECHS.contains(&m), "hash-specific mech {m:#06x} must stay advertised");
+        }
+    }
+
     /// S6 — the four RSA hash-variant mechanisms are advertised at
     /// (2048, 4096) with CKF_SIGN | CKF_VERIFY.
     #[test]
@@ -1233,7 +1260,7 @@ pub fn C_GenerateKeyPair(
                 // CKA_SEED (sensitive-material class). CKA_SEED is an attribute
                 // of the private key; the public template is honored as a
                 // fallback rather than silently ignoring an explicit seed.
-                let seed = get_attr_bytes(
+                let mut seed = get_attr_bytes(
                     p_private_key_template,
                     ul_private_key_attribute_count,
                     CKA_SEED,
@@ -1246,16 +1273,22 @@ pub fn C_GenerateKeyPair(
                         return CKR_ATTRIBUTE_VALUE_INVALID;
                     }
                 }
+                // P5 (PKCS#11 v3.2 §6.68.4 / FIPS 203): keygen CONTRIBUTES CKA_SEED
+                // (d ‖ z) to the private key. On the random path, sample the
+                // 64-byte seed explicitly and expand it deterministically —
+                // functionally identical to generate() but the seed is retained.
+                if seed.is_none() {
+                    use rand::RngCore;
+                    let mut dz = [0u8; 64];
+                    rand::rngs::OsRng.fill_bytes(&mut dz);
+                    seed = Some(dz.to_vec());
+                }
                 macro_rules! mlkem_gen {
                     ($t:ty) => {{
-                        let (dk, ek) = match seed.as_deref() {
-                            Some(s) => {
-                                let d = ml_kem::B32::try_from(&s[..32]).expect("length checked");
-                                let z = ml_kem::B32::try_from(&s[32..64]).expect("length checked");
-                                <$t>::generate_deterministic(&d, &z)
-                            }
-                            None => with_rng!(rng, { <$t>::generate(&mut rng) }),
-                        };
+                        let s = seed.as_deref().expect("seed set above");
+                        let d = ml_kem::B32::try_from(&s[..32]).expect("length checked");
+                        let z = ml_kem::B32::try_from(&s[32..64]).expect("length checked");
+                        let (dk, ek) = <$t>::generate_deterministic(&d, &z);
                         pub_attrs.insert(CKA_VALUE, ek.as_bytes().as_slice().to_vec());
                         prv_attrs.insert(CKA_VALUE, dk.as_bytes().as_slice().to_vec());
                     }};
@@ -1365,7 +1398,7 @@ pub fn C_GenerateKeyPair(
                 // `KeyGen::keygen_from_seed`). Read explicitly —
                 // `absorb_template_attrs` skips CKA_SEED (sensitive-material
                 // class). Private-key attribute; public template is a fallback.
-                let seed = get_attr_bytes(
+                let mut seed = get_attr_bytes(
                     p_private_key_template,
                     ul_private_key_attribute_count,
                     CKA_SEED,
@@ -1378,29 +1411,27 @@ pub fn C_GenerateKeyPair(
                         return CKR_ATTRIBUTE_VALUE_INVALID;
                     }
                 }
+                // P5 (PKCS#11 v3.2 §6.67.4 / FIPS 204): key generation CONTRIBUTES
+                // CKA_SEED to the new private key. On the random path (no caller
+                // seed) generate the 32-byte ξ explicitly and expand it via
+                // keygen_from_seed — functionally identical to try_keygen_with_rng
+                // (FIPS 204 KeyGen samples ξ then expands) but the seed is now
+                // retained so the private key carries CKA_SEED (stored below,
+                // sensitive/non-extractable) and can be backed up / re-derived.
+                if seed.is_none() {
+                    use rand::RngCore;
+                    let mut xi = [0u8; 32];
+                    rand::rngs::OsRng.fill_bytes(&mut xi);
+                    seed = Some(xi.to_vec());
+                }
                 macro_rules! mldsa_gen {
                     ($m:ident) => {{
                         use fips204::traits::{KeyGen, SerDes};
-                        match seed.as_deref() {
-                            Some(s) => {
-                                let xi: &[u8; 32] = s.try_into().expect("length checked");
-                                let (vk, sk) = fips204::$m::KG::keygen_from_seed(xi);
-                                pub_attrs.insert(CKA_VALUE, SerDes::into_bytes(vk).to_vec());
-                                prv_attrs.insert(CKA_VALUE, SerDes::into_bytes(sk).to_vec());
-                            }
-                            None => {
-                                let mut rng = rand::rngs::OsRng;
-                                match fips204::$m::try_keygen_with_rng(&mut rng) {
-                                    Ok((vk, sk)) => {
-                                        pub_attrs
-                                            .insert(CKA_VALUE, SerDes::into_bytes(vk).to_vec());
-                                        prv_attrs
-                                            .insert(CKA_VALUE, SerDes::into_bytes(sk).to_vec());
-                                    }
-                                    Err(_) => return CKR_FUNCTION_FAILED,
-                                }
-                            }
-                        }
+                        let s = seed.as_deref().expect("seed set above");
+                        let xi: &[u8; 32] = s.try_into().expect("length checked");
+                        let (vk, sk) = fips204::$m::KG::keygen_from_seed(xi);
+                        pub_attrs.insert(CKA_VALUE, SerDes::into_bytes(vk).to_vec());
+                        prv_attrs.insert(CKA_VALUE, SerDes::into_bytes(sk).to_vec());
                     }};
                 }
                 match ps {
@@ -2134,11 +2165,24 @@ pub fn C_GenerateKeyPair(
                     param_code = *p_param_ptr;
                 }
 
+                // P4 — the parameter set is carried in the STANDARD
+                // CKA_PARAMETER_SET (0x61d, PKCS#11 v3.2 Table 273); accept the
+                // legacy vendor CKA_XMSS_PARAM_SET and the mechanism-parameter
+                // word as fallbacks. Previously only the vendor attr + mech word
+                // were read, so a conformant client's CKA_PARAMETER_SET was
+                // ignored (inconsistent with XMSSMT above).
                 let mut xmss_param = get_attr_ulong(
                     p_public_key_template,
                     ul_public_key_attribute_count,
-                    CKA_XMSS_PARAM_SET,
+                    CKA_PARAMETER_SET,
                 )
+                .or_else(|| {
+                    get_attr_ulong(
+                        p_public_key_template,
+                        ul_public_key_attribute_count,
+                        CKA_XMSS_PARAM_SET,
+                    )
+                })
                 .unwrap_or(param_code);
 
                 if xmss_param == 0 {
@@ -2160,6 +2204,10 @@ pub fn C_GenerateKeyPair(
                 // the raw param_code. xmss_sign / xmss_verify read this attr
                 // and dispatch on it; a stored 0 falls into the catch-all
                 // `_ => Err(CKR_FUNCTION_FAILED)` arm and breaks every sign.
+                // P4 — expose the param set under the STANDARD CKA_PARAMETER_SET
+                // (what a conformant client reads back) as well as the legacy
+                // vendor attr the sign/verify path dispatches on.
+                store_ulong(&mut pub_attrs, CKA_PARAMETER_SET, xmss_param);
                 store_ulong(&mut pub_attrs, CKA_XMSS_PARAM_SET, xmss_param);
                 store_ulong(&mut pub_attrs, CKA_KEY_GEN_MECHANISM, CKM_XMSS_KEY_PAIR_GEN);
                 store_bool(&mut pub_attrs, CKA_TOKEN, false);
@@ -2171,6 +2219,7 @@ pub fn C_GenerateKeyPair(
                 // Private key attributes
                 store_ulong(&mut prv_attrs, CKA_CLASS, CKO_PRIVATE_KEY);
                 store_ulong(&mut prv_attrs, CKA_KEY_TYPE, CKK_XMSS);
+                store_ulong(&mut prv_attrs, CKA_PARAMETER_SET, xmss_param);
                 store_ulong(&mut prv_attrs, CKA_XMSS_PARAM_SET, xmss_param);
                 store_ulong(&mut prv_attrs, CKA_KEY_GEN_MECHANISM, CKM_XMSS_KEY_PAIR_GEN);
                 store_bool(&mut prv_attrs, CKA_TOKEN, false);

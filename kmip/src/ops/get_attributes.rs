@@ -233,11 +233,13 @@ fn attributes_from_record(r: &ObjectRecord) -> Vec<Attribute> {
         out.push(Attribute::Custom { name: name.clone(), value: value.clone() });
     }
 
-    // KMIP `Object Group` (0x420056) — multi-instance: emit one
-    // attribute per group membership so GetAttributes round-trips the
-    // full set. Empty list → nothing emitted.
+    // K3 — group membership is emitted as `Group Link` (0x4201b3, a Name
+    // Reference), the STRICT KMIP 3.0 representation (§7.24 Table 485: the
+    // Object Groups structure is a list of Group Link references). The
+    // singular `Object Group` tag (0x420056) is RESERVED in KMIP 3.0 and is
+    // never emitted. Multi-instance: one attribute per membership; empty → none.
     for g in &r.object_groups {
-        out.push(Attribute::ObjectGroup(g.clone()));
+        out.push(Attribute::GroupLink(g.clone()));
     }
 
     // KMIP 3.0 §11 + Profiles v3.0 §4.1.1 item 10 — `Digest` is the

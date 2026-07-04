@@ -350,16 +350,18 @@ fn object_group_create_into_group_then_locate_by_group_in_one_session() {
     .uids;
     assert!(none.is_empty(), "Locate by an unknown group returns nothing");
 
-    // GetAttributes surfaces the membership back to the client.
+    // GetAttributes surfaces the membership back to the client as the STRICT
+    // KMIP 3.0 `Group Link` (0x4201b3) — the reserved 2.x `Object Group`
+    // (0x420056) is accepted on input above (compat) but never emitted (K3).
     let ga = get_attributes(
         &deps,
-        GetAttributesRequest { uid: a.clone(), attribute_references: vec!["ObjectGroup".into()] },
+        GetAttributesRequest { uid: a.clone(), attribute_references: vec!["GroupLink".into()] },
         "og-ga",
     )
     .unwrap();
     assert!(
-        ga.attributes.iter().any(|x| matches!(x, Attribute::ObjectGroup(g) if g == "G1")),
-        "GetAttributes round-trips the Object Group membership"
+        ga.attributes.iter().any(|x| matches!(x, Attribute::GroupLink(g) if g == "G1")),
+        "GetAttributes round-trips group membership as the 3.0 Group Link attribute"
     );
 
     let _ = softhsmrustv3::native::session::finalize();

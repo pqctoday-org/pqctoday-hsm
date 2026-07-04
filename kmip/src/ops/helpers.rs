@@ -270,6 +270,8 @@ pub fn canonical_name(a: KmipAlgorithm) -> String {
         SlhDsaShake192f => "SLH-DSA-SHAKE-192f",
         SlhDsaShake256s => "SLH-DSA-SHAKE-256s",
         SlhDsaShake256f => "SLH-DSA-SHAKE-256f",
+        X25519MlKem768 => "X25519MLKEM768",
+        SecP256r1MlKem768 => "SecP256r1MLKEM768",
     }
     .into()
 }
@@ -304,6 +306,86 @@ fn ec_curve_bits(length: u32) -> u32 {
         512 | 521 => 521,
         _ => 256,
     }
+}
+
+/// Curve/size-qualify a *bare* canonical algorithm STRING for policy
+/// evaluation (Y3). The string counterpart to [`qualified_name`], used at the
+/// Create / CreateKeyPair / Encrypt / Decrypt / MAC gates where the handler
+/// has the coarse algorithm name (from the request template) plus its length,
+/// but not a resolved [`KmipAlgorithm`] + record yet.
+///
+/// Before this fix those gates passed bare `"AES"`/`"RSA"`/`"ECDSA"`/`"ECDH"`,
+/// so a policy allowlist entry `AES-256` (or denylist `AES-128`) never matched
+/// and the rule was dead — simultaneously bricking `AES` Create (bare `AES` ∉
+/// an `AES-256`-only allowlist) and letting `AES-128` through. Qualifying the
+/// request means [`super::super::policy::rule::algo_matches`] can compare a
+/// specific request against family-or-specific policy entries consistently.
+///
+/// PQC + hash-based + MAC names are already fully qualified upstream
+/// (`canonical_name`), so they pass through unchanged. `None` length falls back
+/// to the family default (AES-256 / RSA-2048 / P-256) — the same defaults
+/// [`qualified_name`] uses.
+pub fn qualify_algorithm_str(name: &str, key_length: Option<u32>) -> String {
+    match name {
+        "AES" => format!("AES-{}", key_length.filter(|&l| l != 0).unwrap_or(256)),
+        "RSA" => format!("RSA-{}", key_length.filter(|&l| l != 0).unwrap_or(2048)),
+        "ECDSA" => format!("ECDSA-P{}", ec_curve_bits(key_length.unwrap_or(256))),
+        "ECDH" => format!("ECDH-P{}", ec_curve_bits(key_length.unwrap_or(256))),
+        _ => name.to_string(),
+    }
+}
+
+/// Extract the KMIP custom/vendor attributes attached to a request into the
+/// `{ bare_name → value }` map the policy engine consults (Y1).
+///
+/// KMIP carries policy-relevant classification tags as `x-`-prefixed Custom
+/// attributes (e.g. `x-pqctoday-cnsa-classification`). The policy engine keys
+/// on the bare name without the `x-` prefix (see
+/// [`super::super::policy::request::PolicyRequest::custom_attrs`]); a
+/// case-insensitive `x-` prefix is stripped here so a rule's
+/// `attribute_name: pqctoday-cnsa-classification` matches. Non-`x-` custom
+/// attributes are passed through verbatim.
+///
+/// Before this fix every op handler passed an empty map, so
+/// `require_custom_attribute` (and the `exception_/triggered_by_custom_attribute`
+/// escape/trigger hatches) could never see an attribute and permanently denied
+/// their listed algorithms.
+pub fn custom_attrs_from(attrs: &[crate::kmip30::Attribute]) -> std::collections::HashMap<String, String> {
+    strip_x_prefixes(&raw_custom_attrs(attrs))
+}
+
+/// Collect the request's Custom attributes preserving their original (usually
+/// `x-`-prefixed) names, for *persistence* onto the managed object. Register
+/// stores attributes in this form so GetAttributes round-trips them verbatim
+/// (BL-M-14); CreateKeyPair now does the same (Y1) so use-time policy gates can
+/// read the classification back off the stored key.
+pub fn raw_custom_attrs(attrs: &[crate::kmip30::Attribute]) -> std::collections::HashMap<String, String> {
+    use crate::kmip30::Attribute;
+    let mut m = std::collections::HashMap::new();
+    for a in attrs {
+        if let Attribute::Custom { name, value } = a {
+            m.insert(name.clone(), value.clone());
+        }
+    }
+    m
+}
+
+/// Normalise a stored custom-attribute map (whose keys keep the `x-` prefix) to
+/// the bare-name form the policy engine keys on (Y1). Used at use-time ops
+/// (Sign / Encrypt / …) where the attributes come off the stored object, not
+/// the request.
+pub fn strip_x_prefixes(
+    raw: &std::collections::HashMap<String, String>,
+) -> std::collections::HashMap<String, String> {
+    raw.iter()
+        .map(|(k, v)| {
+            let bare = k
+                .strip_prefix("x-")
+                .or_else(|| k.strip_prefix("X-"))
+                .unwrap_or(k);
+            (bare.to_string(), v.clone())
+        })
+        .collect()
 }
 
 /// State name string for the engine's `state` field — mirrors KMIP 3.0

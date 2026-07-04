@@ -71,7 +71,7 @@ pub use ops::{
     SetAttributeRequest, SetAttributeResponse,
     SignatureValidity,
     SignatureVerifyRequest, SignatureVerifyResponse,
-    SignRequest, SignResponse,
+    SignRekeyInfo, SignRequest, SignResponse,
     ValidateRequest, ValidateResponse,
     // P2.3 — Certify (§6.1.6) / Re-certify (§6.1.50).
     CertificateRequestType,

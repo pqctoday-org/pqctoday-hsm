@@ -38,7 +38,7 @@ use crate::store::ObjectRecord;
 
 use super::deps::Deps;
 use super::helpers::{
-    canonical_name, emit_pkcs11, emit_pkcs11_result, emit_request, emit_success, fail_err,
+    emit_pkcs11, emit_pkcs11_result, emit_request, emit_success, fail_err,
     state_name,
 };
 
@@ -232,9 +232,10 @@ fn require_active(obj: &ObjectRecord, _op: &'static str) -> Result<()> {
 }
 
 fn policy_gate(deps: &Deps, obj: &ObjectRecord, op: &'static str, started: OffsetDateTime, correlation_id: &str) -> Result<()> {
-    let empty: HashMap<String, String> = HashMap::new();
-    let algo = canonical_name(obj.algorithm);
-    let mut p_req = PolicyRequest::minimal(op, Some(&algo), started, correlation_id, &empty);
+    // Y1 stored classification; Y3 qualified name (HMAC names already qualified).
+    let stored_attrs = super::helpers::strip_x_prefixes(&obj.custom_attributes);
+    let algo = super::helpers::qualified_name(obj.algorithm, obj.cryptographic_length);
+    let mut p_req = PolicyRequest::minimal(op, Some(&algo), started, correlation_id, &stored_attrs);
     p_req.state = Some(state_name(obj.state));
     p_req.target_uid = Some(&obj.uid);
     if let Decision::Deny { human, .. } = deps.engine.evaluate(&p_req) {

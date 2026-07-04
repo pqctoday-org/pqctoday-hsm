@@ -345,13 +345,10 @@ export interface SoftHSMModule {
     ulDataLen: number,
     pbIsLast: number,
   ): number
-  _C_MessageSignFinal(
-    hSession: number,
-    pParam: number,
-    ulParamLen: number,
-    pSig: number,
-    pulSigLen: number,
-  ): number
+  // PKCS#11 v3.2 C_MessageSignFinal(hSession) — takes ONLY the session handle
+  // (matches pkcs11f.h:1138 and rust/src/ffi.rs:3766). The prior 5-arg
+  // declaration was wrong and would re-import a bad ABI on the next vendor sync.
+  _C_MessageSignFinal(hSession: number): number
   _C_MessageVerifyInit(hSession: number, pMechanism: number, hKey: number): number
   _C_VerifyMessage(
     hSession: number,

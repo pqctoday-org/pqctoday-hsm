@@ -58,7 +58,7 @@ use crate::store::ObjectRecord;
 
 use super::deps::Deps;
 use super::helpers::{
-    canonical_name, emit_pkcs11, emit_pkcs11_result, emit_request, emit_success, fail_err,
+    emit_pkcs11, emit_pkcs11_result, emit_request, emit_success, fail_err,
     state_name,
 };
 
@@ -130,10 +130,10 @@ pub fn derive_key(
 
     // Plane-1 policy gate against the primary base object.
     {
-        let empty: HashMap<String, String> = HashMap::new();
-        let algo = canonical_name(bases[0].algorithm);
+        let stored_attrs = super::helpers::strip_x_prefixes(&bases[0].custom_attributes);
+        let algo = super::helpers::qualified_name(bases[0].algorithm, bases[0].cryptographic_length);
         let mut p_req =
-            PolicyRequest::minimal("DeriveKey", Some(&algo), started, correlation_id, &empty);
+            PolicyRequest::minimal("DeriveKey", Some(&algo), started, correlation_id, &stored_attrs);
         p_req.state = Some(state_name(bases[0].state));
         p_req.target_uid = Some(&bases[0].uid);
         if let Decision::Deny { human, .. } = deps.engine.evaluate(&p_req) {

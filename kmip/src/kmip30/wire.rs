@@ -224,12 +224,14 @@ pub(crate) mod tags {
     pub const ApplicationData: u32        = 0x42_0002;
     /// KMIP 3.0 §11 — `Group Link` Reference (UID of a Group object).
     pub const GroupLink: u32              = 0x42_01b3;
-    /// `Object Group` (0x420056) — multi-instance group-membership
-    /// label. Tag verified against the OASIS KMIP 2.1 normative tag
-    /// registry (`Object Group 420056`); unchanged in 3.0 (the 3.0
-    /// JSON extraction only carries the plural `Object Groups`
-    /// structure at 0x420166, not this singular attribute). Encodes as
-    /// a TextString; SASED-M-3 step #0 supplies it as a Locate filter.
+    /// `Object Group` (0x420056) — the KMIP **2.x** multi-instance
+    /// group-membership label. K3: this tag is **RESERVED in KMIP 3.0**
+    /// (verified against `kmip-spec-3.0-tags-enums.json` — 0x420056 is absent;
+    /// 3.0 §7.24 Table 485 models membership as an `Object Groups` structure
+    /// of `Group Link` 0x4201b3 references). The server therefore emits group
+    /// membership as `Group Link` and NEVER emits 0x420056; it still ACCEPTS
+    /// 0x420056 on input as 2.x compatibility (normalised to the same internal
+    /// membership set). Encodes as a TextString.
     pub const ObjectGroup: u32            = 0x42_0056;
     // K20 — Derive Key (§6.1.18 / §7.13). All six codepoints verified
     // against `kmip-spec-3.0-tags-enums.json`.

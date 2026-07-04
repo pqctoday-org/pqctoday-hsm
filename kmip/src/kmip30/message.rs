@@ -47,8 +47,9 @@ pub const KMIP_VERSION_MINOR: i32 = 0;
 #[derive(Clone, Debug, PartialEq)]
 pub struct RequestMessage {
     pub header: RequestHeader,
-    /// v0.1 ships one batch item per message; the field type is `Vec` to
-    /// match the spec shape so v0.2 multi-op batching is an additive change.
+    /// Multi-item batches are fully supported — the dispatcher processes each
+    /// item with Batch Error Continuation Stop/Continue/Undo and the §6.4 ID
+    /// Placeholder. Most OASIS conformance transcripts are single-item.
     pub batch_items: Vec<RequestBatchItem>,
 }
 
@@ -494,12 +495,18 @@ impl RequestPayload {
 
     /// UIDs the op consumes as input. The dispatcher's R7 Phase 4
     /// (§9.5 Undo) wave snapshots these BEFORE the op runs so it can
-    /// roll them back on a later failure. Read-only ops (Query / Get
-    /// / Locate / Sign / Verify / …) return an empty slice — they
-    /// have no side effect to revert.
+    /// roll them back on a later failure. Most read-only ops (Query /
+    /// Get / Locate / Verify / …) return an empty slice — they have
+    /// no side effect to revert.
     pub fn touched_uids(&self) -> Vec<&str> {
         match self {
             Self::Activate(r)         => vec![r.uid.as_str()],
+            // Sign LOOKS read-only but a rekey-on-use policy can mutate the
+            // target key in place (Active → Deactivated + supersedes link —
+            // see `ops::sign::rekey_and_sign`); snapshot it so Undo restores
+            // the pre-rekey state. Harmless no-op snapshot on the ordinary
+            // (no-rekey) path.
+            Self::Sign(r)             => vec![r.uid.as_str()],
             Self::Revoke(r)           => vec![r.uid.as_str()],
             Self::Destroy(r)          => vec![r.uid.as_str()],
             Self::Deactivate(r)       => vec![r.uid.as_str()],

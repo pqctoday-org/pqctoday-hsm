@@ -34,13 +34,13 @@ use pqctoday_kmip::auditlog::{AuditSink, RingSink};
 use pqctoday_kmip::codec::{decode_one, TtlvFrame, Value as Ttlv};
 use pqctoday_kmip::dispatcher::{dispatch, one_off_request};
 use pqctoday_kmip::kmip30::{
-    decode_request_message, encode_response_message, ActivateRequest, Attribute,
-    BatchErrorContinuationOption, CreateKeyPairRequest, CreateRequest, DecapsulateRequest,
-    DecryptRequest, DestroyRequest, EncapsulateRequest, EncryptRequest, GetRequest, KmipAlgorithm,
-    LocateRequest, ObjectType, QueryFunction, QueryRequest, RequestBatchItem, RequestHeader,
-    RequestMessage, RequestPayload, ResponseBatchItem, ResponseHeader, ResponseMessage,
-    ResponsePayload, ResultStatus, RevocationReason, RevokeRequest, SignRequest,
-    SignatureVerifyRequest, UsageMask, WireError,
+    decode_request_message, encode_request_message, encode_response_message, ActivateRequest,
+    Attribute, BatchErrorContinuationOption, CreateKeyPairRequest, CreateRequest,
+    DecapsulateRequest, DecryptRequest, DestroyRequest, EncapsulateRequest, EncryptRequest,
+    GetRequest, KmipAlgorithm, LocateRequest, ObjectType, QueryFunction, QueryRequest,
+    RequestBatchItem, RequestHeader, RequestMessage, RequestPayload, ResponseBatchItem,
+    ResponseHeader, ResponseMessage, ResponsePayload, ResultStatus, RevocationReason,
+    RevokeRequest, SignRequest, SignatureVerifyRequest, UsageMask, WireError,
 };
 use pqctoday_kmip::ops::{Deps, DepsConfig};
 use pqctoday_kmip::policy::Engine;
@@ -203,9 +203,10 @@ impl KmipPlayground {
     /// back (reported as `OperationUndone`).
     ///
     /// Returns `{ ok, errorContinuation, requested, returned, items[], audit,
-    /// responseWireHex, responseWireLen, responseTree }` where each `items[]`
-    /// entry mirrors a `run_op` result minus the wire (the wire is the one shared
-    /// Response Message).
+    /// requestWireHex, requestWireLen, responseWireHex, responseWireLen,
+    /// responseTree }` where each `items[]` entry mirrors a `run_op` result
+    /// minus the wire (the wire is the one shared Request + Response Message —
+    /// the actual "N operations, ONE request" proof).
     #[wasm_bindgen]
     pub fn run_batch(&self, spec_json: &str) -> String {
         let spec: Json = match serde_json::from_str(spec_json) {
@@ -245,6 +246,11 @@ impl KmipPlayground {
             batch_items,
         };
 
+        // Encode the REQUEST wire before `dispatch` consumes `request` — this is
+        // the "ONE request, many items" proof the Batch tab shows Expert users
+        // alongside the shared response (A-grade review C7).
+        let request_wire = encode_request_message(&request).unwrap_or_default();
+
         let before = self.ring.len();
         let response = dispatch(&self.deps, request);
         let wire = encode_response_message(&response);
@@ -283,6 +289,8 @@ impl KmipPlayground {
             "requested": requested,
             "returned": response.batch_items.len(),
             "items": items_out,
+            "requestWireHex": to_hex(&request_wire),
+            "requestWireLen": request_wire.len(),
             "responseWireHex": to_hex(&wire),
             "responseWireLen": wire.len(),
             "responseTree": frame_json_from_bytes(&wire),
@@ -329,12 +337,23 @@ impl KmipPlayground {
     /// policy WOULD decide for an operation, without executing it or touching the
     /// store. Unlike the REST facade's dry-run (which uses a minimal request that
     /// can never produce a rekey or min-key-length decision), this passes the
-    /// full request fields. spec:
-    /// `{"op":"Sign","algorithm":"ML-DSA-65","length":?,"currentAlgorithm":"ECDSA-P256","state":"Active"}`
+    /// full request fields (WP4b: date, custom attrs, usage mask, mechanism
+    /// params, and key activation date, so temporal / attribute / mechanism
+    /// rules evaluate exactly like the production dispatcher path). spec:
+    /// `{"op":"Sign","algorithm":"ML-DSA-65","length":?,"currentAlgorithm":"ECDSA-P256",
+    ///   "state":"Active","date":"2027-06-01","attrs":{"pqctoday-purpose":"research"},
+    ///   "usageMask":["Sign","Verify"],"activationDate":"2026-01-15",
+    ///   "mechanism":{"hash":"SHA-256","blockMode":"GCM","padding":"OAEP",
+    ///                "deterministic":true,"mech":"CKM_AES_GCM"}}`
+    /// Names resolve through the SAME tables the policy loader validates against
+    /// (`policy::hash_name_to_code` etc.) — never a second hand-rolled mapping.
     /// Returns `{ kind: Allow|Deny|Rekey, algorithm?, from?, to?, rule?, reason? }`.
     #[wasm_bindgen]
     pub fn dry_run(&self, spec_json: &str) -> String {
-        use pqctoday_kmip::policy::{Decision, PolicyRequest};
+        use pqctoday_kmip::policy::{
+            block_cipher_mode_name_to_code, ckm_name_to_code, hash_name_to_code,
+            padding_method_name_to_code, usage_flag_name_to_bit, Decision, PolicyRequest,
+        };
         let spec: Json = match serde_json::from_str(spec_json) {
             Ok(v) => v,
             Err(e) => return error_json(&format!("invalid spec: {e}")),
@@ -348,8 +367,38 @@ impl KmipPlayground {
         let algorithm = s("algorithm").or_else(|| current.clone());
         let state = s("state").unwrap_or_else(|| "Active".into());
         let length = spec.get("length").and_then(|v| v.as_u64()).map(|n| n as u32);
-        let attrs = std::collections::HashMap::new();
-        let now = time::OffsetDateTime::now_utc();
+
+        // `date` — the simulated request clock. Absent/invalid → now (back-compat).
+        let parse_day = |v: &str| -> Option<time::OffsetDateTime> {
+            let p: Vec<&str> = v.split('T').next().unwrap_or(v).split('-').collect();
+            if p.len() < 3 {
+                return None;
+            }
+            let y: i32 = p[0].parse().ok()?;
+            let m: u8 = p[1].parse().ok()?;
+            let d: u8 = p[2].parse().ok()?;
+            let date = time::Date::from_calendar_date(y, time::Month::try_from(m).ok()?, d).ok()?;
+            Some(date.midnight().assume_utc())
+        };
+        let now = s("date")
+            .as_deref()
+            .and_then(parse_day)
+            .unwrap_or_else(time::OffsetDateTime::now_utc);
+
+        // `attrs` — custom x-attributes ({name: value}, x- prefix optional; the
+        // engine stores bare names, loader-style).
+        let attrs: std::collections::HashMap<String, String> = spec
+            .get("attrs")
+            .and_then(|v| v.as_object())
+            .map(|o| {
+                o.iter()
+                    .map(|(k, v)| {
+                        let name = k.strip_prefix("x-").unwrap_or(k).to_string();
+                        (name, v.as_str().unwrap_or_default().to_string())
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
 
         let mut pr = PolicyRequest::minimal(&op, algorithm.as_deref(), now, "dry-run", &attrs);
         pr.key_length = length;
@@ -361,7 +410,34 @@ impl KmipPlayground {
             pr.target_uid = Some("dry-run-object");
         }
 
-        let out = match self.deps.engine.evaluate(&pr) {
+        // `usageMask` — flag names resolved by the engine's own table. Absent →
+        // None (require_usage_mask then fails closed, exactly like a Create that
+        // declared no mask).
+        pr.usage_mask = spec.get("usageMask").and_then(|v| v.as_array()).map(|flags| {
+            flags
+                .iter()
+                .filter_map(|f| f.as_str())
+                .filter_map(usage_flag_name_to_bit)
+                .fold(UsageMask::empty(), |acc, b| acc | b)
+        });
+
+        // `activationDate` — drives max_key_age_days (age = date − activation).
+        pr.object_activation_date = s("activationDate").as_deref().and_then(parse_day);
+
+        // `mechanism` — the hash/mode/padding/deterministic/CKM dimension,
+        // mapped through the same name tables the loader validates against.
+        if let Some(m) = spec.get("mechanism").and_then(|v| v.as_object()) {
+            let ms = |k: &str| m.get(k).and_then(|v| v.as_str());
+            pr.mechanism.hashing_algorithm = ms("hash").and_then(hash_name_to_code);
+            pr.mechanism.block_cipher_mode =
+                ms("blockMode").and_then(block_cipher_mode_name_to_code);
+            pr.mechanism.padding_method = ms("padding").and_then(padding_method_name_to_code);
+            pr.mechanism.deterministic = m.get("deterministic").and_then(|v| v.as_bool());
+            pr.mechanism.canonical_mech = ms("mech").and_then(ckm_name_to_code);
+        }
+
+        let (decision, trace) = self.deps.engine.evaluate_traced(&pr);
+        let mut out = match decision {
             Decision::Allow { algorithm_override, substituted_by_rule, .. } => json!({
                 "kind": "Allow", "algorithm": algorithm_override, "rule": substituted_by_rule,
             }),
@@ -374,6 +450,15 @@ impl KmipPlayground {
                 "rule": triggered_by_rule, "reason": human,
             }),
         };
+        // Per-rule engine trace (1-based `index`) so the Hub visual simulator
+        // highlights exactly what the engine did — not a re-derived guess.
+        let trace_json: Vec<Json> = trace
+            .iter()
+            .map(|t| json!({ "index": t.index, "effect": t.effect, "note": t.note }))
+            .collect();
+        if let Some(obj) = out.as_object_mut() {
+            obj.insert("trace".into(), Json::Array(trace_json));
+        }
         out.to_string()
     }
 
@@ -440,7 +525,9 @@ fn build_payload(op: &str, spec: &Json) -> Result<RequestPayload, String> {
             ],
         }),
         "Create" => {
-            let alg = alg_from_spec(spec).unwrap_or(KmipAlgorithm::Aes);
+            // H1 — a present-but-unknown algorithm name is an error, not a
+            // silent fallback to AES. Absent → AES (symmetric default).
+            let alg = alg_from_spec_checked(spec)?.unwrap_or(KmipAlgorithm::Aes);
             let mut attrs = vec![
                 Attribute::CryptographicAlgorithm(alg),
                 Attribute::CryptographicUsageMask(UsageMask::ENCRYPT | UsageMask::DECRYPT),
@@ -460,7 +547,9 @@ fn build_payload(op: &str, spec: &Json) -> Result<RequestPayload, String> {
             // resolves to a different algorithm). The dispatcher canonicalises
             // the usage mask into `CreateKeyPair:{Sign,KeyAgreement,Encrypt}`,
             // the op-string the policies key their defaults on.
-            let alg = alg_from_spec(spec);
+            // H1 — a present-but-unknown algorithm name is an error, not a
+            // silent fall-through to the default signing keypair.
+            let alg = alg_from_spec_checked(spec)?;
             let intent = spec.get("intent").and_then(|v| v.as_str());
             let usage = match (alg, intent) {
                 (Some(a), _) if is_kem(a) => UsageMask::ENCRYPT | UsageMask::DECRYPT,
@@ -505,10 +594,15 @@ fn build_payload(op: &str, spec: &Json) -> Result<RequestPayload, String> {
             data: spec_bytes(spec, "data", "_"),
             cryptographic_parameters: None,
         }),
+        // `ivHex` threads the IV between the two calls of a symmetric round trip
+        // (the UI carries it from Encrypt's `ivHex` response field back into
+        // Decrypt's `ivHex` request field — this engine doesn't auto-generate one
+        // unless the key's stored CryptographicParameters set `RandomIV=true`,
+        // which the generic `Create` op above doesn't set).
         "Encrypt" => RequestPayload::Encrypt(EncryptRequest {
             uid: uid(),
             data: data(),
-            iv: None,
+            iv: spec_hex_opt(spec, "ivHex"),
             cryptographic_parameters: None,
             aad: None,
             init_indicator: None,
@@ -518,7 +612,7 @@ fn build_payload(op: &str, spec: &Json) -> Result<RequestPayload, String> {
         "Decrypt" => RequestPayload::Decrypt(DecryptRequest {
             uid: uid(),
             data: spec_bytes(spec, "data", "_"),
-            iv: None,
+            iv: spec_hex_opt(spec, "ivHex"),
             cryptographic_parameters: None,
             aad: None,
         }),
@@ -555,8 +649,29 @@ fn spec_bytes(spec: &Json, hex_key: &str, text_key: &str) -> Vec<u8> {
     Vec::new()
 }
 
-fn alg_from_spec(spec: &Json) -> Option<KmipAlgorithm> {
-    spec.get("algorithm").and_then(|v| v.as_str()).and_then(alg_from_name)
+/// Optional hex-encoded bytes (e.g. the IV a symmetric Encrypt/Decrypt round
+/// trip carries between calls — `None` when the spec omits the key, distinct
+/// from `spec_bytes`' "absent → empty Vec" for required fields).
+fn spec_hex_opt(spec: &Json, hex_key: &str) -> Option<Vec<u8>> {
+    spec.get(hex_key).and_then(|v| v.as_str()).and_then(from_hex)
+}
+
+/// Resolve the spec's `algorithm` field, distinguishing "absent" (Ok(None) —
+/// the policy-default path) from "present but not implemented" (Err) (H1).
+///
+/// The old silent-drop behaviour meant a spec naming an algorithm the engine
+/// doesn't implement (e.g. `FrodoKEM-1344`) fell through to a default: Create
+/// became an AES key and CreateKeyPair a signing keypair — so "Run for real"
+/// exercised a *different* request than the UI displayed, and the policy verdict
+/// shown was for the wrong request. Surfacing an error keeps Preview (which
+/// dry-runs the raw string) and Run-for-real honest about each other.
+fn alg_from_spec_checked(spec: &Json) -> Result<Option<KmipAlgorithm>, String> {
+    match spec.get("algorithm").and_then(|v| v.as_str()) {
+        None => Ok(None),
+        Some(name) => alg_from_name(name).map(Some).ok_or_else(|| {
+            format!("unknown algorithm '{name}' — not a KMIP spec name this engine implements")
+        }),
+    }
 }
 
 /// Map a KMIP spec-name string (e.g. "ML-DSA-65") to the algorithm enum.
@@ -568,12 +683,15 @@ fn alg_from_name(name: &str) -> Option<KmipAlgorithm> {
         SlhDsaSha2_128s, SlhDsaSha2_128f, SlhDsaSha2_192s, SlhDsaSha2_192f, SlhDsaSha2_256s,
         SlhDsaSha2_256f, SlhDsaShake128s, SlhDsaShake128f, SlhDsaShake192s, SlhDsaShake192f,
         SlhDsaShake256s, SlhDsaShake256f,
+        // K6 hybrid KEMs.
+        X25519MlKem768, SecP256r1MlKem768,
     ];
     ALL.iter().copied().find(|a| a.spec_name().eq_ignore_ascii_case(name))
 }
 
 fn is_kem(alg: KmipAlgorithm) -> bool {
     matches!(alg, KmipAlgorithm::MlKem512 | KmipAlgorithm::MlKem768 | KmipAlgorithm::MlKem1024)
+        || alg.is_hybrid_kem()
 }
 
 // ── response summary ───────────────────────────────────────────────────────────
@@ -589,6 +707,11 @@ fn summarize(payload: &ResponsePayload) -> Json {
         ResponsePayload::Activate(r) => json!({ "uid": r.uid, "state": format!("{:?}", r.state) }),
         ResponsePayload::Sign(r) => json!({
             "uid": r.uid, "signatureHex": to_hex(&r.signature), "signatureLen": r.signature.len(),
+            "rekeyed": r.rekeyed.as_ref().map(|k| json!({
+                "oldUid": k.old_uid,
+                "newPrivateKeyUid": k.new_private_key_uid,
+                "newPublicKeyUid": k.new_public_key_uid,
+            })),
         }),
         ResponsePayload::SignatureVerify(r) => json!({
             "uid": r.uid, "validity": format!("{:?}", r.validity),

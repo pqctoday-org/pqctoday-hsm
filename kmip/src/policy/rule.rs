@@ -42,6 +42,12 @@ pub enum Rule {
         ops: Vec<String>,
         default_algorithm: String,
         reason: String,
+        /// Which framework clause this rule implements (e.g. "BSI TR-02102-1
+        /// §2.1/§5.3"), for the Hub's rule-provenance UI. Purely descriptive —
+        /// never read by `check_pass2`/`resolve_pass1`; absent when the
+        /// policy author didn't cite one.
+        #[serde(default)]
+        clause: Option<String>,
     },
 
     /// When the request carries `algorithm == from` and `op ∈ ops`, rewrite
@@ -52,6 +58,12 @@ pub enum Rule {
         from: String,
         to: String,
         reason: String,
+        /// Which framework clause this rule implements (e.g. "BSI TR-02102-1
+        /// §2.1/§5.3"), for the Hub's rule-provenance UI. Purely descriptive —
+        /// never read by `check_pass2`/`resolve_pass1`; absent when the
+        /// policy author didn't cite one.
+        #[serde(default)]
+        clause: Option<String>,
     },
 
     // ── Gating rules (Pass 2) ─────────────────────────────────────────────
@@ -60,6 +72,12 @@ pub enum Rule {
         ops: Vec<String>,
         algorithms: Vec<String>,
         reason: String,
+        /// Which framework clause this rule implements (e.g. "BSI TR-02102-1
+        /// §2.1/§5.3"), for the Hub's rule-provenance UI. Purely descriptive —
+        /// never read by `check_pass2`/`resolve_pass1`; absent when the
+        /// policy author didn't cite one.
+        #[serde(default)]
+        clause: Option<String>,
         #[serde(default)]
         effective_from: Option<TimeBound>,
         #[serde(default)]
@@ -71,6 +89,12 @@ pub enum Rule {
         ops: Vec<String>,
         algorithms: Vec<String>,
         reason: String,
+        /// Which framework clause this rule implements (e.g. "BSI TR-02102-1
+        /// §2.1/§5.3"), for the Hub's rule-provenance UI. Purely descriptive —
+        /// never read by `check_pass2`/`resolve_pass1`; absent when the
+        /// policy author didn't cite one.
+        #[serde(default)]
+        clause: Option<String>,
         #[serde(default)]
         effective_from: Option<TimeBound>,
         #[serde(default)]
@@ -85,6 +109,12 @@ pub enum Rule {
         algorithm: String,
         min_bits: u32,
         reason: String,
+        /// Which framework clause this rule implements (e.g. "BSI TR-02102-1
+        /// §2.1/§5.3"), for the Hub's rule-provenance UI. Purely descriptive —
+        /// never read by `check_pass2`/`resolve_pass1`; absent when the
+        /// policy author didn't cite one.
+        #[serde(default)]
+        clause: Option<String>,
     },
 
     /// `op ∈ ops` AND `(now - key.activated_at) > days` → Deny.
@@ -94,6 +124,12 @@ pub enum Rule {
         ops: Vec<String>,
         days: u32,
         reason: String,
+        /// Which framework clause this rule implements (e.g. "BSI TR-02102-1
+        /// §2.1/§5.3"), for the Hub's rule-provenance UI. Purely descriptive —
+        /// never read by `check_pass2`/`resolve_pass1`; absent when the
+        /// policy author didn't cite one.
+        #[serde(default)]
+        clause: Option<String>,
     },
 
     /// Creating `algorithm` without all `flags` set → Deny.
@@ -101,6 +137,12 @@ pub enum Rule {
         algorithm: String,
         flags: Vec<String>,
         reason: String,
+        /// Which framework clause this rule implements (e.g. "BSI TR-02102-1
+        /// §2.1/§5.3"), for the Hub's rule-provenance UI. Purely descriptive —
+        /// never read by `check_pass2`/`resolve_pass1`; absent when the
+        /// policy author didn't cite one.
+        #[serde(default)]
+        clause: Option<String>,
     },
 
     /// Creating any of `algorithms` without `x-<attribute_name>` set → Deny.
@@ -108,6 +150,12 @@ pub enum Rule {
         attribute_name: String,
         algorithms: Vec<String>,
         reason: String,
+        /// Which framework clause this rule implements (e.g. "BSI TR-02102-1
+        /// §2.1/§5.3"), for the Hub's rule-provenance UI. Purely descriptive —
+        /// never read by `check_pass2`/`resolve_pass1`; absent when the
+        /// policy author didn't cite one.
+        #[serde(default)]
+        clause: Option<String>,
     },
 
     /// `now >= after` AND `op == op` AND request matches the class → Deny.
@@ -120,6 +168,12 @@ pub enum Rule {
         algorithms: Vec<String>,
         after: TimeBound,
         reason: String,
+        /// Which framework clause this rule implements (e.g. "BSI TR-02102-1
+        /// §2.1/§5.3"), for the Hub's rule-provenance UI. Purely descriptive —
+        /// never read by `check_pass2`/`resolve_pass1`; absent when the
+        /// policy author didn't cite one.
+        #[serde(default)]
+        clause: Option<String>,
     },
 
     /// `op == op` AND `state ∉ allowed_states` → Deny.
@@ -127,6 +181,12 @@ pub enum Rule {
         op: String,
         allowed_states: Vec<String>,
         reason: String,
+        /// Which framework clause this rule implements (e.g. "BSI TR-02102-1
+        /// §2.1/§5.3"), for the Hub's rule-provenance UI. Purely descriptive —
+        /// never read by `check_pass2`/`resolve_pass1`; absent when the
+        /// policy author didn't cite one.
+        #[serde(default)]
+        clause: Option<String>,
     },
 
     /// During `effective` range, every `Sign`/`Create` op must use the
@@ -143,6 +203,12 @@ pub enum Rule {
         #[serde(default)]
         triggered_by_custom_attribute: Option<AttrPredicate>,
         reason: String,
+        /// Which framework clause this rule implements (e.g. "BSI TR-02102-1
+        /// §2.1/§5.3"), for the Hub's rule-provenance UI. Purely descriptive —
+        /// never read by `check_pass2`/`resolve_pass1`; absent when the
+        /// policy author didn't cite one.
+        #[serde(default)]
+        clause: Option<String>,
     },
 
     /// Catch-all profile gate (`profile: FIPS-140-3 | CNSA-2.0 | NIS2 | ...`).
@@ -154,6 +220,12 @@ pub enum Rule {
         profile: String,
         ops: Vec<String>,
         reason: String,
+        /// Which framework clause this rule implements (e.g. "BSI TR-02102-1
+        /// §2.1/§5.3"), for the Hub's rule-provenance UI. Purely descriptive —
+        /// never read by `check_pass2`/`resolve_pass1`; absent when the
+        /// policy author didn't cite one.
+        #[serde(default)]
+        clause: Option<String>,
     },
 
     // ── Mechanism-dimension gating rules (Pass 2) — crypto-policy gaps plan ──
@@ -167,6 +239,12 @@ pub enum Rule {
         ops: Vec<String>,
         hashing_algorithms: Vec<String>,
         reason: String,
+        /// Which framework clause this rule implements (e.g. "BSI TR-02102-1
+        /// §2.1/§5.3"), for the Hub's rule-provenance UI. Purely descriptive —
+        /// never read by `check_pass2`/`resolve_pass1`; absent when the
+        /// policy author didn't cite one.
+        #[serde(default)]
+        clause: Option<String>,
         #[serde(default)]
         effective_from: Option<TimeBound>,
         #[serde(default)]
@@ -190,6 +268,12 @@ pub enum Rule {
         #[serde(default)]
         require_deterministic: Option<bool>,
         reason: String,
+        /// Which framework clause this rule implements (e.g. "BSI TR-02102-1
+        /// §2.1/§5.3"), for the Hub's rule-provenance UI. Purely descriptive —
+        /// never read by `check_pass2`/`resolve_pass1`; absent when the
+        /// policy author didn't cite one.
+        #[serde(default)]
+        clause: Option<String>,
     },
 
     /// Gate the MAC mechanism family (G1, MAC side). `op ∈ ops` AND the
@@ -200,6 +284,12 @@ pub enum Rule {
         ops: Vec<String>,
         mac_algorithms: Vec<String>,
         reason: String,
+        /// Which framework clause this rule implements (e.g. "BSI TR-02102-1
+        /// §2.1/§5.3"), for the Hub's rule-provenance UI. Purely descriptive —
+        /// never read by `check_pass2`/`resolve_pass1`; absent when the
+        /// policy author didn't cite one.
+        #[serde(default)]
+        clause: Option<String>,
     },
 
     // ── Mechanism-dimension FORCING rule (plan P3) ────────────────────────
@@ -233,6 +323,12 @@ pub enum Rule {
         #[serde(default)]
         salt_length: Option<i32>,
         reason: String,
+        /// Which framework clause this rule implements (e.g. "BSI TR-02102-1
+        /// §2.1/§5.3"), for the Hub's rule-provenance UI. Purely descriptive —
+        /// never read by `check_pass2`/`resolve_pass1`; absent when the
+        /// policy author didn't cite one.
+        #[serde(default)]
+        clause: Option<String>,
     },
 
     // ── PKCS#11 CKM_* mechanism dialect (plan P4) — gates the FULL PKCS#11
@@ -247,12 +343,24 @@ pub enum Rule {
         ops: Vec<String>,
         mechanisms: Vec<String>,
         reason: String,
+        /// Which framework clause this rule implements (e.g. "BSI TR-02102-1
+        /// §2.1/§5.3"), for the Hub's rule-provenance UI. Purely descriptive —
+        /// never read by `check_pass2`/`resolve_pass1`; absent when the
+        /// policy author didn't cite one.
+        #[serde(default)]
+        clause: Option<String>,
     },
     /// `op ∈ ops` AND the request's canonical `CKM_*` ∈ `mechanisms` → Deny.
     MechanismDenylist {
         ops: Vec<String>,
         mechanisms: Vec<String>,
         reason: String,
+        /// Which framework clause this rule implements (e.g. "BSI TR-02102-1
+        /// §2.1/§5.3"), for the Hub's rule-provenance UI. Purely descriptive —
+        /// never read by `check_pass2`/`resolve_pass1`; absent when the
+        /// policy author didn't cite one.
+        #[serde(default)]
+        clause: Option<String>,
     },
 }
 
@@ -374,7 +482,8 @@ impl Rule {
                 ops,
                 default_algorithm,
                 reason,
-            } if ops.iter().any(|o| o == req.op) => Some(Substitution {
+                ..
+            } if ops.iter().any(|o| op_matches(o, req.op)) => Some(Substitution {
                 new_algorithm: default_algorithm.clone(),
                 reason: reason.clone(),
             }),
@@ -396,8 +505,9 @@ impl Rule {
                 from,
                 to,
                 reason,
-            } if current_algorithm == Some(from.as_str())
-                && ops.iter().any(|o| o == req.op) =>
+                ..
+            } if current_algorithm.is_some_and(|c| algo_matches(from, c))
+                && ops.iter().any(|o| op_matches(o, req.op)) =>
             {
                 Some(Substitution {
                     new_algorithm: to.clone(),
@@ -429,10 +539,10 @@ impl Rule {
                 tag_length,
                 salt_length,
                 ..
-            } if ops.iter().any(|o| o == req.op)
+            } if ops.iter().any(|o| op_matches(o, req.op))
                 && algorithm
                     .as_deref()
-                    .map_or(true, |a| resolved_algorithm == Some(a)) =>
+                    .map_or(true, |a| resolved_algorithm.is_some_and(|r| algo_matches(a, r))) =>
             {
                 Some(CpOverride {
                     hashing_algorithm: hashing_algorithm.as_deref().and_then(hash_name_to_code),
@@ -468,19 +578,22 @@ impl Rule {
                 reason,
                 effective_from,
                 effective_until,
+                ..
             } => {
                 if !window_active(effective_from.as_ref(), effective_until.as_ref(), req.ts) {
                     return None;
                 }
-                if !ops.iter().any(|o| o == req.op) {
+                if !ops.iter().any(|o| op_matches(o, req.op)) {
                     return None;
                 }
                 match resolved_algorithm {
                     None => None, // No algorithm to check yet (e.g. raw Locate)
-                    Some(algo) if !algorithms.iter().any(|a| a == algo) => Some(GatingDeny {
-                        kmip_reason: DenyReason::PermissionDenied,
-                        human: reason.clone(),
-                    }),
+                    Some(algo) if !algorithms.iter().any(|a| algo_matches(a, algo)) => {
+                        Some(GatingDeny {
+                            kmip_reason: DenyReason::PermissionDenied,
+                            human: reason.clone(),
+                        })
+                    }
                     Some(_) => None,
                 }
             }
@@ -492,11 +605,12 @@ impl Rule {
                 effective_from,
                 effective_until,
                 exception_custom_attribute,
+                ..
             } => {
                 if !window_active(effective_from.as_ref(), effective_until.as_ref(), req.ts) {
                     return None;
                 }
-                if !ops.iter().any(|o| o == req.op) {
+                if !ops.iter().any(|o| op_matches(o, req.op)) {
                     return None;
                 }
                 if let Some(exc) = exception_custom_attribute.as_ref() {
@@ -505,10 +619,12 @@ impl Rule {
                     }
                 }
                 match resolved_algorithm {
-                    Some(algo) if algorithms.iter().any(|a| a == algo) => Some(GatingDeny {
-                        kmip_reason: DenyReason::PermissionDenied,
-                        human: reason.clone(),
-                    }),
+                    Some(algo) if algorithms.iter().any(|a| algo_matches(a, algo)) => {
+                        Some(GatingDeny {
+                            kmip_reason: DenyReason::PermissionDenied,
+                            human: reason.clone(),
+                        })
+                    }
                     _ => None,
                 }
             }
@@ -517,8 +633,9 @@ impl Rule {
                 algorithm,
                 min_bits,
                 reason,
+                ..
             } => match (resolved_algorithm, req.key_length) {
-                (Some(algo), Some(bits)) if algo == algorithm && bits < *min_bits => {
+                (Some(algo), Some(bits)) if algo_matches(algorithm, algo) && bits < *min_bits => {
                     Some(GatingDeny {
                         kmip_reason: DenyReason::InvalidCryptographicParameters,
                         human: reason.clone(),
@@ -532,8 +649,8 @@ impl Rule {
             // op that targets an activated key — Sign/Encrypt/…); an op with no
             // age reference (Create, or a never-activated object) can't be aged
             // out, so it passes.
-            Rule::MaxKeyAgeDays { ops, days, reason } => {
-                if !ops.iter().any(|o| o == req.op) {
+            Rule::MaxKeyAgeDays { ops, days, reason, .. } => {
+                if !ops.iter().any(|o| op_matches(o, req.op)) {
                     return None;
                 }
                 match req.object_activation_date {
@@ -551,8 +668,9 @@ impl Rule {
                 algorithm,
                 flags,
                 reason,
+                ..
             } => {
-                if resolved_algorithm != Some(algorithm.as_str()) {
+                if !resolved_algorithm.is_some_and(|a| algo_matches(algorithm, a)) {
                     return None;
                 }
                 let Some(mask) = req.usage_mask else {
@@ -577,9 +695,10 @@ impl Rule {
                 attribute_name,
                 algorithms,
                 reason,
+                ..
             } => match resolved_algorithm {
                 Some(algo)
-                    if algorithms.iter().any(|a| a == algo)
+                    if algorithms.iter().any(|a| algo_matches(a, algo))
                         && !req.custom_attrs.contains_key(attribute_name) =>
                 {
                     Some(GatingDeny {
@@ -596,15 +715,16 @@ impl Rule {
                 algorithms,
                 after,
                 reason,
+                ..
             } => {
-                if req.op != op.as_str() {
+                if !op_matches(op, req.op) {
                     return None;
                 }
                 if !after.matches_at_or_after(req.ts) {
                     return None;
                 }
                 let Some(algo) = resolved_algorithm else { return None; };
-                if !algorithms.is_empty() && !algorithms.iter().any(|a| a == algo) {
+                if !algorithms.is_empty() && !algorithms.iter().any(|a| algo_matches(a, algo)) {
                     return None;
                 }
                 if matches_class(algo, algorithm_class) {
@@ -621,8 +741,9 @@ impl Rule {
                 op,
                 allowed_states,
                 reason,
+                ..
             } => {
-                if req.op != op.as_str() {
+                if !op_matches(op, req.op) {
                     return None;
                 }
                 match req.state {
@@ -647,7 +768,7 @@ impl Rule {
                 if !window_active(Some(effective_from), Some(effective_until), req.ts) {
                     return None;
                 }
-                if !ops_affected.iter().any(|o| o == req.op) {
+                if !ops_affected.iter().any(|o| op_matches(o, req.op)) {
                     return None;
                 }
                 if let Some(pred) = triggered_by_custom_attribute.as_ref() {
@@ -655,11 +776,25 @@ impl Rule {
                         return None;
                     }
                 }
-                let composite = format!("{}-{}", primary, secondary.to_uppercase());
-                let composite_alt =
-                    format!("{}-{}", primary.to_uppercase(), secondary.to_uppercase());
+                // A dual-*signature* requirement only judges signature-capable
+                // requests. Symmetric key creation (AES, ChaCha20, HMAC) in the
+                // migration window must pass — otherwise a hybrid-window policy
+                // silently bricks all AES Create (Y7/Y12). A request with no
+                // resolved algorithm yet (e.g. bare Locate) likewise can't be a
+                // composite signature and is left to other rules.
                 match resolved_algorithm {
-                    Some(a) if a == composite || a == composite_alt => None,
+                    None => return None,
+                    Some(a) if matches_class(a, "symmetric") => return None,
+                    Some(_) => {}
+                }
+                // Composite name follows the KMIP 3.0 `CryptographicAlgorithm`
+                // spelling — component names keep their spec casing (`Ed25519`,
+                // per OASIS KMIP 3.0 §11 / RFC 8032; NOT `ED25519`). Match
+                // case-insensitively so a request that spells the composite with
+                // any casing still satisfies the mandate.
+                let composite = format!("{}-{}", primary, secondary);
+                match resolved_algorithm {
+                    Some(a) if a.eq_ignore_ascii_case(&composite) => None,
                     _ => Some(GatingDeny {
                         kmip_reason: DenyReason::PermissionDenied,
                         human: reason.clone(),
@@ -680,11 +815,12 @@ impl Rule {
                 reason,
                 effective_from,
                 effective_until,
+                ..
             } => {
                 if !window_active(effective_from.as_ref(), effective_until.as_ref(), req.ts) {
                     return None;
                 }
-                if !ops.iter().any(|o| o == req.op) {
+                if !ops.iter().any(|o| op_matches(o, req.op)) {
                     return None;
                 }
                 match req.mechanism.hashing_algorithm {
@@ -711,12 +847,13 @@ impl Rule {
                 allowed_padding_methods,
                 require_deterministic,
                 reason,
+                ..
             } => {
-                if !ops.iter().any(|o| o == req.op) {
+                if !ops.iter().any(|o| op_matches(o, req.op)) {
                     return None;
                 }
                 if let Some(a) = algorithm {
-                    if resolved_algorithm != Some(a.as_str()) {
+                    if !resolved_algorithm.is_some_and(|r| algo_matches(a, r)) {
                         return None;
                     }
                 }
@@ -762,16 +899,19 @@ impl Rule {
                 ops,
                 mac_algorithms,
                 reason,
+                ..
             } => {
-                if !ops.iter().any(|o| o == req.op) {
+                if !ops.iter().any(|o| op_matches(o, req.op)) {
                     return None;
                 }
                 match resolved_algorithm {
                     None => None,
-                    Some(algo) if !mac_algorithms.iter().any(|a| a == algo) => Some(GatingDeny {
-                        kmip_reason: DenyReason::PermissionDenied,
-                        human: reason.clone(),
-                    }),
+                    Some(algo) if !mac_algorithms.iter().any(|a| algo_matches(a, algo)) => {
+                        Some(GatingDeny {
+                            kmip_reason: DenyReason::PermissionDenied,
+                            human: reason.clone(),
+                        })
+                    }
                     Some(_) => None,
                 }
             }
@@ -780,16 +920,15 @@ impl Rule {
                 ops,
                 mechanisms,
                 reason,
+                ..
             } => {
-                if !ops.iter().any(|o| o == req.op) {
+                if !ops.iter().any(|o| op_matches(o, req.op)) {
                     return None;
                 }
                 match req.mechanism.canonical_mech {
                     // Not canonicalizable (no mechanism resolved) → not gated.
                     None => None,
-                    Some(code)
-                        if !mechanisms.iter().any(|n| ckm_name_to_code(n) == Some(code)) =>
-                    {
+                    Some(code) if !mechanism_list_matches(mechanisms, code) => {
                         Some(GatingDeny {
                             kmip_reason: DenyReason::PermissionDenied,
                             human: reason.clone(),
@@ -803,12 +942,13 @@ impl Rule {
                 ops,
                 mechanisms,
                 reason,
+                ..
             } => {
-                if !ops.iter().any(|o| o == req.op) {
+                if !ops.iter().any(|o| op_matches(o, req.op)) {
                     return None;
                 }
                 match req.mechanism.canonical_mech {
-                    Some(code) if mechanisms.iter().any(|n| ckm_name_to_code(n) == Some(code)) => {
+                    Some(code) if mechanism_list_matches(mechanisms, code) => {
                         Some(GatingDeny {
                             kmip_reason: DenyReason::PermissionDenied,
                             human: reason.clone(),
@@ -822,6 +962,70 @@ impl Rule {
 }
 
 // ── helpers ────────────────────────────────────────────────────────────────
+
+/// Match a policy rule's `op`/`ops` entry against a request's canonical op.
+///
+/// The dispatcher canonicalises `CreateKeyPair` into `CreateKeyPair:<purpose>`
+/// (`CreateKeyPair:Sign` / `:Encrypt` / `:KeyAgreement`) so a policy can
+/// discriminate KEM vs signing intent (see `dispatcher::canonical_create_key_pair_op`).
+/// A policy that gates the bare family name `CreateKeyPair` must therefore match
+/// every `CreateKeyPair:*` request — but `Create` (symmetric) must NOT be caught
+/// by a `CreateKeyPair` gate, nor vice-versa.
+///
+/// Rules (Y2):
+/// - exact string match → true (`CreateKeyPair:Sign` gate matches only that purpose);
+/// - the request op is a colon-suffixed refinement of the rule op → true
+///   (`CreateKeyPair` gate matches `CreateKeyPair:Sign`);
+/// - otherwise false. `Create` never matches `CreateKeyPair:Sign` because
+///   `"CreateKeyPair:Sign".strip_prefix("Create")` = `"KeyPair:Sign"`, which does
+///   not begin with `':'`.
+pub fn op_matches(rule_op: &str, req_op: &str) -> bool {
+    rule_op == req_op
+        || req_op
+            .strip_prefix(rule_op)
+            .is_some_and(|rest| rest.starts_with(':'))
+}
+
+/// Match a policy `algorithms` entry against a request's (qualified) algorithm.
+///
+/// Policies mix *family* names (`AES`, `RSA`, `ECDSA`, `ECDH`) and *qualified*
+/// names (`AES-256`, `RSA-3072`, `ECDSA-P384`, `ML-DSA-87`). The dispatcher now
+/// qualifies every request algorithm (Y3, `helpers::qualify_algorithm_str`), so
+/// the request side is always specific; only the policy entry may be a family.
+///
+/// An entry *covers* a request when (Y3):
+/// - it equals the request exactly (`AES-256` covers `AES-256`), or
+/// - it is a family prefix and the request is a hyphen-suffixed member
+///   (`AES` covers `AES-256`; `ECDSA` covers `ECDSA-P256`).
+///
+/// It does NOT match in the reverse direction: `AES-256` never covers a bare
+/// `AES`, and `AES-128` never covers `AES-256`. Using the same predicate for
+/// allowlists and denylists therefore gives the intuitive result in both:
+/// denylisting `AES-128` leaves `AES-256` allowed; allowlisting the family
+/// `AES` admits every AES size; denylisting the family `SLH-DSA` catches every
+/// parameter set.
+///
+/// Case-insensitive (CACP A-grade review, 2026-07-03): algorithm names have no
+/// case-significant vocabulary — nothing in this codebase distinguishes two
+/// algorithms by case alone — but a policy author and a request builder
+/// disagreeing on casing (e.g. a YAML rule's `ML-DSA-65-Ed25519` vs a caller's
+/// `ML-DSA-65-ED25519`) used to make this comparison silently return `false`.
+/// For a *gating* rule (`RequireUsageMask`, `AlgorithmDenylist`, …) that is a
+/// fail-OPEN bug — the rule the author wrote simply never fires — not a
+/// merely-cosmetic mismatch, so this normalizes case rather than requiring
+/// exact-byte agreement.
+pub fn algo_matches(policy_entry: &str, request_algo: &str) -> bool {
+    if policy_entry.eq_ignore_ascii_case(request_algo) {
+        return true;
+    }
+    // Family prefix: every algorithm name in this vocabulary is ASCII, so byte
+    // indexing is safe and case-folding per byte is correct (no multi-byte /
+    // Unicode-casing pitfalls to worry about).
+    request_algo.len() > policy_entry.len()
+        && request_algo.is_char_boundary(policy_entry.len())
+        && request_algo[..policy_entry.len()].eq_ignore_ascii_case(policy_entry)
+        && request_algo.as_bytes()[policy_entry.len()] == b'-'
+}
 
 /// `true` if `ts` falls within `[from, until]`. Either bound may be absent.
 ///
@@ -841,7 +1045,7 @@ fn window_active(
 /// KMIP `Hashing Algorithm` name → enum codepoint. Values verified against
 /// `spec/oasis-kmip-3.0/kmip-spec-3.0-tags-enums.json` (§11). Unknown → `None`
 /// (the loader rejects unknown names up-front; this is defence in depth).
-fn hash_name_to_code(name: &str) -> Option<u32> {
+pub fn hash_name_to_code(name: &str) -> Option<u32> {
     Some(match name {
         "SHA-1" => 0x04,
         "SHA-224" => 0x05,
@@ -859,7 +1063,7 @@ fn hash_name_to_code(name: &str) -> Option<u32> {
 }
 
 /// KMIP `Block Cipher Mode` name → enum codepoint (spec §11, verified).
-fn block_cipher_mode_name_to_code(name: &str) -> Option<u32> {
+pub fn block_cipher_mode_name_to_code(name: &str) -> Option<u32> {
     Some(match name {
         "CBC" => 0x01,
         "ECB" => 0x02,
@@ -884,7 +1088,7 @@ fn mgf_name_to_code(name: &str) -> Option<u32> {
 }
 
 /// KMIP `Padding Method` name → enum codepoint (spec §11, verified).
-fn padding_method_name_to_code(name: &str) -> Option<u32> {
+pub fn padding_method_name_to_code(name: &str) -> Option<u32> {
     Some(match name {
         "None" => 0x01,
         "OAEP" => 0x02,
@@ -905,9 +1109,18 @@ fn padding_method_name_to_code(name: &str) -> Option<u32> {
 /// 0x100`). Verified: KMIP/PKCS#11 v3.2 does NOT standardize KMAC (absent from
 /// the canonical OASIS v3.2 `pkcs11t.h`), so vendor-defined is correct, and it
 /// is consistent across `src/lib/pkcs11/pkcs11t.h` + `rust/src/constants.rs`.
-fn ckm_name_to_code(name: &str) -> Option<u32> {
+pub fn ckm_name_to_code(name: &str) -> Option<u32> {
     use softhsmrustv3::constants as c;
     Some(match name {
+        // Key-pair / key generation mechanisms (Y14 — these were missing, so a
+        // lockdown allowlisting them contributed nothing).
+        "CKM_ML_DSA_KEY_PAIR_GEN" => c::CKM_ML_DSA_KEY_PAIR_GEN,
+        "CKM_ML_KEM_KEY_PAIR_GEN" => c::CKM_ML_KEM_KEY_PAIR_GEN,
+        "CKM_SLH_DSA_KEY_PAIR_GEN" => c::CKM_SLH_DSA_KEY_PAIR_GEN,
+        "CKM_EC_KEY_PAIR_GEN" => c::CKM_EC_KEY_PAIR_GEN,
+        "CKM_AES_KEY_GEN" => c::CKM_AES_KEY_GEN,
+        "CKM_RSA_PKCS_PSS" => c::CKM_RSA_PKCS_PSS,
+        "CKM_RSA_PKCS" => c::CKM_RSA_PKCS,
         "CKM_AES_ECB" => c::CKM_AES_ECB,
         "CKM_AES_CBC" => c::CKM_AES_CBC,
         "CKM_AES_CBC_PAD" => c::CKM_AES_CBC_PAD,
@@ -963,31 +1176,136 @@ fn ckm_name_to_code(name: &str) -> Option<u32> {
     })
 }
 
+/// Map a hash-qualified signing mechanism to its base mechanism *family* (Y14).
+///
+/// A Sign request canonicalises to a hash-qualified mechanism — e.g. RSA-PSS
+/// over SHA-256 resolves to `CKM_SHA256_RSA_PKCS_PSS`, ECDSA over SHA-256 to
+/// `CKM_ECDSA_SHA256`. A lockdown policy naturally allowlists the *family*
+/// (`CKM_RSA_PKCS_PSS`, `CKM_ECDSA`), so without this mapping the specific
+/// canonical mechanism was never on the list and legitimate RSA-PSS / ECDSA
+/// signing was falsely denied. `mechanism_list_matches` treats a request as
+/// matching a policy entry when the entry is either the exact mechanism or the
+/// request's family. Returns `None` for a mechanism that is already a base
+/// family (or has no family notion).
+fn ckm_family(code: u32) -> Option<u32> {
+    use softhsmrustv3::constants as c;
+    Some(match code {
+        x if x == c::CKM_SHA256_RSA_PKCS_PSS
+            || x == c::CKM_SHA384_RSA_PKCS_PSS
+            || x == c::CKM_SHA512_RSA_PKCS_PSS =>
+        {
+            c::CKM_RSA_PKCS_PSS
+        }
+        x if x == c::CKM_SHA256_RSA_PKCS
+            || x == c::CKM_SHA384_RSA_PKCS
+            || x == c::CKM_SHA512_RSA_PKCS =>
+        {
+            c::CKM_RSA_PKCS
+        }
+        x if x == c::CKM_ECDSA_SHA256
+            || x == c::CKM_ECDSA_SHA384
+            || x == c::CKM_ECDSA_SHA512 =>
+        {
+            c::CKM_ECDSA
+        }
+        _ => return None,
+    })
+}
+
+// ── Value-lint predicates (WP2.1 / Y6) ───────────────────────────────────────
+// These expose the engine's bounded vocabularies so the loader can reject a
+// policy that references a name the engine will never match (a silent no-op —
+// fail-open for denylists). Algorithm names are validated separately (see
+// `lint::is_known_algorithm_name`) because a denylist may legitimately name a
+// real-but-unimplemented algorithm.
+
+/// `true` if `name` resolves to a PKCS#11 `CKM_*` the engine knows (Y6).
+pub fn is_known_ckm_name(name: &str) -> bool {
+    ckm_name_to_code(name).is_some()
+}
+
+/// `true` if `name` is a KMIP Hashing Algorithm the engine knows (Y6).
+pub fn is_known_hash_name(name: &str) -> bool {
+    hash_name_to_code(name).is_some()
+}
+
+/// `true` if `name` is a KMIP Block Cipher Mode the engine knows (Y6).
+pub fn is_known_block_cipher_mode(name: &str) -> bool {
+    block_cipher_mode_name_to_code(name).is_some()
+}
+
+/// `true` if `name` is a KMIP Padding Method the engine knows (Y6).
+pub fn is_known_padding_method(name: &str) -> bool {
+    padding_method_name_to_code(name).is_some()
+}
+
+/// `true` if `name` is a Mask Generator the engine knows (Y6).
+pub fn is_known_mask_generator(name: &str) -> bool {
+    mgf_name_to_code(name).is_some()
+}
+
+/// `true` if `class` is one of the three classifier classes (Y4/Y6).
+pub fn is_known_algorithm_class(class: &str) -> bool {
+    matches!(class, "pqc" | "symmetric" | "classical")
+}
+
+/// `true` if `flag` is a KMIP Cryptographic Usage Mask flag name (Y6).
+/// Mirrors the names accepted by `usage_mask_has_all`.
+pub fn is_known_usage_flag(flag: &str) -> bool {
+    matches!(
+        flag,
+        "Sign" | "Verify" | "Encrypt" | "Decrypt" | "WrapKey" | "UnwrapKey"
+            | "Export" | "MacGenerate" | "MacVerify" | "DeriveKey"
+            | "ContentCommitment" | "KeyAgreement" | "CertificateSign"
+            | "CrlSign" | "Authenticate"
+    )
+}
+
+/// `true` if the request's canonical mechanism `code` matches any policy
+/// mechanism name in `names` — exactly, or via [`ckm_family`] (Y14). Unknown
+/// names in `names` contribute nothing (the Phase-2 loader lint rejects them).
+fn mechanism_list_matches(names: &[String], code: u32) -> bool {
+    names
+        .iter()
+        .filter_map(|n| ckm_name_to_code(n))
+        .any(|entry| entry == code || ckm_family(code) == Some(entry))
+}
+
+/// Policy-grammar usage-flag name → `UsageMask` bit. The single source of
+/// truth for flag naming, shared by `require_usage_mask` gating and the WASM
+/// dry-run facade (WP4b) so a UI-supplied flag list resolves exactly like a
+/// policy's `flags:` list. Unknown → `None`.
+pub fn usage_flag_name_to_bit(name: &str) -> Option<super::super::kmip30::UsageMask> {
+    use super::super::kmip30::UsageMask as M;
+    Some(match name {
+        "Sign"               => M::SIGN,
+        "Verify"             => M::VERIFY,
+        "Encrypt"            => M::ENCRYPT,
+        "Decrypt"            => M::DECRYPT,
+        "WrapKey"            => M::WRAP_KEY,
+        "UnwrapKey"          => M::UNWRAP_KEY,
+        "Export"             => M::EXPORT,
+        "MacGenerate"        => M::MAC_GENERATE,
+        "MacVerify"          => M::MAC_VERIFY,
+        "DeriveKey"          => M::DERIVE_KEY,
+        "ContentCommitment"  => M::CONTENT_COMMITMENT,
+        "KeyAgreement"       => M::KEY_AGREEMENT,
+        "CertificateSign"    => M::CERTIFICATE_SIGN,
+        "CrlSign"            => M::CRL_SIGN,
+        "Authenticate"       => M::AUTHENTICATE,
+        _ => return None,
+    })
+}
+
 /// `true` if every `flag` is present in `mask`. Unknown flag names are
 /// rejected (loader rejects them up-front, but defence in depth).
 fn usage_mask_has_all(
     mask: super::super::kmip30::UsageMask,
     flags: &[String],
 ) -> bool {
-    use super::super::kmip30::UsageMask as M;
     for f in flags {
-        let bit = match f.as_str() {
-            "Sign"               => M::SIGN,
-            "Verify"             => M::VERIFY,
-            "Encrypt"            => M::ENCRYPT,
-            "Decrypt"            => M::DECRYPT,
-            "WrapKey"            => M::WRAP_KEY,
-            "UnwrapKey"          => M::UNWRAP_KEY,
-            "Export"             => M::EXPORT,
-            "MacGenerate"        => M::MAC_GENERATE,
-            "MacVerify"          => M::MAC_VERIFY,
-            "DeriveKey"          => M::DERIVE_KEY,
-            "ContentCommitment"  => M::CONTENT_COMMITMENT,
-            "KeyAgreement"       => M::KEY_AGREEMENT,
-            "CertificateSign"    => M::CERTIFICATE_SIGN,
-            "CrlSign"            => M::CRL_SIGN,
-            "Authenticate"       => M::AUTHENTICATE,
-            _ => return false,
+        let Some(bit) = usage_flag_name_to_bit(f) else {
+            return false;
         };
         if !mask.contains(bit) {
             return false;
@@ -996,9 +1314,25 @@ fn usage_mask_has_all(
     true
 }
 
-/// Crude algorithm classifier — `"classical"` or `"pqc"`. Conservative:
-/// unknown names default to `"classical"` so a `temporal_cutoff` on
-/// `classical` denies them by default after the cutoff (safe direction).
+/// Algorithm classifier over three disjoint classes: `"pqc"`, `"symmetric"`,
+/// and `"classical"` (Y4).
+///
+/// The distinction matters for `temporal_cutoff`: a migration deadline that
+/// bans `classical` public-key crypto after Q-day must NOT sweep up AES or
+/// HMAC — symmetric primitives are quantum-safe (Grover only halves the
+/// effective key strength, covered by moving to 256-bit keys) and IR 8547
+/// scopes the deprecation to quantum-vulnerable *public-key* algorithms.
+/// Before this fix `matches_class` treated everything non-PQC as classical,
+/// so `pqc-migration-2030` silently banned AES-256 encryption from 2030.
+///
+/// - `pqc`       — ML-KEM / ML-DSA / SLH-DSA / LMS / HSS / XMSS / Falcon / HQC /
+///                 BIKE / FrodoKEM / Classic-McEliece and composite PQC names.
+/// - `symmetric` — AES / ChaCha20 / HMAC / KMAC / SHA (quantum-safe primitives).
+/// - `classical` — quantum-vulnerable public-key: RSA / ECDSA / ECDH / DSA /
+///                 DH / Ed25519 / Ed448 / X25519 / X448 (the deprecation target).
+///
+/// Unknown names fall into `classical` — the safe direction for a cutoff (a
+/// name the engine can't place is treated as legacy and denied after Q-day).
 fn matches_class(algorithm: &str, class: &str) -> bool {
     let is_pqc = algorithm.starts_with("ML-KEM")
         || algorithm.starts_with("ML-DSA")
@@ -1006,10 +1340,24 @@ fn matches_class(algorithm: &str, class: &str) -> bool {
         || algorithm.starts_with("HSS")
         || algorithm.starts_with("LMS")
         || algorithm.starts_with("XMSS")
-        || algorithm.starts_with("Falcon");
+        || algorithm.starts_with("Falcon")
+        || algorithm.starts_with("HQC")
+        || algorithm.starts_with("BIKE")
+        || algorithm.starts_with("FrodoKEM")
+        || algorithm.starts_with("Classic-McEliece")
+        // composite PQC names carry a PQC primary, e.g. ML-DSA-65-ED25519
+        || algorithm.contains("ML-DSA")
+        || algorithm.contains("ML-KEM");
+    let is_symmetric = algorithm.starts_with("AES")
+        || algorithm.starts_with("ChaCha20")
+        || algorithm.starts_with("HMAC")
+        || algorithm.starts_with("KMAC")
+        || algorithm.starts_with("SHA");
     match class {
         "pqc" => is_pqc,
-        "classical" => !is_pqc,
+        "symmetric" => is_symmetric && !is_pqc,
+        // classical = quantum-vulnerable public-key = not PQC and not symmetric.
+        "classical" => !is_pqc && !is_symmetric,
         _ => false,
     }
 }
@@ -1023,6 +1371,86 @@ mod tests {
         PolicyRequest::minimal(op, algo, OffsetDateTime::UNIX_EPOCH, "corr-1", attrs)
     }
 
+    // ── Y2: op_matches — CreateKeyPair:<purpose> vs family names ──────────
+    #[test]
+    fn op_matches_truth_table() {
+        // Exact matches.
+        assert!(op_matches("Sign", "Sign"));
+        assert!(op_matches("CreateKeyPair:Sign", "CreateKeyPair:Sign"));
+        // Family gate matches every colon-suffixed purpose.
+        assert!(op_matches("CreateKeyPair", "CreateKeyPair:Sign"));
+        assert!(op_matches("CreateKeyPair", "CreateKeyPair:Encrypt"));
+        assert!(op_matches("CreateKeyPair", "CreateKeyPair:KeyAgreement"));
+        // A specific purpose gate does NOT match a different purpose.
+        assert!(!op_matches("CreateKeyPair:Sign", "CreateKeyPair:Encrypt"));
+        // `Create` (symmetric) must NOT be caught by CreateKeyPair traffic,
+        // and vice-versa — the fail-open bug this whole change closes (Y2).
+        assert!(!op_matches("Create", "CreateKeyPair:Sign"));
+        assert!(!op_matches("CreateKeyPair", "Create"));
+        assert!(!op_matches("Sign", "SignatureVerify"));
+    }
+
+    // ── Y3: algo_matches — family entries cover qualified requests ────────
+    #[test]
+    fn algo_matches_truth_table() {
+        // Exact.
+        assert!(algo_matches("AES-256", "AES-256"));
+        assert!(algo_matches("ML-DSA-87", "ML-DSA-87"));
+        // Family entry covers a qualified member (allowlist family / denylist family).
+        assert!(algo_matches("AES", "AES-256"));
+        assert!(algo_matches("AES", "AES-128"));
+        assert!(algo_matches("ECDSA", "ECDSA-P256"));
+        assert!(algo_matches("RSA", "RSA-3072"));
+        assert!(algo_matches("SLH-DSA", "SLH-DSA-SHAKE-128f"));
+        // A specific entry does NOT cover a different size — denylisting
+        // AES-128 leaves AES-256 allowed.
+        assert!(!algo_matches("AES-128", "AES-256"));
+        // Never matches the reverse direction (a bare request under a
+        // specific entry) — requests are always qualified post-Y3, so this
+        // just documents the guarantee.
+        assert!(!algo_matches("AES-256", "AES"));
+        // Prefix that isn't a hyphen boundary must not match.
+        assert!(!algo_matches("AES", "AESX"));
+        // Exact family-name request matches its own family entry.
+        assert!(algo_matches("LMS", "LMS"));
+        // CACP A-grade review (2026-07-03): case-insensitive, both directions —
+        // a policy author writing `Ed25519` must still gate a request that
+        // arrives as `ED25519` (or `ed25519`). This used to silently return
+        // false, making `RequireUsageMask`/denylist rules fail OPEN on a pure
+        // casing mismatch — the exact bug behind the composite-Sign gap the
+        // hub's engine-parity suite caught (hybrid-migration-window.yaml).
+        assert!(algo_matches("ML-DSA-65-Ed25519", "ML-DSA-65-ED25519"));
+        assert!(algo_matches("ML-DSA-65-ED25519", "ML-DSA-65-Ed25519"));
+        assert!(algo_matches("aes", "AES-256"), "case-insensitive family prefix");
+        // Still respects the hyphen-boundary rule under case-folding.
+        assert!(!algo_matches("aes", "AESX"));
+    }
+
+    // ── Y4: three-way classifier (symmetric ≠ classical) ──────────────────
+    #[test]
+    fn matches_class_three_way() {
+        // Symmetric primitives are their own class — NOT classical.
+        assert!(matches_class("AES-256", "symmetric"));
+        assert!(matches_class("HMAC-SHA-256", "symmetric"));
+        assert!(matches_class("ChaCha20-Poly1305", "symmetric"));
+        assert!(!matches_class("AES-256", "classical"));
+        assert!(!matches_class("AES-256", "pqc"));
+        // Classical = quantum-vulnerable public-key.
+        assert!(matches_class("RSA-3072", "classical"));
+        assert!(matches_class("ECDSA-P256", "classical"));
+        assert!(matches_class("Ed25519", "classical"));
+        assert!(!matches_class("RSA-3072", "symmetric"));
+        // PQC.
+        assert!(matches_class("ML-DSA-87", "pqc"));
+        assert!(matches_class("ML-KEM-1024", "pqc"));
+        assert!(!matches_class("ML-DSA-87", "classical"));
+        // Composite PQC name classifies as pqc, not classical.
+        assert!(matches_class("ML-DSA-65-ED25519", "pqc"));
+        assert!(!matches_class("ML-DSA-65-ED25519", "classical"));
+        // Unknown → classical (safe cutoff direction).
+        assert!(matches_class("MysteryAlg", "classical"));
+    }
+
     // ── P2: mechanism-dimension gating rules ──────────────────────────────
     #[test]
     fn hash_allowlist_denies_disallowed_hash() {
@@ -1033,6 +1461,7 @@ mod tests {
             reason: "approved hashes only".into(),
             effective_from: None,
             effective_until: None,
+            clause: None,
         };
         // SHA-1 (0x04) → deny.
         let mut r = req("Sign", Some("RSA"), &attrs);
@@ -1060,6 +1489,7 @@ mod tests {
             allowed_padding_methods: vec![],
             require_deterministic: None,
             reason: "AEAD only".into(),
+            clause: None,
         };
         // CBC (0x01) → deny.
         let mut r = req("Encrypt", Some("AES"), &attrs);
@@ -1085,6 +1515,7 @@ mod tests {
             allowed_padding_methods: vec![],
             require_deterministic: Some(true),
             reason: "deterministic signing required".into(),
+            clause: None,
         };
         // deterministic=true → allow.
         let mut r = req("Sign", Some("ML-DSA-65"), &attrs);
@@ -1105,6 +1536,7 @@ mod tests {
             ops: vec!["MAC".into()],
             mac_algorithms: vec!["HMAC-SHA256".into(), "HMAC-SHA384".into()],
             reason: "approved MACs only".into(),
+            clause: None,
         };
         assert!(rule
             .check_pass2(&req("MAC", Some("HMAC-SHA256"), &attrs), Some("HMAC-SHA256"))
@@ -1128,6 +1560,7 @@ mod tests {
             tag_length: None,
             salt_length: None,
             reason: "force deterministic".into(),
+            clause: None,
         };
         let cp = rule
             .resolve_cp(&req("Sign", Some("ML-DSA-65"), &attrs), Some("ML-DSA-65"))
@@ -1142,6 +1575,7 @@ mod tests {
             ops: vec!["MAC".into()],
             mac_algorithms: vec![],
             reason: "x".into(),
+            clause: None,
         }
         .resolve_cp(&req("MAC", Some("HMAC-SHA256"), &attrs), Some("HMAC-SHA256"))
         .is_none());
@@ -1161,6 +1595,7 @@ mod tests {
             tag_length: None,
             salt_length: None,
             reason: "force AEAD".into(),
+            clause: None,
         };
         let cp = rule
             .resolve_cp(&req("Encrypt", Some("AES"), &attrs), Some("AES"))
@@ -1188,6 +1623,7 @@ mod tests {
             tag_length: Some(16),
             salt_length: Some(32),
             reason: "mandate MGF1 + 128-bit tag + 32-byte PSS salt".into(),
+            clause: None,
         };
         let cp = rule
             .resolve_cp(&req("Encrypt", Some("RSA"), &attrs), Some("RSA"))
@@ -1209,6 +1645,7 @@ mod tests {
             ops: vec!["Encrypt".into()],
             mechanisms: vec!["CKM_AES_CBC".into(), "CKM_AES_ECB".into()],
             reason: "AEAD only".into(),
+            clause: None,
         };
         let mut r = req("Encrypt", Some("AES"), &attrs);
         r.mechanism.canonical_mech = Some(c::CKM_AES_CBC);
@@ -1221,6 +1658,7 @@ mod tests {
             ops: vec!["Sign".into()],
             mechanisms: vec!["CKM_ML_DSA".into()],
             reason: "PQC signature mechanisms only".into(),
+            clause: None,
         };
         let mut r3 = req("Sign", Some("ML-DSA-65"), &attrs);
         r3.mechanism.canonical_mech = Some(c::CKM_ML_DSA);
@@ -1239,6 +1677,7 @@ mod tests {
             reason: "Not in allowlist".into(),
             effective_from: None,
             effective_until: None,
+            clause: None,
         };
         let deny = r.check_pass2(&req("Create", Some("RSA-2048"), &attrs), Some("RSA-2048"));
         assert!(deny.is_some());
@@ -1260,6 +1699,7 @@ mod tests {
                 name: "pqctoday-purpose".into(),
                 value: "research".into(),
             }),
+            clause: None,
         };
         let allow = r.check_pass2(&req("Create", Some("ML-DSA-65"), &attrs), Some("ML-DSA-65"));
         assert!(allow.is_none(), "exception attribute should suppress deny");
@@ -1276,6 +1716,7 @@ mod tests {
             algorithm: "RSA".into(),
             min_bits: 3072,
             reason: "FIPS 186-5".into(),
+            clause: None,
         };
         let mut req = req("Create", Some("RSA"), &attrs);
         req.key_length = Some(2048);
@@ -1294,6 +1735,7 @@ mod tests {
             from: "ECDSA-P256".into(),
             to: "ML-DSA-65".into(),
             reason: "Upgrade classical to PQC".into(),
+            clause: None,
         };
         let req = req("CreateKeyPair", Some("ECDSA-P256"), &attrs);
         let sub = r.resolve_substitution(&req, Some("ECDSA-P256")).expect("must substitute");
@@ -1307,6 +1749,7 @@ mod tests {
             ops: vec!["CreateKeyPair".into()],
             default_algorithm: "ML-DSA-87".into(),
             reason: "PQC default for signing".into(),
+            clause: None,
         };
         let req = req("CreateKeyPair", None, &attrs);
         let sub = r.resolve_default(&req).expect("must default");
@@ -1329,6 +1772,7 @@ mod tests {
             ops: vec!["Sign".into()],
             days: 90,
             reason: "key past 90-day rotation window".into(),
+            clause: None,
         };
         let activated = OffsetDateTime::UNIX_EPOCH;
         let aged = |op: &'static str, age_days: i64, with_date: bool| {
@@ -1365,6 +1809,7 @@ mod tests {
             algorithms: vec![],
             after: TimeBound::At(time::Date::from_calendar_date(2030, time::Month::January, 1).unwrap()),
             reason: "Post-2030 classical banned".into(),
+            clause: None,
         };
         let ts_pre = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap(); // 2023
         let ts_post = OffsetDateTime::from_unix_timestamp(2_000_000_000).unwrap(); // 2033
@@ -1384,6 +1829,7 @@ mod tests {
             op: "Sign".into(),
             allowed_states: vec!["Active".into()],
             reason: "Only Active keys may sign".into(),
+            clause: None,
         };
         let mut req = req("Sign", Some("ML-DSA-87"), &attrs);
         req.state = Some("Active");
@@ -1404,12 +1850,15 @@ mod tests {
             composite_oid: None,
             triggered_by_custom_attribute: None,
             reason: "Composite required in migration window".into(),
+            clause: None,
         };
         let mut req = req("Create", Some("ML-DSA-65"), &attrs);
         req.ts = OffsetDateTime::from_unix_timestamp(1_800_000_000).unwrap(); // 2027
         // Pure ML-DSA-65 inside window → deny (composite required).
         assert!(r.check_pass2(&req, Some("ML-DSA-65")).is_some());
-        // Composite name → allow.
+        // KMIP 3.0-cased composite name → allow (canonical spelling).
+        assert!(r.check_pass2(&req, Some("ML-DSA-65-Ed25519")).is_none());
+        // Case-insensitive: the legacy uppercase spelling is still accepted.
         assert!(r.check_pass2(&req, Some("ML-DSA-65-ED25519")).is_none());
     }
 
@@ -1420,6 +1869,7 @@ mod tests {
             attribute_name: "pqctoday-cnsa-classification".into(),
             algorithms: vec!["ML-DSA-87".into()],
             reason: "CNSA classification required".into(),
+            clause: None,
         };
         let req1 = req("Create", Some("ML-DSA-87"), &attrs);
         assert!(r.check_pass2(&req1, Some("ML-DSA-87")).is_some());

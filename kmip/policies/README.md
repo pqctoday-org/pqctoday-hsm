@@ -99,7 +99,7 @@ Two families:
 | `require_custom_attribute` | `attribute_name: <name>`, `algorithms: [...]` | If `algorithm ∈ algorithms` AND `x-<attribute_name>` not set → Deny |
 | `temporal_cutoff` | `op: <name>`, `algorithm_class: <classical\|pqc>`, `after: <YYYY-MM-DD>`, optional `algorithms: [...]` | If `now >= after` AND `op == name` AND algorithm matches class (and optional narrow list) → Deny |
 | `lifecycle_state_gate` | `op: <name>`, `allowed_states: [...]` | If `op == name` AND `state ∉ allowed_states` → Deny |
-| `hybrid_dual_sign_requirement` | `primary: <alg>`, `secondary: <alg>`, `effective_from: <date>`, `effective_until: <date>`, `ops_affected: [...]` | During window, every op in `ops_affected` MUST carry the composite algorithm name `<primary>-<SECONDARY>` (e.g. `ML-DSA-65-ED25519`). |
+| `hybrid_dual_sign_requirement` | `primary: <alg>`, `secondary: <alg>`, `effective_from: <date>`, `effective_until: <date>`, `ops_affected: [...]` | During window, every op in `ops_affected` MUST carry the composite algorithm name `<primary>-<secondary>` in KMIP 3.0 spelling (e.g. `ML-DSA-65-Ed25519`); matched case-insensitively. |
 | `compliance_profile_gate` | `profile: <FIPS-140-3\|CNSA-2.0\|...>`, `ops: [...]` | **Documentational only in Phase 4.5.** Composing allowlist/denylist rules carry actual enforcement; this variant exists so the Phase 8 compliance tool can map a policy back to its profile name. |
 
 ## Decisions

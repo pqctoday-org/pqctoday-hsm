@@ -25,7 +25,6 @@
 //!   no engine session it fails closed — a SHA-256 stand-in survives only
 //!   under `#[cfg(test)]` for the engine-less unit tests.
 
-use std::collections::HashMap;
 use time::OffsetDateTime;
 
 use crate::auditlog::{AuditEvent, EventPayload, KmipOpResult, Plane};
@@ -103,7 +102,9 @@ pub fn sign(deps: &Deps, req: SignRequest, correlation_id: &str) -> Result<SignR
     )?;
 
     // ── Plane 1: policy gate ────────────────────────────────────────────
-    let empty: HashMap<String, String> = HashMap::new();
+    // Y1 — read the classification tag off the stored key so a
+    // `require_custom_attribute` gate applies at use-time too.
+    let stored_attrs = super::helpers::strip_x_prefixes(&obj.custom_attributes);
     // Curve/size-QUALIFIED name (e.g. "ECDSA-P256") so the shipped policies'
     // qualified `from:`/denylist entries actually match this stored key — the
     // coarse `canonical_name` ("ECDSA") never matched, leaving the rekey rules
@@ -114,7 +115,7 @@ pub fn sign(deps: &Deps, req: SignRequest, correlation_id: &str) -> Result<SignR
         Some(&stored_algo),
         started,
         correlation_id,
-        &empty,
+        &stored_attrs,
     );
     p_req.usage_mask = Some(obj.usage_mask);
     p_req.state = Some("Active");
@@ -301,6 +302,7 @@ pub fn sign(deps: &Deps, req: SignRequest, correlation_id: &str) -> Result<SignR
     Ok(SignResponse {
         uid: req.uid,
         signature,
+        rekeyed: None,
     })
 }
 
@@ -378,16 +380,25 @@ fn rekey_and_sign(
         },
     ));
 
-    // 4. Re-issue the original Sign against the migrated key.
-    sign(
+    // 4. Re-issue the original Sign against the migrated key, then stamp the
+    // response with the rekey details (R7 Phase 4 — so the dispatcher's §9.5
+    // Undo wave can find and delete both halves of the new key pair on
+    // rollback; see `SignResponse::rekeyed`).
+    let mut resp = sign(
         deps,
         SignRequest {
-            uid: ckp.private_key_uid,
+            uid: ckp.private_key_uid.clone(),
             data: req.data.clone(),
             cryptographic_parameters: req.cryptographic_parameters.clone(),
         },
         correlation_id,
-    )
+    )?;
+    resp.rekeyed = Some(crate::kmip30::SignRekeyInfo {
+        old_uid: old.uid.clone(),
+        new_private_key_uid: ckp.private_key_uid,
+        new_public_key_uid: ckp.public_key_uid,
+    });
+    Ok(resp)
 }
 
 /// Test-only stand-in used by the engine-less unit tests below. Production

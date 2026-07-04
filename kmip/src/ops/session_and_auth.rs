@@ -31,6 +31,20 @@ use crate::store::ObjectRecord;
 use super::deps::Deps;
 use super::helpers::{emit_request, emit_success, fail_err};
 
+/// K4 — map a KMIP Credential Type (§11) to the matching Object Type credential
+/// subtype (spec Object Type enum 0x0d–0x10), so a created credential reports
+/// its true type instead of Secret Data. Types with no dedicated Object Type
+/// (e.g. Certificate 0x08) fall back to the generic Password Credential.
+fn credential_object_type(credential_type: u32) -> ObjectType {
+    match credential_type {
+        0x02 => ObjectType::DeviceCredential,             // Device
+        0x04 => ObjectType::OneTimePasswordCredential,    // One Time Password
+        0x05 => ObjectType::HashedPasswordCredential,     // Hashed Password
+        // 0x01 Username&Password, 0x07 Password, 0x08 Certificate, … → generic.
+        _ => ObjectType::PasswordCredential,
+    }
+}
+
 // ── CreateCredential ───────────────────────────────────────────────────────
 
 pub fn create_credential(
@@ -84,7 +98,9 @@ pub fn create_credential(
         ));
     }
 
-    let uid = persist_simple_record(deps, ObjectType::SecretData, req.attributes)?;
+    // K4 — persist under the true Credential Object Type, not Secret Data.
+    let uid =
+        persist_simple_record(deps, credential_object_type(req.credential_type), req.attributes)?;
     emit_success(deps, correlation_id, "CreateCredential");
     Ok(CreateCredentialResponse { uid })
 }
@@ -97,9 +113,9 @@ pub fn create_group(
     correlation_id: &str,
 ) -> Result<CreateGroupResponse> {
     emit_request(deps, correlation_id, "CreateGroup", format!("attrs={}", req.attributes.len()));
-    // KMIP doesn't define a Group object type in §3.x, so we persist
-    // it as a SecretData-shaped record with Name + attributes.
-    let uid = persist_simple_record(deps, ObjectType::SecretData, req.attributes)?;
+    // K4 — KMIP 3.0 Object Type enum defines Group (0x0c); persist under it so
+    // GetAttributes/Locate report the true type (was Secret Data).
+    let uid = persist_simple_record(deps, ObjectType::Group, req.attributes)?;
     emit_success(deps, correlation_id, "CreateGroup");
     Ok(CreateGroupResponse { uid })
 }
@@ -112,7 +128,8 @@ pub fn create_user(
     correlation_id: &str,
 ) -> Result<CreateUserResponse> {
     emit_request(deps, correlation_id, "CreateUser", format!("attrs={}", req.attributes.len()));
-    let uid = persist_simple_record(deps, ObjectType::SecretData, req.attributes)?;
+    // K4 — KMIP 3.0 Object Type enum defines User (0x0b); persist under it.
+    let uid = persist_simple_record(deps, ObjectType::User, req.attributes)?;
     emit_success(deps, correlation_id, "CreateUser");
     Ok(CreateUserResponse { uid })
 }
@@ -256,6 +273,38 @@ mod tests {
             password_credential: None,
         }, "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::MissingData);
+    }
+
+    #[test]
+    fn k4_system_objects_persist_true_object_type() {
+        // K4 — CreateUser/Group/Credential must store the true Object Type
+        // (0x0b/0x0c/0x0d–0x10), not Secret Data, so GetAttributes/Locate report it.
+        let d = deps_with();
+
+        let u = create_user(&d, CreateUserRequest { attributes: vec![Attribute::Name("bob".into())] }, "u").unwrap();
+        assert_eq!(d.store.get(&u.uid).unwrap().unwrap().object_type, ObjectType::User);
+
+        let g = create_group(&d, CreateGroupRequest { attributes: vec![Attribute::Name("admins".into())] }, "g").unwrap();
+        assert_eq!(d.store.get(&g.uid).unwrap().unwrap().object_type, ObjectType::Group);
+
+        // Password/Username (0x01) → PasswordCredential; Device (0x02) → DeviceCredential;
+        // Hashed (0x05) → HashedPasswordCredential.
+        let c1 = create_credential(&d, CreateCredentialRequest {
+            credential_type: 0x01, attributes: vec![],
+            password_credential: Some(PasswordCredential { username: "a".into(), password: Some("p".into()) }),
+        }, "c1").unwrap();
+        assert_eq!(d.store.get(&c1.uid).unwrap().unwrap().object_type, ObjectType::PasswordCredential);
+
+        let c2 = create_credential(&d, CreateCredentialRequest {
+            credential_type: 0x02, attributes: vec![], password_credential: None,
+        }, "c2").unwrap();
+        assert_eq!(d.store.get(&c2.uid).unwrap().unwrap().object_type, ObjectType::DeviceCredential);
+
+        let c5 = create_credential(&d, CreateCredentialRequest {
+            credential_type: 0x05, attributes: vec![],
+            password_credential: Some(PasswordCredential { username: "a".into(), password: Some("h".into()) }),
+        }, "c5").unwrap();
+        assert_eq!(d.store.get(&c5.uid).unwrap().unwrap().object_type, ObjectType::HashedPasswordCredential);
     }
 
     #[test]

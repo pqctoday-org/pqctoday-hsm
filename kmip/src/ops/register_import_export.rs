@@ -86,15 +86,18 @@ pub fn register(
     let resolved_length = length.or(key_block.map(|kb| kb.cryptographic_length));
 
     // Plane-1 policy gate. Treat Register as Create from a policy POV —
-    // the engine evaluates Algorithm + UsageMask the same way.
-    let empty: HashMap<String, String> = HashMap::new();
-    let algo_str = resolved_algorithm.map(canonical_name);
+    // the engine evaluates Algorithm + UsageMask the same way. Y1: surface the
+    // request's custom attributes; Y3: qualify the algorithm ("AES" → "AES-256").
+    let custom_attrs = super::helpers::custom_attrs_from(&req.attributes);
+    let algo_str = resolved_algorithm
+        .map(canonical_name)
+        .map(|a| super::helpers::qualify_algorithm_str(&a, resolved_length));
     let mut p_req = PolicyRequest::minimal(
         "Register",
         algo_str.as_deref(),
         started,
         correlation_id,
-        &empty,
+        &custom_attrs,
     );
     p_req.key_length = resolved_length;
     p_req.usage_mask = usage_mask;
@@ -494,14 +497,17 @@ pub fn import_object(
     let resolved_algorithm = algorithm.or(key_block.map(|kb| kb.cryptographic_algorithm));
     let resolved_length = length.or(key_block.map(|kb| kb.cryptographic_length));
 
-    let empty: HashMap<String, String> = HashMap::new();
-    let algo_str = resolved_algorithm.map(canonical_name);
+    // Y1 custom attributes; Y3 qualified algorithm — Import mirrors Register.
+    let custom_attrs = super::helpers::custom_attrs_from(&req.attributes);
+    let algo_str = resolved_algorithm
+        .map(canonical_name)
+        .map(|a| super::helpers::qualify_algorithm_str(&a, resolved_length));
     let mut p_req = PolicyRequest::minimal(
         "Import",
         algo_str.as_deref(),
         started,
         correlation_id,
-        &empty,
+        &custom_attrs,
     );
     p_req.key_length = resolved_length;
     p_req.usage_mask = usage_mask;
