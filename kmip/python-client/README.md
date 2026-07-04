@@ -6,8 +6,14 @@ No external dependencies — uses Python stdlib only (`ssl`, `socket`, `http.cli
 
 ## Install
 
+Stdlib-only — no dependencies. Install from source (the package is not yet
+published to PyPI):
+
 ```bash
-pip install pqctoday-kmip-client
+cd kmip/python-client
+pip install -e .
+# or, without installing:
+PYTHONPATH=src python -m pqctoday_kmip demo
 ```
 
 ## Data plane — KMIP 3.0 operations

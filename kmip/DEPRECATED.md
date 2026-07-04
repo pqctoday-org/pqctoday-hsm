@@ -21,8 +21,8 @@ denominator.
 | `0x05` | DSA (classical discrete-log signatures) | NIST [SP 800-186 §5.4](https://csrc.nist.gov/pubs/sp/800/186/final) + FIPS 186-5 — DSA signing is removed from the federal cryptographic catalogue; new DSA signatures are non-conformant after 2023. |
 
 The corresponding PKCS#11 v3.2 mechanism codepoints (`CKM_DES_*`,
-`CKM_DES3_*`, `CKM_DSA*`) are intentionally absent from
-`rust/src/constants.rs` and have no shim path.
+`CKM_DES3_*`, `CKM_DSA*`) are intentionally absent from the KMIP algorithm
+table in `src/kmip30/algos.rs` (the `KmipAlgorithm` enum) and have no shim path.
 
 ## Affected OASIS conformance tests
 
@@ -56,9 +56,9 @@ in the skip-list is policy documentation, not a current test exclusion.
 
 Re-enabling support for any of these mechanisms requires:
 
-1. Adding `CKM_*` constants to `rust/src/constants.rs`.
+1. Adding the `KmipAlgorithm` enum variant to `src/kmip30/algos.rs`.
 2. Adding a shim path for the mechanism (encrypt/sign/keygen).
-3. Adding the `KmipAlgorithm` enum variant + wire codec coverage.
+3. Adding the wire codec coverage for the new algorithm.
 4. Removing the corresponding entry from `_DEPRECATED_ALGO_TESTS`.
 5. Documenting the rationale for the policy reversal here.
 

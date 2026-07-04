@@ -2,7 +2,7 @@
 
 Example + default policy files consumed by the `pqctoday-hsm/kmip/` subsystem's policy engine (`src/policy/loader.rs`).
 
-Loaded at server start via `pqctoday-kmip --policy-file policies/<name>.yaml`. The engine evaluates every KMIP request against the loaded policy before dispatching it to a Plane 2 op handler. A `Deny` decision short-circuits the request with a KMIP `PermissionDenied` response.
+Loaded at server start via `pqctoday-kmip --policy-dir policies --policy <name>`. The engine evaluates every KMIP request against the loaded policy before dispatching it to a Plane 2 op handler. A `Deny` decision short-circuits the request with a KMIP `PermissionDenied` response.
 
 ## Files
 
@@ -18,6 +18,9 @@ Loaded at server start via `pqctoday-kmip --policy-file policies/<name>.yaml`. T
 | [`fips-hashing.yaml`](fips-hashing.yaml) | **Mechanism dimension (hashing).** Restrict Sign/Verify hashing to FIPS SHA-2/SHA-3; deny SHA-1 — gates the KMIP `Hashing Algorithm`, not just the key algorithm. |
 | [`aead-only.yaml`](aead-only.yaml) | **Mechanism dimension (mode/padding).** AES Encrypt/Decrypt must be GCM/CCM; RSA must be OAEP — gates KMIP `Block Cipher Mode` / `Padding Method`. |
 | [`deterministic-signing.yaml`](deterministic-signing.yaml) | **Mechanism forcing.** Forces deterministic ML-DSA/SLH-DSA via the WD19 `Deterministic` flag — policy *sets* the mechanism param, transparent to the app. |
+| [`auto-migrate-on-use.yaml`](auto-migrate-on-use.yaml) | Auto-rekey classical key handles to their PQC equivalent on first use (Sign/Encrypt), via `algorithm_substitution`. |
+| [`bsi-tr-02102.yaml`](bsi-tr-02102.yaml) | German BSI TR-02102 profile: allowed PQC + classical algorithms and key lengths per the BSI technical guideline. |
+| [`pkcs11-mechanism-lockdown.yaml`](pkcs11-mechanism-lockdown.yaml) | **Mechanism dimension.** Allowlists the specific PKCS#11 mechanisms permitted (keygen + sign/verify families), denying everything else. |
 
 ## Headline-demo dropdown (Hub scenario UI)
 
@@ -70,7 +73,7 @@ rules:                                   # ordered; first matching Deny wins
     reason: <human reason for audit log>
 ```
 
-## Rule types (v0.1 — 12 built-in primitives)
+## Rule types (18 built-in primitives)
 
 Two families:
 
@@ -101,6 +104,22 @@ Two families:
 | `lifecycle_state_gate` | `op: <name>`, `allowed_states: [...]` | If `op == name` AND `state ∉ allowed_states` → Deny |
 | `hybrid_dual_sign_requirement` | `primary: <alg>`, `secondary: <alg>`, `effective_from: <date>`, `effective_until: <date>`, `ops_affected: [...]` | During window, every op in `ops_affected` MUST carry the composite algorithm name `<primary>-<secondary>` in KMIP 3.0 spelling (e.g. `ML-DSA-65-Ed25519`); matched case-insensitively. |
 | `compliance_profile_gate` | `profile: <FIPS-140-3\|CNSA-2.0\|...>`, `ops: [...]` | **Documentational only in Phase 4.5.** Composing allowlist/denylist rules carry actual enforcement; this variant exists so the Phase 8 compliance tool can map a policy back to its profile name. |
+
+### Mechanism-dimension rules
+
+These gate/resolve the KMIP *mechanism* parameters (hash, cipher mode, padding,
+MAC, deterministic flag) rather than just the key algorithm — the "mechanism
+dimension" advertised by `fips-hashing.yaml`, `aead-only.yaml`,
+`deterministic-signing.yaml` and `pkcs11-mechanism-lockdown.yaml`.
+
+| Type | Effect |
+|---|---|
+| `mechanism_allowlist` | If `op ∈ ops` AND the requested PKCS#11 mechanism ∉ `mechanisms` → Deny. |
+| `mechanism_denylist` | If `op ∈ ops` AND the requested mechanism ∈ `mechanisms` → Deny. |
+| `hash_algorithm_allowlist` | Restrict the KMIP `Hashing Algorithm` for Sign/Verify to an allowed set (e.g. deny SHA-1). |
+| `mac_mechanism_policy` | Constrain the MAC mechanism family (e.g. require HMAC-SHA2+). |
+| `mechanism_parameter_constraint` | Gate a mechanism parameter — e.g. AES `Block Cipher Mode` ∈ {GCM, CCM}, RSA `Padding Method` = OAEP. |
+| `mechanism_parameter_default` | Resolution rule (Pass 1): *set* a mechanism parameter the request omitted — e.g. force the WD19 `Deterministic` flag on ML-DSA/SLH-DSA. |
 
 ## Decisions
 
