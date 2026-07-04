@@ -1,0 +1,131 @@
+{
+  "schema_version": "1.0",
+  "description": "pqc_validate operations template — self-validating round-trips plus canonical NIST/RFC known-answer vectors. Runnable from a clean checkout against a softhsmv3 token. Extend with more mechanisms/vectors as needed.",
+  "openssl_scope": "OpenSSL 3.5+ EVP backend (ML-KEM/ML-DSA/SLH-DSA + classical)",
+  "operations": [
+    {
+      "id": "rng-001",
+      "name": "C_GenerateRandom — 32 bytes",
+      "category": "RNG",
+      "mechanism_id": "0x00000000",
+      "params": { "length": 32 },
+      "expected": {}
+    },
+    {
+      "id": "hash-sha256-001",
+      "name": "SHA-256 — NIST vector (\"abc\")",
+      "category": "Hash",
+      "mechanism_id": "0x00000250",
+      "params": { "message_hex": "616263" },
+      "expected": { "digest_hex": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad" }
+    },
+    {
+      "id": "hash-sha384-001",
+      "name": "SHA-384 — NIST vector (\"abc\")",
+      "category": "Hash",
+      "mechanism_id": "0x00000260",
+      "params": { "message_hex": "616263" },
+      "expected": { "digest_hex": "cb00753f45a35e8bb5a03d699ac65007272c32ab0eded1631a8b605a43ff5bed8086072ba1e7cc2358baeca134c825a7" }
+    },
+    {
+      "id": "hash-sha512-001",
+      "name": "SHA-512 — NIST vector (\"abc\")",
+      "category": "Hash",
+      "mechanism_id": "0x00000270",
+      "params": { "message_hex": "616263" },
+      "expected": { "digest_hex": "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f" }
+    },
+    {
+      "id": "hmac-sha256-001",
+      "name": "HMAC-SHA256 — RFC 4231 test case 1",
+      "category": "HMAC",
+      "mechanism_id": "0x00000251",
+      "params": {
+        "key_hex": "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b",
+        "message_hex": "4869205468657265"
+      },
+      "expected": { "mac_hex": "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7" }
+    },
+    {
+      "id": "aes-gcm-256-001",
+      "name": "AES-256-GCM — encrypt/decrypt round-trip + tamper detect",
+      "category": "AES",
+      "mechanism": "CKM_AES_GCM",
+      "mechanism_id": "0x00001087",
+      "params": { "key_bits": 256, "plaintext_hex": "00112233445566778899aabbccddeeff", "aad_hex": "cafe" },
+      "expected": {}
+    },
+    {
+      "id": "ecdsa-p256-001",
+      "name": "ECDSA P-256 — sign/verify round-trip",
+      "category": "ECDSA",
+      "mechanism_id": "0x00001041",
+      "params": { "curve": "P-256", "message_hex": "616263" },
+      "expected": {}
+    },
+    {
+      "id": "eddsa-ed25519-001",
+      "name": "EdDSA Ed25519 — sign/verify round-trip",
+      "category": "EdDSA",
+      "mechanism_id": "0x00001057",
+      "params": { "curve": "Ed25519", "message_hex": "616263" },
+      "expected": {}
+    },
+    {
+      "id": "ml-kem-512-001",
+      "name": "ML-KEM-512 — encapsulate/decapsulate round-trip",
+      "category": "ML-KEM",
+      "mechanism_id": "0x0000000f",
+      "params": { "parameter_set": "ML-KEM-512", "parameter_set_id": "0x00000001" },
+      "expected": {}
+    },
+    {
+      "id": "ml-kem-768-001",
+      "name": "ML-KEM-768 — encapsulate/decapsulate round-trip",
+      "category": "ML-KEM",
+      "mechanism_id": "0x0000000f",
+      "params": { "parameter_set": "ML-KEM-768", "parameter_set_id": "0x00000002" },
+      "expected": {}
+    },
+    {
+      "id": "ml-kem-1024-001",
+      "name": "ML-KEM-1024 — encapsulate/decapsulate round-trip",
+      "category": "ML-KEM",
+      "mechanism_id": "0x0000000f",
+      "params": { "parameter_set": "ML-KEM-1024", "parameter_set_id": "0x00000003" },
+      "expected": {}
+    },
+    {
+      "id": "ml-dsa-44-001",
+      "name": "ML-DSA-44 — sign/verify round-trip",
+      "category": "ML-DSA",
+      "mechanism_id": "0x0000001d",
+      "params": { "parameter_set": "ML-DSA-44", "parameter_set_id": "0x00000001", "message_hex": "616263" },
+      "expected": {}
+    },
+    {
+      "id": "ml-dsa-65-001",
+      "name": "ML-DSA-65 — sign/verify round-trip",
+      "category": "ML-DSA",
+      "mechanism_id": "0x0000001d",
+      "params": { "parameter_set": "ML-DSA-65", "parameter_set_id": "0x00000002", "message_hex": "616263" },
+      "expected": {}
+    },
+    {
+      "id": "ml-dsa-87-001",
+      "name": "ML-DSA-87 — sign/verify round-trip",
+      "category": "ML-DSA",
+      "mechanism_id": "0x0000001d",
+      "params": { "parameter_set": "ML-DSA-87", "parameter_set_id": "0x00000003", "message_hex": "616263" },
+      "expected": {}
+    },
+    {
+      "id": "slh-dsa-sha2-128s-001",
+      "name": "SLH-DSA-SHA2-128s — sign/verify round-trip",
+      "category": "SLH-DSA",
+      "mechanism_id": "0x0000002e",
+      "params": { "parameter_set": "SLH-DSA-SHA2-128s", "parameter_set_id": "0x00000001", "message_hex": "616263" },
+      "expected": {}
+    }
+  ]
+}

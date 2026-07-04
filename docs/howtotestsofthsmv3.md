@@ -296,12 +296,16 @@ g++ -o pqc_validate tests/pqc_validate.cpp \
 > normal output. The phase tables in §7 are retained for historical context.
 
 ╔══ Summary ══╗
-  Total:   70
-  Passed:  52
+  Total:   15
+  Passed:  15
   Failed:  0
-  Skipped: 18
-  Output:  ./pqc_validate_03022026.json
+  Skipped: 0
+  Output:  ./pqc_validate_07042026.json
 ```
+
+(That is the shipped 15-case default ops file — all pass against a v0.8.0 token.
+A non-zero *Skipped* now means a mechanism is missing from the loaded module,
+and any *Failed* is a real regression.)
 
 ### 5.6 Exit codes
 
@@ -742,7 +746,7 @@ Omitting `CKA_VALUE_LEN` → `CKR_TEMPLATE_INCOMPLETE (0x000000d0)`.
 | File | Description |
 |---|---|
 | `tests/pqc_validate.cpp` | Standalone validation program |
-| `tests/pqc_validate_ops.json` | Operations template (70 test cases) |
+| `tests/pqc_validate_ops.json` | Operations template (shipped; 15-case runnable subset — round-trips + NIST/RFC KAT, extensible) |
 | `tests/README.md` | Build + run quick-reference |
 | `src/lib/test/` | CppUnit p11test suite |
 | `src/lib/pkcs11/pkcs11t.h` | All `CKM_*`, `CKK_*`, `CKA_*`, `CKP_*` constants |

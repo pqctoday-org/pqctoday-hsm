@@ -149,7 +149,12 @@ Exit code `0` is expected in all phases — SKIPs do not count as failures.
 
 ---
 
-## Mechanism Coverage (~70 test cases)
+## Mechanism Coverage
+
+The shipped default `pqc_validate_ops.json` is a **15-case runnable subset**
+(RNG, SHA-2 KAT, HMAC KAT, AES-GCM, ECDSA, EdDSA, ML-KEM ×3, ML-DSA ×3,
+SLH-DSA) — enough to validate the token from a clean checkout. The tool itself
+supports the fuller matrix below; extend the ops file to reach it.
 
 | Category | Count | Notes |
 |---|---|---|
@@ -174,9 +179,9 @@ Exit code `0` is expected in all phases — SKIPs do not count as failures.
 ```
 tests/
 ├── pqc_validate.cpp          Main validation program
-├── pqc_validate_ops.json     Operations template — REQUIRED by pqc_validate, but
-│                             NOT currently committed; supply your own before running
-│                             (the program exits with "cannot open ops file" if absent)
+├── pqc_validate_ops.json     Operations template (shipped) — 15 self-validating
+│                             round-trips + NIST/RFC known-answer vectors; the
+│                             default --ops-file. Extend with more cases as needed.
 ├── json.hpp                  nlohmann/json v3.11.3 (download via curl)
 └── README.md                 This file
 ```
