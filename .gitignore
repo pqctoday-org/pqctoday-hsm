@@ -20,7 +20,10 @@ wasm/softhsm.wasm
 pqc_validate
 pqc_validate_asan
 pqc_validate_dbg
-pqc_validate_*.json
+# Ignore dated run-output files (pqc_validate_07042026.json, _r1, …) but NOT the
+# committed ops template pqc_validate_ops.json.
+pqc_validate_[0-9]*.json
+!tests/pqc_validate_ops.json
 
 # Backup files
 *.bak
