@@ -237,6 +237,13 @@ pub const CKM_PKCS5_PBKD2: u32 = 0x0000_03b0;
 pub const CKM_SP800_108_COUNTER_KDF: u32 = 0x0000_03ac;
 pub const CKM_SP800_108_FEEDBACK_KDF: u32 = 0x0000_03ad;
 pub const CKM_HKDF_DERIVE: u32 = 0x0000_402a;
+// Simple key-derivation: concatenate a base key's value with a second key's
+// value (PKCS#11 v3.2 §6.43; value verified against the vendored pkcs11t.h
+// `#define CKM_CONCATENATE_BASE_AND_KEY 0x00000360UL`). The parameter is a
+// `CK_OBJECT_HANDLE` (the second key). This is the spec-defined building
+// block for composing a hybrid KEM shared secret (classical ‖ PQC) entirely
+// inside the HSM — PKCS#11 v3.2 has no dedicated hybrid-KEM mechanism.
+pub const CKM_CONCATENATE_BASE_AND_KEY: u32 = 0x0000_0360;
 
 // ML-DSA pre-hash mechanisms (PKCS#11 v3.2, pkcs11t.h §1221-1231)
 pub const CKM_HASH_ML_DSA_SHA224: u32 = 0x0000_0023;
@@ -544,6 +551,9 @@ pub const SUPPORTED_MECHS: &[u32] = &[
     CKM_HKDF_DERIVE,
     CKM_SP800_108_COUNTER_KDF,
     CKM_SP800_108_FEEDBACK_KDF,
+    // Simple concatenation derive — the hybrid-KEM combiner building block
+    // (classical ‖ PQC shared secret, entirely in-HSM). PKCS#11 v3.2 §6.43.3.
+    CKM_CONCATENATE_BASE_AND_KEY,
     // BIP32 HD derivation (C_DeriveKey master/child — pkcs11t.h 0x105B/0x105C)
     CKM_BIP32_MASTER_DERIVE,
     CKM_BIP32_CHILD_DERIVE,

@@ -96,6 +96,98 @@ future KMIP revision assigns a real one — do not invent a value in the
 variant either; extension-codepoint it, matching the documented pattern
 for the deferred composite-signature algorithms.
 
+## Verified reference values (2026-07-05, from primary sources)
+
+**`CKM_CONCATENATE_BASE_AND_KEY` semantics** (PKCS#11 v3.2 §6.43.3, extracted
+verbatim from the published spec PDF): derives a generic-secret key whose
+value is `base_key.CKA_VALUE ‖ parameter_key.CKA_VALUE`. Base = `C_DeriveKey`'s
+`hBaseKey`; the appended key = the `CK_OBJECT_HANDLE` passed as the mechanism
+parameter. Default output = generic secret, length = sum of the two values.
+No KDF, no truncation — pure ordered concatenation. Value `0x360`, verified
+against the vendored `pkcs11t.h`.
+
+**The three IANA-registered TLS hybrid groups** (`draft-ietf-tls-ecdhe-mlkem`,
+cross-checked vs the IANA TLS registry). Concatenation order is per-variant
+and spec-mandated — reversing it is a non-interop bug:
+
+| Group | IANA codepoint | base (first) ‖ param (second) | SS size |
+|---|---|---|---|
+| X25519MLKEM768 | 0x11EC (4588) | ML-KEM-768 ‖ X25519 | 64 B (32+32) |
+| SecP256r1MLKEM768 | 0x11EB (4587) | ECDH-P256 ‖ ML-KEM-768 | 64 B (32+32) |
+| SecP384r1MLKEM1024 | 0x11ED (4589) | ECDH-P384 ‖ ML-KEM-1024 | 80 B (48+32) |
+
+So per variant: build the two component secret-key handles, then call
+`C_DeriveKey(CKM_CONCATENATE_BASE_AND_KEY, hBaseKey = <first>, param = <second>)`.
+X25519MLKEM768 → base = ML-KEM handle, param = X25519 handle. The two SecP
+variants → base = ECDH handle, param = ML-KEM handle. (These TLS codepoints
+are the key-agreement group IDs, NOT the KMIP `CryptographicAlgorithm`
+codepoints — those remain WD19's `0x5c`/`0x5d`, with SecP384r1MLKEM1024
+needing an extension codepoint per the scope note above.)
+
+## Full composable-combiner architecture (2026-07-05 — scope: "full set")
+
+**Decision**: build the general combiner pipeline, not just pure concatenation
+for the three TLS groups. Verified that EVERY standardized/registered hybrid-
+KEM combiner is expressible as a chain of standard PKCS#11 v3.2 `C_DeriveKey`
+calls (concatenate, then optionally hash/KDF), each handle→handle, nothing
+leaving the HSM. This is the load-bearing correctness claim; the taxonomy
+that proves it:
+
+| Combiner family | Formula | PKCS#11 v3.2 derive chain |
+|---|---|---|
+| Concatenation (TLS `ecdhe-mlkem`, the 3 named groups) | `ss₁ ‖ ss₂` | `CONCATENATE_BASE_AND_KEY` |
+| Hash-of-concat (SSH `kexmlkem768x25519`) | `H(ss₁ ‖ ss₂)` | `CONCATENATE_BASE_AND_KEY` → `SHAx_KEY_DERIVATION` |
+| KDF-of-concat (IKEv2 / RFC 9370 PRF+) | `KDF(ss₁ ‖ ss₂)` | `CONCATENATE_BASE_AND_KEY` → `HKDF_DERIVE` / `SP800_108_*` |
+| Transcript-binding (X-Wing, Chempat) | `H(ss₁ ‖ ss₂ ‖ ct ‖ pk ‖ label)` | `CONCATENATE_BASE_AND_KEY` → `CONCATENATE_BASE_AND_DATA` → `SHA3_256_KEY_DERIVATION` |
+| Keyed dual-PRF | `PRF(ss₁ ; ss₂ ‖ ctx)` | `HKDF_DERIVE` with salt-as-key (HKDF-Extract keys on the salt) |
+
+No proposed combiner (NIST SP 800-227, ETSI, IETF `ecdhe-mlkem`, X-Wing,
+Chempat, IKEv2 RFC 9370) needs anything outside this set — they were all
+designed to reuse standard KDF/hash primitives so HSMs could compose them.
+
+### PKCS#11 v3.2 building blocks — status in our engine
+
+Verified against `rust/src/ffi.rs` `C_DeriveKey` dispatch (2026-07-05):
+
+| Mechanism | Spec | Status | Action |
+|---|---|---|---|
+| `CKM_CONCATENATE_BASE_AND_KEY` | §6.43.3 | ❌ missing | **add** (universal step 1; value 0x360, functional spec quoted below) |
+| `CKM_CONCATENATE_BASE_AND_DATA` | §6.43.4 | ❌ missing | **add** (append ct/pk/label; param `CK_KEY_DERIVATION_STRING_DATA`) |
+| `CKM_SHA512_KEY_DERIVATION` / `CKM_SHA384_…` / `CKM_SHA256_…` | §6.22 | ❌ missing (the SHA code in `C_DeriveKey` today is HKDF's internal PRF selection only, not standalone digest-key-derivation) | **add** (`new_key.value = SHAx(base.value)`) |
+| `CKM_SHA3_256_KEY_DERIVATION` / `CKM_SHA3_512_…` | §6.29 | ❌ missing | **add** (for SHA3-based combiners incl. X-Wing) |
+| `CKM_HKDF_DERIVE` | §6.62 | ✅ present, but salt-as-DATA only | **extend**: add `CKF_HKDF_SALT_KEY` (salt as a key handle) for keyed dual-PRF combiners |
+| `CKM_SP800_108_COUNTER_KDF` / `_FEEDBACK_KDF` | §6.x | ✅ present | none |
+
+`CKM_CONCATENATE_BASE_AND_KEY` functional spec (§6.43.3, verbatim): derives a
+secret key from `base_key.CKA_VALUE ‖ parameter_key.CKA_VALUE`; base =
+`C_DeriveKey`'s `hBaseKey`, appended key = the `CK_OBJECT_HANDLE` parameter;
+default output generic-secret, length = sum. Pure ordered concatenation.
+
+### KMIP 3.0 + PKCS#11 v3.2 dual-compliance mapping
+
+The rebuild must satisfy BOTH standards simultaneously; where each concern
+lives:
+
+| Concern | PKCS#11 v3.2 (rust/ engine) | KMIP 3.0 (kmip/ protocol) |
+|---|---|---|
+| Component keygen | `CKM_ML_KEM_KEY_PAIR_GEN`, `CKM_EC_MONTGOMERY_KEY_PAIR_GEN` (both implemented) | `CreateKeyPair` with the hybrid `CryptographicAlgorithm` (WD19 `0x5c`/`0x5d`; `SecP384r1MLKEM1024` needs an extension codepoint — no WD19 value, confirmed) |
+| Encapsulate | `C_EncapsulateKey` (ML-KEM half) + `C_DeriveKey` ECDH (classical half) → two secret handles; then the combiner pipeline (`C_DeriveKey` chain) → one final handle | KMIP 3.0 WD19 `Encapsulate` op returns ciphertext + the final shared-secret value (only the combined secret is released — correct) |
+| Decapsulate | mirror: `C_DecapsulateKey` + ECDH derive → combiner pipeline | KMIP 3.0 WD19 `Decapsulate` op |
+| Non-extractable private keys | `CKA_SENSITIVE=true` / `CKA_EXTRACTABLE=false` on both component private keys — never leave the HSM | KMIP `Get` on the private object returns no key material (falls out naturally once the key is a real non-extractable PKCS#11 object, not raw `ObjectRecord.key_material`) |
+| Combiner recipe (which chain, per named group + order) | n/a — engine just runs the mechanisms it's told | Lives in `kmip/` as declarative orchestration (legitimate KMIP-layer domain logic, like `ecdsa_curve_from_length`); NO crypto crate |
+
+### The combiner pipeline abstraction
+
+A named hybrid group is declared as an ordered list of derive steps — e.g.
+`X25519MLKEM768 = [Concatenate{base: mlkem_ss, param: x25519_ss}]`;
+`SSH-style = [Concatenate{…}, DigestDerive{SHA512}]`;
+`X-Wing = [Concatenate{base, param}, ConcatData{ct‖pk‖label}, DigestDerive{SHA3-256}]`.
+The `kmip/` layer holds these recipes (data, not code); a small executor walks
+the list calling the matching `native::` derive wrapper for each step against
+the running handle. Adding a future combiner = adding a recipe entry, no new
+crypto. All recipe steps are standard PKCS#11 v3.2 mechanisms, so the pipeline
+is conformant by construction.
+
 ## Design
 
 ### `rust/` changes (all the new code; no crypto crate touches `kmip/`)

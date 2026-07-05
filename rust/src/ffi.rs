@@ -886,6 +886,9 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
         CKM_CHACHA20 | CKM_CHACHA20_POLY1305 => (32, 32, 0x00000100 | 0x00000200),
         // BIP32 HD derivation (C_DeriveKey) — 32-byte seeds/keys, CKF_DERIVE.
         CKM_BIP32_MASTER_DERIVE | CKM_BIP32_CHILD_DERIVE => (32, 32, 0x00080000),
+        // Concatenate base ‖ second key (§6.43.3) — arbitrary-length secret
+        // values, CKF_DERIVE. The hybrid-KEM combiner step-1 building block.
+        CKM_CONCATENATE_BASE_AND_KEY => (0, 0, 0x00080000),
         _ => return None,
     };
     Some(info)
@@ -5807,6 +5810,36 @@ pub fn C_DeriveKey(
         }
 
         let key_value: Vec<u8> = match mech_type {
+            // ── Concatenate base key ‖ second key (PKCS#11 v3.2 §6.43.3) ─────
+            // The universal step-1 building block for composing a hybrid-KEM
+            // shared secret entirely in-HSM (classical ‖ PQC). pParameter is a
+            // single CK_OBJECT_HANDLE (the second/appended key), read at
+            // native width like the other derive params. Derived value =
+            // base.CKA_VALUE ‖ second.CKA_VALUE; flows through the unified
+            // secret-key finalization below (template-aware per the spec's
+            // "if no length/key type provided ⇒ generic secret" rule).
+            CKM_CONCATENATE_BASE_AND_KEY => {
+                let p_param = *((p_mechanism as *const usize).add(1)) as *const usize;
+                if p_param.is_null() {
+                    return CKR_ARGUMENTS_BAD;
+                }
+                let second_handle = *p_param as u32;
+                // The second key must permit derivation too (its value is being
+                // consumed into a new key), and must have a readable value.
+                if let Err(rv) = check_key_usage(_h_session, second_handle, CKA_DERIVE) {
+                    return rv;
+                }
+                let base_val = match get_object_value(h_base_key) {
+                    Some(v) => v,
+                    None => return CKR_KEY_HANDLE_INVALID,
+                };
+                let second_val = match get_object_value(second_handle) {
+                    Some(v) => v,
+                    None => return CKR_KEY_HANDLE_INVALID,
+                };
+                [base_val.as_slice(), second_val.as_slice()].concat()
+            }
+
             // ── ECDH ────────────────────────────────────────────────────────
             CKM_ECDH1_DERIVE | CKM_ECDH1_COFACTOR_DERIVE | CKM_EC_MONTGOMERY_KEY_DERIVE
             | CKM_X25519 | CKM_X448 => {
@@ -10549,6 +10582,71 @@ mod return_code_ffi_tests {
             ),
             CKR_KEY_HANDLE_INVALID,
         );
+    }
+
+    /// PKCS#11 v3.2 §6.43.3 — CKM_CONCATENATE_BASE_AND_KEY over the FFI ABI:
+    /// pParameter is a CK_OBJECT_HANDLE (the second key); the derived value is
+    /// base.CKA_VALUE ‖ second.CKA_VALUE. Proves the FFI marshalling + the new
+    /// dispatch arm + the unified secret-key finalization all cooperate — the
+    /// PKCS#11-conformance counterpart to the native::concatenate_keys tests.
+    #[test]
+    fn concatenate_base_and_key_ffi_produces_summed_length() {
+        let _guard = test_lock::acquire();
+        setup();
+        let (h_base, h_second) = (0x5334_0031, 0x5334_0032);
+        // Both keys must permit derivation (base: generic §5.18.5 gate;
+        // second: the new arm's own check).
+        install_key(h_base, 4, &[(CKA_DERIVE, true)]);
+        install_key(h_second, 8, &[(CKA_DERIVE, true)]);
+        let second_word: usize = h_second as usize;
+        let mut mech: [usize; 3] = [
+            CKM_CONCATENATE_BASE_AND_KEY as usize,
+            &second_word as *const usize as usize,
+            std::mem::size_of::<usize>(),
+        ];
+        let mut h_new: u32 = 0;
+        let rv = unsafe {
+            C_DeriveKey(
+                SESSION,
+                mech.as_mut_ptr() as *mut u8,
+                h_base,
+                std::ptr::null_mut(),
+                0,
+                &mut h_new,
+            )
+        };
+        assert_eq!(rv, CKR_OK);
+        let out = get_object_value(h_new).expect("derived key has a value");
+        assert_eq!(out.len(), 12, "4 (base) + 8 (second) = 12 bytes");
+    }
+
+    /// The second key must carry CKA_DERIVE — else CKR_KEY_FUNCTION_NOT_PERMITTED
+    /// (the arm gates the appended key, not just the base).
+    #[test]
+    fn concatenate_base_and_key_ffi_rejects_non_derivable_second() {
+        let _guard = test_lock::acquire();
+        setup();
+        let (h_base, h_second) = (0x5334_0033, 0x5334_0034);
+        install_key(h_base, 4, &[(CKA_DERIVE, true)]);
+        install_key(h_second, 8, &[(CKA_DERIVE, false)]);
+        let second_word: usize = h_second as usize;
+        let mut mech: [usize; 3] = [
+            CKM_CONCATENATE_BASE_AND_KEY as usize,
+            &second_word as *const usize as usize,
+            std::mem::size_of::<usize>(),
+        ];
+        let mut h_new: u32 = 0;
+        let rv = unsafe {
+            C_DeriveKey(
+                SESSION,
+                mech.as_mut_ptr() as *mut u8,
+                h_base,
+                std::ptr::null_mut(),
+                0,
+                &mut h_new,
+            )
+        };
+        assert_eq!(rv, CKR_KEY_FUNCTION_NOT_PERMITTED);
     }
 
     /// F1 — the legacy bare BIP32 codepoints (0x105B/0x105C) must still be
