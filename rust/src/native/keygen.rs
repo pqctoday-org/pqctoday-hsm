@@ -22,16 +22,15 @@ use std::collections::HashMap;
 use super::CkRv;
 use crate::constants::*;
 use crate::crypto::{
-    ALGO_ECDSA, ALGO_ML_DSA, ALGO_ML_KEM, ALGO_RSA, ALGO_SLH_DSA, CURVE_K256, CURVE_P256,
-    CURVE_P384, CURVE_P521,
+    ALGO_ECDH_P256, ALGO_ECDH_X25519, ALGO_ECDH_X448, ALGO_ECDSA, ALGO_EDDSA, ALGO_ML_DSA,
+    ALGO_ML_KEM, ALGO_RSA, ALGO_SLH_DSA, CURVE_K256, CURVE_P256, CURVE_P384, CURVE_P521,
 };
 use crate::crypto::handlers::{
     build_ec_spki_p256, build_ec_spki_p384, build_ec_spki_p521, build_ed25519_spki,
     build_mldsa44_spki, build_mldsa65_spki, build_mldsa87_spki, build_mlkem1024_spki,
     build_mlkem512_spki, build_mlkem768_spki, build_slhdsa_spki, build_spki_from_parts,
-    Attributes,
+    build_x25519_spki, build_x448_spki, Attributes,
 };
-use crate::crypto::ALGO_EDDSA;
 use crate::state::{
     allocate_handle, compute_kcv, finalize_private_key_attrs, store_algo_family, store_bool,
     store_param_set, store_ulong,
@@ -586,12 +585,145 @@ pub fn generate_ecdsa_keypair(
     finalize_and_register(_session, pub_attrs, prv_attrs)
 }
 
-/// Generate an Ed25519 (RFC 8032) keypair — PKCS#11 v3.2 §6.7
-/// `CKM_EC_EDWARDS_KEY_PAIR_GEN`. Attribute defaults mirror the
-/// `ffi::C_GenerateKeyPair` Edwards arm (CKK_EC_EDWARDS, pub CKA_VERIFY,
-/// prv CKA_SIGN; 32-byte raw CKA_VALUE both halves; RFC 8410 SPKI on the
-/// public half). Signing/verification then dispatch via `CKM_EDDSA`
-/// (`native::sign` / `native::verify`, 64-byte signatures).
+/// Generate a standalone ECDH (NIST-curve Diffie-Hellman) key pair.
+/// `curve` is one of `EccCurve::P256` / `P384` / `P521` (`Secp256K1` is not a
+/// KMIP-referenced ECDH curve in this stack; callers should reject it before
+/// reaching here — see [`generate_ecdsa_keypair`] for the analogous ECDSA
+/// path, which this mirrors structurally).
+///
+/// Tagged `ALGO_ECDH_P256` (the family constant used generically across all
+/// three NIST curves — curve selection is the separate `CURVE_P256/384/521`
+/// param-set attribute, exactly as `ALGO_ECDSA` already works across its four
+/// curves) rather than `ALGO_ECDSA`, and the usage mask is
+/// key-agreement-only (`CKA_DERIVE=true`, `CKA_SIGN=false`,
+/// `CKA_VERIFY=false`) — unlike an ECDSA key (dual sign+derive per
+/// `set_common_ec_prv_attrs`), a key a caller explicitly asked for as `ECDH`
+/// should not silently also be usable for signing.
+///
+/// Fixes the 2026-07-05 KMIP-layer gap: `Ecdh` has a valid `KmipAlgorithm`
+/// wire codepoint (`0x0e`) and is allowlisted by several crypto-agility
+/// policies (bsi-tr-02102, fips-only, classical.yaml), but until this
+/// function existed `CreateKeyPair` for it always failed with
+/// `OperationNotSupported` — the policy plane said "allowed" for an
+/// operation Plane 2 could never actually perform.
+///
+/// Returns `(public_handle, private_handle)`.
+///
+/// **Pre-condition**: `session` must be a valid R/W user session.
+pub fn generate_ecdh_keypair(
+    _session: u32,
+    curve: EccCurve,
+    cka_id: &[u8],
+    label: &str,
+) -> Result<(u32, u32), CkRv> {
+    let mut pub_attrs: Attributes = HashMap::new();
+    let mut prv_attrs: Attributes = HashMap::new();
+
+    store_algo_family(&mut pub_attrs, ALGO_ECDH_P256);
+    store_algo_family(&mut prv_attrs, ALGO_ECDH_P256);
+
+    store_ulong(&mut pub_attrs, CKA_CLASS, CKO_PUBLIC_KEY);
+    store_ulong(&mut pub_attrs, CKA_KEY_TYPE, CKK_EC);
+    store_ulong(&mut pub_attrs, CKA_KEY_GEN_MECHANISM, CKM_EC_KEY_PAIR_GEN);
+    store_bool(&mut pub_attrs, CKA_TOKEN, false);
+    store_bool(&mut pub_attrs, CKA_PRIVATE, false);
+    store_bool(&mut pub_attrs, CKA_ENCRYPT, false);
+    store_bool(&mut pub_attrs, CKA_VERIFY, false);
+    store_bool(&mut pub_attrs, CKA_WRAP, false);
+    store_bool(&mut pub_attrs, CKA_DERIVE, false);
+    // Classical-KEM crypto-agility (2026-07-05): PKCS#11 v3.2 §6.3.17 permits
+    // CKM_ECDH1_DERIVE under C_EncapsulateKey/C_DecapsulateKey as well as
+    // C_DeriveKey (same mechanism, independent permission flags, Table 78) —
+    // this is the ephemeral-static "DHKEM" mode KMIP 3.0 WD19 names in its
+    // KEM Algorithm enum. Enabling it alongside CKA_DERIVE lets one key serve
+    // both the existing static-static DeriveKey path and the new Encapsulate/
+    // Decapsulate path.
+    store_bool(&mut pub_attrs, CKA_ENCAPSULATE, true);
+    store_bool(&mut pub_attrs, CKA_LOCAL, true);
+
+    store_ulong(&mut prv_attrs, CKA_CLASS, CKO_PRIVATE_KEY);
+    store_ulong(&mut prv_attrs, CKA_KEY_TYPE, CKK_EC);
+    store_ulong(&mut prv_attrs, CKA_KEY_GEN_MECHANISM, CKM_EC_KEY_PAIR_GEN);
+    store_bool(&mut prv_attrs, CKA_TOKEN, false);
+    store_bool(&mut prv_attrs, CKA_PRIVATE, true);
+    store_bool(&mut prv_attrs, CKA_SENSITIVE, true);
+    store_bool(&mut prv_attrs, CKA_EXTRACTABLE, false);
+    store_bool(&mut prv_attrs, CKA_DECRYPT, false);
+    store_bool(&mut prv_attrs, CKA_SIGN, false);
+    store_bool(&mut prv_attrs, CKA_UNWRAP, false);
+    store_bool(&mut prv_attrs, CKA_DERIVE, true);
+    store_bool(&mut prv_attrs, CKA_DECAPSULATE, true);
+    store_bool(&mut prv_attrs, CKA_LOCAL, true);
+
+    let mut rng = rand::rngs::OsRng;
+
+    match curve {
+        EccCurve::P256 => {
+            store_param_set(&mut pub_attrs, CURVE_P256);
+            store_param_set(&mut prv_attrs, CURVE_P256);
+            let sk = p256::ecdsa::SigningKey::random(&mut rng);
+            let vk = p256::ecdsa::VerifyingKey::from(&sk);
+            prv_attrs.insert(CKA_VALUE, sk.to_bytes().to_vec());
+            let vk_bytes = vk.to_encoded_point(false).as_bytes().to_vec();
+            let mut ec_point = Vec::with_capacity(2 + vk_bytes.len());
+            ec_point.push(0x04);
+            ec_point.push(vk_bytes.len() as u8); // 65 fits in one byte
+            ec_point.extend_from_slice(&vk_bytes);
+            pub_attrs.insert(CKA_EC_POINT, ec_point);
+            pub_attrs.insert(CKA_PUBLIC_KEY_INFO, build_ec_spki_p256(&vk_bytes));
+        }
+        EccCurve::P384 => {
+            store_param_set(&mut pub_attrs, CURVE_P384);
+            store_param_set(&mut prv_attrs, CURVE_P384);
+            let sk = p384::ecdsa::SigningKey::random(&mut rng);
+            let vk = p384::ecdsa::VerifyingKey::from(&sk);
+            prv_attrs.insert(CKA_VALUE, sk.to_bytes().to_vec());
+            let vk_bytes = vk.to_encoded_point(false).as_bytes().to_vec();
+            let mut ec_point = Vec::with_capacity(2 + vk_bytes.len());
+            ec_point.push(0x04);
+            ec_point.push(vk_bytes.len() as u8); // 97 fits in one byte
+            ec_point.extend_from_slice(&vk_bytes);
+            pub_attrs.insert(CKA_EC_POINT, ec_point);
+            pub_attrs.insert(CKA_PUBLIC_KEY_INFO, build_ec_spki_p384(&vk_bytes));
+        }
+        EccCurve::P521 => {
+            store_param_set(&mut pub_attrs, CURVE_P521);
+            store_param_set(&mut prv_attrs, CURVE_P521);
+            let sk = p521::ecdsa::SigningKey::random(&mut rng);
+            let vk = p521::ecdsa::VerifyingKey::from(&sk);
+            prv_attrs.insert(CKA_VALUE, sk.to_bytes().to_vec());
+            let vk_bytes = vk.to_encoded_point(false).as_bytes().to_vec();
+            // P-521 uncompressed point is 133 bytes — needs long-form DER length.
+            let mut ec_point = Vec::with_capacity(3 + vk_bytes.len());
+            ec_point.push(0x04);
+            ec_point.push(0x81); // multi-byte length tag
+            ec_point.push(vk_bytes.len() as u8); // 133
+            ec_point.extend_from_slice(&vk_bytes);
+            pub_attrs.insert(CKA_EC_POINT, ec_point);
+            pub_attrs.insert(CKA_PUBLIC_KEY_INFO, build_ec_spki_p521(&vk_bytes));
+        }
+        EccCurve::Secp256K1 => {
+            return Err(CKR_MECHANISM_INVALID);
+        }
+    }
+
+    insert_id_and_label(&mut pub_attrs, cka_id, label);
+    insert_id_and_label(&mut prv_attrs, cka_id, label);
+
+    finalize_and_register(_session, pub_attrs, prv_attrs)
+}
+
+/// Generate an Ed25519 (RFC 8032 EdDSA over Curve25519, Edwards form) key
+/// pair. Distinct from [`generate_ecdh_keypair`]'s Montgomery-form X25519 in
+/// every respect: key type (`CKK_EC_EDWARDS`, not `CKK_EC_MONTGOMERY`),
+/// mechanism (`CKM_EC_EDWARDS_KEY_PAIR_GEN`/`CKM_EDDSA`, not
+/// `CKM_EC_MONTGOMERY_KEY_PAIR_GEN`/`CKM_X25519`), purpose (signing, not key
+/// agreement), and OID (`id-Ed25519` = `1.3.101.112`, not `id-X25519` =
+/// `1.3.101.110` — verified directly against RFC 8410, not inferred from the
+/// adjacent arc). Sign/Verify dispatch for `CKM_EDDSA` already exists
+/// (`native::sign`/`native::verify` → `crypto::handlers::sign_eddsa`/
+/// `verify_eddsa`) — this function is the only missing piece for a full
+/// KMIP `CreateKeyPair` round trip (2026-07-05, P1).
 ///
 /// Returns `(public_handle, private_handle)`.
 ///
@@ -601,10 +733,6 @@ pub fn generate_ed25519_keypair(
     cka_id: &[u8],
     label: &str,
 ) -> Result<(u32, u32), CkRv> {
-    let mut rng = rand::rngs::OsRng;
-    let sk = ed25519_dalek::SigningKey::generate(&mut rng);
-    let vk = sk.verifying_key();
-
     let mut pub_attrs: Attributes = HashMap::new();
     let mut prv_attrs: Attributes = HashMap::new();
 
@@ -613,20 +741,204 @@ pub fn generate_ed25519_keypair(
 
     store_ulong(&mut pub_attrs, CKA_CLASS, CKO_PUBLIC_KEY);
     store_ulong(&mut pub_attrs, CKA_KEY_TYPE, CKK_EC_EDWARDS);
-    store_bool(&mut pub_attrs, CKA_VERIFY, true);
-    store_bool(&mut pub_attrs, CKA_LOCAL, true);
     store_ulong(&mut pub_attrs, CKA_KEY_GEN_MECHANISM, CKM_EC_EDWARDS_KEY_PAIR_GEN);
+    store_bool(&mut pub_attrs, CKA_TOKEN, false);
+    store_bool(&mut pub_attrs, CKA_PRIVATE, false);
+    store_bool(&mut pub_attrs, CKA_ENCRYPT, false);
+    store_bool(&mut pub_attrs, CKA_VERIFY, true);
+    store_bool(&mut pub_attrs, CKA_WRAP, false);
+    store_bool(&mut pub_attrs, CKA_DERIVE, false);
+    store_bool(&mut pub_attrs, CKA_LOCAL, true);
 
     store_ulong(&mut prv_attrs, CKA_CLASS, CKO_PRIVATE_KEY);
     store_ulong(&mut prv_attrs, CKA_KEY_TYPE, CKK_EC_EDWARDS);
-    store_bool(&mut prv_attrs, CKA_SIGN, true);
-    store_bool(&mut prv_attrs, CKA_LOCAL, true);
     store_ulong(&mut prv_attrs, CKA_KEY_GEN_MECHANISM, CKM_EC_EDWARDS_KEY_PAIR_GEN);
+    store_bool(&mut prv_attrs, CKA_TOKEN, false);
+    store_bool(&mut prv_attrs, CKA_PRIVATE, true);
+    store_bool(&mut prv_attrs, CKA_SENSITIVE, true);
+    store_bool(&mut prv_attrs, CKA_EXTRACTABLE, false);
+    store_bool(&mut prv_attrs, CKA_DECRYPT, false);
+    store_bool(&mut prv_attrs, CKA_SIGN, true);
+    store_bool(&mut prv_attrs, CKA_UNWRAP, false);
+    store_bool(&mut prv_attrs, CKA_DERIVE, false);
+    store_bool(&mut prv_attrs, CKA_LOCAL, true);
 
-    let vk_bytes = vk.to_bytes().to_vec();
-    prv_attrs.insert(CKA_VALUE, sk.to_bytes().to_vec());
+    let mut rng = rand::rngs::OsRng;
+    let sk = ed25519_dalek::SigningKey::generate(&mut rng);
+    let vk = sk.verifying_key();
+
+    prv_attrs.insert(CKA_VALUE, sk.to_bytes().to_vec()); // 32-byte seed
+    let vk_bytes = vk.to_bytes().to_vec(); // 32-byte encoded point
+    // Matches the existing raw-FFI Ed25519 keygen convention (ffi.rs
+    // CKM_EC_EDWARDS_KEY_PAIR_GEN): the encoded point lives in CKA_VALUE on
+    // the public object, not CKA_EC_POINT (that attribute is the SEC1/DER
+    // convention `get_ec_point_sec1` expects for Weierstrass curves — Ed25519
+    // isn't one, and stuffing a raw Edwards point through that SEC1 stripper
+    // would corrupt it if the point's first byte happened to be 0x04).
     pub_attrs.insert(CKA_VALUE, vk_bytes.clone());
     pub_attrs.insert(CKA_PUBLIC_KEY_INFO, build_ed25519_spki(&vk_bytes));
+
+    insert_id_and_label(&mut pub_attrs, cka_id, label);
+    insert_id_and_label(&mut prv_attrs, cka_id, label);
+
+    finalize_and_register(_session, pub_attrs, prv_attrs)
+}
+
+/// Generate an X25519 (RFC 7748 Montgomery-form ECDH over Curve25519) key
+/// pair. This is the native typed parallel of the FFI
+/// `CKM_EC_MONTGOMERY_KEY_PAIR_GEN` X25519 branch (`ffi.rs`) — same crypto
+/// (`x25519_dalek`), same object shape (`CKK_EC_MONTGOMERY`, 32-byte scalar in
+/// `CKA_VALUE`, raw public point in `CKA_VALUE`/`CKA_EC_POINT`, id-X25519 OID
+/// `1.3.101.110` in `CKA_EC_PARAMS`), exposed to native callers so the hybrid
+/// KEM code can create the classical half of X25519MLKEM768 as an ordinary
+/// NON-EXTRACTABLE engine object (its private scalar never leaves the HSM).
+///
+/// Distinct from [`generate_ed25519_keypair`]: key agreement (`CKA_DERIVE`),
+/// not signing; Montgomery form, not Edwards.
+///
+/// Returns `(public_handle, private_handle)`.
+pub fn generate_x25519_keypair(
+    _session: u32,
+    cka_id: &[u8],
+    label: &str,
+) -> Result<(u32, u32), CkRv> {
+    let mut pub_attrs: Attributes = HashMap::new();
+    let mut prv_attrs: Attributes = HashMap::new();
+
+    store_algo_family(&mut pub_attrs, ALGO_ECDH_X25519);
+    store_algo_family(&mut prv_attrs, ALGO_ECDH_X25519);
+
+    store_ulong(&mut pub_attrs, CKA_CLASS, CKO_PUBLIC_KEY);
+    store_ulong(&mut pub_attrs, CKA_KEY_TYPE, CKK_EC_MONTGOMERY);
+    store_ulong(&mut pub_attrs, CKA_KEY_GEN_MECHANISM, CKM_EC_MONTGOMERY_KEY_PAIR_GEN);
+    store_bool(&mut pub_attrs, CKA_TOKEN, false);
+    store_bool(&mut pub_attrs, CKA_PRIVATE, false);
+    store_bool(&mut pub_attrs, CKA_ENCRYPT, false);
+    store_bool(&mut pub_attrs, CKA_VERIFY, false);
+    store_bool(&mut pub_attrs, CKA_WRAP, false);
+    store_bool(&mut pub_attrs, CKA_DERIVE, false);
+    // Classical-KEM crypto-agility (2026-07-05) — see the identical note in
+    // generate_ecdh_keypair: CKM_EC_MONTGOMERY_KEY_DERIVE is valid under
+    // C_EncapsulateKey/C_DecapsulateKey too (PKCS#11 v3.2 §6.3.17-equivalent
+    // for Montgomery curves), same mechanism as C_DeriveKey.
+    store_bool(&mut pub_attrs, CKA_ENCAPSULATE, true);
+    store_bool(&mut pub_attrs, CKA_LOCAL, true);
+
+    store_ulong(&mut prv_attrs, CKA_CLASS, CKO_PRIVATE_KEY);
+    store_ulong(&mut prv_attrs, CKA_KEY_TYPE, CKK_EC_MONTGOMERY);
+    store_ulong(&mut prv_attrs, CKA_KEY_GEN_MECHANISM, CKM_EC_MONTGOMERY_KEY_PAIR_GEN);
+    store_bool(&mut prv_attrs, CKA_TOKEN, false);
+    store_bool(&mut prv_attrs, CKA_PRIVATE, true);
+    store_bool(&mut prv_attrs, CKA_SENSITIVE, true);
+    store_bool(&mut prv_attrs, CKA_EXTRACTABLE, false);
+    store_bool(&mut prv_attrs, CKA_DECRYPT, false);
+    store_bool(&mut prv_attrs, CKA_SIGN, false);
+    store_bool(&mut prv_attrs, CKA_UNWRAP, false);
+    store_bool(&mut prv_attrs, CKA_DERIVE, true);
+    store_bool(&mut prv_attrs, CKA_DECAPSULATE, true);
+    store_bool(&mut prv_attrs, CKA_LOCAL, true);
+
+    let mut rng = rand::rngs::OsRng;
+    let sk = x25519_dalek::StaticSecret::random_from_rng(&mut rng);
+    let pk = x25519_dalek::PublicKey::from(&sk);
+    let pk_bytes = pk.as_bytes().to_vec(); // 32-byte public
+    let sk_bytes = sk.to_bytes().to_vec(); // 32-byte scalar
+
+    prv_attrs.insert(CKA_VALUE, sk_bytes);
+    pub_attrs.insert(CKA_VALUE, pk_bytes.clone());
+    pub_attrs.insert(CKA_PUBLIC_KEY_INFO, build_x25519_spki(&pk_bytes));
+
+    // PKCS#11 v3.2 §6.7 — CKA_EC_PARAMS carries the DER OID for id-X25519
+    // (RFC 8410, 1.3.101.110 = 06 03 2b 65 6e). Same convention as the FFI arm.
+    let oid_x25519: Vec<u8> = vec![0x06, 0x03, 0x2b, 0x65, 0x6e];
+    pub_attrs.insert(CKA_EC_PARAMS, oid_x25519.clone());
+    prv_attrs.insert(CKA_EC_PARAMS, oid_x25519);
+
+    // CKA_EC_POINT — DER OCTET STRING wrapping the raw 32-byte public key.
+    let mut ec_point = Vec::with_capacity(2 + pk_bytes.len());
+    ec_point.push(0x04u8); // OCTET STRING tag
+    ec_point.push(pk_bytes.len() as u8); // 0x20 = 32
+    ec_point.extend_from_slice(&pk_bytes);
+    pub_attrs.insert(CKA_EC_POINT, ec_point);
+
+    insert_id_and_label(&mut pub_attrs, cka_id, label);
+    insert_id_and_label(&mut prv_attrs, cka_id, label);
+
+    finalize_and_register(_session, pub_attrs, prv_attrs)
+}
+
+/// Generate an X448 (RFC 7748 Montgomery-form ECDH over Curve448) key pair —
+/// the 448-bit sibling of [`generate_x25519_keypair`], parallel to the FFI
+/// `CKM_EC_MONTGOMERY_KEY_PAIR_GEN` X448 branch (`ffi.rs`). Same object shape
+/// (`CKK_EC_MONTGOMERY`, 56-byte scalar in `CKA_VALUE`, raw public point in
+/// `CKA_VALUE`/`CKA_EC_POINT`, id-X448 OID `1.3.101.111` in `CKA_EC_PARAMS`),
+/// NON-EXTRACTABLE. Exposed so the KMIP layer can create X448 as
+/// `ECDH` + `RecommendedCurve = CURVE448`.
+///
+/// Returns `(public_handle, private_handle)`.
+pub fn generate_x448_keypair(
+    _session: u32,
+    cka_id: &[u8],
+    label: &str,
+) -> Result<(u32, u32), CkRv> {
+    use x448::{PublicKey as X448PublicKey, StaticSecret as X448StaticSecret};
+
+    let mut pub_attrs: Attributes = HashMap::new();
+    let mut prv_attrs: Attributes = HashMap::new();
+
+    store_algo_family(&mut pub_attrs, ALGO_ECDH_X448);
+    store_algo_family(&mut prv_attrs, ALGO_ECDH_X448);
+
+    store_ulong(&mut pub_attrs, CKA_CLASS, CKO_PUBLIC_KEY);
+    store_ulong(&mut pub_attrs, CKA_KEY_TYPE, CKK_EC_MONTGOMERY);
+    store_ulong(&mut pub_attrs, CKA_KEY_GEN_MECHANISM, CKM_EC_MONTGOMERY_KEY_PAIR_GEN);
+    store_bool(&mut pub_attrs, CKA_TOKEN, false);
+    store_bool(&mut pub_attrs, CKA_PRIVATE, false);
+    store_bool(&mut pub_attrs, CKA_ENCRYPT, false);
+    store_bool(&mut pub_attrs, CKA_VERIFY, false);
+    store_bool(&mut pub_attrs, CKA_WRAP, false);
+    store_bool(&mut pub_attrs, CKA_DERIVE, false);
+    // Classical-KEM crypto-agility (2026-07-05) — see the identical note in
+    // generate_ecdh_keypair.
+    store_bool(&mut pub_attrs, CKA_ENCAPSULATE, true);
+    store_bool(&mut pub_attrs, CKA_LOCAL, true);
+
+    store_ulong(&mut prv_attrs, CKA_CLASS, CKO_PRIVATE_KEY);
+    store_ulong(&mut prv_attrs, CKA_KEY_TYPE, CKK_EC_MONTGOMERY);
+    store_ulong(&mut prv_attrs, CKA_KEY_GEN_MECHANISM, CKM_EC_MONTGOMERY_KEY_PAIR_GEN);
+    store_bool(&mut prv_attrs, CKA_TOKEN, false);
+    store_bool(&mut prv_attrs, CKA_PRIVATE, true);
+    store_bool(&mut prv_attrs, CKA_SENSITIVE, true);
+    store_bool(&mut prv_attrs, CKA_EXTRACTABLE, false);
+    store_bool(&mut prv_attrs, CKA_DECRYPT, false);
+    store_bool(&mut prv_attrs, CKA_SIGN, false);
+    store_bool(&mut prv_attrs, CKA_UNWRAP, false);
+    store_bool(&mut prv_attrs, CKA_DERIVE, true);
+    store_bool(&mut prv_attrs, CKA_DECAPSULATE, true);
+    store_bool(&mut prv_attrs, CKA_LOCAL, true);
+
+    // x448's StaticSecret is built from 56 random bytes (matches the FFI arm).
+    let mut sk_bytes_arr = [0u8; 56];
+    getrandom::getrandom(&mut sk_bytes_arr).map_err(|_| CKR_FUNCTION_FAILED)?;
+    let sk = X448StaticSecret::from(sk_bytes_arr);
+    let pk = X448PublicKey::from(&sk);
+    let pk_bytes = pk.as_bytes().to_vec(); // 56-byte public
+    let sk_bytes = sk.as_bytes().to_vec(); // 56-byte scalar
+
+    prv_attrs.insert(CKA_VALUE, sk_bytes);
+    pub_attrs.insert(CKA_VALUE, pk_bytes.clone());
+    pub_attrs.insert(CKA_PUBLIC_KEY_INFO, build_x448_spki(&pk_bytes));
+
+    // PKCS#11 v3.2 §6.7 — id-X448 OID (RFC 8410, 1.3.101.111 = 06 03 2b 65 6f).
+    let oid_x448: Vec<u8> = vec![0x06, 0x03, 0x2b, 0x65, 0x6f];
+    pub_attrs.insert(CKA_EC_PARAMS, oid_x448.clone());
+    prv_attrs.insert(CKA_EC_PARAMS, oid_x448);
+
+    let mut ec_point = Vec::with_capacity(2 + pk_bytes.len());
+    ec_point.push(0x04u8); // OCTET STRING tag
+    ec_point.push(pk_bytes.len() as u8); // 0x38 = 56
+    ec_point.extend_from_slice(&pk_bytes);
+    pub_attrs.insert(CKA_EC_POINT, ec_point);
 
     insert_id_and_label(&mut pub_attrs, cka_id, label);
     insert_id_and_label(&mut prv_attrs, cka_id, label);
@@ -1655,6 +1967,131 @@ mod tests {
             generate_ecdsa_keypair(session, EccCurve::P521, b"\x01", "ec-p521").unwrap();
         assert_eq!(get_object_value(prv_h).unwrap().len(), 66);
         assert_eq!(get_ec_point_sec1(pub_h).unwrap().len(), 133);
+        close_session(session).unwrap();
+    }
+
+    /// ECDH P-256/384/521 keygen: same point-length shape as ECDSA on the
+    /// same curve (it's the same elliptic-curve math), but tagged
+    /// `ALGO_ECDH_P256` (never `ALGO_ECDSA`) — the 2026-07-05 fix's whole
+    /// point is that a caller who asked for `Ecdh` gets a key that is NOT
+    /// silently interchangeable with an ECDSA signing key at the KMIP layer.
+    #[test]
+    fn ecdh_keygen_produces_expected_lengths_and_family_tag() {
+        use crate::state::{get_ec_point_sec1, get_object_algo_family, get_object_param_set, get_object_value};
+        let _guard = test_lock::acquire();
+        let session = fresh_session();
+
+        let (pub_h, prv_h) =
+            generate_ecdh_keypair(session, EccCurve::P256, b"\x01", "ecdh-p256").unwrap();
+        assert_eq!(get_object_value(prv_h).unwrap().len(), 32, "P-256 scalar");
+        assert_eq!(get_ec_point_sec1(pub_h).unwrap().len(), 65, "P-256 point");
+        assert_eq!(get_object_algo_family(prv_h), ALGO_ECDH_P256, "tagged ECDH, not ECDSA");
+        assert_eq!(get_object_param_set(prv_h), CURVE_P256);
+
+        let (pub_h, prv_h) =
+            generate_ecdh_keypair(session, EccCurve::P384, b"\x02", "ecdh-p384").unwrap();
+        assert_eq!(get_object_value(prv_h).unwrap().len(), 48, "P-384 scalar");
+        assert_eq!(get_ec_point_sec1(pub_h).unwrap().len(), 97, "P-384 point");
+        assert_eq!(get_object_algo_family(prv_h), ALGO_ECDH_P256);
+        assert_eq!(get_object_param_set(prv_h), CURVE_P384);
+
+        let (pub_h, prv_h) =
+            generate_ecdh_keypair(session, EccCurve::P521, b"\x03", "ecdh-p521").unwrap();
+        assert_eq!(get_object_value(prv_h).unwrap().len(), 66, "P-521 scalar");
+        assert_eq!(get_ec_point_sec1(pub_h).unwrap().len(), 133, "P-521 point");
+        assert_eq!(get_object_algo_family(prv_h), ALGO_ECDH_P256);
+        assert_eq!(get_object_param_set(prv_h), CURVE_P521);
+
+        close_session(session).unwrap();
+    }
+
+    /// Secp256K1 has no KMIP-referenced ECDH use in this stack — must be
+    /// rejected, not silently produce a key.
+    #[test]
+    fn ecdh_keygen_rejects_secp256k1() {
+        let _guard = test_lock::acquire();
+        let session = fresh_session();
+        assert_eq!(
+            generate_ecdh_keypair(session, EccCurve::Secp256K1, b"\x01", "ecdh-k256"),
+            Err(CKR_MECHANISM_INVALID)
+        );
+        close_session(session).unwrap();
+    }
+
+    /// Ed25519 keygen: 32-byte seed, 32-byte encoded point, tagged
+    /// `ALGO_EDDSA` (never `ALGO_ECDH_P256` — Edwards signing key, not
+    /// Montgomery key-agreement key, despite sharing the underlying curve).
+    #[test]
+    fn ed25519_keygen_produces_expected_lengths_and_family_tag() {
+        use crate::state::{get_object_algo_family, get_object_attr_u32, get_object_value};
+        let _guard = test_lock::acquire();
+        let session = fresh_session();
+        let (pub_h, prv_h) =
+            generate_ed25519_keypair(session, b"\x01", "ed25519-1").unwrap();
+        assert_eq!(get_object_value(prv_h).unwrap().len(), 32, "Ed25519 seed");
+        assert_eq!(get_object_value(pub_h).unwrap().len(), 32, "Ed25519 encoded point");
+        assert_eq!(get_object_algo_family(prv_h), ALGO_EDDSA, "tagged EdDSA, not ECDH/ECDSA");
+        assert_eq!(get_object_attr_u32(pub_h, CKA_KEY_TYPE), Some(CKK_EC_EDWARDS));
+        close_session(session).unwrap();
+    }
+
+    /// X25519 keygen: 32-byte scalar + 32-byte public point, tagged
+    /// `ALGO_ECDH_X25519`, `CKK_EC_MONTGOMERY`, and — critically for the hybrid
+    /// KEM — the private key is NON-EXTRACTABLE / sensitive (its scalar never
+    /// leaves the HSM). Parallels the FFI `CKM_EC_MONTGOMERY_KEY_PAIR_GEN` arm.
+    #[test]
+    fn x25519_keygen_lengths_family_and_non_extractable() {
+        use crate::state::{get_object_algo_family, get_object_attr_bytes, get_object_attr_u32, get_object_value};
+        let _guard = test_lock::acquire();
+        let session = fresh_session();
+        let (pub_h, prv_h) = generate_x25519_keypair(session, b"\x01", "x25519-1").unwrap();
+        assert_eq!(get_object_value(prv_h).unwrap().len(), 32, "X25519 scalar");
+        assert_eq!(get_object_value(pub_h).unwrap().len(), 32, "X25519 public point");
+        assert_eq!(get_object_algo_family(prv_h), ALGO_ECDH_X25519, "tagged X25519 ECDH");
+        assert_eq!(get_object_attr_u32(prv_h, CKA_KEY_TYPE), Some(CKK_EC_MONTGOMERY));
+        // The security-critical properties for hybrid-KEM use (store_bool encodes
+        // a single 0x00/0x01 byte):
+        assert_eq!(get_object_attr_bytes(prv_h, CKA_EXTRACTABLE), Some(vec![0x00]), "non-extractable");
+        assert_eq!(get_object_attr_bytes(prv_h, CKA_SENSITIVE), Some(vec![0x01]), "sensitive");
+        close_session(session).unwrap();
+    }
+
+    /// X448 keygen: 56-byte scalar + 56-byte public point, tagged
+    /// `ALGO_ECDH_X448`, `CKK_EC_MONTGOMERY`, NON-EXTRACTABLE. Parallels the
+    /// FFI `CKM_EC_MONTGOMERY_KEY_PAIR_GEN` X448 branch. Used for KMIP
+    /// `ECDH` + `RecommendedCurve = CURVE448`.
+    #[test]
+    fn x448_keygen_lengths_family_and_non_extractable() {
+        use crate::state::{get_object_algo_family, get_object_attr_bytes, get_object_attr_u32, get_object_value};
+        let _guard = test_lock::acquire();
+        let session = fresh_session();
+        let (pub_h, prv_h) = generate_x448_keypair(session, b"\x01", "x448-1").unwrap();
+        assert_eq!(get_object_value(prv_h).unwrap().len(), 56, "X448 scalar");
+        assert_eq!(get_object_value(pub_h).unwrap().len(), 56, "X448 public point");
+        assert_eq!(get_object_algo_family(prv_h), ALGO_ECDH_X448, "tagged X448 ECDH");
+        assert_eq!(get_object_attr_u32(prv_h, CKA_KEY_TYPE), Some(CKK_EC_MONTGOMERY));
+        assert_eq!(get_object_attr_bytes(prv_h, CKA_EXTRACTABLE), Some(vec![0x00]), "non-extractable");
+        assert_eq!(get_object_attr_bytes(prv_h, CKA_SENSITIVE), Some(vec![0x01]), "sensitive");
+        close_session(session).unwrap();
+    }
+
+    /// The public key round-trips through sign/verify — the whole point of
+    /// this fix (2026-07-05, P1): the generic `native::sign`/`native::verify`
+    /// dispatch already handles `CKM_EDDSA`; this proves keygen produces
+    /// key material those functions actually accept.
+    #[test]
+    fn ed25519_keygen_produces_a_working_signing_key() {
+        use crate::native::sign::{sign, verify};
+        let _guard = test_lock::acquire();
+        let session = fresh_session();
+        let (pub_h, prv_h) =
+            generate_ed25519_keypair(session, b"\x02", "ed25519-2").unwrap();
+        let msg = b"hybrid KEM audit trail, 2026-07-05";
+        let sig = sign(session, prv_h, CKM_EDDSA, msg).expect("sign");
+        assert_eq!(sig.len(), 64, "Ed25519 signature is 64 bytes");
+        assert!(verify(session, pub_h, CKM_EDDSA, msg, &sig).unwrap());
+        // Tampered message must not verify.
+        assert!(!verify(session, pub_h, CKM_EDDSA, b"tampered", &sig).unwrap());
         close_session(session).unwrap();
     }
 

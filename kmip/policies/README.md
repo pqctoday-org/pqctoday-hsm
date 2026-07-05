@@ -1,5 +1,10 @@
 # Plane 1 — Crypto Agility Management Plane Policy Library
 
+> **New here?** [`../docs/CACP_GUIDE.md`](../docs/CACP_GUIDE.md) is the full
+> guide: the policy language, how to test policies in the hub's Agility
+> Workbench (policies, batches & macros), and the verified KMIP 3.0 status
+> for hybrid KEMs and hybrid signatures.
+
 Example + default policy files consumed by the `pqctoday-hsm/kmip/` subsystem's policy engine (`src/policy/loader.rs`).
 
 Loaded at server start via `pqctoday-kmip --policy-dir policies --policy <name>`. The engine evaluates every KMIP request against the loaded policy before dispatching it to a Plane 2 op handler. A `Deny` decision short-circuits the request with a KMIP `PermissionDenied` response.
@@ -18,7 +23,7 @@ Loaded at server start via `pqctoday-kmip --policy-dir policies --policy <name>`
 | [`fips-hashing.yaml`](fips-hashing.yaml) | **Mechanism dimension (hashing).** Restrict Sign/Verify hashing to FIPS SHA-2/SHA-3; deny SHA-1 — gates the KMIP `Hashing Algorithm`, not just the key algorithm. |
 | [`aead-only.yaml`](aead-only.yaml) | **Mechanism dimension (mode/padding).** AES Encrypt/Decrypt must be GCM/CCM; RSA must be OAEP — gates KMIP `Block Cipher Mode` / `Padding Method`. |
 | [`deterministic-signing.yaml`](deterministic-signing.yaml) | **Mechanism forcing.** Forces deterministic ML-DSA/SLH-DSA via the WD19 `Deterministic` flag — policy *sets* the mechanism param, transparent to the app. |
-| [`auto-migrate-on-use.yaml`](auto-migrate-on-use.yaml) | Auto-rekey classical key handles to their PQC equivalent on first use (Sign/Encrypt), via `algorithm_substitution`. |
+| [`auto-migrate-on-use.yaml`](auto-migrate-on-use.yaml) | Auto-rekey classical key handles to their PQC equivalent on first use (Sign/Encapsulate), via `algorithm_substitution`. |
 | [`bsi-tr-02102.yaml`](bsi-tr-02102.yaml) | German BSI TR-02102 profile: allowed PQC + classical algorithms and key lengths per the BSI technical guideline. |
 | [`pkcs11-mechanism-lockdown.yaml`](pkcs11-mechanism-lockdown.yaml) | **Mechanism dimension.** Allowlists the specific PKCS#11 mechanisms permitted (keygen + sign/verify families), denying everything else. |
 
@@ -88,7 +93,7 @@ Two families:
 | Type | Fields | Effect |
 |---|---|---|
 | `algorithm_default` | `ops: [...]`, `default_algorithm: <name>` | When request carries `algorithm = None` AND `op ∈ ops`, supply `default_algorithm`. Lets applications call `CreateKeyPair` without naming an algorithm and let policy decide. |
-| `algorithm_substitution` | `ops: [...]`, `from: <name>`, `to: <name>` | When `algorithm == from` AND `op ∈ ops`, rewrite to `to`. **Headline demo:** application keeps asking for ECDSA-P256, policy substitutes ML-DSA-65 silently. |
+| `algorithm_substitution` | `ops: [...]`, `from: <name>`, `to: <name>` | When `algorithm == from` AND `op ∈ ops`, rewrite to `to`. **Headline demo:** application keeps asking for ECDSA-P256, policy substitutes ML-DSA-65 silently. Now also supported for `Encapsulate` (2026-07-05) — classical ECDH/X25519/X448 key-establishment keys rekey to ML-KEM/hybrid the same way, via `encapsulate.rs::rekey_and_encapsulate`. **`ops:` must never include `Decapsulate`, `DeriveKey`, or `Decrypt`** ("consumer ops" — see `policy::rule::is_consumer_op`): their input was already fixed to an algorithm by an earlier, possibly different-party call, so there is nothing to substitute. This is an **engine invariant, not a convention** — the loader rejects such a rule at load time, and the engine ignores it at runtime even if it somehow got through. |
 
 ### Gating rules (Pass 2)
 
@@ -98,8 +103,8 @@ Two families:
 | `algorithm_denylist` | `ops: [...]`, `algorithms: [...]` | If `op ∈ ops` AND `algorithm ∈ algorithms` → Deny. Optional `exception_custom_attribute: { name, value }` suppresses the deny when the request carries that attribute. |
 | `min_key_length` | `algorithm: <name>`, `min_bits: N` | If `algorithm == name` AND `key_length < min_bits` → Deny |
 | `max_key_age_days` | `days: N`, `ops: [...]` | If `op ∈ ops` AND `(now - key.activated_at) > days` → Deny (rotate). **Phase 4.5 stub** — needs Phase 6 object store to expose key timestamps; loader emits a warning at load time. |
-| `require_usage_mask` | `algorithm: <name>`, `flags: [...]` | If creating `algorithm` without all `flags` set (or with no mask at all) → Deny. Flag names: `Sign`, `Verify`, `Encrypt`, `Decrypt`, `WrapKey`, `UnwrapKey`, `Export`, `MacGenerate`, `MacVerify`, `DeriveKey`, `ContentCommitment`, `KeyAgreement`, `CertificateSign`, `CrlSign`, `Authenticate`. |
-| `require_custom_attribute` | `attribute_name: <name>`, `algorithms: [...]` | If `algorithm ∈ algorithms` AND `x-<attribute_name>` not set → Deny |
+| `require_usage_mask` | `algorithm: <name>`, `flags: [...]`, optional `ops: [...]` | If `op ∈ ops` AND `algorithm` matches AND not all `flags` set (or no mask at all) → Deny. `ops` defaults to the creation/ingress ops (`Create`, `CreateKeyPair`, `Register`, `Import`) — un-scoped it re-closed the use ops policies leave open (2026-07-04). Flag names: `Sign`, `Verify`, `Encrypt`, `Decrypt`, `WrapKey`, `UnwrapKey`, `Export`, `MacGenerate`, `MacVerify`, `DeriveKey`, `ContentCommitment`, `KeyAgreement`, `CertificateSign`, `CrlSign`, `Authenticate`. |
+| `require_custom_attribute` | `attribute_name: <name>`, `algorithms: [...]`, optional `ops: [...]` | If `op ∈ ops` AND `algorithm ∈ algorithms` AND `x-<attribute_name>` not set → Deny. `ops` defaults to `Create`/`CreateKeyPair`/`Register`/`Import` (see above). |
 | `temporal_cutoff` | `op: <name>`, `algorithm_class: <classical\|pqc>`, `after: <YYYY-MM-DD>`, optional `algorithms: [...]` | If `now >= after` AND `op == name` AND algorithm matches class (and optional narrow list) → Deny |
 | `lifecycle_state_gate` | `op: <name>`, `allowed_states: [...]` | If `op == name` AND `state ∉ allowed_states` → Deny |
 | `hybrid_dual_sign_requirement` | `primary: <alg>`, `secondary: <alg>`, `effective_from: <date>`, `effective_until: <date>`, `ops_affected: [...]` | During window, every op in `ops_affected` MUST carry the composite algorithm name `<primary>-<secondary>` in KMIP 3.0 spelling (e.g. `ML-DSA-65-Ed25519`); matched case-insensitively. |

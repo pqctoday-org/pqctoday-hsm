@@ -1,0 +1,212 @@
+# Cross-spec fact sheet: classical / hybrid / PQC KEM support in
+# Encapsulate / Decapsulate. See ./README.md for how this file is meant to
+# be used and why it's YAML, not JSON.
+#
+# Verified: 2026-07-05, by hand, pdftotext -layout over both local PDFs
+# (see sources: below for exact commands/checksums). Re-verify by hand if
+# either source file's sha256 changes — this file is NOT covered by the
+# automated kmip-spec-3.0-tags-enums.json crosscheck (see ./README.md).
+
+schema_version: 1
+topic: kem-encapsulate-decapsulate
+
+sources:
+  kmip_3_0_wd19:
+    file: kmip/spec/oasis-kmip-3.0/kmip-spec-v3.0-wd19-clean.pdf
+    label: "KMIP 3.0 Working Draft 19, 14 February 2025"
+    sha256: e2dc1991e0a5697637aab00cb31b4bbebc51a664f2c1f27f8225713a42ba4f4d
+    note: >
+      Use WD19, not kmip-spec-v3.0.pdf (CSD01, 2024-08-23) — CSD01 predates
+      the PQC additions entirely (no Encapsulate, no Decapsulate, no KEM
+      Algorithm enum, no ML-DSA/ML-KEM/hybrid codepoints). WD19 is the same
+      source this repo's kmip/docs/*.md plans already anchor PQC facts to
+      (e.g. the K6 hybrid-KEM codepoint table in
+      cacp-kmip-k3-k4-k6-remediation-plan-07022026.md).
+  pkcs11_3_2_csd01:
+    file: docs/refs/pkcs11-spec-v3.2-csd01.pdf
+    label: "PKCS#11 v3.2 Committee Specification Draft 01, 16 April 2025"
+    sha256: f30334792922cea2d0016585144985f3a298dcadeb156fc52aee5da835ca81c6
+    note: >
+      Same file kmip/CLAUDE.md already names as the CK* constants source of
+      truth. Text extracted via `pdftotext -layout`; the running header on
+      every page reads "pkcs11-spec-v3.2-wd13" (leftover template
+      boilerplate from an earlier working-draft stage) — the title page
+      confirms this is genuinely CSD01, not a version mismatch.
+
+# ── KMIP 3.0 WD19: the two operations ───────────────────────────────────
+kmip_operations:
+  encapsulate:
+    section: "6.1.22"
+    page: 121
+    tables: ["Table 317 (request)", "Table 318 (response)", "Table 319 (errors)"]
+    op_codepoint: "0x00000041"   # Operation Enumeration table, right after Deactivate=0x40
+    quote: >
+      "This operation requests the server to perform the encapsulate
+      operation of a key encapsulation mechanism (KEM) using a Managed
+      Cryptographic Object as the key for the operation."
+    request_payload:
+      - "Unique Identifier — REQUIRED — the key to use for encapsulation"
+      - "Cryptographic Parameters (KEM Algorithm) — OPTIONAL — corresponds to the particular encapsulation method requested"
+      - "Attributes — OPTIONAL — for the new object"
+    response_payload:
+      - "Unique Identifier — REQUIRED — of the newly created Secret Data object"
+      - "Data — REQUIRED — the encapsulated data (ByteString), for use by the peer for decapsulation"
+    verdict: >
+      Generic "a key encapsulation mechanism (KEM)" language throughout —
+      NOT restricted to ML-KEM anywhere in the operation definition or its
+      error table. This repo's `is_ml_kem(...) || is_hybrid_kem(...)` gate
+      in kmip/src/ops/encapsulate.rs is a self-imposed implementation
+      scoping choice, not something the spec requires.
+
+  decapsulate:
+    section: "6.1.15"
+    page: 114
+    tables: ["Table 296 (request)", "Table 297 (response)", "Table 298 (errors)"]
+    op_codepoint: "0x00000042"
+    quote: >
+      "This operation requests the server to perform the decapsulate
+      operation of a key encapsulation mechanism (KEM) using a Managed
+      Cryptographic Object as the key for the operation."
+    request_payload:
+      - "Unique Identifier — REQUIRED"
+      - "Cryptographic Parameters (KEM Algorithm) — OPTIONAL"
+      - "Data — REQUIRED — the encapsulated data (ciphertext) from the peer"
+      - "Attributes — OPTIONAL"
+    response_payload:
+      - "Unique Identifier — REQUIRED — of the newly created Secret Data object"
+    verdict: "Same generic KEM framing as Encapsulate. No algorithm-family restriction."
+
+# ── KMIP 3.0 WD19: the enumeration that disambiguates WHICH KEM ─────────
+kmip_enumerations:
+  kem_algorithm:
+    section: "11.26"
+    page: 216
+    table: "Table 572"
+    wire_tag: "0x4201C3"
+    engine_state: >
+      Already reserved, unused: kmip/src/kmip30/wire.rs:279
+      `pub const KemAlgorithm: u32 = 0x42_01c3;` — no enum type, no field on
+      CryptographicParameters, nothing encodes/decodes it today.
+    values:
+      RSASVE: "0x00000001"
+      DHKEM: "0x00000002"
+      MLKEM: "0x00000003"
+      Extensions: "0x8XXXXXXX"
+    verdict: >
+      DHKEM (0x2) is the spec's OWN name for exactly the "ephemeral-static
+      ECDH as a KEM" construction this repo already implements as the
+      classical half of hybrid combos (rust/src/native/hybrid.rs) and that
+      RFC 9180 HPKE also calls DHKEM. Implementing standalone classical
+      Encapsulate/Decapsulate as `KEM Algorithm = DHKEM` is literal spec
+      conformance, not a vendor extension. RSASVE (0x1) is the equivalent
+      name for the RSA-secret-value-encapsulation construction the PKCS#11
+      RSA table row below describes.
+
+  cryptographic_algorithm_relevant_values:
+    section: "11.12 (Cryptographic Algorithm Enumeration)"
+    table: "Table 552 vicinity"
+    values:
+      DH: "0x0000000D"
+      ECDH: "0x0000000E"
+      X25519: "0x0000005A"
+      X448: "0x0000005B"
+      X25519MLKEM768: "0x0000005C"
+      SECP256R1MLKEM768: "0x0000005D"
+    note: >
+      ECDH=0x0e matches this repo's kmip/src/kmip30/algos.rs KmipAlgorithm::Ecdh
+      wire value exactly. DH=0x0d exists in the enum but this repo has no
+      plain-DH (non-EC) KmipAlgorithm variant today — out of scope unless a
+      future need for classical (non-EC) DH KEM support arises.
+
+# ── PKCS#11 v3.2 CSD01: mechanism table rows that back the KMIP ops ─────
+pkcs11_mechanisms:
+  rsa_pkcs_v1_5:
+    section: "6.1.6"
+    page: 196
+    mechanism: CKM_RSA_PKCS
+    table: "Table 39"
+    quote: >
+      "When the mechanism is used in key encapsulation, the secret key is
+      generated in the C_EncapsulateKey function and then wrapped with RSA
+      PKCS #1 v1.5. C_DecapsulateKey is exactly equivalent to C_UnwrapKey
+      for RSA PKCS."
+    shape: "C_EncapsulateKey(RSA public key) -> ciphertext (block type 02); C_DecapsulateKey(RSA private key, ciphertext) -> secret key. Same construction as NIST SP 800-56B RSA-KEM / KMIP's RSASVE."
+    scope_note: "Optional/stretch scope for this repo's classical-KEM work — RSA key TRANSPORT already has a live KMIP path (Encrypt/Decrypt); the ECDH gap is the one blocking transparent policy-driven agility today."
+
+  ecdh1_derive:
+    section: "6.3.17"
+    page: 234
+    mechanism: CKM_ECDH1_DERIVE
+    table: "Table 78 (allowed key types)"
+    quote: >
+      "When this mechanism is used in C_EncapsulateKey and C_DecapsulateKey,
+      the mechanism parameters pPublicData and ulPublicDataLen must be set
+      to NULL and 0 respectively. For C_EncapsulateKey, an ephemeral key
+      pair is generated. The value of the generated public key is returned
+      as the ciphertext. The generated private key is used with public key
+      provided in the API to generate a symmetric key using EC Derive and
+      has the same format as the public key used in C_DeriveKey. For
+      C_DecapsulateKey, the ciphertext is used with the private key
+      provided in the API to generate a symmetric key using EC Derive."
+    allowed_key_types: "CKK_EC or CKK_EC_MONTGOMERY — identical for C_DeriveKey, C_EncapsulateKey, C_DecapsulateKey (same mechanism ID for all three functions; only the calling function differs)."
+    engine_state: >
+      rust/src/native/hybrid.rs already implements this exact pattern
+      (ephemeral p256::ecdh::EphemeralSecret generated in encapsulate(),
+      DH'd against peer static public; decapsulate() reads the static
+      scalar from its handle and DHs against the ephemeral public in the
+      ciphertext) — but only as the classical HALF of a hybrid combo, never
+      exposed standalone. rust/src/native/agree.rs::ecdh_agree is the
+      DIFFERENT static-static pattern used for classical DeriveKey — not
+      reusable here as-is (no ephemeral generation).
+
+  ecdh1_cofactor_derive:
+    section: "6.3.18"
+    page: 235
+    mechanism: CKM_ECDH1_COFACTOR_DERIVE
+    table: "Table 79 (allowed key types: CKK_EC only)"
+    note: "Same ephemeral-key-pair-as-ciphertext pattern as CKM_ECDH1_DERIVE, cofactor variant. Not currently used anywhere in this repo; out of scope unless a policy specifically needs cofactor DH."
+
+  dh_pkcs3_derive:
+    section: "6.4.10"
+    page: 248
+    mechanism: CKM_DH_PKCS_DERIVE
+    note: "Same ephemeral-key-pair-as-ciphertext pattern, classical (non-EC, PKCS#3) Diffie-Hellman. Out of scope — this repo has no plain-DH KmipAlgorithm variant (see cryptographic_algorithm_relevant_values note above)."
+
+  dh_x9_42_derive:
+    section: "6.4.14"
+    page: 252
+    mechanism: "X9.42 DH derive (CK_X9_42_DH_KDF_TYPE family)"
+    note: "Same ephemeral pattern again. Out of scope, same reason as PKCS#3 DH."
+
+# ── This repo's state as of 2026-07-05 BEFORE this feature shipped
+# (historical — for understanding the starting point; see
+# engine_state_2026_07_05_shipped below for what's true now) ──
+engine_state_2026_07_05_before:
+  rust_engine:
+    - "rust/src/native/encrypt.rs:39-48 encapsulate() hard-gated `mechanism != CKM_ML_KEM` -> CKR_MECHANISM_INVALID. decapsulate() mirrored it."
+    - "rust/src/native/hybrid.rs already implemented ephemeral-static ECDH (P-256, P-384, X25519) as the classical half of the three hybrid combos — proven in production, just not exposed standalone."
+  kmip_layer:
+    - "kmip/src/ops/encapsulate.rs and decapsulate.rs gated `is_ml_kem(...) || obj.algorithm.is_hybrid_kem()` -> OperationNotSupported for any classical key."
+    - "Both ops ALREADY explicitly matched Decision::RekeyAndProceed and failed closed with an honest OperationNotSupported error — true even for the existing ML-KEM/hybrid path. No rekey-on-use transaction existed for the KEM op family at all."
+  policy_layer:
+    - "kmip/policies/pqc.yaml and auto-migrate-on-use.yaml both explicitly avoided any Encapsulate-targeting algorithm_substitution rule, with a code comment warning future policy authors not to add one until this path was implemented."
+    - "kmip/src/ops/derive_key.rs only pattern-matched `Decision::Deny` — NOT RekeyAndProceed. A custom policy substitution on `ops: [DeriveKey]` would have silently fallen through and proceeded on the OLD algorithm. `decrypt.rs` had the identical gap (found during this work, same root cause)."
+
+# ── This repo's state as shipped (2026-07-05, this feature) ────────────
+engine_state_2026_07_05_shipped:
+  rust_engine:
+    - "rust/src/native/encrypt.rs: encapsulate()/decapsulate() now dispatch on mechanism — CKM_ML_KEM (unchanged), plus new CKM_ECDH1_DERIVE (P-256/P-384/P-521, curve read via get_object_param_set) and CKM_EC_MONTGOMERY_KEY_DERIVE (X25519/X448, disambiguated by point/scalar length) via new classical_encapsulate/classical_decapsulate helpers. Ephemeral-static DH math verified against RFC 7748 §5.2 known-answer vectors (1 and 1000 iterations, X25519 and X448), cross-checked against two independent fetches of the RFC text before use — this repo previously had zero KAT coverage for ECDH/X25519 key agreement (confirmed by inventory: kmip/kat/ has ecdsa/ml-kem/etc. but no ecdh/kas directory)."
+    - "rust/src/native/keygen.rs: generate_ecdh_keypair/generate_x25519_keypair/generate_x448_keypair now also set CKA_ENCAPSULATE (public)/CKA_DECAPSULATE (private) — previously only CKA_DERIVE was set, so a classical key could DeriveKey but never pass the Encapsulate/Decapsulate permission-flag check even after the algorithm gate was relaxed."
+    - "hybrid.rs was NOT refactored to share code with the new classical_encapsulate/decapsulate (deliberately deferred — hybrid.rs operates on raw peer bytes for its classical half, since the hybrid public share isn't a KMIP-managed object; the new functions are handle-based, reading from the object store, matching the existing plain-ML-KEM convention instead. Different call shapes; a shared byte-in/byte-out core could still be factored out later as a pure DRY win, left as a follow-up, zero behavior risk either way)."
+    - "P-256/P-384/P-521 have round-trip self-consistency coverage only, not an external KAT — a first attempt at sourcing RFC 5903 vectors via text-fetch produced a value with a stray embedded space (a formatting artifact caught by inspection), so nothing was hardcoded rather than risk a silently-wrong known-answer. Sourcing a properly-vetted NIST ACVP KAS-ECC-SSC vector file remains an open follow-up."
+  kmip_layer:
+    - "KemAlgorithm enum (RsaSve=1/DhKem=2/MlKem=3, kmip30/ops.rs) now populates the previously-reserved-but-unused KEM Algorithm wire tag (0x4201C3), full encode+decode in wire.rs."
+    - "encapsulate.rs/decapsulate.rs gates relaxed via new is_classical_kem(KmipAlgorithm::Ecdh) helper; mechanism resolved via new helpers::classical_kem_mech(recommended_curve) (NOT via qualified_name/cryptographic_length, which would conflate X25519's 256 bits with real P-256 — a pre-existing, separate limitation left as-is, see the recommended_curve note above)."
+    - "Fixed an unconditional-mechanism-resolution bug found while wiring this: both op handlers computed a `mech` value (via `to_pkcs11_mech`, used only for a #[cfg(test)] placeholder's audit log) unconditionally before checking for an engine session — for a classical key (which has no (Ecdh, Encrypt|Decrypt) mapping in to_pkcs11_mech) this would have incorrectly rejected classical keys in PRODUCTION before ever reaching the new dispatch code. Moved the computation inside the test-only branch."
+    - "encapsulate.rs::rekey_and_encapsulate (mirrors sign.rs::rekey_and_sign): mints a fresh key PAIR (not just one key — Encapsulate needs a public+private pair), activates both halves, deactivates+supersedes both halves of the old pair (including the private half, found via PrivateKeyLink — Encapsulate's RekeyAndProceed fires against the public-key object, so the private half needs an explicit lookup), re-issues the Encapsulate against the new public key. EncapsulateResponse gained a `rekeyed: Option<EncapsulateRekeyInfo>` field mirroring SignResponse::rekeyed (internal-only, never wire-encoded)."
+    - "decapsulate.rs's lifecycle gate widened from Active-only to Active|Deactivated|Compromised (matching decrypt.rs's existing precedent) — this is the actual mechanism for 'what happens to in-flight old ciphertext after a migration', not ciphertext-format inference. Also fixed p_req.state, which was hardcoded to the literal string \"Active\" regardless of the object's real state (so a policy's OWN lifecycle_state_gate rule could never see/narrow the true state) — now reports state_name(obj.state), matching decrypt.rs."
+  policy_layer:
+    - "kmip/src/policy/rule.rs: new pub fn is_consumer_op(op) -> matches!(op, \"Decapsulate\" | \"DeriveKey\" | \"Decrypt\"); resolve_substitution now hard-returns None for these regardless of a rule's ops: list — an engine invariant, not left to policy-authoring discipline."
+    - "kmip/src/policy/lint.rs: AlgorithmSubstitution linting now emits a FATAL finding if ops: names a consumer op — rejected at policy LOAD time, not just silently excluded at request time."
+    - "kmip/src/ops/derive_key.rs and decrypt.rs: `if let Decision::Deny` replaced with an exhaustive match over all 3 Decision variants in both files — RekeyAndProceed now fails loudly (defense-in-depth; unreachable via any live path today given the two guards above, but the previous silent-fallthrough shape is exactly the kind of bug that resurfaces if either guard is ever weakened)."
+    - "kmip/policies/pqc.yaml and auto-migrate-on-use.yaml: added algorithm_substitution rules (ops: [Encapsulate]) migrating ECDH-P256/P384/P521 to ML-KEM-1024/768 respectively. NOTE: qualified_name(Ecdh, length) derives the name from bit-length only (pre-existing limitation) — X25519 (256 bits) and X448 (448→default-256) both currently stringify identically to real P-256 as 'ECDH-P256', so the P-256 rule already covers all three today; a future fix giving X25519/X448 distinct qualified names would need a corresponding rule split."

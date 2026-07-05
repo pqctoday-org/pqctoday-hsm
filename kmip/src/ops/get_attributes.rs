@@ -104,6 +104,14 @@ fn attributes_from_record(r: &ObjectRecord) -> Vec<Attribute> {
     if r.cryptographic_length > 0 {
         out.push(Attribute::CryptographicLength(r.cryptographic_length));
     }
+    // KMIP 3.0 §4.16 — report the Recommended Curve inside the standard
+    // Cryptographic Domain Parameters structure attribute (EC/ECDH keys).
+    if let Some(rc) = r.recommended_curve {
+        out.push(Attribute::CryptographicDomainParameters {
+            qlength: None,
+            recommended_curve: Some(rc),
+        });
+    }
     if let Some(n) = &r.name { out.push(Attribute::Name(n.clone())); }
     if let Some(d) = r.activation_date { out.push(Attribute::ActivationDate(d.unix_timestamp())); }
     if let Some(d) = r.deactivation_date { out.push(Attribute::DeactivationDate(d.unix_timestamp())); }
@@ -306,6 +314,7 @@ pub(crate) fn canonical_attribute_name(attr: &Attribute) -> &'static str {
         Attribute::CryptographicAlgorithm(_) => "CryptographicAlgorithm",
         Attribute::CryptographicLength(_)    => "CryptographicLength",
         Attribute::CryptographicUsageMask(_) => "CryptographicUsageMask",
+        Attribute::CryptographicDomainParameters { .. } => "CryptographicDomainParameters",
         Attribute::ObjectType(_)             => "ObjectType",
         Attribute::State(_)                  => "State",
         Attribute::UniqueIdentifier(_)       => "UniqueIdentifier",

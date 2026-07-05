@@ -1,0 +1,33 @@
+name: Rust Dependency Audit
+
+# Runs on a schedule + manual dispatch, NOT on every PR (moved out of ci.yml
+# 2026-07-05). cargo audit scans for known-vulnerable dependency versions
+# (RUSTSEC advisories) -- the CVE database changes when a new advisory is
+# published or a dep is bumped, not per-commit, so gating every single PR on
+# it is the wrong cadence. Weekly is frequent enough to catch a newly
+# published CVE before it reaches a release; still runs on push to main so a
+# dependency bump gets audited promptly.
+on:
+  schedule:
+    - cron: "0 6 * * 1" # Mondays 06:00 UTC
+  push:
+    branches: [main]
+    paths:
+      - "rust/Cargo.toml"
+      - "rust/Cargo.lock"
+  workflow_dispatch: {}
+
+jobs:
+  rust-audit:
+    name: Rust Dependency Audit
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-audit
+        run: cargo install cargo-audit
+      - name: Run cargo audit
+        run: cd rust && cargo audit --deny warnings --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-0097

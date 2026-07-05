@@ -8,6 +8,122 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Label-only crypto agility (Migration playground foundation).** Policies can
+  now map a key's business *name* to an algorithm: `algorithm_default` and
+  `algorithm_substitution` rules take an optional `name_pattern` glob
+  (case-insensitive `*` / `?`), and `PolicyRequest` carries the key `Name`
+  (from the request template at create time, from the stored record at use
+  time). Name-patterned defaults are evaluated before generic ones
+  (most-specific-wins), so one policy can resolve `payments-*` → AES-128 while
+  everything else defaults to AES-256. The application passes only a label; the
+  policy decides every crypto parameter.
+- **Symmetric rekey-on-use.** `Encrypt` on an AES key the active policy wants
+  migrated (e.g. `AES-128 → AES-256`) now transparently generates the
+  replacement, deactivates + supersedes the old key (label carried over), and
+  re-issues the encryption under the new key — the symmetric mirror of the
+  existing Sign-side rekey.
+- **Substitution-aware `ReKey` / `ReKeyKeyPair`.** The sweep-style rekey ops
+  honour the policy's `algorithm_substitution` rules when the client pins no
+  algorithm, so a "migrate everything" pass turns each legacy key into its PQC
+  successor (`RSA-2048 → ML-DSA-44`, `AES-128 → AES-256`) as real KMIP ReKey
+  operations; an explicit client template algorithm still wins (request > policy).
+- **`migration-classical.yaml` / `migration-pqc.yaml`** — a seven-key business
+  estate (AES-256/128, X25519, X448, RSA-2048, ECDSA-P256, Ed25519) and its
+  full-PQC target, driving the label-only demo end to end.
+
+### Changed
+
+- **X25519 / X448 label-only creation + distinct naming.** A policy may now name
+  `X25519` / `X448` directly (`default_algorithm: X25519`); `create_key_pair`
+  turns that into `ECDH` + `RecommendedCurve` CURVE25519/CURVE448 and stores the
+  §6.7 mech-info length (255 / 448), so the stored key renders distinctly
+  (`X25519` / `X448`) instead of colliding with real P-curves as `ECDH-P256`.
+  Key-agreement keys created label-only now flow through the engine-native
+  classical Encapsulate/Decapsulate rather than the client having to supply
+  `CryptographicDomainParameters`.
+- **KEM rekey preserves the key label** — `rekey_and_encapsulate` copies the
+  old key's `Name` onto the ML-KEM/hybrid successor, so Locate-by-label follows
+  the migration.
+- **Label-only keys store their real size** — a key created from a resolved
+  policy name (`RSA-2048`, `ECDSA-P384`) now persists that length instead of 0.
+
+### Internal
+
+- Merged the Migration-playground engine work with the classical-KEM
+  Encapsulate line: the former in-layer `kmip/src/dh_kem.rs` (in-process
+  X25519/X448 DHKEM) was **deleted** in favour of the engine-native classical
+  Encapsulate; the duplicated Ed25519 wiring, in-layer hybrid crypto crates
+  (`ml-kem` / `x25519-dalek` / `p256` / `x448`), and a duplicate
+  Encapsulate-rekey path were dropped in favour of the engine-native versions.
+
+## [0.9.0] — 2026-07-05
+
+Post-quantum hybrid key exchange grows up. This release makes the hybrid KEMs
+production-grade and standards-clean, adds X25519/X448 the way KMIP 3.0 actually
+models them, lets those keys perform key agreement, and — for the first time —
+proves the whole thing interoperates with OpenSSL rather than only with itself.
+It also closes a batch of crypto-agility policy bugs where the compliance rules
+said one thing and enforced another.
+
+### Added
+
+- **A third hybrid KEM group, SecP384r1MLKEM1024**, joins X25519MLKEM768 and
+  SecP256r1MLKEM768 — the higher-security ECDHE-MLKEM group from
+  draft-ietf-tls-ecdhe-mlkem.
+- **X25519 and X448 as first-class KMIP keys.** You create them the standard
+  way — `CryptographicAlgorithm = ECDH` with the curve in a `Cryptographic
+  Domain Parameters` attribute (`Recommended Curve = CURVE25519 / CURVE448`),
+  exactly as KMIP 3.0 §4.16 specifies. The chosen curve is reported back through
+  `GetAttributes`.
+- **ECDH key agreement through `DeriveKey`** (`DerivationMethod = Asymmetric
+  Key`) for X25519, X448, P-256, and P-384 — the classical keys are now usable,
+  not just creatable. The private key never leaves the engine.
+- **Ed25519 and ECDH now work end-to-end through KMIP** — `CreateKeyPair` for
+  both previously failed; Ed25519 sign/verify and ECDH keygen are wired through.
+- **A written CACP policy guide** explaining the crypto-agility policy language,
+  the agility workbench, batches, and macros.
+
+### Changed
+
+- **Hybrid keys are now one KMIP object backed by two non-extractable engine
+  keys** — one classical, one ML-KEM — instead of a single opaque composite.
+  All hybrid cryptography lives in the PKCS#11 engine; the KMIP layer no longer
+  carries its own crypto crates (`ml-kem`/`x25519-dalek`/`p256` removed), so
+  there is one implementation, not two.
+- The hybrid shared-secret **combiner runs through the standard PKCS#11 v3.2
+  derive mechanisms** (`CKM_CONCATENATE_BASE_AND_KEY` and the digest/HKDF key-
+  derivations) rather than ad-hoc byte handling, so the composition is
+  conformant by construction.
+
+### Fixed
+
+- **Crypto-agility policy fail-open bugs.** The compliance policies frequently
+  allowed what their text forbade: custom-attribute gates always denied,
+  key-pair creation didn't match `[Create]`-gated rules (so CNSA-2.0/FIPS-only
+  silently permitted classical RSA/ECDSA keygen), and only some operations
+  received size/curve-qualified algorithm names. Nine policies were rewritten
+  and the engine's operation-scoping fixed so the rules enforce what they say.
+
+### Security
+
+- **`Get` no longer returns a hybrid private key.** Hybrid private keys are now
+  ordinary sensitive, non-extractable engine objects, so `Get`/`Export` refuses
+  them through the existing `CKA_SENSITIVE` path — closing a real key-disclosure
+  gap where the composite private material was returned in the clear.
+
+### Verified
+
+- **OpenSSL 3.5 interoperability.** New cross-implementation tests drive our
+  KMIP Encapsulate/Decapsulate against OpenSSL in both directions for
+  ML-KEM-768 and X25519MLKEM768. They confirm the on-the-wire encoding
+  (`ek‖x_pub`, `ct_mlkem‖x_eph`) and the combiner order (`ss_mlkem‖ss_x25519`)
+  match a reference implementation — the KEMs are interoperable, not just
+  self-consistent. (OpenSSL cannot serialize the composite hybrid key, so the
+  hybrid is verified via its serializable ML-KEM + X25519 halves, which for a
+  pure-concatenation combiner is a full proof.)
+
 ## [0.8.0] — 2026-07-03
 
 Closes the 2026-07-01 CACP/KMIP/PKCS#11 gap audit: the policy engine's

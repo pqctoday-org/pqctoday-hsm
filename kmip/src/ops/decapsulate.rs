@@ -20,8 +20,8 @@ use crate::error::{KmipError, Result, ResultReason};
 use crate::kmip30::{DecapsulateRequest, DecapsulateResponse, PkcsOp, State};
 
 use super::deps::Deps;
-use super::encapsulate::{is_ml_kem, montgomery_curve_of, store_shared_secret};
-use super::helpers::{emit_pkcs11, emit_pkcs11_result, emit_request, emit_success, fail_err};
+use super::encapsulate::{is_classical_kem, is_ml_kem, store_shared_secret};
+use super::helpers::{emit_pkcs11, emit_pkcs11_result, emit_request, emit_success, fail_err, state_name};
 
 pub fn decapsulate(
     deps: &Deps,
@@ -39,32 +39,41 @@ pub fn decapsulate(
         fail_err(deps, correlation_id, "Decapsulate", KmipError::object_not_found(&req.uid))
     })?;
 
-    // K6 — Decapsulate accepts ML-KEM, the hybrid KEMs, and the classical
-    // Montgomery curves (X25519/X448, DHKEM-style).
-    let montgomery = montgomery_curve_of(&obj);
-    if !is_ml_kem(obj.algorithm) && !obj.algorithm.is_hybrid_kem() && montgomery.is_none() {
+    // K6 — Decapsulate accepts ML-KEM, the hybrid KEMs, and (2026-07-05)
+    // classical ECDH/X25519/X448 in DHKEM mode.
+    if !is_ml_kem(obj.algorithm) && !obj.algorithm.is_hybrid_kem() && !is_classical_kem(obj.algorithm) {
         return Err(fail_err(
             deps,
             correlation_id,
             "Decapsulate",
             KmipError::failed(
                 ResultReason::OperationNotSupported,
-                format!(
-                    "Decapsulate requires an ML-KEM, hybrid KEM, or X25519/X448 key; {:?} is not",
-                    obj.algorithm
-                ),
+                format!("Decapsulate requires an ML-KEM, hybrid KEM, or classical ECDH/X25519/X448 key; {:?} is not", obj.algorithm),
             ),
         ));
     }
 
-    // KMIP 3.0 §3.4 lifecycle gate — the private key must be Active.
-    if obj.state != State::Active {
-        return Err(fail_err(
-            deps,
-            correlation_id,
-            "Decapsulate",
-            super::helpers::non_active_state_error(&req.uid, obj.state),
-        ));
+    // Lifecycle gate per §3.4 (2026-07-05: widened to match decrypt.rs's
+    // precedent) — Decapsulate allowed in Active / Deactivated / Compromised;
+    // PreActive and Destroyed rejected. A KEM private key that's been
+    // superseded by a crypto-agility rekey (`encapsulate.rs::rekey_and_encapsulate`)
+    // is Deactivated, not destroyed — it must keep decapsulating any
+    // ciphertext that was legitimately encapsulated against it *before* the
+    // migration (the actual answer to "what happens to in-flight old
+    // ciphertext", not ciphertext-format inference — see
+    // `kmip/spec/crossref/kem-encapsulate-decapsulate.yaml`'s design notes).
+    // `Encapsulate`'s own gate stays Active-only (unchanged, above in
+    // encapsulate.rs) so no *new* encapsulation can target a retired key.
+    match obj.state {
+        State::Active | State::Deactivated | State::Compromised => {}
+        _ => {
+            return Err(fail_err(
+                deps,
+                correlation_id,
+                "Decapsulate",
+                super::helpers::non_active_state_error(&req.uid, obj.state),
+            ));
+        }
     }
     if obj.archived {
         return Err(fail_err(
@@ -91,9 +100,12 @@ pub fn decapsulate(
         &stored_attrs,
     );
     p_req.usage_mask = Some(obj.usage_mask);
-    p_req.state = Some("Active");
-    // name_pattern rules match on the stored key's Name (label-scoped rekey).
-    p_req.name = obj.name.as_deref();
+    // 2026-07-05 — report the TRUE state (was hardcoded "Active"), so a
+    // policy's own `lifecycle_state_gate` can still narrow the op-level
+    // Active/Deactivated/Compromised allowance above if it wants to (e.g.
+    // deny Decapsulate on Compromised keys specifically). Matches
+    // decrypt.rs's precedent.
+    p_req.state = Some(state_name(obj.state));
     p_req.current_object_algorithm = Some(&stored_algo);
     p_req.target_uid = Some(&req.uid);
     p_req.object_activation_date = obj.activation_date; // F-3 — max_key_age_days
@@ -120,61 +132,59 @@ pub fn decapsulate(
         }
     }
 
-    // Classical Montgomery KEM (X25519/X448) — DH of the stored PRIVATE scalar
-    // against the ciphertext (= the encapsulator's ephemeral public key).
-    if let Some(curve) = montgomery {
-        let private = obj.key_material.as_deref().ok_or_else(|| {
-            KmipError::failed(
-                ResultReason::CryptographicFailure,
-                format!("{} private key has no stored material", curve.name()),
-            )
-        })?;
-        let shared_secret =
-            crate::dh_kem::decapsulate(curve, private, &req.data).map_err(|e| {
-                fail_err(
-                    deps,
-                    correlation_id,
-                    "Decapsulate",
-                    KmipError::failed(ResultReason::CryptographicFailure, e),
-                )
-            })?;
-        emit_pkcs11(deps, correlation_id, "soft::dh_kem_decapsulate", None, 0, "CKR_OK");
-        let ss_uid = store_shared_secret(deps, obj.algorithm, shared_secret)?;
-        emit_success(deps, correlation_id, "Decapsulate");
-        return Ok(DecapsulateResponse { uid: ss_uid });
-    }
-
-    // K6 — hybrid KEM: split the composite ciphertext, ML-KEM-decaps + classical
-    // ECDH against the stored composite PRIVATE key, combine per the algorithm's
-    // order (crate::hybrid_kem). ML-KEM implicit rejection is preserved.
+    // K6 — hybrid KEM: the ENGINE decapsulates against the TWO non-extractable
+    // private handles (ML-KEM half under `pkcs11_cka_id`, classical half under
+    // `pkcs11_cka_id_secondary`), splits the composite ciphertext, and combines
+    // per the algorithm's order through the derive machinery. The private key
+    // material never enters this layer (that is the non-extractability fix);
+    // ML-KEM implicit rejection is preserved inside the engine.
     if let Some(hybrid) = obj.algorithm.hybrid_kem() {
-        let private = obj.key_material.as_deref().ok_or_else(|| {
+        let session = deps.engine_session.ok_or_else(|| {
             KmipError::failed(
                 ResultReason::CryptographicFailure,
-                "hybrid KEM private key has no stored material".to_string(),
+                "hybrid KEM decapsulate requires an engine session".to_string(),
             )
         })?;
-        let shared_secret =
-            crate::hybrid_kem::decapsulate(hybrid, private, &req.data).map_err(|e| {
-                fail_err(
-                    deps,
-                    correlation_id,
-                    "Decapsulate",
-                    KmipError::failed(ResultReason::CryptographicFailure, e),
-                )
-            })?;
+        let mlkem_priv = super::helpers::find_handle_for_object(
+            session,
+            &obj.pkcs11_cka_id,
+            crate::kmip30::ObjectType::PrivateKey,
+        )
+        .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Decap:find-mlkem"))?
+        .ok_or_else(|| KmipError::object_not_found(&req.uid))?;
+        let classical_cka_id = obj.pkcs11_cka_id_secondary.as_deref().ok_or_else(|| {
+            KmipError::failed(
+                ResultReason::CryptographicFailure,
+                "hybrid KEM private key missing secondary (classical) CKA_ID".to_string(),
+            )
+        })?;
+        let classical_priv = super::helpers::find_handle_for_object(
+            session,
+            classical_cka_id,
+            crate::kmip30::ObjectType::PrivateKey,
+        )
+        .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Decap:find-classical"))?
+        .ok_or_else(|| KmipError::object_not_found(&req.uid))?;
+        let shared_secret = softhsmrustv3::native::hybrid::decapsulate(
+            session,
+            hybrid,
+            mlkem_priv,
+            classical_priv,
+            &req.data,
+        )
+        .map_err(|rv| {
+            fail_err(
+                deps,
+                correlation_id,
+                "Decapsulate",
+                super::helpers::ck_rv_to_kmip_error(rv, "hybrid decapsulate"),
+            )
+        })?;
         emit_pkcs11(deps, correlation_id, "soft::hybrid_kem_decapsulate", None, 0, "CKR_OK");
         let ss_uid = store_shared_secret(deps, obj.algorithm, shared_secret)?;
         emit_success(deps, correlation_id, "Decapsulate");
         return Ok(DecapsulateResponse { uid: ss_uid });
     }
-
-    let mech = obj.algorithm.to_pkcs11_mech(PkcsOp::Decrypt).ok_or_else(|| {
-        KmipError::failed(
-            ResultReason::OperationNotSupported,
-            format!("ML-KEM {:?} has no decapsulation mechanism", obj.algorithm),
-        )
-    })?;
 
     let shared_secret = match deps.engine_session {
         Some(session) => {
@@ -189,12 +199,21 @@ pub fn decapsulate(
             )
             .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Decap:find"))?
             .ok_or_else(|| KmipError::object_not_found(&req.uid))?;
-            let native_mech = super::helpers::native_kem_mech(obj.algorithm).ok_or_else(|| {
-                KmipError::failed(
-                    ResultReason::OperationNotSupported,
-                    format!("no KEM mechanism for {:?}", obj.algorithm),
-                )
-            })?;
+            let native_mech = if is_classical_kem(obj.algorithm) {
+                super::helpers::classical_kem_mech(obj.recommended_curve).ok_or_else(|| {
+                    KmipError::failed(
+                        ResultReason::OperationNotSupported,
+                        format!("no classical KEM mechanism for RecommendedCurve {:?}", obj.recommended_curve),
+                    )
+                })?
+            } else {
+                super::helpers::native_kem_mech(obj.algorithm).ok_or_else(|| {
+                    KmipError::failed(
+                        ResultReason::OperationNotSupported,
+                        format!("no KEM mechanism for {:?}", obj.algorithm),
+                    )
+                })?
+            };
             let r = softhsmrustv3::native::decapsulate(session, handle, native_mech, &req.data);
             emit_pkcs11_result(deps, correlation_id, "native::decapsulate", Some(native_mech), &r);
             r.map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Decap"))?
@@ -211,11 +230,16 @@ pub fn decapsulate(
             }
             #[cfg(test)]
             {
+                // Cosmetic only (audit-log field) — placeholder builds don't
+                // have a real engine session to resolve a mechanism against,
+                // and this path never runs in production (see the
+                // #[cfg(not(test))] arm above).
+                let mech = obj.algorithm.to_pkcs11_mech(PkcsOp::Decrypt);
                 emit_pkcs11(
                     deps,
                     correlation_id,
                     "soft::placeholder_decapsulate",
-                    Some(mech),
+                    mech,
                     0,
                     "CKR_OK",
                 );
@@ -292,5 +316,36 @@ mod tests {
         assert_eq!(ss_rec.state, State::PreActive);
         assert!(ss_rec.key_material.is_some());
         assert_ne!(resp.uid, "sk");
+    }
+
+    /// Classical ECDH-P256 private key is now a valid Decapsulate target
+    /// (2026-07-05) — mirrors `encapsulate::tests::encapsulate_accepts_classical_ecdh_key`.
+    #[test]
+    fn decapsulate_accepts_classical_ecdh_key() {
+        let d = deps();
+        d.store
+            .put(ObjectRecord {
+                uid: "ecdh-sk".to_string(),
+                object_type: ObjectType::PrivateKey,
+                algorithm: KmipAlgorithm::Ecdh,
+                recommended_curve: Some(crate::kmip30::algos::recommended_curve::P_256),
+                usage_mask: UsageMask::DECRYPT,
+                state: State::Active,
+                ..ObjectRecord::default()
+            })
+            .unwrap();
+        let resp = decapsulate(
+            &d,
+            DecapsulateRequest {
+                uid: "ecdh-sk".to_string(),
+                data: vec![0u8; 65], // SEC1 uncompressed P-256 point length
+                cryptographic_parameters: None,
+            },
+            "t",
+        )
+        .unwrap();
+        let ss_rec = d.store.get(&resp.uid).unwrap().unwrap();
+        assert_eq!(ss_rec.object_type, ObjectType::SecretData);
+        assert_ne!(resp.uid, "ecdh-sk");
     }
 }

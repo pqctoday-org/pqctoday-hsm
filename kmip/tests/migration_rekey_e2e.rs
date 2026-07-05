@@ -198,7 +198,7 @@ fn x448_kex_rekeys_to_mlkem1024_on_first_encapsulate() {
     .unwrap();
 
     let rk = resp.rekeyed.expect("X448 must rekey on encapsulate");
-    let new = deps.store.get(&rk.new_public_key_uid.unwrap()).unwrap().unwrap();
+    let new = deps.store.get(&rk.new_public_key_uid).unwrap().unwrap();
     assert_eq!(new.algorithm, KmipAlgorithm::MlKem1024);
     assert_eq!(new.name.as_deref(), Some("interbank-vpn-kex"));
     // A shared secret was still produced under the migrated key.

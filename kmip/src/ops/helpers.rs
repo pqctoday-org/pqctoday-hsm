@@ -250,10 +250,9 @@ pub fn canonical_name(a: KmipAlgorithm) -> String {
         HmacSha384 => "HMAC-SHA-384",
         HmacSha512 => "HMAC-SHA-512",
         Ecdh => "ECDH",
-        Ed25519 => "Ed25519",
-        Ed448 => "Ed448",
         ChaCha20 => "ChaCha20",
         ChaCha20Poly1305 => "ChaCha20-Poly1305",
+        Ed25519 => "Ed25519",
         MlKem512 => "ML-KEM-512",
         MlKem768 => "ML-KEM-768",
         MlKem1024 => "ML-KEM-1024",
@@ -274,6 +273,7 @@ pub fn canonical_name(a: KmipAlgorithm) -> String {
         SlhDsaShake256f => "SLH-DSA-SHAKE-256f",
         X25519MlKem768 => "X25519MLKEM768",
         SecP256r1MlKem768 => "SecP256r1MLKEM768",
+        SecP384r1MlKem1024 => "SecP384r1MLKEM1024",
     }
     .into()
 }
@@ -293,13 +293,15 @@ pub fn qualified_name(a: KmipAlgorithm, length: u32) -> String {
     use KmipAlgorithm::*;
     match a {
         Ecdsa => format!("ECDSA-P{}", ec_curve_bits(length)),
-        // Montgomery curves collapse to `Ecdh` at the enum layer; the stored
-        // length (255/448, per PKCS#11 v3.2 §6.7) tells them apart from the
-        // NIST P-curves — and the policy-facing names are `X25519`/`X448`.
-        Ecdh => match crate::dh_kem::Curve::from_kmip_bits(length) {
-            Some(curve) => curve.name().to_string(),
-            None => format!("ECDH-P{}", ec_curve_bits(length)),
-        },
+        // Montgomery curves collapse to `Ecdh` at the enum layer; when the
+        // record carries the §6.7 mech-info length (255/448) they get their
+        // own policy-facing names. Engine-native classical KEM keys currently
+        // store length 0, so they fall through to `ECDH-P{P-curve}` — the
+        // known `from:` collision the migration policies account for until the
+        // Montgomery length is threaded onto the record (reassessment item).
+        Ecdh => montgomery_name_for_len(length)
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("ECDH-P{}", ec_curve_bits(length))),
         Rsa => format!("RSA-{}", if length == 0 { 2048 } else { length }),
         Aes => format!("AES-{}", if length == 0 { 256 } else { length }),
         other => canonical_name(other),
@@ -319,6 +321,19 @@ pub fn classical_length_from_name(name: &str) -> Option<u32> {
     let bits: u32 = suffix.trim_start_matches(['P', 'p']).parse().ok()?;
     match family {
         "AES" | "RSA" | "ECDSA" | "ECDH" => Some(bits),
+        _ => None,
+    }
+}
+
+/// Montgomery-curve policy name for a stored `Ecdh` key length — the §6.7
+/// mech-info bit counts (255 → X25519, 448 → X448) distinguish the two
+/// key-agreement curves from the NIST P-curves. `None` for any other length
+/// (including the engine-native default of 0), so P-curve keys and
+/// length-unset Montgomery keys keep the `ECDH-P{bits}` form.
+fn montgomery_name_for_len(length: u32) -> Option<&'static str> {
+    match length {
+        255 => Some("X25519"),
+        448 => Some("X448"),
         _ => None,
     }
 }
@@ -355,10 +370,10 @@ pub fn qualify_algorithm_str(name: &str, key_length: Option<u32>) -> String {
         "AES" => format!("AES-{}", key_length.filter(|&l| l != 0).unwrap_or(256)),
         "RSA" => format!("RSA-{}", key_length.filter(|&l| l != 0).unwrap_or(2048)),
         "ECDSA" => format!("ECDSA-P{}", ec_curve_bits(key_length.unwrap_or(256))),
-        "ECDH" => match key_length.and_then(crate::dh_kem::Curve::from_kmip_bits) {
-            Some(curve) => curve.name().to_string(),
-            None => format!("ECDH-P{}", ec_curve_bits(key_length.unwrap_or(256))),
-        },
+        "ECDH" => key_length
+            .and_then(montgomery_name_for_len)
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("ECDH-P{}", ec_curve_bits(key_length.unwrap_or(256)))),
         _ => name.to_string(),
     }
 }
@@ -697,27 +712,12 @@ pub fn native_sign_mech_with_params(
             H::Sha512 => c::CKM_ECDSA_SHA512,
             _ => return Err(unsupported_hash("ECDSA")),
         },
-        // RFC 8032 pure Ed25519 — no hash parameter (Ed25519ph is a distinct
-        // mechanism the KMIP surface doesn't expose yet).
-        Ed25519 => {
-            if hash.is_some() {
-                return Err(KmipError::unsupported_cryptographic_parameters(
-                    "Ed25519 Sign/Verify is pure EdDSA — Hashing Algorithm must be absent"
-                        .to_string(),
-                ));
-            }
-            c::CKM_EDDSA
-        }
-        Ed448 => {
-            return Err(KmipError::failed(
-                crate::error::ResultReason::OperationNotSupported,
-                "Ed448 signing has no engine backend — use Ed25519 (EdDSA) or X448 (key agreement)"
-                    .to_string(),
-            ));
-        }
         HmacSha256 => c::CKM_SHA256_HMAC,
         HmacSha384 => c::CKM_SHA384_HMAC,
         HmacSha512 => c::CKM_SHA512_HMAC,
+        // P1 (2026-07-05): pure EdDSA signs the message directly — no
+        // caller-selectable hash parameter, unlike RSA/ECDSA above.
+        Ed25519 => c::CKM_EDDSA,
         other => {
             return Err(KmipError::failed(
                 crate::error::ResultReason::OperationNotSupported,
@@ -864,6 +864,28 @@ pub fn native_kem_mech(a: KmipAlgorithm) -> Option<u32> {
     use KmipAlgorithm::*;
     match a {
         MlKem512 | MlKem768 | MlKem1024 => Some(c::CKM_ML_KEM),
+        _ => None,
+    }
+}
+
+/// Map a stored classical `Ecdh` object's `RecommendedCurve` to the engine
+/// mechanism for `Encapsulate`/`Decapsulate` (2026-07-05, DHKEM). Per
+/// PKCS#11 v3.2 §6.3.17, `CKM_ECDH1_DERIVE` covers the NIST Weierstrass
+/// curves (P-256/P-384/P-521); X25519/X448 (Montgomery form) use the
+/// distinct `CKM_EC_MONTGOMERY_KEY_DERIVE` mechanism instead — same
+/// distinction `create_key_pair.rs`'s `Ecdh` branch already makes when
+/// picking `generate_ecdh_keypair` vs `generate_x25519_keypair`/
+/// `generate_x448_keypair`.
+///
+/// Deliberately does NOT fall back to a length-based guess the way
+/// `qualified_name` does — `RecommendedCurve` is the only signal that
+/// distinguishes X25519 (256 bits) from P-256 (also 256 bits) unambiguously.
+pub fn classical_kem_mech(recommended_curve: Option<u32>) -> Option<u32> {
+    use crate::kmip30::algos::recommended_curve as rc;
+    use softhsmrustv3::constants as c;
+    match recommended_curve {
+        Some(rc::P_256) | Some(rc::P_384) | Some(rc::P_521) => Some(c::CKM_ECDH1_DERIVE),
+        Some(rc::CURVE25519) | Some(rc::CURVE448) => Some(c::CKM_EC_MONTGOMERY_KEY_DERIVE),
         _ => None,
     }
 }

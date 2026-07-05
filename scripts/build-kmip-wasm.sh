@@ -89,6 +89,10 @@ HUB_POLICY_DIR="$HUB/public/kmip-policies"
 echo "[kmip-wasm] staging policy presets into $HUB_POLICY_DIR"
 mkdir -p "$HUB_POLICY_DIR"
 cp "$ROOT"/kmip/policies/*.yaml "$HUB_POLICY_DIR/"
+# The CACP guide (policy language + workbench testing + KMIP 3.0 hybrid
+# status) rides along so the playground's "Guide" button always shows the
+# version matching the staged policies/engine.
+cp "$ROOT"/kmip/docs/CACP_GUIDE.md "$HUB_POLICY_DIR/"
 
 echo ""
 echo "[kmip-wasm] done."

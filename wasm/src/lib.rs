@@ -647,6 +647,27 @@ fn json_enum_u32(v: &Json) -> Result<u32, String> {
 
 // ── request builders ─────────────────────────────────────────────────────────
 
+/// Custom `x-*` attributes from an op spec's `attrs` object ({name: value},
+/// `x-` prefix optional — the wire carries the bare name and the create path
+/// persists it for use-time policy gates). Same shape the dry-run facade
+/// accepts, so the UI can send governance tags (e.g.
+/// x-pqctoday-cnsa-classification) on REAL Create/CreateKeyPair ops too
+/// (2026-07-04: previously dry-run-only, which made attribute-gated policies
+/// unusable in the workbench).
+fn custom_attrs_from_spec(spec: &Json) -> Vec<Attribute> {
+    spec.get("attrs")
+        .and_then(|v| v.as_object())
+        .map(|o| {
+            o.iter()
+                .map(|(k, v)| Attribute::Custom {
+                    name: k.strip_prefix("x-").unwrap_or(k).to_string(),
+                    value: v.as_str().unwrap_or_default().to_string(),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn build_payload(op: &str, spec: &Json) -> Result<RequestPayload, String> {
     let uid = || spec.get("uid").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let data = || spec_bytes(spec, "data", "text");
@@ -678,6 +699,7 @@ fn build_payload(op: &str, spec: &Json) -> Result<RequestPayload, String> {
             if let Some(name) = spec.get("name").and_then(|v| v.as_str()) {
                 attrs.push(Attribute::Name(name.to_string()));
             }
+            attrs.extend(custom_attrs_from_spec(spec));
             RequestPayload::Create(CreateRequest {
                 object_type: ObjectType::SymmetricKey,
                 template_attribute: attrs,
@@ -719,6 +741,7 @@ fn build_payload(op: &str, spec: &Json) -> Result<RequestPayload, String> {
             if let Some(name) = spec.get("name").and_then(|v| v.as_str()) {
                 common.push(Attribute::Name(name.to_string()));
             }
+            common.extend(custom_attrs_from_spec(spec));
             RequestPayload::CreateKeyPair(CreateKeyPairRequest {
                 common_attributes: common,
                 private_key_attributes: vec![],
@@ -853,7 +876,7 @@ fn alg_from_name(name: &str) -> Option<KmipAlgorithm> {
         return Some(Ecdh);
     }
     const ALL: &[KmipAlgorithm] = &[
-        Aes, Rsa, Ecdsa, HmacSha256, HmacSha384, HmacSha512, Ecdh, Ed25519, Ed448,
+        Aes, Rsa, Ecdsa, HmacSha256, HmacSha384, HmacSha512, Ecdh, Ed25519,
         ChaCha20, ChaCha20Poly1305,
         MlKem512, MlKem768, MlKem1024, MlDsa44, MlDsa65, MlDsa87,
         SlhDsaSha2_128s, SlhDsaSha2_128f, SlhDsaSha2_192s, SlhDsaSha2_192f, SlhDsaSha2_256s,
@@ -909,7 +932,7 @@ fn summarize(payload: &ResponsePayload) -> Json {
             "uid": r.uid, "ciphertextHex": to_hex(&r.data), "ciphertextLen": r.data.len(),
             "rekeyed": r.rekeyed.as_ref().map(|k| json!({
                 "oldUid": k.old_uid,
-                "newPrivateKeyUid": k.new_uid,
+                "newPrivateKeyUid": k.new_private_key_uid,
                 "newPublicKeyUid": k.new_public_key_uid,
             })),
         }),

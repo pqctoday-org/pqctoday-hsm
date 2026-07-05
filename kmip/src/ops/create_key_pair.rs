@@ -109,7 +109,7 @@ pub fn create_key_pair(
     // Algorithm + length should be the same on both halves (carried in
     // CommonAttributes per the spec; private/public mismatch would be
     // a client bug). Pull from whichever side has it first.
-    let (algorithm_in, key_length, usage_mask) = extract_template(&req);
+    let (algorithm_in, key_length, usage_mask, recommended_curve) = extract_template(&req);
     let _ = (priv_x.algorithm, pub_x.algorithm); // silence unused; merged via extract_template
 
     // ── Plane 1: policy gate ────────────────────────────────────────────
@@ -137,7 +137,9 @@ pub fn create_key_pair(
     p_req.key_length = key_length;
     p_req.usage_mask = usage_mask;
     // Label-pattern rules (`name_pattern`) match on the template's Name — the
-    // label-only agility contract where the policy maps key classes to algos.
+    // Migration tab's label-only contract, where the policy maps a business
+    // key name to an algorithm. `Name` is not `Custom`, so it isn't in
+    // `custom_attrs`; pull it straight off the merged template.
     let template_name = all_attrs.iter().find_map(|a| match a {
         Attribute::Name(n) => Some(n.as_str()),
         _ => None,
@@ -181,6 +183,29 @@ pub fn create_key_pair(
 
     let kmip_algo = parse_algorithm(&resolved_algorithm)?;
 
+    // Label-only Montgomery KEM: when the policy resolved the algorithm to
+    // `X25519`/`X448` (a name, not a template CryptographicDomainParameters),
+    // supply the matching RecommendedCurve + §6.7 mech-info length here so the
+    // engine generates the right curve and `qualified_name` renders the stored
+    // key distinctly (255 → X25519, 448 → X448) instead of colliding with
+    // real P-curves as `ECDH-P256`.
+    let (recommended_curve, montgomery_length) = {
+        use crate::kmip30::algos::recommended_curve as rc;
+        match resolved_algorithm.as_str() {
+            "X25519" => (Some(rc::CURVE25519), Some(255u32)),
+            "X448" => (Some(rc::CURVE448), Some(448u32)),
+            _ => (recommended_curve, None),
+        }
+    };
+    // Size the record from the policy-resolved name on the label-only path
+    // (`RSA-2048` → 2048, `ECDSA-P384` → 384) so the stored key carries its
+    // real length — otherwise a label-only key persisted length 0 and the UI /
+    // GetAttributes reported no size. Montgomery curves get their §6.7 length
+    // above; PQC parameter sets encode their own size (None here).
+    let stored_length = key_length
+        .or(montgomery_length)
+        .or_else(|| super::helpers::classical_length_from_name(&resolved_algorithm));
+
     // ── Plane 3: would call C_GenerateKeyPair ───────────────────────────
     // PKCS#11 v3.2 §C.7.1 — signature in pkcs11f.h:
     //   C_GenerateKeyPair(hSession, pMechanism,
@@ -188,86 +213,82 @@ pub fn create_key_pair(
     //                     pPrivateKeyTemplate, ulPrivateKeyAttributeCount,
     //                     phPublicKey, phPrivateKey)
     // softhsmrustv3 export verified at rust/src/ffi.rs::C_GenerateKeyPair.
-    // K6 — hybrid KEMs (X25519MLKEM768 / SecP256r1MLKEM768) have no single
-    // PKCS#11 mechanism; the composite key is generated in-process
-    // (`crate::hybrid_kem`) and its raw material is stored on the records
-    // (`key_material`) rather than as engine CKA_IDs.
-    // Montgomery-curve keys (X25519/X448) collapse to `Ecdh` at the enum
-    // layer; recognise them by the policy-resolved name (label-only path) or
-    // by an explicit ECDH + 255/448-bit template (client-specified path).
-    let montgomery_curve = match resolved_algorithm.as_str() {
-        "X25519" => Some(crate::dh_kem::Curve::X25519),
-        "X448" => Some(crate::dh_kem::Curve::X448),
-        _ => match (kmip_algo, key_length) {
-            (crate::kmip30::KmipAlgorithm::Ecdh, Some(bits)) => {
-                crate::dh_kem::Curve::from_kmip_bits(bits)
-            }
-            _ => None,
-        },
-    };
-    // Lengths the record must carry when the template didn't say: the size
-    // the policy's resolved string implies ("RSA-2048" → 2048, "ECDSA-P256" →
-    // 256), Montgomery 255/448, Ed25519 255 (PKCS#11 v3.2 §6.7 mech-info
-    // values). Without this the label-only path generated the FAMILY default
-    // size whatever the policy said. `qualified_name` reads the stored length
-    // back to render `X25519`/`RSA-2048` for policy matching and the UI.
-    let implied_bits = match (montgomery_curve, kmip_algo) {
-        (Some(curve), _) => Some(curve.kmip_bits()),
-        (None, crate::kmip30::KmipAlgorithm::Ed25519) => Some(255),
-        _ => super::helpers::classical_length_from_name(&resolved_algorithm),
-    };
-    let effective_length = key_length.or(implied_bits);
-
-    let (generated, hybrid_pub_material, hybrid_priv_material) =
+    // K6 — hybrid KEMs have no single PKCS#11 mechanism. The ENGINE generates
+    // TWO non-extractable keypairs (classical + ML-KEM) under two CKA_IDs and
+    // returns their private handles + the assembled public wire share. The
+    // private record stores NO key_material (its two halves live in the engine,
+    // so Get refuses it via CKA_SENSITIVE); the public record stores the wire
+    // share inline (it is public). `hybrid_secondary_cka_id` is the classical
+    // half's CKA_ID, recorded on the private object so Decapsulate can resolve
+    // both handles.
+    let (generated, hybrid_pub_material, hybrid_priv_material, hybrid_secondary_cka_id) =
         if let Some(hybrid) = kmip_algo.hybrid_kem() {
-            let kp = match crate::hybrid_kem::keygen(hybrid) {
-                Ok(kp) => kp,
-                Err(e) => {
-                    return fail(
-                        deps,
-                        correlation_id,
-                        op_canonical,
-                        KmipError::failed(ResultReason::CryptographicFailure, e),
+            match deps.engine_session {
+                Some(session) => {
+                    let mlkem_cka_id = Uuid::new_v4().as_bytes().to_vec();
+                    let classical_cka_id = Uuid::new_v4().as_bytes().to_vec();
+                    let kg = match softhsmrustv3::native::hybrid::keygen(
+                        session,
+                        hybrid,
+                        &mlkem_cka_id,
+                        &classical_cka_id,
+                    ) {
+                        Ok(kg) => kg,
+                        Err(rv) => {
+                            return fail(
+                                deps,
+                                correlation_id,
+                                op_canonical,
+                                super::helpers::ck_rv_to_kmip_error(rv, "hybrid keygen"),
+                            )
+                        }
+                    };
+                    super::helpers::emit_pkcs11(deps, correlation_id, "soft::hybrid_kem_keygen", None, 0, "CKR_OK");
+                    (
+                        GeneratedKeyPair {
+                            cka_id_priv: mlkem_cka_id,
+                            cka_id_pub: Vec::new(),
+                            digest_priv: None,
+                            digest_pub: None,
+                        },
+                        Some(kg.public),        // public wire share (inline)
+                        None,                   // private key_material NONE — the non-extractability fix
+                        Some(classical_cka_id), // secondary CKA_ID on the private record
                     )
                 }
-            };
-            super::helpers::emit_pkcs11(deps, correlation_id, "soft::hybrid_kem_keygen", None, 0, "CKR_OK");
-            (
-                GeneratedKeyPair {
-                    cka_id_priv: Vec::new(),
-                    cka_id_pub: Vec::new(),
-                    digest_priv: None,
-                    digest_pub: None,
-                },
-                Some(kp.public),
-                Some(kp.private),
-            )
-        } else if let Some(curve) = montgomery_curve {
-            // Classical Montgomery KEM — same in-process pattern as the
-            // hybrid KEMs: raw material on the records, no engine CKA_ID
-            // (`crate::dh_kem`; Encapsulate/Decapsulate dispatch on length).
-            let kp = match crate::dh_kem::keygen(curve) {
-                Ok(kp) => kp,
-                Err(e) => {
-                    return fail(
-                        deps,
-                        correlation_id,
-                        op_canonical,
-                        KmipError::failed(ResultReason::CryptographicFailure, e),
-                    )
+                None => {
+                    // S-2 hardening: no engine session ⇒ no hybrid material.
+                    // Production MUST fail; the soft path survives only for the
+                    // crate's own engine-less unit tests.
+                    #[cfg(not(test))]
+                    {
+                        return fail(
+                            deps,
+                            correlation_id,
+                            op_canonical,
+                            KmipError::failed(
+                                ResultReason::CryptographicFailure,
+                                "no engine session — cannot generate hybrid key pair".to_string(),
+                            ),
+                        );
+                    }
+                    #[cfg(test)]
+                    {
+                        super::helpers::emit_pkcs11(deps, correlation_id, "soft::placeholder_hybrid_keygen", None, 0, "CKR_OK");
+                        (
+                            GeneratedKeyPair {
+                                cka_id_priv: Uuid::new_v4().as_bytes().to_vec(),
+                                cka_id_pub: Vec::new(),
+                                digest_priv: None,
+                                digest_pub: None,
+                            },
+                            None,
+                            None,
+                            Some(Uuid::new_v4().as_bytes().to_vec()),
+                        )
+                    }
                 }
-            };
-            super::helpers::emit_pkcs11(deps, correlation_id, "soft::dh_kem_keygen", None, 0, "CKR_OK");
-            (
-                GeneratedKeyPair {
-                    cka_id_priv: Vec::new(),
-                    cka_id_pub: Vec::new(),
-                    digest_priv: None,
-                    digest_pub: None,
-                },
-                Some(kp.public),
-                Some(kp.private),
-            )
+            }
         } else {
             let mech = kmip_algo.to_pkcs11_mech(PkcsOp::KeyGen).ok_or_else(|| {
                 KmipError::failed(
@@ -281,11 +302,12 @@ pub fn create_key_pair(
                 deps,
                 correlation_id,
                 kmip_algo,
-                effective_length,
+                key_length,
                 mech,
                 req.seed.as_deref(),
+                recommended_curve,
             ) {
-                Ok(g) => (g, None, None),
+                Ok(g) => (g, None, None, None),
                 Err(err) => return fail(deps, correlation_id, op_canonical, err),
             }
         };
@@ -310,7 +332,7 @@ pub fn create_key_pair(
         uid: priv_uid.clone(),
         object_type: ObjectType::PrivateKey,
         algorithm: kmip_algo,
-        cryptographic_length: priv_x.length.or(effective_length).unwrap_or(0),
+        cryptographic_length: priv_x.length.or(stored_length).unwrap_or(0),
         usage_mask: priv_usage,
         state: priv_state,
         pkcs11_cka_id: pkcs11_cka_id_priv,
@@ -340,9 +362,17 @@ pub fn create_key_pair(
             custom_attributes: super::helpers::raw_custom_attrs(&all_attrs),
 
 
-            // K6 — composite private key material for a hybrid KEM (None for
-            // engine-backed keys, which live behind a CKA_ID).
+            // K6 — hybrid private keys are engine-backed (two handles behind
+            // pkcs11_cka_id + pkcs11_cka_id_secondary); no material here, so Get
+            // refuses them. None for every non-hybrid engine key too.
             key_material: hybrid_priv_material,
+
+            // K6 — classical half's CKA_ID for a hybrid private key (None otherwise).
+            pkcs11_cka_id_secondary: hybrid_secondary_cka_id,
+
+            // KMIP 3.0 §4.16 — Recommended Curve chosen for an EC/ECDH key,
+            // reported back via the Cryptographic Domain Parameters attribute.
+            recommended_curve,
 
             digest_value: digest_priv,
 
@@ -372,7 +402,7 @@ pub fn create_key_pair(
         uid: pub_uid.clone(),
         object_type: ObjectType::PublicKey,
         algorithm: kmip_algo,
-        cryptographic_length: pub_x.length.or(effective_length).unwrap_or(0),
+        cryptographic_length: pub_x.length.or(stored_length).unwrap_or(0),
         usage_mask: pub_usage,
         state: pub_state,
         pkcs11_cka_id: pkcs11_cka_id_pub,
@@ -400,6 +430,13 @@ pub fn create_key_pair(
 
             // K6 — composite public key material for a hybrid KEM.
             key_material: hybrid_pub_material,
+
+            // Public keys are never hybrid-engine-backed here (the wire share is
+            // stored inline above); no secondary CKA_ID.
+            pkcs11_cka_id_secondary: None,
+
+            // KMIP 3.0 §4.16 — the public half carries the same domain params.
+            recommended_curve,
 
             digest_value: digest_pub,
 
@@ -458,6 +495,7 @@ pub(crate) fn engine_generate_keypair(
     key_length: Option<u32>,
     mech: u32,
     seed: Option<&[u8]>,
+    recommended_curve: Option<u32>,
 ) -> std::result::Result<GeneratedKeyPair, KmipError> {
     if let Some(session) = deps.engine_session {
         // K15 — `native_generate_keypair` emits the Pkcs11Call audit
@@ -473,6 +511,7 @@ pub(crate) fn engine_generate_keypair(
             &cka_id,
             mech,
             seed,
+            recommended_curve,
         )?;
         Ok(GeneratedKeyPair {
             cka_id_priv: cka_id.clone(),
@@ -516,10 +555,15 @@ pub(crate) fn engine_generate_keypair(
 /// KMIP 3.0 §4.x — `CryptographicAlgorithm`, `CryptographicLength`, and
 /// `CryptographicUsageMask` are the three attributes the dispatcher
 /// canonicalises for the engine.
-fn extract_template(req: &CreateKeyPairRequest) -> (Option<String>, Option<u32>, Option<UsageMask>) {
+fn extract_template(
+    req: &CreateKeyPairRequest,
+) -> (Option<String>, Option<u32>, Option<UsageMask>, Option<u32>) {
     let mut algorithm: Option<String> = None;
     let mut length: Option<u32> = None;
     let mut usage: Option<UsageMask> = None;
+    // KMIP 3.0 §4.16 — the curve is carried inside Cryptographic Domain
+    // Parameters (the compliant surface), NOT a standalone attribute.
+    let mut recommended_curve: Option<u32> = None;
     for a in req
         .common_attributes
         .iter()
@@ -536,10 +580,15 @@ fn extract_template(req: &CreateKeyPairRequest) -> (Option<String>, Option<u32>,
             Attribute::CryptographicUsageMask(m) => {
                 usage = Some(*m);
             }
+            Attribute::CryptographicDomainParameters { recommended_curve: rc, .. } => {
+                if let Some(c) = rc {
+                    recommended_curve = Some(*c);
+                }
+            }
             _ => {}
         }
     }
-    (algorithm, length, usage)
+    (algorithm, length, usage, recommended_curve)
 }
 
 /// Canonical algorithm string used by the policy engine. Mirrors the
@@ -554,10 +603,9 @@ fn canonical_name(a: KmipAlgorithm) -> String {
         HmacSha384 => "HMAC-SHA-384",
         HmacSha512 => "HMAC-SHA-512",
         Ecdh       => "ECDH",
-        Ed25519    => "Ed25519",
-        Ed448      => "Ed448",
         ChaCha20         => "ChaCha20",
         ChaCha20Poly1305 => "ChaCha20-Poly1305",
+        Ed25519    => "Ed25519",
         MlKem512   => "ML-KEM-512",
         MlKem768   => "ML-KEM-768",
         MlKem1024  => "ML-KEM-1024",
@@ -578,6 +626,7 @@ fn canonical_name(a: KmipAlgorithm) -> String {
         SlhDsaShake256f => "SLH-DSA-SHAKE-256f",
         X25519MlKem768 => "X25519MLKEM768",
         SecP256r1MlKem768 => "SecP256r1MLKEM768",
+        SecP384r1MlKem1024 => "SecP384r1MLKEM1024",
     }
     .into()
 }
@@ -612,11 +661,15 @@ pub(crate) fn parse_algorithm(s: &str) -> Result<KmipAlgorithm> {
         // K6 hybrid KEMs (no '-' split; exact names).
         "X25519MLKEM768" => X25519MlKem768,
         "SecP256r1MLKEM768" => SecP256r1MlKem768,
-        // RFC 8032 Edwards curves — exact names, official codepoints.
+        "SecP384r1MLKEM1024" => SecP384r1MlKem1024,
+        // P1 (2026-07-05): Ed25519 has no size/curve suffix — exact name.
         "Ed25519" => Ed25519,
-        "Ed448" => Ed448,
-        // RFC 7748 Montgomery curves collapse to ECDH; the caller derives
-        // the curve from the name/length (see `montgomery_curve` above).
+        // Montgomery key-agreement curves collapse to `Ecdh` at the enum layer;
+        // the caller (create_key_pair) turns these names into ECDH +
+        // RecommendedCurve CURVE25519/CURVE448 so the label-only policy default
+        // path (`default_algorithm: X25519`) can create them. Without this arm
+        // a policy naming X25519/X448 failed to parse (the engine expected the
+        // curve only in the request template's CryptographicDomainParameters).
         "X25519" | "X448" => Ecdh,
         // Size-suffixed classical algos collapse to their base enum.
         _ => match base {
@@ -659,6 +712,7 @@ fn native_generate_keypair(
     cka_id: &[u8],
     mech: u32,
     seed: Option<&[u8]>,
+    recommended_curve: Option<u32>,
 ) -> std::result::Result<(u32, u32), KmipError> {
     use crate::kmip30::KmipAlgorithm::*;
     use softhsmrustv3::native;
@@ -732,6 +786,53 @@ fn native_generate_keypair(
                 native::generate_ecdsa_keypair(session, curve, cka_id, label),
             )
         }
+        // `Ecdh` (wire 0x0e). KMIP 3.0 §4.16 — the curve is chosen by the
+        // `Recommended Curve` inside Cryptographic Domain Parameters. X25519 /
+        // X448 key agreement is modelled here as ECDH + CURVE25519 / CURVE448
+        // (there is no standalone X25519/X448 algorithm codepoint). When no
+        // Recommended Curve is supplied we keep the length-based NIST inference
+        // for back-compat.
+        Ecdh => {
+            use crate::kmip30::algos::recommended_curve as rc;
+            match recommended_curve {
+                Some(rc::CURVE25519) => (
+                    "native::generate_x25519_keypair",
+                    native::generate_x25519_keypair(session, cka_id, label),
+                ),
+                Some(rc::CURVE448) => (
+                    "native::generate_x448_keypair",
+                    native::generate_x448_keypair(session, cka_id, label),
+                ),
+                Some(rc::P_256) => (
+                    "native::generate_ecdh_keypair",
+                    native::generate_ecdh_keypair(session, native::EccCurve::P256, cka_id, label),
+                ),
+                Some(rc::P_384) => (
+                    "native::generate_ecdh_keypair",
+                    native::generate_ecdh_keypair(session, native::EccCurve::P384, cka_id, label),
+                ),
+                Some(rc::P_521) => (
+                    "native::generate_ecdh_keypair",
+                    native::generate_ecdh_keypair(session, native::EccCurve::P521, cka_id, label),
+                ),
+                Some(other) => {
+                    return Err(KmipError::invalid_attribute_value(format!(
+                        "ECDH RecommendedCurve 0x{other:08x} not supported"
+                    )));
+                }
+                None => {
+                    let curve = ecdsa_curve_from_length(key_length)?;
+                    (
+                        "native::generate_ecdh_keypair",
+                        native::generate_ecdh_keypair(session, curve, cka_id, label),
+                    )
+                }
+            }
+        }
+        // P1 (2026-07-05): Ed25519 — no curve/size parameter, single fixed
+        // curve. Keygen/sign/verify all pre-existed at the PKCS#11 layer
+        // (ffi.rs CKM_EC_EDWARDS_KEY_PAIR_GEN / CKM_EDDSA); this is the
+        // missing KMIP-layer plumbing.
         Ed25519 => (
             "native::generate_ed25519_keypair",
             native::generate_ed25519_keypair(session, cka_id, label),

@@ -149,9 +149,17 @@ pub enum Rule {
     },
 
     /// Creating `algorithm` without all `flags` set → Deny.
+    ///
+    /// `ops` scopes the rule; when omitted it defaults to the four
+    /// creation/ingress ops (`Create`, `CreateKeyPair`, `Register`, `Import`)
+    /// — a mask requirement is a key-provenance gate, and firing it on use
+    /// ops re-closed the Decrypt/Verify paths policies deliberately leave
+    /// open (2026-07-04 gap audit).
     RequireUsageMask {
         algorithm: String,
         flags: Vec<String>,
+        #[serde(default)]
+        ops: Vec<String>,
         reason: String,
         /// Which framework clause this rule implements (e.g. "BSI TR-02102-1
         /// §2.1/§5.3"), for the Hub's rule-provenance UI. Purely descriptive —
@@ -162,9 +170,18 @@ pub enum Rule {
     },
 
     /// Creating any of `algorithms` without `x-<attribute_name>` set → Deny.
+    ///
+    /// `ops` scopes the rule; when omitted it defaults to the four
+    /// creation/ingress ops (`Create`, `CreateKeyPair`, `Register`, `Import`).
+    /// Un-scoped, this rule denied EVERY op on an untagged key — including
+    /// the Decrypt/Verify/Get paths the same policies promise stay open
+    /// (2026-07-04 gap audit; the "CNSA 2.0 allows AES-256 but denies
+    /// Encrypt/Decrypt" bug).
     RequireCustomAttribute {
         attribute_name: String,
         algorithms: Vec<String>,
+        #[serde(default)]
+        ops: Vec<String>,
         reason: String,
         /// Which framework clause this rule implements (e.g. "BSI TR-02102-1
         /// §2.1/§5.3"), for the Hub's rule-provenance UI. Purely descriptive —
@@ -546,11 +563,27 @@ impl Rule {
     /// Pass 1: apply `AlgorithmSubstitution` — rewrite `from` → `to` when the
     /// (already default-resolved) algorithm matches `from`. Returns `None` for
     /// every other rule type and for non-matching substitutions.
+    ///
+    /// Hard-excludes "consumer ops" ([`is_consumer_op`]) regardless of what a
+    /// rule's `ops:` list says (2026-07-05, classical-KEM crypto-agility
+    /// design review). A consumer op operates on material a peer already
+    /// fixed at an earlier point in time (`Decapsulate`'s ciphertext,
+    /// `DeriveKey`'s peer public bytes, `Decrypt`'s ciphertext) — there is no
+    /// "instead use algorithm X" available once that input already exists,
+    /// and worse, letting a substitution match here would flag EVERY
+    /// legitimate not-yet-migrated call as needing a rekey it can never
+    /// execute, breaking ordinary decryption/decapsulation/derivation the
+    /// moment such a rule went active. This must be an engine invariant, not
+    /// a policy-authoring guideline — see `kmip/policies/README.md`
+    /// "Consumer ops" and `loader.rs`'s matching load-time rejection.
     pub fn resolve_substitution(
         &self,
         req: &PolicyRequest,
         current_algorithm: Option<&str>,
     ) -> Option<Substitution> {
+        if is_consumer_op(req.op) {
+            return None;
+        }
         match self {
             Rule::AlgorithmSubstitution {
                 ops,
@@ -723,9 +756,13 @@ impl Rule {
             Rule::RequireUsageMask {
                 algorithm,
                 flags,
+                ops,
                 reason,
                 ..
             } => {
+                if !scoped_op_matches(ops, req.op) {
+                    return None;
+                }
                 if !resolved_algorithm.is_some_and(|a| algo_matches(algorithm, a)) {
                     return None;
                 }
@@ -750,20 +787,26 @@ impl Rule {
             Rule::RequireCustomAttribute {
                 attribute_name,
                 algorithms,
+                ops,
                 reason,
                 ..
-            } => match resolved_algorithm {
-                Some(algo)
-                    if algorithms.iter().any(|a| algo_matches(a, algo))
-                        && !req.custom_attrs.contains_key(attribute_name) =>
-                {
-                    Some(GatingDeny {
-                        kmip_reason: DenyReason::InvalidAttributeValue,
-                        human: reason.clone(),
-                    })
+            } => {
+                if !scoped_op_matches(ops, req.op) {
+                    return None;
                 }
-                _ => None,
-            },
+                match resolved_algorithm {
+                    Some(algo)
+                        if algorithms.iter().any(|a| algo_matches(a, algo))
+                            && !req.custom_attrs.contains_key(attribute_name) =>
+                    {
+                        Some(GatingDeny {
+                            kmip_reason: DenyReason::InvalidAttributeValue,
+                            human: reason.clone(),
+                        })
+                    }
+                    _ => None,
+                }
+            }
 
             Rule::TemporalCutoff {
                 op,
@@ -1019,6 +1062,22 @@ impl Rule {
 
 // ── helpers ────────────────────────────────────────────────────────────────
 
+/// Ops a `require_usage_mask` / `require_custom_attribute` rule gates when the
+/// policy author writes no `ops:` — the creation/ingress surface, where a key's
+/// provenance metadata is established. `CreateKeyPair` prefix-matches every
+/// `CreateKeyPair:<purpose>` refinement via [`op_matches`].
+pub const DEFAULT_PROVENANCE_OPS: &[&str] = &["Create", "CreateKeyPair", "Register", "Import"];
+
+/// Match a rule's optional `ops` scope: an explicit list gates exactly those
+/// ops; an empty (omitted) list falls back to [`DEFAULT_PROVENANCE_OPS`].
+fn scoped_op_matches(ops: &[String], req_op: &str) -> bool {
+    if ops.is_empty() {
+        DEFAULT_PROVENANCE_OPS.iter().any(|o| op_matches(o, req_op))
+    } else {
+        ops.iter().any(|o| op_matches(o, req_op))
+    }
+}
+
 /// Match a policy rule's `op`/`ops` entry against a request's canonical op.
 ///
 /// The dispatcher canonicalises `CreateKeyPair` into `CreateKeyPair:<purpose>`
@@ -1040,6 +1099,20 @@ pub fn op_matches(rule_op: &str, req_op: &str) -> bool {
         || req_op
             .strip_prefix(rule_op)
             .is_some_and(|rest| rest.starts_with(':'))
+}
+
+/// "Consumer ops" (2026-07-05 design review, classical-KEM crypto-agility):
+/// operations whose input was already fixed to a specific algorithm by an
+/// earlier, possibly-much-earlier, possibly-different-party call —
+/// `Decapsulate`'s ciphertext (fixed by a peer's `Encapsulate`), `DeriveKey`'s
+/// peer public bytes (opaque, caller-supplied), `Decrypt`'s ciphertext (fixed
+/// by an earlier `Encrypt`). Contrast "originator ops" (`Sign`, `Encapsulate`,
+/// `Encrypt`, `Create`/`CreateKeyPair`) which produce fresh output each call
+/// and so can coherently support `algorithm_substitution`. See
+/// `resolve_substitution`'s doc comment for why this exclusion is a hard
+/// engine invariant, not a policy-authoring convention.
+pub fn is_consumer_op(op: &str) -> bool {
+    matches!(op, "Decapsulate" | "DeriveKey" | "Decrypt")
 }
 
 /// Match a policy `algorithms` entry against a request's (qualified) algorithm.
@@ -1403,7 +1476,11 @@ fn matches_class(algorithm: &str, class: &str) -> bool {
         || algorithm.starts_with("Classic-McEliece")
         // composite PQC names carry a PQC primary, e.g. ML-DSA-65-ED25519
         || algorithm.contains("ML-DSA")
-        || algorithm.contains("ML-KEM");
+        || algorithm.contains("ML-KEM")
+        // hybrid KEMs spell the component without a hyphen (KMIP 3.0 WD19:
+        // X25519MLKEM768, SecP256r1MLKEM768) — they carry a PQC component and
+        // must not fall through to "classical" (2026-07-04 gap audit).
+        || algorithm.contains("MLKEM");
     let is_symmetric = algorithm.starts_with("AES")
         || algorithm.starts_with("ChaCha20")
         || algorithm.starts_with("HMAC")
@@ -1799,6 +1876,45 @@ mod tests {
         assert_eq!(sub.new_algorithm, "ML-DSA-65");
     }
 
+    /// 2026-07-05 (classical-KEM crypto-agility design review) — a
+    /// substitution rule that (mistakenly) targets a consumer op must never
+    /// fire, even though its `ops:` list names the request's op exactly. The
+    /// loader rejects such a rule at load time (see `lint.rs`); this pins the
+    /// engine-level backstop for defense-in-depth.
+    #[test]
+    fn resolve_substitution_never_fires_on_consumer_ops() {
+        let attrs = HashMap::new();
+        for op in ["Decapsulate", "DeriveKey", "Decrypt"] {
+            assert!(is_consumer_op(op), "{op} must be classified as a consumer op");
+            let r = Rule::AlgorithmSubstitution {
+                ops: vec![op.to_string()],
+                from: "ECDH-P256".into(),
+                to: "ML-KEM-1024".into(),
+                reason: "should never fire".into(),
+                clause: None,
+                name_pattern: None,
+            };
+            let req = req(op, Some("ECDH-P256"), &attrs);
+            assert!(
+                r.resolve_substitution(&req, Some("ECDH-P256")).is_none(),
+                "{op}: substitution must not fire even though ops/from/current_algorithm all match"
+            );
+        }
+        // Sanity: Encapsulate (an originator op) with the identical shape
+        // still substitutes normally — the exclusion is op-specific, not a
+        // blanket regression.
+        let r = Rule::AlgorithmSubstitution {
+            ops: vec!["Encapsulate".into()],
+            from: "ECDH-P256".into(),
+            to: "ML-KEM-1024".into(),
+            reason: "should fire".into(),
+            clause: None,
+            name_pattern: None,
+        };
+        let req = req("Encapsulate", Some("ECDH-P256"), &attrs);
+        assert!(r.resolve_substitution(&req, Some("ECDH-P256")).is_some());
+    }
+
     #[test]
     fn algorithm_default_fires_when_no_algo() {
         let attrs = HashMap::new();
@@ -1926,6 +2042,7 @@ mod tests {
         let r = Rule::RequireCustomAttribute {
             attribute_name: "pqctoday-cnsa-classification".into(),
             algorithms: vec!["ML-DSA-87".into()],
+            ops: vec![],
             reason: "CNSA classification required".into(),
             clause: None,
         };
@@ -1934,5 +2051,79 @@ mod tests {
         attrs.insert("pqctoday-cnsa-classification".into(), "TopSecret".into());
         let req2 = req("Create", Some("ML-DSA-87"), &attrs);
         assert!(r.check_pass2(&req2, Some("ML-DSA-87")).is_none());
+    }
+
+    // ── 2026-07-04 gap audit: provenance rules are creation-scoped ────────
+    #[test]
+    fn require_custom_attribute_default_scope_leaves_use_ops_open() {
+        let attrs = HashMap::new(); // attribute deliberately missing
+        let r = Rule::RequireCustomAttribute {
+            attribute_name: "pqctoday-cnsa-classification".into(),
+            algorithms: vec!["AES-256".into()],
+            ops: vec![], // omitted → DEFAULT_PROVENANCE_OPS
+            reason: "classification required".into(),
+            clause: None,
+        };
+        // Creation/ingress ops: denied without the attribute.
+        for op in ["Create", "CreateKeyPair:Encrypt", "Register", "Import"] {
+            let rq = req(op, Some("AES-256"), &attrs);
+            assert!(r.check_pass2(&rq, Some("AES-256")).is_some(), "{op} must deny");
+        }
+        // Use ops on an untagged (e.g. legacy) key: NOT this rule's business.
+        for op in ["Encrypt", "Decrypt", "Sign", "SignatureVerify", "Get", "Decapsulate"] {
+            let rq = req(op, Some("AES-256"), &attrs);
+            assert!(r.check_pass2(&rq, Some("AES-256")).is_none(), "{op} must pass");
+        }
+    }
+
+    #[test]
+    fn require_custom_attribute_explicit_ops_override_default() {
+        let attrs = HashMap::new();
+        let r = Rule::RequireCustomAttribute {
+            attribute_name: "pqctoday-purpose".into(),
+            algorithms: vec!["ML-DSA-87".into()],
+            ops: vec!["Sign".into()],
+            reason: "purpose required to sign".into(),
+            clause: None,
+        };
+        // Explicit scope gates exactly those ops — Create passes, Sign denies.
+        let rq = req("Create", Some("ML-DSA-87"), &attrs);
+        assert!(r.check_pass2(&rq, Some("ML-DSA-87")).is_none());
+        let rq = req("Sign", Some("ML-DSA-87"), &attrs);
+        assert!(r.check_pass2(&rq, Some("ML-DSA-87")).is_some());
+    }
+
+    #[test]
+    fn require_usage_mask_default_scope_leaves_use_ops_open() {
+        let attrs = HashMap::new();
+        let r = Rule::RequireUsageMask {
+            algorithm: "LMS".into(),
+            flags: vec!["Sign".into(), "Verify".into()],
+            ops: vec![],
+            reason: "LMS keys must declare Sign+Verify".into(),
+            clause: None,
+        };
+        // Create without a mask fails closed (unchanged behaviour).
+        let rq = req("Create", Some("LMS"), &attrs);
+        assert!(r.check_pass2(&rq, Some("LMS")).is_some());
+        // A mask-less use request (dry-run, legacy verify) is out of scope.
+        let rq = req("SignatureVerify", Some("LMS"), &attrs);
+        assert!(r.check_pass2(&rq, Some("LMS")).is_none());
+        // Create WITH the right mask passes.
+        let mut rq = req("Create", Some("LMS"), &attrs);
+        rq.usage_mask = Some(
+            super::super::super::kmip30::UsageMask::SIGN
+                | super::super::super::kmip30::UsageMask::VERIFY,
+        );
+        assert!(r.check_pass2(&rq, Some("LMS")).is_none());
+    }
+
+    #[test]
+    fn matches_class_hybrid_kems_are_pqc() {
+        // KMIP 3.0 WD19 hybrid KEM spellings carry no hyphen in the ML-KEM
+        // component; they must classify as PQC, not fall through to classical.
+        assert!(matches_class("X25519MLKEM768", "pqc"));
+        assert!(matches_class("SecP256r1MLKEM768", "pqc"));
+        assert!(!matches_class("X25519MLKEM768", "classical"));
     }
 }

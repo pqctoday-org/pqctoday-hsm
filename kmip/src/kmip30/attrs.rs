@@ -213,6 +213,18 @@ pub enum Attribute {
     /// `Cryptographic Usage Mask` (TTLV tag derived from spec extraction).
     CryptographicUsageMask(UsageMask),
 
+    /// `Cryptographic Domain Parameters` (TTLV tag `0x420029`) — KMIP 3.0 §4.16
+    /// Structure carrying `Qlength` (Integer, `0x420073`) and `Recommended
+    /// Curve` (Enumeration, `0x420075`). This is the standard, spec-compliant
+    /// way to specify the curve on a `Create Key Pair` request — e.g. an X25519
+    /// key is `CryptographicAlgorithm=ECDH` + this with
+    /// `recommended_curve = CURVE25519 (0x45)`. Distinct from
+    /// `Cryptographic Parameters` (`0x42002b`). Both members optional per Table 88.
+    CryptographicDomainParameters {
+        qlength: Option<u32>,
+        recommended_curve: Option<u32>,
+    },
+
     /// `Object Type` (TTLV tag `0x420057`). On a `Create` request this is
     /// implicit (= SymmetricKey or whichever type matches the op variant);
     /// on `Get` responses it's explicit.

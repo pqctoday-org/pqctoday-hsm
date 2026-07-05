@@ -290,6 +290,13 @@ pub(crate) mod tags {
     /// KMIP 3.0 §11 Cryptographic Parameters Structure (codepoint
     /// verified against kmip-spec-3.0-tags-enums.json).
     pub const CryptographicParameters: u32 = 0x42_002b;
+    /// KMIP 3.0 §4.16 Cryptographic Domain Parameters Structure — carries
+    /// `Qlength` (Integer) + `Recommended Curve` (Enumeration). All three
+    /// codepoints + the Structure/Integer/Enumeration item types verified
+    /// against kmip-spec-3.0-tags-enums.json and spec Table 88.
+    pub const CryptographicDomainParameters: u32 = 0x42_0029;
+    pub const Qlength: u32 = 0x42_0073;
+    pub const RecommendedCurve: u32 = 0x42_0075;
     /// KMIP 3.0 §11 Hashing Algorithm Enumeration.
     pub const HashingAlgorithm: u32       = 0x42_0038;
     /// KMIP 3.0 §11 RSA-OAEP family Enumerations / ByteString. All four
@@ -2417,6 +2424,23 @@ fn decode_attribute_v3(frame: &TtlvFrame) -> Result<Option<Attribute>, WireError
             let v = expect_integer(frame, "Cryptographic Usage Mask")? as u32;
             Attribute::CryptographicUsageMask(UsageMask::from_bits_truncate(v))
         }
+        // KMIP 3.0 §4.16 Table 88 — Structure with optional Qlength (Integer)
+        // and Recommended Curve (Enumeration) members.
+        tags::CryptographicDomainParameters => {
+            let children = expect_structure(frame, "Cryptographic Domain Parameters")?;
+            let mut qlength = None;
+            let mut recommended_curve = None;
+            for c in children {
+                match c.tag.0 {
+                    tags::Qlength => qlength = Some(expect_integer(c, "Qlength")? as u32),
+                    tags::RecommendedCurve => {
+                        recommended_curve = Some(expect_enum(c, "Recommended Curve")?)
+                    }
+                    _ => {} // ignore unknown members (forward-compat)
+                }
+            }
+            Attribute::CryptographicDomainParameters { qlength, recommended_curve }
+        }
         tags::ObjectType => {
             let v = expect_enum(frame, "Object Type")?;
             Attribute::ObjectType(
@@ -2904,6 +2928,9 @@ fn encode_cryptographic_parameters(cp: &CryptographicParameters) -> TtlvFrame {
     if let Some(v) = cp.salt_length {
         children.push(TtlvFrame::new(Tag(tags::SaltLength), Value::Integer(v)));
     }
+    if let Some(k) = cp.kem_algorithm {
+        children.push(TtlvFrame::new(Tag(tags::KemAlgorithm), Value::Enumeration(k.to_wire_value())));
+    }
     TtlvFrame::new(Tag(tags::CryptographicParameters), Value::Structure(children))
 }
 
@@ -2971,6 +2998,15 @@ fn decode_cryptographic_parameters(frame: &TtlvFrame) -> Result<CryptographicPar
             tags::PqcRandom => {
                 if let Value::ByteString(b) = &c.value {
                     cp.random = Some(b.clone());
+                }
+            }
+            // KMIP 3.0 WD19 §11.26 — disambiguates DHKEM/MLKEM/RSASVE for
+            // Encapsulate/Decapsulate (2026-07-05, classical-KEM agility).
+            tags::KemAlgorithm => {
+                let v = expect_enum(c, "KEM Algorithm")?;
+                cp.kem_algorithm = KemAlgorithm::from_wire_value(v);
+                if cp.kem_algorithm.is_none() {
+                    return Err(WireError::UnknownEnum { field: "KEM Algorithm", value: v });
                 }
             }
             _ => {}
@@ -4300,6 +4336,18 @@ fn encode_attribute_v3(a: &Attribute) -> TtlvFrame {
             Tag(tags::CryptographicUsageMask),
             Value::Integer(m.bits() as i32),
         ),
+        // KMIP 3.0 §4.16 Table 88 — Structure { [Qlength Integer],
+        // [Recommended Curve Enumeration] }, both optional.
+        Attribute::CryptographicDomainParameters { qlength, recommended_curve } => {
+            let mut children = Vec::new();
+            if let Some(q) = qlength {
+                children.push(TtlvFrame::new(Tag(tags::Qlength), Value::Integer(*q as i32)));
+            }
+            if let Some(rc) = recommended_curve {
+                children.push(TtlvFrame::new(Tag(tags::RecommendedCurve), Value::Enumeration(*rc)));
+            }
+            TtlvFrame::new(Tag(tags::CryptographicDomainParameters), Value::Structure(children))
+        }
         Attribute::ObjectType(ot) => TtlvFrame::new(
             Tag(tags::ObjectType),
             Value::Enumeration(ot.to_wire_value()),
@@ -4718,6 +4766,46 @@ mod tests {
         assert_eq!(tags::ObjectGroup, 0x42_0056, "verified KMIP Object Group tag");
         let decoded = decode_attribute_v3(&frame).unwrap();
         assert_eq!(decoded, Some(attr));
+    }
+
+    /// KMIP 3.0 §4.16 — Cryptographic Domain Parameters is a Structure at
+    /// `0x420029` carrying `Recommended Curve` (Enumeration, `0x420075`) and
+    /// optional `Qlength` (Integer, `0x420073`). This is the spec-compliant way
+    /// to specify an X25519 (CURVE25519) / X448 (CURVE448) ECDH key. Encodes as
+    /// a Structure of the right members with the verified tags, and round-trips.
+    /// (No OASIS test vector exists for this attribute in-repo; this asserts
+    /// spec-correct tags/types + codec self-consistency.)
+    #[test]
+    fn cryptographic_domain_parameters_wire_round_trips() {
+        // Verified tags (spec §4.16 / kmip-spec-3.0-tags-enums.json).
+        assert_eq!(tags::CryptographicDomainParameters, 0x42_0029);
+        assert_eq!(tags::RecommendedCurve, 0x42_0075);
+        assert_eq!(tags::Qlength, 0x42_0073);
+
+        let attr = Attribute::CryptographicDomainParameters {
+            qlength: None,
+            recommended_curve: Some(0x45), // CURVE25519
+        };
+        let frame = encode_attribute_v3(&attr);
+        assert_eq!(frame.tag.0, tags::CryptographicDomainParameters);
+        // The Structure carries exactly the Recommended Curve Enumeration member.
+        match &frame.value {
+            Value::Structure(kids) => {
+                assert_eq!(kids.len(), 1);
+                assert_eq!(kids[0].tag.0, tags::RecommendedCurve);
+                assert_eq!(kids[0].value, Value::Enumeration(0x45));
+            }
+            other => panic!("expected Structure, got {other:?}"),
+        }
+        assert_eq!(decode_attribute_v3(&frame).unwrap(), Some(attr));
+
+        // Both members present also round-trips.
+        let attr2 = Attribute::CryptographicDomainParameters {
+            qlength: Some(255),
+            recommended_curve: Some(0x46), // CURVE448
+        };
+        let frame2 = encode_attribute_v3(&attr2);
+        assert_eq!(decode_attribute_v3(&frame2).unwrap(), Some(attr2));
     }
 
     /// K3 — every published Operation codepoint (0x01–0x40) is either

@@ -126,13 +126,33 @@ pub fn decrypt(deps: &Deps, req: DecryptRequest, correlation_id: &str) -> Result
             .as_ref()
             .or(obj.cryptographic_parameters.as_ref()),
     );
-    if let Decision::Deny { human, .. } = deps.engine.evaluate(&p_req) {
-        return Err(fail_err(
-            deps,
-            correlation_id,
-            "Decrypt",
-            KmipError::permission_denied(human),
-        ));
+    // 2026-07-05 hardening: exhaustive match, not `if let Deny` — see the
+    // identical note in derive_key.rs. Decrypt is a consumer op
+    // (`policy::rule::is_consumer_op`): its ciphertext was already fixed by
+    // an earlier Encrypt, so a substitution rule can never coherently apply
+    // here; the engine/loader already guard against it, this is
+    // defense-in-depth so a weakened guard fails loudly, not silently.
+    match deps.engine.evaluate(&p_req) {
+        Decision::Allow { .. } => {}
+        Decision::Deny { human, .. } => {
+            return Err(fail_err(
+                deps,
+                correlation_id,
+                "Decrypt",
+                KmipError::permission_denied(human),
+            ));
+        }
+        Decision::RekeyAndProceed { .. } => {
+            return Err(fail_err(
+                deps,
+                correlation_id,
+                "Decrypt",
+                KmipError::failed(
+                    ResultReason::OperationNotSupported,
+                    "Decrypt: policy requires rekey, which Decrypt cannot execute",
+                ),
+            ));
+        }
     }
 
     // Plane-3: branch on algorithm.

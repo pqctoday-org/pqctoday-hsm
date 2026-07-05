@@ -207,15 +207,39 @@ fn pqc_migration_2030_temporal_cutoff_kicks_in_post_2030() {
 
 #[test]
 fn hybrid_window_demands_composite_mid_window() {
+    // 2026-07-04/05 rewrite: the unconditional composite mandate this test
+    // originally checked made no signing key creatable at all during the
+    // window (composites aren't instantiable by Plane 2) — fixed by making
+    // the composite an OPT-IN via x-pqctoday-dual-sign=required. Pure PQC is
+    // now the default-allowed path; the mandate only bites a request that
+    // asks for it. Also: the classical-signing cutoff and the dual-sign
+    // rule both key off `CreateKeyPair:Sign`/`Sign`, not bare `Create`
+    // (which never carries an asymmetric signing algorithm in real KMIP
+    // traffic) — updated accordingly.
     let eng = engine_for("hybrid-migration-window.yaml");
-    let attrs = HashMap::new();
-    // Pure ML-DSA-65 at Create during the 2026-2029 window → deny.
-    let mut create_pure = req("Create", Some("ML-DSA-65"), &attrs);
-    create_pure.ts = ts_2027();
-    assert!(eng.evaluate(&create_pure).is_deny());
+    let no_attrs = HashMap::new();
 
-    // Composite name should be allowed.
-    let mut create_composite = req("Create", Some("ML-DSA-65-ED25519"), &attrs);
+    // Pure ML-DSA-65 at CreateKeyPair:Sign during the window, untagged → allow.
+    let mut create_pure = req("CreateKeyPair:Sign", Some("ML-DSA-65"), &no_attrs);
+    create_pure.ts = ts_2027();
+    assert!(
+        eng.evaluate(&create_pure).is_allow(),
+        "untagged pure PQC must be allowed — composites aren't instantiable, so the \
+         mandate can't be unconditional"
+    );
+
+    // Same request, opted into dual-sign → deny (composite required for it).
+    let mut opted_in = HashMap::new();
+    opted_in.insert("pqctoday-dual-sign".to_string(), "required".to_string());
+    let mut create_pure_optin = req("CreateKeyPair:Sign", Some("ML-DSA-65"), &opted_in);
+    create_pure_optin.ts = ts_2027();
+    assert!(
+        eng.evaluate(&create_pure_optin).is_deny(),
+        "opted-in request must be held to the composite"
+    );
+
+    // Composite name should be allowed, tagged or not.
+    let mut create_composite = req("CreateKeyPair:Sign", Some("ML-DSA-65-ED25519"), &no_attrs);
     create_composite.ts = ts_2027();
     let d = eng.evaluate(&create_composite);
     // The hybrid policy's allowlists may not include the composite name
@@ -223,10 +247,10 @@ fn hybrid_window_demands_composite_mid_window() {
     // gate; other allow/deny rules may still apply. If it's denied here,
     // surface the rule index so the assertion message helps the operator.
     if let Decision::Deny { fired_rule_index, human, .. } = &d {
-        // Rule 1 + 2 are the hybrid_dual_sign_requirement rules — they
+        // Rule 1b + 2 are the hybrid_dual_sign_requirement rules — they
         // should NOT be the cause of the deny for the composite name.
         assert!(
-            *fired_rule_index != 1 && *fired_rule_index != 2,
+            *fired_rule_index != 3 && *fired_rule_index != 4,
             "hybrid gate should accept composite; got deny from rule {fired_rule_index}: {human}"
         );
     }

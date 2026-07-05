@@ -60,82 +60,6 @@ jobs:
       - name: Test
         run: cd build && ctest --output-on-failure
 
-  coverage:
-    name: Coverage (Ubuntu 24.04 / OpenSSL 3.3)
-    runs-on: ubuntu-24.04
-    env:
-      PKG_CONFIG_PATH: /opt/openssl-3.6/lib64/pkgconfig:/opt/openssl-3.6/lib/pkgconfig
-      LD_LIBRARY_PATH: /opt/openssl-3.6/lib64:/opt/openssl-3.6/lib
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - name: Install dependencies
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y \
-            cmake g++ pkg-config \
-            libcppunit-dev \
-            lcov
-
-      - name: Cache OpenSSL 3.6
-        id: cache-openssl
-        uses: actions/cache@v4
-        with:
-          path: /opt/openssl-3.6
-          key: ${{ runner.os }}-openssl-3.6-master-v1
-
-      - name: Build and Install OpenSSL 3.6
-        if: steps.cache-openssl.outputs.cache-hit != 'true'
-        run: |
-          sudo mkdir -p /opt/openssl-3.6
-          sudo chown -R $USER:$USER /opt/openssl-3.6
-          git clone --depth 1 https://github.com/openssl/openssl.git
-          cd openssl
-          ./config --prefix=/opt/openssl-3.6 --openssldir=/opt/openssl-3.6/ssl shared
-          make -j$(nproc)
-          make install
-
-      - name: CMake configure (with gcov)
-        run: |
-          cmake -B build-cov \
-            -DCMAKE_BUILD_TYPE=Debug \
-            -DBUILD_TESTS=ON \
-            -DOPENSSL_ROOT_DIR=/opt/openssl-3.6 \
-            -DCMAKE_CXX_FLAGS="--coverage -fprofile-arcs -ftest-coverage" \
-            -DCMAKE_C_FLAGS="--coverage -fprofile-arcs -ftest-coverage" \
-            -DCMAKE_EXE_LINKER_FLAGS="--coverage"
-
-      - name: Build
-        run: cmake --build build-cov -j$(nproc)
-
-      - name: Test
-        run: cd build-cov && ctest --output-on-failure
-
-      - name: Capture coverage
-        run: |
-          lcov --capture \
-            --directory build-cov \
-            --output-file coverage.info \
-            --ignore-errors empty,mismatch || true
-          lcov --remove coverage.info \
-            '/usr/*' \
-            '*/tests/*' \
-            '*/deps/*' \
-            '*/CppUnit*' \
-            --ignore-errors empty,mismatch \
-            --output-file coverage.info || true
-          lcov --list coverage.info || true
-
-      - name: Upload to Codecov
-        uses: codecov/codecov-action@v4
-        with:
-          files: coverage.info
-          fail_ci_if_error: false
-        env:
-          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
-
   constants-gate:
     name: PKCS#11 Constants Gate
     runs-on: ubuntu-24.04
@@ -244,19 +168,13 @@ jobs:
       - name: Run PQC interop replay (vendored subset)
         run: cd kmip && KMIP_REPLAY_CORPUS=conformance/pqc_corpus python3 conformance/harness/dispatcher_replay.py
 
-  rust-audit:
-    name: Rust Dependency Audit
+  deprecated-api-check:
+    name: Deprecated OpenSSL API Check
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-      - name: Install cargo-audit
-        run: cargo install cargo-audit
-      - name: Run cargo audit
-        run: cd rust && cargo audit --deny warnings --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-0097 --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-0097
 
       - name: Check for deprecated OpenSSL API usage
         run: |
