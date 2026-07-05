@@ -81,7 +81,7 @@ wrappers — each with its own README.
 | Component | Path | What |
 | --- | --- | --- |
 | PKCS#11 engines (C++ + Rust) | `src/`, [`rust/`](rust/README.md) | The token; two interchangeable engines. Rust also has a 188/0 [PKCS#11 v3.2 conformance report](rust/RUST_P11_V32_CONFORMANCE_REPORT.md) |
-| KMIP 3.0 server + CACP policy engine | [`kmip/`](kmip/README.md) | Networked key management + crypto-agility policies; ML-KEM/ML-DSA/SLH-DSA + **hybrid KEMs** (X25519MLKEM768 / SecP256r1MLKEM768) |
+| KMIP 3.0 server + CACP policy engine | [`kmip/`](kmip/README.md) | Networked key management + crypto-agility policies; ML-KEM/ML-DSA/SLH-DSA + **hybrid KEMs** (X25519MLKEM768 / SecP256r1MLKEM768 / SecP384r1MLKEM1024, **OpenSSL-3.5-interop-verified**); X25519/X448 key agreement as standard KMIP ECDH + Recommended Curve |
 | Wrappers | see the [Integration Interfaces](#integration-interfaces) table | OpenSSL provider, OpenSSH, OpenPGP, MLS, strongSwan, JavaJCE, WebRPC |
 
 ---
@@ -743,7 +743,7 @@ SoftHSMv3 exposes integration interfaces that cover the full stack from browser 
 | --- | --- | --- |
 | **Direct PKCS#11** | `libsofthsmv3.so` / npm | Native C/C++ / Node.js — load via `dlopen` + `C_GetFunctionList` |
 | **OpenSSL 3.x Provider** | `src/vendor/pkcs11-provider/` | Transparent routing from any `openssl` CLI or linked app |
-| **KMIP 3.0 server + CACP** | [`kmip/`](kmip/README.md) | Networked key management (TTLV/TLS) + crypto-agility policy engine; ML-KEM/ML-DSA/SLH-DSA + hybrid KEMs |
+| **KMIP 3.0 server + CACP** | [`kmip/`](kmip/README.md) | Networked key management (TTLV/TLS) + crypto-agility policy engine; ML-KEM/ML-DSA/SLH-DSA + hybrid KEMs (3 ECDHE-MLKEM groups, OpenSSL-interop-verified); X25519/X448 ECDH + key agreement |
 | **StrongSwan Adapter** | [`strongswan-pkcs11/`](strongswan-pkcs11/README.md) | IKEv2 VPN — ML-KEM-768 key exchange + ML-DSA signing |
 | **Java JCE Layer** | [`JavaJCE/`](JavaJCE/JavaJCESofthsmv3.md) | Hyperledger Besu and JCA-based apps — ML-DSA-65 / ML-KEM-768 |
 | **OpenSSH Connector** | [`openssh-pkcs11/`](openssh-pkcs11/README.md) | ML-DSA-65 ssh / sshd (draft-sfluhrer-ssh-mldsa-06); WASM build runs a real PQ SSH handshake |

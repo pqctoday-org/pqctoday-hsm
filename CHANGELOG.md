@@ -8,6 +8,72 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-07-05
+
+Post-quantum hybrid key exchange grows up. This release makes the hybrid KEMs
+production-grade and standards-clean, adds X25519/X448 the way KMIP 3.0 actually
+models them, lets those keys perform key agreement, and — for the first time —
+proves the whole thing interoperates with OpenSSL rather than only with itself.
+It also closes a batch of crypto-agility policy bugs where the compliance rules
+said one thing and enforced another.
+
+### Added
+
+- **A third hybrid KEM group, SecP384r1MLKEM1024**, joins X25519MLKEM768 and
+  SecP256r1MLKEM768 — the higher-security ECDHE-MLKEM group from
+  draft-ietf-tls-ecdhe-mlkem.
+- **X25519 and X448 as first-class KMIP keys.** You create them the standard
+  way — `CryptographicAlgorithm = ECDH` with the curve in a `Cryptographic
+  Domain Parameters` attribute (`Recommended Curve = CURVE25519 / CURVE448`),
+  exactly as KMIP 3.0 §4.16 specifies. The chosen curve is reported back through
+  `GetAttributes`.
+- **ECDH key agreement through `DeriveKey`** (`DerivationMethod = Asymmetric
+  Key`) for X25519, X448, P-256, and P-384 — the classical keys are now usable,
+  not just creatable. The private key never leaves the engine.
+- **Ed25519 and ECDH now work end-to-end through KMIP** — `CreateKeyPair` for
+  both previously failed; Ed25519 sign/verify and ECDH keygen are wired through.
+- **A written CACP policy guide** explaining the crypto-agility policy language,
+  the agility workbench, batches, and macros.
+
+### Changed
+
+- **Hybrid keys are now one KMIP object backed by two non-extractable engine
+  keys** — one classical, one ML-KEM — instead of a single opaque composite.
+  All hybrid cryptography lives in the PKCS#11 engine; the KMIP layer no longer
+  carries its own crypto crates (`ml-kem`/`x25519-dalek`/`p256` removed), so
+  there is one implementation, not two.
+- The hybrid shared-secret **combiner runs through the standard PKCS#11 v3.2
+  derive mechanisms** (`CKM_CONCATENATE_BASE_AND_KEY` and the digest/HKDF key-
+  derivations) rather than ad-hoc byte handling, so the composition is
+  conformant by construction.
+
+### Fixed
+
+- **Crypto-agility policy fail-open bugs.** The compliance policies frequently
+  allowed what their text forbade: custom-attribute gates always denied,
+  key-pair creation didn't match `[Create]`-gated rules (so CNSA-2.0/FIPS-only
+  silently permitted classical RSA/ECDSA keygen), and only some operations
+  received size/curve-qualified algorithm names. Nine policies were rewritten
+  and the engine's operation-scoping fixed so the rules enforce what they say.
+
+### Security
+
+- **`Get` no longer returns a hybrid private key.** Hybrid private keys are now
+  ordinary sensitive, non-extractable engine objects, so `Get`/`Export` refuses
+  them through the existing `CKA_SENSITIVE` path — closing a real key-disclosure
+  gap where the composite private material was returned in the clear.
+
+### Verified
+
+- **OpenSSL 3.5 interoperability.** New cross-implementation tests drive our
+  KMIP Encapsulate/Decapsulate against OpenSSL in both directions for
+  ML-KEM-768 and X25519MLKEM768. They confirm the on-the-wire encoding
+  (`ek‖x_pub`, `ct_mlkem‖x_eph`) and the combiner order (`ss_mlkem‖ss_x25519`)
+  match a reference implementation — the KEMs are interoperable, not just
+  self-consistent. (OpenSSL cannot serialize the composite hybrid key, so the
+  hybrid is verified via its serializable ML-KEM + X25519 halves, which for a
+  pure-concatenation combiner is a full proof.)
+
 ## [0.8.0] — 2026-07-03
 
 Closes the 2026-07-01 CACP/KMIP/PKCS#11 gap audit: the policy engine's
