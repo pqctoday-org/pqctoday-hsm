@@ -171,11 +171,16 @@ pub enum KmipAlgorithm {
     SlhDsaShake256f,  // 0x4a
 
     // ── KMIP 3.0 WD19 hybrid KEMs (K6) ────────────────────────────────────
-    // ML-KEM-768 composed with a classical ECDH per draft-ietf-tls-ecdhe-mlkem.
-    // These do NOT map to a single PKCS#11 mechanism — the KMIP op handlers
-    // compose them in-process (see `crate::hybrid_kem`).
-    X25519MlKem768,   // 0x5c
-    SecP256r1MlKem768, // 0x5d
+    // ML-KEM composed with a classical ECDH per draft-ietf-tls-ecdhe-mlkem.
+    // These do NOT map to a single PKCS#11 mechanism — the engine composes the
+    // two component keys (see `softhsmrustv3::native::hybrid`).
+    X25519MlKem768,     // 0x5c (WD19)
+    SecP256r1MlKem768,  // 0x5d (WD19)
+    // SecP384r1MLKEM1024 (draft-ietf-tls-ecdhe-mlkem group 0x11ED) has NO WD19
+    // CryptographicAlgorithm value (WD19 stops at 0x5D). Assigned a clearly
+    // vendor/extension codepoint in the reserved high-bit range, pending an
+    // OASIS assignment — same posture as unassigned composite codepoints.
+    SecP384r1MlKem1024, // 0x8000005e (vendor/extension — non-standard)
 }
 
 impl KmipAlgorithm {
@@ -215,6 +220,7 @@ impl KmipAlgorithm {
             SlhDsaShake256f  => 0x0000004a,
             X25519MlKem768    => 0x0000005c,
             SecP256r1MlKem768 => 0x0000005d,
+            SecP384r1MlKem1024 => 0x8000005e,
         }
     }
 
@@ -253,6 +259,7 @@ impl KmipAlgorithm {
             0x0000004a => SlhDsaShake256f,
             0x0000005c => X25519MlKem768,
             0x0000005d => SecP256r1MlKem768,
+            0x8000005e => SecP384r1MlKem1024,
             _ => return None,
         })
     }
@@ -260,14 +267,21 @@ impl KmipAlgorithm {
     /// `true` if this is a KMIP 3.0 WD19 hybrid KEM (K6), composed in-process
     /// from ML-KEM-768 + a classical ECDH rather than a single PKCS#11 mech.
     pub const fn is_hybrid_kem(self) -> bool {
-        matches!(self, KmipAlgorithm::X25519MlKem768 | KmipAlgorithm::SecP256r1MlKem768)
+        matches!(
+            self,
+            KmipAlgorithm::X25519MlKem768
+                | KmipAlgorithm::SecP256r1MlKem768
+                | KmipAlgorithm::SecP384r1MlKem1024
+        )
     }
 
-    /// Map to the [`crate::hybrid_kem::Hybrid`] combiner, or `None` if not hybrid.
+    /// Map to the engine's [`crate::hybrid_kem::Hybrid`] combiner (a re-export
+    /// of `softhsmrustv3::native::hybrid::Hybrid`), or `None` if not hybrid.
     pub const fn hybrid_kem(self) -> Option<crate::hybrid_kem::Hybrid> {
         match self {
             KmipAlgorithm::X25519MlKem768 => Some(crate::hybrid_kem::Hybrid::X25519MlKem768),
             KmipAlgorithm::SecP256r1MlKem768 => Some(crate::hybrid_kem::Hybrid::SecP256r1MlKem768),
+            KmipAlgorithm::SecP384r1MlKem1024 => Some(crate::hybrid_kem::Hybrid::SecP384r1MlKem1024),
             _ => None,
         }
     }
@@ -406,6 +420,7 @@ impl KmipAlgorithm {
             SlhDsaShake256f  => "SLH-DSA-SHAKE-256f",
             X25519MlKem768    => "X25519MLKEM768",
             SecP256r1MlKem768 => "SecP256r1MLKEM768",
+            SecP384r1MlKem1024 => "SecP384r1MLKEM1024",
         }
     }
 }

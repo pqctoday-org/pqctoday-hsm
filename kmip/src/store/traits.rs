@@ -93,6 +93,16 @@ pub struct ObjectRecord {
     /// `None` for objects created via Create / CreateKeyPair where the
     /// key bytes live exclusively inside the engine.
     pub key_material: Option<Vec<u8>>,
+
+    /// Secondary engine `CKA_ID` for a hybrid KEM private key. A hybrid
+    /// object is tied to TWO non-extractable PKCS#11 handles — one classical,
+    /// one PQC. `pkcs11_cka_id` addresses the ML-KEM half; this addresses the
+    /// classical (X25519 / ECDH) half. `None` for every non-hybrid object.
+    /// Both handles stay in the engine, so `Get` refuses the private key via
+    /// the existing `CKA_SENSITIVE` gate — hybrid material never reaches this
+    /// layer. `#[serde(default)]` keeps pre-existing sqlite blobs readable.
+    #[serde(default)]
+    pub pkcs11_cka_id_secondary: Option<Vec<u8>>,
     /// KMIP `Key Format Type` (§6.2) — `Raw`, `Opaque`, `X.509`,
     /// `PKCS#1`, `PKCS#8`, `TransparentSymmetricKey`, etc. Stored as
     /// the wire codepoint; v0.1 only needs `Raw` (0x01) for symmetric
@@ -291,6 +301,7 @@ impl From<BaselineDefaults> for ObjectRecord {
             custom_attributes: std::collections::HashMap::new(),
             object_groups: Vec::new(),
             key_material: None,
+            pkcs11_cka_id_secondary: None,
             key_format_type: None,
             secret_data_type: None,
             pqc_seed: None,

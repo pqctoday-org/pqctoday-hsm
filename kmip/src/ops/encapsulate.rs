@@ -136,9 +136,11 @@ pub fn encapsulate(
         }
     }
 
-    // K6 — hybrid KEM: compose ML-KEM-768 + classical ECDH in-process against
-    // the stored composite PUBLIC key material (no engine handle). The combined
-    // shared secret is stored as a SecretData object like the ML-KEM path.
+    // K6 — hybrid KEM: the ENGINE composes ML-KEM + classical ECDH. Encapsulate
+    // needs only the recipient's PUBLIC wire share (stored inline as
+    // `key_material` — it is public) plus a fresh ephemeral; no private handle.
+    // The engine still needs a session because the shared-secret combine runs
+    // through the PKCS#11 derive machinery (`run_combiner`).
     if let Some(hybrid) = obj.algorithm.hybrid_kem() {
         let public = obj.key_material.as_deref().ok_or_else(|| {
             KmipError::failed(
@@ -146,12 +148,18 @@ pub fn encapsulate(
                 "hybrid KEM public key has no stored material".to_string(),
             )
         })?;
-        let enc = crate::hybrid_kem::encapsulate(hybrid, public).map_err(|e| {
+        let session = deps.engine_session.ok_or_else(|| {
+            KmipError::failed(
+                ResultReason::CryptographicFailure,
+                "hybrid KEM encapsulate requires an engine session".to_string(),
+            )
+        })?;
+        let enc = softhsmrustv3::native::hybrid::encapsulate(session, hybrid, public).map_err(|rv| {
             fail_err(
                 deps,
                 correlation_id,
                 "Encapsulate",
-                KmipError::failed(ResultReason::CryptographicFailure, e),
+                super::helpers::ck_rv_to_kmip_error(rv, "hybrid encapsulate"),
             )
         })?;
         emit_pkcs11(deps, correlation_id, "soft::hybrid_kem_encapsulate", None, 0, "CKR_OK");

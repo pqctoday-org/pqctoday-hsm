@@ -169,11 +169,10 @@ x509-parser = { version = "0.16" }
 # pin this flow against a 2048-bit RSA-PSS signing key.
 rsa = "0.9"
 
-# K6 hybrid KEM (X25519MLKEM768 / SecP256r1MLKEM768) — src/hybrid_kem.rs composes
-# ML-KEM-768 with a classical ECDH. All already in the lock tree transitively.
-ml-kem  = "0.2.3"
-x25519-dalek = { version = "2.0.1", features = ["static_secrets"] }
-p256 = { version = "0.13.2", features = ["ecdh"] }
+# K6 hybrid KEM: ALL hybrid crypto now lives in the softhsmrustv3 engine
+# (native::hybrid) — the KMIP layer holds no crypto crate. The former
+# ml-kem / x25519-dalek / p256 deps were removed with the in-layer duplicate
+# implementation (src/hybrid_kem.rs is now a thin re-export of the engine).
 
 # HTML parsing — only used by the build-time `extract-kmip-spec` tool
 # (tools/extract_kmip_spec.rs). The OASIS KMIP 3.0 spec ships as Word-converted
@@ -201,8 +200,11 @@ predicates = "3"
 # [patch.crates-io] section below.
 fips204 = "0.4.6"
 fips205 = "0.4.1"
-# ml-kem / x25519-dalek / p256 moved to [dependencies] — hybrid_kem.rs (src/)
-# needs them at build time, not just for tests (K6).
+# ml-kem is TEST-ONLY: the dispatcher/native-bridge integration tests build
+# ML-KEM KAT vectors in-test. Production `src/` holds NO crypto crate — all
+# hybrid-KEM crypto lives in the softhsmrustv3 engine (K6). x25519-dalek / p256
+# were removed entirely (no longer used in src/ or tests/).
+ml-kem = "0.2.3"
 
 # Mirror the patches from `pqctoday-hsm/rust/Cargo.toml` so the `softhsmrustv3`
 # path dep above gets the FIPS-204 / FIPS-205 `Ph::SHA{224,384,3_*}` / `SHAKE256`

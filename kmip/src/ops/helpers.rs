@@ -273,6 +273,7 @@ pub fn canonical_name(a: KmipAlgorithm) -> String {
         SlhDsaShake256f => "SLH-DSA-SHAKE-256f",
         X25519MlKem768 => "X25519MLKEM768",
         SecP256r1MlKem768 => "SecP256r1MLKEM768",
+        SecP384r1MlKem1024 => "SecP384r1MLKEM1024",
     }
     .into()
 }

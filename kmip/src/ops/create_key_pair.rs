@@ -181,34 +181,82 @@ pub fn create_key_pair(
     //                     pPrivateKeyTemplate, ulPrivateKeyAttributeCount,
     //                     phPublicKey, phPrivateKey)
     // softhsmrustv3 export verified at rust/src/ffi.rs::C_GenerateKeyPair.
-    // K6 — hybrid KEMs (X25519MLKEM768 / SecP256r1MLKEM768) have no single
-    // PKCS#11 mechanism; the composite key is generated in-process
-    // (`crate::hybrid_kem`) and its raw material is stored on the records
-    // (`key_material`) rather than as engine CKA_IDs.
-    let (generated, hybrid_pub_material, hybrid_priv_material) =
+    // K6 — hybrid KEMs have no single PKCS#11 mechanism. The ENGINE generates
+    // TWO non-extractable keypairs (classical + ML-KEM) under two CKA_IDs and
+    // returns their private handles + the assembled public wire share. The
+    // private record stores NO key_material (its two halves live in the engine,
+    // so Get refuses it via CKA_SENSITIVE); the public record stores the wire
+    // share inline (it is public). `hybrid_secondary_cka_id` is the classical
+    // half's CKA_ID, recorded on the private object so Decapsulate can resolve
+    // both handles.
+    let (generated, hybrid_pub_material, hybrid_priv_material, hybrid_secondary_cka_id) =
         if let Some(hybrid) = kmip_algo.hybrid_kem() {
-            let kp = match crate::hybrid_kem::keygen(hybrid) {
-                Ok(kp) => kp,
-                Err(e) => {
-                    return fail(
-                        deps,
-                        correlation_id,
-                        op_canonical,
-                        KmipError::failed(ResultReason::CryptographicFailure, e),
+            match deps.engine_session {
+                Some(session) => {
+                    let mlkem_cka_id = Uuid::new_v4().as_bytes().to_vec();
+                    let classical_cka_id = Uuid::new_v4().as_bytes().to_vec();
+                    let kg = match softhsmrustv3::native::hybrid::keygen(
+                        session,
+                        hybrid,
+                        &mlkem_cka_id,
+                        &classical_cka_id,
+                    ) {
+                        Ok(kg) => kg,
+                        Err(rv) => {
+                            return fail(
+                                deps,
+                                correlation_id,
+                                op_canonical,
+                                super::helpers::ck_rv_to_kmip_error(rv, "hybrid keygen"),
+                            )
+                        }
+                    };
+                    super::helpers::emit_pkcs11(deps, correlation_id, "soft::hybrid_kem_keygen", None, 0, "CKR_OK");
+                    (
+                        GeneratedKeyPair {
+                            cka_id_priv: mlkem_cka_id,
+                            cka_id_pub: Vec::new(),
+                            digest_priv: None,
+                            digest_pub: None,
+                        },
+                        Some(kg.public),        // public wire share (inline)
+                        None,                   // private key_material NONE — the non-extractability fix
+                        Some(classical_cka_id), // secondary CKA_ID on the private record
                     )
                 }
-            };
-            super::helpers::emit_pkcs11(deps, correlation_id, "soft::hybrid_kem_keygen", None, 0, "CKR_OK");
-            (
-                GeneratedKeyPair {
-                    cka_id_priv: Vec::new(),
-                    cka_id_pub: Vec::new(),
-                    digest_priv: None,
-                    digest_pub: None,
-                },
-                Some(kp.public),
-                Some(kp.private),
-            )
+                None => {
+                    // S-2 hardening: no engine session ⇒ no hybrid material.
+                    // Production MUST fail; the soft path survives only for the
+                    // crate's own engine-less unit tests.
+                    #[cfg(not(test))]
+                    {
+                        return fail(
+                            deps,
+                            correlation_id,
+                            op_canonical,
+                            KmipError::failed(
+                                ResultReason::CryptographicFailure,
+                                "no engine session — cannot generate hybrid key pair".to_string(),
+                            ),
+                        );
+                    }
+                    #[cfg(test)]
+                    {
+                        super::helpers::emit_pkcs11(deps, correlation_id, "soft::placeholder_hybrid_keygen", None, 0, "CKR_OK");
+                        (
+                            GeneratedKeyPair {
+                                cka_id_priv: Uuid::new_v4().as_bytes().to_vec(),
+                                cka_id_pub: Vec::new(),
+                                digest_priv: None,
+                                digest_pub: None,
+                            },
+                            None,
+                            None,
+                            Some(Uuid::new_v4().as_bytes().to_vec()),
+                        )
+                    }
+                }
+            }
         } else {
             let mech = kmip_algo.to_pkcs11_mech(PkcsOp::KeyGen).ok_or_else(|| {
                 KmipError::failed(
@@ -226,7 +274,7 @@ pub fn create_key_pair(
                 mech,
                 req.seed.as_deref(),
             ) {
-                Ok(g) => (g, None, None),
+                Ok(g) => (g, None, None, None),
                 Err(err) => return fail(deps, correlation_id, op_canonical, err),
             }
         };
@@ -281,9 +329,13 @@ pub fn create_key_pair(
             custom_attributes: super::helpers::raw_custom_attrs(&all_attrs),
 
 
-            // K6 — composite private key material for a hybrid KEM (None for
-            // engine-backed keys, which live behind a CKA_ID).
+            // K6 — hybrid private keys are engine-backed (two handles behind
+            // pkcs11_cka_id + pkcs11_cka_id_secondary); no material here, so Get
+            // refuses them. None for every non-hybrid engine key too.
             key_material: hybrid_priv_material,
+
+            // K6 — classical half's CKA_ID for a hybrid private key (None otherwise).
+            pkcs11_cka_id_secondary: hybrid_secondary_cka_id,
 
             digest_value: digest_priv,
 
@@ -341,6 +393,10 @@ pub fn create_key_pair(
 
             // K6 — composite public key material for a hybrid KEM.
             key_material: hybrid_pub_material,
+
+            // Public keys are never hybrid-engine-backed here (the wire share is
+            // stored inline above); no secondary CKA_ID.
+            pkcs11_cka_id_secondary: None,
 
             digest_value: digest_pub,
 
@@ -518,6 +574,7 @@ fn canonical_name(a: KmipAlgorithm) -> String {
         SlhDsaShake256f => "SLH-DSA-SHAKE-256f",
         X25519MlKem768 => "X25519MLKEM768",
         SecP256r1MlKem768 => "SecP256r1MLKEM768",
+        SecP384r1MlKem1024 => "SecP384r1MLKEM1024",
     }
     .into()
 }
@@ -552,6 +609,7 @@ pub(crate) fn parse_algorithm(s: &str) -> Result<KmipAlgorithm> {
         // K6 hybrid KEMs (no '-' split; exact names).
         "X25519MLKEM768" => X25519MlKem768,
         "SecP256r1MLKEM768" => SecP256r1MlKem768,
+        "SecP384r1MLKEM1024" => SecP384r1MlKem1024,
         // P1 (2026-07-05): Ed25519 has no size/curve suffix — exact name.
         "Ed25519" => Ed25519,
         // Size-suffixed classical algos collapse to their base enum.
