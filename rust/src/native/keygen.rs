@@ -22,8 +22,8 @@ use std::collections::HashMap;
 use super::CkRv;
 use crate::constants::*;
 use crate::crypto::{
-    ALGO_ECDSA, ALGO_ML_DSA, ALGO_ML_KEM, ALGO_RSA, ALGO_SLH_DSA, CURVE_K256, CURVE_P256,
-    CURVE_P384, CURVE_P521,
+    ALGO_ECDH_P256, ALGO_ECDSA, ALGO_ML_DSA, ALGO_ML_KEM, ALGO_RSA, ALGO_SLH_DSA, CURVE_K256,
+    CURVE_P256, CURVE_P384, CURVE_P521,
 };
 use crate::crypto::handlers::{
     build_ec_spki_p256, build_ec_spki_p384, build_ec_spki_p521, build_mldsa44_spki,
@@ -575,6 +575,125 @@ pub fn generate_ecdsa_keypair(
                 CKA_PUBLIC_KEY_INFO,
                 build_spki_from_parts(SECP256K1_ALG_ID, &vk_bytes),
             );
+        }
+    }
+
+    insert_id_and_label(&mut pub_attrs, cka_id, label);
+    insert_id_and_label(&mut prv_attrs, cka_id, label);
+
+    finalize_and_register(_session, pub_attrs, prv_attrs)
+}
+
+/// Generate a standalone ECDH (NIST-curve Diffie-Hellman) key pair.
+/// `curve` is one of `EccCurve::P256` / `P384` / `P521` (`Secp256K1` is not a
+/// KMIP-referenced ECDH curve in this stack; callers should reject it before
+/// reaching here — see [`generate_ecdsa_keypair`] for the analogous ECDSA
+/// path, which this mirrors structurally).
+///
+/// Tagged `ALGO_ECDH_P256` (the family constant used generically across all
+/// three NIST curves — curve selection is the separate `CURVE_P256/384/521`
+/// param-set attribute, exactly as `ALGO_ECDSA` already works across its four
+/// curves) rather than `ALGO_ECDSA`, and the usage mask is
+/// key-agreement-only (`CKA_DERIVE=true`, `CKA_SIGN=false`,
+/// `CKA_VERIFY=false`) — unlike an ECDSA key (dual sign+derive per
+/// `set_common_ec_prv_attrs`), a key a caller explicitly asked for as `ECDH`
+/// should not silently also be usable for signing.
+///
+/// Fixes the 2026-07-05 KMIP-layer gap: `Ecdh` has a valid `KmipAlgorithm`
+/// wire codepoint (`0x0e`) and is allowlisted by several crypto-agility
+/// policies (bsi-tr-02102, fips-only, classical.yaml), but until this
+/// function existed `CreateKeyPair` for it always failed with
+/// `OperationNotSupported` — the policy plane said "allowed" for an
+/// operation Plane 2 could never actually perform.
+///
+/// Returns `(public_handle, private_handle)`.
+///
+/// **Pre-condition**: `session` must be a valid R/W user session.
+pub fn generate_ecdh_keypair(
+    _session: u32,
+    curve: EccCurve,
+    cka_id: &[u8],
+    label: &str,
+) -> Result<(u32, u32), CkRv> {
+    let mut pub_attrs: Attributes = HashMap::new();
+    let mut prv_attrs: Attributes = HashMap::new();
+
+    store_algo_family(&mut pub_attrs, ALGO_ECDH_P256);
+    store_algo_family(&mut prv_attrs, ALGO_ECDH_P256);
+
+    store_ulong(&mut pub_attrs, CKA_CLASS, CKO_PUBLIC_KEY);
+    store_ulong(&mut pub_attrs, CKA_KEY_TYPE, CKK_EC);
+    store_ulong(&mut pub_attrs, CKA_KEY_GEN_MECHANISM, CKM_EC_KEY_PAIR_GEN);
+    store_bool(&mut pub_attrs, CKA_TOKEN, false);
+    store_bool(&mut pub_attrs, CKA_PRIVATE, false);
+    store_bool(&mut pub_attrs, CKA_ENCRYPT, false);
+    store_bool(&mut pub_attrs, CKA_VERIFY, false);
+    store_bool(&mut pub_attrs, CKA_WRAP, false);
+    store_bool(&mut pub_attrs, CKA_DERIVE, false);
+    store_bool(&mut pub_attrs, CKA_LOCAL, true);
+
+    store_ulong(&mut prv_attrs, CKA_CLASS, CKO_PRIVATE_KEY);
+    store_ulong(&mut prv_attrs, CKA_KEY_TYPE, CKK_EC);
+    store_ulong(&mut prv_attrs, CKA_KEY_GEN_MECHANISM, CKM_EC_KEY_PAIR_GEN);
+    store_bool(&mut prv_attrs, CKA_TOKEN, false);
+    store_bool(&mut prv_attrs, CKA_PRIVATE, true);
+    store_bool(&mut prv_attrs, CKA_SENSITIVE, true);
+    store_bool(&mut prv_attrs, CKA_EXTRACTABLE, false);
+    store_bool(&mut prv_attrs, CKA_DECRYPT, false);
+    store_bool(&mut prv_attrs, CKA_SIGN, false);
+    store_bool(&mut prv_attrs, CKA_UNWRAP, false);
+    store_bool(&mut prv_attrs, CKA_DERIVE, true);
+    store_bool(&mut prv_attrs, CKA_LOCAL, true);
+
+    let mut rng = rand::rngs::OsRng;
+
+    match curve {
+        EccCurve::P256 => {
+            store_param_set(&mut pub_attrs, CURVE_P256);
+            store_param_set(&mut prv_attrs, CURVE_P256);
+            let sk = p256::ecdsa::SigningKey::random(&mut rng);
+            let vk = p256::ecdsa::VerifyingKey::from(&sk);
+            prv_attrs.insert(CKA_VALUE, sk.to_bytes().to_vec());
+            let vk_bytes = vk.to_encoded_point(false).as_bytes().to_vec();
+            let mut ec_point = Vec::with_capacity(2 + vk_bytes.len());
+            ec_point.push(0x04);
+            ec_point.push(vk_bytes.len() as u8); // 65 fits in one byte
+            ec_point.extend_from_slice(&vk_bytes);
+            pub_attrs.insert(CKA_EC_POINT, ec_point);
+            pub_attrs.insert(CKA_PUBLIC_KEY_INFO, build_ec_spki_p256(&vk_bytes));
+        }
+        EccCurve::P384 => {
+            store_param_set(&mut pub_attrs, CURVE_P384);
+            store_param_set(&mut prv_attrs, CURVE_P384);
+            let sk = p384::ecdsa::SigningKey::random(&mut rng);
+            let vk = p384::ecdsa::VerifyingKey::from(&sk);
+            prv_attrs.insert(CKA_VALUE, sk.to_bytes().to_vec());
+            let vk_bytes = vk.to_encoded_point(false).as_bytes().to_vec();
+            let mut ec_point = Vec::with_capacity(2 + vk_bytes.len());
+            ec_point.push(0x04);
+            ec_point.push(vk_bytes.len() as u8); // 97 fits in one byte
+            ec_point.extend_from_slice(&vk_bytes);
+            pub_attrs.insert(CKA_EC_POINT, ec_point);
+            pub_attrs.insert(CKA_PUBLIC_KEY_INFO, build_ec_spki_p384(&vk_bytes));
+        }
+        EccCurve::P521 => {
+            store_param_set(&mut pub_attrs, CURVE_P521);
+            store_param_set(&mut prv_attrs, CURVE_P521);
+            let sk = p521::ecdsa::SigningKey::random(&mut rng);
+            let vk = p521::ecdsa::VerifyingKey::from(&sk);
+            prv_attrs.insert(CKA_VALUE, sk.to_bytes().to_vec());
+            let vk_bytes = vk.to_encoded_point(false).as_bytes().to_vec();
+            // P-521 uncompressed point is 133 bytes — needs long-form DER length.
+            let mut ec_point = Vec::with_capacity(3 + vk_bytes.len());
+            ec_point.push(0x04);
+            ec_point.push(0x81); // multi-byte length tag
+            ec_point.push(vk_bytes.len() as u8); // 133
+            ec_point.extend_from_slice(&vk_bytes);
+            pub_attrs.insert(CKA_EC_POINT, ec_point);
+            pub_attrs.insert(CKA_PUBLIC_KEY_INFO, build_ec_spki_p521(&vk_bytes));
+        }
+        EccCurve::Secp256K1 => {
+            return Err(CKR_MECHANISM_INVALID);
         }
     }
 
@@ -1605,6 +1724,54 @@ mod tests {
             generate_ecdsa_keypair(session, EccCurve::P521, b"\x01", "ec-p521").unwrap();
         assert_eq!(get_object_value(prv_h).unwrap().len(), 66);
         assert_eq!(get_ec_point_sec1(pub_h).unwrap().len(), 133);
+        close_session(session).unwrap();
+    }
+
+    /// ECDH P-256/384/521 keygen: same point-length shape as ECDSA on the
+    /// same curve (it's the same elliptic-curve math), but tagged
+    /// `ALGO_ECDH_P256` (never `ALGO_ECDSA`) — the 2026-07-05 fix's whole
+    /// point is that a caller who asked for `Ecdh` gets a key that is NOT
+    /// silently interchangeable with an ECDSA signing key at the KMIP layer.
+    #[test]
+    fn ecdh_keygen_produces_expected_lengths_and_family_tag() {
+        use crate::state::{get_ec_point_sec1, get_object_algo_family, get_object_param_set, get_object_value};
+        let _guard = test_lock::acquire();
+        let session = fresh_session();
+
+        let (pub_h, prv_h) =
+            generate_ecdh_keypair(session, EccCurve::P256, b"\x01", "ecdh-p256").unwrap();
+        assert_eq!(get_object_value(prv_h).unwrap().len(), 32, "P-256 scalar");
+        assert_eq!(get_ec_point_sec1(pub_h).unwrap().len(), 65, "P-256 point");
+        assert_eq!(get_object_algo_family(prv_h), ALGO_ECDH_P256, "tagged ECDH, not ECDSA");
+        assert_eq!(get_object_param_set(prv_h), CURVE_P256);
+
+        let (pub_h, prv_h) =
+            generate_ecdh_keypair(session, EccCurve::P384, b"\x02", "ecdh-p384").unwrap();
+        assert_eq!(get_object_value(prv_h).unwrap().len(), 48, "P-384 scalar");
+        assert_eq!(get_ec_point_sec1(pub_h).unwrap().len(), 97, "P-384 point");
+        assert_eq!(get_object_algo_family(prv_h), ALGO_ECDH_P256);
+        assert_eq!(get_object_param_set(prv_h), CURVE_P384);
+
+        let (pub_h, prv_h) =
+            generate_ecdh_keypair(session, EccCurve::P521, b"\x03", "ecdh-p521").unwrap();
+        assert_eq!(get_object_value(prv_h).unwrap().len(), 66, "P-521 scalar");
+        assert_eq!(get_ec_point_sec1(pub_h).unwrap().len(), 133, "P-521 point");
+        assert_eq!(get_object_algo_family(prv_h), ALGO_ECDH_P256);
+        assert_eq!(get_object_param_set(prv_h), CURVE_P521);
+
+        close_session(session).unwrap();
+    }
+
+    /// Secp256K1 has no KMIP-referenced ECDH use in this stack — must be
+    /// rejected, not silently produce a key.
+    #[test]
+    fn ecdh_keygen_rejects_secp256k1() {
+        let _guard = test_lock::acquire();
+        let session = fresh_session();
+        assert_eq!(
+            generate_ecdh_keypair(session, EccCurve::Secp256K1, b"\x01", "ecdh-k256"),
+            Err(CKR_MECHANISM_INVALID)
+        );
         close_session(session).unwrap();
     }
 

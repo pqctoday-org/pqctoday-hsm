@@ -1826,6 +1826,42 @@ fn ecdsa_create_respects_cryptographic_length_attribute() {
     let _ = softhsmrustv3::native::session::finalize();
 }
 
+/// 2026-07-05 KMIP-layer gap fix: `CreateKeyPair` for `Ecdh` used to fail
+/// with `OperationNotSupported` regardless of policy — `Ecdh` had a valid
+/// wire codepoint and policy-plane allowlist entries (bsi-tr-02102,
+/// fips-only, classical.yaml) but no native keygen arm existed. This is the
+/// real end-to-end proof: a genuine `Ecdh` key pair, across all three
+/// policy-referenced curves, actually gets created against the real engine
+/// — not just a policy-plane "Allow" decision.
+#[test]
+fn ecdh_create_key_pair_succeeds_for_all_three_nist_curves() {
+    let _guard = engine_test_lock();
+    let deps = build_deps_with_real_engine();
+
+    for length in [256u32, 384, 521] {
+        let create_req = CreateKeyPairRequest {
+            common_attributes: vec![
+                Attribute::CryptographicAlgorithm(KmipAlgorithm::Ecdh),
+                Attribute::CryptographicLength(length),
+            ],
+            private_key_attributes: vec![Attribute::CryptographicUsageMask(
+                UsageMask::KEY_AGREEMENT,
+            )],
+            public_key_attributes: vec![Attribute::CryptographicUsageMask(
+                UsageMask::KEY_AGREEMENT,
+            )],
+            seed: None,
+        };
+        let kp = create_key_pair(&deps, create_req, "CreateKeyPair:KeyAgreement", "ecdh-e2e")
+            .unwrap_or_else(|e| panic!("ECDH-P{length} CreateKeyPair failed: {e:?}"));
+        let priv_rec = deps.store.get(&kp.private_key_uid).unwrap().unwrap();
+        assert_eq!(priv_rec.algorithm, KmipAlgorithm::Ecdh);
+        assert_eq!(priv_rec.cryptographic_length, length);
+    }
+
+    let _ = softhsmrustv3::native::session::finalize();
+}
+
 /// Phase 7b gap-tightening: Locate's PKCS#11 reconciliation drops
 /// records whose engine handle is gone. Simulates the
 /// persistent-SQLite + volatile-engine restart scenario by finalising

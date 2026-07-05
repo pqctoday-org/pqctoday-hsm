@@ -665,6 +665,18 @@ fn native_generate_keypair(
                 native::generate_ecdsa_keypair(session, curve, cka_id, label),
             )
         }
+        // 2026-07-05 fix: `Ecdh` had a valid wire codepoint (0x0e) and is
+        // allowlisted by several crypto-agility policies (bsi-tr-02102,
+        // fips-only, classical.yaml), but no native keygen arm existed —
+        // every CreateKeyPair for it failed with OperationNotSupported
+        // regardless of what the policy plane decided.
+        Ecdh => {
+            let curve = ecdsa_curve_from_length(key_length)?;
+            (
+                "native::generate_ecdh_keypair",
+                native::generate_ecdh_keypair(session, curve, cka_id, label),
+            )
+        }
         _ => {
             return Err(KmipError::failed(
                 ResultReason::OperationNotSupported,
