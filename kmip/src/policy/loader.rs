@@ -282,6 +282,30 @@ rules:
         assert!(err.to_string().contains("unknown field"), "got: {err}");
     }
 
+    /// 2026-07-05 (classical-KEM crypto-agility) — a substitution rule
+    /// targeting a consumer op (Decapsulate/DeriveKey/Decrypt) is a fatal
+    /// lint finding, not just an engine-level no-op — rejected at load time
+    /// (even in non-strict mode, since this is a fail-open-risk position
+    /// like `from`) so the mistake is caught when the policy is authored.
+    #[test]
+    fn substitution_targeting_decapsulate_is_rejected_at_load() {
+        let yaml = r#"
+schema_version: 1
+metadata: { name: t, description: d, authority: a, effective: "always" }
+rules:
+  - type: algorithm_substitution
+    ops: [Decapsulate]
+    from: ECDH-P256
+    to: ML-KEM-1024
+    reason: "should be rejected"
+"#;
+        let err = load_from_str(yaml, std::path::Path::new("<t>")).unwrap_err();
+        assert!(
+            err.to_string().contains("consumer op"),
+            "expected a consumer-op rejection, got: {err}"
+        );
+    }
+
     #[test]
     fn parses_minimal_policy() {
         let yaml = r#"

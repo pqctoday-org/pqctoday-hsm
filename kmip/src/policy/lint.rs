@@ -92,10 +92,36 @@ fn lint_one(idx: usize, rule: &Rule, strict: bool, out: &mut Vec<Finding>) {
         Rule::AlgorithmDefault { default_algorithm, .. } => {
             algo(idx, "default_algorithm", default_algorithm, strict, out);
         }
-        Rule::AlgorithmSubstitution { from, to, .. } => {
+        Rule::AlgorithmSubstitution { ops, from, to, .. } => {
             // `from` is a deny-position match target → fatal; `to` is allow.
             algo(idx, "from", from, true, out);
             algo(idx, "to", to, strict, out);
+            // 2026-07-05 (classical-KEM crypto-agility design review) —
+            // consumer ops (Decapsulate/DeriveKey/Decrypt) can never
+            // coherently execute a rekey: their input was already fixed to a
+            // specific algorithm by an earlier, possibly different-party
+            // call. The engine hard-excludes them at runtime regardless
+            // (`rule::resolve_substitution`), but a rule naming one here is
+            // always a policy-authoring mistake — reject it at load time
+            // rather than let it silently do nothing forever. See
+            // `rule::is_consumer_op` for the full rationale.
+            for op in ops {
+                if super::rule::is_consumer_op(op) {
+                    out.push(Finding {
+                        rule_index: idx,
+                        field: "ops",
+                        value: op.clone(),
+                        fatal: true,
+                        message: format!(
+                            "algorithm_substitution targets consumer op {op:?} — \
+                             Decapsulate/DeriveKey/Decrypt operate on material a peer \
+                             already fixed to an algorithm; there is nothing to \
+                             substitute, and the engine ignores this rule for that op \
+                             (rejected here so it isn't mistaken for working)"
+                        ),
+                    });
+                }
+            }
         }
         Rule::AlgorithmAllowlist { algorithms, .. } => {
             for a in algorithms {

@@ -827,6 +827,28 @@ pub fn native_kem_mech(a: KmipAlgorithm) -> Option<u32> {
     }
 }
 
+/// Map a stored classical `Ecdh` object's `RecommendedCurve` to the engine
+/// mechanism for `Encapsulate`/`Decapsulate` (2026-07-05, DHKEM). Per
+/// PKCS#11 v3.2 §6.3.17, `CKM_ECDH1_DERIVE` covers the NIST Weierstrass
+/// curves (P-256/P-384/P-521); X25519/X448 (Montgomery form) use the
+/// distinct `CKM_EC_MONTGOMERY_KEY_DERIVE` mechanism instead — same
+/// distinction `create_key_pair.rs`'s `Ecdh` branch already makes when
+/// picking `generate_ecdh_keypair` vs `generate_x25519_keypair`/
+/// `generate_x448_keypair`.
+///
+/// Deliberately does NOT fall back to a length-based guess the way
+/// `qualified_name` does — `RecommendedCurve` is the only signal that
+/// distinguishes X25519 (256 bits) from P-256 (also 256 bits) unambiguously.
+pub fn classical_kem_mech(recommended_curve: Option<u32>) -> Option<u32> {
+    use crate::kmip30::algos::recommended_curve as rc;
+    use softhsmrustv3::constants as c;
+    match recommended_curve {
+        Some(rc::P_256) | Some(rc::P_384) | Some(rc::P_521) => Some(c::CKM_ECDH1_DERIVE),
+        Some(rc::CURVE25519) | Some(rc::CURVE448) => Some(c::CKM_EC_MONTGOMERY_KEY_DERIVE),
+        _ => None,
+    }
+}
+
 /// Map a `KmipAlgorithm` to the parameter-set codepoint (`CKP_*`) used
 /// by `softhsmrustv3::native::generate_*_keypair`.
 pub fn native_parameter_set(a: KmipAlgorithm) -> Option<u32> {

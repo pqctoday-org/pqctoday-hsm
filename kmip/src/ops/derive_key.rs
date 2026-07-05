@@ -136,8 +136,27 @@ pub fn derive_key(
             PolicyRequest::minimal("DeriveKey", Some(&algo), started, correlation_id, &stored_attrs);
         p_req.state = Some(state_name(bases[0].state));
         p_req.target_uid = Some(&bases[0].uid);
-        if let Decision::Deny { human, .. } = deps.engine.evaluate(&p_req) {
-            return Err(fail(KmipError::permission_denied(human)));
+        // 2026-07-05 hardening: exhaustive match, not `if let Deny`. The
+        // engine hard-excludes DeriveKey from ever producing
+        // RekeyAndProceed (`policy::rule::is_consumer_op` — DeriveKey's
+        // peer-public input is already fixed, there's nothing to
+        // substitute), and the loader rejects any policy that tries to
+        // scope a substitution to it. This arm is a defense-in-depth
+        // backstop: if either guard were ever weakened, DeriveKey fails
+        // loudly instead of silently proceeding on the old algorithm as if
+        // the (mis-scoped) rule didn't exist.
+        match deps.engine.evaluate(&p_req) {
+            Decision::Allow { .. } => {}
+            Decision::Deny { human, .. } => {
+                return Err(fail(KmipError::permission_denied(human)));
+            }
+            Decision::RekeyAndProceed { .. } => {
+                return Err(fail(KmipError::failed(
+                    ResultReason::OperationNotSupported,
+                    "DeriveKey: policy requires rekey, which DeriveKey cannot execute — \
+                     migrate this key to Encapsulate/Decapsulate instead",
+                )));
+            }
         }
     }
 

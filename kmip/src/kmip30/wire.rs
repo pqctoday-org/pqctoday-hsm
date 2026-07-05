@@ -2928,6 +2928,9 @@ fn encode_cryptographic_parameters(cp: &CryptographicParameters) -> TtlvFrame {
     if let Some(v) = cp.salt_length {
         children.push(TtlvFrame::new(Tag(tags::SaltLength), Value::Integer(v)));
     }
+    if let Some(k) = cp.kem_algorithm {
+        children.push(TtlvFrame::new(Tag(tags::KemAlgorithm), Value::Enumeration(k.to_wire_value())));
+    }
     TtlvFrame::new(Tag(tags::CryptographicParameters), Value::Structure(children))
 }
 
@@ -2995,6 +2998,15 @@ fn decode_cryptographic_parameters(frame: &TtlvFrame) -> Result<CryptographicPar
             tags::PqcRandom => {
                 if let Value::ByteString(b) = &c.value {
                     cp.random = Some(b.clone());
+                }
+            }
+            // KMIP 3.0 WD19 §11.26 — disambiguates DHKEM/MLKEM/RSASVE for
+            // Encapsulate/Decapsulate (2026-07-05, classical-KEM agility).
+            tags::KemAlgorithm => {
+                let v = expect_enum(c, "KEM Algorithm")?;
+                cp.kem_algorithm = KemAlgorithm::from_wire_value(v);
+                if cp.kem_algorithm.is_none() {
+                    return Err(WireError::UnknownEnum { field: "KEM Algorithm", value: v });
                 }
             }
             _ => {}

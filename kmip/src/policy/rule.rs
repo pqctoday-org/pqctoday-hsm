@@ -511,11 +511,27 @@ impl Rule {
     /// Pass 1: apply `AlgorithmSubstitution` — rewrite `from` → `to` when the
     /// (already default-resolved) algorithm matches `from`. Returns `None` for
     /// every other rule type and for non-matching substitutions.
+    ///
+    /// Hard-excludes "consumer ops" ([`is_consumer_op`]) regardless of what a
+    /// rule's `ops:` list says (2026-07-05, classical-KEM crypto-agility
+    /// design review). A consumer op operates on material a peer already
+    /// fixed at an earlier point in time (`Decapsulate`'s ciphertext,
+    /// `DeriveKey`'s peer public bytes, `Decrypt`'s ciphertext) — there is no
+    /// "instead use algorithm X" available once that input already exists,
+    /// and worse, letting a substitution match here would flag EVERY
+    /// legitimate not-yet-migrated call as needing a rekey it can never
+    /// execute, breaking ordinary decryption/decapsulation/derivation the
+    /// moment such a rule went active. This must be an engine invariant, not
+    /// a policy-authoring guideline — see `kmip/policies/README.md`
+    /// "Consumer ops" and `loader.rs`'s matching load-time rejection.
     pub fn resolve_substitution(
         &self,
         req: &PolicyRequest,
         current_algorithm: Option<&str>,
     ) -> Option<Substitution> {
+        if is_consumer_op(req.op) {
+            return None;
+        }
         match self {
             Rule::AlgorithmSubstitution {
                 ops,
@@ -1027,6 +1043,20 @@ pub fn op_matches(rule_op: &str, req_op: &str) -> bool {
         || req_op
             .strip_prefix(rule_op)
             .is_some_and(|rest| rest.starts_with(':'))
+}
+
+/// "Consumer ops" (2026-07-05 design review, classical-KEM crypto-agility):
+/// operations whose input was already fixed to a specific algorithm by an
+/// earlier, possibly-much-earlier, possibly-different-party call —
+/// `Decapsulate`'s ciphertext (fixed by a peer's `Encapsulate`), `DeriveKey`'s
+/// peer public bytes (opaque, caller-supplied), `Decrypt`'s ciphertext (fixed
+/// by an earlier `Encrypt`). Contrast "originator ops" (`Sign`, `Encapsulate`,
+/// `Encrypt`, `Create`/`CreateKeyPair`) which produce fresh output each call
+/// and so can coherently support `algorithm_substitution`. See
+/// `resolve_substitution`'s doc comment for why this exclusion is a hard
+/// engine invariant, not a policy-authoring convention.
+pub fn is_consumer_op(op: &str) -> bool {
+    matches!(op, "Decapsulate" | "DeriveKey" | "Decrypt")
 }
 
 /// Match a policy `algorithms` entry against a request's (qualified) algorithm.
@@ -1787,6 +1817,43 @@ mod tests {
         let req = req("CreateKeyPair", Some("ECDSA-P256"), &attrs);
         let sub = r.resolve_substitution(&req, Some("ECDSA-P256")).expect("must substitute");
         assert_eq!(sub.new_algorithm, "ML-DSA-65");
+    }
+
+    /// 2026-07-05 (classical-KEM crypto-agility design review) — a
+    /// substitution rule that (mistakenly) targets a consumer op must never
+    /// fire, even though its `ops:` list names the request's op exactly. The
+    /// loader rejects such a rule at load time (see `lint.rs`); this pins the
+    /// engine-level backstop for defense-in-depth.
+    #[test]
+    fn resolve_substitution_never_fires_on_consumer_ops() {
+        let attrs = HashMap::new();
+        for op in ["Decapsulate", "DeriveKey", "Decrypt"] {
+            assert!(is_consumer_op(op), "{op} must be classified as a consumer op");
+            let r = Rule::AlgorithmSubstitution {
+                ops: vec![op.to_string()],
+                from: "ECDH-P256".into(),
+                to: "ML-KEM-1024".into(),
+                reason: "should never fire".into(),
+                clause: None,
+            };
+            let req = req(op, Some("ECDH-P256"), &attrs);
+            assert!(
+                r.resolve_substitution(&req, Some("ECDH-P256")).is_none(),
+                "{op}: substitution must not fire even though ops/from/current_algorithm all match"
+            );
+        }
+        // Sanity: Encapsulate (an originator op) with the identical shape
+        // still substitutes normally — the exclusion is op-specific, not a
+        // blanket regression.
+        let r = Rule::AlgorithmSubstitution {
+            ops: vec!["Encapsulate".into()],
+            from: "ECDH-P256".into(),
+            to: "ML-KEM-1024".into(),
+            reason: "should fire".into(),
+            clause: None,
+        };
+        let req = req("Encapsulate", Some("ECDH-P256"), &attrs);
+        assert!(r.resolve_substitution(&req, Some("ECDH-P256")).is_some());
     }
 
     #[test]
