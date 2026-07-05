@@ -62,6 +62,14 @@ pub const CKM_EC_KEY_PAIR_GEN: CkMechanismType = 0x1040;
 pub const CKM_ECDSA: CkMechanismType           = 0x1041;
 pub const CKM_ECDSA_SHA256: CkMechanismType    = 0x1044;
 
+/// PKCS#11 v3.2 §6.24 — EdDSA key pair generation (Edwards curve). Value
+/// verified against `rust/src/constants.rs` (softhsmrustv3's own mirror of
+/// `pkcs11t.h`, the project's source of truth for `CK*` values).
+pub const CKM_EC_EDWARDS_KEY_PAIR_GEN: CkMechanismType = 0x1055;
+/// PKCS#11 v3.2 §6.24 — EdDSA sign/verify (Ed25519/Ed448). Same
+/// verification source as above.
+pub const CKM_EDDSA: CkMechanismType = 0x1057;
+
 pub const CKM_AES_KEY_GEN: CkMechanismType = 0x1080;
 pub const CKM_AES_GCM: CkMechanismType     = 0x1087;
 
@@ -127,6 +135,16 @@ pub enum KmipAlgorithm {
     /// (separate auth-tag emit path) without needing a `BlockCipherMode`
     /// hint.
     ChaCha20Poly1305,
+    /// EdDSA over Curve25519 (RFC 8032) — KMIP 3.0 §11 codepoint `0x37`
+    /// (base spec enum, predates WD19). Edwards-form signing curve —
+    /// distinct key type, mechanism, and OID from `X25519` (Montgomery-form
+    /// key agreement on the same underlying curve; not yet a KmipAlgorithm
+    /// variant — see `hybrid_kem.rs` for X25519's only current use, inside
+    /// the hybrid KEM combiner). 2026-07-05 (P1): keygen/sign/verify all
+    /// pre-existed at the PKCS#11 layer (`ffi.rs` CKM_EC_EDWARDS_KEY_PAIR_GEN
+    /// / CKM_EDDSA) — this variant is the KMIP-layer plumbing that was
+    /// missing.
+    Ed25519,       // 0x37
 
     // ── FIPS PQC — ML-KEM (FIPS 203) ──────────────────────────────────────
     MlKem512,      // 0x39
@@ -176,6 +194,7 @@ impl KmipAlgorithm {
             Ecdh       => 0x0000000e,
             ChaCha20         => 0x0000001c,
             ChaCha20Poly1305 => 0x0000001e,
+            Ed25519    => 0x00000037,
             MlKem512   => 0x00000039,
             MlKem768   => 0x0000003a,
             MlKem1024  => 0x0000003b,
@@ -213,6 +232,7 @@ impl KmipAlgorithm {
             0x0000000e => Ecdh,
             0x0000001c => ChaCha20,
             0x0000001e => ChaCha20Poly1305,
+            0x00000037 => Ed25519,
             0x00000039 => MlKem512,
             0x0000003a => MlKem768,
             0x0000003b => MlKem1024,
@@ -342,6 +362,10 @@ impl KmipAlgorithm {
             (HmacSha384, Mac) => Some(CKM_SHA384_HMAC),
             (HmacSha512, Mac) => Some(CKM_SHA512_HMAC),
 
+            // ── Ed25519 (RFC 8032 EdDSA) ────────────────────────────────────
+            (Ed25519, KeyGen) => Some(CKM_EC_EDWARDS_KEY_PAIR_GEN),
+            (Ed25519, SignVerify) => Some(CKM_EDDSA),
+
             // Any other (algorithm, op) pair is undefined.
             _ => None,
         }
@@ -361,6 +385,7 @@ impl KmipAlgorithm {
             Ecdh       => "ECDH",
             ChaCha20         => "ChaCha20",
             ChaCha20Poly1305 => "ChaCha20-Poly1305",
+            Ed25519    => "Ed25519",
             MlKem512   => "ML-KEM-512",
             MlKem768   => "ML-KEM-768",
             MlKem1024  => "ML-KEM-1024",

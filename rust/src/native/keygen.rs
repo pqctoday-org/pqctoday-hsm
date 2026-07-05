@@ -22,13 +22,13 @@ use std::collections::HashMap;
 use super::CkRv;
 use crate::constants::*;
 use crate::crypto::{
-    ALGO_ECDH_P256, ALGO_ECDSA, ALGO_ML_DSA, ALGO_ML_KEM, ALGO_RSA, ALGO_SLH_DSA, CURVE_K256,
-    CURVE_P256, CURVE_P384, CURVE_P521,
+    ALGO_ECDH_P256, ALGO_ECDSA, ALGO_EDDSA, ALGO_ML_DSA, ALGO_ML_KEM, ALGO_RSA, ALGO_SLH_DSA,
+    CURVE_K256, CURVE_P256, CURVE_P384, CURVE_P521,
 };
 use crate::crypto::handlers::{
-    build_ec_spki_p256, build_ec_spki_p384, build_ec_spki_p521, build_mldsa44_spki,
-    build_mldsa65_spki, build_mldsa87_spki, build_mlkem1024_spki, build_mlkem512_spki,
-    build_mlkem768_spki, build_slhdsa_spki, build_spki_from_parts, Attributes,
+    build_ec_spki_p256, build_ec_spki_p384, build_ec_spki_p521, build_ed25519_spki,
+    build_mldsa44_spki, build_mldsa65_spki, build_mldsa87_spki, build_mlkem1024_spki,
+    build_mlkem512_spki, build_mlkem768_spki, build_slhdsa_spki, build_spki_from_parts, Attributes,
 };
 use crate::state::{
     allocate_handle, compute_kcv, finalize_private_key_attrs, store_algo_family, store_bool,
@@ -696,6 +696,77 @@ pub fn generate_ecdh_keypair(
             return Err(CKR_MECHANISM_INVALID);
         }
     }
+
+    insert_id_and_label(&mut pub_attrs, cka_id, label);
+    insert_id_and_label(&mut prv_attrs, cka_id, label);
+
+    finalize_and_register(_session, pub_attrs, prv_attrs)
+}
+
+/// Generate an Ed25519 (RFC 8032 EdDSA over Curve25519, Edwards form) key
+/// pair. Distinct from [`generate_ecdh_keypair`]'s Montgomery-form X25519 in
+/// every respect: key type (`CKK_EC_EDWARDS`, not `CKK_EC_MONTGOMERY`),
+/// mechanism (`CKM_EC_EDWARDS_KEY_PAIR_GEN`/`CKM_EDDSA`, not
+/// `CKM_EC_MONTGOMERY_KEY_PAIR_GEN`/`CKM_X25519`), purpose (signing, not key
+/// agreement), and OID (`id-Ed25519` = `1.3.101.112`, not `id-X25519` =
+/// `1.3.101.110` — verified directly against RFC 8410, not inferred from the
+/// adjacent arc). Sign/Verify dispatch for `CKM_EDDSA` already exists
+/// (`native::sign`/`native::verify` → `crypto::handlers::sign_eddsa`/
+/// `verify_eddsa`) — this function is the only missing piece for a full
+/// KMIP `CreateKeyPair` round trip (2026-07-05, P1).
+///
+/// Returns `(public_handle, private_handle)`.
+///
+/// **Pre-condition**: `session` must be a valid R/W user session.
+pub fn generate_ed25519_keypair(
+    _session: u32,
+    cka_id: &[u8],
+    label: &str,
+) -> Result<(u32, u32), CkRv> {
+    let mut pub_attrs: Attributes = HashMap::new();
+    let mut prv_attrs: Attributes = HashMap::new();
+
+    store_algo_family(&mut pub_attrs, ALGO_EDDSA);
+    store_algo_family(&mut prv_attrs, ALGO_EDDSA);
+
+    store_ulong(&mut pub_attrs, CKA_CLASS, CKO_PUBLIC_KEY);
+    store_ulong(&mut pub_attrs, CKA_KEY_TYPE, CKK_EC_EDWARDS);
+    store_ulong(&mut pub_attrs, CKA_KEY_GEN_MECHANISM, CKM_EC_EDWARDS_KEY_PAIR_GEN);
+    store_bool(&mut pub_attrs, CKA_TOKEN, false);
+    store_bool(&mut pub_attrs, CKA_PRIVATE, false);
+    store_bool(&mut pub_attrs, CKA_ENCRYPT, false);
+    store_bool(&mut pub_attrs, CKA_VERIFY, true);
+    store_bool(&mut pub_attrs, CKA_WRAP, false);
+    store_bool(&mut pub_attrs, CKA_DERIVE, false);
+    store_bool(&mut pub_attrs, CKA_LOCAL, true);
+
+    store_ulong(&mut prv_attrs, CKA_CLASS, CKO_PRIVATE_KEY);
+    store_ulong(&mut prv_attrs, CKA_KEY_TYPE, CKK_EC_EDWARDS);
+    store_ulong(&mut prv_attrs, CKA_KEY_GEN_MECHANISM, CKM_EC_EDWARDS_KEY_PAIR_GEN);
+    store_bool(&mut prv_attrs, CKA_TOKEN, false);
+    store_bool(&mut prv_attrs, CKA_PRIVATE, true);
+    store_bool(&mut prv_attrs, CKA_SENSITIVE, true);
+    store_bool(&mut prv_attrs, CKA_EXTRACTABLE, false);
+    store_bool(&mut prv_attrs, CKA_DECRYPT, false);
+    store_bool(&mut prv_attrs, CKA_SIGN, true);
+    store_bool(&mut prv_attrs, CKA_UNWRAP, false);
+    store_bool(&mut prv_attrs, CKA_DERIVE, false);
+    store_bool(&mut prv_attrs, CKA_LOCAL, true);
+
+    let mut rng = rand::rngs::OsRng;
+    let sk = ed25519_dalek::SigningKey::generate(&mut rng);
+    let vk = sk.verifying_key();
+
+    prv_attrs.insert(CKA_VALUE, sk.to_bytes().to_vec()); // 32-byte seed
+    let vk_bytes = vk.to_bytes().to_vec(); // 32-byte encoded point
+    // Matches the existing raw-FFI Ed25519 keygen convention (ffi.rs
+    // CKM_EC_EDWARDS_KEY_PAIR_GEN): the encoded point lives in CKA_VALUE on
+    // the public object, not CKA_EC_POINT (that attribute is the SEC1/DER
+    // convention `get_ec_point_sec1` expects for Weierstrass curves — Ed25519
+    // isn't one, and stuffing a raw Edwards point through that SEC1 stripper
+    // would corrupt it if the point's first byte happened to be 0x04).
+    pub_attrs.insert(CKA_VALUE, vk_bytes.clone());
+    pub_attrs.insert(CKA_PUBLIC_KEY_INFO, build_ed25519_spki(&vk_bytes));
 
     insert_id_and_label(&mut pub_attrs, cka_id, label);
     insert_id_and_label(&mut prv_attrs, cka_id, label);
@@ -1772,6 +1843,43 @@ mod tests {
             generate_ecdh_keypair(session, EccCurve::Secp256K1, b"\x01", "ecdh-k256"),
             Err(CKR_MECHANISM_INVALID)
         );
+        close_session(session).unwrap();
+    }
+
+    /// Ed25519 keygen: 32-byte seed, 32-byte encoded point, tagged
+    /// `ALGO_EDDSA` (never `ALGO_ECDH_P256` — Edwards signing key, not
+    /// Montgomery key-agreement key, despite sharing the underlying curve).
+    #[test]
+    fn ed25519_keygen_produces_expected_lengths_and_family_tag() {
+        use crate::state::{get_object_algo_family, get_object_attr_u32, get_object_value};
+        let _guard = test_lock::acquire();
+        let session = fresh_session();
+        let (pub_h, prv_h) =
+            generate_ed25519_keypair(session, b"\x01", "ed25519-1").unwrap();
+        assert_eq!(get_object_value(prv_h).unwrap().len(), 32, "Ed25519 seed");
+        assert_eq!(get_object_value(pub_h).unwrap().len(), 32, "Ed25519 encoded point");
+        assert_eq!(get_object_algo_family(prv_h), ALGO_EDDSA, "tagged EdDSA, not ECDH/ECDSA");
+        assert_eq!(get_object_attr_u32(pub_h, CKA_KEY_TYPE), Some(CKK_EC_EDWARDS));
+        close_session(session).unwrap();
+    }
+
+    /// The public key round-trips through sign/verify — the whole point of
+    /// this fix (2026-07-05, P1): the generic `native::sign`/`native::verify`
+    /// dispatch already handles `CKM_EDDSA`; this proves keygen produces
+    /// key material those functions actually accept.
+    #[test]
+    fn ed25519_keygen_produces_a_working_signing_key() {
+        use crate::native::sign::{sign, verify};
+        let _guard = test_lock::acquire();
+        let session = fresh_session();
+        let (pub_h, prv_h) =
+            generate_ed25519_keypair(session, b"\x02", "ed25519-2").unwrap();
+        let msg = b"hybrid KEM audit trail, 2026-07-05";
+        let sig = sign(session, prv_h, CKM_EDDSA, msg).expect("sign");
+        assert_eq!(sig.len(), 64, "Ed25519 signature is 64 bytes");
+        assert!(verify(session, pub_h, CKM_EDDSA, msg, &sig).unwrap());
+        // Tampered message must not verify.
+        assert!(!verify(session, pub_h, CKM_EDDSA, b"tampered", &sig).unwrap());
         close_session(session).unwrap();
     }
 

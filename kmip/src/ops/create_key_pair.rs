@@ -497,6 +497,7 @@ fn canonical_name(a: KmipAlgorithm) -> String {
         Ecdh       => "ECDH",
         ChaCha20         => "ChaCha20",
         ChaCha20Poly1305 => "ChaCha20-Poly1305",
+        Ed25519    => "Ed25519",
         MlKem512   => "ML-KEM-512",
         MlKem768   => "ML-KEM-768",
         MlKem1024  => "ML-KEM-1024",
@@ -551,6 +552,8 @@ pub(crate) fn parse_algorithm(s: &str) -> Result<KmipAlgorithm> {
         // K6 hybrid KEMs (no '-' split; exact names).
         "X25519MLKEM768" => X25519MlKem768,
         "SecP256r1MLKEM768" => SecP256r1MlKem768,
+        // P1 (2026-07-05): Ed25519 has no size/curve suffix — exact name.
+        "Ed25519" => Ed25519,
         // Size-suffixed classical algos collapse to their base enum.
         _ => match base {
             "AES" => Aes,
@@ -677,6 +680,14 @@ fn native_generate_keypair(
                 native::generate_ecdh_keypair(session, curve, cka_id, label),
             )
         }
+        // P1 (2026-07-05): Ed25519 — no curve/size parameter, single fixed
+        // curve. Keygen/sign/verify all pre-existed at the PKCS#11 layer
+        // (ffi.rs CKM_EC_EDWARDS_KEY_PAIR_GEN / CKM_EDDSA); this is the
+        // missing KMIP-layer plumbing.
+        Ed25519 => (
+            "native::generate_ed25519_keypair",
+            native::generate_ed25519_keypair(session, cka_id, label),
+        ),
         _ => {
             return Err(KmipError::failed(
                 ResultReason::OperationNotSupported,

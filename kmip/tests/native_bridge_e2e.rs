@@ -1862,6 +1862,81 @@ fn ecdh_create_key_pair_succeeds_for_all_three_nist_curves() {
     let _ = softhsmrustv3::native::session::finalize();
 }
 
+/// 2026-07-05 KMIP-layer gap fix (P1): Ed25519 keygen/sign/verify already
+/// worked at the PKCS#11 layer — no `KmipAlgorithm` variant existed to reach
+/// it through KMIP. Full real round trip: CreateKeyPair → Activate → Sign →
+/// SignatureVerify (correct + tampered), against the live engine, all
+/// crypto in `rust/` — nothing reimplemented in `kmip/`.
+#[test]
+fn ed25519_create_sign_verify_round_trip() {
+    let _guard = engine_test_lock();
+    let deps = build_deps_with_real_engine();
+
+    let create_req = CreateKeyPairRequest {
+        common_attributes: vec![Attribute::CryptographicAlgorithm(KmipAlgorithm::Ed25519)],
+        private_key_attributes: vec![Attribute::CryptographicUsageMask(
+            UsageMask::SIGN | UsageMask::VERIFY,
+        )],
+        public_key_attributes: vec![Attribute::CryptographicUsageMask(
+            UsageMask::SIGN | UsageMask::VERIFY,
+        )],
+        seed: None,
+    };
+    let kp_resp = create_key_pair(&deps, create_req, "CreateKeyPair:Sign", "ed25519-e2e").unwrap();
+    let priv_rec = deps.store.get(&kp_resp.private_key_uid).unwrap().unwrap();
+    let pub_rec = deps.store.get(&kp_resp.public_key_uid).unwrap().unwrap();
+    assert_eq!(priv_rec.algorithm, KmipAlgorithm::Ed25519);
+
+    use pqctoday_kmip::kmip30::ActivateRequest;
+    activate(&deps, ActivateRequest { uid: priv_rec.uid.clone() }, "ed25519-activate-priv")
+        .unwrap();
+    activate(&deps, ActivateRequest { uid: pub_rec.uid.clone() }, "ed25519-activate-pub").unwrap();
+
+    let message = b"hybrid KEM audit trail, 2026-07-05";
+    let sig_resp = sign(
+        &deps,
+        SignRequest {
+            uid: priv_rec.uid.clone(),
+            data: message.to_vec(),
+            cryptographic_parameters: None,
+        },
+        "ed25519-sign",
+    )
+    .unwrap();
+    assert_eq!(sig_resp.signature.len(), 64, "RFC 8032 Ed25519 signature is 64 bytes");
+
+    let verify_resp = signature_verify(
+        &deps,
+        SignatureVerifyRequest {
+            uid: pub_rec.uid.clone(),
+            data: message.to_vec(),
+            signature: sig_resp.signature.clone(),
+            cryptographic_parameters: None,
+        },
+        "ed25519-verify-ok",
+    )
+    .unwrap();
+    assert_eq!(verify_resp.validity, SignatureValidity::Valid);
+
+    let mut tampered = sig_resp.signature.clone();
+    let mid = tampered.len() / 2;
+    tampered[mid] ^= 0xFF;
+    let verify_bad = signature_verify(
+        &deps,
+        SignatureVerifyRequest {
+            uid: pub_rec.uid.clone(),
+            data: message.to_vec(),
+            signature: tampered,
+            cryptographic_parameters: None,
+        },
+        "ed25519-verify-bad",
+    )
+    .unwrap();
+    assert_eq!(verify_bad.validity, SignatureValidity::Invalid);
+
+    let _ = softhsmrustv3::native::session::finalize();
+}
+
 /// Phase 7b gap-tightening: Locate's PKCS#11 reconciliation drops
 /// records whose engine handle is gone. Simulates the
 /// persistent-SQLite + volatile-engine restart scenario by finalising

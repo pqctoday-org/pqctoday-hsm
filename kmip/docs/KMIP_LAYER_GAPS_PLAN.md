@@ -10,6 +10,22 @@ status (or absence) in `rust/` (softhsmrustv3, the PKCS#11 engine) and `kmip/`
 (the KMIP 3.0 protocol crate this session's audit operated on), so that
 "spec-only" claims are accurate and the real, tractable gaps get fixed.
 
+**Architecture rule (binding for every item in this plan, and for the
+deferred composite-signature work): all cryptography lives in `rust/`
+(softhsmrustv3, the PKCS#11 HSM library), exposed to `kmip/` (the protocol
+layer) only as plain function calls (`native::generate_x`,
+`native::sign_x`, `native::verify_x`). `kmip/` must never gain a direct
+dependency on a crypto crate.** Flagging a pre-existing violation found
+while tracing the hybrid-KEM architecture: `kmip/src/hybrid_kem.rs` calls
+`ml_kem`/`x25519-dalek`/`p256` directly, and `kmip/Cargo.toml:175-176` lists
+them as real (not dev) dependencies — `Cargo.toml:204`'s own comment admits
+they were "moved to `[dependencies]`" for this file. This predates the
+2026-07 work in this plan; it is not being fixed here (working code, out of
+scope), but it must not be repeated — P1 below keeps all Ed25519 crypto in
+`rust/src/native/`, and the deferred composite-signature design (see
+`CACP_GUIDE.md` §4) must do the same: new `native::` functions in `rust/`,
+`kmip/` only calls them.
+
 **Source-of-truth rule (unchanged, per project convention)**: every KMIP wire
 value from `spec/oasis-kmip-3.0/kmip-spec-3.0-tags-enums.json` (verified: this
 extract is from the pre-WD19 public-review snapshot, so it stops at
@@ -52,6 +68,60 @@ work package (see `CACP_GUIDE.md` §4); this plan does not revisit it.
 | X448 (standalone key agreement) | Same as X25519 (own `x448` crate, confirmed in `Cargo.toml`) | Same gap as X25519 | Same as X25519 |
 | **Plain `Ecdh` (already an enum variant!)** | Keygen mechanism mapped (`(Ecdsa, KeyGen) \| (Ecdh, KeyGen) => CKM_EC_KEY_PAIR_GEN`) but **`native_generate_keypair`'s match has no `Ecdh =>` arm** — falls to the `_ => Err(OperationNotSupported)` catch-all (`create_key_pair.rs`) | Enum variant exists, wire codepoint `0x0e` correct, but unusable | **Real, standing bug** — every policy that allowlists `ECDH-P256`/`-P384`/`-P521` (bsi-tr-02102, fips-only, classical.yaml) is currently allowlisting an algorithm that fails at Plane 2 with `OperationNotSupported` if actually created. My 2026-07-04 policy fixes were policy-plane-correct but did not (and could not, from that vantage point) catch this Plane-2 gap, since the audit's engine matrix drove `Engine::evaluate` (Plane 1 policy decisions) directly, never the real `create_key_pair` dispatcher. |
 | HSS / LMS / XMSS / XMSS-MT | **Keygen only** (`ffi.rs:2072` — `CKM_HSS_KEY_PAIR_GEN`, incl. the `levels=1` single-tree-LMS special case). **`Sign` has no arm for `CKM_HSS`/`CKM_XMSS`/`CKM_XMSSMT`** — falls to `_ => Err(CKR_MECHANISM_INVALID)` (`ffi.rs:3438` area) | Missing | Skip for this plan — signing state management (one-time-signature trees) is genuinely unimplemented, comparable in size to the composite-signature work, not a quick fix |
+
+## Separate finding: `hybrid_kem.rs` violates the architecture rule above AND
+## isn't PKCS#11-compliant — the private key is extractable (2026-07-05)
+
+Found while answering a question about the existing hybrid-KEM design, not
+part of the original policy audit. Two independent problems, same root
+cause:
+
+1. **Crypto-in-the-wrong-layer.** `kmip/src/hybrid_kem.rs` calls `ml_kem`,
+   `x25519-dalek`, and `p256` directly, and `kmip/Cargo.toml:175-176` lists
+   them as real (not dev) dependencies — `Cargo.toml:204`'s own comment
+   admits they were "moved to `[dependencies]`" for this file. Violates the
+   architecture rule at the top of this doc.
+2. **The private key is extractable via a plain `Get`.** `create_key_pair.rs`
+   generates the hybrid keypair's raw bytes directly in Rust memory
+   (`hybrid_kem::keygen`) and stores them as opaque bytes in the KMIP
+   store's own `ObjectRecord.key_material` field (`cka_id_priv`/`cka_id_pub`
+   are left empty — no PKCS#11 object is ever allocated). `get.rs:139` reads
+   `obj.key_material` directly to build the response to a `Get` request —
+   confirmed: there is no `CKA_SENSITIVE`/`CKA_EXTRACTABLE=false` protection
+   at all, because this key never enters the PKCS#11 engine's protected
+   object store in the first place. This is a real defect, not a labeling
+   gap.
+
+**Verified: PKCS#11 v3.2 has no dedicated hybrid-KEM mechanism** (checked
+against the vendored `docs/refs/pkcs11-spec-v3.2-csd01.pdf` — the only
+"HYBRID" string in it is `CKV_TYPE_HYBRID`, an unrelated token-hardware-type
+enum — and against Mozilla's own PKCS#11 v3.2 ML-KEM implementation tracking,
+which confirms v3.2 adds only standalone ML-KEM `C_EncapsulateKey`/
+`C_DecapsulateKey`, with hybrid composition left entirely to the caller). A
+v3.3 draft reference was found but its contents could not be verified
+(required authenticated access) — no claim is made about it.
+
+**The standards-compliant fix** (not scoped/started — flagging for a future
+pass, likely alongside or after the composite-signature work given the
+similar "combine two real keys" shape): rebuild the hybrid KEM entirely
+inside `rust/`'s `native::` module using mechanisms that already exist and
+are already implemented in this engine:
+- `CKM_ML_KEM_KEY_PAIR_GEN` keygen (already implemented) — private key
+  stays `CKA_SENSITIVE`/non-extractable, never leaves the HSM.
+- `CKM_EC_MONTGOMERY_KEY_PAIR_GEN` keygen (already implemented) — same
+  protection for the classical component.
+- `C_EncapsulateKey`/`C_DecapsulateKey` for the ML-KEM half, `CKM_X25519`
+  derive for the classical half — both already implemented, both should
+  return a *derived secret-key handle*, not raw bytes, to the caller.
+- **`CKM_CONCATENATE_BASE_AND_KEY` (`0x360`) to combine the two derived
+  secret handles into one final shared-secret object** — confirmed present
+  in this project's own `src/lib/pkcs11/pkcs11t.h` (a general-purpose,
+  pre-PQC key-derivation mechanism, not hybrid-KEM-specific) but **not
+  implemented anywhere in `rust/src/ffi.rs`/`constants.rs`** — this is the
+  one new mechanism this fix needs.
+- Only the final *combined shared secret* — the KEM's legitimate,
+  intentionally-releasable output — ever reaches the KMIP caller. Neither
+  private key does, at any point.
 
 ## Priority order
 
