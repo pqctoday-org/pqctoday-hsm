@@ -133,6 +133,128 @@ pub(crate) fn digest_of(mech: u32, data: &[u8]) -> Result<Vec<u8>, CkRv> {
     })
 }
 
+/// HKDF (RFC 5869) over the PRF selected by `prf` — `Extract(salt, ikm)` then
+/// `Expand(info)` to `len` bytes. Mirrors the `hkdf` crate usage in the FFI
+/// `C_DeriveKey` HKDF arm (`ffi.rs`) so the mechanism→hasher mapping is
+/// identical: `prf` ∈ {`CKM_SHA256`, `CKM_SHA384`, `CKM_SHA512`,
+/// `CKM_SHA3_256`, `CKM_SHA3_512`} (SHA-256 default). `salt = None` uses the
+/// all-zero salt per RFC 5869 §2.2. All bytes stay in the engine.
+pub(crate) fn hkdf_extract_expand(
+    prf: u32,
+    salt: Option<&[u8]>,
+    ikm: &[u8],
+    info: &[u8],
+    len: usize,
+) -> Result<Vec<u8>, CkRv> {
+    let mut out = vec![0u8; len];
+    macro_rules! run {
+        ($H:ty) => {{
+            let hk = hkdf::Hkdf::<$H>::new(salt, ikm);
+            hk.expand(info, &mut out).map_err(|_| CKR_KEY_SIZE_RANGE)?;
+        }};
+    }
+    match prf {
+        CKM_SHA384 => run!(sha2::Sha384),
+        CKM_SHA512 => run!(sha2::Sha512),
+        CKM_SHA3_256 => run!(sha3::Sha3_256),
+        CKM_SHA3_512 => run!(sha3::Sha3_512),
+        CKM_SHA256 => run!(sha2::Sha256),
+        _ => return Err(CKR_MECHANISM_INVALID),
+    }
+    Ok(out)
+}
+
+/// A finalize step applied to the running concatenated secret of a
+/// [`Combiner::Concat`], each a standard PKCS#11 v3.2 derive mechanism.
+#[derive(Clone, Debug)]
+pub enum FinalizeStep {
+    /// `CKM_CONCATENATE_BASE_AND_DATA` — append transcript bytes (ct, pk, label)
+    /// onto the running secret (X-Wing: `‖ ct_X ‖ pk_X ‖ XWingLabel`).
+    ConcatData(Vec<u8>),
+    /// `CKM_SHA*_KEY_DERIVATION` — hash the running secret (SSH
+    /// `mlkem768x25519-sha256`: SHA-256; X-Wing: SHA3-256).
+    Digest(u32),
+    /// HKDF over the running secret as IKM (RFC 5869), `salt`/`info`/`len` as
+    /// given. For combiners that KDF rather than plain-hash.
+    Hkdf { prf: u32, salt: Vec<u8>, info: Vec<u8>, len: usize },
+}
+
+/// A hybrid-KEM shared-secret combiner. Two shapes cover the registered
+/// two-component combiners (n-ary keyed-PRF chains — RFC 9370 IKEv2 — are the
+/// calling protocol's orchestration, out of scope here; see the revised plan
+/// Correction 2).
+#[derive(Clone, Debug)]
+pub enum Combiner {
+    /// Concatenate all components in order (via `CKM_CONCATENATE_BASE_AND_KEY`),
+    /// then apply each finalize step. The three IANA TLS groups use
+    /// `finalize: []` (PURE concatenation — verified no hash/KDF).
+    Concat { finalize: Vec<FinalizeStep> },
+    /// HKDF-Extract keying one component with the other (salt = component 0,
+    /// IKM = component 1), then Expand — NO concatenation. The dual-PRF shape.
+    DualPrf { prf: u32, info: Vec<u8>, len: usize },
+}
+
+/// Run a combiner over the component shared secrets, entirely in-HSM, and
+/// return the final combined secret bytes. `Concat` composition happens through
+/// the audited `concatenate_keys`/`concatenate_data`/`digest_key_derivation`
+/// mechanism wrappers (each registers a handle); every intermediate handle is
+/// destroyed before returning so no secret objects accumulate per operation.
+///
+/// The three shipped TLS groups pass `Concat { finalize: [] }`. `DualPrf` and
+/// the `Hkdf`/`Digest`/`ConcatData` finalize steps are exercised at this level
+/// (proving the mechanisms compose) — see the executor tests.
+pub fn run_combiner(
+    session: u32,
+    components: &[&[u8]],
+    combiner: &Combiner,
+) -> Result<Vec<u8>, CkRv> {
+    match combiner {
+        Combiner::Concat { finalize } => {
+            if components.is_empty() {
+                return Err(CKR_ARGUMENTS_BAD);
+            }
+            // Register every component + intermediate as a handle; destroy them
+            // all at the end (hygiene — they hold component secret material).
+            let mut created: Vec<u32> = Vec::new();
+            let mut running = register_derived_secret(session, components[0].to_vec());
+            created.push(running);
+            for comp in &components[1..] {
+                let h = register_derived_secret(session, comp.to_vec());
+                created.push(h);
+                running = concatenate_keys(session, running, h)?;
+                created.push(running);
+            }
+            for step in finalize {
+                running = match step {
+                    FinalizeStep::ConcatData(data) => concatenate_data(session, running, data)?,
+                    FinalizeStep::Digest(mech) => {
+                        digest_key_derivation(session, running, *mech, None)?
+                    }
+                    FinalizeStep::Hkdf { prf, salt, info, len } => {
+                        let ikm = get_object_value(running).ok_or(CKR_KEY_HANDLE_INVALID)?;
+                        let salt_opt = if salt.is_empty() { None } else { Some(salt.as_slice()) };
+                        let out = hkdf_extract_expand(*prf, salt_opt, &ikm, info, *len)?;
+                        register_derived_secret(session, out)
+                    }
+                };
+                created.push(running);
+            }
+            let value = get_object_value(running).ok_or(CKR_FUNCTION_FAILED)?;
+            for h in created {
+                let _ = crate::native::object::destroy_object(session, h);
+            }
+            Ok(value)
+        }
+        Combiner::DualPrf { prf, info, len } => {
+            if components.len() != 2 {
+                return Err(CKR_ARGUMENTS_BAD);
+            }
+            // HKDF-Extract(salt = component 0, IKM = component 1), then Expand.
+            hkdf_extract_expand(*prf, Some(components[0]), components[1], info, *len)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -249,6 +371,99 @@ mod tests {
         let trunc =
             digest_key_derivation(session, base2, CKM_SHA512_KEY_DERIVATION, Some(32)).unwrap();
         assert_eq!(get_object_value(trunc).unwrap(), full_v[..32].to_vec());
+    }
+
+    // ── run_combiner executor ────────────────────────────────────────────────
+
+    /// The three IANA TLS groups: `Concat { finalize: [] }` is pure ordered
+    /// concatenation of the component secrets.
+    #[test]
+    fn run_combiner_pure_concat_is_ordered_concatenation() {
+        let _guard = test_lock::acquire();
+        let session = fresh_session();
+        let ss_mlkem = [0xAA; 32];
+        let ss_x25519 = [0xBB; 32];
+        let out = run_combiner(
+            session,
+            &[&ss_mlkem, &ss_x25519],
+            &Combiner::Concat { finalize: vec![] },
+        )
+        .unwrap();
+        assert_eq!(out.len(), 64);
+        assert_eq!(&out[..32], &ss_mlkem, "ML-KEM ss first");
+        assert_eq!(&out[32..], &ss_x25519, "X25519 ss last");
+    }
+
+    /// SSH `mlkem768x25519-sha256`: `SS = SHA-256(ss_mlkem ‖ ss_x25519)`
+    /// (verified from the OpenSSH source vendored in this repo). Expressed as
+    /// `Concat { finalize: [Digest(SHA256)] }`.
+    #[test]
+    fn run_combiner_ssh_sha256_recipe_matches_direct() {
+        use sha2::Digest as _;
+        let _guard = test_lock::acquire();
+        let session = fresh_session();
+        let ss_mlkem = [0x11; 32];
+        let ss_x25519 = [0x22; 32];
+        let out = run_combiner(
+            session,
+            &[&ss_mlkem, &ss_x25519],
+            &Combiner::Concat { finalize: vec![FinalizeStep::Digest(CKM_SHA256_KEY_DERIVATION)] },
+        )
+        .unwrap();
+        let expect = sha2::Sha256::digest([ss_mlkem, ss_x25519].concat()).to_vec();
+        assert_eq!(out, expect);
+    }
+
+    /// X-Wing: `SS = SHA3-256(ss_M ‖ ss_X ‖ ct_X ‖ pk_X ‖ XWingLabel)` (verified
+    /// from draft-connolly-cfrg-xwing-kem; ML-KEM ct deliberately omitted).
+    /// Expressed as `Concat { finalize: [ConcatData(ct_X‖pk_X‖label), Digest(SHA3_256)] }`.
+    #[test]
+    fn run_combiner_xwing_sha3_256_recipe_matches_direct() {
+        use sha3::Digest as _;
+        let _guard = test_lock::acquire();
+        let session = fresh_session();
+        let ss_m = [0x33; 32];
+        let ss_x = [0x44; 32];
+        let ct_x = [0x55; 32];
+        let pk_x = [0x66; 32];
+        let label: [u8; 6] = [0x5c, 0x2e, 0x2f, 0x2f, 0x5e, 0x5c]; // "\.//^\"
+        let transcript = [ct_x.as_slice(), pk_x.as_slice(), &label].concat();
+        let out = run_combiner(
+            session,
+            &[&ss_m, &ss_x],
+            &Combiner::Concat {
+                finalize: vec![
+                    FinalizeStep::ConcatData(transcript.clone()),
+                    FinalizeStep::Digest(CKM_SHA3_256_KEY_DERIVATION),
+                ],
+            },
+        )
+        .unwrap();
+        let expect =
+            sha3::Sha3_256::digest([ss_m.as_slice(), &ss_x, &transcript].concat()).to_vec();
+        assert_eq!(out, expect);
+    }
+
+    /// DualPrf: `HKDF-Extract(salt = ss1, IKM = ss2)` then Expand — matches a
+    /// direct `hkdf` computation (self-consistency; no external KAT claimed).
+    #[test]
+    fn run_combiner_dualprf_matches_direct_hkdf() {
+        let _guard = test_lock::acquire();
+        let session = fresh_session();
+        let ss1 = [0x77; 32];
+        let ss2 = [0x88; 32];
+        let info = b"dual-prf-info";
+        let out = run_combiner(
+            session,
+            &[&ss1, &ss2],
+            &Combiner::DualPrf { prf: CKM_SHA256, info: info.to_vec(), len: 32 },
+        )
+        .unwrap();
+        let mut expect = [0u8; 32];
+        hkdf::Hkdf::<sha2::Sha256>::new(Some(&ss1), &ss2)
+            .expand(info, &mut expect)
+            .unwrap();
+        assert_eq!(out, expect.to_vec());
     }
 
     #[test]

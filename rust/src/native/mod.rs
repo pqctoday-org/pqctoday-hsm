@@ -42,6 +42,7 @@
 
 pub mod derive;
 pub mod encrypt;
+pub mod hybrid;
 pub mod keygen;
 pub mod object;
 pub mod session;

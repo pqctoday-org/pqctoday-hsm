@@ -22,13 +22,14 @@ use std::collections::HashMap;
 use super::CkRv;
 use crate::constants::*;
 use crate::crypto::{
-    ALGO_ECDH_P256, ALGO_ECDSA, ALGO_EDDSA, ALGO_ML_DSA, ALGO_ML_KEM, ALGO_RSA, ALGO_SLH_DSA,
-    CURVE_K256, CURVE_P256, CURVE_P384, CURVE_P521,
+    ALGO_ECDH_P256, ALGO_ECDH_X25519, ALGO_ECDSA, ALGO_EDDSA, ALGO_ML_DSA, ALGO_ML_KEM, ALGO_RSA,
+    ALGO_SLH_DSA, CURVE_K256, CURVE_P256, CURVE_P384, CURVE_P521,
 };
 use crate::crypto::handlers::{
     build_ec_spki_p256, build_ec_spki_p384, build_ec_spki_p521, build_ed25519_spki,
     build_mldsa44_spki, build_mldsa65_spki, build_mldsa87_spki, build_mlkem1024_spki,
-    build_mlkem512_spki, build_mlkem768_spki, build_slhdsa_spki, build_spki_from_parts, Attributes,
+    build_mlkem512_spki, build_mlkem768_spki, build_slhdsa_spki, build_spki_from_parts,
+    build_x25519_spki, Attributes,
 };
 use crate::state::{
     allocate_handle, compute_kcv, finalize_private_key_attrs, store_algo_family, store_bool,
@@ -767,6 +768,83 @@ pub fn generate_ed25519_keypair(
     // would corrupt it if the point's first byte happened to be 0x04).
     pub_attrs.insert(CKA_VALUE, vk_bytes.clone());
     pub_attrs.insert(CKA_PUBLIC_KEY_INFO, build_ed25519_spki(&vk_bytes));
+
+    insert_id_and_label(&mut pub_attrs, cka_id, label);
+    insert_id_and_label(&mut prv_attrs, cka_id, label);
+
+    finalize_and_register(_session, pub_attrs, prv_attrs)
+}
+
+/// Generate an X25519 (RFC 7748 Montgomery-form ECDH over Curve25519) key
+/// pair. This is the native typed parallel of the FFI
+/// `CKM_EC_MONTGOMERY_KEY_PAIR_GEN` X25519 branch (`ffi.rs`) — same crypto
+/// (`x25519_dalek`), same object shape (`CKK_EC_MONTGOMERY`, 32-byte scalar in
+/// `CKA_VALUE`, raw public point in `CKA_VALUE`/`CKA_EC_POINT`, id-X25519 OID
+/// `1.3.101.110` in `CKA_EC_PARAMS`), exposed to native callers so the hybrid
+/// KEM code can create the classical half of X25519MLKEM768 as an ordinary
+/// NON-EXTRACTABLE engine object (its private scalar never leaves the HSM).
+///
+/// Distinct from [`generate_ed25519_keypair`]: key agreement (`CKA_DERIVE`),
+/// not signing; Montgomery form, not Edwards.
+///
+/// Returns `(public_handle, private_handle)`.
+pub fn generate_x25519_keypair(
+    _session: u32,
+    cka_id: &[u8],
+    label: &str,
+) -> Result<(u32, u32), CkRv> {
+    let mut pub_attrs: Attributes = HashMap::new();
+    let mut prv_attrs: Attributes = HashMap::new();
+
+    store_algo_family(&mut pub_attrs, ALGO_ECDH_X25519);
+    store_algo_family(&mut prv_attrs, ALGO_ECDH_X25519);
+
+    store_ulong(&mut pub_attrs, CKA_CLASS, CKO_PUBLIC_KEY);
+    store_ulong(&mut pub_attrs, CKA_KEY_TYPE, CKK_EC_MONTGOMERY);
+    store_ulong(&mut pub_attrs, CKA_KEY_GEN_MECHANISM, CKM_EC_MONTGOMERY_KEY_PAIR_GEN);
+    store_bool(&mut pub_attrs, CKA_TOKEN, false);
+    store_bool(&mut pub_attrs, CKA_PRIVATE, false);
+    store_bool(&mut pub_attrs, CKA_ENCRYPT, false);
+    store_bool(&mut pub_attrs, CKA_VERIFY, false);
+    store_bool(&mut pub_attrs, CKA_WRAP, false);
+    store_bool(&mut pub_attrs, CKA_DERIVE, false);
+    store_bool(&mut pub_attrs, CKA_LOCAL, true);
+
+    store_ulong(&mut prv_attrs, CKA_CLASS, CKO_PRIVATE_KEY);
+    store_ulong(&mut prv_attrs, CKA_KEY_TYPE, CKK_EC_MONTGOMERY);
+    store_ulong(&mut prv_attrs, CKA_KEY_GEN_MECHANISM, CKM_EC_MONTGOMERY_KEY_PAIR_GEN);
+    store_bool(&mut prv_attrs, CKA_TOKEN, false);
+    store_bool(&mut prv_attrs, CKA_PRIVATE, true);
+    store_bool(&mut prv_attrs, CKA_SENSITIVE, true);
+    store_bool(&mut prv_attrs, CKA_EXTRACTABLE, false);
+    store_bool(&mut prv_attrs, CKA_DECRYPT, false);
+    store_bool(&mut prv_attrs, CKA_SIGN, false);
+    store_bool(&mut prv_attrs, CKA_UNWRAP, false);
+    store_bool(&mut prv_attrs, CKA_DERIVE, true);
+    store_bool(&mut prv_attrs, CKA_LOCAL, true);
+
+    let mut rng = rand::rngs::OsRng;
+    let sk = x25519_dalek::StaticSecret::random_from_rng(&mut rng);
+    let pk = x25519_dalek::PublicKey::from(&sk);
+    let pk_bytes = pk.as_bytes().to_vec(); // 32-byte public
+    let sk_bytes = sk.to_bytes().to_vec(); // 32-byte scalar
+
+    prv_attrs.insert(CKA_VALUE, sk_bytes);
+    pub_attrs.insert(CKA_VALUE, pk_bytes.clone());
+    pub_attrs.insert(CKA_PUBLIC_KEY_INFO, build_x25519_spki(&pk_bytes));
+
+    // PKCS#11 v3.2 §6.7 — CKA_EC_PARAMS carries the DER OID for id-X25519
+    // (RFC 8410, 1.3.101.110 = 06 03 2b 65 6e). Same convention as the FFI arm.
+    let oid_x25519: Vec<u8> = vec![0x06, 0x03, 0x2b, 0x65, 0x6e];
+    pub_attrs.insert(CKA_EC_PARAMS, oid_x25519.clone());
+    prv_attrs.insert(CKA_EC_PARAMS, oid_x25519);
+
+    // CKA_EC_POINT — DER OCTET STRING wrapping the raw 32-byte public key.
+    let mut ec_point = Vec::with_capacity(2 + pk_bytes.len());
+    ec_point.push(0x04u8); // OCTET STRING tag
+    ec_point.push(pk_bytes.len() as u8); // 0x20 = 32
+    ec_point.extend_from_slice(&pk_bytes);
+    pub_attrs.insert(CKA_EC_POINT, ec_point);
 
     insert_id_and_label(&mut pub_attrs, cka_id, label);
     insert_id_and_label(&mut prv_attrs, cka_id, label);
@@ -1860,6 +1938,27 @@ mod tests {
         assert_eq!(get_object_value(pub_h).unwrap().len(), 32, "Ed25519 encoded point");
         assert_eq!(get_object_algo_family(prv_h), ALGO_EDDSA, "tagged EdDSA, not ECDH/ECDSA");
         assert_eq!(get_object_attr_u32(pub_h, CKA_KEY_TYPE), Some(CKK_EC_EDWARDS));
+        close_session(session).unwrap();
+    }
+
+    /// X25519 keygen: 32-byte scalar + 32-byte public point, tagged
+    /// `ALGO_ECDH_X25519`, `CKK_EC_MONTGOMERY`, and — critically for the hybrid
+    /// KEM — the private key is NON-EXTRACTABLE / sensitive (its scalar never
+    /// leaves the HSM). Parallels the FFI `CKM_EC_MONTGOMERY_KEY_PAIR_GEN` arm.
+    #[test]
+    fn x25519_keygen_lengths_family_and_non_extractable() {
+        use crate::state::{get_object_algo_family, get_object_attr_bytes, get_object_attr_u32, get_object_value};
+        let _guard = test_lock::acquire();
+        let session = fresh_session();
+        let (pub_h, prv_h) = generate_x25519_keypair(session, b"\x01", "x25519-1").unwrap();
+        assert_eq!(get_object_value(prv_h).unwrap().len(), 32, "X25519 scalar");
+        assert_eq!(get_object_value(pub_h).unwrap().len(), 32, "X25519 public point");
+        assert_eq!(get_object_algo_family(prv_h), ALGO_ECDH_X25519, "tagged X25519 ECDH");
+        assert_eq!(get_object_attr_u32(prv_h, CKA_KEY_TYPE), Some(CKK_EC_MONTGOMERY));
+        // The security-critical properties for hybrid-KEM use (store_bool encodes
+        // a single 0x00/0x01 byte):
+        assert_eq!(get_object_attr_bytes(prv_h, CKA_EXTRACTABLE), Some(vec![0x00]), "non-extractable");
+        assert_eq!(get_object_attr_bytes(prv_h, CKA_SENSITIVE), Some(vec![0x01]), "sensitive");
         close_session(session).unwrap();
     }
 
