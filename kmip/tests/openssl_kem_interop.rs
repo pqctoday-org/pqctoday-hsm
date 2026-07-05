@@ -68,6 +68,25 @@ fn tmpdir(tag: &str) -> PathBuf {
     d
 }
 
+/// Whether the `openssl` CLI on PATH supports ML-KEM-768 (requires OpenSSL
+/// 3.5+; the container this was developed against has 3.5.6). CI's plain
+/// `ubuntu-24.04` runner (the "Rust Tests" job, unlike the C++ jobs which
+/// build OpenSSL 3.6 from source) ships the distro default (3.0.13), which
+/// predates ML-KEM entirely — `genpkey -algorithm ML-KEM-768` fails with
+/// "unsupported...Global default library context". Interop tests degrade
+/// gracefully (skip, not fail) in an environment lacking the capability
+/// they're testing, rather than hard-failing CI on an unrelated OpenSSL
+/// version gap.
+fn openssl_supports_mlkem768() -> bool {
+    let dir = std::env::temp_dir();
+    Command::new("openssl")
+        .args(["genpkey", "-algorithm", "ML-KEM-768", "-out", "/dev/null"])
+        .current_dir(&dir)
+        .output()
+        .map(|out| out.status.success())
+        .unwrap_or(false)
+}
+
 /// Run `openssl <args>` in `dir`, panicking with stderr on failure.
 fn ossl(dir: &PathBuf, args: &[&str]) {
     let out = Command::new("openssl")
@@ -135,6 +154,10 @@ fn register_key(
 /// byte-interoperable with OpenSSL's decapsulation.
 #[test]
 fn mlkem768_our_encap_openssl_decap() {
+    if !openssl_supports_mlkem768() {
+        eprintln!("skipping: openssl CLI on PATH has no ML-KEM-768 support (needs OpenSSL 3.5+)");
+        return;
+    }
     let _g = engine_test_lock();
     let dir = tmpdir("d1");
     let d = deps();
@@ -174,6 +197,10 @@ fn mlkem768_our_encap_openssl_decap() {
 #[test]
 fn mlkem768_openssl_encap_our_decap() {
     use ml_kem::{EncodedSizeUser, KemCore};
+    if !openssl_supports_mlkem768() {
+        eprintln!("skipping: openssl CLI on PATH has no ML-KEM-768 support (needs OpenSSL 3.5+)");
+        return;
+    }
     let _g = engine_test_lock();
     let dir = tmpdir("d2");
     let d = deps();
@@ -229,6 +256,10 @@ fn mlkem768_openssl_encap_our_decap() {
 /// order, AND the shared-secret combiner order — all against OpenSSL.
 #[test]
 fn x25519mlkem768_our_encap_openssl_component_decap() {
+    if !openssl_supports_mlkem768() {
+        eprintln!("skipping: openssl CLI on PATH has no ML-KEM-768 support (needs OpenSSL 3.5+)");
+        return;
+    }
     let _g = engine_test_lock();
     let dir = tmpdir("h1");
     let d = deps();
@@ -296,6 +327,10 @@ fn x25519mlkem768_our_encap_openssl_component_decap() {
 /// combiner order).
 #[test]
 fn x25519mlkem768_openssl_component_encap_our_decap() {
+    if !openssl_supports_mlkem768() {
+        eprintln!("skipping: openssl CLI on PATH has no ML-KEM-768 support (needs OpenSSL 3.5+)");
+        return;
+    }
     let _g = engine_test_lock();
     let dir = tmpdir("h2");
     let d = deps();
