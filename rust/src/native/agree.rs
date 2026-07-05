@@ -57,6 +57,13 @@ pub fn ecdh_agree(_session: u32, priv_handle: u32, peer_public: &[u8]) -> Result
             let ss = p384::ecdh::diffie_hellman(secret.to_nonzero_scalar(), peer.as_affine());
             Ok(ss.raw_secret_bytes().to_vec())
         }
+        // ── NIST P-521 (66-byte scalar) ─────────────────────────────────────
+        (CKK_EC, 66) => {
+            let secret = p521::SecretKey::from_slice(&scalar).map_err(|_| CKR_KEY_HANDLE_INVALID)?;
+            let peer = p521::PublicKey::from_sec1_bytes(peer_public).map_err(|_| CKR_ARGUMENTS_BAD)?;
+            let ss = p521::ecdh::diffie_hellman(secret.to_nonzero_scalar(), peer.as_affine());
+            Ok(ss.raw_secret_bytes().to_vec())
+        }
         _ => Err(CKR_KEY_TYPE_INCONSISTENT),
     }
 }
@@ -113,6 +120,15 @@ mod tests {
         symmetric(
             |s, id| generate_ecdh_keypair(s, EccCurve::P256, id, "p").unwrap(),
             |h| get_ec_point_sec1(h).unwrap(), // NIST public is SEC1
+        );
+    }
+
+    #[test]
+    fn p521_agreement_is_symmetric() {
+        let _g = test_lock::acquire();
+        symmetric(
+            |s, id| generate_ecdh_keypair(s, EccCurve::P521, id, "p").unwrap(),
+            |h| get_ec_point_sec1(h).unwrap(),
         );
     }
 
