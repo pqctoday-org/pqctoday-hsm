@@ -89,9 +89,11 @@ pub fn concatenate_data(session: u32, base: u32, data: &[u8]) -> Result<u32, CkR
 /// new generic-secret key whose value is `SHAx(base.CKA_VALUE)`, left-
 /// truncated to `out_len` bytes when supplied (`None` keeps the full digest).
 ///
-/// The hash-second-step for concat-then-hash combiners (SSH: SHA-512 of the
-/// concatenation; X-Wing: SHA3-256 of the transcript). `mech` selects the
-/// digest; any non-digest-derivation mechanism → `CKR_MECHANISM_INVALID`.
+/// The hash-second-step for concat-then-hash combiners (SSH
+/// `mlkem768x25519-sha256`: SHA-256 of `ss_mlkem ‖ ss_x25519`, verified from
+/// the OpenSSH source; X-Wing: SHA3-256 of `ss_M ‖ ss_X ‖ ct_X ‖ pk_X ‖ label`,
+/// verified from draft-connolly-cfrg-xwing-kem). `mech` selects the digest;
+/// any non-digest-derivation mechanism → `CKR_MECHANISM_INVALID`.
 /// The base key's value is read in-HSM and never leaves.
 ///
 /// **Pre-condition**: `session` valid R/W; `base` a secret key with a value.
