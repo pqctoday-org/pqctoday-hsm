@@ -980,4 +980,40 @@ mod encode_ttlv_tests {
         }
         assert!(checked > 0, "no .bin fixtures found under {}", dir.display());
     }
+
+    /// Same round-trip, against the much larger "stubbed" tier — every
+    /// individual Request/ResponseMessage from the full 102-file OASIS
+    /// corpus (1234 messages), with `$`-placeholders replaced by neutral
+    /// stub values (not just the 124 already-placeholder-free "pristine"
+    /// ones) — broader structural coverage of the wire format than the
+    /// pristine-only check above.
+    #[test]
+    fn round_trips_every_stubbed_corpus_fixture() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../kmip/conformance/oasis_corpus_bytes/stubbed");
+        let mut checked = 0;
+        let mut failures: Vec<String> = Vec::new();
+        for entry in std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("read {}: {e}", dir.display())) {
+            let path = entry.expect("dir entry").path();
+            if path.extension().and_then(|e| e.to_str()) != Some("bin") {
+                continue;
+            }
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+            let tree_json = decode_ttlv(&bytes);
+            match encode_ttlv(&tree_json) {
+                Ok(re_encoded) if re_encoded == bytes => {}
+                Ok(_) => failures.push(format!("{name}: byte mismatch")),
+                Err(e) => failures.push(format!("{name}: encode_ttlv failed: {e:?}")),
+            }
+            checked += 1;
+        }
+        assert!(checked > 0, "no .bin fixtures found under {}", dir.display());
+        assert!(
+            failures.is_empty(),
+            "{}/{checked} stubbed fixtures failed round-trip:\n{}",
+            failures.len(),
+            failures.join("\n")
+        );
+    }
 }
