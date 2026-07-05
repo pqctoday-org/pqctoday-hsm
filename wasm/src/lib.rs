@@ -72,15 +72,33 @@ pub struct KmipPlayground {
 #[wasm_bindgen]
 impl KmipPlayground {
     /// Boot a fresh control plane: a `softhsmrustv3` token + user session on
-    /// slot 0 (real crypto), the built-in permissive policy wired to the audit
-    /// ring (so Plane-1 decisions are visible), and a volatile `MemoryStore`.
+    /// `slot` (real crypto; omitted/`undefined` → slot 0, the single-tab
+    /// default every existing caller uses), the built-in permissive policy
+    /// wired to the audit ring (so Plane-1 decisions are visible), and a
+    /// volatile `MemoryStore`.
+    ///
+    /// The engine's token/slot storage is a `HashMap<u32, TokenState>`
+    /// (`rust/src/state.rs`), not a single fixed slot — so a second
+    /// `KmipPlayground` in the SAME wasm module instance (e.g. the OASIS
+    /// corpus replay booting one engine per test) needs its own slot;
+    /// reusing slot 0 while an earlier instance's session on it is still
+    /// open fails bootstrap (confirmed empirically: `CK_RV=0x000000b6`).
+    /// The engine boots single-slot (only slot 0 pre-registered) —
+    /// `state::ensure_slot` is "the multi-slot configuration surface"
+    /// (its own doc comment) that brings a new slot online before
+    /// `C_InitToken` will accept it; skipping this for a non-zero slot
+    /// fails with `CKR_SLOT_ID_INVALID` (confirmed empirically).
     #[wasm_bindgen(constructor)]
-    pub fn new() -> Result<KmipPlayground, JsError> {
+    pub fn new(slot: Option<u32>) -> Result<KmipPlayground, JsError> {
         console_error_panic_hook::set_once();
+        let slot = slot.unwrap_or(0);
+        if slot != 0 {
+            softhsmrustv3::state::ensure_slot(slot);
+        }
 
         // Plane 3 — bootstrap the engine token + user session (real crypto).
         let session = softhsmrustv3::native::session::bootstrap_default_token(
-            0, "so-pin", "1234", "pqctoday-kmip",
+            slot, "so-pin", "1234", "pqctoday-kmip",
         )
         .map_err(|rv| JsError::new(&format!("engine bootstrap failed: CK_RV=0x{rv:08x}")))?;
 
