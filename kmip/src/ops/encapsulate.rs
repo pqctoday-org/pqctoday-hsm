@@ -130,16 +130,14 @@ pub fn encapsulate(
                 KmipError::permission_denied(human),
             ));
         }
-        crate::policy::Decision::RekeyAndProceed { .. } => {
-            return Err(fail_err(
-                deps,
-                correlation_id,
-                "Encapsulate",
-                KmipError::failed(
-                    ResultReason::OperationNotSupported,
-                    "Encapsulate: policy requires rekey, which is not supported inline".to_string(),
-                ),
-            ));
+        crate::policy::Decision::RekeyAndProceed { new_algorithm, .. } => {
+            // Crypto agility on the KEM path (Phase 5): the policy substitutes
+            // this key-establishment key's algorithm (X25519/X448 → ML-KEM, or
+            // → a hybrid KEM). Generate the replacement KEM key pair, deactivate
+            // + supersede the old, re-issue the Encapsulate against the new
+            // public key. Cross-primitive but same op — which is exactly why
+            // the classical KEM is exposed DHKEM-style through Encapsulate.
+            return rekey_and_encapsulate(deps, &req, &obj, &new_algorithm, correlation_id);
         }
     }
 
@@ -167,7 +165,7 @@ pub fn encapsulate(
         emit_pkcs11(deps, correlation_id, "soft::dh_kem_encapsulate", None, 0, "CKR_OK");
         let ss_uid = store_shared_secret(deps, obj.algorithm, enc.shared_secret)?;
         emit_success(deps, correlation_id, "Encapsulate");
-        return Ok(EncapsulateResponse { uid: ss_uid, data: enc.ciphertext });
+        return Ok(EncapsulateResponse { uid: ss_uid, data: enc.ciphertext, rekeyed: None });
     }
 
     // K6 — hybrid KEM: compose ML-KEM-768 + classical ECDH in-process against
@@ -191,7 +189,7 @@ pub fn encapsulate(
         emit_pkcs11(deps, correlation_id, "soft::hybrid_kem_encapsulate", None, 0, "CKR_OK");
         let ss_uid = store_shared_secret(deps, obj.algorithm, enc.shared_secret)?;
         emit_success(deps, correlation_id, "Encapsulate");
-        return Ok(EncapsulateResponse { uid: ss_uid, data: enc.ciphertext });
+        return Ok(EncapsulateResponse { uid: ss_uid, data: enc.ciphertext, rekeyed: None });
     }
 
     let mech = obj.algorithm.to_pkcs11_mech(PkcsOp::Encrypt).ok_or_else(|| {
@@ -288,11 +286,57 @@ pub fn encapsulate(
 
     emit_success(deps, correlation_id, "Encapsulate");
 
-    Ok(EncapsulateResponse { uid: ss_uid, data: ciphertext })
+    Ok(EncapsulateResponse { uid: ss_uid, data: ciphertext, rekeyed: None })
 }
 
 pub(crate) fn is_ml_kem(a: KmipAlgorithm) -> bool {
     matches!(a, KmipAlgorithm::MlKem512 | KmipAlgorithm::MlKem768 | KmipAlgorithm::MlKem1024)
+}
+
+/// Transparent KEM auto-rekey (crypto agility, Phase 5) for the Encapsulate
+/// path — X25519/X448/ECDH → ML-KEM (or a hybrid KEM). Generate the
+/// replacement key-establishment pair (Name copied), deactivate + supersede
+/// the old, re-issue the Encapsulate against the new public key, stamp the
+/// response's `rekeyed`. Cross-primitive migration, single op.
+fn rekey_and_encapsulate(
+    deps: &Deps,
+    req: &EncapsulateRequest,
+    old: &ObjectRecord,
+    new_algorithm: &str,
+    correlation_id: &str,
+) -> Result<EncapsulateResponse> {
+    use crate::kmip30::UsageMask;
+
+    // 1+2. Replacement KEM key pair (Name carried over) + Activate both halves.
+    let pair = super::agility::generate_replacement_pair(
+        deps,
+        old,
+        new_algorithm,
+        UsageMask::ENCRYPT | UsageMask::DECRYPT | UsageMask::KEY_AGREEMENT,
+        "CreateKeyPair:KeyAgreement",
+        correlation_id,
+    )
+    .map_err(|e| fail_err(deps, correlation_id, "Encapsulate", e))?;
+
+    // 3. Deactivate + supersede the old key.
+    super::agility::supersede_old(deps, old, &pair.private_uid, new_algorithm, correlation_id)?;
+
+    // 4. Re-issue the Encapsulate against the migrated PUBLIC key.
+    let mut resp = encapsulate(
+        deps,
+        EncapsulateRequest {
+            uid: pair.public_uid.clone(),
+            input_key_material: req.input_key_material.clone(),
+            cryptographic_parameters: req.cryptographic_parameters.clone(),
+        },
+        correlation_id,
+    )?;
+    resp.rekeyed = Some(crate::kmip30::RekeyInfo {
+        old_uid: old.uid.clone(),
+        new_uid: pair.private_uid,
+        new_public_key_uid: Some(pair.public_uid),
+    });
+    Ok(resp)
 }
 
 /// Montgomery-curve detection for the DHKEM path: X25519/X448 collapse to

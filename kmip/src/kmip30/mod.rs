@@ -67,6 +67,7 @@ pub use ops::{
     PingRequest, PingResponse,
     RecoverRequest, RecoverResponse,
     RegisterRequest, RegisterResponse,
+    RekeyInfo,
     ServerInformation,
     SetAttributeRequest, SetAttributeResponse,
     SignatureValidity,

@@ -38,9 +38,10 @@ use pqctoday_kmip::kmip30::{
     Attribute, BatchErrorContinuationOption, CreateKeyPairRequest, CreateRequest,
     DecapsulateRequest, DecryptRequest, DestroyRequest, EncapsulateRequest, EncryptRequest,
     GetRequest, KmipAlgorithm, LocateRequest, ObjectType, QueryFunction, QueryRequest,
-    RequestBatchItem, RequestHeader, RequestMessage, RequestPayload, ResponseBatchItem,
-    ResponseHeader, ResponseMessage, ResponsePayload, ResultStatus, RevocationReason,
-    RevokeRequest, SignRequest, SignatureVerifyRequest, UsageMask, WireError,
+    ReKeyKeyPairRequest, ReKeyRequest, RequestBatchItem, RequestHeader, RequestMessage,
+    RequestPayload, ResponseBatchItem, ResponseHeader, ResponseMessage, ResponsePayload,
+    ResultStatus, RevocationReason, RevokeRequest, SignRequest, SignatureVerifyRequest, UsageMask,
+    WireError,
 };
 use pqctoday_kmip::ops::{Deps, DepsConfig};
 use pqctoday_kmip::policy::Engine;
@@ -785,6 +786,21 @@ fn build_payload(op: &str, spec: &Json) -> Result<RequestPayload, String> {
             reason: RevocationReason::Unspecified,
         }),
         "Destroy" => RequestPayload::Destroy(DestroyRequest { uid: uid() }),
+        // Substitution-aware rekey (Migration tab "Migrate all remaining"
+        // sweep): the app names only the UID; the active policy decides the
+        // replacement algorithm (like-for-like when it has no substitution).
+        "ReKey" => RequestPayload::ReKey(ReKeyRequest {
+            uid: uid(),
+            offset: None,
+            template_attribute: vec![],
+        }),
+        "ReKeyKeyPair" => RequestPayload::ReKeyKeyPair(ReKeyKeyPairRequest {
+            uid: uid(),
+            offset: None,
+            common_attributes: vec![],
+            private_key_attributes: vec![],
+            public_key_attributes: vec![],
+        }),
         other => return Err(format!("unsupported op '{other}'")),
     })
 }
@@ -891,6 +907,11 @@ fn summarize(payload: &ResponsePayload) -> Json {
         }),
         ResponsePayload::Encapsulate(r) => json!({
             "uid": r.uid, "ciphertextHex": to_hex(&r.data), "ciphertextLen": r.data.len(),
+            "rekeyed": r.rekeyed.as_ref().map(|k| json!({
+                "oldUid": k.old_uid,
+                "newPrivateKeyUid": k.new_uid,
+                "newPublicKeyUid": k.new_public_key_uid,
+            })),
         }),
         ResponsePayload::Decapsulate(r) => json!({ "uid": r.uid }),
         ResponsePayload::Encrypt(r) => json!({
@@ -898,6 +919,10 @@ fn summarize(payload: &ResponsePayload) -> Json {
             "ciphertextHex": to_hex(&r.ciphertext),
             "tagHex": r.authenticated_encryption_tag.as_ref().map(|t| to_hex(t)),
             "ivHex": r.iv_counter_nonce.as_ref().map(|t| to_hex(t)),
+            "rekeyed": r.rekeyed.as_ref().map(|k| json!({
+                "oldUid": k.old_uid,
+                "newUid": k.new_uid,
+            })),
         }),
         ResponsePayload::Decrypt(r) => json!({ "uid": r.uid, "plaintextHex": to_hex(&r.data) }),
         ResponsePayload::Locate(r) => json!({ "uids": r.uids }),
@@ -914,6 +939,13 @@ fn summarize(payload: &ResponsePayload) -> Json {
         }),
         ResponsePayload::Revoke(r) => json!({ "uid": r.uid, "state": format!("{:?}", r.state) }),
         ResponsePayload::Destroy(r) => json!({ "uid": r.uid, "state": format!("{:?}", r.state) }),
+        // Sweep-driven rekey: the replacement UID(s). The new algorithm is read
+        // from the keystore (list_objects) after the op — the response carries
+        // only the KMIP §6.1.51/52 UIDs.
+        ResponsePayload::ReKey(r) => json!({ "uid": r.uid }),
+        ResponsePayload::ReKeyKeyPair(r) => json!({
+            "privateKeyUid": r.private_key_uid, "publicKeyUid": r.public_key_uid,
+        }),
         _ => json!({}),
     }
 }

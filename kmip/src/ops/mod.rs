@@ -41,6 +41,7 @@
 //! `Decrypt` for pre-WD19 clients (the handler branches on key algorithm).
 
 pub mod activate;
+pub mod agility;
 pub mod allocation_and_config;
 pub mod attribute_mutate;
 pub mod create;

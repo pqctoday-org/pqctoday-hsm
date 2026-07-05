@@ -669,6 +669,25 @@ pub struct EncryptResponse {
     /// can chain the next request. `None` for single-part ops and on
     /// the final part.
     pub correlation_value: Option<Vec<u8>>,
+    /// Set when the active policy triggered a transparent crypto-agility
+    /// rekey during this Encrypt (`Decision::RekeyAndProceed` — AES-128 →
+    /// AES-256): `uid` above is the freshly-minted replacement key. Internal-
+    /// only, never encoded onto the wire. `None` on the ordinary path.
+    pub rekeyed: Option<RekeyInfo>,
+}
+
+/// Crypto-agility rekey provenance surfaced on the response of a rekey-on-use
+/// op (Encrypt / Encapsulate). The Sign path uses [`SignRekeyInfo`] (kept
+/// distinct so the dispatcher's §9.5 Undo wave and wire encoders are
+/// untouched). `new_public_key_uid` is set for asymmetric replacements.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RekeyInfo {
+    /// The original key's UID — now Deactivated + superseded.
+    pub old_uid: String,
+    /// The replacement's primary UID (symmetric key, or the private key of a pair).
+    pub new_uid: String,
+    /// The replacement public-key UID for an asymmetric rekey; `None` for symmetric.
+    pub new_public_key_uid: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -729,6 +748,11 @@ pub struct EncapsulateResponse {
     pub uid: String,
     /// `Data` (0x4200C2, ByteString) — the ML-KEM ciphertext / encapsulation.
     pub data: Vec<u8>,
+    /// Set when the active policy triggered a transparent crypto-agility rekey
+    /// during this Encapsulate (X25519/X448 → ML-KEM). The `uid` above is the
+    /// shared secret from the migrated key; `rekeyed.new_uid` is the new KEM
+    /// private key. Internal-only, never on the wire. `None` otherwise.
+    pub rekeyed: Option<RekeyInfo>,
 }
 
 /// `Decapsulate` request (KMIP 3.0 WD19) — the private/decapsulation key
