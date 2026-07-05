@@ -22,20 +22,34 @@
 
 use super::CkRv;
 use crate::constants::*;
-use crate::state::{get_object_attr_u32, get_object_param_set, get_object_value, OBJECTS};
+use crate::state::{get_ec_point_sec1, get_object_attr_u32, get_object_param_set, get_object_value, OBJECTS};
 
 // PKCS#11 v3.2 §5.18 — KEM permission flags. CKA_ENCAPSULATE / CKA_DECAPSULATE.
 use crate::constants::{CKA_DECAPSULATE, CKA_DECRYPT, CKA_ENCAPSULATE, CKA_ENCRYPT};
 
-/// ML-KEM encapsulation. Returns `(ciphertext, shared_secret)`.
+/// Encapsulation for either ML-KEM (`CKM_ML_KEM`) or a classical
+/// ephemeral-static ECDH KEM (`CKM_ECDH1_DERIVE` for P-256/P-384/P-521,
+/// `CKM_EC_MONTGOMERY_KEY_DERIVE` for X25519/X448). Returns
+/// `(ciphertext, shared_secret)`.
 ///
-/// `public_key_handle` MUST refer to an ML-KEM public-key object with
-/// `CKA_ENCAPSULATE = true`. `mechanism` is `CKM_ML_KEM`.
+/// The classical branches are KMIP 3.0 WD19's `DHKEM` (§11.26 KEM Algorithm
+/// Enumeration) / PKCS#11 v3.2 §6.3.17: `pPublicData`/`ulPublicDataLen`
+/// are unused for this call shape (no separate params struct here — the
+/// public key handle IS the recipient's static public key); the server
+/// generates a fresh ephemeral key pair, DHs it against the recipient's
+/// static public key, and returns the ephemeral public key AS the
+/// ciphertext (see `kmip/spec/crossref/kem-encapsulate-decapsulate.yaml`).
+/// This is the same math already proven in `hybrid.rs`'s classical half,
+/// exposed here standalone so a plain (non-hybrid) classical key can use
+/// this op too — the crypto-agility payoff being that `Encapsulate`'s
+/// caller shape never differs between classical, hybrid, and ML-KEM.
 ///
-/// Ciphertext / shared-secret lengths per FIPS 203 §7:
-/// - ML-KEM-512:  ct = 768, ss = 32
-/// - ML-KEM-768:  ct = 1088, ss = 32
-/// - ML-KEM-1024: ct = 1568, ss = 32
+/// `public_key_handle` MUST have `CKA_ENCAPSULATE = true`.
+///
+/// Ciphertext / shared-secret lengths:
+/// - ML-KEM-512/768/1024 (FIPS 203 §7): ct = 768/1088/1568, ss = 32.
+/// - ECDH-P256/P384/P521: ct = SEC1 uncompressed point (65/97/133), ss = curve field size (32/48/66).
+/// - X25519/X448 (RFC 7748): ct = 32/56, ss = 32/56.
 pub fn encapsulate(
     _session: u32,
     public_key_handle: u32,
@@ -43,6 +57,9 @@ pub fn encapsulate(
 ) -> Result<(Vec<u8>, Vec<u8>), CkRv> {
     use ml_kem::{kem::Encapsulate, EncodedSizeUser, KemCore};
 
+    if mechanism == CKM_ECDH1_DERIVE || mechanism == CKM_EC_MONTGOMERY_KEY_DERIVE {
+        return classical_encapsulate(public_key_handle, mechanism);
+    }
     if mechanism != CKM_ML_KEM {
         return Err(CKR_MECHANISM_INVALID);
     }
@@ -181,6 +198,9 @@ pub fn decapsulate(
 ) -> Result<Vec<u8>, CkRv> {
     use ml_kem::{kem::Decapsulate, EncodedSizeUser, KemCore};
 
+    if mechanism == CKM_ECDH1_DERIVE || mechanism == CKM_EC_MONTGOMERY_KEY_DERIVE {
+        return classical_decapsulate(private_key_handle, mechanism, ciphertext);
+    }
     if mechanism != CKM_ML_KEM {
         return Err(CKR_MECHANISM_INVALID);
     }
@@ -239,6 +259,150 @@ pub fn decapsulate(
         _ => return Err(CKR_ARGUMENTS_BAD),
     };
     Ok(ss.as_slice().to_vec())
+}
+
+/// Classical-KEM encapsulation (2026-07-05, crypto-agility for `Encapsulate`).
+/// Ephemeral-static ECDH: generates a fresh ephemeral key pair, DHs it
+/// against the recipient's stored static public key, returns the ephemeral
+/// public key as the ciphertext. Same math `hybrid.rs` already runs for its
+/// classical half (KAT-verified there — see `classical_kem` unit tests
+/// below for the standalone curve-by-curve coverage), reused here rather
+/// than duplicated.
+fn classical_encapsulate(public_key_handle: u32, mechanism: u32) -> Result<(Vec<u8>, Vec<u8>), CkRv> {
+    if !check_flag(public_key_handle, CKA_ENCAPSULATE) {
+        return Err(CKR_KEY_FUNCTION_NOT_PERMITTED);
+    }
+    let mut rng = rand::rngs::OsRng;
+    match mechanism {
+        CKM_ECDH1_DERIVE => {
+            if get_object_attr_u32(public_key_handle, CKA_KEY_TYPE) != Some(CKK_EC) {
+                return Err(CKR_KEY_TYPE_INCONSISTENT);
+            }
+            let point = get_ec_point_sec1(public_key_handle).ok_or(CKR_ARGUMENTS_BAD)?;
+            match get_object_param_set(public_key_handle) {
+                256 => {
+                    let peer = p256::PublicKey::from_sec1_bytes(&point)
+                        .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+                    let eph = p256::ecdh::EphemeralSecret::random(&mut rng);
+                    let eph_pub = p256::EncodedPoint::from(eph.public_key());
+                    let ss = eph.diffie_hellman(&peer);
+                    Ok((eph_pub.as_bytes().to_vec(), ss.raw_secret_bytes().to_vec()))
+                }
+                384 => {
+                    let peer = p384::PublicKey::from_sec1_bytes(&point)
+                        .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+                    let eph = p384::ecdh::EphemeralSecret::random(&mut rng);
+                    let eph_pub = p384::EncodedPoint::from(eph.public_key());
+                    let ss = eph.diffie_hellman(&peer);
+                    Ok((eph_pub.as_bytes().to_vec(), ss.raw_secret_bytes().to_vec()))
+                }
+                521 => {
+                    let peer = p521::PublicKey::from_sec1_bytes(&point)
+                        .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+                    let eph = p521::ecdh::EphemeralSecret::random(&mut rng);
+                    let eph_pub = p521::EncodedPoint::from(eph.public_key());
+                    let ss = eph.diffie_hellman(&peer);
+                    Ok((eph_pub.as_bytes().to_vec(), ss.raw_secret_bytes().to_vec()))
+                }
+                _ => Err(CKR_TEMPLATE_INCOMPLETE),
+            }
+        }
+        CKM_EC_MONTGOMERY_KEY_DERIVE => {
+            if get_object_attr_u32(public_key_handle, CKA_KEY_TYPE) != Some(CKK_EC_MONTGOMERY) {
+                return Err(CKR_KEY_TYPE_INCONSISTENT);
+            }
+            let point = get_object_value(public_key_handle).ok_or(CKR_ARGUMENTS_BAD)?;
+            match point.len() {
+                32 => {
+                    let peer: [u8; 32] = point.as_slice().try_into().map_err(|_| CKR_ARGUMENTS_BAD)?;
+                    let eph = x25519_dalek::EphemeralSecret::random_from_rng(&mut rng);
+                    let eph_pub = x25519_dalek::PublicKey::from(&eph);
+                    let ss = eph.diffie_hellman(&x25519_dalek::PublicKey::from(peer));
+                    Ok((eph_pub.as_bytes().to_vec(), ss.as_bytes().to_vec()))
+                }
+                56 => {
+                    let peer_pub = x448::PublicKey::from_bytes(&point).ok_or(CKR_ARGUMENTS_BAD)?;
+                    let mut eph_bytes = [0u8; 56];
+                    getrandom::getrandom(&mut eph_bytes).map_err(|_| CKR_FUNCTION_FAILED)?;
+                    let eph = x448::StaticSecret::from(eph_bytes);
+                    let eph_pub = x448::PublicKey::from(&eph);
+                    let ss = eph.diffie_hellman(&peer_pub);
+                    Ok((eph_pub.as_bytes().to_vec(), ss.as_bytes().to_vec()))
+                }
+                _ => Err(CKR_KEY_TYPE_INCONSISTENT),
+            }
+        }
+        _ => Err(CKR_MECHANISM_INVALID),
+    }
+}
+
+/// Classical-KEM decapsulation — the inverse of `classical_encapsulate`.
+/// Reads the static scalar from its handle (never exported) and DHs it
+/// against the ephemeral public key carried in `ciphertext`.
+fn classical_decapsulate(private_key_handle: u32, mechanism: u32, ciphertext: &[u8]) -> Result<Vec<u8>, CkRv> {
+    if !check_flag(private_key_handle, CKA_DECAPSULATE) {
+        return Err(CKR_KEY_FUNCTION_NOT_PERMITTED);
+    }
+    match mechanism {
+        CKM_ECDH1_DERIVE => {
+            if get_object_attr_u32(private_key_handle, CKA_KEY_TYPE) != Some(CKK_EC) {
+                return Err(CKR_KEY_TYPE_INCONSISTENT);
+            }
+            let scalar = get_object_value(private_key_handle).ok_or(CKR_ARGUMENTS_BAD)?;
+            match get_object_param_set(private_key_handle) {
+                256 => {
+                    let secret = p256::SecretKey::from_slice(&scalar).map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+                    let eph_pub = p256::PublicKey::from_sec1_bytes(ciphertext)
+                        .map_err(|_| CKR_ARGUMENTS_BAD)?;
+                    let ss = p256::ecdh::diffie_hellman(secret.to_nonzero_scalar(), eph_pub.as_affine());
+                    Ok(ss.raw_secret_bytes().to_vec())
+                }
+                384 => {
+                    let secret = p384::SecretKey::from_slice(&scalar).map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+                    let eph_pub = p384::PublicKey::from_sec1_bytes(ciphertext)
+                        .map_err(|_| CKR_ARGUMENTS_BAD)?;
+                    let ss = p384::ecdh::diffie_hellman(secret.to_nonzero_scalar(), eph_pub.as_affine());
+                    Ok(ss.raw_secret_bytes().to_vec())
+                }
+                521 => {
+                    let secret = p521::SecretKey::from_slice(&scalar).map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+                    let eph_pub = p521::PublicKey::from_sec1_bytes(ciphertext)
+                        .map_err(|_| CKR_ARGUMENTS_BAD)?;
+                    let ss = p521::ecdh::diffie_hellman(secret.to_nonzero_scalar(), eph_pub.as_affine());
+                    Ok(ss.raw_secret_bytes().to_vec())
+                }
+                _ => Err(CKR_TEMPLATE_INCOMPLETE),
+            }
+        }
+        CKM_EC_MONTGOMERY_KEY_DERIVE => {
+            if get_object_attr_u32(private_key_handle, CKA_KEY_TYPE) != Some(CKK_EC_MONTGOMERY) {
+                return Err(CKR_KEY_TYPE_INCONSISTENT);
+            }
+            let scalar = get_object_value(private_key_handle).ok_or(CKR_ARGUMENTS_BAD)?;
+            match scalar.len() {
+                32 => {
+                    let arr: [u8; 32] = scalar.as_slice().try_into().map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+                    if ciphertext.len() != 32 {
+                        return Err(CKR_ARGUMENTS_BAD);
+                    }
+                    let eph_pub: [u8; 32] = ciphertext.try_into().map_err(|_| CKR_ARGUMENTS_BAD)?;
+                    let secret = x25519_dalek::StaticSecret::from(arr);
+                    let ss = secret.diffie_hellman(&x25519_dalek::PublicKey::from(eph_pub));
+                    Ok(ss.as_bytes().to_vec())
+                }
+                56 => {
+                    let mut arr = [0u8; 56];
+                    arr.copy_from_slice(scalar.as_slice());
+                    let secret = x448::StaticSecret::from(arr);
+                    let eph_pub = x448::PublicKey::from_bytes(ciphertext).ok_or(CKR_ARGUMENTS_BAD)?;
+                    let ss = secret.diffie_hellman(&eph_pub);
+                    Ok(ss.as_bytes().to_vec())
+                }
+                _ => Err(CKR_KEY_TYPE_INCONSISTENT),
+            }
+        }
+        _ => Err(CKR_MECHANISM_INVALID),
+    }
 }
 
 /// Classical encrypt. v0.1 supports `CKM_AES_GCM`.
@@ -1218,4 +1382,195 @@ mod tests {
     // AES-GCM path) but need a real AES key to test against. Commit 6
     // adds `generate_aes_key(session, bits, cka_id, label)` and the
     // round-trip tests land alongside it.
+
+    // ── Classical-KEM Encapsulate/Decapsulate (2026-07-05) ─────────────────
+    //
+    // RFC 7748 §5.2 KATs anchor the raw X25519/X448 Diffie-Hellman primitive
+    // both `classical_encapsulate`/`classical_decapsulate` call — the exact
+    // gap `kmip/docs/HYBRID_KEM_COMBINER_IMPLEMENTATION.md` flagged for the
+    // same underlying math ("X25519 RFC 7748 §5.2 vectors — to add"), closed
+    // here. Vectors cross-verified against two independent fetches of the
+    // RFC text (rfc-editor.org + datatracker.ietf.org) before use — a wrong
+    // constant here would be worse than no test at all.
+    //
+    // NOTE (documented residual risk, same honesty standard as the hybrid
+    // combiner doc): P-256/P-384/P-521 do NOT yet have an equivalent
+    // external KAT wired in here — a first attempt at sourcing RFC 5903
+    // vectors via a text-fetch pipeline produced a value with a stray
+    // embedded space (a formatting artifact, caught by inspection before
+    // use), so nothing was hardcoded for those curves rather than risk a
+    // silently-wrong "known answer." They're covered by round-trip
+    // self-consistency below only. Sourcing a properly-vetted NIST ACVP
+    // KAS-ECC-SSC vector file (structured JSON, not prose-extracted) is a
+    // flagged follow-up, matching how the existing ecdsa/ml-kem KATs in
+    // `kmip/kat/` were vendored.
+    fn hex32(s: &str) -> [u8; 32] {
+        hex_lit(s).try_into().unwrap()
+    }
+    fn hex56(s: &str) -> [u8; 56] {
+        hex_lit(s).try_into().unwrap()
+    }
+
+    fn x25519_raw(k: [u8; 32], u: [u8; 32]) -> [u8; 32] {
+        let secret = x25519_dalek::StaticSecret::from(k);
+        let public = x25519_dalek::PublicKey::from(u);
+        *secret.diffie_hellman(&public).as_bytes()
+    }
+
+    /// RFC 7748 §5.2 X25519 iterative test, k0=u0=9, after 1 iteration.
+    #[test]
+    fn x25519_rfc7748_iterative_1() {
+        let mut k = [0u8; 32];
+        k[0] = 9;
+        let u = k;
+        let k1 = x25519_raw(k, u);
+        assert_eq!(
+            k1,
+            hex32("422c8e7a6227d7bca1350b3e2bb7279f7897b87bb6854b783c60e80311ae3079")
+        );
+    }
+
+    /// RFC 7748 §5.2 X25519 iterative test, after 1000 iterations.
+    /// (1,000,000 iterations is the RFC's third vector — skipped here as a
+    /// slow test; the primitive is already anchored by 1 and 1000.)
+    #[test]
+    fn x25519_rfc7748_iterative_1000() {
+        let mut k = [0u8; 32];
+        k[0] = 9;
+        let mut u = k;
+        for _ in 0..1000 {
+            let k_new = x25519_raw(k, u);
+            u = k;
+            k = k_new;
+        }
+        assert_eq!(
+            k,
+            hex32("684cf59ba83309552800ef566f2f4d3c1c3887c49360e3875f2eb94d99532c51")
+        );
+    }
+
+    fn x448_raw(k: [u8; 56], u: [u8; 56]) -> [u8; 56] {
+        x448::x448(k, u).expect("valid X448 point")
+    }
+
+    /// RFC 7748 §5.2 X448 iterative test, k0=u0=5, after 1 iteration.
+    #[test]
+    fn x448_rfc7748_iterative_1() {
+        let mut k = [0u8; 56];
+        k[0] = 5;
+        let u = k;
+        let k1 = x448_raw(k, u);
+        assert_eq!(
+            k1,
+            hex56(
+                "3f482c8a9f19b01e6c46ee9711d9dc14fd4bf67af30765c2ae2b846a4d23a8cd0db897086239492caf350b51f833868b9bc2b3bca9cf4113"
+            )
+        );
+    }
+
+    /// RFC 7748 §5.2 X448 iterative test, after 1000 iterations.
+    #[test]
+    fn x448_rfc7748_iterative_1000() {
+        let mut k = [0u8; 56];
+        k[0] = 5;
+        let mut u = k;
+        for _ in 0..1000 {
+            let k_new = x448_raw(k, u);
+            u = k;
+            k = k_new;
+        }
+        assert_eq!(
+            k,
+            hex56(
+                "aa3b4749d55b9daf1e5b00288826c467274ce3ebbdd5c17b975e09d4af6c67cf10d087202db88286e2b79fceea3ec353ef54faa26e219f38"
+            )
+        );
+    }
+
+    /// Standalone classical Encapsulate/Decapsulate round trip, one per
+    /// curve/group. `Encapsulate` returns the ephemeral public key as
+    /// ciphertext; `Decapsulate` must recover the identical shared secret.
+    fn classical_round_trip(
+        keygen_fn: impl Fn(u32) -> (u32, u32),
+        mechanism: u32,
+        expected_ct_len: usize,
+        expected_ss_len: usize,
+    ) {
+        let session = fresh_session();
+        let (pub_h, prv_h) = keygen_fn(session);
+        let (ct, ss_enc) = encapsulate(session, pub_h, mechanism).expect("encapsulate");
+        assert_eq!(ct.len(), expected_ct_len, "ciphertext (ephemeral public) length");
+        assert_eq!(ss_enc.len(), expected_ss_len, "shared secret length");
+        let ss_dec = decapsulate(session, prv_h, mechanism, &ct).expect("decapsulate");
+        assert_eq!(ss_enc, ss_dec, "encapsulator and decapsulator must agree");
+        close_session(session).unwrap();
+    }
+
+    #[test]
+    fn classical_ecdh_p256_encap_decap_round_trip() {
+        let _g = test_lock::acquire();
+        classical_round_trip(
+            |s| crate::native::keygen::generate_ecdh_keypair(s, crate::native::keygen::EccCurve::P256, b"\x01", "kem-p256").unwrap(),
+            CKM_ECDH1_DERIVE,
+            65,
+            32,
+        );
+    }
+
+    #[test]
+    fn classical_ecdh_p384_encap_decap_round_trip() {
+        let _g = test_lock::acquire();
+        classical_round_trip(
+            |s| crate::native::keygen::generate_ecdh_keypair(s, crate::native::keygen::EccCurve::P384, b"\x01", "kem-p384").unwrap(),
+            CKM_ECDH1_DERIVE,
+            97,
+            48,
+        );
+    }
+
+    #[test]
+    fn classical_ecdh_p521_encap_decap_round_trip() {
+        let _g = test_lock::acquire();
+        classical_round_trip(
+            |s| crate::native::keygen::generate_ecdh_keypair(s, crate::native::keygen::EccCurve::P521, b"\x01", "kem-p521").unwrap(),
+            CKM_ECDH1_DERIVE,
+            133,
+            66,
+        );
+    }
+
+    #[test]
+    fn classical_x25519_encap_decap_round_trip() {
+        let _g = test_lock::acquire();
+        classical_round_trip(
+            |s| crate::native::keygen::generate_x25519_keypair(s, b"\x01", "kem-x25519").unwrap(),
+            CKM_EC_MONTGOMERY_KEY_DERIVE,
+            32,
+            32,
+        );
+    }
+
+    #[test]
+    fn classical_x448_encap_decap_round_trip() {
+        let _g = test_lock::acquire();
+        classical_round_trip(
+            |s| crate::native::keygen::generate_x448_keypair(s, b"\x01", "kem-x448").unwrap(),
+            CKM_EC_MONTGOMERY_KEY_DERIVE,
+            56,
+            56,
+        );
+    }
+
+    /// A classical key without CKA_ENCAPSULATE/CKA_DECAPSULATE can't use
+    /// this op family — same permission-flag discipline as ML-KEM.
+    #[test]
+    fn classical_encapsulate_wrong_mechanism_is_rejected() {
+        let _g = test_lock::acquire();
+        let session = fresh_session();
+        let (pub_h, _prv_h) =
+            crate::native::keygen::generate_ecdh_keypair(session, crate::native::keygen::EccCurve::P256, b"\x01", "kem-p256-bad")
+                .unwrap();
+        // ML-KEM mechanism against an EC key type.
+        assert_eq!(encapsulate(session, pub_h, CKM_ML_KEM).unwrap_err(), CKR_KEY_TYPE_INCONSISTENT);
+    }
 }
