@@ -71,8 +71,10 @@ CORPUS_DIR = KMIP_ROOT / "conformance/oasis_corpus"
 REPORT_DIR = KMIP_ROOT / "conformance"
 SERVER_BINARY = KMIP_ROOT / "target/release/pqctoday-kmip"
 
-# 12 KMIP ops the dispatcher currently implements. Tests using any other
-# op are auto-skipped with ``OP_UNSUPPORTED``.
+# KMIP ops the dispatcher currently implements (`handle_payload` in
+# `dispatcher/mod.rs` — the single source of truth; re-derive this set from
+# there, not from memory, if the two ever look out of sync). Tests using any
+# other op are auto-skipped with ``OP_UNSUPPORTED``.
 IMPLEMENTED_OPS: set[str] = {
     "Create", "CreateKeyPair", "Get", "Locate",
     "Activate", "Revoke", "Destroy",
@@ -99,6 +101,14 @@ IMPLEMENTED_OPS: set[str] = {
     "RNGRetrieve", "RNGSeed", "PKCS_11",
     # KMIP 3.0 WD19 (PQC interop): ML-KEM encapsulation / decapsulation.
     "Encapsulate", "Decapsulate",
+    # K19-K21 (baseline client-to-server + derive/rekey ops) — added when the
+    # KMIP3.0 browser Commands tab work found this set was 7 ops stale
+    # relative to the dispatcher; e2e-covered in
+    # `kmip/tests/op_coverage_e2e.rs` (these ops aren't in the OASIS corpus,
+    # so this harness never actually exercises them — see that file for
+    # substantive-outcome coverage instead).
+    "GetUsageAllocation", "GetConstraints", "SetDefaults", "SetEndpointRole",
+    "DeriveKey", "ReKey", "ReKeyKeyPair",
 }
 
 

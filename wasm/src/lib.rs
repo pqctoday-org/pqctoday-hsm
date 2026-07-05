@@ -31,7 +31,7 @@ use serde_json::{json, Value as Json};
 use wasm_bindgen::prelude::*;
 
 use pqctoday_kmip::auditlog::{AuditSink, RingSink};
-use pqctoday_kmip::codec::{decode_one, TtlvFrame, Value as Ttlv};
+use pqctoday_kmip::codec::{decode_one, encode_to_vec, Tag, TtlvFrame, Value as Ttlv};
 use pqctoday_kmip::dispatcher::{dispatch, one_off_request};
 use pqctoday_kmip::kmip30::{
     decode_request_message, encode_request_message, encode_response_message, ActivateRequest,
@@ -510,6 +510,110 @@ pub fn decode_ttlv(bytes: &[u8]) -> String {
     frame_json_from_bytes(bytes).to_string()
 }
 
+/// Encode a JSON tree (`{tag, type, value?, children?}` — the exact shape
+/// `decode_ttlv` emits) to KMIP TTLV wire bytes. The inverse of `decode_ttlv`;
+/// lets a caller build an arbitrary request by hand (any of the 66 KMIP 3.0
+/// operations, not just the ones `run_op`'s friendly `build_payload` below
+/// covers) and hand the resulting bytes to `submit`, which dispatches them
+/// through the exact same path a real request takes. Malformed input here is
+/// a caller bug (a hand-built tree or a corpus-port bug), not a KMIP-protocol
+/// outcome, so it throws rather than returning the `{ok:false,...}` JSON
+/// convention `dry_run`/`load_policy` use.
+#[wasm_bindgen]
+pub fn encode_ttlv(tree_json: &str) -> Result<Vec<u8>, JsError> {
+    let node: Json =
+        serde_json::from_str(tree_json).map_err(|e| JsError::new(&format!("invalid tree JSON: {e}")))?;
+    let frame = frame_from_json(&node).map_err(|e| JsError::new(&e))?;
+    Ok(encode_to_vec(&frame))
+}
+
+// ── generic JSON tree ⇄ TTLV frame (encode_ttlv's helpers) ───────────────────
+
+/// Parse one `{tag, type, value?, children?}` node back into a `TtlvFrame` —
+/// the inverse of `frame_json` below. Recurses into `children` for
+/// `Structure` nodes.
+fn frame_from_json(node: &Json) -> Result<TtlvFrame, String> {
+    let tag_str = node
+        .get("tag")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "node missing string \"tag\"".to_string())?;
+    let item_type = node
+        .get("type")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| format!("tag {tag_str} missing string \"type\""))?;
+    let tag = tag_from_hex(tag_str).ok_or_else(|| format!("invalid tag hex '{tag_str}'"))?;
+    let value = value_from_json(item_type, node).map_err(|e| format!("tag {tag_str} ({item_type}): {e}"))?;
+    Ok(TtlvFrame { tag, value })
+}
+
+/// Parse a `"0x420028"` (or bare `"420028"`) hex string into a [`Tag`].
+fn tag_from_hex(s: &str) -> Option<Tag> {
+    let s = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")).unwrap_or(s);
+    u32::from_str_radix(s, 16).ok().and_then(Tag::new)
+}
+
+/// Parse a node's `value` (or, for `Structure`, its `children`) per the
+/// declared `type` name — the 1:1 inverse of `frame_json`'s match arms below.
+fn value_from_json(item_type: &str, node: &Json) -> Result<Ttlv, String> {
+    if item_type == "Structure" {
+        let children = node
+            .get("children")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| "Structure node missing array \"children\"".to_string())?;
+        let frames = children.iter().map(frame_from_json).collect::<Result<Vec<_>, _>>()?;
+        return Ok(Ttlv::Structure(frames));
+    }
+    let value = node.get("value").ok_or_else(|| format!("{item_type} node missing \"value\""))?;
+    match item_type {
+        "Integer" => Ok(Ttlv::Integer(json_i64(value)? as i32)),
+        "LongInteger" => Ok(Ttlv::LongInteger(json_i64(value)?)),
+        "BigInteger" => Ok(Ttlv::BigInteger(json_hex_bytes(value)?)),
+        "Enumeration" => Ok(Ttlv::Enumeration(json_enum_u32(value)?)),
+        "Boolean" => value
+            .as_bool()
+            .map(Ttlv::Boolean)
+            .ok_or_else(|| format!("Boolean value not a bool: {value}")),
+        "TextString" => value
+            .as_str()
+            .map(|s| Ttlv::TextString(s.to_string()))
+            .ok_or_else(|| format!("TextString value not a string: {value}")),
+        "ByteString" => Ok(Ttlv::ByteString(json_hex_bytes(value)?)),
+        "DateTime" => Ok(Ttlv::DateTime(json_i64(value)?)),
+        "Interval" => Ok(Ttlv::Interval(json_i64(value)? as u32)),
+        "DateTimeExtended" => Ok(Ttlv::DateTimeExtended(json_i64(value)?)),
+        other => Err(format!("unknown TTLV item type '{other}'")),
+    }
+}
+
+/// Numeric value, accepting either sign JSON encodes it with (`serde_json`
+/// picks `u64` for non-negative numbers, `i64` otherwise).
+fn json_i64(v: &Json) -> Result<i64, String> {
+    v.as_i64()
+        .or_else(|| v.as_u64().map(|u| u as i64))
+        .ok_or_else(|| format!("expected an integer, got {v}"))
+}
+
+/// Hex-string value (ByteString/BigInteger — same convention `to_hex` below
+/// produces: lowercase, no `0x` prefix).
+fn json_hex_bytes(v: &Json) -> Result<Vec<u8>, String> {
+    let s = v.as_str().ok_or_else(|| format!("expected a hex string, got {v}"))?;
+    from_hex(s).ok_or_else(|| format!("invalid hex string '{s}'"))
+}
+
+/// Enumeration value — accepts either the `"0xNNNNNNNN"` hex string
+/// `frame_json` emits (round-tripping a decoded tree) or a bare JSON number
+/// (the natural form for a hand-built request template).
+fn json_enum_u32(v: &Json) -> Result<u32, String> {
+    if let Some(n) = v.as_u64() {
+        return Ok(n as u32);
+    }
+    if let Some(s) = v.as_str() {
+        let s = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")).unwrap_or(s);
+        return u32::from_str_radix(s, 16).map_err(|_| format!("invalid enumeration hex '{s}'"));
+    }
+    Err(format!("expected an enumeration (number or hex string), got {v}"))
+}
+
 // ── request builders ─────────────────────────────────────────────────────────
 
 fn build_payload(op: &str, spec: &Json) -> Result<RequestPayload, String> {
@@ -819,5 +923,43 @@ fn wire_error_response(err: &WireError) -> ResponseMessage {
             result_message: Some(format!("KMIP wire decode failed: {err}")),
             payload: None,
         }],
+    }
+}
+
+#[cfg(test)]
+mod encode_ttlv_tests {
+    use super::*;
+    use std::path::Path;
+
+    /// Round-trip every OASIS "pristine" (placeholder-free) corpus fixture
+    /// through `decode_ttlv` → `encode_ttlv` → byte-exact match. These are
+    /// real, checked-in KMIP 3.0 request bytes (the same fixtures the native
+    /// `oasis_request_roundtrip` encoder-fidelity test uses) — free, strong
+    /// regression coverage for the new generic encoder. Runs under plain
+    /// `cargo test` (this crate builds as `rlib` for exactly this reason —
+    /// see the `[lib]` comment in `Cargo.toml`), no wasm host needed.
+    #[test]
+    fn round_trips_every_pristine_corpus_fixture() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../kmip/conformance/oasis_corpus_bytes/pristine");
+        let mut checked = 0;
+        for entry in std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("read {}: {e}", dir.display())) {
+            let path = entry.expect("dir entry").path();
+            if path.extension().and_then(|e| e.to_str()) != Some("bin") {
+                continue;
+            }
+            let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+            let tree_json = decode_ttlv(&bytes);
+            let re_encoded = encode_ttlv(&tree_json)
+                .unwrap_or_else(|e| panic!("encode_ttlv({}) failed: {e:?}", path.display()));
+            assert_eq!(
+                re_encoded,
+                bytes,
+                "round-trip mismatch for {}",
+                path.file_name().unwrap().to_string_lossy()
+            );
+            checked += 1;
+        }
+        assert!(checked > 0, "no .bin fixtures found under {}", dir.display());
     }
 }
