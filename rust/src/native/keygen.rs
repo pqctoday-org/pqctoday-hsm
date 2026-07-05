@@ -22,14 +22,14 @@ use std::collections::HashMap;
 use super::CkRv;
 use crate::constants::*;
 use crate::crypto::{
-    ALGO_ECDH_P256, ALGO_ECDH_X25519, ALGO_ECDSA, ALGO_EDDSA, ALGO_ML_DSA, ALGO_ML_KEM, ALGO_RSA,
-    ALGO_SLH_DSA, CURVE_K256, CURVE_P256, CURVE_P384, CURVE_P521,
+    ALGO_ECDH_P256, ALGO_ECDH_X25519, ALGO_ECDH_X448, ALGO_ECDSA, ALGO_EDDSA, ALGO_ML_DSA,
+    ALGO_ML_KEM, ALGO_RSA, ALGO_SLH_DSA, CURVE_K256, CURVE_P256, CURVE_P384, CURVE_P521,
 };
 use crate::crypto::handlers::{
     build_ec_spki_p256, build_ec_spki_p384, build_ec_spki_p521, build_ed25519_spki,
     build_mldsa44_spki, build_mldsa65_spki, build_mldsa87_spki, build_mlkem1024_spki,
     build_mlkem512_spki, build_mlkem768_spki, build_slhdsa_spki, build_spki_from_parts,
-    build_x25519_spki, Attributes,
+    build_x25519_spki, build_x448_spki, Attributes,
 };
 use crate::state::{
     allocate_handle, compute_kcv, finalize_private_key_attrs, store_algo_family, store_bool,
@@ -843,6 +843,81 @@ pub fn generate_x25519_keypair(
     let mut ec_point = Vec::with_capacity(2 + pk_bytes.len());
     ec_point.push(0x04u8); // OCTET STRING tag
     ec_point.push(pk_bytes.len() as u8); // 0x20 = 32
+    ec_point.extend_from_slice(&pk_bytes);
+    pub_attrs.insert(CKA_EC_POINT, ec_point);
+
+    insert_id_and_label(&mut pub_attrs, cka_id, label);
+    insert_id_and_label(&mut prv_attrs, cka_id, label);
+
+    finalize_and_register(_session, pub_attrs, prv_attrs)
+}
+
+/// Generate an X448 (RFC 7748 Montgomery-form ECDH over Curve448) key pair —
+/// the 448-bit sibling of [`generate_x25519_keypair`], parallel to the FFI
+/// `CKM_EC_MONTGOMERY_KEY_PAIR_GEN` X448 branch (`ffi.rs`). Same object shape
+/// (`CKK_EC_MONTGOMERY`, 56-byte scalar in `CKA_VALUE`, raw public point in
+/// `CKA_VALUE`/`CKA_EC_POINT`, id-X448 OID `1.3.101.111` in `CKA_EC_PARAMS`),
+/// NON-EXTRACTABLE. Exposed so the KMIP layer can create X448 as
+/// `ECDH` + `RecommendedCurve = CURVE448`.
+///
+/// Returns `(public_handle, private_handle)`.
+pub fn generate_x448_keypair(
+    _session: u32,
+    cka_id: &[u8],
+    label: &str,
+) -> Result<(u32, u32), CkRv> {
+    use x448::{PublicKey as X448PublicKey, StaticSecret as X448StaticSecret};
+
+    let mut pub_attrs: Attributes = HashMap::new();
+    let mut prv_attrs: Attributes = HashMap::new();
+
+    store_algo_family(&mut pub_attrs, ALGO_ECDH_X448);
+    store_algo_family(&mut prv_attrs, ALGO_ECDH_X448);
+
+    store_ulong(&mut pub_attrs, CKA_CLASS, CKO_PUBLIC_KEY);
+    store_ulong(&mut pub_attrs, CKA_KEY_TYPE, CKK_EC_MONTGOMERY);
+    store_ulong(&mut pub_attrs, CKA_KEY_GEN_MECHANISM, CKM_EC_MONTGOMERY_KEY_PAIR_GEN);
+    store_bool(&mut pub_attrs, CKA_TOKEN, false);
+    store_bool(&mut pub_attrs, CKA_PRIVATE, false);
+    store_bool(&mut pub_attrs, CKA_ENCRYPT, false);
+    store_bool(&mut pub_attrs, CKA_VERIFY, false);
+    store_bool(&mut pub_attrs, CKA_WRAP, false);
+    store_bool(&mut pub_attrs, CKA_DERIVE, false);
+    store_bool(&mut pub_attrs, CKA_LOCAL, true);
+
+    store_ulong(&mut prv_attrs, CKA_CLASS, CKO_PRIVATE_KEY);
+    store_ulong(&mut prv_attrs, CKA_KEY_TYPE, CKK_EC_MONTGOMERY);
+    store_ulong(&mut prv_attrs, CKA_KEY_GEN_MECHANISM, CKM_EC_MONTGOMERY_KEY_PAIR_GEN);
+    store_bool(&mut prv_attrs, CKA_TOKEN, false);
+    store_bool(&mut prv_attrs, CKA_PRIVATE, true);
+    store_bool(&mut prv_attrs, CKA_SENSITIVE, true);
+    store_bool(&mut prv_attrs, CKA_EXTRACTABLE, false);
+    store_bool(&mut prv_attrs, CKA_DECRYPT, false);
+    store_bool(&mut prv_attrs, CKA_SIGN, false);
+    store_bool(&mut prv_attrs, CKA_UNWRAP, false);
+    store_bool(&mut prv_attrs, CKA_DERIVE, true);
+    store_bool(&mut prv_attrs, CKA_LOCAL, true);
+
+    // x448's StaticSecret is built from 56 random bytes (matches the FFI arm).
+    let mut sk_bytes_arr = [0u8; 56];
+    getrandom::getrandom(&mut sk_bytes_arr).map_err(|_| CKR_FUNCTION_FAILED)?;
+    let sk = X448StaticSecret::from(sk_bytes_arr);
+    let pk = X448PublicKey::from(&sk);
+    let pk_bytes = pk.as_bytes().to_vec(); // 56-byte public
+    let sk_bytes = sk.as_bytes().to_vec(); // 56-byte scalar
+
+    prv_attrs.insert(CKA_VALUE, sk_bytes);
+    pub_attrs.insert(CKA_VALUE, pk_bytes.clone());
+    pub_attrs.insert(CKA_PUBLIC_KEY_INFO, build_x448_spki(&pk_bytes));
+
+    // PKCS#11 v3.2 §6.7 — id-X448 OID (RFC 8410, 1.3.101.111 = 06 03 2b 65 6f).
+    let oid_x448: Vec<u8> = vec![0x06, 0x03, 0x2b, 0x65, 0x6f];
+    pub_attrs.insert(CKA_EC_PARAMS, oid_x448.clone());
+    prv_attrs.insert(CKA_EC_PARAMS, oid_x448);
+
+    let mut ec_point = Vec::with_capacity(2 + pk_bytes.len());
+    ec_point.push(0x04u8); // OCTET STRING tag
+    ec_point.push(pk_bytes.len() as u8); // 0x38 = 56
     ec_point.extend_from_slice(&pk_bytes);
     pub_attrs.insert(CKA_EC_POINT, ec_point);
 
@@ -1957,6 +2032,25 @@ mod tests {
         assert_eq!(get_object_attr_u32(prv_h, CKA_KEY_TYPE), Some(CKK_EC_MONTGOMERY));
         // The security-critical properties for hybrid-KEM use (store_bool encodes
         // a single 0x00/0x01 byte):
+        assert_eq!(get_object_attr_bytes(prv_h, CKA_EXTRACTABLE), Some(vec![0x00]), "non-extractable");
+        assert_eq!(get_object_attr_bytes(prv_h, CKA_SENSITIVE), Some(vec![0x01]), "sensitive");
+        close_session(session).unwrap();
+    }
+
+    /// X448 keygen: 56-byte scalar + 56-byte public point, tagged
+    /// `ALGO_ECDH_X448`, `CKK_EC_MONTGOMERY`, NON-EXTRACTABLE. Parallels the
+    /// FFI `CKM_EC_MONTGOMERY_KEY_PAIR_GEN` X448 branch. Used for KMIP
+    /// `ECDH` + `RecommendedCurve = CURVE448`.
+    #[test]
+    fn x448_keygen_lengths_family_and_non_extractable() {
+        use crate::state::{get_object_algo_family, get_object_attr_bytes, get_object_attr_u32, get_object_value};
+        let _guard = test_lock::acquire();
+        let session = fresh_session();
+        let (pub_h, prv_h) = generate_x448_keypair(session, b"\x01", "x448-1").unwrap();
+        assert_eq!(get_object_value(prv_h).unwrap().len(), 56, "X448 scalar");
+        assert_eq!(get_object_value(pub_h).unwrap().len(), 56, "X448 public point");
+        assert_eq!(get_object_algo_family(prv_h), ALGO_ECDH_X448, "tagged X448 ECDH");
+        assert_eq!(get_object_attr_u32(prv_h, CKA_KEY_TYPE), Some(CKK_EC_MONTGOMERY));
         assert_eq!(get_object_attr_bytes(prv_h, CKA_EXTRACTABLE), Some(vec![0x00]), "non-extractable");
         assert_eq!(get_object_attr_bytes(prv_h, CKA_SENSITIVE), Some(vec![0x01]), "sensitive");
         close_session(session).unwrap();

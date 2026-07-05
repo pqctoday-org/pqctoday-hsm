@@ -315,6 +315,7 @@ pub fn rekey_key_pair(
         key_length,
         mech,
         None, // rekey generates fresh material, never from a client seed
+        None, // TODO: preserve the base object's RecommendedCurve on ECDH rekey (§5)
     )
     .map_err(&fail)?;
 

@@ -21,6 +21,15 @@ use pqctoday_kmip::ops::{Deps, DepsConfig};
 use pqctoday_kmip::policy::Engine;
 use pqctoday_kmip::store::MemoryStore;
 
+// The softhsmrustv3 engine is global (lazy_static Mutex state); serialize the
+// per-test finalize/init so tests can't race (matches native_bridge_e2e.rs).
+fn engine_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
 fn deps() -> Deps {
     use softhsmrustv3::native::session;
     let _ = session::finalize();
@@ -34,6 +43,7 @@ fn deps() -> Deps {
 }
 
 fn round_trip(alg: KmipAlgorithm, ss_len: usize) {
+    let _g = engine_test_lock();
     let d = deps();
 
     // CreateKeyPair (KeyAgreement intent → CreateKeyPair:KeyAgreement).

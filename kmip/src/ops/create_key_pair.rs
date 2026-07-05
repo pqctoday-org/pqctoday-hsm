@@ -109,7 +109,7 @@ pub fn create_key_pair(
     // Algorithm + length should be the same on both halves (carried in
     // CommonAttributes per the spec; private/public mismatch would be
     // a client bug). Pull from whichever side has it first.
-    let (algorithm_in, key_length, usage_mask) = extract_template(&req);
+    let (algorithm_in, key_length, usage_mask, recommended_curve) = extract_template(&req);
     let _ = (priv_x.algorithm, pub_x.algorithm); // silence unused; merged via extract_template
 
     // ── Plane 1: policy gate ────────────────────────────────────────────
@@ -273,6 +273,7 @@ pub fn create_key_pair(
                 key_length,
                 mech,
                 req.seed.as_deref(),
+                recommended_curve,
             ) {
                 Ok(g) => (g, None, None, None),
                 Err(err) => return fail(deps, correlation_id, op_canonical, err),
@@ -337,6 +338,10 @@ pub fn create_key_pair(
             // K6 — classical half's CKA_ID for a hybrid private key (None otherwise).
             pkcs11_cka_id_secondary: hybrid_secondary_cka_id,
 
+            // KMIP 3.0 §4.16 — Recommended Curve chosen for an EC/ECDH key,
+            // reported back via the Cryptographic Domain Parameters attribute.
+            recommended_curve,
+
             digest_value: digest_priv,
 
             // KMIP 3.0 §6.2 — default `KeyFormatType` depends on algo.
@@ -398,6 +403,9 @@ pub fn create_key_pair(
             // stored inline above); no secondary CKA_ID.
             pkcs11_cka_id_secondary: None,
 
+            // KMIP 3.0 §4.16 — the public half carries the same domain params.
+            recommended_curve,
+
             digest_value: digest_pub,
 
             // KMIP 3.0 §6.2 — default `KeyFormatType` depends on algo.
@@ -455,6 +463,7 @@ pub(crate) fn engine_generate_keypair(
     key_length: Option<u32>,
     mech: u32,
     seed: Option<&[u8]>,
+    recommended_curve: Option<u32>,
 ) -> std::result::Result<GeneratedKeyPair, KmipError> {
     if let Some(session) = deps.engine_session {
         // K15 — `native_generate_keypair` emits the Pkcs11Call audit
@@ -470,6 +479,7 @@ pub(crate) fn engine_generate_keypair(
             &cka_id,
             mech,
             seed,
+            recommended_curve,
         )?;
         Ok(GeneratedKeyPair {
             cka_id_priv: cka_id.clone(),
@@ -513,10 +523,15 @@ pub(crate) fn engine_generate_keypair(
 /// KMIP 3.0 §4.x — `CryptographicAlgorithm`, `CryptographicLength`, and
 /// `CryptographicUsageMask` are the three attributes the dispatcher
 /// canonicalises for the engine.
-fn extract_template(req: &CreateKeyPairRequest) -> (Option<String>, Option<u32>, Option<UsageMask>) {
+fn extract_template(
+    req: &CreateKeyPairRequest,
+) -> (Option<String>, Option<u32>, Option<UsageMask>, Option<u32>) {
     let mut algorithm: Option<String> = None;
     let mut length: Option<u32> = None;
     let mut usage: Option<UsageMask> = None;
+    // KMIP 3.0 §4.16 — the curve is carried inside Cryptographic Domain
+    // Parameters (the compliant surface), NOT a standalone attribute.
+    let mut recommended_curve: Option<u32> = None;
     for a in req
         .common_attributes
         .iter()
@@ -533,10 +548,15 @@ fn extract_template(req: &CreateKeyPairRequest) -> (Option<String>, Option<u32>,
             Attribute::CryptographicUsageMask(m) => {
                 usage = Some(*m);
             }
+            Attribute::CryptographicDomainParameters { recommended_curve: rc, .. } => {
+                if let Some(c) = rc {
+                    recommended_curve = Some(*c);
+                }
+            }
             _ => {}
         }
     }
-    (algorithm, length, usage)
+    (algorithm, length, usage, recommended_curve)
 }
 
 /// Canonical algorithm string used by the policy engine. Mirrors the
@@ -653,6 +673,7 @@ fn native_generate_keypair(
     cka_id: &[u8],
     mech: u32,
     seed: Option<&[u8]>,
+    recommended_curve: Option<u32>,
 ) -> std::result::Result<(u32, u32), KmipError> {
     use crate::kmip30::KmipAlgorithm::*;
     use softhsmrustv3::native;
@@ -726,17 +747,48 @@ fn native_generate_keypair(
                 native::generate_ecdsa_keypair(session, curve, cka_id, label),
             )
         }
-        // 2026-07-05 fix: `Ecdh` had a valid wire codepoint (0x0e) and is
-        // allowlisted by several crypto-agility policies (bsi-tr-02102,
-        // fips-only, classical.yaml), but no native keygen arm existed —
-        // every CreateKeyPair for it failed with OperationNotSupported
-        // regardless of what the policy plane decided.
+        // `Ecdh` (wire 0x0e). KMIP 3.0 §4.16 — the curve is chosen by the
+        // `Recommended Curve` inside Cryptographic Domain Parameters. X25519 /
+        // X448 key agreement is modelled here as ECDH + CURVE25519 / CURVE448
+        // (there is no standalone X25519/X448 algorithm codepoint). When no
+        // Recommended Curve is supplied we keep the length-based NIST inference
+        // for back-compat.
         Ecdh => {
-            let curve = ecdsa_curve_from_length(key_length)?;
-            (
-                "native::generate_ecdh_keypair",
-                native::generate_ecdh_keypair(session, curve, cka_id, label),
-            )
+            use crate::kmip30::algos::recommended_curve as rc;
+            match recommended_curve {
+                Some(rc::CURVE25519) => (
+                    "native::generate_x25519_keypair",
+                    native::generate_x25519_keypair(session, cka_id, label),
+                ),
+                Some(rc::CURVE448) => (
+                    "native::generate_x448_keypair",
+                    native::generate_x448_keypair(session, cka_id, label),
+                ),
+                Some(rc::P_256) => (
+                    "native::generate_ecdh_keypair",
+                    native::generate_ecdh_keypair(session, native::EccCurve::P256, cka_id, label),
+                ),
+                Some(rc::P_384) => (
+                    "native::generate_ecdh_keypair",
+                    native::generate_ecdh_keypair(session, native::EccCurve::P384, cka_id, label),
+                ),
+                Some(rc::P_521) => (
+                    "native::generate_ecdh_keypair",
+                    native::generate_ecdh_keypair(session, native::EccCurve::P521, cka_id, label),
+                ),
+                Some(other) => {
+                    return Err(KmipError::invalid_attribute_value(format!(
+                        "ECDH RecommendedCurve 0x{other:08x} not supported"
+                    )));
+                }
+                None => {
+                    let curve = ecdsa_curve_from_length(key_length)?;
+                    (
+                        "native::generate_ecdh_keypair",
+                        native::generate_ecdh_keypair(session, curve, cka_id, label),
+                    )
+                }
+            }
         }
         // P1 (2026-07-05): Ed25519 — no curve/size parameter, single fixed
         // curve. Keygen/sign/verify all pre-existed at the PKCS#11 layer

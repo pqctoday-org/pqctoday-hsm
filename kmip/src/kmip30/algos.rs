@@ -28,6 +28,18 @@
 /// `CK_ULONG`; we model it as `u32` because every codepoint we ship fits.
 pub type CkMechanismType = u32;
 
+/// KMIP 3.0 `Recommended Curve` enumeration values (spec §4.16, tag `0x420075`).
+/// Values verified against `spec/oasis-kmip-3.0/kmip-spec-3.0-tags-enums.json` —
+/// used to resolve an ECDH `CreateKeyPair`'s curve. X25519/X448 key agreement is
+/// `CryptographicAlgorithm=ECDH` + `RecommendedCurve = CURVE25519 / CURVE448`.
+pub mod recommended_curve {
+    pub const P_256: u32 = 0x00000007;
+    pub const P_384: u32 = 0x0000000a;
+    pub const P_521: u32 = 0x0000000d;
+    pub const CURVE25519: u32 = 0x00000045;
+    pub const CURVE448: u32 = 0x00000046;
+}
+
 // ── Standard PKCS#11 v3.2 PQC mech codepoints ────────────────────────────
 // Re-exported from the engine (`softhsmrustv3::constants`) — single source
 // of truth, values per the normative pkcs11t.h.
