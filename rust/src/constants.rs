@@ -237,13 +237,34 @@ pub const CKM_PKCS5_PBKD2: u32 = 0x0000_03b0;
 pub const CKM_SP800_108_COUNTER_KDF: u32 = 0x0000_03ac;
 pub const CKM_SP800_108_FEEDBACK_KDF: u32 = 0x0000_03ad;
 pub const CKM_HKDF_DERIVE: u32 = 0x0000_402a;
-// Simple key-derivation: concatenate a base key's value with a second key's
-// value (PKCS#11 v3.2 §6.43; value verified against the vendored pkcs11t.h
-// `#define CKM_CONCATENATE_BASE_AND_KEY 0x00000360UL`). The parameter is a
-// `CK_OBJECT_HANDLE` (the second key). This is the spec-defined building
-// block for composing a hybrid KEM shared secret (classical ‖ PQC) entirely
-// inside the HSM — PKCS#11 v3.2 has no dedicated hybrid-KEM mechanism.
+// Simple key-derivation mechanisms (PKCS#11 v3.2 §6.43 "Miscellaneous simple
+// key derivation"). Values verified against the vendored pkcs11t.h. The
+// composable building blocks for hybrid-KEM combiners (classical ‖ PQC),
+// entirely in-HSM — v3.2 has no dedicated hybrid-KEM mechanism.
+//   §6.43.3 — derived value = base.CKA_VALUE ‖ second_key.CKA_VALUE
+//             (param: CK_OBJECT_HANDLE of the second key).
 pub const CKM_CONCATENATE_BASE_AND_KEY: u32 = 0x0000_0360;
+//   §6.43.4 — derived value = base.CKA_VALUE ‖ data
+//             (param: CK_KEY_DERIVATION_STRING_DATA { pData, ulLen }).
+//             For appending ciphertext/pubkey/label in transcript-binding
+//             combiners (X-Wing, Chempat).
+pub const CKM_CONCATENATE_BASE_AND_DATA: u32 = 0x0000_0362;
+
+// Digest key-derivation (PKCS#11 v3.2 §6.22 SHA-2 / §6.29 SHA-3): derived
+// value = SHAx(base.CKA_VALUE), left-truncated to CKA_VALUE_LEN when the
+// template supplies one. The hash-second-step for concat-then-hash combiners
+// (SSH, X-Wing). Values verified against pkcs11t.h.
+pub const CKM_SHA256_KEY_DERIVATION: u32 = 0x0000_0393;
+pub const CKM_SHA384_KEY_DERIVATION: u32 = 0x0000_0394;
+pub const CKM_SHA512_KEY_DERIVATION: u32 = 0x0000_0395;
+pub const CKM_SHA3_256_KEY_DERIVATION: u32 = 0x0000_0397;
+pub const CKM_SHA3_384_KEY_DERIVATION: u32 = 0x0000_0399;
+pub const CKM_SHA3_512_KEY_DERIVATION: u32 = 0x0000_039a;
+
+// HKDF salt-as-key flag (pkcs11t.h) — complements the existing
+// CKF_HKDF_SALT_DATA. Lets HKDF-Extract key on ANOTHER key's value (salt =
+// key handle), i.e. HMAC(salt_key, base) — the keyed dual-PRF combiner form.
+pub const CKF_HKDF_SALT_KEY: u32 = 0x0000_0004;
 
 // ML-DSA pre-hash mechanisms (PKCS#11 v3.2, pkcs11t.h §1221-1231)
 pub const CKM_HASH_ML_DSA_SHA224: u32 = 0x0000_0023;
@@ -551,9 +572,17 @@ pub const SUPPORTED_MECHS: &[u32] = &[
     CKM_HKDF_DERIVE,
     CKM_SP800_108_COUNTER_KDF,
     CKM_SP800_108_FEEDBACK_KDF,
-    // Simple concatenation derive — the hybrid-KEM combiner building block
-    // (classical ‖ PQC shared secret, entirely in-HSM). PKCS#11 v3.2 §6.43.3.
+    // Hybrid-KEM combiner building blocks — concatenate (key/data) + digest
+    // key-derivation, all standard PKCS#11 v3.2 derive mechanisms composed
+    // in-HSM (v3.2 has no dedicated hybrid-KEM mechanism). §6.43 / §6.22 / §6.29.
     CKM_CONCATENATE_BASE_AND_KEY,
+    CKM_CONCATENATE_BASE_AND_DATA,
+    CKM_SHA256_KEY_DERIVATION,
+    CKM_SHA384_KEY_DERIVATION,
+    CKM_SHA512_KEY_DERIVATION,
+    CKM_SHA3_256_KEY_DERIVATION,
+    CKM_SHA3_384_KEY_DERIVATION,
+    CKM_SHA3_512_KEY_DERIVATION,
     // BIP32 HD derivation (C_DeriveKey master/child — pkcs11t.h 0x105B/0x105C)
     CKM_BIP32_MASTER_DERIVE,
     CKM_BIP32_CHILD_DERIVE,

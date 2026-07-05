@@ -71,6 +71,66 @@ pub fn concatenate_keys(session: u32, base: u32, second: u32) -> Result<u32, CkR
     Ok(register_derived_secret(session, combined))
 }
 
+/// `CKM_CONCATENATE_BASE_AND_DATA` (PKCS#11 v3.2 §6.43.4): derive a new
+/// generic-secret key whose value is `base.CKA_VALUE ‖ data`.
+///
+/// The transcript-binding building block — appends non-key material
+/// (ciphertext, public key, domain-separation label) onto a running secret
+/// before a hash step, as constructions like X-Wing and Chempat require.
+///
+/// **Pre-condition**: `session` valid R/W; `base` a secret key with a value.
+pub fn concatenate_data(session: u32, base: u32, data: &[u8]) -> Result<u32, CkRv> {
+    let base_val = get_object_value(base).ok_or(CKR_KEY_HANDLE_INVALID)?;
+    let combined = [base_val.as_slice(), data].concat();
+    Ok(register_derived_secret(session, combined))
+}
+
+/// Digest key-derivation (PKCS#11 v3.2 §6.22 SHA-2 / §6.29 SHA-3): derive a
+/// new generic-secret key whose value is `SHAx(base.CKA_VALUE)`, left-
+/// truncated to `out_len` bytes when supplied (`None` keeps the full digest).
+///
+/// The hash-second-step for concat-then-hash combiners (SSH: SHA-512 of the
+/// concatenation; X-Wing: SHA3-256 of the transcript). `mech` selects the
+/// digest; any non-digest-derivation mechanism → `CKR_MECHANISM_INVALID`.
+/// The base key's value is read in-HSM and never leaves.
+///
+/// **Pre-condition**: `session` valid R/W; `base` a secret key with a value.
+pub fn digest_key_derivation(
+    session: u32,
+    base: u32,
+    mech: u32,
+    out_len: Option<usize>,
+) -> Result<u32, CkRv> {
+    let base_val = get_object_value(base).ok_or(CKR_KEY_HANDLE_INVALID)?;
+    let mut digest = digest_of(mech, &base_val)?;
+    if let Some(n) = out_len {
+        if n > digest.len() {
+            // Can't stretch a digest — §6.22: the requested key is longer than
+            // the hash provides.
+            return Err(CKR_KEY_SIZE_RANGE);
+        }
+        digest.truncate(n); // §6.22 — leftmost bytes.
+    }
+    Ok(register_derived_secret(session, digest))
+}
+
+/// Pure digest-key-derivation transform: `SHAx(data)` per `mech` (one of the
+/// `CKM_SHA*_KEY_DERIVATION` codepoints). Shared by [`digest_key_derivation`]
+/// (native) and the `C_DeriveKey` FFI arm so the mechanism→hasher mapping
+/// exists once. `CKR_MECHANISM_INVALID` for any non-digest-derivation mech.
+pub(crate) fn digest_of(mech: u32, data: &[u8]) -> Result<Vec<u8>, CkRv> {
+    use sha2::Digest as _;
+    Ok(match mech {
+        CKM_SHA256_KEY_DERIVATION => sha2::Sha256::digest(data).to_vec(),
+        CKM_SHA384_KEY_DERIVATION => sha2::Sha384::digest(data).to_vec(),
+        CKM_SHA512_KEY_DERIVATION => sha2::Sha512::digest(data).to_vec(),
+        CKM_SHA3_256_KEY_DERIVATION => sha3::Sha3_256::digest(data).to_vec(),
+        CKM_SHA3_384_KEY_DERIVATION => sha3::Sha3_384::digest(data).to_vec(),
+        CKM_SHA3_512_KEY_DERIVATION => sha3::Sha3_512::digest(data).to_vec(),
+        _ => return Err(CKR_MECHANISM_INVALID),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -135,6 +195,74 @@ mod tests {
         assert_eq!(
             concatenate_keys(session, base, 0xDEAD_BEEF),
             Err(CKR_KEY_HANDLE_INVALID)
+        );
+    }
+
+    #[test]
+    fn concatenate_data_appends_raw_bytes() {
+        let _guard = test_lock::acquire();
+        let session = fresh_session();
+        // Spec §6.43.4 worked example: base 0x01234567, data 0x89ABCDEF.
+        let base = secret_with_value(session, &[0x01, 0x23, 0x45, 0x67]);
+        let out = concatenate_data(session, base, &[0x89, 0xAB, 0xCD, 0xEF]).unwrap();
+        assert_eq!(
+            get_object_value(out).unwrap(),
+            vec![0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF]
+        );
+    }
+
+    #[test]
+    fn digest_key_derivation_matches_known_sha256() {
+        let _guard = test_lock::acquire();
+        let session = fresh_session();
+        // Canonical KAT: SHA-256("abc") =
+        // ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad.
+        let base = secret_with_value(session, b"abc");
+        let out = digest_key_derivation(session, base, CKM_SHA256_KEY_DERIVATION, None).unwrap();
+        let expect: Vec<u8> = (0..32)
+            .map(|i| {
+                u8::from_str_radix(
+                    &"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+                        [i * 2..i * 2 + 2],
+                    16,
+                )
+                .unwrap()
+            })
+            .collect();
+        assert_eq!(get_object_value(out).unwrap(), expect);
+    }
+
+    #[test]
+    fn digest_key_derivation_truncates_to_requested_length() {
+        let _guard = test_lock::acquire();
+        let session = fresh_session();
+        // SHA-512 of "abc" truncated to 32 bytes = leftmost 32 of the 64-byte
+        // digest (used e.g. to fit a 256-bit AES key out of a hash step).
+        let base = secret_with_value(session, b"abc");
+        let full =
+            digest_key_derivation(session, base, CKM_SHA512_KEY_DERIVATION, None).unwrap();
+        let full_v = get_object_value(full).unwrap();
+        assert_eq!(full_v.len(), 64);
+        let base2 = secret_with_value(session, b"abc");
+        let trunc =
+            digest_key_derivation(session, base2, CKM_SHA512_KEY_DERIVATION, Some(32)).unwrap();
+        assert_eq!(get_object_value(trunc).unwrap(), full_v[..32].to_vec());
+    }
+
+    #[test]
+    fn digest_key_derivation_rejects_overlong_request_and_bad_mech() {
+        let _guard = test_lock::acquire();
+        let session = fresh_session();
+        let base = secret_with_value(session, b"abc");
+        // Can't stretch a 32-byte SHA-256 to 40 bytes.
+        assert_eq!(
+            digest_key_derivation(session, base, CKM_SHA256_KEY_DERIVATION, Some(40)),
+            Err(CKR_KEY_SIZE_RANGE)
+        );
+        let base2 = secret_with_value(session, b"abc");
+        assert_eq!(
+            digest_key_derivation(session, base2, CKM_CONCATENATE_BASE_AND_KEY, None),
+            Err(CKR_MECHANISM_INVALID)
         );
     }
 }

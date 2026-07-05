@@ -886,9 +886,16 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
         CKM_CHACHA20 | CKM_CHACHA20_POLY1305 => (32, 32, 0x00000100 | 0x00000200),
         // BIP32 HD derivation (C_DeriveKey) — 32-byte seeds/keys, CKF_DERIVE.
         CKM_BIP32_MASTER_DERIVE | CKM_BIP32_CHILD_DERIVE => (32, 32, 0x00080000),
-        // Concatenate base ‖ second key (§6.43.3) — arbitrary-length secret
-        // values, CKF_DERIVE. The hybrid-KEM combiner step-1 building block.
-        CKM_CONCATENATE_BASE_AND_KEY => (0, 0, 0x00080000),
+        // Hybrid-KEM combiner building blocks (§6.43 concat, §6.22/§6.29
+        // digest key-derivation) — arbitrary-length secret values, CKF_DERIVE.
+        CKM_CONCATENATE_BASE_AND_KEY
+        | CKM_CONCATENATE_BASE_AND_DATA
+        | CKM_SHA256_KEY_DERIVATION
+        | CKM_SHA384_KEY_DERIVATION
+        | CKM_SHA512_KEY_DERIVATION
+        | CKM_SHA3_256_KEY_DERIVATION
+        | CKM_SHA3_384_KEY_DERIVATION
+        | CKM_SHA3_512_KEY_DERIVATION => (0, 0, 0x00080000),
         _ => return None,
     };
     Some(info)
@@ -5840,6 +5847,64 @@ pub fn C_DeriveKey(
                 [base_val.as_slice(), second_val.as_slice()].concat()
             }
 
+            // ── Concatenate base key ‖ data (PKCS#11 v3.2 §6.43.4) ──────────
+            // Appends caller-supplied data (ciphertext/pubkey/label) onto the
+            // running secret — the transcript-binding step for X-Wing/Chempat.
+            // pParameter is a CK_KEY_DERIVATION_STRING_DATA { pData, ulLen }.
+            CKM_CONCATENATE_BASE_AND_DATA => {
+                let p_param = *((p_mechanism as *const usize).add(1)) as *const usize;
+                if p_param.is_null() {
+                    return CKR_ARGUMENTS_BAD;
+                }
+                // CK_KEY_DERIVATION_STRING_DATA: word0 = pData, word1 = ulLen.
+                let data_ptr = *p_param.add(0) as *const u8;
+                let data_len = *p_param.add(1);
+                let data: &[u8] = if !data_ptr.is_null() && data_len > 0 {
+                    std::slice::from_raw_parts(data_ptr, data_len)
+                } else {
+                    &[]
+                };
+                let base_val = match get_object_value(h_base_key) {
+                    Some(v) => v,
+                    None => return CKR_KEY_HANDLE_INVALID,
+                };
+                [base_val.as_slice(), data].concat()
+            }
+
+            // ── Digest key derivation (PKCS#11 v3.2 §6.22 SHA-2 / §6.29 SHA-3)
+            // Derived value = SHAx(base.CKA_VALUE), left-truncated to an
+            // explicit CKA_VALUE_LEN when the template supplies one. The
+            // hash-second-step for concat-then-hash combiners. Reuses
+            // native::derive::digest_of so the mech→hasher map exists once.
+            CKM_SHA256_KEY_DERIVATION
+            | CKM_SHA384_KEY_DERIVATION
+            | CKM_SHA512_KEY_DERIVATION
+            | CKM_SHA3_256_KEY_DERIVATION
+            | CKM_SHA3_384_KEY_DERIVATION
+            | CKM_SHA3_512_KEY_DERIVATION => {
+                let base_val = match get_object_value(h_base_key) {
+                    Some(v) => v,
+                    None => return CKR_KEY_HANDLE_INVALID,
+                };
+                let mut digest = match crate::native::derive::digest_of(mech_type, &base_val) {
+                    Ok(d) => d,
+                    Err(rv) => return rv,
+                };
+                // Truncate only when the caller EXPLICITLY set CKA_VALUE_LEN
+                // (the generic `key_len` default of 32 must not silently clip a
+                // longer digest the caller wanted in full).
+                if let Some(want) =
+                    get_attr_ulong(p_template, ul_attribute_count, CKA_VALUE_LEN)
+                {
+                    let want = want as usize;
+                    if want > digest.len() {
+                        return CKR_KEY_SIZE_RANGE;
+                    }
+                    digest.truncate(want);
+                }
+                digest
+            }
+
             // ── ECDH ────────────────────────────────────────────────────────
             CKM_ECDH1_DERIVE | CKM_ECDH1_COFACTOR_DERIVE | CKM_EC_MONTGOMERY_KEY_DERIVE
             | CKM_X25519 | CKM_X448 => {
@@ -6133,12 +6198,28 @@ pub fn C_DeriveKey(
                 let salt_len = *p_param.add(4);
                 let info_ptr = *p_param.add(6) as *const u8;
                 let info_len = *p_param.add(7);
-                let salt_opt =
-                    if salt_type == CKF_HKDF_SALT_DATA && !salt_ptr.is_null() && salt_len > 0 {
-                        Some(std::slice::from_raw_parts(salt_ptr, salt_len))
-                    } else {
-                        None
-                    };
+                // Salt-as-key (CKF_HKDF_SALT_KEY): the salt is another key
+                // handle (hSaltKey @ word5); HKDF-Extract keys HMAC on its
+                // CKA_VALUE — the keyed dual-PRF combiner form,
+                // HMAC(salt_key.value, ikm). The salt key's value is read
+                // in-HSM and never leaves; it need NOT be extractable (using a
+                // key internally is not exporting it).
+                let salt_owned: Option<Vec<u8>> = if salt_type == CKF_HKDF_SALT_KEY {
+                    let h_salt = *p_param.add(5) as u32;
+                    match get_object_value(h_salt) {
+                        Some(v) => Some(v),
+                        None => return CKR_KEY_HANDLE_INVALID,
+                    }
+                } else {
+                    None
+                };
+                let salt_opt: Option<&[u8]> = if let Some(ref v) = salt_owned {
+                    Some(v.as_slice())
+                } else if salt_type == CKF_HKDF_SALT_DATA && !salt_ptr.is_null() && salt_len > 0 {
+                    Some(std::slice::from_raw_parts(salt_ptr, salt_len))
+                } else {
+                    None
+                };
                 let info = if !info_ptr.is_null() && info_len > 0 {
                     std::slice::from_raw_parts(info_ptr, info_len)
                 } else {
@@ -10618,6 +10699,113 @@ mod return_code_ffi_tests {
         assert_eq!(rv, CKR_OK);
         let out = get_object_value(h_new).expect("derived key has a value");
         assert_eq!(out.len(), 12, "4 (base) + 8 (second) = 12 bytes");
+    }
+
+    /// HKDF salt-as-key (CKF_HKDF_SALT_KEY): the salt must be sourced from the
+    /// salt key's CKA_VALUE. Proven by equivalence — HKDF with salt supplied
+    /// as raw DATA `S` and HKDF with salt supplied as a KEY whose CKA_VALUE is
+    /// `S` must produce byte-identical output. That's the keyed dual-PRF
+    /// combiner form, HMAC(salt_key.value, ikm).
+    #[test]
+    fn hkdf_salt_as_key_equals_salt_as_data() {
+        let _guard = test_lock::acquire();
+        setup();
+        let (h_ikm, h_salt) = (0x5334_0051, 0x5334_0052);
+        // Base (IKM) and a salt key whose value is a known salt string.
+        let salt_bytes: [u8; 8] = [0x53, 0x41, 0x4c, 0x54, 0x30, 0x31, 0x32, 0x33];
+        for (h, val) in [(h_ikm, &b"input-keying-material"[..]), (h_salt, &salt_bytes[..])] {
+            OBJECTS.with(|o| {
+                let mut attrs = Attributes::new();
+                attrs.insert(CKA_VALUE, val.to_vec());
+                store_ulong(&mut attrs, CKA_CLASS, CKO_SECRET_KEY);
+                store_ulong(&mut attrs, CKA_KEY_TYPE, CKK_GENERIC_SECRET);
+                store_bool(&mut attrs, CKA_DERIVE, true);
+                o.borrow_mut().insert(h, attrs);
+            });
+        }
+        // CK_HKDF_PARAMS = [flags(expand@bit8), prf, saltType, pSalt,
+        // ulSaltLen, hSaltKey, pInfo, ulInfoLen]. b_expand=1, SHA-256, no info.
+        let derive = |salt_type: u32, p_salt: usize, salt_len: usize, h_salt_key: usize| -> Vec<u8> {
+            let params: [usize; 8] = [
+                0x100,
+                CKM_SHA256 as usize,
+                salt_type as usize,
+                p_salt,
+                salt_len,
+                h_salt_key,
+                0,
+                0,
+            ];
+            let mut mech: [usize; 3] = [
+                CKM_HKDF_DERIVE as usize,
+                params.as_ptr() as usize,
+                std::mem::size_of::<[usize; 8]>(),
+            ];
+            let mut h_new: u32 = 0;
+            let rv = unsafe {
+                C_DeriveKey(
+                    SESSION,
+                    mech.as_mut_ptr() as *mut u8,
+                    h_ikm,
+                    std::ptr::null_mut(),
+                    0,
+                    &mut h_new,
+                )
+            };
+            assert_eq!(rv, CKR_OK);
+            get_object_value(h_new).unwrap()
+        };
+        let via_data = derive(
+            CKF_HKDF_SALT_DATA,
+            salt_bytes.as_ptr() as usize,
+            salt_bytes.len(),
+            0,
+        );
+        let via_key = derive(CKF_HKDF_SALT_KEY, 0, 0, h_salt as usize);
+        assert_eq!(via_key, via_data, "salt-as-key must key HMAC on the salt key's CKA_VALUE");
+        assert_eq!(via_key.len(), 32);
+    }
+
+    /// Digest key derivation over the FFI ABI (§6.22): derived value =
+    /// SHA-256(base.CKA_VALUE). Base value "abc" → the canonical SHA-256 KAT.
+    #[test]
+    fn sha256_key_derivation_ffi_matches_known_answer() {
+        let _guard = test_lock::acquire();
+        setup();
+        let h_base = 0x5334_0041;
+        // install a key whose value is exactly b"abc".
+        OBJECTS.with(|o| {
+            let mut attrs = Attributes::new();
+            attrs.insert(CKA_VALUE, b"abc".to_vec());
+            store_ulong(&mut attrs, CKA_CLASS, CKO_SECRET_KEY);
+            store_ulong(&mut attrs, CKA_KEY_TYPE, CKK_GENERIC_SECRET);
+            store_bool(&mut attrs, CKA_DERIVE, true);
+            o.borrow_mut().insert(h_base, attrs);
+        });
+        let mut mech: [usize; 3] = [CKM_SHA256_KEY_DERIVATION as usize, 0, 0];
+        let mut h_new: u32 = 0;
+        let rv = unsafe {
+            C_DeriveKey(
+                SESSION,
+                mech.as_mut_ptr() as *mut u8,
+                h_base,
+                std::ptr::null_mut(),
+                0,
+                &mut h_new,
+            )
+        };
+        assert_eq!(rv, CKR_OK);
+        let expect: Vec<u8> = (0..32)
+            .map(|i| {
+                u8::from_str_radix(
+                    &"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+                        [i * 2..i * 2 + 2],
+                    16,
+                )
+                .unwrap()
+            })
+            .collect();
+        assert_eq!(get_object_value(h_new).unwrap(), expect);
     }
 
     /// The second key must carry CKA_DERIVE — else CKR_KEY_FUNCTION_NOT_PERMITTED
