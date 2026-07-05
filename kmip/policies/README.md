@@ -1,5 +1,10 @@
 # Plane 1 — Crypto Agility Management Plane Policy Library
 
+> **New here?** [`../docs/CACP_GUIDE.md`](../docs/CACP_GUIDE.md) is the full
+> guide: the policy language, how to test policies in the hub's Agility
+> Workbench (policies, batches & macros), and the verified KMIP 3.0 status
+> for hybrid KEMs and hybrid signatures.
+
 Example + default policy files consumed by the `pqctoday-hsm/kmip/` subsystem's policy engine (`src/policy/loader.rs`).
 
 Loaded at server start via `pqctoday-kmip --policy-dir policies --policy <name>`. The engine evaluates every KMIP request against the loaded policy before dispatching it to a Plane 2 op handler. A `Deny` decision short-circuits the request with a KMIP `PermissionDenied` response.

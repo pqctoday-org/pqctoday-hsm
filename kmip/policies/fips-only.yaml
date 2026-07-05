@@ -188,6 +188,58 @@ rules:
     flags: [Sign, Verify]
     reason: "FIPS 204 sig keys must declare Sign+Verify"
 
+  # 8b. FIPS 205 SLH-DSA sig keys — same requirement, all 12 parameter sets
+  #     (2026-07-04: this policy fully allowlists SLH-DSA but had no usage-mask
+  #     rule for it at all — the same coverage gap rule 8 had for ML-DSA-44).
+  - type: require_usage_mask
+    algorithm: SLH-DSA-SHA2-128s
+    flags: [Sign, Verify]
+    reason: "FIPS 205 sig keys must declare Sign+Verify"
+  - type: require_usage_mask
+    algorithm: SLH-DSA-SHA2-128f
+    flags: [Sign, Verify]
+    reason: "FIPS 205 sig keys must declare Sign+Verify"
+  - type: require_usage_mask
+    algorithm: SLH-DSA-SHA2-192s
+    flags: [Sign, Verify]
+    reason: "FIPS 205 sig keys must declare Sign+Verify"
+  - type: require_usage_mask
+    algorithm: SLH-DSA-SHA2-192f
+    flags: [Sign, Verify]
+    reason: "FIPS 205 sig keys must declare Sign+Verify"
+  - type: require_usage_mask
+    algorithm: SLH-DSA-SHA2-256s
+    flags: [Sign, Verify]
+    reason: "FIPS 205 sig keys must declare Sign+Verify"
+  - type: require_usage_mask
+    algorithm: SLH-DSA-SHA2-256f
+    flags: [Sign, Verify]
+    reason: "FIPS 205 sig keys must declare Sign+Verify"
+  - type: require_usage_mask
+    algorithm: SLH-DSA-SHAKE-128s
+    flags: [Sign, Verify]
+    reason: "FIPS 205 sig keys must declare Sign+Verify"
+  - type: require_usage_mask
+    algorithm: SLH-DSA-SHAKE-128f
+    flags: [Sign, Verify]
+    reason: "FIPS 205 sig keys must declare Sign+Verify"
+  - type: require_usage_mask
+    algorithm: SLH-DSA-SHAKE-192s
+    flags: [Sign, Verify]
+    reason: "FIPS 205 sig keys must declare Sign+Verify"
+  - type: require_usage_mask
+    algorithm: SLH-DSA-SHAKE-192f
+    flags: [Sign, Verify]
+    reason: "FIPS 205 sig keys must declare Sign+Verify"
+  - type: require_usage_mask
+    algorithm: SLH-DSA-SHAKE-256s
+    flags: [Sign, Verify]
+    reason: "FIPS 205 sig keys must declare Sign+Verify"
+  - type: require_usage_mask
+    algorithm: SLH-DSA-SHAKE-256f
+    flags: [Sign, Verify]
+    reason: "FIPS 205 sig keys must declare Sign+Verify"
+
   # 9. Compliance profile gate (catch-all).
   - type: compliance_profile_gate
     profile: FIPS-140-3

@@ -149,15 +149,17 @@ rules:
     min_bits: 3000
     reason: "BSI TR-02102-1 minimum ~120-bit security (RSA >= 3000 bits)"
 
-  # 5. Below-minimum key sizes banned; weak MECHANISMS gated in rules 5a/6.
-  #    (The old list also named RSA-PKCS1-v1_5 / ECDSA-SHA1 / SHA1 / MD5 /
-  #    DES / 3DES as algorithms — spellings the engine never emits, so those
-  #    entries were silent no-ops; 2026-07-04 rewrite. SHA-1 is denied by the
-  #    rule-6 hash allowlist; v1.5 padding by rule 5a.)
+  # 5. Broken/below-minimum ALGORITHMS banned. DES/3DES are real KMIP
+  #    CryptographicAlgorithm names (spec §11), so they belong here even
+  #    though this engine never instantiates them — a Register/dry-run can
+  #    still carry them. The old list also named RSA-PKCS1-v1_5 / ECDSA-SHA1
+  #    / SHA1 / MD5, which are NOT algorithm names (padding/hash mechanisms
+  #    in KMIP terms) — those entries were silent no-ops; SHA-1 is denied by
+  #    the rule-6 hash allowlist, v1.5 padding by rule 5a (2026-07-04).
   - type: algorithm_denylist
     ops: [Create, CreateKeyPair, Sign, Encrypt]
-    algorithms: [RSA-2048]
-    reason: "Below BSI TR-02102-1 ~120-bit minimum"
+    algorithms: [RSA-2048, DES, 3DES]
+    reason: "Below BSI TR-02102-1 minimums / broken primitive"
 
   # 5a. RSA mechanism constraints: PSS for signing, OAEP for encryption
   #     (BSI TR-02102-1 does not recommend PKCS#1 v1.5 for new use).

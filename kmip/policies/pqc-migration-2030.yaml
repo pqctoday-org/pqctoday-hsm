@@ -52,6 +52,13 @@ rules:
     algorithm: RSA
     allowed_padding_methods: [OAEP]
     reason: "RSA encryption must use OAEP (PKCS#1 v1.5 banned; legacy Decrypt stays open)"
+  #    DES/3DES ARE real KMIP algorithm names (spec §11) and stay banned as
+  #    algorithms — a Register or dry-run can carry them even though this
+  #    engine never generates them.
+  - type: algorithm_denylist
+    ops: [Create, CreateKeyPair, Sign, Encrypt]
+    algorithms: [DES, 3DES]
+    reason: "Single/Triple-DES banned at all times"
 
   # 2. Minimum RSA key length 3072 bits for any new key after 2026-01-01.
   - type: min_key_length
@@ -114,13 +121,41 @@ rules:
   #    indefinitely (no rule needed — absence of Deny = Allow).
 
   # 6. Production-classification signing keys must be PQC or composite.
+  #    NOTE: does not cover ML-KEM — that's rule 7's job (KeyAgreement usage
+  #    mask), a separate governance mechanism for a separate key purpose.
+  #    2026-07-04: the algorithm list was 2 of 12 SLH-DSA sets and 2 of 3
+  #    ML-DSA levels' composites — an SLH-DSA-SHAKE-256f production signing
+  #    key slipped through ungoverned. Now exhaustive over every signing
+  #    algorithm this stack can instantiate.
   - type: require_custom_attribute
     attribute_name: pqctoday-purpose
-    algorithms: [ML-DSA-44, ML-DSA-65, ML-DSA-87, SLH-DSA-SHA2-128s, SLH-DSA-SHA2-256s,
-                 ML-DSA-65-Ed25519, ML-DSA-87-ECDSA-P384]
+    algorithms:
+      - ML-DSA-44
+      - ML-DSA-65
+      - ML-DSA-87
+      - SLH-DSA-SHA2-128s
+      - SLH-DSA-SHA2-128f
+      - SLH-DSA-SHA2-192s
+      - SLH-DSA-SHA2-192f
+      - SLH-DSA-SHA2-256s
+      - SLH-DSA-SHA2-256f
+      - SLH-DSA-SHAKE-128s
+      - SLH-DSA-SHAKE-128f
+      - SLH-DSA-SHAKE-192s
+      - SLH-DSA-SHAKE-192f
+      - SLH-DSA-SHAKE-256s
+      - SLH-DSA-SHAKE-256f
+      - ML-DSA-65-Ed25519
+      - ML-DSA-87-ECDSA-P384
     reason: "Production PQC signing keys must declare x-pqctoday-purpose"
 
-  # 7. KEM-only keys (ML-KEM) must carry KeyAgreement usage mask.
+  # 7. KEM-only keys (ML-KEM) must carry KeyAgreement usage mask. 2026-07-04:
+  #    ML-KEM-512 was missing — an arbitrary size-based gap, same pattern as
+  #    rule 6.
+  - type: require_usage_mask
+    algorithm: ML-KEM-512
+    flags: [KeyAgreement]
+    reason: "ML-KEM keys must declare KeyAgreement usage"
   - type: require_usage_mask
     algorithm: ML-KEM-768
     flags: [KeyAgreement]
