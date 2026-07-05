@@ -1290,6 +1290,7 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "x25519-dalek",
+ "x448",
  "x509-cert",
  "x509-parser",
 ]

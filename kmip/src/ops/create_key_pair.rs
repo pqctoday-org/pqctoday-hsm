@@ -136,6 +136,13 @@ pub fn create_key_pair(
     );
     p_req.key_length = key_length;
     p_req.usage_mask = usage_mask;
+    // Label-pattern rules (`name_pattern`) match on the template's Name — the
+    // label-only agility contract where the policy maps key classes to algos.
+    let template_name = all_attrs.iter().find_map(|a| match a {
+        Attribute::Name(n) => Some(n.as_str()),
+        _ => None,
+    });
+    p_req.name = template_name;
 
     let resolved_algorithm = match deps.engine.evaluate(&p_req) {
         Decision::Allow { algorithm_override, .. } => match algorithm_override.or(algorithm_in) {
@@ -185,6 +192,32 @@ pub fn create_key_pair(
     // PKCS#11 mechanism; the composite key is generated in-process
     // (`crate::hybrid_kem`) and its raw material is stored on the records
     // (`key_material`) rather than as engine CKA_IDs.
+    // Montgomery-curve keys (X25519/X448) collapse to `Ecdh` at the enum
+    // layer; recognise them by the policy-resolved name (label-only path) or
+    // by an explicit ECDH + 255/448-bit template (client-specified path).
+    let montgomery_curve = match resolved_algorithm.as_str() {
+        "X25519" => Some(crate::dh_kem::Curve::X25519),
+        "X448" => Some(crate::dh_kem::Curve::X448),
+        _ => match (kmip_algo, key_length) {
+            (crate::kmip30::KmipAlgorithm::Ecdh, Some(bits)) => {
+                crate::dh_kem::Curve::from_kmip_bits(bits)
+            }
+            _ => None,
+        },
+    };
+    // Lengths the record must carry when the template didn't say: the size
+    // the policy's resolved string implies ("RSA-2048" → 2048, "ECDSA-P256" →
+    // 256), Montgomery 255/448, Ed25519 255 (PKCS#11 v3.2 §6.7 mech-info
+    // values). Without this the label-only path generated the FAMILY default
+    // size whatever the policy said. `qualified_name` reads the stored length
+    // back to render `X25519`/`RSA-2048` for policy matching and the UI.
+    let implied_bits = match (montgomery_curve, kmip_algo) {
+        (Some(curve), _) => Some(curve.kmip_bits()),
+        (None, crate::kmip30::KmipAlgorithm::Ed25519) => Some(255),
+        _ => super::helpers::classical_length_from_name(&resolved_algorithm),
+    };
+    let effective_length = key_length.or(implied_bits);
+
     let (generated, hybrid_pub_material, hybrid_priv_material) =
         if let Some(hybrid) = kmip_algo.hybrid_kem() {
             let kp = match crate::hybrid_kem::keygen(hybrid) {
@@ -209,6 +242,32 @@ pub fn create_key_pair(
                 Some(kp.public),
                 Some(kp.private),
             )
+        } else if let Some(curve) = montgomery_curve {
+            // Classical Montgomery KEM — same in-process pattern as the
+            // hybrid KEMs: raw material on the records, no engine CKA_ID
+            // (`crate::dh_kem`; Encapsulate/Decapsulate dispatch on length).
+            let kp = match crate::dh_kem::keygen(curve) {
+                Ok(kp) => kp,
+                Err(e) => {
+                    return fail(
+                        deps,
+                        correlation_id,
+                        op_canonical,
+                        KmipError::failed(ResultReason::CryptographicFailure, e),
+                    )
+                }
+            };
+            super::helpers::emit_pkcs11(deps, correlation_id, "soft::dh_kem_keygen", None, 0, "CKR_OK");
+            (
+                GeneratedKeyPair {
+                    cka_id_priv: Vec::new(),
+                    cka_id_pub: Vec::new(),
+                    digest_priv: None,
+                    digest_pub: None,
+                },
+                Some(kp.public),
+                Some(kp.private),
+            )
         } else {
             let mech = kmip_algo.to_pkcs11_mech(PkcsOp::KeyGen).ok_or_else(|| {
                 KmipError::failed(
@@ -222,7 +281,7 @@ pub fn create_key_pair(
                 deps,
                 correlation_id,
                 kmip_algo,
-                key_length,
+                effective_length,
                 mech,
                 req.seed.as_deref(),
             ) {
@@ -251,7 +310,7 @@ pub fn create_key_pair(
         uid: priv_uid.clone(),
         object_type: ObjectType::PrivateKey,
         algorithm: kmip_algo,
-        cryptographic_length: priv_x.length.unwrap_or(0),
+        cryptographic_length: priv_x.length.or(effective_length).unwrap_or(0),
         usage_mask: priv_usage,
         state: priv_state,
         pkcs11_cka_id: pkcs11_cka_id_priv,
@@ -313,7 +372,7 @@ pub fn create_key_pair(
         uid: pub_uid.clone(),
         object_type: ObjectType::PublicKey,
         algorithm: kmip_algo,
-        cryptographic_length: pub_x.length.unwrap_or(0),
+        cryptographic_length: pub_x.length.or(effective_length).unwrap_or(0),
         usage_mask: pub_usage,
         state: pub_state,
         pkcs11_cka_id: pkcs11_cka_id_pub,
@@ -495,6 +554,8 @@ fn canonical_name(a: KmipAlgorithm) -> String {
         HmacSha384 => "HMAC-SHA-384",
         HmacSha512 => "HMAC-SHA-512",
         Ecdh       => "ECDH",
+        Ed25519    => "Ed25519",
+        Ed448      => "Ed448",
         ChaCha20         => "ChaCha20",
         ChaCha20Poly1305 => "ChaCha20-Poly1305",
         MlKem512   => "ML-KEM-512",
@@ -551,6 +612,12 @@ pub(crate) fn parse_algorithm(s: &str) -> Result<KmipAlgorithm> {
         // K6 hybrid KEMs (no '-' split; exact names).
         "X25519MLKEM768" => X25519MlKem768,
         "SecP256r1MLKEM768" => SecP256r1MlKem768,
+        // RFC 8032 Edwards curves — exact names, official codepoints.
+        "Ed25519" => Ed25519,
+        "Ed448" => Ed448,
+        // RFC 7748 Montgomery curves collapse to ECDH; the caller derives
+        // the curve from the name/length (see `montgomery_curve` above).
+        "X25519" | "X448" => Ecdh,
         // Size-suffixed classical algos collapse to their base enum.
         _ => match base {
             "AES" => Aes,
@@ -665,6 +732,10 @@ fn native_generate_keypair(
                 native::generate_ecdsa_keypair(session, curve, cka_id, label),
             )
         }
+        Ed25519 => (
+            "native::generate_ed25519_keypair",
+            native::generate_ed25519_keypair(session, cka_id, label),
+        ),
         _ => {
             return Err(KmipError::failed(
                 ResultReason::OperationNotSupported,

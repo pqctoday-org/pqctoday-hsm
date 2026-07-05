@@ -119,6 +119,8 @@ pub fn sign(deps: &Deps, req: SignRequest, correlation_id: &str) -> Result<SignR
     );
     p_req.usage_mask = Some(obj.usage_mask);
     p_req.state = Some("Active");
+    // name_pattern rules match on the stored key's Name (label-scoped rekey).
+    p_req.name = obj.name.as_deref();
     p_req.current_object_algorithm = Some(&stored_algo);
     p_req.target_uid = Some(&req.uid);
     p_req.object_activation_date = obj.activation_date; // F-3 — max_key_age_days

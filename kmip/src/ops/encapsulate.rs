@@ -60,16 +60,21 @@ pub fn encapsulate(
         fail_err(deps, correlation_id, "Encapsulate", KmipError::object_not_found(&req.uid))
     })?;
 
-    // K6 — Encapsulate accepts ML-KEM and the hybrid KEMs (X25519MLKEM768 /
-    // SecP256r1MLKEM768).
-    if !is_ml_kem(obj.algorithm) && !obj.algorithm.is_hybrid_kem() {
+    // K6 — Encapsulate accepts ML-KEM, the hybrid KEMs (X25519MLKEM768 /
+    // SecP256r1MLKEM768), and the classical Montgomery curves (X25519/X448,
+    // DHKEM-style — Migration tab classical estate).
+    let montgomery = montgomery_curve_of(&obj);
+    if !is_ml_kem(obj.algorithm) && !obj.algorithm.is_hybrid_kem() && montgomery.is_none() {
         return Err(fail_err(
             deps,
             correlation_id,
             "Encapsulate",
             KmipError::failed(
                 ResultReason::OperationNotSupported,
-                format!("Encapsulate requires an ML-KEM or hybrid KEM key; {:?} is not", obj.algorithm),
+                format!(
+                    "Encapsulate requires an ML-KEM, hybrid KEM, or X25519/X448 key; {:?} is not",
+                    obj.algorithm
+                ),
             ),
         ));
     }
@@ -110,6 +115,8 @@ pub fn encapsulate(
     );
     p_req.usage_mask = Some(obj.usage_mask);
     p_req.state = Some("Active");
+    // name_pattern rules match on the stored key's Name (label-scoped rekey).
+    p_req.name = obj.name.as_deref();
     p_req.current_object_algorithm = Some(&stored_algo);
     p_req.target_uid = Some(&req.uid);
     p_req.object_activation_date = obj.activation_date; // F-3 — max_key_age_days
@@ -134,6 +141,33 @@ pub fn encapsulate(
                 ),
             ));
         }
+    }
+
+    // Classical Montgomery KEM (X25519/X448) — DHKEM-style (RFC 9180 §4.1):
+    // ephemeral DH against the stored PUBLIC key material, ciphertext = the
+    // ephemeral public key. Same in-process pattern + SecretData storage as
+    // the hybrid path below, so the op's shape is identical under every
+    // policy — which is what lets the agility engine substitute X25519 →
+    // ML-KEM later without the application changing its call.
+    if let Some(curve) = montgomery {
+        let public = obj.key_material.as_deref().ok_or_else(|| {
+            KmipError::failed(
+                ResultReason::CryptographicFailure,
+                format!("{} public key has no stored material", curve.name()),
+            )
+        })?;
+        let enc = crate::dh_kem::encapsulate(curve, public).map_err(|e| {
+            fail_err(
+                deps,
+                correlation_id,
+                "Encapsulate",
+                KmipError::failed(ResultReason::CryptographicFailure, e),
+            )
+        })?;
+        emit_pkcs11(deps, correlation_id, "soft::dh_kem_encapsulate", None, 0, "CKR_OK");
+        let ss_uid = store_shared_secret(deps, obj.algorithm, enc.shared_secret)?;
+        emit_success(deps, correlation_id, "Encapsulate");
+        return Ok(EncapsulateResponse { uid: ss_uid, data: enc.ciphertext });
     }
 
     // K6 — hybrid KEM: compose ML-KEM-768 + classical ECDH in-process against
@@ -259,6 +293,16 @@ pub fn encapsulate(
 
 pub(crate) fn is_ml_kem(a: KmipAlgorithm) -> bool {
     matches!(a, KmipAlgorithm::MlKem512 | KmipAlgorithm::MlKem768 | KmipAlgorithm::MlKem1024)
+}
+
+/// Montgomery-curve detection for the DHKEM path: X25519/X448 collapse to
+/// `Ecdh` at the enum layer and are told apart from the NIST P-curves by the
+/// record's `CryptographicLength` (255/448, PKCS#11 v3.2 §6.7).
+pub(crate) fn montgomery_curve_of(obj: &ObjectRecord) -> Option<crate::dh_kem::Curve> {
+    match obj.algorithm {
+        KmipAlgorithm::Ecdh => crate::dh_kem::Curve::from_kmip_bits(obj.cryptographic_length),
+        _ => None,
+    }
 }
 
 /// Persist the derived shared secret as a fresh managed `SecretData`
@@ -396,6 +440,91 @@ mod tests {
         let err = encapsulate(
             &d,
             EncapsulateRequest { uid: "rsa".to_string(), ..Default::default() },
+            "t",
+        )
+        .unwrap_err();
+        assert_eq!(err.result_reason(), ResultReason::OperationNotSupported);
+    }
+
+    /// Migration-tab classical KEM: X25519/X448 records (ECDH + 255/448 bits,
+    /// material stored in-process like the hybrids) round-trip a shared
+    /// secret through the real Encapsulate → Decapsulate ops, and both
+    /// derived SecretData objects hold the SAME bytes.
+    #[test]
+    fn montgomery_encapsulate_decapsulate_round_trips() {
+        for curve in [crate::dh_kem::Curve::X25519, crate::dh_kem::Curve::X448] {
+            let d = deps();
+            let kp = crate::dh_kem::keygen(curve).unwrap();
+            let bits = curve.kmip_bits();
+            d.store
+                .put(ObjectRecord {
+                    uid: "pk".into(),
+                    object_type: ObjectType::PublicKey,
+                    algorithm: KmipAlgorithm::Ecdh,
+                    cryptographic_length: bits,
+                    usage_mask: UsageMask::KEY_AGREEMENT,
+                    state: State::Active,
+                    key_material: Some(kp.public.clone()),
+                    ..ObjectRecord::default()
+                })
+                .unwrap();
+            d.store
+                .put(ObjectRecord {
+                    uid: "sk".into(),
+                    object_type: ObjectType::PrivateKey,
+                    algorithm: KmipAlgorithm::Ecdh,
+                    cryptographic_length: bits,
+                    usage_mask: UsageMask::KEY_AGREEMENT,
+                    state: State::Active,
+                    key_material: Some(kp.private.clone()),
+                    ..ObjectRecord::default()
+                })
+                .unwrap();
+
+            let enc = encapsulate(
+                &d,
+                EncapsulateRequest { uid: "pk".into(), ..Default::default() },
+                "t",
+            )
+            .unwrap();
+            assert_eq!(enc.data.len(), curve.len(), "{curve:?}: ct = ephemeral public key");
+            let ss_enc = d.store.get(&enc.uid).unwrap().unwrap().key_material.unwrap();
+
+            let dec = super::super::decapsulate::decapsulate(
+                &d,
+                crate::kmip30::DecapsulateRequest {
+                    uid: "sk".into(),
+                    data: enc.data.clone(),
+                    ..Default::default()
+                },
+                "t",
+            )
+            .unwrap();
+            let ss_dec = d.store.get(&dec.uid).unwrap().unwrap().key_material.unwrap();
+            assert_eq!(ss_enc, ss_dec, "{curve:?}: both sides derive the same secret");
+            assert_eq!(ss_enc.len(), curve.len());
+        }
+    }
+
+    /// ECDH-P256 records (length 256) must NOT take the Montgomery DHKEM
+    /// path — they stay unsupported until a P-curve DHKEM is implemented.
+    #[test]
+    fn nist_ecdh_does_not_take_montgomery_path() {
+        let d = deps();
+        d.store
+            .put(ObjectRecord {
+                uid: "p256".into(),
+                object_type: ObjectType::PublicKey,
+                algorithm: KmipAlgorithm::Ecdh,
+                cryptographic_length: 256,
+                state: State::Active,
+                key_material: Some(vec![0u8; 65]),
+                ..ObjectRecord::default()
+            })
+            .unwrap();
+        let err = encapsulate(
+            &d,
+            EncapsulateRequest { uid: "p256".into(), ..Default::default() },
             "t",
         )
         .unwrap_err();

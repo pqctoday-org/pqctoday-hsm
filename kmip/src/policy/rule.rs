@@ -48,6 +48,16 @@ pub enum Rule {
         /// policy author didn't cite one.
         #[serde(default)]
         clause: Option<String>,
+        /// Case-insensitive glob (`*` / `?`) the request's key `Name` must
+        /// match for this default to fire — the label-only agility contract:
+        /// one policy maps key CLASSES (by label) to algorithms, so
+        /// `name_pattern: "payments-*"` → AES-128 and the generic rule →
+        /// AES-256 can coexist. Within Pass 0, name-patterned defaults are
+        /// evaluated BEFORE generic ones (most-specific-wins), so authors
+        /// don't have to order the YAML carefully. Absent = matches any name
+        /// (including requests with no name).
+        #[serde(default)]
+        name_pattern: Option<String>,
     },
 
     /// When the request carries `algorithm == from` and `op ∈ ops`, rewrite
@@ -64,6 +74,12 @@ pub enum Rule {
         /// policy author didn't cite one.
         #[serde(default)]
         clause: Option<String>,
+        /// Case-insensitive glob (`*` / `?`) the request's key `Name` must
+        /// match for this substitution to fire — scopes a rekey rule to a
+        /// key class (e.g. only `firmware-*` keys move to ML-DSA-44). Absent
+        /// = matches any name (including requests with no name).
+        #[serde(default)]
+        name_pattern: Option<String>,
     },
 
     // ── Gating rules (Pass 2) ─────────────────────────────────────────────
@@ -469,7 +485,36 @@ pub struct GatingDeny {
     pub human: String,
 }
 
+/// Case-insensitive glob match for rule `name_pattern`s: `*` = any run
+/// (including empty), `?` = any single character; everything else literal.
+/// A rule WITH a pattern only fires when the request HAS a name that matches
+/// — an unnamed request never satisfies a patterned rule.
+pub(crate) fn name_pattern_matches(pattern: &str, name: Option<&str>) -> bool {
+    let Some(name) = name else { return false };
+    fn glob(p: &[u8], s: &[u8]) -> bool {
+        match (p.first(), s.first()) {
+            (None, None) => true,
+            (Some(b'*'), _) => glob(&p[1..], s) || (!s.is_empty() && glob(p, &s[1..])),
+            (Some(b'?'), Some(_)) => glob(&p[1..], &s[1..]),
+            (Some(a), Some(b)) if a.eq_ignore_ascii_case(b) => glob(&p[1..], &s[1..]),
+            _ => false,
+        }
+    }
+    glob(pattern.as_bytes(), name.as_bytes())
+}
+
 impl Rule {
+    /// `true` when this is a resolution rule carrying a `name_pattern` — the
+    /// engine's Pass 0 evaluates these BEFORE generic (un-patterned) defaults
+    /// so the most specific rule wins regardless of YAML order.
+    pub fn has_name_pattern(&self) -> bool {
+        matches!(
+            self,
+            Rule::AlgorithmDefault { name_pattern: Some(_), .. }
+                | Rule::AlgorithmSubstitution { name_pattern: Some(_), .. }
+        )
+    }
+
     /// Pass 0 (F-2): resolve `AlgorithmDefault` — fill the request's algorithm
     /// when the request specified none. The engine runs this BEFORE substitutions
     /// (the caller only invokes it while the algorithm is still unresolved), so a
@@ -482,11 +527,18 @@ impl Rule {
                 ops,
                 default_algorithm,
                 reason,
+                name_pattern,
                 ..
-            } if ops.iter().any(|o| op_matches(o, req.op)) => Some(Substitution {
-                new_algorithm: default_algorithm.clone(),
-                reason: reason.clone(),
-            }),
+            } if ops.iter().any(|o| op_matches(o, req.op))
+                && name_pattern
+                    .as_deref()
+                    .is_none_or(|p| name_pattern_matches(p, req.name)) =>
+            {
+                Some(Substitution {
+                    new_algorithm: default_algorithm.clone(),
+                    reason: reason.clone(),
+                })
+            }
             _ => None,
         }
     }
@@ -505,9 +557,13 @@ impl Rule {
                 from,
                 to,
                 reason,
+                name_pattern,
                 ..
             } if current_algorithm.is_some_and(|c| algo_matches(from, c))
-                && ops.iter().any(|o| op_matches(o, req.op)) =>
+                && ops.iter().any(|o| op_matches(o, req.op))
+                && name_pattern
+                    .as_deref()
+                    .is_none_or(|p| name_pattern_matches(p, req.name)) =>
             {
                 Some(Substitution {
                     new_algorithm: to.clone(),
@@ -1736,6 +1792,7 @@ mod tests {
             to: "ML-DSA-65".into(),
             reason: "Upgrade classical to PQC".into(),
             clause: None,
+            name_pattern: None,
         };
         let req = req("CreateKeyPair", Some("ECDSA-P256"), &attrs);
         let sub = r.resolve_substitution(&req, Some("ECDSA-P256")).expect("must substitute");
@@ -1750,6 +1807,7 @@ mod tests {
             default_algorithm: "ML-DSA-87".into(),
             reason: "PQC default for signing".into(),
             clause: None,
+            name_pattern: None,
         };
         let req = req("CreateKeyPair", None, &attrs);
         let sub = r.resolve_default(&req).expect("must default");

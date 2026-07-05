@@ -20,7 +20,7 @@ use crate::error::{KmipError, Result, ResultReason};
 use crate::kmip30::{DecapsulateRequest, DecapsulateResponse, PkcsOp, State};
 
 use super::deps::Deps;
-use super::encapsulate::{is_ml_kem, store_shared_secret};
+use super::encapsulate::{is_ml_kem, montgomery_curve_of, store_shared_secret};
 use super::helpers::{emit_pkcs11, emit_pkcs11_result, emit_request, emit_success, fail_err};
 
 pub fn decapsulate(
@@ -39,15 +39,20 @@ pub fn decapsulate(
         fail_err(deps, correlation_id, "Decapsulate", KmipError::object_not_found(&req.uid))
     })?;
 
-    // K6 — Decapsulate accepts ML-KEM and the hybrid KEMs.
-    if !is_ml_kem(obj.algorithm) && !obj.algorithm.is_hybrid_kem() {
+    // K6 — Decapsulate accepts ML-KEM, the hybrid KEMs, and the classical
+    // Montgomery curves (X25519/X448, DHKEM-style).
+    let montgomery = montgomery_curve_of(&obj);
+    if !is_ml_kem(obj.algorithm) && !obj.algorithm.is_hybrid_kem() && montgomery.is_none() {
         return Err(fail_err(
             deps,
             correlation_id,
             "Decapsulate",
             KmipError::failed(
                 ResultReason::OperationNotSupported,
-                format!("Decapsulate requires an ML-KEM or hybrid KEM key; {:?} is not", obj.algorithm),
+                format!(
+                    "Decapsulate requires an ML-KEM, hybrid KEM, or X25519/X448 key; {:?} is not",
+                    obj.algorithm
+                ),
             ),
         ));
     }
@@ -87,6 +92,8 @@ pub fn decapsulate(
     );
     p_req.usage_mask = Some(obj.usage_mask);
     p_req.state = Some("Active");
+    // name_pattern rules match on the stored key's Name (label-scoped rekey).
+    p_req.name = obj.name.as_deref();
     p_req.current_object_algorithm = Some(&stored_algo);
     p_req.target_uid = Some(&req.uid);
     p_req.object_activation_date = obj.activation_date; // F-3 — max_key_age_days
@@ -111,6 +118,30 @@ pub fn decapsulate(
                 ),
             ));
         }
+    }
+
+    // Classical Montgomery KEM (X25519/X448) — DH of the stored PRIVATE scalar
+    // against the ciphertext (= the encapsulator's ephemeral public key).
+    if let Some(curve) = montgomery {
+        let private = obj.key_material.as_deref().ok_or_else(|| {
+            KmipError::failed(
+                ResultReason::CryptographicFailure,
+                format!("{} private key has no stored material", curve.name()),
+            )
+        })?;
+        let shared_secret =
+            crate::dh_kem::decapsulate(curve, private, &req.data).map_err(|e| {
+                fail_err(
+                    deps,
+                    correlation_id,
+                    "Decapsulate",
+                    KmipError::failed(ResultReason::CryptographicFailure, e),
+                )
+            })?;
+        emit_pkcs11(deps, correlation_id, "soft::dh_kem_decapsulate", None, 0, "CKR_OK");
+        let ss_uid = store_shared_secret(deps, obj.algorithm, shared_secret)?;
+        emit_success(deps, correlation_id, "Decapsulate");
+        return Ok(DecapsulateResponse { uid: ss_uid });
     }
 
     // K6 — hybrid KEM: split the composite ciphertext, ML-KEM-decaps + classical

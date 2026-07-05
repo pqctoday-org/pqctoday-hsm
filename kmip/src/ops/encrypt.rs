@@ -127,6 +127,8 @@ pub fn encrypt(deps: &Deps, mut req: EncryptRequest, correlation_id: &str) -> Re
         PolicyRequest::minimal("Encrypt", Some(&algo), started, correlation_id, &stored_attrs);
     p_req.usage_mask = Some(obj.usage_mask);
     p_req.state = Some(state_name(obj.state));
+    // name_pattern rules match on the stored key's Name (label-scoped rekey).
+    p_req.name = obj.name.as_deref();
     p_req.current_object_algorithm = Some(&algo);
     p_req.target_uid = Some(&req.uid);
     p_req.object_activation_date = obj.activation_date; // F-3 — max_key_age_days

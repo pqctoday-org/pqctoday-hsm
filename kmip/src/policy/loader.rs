@@ -161,7 +161,7 @@ fn first_unknown_rule_field(yaml: &str) -> Option<(usize, String)> {
         "default_algorithm", "deterministic", "effective_from", "effective_until",
         "exception_custom_attribute", "flags", "from", "hashing_algorithm",
         "hashing_algorithms", "mac_algorithms", "mask_generator", "mechanisms",
-        "min_bits", "op", "ops", "ops_affected", "padding_method", "primary",
+        "min_bits", "name_pattern", "op", "ops", "ops_affected", "padding_method", "primary",
         "profile", "reason", "require_deterministic", "salt_length", "secondary",
         "tag_length", "to", "triggered_by_custom_attribute",
     ];

@@ -1885,6 +1885,7 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "x25519-dalek",
+ "x448",
  "x509-cert",
  "x509-parser",
 ]
@@ -2595,7 +2596,7 @@ dependencies = [
 
 [[package]]
 name = "softhsmrustv3"
-version = "0.6.1"
+version = "0.8.0"
 dependencies = [
  "aes",
  "aes-gcm",

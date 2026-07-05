@@ -202,16 +202,24 @@ rules: []
         // A default only fills a request that specified NO algorithm. Resolve it
         // FIRST (F-2) so substitutions (Pass 1) always see the defaulted value —
         // making resolution independent of the order defaults and substitutions
-        // appear in the policy. First matching default wins.
+        // appear in the policy. First matching default wins — with NAME-PATTERNED
+        // defaults evaluated before generic ones (most-specific-wins), so a
+        // `name_pattern: "payments-*"` → AES-128 rule beats the policy's generic
+        // Create → AES-256 default whatever order the YAML lists them in.
         let mut resolved: Option<String> = req.algorithm.map(|s| s.to_string());
         let mut substituted_by: Option<usize> = None;
         if resolved.is_none() {
-            for (i, rule) in snapshot.policy.rules.iter().enumerate() {
-                if let Some(def) = rule.resolve_default(req) {
-                    resolver_note[i] = Some(format!("default → {}", def.new_algorithm));
-                    resolved = Some(def.new_algorithm);
-                    substituted_by = Some(i + 1);
-                    break;
+            'outer: for patterned_phase in [true, false] {
+                for (i, rule) in snapshot.policy.rules.iter().enumerate() {
+                    if rule.has_name_pattern() != patterned_phase {
+                        continue;
+                    }
+                    if let Some(def) = rule.resolve_default(req) {
+                        resolver_note[i] = Some(format!("default → {}", def.new_algorithm));
+                        resolved = Some(def.new_algorithm);
+                        substituted_by = Some(i + 1);
+                        break 'outer;
+                    }
                 }
             }
         }
@@ -672,6 +680,97 @@ rules:
             d.algorithm_override(),
             Some("ML-DSA-87"),
             "default must resolve first so the substitution can chain off it"
+        );
+    }
+
+    /// Label-pattern rules — the Migration tab's label-only contract: the
+    /// SAME op with no algorithm resolves per the request's key Name, with
+    /// name-patterned defaults beating the generic default even when the
+    /// generic rule is listed FIRST (most-specific-wins, not YAML order).
+    #[test]
+    fn name_patterned_defaults_beat_generic_regardless_of_order() {
+        let yaml = r#"
+schema_version: 1
+metadata:
+  name: label-demo
+  description: per-label defaults
+  authority: test
+  effective: "always"
+rules:
+  - type: algorithm_default
+    ops: [Create]
+    default_algorithm: AES-256
+    reason: "generic symmetric default"
+  - type: algorithm_default
+    ops: [Create]
+    name_pattern: "payments-*"
+    default_algorithm: AES-128
+    reason: "legacy payments cipher"
+"#;
+        let eng = Engine::deny_all();
+        eng.activate(load_from_str(yaml, Path::new("<test>")).unwrap()).unwrap();
+        let attrs = HashMap::new();
+
+        let mut named = PolicyRequest::minimal("Create", None, ts(), "c-lbl-1", &attrs);
+        named.name = Some("payments-db-cipher");
+        assert_eq!(
+            eng.evaluate(&named).algorithm_override(),
+            Some("AES-128"),
+            "patterned rule must win although the generic default is listed first"
+        );
+
+        let mut other = PolicyRequest::minimal("Create", None, ts(), "c-lbl-2", &attrs);
+        other.name = Some("vault-archive-cipher");
+        assert_eq!(eng.evaluate(&other).algorithm_override(), Some("AES-256"));
+
+        let unnamed = PolicyRequest::minimal("Create", None, ts(), "c-lbl-3", &attrs);
+        assert_eq!(
+            eng.evaluate(&unnamed).algorithm_override(),
+            Some("AES-256"),
+            "an unnamed request never matches a patterned rule"
+        );
+    }
+
+    /// A name-patterned substitution rekeys ONLY the matching key class.
+    #[test]
+    fn name_patterned_substitution_scopes_the_rekey() {
+        let yaml = r#"
+schema_version: 1
+metadata:
+  name: label-sub
+  description: label-scoped rekey
+  authority: test
+  effective: "always"
+rules:
+  - type: algorithm_substitution
+    ops: [Sign]
+    name_pattern: "firmware-*"
+    from: RSA-2048
+    to: ML-DSA-44
+    reason: "firmware signing moves to ML-DSA-44"
+"#;
+        let eng = Engine::deny_all();
+        eng.activate(load_from_str(yaml, Path::new("<test>")).unwrap()).unwrap();
+        let attrs = HashMap::new();
+
+        let mut fw = PolicyRequest::minimal("Sign", Some("RSA-2048"), ts(), "c-sub-1", &attrs);
+        fw.name = Some("firmware-release-signing");
+        fw.current_object_algorithm = Some("RSA-2048");
+        fw.target_uid = Some("uid-1");
+        match eng.evaluate(&fw) {
+            Decision::RekeyAndProceed { new_algorithm, .. } => {
+                assert_eq!(new_algorithm, "ML-DSA-44");
+            }
+            other => panic!("expected RekeyAndProceed, got {other:?}"),
+        }
+
+        let mut api = PolicyRequest::minimal("Sign", Some("RSA-2048"), ts(), "c-sub-2", &attrs);
+        api.name = Some("api-gateway-signing");
+        api.current_object_algorithm = Some("RSA-2048");
+        api.target_uid = Some("uid-2");
+        assert!(
+            eng.evaluate(&api).is_allow(),
+            "a non-matching label must NOT trigger the firmware rekey rule"
         );
     }
 

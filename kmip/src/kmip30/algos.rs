@@ -48,6 +48,10 @@ pub use softhsmrustv3::constants::{
     CKM_SLH_DSA, CKM_SLH_DSA_KEY_PAIR_GEN,
 };
 
+// PKCS#11 v3.2 §6.7 Edwards-curve mechanisms — re-exported from the engine
+// like the PQC block above (single source of truth, values per pkcs11t.h).
+pub use softhsmrustv3::constants::{CKM_EC_EDWARDS_KEY_PAIR_GEN, CKM_EDDSA};
+
 // ── Standard PKCS#11 v3.2 mech codepoints used by classical algos ──────────
 // From src/lib/pkcs11/pkcs11t.h (in pqctoday-hsm root). These do NOT live in
 // the vendor manifest — they are part of the OASIS PKCS#11 v3.2 normative
@@ -119,6 +123,16 @@ pub enum KmipAlgorithm {
     HmacSha384,    // 0x0a
     HmacSha512,    // 0x0b
     Ecdh,          // 0x0e
+    /// RFC 8032 Ed25519 — official KMIP 3.0 §10.2.6 codepoint `0x37`.
+    /// KeyGen + Sign/Verify execute via the engine's Edwards mechanisms
+    /// (`CKM_EC_EDWARDS_KEY_PAIR_GEN` / `CKM_EDDSA`, 64-byte signatures).
+    Ed25519,       // 0x37
+    /// RFC 8032 Ed448 — official KMIP 3.0 codepoint `0x38`. Wire-complete
+    /// (policies can name it, Locate/GetAttributes render it) but KeyGen and
+    /// Sign return `OperationNotSupported`: the engine has no Ed448 signing
+    /// backend (no vetted Rust crate). X448 key agreement — the curve-448
+    /// capability the Migration tab needs — rides on `Ecdh` + length 448.
+    Ed448,         // 0x38
     /// IETF ChaCha20 stream cipher (RFC 8439) — KMIP 3.0 §11
     /// `Cryptographic Algorithm` codepoint `0x1c`.
     ChaCha20,
@@ -174,6 +188,8 @@ impl KmipAlgorithm {
             HmacSha384 => 0x0000000a,
             HmacSha512 => 0x0000000b,
             Ecdh       => 0x0000000e,
+            Ed25519    => 0x00000037,
+            Ed448      => 0x00000038,
             ChaCha20         => 0x0000001c,
             ChaCha20Poly1305 => 0x0000001e,
             MlKem512   => 0x00000039,
@@ -211,6 +227,8 @@ impl KmipAlgorithm {
             0x0000000a => HmacSha384,
             0x0000000b => HmacSha512,
             0x0000000e => Ecdh,
+            0x00000037 => Ed25519,
+            0x00000038 => Ed448,
             0x0000001c => ChaCha20,
             0x0000001e => ChaCha20Poly1305,
             0x00000039 => MlKem512,
@@ -269,6 +287,25 @@ impl KmipAlgorithm {
         )
     }
 
+    /// Length-aware quantum-safety classification for the playground's
+    /// keystore badges (NOT the KMIP §11 `Quantum Safe` attribute claim,
+    /// which `register_import_export::algorithm_is_quantum_safe` gates and
+    /// the OASIS corpus pins to PQC-only). Symmetric primitives count as
+    /// safe at ≥ 256-bit (Grover margin — AES-128 is flagged at-risk, the
+    /// Migration tab's whole point); hybrids count as safe (secure while
+    /// EITHER component holds); classical public-key algorithms do not.
+    pub const fn quantum_safe_with_length(self, length_bits: u32) -> bool {
+        use KmipAlgorithm::*;
+        match self {
+            Aes | ChaCha20 | ChaCha20Poly1305 | HmacSha256 | HmacSha384 | HmacSha512 => {
+                length_bits >= 256
+            }
+            Rsa | Ecdsa | Ecdh | Ed25519 | Ed448 => false,
+            X25519MlKem768 | SecP256r1MlKem768 => true,
+            _ => self.is_pqc(),
+        }
+    }
+
     /// PKCS#11 mech to call for `(self, op)`. Returns `None` if the operation
     /// is not defined for this algorithm (e.g. `KeyGen` for HMAC, `SignVerify`
     /// for ML-KEM).
@@ -319,8 +356,19 @@ impl KmipAlgorithm {
             (Rsa, Encrypt | Decrypt) => Some(CKM_RSA_PKCS_OAEP),
 
             // ── ECDSA / ECDH classical ────────────────────────────────────
+            // NOTE: `Ecdh` covers the NIST P-curves here. Montgomery keys
+            // (X25519/X448) also collapse to `Ecdh` at the KMIP layer but are
+            // generated + used in-process (`crate::dh_kem`, hybrid-KEM
+            // pattern) — the op handlers dispatch on record length BEFORE
+            // reaching this mechanism map.
             (Ecdsa, KeyGen) | (Ecdh, KeyGen) => Some(CKM_EC_KEY_PAIR_GEN),
             (Ecdsa, SignVerify) => Some(CKM_ECDSA),
+
+            // ── EdDSA (RFC 8032) ──────────────────────────────────────────
+            // Ed25519 executes via the engine's Edwards mechanisms; Ed448 has
+            // no backend (returns None → OperationNotSupported upstream).
+            (Ed25519, KeyGen) => Some(CKM_EC_EDWARDS_KEY_PAIR_GEN),
+            (Ed25519, SignVerify) => Some(CKM_EDDSA),
 
             // ── AES symmetric ─────────────────────────────────────────────
             (Aes, KeyGen) => Some(CKM_AES_KEY_GEN),
@@ -359,6 +407,8 @@ impl KmipAlgorithm {
             HmacSha384 => "HMAC-SHA384",
             HmacSha512 => "HMAC-SHA512",
             Ecdh       => "ECDH",
+            Ed25519    => "Ed25519",
+            Ed448      => "Ed448",
             ChaCha20         => "ChaCha20",
             ChaCha20Poly1305 => "ChaCha20-Poly1305",
             MlKem512   => "ML-KEM-512",
@@ -395,6 +445,7 @@ mod tests {
         use KmipAlgorithm::*;
         &[
             Aes, Rsa, Ecdsa, HmacSha256, HmacSha384, HmacSha512, Ecdh,
+            Ed25519, Ed448,
             MlKem512, MlKem768, MlKem1024,
             MlDsa44, MlDsa65, MlDsa87,
             SlhDsaSha2_128s, SlhDsaSha2_128f,
@@ -483,6 +534,37 @@ mod tests {
     fn aes_keygen_and_gcm_dispatch_correctly() {
         assert_eq!(KmipAlgorithm::Aes.to_pkcs11_mech(PkcsOp::KeyGen), Some(CKM_AES_KEY_GEN));
         assert_eq!(KmipAlgorithm::Aes.to_pkcs11_mech(PkcsOp::Encrypt), Some(CKM_AES_GCM));
+    }
+
+    #[test]
+    fn ed25519_dispatches_to_edwards_mechs_ed448_has_none() {
+        // Ed25519 executes; official KMIP 3.0 codepoint 0x37.
+        assert_eq!(KmipAlgorithm::Ed25519.to_wire_value(), 0x37);
+        assert_eq!(
+            KmipAlgorithm::Ed25519.to_pkcs11_mech(PkcsOp::KeyGen),
+            Some(CKM_EC_EDWARDS_KEY_PAIR_GEN),
+        );
+        assert_eq!(KmipAlgorithm::Ed25519.to_pkcs11_mech(PkcsOp::SignVerify), Some(CKM_EDDSA));
+        // Ed448 is wire-complete (0x38) but has no executable backend.
+        assert_eq!(KmipAlgorithm::Ed448.to_wire_value(), 0x38);
+        assert_eq!(KmipAlgorithm::Ed448.to_pkcs11_mech(PkcsOp::KeyGen), None);
+        assert_eq!(KmipAlgorithm::Ed448.to_pkcs11_mech(PkcsOp::SignVerify), None);
+    }
+
+    #[test]
+    fn quantum_safety_is_length_aware() {
+        use KmipAlgorithm::*;
+        // Symmetric: safe at ≥256-bit, at-risk below (Grover margin).
+        assert!(Aes.quantum_safe_with_length(256));
+        assert!(!Aes.quantum_safe_with_length(128));
+        // Classical public-key: never safe, whatever the size.
+        for a in [Rsa, Ecdsa, Ecdh, Ed25519, Ed448] {
+            assert!(!a.quantum_safe_with_length(4096), "{}", a.spec_name());
+        }
+        // PQC + hybrids: safe.
+        assert!(MlKem768.quantum_safe_with_length(0));
+        assert!(MlDsa44.quantum_safe_with_length(0));
+        assert!(X25519MlKem768.quantum_safe_with_length(0));
     }
 
     /// Pins the PQC mech codepoints to the **standard PKCS#11 v3.2** values

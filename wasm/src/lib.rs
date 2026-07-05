@@ -418,10 +418,13 @@ impl KmipPlayground {
             })
             .unwrap_or_default();
 
+        let name = s("name");
         let mut pr = PolicyRequest::minimal(&op, algorithm.as_deref(), now, "dry-run", &attrs);
         pr.key_length = length;
         pr.current_object_algorithm = current.as_deref();
         pr.state = Some(&state);
+        // `name` — the key label, so name_pattern rules preview correctly.
+        pr.name = name.as_deref();
         // A non-None target makes the engine treat this as an existing object, so
         // a substitution against `currentAlgorithm` surfaces as a Rekey decision.
         if current.is_some() {
@@ -490,12 +493,21 @@ impl KmipPlayground {
                 json!({
                     "uid": r.uid,
                     "objectType": format!("{:?}", r.object_type),
-                    "algorithm": r.algorithm.spec_name(),
+                    // Curve/size-qualified ("AES-128", "X25519", "ECDSA-P256")
+                    // so the keystore UI and the policies name the same thing.
+                    "algorithm": pqctoday_kmip::ops::helpers::qualified_name(
+                        r.algorithm,
+                        r.cryptographic_length,
+                    ),
                     "length": r.cryptographic_length,
                     "state": format!("{:?}", r.state),
                     "name": r.name,
                     "usageMask": r.usage_mask.bits(),
-                    "quantumSafe": r.quantum_safe,
+                    // Explicit KMIP §11 attribute when the client set one;
+                    // otherwise the engine's length-aware classification
+                    // (AES-128 at-risk, classical asym false, PQC/hybrid true).
+                    "quantumSafe": r.quantum_safe.unwrap_or_else(||
+                        r.algorithm.quantum_safe_with_length(r.cryptographic_length)),
                 })
             })
             .collect();
@@ -648,14 +660,22 @@ fn build_payload(op: &str, spec: &Json) -> Result<RequestPayload, String> {
         }),
         "Create" => {
             // H1 — a present-but-unknown algorithm name is an error, not a
-            // silent fallback to AES. Absent → AES (symmetric default).
-            let alg = alg_from_spec_checked(spec)?.unwrap_or(KmipAlgorithm::Aes);
-            let mut attrs = vec![
-                Attribute::CryptographicAlgorithm(alg),
-                Attribute::CryptographicUsageMask(UsageMask::ENCRYPT | UsageMask::DECRYPT),
-            ];
+            // silent fallback to AES. Absent → NO algorithm attribute, so the
+            // active policy's `algorithm_default` chooses (the label-only
+            // agility path — the old `unwrap_or(Aes)` fallback pinned every
+            // label-only Create to bare AES and Pass 0 never fired).
+            let alg = alg_from_spec_checked(spec)?;
+            let mut attrs = vec![Attribute::CryptographicUsageMask(
+                UsageMask::ENCRYPT | UsageMask::DECRYPT,
+            )];
+            if let Some(a) = alg {
+                attrs.push(Attribute::CryptographicAlgorithm(a));
+            }
             if let Some(len) = spec.get("length").and_then(|v| v.as_u64()) {
                 attrs.push(Attribute::CryptographicLength(len as u32));
+            }
+            if let Some(name) = spec.get("name").and_then(|v| v.as_str()) {
+                attrs.push(Attribute::Name(name.to_string()));
             }
             RequestPayload::Create(CreateRequest {
                 object_type: ObjectType::SymmetricKey,
@@ -675,6 +695,9 @@ fn build_payload(op: &str, spec: &Json) -> Result<RequestPayload, String> {
             let intent = spec.get("intent").and_then(|v| v.as_str());
             let usage = match (alg, intent) {
                 (Some(a), _) if is_kem(a) => UsageMask::ENCRYPT | UsageMask::DECRYPT,
+                // ECDH (incl. X25519/X448) is key agreement — the dispatcher
+                // canonicalises this to `CreateKeyPair:KeyAgreement`.
+                (Some(KmipAlgorithm::Ecdh), _) => UsageMask::KEY_AGREEMENT,
                 (Some(_), _) => UsageMask::SIGN | UsageMask::VERIFY,
                 (None, Some("kem")) => UsageMask::KEY_AGREEMENT, // → CreateKeyPair:KeyAgreement
                 (None, Some("encrypt")) => UsageMask::ENCRYPT | UsageMask::DECRYPT,
@@ -684,8 +707,16 @@ fn build_payload(op: &str, spec: &Json) -> Result<RequestPayload, String> {
             if let Some(a) = alg {
                 common.push(Attribute::CryptographicAlgorithm(a));
             }
-            if let Some(len) = spec.get("length").and_then(|v| v.as_u64()) {
-                common.push(Attribute::CryptographicLength(len as u32));
+            let explicit_len = spec.get("length").and_then(|v| v.as_u64()).map(|l| l as u32);
+            let implied_len = spec
+                .get("algorithm")
+                .and_then(|v| v.as_str())
+                .and_then(implied_length_for_name);
+            if let Some(len) = explicit_len.or(implied_len) {
+                common.push(Attribute::CryptographicLength(len));
+            }
+            if let Some(name) = spec.get("name").and_then(|v| v.as_str()) {
+                common.push(Attribute::Name(name.to_string()));
             }
             RequestPayload::CreateKeyPair(CreateKeyPairRequest {
                 common_attributes: common,
@@ -799,8 +830,15 @@ fn alg_from_spec_checked(spec: &Json) -> Result<Option<KmipAlgorithm>, String> {
 /// Map a KMIP spec-name string (e.g. "ML-DSA-65") to the algorithm enum.
 fn alg_from_name(name: &str) -> Option<KmipAlgorithm> {
     use KmipAlgorithm::*;
+    // Montgomery curves collapse to ECDH at the enum layer; the implied
+    // CryptographicLength (255/448) rides separately — see
+    // `implied_length_for_name`, which `build_payload` consults.
+    if name.eq_ignore_ascii_case("X25519") || name.eq_ignore_ascii_case("X448") {
+        return Some(Ecdh);
+    }
     const ALL: &[KmipAlgorithm] = &[
-        Aes, Rsa, Ecdsa, HmacSha256, HmacSha384, HmacSha512, Ecdh, ChaCha20, ChaCha20Poly1305,
+        Aes, Rsa, Ecdsa, HmacSha256, HmacSha384, HmacSha512, Ecdh, Ed25519, Ed448,
+        ChaCha20, ChaCha20Poly1305,
         MlKem512, MlKem768, MlKem1024, MlDsa44, MlDsa65, MlDsa87,
         SlhDsaSha2_128s, SlhDsaSha2_128f, SlhDsaSha2_192s, SlhDsaSha2_192f, SlhDsaSha2_256s,
         SlhDsaSha2_256f, SlhDsaShake128s, SlhDsaShake128f, SlhDsaShake192s, SlhDsaShake192f,
@@ -809,6 +847,19 @@ fn alg_from_name(name: &str) -> Option<KmipAlgorithm> {
         X25519MlKem768, SecP256r1MlKem768,
     ];
     ALL.iter().copied().find(|a| a.spec_name().eq_ignore_ascii_case(name))
+}
+
+/// CryptographicLength a bare algorithm NAME implies when the spec carries no
+/// explicit `length` — how "X25519"/"X448" reach the dispatcher's Montgomery
+/// path (and Ed25519 its §6.7 mech-info bit count) behind the coarse enum.
+fn implied_length_for_name(name: &str) -> Option<u32> {
+    if name.eq_ignore_ascii_case("X25519") || name.eq_ignore_ascii_case("Ed25519") {
+        Some(255)
+    } else if name.eq_ignore_ascii_case("X448") {
+        Some(448)
+    } else {
+        None
+    }
 }
 
 fn is_kem(alg: KmipAlgorithm) -> bool {

@@ -26,10 +26,12 @@ use crate::crypto::{
     CURVE_P384, CURVE_P521,
 };
 use crate::crypto::handlers::{
-    build_ec_spki_p256, build_ec_spki_p384, build_ec_spki_p521, build_mldsa44_spki,
-    build_mldsa65_spki, build_mldsa87_spki, build_mlkem1024_spki, build_mlkem512_spki,
-    build_mlkem768_spki, build_slhdsa_spki, build_spki_from_parts, Attributes,
+    build_ec_spki_p256, build_ec_spki_p384, build_ec_spki_p521, build_ed25519_spki,
+    build_mldsa44_spki, build_mldsa65_spki, build_mldsa87_spki, build_mlkem1024_spki,
+    build_mlkem512_spki, build_mlkem768_spki, build_slhdsa_spki, build_spki_from_parts,
+    Attributes,
 };
+use crate::crypto::ALGO_EDDSA;
 use crate::state::{
     allocate_handle, compute_kcv, finalize_private_key_attrs, store_algo_family, store_bool,
     store_param_set, store_ulong,
@@ -577,6 +579,54 @@ pub fn generate_ecdsa_keypair(
             );
         }
     }
+
+    insert_id_and_label(&mut pub_attrs, cka_id, label);
+    insert_id_and_label(&mut prv_attrs, cka_id, label);
+
+    finalize_and_register(_session, pub_attrs, prv_attrs)
+}
+
+/// Generate an Ed25519 (RFC 8032) keypair — PKCS#11 v3.2 §6.7
+/// `CKM_EC_EDWARDS_KEY_PAIR_GEN`. Attribute defaults mirror the
+/// `ffi::C_GenerateKeyPair` Edwards arm (CKK_EC_EDWARDS, pub CKA_VERIFY,
+/// prv CKA_SIGN; 32-byte raw CKA_VALUE both halves; RFC 8410 SPKI on the
+/// public half). Signing/verification then dispatch via `CKM_EDDSA`
+/// (`native::sign` / `native::verify`, 64-byte signatures).
+///
+/// Returns `(public_handle, private_handle)`.
+///
+/// **Pre-condition**: `session` must be a valid R/W user session.
+pub fn generate_ed25519_keypair(
+    _session: u32,
+    cka_id: &[u8],
+    label: &str,
+) -> Result<(u32, u32), CkRv> {
+    let mut rng = rand::rngs::OsRng;
+    let sk = ed25519_dalek::SigningKey::generate(&mut rng);
+    let vk = sk.verifying_key();
+
+    let mut pub_attrs: Attributes = HashMap::new();
+    let mut prv_attrs: Attributes = HashMap::new();
+
+    store_algo_family(&mut pub_attrs, ALGO_EDDSA);
+    store_algo_family(&mut prv_attrs, ALGO_EDDSA);
+
+    store_ulong(&mut pub_attrs, CKA_CLASS, CKO_PUBLIC_KEY);
+    store_ulong(&mut pub_attrs, CKA_KEY_TYPE, CKK_EC_EDWARDS);
+    store_bool(&mut pub_attrs, CKA_VERIFY, true);
+    store_bool(&mut pub_attrs, CKA_LOCAL, true);
+    store_ulong(&mut pub_attrs, CKA_KEY_GEN_MECHANISM, CKM_EC_EDWARDS_KEY_PAIR_GEN);
+
+    store_ulong(&mut prv_attrs, CKA_CLASS, CKO_PRIVATE_KEY);
+    store_ulong(&mut prv_attrs, CKA_KEY_TYPE, CKK_EC_EDWARDS);
+    store_bool(&mut prv_attrs, CKA_SIGN, true);
+    store_bool(&mut prv_attrs, CKA_LOCAL, true);
+    store_ulong(&mut prv_attrs, CKA_KEY_GEN_MECHANISM, CKM_EC_EDWARDS_KEY_PAIR_GEN);
+
+    let vk_bytes = vk.to_bytes().to_vec();
+    prv_attrs.insert(CKA_VALUE, sk.to_bytes().to_vec());
+    pub_attrs.insert(CKA_VALUE, vk_bytes.clone());
+    pub_attrs.insert(CKA_PUBLIC_KEY_INFO, build_ed25519_spki(&vk_bytes));
 
     insert_id_and_label(&mut pub_attrs, cka_id, label);
     insert_id_and_label(&mut prv_attrs, cka_id, label);
