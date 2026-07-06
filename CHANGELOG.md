@@ -8,6 +8,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.10.0] — 2026-07-05
+
+Label-only crypto agility: the KMIP policy engine can now drive a complete
+classical → hybrid → post-quantum migration keyed on a business *name* the
+application supplies, rekeying keys transparently on first use. Consolidates
+the classical-KEM Encapsulate line (X25519/X448/ECDH through the engine) with
+the Migration-playground engine work.
+
 ### Added
 
 - **Label-only crypto agility (Migration playground foundation).** Policies can
@@ -29,9 +37,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   algorithm, so a "migrate everything" pass turns each legacy key into its PQC
   successor (`RSA-2048 → ML-DSA-44`, `AES-128 → AES-256`) as real KMIP ReKey
   operations; an explicit client template algorithm still wins (request > policy).
-- **`migration-classical.yaml` / `migration-pqc.yaml`** — a seven-key business
-  estate (AES-256/128, X25519, X448, RSA-2048, ECDSA-P256, Ed25519) and its
-  full-PQC target, driving the label-only demo end to end.
+- **`migration-classical.yaml` / `migration-pqc.yaml` / `migration-hybrid.yaml`**
+  — a seven-key business estate (AES-256/128, X25519, X448, RSA-2048,
+  ECDSA-P256, Ed25519), its full-PQC target, and a hybrid transition
+  (key agreement → X25519MLKEM768, signing → ML-DSA-44), driving the label-only
+  demo end to end. Hybrid and full-PQC sign at the **same** level (ML-DSA-44);
+  hybrid's role is a classical co-signature, not a higher PQC level.
+- **`supersedes` link in `list_objects`.** A superseded (Deactivated) key now
+  reports the UID of the replacement it was rekeyed to
+  (`x-pqctoday-supersedes`), so a keystore UI can draw the old→new rekey edge.
 
 ### Changed
 
@@ -48,6 +62,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   the migration.
 - **Label-only keys store their real size** — a key created from a resolved
   policy name (`RSA-2048`, `ECDSA-P384`) now persists that length instead of 0.
+- **The KMIP `Name` is the application's identifier and is stored verbatim** —
+  the engine never fabricates or rewrites it. A key keeps the same business
+  handle across a migration (crypto-agility transparency); the old and new
+  objects are told apart by their UID + state + the `supersedes` link, not by
+  the name.
+
+### Fixed
+
+- **Sign-rekey now retires BOTH halves of the old key pair.** The transparent
+  Sign-side rekey previously deactivated only the private half, leaving the old
+  public key `Active`; a subsequent verify that resolved the public key by name
+  could pick the stale classical key and reject a valid PQC signature. Both
+  halves are now deactivated + supersede-linked, matching the Encapsulate rekey.
 
 ### Internal
 
