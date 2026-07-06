@@ -117,6 +117,15 @@ pub struct PolicyRequest<'a> {
     /// which case the age rule cannot fire (can't enforce an unknown age).
     pub object_activation_date: Option<OffsetDateTime>,
 
+    /// KMIP `Name` of the key this op creates or targets — the request
+    /// template's `Name` attribute for `Create`/`CreateKeyPair`, the stored
+    /// record's `name` for object-targeting ops. Drives the `name_pattern`
+    /// match on `algorithm_default` / `algorithm_substitution` rules: the
+    /// label-only crypto-agility contract, where the application names a key
+    /// class ("firmware-release-signing") and the POLICY decides what
+    /// algorithm that means. `None` when the request/record carries no name.
+    pub name: Option<&'a str>,
+
     /// Custom attributes attached to the request (KMIP `x-*` namespace).
     /// Keys MUST be the bare name without the `x-` prefix (loader strips it).
     pub custom_attrs: &'a HashMap<String, String>,
@@ -156,6 +165,7 @@ impl<'a> PolicyRequest<'a> {
             key_length: None,
             usage_mask: None,
             state: None,
+            name: None,
             current_object_algorithm: None,
             target_uid: None,
             object_activation_date: None,

@@ -23,7 +23,7 @@ Loaded at server start via `pqctoday-kmip --policy-dir policies --policy <name>`
 | [`fips-hashing.yaml`](fips-hashing.yaml) | **Mechanism dimension (hashing).** Restrict Sign/Verify hashing to FIPS SHA-2/SHA-3; deny SHA-1 — gates the KMIP `Hashing Algorithm`, not just the key algorithm. |
 | [`aead-only.yaml`](aead-only.yaml) | **Mechanism dimension (mode/padding).** AES Encrypt/Decrypt must be GCM/CCM; RSA must be OAEP — gates KMIP `Block Cipher Mode` / `Padding Method`. |
 | [`deterministic-signing.yaml`](deterministic-signing.yaml) | **Mechanism forcing.** Forces deterministic ML-DSA/SLH-DSA via the WD19 `Deterministic` flag — policy *sets* the mechanism param, transparent to the app. |
-| [`auto-migrate-on-use.yaml`](auto-migrate-on-use.yaml) | Auto-rekey classical key handles to their PQC equivalent on first use (Sign/Encrypt), via `algorithm_substitution`. |
+| [`auto-migrate-on-use.yaml`](auto-migrate-on-use.yaml) | Auto-rekey classical key handles to their PQC equivalent on first use (Sign/Encapsulate), via `algorithm_substitution`. |
 | [`bsi-tr-02102.yaml`](bsi-tr-02102.yaml) | German BSI TR-02102 profile: allowed PQC + classical algorithms and key lengths per the BSI technical guideline. |
 | [`pkcs11-mechanism-lockdown.yaml`](pkcs11-mechanism-lockdown.yaml) | **Mechanism dimension.** Allowlists the specific PKCS#11 mechanisms permitted (keygen + sign/verify families), denying everything else. |
 
@@ -93,7 +93,7 @@ Two families:
 | Type | Fields | Effect |
 |---|---|---|
 | `algorithm_default` | `ops: [...]`, `default_algorithm: <name>` | When request carries `algorithm = None` AND `op ∈ ops`, supply `default_algorithm`. Lets applications call `CreateKeyPair` without naming an algorithm and let policy decide. |
-| `algorithm_substitution` | `ops: [...]`, `from: <name>`, `to: <name>` | When `algorithm == from` AND `op ∈ ops`, rewrite to `to`. **Headline demo:** application keeps asking for ECDSA-P256, policy substitutes ML-DSA-65 silently. |
+| `algorithm_substitution` | `ops: [...]`, `from: <name>`, `to: <name>` | When `algorithm == from` AND `op ∈ ops`, rewrite to `to`. **Headline demo:** application keeps asking for ECDSA-P256, policy substitutes ML-DSA-65 silently. Now also supported for `Encapsulate` (2026-07-05) — classical ECDH/X25519/X448 key-establishment keys rekey to ML-KEM/hybrid the same way, via `encapsulate.rs::rekey_and_encapsulate`. **`ops:` must never include `Decapsulate`, `DeriveKey`, or `Decrypt`** ("consumer ops" — see `policy::rule::is_consumer_op`): their input was already fixed to an algorithm by an earlier, possibly different-party call, so there is nothing to substitute. This is an **engine invariant, not a convention** — the loader rejects such a rule at load time, and the engine ignores it at runtime even if it somehow got through. |
 
 ### Gating rules (Pass 2)
 

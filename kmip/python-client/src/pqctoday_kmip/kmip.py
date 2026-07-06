@@ -274,3 +274,93 @@ class KmipClient:
     def get_attributes(self, uid: str) -> KmipResult:
         """KMIP GetAttributes for a single UID."""
         return self.request("GetAttributes", _leaf("UniqueIdentifier", "TextString", uid))
+
+    def get_usage_allocation(self, uid: str, usage_limits_count: Optional[int] = None) -> KmipResult:
+        """KMIP GetUsageAllocation (§6.1.27) — grants a usage allocation by
+        decrementing the object's tracked Usage Limits Count."""
+        payload = [_leaf("UniqueIdentifier", "TextString", uid)]
+        if usage_limits_count is not None:
+            payload.append(_leaf("UsageLimitsCount", "LongInteger", usage_limits_count))
+        return self.request("GetUsageAllocation", *payload)
+
+    def get_constraints(self) -> KmipResult:
+        """KMIP GetConstraints (§6.1.26) — the engine-backed cryptographic
+        constraint table (minimum key lengths, allowed algorithms, …). Takes
+        no request fields."""
+        return self.request("GetConstraints")
+
+    def set_endpoint_role(self, role: str = "Server") -> KmipResult:
+        """KMIP SetEndpointRole (§6.1.59). Only ``role="Server"`` is
+        acknowledged (the server keeps the role it already has);
+        ``role="Client"`` is rejected with FeatureNotSupported."""
+        return self.request("SetEndpointRole", _leaf("EndpointRole", "Enumeration", role))
+
+    def set_defaults(self, object_type: str, name: Optional[str] = None) -> KmipResult:
+        """KMIP SetDefaults (§6.1.58) — register a default Name new objects
+        of ``object_type`` inherit at Create/CreateKeyPair time when the
+        request doesn't supply its own. Matches the tested shape in
+        ``op_coverage_e2e.rs``'s ``sd-set`` case (arbitrary attribute
+        coverage beyond Name isn't exposed here yet)."""
+        attrs = [_leaf("Name", "TextString", name)] if name else []
+        return self.request(
+            "SetDefaults",
+            _struct(
+                "DefaultsInformation",
+                _struct(
+                    "ObjectDefaults",
+                    _leaf("ObjectType", "Enumeration", object_type),
+                    _struct("Attributes", *attrs),
+                ),
+            ),
+        )
+
+    def derive_key(
+        self,
+        base_uid: str,
+        *,
+        derivation_data: bytes,
+        object_type: str = "SymmetricKey",
+        method: str = "NIST800-108-C",
+        algorithm: str = "AES",
+        length: int = 256,
+        usage: str = "Encrypt Decrypt",
+    ) -> KmipResult:
+        """KMIP DeriveKey (§6.1.18) — derive a new key from ``base_uid``.
+        Defaults match the tested NIST SP 800-108 Counter-Mode case in
+        ``op_coverage_e2e.rs``'s ``dk-derive``. Returns the new object's UID
+        via ``.get("UniqueIdentifier")``."""
+        return self.request(
+            "DeriveKey",
+            _leaf("ObjectType", "Enumeration", object_type),
+            _leaf("UniqueIdentifier", "TextString", base_uid),
+            _leaf("DerivationMethod", "Enumeration", method),
+            _struct(
+                "DerivationParameters",
+                _leaf("DerivationData", "ByteString", derivation_data.hex()),
+            ),
+            _struct(
+                "Attributes",
+                _leaf("CryptographicAlgorithm", "Enumeration", algorithm),
+                _leaf("CryptographicLength", "Integer", length),
+                _leaf("CryptographicUsageMask", "Integer", usage),
+            ),
+        )
+
+    def rekey(self, uid: str, *, offset: Optional[int] = None) -> KmipResult:
+        """KMIP Re-key (§6.1.51) — mint a replacement object for ``uid``,
+        inheriting its algorithm; the original is linked via
+        ``ReplacedObjectLink``. Returns the new UID via
+        ``.get("UniqueIdentifier")``."""
+        payload = [_leaf("UniqueIdentifier", "TextString", uid)]
+        if offset is not None:
+            payload.append(_leaf("Offset", "Interval", offset))
+        return self.request("ReKey", *payload)
+
+    def rekey_key_pair(self, uid: str, *, offset: Optional[int] = None) -> KmipResult:
+        """KMIP Re-key Key Pair (§6.1.52) — mint a replacement key pair for
+        the private key ``uid``. Returns the new private/public UIDs via
+        ``.get("PrivateKeyUniqueIdentifier")`` / ``.get("PublicKeyUniqueIdentifier")``."""
+        payload = [_leaf("UniqueIdentifier", "TextString", uid)]
+        if offset is not None:
+            payload.append(_leaf("Offset", "Interval", offset))
+        return self.request("ReKeyKeyPair", *payload)

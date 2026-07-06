@@ -136,6 +136,15 @@ pub fn create_key_pair(
     );
     p_req.key_length = key_length;
     p_req.usage_mask = usage_mask;
+    // Label-pattern rules (`name_pattern`) match on the template's Name — the
+    // Migration tab's label-only contract, where the policy maps a business
+    // key name to an algorithm. `Name` is not `Custom`, so it isn't in
+    // `custom_attrs`; pull it straight off the merged template.
+    let template_name = all_attrs.iter().find_map(|a| match a {
+        Attribute::Name(n) => Some(n.as_str()),
+        _ => None,
+    });
+    p_req.name = template_name;
 
     let resolved_algorithm = match deps.engine.evaluate(&p_req) {
         Decision::Allow { algorithm_override, .. } => match algorithm_override.or(algorithm_in) {
@@ -173,6 +182,29 @@ pub fn create_key_pair(
     };
 
     let kmip_algo = parse_algorithm(&resolved_algorithm)?;
+
+    // Label-only Montgomery KEM: when the policy resolved the algorithm to
+    // `X25519`/`X448` (a name, not a template CryptographicDomainParameters),
+    // supply the matching RecommendedCurve + §6.7 mech-info length here so the
+    // engine generates the right curve and `qualified_name` renders the stored
+    // key distinctly (255 → X25519, 448 → X448) instead of colliding with
+    // real P-curves as `ECDH-P256`.
+    let (recommended_curve, montgomery_length) = {
+        use crate::kmip30::algos::recommended_curve as rc;
+        match resolved_algorithm.as_str() {
+            "X25519" => (Some(rc::CURVE25519), Some(255u32)),
+            "X448" => (Some(rc::CURVE448), Some(448u32)),
+            _ => (recommended_curve, None),
+        }
+    };
+    // Size the record from the policy-resolved name on the label-only path
+    // (`RSA-2048` → 2048, `ECDSA-P384` → 384) so the stored key carries its
+    // real length — otherwise a label-only key persisted length 0 and the UI /
+    // GetAttributes reported no size. Montgomery curves get their §6.7 length
+    // above; PQC parameter sets encode their own size (None here).
+    let stored_length = key_length
+        .or(montgomery_length)
+        .or_else(|| super::helpers::classical_length_from_name(&resolved_algorithm));
 
     // ── Plane 3: would call C_GenerateKeyPair ───────────────────────────
     // PKCS#11 v3.2 §C.7.1 — signature in pkcs11f.h:
@@ -300,7 +332,7 @@ pub fn create_key_pair(
         uid: priv_uid.clone(),
         object_type: ObjectType::PrivateKey,
         algorithm: kmip_algo,
-        cryptographic_length: priv_x.length.unwrap_or(0),
+        cryptographic_length: priv_x.length.or(stored_length).unwrap_or(0),
         usage_mask: priv_usage,
         state: priv_state,
         pkcs11_cka_id: pkcs11_cka_id_priv,
@@ -370,7 +402,7 @@ pub fn create_key_pair(
         uid: pub_uid.clone(),
         object_type: ObjectType::PublicKey,
         algorithm: kmip_algo,
-        cryptographic_length: pub_x.length.unwrap_or(0),
+        cryptographic_length: pub_x.length.or(stored_length).unwrap_or(0),
         usage_mask: pub_usage,
         state: pub_state,
         pkcs11_cka_id: pkcs11_cka_id_pub,
@@ -632,6 +664,13 @@ pub(crate) fn parse_algorithm(s: &str) -> Result<KmipAlgorithm> {
         "SecP384r1MLKEM1024" => SecP384r1MlKem1024,
         // P1 (2026-07-05): Ed25519 has no size/curve suffix — exact name.
         "Ed25519" => Ed25519,
+        // Montgomery key-agreement curves collapse to `Ecdh` at the enum layer;
+        // the caller (create_key_pair) turns these names into ECDH +
+        // RecommendedCurve CURVE25519/CURVE448 so the label-only policy default
+        // path (`default_algorithm: X25519`) can create them. Without this arm
+        // a policy naming X25519/X448 failed to parse (the engine expected the
+        // curve only in the request template's CryptographicDomainParameters).
+        "X25519" | "X448" => Ecdh,
         // Size-suffixed classical algos collapse to their base enum.
         _ => match base {
             "AES" => Aes,

@@ -315,6 +315,25 @@ impl KmipAlgorithm {
         )
     }
 
+    /// Length-aware quantum-safety classification for the playground's
+    /// keystore badges (NOT the KMIP §11 `Quantum Safe` attribute claim,
+    /// which `register_import_export::algorithm_is_quantum_safe` gates and
+    /// the OASIS corpus pins to PQC-only). Symmetric primitives count as
+    /// safe at ≥ 256-bit (Grover margin — AES-128 is flagged at-risk, the
+    /// Migration tab's whole point); hybrids count as safe (secure while
+    /// EITHER component holds); classical public-key algorithms do not.
+    pub const fn quantum_safe_with_length(self, length_bits: u32) -> bool {
+        use KmipAlgorithm::*;
+        match self {
+            Aes | ChaCha20 | ChaCha20Poly1305 | HmacSha256 | HmacSha384 | HmacSha512 => {
+                length_bits >= 256
+            }
+            Rsa | Ecdsa | Ecdh | Ed25519 => false,
+            X25519MlKem768 | SecP256r1MlKem768 => true,
+            _ => self.is_pqc(),
+        }
+    }
+
     /// PKCS#11 mech to call for `(self, op)`. Returns `None` if the operation
     /// is not defined for this algorithm (e.g. `KeyGen` for HMAC, `SignVerify`
     /// for ML-KEM).

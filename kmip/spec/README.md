@@ -6,12 +6,15 @@ Local copies of the OASIS KMIP + PKCS#11 specification documents that the wrappe
 |---|---|---|---|
 | `oasis-kmip-3.0/kmip-spec-v3.0.pdf` | 3 141 715 | `https://docs.oasis-open.org/kmip/kmip-spec/v3.0/kmip-spec-v3.0.pdf` | 2024-08-23 |
 | `oasis-kmip-3.0/kmip-spec-v3.0.html` | 19 055 347 | `https://docs.oasis-open.org/kmip/kmip-spec/v3.0/kmip-spec-v3.0.html` | 2024-08-23 |
+| `oasis-kmip-3.0/kmip-spec-v3.0-wd19-clean.pdf` | 3 142 670 | Working Draft 19 (pre-CSD, PQC ops added WD17+) | 2025-02-14 |
 | `oasis-kmip-3.0/kmip-profiles-v3.0.pdf` | 1 142 181 | `https://docs.oasis-open.org/kmip/kmip-profiles/v3.0/kmip-profiles-v3.0.pdf` | 2023-11-30 |
 | `oasis-kmip-3.0/kmip-profiles-v3.0.zip` | 8 389 246 | `https://docs.oasis-open.org/kmip/kmip-profiles/v3.0/kmip-profiles-v3.0.zip` | 2023-11-30 |
 | `oasis-kmip-2.1/kmip-spec-v2.1-os.pdf` | 6 796 775 | `https://docs.oasis-open.org/kmip/kmip-spec/v2.1/os/kmip-spec-v2.1-os.pdf` | 2020-12-14 |
-| `oasis-pkcs11-3.2/` | _not yet downloaded_ | `https://docs.oasis-open.org/pkcs11/pkcs11-spec/v3.2/` | — |
+| `../../docs/refs/pkcs11-spec-v3.2-csd01.pdf` | 5 142 051 | `https://docs.oasis-open.org/pkcs11/pkcs11-spec/v3.2/csd01/pkcs11-spec-v3.2-csd01.pdf` | 2025-04-16 |
 
-All files have `.sha256` companions next to them; regenerate after any refresh.
+All files have `.sha256` companions next to them; regenerate after any refresh. The PKCS#11 v3.2 PDF actually lives under `pqctoday-hsm/docs/refs/` (next to the canonical `pkcs11t.h`), not under a `oasis-pkcs11-3.2/` subdirectory here — this row previously said "not yet downloaded," which was stale.
+
+**PQC facts (Encapsulate/Decapsulate, ML-DSA/ML-KEM, hybrid KEM codepoints, KEM Algorithm enum) live ONLY in the WD19 PDF** — the CSD01 `.pdf`/`.html` predate them entirely. The automated tag/enum extractor (`kmip/tools/extract_kmip_spec.rs` → `kmip-spec-3.0-tags-enums.json`) parses the CSD01 `.html` only, so it does not — and cannot — cover WD19-only facts. See [`crossref/`](crossref/) for hand-verified, citation-backed fact sheets covering that gap (starting with `crossref/kem-encapsulate-decapsulate.yaml`).
 
 ## Use
 

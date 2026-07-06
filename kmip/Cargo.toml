@@ -169,10 +169,12 @@ x509-parser = { version = "0.16" }
 # pin this flow against a 2048-bit RSA-PSS signing key.
 rsa = "0.9"
 
-# K6 hybrid KEM: ALL hybrid crypto now lives in the softhsmrustv3 engine
-# (native::hybrid) — the KMIP layer holds no crypto crate. The former
-# ml-kem / x25519-dalek / p256 deps were removed with the in-layer duplicate
-# implementation (src/hybrid_kem.rs is now a thin re-export of the engine).
+# K6 hybrid KEM + classical KEM: ALL asymmetric-KEM crypto now lives in the
+# softhsmrustv3 engine (native::hybrid + native classical Encapsulate) — the
+# KMIP layer holds no crypto crate. The former ml-kem / x25519-dalek / p256 /
+# x448 deps were removed with the in-layer duplicate implementations
+# (src/hybrid_kem.rs is a thin re-export; the Migration tab's in-layer
+# src/dh_kem.rs was deleted in favour of the engine's classical Encapsulate).
 
 # HTML parsing — only used by the build-time `extract-kmip-spec` tool
 # (tools/extract_kmip_spec.rs). The OASIS KMIP 3.0 spec ships as Word-converted

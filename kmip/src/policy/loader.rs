@@ -161,7 +161,7 @@ fn first_unknown_rule_field(yaml: &str) -> Option<(usize, String)> {
         "default_algorithm", "deterministic", "effective_from", "effective_until",
         "exception_custom_attribute", "flags", "from", "hashing_algorithm",
         "hashing_algorithms", "mac_algorithms", "mask_generator", "mechanisms",
-        "min_bits", "op", "ops", "ops_affected", "padding_method", "primary",
+        "min_bits", "name_pattern", "op", "ops", "ops_affected", "padding_method", "primary",
         "profile", "reason", "require_deterministic", "salt_length", "secondary",
         "tag_length", "to", "triggered_by_custom_attribute",
     ];
@@ -280,6 +280,30 @@ rules:
         assert_eq!(first_unknown_rule_field(yaml), Some((1, "bogus_field".to_string())));
         let err = load_from_str(yaml, std::path::Path::new("<t>")).unwrap_err();
         assert!(err.to_string().contains("unknown field"), "got: {err}");
+    }
+
+    /// 2026-07-05 (classical-KEM crypto-agility) — a substitution rule
+    /// targeting a consumer op (Decapsulate/DeriveKey/Decrypt) is a fatal
+    /// lint finding, not just an engine-level no-op — rejected at load time
+    /// (even in non-strict mode, since this is a fail-open-risk position
+    /// like `from`) so the mistake is caught when the policy is authored.
+    #[test]
+    fn substitution_targeting_decapsulate_is_rejected_at_load() {
+        let yaml = r#"
+schema_version: 1
+metadata: { name: t, description: d, authority: a, effective: "always" }
+rules:
+  - type: algorithm_substitution
+    ops: [Decapsulate]
+    from: ECDH-P256
+    to: ML-KEM-1024
+    reason: "should be rejected"
+"#;
+        let err = load_from_str(yaml, std::path::Path::new("<t>")).unwrap_err();
+        assert!(
+            err.to_string().contains("consumer op"),
+            "expected a consumer-op rejection, got: {err}"
+        );
     }
 
     #[test]

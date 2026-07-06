@@ -631,6 +631,14 @@ pub fn generate_ecdh_keypair(
     store_bool(&mut pub_attrs, CKA_VERIFY, false);
     store_bool(&mut pub_attrs, CKA_WRAP, false);
     store_bool(&mut pub_attrs, CKA_DERIVE, false);
+    // Classical-KEM crypto-agility (2026-07-05): PKCS#11 v3.2 §6.3.17 permits
+    // CKM_ECDH1_DERIVE under C_EncapsulateKey/C_DecapsulateKey as well as
+    // C_DeriveKey (same mechanism, independent permission flags, Table 78) —
+    // this is the ephemeral-static "DHKEM" mode KMIP 3.0 WD19 names in its
+    // KEM Algorithm enum. Enabling it alongside CKA_DERIVE lets one key serve
+    // both the existing static-static DeriveKey path and the new Encapsulate/
+    // Decapsulate path.
+    store_bool(&mut pub_attrs, CKA_ENCAPSULATE, true);
     store_bool(&mut pub_attrs, CKA_LOCAL, true);
 
     store_ulong(&mut prv_attrs, CKA_CLASS, CKO_PRIVATE_KEY);
@@ -644,6 +652,7 @@ pub fn generate_ecdh_keypair(
     store_bool(&mut prv_attrs, CKA_SIGN, false);
     store_bool(&mut prv_attrs, CKA_UNWRAP, false);
     store_bool(&mut prv_attrs, CKA_DERIVE, true);
+    store_bool(&mut prv_attrs, CKA_DECAPSULATE, true);
     store_bool(&mut prv_attrs, CKA_LOCAL, true);
 
     let mut rng = rand::rngs::OsRng;
@@ -808,6 +817,11 @@ pub fn generate_x25519_keypair(
     store_bool(&mut pub_attrs, CKA_VERIFY, false);
     store_bool(&mut pub_attrs, CKA_WRAP, false);
     store_bool(&mut pub_attrs, CKA_DERIVE, false);
+    // Classical-KEM crypto-agility (2026-07-05) — see the identical note in
+    // generate_ecdh_keypair: CKM_EC_MONTGOMERY_KEY_DERIVE is valid under
+    // C_EncapsulateKey/C_DecapsulateKey too (PKCS#11 v3.2 §6.3.17-equivalent
+    // for Montgomery curves), same mechanism as C_DeriveKey.
+    store_bool(&mut pub_attrs, CKA_ENCAPSULATE, true);
     store_bool(&mut pub_attrs, CKA_LOCAL, true);
 
     store_ulong(&mut prv_attrs, CKA_CLASS, CKO_PRIVATE_KEY);
@@ -821,6 +835,7 @@ pub fn generate_x25519_keypair(
     store_bool(&mut prv_attrs, CKA_SIGN, false);
     store_bool(&mut prv_attrs, CKA_UNWRAP, false);
     store_bool(&mut prv_attrs, CKA_DERIVE, true);
+    store_bool(&mut prv_attrs, CKA_DECAPSULATE, true);
     store_bool(&mut prv_attrs, CKA_LOCAL, true);
 
     let mut rng = rand::rngs::OsRng;
@@ -883,6 +898,9 @@ pub fn generate_x448_keypair(
     store_bool(&mut pub_attrs, CKA_VERIFY, false);
     store_bool(&mut pub_attrs, CKA_WRAP, false);
     store_bool(&mut pub_attrs, CKA_DERIVE, false);
+    // Classical-KEM crypto-agility (2026-07-05) — see the identical note in
+    // generate_ecdh_keypair.
+    store_bool(&mut pub_attrs, CKA_ENCAPSULATE, true);
     store_bool(&mut pub_attrs, CKA_LOCAL, true);
 
     store_ulong(&mut prv_attrs, CKA_CLASS, CKO_PRIVATE_KEY);
@@ -896,6 +914,7 @@ pub fn generate_x448_keypair(
     store_bool(&mut prv_attrs, CKA_SIGN, false);
     store_bool(&mut prv_attrs, CKA_UNWRAP, false);
     store_bool(&mut prv_attrs, CKA_DERIVE, true);
+    store_bool(&mut prv_attrs, CKA_DECAPSULATE, true);
     store_bool(&mut prv_attrs, CKA_LOCAL, true);
 
     // x448's StaticSecret is built from 56 random bytes (matches the FFI arm).

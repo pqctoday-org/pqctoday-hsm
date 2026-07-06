@@ -119,6 +119,8 @@ pub fn sign(deps: &Deps, req: SignRequest, correlation_id: &str) -> Result<SignR
     );
     p_req.usage_mask = Some(obj.usage_mask);
     p_req.state = Some("Active");
+    // name_pattern rules match on the stored key's Name (label-scoped rekey).
+    p_req.name = obj.name.as_deref();
     p_req.current_object_algorithm = Some(&stored_algo);
     p_req.target_uid = Some(&req.uid);
     p_req.object_activation_date = obj.activation_date; // F-3 — max_key_age_days
@@ -326,59 +328,38 @@ fn rekey_and_sign(
     new_algorithm: &str,
     correlation_id: &str,
 ) -> Result<SignResponse> {
-    use crate::kmip30::{ActivateRequest, Attribute, CreateKeyPairRequest, UsageMask};
+    use crate::kmip30::UsageMask;
 
-    let new_alg = super::create_key_pair::parse_algorithm(new_algorithm)
-        .map_err(|e| fail_err(deps, correlation_id, "Sign", e))?;
-
-    // 1. Generate the replacement signing key pair under the policy's target.
-    let ckp = super::create_key_pair::create_key_pair(
+    // 1+2. Replacement signing pair (Name copied from the old key) + Activate.
+    let pair = super::agility::generate_replacement_pair(
         deps,
-        CreateKeyPairRequest {
-            common_attributes: vec![
-                Attribute::CryptographicAlgorithm(new_alg),
-                Attribute::CryptographicUsageMask(UsageMask::SIGN | UsageMask::VERIFY),
-            ],
-            private_key_attributes: vec![],
-            public_key_attributes: vec![],
-            seed: None,
-        },
+        old,
+        new_algorithm,
+        UsageMask::SIGN | UsageMask::VERIFY,
         "CreateKeyPair:Sign",
         correlation_id,
-    )?;
+    )
+    .map_err(|e| fail_err(deps, correlation_id, "Sign", e))?;
 
-    // 2. Activate both halves so the re-issued Sign / future Verify can use them.
-    super::activate::activate(
-        deps,
-        ActivateRequest { uid: ckp.private_key_uid.clone() },
-        correlation_id,
-    )?;
-    super::activate::activate(
-        deps,
-        ActivateRequest { uid: ckp.public_key_uid.clone() },
-        correlation_id,
-    )?;
-
-    // 3. Deactivate + supersede the old key.
-    let mut old_rec = old.clone();
-    let from_state = format!("{:?}", old_rec.state);
-    old_rec.state = State::Deactivated;
-    old_rec.supersedes = Some(ckp.private_key_uid.clone());
-    old_rec
-        .links
-        .insert("x-pqctoday-supersedes".to_string(), ckp.private_key_uid.clone());
-    deps.store.update(old_rec)?;
-    deps.sink.emit(AuditEvent::at(
-        OffsetDateTime::now_utc(),
-        Plane::Kmip,
-        correlation_id,
-        EventPayload::KmipObjectStateChanged {
-            uid: old.uid.clone(),
-            from_state,
-            to_state: "Deactivated".into(),
-            reason: format!("superseded by {} (agility rekey → {})", ckp.private_key_uid, new_algorithm),
-        },
-    ));
+    // 3. Deactivate + supersede the old key pair — BOTH halves. Retiring only
+    // the private half (as an earlier version did) left the old PUBLIC key
+    // Active, so a later verify-by-label could resolve to the stale classical
+    // public key and reject a valid PQC signature. Retire the public half too
+    // and link it to the new public key (mirrors the Encapsulate rekey, which
+    // already supersedes both halves).
+    super::agility::supersede_old(deps, old, &pair.private_uid, new_algorithm, correlation_id)?;
+    if let Some(old_pub_uid) = old.links.get("PublicKeyLink").cloned() {
+        if let Some(mut old_pub) = deps.store.get(&old_pub_uid)? {
+            if old_pub.state == State::Active || old_pub.state == State::PreActive {
+                old_pub.state = State::Deactivated;
+                old_pub.supersedes = Some(pair.public_uid.clone());
+                old_pub
+                    .links
+                    .insert("x-pqctoday-supersedes".to_string(), pair.public_uid.clone());
+                deps.store.update(old_pub)?;
+            }
+        }
+    }
 
     // 4. Re-issue the original Sign against the migrated key, then stamp the
     // response with the rekey details (R7 Phase 4 — so the dispatcher's §9.5
@@ -387,7 +368,7 @@ fn rekey_and_sign(
     let mut resp = sign(
         deps,
         SignRequest {
-            uid: ckp.private_key_uid.clone(),
+            uid: pair.private_uid.clone(),
             data: req.data.clone(),
             cryptographic_parameters: req.cryptographic_parameters.clone(),
         },
@@ -395,8 +376,8 @@ fn rekey_and_sign(
     )?;
     resp.rekeyed = Some(crate::kmip30::SignRekeyInfo {
         old_uid: old.uid.clone(),
-        new_private_key_uid: ckp.private_key_uid,
-        new_public_key_uid: ckp.public_key_uid,
+        new_private_key_uid: pair.private_uid,
+        new_public_key_uid: pair.public_uid,
     });
     Ok(resp)
 }

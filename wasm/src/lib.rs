@@ -31,16 +31,17 @@ use serde_json::{json, Value as Json};
 use wasm_bindgen::prelude::*;
 
 use pqctoday_kmip::auditlog::{AuditSink, RingSink};
-use pqctoday_kmip::codec::{decode_one, TtlvFrame, Value as Ttlv};
+use pqctoday_kmip::codec::{decode_one, encode_to_vec, Tag, TtlvFrame, Value as Ttlv};
 use pqctoday_kmip::dispatcher::{dispatch, one_off_request};
 use pqctoday_kmip::kmip30::{
     decode_request_message, encode_request_message, encode_response_message, ActivateRequest,
     Attribute, BatchErrorContinuationOption, CreateKeyPairRequest, CreateRequest,
     DecapsulateRequest, DecryptRequest, DestroyRequest, EncapsulateRequest, EncryptRequest,
     GetRequest, KmipAlgorithm, LocateRequest, ObjectType, QueryFunction, QueryRequest,
-    RequestBatchItem, RequestHeader, RequestMessage, RequestPayload, ResponseBatchItem,
-    ResponseHeader, ResponseMessage, ResponsePayload, ResultStatus, RevocationReason,
-    RevokeRequest, SignRequest, SignatureVerifyRequest, UsageMask, WireError,
+    ReKeyKeyPairRequest, ReKeyRequest, RequestBatchItem, RequestHeader, RequestMessage,
+    RequestPayload, ResponseBatchItem, ResponseHeader, ResponseMessage, ResponsePayload,
+    ResultStatus, RevocationReason, RevokeRequest, SignRequest, SignatureVerifyRequest, UsageMask,
+    WireError,
 };
 use pqctoday_kmip::ops::{Deps, DepsConfig};
 use pqctoday_kmip::policy::Engine;
@@ -72,15 +73,33 @@ pub struct KmipPlayground {
 #[wasm_bindgen]
 impl KmipPlayground {
     /// Boot a fresh control plane: a `softhsmrustv3` token + user session on
-    /// slot 0 (real crypto), the built-in permissive policy wired to the audit
-    /// ring (so Plane-1 decisions are visible), and a volatile `MemoryStore`.
+    /// `slot` (real crypto; omitted/`undefined` → slot 0, the single-tab
+    /// default every existing caller uses), the built-in permissive policy
+    /// wired to the audit ring (so Plane-1 decisions are visible), and a
+    /// volatile `MemoryStore`.
+    ///
+    /// The engine's token/slot storage is a `HashMap<u32, TokenState>`
+    /// (`rust/src/state.rs`), not a single fixed slot — so a second
+    /// `KmipPlayground` in the SAME wasm module instance (e.g. the OASIS
+    /// corpus replay booting one engine per test) needs its own slot;
+    /// reusing slot 0 while an earlier instance's session on it is still
+    /// open fails bootstrap (confirmed empirically: `CK_RV=0x000000b6`).
+    /// The engine boots single-slot (only slot 0 pre-registered) —
+    /// `state::ensure_slot` is "the multi-slot configuration surface"
+    /// (its own doc comment) that brings a new slot online before
+    /// `C_InitToken` will accept it; skipping this for a non-zero slot
+    /// fails with `CKR_SLOT_ID_INVALID` (confirmed empirically).
     #[wasm_bindgen(constructor)]
-    pub fn new() -> Result<KmipPlayground, JsError> {
+    pub fn new(slot: Option<u32>) -> Result<KmipPlayground, JsError> {
         console_error_panic_hook::set_once();
+        let slot = slot.unwrap_or(0);
+        if slot != 0 {
+            softhsmrustv3::state::ensure_slot(slot);
+        }
 
         // Plane 3 — bootstrap the engine token + user session (real crypto).
         let session = softhsmrustv3::native::session::bootstrap_default_token(
-            0, "so-pin", "1234", "pqctoday-kmip",
+            slot, "so-pin", "1234", "pqctoday-kmip",
         )
         .map_err(|rv| JsError::new(&format!("engine bootstrap failed: CK_RV=0x{rv:08x}")))?;
 
@@ -400,10 +419,13 @@ impl KmipPlayground {
             })
             .unwrap_or_default();
 
+        let name = s("name");
         let mut pr = PolicyRequest::minimal(&op, algorithm.as_deref(), now, "dry-run", &attrs);
         pr.key_length = length;
         pr.current_object_algorithm = current.as_deref();
         pr.state = Some(&state);
+        // `name` — the key label, so name_pattern rules preview correctly.
+        pr.name = name.as_deref();
         // A non-None target makes the engine treat this as an existing object, so
         // a substitution against `currentAlgorithm` surfaces as a Rekey decision.
         if current.is_some() {
@@ -472,12 +494,27 @@ impl KmipPlayground {
                 json!({
                     "uid": r.uid,
                     "objectType": format!("{:?}", r.object_type),
-                    "algorithm": r.algorithm.spec_name(),
+                    // Curve/size-qualified ("AES-128", "X25519", "ECDSA-P256")
+                    // so the keystore UI and the policies name the same thing.
+                    "algorithm": pqctoday_kmip::ops::helpers::qualified_name(
+                        r.algorithm,
+                        r.cryptographic_length,
+                    ),
                     "length": r.cryptographic_length,
                     "state": format!("{:?}", r.state),
                     "name": r.name,
                     "usageMask": r.usage_mask.bits(),
-                    "quantumSafe": r.quantum_safe,
+                    // Explicit KMIP §11 attribute when the client set one;
+                    // otherwise the engine's length-aware classification
+                    // (AES-128 at-risk, classical asym false, PQC/hybrid true).
+                    "quantumSafe": r.quantum_safe.unwrap_or_else(||
+                        r.algorithm.quantum_safe_with_length(r.cryptographic_length)),
+                    // Crypto-agility lineage: on a superseded (Deactivated) key,
+                    // the UID of the replacement it was rekeyed to (KMIP
+                    // `x-pqctoday-supersedes` link / `supersedes` field). `None`
+                    // for keys that were never rekeyed. Lets the keystore UI
+                    // draw the old→new migration edge.
+                    "supersedes": r.supersedes,
                 })
             })
             .collect();
@@ -508,6 +545,110 @@ impl KmipPlayground {
 #[wasm_bindgen]
 pub fn decode_ttlv(bytes: &[u8]) -> String {
     frame_json_from_bytes(bytes).to_string()
+}
+
+/// Encode a JSON tree (`{tag, type, value?, children?}` — the exact shape
+/// `decode_ttlv` emits) to KMIP TTLV wire bytes. The inverse of `decode_ttlv`;
+/// lets a caller build an arbitrary request by hand (any of the 66 KMIP 3.0
+/// operations, not just the ones `run_op`'s friendly `build_payload` below
+/// covers) and hand the resulting bytes to `submit`, which dispatches them
+/// through the exact same path a real request takes. Malformed input here is
+/// a caller bug (a hand-built tree or a corpus-port bug), not a KMIP-protocol
+/// outcome, so it throws rather than returning the `{ok:false,...}` JSON
+/// convention `dry_run`/`load_policy` use.
+#[wasm_bindgen]
+pub fn encode_ttlv(tree_json: &str) -> Result<Vec<u8>, JsError> {
+    let node: Json =
+        serde_json::from_str(tree_json).map_err(|e| JsError::new(&format!("invalid tree JSON: {e}")))?;
+    let frame = frame_from_json(&node).map_err(|e| JsError::new(&e))?;
+    Ok(encode_to_vec(&frame))
+}
+
+// ── generic JSON tree ⇄ TTLV frame (encode_ttlv's helpers) ───────────────────
+
+/// Parse one `{tag, type, value?, children?}` node back into a `TtlvFrame` —
+/// the inverse of `frame_json` below. Recurses into `children` for
+/// `Structure` nodes.
+fn frame_from_json(node: &Json) -> Result<TtlvFrame, String> {
+    let tag_str = node
+        .get("tag")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "node missing string \"tag\"".to_string())?;
+    let item_type = node
+        .get("type")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| format!("tag {tag_str} missing string \"type\""))?;
+    let tag = tag_from_hex(tag_str).ok_or_else(|| format!("invalid tag hex '{tag_str}'"))?;
+    let value = value_from_json(item_type, node).map_err(|e| format!("tag {tag_str} ({item_type}): {e}"))?;
+    Ok(TtlvFrame { tag, value })
+}
+
+/// Parse a `"0x420028"` (or bare `"420028"`) hex string into a [`Tag`].
+fn tag_from_hex(s: &str) -> Option<Tag> {
+    let s = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")).unwrap_or(s);
+    u32::from_str_radix(s, 16).ok().and_then(Tag::new)
+}
+
+/// Parse a node's `value` (or, for `Structure`, its `children`) per the
+/// declared `type` name — the 1:1 inverse of `frame_json`'s match arms below.
+fn value_from_json(item_type: &str, node: &Json) -> Result<Ttlv, String> {
+    if item_type == "Structure" {
+        let children = node
+            .get("children")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| "Structure node missing array \"children\"".to_string())?;
+        let frames = children.iter().map(frame_from_json).collect::<Result<Vec<_>, _>>()?;
+        return Ok(Ttlv::Structure(frames));
+    }
+    let value = node.get("value").ok_or_else(|| format!("{item_type} node missing \"value\""))?;
+    match item_type {
+        "Integer" => Ok(Ttlv::Integer(json_i64(value)? as i32)),
+        "LongInteger" => Ok(Ttlv::LongInteger(json_i64(value)?)),
+        "BigInteger" => Ok(Ttlv::BigInteger(json_hex_bytes(value)?)),
+        "Enumeration" => Ok(Ttlv::Enumeration(json_enum_u32(value)?)),
+        "Boolean" => value
+            .as_bool()
+            .map(Ttlv::Boolean)
+            .ok_or_else(|| format!("Boolean value not a bool: {value}")),
+        "TextString" => value
+            .as_str()
+            .map(|s| Ttlv::TextString(s.to_string()))
+            .ok_or_else(|| format!("TextString value not a string: {value}")),
+        "ByteString" => Ok(Ttlv::ByteString(json_hex_bytes(value)?)),
+        "DateTime" => Ok(Ttlv::DateTime(json_i64(value)?)),
+        "Interval" => Ok(Ttlv::Interval(json_i64(value)? as u32)),
+        "DateTimeExtended" => Ok(Ttlv::DateTimeExtended(json_i64(value)?)),
+        other => Err(format!("unknown TTLV item type '{other}'")),
+    }
+}
+
+/// Numeric value, accepting either sign JSON encodes it with (`serde_json`
+/// picks `u64` for non-negative numbers, `i64` otherwise).
+fn json_i64(v: &Json) -> Result<i64, String> {
+    v.as_i64()
+        .or_else(|| v.as_u64().map(|u| u as i64))
+        .ok_or_else(|| format!("expected an integer, got {v}"))
+}
+
+/// Hex-string value (ByteString/BigInteger — same convention `to_hex` below
+/// produces: lowercase, no `0x` prefix).
+fn json_hex_bytes(v: &Json) -> Result<Vec<u8>, String> {
+    let s = v.as_str().ok_or_else(|| format!("expected a hex string, got {v}"))?;
+    from_hex(s).ok_or_else(|| format!("invalid hex string '{s}'"))
+}
+
+/// Enumeration value — accepts either the `"0xNNNNNNNN"` hex string
+/// `frame_json` emits (round-tripping a decoded tree) or a bare JSON number
+/// (the natural form for a hand-built request template).
+fn json_enum_u32(v: &Json) -> Result<u32, String> {
+    if let Some(n) = v.as_u64() {
+        return Ok(n as u32);
+    }
+    if let Some(s) = v.as_str() {
+        let s = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")).unwrap_or(s);
+        return u32::from_str_radix(s, 16).map_err(|_| format!("invalid enumeration hex '{s}'"));
+    }
+    Err(format!("expected an enumeration (number or hex string), got {v}"))
 }
 
 // ── request builders ─────────────────────────────────────────────────────────
@@ -547,14 +688,22 @@ fn build_payload(op: &str, spec: &Json) -> Result<RequestPayload, String> {
         }),
         "Create" => {
             // H1 — a present-but-unknown algorithm name is an error, not a
-            // silent fallback to AES. Absent → AES (symmetric default).
-            let alg = alg_from_spec_checked(spec)?.unwrap_or(KmipAlgorithm::Aes);
-            let mut attrs = vec![
-                Attribute::CryptographicAlgorithm(alg),
-                Attribute::CryptographicUsageMask(UsageMask::ENCRYPT | UsageMask::DECRYPT),
-            ];
+            // silent fallback to AES. Absent → NO algorithm attribute, so the
+            // active policy's `algorithm_default` chooses (the label-only
+            // agility path — the old `unwrap_or(Aes)` fallback pinned every
+            // label-only Create to bare AES and Pass 0 never fired).
+            let alg = alg_from_spec_checked(spec)?;
+            let mut attrs = vec![Attribute::CryptographicUsageMask(
+                UsageMask::ENCRYPT | UsageMask::DECRYPT,
+            )];
+            if let Some(a) = alg {
+                attrs.push(Attribute::CryptographicAlgorithm(a));
+            }
             if let Some(len) = spec.get("length").and_then(|v| v.as_u64()) {
                 attrs.push(Attribute::CryptographicLength(len as u32));
+            }
+            if let Some(name) = spec.get("name").and_then(|v| v.as_str()) {
+                attrs.push(Attribute::Name(name.to_string()));
             }
             attrs.extend(custom_attrs_from_spec(spec));
             RequestPayload::Create(CreateRequest {
@@ -575,6 +724,9 @@ fn build_payload(op: &str, spec: &Json) -> Result<RequestPayload, String> {
             let intent = spec.get("intent").and_then(|v| v.as_str());
             let usage = match (alg, intent) {
                 (Some(a), _) if is_kem(a) => UsageMask::ENCRYPT | UsageMask::DECRYPT,
+                // ECDH (incl. X25519/X448) is key agreement — the dispatcher
+                // canonicalises this to `CreateKeyPair:KeyAgreement`.
+                (Some(KmipAlgorithm::Ecdh), _) => UsageMask::KEY_AGREEMENT,
                 (Some(_), _) => UsageMask::SIGN | UsageMask::VERIFY,
                 (None, Some("kem")) => UsageMask::KEY_AGREEMENT, // → CreateKeyPair:KeyAgreement
                 (None, Some("encrypt")) => UsageMask::ENCRYPT | UsageMask::DECRYPT,
@@ -584,8 +736,16 @@ fn build_payload(op: &str, spec: &Json) -> Result<RequestPayload, String> {
             if let Some(a) = alg {
                 common.push(Attribute::CryptographicAlgorithm(a));
             }
-            if let Some(len) = spec.get("length").and_then(|v| v.as_u64()) {
-                common.push(Attribute::CryptographicLength(len as u32));
+            let explicit_len = spec.get("length").and_then(|v| v.as_u64()).map(|l| l as u32);
+            let implied_len = spec
+                .get("algorithm")
+                .and_then(|v| v.as_str())
+                .and_then(implied_length_for_name);
+            if let Some(len) = explicit_len.or(implied_len) {
+                common.push(Attribute::CryptographicLength(len));
+            }
+            if let Some(name) = spec.get("name").and_then(|v| v.as_str()) {
+                common.push(Attribute::Name(name.to_string()));
             }
             common.extend(custom_attrs_from_spec(spec));
             RequestPayload::CreateKeyPair(CreateKeyPairRequest {
@@ -655,6 +815,21 @@ fn build_payload(op: &str, spec: &Json) -> Result<RequestPayload, String> {
             reason: RevocationReason::Unspecified,
         }),
         "Destroy" => RequestPayload::Destroy(DestroyRequest { uid: uid() }),
+        // Substitution-aware rekey (Migration tab "Migrate all remaining"
+        // sweep): the app names only the UID; the active policy decides the
+        // replacement algorithm (like-for-like when it has no substitution).
+        "ReKey" => RequestPayload::ReKey(ReKeyRequest {
+            uid: uid(),
+            offset: None,
+            template_attribute: vec![],
+        }),
+        "ReKeyKeyPair" => RequestPayload::ReKeyKeyPair(ReKeyKeyPairRequest {
+            uid: uid(),
+            offset: None,
+            common_attributes: vec![],
+            private_key_attributes: vec![],
+            public_key_attributes: vec![],
+        }),
         other => return Err(format!("unsupported op '{other}'")),
     })
 }
@@ -700,8 +875,15 @@ fn alg_from_spec_checked(spec: &Json) -> Result<Option<KmipAlgorithm>, String> {
 /// Map a KMIP spec-name string (e.g. "ML-DSA-65") to the algorithm enum.
 fn alg_from_name(name: &str) -> Option<KmipAlgorithm> {
     use KmipAlgorithm::*;
+    // Montgomery curves collapse to ECDH at the enum layer; the implied
+    // CryptographicLength (255/448) rides separately — see
+    // `implied_length_for_name`, which `build_payload` consults.
+    if name.eq_ignore_ascii_case("X25519") || name.eq_ignore_ascii_case("X448") {
+        return Some(Ecdh);
+    }
     const ALL: &[KmipAlgorithm] = &[
-        Aes, Rsa, Ecdsa, HmacSha256, HmacSha384, HmacSha512, Ecdh, ChaCha20, ChaCha20Poly1305,
+        Aes, Rsa, Ecdsa, HmacSha256, HmacSha384, HmacSha512, Ecdh, Ed25519,
+        ChaCha20, ChaCha20Poly1305,
         MlKem512, MlKem768, MlKem1024, MlDsa44, MlDsa65, MlDsa87,
         SlhDsaSha2_128s, SlhDsaSha2_128f, SlhDsaSha2_192s, SlhDsaSha2_192f, SlhDsaSha2_256s,
         SlhDsaSha2_256f, SlhDsaShake128s, SlhDsaShake128f, SlhDsaShake192s, SlhDsaShake192f,
@@ -710,6 +892,19 @@ fn alg_from_name(name: &str) -> Option<KmipAlgorithm> {
         X25519MlKem768, SecP256r1MlKem768,
     ];
     ALL.iter().copied().find(|a| a.spec_name().eq_ignore_ascii_case(name))
+}
+
+/// CryptographicLength a bare algorithm NAME implies when the spec carries no
+/// explicit `length` — how "X25519"/"X448" reach the dispatcher's Montgomery
+/// path (and Ed25519 its §6.7 mech-info bit count) behind the coarse enum.
+fn implied_length_for_name(name: &str) -> Option<u32> {
+    if name.eq_ignore_ascii_case("X25519") || name.eq_ignore_ascii_case("Ed25519") {
+        Some(255)
+    } else if name.eq_ignore_ascii_case("X448") {
+        Some(448)
+    } else {
+        None
+    }
 }
 
 fn is_kem(alg: KmipAlgorithm) -> bool {
@@ -741,6 +936,11 @@ fn summarize(payload: &ResponsePayload) -> Json {
         }),
         ResponsePayload::Encapsulate(r) => json!({
             "uid": r.uid, "ciphertextHex": to_hex(&r.data), "ciphertextLen": r.data.len(),
+            "rekeyed": r.rekeyed.as_ref().map(|k| json!({
+                "oldUid": k.old_uid,
+                "newPrivateKeyUid": k.new_private_key_uid,
+                "newPublicKeyUid": k.new_public_key_uid,
+            })),
         }),
         ResponsePayload::Decapsulate(r) => json!({ "uid": r.uid }),
         ResponsePayload::Encrypt(r) => json!({
@@ -748,6 +948,10 @@ fn summarize(payload: &ResponsePayload) -> Json {
             "ciphertextHex": to_hex(&r.ciphertext),
             "tagHex": r.authenticated_encryption_tag.as_ref().map(|t| to_hex(t)),
             "ivHex": r.iv_counter_nonce.as_ref().map(|t| to_hex(t)),
+            "rekeyed": r.rekeyed.as_ref().map(|k| json!({
+                "oldUid": k.old_uid,
+                "newUid": k.new_uid,
+            })),
         }),
         ResponsePayload::Decrypt(r) => json!({ "uid": r.uid, "plaintextHex": to_hex(&r.data) }),
         ResponsePayload::Locate(r) => json!({ "uids": r.uids }),
@@ -764,6 +968,13 @@ fn summarize(payload: &ResponsePayload) -> Json {
         }),
         ResponsePayload::Revoke(r) => json!({ "uid": r.uid, "state": format!("{:?}", r.state) }),
         ResponsePayload::Destroy(r) => json!({ "uid": r.uid, "state": format!("{:?}", r.state) }),
+        // Sweep-driven rekey: the replacement UID(s). The new algorithm is read
+        // from the keystore (list_objects) after the op — the response carries
+        // only the KMIP §6.1.51/52 UIDs.
+        ResponsePayload::ReKey(r) => json!({ "uid": r.uid }),
+        ResponsePayload::ReKeyKeyPair(r) => json!({
+            "privateKeyUid": r.private_key_uid, "publicKeyUid": r.public_key_uid,
+        }),
         _ => json!({}),
     }
 }
@@ -842,5 +1053,79 @@ fn wire_error_response(err: &WireError) -> ResponseMessage {
             result_message: Some(format!("KMIP wire decode failed: {err}")),
             payload: None,
         }],
+    }
+}
+
+#[cfg(test)]
+mod encode_ttlv_tests {
+    use super::*;
+    use std::path::Path;
+
+    /// Round-trip every OASIS "pristine" (placeholder-free) corpus fixture
+    /// through `decode_ttlv` → `encode_ttlv` → byte-exact match. These are
+    /// real, checked-in KMIP 3.0 request bytes (the same fixtures the native
+    /// `oasis_request_roundtrip` encoder-fidelity test uses) — free, strong
+    /// regression coverage for the new generic encoder. Runs under plain
+    /// `cargo test` (this crate builds as `rlib` for exactly this reason —
+    /// see the `[lib]` comment in `Cargo.toml`), no wasm host needed.
+    #[test]
+    fn round_trips_every_pristine_corpus_fixture() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../kmip/conformance/oasis_corpus_bytes/pristine");
+        let mut checked = 0;
+        for entry in std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("read {}: {e}", dir.display())) {
+            let path = entry.expect("dir entry").path();
+            if path.extension().and_then(|e| e.to_str()) != Some("bin") {
+                continue;
+            }
+            let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+            let tree_json = decode_ttlv(&bytes);
+            let re_encoded = encode_ttlv(&tree_json)
+                .unwrap_or_else(|e| panic!("encode_ttlv({}) failed: {e:?}", path.display()));
+            assert_eq!(
+                re_encoded,
+                bytes,
+                "round-trip mismatch for {}",
+                path.file_name().unwrap().to_string_lossy()
+            );
+            checked += 1;
+        }
+        assert!(checked > 0, "no .bin fixtures found under {}", dir.display());
+    }
+
+    /// Same round-trip, against the much larger "stubbed" tier — every
+    /// individual Request/ResponseMessage from the full 102-file OASIS
+    /// corpus (1234 messages), with `$`-placeholders replaced by neutral
+    /// stub values (not just the 124 already-placeholder-free "pristine"
+    /// ones) — broader structural coverage of the wire format than the
+    /// pristine-only check above.
+    #[test]
+    fn round_trips_every_stubbed_corpus_fixture() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../kmip/conformance/oasis_corpus_bytes/stubbed");
+        let mut checked = 0;
+        let mut failures: Vec<String> = Vec::new();
+        for entry in std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("read {}: {e}", dir.display())) {
+            let path = entry.expect("dir entry").path();
+            if path.extension().and_then(|e| e.to_str()) != Some("bin") {
+                continue;
+            }
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+            let tree_json = decode_ttlv(&bytes);
+            match encode_ttlv(&tree_json) {
+                Ok(re_encoded) if re_encoded == bytes => {}
+                Ok(_) => failures.push(format!("{name}: byte mismatch")),
+                Err(e) => failures.push(format!("{name}: encode_ttlv failed: {e:?}")),
+            }
+            checked += 1;
+        }
+        assert!(checked > 0, "no .bin fixtures found under {}", dir.display());
+        assert!(
+            failures.is_empty(),
+            "{}/{checked} stubbed fixtures failed round-trip:\n{}",
+            failures.len(),
+            failures.join("\n")
+        );
     }
 }

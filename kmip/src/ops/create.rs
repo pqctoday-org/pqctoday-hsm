@@ -87,6 +87,13 @@ pub fn create(deps: &Deps, mut req: CreateRequest, correlation_id: &str) -> Resu
     );
     p_req.key_length = key_length;
     p_req.usage_mask = usage_mask;
+    // Label-pattern rules (`name_pattern`) match on the template's Name — the
+    // label-only agility contract where the policy maps key classes to algos.
+    let template_name = req.template_attribute.iter().find_map(|a| match a {
+        crate::kmip30::Attribute::Name(n) => Some(n.as_str()),
+        _ => None,
+    });
+    p_req.name = template_name;
 
     let resolved = match deps.engine.evaluate(&p_req) {
         Decision::Allow { algorithm_override, .. } => match algorithm_override.or(algorithm_in) {
@@ -121,6 +128,11 @@ pub fn create(deps: &Deps, mut req: CreateRequest, correlation_id: &str) -> Resu
     };
 
     let algo = parse_sym_algorithm(&resolved)?;
+
+    // The resolved string carries the policy's size choice ("AES-128" from a
+    // name-patterned default); a label-only template has no length attribute,
+    // so derive it — otherwise the generated key silently ignores the policy.
+    let key_length = key_length.or_else(|| super::helpers::classical_length_from_name(&resolved));
 
     // KMIP 3.0 §11 — reject `QuantumSafe=true` claims on non-PQC
     // algorithms. QS-M-2 pins this with AES + QuantumSafe=true →

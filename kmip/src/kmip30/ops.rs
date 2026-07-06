@@ -669,6 +669,25 @@ pub struct EncryptResponse {
     /// can chain the next request. `None` for single-part ops and on
     /// the final part.
     pub correlation_value: Option<Vec<u8>>,
+    /// Set when the active policy triggered a transparent crypto-agility
+    /// rekey during this Encrypt (`Decision::RekeyAndProceed` — AES-128 →
+    /// AES-256): `uid` above is the freshly-minted replacement key. Internal-
+    /// only, never encoded onto the wire. `None` on the ordinary path.
+    pub rekeyed: Option<RekeyInfo>,
+}
+
+/// Crypto-agility rekey provenance surfaced on the response of a rekey-on-use
+/// op (Encrypt / Encapsulate). The Sign path uses [`SignRekeyInfo`] (kept
+/// distinct so the dispatcher's §9.5 Undo wave and wire encoders are
+/// untouched). `new_public_key_uid` is set for asymmetric replacements.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RekeyInfo {
+    /// The original key's UID — now Deactivated + superseded.
+    pub old_uid: String,
+    /// The replacement's primary UID (symmetric key, or the private key of a pair).
+    pub new_uid: String,
+    /// The replacement public-key UID for an asymmetric rekey; `None` for symmetric.
+    pub new_public_key_uid: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -729,6 +748,25 @@ pub struct EncapsulateResponse {
     pub uid: String,
     /// `Data` (0x4200C2, ByteString) — the ML-KEM ciphertext / encapsulation.
     pub data: Vec<u8>,
+    /// Set when the active policy triggered a transparent crypto-agility
+    /// rekey (`Decision::RekeyAndProceed`) during this Encapsulate — mirrors
+    /// [`SignResponse::rekeyed`]/[`SignRekeyInfo`] exactly (same rationale:
+    /// lets the dispatcher's Undo wave find both new-key halves on
+    /// rollback). `None` on the ordinary (no-rekey) path. Internal-only:
+    /// never encoded onto the wire (see `wire.rs::encode_encapsulate_resp`,
+    /// which reads only `uid` + `data`).
+    pub rekeyed: Option<EncapsulateRekeyInfo>,
+}
+
+/// See [`EncapsulateResponse::rekeyed`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct EncapsulateRekeyInfo {
+    /// The original key pair's private-key UID — now Deactivated + superseded.
+    pub old_uid: String,
+    /// The new key pair's public-key UID (same value as `EncapsulateResponse::uid`'s
+    /// target — Encapsulate operates on the public half).
+    pub new_public_key_uid: String,
+    pub new_private_key_uid: String,
 }
 
 /// `Decapsulate` request (KMIP 3.0 WD19) — the private/decapsulation key
@@ -1364,6 +1402,37 @@ pub struct CryptographicParameters {
     /// `Random` (0x4201CA) — ByteString. Explicit signing randomizer for the
     /// hedged (non-deterministic) variant, making it reproducible.
     pub random: Option<Vec<u8>>,
+    /// `KEM Algorithm` (0x4201C3) — Enumeration (KMIP 3.0 WD19 §11.26,
+    /// Table 572). Disambiguates *which* KEM construction an `Encapsulate`/
+    /// `Decapsulate` call is running — `DHKEM` (classical ephemeral-static
+    /// ECDH), `MLKEM`, or `RSASVE`. See
+    /// `kmip/spec/crossref/kem-encapsulate-decapsulate.yaml`.
+    pub kem_algorithm: Option<KemAlgorithm>,
+}
+
+/// `KEM Algorithm` Enumeration — KMIP 3.0 WD19 §11.26, Table 572.
+/// `DhKem` is the spec's own name for the classical ephemeral-static ECDH
+/// construction (PKCS#11 v3.2 §6.3.17's `CKM_ECDH1_DERIVE`-under-
+/// `C_EncapsulateKey` mode) — not a vendor extension.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum KemAlgorithm {
+    RsaSve = 0x01,
+    DhKem  = 0x02,
+    MlKem  = 0x03,
+}
+
+impl KemAlgorithm {
+    pub const fn to_wire_value(self) -> u32 {
+        self as u32
+    }
+    pub const fn from_wire_value(v: u32) -> Option<Self> {
+        match v {
+            0x01 => Some(Self::RsaSve),
+            0x02 => Some(Self::DhKem),
+            0x03 => Some(Self::MlKem),
+            _ => None,
+        }
+    }
 }
 
 /// `Hashing Algorithm` Enumeration — KMIP 3.0 §11. Codepoints from the

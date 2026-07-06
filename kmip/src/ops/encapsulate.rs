@@ -60,16 +60,17 @@ pub fn encapsulate(
         fail_err(deps, correlation_id, "Encapsulate", KmipError::object_not_found(&req.uid))
     })?;
 
-    // K6 — Encapsulate accepts ML-KEM and the hybrid KEMs (X25519MLKEM768 /
-    // SecP256r1MLKEM768).
-    if !is_ml_kem(obj.algorithm) && !obj.algorithm.is_hybrid_kem() {
+    // K6 — Encapsulate accepts ML-KEM, the hybrid KEMs (X25519MLKEM768 /
+    // SecP256r1MLKEM768), and (2026-07-05) classical ECDH/X25519/X448 in
+    // DHKEM mode — see `is_classical_kem`.
+    if !is_ml_kem(obj.algorithm) && !obj.algorithm.is_hybrid_kem() && !is_classical_kem(obj.algorithm) {
         return Err(fail_err(
             deps,
             correlation_id,
             "Encapsulate",
             KmipError::failed(
                 ResultReason::OperationNotSupported,
-                format!("Encapsulate requires an ML-KEM or hybrid KEM key; {:?} is not", obj.algorithm),
+                format!("Encapsulate requires an ML-KEM, hybrid KEM, or classical ECDH/X25519/X448 key; {:?} is not", obj.algorithm),
             ),
         ));
     }
@@ -123,16 +124,16 @@ pub fn encapsulate(
                 KmipError::permission_denied(human),
             ));
         }
-        crate::policy::Decision::RekeyAndProceed { .. } => {
-            return Err(fail_err(
-                deps,
-                correlation_id,
-                "Encapsulate",
-                KmipError::failed(
-                    ResultReason::OperationNotSupported,
-                    "Encapsulate: policy requires rekey, which is not supported inline".to_string(),
-                ),
-            ));
+        crate::policy::Decision::RekeyAndProceed { new_algorithm, .. } => {
+            // Crypto agility (2026-07-05): the active policy substitutes this
+            // key-establishment key's algorithm for a new one — classical
+            // ECDH/X25519/X448 migrating to ML-KEM/hybrid, mirroring the
+            // Sign-side transparent rekey (`sign.rs::rekey_and_sign`).
+            // `Decapsulate` can never take this branch (see
+            // `policy::rule::is_consumer_op` — the engine hard-excludes it),
+            // so this is sound specifically because Encapsulate originates
+            // fresh output each call.
+            return rekey_and_encapsulate(deps, &req, &obj, &new_algorithm, correlation_id);
         }
     }
 
@@ -165,15 +166,8 @@ pub fn encapsulate(
         emit_pkcs11(deps, correlation_id, "soft::hybrid_kem_encapsulate", None, 0, "CKR_OK");
         let ss_uid = store_shared_secret(deps, obj.algorithm, enc.shared_secret)?;
         emit_success(deps, correlation_id, "Encapsulate");
-        return Ok(EncapsulateResponse { uid: ss_uid, data: enc.ciphertext });
+        return Ok(EncapsulateResponse { uid: ss_uid, data: enc.ciphertext, rekeyed: None });
     }
-
-    let mech = obj.algorithm.to_pkcs11_mech(PkcsOp::Encrypt).ok_or_else(|| {
-        KmipError::failed(
-            ResultReason::OperationNotSupported,
-            format!("ML-KEM {:?} has no encapsulation mechanism", obj.algorithm),
-        )
-    })?;
 
     // The deterministic coins may arrive hoisted (`input_key_material`)
     // or only nested in CryptographicParameters — prefer the hoisted form.
@@ -193,12 +187,32 @@ pub fn encapsulate(
             )
             .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Encap:find"))?
             .ok_or_else(|| KmipError::object_not_found(&req.uid))?;
-            let native_mech = super::helpers::native_kem_mech(obj.algorithm).ok_or_else(|| {
-                KmipError::failed(
-                    ResultReason::OperationNotSupported,
-                    format!("no KEM mechanism for {:?}", obj.algorithm),
-                )
-            })?;
+            let native_mech = if is_classical_kem(obj.algorithm) {
+                if coins.is_some() {
+                    return Err(fail_err(
+                        deps,
+                        correlation_id,
+                        "Encapsulate",
+                        KmipError::failed(
+                            ResultReason::BadCryptographicParameters,
+                            "Encapsulate: deterministic coins (InputKeyMaterial) are an ML-KEM-only interface; classical DHKEM has no equivalent",
+                        ),
+                    ));
+                }
+                super::helpers::classical_kem_mech(obj.recommended_curve).ok_or_else(|| {
+                    KmipError::failed(
+                        ResultReason::OperationNotSupported,
+                        format!("no classical KEM mechanism for RecommendedCurve {:?}", obj.recommended_curve),
+                    )
+                })?
+            } else {
+                super::helpers::native_kem_mech(obj.algorithm).ok_or_else(|| {
+                    KmipError::failed(
+                        ResultReason::OperationNotSupported,
+                        format!("no KEM mechanism for {:?}", obj.algorithm),
+                    )
+                })?
+            };
             match &coins {
                 Some(m) => {
                     let r = softhsmrustv3::native::encapsulate_deterministic(
@@ -241,11 +255,14 @@ pub fn encapsulate(
             }
             #[cfg(test)]
             {
+                // Cosmetic only (audit-log field) — see the identical note
+                // in decapsulate.rs; this path never runs in production.
+                let mech = obj.algorithm.to_pkcs11_mech(PkcsOp::Encrypt);
                 emit_pkcs11(
                     deps,
                     correlation_id,
                     "soft::placeholder_encapsulate",
-                    Some(mech),
+                    mech,
                     0,
                     "CKR_OK",
                 );
@@ -262,11 +279,158 @@ pub fn encapsulate(
 
     emit_success(deps, correlation_id, "Encapsulate");
 
-    Ok(EncapsulateResponse { uid: ss_uid, data: ciphertext })
+    Ok(EncapsulateResponse { uid: ss_uid, data: ciphertext, rekeyed: None })
+}
+
+/// Transparent auto-rekey transaction for classical KEM crypto-agility
+/// (2026-07-05) — the `Encapsulate`-side mirror of `sign.rs::rekey_and_sign`.
+///
+/// The active policy substituted the stored key-pair's algorithm (e.g.
+/// classical `ECDH-P256` → `ML-KEM-1024`/a hybrid), so: (1) generate a fresh
+/// key **pair** under `new_algorithm`; (2) activate **both** halves — doing
+/// this at the pair level, not just the public half, is what makes a
+/// centralized policy migrate both `Encapsulate` (this call) and the
+/// receiver's future `Decapsulate` calls: by the time the receiver next
+/// decapsulates, their new private key is already Active, so that call needs
+/// no rekey logic of its own (see `policy::rule::is_consumer_op` for why
+/// `Decapsulate` structurally can't originate one); (3) deactivate +
+/// supersede **both** halves of the old classical pair (KMIP has no
+/// "Deprecated" state — the §3.2 Active→Deactivated transition is the move
+/// for a superseded key, linked via `x-pqctoday-supersedes`); (4) re-issue
+/// the Encapsulate against the new **public** key (Encapsulate always
+/// targets the public half — unlike Sign's private-key target).
+///
+/// The caller (a sender using the original public-key UID) gets a valid
+/// ciphertext under the migrated algorithm with no code change. The old
+/// (now-Deactivated) key pair remains available for its intended residual
+/// role: any in-flight `Decapsulate` of a ciphertext already encapsulated
+/// against it before the migration (see decapsulate.rs's lifecycle gate).
+fn rekey_and_encapsulate(
+    deps: &Deps,
+    req: &EncapsulateRequest,
+    old: &ObjectRecord,
+    new_algorithm: &str,
+    correlation_id: &str,
+) -> Result<EncapsulateResponse> {
+    use crate::kmip30::{ActivateRequest, Attribute, CreateKeyPairRequest, UsageMask};
+
+    let new_alg = super::create_key_pair::parse_algorithm(new_algorithm)
+        .map_err(|e| fail_err(deps, correlation_id, "Encapsulate", e))?;
+
+    // 1. Generate the replacement key-establishment key pair under the
+    // policy's target (ML-KEM or a hybrid combo — `create_key_pair` already
+    // handles both via `KmipAlgorithm::hybrid_kem()`). The old key's Name is
+    // copied onto the replacement so the business label survives the migration
+    // (Locate-by-label and the Migration tab's cards follow the successor).
+    let mut common_attributes = vec![
+        Attribute::CryptographicAlgorithm(new_alg),
+        Attribute::CryptographicUsageMask(UsageMask::KEY_AGREEMENT),
+    ];
+    if let Some(name) = &old.name {
+        common_attributes.push(Attribute::Name(name.clone()));
+    }
+    let ckp = super::create_key_pair::create_key_pair(
+        deps,
+        CreateKeyPairRequest {
+            common_attributes,
+            private_key_attributes: vec![],
+            public_key_attributes: vec![],
+            seed: None,
+        },
+        "CreateKeyPair:KeyAgreement",
+        correlation_id,
+    )?;
+
+    // 2. Activate both halves — see the function doc for why this is what
+    // makes the receiver's future Decapsulate need no rekey of its own.
+    super::activate::activate(
+        deps,
+        ActivateRequest { uid: ckp.private_key_uid.clone() },
+        correlation_id,
+    )?;
+    super::activate::activate(
+        deps,
+        ActivateRequest { uid: ckp.public_key_uid.clone() },
+        correlation_id,
+    )?;
+
+    // 3. Deactivate + supersede the old key pair (both halves — Encapsulate
+    // targets the public half, but the pair migrates together).
+    let mut old_rec = old.clone();
+    let from_state = format!("{:?}", old_rec.state);
+    old_rec.state = State::Deactivated;
+    old_rec.supersedes = Some(ckp.public_key_uid.clone());
+    old_rec
+        .links
+        .insert("x-pqctoday-supersedes".to_string(), ckp.public_key_uid.clone());
+    deps.store.update(old_rec)?;
+    deps.sink.emit(crate::auditlog::AuditEvent::at(
+        OffsetDateTime::now_utc(),
+        crate::auditlog::Plane::Kmip,
+        correlation_id,
+        crate::auditlog::EventPayload::KmipObjectStateChanged {
+            uid: old.uid.clone(),
+            from_state,
+            to_state: "Deactivated".into(),
+            reason: format!(
+                "superseded by {} (agility rekey → {})",
+                ckp.public_key_uid, new_algorithm
+            ),
+        },
+    ));
+    // The old private half is a separate KMIP object (found via its own
+    // pkcs11_cka_id) when this key was created as a key pair — deactivate it
+    // too so a stray Encapsulate/Decapsulate against the private UID (if a
+    // caller has it) is also correctly blocked from new use. Best-effort:
+    // absence of a distinct private record (e.g. this handler was reached
+    // via the public UID and the private one is untracked here) isn't fatal.
+    if old.object_type == crate::kmip30::ObjectType::PublicKey {
+        if let Some(priv_uid) = old.links.get("PrivateKeyLink").cloned() {
+            if let Ok(Some(mut priv_rec)) = deps.store.get(&priv_uid) {
+                priv_rec.state = State::Deactivated;
+                priv_rec.supersedes = Some(ckp.private_key_uid.clone());
+                priv_rec
+                    .links
+                    .insert("x-pqctoday-supersedes".to_string(), ckp.private_key_uid.clone());
+                let _ = deps.store.update(priv_rec);
+            }
+        }
+    }
+
+    // 4. Re-issue the original Encapsulate against the new PUBLIC key (not
+    // the private key — Encapsulate's Unique Identifier always names the
+    // encapsulation/public half), then stamp the response with rekey
+    // provenance (mirrors `SignResponse::rekeyed` — the dispatcher's Undo
+    // wave can find and delete both new-key halves on rollback).
+    let mut resp = encapsulate(
+        deps,
+        EncapsulateRequest {
+            uid: ckp.public_key_uid.clone(),
+            input_key_material: req.input_key_material.clone(),
+            cryptographic_parameters: req.cryptographic_parameters.clone(),
+        },
+        correlation_id,
+    )?;
+    resp.rekeyed = Some(crate::kmip30::EncapsulateRekeyInfo {
+        old_uid: old.uid.clone(),
+        new_public_key_uid: ckp.public_key_uid,
+        new_private_key_uid: ckp.private_key_uid,
+    });
+    Ok(resp)
 }
 
 pub(crate) fn is_ml_kem(a: KmipAlgorithm) -> bool {
     matches!(a, KmipAlgorithm::MlKem512 | KmipAlgorithm::MlKem768 | KmipAlgorithm::MlKem1024)
+}
+
+/// Classical ephemeral-static ECDH as a KEM (2026-07-05) — KMIP 3.0 WD19's
+/// `DHKEM` (§11.26), PKCS#11 v3.2 §6.3.17's `CKM_ECDH1_DERIVE`-under-
+/// `C_EncapsulateKey`/`C_DecapsulateKey` mode. There is no standalone
+/// X25519/X448 `KmipAlgorithm` codepoint — both are modelled as `Ecdh` with
+/// a `RecommendedCurve` of `CURVE25519`/`CURVE448` (see
+/// `create_key_pair.rs`'s `Ecdh` branch), so this matches the bare variant.
+pub(crate) fn is_classical_kem(a: KmipAlgorithm) -> bool {
+    matches!(a, KmipAlgorithm::Ecdh)
 }
 
 /// Persist the derived shared secret as a fresh managed `SecretData`
@@ -336,10 +500,11 @@ fn placeholder_bytes(uid: &str, input: &[u8], domain: &[u8], len: usize) -> Vec<
 mod tests {
     use super::*;
     use crate::auditlog::{AuditSink, RingSink};
-    use crate::kmip30::UsageMask;
+    use crate::kmip30::{DecapsulateRequest, UsageMask};
     use crate::policy::Engine;
     use crate::store::MemoryStore;
     use std::sync::Arc;
+    use super::super::decapsulate::decapsulate;
 
     fn deps() -> Deps {
         let ring = Arc::new(RingSink::new(64));
@@ -358,6 +523,22 @@ mod tests {
                 uid: uid.to_string(),
                 object_type: ObjectType::PublicKey,
                 algorithm: KmipAlgorithm::MlKem768,
+                usage_mask: UsageMask::ENCRYPT,
+                state: State::Active,
+                ..ObjectRecord::default()
+            })
+            .unwrap();
+    }
+
+    /// Classical `Ecdh` public key with a NIST `RecommendedCurve` (P-256) —
+    /// 2026-07-05, classical-KEM crypto-agility.
+    fn put_ecdh_p256_pub(d: &Deps, uid: &str) {
+        d.store
+            .put(ObjectRecord {
+                uid: uid.to_string(),
+                object_type: ObjectType::PublicKey,
+                algorithm: KmipAlgorithm::Ecdh,
+                recommended_curve: Some(crate::kmip30::algos::recommended_curve::P_256),
                 usage_mask: UsageMask::ENCRYPT,
                 state: State::Active,
                 ..ObjectRecord::default()
@@ -408,5 +589,141 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::OperationNotSupported);
+    }
+
+    /// Classical ECDH-P256 is now a valid Encapsulate target (2026-07-05) —
+    /// previously rejected the same way RSA still is above.
+    #[test]
+    fn encapsulate_accepts_classical_ecdh_key() {
+        let d = deps();
+        put_ecdh_p256_pub(&d, "ecdh-pk");
+        let resp = encapsulate(
+            &d,
+            EncapsulateRequest { uid: "ecdh-pk".to_string(), ..Default::default() },
+            "t",
+        )
+        .unwrap();
+        assert_ne!(resp.uid, "ecdh-pk", "a NEW SecretData object UID is returned");
+        let ss_rec = d.store.get(&resp.uid).unwrap().unwrap();
+        assert_eq!(ss_rec.object_type, ObjectType::SecretData);
+    }
+
+    fn deps_with(yaml: &str) -> (Arc<RingSink>, Deps) {
+        let ring = Arc::new(RingSink::new(64));
+        let sink: Arc<dyn AuditSink> = ring.clone();
+        let engine = Engine::with_global_sink(sink.clone());
+        engine
+            .activate(crate::policy::load_from_str(yaml, std::path::Path::new("<test>")).unwrap())
+            .unwrap();
+        (
+            ring,
+            Deps::new(
+                engine,
+                Arc::new(MemoryStore::new()),
+                sink,
+                super::super::deps::DepsConfig::default(),
+            ),
+        )
+    }
+
+    const REKEY_POLICY: &str = r#"
+schema_version: 1
+metadata: { name: rk, description: rekey, authority: t, effective: "always" }
+rules:
+  - type: algorithm_substitution
+    ops: [Encapsulate]
+    from: ECDH-P256
+    to: ML-KEM-1024
+    reason: "Upgrade key-establishment to ML-KEM-1024"
+"#;
+
+    /// The centralized-policy story end to end (2026-07-05): an existing
+    /// classical ECDH-P256 key PAIR + a policy substituting it to
+    /// ML-KEM-1024 on `Encapsulate` → the engine emits `RekeyAndProceed` →
+    /// `rekey_and_encapsulate` mints a fresh pair, activates BOTH halves,
+    /// deactivates+supersedes BOTH halves of the old pair, and re-issues the
+    /// Encapsulate. Mirrors `sign.rs::tests::rekey_transparently_migrates_and_signs`.
+    #[test]
+    fn rekey_transparently_migrates_and_encapsulates() {
+        let (_ring, d) = deps_with(REKEY_POLICY);
+
+        let mut pub_links = std::collections::HashMap::new();
+        pub_links.insert("PrivateKeyLink".to_string(), "urn:ecdh-priv".to_string());
+        d.store
+            .put(ObjectRecord {
+                uid: "urn:ecdh-pub".into(),
+                object_type: ObjectType::PublicKey,
+                algorithm: KmipAlgorithm::Ecdh,
+                recommended_curve: Some(crate::kmip30::algos::recommended_curve::P_256),
+                usage_mask: UsageMask::KEY_AGREEMENT,
+                state: State::Active,
+                links: pub_links,
+                ..ObjectRecord::default()
+            })
+            .unwrap();
+        let mut priv_links = std::collections::HashMap::new();
+        priv_links.insert("PublicKeyLink".to_string(), "urn:ecdh-pub".to_string());
+        d.store
+            .put(ObjectRecord {
+                uid: "urn:ecdh-priv".into(),
+                object_type: ObjectType::PrivateKey,
+                algorithm: KmipAlgorithm::Ecdh,
+                recommended_curve: Some(crate::kmip30::algos::recommended_curve::P_256),
+                usage_mask: UsageMask::KEY_AGREEMENT,
+                state: State::Active,
+                links: priv_links,
+                ..ObjectRecord::default()
+            })
+            .unwrap();
+
+        let resp = encapsulate(
+            &d,
+            EncapsulateRequest { uid: "urn:ecdh-pub".into(), ..Default::default() },
+            "corr-rk",
+        )
+        .unwrap();
+
+        let rekey = resp.rekeyed.expect("Encapsulate must report the rekey it performed");
+        assert_eq!(rekey.old_uid, "urn:ecdh-pub");
+        assert_ne!(rekey.new_public_key_uid, "urn:ecdh-pub");
+
+        // New pair: ML-KEM-1024, both halves Active.
+        let new_pub = d.store.get(&rekey.new_public_key_uid).unwrap().unwrap();
+        assert_eq!(new_pub.algorithm, KmipAlgorithm::MlKem1024);
+        assert_eq!(new_pub.state, State::Active);
+        let new_priv = d.store.get(&rekey.new_private_key_uid).unwrap().unwrap();
+        assert_eq!(new_priv.algorithm, KmipAlgorithm::MlKem1024);
+        assert_eq!(new_priv.state, State::Active);
+
+        // Old pair: BOTH halves Deactivated + supersede-linked — the pair-level
+        // migration that lets a future Decapsulate need no rekey of its own.
+        let old_pub = d.store.get("urn:ecdh-pub").unwrap().unwrap();
+        assert_eq!(old_pub.state, State::Deactivated);
+        assert_eq!(old_pub.supersedes.as_deref(), Some(rekey.new_public_key_uid.as_str()));
+        let old_priv = d.store.get("urn:ecdh-priv").unwrap().unwrap();
+        assert_eq!(old_priv.state, State::Deactivated, "private half must migrate with the public half");
+        assert_eq!(old_priv.supersedes.as_deref(), Some(rekey.new_private_key_uid.as_str()));
+
+        // The new private key must decapsulate the ciphertext Encapsulate
+        // just produced. (This test harness has no real engine session, so
+        // Decapsulate runs its `#[cfg(test)]` placeholder path rather than
+        // real crypto — it can't independently prove the OLD classical key
+        // would reject an ML-KEM ciphertext; that cross-algorithm rejection
+        // is proven with a real engine at `rust/src/native/encrypt.rs`'s
+        // `classical_encapsulate_wrong_mechanism_is_rejected` and the
+        // `CKA_KEY_TYPE` checks in `classical_decapsulate`. What this test
+        // proves is the KMIP-layer state machine: the pair-level rekey
+        // happened, both new halves are Active, both old halves are
+        // Deactivated+superseded.)
+        let good = decapsulate(
+            &d,
+            DecapsulateRequest {
+                uid: rekey.new_private_key_uid.clone(),
+                data: resp.data.clone(),
+                ..Default::default()
+            },
+            "corr-good",
+        );
+        assert!(good.is_ok(), "new key must decapsulate the ciphertext Encapsulate just produced");
     }
 }

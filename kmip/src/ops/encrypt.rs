@@ -127,6 +127,8 @@ pub fn encrypt(deps: &Deps, mut req: EncryptRequest, correlation_id: &str) -> Re
         PolicyRequest::minimal("Encrypt", Some(&algo), started, correlation_id, &stored_attrs);
     p_req.usage_mask = Some(obj.usage_mask);
     p_req.state = Some(state_name(obj.state));
+    // name_pattern rules match on the stored key's Name (label-scoped rekey).
+    p_req.name = obj.name.as_deref();
     p_req.current_object_algorithm = Some(&algo);
     p_req.target_uid = Some(&req.uid);
     p_req.object_activation_date = obj.activation_date; // F-3 — max_key_age_days
@@ -154,25 +156,29 @@ pub fn encrypt(deps: &Deps, mut req: EncryptRequest, correlation_id: &str) -> Re
                 KmipError::permission_denied(human),
             ));
         }
-        Decision::RekeyAndProceed { new_algorithm, original_uid, .. } => {
-            // Y5 — the Encrypt path does not (yet) execute a rekey. The shipped
-            // policies no longer carry an Encrypt-side substitution (the KEM
-            // auto-migration lands with the Encapsulate rekey work in Phase 5);
-            // a custom policy that adds one gets an honest, actionable error
-            // rather than a silent pretend-success.
-            return Err(fail_err(
-                deps,
-                correlation_id,
-                "Encrypt",
-                KmipError::failed(
-                    ResultReason::OperationNotSupported,
-                    format!(
-                        "policy substitutes {algo} → {new_algorithm} for UID {original_uid}, but \
-                         Encrypt-side auto-rekey is not implemented; rekey the object explicitly \
-                         (ReKey/ReKeyKeyPair) or scope the substitution to Sign"
+        Decision::RekeyAndProceed { new_algorithm, .. } => {
+            // Crypto agility on the symmetric-encrypt path (Phase 5): the policy
+            // substitutes this key's algorithm (AES-128 → AES-256). Generate the
+            // replacement symmetric key, deactivate + supersede the old, re-issue
+            // the Encrypt under the new key. Only symmetric keys reach here —
+            // an asymmetric-encrypt substitution is a cross-primitive migration
+            // (RSA → ML-KEM) the Encrypt op can't drive; guard it.
+            if is_ml_kem(obj.algorithm) || obj.object_type != crate::kmip30::ObjectType::SymmetricKey
+            {
+                return Err(fail_err(
+                    deps,
+                    correlation_id,
+                    "Encrypt",
+                    KmipError::failed(
+                        ResultReason::OperationNotSupported,
+                        format!(
+                            "policy substitutes {algo} → {new_algorithm}, but only symmetric \
+                             Encrypt keys auto-rekey here; migrate a KEM key via Encapsulate"
+                        ),
                     ),
-                ),
-            ));
+                ));
+            }
+            return rekey_and_encrypt(deps, &req, &obj, &new_algorithm, correlation_id);
         }
     }
     if let Some(ov) = forced_cp.as_ref() {
@@ -195,6 +201,50 @@ pub fn encrypt(deps: &Deps, mut req: EncryptRequest, correlation_id: &str) -> Re
     }?;
 
     emit_success(deps, correlation_id, "Encrypt");
+    Ok(resp)
+}
+
+/// Transparent symmetric auto-rekey (crypto agility, Phase 5) for the Encrypt
+/// path — the AES-128 → AES-256 mirror of [`super::sign`]'s `rekey_and_sign`.
+/// Generate the replacement AES key (Name copied), deactivate + supersede the
+/// old, re-issue the Encrypt under the new key, stamp the response's `rekeyed`.
+fn rekey_and_encrypt(
+    deps: &Deps,
+    req: &EncryptRequest,
+    old: &crate::store::ObjectRecord,
+    new_algorithm: &str,
+    correlation_id: &str,
+) -> Result<EncryptResponse> {
+    // 1+2. Replacement symmetric key (Name carried over) + Activate.
+    let new_uid =
+        super::agility::generate_replacement_symmetric(deps, old, new_algorithm, correlation_id)
+            .map_err(|e| fail_err(deps, correlation_id, "Encrypt", e))?;
+
+    // 3. Deactivate + supersede the old key.
+    super::agility::supersede_old(deps, old, &new_uid, new_algorithm, correlation_id)?;
+
+    // 4. Re-issue the Encrypt against the migrated key, then stamp the rekey
+    // provenance. The new key's algorithm is the substitution target, so the
+    // re-issued Encrypt is allowed without re-substituting (no recursion).
+    let mut resp = encrypt(
+        deps,
+        EncryptRequest {
+            uid: new_uid.clone(),
+            data: req.data.clone(),
+            iv: req.iv.clone(),
+            cryptographic_parameters: req.cryptographic_parameters.clone(),
+            aad: req.aad.clone(),
+            init_indicator: req.init_indicator,
+            final_indicator: req.final_indicator,
+            correlation_value: req.correlation_value.clone(),
+        },
+        correlation_id,
+    )?;
+    resp.rekeyed = Some(crate::kmip30::RekeyInfo {
+        old_uid: old.uid.clone(),
+        new_uid,
+        new_public_key_uid: None,
+    });
     Ok(resp)
 }
 

@@ -8,6 +8,83 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.10.0] — 2026-07-05
+
+Label-only crypto agility: the KMIP policy engine can now drive a complete
+classical → hybrid → post-quantum migration keyed on a business *name* the
+application supplies, rekeying keys transparently on first use. Consolidates
+the classical-KEM Encapsulate line (X25519/X448/ECDH through the engine) with
+the Migration-playground engine work.
+
+### Added
+
+- **Label-only crypto agility (Migration playground foundation).** Policies can
+  now map a key's business *name* to an algorithm: `algorithm_default` and
+  `algorithm_substitution` rules take an optional `name_pattern` glob
+  (case-insensitive `*` / `?`), and `PolicyRequest` carries the key `Name`
+  (from the request template at create time, from the stored record at use
+  time). Name-patterned defaults are evaluated before generic ones
+  (most-specific-wins), so one policy can resolve `payments-*` → AES-128 while
+  everything else defaults to AES-256. The application passes only a label; the
+  policy decides every crypto parameter.
+- **Symmetric rekey-on-use.** `Encrypt` on an AES key the active policy wants
+  migrated (e.g. `AES-128 → AES-256`) now transparently generates the
+  replacement, deactivates + supersedes the old key (label carried over), and
+  re-issues the encryption under the new key — the symmetric mirror of the
+  existing Sign-side rekey.
+- **Substitution-aware `ReKey` / `ReKeyKeyPair`.** The sweep-style rekey ops
+  honour the policy's `algorithm_substitution` rules when the client pins no
+  algorithm, so a "migrate everything" pass turns each legacy key into its PQC
+  successor (`RSA-2048 → ML-DSA-44`, `AES-128 → AES-256`) as real KMIP ReKey
+  operations; an explicit client template algorithm still wins (request > policy).
+- **`migration-classical.yaml` / `migration-pqc.yaml` / `migration-hybrid.yaml`**
+  — a seven-key business estate (AES-256/128, X25519, X448, RSA-2048,
+  ECDSA-P256, Ed25519), its full-PQC target, and a hybrid transition
+  (key agreement → X25519MLKEM768, signing → ML-DSA-44), driving the label-only
+  demo end to end. Hybrid and full-PQC sign at the **same** level (ML-DSA-44);
+  hybrid's role is a classical co-signature, not a higher PQC level.
+- **`supersedes` link in `list_objects`.** A superseded (Deactivated) key now
+  reports the UID of the replacement it was rekeyed to
+  (`x-pqctoday-supersedes`), so a keystore UI can draw the old→new rekey edge.
+
+### Changed
+
+- **X25519 / X448 label-only creation + distinct naming.** A policy may now name
+  `X25519` / `X448` directly (`default_algorithm: X25519`); `create_key_pair`
+  turns that into `ECDH` + `RecommendedCurve` CURVE25519/CURVE448 and stores the
+  §6.7 mech-info length (255 / 448), so the stored key renders distinctly
+  (`X25519` / `X448`) instead of colliding with real P-curves as `ECDH-P256`.
+  Key-agreement keys created label-only now flow through the engine-native
+  classical Encapsulate/Decapsulate rather than the client having to supply
+  `CryptographicDomainParameters`.
+- **KEM rekey preserves the key label** — `rekey_and_encapsulate` copies the
+  old key's `Name` onto the ML-KEM/hybrid successor, so Locate-by-label follows
+  the migration.
+- **Label-only keys store their real size** — a key created from a resolved
+  policy name (`RSA-2048`, `ECDSA-P384`) now persists that length instead of 0.
+- **The KMIP `Name` is the application's identifier and is stored verbatim** —
+  the engine never fabricates or rewrites it. A key keeps the same business
+  handle across a migration (crypto-agility transparency); the old and new
+  objects are told apart by their UID + state + the `supersedes` link, not by
+  the name.
+
+### Fixed
+
+- **Sign-rekey now retires BOTH halves of the old key pair.** The transparent
+  Sign-side rekey previously deactivated only the private half, leaving the old
+  public key `Active`; a subsequent verify that resolved the public key by name
+  could pick the stale classical key and reject a valid PQC signature. Both
+  halves are now deactivated + supersede-linked, matching the Encapsulate rekey.
+
+### Internal
+
+- Merged the Migration-playground engine work with the classical-KEM
+  Encapsulate line: the former in-layer `kmip/src/dh_kem.rs` (in-process
+  X25519/X448 DHKEM) was **deleted** in favour of the engine-native classical
+  Encapsulate; the duplicated Ed25519 wiring, in-layer hybrid crypto crates
+  (`ml-kem` / `x25519-dalek` / `p256` / `x448`), and a duplicate
+  Encapsulate-rekey path were dropped in favour of the engine-native versions.
+
 ## [0.9.0] — 2026-07-05
 
 Post-quantum hybrid key exchange grows up. This release makes the hybrid KEMs

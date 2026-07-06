@@ -1273,8 +1273,6 @@ dependencies = [
  "const-oid 0.9.6",
  "der 0.7.10",
  "hmac",
- "ml-kem",
- "p256",
  "pbkdf2",
  "rand 0.8.6",
  "rsa",
@@ -1289,7 +1287,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
- "x25519-dalek",
  "x509-cert",
  "x509-parser",
 ]

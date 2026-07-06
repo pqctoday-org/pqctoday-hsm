@@ -141,11 +141,17 @@ pub fn rekey(deps: &Deps, req: ReKeyRequest, correlation_id: &str) -> Result<ReK
     // inherited > defaults; see module doc for why §6.1.58 Set
     // Defaults never fire here).
     let x = super::register_import_export::extract_attrs(&req.template_attribute);
-    let algo = x.algorithm.unwrap_or(orig.algorithm);
-    let length = x.length.unwrap_or(orig.cryptographic_length);
+    let mut algo = x.algorithm.unwrap_or(orig.algorithm);
+    let mut length = x.length.unwrap_or(orig.cryptographic_length);
     let usage = x.usage.unwrap_or(orig.usage_mask);
 
-    // Plane-1 policy gate against the object being replaced.
+    // Plane-1 policy gate against the object being replaced. Unlike the
+    // client-driven §6.1.51 ReKey (like-for-like), the crypto-agility engine
+    // can SUBSTITUTE the replacement algorithm: a `Decision::RekeyAndProceed`
+    // (e.g. AES-128 → AES-256) means the sweep-driven ReKey adopts the policy's
+    // target. An explicit client-template algorithm still wins (request >
+    // policy) — so we only consult the substitution when the client didn't
+    // pin one.
     {
         let stored_attrs = super::helpers::strip_x_prefixes(&orig.custom_attributes);
         let algo_name = super::helpers::qualified_name(algo, length);
@@ -154,9 +160,19 @@ pub fn rekey(deps: &Deps, req: ReKeyRequest, correlation_id: &str) -> Result<ReK
         p_req.key_length = Some(length);
         p_req.usage_mask = Some(usage);
         p_req.state = Some(state_name(orig.state));
+        p_req.name = orig.name.as_deref();
+        p_req.current_object_algorithm = Some(&algo_name);
         p_req.target_uid = Some(&orig.uid);
-        if let Decision::Deny { human, .. } = deps.engine.evaluate(&p_req) {
-            return Err(fail(KmipError::permission_denied(human)));
+        match deps.engine.evaluate(&p_req) {
+            Decision::Deny { human, .. } => {
+                return Err(fail(KmipError::permission_denied(human)));
+            }
+            Decision::RekeyAndProceed { new_algorithm, .. } if x.algorithm.is_none() => {
+                algo = super::create_key_pair::parse_algorithm(&new_algorithm).map_err(&fail)?;
+                length = super::helpers::classical_length_from_name(&new_algorithm)
+                    .unwrap_or(length);
+            }
+            _ => {}
         }
     }
 
@@ -277,12 +293,24 @@ pub fn rekey_key_pair(
     let pub_x = super::register_import_export::extract_attrs(&pub_attrs);
 
     // Request > inherited (per half; algorithm is pair-wide).
-    let algo = priv_x.algorithm.or(pub_x.algorithm).unwrap_or(old_priv.algorithm);
+    let client_algo = priv_x.algorithm.or(pub_x.algorithm);
+    let mut algo = client_algo.unwrap_or(old_priv.algorithm);
+    // Request > inherited for the generation length too: an explicit
+    // `CryptographicLength` in the re-key template drives the RSA modulus
+    // size / ECDSA curve; otherwise the family default applies (as before).
+    let mut key_length = priv_x.length.or(pub_x.length);
+    // Set when the policy substituted the algorithm — the new records then take
+    // the substituted length, NOT the old key's (which belonged to the old alg).
+    let mut substituted = false;
 
-    // Plane-1 policy gate against the private half being replaced.
+    // Plane-1 policy gate against the private half being replaced. As with
+    // ReKey, a `Decision::RekeyAndProceed` substitutes the replacement
+    // algorithm (RSA-2048 → ML-DSA-44) when the client didn't pin one — this
+    // is what makes the Migration sweep a series of real KMIP ReKeyKeyPair ops.
     {
         let stored_attrs = super::helpers::strip_x_prefixes(&old_priv.custom_attributes);
-        let algo_name = super::helpers::qualified_name(algo, old_priv.cryptographic_length);
+        let algo_name =
+            super::helpers::qualified_name(old_priv.algorithm, old_priv.cryptographic_length);
         let mut p_req = PolicyRequest::minimal(
             "ReKeyKeyPair",
             Some(&algo_name),
@@ -291,9 +319,23 @@ pub fn rekey_key_pair(
             &stored_attrs,
         );
         p_req.state = Some(state_name(old_priv.state));
+        p_req.name = old_priv.name.as_deref();
+        p_req.current_object_algorithm = Some(&algo_name);
         p_req.target_uid = Some(&old_priv.uid);
-        if let Decision::Deny { human, .. } = deps.engine.evaluate(&p_req) {
-            return Err(fail(KmipError::permission_denied(human)));
+        match deps.engine.evaluate(&p_req) {
+            Decision::Deny { human, .. } => {
+                return Err(fail(KmipError::permission_denied(human)));
+            }
+            Decision::RekeyAndProceed { new_algorithm, .. } if client_algo.is_none() => {
+                algo = super::create_key_pair::parse_algorithm(&new_algorithm).map_err(&fail)?;
+                // A PQC target's parameter set fixes its size (length 0); only
+                // classical targets carry a length suffix worth honoring. Either
+                // way the OLD length must not carry over onto the new algorithm.
+                key_length =
+                    Some(super::helpers::classical_length_from_name(&new_algorithm).unwrap_or(0));
+                substituted = true;
+            }
+            _ => {}
         }
     }
 
@@ -304,10 +346,6 @@ pub fn rekey_key_pair(
             format!("algorithm {algo:?} has no KeyGen mechanism"),
         ))
     })?;
-    // Request > inherited for the generation length too: an explicit
-    // `CryptographicLength` in the re-key template drives the RSA modulus
-    // size / ECDSA curve; otherwise the family default applies (as before).
-    let key_length = priv_x.length.or(pub_x.length);
     let generated = super::create_key_pair::engine_generate_keypair(
         deps,
         correlation_id,
@@ -324,9 +362,20 @@ pub fn rekey_key_pair(
     let priv_dates = replacement_dates(&old_priv, now, req.offset, DateTable::ReKeyKeyPair);
     let pub_dates = replacement_dates(&old_pub, now, req.offset, DateTable::ReKeyKeyPair);
 
+    // When the policy substituted the algorithm, `key_length` holds the new
+    // algorithm's size (0 for PQC) — that wins over the old key's length.
+    let priv_length = priv_x
+        .length
+        .or(if substituted { key_length } else { None })
+        .unwrap_or(old_priv.cryptographic_length);
+    let pub_length = pub_x
+        .length
+        .or(if substituted { key_length } else { None })
+        .unwrap_or(old_pub.cryptographic_length);
+
     let mut new_priv = inherited_replacement_base(&old_priv, now);
     new_priv.algorithm = algo;
-    new_priv.cryptographic_length = priv_x.length.unwrap_or(old_priv.cryptographic_length);
+    new_priv.cryptographic_length = priv_length;
     new_priv.usage_mask = priv_x.usage.unwrap_or(old_priv.usage_mask);
     new_priv.pkcs11_cka_id = generated.cka_id_priv;
     new_priv.digest_value = generated.digest_priv;
@@ -337,7 +386,7 @@ pub fn rekey_key_pair(
 
     let mut new_pub = inherited_replacement_base(&old_pub, now);
     new_pub.algorithm = algo;
-    new_pub.cryptographic_length = pub_x.length.unwrap_or(old_pub.cryptographic_length);
+    new_pub.cryptographic_length = pub_length;
     new_pub.usage_mask = pub_x.usage.unwrap_or(old_pub.usage_mask);
     new_pub.pkcs11_cka_id = generated.cka_id_pub;
     new_pub.digest_value = generated.digest_pub;
