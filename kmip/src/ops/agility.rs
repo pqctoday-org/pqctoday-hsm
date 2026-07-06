@@ -134,6 +134,11 @@ pub(crate) fn supersede_old(
     old_rec
         .links
         .insert("x-pqctoday-supersedes".to_string(), replacement_uid.to_string());
+    // The KMIP `Name` is the APPLICATION's identifier and survives migration
+    // unchanged (that IS the crypto-agility contract — the app keeps the same
+    // handle before/after). The engine does NOT rewrite it; the old and new
+    // objects are told apart by their real identity fields (UID, state, and the
+    // `x-pqctoday-supersedes` link) in the keystore view.
     deps.store.update(old_rec)?;
     deps.sink.emit(AuditEvent::at(
         OffsetDateTime::now_utc(),

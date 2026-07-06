@@ -341,8 +341,25 @@ fn rekey_and_sign(
     )
     .map_err(|e| fail_err(deps, correlation_id, "Sign", e))?;
 
-    // 3. Deactivate + supersede the old key.
+    // 3. Deactivate + supersede the old key pair — BOTH halves. Retiring only
+    // the private half (as an earlier version did) left the old PUBLIC key
+    // Active, so a later verify-by-label could resolve to the stale classical
+    // public key and reject a valid PQC signature. Retire the public half too
+    // and link it to the new public key (mirrors the Encapsulate rekey, which
+    // already supersedes both halves).
     super::agility::supersede_old(deps, old, &pair.private_uid, new_algorithm, correlation_id)?;
+    if let Some(old_pub_uid) = old.links.get("PublicKeyLink").cloned() {
+        if let Some(mut old_pub) = deps.store.get(&old_pub_uid)? {
+            if old_pub.state == State::Active || old_pub.state == State::PreActive {
+                old_pub.state = State::Deactivated;
+                old_pub.supersedes = Some(pair.public_uid.clone());
+                old_pub
+                    .links
+                    .insert("x-pqctoday-supersedes".to_string(), pair.public_uid.clone());
+                deps.store.update(old_pub)?;
+            }
+        }
+    }
 
     // 4. Re-issue the original Sign against the migrated key, then stamp the
     // response with the rekey details (R7 Phase 4 — so the dispatcher's §9.5
