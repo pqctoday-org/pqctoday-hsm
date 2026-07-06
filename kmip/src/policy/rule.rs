@@ -133,9 +133,17 @@ pub enum Rule {
     },
 
     /// Creating `algorithm` without all `flags` set → Deny.
+    ///
+    /// `ops` scopes the rule; when omitted it defaults to the four
+    /// creation/ingress ops (`Create`, `CreateKeyPair`, `Register`, `Import`)
+    /// — a mask requirement is a key-provenance gate, and firing it on use
+    /// ops re-closed the Decrypt/Verify paths policies deliberately leave
+    /// open (2026-07-04 gap audit).
     RequireUsageMask {
         algorithm: String,
         flags: Vec<String>,
+        #[serde(default)]
+        ops: Vec<String>,
         reason: String,
         /// Which framework clause this rule implements (e.g. "BSI TR-02102-1
         /// §2.1/§5.3"), for the Hub's rule-provenance UI. Purely descriptive —
@@ -146,9 +154,18 @@ pub enum Rule {
     },
 
     /// Creating any of `algorithms` without `x-<attribute_name>` set → Deny.
+    ///
+    /// `ops` scopes the rule; when omitted it defaults to the four
+    /// creation/ingress ops (`Create`, `CreateKeyPair`, `Register`, `Import`).
+    /// Un-scoped, this rule denied EVERY op on an untagged key — including
+    /// the Decrypt/Verify/Get paths the same policies promise stay open
+    /// (2026-07-04 gap audit; the "CNSA 2.0 allows AES-256 but denies
+    /// Encrypt/Decrypt" bug).
     RequireCustomAttribute {
         attribute_name: String,
         algorithms: Vec<String>,
+        #[serde(default)]
+        ops: Vec<String>,
         reason: String,
         /// Which framework clause this rule implements (e.g. "BSI TR-02102-1
         /// §2.1/§5.3"), for the Hub's rule-provenance UI. Purely descriptive —
@@ -667,9 +684,13 @@ impl Rule {
             Rule::RequireUsageMask {
                 algorithm,
                 flags,
+                ops,
                 reason,
                 ..
             } => {
+                if !scoped_op_matches(ops, req.op) {
+                    return None;
+                }
                 if !resolved_algorithm.is_some_and(|a| algo_matches(algorithm, a)) {
                     return None;
                 }
@@ -694,20 +715,26 @@ impl Rule {
             Rule::RequireCustomAttribute {
                 attribute_name,
                 algorithms,
+                ops,
                 reason,
                 ..
-            } => match resolved_algorithm {
-                Some(algo)
-                    if algorithms.iter().any(|a| algo_matches(a, algo))
-                        && !req.custom_attrs.contains_key(attribute_name) =>
-                {
-                    Some(GatingDeny {
-                        kmip_reason: DenyReason::InvalidAttributeValue,
-                        human: reason.clone(),
-                    })
+            } => {
+                if !scoped_op_matches(ops, req.op) {
+                    return None;
                 }
-                _ => None,
-            },
+                match resolved_algorithm {
+                    Some(algo)
+                        if algorithms.iter().any(|a| algo_matches(a, algo))
+                            && !req.custom_attrs.contains_key(attribute_name) =>
+                    {
+                        Some(GatingDeny {
+                            kmip_reason: DenyReason::InvalidAttributeValue,
+                            human: reason.clone(),
+                        })
+                    }
+                    _ => None,
+                }
+            }
 
             Rule::TemporalCutoff {
                 op,
@@ -962,6 +989,22 @@ impl Rule {
 }
 
 // ── helpers ────────────────────────────────────────────────────────────────
+
+/// Ops a `require_usage_mask` / `require_custom_attribute` rule gates when the
+/// policy author writes no `ops:` — the creation/ingress surface, where a key's
+/// provenance metadata is established. `CreateKeyPair` prefix-matches every
+/// `CreateKeyPair:<purpose>` refinement via [`op_matches`].
+pub const DEFAULT_PROVENANCE_OPS: &[&str] = &["Create", "CreateKeyPair", "Register", "Import"];
+
+/// Match a rule's optional `ops` scope: an explicit list gates exactly those
+/// ops; an empty (omitted) list falls back to [`DEFAULT_PROVENANCE_OPS`].
+fn scoped_op_matches(ops: &[String], req_op: &str) -> bool {
+    if ops.is_empty() {
+        DEFAULT_PROVENANCE_OPS.iter().any(|o| op_matches(o, req_op))
+    } else {
+        ops.iter().any(|o| op_matches(o, req_op))
+    }
+}
 
 /// Match a policy rule's `op`/`ops` entry against a request's canonical op.
 ///
@@ -1347,7 +1390,11 @@ fn matches_class(algorithm: &str, class: &str) -> bool {
         || algorithm.starts_with("Classic-McEliece")
         // composite PQC names carry a PQC primary, e.g. ML-DSA-65-ED25519
         || algorithm.contains("ML-DSA")
-        || algorithm.contains("ML-KEM");
+        || algorithm.contains("ML-KEM")
+        // hybrid KEMs spell the component without a hyphen (KMIP 3.0 WD19:
+        // X25519MLKEM768, SecP256r1MLKEM768) — they carry a PQC component and
+        // must not fall through to "classical" (2026-07-04 gap audit).
+        || algorithm.contains("MLKEM");
     let is_symmetric = algorithm.starts_with("AES")
         || algorithm.starts_with("ChaCha20")
         || algorithm.starts_with("HMAC")
@@ -1868,6 +1915,7 @@ mod tests {
         let r = Rule::RequireCustomAttribute {
             attribute_name: "pqctoday-cnsa-classification".into(),
             algorithms: vec!["ML-DSA-87".into()],
+            ops: vec![],
             reason: "CNSA classification required".into(),
             clause: None,
         };
@@ -1876,5 +1924,79 @@ mod tests {
         attrs.insert("pqctoday-cnsa-classification".into(), "TopSecret".into());
         let req2 = req("Create", Some("ML-DSA-87"), &attrs);
         assert!(r.check_pass2(&req2, Some("ML-DSA-87")).is_none());
+    }
+
+    // ── 2026-07-04 gap audit: provenance rules are creation-scoped ────────
+    #[test]
+    fn require_custom_attribute_default_scope_leaves_use_ops_open() {
+        let attrs = HashMap::new(); // attribute deliberately missing
+        let r = Rule::RequireCustomAttribute {
+            attribute_name: "pqctoday-cnsa-classification".into(),
+            algorithms: vec!["AES-256".into()],
+            ops: vec![], // omitted → DEFAULT_PROVENANCE_OPS
+            reason: "classification required".into(),
+            clause: None,
+        };
+        // Creation/ingress ops: denied without the attribute.
+        for op in ["Create", "CreateKeyPair:Encrypt", "Register", "Import"] {
+            let rq = req(op, Some("AES-256"), &attrs);
+            assert!(r.check_pass2(&rq, Some("AES-256")).is_some(), "{op} must deny");
+        }
+        // Use ops on an untagged (e.g. legacy) key: NOT this rule's business.
+        for op in ["Encrypt", "Decrypt", "Sign", "SignatureVerify", "Get", "Decapsulate"] {
+            let rq = req(op, Some("AES-256"), &attrs);
+            assert!(r.check_pass2(&rq, Some("AES-256")).is_none(), "{op} must pass");
+        }
+    }
+
+    #[test]
+    fn require_custom_attribute_explicit_ops_override_default() {
+        let attrs = HashMap::new();
+        let r = Rule::RequireCustomAttribute {
+            attribute_name: "pqctoday-purpose".into(),
+            algorithms: vec!["ML-DSA-87".into()],
+            ops: vec!["Sign".into()],
+            reason: "purpose required to sign".into(),
+            clause: None,
+        };
+        // Explicit scope gates exactly those ops — Create passes, Sign denies.
+        let rq = req("Create", Some("ML-DSA-87"), &attrs);
+        assert!(r.check_pass2(&rq, Some("ML-DSA-87")).is_none());
+        let rq = req("Sign", Some("ML-DSA-87"), &attrs);
+        assert!(r.check_pass2(&rq, Some("ML-DSA-87")).is_some());
+    }
+
+    #[test]
+    fn require_usage_mask_default_scope_leaves_use_ops_open() {
+        let attrs = HashMap::new();
+        let r = Rule::RequireUsageMask {
+            algorithm: "LMS".into(),
+            flags: vec!["Sign".into(), "Verify".into()],
+            ops: vec![],
+            reason: "LMS keys must declare Sign+Verify".into(),
+            clause: None,
+        };
+        // Create without a mask fails closed (unchanged behaviour).
+        let rq = req("Create", Some("LMS"), &attrs);
+        assert!(r.check_pass2(&rq, Some("LMS")).is_some());
+        // A mask-less use request (dry-run, legacy verify) is out of scope.
+        let rq = req("SignatureVerify", Some("LMS"), &attrs);
+        assert!(r.check_pass2(&rq, Some("LMS")).is_none());
+        // Create WITH the right mask passes.
+        let mut rq = req("Create", Some("LMS"), &attrs);
+        rq.usage_mask = Some(
+            super::super::super::kmip30::UsageMask::SIGN
+                | super::super::super::kmip30::UsageMask::VERIFY,
+        );
+        assert!(r.check_pass2(&rq, Some("LMS")).is_none());
+    }
+
+    #[test]
+    fn matches_class_hybrid_kems_are_pqc() {
+        // KMIP 3.0 WD19 hybrid KEM spellings carry no hyphen in the ML-KEM
+        // component; they must classify as PQC, not fall through to classical.
+        assert!(matches_class("X25519MLKEM768", "pqc"));
+        assert!(matches_class("SecP256r1MLKEM768", "pqc"));
+        assert!(!matches_class("X25519MLKEM768", "classical"));
     }
 }

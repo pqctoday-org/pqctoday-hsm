@@ -252,6 +252,7 @@ pub fn canonical_name(a: KmipAlgorithm) -> String {
         Ecdh => "ECDH",
         ChaCha20 => "ChaCha20",
         ChaCha20Poly1305 => "ChaCha20-Poly1305",
+        Ed25519 => "Ed25519",
         MlKem512 => "ML-KEM-512",
         MlKem768 => "ML-KEM-768",
         MlKem1024 => "ML-KEM-1024",
@@ -272,6 +273,7 @@ pub fn canonical_name(a: KmipAlgorithm) -> String {
         SlhDsaShake256f => "SLH-DSA-SHAKE-256f",
         X25519MlKem768 => "X25519MLKEM768",
         SecP256r1MlKem768 => "SecP256r1MLKEM768",
+        SecP384r1MlKem1024 => "SecP384r1MLKEM1024",
     }
     .into()
 }
@@ -672,6 +674,9 @@ pub fn native_sign_mech_with_params(
         HmacSha256 => c::CKM_SHA256_HMAC,
         HmacSha384 => c::CKM_SHA384_HMAC,
         HmacSha512 => c::CKM_SHA512_HMAC,
+        // P1 (2026-07-05): pure EdDSA signs the message directly — no
+        // caller-selectable hash parameter, unlike RSA/ECDSA above.
+        Ed25519 => c::CKM_EDDSA,
         other => {
             return Err(KmipError::failed(
                 crate::error::ResultReason::OperationNotSupported,

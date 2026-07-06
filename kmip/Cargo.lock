@@ -1856,7 +1856,6 @@ dependencies = [
  "hex",
  "hmac",
  "ml-kem",
- "p256",
  "pbkdf2",
  "predicates",
  "prometheus",
@@ -1884,7 +1883,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
- "x25519-dalek",
  "x509-cert",
  "x509-parser",
 ]
@@ -2595,7 +2593,7 @@ dependencies = [
 
 [[package]]
 name = "softhsmrustv3"
-version = "0.6.1"
+version = "0.8.0"
 dependencies = [
  "aes",
  "aes-gcm",

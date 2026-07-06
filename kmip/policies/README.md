@@ -1,5 +1,10 @@
 # Plane 1 — Crypto Agility Management Plane Policy Library
 
+> **New here?** [`../docs/CACP_GUIDE.md`](../docs/CACP_GUIDE.md) is the full
+> guide: the policy language, how to test policies in the hub's Agility
+> Workbench (policies, batches & macros), and the verified KMIP 3.0 status
+> for hybrid KEMs and hybrid signatures.
+
 Example + default policy files consumed by the `pqctoday-hsm/kmip/` subsystem's policy engine (`src/policy/loader.rs`).
 
 Loaded at server start via `pqctoday-kmip --policy-dir policies --policy <name>`. The engine evaluates every KMIP request against the loaded policy before dispatching it to a Plane 2 op handler. A `Deny` decision short-circuits the request with a KMIP `PermissionDenied` response.
@@ -98,8 +103,8 @@ Two families:
 | `algorithm_denylist` | `ops: [...]`, `algorithms: [...]` | If `op ∈ ops` AND `algorithm ∈ algorithms` → Deny. Optional `exception_custom_attribute: { name, value }` suppresses the deny when the request carries that attribute. |
 | `min_key_length` | `algorithm: <name>`, `min_bits: N` | If `algorithm == name` AND `key_length < min_bits` → Deny |
 | `max_key_age_days` | `days: N`, `ops: [...]` | If `op ∈ ops` AND `(now - key.activated_at) > days` → Deny (rotate). **Phase 4.5 stub** — needs Phase 6 object store to expose key timestamps; loader emits a warning at load time. |
-| `require_usage_mask` | `algorithm: <name>`, `flags: [...]` | If creating `algorithm` without all `flags` set (or with no mask at all) → Deny. Flag names: `Sign`, `Verify`, `Encrypt`, `Decrypt`, `WrapKey`, `UnwrapKey`, `Export`, `MacGenerate`, `MacVerify`, `DeriveKey`, `ContentCommitment`, `KeyAgreement`, `CertificateSign`, `CrlSign`, `Authenticate`. |
-| `require_custom_attribute` | `attribute_name: <name>`, `algorithms: [...]` | If `algorithm ∈ algorithms` AND `x-<attribute_name>` not set → Deny |
+| `require_usage_mask` | `algorithm: <name>`, `flags: [...]`, optional `ops: [...]` | If `op ∈ ops` AND `algorithm` matches AND not all `flags` set (or no mask at all) → Deny. `ops` defaults to the creation/ingress ops (`Create`, `CreateKeyPair`, `Register`, `Import`) — un-scoped it re-closed the use ops policies leave open (2026-07-04). Flag names: `Sign`, `Verify`, `Encrypt`, `Decrypt`, `WrapKey`, `UnwrapKey`, `Export`, `MacGenerate`, `MacVerify`, `DeriveKey`, `ContentCommitment`, `KeyAgreement`, `CertificateSign`, `CrlSign`, `Authenticate`. |
+| `require_custom_attribute` | `attribute_name: <name>`, `algorithms: [...]`, optional `ops: [...]` | If `op ∈ ops` AND `algorithm ∈ algorithms` AND `x-<attribute_name>` not set → Deny. `ops` defaults to `Create`/`CreateKeyPair`/`Register`/`Import` (see above). |
 | `temporal_cutoff` | `op: <name>`, `algorithm_class: <classical\|pqc>`, `after: <YYYY-MM-DD>`, optional `algorithms: [...]` | If `now >= after` AND `op == name` AND algorithm matches class (and optional narrow list) → Deny |
 | `lifecycle_state_gate` | `op: <name>`, `allowed_states: [...]` | If `op == name` AND `state ∉ allowed_states` → Deny |
 | `hybrid_dual_sign_requirement` | `primary: <alg>`, `secondary: <alg>`, `effective_from: <date>`, `effective_until: <date>`, `ops_affected: [...]` | During window, every op in `ops_affected` MUST carry the composite algorithm name `<primary>-<secondary>` in KMIP 3.0 spelling (e.g. `ML-DSA-65-Ed25519`); matched case-insensitively. |

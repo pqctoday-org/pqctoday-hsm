@@ -40,12 +40,17 @@
 //! `Session: !Send` in `pqctoday-hsm/kmip/` already aligns the KMIP
 //! server with this constraint. See `docs/NATIVE_API.md` §4 (Option A).
 
+pub mod agree;
+pub mod derive;
 pub mod encrypt;
+pub mod hybrid;
 pub mod keygen;
 pub mod object;
 pub mod session;
 pub mod sign;
 
+pub use agree::*;
+pub use derive::*;
 pub use encrypt::*;
 pub use keygen::*;
 pub use object::*;

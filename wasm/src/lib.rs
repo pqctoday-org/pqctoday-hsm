@@ -512,6 +512,27 @@ pub fn decode_ttlv(bytes: &[u8]) -> String {
 
 // ── request builders ─────────────────────────────────────────────────────────
 
+/// Custom `x-*` attributes from an op spec's `attrs` object ({name: value},
+/// `x-` prefix optional — the wire carries the bare name and the create path
+/// persists it for use-time policy gates). Same shape the dry-run facade
+/// accepts, so the UI can send governance tags (e.g.
+/// x-pqctoday-cnsa-classification) on REAL Create/CreateKeyPair ops too
+/// (2026-07-04: previously dry-run-only, which made attribute-gated policies
+/// unusable in the workbench).
+fn custom_attrs_from_spec(spec: &Json) -> Vec<Attribute> {
+    spec.get("attrs")
+        .and_then(|v| v.as_object())
+        .map(|o| {
+            o.iter()
+                .map(|(k, v)| Attribute::Custom {
+                    name: k.strip_prefix("x-").unwrap_or(k).to_string(),
+                    value: v.as_str().unwrap_or_default().to_string(),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn build_payload(op: &str, spec: &Json) -> Result<RequestPayload, String> {
     let uid = || spec.get("uid").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let data = || spec_bytes(spec, "data", "text");
@@ -535,6 +556,7 @@ fn build_payload(op: &str, spec: &Json) -> Result<RequestPayload, String> {
             if let Some(len) = spec.get("length").and_then(|v| v.as_u64()) {
                 attrs.push(Attribute::CryptographicLength(len as u32));
             }
+            attrs.extend(custom_attrs_from_spec(spec));
             RequestPayload::Create(CreateRequest {
                 object_type: ObjectType::SymmetricKey,
                 template_attribute: attrs,
@@ -565,6 +587,7 @@ fn build_payload(op: &str, spec: &Json) -> Result<RequestPayload, String> {
             if let Some(len) = spec.get("length").and_then(|v| v.as_u64()) {
                 common.push(Attribute::CryptographicLength(len as u32));
             }
+            common.extend(custom_attrs_from_spec(spec));
             RequestPayload::CreateKeyPair(CreateKeyPairRequest {
                 common_attributes: common,
                 private_key_attributes: vec![],

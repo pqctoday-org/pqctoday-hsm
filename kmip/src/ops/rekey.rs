@@ -315,6 +315,7 @@ pub fn rekey_key_pair(
         key_length,
         mech,
         None, // rekey generates fresh material, never from a client seed
+        old_priv.recommended_curve, // preserve the base object's RecommendedCurve (§4.16) — an X25519/X448/NIST ECDH key rekeys to the same curve
     )
     .map_err(&fail)?;
 
@@ -329,6 +330,7 @@ pub fn rekey_key_pair(
     new_priv.usage_mask = priv_x.usage.unwrap_or(old_priv.usage_mask);
     new_priv.pkcs11_cka_id = generated.cka_id_priv;
     new_priv.digest_value = generated.digest_priv;
+    new_priv.recommended_curve = old_priv.recommended_curve; // KMIP 3.0 §4.16 — curve survives rekey
     apply_dates(&mut new_priv, &priv_dates, &priv_x, now);
     new_priv.name = priv_x.name.clone().or_else(|| old_priv.name.clone());
     new_priv.links.insert(LINK_REPLACED_OBJECT.to_string(), old_priv.uid.clone());
@@ -339,6 +341,7 @@ pub fn rekey_key_pair(
     new_pub.usage_mask = pub_x.usage.unwrap_or(old_pub.usage_mask);
     new_pub.pkcs11_cka_id = generated.cka_id_pub;
     new_pub.digest_value = generated.digest_pub;
+    new_pub.recommended_curve = old_pub.recommended_curve; // KMIP 3.0 §4.16 — curve survives rekey
     apply_dates(&mut new_pub, &pub_dates, &pub_x, now);
     new_pub.name = pub_x.name.clone().or_else(|| old_pub.name.clone());
     new_pub.links.insert(LINK_REPLACED_OBJECT.to_string(), old_pub.uid.clone());

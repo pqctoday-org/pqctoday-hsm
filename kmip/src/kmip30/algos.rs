@@ -28,6 +28,18 @@
 /// `CK_ULONG`; we model it as `u32` because every codepoint we ship fits.
 pub type CkMechanismType = u32;
 
+/// KMIP 3.0 `Recommended Curve` enumeration values (spec §4.16, tag `0x420075`).
+/// Values verified against `spec/oasis-kmip-3.0/kmip-spec-3.0-tags-enums.json` —
+/// used to resolve an ECDH `CreateKeyPair`'s curve. X25519/X448 key agreement is
+/// `CryptographicAlgorithm=ECDH` + `RecommendedCurve = CURVE25519 / CURVE448`.
+pub mod recommended_curve {
+    pub const P_256: u32 = 0x00000007;
+    pub const P_384: u32 = 0x0000000a;
+    pub const P_521: u32 = 0x0000000d;
+    pub const CURVE25519: u32 = 0x00000045;
+    pub const CURVE448: u32 = 0x00000046;
+}
+
 // ── Standard PKCS#11 v3.2 PQC mech codepoints ────────────────────────────
 // Re-exported from the engine (`softhsmrustv3::constants`) — single source
 // of truth, values per the normative pkcs11t.h.
@@ -61,6 +73,14 @@ pub const CKM_RSA_PKCS_PSS: CkMechanismType          = 0x000D;
 pub const CKM_EC_KEY_PAIR_GEN: CkMechanismType = 0x1040;
 pub const CKM_ECDSA: CkMechanismType           = 0x1041;
 pub const CKM_ECDSA_SHA256: CkMechanismType    = 0x1044;
+
+/// PKCS#11 v3.2 §6.24 — EdDSA key pair generation (Edwards curve). Value
+/// verified against `rust/src/constants.rs` (softhsmrustv3's own mirror of
+/// `pkcs11t.h`, the project's source of truth for `CK*` values).
+pub const CKM_EC_EDWARDS_KEY_PAIR_GEN: CkMechanismType = 0x1055;
+/// PKCS#11 v3.2 §6.24 — EdDSA sign/verify (Ed25519/Ed448). Same
+/// verification source as above.
+pub const CKM_EDDSA: CkMechanismType = 0x1057;
 
 pub const CKM_AES_KEY_GEN: CkMechanismType = 0x1080;
 pub const CKM_AES_GCM: CkMechanismType     = 0x1087;
@@ -127,6 +147,16 @@ pub enum KmipAlgorithm {
     /// (separate auth-tag emit path) without needing a `BlockCipherMode`
     /// hint.
     ChaCha20Poly1305,
+    /// EdDSA over Curve25519 (RFC 8032) — KMIP 3.0 §11 codepoint `0x37`
+    /// (base spec enum, predates WD19). Edwards-form signing curve —
+    /// distinct key type, mechanism, and OID from `X25519` (Montgomery-form
+    /// key agreement on the same underlying curve; not yet a KmipAlgorithm
+    /// variant — see `hybrid_kem.rs` for X25519's only current use, inside
+    /// the hybrid KEM combiner). 2026-07-05 (P1): keygen/sign/verify all
+    /// pre-existed at the PKCS#11 layer (`ffi.rs` CKM_EC_EDWARDS_KEY_PAIR_GEN
+    /// / CKM_EDDSA) — this variant is the KMIP-layer plumbing that was
+    /// missing.
+    Ed25519,       // 0x37
 
     // ── FIPS PQC — ML-KEM (FIPS 203) ──────────────────────────────────────
     MlKem512,      // 0x39
@@ -153,11 +183,16 @@ pub enum KmipAlgorithm {
     SlhDsaShake256f,  // 0x4a
 
     // ── KMIP 3.0 WD19 hybrid KEMs (K6) ────────────────────────────────────
-    // ML-KEM-768 composed with a classical ECDH per draft-ietf-tls-ecdhe-mlkem.
-    // These do NOT map to a single PKCS#11 mechanism — the KMIP op handlers
-    // compose them in-process (see `crate::hybrid_kem`).
-    X25519MlKem768,   // 0x5c
-    SecP256r1MlKem768, // 0x5d
+    // ML-KEM composed with a classical ECDH per draft-ietf-tls-ecdhe-mlkem.
+    // These do NOT map to a single PKCS#11 mechanism — the engine composes the
+    // two component keys (see `softhsmrustv3::native::hybrid`).
+    X25519MlKem768,     // 0x5c (WD19)
+    SecP256r1MlKem768,  // 0x5d (WD19)
+    // SecP384r1MLKEM1024 (draft-ietf-tls-ecdhe-mlkem group 0x11ED) has NO WD19
+    // CryptographicAlgorithm value (WD19 stops at 0x5D). Assigned a clearly
+    // vendor/extension codepoint in the reserved high-bit range, pending an
+    // OASIS assignment — same posture as unassigned composite codepoints.
+    SecP384r1MlKem1024, // 0x8000005e (vendor/extension — non-standard)
 }
 
 impl KmipAlgorithm {
@@ -176,6 +211,7 @@ impl KmipAlgorithm {
             Ecdh       => 0x0000000e,
             ChaCha20         => 0x0000001c,
             ChaCha20Poly1305 => 0x0000001e,
+            Ed25519    => 0x00000037,
             MlKem512   => 0x00000039,
             MlKem768   => 0x0000003a,
             MlKem1024  => 0x0000003b,
@@ -196,6 +232,7 @@ impl KmipAlgorithm {
             SlhDsaShake256f  => 0x0000004a,
             X25519MlKem768    => 0x0000005c,
             SecP256r1MlKem768 => 0x0000005d,
+            SecP384r1MlKem1024 => 0x8000005e,
         }
     }
 
@@ -213,6 +250,7 @@ impl KmipAlgorithm {
             0x0000000e => Ecdh,
             0x0000001c => ChaCha20,
             0x0000001e => ChaCha20Poly1305,
+            0x00000037 => Ed25519,
             0x00000039 => MlKem512,
             0x0000003a => MlKem768,
             0x0000003b => MlKem1024,
@@ -233,6 +271,7 @@ impl KmipAlgorithm {
             0x0000004a => SlhDsaShake256f,
             0x0000005c => X25519MlKem768,
             0x0000005d => SecP256r1MlKem768,
+            0x8000005e => SecP384r1MlKem1024,
             _ => return None,
         })
     }
@@ -240,14 +279,21 @@ impl KmipAlgorithm {
     /// `true` if this is a KMIP 3.0 WD19 hybrid KEM (K6), composed in-process
     /// from ML-KEM-768 + a classical ECDH rather than a single PKCS#11 mech.
     pub const fn is_hybrid_kem(self) -> bool {
-        matches!(self, KmipAlgorithm::X25519MlKem768 | KmipAlgorithm::SecP256r1MlKem768)
+        matches!(
+            self,
+            KmipAlgorithm::X25519MlKem768
+                | KmipAlgorithm::SecP256r1MlKem768
+                | KmipAlgorithm::SecP384r1MlKem1024
+        )
     }
 
-    /// Map to the [`crate::hybrid_kem::Hybrid`] combiner, or `None` if not hybrid.
+    /// Map to the engine's [`crate::hybrid_kem::Hybrid`] combiner (a re-export
+    /// of `softhsmrustv3::native::hybrid::Hybrid`), or `None` if not hybrid.
     pub const fn hybrid_kem(self) -> Option<crate::hybrid_kem::Hybrid> {
         match self {
             KmipAlgorithm::X25519MlKem768 => Some(crate::hybrid_kem::Hybrid::X25519MlKem768),
             KmipAlgorithm::SecP256r1MlKem768 => Some(crate::hybrid_kem::Hybrid::SecP256r1MlKem768),
+            KmipAlgorithm::SecP384r1MlKem1024 => Some(crate::hybrid_kem::Hybrid::SecP384r1MlKem1024),
             _ => None,
         }
     }
@@ -342,6 +388,10 @@ impl KmipAlgorithm {
             (HmacSha384, Mac) => Some(CKM_SHA384_HMAC),
             (HmacSha512, Mac) => Some(CKM_SHA512_HMAC),
 
+            // ── Ed25519 (RFC 8032 EdDSA) ────────────────────────────────────
+            (Ed25519, KeyGen) => Some(CKM_EC_EDWARDS_KEY_PAIR_GEN),
+            (Ed25519, SignVerify) => Some(CKM_EDDSA),
+
             // Any other (algorithm, op) pair is undefined.
             _ => None,
         }
@@ -361,6 +411,7 @@ impl KmipAlgorithm {
             Ecdh       => "ECDH",
             ChaCha20         => "ChaCha20",
             ChaCha20Poly1305 => "ChaCha20-Poly1305",
+            Ed25519    => "Ed25519",
             MlKem512   => "ML-KEM-512",
             MlKem768   => "ML-KEM-768",
             MlKem1024  => "ML-KEM-1024",
@@ -381,6 +432,7 @@ impl KmipAlgorithm {
             SlhDsaShake256f  => "SLH-DSA-SHAKE-256f",
             X25519MlKem768    => "X25519MLKEM768",
             SecP256r1MlKem768 => "SecP256r1MLKEM768",
+            SecP384r1MlKem1024 => "SecP384r1MLKEM1024",
         }
     }
 }

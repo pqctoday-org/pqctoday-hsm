@@ -372,12 +372,43 @@ pub fn derive_key(
             out
         }
 
+        // §7.13 — Asymmetric Key agreement (ECDH / X25519 / X448). The base
+        // object is the stored EC/ECDH PRIVATE key (engine-backed,
+        // non-extractable); the peer's public key is the Derivation Data. The
+        // engine computes the DH shared secret in-HSM (the private scalar never
+        // leaves it); we take the requested length as the derived key material
+        // (KMIP Usage-Guide truncation convention — a client wanting a KDF over
+        // it chains a HASH/HMAC DeriveKey).
+        DerivationMethod::AsymmetricKey => {
+            let peer_public = derivation_data.as_deref().ok_or_else(|| {
+                fail(KmipError::invalid_field(
+                    "Asymmetric Key derivation requires the peer public key as \
+                     Derivation Data (§7.13 Table 465)",
+                ))
+            })?;
+            let session = deps.engine_session.ok_or_else(|| {
+                fail(KmipError::failed(
+                    ResultReason::CryptographicFailure,
+                    "Asymmetric Key derivation requires an engine session".to_string(),
+                ))
+            })?;
+            let handle = super::helpers::find_handle_for_object(
+                session,
+                &base.pkcs11_cka_id,
+                ObjectType::PrivateKey,
+            )
+            .map_err(|rv| fail(super::helpers::ck_rv_to_kmip_error(rv, "DeriveKey:find")))?
+            .ok_or_else(|| fail(KmipError::object_not_found(&base.uid)))?;
+            let ss = softhsmrustv3::native::ecdh_agree(session, handle, peer_public)
+                .map_err(|rv| fail(super::helpers::ck_rv_to_kmip_error(rv, "DeriveKey:ecdh_agree")))?;
+            take_prefix(ss, len_bytes).map_err(&fail)?
+        }
+
         // §6.1.18.1 Table 304 lists `Operation Not Supported` — the
         // honest reason for methods this stack cannot back (no engine
         // primitive reachable from the KMIP layer and no in-process
         // implementation): ENCRYPT, the SP 800-108 Feedback /
-        // Double-Pipeline modes, Asymmetric Key agreement, AWS SigV4,
-        // and HKDF.
+        // Double-Pipeline modes, AWS SigV4, and HKDF.
         other => {
             return Err(fail(KmipError::failed(
                 ResultReason::OperationNotSupported,
@@ -943,11 +974,12 @@ mod tests {
         let (_r, d) = deps();
         put_base(&d, "b1", ObjectType::SymmetricKey, KmipAlgorithm::HmacSha256,
                  Some(b"k".to_vec()), UsageMask::DERIVE_KEY, State::Active);
+        // NB: AsymmetricKey (ECDH agreement) is now SUPPORTED — it is exercised
+        // by the ecdh_recommended_curve_e2e integration test, not here.
         for method in [
             DerivationMethod::Encrypt,
             DerivationMethod::Nist800_108F,
             DerivationMethod::Nist800_108Dpi,
-            DerivationMethod::AsymmetricKey,
             DerivationMethod::AwsSigV4,
             DerivationMethod::Hkdf,
         ] {

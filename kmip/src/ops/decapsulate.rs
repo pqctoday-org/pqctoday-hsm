@@ -113,25 +113,54 @@ pub fn decapsulate(
         }
     }
 
-    // K6 — hybrid KEM: split the composite ciphertext, ML-KEM-decaps + classical
-    // ECDH against the stored composite PRIVATE key, combine per the algorithm's
-    // order (crate::hybrid_kem). ML-KEM implicit rejection is preserved.
+    // K6 — hybrid KEM: the ENGINE decapsulates against the TWO non-extractable
+    // private handles (ML-KEM half under `pkcs11_cka_id`, classical half under
+    // `pkcs11_cka_id_secondary`), splits the composite ciphertext, and combines
+    // per the algorithm's order through the derive machinery. The private key
+    // material never enters this layer (that is the non-extractability fix);
+    // ML-KEM implicit rejection is preserved inside the engine.
     if let Some(hybrid) = obj.algorithm.hybrid_kem() {
-        let private = obj.key_material.as_deref().ok_or_else(|| {
+        let session = deps.engine_session.ok_or_else(|| {
             KmipError::failed(
                 ResultReason::CryptographicFailure,
-                "hybrid KEM private key has no stored material".to_string(),
+                "hybrid KEM decapsulate requires an engine session".to_string(),
             )
         })?;
-        let shared_secret =
-            crate::hybrid_kem::decapsulate(hybrid, private, &req.data).map_err(|e| {
-                fail_err(
-                    deps,
-                    correlation_id,
-                    "Decapsulate",
-                    KmipError::failed(ResultReason::CryptographicFailure, e),
-                )
-            })?;
+        let mlkem_priv = super::helpers::find_handle_for_object(
+            session,
+            &obj.pkcs11_cka_id,
+            crate::kmip30::ObjectType::PrivateKey,
+        )
+        .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Decap:find-mlkem"))?
+        .ok_or_else(|| KmipError::object_not_found(&req.uid))?;
+        let classical_cka_id = obj.pkcs11_cka_id_secondary.as_deref().ok_or_else(|| {
+            KmipError::failed(
+                ResultReason::CryptographicFailure,
+                "hybrid KEM private key missing secondary (classical) CKA_ID".to_string(),
+            )
+        })?;
+        let classical_priv = super::helpers::find_handle_for_object(
+            session,
+            classical_cka_id,
+            crate::kmip30::ObjectType::PrivateKey,
+        )
+        .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Decap:find-classical"))?
+        .ok_or_else(|| KmipError::object_not_found(&req.uid))?;
+        let shared_secret = softhsmrustv3::native::hybrid::decapsulate(
+            session,
+            hybrid,
+            mlkem_priv,
+            classical_priv,
+            &req.data,
+        )
+        .map_err(|rv| {
+            fail_err(
+                deps,
+                correlation_id,
+                "Decapsulate",
+                super::helpers::ck_rv_to_kmip_error(rv, "hybrid decapsulate"),
+            )
+        })?;
         emit_pkcs11(deps, correlation_id, "soft::hybrid_kem_decapsulate", None, 0, "CKR_OK");
         let ss_uid = store_shared_secret(deps, obj.algorithm, shared_secret)?;
         emit_success(deps, correlation_id, "Decapsulate");
