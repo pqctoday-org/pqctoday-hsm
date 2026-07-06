@@ -509,6 +509,12 @@ impl KmipPlayground {
                     // (AES-128 at-risk, classical asym false, PQC/hybrid true).
                     "quantumSafe": r.quantum_safe.unwrap_or_else(||
                         r.algorithm.quantum_safe_with_length(r.cryptographic_length)),
+                    // Crypto-agility lineage: on a superseded (Deactivated) key,
+                    // the UID of the replacement it was rekeyed to (KMIP
+                    // `x-pqctoday-supersedes` link / `supersedes` field). `None`
+                    // for keys that were never rekeyed. Lets the keystore UI
+                    // draw the old→new migration edge.
+                    "supersedes": r.supersedes,
                 })
             })
             .collect();
