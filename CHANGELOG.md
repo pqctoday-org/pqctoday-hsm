@@ -8,6 +8,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **FrodoKEM + Classic McEliece key exchange**, the two conservative
+  post-quantum algorithms Germany's BSI recommends for long-term
+  confidentiality (BSI TR-02102-1 §2.4.1/§2.4.2) alongside NIST's ML-KEM.
+  Available end to end: generate a keypair, encapsulate, and decapsulate
+  through both the standard PKCS#11 interface and the KMIP server, gated by
+  the same crypto-agility policy engine as everything else — a BSI-style
+  policy allows them (paired with a hybrid partner algorithm), while
+  FIPS/CNSA policies correctly reject them, matching each region's real
+  guidance. FrodoKEM ships all 6 standard sizes (640/976/1344 × AES/SHAKE);
+  Classic McEliece ships the Category-5 `mceliece6688128` parameter set BSI
+  recommends. Correctness is backed by all 600 official FrodoKEM test
+  vectors from the reference implementation, plus 40 independent
+  round-trip trials against `liboqs` for Classic McEliece (no official
+  test vectors exist for it). HQC is intentionally not included yet.
+
 ## [0.10.0] — 2026-07-05
 
 Label-only crypto agility: the KMIP policy engine can now drive a complete
