@@ -189,10 +189,16 @@ pub enum KmipAlgorithm {
     X25519MlKem768,     // 0x5c (WD19)
     SecP256r1MlKem768,  // 0x5d (WD19)
     // SecP384r1MLKEM1024 (draft-ietf-tls-ecdhe-mlkem group 0x11ED) has NO WD19
-    // CryptographicAlgorithm value (WD19 stops at 0x5D). Assigned a clearly
-    // vendor/extension codepoint in the reserved high-bit range, pending an
-    // OASIS assignment — same posture as unassigned composite codepoints.
-    SecP384r1MlKem1024, // 0x8000005e (vendor/extension — non-standard)
+    // CryptographicAlgorithm value (WD19 stops at 0x5D). Assigned a codepoint
+    // in the `8XXXXXXX` Extensions range — KMIP 3.0's OWN spec-sanctioned
+    // vendor-extension convention for enumeration values (every enum table,
+    // including this one — §11.12 Table 543 Cryptographic Algorithm
+    // Enumeration — lists "Extensions 8XXXXXXX" as a valid entry; confirmed
+    // present in 60 enum tables across the spec). This is a real, working
+    // extension codepoint per spec convention, not an ad hoc invention — it
+    // is simply not (yet) an OASIS-assigned standard value, pending a future
+    // official assignment for this algorithm.
+    SecP384r1MlKem1024, // 0x8000005e (spec-convention vendor extension, §11.12)
 }
 
 impl KmipAlgorithm {

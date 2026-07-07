@@ -93,7 +93,19 @@ Effort S/M/L · Risk L/M/H · each task carries its own exit test.
 ### Phase 0 — Truth & labeling  *(S / L)*
 - **0.1** Relabel the claim (CONFORMANCE_REPORT:10, README, CHANGELOG): "CSD01 corpus + WD19 PQC (drafts); Baseline Server profile **except item 10 (parked)**." *Exit:* no ratified-standard / full-Baseline claim remains.
 - **0.2** Version-qualify the stale strings (`KMIP_3_0_DELTA.md §5`, `vendor_tags.rs:17` "KMIP 3.0 has no Encapsulate"); fix DELTA op-count 50→64; mark `KMIP_LAYER_GAPS_PLAN.md` historical; fix `decision.rs:132` "Deprecated" → `Deactivated`; point to `spec/crossref/kem-encapsulate-decapsulate.yaml`. *Exit:* `grep -ri "no Encapsulate operation"` returns only version-qualified text.
-- **0.3** Remove non-spec wire artifacts: drop / explicit-vendor-gate `SecP384r1MlKem1024=0x8000005e` (`algos.rs:195`); rename test-only `BATCH_COUNT=0x42000d` (Reserved in 3.0, `codec/tag.rs:93`). *Exit:* no non-spec `CryptographicAlgorithm` value can ride the wire; no symbol names a Reserved tag.
+- **0.3** ~~Remove~~ **CORRECTED, not removed:** `SecP384r1MlKem1024=0x8000005e` (`algos.rs:195`) is
+  **not** an invented codepoint — KMIP 3.0's own §11.12 Table 543 (Cryptographic Algorithm
+  Enumeration) lists `Extensions: 8XXXXXXX` as a valid entry (confirmed present in 60 enum tables
+  across the spec), and `0x8000005e`'s high byte is `0x80`. This is spec's own sanctioned
+  vendor-extension convention for enum values, just not (yet) an OASIS-assigned standard value. The
+  original audit finding calling this "invented, no spec basis" was **wrong**; corrected the code
+  comment to cite §11.12 instead of deleting working, wired functionality. **Executed:** rename
+  test-only `BATCH_COUNT` (a genuinely Reserved-in-3.0 codepoint per §11.57, "Batch Count" appears
+  0 times in the spec) → `SYNTHETIC_TEST_TAG` in `codec/tag.rs:93` + its 5 call sites; the checked-in
+  KAT filename (`01-integer-batch-count-1.bin`) and its manifest entry were left as-is (renaming a
+  binary fixture + generator script + manifest for a cosmetic filename was judged not worth the
+  blast radius — noted in each renamed call site's comment instead). *Exit:* no symbol names a
+  Reserved tag; the vendor-extension codepoint is correctly documented, not removed.
 
 ### Phase 1 — De-fake the surface
 

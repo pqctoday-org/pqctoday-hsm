@@ -90,7 +90,15 @@ impl Tag {
     pub const ACTIVATION_DATE: Tag = Tag(0x42_00_01);
     pub const APPLICATION_DATA: Tag = Tag(0x42_00_02);
     pub const APPLICATION_NAMESPACE: Tag = Tag(0x42_00_03);
-    pub const BATCH_COUNT: Tag = Tag(0x42_00_0d);
+    /// `0x42000d` is **(Reserved)** in the KMIP 3.0 tag table (§11.57) — the
+    /// string "Batch Count" appears nowhere in the spec; batch items are
+    /// position-correlated in 3.0, not counted by a dedicated tag (see
+    /// `kmip30/message.rs` for the real, spec-correct envelope). This
+    /// constant is a synthetic codepoint used only by the codec's own
+    /// primitive-type (Integer/Boolean) KAT vectors below — it makes no
+    /// claim about being a real KMIP 3.0 attribute and never reaches a
+    /// real client.
+    pub const SYNTHETIC_TEST_TAG: Tag = Tag(0x42_00_0d);
     pub const BATCH_ITEM: Tag = Tag(0x42_00_0f);
     pub const CRYPTOGRAPHIC_ALGORITHM: Tag = Tag(0x42_00_28);
     pub const CRYPTOGRAPHIC_LENGTH: Tag = Tag(0x42_00_2a);
@@ -133,10 +141,12 @@ mod tests {
     }
 
     #[test]
-    fn batch_count_constant_matches_kat_vector() {
-        // kat/ttlv-wire/01-integer-batch-count-1.bin starts with the bytes
-        // [42 00 0d 02 …]; the first 3 bytes are the BatchCount tag.
-        let bytes: [u8; 3] = Tag::BATCH_COUNT.to_be_bytes();
+    fn synthetic_test_tag_matches_kat_vector() {
+        // kat/ttlv-wire/01-integer-batch-count-1.bin (filename predates this
+        // rename; the codepoint is a synthetic test probe, not a real
+        // attribute — see SYNTHETIC_TEST_TAG's doc comment) starts with the
+        // bytes [42 00 0d 02 …]; the first 3 bytes are this tag.
+        let bytes: [u8; 3] = Tag::SYNTHETIC_TEST_TAG.to_be_bytes();
         assert_eq!(bytes, [0x42, 0x00, 0x0d]);
     }
 

@@ -7,8 +7,13 @@
 
 **Generated**: 2026-06-08 · **Updated**: 2026-06-10 (dispatcher replay results)
 **Subsystem**: `pqctoday-kmip` (`kmip/` crate)
-**Spec**: OASIS Key Management Interoperability Protocol v3.0 CSD01
-**Test corpus**: `kmip-profiles-v3.0.zip` (`test-cases/kmip-v3.0/{mandatory,optional}/*.xml`)
+**Spec**: OASIS Key Management Interoperability Protocol v3.0 **Committee Specification Draft 01
+(CSD01, 23 Aug 2024)** — a draft, not a ratified OASIS Standard. PQC extensions (Encapsulate /
+Decapsulate, hybrid KEMs) are implemented per the later **Working Draft 19 (WD19, 14 Feb 2025)**,
+also unpublished/unratified; the PQC surface has no OASIS test vectors (§4.1, §7 below). See
+`../docs/HONEST_MAXIMUM_PLAN.md` for the roadmap to full Baseline Server profile conformance
+(currently not claimed — see §5).
+**Test corpus**: `kmip-profiles-v3.0.zip` (`test-cases/kmip-v3.0/{mandatory,optional}/*.xml`) — CSD01-era, contains zero PQC test cases.
 
 ## TL;DR
 
@@ -19,7 +24,7 @@
 | Op coverage | ✅ all ops used by the OASIS corpus | 0 `SKIP_OP` in the replay report |
 | Third-party interop (PyKMIP / vendor) | ⏸️ never run | KMIP 3.0 has no compatible OSS client |
 
-**Bottom line**: the wire bytes are KMIP 3.0 standard AND the dispatcher
+**Bottom line**: the wire bytes match the KMIP 3.0 CSD01 draft byte-for-byte AND the dispatcher
 matches the OASIS conformance transcripts on **all 92 tests** that
 exercise implemented, non-deprecated mechanisms (`Get` with
 `KeyWrappingSpecification` — AES-KW key wrapping per AX-M-2 — was the
@@ -185,8 +190,12 @@ tracked as compliance-audit finding K-10
 
 The corpus never invokes any of these as requests, which is why 92/92
 and this delta coexist. The remaining gap to a full Baseline Server
-profile claim is the server-to-client channel (item 10) — an
-architectural addition, not an operation handler. Round-2 work
+profile claim is the server-to-client channel (item 10) — a whole
+protocol direction (Notify/Put initiated by the server, outside the
+normal request/response flow per §6.2.2/§6.2.3, plus the async
+plumbing items 9's Poll/Cancel/Process/Query-Async lean on) rather
+than a single operation handler; see `HONEST_MAXIMUM_PLAN.md` Phase 5
+(deliberately parked) and Phase 4 (async, in scope). Round-2 work
 (2026-06-12, slices K16–K22) additionally closed: Export with
 KeyWrappingSpecification, Register of wrapped key material, RSA-PSS
 Salt Length, Derive Key (HMAC/HASH/PBKDF2/SP800-108-C), Re-key and
