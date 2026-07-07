@@ -778,6 +778,18 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
         // ML-KEM ek: 800 B (ML-KEM-512) … 1568 B (ML-KEM-1024) — FIPS 203 Table 3.
         CKM_ML_KEM_KEY_PAIR_GEN => (800, 1568, 0x00010000),
         CKM_ML_KEM => (800, 1568, 0x10000000 | 0x20000000),
+        // FrodoKEM (BSI TR-02102-1 §2.4.1) — ek: 9616 B (FrodoKEM-640) … 21520 B
+        // (FrodoKEM-1344), verified directly against `frodo-kem` v0.1.0's
+        // `AlgorithmParams::encryption_key_length` (not the spec PDF, to avoid
+        // a version mismatch between the two).
+        CKM_PQCTODAY_FRODOKEM_KEY_PAIR_GEN => (9616, 21520, 0x00010000),
+        CKM_PQCTODAY_FRODOKEM_ENCAPSULATE => (9616, 21520, 0x10000000 | 0x20000000),
+        // Classic McEliece (BSI TR-02102-1 §2.4.2) — scoped to mceliece6688128
+        // only (see implementation plan Phase 0.5); ek: 1,044,992 B, verified
+        // directly against `classic-mceliece-rust` v2.0.2's
+        // `CRYPTO_PUBLICKEYBYTES` for that parameter set.
+        CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN => (1_044_992, 1_044_992, 0x00010000),
+        CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE => (1_044_992, 1_044_992, 0x10000000 | 0x20000000),
         // ML-DSA pk: 1312 B (ML-DSA-44) … 2592 B (ML-DSA-87) — FIPS 204 Table 2.
         CKM_ML_DSA_KEY_PAIR_GEN => (1312, 2592, 0x00010000),
         // CKF_SIGN | CKF_VERIFY | CKF_MESSAGE_SIGN | CKF_MESSAGE_VERIFY —

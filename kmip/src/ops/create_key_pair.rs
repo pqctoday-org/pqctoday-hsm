@@ -627,6 +627,11 @@ fn canonical_name(a: KmipAlgorithm) -> String {
         X25519MlKem768 => "X25519MLKEM768",
         SecP256r1MlKem768 => "SecP256r1MLKEM768",
         SecP384r1MlKem1024 => "SecP384r1MLKEM1024",
+        // See the identical arms + rationale in `ops/helpers.rs::canonical_name`.
+        FrodoKem640Aes | FrodoKem640Shake => "FrodoKEM-640",
+        FrodoKem976Aes | FrodoKem976Shake => "FrodoKEM-976",
+        FrodoKem1344Aes | FrodoKem1344Shake => "FrodoKEM-1344",
+        ClassicMcEliece6688128 => "Classic-McEliece-6688128",
     }
     .into()
 }
@@ -671,6 +676,20 @@ pub(crate) fn parse_algorithm(s: &str) -> Result<KmipAlgorithm> {
         // a policy naming X25519/X448 failed to parse (the engine expected the
         // curve only in the request template's CryptographicDomainParameters).
         "X25519" | "X448" => Ecdh,
+        // BSI TR-02102-1 §2.4.1 — the bare policy-facing name doesn't
+        // distinguish AES vs SHAKE (see `canonical_name`, which collapses
+        // both to this same string). A bare "FrodoKEM-976" therefore can't
+        // round-trip to a unique variant; defaults to the AES matrix-
+        // generation variant (the more commonly deployed one, given
+        // widespread AES-NI hardware support). A caller that needs the
+        // SHAKE variant specifically must go through the fully-qualified
+        // wire `CryptographicAlgorithm` value directly, not this string path.
+        "FrodoKEM-640" => FrodoKem640Aes,
+        "FrodoKEM-976" => FrodoKem976Aes,
+        "FrodoKEM-1344" => FrodoKem1344Aes,
+        // BSI TR-02102-1 §2.4.2 — only one parameter set is implemented
+        // (see implementation plan Phase 0.5), so no ambiguity here.
+        "Classic-McEliece-6688128" => ClassicMcEliece6688128,
         // Size-suffixed classical algos collapse to their base enum.
         _ => match base {
             "AES" => Aes,
@@ -738,6 +757,49 @@ fn native_generate_keypair(
                     native::generate_ml_kem_keypair(session, ps, cka_id, label),
                 ),
             }
+        }
+        FrodoKem640Aes | FrodoKem640Shake | FrodoKem976Aes
+        | FrodoKem976Shake | FrodoKem1344Aes | FrodoKem1344Shake => {
+            // BSI TR-02102-1 §2.4.1. No seeded/deterministic keygen exists
+            // for FrodoKEM in this engine (no PQC-interop profile need for
+            // it, unlike ML-KEM) — reject rather than silently ignore a
+            // caller-supplied seed.
+            if seed.is_some() {
+                return Err(KmipError::failed(
+                    ResultReason::OperationNotSupported,
+                    format!("seeded keygen is not supported for {:?}", algo),
+                ));
+            }
+            let ps = super::helpers::native_parameter_set(algo).ok_or_else(|| {
+                KmipError::failed(
+                    ResultReason::OperationNotSupported,
+                    format!("no parameter-set codepoint for {:?}", algo),
+                )
+            })?;
+            (
+                "native::generate_frodokem_keypair",
+                native::generate_frodokem_keypair(session, ps, cka_id, label),
+            )
+        }
+        ClassicMcEliece6688128 => {
+            // BSI TR-02102-1 §2.4.2. No seeded/deterministic keygen exists
+            // for Classic McEliece in this engine.
+            if seed.is_some() {
+                return Err(KmipError::failed(
+                    ResultReason::OperationNotSupported,
+                    format!("seeded keygen is not supported for {:?}", algo),
+                ));
+            }
+            let ps = super::helpers::native_parameter_set(algo).ok_or_else(|| {
+                KmipError::failed(
+                    ResultReason::OperationNotSupported,
+                    format!("no parameter-set codepoint for {:?}", algo),
+                )
+            })?;
+            (
+                "native::generate_classic_mceliece_keypair",
+                native::generate_classic_mceliece_keypair(session, ps, cka_id, label),
+            )
         }
         MlDsa44 | MlDsa65 | MlDsa87 => {
             let ps = super::helpers::native_parameter_set(algo).unwrap();

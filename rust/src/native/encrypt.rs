@@ -60,6 +60,12 @@ pub fn encapsulate(
     if mechanism == CKM_ECDH1_DERIVE || mechanism == CKM_EC_MONTGOMERY_KEY_DERIVE {
         return classical_encapsulate(public_key_handle, mechanism);
     }
+    if mechanism == CKM_PQCTODAY_FRODOKEM_ENCAPSULATE {
+        return frodokem_encapsulate(public_key_handle);
+    }
+    if mechanism == CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE {
+        return classic_mceliece_encapsulate(public_key_handle);
+    }
     if mechanism != CKM_ML_KEM {
         return Err(CKR_MECHANISM_INVALID);
     }
@@ -200,6 +206,12 @@ pub fn decapsulate(
 
     if mechanism == CKM_ECDH1_DERIVE || mechanism == CKM_EC_MONTGOMERY_KEY_DERIVE {
         return classical_decapsulate(private_key_handle, mechanism, ciphertext);
+    }
+    if mechanism == CKM_PQCTODAY_FRODOKEM_ENCAPSULATE {
+        return frodokem_decapsulate(private_key_handle, ciphertext);
+    }
+    if mechanism == CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE {
+        return classic_mceliece_decapsulate(private_key_handle, ciphertext);
     }
     if mechanism != CKM_ML_KEM {
         return Err(CKR_MECHANISM_INVALID);
@@ -403,6 +415,124 @@ fn classical_decapsulate(private_key_handle: u32, mechanism: u32, ciphertext: &[
         }
         _ => Err(CKR_MECHANISM_INVALID),
     }
+}
+
+/// FrodoKEM encapsulation (BSI TR-02102-1 §2.4.1, `CKM_PQCTODAY_FRODOKEM_ENCAPSULATE`).
+/// Returns `(ciphertext, shared_secret)`.
+///
+/// RNG note — see [`super::keygen::generate_frodokem_keypair`]: `frodo-kem`
+/// needs `rand_core 0.10`'s `CryptoRng`, not this engine's usual
+/// `rand::rngs::OsRng`.
+fn frodokem_encapsulate(public_key_handle: u32) -> Result<(Vec<u8>, Vec<u8>), CkRv> {
+    use getrandom_0_4::rand_core::UnwrapErr;
+    use getrandom_0_4::SysRng;
+
+    if !check_flag(public_key_handle, CKA_ENCAPSULATE) {
+        return Err(CKR_KEY_FUNCTION_NOT_PERMITTED);
+    }
+    if get_object_attr_u32(public_key_handle, CKA_KEY_TYPE) != Some(CKK_PQCTODAY_FRODOKEM) {
+        return Err(CKR_KEY_TYPE_INCONSISTENT);
+    }
+    let ps = get_object_param_set(public_key_handle);
+    if ps == 0 {
+        return Err(CKR_TEMPLATE_INCOMPLETE);
+    }
+    let alg = super::keygen::frodokem_algorithm(ps)?;
+    let pub_key_bytes = get_object_value(public_key_handle).ok_or(CKR_ARGUMENTS_BAD)?;
+    let ek = frodo_kem::EncryptionKey::from_bytes(alg, &pub_key_bytes)
+        .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+    let mut rng = UnwrapErr(SysRng);
+    let (ct, ss) = ek
+        .encapsulate_with_rng(&mut rng)
+        .map_err(|_| CKR_FUNCTION_FAILED)?;
+    Ok((ct.value().to_vec(), ss.value().to_vec()))
+}
+
+/// FrodoKEM decapsulation (`CKM_PQCTODAY_FRODOKEM_ENCAPSULATE`). Returns the
+/// recovered shared secret.
+fn frodokem_decapsulate(private_key_handle: u32, ciphertext: &[u8]) -> Result<Vec<u8>, CkRv> {
+    if !check_flag(private_key_handle, CKA_DECAPSULATE) {
+        return Err(CKR_KEY_FUNCTION_NOT_PERMITTED);
+    }
+    if get_object_attr_u32(private_key_handle, CKA_KEY_TYPE) != Some(CKK_PQCTODAY_FRODOKEM) {
+        return Err(CKR_KEY_TYPE_INCONSISTENT);
+    }
+    let ps = get_object_param_set(private_key_handle);
+    if ps == 0 {
+        return Err(CKR_TEMPLATE_INCOMPLETE);
+    }
+    let alg = super::keygen::frodokem_algorithm(ps)?;
+    let prv_key_bytes = get_object_value(private_key_handle).ok_or(CKR_ARGUMENTS_BAD)?;
+    let dk = frodo_kem::DecryptionKey::from_bytes(alg, &prv_key_bytes)
+        .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+    let ct = frodo_kem::Ciphertext::from_bytes(alg, ciphertext).map_err(|_| CKR_ARGUMENTS_BAD)?;
+    // `B` is an unused generic on `DecryptionKey::decapsulate` (mirrors the
+    // shape of `encapsulate`'s message-buffer type param, but decapsulate
+    // has no such buffer) — any concrete `AsRef<[u8]>` type satisfies it.
+    let (ss, _msg) = dk.decapsulate::<&[u8]>(&ct).map_err(|_| CKR_FUNCTION_FAILED)?;
+    Ok(ss.value().to_vec())
+}
+
+/// Classic McEliece encapsulation (BSI TR-02102-1 §2.4.2,
+/// `CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE`). Scoped to `mceliece6688128`
+/// only (implementation plan Phase 0.5). Returns `(ciphertext,
+/// shared_secret)`.
+///
+/// Unlike FrodoKEM, `classic-mceliece-rust` uses `rand 0.8` — the same
+/// version this engine already uses elsewhere — so `rand::rngs::OsRng`
+/// works directly.
+fn classic_mceliece_encapsulate(public_key_handle: u32) -> Result<(Vec<u8>, Vec<u8>), CkRv> {
+    use classic_mceliece_rust::{encapsulate_boxed, PublicKey, CRYPTO_PUBLICKEYBYTES};
+
+    if !check_flag(public_key_handle, CKA_ENCAPSULATE) {
+        return Err(CKR_KEY_FUNCTION_NOT_PERMITTED);
+    }
+    if get_object_attr_u32(public_key_handle, CKA_KEY_TYPE) != Some(CKK_PQCTODAY_CLASSIC_MCELIECE) {
+        return Err(CKR_KEY_TYPE_INCONSISTENT);
+    }
+    if get_object_param_set(public_key_handle) != CKP_CLASSIC_MCELIECE_6688128 {
+        return Err(CKR_ARGUMENTS_BAD);
+    }
+    let pub_key_bytes = get_object_value(public_key_handle).ok_or(CKR_ARGUMENTS_BAD)?;
+    let mut pk_arr: [u8; CRYPTO_PUBLICKEYBYTES] = pub_key_bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+    // v3+ API: `PublicKey::from` takes `&mut [u8; N]` now, not `&` (a
+    // breaking change from v2).
+    let pk = PublicKey::from(&mut pk_arr);
+    let mut rng = rand::rngs::OsRng;
+    let (ct, ss) = encapsulate_boxed(&pk, &mut rng);
+    Ok((ct.as_array().to_vec(), ss.as_array().to_vec()))
+}
+
+/// Classic McEliece decapsulation (`CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE`).
+/// Returns the recovered shared secret.
+fn classic_mceliece_decapsulate(private_key_handle: u32, ciphertext: &[u8]) -> Result<Vec<u8>, CkRv> {
+    use classic_mceliece_rust::{decapsulate_boxed, Ciphertext, SecretKey, CRYPTO_CIPHERTEXTBYTES, CRYPTO_SECRETKEYBYTES};
+
+    if !check_flag(private_key_handle, CKA_DECAPSULATE) {
+        return Err(CKR_KEY_FUNCTION_NOT_PERMITTED);
+    }
+    if get_object_attr_u32(private_key_handle, CKA_KEY_TYPE) != Some(CKK_PQCTODAY_CLASSIC_MCELIECE) {
+        return Err(CKR_KEY_TYPE_INCONSISTENT);
+    }
+    if get_object_param_set(private_key_handle) != CKP_CLASSIC_MCELIECE_6688128 {
+        return Err(CKR_ARGUMENTS_BAD);
+    }
+    if ciphertext.len() != CRYPTO_CIPHERTEXTBYTES {
+        return Err(CKR_ARGUMENTS_BAD);
+    }
+    let mut prv_key_bytes = get_object_value(private_key_handle).ok_or(CKR_ARGUMENTS_BAD)?;
+    let sk_arr: &mut [u8; CRYPTO_SECRETKEYBYTES] = (&mut prv_key_bytes[..])
+        .try_into()
+        .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+    let sk = SecretKey::from(sk_arr);
+    let ct_arr: [u8; CRYPTO_CIPHERTEXTBYTES] =
+        ciphertext.try_into().map_err(|_| CKR_ARGUMENTS_BAD)?;
+    let ct = Ciphertext::from(ct_arr);
+    let ss = decapsulate_boxed(&ct, &sk);
+    Ok(ss.as_array().to_vec())
 }
 
 /// Classical encrypt. v0.1 supports `CKM_AES_GCM`.
@@ -1118,7 +1248,10 @@ fn check_flag(key_handle: u32, attr_type: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::native::keygen::{generate_ml_dsa_keypair, generate_ml_kem_keypair};
+    use crate::native::keygen::{
+        generate_classic_mceliece_keypair, generate_frodokem_keypair, generate_ml_dsa_keypair,
+        generate_ml_kem_keypair,
+    };
     use crate::native::session::{bootstrap_default_token, close_session, finalize, init};
     use crate::native::test_lock;
 
@@ -1183,6 +1316,269 @@ mod tests {
         assert_eq!(ss_enc.len(), 32);
         let ss_dec = decapsulate(session, prv_h, CKM_ML_KEM, &ct).unwrap();
         assert_eq!(ss_enc, ss_dec);
+        close_session(session).unwrap();
+    }
+
+    /// FrodoKEM-976-AES round-trip (BSI TR-02102-1 §2.4.1 recommended
+    /// parameter set): keygen → encap(pub_h) → decap(prv_h, ct) → shared
+    /// secrets match exactly. Sizes verified against `frodo-kem` v0.1.0's
+    /// own `AlgorithmParams`.
+    #[test]
+    fn frodokem_976_aes_encap_decap_round_trip() {
+        let _guard = test_lock::acquire();
+        let session = fresh_session();
+        let (pub_h, prv_h) =
+            generate_frodokem_keypair(session, CKP_FRODOKEM_976_AES, b"\x01", "frodo-976").unwrap();
+
+        let (ct, ss_enc) = encapsulate(session, pub_h, CKM_PQCTODAY_FRODOKEM_ENCAPSULATE).unwrap();
+        assert_eq!(ct.len(), 15792);
+        assert_eq!(ss_enc.len(), 24);
+
+        let ss_dec = decapsulate(session, prv_h, CKM_PQCTODAY_FRODOKEM_ENCAPSULATE, &ct).unwrap();
+        assert_eq!(ss_enc, ss_dec, "encap SS must equal decap SS");
+        close_session(session).unwrap();
+    }
+
+    /// FrodoKEM-640-SHAKE round-trip — the smallest BSI-recommended level,
+    /// SHAKE matrix-expansion variant.
+    #[test]
+    fn frodokem_640_shake_encap_decap_round_trip() {
+        let _guard = test_lock::acquire();
+        let session = fresh_session();
+        let (pub_h, prv_h) =
+            generate_frodokem_keypair(session, CKP_FRODOKEM_640_SHAKE, b"\x01", "frodo-640s").unwrap();
+        let (ct, ss_enc) = encapsulate(session, pub_h, CKM_PQCTODAY_FRODOKEM_ENCAPSULATE).unwrap();
+        assert_eq!(ct.len(), 9752);
+        assert_eq!(ss_enc.len(), 16);
+        let ss_dec = decapsulate(session, prv_h, CKM_PQCTODAY_FRODOKEM_ENCAPSULATE, &ct).unwrap();
+        assert_eq!(ss_enc, ss_dec);
+        close_session(session).unwrap();
+    }
+
+    /// A ciphertext from one FrodoKEM keypair must not decapsulate
+    /// successfully to the same shared secret under an unrelated keypair
+    /// (sanity check that this isn't a no-op that always "succeeds").
+    #[test]
+    fn frodokem_decap_with_wrong_key_does_not_match() {
+        let _guard = test_lock::acquire();
+        let session = fresh_session();
+        let (pub_a, _prv_a) =
+            generate_frodokem_keypair(session, CKP_FRODOKEM_640_AES, b"\x01", "a").unwrap();
+        let (_pub_b, prv_b) =
+            generate_frodokem_keypair(session, CKP_FRODOKEM_640_AES, b"\x02", "b").unwrap();
+        let (ct, ss_enc) = encapsulate(session, pub_a, CKM_PQCTODAY_FRODOKEM_ENCAPSULATE).unwrap();
+        // Decapsulating with B's key either fails outright or (FrodoKEM's
+        // implicit-rejection design) returns a pseudorandom, non-matching
+        // secret — either way it must not equal the real shared secret.
+        if let Ok(ss_wrong) = decapsulate(session, prv_b, CKM_PQCTODAY_FRODOKEM_ENCAPSULATE, &ct) {
+            assert_ne!(ss_enc, ss_wrong);
+        }
+        close_session(session).unwrap();
+    }
+
+    /// Classic McEliece (mceliece6688128) round-trip — BSI TR-02102-1
+    /// §2.4.2 Category-5 pick. ct = 208 bytes (the raw syndrome, per
+    /// `mceliece-spec-20221023.pdf` §6.2 — verified against
+    /// `classic-mceliece-rust` v3.1.0, liboqs, and the spec text directly),
+    /// ss = 32 bytes.
+    #[test]
+    fn classic_mceliece_6688128_encap_decap_round_trip() {
+        let _guard = test_lock::acquire();
+        let session = fresh_session();
+        let (pub_h, prv_h) = generate_classic_mceliece_keypair(
+            session,
+            CKP_CLASSIC_MCELIECE_6688128,
+            b"\x01",
+            "mceliece",
+        )
+        .unwrap();
+
+        let (ct, ss_enc) =
+            encapsulate(session, pub_h, CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE).unwrap();
+        // 208 bytes per mceliece-spec-20221023.pdf §6.2 (ciphertext = the
+        // raw syndrome only) — matches liboqs exactly; classic-mceliece-rust
+        // v3.1.0 dropped the non-spec 32-byte confirmation hash v2.0.2 added.
+        assert_eq!(ct.len(), 208);
+        assert_eq!(ss_enc.len(), 32);
+
+        let ss_dec =
+            decapsulate(session, prv_h, CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE, &ct).unwrap();
+        assert_eq!(ss_enc, ss_dec, "encap SS must equal decap SS");
+        close_session(session).unwrap();
+    }
+
+    // ── Cross-validation against liboqs (implementation plan Phase 0.9) ────
+    //
+    // `oqs` is a `[dev-dependencies]`-only entry — never part of the
+    // shipping engine — used solely as an independent reference
+    // implementation. These tests prove actual interoperability: a
+    // ciphertext produced by one independent implementation is correctly
+    // recoverable by the other, in both directions, which is the real
+    // correctness property a KEM has to satisfy (stronger than either
+    // implementation just agreeing with itself).
+
+    /// Direction A: encaps with `oqs` (liboqs), decaps with our PKCS#11
+    /// engine (import via `register_frodokem_private_key`).
+    ///
+    /// IGNORED — not an engine bug. liboqs (0.12.0/0.13.0, the newest on
+    /// crates.io as of this writing) implements a pre-salt FrodoKEM
+    /// ciphertext; `frodo-kem` correctly implements the current official
+    /// spec's mandatory salt (verified directly against
+    /// `FrodoKEM_standard_proposal_20250929.pdf` §9, byte-for-byte on
+    /// `len_salt` per level). No dependency bump fixes this the way it did
+    /// for Classic McEliece — liboqs itself is missing the field. Re-enable
+    /// once a spec-conformant cross-check reference is found (tracked as a
+    /// follow-up, see the FrodoKEM/Classic-McEliece/HQC implementation
+    /// plan).
+    #[test]
+    #[ignore = "liboqs 0.12.0/0.13.0 lacks the mandatory salt frodo-kem correctly implements — not an engine bug, see doc comment"]
+    fn frodokem_640_aes_cross_validate_oqs_encap_our_decap() {
+        let _guard = test_lock::acquire();
+        let session = fresh_session();
+
+        let kem = oqs::kem::Kem::new(oqs::kem::Algorithm::FrodoKem640Aes)
+            .expect("liboqs FrodoKEM-640-AES unavailable");
+        let (pk, sk) = kem.keypair().expect("liboqs keygen");
+        let (ct, ss_oqs) = kem.encapsulate(&pk).expect("liboqs encapsulate");
+
+        let prv_h = crate::native::keygen::register_frodokem_private_key(
+            session,
+            CKP_FRODOKEM_640_AES,
+            sk.as_ref(),
+            b"\x01",
+            "oqs-imported-sk",
+        )
+        .expect("register imported FrodoKEM private key");
+
+        let ss_ours = decapsulate(session, prv_h, CKM_PQCTODAY_FRODOKEM_ENCAPSULATE, ct.as_ref())
+            .expect("our engine decapsulate");
+        assert_eq!(ss_ours, ss_oqs.as_ref(), "our decap must recover liboqs's shared secret");
+        close_session(session).unwrap();
+    }
+
+    /// Direction B: encaps with our PKCS#11 engine, decaps with `oqs`
+    /// (liboqs).
+    ///
+    /// IGNORED — same reason as the other direction: liboqs's ciphertext
+    /// length doesn't match `frodo-kem`'s spec-conformant (salted) one.
+    #[test]
+    #[ignore = "liboqs 0.12.0/0.13.0 lacks the mandatory salt frodo-kem correctly implements — not an engine bug, see doc comment"]
+    fn frodokem_640_aes_cross_validate_our_encap_oqs_decap() {
+        let _guard = test_lock::acquire();
+        let session = fresh_session();
+
+        let (pub_h, prv_h) =
+            generate_frodokem_keypair(session, CKP_FRODOKEM_640_AES, b"\x01", "ours").unwrap();
+        let (ct, ss_ours) = encapsulate(session, pub_h, CKM_PQCTODAY_FRODOKEM_ENCAPSULATE).unwrap();
+
+        // Native-internal read-back of the private key bytes — same access
+        // pattern the KAT tests already use, not a public export.
+        let sk_bytes = get_object_value(prv_h).expect("read back our private key");
+
+        let kem = oqs::kem::Kem::new(oqs::kem::Algorithm::FrodoKem640Aes)
+            .expect("liboqs FrodoKEM-640-AES unavailable");
+        let sk_ref = kem.secret_key_from_bytes(&sk_bytes).expect("liboqs secret_key_from_bytes");
+        let ct_ref = kem.ciphertext_from_bytes(&ct).expect("liboqs ciphertext_from_bytes");
+        let ss_oqs = kem.decapsulate(sk_ref, ct_ref).expect("liboqs decapsulate");
+
+        assert_eq!(ss_ours, ss_oqs.as_ref(), "liboqs decap must recover our engine's shared secret");
+        close_session(session).unwrap();
+    }
+
+    /// Direction A for Classic McEliece (mceliece6688128): encaps with
+    /// `oqs`, decaps with our PKCS#11 engine.
+    #[test]
+    fn classic_mceliece_6688128_cross_validate_oqs_encap_our_decap() {
+        let _guard = test_lock::acquire();
+        let session = fresh_session();
+
+        let kem = oqs::kem::Kem::new(oqs::kem::Algorithm::ClassicMcEliece6688128)
+            .expect("liboqs Classic McEliece 6688128 unavailable");
+
+        // No independently-hosted static Classic McEliece KAT file exists
+        // (unlike FrodoKEM — PQClean and classic-mceliece-rust's own KAT
+        // harness both GENERATE vectors deterministically rather than
+        // shipping a static file, and using classic-mceliece-rust's own
+        // generator would be circular). Since liboqs IS a genuinely
+        // independent implementation (verified directly against the spec
+        // text earlier, and now proven interoperable), run N fresh
+        // liboqs-generated keypairs through our engine instead of just
+        // one — the same statistical breadth FrodoKEM's 100-per-variant
+        // static KAT file gives, via repeated independent trials rather
+        // than a fixed file.
+        const N: usize = 20;
+        for i in 0..N {
+            let (pk, sk) = kem.keypair().unwrap_or_else(|e| panic!("liboqs keygen #{i}: {e}"));
+            let (ct, ss_oqs) =
+                kem.encapsulate(&pk).unwrap_or_else(|e| panic!("liboqs encapsulate #{i}: {e}"));
+
+            let prv_h = crate::native::keygen::register_classic_mceliece_private_key(
+                session,
+                CKP_CLASSIC_MCELIECE_6688128,
+                sk.as_ref(),
+                format!("oqs-imported-sk-{i}").as_bytes(),
+                "oqs-imported-sk",
+            )
+            .unwrap_or_else(|e| panic!("register imported private key #{i}: {e:?}"));
+
+            let ss_ours = decapsulate(
+                session,
+                prv_h,
+                CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE,
+                ct.as_ref(),
+            )
+            .unwrap_or_else(|e| panic!("our engine decapsulate #{i}: {e:?}"));
+            assert_eq!(
+                ss_ours,
+                ss_oqs.as_ref(),
+                "trial #{i}: our decap must recover liboqs's shared secret"
+            );
+        }
+        close_session(session).unwrap();
+    }
+
+    /// Direction B for Classic McEliece: encaps with our PKCS#11 engine,
+    /// decaps with `oqs`. Same N-trial breadth as Direction A.
+    #[test]
+    fn classic_mceliece_6688128_cross_validate_our_encap_oqs_decap() {
+        let _guard = test_lock::acquire();
+        let session = fresh_session();
+
+        let kem = oqs::kem::Kem::new(oqs::kem::Algorithm::ClassicMcEliece6688128)
+            .expect("liboqs Classic McEliece 6688128 unavailable");
+
+        const N: usize = 20;
+        for i in 0..N {
+            let (pub_h, prv_h) = generate_classic_mceliece_keypair(
+                session,
+                CKP_CLASSIC_MCELIECE_6688128,
+                format!("ours-{i}").as_bytes(),
+                "ours",
+            )
+            .unwrap_or_else(|e| panic!("our engine keygen #{i}: {e:?}"));
+            let (ct, ss_ours) =
+                encapsulate(session, pub_h, CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE)
+                    .unwrap_or_else(|e| panic!("our engine encapsulate #{i}: {e:?}"));
+
+            let sk_bytes =
+                get_object_value(prv_h).unwrap_or_else(|| panic!("read back private key #{i}"));
+
+            let sk_ref = kem
+                .secret_key_from_bytes(&sk_bytes)
+                .unwrap_or_else(|| panic!("liboqs secret_key_from_bytes #{i}"));
+            let ct_ref = kem
+                .ciphertext_from_bytes(&ct)
+                .unwrap_or_else(|| panic!("liboqs ciphertext_from_bytes #{i}"));
+            let ss_oqs = kem
+                .decapsulate(sk_ref, ct_ref)
+                .unwrap_or_else(|e| panic!("liboqs decapsulate #{i}: {e}"));
+
+            assert_eq!(
+                ss_ours,
+                ss_oqs.as_ref(),
+                "trial #{i}: liboqs decap must recover our engine's shared secret"
+            );
+        }
         close_session(session).unwrap();
     }
 

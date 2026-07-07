@@ -22,6 +22,8 @@ pub const ALGO_EDDSA: u32 = 6;
 pub const ALGO_ECDH_P256: u32 = 7;
 pub const ALGO_ECDH_X25519: u32 = 8;
 pub const ALGO_ECDH_X448: u32 = 9;
+pub const ALGO_FRODOKEM: u32 = 10;
+pub const ALGO_CLASSIC_MCELIECE: u32 = 11;
 
 // ECDSA curve identifiers (stored in CKA_PRIV_PARAM_SET)
 pub const CURVE_P256: u32 = 256;
