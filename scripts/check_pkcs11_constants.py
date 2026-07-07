@@ -48,6 +48,10 @@ VENDOR_BASE = 0x80000000
 #   legacy — pre-vendor-migration compat codepoints kept for old tokens.
 #   drift  — naming drift from a spec constant; value equals the spec one.
 #   abi    — wasm32 ABI struct sizes exported on the JS surface only.
+#   param-set — pqctoday's own small-integer CKA_PARAMETER_SET enumeration
+#            for a vendor key type; not a codepoint, so exempt from the
+#            vendor-space (>= 0x80000000) rule (same idea as CKP_ML_DSA_*/
+#            CKP_ML_KEM_* in the OASIS header itself).
 PINNED = {
     # LMS tree parameter sets (IANA "LMS" registry, RFC 8554 §5 + SP 800-208 §4)
     "CKP_LMS_SHA256_M32_H5": (0x05, "iana"),
@@ -144,6 +148,25 @@ PINNED = {
     "CKA_XMSSMT_PARAM_SET": (0x80000107, "vendor"),
     "CKM_KECCAK_256": (0x80000010, "vendor"),
     "CKM_EC_MONTGOMERY_KEY_DERIVE": (0x80000011, "vendor"),
+    # FrodoKEM / Classic McEliece (BSI TR-02102-1) — not OASIS-standardized,
+    # so both the key types and mechanisms live in vendor space. Allocated in
+    # pqctoday-priv's PKCS#11 authority file and mirrored into
+    # kmip/pkcs11-mech-manifest.json.
+    "CKK_PQCTODAY_FRODOKEM": (0x80000001, "vendor"),
+    "CKK_PQCTODAY_CLASSIC_MCELIECE": (0x80000002, "vendor"),
+    "CKM_PQCTODAY_FRODOKEM_KEY_PAIR_GEN": (0x80000001, "vendor"),
+    "CKM_PQCTODAY_FRODOKEM_ENCAPSULATE": (0x80000002, "vendor"),
+    "CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN": (0x80000003, "vendor"),
+    "CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE": (0x80000004, "vendor"),
+    # FrodoKEM / Classic McEliece CKA_PARAMETER_SET enumeration (own small-
+    # integer numbering, same convention as CKP_ML_DSA_*/CKP_ML_KEM_* above).
+    "CKP_FRODOKEM_640_AES": (0x01, "param-set"),
+    "CKP_FRODOKEM_640_SHAKE": (0x02, "param-set"),
+    "CKP_FRODOKEM_976_AES": (0x03, "param-set"),
+    "CKP_FRODOKEM_976_SHAKE": (0x04, "param-set"),
+    "CKP_FRODOKEM_1344_AES": (0x05, "param-set"),
+    "CKP_FRODOKEM_1344_SHAKE": (0x06, "param-set"),
+    "CKP_CLASSIC_MCELIECE_6688128": (0x01, "param-set"),
     # legacy bare BIP32 codepoints (pre vendor-space migration, still accepted)
     "CKA_BIP32_CHAIN_CODE_LEGACY": (0x1021, "legacy"),
     "CKA_BIP32_CHILD_INDEX_LEGACY": (0x1022, "legacy"),

@@ -126,3 +126,9 @@ cac949c449029ab79422a16e286dc44b725bdc1dbeac299a987b1e19c08316ce  ./sha/sha256-a
 c41de0a792153dc01b4525f670c7995e5d3e51db3612cee1ce41f9ce7516ab19  ./sha/sha384-acvp.json
 724c56a05b1d3e9b07118a011e95298cfdf365e2d241971c09a9448a4e103516  ./sha/sha512-acvp.json
 1a816747299e27597bd1f96cb31411647ec37c2101ccfbccbc5f8bcffd3f5b1e  ./slh-dsa/slh-dsa-acvp.json
+ed46a5054b2dca53d60df524ffe3a7f8dfbee58c12ea6465a8ef7d59f8c2fbf4  ./frodokem/raw/PQCkemKAT_19888.rsp
+712ed35063d8b8329f610c42d6e3037cd1c24346f85f21651e927d6cb7057b0d  ./frodokem/raw/PQCkemKAT_19888_shake.rsp
+d1bc19050269a99bfa84038ad466688428ebc98417ba35b48a06f3c05aefc9bd  ./frodokem/raw/PQCkemKAT_31296.rsp
+e29858b32dbd88f926e2a45d3d464812642e1df7cd45fcf9c3db4b4c683f45f0  ./frodokem/raw/PQCkemKAT_31296_shake.rsp
+1c866df7985ef3e3ca1402d046778d49c643ec584b8bf25b30baf7a34bcdde34  ./frodokem/raw/PQCkemKAT_43088.rsp
+05cdb3dad681f448da3b86eaa8404e6555593199b4311b6738fcfabf79f288dd  ./frodokem/raw/PQCkemKAT_43088_shake.rsp

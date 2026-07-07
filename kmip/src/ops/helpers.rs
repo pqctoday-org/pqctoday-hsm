@@ -274,6 +274,16 @@ pub fn canonical_name(a: KmipAlgorithm) -> String {
         X25519MlKem768 => "X25519MLKEM768",
         SecP256r1MlKem768 => "SecP256r1MLKEM768",
         SecP384r1MlKem1024 => "SecP384r1MLKEM1024",
+        // BSI TR-02102-1 §2.4.1 — AES/SHAKE are both engine-executable
+        // variants (see `to_pkcs11_mech`), but `kmip/policies/bsi-tr-02102.yaml`
+        // and `policy/lint.rs::is_known_algorithm_name` only recognize the
+        // bare `FrodoKEM-{640,976,1344}` form (no AES/SHAKE suffix) — both
+        // variants of a level collapse to the same policy-facing name.
+        FrodoKem640Aes | FrodoKem640Shake => "FrodoKEM-640",
+        FrodoKem976Aes | FrodoKem976Shake => "FrodoKEM-976",
+        FrodoKem1344Aes | FrodoKem1344Shake => "FrodoKEM-1344",
+        // BSI TR-02102-1 §2.4.2.
+        ClassicMcEliece6688128 => "Classic-McEliece-6688128",
     }
     .into()
 }
@@ -864,6 +874,10 @@ pub fn native_kem_mech(a: KmipAlgorithm) -> Option<u32> {
     use KmipAlgorithm::*;
     match a {
         MlKem512 | MlKem768 | MlKem1024 => Some(c::CKM_ML_KEM),
+        FrodoKem640Aes | FrodoKem640Shake | FrodoKem976Aes
+            | FrodoKem976Shake | FrodoKem1344Aes | FrodoKem1344Shake =>
+            Some(c::CKM_PQCTODAY_FRODOKEM_ENCAPSULATE),
+        ClassicMcEliece6688128 => Some(c::CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE),
         _ => None,
     }
 }
@@ -914,6 +928,13 @@ pub fn native_parameter_set(a: KmipAlgorithm) -> Option<u32> {
         SlhDsaShake192f  => c::CKP_SLH_DSA_SHAKE_192F,
         SlhDsaShake256s  => c::CKP_SLH_DSA_SHAKE_256S,
         SlhDsaShake256f  => c::CKP_SLH_DSA_SHAKE_256F,
+        FrodoKem640Aes    => c::CKP_FRODOKEM_640_AES,
+        FrodoKem640Shake  => c::CKP_FRODOKEM_640_SHAKE,
+        FrodoKem976Aes    => c::CKP_FRODOKEM_976_AES,
+        FrodoKem976Shake  => c::CKP_FRODOKEM_976_SHAKE,
+        FrodoKem1344Aes   => c::CKP_FRODOKEM_1344_AES,
+        FrodoKem1344Shake => c::CKP_FRODOKEM_1344_SHAKE,
+        ClassicMcEliece6688128 => c::CKP_CLASSIC_MCELIECE_6688128,
         _ => return None,
     })
 }

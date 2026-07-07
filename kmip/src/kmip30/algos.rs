@@ -58,6 +58,10 @@ pub mod recommended_curve {
 pub use softhsmrustv3::constants::{
     CKM_ML_DSA, CKM_ML_DSA_KEY_PAIR_GEN, CKM_ML_KEM, CKM_ML_KEM_KEY_PAIR_GEN,
     CKM_SLH_DSA, CKM_SLH_DSA_KEY_PAIR_GEN,
+    // BSI TR-02102-1 recommended KEMs (vendor mechanisms — see
+    // pqctoday-priv/docs/platform/data/pkcs11-vendor-mech-allocation.md §1.4).
+    CKM_PQCTODAY_FRODOKEM_KEY_PAIR_GEN, CKM_PQCTODAY_FRODOKEM_ENCAPSULATE,
+    CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN, CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE,
 };
 
 // ── Standard PKCS#11 v3.2 mech codepoints used by classical algos ──────────
@@ -193,6 +197,33 @@ pub enum KmipAlgorithm {
     // vendor/extension codepoint in the reserved high-bit range, pending an
     // OASIS assignment — same posture as unassigned composite codepoints.
     SecP384r1MlKem1024, // 0x8000005e (vendor/extension — non-standard)
+
+    // ── BSI TR-02102-1 §2.4.2 — Classic McEliece ─────────────────────────
+    // KMIP's own `CryptographicAlgorithm` enum already has REAL OASIS
+    // codepoints for McEliece (0x34 generic, 0x35 = McEliece-6960119, 0x36 =
+    // McEliece-8192128 — confirmed directly in
+    // `spec/oasis-kmip-3.0/kmip-spec-3.0-tags-enums.json`) — but none
+    // specific to `mceliece6688128` (BSI's Category-5 pick, the only
+    // parameter set this engine implements — see the FrodoKEM/
+    // Classic-McEliece/HQC implementation plan Phase 0.5). Using the
+    // generic 0x34 codepoint here; if a second parameter set is added
+    // later, disambiguation will need a real attribute (mirrors how `Ecdh`
+    // is one variant covering multiple curves via `RecommendedCurve`), not
+    // a rename of this variant.
+    ClassicMcEliece6688128, // 0x00000034 (OASIS, generic "McEliece")
+
+    // ── BSI TR-02102-1 §2.4.1 — FrodoKEM ──────────────────────────────────
+    // No OASIS codepoint exists for FrodoKEM at all (confirmed: absent from
+    // the same tags-enums.json). Vendor/extension range, continuing after
+    // `SecP384r1MlKem1024` (0x8000005e) — same posture as that entry.
+    // eFrodoKEM (ephemeral) variants intentionally not included — see
+    // implementation plan Phase 0.8.
+    FrodoKem640Aes,     // 0x8000005f (vendor/extension — non-standard)
+    FrodoKem640Shake,   // 0x80000060 (vendor/extension — non-standard)
+    FrodoKem976Aes,     // 0x80000061 (vendor/extension — non-standard)
+    FrodoKem976Shake,   // 0x80000062 (vendor/extension — non-standard)
+    FrodoKem1344Aes,    // 0x80000063 (vendor/extension — non-standard)
+    FrodoKem1344Shake,  // 0x80000064 (vendor/extension — non-standard)
 }
 
 impl KmipAlgorithm {
@@ -233,6 +264,13 @@ impl KmipAlgorithm {
             X25519MlKem768    => 0x0000005c,
             SecP256r1MlKem768 => 0x0000005d,
             SecP384r1MlKem1024 => 0x8000005e,
+            ClassicMcEliece6688128 => 0x00000034,
+            FrodoKem640Aes    => 0x8000005f,
+            FrodoKem640Shake  => 0x80000060,
+            FrodoKem976Aes    => 0x80000061,
+            FrodoKem976Shake  => 0x80000062,
+            FrodoKem1344Aes   => 0x80000063,
+            FrodoKem1344Shake => 0x80000064,
         }
     }
 
@@ -272,6 +310,13 @@ impl KmipAlgorithm {
             0x0000005c => X25519MlKem768,
             0x0000005d => SecP256r1MlKem768,
             0x8000005e => SecP384r1MlKem1024,
+            0x00000034 => ClassicMcEliece6688128,
+            0x8000005f => FrodoKem640Aes,
+            0x80000060 => FrodoKem640Shake,
+            0x80000061 => FrodoKem976Aes,
+            0x80000062 => FrodoKem976Shake,
+            0x80000063 => FrodoKem1344Aes,
+            0x80000064 => FrodoKem1344Shake,
             _ => return None,
         })
     }
@@ -351,6 +396,20 @@ impl KmipAlgorithm {
                 Some(CKM_ML_KEM_KEY_PAIR_GEN),
             (MlKem512 | MlKem768 | MlKem1024, Encrypt | Decrypt) =>
                 Some(CKM_ML_KEM),
+
+            // ── FrodoKEM (BSI TR-02102-1 §2.4.1) ──────────────────────────
+            (FrodoKem640Aes | FrodoKem640Shake | FrodoKem976Aes
+                | FrodoKem976Shake | FrodoKem1344Aes | FrodoKem1344Shake, KeyGen)
+                => Some(CKM_PQCTODAY_FRODOKEM_KEY_PAIR_GEN),
+            (FrodoKem640Aes | FrodoKem640Shake | FrodoKem976Aes
+                | FrodoKem976Shake | FrodoKem1344Aes | FrodoKem1344Shake, Encrypt | Decrypt)
+                => Some(CKM_PQCTODAY_FRODOKEM_ENCAPSULATE),
+
+            // ── Classic McEliece (BSI TR-02102-1 §2.4.2) ──────────────────
+            (ClassicMcEliece6688128, KeyGen) =>
+                Some(CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN),
+            (ClassicMcEliece6688128, Encrypt | Decrypt) =>
+                Some(CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE),
 
             // ── ML-DSA (FIPS 204) ─────────────────────────────────────────
             (MlDsa44 | MlDsa65 | MlDsa87, KeyGen) =>
@@ -452,6 +511,13 @@ impl KmipAlgorithm {
             X25519MlKem768    => "X25519MLKEM768",
             SecP256r1MlKem768 => "SecP256r1MLKEM768",
             SecP384r1MlKem1024 => "SecP384r1MLKEM1024",
+            ClassicMcEliece6688128 => "Classic-McEliece-6688128",
+            FrodoKem640Aes    => "FrodoKEM-640-AES",
+            FrodoKem640Shake  => "FrodoKEM-640-SHAKE",
+            FrodoKem976Aes    => "FrodoKEM-976-AES",
+            FrodoKem976Shake  => "FrodoKEM-976-SHAKE",
+            FrodoKem1344Aes   => "FrodoKEM-1344-AES",
+            FrodoKem1344Shake => "FrodoKEM-1344-SHAKE",
         }
     }
 }

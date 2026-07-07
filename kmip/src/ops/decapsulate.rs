@@ -20,7 +20,7 @@ use crate::error::{KmipError, Result, ResultReason};
 use crate::kmip30::{DecapsulateRequest, DecapsulateResponse, PkcsOp, State};
 
 use super::deps::Deps;
-use super::encapsulate::{is_classical_kem, is_ml_kem, store_shared_secret};
+use super::encapsulate::{is_classic_mceliece, is_classical_kem, is_frodokem, is_ml_kem, store_shared_secret};
 use super::helpers::{emit_pkcs11, emit_pkcs11_result, emit_request, emit_success, fail_err, state_name};
 
 pub fn decapsulate(
@@ -39,16 +39,22 @@ pub fn decapsulate(
         fail_err(deps, correlation_id, "Decapsulate", KmipError::object_not_found(&req.uid))
     })?;
 
-    // K6 — Decapsulate accepts ML-KEM, the hybrid KEMs, and (2026-07-05)
-    // classical ECDH/X25519/X448 in DHKEM mode.
-    if !is_ml_kem(obj.algorithm) && !obj.algorithm.is_hybrid_kem() && !is_classical_kem(obj.algorithm) {
+    // K6 — Decapsulate accepts ML-KEM, the hybrid KEMs, classical
+    // ECDH/X25519/X448 in DHKEM mode, and (2026-07-06) BSI TR-02102-1's
+    // FrodoKEM / Classic McEliece.
+    if !is_ml_kem(obj.algorithm)
+        && !obj.algorithm.is_hybrid_kem()
+        && !is_classical_kem(obj.algorithm)
+        && !is_frodokem(obj.algorithm)
+        && !is_classic_mceliece(obj.algorithm)
+    {
         return Err(fail_err(
             deps,
             correlation_id,
             "Decapsulate",
             KmipError::failed(
                 ResultReason::OperationNotSupported,
-                format!("Decapsulate requires an ML-KEM, hybrid KEM, or classical ECDH/X25519/X448 key; {:?} is not", obj.algorithm),
+                format!("Decapsulate requires an ML-KEM, hybrid KEM, classical ECDH/X25519/X448, FrodoKEM, or Classic McEliece key; {:?} is not", obj.algorithm),
             ),
         ));
     }

@@ -87,9 +87,15 @@ jobs:
             kmip/target
           key: ${{ runner.os }}-cargo-test-${{ hashFiles('rust/Cargo.lock', 'kmip/Cargo.lock') }}
       - name: Run engine tests
-        run: cd rust && cargo test
+        # RUST_MIN_STACK: mceliece6688128's keygen needs more than the default
+        # test-thread stack in an unoptimized debug build — seen overflowing
+        # on ubuntu-24.04 x86_64 (not reliably reproduced on local aarch64).
+        run: cd rust && RUST_MIN_STACK=134217728 cargo test
       - name: Run KMIP tests
-        run: cd kmip && cargo test --quiet
+        # Same RUST_MIN_STACK need as the engine tests above — this crate
+        # has its own classic_mceliece_6688128_round_trip e2e test
+        # (kmip/tests/frodokem_mceliece_e2e.rs).
+        run: cd kmip && RUST_MIN_STACK=134217728 cargo test --quiet
 
   kmip-conformance:
     name: KMIP OASIS Conformance Replay
