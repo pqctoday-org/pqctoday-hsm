@@ -4438,7 +4438,19 @@ fn encode_attribute_v3(a: &Attribute) -> TtlvFrame {
                 .collect();
             TtlvFrame::new(Tag(tags::ShortUniqueIdentifier), Value::ByteString(bytes))
         }
-        Attribute::AlternativeName(s)          => TtlvFrame::new(Tag(tags::AlternativeName),          Value::TextString(s.clone())),
+        // KMIP 3.0 §4.5 — Structure { Alternative Name Value, Alternative
+        // Name Type }, mirroring the decode side. We only track the Value
+        // half internally, so Type is a fixed `Uninterpreted Text String`
+        // (§11.2 Alternative Name Type Enumeration, value 1) — the correct
+        // default for a free-text label with no more specific semantic
+        // (not a URI / serial number / email / DNS name / X.500 DN / IP).
+        Attribute::AlternativeName(s) => TtlvFrame::new(
+            Tag(tags::AlternativeName),
+            Value::Structure(vec![
+                TtlvFrame::new(Tag(tags::AlternativeNameValue), Value::TextString(s.clone())),
+                TtlvFrame::new(Tag(tags::AlternativeNameType), Value::Enumeration(1)),
+            ]),
+        ),
         Attribute::Comment(s)                  => TtlvFrame::new(Tag(tags::Comment),                  Value::TextString(s.clone())),
         Attribute::Description(s)              => TtlvFrame::new(Tag(tags::Description),              Value::TextString(s.clone())),
         Attribute::ContactInformation(s)       => TtlvFrame::new(Tag(tags::ContactInformation),       Value::TextString(s.clone())),

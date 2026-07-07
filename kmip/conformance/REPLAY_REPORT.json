@@ -1,16 +1,16 @@
 {
-  "generated_at": 1783464479,
+  "generated_at": 1783468453,
   "summary": {
-    "pass": 93,
+    "pass": 96,
     "fail": 1,
     "error": 0,
     "skip_op": 0,
     "skip_parse": 0,
     "skip_deprecated": 5,
     "skip_precondition": 0,
-    "skip_policy_variant": 3,
+    "skip_policy_variant": 0,
     "total": 102,
-    "candidates": 94
+    "candidates": 97
   },
   "tests": [
     {
@@ -1064,21 +1064,27 @@
     },
     {
       "name": "CS-RNG-O-2-30.xml",
-      "status": "SKIP_POLICY_VARIANT",
-      "detail": "RNGSeed policy variant: partial-consume (DataLength=16). We implement full-consume per CS-RNG-O-1",
-      "ops_used": []
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "RNGSeed"
+      ]
     },
     {
       "name": "CS-RNG-O-3-30.xml",
-      "status": "SKIP_POLICY_VARIANT",
-      "detail": "RNGSeed policy variant: ignore-seed (DataLength=0). We implement full-consume per CS-RNG-O-1",
-      "ops_used": []
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "RNGSeed"
+      ]
     },
     {
       "name": "CS-RNG-O-4-30.xml",
-      "status": "SKIP_POLICY_VARIANT",
-      "detail": "RNGSeed policy variant: deny (PermissionDenied). We implement full-consume per CS-RNG-O-1",
-      "ops_used": []
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "RNGSeed"
+      ]
     },
     {
       "name": "OMOS-O-1-30.xml",

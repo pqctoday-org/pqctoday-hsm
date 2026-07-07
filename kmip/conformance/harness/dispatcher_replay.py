@@ -193,34 +193,34 @@ def is_precondition_test(name: str) -> str | None:
 
 # OASIS conformance tests that pin a specific server policy choice from a
 # set of MUTUALLY EXCLUSIVE conformant behaviors. RNGSeed is the canonical
-# example: KMIP 3.0 §6.1.45 lets a conformant server (a) consume the full
+# example: KMIP 3.0 §6.1.55 lets a conformant server (a) consume the full
 # seed, (b) consume only N bytes and report DataLength=N, (c) ignore the
 # seed entirely and report DataLength=0, or (d) deny the op outright with
-# `PermissionDenied`. CS-RNG-O-1 exercises (a) — which is our default —
-# and we pass it. CS-RNG-O-{2,3,4} each pin (b), (c), and (d) respectively
-# and would require swapping the server policy mid-replay, which our
-# hermetic per-test harness intentionally does not do.
+# `PermissionDenied`. CS-RNG-O-1 exercises (a) — the server's default.
 #
-# Surfacing these as ``SKIP_POLICY_VARIANT`` keeps the pass-rate honest
-# without pretending we implemented per-test policy injection.
-_POLICY_VARIANT_TESTS: dict[str, str] = {
-    "CS-RNG-O-2-30.xml": (
-        "RNGSeed policy variant: partial-consume (DataLength=16). "
-        "We implement full-consume per CS-RNG-O-1"
-    ),
-    "CS-RNG-O-3-30.xml": (
-        "RNGSeed policy variant: ignore-seed (DataLength=0). "
-        "We implement full-consume per CS-RNG-O-1"
-    ),
-    "CS-RNG-O-4-30.xml": (
-        "RNGSeed policy variant: deny (PermissionDenied). "
-        "We implement full-consume per CS-RNG-O-1"
-    ),
-}
+# RESOLVED (2026-07-07, Honest-Maximum Phase 2.2): the server now accepts
+# `--rng-seed-mode <full|partial|ignore|deny>` (`bin/pqctoday-kmip.rs`,
+# `ops/deps.rs::RngSeedMode`), so CS-RNG-O-{2,3,4} each get their own
+# server instance started with the matching mode pinned via `extra_args`
+# — see `_RNG_SEED_MODE_TESTS` and its use in `main()`. This dict is kept
+# (currently empty) as a documented escape hatch for a *future* corpus
+# addition that pins some other mutually-exclusive server choice we
+# haven't built a selector for yet.
+_POLICY_VARIANT_TESTS: dict[str, str] = {}
 
 
 def is_policy_variant_test(name: str) -> str | None:
     return _POLICY_VARIANT_TESTS.get(name)
+
+
+# Maps a CS-RNG-O-{2,3,4} transcript to the `--rng-seed-mode` value that
+# makes it the server's active policy for that one run. CS-RNG-O-1 needs
+# no entry — `full` is already the server's built-in default.
+_RNG_SEED_MODE_TESTS: dict[str, str] = {
+    "CS-RNG-O-2-30.xml": "partial",
+    "CS-RNG-O-3-30.xml": "ignore",
+    "CS-RNG-O-4-30.xml": "deny",
+}
 
 
 # ── Placeholder resolution ──────────────────────────────────────────────────
@@ -943,11 +943,14 @@ class Server:
             self.proc.kill()
 
 
-def start_server(port: int = 9999) -> Server:
+def start_server(port: int = 9999, extra_args: list[str] | None = None) -> Server:
     """Spawn ``pqctoday-kmip`` with volatile store + self-signed TLS.
 
     Caller is responsible for ``Server.stop()`` — even on test failures —
-    so we don't leak listeners across runs.
+    so we don't leak listeners across runs. ``extra_args`` lets a caller
+    pin a server-operator-choice flag for one run — e.g. ``--rng-seed-mode``
+    (see ``_RNG_SEED_MODE_TESTS`` below) — without touching every other
+    test's default config.
     """
     if not SERVER_BINARY.exists():
         raise SystemExit(
@@ -955,7 +958,7 @@ def start_server(port: int = 9999) -> Server:
             f"run `cargo build --release --bin pqctoday-kmip` first"
         )
     proc = subprocess.Popen(
-        [str(SERVER_BINARY), "--listen", f"127.0.0.1:{port}", "--store-memory"],
+        [str(SERVER_BINARY), "--listen", f"127.0.0.1:{port}", "--store-memory", *(extra_args or [])],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=False,
@@ -1299,13 +1302,17 @@ def main(argv: list[str]) -> int:
         # some platforms (macOS), making `start_server` time out mid-run.
         # A rotating port over a wide range avoids the collision; the range
         # is bounded so it stays inside the ephemeral space.
-        srv = start_server(port=next_port())
+        extra_args: list[str] = []
+        if (mode := _RNG_SEED_MODE_TESTS.get(name)) is not None:
+            extra_args = ["--rng-seed-mode", mode]
+        srv = start_server(port=next_port(), extra_args=extra_args)
         try:
             r = run_test(srv, path)
         finally:
             srv.stop()
         results.append(r)
-        print(f"  [{i:3d}/{len(paths)}] {r.status:12s}  {r.name}  {r.detail[:60]}")
+        tag = f"  (--rng-seed-mode={mode})" if extra_args else ""
+        print(f"  [{i:3d}/{len(paths)}] {r.status:12s}  {r.name}  {r.detail[:60]}{tag}")
 
     out = REPORT_DIR / "REPLAY_REPORT.md"
     write_report(results, out)

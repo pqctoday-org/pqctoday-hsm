@@ -79,7 +79,7 @@ pub mod validate;
 #[cfg(feature = "native")]
 pub mod certify;
 
-pub use deps::{Deps, DepsConfig};
+pub use deps::{Deps, DepsConfig, RngSeedMode};
 
 /// K8 test fixture — the BL-M-9-30 Transparent RSA Private Key
 /// components (OASIS corpus, 1024-bit), shared by the Register /

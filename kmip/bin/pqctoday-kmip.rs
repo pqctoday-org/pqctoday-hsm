@@ -23,7 +23,7 @@ use clap::Parser;
 
 use pqctoday_kmip::auditlog::{AuditSink, CompositeSink, JsonlSink, OtlpSink, RingSink, SseSink, SyslogSink};
 use pqctoday_kmip::cert_init::init_certs_if_missing;
-use pqctoday_kmip::ops::{Deps, DepsConfig};
+use pqctoday_kmip::ops::{Deps, DepsConfig, RngSeedMode};
 use pqctoday_kmip::policy::{load_from_str, Engine, PolicyStore};
 use pqctoday_kmip::server::{serve, tls_from_pem, tls_mtls, tls_self_signed, AuthUser};
 use pqctoday_kmip::store::{KeyStore, MemoryStore, SqliteStore};
@@ -157,6 +157,17 @@ struct Cli {
     /// the issuer DN of every issued certificate. Requires `--ca-key`.
     #[arg(long = "ca-cert", requires = "ca_key")]
     ca_cert: Option<String>,
+
+    /// §6.1.55 RNG Seed behavior: `full` (consume + report the whole
+    /// client seed — the default), `partial` (consume a fixed 16-byte
+    /// cap), `ignore` (report DataLength=0, consume nothing), or `deny`
+    /// (reject with PermissionDenied). All four are conformant per the
+    /// spec text ("the server MAY elect to ignore..."); this flag exists
+    /// so the OASIS CS-RNG-O-{2,3,4} optional conformance tests — each
+    /// pinning a different one of the three non-default choices — can
+    /// be exercised, since a deployed server picks exactly one.
+    #[arg(long = "rng-seed-mode", default_value = "full")]
+    rng_seed_mode: String,
 }
 
 #[tokio::main]
@@ -318,6 +329,17 @@ async fn main() -> anyhow::Result<()> {
             None
         }
     };
+    let rng_seed_mode = match cli.rng_seed_mode.as_str() {
+        "full" => RngSeedMode::FullConsume,
+        "partial" => RngSeedMode::PartialConsume,
+        "ignore" => RngSeedMode::Ignore,
+        "deny" => RngSeedMode::Deny,
+        other => {
+            anyhow::bail!(
+                "--rng-seed-mode: unknown value {other:?} (expected full|partial|ignore|deny)"
+            );
+        }
+    };
     let config = DepsConfig {
         pkcs11_slot: cli.slot,
         pkcs11_pin: cli.pin,
@@ -325,6 +347,7 @@ async fn main() -> anyhow::Result<()> {
         server_version: env!("CARGO_PKG_VERSION").into(),
         auth_users,
         ca_key,
+        rng_seed_mode,
     };
     let deps = Arc::new(
         Deps::new(engine, store, sink, config).with_engine_session(engine_session),

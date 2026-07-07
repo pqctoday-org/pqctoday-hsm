@@ -16,14 +16,14 @@
 
 use rand::RngCore;
 
-use crate::error::Result;
+use crate::error::{KmipError, Result};
 use crate::kmip30::{
     Pkcs11Request, Pkcs11Response, RngRetrieveRequest, RngRetrieveResponse, RngSeedRequest,
     RngSeedResponse,
 };
 
-use super::deps::Deps;
-use super::helpers::{emit_request, emit_success};
+use super::deps::{Deps, RngSeedMode, RNG_SEED_PARTIAL_CONSUME_CAP};
+use super::helpers::{emit_request, emit_success, fail_err};
 
 // ── RNG Retrieve ───────────────────────────────────────────────────────────
 
@@ -46,13 +46,36 @@ pub fn rng_seed(deps: &Deps, req: RngSeedRequest, correlation_id: &str) -> Resul
     emit_request(deps, correlation_id, "RNGSeed", format!("seed_len={}", req.data.len()));
     // Per §6.1.55: "The server MAY elect to ignore the information
     // provided by the client and MAY indicate this to the client by
-    // returning zero as the value in the Data Length response."
-    // OsRng is already seeded by the kernel; we accept the client's
-    // bytes purely for protocol conformance and report them all as
-    // consumed. A future variant could mix them into a userspace pool.
-    let data_length = req.data.len() as i32;
-    emit_success(deps, correlation_id, "RNGSeed");
-    Ok(RngSeedResponse { data_length })
+    // returning zero as the value in the Data Length response." All
+    // four branches are independently spec-conformant — which one
+    // fires is a server-operator choice (`--rng-seed-mode`), not
+    // something the client selects per request. OsRng is already
+    // seeded by the kernel; the client's bytes are accepted purely for
+    // protocol conformance and never actually mixed into it, regardless
+    // of mode (a future variant could feed FullConsume/PartialConsume
+    // into a userspace pool).
+    match deps.config.rng_seed_mode {
+        RngSeedMode::FullConsume => {
+            let data_length = req.data.len() as i32;
+            emit_success(deps, correlation_id, "RNGSeed");
+            Ok(RngSeedResponse { data_length })
+        }
+        RngSeedMode::PartialConsume => {
+            let data_length = req.data.len().min(RNG_SEED_PARTIAL_CONSUME_CAP) as i32;
+            emit_success(deps, correlation_id, "RNGSeed");
+            Ok(RngSeedResponse { data_length })
+        }
+        RngSeedMode::Ignore => {
+            emit_success(deps, correlation_id, "RNGSeed");
+            Ok(RngSeedResponse { data_length: 0 })
+        }
+        RngSeedMode::Deny => Err(fail_err(
+            deps,
+            correlation_id,
+            "RNGSeed",
+            KmipError::permission_denied("RNGSeed: server policy denies client-supplied seed material"),
+        )),
+    }
 }
 
 // ── PKCS#11 passthrough ────────────────────────────────────────────────────
@@ -107,6 +130,18 @@ mod tests {
         Deps::new(engine, Arc::new(MemoryStore::new()), sink, super::super::deps::DepsConfig::default())
     }
 
+    fn deps_with_rng_mode(mode: RngSeedMode) -> Deps {
+        let ring = Arc::new(RingSink::new(64));
+        let sink: Arc<dyn AuditSink> = ring.clone();
+        let engine = Engine::with_global_sink(sink.clone());
+        engine.activate(load_from_str(
+            "schema_version: 1\nmetadata: {name: t, description: t, authority: t, effective: always}\nrules: []\n",
+            std::path::Path::new("<t>"),
+        ).unwrap()).unwrap();
+        let config = super::super::deps::DepsConfig { rng_seed_mode: mode, ..Default::default() };
+        Deps::new(engine, Arc::new(MemoryStore::new()), sink, config)
+    }
+
     #[test]
     fn rng_retrieve_returns_requested_byte_count() {
         let d = deps_with();
@@ -130,6 +165,39 @@ mod tests {
         let d = deps_with();
         let r = rng_seed(&d, RngSeedRequest { data: vec![1, 2, 3, 4] }, "c").unwrap();
         assert_eq!(r.data_length, 4);
+    }
+
+    // §6.1.55 policy variants (CS-RNG-O-2/3/4) — Honest-Maximum Phase 2.2.
+
+    #[test]
+    fn rng_seed_full_consume_reports_all_bytes() {
+        let d = deps_with_rng_mode(RngSeedMode::FullConsume);
+        let r = rng_seed(&d, RngSeedRequest { data: vec![0u8; 32] }, "c").unwrap();
+        assert_eq!(r.data_length, 32);
+    }
+
+    #[test]
+    fn rng_seed_partial_consume_caps_at_16() {
+        let d = deps_with_rng_mode(RngSeedMode::PartialConsume);
+        let r = rng_seed(&d, RngSeedRequest { data: vec![0u8; 32] }, "c").unwrap();
+        assert_eq!(r.data_length, 16);
+        // Smaller than the cap: report the true (smaller) length, not the cap.
+        let r2 = rng_seed(&d, RngSeedRequest { data: vec![0u8; 4] }, "c").unwrap();
+        assert_eq!(r2.data_length, 4);
+    }
+
+    #[test]
+    fn rng_seed_ignore_reports_zero() {
+        let d = deps_with_rng_mode(RngSeedMode::Ignore);
+        let r = rng_seed(&d, RngSeedRequest { data: vec![0u8; 32] }, "c").unwrap();
+        assert_eq!(r.data_length, 0);
+    }
+
+    #[test]
+    fn rng_seed_deny_returns_permission_denied() {
+        let d = deps_with_rng_mode(RngSeedMode::Deny);
+        let err = rng_seed(&d, RngSeedRequest { data: vec![0u8; 32] }, "c").unwrap_err();
+        assert_eq!(err.result_reason(), crate::error::ResultReason::PermissionDenied);
     }
 
     #[test]

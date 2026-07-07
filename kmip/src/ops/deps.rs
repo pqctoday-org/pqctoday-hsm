@@ -62,6 +62,10 @@ pub struct DepsConfig {
     /// [`Deps::with_ca_key`] in tests. See the module doc on
     /// [`CaKeyDesignation`] for the authorisation model.
     pub ca_key: Option<CaKeyDesignation>,
+
+    /// §6.1.55 RNG Seed behavior — see [`RngSeedMode`]. Defaults to
+    /// full-consume (the pre-existing behavior; CS-RNG-O-1 pins it).
+    pub rng_seed_mode: RngSeedMode,
 }
 
 /// P2.3 — designates the single key/cert pair the server may use as a
@@ -97,6 +101,33 @@ pub struct CaKeyDesignation {
     pub certificate_uid: String,
 }
 
+/// KMIP 3.0 §6.1.55 `RNG Seed` — the spec text: "The server MAY elect to
+/// ignore the information provided by the client and MAY indicate this
+/// to the client by returning zero as the value in the Data Length
+/// response." This is a server-chosen, mutually-exclusive policy
+/// choice, not client-selectable per request — the OASIS Cryptographic
+/// Services Optional profile pins four concrete behaviors as separate
+/// conformance tests (CS-RNG-O-1..4), each expecting a different one:
+///
+/// | Variant | Response `DataLength` for a 32-byte seed | Test |
+/// |---|---|---|
+/// | `FullConsume` (default) | 32 (all of it) | CS-RNG-O-1 |
+/// | `PartialConsume` | 16 (a fixed cap, per the pinned transcript) | CS-RNG-O-2 |
+/// | `Ignore` | 0 | CS-RNG-O-3 |
+/// | `Deny` | n/a — `PermissionDenied` | CS-RNG-O-4 |
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RngSeedMode {
+    #[default]
+    FullConsume,
+    PartialConsume,
+    Ignore,
+    Deny,
+}
+
+/// Fixed byte cap for `RngSeedMode::PartialConsume` — CS-RNG-O-2 pins
+/// exactly 16 regardless of the client-supplied seed length.
+pub const RNG_SEED_PARTIAL_CONSUME_CAP: usize = 16;
+
 impl DepsConfig {
     /// `true` when a credential store is configured (auth enforced).
     pub fn auth_enabled(&self) -> bool {
@@ -113,6 +144,7 @@ impl Default for DepsConfig {
             server_version: env!("CARGO_PKG_VERSION").into(),
             auth_users: Vec::new(), // open-auth — replay harness depends on this
             ca_key: None,           // not a CA unless explicitly configured
+            rng_seed_mode: RngSeedMode::FullConsume,
         }
     }
 }
