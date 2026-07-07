@@ -890,6 +890,9 @@ fn alg_from_name(name: &str) -> Option<KmipAlgorithm> {
         SlhDsaShake256s, SlhDsaShake256f,
         // K6 hybrid KEMs.
         X25519MlKem768, SecP256r1MlKem768,
+        // BSI TR-02102-1 §2.4.1/§2.4.2 vendor KEMs.
+        FrodoKem640Aes, FrodoKem640Shake, FrodoKem976Aes, FrodoKem976Shake,
+        FrodoKem1344Aes, FrodoKem1344Shake, ClassicMcEliece6688128,
     ];
     ALL.iter().copied().find(|a| a.spec_name().eq_ignore_ascii_case(name))
 }
@@ -908,8 +911,19 @@ fn implied_length_for_name(name: &str) -> Option<u32> {
 }
 
 fn is_kem(alg: KmipAlgorithm) -> bool {
-    matches!(alg, KmipAlgorithm::MlKem512 | KmipAlgorithm::MlKem768 | KmipAlgorithm::MlKem1024)
-        || alg.is_hybrid_kem()
+    matches!(
+        alg,
+        KmipAlgorithm::MlKem512
+            | KmipAlgorithm::MlKem768
+            | KmipAlgorithm::MlKem1024
+            | KmipAlgorithm::FrodoKem640Aes
+            | KmipAlgorithm::FrodoKem640Shake
+            | KmipAlgorithm::FrodoKem976Aes
+            | KmipAlgorithm::FrodoKem976Shake
+            | KmipAlgorithm::FrodoKem1344Aes
+            | KmipAlgorithm::FrodoKem1344Shake
+            | KmipAlgorithm::ClassicMcEliece6688128
+    ) || alg.is_hybrid_kem()
 }
 
 // ── response summary ───────────────────────────────────────────────────────────

@@ -29,6 +29,15 @@ WASM_BINDGEN_VERSION="0.2.117"                       # MUST match wasm/Cargo.tom
 HUB_SHIM_DIR="$HUB/src/wasm/kmip"
 HUB_WASM_DIR="$HUB/public/wasm/rust-kmip"
 
+# FrodoKEM's largest matrix (the 1344 parameter set's n×n generation) exceeds
+# wasm32-unknown-unknown's default ~1MiB shadow stack even in a --release
+# build — reproduced directly: `native::encrypt::encapsulate` traps with
+# "memory access out of bounds" at the default size, passes cleanly at 8MiB.
+# This is the same class of issue rust/build-wasm-bundle.sh already works
+# around for ML-DSA (there, only under --dev; FrodoKEM's matrices are large
+# enough to need the larger stack in --release too).
+export RUSTFLAGS="${RUSTFLAGS:-} -C link-arg=-zstack-size=8388608"
+
 # ── Pick a runner: host cargo, or `docker exec` into the build container ──────
 RUST_CONTAINER="${RUST_CONTAINER:-pqc-rust}"
 if command -v cargo >/dev/null 2>&1; then
@@ -50,7 +59,7 @@ else
     docker exec "$RUST_CONTAINER" rustup target add wasm32-unknown-unknown
     docker exec "$RUST_CONTAINER" sh -c "command -v wasm-bindgen >/dev/null 2>&1 || cargo install wasm-bindgen-cli --version $WASM_BINDGEN_VERSION"
   fi
-  run() { docker exec "$RUST_CONTAINER" sh -c "cd /ag/pqctoday-hsm/wasm && $*"; }
+  run() { docker exec -e RUSTFLAGS="$RUSTFLAGS" "$RUST_CONTAINER" sh -c "cd /ag/pqctoday-hsm/wasm && $*"; }
   CARGO_TARGET_ROOT="/cargo-target"
 fi
 
