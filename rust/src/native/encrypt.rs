@@ -1487,7 +1487,15 @@ mod tests {
 
     /// Direction A for Classic McEliece (mceliece6688128): encaps with
     /// `oqs`, decaps with our PKCS#11 engine.
+    ///
+    /// `#[ignore]`: 20 fresh mceliece6688128 keypairs in an unoptimized
+    /// debug build take tens of minutes, not seconds — too slow for every
+    /// CI run. Run manually with `cargo test --release -- --ignored
+    /// classic_mceliece_6688128_cross_validate` (release mode is fast).
+    /// `classic_mceliece_6688128_round_trip` already covers the basic
+    /// correctness path on every run.
     #[test]
+    #[ignore]
     fn classic_mceliece_6688128_cross_validate_oqs_encap_our_decap() {
         let _guard = test_lock::acquire();
         let session = fresh_session();
@@ -1539,7 +1547,11 @@ mod tests {
 
     /// Direction B for Classic McEliece: encaps with our PKCS#11 engine,
     /// decaps with `oqs`. Same N-trial breadth as Direction A.
+    ///
+    /// `#[ignore]`: same reason as Direction A above — 20 fresh debug-build
+    /// mceliece6688128 keygens is too slow for every CI run.
     #[test]
+    #[ignore]
     fn classic_mceliece_6688128_cross_validate_our_encap_oqs_decap() {
         let _guard = test_lock::acquire();
         let session = fresh_session();
