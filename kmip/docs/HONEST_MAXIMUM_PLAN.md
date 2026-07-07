@@ -144,10 +144,18 @@ Effort S/M/L · Risk L/M/H · each task carries its own exit test.
 ### Phase 2 — Corpus closure → 97/102
 
 **2.1 Stateful Locate** — `SASED-M-3`, `TL-M-3` · *(S / L, harness)*. Filters already implemented (`locate.rs:205-216`).
-- T1 replay the paired transcripts (M-2→M-3) against **one** server instance (no per-test wipe, `dispatcher_replay.py:142`); keep all else hermetic.
-- T2 add Rust unit tests for Locate-by-GroupLink + Locate-by-ApplicationSpecificInformation (currently inspection-only).
-- T3 reclassify both to expected-PASS in `assert_replay_report.py`.
+- T1 replay the paired transcripts (M-2→M-3) against **one** server instance (no per-test wipe, `dispatcher_replay.py:142`); keep all else hermetic. **DONE** — `_CHAINED_TEST_GROUPS` mechanism added to `dispatcher_replay.py`; `run_test` now accepts a shared `Bindings`.
+- T2 add Rust unit tests for Locate-by-GroupLink + Locate-by-ApplicationSpecificInformation (currently inspection-only). **Not yet done** — deferred alongside T3 below.
+- T3 reclassify both to expected-PASS in `assert_replay_report.py`. **SASED done** (genuinely PASS/PASS via the chain). **TL not yet** — see below.
 - *Exit:* both PASS as real cross-request Locate.
+
+**Outcome (2026-07-07):**
+- **`SASED-M-2`→`SASED-M-3` fully closed** — both PASS for real via the chained-transcript mechanism. Locate-by-GroupLink genuinely round-trips end to end.
+- **`TL-M-2`→`TL-M-3`: the chain mechanism works and surfaced 3 real, independently-confirmed spec-conformance bugs, all fixed and verified (full `cargo test` still 518/518 + all integration suites green after each):**
+  1. **`encode_get_attribute_list_resp` silently dropped every custom/vendor attribute name** from `GetAttributeList` responses (§4.1.2 item 5 violation) — it had its own inline, incomplete encode logic instead of reusing the already-correct `attribute_reference_frame` helper (which handles both the Enumeration and `Structure{AttributeName}` shapes). Fixed by reusing that helper (`wire.rs`).
+  2. **`ApplicationSpecificInformation` was never checked** in `get_attribute_list.rs`'s name surface, despite `ObjectRecord` tracking it and `GetAttributes` already surfacing it. A genuine omission, not a wire bug. Fixed (`get_attribute_list.rs`).
+  3. **`Attribute::AlternativeName` decode expected a bare `TextString`**, but KMIP 3.0 §4.5 defines it as `Structure{AlternativeNameValue, AlternativeNameType}` — every real client-set AlternativeName silently decoded to `Ok(None)` and was dropped. Also found the extraction pipeline (`ExtractedAttrs`/`extract_attrs`) had no field for it at all — systemic, affecting Create AND Register. Fixed all three layers (`wire.rs` decode + 2 new tag constants `AlternativeNameValue`/`AlternativeNameType`; `ExtractedAttrs` struct + `extract_attrs`; wired into both `create.rs` and `register_import_export.rs`'s `ObjectRecord` construction).
+- **Remaining, larger, distinct gap found (NOT fixed — flagged for a decision, not silently absorbed into "harness fix" scope):** `TL-M-3`'s `GetAttributes` step round-trips the *values* of the 5 custom/vendor attributes TL-M-2 set, including `VendorAttribute2` (Integer) and `VendorAttribute3` (DateTime). Our `Attribute::Custom { name, value: String }` model — and `ObjectRecord.custom_attributes: HashMap<String, String>` — only ever stores a **string**; `decode_attribute_v3`'s generic vendor-`Attribute` arm only extracts `AttributeValue` when it's a `TextString`, silently dropping Integer/DateTime/Boolean/Enumeration typed values (stored as `""`). Closing this for real means threading a typed value through the wire codec, the `Attribute` enum, `ObjectRecord.custom_attributes`, AND the ~15 call sites that currently do string-based policy matching on it (`strip_x_prefixes` and its callers in `sign.rs`, `encrypt.rs`, `decrypt.rs`, `rekey.rs`, `derive_key.rs`, `mac_and_hash.rs`, `signature_verify.rs`, `encapsulate.rs`, `decapsulate.rs`, …) — a genuinely separate, medium-sized piece of work, not a harness fix. `TL-M-3` stays `FAIL` (not silently reclassified) until this is deliberately scoped and done.
 
 **2.2 RNG-seed variants** — §6.1.55 · *(M / L)*. `rng_and_pkcs11.rs:47-53` full-consume only.
 - T1 implement partial-consume, ignore (`DataLength=0`), deny (`PermissionDenied`).

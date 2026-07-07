@@ -393,6 +393,10 @@ pub(crate) mod tags {
     pub const RotateAutomatic: u32               = 0x42_016b;
     pub const ShortUniqueIdentifier: u32         = 0x42_0136;
     pub const AlternativeName: u32               = 0x42_00bf;
+    /// §4.5 Structure members — see the `tags::AlternativeName` decode
+    /// arm (`decode_attribute_v3`).
+    pub const AlternativeNameValue: u32          = 0x42_00c0;
+    pub const AlternativeNameType: u32           = 0x42_00c1;
     pub const Comment: u32                       = 0x42_00fd;
     pub const Description: u32                   = 0x42_00fc;
     pub const ContactInformation: u32            = 0x42_0022;
@@ -2571,9 +2575,30 @@ fn decode_attribute_v3(frame: &TtlvFrame) -> Result<Option<Attribute>, WireError
                 Attribute::ContactInformation(s.clone())
             } else { return Ok(None); }
         }
+        // KMIP 3.0 §4.5 — Alternative Name is a Structure { Alternative
+        // Name Value (TextString), Alternative Name Type (Enumeration) },
+        // not a bare TextString leaf. The previous arm only matched
+        // `Value::TextString` directly on the `AlternativeName` frame
+        // itself, so every real client-set AlternativeName (which always
+        // wire-encodes as a Structure) silently decoded to `Ok(None)` and
+        // was dropped — found via the OASIS TL-M-2/TL-M-3 conformance
+        // transcripts (Honest-Maximum Phase 2.1). We keep only the Value
+        // half on `Attribute::AlternativeName(String)`; the Type
+        // enumeration isn't read back by anything downstream yet.
         tags::AlternativeName => {
             if let Value::TextString(s) = &frame.value {
                 Attribute::AlternativeName(s.clone())
+            } else if let Value::Structure(children) = &frame.value {
+                let mut value = None;
+                for c in children {
+                    if c.tag.0 == tags::AlternativeNameValue {
+                        if let Value::TextString(s) = &c.value { value = Some(s.clone()); }
+                    }
+                }
+                match value {
+                    Some(s) => Attribute::AlternativeName(s),
+                    None => return Ok(None),
+                }
             } else { return Ok(None); }
         }
         tags::ObjectClass => {
@@ -4279,16 +4304,23 @@ fn encode_get_attribute_list_resp(r: &GetAttributeListResponse) -> Vec<TtlvFrame
         Tag(tags::UniqueIdentifier),
         Value::TextString(r.uid.clone()),
     )];
+    // Per §6.1.22 a spec-defined attribute name is carried as an
+    // AttributeReference Enumeration (the "enumerable Tag" form); a
+    // client-set custom/vendor attribute name (no defined codepoint —
+    // KMIP 3.0's own client-set generic `Attribute{VendorIdentification,
+    // AttributeName,AttributeValue}` mechanism, §11) has no Enumeration
+    // value and MUST still be reported per §4.1.2 item 5 ("the server
+    // returns a list of Attribute References for ALL Object attributes
+    // ... associated with the specified object"). `attribute_reference_frame`
+    // already implements both shapes correctly (used by GetAttributes'
+    // request encoder above) — reuse it here instead of the previous
+    // inline `if let Some(tag_code) = ...` which silently DROPPED any
+    // name it couldn't resolve to a codepoint, so every custom/vendor
+    // attribute an object had was omitted from GetAttributeList
+    // responses (found via the OASIS TL-M-3 conformance transcript,
+    // Honest-Maximum Phase 2.1).
     for name in &r.attribute_references {
-        // Per §6.1.22 each attribute name is carried as an
-        // AttributeReference Enumeration (the spec's "enumerable Tag"
-        // form — value is the 4-byte tag code).
-        if let Some(tag_code) = tag_code_from_name(name) {
-            out.push(TtlvFrame::new(
-                Tag(tags::AttributeReference),
-                Value::Enumeration(tag_code),
-            ));
-        }
+        out.push(attribute_reference_frame(name));
     }
     out
 }

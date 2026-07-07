@@ -456,6 +456,7 @@ pub fn register(
         original_creation_date: Some(now),
         supersedes: None,
         name,
+        alternative_name: x.alternative_name.clone(),
         links,
         custom_attributes,
         object_groups: x.object_groups.clone(),
@@ -741,6 +742,15 @@ pub(crate) struct ExtractedAttrs {
     /// template — multi-instance, so a list. SASED-M-2 registers an
     /// object into a group; SASED-M-3 then Locates it by that group.
     pub object_groups: Vec<String>,
+    /// `Alternative Name` (KMIP §4.4, 0x4200bf) — a client-set secondary
+    /// name for the object (e.g. a barcode/serial-style label). Was
+    /// decoded off the wire (`Attribute::AlternativeName`) but silently
+    /// dropped by this extractor's catch-all — TL-M-2 sets one and
+    /// GetAttributeList already checked `obj.alternative_name.is_some()`
+    /// (get_attribute_list.rs), so the name surface reported "not set"
+    /// for an attribute the client explicitly provided (found via the
+    /// OASIS TL-M-3 conformance transcript, Honest-Maximum Phase 2.1).
+    pub alternative_name: Option<String>,
 }
 
 pub(crate) fn extract_attrs(attrs: &[Attribute]) -> ExtractedAttrs {
@@ -753,6 +763,7 @@ pub(crate) fn extract_attrs(attrs: &[Attribute]) -> ExtractedAttrs {
         usage_limits_unit: None,
         application_specific_information: None,
         object_groups: Vec::new(),
+        alternative_name: None,
     };
     for a in attrs {
         match a {
@@ -775,6 +786,7 @@ pub(crate) fn extract_attrs(attrs: &[Attribute]) -> ExtractedAttrs {
             Attribute::ApplicationSpecificInformation { namespace, data } => {
                 out.application_specific_information = Some((namespace.clone(), data.clone()));
             }
+            Attribute::AlternativeName(n) => out.alternative_name = Some(n.clone()),
             // Multi-instance: accumulate every Object Group label so an
             // object Registered into several groups is locatable by any.
             Attribute::ObjectGroup(g) => {

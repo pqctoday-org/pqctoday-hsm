@@ -141,25 +141,50 @@ def is_deprecated_algo_test(name: str) -> str | None:
 # left over from an earlier transcript in the same profile run. Our harness
 # restarts ``pqctoday-kmip`` per test for hermetic isolation (see
 # ``run_test`` / ``start_server``), so any cross-test state is intentionally
-# wiped. The OASIS reference suite was authored against a long-lived
-# server where the M-2 transcript's Register/Create persists into M-3.
+# wiped by default. The OASIS reference suite was authored against a
+# long-lived server where the M-2 transcript's Register/Create persists
+# into M-3.
 #
-# These are not implementation gaps — our Locate-by-attribute pipeline is
-# verified by passing the M-2 + M-1 transcripts in the same families. The
-# only reason M-3 fails is the missing precondition state. Surfacing them
-# as ``SKIP_PRECONDITION`` (not ``FAIL``) and removing them from the
-# headline denominator keeps the pass-rate honest without pretending we
-# implemented inter-transcript state seeding.
-_PRECONDITION_TESTS: dict[str, str] = {
-    "TL-M-3-30.xml": (
-        "Locate-by-ApplicationSpecificInformation of object Created in TL-M-2; "
-        "hermetic per-test isolation wipes it"
-    ),
-    "SASED-M-3-30.xml": (
-        "Locate-by-GroupLink of SecretData Registered in SASED-M-2; "
-        "hermetic per-test isolation wipes it"
-    ),
-}
+# RESOLVED (2026-07-07, Honest-Maximum Phase 2.1): TL-M-3 and SASED-M-3 are
+# NOT implementation gaps — the underlying stateful Locate filters
+# (GroupLink, ApplicationSpecificInformation; see `locate.rs`) were already
+# implemented, only untested end-to-end because this harness wiped the
+# precondition state. They're now run as `_CHAINED_TEST_GROUPS` (below):
+# the M-2 + M-3 pair shares one server instance and one `Bindings` object,
+# exactly like a real long-lived server session, instead of getting a fresh
+# server per test. This dict is kept (currently empty) as a documented
+# escape hatch for any *future* corpus addition with the same shape, so a
+# real gap doesn't get silently misclassified as FAIL without an
+# explanation, or silently skipped without one either.
+_PRECONDITION_TESTS: dict[str, str] = {}
+
+# Test files that must run against ONE shared server + ONE shared
+# `Bindings` object, in the given order, instead of each getting its own
+# fresh server. Mirrors how the OASIS reference suite's transcripts were
+# authored (against a single long-lived server across an entire profile
+# run) for the specific pairs that depend on it — e.g. TL-M-3's
+# Locate-by-ApplicationSpecificInformation targets the object TL-M-2
+# created; SASED-M-3's Locate-by-GroupLink targets the SecretData
+# SASED-M-2 registered. Every other test stays hermetic (fresh server).
+#
+# Both group members are still scored independently (PASS/FAIL per test);
+# only the server process and placeholder bindings are shared. Verified
+# safe to share bindings wholesale: the trailing member's placeholder
+# names that overlap the leading member's (`$UNIQUE_IDENTIFIER_0` in both
+# pairs) resolve to the SAME object in both transcripts, so
+# `Bindings.bind()`'s re-bind-must-match-prior-value check never fires.
+_CHAINED_TEST_GROUPS: list[list[str]] = [
+    ["SASED-M-2-30.xml", "SASED-M-3-30.xml"],
+    ["TL-M-2-30.xml", "TL-M-3-30.xml"],
+]
+
+
+def chained_group_for(name: str) -> list[str] | None:
+    """Return the chain `name` belongs to, or None if it runs standalone."""
+    for group in _CHAINED_TEST_GROUPS:
+        if name in group:
+            return group
+    return None
 
 
 def is_precondition_test(name: str) -> str | None:
@@ -694,20 +719,48 @@ def _compare_attribute_reference_list(
         ok, why = compare_responses(e_uid, a_uid, bindings, "GetAttributeList")
         if not ok:
             return False, f"ResponsePayload/{why}"
-    # Bag semantics on AttributeReference values. Each expected ref must
-    # resolve to a tag codepoint that also appears in the actual list.
+
+    # Each AttributeReference has TWO valid wire shapes (KMIP 3.0 §11 "the
+    # enumerable Tag" + our own encoder, `wire.rs::attribute_reference_frame`):
+    #   1. A spec tag-name -> a leaf Enumeration (`.value` = the tag codepoint).
+    #   2. A custom/vendor attribute name (no codepoint) -> a Structure
+    #      carrying an `AttributeName` TextString child (optionally also a
+    #      `VendorIdentification` sibling, which our encoder omits and the
+    #      OASIS corpus includes — tolerated: only AttributeName identifies
+    #      the reference, VendorIdentification is not part of its identity
+    #      for this comparison).
+    # A prior version of this comparator only understood shape 1 — any
+    # shape-2 (Structure) reference had `.value is None` and always failed
+    # to match, misreporting a real custom-vendor-attribute round trip
+    # (KMIP 3.0's own client-set generic `Attribute{VendorIdentification,
+    # AttributeName,AttributeValue}` mechanism) as a server gap.
+    def identity(ref: TtlvNode) -> tuple[str, Any]:
+        if ref.value is not None:
+            # Shape 1: already a resolved Enumeration value (int) or a
+            # symbolic placeholder string handled below by the caller.
+            return ("enum", ref.value)
+        for c in ref.children:
+            if _norm(c.tag_name) == _norm("AttributeName"):
+                return ("name", c.value)
+        return ("unknown", None)
+
     from conformance.harness.oasis_codec import table
-    actual_codes = {a.value for a in a_refs}
+    actual_identities = {identity(a) for a in a_refs}
     for er in e_refs:
         ev = er.value
         if isinstance(ev, str):
+            # Shape 1 with a symbolic tag name (not yet resolved to a
+            # codepoint) — resolve via the tag table, same as before.
             ec = table().tag_name_to_code.get(_norm(ev))
-            ok = ec is not None and ec in actual_codes
+            want = ("enum", ec) if ec is not None else ("unknown", None)
+        elif ev is not None:
+            want = ("enum", ev)
         else:
-            ok = ev in actual_codes
+            want = identity(er)  # Shape 2: Structure{AttributeName}
+        ok = want in actual_identities
         if not ok:
             return False, (
-                f"ResponsePayload/AttributeReference: expected {ev!r} not "
+                f"ResponsePayload/AttributeReference: expected {want!r} not "
                 f"present in actual list (§4.1.2 item 5 — order variable, "
                 f"omissions are non-conformant)"
             )
@@ -980,7 +1033,13 @@ class TestResult:
     ops_used: list[str] = field(default_factory=list)
 
 
-def run_test(srv: Server, xml_path: Path) -> TestResult:
+def run_test(srv: Server, xml_path: Path, bindings: "Bindings | None" = None) -> TestResult:
+    """Run one transcript. `bindings` lets a `_CHAINED_TEST_GROUPS` member
+    reuse the placeholder state a prior group member harvested (e.g. the
+    UID an M-2 Register/Create bound, for an M-3 Locate to reference) —
+    the default (`None`) gives every standalone test its own fresh state,
+    unchanged from before chained groups existed.
+    """
     name = xml_path.name
     # Policy: deprecated mechanisms (DES, 3DES, classical DSA) are
     # out of scope for the softhsmrustv3 backend. See
@@ -1006,7 +1065,8 @@ def run_test(srv: Server, xml_path: Path) -> TestResult:
             ops_used=sorted(ops),
         )
 
-    bindings = Bindings()
+    if bindings is None:
+        bindings = Bindings()
     # Process Request / Response pairs in order.
     if len(transcript) % 2 != 0:
         return TestResult(name=name, status="SKIP_PARSE", detail="odd message count")
@@ -1195,14 +1255,51 @@ def main(argv: list[str]) -> int:
     # carries no state across tests. Without this, e.g. Locate by Name
     # leaks objects from prior runs and breaks placeholder bindings.
     # Cost: ~0.5 s startup × N tests; for the full corpus that's ~50 s.
+    #
+    # EXCEPTION: `_CHAINED_TEST_GROUPS` members share one server + one
+    # `Bindings` across the group (see that constant's docstring) — the
+    # OASIS transcripts in those specific pairs assume a single
+    # long-lived server session, not hermetic per-test isolation.
+    by_name = {p.name: p for p in paths}
     results: list[TestResult] = []
+    consumed: set[str] = set()  # chain members already scored, skip in the main loop
+    port_counter = 0
+
+    def next_port() -> int:
+        nonlocal port_counter
+        port_counter += 1
+        # See the per-test cycling comment above — same rationale.
+        return 10000 + (port_counter % 5000)
+
     for i, path in enumerate(paths, 1):
+        name = path.name
+        if name in consumed:
+            continue
+
+        group = chained_group_for(name)
+        # Only run as a chain if EVERY member is present in this invocation
+        # (e.g. `target_name` filtering to a single file falls back to the
+        # old standalone behavior — legitimately unresolvable without its
+        # precondition, which is the correct debug-mode signal).
+        if group is not None and all(g in by_name for g in group) and name == group[0]:
+            srv = start_server(port=next_port())
+            shared_bindings = Bindings()
+            try:
+                for member_name in group:
+                    r = run_test(srv, by_name[member_name], bindings=shared_bindings)
+                    results.append(r)
+                    consumed.add(member_name)
+                    print(f"  [{i:3d}/{len(paths)}] {r.status:12s}  {r.name}  {r.detail[:60]}  (chained)")
+            finally:
+                srv.stop()
+            continue
+
         # Cycle the listen port per test. Re-binding a single fixed port
         # hundreds of times in quick succession exhausts TIME_WAIT slots on
         # some platforms (macOS), making `start_server` time out mid-run.
         # A rotating port over a wide range avoids the collision; the range
         # is bounded so it stays inside the ephemeral space.
-        srv = start_server(port=10000 + (i % 5000))
+        srv = start_server(port=next_port())
         try:
             r = run_test(srv, path)
         finally:

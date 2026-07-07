@@ -1,16 +1,16 @@
 {
-  "generated_at": 1783293534,
+  "generated_at": 1783464479,
   "summary": {
-    "pass": 92,
-    "fail": 0,
+    "pass": 93,
+    "fail": 1,
     "error": 0,
     "skip_op": 0,
     "skip_parse": 0,
     "skip_deprecated": 5,
-    "skip_precondition": 2,
+    "skip_precondition": 0,
     "skip_policy_variant": 3,
     "total": 102,
-    "candidates": 92
+    "candidates": 94
   },
   "tests": [
     {
@@ -838,9 +838,14 @@
     },
     {
       "name": "SASED-M-3-30.xml",
-      "status": "SKIP_PRECONDITION",
-      "detail": "Locate-by-GroupLink of SecretData Registered in SASED-M-2; hermetic per-test isolation wipes it",
-      "ops_used": []
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "Destroy",
+        "Get",
+        "GetAttributes",
+        "Locate"
+      ]
     },
     {
       "name": "SKFF-M-1-30.xml",
@@ -1028,9 +1033,16 @@
     },
     {
       "name": "TL-M-3-30.xml",
-      "status": "SKIP_PRECONDITION",
-      "detail": "Locate-by-ApplicationSpecificInformation of object Created in TL-M-2; hermetic per-test isolation wipes it",
-      "ops_used": []
+      "status": "FAIL",
+      "detail": "msg #2: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: no actual 'Attribute' matches expected value",
+      "ops_used": [
+        "Destroy",
+        "Get",
+        "GetAttributeList",
+        "GetAttributes",
+        "Locate",
+        "ModifyAttribute"
+      ]
     },
     {
       "name": "AKLC-O-1-30.xml",
