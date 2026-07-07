@@ -881,6 +881,20 @@ fn alg_from_name(name: &str) -> Option<KmipAlgorithm> {
     if name.eq_ignore_ascii_case("X25519") || name.eq_ignore_ascii_case("X448") {
         return Some(Ecdh);
     }
+    // A bare "FrodoKEM-640/976/1344" (no AES/SHAKE suffix) defaults to the
+    // AES variant — mirrors create_key_pair.rs::parse_algorithm's own
+    // convention exactly, so the same ambiguous name a policy's allow/deny
+    // rule references (canonical_name collapses both variants to this bare
+    // form) is also directly runnable here, not just dry-run-able.
+    if name.eq_ignore_ascii_case("FrodoKEM-640") {
+        return Some(FrodoKem640Aes);
+    }
+    if name.eq_ignore_ascii_case("FrodoKEM-976") {
+        return Some(FrodoKem976Aes);
+    }
+    if name.eq_ignore_ascii_case("FrodoKEM-1344") {
+        return Some(FrodoKem1344Aes);
+    }
     const ALL: &[KmipAlgorithm] = &[
         Aes, Rsa, Ecdsa, HmacSha256, HmacSha384, HmacSha512, Ecdh, Ed25519,
         ChaCha20, ChaCha20Poly1305,
