@@ -87,7 +87,10 @@ jobs:
             kmip/target
           key: ${{ runner.os }}-cargo-test-${{ hashFiles('rust/Cargo.lock', 'kmip/Cargo.lock') }}
       - name: Run engine tests
-        run: cd rust && cargo test
+        # RUST_MIN_STACK: mceliece6688128's keygen needs more than the default
+        # test-thread stack in an unoptimized debug build — seen overflowing
+        # on ubuntu-24.04 x86_64 (not reliably reproduced on local aarch64).
+        run: cd rust && RUST_MIN_STACK=134217728 cargo test
       - name: Run KMIP tests
         run: cd kmip && cargo test --quiet
 
