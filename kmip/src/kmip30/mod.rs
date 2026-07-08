@@ -92,7 +92,7 @@ pub use ops::{
     ReKeyKeyPairRequest, ReKeyKeyPairResponse, ReKeyRequest, ReKeyResponse,
 };
 
-pub use message::{AsynchronousIndicator, BatchErrorContinuationOption, Credential};
+pub use message::{AsynchronousIndicator, BatchErrorContinuationOption, Credential, Ticket, TICKET_TYPE_LOGIN};
 pub use message::{
     RequestBatchItem, RequestHeader, RequestMessage, RequestPayload, ResponseBatchItem,
     ResponseHeader, ResponseMessage, ResponsePayload, ResultStatus, KMIP_VERSION_MAJOR,

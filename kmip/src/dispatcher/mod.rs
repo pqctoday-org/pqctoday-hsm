@@ -203,10 +203,35 @@ fn authenticate_request(
     header: &crate::kmip30::RequestHeader,
     transport_identity: Option<crate::server::auth::Identity>,
 ) -> Result<crate::server::auth::AuthContext, ()> {
+    use crate::kmip30::Credential;
     use crate::server::auth::{AuthContext, ConfigVerifier, CredentialVerifier};
     if !deps.config.auth_enabled() {
         // Open-auth — REQUIRED default for the hermetic replay harness.
         return Ok(AuthContext { identity: transport_identity });
+    }
+    // Phase 1.4 (K14, T4) — a Login-issued ticket authenticates a
+    // request exactly like a verified Username/Password credential:
+    // same header slot (§8.1.2 Authentication carries a `Credential`,
+    // and Ticket (0x06) is one of the published Credential Types —
+    // §9.9 Table 517), same all-or-nothing per-request re-check (no
+    // separate "session" concept beyond "is this ticket live"). An
+    // expired or unknown ticket falls through to the credential/mTLS
+    // checks below rather than failing immediately, so a client that
+    // sends a Ticket AND a fresh Username/Password isn't penalised for
+    // the stale ticket.
+    if let Some(identity) = header.authentication.iter().find_map(|c| match c {
+        Credential::Ticket(t) => {
+            let sessions = deps.sessions.lock().unwrap_or_else(|e| e.into_inner());
+            let record = sessions.get(&t.ticket_value)?;
+            if record.is_expired(time::OffsetDateTime::now_utc()) {
+                None
+            } else {
+                Some(record.identity.clone())
+            }
+        }
+        _ => None,
+    }) {
+        return Ok(AuthContext { identity: Some(identity) });
     }
     let verifier = ConfigVerifier::new(&deps.config.auth_users);
     if let Some(identity) = header
@@ -2142,6 +2167,120 @@ rules:
         assert!(
             d.store.get(&new_pub_uid).unwrap().is_none(),
             "Undo must delete the newly-minted replacement public key",
+        );
+    }
+
+    // ── Phase 1.4 (K14) — ticket-based session auth ─────────────────────
+
+    /// The real proof of T4: a Login-issued ticket authenticates a
+    /// LATER, otherwise-credential-free request — through the actual
+    /// `dispatch()` entry point, not just the `login`/`logout` op
+    /// functions in isolation. Query is a harmless op to probe with.
+    #[test]
+    fn login_ticket_authenticates_a_later_request() {
+        use crate::kmip30::{Credential, QueryFunction, QueryRequest, Ticket};
+        use crate::server::auth::{sha256_hex, AuthUser};
+
+        let mut d = deps();
+        d.config.auth_users = vec![AuthUser { username: "alice".into(), password_sha256: sha256_hex("pw") }];
+
+        // A request with no credential at all: rejected under configured auth.
+        let bare_query = || one_off_request(RequestPayload::Query(QueryRequest {
+            functions: vec![QueryFunction::QueryOperations],
+        }));
+        let resp = dispatch(&d, bare_query());
+        assert_eq!(resp.batch_items[0].result_status, ResultStatus::OperationFailed);
+
+        // Login with a real username/password credential in the header.
+        let login_req = RequestMessage {
+            header: crate::kmip30::RequestHeader {
+                authentication: vec![Credential::UsernameAndPassword {
+                    username: "alice".into(),
+                    password: Some("pw".into()),
+                }],
+                ..crate::kmip30::RequestHeader::v3()
+            },
+            batch_items: vec![RequestBatchItem {
+                operation: crate::kmip30::Operation::Login,
+                payload: RequestPayload::Login(crate::kmip30::LoginRequest {
+                    lease_time: None, request_count: None, usage_limits: None,
+                }),
+            }],
+        };
+        let login_resp = dispatch(&d, login_req);
+        assert_eq!(login_resp.batch_items[0].result_status, ResultStatus::Success);
+        let ticket = match &login_resp.batch_items[0].payload {
+            Some(ResponsePayload::Login(r)) => r.ticket.clone(),
+            other => panic!("expected Login response payload, got {other:?}"),
+        };
+
+        // A LATER, otherwise-bare Query — carrying ONLY the ticket, no
+        // username/password — must now authenticate.
+        let ticket_req = RequestMessage {
+            header: crate::kmip30::RequestHeader {
+                authentication: vec![Credential::Ticket(Ticket {
+                    ticket_type: ticket.ticket_type,
+                    ticket_value: ticket.ticket_value.clone(),
+                })],
+                ..crate::kmip30::RequestHeader::v3()
+            },
+            batch_items: vec![RequestBatchItem {
+                operation: crate::kmip30::Operation::Query,
+                payload: RequestPayload::Query(QueryRequest { functions: vec![QueryFunction::QueryOperations] }),
+            }],
+        };
+        let resp = dispatch(&d, ticket_req);
+        assert_eq!(
+            resp.batch_items[0].result_status,
+            ResultStatus::Success,
+            "a live Login ticket must authenticate a later request on its own"
+        );
+
+        // A ticket with tampered bytes must NOT authenticate.
+        let mut bad_ticket_value = ticket.ticket_value.clone();
+        bad_ticket_value[0] ^= 0xFF;
+        let bad_req = RequestMessage {
+            header: crate::kmip30::RequestHeader {
+                authentication: vec![Credential::Ticket(Ticket {
+                    ticket_type: ticket.ticket_type,
+                    ticket_value: bad_ticket_value,
+                })],
+                ..crate::kmip30::RequestHeader::v3()
+            },
+            batch_items: vec![RequestBatchItem {
+                operation: crate::kmip30::Operation::Query,
+                payload: RequestPayload::Query(QueryRequest { functions: vec![] }),
+            }],
+        };
+        assert_eq!(dispatch(&d, bad_req).batch_items[0].result_status, ResultStatus::OperationFailed);
+
+        // Logout invalidates the ticket; it stops working on a THIRD request.
+        let logout_req = RequestMessage {
+            header: crate::kmip30::RequestHeader {
+                authentication: vec![Credential::Ticket(ticket.clone())],
+                ..crate::kmip30::RequestHeader::v3()
+            },
+            batch_items: vec![RequestBatchItem {
+                operation: crate::kmip30::Operation::Logout,
+                payload: RequestPayload::Logout(crate::kmip30::LogoutRequest { ticket: ticket.clone() }),
+            }],
+        };
+        assert_eq!(dispatch(&d, logout_req).batch_items[0].result_status, ResultStatus::Success);
+
+        let ticket_req_again = RequestMessage {
+            header: crate::kmip30::RequestHeader {
+                authentication: vec![Credential::Ticket(ticket)],
+                ..crate::kmip30::RequestHeader::v3()
+            },
+            batch_items: vec![RequestBatchItem {
+                operation: crate::kmip30::Operation::Query,
+                payload: RequestPayload::Query(QueryRequest { functions: vec![] }),
+            }],
+        };
+        assert_eq!(
+            dispatch(&d, ticket_req_again).batch_items[0].result_status,
+            ResultStatus::OperationFailed,
+            "a logged-out ticket must stop authenticating"
         );
     }
 }

@@ -347,6 +347,10 @@ pub(crate) mod tags {
     pub const Username: u32               = 0x42_0099;
     pub const Password: u32               = 0x42_00a1;
     pub const Ticket: u32                 = 0x42_0149;
+    // §7.40 Table 494 Ticket Structure — verified against the spec PDF
+    // (§11.61 Object tag table): Ticket Type 42014A, Ticket Value 42014B.
+    pub const TicketType: u32             = 0x42_014a;
+    pub const TicketValue: u32            = 0x42_014b;
     pub const LogMessage: u32             = 0x42_0141;
     pub const RequestCount: u32           = 0x42_014c;
     pub const UsageLimits: u32            = 0x42_0095;
@@ -656,8 +660,22 @@ fn decode_credential(frame: &TtlvFrame) -> Result<crate::kmip30::Credential, Wir
         tag: tags::CredentialType,
         name: "Credential Type",
     })?;
-    // 0x01 = `Username and Password` per the OASIS enums JSON
-    // (`Credential Type` enum).
+    // 0x01 = `Username and Password`, 0x06 = `Ticket` per the OASIS
+    // enums JSON (`Credential Type` enum).
+    if credential_type == 0x06 {
+        let value_frame = value_frame.ok_or(WireError::Missing {
+            tag: tags::CredentialValue,
+            name: "Credential Value",
+        })?;
+        // §9.9 Table 517 — Credential Value for Ticket is a Structure
+        // wrapping exactly one nested §7.40 `Ticket` structure.
+        let ticket_frame = expect_structure(value_frame, "Credential Value")?
+            .iter()
+            .find(|c| c.tag.0 == tags::Ticket)
+            .ok_or(WireError::Missing { tag: tags::Ticket, name: "Ticket" })?;
+        let (ticket_type, ticket_value) = decode_ticket_structure(ticket_frame)?;
+        return Ok(Credential::Ticket(crate::kmip30::Ticket { ticket_type, ticket_value }));
+    }
     if credential_type != 0x01 {
         return Ok(Credential::Unsupported { credential_type });
     }
@@ -910,8 +928,52 @@ fn encode_credential(c: &crate::kmip30::Credential) -> Option<TtlvFrame> {
                 ]),
             ))
         }
+        Credential::Ticket(t) => Some(TtlvFrame::new(
+            Tag(tags::Credential),
+            Value::Structure(vec![
+                TtlvFrame::new(Tag(tags::CredentialType), Value::Enumeration(0x06)),
+                TtlvFrame::new(
+                    Tag(tags::CredentialValue),
+                    Value::Structure(vec![encode_ticket_frame(t.ticket_type, &t.ticket_value)]),
+                ),
+            ]),
+        )),
         Credential::Unsupported { .. } => None,
     }
+}
+
+/// Encode a §7.40 `Ticket` Structure: `Ticket Type` (Enumeration) +
+/// `Ticket Value` (ByteString). Shared by `Login`'s response, `Logout`'s
+/// request, and the `Ticket` `Credential` type — all three carry the
+/// exact same structure per spec.
+fn encode_ticket_frame(ticket_type: u32, ticket_value: &[u8]) -> TtlvFrame {
+    TtlvFrame::new(
+        Tag(tags::Ticket),
+        Value::Structure(vec![
+            TtlvFrame::new(Tag(tags::TicketType), Value::Enumeration(ticket_type)),
+            TtlvFrame::new(Tag(tags::TicketValue), Value::ByteString(ticket_value.to_vec())),
+        ]),
+    )
+}
+
+/// Decode a §7.40 `Ticket` Structure (mirror of [`encode_ticket_frame`]).
+fn decode_ticket_structure(frame: &TtlvFrame) -> Result<(u32, Vec<u8>), WireError> {
+    let mut ticket_type: Option<u32> = None;
+    let mut ticket_value: Option<Vec<u8>> = None;
+    for c in expect_structure(frame, "Ticket")? {
+        match c.tag.0 {
+            tags::TicketType => ticket_type = Some(expect_enum(c, "Ticket Type")?),
+            tags::TicketValue => {
+                if let Value::ByteString(b) = &c.value {
+                    ticket_value = Some(b.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+    let ticket_type = ticket_type.ok_or(WireError::Missing { tag: tags::TicketType, name: "Ticket Type" })?;
+    let ticket_value = ticket_value.ok_or(WireError::Missing { tag: tags::TicketValue, name: "Ticket Value" })?;
+    Ok((ticket_type, ticket_value))
 }
 
 fn request_batch_item_to_frame(bi: &RequestBatchItem) -> Option<TtlvFrame> {
@@ -1520,8 +1582,10 @@ fn response_payload_to_frame(payload: &ResponsePayload) -> TtlvFrame {
         ResponsePayload::CreateGroup(r)      => encode_uid_only_resp(&r.uid),
         ResponsePayload::CreateUser(r)       => encode_uid_only_resp(&r.uid),
         ResponsePayload::Log(_)              => vec![],
+        // KMIP 3.0 §7.40 Table 494 — Ticket is a Structure (Ticket Type +
+        // Ticket Value), not a bare TextString (fixed pre-existing bug).
         ResponsePayload::Login(r)            => vec![
-            TtlvFrame::new(Tag(tags::Ticket), Value::TextString(r.ticket.clone())),
+            encode_ticket_frame(r.ticket.ticket_type, &r.ticket.ticket_value),
         ],
         ResponsePayload::Logout(_)           => vec![],
         ResponsePayload::RngRetrieve(r)      => vec![
@@ -2934,13 +2998,12 @@ fn decode_login_req(children: &[TtlvFrame]) -> Result<LoginRequest, WireError> {
 }
 
 fn decode_logout_req(children: &[TtlvFrame]) -> Result<LogoutRequest, WireError> {
-    let mut ticket = String::new();
-    for c in children {
-        if c.tag.0 == tags::Ticket {
-            if let Value::TextString(s) = &c.value { ticket = s.clone(); }
-        }
-    }
-    Ok(LogoutRequest { ticket })
+    let frame = children
+        .iter()
+        .find(|c| c.tag.0 == tags::Ticket)
+        .ok_or(WireError::Missing { tag: tags::Ticket, name: "Ticket" })?;
+    let (ticket_type, ticket_value) = decode_ticket_structure(frame)?;
+    Ok(LogoutRequest { ticket: crate::kmip30::Ticket { ticket_type, ticket_value } })
 }
 
 // ── Group E codecs: MAC / MACVerify / Hash ─────────────────────────────────

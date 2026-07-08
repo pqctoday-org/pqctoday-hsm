@@ -180,6 +180,14 @@ pub struct Deps {
     /// persisted in the object store and is reset on restart.
     pub object_defaults:
         Mutex<HashMap<crate::kmip30::ObjectType, Vec<crate::kmip30::Attribute>>>,
+    /// K14 (Phase 1.4) — live `Login`-issued sessions, keyed by the
+    /// ticket's `Ticket Value` bytes. `Logout` removes an entry; a
+    /// `Credential::Ticket` presented in a later request's §8.1.2
+    /// `Authentication` header is looked up here
+    /// (`dispatcher::authenticate_request`). Server-wide (not
+    /// per-connection) — matches this server's other session-scale
+    /// state (`pkcs11_virtual_initialized`).
+    pub sessions: Mutex<HashMap<Vec<u8>, crate::server::auth::SessionRecord>>,
     /// KMIP §6.1.42 PKCS_11 passthrough — tracks whether a client has
     /// issued `C_Initialize` without an intervening `C_Finalize`
     /// (PKCS#11 v3.2 §5.6 library-lifecycle state). Deliberately
@@ -208,6 +216,7 @@ impl Deps {
             streams: Mutex::new(HashMap::new()),
             next_correlation: std::sync::atomic::AtomicU64::new(1),
             object_defaults: Mutex::new(HashMap::new()),
+            sessions: Mutex::new(HashMap::new()),
             pkcs11_virtual_initialized: std::sync::atomic::AtomicBool::new(false),
         }
     }

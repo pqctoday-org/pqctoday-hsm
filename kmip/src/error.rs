@@ -31,6 +31,10 @@ pub enum ResultReason {
     /// (§6.1.27, Table 331) asked for more Usage Limits Units than the
     /// object's remaining `Usage Limits Count` can grant.
     UsageLimitExceeded    = 0x0000_001a,
+    /// `Invalid Ticket` — KMIP 3.0 §11 / §6.1.35 Table 357. Logout's
+    /// ticket doesn't name a live session (unknown, already logged
+    /// out, or expired).
+    InvalidTicket          = 0x0000_0019,
     /// `Attribute Not Found` — KMIP 3.0 §11. The operation requires an
     /// attribute the object does not carry (e.g. Get Usage Allocation
     /// against an object with no Usage Limits attribute — §6.1.27
@@ -201,6 +205,9 @@ impl KmipError {
 
     pub fn permission_denied(msg: impl Into<String>) -> Self {
         Self::failed(ResultReason::PermissionDenied, msg)
+    }
+    pub fn invalid_ticket(msg: impl Into<String>) -> Self {
+        Self::failed(ResultReason::InvalidTicket, msg)
     }
     pub fn not_found(uid: &str) -> Self {
         // KMIP 3.0 §11: `Item Not Found` is the spec's default for a
@@ -399,6 +406,7 @@ mod tests {
         assert_eq!(ResultReason::BadCryptographicParameters.to_wire_value(), 0x0000_0024);
         assert_eq!(ResultReason::InvalidObjectType.to_wire_value(),     0x0000_0030);
         assert_eq!(ResultReason::UsageLimitExceeded.to_wire_value(),    0x0000_001a);
+        assert_eq!(ResultReason::InvalidTicket.to_wire_value(),         0x0000_0019);
         assert_eq!(ResultReason::AttributeNotFound.to_wire_value(),     0x0000_0021);
         // P2.4 additions — `Result Reason` rows in the OASIS enums JSON.
         assert_eq!(ResultReason::WrappingObjectArchived.to_wire_value(),  0x0000_0040);

@@ -797,14 +797,11 @@ fn ping_returns_success() {
 
 /// §6.1.34 / §6.1.35: with auth configured, Login rejects an
 /// unauthenticated request (`AuthenticationNotSuccessful`) but validates
-/// a verified identity and issues a ticket; a private-object op then
-/// succeeds; Logout succeeds.
-///
-/// NOTE: v0.1 has no session-ticket enforcement table (documented in
-/// `ops::session_and_auth`), so a post-Logout op is NOT gated at this
-/// layer — the substantive assertions here are the credential gate
-/// (good vs missing identity) and the ticket issuance, which is what the
-/// op actually enforces. The reused K14 setup is the auth-config path.
+/// a verified identity and issues a REAL ticket (Phase 1.4 — recorded in
+/// `deps.sessions`, not just a display string); a private-object op then
+/// succeeds; Logout genuinely invalidates the session, and a second
+/// Logout with the same ticket fails `Invalid Ticket` rather than
+/// silently succeeding again.
 #[test]
 fn login_validates_credential_issues_ticket_then_logout() {
     use pqctoday_kmip::server::auth::{sha256_hex, AuthUser, Identity};
@@ -819,10 +816,14 @@ fn login_validates_credential_issues_ticket_then_logout() {
     let err = login(&deps, req(), &AuthContext::open(), "lg-bad").unwrap_err();
     assert_eq!(err.result_reason(), ResultReason::AuthenticationNotSuccessful);
 
-    // Verified identity → ticket issued.
+    // Verified identity → a real ticket, bound to "alice" in the session store.
     let ctx = AuthContext { identity: Some(Identity { username: "alice".into() }) };
     let ticket = login(&deps, req(), &ctx, "lg-ok").unwrap().ticket;
-    assert!(ticket.starts_with("urn:pqctoday:ticket:"), "Login issues a ticket on a good credential");
+    {
+        let sessions = deps.sessions.lock().unwrap();
+        let record = sessions.get(&ticket.ticket_value).expect("Login must record a real session");
+        assert_eq!(record.identity.username, "alice");
+    }
 
     // A private-object op under the verified session succeeds: Create an
     // AES key (engine-backed) and read it back.
@@ -833,8 +834,13 @@ fn login_validates_credential_issues_ticket_then_logout() {
     );
     assert_eq!(state_via_get_attributes(&deps, &uid), State::Active);
 
-    // Logout succeeds (no-op ticket invalidation in v0.1).
-    assert!(logout(&deps, LogoutRequest { ticket }, "lg-logout").is_ok());
+    // Logout genuinely invalidates the ticket.
+    logout(&deps, LogoutRequest { ticket: ticket.clone() }, "lg-logout").unwrap();
+    assert!(deps.sessions.lock().unwrap().is_empty(), "Logout must remove the session, not no-op");
+
+    // Reusing the now-invalid ticket fails Invalid Ticket, not a silent success.
+    let err = logout(&deps, LogoutRequest { ticket }, "lg-logout-again").unwrap_err();
+    assert_eq!(err.result_reason(), ResultReason::InvalidTicket);
 
     let _ = softhsmrustv3::native::session::finalize();
 }

@@ -1258,15 +1258,17 @@ pub struct LoginRequest {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct LoginResponse {
-    /// Wire tag `Ticket` (0x420149, TextString).
-    pub ticket: String,
+    /// Wire tag `Ticket` (0x420149) — §7.40 Table 494 Structure
+    /// (`Ticket Type` + `Ticket Value`), NOT a bare TextString (a
+    /// pre-Phase-1.4 wire bug: the spec mandates the nested structure).
+    pub ticket: crate::kmip30::Ticket,
 }
 
 /// `Logout` (KMIP 3.0 §6.1.35 / Table 355) — invalidate a Login
 /// ticket. Empty response.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LogoutRequest {
-    pub ticket: String,
+    pub ticket: crate::kmip30::Ticket,
 }
 
 #[derive(Clone, Debug, PartialEq)]

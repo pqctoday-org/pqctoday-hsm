@@ -84,16 +84,32 @@ pub struct RequestHeader {
     pub authentication: Vec<Credential>,
 }
 
+/// KMIP 3.0 §7.40 Table 494 `Ticket` structure — `Ticket Type`
+/// (Enumeration, e.g. `Login` = 1) + `Ticket Value` (ByteString, opaque
+/// server-issued session token). Shared by `Login`'s response,
+/// `Logout`'s request, and `Credential::Ticket` — all three carry the
+/// exact same wire shape.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Ticket {
+    pub ticket_type: u32,
+    pub ticket_value: Vec<u8>,
+}
+
+/// §11.58 `Ticket Type Enumeration` — `Login` is the only OASIS-assigned
+/// value; `Extensions` (`8XXXXXXX`) is reserved for vendor use.
+pub const TICKET_TYPE_LOGIN: u32 = 0x0000_0001;
+
 /// KMIP 3.0 §9.9 `Credential` — "a structure used for client
 /// identification purposes" carried inside the request header's
 /// `Authentication` structure. Shape per spec Table 509:
 /// `Credential Type` (Enumeration, required) + `Credential Value`
 /// (varies by type, required).
 ///
-/// K14 supports verification of `Username and Password` (0x01) only;
-/// every other published Credential Type (Device 0x02, Attestation
-/// 0x03, One Time Password 0x04, Hashed Password 0x05, Ticket 0x06,
-/// Password 0x07, Certificate 0x08 — per
+/// K14 supports verification of `Username and Password` (0x01) and
+/// `Ticket` (0x06, Phase 1.4 — a Login-issued session ticket presented
+/// on a later request); every other published Credential Type (Device
+/// 0x02, Attestation 0x03, One Time Password 0x04, Hashed Password
+/// 0x05, Password 0x07, Certificate 0x08 — per
 /// `kmip-spec-3.0-tags-enums.json` `Credential Type`) is decoded and
 /// carried as [`Credential::Unsupported`] so the header decode never
 /// fails on a credential we merely can't verify.
@@ -106,6 +122,11 @@ pub enum Credential {
         username: String,
         password: Option<String>,
     },
+    /// Credential Type `Ticket` (0x06). Credential Value per spec
+    /// Table 517: a single `Ticket` structure (§7.40 Table 494:
+    /// `Ticket Type` Enumeration + `Ticket Value` ByteString) — the
+    /// same structure `Login` returns and `Logout` invalidates.
+    Ticket(Ticket),
     /// Any other Credential Type — tolerated on decode, never
     /// verifiable, so under configured auth it fails verification.
     Unsupported { credential_type: u32 },

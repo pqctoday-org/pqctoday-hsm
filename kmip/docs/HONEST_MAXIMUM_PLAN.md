@@ -161,6 +161,42 @@ Effort S/M/L · Risk L/M/H · each task carries its own exit test.
 - *Exit:* Login issues a real ticket; unauth mutating op under configured-auth → `PermissionDenied`; `SASED-M-1/2`, `QS-*` green in open-auth.
 - *Confidence:* shape grounded; session-integration seam to trace at build.
 
+**Outcome (2026-07-08):** T2 and most of T3 were already real going in
+(`persist_simple_record` genuinely stores User/Group/Credential objects;
+Login already checked `AuthContext.identity`, itself correctly verified
+from the §8.1.2 header per §9.9, not an in-payload field — KMIP 3.0's
+Login request has no Credential slot, Table 352 only lists
+LeaseTime/RequestCount/UsageLimits). What was fake: the returned
+"ticket" was a display string nobody ever stored or checked again, and
+Logout was a hardcoded no-op.
+- Found and fixed a **real wire-format bug** while implementing this:
+  `Ticket` (§7.40 Table 494) is a `Structure{TicketType, TicketValue}`,
+  but the encoder emitted a bare `TextString` and the decoder expected
+  one to match — spec-non-conformant on both sides, for both Login's
+  response and Logout's request. Fixed with shared
+  `encode_ticket_frame`/`decode_ticket_structure` helpers.
+- T1: `Deps.sessions: Mutex<HashMap<Vec<u8>, SessionRecord>>` — a real
+  ticket → Identity (+ optional expiry from Login's `Lease Time`) store.
+- Login now generates real random ticket bytes (UUID v4), records the
+  session, returns a spec-correct `Ticket` structure.
+- Logout removes the session for real; an unknown/already-used ticket
+  fails `Invalid Ticket` (0x19, added to `ResultReason` — verified
+  against the spec's §6.1.35 error table) instead of silently
+  succeeding.
+- T4: added `Credential::Ticket` (Credential Type 0x06, §9.9 Table 517)
+  end to end — wire codec, and a new check in
+  `dispatcher::authenticate_request` that looks a presented ticket up
+  in the session store (checking expiry) before falling through to the
+  username/password verifier. A live ticket now authenticates a LATER
+  request on its own, with no credentials resent — proven by a
+  dispatcher-level test that Logins once, then Queries with ONLY the
+  ticket, then confirms a tampered ticket fails and a post-Logout reuse
+  fails. Open-auth mode (the harness default) is unchanged — the new
+  ticket check only engages when auth is configured, same gate as the
+  rest of §8.1.2 enforcement.
+- `cargo test`: 535 lib tests + all integration binaries green. Corpus
+  unchanged 97/0/5 (no OASIS transcript exercises configured auth).
+
 **1.5 Wire HSS/LMS signing** — RFC 8554 / HSS · *(M / Low — revised down from L/High)*.
 **The engine already manages HBS state; the KMIP layer manages none of it.** `ffi.rs::C_Sign` (:3271–3360) already implements HSS: an `update_fn` captures the advanced private state, `crypto::lms::hss_sign` drives it, and the new `CKA_LEAF_INDEX` is atomically read-advance-persisted onto the key object. But `native/sign.rs` (the path the KMIP server uses) **omits** the HSS arm and falls to `CKR_MECHANISM_INVALID`.
 - T1 **extract** the HSS/LMS sign-and-advance core out of `ffi.rs::C_Sign` into **one shared engine helper** (single source of truth for leaf-index persistence — where drift = key reuse).

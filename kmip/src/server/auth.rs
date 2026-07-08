@@ -28,6 +28,7 @@
 //! a new heavy dependency into this slice.
 
 use sha2::{Digest, Sha256};
+use time::OffsetDateTime;
 
 use crate::kmip30::Credential;
 
@@ -36,6 +37,24 @@ use crate::kmip30::Credential;
 pub struct Identity {
     /// KMIP username (configured-auth) or mTLS client-cert subject CN.
     pub username: String,
+}
+
+/// A live `Login`-issued session, keyed by the ticket's `Ticket Value`
+/// bytes in [`crate::ops::Deps::sessions`]. KMIP 3.0 §6.1.34: "allow
+/// future requests to be authenticated using a ticket" — this is the
+/// server-side half of that promise; `Logout` removes the entry,
+/// `expires_at` (from the Login request's `Lease Time`, when supplied)
+/// makes stale tickets stop working on their own.
+#[derive(Clone, Debug)]
+pub struct SessionRecord {
+    pub identity: Identity,
+    pub expires_at: Option<OffsetDateTime>,
+}
+
+impl SessionRecord {
+    pub fn is_expired(&self, now: OffsetDateTime) -> bool {
+        self.expires_at.is_some_and(|exp| now >= exp)
+    }
 }
 
 /// Per-request authentication outcome the dispatcher threads to op
@@ -145,6 +164,12 @@ impl CredentialVerifier for ConfigVerifier<'_> {
                     .map(|u| Identity { username: u.username.clone() })
                     .ok_or(())
             }
+            // A Ticket credential never verifies against the static
+            // config user list — it's checked against the session
+            // store instead (`dispatcher::authenticate_request`'s
+            // separate ticket-lookup path, since this verifier only
+            // has `&[AuthUser]`, not `Deps`).
+            Credential::Ticket(_) => Err(()),
             // Decoded-but-unsupported credential types can never
             // verify (K14 supports Username and Password only).
             Credential::Unsupported { .. } => Err(()),
