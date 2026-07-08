@@ -515,6 +515,74 @@ would drop those → break MSGENC unless the comparator is corrected.
 Query §6.1.47-truthful, all Baseline conditions met **except item 10 (parked)**, HSS/LMS + broad
 async real. *Exit:* report matches measured reality.
 
+**Outcome (2026-07-08):** Both sub-phases done together (6.2 turned
+out to be a direct consequence of 6.1, not separate work).
+
+6.1: `_compare_query_response_payload` in `dispatcher_replay.py` now
+reads a module-level `_CURRENT_TEST_NAME` (set once per test at the
+top of `run_test`; the harness runs strictly sequentially, so this is
+safe without a contextvar) and skips the Operation/ObjectType
+superset check entirely for MSGENC-*, instead of requiring our
+capability set to be a superset of the reference server's — which
+would have meant re-lying about Notify/Put forever, since our
+capability set can never legitimately exceed a server that also does
+server-to-client delivery. Every other field in the Query
+ResponsePayload still compares normally for MSGENC-*, which is what
+actually exercises message-encoding fidelity (its stated purpose).
+
+`ADVERTISED_UNIMPLEMENTED_OPERATIONS` and
+`ADVERTISED_UNIMPLEMENTED_OBJECT_TYPES` are now both **empty consts**
+(`&[]`) — not just smaller. T3 surfaced a genuine pre-existing bug
+along the way: `User`/`Group`/`PasswordCredential`/`DeviceCredential`/
+`OneTimePasswordCredential`/`HashedPasswordCredential` were sitting in
+the *unimplemented* list despite `CreateUser`/`CreateGroup`/
+`CreateCredential` (`ops::session_and_auth`) genuinely persisting each
+as its own `ObjectRecord` with the matching `object_type` — a stale
+doc-comment label from before those handlers existed, never corrected
+when they landed. Moved to `IMPLEMENTED_OBJECT_TYPES` (13 entries now,
+was 7). `CertificateRequest` is the one type that's genuinely
+unimplemented (`Certify`/`Re-certify` consume a CSR's bytes inline but
+never persist a `CertificateRequest` managed object) — dropped
+entirely per T3's "implemented or dropped" rule, not advertised.
+`Notify`/`Put` (Phase 5, parked — §6.2.2/§6.2.3's transport is
+spec-undefined) are the only two ops genuinely unimplemented, also
+dropped from advertisement. Verified against the actual corpus fixture
+content, not assumption: grepped every transcript for Notify/Put/
+CertificateRequest/credential-type references — only the 3 MSGENC-*
+files touch them (confirming the exemption is exactly right-sized) and
+QS-M-1/QS-M-2 (the other Query-exercising transcripts) don't reference
+any of them at all, so they were never at risk.
+
+`cargo test`: 551 lib tests + all integration binaries green (2 stale
+hardcoded counts fixed: Operations 64→62, ObjectTypes 14→13, both
+in `ops::query`'s own tests). Corpus unchanged 97/0/5, MSGENC-*
+verified still genuinely PASS under the new honest, much-smaller
+capability set — the whole point.
+
+6.2: `docs/CONFORMANCE_REPORT.md` rewritten end to end against the
+KMIP 3.0 profiles spec's actual §5.1.2 13-item Baseline Server list
+(extracted from `kmip-profiles-v3.0.pdf` directly, not approximated) —
+found and corrected a genuine inaccuracy in the *previous* revision of
+this report along the way: it claimed the async ops
+(`Poll`/`Cancel`/`Process`/`Query Asynchronous Requests`) were somehow
+entangled with item 10's server-to-client gap. They aren't — §5.1.2
+item 9 (32 named client-to-server ops) and item 10 (5 named
+server-to-client ops) don't name the async ops at all; they're
+covered separately as message-layer plumbing under item 11.a
+(`Asynchronous Indicator`). Phase 4 proved them fully independent of
+Phase 5 (server-to-client remains parked; async ships regardless).
+New sections cite HSS/LMS (§4.3), the async subsystem (§4.4), and
+Split Key (§4.5) as real, each with its own proof citation (corpus
+doesn't exercise any of the three, so each cites the specific
+non-corpus test suite that does). `docs/REPLAY_REPORT_ANALYSIS.md`'s
+"current standing" banner (already correctly marked historical/
+superseded) updated from the stale 92/0/10 to 97/0/5; the other
+historical planning docs (`COMPLIANCE_FIX_PLAN.md`,
+`COVERAGE_GAP_PLAN.md`, `IMPLEMENTATION_PLAN.md`,
+`REMEDIATION_PLAN.md`) already correctly defer to
+`CONFORMANCE_REPORT.md` for current numbers rather than embedding
+their own, so none of them needed editing.
+
 ### Phase 7 — Verification & CI
 - **7.1** Update `assert_replay_report.py` → **97 PASS / 5 SKIP_DEPRECATED / 0 fail / 0 SKIP_OP** + explicit declined set; keep `check_report_fresh.py`. *(S)*
 - **7.2** New coverage: HSS/LMS sign + **state-advance/no-reuse** (critical), async round-trip + Cancel/Process/QueryAsync, Split Key create/join per method (threshold), real auth ticket, PKCS#11 real proxy, 2 stateful-Locate filters, 4 RNG-seed behaviors. *(M)*

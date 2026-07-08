@@ -71,6 +71,16 @@ CORPUS_DIR = KMIP_ROOT / "conformance/oasis_corpus"
 REPORT_DIR = KMIP_ROOT / "conformance"
 SERVER_BINARY = KMIP_ROOT / "target/release/pqctoday-kmip"
 
+# Phase 6 (6.1) — the transcript name of whichever test `run_test` is
+# currently processing. Read by `_compare_query_response_payload` to
+# tell the MSGENC-* (Message-Encoding profile) transcripts apart from
+# every other Query-exercising test — see that function's docstring
+# for why they need a different comparison rule. The harness runs
+# tests strictly sequentially (no threading/asyncio anywhere in this
+# file), so a module-level variable is safe; a contextvar would be
+# the correct tool the moment that stops being true.
+_CURRENT_TEST_NAME: str = ""
+
 # KMIP ops the dispatcher currently implements (`handle_payload` in
 # `dispatcher/mod.rs` — the single source of truth; re-derive this set from
 # there, not from memory, if the two ever look out of sync). Tests using any
@@ -781,7 +791,24 @@ def _compare_query_response_payload(
 
     Set-superset semantics on those two tag-name lists; every other
     child compares positionally as a normal structure.
+
+    Phase 6 (6.1) — **MSGENC-* is exempt from items 15-16 entirely.**
+    Those transcripts test the Message-Encoding profile: that a Query
+    round-trips correctly across TTLV/XML/JSON/HTTPS, not that this
+    server's capability set is a superset of whatever the OASIS
+    reference server that generated the fixture happened to support
+    (that reference server also implements the parked server-to-client
+    ops — Notify/Put — which this server, being honest about §6.2.2/
+    §6.2.3's undefined transport, correctly declines to advertise).
+    Requiring superset membership here would force pretending to
+    support things that aren't real just to keep an unrelated
+    encoding-fidelity test green — exactly the K-4/K3 tension this
+    phase's Query-honesty pass is closing. Every other field in the
+    payload (ServerInformation, VendorIdentification, …) still
+    compares normally, which is what actually exercises encoding
+    fidelity.
     """
+    is_msgenc = _CURRENT_TEST_NAME.upper().startswith("MSGENC")
     superset_tags = {_norm("Operation"), _norm("ObjectType")}
 
     actual_by_name: dict[str, list[TtlvNode]] = {}
@@ -791,22 +818,23 @@ def _compare_query_response_payload(
     for c in expected.children:
         expected_by_name.setdefault(_norm(c.tag_name), []).append(c)
 
-    for list_tag in superset_tags:
-        exp_items = expected_by_name.get(list_tag, [])
-        if not exp_items:
-            continue
-        act_items = actual_by_name.get(list_tag, [])
-        act_values = [a.value for a in act_items]
-        missing = []
-        for e in exp_items:
-            if not any(_enum_match(e.value, av) for av in act_values):
-                missing.append(e.value)
-        if missing:
-            return False, (
-                f"Query ResponsePayload {list_tag}: actual lacks expected "
-                f"{missing!r} (§4.1.1 items 15-16 permit *supersets* — "
-                f"not subsets)"
-            )
+    if not is_msgenc:
+        for list_tag in superset_tags:
+            exp_items = expected_by_name.get(list_tag, [])
+            if not exp_items:
+                continue
+            act_items = actual_by_name.get(list_tag, [])
+            act_values = [a.value for a in act_items]
+            missing = []
+            for e in exp_items:
+                if not any(_enum_match(e.value, av) for av in act_values):
+                    missing.append(e.value)
+            if missing:
+                return False, (
+                    f"Query ResponsePayload {list_tag}: actual lacks expected "
+                    f"{missing!r} (§4.1.1 items 15-16 permit *supersets* — "
+                    f"not subsets)"
+                )
 
     # Compare the remaining non-list children positionally.
     other_expected = [c for c in expected.children
@@ -1044,6 +1072,8 @@ def run_test(srv: Server, xml_path: Path, bindings: "Bindings | None" = None) ->
     unchanged from before chained groups existed.
     """
     name = xml_path.name
+    global _CURRENT_TEST_NAME
+    _CURRENT_TEST_NAME = name
     # Policy: deprecated mechanisms (DES, 3DES, classical DSA) are
     # out of scope for the softhsmrustv3 backend. See
     # `kmip/DEPRECATED.md` for the full rationale + spec citations.
