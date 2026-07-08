@@ -180,6 +180,13 @@ pub struct Deps {
     /// persisted in the object store and is reset on restart.
     pub object_defaults:
         Mutex<HashMap<crate::kmip30::ObjectType, Vec<crate::kmip30::Attribute>>>,
+    /// Phase 3.2 — client-set §6.1.57 Constraints, replacing the
+    /// engine-bounds default `Get Constraints` (§6.1.26) otherwise
+    /// reports. `None` ⇒ no client override yet; `get_constraints`
+    /// falls back to the static engine-derived table. `Some(vec![])`
+    /// (an explicit empty Set Constraints) is a real override meaning
+    /// "no constraints" — distinct from `None`.
+    pub constraints: Mutex<Option<Vec<crate::kmip30::Constraint>>>,
     /// K14 (Phase 1.4) — live `Login`-issued sessions, keyed by the
     /// ticket's `Ticket Value` bytes. `Logout` removes an entry; a
     /// `Credential::Ticket` presented in a later request's §8.1.2
@@ -216,6 +223,7 @@ impl Deps {
             streams: Mutex::new(HashMap::new()),
             next_correlation: std::sync::atomic::AtomicU64::new(1),
             object_defaults: Mutex::new(HashMap::new()),
+            constraints: Mutex::new(None),
             sessions: Mutex::new(HashMap::new()),
             pkcs11_virtual_initialized: std::sync::atomic::AtomicBool::new(false),
         }

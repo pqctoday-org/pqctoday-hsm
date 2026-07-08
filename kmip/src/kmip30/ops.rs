@@ -1815,6 +1815,20 @@ pub struct Constraint {
     pub attributes: Vec<Attribute>,
 }
 
+/// `Set Constraints` (KMIP 3.0 §6.1.57 / Table 427) — "set the
+/// constraints that will be applied to Managed Objects during
+/// operations." Replaces the stored set entirely (mirrors Set
+/// Defaults' replace semantics, §6.1.58) — Get Constraints (§6.1.26)
+/// reads it back.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SetConstraintsRequest {
+    pub constraints: Vec<Constraint>,
+}
+
+/// §6.1.57 / Table 428 — empty response payload.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SetConstraintsResponse;
+
 /// `Set Defaults` (KMIP 3.0 §6.1.58 / Table 428) — "set the default
 /// attributes that will be applied to Managed Objects during factory
 /// operations if the client does not supply values".

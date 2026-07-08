@@ -84,6 +84,7 @@ pub use ops::{
     Constraint, EndpointRole, ObjectDefaults,
     GetConstraintsRequest, GetConstraintsResponse,
     GetUsageAllocationRequest, GetUsageAllocationResponse,
+    SetConstraintsRequest, SetConstraintsResponse,
     SetDefaultsRequest, SetDefaultsResponse,
     SetEndpointRoleRequest, SetEndpointRoleResponse,
     // K20 — Derive Key (§6.1.18 / §7.13 / §11.15).

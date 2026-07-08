@@ -32,7 +32,7 @@ use crate::kmip30::{
 };
 use crate::ops::{
     activate::activate,
-    allocation_and_config::{get_constraints, get_usage_allocation, set_defaults, set_endpoint_role},
+    allocation_and_config::{get_constraints, get_usage_allocation, set_constraints, set_defaults, set_endpoint_role},
     attribute_mutate::{add_attribute, adjust_attribute, delete_attribute, modify_attribute, set_attribute},
     create::create, create_key_pair::create_key_pair, decrypt::decrypt,
     derive_key::derive_key,
@@ -359,7 +359,7 @@ pub const HANDLED_OPERATIONS: &[crate::kmip30::Operation] = {
         Op::Log, Op::Login, Op::Logout,
         Op::RNGRetrieve, Op::RNGSeed, Op::Pkcs11,
         // K19 — Baseline client-to-server ops (§6.1.26/27/58/59).
-        Op::GetUsageAllocation, Op::GetConstraints,
+        Op::GetUsageAllocation, Op::GetConstraints, Op::SetConstraints,
         Op::SetDefaults, Op::SetEndpointRole,
         // K20 — §6.1.18 Derive Key.
         Op::DeriveKey,
@@ -690,6 +690,9 @@ fn handle_payload(
         }
         RequestPayload::GetConstraints(r) => {
             ResponsePayload::GetConstraints(get_constraints(deps, r, correlation_id)?)
+        }
+        RequestPayload::SetConstraints(r) => {
+            ResponsePayload::SetConstraints(set_constraints(deps, r, correlation_id)?)
         }
         RequestPayload::SetDefaults(r) => {
             ResponsePayload::SetDefaults(set_defaults(deps, r, correlation_id)?)

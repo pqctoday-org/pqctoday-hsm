@@ -1086,6 +1086,7 @@ fn coverage_map() -> std::collections::HashMap<pqctoday_kmip::kmip30::Operation,
         (Op::ReKeyKeyPair, "e2e:op_coverage(rekey_key_pair_mints_both_halves_with_links_and_retires_originals)"),
         (Op::GetUsageAllocation, "e2e:op_coverage(get_usage_allocation_decrements_then_rejects_over_budget)"),
         (Op::GetConstraints, "e2e:op_coverage(get_constraints_returns_structure_with_expected_bound)"),
+        (Op::SetConstraints, "unit:ops::allocation_and_config"),
         (Op::SetDefaults, "e2e:op_coverage(set_defaults_inherited_by_create_unless_client_overrides)"),
         (Op::SetEndpointRole, "e2e:op_coverage(set_endpoint_role_server_ok_client_unsupported)"),
         (Op::DiscoverVersions, "e2e:op_coverage(discover_versions_intersection_semantics)"),
@@ -1158,5 +1159,5 @@ fn coverage_map_covers_every_handled_operation() {
         stale.is_empty(),
         "coverage_map references ops that are not in HANDLED_OPERATIONS: {stale:?}"
     );
-    assert_eq!(handled.len(), 55, "HANDLED_OPERATIONS count changed — review coverage");
+    assert_eq!(handled.len(), 56, "HANDLED_OPERATIONS count changed — review coverage");
 }

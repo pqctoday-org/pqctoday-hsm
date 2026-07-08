@@ -164,7 +164,6 @@ pub(crate) const ADVERTISED_UNIMPLEMENTED_OPERATIONS: &[Operation] = &[
     Operation::Notify,
     Operation::Put,
     Operation::CreateSplitKey,
-    Operation::SetConstraints,
     Operation::QueryAsynchronousRequests,
     Operation::Process,
     // K3 additions — also enumerated by the MSGENC-* expected Query

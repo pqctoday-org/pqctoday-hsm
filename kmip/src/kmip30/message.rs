@@ -348,6 +348,7 @@ pub enum RequestPayload {
     // K19 — Baseline client-to-server ops (§6.1.26/27/58/59).
     GetUsageAllocation(super::ops::GetUsageAllocationRequest),
     GetConstraints(super::ops::GetConstraintsRequest),
+    SetConstraints(super::ops::SetConstraintsRequest),
     SetDefaults(super::ops::SetDefaultsRequest),
     SetEndpointRole(super::ops::SetEndpointRoleRequest),
     /// K20 — §6.1.18 Derive Key.
@@ -436,6 +437,7 @@ pub enum ResponsePayload {
     // K19 — Baseline client-to-server ops (§6.1.26/27/58/59).
     GetUsageAllocation(super::ops::GetUsageAllocationResponse),
     GetConstraints(super::ops::GetConstraintsResponse),
+    SetConstraints(super::ops::SetConstraintsResponse),
     SetDefaults(super::ops::SetDefaultsResponse),
     /// K20 — §6.1.18 Derive Key.
     DeriveKey(super::ops::DeriveKeyResponse),
@@ -499,6 +501,7 @@ impl RequestPayload {
             Self::Pkcs11(_)           => Operation::Pkcs11,
             Self::GetUsageAllocation(_) => Operation::GetUsageAllocation,
             Self::GetConstraints(_)   => Operation::GetConstraints,
+            Self::SetConstraints(_)   => Operation::SetConstraints,
             Self::SetDefaults(_)      => Operation::SetDefaults,
             Self::SetEndpointRole(_)  => Operation::SetEndpointRole,
             Self::DeriveKey(_)        => Operation::DeriveKey,

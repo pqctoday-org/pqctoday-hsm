@@ -1498,6 +1498,7 @@ fn decode_request_payload(op: Operation, frame: &TtlvFrame) -> Result<RequestPay
             RequestPayload::GetUsageAllocation(decode_get_usage_allocation_req(children)?)
         }
         Operation::GetConstraints   => RequestPayload::GetConstraints(GetConstraintsRequest),
+        Operation::SetConstraints   => RequestPayload::SetConstraints(decode_set_constraints_req(children)?),
         Operation::SetDefaults      => RequestPayload::SetDefaults(decode_set_defaults_req(children)?),
         Operation::SetEndpointRole  => {
             RequestPayload::SetEndpointRole(decode_set_endpoint_role_req(children)?)
@@ -1525,7 +1526,6 @@ fn decode_request_payload(op: Operation, frame: &TtlvFrame) -> Result<RequestPay
         | Operation::Notify
         | Operation::Put
         | Operation::CreateSplitKey
-        | Operation::SetConstraints
         | Operation::QueryAsynchronousRequests
         | Operation::Process
         | Operation::Cancel
@@ -1606,6 +1606,7 @@ fn response_payload_to_frame(payload: &ResponsePayload) -> TtlvFrame {
         // K19 — Baseline client-to-server ops (§6.1.26/27/58/59).
         ResponsePayload::GetUsageAllocation(r) => encode_uid_only_resp(&r.uid),
         ResponsePayload::GetConstraints(r)   => encode_get_constraints_resp(r),
+        ResponsePayload::SetConstraints(_)   => vec![],
         // §6.1.58 Table 429 — Set Defaults response payload is empty.
         ResponsePayload::SetDefaults(_)      => vec![],
         ResponsePayload::SetEndpointRole(r)  => vec![TtlvFrame::new(
@@ -3344,6 +3345,46 @@ fn encode_get_constraints_resp(r: &GetConstraintsResponse) -> Vec<TtlvFrame> {
         })
         .collect();
     vec![TtlvFrame::new(Tag(tags::Constraints), Value::Structure(constraint_frames))]
+}
+
+/// `Set Constraints` request per §6.1.57 Table 427: one `Constraints`
+/// Structure (§7.7 Table 458) of repeated `Constraint` Structures
+/// (§7.6 Table 457) — mirror of [`encode_get_constraints_resp`]'s
+/// output shape, since Set/Get Constraints carry the identical
+/// `Constraints` structure on opposite sides of the wire.
+fn decode_set_constraints_req(children: &[TtlvFrame]) -> Result<SetConstraintsRequest, WireError> {
+    let block = children
+        .iter()
+        .find(|c| c.tag.0 == tags::Constraints)
+        .ok_or(WireError::Missing { tag: tags::Constraints, name: "Constraints" })?;
+    let mut constraints = Vec::new();
+    for c in expect_structure(block, "Constraints")? {
+        if c.tag.0 != tags::Constraint {
+            continue;
+        }
+        let mut object_types = Vec::new();
+        let mut attributes = Vec::new();
+        for f in expect_structure(c, "Constraint")? {
+            match f.tag.0 {
+                tags::ObjectTypes => {
+                    for ot in expect_structure(f, "Object Types")? {
+                        if ot.tag.0 == tags::ObjectType {
+                            let v = expect_enum(ot, "Object Type")?;
+                            if let Some(t) = ObjectType::from_wire_value(v) {
+                                object_types.push(t);
+                            }
+                        }
+                    }
+                }
+                tags::Attributes => {
+                    attributes = decode_attributes_block(f)?;
+                }
+                _ => {}
+            }
+        }
+        constraints.push(Constraint { object_types, attributes });
+    }
+    Ok(SetConstraintsRequest { constraints })
 }
 
 /// K20 — `Derive Key` request per §6.1.18 Table 302: `Object Type`

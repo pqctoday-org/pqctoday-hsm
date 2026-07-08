@@ -306,6 +306,17 @@ Corpus unchanged 97/0/5.
 - T2 implement Set Constraints writing that store; Get reads it back.
 - *Exit:* Set→Get round-trips.
 
+**Outcome (2026-07-08):** `SetConstraintsRequest`/`Response` added (new
+wire codec — Set Constraints previously had no request-side decode at
+all, only Get's response-side encode existed), `Deps.constraints:
+Mutex<Option<Vec<Constraint>>>` backs it. `None` (never Set) falls back
+to the real engine-bounds `server_constraints()` default; `Some(v)`
+(including an explicit empty Set — a genuine "no constraints" override,
+distinct from never calling Set) replaces it entirely, and a later Set
+replaces rather than merges. Moved from `ADVERTISED_UNIMPLEMENTED_OPERATIONS`
+to `HANDLED_OPERATIONS`. 3 new unit tests. `cargo test`: 544 lib tests +
+all integration binaries green. Corpus unchanged 97/0/5.
+
 **3.3 Create / Join Split Key** — §6.1.12 / §6.1.31; attrs §4.64–4.66; enums §11.54/§11.55 · *(M–L / M)*.
 Types exist (`attrs.rs:64` SplitKey=0x05; `ops.rs:115/134`) → route to Unsupported. **Engine has no secret-sharing primitive — implement from spec.**
 - T1 implement the **four §11.54 methods**: XOR (0x01), Polynomial Sharing GF(2¹⁶) (0x02), Polynomial Sharing Prime Field (0x03), Polynomial Sharing GF(2⁸) (0x04); with the §11.55 polynomials (Polynomial-283, Polynomial-285) for the GF variants (Shamir threshold sharing).
