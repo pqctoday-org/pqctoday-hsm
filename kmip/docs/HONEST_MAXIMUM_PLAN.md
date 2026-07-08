@@ -115,6 +115,34 @@ Effort S/M/L · Risk L/M/H · each task carries its own exit test.
 - T3 unsupported function → real `CKR_FUNCTION_NOT_SUPPORTED`.
 - *Exit:* `PKCS11-M-1` passes via a real side-effect; a bogus function returns a real error.
 - *Confidence:* shape grounded; exact function set to confirm at build.
+- **Done (2026-07-07):** real dispatch for `C_Initialize`/`C_Finalize`/`C_GetInfo`, the
+  only functions PKCS11-M-1 exercises. Function ordinals grounded in KMIP 3.0 §11.39
+  ("1-based offset count... in `CK_FUNCTION_LIST_3_0`") verified against this repo's own
+  `pkcs11f.h`, not assumed. `C_Initialize`/`C_Finalize` track a new KMIP-server-side
+  virtual Cryptoki-lifecycle flag (`Deps.pkcs11_virtual_initialized`) rather than the
+  real engine's global init state (which must stay up for every other KMIP client).
+  `C_GetInfo` calls the real engine for genuine `CK_INFO` bytes. 6 new unit tests;
+  corpus unchanged 97/0/5.
+- **Deferred — full PKCS#11 transparent-mode scope (separate future item, explicitly
+  requested to pick up after the current plan finishes):** per Profiles v3.0 §5.18.1,
+  the `PKCS_11` operation's encoding rules are function-agnostic and cover the *entire*
+  PKCS#11 v3.x parameter-marshalling problem (session ops, object/attribute ops,
+  crypto ops — e.g. `C_OpenSession`, `C_Login`, `C_GetAttributeValue`, `C_Encrypt` are
+  all in-scope per the profile's own worked examples, §5.18.3). Server conformance
+  itself only requires supporting the operation + the one mandatory test (`PKCS11-M-1`,
+  §5.18.6.1) — there is no enumerated required-function checklist, so this is a real
+  but *optional* scope expansion, not a conformance gap. Explicit spec exclusions to
+  respect when scoping it: `C_GetFunctionList`, `C_GetInterface`, `C_WaitForSlotEvent`,
+  and callback pointers (e.g. `C_OpenSession`'s `Notify` param) are never passed
+  through (§5.18.1) — a local PKCS#11 stub answers those itself. Scoping this properly
+  needs: (a) which functions to expose (a deliberate product/security decision — every
+  exposed function is server-side attack surface), (b) the byte-level parameter
+  marshalling per function per §5.18.1 (structures inlined, variable-length
+  two-call-pattern, attribute templates with value/count indicator flags, mechanism
+  parameter encoding), (c) a decision on per-KMIP-client PKCS#11 session-state
+  isolation (today's virtual-init flag is server-global; real `C_OpenSession`/
+  `C_CloseSession` would need session-handle bookkeeping scoped correctly for a
+  multi-tenant KMIP server).
 
 **1.2 `Check` full enforcement** — §6.1.7 · *(S–M / L)*. `lifecycle_and_protocol.rs:78-111` = mask only.
 - T1 wire Usage-Limits-Count to tracked `usage_limits_remaining` (`allocation_and_config.rs:113`).
