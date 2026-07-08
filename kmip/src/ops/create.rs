@@ -211,6 +211,10 @@ pub fn create(deps: &Deps, mut req: CreateRequest, correlation_id: &str) -> Resu
         fresh: Some(true),
         application_specific_information: x.application_specific_information.clone(),
         protection_storage_mask: Some(0x01),
+        // KMIP §4.34 — server-set max lease cap. Phase 3.1: a real
+        // per-object value (was a get_attributes.rs read-time fallback
+        // with nothing behind it).
+        lease_time: Some(3600),
     ..ObjectRecord::default()
 })?;
 

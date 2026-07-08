@@ -397,6 +397,7 @@ pub fn create_key_pair(
             // KMIP §11 Fresh = True for server-generated objects.
             fresh: Some(true),
             protection_storage_mask: Some(0x01),
+            lease_time: Some(3600),
     ..ObjectRecord::default()
 })?;
     deps.store.put(ObjectRecord {
@@ -452,6 +453,7 @@ pub fn create_key_pair(
             // KMIP §11 Fresh = True for server-generated objects.
             fresh: Some(true),
             protection_storage_mask: Some(0x01),
+            lease_time: Some(3600),
     ..ObjectRecord::default()
 })?;
 

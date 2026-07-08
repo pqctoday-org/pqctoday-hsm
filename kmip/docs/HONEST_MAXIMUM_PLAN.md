@@ -150,6 +150,23 @@ Effort S/M/L · Risk L/M/H · each task carries its own exit test.
 - T3 return §6.1.7 result (UID if allowed, else failing attribute + usable/failed date).
 - *Exit:* over-budget usage-count or expired lease fails with correct reason; `BL-M-2` green.
 
+**Outcome (2026-07-08):** Done together with 3.1 (real dependency, not
+just planned sequencing). Usage Limits Count now compares against
+`usage_limits_remaining` (objects with no tracked budget — e.g.
+asymmetric keys — pass, nothing to deny against). Lease Time compares
+against the object's real §4.34 cap (`ObjectRecord.lease_time`, now set
+at Create/CreateKeyPair/Register/DeriveKey instead of a get_attributes.rs
+read-time fallback with nothing behind it) — per spec Table 269 this is
+a hypothetical "would this be granted" check, not "is my current lease
+still valid," so it does not consult `lease_expiry`. T3's richer
+denial-response shape (echoing the specific rejected attribute) was
+scoped out — this server's `KmipError` failure model doesn't carry a
+response payload on error, matching how the pre-existing Cryptographic
+Usage Mask check already works (fails with the reason code, no echoed
+value); extending that would be a separate, larger response-model
+change, not a Check-specific gap. 6 new unit tests; `BL-M-2` unaffected
+(mask-only in the OASIS corpus, still green).
+
 **1.3 Truthful Protection Storage Mask** — §4.50 · *(S / L)*. `get_attributes.rs:190` hardcodes `0x01`.
 - T1 record the mask actually used at create/register on `ObjectRecord`; emit that. *Exit:* value tracks the request.
 
@@ -269,6 +286,20 @@ KMIP-wire support rather than engine-only:
 - T2 implement Obtain Lease (issue/renew Lease Time + Last Change Date); stop faking `LeaseTime(3600)` (`get_attributes.rs:186`) — derive from the record.
 - T3 expose expiry to Check (1.2-T2).
 - *Exit:* real, renewable lease; expiry observable.
+
+**Outcome (2026-07-08):** `ObjectRecord.lease_expiry: Option<OffsetDateTime>`
+added; `ObtainLease` wired end to end (new `ObtainLeaseRequest`/
+`ObtainLeaseResponse` types, wire codec, dispatcher entry, moved from
+`ADVERTISED_UNIMPLEMENTED_OPERATIONS` to `HANDLED_OPERATIONS`) — grants
+the object's real Lease Time cap, sets `lease_expiry = now + cap`,
+stamps `last_change_date`, returns both per §6.1.40 Table 371.
+Renewable: a second Obtain Lease call advances the expiry further
+(tested). Every object-creation site (Create/CreateKeyPair/Register/
+DeriveKey) now sets a real `lease_time: Some(3600)` instead of relying
+on `get_attributes.rs`'s read-time fallback. 9 new unit tests
+(grant/renew/unknown-uid + Check's two new sub-checks, done together —
+see 1.2). `cargo test`: 541 lib tests + all integration binaries green.
+Corpus unchanged 97/0/5.
 
 **3.2 Set Constraints** — §6.1.57 (pairs Get §6.1.26) · *(S–M / L)*.
 - T1 back `server_constraints()` (`allocation_and_config.rs:152`) with a mutable store.

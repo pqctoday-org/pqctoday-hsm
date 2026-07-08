@@ -1090,6 +1090,7 @@ fn request_payload_to_frame(p: &RequestPayload) -> Option<TtlvFrame> {
         RequestPayload::Activate(r) => vec![uid_frame(&r.uid)],
         RequestPayload::Destroy(r) => vec![uid_frame(&r.uid)],
         RequestPayload::Archive(r) => vec![uid_frame(&r.uid)],
+        RequestPayload::ObtainLease(r) => vec![uid_frame(&r.uid)],
         RequestPayload::Recover(r) => vec![uid_frame(&r.uid)],
         RequestPayload::Obliterate(r) => vec![uid_frame(&r.uid)],
         RequestPayload::Revoke(r) => vec![
@@ -1474,6 +1475,7 @@ fn decode_request_payload(op: Operation, frame: &TtlvFrame) -> Result<RequestPay
         Operation::Export           => RequestPayload::Export(decode_export_req(children)?),
         Operation::Deactivate       => RequestPayload::Deactivate(decode_deactivate_req(children)?),
         Operation::Check            => RequestPayload::Check(decode_check_req(children)?),
+        Operation::ObtainLease      => RequestPayload::ObtainLease(ObtainLeaseRequest { uid: required_uid(children)? }),
         Operation::Archive          => RequestPayload::Archive(ArchiveRequest { uid: required_uid(children)? }),
         Operation::Recover          => RequestPayload::Recover(RecoverRequest { uid: required_uid(children)? }),
         Operation::Obliterate       => RequestPayload::Obliterate(ObliterateRequest { uid: required_uid(children)? }),
@@ -1519,8 +1521,7 @@ fn decode_request_payload(op: Operation, frame: &TtlvFrame) -> Result<RequestPay
         // the `UnknownEnum` → InvalidMessage treatment.
         // K21 moved ReKey / ReKeyKeyPair out of this arm into real
         // §6.1.51 / §6.1.52 decode routes above.
-        Operation::ObtainLease
-        | Operation::Poll
+        Operation::Poll
         | Operation::Notify
         | Operation::Put
         | Operation::CreateSplitKey
@@ -1570,6 +1571,13 @@ fn response_payload_to_frame(payload: &ResponsePayload) -> TtlvFrame {
         ResponsePayload::Export(r)           => encode_export_resp(r),
         ResponsePayload::Deactivate(r)       => encode_uid_only_resp(&r.uid),
         ResponsePayload::Check(r)            => encode_uid_only_resp(&r.uid),
+        // §6.1.40 Table 371 — UniqueIdentifier + LeaseTime (Interval) +
+        // LastChangeDate (DateTime), all REQUIRED.
+        ResponsePayload::ObtainLease(r)      => vec![
+            uid_frame(&r.uid),
+            TtlvFrame::new(Tag(tags::LeaseTime), Value::Interval(r.lease_time)),
+            TtlvFrame::new(Tag(tags::LastChangeDate), Value::DateTime(r.last_change_date)),
+        ],
         ResponsePayload::Archive(r)          => encode_uid_only_resp(&r.uid),
         ResponsePayload::Recover(r)          => encode_uid_only_resp(&r.uid),
         ResponsePayload::Obliterate(_)       => vec![],

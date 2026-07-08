@@ -327,6 +327,7 @@ pub enum RequestPayload {
     Export(super::ops::ExportRequest),
     Deactivate(super::ops::DeactivateRequest),
     Check(super::ops::CheckRequest),
+    ObtainLease(super::ops::ObtainLeaseRequest),
     Archive(super::ops::ArchiveRequest),
     Recover(super::ops::RecoverRequest),
     Obliterate(super::ops::ObliterateRequest),
@@ -414,6 +415,7 @@ pub enum ResponsePayload {
     Export(super::ops::ExportResponse),
     Deactivate(super::ops::DeactivateResponse),
     Check(super::ops::CheckResponse),
+    ObtainLease(super::ops::ObtainLeaseResponse),
     Archive(super::ops::ArchiveResponse),
     Recover(super::ops::RecoverResponse),
     Obliterate(super::ops::ObliterateResponse),
@@ -477,6 +479,7 @@ impl RequestPayload {
             Self::Export(_)           => Operation::Export,
             Self::Deactivate(_)       => Operation::Deactivate,
             Self::Check(_)            => Operation::Check,
+            Self::ObtainLease(_)      => Operation::ObtainLease,
             Self::Archive(_)          => Operation::Archive,
             Self::Recover(_)          => Operation::Recover,
             Self::Obliterate(_)       => Operation::Obliterate,
@@ -531,6 +534,9 @@ impl RequestPayload {
             Self::Revoke(r)           => vec![r.uid.as_str()],
             Self::Destroy(r)          => vec![r.uid.as_str()],
             Self::Deactivate(r)       => vec![r.uid.as_str()],
+            // Obtain Lease mutates the record (lease_expiry + Last Change
+            // Date), so a later batch-item failure must be able to Undo it.
+            Self::ObtainLease(r)      => vec![r.uid.as_str()],
             Self::Archive(r)          => vec![r.uid.as_str()],
             Self::Recover(r)          => vec![r.uid.as_str()],
             Self::Obliterate(r)       => vec![r.uid.as_str()],

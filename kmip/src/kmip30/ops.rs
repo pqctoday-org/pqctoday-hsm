@@ -1548,8 +1548,10 @@ impl DeactivationReason {
 }
 
 /// `Check` (KMIP 3.0 §6.1.7 / Table 270) — validate policy permits the
-/// client's intended use. Spec response: UID if allowed, attribute
-/// reflection if denied (v0.1 always allows; we always return UID).
+/// client's intended use: Cryptographic Usage Mask must be a subset of
+/// the object's mask, Usage Limits Count must fit within the object's
+/// remaining budget, and Lease Time must not exceed the object's Lease
+/// Time cap (Phase 3.1 — real, not a v0.1 always-allow stub).
 #[derive(Clone, Debug, PartialEq)]
 pub struct CheckRequest {
     pub uid: String,
@@ -1564,6 +1566,25 @@ pub struct CheckRequest {
 #[derive(Clone, Debug, PartialEq)]
 pub struct CheckResponse {
     pub uid: String,
+}
+
+/// `Obtain Lease` (KMIP 3.0 §6.1.40 / Table 370-371) — grant/renew a
+/// lease for `uid`, up to the object's `Lease Time` attribute cap
+/// (§4.34 — server-set, client read-only). Response echoes the granted
+/// interval + the object's current `Last Change Date` (so the client
+/// can tell if its cached attributes are stale).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ObtainLeaseRequest {
+    pub uid: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ObtainLeaseResponse {
+    pub uid: String,
+    /// Wire tag `Lease Time` (0x420049, Interval, seconds).
+    pub lease_time: u32,
+    /// Wire tag `Last Change Date` (0x420048, DateTime, Unix seconds).
+    pub last_change_date: i64,
 }
 
 /// `Archive` (KMIP 3.0 §6.1.4 / Table 260) — client indicates the

@@ -498,6 +498,7 @@ pub fn register(
         usage_limits_unit: x.usage_limits_unit,
         application_specific_information: x.application_specific_information.clone(),
         protection_storage_mask: Some(0x01),
+        lease_time: Some(3600),
         sensitive,
         always_sensitive: sensitive,
         extractable,

@@ -1124,6 +1124,7 @@ fn coverage_map() -> std::collections::HashMap<pqctoday_kmip::kmip30::Operation,
         (Op::Locate, "unit:ops::locate"),
         (Op::Interop, "unit:ops::interop"),
         (Op::Check, "unit:ops::lifecycle_and_protocol"),
+        (Op::ObtainLease, "unit:ops::lifecycle_and_protocol"),
         (Op::Obliterate, "unit:ops::lifecycle_and_protocol"),
         (Op::Hash, "unit:ops::mac_and_hash"),
         (Op::CreateCredential, "unit:ops::session_and_auth"),
@@ -1157,5 +1158,5 @@ fn coverage_map_covers_every_handled_operation() {
         stale.is_empty(),
         "coverage_map references ops that are not in HANDLED_OPERATIONS: {stale:?}"
     );
-    assert_eq!(handled.len(), 54, "HANDLED_OPERATIONS count changed — review coverage");
+    assert_eq!(handled.len(), 55, "HANDLED_OPERATIONS count changed — review coverage");
 }

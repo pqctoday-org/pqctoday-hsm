@@ -65,6 +65,7 @@ pub use ops::{
     ExportRequest, ExportResponse,
     ImportRequest, ImportResponse,
     ObliterateRequest, ObliterateResponse,
+    ObtainLeaseRequest, ObtainLeaseResponse,
     PingRequest, PingResponse,
     RecoverRequest, RecoverResponse,
     RegisterRequest, RegisterResponse,

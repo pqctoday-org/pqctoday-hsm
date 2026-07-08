@@ -230,8 +230,17 @@ pub struct ObjectRecord {
     /// KMIP §6.1.14 `Deactivation Reason Code` — set on `Deactivate`.
     pub deactivation_reason_code: Option<u32>,
 
-    /// KMIP §4 `Lease Time` — Interval seconds.
+    /// KMIP §4.34 `Lease Time` — the MAXIMUM lease (seconds) this server
+    /// will ever grant for this object; server-set at creation,
+    /// read-only for clients. NOT the remaining time on a currently-held
+    /// lease — see `lease_expiry` for that.
     pub lease_time: Option<u32>,
+    /// Phase 3.1 — when a lease is currently held (via Obtain Lease),
+    /// the moment it expires. `None` before the first Obtain Lease, or
+    /// once a granted lease's `lease_time` has fully elapsed (this
+    /// server does not distinguish "never leased" from "lease expired
+    /// long ago" — both mean "no live lease" to Check/enforcement).
+    pub lease_expiry: Option<OffsetDateTime>,
     /// KMIP §4 `Protection Period` — Interval seconds.
     pub protection_period: Option<u32>,
     pub rotate_interval: Option<u32>,
@@ -366,6 +375,7 @@ impl From<BaselineDefaults> for ObjectRecord {
             revocation_reason_code: None,
             deactivation_reason_code: None,
             lease_time: None,
+            lease_expiry: None,
             protection_period: None,
             rotate_interval: None,
             rotate_offset: None,

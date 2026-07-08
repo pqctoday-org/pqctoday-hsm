@@ -39,7 +39,7 @@ use crate::ops::{
     destroy::destroy, encrypt::encrypt, encapsulate::encapsulate, decapsulate::decapsulate, get::get,
     get_attribute_list::get_attribute_list, get_attributes::get_attributes,
     interop::interop,
-    lifecycle_and_protocol::{archive, check, deactivate, discover_versions, obliterate, ping, recover},
+    lifecycle_and_protocol::{archive, check, deactivate, discover_versions, obliterate, obtain_lease, ping, recover},
     locate::locate,
     mac_and_hash::{hash, mac, mac_verify},
     query::query,
@@ -352,7 +352,7 @@ pub const HANDLED_OPERATIONS: &[crate::kmip30::Operation] = {
         // KMIP 3.0 WD19 — first-class ML-KEM Encapsulate / Decapsulate.
         Op::Encapsulate, Op::Decapsulate,
         Op::Interop, Op::Register, Op::Import, Op::Export,
-        Op::Deactivate, Op::Check, Op::Archive, Op::Recover,
+        Op::Deactivate, Op::Check, Op::ObtainLease, Op::Archive, Op::Recover,
         Op::Obliterate, Op::DiscoverVersions, Op::Ping,
         Op::MAC, Op::MACVerify, Op::Hash,
         Op::CreateCredential, Op::CreateGroup, Op::CreateUser,
@@ -647,6 +647,7 @@ fn handle_payload(
         RequestPayload::Export(r) => ResponsePayload::Export(export(deps, r, correlation_id)?),
         RequestPayload::Deactivate(r) => ResponsePayload::Deactivate(deactivate(deps, r, correlation_id)?),
         RequestPayload::Check(r) => ResponsePayload::Check(check(deps, r, correlation_id)?),
+        RequestPayload::ObtainLease(r) => ResponsePayload::ObtainLease(obtain_lease(deps, r, correlation_id)?),
         RequestPayload::Archive(r) => ResponsePayload::Archive(archive(deps, r, correlation_id)?),
         RequestPayload::Recover(r) => ResponsePayload::Recover(recover(deps, r, correlation_id)?),
         RequestPayload::Obliterate(r) => ResponsePayload::Obliterate(obliterate(deps, r, correlation_id)?),
@@ -850,10 +851,9 @@ mod tests {
     #[test]
     fn k3_unsupported_op_fails_item_with_operation_not_supported() {
         let d = deps();
-        // K21 promoted ReKey to a real handler; ObtainLease keeps this
-        // matrix at four advertised-unimplemented ops.
+        // K21 promoted ReKey to a real handler; Phase 3.1 promoted
+        // ObtainLease — this matrix keeps shrinking as real handlers land.
         for op in [
-            crate::kmip30::Operation::ObtainLease,
             crate::kmip30::Operation::Certify,
             crate::kmip30::Operation::Cancel,
             crate::kmip30::Operation::DelegatedLogin,

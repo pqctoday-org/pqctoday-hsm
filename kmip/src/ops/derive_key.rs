@@ -494,6 +494,7 @@ pub fn derive_key(
         usage_limits_unit: x.usage_limits_unit,
         application_specific_information: x.application_specific_information.clone(),
         protection_storage_mask: Some(0x01),
+        lease_time: Some(3600),
         last_change_date: Some(now),
         original_creation_date: Some(now),
         cryptographic_parameters: x.cryptographic_parameters.clone(),

@@ -152,8 +152,11 @@ pub fn query(deps: &Deps, req: QueryRequest, correlation_id: &str) -> Result<Que
 /// K21 moved ReKey + ReKeyKeyPair into `HANDLED_OPERATIONS` (§6.1.51
 /// / §6.1.52 handlers) — both were already advertised here, so the
 /// net advertised set is unchanged.
+///
+/// Phase 3.1 moved ObtainLease into `HANDLED_OPERATIONS` (§6.1.40
+/// handler, real lease grant/renew) — it was already advertised here,
+/// so the net advertised set is unchanged.
 pub(crate) const ADVERTISED_UNIMPLEMENTED_OPERATIONS: &[Operation] = &[
-    Operation::ObtainLease,
     // P2.2 moved Validate into `HANDLED_OPERATIONS` (§6.1.62 handler) —
     // it was already advertised here, so the net advertised set is
     // unchanged (the corpus gate is *expected ⊆ actual*).
