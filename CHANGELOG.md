@@ -8,6 +8,81 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.11.0] — 2026-07-08
+
+Closes the KMIP `HONEST_MAXIMUM_PLAN.md` initiative: every advertised KMIP 3.0
+capability the server claims is now genuinely implemented, replacing the last
+faked/placeholder operations with real ones. The two headline additions are a
+real asynchronous-processing subsystem and real Shamir-style key splitting;
+alongside them, the server's own `Query` response was audited down to
+"nothing advertised that isn't real," and the OASIS conformance report and CI
+gates were rewritten to match measured reality rather than an older, partly
+stale baseline.
+
+### Added
+
+- **Create Split Key / Join Split Key (§6.1.12 / §6.1.31).** All four KMIP
+  §11.54 secret-sharing methods — XOR, Polynomial Sharing GF(2⁸), Polynomial
+  Sharing GF(2¹⁶), and Polynomial Sharing Prime Field — implemented from
+  spec in the Rust engine as a new vendor mechanism
+  (`CKM_PQCTODAY_SPLIT_KEY`), reachable only through opaque PKCS#11 object
+  handles: the KMIP server never sees a raw secret byte, split or whole.
+  Splitting a key into N shares and joining any threshold-sized subset back
+  together reconstructs the exact original key; fewer than the threshold
+  fails cleanly instead of silently returning garbage.
+- **Real asynchronous processing (§6.1.43 Poll, §6.1.5 Cancel, §6.1.44
+  Process, §6.1.46 Query Asynchronous Requests).** A client requesting
+  `Mandatory` asynchronous handling on an eligible operation now gets a real
+  job — tracked by a server-generated correlation value, executed on a
+  genuine background thread in the production server — instead of the
+  request being rejected outright. `Poll` returns the real result once the
+  job completes; `Cancel` and `Process` correctly handle the underlying race
+  between a client request and the background executor. `Query` now
+  honestly reports `Asynchronous Capability = true`.
+
+### Changed
+
+- **`Query` now advertises only what's real.** Every operation and object
+  type the server ever listed as "supported" is genuinely implemented —
+  the internal "advertised but not implemented" lists are empty. Along the
+  way, a real mislabeling bug surfaced and was fixed: `User`, `Group`, and
+  the four credential object types were marked "unimplemented" in `Query`
+  despite `Create User` / `Create Group` / `Create Credential` genuinely
+  creating them; `Certificate Request` (genuinely never implemented) is no
+  longer advertised at all.
+- **OASIS conformance report rewritten** against the KMIP profiles spec's
+  actual Baseline Server checklist. Every condition is met except the
+  server-to-client operations (server-initiated `Notify` / `Put`), which
+  remain a deliberate, documented scope boundary — the spec itself leaves
+  that transport unspecified. Corrects an inaccuracy in the previous
+  report, which had speculated the async operations depended on that same
+  gap; they don't, and this release proves it by shipping them independently.
+
+### Fixed
+
+- **A genuine transcription bug in the KMIP 3.0 draft itself**, found while
+  implementing Polynomial Sharing GF(2¹⁶): the spec's own printed
+  multiplication formula misplaces a constant-term factor. Re-derived from
+  first principles and cross-checked against the spec's own inverse
+  formula before fixing the implementation (not the spec).
+
+### Internal
+
+- CI conformance gates (`assert_replay_report.py`) tightened from a
+  "pass at least N" floor with a partly-stale skip breakdown to an exact,
+  fully-current baseline (97 pass / 5 declined-by-policy / 0 everything
+  else) — a new skip category silently reappearing now fails CI immediately
+  instead of quietly shrinking the pass count.
+- New end-to-end test coverage closing three real gaps found by auditing
+  existing tests against what they actually exercised rather than what
+  their names implied: Split Key now has a test per secret-sharing method
+  (previously only one of four was tested end-to-end); a session ticket is
+  now proven to authenticate a real subsequent request through the actual
+  server dispatch path (previously only proven to exist in the session
+  store); and the PKCS#11 passthrough's `C_GetInfo` is now proven against a
+  real engine session (previously only tested against the no-engine
+  fallback path).
+
 ## [0.10.0] — 2026-07-05
 
 Label-only crypto agility: the KMIP policy engine can now drive a complete
