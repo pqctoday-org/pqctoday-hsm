@@ -2011,3 +2011,123 @@ fn locate_drops_orphans_when_engine_handle_is_gone() {
 
     let _ = session::finalize();
 }
+
+/// Phase 1.5 — HSS/LMS (RFC 8554) end-to-end through the real KMIP op
+/// handlers: Register (import, since this server has no KMIP-driven HSS
+/// keygen) → Sign → SignatureVerify, twice, proving each Sign consumes a
+/// distinct leaf (real leaf-index advance-and-persist through the
+/// engine, driven by `native::hbs` via `native::sign`) rather than
+/// reusing one, plus a tampered-signature → Invalid check. This is the
+/// KMIP-wire-protocol proof that the algorithm-enum + Register-import +
+/// Sign-dispatch wiring for HSS actually composes end to end, not just
+/// each piece in isolation (already covered at the engine level by
+/// `rust/src/native/sign.rs`'s and `parity.rs`'s dedicated HSS tests).
+#[test]
+fn hss_register_sign_verify_against_real_engine() {
+    use pqctoday_kmip::kmip30::{ActivateRequest, KeyBlock, KeyFormatType, RegisterRequest};
+    use pqctoday_kmip::ops::register_import_export::register;
+
+    let _guard = engine_test_lock();
+    let deps = build_deps_with_real_engine();
+
+    let (pub_bytes, priv_bytes) = softhsmrustv3::crypto::lms::hss_keygen(
+        1,
+        &[softhsmrustv3::constants::CKP_LMS_SHA256_M32_H5],
+        &[softhsmrustv3::constants::CKP_LMOTS_SHA256_N32_W4],
+    )
+    .expect("hss_keygen must succeed");
+
+    let register_hss = |material: Vec<u8>, object_type: ObjectType, usage: UsageMask, cid: &str| {
+        register(
+            &deps,
+            RegisterRequest {
+                object_type,
+                attributes: vec![
+                    Attribute::CryptographicAlgorithm(KmipAlgorithm::Hss),
+                    Attribute::CryptographicUsageMask(usage),
+                ],
+                managed_object: Some(KeyBlock {
+                    key_format_type: KeyFormatType::Raw,
+                    cryptographic_algorithm: KmipAlgorithm::Hss,
+                    cryptographic_length: 0,
+                    key_value: material,
+                    key_wrapping_data: None,
+                }),
+                protection_storage_masks: None,
+                certificate_payload: None,
+            },
+            cid,
+        )
+        .unwrap()
+        .uid
+    };
+
+    let priv_uid = register_hss(priv_bytes, ObjectType::PrivateKey, UsageMask::SIGN, "hss-e2e-priv");
+    let pub_uid = register_hss(pub_bytes, ObjectType::PublicKey, UsageMask::VERIFY, "hss-e2e-pub");
+
+    activate(&deps, ActivateRequest { uid: priv_uid.clone() }, "hss-e2e-activate-priv").unwrap();
+    activate(&deps, ActivateRequest { uid: pub_uid.clone() }, "hss-e2e-activate-pub").unwrap();
+
+    // ── First sign ───────────────────────────────────────────────────────
+    let sig1 = sign(
+        &deps,
+        SignRequest { uid: priv_uid.clone(), data: b"message one".to_vec(), cryptographic_parameters: None },
+        "hss-e2e-sign-1",
+    )
+    .unwrap();
+    let verify1 = signature_verify(
+        &deps,
+        SignatureVerifyRequest {
+            uid: pub_uid.clone(),
+            data: b"message one".to_vec(),
+            signature: sig1.signature.clone(),
+            cryptographic_parameters: None,
+        },
+        "hss-e2e-verify-1",
+    )
+    .unwrap();
+    assert_eq!(verify1.validity, SignatureValidity::Valid);
+
+    // ── Second sign — MUST consume a distinct leaf ──────────────────────
+    let sig2 = sign(
+        &deps,
+        SignRequest { uid: priv_uid.clone(), data: b"message two".to_vec(), cryptographic_parameters: None },
+        "hss-e2e-sign-2",
+    )
+    .unwrap();
+    assert_ne!(
+        sig1.signature, sig2.signature,
+        "distinct leaves must produce distinct signatures — a repeat would mean leaf reuse"
+    );
+    let verify2 = signature_verify(
+        &deps,
+        SignatureVerifyRequest {
+            uid: pub_uid.clone(),
+            data: b"message two".to_vec(),
+            signature: sig2.signature,
+            cryptographic_parameters: None,
+        },
+        "hss-e2e-verify-2",
+    )
+    .unwrap();
+    assert_eq!(verify2.validity, SignatureValidity::Valid);
+
+    // ── Tampered signature → Invalid, not a protocol error ──────────────
+    let mut tampered = sig1.signature.clone();
+    let mid = tampered.len() / 2;
+    tampered[mid] ^= 0xFF;
+    let verify_bad = signature_verify(
+        &deps,
+        SignatureVerifyRequest {
+            uid: pub_uid.clone(),
+            data: b"message one".to_vec(),
+            signature: tampered,
+            cryptographic_parameters: None,
+        },
+        "hss-e2e-verify-bad",
+    )
+    .unwrap();
+    assert_eq!(verify_bad.validity, SignatureValidity::Invalid);
+
+    let _ = softhsmrustv3::native::session::finalize();
+}

@@ -56,8 +56,8 @@ pub mod recommended_curve {
 // `0x8000_0000 | n`.
 
 pub use softhsmrustv3::constants::{
-    CKM_ML_DSA, CKM_ML_DSA_KEY_PAIR_GEN, CKM_ML_KEM, CKM_ML_KEM_KEY_PAIR_GEN,
-    CKM_SLH_DSA, CKM_SLH_DSA_KEY_PAIR_GEN,
+    CKM_HSS, CKM_HSS_KEY_PAIR_GEN, CKM_ML_DSA, CKM_ML_DSA_KEY_PAIR_GEN, CKM_ML_KEM,
+    CKM_ML_KEM_KEY_PAIR_GEN, CKM_SLH_DSA, CKM_SLH_DSA_KEY_PAIR_GEN,
 };
 
 // ── Standard PKCS#11 v3.2 mech codepoints used by classical algos ──────────
@@ -199,6 +199,21 @@ pub enum KmipAlgorithm {
     // is simply not (yet) an OASIS-assigned standard value, pending a future
     // official assignment for this algorithm.
     SecP384r1MlKem1024, // 0x8000005e (spec-convention vendor extension, §11.12)
+
+    // ── HSS/LMS (RFC 8554) ─────────────────────────────────────────────────
+    // KMIP 3.0's Cryptographic Algorithm Enumeration (§11.12 Table 545) has
+    // NO entry for HSS/LMS — verified directly against the spec text (both
+    // the base CSD01 and the WD19 PQC draft): only `XMSS` (0x32) is listed,
+    // a genuine gap in the spec, not something missed here. Assigned a
+    // codepoint in the same `8XXXXXXX` Extensions range as
+    // `SecP384r1MlKem1024` above, following the identical spec-sanctioned
+    // vendor-extension convention (§11.12). Represents HSS generically —
+    // per RFC 8554 §6, a single-level HSS key IS an LMS key, so this one
+    // variant covers both; the specific LMS/LM-OTS parameter combination is
+    // carried as an engine attribute (`CKA_LMS_PARAM_SET`), the same pattern
+    // `Ecdsa` already uses for its curve ("covers ECDSA over any curve;
+    // curve = attribute").
+    Hss, // 0x8000005f (spec-convention vendor extension, §11.12)
 }
 
 impl KmipAlgorithm {
@@ -239,11 +254,14 @@ impl KmipAlgorithm {
             X25519MlKem768    => 0x0000005c,
             SecP256r1MlKem768 => 0x0000005d,
             SecP384r1MlKem1024 => 0x8000005e,
+            Hss => 0x8000005f,
         }
     }
 
     /// Reverse of [`Self::to_wire_value`]. Returns `None` for values outside
-    /// the FIPS-certified set this v0.1 supports.
+    /// the algorithm set this v0.1 supports (mostly FIPS-certified
+    /// primitives, plus a couple of NIST-recognized or vendor-extension
+    /// entries — SecP384r1MlKem1024, Hss — that aren't FIPS numbers).
     pub const fn from_wire_value(v: u32) -> Option<Self> {
         use KmipAlgorithm::*;
         Some(match v {
@@ -278,6 +296,7 @@ impl KmipAlgorithm {
             0x0000005c => X25519MlKem768,
             0x0000005d => SecP256r1MlKem768,
             0x8000005e => SecP384r1MlKem1024,
+            0x8000005f => Hss,
             _ => return None,
         })
     }
@@ -417,6 +436,10 @@ impl KmipAlgorithm {
             (Ed25519, KeyGen) => Some(CKM_EC_EDWARDS_KEY_PAIR_GEN),
             (Ed25519, SignVerify) => Some(CKM_EDDSA),
 
+            // ── HSS/LMS (RFC 8554) ────────────────────────────────────────
+            (Hss, KeyGen) => Some(CKM_HSS_KEY_PAIR_GEN),
+            (Hss, SignVerify) => Some(CKM_HSS),
+
             // Any other (algorithm, op) pair is undefined.
             _ => None,
         }
@@ -458,6 +481,7 @@ impl KmipAlgorithm {
             X25519MlKem768    => "X25519MLKEM768",
             SecP256r1MlKem768 => "SecP256r1MLKEM768",
             SecP384r1MlKem1024 => "SecP384r1MLKEM1024",
+            Hss => "HSS",
         }
     }
 }

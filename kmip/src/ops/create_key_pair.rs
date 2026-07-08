@@ -629,6 +629,7 @@ fn canonical_name(a: KmipAlgorithm) -> String {
         X25519MlKem768 => "X25519MLKEM768",
         SecP256r1MlKem768 => "SecP256r1MLKEM768",
         SecP384r1MlKem1024 => "SecP384r1MLKEM1024",
+        Hss => "HSS",
     }
     .into()
 }

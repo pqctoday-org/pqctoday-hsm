@@ -274,6 +274,7 @@ pub fn canonical_name(a: KmipAlgorithm) -> String {
         X25519MlKem768 => "X25519MLKEM768",
         SecP256r1MlKem768 => "SecP256r1MLKEM768",
         SecP384r1MlKem1024 => "SecP384r1MLKEM1024",
+        Hss => "HSS",
     }
     .into()
 }
@@ -726,6 +727,10 @@ pub fn native_sign_mech_with_params(
         // P1 (2026-07-05): pure EdDSA signs the message directly — no
         // caller-selectable hash parameter, unlike RSA/ECDSA above.
         Ed25519 => c::CKM_EDDSA,
+        // HSS/LMS (RFC 8554) — no caller-selectable hash parameter either;
+        // the hash family is fixed by the key's own LMS parameter set
+        // (CKA_LMS_PARAM_SET), not by CryptographicParameters.
+        Hss => c::CKM_HSS,
         other => {
             return Err(KmipError::failed(
                 crate::error::ResultReason::OperationNotSupported,

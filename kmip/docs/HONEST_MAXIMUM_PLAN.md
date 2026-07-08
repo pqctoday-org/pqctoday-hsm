@@ -169,6 +169,35 @@ Effort S/M/L · Risk L/M/H · each task carries its own exit test.
 - T4 **verify (not build):** confirm HBS keys are backed by a **durable** token store in the deployment (leaf-index write must survive a crash) — an engine object-store property; note in the deployment doc.
 - *Exit:* KMIP Sign on an HSS key → signature `hss_verify` accepts; leaf advances+persists via the shared helper; second sign consumes a new leaf (unit test: distinct indices + persisted counter); exhaustion → clean error; FFI and native paths byte-identical.
 
+**Outcome (2026-07-07) — done, scope expanded mid-flight to full KMIP-wire support:**
+T1–T3 as planned, PLUS: KMIP 3.0's `Cryptographic Algorithm` enum (§11.12
+Table 545) turned out to have **no HSS entry at all** (verified directly
+against the spec text, both CSD01 and the WD19 PQC draft — only `XMSS` is
+listed, a genuine spec gap). Explicitly re-scoped with the user to full
+KMIP-wire support rather than engine-only:
+- rust engine: new `native::hbs` module (the single shared prepare/commit
+  leaf-advance-and-persist core), `ffi::C_Sign`'s HSS branch refactored to
+  call it (XMSS/XMSSMT untouched), `native::sign`/`verify` gained real
+  `CKM_HSS` arms, `native::keygen` gained `register_hss_private_key` /
+  `register_hss_public_key` (Register-import only — v0.1 fixes one LMS/
+  LM-OTS parameter combination, `CKP_LMS_SHA256_M32_H5` /
+  `CKP_LMOTS_SHA256_N32_W4`, the engine's own unparametrised default).
+  8 new tests incl. a real 32-signature exhaustion test (not mocked) and
+  an ffi-vs-native leaf-advance parity test. `cargo test --lib`: 251/251.
+- KMIP layer: `KmipAlgorithm::Hss` added at `0x8000005f`, the same
+  spec-sanctioned `8XXXXXXX` vendor-extension convention already used for
+  `SecP384r1MlKem1024`. `native_parameter_set` deliberately has NO `Hss`
+  arm (HSS keygen isn't supported, only import, so `CreateKeyPair` on Hss
+  correctly stays `OperationNotSupported`); Register gets its own
+  dedicated HSS arm instead of the generic PQC-family one.
+  `native_sign_mech_with_params` resolves `Hss → CKM_HSS`; `Sign`'s
+  existing generic dispatch needed no changes beyond that. New KMIP-level
+  e2e test: Register → Sign → SignatureVerify twice (proving two signs
+  consume distinct leaves through the full KMIP wire path, not just at
+  the engine level) + a tampered-signature check.
+- Corpus unaffected (97/0/5 — no OASIS test exercises HSS). Full kmip
+  `cargo test`: 530+ lib tests / all integration binaries green.
+
 ### Phase 2 — Corpus closure → 97/102
 
 **2.1 Stateful Locate** — `SASED-M-3`, `TL-M-3` · *(S / L, harness)*. Filters already implemented (`locate.rs:205-216`).

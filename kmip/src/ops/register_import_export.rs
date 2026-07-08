@@ -369,6 +369,36 @@ pub fn register(
                 import.map_err(|rv| fail_err(deps, correlation_id, "Register",
                     super::helpers::ck_rv_to_kmip_error(rv, "Register:pqc-import")))?;
             }
+            // HSS/LMS (RFC 8554) — separate from the generic PQC-family
+            // block above because `native_parameter_set` deliberately has
+            // no `Hss` arm: this server supports HSS Register-import but
+            // NOT KMIP-driven keygen (no `native::generate_hss_keypair`
+            // exists), so `CreateKeyPair` on Hss correctly stays
+            // unsupported while Register still works. The engine-side
+            // LMS/LM-OTS parameter combination is fixed for v0.1 (see
+            // `register_hss_private_key`'s doc comment) — no CKP_* to
+            // cross-check here, unlike the generic PQC block above.
+            (ObjectType::PrivateKey | ObjectType::PublicKey, crate::kmip30::KmipAlgorithm::Hss) => {
+                if fmt != KeyFormatType::Raw as u32 {
+                    return Err(fail_err(deps, correlation_id, "Register",
+                        KmipError::key_format_type_not_supported(format!(
+                            "HSS Register: engine import supports KeyFormatType \
+                             Raw (0x01) only, got 0x{fmt:02x}",
+                        ))));
+                }
+                let label = "kmip-register-hss";
+                let import = if req.object_type == ObjectType::PublicKey {
+                    softhsmrustv3::native::register_hss_public_key(
+                        session, material, &cka_id_bytes, label,
+                    )
+                } else {
+                    softhsmrustv3::native::register_hss_private_key(
+                        session, material, &cka_id_bytes, label,
+                    )
+                };
+                import.map_err(|rv| fail_err(deps, correlation_id, "Register",
+                    super::helpers::ck_rv_to_kmip_error(rv, "Register:hss-import")))?;
+            }
             _ => {}
         }
     }
