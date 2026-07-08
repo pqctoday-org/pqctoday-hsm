@@ -236,6 +236,7 @@ fn response_too_large(
             result_reason: Some(ResultReason::ResponseTooLarge as u32),
             result_message: Some(format!("TOO_LARGE: {actual} bytes > limit {limit}")),
             payload: None,
+            asynchronous_correlation_value: None,
         }],
     }
 }
@@ -264,6 +265,7 @@ fn wire_error_response(err: &WireError) -> crate::kmip30::ResponseMessage {
             result_reason: Some(reason as u32),
             result_message: Some(format!("KMIP wire decode failed: {err}")),
             payload: None,
+            asynchronous_correlation_value: None,
         }],
     }
 }

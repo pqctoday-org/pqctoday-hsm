@@ -352,6 +352,11 @@ async fn main() -> anyhow::Result<()> {
     let deps = Arc::new(
         Deps::new(engine, store, sink, config).with_engine_session(engine_session),
     );
+    // Phase 4 — enables genuine background-thread execution of
+    // asynchronous jobs (§8.1.2 Mandatory processing). Without this,
+    // the async subsystem still works correctly, just falls back to
+    // running each job inline before the enqueuing response returns.
+    deps.install_self_handle();
 
     // ── TLS config ──────────────────────────────────────────────────────
     let tls_cfg = match (cli.tls_cert.as_ref(), cli.tls_key.as_ref()) {

@@ -262,6 +262,12 @@ pub struct ResponseBatchItem {
     pub result_message: Option<String>,
     /// REQUIRED on success, omitted on failure.
     pub payload: Option<ResponsePayload>,
+    /// KMIP 3.0 §9.1 `Asynchronous Correlation Value` — "returned in
+    /// the immediate response to an operation that is pending and
+    /// that requires asynchronous polling." REQUIRED iff
+    /// `result_status == OperationPending` (Phase 4); `None` for
+    /// every synchronous response.
+    pub asynchronous_correlation_value: Option<Vec<u8>>,
 }
 
 /// §6.1 / §11.5 Result Status — wire-format Enumeration codepoint.
@@ -286,6 +292,61 @@ impl ResultStatus {
             1 => Some(Self::OperationFailed),
             2 => Some(Self::OperationPending),
             3 => Some(Self::OperationUndone),
+            _ => None,
+        }
+    }
+}
+
+/// Phase 4 — KMIP 3.0 §7.2 `Asynchronous Request` Structure's
+/// `Processing Stage` Enumeration: the three stages a server-tracked
+/// async job moves through. Codepoints verified from
+/// `kmip-spec-3.0-tags-enums.json` (`Processing Stage` enum).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[repr(u32)]
+pub enum ProcessingStage {
+    Submitted = 0x0000_0001,
+    InProcess = 0x0000_0002,
+    Completed = 0x0000_0003,
+}
+
+impl ProcessingStage {
+    pub const fn to_wire_value(self) -> u32 {
+        self as u32
+    }
+    pub const fn from_wire_value(v: u32) -> Option<Self> {
+        match v {
+            1 => Some(Self::Submitted),
+            2 => Some(Self::InProcess),
+            3 => Some(Self::Completed),
+            _ => None,
+        }
+    }
+}
+
+/// Phase 4 — KMIP 3.0 §6.1.5 `Cancel` response's `Cancellation Result`
+/// Enumeration. Codepoints verified from `kmip-spec-3.0-tags-enums.json`
+/// (`Cancellation Result` enum).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[repr(u32)]
+pub enum CancellationResult {
+    Canceled       = 0x0000_0001,
+    UnableToCancel = 0x0000_0002,
+    Completed      = 0x0000_0003,
+    Failed         = 0x0000_0004,
+    Unavailable    = 0x0000_0005,
+}
+
+impl CancellationResult {
+    pub const fn to_wire_value(self) -> u32 {
+        self as u32
+    }
+    pub const fn from_wire_value(v: u32) -> Option<Self> {
+        match v {
+            1 => Some(Self::Canceled),
+            2 => Some(Self::UnableToCancel),
+            3 => Some(Self::Completed),
+            4 => Some(Self::Failed),
+            5 => Some(Self::Unavailable),
             _ => None,
         }
     }
@@ -358,6 +419,12 @@ pub enum RequestPayload {
     /// K21 — §6.1.51 Re-key / §6.1.52 Re-key Key Pair.
     ReKey(super::ops::ReKeyRequest),
     ReKeyKeyPair(super::ops::ReKeyKeyPairRequest),
+    /// Phase 4 — §6.1.43 Poll / §6.1.5 Cancel / §6.1.44 Process /
+    /// §6.1.46 Query Asynchronous Requests.
+    Poll(super::ops::PollRequest),
+    Cancel(super::ops::CancelRequest),
+    Process(super::ops::ProcessRequest),
+    QueryAsynchronousRequests(super::ops::QueryAsynchronousRequestsRequest),
     /// R7 Phase 1 sentinel — emitted by `decode_request_message` when
     /// a per-BatchItem payload fails to decode but the outer envelope
     /// is intact. The dispatcher recognises it and emits a per-item
@@ -449,6 +516,15 @@ pub enum ResponsePayload {
     /// K21 — §6.1.51 Re-key / §6.1.52 Re-key Key Pair.
     ReKey(super::ops::ReKeyResponse),
     ReKeyKeyPair(super::ops::ReKeyKeyPairResponse),
+    /// Phase 4 — §6.1.5 Cancel / §6.1.44 Process / §6.1.46 Query
+    /// Asynchronous Requests. `Poll` (§6.1.43) has no variant here —
+    /// its successful response splices in whatever `ResponsePayload`
+    /// variant the ORIGINAL polled operation produced (see
+    /// `dispatcher::handle_poll`), and its not-yet-complete response
+    /// carries no payload at all.
+    Cancel(super::ops::CancelResponse),
+    Process(super::ops::ProcessResponse),
+    QueryAsynchronousRequests(super::ops::QueryAsynchronousRequestsResponse),
 }
 
 impl RequestPayload {
@@ -513,6 +589,10 @@ impl RequestPayload {
             Self::DeriveKey(_)        => Operation::DeriveKey,
             Self::ReKey(_)            => Operation::ReKey,
             Self::ReKeyKeyPair(_)     => Operation::ReKeyKeyPair,
+            Self::Poll(_)             => Operation::Poll,
+            Self::Cancel(_)           => Operation::Cancel,
+            Self::Process(_)          => Operation::Process,
+            Self::QueryAsynchronousRequests(_) => Operation::QueryAsynchronousRequests,
             // Echo the original Operation when we were able to read it
             // before the payload decode failed; fall back to `Ping`
             // (whose handler we already special-case in the

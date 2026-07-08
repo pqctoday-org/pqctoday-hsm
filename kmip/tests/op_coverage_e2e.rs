@@ -1138,6 +1138,11 @@ fn coverage_map() -> std::collections::HashMap<pqctoday_kmip::kmip30::Operation,
         (Op::RNGRetrieve, "unit:ops::rng_and_pkcs11"),
         (Op::RNGSeed, "unit:ops::rng_and_pkcs11"),
         (Op::Pkcs11, "unit:ops::rng_and_pkcs11"),
+        // Phase 4 — asynchronous subsystem (§6.1.43/§6.1.5/§6.1.44/§6.1.46).
+        (Op::Poll, "e2e:async_ops_e2e(mandatory_hash_enqueues_then_poll_matches_synchronous_result)"),
+        (Op::Cancel, "e2e:async_ops_e2e(cancel_reports_a_real_outcome_and_query_async_requests_clears_on_completion) + unit:ops::async_ops"),
+        (Op::Process, "e2e:async_ops_e2e(process_blocks_until_completed_instead_of_double_running) + unit:ops::async_ops"),
+        (Op::QueryAsynchronousRequests, "e2e:async_ops_e2e(cancel_reports_a_real_outcome_and_query_async_requests_clears_on_completion) + unit:ops::async_ops"),
     ]
     .into_iter()
     .collect()
@@ -1162,5 +1167,5 @@ fn coverage_map_covers_every_handled_operation() {
         stale.is_empty(),
         "coverage_map references ops that are not in HANDLED_OPERATIONS: {stale:?}"
     );
-    assert_eq!(handled.len(), 58, "HANDLED_OPERATIONS count changed — review coverage");
+    assert_eq!(handled.len(), 62, "HANDLED_OPERATIONS count changed — review coverage");
 }

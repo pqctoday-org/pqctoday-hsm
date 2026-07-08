@@ -94,10 +94,17 @@ pub use ops::{
     DeriveKeyRequest, DeriveKeyResponse,
     // K21 — Re-key / Re-key Key Pair (§6.1.51 / §6.1.52).
     ReKeyKeyPairRequest, ReKeyKeyPairResponse, ReKeyRequest, ReKeyResponse,
+    // Phase 4 — asynchronous subsystem (§6.1.5/§6.1.43/§6.1.44/§6.1.46).
+    PollRequest,
+    CancelRequest, CancelResponse,
+    ProcessRequest, ProcessResponse,
+    AsynchronousRequestInfo,
+    QueryAsynchronousRequestsRequest, QueryAsynchronousRequestsResponse,
 };
 
 pub use message::{AsynchronousIndicator, BatchErrorContinuationOption, Credential, Ticket, TICKET_TYPE_LOGIN};
 pub use message::{
+    CancellationResult, ProcessingStage,
     RequestBatchItem, RequestHeader, RequestMessage, RequestPayload, ResponseBatchItem,
     ResponseHeader, ResponseMessage, ResponsePayload, ResultStatus, KMIP_VERSION_MAJOR,
     KMIP_VERSION_MINOR,

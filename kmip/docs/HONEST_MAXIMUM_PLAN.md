@@ -395,6 +395,100 @@ Grounded: indicator parsed (`message.rs:73-77`, `wire.rs:558`); `ResultStatus::O
 
 **4.3 Advertise capability.** Set `Asynchronous Capability = true` (tag `0x4200f0`) **only after 4.1–4.2 pass.** *Exit:* QS reports async true and it's real.
 
+**Outcome (2026-07-08):** Full async subsystem shipped, with two
+scope calls made explicit rather than silently simplified:
+
+- **Job store lives on `Deps`, not behind the `KeyStore` trait.**
+  A job's data (submitted request snapshot, stage, result-or-error,
+  submit time) isn't a KMIP *Managed Object* — no UID, no lifecycle
+  FSM, no attributes — routing it through `KeyStore` would be a
+  category error. `Deps::async_jobs: Mutex<HashMap<CorrelationValue,
+  Arc<AsyncJob>>>`, in-memory only (matches every other server-scale,
+  non-object state already on `Deps` — `sessions`, `constraints`,
+  `object_defaults`).
+- **Genuine background execution requires an owned `Arc<Deps>`; the
+  entire codebase (500+ tests) threads `Deps` as a plain `&Deps`
+  borrow.** Rather than a crate-wide refactor, `Deps` grew a
+  `self_handle: OnceLock<Weak<Deps>>`, set once via
+  `Deps::install_self_handle()` right after the production binary
+  wraps its `Deps` in `Arc` (`bin/pqctoday-kmip.rs`). When present, the
+  async executor spawns a real `std::thread` and hands it a `'static`
+  `Arc<Deps>` upgraded from the weak handle — genuine, concurrent,
+  out-of-band execution, exactly like the production server. When
+  absent (every one of the 551 pre-existing tests, which build `Deps`
+  directly via `Deps::new`, and any non-`native` build with no OS
+  threads at all) the same job runs inline, synchronously, before the
+  enqueuing call returns. Both paths are fully protocol-correct — the
+  enqueuing response is `OperationPending` with no payload either way,
+  a client MUST `Poll` regardless of how fast the server actually
+  finished — only the *when* differs, and it's documented rather than
+  silently pretended to be the threaded path.
+
+`Cancel`/`Process` needed one real correctness fix beyond the naive
+design: `Cancel` on a `Submitted` job and the background thread's own
+`Submitted → InProcess` transition are a genuine race (two threads,
+one job). `AsyncJob::try_cancel_if_submitted` closes it with a single
+locked check-and-set instead of separate read-then-write lock
+acquisitions, which could otherwise clobber a real in-flight result
+with a fake "canceled" one. `Process` blocks on the job's `Condvar`
+rather than re-running the operation — re-running would risk
+double-executing a side-effecting handler (e.g. double-decrementing a
+Usage Limits counter).
+
+`Poll` (§6.1.43) doesn't get its own `ResponsePayload` variant —
+per spec its completed response is "identical to the response that
+would have been sent if the operation had completed synchronously",
+so `dispatcher::handle_poll` splices in the ORIGINAL polled
+operation's real `Operation` + outcome; its not-yet-complete response
+echoes `Poll` itself with no payload, per the same table row every
+async-triggering operation's immediate acknowledgment uses (§9.1).
+`Query Asynchronous Requests` reports jobs with `stage != Completed`
+as "outstanding" — a documented reading of "results not yet obtained"
+(the alternative, tracking whether a client's `Poll` literally already
+retrieved a `Completed` job's result, needs a fourth state dimension
+for a narrow window with no behavioral consequence).
+
+Eligibility is broad per T4: every `HANDLED_OPERATIONS` entry except
+the async-management ops themselves (`Poll`/`Cancel`/`Process`/
+`QueryAsynchronousRequests` — each explicitly says its own response is
+never asynchronous) and `Query`/`DiscoverVersions`/`Ping` (trivial
+negotiation ops). The `Mandatory`-but-ineligible-op gate moved from a
+whole-*batch* rejection (the pre-existing K4 seam) to a per-*item*
+check inside `dispatch_one` — batch items can be different operations,
+and the old behavior violated §9.5 Batch Error Continuation by always
+returning one response per item regardless of `Stop`/`Continue`/`Undo`.
+
+Two new `ResultReason` codepoints added (verified against
+`kmip-spec-3.0-tags-enums.json`): `Invalid Asynchronous Correlation
+Value` (0x2b) and `Operation Canceled By Requester` (0x09, the exact
+outcome a successful early-`Cancel` leaves behind for a later `Poll`).
+Six new wire tags (`Asynchronous Correlation Value`, `Cancellation
+Result`, `Asynchronous Request`, `Submission Date`, `Processing
+Stage`, `Asynchronous Correlation Values`, `Operations`). New
+`ResponseBatchItem.asynchronous_correlation_value` field threaded
+through every existing construction site.
+
+Tests: 7 new unit tests in `ops::async_ops` pin the exact per-stage
+Cancel/Process/QueryAsynchronousRequests behavior deterministically
+(constructing `AsyncJob` state directly, no timing dependency); 5 new
+e2e tests in `tests/async_ops_e2e.rs` drive the real dispatcher with a
+genuine `Arc<Deps>` + `install_self_handle()` — Mandatory-Hash
+enqueue → poll-until-done loop (bounded, always converges, no fixed
+sleep) → byte-exact match against a synchronous baseline; unknown
+correlation value; Process-blocks-don't-double-run; Cancel against a
+real timing race (asserts one of the three legitimate outcomes, since
+exact interleaving is inherently non-deterministic — the unit tests
+pin exact behavior per stage); and the per-item (not whole-batch)
+eligibility gate. One pre-existing test (`k4_async_mandatory_fails_
+every_batch_item`) updated to explicitly request `Continue` mode,
+since its "every item fails independently" intent now needs that
+explicit — the previous whole-batch shortcut bypassed Batch Error
+Continuation entirely, which was itself the bug this phase fixed.
+`cargo test`: 551 lib tests + all integration binaries green. Corpus
+unchanged 97/0/5 (no OASIS transcript exercises the async header).
+`Asynchronous Capability` flipped to `true` in Query only after all of
+the above was green (4.3's stated gate).
+
 ### Phase 5 — Server-to-client (Notify §6.2.2 / Put §6.2.3) — PARKED (D3)
 Spec: delivered "via means **outside** the normal request/response protocol, using **unspecified**
 configuration" (transport spec-undefined; profiles: server behaves as an HTTPS *client*).

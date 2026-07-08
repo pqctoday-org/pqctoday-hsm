@@ -43,6 +43,7 @@
 pub mod activate;
 pub mod agility;
 pub mod allocation_and_config;
+pub mod async_ops;
 pub mod attribute_mutate;
 pub mod create;
 pub mod create_key_pair;
@@ -80,7 +81,7 @@ pub mod validate;
 #[cfg(feature = "native")]
 pub mod certify;
 
-pub use deps::{Deps, DepsConfig, RngSeedMode};
+pub use deps::{AsyncJob, AsyncJobState, AsyncJobStore, Deps, DepsConfig, RngSeedMode};
 
 /// K8 test fixture — the BL-M-9-30 Transparent RSA Private Key
 /// components (OASIS corpus, 1024-bit), shared by the Register /

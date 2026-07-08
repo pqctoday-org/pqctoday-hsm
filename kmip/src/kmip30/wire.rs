@@ -156,6 +156,28 @@ pub(crate) mod tags {
     // verified from `kmip-spec-3.0-tags-enums.json`. ────────────────
     /// §8.1.2 `Asynchronous Indicator` Enumeration (request header).
     pub const AsynchronousIndicator: u32  = 0x42_0007;
+    // ── Phase 4 — asynchronous subsystem (§6.1.5/§6.1.43/§6.1.44/
+    // §6.1.46, §9.1, §11.61 tag table 453). Codepoints verified from
+    // `kmip-spec-3.0-tags-enums.json`. ──────────────────────────────
+    /// §9.1 `Asynchronous Correlation Value` (Response Batch Item /
+    /// Poll+Cancel+Process request &c.) — ByteString.
+    pub const AsynchronousCorrelationValue: u32   = 0x42_0006;
+    /// §6.1.5 `Cancellation Result` Enumeration (Cancel response).
+    pub const CancellationResult: u32             = 0x42_0012;
+    /// §7.2 `Asynchronous Request` Structure (Query Asynchronous
+    /// Requests response, repeatable).
+    pub const AsynchronousRequest: u32            = 0x42_0173;
+    /// `Submission Date` (DateTimeExtended) inside Asynchronous Request.
+    pub const SubmissionDate: u32                 = 0x42_0174;
+    /// `Processing Stage` Enumeration inside Asynchronous Request.
+    pub const ProcessingStage: u32                = 0x42_0175;
+    /// §7.1 `Asynchronous Correlation Values` Structure (Query
+    /// Asynchronous Requests request — zero or more correlation values).
+    pub const AsynchronousCorrelationValues: u32  = 0x42_0176;
+    /// `Operations` Structure (Query Asynchronous Requests request —
+    /// zero or more `Operation` Enumeration filter values). Distinct
+    /// from the singular `Operation` tag (0x42005c) used elsewhere.
+    pub const Operations: u32                     = 0x42_014f;
     /// §8.1.3 `Message Extension` Structure (per batch item).
     pub const MessageExtension: u32       = 0x42_0051;
     /// `Criticality Indicator` Boolean inside Message Extension.
@@ -853,6 +875,16 @@ fn response_batch_item_to_frame(bi: &ResponseBatchItem) -> TtlvFrame {
         if let Some(msg) = &bi.result_message {
             children.push(TtlvFrame::new(Tag(tags::ResultMessage), Value::TextString(msg.clone())));
         }
+        // Phase 4 — §9.1: "returned in the immediate response to an
+        // operation that is pending and that requires asynchronous
+        // polling." REQUIRED iff `result_status == OperationPending`;
+        // `dispatch_one`/`handle_poll` only ever populate it then.
+        if let Some(cv) = &bi.asynchronous_correlation_value {
+            children.push(TtlvFrame::new(
+                Tag(tags::AsynchronousCorrelationValue),
+                Value::ByteString(cv.clone()),
+            ));
+        }
     }
     TtlvFrame::new(Tag(tags::BatchItem), Value::Structure(children))
 }
@@ -1533,12 +1565,18 @@ fn decode_request_payload(op: Operation, frame: &TtlvFrame) -> Result<RequestPay
         // the `UnknownEnum` → InvalidMessage treatment.
         // K21 moved ReKey / ReKeyKeyPair out of this arm into real
         // §6.1.51 / §6.1.52 decode routes above.
-        Operation::Poll
-        | Operation::Notify
+        // Phase 4 moved Poll / Cancel / Process / QueryAsynchronousRequests
+        // out of this arm into real §6.1.43/§6.1.5/§6.1.44/§6.1.46 decode
+        // routes below. Notify / Put stay parked (Phase 5 — server-to-client,
+        // spec-undefined transport).
+        Operation::Poll             => RequestPayload::Poll(decode_poll_req(children)?),
+        Operation::Cancel           => RequestPayload::Cancel(decode_cancel_req(children)?),
+        Operation::Process          => RequestPayload::Process(decode_process_req(children)?),
+        Operation::QueryAsynchronousRequests => {
+            RequestPayload::QueryAsynchronousRequests(decode_query_async_req(children)?)
+        }
+        Operation::Notify
         | Operation::Put
-        | Operation::QueryAsynchronousRequests
-        | Operation::Process
-        | Operation::Cancel
         | Operation::DelegatedLogin
         | Operation::ReProvision => RequestPayload::Unsupported(op),
     })
@@ -1645,6 +1683,49 @@ fn response_payload_to_frame(payload: &ResponsePayload) -> TtlvFrame {
                 Value::TextString(r.public_key_uid.clone()),
             ),
         ],
+        // Phase 4 — §6.1.5 Table 262: Asynchronous Correlation Value +
+        // Cancellation Result.
+        ResponsePayload::Cancel(r) => vec![
+            TtlvFrame::new(
+                Tag(tags::AsynchronousCorrelationValue),
+                Value::ByteString(r.asynchronous_correlation_value.clone()),
+            ),
+            TtlvFrame::new(
+                Tag(tags::CancellationResult),
+                Value::Enumeration(r.cancellation_result.to_wire_value()),
+            ),
+        ],
+        // §6.1.44 Table 379: empty response payload.
+        ResponsePayload::Process(_r) => Vec::new(),
+        // §6.1.46 Table 386: zero or more repeated Asynchronous Request
+        // structures (§7.2 Table 453).
+        ResponsePayload::QueryAsynchronousRequests(r) => r
+            .requests
+            .iter()
+            .map(|req| {
+                TtlvFrame::new(
+                    Tag(tags::AsynchronousRequest),
+                    Value::Structure(vec![
+                        TtlvFrame::new(
+                            Tag(tags::AsynchronousCorrelationValue),
+                            Value::ByteString(req.asynchronous_correlation_value.clone()),
+                        ),
+                        TtlvFrame::new(
+                            Tag(tags::Operation),
+                            Value::Enumeration(req.operation.to_wire_value()),
+                        ),
+                        TtlvFrame::new(
+                            Tag(tags::SubmissionDate),
+                            Value::DateTime(req.submission_date),
+                        ),
+                        TtlvFrame::new(
+                            Tag(tags::ProcessingStage),
+                            Value::Enumeration(req.processing_stage.to_wire_value()),
+                        ),
+                    ]),
+                )
+            })
+            .collect(),
     };
     TtlvFrame::new(Tag(tags::ResponsePayload), Value::Structure(children))
 }
@@ -3510,6 +3591,56 @@ fn encode_get_constraints_resp(r: &GetConstraintsResponse) -> Vec<TtlvFrame> {
 /// (§7.6 Table 457) — mirror of [`encode_get_constraints_resp`]'s
 /// output shape, since Set/Get Constraints carry the identical
 /// `Constraints` structure on opposite sides of the wire.
+// ── Phase 4 — asynchronous subsystem (§6.1.5/§6.1.43/§6.1.44/§6.1.46) ──
+
+fn decode_poll_req(children: &[TtlvFrame]) -> Result<PollRequest, WireError> {
+    Ok(PollRequest {
+        asynchronous_correlation_value: required_asynchronous_correlation_value(children)?,
+    })
+}
+
+fn decode_cancel_req(children: &[TtlvFrame]) -> Result<CancelRequest, WireError> {
+    Ok(CancelRequest {
+        asynchronous_correlation_value: required_asynchronous_correlation_value(children)?,
+    })
+}
+
+fn decode_process_req(children: &[TtlvFrame]) -> Result<ProcessRequest, WireError> {
+    Ok(ProcessRequest {
+        asynchronous_correlation_value: required_asynchronous_correlation_value(children)?,
+    })
+}
+
+/// §6.1.46 Table 385 — both filters optional; either may be absent,
+/// empty, or populated.
+fn decode_query_async_req(
+    children: &[TtlvFrame],
+) -> Result<QueryAsynchronousRequestsRequest, WireError> {
+    let mut asynchronous_correlation_values = Vec::new();
+    let mut operations = Vec::new();
+    for c in children {
+        if c.tag.0 == tags::AsynchronousCorrelationValues {
+            for ic in expect_structure(c, "Asynchronous Correlation Values")? {
+                if ic.tag.0 == tags::AsynchronousCorrelationValue {
+                    asynchronous_correlation_values
+                        .push(expect_byte_string(ic, "Asynchronous Correlation Value")?);
+                }
+            }
+        } else if c.tag.0 == tags::Operations {
+            for ic in expect_structure(c, "Operations")? {
+                if ic.tag.0 == tags::Operation {
+                    let v = expect_enum(ic, "Operation")?;
+                    match Operation::from_wire_value(v) {
+                        Some(op) => operations.push(op),
+                        None => return Err(WireError::UnknownEnum { field: "Operation", value: v }),
+                    }
+                }
+            }
+        }
+    }
+    Ok(QueryAsynchronousRequestsRequest { asynchronous_correlation_values, operations })
+}
+
 fn decode_set_constraints_req(children: &[TtlvFrame]) -> Result<SetConstraintsRequest, WireError> {
     let block = children
         .iter()
@@ -5102,6 +5233,28 @@ fn expect_boolean(frame: &TtlvFrame, name: &'static str) -> Result<bool, WireErr
     }
 }
 
+fn expect_byte_string(frame: &TtlvFrame, name: &'static str) -> Result<Vec<u8>, WireError> {
+    match &frame.value {
+        Value::ByteString(v) => Ok(v.clone()),
+        _ => Err(WireError::BadType { tag: frame.tag.0, name, msg: "expected ByteString".into() }),
+    }
+}
+
+/// Phase 4 — every `Poll` / `Cancel` / `Process` request payload is
+/// just `{ Asynchronous Correlation Value }` (§6.1.43/§6.1.5/§6.1.44
+/// Table 376/261/378, all identical shapes).
+fn required_asynchronous_correlation_value(children: &[TtlvFrame]) -> Result<Vec<u8>, WireError> {
+    for c in children {
+        if c.tag.0 == tags::AsynchronousCorrelationValue {
+            return expect_byte_string(c, "Asynchronous Correlation Value");
+        }
+    }
+    Err(WireError::Missing {
+        tag: tags::AsynchronousCorrelationValue,
+        name: "Asynchronous Correlation Value",
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5447,6 +5600,7 @@ mod tests {
                     profile_information: None,
                     capability_information: None,
                 })),
+                asynchronous_correlation_value: None,
             }],
         };
         let bytes = encode_response_message(&resp);
@@ -5585,6 +5739,7 @@ mod tests {
                 payload: Some(ResponsePayload::Validate(ValidateResponse {
                     validity: SignatureValidity::Valid,
                 })),
+                asynchronous_correlation_value: None,
             }],
         };
         let bytes = encode_response_message(&resp);
@@ -5688,6 +5843,7 @@ mod tests {
                     result_reason: None,
                     result_message: None,
                     payload: Some(payload),
+                    asynchronous_correlation_value: None,
                 }],
             };
             let bytes = encode_response_message(&resp);

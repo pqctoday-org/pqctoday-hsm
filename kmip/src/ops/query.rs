@@ -96,12 +96,16 @@ pub fn query(deps: &Deps, req: QueryRequest, correlation_id: &str) -> Result<Que
             QueryFunction::QueryCapabilities => {
                 // K3 — honest CapabilityInformation (compliance-audit
                 // K-11): multi-part Encrypt/Decrypt streaming is
-                // implemented (CS-BC-M-GCM-3); asynchronous processing
-                // and attestation are not; §9.5 Undo and Continue
-                // batch modes are implemented in the dispatcher.
+                // implemented (CS-BC-M-GCM-3); attestation is not.
+                // §9.5 Undo and Continue batch modes are implemented
+                // in the dispatcher. Phase 4 — asynchronous processing
+                // is now real too (§6.1.43/§6.1.5/§6.1.44/§6.1.46 all
+                // handled, backed by a genuine job store + executor —
+                // see `dispatcher::enqueue_async_job`), flipped on only
+                // after those handlers and their tests were green.
                 resp.capability_information = Some(CapabilityInformation {
                     streaming_capability: true,
-                    asynchronous_capability: false,
+                    asynchronous_capability: true,
                     attestation_capability: false,
                     batch_undo_capability: true,
                     batch_continue_capability: true,
@@ -160,11 +164,13 @@ pub(crate) const ADVERTISED_UNIMPLEMENTED_OPERATIONS: &[Operation] = &[
     // P2.2 moved Validate into `HANDLED_OPERATIONS` (§6.1.62 handler) —
     // it was already advertised here, so the net advertised set is
     // unchanged (the corpus gate is *expected ⊆ actual*).
-    Operation::Poll,
+    //
+    // Notify / Put stay here — Phase 5 (server-to-client), parked: the
+    // spec itself says they're delivered "via means outside the normal
+    // request/response protocol, using unspecified configuration", so
+    // there is no wire-protocol shape to implement against yet.
     Operation::Notify,
     Operation::Put,
-    Operation::QueryAsynchronousRequests,
-    Operation::Process,
     // K3 additions — also enumerated by the MSGENC-* expected Query
     // responses (previously missing from the Operation enum entirely).
     // K20 moved DeriveKey out of this list into `HANDLED_OPERATIONS`
@@ -178,7 +184,11 @@ pub(crate) const ADVERTISED_UNIMPLEMENTED_OPERATIONS: &[Operation] = &[
     // `HANDLED_OPERATIONS` (real §6.1.12/§6.1.31 handlers, backed by a
     // genuine secret-sharing implementation) — both were already
     // advertised here, so the net advertised set is unchanged.
-    Operation::Cancel,
+    // Phase 4 moved Poll / Cancel / Process / QueryAsynchronousRequests
+    // into `HANDLED_OPERATIONS` (real §6.1.43/§6.1.5/§6.1.44/§6.1.46
+    // handlers backed by a genuine job store + executor) — all four
+    // were already advertised here, so the net advertised set is
+    // unchanged.
 ];
 
 /// Operation capability list — surfaced via `QueryOperations`. The
@@ -353,7 +363,7 @@ mod tests {
         .unwrap();
         let cap = resp.capability_information.expect("CapabilityInformation present");
         assert!(cap.streaming_capability, "multi-part Encrypt/Decrypt is implemented");
-        assert!(!cap.asynchronous_capability, "no async processing");
+        assert!(cap.asynchronous_capability, "Phase 4 — asynchronous processing is real now");
         assert!(!cap.attestation_capability, "no attestation");
         assert!(cap.batch_undo_capability, "§9.5 Undo is implemented");
         assert!(cap.batch_continue_capability, "§9.5 Continue is implemented");

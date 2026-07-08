@@ -2112,6 +2112,71 @@ pub struct SetEndpointRoleResponse {
     pub endpoint_role: EndpointRole,
 }
 
+// ── Phase 4 — asynchronous subsystem (§6.1.5 Cancel / §6.1.43 Poll /
+// §6.1.44 Process / §6.1.46 Query Asynchronous Requests) ───────────────
+
+/// `Poll` (KMIP 3.0 §6.1.43 / Table 376). Has no `PollResponse` type —
+/// per spec its response "SHALL be identical to the response that
+/// would have been sent if the operation had completed synchronously"
+/// (or, if not yet complete, the same no-payload/Pending shape the
+/// original enqueuing response used) — `dispatcher::handle_poll`
+/// builds a [`super::message::ResponseBatchItem`] directly rather than
+/// going through a typed per-op response.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PollRequest {
+    pub asynchronous_correlation_value: Vec<u8>,
+}
+
+/// `Cancel` (KMIP 3.0 §6.1.5 / Table 261-262).
+#[derive(Clone, Debug, PartialEq)]
+pub struct CancelRequest {
+    pub asynchronous_correlation_value: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct CancelResponse {
+    pub asynchronous_correlation_value: Vec<u8>,
+    pub cancellation_result: super::message::CancellationResult,
+}
+
+/// `Process` (KMIP 3.0 §6.1.44 / Table 378-379). Empty response
+/// payload per spec (Table 379 lists no items) — the struct exists so
+/// `Process` still fits this codebase's one-typed-struct-per-op
+/// pattern rather than a bare `()`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProcessRequest {
+    pub asynchronous_correlation_value: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct ProcessResponse {}
+
+/// `Query Asynchronous Requests` (KMIP 3.0 §6.1.46 / Table 385-386).
+/// Both filters are optional; an empty request reports every
+/// outstanding job. Non-empty filters combine as OR-within-field,
+/// AND-across-fields (a job matches if its correlation value is
+/// absent-or-listed AND its operation is absent-or-listed).
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct QueryAsynchronousRequestsRequest {
+    pub asynchronous_correlation_values: Vec<Vec<u8>>,
+    pub operations: Vec<Operation>,
+}
+
+/// §7.2 `Asynchronous Request` Structure (Table 453) — one row of the
+/// Query Asynchronous Requests response.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AsynchronousRequestInfo {
+    pub asynchronous_correlation_value: Vec<u8>,
+    pub operation: Operation,
+    pub submission_date: i64,
+    pub processing_stage: super::message::ProcessingStage,
+}
+
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct QueryAsynchronousRequestsResponse {
+    pub requests: Vec<AsynchronousRequestInfo>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
