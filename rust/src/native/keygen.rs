@@ -1534,7 +1534,7 @@ fn build_aes_attrs(key: Vec<u8>, key_len_bytes: u32, cka_id: &[u8], label: &str)
 
 /// Build the attribute map for a Generic-Secret key (HMAC). Mirrors
 /// `ffi::C_GenerateKey @ CKM_GENERIC_SECRET_KEY_GEN`.
-fn build_generic_secret_attrs(
+pub(crate) fn build_generic_secret_attrs(
     key: Vec<u8>,
     key_len_bytes: u32,
     cka_id: &[u8],
@@ -1776,12 +1776,12 @@ fn register_pqc_public(
 /// [`super::object::find_all_by_cka_id`]) attributes it to the right token.
 /// An unknown session stamps slot 0, the primary token, which preserves the
 /// single-slot KMIP/wasm behavior.
-fn alloc_in_session_slot(session: u32, mut attrs: Attributes) -> u32 {
+pub(crate) fn alloc_in_session_slot(session: u32, mut attrs: Attributes) -> u32 {
     crate::state::tag_object_slot(session, &mut attrs);
     allocate_handle(attrs)
 }
 
-fn insert_id_and_label(attrs: &mut Attributes, cka_id: &[u8], label: &str) {
+pub(crate) fn insert_id_and_label(attrs: &mut Attributes, cka_id: &[u8], label: &str) {
     if !cka_id.is_empty() {
         attrs.insert(CKA_ID, cka_id.to_vec());
     }

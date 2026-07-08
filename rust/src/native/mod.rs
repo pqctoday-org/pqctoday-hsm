@@ -49,6 +49,7 @@ pub mod keygen;
 pub mod object;
 pub mod session;
 pub mod sign;
+pub mod split_key;
 
 pub use agree::*;
 pub use derive::*;
@@ -56,6 +57,7 @@ pub use encrypt::*;
 pub use keygen::*;
 pub use object::*;
 pub use session::*;
+pub use split_key::{join, split};
 pub use sign::*;
 
 /// `CK_RV` (PKCS#11 return value). Matches `ffi::CkRv` / the C ABI's
