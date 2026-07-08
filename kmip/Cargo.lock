@@ -1942,6 +1942,7 @@ dependencies = [
  "uuid",
  "x509-cert",
  "x509-parser",
+ "zeroize",
 ]
 
 [[package]]

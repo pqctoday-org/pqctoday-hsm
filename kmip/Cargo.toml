@@ -132,6 +132,10 @@ prometheus = { version = "0.13", default-features = false, optional = true }
 rand        = "0.8"
 sha2        = "0.10"
 hmac        = "0.12"
+# Gap-remediation Phase A — Destroy must scrub Register/Import'd
+# ObjectRecord.key_material, not just flip the lifecycle state. Same
+# crate + `.zeroize()` discipline `rust/src/ffi.rs` already uses.
+zeroize     = "1"
 # K20 — Derive Key PBKDF2 method (RFC 2898 via the RustCrypto crate;
 # same version the engine uses for TokenState PIN hashing).
 pbkdf2      = "0.12"

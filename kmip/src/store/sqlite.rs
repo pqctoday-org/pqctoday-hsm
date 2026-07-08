@@ -77,11 +77,23 @@ impl SqliteStore {
         // `busy_timeout` are per-connection (must be set every open);
         // `journal_mode=WAL` persists in the file. WAL is a no-op on `:memory:`
         // (it stays in memory), so this is safe for the in-memory test path too.
+        //
+        // Gap-remediation Phase A — `secure_delete = FAST` closes a real
+        // gap: without it, SQLite marks a deleted row's page free for
+        // reuse instead of overwriting it, so a Destroy'd object's
+        // `key_material` (see `ops/destroy.rs`, which now zeroizes the
+        // Rust-side buffer before this UPDATE ever reaches SQLite) could
+        // still be recoverable from a free page or the WAL until
+        // reused/checkpointed. `FAST` (vs `ON`) overwrites the actual
+        // deleted content without the extra I/O of zeroing all
+        // surrounding free space — the right tradeoff for a
+        // key-management store's write volume, still real security.
         conn.execute_batch(
             "PRAGMA journal_mode = WAL;
              PRAGMA synchronous = NORMAL;
              PRAGMA busy_timeout = 5000;
-             PRAGMA foreign_keys = ON;",
+             PRAGMA foreign_keys = ON;
+             PRAGMA secure_delete = FAST;",
         )
         .map_err(map_sqlite_err)?;
         Self::migrate(&mut conn)?;
