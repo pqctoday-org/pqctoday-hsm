@@ -180,6 +180,16 @@ pub struct Deps {
     /// persisted in the object store and is reset on restart.
     pub object_defaults:
         Mutex<HashMap<crate::kmip30::ObjectType, Vec<crate::kmip30::Attribute>>>,
+    /// KMIP §6.1.42 PKCS_11 passthrough — tracks whether a client has
+    /// issued `C_Initialize` without an intervening `C_Finalize`
+    /// (PKCS#11 v3.2 §5.6 library-lifecycle state). Deliberately
+    /// SEPARATE from `engine_session`'s real init state: the engine
+    /// stays initialized for the server's whole lifetime so every other
+    /// KMIP operation keeps working, so a client-driven `C_Finalize`
+    /// here must not tear down the real engine out from under other
+    /// tenants. Read-only PKCS#11 functions (`C_GetInfo`, ...) still
+    /// dispatch to the real engine regardless of this flag.
+    pub pkcs11_virtual_initialized: std::sync::atomic::AtomicBool,
 }
 
 impl Deps {
@@ -198,6 +208,7 @@ impl Deps {
             streams: Mutex::new(HashMap::new()),
             next_correlation: std::sync::atomic::AtomicU64::new(1),
             object_defaults: Mutex::new(HashMap::new()),
+            pkcs11_virtual_initialized: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
