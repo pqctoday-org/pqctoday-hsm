@@ -3259,8 +3259,45 @@ pub fn C_Sign(
             return CKR_OK;
         }
 
-        // ── LMS / HSS stateful sign — separate path (uses CKA_STATEFUL_KEY_STATE) ───
-        if mech == CKM_HSS || mech == CKM_XMSS || mech == CKM_XMSSMT {
+        // ── HSS/LMS stateful sign — single source of truth for the
+        // leaf advance-and-persist core lives in `native::hbs`, shared
+        // with the KMIP-facing `native::sign` path (see that module's
+        // doc comment: drift here means a leaf index gets reused,
+        // breaking the one-time-signature security property). ───────
+        if mech == CKM_HSS {
+            let msg = std::slice::from_raw_parts(p_data, ul_data_len as usize);
+            let rv = match crate::native::hbs::sign_prepare(hkey, msg) {
+                Ok(prepared) => {
+                    // PKCS#11 v3.2 §5.2 — for a one-time (stateful) key the leaf
+                    // MUST NOT be consumed until the caller's output buffer is
+                    // known to be adequate. Validate the buffer FIRST; on
+                    // CKR_BUFFER_TOO_SMALL leave the on-object key state
+                    // unchanged and keep the operation active so the caller can
+                    // retry with a larger buffer (re-signing the same leaf is
+                    // deterministic and idempotent here).
+                    if (*pul_signature_len as usize) < prepared.signature.len() {
+                        *pul_signature_len = prepared.signature.len() as u32;
+                        return CKR_BUFFER_TOO_SMALL;
+                    }
+                    // Buffer is adequate — now atomically advance and persist
+                    // the key state, then emit the signature.
+                    crate::native::hbs::sign_commit(hkey, &prepared);
+                    std::ptr::copy_nonoverlapping(
+                        prepared.signature.as_ptr(),
+                        p_signature,
+                        prepared.signature.len(),
+                    );
+                    *pul_signature_len = prepared.signature.len() as u32;
+                    CKR_OK
+                }
+                Err(e) => e,
+            };
+            SIGN_STATE.with(|s| s.borrow_mut().remove(&h_session));
+            return rv;
+        }
+
+        // ── XMSS / XMSS^MT stateful sign — separate path (uses CKA_STATEFUL_KEY_STATE) ───
+        if mech == CKM_XMSS || mech == CKM_XMSSMT {
             let priv_bytes = match get_object_attr_bytes(hkey, CKA_STATEFUL_KEY_STATE) {
                 Some(v) => v,
                 None => return CKR_KEY_TYPE_INCONSISTENT,
@@ -3284,7 +3321,7 @@ pub fn C_Sign(
                     },
                     Err(e) => Err(e),
                 }
-            } else if mech == CKM_XMSSMT {
+            } else {
                 let mt_param = get_object_attr_u32(hkey, CKA_XMSSMT_PARAM_SET)
                     .unwrap_or(CKP_XMSSMT_SHA2_20_2_256);
                 match crate::crypto::xmss_bridge::xmssmt_sign(mt_param, &priv_bytes, msg) {
@@ -3294,9 +3331,6 @@ pub fn C_Sign(
                     },
                     Err(e) => Err(e),
                 }
-            } else {
-                let lms_param = get_object_attr_u32(hkey, CKA_LMS_PARAM_SET).unwrap_or(0x05);
-                crate::crypto::lms::hss_sign(lms_param, &priv_bytes, msg, &mut update_fn)
             };
 
             let rv = match sign_result {
@@ -3317,28 +3351,7 @@ pub fn C_Sign(
                     if let Some(ref new_priv_bytes) = new_state {
                         set_object_attr_bytes(hkey, CKA_STATEFUL_KEY_STATE, new_priv_bytes.clone());
 
-                        if mech == CKM_HSS {
-                            // HSS: increment leaf index (managed externally; hss library handles internal state)
-                            let old_idx = get_object_attr_u64(hkey, CKA_LEAF_INDEX).unwrap_or(0);
-                            set_object_attr_bytes(
-                                hkey,
-                                CKA_LEAF_INDEX,
-                                (old_idx + 1).to_le_bytes().to_vec(),
-                            );
-                            // HSS: decrement CKA_HSS_KEYS_REMAINING by 1 per sign (PKCS#11 v3.2 §6.14)
-                            if let Some(mut remaining) =
-                                get_object_attr_u32(hkey, CKA_HSS_KEYS_REMAINING)
-                            {
-                                if remaining > 0 {
-                                    remaining -= 1;
-                                    set_object_attr_bytes(
-                                        hkey,
-                                        CKA_HSS_KEYS_REMAINING,
-                                        remaining.to_le_bytes().to_vec(),
-                                    );
-                                }
-                            }
-                        } else if mech == CKM_XMSSMT {
+                        if mech == CKM_XMSSMT {
                             // XMSS^MT: derive remaining from the MT signing-key
                             // state (the index width differs from single-tree).
                             let mt_param = get_object_attr_u32(hkey, CKA_XMSSMT_PARAM_SET)

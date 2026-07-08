@@ -71,6 +71,22 @@ pub fn sign_with_pss_salt(
         return Err(CKR_KEY_FUNCTION_NOT_PERMITTED);
     }
 
+    // HSS/LMS is stateful and keeps its key material in
+    // `CKA_STATEFUL_KEY_STATE`, not `CKA_VALUE` (mirrors `ffi::C_Sign`'s
+    // separate stateful-sign branch) — dispatch it BEFORE the generic
+    // `CKA_VALUE` fetch below, which would otherwise fail closed with
+    // `CKR_ARGUMENTS_BAD` for every HSS key.
+    if mechanism == CKM_HSS {
+        // Stateful — the two-phase prepare/commit in `native::hbs` is the
+        // single source of truth for leaf advance-and-persist, shared
+        // with `ffi::C_Sign`'s HSS path. No output buffer here (KMIP
+        // callers get an owned `Vec<u8>`), so commit immediately after a
+        // successful prepare.
+        let prepared = super::hbs::sign_prepare(key_handle, data)?;
+        super::hbs::sign_commit(key_handle, &prepared);
+        return Ok(prepared.signature);
+    }
+
     let sk_bytes = get_object_value(key_handle).ok_or(CKR_ARGUMENTS_BAD)?;
     let ps = get_object_param_set(key_handle);
 
@@ -186,6 +202,16 @@ pub fn verify_with_pss_salt(
         },
         CKM_EDDSA => verify_eddsa(&pk_bytes, data, signature),
         CKM_EDDSA_PH => verify_eddsa_ph(&pk_bytes, data, signature),
+        CKM_HSS => {
+            // Stateless — RFC 8554 verification needs no key-object
+            // mutation, unlike sign's leaf advance-and-persist.
+            let lms_param = get_object_attr_u32(key_handle, CKA_LMS_PARAM_SET).unwrap_or(0x05);
+            if crate::crypto::lms::hss_verify(&pk_bytes, data, signature, lms_param) {
+                Ok(())
+            } else {
+                Err(CKR_SIGNATURE_INVALID)
+            }
+        }
         _ => Err(CKR_MECHANISM_INVALID),
     };
 
@@ -328,13 +354,6 @@ fn check_can_sign(key_handle: u32, attr_type: u32) -> bool {
             .map(|v| !v.is_empty() && v[0] == 0x01)
             .unwrap_or(false)
     })
-}
-
-// Suppress unused-import warning when not all dispatch paths reference
-// every helper (e.g. get_object_attr_u32 only used by future LMS path).
-#[allow(dead_code)]
-fn _suppress_unused() {
-    let _: fn(u32, u32) -> Option<u32> = get_object_attr_u32;
 }
 
 #[cfg(test)]
@@ -504,6 +523,94 @@ mod tests {
         let sig = sign(session, prv_h, CKM_ML_DSA, b"").unwrap();
         assert_eq!(sig.len(), 3309);
         assert!(verify(session, pub_h, CKM_ML_DSA, b"", &sig).unwrap());
+        close_session(session).unwrap();
+    }
+
+    // ── HSS/LMS (RFC 8554) — native::sign was missing this arm entirely
+    // before this change (ffi::C_Sign already had it); these tests prove
+    // the native path now works, and that it genuinely advances +
+    // persists the leaf index rather than reusing one. ──────────────────
+
+    fn register_fresh_hss_keypair(session: u32, label: &str) -> (u32, u32) {
+        use crate::native::keygen::{register_hss_private_key, register_hss_public_key};
+        let (pub_bytes, priv_bytes) =
+            crate::crypto::lms::hss_keygen(1, &[CKP_LMS_SHA256_M32_H5], &[CKP_LMOTS_SHA256_N32_W4])
+                .expect("hss_keygen must succeed");
+        let pub_h = register_hss_public_key(session, &pub_bytes, b"\x01", label).unwrap();
+        let prv_h = register_hss_private_key(session, &priv_bytes, b"\x01", label).unwrap();
+        (pub_h, prv_h)
+    }
+
+    #[test]
+    fn hss_sign_then_verify_returns_valid() {
+        let _guard = test_lock::acquire();
+        let session = fresh_session();
+        let (pub_h, prv_h) = register_fresh_hss_keypair(session, "hss-basic");
+
+        let message = b"the quick brown fox jumps over the lazy dog";
+        let sig = sign(session, prv_h, CKM_HSS, message).expect("HSS sign must succeed");
+        let valid = verify(session, pub_h, CKM_HSS, message, &sig).expect("verify must succeed");
+        assert!(valid, "freshly-signed HSS message must verify");
+
+        close_session(session).unwrap();
+    }
+
+    /// The core one-time-signature safety property: two sequential signs
+    /// on the same key MUST consume two distinct leaves — a real signal
+    /// that `native::hbs::sign_commit` actually persisted the advanced
+    /// state, not just computed a signature and discarded it.
+    #[test]
+    fn hss_second_sign_uses_a_new_leaf_and_persists_the_counter() {
+        let _guard = test_lock::acquire();
+        let session = fresh_session();
+        let (pub_h, prv_h) = register_fresh_hss_keypair(session, "hss-leaf-advance");
+
+        let leaf_index = || {
+            crate::state::get_object_attr_u64(prv_h, CKA_LEAF_INDEX).expect("leaf index must be set")
+        };
+        let keys_remaining = || {
+            crate::state::get_object_attr_u32(prv_h, CKA_HSS_KEYS_REMAINING)
+                .expect("keys remaining must be set")
+        };
+
+        let total = keys_remaining();
+        assert_eq!(leaf_index(), 0, "fresh key starts at leaf 0");
+
+        let sig1 = sign(session, prv_h, CKM_HSS, b"message one").unwrap();
+        assert_eq!(leaf_index(), 1, "first sign advances to leaf 1");
+        assert_eq!(keys_remaining(), total - 1);
+
+        let sig2 = sign(session, prv_h, CKM_HSS, b"message two").unwrap();
+        assert_eq!(leaf_index(), 2, "second sign advances to leaf 2");
+        assert_eq!(keys_remaining(), total - 2);
+
+        assert_ne!(sig1, sig2, "distinct leaves must produce distinct signatures");
+        assert!(verify(session, pub_h, CKM_HSS, b"message one", &sig1).unwrap());
+        assert!(verify(session, pub_h, CKM_HSS, b"message two", &sig2).unwrap());
+
+        close_session(session).unwrap();
+    }
+
+    #[test]
+    fn hss_verify_rejects_tampered_signature() {
+        let _guard = test_lock::acquire();
+        let session = fresh_session();
+        let (pub_h, prv_h) = register_fresh_hss_keypair(session, "hss-tamper");
+        let mut sig = sign(session, prv_h, CKM_HSS, b"data").unwrap();
+        let mid = sig.len() / 2;
+        sig[mid] ^= 0xFF;
+        let result = verify(session, pub_h, CKM_HSS, b"data", &sig);
+        assert_eq!(result, Ok(false), "tampered HSS sig is Ok(false), not Err");
+        close_session(session).unwrap();
+    }
+
+    #[test]
+    fn hss_sign_with_public_key_handle_is_denied() {
+        let _guard = test_lock::acquire();
+        let session = fresh_session();
+        let (pub_h, _prv_h) = register_fresh_hss_keypair(session, "hss-wrong-handle");
+        let result = sign(session, pub_h, CKM_HSS, b"data");
+        assert_eq!(result, Err(CKR_KEY_FUNCTION_NOT_PERMITTED));
         close_session(session).unwrap();
     }
 }

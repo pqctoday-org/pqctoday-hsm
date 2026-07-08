@@ -1295,6 +1295,93 @@ pub fn register_slh_dsa_public_key(
     ))
 }
 
+// ── HSS/LMS (RFC 8554) ───────────────────────────────────────────────────
+
+/// Register an existing HSS/LMS private key given the raw serialized
+/// `hbs-lms` private-key state blob (the same `CKA_STATEFUL_KEY_STATE`
+/// format `ffi::C_GenerateKeyPair @ CKM_HSS_KEY_PAIR_GEN` produces).
+///
+/// v0.1 supports exactly **one** parameter combination: single-level HSS
+/// (i.e. plain LMS — RFC 8554 §6: an HSS key with 1 level is an LMS key),
+/// `CKP_LMS_SHA256_M32_H5` / `CKP_LMOTS_SHA256_N32_W4` — the same default
+/// `ffi::C_GenerateKeyPair`'s HSS arm falls back to when the caller
+/// supplies no explicit params. KMIP has no attribute to select a
+/// different combination yet; broader coverage is a natural follow-up,
+/// not a correctness gap in what this does support.
+///
+/// The leaf index starts at 0 (fresh key). If the supplied state blob is
+/// not actually fresh (e.g. re-registering a partially-used key from a
+/// backup), the caller is responsible for that being true — this
+/// function has no way to verify a state blob's prior usage history.
+pub fn register_hss_private_key(
+    session: u32,
+    priv_state_bytes: &[u8],
+    cka_id: &[u8],
+    label: &str,
+) -> Result<u32, CkRv> {
+    if priv_state_bytes.is_empty() {
+        return Err(CKR_ATTRIBUTE_VALUE_INVALID);
+    }
+    let lms_param = CKP_LMS_SHA256_M32_H5;
+    let lmots_param = CKP_LMOTS_SHA256_N32_W4;
+    let total_sigs = crate::crypto::lms::lms_param_max_leaves(lms_param)
+        .unwrap_or(0)
+        .min(u32::MAX as u64) as u32;
+
+    let mut attrs: Attributes = HashMap::new();
+    store_ulong(&mut attrs, CKA_CLASS, CKO_PRIVATE_KEY);
+    store_ulong(&mut attrs, CKA_KEY_TYPE, CKK_HSS);
+    store_ulong(&mut attrs, CKA_HSS_LMS_TYPE, 1); // levels — single-level HSS = LMS
+    store_ulong(&mut attrs, CKA_LMS_PARAM_SET, lms_param);
+    store_ulong(&mut attrs, CKA_LMOTS_PARAM_SET, lmots_param);
+    store_ulong(&mut attrs, CKA_HSS_KEYS_REMAINING, total_sigs);
+    store_bool(&mut attrs, CKA_TOKEN, false);
+    store_bool(&mut attrs, CKA_PRIVATE, true);
+    store_bool(&mut attrs, CKA_SENSITIVE, true);
+    store_bool(&mut attrs, CKA_EXTRACTABLE, false);
+    store_bool(&mut attrs, CKA_SIGN, true);
+    attrs.insert(CKA_STATEFUL_KEY_STATE, priv_state_bytes.to_vec());
+    attrs.insert(CKA_LEAF_INDEX, 0u64.to_le_bytes().to_vec());
+    insert_id_and_label(&mut attrs, cka_id, label);
+    // Imported provenance — matches `register_pqc_private`'s convention.
+    store_bool(&mut attrs, CKA_LOCAL, false);
+    store_ulong(&mut attrs, CKA_KEY_GEN_MECHANISM, CKM_UNAVAILABLE_INFORMATION);
+    compute_kcv(&mut attrs);
+    Ok(alloc_in_session_slot(session, attrs))
+}
+
+/// Register an existing HSS/LMS public key given the raw `hbs-lms`
+/// public-key bytes. Same v0.1 single-parameter-combination scope as
+/// [`register_hss_private_key`].
+pub fn register_hss_public_key(
+    session: u32,
+    pub_key_bytes: &[u8],
+    cka_id: &[u8],
+    label: &str,
+) -> Result<u32, CkRv> {
+    if pub_key_bytes.is_empty() {
+        return Err(CKR_ATTRIBUTE_VALUE_INVALID);
+    }
+    let lms_param = CKP_LMS_SHA256_M32_H5;
+    let lmots_param = CKP_LMOTS_SHA256_N32_W4;
+
+    let mut attrs: Attributes = HashMap::new();
+    store_ulong(&mut attrs, CKA_CLASS, CKO_PUBLIC_KEY);
+    store_ulong(&mut attrs, CKA_KEY_TYPE, CKK_HSS);
+    store_ulong(&mut attrs, CKA_HSS_LMS_TYPE, 1);
+    store_ulong(&mut attrs, CKA_LMS_PARAM_SET, lms_param);
+    store_ulong(&mut attrs, CKA_LMOTS_PARAM_SET, lmots_param);
+    store_bool(&mut attrs, CKA_TOKEN, false);
+    store_bool(&mut attrs, CKA_PRIVATE, false);
+    store_bool(&mut attrs, CKA_VERIFY, true);
+    attrs.insert(CKA_VALUE, pub_key_bytes.to_vec());
+    insert_id_and_label(&mut attrs, cka_id, label);
+    store_bool(&mut attrs, CKA_LOCAL, false);
+    store_ulong(&mut attrs, CKA_KEY_GEN_MECHANISM, CKM_UNAVAILABLE_INFORMATION);
+    compute_kcv(&mut attrs);
+    Ok(alloc_in_session_slot(session, attrs))
+}
+
 /// Generate a Generic-Secret key (HMAC etc.). `bits` ∈ [8, 4096] in
 /// multiples of 8 (engine permits 1..=512 bytes).
 pub fn generate_generic_secret(
