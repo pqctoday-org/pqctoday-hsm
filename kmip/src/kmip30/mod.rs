@@ -18,7 +18,8 @@ pub mod wire;
 
 pub use algos::{CkMechanismType, KmipAlgorithm, PkcsOp};
 pub use attrs::{
-    Attribute, DigestAttribute, ObjectType, RevocationReason, RngAttribute, State, UsageMask,
+    Attribute, CustomAttributeValue, DigestAttribute, ObjectType, RevocationReason, RngAttribute,
+    State, UsageMask,
 };
 pub use ops::{
     ActivateRequest, ActivateResponse,

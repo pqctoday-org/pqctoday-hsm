@@ -16,7 +16,7 @@ use bytes::BytesMut;
 use crate::codec::{decode_one, encode, Tag, TtlvFrame, Value};
 
 use super::algos::KmipAlgorithm;
-use super::attrs::{Attribute, ObjectType, RevocationReason, State, UsageMask};
+use super::attrs::{Attribute, CustomAttributeValue, ObjectType, RevocationReason, State, UsageMask};
 use super::message::{
     RequestBatchItem, RequestHeader, RequestMessage, RequestPayload, ResponseBatchItem,
     ResponseHeader, ResponseMessage, ResponsePayload, ResultStatus,
@@ -2542,14 +2542,36 @@ fn decode_attribute_v3(frame: &TtlvFrame) -> Result<Option<Attribute>, WireError
         tags::Attribute => {
             let inner = expect_structure(frame, "Attribute")?;
             let mut name = String::new();
-            let mut value = String::new();
+            let mut value = CustomAttributeValue::Text(String::new());
             for c in inner {
                 match c.tag.0 {
                     tags::AttributeName => {
                         if let Value::TextString(s) = &c.value { name = s.clone(); }
                     }
+                    // Per §11, AttributeValue is client-typed on the wire
+                    // (its TTLV item-type byte, not the Attribute Name,
+                    // says what it is). Previously only `TextString` was
+                    // read — every Integer/DateTime/Boolean-typed custom
+                    // attribute silently decoded to an empty string
+                    // (found via the OASIS TL-M-2/TL-M-3 conformance
+                    // transcripts, which set an Integer- and a
+                    // DateTime-valued vendor attribute and expect
+                    // GetAttributes to round-trip the real type back —
+                    // Honest-Maximum Phase 2.1 follow-up).
                     tags::AttributeValue => {
-                        if let Value::TextString(s) = &c.value { value = s.clone(); }
+                        value = match &c.value {
+                            Value::TextString(s) => CustomAttributeValue::Text(s.clone()),
+                            Value::Integer(n) => CustomAttributeValue::Integer(*n as i64),
+                            Value::LongInteger(n) => CustomAttributeValue::Integer(*n),
+                            Value::DateTime(t) => CustomAttributeValue::DateTime(*t),
+                            Value::Boolean(b) => CustomAttributeValue::Boolean(*b),
+                            // ByteString / Enumeration / BigInteger / Structure
+                            // custom-attribute values: not exercised by any
+                            // known transcript. Falls back to the pre-existing
+                            // graceful-degradation posture (empty text) rather
+                            // than guessing a representation.
+                            _ => CustomAttributeValue::Text(String::new()),
+                        };
                     }
                     _ => {} // VendorIdentification + future fields ignored in v0.1
                 }
@@ -4401,10 +4423,21 @@ fn encode_attribute_v3(a: &Attribute) -> TtlvFrame {
             // Attribute Structure { VendorIdentification, AttributeName,
             // AttributeValue }. v0.1 defaults VendorIdentification to "x".
             // BL-M-14 / SKFF-M-9 GetAttributes responses pin this shape.
+            // AttributeValue's TTLV item type mirrors what the client
+            // originally sent (mirrors the decode side) — an Integer- or
+            // DateTime-typed custom attribute round-trips as that type,
+            // not flattened to TextString (TL-M-3's GetAttributes step
+            // pins this for `VendorAttribute2`/`VendorAttribute3`).
+            let value_frame = match value {
+                CustomAttributeValue::Text(s) => Value::TextString(s.clone()),
+                CustomAttributeValue::Integer(n) => Value::Integer(*n as i32),
+                CustomAttributeValue::DateTime(t) => Value::DateTime(*t),
+                CustomAttributeValue::Boolean(b) => Value::Boolean(*b),
+            };
             TtlvFrame::new(Tag(tags::Attribute), Value::Structure(vec![
                 TtlvFrame::new(Tag(tags::VendorIdentification), Value::TextString("x".into())),
                 TtlvFrame::new(Tag(tags::AttributeName), Value::TextString(name.clone())),
-                TtlvFrame::new(Tag(tags::AttributeValue), Value::TextString(value.clone())),
+                TtlvFrame::new(Tag(tags::AttributeValue), value_frame),
             ]))
         }
         // ── Baseline Server profile attributes (KMIP Profiles v3.0 §5.1.2) ──

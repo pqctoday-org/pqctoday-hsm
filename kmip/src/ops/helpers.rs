@@ -401,8 +401,12 @@ pub fn custom_attrs_from(attrs: &[crate::kmip30::Attribute]) -> std::collections
 /// `x-`-prefixed) names, for *persistence* onto the managed object. Register
 /// stores attributes in this form so GetAttributes round-trips them verbatim
 /// (BL-M-14); CreateKeyPair now does the same (Y1) so use-time policy gates can
-/// read the classification back off the stored key.
-pub fn raw_custom_attrs(attrs: &[crate::kmip30::Attribute]) -> std::collections::HashMap<String, String> {
+/// read the classification back off the stored key. Typed (not `String`) so
+/// an Integer/DateTime-valued custom attribute keeps its real wire type
+/// through storage — see [`crate::kmip30::CustomAttributeValue`].
+pub fn raw_custom_attrs(
+    attrs: &[crate::kmip30::Attribute],
+) -> std::collections::HashMap<String, crate::kmip30::CustomAttributeValue> {
     use crate::kmip30::Attribute;
     let mut m = std::collections::HashMap::new();
     for a in attrs {
@@ -414,11 +418,15 @@ pub fn raw_custom_attrs(attrs: &[crate::kmip30::Attribute]) -> std::collections:
 }
 
 /// Normalise a stored custom-attribute map (whose keys keep the `x-` prefix) to
-/// the bare-name form the policy engine keys on (Y1). Used at use-time ops
-/// (Sign / Encrypt / …) where the attributes come off the stored object, not
-/// the request.
+/// the bare-name form the policy engine keys on (Y1), stringifying each typed
+/// value via [`crate::kmip30::CustomAttributeValue::as_policy_string`] — policy
+/// YAML rules match on string patterns, so this is the one place the type
+/// information intentionally collapses back to a string; the *stored* record
+/// (`ObjectRecord.custom_attributes`) and the wire round-trip
+/// (`GetAttributes`) stay typed. Used at use-time ops (Sign / Encrypt / …)
+/// where the attributes come off the stored object, not the request.
 pub fn strip_x_prefixes(
-    raw: &std::collections::HashMap<String, String>,
+    raw: &std::collections::HashMap<String, crate::kmip30::CustomAttributeValue>,
 ) -> std::collections::HashMap<String, String> {
     raw.iter()
         .map(|(k, v)| {
@@ -426,7 +434,7 @@ pub fn strip_x_prefixes(
                 .strip_prefix("x-")
                 .or_else(|| k.strip_prefix("X-"))
                 .unwrap_or(k);
-            (bare.to_string(), v.clone())
+            (bare.to_string(), v.as_policy_string())
         })
         .collect()
 }

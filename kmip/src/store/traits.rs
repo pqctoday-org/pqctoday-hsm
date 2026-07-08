@@ -75,10 +75,14 @@ pub struct ObjectRecord {
     /// `NextLink` round-trips correctly through OASIS test cases.
     pub links: std::collections::HashMap<String, String>,
     /// Arbitrary custom attributes carried per managed object (KMIP
-    /// `Custom Attribute` family, x-* / y- names). Populated by
-    /// AddAttribute / SetAttribute; surfaced by GetAttributes /
-    /// GetAttributeList.
-    pub custom_attributes: std::collections::HashMap<String, String>,
+    /// `Custom Attribute` family, x-* / y- names, AND genuine client-set
+    /// vendor `Attribute`s per §11 — e.g. TL-M-2's `Barcode`,
+    /// `VendorAttribute1-3`). Populated by AddAttribute / SetAttribute /
+    /// Create / Register; surfaced by GetAttributes / GetAttributeList.
+    /// Typed (not a bare `String`) so an Integer- or DateTime-valued
+    /// custom attribute round-trips its actual wire type instead of
+    /// losing it — see [`crate::kmip30::CustomAttributeValue`].
+    pub custom_attributes: std::collections::HashMap<String, crate::kmip30::CustomAttributeValue>,
     /// KMIP `Object Group` (0x420056) memberships — **multi-instance**:
     /// an object may belong to several groups, so this is a list of
     /// group-name labels rather than a single value. Populated from the

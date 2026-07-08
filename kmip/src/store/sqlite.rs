@@ -521,9 +521,10 @@ mod tests {
         original.cryptographic_length = 256;
         original.name = Some("my-signing-key".into()); // NOT persisted (D-1)
         original.key_material = Some(vec![9, 8, 7, 6]); // NOT persisted (D-1)
-        original
-            .custom_attributes
-            .insert("env".into(), "prod".into()); // NOT persisted (D-1)
+        original.custom_attributes.insert(
+            "env".into(),
+            crate::kmip30::CustomAttributeValue::Text("prod".into()),
+        ); // NOT persisted (D-1)
 
         {
             let store = SqliteStore::open(&path).unwrap();
@@ -545,7 +546,10 @@ mod tests {
         // D-1 — previously-dropped fields now survive the reopen.
         assert_eq!(loaded.name, Some("my-signing-key".into()));
         assert_eq!(loaded.key_material, Some(vec![9, 8, 7, 6]));
-        assert_eq!(loaded.custom_attributes.get("env"), Some(&"prod".to_string()));
+        assert_eq!(
+            loaded.custom_attributes.get("env"),
+            Some(&crate::kmip30::CustomAttributeValue::Text("prod".to_string()))
+        );
         // The ENTIRE record round-trips byte-for-byte.
         assert_eq!(loaded, original, "full-record round-trip must be lossless");
 

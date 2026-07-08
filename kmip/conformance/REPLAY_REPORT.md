@@ -1,6 +1,6 @@
 # OASIS KMIP 3.0 Dispatcher Replay Report
 
-Generated: 2026-07-07 23:54:13 UTC
+Generated: 2026-07-08 00:13:14 UTC
 
 
 ## Aggregate
@@ -8,8 +8,8 @@ Generated: 2026-07-07 23:54:13 UTC
 
 | Status | Count | % of total |
 |---|---|---|
-| **PASS** | 96 | 94.1% |
-| **FAIL** | 1 | 1.0% |
+| **PASS** | 97 | 95.1% |
+| **FAIL** | 0 | 0.0% |
 | ERROR | 0 | 0.0% |
 | SKIP_OP (op not implemented) | 0 | 0.0% |
 | SKIP_DEPRECATED (DES / 3DES / DSA out of scope) | 5 | 4.9% |
@@ -21,9 +21,9 @@ Generated: 2026-07-07 23:54:13 UTC
 
 Of the 97 tests that exercise only implemented + non-deprecated ops:
 
-  - **96 pass (99%)**
+  - **97 pass (100%)**
 
-  - 1 fail
+  - 0 fail
 
   - 0 errored
 
@@ -48,7 +48,6 @@ Of the 97 tests that exercise only implemented + non-deprecated ops:
 
 | Test | Status | Detail |
 |---|---|---|
-| `TL-M-3-30.xml` | FAIL | msg #2: response mismatch: ResponseMessage/BatchItem/ResponsePayload/Attributes: no actual 'Attribute' matches expected value |
 | `AKLC-M-1-30.xml` | PASS |  |
 | `AKLC-M-2-30.xml` | PASS |  |
 | `AKLC-M-3-30.xml` | PASS |  |
@@ -145,6 +144,7 @@ Of the 97 tests that exercise only implemented + non-deprecated ops:
 | `SKLC-O-1-30.xml` | PASS |  |
 | `TL-M-1-30.xml` | PASS |  |
 | `TL-M-2-30.xml` | PASS |  |
+| `TL-M-3-30.xml` | PASS |  |
 | `BL-M-12-30.xml` | SKIP_DEPRECATED | DSA — deprecated (NIST SP 800-186 §5.4) |
 | `BL-M-13-30.xml` | SKIP_DEPRECATED | DSA — deprecated (NIST SP 800-186 §5.4) |
 | `SKFF-M-12-30.xml` | SKIP_DEPRECATED | 3DES — deprecated (NIST SP 800-131A r2 §1.2.1) |

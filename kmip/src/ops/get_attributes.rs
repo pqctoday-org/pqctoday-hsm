@@ -153,6 +153,9 @@ fn attributes_from_record(r: &ObjectRecord) -> Vec<Attribute> {
         out.push(Attribute::ShortUniqueIdentifier(sid));
     }
     if let Some(s) = &r.alternative_name { out.push(Attribute::AlternativeName(s.clone())); }
+    if let Some((ns, data)) = &r.application_specific_information {
+        out.push(Attribute::ApplicationSpecificInformation { namespace: ns.clone(), data: data.clone() });
+    }
     if let Some(s) = &r.comment { out.push(Attribute::Comment(s.clone())); }
     if let Some(s) = &r.description { out.push(Attribute::Description(s.clone())); }
     if let Some(s) = &r.contact_information { out.push(Attribute::ContactInformation(s.clone())); }

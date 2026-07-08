@@ -366,7 +366,7 @@ pub fn register(
     // attributes (vendor-extension envelope) so GetAttributes can
     // surface them. BL-M-14 / SKFF-M-{9..11} step #0 supply
     // `<Attribute>` envelopes inside `<Attributes>`.
-    let mut custom_attributes: HashMap<String, String> = HashMap::new();
+    let mut custom_attributes: HashMap<String, crate::kmip30::CustomAttributeValue> = HashMap::new();
     let mut links: HashMap<String, String> = HashMap::new();
     // KMIP 3.0 §11 — Sensitive / Extractable are client-settable at
     // Register time (BL-M-12 supplies Sensitive=true in the template);

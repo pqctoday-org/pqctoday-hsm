@@ -657,7 +657,7 @@ mod tests {
             usage_limits_unit: Some(0x01),
             custom_attributes: {
                 let mut m = HashMap::new();
-                m.insert("x-team".to_string(), "blue".to_string());
+                m.insert("x-team".to_string(), crate::kmip30::CustomAttributeValue::Text("blue".to_string()));
                 m
             },
             fresh: Some(false),
@@ -714,7 +714,10 @@ mod tests {
         assert_eq!(new.algorithm, KmipAlgorithm::Aes);
         assert_eq!(new.cryptographic_length, 256);
         assert_eq!(new.usage_mask, UsageMask::ENCRYPT | UsageMask::DECRYPT);
-        assert_eq!(new.custom_attributes.get("x-team").map(String::as_str), Some("blue"));
+        assert_eq!(
+            new.custom_attributes.get("x-team"),
+            Some(&crate::kmip30::CustomAttributeValue::Text("blue".to_string()))
+        );
         // No Offset ⇒ Activation Date copied ⇒ replacement is Active.
         assert_eq!(new.state, State::Active);
         assert_eq!(new.fresh, Some(true));
