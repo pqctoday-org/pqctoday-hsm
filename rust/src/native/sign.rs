@@ -613,4 +613,43 @@ mod tests {
         assert_eq!(result, Err(CKR_KEY_FUNCTION_NOT_PERMITTED));
         close_session(session).unwrap();
     }
+
+    /// Real exhaustion, not a mocked one: `CKP_LMS_SHA256_M32_H5` has
+    /// exactly `2^5 = 32` leaves (RFC 8554 §5.3). Sign 32 times (every
+    /// leaf), confirm each is genuinely usable, then confirm the 33rd
+    /// sign fails clean with `CKR_KEY_EXHAUSTED` instead of panicking,
+    /// corrupting state, or silently reusing a leaf.
+    #[test]
+    fn hss_key_signs_exactly_its_capacity_then_exhausts_cleanly() {
+        let _guard = test_lock::acquire();
+        let session = fresh_session();
+        let (pub_h, prv_h) = register_fresh_hss_keypair(session, "hss-exhaust");
+
+        let total = crate::state::get_object_attr_u32(prv_h, CKA_HSS_KEYS_REMAINING).unwrap();
+        assert_eq!(total, 32, "CKP_LMS_SHA256_M32_H5 = 2^5 leaves");
+
+        for i in 0..total {
+            let msg = format!("message {i}");
+            let sig = sign(session, prv_h, CKM_HSS, msg.as_bytes())
+                .unwrap_or_else(|e| panic!("sign #{i} of {total} must succeed, got {e:#x}"));
+            assert!(
+                verify(session, pub_h, CKM_HSS, msg.as_bytes(), &sig).unwrap(),
+                "signature #{i} must verify"
+            );
+        }
+        assert_eq!(
+            crate::state::get_object_attr_u64(prv_h, CKA_LEAF_INDEX).unwrap(),
+            total as u64,
+            "every leaf must have been consumed exactly once"
+        );
+        assert_eq!(
+            crate::state::get_object_attr_u32(prv_h, CKA_HSS_KEYS_REMAINING).unwrap(),
+            0
+        );
+
+        let result = sign(session, prv_h, CKM_HSS, b"one too many");
+        assert_eq!(result, Err(CKR_KEY_EXHAUSTED), "the 33rd sign must fail, not reuse a leaf");
+
+        close_session(session).unwrap();
+    }
 }
