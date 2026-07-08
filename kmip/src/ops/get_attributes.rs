@@ -153,6 +153,9 @@ fn attributes_from_record(r: &ObjectRecord) -> Vec<Attribute> {
         out.push(Attribute::ShortUniqueIdentifier(sid));
     }
     if let Some(s) = &r.alternative_name { out.push(Attribute::AlternativeName(s.clone())); }
+    if let Some((ns, data)) = &r.application_specific_information {
+        out.push(Attribute::ApplicationSpecificInformation { namespace: ns.clone(), data: data.clone() });
+    }
     if let Some(s) = &r.comment { out.push(Attribute::Comment(s.clone())); }
     if let Some(s) = &r.description { out.push(Attribute::Description(s.clone())); }
     if let Some(s) = &r.contact_information { out.push(Attribute::ContactInformation(s.clone())); }
@@ -184,10 +187,22 @@ fn attributes_from_record(r: &ObjectRecord) -> Vec<Attribute> {
     // pins 3600 seconds for newly-created keys (BL-M-14 / AKLC-O-1 /
     // SKLC-O-1). Honour an explicit record value when set.
     out.push(Attribute::LeaseTime(r.lease_time.unwrap_or(3600)));
-    // KMIP §11 `Protection Storage Mask` — bit-flag Integer; the
-    // Baseline corpus pins `Software` (0x01) on every test-created
-    // managed object. BL-M-14 / SKLC-O-1 step #3 / AKLC-O-1 step #3.
-    out.push(Attribute::ProtectionStorageMask(0x01));
+    // Phase 3.3 — Split Key (§2.2.8/§4.29/§4.30/§4.63-4.66). `Some`
+    // only on `ObjectType::SplitKey` share objects.
+    if let Some(v) = r.split_key_method { out.push(Attribute::SplitKeyMethod(v)); }
+    if let Some(n) = r.split_key_parts { out.push(Attribute::SplitKeyParts(n)); }
+    if let Some(n) = r.split_key_threshold { out.push(Attribute::SplitKeyThreshold(n)); }
+    if let Some(n) = r.key_part_identifier { out.push(Attribute::KeyPartIdentifier(n)); }
+    if let Some(v) = r.split_key_polynomial { out.push(Attribute::SplitKeyPolynomial(v)); }
+    // KMIP §11 `Protection Storage Mask` — bit-flag Integer; the mask
+    // actually used, recorded at Create/Register (`r.protection_storage_mask`).
+    // Every record this server has ever produced carries `Software` (0x01) —
+    // the only storage class it has — so the fallback for pre-field records
+    // is the same true value, not a fabricated default. BL-M-14 / SKLC-O-1
+    // step #3 / AKLC-O-1 step #3 pin `Software`.
+    out.push(Attribute::ProtectionStorageMask(
+        r.protection_storage_mask.unwrap_or(0x01),
+    ));
     // KMIP §11 Link attributes — emit EVERY entry of the record's
     // `links` map (K-15), not a cherry-picked subset. Keys are the
     // canonical link-type names written by `create_key_pair`,
@@ -375,6 +390,11 @@ pub(crate) fn canonical_attribute_name(attr: &Attribute) -> &'static str {
         Attribute::KeyFormatType(_)          => "KeyFormatType",
         Attribute::CertificateLength(_)      => "CertificateLength",
         Attribute::LeaseTime(_)              => "LeaseTime",
+        Attribute::SplitKeyMethod(_)         => "SplitKeyMethod",
+        Attribute::SplitKeyParts(_)          => "SplitKeyParts",
+        Attribute::SplitKeyThreshold(_)      => "SplitKeyThreshold",
+        Attribute::KeyPartIdentifier(_)      => "KeyPartIdentifier",
+        Attribute::SplitKeyPolynomial(_)     => "SplitKeyPolynomial",
         Attribute::ProtectionPeriod(_)       => "ProtectionPeriod",
         Attribute::RotateInterval(_)         => "RotateInterval",
         Attribute::RotateOffset(_)           => "RotateOffset",

@@ -24,8 +24,8 @@ use crate::error::{KmipError, Result};
 use crate::kmip30::{
     Attribute, Constraint, EndpointRole, GetConstraintsRequest, GetConstraintsResponse,
     GetUsageAllocationRequest, GetUsageAllocationResponse, KmipAlgorithm, ObjectType,
-    SetDefaultsRequest, SetDefaultsResponse, SetEndpointRoleRequest, SetEndpointRoleResponse,
-    State,
+    SetConstraintsRequest, SetConstraintsResponse, SetDefaultsRequest, SetDefaultsResponse,
+    SetEndpointRoleRequest, SetEndpointRoleResponse, State,
 };
 
 use super::deps::Deps;
@@ -149,9 +149,39 @@ pub fn get_constraints(
     correlation_id: &str,
 ) -> Result<GetConstraintsResponse> {
     emit_request(deps, correlation_id, "GetConstraints", String::new());
-    let resp = GetConstraintsResponse { constraints: server_constraints() };
+    // Phase 3.2 — a client-set override (§6.1.57) wins; absent one,
+    // report the real engine-bounds default.
+    let constraints = deps
+        .constraints
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+        .unwrap_or_else(server_constraints);
+    let resp = GetConstraintsResponse { constraints };
     emit_success(deps, correlation_id, "GetConstraints");
     Ok(resp)
+}
+
+/// `Set Constraints` (KMIP 3.0 §6.1.57 / Table 427) — "set the
+/// constraints that will be applied to Managed Objects during
+/// operations." Replaces the stored set entirely; `Get Constraints`
+/// (§6.1.26) reads it back. Genuinely mutable — before Phase 3.2 the
+/// server always reported a hardcoded engine-bounds table regardless
+/// of what a client tried to set.
+pub fn set_constraints(
+    deps: &Deps,
+    req: SetConstraintsRequest,
+    correlation_id: &str,
+) -> Result<SetConstraintsResponse> {
+    emit_request(
+        deps,
+        correlation_id,
+        "SetConstraints",
+        format!("constraints={}", req.constraints.len()),
+    );
+    *deps.constraints.lock().unwrap_or_else(|e| e.into_inner()) = Some(req.constraints);
+    emit_success(deps, correlation_id, "SetConstraints");
+    Ok(SetConstraintsResponse)
 }
 
 /// The engine-backed constraint table (§7.6 / §7.7). Lengths are the
@@ -469,6 +499,56 @@ mod tests {
         assert!(r.constraints.iter().any(|c| {
             c.attributes.contains(&Attribute::CryptographicAlgorithm(KmipAlgorithm::MlKem1024))
         }));
+    }
+
+    // ── Set Constraints (Phase 3.2) ─────────────────────────────────────
+
+    /// Set→Get round-trips: a client-set constraints list genuinely
+    /// replaces the engine-bounds default, and Get reads it back
+    /// exactly. Before Phase 3.2, `server_constraints()` was a hardcoded
+    /// function — Set Constraints had no store to write into at all.
+    #[test]
+    fn set_constraints_then_get_round_trips() {
+        let d = deps();
+        let custom = vec![Constraint {
+            object_types: vec![ObjectType::SymmetricKey],
+            attributes: vec![
+                Attribute::CryptographicAlgorithm(KmipAlgorithm::Aes),
+                Attribute::CryptographicLength(128),
+            ],
+        }];
+        set_constraints(&d, SetConstraintsRequest { constraints: custom.clone() }, "c").unwrap();
+        let r = get_constraints(&d, GetConstraintsRequest, "c").unwrap();
+        assert_eq!(r.constraints, custom);
+    }
+
+    /// An explicit empty Set Constraints is a real override ("no
+    /// constraints"), distinct from never having called Set Constraints
+    /// at all (which still reports the engine-bounds default).
+    #[test]
+    fn set_constraints_empty_list_overrides_the_default() {
+        let d = deps();
+        set_constraints(&d, SetConstraintsRequest { constraints: vec![] }, "c").unwrap();
+        let r = get_constraints(&d, GetConstraintsRequest, "c").unwrap();
+        assert!(r.constraints.is_empty());
+    }
+
+    /// A later Set Constraints replaces (not merges with) the earlier one.
+    #[test]
+    fn set_constraints_replaces_not_merges() {
+        let d = deps();
+        let first = vec![Constraint {
+            object_types: vec![ObjectType::SymmetricKey],
+            attributes: vec![Attribute::CryptographicAlgorithm(KmipAlgorithm::Aes)],
+        }];
+        let second = vec![Constraint {
+            object_types: vec![ObjectType::PublicKey, ObjectType::PrivateKey],
+            attributes: vec![Attribute::CryptographicAlgorithm(KmipAlgorithm::Rsa)],
+        }];
+        set_constraints(&d, SetConstraintsRequest { constraints: first }, "c1").unwrap();
+        set_constraints(&d, SetConstraintsRequest { constraints: second.clone() }, "c2").unwrap();
+        let r = get_constraints(&d, GetConstraintsRequest, "c").unwrap();
+        assert_eq!(r.constraints, second);
     }
 
     // ── Set Defaults ────────────────────────────────────────────────────

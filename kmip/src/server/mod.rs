@@ -24,6 +24,6 @@ pub mod auth;
 #[cfg(feature = "native")]
 pub mod listener;
 
-pub use auth::{AuthContext, AuthUser, ConfigVerifier, CredentialVerifier, Identity};
+pub use auth::{AuthContext, AuthUser, ConfigVerifier, CredentialVerifier, Identity, SessionRecord};
 #[cfg(feature = "native")]
 pub use listener::{serve, tls_from_pem, tls_mtls, tls_self_signed, ServerError};

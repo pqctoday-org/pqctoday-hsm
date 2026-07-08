@@ -357,6 +357,18 @@ pub const CKM_EDDSA: u32 = 0x0000_1057;
 // range (0x80000000+) — the former 0x1058 squatted unassigned spec-reserved
 // space adjacent to CKM_EDDSA and risked a future OASIS collision.
 pub const CKM_EC_MONTGOMERY_KEY_DERIVE: u32 = 0x8000_0011;
+// G12 — Split Key secret sharing (KMIP 3.0 §6.1.12/§6.1.31, §13.1).
+// PKCS#11 v3.2 has NO mechanism for this at all (verified directly
+// against the spec text, not just the header — no Shamir / secret
+// sharing / threshold-scheme / key-split concept anywhere in it), so
+// this is a genuinely new vendor mechanism, not a gap-fill of an
+// existing one. Covers all four KMIP 3.0 §11.54 Split Key Method
+// Enumeration values (XOR, Prime Field, GF(2^16), GF(2^8)) — the
+// specific method + parameters travel in a
+// `CK_SPLIT_KEY_PARAMS`-style native argument, not separate mechanism
+// codepoints, mirroring how CKM_HSS_KEY_PAIR_GEN carries its levels/
+// param-set choice in one mechanism.
+pub const CKM_PQCTODAY_SPLIT_KEY: u32 = 0x8000_0012;
 // PKCS#11 v3.2 §6.7 dedicated Montgomery-curve DH mechanisms, in the
 // CKM_VENDOR_DEFINED (0x80000000) range per the spec header:
 // CKM_X25519 = CKM_VENDOR_DEFINED | 0x1058, CKM_X448 = | 0x1059.

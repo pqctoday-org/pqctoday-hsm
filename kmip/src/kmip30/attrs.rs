@@ -190,6 +190,46 @@ impl RevocationReason {
     }
 }
 
+/// The typed value of a client-set custom/vendor `Attribute` (KMIP §11's
+/// generic `VendorIdentification` + `AttributeName` + `AttributeValue`
+/// envelope). Found genuinely necessary, not speculative: the OASIS
+/// TL-M-2/TL-M-3 conformance transcripts set `VendorAttribute2` as an
+/// Integer and `VendorAttribute3` as a DateTime and expect `GetAttributes`
+/// to round-trip the same wire type back — a bare `String` value silently
+/// lost that (decoded to `""`, since the old decode arm only matched
+/// `Value::TextString`). Covers the scalar TTLV primitive types actually
+/// exercised by any known transcript; ByteString / Enumeration / BigInteger
+/// / LongInteger custom-attribute values are not corpus-tested and fall
+/// back to being dropped at decode (same graceful-degradation posture as
+/// before this type existed), same as any other genuinely-unsupported
+/// wire shape.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum CustomAttributeValue {
+    Text(String),
+    /// Wire `Value::Integer` (i32) widened to i64 for one shared column
+    /// with `DateTime` (also epoch seconds) — no precision is lost.
+    Integer(i64),
+    /// Epoch seconds, matching every other DateTime-typed `Attribute`
+    /// variant's convention in this enum (see `ActivationDate` etc.).
+    DateTime(i64),
+    Boolean(bool),
+}
+
+impl CustomAttributeValue {
+    /// Stringify for the policy-matching / legacy string-map surface
+    /// (`helpers::strip_x_prefixes`, `helpers::custom_attrs_from`) —
+    /// callers that only ever compared these as strings (policy YAML
+    /// rules match on string patterns) keep working unchanged.
+    pub fn as_policy_string(&self) -> String {
+        match self {
+            Self::Text(s) => s.clone(),
+            Self::Integer(n) => n.to_string(),
+            Self::DateTime(t) => t.to_string(),
+            Self::Boolean(b) => b.to_string(),
+        }
+    }
+}
+
 // ── Attribute enum ──────────────────────────────────────────────────────────
 
 /// One typed KMIP attribute. The variant carries the decoded payload its
@@ -240,9 +280,12 @@ pub enum Attribute {
     /// type + value; for v0.1 we collapse to a single string.
     Name(String),
 
-    /// Arbitrary key-value pair the platform tracks (e.g. `pqc-demo`).
-    /// Mapped to KMIP `Custom Attribute` on the wire.
-    Custom { name: String, value: String },
+    /// Arbitrary key-value pair the platform tracks (e.g. `pqc-demo`), OR
+    /// a genuine client-set KMIP §11 vendor/custom `Attribute` (the
+    /// `VendorIdentification` + `AttributeName` + `AttributeValue`
+    /// envelope — e.g. the OASIS TL-M-2/TL-M-3 conformance transcripts'
+    /// `Barcode`, `VendorAttribute1-3`). Both ride the same wire shape.
+    Custom { name: String, value: CustomAttributeValue },
 
     // ── KMIP Profiles v3.0 §5.1.2 Baseline Server attributes ──────────
     //
@@ -373,6 +416,15 @@ pub enum Attribute {
     /// Integers.
     CertificateLength(i32),
     LeaseTime(u32),
+    /// KMIP §4.64/§4.65/§4.66/§4.30/§4.63 — Phase 3.3 Split Key
+    /// attributes. All read-only, client-set-once-at-creation.
+    SplitKeyMethod(u32),
+    SplitKeyParts(u32),
+    SplitKeyThreshold(u32),
+    KeyPartIdentifier(u32),
+    /// §11.55 wire value (283/285) — only meaningful for the two
+    /// GF(2^8)-based Split Key Methods.
+    SplitKeyPolynomial(u32),
     ProtectionPeriod(u32),
     RotateInterval(u32),
     RotateOffset(i32),

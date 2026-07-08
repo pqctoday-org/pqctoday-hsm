@@ -1,6 +1,6 @@
 [package]
 name = "softhsmrustv3"
-version = "0.8.0"
+version = "0.12.0"
 edition = "2024"
 description = "A native Rust WebAssembly clone of SoftHSMv3"
 
@@ -75,6 +75,12 @@ p521 = { version = "0.13", features = ["ecdsa", "ecdh"] }
 k256 = { version = "0.13", features = ["ecdsa", "ecdh"] }
 pkcs8 = { version = "0.11.0-rc.11", features = ["alloc"] }  # TODO: upgrade when stable release available
 rsa = { version = "0.9", features = ["sha2"] }
+# G12 — Split Key Polynomial Sharing Prime Field (PKCS#11 v3.2 has no
+# secret-sharing mechanism to build on; this is a new vendor mechanism,
+# CKM_PQCTODAY_SPLIT_KEY, implemented from KMIP 3.0 §13.1 directly).
+# Already present transitively via `rsa`'s num-bigint-dig; a direct dep
+# makes the modular-arithmetic API available here.
+num-bigint = "0.4"
 sha2 = "0.10.8"
 # `oid` feature exposes the digest's AssociatedOid, required for PKCS#1 v1.5
 # RSA signatures over SHA3 (CKM_SHA3_384_RSA_PKCS); SHA3-PSS does not need it.

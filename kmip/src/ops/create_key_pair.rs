@@ -396,6 +396,8 @@ pub fn create_key_pair(
             sensitive: req.seed.as_ref().map(|_| false),
             // KMIP §11 Fresh = True for server-generated objects.
             fresh: Some(true),
+            protection_storage_mask: Some(0x01),
+            lease_time: Some(3600),
     ..ObjectRecord::default()
 })?;
     deps.store.put(ObjectRecord {
@@ -450,6 +452,8 @@ pub fn create_key_pair(
             },
             // KMIP §11 Fresh = True for server-generated objects.
             fresh: Some(true),
+            protection_storage_mask: Some(0x01),
+            lease_time: Some(3600),
     ..ObjectRecord::default()
 })?;
 
@@ -632,6 +636,7 @@ fn canonical_name(a: KmipAlgorithm) -> String {
         FrodoKem976Aes | FrodoKem976Shake => "FrodoKEM-976",
         FrodoKem1344Aes | FrodoKem1344Shake => "FrodoKEM-1344",
         ClassicMcEliece6688128 => "Classic-McEliece-6688128",
+        Hss => "HSS",
     }
     .into()
 }

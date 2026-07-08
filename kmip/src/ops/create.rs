@@ -196,6 +196,7 @@ pub fn create(deps: &Deps, mut req: CreateRequest, correlation_id: &str) -> Resu
         cryptographic_parameters: cp,
         supersedes: None,
         name: x.name.clone(),
+        alternative_name: x.alternative_name.clone(),
         links: std::collections::HashMap::new(),
         // Y1 — persist the request's custom attributes so use-time gates read
         // the classification tag off the stored symmetric key.
@@ -209,6 +210,11 @@ pub fn create(deps: &Deps, mut req: CreateRequest, correlation_id: &str) -> Resu
         // KMIP §11 Fresh = True for server-generated objects.
         fresh: Some(true),
         application_specific_information: x.application_specific_information.clone(),
+        protection_storage_mask: Some(0x01),
+        // KMIP §4.34 — server-set max lease cap. Phase 3.1: a real
+        // per-object value (was a get_attributes.rs read-time fallback
+        // with nothing behind it).
+        lease_time: Some(3600),
     ..ObjectRecord::default()
 })?;
 

@@ -222,14 +222,17 @@ mod tests {
     use crate::codec::Tag;
 
     #[test]
-    fn decodes_kat_vector_01_integer_batch_count_1() {
+    fn decodes_kat_vector_01_synthetic_test_tag() {
+        // Filename predates the Tag::SYNTHETIC_TEST_TAG rename; see that
+        // constant's doc comment — 0x42000d is a synthetic probe, not a
+        // real KMIP 3.0 attribute (0x42000d is Reserved in the 3.0 spec).
         let bytes = [
             0x42, 0x00, 0x0d, 0x02, 0x00, 0x00, 0x00, 0x04,
             0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
         ];
         let (frame, n) = decode(&bytes).expect("decode");
         assert_eq!(n, 16);
-        assert_eq!(frame.tag, Tag::BATCH_COUNT);
+        assert_eq!(frame.tag, Tag::SYNTHETIC_TEST_TAG);
         assert_eq!(frame.value, Value::Integer(1));
     }
 

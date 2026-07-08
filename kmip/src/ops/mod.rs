@@ -43,6 +43,7 @@
 pub mod activate;
 pub mod agility;
 pub mod allocation_and_config;
+pub mod async_ops;
 pub mod attribute_mutate;
 pub mod create;
 pub mod create_key_pair;
@@ -70,6 +71,7 @@ pub mod rng_and_pkcs11;
 pub mod session_and_auth;
 pub mod sign;
 pub mod signature_verify;
+pub mod split_key;
 // §6.1.62 Validate (ring-backed cert-chain verification) and §6.1.6/§6.1.50
 // Certify / Re-certify (rcgen + aws_lc_rs PQC CA issuance) are `native` only —
 // their crypto backends do not cross-compile to wasm32. The wasm dispatcher
@@ -79,7 +81,7 @@ pub mod validate;
 #[cfg(feature = "native")]
 pub mod certify;
 
-pub use deps::{Deps, DepsConfig};
+pub use deps::{AsyncJob, AsyncJobState, AsyncJobStore, Deps, DepsConfig, RngSeedMode};
 
 /// K8 test fixture — the BL-M-9-30 Transparent RSA Private Key
 /// components (OASIS corpus, 1024-bit), shared by the Register /

@@ -149,7 +149,7 @@ pub fn log(deps: &Deps, req: LogRequest, correlation_id: &str) -> Result<LogResp
 
 pub fn login(
     deps: &Deps,
-    _req: LoginRequest,
+    req: LoginRequest,
     auth: &AuthContext,
     correlation_id: &str,
 ) -> Result<LoginResponse> {
@@ -163,28 +163,70 @@ pub fn login(
     // dispatcher gate already fails unauthenticated requests wholesale
     // under configured auth; this check is defence-in-depth for
     // direct/in-process callers.
-    if deps.config.auth_enabled() && auth.identity.is_none() {
+    let identity = match &auth.identity {
+        Some(id) => id.clone(),
+        None => {
+            if deps.config.auth_enabled() {
+                return Err(fail_err(
+                    deps,
+                    correlation_id,
+                    "Login",
+                    KmipError::failed(
+                        ResultReason::AuthenticationNotSuccessful,
+                        "Login requires a verified credential when authentication is configured",
+                    ),
+                ));
+            }
+            // Open-auth: no identity to bind the ticket to. The ticket
+            // is still real (a genuine session gets created and can be
+            // Logout-invalidated) — it just authenticates as "anonymous",
+            // matching the harness's credential-free default.
+            crate::server::auth::Identity { username: "anonymous".into() }
+        }
+    };
+
+    // Phase 1.4 (K14) — issue a REAL ticket: random bytes, recorded in
+    // the session store keyed by those bytes, so a later request can
+    // present it (as `Credential::Ticket` in the §8.1.2 Authentication
+    // header) and be authenticated as `identity` without re-sending
+    // full credentials. `Lease Time` (seconds), when supplied, becomes
+    // the session's expiry; omitted ⇒ no server-enforced expiry.
+    let ticket_value = Uuid::new_v4().as_bytes().to_vec();
+    let expires_at = req
+        .lease_time
+        .map(|secs| OffsetDateTime::now_utc() + time::Duration::seconds(secs as i64));
+    deps.sessions.lock().unwrap_or_else(|e| e.into_inner()).insert(
+        ticket_value.clone(),
+        crate::server::auth::SessionRecord { identity, expires_at },
+    );
+
+    emit_success(deps, correlation_id, "Login");
+    Ok(LoginResponse {
+        ticket: crate::kmip30::Ticket {
+            ticket_type: crate::kmip30::TICKET_TYPE_LOGIN,
+            ticket_value,
+        },
+    })
+}
+
+pub fn logout(deps: &Deps, req: LogoutRequest, correlation_id: &str) -> Result<LogoutResponse> {
+    emit_request(deps, correlation_id, "Logout", String::new());
+    // KMIP 3.0 §6.1.35 error table: an unknown/already-invalidated
+    // ticket is `Invalid Ticket`, not a silent no-op success.
+    let removed = deps
+        .sessions
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&req.ticket.ticket_value)
+        .is_some();
+    if !removed {
         return Err(fail_err(
             deps,
             correlation_id,
-            "Login",
-            KmipError::failed(
-                ResultReason::AuthenticationNotSuccessful,
-                "Login requires a verified credential when authentication is configured",
-            ),
+            "Logout",
+            KmipError::invalid_ticket("Logout: ticket does not name a live session"),
         ));
     }
-    // Issue a fresh ticket. v0.1 doesn't enforce ticket presence on
-    // subsequent ops; ticket validation lands when session enforcement
-    // is wired (Phase 12 sandbox MVP).
-    let ticket = format!("urn:pqctoday:ticket:{}", Uuid::new_v4());
-    emit_success(deps, correlation_id, "Login");
-    Ok(LoginResponse { ticket })
-}
-
-pub fn logout(deps: &Deps, _req: LogoutRequest, correlation_id: &str) -> Result<LogoutResponse> {
-    emit_request(deps, correlation_id, "Logout", String::new());
-    // No active session table in v0.1, so logout is a no-op.
     emit_success(deps, correlation_id, "Logout");
     Ok(LogoutResponse)
 }
@@ -333,12 +375,17 @@ mod tests {
     }
 
     #[test]
-    fn login_returns_ticket_string() {
+    fn login_returns_real_ticket_and_creates_a_session() {
         let d = deps_with();
         let r = login(&d, LoginRequest {
             lease_time: None, request_count: None, usage_limits: None,
         }, &AuthContext::open(), "c").unwrap();
-        assert!(r.ticket.starts_with("urn:pqctoday:ticket:"));
+        assert_eq!(r.ticket.ticket_type, crate::kmip30::TICKET_TYPE_LOGIN);
+        assert_eq!(r.ticket.ticket_value.len(), 16, "UUID v4 ticket value");
+        assert!(
+            d.sessions.lock().unwrap().contains_key(&r.ticket.ticket_value),
+            "Login must record a real session, not just return a display string"
+        );
     }
 
     /// K14 — under configured auth, an unauthenticated Login is
@@ -356,10 +403,71 @@ mod tests {
         let err = login(&d, req(), &AuthContext::open(), "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::AuthenticationNotSuccessful);
         // Verified identity (dispatcher-authenticated header credential
-        // or mTLS subject) → ticket issued.
+        // or mTLS subject) → ticket issued, bound to that identity.
         let ctx = AuthContext { identity: Some(Identity { username: "alice".into() }) };
         let r = login(&d, req(), &ctx, "c").unwrap();
-        assert!(r.ticket.starts_with("urn:pqctoday:ticket:"));
+        let sessions = d.sessions.lock().unwrap();
+        let record = sessions.get(&r.ticket.ticket_value).expect("session recorded");
+        assert_eq!(record.identity.username, "alice");
+    }
+
+    /// Two Logins issue two DIFFERENT tickets, and each is independently
+    /// live — a real per-session store, not a shared/global flag.
+    #[test]
+    fn two_logins_create_two_independent_sessions() {
+        let d = deps_with();
+        let req = || LoginRequest { lease_time: None, request_count: None, usage_limits: None };
+        let r1 = login(&d, req(), &AuthContext::open(), "c1").unwrap();
+        let r2 = login(&d, req(), &AuthContext::open(), "c2").unwrap();
+        assert_ne!(r1.ticket.ticket_value, r2.ticket.ticket_value);
+        assert_eq!(d.sessions.lock().unwrap().len(), 2);
+    }
+
+    /// Logout removes the session; a second Logout with the same
+    /// (now-invalid) ticket fails `Invalid Ticket`, not a silent no-op.
+    #[test]
+    fn logout_invalidates_the_ticket_and_rejects_reuse() {
+        let d = deps_with();
+        let login_resp = login(&d, LoginRequest {
+            lease_time: None, request_count: None, usage_limits: None,
+        }, &AuthContext::open(), "c").unwrap();
+
+        logout(&d, LogoutRequest { ticket: login_resp.ticket.clone() }, "c1").unwrap();
+        assert!(d.sessions.lock().unwrap().is_empty());
+
+        let err = logout(&d, LogoutRequest { ticket: login_resp.ticket }, "c2").unwrap_err();
+        assert_eq!(err.result_reason(), ResultReason::InvalidTicket);
+    }
+
+    #[test]
+    fn logout_with_unknown_ticket_fails_invalid_ticket() {
+        let d = deps_with();
+        let err = logout(&d, LogoutRequest {
+            ticket: crate::kmip30::Ticket {
+                ticket_type: crate::kmip30::TICKET_TYPE_LOGIN,
+                ticket_value: vec![0xAA; 16],
+            },
+        }, "c").unwrap_err();
+        assert_eq!(err.result_reason(), ResultReason::InvalidTicket);
+    }
+
+    /// A `Lease Time` on Login makes the session expire for real.
+    #[test]
+    fn login_with_lease_time_expires_the_session() {
+        let d = deps_with();
+        let r = login(&d, LoginRequest {
+            lease_time: Some(0), request_count: None, usage_limits: None,
+        }, &AuthContext::open(), "c").unwrap();
+        let sessions = d.sessions.lock().unwrap();
+        let record = sessions.get(&r.ticket.ticket_value).unwrap();
+        assert!(
+            record.is_expired(OffsetDateTime::now_utc() + time::Duration::seconds(1)),
+            "a 0-second lease must already be expired a moment later"
+        );
+        assert!(
+            !record.is_expired(OffsetDateTime::now_utc() - time::Duration::seconds(10)),
+            "must not be expired relative to a time before it was even issued"
+        );
     }
 
     #[test]

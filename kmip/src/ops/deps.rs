@@ -13,7 +13,7 @@
 //! shares it across all per-connection tasks.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex, Weak};
 
 use crate::auditlog::AuditSink;
 use crate::policy::Engine;
@@ -29,6 +29,100 @@ pub struct StreamCtx {
     /// part to target the same key.
     pub uid: String,
 }
+
+/// Phase 4 — mutable state of one server-tracked asynchronous job
+/// (KMIP 3.0 §7.2 `Asynchronous Request` Structure content, plus the
+/// eventual outcome once `stage == Completed`).
+pub struct AsyncJobState {
+    pub operation: crate::kmip30::Operation,
+    pub stage: crate::kmip30::ProcessingStage,
+    pub submitted_at: time::OffsetDateTime,
+    /// `None` until `stage == Completed`. Holds exactly what a
+    /// synchronous call to the same operation would have produced —
+    /// the async subsystem changes *when* the client learns the
+    /// result, never *what* the result is.
+    pub outcome: Option<crate::error::Result<crate::kmip30::ResponsePayload>>,
+}
+
+/// One server-tracked async job (§6.1.43 Poll / §6.1.5 Cancel / §6.1.44
+/// Process / §6.1.46 Query Asynchronous Requests all key off the same
+/// record via its `Asynchronous Correlation Value`).
+///
+/// `done` is signalled exactly once, when `state.stage` transitions to
+/// `Completed`. `Process` blocks on it instead of re-running the
+/// operation itself — double-execution would be a real correctness bug
+/// (e.g. double-decrementing a Usage Limits counter), not just an
+/// implementation nuance.
+pub struct AsyncJob {
+    pub state: Mutex<AsyncJobState>,
+    pub done: Condvar,
+}
+
+impl AsyncJob {
+    pub fn new(operation: crate::kmip30::Operation) -> Arc<Self> {
+        Arc::new(Self {
+            state: Mutex::new(AsyncJobState {
+                operation,
+                stage: crate::kmip30::ProcessingStage::Submitted,
+                submitted_at: time::OffsetDateTime::now_utc(),
+                outcome: None,
+            }),
+            done: Condvar::new(),
+        })
+    }
+
+    /// Block the calling thread until this job reaches `Completed`.
+    /// Used by `Process` (§6.1.44: "effectively changing the
+    /// processing mode for that batch item to that resembling
+    /// synchronous processing") and by the `Deps::new`-only (no
+    /// `self_handle`) eager-fallback executor, where the predicate is
+    /// already true by the time anything can call this — so the wait
+    /// never actually blocks there.
+    pub fn wait_until_completed(&self) {
+        let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        while st.stage != crate::kmip30::ProcessingStage::Completed {
+            st = self.done.wait(st).unwrap_or_else(|e| e.into_inner());
+        }
+    }
+
+    pub fn mark_in_process(&self) {
+        let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        st.stage = crate::kmip30::ProcessingStage::InProcess;
+    }
+
+    pub fn mark_completed(&self, outcome: crate::error::Result<crate::kmip30::ResponsePayload>) {
+        {
+            let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            st.stage = crate::kmip30::ProcessingStage::Completed;
+            st.outcome = Some(outcome);
+        }
+        self.done.notify_all();
+    }
+
+    /// `Cancel` (§6.1.5) — atomically transition `Submitted` →
+    /// `Completed` (with an `Operation Canceled By Requester` outcome)
+    /// and report success, or report failure without touching
+    /// anything if the job has already moved past `Submitted`. Must be
+    /// a single locked check-and-set: reading `stage` and then calling
+    /// `mark_completed` as two separate lock acquisitions would race
+    /// against a background executor thread concurrently transitioning
+    /// `Submitted → InProcess → Completed`, which could clobber a
+    /// genuine real result with a fake "canceled" one.
+    pub fn try_cancel_if_submitted(&self) -> bool {
+        let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if st.stage != crate::kmip30::ProcessingStage::Submitted {
+            return false;
+        }
+        st.stage = crate::kmip30::ProcessingStage::Completed;
+        st.outcome = Some(Err(crate::error::KmipError::operation_canceled_by_requester()));
+        drop(st);
+        self.done.notify_all();
+        true
+    }
+}
+
+/// Keyed by the server-generated §9.1 `Asynchronous Correlation Value`.
+pub type AsyncJobStore = Mutex<HashMap<Vec<u8>, Arc<AsyncJob>>>;
 
 /// Runtime configuration the op handlers need.
 #[derive(Clone, Debug)]
@@ -62,6 +156,10 @@ pub struct DepsConfig {
     /// [`Deps::with_ca_key`] in tests. See the module doc on
     /// [`CaKeyDesignation`] for the authorisation model.
     pub ca_key: Option<CaKeyDesignation>,
+
+    /// §6.1.55 RNG Seed behavior — see [`RngSeedMode`]. Defaults to
+    /// full-consume (the pre-existing behavior; CS-RNG-O-1 pins it).
+    pub rng_seed_mode: RngSeedMode,
 }
 
 /// P2.3 — designates the single key/cert pair the server may use as a
@@ -97,6 +195,33 @@ pub struct CaKeyDesignation {
     pub certificate_uid: String,
 }
 
+/// KMIP 3.0 §6.1.55 `RNG Seed` — the spec text: "The server MAY elect to
+/// ignore the information provided by the client and MAY indicate this
+/// to the client by returning zero as the value in the Data Length
+/// response." This is a server-chosen, mutually-exclusive policy
+/// choice, not client-selectable per request — the OASIS Cryptographic
+/// Services Optional profile pins four concrete behaviors as separate
+/// conformance tests (CS-RNG-O-1..4), each expecting a different one:
+///
+/// | Variant | Response `DataLength` for a 32-byte seed | Test |
+/// |---|---|---|
+/// | `FullConsume` (default) | 32 (all of it) | CS-RNG-O-1 |
+/// | `PartialConsume` | 16 (a fixed cap, per the pinned transcript) | CS-RNG-O-2 |
+/// | `Ignore` | 0 | CS-RNG-O-3 |
+/// | `Deny` | n/a — `PermissionDenied` | CS-RNG-O-4 |
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RngSeedMode {
+    #[default]
+    FullConsume,
+    PartialConsume,
+    Ignore,
+    Deny,
+}
+
+/// Fixed byte cap for `RngSeedMode::PartialConsume` — CS-RNG-O-2 pins
+/// exactly 16 regardless of the client-supplied seed length.
+pub const RNG_SEED_PARTIAL_CONSUME_CAP: usize = 16;
+
 impl DepsConfig {
     /// `true` when a credential store is configured (auth enforced).
     pub fn auth_enabled(&self) -> bool {
@@ -113,6 +238,7 @@ impl Default for DepsConfig {
             server_version: env!("CARGO_PKG_VERSION").into(),
             auth_users: Vec::new(), // open-auth — replay harness depends on this
             ca_key: None,           // not a CA unless explicitly configured
+            rng_seed_mode: RngSeedMode::FullConsume,
         }
     }
 }
@@ -148,6 +274,49 @@ pub struct Deps {
     /// persisted in the object store and is reset on restart.
     pub object_defaults:
         Mutex<HashMap<crate::kmip30::ObjectType, Vec<crate::kmip30::Attribute>>>,
+    /// Phase 3.2 — client-set §6.1.57 Constraints, replacing the
+    /// engine-bounds default `Get Constraints` (§6.1.26) otherwise
+    /// reports. `None` ⇒ no client override yet; `get_constraints`
+    /// falls back to the static engine-derived table. `Some(vec![])`
+    /// (an explicit empty Set Constraints) is a real override meaning
+    /// "no constraints" — distinct from `None`.
+    pub constraints: Mutex<Option<Vec<crate::kmip30::Constraint>>>,
+    /// K14 (Phase 1.4) — live `Login`-issued sessions, keyed by the
+    /// ticket's `Ticket Value` bytes. `Logout` removes an entry; a
+    /// `Credential::Ticket` presented in a later request's §8.1.2
+    /// `Authentication` header is looked up here
+    /// (`dispatcher::authenticate_request`). Server-wide (not
+    /// per-connection) — matches this server's other session-scale
+    /// state (`pkcs11_virtual_initialized`).
+    pub sessions: Mutex<HashMap<Vec<u8>, crate::server::auth::SessionRecord>>,
+    /// KMIP §6.1.42 PKCS_11 passthrough — tracks whether a client has
+    /// issued `C_Initialize` without an intervening `C_Finalize`
+    /// (PKCS#11 v3.2 §5.6 library-lifecycle state). Deliberately
+    /// SEPARATE from `engine_session`'s real init state: the engine
+    /// stays initialized for the server's whole lifetime so every other
+    /// KMIP operation keeps working, so a client-driven `C_Finalize`
+    /// here must not tear down the real engine out from under other
+    /// tenants. Read-only PKCS#11 functions (`C_GetInfo`, ...) still
+    /// dispatch to the real engine regardless of this flag.
+    pub pkcs11_virtual_initialized: std::sync::atomic::AtomicBool,
+    /// Phase 4 — live asynchronous jobs, keyed by the server-generated
+    /// §9.1 Asynchronous Correlation Value. See [`AsyncJob`].
+    pub async_jobs: AsyncJobStore,
+    /// Phase 4 — a weak self-reference, set once via
+    /// [`Deps::install_self_handle`] right after the production binary
+    /// wraps its `Deps` in `Arc` (`bin/pqctoday-kmip.rs` /
+    /// `server::listener`). Lets the async-job executor hand a
+    /// `'static`-lifetime `Arc<Deps>` to a genuine background OS
+    /// thread. **Unset in every test that builds `Deps` directly via
+    /// [`Deps::new`]** (544+ existing call sites) — those transparently
+    /// fall back to running the job inline, synchronously, before the
+    /// enqueuing call returns (see `dispatcher::run_async_job_eagerly`).
+    /// That fallback is fully protocol-correct — the enqueuing
+    /// response is still `OperationPending`, never the payload — it
+    /// just isn't genuinely deferred past the enqueuing request, which
+    /// no test needs. Not `Clone`/`Copy`, so it lives behind a
+    /// `OnceLock`.
+    pub self_handle: std::sync::OnceLock<Weak<Deps>>,
 }
 
 impl Deps {
@@ -166,15 +335,31 @@ impl Deps {
             streams: Mutex::new(HashMap::new()),
             next_correlation: std::sync::atomic::AtomicU64::new(1),
             object_defaults: Mutex::new(HashMap::new()),
+            constraints: Mutex::new(None),
+            sessions: Mutex::new(HashMap::new()),
+            pkcs11_virtual_initialized: std::sync::atomic::AtomicBool::new(false),
+            async_jobs: Mutex::new(HashMap::new()),
+            self_handle: std::sync::OnceLock::new(),
         }
     }
 
-    /// Issue a fresh 8-byte correlation value for a new multi-part stream.
+    /// Issue a fresh 8-byte correlation value for a new multi-part stream
+    /// (or a fresh async job — same generator, disjoint namespaces).
     pub fn new_correlation_value(&self) -> Vec<u8> {
         let n = self
             .next_correlation
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         n.to_be_bytes().to_vec()
+    }
+
+    /// Phase 4 — enable genuine background execution of asynchronous
+    /// jobs. Call once, immediately after wrapping a freshly-built
+    /// `Deps` in `Arc` (`let deps = Arc::new(Deps::new(...)); deps.install_self_handle();`).
+    /// Without this call the async-job executor still works correctly,
+    /// just eagerly/inline rather than on a detached thread — see
+    /// [`Deps::self_handle`].
+    pub fn install_self_handle(self: &Arc<Self>) {
+        let _ = self.self_handle.set(Arc::downgrade(self));
     }
 
     /// Construct with an engine session for real bridge wiring. Used by

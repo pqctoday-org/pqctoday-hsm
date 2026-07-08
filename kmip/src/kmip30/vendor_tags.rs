@@ -14,9 +14,13 @@
 /// `PQCToday-SharedSecret` (`0x540001`) — carries the ML-KEM
 /// encapsulation shared secret in an Encrypt response payload.
 ///
-/// KMIP 3.0 has no Encapsulate operation; this server overloads
-/// Encrypt/Decrypt for ML-KEM encapsulation/decapsulation as a
-/// documented vendor extension (see `docs/CONFORMANCE_REPORT.md`).
+/// The published KMIP 3.0 (CSD01) has no Encapsulate/Decapsulate
+/// operation — that pair is a later WD19 addition, which this server
+/// also implements natively (`ops::encapsulate`/`ops::decapsulate`,
+/// see `docs/CONFORMANCE_REPORT.md §4.1`). This tag exists for the
+/// separate, still-needed **pre-WD19 client** path: this server
+/// overloads Encrypt/Decrypt for ML-KEM encapsulation/decapsulation as
+/// a documented backward-compatible vendor extension.
 /// The shared secret previously rode the standard `IVCounterNonce`
 /// tag (`0x42003d`), which is wire-ambiguous with classical RandomIV
 /// responses (compliance-audit B-7); this dedicated extension tag

@@ -1,6 +1,6 @@
 # OASIS KMIP 3.0 Dispatcher Replay Report
 
-Generated: 2026-07-05 23:18:54 UTC
+Generated: 2026-07-08 04:02:23 UTC
 
 
 ## Aggregate
@@ -8,20 +8,20 @@ Generated: 2026-07-05 23:18:54 UTC
 
 | Status | Count | % of total |
 |---|---|---|
-| **PASS** | 92 | 90.2% |
+| **PASS** | 97 | 95.1% |
 | **FAIL** | 0 | 0.0% |
 | ERROR | 0 | 0.0% |
 | SKIP_OP (op not implemented) | 0 | 0.0% |
 | SKIP_DEPRECATED (DES / 3DES / DSA out of scope) | 5 | 4.9% |
-| SKIP_PRECONDITION (needs prior-transcript state) | 2 | 2.0% |
-| SKIP_POLICY_VARIANT (mutually-exclusive policy) | 3 | 2.9% |
+| SKIP_PRECONDITION (needs prior-transcript state) | 0 | 0.0% |
+| SKIP_POLICY_VARIANT (mutually-exclusive policy) | 0 | 0.0% |
 | SKIP_PARSE (XML malformed) | 0 | 0.0% |
 | **Total** | **102** | 100.0% |
 
 
-Of the 92 tests that exercise only implemented + non-deprecated ops:
+Of the 97 tests that exercise only implemented + non-deprecated ops:
 
-  - **92 pass (100%)**
+  - **97 pass (100%)**
 
   - 0 fail
 
@@ -40,26 +40,6 @@ Of the 92 tests that exercise only implemented + non-deprecated ops:
   - `SKFF-M-4-30.xml` — 3DES — deprecated (NIST SP 800-131A r2 §1.2.1)
 
   - `SKFF-M-8-30.xml` — 3DES — deprecated (NIST SP 800-131A r2 §1.2.1)
-
-
-
-2 test(s) skipped — depend on inter-transcript state 
-our hermetic per-test harness wipes:
-
-  - `SASED-M-3-30.xml` — Locate-by-GroupLink of SecretData Registered in SASED-M-2; hermetic per-test isolation wipes it
-
-  - `TL-M-3-30.xml` — Locate-by-ApplicationSpecificInformation of object Created in TL-M-2; hermetic per-test isolation wipes it
-
-
-
-3 test(s) skipped — pin a mutually-exclusive policy 
-choice our server does not select:
-
-  - `CS-RNG-O-2-30.xml` — RNGSeed policy variant: partial-consume (DataLength=16). We implement full-consume per CS-RNG-O-1
-
-  - `CS-RNG-O-3-30.xml` — RNGSeed policy variant: ignore-seed (DataLength=0). We implement full-consume per CS-RNG-O-1
-
-  - `CS-RNG-O-4-30.xml` — RNGSeed policy variant: deny (PermissionDenied). We implement full-consume per CS-RNG-O-1
 
 
 
@@ -135,6 +115,9 @@ choice our server does not select:
 | `CS-BC-M-GCM-3-30.xml` | PASS |  |
 | `CS-RNG-M-1-30.xml` | PASS |  |
 | `CS-RNG-O-1-30.xml` | PASS |  |
+| `CS-RNG-O-2-30.xml` | PASS |  |
+| `CS-RNG-O-3-30.xml` | PASS |  |
+| `CS-RNG-O-4-30.xml` | PASS |  |
 | `MSGENC-HTTPS-M-1-30.xml` | PASS |  |
 | `MSGENC-JSON-M-1-30.xml` | PASS |  |
 | `MSGENC-XML-M-1-30.xml` | PASS |  |
@@ -145,6 +128,7 @@ choice our server does not select:
 | `QS-M-2-30.xml` | PASS |  |
 | `SASED-M-1-30.xml` | PASS |  |
 | `SASED-M-2-30.xml` | PASS |  |
+| `SASED-M-3-30.xml` | PASS |  |
 | `SKFF-M-1-30.xml` | PASS |  |
 | `SKFF-M-10-30.xml` | PASS |  |
 | `SKFF-M-11-30.xml` | PASS |  |
@@ -160,13 +144,9 @@ choice our server does not select:
 | `SKLC-O-1-30.xml` | PASS |  |
 | `TL-M-1-30.xml` | PASS |  |
 | `TL-M-2-30.xml` | PASS |  |
+| `TL-M-3-30.xml` | PASS |  |
 | `BL-M-12-30.xml` | SKIP_DEPRECATED | DSA — deprecated (NIST SP 800-186 §5.4) |
 | `BL-M-13-30.xml` | SKIP_DEPRECATED | DSA — deprecated (NIST SP 800-186 §5.4) |
 | `SKFF-M-12-30.xml` | SKIP_DEPRECATED | 3DES — deprecated (NIST SP 800-131A r2 §1.2.1) |
 | `SKFF-M-4-30.xml` | SKIP_DEPRECATED | 3DES — deprecated (NIST SP 800-131A r2 §1.2.1) |
 | `SKFF-M-8-30.xml` | SKIP_DEPRECATED | 3DES — deprecated (NIST SP 800-131A r2 §1.2.1) |
-| `CS-RNG-O-2-30.xml` | SKIP_POLICY_VARIANT | RNGSeed policy variant: partial-consume (DataLength=16). We implement full-consume per CS-RNG-O-1 |
-| `CS-RNG-O-3-30.xml` | SKIP_POLICY_VARIANT | RNGSeed policy variant: ignore-seed (DataLength=0). We implement full-consume per CS-RNG-O-1 |
-| `CS-RNG-O-4-30.xml` | SKIP_POLICY_VARIANT | RNGSeed policy variant: deny (PermissionDenied). We implement full-consume per CS-RNG-O-1 |
-| `SASED-M-3-30.xml` | SKIP_PRECONDITION | Locate-by-GroupLink of SecretData Registered in SASED-M-2; hermetic per-test isolation wipes it |
-| `TL-M-3-30.xml` | SKIP_PRECONDITION | Locate-by-ApplicationSpecificInformation of object Created in TL-M-2; hermetic per-test isolation wipes it |

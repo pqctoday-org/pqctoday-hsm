@@ -284,6 +284,7 @@ pub fn canonical_name(a: KmipAlgorithm) -> String {
         FrodoKem1344Aes | FrodoKem1344Shake => "FrodoKEM-1344",
         // BSI TR-02102-1 §2.4.2.
         ClassicMcEliece6688128 => "Classic-McEliece-6688128",
+        Hss => "HSS",
     }
     .into()
 }
@@ -411,8 +412,12 @@ pub fn custom_attrs_from(attrs: &[crate::kmip30::Attribute]) -> std::collections
 /// `x-`-prefixed) names, for *persistence* onto the managed object. Register
 /// stores attributes in this form so GetAttributes round-trips them verbatim
 /// (BL-M-14); CreateKeyPair now does the same (Y1) so use-time policy gates can
-/// read the classification back off the stored key.
-pub fn raw_custom_attrs(attrs: &[crate::kmip30::Attribute]) -> std::collections::HashMap<String, String> {
+/// read the classification back off the stored key. Typed (not `String`) so
+/// an Integer/DateTime-valued custom attribute keeps its real wire type
+/// through storage — see [`crate::kmip30::CustomAttributeValue`].
+pub fn raw_custom_attrs(
+    attrs: &[crate::kmip30::Attribute],
+) -> std::collections::HashMap<String, crate::kmip30::CustomAttributeValue> {
     use crate::kmip30::Attribute;
     let mut m = std::collections::HashMap::new();
     for a in attrs {
@@ -424,11 +429,15 @@ pub fn raw_custom_attrs(attrs: &[crate::kmip30::Attribute]) -> std::collections:
 }
 
 /// Normalise a stored custom-attribute map (whose keys keep the `x-` prefix) to
-/// the bare-name form the policy engine keys on (Y1). Used at use-time ops
-/// (Sign / Encrypt / …) where the attributes come off the stored object, not
-/// the request.
+/// the bare-name form the policy engine keys on (Y1), stringifying each typed
+/// value via [`crate::kmip30::CustomAttributeValue::as_policy_string`] — policy
+/// YAML rules match on string patterns, so this is the one place the type
+/// information intentionally collapses back to a string; the *stored* record
+/// (`ObjectRecord.custom_attributes`) and the wire round-trip
+/// (`GetAttributes`) stay typed. Used at use-time ops (Sign / Encrypt / …)
+/// where the attributes come off the stored object, not the request.
 pub fn strip_x_prefixes(
-    raw: &std::collections::HashMap<String, String>,
+    raw: &std::collections::HashMap<String, crate::kmip30::CustomAttributeValue>,
 ) -> std::collections::HashMap<String, String> {
     raw.iter()
         .map(|(k, v)| {
@@ -436,7 +445,7 @@ pub fn strip_x_prefixes(
                 .strip_prefix("x-")
                 .or_else(|| k.strip_prefix("X-"))
                 .unwrap_or(k);
-            (bare.to_string(), v.clone())
+            (bare.to_string(), v.as_policy_string())
         })
         .collect()
 }
@@ -728,6 +737,10 @@ pub fn native_sign_mech_with_params(
         // P1 (2026-07-05): pure EdDSA signs the message directly — no
         // caller-selectable hash parameter, unlike RSA/ECDSA above.
         Ed25519 => c::CKM_EDDSA,
+        // HSS/LMS (RFC 8554) — no caller-selectable hash parameter either;
+        // the hash family is fixed by the key's own LMS parameter set
+        // (CKA_LMS_PARAM_SET), not by CryptographicParameters.
+        Hss => c::CKM_HSS,
         other => {
             return Err(KmipError::failed(
                 crate::error::ResultReason::OperationNotSupported,
@@ -957,14 +970,18 @@ pub fn find_handle_for_object(
     let target_class = match object_type {
         ObjectType::PrivateKey => c::CKO_PRIVATE_KEY,
         ObjectType::PublicKey => c::CKO_PUBLIC_KEY,
-        ObjectType::SymmetricKey | ObjectType::SecretData => c::CKO_SECRET_KEY,
+        // Phase 3.3 — a Split Key part is a real engine `Generic Secret`
+        // object (`native::split_key::split` registers it exactly like
+        // `register_generic_secret_bytes`), same class as SecretData.
+        ObjectType::SymmetricKey | ObjectType::SecretData | ObjectType::SplitKey => {
+            c::CKO_SECRET_KEY
+        }
         // PKCS#11 CKO_CERTIFICATE = 0x01, not exposed in softhsmrustv3 constants
         ObjectType::Certificate => 0x01,
         // KMIP-only object types — no PKCS#11 cryptoki class maps cleanly.
         // Surface as ItemNotFound by returning a sentinel that never
         // matches a real handle class (CKO_VENDOR_DEFINED start = 0x80000000).
-        ObjectType::SplitKey
-        | ObjectType::OpaqueObject
+        ObjectType::OpaqueObject
         | ObjectType::PgpKey
         | ObjectType::CertificateRequest
         | ObjectType::User

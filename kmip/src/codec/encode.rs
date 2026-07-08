@@ -124,14 +124,18 @@ mod tests {
 
     #[test]
     fn integer_value_one_encodes_to_kat_vector_01() {
-        // kat/ttlv-wire/01-integer-batch-count-1.bin:
+        // kat/ttlv-wire/01-integer-batch-count-1.bin (filename predates the
+        // Tag::SYNTHETIC_TEST_TAG rename — this codepoint is a synthetic
+        // probe for the Integer/Boolean primitive codec paths, not a real
+        // KMIP 3.0 attribute; 0x42000d is Reserved in 3.0, see the tag's
+        // doc comment):
         //   42 00 0d 02 00 00 00 04 00 00 00 01 00 00 00 00
-        //   ^^^^^^^^ tag (BatchCount = 0x42000d)
+        //   ^^^^^^^^ tag (synthetic test probe = 0x42000d)
         //            ^^ type (Integer = 0x02)
         //               ^^^^^^^^^^^ length 4
         //                          ^^^^^^^^^^^ value (1, signed 32-bit BE)
         //                                     ^^^^^^^^^^^ 4 bytes of padding
-        let frame = TtlvFrame::new(Tag::BATCH_COUNT, Value::Integer(1));
+        let frame = TtlvFrame::new(Tag::SYNTHETIC_TEST_TAG, Value::Integer(1));
         let bytes = encode_to_vec(&frame);
         assert_eq!(
             bytes,
@@ -162,7 +166,7 @@ mod tests {
 
     #[test]
     fn boolean_true_pads_to_8_bytes() {
-        let frame = TtlvFrame::new(Tag::BATCH_COUNT, Value::Boolean(true));
+        let frame = TtlvFrame::new(Tag::SYNTHETIC_TEST_TAG, Value::Boolean(true));
         let bytes = encode_to_vec(&frame);
         // header (3+1+4=8) + value (8) + pad (0 — Boolean body is already 8)
         assert_eq!(bytes.len(), 16);

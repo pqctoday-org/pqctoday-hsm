@@ -130,7 +130,9 @@ pub enum Decision {
     /// than the stored object currently carries. Dispatcher MUST:
     ///
     /// 1. Generate a fresh keypair / key under `new_algorithm`.
-    /// 2. Mark the original (`original_uid`) as `Deprecated` (KMIP lifecycle).
+    /// 2. Mark the original (`original_uid`) as `Deactivated` (KMIP 3.0
+    ///    §11.56 State Enumeration has no "Deprecated" value — this is
+    ///    the correct state and matches what `agility.rs` actually sets).
     /// 3. Link new ↔ old via the `x-pqctoday-supersedes` custom attribute
     ///    so verify-old-signature flows can still locate the predecessor.
     /// 4. Re-issue the original op against the new key handle.

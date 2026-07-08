@@ -1058,6 +1058,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "num-bigint"
+version = "0.4.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c89e69e7e0f03bea5ef08013795c25018e101932225a656383bd384495ecc367"
+dependencies = [
+ "num-integer",
+ "num-traits",
+]
+
+[[package]]
 name = "num-bigint-dig"
 version = "0.8.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1650,7 +1660,7 @@ checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
 
 [[package]]
 name = "softhsmrustv3"
-version = "0.8.0"
+version = "0.12.0"
 dependencies = [
  "aes 0.8.4",
  "aes-gcm",
@@ -1676,6 +1686,7 @@ dependencies = [
  "k256",
  "lazy_static",
  "ml-kem",
+ "num-bigint",
  "oqs",
  "p256",
  "p384",

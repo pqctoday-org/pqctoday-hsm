@@ -45,6 +45,25 @@ pub fn register(
         format!("object_type={:?} attrs={}", req.object_type, req.attributes.len()),
     );
 
+    // KMIP 3.0 §11 `Protection Storage Mask` / §6.1.48 `Protection
+    // Storage Masks` — this server only ever stores objects in
+    // software (`Software = 0x01`); no other storage class exists to
+    // truthfully claim. Honour a client-supplied permitted-set by
+    // rejecting the request when Software isn't a member, instead of
+    // silently reporting Software regardless of what was asked for.
+    if let Some(masks) = req.protection_storage_masks {
+        if masks & 0x01 == 0 {
+            return Err(fail_err(
+                deps,
+                correlation_id,
+                "Register",
+                KmipError::invalid_field(
+                    "Protection Storage Masks: server only supports Software (0x01) storage",
+                ),
+            ));
+        }
+    }
+
     // K17 — §2.1.5 / §6.1.48: a KeyBlock carrying `KeyWrappingData`
     // holds AES-KW-wrapped material. Resolve the KEK (Active +
     // UnwrapKey usage), unwrap, decode the plaintext per Encoding
@@ -350,6 +369,36 @@ pub fn register(
                 import.map_err(|rv| fail_err(deps, correlation_id, "Register",
                     super::helpers::ck_rv_to_kmip_error(rv, "Register:pqc-import")))?;
             }
+            // HSS/LMS (RFC 8554) — separate from the generic PQC-family
+            // block above because `native_parameter_set` deliberately has
+            // no `Hss` arm: this server supports HSS Register-import but
+            // NOT KMIP-driven keygen (no `native::generate_hss_keypair`
+            // exists), so `CreateKeyPair` on Hss correctly stays
+            // unsupported while Register still works. The engine-side
+            // LMS/LM-OTS parameter combination is fixed for v0.1 (see
+            // `register_hss_private_key`'s doc comment) — no CKP_* to
+            // cross-check here, unlike the generic PQC block above.
+            (ObjectType::PrivateKey | ObjectType::PublicKey, crate::kmip30::KmipAlgorithm::Hss) => {
+                if fmt != KeyFormatType::Raw as u32 {
+                    return Err(fail_err(deps, correlation_id, "Register",
+                        KmipError::key_format_type_not_supported(format!(
+                            "HSS Register: engine import supports KeyFormatType \
+                             Raw (0x01) only, got 0x{fmt:02x}",
+                        ))));
+                }
+                let label = "kmip-register-hss";
+                let import = if req.object_type == ObjectType::PublicKey {
+                    softhsmrustv3::native::register_hss_public_key(
+                        session, material, &cka_id_bytes, label,
+                    )
+                } else {
+                    softhsmrustv3::native::register_hss_private_key(
+                        session, material, &cka_id_bytes, label,
+                    )
+                };
+                import.map_err(|rv| fail_err(deps, correlation_id, "Register",
+                    super::helpers::ck_rv_to_kmip_error(rv, "Register:hss-import")))?;
+            }
             _ => {}
         }
     }
@@ -366,7 +415,7 @@ pub fn register(
     // attributes (vendor-extension envelope) so GetAttributes can
     // surface them. BL-M-14 / SKFF-M-{9..11} step #0 supply
     // `<Attribute>` envelopes inside `<Attributes>`.
-    let mut custom_attributes: HashMap<String, String> = HashMap::new();
+    let mut custom_attributes: HashMap<String, crate::kmip30::CustomAttributeValue> = HashMap::new();
     let mut links: HashMap<String, String> = HashMap::new();
     // KMIP 3.0 §11 — Sensitive / Extractable are client-settable at
     // Register time (BL-M-12 supplies Sensitive=true in the template);
@@ -448,6 +497,8 @@ pub fn register(
         usage_limits_remaining: x.usage_limits_total,
         usage_limits_unit: x.usage_limits_unit,
         application_specific_information: x.application_specific_information.clone(),
+        protection_storage_mask: Some(0x01),
+        lease_time: Some(3600),
         sensitive,
         always_sensitive: sensitive,
         extractable,
@@ -456,6 +507,7 @@ pub fn register(
         original_creation_date: Some(now),
         supersedes: None,
         name,
+        alternative_name: x.alternative_name.clone(),
         links,
         custom_attributes,
         object_groups: x.object_groups.clone(),
@@ -741,6 +793,15 @@ pub(crate) struct ExtractedAttrs {
     /// template — multi-instance, so a list. SASED-M-2 registers an
     /// object into a group; SASED-M-3 then Locates it by that group.
     pub object_groups: Vec<String>,
+    /// `Alternative Name` (KMIP §4.4, 0x4200bf) — a client-set secondary
+    /// name for the object (e.g. a barcode/serial-style label). Was
+    /// decoded off the wire (`Attribute::AlternativeName`) but silently
+    /// dropped by this extractor's catch-all — TL-M-2 sets one and
+    /// GetAttributeList already checked `obj.alternative_name.is_some()`
+    /// (get_attribute_list.rs), so the name surface reported "not set"
+    /// for an attribute the client explicitly provided (found via the
+    /// OASIS TL-M-3 conformance transcript, Honest-Maximum Phase 2.1).
+    pub alternative_name: Option<String>,
 }
 
 pub(crate) fn extract_attrs(attrs: &[Attribute]) -> ExtractedAttrs {
@@ -753,6 +814,7 @@ pub(crate) fn extract_attrs(attrs: &[Attribute]) -> ExtractedAttrs {
         usage_limits_unit: None,
         application_specific_information: None,
         object_groups: Vec::new(),
+        alternative_name: None,
     };
     for a in attrs {
         match a {
@@ -775,6 +837,7 @@ pub(crate) fn extract_attrs(attrs: &[Attribute]) -> ExtractedAttrs {
             Attribute::ApplicationSpecificInformation { namespace, data } => {
                 out.application_specific_information = Some((namespace.clone(), data.clone()));
             }
+            Attribute::AlternativeName(n) => out.alternative_name = Some(n.clone()),
             // Multi-instance: accumulate every Object Group label so an
             // object Registered into several groups is locatable by any.
             Attribute::ObjectGroup(g) => {
@@ -903,6 +966,44 @@ mod tests {
         assert_eq!(resp.uid, "urn:fixed");
         let err = register(&d, req(), "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::ObjectAlreadyExists);
+    }
+
+    #[test]
+    fn register_records_the_real_protection_storage_mask() {
+        let d = deps_with();
+        let resp = register(&d, RegisterRequest {
+            object_type: ObjectType::SymmetricKey,
+            attributes: vec![
+                Attribute::CryptographicAlgorithm(KmipAlgorithm::Aes),
+                Attribute::CryptographicLength(128),
+                Attribute::CryptographicUsageMask(UsageMask::ENCRYPT | UsageMask::DECRYPT),
+            ],
+            managed_object: Some(raw_aes128_kb()),
+            // Client permits Software (0x01) among others — server can satisfy it.
+            protection_storage_masks: Some(0x03),
+            certificate_payload: None,
+        }, "c").unwrap();
+        let rec = d.store.get(&resp.uid).unwrap().unwrap();
+        assert_eq!(rec.protection_storage_mask, Some(0x01));
+    }
+
+    #[test]
+    fn register_rejects_protection_storage_masks_excluding_software() {
+        let d = deps_with();
+        // Client requires Hardware (0x02) only — this server has no
+        // hardware storage class, so it must refuse rather than lie.
+        let err = register(&d, RegisterRequest {
+            object_type: ObjectType::SymmetricKey,
+            attributes: vec![
+                Attribute::CryptographicAlgorithm(KmipAlgorithm::Aes),
+                Attribute::CryptographicLength(128),
+                Attribute::CryptographicUsageMask(UsageMask::ENCRYPT | UsageMask::DECRYPT),
+            ],
+            managed_object: Some(raw_aes128_kb()),
+            protection_storage_masks: Some(0x02),
+            certificate_payload: None,
+        }, "c").unwrap_err();
+        assert_eq!(err.result_reason(), ResultReason::InvalidField);
     }
 
     #[test]
