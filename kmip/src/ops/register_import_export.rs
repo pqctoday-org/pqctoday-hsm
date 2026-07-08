@@ -45,6 +45,25 @@ pub fn register(
         format!("object_type={:?} attrs={}", req.object_type, req.attributes.len()),
     );
 
+    // KMIP 3.0 §11 `Protection Storage Mask` / §6.1.48 `Protection
+    // Storage Masks` — this server only ever stores objects in
+    // software (`Software = 0x01`); no other storage class exists to
+    // truthfully claim. Honour a client-supplied permitted-set by
+    // rejecting the request when Software isn't a member, instead of
+    // silently reporting Software regardless of what was asked for.
+    if let Some(masks) = req.protection_storage_masks {
+        if masks & 0x01 == 0 {
+            return Err(fail_err(
+                deps,
+                correlation_id,
+                "Register",
+                KmipError::invalid_field(
+                    "Protection Storage Masks: server only supports Software (0x01) storage",
+                ),
+            ));
+        }
+    }
+
     // K17 — §2.1.5 / §6.1.48: a KeyBlock carrying `KeyWrappingData`
     // holds AES-KW-wrapped material. Resolve the KEK (Active +
     // UnwrapKey usage), unwrap, decode the plaintext per Encoding
@@ -448,6 +467,7 @@ pub fn register(
         usage_limits_remaining: x.usage_limits_total,
         usage_limits_unit: x.usage_limits_unit,
         application_specific_information: x.application_specific_information.clone(),
+        protection_storage_mask: Some(0x01),
         sensitive,
         always_sensitive: sensitive,
         extractable,
@@ -915,6 +935,44 @@ mod tests {
         assert_eq!(resp.uid, "urn:fixed");
         let err = register(&d, req(), "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::ObjectAlreadyExists);
+    }
+
+    #[test]
+    fn register_records_the_real_protection_storage_mask() {
+        let d = deps_with();
+        let resp = register(&d, RegisterRequest {
+            object_type: ObjectType::SymmetricKey,
+            attributes: vec![
+                Attribute::CryptographicAlgorithm(KmipAlgorithm::Aes),
+                Attribute::CryptographicLength(128),
+                Attribute::CryptographicUsageMask(UsageMask::ENCRYPT | UsageMask::DECRYPT),
+            ],
+            managed_object: Some(raw_aes128_kb()),
+            // Client permits Software (0x01) among others — server can satisfy it.
+            protection_storage_masks: Some(0x03),
+            certificate_payload: None,
+        }, "c").unwrap();
+        let rec = d.store.get(&resp.uid).unwrap().unwrap();
+        assert_eq!(rec.protection_storage_mask, Some(0x01));
+    }
+
+    #[test]
+    fn register_rejects_protection_storage_masks_excluding_software() {
+        let d = deps_with();
+        // Client requires Hardware (0x02) only — this server has no
+        // hardware storage class, so it must refuse rather than lie.
+        let err = register(&d, RegisterRequest {
+            object_type: ObjectType::SymmetricKey,
+            attributes: vec![
+                Attribute::CryptographicAlgorithm(KmipAlgorithm::Aes),
+                Attribute::CryptographicLength(128),
+                Attribute::CryptographicUsageMask(UsageMask::ENCRYPT | UsageMask::DECRYPT),
+            ],
+            managed_object: Some(raw_aes128_kb()),
+            protection_storage_masks: Some(0x02),
+            certificate_payload: None,
+        }, "c").unwrap_err();
+        assert_eq!(err.result_reason(), ResultReason::InvalidField);
     }
 
     #[test]

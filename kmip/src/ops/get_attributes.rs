@@ -187,10 +187,15 @@ fn attributes_from_record(r: &ObjectRecord) -> Vec<Attribute> {
     // pins 3600 seconds for newly-created keys (BL-M-14 / AKLC-O-1 /
     // SKLC-O-1). Honour an explicit record value when set.
     out.push(Attribute::LeaseTime(r.lease_time.unwrap_or(3600)));
-    // KMIP §11 `Protection Storage Mask` — bit-flag Integer; the
-    // Baseline corpus pins `Software` (0x01) on every test-created
-    // managed object. BL-M-14 / SKLC-O-1 step #3 / AKLC-O-1 step #3.
-    out.push(Attribute::ProtectionStorageMask(0x01));
+    // KMIP §11 `Protection Storage Mask` — bit-flag Integer; the mask
+    // actually used, recorded at Create/Register (`r.protection_storage_mask`).
+    // Every record this server has ever produced carries `Software` (0x01) —
+    // the only storage class it has — so the fallback for pre-field records
+    // is the same true value, not a fabricated default. BL-M-14 / SKLC-O-1
+    // step #3 / AKLC-O-1 step #3 pin `Software`.
+    out.push(Attribute::ProtectionStorageMask(
+        r.protection_storage_mask.unwrap_or(0x01),
+    ));
     // KMIP §11 Link attributes — emit EVERY entry of the record's
     // `links` map (K-15), not a cherry-picked subset. Keys are the
     // canonical link-type names written by `create_key_pair`,

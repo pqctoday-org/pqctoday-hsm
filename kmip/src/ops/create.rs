@@ -210,6 +210,7 @@ pub fn create(deps: &Deps, mut req: CreateRequest, correlation_id: &str) -> Resu
         // KMIP §11 Fresh = True for server-generated objects.
         fresh: Some(true),
         application_specific_information: x.application_specific_information.clone(),
+        protection_storage_mask: Some(0x01),
     ..ObjectRecord::default()
 })?;
 

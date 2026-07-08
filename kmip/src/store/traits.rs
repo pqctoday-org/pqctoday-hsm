@@ -267,6 +267,16 @@ pub struct ObjectRecord {
     /// KMIP §11 `Application Specific Information` Structure —
     /// `(namespace, data)` pair. TL-M-3 step #0 finds objects by it.
     pub application_specific_information: Option<(String, String)>,
+    /// KMIP §11 `Protection Storage Mask` — the storage class actually
+    /// used for this object. Every managed object in this server is
+    /// backed by software storage (`Software = 0x01`), so this is
+    /// always `Some(0x01)` once set; `None` only for records built
+    /// before this field existed (`GetAttributes` then falls back to
+    /// `0x01`, still the true value). Register honours a client-supplied
+    /// `Protection Storage Masks` permitted-set by rejecting the request
+    /// (`Result Reason Invalid Field`) if `Software` isn't in it — the
+    /// server has no other storage class to truthfully claim.
+    pub protection_storage_mask: Option<u32>,
     /// Storage status — KMIP 3.0 §6.1.4 Archive / §6.1.47 Recover.
     /// `true` = Archival storage (§12.3 Storage Status Mask bit
     /// 0x02): the material is off-line, so Get and cryptographic
@@ -367,6 +377,7 @@ impl From<BaselineDefaults> for ObjectRecord {
             usage_limits_unit: None,
             digest_value: None,
             application_specific_information: None,
+            protection_storage_mask: None,
             archived: false,
         }
     }
