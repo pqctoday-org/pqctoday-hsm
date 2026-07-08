@@ -241,6 +241,17 @@ pub struct ObjectRecord {
     /// server does not distinguish "never leased" from "lease expired
     /// long ago" — both mean "no live lease" to Check/enforcement).
     pub lease_expiry: Option<OffsetDateTime>,
+    /// Phase 3.3 — §2.2.8 / §4.29/§4.30/§4.64-4.66 Split Key object
+    /// metadata. `Some` only on `ObjectType::SplitKey` objects (each a
+    /// single share, `key_material` holding that share's bytes).
+    pub split_key_parts: Option<u32>,
+    pub split_key_threshold: Option<u32>,
+    /// §11.54 wire value (XOR=1, GF(2^16)=2, Prime Field=3, GF(2^8)=4).
+    pub split_key_method: Option<u32>,
+    /// §4.30 — this share's index (finite-field x-coordinate), 1..=Split Key Parts.
+    pub key_part_identifier: Option<u32>,
+    /// §11.55 wire value (283/285) — only set for the two GF(2^8)-based methods.
+    pub split_key_polynomial: Option<u32>,
     /// KMIP §4 `Protection Period` — Interval seconds.
     pub protection_period: Option<u32>,
     pub rotate_interval: Option<u32>,
@@ -376,6 +387,11 @@ impl From<BaselineDefaults> for ObjectRecord {
             deactivation_reason_code: None,
             lease_time: None,
             lease_expiry: None,
+            split_key_parts: None,
+            split_key_threshold: None,
+            split_key_method: None,
+            key_part_identifier: None,
+            split_key_polynomial: None,
             protection_period: None,
             rotate_interval: None,
             rotate_offset: None,

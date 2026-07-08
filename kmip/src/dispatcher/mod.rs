@@ -49,6 +49,7 @@ use crate::ops::{
     rng_and_pkcs11::{pkcs11, rng_retrieve, rng_seed},
     session_and_auth::{create_credential, create_group, create_user, log, login, logout},
     sign::sign, signature_verify::signature_verify,
+    split_key::{create_split_key, join_split_key},
     Deps,
 };
 // Certify / Re-certify / Validate handlers compile only in the `native`
@@ -353,6 +354,7 @@ pub const HANDLED_OPERATIONS: &[crate::kmip30::Operation] = {
         Op::Encapsulate, Op::Decapsulate,
         Op::Interop, Op::Register, Op::Import, Op::Export,
         Op::Deactivate, Op::Check, Op::ObtainLease, Op::Archive, Op::Recover,
+        Op::CreateSplitKey, Op::JoinSplitKey,
         Op::Obliterate, Op::DiscoverVersions, Op::Ping,
         Op::MAC, Op::MACVerify, Op::Hash,
         Op::CreateCredential, Op::CreateGroup, Op::CreateUser,
@@ -648,6 +650,8 @@ fn handle_payload(
         RequestPayload::Deactivate(r) => ResponsePayload::Deactivate(deactivate(deps, r, correlation_id)?),
         RequestPayload::Check(r) => ResponsePayload::Check(check(deps, r, correlation_id)?),
         RequestPayload::ObtainLease(r) => ResponsePayload::ObtainLease(obtain_lease(deps, r, correlation_id)?),
+        RequestPayload::CreateSplitKey(r) => ResponsePayload::CreateSplitKey(create_split_key(deps, r, correlation_id)?),
+        RequestPayload::JoinSplitKey(r) => ResponsePayload::JoinSplitKey(join_split_key(deps, r, correlation_id)?),
         RequestPayload::Archive(r) => ResponsePayload::Archive(archive(deps, r, correlation_id)?),
         RequestPayload::Recover(r) => ResponsePayload::Recover(recover(deps, r, correlation_id)?),
         RequestPayload::Obliterate(r) => ResponsePayload::Obliterate(obliterate(deps, r, correlation_id)?),

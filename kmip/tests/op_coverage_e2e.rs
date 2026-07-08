@@ -1115,6 +1115,9 @@ fn coverage_map() -> std::collections::HashMap<pqctoday_kmip::kmip30::Operation,
         (Op::GetAttributes, "e2e:native_bridge(k11_digest_persisted_from_real_engine_material)"),
         (Op::MAC, "e2e:native_bridge(k15_hmac_mac_and_verify_route_through_engine)"),
         (Op::MACVerify, "e2e:native_bridge(k15_hmac_mac_and_verify_route_through_engine)"),
+        // P3.3 — §6.1.12 Create Split Key / §6.1.31 Join Split Key.
+        (Op::CreateSplitKey, "e2e:native_bridge(create_split_key_then_join_threshold_subset_reconstructs_via_real_engine)"),
+        (Op::JoinSplitKey, "e2e:native_bridge(create_split_key_then_join_threshold_subset_reconstructs_via_real_engine)"),
         // ── Handler-level unit tests (src/ops/*.rs) ──
         (Op::Query, "unit:ops::query"),
         (Op::Get, "unit:ops::get"),
@@ -1159,5 +1162,5 @@ fn coverage_map_covers_every_handled_operation() {
         stale.is_empty(),
         "coverage_map references ops that are not in HANDLED_OPERATIONS: {stale:?}"
     );
-    assert_eq!(handled.len(), 56, "HANDLED_OPERATIONS count changed — review coverage");
+    assert_eq!(handled.len(), 58, "HANDLED_OPERATIONS count changed — review coverage");
 }

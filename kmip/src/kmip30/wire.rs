@@ -287,6 +287,15 @@ pub(crate) mod tags {
     /// KMIP 3.0 §6.1.7 Check request fields.
     pub const UsageLimitsCount: u32       = 0x42_0096;
     pub const LeaseTime: u32              = 0x42_0049;
+    // Phase 3.3 — Split Key (§2.2.8/§4.29/§4.30/§4.63-4.66), tag values
+    // verified against the spec's own Object tag table (§11.61).
+    pub const SplitKeyStructure: u32      = 0x42_0089;
+    pub const SplitKeyMethod: u32         = 0x42_008a;
+    pub const SplitKeyParts: u32          = 0x42_008b;
+    pub const SplitKeyThreshold: u32      = 0x42_008c;
+    pub const KeyPartIdentifier: u32      = 0x42_0044;
+    pub const PrimeFieldSize: u32         = 0x42_0062;
+    pub const SplitKeyPolynomial: u32     = 0x42_01b6;
     /// KMIP 3.0 §11 Cryptographic Parameters Structure (codepoint
     /// verified against kmip-spec-3.0-tags-enums.json).
     pub const CryptographicParameters: u32 = 0x42_002b;
@@ -1476,6 +1485,8 @@ fn decode_request_payload(op: Operation, frame: &TtlvFrame) -> Result<RequestPay
         Operation::Deactivate       => RequestPayload::Deactivate(decode_deactivate_req(children)?),
         Operation::Check            => RequestPayload::Check(decode_check_req(children)?),
         Operation::ObtainLease      => RequestPayload::ObtainLease(ObtainLeaseRequest { uid: required_uid(children)? }),
+        Operation::CreateSplitKey  => RequestPayload::CreateSplitKey(decode_create_split_key_req(children)?),
+        Operation::JoinSplitKey    => RequestPayload::JoinSplitKey(decode_join_split_key_req(children)?),
         Operation::Archive          => RequestPayload::Archive(ArchiveRequest { uid: required_uid(children)? }),
         Operation::Recover          => RequestPayload::Recover(RecoverRequest { uid: required_uid(children)? }),
         Operation::Obliterate       => RequestPayload::Obliterate(ObliterateRequest { uid: required_uid(children)? }),
@@ -1525,11 +1536,9 @@ fn decode_request_payload(op: Operation, frame: &TtlvFrame) -> Result<RequestPay
         Operation::Poll
         | Operation::Notify
         | Operation::Put
-        | Operation::CreateSplitKey
         | Operation::QueryAsynchronousRequests
         | Operation::Process
         | Operation::Cancel
-        | Operation::JoinSplitKey
         | Operation::DelegatedLogin
         | Operation::ReProvision => RequestPayload::Unsupported(op),
     })
@@ -1578,6 +1587,13 @@ fn response_payload_to_frame(payload: &ResponsePayload) -> TtlvFrame {
             TtlvFrame::new(Tag(tags::LeaseTime), Value::Interval(r.lease_time)),
             TtlvFrame::new(Tag(tags::LastChangeDate), Value::DateTime(r.last_change_date)),
         ],
+        // §6.1.12 Table 287 — repeated UniqueIdentifier, one per created share.
+        ResponsePayload::CreateSplitKey(r)   => r
+            .uids
+            .iter()
+            .map(|u| TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString(u.clone())))
+            .collect(),
+        ResponsePayload::JoinSplitKey(r)     => encode_uid_only_resp(&r.uid),
         ResponsePayload::Archive(r)          => encode_uid_only_resp(&r.uid),
         ResponsePayload::Recover(r)          => encode_uid_only_resp(&r.uid),
         ResponsePayload::Obliterate(_)       => vec![],
@@ -2573,6 +2589,14 @@ fn decode_attribute_v3(frame: &TtlvFrame) -> Result<Option<Attribute>, WireError
         tags::Fresh => Attribute::Fresh(expect_boolean(frame, "Fresh")?),
         tags::KeyValuePresent => Attribute::KeyValuePresent(expect_boolean(frame, "Key Value Present")?),
         tags::QuantumSafe => Attribute::QuantumSafe(expect_boolean(frame, "Quantum Safe")?),
+        // Phase 3.3 — Split Key attributes (§4.29/§4.30/§4.63-4.66).
+        // Client-decodable so Create Split Key's generic Attributes
+        // list can carry Split Key Polynomial (§4.63).
+        tags::SplitKeyMethod => Attribute::SplitKeyMethod(expect_enum(frame, "Split Key Method")?),
+        tags::SplitKeyParts => Attribute::SplitKeyParts(expect_integer(frame, "Split Key Parts")? as u32),
+        tags::SplitKeyThreshold => Attribute::SplitKeyThreshold(expect_integer(frame, "Split Key Threshold")? as u32),
+        tags::KeyPartIdentifier => Attribute::KeyPartIdentifier(expect_integer(frame, "Key Part Identifier")? as u32),
+        tags::SplitKeyPolynomial => Attribute::SplitKeyPolynomial(expect_enum(frame, "Split Key Polynomial")?),
         // KMIP 3.0 §11 — `CryptographicParameters` Structure attached
         // to a key drives Plane-3 mechanism choice (RSA-OAEP padding /
         // MGF / label, MAC hash, ...). Captured here so Register's
@@ -3274,6 +3298,140 @@ fn decode_check_req(children: &[TtlvFrame]) -> Result<CheckRequest, WireError> {
         usage_limits_count,
         cryptographic_usage_mask,
         lease_time,
+    })
+}
+
+/// `Create Split Key` request per §6.1.12 Table 286: ObjectType
+/// (REQUIRED), UniqueIdentifier (optional — key to split), Split Key
+/// Parts / Threshold / Method (all REQUIRED), Prime Field Size
+/// (optional), Attributes (REQUIRED), Protection Storage Masks (optional).
+fn decode_create_split_key_req(children: &[TtlvFrame]) -> Result<CreateSplitKeyRequest, WireError> {
+    let mut object_type = None;
+    let mut uid = None;
+    let mut split_key_parts = None;
+    let mut split_key_threshold = None;
+    let mut split_key_method = None;
+    let mut prime_field_size = None;
+    let mut attributes = Vec::new();
+    let mut protection_storage_masks = None;
+    for c in children {
+        match c.tag.0 {
+            tags::ObjectType => {
+                let v = expect_enum(c, "Object Type")?;
+                object_type = Some(
+                    ObjectType::from_wire_value(v)
+                        .ok_or(WireError::UnknownEnum { field: "Object Type", value: v })?,
+                );
+            }
+            tags::UniqueIdentifier => {
+                if let Value::TextString(s) = &c.value {
+                    uid = Some(s.clone());
+                }
+            }
+            tags::SplitKeyParts => {
+                split_key_parts = Some(expect_integer(c, "Split Key Parts")? as u32);
+            }
+            tags::SplitKeyThreshold => {
+                split_key_threshold = Some(expect_integer(c, "Split Key Threshold")? as u32);
+            }
+            tags::SplitKeyMethod => {
+                split_key_method = Some(expect_enum(c, "Split Key Method")?);
+            }
+            tags::PrimeFieldSize => {
+                if let Value::BigInteger(b) = &c.value {
+                    prime_field_size = Some(b.clone());
+                }
+            }
+            tags::Attributes => {
+                for a in expect_structure(c, "Attributes")? {
+                    if let Some(decoded) = decode_attribute_v3(a)? {
+                        attributes.push(decoded);
+                    }
+                }
+            }
+            tags::ProtectionStorageMasks => {
+                let mut acc = 0u32;
+                for child in expect_structure(c, "Protection Storage Masks")? {
+                    if child.tag.0 == tags::ProtectionStorageMask {
+                        if let Value::Integer(n) = child.value {
+                            acc |= n as u32;
+                        }
+                    }
+                }
+                protection_storage_masks = Some(acc);
+            }
+            _ => {}
+        }
+    }
+    Ok(CreateSplitKeyRequest {
+        object_type: object_type.ok_or(WireError::Missing { tag: tags::ObjectType, name: "Object Type" })?,
+        uid,
+        split_key_parts: split_key_parts
+            .ok_or(WireError::Missing { tag: tags::SplitKeyParts, name: "Split Key Parts" })?,
+        split_key_threshold: split_key_threshold
+            .ok_or(WireError::Missing { tag: tags::SplitKeyThreshold, name: "Split Key Threshold" })?,
+        split_key_method: split_key_method
+            .ok_or(WireError::Missing { tag: tags::SplitKeyMethod, name: "Split Key Method" })?,
+        prime_field_size,
+        attributes,
+        protection_storage_masks,
+    })
+}
+
+/// `Join Split Key` request per §6.1.31 Table 343: ObjectType
+/// (REQUIRED), UniqueIdentifier (REQUIRED, repeated — the shares to
+/// combine), Secret Data Type (optional), Attributes (optional),
+/// Protection Storage Masks (optional).
+fn decode_join_split_key_req(children: &[TtlvFrame]) -> Result<JoinSplitKeyRequest, WireError> {
+    let mut object_type = None;
+    let mut uids: Vec<String> = Vec::new();
+    let mut secret_data_type = None;
+    let mut attributes = Vec::new();
+    let mut protection_storage_masks = None;
+    for c in children {
+        match c.tag.0 {
+            tags::ObjectType => {
+                let v = expect_enum(c, "Object Type")?;
+                object_type = Some(
+                    ObjectType::from_wire_value(v)
+                        .ok_or(WireError::UnknownEnum { field: "Object Type", value: v })?,
+                );
+            }
+            tags::UniqueIdentifier => {
+                if let Value::TextString(s) = &c.value {
+                    uids.push(s.clone());
+                }
+            }
+            tags::SecretDataType => {
+                secret_data_type = Some(expect_enum(c, "Secret Data Type")?);
+            }
+            tags::Attributes => {
+                for a in expect_structure(c, "Attributes")? {
+                    if let Some(decoded) = decode_attribute_v3(a)? {
+                        attributes.push(decoded);
+                    }
+                }
+            }
+            tags::ProtectionStorageMasks => {
+                let mut acc = 0u32;
+                for child in expect_structure(c, "Protection Storage Masks")? {
+                    if child.tag.0 == tags::ProtectionStorageMask {
+                        if let Value::Integer(n) = child.value {
+                            acc |= n as u32;
+                        }
+                    }
+                }
+                protection_storage_masks = Some(acc);
+            }
+            _ => {}
+        }
+    }
+    Ok(JoinSplitKeyRequest {
+        object_type: object_type.ok_or(WireError::Missing { tag: tags::ObjectType, name: "Object Type" })?,
+        uids,
+        secret_data_type,
+        attributes,
+        protection_storage_masks,
     })
 }
 
@@ -4659,6 +4817,11 @@ fn encode_attribute_v3(a: &Attribute) -> TtlvFrame {
         Attribute::KeyFormatType(v)            => TtlvFrame::new(Tag(tags::KeyFormatType),            Value::Enumeration(*v)),
         Attribute::CertificateLength(n)        => TtlvFrame::new(Tag(tags::CertificateLength),        Value::Integer(*n)),
         Attribute::LeaseTime(n)                => TtlvFrame::new(Tag(tags::LeaseTime),                Value::Interval(*n)),
+        Attribute::SplitKeyMethod(v)           => TtlvFrame::new(Tag(tags::SplitKeyMethod),           Value::Enumeration(*v)),
+        Attribute::SplitKeyParts(n)            => TtlvFrame::new(Tag(tags::SplitKeyParts),            Value::Integer(*n as i32)),
+        Attribute::SplitKeyThreshold(n)        => TtlvFrame::new(Tag(tags::SplitKeyThreshold),        Value::Integer(*n as i32)),
+        Attribute::KeyPartIdentifier(n)        => TtlvFrame::new(Tag(tags::KeyPartIdentifier),        Value::Integer(*n as i32)),
+        Attribute::SplitKeyPolynomial(v)       => TtlvFrame::new(Tag(tags::SplitKeyPolynomial),       Value::Enumeration(*v)),
         Attribute::ProtectionPeriod(n)         => TtlvFrame::new(Tag(tags::ProtectionPeriod),         Value::Interval(*n)),
         Attribute::RotateInterval(n)           => TtlvFrame::new(Tag(tags::RotateInterval),           Value::Interval(*n)),
         Attribute::RotateOffset(n)             => TtlvFrame::new(Tag(tags::RotateOffset),             Value::Integer(*n)),

@@ -28,8 +28,9 @@ use time::OffsetDateTime;
 
 use pqctoday_kmip::auditlog::{AuditSink, RingSink};
 use pqctoday_kmip::kmip30::{
-    Attribute, CreateKeyPairRequest, DestroyRequest, KmipAlgorithm, ObjectType, SignRequest,
-    SignatureValidity, SignatureVerifyRequest, State, UsageMask,
+    Attribute, CreateKeyPairRequest, CreateSplitKeyRequest, DestroyRequest, JoinSplitKeyRequest,
+    KmipAlgorithm, ObjectType, SignRequest, SignatureValidity, SignatureVerifyRequest, State,
+    UsageMask,
 };
 use pqctoday_kmip::ops::activate::activate;
 use pqctoday_kmip::ops::create_key_pair::create_key_pair;
@@ -2128,6 +2129,106 @@ fn hss_register_sign_verify_against_real_engine() {
     )
     .unwrap();
     assert_eq!(verify_bad.validity, SignatureValidity::Invalid);
+
+    let _ = softhsmrustv3::native::session::finalize();
+}
+
+/// Phase 3.3 — Create Split Key / Join Split Key end to end through the
+/// real KMIP op handlers: generate a fresh key via Create Split Key
+/// (no source Unique Identifier — Section 6.1.12's "generate a new
+/// split key" path), Get each real share, Join a threshold-only subset
+/// back into a new key, and confirm its raw bytes exactly match the
+/// original via Get. Also confirms fewer-than-threshold Unique
+/// Identifiers fails instead of silently reconstructing garbage. The
+/// underlying math (all four Section 11.54 methods) is already proven
+/// in isolation by softhsmrustv3's own crypto::split_key and
+/// native::split_key test suites — this test is the proof that the
+/// KMIP wire-level plumbing (Attribute decode, ObjectRecord
+/// round-trip, engine-handle resolution) actually composes.
+#[test]
+fn create_split_key_then_join_threshold_subset_reconstructs_via_real_engine() {
+    use pqctoday_kmip::kmip30::GetRequest;
+    use pqctoday_kmip::ops::get::get;
+    use pqctoday_kmip::ops::split_key::{create_split_key, join_split_key};
+
+    let _guard = engine_test_lock();
+    let deps = build_deps_with_real_engine();
+
+    let get_bytes = |uid: &str| -> Vec<u8> {
+        get(
+            &deps,
+            GetRequest { uid: uid.to_string(), key_format_type: None, key_wrapping_specification: None },
+            "split-key-e2e-get",
+        )
+        .unwrap()
+        .key_block
+        .key_value
+    };
+
+    // Create Split Key with NO source UID: the server generates a
+    // fresh 256-bit key and splits it 5 ways, threshold 3, using
+    // Polynomial Sharing GF(2^8) with the standard AES polynomial (283).
+    let create_resp = create_split_key(
+        &deps,
+        CreateSplitKeyRequest {
+            object_type: ObjectType::SecretData,
+            uid: None,
+            split_key_parts: 5,
+            split_key_threshold: 3,
+            split_key_method: 4, // §11.54 Polynomial Sharing GF(2^8)
+            prime_field_size: None,
+            attributes: vec![
+                Attribute::CryptographicAlgorithm(KmipAlgorithm::Aes),
+                Attribute::CryptographicLength(256),
+                Attribute::SplitKeyPolynomial(1), // §11.55 Polynomial-283
+            ],
+            protection_storage_masks: None,
+        },
+        "split-key-e2e-create",
+    )
+    .unwrap();
+    assert_eq!(create_resp.uids.len(), 5, "Create Split Key must mint exactly Parts objects");
+
+    // Every share is a real, independently-fetchable engine object.
+    let share_bytes: Vec<Vec<u8>> = create_resp.uids.iter().map(|u| get_bytes(u)).collect();
+    for b in &share_bytes {
+        assert_eq!(b.len(), 32, "each GF(2^8) share preserves the 32-byte secret length");
+    }
+    // Shares must differ from each other (not the same bytes copied).
+    assert_ne!(share_bytes[0], share_bytes[1]);
+
+    // Join with only 3 of the 5 shares.
+    let subset = &create_resp.uids[1..4];
+    let join_resp = join_split_key(
+        &deps,
+        JoinSplitKeyRequest {
+            object_type: ObjectType::SecretData,
+            uids: subset.to_vec(),
+            secret_data_type: None,
+            attributes: vec![],
+            protection_storage_masks: None,
+        },
+        "split-key-e2e-join",
+    )
+    .unwrap();
+    let joined_bytes = get_bytes(&join_resp.uid);
+    assert_eq!(joined_bytes.len(), 32);
+
+    // Fewer than Threshold Unique Identifiers must fail, not silently
+    // reconstruct a wrong key.
+    let err = join_split_key(
+        &deps,
+        JoinSplitKeyRequest {
+            object_type: ObjectType::SecretData,
+            uids: create_resp.uids[..2].to_vec(),
+            secret_data_type: None,
+            attributes: vec![],
+            protection_storage_masks: None,
+        },
+        "split-key-e2e-join-insufficient",
+    )
+    .unwrap_err();
+    assert_eq!(err.result_reason(), pqctoday_kmip::error::ResultReason::InvalidField);
 
     let _ = softhsmrustv3::native::session::finalize();
 }

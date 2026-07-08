@@ -187,6 +187,13 @@ fn attributes_from_record(r: &ObjectRecord) -> Vec<Attribute> {
     // pins 3600 seconds for newly-created keys (BL-M-14 / AKLC-O-1 /
     // SKLC-O-1). Honour an explicit record value when set.
     out.push(Attribute::LeaseTime(r.lease_time.unwrap_or(3600)));
+    // Phase 3.3 — Split Key (§2.2.8/§4.29/§4.30/§4.63-4.66). `Some`
+    // only on `ObjectType::SplitKey` share objects.
+    if let Some(v) = r.split_key_method { out.push(Attribute::SplitKeyMethod(v)); }
+    if let Some(n) = r.split_key_parts { out.push(Attribute::SplitKeyParts(n)); }
+    if let Some(n) = r.split_key_threshold { out.push(Attribute::SplitKeyThreshold(n)); }
+    if let Some(n) = r.key_part_identifier { out.push(Attribute::KeyPartIdentifier(n)); }
+    if let Some(v) = r.split_key_polynomial { out.push(Attribute::SplitKeyPolynomial(v)); }
     // KMIP §11 `Protection Storage Mask` — bit-flag Integer; the mask
     // actually used, recorded at Create/Register (`r.protection_storage_mask`).
     // Every record this server has ever produced carries `Software` (0x01) —
@@ -383,6 +390,11 @@ pub(crate) fn canonical_attribute_name(attr: &Attribute) -> &'static str {
         Attribute::KeyFormatType(_)          => "KeyFormatType",
         Attribute::CertificateLength(_)      => "CertificateLength",
         Attribute::LeaseTime(_)              => "LeaseTime",
+        Attribute::SplitKeyMethod(_)         => "SplitKeyMethod",
+        Attribute::SplitKeyParts(_)          => "SplitKeyParts",
+        Attribute::SplitKeyThreshold(_)      => "SplitKeyThreshold",
+        Attribute::KeyPartIdentifier(_)      => "KeyPartIdentifier",
+        Attribute::SplitKeyPolynomial(_)     => "SplitKeyPolynomial",
         Attribute::ProtectionPeriod(_)       => "ProtectionPeriod",
         Attribute::RotateInterval(_)         => "RotateInterval",
         Attribute::RotateOffset(_)           => "RotateOffset",

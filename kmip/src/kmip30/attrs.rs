@@ -416,6 +416,15 @@ pub enum Attribute {
     /// Integers.
     CertificateLength(i32),
     LeaseTime(u32),
+    /// KMIP §4.64/§4.65/§4.66/§4.30/§4.63 — Phase 3.3 Split Key
+    /// attributes. All read-only, client-set-once-at-creation.
+    SplitKeyMethod(u32),
+    SplitKeyParts(u32),
+    SplitKeyThreshold(u32),
+    KeyPartIdentifier(u32),
+    /// §11.55 wire value (283/285) — only meaningful for the two
+    /// GF(2^8)-based Split Key Methods.
+    SplitKeyPolynomial(u32),
     ProtectionPeriod(u32),
     RotateInterval(u32),
     RotateOffset(i32),

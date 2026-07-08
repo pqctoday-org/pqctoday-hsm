@@ -1587,6 +1587,56 @@ pub struct ObtainLeaseResponse {
     pub last_change_date: i64,
 }
 
+/// `Create Split Key` (KMIP 3.0 §6.1.12 / Table 286) — Phase 3.3.
+/// "The request contains attributes to be assigned to the objects...
+/// The request MAY contain the Unique Identifier of an existing
+/// cryptographic object that the client requests be split by the
+/// server. If the attributes supplied in the request do not match
+/// those of the key supplied, the attributes of the key take
+/// precedence." — `uid` absent ⇒ generate a fresh key (per
+/// `attributes`' CryptographicAlgorithm/Length) and split THAT.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CreateSplitKeyRequest {
+    pub object_type: ObjectType,
+    /// The key to split, if the client is splitting an existing one.
+    pub uid: Option<String>,
+    pub split_key_parts: u32,
+    pub split_key_threshold: u32,
+    /// §11.54 wire value.
+    pub split_key_method: u32,
+    /// `Prime Field Size` (Big Integer, OPTIONAL) — this server fixes
+    /// the Prime Field modulus at 2^521-1 (see
+    /// `softhsmrustv3::crypto::split_key`); a supplied value is only
+    /// checked for compatibility (must fit under that modulus), not
+    /// used to select a different one.
+    pub prime_field_size: Option<Vec<u8>>,
+    pub attributes: Vec<Attribute>,
+    pub protection_storage_masks: Option<u32>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct CreateSplitKeyResponse {
+    pub uids: Vec<String>,
+}
+
+/// `Join Split Key` (KMIP 3.0 §6.1.31 / Table 343) — Phase 3.3.
+#[derive(Clone, Debug, PartialEq)]
+pub struct JoinSplitKeyRequest {
+    pub object_type: ObjectType,
+    /// The Split Key part UIDs to combine — MUST be at least the
+    /// parts' own Split Key Threshold (checked by the handler, not
+    /// the wire decoder).
+    pub uids: Vec<String>,
+    pub secret_data_type: Option<u32>,
+    pub attributes: Vec<Attribute>,
+    pub protection_storage_masks: Option<u32>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct JoinSplitKeyResponse {
+    pub uid: String,
+}
+
 /// `Archive` (KMIP 3.0 §6.1.4 / Table 260) — client indicates the
 /// object MAY be archived. v0.1 acknowledges but does not move bytes;
 /// archival policy is server-determined per spec.

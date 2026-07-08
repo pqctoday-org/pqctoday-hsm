@@ -163,7 +163,6 @@ pub(crate) const ADVERTISED_UNIMPLEMENTED_OPERATIONS: &[Operation] = &[
     Operation::Poll,
     Operation::Notify,
     Operation::Put,
-    Operation::CreateSplitKey,
     Operation::QueryAsynchronousRequests,
     Operation::Process,
     // K3 additions — also enumerated by the MSGENC-* expected Query
@@ -175,8 +174,11 @@ pub(crate) const ADVERTISED_UNIMPLEMENTED_OPERATIONS: &[Operation] = &[
     // P2.3 moved Certify + Re-certify into `HANDLED_OPERATIONS`
     // (§6.1.6 / §6.1.50 PQC-capable CA handlers) — both were already
     // advertised here, so the net advertised set is unchanged.
+    // Phase 3.3 moved CreateSplitKey + JoinSplitKey into
+    // `HANDLED_OPERATIONS` (real §6.1.12/§6.1.31 handlers, backed by a
+    // genuine secret-sharing implementation) — both were already
+    // advertised here, so the net advertised set is unchanged.
     Operation::Cancel,
-    Operation::JoinSplitKey,
 ];
 
 /// Operation capability list — surfaced via `QueryOperations`. The
@@ -195,6 +197,8 @@ fn supported_operations() -> Vec<Operation> {
 /// - CreateKeyPair: PublicKey + PrivateKey
 /// - Register: SymmetricKey / PublicKey / PrivateKey / SecretData /
 ///   Certificate / OpaqueObject (`ops::register_import_export`)
+/// - Phase 3.3: SplitKey, via the dedicated Create Split Key / Join
+///   Split Key ops (`ops::split_key`) rather than plain Create/Register.
 pub(crate) const IMPLEMENTED_OBJECT_TYPES: &[ObjectType] = &[
     ObjectType::Certificate,
     ObjectType::SymmetricKey,
@@ -202,6 +206,7 @@ pub(crate) const IMPLEMENTED_OBJECT_TYPES: &[ObjectType] = &[
     ObjectType::PrivateKey,
     ObjectType::SecretData,
     ObjectType::OpaqueObject,
+    ObjectType::SplitKey,
 ];
 
 /// K3 — object types the MSGENC-* expected Query responses enumerate
@@ -211,7 +216,6 @@ pub(crate) const IMPLEMENTED_OBJECT_TYPES: &[ObjectType] = &[
 /// *expected ⊆ actual*, so these stay advertised; PgpKey (neither
 /// implemented nor corpus-required) was trimmed in K3.
 pub(crate) const ADVERTISED_UNIMPLEMENTED_OBJECT_TYPES: &[ObjectType] = &[
-    ObjectType::SplitKey,
     ObjectType::CertificateRequest,
     ObjectType::User,
     ObjectType::Group,

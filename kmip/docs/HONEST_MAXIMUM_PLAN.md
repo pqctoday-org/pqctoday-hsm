@@ -325,6 +325,56 @@ Types exist (`attrs.rs:64` SplitKey=0x05; `ops.rs:115/134`) → route to Unsuppo
 - T4 remove `SplitKey` from `ADVERTISED_UNIMPLEMENTED_OBJECT_TYPES` (`query.rs:212`).
 - *Exit:* Create N shares; Join of ≥threshold reconstructs the exact key; fewer-than-threshold fails (§6.1.31); KATs per method.
 
+**Outcome (2026-07-08):** All four §11.54 methods implemented from spec
+in a new engine-side (`rust/`) primitive, not `kmip/` — secret-sharing
+math is genuinely reusable at the PKCS#11 level (e.g. digital-asset key
+custody), and `kmip/` never touches raw key bytes, matching every other
+`native::*` bridge in this codebase. New engine vendor mechanism
+`CKM_PQCTODAY_SPLIT_KEY` (`0x8000_0012`) — verified against the local
+PKCS#11 v3.2 CSD01 spec text directly (not just the header) that no
+standard mechanism covers secret sharing at all, so this is honestly
+vendor-only, unlike e.g. HSS which does map to a real PKCS#11 mechanism.
+`rust/src/crypto/split_key.rs`: XOR, Polynomial Sharing GF(2⁸) (both
+irreducible polynomials 283/285 per §11.55), Polynomial Sharing Prime
+Field (Shamir over the fixed 2^521−1 Mersenne prime, `num-bigint`),
+Polynomial Sharing GF(2¹⁶) (`y²=y+m` algebraic extension of GF(2⁸)).
+**Found and fixed a genuine bug in the KMIP 3.0 draft's own printed
+GF(2¹⁶) multiplication formula** (§13.1): the constant term's `m` factor
+is on the wrong product term (`ru+svm` as printed vs. the algebraically
+correct `rum+sv`, re-derived from the defining relation and
+cross-verified against the spec's own inverse formula, which is only
+consistent with the corrected multiply). All 18 crypto-layer unit tests
+green, including split→join round trips, FIPS-197 cross-check, and
+genuine below-threshold-does-not-recover-secret checks.
+`rust/src/native/split_key.rs` wraps this as a handle-in/handle-out API
+(`split(session, secret_handle, ...) -> Vec<(key_part_identifier,
+handle)>`, `join(session, shares: &[(u32,u32)], ...) -> handle`) —
+`kmip/` only ever sees opaque engine object handles, never secret bytes,
+per this codebase's standing security model (confirmed with the user
+before writing any KMIP-layer code). Each share/joined result is
+registered as a real `CKO_SECRET_KEY` engine object.
+KMIP layer: `Create Split Key` (§6.1.12, both the "split an existing
+key" and "generate a fresh key" paths) and `Join Split Key` (§6.1.31,
+rejects fewer-than-threshold identifiers and mismatched
+method/threshold/polynomial across the supplied shares) — new
+`ops/split_key.rs` handler, wire codec (`SplitKeyStructure` +
+`SplitKeyMethod`/`SplitKeyParts`/`SplitKeyThreshold`/
+`KeyPartIdentifier`/`PrimeFieldSize`/`SplitKeyPolynomial` tags per
+§11.61), 5 new `ObjectRecord` fields, dispatcher wiring, moved from
+`ADVERTISED_UNIMPLEMENTED_OPERATIONS` to `HANDLED_OPERATIONS`. T4 done:
+`SplitKey` moved from `ADVERTISED_UNIMPLEMENTED_OBJECT_TYPES` to
+`IMPLEMENTED_OBJECT_TYPES` in `query.rs` — it's a real, fully-functional
+object type now, not just advertised. New e2e test
+`create_split_key_then_join_threshold_subset_reconstructs_via_real_engine`
+(`native_bridge_e2e.rs`) drives Create Split Key with no source UID
+(fresh-key-generation path) through 5-way GF(2⁸) split, threshold 3,
+Get on every real share, Join of a 3-share subset, and confirms the
+fewer-than-threshold case fails `InvalidField` instead of silently
+reconstructing garbage. `cargo test`: 544 lib tests + all integration
+binaries green (was 544/545 before this test existed — the 545th, the
+op-coverage assertion, is now satisfied). Corpus unchanged 97/0/5 (no
+OASIS transcript exercises Split Key).
+
 ### Phase 4 — Asynchronous subsystem (broad, §8.1.2)  *(L / H — the biggest new work)*
 Grounded: indicator parsed (`message.rs:73-77`, `wire.rs:558`); `ResultStatus::OperationPending=0x02`; dispatcher **fails every batch item when async is requested** (`mod.rs:~123`) — that rejection is the seam we replace.
 

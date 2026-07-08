@@ -66,6 +66,8 @@ pub use ops::{
     ImportRequest, ImportResponse,
     ObliterateRequest, ObliterateResponse,
     ObtainLeaseRequest, ObtainLeaseResponse,
+    CreateSplitKeyRequest, CreateSplitKeyResponse,
+    JoinSplitKeyRequest, JoinSplitKeyResponse,
     PingRequest, PingResponse,
     RecoverRequest, RecoverResponse,
     RegisterRequest, RegisterResponse,
