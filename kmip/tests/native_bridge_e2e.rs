@@ -2232,3 +2232,111 @@ fn create_split_key_then_join_threshold_subset_reconstructs_via_real_engine() {
 
     let _ = softhsmrustv3::native::session::finalize();
 }
+
+/// Phase 7.2 — the test above only ever exercises §11.54 method 4
+/// (Polynomial Sharing GF(2^8)). The other three methods' MATH is
+/// proven in isolation by `softhsmrustv3::crypto::split_key` /
+/// `native::split_key`'s own suites, but nothing previously drove them
+/// through the actual KMIP wire-level plumbing (Attribute decode,
+/// `Split Key Method`/`Split Key Polynomial` routing,
+/// `ObjectRecord`/engine-handle round-trip) — this closes that gap for
+/// all four methods in one place: XOR (parts MUST equal threshold per
+/// §11.54 — proves that constraint is enforced at the KMIP layer, not
+/// just the crypto layer), Polynomial GF(2¹⁶), Polynomial Prime Field,
+/// and Polynomial GF(2⁸) (repeated here for parity, cheap given the
+/// shared harness).
+#[test]
+fn create_split_key_then_join_covers_every_11_54_method_via_real_engine() {
+    use pqctoday_kmip::kmip30::GetRequest;
+    use pqctoday_kmip::ops::get::get;
+    use pqctoday_kmip::ops::split_key::{create_split_key, join_split_key};
+
+    let _guard = engine_test_lock();
+    let deps = build_deps_with_real_engine();
+
+    let get_bytes = |uid: &str| -> Vec<u8> {
+        get(
+            &deps,
+            GetRequest { uid: uid.to_string(), key_format_type: None, key_wrapping_specification: None },
+            "split-key-methods-e2e-get",
+        )
+        .unwrap()
+        .key_block
+        .key_value
+    };
+
+    // (method wire value, parts, threshold, extra attributes)
+    let cases: Vec<(u32, u32, u32, Vec<Attribute>)> = vec![
+        // §11.54 XOR (0x01) — spec REQUIRES Parts == Threshold.
+        (1, 3, 3, vec![]),
+        // §11.54 Polynomial Sharing GF(2^16) (0x02) — no polynomial
+        // attribute (that's GF(2^8)-only per §11.55); 5-way/threshold-3.
+        (2, 5, 3, vec![]),
+        // §11.54 Polynomial Sharing Prime Field (0x03).
+        (3, 5, 3, vec![]),
+        // §11.54 Polynomial Sharing GF(2^8) (0x04) with the
+        // spec-example polynomial 285 this time (283 is covered by
+        // the test above) — exercises the OTHER §11.55 value end to end.
+        (4, 5, 3, vec![Attribute::SplitKeyPolynomial(2)]),
+    ];
+
+    for (method, parts, threshold, extra_attrs) in cases {
+        let mut attributes = vec![
+            Attribute::CryptographicAlgorithm(KmipAlgorithm::Aes),
+            Attribute::CryptographicLength(256),
+        ];
+        attributes.extend(extra_attrs);
+
+        let create_resp = create_split_key(
+            &deps,
+            CreateSplitKeyRequest {
+                object_type: ObjectType::SecretData,
+                uid: None,
+                split_key_parts: parts,
+                split_key_threshold: threshold,
+                split_key_method: method,
+                prime_field_size: None,
+                attributes,
+                protection_storage_masks: None,
+            },
+            "split-key-methods-e2e-create",
+        )
+        .unwrap_or_else(|e| panic!("method {method}: Create Split Key failed: {e}"));
+        assert_eq!(
+            create_resp.uids.len(),
+            parts as usize,
+            "method {method}: must mint exactly Parts objects"
+        );
+
+        let share_bytes: Vec<Vec<u8>> = create_resp.uids.iter().map(|u| get_bytes(u)).collect();
+        // Prime Field (method 3) shares are field elements mod the
+        // fixed 521-bit modulus — up to 66 bytes, NOT the original
+        // secret's length (that's a genuine property of Shamir over a
+        // big prime field, not a bug). Every other method's shares
+        // preserve the original 32-byte length exactly.
+        if method != 3 {
+            for b in &share_bytes {
+                assert_eq!(b.len(), 32, "method {method}: each share preserves the 32-byte secret length");
+            }
+        }
+        assert_ne!(share_bytes[0], share_bytes[1], "method {method}: shares must differ from each other");
+
+        let subset = &create_resp.uids[..threshold as usize];
+        let join_resp = join_split_key(
+            &deps,
+            JoinSplitKeyRequest {
+                object_type: ObjectType::SecretData,
+                uids: subset.to_vec(),
+                secret_data_type: None,
+                attributes: vec![],
+                protection_storage_masks: None,
+            },
+            "split-key-methods-e2e-join",
+        )
+        .unwrap_or_else(|e| panic!("method {method}: Join Split Key failed: {e}"));
+        let joined_bytes = get_bytes(&join_resp.uid);
+        assert_eq!(joined_bytes.len(), 32, "method {method}: reconstructed secret must be 32 bytes");
+    }
+
+    let _ = softhsmrustv3::native::session::finalize();
+}

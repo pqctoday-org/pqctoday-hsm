@@ -845,6 +845,89 @@ fn login_validates_credential_issues_ticket_then_logout() {
     let _ = softhsmrustv3::native::session::finalize();
 }
 
+/// Phase 7.2 — the test above proves Login records a real session and
+/// Logout removes it, but never actually PRESENTS the ticket back to
+/// the dispatcher the way a real client does: as a `Credential::Ticket`
+/// in a LATER request's §8.1.2 `Authentication` header, routed through
+/// the real `dispatcher::dispatch` entry point (not a direct handler
+/// call bypassing `authenticate_request` entirely). This closes that
+/// gap: a ticket-bearing request genuinely authenticates and runs; the
+/// exact same request with no credential at all is genuinely rejected
+/// (auth is enforced, not open); and an unknown/forged ticket value
+/// also fails rather than being silently accepted.
+#[test]
+fn login_ticket_authenticates_a_later_dispatched_request() {
+    use pqctoday_kmip::dispatcher::dispatch;
+    use pqctoday_kmip::kmip30::{
+        Credential, Operation, RequestBatchItem, RequestHeader, RequestMessage, RequestPayload,
+        ResultStatus,
+    };
+    use pqctoday_kmip::server::auth::{sha256_hex, AuthUser, Identity};
+
+    let ring = Arc::new(RingSink::new(64));
+    let sink: Arc<dyn AuditSink> = ring;
+    let engine = Engine::with_global_sink(sink.clone());
+    engine
+        .activate(load_from_str(
+            "schema_version: 1\nmetadata: {name: t, description: t, authority: t, effective: always}\nrules: []\n",
+            std::path::Path::new("<t>"),
+        ).unwrap())
+        .unwrap();
+    let mut deps = Deps::new(engine, Arc::new(MemoryStore::new()), sink, DepsConfig::default());
+    deps.config.auth_users = vec![AuthUser { username: "alice".into(), password_sha256: sha256_hex("pw") }];
+
+    // Login (as if freshly verified via mTLS or Username/Password on
+    // THIS request) issues a real ticket for use on later requests.
+    let ctx = AuthContext { identity: Some(Identity { username: "alice".into() }) };
+    let ticket = login(
+        &deps,
+        LoginRequest { lease_time: None, request_count: None, usage_limits: None },
+        &ctx,
+        "ticket-e2e-login",
+    )
+    .unwrap()
+    .ticket;
+
+    let ping_msg = |authentication: Vec<Credential>| RequestMessage {
+        header: RequestHeader { authentication, ..RequestHeader::v3() },
+        batch_items: vec![RequestBatchItem { operation: Operation::Ping, payload: RequestPayload::Ping(PingRequest) }],
+    };
+
+    // The ticket, presented as the header's Authentication credential,
+    // genuinely authenticates — routed through the real dispatcher,
+    // not a direct handler call.
+    let resp = dispatch(&deps, ping_msg(vec![Credential::Ticket(ticket.clone())]));
+    assert_eq!(resp.batch_items[0].result_status, ResultStatus::Success, "a valid ticket must authenticate");
+
+    // The exact same request with NO credential at all is genuinely
+    // rejected — proves auth is actually enforced here, not silently
+    // open (auth_users is non-empty).
+    let resp = dispatch(&deps, ping_msg(vec![]));
+    assert_eq!(resp.batch_items[0].result_status, ResultStatus::OperationFailed);
+    assert_eq!(
+        resp.batch_items[0].result_reason,
+        Some(ResultReason::AuthenticationNotSuccessful.to_wire_value()),
+    );
+
+    // An unknown/forged ticket value also fails — not silently accepted.
+    let forged = pqctoday_kmip::kmip30::Ticket {
+        ticket_type: pqctoday_kmip::kmip30::TICKET_TYPE_LOGIN,
+        ticket_value: b"not-a-real-ticket".to_vec(),
+    };
+    let resp = dispatch(&deps, ping_msg(vec![Credential::Ticket(forged)]));
+    assert_eq!(resp.batch_items[0].result_status, ResultStatus::OperationFailed);
+    assert_eq!(
+        resp.batch_items[0].result_reason,
+        Some(ResultReason::AuthenticationNotSuccessful.to_wire_value()),
+    );
+
+    // Logout invalidates the real ticket; a later request presenting
+    // it must fail exactly like the forged one, not still succeed.
+    logout(&deps, LogoutRequest { ticket: ticket.clone() }, "ticket-e2e-logout").unwrap();
+    let resp = dispatch(&deps, ping_msg(vec![Credential::Ticket(ticket)]));
+    assert_eq!(resp.batch_items[0].result_status, ResultStatus::OperationFailed);
+}
+
 /// P2.2 — §6.1.62 Validate end-to-end against the live store. A stored
 /// self-signed Certificate validates to `Valid`; an inline expired cert
 /// → `Invalid`; a leaf whose issuer isn't supplied → `Unknown`; a UID
@@ -1116,8 +1199,8 @@ fn coverage_map() -> std::collections::HashMap<pqctoday_kmip::kmip30::Operation,
         (Op::MAC, "e2e:native_bridge(k15_hmac_mac_and_verify_route_through_engine)"),
         (Op::MACVerify, "e2e:native_bridge(k15_hmac_mac_and_verify_route_through_engine)"),
         // P3.3 — §6.1.12 Create Split Key / §6.1.31 Join Split Key.
-        (Op::CreateSplitKey, "e2e:native_bridge(create_split_key_then_join_threshold_subset_reconstructs_via_real_engine)"),
-        (Op::JoinSplitKey, "e2e:native_bridge(create_split_key_then_join_threshold_subset_reconstructs_via_real_engine)"),
+        (Op::CreateSplitKey, "e2e:native_bridge(create_split_key_then_join_threshold_subset_reconstructs_via_real_engine, create_split_key_then_join_covers_every_11_54_method_via_real_engine)"),
+        (Op::JoinSplitKey, "e2e:native_bridge(create_split_key_then_join_threshold_subset_reconstructs_via_real_engine, create_split_key_then_join_covers_every_11_54_method_via_real_engine)"),
         // ── Handler-level unit tests (src/ops/*.rs) ──
         (Op::Query, "unit:ops::query"),
         (Op::Get, "unit:ops::get"),
@@ -1137,7 +1220,7 @@ fn coverage_map() -> std::collections::HashMap<pqctoday_kmip::kmip30::Operation,
         (Op::Log, "unit:ops::session_and_auth"),
         (Op::RNGRetrieve, "unit:ops::rng_and_pkcs11"),
         (Op::RNGSeed, "unit:ops::rng_and_pkcs11"),
-        (Op::Pkcs11, "unit:ops::rng_and_pkcs11"),
+        (Op::Pkcs11, "unit:ops::rng_and_pkcs11 + e2e:op_coverage(pkcs11_get_info_returns_real_ck_info_bytes_against_real_engine)"),
         // Phase 4 — asynchronous subsystem (§6.1.43/§6.1.5/§6.1.44/§6.1.46).
         (Op::Poll, "e2e:async_ops_e2e(mandatory_hash_enqueues_then_poll_matches_synchronous_result)"),
         (Op::Cancel, "e2e:async_ops_e2e(cancel_reports_a_real_outcome_and_query_async_requests_clears_on_completion) + unit:ops::async_ops"),
@@ -1146,6 +1229,50 @@ fn coverage_map() -> std::collections::HashMap<pqctoday_kmip::kmip30::Operation,
     ]
     .into_iter()
     .collect()
+}
+
+/// Phase 7.2 — §6.1.42 PKCS_11 passthrough's `C_GetInfo` branch is
+/// documented as "genuinely calls into the real engine and returns its
+/// actual CK_INFO bytes — real identity, not fabricated" (see the
+/// handler's own doc comment), but every existing `ops::rng_and_pkcs11`
+/// unit test builds a `Deps` with `engine_session: None` — the honest
+/// "no real engine wired in, don't fabricate" fallback path, never the
+/// real one. This proves the real path: against a genuine bootstrapped
+/// engine session, `C_GetInfo` returns actual non-empty CK_INFO bytes
+/// (72 B per PKCS#11 v3.2 §5.4) rather than the `None` output the
+/// fallback produces.
+#[test]
+fn pkcs11_get_info_returns_real_ck_info_bytes_against_real_engine() {
+    use pqctoday_kmip::kmip30::Pkcs11Request;
+    use pqctoday_kmip::ops::rng_and_pkcs11::pkcs11;
+
+    let _guard = engine_test_lock();
+    let deps = build_deps_with_real_engine();
+
+    let req = |function: u32| Pkcs11Request {
+        interface: Some("V3.2".into()),
+        function,
+        correlation_value: Some(vec![0xCA, 0xFE]),
+        input_parameters: None,
+    };
+
+    // C_Initialize (0x01) — the KMIP-server-side virtual lifecycle
+    // flag; the real engine is already initialized for the server's
+    // whole lifetime, this just tracks THIS client's view of it.
+    assert_eq!(pkcs11(&deps, req(1), "pkcs11-e2e-init").unwrap().return_code, 0);
+
+    // C_GetInfo (0x03) against the REAL engine session — must return
+    // actual, non-empty CK_INFO bytes, not the honest-`None` fallback.
+    let info_resp = pkcs11(&deps, req(3), "pkcs11-e2e-getinfo").unwrap();
+    assert_eq!(info_resp.return_code, 0);
+    let info_bytes = info_resp.output_parameters.expect("real engine must return real CK_INFO bytes");
+    assert_eq!(info_bytes.len(), 72, "CK_INFO is 72 bytes per PKCS#11 v3.2 §5.4");
+    assert!(info_bytes.iter().any(|&b| b != 0), "real CK_INFO is not all-zero filler");
+
+    // C_Finalize (0x02) — clean teardown of the virtual lifecycle flag.
+    assert_eq!(pkcs11(&deps, req(2), "pkcs11-e2e-finalize").unwrap().return_code, 0);
+
+    let _ = softhsmrustv3::native::session::finalize();
 }
 
 /// The coverage checklist's key set MUST equal `HANDLED_OPERATIONS`

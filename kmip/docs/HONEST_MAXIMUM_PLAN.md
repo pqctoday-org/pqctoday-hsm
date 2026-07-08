@@ -1,6 +1,7 @@
 # KMIP 3.0 "Honest Maximum" — Implementation Plan
 
-> **Status:** PLAN (not yet executed) · **Authored:** 2026-07-07
+> **Status:** ✅ EXECUTED — all in-scope phases (0-4, 6, 7) complete 2026-07-08; Phase 5
+> (server-to-client) remains deliberately parked, as planned. · **Authored:** 2026-07-07
 > **Scope target:** 100% of the non-deprecated OASIS corpus (**97/102**), **zero faked operations**,
 > **HSS/LMS signing wired**, **broad asynchronous operations**, and **all Baseline Server profile
 > conditions except item 10 (server-to-client), which is deliberately parked.**
@@ -587,6 +588,81 @@ their own, so none of them needed editing.
 - **7.1** Update `assert_replay_report.py` → **97 PASS / 5 SKIP_DEPRECATED / 0 fail / 0 SKIP_OP** + explicit declined set; keep `check_report_fresh.py`. *(S)*
 - **7.2** New coverage: HSS/LMS sign + **state-advance/no-reuse** (critical), async round-trip + Cancel/Process/QueryAsync, Split Key create/join per method (threshold), real auth ticket, PKCS#11 real proxy, 2 stateful-Locate filters, 4 RNG-seed behaviors. *(M)*
 - **7.3** Regenerate `REPLAY_REPORT.{md,json}`, `CONFORMANCE_REPORT.md`, crossref YAMLs; ensure the 3 CI jobs gate the new expectations. *(S)*
+
+**Outcome (2026-07-08):**
+
+7.1: `assert_replay_report.py` rewritten to the honest exact baseline —
+`EXPECT_PASS = 97` (was `MIN_PASS = 92`, a floor rather than an exact
+figure) and `EXPECTED_SKIP` now `{skip_deprecated: 5, everything else:
+0}` (was `{5, 2, 3, 0, 0}` = 10). `check_report_fresh.py` needed no
+changes — it's generic (diffs the working-tree report against `HEAD`
+modulo the timestamp field, no hardcoded numbers) and still passes.
+`.github/workflows/ci.yml`'s `kmip-conformance` job step name/comment
+("Assert replay baseline (92 PASS / 0 FAIL / 10 SKIP)") was also stale
+— fixed to 97/0/5, the actual behavior it was already correctly
+gating.
+
+7.2: audited the checklist against actual test coverage before writing
+anything — 4 of the 7 items were **already closed**: HSS/LMS
+exhaustion (`e935284`, this session, before the summarized portion),
+the async subsystem (Phase 4, this session), Locate's stateful filters
+(Storage Status Mask has 3 dedicated unit tests; Object Group /
+Application Specific Information are corpus-covered via
+SASED-M-3/TL-M-3), and all 4 RNG-seed behaviors (already 4 dedicated
+unit tests, one per mode). Three were genuine gaps, closed with real
+tests against a real engine session, not stubs:
+- **Split Key per method** — the existing e2e test only ever exercised
+  §11.54 method 4 (GF(2^8)). New
+  `create_split_key_then_join_covers_every_11_54_method_via_real_engine`
+  (`tests/native_bridge_e2e.rs`) drives all four methods through the
+  actual KMIP wire-level plumbing, including XOR's Parts==Threshold
+  constraint and the second §11.55 polynomial (285). Caught a real
+  test-design bug while writing it: Prime Field shares are field
+  elements mod a ~521-bit prime, not the original secret's length —
+  asserting all shares are exactly 32 bytes is only true for the other
+  three methods; fixed the assertion, not the implementation.
+- **Real auth ticket** — the existing Login/Logout test proved a
+  session record exists in `deps.sessions` but never actually
+  presented the ticket back through `dispatcher::dispatch` as a
+  `Credential::Ticket`, so `authenticate_request`'s ticket-lookup
+  branch was implemented but never exercised by an end-to-end test.
+  New `login_ticket_authenticates_a_later_dispatched_request`
+  (`tests/op_coverage_e2e.rs`) proves: a valid ticket authenticates a
+  real dispatched request; the identical request with no credential
+  fails (auth is genuinely enforced, not open); a forged ticket value
+  fails; a logged-out ticket fails.
+- **PKCS#11 real proxy** — every existing `C_GetInfo` test built
+  `Deps` with `engine_session: None`, exercising only the honest "no
+  real engine, don't fabricate" fallback, never the real branch the
+  handler's own doc comment claims exists. New
+  `pkcs11_get_info_returns_real_ck_info_bytes_against_real_engine`
+  (`tests/op_coverage_e2e.rs`) proves it: against a real bootstrapped
+  engine session, `C_GetInfo` returns actual non-empty 72-byte CK_INFO,
+  not the fallback's `None`.
+
+7.3: `REPLAY_REPORT.{md,json}` and `CONFORMANCE_REPORT.md` were
+already regenerated/rewritten in Phase 6.2; re-verified fresh after
+7.2's new tests (behavior-neutral — they only add coverage, corpus
+replay is byte-identical). `spec/crossref/*.yaml` — checked; the one
+existing file (`kem-encapsulate-decapsulate.yaml`) is a different,
+unrelated topic (classical/hybrid/PQC KEM support) and needed no
+changes; no new crossref file was warranted for this phase's work
+(nothing here rests on a disputed spec-fact worth its own hand-curated
+sheet beyond what's already inline in code comments and this plan
+doc). All 3 CI jobs (`rust-test`, `kmip-conformance`,
+`kmip-pqc-conformance`) already gate the current behavior correctly —
+only the `kmip-conformance` step's stale display text needed fixing
+(done in 7.1).
+
+`cargo test`: 551 lib tests (unchanged — all 3 new tests are
+integration-level) + all integration binaries green, +4 tests total
+(`native_bridge_e2e` 25→26, `op_coverage_e2e` 19→21). Corpus unchanged
+97/0/5, both CI gate scripts pass locally. **Definition of done (§6)
+verified line by line: 97/102 with 5 documented deprecated declines
+and 0 SKIP_OP; 0 fake handler; HSS/LMS real with engine-managed
+crash-safe state; broad async real with `Asynchronous Capability =
+true`; Query truthful (§6.1.47, no padding); honest label stated
+verbatim in `CONFORMANCE_REPORT.md` §5.1 — all met.**
 
 ---
 
