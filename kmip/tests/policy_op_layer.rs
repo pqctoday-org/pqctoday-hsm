@@ -257,6 +257,78 @@ fn training_permissive_allows_everything() {
     assert!(policy_allowed(&try_create_sym(&deps, KmipAlgorithm::Aes, 256, &[])));
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// BSI TR-02102-1 §2.4.1/§2.4.2 — FrodoKEM / Classic McEliece. These policy
+// rules (algorithm_allowlist + require_custom_attribute) already existed in
+// bsi-tr-02102.yaml, naming these exact algorithm strings — but were
+// unreachable dead code until the FrodoKEM/Classic-McEliece/HQC
+// implementation plan made the algorithms real. This is the test that
+// proves they're not dead anymore.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const HYBRID_PARTNER_TAG: (&str, &str) = ("pqctoday-hybrid-partner", "X25519");
+
+#[test]
+#[ignore = "op-layer suite: run via local gate (--include-ignored)"]
+fn bsi_allows_frodokem_and_mceliece_with_hybrid_partner_tag() {
+    let deps = deps_for("bsi-tr-02102.yaml");
+    assert!(
+        policy_allowed(&try_create_key_pair(
+            &deps, KmipAlgorithm::FrodoKem976Aes, 0, "kem", &[HYBRID_PARTNER_TAG]
+        )),
+        "BSI must ALLOW FrodoKEM-976 with the hybrid-partner tag"
+    );
+    assert!(
+        policy_allowed(&try_create_key_pair(
+            &deps, KmipAlgorithm::ClassicMcEliece6688128, 0, "kem", &[HYBRID_PARTNER_TAG]
+        )),
+        "BSI must ALLOW Classic-McEliece-6688128 with the hybrid-partner tag"
+    );
+}
+
+#[test]
+#[ignore = "op-layer suite: run via local gate (--include-ignored)"]
+fn bsi_denies_frodokem_and_mceliece_without_hybrid_partner_tag() {
+    let deps = deps_for("bsi-tr-02102.yaml");
+    assert!(
+        policy_denied(&try_create_key_pair(&deps, KmipAlgorithm::FrodoKem976Aes, 0, "kem", &[])),
+        "BSI must DENY FrodoKEM-976 without the hybrid-partner tag (Rule 3)"
+    );
+    assert!(
+        policy_denied(&try_create_key_pair(&deps, KmipAlgorithm::ClassicMcEliece6688128, 0, "kem", &[])),
+        "BSI must DENY Classic-McEliece-6688128 without the hybrid-partner tag (Rule 3)"
+    );
+}
+
+/// The regional contrast the codebase's own docs describe: FIPS-only and
+/// CNSA 2.0 explicitly do NOT recognize FrodoKEM/Classic McEliece (they're
+/// not NIST-standardized), so both must deny them outright — regardless of
+/// any hybrid-partner tag — while BSI allows them. Same engine, same ops;
+/// the regulator's stance is a policy file, not a code path.
+#[test]
+#[ignore = "op-layer suite: run via local gate (--include-ignored)"]
+fn fips_and_cnsa_deny_frodokem_and_mceliece_bsi_allows() {
+    for policy in ["fips-only.yaml", "cnsa-2.0.yaml"] {
+        let deps = deps_for(policy);
+        assert!(
+            policy_denied(&try_create_key_pair(
+                &deps, KmipAlgorithm::FrodoKem976Aes, 0, "kem", &[HYBRID_PARTNER_TAG, CNSA_TAG]
+            )),
+            "{policy} must DENY FrodoKEM-976 (not NIST-standardized)"
+        );
+        assert!(
+            policy_denied(&try_create_key_pair(
+                &deps, KmipAlgorithm::ClassicMcEliece6688128, 0, "kem", &[HYBRID_PARTNER_TAG, CNSA_TAG]
+            )),
+            "{policy} must DENY Classic-McEliece-6688128 (not NIST-standardized)"
+        );
+    }
+    let bsi_deps = deps_for("bsi-tr-02102.yaml");
+    assert!(policy_allowed(&try_create_key_pair(
+        &bsi_deps, KmipAlgorithm::FrodoKem976Aes, 0, "kem", &[HYBRID_PARTNER_TAG]
+    )));
+}
+
 /// Meta-check: every shipped policy activates and can evaluate a CreateKeyPair
 /// without panicking (proves all 13 load + mount through the op layer).
 #[test]

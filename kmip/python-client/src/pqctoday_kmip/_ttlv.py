@@ -150,6 +150,23 @@ _SPEC_EXTRACT_PATCHES: dict[str, dict[str, int]] = {
         "DES":  0x00000001,
         "DES3": 0x00000002,
         "RC4":  0x00000005,
+        # BSI TR-02102-1 vendor KEMs (2026-07-06) — not in the published-3.0
+        # spec JSON since they're vendor extensions, not OASIS codepoints
+        # (Classic McEliece's 0x34 is a real OASIS value; FrodoKEM's
+        # 0x8000_005f-0x64 range is ours). Keep in sync with
+        # codepointTable.ts's copy of this same patch. Bare family names
+        # default to the AES variant, matching
+        # create_key_pair.rs::parse_algorithm's convention.
+        "FrodoKEM-640":             0x8000005F,
+        "FrodoKEM-640-AES":         0x8000005F,
+        "FrodoKEM-640-SHAKE":       0x80000060,
+        "FrodoKEM-976":             0x80000061,
+        "FrodoKEM-976-AES":         0x80000061,
+        "FrodoKEM-976-SHAKE":       0x80000062,
+        "FrodoKEM-1344":            0x80000063,
+        "FrodoKEM-1344-AES":        0x80000063,
+        "FrodoKEM-1344-SHAKE":      0x80000064,
+        "Classic-McEliece-6688128": 0x00000034,
     },
     "Operation": {
         "ReKey":        0x00000004,

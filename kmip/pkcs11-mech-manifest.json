@@ -5,11 +5,19 @@
   "captured_by_phase": "K5 vendor mech codepoint migration (compliance-audit B-1)",
   "authority": {
     "path": "pqctoday-priv/docs/platform/data/pkcs11-vendor-mech-allocation.md",
-    "sha256": "003ef8bef654dff07481d405353a105d820123a7cd149e7458626ef651a4c147",
+    "sha256": "4b76e108fa6573dbef192b0f393dbc359715870fcb16802ca89567b128c3b1cb",
     "note": "Authority file lives in the private repo; CI gate verifies sha256 match. Update this manifest's `authority.sha256` whenever the authority file changes."
   },
   "active": {
-    "_note": "Empty since K5 (2026-06-10). The former CKM_PQCTODAY_* block 0x4032-0x4037 collided with OASIS-assigned CKM_HSS/CKM_XMSS* codepoints (pkcs11t.h:1218-1224) and sat below CKM_VENDOR_DEFINED (0x80000000). All six had standard PKCS#11 v3.2 equivalents (see `standard_pkcs11_v3_2`), so no vendor mechanisms remain. Any future genuinely vendor-specific mech MUST be allocated at 0x80000000 | n."
+    "_note": "First genuinely vendor-compliant entries since K5 (2026-06-10) — allocated 2026-07-06 per authority file §1.4, at or above CKM_VENDOR_DEFINED/CKK_VENDOR_DEFINED (0x80000000). Backed by pure-Rust crates (frodo-kem, classic-mceliece-rust) in softhsmrustv3, per cacp-frodokem-mceliece-softhsm-kmip-policy-plan-07062026.md. HQC intentionally not allocated yet — deferred pending hqc-kem crate maturity and BSI recommending it with parameters (neither true as of TR-02102-1 v2026-01).",
+    "0x80000001": {"symbol": "CKM_PQCTODAY_FRODOKEM_KEY_PAIR_GEN",         "operation": "keygen",      "algorithm": "FrodoKEM-640/976/1344, AES + SHAKE (param via CKA_PARAMETER_SET)"},
+    "0x80000002": {"symbol": "CKM_PQCTODAY_FRODOKEM_ENCAPSULATE",         "operation": "encap_decap", "algorithm": "FrodoKEM (all standard variants)"},
+    "0x80000003": {"symbol": "CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN","operation": "keygen",      "algorithm": "Classic McEliece (parameter set per Phase-0.5 scoping decision)"},
+    "0x80000004": {"symbol": "CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE","operation": "encap_decap", "algorithm": "Classic McEliece"}
+  },
+  "active_key_types": {
+    "0x80000001": {"symbol": "CKK_PQCTODAY_FRODOKEM", "algorithm": "FrodoKEM key objects"},
+    "0x80000002": {"symbol": "CKK_PQCTODAY_CLASSIC_MCELIECE", "algorithm": "Classic McEliece key objects"}
   },
   "standard_pkcs11_v3_2": {
     "_note": "Informational — the standard OASIS PKCS#11 v3.2 PQC codepoints the KMIP layer now emits (source of truth: src/lib/pkcs11/pkcs11t.h, mirrored by softhsmrustv3::constants). These are NOT vendor mechs and are NOT governed by the authority file's allocation table.",

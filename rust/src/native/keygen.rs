@@ -22,8 +22,9 @@ use std::collections::HashMap;
 use super::CkRv;
 use crate::constants::*;
 use crate::crypto::{
-    ALGO_ECDH_P256, ALGO_ECDH_X25519, ALGO_ECDH_X448, ALGO_ECDSA, ALGO_EDDSA, ALGO_ML_DSA,
-    ALGO_ML_KEM, ALGO_RSA, ALGO_SLH_DSA, CURVE_K256, CURVE_P256, CURVE_P384, CURVE_P521,
+    ALGO_CLASSIC_MCELIECE, ALGO_ECDH_P256, ALGO_ECDH_X25519, ALGO_ECDH_X448, ALGO_ECDSA,
+    ALGO_EDDSA, ALGO_FRODOKEM, ALGO_ML_DSA, ALGO_ML_KEM, ALGO_RSA, ALGO_SLH_DSA, CURVE_K256,
+    CURVE_P256, CURVE_P384, CURVE_P521,
 };
 use crate::crypto::handlers::{
     build_ec_spki_p256, build_ec_spki_p384, build_ec_spki_p521, build_ed25519_spki,
@@ -1234,6 +1235,139 @@ pub fn register_ml_kem_public_key(
     ))
 }
 
+/// FrodoKEM parameter-set table: `CKP_FRODOKEM_*` → `(sk_len, pk_len)`,
+/// verified directly against `frodo-kem` v0.1.0's own `AlgorithmParams`
+/// (see the mechanism_info comment in ffi.rs for how — not the spec PDF,
+/// to avoid a crate/spec version mismatch).
+fn frodokem_key_lens(parameter_set: u32) -> Option<(usize, usize)> {
+    match parameter_set {
+        CKP_FRODOKEM_640_AES | CKP_FRODOKEM_640_SHAKE => Some((19888, 9616)),
+        CKP_FRODOKEM_976_AES | CKP_FRODOKEM_976_SHAKE => Some((31296, 15632)),
+        CKP_FRODOKEM_1344_AES | CKP_FRODOKEM_1344_SHAKE => Some((43088, 21520)),
+        _ => None,
+    }
+}
+
+/// Register an existing FrodoKEM private (decryption) key supplied as raw
+/// bytes. Sets `CKA_DECAPSULATE=TRUE`, mirroring keygen.
+pub fn register_frodokem_private_key(
+    _session: u32,
+    parameter_set: u32,
+    dk_bytes: &[u8],
+    cka_id: &[u8],
+    label: &str,
+) -> Result<u32, CkRv> {
+    let (dk_len, _) = frodokem_key_lens(parameter_set).ok_or(CKR_ARGUMENTS_BAD)?;
+    if dk_bytes.len() != dk_len {
+        return Err(CKR_ATTRIBUTE_VALUE_INVALID);
+    }
+    Ok(register_pqc_private(
+        _session,
+        parameter_set,
+        ALGO_FRODOKEM,
+        CKK_PQCTODAY_FRODOKEM,
+        CKM_PQCTODAY_FRODOKEM_KEY_PAIR_GEN,
+        false, // CKA_SIGN
+        true,  // CKA_DECAPSULATE
+        dk_bytes,
+        cka_id,
+        label,
+    ))
+}
+
+/// Register an existing FrodoKEM public (encryption) key supplied as raw
+/// bytes. Sets `CKA_ENCAPSULATE=TRUE`, mirroring keygen. No SPKI builder
+/// exists for FrodoKEM (no standard AlgorithmIdentifier OID is registered
+/// for it), so `CKA_PUBLIC_KEY_INFO` is left unset — same as any other
+/// algorithm without one (see `register_pqc_public`'s `spki.is_empty()`
+/// guard).
+pub fn register_frodokem_public_key(
+    _session: u32,
+    parameter_set: u32,
+    ek_bytes: &[u8],
+    cka_id: &[u8],
+    label: &str,
+) -> Result<u32, CkRv> {
+    let (_, ek_len) = frodokem_key_lens(parameter_set).ok_or(CKR_ARGUMENTS_BAD)?;
+    if ek_bytes.len() != ek_len {
+        return Err(CKR_ATTRIBUTE_VALUE_INVALID);
+    }
+    Ok(register_pqc_public(
+        _session,
+        parameter_set,
+        ALGO_FRODOKEM,
+        CKK_PQCTODAY_FRODOKEM,
+        CKM_PQCTODAY_FRODOKEM_KEY_PAIR_GEN,
+        false, // CKA_VERIFY
+        true,  // CKA_ENCAPSULATE
+        ek_bytes,
+        Vec::new(),
+        cka_id,
+        label,
+    ))
+}
+
+/// Register an existing Classic McEliece private (secret) key supplied as
+/// raw bytes. Scoped to `mceliece6688128` only (implementation plan Phase
+/// 0.5) — `parameter_set` MUST be `CKP_CLASSIC_MCELIECE_6688128`.
+pub fn register_classic_mceliece_private_key(
+    _session: u32,
+    parameter_set: u32,
+    sk_bytes: &[u8],
+    cka_id: &[u8],
+    label: &str,
+) -> Result<u32, CkRv> {
+    if parameter_set != CKP_CLASSIC_MCELIECE_6688128 {
+        return Err(CKR_ARGUMENTS_BAD);
+    }
+    if sk_bytes.len() != classic_mceliece_rust::CRYPTO_SECRETKEYBYTES {
+        return Err(CKR_ATTRIBUTE_VALUE_INVALID);
+    }
+    Ok(register_pqc_private(
+        _session,
+        parameter_set,
+        ALGO_CLASSIC_MCELIECE,
+        CKK_PQCTODAY_CLASSIC_MCELIECE,
+        CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN,
+        false, // CKA_SIGN
+        true,  // CKA_DECAPSULATE
+        sk_bytes,
+        cka_id,
+        label,
+    ))
+}
+
+/// Register an existing Classic McEliece public key supplied as raw bytes.
+/// Scoped to `mceliece6688128` only. No SPKI builder exists for Classic
+/// McEliece (no standard AlgorithmIdentifier OID is registered for it).
+pub fn register_classic_mceliece_public_key(
+    _session: u32,
+    parameter_set: u32,
+    pk_bytes: &[u8],
+    cka_id: &[u8],
+    label: &str,
+) -> Result<u32, CkRv> {
+    if parameter_set != CKP_CLASSIC_MCELIECE_6688128 {
+        return Err(CKR_ARGUMENTS_BAD);
+    }
+    if pk_bytes.len() != classic_mceliece_rust::CRYPTO_PUBLICKEYBYTES {
+        return Err(CKR_ATTRIBUTE_VALUE_INVALID);
+    }
+    Ok(register_pqc_public(
+        _session,
+        parameter_set,
+        ALGO_CLASSIC_MCELIECE,
+        CKK_PQCTODAY_CLASSIC_MCELIECE,
+        CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN,
+        false, // CKA_VERIFY
+        true,  // CKA_ENCAPSULATE
+        pk_bytes,
+        Vec::new(),
+        cka_id,
+        label,
+    ))
+}
+
 /// Register an existing SLH-DSA private key supplied as raw FIPS 205
 /// `sk` bytes. `parameter_set` is one of the 12 `CKP_SLH_DSA_*` values;
 /// length is `4n` per FIPS 205 §9.1 (64 / 96 / 128 for n = 16 / 24 / 32),
@@ -1408,6 +1542,110 @@ pub enum EccCurve {
     P384,
     P521,
     Secp256K1,
+}
+
+// ── FrodoKEM (BSI TR-02102-1 §2.4.1) ─────────────────────────────────────────
+
+/// Maps a `CKP_FRODOKEM_*` parameter set to the `frodo-kem` crate's
+/// `Algorithm` enum. Only the 6 standard variants are exposed — eFrodoKEM
+/// (ephemeral/one-time-use) intentionally is not (see the FrodoKEM /
+/// Classic-McEliece / HQC implementation plan, Phase 0.8: there is nothing
+/// to cross-validate the ephemeral variants against).
+pub(crate) fn frodokem_algorithm(parameter_set: u32) -> Result<frodo_kem::Algorithm, CkRv> {
+    use frodo_kem::Algorithm;
+    match parameter_set {
+        CKP_FRODOKEM_640_AES => Ok(Algorithm::FrodoKem640Aes),
+        CKP_FRODOKEM_640_SHAKE => Ok(Algorithm::FrodoKem640Shake),
+        CKP_FRODOKEM_976_AES => Ok(Algorithm::FrodoKem976Aes),
+        CKP_FRODOKEM_976_SHAKE => Ok(Algorithm::FrodoKem976Shake),
+        CKP_FRODOKEM_1344_AES => Ok(Algorithm::FrodoKem1344Aes),
+        CKP_FRODOKEM_1344_SHAKE => Ok(Algorithm::FrodoKem1344Shake),
+        _ => Err(CKR_ARGUMENTS_BAD),
+    }
+}
+
+/// Generate a FrodoKEM keypair. `parameter_set` ∈ the 6 `CKP_FRODOKEM_*`
+/// standard variants. Returns `(public_handle, private_handle)`.
+///
+/// RNG note: `frodo-kem` requires `rand_core 0.10`'s `CryptoRng`, not the
+/// engine's usual `rand 0.8`/`rand::rngs::OsRng` — incompatible major
+/// versions of the same trait. Uses `getrandom_0_4::SysRng` (already a
+/// engine dependency for the wasm32 entropy source) wrapped in
+/// `UnwrapErr`, exactly as `frodo-kem`'s own documented usage shows.
+pub fn generate_frodokem_keypair(
+    _session: u32,
+    parameter_set: u32,
+    cka_id: &[u8],
+    label: &str,
+) -> Result<(u32, u32), CkRv> {
+    use getrandom_0_4::rand_core::UnwrapErr;
+    use getrandom_0_4::SysRng;
+
+    let alg = frodokem_algorithm(parameter_set)?;
+
+    let mut pub_attrs: Attributes = HashMap::new();
+    let mut prv_attrs: Attributes = HashMap::new();
+
+    set_common_pub_attrs(&mut pub_attrs, parameter_set, ALGO_FRODOKEM, CKK_PQCTODAY_FRODOKEM, CKM_PQCTODAY_FRODOKEM_KEY_PAIR_GEN);
+    set_common_prv_attrs(&mut prv_attrs, parameter_set, ALGO_FRODOKEM, CKK_PQCTODAY_FRODOKEM, CKM_PQCTODAY_FRODOKEM_KEY_PAIR_GEN);
+    // FrodoKEM-specific flags: encapsulate / decapsulate, NOT sign / verify.
+    store_bool(&mut pub_attrs, CKA_VERIFY, false);
+    store_bool(&mut pub_attrs, CKA_ENCAPSULATE, true);
+    store_bool(&mut prv_attrs, CKA_SIGN, false);
+    store_bool(&mut prv_attrs, CKA_DECAPSULATE, true);
+
+    insert_id_and_label(&mut pub_attrs, cka_id, label);
+    insert_id_and_label(&mut prv_attrs, cka_id, label);
+
+    let mut rng = UnwrapErr(SysRng);
+    let (ek, dk) = alg.generate_keypair(&mut rng);
+    pub_attrs.insert(CKA_VALUE, ek.value().to_vec());
+    prv_attrs.insert(CKA_VALUE, dk.value().to_vec());
+
+    finalize_and_register(_session, pub_attrs, prv_attrs)
+}
+
+// ── Classic McEliece (BSI TR-02102-1 §2.4.2) ─────────────────────────────────
+
+/// Generate a Classic McEliece keypair. Scoped to `mceliece6688128` only
+/// (see implementation plan Phase 0.5 — `classic-mceliece-rust` can only
+/// have one parameter-set feature compiled in at a time); `parameter_set`
+/// MUST be `CKP_CLASSIC_MCELIECE_6688128`. Returns `(public_handle,
+/// private_handle)`.
+///
+/// Unlike FrodoKEM, `classic-mceliece-rust` uses `rand 0.8`'s
+/// `CryptoRng`/`RngCore` (confirmed against its own `Cargo.toml`) — the
+/// same version the rest of this engine already uses, so
+/// `rand::rngs::OsRng` works directly here.
+pub fn generate_classic_mceliece_keypair(
+    _session: u32,
+    parameter_set: u32,
+    cka_id: &[u8],
+    label: &str,
+) -> Result<(u32, u32), CkRv> {
+    if parameter_set != CKP_CLASSIC_MCELIECE_6688128 {
+        return Err(CKR_ARGUMENTS_BAD);
+    }
+
+    let mut pub_attrs: Attributes = HashMap::new();
+    let mut prv_attrs: Attributes = HashMap::new();
+
+    set_common_pub_attrs(&mut pub_attrs, parameter_set, ALGO_CLASSIC_MCELIECE, CKK_PQCTODAY_CLASSIC_MCELIECE, CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN);
+    set_common_prv_attrs(&mut prv_attrs, parameter_set, ALGO_CLASSIC_MCELIECE, CKK_PQCTODAY_CLASSIC_MCELIECE, CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN);
+    store_bool(&mut pub_attrs, CKA_VERIFY, false);
+    store_bool(&mut pub_attrs, CKA_ENCAPSULATE, true);
+    store_bool(&mut prv_attrs, CKA_SIGN, false);
+    store_bool(&mut prv_attrs, CKA_DECAPSULATE, true);
+
+    insert_id_and_label(&mut pub_attrs, cka_id, label);
+    insert_id_and_label(&mut prv_attrs, cka_id, label);
+
+    let mut rng = rand::rngs::OsRng;
+    let (pk, sk) = classic_mceliece_rust::keypair_boxed(&mut rng);
+    pub_attrs.insert(CKA_VALUE, pk.as_ref().to_vec());
+    prv_attrs.insert(CKA_VALUE, sk.as_ref().to_vec());
+
+    finalize_and_register(_session, pub_attrs, prv_attrs)
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -1884,6 +2122,78 @@ mod tests {
             generate_ml_kem_keypair(session, CKP_ML_KEM_1024, b"\x01", "kem1024").unwrap();
         assert_eq!(get_object_value(pub_h).unwrap().len(), 1568);
         assert_eq!(get_object_value(prv_h).unwrap().len(), 3168);
+        close_session(session).unwrap();
+    }
+
+    /// FrodoKEM-640-AES keygen produces a valid keypair with the sizes
+    /// verified directly against `frodo-kem` v0.1.0's own
+    /// `AlgorithmParams` (see mechanism_info comment in ffi.rs) — not the
+    /// spec PDF, to avoid any crate/spec version mismatch.
+    #[test]
+    fn frodokem_640_aes_keygen_produces_expected_length() {
+        let _guard = test_lock::acquire();
+        let session = fresh_session();
+        let (pub_h, prv_h) = generate_frodokem_keypair(
+            session,
+            CKP_FRODOKEM_640_AES,
+            b"\x01",
+            "frodo640aes-test",
+        )
+        .unwrap();
+        assert!(pub_h > 0 && prv_h > 0 && pub_h != prv_h);
+        assert_eq!(get_object_value(pub_h).unwrap().len(), 9616);
+        assert_eq!(get_object_value(prv_h).unwrap().len(), 19888);
+        close_session(session).unwrap();
+    }
+
+    /// FrodoKEM-1344-SHAKE (BSI's largest recommended parameter set,
+    /// §2.4.1) — pk = 21520 bytes, sk = 43088 bytes.
+    #[test]
+    fn frodokem_1344_shake_keygen_produces_expected_length() {
+        let _guard = test_lock::acquire();
+        let session = fresh_session();
+        let (pub_h, prv_h) = generate_frodokem_keypair(
+            session,
+            CKP_FRODOKEM_1344_SHAKE,
+            b"\x01",
+            "frodo1344shake-test",
+        )
+        .unwrap();
+        assert_eq!(get_object_value(pub_h).unwrap().len(), 21520);
+        assert_eq!(get_object_value(prv_h).unwrap().len(), 43088);
+        close_session(session).unwrap();
+    }
+
+    /// Classic McEliece (mceliece6688128 — BSI's recommended Category-5
+    /// pick, §2.4.2) — pk = 1,044,992 bytes, sk = 13,932 bytes, verified
+    /// directly against `classic-mceliece-rust` v2.0.2's
+    /// `CRYPTO_PUBLICKEYBYTES`/`CRYPTO_SECRETKEYBYTES` for this variant.
+    #[test]
+    fn classic_mceliece_6688128_keygen_produces_expected_length() {
+        let _guard = test_lock::acquire();
+        let session = fresh_session();
+        let (pub_h, prv_h) = generate_classic_mceliece_keypair(
+            session,
+            CKP_CLASSIC_MCELIECE_6688128,
+            b"\x01",
+            "mceliece-test",
+        )
+        .unwrap();
+        assert!(pub_h > 0 && prv_h > 0 && pub_h != prv_h);
+        assert_eq!(get_object_value(pub_h).unwrap().len(), 1_044_992);
+        assert_eq!(get_object_value(prv_h).unwrap().len(), 13_932);
+        close_session(session).unwrap();
+    }
+
+    /// Classic McEliece rejects any parameter set other than the one
+    /// scoped variant (Phase 0.5 — the crate can't compile in more than
+    /// one at a time).
+    #[test]
+    fn classic_mceliece_rejects_wrong_parameter_set() {
+        let _guard = test_lock::acquire();
+        let session = fresh_session();
+        let result = generate_classic_mceliece_keypair(session, 0xFF, b"\x01", "bad-ps");
+        assert_eq!(result.unwrap_err(), CKR_ARGUMENTS_BAD);
         close_session(session).unwrap();
     }
 

@@ -536,6 +536,9 @@ From `rust/Cargo.toml`:
 | `sha2`, `sha3`, `hmac` | Digest and MAC |
 | `wasm-bindgen` 0.2.117 | WASM ↔ JS bridge |
 | `getrandom` 0.2 (js feature) | Browser-compatible CSPRNG |
+| `frodo-kem` 0.1 | FrodoKEM-640/976/1344 (AES + SHAKE) key encapsulation — BSI TR-02102-1 recommended, not NIST-standardized |
+| `classic-mceliece-rust` 2 (mceliece6688128 feature) | Classic McEliece key encapsulation — BSI TR-02102-1 recommended, not NIST-standardized |
+| `oqs` 0.10 (dev-dependency only) | liboqs bindings used solely as an independent cross-validation oracle for the two crates above; never a shipping/runtime dependency |
 
 ### Building the Rust Engine
 

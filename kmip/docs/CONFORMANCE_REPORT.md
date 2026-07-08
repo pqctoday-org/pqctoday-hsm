@@ -1,6 +1,6 @@
 # KMIP 3.0 Conformance Report
 
-> **Current as of v0.11.0.** The replay figures below are regenerated per run via
+> **Current as of v0.12.0.** The replay figures below are regenerated per run via
 > `../conformance/harness/dispatcher_replay.py` (`cargo test` in CI also gates
 > them); the dated stamps below are when the prose was last edited, not a ceiling
 > on validity.

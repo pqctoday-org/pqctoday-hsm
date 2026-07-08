@@ -1,6 +1,6 @@
 [package]
 name = "softhsmrustv3"
-version = "0.11.0"
+version = "0.12.0"
 edition = "2024"
 description = "A native Rust WebAssembly clone of SoftHSMv3"
 
@@ -31,7 +31,10 @@ lazy_static = "1.4.0"
 
 # Cryptography (Pure Rust replacements for OpenSSL/Botan)
 getrandom = { version = "0.2.17", features = ["js"] }
-getrandom_0_4 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
+# `sys_rng` added for `frodo-kem` (needs `rand_core 0.10`'s `CryptoRng`, not
+# `rand 0.8`'s — see FrodoKEM keygen in native/keygen.rs). `wasm_js` remains
+# for the existing browser/wasm32 entropy source.
+getrandom_0_4 = { package = "getrandom", version = "0.4", features = ["wasm_js", "sys_rng"] }
 rand = "0.8.5"
 rand_chacha = "0.3"
 aes = "0.8.3"
@@ -102,10 +105,32 @@ xmss = "0.1.0-pre.0"
 fips204 = "0.4.6"
 fips205 = "0.4.1"
 
+# BSI TR-02102-1 conservative KEMs (recommended alongside ML-KEM, not NIST-standardized).
+# Both take an external CryptoRng parameter — no getrandom/OS-randomness call inside
+# either crate, so no wasm32 RNG feature wiring is needed (verified against each
+# crate's keygen signature before adding).
+frodo-kem = { version = "0.1", default-features = false, features = [
+    "frodo640aes", "frodo640shake", "frodo976aes", "frodo976shake", "frodo1344aes", "frodo1344shake",
+] }
+# Only one parameter-set feature may be enabled at a time (crate constraint — see
+# cacp-frodokem-mceliece-softhsm-kmip-policy-plan-07062026.md Phase 0.5). Scoped to
+# mceliece6688128 (BSI's Category-5 pick) for this initial slice; 460896/8192128
+# follow-up tracked in that plan.
+# v3+ required — v2.0.2's ciphertext included a non-spec confirmation-hash
+# addition (K = H(1,e,C,H(2,e)) instead of the official spec's K = H(1,e,C));
+# v3.1.0 fixed this, matching mceliece-spec-20221023.pdf and liboqs exactly
+# (verified directly against both sources' source code — see the FrodoKEM/
+# Classic-McEliece/HQC implementation plan).
+classic-mceliece-rust = { version = "3", default-features = false, features = ["mceliece6688128", "alloc", "zeroize"] }
+
 [dev-dependencies]
 # NIST ACVP keyGen KAT parsing (T7 seed-deterministic keygen tests reads
 # the internalProjection.json vector files shipped with the patched forks).
 serde_json = "1"
+# Cross-validation oracle only (Phase 0.9/0.6 of the FrodoKEM/McEliece/HQC plan) —
+# native liboqs bindings, dev-dependency only so it never has to cross the wasm32
+# target; the engine's shipping crypto never depends on this.
+oqs = { version = "0.10", default-features = false, features = ["kems", "vendored"] }
 
 [patch.crates-io]
 fips204 = { path = "fips204-patched" }

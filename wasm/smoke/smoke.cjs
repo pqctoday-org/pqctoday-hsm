@@ -110,8 +110,12 @@ console.log(`[smoke]   ✓ list_objects=${objs.length}, policy="${pol.name}", au
 // ── Step 6 — H1: a present-but-unknown algorithm must fail, not silently
 // fall back to a default (which would test a different request than the UI
 // shows). CreateKeyPair with an algorithm the engine doesn't implement.
-console.log('[smoke] CreateKeyPair with an unimplemented algorithm (FrodoKEM-1344) …');
-const bogus = runOp({ op: 'CreateKeyPair', algorithm: 'FrodoKEM-1344' });
+// FrodoKEM-1344 used to be this file's example of "unimplemented" — it no
+// longer is (BSI TR-02102-1 FrodoKEM/Classic McEliece support, 2026-07-06),
+// so this now uses Falcon, which remains genuinely parked (see the
+// FrodoKEM/Classic-McEliece/HQC implementation plan's explicit non-goals).
+console.log('[smoke] CreateKeyPair with an unimplemented algorithm (Falcon-512) …');
+const bogus = runOp({ op: 'CreateKeyPair', algorithm: 'Falcon-512' });
 assert.ok(!bogus.ok, 'unknown algorithm must produce a failed OpResult, not a silent default keypair');
 assert.ok(/unknown algorithm/i.test(bogus.message || ''),
   `error names the unknown algorithm (got: ${bogus.message})`);

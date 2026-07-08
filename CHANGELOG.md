@@ -8,7 +8,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-## [0.11.0] — 2026-07-08
+## [0.12.0] — 2026-07-08
 
 Closes the KMIP `HONEST_MAXIMUM_PLAN.md` initiative: every advertised KMIP 3.0
 capability the server claims is now genuinely implemented, replacing the last
@@ -82,6 +82,64 @@ stale baseline.
   store); and the PKCS#11 passthrough's `C_GetInfo` is now proven against a
   real engine session (previously only tested against the no-engine
   fallback path).
+
+## [0.11.0] — 2026-07-06
+
+FrodoKEM (all 6 parameter sets) and Classic McEliece-6688128 per BSI
+TR-02102-1, wired end to end: the Rust engine, the raw PKCS#11 C-ABI, the
+KMIP 3.0 layer, and the crypto-agility policy engine.
+
+### Added
+
+- **FrodoKEM (640/976/1344, AES and SHAKE variants) and Classic
+  McEliece-6688128 key generation, encapsulation, and decapsulation** in the
+  SoftHSMv3 Rust engine, via new `CKM_PQCTODAY_*` vendor mechanisms.
+  FrodoKEM passes all 600 official KAT vectors (6 variants x 100, from
+  microsoft/PQCrypto-LWEKE); Classic McEliece has no independent static KAT
+  file, so it's covered by 40 bidirectional cross-validation trials against
+  liboqs instead. `classic-mceliece-rust` bumped 2 → 3 to fix a spec
+  non-conformance (an extra non-spec confirmation-hash term in K).
+- **Both algorithms exposed via the raw PKCS#11 C-ABI**
+  (`C_GenerateKeyPair`/`C_EncapsulateKey`/`C_DecapsulateKey`), not just the
+  KMIP native API — the same convention already used for ML-KEM/ML-DSA
+  (`CKA_PARAMETER_SET`-required, no `CKA_SEED` support). 8 new C-ABI tests
+  cover full round trips plus negative-path cases (missing/wrong parameter
+  set, rejected seed, wrong key family, wrong ciphertext length).
+- **KMIP 3.0 wire codepoints and CreateKeyPair/Encapsulate/Decapsulate
+  dispatch** for both algorithms, with canonical naming for crypto-agility
+  policy matching.
+- **BSI TR-02102-1 policy support**: the crypto policy engine now allows
+  both algorithms under a BSI profile (tagged as needing a hybrid partner),
+  while FIPS/CNSA profiles deny both — matching the intended regional
+  divergence. Two policy scenarios (`bsi-allow-frodo`,
+  `bsi-deny-frodo-nopartner`, `fips-deny-frodo`) gained a `realExecution`
+  companion that runs a real CreateKeyPair round trip (or confirms a real
+  attempt is refused) rather than only simulating the policy decision.
+- **The in-browser KMIP wasm bundle vendored into the hub's CACP Playground**
+  now recognizes both algorithms in its own algorithm-name lookup and KMIP
+  codepoint patch table, and no longer overflows the wasm32 shadow stack on
+  FrodoKEM-1344's matrix generation (`build-kmip-wasm.sh` now reserves 8MiB).
+
+### Scope
+
+- Classic McEliece-6688128 only (BSI's Category-5 pick); the smaller
+  6960119 parameter set and HQC are deferred.
+
+
+- **FrodoKEM + Classic McEliece key exchange**, the two conservative
+  post-quantum algorithms Germany's BSI recommends for long-term
+  confidentiality (BSI TR-02102-1 §2.4.1/§2.4.2) alongside NIST's ML-KEM.
+  Available end to end: generate a keypair, encapsulate, and decapsulate
+  through both the standard PKCS#11 interface and the KMIP server, gated by
+  the same crypto-agility policy engine as everything else — a BSI-style
+  policy allows them (paired with a hybrid partner algorithm), while
+  FIPS/CNSA policies correctly reject them, matching each region's real
+  guidance. FrodoKEM ships all 6 standard sizes (640/976/1344 × AES/SHAKE);
+  Classic McEliece ships the Category-5 `mceliece6688128` parameter set BSI
+  recommends. Correctness is backed by all 600 official FrodoKEM test
+  vectors from the reference implementation, plus 40 independent
+  round-trip trials against `liboqs` for Classic McEliece (no official
+  test vectors exist for it). HQC is intentionally not included yet.
 
 ## [0.10.0] — 2026-07-05
 

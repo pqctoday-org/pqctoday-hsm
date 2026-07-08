@@ -881,6 +881,20 @@ fn alg_from_name(name: &str) -> Option<KmipAlgorithm> {
     if name.eq_ignore_ascii_case("X25519") || name.eq_ignore_ascii_case("X448") {
         return Some(Ecdh);
     }
+    // A bare "FrodoKEM-640/976/1344" (no AES/SHAKE suffix) defaults to the
+    // AES variant — mirrors create_key_pair.rs::parse_algorithm's own
+    // convention exactly, so the same ambiguous name a policy's allow/deny
+    // rule references (canonical_name collapses both variants to this bare
+    // form) is also directly runnable here, not just dry-run-able.
+    if name.eq_ignore_ascii_case("FrodoKEM-640") {
+        return Some(FrodoKem640Aes);
+    }
+    if name.eq_ignore_ascii_case("FrodoKEM-976") {
+        return Some(FrodoKem976Aes);
+    }
+    if name.eq_ignore_ascii_case("FrodoKEM-1344") {
+        return Some(FrodoKem1344Aes);
+    }
     const ALL: &[KmipAlgorithm] = &[
         Aes, Rsa, Ecdsa, HmacSha256, HmacSha384, HmacSha512, Ecdh, Ed25519,
         ChaCha20, ChaCha20Poly1305,
@@ -890,6 +904,9 @@ fn alg_from_name(name: &str) -> Option<KmipAlgorithm> {
         SlhDsaShake256s, SlhDsaShake256f,
         // K6 hybrid KEMs.
         X25519MlKem768, SecP256r1MlKem768,
+        // BSI TR-02102-1 §2.4.1/§2.4.2 vendor KEMs.
+        FrodoKem640Aes, FrodoKem640Shake, FrodoKem976Aes, FrodoKem976Shake,
+        FrodoKem1344Aes, FrodoKem1344Shake, ClassicMcEliece6688128,
     ];
     ALL.iter().copied().find(|a| a.spec_name().eq_ignore_ascii_case(name))
 }
@@ -908,8 +925,19 @@ fn implied_length_for_name(name: &str) -> Option<u32> {
 }
 
 fn is_kem(alg: KmipAlgorithm) -> bool {
-    matches!(alg, KmipAlgorithm::MlKem512 | KmipAlgorithm::MlKem768 | KmipAlgorithm::MlKem1024)
-        || alg.is_hybrid_kem()
+    matches!(
+        alg,
+        KmipAlgorithm::MlKem512
+            | KmipAlgorithm::MlKem768
+            | KmipAlgorithm::MlKem1024
+            | KmipAlgorithm::FrodoKem640Aes
+            | KmipAlgorithm::FrodoKem640Shake
+            | KmipAlgorithm::FrodoKem976Aes
+            | KmipAlgorithm::FrodoKem976Shake
+            | KmipAlgorithm::FrodoKem1344Aes
+            | KmipAlgorithm::FrodoKem1344Shake
+            | KmipAlgorithm::ClassicMcEliece6688128
+    ) || alg.is_hybrid_kem()
 }
 
 // ── response summary ───────────────────────────────────────────────────────────
