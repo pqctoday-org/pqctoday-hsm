@@ -8,6 +8,31 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.13.1] — 2026-07-09
+
+CI-only follow-up to 0.13.0. No functional or behavioral changes to the
+engine or KMIP server.
+
+### Fixed
+
+- **PKCS#11 Constants Gate CI check.** `CKM_PQCTODAY_SPLIT_KEY`
+  (`0x80000012` — the Split Key vendor mechanism added in 0.12.0) was
+  never added to `scripts/check_pkcs11_constants.py`'s `PINNED`
+  allowlist, so the gate had been failing on every push/PR to `main`
+  since that merge. Added.
+
+### Internal
+
+- **`cargo test` no longer runs real Classic McEliece keygens by
+  default.** Six tests across `rust/` and `kmip/` each build a real
+  `mceliece6688128` keypair (Goppa code generation), which is
+  minutes-slow in an unoptimized debug build — the dominant cost in
+  every CI run of the "Rust Tests" job (up to ~41 minutes). Marked
+  `#[ignore]`, consistent with the two most expensive McEliece
+  cross-validation tests that already were; every ignored test is
+  still real coverage, documented, and runnable manually with
+  `cargo test --release -- --ignored <name>`.
+
 ## [0.13.0] — 2026-07-09
 
 A follow-up audit of the `HONEST_MAXIMUM_PLAN.md` work in 0.12.0: a
