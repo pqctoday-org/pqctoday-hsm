@@ -2180,7 +2180,13 @@ mod tests {
     /// pick, §2.4.2) — pk = 1,044,992 bytes, sk = 13,932 bytes, verified
     /// directly against `classic-mceliece-rust` v2.0.2's
     /// `CRYPTO_PUBLICKEYBYTES`/`CRYPTO_SECRETKEYBYTES` for this variant.
+    ///
+    /// `#[ignore]`: a single mceliece6688128 keygen (Goppa code generation)
+    /// takes minutes in an unoptimized debug build — too slow for every CI
+    /// run. Run manually with `cargo test --release -- --ignored
+    /// classic_mceliece_6688128_keygen` (release mode is fast).
     #[test]
+    #[ignore = "mceliece6688128 keygen is minutes-slow in debug builds — see doc comment"]
     fn classic_mceliece_6688128_keygen_produces_expected_length() {
         let _guard = test_lock::acquire();
         let session = fresh_session();

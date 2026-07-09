@@ -156,7 +156,12 @@ fn frodokem_1344_shake_round_trip() {
 // only (implementation plan Phase 0.5). Keygen is slow in debug builds
 // (Goppa code generation) — run with --release for a fast pass. ─────────
 
+/// `#[ignore]`: a single mceliece6688128 keygen (Goppa code generation)
+/// takes minutes in an unoptimized debug build — too slow for every CI
+/// run. Run manually with `cargo test --release -- --ignored
+/// classic_mceliece_6688128_round_trip` (release mode is fast).
 #[test]
+#[ignore = "mceliece6688128 keygen is minutes-slow in debug builds — see doc comment"]
 fn classic_mceliece_6688128_round_trip() {
     round_trip(KmipAlgorithm::ClassicMcEliece6688128, 32);
 }
