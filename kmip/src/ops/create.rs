@@ -197,6 +197,7 @@ pub fn create(deps: &Deps, mut req: CreateRequest, correlation_id: &str) -> Resu
         supersedes: None,
         name: x.name.clone(),
         alternative_name: x.alternative_name.clone(),
+        alternative_name_type: x.alternative_name_type,
         links: std::collections::HashMap::new(),
         // Y1 — persist the request's custom attributes so use-time gates read
         // the classification tag off the stored symmetric key.

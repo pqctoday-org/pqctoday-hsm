@@ -2782,21 +2782,31 @@ fn decode_attribute_v3(frame: &TtlvFrame) -> Result<Option<Attribute>, WireError
         // itself, so every real client-set AlternativeName (which always
         // wire-encodes as a Structure) silently decoded to `Ok(None)` and
         // was dropped — found via the OASIS TL-M-2/TL-M-3 conformance
-        // transcripts (Honest-Maximum Phase 2.1). We keep only the Value
-        // half on `Attribute::AlternativeName(String)`; the Type
-        // enumeration isn't read back by anything downstream yet.
+        // transcripts (Honest-Maximum Phase 2.1).
+        //
+        // Gap-remediation Phase H, Finding #11 — the Type enumeration is
+        // now decoded for real instead of being discarded. `1`
+        // (Uninterpreted Text String) is the spec default and also what
+        // a non-compliant bare-TextString frame implies.
         tags::AlternativeName => {
             if let Value::TextString(s) = &frame.value {
-                Attribute::AlternativeName(s.clone())
+                Attribute::AlternativeName { value: s.clone(), name_type: 1 }
             } else if let Value::Structure(children) = &frame.value {
                 let mut value = None;
+                let mut name_type = 1u32;
                 for c in children {
-                    if c.tag.0 == tags::AlternativeNameValue {
-                        if let Value::TextString(s) = &c.value { value = Some(s.clone()); }
+                    match c.tag.0 {
+                        tags::AlternativeNameValue => {
+                            if let Value::TextString(s) = &c.value { value = Some(s.clone()); }
+                        }
+                        tags::AlternativeNameType => {
+                            if let Value::Enumeration(v) = c.value { name_type = v; }
+                        }
+                        _ => {}
                     }
                 }
                 match value {
-                    Some(s) => Attribute::AlternativeName(s),
+                    Some(value) => Attribute::AlternativeName { value, name_type },
                     None => return Ok(None),
                 }
             } else { return Ok(None); }
@@ -4414,6 +4424,60 @@ pub fn decode_transparent_rsa_private_key(
     Ok(f)
 }
 
+/// `TransparentRSAPublicKey`'s `KeyMaterial` — just Modulus + Public
+/// Exponent (both mandatory per §6.2.1 Table 158).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TransparentRsaPublicKeyFields {
+    pub modulus: Vec<u8>,
+    pub public_exponent: Vec<u8>,
+}
+
+/// Gap-remediation Phase D/H (found via BL-M-8-30 conformance replay,
+/// not originally called out by name in Finding #3's text) — mirrors
+/// [`decode_transparent_rsa_private_key`] for the public-key half. Per
+/// `decode_key_block`'s own comment ("K8 stores its TTLV encoding
+/// verbatim... and the Register path can parse typed fields out of
+/// it" — citing BL-M-8 directly), this was always the intended design;
+/// only the private-key parser was ever implemented. Before this,
+/// `register_import_export.rs` fed the raw TTLV `KeyMaterial` bytes
+/// straight to `register_rsa_public_key_der` (which expects real DER),
+/// so a `TransparentRSAPublicKey` Register always failed internally —
+/// silently, while Finding #3's discarded-`Result` bug was still in
+/// place, and loudly (a regression this fix closes) once that bug was
+/// fixed.
+pub fn decode_transparent_rsa_public_key(
+    ttlv_key_material: &[u8],
+) -> Result<TransparentRsaPublicKeyFields, WireError> {
+    let frame = decode_one(ttlv_key_material)?;
+    if frame.tag.0 != tags::KeyMaterial {
+        return Err(WireError::UnexpectedTag {
+            got: frame.tag.0,
+            expected: tags::KeyMaterial,
+            name: "Transparent RSA Public Key material",
+        });
+    }
+    let mut f = TransparentRsaPublicKeyFields::default();
+    for c in expect_structure(&frame, "Key Material")? {
+        let dst = match c.tag.0 {
+            tags::Modulus        => &mut f.modulus,
+            tags::PublicExponent => &mut f.public_exponent,
+            _ => continue,
+        };
+        if let Value::BigInteger(b) = &c.value {
+            *dst = b.clone();
+        }
+    }
+    for (field, tag, name) in [
+        (&f.modulus, tags::Modulus, "Modulus"),
+        (&f.public_exponent, tags::PublicExponent, "Public Exponent"),
+    ] {
+        if field.is_empty() {
+            return Err(WireError::Missing { tag, name });
+        }
+    }
+    Ok(f)
+}
+
 /// Encode an Export response payload per §6.1.22 / Table 317:
 /// ObjectType + UID + Attributes (Structure) + Any Object (SymmetricKey
 /// / PublicKey / PrivateKey wrapping a KeyBlock).
@@ -4908,16 +4972,15 @@ fn encode_attribute_v3(a: &Attribute) -> TtlvFrame {
             TtlvFrame::new(Tag(tags::ShortUniqueIdentifier), Value::ByteString(bytes))
         }
         // KMIP 3.0 §4.5 — Structure { Alternative Name Value, Alternative
-        // Name Type }, mirroring the decode side. We only track the Value
-        // half internally, so Type is a fixed `Uninterpreted Text String`
-        // (§11.2 Alternative Name Type Enumeration, value 1) — the correct
-        // default for a free-text label with no more specific semantic
-        // (not a URI / serial number / email / DNS name / X.500 DN / IP).
-        Attribute::AlternativeName(s) => TtlvFrame::new(
+        // Name Type }, mirroring the decode side. Gap-remediation Phase
+        // H, Finding #11 — `name_type` now genuinely round-trips instead
+        // of always being re-emitted as `1` (Uninterpreted Text String)
+        // regardless of what the client set.
+        Attribute::AlternativeName { value, name_type } => TtlvFrame::new(
             Tag(tags::AlternativeName),
             Value::Structure(vec![
-                TtlvFrame::new(Tag(tags::AlternativeNameValue), Value::TextString(s.clone())),
-                TtlvFrame::new(Tag(tags::AlternativeNameType), Value::Enumeration(1)),
+                TtlvFrame::new(Tag(tags::AlternativeNameValue), Value::TextString(value.clone())),
+                TtlvFrame::new(Tag(tags::AlternativeNameType), Value::Enumeration(*name_type)),
             ]),
         ),
         Attribute::Comment(s)                  => TtlvFrame::new(Tag(tags::Comment),                  Value::TextString(s.clone())),
@@ -6562,5 +6625,35 @@ mod tests {
         ];
         let req = decode_delete_attribute_req(&frames).unwrap();
         assert_eq!(req.attribute_reference.as_deref(), Some("Split Key Method"));
+    }
+
+    /// Gap-remediation Phase H, Finding #11 — `AlternativeNameType` must
+    /// survive decode → encode instead of being silently discarded on
+    /// decode and hardcoded to `1` (Uninterpreted Text String) on
+    /// encode regardless of what the client set. `2` = URI per §11.2.
+    #[test]
+    fn alternative_name_type_round_trips_through_structure_form() {
+        let frame = TtlvFrame::new(Tag(tags::AlternativeName), Value::Structure(vec![
+            TtlvFrame::new(Tag(tags::AlternativeNameValue), Value::TextString("https://example/asset/1".into())),
+            TtlvFrame::new(Tag(tags::AlternativeNameType), Value::Enumeration(2)), // URI
+        ]));
+        let decoded = decode_attribute_v3(&frame).unwrap().unwrap();
+        assert_eq!(
+            decoded,
+            Attribute::AlternativeName { value: "https://example/asset/1".into(), name_type: 2 },
+        );
+        let re_encoded = encode_attribute_v3(&decoded);
+        let round_tripped = decode_attribute_v3(&re_encoded).unwrap().unwrap();
+        assert_eq!(round_tripped, decoded, "Type must survive an encode/decode round trip, not just decode");
+    }
+
+    /// A bare `TextString` AlternativeName (non-compliant but seen in
+    /// the wild) defaults to Type `1` (Uninterpreted Text String), the
+    /// same default the encoder used to hardcode unconditionally.
+    #[test]
+    fn alternative_name_bare_text_string_defaults_to_uninterpreted_type() {
+        let frame = TtlvFrame::new(Tag(tags::AlternativeName), Value::TextString("legacy-label".into()));
+        let decoded = decode_attribute_v3(&frame).unwrap().unwrap();
+        assert_eq!(decoded, Attribute::AlternativeName { value: "legacy-label".into(), name_type: 1 });
     }
 }

@@ -233,6 +233,45 @@ pub fn register(
         _ => None,
     };
 
+    // Gap-remediation Phase D/H (found via BL-M-8-30 conformance
+    // replay) — mirrors `transparent_rsa_pkcs8` above for the
+    // PUBLIC-key half. `decode_key_block`'s own comment already noted
+    // "the Register path can parse typed fields out of it" for every
+    // Transparent* form (citing BL-M-8 by name); only the private-key
+    // half was ever actually wired up. Re-encode Modulus/PublicExponent
+    // as real SubjectPublicKeyInfo DER so `register_rsa_public_key_der`
+    // (which only understands DER, per/register-side comment above)
+    // gets parseable bytes instead of the raw TTLV KeyMaterial Structure.
+    let transparent_rsa_public_der: Option<Vec<u8>> = match (req.object_type, kmip_algorithm, key_format_type) {
+        (ObjectType::PublicKey, crate::kmip30::KmipAlgorithm::Rsa, Some(0x0B)) => {
+            let material = key_material.as_deref().unwrap_or_default();
+            let der = crate::kmip30::decode_transparent_rsa_public_key(material)
+                .map_err(|e| e.to_string())
+                .and_then(|f| {
+                    use rsa::pkcs8::EncodePublicKey;
+                    use rsa::BigUint;
+                    rsa::RsaPublicKey::new(
+                        BigUint::from_bytes_be(&f.modulus),
+                        BigUint::from_bytes_be(&f.public_exponent),
+                    )
+                    .map_err(|e| e.to_string())
+                    .and_then(|k| {
+                        k.to_public_key_der()
+                            .map(|d| d.as_bytes().to_vec())
+                            .map_err(|e| e.to_string())
+                    })
+                })
+                .map_err(|e| {
+                    fail_err(deps, correlation_id, "Register",
+                        KmipError::key_format_type_not_supported(format!(
+                            "Transparent RSA Public Key material could not be parsed: {e}"
+                        )))
+                })?;
+            Some(der)
+        }
+        _ => None,
+    };
+
     // KMIP 3.0 §6.1.48 + §6.2 — when the client supplies an RSA
     // private key in PKCS#1 (KeyFormatType=0x03), PKCS#8 (0x04) or
     // Transparent RSA Private Key (0x0A) form, or PQC (ML-DSA /
@@ -286,16 +325,32 @@ pub fn register(
                     super::helpers::ck_rv_to_kmip_error(rv, "Register:rsa-private-import")))?;
             }
             (ObjectType::PublicKey, crate::kmip30::KmipAlgorithm::Rsa) => {
-                // PKCS_1 RSAPublicKey or PKCS_8 SubjectPublicKeyInfo —
-                // store the DER as-is; `verify_rsa` extracts the
-                // modulus/exponent from CKA_VALUE. Gap-remediation
-                // Phase D, Finding #3 — the engine now genuinely
-                // accepts both forms (see `register_rsa_public_key_der`
-                // in `rust/src/native/keygen.rs`) and this Result is no
-                // longer discarded, so a malformed DER honestly fails
-                // Register instead of succeeding with no engine object.
+                // PKCS_1 RSAPublicKey, PKCS_8 SubjectPublicKeyInfo, or
+                // Transparent RSA Public Key (0x0B, re-encoded to SPKI
+                // DER above) — `register_rsa_public_key_der` accepts
+                // both DER forms (Gap-remediation Phase D, Finding #3);
+                // an unrecognized `fmt` now honestly fails Register
+                // instead of feeding it non-DER bytes and silently
+                // producing no engine object (found via BL-M-8-30
+                // conformance replay — the same "succeeds with no real
+                // object" failure mode Finding #3 described, just one
+                // format this file's original text didn't name).
+                // PKCS_1 (3), PKCS_8 (4), and X_509 (5, SubjectPublicKeyInfo
+                // — same shape PKCS_8 uses for public keys) are all real
+                // DER `register_rsa_public_key_der`'s from_public_key_der →
+                // from_pkcs1_der fallback already parses directly.
+                let der: std::result::Result<&[u8], String> = match fmt {
+                    3 | 4 | 5 => Ok(material),
+                    0x0B => transparent_rsa_public_der.as_deref()
+                        .ok_or_else(|| "Transparent RSA Public Key material missing".to_string()),
+                    other => Err(format!("unsupported KeyFormatType 0x{other:02x} for RSA PublicKey Register")),
+                };
+                let der = der.map_err(|e| fail_err(deps, correlation_id, "Register",
+                    KmipError::key_format_type_not_supported(format!(
+                        "RSA PublicKey Register: {e}"
+                    ))))?;
                 softhsmrustv3::native::register_rsa_public_key_der(
-                    session, material, &cka_id_bytes, "kmip-register-pub",
+                    session, der, &cka_id_bytes, "kmip-register-pub",
                 ).map_err(|rv| fail_err(deps, correlation_id, "Register",
                     super::helpers::ck_rv_to_kmip_error(rv, "Register:rsa-public-import")))?;
             }
@@ -530,6 +585,7 @@ pub fn register(
         supersedes: None,
         name,
         alternative_name: x.alternative_name.clone(),
+        alternative_name_type: x.alternative_name_type,
         links,
         custom_attributes,
         object_groups: x.object_groups.clone(),
@@ -828,6 +884,9 @@ pub(crate) struct ExtractedAttrs {
     /// for an attribute the client explicitly provided (found via the
     /// OASIS TL-M-3 conformance transcript, Honest-Maximum Phase 2.1).
     pub alternative_name: Option<String>,
+    /// Gap-remediation Phase H, Finding #11 — sibling `Alternative Name
+    /// Type` (§4.5 Enumeration), previously discarded on decode.
+    pub alternative_name_type: Option<u32>,
 }
 
 pub(crate) fn extract_attrs(attrs: &[Attribute]) -> ExtractedAttrs {
@@ -841,6 +900,7 @@ pub(crate) fn extract_attrs(attrs: &[Attribute]) -> ExtractedAttrs {
         application_specific_information: None,
         object_groups: Vec::new(),
         alternative_name: None,
+        alternative_name_type: None,
     };
     for a in attrs {
         match a {
@@ -863,7 +923,10 @@ pub(crate) fn extract_attrs(attrs: &[Attribute]) -> ExtractedAttrs {
             Attribute::ApplicationSpecificInformation { namespace, data } => {
                 out.application_specific_information = Some((namespace.clone(), data.clone()));
             }
-            Attribute::AlternativeName(n) => out.alternative_name = Some(n.clone()),
+            Attribute::AlternativeName { value, name_type } => {
+                out.alternative_name = Some(value.clone());
+                out.alternative_name_type = Some(*name_type);
+            }
             // Multi-instance: accumulate every Object Group label so an
             // object Registered into several groups is locatable by any.
             Attribute::ObjectGroup(g) => {

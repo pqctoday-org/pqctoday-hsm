@@ -575,7 +575,7 @@ fn attribute_present(obj: &ObjectRecord, a: &Attribute) -> bool {
         Attribute::Description(_)            => obj.description.is_some(),
         Attribute::Comment(_)                => obj.comment.is_some(),
         Attribute::ContactInformation(_)     => obj.contact_information.is_some(),
-        Attribute::AlternativeName(_)        => obj.alternative_name.is_some(),
+        Attribute::AlternativeName { .. }    => obj.alternative_name.is_some(),
         Attribute::ObjectClass(_)            => obj.object_class.is_some(),
         Attribute::KeyValueLocation(_)       => obj.key_value_location.is_some(),
         Attribute::ActivationDate(_)         => obj.activation_date.is_some(),
@@ -779,7 +779,10 @@ fn apply_attribute(obj: &mut ObjectRecord, a: &Attribute) {
         Attribute::Fresh(b)                    => obj.fresh = Some(*b),
         Attribute::QuantumSafe(b)              => obj.quantum_safe = Some(*b),
         Attribute::RotateAutomatic(b)          => obj.rotate_automatic = Some(*b),
-        Attribute::AlternativeName(s)          => obj.alternative_name = Some(s.clone()),
+        Attribute::AlternativeName { value, name_type } => {
+            obj.alternative_name = Some(value.clone());
+            obj.alternative_name_type = Some(*name_type);
+        }
         Attribute::Comment(s)                  => obj.comment = Some(s.clone()),
         Attribute::Description(s)              => obj.description = Some(s.clone()),
         Attribute::ContactInformation(s)       => obj.contact_information = Some(s.clone()),

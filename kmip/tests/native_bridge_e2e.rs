@@ -2628,3 +2628,117 @@ fn k9_id_placeholder_resolves_after_join_split_key() {
 
     let _ = softhsmrustv3::native::session::finalize();
 }
+
+/// Gap-remediation Phase D/H — found via BL-M-8-30 conformance replay
+/// (not originally called out by Finding #3's text): `TransparentRSAPublicKey`
+/// Register fed the raw TTLV `KeyMaterial` Structure straight to
+/// `register_rsa_public_key_der` (which expects real DER), so it always
+/// failed internally — silently while Finding #3's discarded-`Result`
+/// bug was in place, loudly (breaking BL-M-8) once that bug was fixed.
+/// Proves the Transparent form now produces a genuinely usable engine
+/// object: Register a real RSA key pair's private half in PKCS#8 form
+/// and public half in `TransparentRSAPublicKey` form (raw Modulus +
+/// PublicExponent BigIntegers, §6.2.1), then Sign with the private key
+/// and SignatureVerify with the Transparent-registered public key.
+#[test]
+fn k3_register_transparent_rsa_public_key_produces_usable_engine_object() {
+    use pqctoday_kmip::codec::{encode, Tag, TtlvFrame, Value};
+    use pqctoday_kmip::kmip30::{KeyBlock, KeyFormatType, RegisterRequest};
+    use pqctoday_kmip::ops::register_import_export::register;
+    use rsa::pkcs8::EncodePrivateKey;
+    use rsa::traits::PublicKeyParts;
+
+    let _guard = engine_test_lock();
+    let deps = build_deps_with_real_engine();
+
+    // KMIP §9.2.4 — BigInteger byte length must already be a multiple
+    // of 8 when handed to the codec; it does not auto-pad.
+    fn pad_to_multiple_of_8(mut bytes: Vec<u8>) -> Vec<u8> {
+        let pad = (8 - bytes.len() % 8) % 8;
+        let mut out = vec![0u8; pad];
+        out.append(&mut bytes);
+        out
+    }
+
+    let priv_key = rsa::RsaPrivateKey::new(&mut rand::rngs::OsRng, 2048)
+        .expect("generate RSA-2048 key");
+    let pub_key = priv_key.to_public_key();
+    let priv_pkcs8 = priv_key.to_pkcs8_der().expect("encode PKCS#8 private").as_bytes().to_vec();
+    let modulus_bits = (pub_key.n().to_bytes_be().len() as u32) * 8;
+    let modulus_bytes = pad_to_multiple_of_8(pub_key.n().to_bytes_be());
+    let exponent_bytes = pad_to_multiple_of_8(pub_key.e().to_bytes_be());
+
+    // §6.2.1 `KeyMaterial` Structure for TransparentRSAPublicKey:
+    // just Modulus (0x420052) + Public Exponent (0x42006c) BigIntegers.
+    const TAG_KEY_MATERIAL: u32 = 0x42_0043;
+    const TAG_MODULUS: u32 = 0x42_0052;
+    const TAG_PUBLIC_EXPONENT: u32 = 0x42_006c;
+    let key_material_frame = TtlvFrame::new(
+        Tag(TAG_KEY_MATERIAL),
+        Value::Structure(vec![
+            TtlvFrame::new(Tag(TAG_MODULUS), Value::BigInteger(modulus_bytes)),
+            TtlvFrame::new(Tag(TAG_PUBLIC_EXPONENT), Value::BigInteger(exponent_bytes)),
+        ]),
+    );
+    let mut ttlv_key_material = bytes::BytesMut::new();
+    encode(&key_material_frame, &mut ttlv_key_material);
+
+    let register_rsa = |object_type, format, bytes: Vec<u8>, usage| {
+        register(
+            &deps,
+            RegisterRequest {
+                secret_data_type: None,
+                object_type,
+                attributes: vec![
+                    Attribute::CryptographicAlgorithm(KmipAlgorithm::Rsa),
+                    Attribute::CryptographicLength(modulus_bits),
+                    Attribute::CryptographicUsageMask(usage),
+                    Attribute::ActivationDate(OffsetDateTime::now_utc().unix_timestamp() - 3600),
+                ],
+                managed_object: Some(KeyBlock {
+                    key_format_type: format,
+                    cryptographic_algorithm: KmipAlgorithm::Rsa,
+                    cryptographic_length: modulus_bits,
+                    key_value: bytes,
+                    key_wrapping_data: None,
+                }),
+                protection_storage_masks: None,
+                certificate_payload: None,
+            },
+            "k3-register-transparent",
+        )
+        .map(|r| r.uid)
+    };
+
+    let priv_uid = register_rsa(ObjectType::PrivateKey, KeyFormatType::Pkcs8, priv_pkcs8, UsageMask::SIGN)
+        .expect("Register RSA private key (PKCS#8)");
+    let pub_uid = register_rsa(
+        ObjectType::PublicKey,
+        KeyFormatType::TransparentRsaPublicKey,
+        ttlv_key_material.to_vec(),
+        UsageMask::VERIFY,
+    )
+    .expect("Register RSA public key (TransparentRSAPublicKey) must succeed with a real engine object");
+
+    let message = b"BL-M-8: TransparentRSAPublicKey Register must be genuinely usable".to_vec();
+    let sig = sign(
+        &deps,
+        SignRequest { uid: priv_uid, data: message.clone(), cryptographic_parameters: None },
+        "k3-sign-transparent",
+    )
+    .expect("Sign with PKCS#8-registered RSA private key");
+    let verified = signature_verify(
+        &deps,
+        SignatureVerifyRequest {
+            uid: pub_uid,
+            data: message,
+            signature: sig.signature,
+            cryptographic_parameters: None,
+        },
+        "k3-verify-transparent",
+    )
+    .expect("SignatureVerify against a TransparentRSAPublicKey-registered public key");
+    assert_eq!(verified.validity, SignatureValidity::Valid);
+
+    let _ = softhsmrustv3::native::session::finalize();
+}
