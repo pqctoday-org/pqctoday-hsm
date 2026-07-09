@@ -2563,10 +2563,85 @@ mod tests {
         let handle = generate_aes_key(session, 256, b"\x01", "aes-gcm").unwrap();
         let iv = vec![0x42u8; 12];
         let plaintext = b"the quick brown fox";
-        let ciphertext = encrypt(session, handle, CKM_AES_GCM, plaintext, Some(&iv)).unwrap();
+        let ciphertext =
+            encrypt(session, handle, CKM_AES_GCM, plaintext, Some(&iv), None, &[], None).unwrap();
         // AES-GCM ciphertext = plaintext.len() + 16-byte tag.
         assert_eq!(ciphertext.len(), plaintext.len() + 16);
-        let recovered = decrypt(session, handle, CKM_AES_GCM, &ciphertext, Some(&iv)).unwrap();
+        let recovered =
+            decrypt(session, handle, CKM_AES_GCM, &ciphertext, Some(&iv), None, &[], None).unwrap();
+        assert_eq!(recovered, plaintext);
+        close_session(session).unwrap();
+    }
+
+    /// Gap-remediation Phase F, Finding #4 — the handle-based `encrypt`/
+    /// `decrypt` previously hardcoded empty AAD unconditionally; real
+    /// client-supplied AAD must now genuinely authenticate the
+    /// ciphertext (round-trips when matched, fails when tampered),
+    /// exactly like the raw-bytes `encrypt_with_key_bytes` path already
+    /// did.
+    #[test]
+    fn aes_256_gcm_engine_handle_honors_real_aad() {
+        use crate::native::encrypt::{decrypt, encrypt};
+        let _guard = test_lock::acquire();
+        let session = fresh_session();
+        let handle = generate_aes_key(session, 256, b"\x01", "aes-gcm-aad").unwrap();
+        let iv = vec![0x24u8; 12];
+        let plaintext = b"Phase F: real AAD must genuinely authenticate";
+        let aad = b"associated-data-not-encrypted";
+
+        let ciphertext =
+            encrypt(session, handle, CKM_AES_GCM, plaintext, Some(&iv), None, aad, None).unwrap();
+        let recovered =
+            decrypt(session, handle, CKM_AES_GCM, &ciphertext, Some(&iv), None, aad, None).unwrap();
+        assert_eq!(recovered, plaintext, "decrypt with the matching AAD must recover the plaintext");
+
+        let err = decrypt(
+            session, handle, CKM_AES_GCM, &ciphertext, Some(&iv), None, b"wrong-aad", None,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err, CKR_ENCRYPTED_DATA_INVALID,
+            "decrypt with mismatched AAD must fail authentication, not silently succeed",
+        );
+        close_session(session).unwrap();
+    }
+
+    /// Gap-remediation Phase F, Finding #4 — the handle-based `encrypt`/
+    /// `decrypt` previously hardcoded SHA-256/MGF1-SHA-256 for RSA-OAEP
+    /// unconditionally. Proves an explicit non-default hash (SHA-384) is
+    /// genuinely used, not silently ignored: encrypting with SHA-384 and
+    /// decrypting with the SHA-256 default must fail (wrong padding
+    /// hash), while decrypting with SHA-384 explicitly must recover the
+    /// plaintext.
+    #[test]
+    fn rsa_oaep_engine_handle_honors_explicit_hash_override() {
+        use crate::native::encrypt::{decrypt, encrypt, OaepHash, OaepParams};
+        let _guard = test_lock::acquire();
+        let session = fresh_session();
+        let (pub_handle, priv_handle) =
+            generate_rsa_keypair(session, 2048, b"\x01", "rsa-oaep-hash").unwrap();
+        let plaintext = b"Phase F: OAEP hash override must be real";
+
+        let sha384 = OaepParams { hash: Some(OaepHash::Sha384), mgf_hash: Some(OaepHash::Sha384), label: None };
+        let ciphertext = encrypt(
+            session, pub_handle, CKM_RSA_PKCS_OAEP, plaintext, None, Some(&sha384), &[], None,
+        )
+        .unwrap();
+
+        // SHA-256 default (no override) must NOT decrypt SHA-384-OAEP
+        // ciphertext — proves encrypt genuinely used SHA-384, not a
+        // silently-ignored parameter.
+        let default_err = decrypt(
+            session, priv_handle, CKM_RSA_PKCS_OAEP, &ciphertext, None, None, &[], None,
+        )
+        .unwrap_err();
+        assert_eq!(default_err, CKR_ENCRYPTED_DATA_INVALID);
+
+        // The matching SHA-384 override on decrypt recovers the plaintext.
+        let recovered = decrypt(
+            session, priv_handle, CKM_RSA_PKCS_OAEP, &ciphertext, None, Some(&sha384), &[], None,
+        )
+        .unwrap();
         assert_eq!(recovered, plaintext);
         close_session(session).unwrap();
     }
@@ -2580,9 +2655,11 @@ mod tests {
         let session = fresh_session();
         let handle = generate_aes_key(session, 256, b"\x01", "tamper").unwrap();
         let iv = vec![0u8; 12];
-        let mut ct = encrypt(session, handle, CKM_AES_GCM, b"hello", Some(&iv)).unwrap();
+        let mut ct =
+            encrypt(session, handle, CKM_AES_GCM, b"hello", Some(&iv), None, &[], None).unwrap();
         ct[0] ^= 0xFF;
-        let err = decrypt(session, handle, CKM_AES_GCM, &ct, Some(&iv)).unwrap_err();
+        let err =
+            decrypt(session, handle, CKM_AES_GCM, &ct, Some(&iv), None, &[], None).unwrap_err();
         assert_eq!(err, CKR_ENCRYPTED_DATA_INVALID);
         close_session(session).unwrap();
     }
