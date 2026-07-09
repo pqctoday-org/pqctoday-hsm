@@ -126,6 +126,20 @@ pub fn modify_attribute(
             KmipError::attribute_read_only(attribute_name(&req.new_attribute))));
     }
 
+    // Gap-remediation Phase B — §4.69 Table 90's guard condition:
+    // Usage Limits stops being client-modifiable once Get Usage
+    // Allocation has granted at least one allocation against it.
+    if matches!(&req.new_attribute, Attribute::UsageLimits { .. }) && usage_limits_locked(&obj) {
+        return Err(fail_err(deps, correlation_id, "ModifyAttribute",
+            KmipError::failed(
+                ResultReason::InvalidField,
+                format!(
+                    "UsageLimits on {} is no longer client-modifiable — Get Usage Allocation has already granted against it",
+                    req.uid,
+                ),
+            )));
+    }
+
     // Per KMIP 3.0 §11 attribute table — `Activation Date` is modifiable
     // only while the object is in `PreActive`. AKLC-M-3 + SKLC-M-3 step #4
     // both pin `WrongKeyLifecycleState` once the object is Active.
@@ -204,6 +218,20 @@ pub fn delete_attribute(
                     "Current Attribute does not match any existing value".to_string(),
                 )));
         }
+        // Gap-remediation Phase B/T3 — §4.69 Table 90: "Deletable by
+        // client: Yes, as long as Get Usage Allocation has not been
+        // performed" — the same guard condition as Set/ModifyAttribute,
+        // just phrased for Delete.
+        if matches!(current, Attribute::UsageLimits { .. }) && usage_limits_locked(&obj) {
+            return Err(fail_err(deps, correlation_id, "DeleteAttribute",
+                KmipError::failed(
+                    ResultReason::InvalidField,
+                    format!(
+                        "UsageLimits on {} is no longer client-deletable — Get Usage Allocation has already granted against it",
+                        req.uid,
+                    ),
+                )));
+        }
         remove_attribute_by_value(&mut obj, current);
     } else if let Some(name) = &req.attribute_reference {
         if attribute_name_is_required(name) {
@@ -218,6 +246,17 @@ pub fn delete_attribute(
                 KmipError::failed(
                     ResultReason::ItemNotFound,
                     format!("attribute {name} not present on {}", req.uid),
+                )));
+        }
+        let canonical_name: String = name.chars().filter(|c| c.is_alphanumeric()).collect();
+        if canonical_name == "UsageLimits" && usage_limits_locked(&obj) {
+            return Err(fail_err(deps, correlation_id, "DeleteAttribute",
+                KmipError::failed(
+                    ResultReason::InvalidField,
+                    format!(
+                        "UsageLimits on {} is no longer client-deletable — Get Usage Allocation has already granted against it",
+                        req.uid,
+                    ),
                 )));
         }
         remove_attribute_by_name(&mut obj, name);
@@ -256,6 +295,20 @@ pub fn set_attribute(
             KmipError::failed(
                 ResultReason::InvalidField,
                 format!("attribute {:?} is Read-Only", attribute_name(&req.new_attribute)),
+            )));
+    }
+
+    // Gap-remediation Phase B — §4.69 Table 90's guard condition:
+    // Usage Limits stops being client-modifiable once Get Usage
+    // Allocation has granted at least one allocation against it.
+    if matches!(&req.new_attribute, Attribute::UsageLimits { .. }) && usage_limits_locked(&obj) {
+        return Err(fail_err(deps, correlation_id, "SetAttribute",
+            KmipError::failed(
+                ResultReason::InvalidField,
+                format!(
+                    "UsageLimits on {} is no longer client-modifiable — Get Usage Allocation has already granted against it",
+                    req.uid,
+                ),
             )));
     }
 
@@ -392,6 +445,16 @@ fn attribute_name_is_required(name: &str) -> bool {
 /// Per KMIP 3.0 §11 attribute table these attributes are Read-Only —
 /// server SHALL NOT honour client attempts to add or modify them. The
 /// list below mirrors the spec's "Modifiable by client = No" column.
+///
+/// Gap-remediation Phase B — every entry below (past the original
+/// v0.1 set) was verified directly against the spec's own
+/// attribute-rules tables (`kmip-spec-v3.0.pdf` §4.x, "Modifiable by
+/// client" row), not inferred from context — a first-pass draft of
+/// this fix had 3 wrong entries (CryptographicDomainParameters,
+/// ProtectionStorageMask, KeyFormatType belong here; the Link
+/// sub-types and ProtectionLevel do NOT — see `apply_attribute`)
+/// caught only by re-checking every attribute against the spec text
+/// before implementing.
 fn attribute_is_read_only(a: &Attribute) -> bool {
     matches!(a,
         Attribute::UniqueIdentifier(_) |
@@ -419,8 +482,52 @@ fn attribute_is_read_only(a: &Attribute) -> bool {
         Attribute::CertificateSubjectCN(_) |
         Attribute::X509CertificateSubject(_) |
         Attribute::X509CertificateIssuer(_) |
-        Attribute::X509CertificateIdentifier(_)
+        Attribute::X509CertificateIdentifier(_) |
+        // §4.16 Table 89 — "Modifiable by client: No". Distinct from
+        // `CryptographicParameters`, which IS client-modifiable
+        // (Table 93) — see `apply_attribute`.
+        Attribute::CryptographicDomainParameters { .. } |
+        // §4.50 — "Modifiable by client: No". The server is the only
+        // authority on which storage classes actually back an object.
+        Attribute::ProtectionStorageMask(_) |
+        // §4.29 — "Modifiable by client: No".
+        Attribute::KeyFormatType(_) |
+        // §4.25 — "Modifiable by client: No".
+        Attribute::DigitalSignatureAlgorithm(_) |
+        // §4.38 — "Modifiable by client: No".
+        Attribute::NistKeyType(_) |
+        // §4.53 — "Modifiable by client: No". Set by Revoke, not
+        // client-editable afterward.
+        Attribute::RevocationReasonCode(_) |
+        // §4.21 — "Modifiable by client: No". Set by Deactivate.
+        Attribute::DeactivationReasonCode(_) |
+        // §4.7 — "Modifiable by client: No". Server-derived from the
+        // Certificate Value DER at Register time, same posture as the
+        // CertificateLength/SubjectCN/Issuer/Subject group above.
+        Attribute::CertificateType(_) |
+        Attribute::CertificateValue(_) |
+        // §4.63-4.66 — all four Split Key attributes plus Key Part
+        // Identifier are "Modifiable by client: No"; they describe the
+        // share's own math (method/threshold/parts/index/polynomial),
+        // fixed at Create Split Key time, not something to edit after
+        // the fact.
+        Attribute::SplitKeyMethod(_) |
+        Attribute::SplitKeyParts(_) |
+        Attribute::SplitKeyThreshold(_) |
+        Attribute::KeyPartIdentifier(_) |
+        Attribute::SplitKeyPolynomial(_)
     )
+}
+
+/// Gap-remediation Phase B — §4.69 Table 90: `Usage Limits` is
+/// "Modifiable by client: Yes (Usage Limits Total and/or Usage Limits
+/// Unit only, as long as Get Usage Allocation has not been performed)".
+/// `usage_limits_remaining` starts `None` and only becomes `Some(_)`
+/// once `GetUsageAllocation` grants the first allocation
+/// (`ops/allocation_and_config.rs`) — exactly the signal the spec's
+/// guard condition needs.
+fn usage_limits_locked(obj: &ObjectRecord) -> bool {
+    obj.usage_limits_remaining.is_some()
 }
 
 /// True if `obj` currently has a value for the attribute carried in `a`.
@@ -438,6 +545,24 @@ fn attribute_present(obj: &ObjectRecord, a: &Attribute) -> bool {
         Attribute::PreviousLink(_)           => obj.links.contains_key("PreviousLink"),
         Attribute::PublicKeyLink(_)          => obj.links.contains_key("PublicKeyLink"),
         Attribute::PrivateKeyLink(_)         => obj.links.contains_key("PrivateKeyLink"),
+        // Gap-remediation Phase B/T3 — these 5 link types (the
+        // pre-existing GroupLink plus the 4 newly-settable Derivation/
+        // Replacement links) fell through to the `true` catch-all
+        // below, which made `AddAttribute` on a *fresh* object (that
+        // never had the link set) wrongly fail with
+        // `AttributeSingleValued` instead of succeeding — harmless
+        // while these were no-ops in `apply_attribute`, load-bearing
+        // now that they're genuinely persisted.
+        Attribute::GroupLink(_)                   => obj.links.contains_key("GroupLink"),
+        Attribute::DerivationBaseObjectLink(_)    => obj.links.contains_key("DerivationBaseObjectLink"),
+        Attribute::DerivedObjectLink(_)            => obj.links.contains_key("DerivedObjectLink"),
+        Attribute::ReplacedObjectLink(_)           => obj.links.contains_key("ReplacedObjectLink"),
+        Attribute::ReplacementObjectLink(_)        => obj.links.contains_key("ReplacementObjectLink"),
+        // Same class of gap for the three attributes Phase B just made
+        // genuinely settable.
+        Attribute::ProtectionLevel(_)         => obj.protection_level.is_some(),
+        Attribute::CryptographicParameters(_) => obj.cryptographic_parameters.is_some(),
+        Attribute::UsageLimits { .. }         => obj.usage_limits_total.is_some(),
         // KMIP `Object Group` is multi-instance: "present" means THIS
         // exact membership already exists. AddAttribute may add further
         // distinct groups; re-adding the same one trips the §6.1.2
@@ -482,7 +607,22 @@ fn attribute_name_present(obj: &ObjectRecord, name: &str) -> bool {
         "CryptographicLength"     => obj.cryptographic_length > 0,
         "CryptographicUsageMask"  => !obj.usage_mask.is_empty(),
         "ObjectType" | "State" | "UniqueIdentifier" => true,
-        _ => obj.custom_attributes.contains_key(name) || obj.links.contains_key(name),
+        // Gap-remediation Phase B/T3 — same three attributes as
+        // `attribute_present`'s corresponding fix.
+        "ProtectionLevel"         => obj.protection_level.is_some(),
+        "CryptographicParameters" => obj.cryptographic_parameters.is_some(),
+        "UsageLimits"             => obj.usage_limits_total.is_some(),
+        // Gap-remediation Phase B/T3 — the pre-existing catch-all
+        // checked `obj.links.contains_key(name)` against the RAW
+        // decoded reference (e.g. "Next Link", spec-cased with a
+        // space per `tag_name_from_code`), never matching the
+        // no-space keys `apply_attribute` actually writes
+        // ("NextLink"). Every `DeleteAttribute` by name against any
+        // Link attribute has always spuriously returned
+        // `ItemNotFound` as a result. Match on `canonical` (already
+        // space-stripped) instead, same as `remove_attribute_by_name`
+        // below.
+        _ => obj.custom_attributes.contains_key(name) || obj.links.contains_key(&canonical),
     }
 }
 
@@ -496,6 +636,19 @@ fn link_target(a: &Attribute) -> Option<(&'static str, &str)> {
         Attribute::PublicKeyLink(uid)  => Some(("PublicKeyLink", uid)),
         Attribute::PrivateKeyLink(uid) => Some(("PrivateKeyLink", uid)),
         Attribute::GroupLink(uid)      => Some(("GroupLink", uid)),
+        // Gap-remediation Phase B — KMIP 3.0 Tables 136/138/160/162 all
+        // say "Modifiable by client: Yes" for these four (verified
+        // directly against the spec, not assumed), so `apply_attribute`
+        // below now persists them for real. Wiring them into
+        // `link_target` too means `check_circular_link` (already called
+        // generically by Add/Modify/SetAttribute) actually protects
+        // them — without this, making them settable would let a client
+        // create a genuine circular link the way ReKey/DeriveKey's own
+        // internal writes never could.
+        Attribute::DerivationBaseObjectLink(uid) => Some(("DerivationBaseObjectLink", uid)),
+        Attribute::DerivedObjectLink(uid)         => Some(("DerivedObjectLink", uid)),
+        Attribute::ReplacedObjectLink(uid)         => Some(("ReplacedObjectLink", uid)),
+        Attribute::ReplacementObjectLink(uid)      => Some(("ReplacementObjectLink", uid)),
         _ => None,
     }
 }
@@ -590,6 +743,17 @@ fn apply_attribute(obj: &mut ObjectRecord, a: &Attribute) {
         Attribute::PublicKeyLink(uid)        => { obj.links.insert("PublicKeyLink".into(), uid.clone()); }
         Attribute::PrivateKeyLink(uid)       => { obj.links.insert("PrivateKeyLink".into(), uid.clone()); }
         Attribute::GroupLink(uid)            => { obj.links.insert("GroupLink".into(), uid.clone()); }
+        // Gap-remediation Phase B — §4.19/§4.22/§4.51/§4.52 (Tables
+        // 136/138/160/162): all "Modifiable by client: Yes", same
+        // posture as the five link types just above. `link_target`
+        // (used by `check_circular_link`, already called generically
+        // by every caller of `apply_attribute`) now recognizes these
+        // four too, so making them real doesn't also open a
+        // circular-link hole.
+        Attribute::DerivationBaseObjectLink(uid) => { obj.links.insert("DerivationBaseObjectLink".into(), uid.clone()); }
+        Attribute::DerivedObjectLink(uid)         => { obj.links.insert("DerivedObjectLink".into(), uid.clone()); }
+        Attribute::ReplacedObjectLink(uid)         => { obj.links.insert("ReplacedObjectLink".into(), uid.clone()); }
+        Attribute::ReplacementObjectLink(uid)      => { obj.links.insert("ReplacementObjectLink".into(), uid.clone()); }
         // KMIP `Object Group` (0x420056) — multi-instance: AddAttribute
         // appends a fresh membership; SetAttribute reuses this path so a
         // repeated value is idempotent (deduped).
@@ -630,10 +794,35 @@ fn apply_attribute(obj: &mut ObjectRecord, a: &Attribute) {
         Attribute::RotateInterval(n)           => obj.rotate_interval = Some(*n),
         Attribute::RotateOffset(n)             => obj.rotate_offset = Some(*n),
         Attribute::RotateGeneration(n)         => obj.rotate_generation = Some(*n),
+        // §4.48 Table 148 — "Modifiable by client: Yes".
+        Attribute::ProtectionLevel(n)          => obj.protection_level = Some(*n),
+        // Gap-remediation Phase B — §4.18 Table 93: "Modifiable by
+        // client: Yes", unconditionally (unlike UsageLimits below, no
+        // guard condition). Distinct from `CryptographicDomainParameters`
+        // (read-only, see `attribute_is_read_only`).
+        Attribute::CryptographicParameters(cp) => obj.cryptographic_parameters = Some(cp.clone()),
+        // Gap-remediation Phase B — §4.69 Table 90: "Modifiable by
+        // client: Yes (Usage Limits Total and/or Usage Limits Unit
+        // only, as long as Get Usage Allocation has not been
+        // performed)". The guard condition is enforced by the callers
+        // (`set_attribute`/`modify_attribute`, via `usage_limits_locked`)
+        // before this ever runs; `count` (the remaining budget) is
+        // deliberately NOT settable here — that's server-managed via
+        // GetUsageAllocation, same as `extract_attrs`'s identical
+        // Create/Register-time handling of this attribute.
+        Attribute::UsageLimits { total, unit, .. } => {
+            obj.usage_limits_total = Some(*total);
+            obj.usage_limits_unit = *unit;
+        }
         // Read-only or server-managed Baseline attributes (Initial Date,
         // Last Change Date, Original Creation Date, Short UID, Always/
-        // Never Sensitive, Key Value Present, Certificate*, etc.) — the
-        // server sets these; client AddAttribute is a no-op.
+        // Never Sensitive, Key Value Present, Certificate*, Split Key*,
+        // etc.) — the server sets these; client AddAttribute is a no-op.
+        // Every non-custom variant that reaches this arm is intentional:
+        // it's either genuinely read-only (guarded by
+        // `attribute_is_read_only` before `apply_attribute` is ever
+        // called) or a vendor/forward-compat variant this store doesn't
+        // yet route to a typed field.
         _ => {}
     }
 }
@@ -647,6 +836,32 @@ fn remove_attribute_by_value(obj: &mut ObjectRecord, a: &Attribute) {
         // KMIP `Object Group` multi-instance — drop just the named
         // membership, leaving the object in any other groups.
         Attribute::ObjectGroup(g)            => { obj.object_groups.retain(|x| x != g); }
+        // Gap-remediation Phase B/T3 — `DeleteAttribute`'s
+        // `current_attribute`-value path had no arms at all for any
+        // Link type or for the three attributes Phase B just made
+        // genuinely settable: `attribute_present`/`attribute_is_required`
+        // would let the delete through, but this function then did
+        // nothing, so the client got a `Success` while the value stayed
+        // in the store. `UsageLimits`'s own guard (§4.69 Table 90:
+        // "Deletable by client: Yes, as long as Get Usage Allocation has
+        // not been performed") is enforced by the caller
+        // (`delete_attribute`, via `usage_limits_locked`) before this
+        // ever runs — mirrors the Set/ModifyAttribute guard exactly.
+        Attribute::NextLink(_)                    => { obj.links.remove("NextLink"); }
+        Attribute::PreviousLink(_)                => { obj.links.remove("PreviousLink"); }
+        Attribute::PublicKeyLink(_)               => { obj.links.remove("PublicKeyLink"); }
+        Attribute::PrivateKeyLink(_)              => { obj.links.remove("PrivateKeyLink"); }
+        Attribute::GroupLink(_)                   => { obj.links.remove("GroupLink"); }
+        Attribute::DerivationBaseObjectLink(_)    => { obj.links.remove("DerivationBaseObjectLink"); }
+        Attribute::DerivedObjectLink(_)           => { obj.links.remove("DerivedObjectLink"); }
+        Attribute::ReplacedObjectLink(_)          => { obj.links.remove("ReplacedObjectLink"); }
+        Attribute::ReplacementObjectLink(_)       => { obj.links.remove("ReplacementObjectLink"); }
+        Attribute::ProtectionLevel(_)             => { obj.protection_level = None; }
+        Attribute::CryptographicParameters(_)     => { obj.cryptographic_parameters = None; }
+        Attribute::UsageLimits { .. }             => {
+            obj.usage_limits_total = None;
+            obj.usage_limits_unit = None;
+        }
         // Required / Read-Only attributes guarded earlier.
         _ => {}
     }
@@ -658,6 +873,17 @@ fn remove_attribute_by_name(obj: &mut ObjectRecord, name: &str) {
         "Name"                   => obj.name = None,
         "CryptographicLength"    => obj.cryptographic_length = 0,
         "CryptographicUsageMask" => obj.usage_mask = UsageMask::empty(),
+        // Gap-remediation Phase B/T3 — same three attributes as
+        // `remove_attribute_by_value`'s corresponding fix; the generic
+        // `other` arm below only clears `custom_attributes`/`links`, so
+        // these three (stored in dedicated typed fields) need explicit
+        // arms or a name-based Delete silently no-ops for them too.
+        "ProtectionLevel"         => obj.protection_level = None,
+        "CryptographicParameters" => obj.cryptographic_parameters = None,
+        "UsageLimits"             => {
+            obj.usage_limits_total = None;
+            obj.usage_limits_unit = None;
+        }
         other => {
             obj.custom_attributes.remove(other);
             obj.links.remove(other);
@@ -1064,5 +1290,294 @@ mod tests {
             d.store.get("a").unwrap().unwrap().links.get("NextLink").map(String::as_str),
             Some("b")
         );
+    }
+
+    // ── Gap-remediation Phase B ─────────────────────────────────────────
+
+    /// §4.18 Table 93 — `CryptographicParameters` is client-modifiable
+    /// (unlike `CryptographicDomainParameters`, which is not). SetAttribute
+    /// must persist it for real, not silently drop it.
+    #[test]
+    fn set_attribute_cryptographic_parameters_round_trips() {
+        let d = deps_with();
+        put(&d, "u");
+        let cp = crate::kmip30::ops::CryptographicParameters {
+            padding_method: Some(0x07), // OAEP
+            ..Default::default()
+        };
+        set_attribute(&d, SetAttributeRequest {
+            uid: "u".into(),
+            new_attribute: Attribute::CryptographicParameters(cp.clone()),
+        }, "c").unwrap();
+        assert_eq!(
+            d.store.get("u").unwrap().unwrap().cryptographic_parameters,
+            Some(cp),
+        );
+    }
+
+    /// §4.48 Table 148 — `ProtectionLevel` is client-modifiable.
+    #[test]
+    fn set_attribute_protection_level_round_trips() {
+        let d = deps_with();
+        put(&d, "u");
+        set_attribute(&d, SetAttributeRequest {
+            uid: "u".into(),
+            new_attribute: Attribute::ProtectionLevel(1),
+        }, "c").unwrap();
+        assert_eq!(d.store.get("u").unwrap().unwrap().protection_level, Some(1));
+    }
+
+    /// §4.69 Table 90 — `UsageLimits` Total/Unit are client-modifiable
+    /// *before* Get Usage Allocation has been performed.
+    #[test]
+    fn set_attribute_usage_limits_round_trips_before_allocation() {
+        let d = deps_with();
+        put(&d, "u");
+        set_attribute(&d, SetAttributeRequest {
+            uid: "u".into(),
+            new_attribute: Attribute::UsageLimits { total: 500, count: None, unit: Some(1) },
+        }, "c").unwrap();
+        let rec = d.store.get("u").unwrap().unwrap();
+        assert_eq!(rec.usage_limits_total, Some(500));
+        assert_eq!(rec.usage_limits_unit, Some(1));
+    }
+
+    /// §4.69 Table 90's guard condition — once Get Usage Allocation has
+    /// granted at least one allocation, UsageLimits is no longer
+    /// client-modifiable via SetAttribute or ModifyAttribute.
+    #[test]
+    fn set_and_modify_attribute_usage_limits_rejected_after_allocation() {
+        let d = deps_with();
+        put(&d, "u");
+        let mut rec = d.store.get("u").unwrap().unwrap();
+        rec.usage_limits_total = Some(1000);
+        rec.usage_limits_remaining = Some(700); // Get Usage Allocation already ran.
+        d.store.update(rec).unwrap();
+
+        let err = set_attribute(&d, SetAttributeRequest {
+            uid: "u".into(),
+            new_attribute: Attribute::UsageLimits { total: 2000, count: None, unit: None },
+        }, "c").unwrap_err();
+        assert_eq!(err.result_reason(), ResultReason::InvalidField);
+
+        let err = modify_attribute(&d, ModifyAttributeRequest {
+            uid: "u".into(),
+            current_attribute: None,
+            new_attribute: Attribute::UsageLimits { total: 2000, count: None, unit: None },
+        }, "c").unwrap_err();
+        assert_eq!(err.result_reason(), ResultReason::InvalidField);
+
+        // The stored value must be untouched by the rejected attempts.
+        assert_eq!(d.store.get("u").unwrap().unwrap().usage_limits_total, Some(1000));
+    }
+
+    /// §4.16 Table 89 — `CryptographicDomainParameters` is Read-Only,
+    /// distinct from the client-modifiable `CryptographicParameters`
+    /// above; a first-pass draft of this fix conflated the two.
+    #[test]
+    fn set_attribute_cryptographic_domain_parameters_rejected_read_only() {
+        let d = deps_with();
+        put(&d, "u");
+        let err = set_attribute(&d, SetAttributeRequest {
+            uid: "u".into(),
+            new_attribute: Attribute::CryptographicDomainParameters { qlength: None, recommended_curve: None },
+        }, "c").unwrap_err();
+        assert_eq!(err.result_reason(), ResultReason::InvalidField);
+    }
+
+    /// §4.50 — `ProtectionStorageMask` is Read-Only.
+    #[test]
+    fn set_attribute_protection_storage_mask_rejected_read_only() {
+        let d = deps_with();
+        put(&d, "u");
+        let err = set_attribute(&d, SetAttributeRequest {
+            uid: "u".into(),
+            new_attribute: Attribute::ProtectionStorageMask(1),
+        }, "c").unwrap_err();
+        assert_eq!(err.result_reason(), ResultReason::InvalidField);
+    }
+
+    /// §4.29 — `KeyFormatType` is Read-Only.
+    #[test]
+    fn set_attribute_key_format_type_rejected_read_only() {
+        let d = deps_with();
+        put(&d, "u");
+        let err = set_attribute(&d, SetAttributeRequest {
+            uid: "u".into(),
+            new_attribute: Attribute::KeyFormatType(0x01), // Raw
+        }, "c").unwrap_err();
+        assert_eq!(err.result_reason(), ResultReason::InvalidField);
+    }
+
+    /// Tables 136/138/160/162 — the four Derivation/Replacement link
+    /// types are client-modifiable, and (per `link_target`) still get
+    /// real circular-link protection: a direct A→B / B→A cycle via the
+    /// *same* link type (not the spec inverse) must be rejected.
+    #[test]
+    fn set_attribute_derivation_link_round_trips_and_detects_cycle() {
+        let d = deps_with();
+        put(&d, "a");
+        put(&d, "b");
+        set_attribute(&d, SetAttributeRequest {
+            uid: "a".into(),
+            new_attribute: Attribute::DerivationBaseObjectLink("b".into()),
+        }, "c").unwrap();
+        assert_eq!(
+            d.store.get("a").unwrap().unwrap().links.get("DerivationBaseObjectLink").map(String::as_str),
+            Some("b")
+        );
+
+        // b → a via the SAME (non-inverse) link type closes a true cycle.
+        let err = set_attribute(&d, SetAttributeRequest {
+            uid: "b".into(),
+            new_attribute: Attribute::DerivationBaseObjectLink("a".into()),
+        }, "c").unwrap_err();
+        assert_eq!(err.result_reason(), ResultReason::CircularLinkError);
+
+        // b → a via the spec INVERSE (DerivedObjectLink) is the
+        // legitimate back edge and must be accepted.
+        set_attribute(&d, SetAttributeRequest {
+            uid: "b".into(),
+            new_attribute: Attribute::DerivedObjectLink("a".into()),
+        }, "c").unwrap();
+        assert_eq!(
+            d.store.get("b").unwrap().unwrap().links.get("DerivedObjectLink").map(String::as_str),
+            Some("a")
+        );
+    }
+
+    // ── Gap-remediation Phase B/T3 — DeleteAttribute's independent path ─
+
+    /// Before this fix, `attribute_present`'s catch-all unconditionally
+    /// claimed `ProtectionLevel`/`CryptographicParameters`/`UsageLimits`
+    /// were already present, so the very first `AddAttribute` for any of
+    /// them wrongly failed with `AttributeSingleValued` on a fresh
+    /// object that had never had the value set.
+    #[test]
+    fn add_attribute_protection_level_succeeds_on_fresh_object() {
+        let d = deps_with();
+        put(&d, "u");
+        add_attribute(&d, AddAttributeRequest {
+            uid: "u".into(),
+            new_attribute: Attribute::ProtectionLevel(1),
+        }, "c").unwrap();
+        assert_eq!(d.store.get("u").unwrap().unwrap().protection_level, Some(1));
+    }
+
+    /// Same class of gap for a Link type's first-time `AddAttribute`.
+    #[test]
+    fn add_attribute_derivation_link_succeeds_on_fresh_object() {
+        let d = deps_with();
+        put(&d, "a");
+        put(&d, "b");
+        add_attribute(&d, AddAttributeRequest {
+            uid: "a".into(),
+            new_attribute: Attribute::DerivationBaseObjectLink("b".into()),
+        }, "c").unwrap();
+        assert_eq!(
+            d.store.get("a").unwrap().unwrap().links.get("DerivationBaseObjectLink").map(String::as_str),
+            Some("b")
+        );
+    }
+
+    /// `DeleteAttribute` by `current_attribute` value must actually clear
+    /// `ProtectionLevel`/`CryptographicParameters`/`UsageLimits` and every
+    /// Link type — before this fix `remove_attribute_by_value` had no
+    /// arms for any of them and silently no-op'd.
+    #[test]
+    fn delete_attribute_by_value_clears_settable_attributes_and_links() {
+        let d = deps_with();
+        put(&d, "u");
+        set_attribute(&d, SetAttributeRequest {
+            uid: "u".into(), new_attribute: Attribute::ProtectionLevel(2),
+        }, "c").unwrap();
+        delete_attribute(&d, DeleteAttributeRequest {
+            uid: "u".into(),
+            current_attribute: Some(Attribute::ProtectionLevel(2)),
+            attribute_reference: None,
+        }, "c").unwrap();
+        assert_eq!(d.store.get("u").unwrap().unwrap().protection_level, None);
+
+        put(&d, "a");
+        put(&d, "b");
+        set_attribute(&d, SetAttributeRequest {
+            uid: "a".into(), new_attribute: Attribute::NextLink("b".into()),
+        }, "c").unwrap();
+        delete_attribute(&d, DeleteAttributeRequest {
+            uid: "a".into(),
+            current_attribute: Some(Attribute::NextLink("b".into())),
+            attribute_reference: None,
+        }, "c").unwrap();
+        assert!(d.store.get("a").unwrap().unwrap().links.get("NextLink").is_none());
+    }
+
+    /// `DeleteAttribute` by `attribute_reference` name for a Link type —
+    /// before this fix, `attribute_name_present`'s catch-all compared the
+    /// raw decoded reference name (spec-cased with a space, e.g. "Next
+    /// Link") against `obj.links`' no-space keys ("NextLink"), so this
+    /// always spuriously returned `ItemNotFound`.
+    #[test]
+    fn delete_attribute_by_name_finds_and_clears_link() {
+        let d = deps_with();
+        put(&d, "a");
+        put(&d, "b");
+        set_attribute(&d, SetAttributeRequest {
+            uid: "a".into(), new_attribute: Attribute::NextLink("b".into()),
+        }, "c").unwrap();
+        // Simulates the space-cased name `tag_name_from_code` decodes.
+        delete_attribute(&d, DeleteAttributeRequest {
+            uid: "a".into(),
+            current_attribute: None,
+            attribute_reference: Some("Next Link".into()),
+        }, "c").unwrap();
+        assert!(d.store.get("a").unwrap().unwrap().links.get("NextLink").is_none());
+    }
+
+    /// `DeleteAttribute` by `attribute_reference` name for `UsageLimits`
+    /// — before this fix the generic fallback arm only cleared
+    /// `custom_attributes`/`links`, so this silently no-op'd.
+    #[test]
+    fn delete_attribute_by_name_clears_usage_limits() {
+        let d = deps_with();
+        put(&d, "u");
+        set_attribute(&d, SetAttributeRequest {
+            uid: "u".into(),
+            new_attribute: Attribute::UsageLimits { total: 100, count: None, unit: Some(1) },
+        }, "c").unwrap();
+        delete_attribute(&d, DeleteAttributeRequest {
+            uid: "u".into(),
+            current_attribute: None,
+            attribute_reference: Some("Usage Limits".into()),
+        }, "c").unwrap();
+        assert_eq!(d.store.get("u").unwrap().unwrap().usage_limits_total, None);
+    }
+
+    /// §4.69 Table 90 — "Deletable by client: Yes, as long as Get Usage
+    /// Allocation has not been performed": once locked, DeleteAttribute
+    /// must reject both the by-value and by-name forms.
+    #[test]
+    fn delete_attribute_usage_limits_rejected_after_allocation() {
+        let d = deps_with();
+        put(&d, "u");
+        let mut rec = d.store.get("u").unwrap().unwrap();
+        rec.usage_limits_total = Some(1000);
+        rec.usage_limits_remaining = Some(700);
+        d.store.update(rec).unwrap();
+
+        let err = delete_attribute(&d, DeleteAttributeRequest {
+            uid: "u".into(),
+            current_attribute: Some(Attribute::UsageLimits { total: 1000, count: None, unit: None }),
+            attribute_reference: None,
+        }, "c").unwrap_err();
+        assert_eq!(err.result_reason(), ResultReason::InvalidField);
+
+        let err = delete_attribute(&d, DeleteAttributeRequest {
+            uid: "u".into(),
+            current_attribute: None,
+            attribute_reference: Some("Usage Limits".into()),
+        }, "c").unwrap_err();
+        assert_eq!(err.result_reason(), ResultReason::InvalidField);
+
+        assert_eq!(d.store.get("u").unwrap().unwrap().usage_limits_total, Some(1000));
     }
 }
