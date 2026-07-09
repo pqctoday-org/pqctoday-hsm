@@ -134,8 +134,13 @@ pub enum Rule {
     },
 
     /// `op ∈ ops` AND `(now - key.activated_at) > days` → Deny.
-    /// Phase 4.5 stub — needs Phase 6 object store to expose key timestamps.
-    /// Today this rule never fires; engine logs a warning at load.
+    /// `check_pass2` genuinely evaluates this against
+    /// `PolicyRequest::object_activation_date`, which 5 op handlers
+    /// (Decapsulate/Decrypt/Encapsulate/Encrypt/Sign) populate from the
+    /// stored object's real Activation Date. Only fires for ops that
+    /// target an already-activated key — `Create` and never-activated
+    /// objects have no activation date to age out (see the loader's
+    /// load-time warning for this rule).
     MaxKeyAgeDays {
         ops: Vec<String>,
         days: u32,

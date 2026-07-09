@@ -1198,9 +1198,15 @@ pub fn C_GenerateKeyPair(
             CKM_SLH_DSA_KEY_PAIR_GEN => Some(CKK_SLH_DSA),
             CKM_RSA_PKCS_KEY_PAIR_GEN => Some(CKK_RSA),
             CKM_EC_KEY_PAIR_GEN => Some(CKK_EC),
-            // Stateful HBS keygen is not implemented, but the keytype-vs-mech
-            // consistency rule (V4) still applies up-front: a contradictory
-            // CKA_KEY_TYPE is CKR_TEMPLATE_INCONSISTENT before any keygen work.
+            // HSS, XMSS, and XMSS-MT keygen are all implemented below
+            // (real LMS/LM-OTS / XMSS tree generation), and this FFI
+            // layer's own C_Sign/C_Verify sign/verify both mechanisms
+            // for real too. Only the newer typed `native::sign` module
+            // hasn't been extended past HSS to XMSS/XMSS-MT yet (see
+            // that module's doc comment) — this FFI path is unaffected.
+            // The keytype-vs-mech consistency rule (V4) still applies
+            // up-front for all three here: a contradictory CKA_KEY_TYPE
+            // is CKR_TEMPLATE_INCONSISTENT before any keygen work runs.
             CKM_HSS_KEY_PAIR_GEN => Some(CKK_HSS),
             CKM_XMSS_KEY_PAIR_GEN => Some(CKK_XMSS),
             CKM_XMSSMT_KEY_PAIR_GEN => Some(CKK_XMSSMT),

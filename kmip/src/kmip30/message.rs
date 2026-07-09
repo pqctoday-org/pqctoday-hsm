@@ -26,14 +26,16 @@
 //!
 //! ## v0.1 simplifying assumptions
 //!
-//! - **One batch item per message.** The wire codec handles a single
-//!   Batch Item child of the Request/Response Message structure. Multi-op
-//!   batching is a spec feature deferred to v0.2.
 //! - **Protocol Version hardcoded `3.0`** (major=3, minor=0) — this is
 //!   the only version the engine speaks.
-//! - **Optional header fields omitted** — no Maximum Response Size,
-//!   Correlation Value, Asynchronous Indicator, Attestation, Authentication
-//!   in v0.1.
+//! - **Multi-item batching, Client/Server Correlation Value,
+//!   Asynchronous Indicator, and Authentication (Credential list) are
+//!   all genuinely implemented** — `batch_items: Vec<...>` on both
+//!   Request/ResponseMessage, `dispatcher::dispatch` iterates every item
+//!   (with Stop/Undo error-continuation semantics and §6.4 ID
+//!   Placeholder threading between items), Login/Logout issue and
+//!   validate real per-session tickets, and `AsynchronousIndicator`
+//!   drives `dispatcher`'s real async-job enqueue path for eligible ops.
 
 use time::OffsetDateTime;
 
@@ -70,10 +72,12 @@ pub struct RequestHeader {
     /// the encoded ResponseMessage would exceed it. `None` ≡ no
     /// limit.
     pub maximum_response_size: Option<i32>,
-    /// KMIP 3.0 §8.1.2 `Asynchronous Indicator` Enumeration. This
-    /// server has no asynchronous capability, so `Mandatory` fails
-    /// every batch item with `OperationNotSupported`; `Optional` /
-    /// `Prohibited` / absent all process synchronously (K4).
+    /// KMIP 3.0 §8.1.2 `Asynchronous Indicator` Enumeration. `Mandatory`
+    /// on an async-eligible op (`dispatcher::is_async_eligible`) enqueues
+    /// a real job (§9.1 Asynchronous Correlation Value) instead of
+    /// running inline, returning `OperationPending`; `Mandatory` on an
+    /// ineligible op fails that item with `OperationNotSupported`.
+    /// `Optional` / `Prohibited` / absent all process synchronously (K4).
     pub asynchronous_indicator: Option<AsynchronousIndicator>,
     /// KMIP 3.0 §8.1.2 / §9.4 `Authentication` Structure — "Credential,
     /// MAY be repeated" (spec Table 504). Empty ≡ the Authentication

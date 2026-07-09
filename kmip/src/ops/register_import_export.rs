@@ -1556,6 +1556,38 @@ mod tests {
         assert_eq!(hex::encode(&f.public_exponent), crate::ops::test_rsa_fixture::PUBLIC_EXPONENT);
     }
 
+    /// Gap-remediation Phase D/H — public-key half of the same fixture
+    /// (found broken via BL-M-8-30 conformance replay; the real-engine
+    /// round-trip proving the DER conversion actually produces a usable
+    /// object lives in tests/native_bridge_e2e.rs — this pins the
+    /// storage + parse side without needing a session).
+    #[test]
+    fn register_transparent_rsa_public_key_parses_and_round_trips() {
+        let d = deps_with();
+        let r = register(&d, RegisterRequest {
+            secret_data_type: None,
+            object_type: ObjectType::PublicKey,
+            attributes: vec![Attribute::CryptographicUsageMask(UsageMask::VERIFY)],
+            managed_object: Some(KeyBlock {
+                key_format_type: KeyFormatType::TransparentRsaPublicKey,
+                cryptographic_algorithm: KmipAlgorithm::Rsa,
+                cryptographic_length: 1024,
+                key_value: crate::ops::test_rsa_fixture::ttlv_public_key_material(),
+                key_wrapping_data: None,
+            }),
+            protection_storage_masks: None,
+            certificate_payload: None,
+        }, "c").unwrap();
+        let rec = d.store.get(&r.uid).unwrap().unwrap();
+        assert_eq!(rec.key_format_type, Some(0x0B));
+        let stored = rec.key_material.expect("material stored");
+        assert!(!stored.is_empty(), "never store empty material");
+        assert_eq!(stored, crate::ops::test_rsa_fixture::ttlv_public_key_material());
+        let f = crate::kmip30::decode_transparent_rsa_public_key(&stored).unwrap();
+        assert_eq!(hex::encode(&f.modulus), crate::ops::test_rsa_fixture::MODULUS);
+        assert_eq!(hex::encode(&f.public_exponent), crate::ops::test_rsa_fixture::PUBLIC_EXPONENT);
+    }
+
     #[test]
     fn register_transparent_rsa_private_key_malformed_fails_0x10() {
         // Garbage that is not a TTLV KeyMaterial Structure must fail

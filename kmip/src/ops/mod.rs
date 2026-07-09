@@ -30,9 +30,10 @@
 //! 3. Call `deps.engine.evaluate(&policy_request)`.
 //! 4. Map `(KmipAlgorithm, PkcsOp) → CKM_*` via
 //!    `KmipAlgorithm::to_pkcs11_mech` (Phase 3).
-//! 5. Emit Plane-3 `Pkcs11Call`s; call the bridge (Phase 7 wires real
-//!    softhsmrustv3 entries; v0.1 uses placeholders so tests run without
-//!    a token).
+//! 5. Emit Plane-3 `Pkcs11Call`s; call the bridge — real `softhsmrustv3`
+//!    engine entries when `deps.engine_session` is wired (production +
+//!    e2e tests), a documented soft placeholder path for engine-less
+//!    unit tests (see e.g. `create_key_pair::engine_generate_keypair`).
 //! 6. Persist any store mutations.
 //! 7. Emit Plane-2 `KmipResponseSent`.
 //!
