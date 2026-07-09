@@ -1358,7 +1358,13 @@ mod tests {
     /// `mceliece-spec-20221023.pdf` §6.2 — verified against
     /// `classic-mceliece-rust` v3.1.0, liboqs, and the spec text directly),
     /// ss = 32 bytes.
+    ///
+    /// `#[ignore]`: a single mceliece6688128 keygen (Goppa code generation)
+    /// takes minutes in an unoptimized debug build — too slow for every CI
+    /// run. Run manually with `cargo test --release -- --ignored
+    /// classic_mceliece_6688128_encap_decap` (release mode is fast).
     #[test]
+    #[ignore = "mceliece6688128 keygen is minutes-slow in debug builds — see doc comment"]
     fn classic_mceliece_6688128_encap_decap_round_trip() {
         let _guard = test_lock::acquire();
         let session = fresh_session();

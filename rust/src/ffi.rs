@@ -11726,7 +11726,12 @@ mod pqc_vendor_kem_ffi_tests {
         );
     }
 
+    /// `#[ignore]`: a single mceliece6688128 keygen (Goppa code generation)
+    /// takes minutes in an unoptimized debug build — too slow for every CI
+    /// run. Run manually with `cargo test --release -- --ignored
+    /// classic_mceliece_6688128_round_trip` (release mode is fast).
     #[test]
+    #[ignore = "mceliece6688128 keygen is minutes-slow in debug builds — see doc comment"]
     fn classic_mceliece_6688128_round_trip() {
         round_trip(
             CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN,
@@ -11833,7 +11838,12 @@ mod pqc_vendor_kem_ffi_tests {
     /// S5-equivalent (mirrors `encap_decap_on_aes_key_key_type_inconsistent`
     /// for ML-KEM) — encapsulate/decapsulate on a key of the wrong PQC
     /// vendor KEM family → CKR_KEY_TYPE_INCONSISTENT, not a crypto attempt.
+    ///
+    /// `#[ignore]`: builds a real mceliece6688128 keypair first — minutes-slow
+    /// in an unoptimized debug build. Run manually with `cargo test --release
+    /// -- --ignored encapsulate_on_wrong_key_family` (release mode is fast).
     #[test]
+    #[ignore = "mceliece6688128 keygen is minutes-slow in debug builds — see doc comment"]
     fn encapsulate_on_wrong_key_family_key_type_inconsistent() {
         let _guard = test_lock::acquire();
         setup();
@@ -11882,7 +11892,13 @@ mod pqc_vendor_kem_ffi_tests {
 
     /// §5.18.9-equivalent — a ciphertext of the wrong length for the vendor
     /// KEM's parameter set → CKR_ENCRYPTED_DATA_INVALID.
+    ///
+    /// `#[ignore]`: builds a real mceliece6688128 keypair first — minutes-slow
+    /// in an unoptimized debug build. Run manually with `cargo test --release
+    /// -- --ignored pqc_vendor_kem_ffi_tests::decapsulate_wrong_ciphertext_len`
+    /// (release mode is fast).
     #[test]
+    #[ignore = "mceliece6688128 keygen is minutes-slow in debug builds — see doc comment"]
     fn decapsulate_wrong_ciphertext_len_encrypted_data_invalid() {
         let _guard = test_lock::acquire();
         setup();
