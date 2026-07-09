@@ -2488,3 +2488,143 @@ fn k3_register_rsa_private_key_malformed_pkcs1_fails_register_not_silently() {
 
     let _ = softhsmrustv3::native::session::finalize();
 }
+
+/// Gap-remediation Phase G, Finding #9 — `newly_created_uids` didn't
+/// match `CreateSplitKey`'s response, so a batch `Undo` after it
+/// succeeded used to leak every minted Split Key part instead of
+/// rolling them back. 2-item batch: item 1 = CreateSplitKey (mints 3
+/// parts via XOR), item 2 = a deliberately-failing Destroy on a UID
+/// that was never created, mode = Undo.
+#[test]
+fn k9_undo_rolls_back_create_split_key_parts() {
+    use pqctoday_kmip::dispatcher::dispatch;
+    use pqctoday_kmip::kmip30::{
+        BatchErrorContinuationOption, CreateSplitKeyRequest, DestroyRequest, ObjectType, Operation,
+        RequestBatchItem, RequestHeader, RequestMessage, RequestPayload, ResultStatus,
+    };
+
+    let _guard = engine_test_lock();
+    let deps = build_deps_with_real_engine();
+
+    let msg = RequestMessage {
+        header: RequestHeader {
+            batch_error_continuation_option: Some(BatchErrorContinuationOption::Undo),
+            ..RequestHeader::v3()
+        },
+        batch_items: vec![
+            RequestBatchItem {
+                operation: Operation::CreateSplitKey,
+                payload: RequestPayload::CreateSplitKey(CreateSplitKeyRequest {
+                    object_type: ObjectType::SecretData,
+                    uid: None,
+                    split_key_parts: 3,
+                    split_key_threshold: 3,
+                    split_key_method: 1, // XOR
+                    prime_field_size: None,
+                    attributes: vec![
+                        Attribute::CryptographicAlgorithm(KmipAlgorithm::Aes),
+                        Attribute::CryptographicLength(256),
+                    ],
+                    protection_storage_masks: None,
+                }),
+            },
+            RequestBatchItem {
+                operation: Operation::Destroy,
+                payload: RequestPayload::Destroy(DestroyRequest { uid: "urn:ghost".into() }),
+            },
+        ],
+    };
+
+    let resp = dispatch(&deps, msg);
+    assert_eq!(resp.batch_items.len(), 2);
+    assert_eq!(
+        resp.batch_items[0].result_status,
+        ResultStatus::OperationUndone,
+        "CreateSplitKey must be relabelled OperationUndone after the Undo wave",
+    );
+    let part_uids = match &resp.batch_items[0].payload {
+        Some(pqctoday_kmip::kmip30::ResponsePayload::CreateSplitKey(r)) => r.uids.clone(),
+        other => panic!("expected CreateSplitKey response payload, got {other:?}"),
+    };
+    assert_eq!(part_uids.len(), 3);
+    for uid in &part_uids {
+        assert!(
+            deps.store.get(uid).unwrap().is_none(),
+            "Undo must genuinely delete split-key part {uid}, not just relabel the response",
+        );
+    }
+    let _ = softhsmrustv3::native::session::finalize();
+}
+
+/// Gap-remediation Phase G, Finding #9 — `update_id_placeholder` didn't
+/// match `JoinSplitKey`'s response either, so a batch item chained via
+/// `$IDPlaceholder` right after a JoinSplitKey used to fail with a
+/// spurious "ID Placeholder not set" instead of resolving to the
+/// reconstructed object's real UID.
+#[test]
+fn k9_id_placeholder_resolves_after_join_split_key() {
+    use pqctoday_kmip::dispatcher::{dispatch, ID_PLACEHOLDER_SENTINEL};
+    use pqctoday_kmip::kmip30::{
+        GetRequest, JoinSplitKeyRequest, ObjectType, Operation, RequestBatchItem, RequestHeader,
+        RequestMessage, RequestPayload, ResultStatus,
+    };
+    use pqctoday_kmip::ops::split_key::create_split_key;
+    use pqctoday_kmip::kmip30::CreateSplitKeyRequest;
+
+    let _guard = engine_test_lock();
+    let deps = build_deps_with_real_engine();
+
+    let create_resp = create_split_key(
+        &deps,
+        CreateSplitKeyRequest {
+            object_type: ObjectType::SecretData,
+            uid: None,
+            split_key_parts: 3,
+            split_key_threshold: 3,
+            split_key_method: 1, // XOR
+            prime_field_size: None,
+            attributes: vec![
+                Attribute::CryptographicAlgorithm(KmipAlgorithm::Aes),
+                Attribute::CryptographicLength(256),
+            ],
+            protection_storage_masks: None,
+        },
+        "k9-precreate-parts",
+    )
+    .expect("Create Split Key");
+
+    let msg = RequestMessage {
+        header: RequestHeader::v3(),
+        batch_items: vec![
+            RequestBatchItem {
+                operation: Operation::JoinSplitKey,
+                payload: RequestPayload::JoinSplitKey(JoinSplitKeyRequest {
+                    object_type: ObjectType::SecretData,
+                    uids: create_resp.uids.clone(),
+                    secret_data_type: None,
+                    attributes: vec![],
+                    protection_storage_masks: None,
+                }),
+            },
+            RequestBatchItem {
+                operation: Operation::Get,
+                payload: RequestPayload::Get(GetRequest {
+                    uid: ID_PLACEHOLDER_SENTINEL.to_string(),
+                    key_format_type: None,
+                    key_wrapping_specification: None,
+                }),
+            },
+        ],
+    };
+
+    let resp = dispatch(&deps, msg);
+    assert_eq!(resp.batch_items.len(), 2);
+    assert_eq!(resp.batch_items[0].result_status, ResultStatus::Success);
+    assert_eq!(
+        resp.batch_items[1].result_status,
+        ResultStatus::Success,
+        "Get with IDPlaceholder must resolve to JoinSplitKey's reconstructed UID",
+    );
+
+    let _ = softhsmrustv3::native::session::finalize();
+}
