@@ -183,6 +183,30 @@ pub fn create_key_pair(
 
     let kmip_algo = parse_algorithm(&resolved_algorithm)?;
 
+    // Gap-remediation Phase E, Finding #13 — KMIP 3.0 §11 — reject
+    // `QuantumSafe=true` claims on non-PQC algorithms, same check
+    // `create.rs` already performs (QS-M-2 pins this with AES +
+    // QuantumSafe=true → `GeneralFailure` "NOT_SAFE"). QuantumSafe MAY
+    // ride on any of the three attribute baskets (Common/Private/Public),
+    // so check the full merged set like the Y1 custom-attribute lookup
+    // above does, not just one half.
+    {
+        let x = super::register_import_export::extract_attrs(&all_attrs);
+        if matches!(x.quantum_safe, Some(true))
+            && !super::register_import_export::algorithm_is_quantum_safe(kmip_algo)
+        {
+            return fail(
+                deps,
+                correlation_id,
+                op_canonical,
+                KmipError::failed(
+                    ResultReason::GeneralFailure,
+                    format!("QuantumSafe=true claimed for non-PQC algorithm {kmip_algo:?}"),
+                ),
+            );
+        }
+    }
+
     // Label-only Montgomery KEM: when the policy resolved the algorithm to
     // `X25519`/`X448` (a name, not a template CryptographicDomainParameters),
     // supply the matching RecommendedCurve + §6.7 mech-info length here so the
@@ -361,6 +385,14 @@ pub fn create_key_pair(
             // (Sign/Encrypt) can read the classification back off the object.
             custom_attributes: super::helpers::raw_custom_attrs(&all_attrs),
 
+            // Gap-remediation Phase E, Finding #5 — `create.rs`,
+            // `register_import_export.rs`, and `derive_key.rs` all
+            // persist this field; `create_key_pair.rs` never read it off
+            // `priv_x`/`pub_x`, so a key's declared default padding/hash
+            // (e.g. PSS/SHA-384) was silently lost and a later bare
+            // Sign/Verify fell back to the mechanism default.
+            cryptographic_parameters: priv_x.cryptographic_parameters.clone(),
+
 
             // K6 — hybrid private keys are engine-backed (two handles behind
             // pkcs11_cka_id + pkcs11_cka_id_secondary); no material here, so Get
@@ -429,6 +461,10 @@ pub fn create_key_pair(
 
             custom_attributes: std::collections::HashMap::new(),
 
+            // Gap-remediation Phase E, Finding #5 — same fix as the
+            // private half above; the public half has its own
+            // independently-templated CryptographicParameters basket.
+            cryptographic_parameters: pub_x.cryptographic_parameters.clone(),
 
             // K6 — composite public key material for a hybrid KEM.
             key_material: hybrid_pub_material,
@@ -1059,5 +1095,80 @@ rules: []
         // Classical sized names collapse to base.
         assert_eq!(parse_algorithm("AES-256").unwrap(), KmipAlgorithm::Aes);
         assert_eq!(parse_algorithm("ECDSA-P256").unwrap(), KmipAlgorithm::Ecdsa);
+    }
+
+    const PERMISSIVE_POLICY: &str = r#"
+schema_version: 1
+metadata: { name: t, description: t, authority: t, effective: "always" }
+rules: []
+"#;
+
+    /// Gap-remediation Phase E, Finding #5 — a key's declared default
+    /// `CryptographicParameters` (e.g. PSS/SHA-384) must survive onto
+    /// BOTH halves' stored `ObjectRecord`, independently per half, not
+    /// silently dropped (`create.rs`/`register_import_export.rs`/
+    /// `derive_key.rs` all persist this field already; `create_key_pair`
+    /// previously never read it off `priv_x`/`pub_x`).
+    #[test]
+    fn create_key_pair_persists_cryptographic_parameters_on_both_halves() {
+        let (_ring, d) = deps_with(PERMISSIVE_POLICY);
+        let priv_cp = crate::kmip30::ops::CryptographicParameters {
+            padding_method: Some(0x0a), // PSS
+            hashing_algorithm: Some(crate::kmip30::ops::HashingAlgorithm::Sha384),
+            ..Default::default()
+        };
+        let pub_cp = crate::kmip30::ops::CryptographicParameters {
+            padding_method: Some(0x0a),
+            hashing_algorithm: Some(crate::kmip30::ops::HashingAlgorithm::Sha256),
+            ..Default::default()
+        };
+        let req = CreateKeyPairRequest {
+            common_attributes: vec![Attribute::CryptographicAlgorithm(KmipAlgorithm::Rsa)],
+            private_key_attributes: vec![Attribute::CryptographicParameters(priv_cp.clone())],
+            public_key_attributes: vec![Attribute::CryptographicParameters(pub_cp.clone())],
+            seed: None,
+        };
+        let resp = create_key_pair(&d, req, "CreateKeyPair:Sign", "corr-cp").unwrap();
+        let priv_record = d.store.get(&resp.private_key_uid).unwrap().unwrap();
+        let pub_record = d.store.get(&resp.public_key_uid).unwrap().unwrap();
+        assert_eq!(priv_record.cryptographic_parameters, Some(priv_cp));
+        assert_eq!(pub_record.cryptographic_parameters, Some(pub_cp));
+    }
+
+    /// Gap-remediation Phase E, Finding #13 — `QuantumSafe=true` on a
+    /// non-PQC algorithm must be rejected, matching `create.rs`'s
+    /// existing check for the same scenario (QS-M-2).
+    #[test]
+    fn create_key_pair_quantum_safe_true_on_rsa_is_rejected() {
+        let (_ring, d) = deps_with(PERMISSIVE_POLICY);
+        let req = CreateKeyPairRequest {
+            common_attributes: vec![
+                Attribute::CryptographicAlgorithm(KmipAlgorithm::Rsa),
+                Attribute::QuantumSafe(true),
+            ],
+            private_key_attributes: vec![],
+            public_key_attributes: vec![],
+            seed: None,
+        };
+        let err = create_key_pair(&d, req, "CreateKeyPair:Sign", "corr-qs").unwrap_err();
+        assert_eq!(err.result_reason(), ResultReason::GeneralFailure);
+    }
+
+    /// A genuinely PQC algorithm with `QuantumSafe=true` must still
+    /// succeed — the check only rejects the false claim, not the
+    /// attribute itself.
+    #[test]
+    fn create_key_pair_quantum_safe_true_on_ml_dsa_succeeds() {
+        let (_ring, d) = deps_with(PERMISSIVE_POLICY);
+        let req = CreateKeyPairRequest {
+            common_attributes: vec![
+                Attribute::CryptographicAlgorithm(KmipAlgorithm::MlDsa87),
+                Attribute::QuantumSafe(true),
+            ],
+            private_key_attributes: vec![],
+            public_key_attributes: vec![],
+            seed: None,
+        };
+        create_key_pair(&d, req, "CreateKeyPair:Sign", "corr-qs-ok").unwrap();
     }
 }
