@@ -519,6 +519,10 @@ pub fn register(
         certificate_value,
         certificate_length,
         certificate_subject_cn,
+        // Gap-remediation Phase C, Finding #8 — previously dropped at
+        // decode time; a later Get always echoed the Password default
+        // regardless of what was actually registered.
+        secret_data_type: req.secret_data_type,
         ..ObjectRecord::default()
     })?;
 
@@ -929,6 +933,7 @@ mod tests {
     fn register_persists_record_with_uid_and_key_bytes() {
         let d = deps_with();
         let resp = register(&d, RegisterRequest {
+            secret_data_type: None,
             object_type: ObjectType::SymmetricKey,
             attributes: vec![
                 Attribute::CryptographicAlgorithm(KmipAlgorithm::Aes),
@@ -951,6 +956,7 @@ mod tests {
     fn register_with_client_uid_rejects_duplicate() {
         let d = deps_with();
         let req = || RegisterRequest {
+            secret_data_type: None,
             object_type: ObjectType::SymmetricKey,
             attributes: vec![
                 Attribute::UniqueIdentifier("urn:fixed".into()),
@@ -972,6 +978,7 @@ mod tests {
     fn register_records_the_real_protection_storage_mask() {
         let d = deps_with();
         let resp = register(&d, RegisterRequest {
+            secret_data_type: None,
             object_type: ObjectType::SymmetricKey,
             attributes: vec![
                 Attribute::CryptographicAlgorithm(KmipAlgorithm::Aes),
@@ -993,6 +1000,7 @@ mod tests {
         // Client requires Hardware (0x02) only — this server has no
         // hardware storage class, so it must refuse rather than lie.
         let err = register(&d, RegisterRequest {
+            secret_data_type: None,
             object_type: ObjectType::SymmetricKey,
             attributes: vec![
                 Attribute::CryptographicAlgorithm(KmipAlgorithm::Aes),
@@ -1011,6 +1019,7 @@ mod tests {
         let d = deps_with();
         // First create via Register.
         register(&d, RegisterRequest {
+            secret_data_type: None,
             object_type: ObjectType::SymmetricKey,
             attributes: vec![
                 Attribute::UniqueIdentifier("u".into()),
@@ -1041,6 +1050,7 @@ mod tests {
     fn import_with_replace_overwrites_existing() {
         let d = deps_with();
         register(&d, RegisterRequest {
+            secret_data_type: None,
             object_type: ObjectType::SymmetricKey,
             attributes: vec![
                 Attribute::UniqueIdentifier("u".into()),
@@ -1074,6 +1084,7 @@ mod tests {
     fn export_returns_attributes_and_key_material() {
         let d = deps_with();
         let r = register(&d, RegisterRequest {
+            secret_data_type: None,
             object_type: ObjectType::SymmetricKey,
             attributes: vec![
                 Attribute::CryptographicAlgorithm(KmipAlgorithm::Aes),
@@ -1102,6 +1113,7 @@ mod tests {
     fn export_on_destroyed_omits_key_material() {
         let d = deps_with();
         let r = register(&d, RegisterRequest {
+            secret_data_type: None,
             object_type: ObjectType::SymmetricKey,
             attributes: vec![
                 Attribute::CryptographicAlgorithm(KmipAlgorithm::Aes),
@@ -1130,6 +1142,7 @@ mod tests {
     fn register_persists_sensitive_and_extractable_from_template() {
         let d = deps_with();
         let r = register(&d, RegisterRequest {
+            secret_data_type: None,
             object_type: ObjectType::SymmetricKey,
             attributes: vec![
                 Attribute::CryptographicAlgorithm(KmipAlgorithm::Aes),
@@ -1158,6 +1171,7 @@ mod tests {
         if let Some(b) = sensitive { attributes.push(Attribute::Sensitive(b)); }
         if let Some(b) = extractable { attributes.push(Attribute::Extractable(b)); }
         register(d, RegisterRequest {
+            secret_data_type: None,
             object_type: ObjectType::SymmetricKey,
             attributes,
             managed_object: Some(raw_aes128_kb()),
@@ -1308,6 +1322,7 @@ mod tests {
         kwd: crate::kmip30::KeyWrappingSpec,
     ) -> Result<RegisterResponse> {
         register(d, RegisterRequest {
+            secret_data_type: None,
             object_type: ObjectType::SymmetricKey,
             attributes: vec![
                 Attribute::CryptographicAlgorithm(KmipAlgorithm::Aes),
@@ -1420,6 +1435,7 @@ mod tests {
 
     fn register_transparent_rsa(d: &Deps) -> crate::error::Result<RegisterResponse> {
         register(d, RegisterRequest {
+            secret_data_type: None,
             object_type: ObjectType::PrivateKey,
             attributes: vec![
                 Attribute::CryptographicUsageMask(UsageMask::DECRYPT),
@@ -1462,6 +1478,7 @@ mod tests {
         // land in the store as dead material.
         let d = deps_with();
         let err = register(&d, RegisterRequest {
+            secret_data_type: None,
             object_type: ObjectType::PrivateKey,
             attributes: vec![Attribute::CryptographicUsageMask(UsageMask::DECRYPT)],
             managed_object: Some(KeyBlock {
@@ -1479,6 +1496,7 @@ mod tests {
 
     fn register_tsk(d: &Deps) -> String {
         register(d, RegisterRequest {
+            secret_data_type: None,
             object_type: ObjectType::SymmetricKey,
             attributes: vec![
                 Attribute::CryptographicAlgorithm(KmipAlgorithm::Aes),
@@ -1533,5 +1551,39 @@ mod tests {
             key_wrapping_specification: None,
         }, "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::KeyFormatTypeNotSupported);
+    }
+
+    /// Gap-remediation Phase C, Finding #8 — `SecretDataType` (Password
+    /// = 0x01, Seed = 0x02) must survive Register → Get instead of
+    /// always echoing the hardcoded Password default.
+    #[test]
+    fn register_secret_data_type_round_trips_through_get() {
+        let d = deps_with();
+        let resp = register(&d, RegisterRequest {
+            secret_data_type: Some(0x02), // Seed
+            object_type: ObjectType::SecretData,
+            attributes: vec![
+                Attribute::CryptographicUsageMask(UsageMask::empty()),
+            ],
+            managed_object: Some(KeyBlock {
+                key_format_type: KeyFormatType::Raw,
+                cryptographic_algorithm: KmipAlgorithm::Aes,
+                cryptographic_length: 0,
+                key_value: vec![0xAB; 32],
+                key_wrapping_data: None,
+            }),
+            protection_storage_masks: None,
+            certificate_payload: None,
+        }, "c").unwrap();
+
+        let rec = d.store.get(&resp.uid).unwrap().unwrap();
+        assert_eq!(rec.secret_data_type, Some(0x02));
+
+        let got = super::super::get::get(&d, crate::kmip30::GetRequest {
+            uid: resp.uid,
+            key_format_type: None,
+            key_wrapping_specification: None,
+        }, "c").unwrap();
+        assert_eq!(got.secret_data_type, Some(0x02));
     }
 }

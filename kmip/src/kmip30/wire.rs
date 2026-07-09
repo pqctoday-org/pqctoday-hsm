@@ -3149,8 +3149,34 @@ fn encode_cryptographic_parameters(cp: &CryptographicParameters) -> TtlvFrame {
     if let Some(v) = cp.block_cipher_mode {
         children.push(TtlvFrame::new(Tag(tags::BlockCipherMode), Value::Enumeration(v)));
     }
+    // Gap-remediation Phase C, Finding #6 — these 7 fields were fully
+    // decoded (see `decode_cryptographic_parameters` below) but never
+    // encoded back out, so a PQC signing object with Deterministic/
+    // ContextString set, or an AEAD object with TagLength set, lost
+    // those fields on every GetAttributes/Export response.
+    if let Some(v) = cp.tag_length {
+        children.push(TtlvFrame::new(Tag(tags::TagLength), Value::Integer(v)));
+    }
+    if let Some(v) = cp.random_iv {
+        children.push(TtlvFrame::new(Tag(tags::RandomIV), Value::Boolean(v)));
+    }
     if let Some(v) = cp.salt_length {
         children.push(TtlvFrame::new(Tag(tags::SaltLength), Value::Integer(v)));
+    }
+    if let Some(v) = cp.deterministic {
+        children.push(TtlvFrame::new(Tag(tags::Deterministic), Value::Boolean(v)));
+    }
+    if let Some(b) = &cp.context_string {
+        children.push(TtlvFrame::new(Tag(tags::ContextString), Value::ByteString(b.clone())));
+    }
+    if let Some(v) = cp.internal {
+        children.push(TtlvFrame::new(Tag(tags::Internal), Value::Boolean(v)));
+    }
+    if let Some(v) = cp.external_mu {
+        children.push(TtlvFrame::new(Tag(tags::ExternalMu), Value::Boolean(v)));
+    }
+    if let Some(b) = &cp.random {
+        children.push(TtlvFrame::new(Tag(tags::PqcRandom), Value::ByteString(b.clone())));
     }
     if let Some(k) = cp.kem_algorithm {
         children.push(TtlvFrame::new(Tag(tags::KemAlgorithm), Value::Enumeration(k.to_wire_value())));
@@ -3991,6 +4017,7 @@ fn decode_register_req(children: &[TtlvFrame]) -> Result<RegisterRequest, WireEr
     let mut managed_object = None;
     let mut protection_storage_masks = None;
     let mut certificate_payload: Option<(u32, Vec<u8>)> = None;
+    let mut secret_data_type: Option<u32> = None;
     for c in children {
         match c.tag.0 {
             tags::ObjectType => {
@@ -4012,12 +4039,19 @@ fn decode_register_req(children: &[TtlvFrame]) -> Result<RegisterRequest, WireEr
             }
             tags::SecretData => {
                 // KMIP 3.0 §6.2 SecretData Structure: SecretDataType
-                // (Enumeration) + KeyBlock. v0.1 captures the inner
-                // KeyBlock and silently drops the type; future Get
-                // can echo it as ObjectType=SecretData.
+                // (Enumeration) + KeyBlock. Gap-remediation Phase C,
+                // Finding #8 — the type is now captured too (mirroring
+                // the adjacent OpaqueObject arm's OpaqueDataType
+                // handling) instead of being silently dropped.
                 for child in expect_structure(c, "Secret Data")? {
-                    if child.tag.0 == tags::KeyBlock {
-                        managed_object = Some(decode_key_block(child)?);
+                    match child.tag.0 {
+                        tags::KeyBlock => {
+                            managed_object = Some(decode_key_block(child)?);
+                        }
+                        tags::SecretDataType => {
+                            secret_data_type = Some(expect_enum(child, "Secret Data Type")?);
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -4110,6 +4144,7 @@ fn decode_register_req(children: &[TtlvFrame]) -> Result<RegisterRequest, WireEr
         managed_object,
         protection_storage_masks,
         certificate_payload,
+        secret_data_type,
     })
 }
 
@@ -5077,6 +5112,18 @@ fn tag_code_from_name(name: &str) -> Option<u32> {
         "Digest"                 => tags::Digest,
         "RandomNumberGenerator"  => tags::RandomNumberGenerator,
         "CryptographicParameters" => tags::CryptographicParameters,
+        // Gap-remediation Phase C, Finding #7 — `decode_attribute_v3`
+        // already fully decodes these 6; the numeric-`AttributeReference`
+        // lookup table (used by AdjustAttribute/DeleteAttribute per the
+        // Phase B/T3 correction — SetAttribute/ModifyAttribute never
+        // call this) just never learned their names, so a reference by
+        // code resolved to "Unknown" instead of the real attribute.
+        "CryptographicDomainParameters" => tags::CryptographicDomainParameters,
+        "SplitKeyMethod"         => tags::SplitKeyMethod,
+        "SplitKeyParts"          => tags::SplitKeyParts,
+        "SplitKeyThreshold"      => tags::SplitKeyThreshold,
+        "KeyPartIdentifier"      => tags::KeyPartIdentifier,
+        "SplitKeyPolynomial"     => tags::SplitKeyPolynomial,
         _ => return None,
     })
 }
@@ -5156,6 +5203,14 @@ fn tag_name_from_code(code: u32) -> &'static str {
         tags::ReplacedObjectLink     => "Replaced Object Link",
         tags::ReplacementObjectLink  => "Replacement Object Link",
         tags::ApplicationSpecificInformation => "Application Specific Information",
+        // Gap-remediation Phase C, Finding #7 — inverse of the 6 entries
+        // just added to `tag_code_from_name`.
+        tags::CryptographicDomainParameters => "Cryptographic Domain Parameters",
+        tags::SplitKeyMethod         => "Split Key Method",
+        tags::SplitKeyParts          => "Split Key Parts",
+        tags::SplitKeyThreshold      => "Split Key Threshold",
+        tags::KeyPartIdentifier      => "Key Part Identifier",
+        tags::SplitKeyPolynomial     => "Split Key Polynomial",
         _ => "Unknown",
     }
 }
@@ -6400,6 +6455,48 @@ mod tests {
         assert_eq!(decode_cryptographic_parameters(&neg).unwrap().salt_length, Some(-1));
     }
 
+    /// Gap-remediation Phase C, Finding #6 — `encode_cryptographic_parameters`
+    /// dropped 7 real fields (`tag_length`, `random_iv`, `deterministic`,
+    /// `context_string`, `internal`, `external_mu`, `random`) that
+    /// `decode_cryptographic_parameters` already understood. This is the
+    /// test gap the original K18 test above didn't cover (it never
+    /// populated any of these 7 fields, so the encoder's silent drop
+    /// never surfaced). Populate every one and prove the round trip is
+    /// truly lossless — not just for the 3 fields K18 already exercised.
+    #[test]
+    fn cryptographic_parameters_full_field_set_round_trips() {
+        let frame = TtlvFrame::new(Tag(tags::CryptographicParameters), Value::Structure(vec![
+            TtlvFrame::new(Tag(tags::HashingAlgorithm), Value::Enumeration(0x06)), // SHA-256
+            TtlvFrame::new(Tag(tags::CryptographicAlgorithm), Value::Enumeration(
+                crate::kmip30::KmipAlgorithm::MlDsa65.to_wire_value(),
+            )),
+            TtlvFrame::new(Tag(tags::PaddingMethod), Value::Enumeration(0x0a)), // PSS
+            TtlvFrame::new(Tag(tags::MaskGenerator), Value::Enumeration(0x01)), // MGF1
+            TtlvFrame::new(Tag(tags::MaskGeneratorHashingAlgorithm), Value::Enumeration(0x06)),
+            TtlvFrame::new(Tag(tags::PSource), Value::ByteString(vec![0x01, 0x02])),
+            TtlvFrame::new(Tag(tags::BlockCipherMode), Value::Enumeration(0x06)), // GCM
+            TtlvFrame::new(Tag(tags::TagLength), Value::Integer(16)),
+            TtlvFrame::new(Tag(tags::RandomIV), Value::Boolean(true)),
+            TtlvFrame::new(Tag(tags::SaltLength), Value::Integer(32)),
+            TtlvFrame::new(Tag(tags::Deterministic), Value::Boolean(true)),
+            TtlvFrame::new(Tag(tags::ContextString), Value::ByteString(vec![0xAA, 0xBB])),
+            TtlvFrame::new(Tag(tags::Internal), Value::Boolean(true)),
+            TtlvFrame::new(Tag(tags::ExternalMu), Value::Boolean(false)),
+            TtlvFrame::new(Tag(tags::PqcRandom), Value::ByteString(vec![0xCC; 4])),
+        ]));
+        let cp = decode_cryptographic_parameters(&frame).unwrap();
+        assert_eq!(cp.tag_length, Some(16));
+        assert_eq!(cp.random_iv, Some(true));
+        assert_eq!(cp.deterministic, Some(true));
+        assert_eq!(cp.context_string, Some(vec![0xAA, 0xBB]));
+        assert_eq!(cp.internal, Some(true));
+        assert_eq!(cp.external_mu, Some(false));
+        assert_eq!(cp.random, Some(vec![0xCC; 4]));
+
+        let cp2 = decode_cryptographic_parameters(&encode_cryptographic_parameters(&cp)).unwrap();
+        assert_eq!(cp2, cp, "every field must survive an encode/decode round trip");
+    }
+
     /// K10 — ML-KEM decapsulation round-trip: the request decodes the
     /// encapsulation bytes from `Data`, and the response carries the
     /// recovered shared secret in `Data` — no IvCounterNonce, no
@@ -6425,5 +6522,45 @@ mod tests {
         assert_eq!(data.value, Value::ByteString(vec![0x55; 32]));
         assert!(frames.iter().all(|f| f.tag.0 != tags::IvCounterNonce
             && f.tag.0 != super::super::vendor_tags::PQCTODAY_SHARED_SECRET));
+    }
+
+    /// Gap-remediation Phase C, Finding #7 — `tag_code_from_name`/
+    /// `tag_name_from_code` omitted `CryptographicDomainParameters` and
+    /// all 5 Split Key attributes even though `decode_attribute_v3`
+    /// fully decodes them, so a numeric `AttributeReference` (used by
+    /// AdjustAttribute/DeleteAttribute) to any of them resolved to the
+    /// literal string "Unknown" instead of the real name.
+    #[test]
+    fn tag_name_table_covers_domain_parameters_and_split_key_attributes() {
+        let pairs: &[(u32, &str)] = &[
+            (tags::CryptographicDomainParameters, "CryptographicDomainParameters"),
+            (tags::SplitKeyMethod, "SplitKeyMethod"),
+            (tags::SplitKeyParts, "SplitKeyParts"),
+            (tags::SplitKeyThreshold, "SplitKeyThreshold"),
+            (tags::KeyPartIdentifier, "KeyPartIdentifier"),
+            (tags::SplitKeyPolynomial, "SplitKeyPolynomial"),
+        ];
+        for (code, canonical) in pairs {
+            assert_eq!(tag_code_from_name(canonical), Some(*code), "{canonical} → code");
+            let name = tag_name_from_code(*code);
+            assert_ne!(name, "Unknown", "{canonical} (0x{code:08x}) must resolve to a real name");
+            let round_trip: String = name.chars().filter(|c| c.is_alphanumeric()).collect();
+            assert_eq!(&round_trip, canonical, "name → canonical round trip for {canonical}");
+        }
+    }
+
+    /// `DeleteAttribute`'s `AttributeReference` MAY arrive as a numeric
+    /// Enumeration (the tag codepoint) rather than a name Structure —
+    /// this only resolves to the right attribute if `tag_name_from_code`
+    /// knows it. Proves the fix end-to-end through the actual decoder,
+    /// not just the lookup table in isolation.
+    #[test]
+    fn delete_attribute_resolves_numeric_reference_for_split_key_method() {
+        let frames = vec![
+            TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString("u".into())),
+            TtlvFrame::new(Tag(tags::AttributeReference), Value::Enumeration(tags::SplitKeyMethod)),
+        ];
+        let req = decode_delete_attribute_req(&frames).unwrap();
+        assert_eq!(req.attribute_reference.as_deref(), Some("Split Key Method"));
     }
 }

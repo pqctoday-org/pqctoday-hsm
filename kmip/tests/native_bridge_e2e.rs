@@ -572,6 +572,7 @@ fn register_pqc(
     register(
         deps,
         RegisterRequest {
+            secret_data_type: None,
             object_type,
             attributes: vec![
                 Attribute::CryptographicAlgorithm(alg),
@@ -846,6 +847,7 @@ fn k9_register_pqc_length_mismatch_fails_invalid_attribute_value() {
     let err = register(
         &deps,
         RegisterRequest {
+            secret_data_type: None,
             object_type: ObjectType::PrivateKey,
             attributes: vec![
                 Attribute::CryptographicAlgorithm(KmipAlgorithm::MlDsa65),
@@ -1220,6 +1222,7 @@ fn k17_register_wrapped_hmac_key_then_mac_against_real_engine() {
         let uid = register(
             &deps,
             RegisterRequest {
+            secret_data_type: None,
                 object_type: ObjectType::SymmetricKey,
                 attributes: vec![
                     Attribute::CryptographicAlgorithm(alg),
@@ -2042,6 +2045,7 @@ fn hss_register_sign_verify_against_real_engine() {
         register(
             &deps,
             RegisterRequest {
+            secret_data_type: None,
                 object_type,
                 attributes: vec![
                     Attribute::CryptographicAlgorithm(KmipAlgorithm::Hss),
