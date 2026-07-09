@@ -632,7 +632,15 @@ fn encrypt_classical(
         let handle = softhsmrustv3::native::find_by_cka_id(session, &obj.pkcs11_cka_id)
             .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Encrypt:find"))?
             .ok_or_else(|| KmipError::object_not_found(&req.uid))?;
-        let r = softhsmrustv3::native::encrypt(session, handle, mech, data_for_shim, effective_iv);
+        // Gap-remediation Phase F, Finding #4 — `oaep`/`aad`/`tag_len`
+        // were already computed above (same effective-CP derivation the
+        // `encrypt_with_key_bytes` branch above uses) but never
+        // forwarded here; the engine hardcoded empty AAD and the
+        // SHA-256 OAEP default for every engine-resident key regardless
+        // of what the client actually requested.
+        let r = softhsmrustv3::native::encrypt(
+            session, handle, mech, data_for_shim, effective_iv, oaep.as_ref(), aad, tag_len,
+        );
         emit_pkcs11_result(deps, correlation_id, "native::encrypt", Some(mech), &r);
         r.map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Encrypt"))?
     } else {

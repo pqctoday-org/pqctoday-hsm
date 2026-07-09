@@ -673,6 +673,25 @@ fn newly_created_uids(payload: &ResponsePayload) -> Vec<String> {
             Some(info) => vec![info.new_private_key_uid.clone(), info.new_public_key_uid.clone()],
             None => Vec::new(),
         },
+        // Gap-remediation Phase G, Finding #9 — these four PQC/Split-Key
+        // ops mint UIDs just like every arm above, but fell through to
+        // the catch-all: a batch Undo after one of them succeeded leaked
+        // the newly-created object instead of rolling it back.
+        // Encapsulate always mints a new Secret Data object for the
+        // shared secret (`uid`); `rekeyed` (same shape/rationale as
+        // Sign's own field above) additionally mints a fresh key pair
+        // when a crypto-agility rekey fired inline.
+        ResponsePayload::Encapsulate(r) => {
+            let mut uids = vec![r.uid.clone()];
+            if let Some(info) = &r.rekeyed {
+                uids.push(info.new_private_key_uid.clone());
+                uids.push(info.new_public_key_uid.clone());
+            }
+            uids
+        }
+        ResponsePayload::Decapsulate(r) => vec![r.uid.clone()],
+        ResponsePayload::CreateSplitKey(r) => r.uids.clone(),
+        ResponsePayload::JoinSplitKey(r) => vec![r.uid.clone()],
         _ => Vec::new(),
     }
 }
@@ -784,6 +803,15 @@ fn update_id_placeholder(state: &mut BatchState, payload: &ResponsePayload) {
         // Placeholder for the rest of the batch.
         ResponsePayload::Certify(r)      => Some(&r.uid),
         ResponsePayload::ReCertify(r)    => Some(&r.uid),
+        // Gap-remediation Phase G, Finding #9 — same 4 ops as
+        // `newly_created_uids` above; a batch item referencing
+        // `$IDPlaceholder` right after one of these used to fail with a
+        // spurious "ID Placeholder not set" instead of resolving to the
+        // real UID.
+        ResponsePayload::Encapsulate(r)   => Some(&r.uid),
+        ResponsePayload::Decapsulate(r)   => Some(&r.uid),
+        ResponsePayload::CreateSplitKey(r) => r.uids.first().map(|s| s.as_str()),
+        ResponsePayload::JoinSplitKey(r)  => Some(&r.uid),
         _ => None,
     };
     if let Some(u) = uid { state.id_placeholder = Some(u.to_string()); }

@@ -690,9 +690,12 @@ pub fn C_GetMechanismList(slot_id: u32, p_mechanism_list: *mut u32, pul_count: *
     CKR_OK
 }
 
-// ── Multi-part operation stubs (PKCS#11 v3.2 compliance) ────────────────────
-// These return CKR_FUNCTION_NOT_SUPPORTED as the Rust engine only supports
-// single-shot operations. DigestUpdate/DigestFinal are fully implemented above.
+// C_*Update/C_*Final multi-part Sign/Verify/Encrypt/Decrypt/Digest flows are
+// all genuinely implemented in ffi.rs (real per-session accumulator state,
+// e.g. SIGN_MULTIPART_ACC), not stubbed. CKR_FUNCTION_NOT_SUPPORTED below
+// remains the spec-legal answer for the handful of PKCS#11 v3.2 functions a
+// compliant library may decline outright (§11.17) — it is not a marker for
+// "multi-part isn't implemented."
 
 pub const CKR_FUNCTION_NOT_SUPPORTED: u32 = 0x0000_0054;
 pub const CKR_FUNCTION_NOT_PARALLEL: u32 = 0x0000_0051;

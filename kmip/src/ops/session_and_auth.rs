@@ -1,9 +1,12 @@
 //! KMIP 3.0 Group F: session / auth ops.
 //!
-//! All six ops carry minimal semantics in v0.1 — we acknowledge the
-//! request, allocate a UID where the spec requires one, and emit
-//! audit events. Genuine credential storage + ticket-based session
-//! enforcement is a Phase 12 (sandbox MVP) deliverable.
+//! CreateCredential/CreateGroup/CreateUser/Log acknowledge the request,
+//! allocate a UID where the spec requires one, and emit audit events.
+//! Login/Logout carry real semantics (Phase 1.4, K14): Login issues a
+//! genuine random ticket recorded in a live-session map (optionally
+//! gated on verified `AuthContext` identity when auth is configured),
+//! and Logout invalidates it — a stale/unknown ticket fails `Invalid
+//! Ticket` rather than a silent no-op success.
 //!
 //! Spec mapping:
 //!

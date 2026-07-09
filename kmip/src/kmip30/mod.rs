@@ -110,7 +110,7 @@ pub use message::{
     KMIP_VERSION_MINOR,
 };
 pub use wire::{
-    decode_request_message, decode_transparent_rsa_private_key, encode_request_message,
-    encode_response_message, ttlv_decode_key_value, ttlv_encode_key_value,
-    TransparentRsaPrivateKeyFields, WireError,
+    decode_request_message, decode_transparent_rsa_private_key, decode_transparent_rsa_public_key,
+    encode_request_message, encode_response_message, ttlv_decode_key_value, ttlv_encode_key_value,
+    TransparentRsaPrivateKeyFields, TransparentRsaPublicKeyFields, WireError,
 };

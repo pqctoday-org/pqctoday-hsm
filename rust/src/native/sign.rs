@@ -6,11 +6,12 @@
 //! the right typed primitive. Returns the signature as `Vec<u8>` (no
 //! caller-allocated output buffer).
 //!
-//! Mirrors the dispatch logic in `ffi::C_Sign` / `ffi::C_Verify` exactly,
-//! minus the wasm32 pointer marshalling and the stateful HSS / XMSS / LMS
-//! paths (those require coordinated `CKA_STATEFUL_KEY_STATE` updates
-//! that don't map cleanly to the Result<Vec<u8>, _> shape; KMIP doesn't
-//! need them per Phase 4.5 FIPS-only scope).
+//! Mirrors the dispatch logic in `ffi::C_Sign` / `ffi::C_Verify`, minus
+//! the wasm32 pointer marshalling. Stateful HSS sign/verify IS
+//! implemented here (leaf-index advancement + tamper detection covered
+//! by this module's own tests); XMSS/XMSS-MT sign/verify is not — an
+//! XMSS key handle correctly falls through to `CKR_MECHANISM_INVALID`
+//! rather than mis-signing.
 //!
 //! See [`super`] for the typed-vs-FFI architectural relationship.
 

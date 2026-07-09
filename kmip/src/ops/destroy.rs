@@ -19,6 +19,7 @@
 
 use std::collections::HashMap;
 use time::OffsetDateTime;
+use zeroize::Zeroize;
 
 use crate::error::{KmipError, Result};
 use crate::kmip30::{DestroyRequest, DestroyResponse, State};
@@ -109,6 +110,22 @@ pub fn destroy(deps: &Deps, req: DestroyRequest, correlation_id: &str) -> Result
     obj.state = target_state;
     obj.destroy_date = Some(now);
     obj.last_change_date = Some(now);
+
+    // Gap-remediation Phase A — "the key material for the specified
+    // Managed Object SHALL be destroyed" (§6.1.19) means destroyed, not
+    // "state flipped while the plaintext sits in the store forever."
+    // For Register/Import'd objects the raw bytes live in
+    // `ObjectRecord.key_material` (there is no engine handle for them
+    // to destroy above); zeroize the backing buffer before dropping it
+    // rather than a bare `= None`, matching the `.zeroize()` discipline
+    // `rust/src/ffi.rs` already uses for sensitive buffers. `Export`'s
+    // own `key_material` filter for Destroyed objects becomes
+    // redundant-but-harmless defense in depth after this, not load-
+    // bearing — left in place.
+    if let Some(mut material) = obj.key_material.take() {
+        material.zeroize();
+    }
+
     deps.store.update(obj)?;
 
     emit_state_change(
@@ -221,5 +238,69 @@ mod tests {
         put(&d, "u", State::Destroyed);
         let err = destroy(&d, DestroyRequest { uid: "u".into() }, "c").unwrap_err();
         assert_eq!(err.result_reason(), crate::error::ResultReason::ObjectDestroyed);
+    }
+
+    /// Gap-remediation Phase A — a Register/Import'd object's raw key
+    /// bytes live in `ObjectRecord.key_material` (no engine handle to
+    /// destroy). Destroy must scrub that field for real, not just flip
+    /// the lifecycle state and leave the plaintext sitting in the
+    /// store. Also confirms the pre-existing Export-side suppression
+    /// (§6.1.22: Destroyed objects never return key material) still
+    /// holds — that check becomes redundant-but-harmless defense in
+    /// depth after this fix, not the only thing standing between a
+    /// client and a "destroyed" key's plaintext.
+    #[test]
+    fn destroy_scrubs_key_material_for_registered_objects() {
+        use crate::kmip30::ExportRequest;
+        use crate::ops::register_import_export::export;
+
+        let d = deps_with();
+        d.store
+            .put(ObjectRecord {
+                uid: "u".into(),
+                object_type: ObjectType::SecretData,
+                algorithm: KmipAlgorithm::Aes,
+                cryptographic_length: 256,
+                usage_mask: UsageMask::ENCRYPT,
+                state: State::PreActive,
+                pkcs11_cka_id: vec![],
+                pkcs11_slot: 0,
+                initial_date: OffsetDateTime::UNIX_EPOCH,
+                activation_date: None,
+                supersedes: None,
+                name: None,
+                links: std::collections::HashMap::new(),
+                custom_attributes: std::collections::HashMap::new(),
+                key_material: Some(vec![0xAB; 32]),
+                key_format_type: None,
+                ..ObjectRecord::default()
+            })
+            .unwrap();
+
+        destroy(&d, DestroyRequest { uid: "u".into() }, "c").unwrap();
+
+        let stored = d.store.get("u").unwrap().unwrap();
+        assert!(
+            stored.key_material.is_none(),
+            "Destroy must scrub key_material, not just flip lifecycle state"
+        );
+
+        // Export still honestly reports no material for a Destroyed
+        // object (pre-existing §6.1.22 behavior) — proves this path
+        // stays correct now that it's no longer the only thing hiding
+        // the plaintext.
+        let exported = export(
+            &d,
+            ExportRequest {
+                uid: "u".into(),
+                key_format_type: None,
+                key_wrap_type: None,
+                key_compression_type: None,
+                key_wrapping_specification: None,
+            },
+            "c",
+        )
+        .unwrap();
+        assert!(exported.managed_object.is_none());
     }
 }

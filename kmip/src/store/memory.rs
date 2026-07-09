@@ -148,6 +148,31 @@ mod tests {
         );
     }
 
+    /// Gap-remediation Phase H, Finding #12 — companion to
+    /// `SqliteStore`'s equivalent test; `MemoryStore::update` already
+    /// re-asserts these, this pins the guarantee so it can't silently
+    /// regress out from under the SQLite parity fix.
+    #[test]
+    fn update_does_not_let_caller_mutate_immutable_dates() {
+        let s = MemoryStore::new();
+        let mut original = rec("u");
+        original.original_creation_date = Some(OffsetDateTime::UNIX_EPOCH);
+        s.put(original).unwrap();
+
+        let mut mutated = rec("u");
+        mutated.initial_date = OffsetDateTime::UNIX_EPOCH + time::Duration::days(365);
+        mutated.original_creation_date = Some(OffsetDateTime::UNIX_EPOCH + time::Duration::days(365));
+        s.update(mutated).unwrap();
+
+        let r = s.get("u").unwrap().unwrap();
+        assert_eq!(r.initial_date, OffsetDateTime::UNIX_EPOCH, "Initial Date must not be caller-mutable");
+        assert_eq!(
+            r.original_creation_date,
+            Some(OffsetDateTime::UNIX_EPOCH),
+            "Original Creation Date must not be caller-mutable",
+        );
+    }
+
     #[test]
     fn update_requires_existing() {
         let s = MemoryStore::new();

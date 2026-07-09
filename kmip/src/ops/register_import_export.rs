@@ -233,6 +233,45 @@ pub fn register(
         _ => None,
     };
 
+    // Gap-remediation Phase D/H (found via BL-M-8-30 conformance
+    // replay) — mirrors `transparent_rsa_pkcs8` above for the
+    // PUBLIC-key half. `decode_key_block`'s own comment already noted
+    // "the Register path can parse typed fields out of it" for every
+    // Transparent* form (citing BL-M-8 by name); only the private-key
+    // half was ever actually wired up. Re-encode Modulus/PublicExponent
+    // as real SubjectPublicKeyInfo DER so `register_rsa_public_key_der`
+    // (which only understands DER, per/register-side comment above)
+    // gets parseable bytes instead of the raw TTLV KeyMaterial Structure.
+    let transparent_rsa_public_der: Option<Vec<u8>> = match (req.object_type, kmip_algorithm, key_format_type) {
+        (ObjectType::PublicKey, crate::kmip30::KmipAlgorithm::Rsa, Some(0x0B)) => {
+            let material = key_material.as_deref().unwrap_or_default();
+            let der = crate::kmip30::decode_transparent_rsa_public_key(material)
+                .map_err(|e| e.to_string())
+                .and_then(|f| {
+                    use rsa::pkcs8::EncodePublicKey;
+                    use rsa::BigUint;
+                    rsa::RsaPublicKey::new(
+                        BigUint::from_bytes_be(&f.modulus),
+                        BigUint::from_bytes_be(&f.public_exponent),
+                    )
+                    .map_err(|e| e.to_string())
+                    .and_then(|k| {
+                        k.to_public_key_der()
+                            .map(|d| d.as_bytes().to_vec())
+                            .map_err(|e| e.to_string())
+                    })
+                })
+                .map_err(|e| {
+                    fail_err(deps, correlation_id, "Register",
+                        KmipError::key_format_type_not_supported(format!(
+                            "Transparent RSA Public Key material could not be parsed: {e}"
+                        )))
+                })?;
+            Some(der)
+        }
+        _ => None,
+    };
+
     // KMIP 3.0 §6.1.48 + §6.2 — when the client supplies an RSA
     // private key in PKCS#1 (KeyFormatType=0x03), PKCS#8 (0x04) or
     // Transparent RSA Private Key (0x0A) form, or PQC (ML-DSA /
@@ -252,31 +291,68 @@ pub fn register(
                 // (PrivateKeyInfo). Both surface in `sign_rsa` via
                 // `RsaPrivateKey::from_pkcs8_der`. 0x0A was converted
                 // to PKCS#8 above.
-                let pkcs8_bytes: Option<Vec<u8>> = match fmt {
+                //
+                // Gap-remediation Phase D, Finding #3 — a malformed
+                // PKCS#1 body (fmt 3) or an unrecognized `fmt` value
+                // used to fall through to `None` here and the whole
+                // block silently did nothing: wire `Success`, no real
+                // engine object, violating this file's own "Register
+                // must NOT succeed-then-fail-at-use" invariant just as
+                // much as the discarded `Result`s below did. Now
+                // surfaces `KeyFormatTypeNotSupported` instead.
+                let pkcs8_bytes: std::result::Result<Vec<u8>, String> = match fmt {
                     3 => {
                         use rsa::pkcs1::DecodeRsaPrivateKey;
                         use rsa::pkcs8::EncodePrivateKey;
                         rsa::RsaPrivateKey::from_pkcs1_der(material)
-                            .ok()
-                            .and_then(|k| k.to_pkcs8_der().ok().map(|d| d.as_bytes().to_vec()))
+                            .map_err(|e| e.to_string())
+                            .and_then(|k| k.to_pkcs8_der()
+                                .map(|d| d.as_bytes().to_vec())
+                                .map_err(|e| e.to_string()))
                     }
-                    4 => Some(material.clone()),
-                    0x0A => transparent_rsa_pkcs8.clone(),
-                    _ => None,
+                    4 => Ok(material.clone()),
+                    0x0A => transparent_rsa_pkcs8.clone()
+                        .ok_or_else(|| "Transparent RSA Private Key material missing".to_string()),
+                    other => Err(format!("unsupported KeyFormatType 0x{other:02x} for RSA PrivateKey Register")),
                 };
-                if let Some(pkcs8) = pkcs8_bytes {
-                    let _ = softhsmrustv3::native::register_rsa_private_key_pkcs8(
-                        session, &pkcs8, &cka_id_bytes, "kmip-register",
-                    );
-                }
+                let pkcs8 = pkcs8_bytes.map_err(|e| fail_err(deps, correlation_id, "Register",
+                    KmipError::key_format_type_not_supported(format!(
+                        "RSA PrivateKey Register: {e}"
+                    ))))?;
+                softhsmrustv3::native::register_rsa_private_key_pkcs8(
+                    session, &pkcs8, &cka_id_bytes, "kmip-register",
+                ).map_err(|rv| fail_err(deps, correlation_id, "Register",
+                    super::helpers::ck_rv_to_kmip_error(rv, "Register:rsa-private-import")))?;
             }
             (ObjectType::PublicKey, crate::kmip30::KmipAlgorithm::Rsa) => {
-                // PKCS_1 RSAPublicKey or PKCS_8 SubjectPublicKeyInfo —
-                // store the DER as-is; `verify_rsa` extracts the
-                // modulus/exponent from CKA_VALUE.
-                let _ = softhsmrustv3::native::register_rsa_public_key_der(
-                    session, material, &cka_id_bytes, "kmip-register-pub",
-                );
+                // PKCS_1 RSAPublicKey, PKCS_8 SubjectPublicKeyInfo, or
+                // Transparent RSA Public Key (0x0B, re-encoded to SPKI
+                // DER above) — `register_rsa_public_key_der` accepts
+                // both DER forms (Gap-remediation Phase D, Finding #3);
+                // an unrecognized `fmt` now honestly fails Register
+                // instead of feeding it non-DER bytes and silently
+                // producing no engine object (found via BL-M-8-30
+                // conformance replay — the same "succeeds with no real
+                // object" failure mode Finding #3 described, just one
+                // format this file's original text didn't name).
+                // PKCS_1 (3), PKCS_8 (4), and X_509 (5, SubjectPublicKeyInfo
+                // — same shape PKCS_8 uses for public keys) are all real
+                // DER `register_rsa_public_key_der`'s from_public_key_der →
+                // from_pkcs1_der fallback already parses directly.
+                let der: std::result::Result<&[u8], String> = match fmt {
+                    3 | 4 | 5 => Ok(material),
+                    0x0B => transparent_rsa_public_der.as_deref()
+                        .ok_or_else(|| "Transparent RSA Public Key material missing".to_string()),
+                    other => Err(format!("unsupported KeyFormatType 0x{other:02x} for RSA PublicKey Register")),
+                };
+                let der = der.map_err(|e| fail_err(deps, correlation_id, "Register",
+                    KmipError::key_format_type_not_supported(format!(
+                        "RSA PublicKey Register: {e}"
+                    ))))?;
+                softhsmrustv3::native::register_rsa_public_key_der(
+                    session, der, &cka_id_bytes, "kmip-register-pub",
+                ).map_err(|rv| fail_err(deps, correlation_id, "Register",
+                    super::helpers::ck_rv_to_kmip_error(rv, "Register:rsa-public-import")))?;
             }
             (ObjectType::SymmetricKey, alg)
                 if matches!(
@@ -288,9 +364,10 @@ pub fn register(
             {
                 // HMAC keys are raw bytes; the shim's MAC path reads
                 // them from CKA_VALUE.
-                let _ = softhsmrustv3::native::register_generic_secret_bytes(
+                softhsmrustv3::native::register_generic_secret_bytes(
                     session, material, &cka_id_bytes, "kmip-register-hmac",
-                );
+                ).map_err(|rv| fail_err(deps, correlation_id, "Register",
+                    super::helpers::ck_rv_to_kmip_error(rv, "Register:hmac-import")))?;
             }
             // K9 (compliance-audit B-6) — PQC families: ML-DSA /
             // ML-KEM / SLH-DSA raw FIPS 204/203/205 key material is
@@ -508,6 +585,7 @@ pub fn register(
         supersedes: None,
         name,
         alternative_name: x.alternative_name.clone(),
+        alternative_name_type: x.alternative_name_type,
         links,
         custom_attributes,
         object_groups: x.object_groups.clone(),
@@ -519,6 +597,10 @@ pub fn register(
         certificate_value,
         certificate_length,
         certificate_subject_cn,
+        // Gap-remediation Phase C, Finding #8 — previously dropped at
+        // decode time; a later Get always echoed the Password default
+        // regardless of what was actually registered.
+        secret_data_type: req.secret_data_type,
         ..ObjectRecord::default()
     })?;
 
@@ -802,6 +884,9 @@ pub(crate) struct ExtractedAttrs {
     /// for an attribute the client explicitly provided (found via the
     /// OASIS TL-M-3 conformance transcript, Honest-Maximum Phase 2.1).
     pub alternative_name: Option<String>,
+    /// Gap-remediation Phase H, Finding #11 — sibling `Alternative Name
+    /// Type` (§4.5 Enumeration), previously discarded on decode.
+    pub alternative_name_type: Option<u32>,
 }
 
 pub(crate) fn extract_attrs(attrs: &[Attribute]) -> ExtractedAttrs {
@@ -815,6 +900,7 @@ pub(crate) fn extract_attrs(attrs: &[Attribute]) -> ExtractedAttrs {
         application_specific_information: None,
         object_groups: Vec::new(),
         alternative_name: None,
+        alternative_name_type: None,
     };
     for a in attrs {
         match a {
@@ -837,7 +923,10 @@ pub(crate) fn extract_attrs(attrs: &[Attribute]) -> ExtractedAttrs {
             Attribute::ApplicationSpecificInformation { namespace, data } => {
                 out.application_specific_information = Some((namespace.clone(), data.clone()));
             }
-            Attribute::AlternativeName(n) => out.alternative_name = Some(n.clone()),
+            Attribute::AlternativeName { value, name_type } => {
+                out.alternative_name = Some(value.clone());
+                out.alternative_name_type = Some(*name_type);
+            }
             // Multi-instance: accumulate every Object Group label so an
             // object Registered into several groups is locatable by any.
             Attribute::ObjectGroup(g) => {
@@ -929,6 +1018,7 @@ mod tests {
     fn register_persists_record_with_uid_and_key_bytes() {
         let d = deps_with();
         let resp = register(&d, RegisterRequest {
+            secret_data_type: None,
             object_type: ObjectType::SymmetricKey,
             attributes: vec![
                 Attribute::CryptographicAlgorithm(KmipAlgorithm::Aes),
@@ -951,6 +1041,7 @@ mod tests {
     fn register_with_client_uid_rejects_duplicate() {
         let d = deps_with();
         let req = || RegisterRequest {
+            secret_data_type: None,
             object_type: ObjectType::SymmetricKey,
             attributes: vec![
                 Attribute::UniqueIdentifier("urn:fixed".into()),
@@ -972,6 +1063,7 @@ mod tests {
     fn register_records_the_real_protection_storage_mask() {
         let d = deps_with();
         let resp = register(&d, RegisterRequest {
+            secret_data_type: None,
             object_type: ObjectType::SymmetricKey,
             attributes: vec![
                 Attribute::CryptographicAlgorithm(KmipAlgorithm::Aes),
@@ -993,6 +1085,7 @@ mod tests {
         // Client requires Hardware (0x02) only — this server has no
         // hardware storage class, so it must refuse rather than lie.
         let err = register(&d, RegisterRequest {
+            secret_data_type: None,
             object_type: ObjectType::SymmetricKey,
             attributes: vec![
                 Attribute::CryptographicAlgorithm(KmipAlgorithm::Aes),
@@ -1011,6 +1104,7 @@ mod tests {
         let d = deps_with();
         // First create via Register.
         register(&d, RegisterRequest {
+            secret_data_type: None,
             object_type: ObjectType::SymmetricKey,
             attributes: vec![
                 Attribute::UniqueIdentifier("u".into()),
@@ -1041,6 +1135,7 @@ mod tests {
     fn import_with_replace_overwrites_existing() {
         let d = deps_with();
         register(&d, RegisterRequest {
+            secret_data_type: None,
             object_type: ObjectType::SymmetricKey,
             attributes: vec![
                 Attribute::UniqueIdentifier("u".into()),
@@ -1074,6 +1169,7 @@ mod tests {
     fn export_returns_attributes_and_key_material() {
         let d = deps_with();
         let r = register(&d, RegisterRequest {
+            secret_data_type: None,
             object_type: ObjectType::SymmetricKey,
             attributes: vec![
                 Attribute::CryptographicAlgorithm(KmipAlgorithm::Aes),
@@ -1102,6 +1198,7 @@ mod tests {
     fn export_on_destroyed_omits_key_material() {
         let d = deps_with();
         let r = register(&d, RegisterRequest {
+            secret_data_type: None,
             object_type: ObjectType::SymmetricKey,
             attributes: vec![
                 Attribute::CryptographicAlgorithm(KmipAlgorithm::Aes),
@@ -1130,6 +1227,7 @@ mod tests {
     fn register_persists_sensitive_and_extractable_from_template() {
         let d = deps_with();
         let r = register(&d, RegisterRequest {
+            secret_data_type: None,
             object_type: ObjectType::SymmetricKey,
             attributes: vec![
                 Attribute::CryptographicAlgorithm(KmipAlgorithm::Aes),
@@ -1158,6 +1256,7 @@ mod tests {
         if let Some(b) = sensitive { attributes.push(Attribute::Sensitive(b)); }
         if let Some(b) = extractable { attributes.push(Attribute::Extractable(b)); }
         register(d, RegisterRequest {
+            secret_data_type: None,
             object_type: ObjectType::SymmetricKey,
             attributes,
             managed_object: Some(raw_aes128_kb()),
@@ -1308,6 +1407,7 @@ mod tests {
         kwd: crate::kmip30::KeyWrappingSpec,
     ) -> Result<RegisterResponse> {
         register(d, RegisterRequest {
+            secret_data_type: None,
             object_type: ObjectType::SymmetricKey,
             attributes: vec![
                 Attribute::CryptographicAlgorithm(KmipAlgorithm::Aes),
@@ -1420,6 +1520,7 @@ mod tests {
 
     fn register_transparent_rsa(d: &Deps) -> crate::error::Result<RegisterResponse> {
         register(d, RegisterRequest {
+            secret_data_type: None,
             object_type: ObjectType::PrivateKey,
             attributes: vec![
                 Attribute::CryptographicUsageMask(UsageMask::DECRYPT),
@@ -1455,6 +1556,38 @@ mod tests {
         assert_eq!(hex::encode(&f.public_exponent), crate::ops::test_rsa_fixture::PUBLIC_EXPONENT);
     }
 
+    /// Gap-remediation Phase D/H — public-key half of the same fixture
+    /// (found broken via BL-M-8-30 conformance replay; the real-engine
+    /// round-trip proving the DER conversion actually produces a usable
+    /// object lives in tests/native_bridge_e2e.rs — this pins the
+    /// storage + parse side without needing a session).
+    #[test]
+    fn register_transparent_rsa_public_key_parses_and_round_trips() {
+        let d = deps_with();
+        let r = register(&d, RegisterRequest {
+            secret_data_type: None,
+            object_type: ObjectType::PublicKey,
+            attributes: vec![Attribute::CryptographicUsageMask(UsageMask::VERIFY)],
+            managed_object: Some(KeyBlock {
+                key_format_type: KeyFormatType::TransparentRsaPublicKey,
+                cryptographic_algorithm: KmipAlgorithm::Rsa,
+                cryptographic_length: 1024,
+                key_value: crate::ops::test_rsa_fixture::ttlv_public_key_material(),
+                key_wrapping_data: None,
+            }),
+            protection_storage_masks: None,
+            certificate_payload: None,
+        }, "c").unwrap();
+        let rec = d.store.get(&r.uid).unwrap().unwrap();
+        assert_eq!(rec.key_format_type, Some(0x0B));
+        let stored = rec.key_material.expect("material stored");
+        assert!(!stored.is_empty(), "never store empty material");
+        assert_eq!(stored, crate::ops::test_rsa_fixture::ttlv_public_key_material());
+        let f = crate::kmip30::decode_transparent_rsa_public_key(&stored).unwrap();
+        assert_eq!(hex::encode(&f.modulus), crate::ops::test_rsa_fixture::MODULUS);
+        assert_eq!(hex::encode(&f.public_exponent), crate::ops::test_rsa_fixture::PUBLIC_EXPONENT);
+    }
+
     #[test]
     fn register_transparent_rsa_private_key_malformed_fails_0x10() {
         // Garbage that is not a TTLV KeyMaterial Structure must fail
@@ -1462,6 +1595,7 @@ mod tests {
         // land in the store as dead material.
         let d = deps_with();
         let err = register(&d, RegisterRequest {
+            secret_data_type: None,
             object_type: ObjectType::PrivateKey,
             attributes: vec![Attribute::CryptographicUsageMask(UsageMask::DECRYPT)],
             managed_object: Some(KeyBlock {
@@ -1479,6 +1613,7 @@ mod tests {
 
     fn register_tsk(d: &Deps) -> String {
         register(d, RegisterRequest {
+            secret_data_type: None,
             object_type: ObjectType::SymmetricKey,
             attributes: vec![
                 Attribute::CryptographicAlgorithm(KmipAlgorithm::Aes),
@@ -1533,5 +1668,39 @@ mod tests {
             key_wrapping_specification: None,
         }, "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::KeyFormatTypeNotSupported);
+    }
+
+    /// Gap-remediation Phase C, Finding #8 — `SecretDataType` (Password
+    /// = 0x01, Seed = 0x02) must survive Register → Get instead of
+    /// always echoing the hardcoded Password default.
+    #[test]
+    fn register_secret_data_type_round_trips_through_get() {
+        let d = deps_with();
+        let resp = register(&d, RegisterRequest {
+            secret_data_type: Some(0x02), // Seed
+            object_type: ObjectType::SecretData,
+            attributes: vec![
+                Attribute::CryptographicUsageMask(UsageMask::empty()),
+            ],
+            managed_object: Some(KeyBlock {
+                key_format_type: KeyFormatType::Raw,
+                cryptographic_algorithm: KmipAlgorithm::Aes,
+                cryptographic_length: 0,
+                key_value: vec![0xAB; 32],
+                key_wrapping_data: None,
+            }),
+            protection_storage_masks: None,
+            certificate_payload: None,
+        }, "c").unwrap();
+
+        let rec = d.store.get(&resp.uid).unwrap().unwrap();
+        assert_eq!(rec.secret_data_type, Some(0x02));
+
+        let got = super::super::get::get(&d, crate::kmip30::GetRequest {
+            uid: resp.uid,
+            key_format_type: None,
+            key_wrapping_specification: None,
+        }, "c").unwrap();
+        assert_eq!(got.secret_data_type, Some(0x02));
     }
 }

@@ -1,18 +1,23 @@
 # KMIP 3.0 Conformance Report
 
-> **Current as of v0.12.0.** The replay figures below are regenerated per run via
+> **Current as of v0.13.0.** The replay figures below are regenerated per run via
 > `../conformance/harness/dispatcher_replay.py` (`cargo test` in CI also gates
 > them); the dated stamps below are when the prose was last edited, not a ceiling
 > on validity.
 
-**Generated**: 2026-06-08 · **Updated**: 2026-07-08 (HONEST_MAXIMUM_PLAN Phases 0–4, 6.1 complete)
+**Generated**: 2026-06-08 · **Updated**: 2026-07-09 (`GAP_REMEDIATION_PLAN.md` Phases A–I complete)
 **Subsystem**: `pqctoday-kmip` (`kmip/` crate)
 **Spec**: OASIS Key Management Interoperability Protocol v3.0 **Committee Specification Draft 01
 (CSD01, 23 Aug 2024)** — a draft, not a ratified OASIS Standard. PQC extensions (Encapsulate /
 Decapsulate, hybrid KEMs) are implemented per the later **Working Draft 19 (WD19, 14 Feb 2025)**,
 also unpublished/unratified; the PQC surface has no OASIS test vectors (§4.1, §7 below). See
 `../docs/HONEST_MAXIMUM_PLAN.md` for the roadmap this report reflects the completion of (Phases
-0–4 and 6.1; Phase 5 — server-to-client — is deliberately parked, see §5).
+0–4 and 6.1; Phase 5 — server-to-client — is deliberately parked, see §5), and
+`GAP_REMEDIATION_PLAN.md` for a follow-up audit (13 findings, all fixed) that specifically
+targeted silently-dropped errors and stub/placeholder behavior the dispatcher-conformance figures
+below wouldn't have caught on their own (they test observable request/response shape, not every
+internal error-propagation path — e.g. a discarded engine-import `Result` that still returns wire
+`Success`).
 **Test corpus**: `kmip-profiles-v3.0.zip` (`test-cases/kmip-v3.0/{mandatory,optional}/*.xml`) — CSD01-era, contains zero PQC test cases.
 
 ## TL;DR
@@ -35,6 +40,34 @@ out of scope for the `softhsmrustv3` backend (`kmip/DEPRECATED.md`). There are, 
 revision, **zero** other skip categories: no `SKIP_OP`, no `SKIP_PRECONDITION`, no
 `SKIP_POLICY_VARIANT`, no `SKIP_PARSE` — every transcript the harness can meaningfully run,
 it runs to a real PASS or FAIL.
+
+## 0. Gap-remediation follow-up (v0.13.0, 2026-07-09)
+
+The 97/97 corpus-replay figure above hasn't moved — but it was never designed to catch every gap
+this class of bug produces. A dedicated audit of both the `rust/` (PKCS#11 engine) and `kmip/`
+crates for stub/placeholder code and silently-dropped errors found 13 real gaps, none of which
+changed an op's observable wire shape enough to fail a corpus transcript on its own (the corpus
+mostly exercises the happy path with well-formed requests). All 13 are fixed, documented phase by
+phase in `GAP_REMEDIATION_PLAN.md`, each with new regression tests:
+
+- `Destroy` now genuinely scrubs key material instead of only flipping a lifecycle flag.
+- `SetAttribute`/`ModifyAttribute`/`DeleteAttribute` no longer silently drop several attributes,
+  and correctly reject others as Read-Only that previously fell through a permissive catch-all.
+- Three wire-encoding round-trip gaps (attribute-name lookup table, `CryptographicParameters`
+  field coverage, `SecretData` type persistence).
+- `Register` no longer discards engine-import errors, and RSA public keys registered in PKCS#8 or
+  Transparent form now genuinely produce a usable engine object (previously silent no-ops).
+- `CreateKeyPair` persists `CryptographicParameters` and rejects false `QuantumSafe` claims.
+- `Encrypt`/`Decrypt` pass real AAD and OAEP-hash choices through for engine-generated keys, not
+  just `Register`'d ones.
+- Batch `Undo`/`$IDPlaceholder` now cover `Encapsulate`/`Decapsulate`/`CreateSplitKey`/`JoinSplitKey`.
+- `Locate` filters by cryptographic length, usage mask, and unique identifier instead of silently
+  ignoring them.
+
+One genuine regression was caught and fixed during this work itself: re-running the full
+mandatory corpus replay while verifying the Locate fix turned up that the RSA-Register honesty fix
+had exposed a pre-existing, separate bug (Transparent RSA Public Key registration never actually
+worked) as a hard failure instead of a silent one. Both are fixed; the corpus is back to 97/0/5.
 
 ## 1. Test corpus inventory
 

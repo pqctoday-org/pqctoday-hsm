@@ -200,6 +200,13 @@ pub struct ObjectRecord {
     /// (last 8 hex chars of the UUID portion). Generated lazily.
     pub short_unique_identifier: Option<String>,
     pub alternative_name: Option<String>,
+    /// KMIP 3.0 §4.5 — `Alternative Name Type` (Enumeration). Gap-
+    /// remediation Phase H, Finding #11 — previously hardcoded to
+    /// `Uninterpreted Text String` (1) on encode regardless of what the
+    /// client set; now genuinely round-trips. `None` (e.g. an object
+    /// with no AlternativeName at all) renders the attribute absent,
+    /// same as before.
+    pub alternative_name_type: Option<u32>,
     pub comment: Option<String>,
     pub description: Option<String>,
     pub contact_information: Option<String>,
@@ -368,6 +375,7 @@ impl From<BaselineDefaults> for ObjectRecord {
             rotate_automatic: None,
             short_unique_identifier: None,
             alternative_name: None,
+            alternative_name_type: None,
             comment: None,
             description: None,
             contact_information: None,

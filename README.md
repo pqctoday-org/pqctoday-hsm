@@ -409,7 +409,7 @@ The `softhsmv3` implementations maintain strict compliance with current ACVP tes
 
 A formal security audit was conducted in March 2026 covering C++ memory safety, PKCS#11 API validation, cryptographic implementation, WASM/JS bindings, Rust PKCS#11, and build/supply chain. A subsequent hardening sweep occurred in April 2026 focusing on bounds control.
 
-**As of the v0.4.24 hardening sweep (April 2026): all HIGH and MEDIUM findings resolved, remaining LOW findings patched.** Security-relevant work since then is recorded in `CHANGELOG.md` (through v0.8.0).
+**As of the v0.4.24 hardening sweep (April 2026): all HIGH and MEDIUM findings resolved, remaining LOW findings patched.** Security-relevant work since then is recorded in `CHANGELOG.md`.
 
 | Severity | Original | Fixed in v0.4.24 | Remaining |
 | --- | --- | --- | --- |

@@ -30,9 +30,10 @@
 //! 3. Call `deps.engine.evaluate(&policy_request)`.
 //! 4. Map `(KmipAlgorithm, PkcsOp) → CKM_*` via
 //!    `KmipAlgorithm::to_pkcs11_mech` (Phase 3).
-//! 5. Emit Plane-3 `Pkcs11Call`s; call the bridge (Phase 7 wires real
-//!    softhsmrustv3 entries; v0.1 uses placeholders so tests run without
-//!    a token).
+//! 5. Emit Plane-3 `Pkcs11Call`s; call the bridge — real `softhsmrustv3`
+//!    engine entries when `deps.engine_session` is wired (production +
+//!    e2e tests), a documented soft placeholder path for engine-less
+//!    unit tests (see e.g. `create_key_pair::engine_generate_keypair`).
 //! 6. Persist any store mutations.
 //! 7. Emit Plane-2 `KmipResponseSent`.
 //!
@@ -114,6 +115,26 @@ pub(crate) mod test_rsa_fixture {
                 big(tags::PublicExponent, PUBLIC_EXPONENT),
                 big(tags::PrimeP, P),
                 big(tags::PrimeQ, Q),
+            ]),
+        );
+        let mut buf = bytes::BytesMut::new();
+        encode(&frame, &mut buf);
+        buf.to_vec()
+    }
+
+    /// Gap-remediation Phase D/H — the PUBLIC-key half of the same
+    /// fixture (Modulus + Public Exponent only), TTLV-encoded exactly
+    /// as BL-M-8-30's `TransparentRSAPublicKey` Register request
+    /// carries it.
+    pub fn ttlv_public_key_material() -> Vec<u8> {
+        let big = |tag: u32, hex_str: &str| {
+            TtlvFrame::new(Tag(tag), Value::BigInteger(hex::decode(hex_str).unwrap()))
+        };
+        let frame = TtlvFrame::new(
+            Tag(tags::KeyMaterial),
+            Value::Structure(vec![
+                big(tags::Modulus, MODULUS),
+                big(tags::PublicExponent, PUBLIC_EXPONENT),
             ]),
         );
         let mut buf = bytes::BytesMut::new();

@@ -21,7 +21,7 @@ use std::collections::HashMap;
 use time::OffsetDateTime;
 
 use crate::error::Result;
-use crate::kmip30::{Attribute, KmipAlgorithm, LocateRequest, LocateResponse, ObjectType, State};
+use crate::kmip30::{Attribute, KmipAlgorithm, LocateRequest, LocateResponse, ObjectType, State, UsageMask};
 use crate::policy::{Decision, PolicyRequest};
 use crate::store::ObjectRecord;
 
@@ -173,6 +173,17 @@ struct LocateFilters {
     /// equals this value (Object Group is multi-instance). This is the
     /// capability behind SASED-M-3 step #0's group-membership Locate.
     object_group: Option<String>,
+    /// Gap-remediation Phase H, Finding #10 — previously accepted as
+    /// valid Locate syntax and then silently dropped (over-broad
+    /// results, not an error). The OASIS mandatory corpus's own
+    /// SKFF-M-5..8 Locate steps filter by `UniqueIdentifier` and relied
+    /// on this being harmlessly over-broad; narrowing it for real is
+    /// still correct for those steps (`UniqueIdentifier` filter must
+    /// pick out AT MOST the one matching object, a strict subset of
+    /// "every object").
+    cryptographic_length: Option<u32>,
+    cryptographic_usage_mask: Option<UsageMask>,
+    unique_identifier: Option<String>,
 }
 
 impl LocateFilters {
@@ -222,6 +233,25 @@ impl LocateFilters {
                 return false;
             }
         }
+        if let Some(want) = self.cryptographic_length {
+            if r.cryptographic_length != want {
+                return false;
+            }
+        }
+        // Per §11 `Cryptographic Usage Mask` is bit-valued; a Locate
+        // filter matches when the record's mask has ALL requested bits
+        // set (a subset check, not exact equality — the same semantics
+        // GetAttributes/other consumers use elsewhere for this field).
+        if let Some(want) = self.cryptographic_usage_mask {
+            if !r.usage_mask.contains(want) {
+                return false;
+            }
+        }
+        if let Some(want) = &self.unique_identifier {
+            if &r.uid != want {
+                return false;
+            }
+        }
         true
     }
 }
@@ -235,6 +265,9 @@ fn build_filters(attrs: &[Attribute]) -> LocateFilters {
         application_specific_information: None,
         group_link: None,
         object_group: None,
+        cryptographic_length: None,
+        cryptographic_usage_mask: None,
+        unique_identifier: None,
     };
     for a in attrs {
         match a {
@@ -248,6 +281,14 @@ fn build_filters(attrs: &[Attribute]) -> LocateFilters {
             Attribute::GroupLink(uid) => {
                 f.group_link = Some(uid.clone());
             }
+            // Gap-remediation Phase H, Finding #10 — 3 highest-value
+            // missing filters, per the OASIS corpus's own Locate usage
+            // (UniqueIdentifier appears in SKFF-M-5..8; Length/UsageMask
+            // aren't corpus-exercised but are the next most useful
+            // generic filters per the plan).
+            Attribute::CryptographicLength(n) => f.cryptographic_length = Some(*n),
+            Attribute::CryptographicUsageMask(m) => f.cryptographic_usage_mask = Some(*m),
+            Attribute::UniqueIdentifier(uid) => f.unique_identifier = Some(uid.clone()),
             Attribute::ObjectGroup(g) => {
                 f.object_group = Some(g.clone());
             }
@@ -607,5 +648,80 @@ mod tests {
             ..Default::default()
         }, "c").unwrap();
         assert_eq!(r.uids, vec!["dead", "live"]);
+    }
+
+    /// Gap-remediation Phase H, Finding #10 — `CryptographicLength` was
+    /// previously accepted as valid Locate syntax and silently dropped
+    /// (over-broad results, not an error). Confirms it now genuinely
+    /// narrows instead of just "doesn't error."
+    #[test]
+    fn locate_filters_by_cryptographic_length() {
+        let d = deps_with();
+        for (uid, length) in [("aes128", 128u32), ("aes256", 256u32)] {
+            d.store.put(ObjectRecord {
+                uid: uid.into(),
+                object_type: ObjectType::SymmetricKey,
+                algorithm: KmipAlgorithm::Aes,
+                cryptographic_length: length,
+                state: State::Active,
+                initial_date: OffsetDateTime::UNIX_EPOCH,
+                ..ObjectRecord::default()
+            }).unwrap();
+        }
+
+        let r = locate(&d, LocateRequest {
+            attributes: vec![Attribute::CryptographicLength(256)],
+            ..Default::default()
+        }, "c").unwrap();
+        assert_eq!(r.uids, vec!["aes256"]);
+    }
+
+    /// `CryptographicUsageMask` — matches when the record's mask
+    /// contains ALL requested bits (subset check).
+    #[test]
+    fn locate_filters_by_cryptographic_usage_mask() {
+        let d = deps_with();
+        d.store.put(ObjectRecord {
+            uid: "enc-only".into(),
+            object_type: ObjectType::SymmetricKey,
+            algorithm: KmipAlgorithm::Aes,
+            usage_mask: UsageMask::ENCRYPT,
+            state: State::Active,
+            initial_date: OffsetDateTime::UNIX_EPOCH,
+            ..ObjectRecord::default()
+        }).unwrap();
+        d.store.put(ObjectRecord {
+            uid: "enc-dec".into(),
+            object_type: ObjectType::SymmetricKey,
+            algorithm: KmipAlgorithm::Aes,
+            usage_mask: UsageMask::ENCRYPT | UsageMask::DECRYPT,
+            state: State::Active,
+            initial_date: OffsetDateTime::UNIX_EPOCH,
+            ..ObjectRecord::default()
+        }).unwrap();
+
+        let mut r = locate(&d, LocateRequest {
+            attributes: vec![Attribute::CryptographicUsageMask(UsageMask::DECRYPT)],
+            ..Default::default()
+        }, "c").unwrap().uids;
+        r.sort();
+        assert_eq!(r, vec!["enc-dec"]);
+    }
+
+    /// `UniqueIdentifier` — the OASIS mandatory corpus's SKFF-M-5..8
+    /// Locate steps filter by this and previously relied on it being
+    /// harmlessly ignored (returning every object); narrowing it to the
+    /// single matching UID is still correct for those steps.
+    #[test]
+    fn locate_filters_by_unique_identifier() {
+        let d = deps_with();
+        put(&d, "target", KmipAlgorithm::Aes, ObjectType::SymmetricKey, State::Active);
+        put(&d, "other", KmipAlgorithm::Aes, ObjectType::SymmetricKey, State::Active);
+
+        let r = locate(&d, LocateRequest {
+            attributes: vec![Attribute::UniqueIdentifier("target".into())],
+            ..Default::default()
+        }, "c").unwrap();
+        assert_eq!(r.uids, vec!["target"]);
     }
 }

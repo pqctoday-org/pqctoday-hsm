@@ -1736,6 +1736,13 @@ pub struct RegisterRequest {
     /// populate `certificate_value` / `certificate_length` /
     /// `certificate_subject_cn` in one place.
     pub certificate_payload: Option<(u32, Vec<u8>)>,
+    /// Gap-remediation Phase C, Finding #8 — KMIP 3.0 §6.2 `SecretData`
+    /// Structure carries `SecretDataType` (Password = 0x01, Seed = 0x02)
+    /// alongside the `KeyBlock`; only meaningful when `object_type ==
+    /// SecretData`. Previously decoded then silently dropped, so a later
+    /// `Get` always reported the hardcoded `Password` default regardless
+    /// of what was actually registered.
+    pub secret_data_type: Option<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq)]

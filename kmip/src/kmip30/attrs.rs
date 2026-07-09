@@ -328,7 +328,12 @@ pub enum Attribute {
 
     /// Identity / description strings.
     ShortUniqueIdentifier(String),
-    AlternativeName(String),
+    /// KMIP 3.0 §4.5 — Structure of `{ Alternative Name Value,
+    /// Alternative Name Type }`. Gap-remediation Phase H, Finding #11:
+    /// `name_type` used to be discarded on decode and hardcoded to `1`
+    /// (Uninterpreted Text String) on encode regardless of what the
+    /// client actually set; now genuinely carried through.
+    AlternativeName { value: String, name_type: u32 },
     Comment(String),
     Description(String),
     ContactInformation(String),

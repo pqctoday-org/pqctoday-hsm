@@ -554,103 +554,51 @@ fn classic_mceliece_decapsulate(private_key_handle: u32, ciphertext: &[u8]) -> R
 ///   from the KMIP `Register` op).
 ///
 /// Other modes return `CKR_MECHANISM_INVALID`.
+/// Gap-remediation Phase F, Finding #4 — previously hardcoded empty AAD
+/// (AES-GCM/ChaCha20-Poly1305) and the SHA-256/MGF1-SHA-256/no-label
+/// OAEP default, unconditionally, for every engine-resident (Create/
+/// CreateKeyPair'd) key — those client-supplied values only reached the
+/// engine on the Register'd-key (raw-material) path via
+/// [`encrypt_with_key_bytes`]. Now resolves the key bytes exactly as
+/// before (`check_flag` + `get_object_value`) and delegates to
+/// [`encrypt_with_key_bytes`] for the actual mechanism dispatch, so both
+/// paths run the identical match body instead of two copies that used
+/// to silently drift apart.
 pub fn encrypt(
     _session: u32,
     key_handle: u32,
     mechanism: u32,
     plaintext: &[u8],
     iv: Option<&[u8]>,
+    oaep: Option<&OaepParams>,
+    aad: &[u8],
+    tag_len: Option<usize>,
 ) -> Result<Vec<u8>, CkRv> {
     if !check_flag(key_handle, CKA_ENCRYPT) {
         return Err(CKR_KEY_FUNCTION_NOT_PERMITTED);
     }
     let key_bytes = get_object_value(key_handle).ok_or(CKR_ARGUMENTS_BAD)?;
-
-    match mechanism {
-        CKM_AES_GCM => {
-            let iv = iv.ok_or(CKR_ARGUMENTS_BAD)?;
-            // Handle-based encrypt has no AAD plumbing yet — use empty.
-            // KMIP callers that need AEAD with AAD go through
-            // `encrypt_with_key_bytes` instead.
-            aes_gcm_encrypt(&key_bytes, iv, plaintext, &[], None)
-        }
-        CKM_AES_ECB => aes_ecb_encrypt(&key_bytes, plaintext),
-        CKM_AES_CBC => {
-            let iv = iv.ok_or(CKR_ARGUMENTS_BAD)?;
-            aes_cbc_encrypt(&key_bytes, iv, plaintext)
-        }
-        CKM_AES_CBC_PAD => {
-            let iv = iv.ok_or(CKR_ARGUMENTS_BAD)?;
-            aes_cbc_pad_encrypt(&key_bytes, iv, plaintext)
-        }
-        CKM_AES_CTR => {
-            let iv = iv.ok_or(CKR_ARGUMENTS_BAD)?;
-            aes_ctr_apply(&key_bytes, iv, plaintext)
-        }
-        CKM_CHACHA20 => {
-            let iv = iv.ok_or(CKR_ARGUMENTS_BAD)?;
-            chacha20_encrypt(&key_bytes, iv, plaintext)
-        }
-        CKM_CHACHA20_POLY1305 => {
-            let iv = iv.ok_or(CKR_ARGUMENTS_BAD)?;
-            chacha20_poly1305_encrypt(&key_bytes, iv, plaintext, &[])
-        }
-        CKM_RSA_PKCS_OAEP => {
-            // Handle-based path doesn't carry parameters yet; defaults
-            // to SHA-256/MGF1-SHA-256/no-label (the Baseline default).
-            rsa_oaep_encrypt(&key_bytes, plaintext, &OaepParams::sha256_default())
-        }
-        _ => Err(CKR_MECHANISM_INVALID),
-    }
+    encrypt_with_key_bytes(&key_bytes, mechanism, plaintext, iv, oaep, aad, tag_len)
 }
 
-/// Classical decrypt. See [`encrypt`] for the mechanism table.
+/// Classical decrypt. See [`encrypt`] for the mechanism table and the
+/// Gap-remediation Phase F note on why this now delegates to
+/// [`decrypt_with_key_bytes`].
 pub fn decrypt(
     _session: u32,
     key_handle: u32,
     mechanism: u32,
     ciphertext: &[u8],
     iv: Option<&[u8]>,
+    oaep: Option<&OaepParams>,
+    aad: &[u8],
+    tag_len: Option<usize>,
 ) -> Result<Vec<u8>, CkRv> {
     if !check_flag(key_handle, CKA_DECRYPT) {
         return Err(CKR_KEY_FUNCTION_NOT_PERMITTED);
     }
     let key_bytes = get_object_value(key_handle).ok_or(CKR_ARGUMENTS_BAD)?;
-
-    match mechanism {
-        CKM_AES_GCM => {
-            let iv = iv.ok_or(CKR_ARGUMENTS_BAD)?;
-            aes_gcm_decrypt(&key_bytes, iv, ciphertext, &[], None)
-        }
-        CKM_AES_ECB => aes_ecb_decrypt(&key_bytes, ciphertext),
-        CKM_AES_CBC => {
-            let iv = iv.ok_or(CKR_ARGUMENTS_BAD)?;
-            aes_cbc_decrypt(&key_bytes, iv, ciphertext)
-        }
-        CKM_AES_CBC_PAD => {
-            let iv = iv.ok_or(CKR_ARGUMENTS_BAD)?;
-            aes_cbc_pad_decrypt(&key_bytes, iv, ciphertext)
-        }
-        CKM_AES_CTR => {
-            // CTR is self-inverse — same keystream XOR for both directions.
-            let iv = iv.ok_or(CKR_ARGUMENTS_BAD)?;
-            aes_ctr_apply(&key_bytes, iv, ciphertext)
-        }
-        CKM_CHACHA20 => {
-            let iv = iv.ok_or(CKR_ARGUMENTS_BAD)?;
-            // ChaCha20 is symmetric / self-inverse — same primitive
-            // for encrypt and decrypt.
-            chacha20_encrypt(&key_bytes, iv, ciphertext)
-        }
-        CKM_CHACHA20_POLY1305 => {
-            let iv = iv.ok_or(CKR_ARGUMENTS_BAD)?;
-            chacha20_poly1305_decrypt(&key_bytes, iv, ciphertext, &[])
-        }
-        CKM_RSA_PKCS_OAEP => {
-            rsa_oaep_decrypt(&key_bytes, ciphertext, &OaepParams::sha256_default())
-        }
-        _ => Err(CKR_MECHANISM_INVALID),
-    }
+    decrypt_with_key_bytes(&key_bytes, mechanism, ciphertext, iv, oaep, aad, tag_len)
 }
 
 /// OAEP padding parameters per PKCS#11 v3.2 §6.13 (`CK_RSA_PKCS_OAEP_PARAMS`).
@@ -800,7 +748,36 @@ fn rsa_public_key_from_any_der(bytes: &[u8]) -> Result<rsa::RsaPublicKey, CkRv> 
     use rsa::pkcs8::DecodePublicKey;
     rsa::RsaPublicKey::from_public_key_der(bytes)
         .or_else(|_| rsa::RsaPublicKey::from_pkcs1_der(bytes))
+        .or_else(|_| rsa_public_key_from_packed_native(bytes))
         .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)
+}
+
+/// Gap-remediation Phase F, Finding #4 (T0 discovery) — a
+/// `generate_rsa_keypair`'d public key's `CKA_VALUE` is NOT DER at all;
+/// it's this engine's own internal packed `[n_len:4LE][n_bytes][e_bytes]`
+/// format (see `generate_rsa_keypair`'s comment: "Format mirrors
+/// ffi.rs"). `ffi.rs`'s own `CKM_RSA_PKCS_OAEP` C_Encrypt path already
+/// unpacks this exact format independently (it never calls this
+/// function) — this mirrors that unpacking so the native handle-based
+/// `encrypt()`, once delegating here via `encrypt_with_key_bytes`, can
+/// finally RSA-OAEP-encrypt with an engine-GENERATED key too, not just
+/// a `Register`'d one. Before this, `rsa_public_key_from_any_der`
+/// rejected the packed bytes outright (`Err(InvalidPkcs1)` /
+/// `Err(InvalidPkcs8)`) and RSA-OAEP Encrypt against any
+/// CreateKeyPair'd RSA key handle always failed — a pre-existing gap
+/// this fix's own new test (`rsa_oaep_engine_handle_honors_explicit_hash_override`)
+/// caught, not something Finding #4's text originally called out.
+fn rsa_public_key_from_packed_native(bytes: &[u8]) -> Result<rsa::RsaPublicKey, rsa::Error> {
+    if bytes.len() < 4 {
+        return Err(rsa::Error::Internal);
+    }
+    let n_len = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
+    if bytes.len() < 4 + n_len + 1 {
+        return Err(rsa::Error::Internal);
+    }
+    let n = rsa::BigUint::from_bytes_be(&bytes[4..4 + n_len]);
+    let e = rsa::BigUint::from_bytes_be(&bytes[4 + n_len..]);
+    rsa::RsaPublicKey::new(n, e)
 }
 
 /// Parse an RSA private key from either PKCS#8 PrivateKeyInfo (KMIP

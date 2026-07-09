@@ -107,6 +107,7 @@ fn register_pqc_via_dispatcher(
         batch_items: vec![RequestBatchItem {
             operation: Operation::Register,
             payload: RequestPayload::Register(RegisterRequest {
+            secret_data_type: None,
                 object_type,
                 attributes: vec![
                     Attribute::CryptographicAlgorithm(alg),
@@ -450,6 +451,7 @@ fn register_aes_via_dispatcher(deps: &Deps, key: Vec<u8>) -> String {
         batch_items: vec![RequestBatchItem {
             operation: Operation::Register,
             payload: RequestPayload::Register(RegisterRequest {
+            secret_data_type: None,
                 object_type: ObjectType::SymmetricKey,
                 attributes: vec![
                     Attribute::CryptographicAlgorithm(KmipAlgorithm::Aes),

@@ -152,7 +152,12 @@ fn attributes_from_record(r: &ObjectRecord) -> Vec<Attribute> {
         });
         out.push(Attribute::ShortUniqueIdentifier(sid));
     }
-    if let Some(s) = &r.alternative_name { out.push(Attribute::AlternativeName(s.clone())); }
+    if let Some(s) = &r.alternative_name {
+        out.push(Attribute::AlternativeName {
+            value: s.clone(),
+            name_type: r.alternative_name_type.unwrap_or(1),
+        });
+    }
     if let Some((ns, data)) = &r.application_specific_information {
         out.push(Attribute::ApplicationSpecificInformation { namespace: ns.clone(), data: data.clone() });
     }
@@ -355,7 +360,7 @@ pub(crate) fn canonical_attribute_name(attr: &Attribute) -> &'static str {
         Attribute::QuantumSafe(_)            => "QuantumSafe",
         Attribute::RotateAutomatic(_)        => "RotateAutomatic",
         Attribute::ShortUniqueIdentifier(_)  => "ShortUniqueIdentifier",
-        Attribute::AlternativeName(_)        => "AlternativeName",
+        Attribute::AlternativeName { .. }    => "AlternativeName",
         Attribute::Comment(_)                => "Comment",
         Attribute::Description(_)            => "Description",
         Attribute::ContactInformation(_)     => "ContactInformation",
@@ -660,5 +665,46 @@ mod tests {
         // OASIS corpus BL-M-20-30.xml pins ItemNotFound for a missing
         // UID on GetAttributes (corpus is authoritative over the sweep).
         assert_eq!(err.result_reason(), crate::error::ResultReason::ItemNotFound);
+    }
+
+    /// Gap-remediation Phase H, Finding #11 — Register with
+    /// `AlternativeNameType=URI(2)` must round-trip through
+    /// GetAttributes, not silently collapse to the `1`
+    /// (Uninterpreted Text String) default.
+    #[test]
+    fn register_alternative_name_type_round_trips_through_get_attributes() {
+        use crate::kmip30::{KeyBlock, KeyFormatType, RegisterRequest};
+        use crate::ops::register_import_export::register;
+
+        let d = deps_with();
+        let resp = register(&d, RegisterRequest {
+            secret_data_type: None,
+            object_type: ObjectType::SymmetricKey,
+            attributes: vec![
+                Attribute::CryptographicAlgorithm(KmipAlgorithm::Aes),
+                Attribute::CryptographicLength(128),
+                Attribute::CryptographicUsageMask(UsageMask::ENCRYPT),
+                Attribute::AlternativeName { value: "https://example/asset/1".into(), name_type: 2 },
+            ],
+            managed_object: Some(KeyBlock {
+                key_format_type: KeyFormatType::Raw,
+                cryptographic_algorithm: KmipAlgorithm::Aes,
+                cryptographic_length: 128,
+                key_value: vec![0x11; 16],
+                key_wrapping_data: None,
+            }),
+            protection_storage_masks: None,
+            certificate_payload: None,
+        }, "c").unwrap();
+
+        let r = get_attributes(&d, GetAttributesRequest {
+            uid: resp.uid,
+            attribute_references: vec![],
+        }, "c").unwrap();
+        let found = r.attributes.iter().find_map(|a| match a {
+            Attribute::AlternativeName { value, name_type } => Some((value.clone(), *name_type)),
+            _ => None,
+        });
+        assert_eq!(found, Some(("https://example/asset/1".to_string(), 2)));
     }
 }
