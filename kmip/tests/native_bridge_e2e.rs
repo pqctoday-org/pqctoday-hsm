@@ -2344,3 +2344,147 @@ fn create_split_key_then_join_covers_every_11_54_method_via_real_engine() {
 
     let _ = softhsmrustv3::native::session::finalize();
 }
+
+/// Gap-remediation Phase D, Finding #3 — `register_rsa_public_key_der`
+/// previously accepted PKCS#1 (`RSAPublicKey`) DER only, despite the
+/// KMIP-layer Register handler's own doc comment claiming PKCS#8
+/// (SubjectPublicKeyInfo) support too. A PKCS#8-form Register used to
+/// return wire `Success` with no real engine object (the `Result` was
+/// discarded), so a later `SignatureVerify` failed with an unrelated
+/// "not found" error instead of `Register` honestly rejecting or
+/// genuinely supporting the format. Proves both DER forms now really
+/// work end-to-end: Register (PrivateKey, PKCS#8) → Register
+/// (PublicKey, PKCS#8) → Sign → SignatureVerify, and separately Register
+/// (PublicKey, PKCS#1) → SignatureVerify against the same signature.
+#[test]
+fn k3_register_rsa_public_key_accepts_both_pkcs1_and_pkcs8_der() {
+    use pqctoday_kmip::kmip30::{KeyBlock, KeyFormatType, RegisterRequest};
+    use pqctoday_kmip::ops::register_import_export::register;
+    use rsa::pkcs1::EncodeRsaPublicKey;
+    use rsa::pkcs8::{EncodePrivateKey, EncodePublicKey};
+    use rsa::traits::PublicKeyParts;
+
+    let _guard = engine_test_lock();
+    let deps = build_deps_with_real_engine();
+
+    let priv_key = rsa::RsaPrivateKey::new(&mut rand::rngs::OsRng, 2048)
+        .expect("generate RSA-2048 key");
+    let pub_key = priv_key.to_public_key();
+    let priv_pkcs8 = priv_key.to_pkcs8_der().expect("encode PKCS#8 private").as_bytes().to_vec();
+    let pub_pkcs8 = pub_key.to_public_key_der().expect("encode PKCS#8 SPKI public").as_bytes().to_vec();
+    let pub_pkcs1 = pub_key.to_pkcs1_der().expect("encode PKCS#1 public").as_bytes().to_vec();
+    let modulus_bits = pub_key.n().bits() as u32;
+
+    let register_rsa = |object_type, format, bytes: Vec<u8>, usage| {
+        register(
+            &deps,
+            RegisterRequest {
+                secret_data_type: None,
+                object_type,
+                attributes: vec![
+                    Attribute::CryptographicAlgorithm(KmipAlgorithm::Rsa),
+                    Attribute::CryptographicLength(modulus_bits),
+                    Attribute::CryptographicUsageMask(usage),
+                    Attribute::ActivationDate(OffsetDateTime::now_utc().unix_timestamp() - 3600),
+                ],
+                managed_object: Some(KeyBlock {
+                    key_format_type: format,
+                    cryptographic_algorithm: KmipAlgorithm::Rsa,
+                    cryptographic_length: modulus_bits,
+                    key_value: bytes,
+                    key_wrapping_data: None,
+                }),
+                protection_storage_masks: None,
+                certificate_payload: None,
+            },
+            "k3-register",
+        )
+        .map(|r| r.uid)
+    };
+
+    let priv_uid = register_rsa(ObjectType::PrivateKey, KeyFormatType::Pkcs8, priv_pkcs8, UsageMask::SIGN)
+        .expect("Register RSA private key (PKCS#8) must succeed with a real engine object");
+
+    let message = b"K3: PKCS#8 RSA public key Register must be genuinely usable".to_vec();
+    let sig = sign(
+        &deps,
+        SignRequest { uid: priv_uid, data: message.clone(), cryptographic_parameters: None },
+        "k3-sign",
+    )
+    .expect("Sign with PKCS#8-registered RSA private key");
+
+    // PKCS#8 (SubjectPublicKeyInfo) form — the case that previously
+    // silently produced no engine object.
+    let pub_uid_pkcs8 = register_rsa(ObjectType::PublicKey, KeyFormatType::Pkcs8, pub_pkcs8, UsageMask::VERIFY)
+        .expect("Register RSA public key (PKCS#8) must succeed with a real engine object");
+    let verified = signature_verify(
+        &deps,
+        SignatureVerifyRequest {
+            uid: pub_uid_pkcs8,
+            data: message.clone(),
+            signature: sig.signature.clone(),
+            cryptographic_parameters: None,
+        },
+        "k3-verify-pkcs8",
+    )
+    .expect("SignatureVerify against a PKCS#8-registered RSA public key");
+    assert_eq!(verified.validity, SignatureValidity::Valid);
+
+    // PKCS#1 (RSAPublicKey) form — the pre-existing, already-working case
+    // — must keep working after adding PKCS#8 support alongside it.
+    let pub_uid_pkcs1 = register_rsa(ObjectType::PublicKey, KeyFormatType::Pkcs1, pub_pkcs1, UsageMask::VERIFY)
+        .expect("Register RSA public key (PKCS#1) must still succeed");
+    let verified = signature_verify(
+        &deps,
+        SignatureVerifyRequest {
+            uid: pub_uid_pkcs1,
+            data: message,
+            signature: sig.signature,
+            cryptographic_parameters: None,
+        },
+        "k3-verify-pkcs1",
+    )
+    .expect("SignatureVerify against a PKCS#1-registered RSA public key");
+    assert_eq!(verified.validity, SignatureValidity::Valid);
+
+    let _ = softhsmrustv3::native::session::finalize();
+}
+
+/// Gap-remediation Phase D, Finding #3 — an unrecognized/malformed RSA
+/// PrivateKey `KeyFormatType` at Register time must fail Register
+/// honestly instead of silently succeeding with no engine object.
+#[test]
+fn k3_register_rsa_private_key_malformed_pkcs1_fails_register_not_silently() {
+    use pqctoday_kmip::kmip30::{KeyBlock, KeyFormatType, RegisterRequest};
+    use pqctoday_kmip::ops::register_import_export::register;
+
+    let _guard = engine_test_lock();
+    let deps = build_deps_with_real_engine();
+
+    let err = register(
+        &deps,
+        RegisterRequest {
+            secret_data_type: None,
+            object_type: ObjectType::PrivateKey,
+            attributes: vec![
+                Attribute::CryptographicAlgorithm(KmipAlgorithm::Rsa),
+                Attribute::CryptographicLength(2048),
+                Attribute::CryptographicUsageMask(UsageMask::SIGN),
+            ],
+            managed_object: Some(KeyBlock {
+                key_format_type: KeyFormatType::Pkcs1,
+                cryptographic_algorithm: KmipAlgorithm::Rsa,
+                cryptographic_length: 2048,
+                key_value: vec![0xFF; 32], // not a valid PKCS#1 RSAPrivateKey DER
+                key_wrapping_data: None,
+            }),
+            protection_storage_masks: None,
+            certificate_payload: None,
+        },
+        "k3-register-malformed",
+    )
+    .unwrap_err();
+    assert_eq!(err.result_reason(), pqctoday_kmip::error::ResultReason::KeyFormatTypeNotSupported);
+
+    let _ = softhsmrustv3::native::session::finalize();
+}

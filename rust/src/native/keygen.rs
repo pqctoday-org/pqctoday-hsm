@@ -1010,13 +1010,22 @@ pub fn register_rsa_private_key_pkcs8(
     Ok(alloc_in_session_slot(_session, attrs))
 }
 
-/// Register an existing RSA public key supplied as PKCS#1 (RSAPublicKey)
-/// DER bytes — `SEQUENCE { modulus, publicExponent }`. Parses the DER
-/// to extract `n` and `e`, stored as `CKA_MODULUS` + `CKA_PUBLIC_EXPONENT`
-/// (the form `verify_rsa` reads via `get_rsa_public_components`).
+/// Register an existing RSA public key supplied as either PKCS#1
+/// (RSAPublicKey, `SEQUENCE { modulus, publicExponent }`) or PKCS#8
+/// (SubjectPublicKeyInfo) DER bytes. Parses the DER to extract `n` and
+/// `e`, stored as `CKA_MODULUS` + `CKA_PUBLIC_EXPONENT` (the form
+/// `verify_rsa` reads via `get_rsa_public_components`).
 ///
 /// Used by KMIP Register when the client provides an RSA PublicKey.
 /// CS-AC-M-2 exercises this path against a SignatureVerify op.
+///
+/// Gap-remediation Phase D, Finding #3 — this previously accepted PKCS#1
+/// only, despite the KMIP-layer caller's own doc comment claiming PKCS#8
+/// support too; a PKCS#8-form Register call would fail here and the KMIP
+/// layer discarded the `Result`, so the client saw a wire `Success` with
+/// no real engine object. Same `from_public_key_der` → `from_pkcs1_der`
+/// fallback order `rsa_public_key_from_any_der` (`native/encrypt.rs`)
+/// already uses for the analogous Encrypt/Decrypt DER-parsing path.
 pub fn register_rsa_public_key_der(
     _session: u32,
     der: &[u8],
@@ -1028,8 +1037,11 @@ pub fn register_rsa_public_key_der(
         CKA_PUBLIC_EXPONENT, CKA_VALUE, CKA_VERIFY, CKK_RSA, CKO_PUBLIC_KEY,
     };
     use rsa::pkcs1::DecodeRsaPublicKey;
+    use rsa::pkcs8::DecodePublicKey;
     use rsa::traits::PublicKeyParts;
-    let pk = rsa::RsaPublicKey::from_pkcs1_der(der).map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+    let pk = rsa::RsaPublicKey::from_public_key_der(der)
+        .or_else(|_| rsa::RsaPublicKey::from_pkcs1_der(der))
+        .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
     let n_bytes = pk.n().to_bytes_be();
     let e_bytes = pk.e().to_bytes_be();
     let bits = (n_bytes.len() as u32) * 8;

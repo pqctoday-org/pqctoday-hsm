@@ -252,31 +252,52 @@ pub fn register(
                 // (PrivateKeyInfo). Both surface in `sign_rsa` via
                 // `RsaPrivateKey::from_pkcs8_der`. 0x0A was converted
                 // to PKCS#8 above.
-                let pkcs8_bytes: Option<Vec<u8>> = match fmt {
+                //
+                // Gap-remediation Phase D, Finding #3 — a malformed
+                // PKCS#1 body (fmt 3) or an unrecognized `fmt` value
+                // used to fall through to `None` here and the whole
+                // block silently did nothing: wire `Success`, no real
+                // engine object, violating this file's own "Register
+                // must NOT succeed-then-fail-at-use" invariant just as
+                // much as the discarded `Result`s below did. Now
+                // surfaces `KeyFormatTypeNotSupported` instead.
+                let pkcs8_bytes: std::result::Result<Vec<u8>, String> = match fmt {
                     3 => {
                         use rsa::pkcs1::DecodeRsaPrivateKey;
                         use rsa::pkcs8::EncodePrivateKey;
                         rsa::RsaPrivateKey::from_pkcs1_der(material)
-                            .ok()
-                            .and_then(|k| k.to_pkcs8_der().ok().map(|d| d.as_bytes().to_vec()))
+                            .map_err(|e| e.to_string())
+                            .and_then(|k| k.to_pkcs8_der()
+                                .map(|d| d.as_bytes().to_vec())
+                                .map_err(|e| e.to_string()))
                     }
-                    4 => Some(material.clone()),
-                    0x0A => transparent_rsa_pkcs8.clone(),
-                    _ => None,
+                    4 => Ok(material.clone()),
+                    0x0A => transparent_rsa_pkcs8.clone()
+                        .ok_or_else(|| "Transparent RSA Private Key material missing".to_string()),
+                    other => Err(format!("unsupported KeyFormatType 0x{other:02x} for RSA PrivateKey Register")),
                 };
-                if let Some(pkcs8) = pkcs8_bytes {
-                    let _ = softhsmrustv3::native::register_rsa_private_key_pkcs8(
-                        session, &pkcs8, &cka_id_bytes, "kmip-register",
-                    );
-                }
+                let pkcs8 = pkcs8_bytes.map_err(|e| fail_err(deps, correlation_id, "Register",
+                    KmipError::key_format_type_not_supported(format!(
+                        "RSA PrivateKey Register: {e}"
+                    ))))?;
+                softhsmrustv3::native::register_rsa_private_key_pkcs8(
+                    session, &pkcs8, &cka_id_bytes, "kmip-register",
+                ).map_err(|rv| fail_err(deps, correlation_id, "Register",
+                    super::helpers::ck_rv_to_kmip_error(rv, "Register:rsa-private-import")))?;
             }
             (ObjectType::PublicKey, crate::kmip30::KmipAlgorithm::Rsa) => {
                 // PKCS_1 RSAPublicKey or PKCS_8 SubjectPublicKeyInfo —
                 // store the DER as-is; `verify_rsa` extracts the
-                // modulus/exponent from CKA_VALUE.
-                let _ = softhsmrustv3::native::register_rsa_public_key_der(
+                // modulus/exponent from CKA_VALUE. Gap-remediation
+                // Phase D, Finding #3 — the engine now genuinely
+                // accepts both forms (see `register_rsa_public_key_der`
+                // in `rust/src/native/keygen.rs`) and this Result is no
+                // longer discarded, so a malformed DER honestly fails
+                // Register instead of succeeding with no engine object.
+                softhsmrustv3::native::register_rsa_public_key_der(
                     session, material, &cka_id_bytes, "kmip-register-pub",
-                );
+                ).map_err(|rv| fail_err(deps, correlation_id, "Register",
+                    super::helpers::ck_rv_to_kmip_error(rv, "Register:rsa-public-import")))?;
             }
             (ObjectType::SymmetricKey, alg)
                 if matches!(
@@ -288,9 +309,10 @@ pub fn register(
             {
                 // HMAC keys are raw bytes; the shim's MAC path reads
                 // them from CKA_VALUE.
-                let _ = softhsmrustv3::native::register_generic_secret_bytes(
+                softhsmrustv3::native::register_generic_secret_bytes(
                     session, material, &cka_id_bytes, "kmip-register-hmac",
-                );
+                ).map_err(|rv| fail_err(deps, correlation_id, "Register",
+                    super::helpers::ck_rv_to_kmip_error(rv, "Register:hmac-import")))?;
             }
             // K9 (compliance-audit B-6) — PQC families: ML-DSA /
             // ML-KEM / SLH-DSA raw FIPS 204/203/205 key material is
