@@ -8,6 +8,87 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.13.0] — 2026-07-09
+
+A follow-up audit of the `HONEST_MAXIMUM_PLAN.md` work in 0.12.0: a
+dedicated pass over the PKCS#11 and KMIP Rust crates looking specifically
+for stub/placeholder code and silently-dropped errors. It found 13 real
+gaps, all fixed here in 9 phases (documented in
+`kmip/docs/GAP_REMEDIATION_PLAN.md`), plus two further bugs the fix work
+itself surfaced along the way. Every fix ships with new tests, and the
+full OASIS mandatory conformance corpus (97 tests) still passes end to
+end.
+
+### Fixed
+
+- **`Destroy` now genuinely scrubs key material.** Registered/imported
+  objects had their raw key bytes zeroized in memory before being
+  dropped, and SQLite's `secure_delete` pragma is now enabled — "the key
+  material SHALL be destroyed" (§6.1.19) previously only flipped a
+  lifecycle flag while the plaintext sat in the database.
+- **`SetAttribute` / `ModifyAttribute` / `DeleteAttribute` no longer
+  silently drop attributes.** Several attributes (`CryptographicParameters`,
+  `UsageLimits`, `ProtectionLevel`, four Link types) returned a wire
+  `Success` while persisting nothing; a separate group
+  (`CryptographicDomainParameters`, `ProtectionStorageMask`, and 11
+  others) is now honestly rejected as Read-Only instead of the same
+  silent no-op. `UsageLimits` also gained its §4.69 guard: once `Get
+  Usage Allocation` has granted an allocation, the budget can no longer
+  be silently re-set. Auditing `DeleteAttribute`'s independent code path
+  for the same class of bug also caught two more real bugs: `AddAttribute`
+  wrongly rejected a legitimate first-time add, and `DeleteAttribute` by
+  name could never actually find a Link attribute due to a space-vs-no-space
+  string mismatch.
+- **Three wire-encoding round-trip gaps.** The attribute-name lookup table
+  used by `AdjustAttribute`/`DeleteAttribute` was missing 6 entries;
+  `CryptographicParameters` encoding dropped 7 real fields (tag length,
+  random IV, deterministic signing, context string, and more); and
+  `Register`ing a `SecretData` object always reported its type back as
+  `Password` regardless of what was actually registered.
+- **`Register` RSA public/private key honesty.** Engine-import failures
+  were previously discarded, so a malformed or unsupported key could
+  register successfully and only fail on first use. RSA public keys can
+  now genuinely be registered in PKCS#8 form (previously silently
+  produced no usable key), and — found via the OASIS conformance replay
+  while verifying this fix — the "Transparent RSA Public Key" wire form
+  never actually worked either; it does now.
+- **`CreateKeyPair` persists `CryptographicParameters` and rejects false
+  `QuantumSafe` claims.** A key's declared default padding/hash (e.g.
+  PSS/SHA-384) was silently lost, same as `Create` already handles
+  correctly; `QuantumSafe=true` on a non-PQC algorithm is now rejected,
+  matching `Create`'s existing check.
+- **`Encrypt`/`Decrypt` now pass real AAD and OAEP-hash choices through
+  for engine-generated keys.** Only `Register`'d (raw-material) keys
+  previously got the client's actual AAD / RSA-OAEP hash selection;
+  `Create`/`CreateKeyPair`'d keys silently got empty AAD and a hardcoded
+  SHA-256 default. Found and fixed along the way: RSA-OAEP encryption
+  against an engine-generated key had never worked at all, due to an
+  internal key-format mismatch.
+- **Batch `Undo` / `$IDPlaceholder` now cover every UID-minting
+  operation.** `Encapsulate`, `Decapsulate`, `CreateSplitKey`, and
+  `JoinSplitKey` were the only operations the dispatcher didn't know how
+  to roll back or chain — a batch `Undo` after one of them left the new
+  object behind instead of deleting it, and a later batch item couldn't
+  reference `$IDPlaceholder` after one ran.
+- **`Locate` can now filter by cryptographic length, usage mask, and
+  unique identifier** — previously accepted as valid filter syntax and
+  silently ignored, returning every object instead of narrowing.
+- **`AlternativeName`'s Type is no longer discarded.** Registering a name
+  as e.g. a URI previously always reported back as plain text; the type
+  now genuinely round-trips.
+- **SQLite storage now protects Initial Date / Original Creation Date**
+  from being overwritten on update, matching the guarantee in-memory
+  storage already provided.
+
+### Internal
+
+- Nine stale code comments corrected — several claimed features were
+  still unimplemented (session tickets, audit event emission, batch
+  processing, HSS/XMSS key generation, multi-part crypto operations)
+  when they had genuinely shipped since the comment was written.
+- The syslog audit sink now logs and counts dropped events on a send
+  failure, matching every other audit sink instead of failing silently.
+
 ## [0.12.0] — 2026-07-08
 
 Closes the KMIP `HONEST_MAXIMUM_PLAN.md` initiative: every advertised KMIP 3.0
