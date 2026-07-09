@@ -148,6 +148,12 @@ PINNED = {
     "CKA_XMSSMT_PARAM_SET": (0x80000107, "vendor"),
     "CKM_KECCAK_256": (0x80000010, "vendor"),
     "CKM_EC_MONTGOMERY_KEY_DERIVE": (0x80000011, "vendor"),
+    # KMIP 3.0 §11.54 Create/Join Split Key (XOR + 3 Polynomial Sharing
+    # variants) — no PKCS#11-standard mechanism for Shamir-style secret
+    # splitting, so this is a pqctoday vendor mechanism reached only
+    # through opaque object handles (v0.12.0 HONEST_MAXIMUM_PLAN). Next
+    # sequential vendor-mechanism codepoint after CKM_EC_MONTGOMERY_KEY_DERIVE.
+    "CKM_PQCTODAY_SPLIT_KEY": (0x80000012, "vendor"),
     # FrodoKEM / Classic McEliece (BSI TR-02102-1) — not OASIS-standardized,
     # so both the key types and mechanisms live in vendor space. Allocated in
     # pqctoday-priv's PKCS#11 authority file and mirrored into
