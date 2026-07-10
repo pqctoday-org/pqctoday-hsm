@@ -10268,6 +10268,35 @@ mod object_mgmt_ffi_tests {
         assert_eq!(obj_bool(h, CKA_ENCAPSULATE), Some(true));
     }
 
+    /// WP-6 remediation — §4.8 Table 13: `C_SetAttributeValue` must reject
+    /// a malformed (non-multiple-of-4) `CKA_ALLOWED_MECHANISMS` value the
+    /// same way `C_CreateObject`'s `validate_create_template` already
+    /// does. Before this fix, the mutation path accepted any byte length
+    /// and stored it verbatim, silently mis-parsed later by
+    /// `check_mechanism_allowed`'s `chunks_exact(4)`.
+    #[test]
+    fn set_attr_allowed_mechanisms_rejects_malformed_length() {
+        let _guard = test_lock::acquire();
+        setup();
+        let h = create_object_from_attrs(SESSION_RW, aes_import_attrs()).unwrap();
+        // 7 bytes — not a whole number of CK_MECHANISM_TYPE (u32) entries.
+        let malformed: Vec<(u32, Vec<u8>)> = vec![(CKA_ALLOWED_MECHANISMS, vec![0u8; 7])];
+        assert_eq!(
+            set_attribute_values_from_list(SESSION_RW, h, &malformed),
+            CKR_ATTRIBUTE_VALUE_INVALID
+        );
+        assert!(
+            obj_attr(h, CKA_ALLOWED_MECHANISMS).is_none(),
+            "the malformed value must not have been stored"
+        );
+
+        // A well-formed value (one whole mechanism) is still accepted.
+        let well_formed: Vec<(u32, Vec<u8>)> =
+            vec![(CKA_ALLOWED_MECHANISMS, CKM_AES_GCM.to_le_bytes().to_vec())];
+        assert_eq!(set_attribute_values_from_list(SESSION_RW, h, &well_formed), CKR_OK);
+        assert_eq!(obj_attr(h, CKA_ALLOWED_MECHANISMS), Some(CKM_AES_GCM.to_le_bytes().to_vec()));
+    }
+
     /// §4.1.3 read-only loop — every server-managed attr is refused with
     /// CKR_ATTRIBUTE_READ_ONLY and the object stays untouched.
     #[test]

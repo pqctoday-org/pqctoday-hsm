@@ -561,6 +561,16 @@ pub fn attr_mutation_allowed(attrs: &Attributes, attr_type: u32, value: &[u8]) -
     if READ_ONLY.contains(&attr_type) {
         return Err(CKR_ATTRIBUTE_READ_ONLY);
     }
+    // WP-6 remediation — §4.8 Table 13: CKA_ALLOWED_MECHANISMS is a packed
+    // CK_MECHANISM_TYPE[] (u32 LE); mirrors validate_create_template's
+    // identical check at creation time (ffi.rs), which this mutation path
+    // never ran through. Without this, C_SetAttributeValue accepted any
+    // byte length — including the exact malformed value C_CreateObject
+    // would reject — and check_mechanism_allowed's chunks_exact(4) would
+    // then silently drop a trailing partial chunk rather than erroring.
+    if attr_type == CKA_ALLOWED_MECHANISMS && value.len() % 4 != 0 {
+        return Err(CKR_ATTRIBUTE_VALUE_INVALID);
+    }
     if attr_type == CKA_SENSITIVE || attr_type == CKA_EXTRACTABLE {
         let new_val = value.first().copied().unwrap_or(0) != 0;
         let cur_val = read_bool_attr(attrs, attr_type);
