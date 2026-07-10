@@ -49,7 +49,7 @@ const CKM = {
   ML_KEM_KEY_PAIR_GEN: 0x0f, ML_KEM: 0x17, ML_DSA_KEY_PAIR_GEN: 0x1c, ML_DSA: 0x1d,
   SLH_DSA_KEY_PAIR_GEN: 0x2d, SLH_DSA: 0x2e, SHA256: 0x250, SHA256_HMAC: 0x251,
   SHA256_HMAC_GENERAL: 0x252, SHA384_HMAC: 0x261, GENERIC_SECRET_KEY_GEN: 0x350,
-  SP800_108_COUNTER_KDF: 0x3ac,
+  SP800_108_COUNTER_KDF: 0x3ac, SP800_108_FEEDBACK_KDF: 0x3ad,
   AES_KEY_GEN: 0x1080, AES_ECB: 0x1081, AES_CBC: 0x1082, AES_CBC_PAD: 0x1085,
   AES_CTR: 0x1086, AES_GCM: 0x1087, AES_KEY_WRAP: 0x2109,
   EC_KEY_PAIR_GEN: 0x1040, ECDSA: 0x1041,
@@ -911,6 +911,258 @@ section('Round-2 — SP800-108 KBKDF PRF must be a keyed-MAC mechanism (§6.26)'
         got384.value.equals(got256.value) ? 0 : 1, 1);
     }
   }
+}
+
+section('Round-2 — SP800-108 CK_PRF_DATA_TYPE completeness (COUNTER, KEY_HANDLE, SUM_OF_SEGMENTS)');
+{
+  const crypto = require('crypto');
+  const SP800_108 = { ITERATION_VARIABLE: 1, COUNTER: 2, DKM_LENGTH: 3, BYTE_ARRAY: 4, KEY_HANDLE: 5 };
+  const DKM_METHOD = { SUM_OF_KEYS: 1, SUM_OF_SEGMENTS: 2 };
+
+  const baseVal = new Uint8Array(32).map((_, i) => (i * 7 + 5) & 0xff);
+  const importSecret = (val) => {
+    const tpl = buildTpl([
+      { type: CKA.CLASS, ulong: CKO.SECRET_KEY },
+      { type: CKA.KEY_TYPE, ulong: CKK.GENERIC_SECRET },
+      { type: CKA.VALUE, bytes: val },
+      { type: CKA.DERIVE, bool: true }]);
+    const hp = alloc(4);
+    check('import secret key → OK', w._C_CreateObject(hS, tpl, 4, hp), CKR.OK);
+    return readU32(hp);
+  };
+  const hBase = importSecret(baseVal);
+
+  // CK_SP800_108_COUNTER_FORMAT — wasm32 8 B: bLittleEndian (CK_BBOOL,
+  // padded), ulWidthInBits (CK_ULONG at offset 4).
+  const counterFormat = (le, widthBits) => {
+    const p = alloc(8);
+    new Uint8Array(mem().buffer, p, 8).fill(0);
+    new Uint8Array(mem().buffer, p, 1)[0] = le ? 1 : 0;
+    writeU32(p + 4, widthBits);
+    return p;
+  };
+  // CK_SP800_108_DKM_LENGTH_FORMAT — wasm32 12 B: method (offset 0),
+  // bLittleEndian (offset 4, padded), ulWidthInBits (offset 8).
+  const dkmLengthFormat = (method, le, widthBits) => {
+    const p = alloc(12);
+    new Uint8Array(mem().buffer, p, 12).fill(0);
+    writeU32(p, method);
+    new Uint8Array(mem().buffer, p + 4, 1)[0] = le ? 1 : 0;
+    writeU32(p + 8, widthBits);
+    return p;
+  };
+  // CK_PRF_DATA_PARAM[] — wasm32 layout identical to CK_ATTRIBUTE[]:
+  // type u32, pValue u32, ulValueLen u32 (12 B each).
+  const prfDataParams = (entries) => {
+    const p = alloc(entries.length * 12);
+    entries.forEach((e, i) => {
+      writeU32(p + i * 12, e.type);
+      writeU32(p + i * 12 + 4, e.ptr);
+      writeU32(p + i * 12 + 8, e.len);
+    });
+    return p;
+  };
+  const objectHandlePtr = (h) => { const p = alloc(4); writeU32(p, h); return p; };
+  const byteArrayPtr = (bytes) => { const p = alloc(bytes.length || 1); writeBytes(p, bytes); return p; };
+
+  const deriveCounter = (dataEntries, keyLen) => {
+    const dp = prfDataParams(dataEntries);
+    const params = new Uint8Array(new Uint32Array([CKM.SHA256_HMAC, dataEntries.length, dp]).buffer);
+    const dTpl = buildTpl([
+      { type: CKA.CLASS, ulong: CKO.SECRET_KEY },
+      { type: CKA.KEY_TYPE, ulong: CKK.GENERIC_SECRET },
+      { type: CKA.VALUE_LEN, ulong: keyLen }]);
+    const hd = alloc(4); writeU32(hd, 0);
+    const rv = w._C_DeriveKey(hS, buildMech(CKM.SP800_108_COUNTER_KDF, params), hBase, dTpl, 3, hd);
+    return { rv, h: readU32(hd) };
+  };
+  const deriveFeedback = (dataEntries, keyLen, iv) => {
+    const dp = prfDataParams(dataEntries);
+    const ivPtr = iv && iv.length ? byteArrayPtr(iv) : 0;
+    const params = new Uint8Array(new Uint32Array(
+      [CKM.SHA256_HMAC, dataEntries.length, dp, iv ? iv.length : 0, ivPtr]).buffer);
+    const dTpl = buildTpl([
+      { type: CKA.CLASS, ulong: CKO.SECRET_KEY },
+      { type: CKA.KEY_TYPE, ulong: CKK.GENERIC_SECRET },
+      { type: CKA.VALUE_LEN, ulong: keyLen }]);
+    const hd = alloc(4); writeU32(hd, 0);
+    const rv = w._C_DeriveKey(hS, buildMech(CKM.SP800_108_FEEDBACK_KDF, params), hBase, dTpl, 3, hd);
+    return { rv, h: readU32(hd) };
+  };
+  const readValueN = (h, n) => {
+    const out = buildTpl([{ type: CKA.VALUE, bytes: new Uint8Array(n) }]);
+    const rv = w._C_GetAttributeValue(hS, h, out, 1);
+    return { rv, value: Buffer.from(new Uint8Array(mem().buffer, readU32(out + 4), readU32(out + 8))) };
+  };
+
+  // ── Table 199 — CK_SP800_108_COUNTER is invalid for Counter Mode KDF ──────
+  {
+    const cf = counterFormat(false, 16);
+    const r = deriveCounter(
+      [{ type: SP800_108.COUNTER, ptr: cf, len: 8 }], 20);
+    check('Counter Mode + CK_SP800_108_COUNTER field → MECHANISM_PARAM_INVALID (Table 199)',
+      r.rv, CKR.MECHANISM_PARAM_INVALID);
+  }
+
+  // ── Table 200 — CK_SP800_108_COUNTER is optional for Feedback Mode KDF ────
+  {
+    const withoutCounter = deriveFeedback([], 20, new Uint8Array(32));
+    check('Feedback Mode without CK_SP800_108_COUNTER → OK', withoutCounter.rv, CKR.OK);
+    const cf = counterFormat(false, 16);
+    const withCounter = deriveFeedback(
+      [{ type: SP800_108.COUNTER, ptr: cf, len: 8 }], 20, new Uint8Array(32));
+    check('Feedback Mode with CK_SP800_108_COUNTER → OK (Table 200)', withCounter.rv, CKR.OK);
+    if (withoutCounter.rv === CKR.OK && withCounter.rv === CKR.OK) {
+      const a = readValueN(withoutCounter.h, 20).value;
+      const b = readValueN(withCounter.h, 20).value;
+      check('CK_SP800_108_COUNTER changes Feedback Mode output (not silently ignored)',
+        a.equals(b) ? 0 : 1, 1);
+    }
+  }
+
+  // ── Table 197 — CK_SP800_108_KEY_HANDLE splices a key's CKA_VALUE in ──────
+  {
+    const additional1 = importSecret(new Uint8Array(16).fill(0xaa));
+    const additional2 = importSecret(new Uint8Array(16).fill(0xbb));
+    const r1 = deriveCounter(
+      [{ type: SP800_108.KEY_HANDLE, ptr: objectHandlePtr(additional1), len: 4 }], 20);
+    check('Counter Mode + CK_SP800_108_KEY_HANDLE → OK', r1.rv, CKR.OK);
+    if (r1.rv === CKR.OK) {
+      const got = readValueN(r1.h, 20).value;
+      // Independent Node-crypto reference: KO = HMAC-SHA256(base, BE32(1) || additional1_value), truncated to 20 B.
+      const ref = crypto.createHmac('sha256', Buffer.from(baseVal))
+        .update(Buffer.concat([Buffer.from([0, 0, 0, 1]), Buffer.from(new Uint8Array(16).fill(0xaa))]))
+        .digest();
+      check('CK_SP800_108_KEY_HANDLE byte-equals Node-crypto reference (splices CKA_VALUE)',
+        got.equals(ref.subarray(0, 20)) ? 1 : 0, 1);
+    }
+    const r2 = deriveCounter(
+      [{ type: SP800_108.KEY_HANDLE, ptr: objectHandlePtr(additional2), len: 4 }], 20);
+    check('CK_SP800_108_KEY_HANDLE with a different key → OK', r2.rv, CKR.OK);
+    if (r1.rv === CKR.OK && r2.rv === CKR.OK) {
+      check('different KEY_HANDLE key values produce different derived output',
+        readValueN(r1.h, 20).value.equals(readValueN(r2.h, 20).value) ? 0 : 1, 1);
+    }
+    const bogus = deriveCounter(
+      [{ type: SP800_108.KEY_HANDLE, ptr: objectHandlePtr(0x7fffffff), len: 4 }], 20);
+    check('CK_SP800_108_KEY_HANDLE with a bogus handle → KEY_HANDLE_INVALID', bogus.rv, CKR.KEY_HANDLE_INVALID);
+  }
+
+  // ── Table 198 — SUM_OF_SEGMENTS rounds the DKM length UP to a whole PRF
+  // output block (32 B for HMAC-SHA256), unlike SUM_OF_KEYS (exact key length) ──
+  {
+    const keyLen = 20; // < 32-byte SHA256 PRF output → 1 segment either way, but L differs.
+    const sumOfKeys = deriveCounter(
+      [{ type: SP800_108.DKM_LENGTH, ptr: dkmLengthFormat(DKM_METHOD.SUM_OF_KEYS, false, 16), len: 12 }],
+      keyLen);
+    const sumOfSegments = deriveCounter(
+      [{ type: SP800_108.DKM_LENGTH, ptr: dkmLengthFormat(DKM_METHOD.SUM_OF_SEGMENTS, false, 16), len: 12 }],
+      keyLen);
+    check('SUM_OF_KEYS DKM_LENGTH → OK', sumOfKeys.rv, CKR.OK);
+    check('SUM_OF_SEGMENTS DKM_LENGTH → OK', sumOfSegments.rv, CKR.OK);
+    if (sumOfKeys.rv === CKR.OK && sumOfSegments.rv === CKR.OK) {
+      const a = readValueN(sumOfKeys.h, keyLen).value;
+      const b = readValueN(sumOfSegments.h, keyLen).value;
+      check('SUM_OF_SEGMENTS output differs from SUM_OF_KEYS (L value actually rounds up)',
+        a.equals(b) ? 0 : 1, 1);
+      // SUM_OF_KEYS: L = 20*8 = 160 bits = 0x00A0 (16-bit BE). SUM_OF_SEGMENTS:
+      // L = ceil(20/32)*32*8 = 256 bits = 0x0100 (16-bit BE).
+      const refKeys = crypto.createHmac('sha256', Buffer.from(baseVal))
+        .update(Buffer.concat([Buffer.from([0, 0, 0, 1]), Buffer.from([0x00, 0xa0])]))
+        .digest();
+      const refSegments = crypto.createHmac('sha256', Buffer.from(baseVal))
+        .update(Buffer.concat([Buffer.from([0, 0, 0, 1]), Buffer.from([0x01, 0x00])]))
+        .digest();
+      check('SUM_OF_KEYS byte-equals Node-crypto reference (L=160 bits)',
+        a.equals(refKeys.subarray(0, keyLen)) ? 1 : 0, 1);
+      check('SUM_OF_SEGMENTS byte-equals Node-crypto reference (L=256 bits, rounded up)',
+        b.equals(refSegments.subarray(0, keyLen)) ? 1 : 0, 1);
+    }
+  }
+}
+
+section('WP4a — CKO_TRUST object lifecycle (§4.7 Table 25)');
+{
+  const CKO_TRUST = 0x0b;
+  const CKT = { UNKNOWN: 0, TRUSTED: 1, TRUST_ANCHOR: 2, NOT_TRUSTED: 3, MUST_VERIFY_TRUST: 4 };
+  const CKA_TRUST = {
+    ISSUER: 0x81, SERIAL_NUMBER: 0x82, HASH_OF_CERTIFICATE: 0x635, NAME_HASH_ALGORITHM: 0x8c,
+    TRUST_SERVER_AUTH: 0x62c, TRUST_CLIENT_AUTH: 0x62d, TRUST_CODE_SIGNING: 0x62e,
+    TRUST_EMAIL_PROTECTION: 0x62f, TRUST_IPSEC_IKE: 0x630, TRUST_TIME_STAMPING: 0x631,
+    TRUST_OCSP_SIGNING: 0x632,
+  };
+  const ulongBytes = (n) => new Uint8Array(new Uint32Array([n]).buffer);
+  const issuer = new TextEncoder().encode('CN=Test Root CA');
+  const serial = new Uint8Array([0x01, 0x02, 0x03]);
+
+  const tpl = buildTpl([
+    { type: CKA.CLASS, ulong: CKO_TRUST },
+    { type: CKA_TRUST.ISSUER, bytes: issuer },
+    { type: CKA_TRUST.SERIAL_NUMBER, bytes: serial },
+    { type: CKA_TRUST.TRUST_SERVER_AUTH, bytes: ulongBytes(CKT.TRUSTED) },
+    { type: CKA_TRUST.TRUST_CODE_SIGNING, bytes: ulongBytes(CKT.TRUST_ANCHOR) },
+  ]);
+  const hp = alloc(4);
+  check('C_CreateObject(CKO_TRUST) → OK', w._C_CreateObject(hS, tpl, 5, hp), CKR.OK);
+  const hTrust = readU32(hp);
+
+  // Round-trip CKA_ISSUER and a CK_TRUST-typed attribute byte-exact. Two
+  // separate single-attribute queries (rather than packed into one) so the
+  // odd-length CKA_ISSUER value can't shift CKA_TRUST_SERVER_AUTH's data
+  // pointer off a 4-byte boundary within buildTpl's packed data region.
+  {
+    const outIssuer = buildTpl([{ type: CKA_TRUST.ISSUER, bytes: new Uint8Array(issuer.length) }]);
+    check('C_GetAttributeValue(CKA_ISSUER) → OK', w._C_GetAttributeValue(hS, hTrust, outIssuer, 1), CKR.OK);
+    const gotIssuer = Buffer.from(new Uint8Array(mem().buffer, readU32(outIssuer + 4), readU32(outIssuer + 8)));
+    check('CKA_ISSUER round-trips byte-exact', gotIssuer.equals(Buffer.from(issuer)) ? 1 : 0, 1);
+
+    const outTrust = buildTpl([{ type: CKA_TRUST.TRUST_SERVER_AUTH, bytes: new Uint8Array(4) }]);
+    check('C_GetAttributeValue(CKA_TRUST_SERVER_AUTH) → OK', w._C_GetAttributeValue(hS, hTrust, outTrust, 1), CKR.OK);
+    const gotTrust = readU32(readU32(outTrust + 4));
+    check('CKA_TRUST_SERVER_AUTH round-trips as CKT_TRUSTED', gotTrust, CKT.TRUSTED);
+  }
+
+  // An attribute never set on this object (e.g. CKA_TRUST_OCSP_SIGNING) is
+  // simply absent — §5.7.5: ulValueLen → CK_UNAVAILABLE_INFORMATION and the
+  // call itself reports CKR_ATTRIBUTE_TYPE_INVALID (the engine's uniform
+  // missing-attribute convention). Callers interpret this as
+  // CKT_TRUST_UNKNOWN per Table 25's footnote, but the token doesn't
+  // synthesize/store that default itself.
+  {
+    const out = buildTpl([{ type: CKA_TRUST.TRUST_OCSP_SIGNING, bytes: new Uint8Array(4) }]);
+    check('C_GetAttributeValue(unset CKA_TRUST_OCSP_SIGNING) → ATTRIBUTE_TYPE_INVALID',
+      w._C_GetAttributeValue(hS, hTrust, out, 1), CKR.ATTRIBUTE_TYPE_INVALID);
+    check('unset CKA_TRUST_OCSP_SIGNING → CK_UNAVAILABLE_INFORMATION length',
+      readU32(out + 8), 0xffffffff);
+  }
+
+  // CKA_MODIFIABLE defaults TRUE (§4.4, apply_object_defaults) — SetAttributeValue works.
+  check('C_SetAttributeValue(CKA_TRUST_OCSP_SIGNING) → OK (CKA_MODIFIABLE defaults TRUE)',
+    w._C_SetAttributeValue(hS, hTrust,
+      buildTpl([{ type: CKA_TRUST.TRUST_OCSP_SIGNING, bytes: ulongBytes(CKT.NOT_TRUSTED) }]), 1),
+    CKR.OK);
+
+  // C_FindObjects by CKA_CLASS=CKO_TRUST locates it.
+  {
+    check('C_FindObjectsInit(CKA_CLASS=CKO_TRUST) → OK',
+      w._C_FindObjectsInit(hS, buildTpl([{ type: CKA.CLASS, ulong: CKO_TRUST }]), 1), CKR.OK);
+    const found = alloc(4); const cnt = alloc(4); writeU32(cnt, 0);
+    check('C_FindObjects → OK', w._C_FindObjects(hS, found, 1, cnt), CKR.OK);
+    check('C_FindObjects locates the CKO_TRUST object', readU32(cnt), 1);
+    check('C_FindObjects returns the correct handle', readU32(found), hTrust);
+    check('C_FindObjectsFinal → OK', w._C_FindObjectsFinal(hS), CKR.OK);
+  }
+
+  // C_CopyObject and C_DestroyObject work generically, as for any other class.
+  {
+    const hCopyP = alloc(4);
+    check('C_CopyObject(CKO_TRUST) → OK', w._C_CopyObject(hS, hTrust, 0, 0, hCopyP), CKR.OK);
+    check('C_DestroyObject(copy) → OK', w._C_DestroyObject(hS, readU32(hCopyP)), CKR.OK);
+  }
+  check('C_DestroyObject(CKO_TRUST) → OK', w._C_DestroyObject(hS, hTrust), CKR.OK);
+  check('destroyed CKO_TRUST object is gone → OBJECT_HANDLE_INVALID',
+    w._C_GetAttributeValue(hS, hTrust, buildTpl([{ type: CKA.CLASS, bytes: new Uint8Array(4) }]), 1),
+    CKR.OBJECT_HANDLE_INVALID);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

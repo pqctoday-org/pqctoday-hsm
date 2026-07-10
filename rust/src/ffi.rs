@@ -1307,8 +1307,8 @@ pub fn C_GenerateKeyPair(
                     CKP_ML_KEM_512 => mlkem_gen!(ml_kem::MlKem512),
                     CKP_ML_KEM_768 => mlkem_gen!(ml_kem::MlKem768),
                     CKP_ML_KEM_1024 => mlkem_gen!(ml_kem::MlKem1024),
-                    // §4.1 — unknown CKA_PARAMETER_SET value in the template.
-                    _ => return CKR_ATTRIBUTE_VALUE_INVALID,
+                    // Table 6 — unrecognized CKA_PARAMETER_SET value in the template.
+                    _ => return CKR_PARAMETER_SET_NOT_SUPPORTED,
                 }
                 // Store the seed on the private object — engine-side, in the
                 // sensitive-blocked readback set (state::attr_is_sensitive_material).
@@ -1448,8 +1448,8 @@ pub fn C_GenerateKeyPair(
                     CKP_ML_DSA_44 => mldsa_gen!(ml_dsa_44),
                     CKP_ML_DSA_65 => mldsa_gen!(ml_dsa_65),
                     CKP_ML_DSA_87 => mldsa_gen!(ml_dsa_87),
-                    // §4.1 — unknown CKA_PARAMETER_SET value in the template.
-                    _ => return CKR_ATTRIBUTE_VALUE_INVALID,
+                    // Table 6 — unrecognized CKA_PARAMETER_SET value in the template.
+                    _ => return CKR_PARAMETER_SET_NOT_SUPPORTED,
                 }
                 // Store the seed on the private object — engine-side, in the
                 // sensitive-blocked readback set (state::attr_is_sensitive_material).
@@ -1596,8 +1596,8 @@ pub fn C_GenerateKeyPair(
                     CKP_SLH_DSA_SHAKE_256F => {
                         slh_dsa_keygen!(slh_dsa_shake_256f, seed.as_deref(), pub_attrs, prv_attrs)
                     }
-                    // §4.1 — unknown CKA_PARAMETER_SET value in the template.
-                    _ => return CKR_ATTRIBUTE_VALUE_INVALID,
+                    // Table 6 — unrecognized CKA_PARAMETER_SET value in the template.
+                    _ => return CKR_PARAMETER_SET_NOT_SUPPORTED,
                 }
                 // Store the seed on the private object — engine-side, in the
                 // sensitive-blocked readback set (state::attr_is_sensitive_material).
@@ -5418,14 +5418,40 @@ enum Sp800Seg {
     Bytes(Vec<u8>),
 }
 
+/// PKCS#11 v3.2 §6.42.2 — PRF output length in bytes for the SP 800-108
+/// PRF types this engine supports (used only to size
+/// `CK_SP800_108_DKM_LENGTH_SUM_OF_SEGMENTS`). `None` for an unrecognized
+/// PRF type or an invalid AES-CMAC key length.
+fn sp800_108_prf_output_len(prf_type: u32, base_key_len: usize) -> Option<usize> {
+    match prf_type {
+        CKM_SHA256_HMAC => Some(32),
+        CKM_SHA384_HMAC => Some(48),
+        CKM_SHA512_HMAC => Some(64),
+        CKM_SHA3_256_HMAC => Some(32),
+        CKM_SHA3_512_HMAC => Some(64),
+        // CMAC output = the underlying block cipher's block size (AES = 16
+        // bytes), independent of key length; base_key_len is only checked
+        // for AES key-size validity, mirroring sp800_108_counter_kbkdf.
+        CKM_AES_CMAC if matches!(base_key_len, 16 | 24 | 32) => Some(16),
+        _ => None,
+    }
+}
+
 /// Parse CK_PRF_DATA_PARAM[] — { type: CK_PRF_DATA_TYPE, pValue, ulValueLen },
 /// all CK_ULONG/pointer-width, so the array stride and the nested COUNTER /
 /// DKM_LENGTH format-struct field offsets are taken at size_of::<usize>()
 /// (4 B wasm32, 8 B native). `key_len` is the requested DKM length in bytes.
+/// `prf_type`/`base_key_len` size a `SUM_OF_SEGMENTS` DKM length.
+/// `allow_explicit_counter` — Table 199 (Counter Mode) forbids the separate
+/// `CK_SP800_108_COUNTER` field (the counter there is the mandatory
+/// ITERATION_VARIABLE); Table 200 (Feedback Mode) allows it as optional.
 unsafe fn parse_sp800_108_segments(
     p_segs: *const usize,
     num_segs: usize,
     key_len: usize,
+    prf_type: u32,
+    base_key_len: usize,
+    allow_explicit_counter: bool,
 ) -> Result<Vec<Sp800Seg>, u32> {
     let usz = core::mem::size_of::<usize>();
     let mut out = Vec::new();
@@ -5451,6 +5477,24 @@ unsafe fn parse_sp800_108_segments(
                 }
                 out.push(Sp800Seg::Counter(le, (width_bits / 8) as usize));
             }
+            t if t == CK_SP800_108_COUNTER => {
+                // Table 199 — invalid data field for Counter Mode KDF.
+                if !allow_explicit_counter {
+                    return Err(CKR_MECHANISM_PARAM_INVALID);
+                }
+                // Same wire shape as ITERATION_VARIABLE: pValue →
+                // CK_SP800_108_COUNTER_FORMAT.
+                if val_ptr.is_null() || val_len < 2 * usz {
+                    return Err(CKR_MECHANISM_PARAM_INVALID);
+                }
+                let le = *val_ptr != 0;
+                let width_bits =
+                    std::ptr::read_unaligned(val_ptr.add(usz) as *const usize) as u32;
+                if !matches!(width_bits, 8 | 16 | 24 | 32) {
+                    return Err(CKR_MECHANISM_PARAM_INVALID);
+                }
+                out.push(Sp800Seg::Counter(le, (width_bits / 8) as usize));
+            }
             t if t == CK_SP800_108_DKM_LENGTH => {
                 // pValue → CK_SP800_108_DKM_LENGTH_FORMAT { method: CK_ULONG,
                 // bLittleEndian: CK_BBOOL, ulWidthInBits: CK_ULONG }.
@@ -5458,16 +5502,26 @@ unsafe fn parse_sp800_108_segments(
                     return Err(CKR_MECHANISM_PARAM_INVALID);
                 }
                 let method = std::ptr::read_unaligned(val_ptr as *const usize) as u32;
-                if method != CK_SP800_108_DKM_LENGTH_SUM_OF_KEYS {
-                    return Err(CKR_MECHANISM_PARAM_INVALID);
-                }
                 let le = *val_ptr.add(usz) != 0;
                 let width_bits =
                     std::ptr::read_unaligned(val_ptr.add(2 * usz) as *const usize) as u32;
                 if !matches!(width_bits, 8 | 16 | 32 | 64) {
                     return Err(CKR_MECHANISM_PARAM_INVALID);
                 }
-                let l_bits = (key_len as u64) * 8;
+                // Table 198 — SUM_OF_KEYS is just the requested key length;
+                // SUM_OF_SEGMENTS is that length rounded UP to a whole
+                // number of PRF-output blocks (the KDF always emits whole
+                // segments even if only part of the last one is kept).
+                let l_bits: u64 = if method == CK_SP800_108_DKM_LENGTH_SUM_OF_KEYS {
+                    (key_len as u64) * 8
+                } else if method == CK_SP800_108_DKM_LENGTH_SUM_OF_SEGMENTS {
+                    let prf_out = sp800_108_prf_output_len(prf_type, base_key_len)
+                        .ok_or(CKR_MECHANISM_PARAM_INVALID)?;
+                    let segments = key_len.div_ceil(prf_out).max(1);
+                    ((segments * prf_out) as u64) * 8
+                } else {
+                    return Err(CKR_MECHANISM_PARAM_INVALID);
+                };
                 let width = (width_bits / 8) as usize;
                 let full = if le {
                     l_bits.to_le_bytes()
@@ -5487,6 +5541,16 @@ unsafe fn parse_sp800_108_segments(
                         std::slice::from_raw_parts(val_ptr, val_len).to_vec(),
                     ));
                 }
+            }
+            t if t == CK_SP800_108_KEY_HANDLE => {
+                // pValue → CK_OBJECT_HANDLE_PTR, ulValueLen == sizeof(CK_OBJECT_HANDLE).
+                // Splices the referenced key's CKA_VALUE in as a byte-array segment.
+                if val_ptr.is_null() || val_len != usz {
+                    return Err(CKR_MECHANISM_PARAM_INVALID);
+                }
+                let handle = std::ptr::read_unaligned(val_ptr as *const usize) as u32;
+                let key_bytes = get_object_value(handle).ok_or(CKR_KEY_HANDLE_INVALID)?;
+                out.push(Sp800Seg::Bytes(key_bytes));
             }
             _ => return Err(CKR_MECHANISM_PARAM_INVALID),
         }
@@ -6298,9 +6362,18 @@ pub fn C_DeriveKey(
                 // SP 800-108 §4.1 / PKCS#11 §6.x — process the data params IN
                 // ORDER. Supported segment types: ITERATION_VARIABLE (counter
                 // at caller-specified width/endianness), DKM_LENGTH ([L]
-                // field), BYTE_ARRAY (fixed input). Legacy default when no
-                // ITERATION_VARIABLE is present: 32-bit BE counter prefix.
-                let segs = match parse_sp800_108_segments(p_segs, num_segs, key_len) {
+                // field), BYTE_ARRAY (fixed input), KEY_HANDLE (spliced-in key
+                // value). Legacy default when no ITERATION_VARIABLE is
+                // present: 32-bit BE counter prefix. Table 199 — the separate
+                // CK_SP800_108_COUNTER field is invalid for Counter Mode.
+                let segs = match parse_sp800_108_segments(
+                    p_segs,
+                    num_segs,
+                    key_len,
+                    prf_type,
+                    base_key.len(),
+                    /* allow_explicit_counter */ false,
+                ) {
                     Ok(s) => s,
                     Err(rv) => return rv,
                 };
@@ -6334,8 +6407,17 @@ pub fn C_DeriveKey(
                     Vec::new()
                 };
                 // SP 800-108 §4.2 — ordered data params: optional counter at
-                // caller width/endianness, [L] field, byte arrays. K(0) = IV.
-                let segs = match parse_sp800_108_segments(p_segs, num_segs, key_len) {
+                // caller width/endianness, [L] field, byte arrays, spliced-in
+                // key values. K(0) = IV. Table 200 — CK_SP800_108_COUNTER is
+                // optional for Feedback Mode (unlike Counter Mode).
+                let segs = match parse_sp800_108_segments(
+                    p_segs,
+                    num_segs,
+                    key_len,
+                    prf_type,
+                    base_key.len(),
+                    /* allow_explicit_counter */ true,
+                ) {
                     Ok(s) => s,
                     Err(rv) => return rv,
                 };

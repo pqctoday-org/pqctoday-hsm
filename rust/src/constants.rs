@@ -28,6 +28,10 @@ pub const CKR_SIGNATURE_INVALID: u32 = 0x0000_00C0;
 pub const CKR_TEMPLATE_INCOMPLETE: u32 = 0x0000_00D0;
 pub const CKR_TEMPLATE_INCONSISTENT: u32 = 0x0000_00D1;
 pub const CKR_KEY_NOT_WRAPPABLE: u32 = 0x0000_0069; // PKCS#11 v3.2 — CKA_WRAP_WITH_TRUSTED policy violation
+/// PKCS#11 v3.2 §5.1.6 (Table 6) — "This parameter set is not supported by
+/// this token." Narrower than `CKR_ATTRIBUTE_VALUE_INVALID`: for an
+/// unrecognized `CKA_PARAMETER_SET` value on a PQC keygen template.
+pub const CKR_PARAMETER_SET_NOT_SUPPORTED: u32 = 0x0000_0209;
 pub const CKR_KEY_UNEXTRACTABLE: u32 = 0x0000_006A;
 pub const CKR_KEY_FUNCTION_NOT_PERMITTED: u32 = 0x0000_0068;
 pub const CKR_KEY_HANDLE_INVALID: u32 = 0x0000_0060;
@@ -80,6 +84,20 @@ pub const CKA_SEED: u32 = 0x0000_0637;
 pub const CKO_PUBLIC_KEY: u32 = 0x0000_0002;
 pub const CKO_PRIVATE_KEY: u32 = 0x0000_0003;
 pub const CKO_SECRET_KEY: u32 = 0x0000_0004;
+/// PKCS#11 v3.2 §4.7 — trust objects bind trusted usages (`CKA_TRUST_*`
+/// below) to individual certificates, keyed by `CKA_ISSUER` +
+/// `CKA_SERIAL_NUMBER`. Read/write, general-purpose object storage — no
+/// key-specific validation applies (state::validate_create_template already
+/// falls through to `Ok(())` for any non-key class).
+pub const CKO_TRUST: u32 = 0x0000_000b;
+
+// ── PKCS#11 v3.2 §4.7 — CK_TRUST values ──────────────────────────────────────
+
+pub const CKT_TRUST_UNKNOWN: u32 = 0x0000_0000;
+pub const CKT_TRUSTED: u32 = 0x0000_0001;
+pub const CKT_TRUST_ANCHOR: u32 = 0x0000_0002;
+pub const CKT_NOT_TRUSTED: u32 = 0x0000_0003;
+pub const CKT_TRUST_MUST_VERIFY_TRUST: u32 = 0x0000_0004;
 
 // ── PKCS#11 Key Types (CKK_*) ────────────────────────────────────────────────
 
@@ -132,6 +150,24 @@ pub const CKA_DESTROYABLE: u32 = 0x0000_0172; // PKCS#11 v3.2 — mandatory for 
 pub const CKA_TRUSTED: u32 = 0x0000_0086; // PKCS#11 v3.2 — public/secret keys (default: FALSE)
 pub const CKA_WRAP_WITH_TRUSTED: u32 = 0x0000_0210; // PKCS#11 v3.2 — private/secret keys (default: FALSE)
 pub const CKA_ALWAYS_AUTHENTICATE: u32 = 0x0000_0202; // PKCS#11 v3.2 — private keys (default: FALSE)
+
+// PKCS#11 v3.2 §4.7 Table 25 — CKO_TRUST object attributes. CKA_ISSUER +
+// CKA_SERIAL_NUMBER key the trust object to a certificate; the 7 CKA_TRUST_*
+// attributes (type CK_TRUST) carry per-usage trust values; a missing
+// CKA_TRUST_* is application-interpreted as CKT_TRUST_UNKNOWN (not
+// engine-synthesized — consistent with how every other optional attribute
+// on this engine surfaces as CK_UNAVAILABLE_INFORMATION when absent).
+pub const CKA_ISSUER: u32 = 0x0000_0081;
+pub const CKA_SERIAL_NUMBER: u32 = 0x0000_0082;
+pub const CKA_HASH_OF_CERTIFICATE: u32 = 0x0000_0635;
+pub const CKA_NAME_HASH_ALGORITHM: u32 = 0x0000_008c;
+pub const CKA_TRUST_SERVER_AUTH: u32 = 0x0000_062c;
+pub const CKA_TRUST_CLIENT_AUTH: u32 = 0x0000_062d;
+pub const CKA_TRUST_CODE_SIGNING: u32 = 0x0000_062e;
+pub const CKA_TRUST_EMAIL_PROTECTION: u32 = 0x0000_062f;
+pub const CKA_TRUST_IPSEC_IKE: u32 = 0x0000_0630;
+pub const CKA_TRUST_TIME_STAMPING: u32 = 0x0000_0631;
+pub const CKA_TRUST_OCSP_SIGNING: u32 = 0x0000_0632;
 
 // Private attribute: stores the parameter set on generated keys
 pub const CKA_PRIV_PARAM_SET: u32 = 0xFFFF_0001;
@@ -221,8 +257,21 @@ pub const CKG_MGF1_SHA3_384: u32 = 0x0000_0008;
 pub const CKZ_DATA_SPECIFIED: u32 = 0x0000_0001;
 // SP 800-108 data-param types (beyond BYTE_ARRAY below)
 pub const CK_SP800_108_ITERATION_VARIABLE: u32 = 0x0000_0001;
+/// PKCS#11 v3.2 Table 197 — `CK_SP800_108_OPTIONAL_COUNTER`, aliased by the
+/// spec as `CK_SP800_108_COUNTER`. Invalid for Counter Mode KDF (Table 199 —
+/// the counter there is the mandatory ITERATION_VARIABLE); optional for
+/// Feedback Mode KDF (Table 200).
+pub const CK_SP800_108_OPTIONAL_COUNTER: u32 = 0x0000_0002;
+pub const CK_SP800_108_COUNTER: u32 = CK_SP800_108_OPTIONAL_COUNTER;
 pub const CK_SP800_108_DKM_LENGTH: u32 = 0x0000_0003;
+/// PKCS#11 v3.2 Table 197 — identifies a symmetric key's `CKA_VALUE` to be
+/// spliced into the constructed PRF input data at this position.
+pub const CK_SP800_108_KEY_HANDLE: u32 = 0x0000_0005;
 pub const CK_SP800_108_DKM_LENGTH_SUM_OF_KEYS: u32 = 0x0000_0001;
+/// PKCS#11 v3.2 Table 198 — DKM length is the sum of the lengths of all PRF
+/// output segments produced by this KDF invocation (rounded up to a whole
+/// number of PRF-output blocks), not just the derived key length(s).
+pub const CK_SP800_108_DKM_LENGTH_SUM_OF_SEGMENTS: u32 = 0x0000_0002;
 
 // KMAC
 pub const CKM_KMAC_128: u32 = 0x8000_0100;
