@@ -835,6 +835,33 @@ pub fn recertify(
     )
     .map_err(|e| fail(deps, correlation_id, "Re-certify", e))?;
 
+    // WP-3 remediation — `store_certificate` below reuses the linked
+    // public key's CKA_ID for the new certificate (so a PKCS#11 client can
+    // match cert-to-key), which is the SAME CKA_ID `existing`'s engine
+    // object already carries. Destroy that old engine object now, BEFORE
+    // the new one is created, so the two never coexist: once both share a
+    // CKA_ID, `find_handle_for_object`'s class-aware lookup can no longer
+    // tell them apart (it disambiguates across classes — pub/priv/cert —
+    // not within one), so any later Destroy(old_uid) could resolve to
+    // whichever the engine's HashMap iterates first, including the new,
+    // still-active certificate. Best-effort: if the handle is already
+    // gone, proceed anyway — the KMIP-side lifecycle transition below is
+    // authoritative regardless.
+    if let Some(session) = deps.engine_session {
+        if let Ok(Some(handle)) = super::helpers::find_handle_for_object(
+            session, &existing.pkcs11_cka_id, existing.object_type,
+        ) {
+            let r = softhsmrustv3::native::destroy_object(session, handle);
+            super::helpers::emit_pkcs11_result(
+                deps,
+                correlation_id,
+                "native::destroy_object(superseded certificate)",
+                None,
+                &r,
+            );
+        }
+    }
+
     // Store the new cert with a Replaced link → existing; carry the
     // existing cert's Name (§6.1.50: the new cert takes over the Name).
     let new_uid = store_certificate(
@@ -855,6 +882,16 @@ pub fn recertify(
         .links
         .insert("ReplacementObjectLink".to_string(), new_uid.clone());
     existing_mut.name = None;
+    // WP-3 remediation — the old record's engine object was just destroyed
+    // above, and `store_certificate` may have reused its CKA_ID for the
+    // NEW certificate (when linked to the same public key). Clear it here
+    // so any future CKA_ID-based engine lookup against this now-retired
+    // record (Destroy, Revoke, …) resolves to nothing instead of
+    // colliding with — and potentially tearing down — the new
+    // certificate's engine object, which now legitimately owns that
+    // CKA_ID. The KMIP store record itself (certificate_value, links,
+    // state) remains fully intact and Get/GetAttributes-able regardless.
+    existing_mut.pkcs11_cka_id = Vec::new();
     existing_mut.state = State::Deactivated;
     existing_mut.deactivation_date = Some(OffsetDateTime::now_utc());
     existing_mut.last_change_date = Some(OffsetDateTime::now_utc());
@@ -1536,6 +1573,104 @@ mod tests {
             new_cert.tbs_certificate.validity.not_before.to_unix_duration(),
             old_cert.tbs_certificate.validity.not_before.to_unix_duration(),
             "Re-certify shifts the validity window"
+        );
+
+        let _ = softhsmrustv3::native::session::finalize();
+    }
+
+    /// WP-3 remediation — when the re-certified certificate is linked to a
+    /// stored PublicKey (via `resolve_subject`'s uid-based path, `Certify`
+    /// with no CSR), `store_certificate` reuses that key's CKA_ID for the
+    /// new certificate — the SAME CKA_ID the OLD certificate's engine
+    /// object already carries. Before the fix, Re-certify never destroyed
+    /// the old engine object, so the engine ended up with TWO
+    /// `CKO_CERTIFICATE` objects sharing one CKA_ID; because the engine's
+    /// object map has no iteration-order guarantee, a later `Destroy` of
+    /// the superseded UID could resolve to either one — including the new,
+    /// still-Active certificate. Proves: exactly one engine object exists
+    /// at the shared CKA_ID after Re-certify (the new one), and destroying
+    /// the superseded UID afterward leaves it untouched.
+    #[test]
+    fn recertify_replaces_engine_object_sharing_linked_public_key_cka_id() {
+        use softhsmrustv3::constants as c;
+        use softhsmrustv3::native::{self, EccCurve};
+        let _g = engine_lock();
+        let f = bootstrap_ca(KmipAlgorithm::Ecdsa);
+
+        // A leaf key pair, independent of the CA's, with its own CKA_ID —
+        // stored as a KMIP PublicKey record so Certify(uid=...) can link it.
+        let leaf_cka_id = b"leaf-key-id".to_vec();
+        let (leaf_pub_h, _leaf_prv_h) =
+            native::generate_ecdsa_keypair(f.session, EccCurve::P256, &leaf_cka_id, "leaf-ec")
+                .expect("leaf keygen");
+        let leaf_spki = native::get_attribute(f.session, leaf_pub_h, c::CKA_PUBLIC_KEY_INFO)
+            .expect("leaf public key SPKI");
+        f.deps
+            .store
+            .put(ObjectRecord {
+                uid: "urn:leaf-pub".into(),
+                object_type: ObjectType::PublicKey,
+                algorithm: KmipAlgorithm::Ecdsa,
+                usage_mask: UsageMask::VERIFY,
+                state: State::Active,
+                pkcs11_cka_id: leaf_cka_id.clone(),
+                key_material: Some(leaf_spki),
+                ..ObjectRecord::default()
+            })
+            .unwrap();
+
+        // Certify the stored PublicKey by UID (no CSR) — links the new
+        // cert to "urn:leaf-pub", so store_certificate reuses leaf_cka_id.
+        let issued = certify(
+            &f.deps,
+            CertifyRequest { uid: Some("urn:leaf-pub".into()), ..CertifyRequest::default() },
+            "c-initial",
+        )
+        .unwrap();
+        let issued_rec = f.deps.store.get(&issued.uid).unwrap().unwrap();
+        assert_eq!(
+            issued_rec.pkcs11_cka_id, leaf_cka_id,
+            "precondition: the issued cert must share the linked public key's CKA_ID"
+        );
+
+        let renewed = recertify(
+            &f.deps,
+            ReCertifyRequest { uid: issued.uid.clone(), ..ReCertifyRequest::default() },
+            "c-renew",
+        )
+        .unwrap();
+        let renewed_rec = f.deps.store.get(&renewed.uid).unwrap().unwrap();
+        assert_eq!(
+            renewed_rec.pkcs11_cka_id, leaf_cka_id,
+            "the new cert must reuse the same CKA_ID — this is the collision precondition"
+        );
+
+        // Exactly one engine certificate object at that CKA_ID, and it's
+        // the NEW certificate, not the superseded one.
+        let handle = super::super::helpers::find_handle_for_object(
+            f.session, &leaf_cka_id, ObjectType::Certificate,
+        )
+        .unwrap()
+        .expect("exactly one engine certificate object must exist at the shared CKA_ID");
+        let engine_der = native::get_attribute(f.session, handle, c::CKA_VALUE)
+            .expect("engine certificate object must carry DER");
+        assert_eq!(
+            engine_der, *renewed_rec.certificate_value.as_ref().unwrap(),
+            "the one live engine object must be the NEW certificate, not the superseded one"
+        );
+
+        // Destroying the OLD (already-Deactivated) cert must not remove
+        // the new, still-Active one.
+        super::super::destroy::destroy(
+            &f.deps,
+            crate::kmip30::DestroyRequest { uid: issued.uid.clone() },
+            "c-destroy-old",
+        )
+        .unwrap();
+        assert_eq!(
+            native::get_attribute(f.session, handle, c::CKA_VALUE).as_deref(),
+            Some(renewed_rec.certificate_value.as_ref().unwrap().as_slice()),
+            "destroying the superseded certificate must not remove the new certificate's engine object"
         );
 
         let _ = softhsmrustv3::native::session::finalize();
