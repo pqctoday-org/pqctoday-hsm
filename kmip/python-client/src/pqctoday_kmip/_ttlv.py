@@ -133,11 +133,26 @@ _SPEC_EXTRACT_TAG_PATCHES: dict[str, int] = {
     "Internal":         0x42_01C8,
     "ExternalMu":       0x42_01C9,
     "Random":           0x42_01CA,
+    # Sec6.1.62 Validate / Sec6.1.6 Certify / Sec6.1.50 Re-certify (Certificate
+    # Services) - also absent from the spec-extraction JSON. Mirrors the hub's
+    # codepointTable.ts patch (kept in sync per that file's own convention);
+    # values cross-checked against wire.rs's tags::* constants.
+    "CertificateValue":                   0x42_001E,
+    "CertificateRequestType":             0x42_0019,
+    "CertificateRequest":                 0x42_0018,
+    "CertificateRequestValue":            0x42_0140,
+    "CertificateRequestUniqueIdentifier": 0x42_0139,
+    "ValidityDate":                       0x42_009A,
+    "ValidityIndicator":                  0x42_009B,
 }
 
 _SPEC_EXTRACT_PATCHES: dict[str, dict[str, int]] = {
     "MaskGenerator": {"MGF1": 0x00000001},
     "KeyFormatType": {"SeedPrivateKey": 0x00000018},
+    # Certificate Services (WP5) - matches kmip30::ops::CertificateRequestType.
+    "CertificateRequestType": {"Crmf": 0x00000001, "PKCS10": 0x00000002, "PEM": 0x00000003},
+    # Validate's three-way answer - matches kmip30::ops::SignatureValidity.
+    "ValidityIndicator": {"Valid": 0x00000001, "Invalid": 0x00000002, "Unknown": 0x00000003},
     "CredentialType": {
         "UsernameAndPassword": 0x00000001,
         "Device":              0x00000002,

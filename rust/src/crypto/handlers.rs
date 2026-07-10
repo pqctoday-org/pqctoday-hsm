@@ -596,28 +596,43 @@ pub fn build_mldsa87_spki(pk: &[u8]) -> Vec<u8> {
 }
 
 /// Build SPKI for SLH-DSA given a CKP_SLH_DSA_* parameter set.
-/// OIDs from NIST FIPS 205: 2.16.840.1.101.3.4.20.{1..12}
-/// SHA2 variants: 1–6; SHAKE variants: 7–12.
-/// CKP_SLH_DSA_* constants interleave SHA2/SHAKE by security level — map to sequential OIDs.
+///
+/// Pure SLH-DSA OIDs are RFC 9909 §3 — NIST CSOR arc
+/// `2.16.840.1.101.3.4.3.{20..31}` (nistAlgorithms(4).sigAlgs(3), the SAME
+/// parent arc as ML-DSA's `.3.{17,18,19}` above, contiguous from where it
+/// leaves off), NOT `2.16.840.1.101.3.4.20.{1..12}` — that shape (this
+/// function's previous, wrong implementation) doesn't exist in the RFC;
+/// every OpenSSL >=3.5 build with SLH-DSA support disagrees with it too
+/// (`openssl list -signature-algorithms` — `id-slh-dsa-sha2-128s` is
+/// `2.16.840.1.101.3.4.3.20`), which is how this was caught: the
+/// kmip/tests/openssl_cert_crosscheck.rs external cross-check failed to
+/// even DECODE a CA cert's SLH-DSA SubjectPublicKeyInfo built by this
+/// function. Verified against the RFC 9909 ASN.1 module directly (§3):
+/// `sigAlgs OBJECT IDENTIFIER ::= { nistAlgorithms 3 }`, then
+/// `id-slh-dsa-sha2-128s ::= { sigAlgs 20 }` counting up to
+/// `id-slh-dsa-shake-256f ::= { sigAlgs 31 }` — matches
+/// `kmip::ops::certify`'s own independently-verified OID table exactly.
 pub fn build_slhdsa_spki(ckp: u32, pk: &[u8]) -> Vec<u8> {
-    // Mapping from CKP constant to OID arc-20 last byte
+    // CKP_SLH_DSA_* constant -> RFC 9909 final OID arc (20-31). All 12
+    // values fit a single base-128 byte (< 0x80), so `oid_last` IS that
+    // byte, not a further-encoded multi-byte value.
     let oid_last: u8 = match ckp {
-        1 => 0x01,              // SHA2-128s
-        3 => 0x02,              // SHA2-128f
-        5 => 0x03,              // SHA2-192s
-        7 => 0x04,              // SHA2-192f
-        9 => 0x05,              // SHA2-256s
-        11 => 0x06,             // SHA2-256f
-        2 => 0x07,              // SHAKE-128s
-        4 => 0x08,              // SHAKE-128f
-        6 => 0x09,              // SHAKE-192s
-        8 => 0x0a,              // SHAKE-192f
-        10 => 0x0b,             // SHAKE-256s
-        12 => 0x0c,             // SHAKE-256f
+        1 => 0x14,               // SHA2-128s  -> .20
+        3 => 0x15,               // SHA2-128f  -> .21
+        5 => 0x16,               // SHA2-192s  -> .22
+        7 => 0x17,               // SHA2-192f  -> .23
+        9 => 0x18,               // SHA2-256s  -> .24
+        11 => 0x19,              // SHA2-256f  -> .25
+        2 => 0x1a,               // SHAKE-128s -> .26
+        4 => 0x1b,               // SHAKE-128f -> .27
+        6 => 0x1c,               // SHAKE-192s -> .28
+        8 => 0x1d,               // SHAKE-192f -> .29
+        10 => 0x1e,              // SHAKE-256s -> .30
+        12 => 0x1f,              // SHAKE-256f -> .31
         _ => return Vec::new(), // unknown parameter set
     };
     let alg_id = [
-        0x30, 0x0b, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x14, oid_last,
+        0x30, 0x0b, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x03, oid_last,
     ];
     build_spki_from_parts(&alg_id, pk)
 }
@@ -2368,6 +2383,52 @@ cfb60dbd1706a95d149004631b7b6e49672331cdd99a55561fd95e22016c74389763b9996c5ac956
                 Err(CKR_SIGNATURE_INVALID),
                 "mech {m:#06x}"
             );
+        }
+    }
+
+    /// Regression test for a real bug the `openssl_cert_crosscheck.rs`
+    /// external cross-check caught (kmip cert-ops port, 2026-07-09):
+    /// `build_slhdsa_spki` encoded every parameter set's OID as
+    /// `2.16.840.1.101.3.4.20.{1..12}` — a shape that doesn't exist in
+    /// RFC 9909 at all — instead of the real `2.16.840.1.101.3.4.3.{20..31}`
+    /// (§3, verified against the RFC's own ASN.1 module and independently
+    /// against `openssl list -signature-algorithms`' registered OIDs).
+    /// OpenSSL couldn't even DECODE a cert carrying the old, wrong SPKI.
+    /// Checks all 12 parameter sets against RFC 9909, decoded with the
+    /// SAME `spki` crate the kmip crate's Certify/Validate use — an
+    /// independent parse of this function's own output, not a
+    /// self-referential byte comparison.
+    #[test]
+    fn build_slhdsa_spki_encodes_the_real_rfc9909_oid_for_all_twelve_parameter_sets() {
+        use spki::der::Decode;
+        use spki::SubjectPublicKeyInfoOwned;
+
+        let cases: [(u32, &str); 12] = [
+            (1, "2.16.840.1.101.3.4.3.20"),  // SHA2-128s
+            (3, "2.16.840.1.101.3.4.3.21"),  // SHA2-128f
+            (5, "2.16.840.1.101.3.4.3.22"),  // SHA2-192s
+            (7, "2.16.840.1.101.3.4.3.23"),  // SHA2-192f
+            (9, "2.16.840.1.101.3.4.3.24"),  // SHA2-256s
+            (11, "2.16.840.1.101.3.4.3.25"), // SHA2-256f
+            (2, "2.16.840.1.101.3.4.3.26"),  // SHAKE-128s
+            (4, "2.16.840.1.101.3.4.3.27"),  // SHAKE-128f
+            (6, "2.16.840.1.101.3.4.3.28"),  // SHAKE-192s
+            (8, "2.16.840.1.101.3.4.3.29"),  // SHAKE-192f
+            (10, "2.16.840.1.101.3.4.3.30"), // SHAKE-256s
+            (12, "2.16.840.1.101.3.4.3.31"), // SHAKE-256f
+        ];
+        for (ckp, expected_oid) in cases {
+            let fake_pk = vec![0u8; 32]; // OID check only — key length is irrelevant here.
+            let spki_der = build_slhdsa_spki(ckp, &fake_pk);
+            assert!(!spki_der.is_empty(), "CKP {ckp}: build_slhdsa_spki returned empty (unknown parameter set?)");
+            let spki = SubjectPublicKeyInfoOwned::from_der(&spki_der)
+                .unwrap_or_else(|e| panic!("CKP {ckp}: SPKI must be valid DER, decodable by an independent parser: {e}"));
+            assert_eq!(
+                spki.algorithm.oid.to_string(),
+                expected_oid,
+                "CKP {ckp}: wrong SLH-DSA OID"
+            );
+            assert!(spki.algorithm.parameters.is_none(), "CKP {ckp}: RFC 9909 requires ABSENT parameters");
         }
     }
 }

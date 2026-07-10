@@ -69,6 +69,11 @@ pub struct KmipPlayground {
     /// Concrete handle on the audit ring (the `Deps.sink` is type-erased to
     /// `Arc<dyn AuditSink>`, which has no `snapshot()`); same allocation.
     ring: Arc<RingSink>,
+    /// [`setup_demo_ca`](KmipPlayground::setup_demo_ca) call count this
+    /// session — gives each demo CA a fresh UID so re-running the "Set up
+    /// demo CA" affordance (e.g. to try a different algorithm) never
+    /// collides with the store's duplicate-UID rejection.
+    demo_ca_counter: u32,
 }
 
 #[wasm_bindgen]
@@ -143,7 +148,106 @@ impl KmipPlayground {
         let config = DepsConfig { rng_seed_mode, ..DepsConfig::default() };
         let deps = Deps::new(engine, store, sink, config).with_engine_session(session);
 
-        Ok(KmipPlayground { deps, ring })
+        Ok(KmipPlayground { deps, ring, demo_ca_counter: 0 })
+    }
+
+    /// WP5 — "Set up demo CA" affordance for the Certificate Services
+    /// teaching flow: generate a fresh keypair of `algorithm` in the
+    /// engine, self-sign it into a CA certificate via the SAME production
+    /// `certify::bootstrap_ca_certificate` path the native server's
+    /// `--ca-key` bootstrap uses (not a wasm-only shortcut), and
+    /// designate it on this session's `Deps` so subsequent Certify /
+    /// Re-certify calls (via [`submit`](KmipPlayground::submit) /
+    /// [`run_op`](KmipPlayground::run_op)) have a signer. `algorithm` ∈
+    /// `RSA-2048 | ECDSA-P256 | ML-DSA-65 | SLH-DSA-SHA2-128f`; empty
+    /// `subject_cn` defaults to "Playground Demo CA". Returns
+    /// `{ ok, privateKeyUid, certificateUid, certificateDerHex,
+    /// algorithm }` on success, `{ ok: false, error }` on failure — never
+    /// partially designates a CA it failed to fully mint.
+    #[wasm_bindgen]
+    pub fn setup_demo_ca(&mut self, algorithm: &str, subject_cn: &str) -> String {
+        use pqctoday_kmip::kmip30::State;
+        use pqctoday_kmip::store::ObjectRecord;
+        use softhsmrustv3::constants as c;
+        use softhsmrustv3::native::{self, EccCurve};
+
+        let session = match self.deps.engine_session {
+            Some(s) => s,
+            None => return error_json("no engine session"),
+        };
+
+        let algo = match algorithm {
+            "RSA-2048" | "RSA" => KmipAlgorithm::Rsa,
+            "ECDSA-P256" | "ECDSA" => KmipAlgorithm::Ecdsa,
+            "ML-DSA-65" => KmipAlgorithm::MlDsa65,
+            "SLH-DSA-SHA2-128f" => KmipAlgorithm::SlhDsaSha2_128f,
+            other => {
+                return error_json(&format!(
+                    "unsupported demo-CA algorithm '{other}' — expected \
+                     RSA-2048 | ECDSA-P256 | ML-DSA-65 | SLH-DSA-SHA2-128f"
+                ))
+            }
+        };
+
+        self.demo_ca_counter += 1;
+        let n = self.demo_ca_counter;
+        let cka_id = format!("demo-ca-{n}").into_bytes();
+        let priv_uid = format!("urn:demo-ca-priv-{n}");
+        let cert_uid = format!("urn:demo-ca-cert-{n}");
+
+        let keygen = match algo {
+            KmipAlgorithm::Rsa => native::generate_rsa_keypair(session, 2048, &cka_id, "demo-ca"),
+            KmipAlgorithm::Ecdsa => {
+                native::generate_ecdsa_keypair(session, EccCurve::P256, &cka_id, "demo-ca")
+            }
+            KmipAlgorithm::MlDsa65 => {
+                native::generate_ml_dsa_keypair(session, c::CKP_ML_DSA_65, &cka_id, "demo-ca")
+            }
+            KmipAlgorithm::SlhDsaSha2_128f => native::generate_slh_dsa_keypair(
+                session,
+                c::CKP_SLH_DSA_SHA2_128F,
+                &cka_id,
+                "demo-ca",
+            ),
+            _ => unreachable!("exhaustively matched above"),
+        };
+        if let Err(rv) = keygen {
+            return error_json(&format!("CA keygen failed: CK_RV=0x{rv:08x}"));
+        }
+
+        if let Err(e) = self.deps.store.put(ObjectRecord {
+            uid: priv_uid.clone(),
+            object_type: ObjectType::PrivateKey,
+            algorithm: algo,
+            usage_mask: UsageMask::SIGN,
+            state: State::Active,
+            pkcs11_cka_id: cka_id,
+            ..ObjectRecord::default()
+        }) {
+            return error_json(&format!("store PrivateKey record failed: {e}"));
+        }
+
+        let subject_cn = if subject_cn.is_empty() { "Playground Demo CA" } else { subject_cn };
+        let der = match pqctoday_kmip::ops::certify::bootstrap_ca_certificate(
+            &self.deps, &priv_uid, &cert_uid, subject_cn, 3650,
+        ) {
+            Ok(d) => d,
+            Err(e) => return error_json(&format!("bootstrap CA cert failed: {e}")),
+        };
+
+        self.deps.config.ca_key = Some(pqctoday_kmip::ops::deps::CaKeyDesignation {
+            private_key_uid: priv_uid.clone(),
+            certificate_uid: cert_uid.clone(),
+        });
+
+        json!({
+            "ok": true,
+            "privateKeyUid": priv_uid,
+            "certificateUid": cert_uid,
+            "certificateDerHex": to_hex(&der),
+            "algorithm": algorithm,
+        })
+        .to_string()
     }
 
     /// Raw entry: one KMIP 3.0 `Request Message` (TTLV wire bytes) → encoded

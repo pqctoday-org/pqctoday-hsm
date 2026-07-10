@@ -1064,6 +1064,162 @@ pub fn register_rsa_public_key_der(
     Ok(alloc_in_session_slot(_session, attrs))
 }
 
+/// Register an externally-supplied ECDSA public key from its DER
+/// `SubjectPublicKeyInfo` (RFC 5480) — the KMIP-Register/Certify-CSR-
+/// verification counterpart of [`generate_ecdsa_keypair`], which this
+/// mirrors attribute-for-attribute (verify-only usage: `CKA_VERIFY=true`,
+/// `CKA_SIGN` absent, since only the private half a caller never has
+/// signs). Added 2026-07 for the pure-Rust Certify/Validate port: neither
+/// a CSR's self-signature check nor an X.509 chain-link signature check
+/// can be performed against an ECDSA key without a way to import that
+/// key's PUBLIC half into the engine as a transient verify object — RSA
+/// and the PQC families already had this ([`register_rsa_public_key_der`],
+/// [`register_ml_dsa_public_key`]); ECDSA/Ed25519 (see
+/// [`register_ed25519_public_key`] below) did not, because nothing before
+/// this needed to VERIFY against an externally-supplied EC key — keygen +
+/// signing with engine-generated EC keys already worked.
+///
+/// Curve is determined from the SPKI's own AlgorithmIdentifier, decoded
+/// via `spki`'s real DER parser (`SubjectPublicKeyInfoOwned::from_der`) —
+/// the same RustCrypto family the kmip crate uses for X.509 elsewhere in
+/// this port — not by hand-matching fixed byte prefixes. RFC 5480: the
+/// algorithm OID is always `id-ecPublicKey` (1.2.840.10045.2.1); the
+/// specific curve is the `ECParameters` CHOICE carried in the
+/// AlgorithmIdentifier's `parameters` field, which — in its common
+/// `namedCurve` form — is itself just an OID, decoded here the same way.
+pub fn register_ecdsa_public_key(
+    _session: u32,
+    der: &[u8],
+    cka_id: &[u8],
+    label: &str,
+) -> Result<u32, CkRv> {
+    use crate::crypto::handlers::{build_ec_spki_p256, build_ec_spki_p384, build_ec_spki_p521};
+    use spki::der::{Decode, Encode};
+    use spki::SubjectPublicKeyInfoOwned;
+
+    const EC_PUBLIC_KEY_OID: &str = "1.2.840.10045.2.1";
+    const SECP256R1_OID: &str = "1.2.840.10045.3.1.7";
+    const SECP384R1_OID: &str = "1.3.132.0.34";
+    const SECP521R1_OID: &str = "1.3.132.0.35";
+
+    let spki = SubjectPublicKeyInfoOwned::from_der(der).map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+    if spki.algorithm.oid.to_string() != EC_PUBLIC_KEY_OID {
+        return Err(CKR_KEY_TYPE_INCONSISTENT);
+    }
+    let curve_oid = spki
+        .algorithm
+        .parameters
+        .as_ref()
+        .and_then(|p| p.decode_as::<spki::ObjectIdentifier>().ok())
+        .ok_or(CKR_KEY_TYPE_INCONSISTENT)?
+        .to_string();
+    let point = spki.subject_public_key.raw_bytes();
+
+    // Validate the point is genuinely ON the named curve — the one place
+    // this function touches actual EC math, and it happens here in the
+    // engine (rust/), never in the kmip crate, per the crypto/encoding
+    // boundary this port holds to throughout.
+    let (curve, param_set, canonical_spki): (EccCurve, u32, Vec<u8>) =
+        if curve_oid == SECP256R1_OID {
+            p256::PublicKey::from_sec1_bytes(point).map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+            (EccCurve::P256, CURVE_P256, build_ec_spki_p256(point))
+        } else if curve_oid == SECP384R1_OID {
+            p384::PublicKey::from_sec1_bytes(point).map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+            (EccCurve::P384, CURVE_P384, build_ec_spki_p384(point))
+        } else if curve_oid == SECP521R1_OID {
+            p521::PublicKey::from_sec1_bytes(point).map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+            (EccCurve::P521, CURVE_P521, build_ec_spki_p521(point))
+        } else {
+            return Err(CKR_KEY_TYPE_INCONSISTENT); // e.g. secp256k1, or explicit (non-named) params
+        };
+    let _ = EccCurve::Secp256K1; // silence unused-variant warning; not reachable here by design
+
+    let mut attrs: Attributes = HashMap::new();
+    store_algo_family(&mut attrs, ALGO_ECDSA);
+    set_common_ec_pub_attrs(&mut attrs);
+    store_param_set(&mut attrs, param_set);
+
+    // CKA_EC_POINT: DER OCTET STRING wrapping the uncompressed SEC1 point
+    // — identical wrapping convention to `generate_ecdsa_keypair`.
+    let mut ec_point = Vec::with_capacity(3 + point.len());
+    ec_point.push(0x04);
+    ec_point.extend_from_slice(&crate::crypto::handlers::der_length(point.len()));
+    ec_point.extend_from_slice(point);
+    attrs.insert(CKA_EC_POINT, ec_point);
+    // Store the CANONICAL re-derived SPKI (not the caller's original DER
+    // bytes verbatim) — matches `register_rsa_public_key_der`'s convention
+    // of storing what the engine itself would produce, so a subsequent Get
+    // always returns a form the engine's own builders vouch for. Curve
+    // already validated above; `.to_der()` failing here would mean this
+    // engine's own SPKI encoder produced something spki's decoder itself
+    // rejects — treat that as a bug, not a client-input error.
+    let _ = curve; // used only to select param_set/builder above
+    attrs.insert(
+        CKA_PUBLIC_KEY_INFO,
+        SubjectPublicKeyInfoOwned::from_der(&canonical_spki)
+            .and_then(|s| s.to_der())
+            .unwrap_or(canonical_spki),
+    );
+    insert_id_and_label(&mut attrs, cka_id, label);
+    // PKCS#11 v3.2 §4.3 — imported, not locally generated.
+    store_bool(&mut attrs, CKA_LOCAL, false);
+    store_ulong(&mut attrs, CKA_KEY_GEN_MECHANISM, CKM_UNAVAILABLE_INFORMATION);
+    compute_kcv(&mut attrs);
+    Ok(alloc_in_session_slot(_session, attrs))
+}
+
+/// Register an externally-supplied Ed25519 public key from its DER
+/// `SubjectPublicKeyInfo` (RFC 8410) — see [`register_ecdsa_public_key`]'s
+/// doc comment for why this function exists. Mirrors
+/// [`generate_ed25519_keypair`]'s public-object attribute layout exactly,
+/// including the RFC 8410 convention this engine already follows: the raw
+/// 32-byte Edwards point lives in `CKA_VALUE`, not `CKA_EC_POINT` (that
+/// attribute's SEC1-stripping convention is for Weierstrass curves only —
+/// see `generate_ed25519_keypair`'s comment on exactly this point). Real
+/// DER parsing via `spki`, same as [`register_ecdsa_public_key`].
+pub fn register_ed25519_public_key(
+    _session: u32,
+    der: &[u8],
+    cka_id: &[u8],
+    label: &str,
+) -> Result<u32, CkRv> {
+    use crate::crypto::handlers::build_ed25519_spki;
+    use spki::der::Decode;
+    use spki::SubjectPublicKeyInfoOwned;
+
+    const ED25519_OID: &str = "1.3.101.112";
+
+    let spki = SubjectPublicKeyInfoOwned::from_der(der).map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+    if spki.algorithm.oid.to_string() != ED25519_OID {
+        return Err(CKR_KEY_TYPE_INCONSISTENT);
+    }
+    let point = spki.subject_public_key.raw_bytes();
+    let point_arr: [u8; 32] = point.try_into().map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+    // The one EC-math touch point, in the engine, never in kmip: confirm
+    // this is genuinely a point on the curve before it's ever handed to
+    // C_Verify — a malformed point must fail HERE, not surface as a
+    // confusing verify-time error later.
+    ed25519_dalek::VerifyingKey::from_bytes(&point_arr).map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+
+    let mut attrs: Attributes = HashMap::new();
+    store_algo_family(&mut attrs, ALGO_EDDSA);
+    store_ulong(&mut attrs, CKA_CLASS, CKO_PUBLIC_KEY);
+    store_ulong(&mut attrs, CKA_KEY_TYPE, CKK_EC_EDWARDS);
+    store_bool(&mut attrs, CKA_TOKEN, false);
+    store_bool(&mut attrs, CKA_PRIVATE, false);
+    store_bool(&mut attrs, CKA_ENCRYPT, false);
+    store_bool(&mut attrs, CKA_VERIFY, true);
+    store_bool(&mut attrs, CKA_WRAP, false);
+    store_bool(&mut attrs, CKA_DERIVE, false);
+    attrs.insert(CKA_VALUE, point.to_vec());
+    attrs.insert(CKA_PUBLIC_KEY_INFO, build_ed25519_spki(point));
+    insert_id_and_label(&mut attrs, cka_id, label);
+    store_bool(&mut attrs, CKA_LOCAL, false);
+    store_ulong(&mut attrs, CKA_KEY_GEN_MECHANISM, CKM_UNAVAILABLE_INFORMATION);
+    compute_kcv(&mut attrs);
+    Ok(alloc_in_session_slot(_session, attrs))
+}
+
 /// Register an existing HMAC / Generic Secret key supplied as raw key
 /// bytes. Used by KMIP Register when the client provides a SymmetricKey
 /// with `CryptographicAlgorithm = HMAC_SHA{256,384,512}`. CS-AC-M-{4,5,6}
@@ -2105,6 +2261,131 @@ mod tests {
         let _ = finalize();
         init().unwrap();
         bootstrap_default_token(0, "so", "user", "pqctoday-test").unwrap()
+    }
+
+    // ── register_ecdsa_public_key / register_ed25519_public_key ─────────
+    //
+    // Real round-trip KATs, not just "does it not panic": generate a
+    // keypair NATIVELY, sign with the private half, export the public
+    // half's REAL CKA_PUBLIC_KEY_INFO (produced by generate_*_keypair —
+    // this crate's own encode side), import it back as an INDEPENDENT
+    // object via the new register_* function (the decode side), then
+    // verify the ORIGINAL signature against the RE-IMPORTED handle. This
+    // is the exact shape the pure-Rust Certify/Validate port needs: an
+    // externally-supplied SPKI (from a CSR or a chain certificate) must
+    // verify a signature made by whatever produced that SPKI, regardless
+    // of which engine instance minted it.
+    use crate::state::get_object_attr_bytes;
+    use crate::constants::CKA_PUBLIC_KEY_INFO;
+
+    #[test]
+    fn register_ecdsa_public_key_round_trips_p256_p384_p521() {
+        let _guard = test_lock::acquire();
+        let session = fresh_session();
+        let msg = b"pure-rust cert-ops KAT";
+
+        for (curve, mech) in [
+            (EccCurve::P256, CKM_ECDSA_SHA256),
+            (EccCurve::P384, CKM_ECDSA_SHA384),
+            (EccCurve::P521, CKM_ECDSA_SHA512),
+        ] {
+            let (pub_h, prv_h) =
+                generate_ecdsa_keypair(session, curve, b"\x01", "ecdsa-kat").unwrap();
+            let sig = crate::native::sign::sign(session, prv_h, mech, msg).unwrap();
+            let spki = get_object_attr_bytes(pub_h, CKA_PUBLIC_KEY_INFO)
+                .expect("generate_ecdsa_keypair must set CKA_PUBLIC_KEY_INFO");
+
+            let reimported = register_ecdsa_public_key(session, &spki, b"\x02", "reimport")
+                .unwrap_or_else(|e| panic!("{curve:?}: register failed: {e:x}"));
+            assert_ne!(reimported, pub_h, "must be an independent object");
+
+            let ok = crate::native::sign::verify(session, reimported, mech, msg, &sig)
+                .unwrap_or_else(|e| panic!("{curve:?}: verify errored: {e:x}"));
+            assert!(ok, "{curve:?}: signature must verify against the re-imported key");
+
+            // Negative: a corrupted signature must fail, not silently pass.
+            let mut bad_sig = sig.clone();
+            let last = bad_sig.len() - 1;
+            bad_sig[last] ^= 0xff;
+            let bad_ok = crate::native::sign::verify(session, reimported, mech, msg, &bad_sig)
+                .unwrap_or_else(|e| panic!("{curve:?}: verify(bad sig) errored: {e:x}"));
+            assert!(!bad_ok, "{curve:?}: corrupted signature must NOT verify");
+        }
+        close_session(session).unwrap();
+    }
+
+    #[test]
+    fn register_ed25519_public_key_round_trips() {
+        let _guard = test_lock::acquire();
+        let session = fresh_session();
+        let msg = b"pure-rust cert-ops KAT ed25519";
+
+        let (pub_h, prv_h) = generate_ed25519_keypair(session, b"\x01", "ed25519-kat").unwrap();
+        let sig = crate::native::sign::sign(session, prv_h, CKM_EDDSA, msg).unwrap();
+        let spki = get_object_attr_bytes(pub_h, CKA_PUBLIC_KEY_INFO)
+            .expect("generate_ed25519_keypair must set CKA_PUBLIC_KEY_INFO");
+
+        let reimported = register_ed25519_public_key(session, &spki, b"\x02", "reimport")
+            .expect("register_ed25519_public_key must accept its own generator's SPKI");
+        assert_ne!(reimported, pub_h);
+
+        let ok = crate::native::sign::verify(session, reimported, CKM_EDDSA, msg, &sig)
+            .expect("verify must not error");
+        assert!(ok, "signature must verify against the re-imported key");
+
+        let mut bad_sig = sig.clone();
+        let last = bad_sig.len() - 1;
+        bad_sig[last] ^= 0xff;
+        let bad_ok = crate::native::sign::verify(session, reimported, CKM_EDDSA, msg, &bad_sig)
+            .expect("verify must not error");
+        assert!(!bad_ok, "corrupted signature must NOT verify");
+        close_session(session).unwrap();
+    }
+
+    #[test]
+    fn register_ecdsa_public_key_rejects_malformed_and_wrong_algorithm_der() {
+        let _guard = test_lock::acquire();
+        let session = fresh_session();
+
+        assert!(register_ecdsa_public_key(session, &[], b"\x01", "empty").is_err());
+        assert!(register_ecdsa_public_key(session, &[0x30, 0x00], b"\x01", "empty-seq").is_err());
+
+        // A genuine Ed25519 SPKI must be rejected by the ECDSA importer —
+        // and vice versa — proving the OID check actually discriminates,
+        // not just "parses as *some* valid SPKI".
+        let (ed_pub, _) = generate_ed25519_keypair(session, b"\x01", "ed-for-negative").unwrap();
+        let ed_spki = get_object_attr_bytes(ed_pub, CKA_PUBLIC_KEY_INFO).unwrap();
+        assert!(register_ecdsa_public_key(session, &ed_spki, b"\x02", "wrong-alg").is_err());
+
+        let (ec_pub, _) =
+            generate_ecdsa_keypair(session, EccCurve::P256, b"\x01", "ec-for-negative").unwrap();
+        let ec_spki = get_object_attr_bytes(ec_pub, CKA_PUBLIC_KEY_INFO).unwrap();
+        assert!(register_ed25519_public_key(session, &ec_spki, b"\x02", "wrong-alg").is_err());
+
+        close_session(session).unwrap();
+    }
+
+    /// `register_ecdsa_public_key` only recognizes P-256/P-384/P-521 (the
+    /// three curves `EccCurve` maps to a `CURVE_*` PKCS#11 param set for
+    /// import). secp256k1 is a real, generateable curve in this engine
+    /// (`generate_ecdsa_keypair(.., EccCurve::Secp256K1, ..)`), so this
+    /// uses a REAL secp256k1 SPKI (this engine's own encoder, not a
+    /// hand-spliced fixture) to prove the curve check genuinely
+    /// discriminates rather than accepting anything `id-ecPublicKey`.
+    #[test]
+    fn register_ecdsa_public_key_rejects_unrecognized_curve() {
+        let _guard = test_lock::acquire();
+        let session = fresh_session();
+        let (pub_h, _) =
+            generate_ecdsa_keypair(session, EccCurve::Secp256K1, b"\x01", "k1-src").unwrap();
+        let spki = get_object_attr_bytes(pub_h, CKA_PUBLIC_KEY_INFO)
+            .expect("generate_ecdsa_keypair must set CKA_PUBLIC_KEY_INFO for secp256k1 too");
+
+        assert!(
+            register_ecdsa_public_key(session, &spki, b"\x02", "bad-curve").is_err(),
+            "secp256k1 is a real id-ecPublicKey SPKI but not one of the recognized curves"
+        );
+        close_session(session).unwrap();
     }
 
     /// ML-KEM-768 keygen produces a valid keypair. FIPS 203 §7.4 — the

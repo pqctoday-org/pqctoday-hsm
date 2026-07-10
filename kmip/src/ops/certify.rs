@@ -12,7 +12,7 @@
 //! the new UID. Re-certify renews an existing certificate with a new
 //! validity window (`Offset`) and `Replaced` / `Replacement` links.
 //!
-//! ## Why not rcgen for issuance
+//! ## Why not rcgen
 //!
 //! rcgen 0.13 can ISSUE RSA/ECDSA/Ed25519 certs, but its
 //! `SignatureAlgorithm` table has no ML-DSA — it cannot emit a
@@ -20,8 +20,13 @@
 //! algorithm goes through one uniform path: build the `TBSCertificate`
 //! with [`x509_cert`] (which accepts ARBITRARY `AlgorithmIdentifier`
 //! OIDs), sign the TBS DER in the engine via `native::sign`, and wrap the
-//! signature into the X.509 `Certificate`. rcgen is used ONLY to parse +
-//! verify the inbound PKCS#10 CSR (`Invalid CSR` on failure).
+//! signature into the X.509 `Certificate`. Inbound PKCS#10 CSRs are
+//! parsed with [`x509_cert::request::CertReq`] and their self-signature
+//! verified via `super::spki_verify::verify_with_spki` (the engine, not
+//! rcgen) — for the same reason: rcgen's verifier inherits the same
+//! ML-DSA gap and rejected genuinely-valid PQC-signed CSRs as
+//! `Invalid CSR`. rcgen appears only in this file's own tests, as an
+//! independent CSR/cert fixture generator.
 //!
 //! ## Signature-format conversions (X.509 expects)
 //!
@@ -73,6 +78,27 @@ const OID_ECDSA_SHA512: &str = "1.2.840.10045.4.3.4";
 const OID_ML_DSA_44: &str = "2.16.840.1.101.3.4.3.17";
 const OID_ML_DSA_65: &str = "2.16.840.1.101.3.4.3.18";
 const OID_ML_DSA_87: &str = "2.16.840.1.101.3.4.3.19";
+// Pure SLH-DSA (FIPS 205), RFC 9909 §3 — NIST CSOR arc, same
+// nistAlgorithms(4).sigAlgs(3) parent as ML-DSA above, contiguous from
+// where it leaves off. Verified against the project's own downloaded RFC
+// 9909 copy (hub `public/library/RFC_9909.html`, ASN.1 module in §3):
+// `sigAlgs OBJECT IDENTIFIER ::= { nistAlgorithms 3 }`, then
+// `id-slh-dsa-sha2-128s ::= { sigAlgs 20 }` counting up to
+// `id-slh-dsa-shake-256f ::= { sigAlgs 31 }`. RFC 9909 §3/§4: the
+// AlgorithmIdentifier `parameters` field MUST be absent for every one of
+// these OIDs (same convention as ML-DSA, not RSA's explicit NULL).
+const OID_SLH_DSA_SHA2_128S: &str = "2.16.840.1.101.3.4.3.20";
+const OID_SLH_DSA_SHA2_128F: &str = "2.16.840.1.101.3.4.3.21";
+const OID_SLH_DSA_SHA2_192S: &str = "2.16.840.1.101.3.4.3.22";
+const OID_SLH_DSA_SHA2_192F: &str = "2.16.840.1.101.3.4.3.23";
+const OID_SLH_DSA_SHA2_256S: &str = "2.16.840.1.101.3.4.3.24";
+const OID_SLH_DSA_SHA2_256F: &str = "2.16.840.1.101.3.4.3.25";
+const OID_SLH_DSA_SHAKE_128S: &str = "2.16.840.1.101.3.4.3.26";
+const OID_SLH_DSA_SHAKE_128F: &str = "2.16.840.1.101.3.4.3.27";
+const OID_SLH_DSA_SHAKE_192S: &str = "2.16.840.1.101.3.4.3.28";
+const OID_SLH_DSA_SHAKE_192F: &str = "2.16.840.1.101.3.4.3.29";
+const OID_SLH_DSA_SHAKE_256S: &str = "2.16.840.1.101.3.4.3.30";
+const OID_SLH_DSA_SHAKE_256F: &str = "2.16.840.1.101.3.4.3.31";
 // EC named curves (in the SPKI alg params of an ECDSA key).
 const OID_EC_P256: &str = "1.2.840.10045.3.1.7";
 const OID_EC_P384: &str = "1.3.132.0.34";
@@ -167,6 +193,44 @@ fn signature_alg_and_mech(
             (
                 AlgorithmIdentifierOwned { oid: oid(sig_oid), parameters: None },
                 c::CKM_ML_DSA,
+            )
+        }
+        KmipAlgorithm::SlhDsaSha2_128s
+        | KmipAlgorithm::SlhDsaSha2_128f
+        | KmipAlgorithm::SlhDsaSha2_192s
+        | KmipAlgorithm::SlhDsaSha2_192f
+        | KmipAlgorithm::SlhDsaSha2_256s
+        | KmipAlgorithm::SlhDsaSha2_256f
+        | KmipAlgorithm::SlhDsaShake128s
+        | KmipAlgorithm::SlhDsaShake128f
+        | KmipAlgorithm::SlhDsaShake192s
+        | KmipAlgorithm::SlhDsaShake192f
+        | KmipAlgorithm::SlhDsaShake256s
+        | KmipAlgorithm::SlhDsaShake256f => {
+            // RFC 9909 §3/§4 — ABSENT parameters, same convention as
+            // ML-DSA. One sig_oid per parameter set (unlike ECDSA, the
+            // parameter set is the WHOLE key identity, not derived from
+            // a separate curve field) but a single engine mechanism —
+            // CKM_SLH_DSA covers all 12 (CKA_PARAMETER_SET on the key
+            // handle itself picks the variant, mirroring how CKM_ML_DSA
+            // covers all 3 ML-DSA sizes).
+            let sig_oid = match ca_algorithm {
+                KmipAlgorithm::SlhDsaSha2_128s => OID_SLH_DSA_SHA2_128S,
+                KmipAlgorithm::SlhDsaSha2_128f => OID_SLH_DSA_SHA2_128F,
+                KmipAlgorithm::SlhDsaSha2_192s => OID_SLH_DSA_SHA2_192S,
+                KmipAlgorithm::SlhDsaSha2_192f => OID_SLH_DSA_SHA2_192F,
+                KmipAlgorithm::SlhDsaSha2_256s => OID_SLH_DSA_SHA2_256S,
+                KmipAlgorithm::SlhDsaSha2_256f => OID_SLH_DSA_SHA2_256F,
+                KmipAlgorithm::SlhDsaShake128s => OID_SLH_DSA_SHAKE_128S,
+                KmipAlgorithm::SlhDsaShake128f => OID_SLH_DSA_SHAKE_128F,
+                KmipAlgorithm::SlhDsaShake192s => OID_SLH_DSA_SHAKE_192S,
+                KmipAlgorithm::SlhDsaShake192f => OID_SLH_DSA_SHAKE_192F,
+                KmipAlgorithm::SlhDsaShake256s => OID_SLH_DSA_SHAKE_256S,
+                _ => OID_SLH_DSA_SHAKE_256F,
+            };
+            (
+                AlgorithmIdentifierOwned { oid: oid(sig_oid), parameters: None },
+                c::CKM_SLH_DSA,
             )
         }
         other => {
@@ -304,7 +368,7 @@ fn resolve_subject(
                     ));
                 }
             }
-            parse_pkcs10_csr(op, csr_bytes)
+            parse_pkcs10_csr(deps, op, csr_bytes)
         }
         (None, _) => {
             // No CSR — certify a stored PublicKey by UID. Its DER public
@@ -326,12 +390,32 @@ fn resolve_subject(
                     rec.object_type
                 )));
             }
-            let spki_der = rec.key_material.as_deref().ok_or_else(|| {
-                KmipError::failed(
-                    ResultReason::KeyValueNotPresent,
-                    format!("{op}: PublicKey {uid:?} has no SubjectPublicKeyInfo DER"),
-                )
-            })?;
+            // WP-R/R1 — `CreateKeyPair` never populates `key_material` for
+            // a non-hybrid-KEM PublicKey (its real SPKI lives only in the
+            // engine; confirmed by reading `create_key_pair.rs` directly).
+            // Try the store cache first (respects a `Register`'d/imported
+            // key's client-supplied bytes, unchanged from before); on a
+            // miss, fall back to a LIVE engine lookup instead of failing a
+            // key this server itself just generated moments ago — mirrors
+            // `bootstrap_ca_certificate`'s existing pattern exactly (see
+            // `live_public_key_spki` below).
+            let owned_spki_der;
+            let spki_der: &[u8] = match rec.key_material.as_deref() {
+                Some(bytes) => bytes,
+                None => {
+                    let session = deps.engine_session.ok_or_else(|| {
+                        KmipError::failed(
+                            ResultReason::KeyValueNotPresent,
+                            format!(
+                                "{op}: PublicKey {uid:?} has no SubjectPublicKeyInfo DER on \
+                                 record and no engine session to look it up live"
+                            ),
+                        )
+                    })?;
+                    owned_spki_der = live_public_key_spki(session, &rec.pkcs11_cka_id, uid)?;
+                    &owned_spki_der
+                }
+            };
             let spki = SubjectPublicKeyInfoOwned::from_der(spki_der).map_err(|e| {
                 KmipError::failed(
                     ResultReason::InvalidField,
@@ -349,21 +433,70 @@ fn resolve_subject(
     }
 }
 
+/// Resolve a PublicKey object's real SubjectPublicKeyInfo DER directly
+/// from the engine, given its PKCS#11 `CKA_ID` — the live counterpart of
+/// a stored `ObjectRecord`'s (possibly absent) `key_material` cache.
+///
+/// WP-R/R1 (cert-ops plan revision): shared by `resolve_subject`'s
+/// stored-PublicKey-UID path (a `CreateKeyPair`-generated key, whose
+/// `key_material` the store never caches) and `bootstrap_ca_certificate`
+/// (a `PrivateKey` UID's paired public half) — both need "the real SPKI
+/// bytes for a public key the engine holds, regardless of what the store
+/// happens to have cached," and this is the one place that logic lives
+/// now instead of being duplicated.
+fn live_public_key_spki(session: u32, cka_id: &[u8], not_found_context: &str) -> Result<Vec<u8>> {
+    use softhsmrustv3::constants as c;
+    let pub_h = super::helpers::find_handle_for_object(session, cka_id, ObjectType::PublicKey)
+        .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "live_public_key_spki:find"))?
+        .ok_or_else(|| KmipError::object_not_found(not_found_context))?;
+    softhsmrustv3::native::get_attribute(session, pub_h, c::CKA_PUBLIC_KEY_INFO).ok_or_else(|| {
+        KmipError::failed(
+            ResultReason::KeyValueNotPresent,
+            format!("{not_found_context}: public key has no CKA_PUBLIC_KEY_INFO in the engine"),
+        )
+    })
+}
+
 /// Parse a PKCS#10 CSR via `x509-cert` (subject DN + SPKI) and verify its
-/// self-signature via rcgen (`Invalid CSR` on failure).
-fn parse_pkcs10_csr(op: &str, csr: &[u8]) -> Result<SubjectInputs> {
-    // Verify the CSR self-signature (rcgen's parser checks it).
-    // `CertificateSigningRequestDer` lives in `rustls-pki-types`, re-exported
-    // by `rustls` (a direct dep) — rcgen does not re-export it.
-    let csr_der: rustls::pki_types::CertificateSigningRequestDer<'static> = csr.to_vec().into();
-    rcgen::CertificateSigningRequestParams::from_der(&csr_der).map_err(|e| {
-        KmipError::invalid_csr(format!("{op}: PKCS#10 CSR rejected: {e}"))
-    })?;
-    // Decode subject DN + SPKI directly with x509-cert (gives us the
-    // SubjectPublicKeyInfoOwned the TBSCertificate needs).
+/// self-signature via the engine (`Invalid CSR` on a bad or unverifiable
+/// signature) — `super::spki_verify::verify_with_spki` on the CSR's own
+/// `CertReqInfo` DER against its own `signature`/`algorithm` (RFC 2986
+/// §4: "the CertificationRequestInfo ... is authenticated by the
+/// subject's private key").
+///
+/// Replaces the earlier rcgen-backed check (`rcgen::
+/// CertificateSigningRequestParams::from_der`): rcgen's `SignatureAlgorithm`
+/// table has no ML-DSA (or any PQC algorithm), so a self-signed PQC CSR
+/// was rejected as `Invalid CSR` even though the signature was genuinely
+/// valid — an artifact of the checker's coverage, not the CSR. Going
+/// through the same engine-backed verifier Certify/Validate use for
+/// every other signature check removes that gap: any algorithm
+/// `verify_with_spki` supports (RSA/ECDSA/ML-DSA/Ed25519) is now
+/// checkable, PQC included.
+fn parse_pkcs10_csr(deps: &Deps, op: &str, csr: &[u8]) -> Result<SubjectInputs> {
     let req = x509_cert::request::CertReq::from_der(csr).map_err(|e| {
         KmipError::invalid_csr(format!("{op}: PKCS#10 CSR DER unparseable: {e}"))
     })?;
+    let signed_bytes = req.info.to_der().map_err(der_err)?;
+    let verdict = super::spki_verify::verify_with_spki(
+        deps,
+        &req.info.public_key,
+        &req.algorithm,
+        &signed_bytes,
+        req.signature.raw_bytes(),
+    )?;
+    match verdict {
+        super::spki_verify::SpkiVerdict::Valid => {}
+        super::spki_verify::SpkiVerdict::Invalid => {
+            return Err(KmipError::invalid_csr(format!("{op}: CSR self-signature does not verify")));
+        }
+        super::spki_verify::SpkiVerdict::UnsupportedAlgorithm => {
+            return Err(KmipError::invalid_csr(format!(
+                "{op}: CSR signature algorithm {} has no verify mechanism — cannot confirm self-signature",
+                req.algorithm.oid
+            )));
+        }
+    }
     Ok(SubjectInputs {
         subject: req.info.subject.clone(),
         spki: req.info.public_key.clone(),
@@ -581,7 +714,6 @@ pub fn bootstrap_ca_certificate(
     subject_cn: &str,
     validity_days: i64,
 ) -> Result<Vec<u8>> {
-    use softhsmrustv3::constants as c;
     let session = deps.engine_session.ok_or_else(|| {
         KmipError::internal("bootstrap_ca_certificate requires an engine session")
     })?;
@@ -594,29 +726,16 @@ pub fn bootstrap_ca_certificate(
             "{private_key_uid:?} is not a PrivateKey"
         )));
     }
-    // Resolve both halves (pub + prv) from the shared CKA_ID.
+    // Resolve the private handle for signing, and the public SPKI via the
+    // shared live-lookup helper (WP-R/R1 — same one `resolve_subject` now
+    // uses for the identical "read this key's real SPKI off the engine"
+    // need).
     let prv_h = super::helpers::find_handle_for_object(
         session, &priv_rec.pkcs11_cka_id, ObjectType::PrivateKey,
     )
     .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "bootstrap:find-priv"))?
     .ok_or_else(|| KmipError::object_not_found(private_key_uid))?;
-    let pub_h = super::helpers::find_handle_for_object(
-        session, &priv_rec.pkcs11_cka_id, ObjectType::PublicKey,
-    )
-    .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "bootstrap:find-pub"))?
-    .ok_or_else(|| {
-        KmipError::failed(
-            ResultReason::KeyValueNotPresent,
-            format!("CA public key for {private_key_uid:?} not found in engine"),
-        )
-    })?;
-    let spki_der = softhsmrustv3::native::get_attribute(session, pub_h, c::CKA_PUBLIC_KEY_INFO)
-        .ok_or_else(|| {
-            KmipError::failed(
-                ResultReason::KeyValueNotPresent,
-                "CA public key has no CKA_PUBLIC_KEY_INFO".to_string(),
-            )
-        })?;
+    let spki_der = live_public_key_spki(session, &priv_rec.pkcs11_cka_id, private_key_uid)?;
     let spki = SubjectPublicKeyInfoOwned::from_der(&spki_der).map_err(|e| {
         KmipError::failed(ResultReason::GeneralFailure, format!("CA SPKI DER unparseable: {e}"))
     })?;
@@ -782,7 +901,7 @@ pub fn recertify(
     // in place). The PublicKey link is carried over from the existing
     // certificate record if present.
     let subject_inputs = if let Some(csr) = req.certificate_request.as_deref() {
-        parse_pkcs10_csr("Re-certify", csr)
+        parse_pkcs10_csr(deps, "Re-certify", csr)
             .map_err(|e| fail(deps, correlation_id, "Re-certify", e))?
     } else {
         SubjectInputs {
@@ -872,7 +991,6 @@ fn store_certificate(
     replaced_uid: Option<&str>,
     name: Option<String>,
 ) -> Result<String> {
-    use sha2::{Digest, Sha256};
     let uid = format!("urn:uuid:{}", uuid::Uuid::new_v4());
     let now = OffsetDateTime::now_utc();
 
@@ -908,7 +1026,14 @@ fn store_certificate(
         certificate_value: Some(cert_der.to_vec()),
         certificate_length: Some(cert_der.len() as i32),
         certificate_subject_cn: subject_cn(cert_der),
-        digest_value: Some(Sha256::digest(cert_der).to_vec()),
+        // WP7-d (cert-ops plan) — was a direct `sha2::Sha256::digest`
+        // call; the §11 Digest attribute is still a hash (a crypto
+        // primitive per this crate's invariant), so it goes through
+        // the engine like everything else, not a local crypto crate.
+        digest_value: Some(
+            softhsmrustv3::native::digest(softhsmrustv3::constants::CKM_SHA256, cert_der)
+                .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "store_certificate:digest"))?,
+        ),
         ..ObjectRecord::default()
     })?;
 
@@ -964,11 +1089,11 @@ fn fail(deps: &Deps, correlation_id: &str, op: &str, err: KmipError) -> KmipErro
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::auditlog::RingSink;
     use crate::store::MemoryStore;
-    use std::sync::{Arc, Mutex, OnceLock};
+    use std::sync::Arc;
 
     // ── No-engine unit tests (format conversions + negatives) ────────────
 
@@ -1060,25 +1185,29 @@ mod tests {
 
     // ── Engine-backed issuance + verification (the high-assurance track) ──
 
-    /// Serialise engine-touching tests (shared global session state).
-    fn engine_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner())
-    }
+    /// Serialise engine-touching tests. Shared crate-wide (not a lock
+    /// private to this file) — see `ops::helpers::engine_lock`'s doc for
+    /// why a per-file lock isn't enough once more than one file's tests
+    /// touch a real engine session (`spki_verify.rs` since WP1).
+    use super::super::helpers::engine_lock;
 
     /// Generate a CA keypair of `algo` in the engine, read its SPKI, build
     /// a self-signed CA certificate (TBS signed in the engine), store the
     /// CA private key + CA cert, and hand back Deps designated with that
     /// CA. Returns the Deps plus the engine session + CA public handle so
     /// tests can verify issued signatures directly.
-    struct CaFixture {
-        deps: Deps,
+    // `pub(crate)` (not private) — WP-R/R2's Register test needs a real,
+    // designated CA to Certify against, and this fixture is the one place
+    // that setup lives; reusing it (instead of a second copy in
+    // register_import_export.rs's test module) is the point.
+    pub(crate) struct CaFixture {
+        pub(crate) deps: Deps,
         session: u32,
         ca_pub_handle: u32,
         ca_algo: KmipAlgorithm,
     }
 
-    fn bootstrap_ca(algo: KmipAlgorithm) -> CaFixture {
+    pub(crate) fn bootstrap_ca(algo: KmipAlgorithm) -> CaFixture {
         use softhsmrustv3::constants as c;
         use softhsmrustv3::native::{self, session, EccCurve};
         let _ = session::finalize();
@@ -1094,6 +1223,22 @@ mod tests {
             }
             KmipAlgorithm::MlDsa65 => {
                 native::generate_ml_dsa_keypair(sess, c::CKP_ML_DSA_65, &cka_id, "ca-mldsa")
+            }
+            slh @ (KmipAlgorithm::SlhDsaSha2_128s
+            | KmipAlgorithm::SlhDsaSha2_128f
+            | KmipAlgorithm::SlhDsaSha2_192s
+            | KmipAlgorithm::SlhDsaSha2_192f
+            | KmipAlgorithm::SlhDsaSha2_256s
+            | KmipAlgorithm::SlhDsaSha2_256f
+            | KmipAlgorithm::SlhDsaShake128s
+            | KmipAlgorithm::SlhDsaShake128f
+            | KmipAlgorithm::SlhDsaShake192s
+            | KmipAlgorithm::SlhDsaShake192f
+            | KmipAlgorithm::SlhDsaShake256s
+            | KmipAlgorithm::SlhDsaShake256f) => {
+                let param_set = super::super::helpers::native_parameter_set(slh)
+                    .expect("every SLH-DSA KmipAlgorithm has a CKP_SLH_DSA_* mapping");
+                native::generate_slh_dsa_keypair(sess, param_set, &cka_id, "ca-slhdsa")
             }
             other => panic!("unsupported CA algo {other:?}"),
         }
@@ -1225,6 +1370,44 @@ mod tests {
         .expect("verify call");
         assert!(ok, "{:?}-issued certificate signature must verify against the CA key", algo);
 
+        // WP6-a (cert-ops plan revision) — structural parity fields: not
+        // byte-identical (serial + timestamp are wall-clock, ECDSA/ML-DSA/
+        // SLH-DSA signatures are randomized by this engine's default —
+        // confirmed empirically, see plan §"WP6-a"), but every field that
+        // ISN'T inherently random must be pinned here so a native run and
+        // a wasm (pkg_node) run of the identical sequence can each assert
+        // the same facts independently. Deliberately NOT asserting serial
+        // number, timestamps, or raw signature bytes.
+        assert_eq!(
+            issued.tbs_certificate.issuer.to_string(),
+            "CN=PQC Test CA",
+            "issuer DN must be the CA's own subject DN"
+        );
+        assert_eq!(
+            issued.tbs_certificate.subject.to_string(),
+            "CN=leaf",
+            "subject DN must match the CSR"
+        );
+        let not_before: OffsetDateTime =
+            std::time::SystemTime::from(issued.tbs_certificate.validity.not_before).into();
+        let not_after: OffsetDateTime =
+            std::time::SystemTime::from(issued.tbs_certificate.validity.not_after).into();
+        assert_eq!(
+            (not_after - not_before).whole_days(),
+            365,
+            "default validity window WIDTH (not the absolute stamps) is 365 days"
+        );
+        assert_eq!(
+            issued.tbs_certificate.signature.oid,
+            signature_alg_and_mech(f.ca_algo, curve.as_deref()).unwrap().0.oid,
+            "TBS signature AlgorithmIdentifier OID must match what the CA algorithm resolves to"
+        );
+        assert!(
+            issued.tbs_certificate.extensions.is_none(),
+            "v0.1 leaf certs carry no extensions by design — a future change adding \
+             extensions here should update this assertion deliberately"
+        );
+
         let _ = softhsmrustv3::native::session::finalize();
     }
 
@@ -1244,6 +1427,143 @@ mod tests {
         // issuable only via the x509-cert + engine path (rcgen can't),
         // and its FIPS-204 signature verifies in the engine.
         issue_and_verify(KmipAlgorithm::MlDsa65);
+    }
+
+    /// Build a self-signed PKCS#10 CSR for `algo`, signed by a FRESH
+    /// engine keypair — not rcgen, which cannot sign ML-DSA at all (no
+    /// entry in its `SignatureAlgorithm` table). This is what a genuine
+    /// PQC-capable client would submit: `CertReqInfo` built with
+    /// `x509-cert`, signed in the engine, exactly mirroring how
+    /// `issue_certificate`/`bootstrap_ca_certificate` self-sign a
+    /// `TbsCertificate` — just shaped as a `CertReq` instead.
+    fn build_engine_signed_csr(session: u32, algo: KmipAlgorithm, subject_cn: &str) -> Vec<u8> {
+        use softhsmrustv3::constants as c;
+        use softhsmrustv3::native::{self, EccCurve};
+        use x509_cert::request::{CertReq, CertReqInfo, Version};
+
+        let cka_id = format!("csr-subj-{subject_cn}").into_bytes();
+        let (pub_h, prv_h) = match algo {
+            KmipAlgorithm::Rsa => native::generate_rsa_keypair(session, 2048, &cka_id, "csr-rsa"),
+            KmipAlgorithm::Ecdsa => {
+                native::generate_ecdsa_keypair(session, EccCurve::P256, &cka_id, "csr-ec")
+            }
+            KmipAlgorithm::MlDsa65 => {
+                native::generate_ml_dsa_keypair(session, c::CKP_ML_DSA_65, &cka_id, "csr-mldsa")
+            }
+            other => panic!("unsupported CSR subject algo {other:?}"),
+        }
+        .expect("CSR subject keygen");
+
+        let spki_der = native::get_attribute(session, pub_h, c::CKA_PUBLIC_KEY_INFO)
+            .expect("CSR subject SPKI");
+        let spki = SubjectPublicKeyInfoOwned::from_der(&spki_der).unwrap();
+        let curve = ec_curve_oid_of(&spki);
+        let (sig_alg, mech) = signature_alg_and_mech(algo, curve.as_deref()).unwrap();
+
+        let info = CertReqInfo {
+            version: Version::V1,
+            subject: Name::from_str(&format!("CN={subject_cn}")).unwrap(),
+            public_key: spki,
+            attributes: Default::default(),
+        };
+        let info_der = info.to_der().unwrap();
+        let raw_sig = native::sign(session, prv_h, mech, &info_der).unwrap();
+        let sig_bytes = match algo {
+            KmipAlgorithm::Ecdsa => ecdsa_raw_to_der(&raw_sig).unwrap(),
+            _ => raw_sig,
+        };
+        CertReq { info, algorithm: sig_alg, signature: BitString::from_bytes(&sig_bytes).unwrap() }
+            .to_der()
+            .unwrap()
+    }
+
+    /// The NEW capability this port unlocks: a self-signed ML-DSA-65 CSR
+    /// — genuinely valid, but a shape rcgen/aws_lc_rs cannot even
+    /// evaluate (no ML-DSA in its `SignatureAlgorithm` table) — used to
+    /// be rejected as `Invalid CSR` regardless of its actual validity.
+    /// The engine-backed `verify_with_spki` has no such gap.
+    #[test]
+    fn certify_ml_dsa_pqc_csr_is_accepted() {
+        let (deps, _g) = ca_engine_deps(KmipAlgorithm::Ecdsa);
+        let session = deps.engine_session.unwrap();
+        let csr_der = build_engine_signed_csr(session, KmipAlgorithm::MlDsa65, "pqc-leaf");
+
+        let resp = certify(
+            &deps,
+            CertifyRequest {
+                certificate_request_type: Some(CertificateRequestType::Pkcs10),
+                certificate_request: Some(csr_der),
+                ..CertifyRequest::default()
+            },
+            "c-pqc-csr",
+        )
+        .expect("a genuinely self-signature-valid ML-DSA CSR must be accepted");
+        assert_eq!(deps.store.get(&resp.uid).unwrap().unwrap().object_type, ObjectType::Certificate);
+    }
+
+    /// Negative control for the same new path: a tampered ML-DSA CSR
+    /// signature must still be rejected — the new PQC coverage isn't a
+    /// blanket accept.
+    #[test]
+    fn certify_ml_dsa_pqc_csr_tampered_is_invalid_csr() {
+        let (deps, _g) = ca_engine_deps(KmipAlgorithm::Ecdsa);
+        let session = deps.engine_session.unwrap();
+        let mut csr_der = build_engine_signed_csr(session, KmipAlgorithm::MlDsa65, "pqc-leaf-bad");
+        let n = csr_der.len();
+        csr_der[n - 5] ^= 0xFF;
+
+        let err = certify(
+            &deps,
+            CertifyRequest {
+                certificate_request_type: Some(CertificateRequestType::Pkcs10),
+                certificate_request: Some(csr_der),
+                ..CertifyRequest::default()
+            },
+            "c-pqc-csr-bad",
+        )
+        .unwrap_err();
+        assert_eq!(err.result_reason(), ResultReason::InvalidCsr);
+    }
+
+    /// WP2b — every one of the 12 FIPS 205 parameter sets gets its own
+    /// correct RFC 9909 OID and the shared `CKM_SLH_DSA` mechanism. A
+    /// pure table check (no engine/keygen), so it's cheap enough to cover
+    /// all 12 rather than sampling — the whole point is no OID typo in
+    /// the table, and only an exhaustive check catches that.
+    #[test]
+    fn signature_alg_and_mech_covers_all_twelve_slh_dsa_parameter_sets() {
+        use softhsmrustv3::constants::CKM_SLH_DSA;
+        let cases = [
+            (KmipAlgorithm::SlhDsaSha2_128s, OID_SLH_DSA_SHA2_128S),
+            (KmipAlgorithm::SlhDsaSha2_128f, OID_SLH_DSA_SHA2_128F),
+            (KmipAlgorithm::SlhDsaSha2_192s, OID_SLH_DSA_SHA2_192S),
+            (KmipAlgorithm::SlhDsaSha2_192f, OID_SLH_DSA_SHA2_192F),
+            (KmipAlgorithm::SlhDsaSha2_256s, OID_SLH_DSA_SHA2_256S),
+            (KmipAlgorithm::SlhDsaSha2_256f, OID_SLH_DSA_SHA2_256F),
+            (KmipAlgorithm::SlhDsaShake128s, OID_SLH_DSA_SHAKE_128S),
+            (KmipAlgorithm::SlhDsaShake128f, OID_SLH_DSA_SHAKE_128F),
+            (KmipAlgorithm::SlhDsaShake192s, OID_SLH_DSA_SHAKE_192S),
+            (KmipAlgorithm::SlhDsaShake192f, OID_SLH_DSA_SHAKE_192F),
+            (KmipAlgorithm::SlhDsaShake256s, OID_SLH_DSA_SHAKE_256S),
+            (KmipAlgorithm::SlhDsaShake256f, OID_SLH_DSA_SHAKE_256F),
+        ];
+        let mut seen_oids = std::collections::HashSet::new();
+        for (algo, expected_oid) in cases {
+            let (alg_id, mech) = signature_alg_and_mech(algo, None).unwrap();
+            assert_eq!(alg_id.oid.to_string(), expected_oid, "{algo:?}: wrong OID");
+            assert!(alg_id.parameters.is_none(), "{algo:?}: RFC 9909 requires ABSENT parameters");
+            assert_eq!(mech, CKM_SLH_DSA, "{algo:?}: wrong engine mechanism");
+            assert!(seen_oids.insert(expected_oid), "duplicate OID {expected_oid} in the table");
+        }
+    }
+
+    /// WP2b headline: a REAL SLH-DSA-signed X.509 certificate, issued via
+    /// the engine (rcgen has no SLH-DSA support at all) and verified in
+    /// the engine. SHA2-128f (a "fast-sign" parameter set) keeps the test
+    /// affordable; the OID table itself is checked exhaustively above.
+    #[test]
+    fn certify_slh_dsa_128f_issued_cert_verifies_against_ca() {
+        issue_and_verify(KmipAlgorithm::SlhDsaSha2_128f);
     }
 
     #[test]
@@ -1286,6 +1606,82 @@ mod tests {
         assert_eq!(pk.links.get("CertificateLink"), Some(&resp.uid));
 
         let _ = softhsmrustv3::native::session::finalize();
+    }
+
+    /// WP-R/R1 (cert-ops plan revision) — the headline test the original
+    /// draft of this work package was missing: certify a subject key
+    /// straight off `CreateKeyPair`, with NO `Register` step and no
+    /// manually-constructed `ObjectRecord.key_material` (unlike
+    /// `certify_supplied_public_key_no_csr` above, which hand-sets
+    /// `key_material` — exactly the store-cache path that does NOT exist
+    /// for a real `CreateKeyPair` output). Runs for RSA, ECDSA, and
+    /// ML-DSA — the three families whose Register support was assumed
+    /// (not tested) to make this work; `resolve_subject`'s live-engine
+    /// fallback (`live_public_key_spki`) is what actually makes it work
+    /// now, for all three uniformly, without needing Register at all.
+    fn certify_freshly_created_public_key_by_uid(algo: KmipAlgorithm) {
+        use crate::kmip30::{Attribute, CreateKeyPairRequest};
+        use crate::ops::create_key_pair::create_key_pair;
+
+        let _g = engine_lock();
+        let f = bootstrap_ca(KmipAlgorithm::Ecdsa);
+
+        let subj = create_key_pair(
+            &f.deps,
+            CreateKeyPairRequest {
+                common_attributes: vec![Attribute::CryptographicAlgorithm(algo)],
+                private_key_attributes: vec![],
+                public_key_attributes: vec![],
+                seed: None,
+            },
+            "CreateKeyPair",
+            "c-subj-fresh",
+        )
+        .unwrap();
+
+        // The freshly-created PublicKey record must NOT have cached SPKI
+        // bytes — if this ever starts failing, `create_key_pair.rs`
+        // changed to populate `key_material` and this test should be
+        // simplified (the live-engine fallback would no longer be
+        // exercised by it).
+        let pub_rec = f.deps.store.get(&subj.public_key_uid).unwrap().unwrap();
+        assert!(
+            pub_rec.key_material.is_none(),
+            "{algo:?}: test assumption violated — CreateKeyPair now caches key_material; \
+             this no longer exercises the live-engine fallback"
+        );
+
+        let resp = certify(
+            &f.deps,
+            CertifyRequest { uid: Some(subj.public_key_uid.clone()), ..CertifyRequest::default() },
+            "c-fresh",
+        )
+        .unwrap_or_else(|e| panic!("{algo:?}: Certify a freshly-created PublicKey UID must \
+                                     succeed via the live-engine SPKI fallback: {e:?}"));
+
+        let cert = f.deps.store.get(&resp.uid).unwrap().unwrap();
+        assert_eq!(cert.object_type, ObjectType::Certificate);
+        assert_eq!(
+            cert.links.get("PublicKeyLink").map(String::as_str),
+            Some(subj.public_key_uid.as_str())
+        );
+
+        let _ = softhsmrustv3::native::session::finalize();
+    }
+
+    #[test]
+    fn certify_freshly_created_rsa_public_key_by_uid() {
+        certify_freshly_created_public_key_by_uid(KmipAlgorithm::Rsa);
+    }
+
+    #[test]
+    fn certify_freshly_created_ecdsa_public_key_by_uid() {
+        certify_freshly_created_public_key_by_uid(KmipAlgorithm::Ecdsa);
+    }
+
+    #[test]
+    fn certify_freshly_created_ml_dsa_public_key_by_uid() {
+        certify_freshly_created_public_key_by_uid(KmipAlgorithm::MlDsa65);
     }
 
     #[test]

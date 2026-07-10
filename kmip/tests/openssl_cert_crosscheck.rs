@@ -163,6 +163,23 @@ fn bootstrap_ca(algo: KmipAlgorithm) -> CaFixture {
         KmipAlgorithm::MlDsa65 => {
             native::generate_ml_dsa_keypair(sess, c::CKP_ML_DSA_65, &cka_id, "ca-mldsa")
         }
+        // WP6 — RFC 9909 SLH-DSA cross-check. `native_parameter_set` is the
+        // same KmipAlgorithm -> CKP_SLH_DSA_* table certify.rs's own tests
+        // use (`ops::helpers::native_parameter_set`, `pub(crate)` — not
+        // reachable from this external test crate, so the four variants
+        // this file exercises are mapped by hand instead).
+        KmipAlgorithm::SlhDsaSha2_128s => {
+            native::generate_slh_dsa_keypair(sess, c::CKP_SLH_DSA_SHA2_128S, &cka_id, "ca-slhdsa")
+        }
+        KmipAlgorithm::SlhDsaSha2_128f => {
+            native::generate_slh_dsa_keypair(sess, c::CKP_SLH_DSA_SHA2_128F, &cka_id, "ca-slhdsa")
+        }
+        KmipAlgorithm::SlhDsaShake128s => {
+            native::generate_slh_dsa_keypair(sess, c::CKP_SLH_DSA_SHAKE_128S, &cka_id, "ca-slhdsa")
+        }
+        KmipAlgorithm::SlhDsaShake128f => {
+            native::generate_slh_dsa_keypair(sess, c::CKP_SLH_DSA_SHAKE_128F, &cka_id, "ca-slhdsa")
+        }
         other => panic!("unsupported CA algo {other:?}"),
     }
     .expect("CA keygen");
@@ -268,6 +285,15 @@ fn expected_alg_strings(algo: KmipAlgorithm) -> (&'static str, &'static str) {
         KmipAlgorithm::Rsa => ("sha256WithRSAEncryption", "rsaEncryption"),
         KmipAlgorithm::Ecdsa => ("ecdsa-with-SHA256", "id-ecPublicKey"),
         KmipAlgorithm::MlDsa65 => ("ML-DSA-65", "ML-DSA-65"),
+        // Empirically confirmed against this OpenSSL 3.6.3 build: `openssl
+        // req -x509 -newkey slh-dsa-sha2-128s ...` then `x509 -text` prints
+        // `Signature Algorithm: SLH-DSA-SHA2-128s` (same string for both
+        // the Signature and Public Key Algorithm lines — SLH-DSA uses one
+        // OID for both, like ML-DSA).
+        KmipAlgorithm::SlhDsaSha2_128s => ("SLH-DSA-SHA2-128s", "SLH-DSA-SHA2-128s"),
+        KmipAlgorithm::SlhDsaSha2_128f => ("SLH-DSA-SHA2-128f", "SLH-DSA-SHA2-128f"),
+        KmipAlgorithm::SlhDsaShake128s => ("SLH-DSA-SHAKE-128s", "SLH-DSA-SHAKE-128s"),
+        KmipAlgorithm::SlhDsaShake128f => ("SLH-DSA-SHAKE-128f", "SLH-DSA-SHAKE-128f"),
         other => panic!("no expected strings for {other:?}"),
     }
 }
@@ -384,4 +410,26 @@ fn openssl_crosscheck_rsa_ecdsa_mldsa() {
     cross_check_algo(&ossl, KmipAlgorithm::Rsa);
     cross_check_algo(&ossl, KmipAlgorithm::Ecdsa);
     cross_check_algo(&ossl, KmipAlgorithm::MlDsa65);
+}
+
+/// WP6 cross-check ask: "at least 128s byte-cross-checked... and one s/f
+/// pair per hash family through the OpenSSL crosscheck" — SHA2-128s/128f
+/// and SHAKE-128s/128f (one s/f pair per SLH-DSA hash family), independent
+/// of the RSA/ECDSA/ML-DSA test above so a slow "s"-variant CA keygen
+/// doesn't block those faster checks from running/reporting first.
+#[test]
+fn openssl_crosscheck_slh_dsa() {
+    let ossl = match find_openssl() {
+        Some(o) => o,
+        None => {
+            eprintln!("SKIP: no OpenSSL >=3.5 with ML-DSA found (same gate as the RSA/ECDSA/ML-DSA cross-check).");
+            return;
+        }
+    };
+    eprintln!("Using OpenSSL: {} ({})", ossl.bin.display(), ossl.version);
+
+    cross_check_algo(&ossl, KmipAlgorithm::SlhDsaSha2_128s);
+    cross_check_algo(&ossl, KmipAlgorithm::SlhDsaSha2_128f);
+    cross_check_algo(&ossl, KmipAlgorithm::SlhDsaShake128s);
+    cross_check_algo(&ossl, KmipAlgorithm::SlhDsaShake128f);
 }

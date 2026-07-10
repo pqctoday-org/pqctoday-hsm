@@ -55,10 +55,8 @@ use crate::ops::{
     split_key::{create_split_key, join_split_key},
     Deps,
 };
-// Certify / Re-certify / Validate handlers compile only in the `native`
-// build (see `ops/mod.rs`); the wasm dispatcher answers those operations
-// with `OperationNotSupported` via the `not(native)` match arms below.
-#[cfg(feature = "native")]
+// Certify / Re-certify / Validate handlers — ungated since WP4 (pure
+// Rust, see `ops/mod.rs`); dispatched on wasm32 the same as native.
 use crate::ops::{validate::validate, certify::{certify, recertify}};
 
 use crate::kmip30::RequestPayload;
@@ -849,22 +847,13 @@ fn handle_payload(
         RequestPayload::SignatureVerify(r) => {
             ResponsePayload::SignatureVerify(signature_verify(deps, r, correlation_id)?)
         }
-        #[cfg(feature = "native")]
         RequestPayload::Validate(r) => ResponsePayload::Validate(validate(deps, r, correlation_id)?),
         // P2.3 — §6.1.6 Certify / §6.1.50 Re-certify (PQC-capable CA).
-        #[cfg(feature = "native")]
+        // Ungated since WP4 — pure Rust (`spki_verify` + the engine),
+        // dispatched on wasm32 the same as native; no more `not(native)`
+        // OperationNotSupported fallback for these three.
         RequestPayload::Certify(r) => ResponsePayload::Certify(certify(deps, r, correlation_id)?),
-        #[cfg(feature = "native")]
         RequestPayload::ReCertify(r) => ResponsePayload::ReCertify(recertify(deps, r, correlation_id)?),
-        // wasm core: the ring/rcgen-backed CA + chain-validation ops are not
-        // compiled in. Answer them like any recognized-but-unhandled op.
-        #[cfg(not(feature = "native"))]
-        RequestPayload::Validate(_) | RequestPayload::Certify(_) | RequestPayload::ReCertify(_) => {
-            return Err(KmipError::failed(
-                crate::error::ResultReason::OperationNotSupported,
-                "this build does not include certificate issuance / validation",
-            ));
-        }
         RequestPayload::Interop(r) => ResponsePayload::Interop(interop(deps, r, correlation_id)?),
         RequestPayload::AddAttribute(r) => ResponsePayload::AddAttribute(add_attribute(deps, r, correlation_id)?),
         RequestPayload::ModifyAttribute(r) => ResponsePayload::ModifyAttribute(modify_attribute(deps, r, correlation_id)?),

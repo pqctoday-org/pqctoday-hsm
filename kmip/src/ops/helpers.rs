@@ -1375,6 +1375,21 @@ pub fn unwrap_key_value(
     }
 }
 
+/// Serialise every test (in any `ops::*` module) that touches a real
+/// engine session. The engine's session/token state is process-global
+/// (`lazy_static!`, not thread-local), and `cargo test` runs `#[test]`
+/// fns on separate threads by default — so two engine-touching tests in
+/// *different* files, each guarded only by a lock private to its own
+/// module, can still race each other (one test's `session::finalize()`
+/// invalidating a handle another test is mid-use with). This ONE shared
+/// lock, used by every such module (`certify.rs`, `spki_verify.rs`, …),
+/// is what actually prevents that.
+#[cfg(test)]
+pub(crate) fn engine_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
