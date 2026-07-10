@@ -1,3 +1,17 @@
+> **Update (2026-07-10).** A follow-up audit against the final PKCS#11 v3.2
+> OASIS Standard (published 2026-06-03; content-identical to the CSD01
+> baseline this file already used — see `../../pkcs11-v32-final-vs-wd02-gap-report-07102026.md`
+> in the workspace root)
+> found and closed 3 more gaps (`CKR_PARAMETER_SET_NOT_SUPPORTED`, SP 800-108
+> `CK_SP800_108_COUNTER`/`KEY_HANDLE`/`DKM_LENGTH_SUM_OF_SEGMENTS`, and the
+> `CKO_TRUST` object class) — see `../../pkcs11-v32-gap-remediation-plan-07102026.md`
+> and the refreshed 222/0 conformance report. **`CKO_VALIDATION` (§4.15) is a
+> deliberate, documented hold, not a miss**: it's the module self-attesting
+> to real NIST CMVP/Common Criteria certification, which this engine does not
+> hold — implementing it now would mean shipping an object class that always
+> reports "no validation." Revisit only if a real FIPS 140-3/CC validation
+> effort exists to describe.
+>
 > **Historical record (2026-06).** These gaps are closed — the Rust engine now
 > passes its own 188/0 PKCS#11 v3.2 conformance suite (`../rust/RUST_P11_V32_CONFORMANCE_REPORT.md`),
 > shipped through v0.8.0. Kept for provenance, not an open to-do list.

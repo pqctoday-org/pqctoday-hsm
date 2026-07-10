@@ -4,7 +4,7 @@
 **Harness:** `rust/test_p11_conformance.js` (table-driven negative-path + KAT
 matrix asserting exact `CKR_*` codes in spec priority order §5.4/§5.12, plus
 PQC keygen/param-set, SP800-108 KBKDF, and message-based-crypto checks).
-**Engine commit:** `f06f53f` · **Generated:** 2026-07-02
+**Engine commit:** `f5b253d` · **Generated:** 2026-07-10
 **Regenerate:** `scripts/local-gate.sh --rust-p11` (see below), or manually:
 ```
 docker exec pqc-rust bash -c 'cd /ag/pqctoday-hsm/rust && \
@@ -15,7 +15,7 @@ cd rust && node test_p11_conformance.js
 
 ## Result
 
-**188 passed / 0 failed** across 36 sections.
+**222 passed / 0 failed** across 38 sections.
 
 This is the Rust engine's OWN conformance evidence. Previously the only checked-in
 compliance artifact (`cpp_compliance_report.md`) targeted the **C++** engine,
@@ -23,6 +23,12 @@ while CACP (the KMIP server + wasm playground) ships the **Rust** engine — so
 Rust conformance rested on prose (report gap P2/T1). This report closes that gap:
 the actual Rust engine, exercised through its real PKCS#11 ABI (wasm-bindgen
 `_C_*` exports), passes the full v3.2 negative-path + KAT matrix.
+
+Up from 188/36 (2026-07-02): the two new sections close 3 gaps from
+`pkcs11-v32-gap-remediation-plan-07102026.md` (WP1 — `CKR_PARAMETER_SET_NOT_SUPPORTED`;
+WP2 — SP 800-108 `CK_SP800_108_COUNTER`/`KEY_HANDLE`/`DKM_LENGTH_SUM_OF_SEGMENTS`;
+WP4a — `CKO_TRUST` object class), each independently verified against Node-crypto
+reference vectors, not just "returns OK".
 
 ## Sections covered
 
@@ -62,6 +68,8 @@ the actual Rust engine, exercised through its real PKCS#11 ABI (wasm-bindgen
 - Round-2 — mechanism table contents + FIPS ranges (F2/T8)
 - Round-2 — T5 message API ≡ one-shot GCM (§5.19)
 - Round-2 — SP800-108 KBKDF PRF must be a keyed-MAC mechanism (§6.26)
+- Round-2 — SP800-108 CK_PRF_DATA_TYPE completeness (COUNTER, KEY_HANDLE, SUM_OF_SEGMENTS)
+- WP4a — CKO_TRUST object lifecycle (§4.7 Table 25)
 
 ## Full transcript
 
@@ -179,7 +187,7 @@ the actual Rust engine, exercised through its real PKCS#11 ABI (wasm-bindgen
   ✅ C_DigestEncryptUpdate (no active ops) → OPERATION_NOT_INITIALIZED
 
 ── F1 — mechanism table reconciliation (R6.2) ──
-  ✅ all 103 advertised mechanisms answerable → 0 missing
+  ✅ all 109 advertised mechanisms answerable → 0 missing
 
 ── R3.1 — C_CreateObject template validation (§4.1.1) ──
   ✅ no CKA_CLASS → TEMPLATE_INCOMPLETE
@@ -327,5 +335,43 @@ the actual Rust engine, exercised through its real PKCS#11 ABI (wasm-bindgen
   ✅ read SHA256-PRF derived CKA_VALUE → OK
   ✅ SHA384-PRF output differs from SHA256-PRF output (no silent default)
 
-════════ RESULT: 188 passed, 0 failed ════════
+── Round-2 — SP800-108 CK_PRF_DATA_TYPE completeness (COUNTER, KEY_HANDLE, SUM_OF_SEGMENTS) ──
+  ✅ import secret key → OK
+  ✅ Counter Mode + CK_SP800_108_COUNTER field → MECHANISM_PARAM_INVALID (Table 199)
+  ✅ Feedback Mode without CK_SP800_108_COUNTER → OK
+  ✅ Feedback Mode with CK_SP800_108_COUNTER → OK (Table 200)
+  ✅ CK_SP800_108_COUNTER changes Feedback Mode output (not silently ignored)
+  ✅ import secret key → OK
+  ✅ import secret key → OK
+  ✅ Counter Mode + CK_SP800_108_KEY_HANDLE → OK
+  ✅ CK_SP800_108_KEY_HANDLE byte-equals Node-crypto reference (splices CKA_VALUE)
+  ✅ CK_SP800_108_KEY_HANDLE with a different key → OK
+  ✅ different KEY_HANDLE key values produce different derived output
+  ✅ CK_SP800_108_KEY_HANDLE with a bogus handle → KEY_HANDLE_INVALID
+  ✅ SUM_OF_KEYS DKM_LENGTH → OK
+  ✅ SUM_OF_SEGMENTS DKM_LENGTH → OK
+  ✅ SUM_OF_SEGMENTS output differs from SUM_OF_KEYS (L value actually rounds up)
+  ✅ SUM_OF_KEYS byte-equals Node-crypto reference (L=160 bits)
+  ✅ SUM_OF_SEGMENTS byte-equals Node-crypto reference (L=256 bits, rounded up)
+
+── WP4a — CKO_TRUST object lifecycle (§4.7 Table 25) ──
+  ✅ C_CreateObject(CKO_TRUST) → OK
+  ✅ C_GetAttributeValue(CKA_ISSUER) → OK
+  ✅ CKA_ISSUER round-trips byte-exact
+  ✅ C_GetAttributeValue(CKA_TRUST_SERVER_AUTH) → OK
+  ✅ CKA_TRUST_SERVER_AUTH round-trips as CKT_TRUSTED
+  ✅ C_GetAttributeValue(unset CKA_TRUST_OCSP_SIGNING) → ATTRIBUTE_TYPE_INVALID
+  ✅ unset CKA_TRUST_OCSP_SIGNING → CK_UNAVAILABLE_INFORMATION length
+  ✅ C_SetAttributeValue(CKA_TRUST_OCSP_SIGNING) → OK (CKA_MODIFIABLE defaults TRUE)
+  ✅ C_FindObjectsInit(CKA_CLASS=CKO_TRUST) → OK
+  ✅ C_FindObjects → OK
+  ✅ C_FindObjects locates the CKO_TRUST object
+  ✅ C_FindObjects returns the correct handle
+  ✅ C_FindObjectsFinal → OK
+  ✅ C_CopyObject(CKO_TRUST) → OK
+  ✅ C_DestroyObject(copy) → OK
+  ✅ C_DestroyObject(CKO_TRUST) → OK
+  ✅ destroyed CKO_TRUST object is gone → OBJECT_HANDLE_INVALID
+
+════════ RESULT: 222 passed, 0 failed ════════
 ```
