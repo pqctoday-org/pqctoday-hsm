@@ -176,6 +176,78 @@ impl KmipPlayground {
             None => return error_json("no engine session"),
         };
 
+        // LAMPS composite signatures (draft-19, WP-C7) — a genuinely
+        // different keygen shape (two engine keys, one KMIP object; see
+        // create_key_pair.rs's own composite branch), resolved and
+        // generated in its own path, separate from the single-algorithm
+        // match below.
+        let composite_algo = match algorithm {
+            "ML-DSA-44-RSA2048-PSS" => Some(KmipAlgorithm::CompositeMlDsa44Rsa2048PssSha256),
+            "ML-DSA-65-ECDSA-P256" => Some(KmipAlgorithm::CompositeMlDsa65EcdsaP256Sha512),
+            "ML-DSA-87-ECDSA-P384" => Some(KmipAlgorithm::CompositeMlDsa87EcdsaP384Sha512),
+            _ => None,
+        };
+
+        self.demo_ca_counter += 1;
+        let n = self.demo_ca_counter;
+        let priv_uid = format!("urn:demo-ca-priv-{n}");
+        let cert_uid = format!("urn:demo-ca-cert-{n}");
+
+        if let Some(algo) = composite_algo {
+            let profile = pqctoday_kmip::ops::composite_sig::profile_for(algo)
+                .expect("every composite_algo match arm has a profile");
+            let mldsa_cka_id = format!("demo-ca-{n}-mldsa").into_bytes();
+            let classical_cka_id = format!("demo-ca-{n}-classical").into_bytes();
+            if let Err(rv) = native::generate_ml_dsa_keypair(
+                session, profile.mldsa_param_set, &mldsa_cka_id, "demo-ca-composite",
+            ) {
+                return error_json(&format!("composite CA ML-DSA keygen failed: CK_RV=0x{rv:08x}"));
+            }
+            let classical_result = match profile.classical_ec_field_width {
+                Some(32) => native::generate_ecdsa_keypair(session, EccCurve::P256, &classical_cka_id, "demo-ca-composite"),
+                Some(48) => native::generate_ecdsa_keypair(session, EccCurve::P384, &classical_cka_id, "demo-ca-composite"),
+                None => native::generate_rsa_keypair(session, 2048, &classical_cka_id, "demo-ca-composite"),
+                Some(other) => {
+                    return error_json(&format!("composite CA: no profile uses a {other}-byte EC field width"))
+                }
+            };
+            if let Err(rv) = classical_result {
+                return error_json(&format!("composite CA classical keygen failed: CK_RV=0x{rv:08x}"));
+            }
+            if let Err(e) = self.deps.store.put(ObjectRecord {
+                uid: priv_uid.clone(),
+                object_type: ObjectType::PrivateKey,
+                algorithm: algo,
+                usage_mask: UsageMask::SIGN,
+                state: State::Active,
+                pkcs11_cka_id: mldsa_cka_id,
+                pkcs11_cka_id_secondary: Some(classical_cka_id),
+                ..ObjectRecord::default()
+            }) {
+                return error_json(&format!("store composite CA PrivateKey record failed: {e}"));
+            }
+
+            let subject_cn = if subject_cn.is_empty() { "Playground Demo CA" } else { subject_cn };
+            let der = match pqctoday_kmip::ops::certify::bootstrap_ca_certificate(
+                &self.deps, &priv_uid, &cert_uid, subject_cn, 3650,
+            ) {
+                Ok(d) => d,
+                Err(e) => return error_json(&format!("bootstrap composite CA cert failed: {e}")),
+            };
+            self.deps.config.ca_key = Some(pqctoday_kmip::ops::deps::CaKeyDesignation {
+                private_key_uid: priv_uid.clone(),
+                certificate_uid: cert_uid.clone(),
+            });
+            return json!({
+                "ok": true,
+                "privateKeyUid": priv_uid,
+                "certificateUid": cert_uid,
+                "certificateDerHex": to_hex(&der),
+                "algorithm": algorithm,
+            })
+            .to_string();
+        }
+
         let algo = match algorithm {
             "RSA-2048" | "RSA" => KmipAlgorithm::Rsa,
             "ECDSA-P256" | "ECDSA" => KmipAlgorithm::Ecdsa,
@@ -184,16 +256,13 @@ impl KmipPlayground {
             other => {
                 return error_json(&format!(
                     "unsupported demo-CA algorithm '{other}' — expected \
-                     RSA-2048 | ECDSA-P256 | ML-DSA-65 | SLH-DSA-SHA2-128f"
+                     RSA-2048 | ECDSA-P256 | ML-DSA-65 | SLH-DSA-SHA2-128f | \
+                     ML-DSA-{{44-RSA2048-PSS,65-ECDSA-P256,87-ECDSA-P384}}"
                 ))
             }
         };
 
-        self.demo_ca_counter += 1;
-        let n = self.demo_ca_counter;
         let cka_id = format!("demo-ca-{n}").into_bytes();
-        let priv_uid = format!("urn:demo-ca-priv-{n}");
-        let cert_uid = format!("urn:demo-ca-cert-{n}");
 
         let keygen = match algo {
             KmipAlgorithm::Rsa => native::generate_rsa_keypair(session, 2048, &cka_id, "demo-ca"),

@@ -24,6 +24,7 @@
 //!   engine session (unit tests) the soft fallback allocates UUIDs and
 //!   is audited as `soft::placeholder_generate_keypair`.
 
+use der::Encode;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
@@ -299,6 +300,176 @@ pub fn create_key_pair(
                     #[cfg(test)]
                     {
                         super::helpers::emit_pkcs11(deps, correlation_id, "soft::placeholder_hybrid_keygen", None, 0, "CKR_OK");
+                        (
+                            GeneratedKeyPair {
+                                cka_id_priv: Uuid::new_v4().as_bytes().to_vec(),
+                                cka_id_pub: Vec::new(),
+                                digest_priv: None,
+                                digest_pub: None,
+                            },
+                            None,
+                            None,
+                            Some(Uuid::new_v4().as_bytes().to_vec()),
+                        )
+                    }
+                }
+            }
+        } else if let Some(profile) = super::composite_sig::profile_for(kmip_algo) {
+            // LAMPS composite signatures (draft-19) — the same "two
+            // engine keys, one KMIP-object identity" pattern as the
+            // K6 hybrid-KEM branch above, reused per the composite/
+            // hybrid remediation plan's WP-C5: an ML-DSA keypair and a
+            // classical (RSA-PSS or ECDSA) keypair, each under their
+            // own fresh CKA_ID, tied together on the PRIVATE record
+            // via `pkcs11_cka_id` (ML-DSA) + `pkcs11_cka_id_secondary`
+            // (classical) — exactly what `certify.rs::sign_tbs_with_plan`'s
+            // `SigningPlan::Composite` arm already expects when it
+            // later signs with this key. The composite PUBLIC key has
+            // no single engine identity (it spans two engine objects),
+            // so — again mirroring the hybrid-KEM convention — its
+            // record carries no `pkcs11_cka_id` and instead caches the
+            // assembled SubjectPublicKeyInfo DER inline as
+            // `key_material`, which `certify.rs::resolve_subject`'s
+            // existing generic "certify a stored PublicKey by UID"
+            // path already reads unmodified (draft-19 §4 composite
+            // SPKI = `mldsaPubKey || classicalPubKey`, assembled by
+            // `live_composite_public_key_spki`, ported from
+            // `certBuilder.ts::buildCompositeCertDraft19`'s own SPKI
+            // builder).
+            match deps.engine_session {
+                Some(session) => {
+                    let mldsa_cka_id = Uuid::new_v4().as_bytes().to_vec();
+                    let classical_cka_id = Uuid::new_v4().as_bytes().to_vec();
+                    let label = "kmip-generated-composite";
+
+                    let mldsa_result = softhsmrustv3::native::generate_ml_dsa_keypair(
+                        session,
+                        profile.mldsa_param_set,
+                        &mldsa_cka_id,
+                        label,
+                    );
+                    super::helpers::emit_pkcs11_result(
+                        deps,
+                        correlation_id,
+                        "native::generate_ml_dsa_keypair",
+                        Some(softhsmrustv3::constants::CKM_ML_DSA_KEY_PAIR_GEN),
+                        &mldsa_result,
+                    );
+                    if let Err(rv) = mldsa_result {
+                        return fail(
+                            deps,
+                            correlation_id,
+                            op_canonical,
+                            super::helpers::ck_rv_to_kmip_error(rv, "composite CreateKeyPair: ML-DSA half"),
+                        );
+                    }
+
+                    // The classical half's shape is fixed by the profile
+                    // (never client-supplied — draft-19 profiles are not
+                    // parameterisable), same explicit-not-inferred
+                    // discipline `verify_composite_signature` already
+                    // uses for `classical_ec_field_width`.
+                    let classical_result = match profile.classical_ec_field_width {
+                        Some(32) => softhsmrustv3::native::generate_ecdsa_keypair(
+                            session,
+                            softhsmrustv3::native::EccCurve::P256,
+                            &classical_cka_id,
+                            label,
+                        ),
+                        Some(48) => softhsmrustv3::native::generate_ecdsa_keypair(
+                            session,
+                            softhsmrustv3::native::EccCurve::P384,
+                            &classical_cka_id,
+                            label,
+                        ),
+                        None => softhsmrustv3::native::generate_rsa_keypair(session, 2048, &classical_cka_id, label),
+                        Some(other) => {
+                            return fail(
+                                deps,
+                                correlation_id,
+                                op_canonical,
+                                KmipError::failed(
+                                    ResultReason::GeneralFailure,
+                                    format!(
+                                        "{}: no composite profile uses a {other}-byte EC field width",
+                                        profile.label
+                                    ),
+                                ),
+                            );
+                        }
+                    };
+                    super::helpers::emit_pkcs11_result(
+                        deps,
+                        correlation_id,
+                        "native::generate_classical_keypair (composite)",
+                        Some(profile.classical_keygen_mech),
+                        &classical_result,
+                    );
+                    if let Err(rv) = classical_result {
+                        return fail(
+                            deps,
+                            correlation_id,
+                            op_canonical,
+                            super::helpers::ck_rv_to_kmip_error(rv, "composite CreateKeyPair: classical half"),
+                        );
+                    }
+
+                    let composite_spki_der = match super::certify::live_composite_public_key_spki(
+                        session,
+                        &mldsa_cka_id,
+                        &classical_cka_id,
+                        profile,
+                        "CreateKeyPair:composite",
+                    )
+                    .and_then(|spki| {
+                        spki.to_der().map_err(|e| {
+                            KmipError::failed(
+                                ResultReason::GeneralFailure,
+                                format!("composite SPKI DER encode: {e}"),
+                            )
+                        })
+                    }) {
+                        Ok(der) => der,
+                        Err(err) => return fail(deps, correlation_id, op_canonical, err),
+                    };
+
+                    (
+                        GeneratedKeyPair {
+                            cka_id_priv: mldsa_cka_id,
+                            cka_id_pub: Vec::new(),
+                            digest_priv: None,
+                            digest_pub: None,
+                        },
+                        Some(composite_spki_der),
+                        None,
+                        Some(classical_cka_id),
+                    )
+                }
+                None => {
+                    // S-2 hardening, same as the hybrid-KEM branch: no
+                    // engine session ⇒ no composite key material.
+                    #[cfg(not(test))]
+                    {
+                        return fail(
+                            deps,
+                            correlation_id,
+                            op_canonical,
+                            KmipError::failed(
+                                ResultReason::CryptographicFailure,
+                                "no engine session — cannot generate composite key pair".to_string(),
+                            ),
+                        );
+                    }
+                    #[cfg(test)]
+                    {
+                        super::helpers::emit_pkcs11(
+                            deps,
+                            correlation_id,
+                            "soft::placeholder_composite_keygen",
+                            None,
+                            0,
+                            "CKR_OK",
+                        );
                         (
                             GeneratedKeyPair {
                                 cka_id_priv: Uuid::new_v4().as_bytes().to_vec(),
@@ -673,6 +844,12 @@ fn canonical_name(a: KmipAlgorithm) -> String {
         FrodoKem1344Aes | FrodoKem1344Shake => "FrodoKEM-1344",
         ClassicMcEliece6688128 => "Classic-McEliece-6688128",
         Hss => "HSS",
+        // Matches `KmipAlgorithm::spec_name()`'s strings exactly — see the
+        // note there on why this isn't the `HybridDualSignRequirement`
+        // 2-part `primary-secondary` shape.
+        CompositeMlDsa44Rsa2048PssSha256 => "ML-DSA-44-RSA2048-PSS",
+        CompositeMlDsa65EcdsaP256Sha512 => "ML-DSA-65-ECDSA-P256",
+        CompositeMlDsa87EcdsaP384Sha512 => "ML-DSA-87-ECDSA-P384",
     }
     .into()
 }
@@ -731,6 +908,11 @@ pub(crate) fn parse_algorithm(s: &str) -> Result<KmipAlgorithm> {
         // BSI TR-02102-1 §2.4.2 — only one parameter set is implemented
         // (see implementation plan Phase 0.5), so no ambiguity here.
         "Classic-McEliece-6688128" => ClassicMcEliece6688128,
+        // LAMPS composite signatures (draft-19) — exact names, matches
+        // `canonical_name`'s output for these three variants.
+        "ML-DSA-44-RSA2048-PSS" => CompositeMlDsa44Rsa2048PssSha256,
+        "ML-DSA-65-ECDSA-P256" => CompositeMlDsa65EcdsaP256Sha512,
+        "ML-DSA-87-ECDSA-P384" => CompositeMlDsa87EcdsaP384Sha512,
         // Size-suffixed classical algos collapse to their base enum.
         _ => match base {
             "AES" => Aes,
@@ -1097,6 +1279,23 @@ rules: []
         assert_eq!(parse_algorithm("ECDSA-P256").unwrap(), KmipAlgorithm::Ecdsa);
     }
 
+    #[test]
+    fn composite_sig_names_round_trip_through_canonical_name_and_parse_algorithm() {
+        for a in [
+            KmipAlgorithm::CompositeMlDsa44Rsa2048PssSha256,
+            KmipAlgorithm::CompositeMlDsa65EcdsaP256Sha512,
+            KmipAlgorithm::CompositeMlDsa87EcdsaP384Sha512,
+        ] {
+            let name = canonical_name(a);
+            assert_eq!(parse_algorithm(&name).unwrap(), a, "{name}");
+            // create_key_pair.rs's canonical_name and algos.rs's spec_name
+            // must not drift apart — same string, two independent
+            // functions (a real, pre-existing triplication in this
+            // codebase, not introduced here).
+            assert_eq!(name, a.spec_name());
+        }
+    }
+
     const PERMISSIVE_POLICY: &str = r#"
 schema_version: 1
 metadata: { name: t, description: t, authority: t, effective: "always" }
@@ -1170,5 +1369,161 @@ rules: []
             seed: None,
         };
         create_key_pair(&d, req, "CreateKeyPair:Sign", "corr-qs-ok").unwrap();
+    }
+
+    /// `deps_with` plus a real engine session — same pattern as
+    /// `validate.rs`'s own `deps_with_session` (crate-wide
+    /// `engine_lock()` held for the guard's lifetime; see that file's
+    /// doc for why a per-file lock isn't enough).
+    fn deps_with_engine(yaml: &str) -> (Arc<RingSink>, Deps, std::sync::MutexGuard<'static, ()>) {
+        use softhsmrustv3::native::session::{bootstrap_default_token, finalize, init};
+        let guard = super::super::helpers::engine_lock();
+        let _ = finalize();
+        init().expect("engine init");
+        let session = bootstrap_default_token(0, "so", "user", "create-key-pair-composite-test")
+            .expect("bootstrap session");
+        let (ring, d) = deps_with(yaml);
+        (ring, d.with_engine_session(session), guard)
+    }
+
+    /// WP-C5 end-to-end: a composite key pair generated through the real
+    /// `CreateKeyPair` request/response handler (not a hand-built test
+    /// fixture, unlike WP-C3/WP-C4's tests) — proves the new branch's
+    /// output is byte-exact against `live_composite_public_key_spki`
+    /// AND is immediately usable by the rest of the already-proven
+    /// composite pipeline: `Certify` reads its cached `key_material` as
+    /// the leaf SPKI unmodified (no certify.rs changes were needed for
+    /// this — confirms the design choice to cache the FULL SPKI DER,
+    /// not just the raw draft-19 concatenation), and the resulting
+    /// 2-cert chain validates through `validate_chain`.
+    #[test]
+    fn composite_create_key_pair_leaf_certifies_under_composite_ca_and_validates() {
+        use crate::kmip30::ops::{CertifyRequest, CertificateRequestType};
+        use crate::kmip30::{SignatureValidity, State};
+        use crate::store::ObjectRecord;
+        use der::{Decode, Encode};
+        use spki::SubjectPublicKeyInfoOwned;
+
+        let (_ring, mut d, _guard) = deps_with_engine(PERMISSIVE_POLICY);
+        let session = d.engine_session.unwrap();
+        let profile = &super::super::composite_sig::MLDSA65_ECDSA_P256_SHA512;
+
+        // ── CA side: hand-built fixture, same pattern WP-C3/WP-C4 already
+        // proved correct — WP-C5 is about the LEAF side's CreateKeyPair
+        // path, not re-proving CA bootstrap.
+        let ca_priv_uid = "urn:test:composite-ca-priv".to_string();
+        let ca_cert_uid = "urn:test:composite-ca-cert".to_string();
+        let ca_mldsa_cka_id = b"e2e-ca-mldsa".to_vec();
+        let ca_classical_cka_id = b"e2e-ca-classical".to_vec();
+        softhsmrustv3::native::generate_ml_dsa_keypair(session, profile.mldsa_param_set, &ca_mldsa_cka_id, "e2e-ca-mldsa")
+            .expect("CA ML-DSA half keygen");
+        softhsmrustv3::native::generate_ecdsa_keypair(session, softhsmrustv3::native::EccCurve::P256, &ca_classical_cka_id, "e2e-ca-classical")
+            .expect("CA classical half keygen");
+        d.store
+            .put(ObjectRecord {
+                uid: ca_priv_uid.clone(),
+                object_type: ObjectType::PrivateKey,
+                algorithm: KmipAlgorithm::CompositeMlDsa65EcdsaP256Sha512,
+                usage_mask: UsageMask::SIGN,
+                state: State::Active,
+                pkcs11_cka_id: ca_mldsa_cka_id,
+                pkcs11_cka_id_secondary: Some(ca_classical_cka_id),
+                ..ObjectRecord::default()
+            })
+            .unwrap();
+        super::super::certify::bootstrap_ca_certificate(
+            &d, &ca_priv_uid, &ca_cert_uid, "Composite E2E Root", 3650,
+        )
+        .expect("bootstrap composite CA cert");
+        d.config.ca_key = Some(super::super::deps::CaKeyDesignation {
+            private_key_uid: ca_priv_uid,
+            certificate_uid: ca_cert_uid.clone(),
+        });
+
+        // ── Leaf side: the actual code under test — a composite key pair
+        // through the real CreateKeyPair handler.
+        let req = CreateKeyPairRequest {
+            common_attributes: vec![Attribute::CryptographicAlgorithm(
+                KmipAlgorithm::CompositeMlDsa65EcdsaP256Sha512,
+            )],
+            private_key_attributes: vec![],
+            public_key_attributes: vec![],
+            seed: None,
+        };
+        let resp = create_key_pair(&d, req, "CreateKeyPair:Sign", "corr-leaf").unwrap();
+        let priv_record = d.store.get(&resp.private_key_uid).unwrap().unwrap();
+        let pub_record = d.store.get(&resp.public_key_uid).unwrap().unwrap();
+
+        assert_eq!(priv_record.algorithm, KmipAlgorithm::CompositeMlDsa65EcdsaP256Sha512);
+        assert_eq!(pub_record.algorithm, KmipAlgorithm::CompositeMlDsa65EcdsaP256Sha512);
+
+        // Private half: two distinct engine-backed CKA_IDs, no cached
+        // material (K6 hybrid convention — Get must refuse it).
+        assert!(!priv_record.pkcs11_cka_id.is_empty());
+        let classical_cka_id = priv_record
+            .pkcs11_cka_id_secondary
+            .clone()
+            .expect("classical half CKA_ID recorded on the private record");
+        assert_ne!(priv_record.pkcs11_cka_id, classical_cka_id, "the two halves must be distinct engine keys");
+        assert!(priv_record.key_material.is_none(), "composite private material must stay engine-side only");
+
+        // Public half: no single engine identity; the composite SPKI is
+        // cached inline, byte-exact against a fresh live read of the
+        // same two CKA_IDs.
+        assert!(pub_record.pkcs11_cka_id.is_empty());
+        let spki_der = pub_record.key_material.clone().expect("composite SPKI cached on public record");
+        let live_spki = super::super::certify::live_composite_public_key_spki(
+            session, &priv_record.pkcs11_cka_id, &classical_cka_id, profile, "test",
+        )
+        .unwrap();
+        assert_eq!(spki_der, live_spki.to_der().unwrap(), "CreateKeyPair-time SPKI must match a live engine read");
+
+        let parsed = SubjectPublicKeyInfoOwned::from_der(&spki_der).unwrap();
+        assert_eq!(parsed.algorithm.oid.to_string(), profile.oid);
+        assert_eq!(
+            parsed.subject_public_key.raw_bytes().len(),
+            profile.mldsa_pubkey_bytes + 65, // uncompressed P-256 point: 0x04||X||Y
+            "composite SPKI must be exactly mldsaPubKey || classicalPubKey, draft-19 §4"
+        );
+
+        // ── Certify the CreateKeyPair-generated leaf under the composite
+        // CA — exercises certify.rs's UNMODIFIED generic "certify a
+        // stored PublicKey by UID" path against WP-C5's new output.
+        let certify_resp = super::super::certify::certify(
+            &d,
+            CertifyRequest {
+                uid: Some(resp.public_key_uid.clone()),
+                certificate_request_type: None::<CertificateRequestType>,
+                certificate_request: None,
+                attributes: vec![],
+            },
+            "corr-certify-leaf",
+        )
+        .expect("Certify the composite leaf under the composite CA");
+        let leaf_cert_der = d
+            .store
+            .get(&certify_resp.uid)
+            .unwrap()
+            .unwrap()
+            .key_material
+            .expect("Certify must store the issued certificate DER");
+        let ca_cert_der = d.store.get(&ca_cert_uid).unwrap().unwrap().key_material.unwrap();
+
+        // ── Validate the resulting 2-cert chain end to end.
+        assert_eq!(
+            super::super::validate::validate_chain(&d, &[leaf_cert_der.clone(), ca_cert_der], time::OffsetDateTime::now_utc()),
+            SignatureValidity::Valid,
+            "a CreateKeyPair-generated composite leaf, certified by a composite CA, must validate"
+        );
+
+        let mut tampered = leaf_cert_der;
+        let last = tampered.len() - 1;
+        tampered[last] ^= 0xff;
+        let ca_cert_der_2 = d.store.get(&ca_cert_uid).unwrap().unwrap().key_material.unwrap();
+        assert_eq!(
+            super::super::validate::validate_chain(&d, &[tampered, ca_cert_der_2], time::OffsetDateTime::now_utc()),
+            SignatureValidity::Invalid,
+            "a tampered leaf signature must never come back Valid"
+        );
     }
 }

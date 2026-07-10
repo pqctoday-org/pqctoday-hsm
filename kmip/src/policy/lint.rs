@@ -296,6 +296,16 @@ pub fn is_known_algorithm_name(name: &str) -> bool {
 /// matched case-insensitively so the KMIP 3.0 spelling (`Ed25519`, per RFC 8032)
 /// and the legacy uppercase (`ED25519`) both validate — the engine likewise
 /// matches composites case-insensitively.
+///
+/// `RSA2048-PSS` added alongside the three real
+/// `KmipAlgorithm::CompositeMlDsa*` variants (draft-ietf-lamps-pq-
+/// composite-sigs-19 §6) — `KmipAlgorithm::canonical_name`'s output for
+/// those three is exactly `ML-DSA-{44,65,87}-{RSA2048-PSS,ECDSA-P256,
+/// ECDSA-P384}` (no hash-function suffix — the LAMPS profile's hash choice
+/// is baked into the OID/engine mechanism, not distinguished at the
+/// policy-name layer), so this tail set must stay a superset of what those
+/// three variants actually produce or a real composite policy target would
+/// fail its own linter.
 fn is_ml_dsa_suffix(s: &str) -> bool {
     match s {
         "44" | "65" | "87" => true,
@@ -308,6 +318,7 @@ fn is_ml_dsa_suffix(s: &str) -> bool {
                 && matches!(
                     tail.as_str(),
                     "ED25519" | "ED448" | "ECDSA-P256" | "ECDSA-P384" | "ECDSA-P521"
+                        | "RSA2048-PSS"
                 )
         }
     }
@@ -342,6 +353,24 @@ mod tests {
             "X25519MLKEM768", "SecP256r1MLKEM768",
         ] {
             assert!(is_known_algorithm_name(ok), "should accept {ok}");
+        }
+    }
+
+    /// The linter's accepted composite tail set must stay a superset of
+    /// what the three real `KmipAlgorithm::CompositeMlDsa*` variants
+    /// actually produce — sourced from `spec_name()` directly (not
+    /// hand-typed) so this can't silently drift from the enum the way a
+    /// copy-pasted literal could.
+    #[test]
+    fn known_algorithm_names_accepts_every_real_composite_sig_variant() {
+        use crate::kmip30::KmipAlgorithm;
+        for a in [
+            KmipAlgorithm::CompositeMlDsa44Rsa2048PssSha256,
+            KmipAlgorithm::CompositeMlDsa65EcdsaP256Sha512,
+            KmipAlgorithm::CompositeMlDsa87EcdsaP384Sha512,
+        ] {
+            let name = a.spec_name();
+            assert!(is_known_algorithm_name(name), "should accept {name}");
         }
     }
 

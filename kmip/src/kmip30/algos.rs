@@ -246,6 +246,29 @@ pub enum KmipAlgorithm {
     // `Ecdsa` already uses for its curve ("covers ECDSA over any curve;
     // curve = attribute").
     Hss, // 0x80000065 (spec-convention vendor extension, §11.12)
+
+    // ── LAMPS composite signatures (draft-ietf-lamps-pq-composite-sigs-19) ──
+    // Composite-sig OIDs have no OASIS `CryptographicAlgorithm` codepoint
+    // (they're an X.509 AlgorithmIdentifier OID, not a KMIP enum value the
+    // spec assigns) — same §11.12 vendor-extension convention as the PQC
+    // KEM block above, continuing the free range after `Hss` (0x80000065).
+    // Each variant's `to_pkcs11_mech` is intentionally `None` for every
+    // `PkcsOp` (see below): a composite signature is never produced by ONE
+    // engine mechanism call the way `CKM_ECDSA_SHA256` is — it's two
+    // independent single-algorithm signs assembled by the kmip crate (see
+    // `ops/composite_sig.rs`), mirroring how `is_hybrid_kem` already
+    // documents "no single PKCS#11 mechanism" for the K6 hybrid KEMs.
+    // OID values ported verbatim from the hub's own
+    // `certBuilder.ts::COMPOSITE_PROFILE_MLDSA*` constants (already used in
+    // this monorepo, cross-checked against `pkcs11-provider/src/
+    // composite.c`'s independent implementation of the same draft) — not
+    // retyped from the draft text.
+    /// id-MLDSA44-RSA2048-PSS-SHA256 — OID `1.3.6.1.5.5.7.6.37`.
+    CompositeMlDsa44Rsa2048PssSha256, // 0x80000066 (spec-convention vendor extension, §11.12)
+    /// id-MLDSA65-ECDSA-P256-SHA512 — OID `1.3.6.1.5.5.7.6.45`.
+    CompositeMlDsa65EcdsaP256Sha512, // 0x80000067 (spec-convention vendor extension, §11.12)
+    /// id-MLDSA87-ECDSA-P384-SHA512 — OID `1.3.6.1.5.5.7.6.49`.
+    CompositeMlDsa87EcdsaP384Sha512, // 0x80000068 (spec-convention vendor extension, §11.12)
 }
 
 impl KmipAlgorithm {
@@ -294,6 +317,9 @@ impl KmipAlgorithm {
             FrodoKem1344Aes   => 0x80000063,
             FrodoKem1344Shake => 0x80000064,
             Hss => 0x80000065,
+            CompositeMlDsa44Rsa2048PssSha256 => 0x80000066,
+            CompositeMlDsa65EcdsaP256Sha512 => 0x80000067,
+            CompositeMlDsa87EcdsaP384Sha512 => 0x80000068,
         }
     }
 
@@ -343,8 +369,24 @@ impl KmipAlgorithm {
             0x80000063 => FrodoKem1344Aes,
             0x80000064 => FrodoKem1344Shake,
             0x80000065 => Hss,
+            0x80000066 => CompositeMlDsa44Rsa2048PssSha256,
+            0x80000067 => CompositeMlDsa65EcdsaP256Sha512,
+            0x80000068 => CompositeMlDsa87EcdsaP384Sha512,
             _ => return None,
         })
+    }
+
+    /// `true` for a LAMPS draft-19 composite-signature algorithm — two
+    /// independent component signatures over the same message
+    /// representative, never one engine mechanism call (see
+    /// `ops/composite_sig.rs`).
+    pub const fn is_composite_sig(self) -> bool {
+        matches!(
+            self,
+            KmipAlgorithm::CompositeMlDsa44Rsa2048PssSha256
+                | KmipAlgorithm::CompositeMlDsa65EcdsaP256Sha512
+                | KmipAlgorithm::CompositeMlDsa87EcdsaP384Sha512
+        )
     }
 
     /// `true` if this is a KMIP 3.0 WD19 hybrid KEM (K6), composed in-process
@@ -370,7 +412,12 @@ impl KmipAlgorithm {
     }
 
     /// `true` if this algorithm is one of the NIST FIPS PQC standards
-    /// (FIPS 203 ML-KEM, FIPS 204 ML-DSA, FIPS 205 SLH-DSA).
+    /// (FIPS 203 ML-KEM, FIPS 204 ML-DSA, FIPS 205 SLH-DSA) — or a
+    /// composite signature built on one. A composite is quantum-safe via
+    /// its ML-DSA half exactly the way a hybrid KEM is via its ML-KEM half
+    /// (`quantum_safe_with_length`'s existing "secure while EITHER
+    /// component holds" rule) — this is what makes composite ML-DSA+RSA/
+    /// ECDSA a PQC-migration primitive at all, not a classical one.
     pub const fn is_pqc(self) -> bool {
         use KmipAlgorithm::*;
         matches!(
@@ -383,6 +430,9 @@ impl KmipAlgorithm {
                 | SlhDsaShake128s | SlhDsaShake128f
                 | SlhDsaShake192s | SlhDsaShake192f
                 | SlhDsaShake256s | SlhDsaShake256f
+                | CompositeMlDsa44Rsa2048PssSha256
+                | CompositeMlDsa65EcdsaP256Sha512
+                | CompositeMlDsa87EcdsaP384Sha512
         )
     }
 
@@ -549,6 +599,16 @@ impl KmipAlgorithm {
             FrodoKem1344Aes   => "FrodoKEM-1344-AES",
             FrodoKem1344Shake => "FrodoKEM-1344-SHAKE",
             Hss => "HSS",
+            // Canonical, self-describing names — NOT the 2-part
+            // `primary-secondary` shape `policy::rule::
+            // HybridDualSignRequirement` synthesizes (`format!("{}-{}",
+            // primary, secondary)`). A policy author targeting one of these
+            // via that rule needs `primary="ML-DSA-65"` +
+            // `secondary="ECDSA-P256-SHA512"` (etc.) to reproduce this exact
+            // string — verified by a real test in WP-C12, not assumed here.
+            CompositeMlDsa44Rsa2048PssSha256 => "ML-DSA-44-RSA2048-PSS",
+            CompositeMlDsa65EcdsaP256Sha512 => "ML-DSA-65-ECDSA-P256",
+            CompositeMlDsa87EcdsaP384Sha512 => "ML-DSA-87-ECDSA-P384",
         }
     }
 }
@@ -576,6 +636,9 @@ mod tests {
             FrodoKem640Aes, FrodoKem640Shake, FrodoKem976Aes, FrodoKem976Shake,
             FrodoKem1344Aes, FrodoKem1344Shake,
             Hss,
+            CompositeMlDsa44Rsa2048PssSha256,
+            CompositeMlDsa65EcdsaP256Sha512,
+            CompositeMlDsa87EcdsaP384Sha512,
         ]
     }
 
