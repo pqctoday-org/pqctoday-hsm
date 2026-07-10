@@ -148,12 +148,12 @@ pub fn encrypt(deps: &Deps, mut req: EncryptRequest, correlation_id: &str) -> Re
     let forced_cp = decision.cp_override().cloned();
     match decision {
         Decision::Allow { .. } => {}
-        Decision::Deny { human, .. } => {
+        Decision::Deny { kmip_reason, human, .. } => {
             return Err(fail_err(
                 deps,
                 correlation_id,
                 "Encrypt",
-                KmipError::permission_denied(human),
+                KmipError::failed(kmip_reason.to_result_reason(), human),
             ));
         }
         Decision::RekeyAndProceed { new_algorithm, .. } => {

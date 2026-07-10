@@ -71,10 +71,27 @@ pub const CKM_RSA_PKCS_KEY_PAIR_GEN: CkMechanismType = 0x0000;
 pub const CKM_RSA_PKCS: CkMechanismType              = 0x0001;
 pub const CKM_RSA_PKCS_OAEP: CkMechanismType         = 0x0009;
 pub const CKM_RSA_PKCS_PSS: CkMechanismType          = 0x000D;
+/// Hash-qualified RSA sign/verify mechanisms — what
+/// `native_sign_mech_with_params` (kmip/src/ops/helpers.rs) actually
+/// resolves to at Sign/Verify time (never the bare `CKM_RSA_PKCS_PSS`
+/// above). Needed by `usage_mask_to_allowed_mechanisms` so a KMIP-created
+/// key's `CKA_ALLOWED_MECHANISMS` whitelist matches what Sign/Verify will
+/// really ask for.
+pub const CKM_SHA256_RSA_PKCS: CkMechanismType     = 0x0040;
+pub const CKM_SHA384_RSA_PKCS: CkMechanismType     = 0x0041;
+pub const CKM_SHA512_RSA_PKCS: CkMechanismType     = 0x0042;
+pub const CKM_SHA256_RSA_PKCS_PSS: CkMechanismType = 0x0043;
+pub const CKM_SHA384_RSA_PKCS_PSS: CkMechanismType = 0x0044;
+pub const CKM_SHA512_RSA_PKCS_PSS: CkMechanismType = 0x0045;
 
 pub const CKM_EC_KEY_PAIR_GEN: CkMechanismType = 0x1040;
 pub const CKM_ECDSA: CkMechanismType           = 0x1041;
 pub const CKM_ECDSA_SHA256: CkMechanismType    = 0x1044;
+/// Same rationale as the RSA hash-qualified set above — ECDSA
+/// Sign/Verify always resolves to one of these three, never bare
+/// `CKM_ECDSA`.
+pub const CKM_ECDSA_SHA384: CkMechanismType = 0x1045;
+pub const CKM_ECDSA_SHA512: CkMechanismType = 0x1046;
 /// PKCS#11 v3.2 §6.17.2 — single-pass ECDH key agreement. Value verified
 /// against `rust/src/constants.rs`.
 pub const CKM_ECDH1_DERIVE: CkMechanismType = 0x1050;
@@ -92,6 +109,10 @@ pub const CKM_EC_EDWARDS_KEY_PAIR_GEN: CkMechanismType = 0x1055;
 pub const CKM_EDDSA: CkMechanismType = 0x1057;
 
 pub const CKM_AES_KEY_GEN: CkMechanismType = 0x1080;
+pub const CKM_AES_ECB: CkMechanismType     = 0x1081;
+pub const CKM_AES_CBC: CkMechanismType     = 0x1082;
+pub const CKM_AES_CBC_PAD: CkMechanismType = 0x1085;
+pub const CKM_AES_CTR: CkMechanismType     = 0x1086;
 pub const CKM_AES_GCM: CkMechanismType     = 0x1087;
 /// PKCS#11 v3.2 §6.31 — AES key wrap (RFC 3394). Value verified against
 /// `rust/src/constants.rs`.
@@ -474,10 +495,44 @@ impl KmipAlgorithm {
         };
 
         if mask.intersects(UsageMask::SIGN | UsageMask::VERIFY) {
-            push(self.to_pkcs11_mech(SignVerify));
+            // RSA/ECDSA Sign/Verify resolve to a hash-qualified mechanism at
+            // call time (`native_sign_mech_with_params`, helpers.rs) — never
+            // the bare `to_pkcs11_mech` value. Enumerate the real reachable
+            // set so the whitelist actually matches what gets asked for;
+            // every other signing algorithm here (ML-DSA/SLH-DSA/Ed25519/
+            // HMAC) has no such hash parameter and `to_pkcs11_mech` already
+            // agrees with the caller-facing resolver.
+            match self {
+                KmipAlgorithm::Rsa => {
+                    for m in [
+                        CKM_SHA256_RSA_PKCS, CKM_SHA384_RSA_PKCS, CKM_SHA512_RSA_PKCS,
+                        CKM_SHA256_RSA_PKCS_PSS, CKM_SHA384_RSA_PKCS_PSS, CKM_SHA512_RSA_PKCS_PSS,
+                    ] {
+                        push(Some(m));
+                    }
+                }
+                KmipAlgorithm::Ecdsa => {
+                    for m in [CKM_ECDSA_SHA256, CKM_ECDSA_SHA384, CKM_ECDSA_SHA512] {
+                        push(Some(m));
+                    }
+                }
+                _ => push(self.to_pkcs11_mech(SignVerify)),
+            }
         }
         if mask.intersects(UsageMask::ENCRYPT | UsageMask::DECRYPT) {
-            push(self.to_pkcs11_mech(Encrypt));
+            // Same reasoning for AES: `aes_mechanism_for` (helpers.rs) picks
+            // the mechanism off the request's `BlockCipherMode`, defaulting
+            // to GCM only when absent — enumerate the full reachable set.
+            // RSA Encrypt/Decrypt has no such parameterization (always
+            // OAEP), so it keeps using `to_pkcs11_mech` below.
+            match self {
+                KmipAlgorithm::Aes => {
+                    for m in [CKM_AES_CBC, CKM_AES_CBC_PAD, CKM_AES_ECB, CKM_AES_CTR, CKM_AES_GCM] {
+                        push(Some(m));
+                    }
+                }
+                _ => push(self.to_pkcs11_mech(Encrypt)),
+            }
         }
         if mask.intersects(UsageMask::MAC_GENERATE | UsageMask::MAC_VERIFY) {
             push(self.to_pkcs11_mech(Mac));

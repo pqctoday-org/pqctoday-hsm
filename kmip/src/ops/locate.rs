@@ -41,12 +41,12 @@ pub fn locate(deps: &Deps, req: LocateRequest, correlation_id: &str) -> Result<L
     // Plane-1 policy gate.
     let empty: HashMap<String, String> = HashMap::new();
     let p_req = PolicyRequest::minimal("Locate", None, started, correlation_id, &empty);
-    if let Decision::Deny { human, .. } = deps.engine.evaluate(&p_req) {
+    if let Decision::Deny { kmip_reason, human, .. } = deps.engine.evaluate(&p_req) {
         return Err(fail_err(
             deps,
             correlation_id,
             "Locate",
-            KmipError::permission_denied(human),
+            KmipError::failed(kmip_reason.to_result_reason(), human),
         ));
     }
 

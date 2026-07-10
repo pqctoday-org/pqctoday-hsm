@@ -134,12 +134,12 @@ pub fn decrypt(deps: &Deps, req: DecryptRequest, correlation_id: &str) -> Result
     // defense-in-depth so a weakened guard fails loudly, not silently.
     match deps.engine.evaluate(&p_req) {
         Decision::Allow { .. } => {}
-        Decision::Deny { human, .. } => {
+        Decision::Deny { kmip_reason, human, .. } => {
             return Err(fail_err(
                 deps,
                 correlation_id,
                 "Decrypt",
-                KmipError::permission_denied(human),
+                KmipError::failed(kmip_reason.to_result_reason(), human),
             ));
         }
         Decision::RekeyAndProceed { .. } => {

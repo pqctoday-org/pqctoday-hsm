@@ -109,7 +109,7 @@ pub fn create_key_pair(
     // Algorithm + length should be the same on both halves (carried in
     // CommonAttributes per the spec; private/public mismatch would be
     // a client bug). Pull from whichever side has it first.
-    let (algorithm_in, key_length, usage_mask, recommended_curve) = extract_template(&req);
+    let (algorithm_in, algo_enum, key_length, usage_mask, recommended_curve) = extract_template(&req);
     let _ = (priv_x.algorithm, pub_x.algorithm); // silence unused; merged via extract_template
 
     // ── Plane 1: policy gate ────────────────────────────────────────────
@@ -145,6 +145,15 @@ pub fn create_key_pair(
         _ => None,
     });
     p_req.name = template_name;
+    // Surface the mechanism dimension so `mechanism_allowlist`/`_denylist`
+    // rules scoped to `Create`/`CreateKeyPair` (e.g.
+    // pkcs11-mechanism-lockdown.yaml) actually gate keygen instead of
+    // silently no-op'ing. Only meaningful when the client named an
+    // algorithm — a template-omitted algorithm relies on policy's own
+    // `algorithm_default`, which hasn't run yet at this point.
+    if let Some(a) = algo_enum {
+        p_req.mechanism = super::helpers::mechanism_params_from_cp(a, PkcsOp::KeyGen, None);
+    }
 
     let resolved_algorithm = match deps.engine.evaluate(&p_req) {
         Decision::Allow { algorithm_override, .. } => match algorithm_override.or(algorithm_in) {
@@ -160,12 +169,12 @@ pub fn create_key_pair(
                 );
             }
         },
-        Decision::Deny { human, .. } => {
+        Decision::Deny { kmip_reason, human, .. } => {
             return fail(
                 deps,
                 correlation_id,
                 op_canonical,
-                KmipError::permission_denied(human),
+                KmipError::failed(kmip_reason.to_result_reason(), human),
             );
         }
         Decision::RekeyAndProceed { .. } => {
@@ -590,8 +599,9 @@ pub(crate) fn engine_generate_keypair(
 /// canonicalises for the engine.
 fn extract_template(
     req: &CreateKeyPairRequest,
-) -> (Option<String>, Option<u32>, Option<UsageMask>, Option<u32>) {
+) -> (Option<String>, Option<KmipAlgorithm>, Option<u32>, Option<UsageMask>, Option<u32>) {
     let mut algorithm: Option<String> = None;
+    let mut algo_enum: Option<KmipAlgorithm> = None;
     let mut length: Option<u32> = None;
     let mut usage: Option<UsageMask> = None;
     // KMIP 3.0 §4.16 — the curve is carried inside Cryptographic Domain
@@ -606,6 +616,7 @@ fn extract_template(
         match a {
             Attribute::CryptographicAlgorithm(alg) => {
                 algorithm = Some(canonical_name(*alg));
+                algo_enum = Some(*alg);
             }
             Attribute::CryptographicLength(n) => {
                 length = Some(*n as u32);
@@ -621,7 +632,7 @@ fn extract_template(
             _ => {}
         }
     }
-    (algorithm, length, usage, recommended_curve)
+    (algorithm, algo_enum, length, usage, recommended_curve)
 }
 
 /// Canonical algorithm string used by the policy engine. Mirrors the

@@ -78,12 +78,12 @@ pub fn get(deps: &Deps, req: GetRequest, correlation_id: &str) -> Result<GetResp
     let mut p_req = PolicyRequest::minimal("Get", Some(&algo), started, correlation_id, &empty);
     p_req.state = Some(state_name(obj.state));
     p_req.target_uid = Some(&req.uid);
-    if let Decision::Deny { human, .. } = deps.engine.evaluate(&p_req) {
+    if let Decision::Deny { kmip_reason, human, .. } = deps.engine.evaluate(&p_req) {
         return Err(fail_err(
             deps,
             correlation_id,
             "Get",
-            KmipError::permission_denied(human),
+            KmipError::failed(kmip_reason.to_result_reason(), human),
         ));
     }
 

@@ -68,7 +68,7 @@ pub fn create(deps: &Deps, mut req: CreateRequest, correlation_id: &str) -> Resu
         &mut req.template_attribute,
     );
 
-    let (algorithm_in, key_length, usage_mask) = extract_template(&req.template_attribute);
+    let (algorithm_in, algo_enum, key_length, usage_mask) = extract_template(&req.template_attribute);
 
     // Plane-1 policy gate. Y1: surface the request's custom attributes so
     // `require_custom_attribute` can actually see the classification tag.
@@ -94,6 +94,15 @@ pub fn create(deps: &Deps, mut req: CreateRequest, correlation_id: &str) -> Resu
         _ => None,
     });
     p_req.name = template_name;
+    // Surface the mechanism dimension so `mechanism_allowlist`/`_denylist`
+    // rules scoped to `Create`/`CreateKeyPair` (e.g.
+    // pkcs11-mechanism-lockdown.yaml) actually gate keygen instead of
+    // silently no-op'ing. Only meaningful when the client named an
+    // algorithm — a template-omitted algorithm relies on policy's own
+    // `algorithm_default`, which hasn't run yet at this point.
+    if let Some(a) = algo_enum {
+        p_req.mechanism = super::helpers::mechanism_params_from_cp(a, PkcsOp::KeyGen, None);
+    }
 
     let resolved = match deps.engine.evaluate(&p_req) {
         Decision::Allow { algorithm_override, .. } => match algorithm_override.or(algorithm_in) {
@@ -109,12 +118,12 @@ pub fn create(deps: &Deps, mut req: CreateRequest, correlation_id: &str) -> Resu
                 ));
             }
         },
-        Decision::Deny { human, .. } => {
+        Decision::Deny { kmip_reason, human, .. } => {
             return Err(fail_err(
                 deps,
                 correlation_id,
                 "Create",
-                KmipError::permission_denied(human),
+                KmipError::failed(kmip_reason.to_result_reason(), human),
             ));
         }
         Decision::RekeyAndProceed { .. } => {
@@ -335,21 +344,25 @@ pub(crate) fn engine_generate_symmetric(
     Ok(digest_value)
 }
 
-fn extract_template(attrs: &[Attribute]) -> (Option<String>, Option<u32>, Option<UsageMask>) {
+fn extract_template(
+    attrs: &[Attribute],
+) -> (Option<String>, Option<KmipAlgorithm>, Option<u32>, Option<UsageMask>) {
     let mut algorithm: Option<String> = None;
+    let mut algo_enum: Option<KmipAlgorithm> = None;
     let mut length: Option<u32> = None;
     let mut usage: Option<UsageMask> = None;
     for a in attrs {
         match a {
             Attribute::CryptographicAlgorithm(alg) => {
                 algorithm = Some(super::helpers::canonical_name(*alg));
+                algo_enum = Some(*alg);
             }
             Attribute::CryptographicLength(n) => length = Some(*n as u32),
             Attribute::CryptographicUsageMask(m) => usage = Some(*m),
             _ => {}
         }
     }
-    (algorithm, length, usage)
+    (algorithm, algo_enum, length, usage)
 }
 
 /// Symmetric-only algorithm parse. AES + HMAC variants accepted; asymmetric
@@ -446,12 +459,15 @@ rules:
 
     /// PKCS#11 v3.2 §4.8 Table 13 — Create on a symmetric key with
     /// UsageMask=ENCRYPT|DECRYPT auto-restricts the engine object's
-    /// CKA_ALLOWED_MECHANISMS to CKM_AES_GCM (the only mechanism
-    /// `to_pkcs11_mech(Aes, Encrypt|Decrypt)` resolves to). Verified two
+    /// CKA_ALLOWED_MECHANISMS to the full set `aes_mechanism_for`
+    /// (helpers.rs) can actually resolve to for Encrypt/Decrypt — every
+    /// `BlockCipherMode` the request might carry, not just the GCM default
+    /// (WP-1 remediation: the original single-mechanism whitelist collapsed
+    /// non-GCM Encrypt/Decrypt with CKR_MECHANISM_INVALID). Verified two
     /// ways: the raw attribute bytes on the engine handle, AND that the
-    /// restriction is actually enforced (CKM_AES_ECB now fails at the
-    /// engine with CKR_MECHANISM_INVALID even though AES-ECB is otherwise
-    /// a perfectly valid mechanism for an AES key).
+    /// restriction is still enforced against a mechanism genuinely absent
+    /// from it — CKM_AES_KEY_WRAP, a real AES mechanism but one this key's
+    /// mask (ENCRYPT|DECRYPT, no WRAP_KEY/UNWRAP_KEY) never allows.
     #[test]
     fn create_symmetric_auto_restricts_engine_key_from_usage_mask() {
         let _lock = crate::engine_test_lock::acquire();
@@ -482,11 +498,16 @@ rules:
 
         let allowed = softhsmrustv3::native::get_attribute(sess, handle, c::CKA_ALLOWED_MECHANISMS)
             .expect("CKA_ALLOWED_MECHANISMS was set by Create");
-        assert_eq!(allowed, c::CKM_AES_GCM.to_le_bytes().to_vec());
+        let expected: Vec<u8> = [c::CKM_AES_CBC, c::CKM_AES_CBC_PAD, c::CKM_AES_ECB, c::CKM_AES_CTR, c::CKM_AES_GCM]
+            .iter()
+            .flat_map(|m| m.to_le_bytes())
+            .collect();
+        assert_eq!(allowed, expected);
 
-        // Enforcement, not just presence: AES-ECB is a real mechanism for
-        // an AES key, but it isn't in this key's allowed list.
-        let err = softhsmrustv3::native::encrypt(sess, handle, c::CKM_AES_ECB, b"0123456789012345", None)
+        // Enforcement, not just presence: AES-KEY-WRAP is a real AES
+        // mechanism, but this key's mask (ENCRYPT|DECRYPT only, no
+        // WRAP_KEY/UNWRAP_KEY) never allows it.
+        let err = softhsmrustv3::native::encrypt(sess, handle, c::CKM_AES_KEY_WRAP, b"0123456789012345", None)
             .unwrap_err();
         assert_eq!(err, c::CKR_MECHANISM_INVALID);
         // The mechanism the usage mask DID imply still works.

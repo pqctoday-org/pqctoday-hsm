@@ -101,8 +101,8 @@ pub fn register(
     );
     p_req.key_length = resolved_length;
     p_req.usage_mask = usage_mask;
-    if let Decision::Deny { human, .. } = deps.engine.evaluate(&p_req) {
-        return Err(fail_err(deps, correlation_id, "Register", KmipError::permission_denied(human)));
+    if let Decision::Deny { kmip_reason, human, .. } = deps.engine.evaluate(&p_req) {
+        return Err(fail_err(deps, correlation_id, "Register", KmipError::failed(kmip_reason.to_result_reason(), human)));
     }
 
     // KMIP 3.0 §6.1.48 — Certificate / OpaqueObject Registers are not
@@ -531,8 +531,8 @@ pub fn import_object(
     );
     p_req.key_length = resolved_length;
     p_req.usage_mask = usage_mask;
-    if let Decision::Deny { human, .. } = deps.engine.evaluate(&p_req) {
-        return Err(fail_err(deps, correlation_id, "Import", KmipError::permission_denied(human)));
+    if let Decision::Deny { kmip_reason, human, .. } = deps.engine.evaluate(&p_req) {
+        return Err(fail_err(deps, correlation_id, "Import", KmipError::failed(kmip_reason.to_result_reason(), human)));
     }
 
     let kmip_algorithm = resolved_algorithm.ok_or_else(|| {

@@ -164,8 +164,8 @@ pub fn rekey(deps: &Deps, req: ReKeyRequest, correlation_id: &str) -> Result<ReK
         p_req.current_object_algorithm = Some(&algo_name);
         p_req.target_uid = Some(&orig.uid);
         match deps.engine.evaluate(&p_req) {
-            Decision::Deny { human, .. } => {
-                return Err(fail(KmipError::permission_denied(human)));
+            Decision::Deny { kmip_reason, human, .. } => {
+                return Err(fail(KmipError::failed(kmip_reason.to_result_reason(), human)));
             }
             Decision::RekeyAndProceed { new_algorithm, .. } if x.algorithm.is_none() => {
                 algo = super::create_key_pair::parse_algorithm(&new_algorithm).map_err(&fail)?;
@@ -324,8 +324,8 @@ pub fn rekey_key_pair(
         p_req.current_object_algorithm = Some(&algo_name);
         p_req.target_uid = Some(&old_priv.uid);
         match deps.engine.evaluate(&p_req) {
-            Decision::Deny { human, .. } => {
-                return Err(fail(KmipError::permission_denied(human)));
+            Decision::Deny { kmip_reason, human, .. } => {
+                return Err(fail(KmipError::failed(kmip_reason.to_result_reason(), human)));
             }
             Decision::RekeyAndProceed { new_algorithm, .. } if client_algo.is_none() => {
                 algo = super::create_key_pair::parse_algorithm(&new_algorithm).map_err(&fail)?;

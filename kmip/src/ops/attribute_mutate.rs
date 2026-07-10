@@ -97,7 +97,7 @@ pub fn add_attribute(
 
     check_circular_link(deps, "AddAttribute", &req.uid, &req.new_attribute, correlation_id)?;
     apply_attribute(&mut obj, &req.new_attribute);
-    commit_mutation(deps, obj)?;
+    commit_mutation(deps, correlation_id, obj)?;
     emit_success(deps, correlation_id, "AddAttribute");
     Ok(AddAttributeResponse { uid: req.uid })
 }
@@ -162,7 +162,7 @@ pub fn modify_attribute(
 
     check_circular_link(deps, "ModifyAttribute", &req.uid, &req.new_attribute, correlation_id)?;
     apply_attribute(&mut obj, &req.new_attribute);
-    commit_mutation(deps, obj)?;
+    commit_mutation(deps, correlation_id, obj)?;
     emit_success(deps, correlation_id, "ModifyAttribute");
     Ok(ModifyAttributeResponse { uid: req.uid })
 }
@@ -229,7 +229,7 @@ pub fn delete_attribute(
             )));
     }
 
-    commit_mutation(deps, obj)?;
+    commit_mutation(deps, correlation_id, obj)?;
     emit_success(deps, correlation_id, "DeleteAttribute");
     Ok(DeleteAttributeResponse { uid: req.uid })
 }
@@ -261,7 +261,7 @@ pub fn set_attribute(
 
     check_circular_link(deps, "SetAttribute", &req.uid, &req.new_attribute, correlation_id)?;
     apply_attribute(&mut obj, &req.new_attribute);
-    commit_mutation(deps, obj)?;
+    commit_mutation(deps, correlation_id, obj)?;
     emit_success(deps, correlation_id, "SetAttribute");
     Ok(SetAttributeResponse { uid: req.uid })
 }
@@ -324,7 +324,7 @@ pub fn adjust_attribute(
         }
     }
 
-    commit_mutation(deps, obj)?;
+    commit_mutation(deps, correlation_id, obj)?;
     emit_success(deps, correlation_id, "AdjustAttribute");
     Ok(AdjustAttributeResponse { uid: req.uid })
 }
@@ -336,9 +336,57 @@ pub fn adjust_attribute(
 /// attribute of the managed object changes (K-13); stamping it here,
 /// immediately before `store.update`, guarantees no mutation op can
 /// forget it.
-fn commit_mutation(deps: &Deps, mut obj: ObjectRecord) -> Result<()> {
+fn commit_mutation(deps: &Deps, correlation_id: &str, mut obj: ObjectRecord) -> Result<()> {
     obj.last_change_date = Some(OffsetDateTime::now_utc());
+    refresh_engine_mechanism_whitelist(deps, correlation_id, &obj);
     deps.store.update(obj)
+}
+
+/// PKCS#11 v3.2 §4.8 Table 13 — keep the engine-side `CKA_ALLOWED_MECHANISMS`
+/// whitelist in sync with `CryptographicUsageMask` across every attribute
+/// mutation (Add/Modify/Set/Adjust/Delete all funnel through
+/// `commit_mutation`). Without this, widening usage post-creation left the
+/// engine gate stuck at its original, narrower set (blocking a now-allowed
+/// op), and narrowing it left the gate stuck at its original, wider set —
+/// reopening the exact raw-PKCS#11 bypass this attribute exists to close.
+/// Unconditional (not gated on which attribute changed) and unconditional on
+/// the derived list being non-empty — unlike Create's skip-if-empty
+/// posture, a mutation that narrows usage to nothing MUST actively write an
+/// empty whitelist so `check_mechanism_allowed` locks the key down, not
+/// leave a stale wider one in place. Scoped to key objects only — Certificate
+/// records carry a sentinel `CryptographicAlgorithm` (never a real mechanism
+/// family) and have no PKCS#11 concept of a mechanism whitelist. Best-effort,
+/// same posture as key creation: a set_attribute failure here doesn't unwind
+/// the already-decided KMIP-side mutation.
+fn refresh_engine_mechanism_whitelist(deps: &Deps, correlation_id: &str, obj: &ObjectRecord) {
+    use crate::kmip30::ObjectType;
+    if !matches!(
+        obj.object_type,
+        ObjectType::PrivateKey | ObjectType::PublicKey | ObjectType::SymmetricKey
+    ) {
+        return;
+    }
+    let Some(session) = deps.engine_session else { return };
+    let Ok(Some(handle)) =
+        super::helpers::find_handle_for_object(session, &obj.pkcs11_cka_id, obj.object_type)
+    else {
+        return;
+    };
+    let mechs = obj.algorithm.usage_mask_to_allowed_mechanisms(obj.usage_mask);
+    let packed: Vec<u8> = mechs.iter().flat_map(|m| m.to_le_bytes()).collect();
+    let r = softhsmrustv3::native::set_attribute(
+        session,
+        handle,
+        softhsmrustv3::constants::CKA_ALLOWED_MECHANISMS,
+        packed,
+    );
+    super::helpers::emit_pkcs11_result(
+        deps,
+        correlation_id,
+        "native::set_attribute(CKA_ALLOWED_MECHANISMS, refresh)",
+        None,
+        &r,
+    );
 }
 
 fn policy_gate(deps: &Deps, obj: &ObjectRecord, op: &'static str, correlation_id: &str) -> Result<()> {
@@ -348,8 +396,8 @@ fn policy_gate(deps: &Deps, obj: &ObjectRecord, op: &'static str, correlation_id
     let mut p_req = PolicyRequest::minimal(op, Some(&algo), started, correlation_id, &empty);
     p_req.state = Some(state_name(obj.state));
     p_req.target_uid = Some(&obj.uid);
-    if let Decision::Deny { human, .. } = deps.engine.evaluate(&p_req) {
-        return Err(fail_err(deps, correlation_id, op, KmipError::permission_denied(human)));
+    if let Decision::Deny { kmip_reason, human, .. } = deps.engine.evaluate(&p_req) {
+        return Err(fail_err(deps, correlation_id, op, KmipError::failed(kmip_reason.to_result_reason(), human)));
     }
     Ok(())
 }

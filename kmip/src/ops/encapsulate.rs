@@ -116,12 +116,12 @@ pub fn encapsulate(
     p_req.object_activation_date = obj.activation_date; // F-3 — max_key_age_days
     match deps.engine.evaluate(&p_req) {
         crate::policy::Decision::Allow { .. } => {}
-        crate::policy::Decision::Deny { human, .. } => {
+        crate::policy::Decision::Deny { kmip_reason, human, .. } => {
             return Err(fail_err(
                 deps,
                 correlation_id,
                 "Encapsulate",
-                KmipError::permission_denied(human),
+                KmipError::failed(kmip_reason.to_result_reason(), human),
             ));
         }
         crate::policy::Decision::RekeyAndProceed { new_algorithm, .. } => {
