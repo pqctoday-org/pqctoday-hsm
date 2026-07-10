@@ -454,6 +454,7 @@ rules:
     /// a perfectly valid mechanism for an AES key).
     #[test]
     fn create_symmetric_auto_restricts_engine_key_from_usage_mask() {
+        let _lock = crate::engine_test_lock::acquire();
         use softhsmrustv3::constants as c;
         use softhsmrustv3::native::session;
         let _guard_reset = session::finalize();

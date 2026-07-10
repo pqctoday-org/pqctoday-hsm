@@ -428,6 +428,7 @@ pub fn register(
             .map(|b| Sha256::digest(b).to_vec())
     };
 
+    let cka_id_for_cert_projection = cka_id_bytes.clone();
     deps.store.put(ObjectRecord {
         uid: uid.clone(),
         object_type: req.object_type,
@@ -464,11 +465,30 @@ pub fn register(
         digest_value,
         cryptographic_parameters: x.cryptographic_parameters.clone(),
         certificate_type,
-        certificate_value,
+        certificate_value: certificate_value.clone(),
         certificate_length,
         certificate_subject_cn,
         ..ObjectRecord::default()
     })?;
+
+    // PKCS#11 v3.2 §4.6 — mirror a registered X.509 certificate onto the
+    // engine too, same as Certify does (see
+    // ops::certify::project_certificate_to_engine's doc comment for why
+    // this is best-effort and KMIP-authoritative). Category is always
+    // TOKEN_USER here — Register has no "this is a CA cert" signal;
+    // AUTHORITY is reserved for the CA bootstrap path.
+    if req.object_type == ObjectType::Certificate {
+        if let Some(der) = certificate_value.as_deref() {
+            super::certify::project_certificate_to_engine(
+                deps,
+                correlation_id,
+                "Register",
+                der,
+                &cka_id_for_cert_projection,
+                softhsmrustv3::constants::CK_CERTIFICATE_CATEGORY_TOKEN_USER,
+            );
+        }
+    }
 
     emit_success(deps, correlation_id, "Register");
     Ok(RegisterResponse { uid })
@@ -860,6 +880,56 @@ mod tests {
             key_value: vec![0x01; 16],
             key_wrapping_data: None,
         }
+    }
+
+    /// PKCS#11 v3.2 §4.6 — WP-C: Register(Certificate) mirrors the
+    /// certificate onto the engine too, same as Certify — see
+    /// ops::certify::project_certificate_to_engine's doc comment. Uses a
+    /// real (rcgen-generated, self-signed) X.509 DER so the engine-side
+    /// x509-parser subject/issuer/serial extraction has real input, not a
+    /// synthetic fixture.
+    #[test]
+    fn register_certificate_projects_engine_object() {
+        use softhsmrustv3::constants as c;
+        use softhsmrustv3::native::session;
+        let _lock = crate::engine_test_lock::acquire();
+        let _ = session::finalize();
+        session::init().expect("engine init");
+        let sess = session::bootstrap_default_token(0, "so-pin", "user-pin", "register-cert-test")
+            .expect("bootstrap session");
+
+        let cert = rcgen::generate_simple_self_signed(vec!["wp-c.example.test".to_string()])
+            .expect("rcgen self-signed cert");
+        let der = cert.cert.der().to_vec();
+
+        let d = deps_with().with_engine_session(sess);
+        let resp = register(&d, RegisterRequest {
+            object_type: ObjectType::Certificate,
+            attributes: vec![Attribute::Name("wp-c-register-cert".into())],
+            managed_object: None,
+            protection_storage_masks: None,
+            certificate_payload: Some((0 /* X.509 */, der.clone())),
+        }, "c-wpc-register").unwrap();
+
+        let rec = d.store.get(&resp.uid).unwrap().unwrap();
+        assert_eq!(rec.certificate_value.as_deref(), Some(der.as_slice()));
+        assert!(!rec.pkcs11_cka_id.is_empty(), "Register must stamp a CKA_ID for engine lookup");
+
+        let handle = crate::ops::helpers::find_handle_for_object(sess, &rec.pkcs11_cka_id, ObjectType::Certificate)
+            .unwrap()
+            .expect("registered certificate must be projected onto the engine");
+        assert_eq!(
+            softhsmrustv3::native::get_attribute(sess, handle, c::CKA_VALUE).unwrap(),
+            der,
+            "engine CKA_VALUE must byte-equal the registered Certificate Value"
+        );
+        assert_eq!(
+            softhsmrustv3::native::get_attribute_u32(sess, handle, c::CKA_CERTIFICATE_CATEGORY),
+            Some(c::CK_CERTIFICATE_CATEGORY_TOKEN_USER),
+            "Register has no CA-designation signal — always TOKEN_USER"
+        );
+
+        let _ = session::finalize();
     }
 
     #[test]

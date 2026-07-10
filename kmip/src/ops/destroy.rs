@@ -90,7 +90,16 @@ pub fn destroy(deps: &Deps, req: DestroyRequest, correlation_id: &str) -> Result
         // Best-effort: if the handle is already gone (e.g. engine restart
         // between record creation and Destroy), ignore the error — the
         // KMIP lifecycle transition still proceeds.
-        if let Ok(Some(handle)) = softhsmrustv3::native::find_by_cka_id(session, &obj.pkcs11_cka_id) {
+        //
+        // Class-aware lookup, not the bare find_by_cka_id: a public key,
+        // its matching private key, AND (since WP-C) a linked certificate
+        // can all share one CKA_ID — see helpers::find_handle_for_object's
+        // doc comment. Destroying the KMIP record for one of them must
+        // remove only ITS engine object, not whichever handle a
+        // class-blind lookup happened to return first.
+        if let Ok(Some(handle)) =
+            super::helpers::find_handle_for_object(session, &obj.pkcs11_cka_id, obj.object_type)
+        {
             let r = softhsmrustv3::native::destroy_object(session, handle);
             super::helpers::emit_pkcs11_result(
                 deps,

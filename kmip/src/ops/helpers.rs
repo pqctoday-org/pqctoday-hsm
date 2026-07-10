@@ -937,8 +937,7 @@ pub fn find_handle_for_object(
         ObjectType::PrivateKey => c::CKO_PRIVATE_KEY,
         ObjectType::PublicKey => c::CKO_PUBLIC_KEY,
         ObjectType::SymmetricKey | ObjectType::SecretData => c::CKO_SECRET_KEY,
-        // PKCS#11 CKO_CERTIFICATE = 0x01, not exposed in softhsmrustv3 constants
-        ObjectType::Certificate => 0x01,
+        ObjectType::Certificate => c::CKO_CERTIFICATE,
         // KMIP-only object types — no PKCS#11 cryptoki class maps cleanly.
         // Surface as ItemNotFound by returning a sentinel that never
         // matches a real handle class (CKO_VENDOR_DEFINED start = 0x80000000).
