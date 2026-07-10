@@ -36,6 +36,7 @@ use pqctoday_kmip::dispatcher::{dispatch, one_off_request};
 use pqctoday_kmip::kmip30::{
     decode_request_message, encode_request_message, encode_response_message, ActivateRequest,
     Attribute, BatchErrorContinuationOption, CreateKeyPairRequest, CreateRequest,
+    CustomAttributeValue,
     DecapsulateRequest, DecryptRequest, DestroyRequest, EncapsulateRequest, EncryptRequest,
     GetRequest, KmipAlgorithm, LocateRequest, ObjectType, QueryFunction, QueryRequest,
     ReKeyKeyPairRequest, ReKeyRequest, RequestBatchItem, RequestHeader, RequestMessage,
@@ -43,7 +44,7 @@ use pqctoday_kmip::kmip30::{
     ResultStatus, RevocationReason, RevokeRequest, SignRequest, SignatureVerifyRequest, UsageMask,
     WireError,
 };
-use pqctoday_kmip::ops::{Deps, DepsConfig};
+use pqctoday_kmip::ops::{Deps, DepsConfig, RngSeedMode};
 use pqctoday_kmip::policy::Engine;
 use pqctoday_kmip::store::MemoryStore;
 
@@ -89,13 +90,32 @@ impl KmipPlayground {
     /// (its own doc comment) that brings a new slot online before
     /// `C_InitToken` will accept it; skipping this for a non-zero slot
     /// fails with `CKR_SLOT_ID_INVALID` (confirmed empirically).
+    /// `rng_seed_mode` — the server's §6.1.55 RNG Seed policy choice
+    /// (`RngSeedMode`): `"full-consume"` (default) / `"partial-consume"` /
+    /// `"ignore"` / `"deny"`. Server-chosen and mutually exclusive per the
+    /// spec, so it's a CONSTRUCTOR parameter, not per-request — exposed so
+    /// the in-browser OASIS corpus replay can boot each CS-RNG-O variant
+    /// test on an engine pinned to that test's mode, exactly as the native
+    /// harness constructs per-test `Deps`.
     #[wasm_bindgen(constructor)]
-    pub fn new(slot: Option<u32>) -> Result<KmipPlayground, JsError> {
+    pub fn new(slot: Option<u32>, rng_seed_mode: Option<String>) -> Result<KmipPlayground, JsError> {
         console_error_panic_hook::set_once();
         let slot = slot.unwrap_or(0);
         if slot != 0 {
             softhsmrustv3::state::ensure_slot(slot);
         }
+
+        let rng_seed_mode = match rng_seed_mode.as_deref() {
+            None | Some("full-consume") => RngSeedMode::FullConsume,
+            Some("partial-consume") => RngSeedMode::PartialConsume,
+            Some("ignore") => RngSeedMode::Ignore,
+            Some("deny") => RngSeedMode::Deny,
+            Some(other) => {
+                return Err(JsError::new(&format!(
+                    "unknown rng_seed_mode '{other}' — expected full-consume | partial-consume | ignore | deny"
+                )))
+            }
+        };
 
         // Plane 3 — bootstrap the engine token + user session (real crypto).
         let session = softhsmrustv3::native::session::bootstrap_default_token(
@@ -120,8 +140,8 @@ impl KmipPlayground {
 
         // Plane 2 — volatile object store.
         let store = Arc::new(MemoryStore::new());
-        let deps = Deps::new(engine, store, sink, DepsConfig::default())
-            .with_engine_session(session);
+        let config = DepsConfig { rng_seed_mode, ..DepsConfig::default() };
+        let deps = Deps::new(engine, store, sink, config).with_engine_session(session);
 
         Ok(KmipPlayground { deps, ring })
     }
@@ -667,7 +687,7 @@ fn custom_attrs_from_spec(spec: &Json) -> Vec<Attribute> {
             o.iter()
                 .map(|(k, v)| Attribute::Custom {
                     name: k.strip_prefix("x-").unwrap_or(k).to_string(),
-                    value: v.as_str().unwrap_or_default().to_string(),
+                    value: CustomAttributeValue::Text(v.as_str().unwrap_or_default().to_string()),
                 })
                 .collect()
         })
@@ -1079,6 +1099,7 @@ fn wire_error_response(err: &WireError) -> ResponseMessage {
             result_status: ResultStatus::OperationFailed,
             result_reason: Some(reason as u32),
             result_message: Some(format!("KMIP wire decode failed: {err}")),
+            asynchronous_correlation_value: None,
             payload: None,
         }],
     }
