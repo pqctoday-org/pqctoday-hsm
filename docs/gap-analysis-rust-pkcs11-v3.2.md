@@ -12,6 +12,24 @@
 > reports "no validation." Revisit only if a real FIPS 140-3/CC validation
 > effort exists to describe.
 >
+> **Update 2 (2026-07-10).** A second follow-up, from the same-day canonical-
+> header sweep that produced the update above, found and closed 2 more real
+> gaps plus a KMIP-side integration: `CKA_ALLOWED_MECHANISMS` (§4.8 Table 13
+> — engine-side mechanism whitelisting, wired into every FFI and native
+> operation that binds a key to a mechanism, auto-derived for KMIP-created
+> keys from their `CryptographicUsageMask`) and `CKO_CERTIFICATE` (§4.6,
+> X.509 only — WTLS/X.509-attribute-certs recognized-but-rejected, no
+> consumer for either). A third piece, projecting KMIP-issued/registered
+> certificates onto the engine as real `CKO_CERTIFICATE` objects (so a raw
+> PKCS#11 client like strongSwan can find them), found and fixed a genuine
+> pre-existing bug as a necessary side effect: `ops::destroy.rs` in the KMIP
+> crate resolved which engine handle to tear down via the class-blind
+> `find_by_cka_id`, which is ambiguous the moment more than one object class
+> shares a CKA_ID (now routine for cert+key pairs) — switched to the
+> class-aware `find_handle_for_object` everywhere. See
+> `../../pkcs11-v32-allowedmech-certobjects-remediation-plan-07102026.md`
+> and the refreshed 257/0 conformance report (up from 222/0).
+>
 > **Historical record (2026-06).** These gaps are closed — the Rust engine now
 > passes its own 188/0 PKCS#11 v3.2 conformance suite (`../rust/RUST_P11_V32_CONFORMANCE_REPORT.md`),
 > shipped through v0.8.0. Kept for provenance, not an open to-do list.

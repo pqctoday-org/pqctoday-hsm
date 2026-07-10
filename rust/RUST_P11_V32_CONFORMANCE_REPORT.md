@@ -4,7 +4,7 @@
 **Harness:** `rust/test_p11_conformance.js` (table-driven negative-path + KAT
 matrix asserting exact `CKR_*` codes in spec priority order §5.4/§5.12, plus
 PQC keygen/param-set, SP800-108 KBKDF, and message-based-crypto checks).
-**Engine commit:** `f5b253d` · **Generated:** 2026-07-10
+**Engine commit:** `9490a0b` · **Generated:** 2026-07-10
 **Regenerate:** `scripts/local-gate.sh --rust-p11` (see below), or manually:
 ```
 docker exec pqc-rust bash -c 'cd /ag/pqctoday-hsm/rust && \
@@ -15,7 +15,7 @@ cd rust && node test_p11_conformance.js
 
 ## Result
 
-**222 passed / 0 failed** across 38 sections.
+**257 passed / 0 failed** across 40 sections.
 
 This is the Rust engine's OWN conformance evidence. Previously the only checked-in
 compliance artifact (`cpp_compliance_report.md`) targeted the **C++** engine,
@@ -24,11 +24,16 @@ Rust conformance rested on prose (report gap P2/T1). This report closes that gap
 the actual Rust engine, exercised through its real PKCS#11 ABI (wasm-bindgen
 `_C_*` exports), passes the full v3.2 negative-path + KAT matrix.
 
-Up from 188/36 (2026-07-02): the two new sections close 3 gaps from
-`pkcs11-v32-gap-remediation-plan-07102026.md` (WP1 — `CKR_PARAMETER_SET_NOT_SUPPORTED`;
-WP2 — SP 800-108 `CK_SP800_108_COUNTER`/`KEY_HANDLE`/`DKM_LENGTH_SUM_OF_SEGMENTS`;
-WP4a — `CKO_TRUST` object class), each independently verified against Node-crypto
-reference vectors, not just "returns OK".
+Up from 222/38 (2026-07-10, commit f5b253d): the two new sections close the
+remaining two gaps from `pkcs11-v32-allowedmech-certobjects-remediation-plan-07102026.md`
+— `CKA_ALLOWED_MECHANISMS` (§4.8 Table 13) engine-side enforcement across
+every operation that binds a key to a mechanism, and `CKO_CERTIFICATE`
+(§4.6, X.509 only). A third work package in that same plan — projecting
+KMIP-issued/registered certificates onto the engine as real
+`CKO_CERTIFICATE` objects — is verified by the **KMIP crate's own test
+suite** (521 tests), not this wasm harness, since it's a KMIP-server-side
+integration rather than a raw PKCS#11 ABI behavior; see that plan's WP-C
+and the commit that shipped it for the evidence.
 
 ## Sections covered
 
@@ -70,6 +75,8 @@ reference vectors, not just "returns OK".
 - Round-2 — SP800-108 KBKDF PRF must be a keyed-MAC mechanism (§6.26)
 - Round-2 — SP800-108 CK_PRF_DATA_TYPE completeness (COUNTER, KEY_HANDLE, SUM_OF_SEGMENTS)
 - WP4a — CKO_TRUST object lifecycle (§4.7 Table 25)
+- WP-A — CKA_ALLOWED_MECHANISMS enforcement (§4.8 Table 13)
+- WP-B — CKO_CERTIFICATE object lifecycle, X.509 only (§4.6 Tables 19-20)
 
 ## Full transcript
 
@@ -373,5 +380,44 @@ reference vectors, not just "returns OK".
   ✅ C_DestroyObject(CKO_TRUST) → OK
   ✅ destroyed CKO_TRUST object is gone → OBJECT_HANDLE_INVALID
 
-════════ RESULT: 222 passed, 0 failed ════════
+── WP-A — CKA_ALLOWED_MECHANISMS enforcement (§4.8 Table 13) ──
+  ✅ C_GenerateKey(AES, CKA_ALLOWED_MECHANISMS=[AES_GCM]) → OK
+  ✅ C_EncryptInit(CKM_AES_GCM) on a GCM-restricted key → OK
+  ✅ C_EncryptInit(CKM_AES_CBC) on a GCM-restricted key → MECHANISM_INVALID
+  ✅ fixture: unrestricted AES key → OK
+  ✅ C_EncryptInit(CKM_AES_CBC) on an unrestricted key → OK
+  ✅ C_CreateObject with malformed CKA_ALLOWED_MECHANISMS length → ATTRIBUTE_VALUE_INVALID
+  ✅ C_GenerateKeyPair(ML-DSA, private CKA_ALLOWED_MECHANISMS=[ML_DSA]) → OK
+  ✅ C_SignInit(CKM_ML_DSA) on an ML_DSA-restricted key → OK
+  ✅ C_SignInit(CKM_HASH_ML_DSA_SHA256) on an ML_DSA-only-restricted key → MECHANISM_INVALID
+
+── WP-B — CKO_CERTIFICATE object lifecycle, X.509 only (§4.6 Tables 19-20) ──
+  ✅ C_CreateObject(cert, no CKA_CERTIFICATE_TYPE) → TEMPLATE_INCOMPLETE
+  ✅ C_CreateObject(cert, no CKA_SUBJECT) → TEMPLATE_INCOMPLETE
+  ✅ C_CreateObject(cert, no CKA_VALUE and no CKA_URL) → TEMPLATE_INCOMPLETE
+  ✅ C_CreateObject(cert, CKC_WTLS) → ATTRIBUTE_VALUE_INVALID (X.509 only)
+  ✅ C_CreateObject(CKO_CERTIFICATE, CKC_X_509) → OK
+  ✅ C_GetAttributeValue(CKA_SUBJECT) → OK
+  ✅ CKA_SUBJECT round-trips byte-exact
+  ✅ C_GetAttributeValue(CKA_VALUE) → OK
+  ✅ CKA_VALUE round-trips byte-exact
+  ✅ C_GetAttributeValue(CKA_ISSUER) → OK
+  ✅ CKA_ISSUER round-trips byte-exact
+  ✅ C_GetAttributeValue(CKA_CHECK_VALUE) → OK
+  ✅ CKA_CHECK_VALUE = SHA-256(CKA_VALUE)[..3]
+  ✅ C_FindObjectsInit({CLASS,ISSUER,SERIAL_NUMBER}) → OK
+  ✅ C_FindObjects → OK
+  ✅ C_FindObjects locates the certificate
+  ✅ C_FindObjects returns the correct handle
+  ✅ C_FindObjectsFinal → OK
+  ✅ C_CreateObject(cert, CKA_TRUSTED=true) as USER → ATTRIBUTE_READ_ONLY
+  ✅ C_Logout (leaving USER) → OK
+  ✅ C_Login(SO) → OK
+  ✅ C_CreateObject(cert, CKA_TRUSTED=true) as SO → OK
+  ✅ C_GetAttributeValue(CKA_TRUSTED) → OK
+  ✅ CKA_TRUSTED set by SO reads back TRUE
+  ✅ C_Logout (leaving SO) → OK
+  ✅ re-Login(USER) → OK
+
+════════ RESULT: 257 passed, 0 failed ════════
 ```
