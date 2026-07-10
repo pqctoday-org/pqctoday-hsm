@@ -419,6 +419,37 @@ pub fn can_access_object(h_session: u32, attrs: &Attributes) -> bool {
     session_logged_in(h_session)
 }
 
+/// PKCS#11 v3.2 §4.8 Table 13 — `CKA_ALLOWED_MECHANISMS` restricts a key to
+/// a caller-specified mechanism whitelist. Absent attribute (the common
+/// case) means unrestricted, per the spec's default. Call AFTER key-handle
+/// validation and BEFORE any mechanism-parameter-specific parsing, using
+/// the caller's ORIGINAL requested mechanism (not an internal remap like
+/// CKM_EDDSA → CKM_EDDSA_PH) — §5.1.6 `CKR_MECHANISM_INVALID` is the code
+/// consumers (NSS, pkcs11-provider) expect for a disallowed mechanism.
+/// Shared by both the FFI (`ffi.rs`) and native (`native/*.rs`) entry
+/// points — KMIP calls the engine through the native surface, not FFI, so
+/// this can't live only on one side.
+pub fn check_mechanism_allowed(h_key: u32, mech_type: u32) -> Result<(), u32> {
+    let allowed = OBJECTS.with(|o| {
+        o.borrow()
+            .get(&h_key)
+            .and_then(|attrs| attrs.get(&CKA_ALLOWED_MECHANISMS).cloned())
+    });
+    match allowed {
+        None => Ok(()),
+        Some(bytes) => {
+            let is_allowed = bytes
+                .chunks_exact(4)
+                .any(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]) == mech_type);
+            if is_allowed {
+                Ok(())
+            } else {
+                Err(CKR_MECHANISM_INVALID)
+            }
+        }
+    }
+}
+
 /// Convenience: look up an object by handle and decide accessibility from the
 /// given session. Returns false if the object does not exist.
 pub fn can_access_handle(h_session: u32, handle: u32) -> bool {

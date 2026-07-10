@@ -70,6 +70,8 @@ pub fn sign_with_pss_salt(
     if !check_can_sign(key_handle, CKA_SIGN) {
         return Err(CKR_KEY_FUNCTION_NOT_PERMITTED);
     }
+    // PKCS#11 v3.2 §4.8 Table 13 — CKA_ALLOWED_MECHANISMS.
+    crate::state::check_mechanism_allowed(key_handle, mechanism)?;
 
     let sk_bytes = get_object_value(key_handle).ok_or(CKR_ARGUMENTS_BAD)?;
     let ps = get_object_param_set(key_handle);
@@ -140,6 +142,8 @@ pub fn verify_with_pss_salt(
     if !check_can_sign(key_handle, CKA_VERIFY) {
         return Err(CKR_KEY_FUNCTION_NOT_PERMITTED);
     }
+    // PKCS#11 v3.2 §4.8 Table 13 — CKA_ALLOWED_MECHANISMS.
+    crate::state::check_mechanism_allowed(key_handle, mechanism)?;
 
     // For most algorithms `CKA_VALUE` holds the verification key bytes
     // (ML-DSA, SLH-DSA, EdDSA, HMAC, KMAC). RSA/ECDSA public keys are
@@ -221,6 +225,8 @@ pub fn sign_pqc(
     if !check_can_sign(key_handle, CKA_SIGN) {
         return Err(CKR_KEY_FUNCTION_NOT_PERMITTED);
     }
+    // PKCS#11 v3.2 §4.8 Table 13 — CKA_ALLOWED_MECHANISMS.
+    crate::state::check_mechanism_allowed(key_handle, mechanism)?;
     use rand::RngCore;
     let sk = get_object_value(key_handle).ok_or(CKR_ARGUMENTS_BAD)?;
     let ps = get_object_param_set(key_handle);
@@ -296,6 +302,8 @@ pub fn verify_pqc(
     if !check_can_sign(key_handle, CKA_VERIFY) {
         return Err(CKR_KEY_FUNCTION_NOT_PERMITTED);
     }
+    // PKCS#11 v3.2 §4.8 Table 13 — CKA_ALLOWED_MECHANISMS.
+    crate::state::check_mechanism_allowed(key_handle, mechanism)?;
     let pk = get_object_value(key_handle).ok_or(CKR_ARGUMENTS_BAD)?;
     let ps = get_object_param_set(key_handle);
     match mechanism {

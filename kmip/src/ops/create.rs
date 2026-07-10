@@ -164,9 +164,17 @@ pub fn create(deps: &Deps, mut req: CreateRequest, correlation_id: &str) -> Resu
     // Plane-3: real bridge call when a session is wired. K15 — the
     // audit record is emitted after the generate call with its real rv.
     let cka_id_bytes = Uuid::new_v4().as_bytes().to_vec();
-    let digest_value =
-        engine_generate_symmetric(deps, correlation_id, "Create", algo, key_length, mech, &cka_id_bytes)
-            .map_err(|e| fail_err(deps, correlation_id, "Create", e))?;
+    let digest_value = engine_generate_symmetric(
+        deps,
+        correlation_id,
+        "Create",
+        algo,
+        key_length,
+        mech,
+        &cka_id_bytes,
+        usage_mask.unwrap_or_else(UsageMask::empty),
+    )
+    .map_err(|e| fail_err(deps, correlation_id, "Create", e))?;
 
     // Plane-2: persist. Lift `Name` + date attributes out of the
     // template. KMIP 3.0 Spec §3.x lifecycle FSM means a past
@@ -237,6 +245,7 @@ pub(crate) fn engine_generate_symmetric(
     key_length: Option<u32>,
     mech: u32,
     cka_id_bytes: &[u8],
+    usage_mask: UsageMask,
 ) -> Result<Option<Vec<u8>>> {
     let mut digest_value: Option<Vec<u8>> = None;
     if let Some(session) = deps.engine_session {
@@ -276,6 +285,29 @@ pub(crate) fn engine_generate_symmetric(
         match result {
             Ok(handle) => {
                 digest_value = softhsmrustv3::native::get_value_digest_sha256(session, handle);
+                // PKCS#11 v3.2 §4.8 Table 13 — restrict the engine key to the
+                // mechanisms its KMIP usage mask implies, closing the
+                // raw-PKCS#11 bypass. Best-effort: an empty list (no usage
+                // bits set) means nothing to write, and a set_attribute
+                // failure here doesn't unwind an already-created key —
+                // logged via emit_pkcs11 same as any other bridge call.
+                let mechs = algo.usage_mask_to_allowed_mechanisms(usage_mask);
+                if !mechs.is_empty() {
+                    let packed: Vec<u8> = mechs.iter().flat_map(|m| m.to_le_bytes()).collect();
+                    let r = softhsmrustv3::native::set_attribute(
+                        session,
+                        handle,
+                        softhsmrustv3::constants::CKA_ALLOWED_MECHANISMS,
+                        packed,
+                    );
+                    super::helpers::emit_pkcs11_result(
+                        deps,
+                        correlation_id,
+                        "native::set_attribute(CKA_ALLOWED_MECHANISMS)",
+                        None,
+                        &r,
+                    );
+                }
             }
             Err(rv) => {
                 return Err(super::helpers::ck_rv_to_kmip_error(rv, op));
@@ -410,5 +442,56 @@ rules:
         }, "c").unwrap();
         let rec = d.store.get(&resp.uid).unwrap().unwrap();
         assert_eq!(rec.algorithm, KmipAlgorithm::HmacSha256);
+    }
+
+    /// PKCS#11 v3.2 §4.8 Table 13 — Create on a symmetric key with
+    /// UsageMask=ENCRYPT|DECRYPT auto-restricts the engine object's
+    /// CKA_ALLOWED_MECHANISMS to CKM_AES_GCM (the only mechanism
+    /// `to_pkcs11_mech(Aes, Encrypt|Decrypt)` resolves to). Verified two
+    /// ways: the raw attribute bytes on the engine handle, AND that the
+    /// restriction is actually enforced (CKM_AES_ECB now fails at the
+    /// engine with CKR_MECHANISM_INVALID even though AES-ECB is otherwise
+    /// a perfectly valid mechanism for an AES key).
+    #[test]
+    fn create_symmetric_auto_restricts_engine_key_from_usage_mask() {
+        use softhsmrustv3::constants as c;
+        use softhsmrustv3::native::session;
+        let _guard_reset = session::finalize();
+        session::init().expect("engine init");
+        let sess = session::bootstrap_default_token(0, "so-pin", "user-pin", "create-restrict-test")
+            .expect("bootstrap session");
+
+        let d = deps_with("schema_version: 1\nmetadata: {name: t, description: t, authority: t, effective: always}\nrules: []\n")
+            .with_engine_session(sess);
+
+        let resp = create(&d, CreateRequest {
+            object_type: ObjectType::SymmetricKey,
+            template_attribute: vec![
+                Attribute::CryptographicAlgorithm(KmipAlgorithm::Aes),
+                Attribute::CryptographicLength(256),
+                Attribute::CryptographicUsageMask(UsageMask::ENCRYPT | UsageMask::DECRYPT),
+            ],
+        }, "c").unwrap();
+        let rec = d.store.get(&resp.uid).unwrap().unwrap();
+
+        let handle =
+            crate::ops::helpers::find_handle_for_object(sess, &rec.pkcs11_cka_id, rec.object_type)
+                .expect("lookup ok")
+                .expect("engine handle exists");
+
+        let allowed = softhsmrustv3::native::get_attribute(sess, handle, c::CKA_ALLOWED_MECHANISMS)
+            .expect("CKA_ALLOWED_MECHANISMS was set by Create");
+        assert_eq!(allowed, c::CKM_AES_GCM.to_le_bytes().to_vec());
+
+        // Enforcement, not just presence: AES-ECB is a real mechanism for
+        // an AES key, but it isn't in this key's allowed list.
+        let err = softhsmrustv3::native::encrypt(sess, handle, c::CKM_AES_ECB, b"0123456789012345", None)
+            .unwrap_err();
+        assert_eq!(err, c::CKR_MECHANISM_INVALID);
+        // The mechanism the usage mask DID imply still works.
+        let iv = [0u8; 12];
+        assert!(softhsmrustv3::native::encrypt(sess, handle, c::CKM_AES_GCM, b"hi", Some(&iv)).is_ok());
+
+        let _ = session::finalize();
     }
 }

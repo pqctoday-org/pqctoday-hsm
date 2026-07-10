@@ -193,6 +193,7 @@ pub fn rekey(deps: &Deps, req: ReKeyRequest, correlation_id: &str) -> Result<ReK
         Some(length),
         mech,
         &cka_id_bytes,
+        usage,
     )
     .map_err(&fail)?;
 
@@ -354,6 +355,8 @@ pub fn rekey_key_pair(
         mech,
         None, // rekey generates fresh material, never from a client seed
         old_priv.recommended_curve, // preserve the base object's RecommendedCurve (§4.16) — an X25519/X448/NIST ECDH key rekeys to the same curve
+        pub_x.usage.unwrap_or(old_pub.usage_mask),
+        priv_x.usage.unwrap_or(old_priv.usage_mask),
     )
     .map_err(&fail)?;
 

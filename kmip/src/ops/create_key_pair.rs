@@ -306,6 +306,8 @@ pub fn create_key_pair(
                 mech,
                 req.seed.as_deref(),
                 recommended_curve,
+                pub_x.usage.unwrap_or_else(UsageMask::empty),
+                priv_x.usage.unwrap_or_else(UsageMask::empty),
             ) {
                 Ok(g) => (g, None, None, None),
                 Err(err) => return fail(deps, correlation_id, op_canonical, err),
@@ -496,6 +498,8 @@ pub(crate) fn engine_generate_keypair(
     mech: u32,
     seed: Option<&[u8]>,
     recommended_curve: Option<u32>,
+    usage_pub: UsageMask,
+    usage_priv: UsageMask,
 ) -> std::result::Result<GeneratedKeyPair, KmipError> {
     if let Some(session) = deps.engine_session {
         // K15 — `native_generate_keypair` emits the Pkcs11Call audit
@@ -513,6 +517,35 @@ pub(crate) fn engine_generate_keypair(
             seed,
             recommended_curve,
         )?;
+        // PKCS#11 v3.2 §4.8 Table 13 — restrict each half to the mechanisms
+        // ITS OWN usage mask implies (PublicKeyAttributes/
+        // PrivateKeyAttributes can carry different masks — e.g. a private
+        // key restricted to SIGN while the public key is restricted to
+        // VERIFY; both resolve to the same mechanism via
+        // `usage_mask_to_allowed_mechanisms`, but they don't have to).
+        // Best-effort posture, same as the symmetric path in `create.rs`.
+        for (label, handle, usage) in
+            [("public", pub_h, usage_pub), ("private", prv_h, usage_priv)]
+        {
+            let mechs = kmip_algo.usage_mask_to_allowed_mechanisms(usage);
+            if mechs.is_empty() {
+                continue;
+            }
+            let packed: Vec<u8> = mechs.iter().flat_map(|m| m.to_le_bytes()).collect();
+            let r = softhsmrustv3::native::set_attribute(
+                session,
+                handle,
+                softhsmrustv3::constants::CKA_ALLOWED_MECHANISMS,
+                packed,
+            );
+            super::helpers::emit_pkcs11_result(
+                deps,
+                correlation_id,
+                &format!("native::set_attribute(CKA_ALLOWED_MECHANISMS, {label})"),
+                None,
+                &r,
+            );
+        }
         Ok(GeneratedKeyPair {
             cka_id_priv: cka_id.clone(),
             cka_id_pub: cka_id,

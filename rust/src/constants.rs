@@ -169,6 +169,15 @@ pub const CKA_TRUST_IPSEC_IKE: u32 = 0x0000_0630;
 pub const CKA_TRUST_TIME_STAMPING: u32 = 0x0000_0631;
 pub const CKA_TRUST_OCSP_SIGNING: u32 = 0x0000_0632;
 
+/// PKCS#11 v3.2 §3.1/§4.8 Table 13 — marks an attribute whose value is an
+/// array (here, of `CK_MECHANISM_TYPE`) rather than a scalar.
+pub const CKF_ARRAY_ATTRIBUTE: u32 = 0x4000_0000;
+/// PKCS#11 v3.2 §4.8 Table 13 — restricts a key to a caller-specified
+/// mechanism whitelist; absent = unrestricted (the spec default). Stored as
+/// a packed `CK_MECHANISM_TYPE[]` (u32 LE, matching this engine's existing
+/// CK_ULONG-as-4-byte convention — see `check_mechanism_allowed` in ffi.rs).
+pub const CKA_ALLOWED_MECHANISMS: u32 = CKF_ARRAY_ATTRIBUTE | 0x0000_0600;
+
 // Private attribute: stores the parameter set on generated keys
 pub const CKA_PRIV_PARAM_SET: u32 = 0xFFFF_0001;
 // Private attribute: stores the algorithm family for polymorphic dispatch

@@ -42,11 +42,13 @@ const CKA = {
   EXTRACTABLE: 0x162, LOCAL: 0x163, NEVER_EXTRACTABLE: 0x164, ALWAYS_SENSITIVE: 0x165,
   PARAMETER_SET: 0x61d, ENCAPSULATE: 0x633, DECAPSULATE: 0x634,
   VALUE_LEN: 0x161, MODULUS: 0x120, EC_PARAMS: 0x180, EC_POINT: 0x181,
+  ALLOWED_MECHANISMS: 0x40000600,
 };
 const CKO = { DATA: 0, PUBLIC_KEY: 2, PRIVATE_KEY: 3, SECRET_KEY: 4 };
 const CKK = { AES: 0x1f, GENERIC_SECRET: 0x10, ML_KEM: 0x49, ML_DSA: 0x4a, SLH_DSA: 0x4b, EC: 0x03 };
 const CKM = {
   ML_KEM_KEY_PAIR_GEN: 0x0f, ML_KEM: 0x17, ML_DSA_KEY_PAIR_GEN: 0x1c, ML_DSA: 0x1d,
+  HASH_ML_DSA_SHA256: 0x24,
   SLH_DSA_KEY_PAIR_GEN: 0x2d, SLH_DSA: 0x2e, SHA256: 0x250, SHA256_HMAC: 0x251,
   SHA256_HMAC_GENERAL: 0x252, SHA384_HMAC: 0x261, GENERIC_SECRET_KEY_GEN: 0x350,
   SP800_108_COUNTER_KDF: 0x3ac, SP800_108_FEEDBACK_KDF: 0x3ad,
@@ -1163,6 +1165,74 @@ section('WP4a — CKO_TRUST object lifecycle (§4.7 Table 25)');
   check('destroyed CKO_TRUST object is gone → OBJECT_HANDLE_INVALID',
     w._C_GetAttributeValue(hS, hTrust, buildTpl([{ type: CKA.CLASS, bytes: new Uint8Array(4) }]), 1),
     CKR.OBJECT_HANDLE_INVALID);
+}
+
+section('WP-A — CKA_ALLOWED_MECHANISMS enforcement (§4.8 Table 13)');
+{
+  const packedMechs = (mechs) => new Uint8Array(new Uint32Array(mechs).buffer);
+
+  // ── AES key restricted to CKM_AES_GCM only ────────────────────────────────
+  {
+    const restricted = genAes(hS, [
+      { type: CKA.ALLOWED_MECHANISMS, bytes: packedMechs([CKM.AES_GCM]) }]);
+    check('C_GenerateKey(AES, CKA_ALLOWED_MECHANISMS=[AES_GCM]) → OK', restricted.rv, CKR.OK);
+
+    const iv = new Uint8Array(12);
+    const gcmMech = buildMech(CKM.AES_GCM, gcmParams(iv, new Uint8Array(0), 128));
+    check('C_EncryptInit(CKM_AES_GCM) on a GCM-restricted key → OK',
+      w._C_EncryptInit(hS, gcmMech, restricted.h), CKR.OK);
+    // Cancel the now-active encrypt op (a fresh EncryptInit on the same
+    // session would otherwise see OPERATION_ACTIVE, not the code we're
+    // testing) before trying the disallowed mechanism.
+    w._C_SessionCancel(hS, 0x100 /* CKF_ENCRYPT */);
+    check('C_EncryptInit(CKM_AES_CBC) on a GCM-restricted key → MECHANISM_INVALID',
+      w._C_EncryptInit(hS, buildMech(CKM.AES_CBC, new Uint8Array(16)), restricted.h),
+      CKR.MECHANISM_INVALID);
+
+    // A key with no CKA_ALLOWED_MECHANISMS at all remains unrestricted.
+    const unrestricted = genAes(hS);
+    check('fixture: unrestricted AES key → OK', unrestricted.rv, CKR.OK);
+    check('C_EncryptInit(CKM_AES_CBC) on an unrestricted key → OK',
+      w._C_EncryptInit(hS, buildMech(CKM.AES_CBC, new Uint8Array(16)), unrestricted.h), CKR.OK);
+    w._C_SessionCancel(hS, 0x100 /* CKF_ENCRYPT */);
+
+    // Malformed (non-multiple-of-4) CKA_ALLOWED_MECHANISMS length is rejected
+    // at creation time (§4.8 Table 13 — packed CK_MECHANISM_TYPE[] array).
+    // Checked in validate_create_template, which only runs on the
+    // C_CreateObject (import) path — C_GenerateKey's bespoke per-algorithm
+    // template absorption doesn't route through it (a malformed value there
+    // still fails safe: check_mechanism_allowed's chunks_exact(4) silently
+    // drops a trailing partial entry rather than panicking or misreading).
+    const malformedTpl = buildTpl([
+      { type: CKA.CLASS, ulong: CKO.SECRET_KEY },
+      { type: CKA.KEY_TYPE, ulong: CKK.GENERIC_SECRET },
+      { type: CKA.VALUE, bytes: new Uint8Array(16) },
+      { type: CKA.ALLOWED_MECHANISMS, bytes: new Uint8Array([1, 2, 3]) }]);
+    const hMalformed = alloc(4);
+    check('C_CreateObject with malformed CKA_ALLOWED_MECHANISMS length → ATTRIBUTE_VALUE_INVALID',
+      w._C_CreateObject(hS, malformedTpl, 4, hMalformed), CKR.ATTRIBUTE_VALUE_INVALID);
+  }
+
+  // ── ML-DSA private key restricted to CKM_ML_DSA (pure), not the
+  // pre-hash variant ────────────────────────────────────────────────────────
+  {
+    const pub = [{ type: CKA.CLASS, ulong: CKO.PUBLIC_KEY }, { type: CKA.KEY_TYPE, ulong: CKK.ML_DSA },
+      { type: CKA.VERIFY, bool: true }, { type: CKA.PARAMETER_SET, ulong: CKP.ML_DSA_65 }];
+    const prv = [{ type: CKA.CLASS, ulong: CKO.PRIVATE_KEY }, { type: CKA.KEY_TYPE, ulong: CKK.ML_DSA },
+      { type: CKA.SIGN, bool: true },
+      { type: CKA.ALLOWED_MECHANISMS, bytes: packedMechs([CKM.ML_DSA]) }];
+    const hPub = alloc(4), hPrv = alloc(4);
+    const rv = w._C_GenerateKeyPair(hS, buildMech(CKM.ML_DSA_KEY_PAIR_GEN),
+      buildTpl(pub), pub.length, buildTpl(prv), prv.length, hPub, hPrv);
+    check('C_GenerateKeyPair(ML-DSA, private CKA_ALLOWED_MECHANISMS=[ML_DSA]) → OK', rv, CKR.OK);
+    const prvH = readU32(hPrv);
+
+    check('C_SignInit(CKM_ML_DSA) on an ML_DSA-restricted key → OK',
+      w._C_SignInit(hS, buildMech(CKM.ML_DSA), prvH), CKR.OK);
+    w._C_SessionCancel(hS, 0x800 /* CKF_SIGN */);
+    check('C_SignInit(CKM_HASH_ML_DSA_SHA256) on an ML_DSA-only-restricted key → MECHANISM_INVALID',
+      w._C_SignInit(hS, buildMech(CKM.HASH_ML_DSA_SHA256), prvH), CKR.MECHANISM_INVALID);
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

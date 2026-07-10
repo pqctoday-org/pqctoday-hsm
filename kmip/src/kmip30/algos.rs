@@ -24,6 +24,8 @@
 //! That's why [`KmipAlgorithm::to_pkcs11_mech`] takes a [`PkcsOp`] argument —
 //! the mapping is `(algorithm, op) → mech`, not just `algorithm → mech`.
 
+use super::attrs::UsageMask;
+
 /// PKCS#11 mechanism ID (CK_MECHANISM_TYPE on the wire). Conceptually a
 /// `CK_ULONG`; we model it as `u32` because every codepoint we ship fits.
 pub type CkMechanismType = u32;
@@ -73,6 +75,13 @@ pub const CKM_RSA_PKCS_PSS: CkMechanismType          = 0x000D;
 pub const CKM_EC_KEY_PAIR_GEN: CkMechanismType = 0x1040;
 pub const CKM_ECDSA: CkMechanismType           = 0x1041;
 pub const CKM_ECDSA_SHA256: CkMechanismType    = 0x1044;
+/// PKCS#11 v3.2 §6.17.2 — single-pass ECDH key agreement. Value verified
+/// against `rust/src/constants.rs`.
+pub const CKM_ECDH1_DERIVE: CkMechanismType = 0x1050;
+/// PKCS#11 v3.2 §6.24 — X25519/X448 (Montgomery-form) key agreement.
+/// Vendor-space codepoint per the engine's normative header (no OASIS
+/// codepoint exists for this yet) — same value as `rust/src/constants.rs`.
+pub const CKM_EC_MONTGOMERY_KEY_DERIVE: CkMechanismType = 0x8000_0011;
 
 /// PKCS#11 v3.2 §6.24 — EdDSA key pair generation (Edwards curve). Value
 /// verified against `rust/src/constants.rs` (softhsmrustv3's own mirror of
@@ -84,6 +93,12 @@ pub const CKM_EDDSA: CkMechanismType = 0x1057;
 
 pub const CKM_AES_KEY_GEN: CkMechanismType = 0x1080;
 pub const CKM_AES_GCM: CkMechanismType     = 0x1087;
+/// PKCS#11 v3.2 §6.31 — AES key wrap (RFC 3394). Value verified against
+/// `rust/src/constants.rs`.
+pub const CKM_AES_KEY_WRAP: CkMechanismType = 0x2109;
+/// PKCS#11 v3.2 §6.31 — AES key wrap with padding (RFC 5649). Same
+/// verification source as above.
+pub const CKM_AES_KEY_WRAP_KWP: CkMechanismType = 0x210B;
 
 /// PKCS#11 v3.2 §6.20 — IETF ChaCha20 stream cipher. Codepoint
 /// `0x1226` verified from the normative `pkcs11t.h`
@@ -414,6 +429,78 @@ impl KmipAlgorithm {
             // Any other (algorithm, op) pair is undefined.
             _ => None,
         }
+    }
+
+    /// PKCS#11 v3.2 §4.8 Table 13 — the `CKA_ALLOWED_MECHANISMS` list a
+    /// KMIP-created engine key should carry, derived from its KMIP 3.0
+    /// `CryptographicUsageMask`. Closes the raw-PKCS#11 bypass: without
+    /// this, a KMIP-created key has no engine-side mechanism restriction,
+    /// so a caller talking to the PKCS#11 ABI directly (bypassing KMIP's
+    /// own usage-mask/policy checks) could use it for any mechanism the
+    /// key type supports.
+    ///
+    /// Grounded in what the engine bridge actually calls, not aspirational
+    /// coverage:
+    /// - SIGN/VERIFY, ENCRYPT/DECRYPT, MAC_GENERATE/MAC_VERIFY map onto
+    ///   [`to_pkcs11_mech`]'s existing `SignVerify`/`Encrypt`/`Mac` arms —
+    ///   the same mechanisms `native::sign`/`verify`/`encrypt`/`decrypt`
+    ///   are invoked with.
+    /// - DERIVE_KEY additionally includes the `Mac` mechanism for HMAC-
+    ///   family algorithms: `derive_key.rs`'s only engine-backed KDF path
+    ///   (`hmac_prf`) is a hand-rolled HMAC-PRF construction that calls
+    ///   `native::sign` with `CKM_SHA*_HMAC` — not a dedicated SP800-108/
+    ///   HKDF native call — so that's the mechanism that must be allowed.
+    /// - WRAP_KEY/UNWRAP_KEY and KEY_AGREEMENT have no handle-based native
+    ///   entry point today (`encrypt.rs` has no wrap/unwrap-by-handle;
+    ///   `agree::ecdh_agree` takes no mechanism param at all), but the
+    ///   FFI `C_WrapKey`/`C_UnwrapKey`/`C_DeriveKey(CKM_ECDH1_DERIVE)`
+    ///   ARE reachable by a raw PKCS#11 caller, so the mechanism is still
+    ///   listed to protect that path.
+    /// - `KmipAlgorithm::Ecdh` doesn't carry curve family (Weierstrass vs.
+    ///   Montgomery) at this layer, so both `CKM_ECDH1_DERIVE` and
+    ///   `CKM_EC_MONTGOMERY_KEY_DERIVE` are listed for KEY_AGREEMENT;
+    ///   over-inclusive by one mechanism the actual key type can never
+    ///   invoke (caught separately by key-type-consistency checks), never
+    ///   under-protective.
+    pub fn usage_mask_to_allowed_mechanisms(self, mask: UsageMask) -> Vec<CkMechanismType> {
+        use PkcsOp::*;
+        let mut mechs: Vec<CkMechanismType> = Vec::new();
+        let mut push = |m: Option<CkMechanismType>| {
+            if let Some(m) = m {
+                if !mechs.contains(&m) {
+                    mechs.push(m);
+                }
+            }
+        };
+
+        if mask.intersects(UsageMask::SIGN | UsageMask::VERIFY) {
+            push(self.to_pkcs11_mech(SignVerify));
+        }
+        if mask.intersects(UsageMask::ENCRYPT | UsageMask::DECRYPT) {
+            push(self.to_pkcs11_mech(Encrypt));
+        }
+        if mask.intersects(UsageMask::MAC_GENERATE | UsageMask::MAC_VERIFY) {
+            push(self.to_pkcs11_mech(Mac));
+        }
+        if mask.contains(UsageMask::DERIVE_KEY) {
+            push(self.to_pkcs11_mech(Mac));
+        }
+        if mask.intersects(UsageMask::WRAP_KEY | UsageMask::UNWRAP_KEY) {
+            match self {
+                KmipAlgorithm::Aes => {
+                    push(Some(CKM_AES_KEY_WRAP));
+                    push(Some(CKM_AES_KEY_WRAP_KWP));
+                }
+                KmipAlgorithm::Rsa => push(Some(CKM_RSA_PKCS_OAEP)),
+                _ => {}
+            }
+        }
+        if mask.contains(UsageMask::KEY_AGREEMENT) && matches!(self, KmipAlgorithm::Ecdh) {
+            push(Some(CKM_ECDH1_DERIVE));
+            push(Some(CKM_EC_MONTGOMERY_KEY_DERIVE));
+        }
+
+        mechs
     }
 
     /// Spec-text symbolic name (matches OASIS spelling). Useful for logging

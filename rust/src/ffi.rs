@@ -2518,6 +2518,10 @@ pub fn C_EncapsulateKey(
         if mech_type != CKM_ML_KEM {
             return CKR_MECHANISM_INVALID;
         }
+        // §4.8 Table 13 — CKA_ALLOWED_MECHANISMS.
+        if let Err(rv) = check_mechanism_allowed(h_key, mech_type) {
+            return rv;
+        }
 
         // PKCS#11 v3.2 §5.18.8 — CKM_ML_KEM requires an ML-KEM key
         // (compliance-audit P-10).
@@ -2621,6 +2625,10 @@ pub fn C_DecapsulateKey(
         let mech_type = *(p_mechanism as *const u32);
         if mech_type != CKM_ML_KEM {
             return CKR_MECHANISM_INVALID;
+        }
+        // §4.8 Table 13 — CKA_ALLOWED_MECHANISMS.
+        if let Err(rv) = check_mechanism_allowed(h_private_key, mech_type) {
+            return rv;
         }
 
         // PKCS#11 v3.2 §5.18.9 — CKM_ML_KEM requires an ML-KEM key
@@ -2797,6 +2805,13 @@ fn validate_create_template(attrs: &Attributes) -> Result<(), u32> {
         Some(v) if v.len() < 4 => return Err(CKR_ATTRIBUTE_VALUE_INVALID),
         Some(_) => read_u32(CKA_CLASS).unwrap(),
     };
+    // §4.8 Table 13 — CKA_ALLOWED_MECHANISMS is a packed CK_MECHANISM_TYPE[]
+    // (u32 LE); a length that isn't a whole number of entries is malformed.
+    if let Some(v) = attrs.get(&CKA_ALLOWED_MECHANISMS) {
+        if v.len() % 4 != 0 {
+            return Err(CKR_ATTRIBUTE_VALUE_INVALID);
+        }
+    }
     let is_key_class =
         class == CKO_SECRET_KEY || class == CKO_PUBLIC_KEY || class == CKO_PRIVATE_KEY;
     if !is_key_class {
@@ -3045,6 +3060,7 @@ fn check_key_usage_as(
     Ok(())
 }
 
+
 /// RSA-PSS mechanism → (expected CKM_* hashAlg, expected CKG_MGF1_* mgf) for
 /// CK_RSA_PKCS_PSS_PARAMS validation (§6.4.5: hashAlg/mgf must match the
 /// digest baked into the mechanism; MGF1 uses the same hash per §6.2).
@@ -3075,6 +3091,11 @@ pub fn C_SignInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
             return rv;
         }
         let mut mech_type = *(p_mechanism as *const u32);
+        // §4.8 Table 13 — CKA_ALLOWED_MECHANISMS, checked against the
+        // caller's original request before any internal remap below.
+        if let Err(rv) = check_mechanism_allowed(h_key, mech_type) {
+            return rv;
+        }
         // §6.4 — raw CKM_RSA_PKCS takes NO mechanism parameter; a supplied one
         // (e.g. a CK_SIGN_ADDITIONAL_CONTEXT meant for ML-DSA/SLH-DSA) is
         // CKR_MECHANISM_PARAM_INVALID.
@@ -3485,6 +3506,10 @@ pub fn C_VerifyInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
             return rv;
         }
         let mut mech_type = *(p_mechanism as *const u32);
+        // §4.8 Table 13 — CKA_ALLOWED_MECHANISMS, checked before any remap.
+        if let Err(rv) = check_mechanism_allowed(h_key, mech_type) {
+            return rv;
+        }
         // Parse CK_EDDSA_PARAMS: if phFlag is set, use internal CKM_EDDSA_PH
         if mech_type == CKM_EDDSA {
             let p_param = *((p_mechanism as *const usize).add(1)) as usize as *const u8;
@@ -4071,6 +4096,10 @@ pub fn C_VerifySignatureInit(
             return rv;
         }
         let mut mech_type = *(p_mechanism as *const u32);
+        // §4.8 Table 13 — CKA_ALLOWED_MECHANISMS, checked before any remap.
+        if let Err(rv) = check_mechanism_allowed(h_key, mech_type) {
+            return rv;
+        }
         if mech_type == CKM_EDDSA {
             let p_param = *((p_mechanism as *const usize).add(1)) as usize as *const u8;
             let ul_param_len = *((p_mechanism as *const usize).add(2));
@@ -4322,6 +4351,10 @@ pub fn C_EncryptInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
             return rv;
         }
         let mech_type = *(p_mechanism as *const u32);
+        // §4.8 Table 13 — CKA_ALLOWED_MECHANISMS.
+        if let Err(rv) = check_mechanism_allowed(h_key, mech_type) {
+            return rv;
+        }
         let p_param = *((p_mechanism as *const usize).add(1)) as usize as *const u8;
         let ul_param_len = *((p_mechanism as *const usize).add(2));
 
@@ -4748,6 +4781,10 @@ pub fn C_DecryptInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
             return rv;
         }
         let mech_type = *(p_mechanism as *const u32);
+        // §4.8 Table 13 — CKA_ALLOWED_MECHANISMS.
+        if let Err(rv) = check_mechanism_allowed(h_key, mech_type) {
+            return rv;
+        }
         let p_param = *((p_mechanism as *const usize).add(1)) as usize as *const u8;
         let ul_param_len = *((p_mechanism as *const usize).add(2));
 
@@ -5774,6 +5811,10 @@ pub fn C_DeriveKey(
             if let Err(rv) = check_key_usage(_h_session, h_base_key, CKA_DERIVE) {
                 return rv;
             }
+            // §4.8 Table 13 — CKA_ALLOWED_MECHANISMS on the base key.
+            if let Err(rv) = check_mechanism_allowed(h_base_key, mech_type) {
+                return rv;
+            }
         }
 
         if mech_type == CKM_BIP32_MASTER_DERIVE || mech_type == CKM_BIP32_CHILD_DERIVE {
@@ -6594,6 +6635,10 @@ pub fn C_WrapKey(
         {
             return rv;
         }
+        // §4.8 Table 13 — CKA_ALLOWED_MECHANISMS on the wrapping key.
+        if let Err(rv) = check_mechanism_allowed(h_wrapping_key, mech_type) {
+            return rv;
+        }
 
         // Target key: handle exists + visible → else CKR_KEY_HANDLE_INVALID;
         // CKR_KEY_UNEXTRACTABLE only when the key EXISTS but CKA_EXTRACTABLE=FALSE.
@@ -6770,6 +6815,10 @@ pub fn C_UnwrapKey(
             CKA_UNWRAP,
             CKR_UNWRAPPING_KEY_HANDLE_INVALID,
         ) {
+            return rv;
+        }
+        // §4.8 Table 13 — CKA_ALLOWED_MECHANISMS on the unwrapping key.
+        if let Err(rv) = check_mechanism_allowed(h_unwrapping_key, mech_type) {
             return rv;
         }
 
@@ -7004,6 +7053,10 @@ pub fn C_WrapKeyAuthenticated(
         {
             return rv;
         }
+        // §4.8 Table 13 — CKA_ALLOWED_MECHANISMS on the wrapping key.
+        if let Err(rv) = check_mechanism_allowed(h_wrapping_key, mech_type) {
+            return rv;
+        }
 
         // Target key: handle → CKR_KEY_HANDLE_INVALID; unextractable (exists,
         // CKA_EXTRACTABLE=FALSE) → CKR_KEY_UNEXTRACTABLE.
@@ -7139,6 +7192,10 @@ pub fn C_UnwrapKeyAuthenticated(
             CKA_UNWRAP,
             CKR_UNWRAPPING_KEY_HANDLE_INVALID,
         ) {
+            return rv;
+        }
+        // §4.8 Table 13 — CKA_ALLOWED_MECHANISMS on the unwrapping key.
+        if let Err(rv) = check_mechanism_allowed(h_unwrapping_key, mech_type) {
             return rv;
         }
 
@@ -8479,6 +8536,12 @@ pub fn msg_encrypt_init_internal(
         });
         if !can_use {
             return CKR_KEY_FUNCTION_NOT_PERMITTED;
+        }
+        // §4.8 Table 13 — CKA_ALLOWED_MECHANISMS. Covers both
+        // C_MessageEncryptInit and C_MessageDecryptInit, which both delegate
+        // here.
+        if let Err(rv) = check_mechanism_allowed(h_key, mech_type) {
+            return rv;
         }
 
         let key_bytes = match get_object_value(h_key) {
