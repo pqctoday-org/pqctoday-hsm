@@ -8269,14 +8269,52 @@ pub(crate) fn copy_object_from_attrs(
     if !copyable {
         return Err(CKR_ACTION_PROHIBITED);
     }
+    // WP-5 remediation — CKA_TRUSTED needs its own SO-aware gate, separate
+    // from the generic attr_mutation_allowed loop below (which
+    // unconditionally rejects it — correct for C_SetAttributeValue, but
+    // too strict here: an SO session copying an object should be able to
+    // produce a trusted copy, mirroring C_CreateObject's own SO exception
+    // per §4.1.1 Table 12 / §4.6 Table 19 footnote). Before this fix, an
+    // explicit CKA_TRUSTED in the template was rejected for EVERY session
+    // including SO.
+    let is_so = crate::state::session_is_so(h_session);
+    if template.contains_key(&CKA_TRUSTED) && !is_so {
+        return Err(CKR_ATTRIBUTE_READ_ONLY);
+    }
+    // WP-5 remediation — identity-field respoofing guard. If the SOURCE
+    // object is CKA_TRUSTED=TRUE, a non-SO caller could previously omit
+    // CKA_TRUSTED from the template (letting it silently carry over
+    // unchanged — see the clone below) while simultaneously rewriting
+    // CKA_SUBJECT / CKA_ISSUER / CKA_SERIAL_NUMBER / CKA_ID / CKA_LABEL /
+    // CKA_PRIVATE in the same copy: a trusted-looking object with
+    // attacker-chosen identity metadata, entirely outside the SO gate
+    // C_CreateObject enforces. Require SO for any of those changes
+    // whenever the source is already trusted.
+    if read_bool_attr(&src, CKA_TRUSTED) && !is_so {
+        let identity_attrs = [
+            CKA_SUBJECT,
+            CKA_ISSUER,
+            CKA_SERIAL_NUMBER,
+            crate::native::keygen::CKA_ID,
+            crate::native::keygen::CKA_LABEL,
+            CKA_PRIVATE,
+        ];
+        if template.keys().any(|t| identity_attrs.contains(t)) {
+            return Err(CKR_ATTRIBUTE_READ_ONLY);
+        }
+    }
     // §4.1.2-3 — the copy template may set CKA_TOKEN / CKA_PRIVATE /
     // CKA_MODIFIABLE (not in the gate's read-only set) but may NOT touch
     // server-managed attrs or weaken security (CKA_SENSITIVE TRUE→FALSE,
     // CKA_EXTRACTABLE FALSE→TRUE). Weakening is pinned to
     // CKR_ATTRIBUTE_READ_ONLY from C_CopyObject's §5.7.2 return list,
     // through the same gate C_SetAttributeValue uses (single source of
-    // truth: state::attr_mutation_allowed).
+    // truth: state::attr_mutation_allowed). CKA_TRUSTED is excluded here —
+    // handled above with its own SO-aware check.
     for (t, v) in &template {
+        if *t == CKA_TRUSTED {
+            continue;
+        }
         attr_mutation_allowed(&src, *t, v)?;
     }
     // §5.7.2 — a R/O session cannot produce a token object. The copy's
@@ -8299,6 +8337,16 @@ pub(crate) fn copy_object_from_attrs(
     let mut new_attrs = src.clone();
     new_attrs.remove(&CKA_PRIV_OWNER_SESSION);
     new_attrs.remove(&CKA_PRIV_SLOT_ID);
+    // WP-5 remediation — CKA_TRUSTED must not silently carry over from the
+    // source for a non-SO copy (the gap this whole block closes): force it
+    // FALSE here, before the template overlay below. A non-SO template can
+    // never contain CKA_TRUSTED (rejected above), so this stands
+    // unconditionally for a non-SO session regardless of the template's
+    // contents; an SO session's explicit CKA_TRUSTED=TRUE is applied by
+    // the overlay immediately after and overwrites this default.
+    if !is_so {
+        new_attrs.insert(CKA_TRUSTED, vec![0]);
+    }
     for (t, v) in template {
         new_attrs.insert(t, v);
     }
@@ -10469,6 +10517,105 @@ mod object_mgmt_ffi_tests {
         store_bool(&mut tmpl, CKA_TOKEN, false);
         let h_copy = copy_object_from_attrs(SESSION_RO, h, tmpl).unwrap();
         assert_eq!(obj_bool(h_copy, CKA_TOKEN), Some(false));
+    }
+
+    /// Test-only: flip slot 0's login state directly (no real SO PIN was
+    /// ever set via C_InitToken in this module's `setup()`), mirroring
+    /// `session_is_so`'s read of `TOKEN_STORE`.
+    fn set_so_logged_in(so: bool) {
+        crate::state::ensure_slot(0);
+        crate::state::TOKEN_STORE.with(|ts| {
+            if let Some(t) = ts.borrow_mut().get_mut(&0) {
+                t.login_state = if so { crate::state::LoginState::SO } else { crate::state::LoginState::Public };
+            }
+        });
+    }
+
+    /// WP-5 remediation — §4.1.1 Table 12 / §4.6 Table 19 footnote:
+    /// `C_CopyObject` must mirror `C_CreateObject`'s SO-only gate on
+    /// `CKA_TRUSTED`, in both directions:
+    /// - an SO session's EXPLICIT `CKA_TRUSTED=TRUE` in the copy template
+    ///   must be honored (previously rejected for every session, SO
+    ///   included);
+    /// - a non-SO session's explicit `CKA_TRUSTED=TRUE` must still be
+    ///   rejected (unchanged behavior, still correct);
+    /// - omitting `CKA_TRUSTED` from the template must NOT silently carry
+    ///   TRUE over from the source for a non-SO copy — it must be forced
+    ///   to FALSE.
+    #[test]
+    fn copy_trusted_requires_so_both_explicit_and_inherited() {
+        let _guard = test_lock::acquire();
+        setup();
+        set_so_logged_in(true);
+        let mut attrs = aes_import_attrs();
+        store_bool(&mut attrs, CKA_TRUSTED, true);
+        let h_trusted = create_object_from_attrs(SESSION_RW, attrs).unwrap();
+        assert_eq!(obj_bool(h_trusted, CKA_TRUSTED), Some(true));
+
+        // SO explicitly re-asserting CKA_TRUSTED=TRUE in the copy template
+        // must succeed (was wrongly rejected for every session before).
+        let mut tmpl = Attributes::new();
+        store_bool(&mut tmpl, CKA_TRUSTED, true);
+        let h_so_explicit = copy_object_from_attrs(SESSION_RW, h_trusted, tmpl).unwrap();
+        assert_eq!(obj_bool(h_so_explicit, CKA_TRUSTED), Some(true));
+
+        // SO omitting CKA_TRUSTED from the template: carries over as TRUE.
+        let h_so_omitted = copy_object_from_attrs(SESSION_RW, h_trusted, Attributes::new()).unwrap();
+        assert_eq!(obj_bool(h_so_omitted, CKA_TRUSTED), Some(true));
+
+        set_so_logged_in(false);
+
+        // Non-SO explicit CKA_TRUSTED=TRUE: still rejected.
+        let mut tmpl = Attributes::new();
+        store_bool(&mut tmpl, CKA_TRUSTED, true);
+        assert_eq!(
+            copy_object_from_attrs(SESSION_RW, h_trusted, tmpl).unwrap_err(),
+            CKR_ATTRIBUTE_READ_ONLY
+        );
+
+        // Non-SO omitting CKA_TRUSTED: must NOT silently inherit TRUE —
+        // this is the gap. Forced to FALSE instead.
+        let h_non_so_omitted = copy_object_from_attrs(SESSION_RW, h_trusted, Attributes::new()).unwrap();
+        assert_eq!(
+            obj_bool(h_non_so_omitted, CKA_TRUSTED),
+            Some(false),
+            "non-SO copy must not silently inherit CKA_TRUSTED=TRUE from the source"
+        );
+    }
+
+    /// WP-5 remediation — identity-field respoofing guard: a non-SO copy of
+    /// a CKA_TRUSTED=TRUE object must not be able to rewrite identity
+    /// attributes (CKA_ID here) in the same template, even though CKA_ID
+    /// is ordinarily freely copy-mutable and CKA_TRUSTED itself is never
+    /// touched by this template. An SO session doing the identical copy
+    /// is unaffected.
+    #[test]
+    fn copy_trusted_source_blocks_identity_field_changes_for_non_so() {
+        let _guard = test_lock::acquire();
+        setup();
+        set_so_logged_in(true);
+        let mut attrs = aes_import_attrs();
+        store_bool(&mut attrs, CKA_TRUSTED, true);
+        let h_trusted = create_object_from_attrs(SESSION_RW, attrs).unwrap();
+
+        set_so_logged_in(false);
+        let mut tmpl = Attributes::new();
+        tmpl.insert(crate::native::keygen::CKA_ID, b"respoofed-id".to_vec());
+        assert_eq!(
+            copy_object_from_attrs(SESSION_RW, h_trusted, tmpl).unwrap_err(),
+            CKR_ATTRIBUTE_READ_ONLY,
+            "non-SO must not be able to change CKA_ID on a copy of a trusted object"
+        );
+
+        set_so_logged_in(true);
+        let mut tmpl = Attributes::new();
+        tmpl.insert(crate::native::keygen::CKA_ID, b"so-relabel".to_vec());
+        let h_relabeled = copy_object_from_attrs(SESSION_RW, h_trusted, tmpl).unwrap();
+        assert_eq!(
+            obj_attr(h_relabeled, crate::native::keygen::CKA_ID),
+            Some(b"so-relabel".to_vec()),
+            "SO may still relabel a trusted object's identity fields on copy"
+        );
     }
 
     /// T3 — copying a foreign slot's object: handle invalid.
