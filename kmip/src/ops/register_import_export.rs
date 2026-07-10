@@ -535,12 +535,21 @@ pub fn import_object(
         return Err(fail_err(deps, correlation_id, "Import", KmipError::failed(kmip_reason.to_result_reason(), human)));
     }
 
-    let kmip_algorithm = resolved_algorithm.ok_or_else(|| {
-        fail_err(deps, correlation_id, "Import", KmipError::failed(
-            ResultReason::MissingData,
-            "Import requires CryptographicAlgorithm".to_string(),
-        ))
-    })?;
+    // WP-2 remediation — a Certificate Import carries no
+    // CryptographicAlgorithm (the object isn't a cryptographic key in the
+    // §11 attribute-table sense), mirroring Register's identical
+    // carve-out. `Rsa` is a harmless sentinel, never inspected for
+    // Certificate records.
+    let kmip_algorithm = match resolved_algorithm {
+        Some(a) => a,
+        None if req.object_type == ObjectType::Certificate => crate::kmip30::KmipAlgorithm::Rsa,
+        None => {
+            return Err(fail_err(deps, correlation_id, "Import", KmipError::failed(
+                ResultReason::MissingData,
+                "Import requires CryptographicAlgorithm".to_string(),
+            )));
+        }
+    };
 
     // Per §6.1.29: "If absent or false [for ReplaceExisting] and an
     // object exists with the same Unique Identifier then an error
@@ -560,13 +569,35 @@ pub fn import_object(
     let now = OffsetDateTime::now_utc();
     let key_material = key_block.map(|kb| kb.key_value.clone());
     let key_format_type = key_block.map(|kb| kb.key_format_type as u32);
+
+    // WP-2 remediation — populate cert-specific fields from the wire
+    // Certificate payload, mirroring Register's identical handling.
+    // Without this, Import(Certificate) either errored confusingly (no
+    // CryptographicAlgorithm) or, if a client worked around that, silently
+    // discarded the certificate DER entirely while still returning success.
+    let (certificate_type, certificate_value, certificate_length, certificate_subject_cn) =
+        match (&req.certificate_payload, req.object_type) {
+            (Some((wire_ct, der)), ObjectType::Certificate) => {
+                let len = der.len() as i32;
+                let cn = super::der_x509::extract_subject_cn(der);
+                (Some(*wire_ct), Some(der.clone()), Some(len), cn)
+            }
+            _ => (None, None, None, None),
+        };
+
     // K-14 — same Digest-at-creation rule as Register: SHA-256 over
-    // the supplied KeyMaterial bytes when present, otherwise omitted.
+    // the supplied KeyMaterial (or Certificate Value) bytes when present,
+    // otherwise omitted.
     let digest_value = {
         use sha2::{Digest as _, Sha256};
-        key_material.as_deref().map(|b| Sha256::digest(b).to_vec())
+        key_material
+            .as_deref()
+            .or(certificate_value.as_deref())
+            .map(|b| Sha256::digest(b).to_vec())
     };
 
+    let cka_id_bytes = Uuid::new_v4().as_bytes().to_vec();
+    let cka_id_for_cert_projection = cka_id_bytes.clone();
     deps.store.put(ObjectRecord {
         uid: req.uid.clone(),
         object_type: req.object_type,
@@ -574,7 +605,7 @@ pub fn import_object(
         cryptographic_length: resolved_length.unwrap_or(0),
         usage_mask: usage_mask.unwrap_or_else(UsageMask::empty),
         state: State::PreActive,
-        pkcs11_cka_id: Uuid::new_v4().as_bytes().to_vec(),
+        pkcs11_cka_id: cka_id_bytes,
         pkcs11_slot: deps.config.pkcs11_slot,
         initial_date: now,
         activation_date: None,
@@ -585,8 +616,29 @@ pub fn import_object(
         key_material,
         key_format_type,
         digest_value,
+        certificate_type,
+        certificate_value: certificate_value.clone(),
+        certificate_length,
+        certificate_subject_cn,
         ..ObjectRecord::default()
     })?;
+
+    // PKCS#11 v3.2 §4.6 — mirror an imported X.509 certificate onto the
+    // engine too, same as Register/Certify (see
+    // ops::certify::project_certificate_to_engine's doc comment for why
+    // this is best-effort and KMIP-authoritative).
+    if req.object_type == ObjectType::Certificate {
+        if let Some(der) = certificate_value.as_deref() {
+            super::certify::project_certificate_to_engine(
+                deps,
+                correlation_id,
+                "Import",
+                der,
+                &cka_id_for_cert_projection,
+                softhsmrustv3::constants::CK_CERTIFICATE_CATEGORY_TOKEN_USER,
+            );
+        }
+    }
 
     emit_success(deps, correlation_id, "Import");
     Ok(ImportResponse { uid: req.uid })
@@ -638,6 +690,15 @@ pub fn export(
     // only the KeyBlock is suppressed.
     let key_material = if matches!(obj.state, State::Destroyed | State::DestroyedCompromised) {
         None
+    } else if obj.object_type == ObjectType::Certificate {
+        // WP-2 remediation — a Certificate's authoritative DER always
+        // lives in `certificate_value`: `Certify` sets both
+        // `key_material` and `certificate_value` identically, but
+        // `Register` only ever sets `certificate_value`. Unlike `key_material`
+        // (which stayed `None` for a Register-created cert), reading
+        // `certificate_value` here makes Export agree with `Get` and
+        // `GetAttributes(CertificateValue)` for both creation paths.
+        obj.certificate_value.clone()
     } else {
         obj.key_material.clone()
     };
@@ -666,10 +727,15 @@ pub fn export(
     let managed_object = match key_material {
         None => None,
         Some(bytes) => {
+            let default_format = if obj.object_type == ObjectType::Certificate {
+                KeyFormatType::X509
+            } else {
+                KeyFormatType::Raw
+            };
             let stored_format = obj
                 .key_format_type
                 .and_then(KeyFormatType::from_wire_value)
-                .unwrap_or(KeyFormatType::Raw);
+                .unwrap_or(default_format);
             let (key_format_type, key_value) = super::helpers::convert_key_format(
                 stored_format,
                 bytes,
@@ -1002,6 +1068,7 @@ mod tests {
                 Attribute::CryptographicUsageMask(UsageMask::ENCRYPT),
             ],
             managed_object: Some(raw_aes128_kb()),
+            certificate_payload: None,
         }, "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::ObjectAlreadyExists);
     }
@@ -1033,6 +1100,7 @@ mod tests {
                 Attribute::CryptographicUsageMask(UsageMask::ENCRYPT),
             ],
             managed_object: Some(new_kb),
+            certificate_payload: None,
         }, "c").unwrap();
 
         let rec = d.store.get("u").unwrap().unwrap();

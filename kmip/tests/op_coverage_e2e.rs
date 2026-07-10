@@ -247,6 +247,7 @@ fn import_aes_with_material(deps: &Deps, uid: &str, material: Vec<u8>) -> String
                 key_value: material,
                 key_wrapping_data: None,
             }),
+            certificate_payload: None,
         },
         "import",
     )
@@ -1152,4 +1153,57 @@ fn coverage_map_covers_every_handled_operation() {
         "coverage_map references ops that are not in HANDLED_OPERATIONS: {stale:?}"
     );
     assert_eq!(handled.len(), 54, "HANDLED_OPERATIONS count changed — review coverage");
+}
+
+/// WP-2 remediation — Import(Certificate) round-trip. Before this fix,
+/// the wire decoder silently dropped the client's Certificate structure
+/// (no `tags::Certificate` arm in `decode_import_req`), and even working
+/// around that by attaching a `CryptographicAlgorithm` attribute, the
+/// handler had no Certificate-specific field population at all — Import
+/// returned a plausible-looking `CKR_OK`-equivalent success while
+/// silently discarding the DER. Proves: no CryptographicAlgorithm
+/// attribute is required (unlike other object types), the stored record
+/// carries the real DER, and Get returns byte-identical bytes back.
+#[test]
+fn import_certificate_round_trips_der_no_algorithm_attribute_required() {
+    let ring = Arc::new(RingSink::new(64));
+    let sink: Arc<dyn AuditSink> = ring.clone();
+    let deps = Deps::new(
+        Engine::permissive(),
+        Arc::new(MemoryStore::new()),
+        sink,
+        DepsConfig::default(),
+    );
+
+    let mut params = rcgen::CertificateParams::new(vec!["import-e2e.example".into()]).unwrap();
+    params.distinguished_name.push(rcgen::DnType::CommonName, "import-e2e");
+    let key = rcgen::KeyPair::generate().unwrap();
+    let der = params.self_signed(&key).unwrap().der().to_vec();
+
+    let resp = import_object(
+        &deps,
+        ImportRequest {
+            uid: "cert-import".into(),
+            object_type: ObjectType::Certificate,
+            replace_existing: false,
+            key_wrap_type: None,
+            // Deliberately NO CryptographicAlgorithm attribute — Certificate
+            // Import must not require one (mirrors Register's carve-out).
+            attributes: vec![],
+            managed_object: None,
+            certificate_payload: Some((0 /* X.509 */, der.clone())),
+        },
+        "import-cert",
+    )
+    .unwrap();
+    assert_eq!(resp.uid, "cert-import");
+
+    let rec = deps.store.get("cert-import").unwrap().unwrap();
+    assert_eq!(rec.certificate_value.as_deref(), Some(der.as_slice()));
+    assert_eq!(rec.certificate_length, Some(der.len() as i32));
+
+    // Get must return the exact same DER — proves the store-side fix,
+    // independent of any engine session (none is wired in this test).
+    let got = get(&deps, GetRequest { uid: "cert-import".into(), key_format_type: None, key_wrapping_specification: None }, "get-cert").unwrap();
+    assert_eq!(got.key_block.key_value, der);
 }

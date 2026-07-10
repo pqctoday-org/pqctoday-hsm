@@ -3672,6 +3672,7 @@ fn decode_import_req(children: &[TtlvFrame]) -> Result<ImportRequest, WireError>
     let mut key_wrap_type = None;
     let mut attributes = Vec::new();
     let mut managed_object = None;
+    let mut certificate_payload: Option<(u32, Vec<u8>)> = None;
     for c in children {
         match c.tag.0 {
             tags::ObjectType => {
@@ -3701,6 +3702,28 @@ fn decode_import_req(children: &[TtlvFrame]) -> Result<ImportRequest, WireError>
             tags::SymmetricKey | tags::PublicKey | tags::PrivateKey => {
                 managed_object = Some(decode_managed_object(c)?);
             }
+            // WP-2 remediation — mirrors decode_register_req's Certificate
+            // arm. Without this, a client-sent Certificate structure on
+            // Import was silently dropped at decode time (never reached
+            // ImportRequest at all).
+            tags::Certificate => {
+                let mut ctype = 0u32;
+                let mut cvalue: Vec<u8> = Vec::new();
+                for child in expect_structure(c, "Certificate")? {
+                    match child.tag.0 {
+                        tags::CertificateType => {
+                            ctype = expect_enum(child, "Certificate Type")?;
+                        }
+                        tags::CertificateValue => {
+                            if let Value::ByteString(b) = &child.value {
+                                cvalue = b.clone();
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                certificate_payload = Some((ctype, cvalue));
+            }
             _ => {}
         }
     }
@@ -3715,6 +3738,7 @@ fn decode_import_req(children: &[TtlvFrame]) -> Result<ImportRequest, WireError>
         key_wrap_type,
         attributes,
         managed_object,
+        certificate_payload,
     })
 }
 

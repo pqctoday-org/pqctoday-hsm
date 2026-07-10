@@ -467,7 +467,12 @@ fn attribute_is_read_only(a: &Attribute) -> bool {
         Attribute::CertificateSubjectCN(_) |
         Attribute::X509CertificateSubject(_) |
         Attribute::X509CertificateIssuer(_) |
-        Attribute::X509CertificateIdentifier(_)
+        Attribute::X509CertificateIdentifier(_) |
+        // WP-2 remediation — §6.1.56 requires CertificateValue be
+        // rejected as read-only on Add/Modify/Set; it was missing here,
+        // so `apply_attribute` (which also has no write arm for it)
+        // silently no-op'd instead of returning AttributeReadOnly.
+        Attribute::CertificateValue(_)
     )
 }
 

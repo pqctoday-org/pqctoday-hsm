@@ -136,7 +136,19 @@ pub fn get(deps: &Deps, req: GetRequest, correlation_id: &str) -> Result<GetResp
     // unknown values at Register/Import time with 0x10, so the stored
     // format is surfaced faithfully — no silent `Raw` re-labeling.
     let stored_format = obj.key_format_type.and_then(KeyFormatType::from_wire_value);
-    let (key_format, key_value) = if let Some(bytes) = &obj.key_material {
+    let (key_format, key_value) = if obj.object_type == ObjectType::Certificate {
+        // WP-2 remediation — a Certificate's authoritative DER always
+        // lives in `certificate_value`, regardless of creation path:
+        // `Certify` sets both `key_material` and `certificate_value`
+        // identically, but `Register` only ever sets `certificate_value`.
+        // Reading it directly here (instead of falling through to the
+        // key-material three-tier lookup below, which the Register path
+        // never populates) makes `Get` agree with `GetAttributes
+        // (CertificateValue)` for both creation paths, and removes the
+        // dependency on the best-effort engine projection succeeding.
+        let der = obj.certificate_value.clone().unwrap_or_default();
+        (stored_format.unwrap_or(KeyFormatType::X509), der)
+    } else if let Some(bytes) = &obj.key_material {
         (stored_format.unwrap_or(KeyFormatType::Raw), bytes.clone())
     } else {
         // Engine-held private key: the material lives behind the PKCS#11
