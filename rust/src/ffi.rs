@@ -2812,6 +2812,47 @@ fn validate_create_template(attrs: &Attributes) -> Result<(), u32> {
             return Err(CKR_ATTRIBUTE_VALUE_INVALID);
         }
     }
+    if class == CKO_CERTIFICATE {
+        // §4.6.1 Table 19 footnote 1 — CKA_CERTIFICATE_TYPE MUST be
+        // specified when the object is created.
+        let cert_type = match read_u32(CKA_CERTIFICATE_TYPE) {
+            None => return Err(CKR_TEMPLATE_INCOMPLETE),
+            Some(t) => t,
+        };
+        // X.509 only — CKC_X_509_ATTR_CERT (§4.6.5) and CKC_WTLS (§4.6.4)
+        // are recognized but not implemented (no consumer in this
+        // workspace, no KMIP 3.0 counterpart).
+        if cert_type != CKC_X_509 {
+            return Err(CKR_ATTRIBUTE_VALUE_INVALID);
+        }
+        // §4.6.3 Table 20 footnote 1 — CKA_SUBJECT MUST be specified for
+        // an X.509 certificate.
+        if !attrs.contains_key(&CKA_SUBJECT) {
+            return Err(CKR_TEMPLATE_INCOMPLETE);
+        }
+        // §4.6.3 Table 20 footnotes 2-6 — at least one of CKA_VALUE /
+        // CKA_URL must be present and non-empty; if CKA_URL is used
+        // instead of an inline CKA_VALUE, both public-key hash
+        // attributes must accompany it so the cert can still be
+        // identified/verified without fetching it.
+        let non_empty = |t: u32| attrs.get(&t).is_some_and(|v| !v.is_empty());
+        let has_value = non_empty(CKA_VALUE);
+        let has_url = non_empty(CKA_URL);
+        if !has_value && !has_url {
+            return Err(CKR_TEMPLATE_INCOMPLETE);
+        }
+        if has_url
+            && !has_value
+            && (!non_empty(CKA_HASH_OF_SUBJECT_PUBLIC_KEY) || !non_empty(CKA_HASH_OF_ISSUER_PUBLIC_KEY))
+        {
+            return Err(CKR_TEMPLATE_INCOMPLETE);
+        }
+        // §4.6 Table 19 footnote — CKA_TRUSTED on a certificate can only
+        // be set to CK_TRUE by the SO user. Session role isn't visible
+        // here (this function is attribute-shape-only); the caller
+        // (ffi::C_CreateObject) enforces this before calling in.
+        return Ok(());
+    }
     let is_key_class =
         class == CKO_SECRET_KEY || class == CKO_PUBLIC_KEY || class == CKO_PRIVATE_KEY;
     if !is_key_class {
@@ -2880,22 +2921,27 @@ pub(crate) fn create_object_from_attrs(
     h_session: u32,
     mut new_attrs: Attributes,
 ) -> Result<u32, u32> {
-    // PKCS#11 v3.2 §4.1.1 Table 12 — token-computed / SO-only attributes may
-    // never appear in a C_CreateObject template → CKR_ATTRIBUTE_READ_ONLY.
+    // PKCS#11 v3.2 §4.1.1 Table 12 — token-computed attributes may never
+    // appear in a C_CreateObject template → CKR_ATTRIBUTE_READ_ONLY.
     const CREATE_READ_ONLY: &[u32] = &[
         CKA_ALWAYS_SENSITIVE,  // §4.9/§4.10 — provenance is token-computed
         CKA_NEVER_EXTRACTABLE, // §4.9/§4.10 — provenance is token-computed
         CKA_KEY_GEN_MECHANISM, // §4.3 Table 13 — token-computed
         CKA_UNIQUE_ID,         // §4.4.1 — token-generated (state::allocate_handle)
-        // §4.1.1 Table 12 — CKA_TRUSTED requires SO login to set; this crate
-        // has no SO-session concept, so ALL caller sets are rejected and the
-        // FALSE default (state::apply_object_defaults) stands.
-        CKA_TRUSTED,
     ];
     for ro in CREATE_READ_ONLY {
         if new_attrs.contains_key(ro) {
             return Err(CKR_ATTRIBUTE_READ_ONLY);
         }
+    }
+    // §4.1.1 Table 12 / §4.6 Table 19 footnote — CKA_TRUSTED requires SO
+    // login to set (on any object class it appears on: certificates,
+    // public/secret keys). A non-SO caller supplying it at all is
+    // rejected — including CK_FALSE, so a non-SO session can't probe
+    // whether SO-only enforcement is even wired. The SO session may set
+    // it either way.
+    if new_attrs.contains_key(&CKA_TRUSTED) && !crate::state::session_is_so(h_session) {
+        return Err(CKR_ATTRIBUTE_READ_ONLY);
     }
     // PKCS#11 v3.2 §4.1.1 — template validation (required attrs, value
     // sanity, class/type consistency) before any object is created.

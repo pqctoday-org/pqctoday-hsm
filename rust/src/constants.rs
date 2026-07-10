@@ -81,6 +81,11 @@ pub const CKA_SEED: u32 = 0x0000_0637;
 
 // ── PKCS#11 Object Classes ────────────────────────────────────────────────────
 
+/// PKCS#11 v3.2 §4.6 — certificate objects. X.509 (`CKC_X_509`) only in
+/// this engine; WTLS/X.509-attribute-certificate types are recognized (to
+/// reject cleanly) but not implemented — no consumer in this workspace and
+/// no KMIP 3.0 counterpart.
+pub const CKO_CERTIFICATE: u32 = 0x0000_0001;
 pub const CKO_PUBLIC_KEY: u32 = 0x0000_0002;
 pub const CKO_PRIVATE_KEY: u32 = 0x0000_0003;
 pub const CKO_SECRET_KEY: u32 = 0x0000_0004;
@@ -98,6 +103,23 @@ pub const CKT_TRUSTED: u32 = 0x0000_0001;
 pub const CKT_TRUST_ANCHOR: u32 = 0x0000_0002;
 pub const CKT_NOT_TRUSTED: u32 = 0x0000_0003;
 pub const CKT_TRUST_MUST_VERIFY_TRUST: u32 = 0x0000_0004;
+
+// ── PKCS#11 v3.2 §4.6.3 Table 20 — CK_CERTIFICATE_TYPE values ────────────────
+// Only CKC_X_509 is accepted by this engine's template validation; the
+// others are defined so an unsupported request can be recognized and
+// rejected with CKR_ATTRIBUTE_VALUE_INVALID rather than falling through as
+// an unrecognized raw integer.
+
+pub const CKC_X_509: u32 = 0x0000_0000;
+pub const CKC_X_509_ATTR_CERT: u32 = 0x0000_0001;
+pub const CKC_WTLS: u32 = 0x0000_0002;
+
+// ── PKCS#11 v3.2 §4.6.2 Table 19 — CK_CERTIFICATE_CATEGORY values ────────────
+
+pub const CK_CERTIFICATE_CATEGORY_UNSPECIFIED: u32 = 0x0000_0000;
+pub const CK_CERTIFICATE_CATEGORY_TOKEN_USER: u32 = 0x0000_0001;
+pub const CK_CERTIFICATE_CATEGORY_AUTHORITY: u32 = 0x0000_0002;
+pub const CK_CERTIFICATE_CATEGORY_OTHER_ENTITY: u32 = 0x0000_0003;
 
 // ── PKCS#11 Key Types (CKK_*) ────────────────────────────────────────────────
 
@@ -150,6 +172,20 @@ pub const CKA_DESTROYABLE: u32 = 0x0000_0172; // PKCS#11 v3.2 — mandatory for 
 pub const CKA_TRUSTED: u32 = 0x0000_0086; // PKCS#11 v3.2 — public/secret keys (default: FALSE)
 pub const CKA_WRAP_WITH_TRUSTED: u32 = 0x0000_0210; // PKCS#11 v3.2 — private/secret keys (default: FALSE)
 pub const CKA_ALWAYS_AUTHENTICATE: u32 = 0x0000_0202; // PKCS#11 v3.2 — private keys (default: FALSE)
+
+// PKCS#11 v3.2 §4.6 Tables 19-20 — CKO_CERTIFICATE object attributes
+// (X.509 only). CKA_VALUE/CKA_ID/CKA_LABEL/CKA_TRUSTED/CKA_CHECK_VALUE/
+// CKA_PUBLIC_KEY_INFO already exist (constants.rs / native/keygen.rs);
+// CKA_ISSUER/CKA_SERIAL_NUMBER/CKA_NAME_HASH_ALGORITHM already exist below
+// (shared with CKO_TRUST, §4.7 Table 25).
+pub const CKA_CERTIFICATE_TYPE: u32 = 0x0000_0080;
+pub const CKA_CERTIFICATE_CATEGORY: u32 = 0x0000_0087;
+pub const CKA_URL: u32 = 0x0000_0089;
+pub const CKA_HASH_OF_SUBJECT_PUBLIC_KEY: u32 = 0x0000_008a;
+pub const CKA_HASH_OF_ISSUER_PUBLIC_KEY: u32 = 0x0000_008b;
+pub const CKA_SUBJECT: u32 = 0x0000_0101;
+pub const CKA_START_DATE: u32 = 0x0000_0110;
+pub const CKA_END_DATE: u32 = 0x0000_0111;
 
 // PKCS#11 v3.2 §4.7 Table 25 — CKO_TRUST object attributes. CKA_ISSUER +
 // CKA_SERIAL_NUMBER key the trust object to a certificate; the 7 CKA_TRUST_*

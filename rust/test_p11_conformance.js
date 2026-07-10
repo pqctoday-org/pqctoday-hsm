@@ -43,8 +43,13 @@ const CKA = {
   PARAMETER_SET: 0x61d, ENCAPSULATE: 0x633, DECAPSULATE: 0x634,
   VALUE_LEN: 0x161, MODULUS: 0x120, EC_PARAMS: 0x180, EC_POINT: 0x181,
   ALLOWED_MECHANISMS: 0x40000600,
+  TRUSTED: 0x086, CHECK_VALUE: 0x090,
+  CERTIFICATE_TYPE: 0x080, CERTIFICATE_CATEGORY: 0x087, URL: 0x089,
+  HASH_OF_SUBJECT_PUBLIC_KEY: 0x08a, HASH_OF_ISSUER_PUBLIC_KEY: 0x08b,
+  SUBJECT: 0x101, START_DATE: 0x110, END_DATE: 0x111,
 };
-const CKO = { DATA: 0, PUBLIC_KEY: 2, PRIVATE_KEY: 3, SECRET_KEY: 4 };
+const CKO = { DATA: 0, CERTIFICATE: 1, PUBLIC_KEY: 2, PRIVATE_KEY: 3, SECRET_KEY: 4 };
+const CKC = { X_509: 0, X_509_ATTR_CERT: 1, WTLS: 2 };
 const CKK = { AES: 0x1f, GENERIC_SECRET: 0x10, ML_KEM: 0x49, ML_DSA: 0x4a, SLH_DSA: 0x4b, EC: 0x03 };
 const CKM = {
   ML_KEM_KEY_PAIR_GEN: 0x0f, ML_KEM: 0x17, ML_DSA_KEY_PAIR_GEN: 0x1c, ML_DSA: 0x1d,
@@ -1233,6 +1238,149 @@ section('WP-A — CKA_ALLOWED_MECHANISMS enforcement (§4.8 Table 13)');
     check('C_SignInit(CKM_HASH_ML_DSA_SHA256) on an ML_DSA-only-restricted key → MECHANISM_INVALID',
       w._C_SignInit(hS, buildMech(CKM.HASH_ML_DSA_SHA256), prvH), CKR.MECHANISM_INVALID);
   }
+}
+
+section('WP-B — CKO_CERTIFICATE object lifecycle, X.509 only (§4.6 Tables 19-20)');
+{
+  const crypto = require('crypto');
+  const CKA_CERT = { ISSUER: 0x81, SERIAL_NUMBER: 0x82 };
+  const issuer = new TextEncoder().encode('CN=Test Root CA');
+  const serial = new Uint8Array([0x01, 0x02, 0x03]);
+  const subject = new TextEncoder().encode('CN=leaf.example.test');
+  const derValue = new Uint8Array(64).map((_, i) => (i * 13 + 7) & 0xff); // fixture "DER"
+
+  const minimalCertTpl = (extra = []) => [
+    { type: CKA.CLASS, ulong: CKO.CERTIFICATE },
+    { type: CKA.CERTIFICATE_TYPE, ulong: CKC.X_509 },
+    { type: CKA.SUBJECT, bytes: subject },
+    { type: CKA.VALUE, bytes: derValue },
+    { type: CKA_CERT.ISSUER, bytes: issuer },
+    { type: CKA_CERT.SERIAL_NUMBER, bytes: serial },
+    ...extra,
+  ];
+  const createCert = (extra = []) => {
+    const tpl = minimalCertTpl(extra);
+    const hp = alloc(4);
+    const rv = w._C_CreateObject(hS, buildTpl(tpl), tpl.length, hp);
+    return { rv, h: readU32(hp) };
+  };
+
+  // ── Required-attribute rejections (§4.6.1/§4.6.3 footnotes) ───────────────
+  {
+    const noType = [
+      { type: CKA.CLASS, ulong: CKO.CERTIFICATE },
+      { type: CKA.SUBJECT, bytes: subject },
+      { type: CKA.VALUE, bytes: derValue },
+    ];
+    const hp = alloc(4);
+    check('C_CreateObject(cert, no CKA_CERTIFICATE_TYPE) → TEMPLATE_INCOMPLETE',
+      w._C_CreateObject(hS, buildTpl(noType), noType.length, hp), CKR.TEMPLATE_INCOMPLETE);
+
+    const noSubject = [
+      { type: CKA.CLASS, ulong: CKO.CERTIFICATE },
+      { type: CKA.CERTIFICATE_TYPE, ulong: CKC.X_509 },
+      { type: CKA.VALUE, bytes: derValue },
+    ];
+    check('C_CreateObject(cert, no CKA_SUBJECT) → TEMPLATE_INCOMPLETE',
+      w._C_CreateObject(hS, buildTpl(noSubject), noSubject.length, hp), CKR.TEMPLATE_INCOMPLETE);
+
+    const noValueNoUrl = [
+      { type: CKA.CLASS, ulong: CKO.CERTIFICATE },
+      { type: CKA.CERTIFICATE_TYPE, ulong: CKC.X_509 },
+      { type: CKA.SUBJECT, bytes: subject },
+    ];
+    check('C_CreateObject(cert, no CKA_VALUE and no CKA_URL) → TEMPLATE_INCOMPLETE',
+      w._C_CreateObject(hS, buildTpl(noValueNoUrl), noValueNoUrl.length, hp), CKR.TEMPLATE_INCOMPLETE);
+
+    const wtls = [
+      { type: CKA.CLASS, ulong: CKO.CERTIFICATE },
+      { type: CKA.CERTIFICATE_TYPE, ulong: CKC.WTLS },
+      { type: CKA.SUBJECT, bytes: subject },
+      { type: CKA.VALUE, bytes: derValue },
+    ];
+    check('C_CreateObject(cert, CKC_WTLS) → ATTRIBUTE_VALUE_INVALID (X.509 only)',
+      w._C_CreateObject(hS, buildTpl(wtls), wtls.length, hp), CKR.ATTRIBUTE_VALUE_INVALID);
+  }
+
+  // ── Happy path: create, round-trip, CKA_CHECK_VALUE, find, destroy ────────
+  let certHandle;
+  {
+    const created = createCert();
+    check('C_CreateObject(CKO_CERTIFICATE, CKC_X_509) → OK', created.rv, CKR.OK);
+    certHandle = created.h;
+
+    const outSubject = buildTpl([{ type: CKA.SUBJECT, bytes: new Uint8Array(subject.length) }]);
+    check('C_GetAttributeValue(CKA_SUBJECT) → OK', w._C_GetAttributeValue(hS, certHandle, outSubject, 1), CKR.OK);
+    check('CKA_SUBJECT round-trips byte-exact',
+      Buffer.from(new Uint8Array(mem().buffer, readU32(outSubject + 4), readU32(outSubject + 8)))
+        .equals(Buffer.from(subject)) ? 1 : 0, 1);
+
+    const outValue = buildTpl([{ type: CKA.VALUE, bytes: new Uint8Array(derValue.length) }]);
+    check('C_GetAttributeValue(CKA_VALUE) → OK', w._C_GetAttributeValue(hS, certHandle, outValue, 1), CKR.OK);
+    check('CKA_VALUE round-trips byte-exact',
+      Buffer.from(new Uint8Array(mem().buffer, readU32(outValue + 4), readU32(outValue + 8)))
+        .equals(Buffer.from(derValue)) ? 1 : 0, 1);
+
+    const outIssuer = buildTpl([{ type: CKA_CERT.ISSUER, bytes: new Uint8Array(issuer.length) }]);
+    check('C_GetAttributeValue(CKA_ISSUER) → OK', w._C_GetAttributeValue(hS, certHandle, outIssuer, 1), CKR.OK);
+    check('CKA_ISSUER round-trips byte-exact',
+      Buffer.from(new Uint8Array(mem().buffer, readU32(outIssuer + 4), readU32(outIssuer + 8)))
+        .equals(Buffer.from(issuer)) ? 1 : 0, 1);
+
+    // CKA_CHECK_VALUE — first 3 bytes of SHA-256(CKA_VALUE), same convention
+    // already used for public/private keys (state::compute_kcv).
+    const outKcv = buildTpl([{ type: CKA.CHECK_VALUE, bytes: new Uint8Array(3) }]);
+    check('C_GetAttributeValue(CKA_CHECK_VALUE) → OK', w._C_GetAttributeValue(hS, certHandle, outKcv, 1), CKR.OK);
+    const gotKcv = Buffer.from(new Uint8Array(mem().buffer, readU32(outKcv + 4), readU32(outKcv + 8)));
+    const wantKcv = crypto.createHash('sha256').update(Buffer.from(derValue)).digest().subarray(0, 3);
+    check('CKA_CHECK_VALUE = SHA-256(CKA_VALUE)[..3]', gotKcv.equals(wantKcv) ? 1 : 0, 1);
+
+    // C_FindObjects by {CKA_CLASS, CKA_ISSUER, CKA_SERIAL_NUMBER} — the exact
+    // lookup pattern strongswan-pkcs11/pkcs11_creds.c uses.
+    const findTpl = [
+      { type: CKA.CLASS, ulong: CKO.CERTIFICATE },
+      { type: CKA_CERT.ISSUER, bytes: issuer },
+      { type: CKA_CERT.SERIAL_NUMBER, bytes: serial },
+    ];
+    check('C_FindObjectsInit({CLASS,ISSUER,SERIAL_NUMBER}) → OK',
+      w._C_FindObjectsInit(hS, buildTpl(findTpl), findTpl.length), CKR.OK);
+    const found = alloc(4); const cnt = alloc(4); writeU32(cnt, 0);
+    check('C_FindObjects → OK', w._C_FindObjects(hS, found, 1, cnt), CKR.OK);
+    check('C_FindObjects locates the certificate', readU32(cnt), 1);
+    check('C_FindObjects returns the correct handle', readU32(found), certHandle);
+    check('C_FindObjectsFinal → OK', w._C_FindObjectsFinal(hS), CKR.OK);
+  }
+
+  // ── CKA_TRUSTED is SO-only (§4.6 Table 19 footnote) ────────────────────────
+  {
+    // hS is currently logged in as USER (login fixture, earlier in this
+    // file). A USER-session template carrying CKA_TRUSTED at all — even
+    // CK_FALSE — is rejected, matching the pre-existing (already-tested)
+    // CREATE_READ_ONLY behavior for every other SO/token-computed attr.
+    const asUser = createCert([{ type: CKA.TRUSTED, bool: true }]);
+    check('C_CreateObject(cert, CKA_TRUSTED=true) as USER → ATTRIBUTE_READ_ONLY',
+      asUser.rv, CKR.ATTRIBUTE_READ_ONLY);
+
+    const pSo = alloc(soPin.length); writeBytes(pSo, soPin);
+    const pUser = alloc(userPin.length); writeBytes(pUser, userPin);
+    check('C_Logout (leaving USER) → OK', w._C_Logout(hS), CKR.OK);
+    check('C_Login(SO) → OK', w._C_Login(hS, CKU.SO, pSo, soPin.length), CKR.OK);
+
+    const asSo = createCert([{ type: CKA.TRUSTED, bool: true }]);
+    check('C_CreateObject(cert, CKA_TRUSTED=true) as SO → OK', asSo.rv, CKR.OK);
+    const outTrusted = buildTpl([{ type: CKA.TRUSTED, bytes: new Uint8Array(1) }]);
+    check('C_GetAttributeValue(CKA_TRUSTED) → OK', w._C_GetAttributeValue(hS, asSo.h, outTrusted, 1), CKR.OK);
+    check('CKA_TRUSTED set by SO reads back TRUE', readU32(readU32(outTrusted + 4)) & 0xff, 1);
+
+    // Restore USER login so session state matches what it was before this
+    // section, in case a future section is appended after this one.
+    check('C_Logout (leaving SO) → OK', w._C_Logout(hS), CKR.OK);
+    check('re-Login(USER) → OK', w._C_Login(hS, CKU.USER, pUser, userPin.length), CKR.OK);
+
+    w._C_DestroyObject(hS, asSo.h);
+  }
+
+  w._C_DestroyObject(hS, certHandle);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -378,6 +378,21 @@ pub fn session_logged_in(h_session: u32) -> bool {
     }
 }
 
+/// True if the session is logged in specifically as SO (Security Officer).
+/// PKCS#11 v3.2 §4.6 Table 19 footnote — `CKA_TRUSTED` on a certificate
+/// "can only be set to CK_TRUE by the SO user".
+pub fn session_is_so(h_session: u32) -> bool {
+    match session_slot(h_session) {
+        Some(slot) => TOKEN_STORE.with(|ts| {
+            ts.borrow()
+                .get(&slot)
+                .map(|t| t.login_state == LoginState::SO)
+                .unwrap_or(false)
+        }),
+        None => false,
+    }
+}
+
 /// Slot id of the token owning an object record. Objects are stamped with
 /// `CKA_PRIV_SLOT_ID` at creation ([`allocate_handle`]); records created
 /// before that (or hand-built test fixtures) default to slot 0, the primary
@@ -904,8 +919,12 @@ pub fn compute_kcv(attrs: &mut Attributes) {
                 _ => return,
             }
         }
-        CKO_PUBLIC_KEY | CKO_PRIVATE_KEY => {
-            // Asymmetric keys: SHA-256 of CKA_VALUE → first 3 bytes
+        CKO_PUBLIC_KEY | CKO_PRIVATE_KEY | CKO_CERTIFICATE => {
+            // Asymmetric keys and certificates: SHA-256 of CKA_VALUE (the
+            // DER cert bytes, for CKO_CERTIFICATE) → first 3 bytes. §4.6
+            // Table 19 doesn't mandate a specific algorithm for
+            // certificates (token-defined) — reusing the same convention
+            // already used for public/private keys.
             let hash = Sha256::digest(&key_value);
             hash[..3].to_vec()
         }
