@@ -188,7 +188,12 @@ fn decrypt_ml_kem(
     // K15 — the Plane-3 record is emitted after the call with its real rv.
     let shared_secret = match deps.engine_session {
         Some(session) => {
-            let handle = softhsmrustv3::native::find_by_cka_id(session, &obj.pkcs11_cka_id)
+            // WP-4 remediation — class-aware, not the ambiguous class-blind
+            // find_by_cka_id: a certified private key now shares its
+            // CKA_ID with its public key AND a linked certificate.
+            let handle = super::helpers::find_handle_for_object(
+                session, &obj.pkcs11_cka_id, obj.object_type,
+            )
                 .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Decap:find"))?
                 .ok_or_else(|| KmipError::object_not_found(&req.uid))?;
             let native_mech = super::helpers::native_kem_mech(obj.algorithm).ok_or_else(|| {
@@ -294,7 +299,12 @@ fn decrypt_classical(
         emit_pkcs11_result(deps, correlation_id, "native::decrypt_with_key_bytes", Some(mech), &r);
         r.map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Decrypt"))?
     } else if let Some(session) = deps.engine_session {
-        let handle = softhsmrustv3::native::find_by_cka_id(session, &obj.pkcs11_cka_id)
+        // WP-4 remediation — class-aware, not the ambiguous class-blind
+        // find_by_cka_id: a certified RSA private key now shares its
+        // CKA_ID with its public key AND a linked certificate.
+        let handle = super::helpers::find_handle_for_object(
+            session, &obj.pkcs11_cka_id, obj.object_type,
+        )
             .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Decrypt:find"))?
             .ok_or_else(|| KmipError::object_not_found(&req.uid))?;
         let r =

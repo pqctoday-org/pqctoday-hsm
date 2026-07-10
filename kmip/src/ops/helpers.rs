@@ -1245,7 +1245,12 @@ fn resolve_kek(
         None => deps
             .engine_session
             .and_then(|session| {
-                softhsmrustv3::native::find_by_cka_id(session, &kek_obj.pkcs11_cka_id)
+                // WP-4 remediation — class-aware, not the ambiguous
+                // class-blind find_by_cka_id (low urgency in practice: the
+                // AES-KW length check below already fails safe on a
+                // wrong-class handle, but this keeps the pattern
+                // consistent everywhere it's used).
+                find_handle_for_object(session, &kek_obj.pkcs11_cka_id, kek_obj.object_type)
                     .ok()
                     .flatten()
                     .and_then(|h| {

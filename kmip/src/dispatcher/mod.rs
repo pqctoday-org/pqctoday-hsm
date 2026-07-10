@@ -253,8 +253,15 @@ fn undo_wave(deps: &Deps, state: &mut BatchState, items: &mut [ResponseBatchItem
                     // handle the op had created.
                     if let Some(rec) = deps.store.get(&snap.uid).ok().flatten() {
                         if let Some(session) = deps.engine_session {
-                            if let Ok(Some(handle)) = softhsmrustv3::native::find_by_cka_id(
-                                session, &rec.pkcs11_cka_id,
+                            // WP-4 remediation — class-aware, not the
+                            // ambiguous class-blind find_by_cka_id: rolling
+                            // back a failed batch item must destroy only
+                            // ITS engine object, not whichever handle a
+                            // class-blind lookup happened to return first
+                            // when a sibling (pub/priv/cert) shares the
+                            // same CKA_ID.
+                            if let Ok(Some(handle)) = crate::ops::helpers::find_handle_for_object(
+                                session, &rec.pkcs11_cka_id, rec.object_type,
                             ) {
                                 let _ = softhsmrustv3::native::destroy_object(session, handle);
                             }
