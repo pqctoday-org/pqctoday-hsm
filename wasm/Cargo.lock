@@ -1321,7 +1321,7 @@ dependencies = [
 
 [[package]]
 name = "pqctoday-kmip"
-version = "0.8.0"
+version = "0.13.1"
 dependencies = [
  "anyhow",
  "bitflags",
@@ -1346,6 +1346,7 @@ dependencies = [
  "uuid",
  "x509-cert",
  "x509-parser",
+ "zeroize",
 ]
 
 [[package]]
@@ -1704,7 +1705,7 @@ checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
 
 [[package]]
 name = "softhsmrustv3"
-version = "0.8.0"
+version = "0.13.1"
 dependencies = [
  "aes 0.8.4",
  "aes-gcm",
@@ -1730,6 +1731,7 @@ dependencies = [
  "k256",
  "lazy_static",
  "ml-kem",
+ "num-bigint",
  "p256",
  "p384",
  "p521",
