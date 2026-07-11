@@ -632,7 +632,7 @@ pub fn register(
     // AUTHORITY is reserved for the CA bootstrap path.
     if req.object_type == ObjectType::Certificate {
         if let Some(der) = certificate_value.as_deref() {
-            super::certify::project_certificate_to_engine(
+            super::cert_projection::project_certificate_to_engine(
                 deps,
                 correlation_id,
                 "Register",
@@ -796,7 +796,7 @@ pub fn import_object(
     // this is best-effort and KMIP-authoritative).
     if req.object_type == ObjectType::Certificate {
         if let Some(der) = certificate_value.as_deref() {
-            super::certify::project_certificate_to_engine(
+            super::cert_projection::project_certificate_to_engine(
                 deps,
                 correlation_id,
                 "Import",
@@ -1233,7 +1233,7 @@ mod tests {
         let d = Deps::new(engine, Arc::new(MemoryStore::new()), sink, super::super::deps::DepsConfig::default())
             .with_engine_session(sess);
 
-        super::super::certify::project_certificate_to_engine(
+        super::super::cert_projection::project_certificate_to_engine(
             &d,
             "c-skip-audit",
             "TestOp",
