@@ -274,19 +274,55 @@ def parse_header(path: Path) -> dict:
 def parse_rust(path: Path) -> dict:
     out = {}
     text = path.read_text()
+    # RHS is captured as a raw expression (not just a bare literal) so a
+    # constant may be composed from other already-declared constants, e.g.
+    # `pub const CKA_ALLOWED_MECHANISMS: u32 = CKF_ARRAY_ATTRIBUTE | 0x0000_0600;`
+    # (§4.8 Table 13) or a plain alias `pub const X: u32 = Y;`.
     pat = re.compile(
-        r"^pub const (CK[A-Z0-9_]*)\s*:\s*u32\s*=\s*(0x[0-9a-fA-F_]+|\d+)\s*;",
+        r"^pub const (CK[A-Z0-9_]*)\s*:\s*u32\s*=\s*(.+?)\s*;",
         re.M,
     )
-    for m in pat.finditer(text):
-        name, raw = m.group(1), m.group(2).replace("_", "")
-        out[name] = int(raw, 16) if raw.lower().startswith("0x") else int(raw)
+    exprs = {m.group(1): m.group(2) for m in pat.finditer(text)}
+
+    def resolve(expr: str):
+        """Evaluate a `LITERAL | LITERAL | NAME | ...` RHS against already-
+        resolved names in `out`. Returns None if any term isn't yet
+        resolvable (forward reference to a constant not yet in `out`)."""
+        val = 0
+        for term in expr.split("|"):
+            term = term.strip()
+            digits = term.replace("_", "")  # Rust digit separators, e.g. 0x0000_0600
+            if re.fullmatch(r"0x[0-9a-fA-F]+", digits, re.I):
+                val |= int(digits, 16)
+            elif re.fullmatch(r"\d+", digits):
+                val |= int(digits)
+            elif term in out:
+                val |= out[term]
+            else:
+                return None
+        return val
+
+    # Iterate to a fixed point: a term may reference a constant declared
+    # later in the file (forward reference), so resolve whatever's ready
+    # each pass until nothing new resolves.
+    pending = dict(exprs)
+    progress = True
+    while pending and progress:
+        progress = False
+        for name, expr in list(pending.items()):
+            resolved = resolve(expr)
+            if resolved is not None:
+                out[name] = resolved
+                del pending[name]
+                progress = True
+
     # parser hardening: every `pub const CK...` line must have been parsed
     declared = len(re.findall(r"^pub const CK", text, re.M))
     if declared != len(out):
         raise SystemExit(
             f"PARSER ERROR: {path.name} declares {declared} `pub const CK*` "
-            f"lines but only {len(out)} were parsed as u32 constants — "
+            f"lines but only {len(out)} were parsed as u32 constants "
+            f"(unresolved: {', '.join(sorted(pending)) or '?'}) — "
             f"update parse_rust() to cover the new form."
         )
     return out
