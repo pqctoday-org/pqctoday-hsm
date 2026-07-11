@@ -12093,6 +12093,22 @@ mod pqc_vendor_kem_ffi_tests {
         );
     }
 
+    /// FrodoKEM-1344-AES specifically — the parameter set the hub's PKCS#11
+    /// playground showcases. Not previously covered (only 976-aes/640-shake
+    /// were); this was the gap that let the wasm shadow-stack overflow for
+    /// FrodoKEM's own encapsulate/decapsulate go unnoticed (native tests
+    /// don't have a wasm stack limit, so they never would have caught it —
+    /// this test exists for algorithmic coverage, not the stack-size bug).
+    #[test]
+    fn frodokem_1344_aes_round_trip() {
+        round_trip(
+            CKM_PQCTODAY_FRODOKEM_KEY_PAIR_GEN,
+            CKM_PQCTODAY_FRODOKEM_ENCAPSULATE,
+            CKP_FRODOKEM_1344_AES,
+            32,
+        );
+    }
+
     /// `#[ignore]`: a single mceliece6688128 keygen (Goppa code generation)
     /// takes minutes in an unoptimized debug build — too slow for every CI
     /// run. Run manually with `cargo test --release -- --ignored
