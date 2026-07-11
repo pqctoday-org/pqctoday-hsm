@@ -184,7 +184,34 @@ pub fn register(
     let now = OffsetDateTime::now_utc();
     // Stable CKA_ID for this object so the KMIP layer can locate the
     // engine handle later via `find_by_cka_id` (Sign/Decrypt path).
-    let cka_id_bytes = Uuid::new_v4().as_bytes().to_vec();
+    //
+    // PKCS#11 v3.2 §4.6 (the strongSwan cert-to-key matching pattern) —
+    // when Registering a Certificate linked to an existing PublicKey via
+    // `PublicKeyLink`, reuse THAT key's own CKA_ID instead of minting a
+    // fresh one, exactly like the native Certify path (`store_certificate`)
+    // already does. Without this, a Register'd certificate's engine
+    // projection never shares a CKA_ID with its linked key, and a raw
+    // PKCS#11 client has no way to match the two — silently defeating the
+    // whole point of projecting the certificate onto the engine at all.
+    // Only affects Certificate registrations that supply the link; every
+    // other Register (symmetric/asymmetric keys, link-less certificates)
+    // is unchanged.
+    let linked_public_key_cka_id = (req.object_type == ObjectType::Certificate)
+        .then(|| {
+            req.attributes.iter().find_map(|a| match a {
+                Attribute::PublicKeyLink(pk_uid) => deps
+                    .store
+                    .get(pk_uid)
+                    .ok()
+                    .flatten()
+                    .map(|r| r.pkcs11_cka_id)
+                    .filter(|id| !id.is_empty()),
+                _ => None,
+            })
+        })
+        .flatten();
+    let cka_id_bytes =
+        linked_public_key_cka_id.unwrap_or_else(|| Uuid::new_v4().as_bytes().to_vec());
     let key_format_type = key_block.map(|kb| kb.key_format_type as u32);
     let key_material = key_block.map(|kb| kb.key_value.clone());
 
@@ -1180,6 +1207,88 @@ mod tests {
             softhsmrustv3::native::get_attribute_u32(sess, handle, c::CKA_CERTIFICATE_CATEGORY),
             Some(c::CK_CERTIFICATE_CATEGORY_TOKEN_USER),
             "Register has no CA-designation signal — always TOKEN_USER"
+        );
+
+        let _ = session::finalize();
+    }
+
+    /// WP-3 remediation (2026-07-11) — Register(Certificate) with a
+    /// `PublicKeyLink` must reuse THAT key's own CKA_ID, exactly like the
+    /// native Certify path (`certify::store_certificate`) already does,
+    /// so a raw PKCS#11 client can match the projected certificate to its
+    /// key by CKA_ID (the strongSwan pattern). Before this fix, Register
+    /// always minted a fresh CKA_ID regardless of any link supplied,
+    /// silently defeating that matching even though the certificate WAS
+    /// projected onto the engine.
+    #[test]
+    fn register_certificate_with_public_key_link_shares_its_cka_id() {
+        use softhsmrustv3::constants as c;
+        use softhsmrustv3::native::{self, session, EccCurve};
+        let _lock = crate::engine_test_lock::acquire();
+        let _ = session::finalize();
+        session::init().expect("engine init");
+        let sess = session::bootstrap_default_token(0, "so-pin", "user-pin", "register-cert-link-test")
+            .expect("bootstrap session");
+
+        // A leaf key pair, stored as a KMIP PublicKey record with its own
+        // engine CKA_ID — mirrors certify.rs's
+        // `recertify_replaces_engine_object_sharing_linked_public_key_cka_id`
+        // fixture, since this is the Register-side counterpart of that fix.
+        let leaf_cka_id = b"register-leaf-key-id".to_vec();
+        let (leaf_pub_h, _leaf_prv_h) =
+            native::generate_ecdsa_keypair(sess, EccCurve::P256, &leaf_cka_id, "leaf-ec")
+                .expect("leaf keygen");
+        let leaf_spki = native::get_attribute(sess, leaf_pub_h, c::CKA_PUBLIC_KEY_INFO)
+            .expect("leaf public key SPKI");
+
+        let d = deps_with().with_engine_session(sess);
+        d.store
+            .put(ObjectRecord {
+                uid: "urn:leaf-pub".into(),
+                object_type: ObjectType::PublicKey,
+                algorithm: KmipAlgorithm::Ecdsa,
+                usage_mask: UsageMask::VERIFY,
+                state: State::Active,
+                pkcs11_cka_id: leaf_cka_id.clone(),
+                key_material: Some(leaf_spki),
+                ..ObjectRecord::default()
+            })
+            .unwrap();
+
+        let cert = rcgen::generate_simple_self_signed(vec!["wp-3.example.test".to_string()])
+            .expect("rcgen self-signed cert");
+        let der = cert.cert.der().to_vec();
+
+        let resp = register(
+            &d,
+            RegisterRequest {
+                object_type: ObjectType::Certificate,
+                attributes: vec![
+                    Attribute::Name("wp-3-register-cert-linked".into()),
+                    Attribute::PublicKeyLink("urn:leaf-pub".into()),
+                ],
+                managed_object: None,
+                protection_storage_masks: None,
+                certificate_payload: Some((0, der.clone())),
+                secret_data_type: None,
+            },
+            "c-wp3-register-linked",
+        )
+        .unwrap();
+
+        let rec = d.store.get(&resp.uid).unwrap().unwrap();
+        assert_eq!(
+            rec.pkcs11_cka_id, leaf_cka_id,
+            "the registered certificate must reuse the linked public key's CKA_ID, not a fresh one"
+        );
+
+        let handle = crate::ops::helpers::find_handle_for_object(sess, &leaf_cka_id, ObjectType::Certificate)
+            .unwrap()
+            .expect("the certificate must be projected onto the engine AT THE SHARED CKA_ID");
+        assert_eq!(
+            native::get_attribute(sess, handle, c::CKA_VALUE).unwrap(),
+            der,
+            "engine CKA_VALUE at the shared CKA_ID must byte-equal the registered Certificate Value"
         );
 
         let _ = session::finalize();
