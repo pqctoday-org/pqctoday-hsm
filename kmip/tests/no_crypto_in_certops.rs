@@ -47,11 +47,19 @@ const BANNED_TOKENS: &[&str] = &[
 ];
 
 /// The cert-ops surface this gate covers — see the module doc for why
-/// this isn't crate-wide.
+/// this isn't crate-wide. `composite_sig.rs`/`composite_kem.rs` (the
+/// composite/hybrid remediation plan's WP-C2/WP-C6) extend the same
+/// surface — draft-19/draft-17 byte assembly and OID lookups only, the
+/// same "encoding, not crypto" contract as the original three files.
 const SCOPED_FILES: &[&str] = &[
     "src/ops/certify.rs",
     "src/ops/validate.rs",
     "src/ops/spki_verify.rs",
+    "src/ops/composite_sig.rs",
+    "src/ops/composite_kem.rs",
+    "src/ops/catalyst.rs",
+    "src/ops/related_certs.rs",
+    "src/ops/chameleon.rs",
 ];
 
 /// Remove `//` line comments and `/* */` block comments (no nesting —

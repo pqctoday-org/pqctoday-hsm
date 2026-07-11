@@ -131,7 +131,7 @@ struct EcdsaSigValue<'a> {
 /// Convert a raw PKCS#11 ECDSA signature (`r || s`, each field-width
 /// big-endian) into a DER `Ecdsa-Sig-Value`. Returns `InvalidField` if
 /// the raw signature has an odd length (cannot be halved).
-fn ecdsa_raw_to_der(raw: &[u8]) -> Result<Vec<u8>> {
+pub(crate) fn ecdsa_raw_to_der(raw: &[u8]) -> Result<Vec<u8>> {
     if raw.is_empty() || raw.len() % 2 != 0 {
         return Err(KmipError::failed(
             ResultReason::CryptographicFailure,
@@ -242,13 +242,35 @@ fn signature_alg_and_mech(
     })
 }
 
-/// The CA's resolved signing context: the engine handle, the X.509
-/// signature AlgorithmIdentifier, the engine mechanism, and the issuer
-/// DN (from the CA certificate's subject).
+/// How to sign a TBSCertificate for the designated CA. `Single` is every
+/// algorithm this port supported before composite work — one engine key,
+/// one mechanism, unchanged. `Composite` is a LAMPS draft-19 composite:
+/// two engine keys (the ML-DSA half's `CKA_ID` is the private record's
+/// own `pkcs11_cka_id`; the classical half's lives in
+/// `pkcs11_cka_id_secondary` — the SAME "two engine keys, one KMIP
+/// object" field the K6 hybrid KEMs already use, not a new store column),
+/// signed independently over the SAME message representative and
+/// concatenated per draft-19 §4.3.
+enum SigningPlan {
+    Single { signature_alg: AlgorithmIdentifierOwned, mechanism: u32 },
+    Composite { signature_alg: AlgorithmIdentifierOwned, profile: &'static super::composite_sig::CompositeSigProfile },
+}
+
+impl SigningPlan {
+    fn signature_alg(&self) -> AlgorithmIdentifierOwned {
+        match self {
+            SigningPlan::Single { signature_alg, .. } => signature_alg.clone(),
+            SigningPlan::Composite { signature_alg, .. } => signature_alg.clone(),
+        }
+    }
+}
+
+/// The CA's resolved signing context: the engine handle(s), the X.509
+/// signature AlgorithmIdentifier, the signing plan, and the issuer DN
+/// (from the CA certificate's subject).
 struct CaContext {
     private_uid: String,
-    signature_alg: AlgorithmIdentifierOwned,
-    mechanism: u32,
+    plan: SigningPlan,
     issuer: Name,
     private_record: ObjectRecord,
 }
@@ -309,15 +331,26 @@ fn resolve_ca(deps: &Deps, op: &str) -> Result<CaContext> {
         )
     })?;
     let issuer = ca_cert.tbs_certificate.subject.clone();
-    let curve_oid = ec_curve_oid_of(&ca_cert.tbs_certificate.subject_public_key_info);
 
-    let (signature_alg, mechanism) =
-        signature_alg_and_mech(private_record.algorithm, curve_oid.as_deref())?;
+    let plan = match super::composite_sig::profile_for(private_record.algorithm) {
+        Some(profile) => {
+            let oid = der::oid::ObjectIdentifier::from_str(profile.oid).expect("static OID");
+            SigningPlan::Composite {
+                signature_alg: AlgorithmIdentifierOwned { oid, parameters: None },
+                profile,
+            }
+        }
+        None => {
+            let curve_oid = ec_curve_oid_of(&ca_cert.tbs_certificate.subject_public_key_info);
+            let (signature_alg, mechanism) =
+                signature_alg_and_mech(private_record.algorithm, curve_oid.as_deref())?;
+            SigningPlan::Single { signature_alg, mechanism }
+        }
+    };
 
     Ok(CaContext {
         private_uid: private_key_uid,
-        signature_alg,
-        mechanism,
+        plan,
         issuer,
         private_record,
     })
@@ -399,21 +432,39 @@ fn resolve_subject(
             // key this server itself just generated moments ago — mirrors
             // `bootstrap_ca_certificate`'s existing pattern exactly (see
             // `live_public_key_spki` below).
+            //
+            // WP-C6 — a hybrid-KEM PublicKey's `key_material` (when
+            // present) is the raw draft-17 wire share
+            // (`mlkemPK || tradPK`), NOT an SPKI DER — the SAME bytes
+            // `Encapsulate` reads directly, so that storage format can't
+            // change. Wrap it into a composite-KEM SPKI here, at
+            // Certify-read-time only, instead of DER-parsing it as-is.
             let owned_spki_der;
-            let spki_der: &[u8] = match rec.key_material.as_deref() {
-                Some(bytes) => bytes,
-                None => {
-                    let session = deps.engine_session.ok_or_else(|| {
-                        KmipError::failed(
-                            ResultReason::KeyValueNotPresent,
-                            format!(
-                                "{op}: PublicKey {uid:?} has no SubjectPublicKeyInfo DER on \
-                                 record and no engine session to look it up live"
-                            ),
-                        )
-                    })?;
-                    owned_spki_der = live_public_key_spki(session, &rec.pkcs11_cka_id, uid)?;
-                    &owned_spki_der
+            let spki_der: &[u8] = if let Some(hybrid) = rec.algorithm.hybrid_kem() {
+                let wire_share = rec.key_material.as_deref().ok_or_else(|| {
+                    KmipError::failed(
+                        ResultReason::KeyValueNotPresent,
+                        format!("{op}: hybrid-KEM PublicKey {uid:?} has no cached wire-share material"),
+                    )
+                })?;
+                owned_spki_der = super::composite_kem::wrap_composite_kem_spki(hybrid, wire_share)?;
+                &owned_spki_der
+            } else {
+                match rec.key_material.as_deref() {
+                    Some(bytes) => bytes,
+                    None => {
+                        let session = deps.engine_session.ok_or_else(|| {
+                            KmipError::failed(
+                                ResultReason::KeyValueNotPresent,
+                                format!(
+                                    "{op}: PublicKey {uid:?} has no SubjectPublicKeyInfo DER on \
+                                     record and no engine session to look it up live"
+                                ),
+                            )
+                        })?;
+                        owned_spki_der = live_public_key_spki(session, &rec.pkcs11_cka_id, uid)?;
+                        &owned_spki_der
+                    }
                 }
             };
             let spki = SubjectPublicKeyInfoOwned::from_der(spki_der).map_err(|e| {
@@ -454,6 +505,44 @@ fn live_public_key_spki(session: u32, cka_id: &[u8], not_found_context: &str) ->
             ResultReason::KeyValueNotPresent,
             format!("{not_found_context}: public key has no CKA_PUBLIC_KEY_INFO in the engine"),
         )
+    })
+}
+
+/// The composite counterpart of [`live_public_key_spki`]: read BOTH
+/// component public keys live from the engine (same `CKA_ID`-keyed
+/// lookup, one call per half) and assemble the draft-19 §4.1 composite
+/// SubjectPublicKeyInfo — `subjectPublicKey := mldsaPK || classicalPK`
+/// (plain concatenation of the RAW key bytes, each half's own
+/// AlgorithmIdentifier wrapper stripped), tagged with the profile's
+/// composite OID. Mirrors `certBuilder.ts`'s `buildCompositeCertDraft19`
+/// exactly (`compositeKeyBytes.set(mldsaPubKey, 0); .set(classicalPubKey,
+/// mldsaPubKey.length)`).
+pub(crate) fn live_composite_public_key_spki(
+    session: u32,
+    mldsa_cka_id: &[u8],
+    classical_cka_id: &[u8],
+    profile: &super::composite_sig::CompositeSigProfile,
+    not_found_context: &str,
+) -> Result<SubjectPublicKeyInfoOwned> {
+    let mldsa_spki_der = live_public_key_spki(session, mldsa_cka_id, not_found_context)?;
+    let classical_spki_der = live_public_key_spki(session, classical_cka_id, not_found_context)?;
+    let mldsa_spki = SubjectPublicKeyInfoOwned::from_der(&mldsa_spki_der).map_err(|e| {
+        KmipError::failed(ResultReason::GeneralFailure, format!("{not_found_context}: ML-DSA SPKI DER unparseable: {e}"))
+    })?;
+    let classical_spki = SubjectPublicKeyInfoOwned::from_der(&classical_spki_der).map_err(|e| {
+        KmipError::failed(ResultReason::GeneralFailure, format!("{not_found_context}: classical SPKI DER unparseable: {e}"))
+    })?;
+    let mldsa_raw = mldsa_spki.subject_public_key.raw_bytes();
+    let classical_raw = classical_spki.subject_public_key.raw_bytes();
+
+    let mut composite_key_bytes = Vec::with_capacity(mldsa_raw.len() + classical_raw.len());
+    composite_key_bytes.extend_from_slice(mldsa_raw);
+    composite_key_bytes.extend_from_slice(classical_raw);
+
+    let oid = der::oid::ObjectIdentifier::from_str(profile.oid).expect("static OID");
+    Ok(SubjectPublicKeyInfoOwned {
+        algorithm: AlgorithmIdentifierOwned { oid, parameters: None },
+        subject_public_key: BitString::from_bytes(&composite_key_bytes).map_err(der_err)?,
     })
 }
 
@@ -542,7 +631,7 @@ fn issue_certificate(
     let tbs = TbsCertificate {
         version: Version::V3,
         serial_number: serial,
-        signature: ca.signature_alg.clone(),
+        signature: ca.plan.signature_alg(),
         issuer: ca.issuer.clone(),
         validity,
         subject: subject_inputs.subject.clone(),
@@ -558,18 +647,25 @@ fn issue_certificate(
     let tbs_der = tbs.to_der().map_err(der_err)?;
 
     // ── Engine: sign the TBS DER with the CA private key ─────────────
+    // For `SigningPlan::Composite`, `sign_tbs_in_engine` already returns
+    // the FULLY ASSEMBLED `mldsaSig || classicalSig` bytes (including the
+    // classical half's own DER conversion where needed) — the match below
+    // correctly passes composite algorithms through unchanged (they're
+    // never `KmipAlgorithm::Ecdsa`), same as it already does for RSA/
+    // ML-DSA/SLH-DSA today.
     let raw_sig = sign_tbs_in_engine(deps, op, correlation_id, ca, &tbs_der)?;
 
     // ── X.509 signature-format conversion ────────────────────────────
     let signature_bytes = match ca.private_record.algorithm {
         KmipAlgorithm::Ecdsa => ecdsa_raw_to_der(&raw_sig)?,
-        // RSA PKCS#1 v1.5 + ML-DSA FIPS-204 signatures go in as-is.
+        // RSA PKCS#1 v1.5, ML-DSA FIPS-204, and composite (already
+        // fully assembled) signatures go in as-is.
         _ => raw_sig,
     };
 
     let cert = Certificate {
         tbs_certificate: tbs,
-        signature_algorithm: ca.signature_alg.clone(),
+        signature_algorithm: ca.plan.signature_alg(),
         signature: BitString::from_bytes(&signature_bytes).map_err(der_err)?,
     };
     cert.to_der().map_err(der_err)
@@ -577,7 +673,13 @@ fn issue_certificate(
 
 /// Sign the TBS DER in the engine with the CA private key. Falls back to
 /// a deterministic placeholder when no engine session is wired (unit
-/// tests) — same convention as `ops::sign`.
+/// tests) — same convention as `ops::sign`. The placeholder path is
+/// intentionally single-algorithm-only: a composite CA private key
+/// cannot exist without a real engine session in the first place (its
+/// two component keys are always generated in the engine, same as the
+/// K6 hybrid KEMs — see WP-C5), so a composite `ca.plan` reaching this
+/// function with `deps.engine_session = None` would be a caller bug, not
+/// a supported test surface.
 fn sign_tbs_in_engine(
     deps: &Deps,
     op: &str,
@@ -586,24 +688,7 @@ fn sign_tbs_in_engine(
     tbs_der: &[u8],
 ) -> Result<Vec<u8>> {
     match deps.engine_session {
-        Some(session) => {
-            let handle = super::helpers::find_handle_for_object(
-                session,
-                &ca.private_record.pkcs11_cka_id,
-                ObjectType::PrivateKey,
-            )
-            .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, &format!("{op}:find")))?
-            .ok_or_else(|| KmipError::object_not_found(&ca.private_uid))?;
-            let r = softhsmrustv3::native::sign(session, handle, ca.mechanism, tbs_der);
-            super::helpers::emit_pkcs11_result(
-                deps,
-                correlation_id,
-                "native::sign(CA)",
-                Some(ca.mechanism),
-                &r,
-            );
-            r.map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, op))
-        }
+        Some(session) => sign_tbs_with_plan(deps, session, op, correlation_id, &ca.plan, &ca.private_record, &ca.private_uid, tbs_der),
         None => {
             // S-2 hardening: NO engine session ⇒ the CA private key is
             // unavailable, so we cannot produce a real certificate signature.
@@ -618,11 +703,22 @@ fn sign_tbs_in_engine(
             }
             #[cfg(test)]
             {
+                let mechanism = match &ca.plan {
+                    SigningPlan::Single { mechanism, .. } => *mechanism,
+                    SigningPlan::Composite { .. } => {
+                        return Err(KmipError::failed(
+                            ResultReason::CryptographicFailure,
+                            "sign_tbs_in_engine: composite CA reached the no-engine-session \
+                             test placeholder — composite keys always require a real engine \
+                             session (see this function's doc comment)",
+                        ));
+                    }
+                };
                 super::helpers::emit_pkcs11(
                     deps,
                     correlation_id,
                     "soft::placeholder_ca_sign",
-                    Some(ca.mechanism),
+                    Some(mechanism),
                     0,
                     "CKR_OK",
                 );
@@ -631,6 +727,121 @@ fn sign_tbs_in_engine(
                 use sha2::{Digest, Sha256};
                 Ok(Sha256::digest(tbs_der).to_vec())
             }
+        }
+    }
+}
+
+/// Sign `tbs_der` per `plan` — one engine key (existing single-algorithm
+/// path, unchanged behavior) or a LAMPS composite (two engine keys, M'
+/// construction, concatenated result per draft-19 §4.3). Shared by
+/// `sign_tbs_in_engine` (Certify/Re-certify) and
+/// `bootstrap_ca_certificate` (self-signed CA root) so the composite
+/// signing logic exists in exactly one place, not duplicated per caller.
+fn sign_tbs_with_plan(
+    deps: &Deps,
+    session: u32,
+    op: &str,
+    correlation_id: &str,
+    plan: &SigningPlan,
+    private_record: &ObjectRecord,
+    private_uid: &str,
+    tbs_der: &[u8],
+) -> Result<Vec<u8>> {
+    match plan {
+        SigningPlan::Single { mechanism, .. } => {
+            let handle = super::helpers::find_handle_for_object(
+                session,
+                &private_record.pkcs11_cka_id,
+                ObjectType::PrivateKey,
+            )
+            .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, &format!("{op}:find")))?
+            .ok_or_else(|| KmipError::object_not_found(private_uid))?;
+            let r = softhsmrustv3::native::sign(session, handle, *mechanism, tbs_der);
+            super::helpers::emit_pkcs11_result(deps, correlation_id, "native::sign(CA)", Some(*mechanism), &r);
+            r.map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, op))
+        }
+        SigningPlan::Composite { profile, .. } => {
+            let mldsa_handle = super::helpers::find_handle_for_object(
+                session,
+                &private_record.pkcs11_cka_id,
+                ObjectType::PrivateKey,
+            )
+            .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, &format!("{op}:find-mldsa")))?
+            .ok_or_else(|| KmipError::object_not_found(private_uid))?;
+            let classical_cka_id = private_record.pkcs11_cka_id_secondary.as_deref().ok_or_else(|| {
+                KmipError::failed(
+                    ResultReason::GeneralFailure,
+                    format!("{op}: composite CA {private_uid:?} has no secondary (classical) CKA_ID"),
+                )
+            })?;
+            let classical_handle = super::helpers::find_handle_for_object(
+                session,
+                classical_cka_id,
+                ObjectType::PrivateKey,
+            )
+            .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, &format!("{op}:find-classical")))?
+            .ok_or_else(|| KmipError::object_not_found(private_uid))?;
+
+            // Empty application context — no KMIP request surface for
+            // composite Certify carries one yet (matches how the plain
+            // `certify`/`bootstrap_ca_certificate` paths take no extra
+            // signing parameters today either).
+            let mprime = super::composite_sig::build_message_representative(profile, tbs_der, &[])?;
+
+            let mldsa_mech = softhsmrustv3::constants::CKM_ML_DSA;
+            let mldsa_sig = softhsmrustv3::native::sign_pqc(
+                session,
+                mldsa_handle,
+                mldsa_mech,
+                &mprime,
+                profile.signature_label.as_bytes(),
+                false, // deterministic — hedged, matching this engine's
+                       // established ML-DSA default (cert-ops plan WP6-a).
+                false, // internal
+                false, // external_mu
+                None,  // random — engine's own RNG hedge.
+            );
+            super::helpers::emit_pkcs11_result(deps, correlation_id, "native::sign_pqc(CA-composite-mldsa)", Some(mldsa_mech), &mldsa_sig);
+            let mldsa_sig = mldsa_sig.map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, op))?;
+            if mldsa_sig.len() != profile.mldsa_sig_bytes {
+                return Err(KmipError::failed(
+                    ResultReason::CryptographicFailure,
+                    format!(
+                        "{op}: engine returned a {}-byte ML-DSA signature for {}; FIPS 204 \
+                         expects exactly {} — refusing to assemble a malformed composite \
+                         signature",
+                        mldsa_sig.len(),
+                        profile.label,
+                        profile.mldsa_sig_bytes
+                    ),
+                ));
+            }
+
+            let classical_raw =
+                softhsmrustv3::native::sign(session, classical_handle, profile.classical_sign_mech, &mprime);
+            super::helpers::emit_pkcs11_result(
+                deps,
+                correlation_id,
+                "native::sign(CA-composite-classical)",
+                Some(profile.classical_sign_mech),
+                &classical_raw,
+            );
+            let classical_raw = classical_raw.map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, op))?;
+            // The classical half keeps its own conventional X.509 wire
+            // form inside the composite bytes (RFC 3279 §2.2.3 DER for
+            // ECDSA; RSA-PSS signatures have no raw-vs-DER distinction —
+            // same conversion rule `issue_certificate`'s single-algorithm
+            // path already applies, reused here rather than reinvented.
+            let classical_final = if profile.classical_sign_mech == softhsmrustv3::constants::CKM_ECDSA_SHA512 {
+                ecdsa_raw_to_der(&classical_raw)?
+            } else {
+                classical_raw
+            };
+
+            let mut out = Vec::with_capacity(mldsa_sig.len() + classical_final.len());
+            out.extend_from_slice(&mldsa_sig);
+            out.extend_from_slice(&classical_final);
+            Ok(out)
         }
     }
 }
@@ -726,21 +937,46 @@ pub fn bootstrap_ca_certificate(
             "{private_key_uid:?} is not a PrivateKey"
         )));
     }
-    // Resolve the private handle for signing, and the public SPKI via the
-    // shared live-lookup helper (WP-R/R1 — same one `resolve_subject` now
-    // uses for the identical "read this key's real SPKI off the engine"
-    // need).
-    let prv_h = super::helpers::find_handle_for_object(
-        session, &priv_rec.pkcs11_cka_id, ObjectType::PrivateKey,
-    )
-    .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "bootstrap:find-priv"))?
-    .ok_or_else(|| KmipError::object_not_found(private_key_uid))?;
-    let spki_der = live_public_key_spki(session, &priv_rec.pkcs11_cka_id, private_key_uid)?;
-    let spki = SubjectPublicKeyInfoOwned::from_der(&spki_der).map_err(|e| {
-        KmipError::failed(ResultReason::GeneralFailure, format!("CA SPKI DER unparseable: {e}"))
-    })?;
-    let curve = ec_curve_oid_of(&spki);
-    let (sig_alg, mech) = signature_alg_and_mech(priv_rec.algorithm, curve.as_deref())?;
+    // Resolve the signing plan + public SPKI. Composite CAs read BOTH
+    // component public keys live from the engine and assemble a
+    // composite SPKI; every other algorithm keeps the exact WP-R/R1
+    // single-key live-lookup path `resolve_subject` also uses — same
+    // "read this key's real SPKI off the engine" need either way.
+    let plan = match super::composite_sig::profile_for(priv_rec.algorithm) {
+        Some(profile) => {
+            let oid = der::oid::ObjectIdentifier::from_str(profile.oid).expect("static OID");
+            SigningPlan::Composite {
+                signature_alg: AlgorithmIdentifierOwned { oid, parameters: None },
+                profile,
+            }
+        }
+        None => {
+            let spki_der = live_public_key_spki(session, &priv_rec.pkcs11_cka_id, private_key_uid)?;
+            let spki = SubjectPublicKeyInfoOwned::from_der(&spki_der).map_err(|e| {
+                KmipError::failed(ResultReason::GeneralFailure, format!("CA SPKI DER unparseable: {e}"))
+            })?;
+            let curve = ec_curve_oid_of(&spki);
+            let (signature_alg, mechanism) = signature_alg_and_mech(priv_rec.algorithm, curve.as_deref())?;
+            SigningPlan::Single { signature_alg, mechanism }
+        }
+    };
+    let spki = match &plan {
+        SigningPlan::Composite { profile, .. } => {
+            let classical_cka_id = priv_rec.pkcs11_cka_id_secondary.as_deref().ok_or_else(|| {
+                KmipError::failed(
+                    ResultReason::GeneralFailure,
+                    format!("{private_key_uid:?}: composite CA has no secondary (classical) CKA_ID"),
+                )
+            })?;
+            live_composite_public_key_spki(session, &priv_rec.pkcs11_cka_id, classical_cka_id, profile, private_key_uid)?
+        }
+        SigningPlan::Single { .. } => {
+            let spki_der = live_public_key_spki(session, &priv_rec.pkcs11_cka_id, private_key_uid)?;
+            SubjectPublicKeyInfoOwned::from_der(&spki_der).map_err(|e| {
+                KmipError::failed(ResultReason::GeneralFailure, format!("CA SPKI DER unparseable: {e}"))
+            })?
+        }
+    };
 
     let name = Name::from_str(&format!("CN={subject_cn}"))
         .map_err(|e| KmipError::invalid_field(format!("bad CA subject CN: {e}")))?;
@@ -748,7 +984,7 @@ pub fn bootstrap_ca_certificate(
     let tbs = TbsCertificate {
         version: Version::V3,
         serial_number: SerialNumber::new(&next_serial()).map_err(der_err)?,
-        signature: sig_alg.clone(),
+        signature: plan.signature_alg(),
         issuer: name.clone(),
         validity: Validity {
             not_before: Time::try_from(std::time::SystemTime::from(now - time::Duration::days(1)))
@@ -768,15 +1004,18 @@ pub fn bootstrap_ca_certificate(
         extensions: Some(ca_extensions()?),
     };
     let tbs_der = tbs.to_der().map_err(der_err)?;
-    let raw = softhsmrustv3::native::sign(session, prv_h, mech, &tbs_der)
-        .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "bootstrap:sign"))?;
+    let raw = sign_tbs_with_plan(
+        deps, session, "Bootstrap-CA", certificate_uid, &plan, &priv_rec, private_key_uid, &tbs_der,
+    )?;
     let sig = match priv_rec.algorithm {
         KmipAlgorithm::Ecdsa => ecdsa_raw_to_der(&raw)?,
+        // RSA/ML-DSA/SLH-DSA go in as-is; composite is already fully
+        // assembled by `sign_tbs_with_plan` (never `KmipAlgorithm::Ecdsa`).
         _ => raw,
     };
     let cert = Certificate {
         tbs_certificate: tbs,
-        signature_algorithm: sig_alg,
+        signature_algorithm: plan.signature_alg(),
         signature: BitString::from_bytes(&sig).map_err(der_err)?,
     };
     let der = cert.to_der().map_err(der_err)?;
@@ -2048,5 +2287,253 @@ pub(crate) mod tests {
         );
 
         let _ = softhsmrustv3::native::session::finalize();
+    }
+
+    // ── Composite signatures (LAMPS draft-19) ──────────────────────────────
+
+    /// Bootstrap a composite CA (two real engine keypairs — ML-DSA half +
+    /// classical half, tied to ONE PrivateKey record via `pkcs11_cka_id`
+    /// / `pkcs11_cka_id_secondary`, the same two-key-one-object pattern
+    /// the K6 hybrid KEMs already use) and mint its self-signed root via
+    /// the production `bootstrap_ca_certificate` path — proves
+    /// `SigningPlan::Composite` end to end: both component signatures
+    /// independently verify against their own public keys, not just "the
+    /// call didn't error."
+    fn bootstrap_composite_ca_and_verify(
+        profile: &'static super::super::composite_sig::CompositeSigProfile,
+        algo: KmipAlgorithm,
+    ) {
+        use softhsmrustv3::constants as c;
+        use softhsmrustv3::native::{self, session, EccCurve};
+        let _g = engine_lock();
+        let _ = session::finalize();
+        session::init().expect("engine init");
+        let sess = session::bootstrap_default_token(0, "so-pin", "user-pin", "composite-ca")
+            .expect("bootstrap session");
+
+        let mldsa_cka_id = b"composite-ca-mldsa".to_vec();
+        let classical_cka_id = b"composite-ca-classical".to_vec();
+        let (mldsa_pub_h, _mldsa_prv_h) =
+            native::generate_ml_dsa_keypair(sess, profile.mldsa_param_set, &mldsa_cka_id, "ca-mldsa")
+                .expect("ML-DSA half keygen");
+        let curve = match profile.classical_ec_field_width {
+            Some(32) => EccCurve::P256,
+            Some(48) => EccCurve::P384,
+            other => panic!("test only covers EC composite profiles, got field width {other:?}"),
+        };
+        let (classical_pub_h, _classical_prv_h) =
+            native::generate_ecdsa_keypair(sess, curve, &classical_cka_id, "ca-classical")
+                .expect("classical half keygen");
+
+        let sink: Arc<dyn crate::auditlog::AuditSink> = Arc::new(RingSink::new(256));
+        let deps = Deps::new(
+            crate::policy::Engine::permissive(),
+            Arc::new(MemoryStore::new()),
+            sink,
+            crate::ops::DepsConfig::default(),
+        )
+        .with_engine_session(sess)
+        .with_ca_key("urn:composite-ca-priv", "urn:composite-ca-cert");
+
+        deps.store
+            .put(ObjectRecord {
+                uid: "urn:composite-ca-priv".into(),
+                object_type: ObjectType::PrivateKey,
+                algorithm: algo,
+                usage_mask: UsageMask::SIGN,
+                state: State::Active,
+                pkcs11_cka_id: mldsa_cka_id.clone(),
+                pkcs11_cka_id_secondary: Some(classical_cka_id.clone()),
+                ..ObjectRecord::default()
+            })
+            .unwrap();
+
+        let der = super::bootstrap_ca_certificate(
+            &deps, "urn:composite-ca-priv", "urn:composite-ca-cert", "Composite Test CA", 3650,
+        )
+        .expect("bootstrap composite CA cert");
+
+        let cert = Certificate::from_der(&der).expect("composite cert parses as X.509");
+        let composite_oid = der::oid::ObjectIdentifier::from_str(profile.oid).unwrap();
+        assert_eq!(cert.tbs_certificate.signature.oid, composite_oid, "TBS signature OID is the composite OID");
+        assert_eq!(cert.signature_algorithm.oid, composite_oid, "outer signatureAlgorithm OID is the composite OID");
+        assert_eq!(
+            cert.tbs_certificate.subject_public_key_info.algorithm.oid, composite_oid,
+            "composite SPKI's own algorithm OID is the composite OID (no separate SPKI-vs-signature split, unlike RSA/ECDSA)"
+        );
+
+        // ── Structural: composite SPKI is exactly mldsaPub || classicalPub ──
+        let mldsa_spki_der = native::get_attribute(sess, mldsa_pub_h, c::CKA_PUBLIC_KEY_INFO).unwrap();
+        let mldsa_spki = SubjectPublicKeyInfoOwned::from_der(&mldsa_spki_der).unwrap();
+        let mldsa_raw = mldsa_spki.subject_public_key.raw_bytes();
+        let classical_spki_der = native::get_attribute(sess, classical_pub_h, c::CKA_PUBLIC_KEY_INFO).unwrap();
+        let classical_spki = SubjectPublicKeyInfoOwned::from_der(&classical_spki_der).unwrap();
+        let classical_raw = classical_spki.subject_public_key.raw_bytes();
+        let composite_spki_raw = cert.tbs_certificate.subject_public_key_info.subject_public_key.raw_bytes();
+        assert_eq!(composite_spki_raw.len(), mldsa_raw.len() + classical_raw.len());
+        assert_eq!(&composite_spki_raw[..mldsa_raw.len()], mldsa_raw);
+        assert_eq!(&composite_spki_raw[mldsa_raw.len()..], classical_raw);
+
+        // ── Cryptographic: split the composite signature, verify BOTH
+        // components independently against their own public keys — the
+        // real proof, not just "a signature-shaped blob came back".
+        let sig_bytes = cert.signature.as_bytes().expect("aligned BIT STRING");
+        assert!(sig_bytes.len() > profile.mldsa_sig_bytes, "composite sig must carry a classical tail too");
+        let (mldsa_sig, classical_sig_der) = sig_bytes.split_at(profile.mldsa_sig_bytes);
+
+        let tbs_der = cert.tbs_certificate.to_der().unwrap();
+        let mprime = super::super::composite_sig::build_message_representative(profile, &tbs_der, &[]).unwrap();
+
+        native::verify_pqc(
+            sess, mldsa_pub_h, c::CKM_ML_DSA, &mprime, mldsa_sig,
+            profile.signature_label.as_bytes(), false, false,
+        )
+        .expect("ML-DSA half must independently verify against the ML-DSA public key");
+
+        let field_width = profile.classical_ec_field_width.unwrap();
+        let EcdsaSigValue { r, s } = EcdsaSigValue::from_der(classical_sig_der).expect("classical half is a valid Ecdsa-Sig-Value");
+        let pad = |bytes: &[u8]| {
+            let mut p = vec![0u8; field_width];
+            p[field_width - bytes.len()..].copy_from_slice(bytes);
+            p
+        };
+        let mut raw = pad(r.as_bytes());
+        raw.extend(pad(s.as_bytes()));
+        let ok = native::verify(sess, classical_pub_h, profile.classical_sign_mech, &mprime, &raw)
+            .expect("classical verify call");
+        assert!(ok, "classical half must independently verify against the classical public key");
+
+        // A tampered ML-DSA byte must NOT verify — proves this is a real
+        // check, not a call that always returns Ok/true.
+        let mut tampered_mldsa = mldsa_sig.to_vec();
+        let last = tampered_mldsa.len() - 1;
+        tampered_mldsa[last] ^= 0xff;
+        let tampered_ok = native::verify_pqc(
+            sess, mldsa_pub_h, c::CKM_ML_DSA, &mprime, &tampered_mldsa,
+            profile.signature_label.as_bytes(), false, false,
+        );
+        assert!(tampered_ok.is_err(), "a tampered ML-DSA half must not verify");
+
+        let _ = session::finalize();
+    }
+
+    #[test]
+    fn bootstrap_composite_mldsa65_ecdsa_p256_ca_both_halves_verify() {
+        bootstrap_composite_ca_and_verify(
+            &super::super::composite_sig::MLDSA65_ECDSA_P256_SHA512,
+            KmipAlgorithm::CompositeMlDsa65EcdsaP256Sha512,
+        );
+    }
+
+    #[test]
+    fn bootstrap_composite_mldsa87_ecdsa_p384_ca_both_halves_verify() {
+        bootstrap_composite_ca_and_verify(
+            &super::super::composite_sig::MLDSA87_ECDSA_P384_SHA512,
+            KmipAlgorithm::CompositeMlDsa87EcdsaP384Sha512,
+        );
+    }
+
+    /// WP-C6 end to end: a hybrid-KEM key pair generated through the
+    /// real `CreateKeyPair` handler (the K6 path, unchanged by this
+    /// work), certified under a plain ML-DSA-65 CA — the "asymmetric
+    /// pattern" `certBuilder.ts` names explicitly (KEM keys can't
+    /// self-sign, so the issuer is a separate signing key). Proves
+    /// `resolve_subject`'s new hybrid-KEM branch wraps the EXACT same
+    /// wire-share bytes `CreateKeyPair` cached (no silent truncation or
+    /// re-ordering), tags them with the verified draft-17 OID, and that
+    /// the resulting certificate validates through the ordinary
+    /// (unmodified) single-algorithm signature path in `validate.rs`.
+    #[test]
+    fn hybrid_kem_leaf_certifies_under_ml_dsa_ca_as_composite_kem() {
+        use crate::kmip30::{Attribute, CreateKeyPairRequest, SignatureValidity};
+
+        let (deps, _g) = ca_engine_deps(KmipAlgorithm::MlDsa65);
+
+        let req = CreateKeyPairRequest {
+            common_attributes: vec![Attribute::CryptographicAlgorithm(KmipAlgorithm::X25519MlKem768)],
+            private_key_attributes: vec![],
+            public_key_attributes: vec![],
+            seed: None,
+        };
+        let resp = super::super::create_key_pair::create_key_pair(
+            &deps, req, "CreateKeyPair:KeyAgreement", "corr-hybrid-leaf",
+        )
+        .expect("hybrid-KEM CreateKeyPair");
+        let pub_record = deps.store.get(&resp.public_key_uid).unwrap().unwrap();
+        let wire_share = pub_record.key_material.clone().expect("hybrid-KEM public wire share cached");
+        assert_eq!(wire_share.len(), 1184 + 32, "X25519MlKem768 wire share must be mlkem768(1184) || x25519(32)");
+
+        let certify_resp = certify(
+            &deps,
+            CertifyRequest {
+                uid: Some(resp.public_key_uid.clone()),
+                certificate_request_type: None,
+                certificate_request: None,
+                attributes: vec![],
+            },
+            "corr-certify-kem-leaf",
+        )
+        .expect("Certify the hybrid-KEM leaf under the ML-DSA CA");
+        let leaf_cert_der = deps
+            .store
+            .get(&certify_resp.uid)
+            .unwrap()
+            .unwrap()
+            .key_material
+            .expect("Certify must store the issued certificate DER");
+
+        // The stored certificate's SPKI must be the composite-KEM wrap
+        // of exactly the same wire share, tagged with the draft-17 OID.
+        let cert = Certificate::from_der(&leaf_cert_der).unwrap();
+        let spki = &cert.tbs_certificate.subject_public_key_info;
+        assert_eq!(spki.algorithm.oid.to_string(), super::super::composite_kem::MLKEM768_X25519_OID);
+        assert_eq!(spki.subject_public_key.raw_bytes(), wire_share.as_slice());
+
+        // And the whole chain validates through the ordinary
+        // single-algorithm path in validate.rs — no new code exercised
+        // there; confirms the composite-KEM SPKI sits correctly inside
+        // an otherwise-normal, already-proven certificate.
+        let ca_cert_der = deps.store.get("urn:ca-cert").unwrap().unwrap().key_material.unwrap();
+        assert_eq!(
+            super::super::validate::validate_chain(&deps, &[leaf_cert_der, ca_cert_der], OffsetDateTime::now_utc()),
+            SignatureValidity::Valid,
+            "a hybrid-KEM leaf certified by a plain ML-DSA CA must validate"
+        );
+    }
+
+    /// The honest-degrade half of WP-C6: `SecP256r1MlKem768` has no
+    /// verified draft-17 OID/byte-order reference (see
+    /// `composite_kem.rs`'s module doc), so `Certify` must reject it
+    /// with `OperationNotSupported` through the REAL request path — not
+    /// just at the `composite_kem::wrap_composite_kem_spki` unit level.
+    #[test]
+    fn hybrid_kem_leaf_without_verified_oid_is_rejected_not_guessed() {
+        use crate::kmip30::{Attribute, CreateKeyPairRequest};
+
+        let (deps, _g) = ca_engine_deps(KmipAlgorithm::MlDsa65);
+
+        let req = CreateKeyPairRequest {
+            common_attributes: vec![Attribute::CryptographicAlgorithm(KmipAlgorithm::SecP256r1MlKem768)],
+            private_key_attributes: vec![],
+            public_key_attributes: vec![],
+            seed: None,
+        };
+        let resp = super::super::create_key_pair::create_key_pair(
+            &deps, req, "CreateKeyPair:KeyAgreement", "corr-hybrid-p256-leaf",
+        )
+        .expect("hybrid-KEM CreateKeyPair");
+
+        let err = certify(
+            &deps,
+            CertifyRequest {
+                uid: Some(resp.public_key_uid),
+                certificate_request_type: None,
+                certificate_request: None,
+                attributes: vec![],
+            },
+            "corr-certify-kem-p256-leaf",
+        )
+        .unwrap_err();
+        assert_eq!(err.result_reason(), ResultReason::OperationNotSupported);
     }
 }

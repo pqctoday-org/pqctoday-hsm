@@ -285,6 +285,10 @@ pub fn canonical_name(a: KmipAlgorithm) -> String {
         // BSI TR-02102-1 §2.4.2.
         ClassicMcEliece6688128 => "Classic-McEliece-6688128",
         Hss => "HSS",
+        // Matches `KmipAlgorithm::spec_name()`'s strings exactly.
+        CompositeMlDsa44Rsa2048PssSha256 => "ML-DSA-44-RSA2048-PSS",
+        CompositeMlDsa65EcdsaP256Sha512 => "ML-DSA-65-ECDSA-P256",
+        CompositeMlDsa87EcdsaP384Sha512 => "ML-DSA-87-ECDSA-P384",
     }
     .into()
 }

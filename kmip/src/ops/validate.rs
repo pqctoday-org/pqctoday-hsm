@@ -71,6 +71,7 @@ use std::str::FromStr;
 
 use ::time::OffsetDateTime;
 use der::Decode;
+use x509_cert::TbsCertificate;
 use x509_parser::prelude::*;
 
 use crate::error::{KmipError, Result};
@@ -156,7 +157,7 @@ pub fn validate(
 /// Unknown contract. Takes `deps` (unlike the pre-port version) because
 /// signature verification now goes through the engine via
 /// `verify_with_spki`, not a self-contained `ring` call.
-fn validate_chain(deps: &Deps, ders: &[Vec<u8>], at: OffsetDateTime) -> SignatureValidity {
+pub(crate) fn validate_chain(deps: &Deps, ders: &[Vec<u8>], at: OffsetDateTime) -> SignatureValidity {
     // 1. Parse every certificate. Any parse failure → Invalid.
     let mut certs: Vec<X509Certificate> = Vec::with_capacity(ders.len());
     for der in ders {
@@ -183,7 +184,7 @@ fn validate_chain(deps: &Deps, ders: &[Vec<u8>], at: OffsetDateTime) -> Signatur
     let mut degrade_unknown = false;
     let mut saw_self_signed_anchor = false;
 
-    for c in &certs {
+    for (idx, c) in certs.iter().enumerate() {
         let self_signed = c.issuer() == c.subject();
 
         // Locate the issuer's public key within the supplied set.
@@ -232,7 +233,23 @@ fn validate_chain(deps: &Deps, ders: &[Vec<u8>], at: OffsetDateTime) -> Signatur
                 let tbs_bytes: &[u8] = c.tbs_certificate.as_ref();
                 let sig_bytes: &[u8] = c.signature_value.data.as_ref();
 
-                match verify_with_spki(deps, &issuer_spki, &sig_alg, tbs_bytes, sig_bytes) {
+                // LAMPS composite signatures (draft-19) need two
+                // independent component verifications, not one —
+                // `verify_with_spki`'s single-algorithm OID table has no
+                // entry for a composite OID and would otherwise (safely,
+                // just less usefully) degrade every composite chain to
+                // `Unknown`. Checked by OID before falling through to the
+                // ordinary single-algorithm path below, exactly the way
+                // `signature_alg_and_mech`/`profile_for` are checked
+                // first on the issuance side (`certify.rs::resolve_ca`).
+                let verdict = match super::composite_sig::profile_for_oid(&sig_alg.oid.to_string()) {
+                    Some(profile) => super::composite_sig::verify_composite_signature(
+                        deps, profile, &issuer_spki, tbs_bytes, sig_bytes,
+                    ),
+                    None => verify_with_spki(deps, &issuer_spki, &sig_alg, tbs_bytes, sig_bytes),
+                };
+
+                match verdict {
                     Ok(SpkiVerdict::Valid) => {
                         if self_signed {
                             saw_self_signed_anchor = true;
@@ -247,7 +264,83 @@ fn validate_chain(deps: &Deps, ders: &[Vec<u8>], at: OffsetDateTime) -> Signatur
                         // (including "no session wired") — cannot affirm,
                         // so degrade rather than silently pass or fail.
                         degrade_unknown = true;
+                        continue;
                     }
+                }
+
+                // Re-parse `tbs_bytes` with `x509_cert` (a second,
+                // independent parser from the `x509-parser` crate this
+                // loop otherwise uses) once, shared by the Catalyst and
+                // Chameleon checks below — both need a fully-typed
+                // `TbsCertificate` for their extension/re-encode logic,
+                // not raw byte access.
+                match TbsCertificate::from_der(tbs_bytes) {
+                    Ok(typed_tbs) => {
+                        // ITU-T X.509 (2019) §9.8 Catalyst — an OPT-IN
+                        // second, fully independent signature carried in
+                        // extensions 2.5.29.72/73/74 (WP-C9). The primary
+                        // signature above already verified; a Catalyst
+                        // cert additionally demands its alt signature
+                        // verify too (AND-verdict, same discipline WP-C4
+                        // uses for composite-signature's two components).
+                        match super::catalyst::extract_alt_sig_fields(&typed_tbs) {
+                            Ok(None) => {} // not Catalyst-shaped — nothing more to check
+                            Ok(Some(fields)) => {
+                                let alt_verdict = super::catalyst::tbs_minus_alt_sig_value(&typed_tbs).and_then(
+                                    |tbs_minus_alt| super::catalyst::verify_alt_signature(deps, &fields, &tbs_minus_alt),
+                                );
+                                match alt_verdict {
+                                    Ok(SpkiVerdict::Valid) => {}
+                                    Ok(SpkiVerdict::Invalid) => return SignatureValidity::Invalid,
+                                    Ok(SpkiVerdict::UnsupportedAlgorithm) | Err(_) => degrade_unknown = true,
+                                }
+                            }
+                            Err(_) => degrade_unknown = true, // present-but-malformed Catalyst extensions
+                        }
+
+                        // draft-bonnell-lamps-chameleon-certs-07 — an
+                        // OPT-IN "delta" certificate reconstructed from
+                        // the DeltaCertificateDescriptor extension
+                        // (WP-C11, validation only — see chameleon.rs's
+                        // module doc for why no issuance path exists).
+                        // Same "only meaningful once the primary
+                        // signature above is confirmed" reasoning.
+                        match super::chameleon::reconstruct_delta(&typed_tbs) {
+                            Ok(None) => {} // not Chameleon-shaped — nothing more to check
+                            Ok(Some(delta)) => match super::chameleon::verify_delta_signature(deps, &delta) {
+                                Ok(SpkiVerdict::Valid) => {}
+                                Ok(SpkiVerdict::Invalid) => return SignatureValidity::Invalid,
+                                Ok(SpkiVerdict::UnsupportedAlgorithm) | Err(_) => degrade_unknown = true,
+                            },
+                            Err(_) => degrade_unknown = true, // present-but-malformed descriptor
+                        }
+                    }
+                    Err(_) => degrade_unknown = true, // couldn't re-parse via x509_cert
+                }
+
+                // RFC 9763 Related Certificates — another OPT-IN
+                // extension (WP-C10), same "only meaningful once the
+                // primary signature above is confirmed" reasoning as
+                // Catalyst: the extension's claimed hash is otherwise
+                // unauthenticated, attacker-controlled content.
+                let related_cert_oid = x509_parser::oid_registry::Oid::from_str(super::related_certs::RELATED_CERT_OID)
+                    .expect("static OID");
+                match c.get_extension_unique(&related_cert_oid) {
+                    Ok(None) => {} // no RelatedCertificate extension — nothing to check
+                    Ok(Some(ext)) => match super::related_certs::extract_related_cert_claim(ext.value) {
+                        Ok((hash_alg_oid, claimed_hash)) => match super::related_certs::resolve_related_cert(
+                            deps, &hash_alg_oid, &claimed_hash, ders, idx,
+                        ) {
+                            Ok(super::related_certs::RelatedCertVerdict::Bound) => {}
+                            Ok(super::related_certs::RelatedCertVerdict::Unknown) => degrade_unknown = true,
+                            Ok(super::related_certs::RelatedCertVerdict::Invalid) => {
+                                return SignatureValidity::Invalid
+                            }
+                            Err(_) => degrade_unknown = true,
+                        },
+                        Err(_) => degrade_unknown = true, // present-but-malformed extension
+                    },
+                    Err(_) => degrade_unknown = true, // multiple instances — malformed
                 }
             }
             None => {
@@ -565,5 +658,171 @@ mod tests {
         )
         .unwrap();
         assert_eq!(r.validity, SignatureValidity::Valid);
+    }
+
+    /// A self-signed LAMPS composite (ML-DSA-65 + ECDSA-P256) chain of
+    /// one must validate — the real end-to-end proof for
+    /// `verify_composite_signature`, mirroring
+    /// `self_signed_ml_dsa_chain_is_valid` above but with the two-engine-
+    /// keypair composite CA setup `certify.rs`'s own composite bootstrap
+    /// tests use. Then: flip one byte anywhere in the composite signature
+    /// (ML-DSA half OR classical tail, doesn't matter which) and confirm
+    /// it flips to `Invalid`, never a false `Valid`.
+    #[test]
+    fn self_signed_composite_chain_is_valid_and_tamper_detected() {
+        use softhsmrustv3::native;
+
+        let (deps, _g) = deps_with_session();
+        let session = deps.engine_session.unwrap();
+        let profile = &super::super::composite_sig::MLDSA65_ECDSA_P256_SHA512;
+        let mldsa_cka_id = b"validate-composite-mldsa".to_vec();
+        let classical_cka_id = b"validate-composite-classical".to_vec();
+        native::generate_ml_dsa_keypair(session, profile.mldsa_param_set, &mldsa_cka_id, "validate-composite-mldsa")
+            .expect("ML-DSA half keygen");
+        native::generate_ecdsa_keypair(session, native::EccCurve::P256, &classical_cka_id, "validate-composite-classical")
+            .expect("classical half keygen");
+        deps.store
+            .put(ObjectRecord {
+                uid: "urn:composite-root-priv".into(),
+                object_type: ObjectType::PrivateKey,
+                algorithm: KmipAlgorithm::CompositeMlDsa65EcdsaP256Sha512,
+                usage_mask: UsageMask::SIGN,
+                state: State::Active,
+                pkcs11_cka_id: mldsa_cka_id,
+                pkcs11_cka_id_secondary: Some(classical_cka_id),
+                ..ObjectRecord::default()
+            })
+            .unwrap();
+
+        let cert_der = super::super::certify::bootstrap_ca_certificate(
+            &deps, "urn:composite-root-priv", "urn:composite-root-cert", "Composite Validate Root", 3650,
+        )
+        .expect("bootstrap composite CA cert");
+
+        assert_eq!(
+            validate_chain(&deps, &[cert_der.clone()], OffsetDateTime::now_utc()),
+            SignatureValidity::Valid,
+            "a self-signed composite chain must validate — both components verify independently"
+        );
+
+        let mut tampered = cert_der;
+        let last = tampered.len() - 1;
+        tampered[last] ^= 0xff;
+        assert_eq!(
+            validate_chain(&deps, &[tampered], OffsetDateTime::now_utc()),
+            SignatureValidity::Invalid,
+            "a tampered composite signature must never come back Valid"
+        );
+    }
+
+    /// WP-C9 end to end: `validate_chain`'s new Catalyst branch actually
+    /// fires and AND-combines with the primary-signature check — not
+    /// just that `catalyst.rs`'s own functions work in isolation
+    /// (already proven by that module's 4 unit tests). Reuses
+    /// `catalyst::tests::build_catalyst_tbs_and_sign` (a real
+    /// self-signed ECDSA-primary / ML-DSA-alt certificate) rather than
+    /// re-deriving the same fixture here.
+    #[test]
+    fn self_signed_catalyst_chain_is_valid_and_alt_tamper_detected() {
+        let (deps, _g) = deps_with_session();
+        let session = deps.engine_session.unwrap();
+
+        let (valid_cert_der, _tbs) = super::super::catalyst::tests::build_catalyst_tbs_and_sign(session, false);
+        assert_eq!(
+            validate_chain(&deps, &[valid_cert_der], OffsetDateTime::now_utc()),
+            SignatureValidity::Valid,
+            "a self-signed Catalyst cert with a genuine alt signature must validate"
+        );
+
+        // A tampered ALT signature must invalidate the chain even though
+        // the PRIMARY (ECDSA) signature is untouched and still verifies
+        // — proves the AND-verdict, not just an OR that only checks
+        // whichever signature happens to be examined first.
+        let (tampered_alt_cert_der, _tbs2) = super::super::catalyst::tests::build_catalyst_tbs_and_sign(session, true);
+        assert_eq!(
+            validate_chain(&deps, &[tampered_alt_cert_der], OffsetDateTime::now_utc()),
+            SignatureValidity::Invalid,
+            "a tampered Catalyst alt signature must invalidate the chain even though the primary signature is untouched"
+        );
+    }
+
+    /// WP-C10 end to end: `validate_chain`'s RelatedCertificate branch
+    /// fires and produces the right 3-way verdict — `Bound` when the
+    /// real companion is supplied alongside, `Unknown` when nothing
+    /// else is supplied at all, `Invalid` when something else IS
+    /// supplied but doesn't hash-match. Two plain self-signed certs
+    /// (rcgen, same as every other test in this file) — cert A plain,
+    /// cert B carrying a real `RelatedCertificate` extension built via
+    /// `related_certs::tests::build_related_ext_der` pointing at cert
+    /// A's actual `native::digest`-computed hash.
+    #[test]
+    fn related_certificate_binding_resolves_the_full_3_way_verdict() {
+        let (deps, _g) = deps_with_session();
+
+        let cert_a_der = params_with_cn("related-a").self_signed(&rcgen::KeyPair::generate().unwrap()).unwrap().der().to_vec();
+        let real_hash_a =
+            softhsmrustv3::native::digest(softhsmrustv3::constants::CKM_SHA256, &cert_a_der).unwrap();
+
+        let mut params_b = params_with_cn("related-b");
+        params_b.custom_extensions.push(rcgen::CustomExtension::from_oid_content(
+            &[1, 3, 6, 1, 5, 5, 7, 1, 36],
+            super::super::related_certs::tests::build_related_ext_der(&real_hash_a),
+        ));
+        let cert_b_der = params_b.self_signed(&rcgen::KeyPair::generate().unwrap()).unwrap().der().to_vec();
+
+        // Both companions supplied together — Bound, both self-signed,
+        // both primary signatures verify → Valid overall.
+        assert_eq!(
+            validate_chain(&deps, &[cert_a_der.clone(), cert_b_der.clone()], OffsetDateTime::now_utc()),
+            SignatureValidity::Valid,
+            "cert B's real companion (cert A) supplied alongside it must bind and validate"
+        );
+
+        // Cert B alone — nothing else supplied to check the claim
+        // against → Unknown, not Invalid (honest "can't confirm").
+        assert_eq!(
+            validate_chain(&deps, &[cert_b_der.clone()], OffsetDateTime::now_utc()),
+            SignatureValidity::Unknown,
+            "no companion supplied at all must degrade to Unknown, not guess Invalid"
+        );
+
+        // Cert B plus an UNRELATED third self-signed cert — something
+        // else WAS supplied, but it doesn't hash-match the claim →
+        // Invalid, a real checkable failure.
+        let unrelated_der = params_with_cn("related-unrelated").self_signed(&rcgen::KeyPair::generate().unwrap()).unwrap().der().to_vec();
+        assert_eq!(
+            validate_chain(&deps, &[cert_b_der, unrelated_der], OffsetDateTime::now_utc()),
+            SignatureValidity::Invalid,
+            "an unrelated companion that doesn't hash-match the claim must be Invalid"
+        );
+    }
+
+    /// WP-C11 end to end: `validate_chain`'s Chameleon branch actually
+    /// fires and AND-combines with the primary-signature check. Reuses
+    /// `chameleon::tests::build_chameleon_primary_tbs` (a real
+    /// self-signed ML-DSA primary / ECDSA delta certificate) rather
+    /// than re-deriving the same fixture here.
+    #[test]
+    fn self_signed_chameleon_chain_is_valid_and_delta_tamper_detected() {
+        let (deps, _g) = deps_with_session();
+        let session = deps.engine_session.unwrap();
+
+        let (valid_cert_der, _tbs) = super::super::chameleon::tests::build_chameleon_primary_tbs(session, false);
+        assert_eq!(
+            validate_chain(&deps, &[valid_cert_der], OffsetDateTime::now_utc()),
+            SignatureValidity::Valid,
+            "a self-signed Chameleon cert with a genuine delta signature must validate"
+        );
+
+        // A tampered DELTA signature must invalidate the chain even
+        // though the PRIMARY (ML-DSA) signature is untouched and still
+        // verifies — proves the AND-verdict.
+        let (tampered_delta_cert_der, _tbs2) =
+            super::super::chameleon::tests::build_chameleon_primary_tbs(session, true);
+        assert_eq!(
+            validate_chain(&deps, &[tampered_delta_cert_der], OffsetDateTime::now_utc()),
+            SignatureValidity::Invalid,
+            "a tampered Chameleon delta signature must invalidate the chain even though the primary signature is untouched"
+        );
     }
 }
