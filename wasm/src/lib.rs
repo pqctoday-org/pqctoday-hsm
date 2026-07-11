@@ -634,6 +634,107 @@ impl KmipPlayground {
         };
         serde_json::to_string(&value).unwrap_or_else(|_| "{}".into())
     }
+
+    /// WP-3 showcase — register a caller-supplied X.509 certificate (DER,
+    /// hex-encoded) linked to an existing KMIP public key, and project it
+    /// onto the engine as a real `CKO_CERTIFICATE` object sharing that
+    /// key's `CKA_ID` (the strongSwan cert-to-key matching pattern).
+    /// Native CA issuance (`Certify`) isn't reachable in wasm (its
+    /// rcgen/aws_lc_rs backend doesn't cross-compile to wasm32 — see this
+    /// crate's doc comment), so this exercises `Register`'s
+    /// wasm-reachable certificate projection instead, on a certificate
+    /// the caller already holds — exactly how a raw PKCS#11 client like
+    /// strongSwan would present one, not a full in-browser CA workflow.
+    #[wasm_bindgen]
+    pub fn register_certificate_demo(&self, linked_public_key_uid: &str, cert_der_hex: &str) -> String {
+        let outcome = (|| -> std::result::Result<Json, String> {
+            let der = hex_decode(cert_der_hex)?;
+            let req = pqctoday_kmip::kmip30::RegisterRequest {
+                object_type: ObjectType::Certificate,
+                attributes: vec![
+                    Attribute::Name("wp3-demo-certificate".into()),
+                    Attribute::PublicKeyLink(linked_public_key_uid.into()),
+                ],
+                managed_object: None,
+                protection_storage_masks: None,
+                certificate_payload: Some((0, der)),
+                secret_data_type: None,
+            };
+            pqctoday_kmip::ops::register_import_export::register(&self.deps, req, "wp3-register-cert-demo")
+                .map(|resp| json!({ "ok": true, "uid": resp.uid }))
+                .map_err(|e| format!("{e:?}"))
+        })();
+        let value = match outcome {
+            Ok(v) => v,
+            Err(e) => json!({ "ok": false, "error": e }),
+        };
+        serde_json::to_string(&value).unwrap_or_else(|_| "{}".into())
+    }
+
+    /// WP-3 showcase — read back a Certificate object's REAL engine-side
+    /// PKCS#11 attributes (not the KMIP store record) by its KMIP uid:
+    /// `CKA_ID`, `CKA_VALUE` length, `CKA_SUBJECT`/`CKA_ISSUER` DER
+    /// lengths, `CKA_SERIAL_NUMBER`, and a human-readable Subject CN
+    /// (re-derived from `CKA_VALUE` — the same DER the engine actually
+    /// holds, not the request that created it).
+    #[wasm_bindgen]
+    pub fn engine_certificate_attributes(&self, certificate_uid: &str) -> String {
+        let outcome = (|| -> std::result::Result<Json, String> {
+            let session = self
+                .deps
+                .engine_session
+                .ok_or_else(|| "no engine session".to_string())?;
+            let rec = self
+                .deps
+                .store
+                .get(certificate_uid)
+                .map_err(|e| format!("store error: {e:?}"))?
+                .ok_or_else(|| "object not found".to_string())?;
+            let handle = pqctoday_kmip::ops::helpers::find_handle_for_object(
+                session,
+                &rec.pkcs11_cka_id,
+                ObjectType::Certificate,
+            )
+            .map_err(|rv| format!("engine lookup failed, rv=0x{rv:08x}"))?
+            .ok_or_else(|| "no engine object at this certificate's CKA_ID".to_string())?;
+
+            let ck_value = softhsmrustv3::native::get_attribute(session, handle, softhsmrustv3::constants::CKA_VALUE);
+            let ck_subject = softhsmrustv3::native::get_attribute(session, handle, softhsmrustv3::constants::CKA_SUBJECT);
+            let ck_issuer = softhsmrustv3::native::get_attribute(session, handle, softhsmrustv3::constants::CKA_ISSUER);
+            let ck_serial = softhsmrustv3::native::get_attribute(session, handle, softhsmrustv3::constants::CKA_SERIAL_NUMBER);
+            let subject_cn = ck_value
+                .as_deref()
+                .and_then(pqctoday_kmip::ops::der_x509::extract_subject_cn);
+
+            Ok(json!({
+                "ckaId": hex_encode(&rec.pkcs11_cka_id),
+                "ckaValueLen": ck_value.as_ref().map(|v| v.len()),
+                "ckaSubjectDerLen": ck_subject.as_ref().map(|v| v.len()),
+                "ckaIssuerDerLen": ck_issuer.as_ref().map(|v| v.len()),
+                "ckaSerialNumberHex": ck_serial.as_ref().map(|v| hex_encode(v)),
+                "subjectCn": subject_cn,
+            }))
+        })();
+        let value = match outcome {
+            Ok(v) => v,
+            Err(e) => json!({ "error": e }),
+        };
+        serde_json::to_string(&value).unwrap_or_else(|_| "{}".into())
+    }
+}
+
+fn hex_decode(s: &str) -> std::result::Result<Vec<u8>, String> {
+    if s.len() % 2 != 0 {
+        return Err("odd-length hex string".to_string());
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).map_err(|e| e.to_string()))
+        .collect()
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Decode any KMIP TTLV frame (request or response wire bytes) to a JSON tree
