@@ -822,10 +822,14 @@ impl KmipPlayground {
     pub fn register_certificate_demo(&self, linked_public_key_uid: &str, cert_der_hex: &str) -> String {
         let outcome = (|| -> std::result::Result<Json, String> {
             let der = hex_decode(cert_der_hex)?;
+            // Derive the Name from the (freshly-created, unique) linked key UID
+            // so the demo is re-runnable — a fixed Name collides with
+            // NonUniqueNameAttribute on the second click.
+            let name_suffix = linked_public_key_uid.rsplit(':').next().unwrap_or(linked_public_key_uid);
             let req = pqctoday_kmip::kmip30::RegisterRequest {
                 object_type: ObjectType::Certificate,
                 attributes: vec![
-                    Attribute::Name("wp3-demo-certificate".into()),
+                    Attribute::Name(format!("wp3-demo-certificate-{name_suffix}")),
                     Attribute::PublicKeyLink(linked_public_key_uid.into()),
                 ],
                 managed_object: None,
