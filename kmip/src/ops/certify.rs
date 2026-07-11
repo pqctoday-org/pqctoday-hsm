@@ -682,6 +682,7 @@ pub fn bootstrap_ca_certificate(
         deps,
         "bootstrap",
         "BootstrapCa",
+        certificate_uid,
         &der,
         &priv_rec.pkcs11_cka_id,
         softhsmrustv3::constants::CK_CERTIFICATE_CATEGORY_AUTHORITY,
@@ -992,6 +993,7 @@ fn store_certificate(
         deps,
         correlation_id,
         "Certify",
+        &uid,
         cert_der,
         &cka_id,
         softhsmrustv3::constants::CK_CERTIFICATE_CATEGORY_TOKEN_USER,
@@ -1007,11 +1009,26 @@ fn store_certificate(
 /// projection — a failure here doesn't fail the KMIP operation (same
 /// posture as the WP-A `CKA_ALLOWED_MECHANISMS` auto-restrict), since the
 /// certificate is already correctly and durably stored in the KMIP record
-/// either way. No engine session (e.g. crate unit tests) is a silent no-op.
+/// either way. No engine session (e.g. crate unit tests) is a silent,
+/// unaudited no-op — the common, expected case, not worth an audit event.
+///
+/// WP-7 remediation: an engine session present but no Subject extracted
+/// (`der_x509::extract_subject_der` returning empty) now emits a
+/// `Pkcs11Call`-shaped audit event instead of silently vanishing, so an
+/// operator can tell this specific certificate's PKCS#11-side mirror
+/// never materialized. In practice this only happens for genuinely
+/// unparseable DER — a certificate that parses at all always yields a
+/// non-empty raw Subject encoding (even an empty RDNSequence DER-encodes
+/// to a 2-byte `30 00`, never zero bytes), so `register()`'s own
+/// parseability guard means ordinary client-supplied DER can no longer
+/// reach this branch at all; it remains a safety net for the
+/// server-generated paths (`bootstrap_ca_certificate`, `Certify`,
+/// `Re-certify`), where hitting it would indicate a real bug upstream.
 pub(crate) fn project_certificate_to_engine(
     deps: &Deps,
     correlation_id: &str,
     op: &str,
+    uid: &str,
     cert_der: &[u8],
     cka_id: &[u8],
     category: u32,
@@ -1021,8 +1038,20 @@ pub(crate) fn project_certificate_to_engine(
     };
     let subject = super::der_x509::extract_subject_der(cert_der).unwrap_or_default();
     if subject.is_empty() {
-        // Unparseable DER — nothing sane to project; KMIP's own copy is
-        // still correct and unaffected.
+        // No Subject extracted — nothing sane to project; KMIP's own copy
+        // is still correct and unaffected. Worth flagging (unlike the "no
+        // engine session" case above): in practice this means the DER
+        // didn't parse at all (see this function's doc comment) — an
+        // operator should be able to tell this certificate's engine
+        // mirror silently never appeared.
+        super::helpers::emit_pkcs11(
+            deps,
+            correlation_id,
+            &format!("certify::project_certificate_to_engine({op})"),
+            None,
+            0xFFFF_FFFF,
+            &format!("skipped: no Subject extracted from {}-byte DER for {uid:?}", cert_der.len()),
+        );
         return;
     }
     let issuer = super::der_x509::extract_issuer_der(cert_der).unwrap_or_default();

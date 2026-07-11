@@ -394,6 +394,25 @@ pub fn register(
         }
     }
 
+    // WP-7 remediation — reject genuinely unparseable Certificate DER up
+    // front, rather than silently accepting it and later relying on
+    // project_certificate_to_engine's best-effort skip (which previously
+    // conflated "unparseable" with "parses fine but has no Subject" — a
+    // legitimate case per RFC 5280 §4.1.2.6 that must still be accepted).
+    // A malformed CertificateValue is a client error, not a KMIP-store
+    // concern, so it fails the whole Register rather than storing an
+    // opaque blob nothing can ever validate or find.
+    if req.object_type == ObjectType::Certificate {
+        if let Some((_, der)) = &req.certificate_payload {
+            if !super::der_x509::is_parseable(der) {
+                return Err(fail_err(deps, correlation_id, "Register", KmipError::failed(
+                    ResultReason::InvalidField,
+                    format!("Register: Certificate Value ({} bytes) does not parse as a valid X.509 certificate", der.len()),
+                )));
+            }
+        }
+    }
+
     // KMIP 3.0 §6.2 Certificate payload — populate cert-specific
     // attributes from the wire `Certificate` Structure (DER bytes +
     // type). `CertificateLength` is the DER byte count; the §11
@@ -483,6 +502,7 @@ pub fn register(
                 deps,
                 correlation_id,
                 "Register",
+                &uid,
                 der,
                 &cka_id_for_cert_projection,
                 softhsmrustv3::constants::CK_CERTIFICATE_CATEGORY_TOKEN_USER,
@@ -570,6 +590,19 @@ pub fn import_object(
     let key_material = key_block.map(|kb| kb.key_value.clone());
     let key_format_type = key_block.map(|kb| kb.key_format_type as u32);
 
+    // WP-7 remediation — same upstream parseability guard as Register;
+    // see that function for the rationale.
+    if req.object_type == ObjectType::Certificate {
+        if let Some((_, der)) = &req.certificate_payload {
+            if !super::der_x509::is_parseable(der) {
+                return Err(fail_err(deps, correlation_id, "Import", KmipError::failed(
+                    ResultReason::InvalidField,
+                    format!("Import: Certificate Value ({} bytes) does not parse as a valid X.509 certificate", der.len()),
+                )));
+            }
+        }
+    }
+
     // WP-2 remediation — populate cert-specific fields from the wire
     // Certificate payload, mirroring Register's identical handling.
     // Without this, Import(Certificate) either errored confusingly (no
@@ -633,6 +666,7 @@ pub fn import_object(
                 deps,
                 correlation_id,
                 "Import",
+                &req.uid,
                 der,
                 &cka_id_for_cert_projection,
                 softhsmrustv3::constants::CK_CERTIFICATE_CATEGORY_TOKEN_USER,
@@ -994,6 +1028,74 @@ mod tests {
             Some(c::CK_CERTIFICATE_CATEGORY_TOKEN_USER),
             "Register has no CA-designation signal — always TOKEN_USER"
         );
+
+        let _ = session::finalize();
+    }
+
+    /// WP-7 remediation — Register must reject genuinely unparseable
+    /// Certificate DER up front (InvalidField), rather than silently
+    /// accepting it and later relying on project_certificate_to_engine's
+    /// best-effort skip.
+    #[test]
+    fn register_certificate_rejects_unparseable_der() {
+        let d = deps_with();
+        let err = register(&d, RegisterRequest {
+            object_type: ObjectType::Certificate,
+            attributes: vec![],
+            managed_object: None,
+            protection_storage_masks: None,
+            certificate_payload: Some((0, vec![0xde, 0xad, 0xbe, 0xef])),
+        }, "c-garbage-der").unwrap_err();
+        assert_eq!(err.result_reason(), crate::error::ResultReason::InvalidField);
+    }
+
+    /// WP-7 remediation — `project_certificate_to_engine`'s "no Subject
+    /// extracted" skip must be visible in the audit trail rather than
+    /// silently vanishing. Register's own parseability guard (the test
+    /// above) means this path is no longer reachable via `Register` for
+    /// ordinary client-supplied DER — but `project_certificate_to_engine`
+    /// is also called from `bootstrap_ca_certificate`/`Certify`/
+    /// `Re-certify` with server-generated DER, so the safety net earns
+    /// its own direct test against genuinely unparseable bytes (the only
+    /// input that can actually reach this branch — a certificate that
+    /// parses at all always has at least an empty-SEQUENCE-encoded
+    /// Subject, never zero raw bytes).
+    #[test]
+    fn project_certificate_to_engine_skip_is_audited() {
+        use softhsmrustv3::native::session;
+        let _lock = crate::engine_test_lock::acquire();
+        let _ = session::finalize();
+        session::init().expect("engine init");
+        let sess = session::bootstrap_default_token(0, "so-pin", "user-pin", "skip-audit-test")
+            .expect("bootstrap session");
+
+        let ring = Arc::new(RingSink::new(64));
+        let sink: Arc<dyn AuditSink> = ring.clone();
+        let engine = Engine::with_global_sink(sink.clone());
+        engine.activate(load_from_str(
+            "schema_version: 1\nmetadata: {name: t, description: t, authority: t, effective: always}\nrules: []\n",
+            std::path::Path::new("<t>"),
+        ).unwrap()).unwrap();
+        let d = Deps::new(engine, Arc::new(MemoryStore::new()), sink, super::super::deps::DepsConfig::default())
+            .with_engine_session(sess);
+
+        super::super::certify::project_certificate_to_engine(
+            &d,
+            "c-skip-audit",
+            "TestOp",
+            "urn:test:unparseable-cert",
+            &[0xde, 0xad, 0xbe, 0xef],
+            b"some-cka-id",
+            softhsmrustv3::constants::CK_CERTIFICATE_CATEGORY_TOKEN_USER,
+        );
+
+        let skipped = ring.filter_correlation_id("c-skip-audit").into_iter().any(|e| {
+            matches!(&e.event, crate::auditlog::EventPayload::Pkcs11Call { function, rv_name, .. }
+                if function.contains("project_certificate_to_engine")
+                    && rv_name.contains("no Subject extracted")
+                    && rv_name.contains("urn:test:unparseable-cert"))
+        });
+        assert!(skipped, "the engine-projection skip must be visible in the audit trail, not silent");
 
         let _ = session::finalize();
     }
