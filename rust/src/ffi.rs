@@ -1327,8 +1327,8 @@ pub fn C_GenerateKeyPair(
                     CKP_ML_KEM_512 => mlkem_gen!(ml_kem::MlKem512),
                     CKP_ML_KEM_768 => mlkem_gen!(ml_kem::MlKem768),
                     CKP_ML_KEM_1024 => mlkem_gen!(ml_kem::MlKem1024),
-                    // §4.1 — unknown CKA_PARAMETER_SET value in the template.
-                    _ => return CKR_ATTRIBUTE_VALUE_INVALID,
+                    // Table 6 — unrecognized CKA_PARAMETER_SET value in the template.
+                    _ => return CKR_PARAMETER_SET_NOT_SUPPORTED,
                 }
                 // Store the seed on the private object — engine-side, in the
                 // sensitive-blocked readback set (state::attr_is_sensitive_material).
@@ -1468,8 +1468,8 @@ pub fn C_GenerateKeyPair(
                     CKP_ML_DSA_44 => mldsa_gen!(ml_dsa_44),
                     CKP_ML_DSA_65 => mldsa_gen!(ml_dsa_65),
                     CKP_ML_DSA_87 => mldsa_gen!(ml_dsa_87),
-                    // §4.1 — unknown CKA_PARAMETER_SET value in the template.
-                    _ => return CKR_ATTRIBUTE_VALUE_INVALID,
+                    // Table 6 — unrecognized CKA_PARAMETER_SET value in the template.
+                    _ => return CKR_PARAMETER_SET_NOT_SUPPORTED,
                 }
                 // Store the seed on the private object — engine-side, in the
                 // sensitive-blocked readback set (state::attr_is_sensitive_material).
@@ -1616,8 +1616,8 @@ pub fn C_GenerateKeyPair(
                     CKP_SLH_DSA_SHAKE_256F => {
                         slh_dsa_keygen!(slh_dsa_shake_256f, seed.as_deref(), pub_attrs, prv_attrs)
                     }
-                    // §4.1 — unknown CKA_PARAMETER_SET value in the template.
-                    _ => return CKR_ATTRIBUTE_VALUE_INVALID,
+                    // Table 6 — unrecognized CKA_PARAMETER_SET value in the template.
+                    _ => return CKR_PARAMETER_SET_NOT_SUPPORTED,
                 }
                 // Store the seed on the private object — engine-side, in the
                 // sensitive-blocked readback set (state::attr_is_sensitive_material).
@@ -2781,6 +2781,10 @@ pub fn C_EncapsulateKey(
         if mech_type != CKM_ML_KEM {
             return CKR_MECHANISM_INVALID;
         }
+        // §4.8 Table 13 — CKA_ALLOWED_MECHANISMS.
+        if let Err(rv) = check_mechanism_allowed(h_key, mech_type) {
+            return rv;
+        }
 
         // PKCS#11 v3.2 §5.18.8 — CKM_ML_KEM requires an ML-KEM key
         // (compliance-audit P-10).
@@ -2951,6 +2955,10 @@ pub fn C_DecapsulateKey(
 
         if mech_type != CKM_ML_KEM {
             return CKR_MECHANISM_INVALID;
+        }
+        // §4.8 Table 13 — CKA_ALLOWED_MECHANISMS.
+        if let Err(rv) = check_mechanism_allowed(h_private_key, mech_type) {
+            return rv;
         }
 
         // PKCS#11 v3.2 §5.18.9 — CKM_ML_KEM requires an ML-KEM key
@@ -3127,6 +3135,54 @@ fn validate_create_template(attrs: &Attributes) -> Result<(), u32> {
         Some(v) if v.len() < 4 => return Err(CKR_ATTRIBUTE_VALUE_INVALID),
         Some(_) => read_u32(CKA_CLASS).unwrap(),
     };
+    // §4.8 Table 13 — CKA_ALLOWED_MECHANISMS is a packed CK_MECHANISM_TYPE[]
+    // (u32 LE); a length that isn't a whole number of entries is malformed.
+    if let Some(v) = attrs.get(&CKA_ALLOWED_MECHANISMS) {
+        if v.len() % 4 != 0 {
+            return Err(CKR_ATTRIBUTE_VALUE_INVALID);
+        }
+    }
+    if class == CKO_CERTIFICATE {
+        // §4.6.1 Table 19 footnote 1 — CKA_CERTIFICATE_TYPE MUST be
+        // specified when the object is created.
+        let cert_type = match read_u32(CKA_CERTIFICATE_TYPE) {
+            None => return Err(CKR_TEMPLATE_INCOMPLETE),
+            Some(t) => t,
+        };
+        // X.509 only — CKC_X_509_ATTR_CERT (§4.6.5) and CKC_WTLS (§4.6.4)
+        // are recognized but not implemented (no consumer in this
+        // workspace, no KMIP 3.0 counterpart).
+        if cert_type != CKC_X_509 {
+            return Err(CKR_ATTRIBUTE_VALUE_INVALID);
+        }
+        // §4.6.3 Table 20 footnote 1 — CKA_SUBJECT MUST be specified for
+        // an X.509 certificate.
+        if !attrs.contains_key(&CKA_SUBJECT) {
+            return Err(CKR_TEMPLATE_INCOMPLETE);
+        }
+        // §4.6.3 Table 20 footnotes 2-6 — at least one of CKA_VALUE /
+        // CKA_URL must be present and non-empty; if CKA_URL is used
+        // instead of an inline CKA_VALUE, both public-key hash
+        // attributes must accompany it so the cert can still be
+        // identified/verified without fetching it.
+        let non_empty = |t: u32| attrs.get(&t).is_some_and(|v| !v.is_empty());
+        let has_value = non_empty(CKA_VALUE);
+        let has_url = non_empty(CKA_URL);
+        if !has_value && !has_url {
+            return Err(CKR_TEMPLATE_INCOMPLETE);
+        }
+        if has_url
+            && !has_value
+            && (!non_empty(CKA_HASH_OF_SUBJECT_PUBLIC_KEY) || !non_empty(CKA_HASH_OF_ISSUER_PUBLIC_KEY))
+        {
+            return Err(CKR_TEMPLATE_INCOMPLETE);
+        }
+        // §4.6 Table 19 footnote — CKA_TRUSTED on a certificate can only
+        // be set to CK_TRUE by the SO user. Session role isn't visible
+        // here (this function is attribute-shape-only); the caller
+        // (ffi::C_CreateObject) enforces this before calling in.
+        return Ok(());
+    }
     let is_key_class =
         class == CKO_SECRET_KEY || class == CKO_PUBLIC_KEY || class == CKO_PRIVATE_KEY;
     if !is_key_class {
@@ -3195,22 +3251,27 @@ pub(crate) fn create_object_from_attrs(
     h_session: u32,
     mut new_attrs: Attributes,
 ) -> Result<u32, u32> {
-    // PKCS#11 v3.2 §4.1.1 Table 12 — token-computed / SO-only attributes may
-    // never appear in a C_CreateObject template → CKR_ATTRIBUTE_READ_ONLY.
+    // PKCS#11 v3.2 §4.1.1 Table 12 — token-computed attributes may never
+    // appear in a C_CreateObject template → CKR_ATTRIBUTE_READ_ONLY.
     const CREATE_READ_ONLY: &[u32] = &[
         CKA_ALWAYS_SENSITIVE,  // §4.9/§4.10 — provenance is token-computed
         CKA_NEVER_EXTRACTABLE, // §4.9/§4.10 — provenance is token-computed
         CKA_KEY_GEN_MECHANISM, // §4.3 Table 13 — token-computed
         CKA_UNIQUE_ID,         // §4.4.1 — token-generated (state::allocate_handle)
-        // §4.1.1 Table 12 — CKA_TRUSTED requires SO login to set; this crate
-        // has no SO-session concept, so ALL caller sets are rejected and the
-        // FALSE default (state::apply_object_defaults) stands.
-        CKA_TRUSTED,
     ];
     for ro in CREATE_READ_ONLY {
         if new_attrs.contains_key(ro) {
             return Err(CKR_ATTRIBUTE_READ_ONLY);
         }
+    }
+    // §4.1.1 Table 12 / §4.6 Table 19 footnote — CKA_TRUSTED requires SO
+    // login to set (on any object class it appears on: certificates,
+    // public/secret keys). A non-SO caller supplying it at all is
+    // rejected — including CK_FALSE, so a non-SO session can't probe
+    // whether SO-only enforcement is even wired. The SO session may set
+    // it either way.
+    if new_attrs.contains_key(&CKA_TRUSTED) && !crate::state::session_is_so(h_session) {
+        return Err(CKR_ATTRIBUTE_READ_ONLY);
     }
     // PKCS#11 v3.2 §4.1.1 — template validation (required attrs, value
     // sanity, class/type consistency) before any object is created.
@@ -3375,6 +3436,7 @@ fn check_key_usage_as(
     Ok(())
 }
 
+
 /// RSA-PSS mechanism → (expected CKM_* hashAlg, expected CKG_MGF1_* mgf) for
 /// CK_RSA_PKCS_PSS_PARAMS validation (§6.4.5: hashAlg/mgf must match the
 /// digest baked into the mechanism; MGF1 uses the same hash per §6.2).
@@ -3405,6 +3467,11 @@ pub fn C_SignInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
             return rv;
         }
         let mut mech_type = *(p_mechanism as *const u32);
+        // §4.8 Table 13 — CKA_ALLOWED_MECHANISMS, checked against the
+        // caller's original request before any internal remap below.
+        if let Err(rv) = check_mechanism_allowed(h_key, mech_type) {
+            return rv;
+        }
         // §6.4 — raw CKM_RSA_PKCS takes NO mechanism parameter; a supplied one
         // (e.g. a CK_SIGN_ADDITIONAL_CONTEXT meant for ML-DSA/SLH-DSA) is
         // CKR_MECHANISM_PARAM_INVALID.
@@ -3828,6 +3895,10 @@ pub fn C_VerifyInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
             return rv;
         }
         let mut mech_type = *(p_mechanism as *const u32);
+        // §4.8 Table 13 — CKA_ALLOWED_MECHANISMS, checked before any remap.
+        if let Err(rv) = check_mechanism_allowed(h_key, mech_type) {
+            return rv;
+        }
         // Parse CK_EDDSA_PARAMS: if phFlag is set, use internal CKM_EDDSA_PH
         if mech_type == CKM_EDDSA {
             let p_param = *((p_mechanism as *const usize).add(1)) as usize as *const u8;
@@ -4414,6 +4485,10 @@ pub fn C_VerifySignatureInit(
             return rv;
         }
         let mut mech_type = *(p_mechanism as *const u32);
+        // §4.8 Table 13 — CKA_ALLOWED_MECHANISMS, checked before any remap.
+        if let Err(rv) = check_mechanism_allowed(h_key, mech_type) {
+            return rv;
+        }
         if mech_type == CKM_EDDSA {
             let p_param = *((p_mechanism as *const usize).add(1)) as usize as *const u8;
             let ul_param_len = *((p_mechanism as *const usize).add(2));
@@ -4665,6 +4740,10 @@ pub fn C_EncryptInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
             return rv;
         }
         let mech_type = *(p_mechanism as *const u32);
+        // §4.8 Table 13 — CKA_ALLOWED_MECHANISMS.
+        if let Err(rv) = check_mechanism_allowed(h_key, mech_type) {
+            return rv;
+        }
         let p_param = *((p_mechanism as *const usize).add(1)) as usize as *const u8;
         let ul_param_len = *((p_mechanism as *const usize).add(2));
 
@@ -5091,6 +5170,10 @@ pub fn C_DecryptInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
             return rv;
         }
         let mech_type = *(p_mechanism as *const u32);
+        // §4.8 Table 13 — CKA_ALLOWED_MECHANISMS.
+        if let Err(rv) = check_mechanism_allowed(h_key, mech_type) {
+            return rv;
+        }
         let p_param = *((p_mechanism as *const usize).add(1)) as usize as *const u8;
         let ul_param_len = *((p_mechanism as *const usize).add(2));
 
@@ -5761,14 +5844,40 @@ enum Sp800Seg {
     Bytes(Vec<u8>),
 }
 
+/// PKCS#11 v3.2 §6.42.2 — PRF output length in bytes for the SP 800-108
+/// PRF types this engine supports (used only to size
+/// `CK_SP800_108_DKM_LENGTH_SUM_OF_SEGMENTS`). `None` for an unrecognized
+/// PRF type or an invalid AES-CMAC key length.
+fn sp800_108_prf_output_len(prf_type: u32, base_key_len: usize) -> Option<usize> {
+    match prf_type {
+        CKM_SHA256_HMAC => Some(32),
+        CKM_SHA384_HMAC => Some(48),
+        CKM_SHA512_HMAC => Some(64),
+        CKM_SHA3_256_HMAC => Some(32),
+        CKM_SHA3_512_HMAC => Some(64),
+        // CMAC output = the underlying block cipher's block size (AES = 16
+        // bytes), independent of key length; base_key_len is only checked
+        // for AES key-size validity, mirroring sp800_108_counter_kbkdf.
+        CKM_AES_CMAC if matches!(base_key_len, 16 | 24 | 32) => Some(16),
+        _ => None,
+    }
+}
+
 /// Parse CK_PRF_DATA_PARAM[] — { type: CK_PRF_DATA_TYPE, pValue, ulValueLen },
 /// all CK_ULONG/pointer-width, so the array stride and the nested COUNTER /
 /// DKM_LENGTH format-struct field offsets are taken at size_of::<usize>()
 /// (4 B wasm32, 8 B native). `key_len` is the requested DKM length in bytes.
+/// `prf_type`/`base_key_len` size a `SUM_OF_SEGMENTS` DKM length.
+/// `allow_explicit_counter` — Table 199 (Counter Mode) forbids the separate
+/// `CK_SP800_108_COUNTER` field (the counter there is the mandatory
+/// ITERATION_VARIABLE); Table 200 (Feedback Mode) allows it as optional.
 unsafe fn parse_sp800_108_segments(
     p_segs: *const usize,
     num_segs: usize,
     key_len: usize,
+    prf_type: u32,
+    base_key_len: usize,
+    allow_explicit_counter: bool,
 ) -> Result<Vec<Sp800Seg>, u32> {
     let usz = core::mem::size_of::<usize>();
     let mut out = Vec::new();
@@ -5794,6 +5903,24 @@ unsafe fn parse_sp800_108_segments(
                 }
                 out.push(Sp800Seg::Counter(le, (width_bits / 8) as usize));
             }
+            t if t == CK_SP800_108_COUNTER => {
+                // Table 199 — invalid data field for Counter Mode KDF.
+                if !allow_explicit_counter {
+                    return Err(CKR_MECHANISM_PARAM_INVALID);
+                }
+                // Same wire shape as ITERATION_VARIABLE: pValue →
+                // CK_SP800_108_COUNTER_FORMAT.
+                if val_ptr.is_null() || val_len < 2 * usz {
+                    return Err(CKR_MECHANISM_PARAM_INVALID);
+                }
+                let le = *val_ptr != 0;
+                let width_bits =
+                    std::ptr::read_unaligned(val_ptr.add(usz) as *const usize) as u32;
+                if !matches!(width_bits, 8 | 16 | 24 | 32) {
+                    return Err(CKR_MECHANISM_PARAM_INVALID);
+                }
+                out.push(Sp800Seg::Counter(le, (width_bits / 8) as usize));
+            }
             t if t == CK_SP800_108_DKM_LENGTH => {
                 // pValue → CK_SP800_108_DKM_LENGTH_FORMAT { method: CK_ULONG,
                 // bLittleEndian: CK_BBOOL, ulWidthInBits: CK_ULONG }.
@@ -5801,16 +5928,26 @@ unsafe fn parse_sp800_108_segments(
                     return Err(CKR_MECHANISM_PARAM_INVALID);
                 }
                 let method = std::ptr::read_unaligned(val_ptr as *const usize) as u32;
-                if method != CK_SP800_108_DKM_LENGTH_SUM_OF_KEYS {
-                    return Err(CKR_MECHANISM_PARAM_INVALID);
-                }
                 let le = *val_ptr.add(usz) != 0;
                 let width_bits =
                     std::ptr::read_unaligned(val_ptr.add(2 * usz) as *const usize) as u32;
                 if !matches!(width_bits, 8 | 16 | 32 | 64) {
                     return Err(CKR_MECHANISM_PARAM_INVALID);
                 }
-                let l_bits = (key_len as u64) * 8;
+                // Table 198 — SUM_OF_KEYS is just the requested key length;
+                // SUM_OF_SEGMENTS is that length rounded UP to a whole
+                // number of PRF-output blocks (the KDF always emits whole
+                // segments even if only part of the last one is kept).
+                let l_bits: u64 = if method == CK_SP800_108_DKM_LENGTH_SUM_OF_KEYS {
+                    (key_len as u64) * 8
+                } else if method == CK_SP800_108_DKM_LENGTH_SUM_OF_SEGMENTS {
+                    let prf_out = sp800_108_prf_output_len(prf_type, base_key_len)
+                        .ok_or(CKR_MECHANISM_PARAM_INVALID)?;
+                    let segments = key_len.div_ceil(prf_out).max(1);
+                    ((segments * prf_out) as u64) * 8
+                } else {
+                    return Err(CKR_MECHANISM_PARAM_INVALID);
+                };
                 let width = (width_bits / 8) as usize;
                 let full = if le {
                     l_bits.to_le_bytes()
@@ -5830,6 +5967,16 @@ unsafe fn parse_sp800_108_segments(
                         std::slice::from_raw_parts(val_ptr, val_len).to_vec(),
                     ));
                 }
+            }
+            t if t == CK_SP800_108_KEY_HANDLE => {
+                // pValue → CK_OBJECT_HANDLE_PTR, ulValueLen == sizeof(CK_OBJECT_HANDLE).
+                // Splices the referenced key's CKA_VALUE in as a byte-array segment.
+                if val_ptr.is_null() || val_len != usz {
+                    return Err(CKR_MECHANISM_PARAM_INVALID);
+                }
+                let handle = std::ptr::read_unaligned(val_ptr as *const usize) as u32;
+                let key_bytes = get_object_value(handle).ok_or(CKR_KEY_HANDLE_INVALID)?;
+                out.push(Sp800Seg::Bytes(key_bytes));
             }
             _ => return Err(CKR_MECHANISM_PARAM_INVALID),
         }
@@ -6051,6 +6198,10 @@ pub fn C_DeriveKey(
         // (password in params), so skip the check for that case.
         if h_base_key != 0 {
             if let Err(rv) = check_key_usage(_h_session, h_base_key, CKA_DERIVE) {
+                return rv;
+            }
+            // §4.8 Table 13 — CKA_ALLOWED_MECHANISMS on the base key.
+            if let Err(rv) = check_mechanism_allowed(h_base_key, mech_type) {
                 return rv;
             }
         }
@@ -6641,9 +6792,18 @@ pub fn C_DeriveKey(
                 // SP 800-108 §4.1 / PKCS#11 §6.x — process the data params IN
                 // ORDER. Supported segment types: ITERATION_VARIABLE (counter
                 // at caller-specified width/endianness), DKM_LENGTH ([L]
-                // field), BYTE_ARRAY (fixed input). Legacy default when no
-                // ITERATION_VARIABLE is present: 32-bit BE counter prefix.
-                let segs = match parse_sp800_108_segments(p_segs, num_segs, key_len) {
+                // field), BYTE_ARRAY (fixed input), KEY_HANDLE (spliced-in key
+                // value). Legacy default when no ITERATION_VARIABLE is
+                // present: 32-bit BE counter prefix. Table 199 — the separate
+                // CK_SP800_108_COUNTER field is invalid for Counter Mode.
+                let segs = match parse_sp800_108_segments(
+                    p_segs,
+                    num_segs,
+                    key_len,
+                    prf_type,
+                    base_key.len(),
+                    /* allow_explicit_counter */ false,
+                ) {
                     Ok(s) => s,
                     Err(rv) => return rv,
                 };
@@ -6677,8 +6837,17 @@ pub fn C_DeriveKey(
                     Vec::new()
                 };
                 // SP 800-108 §4.2 — ordered data params: optional counter at
-                // caller width/endianness, [L] field, byte arrays. K(0) = IV.
-                let segs = match parse_sp800_108_segments(p_segs, num_segs, key_len) {
+                // caller width/endianness, [L] field, byte arrays, spliced-in
+                // key values. K(0) = IV. Table 200 — CK_SP800_108_COUNTER is
+                // optional for Feedback Mode (unlike Counter Mode).
+                let segs = match parse_sp800_108_segments(
+                    p_segs,
+                    num_segs,
+                    key_len,
+                    prf_type,
+                    base_key.len(),
+                    /* allow_explicit_counter */ true,
+                ) {
                     Ok(s) => s,
                     Err(rv) => return rv,
                 };
@@ -6853,6 +7022,10 @@ pub fn C_WrapKey(
         if let Err(rv) =
             check_key_usage_as(_h_session, h_wrapping_key, CKA_WRAP, CKR_WRAPPING_KEY_HANDLE_INVALID)
         {
+            return rv;
+        }
+        // §4.8 Table 13 — CKA_ALLOWED_MECHANISMS on the wrapping key.
+        if let Err(rv) = check_mechanism_allowed(h_wrapping_key, mech_type) {
             return rv;
         }
 
@@ -7031,6 +7204,10 @@ pub fn C_UnwrapKey(
             CKA_UNWRAP,
             CKR_UNWRAPPING_KEY_HANDLE_INVALID,
         ) {
+            return rv;
+        }
+        // §4.8 Table 13 — CKA_ALLOWED_MECHANISMS on the unwrapping key.
+        if let Err(rv) = check_mechanism_allowed(h_unwrapping_key, mech_type) {
             return rv;
         }
 
@@ -7265,6 +7442,10 @@ pub fn C_WrapKeyAuthenticated(
         {
             return rv;
         }
+        // §4.8 Table 13 — CKA_ALLOWED_MECHANISMS on the wrapping key.
+        if let Err(rv) = check_mechanism_allowed(h_wrapping_key, mech_type) {
+            return rv;
+        }
 
         // Target key: handle → CKR_KEY_HANDLE_INVALID; unextractable (exists,
         // CKA_EXTRACTABLE=FALSE) → CKR_KEY_UNEXTRACTABLE.
@@ -7400,6 +7581,10 @@ pub fn C_UnwrapKeyAuthenticated(
             CKA_UNWRAP,
             CKR_UNWRAPPING_KEY_HANDLE_INVALID,
         ) {
+            return rv;
+        }
+        // §4.8 Table 13 — CKA_ALLOWED_MECHANISMS on the unwrapping key.
+        if let Err(rv) = check_mechanism_allowed(h_unwrapping_key, mech_type) {
             return rv;
         }
 
@@ -8427,14 +8612,52 @@ pub(crate) fn copy_object_from_attrs(
     if !copyable {
         return Err(CKR_ACTION_PROHIBITED);
     }
+    // WP-5 remediation — CKA_TRUSTED needs its own SO-aware gate, separate
+    // from the generic attr_mutation_allowed loop below (which
+    // unconditionally rejects it — correct for C_SetAttributeValue, but
+    // too strict here: an SO session copying an object should be able to
+    // produce a trusted copy, mirroring C_CreateObject's own SO exception
+    // per §4.1.1 Table 12 / §4.6 Table 19 footnote). Before this fix, an
+    // explicit CKA_TRUSTED in the template was rejected for EVERY session
+    // including SO.
+    let is_so = crate::state::session_is_so(h_session);
+    if template.contains_key(&CKA_TRUSTED) && !is_so {
+        return Err(CKR_ATTRIBUTE_READ_ONLY);
+    }
+    // WP-5 remediation — identity-field respoofing guard. If the SOURCE
+    // object is CKA_TRUSTED=TRUE, a non-SO caller could previously omit
+    // CKA_TRUSTED from the template (letting it silently carry over
+    // unchanged — see the clone below) while simultaneously rewriting
+    // CKA_SUBJECT / CKA_ISSUER / CKA_SERIAL_NUMBER / CKA_ID / CKA_LABEL /
+    // CKA_PRIVATE in the same copy: a trusted-looking object with
+    // attacker-chosen identity metadata, entirely outside the SO gate
+    // C_CreateObject enforces. Require SO for any of those changes
+    // whenever the source is already trusted.
+    if read_bool_attr(&src, CKA_TRUSTED) && !is_so {
+        let identity_attrs = [
+            CKA_SUBJECT,
+            CKA_ISSUER,
+            CKA_SERIAL_NUMBER,
+            crate::native::keygen::CKA_ID,
+            crate::native::keygen::CKA_LABEL,
+            CKA_PRIVATE,
+        ];
+        if template.keys().any(|t| identity_attrs.contains(t)) {
+            return Err(CKR_ATTRIBUTE_READ_ONLY);
+        }
+    }
     // §4.1.2-3 — the copy template may set CKA_TOKEN / CKA_PRIVATE /
     // CKA_MODIFIABLE (not in the gate's read-only set) but may NOT touch
     // server-managed attrs or weaken security (CKA_SENSITIVE TRUE→FALSE,
     // CKA_EXTRACTABLE FALSE→TRUE). Weakening is pinned to
     // CKR_ATTRIBUTE_READ_ONLY from C_CopyObject's §5.7.2 return list,
     // through the same gate C_SetAttributeValue uses (single source of
-    // truth: state::attr_mutation_allowed).
+    // truth: state::attr_mutation_allowed). CKA_TRUSTED is excluded here —
+    // handled above with its own SO-aware check.
     for (t, v) in &template {
+        if *t == CKA_TRUSTED {
+            continue;
+        }
         attr_mutation_allowed(&src, *t, v)?;
     }
     // §5.7.2 — a R/O session cannot produce a token object. The copy's
@@ -8457,6 +8680,16 @@ pub(crate) fn copy_object_from_attrs(
     let mut new_attrs = src.clone();
     new_attrs.remove(&CKA_PRIV_OWNER_SESSION);
     new_attrs.remove(&CKA_PRIV_SLOT_ID);
+    // WP-5 remediation — CKA_TRUSTED must not silently carry over from the
+    // source for a non-SO copy (the gap this whole block closes): force it
+    // FALSE here, before the template overlay below. A non-SO template can
+    // never contain CKA_TRUSTED (rejected above), so this stands
+    // unconditionally for a non-SO session regardless of the template's
+    // contents; an SO session's explicit CKA_TRUSTED=TRUE is applied by
+    // the overlay immediately after and overwrites this default.
+    if !is_so {
+        new_attrs.insert(CKA_TRUSTED, vec![0]);
+    }
     for (t, v) in template {
         new_attrs.insert(t, v);
     }
@@ -8740,6 +8973,12 @@ pub fn msg_encrypt_init_internal(
         });
         if !can_use {
             return CKR_KEY_FUNCTION_NOT_PERMITTED;
+        }
+        // §4.8 Table 13 — CKA_ALLOWED_MECHANISMS. Covers both
+        // C_MessageEncryptInit and C_MessageDecryptInit, which both delegate
+        // here.
+        if let Err(rv) = check_mechanism_allowed(h_key, mech_type) {
+            return rv;
         }
 
         let key_bytes = match get_object_value(h_key) {
@@ -10372,6 +10611,35 @@ mod object_mgmt_ffi_tests {
         assert_eq!(obj_bool(h, CKA_ENCAPSULATE), Some(true));
     }
 
+    /// WP-6 remediation — §4.8 Table 13: `C_SetAttributeValue` must reject
+    /// a malformed (non-multiple-of-4) `CKA_ALLOWED_MECHANISMS` value the
+    /// same way `C_CreateObject`'s `validate_create_template` already
+    /// does. Before this fix, the mutation path accepted any byte length
+    /// and stored it verbatim, silently mis-parsed later by
+    /// `check_mechanism_allowed`'s `chunks_exact(4)`.
+    #[test]
+    fn set_attr_allowed_mechanisms_rejects_malformed_length() {
+        let _guard = test_lock::acquire();
+        setup();
+        let h = create_object_from_attrs(SESSION_RW, aes_import_attrs()).unwrap();
+        // 7 bytes — not a whole number of CK_MECHANISM_TYPE (u32) entries.
+        let malformed: Vec<(u32, Vec<u8>)> = vec![(CKA_ALLOWED_MECHANISMS, vec![0u8; 7])];
+        assert_eq!(
+            set_attribute_values_from_list(SESSION_RW, h, &malformed),
+            CKR_ATTRIBUTE_VALUE_INVALID
+        );
+        assert!(
+            obj_attr(h, CKA_ALLOWED_MECHANISMS).is_none(),
+            "the malformed value must not have been stored"
+        );
+
+        // A well-formed value (one whole mechanism) is still accepted.
+        let well_formed: Vec<(u32, Vec<u8>)> =
+            vec![(CKA_ALLOWED_MECHANISMS, CKM_AES_GCM.to_le_bytes().to_vec())];
+        assert_eq!(set_attribute_values_from_list(SESSION_RW, h, &well_formed), CKR_OK);
+        assert_eq!(obj_attr(h, CKA_ALLOWED_MECHANISMS), Some(CKM_AES_GCM.to_le_bytes().to_vec()));
+    }
+
     /// §4.1.3 read-only loop — every server-managed attr is refused with
     /// CKR_ATTRIBUTE_READ_ONLY and the object stays untouched.
     #[test]
@@ -10621,6 +10889,105 @@ mod object_mgmt_ffi_tests {
         store_bool(&mut tmpl, CKA_TOKEN, false);
         let h_copy = copy_object_from_attrs(SESSION_RO, h, tmpl).unwrap();
         assert_eq!(obj_bool(h_copy, CKA_TOKEN), Some(false));
+    }
+
+    /// Test-only: flip slot 0's login state directly (no real SO PIN was
+    /// ever set via C_InitToken in this module's `setup()`), mirroring
+    /// `session_is_so`'s read of `TOKEN_STORE`.
+    fn set_so_logged_in(so: bool) {
+        crate::state::ensure_slot(0);
+        crate::state::TOKEN_STORE.with(|ts| {
+            if let Some(t) = ts.borrow_mut().get_mut(&0) {
+                t.login_state = if so { crate::state::LoginState::SO } else { crate::state::LoginState::Public };
+            }
+        });
+    }
+
+    /// WP-5 remediation — §4.1.1 Table 12 / §4.6 Table 19 footnote:
+    /// `C_CopyObject` must mirror `C_CreateObject`'s SO-only gate on
+    /// `CKA_TRUSTED`, in both directions:
+    /// - an SO session's EXPLICIT `CKA_TRUSTED=TRUE` in the copy template
+    ///   must be honored (previously rejected for every session, SO
+    ///   included);
+    /// - a non-SO session's explicit `CKA_TRUSTED=TRUE` must still be
+    ///   rejected (unchanged behavior, still correct);
+    /// - omitting `CKA_TRUSTED` from the template must NOT silently carry
+    ///   TRUE over from the source for a non-SO copy — it must be forced
+    ///   to FALSE.
+    #[test]
+    fn copy_trusted_requires_so_both_explicit_and_inherited() {
+        let _guard = test_lock::acquire();
+        setup();
+        set_so_logged_in(true);
+        let mut attrs = aes_import_attrs();
+        store_bool(&mut attrs, CKA_TRUSTED, true);
+        let h_trusted = create_object_from_attrs(SESSION_RW, attrs).unwrap();
+        assert_eq!(obj_bool(h_trusted, CKA_TRUSTED), Some(true));
+
+        // SO explicitly re-asserting CKA_TRUSTED=TRUE in the copy template
+        // must succeed (was wrongly rejected for every session before).
+        let mut tmpl = Attributes::new();
+        store_bool(&mut tmpl, CKA_TRUSTED, true);
+        let h_so_explicit = copy_object_from_attrs(SESSION_RW, h_trusted, tmpl).unwrap();
+        assert_eq!(obj_bool(h_so_explicit, CKA_TRUSTED), Some(true));
+
+        // SO omitting CKA_TRUSTED from the template: carries over as TRUE.
+        let h_so_omitted = copy_object_from_attrs(SESSION_RW, h_trusted, Attributes::new()).unwrap();
+        assert_eq!(obj_bool(h_so_omitted, CKA_TRUSTED), Some(true));
+
+        set_so_logged_in(false);
+
+        // Non-SO explicit CKA_TRUSTED=TRUE: still rejected.
+        let mut tmpl = Attributes::new();
+        store_bool(&mut tmpl, CKA_TRUSTED, true);
+        assert_eq!(
+            copy_object_from_attrs(SESSION_RW, h_trusted, tmpl).unwrap_err(),
+            CKR_ATTRIBUTE_READ_ONLY
+        );
+
+        // Non-SO omitting CKA_TRUSTED: must NOT silently inherit TRUE —
+        // this is the gap. Forced to FALSE instead.
+        let h_non_so_omitted = copy_object_from_attrs(SESSION_RW, h_trusted, Attributes::new()).unwrap();
+        assert_eq!(
+            obj_bool(h_non_so_omitted, CKA_TRUSTED),
+            Some(false),
+            "non-SO copy must not silently inherit CKA_TRUSTED=TRUE from the source"
+        );
+    }
+
+    /// WP-5 remediation — identity-field respoofing guard: a non-SO copy of
+    /// a CKA_TRUSTED=TRUE object must not be able to rewrite identity
+    /// attributes (CKA_ID here) in the same template, even though CKA_ID
+    /// is ordinarily freely copy-mutable and CKA_TRUSTED itself is never
+    /// touched by this template. An SO session doing the identical copy
+    /// is unaffected.
+    #[test]
+    fn copy_trusted_source_blocks_identity_field_changes_for_non_so() {
+        let _guard = test_lock::acquire();
+        setup();
+        set_so_logged_in(true);
+        let mut attrs = aes_import_attrs();
+        store_bool(&mut attrs, CKA_TRUSTED, true);
+        let h_trusted = create_object_from_attrs(SESSION_RW, attrs).unwrap();
+
+        set_so_logged_in(false);
+        let mut tmpl = Attributes::new();
+        tmpl.insert(crate::native::keygen::CKA_ID, b"respoofed-id".to_vec());
+        assert_eq!(
+            copy_object_from_attrs(SESSION_RW, h_trusted, tmpl).unwrap_err(),
+            CKR_ATTRIBUTE_READ_ONLY,
+            "non-SO must not be able to change CKA_ID on a copy of a trusted object"
+        );
+
+        set_so_logged_in(true);
+        let mut tmpl = Attributes::new();
+        tmpl.insert(crate::native::keygen::CKA_ID, b"so-relabel".to_vec());
+        let h_relabeled = copy_object_from_attrs(SESSION_RW, h_trusted, tmpl).unwrap();
+        assert_eq!(
+            obj_attr(h_relabeled, crate::native::keygen::CKA_ID),
+            Some(b"so-relabel".to_vec()),
+            "SO may still relabel a trusted object's identity fields on copy"
+        );
     }
 
     /// T3 — copying a foreign slot's object: handle invalid.
@@ -11723,6 +12090,22 @@ mod pqc_vendor_kem_ffi_tests {
             CKM_PQCTODAY_FRODOKEM_ENCAPSULATE,
             CKP_FRODOKEM_640_SHAKE,
             16,
+        );
+    }
+
+    /// FrodoKEM-1344-AES specifically — the parameter set the hub's PKCS#11
+    /// playground showcases. Not previously covered (only 976-aes/640-shake
+    /// were); this was the gap that let the wasm shadow-stack overflow for
+    /// FrodoKEM's own encapsulate/decapsulate go unnoticed (native tests
+    /// don't have a wasm stack limit, so they never would have caught it —
+    /// this test exists for algorithmic coverage, not the stack-size bug).
+    #[test]
+    fn frodokem_1344_aes_round_trip() {
+        round_trip(
+            CKM_PQCTODAY_FRODOKEM_KEY_PAIR_GEN,
+            CKM_PQCTODAY_FRODOKEM_ENCAPSULATE,
+            CKP_FRODOKEM_1344_AES,
+            32,
         );
     }
 

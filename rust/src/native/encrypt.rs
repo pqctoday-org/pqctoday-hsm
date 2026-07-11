@@ -72,6 +72,8 @@ pub fn encapsulate(
     if !check_flag(public_key_handle, CKA_ENCAPSULATE) {
         return Err(CKR_KEY_FUNCTION_NOT_PERMITTED);
     }
+    // PKCS#11 v3.2 §4.8 Table 13 — CKA_ALLOWED_MECHANISMS.
+    crate::state::check_mechanism_allowed(public_key_handle, mechanism)?;
 
     // PKCS#11 v3.2 §5.18.8 — CKM_ML_KEM requires an ML-KEM key
     // (compliance-audit P-10).
@@ -147,6 +149,8 @@ pub fn encapsulate_deterministic(
     if !check_flag(public_key_handle, CKA_ENCAPSULATE) {
         return Err(CKR_KEY_FUNCTION_NOT_PERMITTED);
     }
+    // PKCS#11 v3.2 §4.8 Table 13 — CKA_ALLOWED_MECHANISMS.
+    crate::state::check_mechanism_allowed(public_key_handle, mechanism)?;
     if get_object_attr_u32(public_key_handle, CKA_KEY_TYPE) != Some(CKK_ML_KEM) {
         return Err(CKR_KEY_TYPE_INCONSISTENT);
     }
@@ -219,6 +223,8 @@ pub fn decapsulate(
     if !check_flag(private_key_handle, CKA_DECAPSULATE) {
         return Err(CKR_KEY_FUNCTION_NOT_PERMITTED);
     }
+    // PKCS#11 v3.2 §4.8 Table 13 — CKA_ALLOWED_MECHANISMS.
+    crate::state::check_mechanism_allowed(private_key_handle, mechanism)?;
 
     // PKCS#11 v3.2 §5.18.9 — CKM_ML_KEM requires an ML-KEM key
     // (compliance-audit P-10).
@@ -284,6 +290,8 @@ fn classical_encapsulate(public_key_handle: u32, mechanism: u32) -> Result<(Vec<
     if !check_flag(public_key_handle, CKA_ENCAPSULATE) {
         return Err(CKR_KEY_FUNCTION_NOT_PERMITTED);
     }
+    // PKCS#11 v3.2 §4.8 Table 13 — CKA_ALLOWED_MECHANISMS.
+    crate::state::check_mechanism_allowed(public_key_handle, mechanism)?;
     let mut rng = rand::rngs::OsRng;
     match mechanism {
         CKM_ECDH1_DERIVE => {
@@ -355,6 +363,8 @@ fn classical_decapsulate(private_key_handle: u32, mechanism: u32, ciphertext: &[
     if !check_flag(private_key_handle, CKA_DECAPSULATE) {
         return Err(CKR_KEY_FUNCTION_NOT_PERMITTED);
     }
+    // PKCS#11 v3.2 §4.8 Table 13 — CKA_ALLOWED_MECHANISMS.
+    crate::state::check_mechanism_allowed(private_key_handle, mechanism)?;
     match mechanism {
         CKM_ECDH1_DERIVE => {
             if get_object_attr_u32(private_key_handle, CKA_KEY_TYPE) != Some(CKK_EC) {
@@ -577,6 +587,8 @@ pub fn encrypt(
     if !check_flag(key_handle, CKA_ENCRYPT) {
         return Err(CKR_KEY_FUNCTION_NOT_PERMITTED);
     }
+    // PKCS#11 v3.2 §4.8 Table 13 — CKA_ALLOWED_MECHANISMS.
+    crate::state::check_mechanism_allowed(key_handle, mechanism)?;
     let key_bytes = get_object_value(key_handle).ok_or(CKR_ARGUMENTS_BAD)?;
     encrypt_with_key_bytes(&key_bytes, mechanism, plaintext, iv, oaep, aad, tag_len)
 }
@@ -597,6 +609,8 @@ pub fn decrypt(
     if !check_flag(key_handle, CKA_DECRYPT) {
         return Err(CKR_KEY_FUNCTION_NOT_PERMITTED);
     }
+    // PKCS#11 v3.2 §4.8 Table 13 — CKA_ALLOWED_MECHANISMS.
+    crate::state::check_mechanism_allowed(key_handle, mechanism)?;
     let key_bytes = get_object_value(key_handle).ok_or(CKR_ARGUMENTS_BAD)?;
     decrypt_with_key_bytes(&key_bytes, mechanism, ciphertext, iv, oaep, aad, tag_len)
 }
@@ -1963,5 +1977,40 @@ mod tests {
                 .unwrap();
         // ML-KEM mechanism against an EC key type.
         assert_eq!(encapsulate(session, pub_h, CKM_ML_KEM).unwrap_err(), CKR_KEY_TYPE_INCONSISTENT);
+    }
+
+    /// PKCS#11 v3.2 §4.8 Table 13 — CKA_ALLOWED_MECHANISMS on the native
+    /// path (KMIP's entry point, not the FFI ABI). A key restricted to
+    /// CKM_AES_GCM only accepts that mechanism; any other — even one the
+    /// key type would otherwise support — is CKR_MECHANISM_INVALID. A key
+    /// with no CKA_ALLOWED_MECHANISMS set stays unrestricted.
+    #[test]
+    fn native_encrypt_honors_allowed_mechanisms() {
+        let _g = test_lock::acquire();
+        let session = fresh_session();
+        let handle = crate::native::keygen::generate_aes_key(session, 256, b"\x01", "gcm-only").unwrap();
+
+        let packed: Vec<u8> = CKM_AES_GCM.to_le_bytes().to_vec();
+        crate::native::object::set_attribute(session, handle, CKA_ALLOWED_MECHANISMS, packed).unwrap();
+
+        let iv = [0u8; 12];
+        assert!(
+            encrypt(session, handle, CKM_AES_GCM, b"hello", Some(&iv), None, &[], None).is_ok(),
+            "CKM_AES_GCM must be allowed — it's the only entry in the list"
+        );
+        assert_eq!(
+            encrypt(session, handle, CKM_AES_ECB, b"0123456789012345", None, None, &[], None).unwrap_err(),
+            CKR_MECHANISM_INVALID,
+            "CKM_AES_ECB must be rejected — not in the CKA_ALLOWED_MECHANISMS list"
+        );
+
+        // A sibling key with no CKA_ALLOWED_MECHANISMS set is unrestricted.
+        let unrestricted = crate::native::keygen::generate_aes_key(session, 256, b"\x02", "unrestricted").unwrap();
+        assert!(
+            encrypt(session, unrestricted, CKM_AES_ECB, b"0123456789012345", None, None, &[], None).is_ok(),
+            "a key with no CKA_ALLOWED_MECHANISMS attribute must remain unrestricted"
+        );
+
+        close_session(session).unwrap();
     }
 }

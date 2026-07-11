@@ -150,6 +150,61 @@ pub fn set_attribute(
     crate::state::set_object_attr_checked(handle, attr_type, value)
 }
 
+/// Create a `CKO_CERTIFICATE` object (X.509 only, §4.6.3) as an engine
+/// projection of a KMIP-managed certificate — see
+/// [`super::keygen::register_rsa_public_key_der`] for the equivalent
+/// key-registration pattern this mirrors. No DER parsing here: `subject`/
+/// `issuer`/`serial_number` are pre-extracted by the caller (the KMIP crate
+/// already links `x509_cert` for `Certify`; the engine stays parser-free).
+///
+/// `cka_id`, when non-empty, links the certificate to its key pair (KMIP's
+/// Public Key Link) — the same CKA_ID a strongSwan-style consumer matches
+/// a certificate to its private key with.
+pub fn register_certificate(
+    session: u32,
+    der_value: &[u8],
+    subject: &[u8],
+    issuer: &[u8],
+    serial_number: &[u8],
+    category: u32,
+    cka_id: &[u8],
+    label: &str,
+) -> Result<u32, CkRv> {
+    use crate::state::{allocate_handle, compute_kcv, store_bool, store_ulong, tag_object_slot};
+
+    // §4.6.1/§4.6.3 footnote 1 — CKA_CERTIFICATE_TYPE and CKA_SUBJECT are
+    // mandatory; mirrors ffi::validate_create_template's C_CreateObject
+    // rules so a KMIP-projected certificate is never laxer than one a raw
+    // PKCS#11 caller could create directly.
+    if der_value.is_empty() || subject.is_empty() {
+        return Err(CKR_ARGUMENTS_BAD);
+    }
+    let mut attrs = std::collections::HashMap::new();
+    store_ulong(&mut attrs, CKA_CLASS, CKO_CERTIFICATE);
+    store_ulong(&mut attrs, CKA_CERTIFICATE_TYPE, CKC_X_509);
+    store_ulong(&mut attrs, CKA_CERTIFICATE_CATEGORY, category);
+    attrs.insert(CKA_VALUE, der_value.to_vec());
+    attrs.insert(CKA_SUBJECT, subject.to_vec());
+    if !issuer.is_empty() {
+        attrs.insert(CKA_ISSUER, issuer.to_vec());
+    }
+    if !serial_number.is_empty() {
+        attrs.insert(CKA_SERIAL_NUMBER, serial_number.to_vec());
+    }
+    if !cka_id.is_empty() {
+        attrs.insert(CKA_ID, cka_id.to_vec());
+    }
+    if !label.is_empty() {
+        attrs.insert(super::keygen::CKA_LABEL, label.as_bytes().to_vec());
+    }
+    // §4.6 — certificates are public, token objects.
+    store_bool(&mut attrs, CKA_TOKEN, true);
+    store_bool(&mut attrs, CKA_PRIVATE, false);
+    compute_kcv(&mut attrs);
+    tag_object_slot(session, &mut attrs);
+    Ok(allocate_handle(attrs))
+}
+
 /// Read a `u32` attribute (4-byte little-endian — engine's storage
 /// convention). Returns `None` if the attribute is absent or is
 /// blocked by sensitivity policy.

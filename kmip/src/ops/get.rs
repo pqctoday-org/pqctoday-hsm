@@ -78,12 +78,12 @@ pub fn get(deps: &Deps, req: GetRequest, correlation_id: &str) -> Result<GetResp
     let mut p_req = PolicyRequest::minimal("Get", Some(&algo), started, correlation_id, &empty);
     p_req.state = Some(state_name(obj.state));
     p_req.target_uid = Some(&req.uid);
-    if let Decision::Deny { human, .. } = deps.engine.evaluate(&p_req) {
+    if let Decision::Deny { kmip_reason, human, .. } = deps.engine.evaluate(&p_req) {
         return Err(fail_err(
             deps,
             correlation_id,
             "Get",
-            KmipError::permission_denied(human),
+            KmipError::failed(kmip_reason.to_result_reason(), human),
         ));
     }
 
@@ -136,7 +136,19 @@ pub fn get(deps: &Deps, req: GetRequest, correlation_id: &str) -> Result<GetResp
     // unknown values at Register/Import time with 0x10, so the stored
     // format is surfaced faithfully — no silent `Raw` re-labeling.
     let stored_format = obj.key_format_type.and_then(KeyFormatType::from_wire_value);
-    let (key_format, key_value) = if let Some(bytes) = &obj.key_material {
+    let (key_format, key_value) = if obj.object_type == ObjectType::Certificate {
+        // WP-2 remediation — a Certificate's authoritative DER always
+        // lives in `certificate_value`, regardless of creation path:
+        // `Certify` sets both `key_material` and `certificate_value`
+        // identically, but `Register` only ever sets `certificate_value`.
+        // Reading it directly here (instead of falling through to the
+        // key-material three-tier lookup below, which the Register path
+        // never populates) makes `Get` agree with `GetAttributes
+        // (CertificateValue)` for both creation paths, and removes the
+        // dependency on the best-effort engine projection succeeding.
+        let der = obj.certificate_value.clone().unwrap_or_default();
+        (stored_format.unwrap_or(KeyFormatType::X509), der)
+    } else if let Some(bytes) = &obj.key_material {
         (stored_format.unwrap_or(KeyFormatType::Raw), bytes.clone())
     } else {
         // Engine-held private key: the material lives behind the PKCS#11

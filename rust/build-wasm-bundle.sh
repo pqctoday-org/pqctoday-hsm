@@ -18,12 +18,18 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-PROFILE="release"; OUT="pkg-release"; EXTRA_RUSTFLAGS=""
+PROFILE="release"; OUT="pkg-release"
+# Both fips204 ML-DSA keygen (unoptimized builds) and
+# CKM_PQCTODAY_FRODOKEM_ENCAPSULATE / CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE
+# (BSI TR-02102-1 §2.4.1/§2.4.2, ffi.rs — even in --release) overflow the
+# default 1MB wasm shadow stack ("memory access out of bounds"). Classic
+# McEliece's mceliece6688128 public key alone is over 1MB, and
+# encapsulate/decapsulate handle it via on-stack buffers. 8MB covers both
+# with headroom; applied to every profile, not just --dev, since the
+# vendor-KEM overflow reproduces in release too.
+EXTRA_RUSTFLAGS='-C link-arg=-zstack-size=8388608'
 if [[ "${1:-}" == "--dev" ]]; then
   PROFILE="dev"; OUT="pkg"
-  # Unoptimized fips204 ML-DSA keygen overflows the default 1MB wasm shadow
-  # stack under --dev ("memory access out of bounds" in expand_a); release fits.
-  EXTRA_RUSTFLAGS='-C link-arg=-zstack-size=2097152'
 fi
 
 # Resolve the rustup toolchain bin dir (NOT Homebrew's cargo/rustc).
@@ -36,8 +42,7 @@ echo "▶ wasm-pack build ($PROFILE, target=bundler, toolchain=$TOOLCHAIN) → $
 # (returns CKR_ARGUMENTS_BAD 0x07), which breaks all ACVP KAT seeding.
 # The acvp feature was removed from [default] on 2026-06-21 for compliance builds;
 # it must be explicitly requested here for the playground WASM bundle.
-PATH="$TC:$PATH" RUSTC="$TC/rustc" RUSTUP_TOOLCHAIN="$TOOLCHAIN" \
-  ${EXTRA_RUSTFLAGS:+RUSTFLAGS="$EXTRA_RUSTFLAGS"} \
+PATH="$TC:$PATH" RUSTC="$TC/rustc" RUSTUP_TOOLCHAIN="$TOOLCHAIN" RUSTFLAGS="$EXTRA_RUSTFLAGS" \
   wasm-pack build --target bundler --out-dir "$OUT" --"$PROFILE" -- --features acvp
 
 # ── Re-apply the __wbg_get_memory post-build shim (idempotent) ───────────────

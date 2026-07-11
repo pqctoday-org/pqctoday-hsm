@@ -976,8 +976,7 @@ pub fn find_handle_for_object(
         ObjectType::SymmetricKey | ObjectType::SecretData | ObjectType::SplitKey => {
             c::CKO_SECRET_KEY
         }
-        // PKCS#11 CKO_CERTIFICATE = 0x01, not exposed in softhsmrustv3 constants
-        ObjectType::Certificate => 0x01,
+        ObjectType::Certificate => c::CKO_CERTIFICATE,
         // KMIP-only object types — no PKCS#11 cryptoki class maps cleanly.
         // Surface as ItemNotFound by returning a sentinel that never
         // matches a real handle class (CKO_VENDOR_DEFINED start = 0x80000000).
@@ -1036,6 +1035,9 @@ pub fn ck_rv_to_kmip_error(rv: u32, op: &str) -> KmipError {
         ),
         c::CKR_MECHANISM_PARAM_INVALID => KmipError::unsupported_cryptographic_parameters(
             format!("{op}: mechanism parameters not supported"),
+        ),
+        c::CKR_PARAMETER_SET_NOT_SUPPORTED => KmipError::unsupported_cryptographic_parameters(
+            format!("{op}: parameter set not supported by this engine"),
         ),
         // ── Malformed request fields ────────────────────────────────
         c::CKR_ARGUMENTS_BAD => KmipError::invalid_field(format!("{op}: bad arguments")),
@@ -1281,7 +1283,12 @@ fn resolve_kek(
         None => deps
             .engine_session
             .and_then(|session| {
-                softhsmrustv3::native::find_by_cka_id(session, &kek_obj.pkcs11_cka_id)
+                // WP-4 remediation — class-aware, not the ambiguous
+                // class-blind find_by_cka_id (low urgency in practice: the
+                // AES-KW length check below already fails safe on a
+                // wrong-class handle, but this keeps the pattern
+                // consistent everywhere it's used).
+                find_handle_for_object(session, &kek_obj.pkcs11_cka_id, kek_obj.object_type)
                     .ok()
                     .flatten()
                     .and_then(|h| {
@@ -1409,6 +1416,10 @@ mod tests {
             (c::CKR_UNWRAPPING_KEY_HANDLE_INVALID, ResultReason::ObjectNotFound),
             (c::CKR_MECHANISM_INVALID, ResultReason::OperationNotSupported),
             (c::CKR_MECHANISM_PARAM_INVALID, ResultReason::UnsupportedCryptographicParameters),
+            (
+                c::CKR_PARAMETER_SET_NOT_SUPPORTED,
+                ResultReason::UnsupportedCryptographicParameters,
+            ),
             (c::CKR_ARGUMENTS_BAD, ResultReason::InvalidField),
             (c::CKR_DATA_LEN_RANGE, ResultReason::InvalidField),
             (c::CKR_ENCRYPTED_DATA_LEN_RANGE, ResultReason::InvalidField),

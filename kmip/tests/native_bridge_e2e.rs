@@ -28,11 +28,13 @@ use time::OffsetDateTime;
 
 use pqctoday_kmip::auditlog::{AuditSink, RingSink};
 use pqctoday_kmip::kmip30::{
-    Attribute, CreateKeyPairRequest, CreateSplitKeyRequest, DestroyRequest, JoinSplitKeyRequest,
-    KmipAlgorithm, ObjectType, SignRequest, SignatureValidity, SignatureVerifyRequest, State,
-    UsageMask,
+    Attribute, CreateKeyPairRequest, CreateRequest, CreateSplitKeyRequest, DestroyRequest,
+    JoinSplitKeyRequest, KmipAlgorithm, ObjectType, SetAttributeRequest, SignRequest,
+    SignatureValidity, SignatureVerifyRequest, State, UsageMask,
 };
 use pqctoday_kmip::ops::activate::activate;
+use pqctoday_kmip::ops::attribute_mutate::set_attribute;
+use pqctoday_kmip::ops::create::create;
 use pqctoday_kmip::ops::create_key_pair::create_key_pair;
 use pqctoday_kmip::ops::destroy::destroy;
 use pqctoday_kmip::ops::sign::sign;
@@ -1040,8 +1042,16 @@ fn k15_audit_records_real_rv_and_native_entry_point() {
     let calls = p3_calls(&ring, "k15-create-ok");
     assert_eq!(
         calls,
-        vec![("native::generate_aes_key".to_string(), 0, "CKR_OK".to_string())],
-        "successful engine generate must be audited with the real entry point + CKR_OK"
+        vec![
+            ("native::generate_aes_key".to_string(), 0, "CKR_OK".to_string()),
+            (
+                "native::set_attribute(CKA_ALLOWED_MECHANISMS)".to_string(),
+                0,
+                "CKR_OK".to_string()
+            ),
+        ],
+        "successful engine generate must be audited with the real entry point + CKR_OK \
+         (plus the CKA_ALLOWED_MECHANISMS whitelist write §4.8 Table 13 now performs)"
     );
 
     // ── Failure: drive native::sign into a real engine error ────────────
@@ -1690,8 +1700,16 @@ fn k21_rekeyed_aes_key_encrypts_against_real_engine() {
     let calls = p3_calls(&ring, "k21-rekey");
     assert_eq!(
         calls,
-        vec![("native::generate_aes_key".to_string(), 0, "CKR_OK".to_string())],
-        "Re-key must generate the replacement inside the engine (Create path)"
+        vec![
+            ("native::generate_aes_key".to_string(), 0, "CKR_OK".to_string()),
+            (
+                "native::set_attribute(CKA_ALLOWED_MECHANISMS)".to_string(),
+                0,
+                "CKR_OK".to_string()
+            ),
+        ],
+        "Re-key must generate the replacement inside the engine (Create path), \
+         plus the CKA_ALLOWED_MECHANISMS whitelist write §4.8 Table 13 now performs"
     );
 
     let new_rec = deps.store.get(&r.uid).unwrap().unwrap();
@@ -2012,6 +2030,87 @@ fn locate_drops_orphans_when_engine_handle_is_gone() {
         "orphan records must be filtered out when their PKCS#11 handle is gone (got {:?})",
         after.uids
     );
+
+    let _ = session::finalize();
+}
+
+/// WP-1 remediation — narrowing `CryptographicUsageMask` post-creation via
+/// `SetAttribute` must actually shrink the engine's `CKA_ALLOWED_MECHANISMS`
+/// whitelist, not leave the wider creation-time set in place forever. Before
+/// this fix, `attribute_mutate::commit_mutation` never touched the engine
+/// side, so a mechanism allowed at creation stayed allowed even after KMIP
+/// itself would refuse the operation on usage-mask grounds — reopening the
+/// exact raw-PKCS#11 bypass `CKA_ALLOWED_MECHANISMS` exists to close.
+#[test]
+fn narrowing_usage_mask_via_set_attribute_shrinks_engine_whitelist() {
+    use softhsmrustv3::constants as c;
+    use softhsmrustv3::native::session;
+
+    let _guard = engine_test_lock();
+    let (_ring, deps) = build_deps_with_real_engine_and_ring();
+
+    let created = create(
+        &deps,
+        CreateRequest {
+            object_type: ObjectType::SymmetricKey,
+            template_attribute: vec![
+                Attribute::CryptographicAlgorithm(KmipAlgorithm::Aes),
+                Attribute::CryptographicLength(256),
+                Attribute::CryptographicUsageMask(
+                    UsageMask::ENCRYPT | UsageMask::DECRYPT | UsageMask::WRAP_KEY | UsageMask::UNWRAP_KEY,
+                ),
+            ],
+        },
+        "narrow-create",
+    )
+    .unwrap();
+    let rec = deps.store.get(&created.uid).unwrap().unwrap();
+    let session = deps.engine_session.unwrap();
+    let handle = pqctoday_kmip::ops::helpers::find_handle_for_object(
+        session, &rec.pkcs11_cka_id, rec.object_type,
+    )
+    .expect("lookup ok")
+    .expect("engine handle exists");
+
+    // Before narrowing: full 7-mechanism set (5 cipher modes + 2 wrap).
+    let before = softhsmrustv3::native::get_attribute(session, handle, c::CKA_ALLOWED_MECHANISMS)
+        .expect("CKA_ALLOWED_MECHANISMS was set by Create");
+    let full: Vec<u8> = [
+        c::CKM_AES_CBC, c::CKM_AES_CBC_PAD, c::CKM_AES_ECB, c::CKM_AES_CTR, c::CKM_AES_GCM,
+        c::CKM_AES_KEY_WRAP, c::CKM_AES_KEY_WRAP_KWP,
+    ]
+    .iter()
+    .flat_map(|m| m.to_le_bytes())
+    .collect();
+    assert_eq!(before, full, "whitelist must start with cipher + wrap mechanisms");
+
+    // Enforcement, pre-narrowing: the wrap mechanism is genuinely allowed.
+    softhsmrustv3::state::check_mechanism_allowed(handle, c::CKM_AES_KEY_WRAP)
+        .expect("AES-KEY-WRAP allowed before narrowing");
+
+    set_attribute(
+        &deps,
+        SetAttributeRequest {
+            uid: created.uid.clone(),
+            new_attribute: Attribute::CryptographicUsageMask(UsageMask::ENCRYPT | UsageMask::DECRYPT),
+        },
+        "narrow-set",
+    )
+    .unwrap();
+
+    let after = softhsmrustv3::native::get_attribute(session, handle, c::CKA_ALLOWED_MECHANISMS)
+        .expect("CKA_ALLOWED_MECHANISMS still present after narrowing");
+    let cipher_only: Vec<u8> = [c::CKM_AES_CBC, c::CKM_AES_CBC_PAD, c::CKM_AES_ECB, c::CKM_AES_CTR, c::CKM_AES_GCM]
+        .iter()
+        .flat_map(|m| m.to_le_bytes())
+        .collect();
+    assert_eq!(after, cipher_only, "whitelist must shrink once WRAP_KEY/UNWRAP_KEY are removed");
+
+    // Enforcement, post-narrowing: the wrap mechanism is no longer allowed —
+    // this is the exact bypass the refresh closes (stale wider whitelist
+    // would otherwise still permit it after KMIP itself would refuse Wrap).
+    let err = softhsmrustv3::state::check_mechanism_allowed(handle, c::CKM_AES_KEY_WRAP).unwrap_err();
+    assert_eq!(err, c::CKR_MECHANISM_INVALID, "AES-KEY-WRAP must be blocked after WRAP_KEY was removed");
 
     let _ = session::finalize();
 }

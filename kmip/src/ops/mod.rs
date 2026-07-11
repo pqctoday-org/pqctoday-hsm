@@ -46,6 +46,7 @@ pub mod agility;
 pub mod allocation_and_config;
 pub mod async_ops;
 pub mod attribute_mutate;
+pub mod cert_projection;
 pub mod create;
 pub mod create_key_pair;
 pub mod decapsulate;
