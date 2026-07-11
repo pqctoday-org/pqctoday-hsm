@@ -77,11 +77,23 @@ impl SqliteStore {
         // `busy_timeout` are per-connection (must be set every open);
         // `journal_mode=WAL` persists in the file. WAL is a no-op on `:memory:`
         // (it stays in memory), so this is safe for the in-memory test path too.
+        //
+        // Gap-remediation Phase A — `secure_delete = FAST` closes a real
+        // gap: without it, SQLite marks a deleted row's page free for
+        // reuse instead of overwriting it, so a Destroy'd object's
+        // `key_material` (see `ops/destroy.rs`, which now zeroizes the
+        // Rust-side buffer before this UPDATE ever reaches SQLite) could
+        // still be recoverable from a free page or the WAL until
+        // reused/checkpointed. `FAST` (vs `ON`) overwrites the actual
+        // deleted content without the extra I/O of zeroing all
+        // surrounding free space — the right tradeoff for a
+        // key-management store's write volume, still real security.
         conn.execute_batch(
             "PRAGMA journal_mode = WAL;
              PRAGMA synchronous = NORMAL;
              PRAGMA busy_timeout = 5000;
-             PRAGMA foreign_keys = ON;",
+             PRAGMA foreign_keys = ON;
+             PRAGMA secure_delete = FAST;",
         )
         .map_err(map_sqlite_err)?;
         Self::migrate(&mut conn)?;
@@ -195,23 +207,40 @@ impl KeyStore for SqliteStore {
 
     fn update(&self, record: ObjectRecord) -> Result<()> {
         let conn = self.lock();
-        // Defence-in-depth: enforce the FSM at the store layer.
-        let current: Option<String> = conn
+        // Defence-in-depth: enforce the FSM at the store layer. Gap-
+        // remediation Phase H, Finding #12 — also fetch the existing
+        // row's full record (via the same `attributes_json` blob `get`/
+        // `row_to_record` treat as the source of truth) so
+        // `initial_date`/`original_creation_date` can be re-asserted
+        // below. `MemoryStore::update` already does this defence-in-
+        // depth re-assertion; `SqliteStore::update` previously only
+        // fetched `state` and wrote the incoming record's dates
+        // verbatim, silently accepting a caller-mutated Initial Date /
+        // Original Creation Date — both spec-immutable per §3/§11.
+        let current: Option<(String, Option<Vec<u8>>)> = conn
             .query_row(
-                "SELECT state FROM objects WHERE uid = ?1",
+                "SELECT state, attributes_json FROM objects WHERE uid = ?1",
                 params![record.uid],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .map(Some)
             .or_else(|e| match e {
                 rusqlite::Error::QueryReturnedNoRows => Ok(None),
                 other => Err(map_sqlite_err(other)),
             })?;
-        let current_state =
+        let (current_state, current_json) =
             current.ok_or_else(|| KmipError::not_found(&record.uid))?;
         let from = state_from_str(&current_state)
             .ok_or_else(|| KmipError::internal(format!("unknown stored state {current_state:?}")))?;
         enforce_transition(from, record.state)?;
+
+        let mut record = record;
+        if let Some(blob) = &current_json {
+            if let Ok(existing) = serde_json::from_slice::<ObjectRecord>(blob) {
+                record.initial_date = existing.initial_date;
+                record.original_creation_date = existing.original_creation_date;
+            }
+        }
 
         let json = serde_json::to_vec(&record)
             .map_err(|e| KmipError::internal(format!("record serialise failed: {e}")))?;
@@ -521,9 +550,10 @@ mod tests {
         original.cryptographic_length = 256;
         original.name = Some("my-signing-key".into()); // NOT persisted (D-1)
         original.key_material = Some(vec![9, 8, 7, 6]); // NOT persisted (D-1)
-        original
-            .custom_attributes
-            .insert("env".into(), "prod".into()); // NOT persisted (D-1)
+        original.custom_attributes.insert(
+            "env".into(),
+            crate::kmip30::CustomAttributeValue::Text("prod".into()),
+        ); // NOT persisted (D-1)
 
         {
             let store = SqliteStore::open(&path).unwrap();
@@ -545,7 +575,10 @@ mod tests {
         // D-1 — previously-dropped fields now survive the reopen.
         assert_eq!(loaded.name, Some("my-signing-key".into()));
         assert_eq!(loaded.key_material, Some(vec![9, 8, 7, 6]));
-        assert_eq!(loaded.custom_attributes.get("env"), Some(&"prod".to_string()));
+        assert_eq!(
+            loaded.custom_attributes.get("env"),
+            Some(&crate::kmip30::CustomAttributeValue::Text("prod".to_string()))
+        );
         // The ENTIRE record round-trips byte-for-byte.
         assert_eq!(loaded, original, "full-record round-trip must be lossless");
 
@@ -589,6 +622,32 @@ mod tests {
         let r = store.get("u").unwrap().unwrap();
         assert_eq!(r.state, State::Active);
         assert!(r.activation_date.is_some());
+    }
+
+    /// Gap-remediation Phase H, Finding #12 — `Initial Date` and
+    /// `Original Creation Date` are spec-immutable (§3/§11);
+    /// `MemoryStore::update` already re-asserts them defensively,
+    /// `SqliteStore::update` previously wrote whatever the caller
+    /// passed in verbatim.
+    #[test]
+    fn update_does_not_let_caller_mutate_immutable_dates() {
+        let store = SqliteStore::in_memory().unwrap();
+        let mut original = rec("u", State::PreActive);
+        original.original_creation_date = Some(OffsetDateTime::UNIX_EPOCH);
+        store.put(original).unwrap();
+
+        let mut mutated = rec("u", State::PreActive);
+        mutated.initial_date = OffsetDateTime::UNIX_EPOCH + time::Duration::days(365);
+        mutated.original_creation_date = Some(OffsetDateTime::UNIX_EPOCH + time::Duration::days(365));
+        store.update(mutated).unwrap();
+
+        let r = store.get("u").unwrap().unwrap();
+        assert_eq!(r.initial_date, OffsetDateTime::UNIX_EPOCH, "Initial Date must not be caller-mutable");
+        assert_eq!(
+            r.original_creation_date,
+            Some(OffsetDateTime::UNIX_EPOCH),
+            "Original Creation Date must not be caller-mutable",
+        );
     }
 
     #[test]

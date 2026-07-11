@@ -1258,15 +1258,17 @@ pub struct LoginRequest {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct LoginResponse {
-    /// Wire tag `Ticket` (0x420149, TextString).
-    pub ticket: String,
+    /// Wire tag `Ticket` (0x420149) — §7.40 Table 494 Structure
+    /// (`Ticket Type` + `Ticket Value`), NOT a bare TextString (a
+    /// pre-Phase-1.4 wire bug: the spec mandates the nested structure).
+    pub ticket: crate::kmip30::Ticket,
 }
 
 /// `Logout` (KMIP 3.0 §6.1.35 / Table 355) — invalidate a Login
 /// ticket. Empty response.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LogoutRequest {
-    pub ticket: String,
+    pub ticket: crate::kmip30::Ticket,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1546,8 +1548,10 @@ impl DeactivationReason {
 }
 
 /// `Check` (KMIP 3.0 §6.1.7 / Table 270) — validate policy permits the
-/// client's intended use. Spec response: UID if allowed, attribute
-/// reflection if denied (v0.1 always allows; we always return UID).
+/// client's intended use: Cryptographic Usage Mask must be a subset of
+/// the object's mask, Usage Limits Count must fit within the object's
+/// remaining budget, and Lease Time must not exceed the object's Lease
+/// Time cap (Phase 3.1 — real, not a v0.1 always-allow stub).
 #[derive(Clone, Debug, PartialEq)]
 pub struct CheckRequest {
     pub uid: String,
@@ -1561,6 +1565,75 @@ pub struct CheckRequest {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct CheckResponse {
+    pub uid: String,
+}
+
+/// `Obtain Lease` (KMIP 3.0 §6.1.40 / Table 370-371) — grant/renew a
+/// lease for `uid`, up to the object's `Lease Time` attribute cap
+/// (§4.34 — server-set, client read-only). Response echoes the granted
+/// interval + the object's current `Last Change Date` (so the client
+/// can tell if its cached attributes are stale).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ObtainLeaseRequest {
+    pub uid: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ObtainLeaseResponse {
+    pub uid: String,
+    /// Wire tag `Lease Time` (0x420049, Interval, seconds).
+    pub lease_time: u32,
+    /// Wire tag `Last Change Date` (0x420048, DateTime, Unix seconds).
+    pub last_change_date: i64,
+}
+
+/// `Create Split Key` (KMIP 3.0 §6.1.12 / Table 286) — Phase 3.3.
+/// "The request contains attributes to be assigned to the objects...
+/// The request MAY contain the Unique Identifier of an existing
+/// cryptographic object that the client requests be split by the
+/// server. If the attributes supplied in the request do not match
+/// those of the key supplied, the attributes of the key take
+/// precedence." — `uid` absent ⇒ generate a fresh key (per
+/// `attributes`' CryptographicAlgorithm/Length) and split THAT.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CreateSplitKeyRequest {
+    pub object_type: ObjectType,
+    /// The key to split, if the client is splitting an existing one.
+    pub uid: Option<String>,
+    pub split_key_parts: u32,
+    pub split_key_threshold: u32,
+    /// §11.54 wire value.
+    pub split_key_method: u32,
+    /// `Prime Field Size` (Big Integer, OPTIONAL) — this server fixes
+    /// the Prime Field modulus at 2^521-1 (see
+    /// `softhsmrustv3::crypto::split_key`); a supplied value is only
+    /// checked for compatibility (must fit under that modulus), not
+    /// used to select a different one.
+    pub prime_field_size: Option<Vec<u8>>,
+    pub attributes: Vec<Attribute>,
+    pub protection_storage_masks: Option<u32>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct CreateSplitKeyResponse {
+    pub uids: Vec<String>,
+}
+
+/// `Join Split Key` (KMIP 3.0 §6.1.31 / Table 343) — Phase 3.3.
+#[derive(Clone, Debug, PartialEq)]
+pub struct JoinSplitKeyRequest {
+    pub object_type: ObjectType,
+    /// The Split Key part UIDs to combine — MUST be at least the
+    /// parts' own Split Key Threshold (checked by the handler, not
+    /// the wire decoder).
+    pub uids: Vec<String>,
+    pub secret_data_type: Option<u32>,
+    pub attributes: Vec<Attribute>,
+    pub protection_storage_masks: Option<u32>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct JoinSplitKeyResponse {
     pub uid: String,
 }
 
@@ -1663,6 +1736,13 @@ pub struct RegisterRequest {
     /// populate `certificate_value` / `certificate_length` /
     /// `certificate_subject_cn` in one place.
     pub certificate_payload: Option<(u32, Vec<u8>)>,
+    /// Gap-remediation Phase C, Finding #8 — KMIP 3.0 §6.2 `SecretData`
+    /// Structure carries `SecretDataType` (Password = 0x01, Seed = 0x02)
+    /// alongside the `KeyBlock`; only meaningful when `object_type ==
+    /// SecretData`. Previously decoded then silently dropped, so a later
+    /// `Get` always reported the hardcoded `Password` default regardless
+    /// of what was actually registered.
+    pub secret_data_type: Option<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1796,6 +1876,20 @@ pub struct Constraint {
     /// `Attributes` (0x420125) — the constrained attribute values.
     pub attributes: Vec<Attribute>,
 }
+
+/// `Set Constraints` (KMIP 3.0 §6.1.57 / Table 427) — "set the
+/// constraints that will be applied to Managed Objects during
+/// operations." Replaces the stored set entirely (mirrors Set
+/// Defaults' replace semantics, §6.1.58) — Get Constraints (§6.1.26)
+/// reads it back.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SetConstraintsRequest {
+    pub constraints: Vec<Constraint>,
+}
+
+/// §6.1.57 / Table 428 — empty response payload.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SetConstraintsResponse;
 
 /// `Set Defaults` (KMIP 3.0 §6.1.58 / Table 428) — "set the default
 /// attributes that will be applied to Managed Objects during factory
@@ -2028,6 +2122,71 @@ pub struct SetEndpointRoleRequest {
 #[derive(Clone, Debug, PartialEq)]
 pub struct SetEndpointRoleResponse {
     pub endpoint_role: EndpointRole,
+}
+
+// ── Phase 4 — asynchronous subsystem (§6.1.5 Cancel / §6.1.43 Poll /
+// §6.1.44 Process / §6.1.46 Query Asynchronous Requests) ───────────────
+
+/// `Poll` (KMIP 3.0 §6.1.43 / Table 376). Has no `PollResponse` type —
+/// per spec its response "SHALL be identical to the response that
+/// would have been sent if the operation had completed synchronously"
+/// (or, if not yet complete, the same no-payload/Pending shape the
+/// original enqueuing response used) — `dispatcher::handle_poll`
+/// builds a [`super::message::ResponseBatchItem`] directly rather than
+/// going through a typed per-op response.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PollRequest {
+    pub asynchronous_correlation_value: Vec<u8>,
+}
+
+/// `Cancel` (KMIP 3.0 §6.1.5 / Table 261-262).
+#[derive(Clone, Debug, PartialEq)]
+pub struct CancelRequest {
+    pub asynchronous_correlation_value: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct CancelResponse {
+    pub asynchronous_correlation_value: Vec<u8>,
+    pub cancellation_result: super::message::CancellationResult,
+}
+
+/// `Process` (KMIP 3.0 §6.1.44 / Table 378-379). Empty response
+/// payload per spec (Table 379 lists no items) — the struct exists so
+/// `Process` still fits this codebase's one-typed-struct-per-op
+/// pattern rather than a bare `()`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProcessRequest {
+    pub asynchronous_correlation_value: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct ProcessResponse {}
+
+/// `Query Asynchronous Requests` (KMIP 3.0 §6.1.46 / Table 385-386).
+/// Both filters are optional; an empty request reports every
+/// outstanding job. Non-empty filters combine as OR-within-field,
+/// AND-across-fields (a job matches if its correlation value is
+/// absent-or-listed AND its operation is absent-or-listed).
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct QueryAsynchronousRequestsRequest {
+    pub asynchronous_correlation_values: Vec<Vec<u8>>,
+    pub operations: Vec<Operation>,
+}
+
+/// §7.2 `Asynchronous Request` Structure (Table 453) — one row of the
+/// Query Asynchronous Requests response.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AsynchronousRequestInfo {
+    pub asynchronous_correlation_value: Vec<u8>,
+    pub operation: Operation,
+    pub submission_date: i64,
+    pub processing_stage: super::message::ProcessingStage,
+}
+
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct QueryAsynchronousRequestsResponse {
+    pub requests: Vec<AsynchronousRequestInfo>,
 }
 
 #[cfg(test)]

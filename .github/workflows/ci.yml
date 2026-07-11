@@ -87,9 +87,15 @@ jobs:
             kmip/target
           key: ${{ runner.os }}-cargo-test-${{ hashFiles('rust/Cargo.lock', 'kmip/Cargo.lock') }}
       - name: Run engine tests
-        run: cd rust && cargo test
+        # RUST_MIN_STACK: mceliece6688128's keygen needs more than the default
+        # test-thread stack in an unoptimized debug build — seen overflowing
+        # on ubuntu-24.04 x86_64 (not reliably reproduced on local aarch64).
+        run: cd rust && RUST_MIN_STACK=134217728 cargo test
       - name: Run KMIP tests
-        run: cd kmip && cargo test --quiet
+        # Same RUST_MIN_STACK need as the engine tests above — this crate
+        # has its own classic_mceliece_6688128_round_trip e2e test
+        # (kmip/tests/frodokem_mceliece_e2e.rs).
+        run: cd kmip && RUST_MIN_STACK=134217728 cargo test --quiet
 
   kmip-conformance:
     name: KMIP OASIS Conformance Replay
@@ -122,10 +128,10 @@ jobs:
         run: cd kmip && python3 conformance/harness/dispatcher_replay.py
 
       # Belt-and-suspenders: assert the JSON summary matches the
-      # documented 92/0/10 baseline (5 deprecated + 2 precondition +
-      # 3 policy-variant). A NEW skip silently appearing shrinks the
-      # pass denominator and hides a regression — fail on skip-set drift.
-      - name: Assert replay baseline (92 PASS / 0 FAIL / 10 SKIP)
+      # documented 97/0/5 baseline (5 deprecated, nothing else skipped).
+      # A NEW skip silently appearing shrinks the pass denominator and
+      # hides a regression — fail on skip-set drift.
+      - name: Assert replay baseline (97 PASS / 0 FAIL / 5 SKIP)
         run: cd kmip && python3 conformance/assert_replay_report.py
 
       # Staleness guard: the committed REPLAY_REPORT.{md,json} must match

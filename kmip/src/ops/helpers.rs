@@ -274,6 +274,17 @@ pub fn canonical_name(a: KmipAlgorithm) -> String {
         X25519MlKem768 => "X25519MLKEM768",
         SecP256r1MlKem768 => "SecP256r1MLKEM768",
         SecP384r1MlKem1024 => "SecP384r1MLKEM1024",
+        // BSI TR-02102-1 §2.4.1 — AES/SHAKE are both engine-executable
+        // variants (see `to_pkcs11_mech`), but `kmip/policies/bsi-tr-02102.yaml`
+        // and `policy/lint.rs::is_known_algorithm_name` only recognize the
+        // bare `FrodoKEM-{640,976,1344}` form (no AES/SHAKE suffix) — both
+        // variants of a level collapse to the same policy-facing name.
+        FrodoKem640Aes | FrodoKem640Shake => "FrodoKEM-640",
+        FrodoKem976Aes | FrodoKem976Shake => "FrodoKEM-976",
+        FrodoKem1344Aes | FrodoKem1344Shake => "FrodoKEM-1344",
+        // BSI TR-02102-1 §2.4.2.
+        ClassicMcEliece6688128 => "Classic-McEliece-6688128",
+        Hss => "HSS",
     }
     .into()
 }
@@ -401,8 +412,12 @@ pub fn custom_attrs_from(attrs: &[crate::kmip30::Attribute]) -> std::collections
 /// `x-`-prefixed) names, for *persistence* onto the managed object. Register
 /// stores attributes in this form so GetAttributes round-trips them verbatim
 /// (BL-M-14); CreateKeyPair now does the same (Y1) so use-time policy gates can
-/// read the classification back off the stored key.
-pub fn raw_custom_attrs(attrs: &[crate::kmip30::Attribute]) -> std::collections::HashMap<String, String> {
+/// read the classification back off the stored key. Typed (not `String`) so
+/// an Integer/DateTime-valued custom attribute keeps its real wire type
+/// through storage — see [`crate::kmip30::CustomAttributeValue`].
+pub fn raw_custom_attrs(
+    attrs: &[crate::kmip30::Attribute],
+) -> std::collections::HashMap<String, crate::kmip30::CustomAttributeValue> {
     use crate::kmip30::Attribute;
     let mut m = std::collections::HashMap::new();
     for a in attrs {
@@ -414,11 +429,15 @@ pub fn raw_custom_attrs(attrs: &[crate::kmip30::Attribute]) -> std::collections:
 }
 
 /// Normalise a stored custom-attribute map (whose keys keep the `x-` prefix) to
-/// the bare-name form the policy engine keys on (Y1). Used at use-time ops
-/// (Sign / Encrypt / …) where the attributes come off the stored object, not
-/// the request.
+/// the bare-name form the policy engine keys on (Y1), stringifying each typed
+/// value via [`crate::kmip30::CustomAttributeValue::as_policy_string`] — policy
+/// YAML rules match on string patterns, so this is the one place the type
+/// information intentionally collapses back to a string; the *stored* record
+/// (`ObjectRecord.custom_attributes`) and the wire round-trip
+/// (`GetAttributes`) stay typed. Used at use-time ops (Sign / Encrypt / …)
+/// where the attributes come off the stored object, not the request.
 pub fn strip_x_prefixes(
-    raw: &std::collections::HashMap<String, String>,
+    raw: &std::collections::HashMap<String, crate::kmip30::CustomAttributeValue>,
 ) -> std::collections::HashMap<String, String> {
     raw.iter()
         .map(|(k, v)| {
@@ -426,7 +445,7 @@ pub fn strip_x_prefixes(
                 .strip_prefix("x-")
                 .or_else(|| k.strip_prefix("X-"))
                 .unwrap_or(k);
-            (bare.to_string(), v.clone())
+            (bare.to_string(), v.as_policy_string())
         })
         .collect()
 }
@@ -718,6 +737,10 @@ pub fn native_sign_mech_with_params(
         // P1 (2026-07-05): pure EdDSA signs the message directly — no
         // caller-selectable hash parameter, unlike RSA/ECDSA above.
         Ed25519 => c::CKM_EDDSA,
+        // HSS/LMS (RFC 8554) — no caller-selectable hash parameter either;
+        // the hash family is fixed by the key's own LMS parameter set
+        // (CKA_LMS_PARAM_SET), not by CryptographicParameters.
+        Hss => c::CKM_HSS,
         other => {
             return Err(KmipError::failed(
                 crate::error::ResultReason::OperationNotSupported,
@@ -864,6 +887,10 @@ pub fn native_kem_mech(a: KmipAlgorithm) -> Option<u32> {
     use KmipAlgorithm::*;
     match a {
         MlKem512 | MlKem768 | MlKem1024 => Some(c::CKM_ML_KEM),
+        FrodoKem640Aes | FrodoKem640Shake | FrodoKem976Aes
+            | FrodoKem976Shake | FrodoKem1344Aes | FrodoKem1344Shake =>
+            Some(c::CKM_PQCTODAY_FRODOKEM_ENCAPSULATE),
+        ClassicMcEliece6688128 => Some(c::CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE),
         _ => None,
     }
 }
@@ -914,6 +941,13 @@ pub fn native_parameter_set(a: KmipAlgorithm) -> Option<u32> {
         SlhDsaShake192f  => c::CKP_SLH_DSA_SHAKE_192F,
         SlhDsaShake256s  => c::CKP_SLH_DSA_SHAKE_256S,
         SlhDsaShake256f  => c::CKP_SLH_DSA_SHAKE_256F,
+        FrodoKem640Aes    => c::CKP_FRODOKEM_640_AES,
+        FrodoKem640Shake  => c::CKP_FRODOKEM_640_SHAKE,
+        FrodoKem976Aes    => c::CKP_FRODOKEM_976_AES,
+        FrodoKem976Shake  => c::CKP_FRODOKEM_976_SHAKE,
+        FrodoKem1344Aes   => c::CKP_FRODOKEM_1344_AES,
+        FrodoKem1344Shake => c::CKP_FRODOKEM_1344_SHAKE,
+        ClassicMcEliece6688128 => c::CKP_CLASSIC_MCELIECE_6688128,
         _ => return None,
     })
 }
@@ -936,13 +970,17 @@ pub fn find_handle_for_object(
     let target_class = match object_type {
         ObjectType::PrivateKey => c::CKO_PRIVATE_KEY,
         ObjectType::PublicKey => c::CKO_PUBLIC_KEY,
-        ObjectType::SymmetricKey | ObjectType::SecretData => c::CKO_SECRET_KEY,
+        // Phase 3.3 — a Split Key part is a real engine `Generic Secret`
+        // object (`native::split_key::split` registers it exactly like
+        // `register_generic_secret_bytes`), same class as SecretData.
+        ObjectType::SymmetricKey | ObjectType::SecretData | ObjectType::SplitKey => {
+            c::CKO_SECRET_KEY
+        }
         ObjectType::Certificate => c::CKO_CERTIFICATE,
         // KMIP-only object types — no PKCS#11 cryptoki class maps cleanly.
         // Surface as ItemNotFound by returning a sentinel that never
         // matches a real handle class (CKO_VENDOR_DEFINED start = 0x80000000).
-        ObjectType::SplitKey
-        | ObjectType::OpaqueObject
+        ObjectType::OpaqueObject
         | ObjectType::PgpKey
         | ObjectType::CertificateRequest
         | ObjectType::User

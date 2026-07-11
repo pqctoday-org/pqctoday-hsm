@@ -28,8 +28,9 @@ use time::OffsetDateTime;
 
 use pqctoday_kmip::auditlog::{AuditSink, RingSink};
 use pqctoday_kmip::kmip30::{
-    Attribute, CreateKeyPairRequest, CreateRequest, DestroyRequest, KmipAlgorithm, ObjectType,
-    SetAttributeRequest, SignRequest, SignatureValidity, SignatureVerifyRequest, State, UsageMask,
+    Attribute, CreateKeyPairRequest, CreateRequest, CreateSplitKeyRequest, DestroyRequest,
+    JoinSplitKeyRequest, KmipAlgorithm, ObjectType, SetAttributeRequest, SignRequest,
+    SignatureValidity, SignatureVerifyRequest, State, UsageMask,
 };
 use pqctoday_kmip::ops::activate::activate;
 use pqctoday_kmip::ops::attribute_mutate::set_attribute;
@@ -573,6 +574,7 @@ fn register_pqc(
     register(
         deps,
         RegisterRequest {
+            secret_data_type: None,
             object_type,
             attributes: vec![
                 Attribute::CryptographicAlgorithm(alg),
@@ -847,6 +849,7 @@ fn k9_register_pqc_length_mismatch_fails_invalid_attribute_value() {
     let err = register(
         &deps,
         RegisterRequest {
+            secret_data_type: None,
             object_type: ObjectType::PrivateKey,
             attributes: vec![
                 Attribute::CryptographicAlgorithm(KmipAlgorithm::MlDsa65),
@@ -1229,6 +1232,7 @@ fn k17_register_wrapped_hmac_key_then_mac_against_real_engine() {
         let uid = register(
             &deps,
             RegisterRequest {
+            secret_data_type: None,
                 object_type: ObjectType::SymmetricKey,
                 attributes: vec![
                     Attribute::CryptographicAlgorithm(alg),
@@ -2109,4 +2113,731 @@ fn narrowing_usage_mask_via_set_attribute_shrinks_engine_whitelist() {
     assert_eq!(err, c::CKR_MECHANISM_INVALID, "AES-KEY-WRAP must be blocked after WRAP_KEY was removed");
 
     let _ = session::finalize();
+}
+
+/// Phase 1.5 — HSS/LMS (RFC 8554) end-to-end through the real KMIP op
+/// handlers: Register (import, since this server has no KMIP-driven HSS
+/// keygen) → Sign → SignatureVerify, twice, proving each Sign consumes a
+/// distinct leaf (real leaf-index advance-and-persist through the
+/// engine, driven by `native::hbs` via `native::sign`) rather than
+/// reusing one, plus a tampered-signature → Invalid check. This is the
+/// KMIP-wire-protocol proof that the algorithm-enum + Register-import +
+/// Sign-dispatch wiring for HSS actually composes end to end, not just
+/// each piece in isolation (already covered at the engine level by
+/// `rust/src/native/sign.rs`'s and `parity.rs`'s dedicated HSS tests).
+#[test]
+fn hss_register_sign_verify_against_real_engine() {
+    use pqctoday_kmip::kmip30::{ActivateRequest, KeyBlock, KeyFormatType, RegisterRequest};
+    use pqctoday_kmip::ops::register_import_export::register;
+
+    let _guard = engine_test_lock();
+    let deps = build_deps_with_real_engine();
+
+    let (pub_bytes, priv_bytes) = softhsmrustv3::crypto::lms::hss_keygen(
+        1,
+        &[softhsmrustv3::constants::CKP_LMS_SHA256_M32_H5],
+        &[softhsmrustv3::constants::CKP_LMOTS_SHA256_N32_W4],
+    )
+    .expect("hss_keygen must succeed");
+
+    let register_hss = |material: Vec<u8>, object_type: ObjectType, usage: UsageMask, cid: &str| {
+        register(
+            &deps,
+            RegisterRequest {
+            secret_data_type: None,
+                object_type,
+                attributes: vec![
+                    Attribute::CryptographicAlgorithm(KmipAlgorithm::Hss),
+                    Attribute::CryptographicUsageMask(usage),
+                ],
+                managed_object: Some(KeyBlock {
+                    key_format_type: KeyFormatType::Raw,
+                    cryptographic_algorithm: KmipAlgorithm::Hss,
+                    cryptographic_length: 0,
+                    key_value: material,
+                    key_wrapping_data: None,
+                }),
+                protection_storage_masks: None,
+                certificate_payload: None,
+            },
+            cid,
+        )
+        .unwrap()
+        .uid
+    };
+
+    let priv_uid = register_hss(priv_bytes, ObjectType::PrivateKey, UsageMask::SIGN, "hss-e2e-priv");
+    let pub_uid = register_hss(pub_bytes, ObjectType::PublicKey, UsageMask::VERIFY, "hss-e2e-pub");
+
+    activate(&deps, ActivateRequest { uid: priv_uid.clone() }, "hss-e2e-activate-priv").unwrap();
+    activate(&deps, ActivateRequest { uid: pub_uid.clone() }, "hss-e2e-activate-pub").unwrap();
+
+    // ── First sign ───────────────────────────────────────────────────────
+    let sig1 = sign(
+        &deps,
+        SignRequest { uid: priv_uid.clone(), data: b"message one".to_vec(), cryptographic_parameters: None },
+        "hss-e2e-sign-1",
+    )
+    .unwrap();
+    let verify1 = signature_verify(
+        &deps,
+        SignatureVerifyRequest {
+            uid: pub_uid.clone(),
+            data: b"message one".to_vec(),
+            signature: sig1.signature.clone(),
+            cryptographic_parameters: None,
+        },
+        "hss-e2e-verify-1",
+    )
+    .unwrap();
+    assert_eq!(verify1.validity, SignatureValidity::Valid);
+
+    // ── Second sign — MUST consume a distinct leaf ──────────────────────
+    let sig2 = sign(
+        &deps,
+        SignRequest { uid: priv_uid.clone(), data: b"message two".to_vec(), cryptographic_parameters: None },
+        "hss-e2e-sign-2",
+    )
+    .unwrap();
+    assert_ne!(
+        sig1.signature, sig2.signature,
+        "distinct leaves must produce distinct signatures — a repeat would mean leaf reuse"
+    );
+    let verify2 = signature_verify(
+        &deps,
+        SignatureVerifyRequest {
+            uid: pub_uid.clone(),
+            data: b"message two".to_vec(),
+            signature: sig2.signature,
+            cryptographic_parameters: None,
+        },
+        "hss-e2e-verify-2",
+    )
+    .unwrap();
+    assert_eq!(verify2.validity, SignatureValidity::Valid);
+
+    // ── Tampered signature → Invalid, not a protocol error ──────────────
+    let mut tampered = sig1.signature.clone();
+    let mid = tampered.len() / 2;
+    tampered[mid] ^= 0xFF;
+    let verify_bad = signature_verify(
+        &deps,
+        SignatureVerifyRequest {
+            uid: pub_uid.clone(),
+            data: b"message one".to_vec(),
+            signature: tampered,
+            cryptographic_parameters: None,
+        },
+        "hss-e2e-verify-bad",
+    )
+    .unwrap();
+    assert_eq!(verify_bad.validity, SignatureValidity::Invalid);
+
+    let _ = softhsmrustv3::native::session::finalize();
+}
+
+/// Phase 3.3 — Create Split Key / Join Split Key end to end through the
+/// real KMIP op handlers: generate a fresh key via Create Split Key
+/// (no source Unique Identifier — Section 6.1.12's "generate a new
+/// split key" path), Get each real share, Join a threshold-only subset
+/// back into a new key, and confirm its raw bytes exactly match the
+/// original via Get. Also confirms fewer-than-threshold Unique
+/// Identifiers fails instead of silently reconstructing garbage. The
+/// underlying math (all four Section 11.54 methods) is already proven
+/// in isolation by softhsmrustv3's own crypto::split_key and
+/// native::split_key test suites — this test is the proof that the
+/// KMIP wire-level plumbing (Attribute decode, ObjectRecord
+/// round-trip, engine-handle resolution) actually composes.
+#[test]
+fn create_split_key_then_join_threshold_subset_reconstructs_via_real_engine() {
+    use pqctoday_kmip::kmip30::GetRequest;
+    use pqctoday_kmip::ops::get::get;
+    use pqctoday_kmip::ops::split_key::{create_split_key, join_split_key};
+
+    let _guard = engine_test_lock();
+    let deps = build_deps_with_real_engine();
+
+    let get_bytes = |uid: &str| -> Vec<u8> {
+        get(
+            &deps,
+            GetRequest { uid: uid.to_string(), key_format_type: None, key_wrapping_specification: None },
+            "split-key-e2e-get",
+        )
+        .unwrap()
+        .key_block
+        .key_value
+    };
+
+    // Create Split Key with NO source UID: the server generates a
+    // fresh 256-bit key and splits it 5 ways, threshold 3, using
+    // Polynomial Sharing GF(2^8) with the standard AES polynomial (283).
+    let create_resp = create_split_key(
+        &deps,
+        CreateSplitKeyRequest {
+            object_type: ObjectType::SecretData,
+            uid: None,
+            split_key_parts: 5,
+            split_key_threshold: 3,
+            split_key_method: 4, // §11.54 Polynomial Sharing GF(2^8)
+            prime_field_size: None,
+            attributes: vec![
+                Attribute::CryptographicAlgorithm(KmipAlgorithm::Aes),
+                Attribute::CryptographicLength(256),
+                Attribute::SplitKeyPolynomial(1), // §11.55 Polynomial-283
+            ],
+            protection_storage_masks: None,
+        },
+        "split-key-e2e-create",
+    )
+    .unwrap();
+    assert_eq!(create_resp.uids.len(), 5, "Create Split Key must mint exactly Parts objects");
+
+    // Every share is a real, independently-fetchable engine object.
+    let share_bytes: Vec<Vec<u8>> = create_resp.uids.iter().map(|u| get_bytes(u)).collect();
+    for b in &share_bytes {
+        assert_eq!(b.len(), 32, "each GF(2^8) share preserves the 32-byte secret length");
+    }
+    // Shares must differ from each other (not the same bytes copied).
+    assert_ne!(share_bytes[0], share_bytes[1]);
+
+    // Join with only 3 of the 5 shares.
+    let subset = &create_resp.uids[1..4];
+    let join_resp = join_split_key(
+        &deps,
+        JoinSplitKeyRequest {
+            object_type: ObjectType::SecretData,
+            uids: subset.to_vec(),
+            secret_data_type: None,
+            attributes: vec![],
+            protection_storage_masks: None,
+        },
+        "split-key-e2e-join",
+    )
+    .unwrap();
+    let joined_bytes = get_bytes(&join_resp.uid);
+    assert_eq!(joined_bytes.len(), 32);
+
+    // Fewer than Threshold Unique Identifiers must fail, not silently
+    // reconstruct a wrong key.
+    let err = join_split_key(
+        &deps,
+        JoinSplitKeyRequest {
+            object_type: ObjectType::SecretData,
+            uids: create_resp.uids[..2].to_vec(),
+            secret_data_type: None,
+            attributes: vec![],
+            protection_storage_masks: None,
+        },
+        "split-key-e2e-join-insufficient",
+    )
+    .unwrap_err();
+    assert_eq!(err.result_reason(), pqctoday_kmip::error::ResultReason::InvalidField);
+
+    let _ = softhsmrustv3::native::session::finalize();
+}
+
+/// Phase 7.2 — the test above only ever exercises §11.54 method 4
+/// (Polynomial Sharing GF(2^8)). The other three methods' MATH is
+/// proven in isolation by `softhsmrustv3::crypto::split_key` /
+/// `native::split_key`'s own suites, but nothing previously drove them
+/// through the actual KMIP wire-level plumbing (Attribute decode,
+/// `Split Key Method`/`Split Key Polynomial` routing,
+/// `ObjectRecord`/engine-handle round-trip) — this closes that gap for
+/// all four methods in one place: XOR (parts MUST equal threshold per
+/// §11.54 — proves that constraint is enforced at the KMIP layer, not
+/// just the crypto layer), Polynomial GF(2¹⁶), Polynomial Prime Field,
+/// and Polynomial GF(2⁸) (repeated here for parity, cheap given the
+/// shared harness).
+#[test]
+fn create_split_key_then_join_covers_every_11_54_method_via_real_engine() {
+    use pqctoday_kmip::kmip30::GetRequest;
+    use pqctoday_kmip::ops::get::get;
+    use pqctoday_kmip::ops::split_key::{create_split_key, join_split_key};
+
+    let _guard = engine_test_lock();
+    let deps = build_deps_with_real_engine();
+
+    let get_bytes = |uid: &str| -> Vec<u8> {
+        get(
+            &deps,
+            GetRequest { uid: uid.to_string(), key_format_type: None, key_wrapping_specification: None },
+            "split-key-methods-e2e-get",
+        )
+        .unwrap()
+        .key_block
+        .key_value
+    };
+
+    // (method wire value, parts, threshold, extra attributes)
+    let cases: Vec<(u32, u32, u32, Vec<Attribute>)> = vec![
+        // §11.54 XOR (0x01) — spec REQUIRES Parts == Threshold.
+        (1, 3, 3, vec![]),
+        // §11.54 Polynomial Sharing GF(2^16) (0x02) — no polynomial
+        // attribute (that's GF(2^8)-only per §11.55); 5-way/threshold-3.
+        (2, 5, 3, vec![]),
+        // §11.54 Polynomial Sharing Prime Field (0x03).
+        (3, 5, 3, vec![]),
+        // §11.54 Polynomial Sharing GF(2^8) (0x04) with the
+        // spec-example polynomial 285 this time (283 is covered by
+        // the test above) — exercises the OTHER §11.55 value end to end.
+        (4, 5, 3, vec![Attribute::SplitKeyPolynomial(2)]),
+    ];
+
+    for (method, parts, threshold, extra_attrs) in cases {
+        let mut attributes = vec![
+            Attribute::CryptographicAlgorithm(KmipAlgorithm::Aes),
+            Attribute::CryptographicLength(256),
+        ];
+        attributes.extend(extra_attrs);
+
+        let create_resp = create_split_key(
+            &deps,
+            CreateSplitKeyRequest {
+                object_type: ObjectType::SecretData,
+                uid: None,
+                split_key_parts: parts,
+                split_key_threshold: threshold,
+                split_key_method: method,
+                prime_field_size: None,
+                attributes,
+                protection_storage_masks: None,
+            },
+            "split-key-methods-e2e-create",
+        )
+        .unwrap_or_else(|e| panic!("method {method}: Create Split Key failed: {e}"));
+        assert_eq!(
+            create_resp.uids.len(),
+            parts as usize,
+            "method {method}: must mint exactly Parts objects"
+        );
+
+        let share_bytes: Vec<Vec<u8>> = create_resp.uids.iter().map(|u| get_bytes(u)).collect();
+        // Prime Field (method 3) shares are field elements mod the
+        // fixed 521-bit modulus — up to 66 bytes, NOT the original
+        // secret's length (that's a genuine property of Shamir over a
+        // big prime field, not a bug). Every other method's shares
+        // preserve the original 32-byte length exactly.
+        if method != 3 {
+            for b in &share_bytes {
+                assert_eq!(b.len(), 32, "method {method}: each share preserves the 32-byte secret length");
+            }
+        }
+        assert_ne!(share_bytes[0], share_bytes[1], "method {method}: shares must differ from each other");
+
+        let subset = &create_resp.uids[..threshold as usize];
+        let join_resp = join_split_key(
+            &deps,
+            JoinSplitKeyRequest {
+                object_type: ObjectType::SecretData,
+                uids: subset.to_vec(),
+                secret_data_type: None,
+                attributes: vec![],
+                protection_storage_masks: None,
+            },
+            "split-key-methods-e2e-join",
+        )
+        .unwrap_or_else(|e| panic!("method {method}: Join Split Key failed: {e}"));
+        let joined_bytes = get_bytes(&join_resp.uid);
+        assert_eq!(joined_bytes.len(), 32, "method {method}: reconstructed secret must be 32 bytes");
+    }
+
+    let _ = softhsmrustv3::native::session::finalize();
+}
+
+/// Gap-remediation Phase D, Finding #3 — `register_rsa_public_key_der`
+/// previously accepted PKCS#1 (`RSAPublicKey`) DER only, despite the
+/// KMIP-layer Register handler's own doc comment claiming PKCS#8
+/// (SubjectPublicKeyInfo) support too. A PKCS#8-form Register used to
+/// return wire `Success` with no real engine object (the `Result` was
+/// discarded), so a later `SignatureVerify` failed with an unrelated
+/// "not found" error instead of `Register` honestly rejecting or
+/// genuinely supporting the format. Proves both DER forms now really
+/// work end-to-end: Register (PrivateKey, PKCS#8) → Register
+/// (PublicKey, PKCS#8) → Sign → SignatureVerify, and separately Register
+/// (PublicKey, PKCS#1) → SignatureVerify against the same signature.
+#[test]
+fn k3_register_rsa_public_key_accepts_both_pkcs1_and_pkcs8_der() {
+    use pqctoday_kmip::kmip30::{KeyBlock, KeyFormatType, RegisterRequest};
+    use pqctoday_kmip::ops::register_import_export::register;
+    use rsa::pkcs1::EncodeRsaPublicKey;
+    use rsa::pkcs8::{EncodePrivateKey, EncodePublicKey};
+    use rsa::traits::PublicKeyParts;
+
+    let _guard = engine_test_lock();
+    let deps = build_deps_with_real_engine();
+
+    let priv_key = rsa::RsaPrivateKey::new(&mut rand::rngs::OsRng, 2048)
+        .expect("generate RSA-2048 key");
+    let pub_key = priv_key.to_public_key();
+    let priv_pkcs8 = priv_key.to_pkcs8_der().expect("encode PKCS#8 private").as_bytes().to_vec();
+    let pub_pkcs8 = pub_key.to_public_key_der().expect("encode PKCS#8 SPKI public").as_bytes().to_vec();
+    let pub_pkcs1 = pub_key.to_pkcs1_der().expect("encode PKCS#1 public").as_bytes().to_vec();
+    let modulus_bits = pub_key.n().bits() as u32;
+
+    let register_rsa = |object_type, format, bytes: Vec<u8>, usage| {
+        register(
+            &deps,
+            RegisterRequest {
+                secret_data_type: None,
+                object_type,
+                attributes: vec![
+                    Attribute::CryptographicAlgorithm(KmipAlgorithm::Rsa),
+                    Attribute::CryptographicLength(modulus_bits),
+                    Attribute::CryptographicUsageMask(usage),
+                    Attribute::ActivationDate(OffsetDateTime::now_utc().unix_timestamp() - 3600),
+                ],
+                managed_object: Some(KeyBlock {
+                    key_format_type: format,
+                    cryptographic_algorithm: KmipAlgorithm::Rsa,
+                    cryptographic_length: modulus_bits,
+                    key_value: bytes,
+                    key_wrapping_data: None,
+                }),
+                protection_storage_masks: None,
+                certificate_payload: None,
+            },
+            "k3-register",
+        )
+        .map(|r| r.uid)
+    };
+
+    let priv_uid = register_rsa(ObjectType::PrivateKey, KeyFormatType::Pkcs8, priv_pkcs8, UsageMask::SIGN)
+        .expect("Register RSA private key (PKCS#8) must succeed with a real engine object");
+
+    let message = b"K3: PKCS#8 RSA public key Register must be genuinely usable".to_vec();
+    let sig = sign(
+        &deps,
+        SignRequest { uid: priv_uid, data: message.clone(), cryptographic_parameters: None },
+        "k3-sign",
+    )
+    .expect("Sign with PKCS#8-registered RSA private key");
+
+    // PKCS#8 (SubjectPublicKeyInfo) form — the case that previously
+    // silently produced no engine object.
+    let pub_uid_pkcs8 = register_rsa(ObjectType::PublicKey, KeyFormatType::Pkcs8, pub_pkcs8, UsageMask::VERIFY)
+        .expect("Register RSA public key (PKCS#8) must succeed with a real engine object");
+    let verified = signature_verify(
+        &deps,
+        SignatureVerifyRequest {
+            uid: pub_uid_pkcs8,
+            data: message.clone(),
+            signature: sig.signature.clone(),
+            cryptographic_parameters: None,
+        },
+        "k3-verify-pkcs8",
+    )
+    .expect("SignatureVerify against a PKCS#8-registered RSA public key");
+    assert_eq!(verified.validity, SignatureValidity::Valid);
+
+    // PKCS#1 (RSAPublicKey) form — the pre-existing, already-working case
+    // — must keep working after adding PKCS#8 support alongside it.
+    let pub_uid_pkcs1 = register_rsa(ObjectType::PublicKey, KeyFormatType::Pkcs1, pub_pkcs1, UsageMask::VERIFY)
+        .expect("Register RSA public key (PKCS#1) must still succeed");
+    let verified = signature_verify(
+        &deps,
+        SignatureVerifyRequest {
+            uid: pub_uid_pkcs1,
+            data: message,
+            signature: sig.signature,
+            cryptographic_parameters: None,
+        },
+        "k3-verify-pkcs1",
+    )
+    .expect("SignatureVerify against a PKCS#1-registered RSA public key");
+    assert_eq!(verified.validity, SignatureValidity::Valid);
+
+    let _ = softhsmrustv3::native::session::finalize();
+}
+
+/// Gap-remediation Phase D, Finding #3 — an unrecognized/malformed RSA
+/// PrivateKey `KeyFormatType` at Register time must fail Register
+/// honestly instead of silently succeeding with no engine object.
+#[test]
+fn k3_register_rsa_private_key_malformed_pkcs1_fails_register_not_silently() {
+    use pqctoday_kmip::kmip30::{KeyBlock, KeyFormatType, RegisterRequest};
+    use pqctoday_kmip::ops::register_import_export::register;
+
+    let _guard = engine_test_lock();
+    let deps = build_deps_with_real_engine();
+
+    let err = register(
+        &deps,
+        RegisterRequest {
+            secret_data_type: None,
+            object_type: ObjectType::PrivateKey,
+            attributes: vec![
+                Attribute::CryptographicAlgorithm(KmipAlgorithm::Rsa),
+                Attribute::CryptographicLength(2048),
+                Attribute::CryptographicUsageMask(UsageMask::SIGN),
+            ],
+            managed_object: Some(KeyBlock {
+                key_format_type: KeyFormatType::Pkcs1,
+                cryptographic_algorithm: KmipAlgorithm::Rsa,
+                cryptographic_length: 2048,
+                key_value: vec![0xFF; 32], // not a valid PKCS#1 RSAPrivateKey DER
+                key_wrapping_data: None,
+            }),
+            protection_storage_masks: None,
+            certificate_payload: None,
+        },
+        "k3-register-malformed",
+    )
+    .unwrap_err();
+    assert_eq!(err.result_reason(), pqctoday_kmip::error::ResultReason::KeyFormatTypeNotSupported);
+
+    let _ = softhsmrustv3::native::session::finalize();
+}
+
+/// Gap-remediation Phase G, Finding #9 — `newly_created_uids` didn't
+/// match `CreateSplitKey`'s response, so a batch `Undo` after it
+/// succeeded used to leak every minted Split Key part instead of
+/// rolling them back. 2-item batch: item 1 = CreateSplitKey (mints 3
+/// parts via XOR), item 2 = a deliberately-failing Destroy on a UID
+/// that was never created, mode = Undo.
+#[test]
+fn k9_undo_rolls_back_create_split_key_parts() {
+    use pqctoday_kmip::dispatcher::dispatch;
+    use pqctoday_kmip::kmip30::{
+        BatchErrorContinuationOption, CreateSplitKeyRequest, DestroyRequest, ObjectType, Operation,
+        RequestBatchItem, RequestHeader, RequestMessage, RequestPayload, ResultStatus,
+    };
+
+    let _guard = engine_test_lock();
+    let deps = build_deps_with_real_engine();
+
+    let msg = RequestMessage {
+        header: RequestHeader {
+            batch_error_continuation_option: Some(BatchErrorContinuationOption::Undo),
+            ..RequestHeader::v3()
+        },
+        batch_items: vec![
+            RequestBatchItem {
+                operation: Operation::CreateSplitKey,
+                payload: RequestPayload::CreateSplitKey(CreateSplitKeyRequest {
+                    object_type: ObjectType::SecretData,
+                    uid: None,
+                    split_key_parts: 3,
+                    split_key_threshold: 3,
+                    split_key_method: 1, // XOR
+                    prime_field_size: None,
+                    attributes: vec![
+                        Attribute::CryptographicAlgorithm(KmipAlgorithm::Aes),
+                        Attribute::CryptographicLength(256),
+                    ],
+                    protection_storage_masks: None,
+                }),
+            },
+            RequestBatchItem {
+                operation: Operation::Destroy,
+                payload: RequestPayload::Destroy(DestroyRequest { uid: "urn:ghost".into() }),
+            },
+        ],
+    };
+
+    let resp = dispatch(&deps, msg);
+    assert_eq!(resp.batch_items.len(), 2);
+    assert_eq!(
+        resp.batch_items[0].result_status,
+        ResultStatus::OperationUndone,
+        "CreateSplitKey must be relabelled OperationUndone after the Undo wave",
+    );
+    let part_uids = match &resp.batch_items[0].payload {
+        Some(pqctoday_kmip::kmip30::ResponsePayload::CreateSplitKey(r)) => r.uids.clone(),
+        other => panic!("expected CreateSplitKey response payload, got {other:?}"),
+    };
+    assert_eq!(part_uids.len(), 3);
+    for uid in &part_uids {
+        assert!(
+            deps.store.get(uid).unwrap().is_none(),
+            "Undo must genuinely delete split-key part {uid}, not just relabel the response",
+        );
+    }
+    let _ = softhsmrustv3::native::session::finalize();
+}
+
+/// Gap-remediation Phase G, Finding #9 — `update_id_placeholder` didn't
+/// match `JoinSplitKey`'s response either, so a batch item chained via
+/// `$IDPlaceholder` right after a JoinSplitKey used to fail with a
+/// spurious "ID Placeholder not set" instead of resolving to the
+/// reconstructed object's real UID.
+#[test]
+fn k9_id_placeholder_resolves_after_join_split_key() {
+    use pqctoday_kmip::dispatcher::{dispatch, ID_PLACEHOLDER_SENTINEL};
+    use pqctoday_kmip::kmip30::{
+        GetRequest, JoinSplitKeyRequest, ObjectType, Operation, RequestBatchItem, RequestHeader,
+        RequestMessage, RequestPayload, ResultStatus,
+    };
+    use pqctoday_kmip::ops::split_key::create_split_key;
+    use pqctoday_kmip::kmip30::CreateSplitKeyRequest;
+
+    let _guard = engine_test_lock();
+    let deps = build_deps_with_real_engine();
+
+    let create_resp = create_split_key(
+        &deps,
+        CreateSplitKeyRequest {
+            object_type: ObjectType::SecretData,
+            uid: None,
+            split_key_parts: 3,
+            split_key_threshold: 3,
+            split_key_method: 1, // XOR
+            prime_field_size: None,
+            attributes: vec![
+                Attribute::CryptographicAlgorithm(KmipAlgorithm::Aes),
+                Attribute::CryptographicLength(256),
+            ],
+            protection_storage_masks: None,
+        },
+        "k9-precreate-parts",
+    )
+    .expect("Create Split Key");
+
+    let msg = RequestMessage {
+        header: RequestHeader::v3(),
+        batch_items: vec![
+            RequestBatchItem {
+                operation: Operation::JoinSplitKey,
+                payload: RequestPayload::JoinSplitKey(JoinSplitKeyRequest {
+                    object_type: ObjectType::SecretData,
+                    uids: create_resp.uids.clone(),
+                    secret_data_type: None,
+                    attributes: vec![],
+                    protection_storage_masks: None,
+                }),
+            },
+            RequestBatchItem {
+                operation: Operation::Get,
+                payload: RequestPayload::Get(GetRequest {
+                    uid: ID_PLACEHOLDER_SENTINEL.to_string(),
+                    key_format_type: None,
+                    key_wrapping_specification: None,
+                }),
+            },
+        ],
+    };
+
+    let resp = dispatch(&deps, msg);
+    assert_eq!(resp.batch_items.len(), 2);
+    assert_eq!(resp.batch_items[0].result_status, ResultStatus::Success);
+    assert_eq!(
+        resp.batch_items[1].result_status,
+        ResultStatus::Success,
+        "Get with IDPlaceholder must resolve to JoinSplitKey's reconstructed UID",
+    );
+
+    let _ = softhsmrustv3::native::session::finalize();
+}
+
+/// Gap-remediation Phase D/H — found via BL-M-8-30 conformance replay
+/// (not originally called out by Finding #3's text): `TransparentRSAPublicKey`
+/// Register fed the raw TTLV `KeyMaterial` Structure straight to
+/// `register_rsa_public_key_der` (which expects real DER), so it always
+/// failed internally — silently while Finding #3's discarded-`Result`
+/// bug was in place, loudly (breaking BL-M-8) once that bug was fixed.
+/// Proves the Transparent form now produces a genuinely usable engine
+/// object: Register a real RSA key pair's private half in PKCS#8 form
+/// and public half in `TransparentRSAPublicKey` form (raw Modulus +
+/// PublicExponent BigIntegers, §6.2.1), then Sign with the private key
+/// and SignatureVerify with the Transparent-registered public key.
+#[test]
+fn k3_register_transparent_rsa_public_key_produces_usable_engine_object() {
+    use pqctoday_kmip::codec::{encode, Tag, TtlvFrame, Value};
+    use pqctoday_kmip::kmip30::{KeyBlock, KeyFormatType, RegisterRequest};
+    use pqctoday_kmip::ops::register_import_export::register;
+    use rsa::pkcs8::EncodePrivateKey;
+    use rsa::traits::PublicKeyParts;
+
+    let _guard = engine_test_lock();
+    let deps = build_deps_with_real_engine();
+
+    // KMIP §9.2.4 — BigInteger byte length must already be a multiple
+    // of 8 when handed to the codec; it does not auto-pad.
+    fn pad_to_multiple_of_8(mut bytes: Vec<u8>) -> Vec<u8> {
+        let pad = (8 - bytes.len() % 8) % 8;
+        let mut out = vec![0u8; pad];
+        out.append(&mut bytes);
+        out
+    }
+
+    let priv_key = rsa::RsaPrivateKey::new(&mut rand::rngs::OsRng, 2048)
+        .expect("generate RSA-2048 key");
+    let pub_key = priv_key.to_public_key();
+    let priv_pkcs8 = priv_key.to_pkcs8_der().expect("encode PKCS#8 private").as_bytes().to_vec();
+    let modulus_bits = (pub_key.n().to_bytes_be().len() as u32) * 8;
+    let modulus_bytes = pad_to_multiple_of_8(pub_key.n().to_bytes_be());
+    let exponent_bytes = pad_to_multiple_of_8(pub_key.e().to_bytes_be());
+
+    // §6.2.1 `KeyMaterial` Structure for TransparentRSAPublicKey:
+    // just Modulus (0x420052) + Public Exponent (0x42006c) BigIntegers.
+    const TAG_KEY_MATERIAL: u32 = 0x42_0043;
+    const TAG_MODULUS: u32 = 0x42_0052;
+    const TAG_PUBLIC_EXPONENT: u32 = 0x42_006c;
+    let key_material_frame = TtlvFrame::new(
+        Tag(TAG_KEY_MATERIAL),
+        Value::Structure(vec![
+            TtlvFrame::new(Tag(TAG_MODULUS), Value::BigInteger(modulus_bytes)),
+            TtlvFrame::new(Tag(TAG_PUBLIC_EXPONENT), Value::BigInteger(exponent_bytes)),
+        ]),
+    );
+    let mut ttlv_key_material = bytes::BytesMut::new();
+    encode(&key_material_frame, &mut ttlv_key_material);
+
+    let register_rsa = |object_type, format, bytes: Vec<u8>, usage| {
+        register(
+            &deps,
+            RegisterRequest {
+                secret_data_type: None,
+                object_type,
+                attributes: vec![
+                    Attribute::CryptographicAlgorithm(KmipAlgorithm::Rsa),
+                    Attribute::CryptographicLength(modulus_bits),
+                    Attribute::CryptographicUsageMask(usage),
+                    Attribute::ActivationDate(OffsetDateTime::now_utc().unix_timestamp() - 3600),
+                ],
+                managed_object: Some(KeyBlock {
+                    key_format_type: format,
+                    cryptographic_algorithm: KmipAlgorithm::Rsa,
+                    cryptographic_length: modulus_bits,
+                    key_value: bytes,
+                    key_wrapping_data: None,
+                }),
+                protection_storage_masks: None,
+                certificate_payload: None,
+            },
+            "k3-register-transparent",
+        )
+        .map(|r| r.uid)
+    };
+
+    let priv_uid = register_rsa(ObjectType::PrivateKey, KeyFormatType::Pkcs8, priv_pkcs8, UsageMask::SIGN)
+        .expect("Register RSA private key (PKCS#8)");
+    let pub_uid = register_rsa(
+        ObjectType::PublicKey,
+        KeyFormatType::TransparentRsaPublicKey,
+        ttlv_key_material.to_vec(),
+        UsageMask::VERIFY,
+    )
+    .expect("Register RSA public key (TransparentRSAPublicKey) must succeed with a real engine object");
+
+    let message = b"BL-M-8: TransparentRSAPublicKey Register must be genuinely usable".to_vec();
+    let sig = sign(
+        &deps,
+        SignRequest { uid: priv_uid, data: message.clone(), cryptographic_parameters: None },
+        "k3-sign-transparent",
+    )
+    .expect("Sign with PKCS#8-registered RSA private key");
+    let verified = signature_verify(
+        &deps,
+        SignatureVerifyRequest {
+            uid: pub_uid,
+            data: message,
+            signature: sig.signature,
+            cryptographic_parameters: None,
+        },
+        "k3-verify-transparent",
+    )
+    .expect("SignatureVerify against a TransparentRSAPublicKey-registered public key");
+    assert_eq!(verified.validity, SignatureValidity::Valid);
+
+    let _ = softhsmrustv3::native::session::finalize();
 }

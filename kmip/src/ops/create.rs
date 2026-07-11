@@ -213,6 +213,8 @@ pub fn create(deps: &Deps, mut req: CreateRequest, correlation_id: &str) -> Resu
         cryptographic_parameters: cp,
         supersedes: None,
         name: x.name.clone(),
+        alternative_name: x.alternative_name.clone(),
+        alternative_name_type: x.alternative_name_type,
         links: std::collections::HashMap::new(),
         // Y1 — persist the request's custom attributes so use-time gates read
         // the classification tag off the stored symmetric key.
@@ -226,6 +228,11 @@ pub fn create(deps: &Deps, mut req: CreateRequest, correlation_id: &str) -> Resu
         // KMIP §11 Fresh = True for server-generated objects.
         fresh: Some(true),
         application_specific_information: x.application_specific_information.clone(),
+        protection_storage_mask: Some(0x01),
+        // KMIP §4.34 — server-set max lease cap. Phase 3.1: a real
+        // per-object value (was a get_attributes.rs read-time fallback
+        // with nothing behind it).
+        lease_time: Some(3600),
     ..ObjectRecord::default()
 })?;
 
@@ -507,12 +514,12 @@ rules:
         // Enforcement, not just presence: AES-KEY-WRAP is a real AES
         // mechanism, but this key's mask (ENCRYPT|DECRYPT only, no
         // WRAP_KEY/UNWRAP_KEY) never allows it.
-        let err = softhsmrustv3::native::encrypt(sess, handle, c::CKM_AES_KEY_WRAP, b"0123456789012345", None)
+        let err = softhsmrustv3::native::encrypt(sess, handle, c::CKM_AES_KEY_WRAP, b"0123456789012345", None, None, &[], None)
             .unwrap_err();
         assert_eq!(err, c::CKR_MECHANISM_INVALID);
         // The mechanism the usage mask DID imply still works.
         let iv = [0u8; 12];
-        assert!(softhsmrustv3::native::encrypt(sess, handle, c::CKM_AES_GCM, b"hi", Some(&iv)).is_ok());
+        assert!(softhsmrustv3::native::encrypt(sess, handle, c::CKM_AES_GCM, b"hi", Some(&iv), None, &[], None).is_ok());
 
         let _ = session::finalize();
     }

@@ -96,12 +96,16 @@ pub fn query(deps: &Deps, req: QueryRequest, correlation_id: &str) -> Result<Que
             QueryFunction::QueryCapabilities => {
                 // K3 — honest CapabilityInformation (compliance-audit
                 // K-11): multi-part Encrypt/Decrypt streaming is
-                // implemented (CS-BC-M-GCM-3); asynchronous processing
-                // and attestation are not; §9.5 Undo and Continue
-                // batch modes are implemented in the dispatcher.
+                // implemented (CS-BC-M-GCM-3); attestation is not.
+                // §9.5 Undo and Continue batch modes are implemented
+                // in the dispatcher. Phase 4 — asynchronous processing
+                // is now real too (§6.1.43/§6.1.5/§6.1.44/§6.1.46 all
+                // handled, backed by a genuine job store + executor —
+                // see `dispatcher::enqueue_async_job`), flipped on only
+                // after those handlers and their tests were green.
                 resp.capability_information = Some(CapabilityInformation {
                     streaming_capability: true,
-                    asynchronous_capability: false,
+                    asynchronous_capability: true,
                     attestation_capability: false,
                     batch_undo_capability: true,
                     batch_continue_capability: true,
@@ -124,58 +128,32 @@ pub fn query(deps: &Deps, req: QueryRequest, correlation_id: &str) -> Result<Que
     Ok(resp)
 }
 
-/// K3 — ops the OASIS corpus requires in the Query advertisement but
-/// the dispatcher does NOT implement.
+/// Phase 6 (6.1) — **empty.** Every op this server ever advertised is
+/// now genuinely implemented in [`crate::dispatcher::HANDLED_OPERATIONS`]
+/// (K19/K20/K21/P2.2/P2.3/Phase 3.1/Phase 3.3/Phase 4 each moved their
+/// op(s) out of this list over the course of this codebase's history —
+/// see git blame for the play-by-play). What's left un-advertised —
+/// `Notify` / `Put` (§6.2.2/§6.2.3, Phase 5, parked: the spec itself
+/// says they're delivered "via means outside the normal
+/// request/response protocol, using unspecified configuration", so
+/// there is no wire-protocol shape to honestly claim) and
+/// `DelegatedLogin` / `ReProvision` (never implemented, never
+/// corpus-required) — genuinely isn't supported, so it's genuinely
+/// not advertised.
 ///
-/// **Documented tension (compliance-audit K-4):** the truthful answer
-/// would be [`crate::dispatcher::HANDLED_OPERATIONS`] alone, but the
-/// MSGENC-{XML,JSON,HTTPS}-M-1 expected Query responses enumerate all
-/// 60 ops below + handled ones, and the replay harness enforces the
-/// Profiles v3.0 §4.1.1 item 15 rule *expected ⊆ actual* — trimming
-/// any of these fails the corpus gate. Resolution per the K3 gate
-/// rule: advertise exactly the corpus-required set and nothing more,
-/// and make every entry here fail honestly on invocation with
-/// `OperationFailed / OperationNotSupported (0x05)` (see
-/// `RequestPayload::Unsupported`) instead of the previous
-/// advertised-but-InvalidMessage behaviour. DelegatedLogin /
-/// ReProvision are neither implemented nor corpus-required, so they
-/// are NOT advertised.
-///
-/// K19 moved SetEndpointRole / GetUsageAllocation / GetConstraints out
-/// of this list into `HANDLED_OPERATIONS` (no net change to the
-/// advertised set), and implemented SetDefaults — which was previously
-/// neither implemented nor advertised — so it is now advertised as a
-/// handled op (the corpus gate is *expected ⊆ actual*, so the one-op
-/// growth of the advertised set keeps every MSGENC-* Query transcript
-/// passing).
-///
-/// K21 moved ReKey + ReKeyKeyPair into `HANDLED_OPERATIONS` (§6.1.51
-/// / §6.1.52 handlers) — both were already advertised here, so the
-/// net advertised set is unchanged.
-pub(crate) const ADVERTISED_UNIMPLEMENTED_OPERATIONS: &[Operation] = &[
-    Operation::ObtainLease,
-    // P2.2 moved Validate into `HANDLED_OPERATIONS` (§6.1.62 handler) —
-    // it was already advertised here, so the net advertised set is
-    // unchanged (the corpus gate is *expected ⊆ actual*).
-    Operation::Poll,
-    Operation::Notify,
-    Operation::Put,
-    Operation::CreateSplitKey,
-    Operation::SetConstraints,
-    Operation::QueryAsynchronousRequests,
-    Operation::Process,
-    // K3 additions — also enumerated by the MSGENC-* expected Query
-    // responses (previously missing from the Operation enum entirely).
-    // K20 moved DeriveKey out of this list into `HANDLED_OPERATIONS`
-    // (implemented §6.1.18 handler) — no net change to the advertised
-    // set, so every MSGENC-* Query transcript keeps passing. K21 did
-    // the same for ReKeyKeyPair (and ReKey above).
-    // P2.3 moved Certify + Re-certify into `HANDLED_OPERATIONS`
-    // (§6.1.6 / §6.1.50 PQC-capable CA handlers) — both were already
-    // advertised here, so the net advertised set is unchanged.
-    Operation::Cancel,
-    Operation::JoinSplitKey,
-];
+/// This used to be non-empty purely to satisfy the MSGENC-*
+/// (Message-Encoding profile) fixtures' expected Query response,
+/// under the replay harness's Profiles v3.0 §4.1.1 item 15 *expected ⊆
+/// actual* comparator — those fixtures list Notify/Put alongside every
+/// genuinely-implemented op because they were captured from a
+/// reference server that also implements server-to-client delivery.
+/// `conformance/harness/dispatcher_replay.py`'s `_compare_query_response_payload`
+/// now exempts MSGENC-* from that capability-set check entirely
+/// (Phase 6.1) — those transcripts test encoding fidelity, not
+/// capability-list membership, so pretending to support Notify/Put
+/// just to keep them green was never actually validating what they're
+/// for.
+pub(crate) const ADVERTISED_UNIMPLEMENTED_OPERATIONS: &[Operation] = &[];
 
 /// Operation capability list — surfaced via `QueryOperations`. The
 /// dispatcher's real surface ([`crate::dispatcher::HANDLED_OPERATIONS`],
@@ -193,6 +171,17 @@ fn supported_operations() -> Vec<Operation> {
 /// - CreateKeyPair: PublicKey + PrivateKey
 /// - Register: SymmetricKey / PublicKey / PrivateKey / SecretData /
 ///   Certificate / OpaqueObject (`ops::register_import_export`)
+/// - Phase 3.3: SplitKey, via the dedicated Create Split Key / Join
+///   Split Key ops (`ops::split_key`) rather than plain Create/Register.
+/// - Phase 6 (6.1) — User / Group / PasswordCredential /
+///   DeviceCredential / OneTimePasswordCredential /
+///   HashedPasswordCredential moved here from
+///   [`ADVERTISED_UNIMPLEMENTED_OBJECT_TYPES`]: they were mislabeled
+///   "unimplemented" — `CreateUser`/`CreateGroup`/`CreateCredential`
+///   (`ops::session_and_auth`) genuinely persist each as its own
+///   `ObjectRecord` with the matching `object_type` (see that module's
+///   tests). Not PKCS#11-engine-backed, which is correct and expected
+///   — they're login/identity metadata, not cryptographic key material.
 pub(crate) const IMPLEMENTED_OBJECT_TYPES: &[ObjectType] = &[
     ObjectType::Certificate,
     ObjectType::SymmetricKey,
@@ -200,17 +189,7 @@ pub(crate) const IMPLEMENTED_OBJECT_TYPES: &[ObjectType] = &[
     ObjectType::PrivateKey,
     ObjectType::SecretData,
     ObjectType::OpaqueObject,
-];
-
-/// K3 — object types the MSGENC-* expected Query responses enumerate
-/// but Register/Create reject on invocation (InvalidObjectType /
-/// OperationNotSupported). Same §4.1.1 item-16 corpus tension as
-/// [`ADVERTISED_UNIMPLEMENTED_OPERATIONS`] — the harness requires
-/// *expected ⊆ actual*, so these stay advertised; PgpKey (neither
-/// implemented nor corpus-required) was trimmed in K3.
-pub(crate) const ADVERTISED_UNIMPLEMENTED_OBJECT_TYPES: &[ObjectType] = &[
     ObjectType::SplitKey,
-    ObjectType::CertificateRequest,
     ObjectType::User,
     ObjectType::Group,
     ObjectType::PasswordCredential,
@@ -218,6 +197,18 @@ pub(crate) const ADVERTISED_UNIMPLEMENTED_OBJECT_TYPES: &[ObjectType] = &[
     ObjectType::OneTimePasswordCredential,
     ObjectType::HashedPasswordCredential,
 ];
+
+/// Phase 6 (6.1) — **empty.** `CertificateRequest` was the sole
+/// remaining entry (PgpKey was trimmed in K3): `Certify`/`Re-certify`
+/// (`ops::certify`) consume a client-supplied CSR's bytes inline via
+/// `CertificateRequestType`/`CertificateRequestValue`, but never
+/// persist a `CertificateRequest` as its own queryable managed object
+/// — genuinely unimplemented, so honestly not advertised, per T3's
+/// "implemented or dropped" rule. The MSGENC-* fixtures that used to
+/// require advertising it are exempted from this capability-list
+/// check entirely now (see `ADVERTISED_UNIMPLEMENTED_OPERATIONS`'s
+/// doc comment).
+pub(crate) const ADVERTISED_UNIMPLEMENTED_OBJECT_TYPES: &[ObjectType] = &[];
 
 /// Object types the server reports under `QueryObjects` — the real
 /// surface plus the corpus-required advertised-only set.
@@ -250,19 +241,16 @@ mod tests {
         let (_ring, d) = deps();
         let resp = query(&d, QueryRequest { functions: vec![QueryFunction::QueryOperations] }, "corr-q").unwrap();
         let ops = resp.operations.unwrap();
-        // K19: 46 handled + 16 corpus-required advertised-only = 62
-        // (was 42 + 19 = 61; SetEndpointRole / GetUsageAllocation /
-        // GetConstraints moved between the sets, SetDefaults is newly
-        // implemented and therefore newly — honestly — advertised).
-        // K20: DeriveKey moved between the sets (47 + 15) — net
-        // advertised set unchanged at 62.
-        // K21: ReKey + ReKeyKeyPair moved between the sets (49 + 13)
-        // — net advertised set still 62.
-        // P2.3: Certify + Re-certify moved between the sets (52 + 10)
-        // — net advertised set still 62.
-        // WD19: Encapsulate + Decapsulate are newly handled (and
-        // therefore honestly advertised) → 54 + 10 = 64.
-        assert_eq!(ops.len(), 64);
+        // History: K19/K20/K21/P2.3/WD19 each moved ops between
+        // handled and corpus-required-advertised-only, net unchanged
+        // at 64 (54 handled + 10 advertised-only) — see git blame for
+        // the full play-by-play. Phase 3.3 (Split Key) and Phase 4
+        // (async subsystem) grew the HANDLED side by 6 (62 handled +
+        // 2 advertised-only = 64, still unchanged net). Phase 6.1 is
+        // the first REAL change: `ADVERTISED_UNIMPLEMENTED_OPERATIONS`
+        // is now empty (Notify/Put were never implemented — see that
+        // const's doc comment) → 62 handled + 0 advertised-only = 62.
+        assert_eq!(ops.len(), 62);
         assert!(ops.contains(&Operation::Sign));
         assert!(ops.contains(&Operation::Encrypt));
         assert!(ops.contains(&Operation::Decrypt));
@@ -325,11 +313,22 @@ mod tests {
         let (_ring, d) = deps();
         let resp = query(&d, QueryRequest { functions: vec![QueryFunction::QueryObjects] }, "corr-o").unwrap();
         let types = resp.object_types.unwrap();
-        assert_eq!(types.len(), 14);
+        // Phase 6.1: was 14 (7 implemented + 7 advertised-only, which
+        // included the genuinely-unimplemented CertificateRequest).
+        // User/Group/*Credential moved into IMPLEMENTED_OBJECT_TYPES
+        // (they were mislabeled, not actually missing);
+        // CertificateRequest was dropped (genuinely unimplemented) —
+        // net 13 (all real now, 0 advertised-only).
+        assert_eq!(types.len(), 13);
         // PgpKey: neither implemented nor corpus-required — trimmed in K3.
         assert!(!types.contains(&ObjectType::PgpKey));
+        // CertificateRequest: genuinely unimplemented (Phase 6.1) —
+        // see ADVERTISED_UNIMPLEMENTED_OBJECT_TYPES's doc comment.
+        assert!(!types.contains(&ObjectType::CertificateRequest));
         assert!(types.contains(&ObjectType::OpaqueObject));
         assert!(types.contains(&ObjectType::SymmetricKey));
+        assert!(types.contains(&ObjectType::User), "genuinely implemented — CreateUser persists it");
+        assert!(types.contains(&ObjectType::Group), "genuinely implemented — CreateGroup persists it");
     }
 
     /// K3 — QueryCapabilities reports the honest capability set;
@@ -347,7 +346,7 @@ mod tests {
         .unwrap();
         let cap = resp.capability_information.expect("CapabilityInformation present");
         assert!(cap.streaming_capability, "multi-part Encrypt/Decrypt is implemented");
-        assert!(!cap.asynchronous_capability, "no async processing");
+        assert!(cap.asynchronous_capability, "Phase 4 — asynchronous processing is real now");
         assert!(!cap.attestation_capability, "no attestation");
         assert!(cap.batch_undo_capability, "§9.5 Undo is implemented");
         assert!(cap.batch_continue_capability, "§9.5 Continue is implemented");

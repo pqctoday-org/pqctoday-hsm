@@ -138,6 +138,15 @@ pub const CKK_XMSS: u32 = 0x0000_0047; // XMSS single-tree (standard)
 pub const CKK_XMSSMT: u32 = 0x0000_0048; // XMSS^MT multi-tree (standard)
 // Vendor: single-level LMS (not in PKCS#11 v3.2 standard; same numeric space as CKK is separate from CKM)
 
+// Vendor key types — FrodoKEM / Classic McEliece (BSI TR-02102-1 recommended KEMs,
+// not NIST-standardized, no PKCS#11 v3.2 standard codepoint exists for either).
+// Allocated at CKK_VENDOR_DEFINED (0x8000_0000) | n per
+// pqctoday-priv/docs/platform/data/pkcs11-vendor-mech-allocation.md §1.4 — the
+// first genuinely vendor-compliant allocation in this project (the earlier
+// 0x4030-0x404F block sat below CKK_VENDOR_DEFINED and was retired).
+pub const CKK_PQCTODAY_FRODOKEM: u32 = 0x8000_0001;
+pub const CKK_PQCTODAY_CLASSIC_MCELIECE: u32 = 0x8000_0002;
+
 // ── PKCS#11 Semantic Attribute Types ─────────────────────────────────────────
 
 pub const CKA_CLASS: u32 = 0x0000_0000;
@@ -256,6 +265,16 @@ pub const CKM_SHA3_384_RSA_PKCS_PSS: u32 = 0x0000_0064;
 // PQC - KEM
 pub const CKM_ML_KEM_KEY_PAIR_GEN: u32 = 0x0000_000F;
 pub const CKM_ML_KEM: u32 = 0x0000_0017;
+
+// Vendor KEMs — FrodoKEM / Classic McEliece (BSI TR-02102-1 §2.4.1/2.4.2
+// recommended, NIST passed on both). No PKCS#11 v3.2 standard codepoint exists
+// for either (confirmed against the normative pkcs11t.h and the OASIS CSD01
+// spec text directly). Allocated at CKM_VENDOR_DEFINED (0x8000_0000) | n per
+// pqctoday-priv/docs/platform/data/pkcs11-vendor-mech-allocation.md §1.4.
+pub const CKM_PQCTODAY_FRODOKEM_KEY_PAIR_GEN: u32 = 0x8000_0001;
+pub const CKM_PQCTODAY_FRODOKEM_ENCAPSULATE: u32 = 0x8000_0002;
+pub const CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN: u32 = 0x8000_0003;
+pub const CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE: u32 = 0x8000_0004;
 
 // PQC - DSA
 pub const CKM_ML_DSA_KEY_PAIR_GEN: u32 = 0x0000_001C;
@@ -432,6 +451,18 @@ pub const CKM_EDDSA: u32 = 0x0000_1057;
 // range (0x80000000+) — the former 0x1058 squatted unassigned spec-reserved
 // space adjacent to CKM_EDDSA and risked a future OASIS collision.
 pub const CKM_EC_MONTGOMERY_KEY_DERIVE: u32 = 0x8000_0011;
+// G12 — Split Key secret sharing (KMIP 3.0 §6.1.12/§6.1.31, §13.1).
+// PKCS#11 v3.2 has NO mechanism for this at all (verified directly
+// against the spec text, not just the header — no Shamir / secret
+// sharing / threshold-scheme / key-split concept anywhere in it), so
+// this is a genuinely new vendor mechanism, not a gap-fill of an
+// existing one. Covers all four KMIP 3.0 §11.54 Split Key Method
+// Enumeration values (XOR, Prime Field, GF(2^16), GF(2^8)) — the
+// specific method + parameters travel in a
+// `CK_SPLIT_KEY_PARAMS`-style native argument, not separate mechanism
+// codepoints, mirroring how CKM_HSS_KEY_PAIR_GEN carries its levels/
+// param-set choice in one mechanism.
+pub const CKM_PQCTODAY_SPLIT_KEY: u32 = 0x8000_0012;
 // PKCS#11 v3.2 §6.7 dedicated Montgomery-curve DH mechanisms, in the
 // CKM_VENDOR_DEFINED (0x80000000) range per the spec header:
 // CKM_X25519 = CKM_VENDOR_DEFINED | 0x1058, CKM_X448 = | 0x1059.
@@ -481,6 +512,25 @@ pub const CKM_CHACHA20_POLY1305: u32 = 0x0000_4021;
 pub const CKP_ML_KEM_512: u32 = 0x1;
 pub const CKP_ML_KEM_768: u32 = 0x2;
 pub const CKP_ML_KEM_1024: u32 = 0x3;
+
+// FrodoKEM (BSI TR-02102-1 §2.4.1) — 6 standard variants; eFrodoKEM
+// (ephemeral/one-time-use) intentionally not exposed, see the FrodoKEM/
+// Classic-McEliece/HQC implementation plan Phase 0.8.
+pub const CKP_FRODOKEM_640_AES: u32 = 0x1;
+pub const CKP_FRODOKEM_640_SHAKE: u32 = 0x2;
+pub const CKP_FRODOKEM_976_AES: u32 = 0x3;
+pub const CKP_FRODOKEM_976_SHAKE: u32 = 0x4;
+pub const CKP_FRODOKEM_1344_AES: u32 = 0x5;
+pub const CKP_FRODOKEM_1344_SHAKE: u32 = 0x6;
+
+// Classic McEliece (BSI TR-02102-1 §2.4.2) — scoped to mceliece6688128 (BSI's
+// Category-5 pick) for this slice; the crate can only have one parameter-set
+// feature compiled in at a time (see implementation plan Phase 0.5), so this
+// is the only valid value today. Kept as an explicit CKP_* (not a bare
+// literal) so CKA_PARAMETER_SET validation follows the same
+// no-silent-default pattern as ML-KEM, and so adding 460896/8192128 later is
+// additive, not a rename.
+pub const CKP_CLASSIC_MCELIECE_6688128: u32 = 0x1;
 
 pub const CKP_ML_DSA_44: u32 = 0x1;
 pub const CKP_ML_DSA_65: u32 = 0x2;
@@ -568,6 +618,12 @@ pub const SUPPORTED_MECHS: &[u32] = &[
     // ML-KEM (FIPS 203)
     CKM_ML_KEM_KEY_PAIR_GEN,
     CKM_ML_KEM,
+    // FrodoKEM / Classic McEliece (BSI TR-02102-1 — vendor mechanisms, see
+    // pqctoday-priv/docs/platform/data/pkcs11-vendor-mech-allocation.md §1.4)
+    CKM_PQCTODAY_FRODOKEM_KEY_PAIR_GEN,
+    CKM_PQCTODAY_FRODOKEM_ENCAPSULATE,
+    CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN,
+    CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE,
     // ML-DSA (FIPS 204) — pure + pre-hash.
     // NOTE: the GENERIC CKM_HASH_ML_DSA (0x1F) is intentionally NOT advertised
     // (P1): it selects the pre-hash via the CK_HASH_SIGN_ADDITIONAL_CONTEXT.hash
@@ -728,9 +784,12 @@ pub fn C_GetMechanismList(slot_id: u32, p_mechanism_list: *mut u32, pul_count: *
     CKR_OK
 }
 
-// ── Multi-part operation stubs (PKCS#11 v3.2 compliance) ────────────────────
-// These return CKR_FUNCTION_NOT_SUPPORTED as the Rust engine only supports
-// single-shot operations. DigestUpdate/DigestFinal are fully implemented above.
+// C_*Update/C_*Final multi-part Sign/Verify/Encrypt/Decrypt/Digest flows are
+// all genuinely implemented in ffi.rs (real per-session accumulator state,
+// e.g. SIGN_MULTIPART_ACC), not stubbed. CKR_FUNCTION_NOT_SUPPORTED below
+// remains the spec-legal answer for the handful of PKCS#11 v3.2 functions a
+// compliant library may decline outright (§11.17) — it is not a marker for
+// "multi-part isn't implemented."
 
 pub const CKR_FUNCTION_NOT_SUPPORTED: u32 = 0x0000_0054;
 pub const CKR_FUNCTION_NOT_PARALLEL: u32 = 0x0000_0051;

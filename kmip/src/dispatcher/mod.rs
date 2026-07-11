@@ -20,6 +20,8 @@
 //! KMIP 3.0 §8.1.3 / §8.2.3 — Batch items are positionally correlated
 //! (no `Unique Batch Item ID` in v3.0). The dispatcher preserves order.
 
+use std::sync::Arc;
+
 use uuid::Uuid;
 
 use crate::error::KmipError;
@@ -32,14 +34,15 @@ use crate::kmip30::{
 };
 use crate::ops::{
     activate::activate,
-    allocation_and_config::{get_constraints, get_usage_allocation, set_defaults, set_endpoint_role},
+    allocation_and_config::{get_constraints, get_usage_allocation, set_constraints, set_defaults, set_endpoint_role},
+    async_ops::{cancel, process, query_asynchronous_requests},
     attribute_mutate::{add_attribute, adjust_attribute, delete_attribute, modify_attribute, set_attribute},
     create::create, create_key_pair::create_key_pair, decrypt::decrypt,
     derive_key::derive_key,
     destroy::destroy, encrypt::encrypt, encapsulate::encapsulate, decapsulate::decapsulate, get::get,
     get_attribute_list::get_attribute_list, get_attributes::get_attributes,
     interop::interop,
-    lifecycle_and_protocol::{archive, check, deactivate, discover_versions, obliterate, ping, recover},
+    lifecycle_and_protocol::{archive, check, deactivate, discover_versions, obliterate, obtain_lease, ping, recover},
     locate::locate,
     mac_and_hash::{hash, mac, mac_verify},
     query::query,
@@ -49,6 +52,7 @@ use crate::ops::{
     rng_and_pkcs11::{pkcs11, rng_retrieve, rng_seed},
     session_and_auth::{create_credential, create_group, create_user, log, login, logout},
     sign::sign, signature_verify::signature_verify,
+    split_key::{create_split_key, join_split_key},
     Deps,
 };
 // Certify / Re-certify / Validate handlers compile only in the `native`
@@ -109,6 +113,7 @@ pub fn dispatch_with_transport_identity(
                     ),
                     result_message: Some("authentication not successful".into()),
                     payload: None,
+                    asynchronous_correlation_value: None,
                 })
                 .collect();
             return ResponseMessage {
@@ -117,34 +122,14 @@ pub fn dispatch_with_transport_identity(
             };
         }
     };
-    // K4 — KMIP 3.0 §8.1.2 `Asynchronous Indicator`. This server has
-    // no asynchronous capability (Query reports `Asynchronous
-    // Capability = false`), so a client demanding `Mandatory`
-    // asynchronous processing gets every batch item failed with
-    // `OperationFailed / OperationNotSupported` instead of a silent
-    // synchronous run. `Optional` / `Prohibited` / absent all proceed
-    // synchronously.
-    if request.header.asynchronous_indicator
-        == Some(crate::kmip30::AsynchronousIndicator::Mandatory)
-    {
-        let items = request
-            .batch_items
-            .iter()
-            .map(|item| ResponseBatchItem {
-                operation: Some(item.operation),
-                result_status: ResultStatus::OperationFailed,
-                result_reason: Some(
-                    crate::error::ResultReason::OperationNotSupported.to_wire_value(),
-                ),
-                result_message: Some("asynchronous processing not supported".into()),
-                payload: None,
-            })
-            .collect();
-        return ResponseMessage {
-            header: ResponseHeader::v3_now(),
-            batch_items: items,
-        };
-    }
+    // K4 / Phase 4 — KMIP 3.0 §8.1.2 `Asynchronous Indicator`. Handling
+    // moved from a single whole-batch gate here into per-item logic in
+    // `dispatch_one`: each batch item can be a different operation, and
+    // Poll/Cancel/Process/Query Asynchronous Requests themselves can
+    // never be asynchronous (§6.1.43/§6.1.5/§6.1.44 each say so
+    // explicitly), so a blanket batch-level check was too coarse once
+    // the server gained real asynchronous capability. `Optional` /
+    // `Prohibited` / absent all proceed synchronously, unchanged.
     let mode = request
         .header
         .batch_error_continuation_option
@@ -152,7 +137,7 @@ pub fn dispatch_with_transport_identity(
     let mut state = BatchState::default();
     let mut items: Vec<ResponseBatchItem> = Vec::with_capacity(request.batch_items.len());
     for item in request.batch_items {
-        let response = dispatch_one(deps, item, &mut state, &auth);
+        let response = dispatch_one(deps, item, &mut state, &auth, request.header.asynchronous_indicator);
         // D1 — KMIP request counter (operation × success/error). `native` only —
         // the wasm core has no Prometheus registry (`crate::metrics` is gated out).
         #[cfg(feature = "native")]
@@ -203,10 +188,35 @@ fn authenticate_request(
     header: &crate::kmip30::RequestHeader,
     transport_identity: Option<crate::server::auth::Identity>,
 ) -> Result<crate::server::auth::AuthContext, ()> {
+    use crate::kmip30::Credential;
     use crate::server::auth::{AuthContext, ConfigVerifier, CredentialVerifier};
     if !deps.config.auth_enabled() {
         // Open-auth — REQUIRED default for the hermetic replay harness.
         return Ok(AuthContext { identity: transport_identity });
+    }
+    // Phase 1.4 (K14, T4) — a Login-issued ticket authenticates a
+    // request exactly like a verified Username/Password credential:
+    // same header slot (§8.1.2 Authentication carries a `Credential`,
+    // and Ticket (0x06) is one of the published Credential Types —
+    // §9.9 Table 517), same all-or-nothing per-request re-check (no
+    // separate "session" concept beyond "is this ticket live"). An
+    // expired or unknown ticket falls through to the credential/mTLS
+    // checks below rather than failing immediately, so a client that
+    // sends a Ticket AND a fresh Username/Password isn't penalised for
+    // the stale ticket.
+    if let Some(identity) = header.authentication.iter().find_map(|c| match c {
+        Credential::Ticket(t) => {
+            let sessions = deps.sessions.lock().unwrap_or_else(|e| e.into_inner());
+            let record = sessions.get(&t.ticket_value)?;
+            if record.is_expired(time::OffsetDateTime::now_utc()) {
+                None
+            } else {
+                Some(record.identity.clone())
+            }
+        }
+        _ => None,
+    }) {
+        return Ok(AuthContext { identity: Some(identity) });
     }
     let verifier = ConfigVerifier::new(&deps.config.auth_users);
     if let Some(identity) = header
@@ -334,14 +344,15 @@ pub const HANDLED_OPERATIONS: &[crate::kmip30::Operation] = {
         // KMIP 3.0 WD19 — first-class ML-KEM Encapsulate / Decapsulate.
         Op::Encapsulate, Op::Decapsulate,
         Op::Interop, Op::Register, Op::Import, Op::Export,
-        Op::Deactivate, Op::Check, Op::Archive, Op::Recover,
+        Op::Deactivate, Op::Check, Op::ObtainLease, Op::Archive, Op::Recover,
+        Op::CreateSplitKey, Op::JoinSplitKey,
         Op::Obliterate, Op::DiscoverVersions, Op::Ping,
         Op::MAC, Op::MACVerify, Op::Hash,
         Op::CreateCredential, Op::CreateGroup, Op::CreateUser,
         Op::Log, Op::Login, Op::Logout,
         Op::RNGRetrieve, Op::RNGSeed, Op::Pkcs11,
         // K19 — Baseline client-to-server ops (§6.1.26/27/58/59).
-        Op::GetUsageAllocation, Op::GetConstraints,
+        Op::GetUsageAllocation, Op::GetConstraints, Op::SetConstraints,
         Op::SetDefaults, Op::SetEndpointRole,
         // K20 — §6.1.18 Derive Key.
         Op::DeriveKey,
@@ -351,6 +362,8 @@ pub const HANDLED_OPERATIONS: &[crate::kmip30::Operation] = {
         Op::Validate,
         // P2.3 — §6.1.6 Certify / §6.1.50 Re-certify (PQC-capable CA).
         Op::Certify, Op::ReCertify,
+        // Phase 4 — asynchronous subsystem (§6.1.43/§6.1.5/§6.1.44/§6.1.46).
+        Op::Poll, Op::Cancel, Op::Process, Op::QueryAsynchronousRequests,
     ]
 };
 
@@ -359,6 +372,7 @@ fn dispatch_one(
     item: RequestBatchItem,
     state: &mut BatchState,
     auth: &crate::server::auth::AuthContext,
+    asynchronous_indicator: Option<crate::kmip30::AsynchronousIndicator>,
 ) -> ResponseBatchItem {
     let correlation_id = Uuid::new_v4().to_string();
     let op = item.operation;
@@ -371,9 +385,45 @@ fn dispatch_one(
                 result_reason: Some(err.result_reason().to_wire_value()),
                 result_message: Some(err.to_string()),
                 payload: None,
+                asynchronous_correlation_value: None,
             };
         }
     };
+
+    // Async subsystem — §6.1.43 `Poll` never runs through the normal
+    // Success/Failed handler wrapping below: its response impersonates
+    // whatever op it's polling for ("SHALL be identical to the response
+    // that would have been sent if the operation had completed
+    // synchronously"), which `handle_payload`'s uniform per-op wrapping
+    // can't express. Handled first and returns early.
+    if let RequestPayload::Poll(req) = &payload {
+        return handle_poll(deps, req);
+    }
+
+    // Async subsystem — KMIP 3.0 §8.1.2 `Asynchronous Indicator =
+    // Mandatory`. Poll/Cancel/Process/QueryAsynchronousRequests are
+    // themselves never asynchronous (§6.1.5/§6.1.44/§6.1.46 all say so
+    // explicitly) and Query/DiscoverVersions/Ping are trivial
+    // negotiation ops not worth deferring — every other handled op is
+    // eligible (`is_async_eligible`). An eligible op is enqueued as a
+    // real job (§9.1 Asynchronous Correlation Value) instead of run
+    // inline; the response is `OperationPending` with no payload, per
+    // the same table row Poll's own "not yet complete" response uses.
+    // An ineligible op fails just this item — `Optional` / `Prohibited`
+    // / absent all proceed synchronously, unchanged.
+    if asynchronous_indicator == Some(crate::kmip30::AsynchronousIndicator::Mandatory) {
+        if is_async_eligible(op) {
+            return enqueue_async_job(deps, op, payload, correlation_id, auth.clone());
+        }
+        return ResponseBatchItem {
+            operation: Some(op),
+            result_status: ResultStatus::OperationFailed,
+            result_reason: Some(crate::error::ResultReason::OperationNotSupported.to_wire_value()),
+            result_message: Some(format!("{op:?} is not eligible for asynchronous processing")),
+            payload: None,
+            asynchronous_correlation_value: None,
+        };
+    }
 
     // R7 Phase 4 — snapshot every input UID BEFORE the handler runs
     // so the §9.5 Undo wave (if triggered later in this batch) can
@@ -409,6 +459,7 @@ fn dispatch_one(
                 result_reason: None,
                 result_message: None,
                 payload: Some(payload),
+                asynchronous_correlation_value: None,
             }
         }
         Err(err) => ResponseBatchItem {
@@ -417,7 +468,182 @@ fn dispatch_one(
             result_reason: Some(err.result_reason().to_wire_value()),
             result_message: Some(err.to_string()),
             payload: None,
+            asynchronous_correlation_value: None,
         },
+    }
+}
+
+/// Async subsystem — ops that MAY be processed asynchronously. Broad
+/// by design (KMIP 3.0 §8.1.2: "any operation MAY be processed
+/// asynchronously"), minus:
+/// - the async-management ops themselves (`Poll`/`Cancel`/`Process`/
+///   `QueryAsynchronousRequests`) — each explicitly documents its own
+///   response as never asynchronous;
+/// - `Query`/`DiscoverVersions`/`Ping` — trivial negotiation ops with
+///   no realistic latency to hide behind polling.
+/// Every other entry in [`HANDLED_OPERATIONS`] is eligible.
+fn is_async_eligible(op: crate::kmip30::Operation) -> bool {
+    use crate::kmip30::Operation as Op;
+    HANDLED_OPERATIONS.contains(&op)
+        && !matches!(
+            op,
+            Op::Poll
+                | Op::Cancel
+                | Op::Process
+                | Op::QueryAsynchronousRequests
+                | Op::Query
+                | Op::DiscoverVersions
+                | Op::Ping
+        )
+}
+
+/// Async subsystem — enqueue `payload` as a new job and respond
+/// `OperationPending` with a fresh Asynchronous Correlation Value. The
+/// job itself starts executing via [`spawn_or_run_async_job`] before
+/// this function returns; whether that means "on a detached thread,
+/// concurrently" or "inline, right now" depends on whether `deps` has
+/// a usable [`crate::ops::Deps::self_handle`] — either way, THIS
+/// response never carries the payload.
+fn enqueue_async_job(
+    deps: &Deps,
+    op: crate::kmip30::Operation,
+    payload: RequestPayload,
+    correlation_id: String,
+    auth: crate::server::auth::AuthContext,
+) -> ResponseBatchItem {
+    let cv = deps.new_correlation_value();
+    let job = crate::ops::AsyncJob::new(op);
+    deps.async_jobs
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(cv.clone(), Arc::clone(&job));
+    spawn_or_run_async_job(deps, job, payload, correlation_id, auth);
+    ResponseBatchItem {
+        operation: Some(op),
+        result_status: ResultStatus::OperationPending,
+        result_reason: None,
+        result_message: None,
+        payload: None,
+        asynchronous_correlation_value: Some(cv),
+    }
+}
+
+/// Async subsystem — native, with a `self_handle` installed (the
+/// production server): run `job` on a real detached OS thread, so it
+/// genuinely executes concurrently with whatever the client does next.
+/// Every other configuration (any test building `Deps` via
+/// `Deps::new`, or a non-`native` build with no OS threads at all)
+/// falls back to running it inline before this call returns — see
+/// [`crate::ops::Deps::self_handle`] for why that fallback is still
+/// fully protocol-correct.
+fn spawn_or_run_async_job(
+    deps: &Deps,
+    job: Arc<crate::ops::AsyncJob>,
+    payload: RequestPayload,
+    correlation_id: String,
+    auth: crate::server::auth::AuthContext,
+) {
+    #[cfg(feature = "native")]
+    if let Some(deps_arc) = deps.self_handle.get().and_then(|w| w.upgrade()) {
+        // Clone the handle BEFORE moving one copy into the closure —
+        // if `spawn` itself fails (OS resource exhaustion), the
+        // closure (and everything it captured, including that moved
+        // `Arc`) is dropped, not returned to us; we still need a
+        // handle to mark the job failed instead of leaving it stuck
+        // at `Submitted` forever.
+        let job_for_thread = Arc::clone(&job);
+        let spawned = std::thread::Builder::new()
+            .name("kmip-async-job".into())
+            .spawn(move || {
+                job_for_thread.mark_in_process();
+                let outcome = handle_payload(&deps_arc, payload, &correlation_id, &auth);
+                job_for_thread.mark_completed(outcome);
+            });
+        if spawned.is_ok() {
+            return;
+        }
+        job.mark_completed(Err(KmipError::internal(
+            "failed to spawn background async-job thread",
+        )));
+        return;
+    }
+    run_async_job_eagerly(deps, job, payload, correlation_id, &auth);
+}
+
+/// Async subsystem — run `job` inline, synchronously, right now. Used
+/// whenever genuine background execution isn't available (see
+/// [`spawn_or_run_async_job`]). The job's `stage` still visits
+/// `InProcess` (briefly, on this same thread) before `Completed`, so
+/// `Poll`/`Cancel`/`Process` see a real, if instantaneous, state
+/// machine — not a special-cased shortcut.
+fn run_async_job_eagerly(
+    deps: &Deps,
+    job: Arc<crate::ops::AsyncJob>,
+    payload: RequestPayload,
+    correlation_id: String,
+    auth: &crate::server::auth::AuthContext,
+) {
+    job.mark_in_process();
+    let outcome = handle_payload(deps, payload, &correlation_id, auth);
+    job.mark_completed(outcome);
+}
+
+/// Async subsystem — §6.1.43 `Poll`. Looks up the job by its
+/// Asynchronous Correlation Value:
+/// - unknown value → `OperationFailed / Invalid Asynchronous
+///   Correlation Value`, echoing `Poll` itself as the operation.
+/// - not yet `Completed` → `OperationPending`, no payload, echoing
+///   `Poll` (the response IS to this Poll request).
+/// - `Completed` → "identical to the response that would have been
+///   sent if the operation had completed synchronously" (§6.1.43):
+///   echoes the ORIGINAL polled operation + its real outcome, exactly
+///   as `dispatch_one`'s normal Success/Failed wrapping would have.
+fn handle_poll(deps: &Deps, req: &crate::kmip30::PollRequest) -> ResponseBatchItem {
+    use crate::kmip30::{Operation, ProcessingStage};
+    let job = {
+        let jobs = deps.async_jobs.lock().unwrap_or_else(|e| e.into_inner());
+        jobs.get(&req.asynchronous_correlation_value).cloned()
+    };
+    let Some(job) = job else {
+        let err = KmipError::invalid_asynchronous_correlation_value();
+        return ResponseBatchItem {
+            operation: Some(Operation::Poll),
+            result_status: ResultStatus::OperationFailed,
+            result_reason: Some(err.result_reason().to_wire_value()),
+            result_message: Some(err.to_string()),
+            payload: None,
+            asynchronous_correlation_value: None,
+        };
+    };
+    let st = job.state.lock().unwrap_or_else(|e| e.into_inner());
+    if st.stage != ProcessingStage::Completed {
+        return ResponseBatchItem {
+            operation: Some(Operation::Poll),
+            result_status: ResultStatus::OperationPending,
+            result_reason: None,
+            result_message: None,
+            payload: None,
+            asynchronous_correlation_value: Some(req.asynchronous_correlation_value.clone()),
+        };
+    }
+    match &st.outcome {
+        Some(Ok(payload)) => ResponseBatchItem {
+            operation: Some(st.operation),
+            result_status: ResultStatus::Success,
+            result_reason: None,
+            result_message: None,
+            payload: Some(payload.clone()),
+            asynchronous_correlation_value: None,
+        },
+        Some(Err(err)) => ResponseBatchItem {
+            operation: Some(st.operation),
+            result_status: ResultStatus::OperationFailed,
+            result_reason: Some(err.result_reason().to_wire_value()),
+            result_message: Some(err.to_string()),
+            payload: None,
+            asynchronous_correlation_value: None,
+        },
+        None => unreachable!("AsyncJob::mark_completed always sets `outcome` before `stage = Completed`"),
     }
 }
 
@@ -454,6 +680,25 @@ fn newly_created_uids(payload: &ResponsePayload) -> Vec<String> {
             Some(info) => vec![info.new_private_key_uid.clone(), info.new_public_key_uid.clone()],
             None => Vec::new(),
         },
+        // Gap-remediation Phase G, Finding #9 — these four PQC/Split-Key
+        // ops mint UIDs just like every arm above, but fell through to
+        // the catch-all: a batch Undo after one of them succeeded leaked
+        // the newly-created object instead of rolling it back.
+        // Encapsulate always mints a new Secret Data object for the
+        // shared secret (`uid`); `rekeyed` (same shape/rationale as
+        // Sign's own field above) additionally mints a fresh key pair
+        // when a crypto-agility rekey fired inline.
+        ResponsePayload::Encapsulate(r) => {
+            let mut uids = vec![r.uid.clone()];
+            if let Some(info) = &r.rekeyed {
+                uids.push(info.new_private_key_uid.clone());
+                uids.push(info.new_public_key_uid.clone());
+            }
+            uids
+        }
+        ResponsePayload::Decapsulate(r) => vec![r.uid.clone()],
+        ResponsePayload::CreateSplitKey(r) => r.uids.clone(),
+        ResponsePayload::JoinSplitKey(r) => vec![r.uid.clone()],
         _ => Vec::new(),
     }
 }
@@ -565,6 +810,15 @@ fn update_id_placeholder(state: &mut BatchState, payload: &ResponsePayload) {
         // Placeholder for the rest of the batch.
         ResponsePayload::Certify(r)      => Some(&r.uid),
         ResponsePayload::ReCertify(r)    => Some(&r.uid),
+        // Gap-remediation Phase G, Finding #9 — same 4 ops as
+        // `newly_created_uids` above; a batch item referencing
+        // `$IDPlaceholder` right after one of these used to fail with a
+        // spurious "ID Placeholder not set" instead of resolving to the
+        // real UID.
+        ResponsePayload::Encapsulate(r)   => Some(&r.uid),
+        ResponsePayload::Decapsulate(r)   => Some(&r.uid),
+        ResponsePayload::CreateSplitKey(r) => r.uids.first().map(|s| s.as_str()),
+        ResponsePayload::JoinSplitKey(r)  => Some(&r.uid),
         _ => None,
     };
     if let Some(u) = uid { state.id_placeholder = Some(u.to_string()); }
@@ -629,6 +883,9 @@ fn handle_payload(
         RequestPayload::Export(r) => ResponsePayload::Export(export(deps, r, correlation_id)?),
         RequestPayload::Deactivate(r) => ResponsePayload::Deactivate(deactivate(deps, r, correlation_id)?),
         RequestPayload::Check(r) => ResponsePayload::Check(check(deps, r, correlation_id)?),
+        RequestPayload::ObtainLease(r) => ResponsePayload::ObtainLease(obtain_lease(deps, r, correlation_id)?),
+        RequestPayload::CreateSplitKey(r) => ResponsePayload::CreateSplitKey(create_split_key(deps, r, correlation_id)?),
+        RequestPayload::JoinSplitKey(r) => ResponsePayload::JoinSplitKey(join_split_key(deps, r, correlation_id)?),
         RequestPayload::Archive(r) => ResponsePayload::Archive(archive(deps, r, correlation_id)?),
         RequestPayload::Recover(r) => ResponsePayload::Recover(recover(deps, r, correlation_id)?),
         RequestPayload::Obliterate(r) => ResponsePayload::Obliterate(obliterate(deps, r, correlation_id)?),
@@ -672,6 +929,9 @@ fn handle_payload(
         RequestPayload::GetConstraints(r) => {
             ResponsePayload::GetConstraints(get_constraints(deps, r, correlation_id)?)
         }
+        RequestPayload::SetConstraints(r) => {
+            ResponsePayload::SetConstraints(set_constraints(deps, r, correlation_id)?)
+        }
         RequestPayload::SetDefaults(r) => {
             ResponsePayload::SetDefaults(set_defaults(deps, r, correlation_id)?)
         }
@@ -686,6 +946,21 @@ fn handle_payload(
         RequestPayload::ReKeyKeyPair(r) => {
             ResponsePayload::ReKeyKeyPair(rekey_key_pair(deps, r, correlation_id)?)
         }
+        // Phase 4 — `Poll` never reaches here: `dispatch_one` intercepts
+        // it before calling `handle_payload` (its response impersonates
+        // the ORIGINAL polled operation, which this uniform per-op
+        // wrapping can't express). This arm exists only so the match
+        // stays exhaustive.
+        RequestPayload::Poll(_) => {
+            return Err(KmipError::internal(
+                "Poll must be intercepted by dispatch_one before handle_payload",
+            ));
+        }
+        RequestPayload::Cancel(r) => ResponsePayload::Cancel(cancel(deps, r, correlation_id)?),
+        RequestPayload::Process(r) => ResponsePayload::Process(process(deps, r, correlation_id)?),
+        RequestPayload::QueryAsynchronousRequests(r) => ResponsePayload::QueryAsynchronousRequests(
+            query_asynchronous_requests(deps, r, correlation_id)?,
+        ),
     })
 }
 
@@ -832,10 +1107,9 @@ mod tests {
     #[test]
     fn k3_unsupported_op_fails_item_with_operation_not_supported() {
         let d = deps();
-        // K21 promoted ReKey to a real handler; ObtainLease keeps this
-        // matrix at four advertised-unimplemented ops.
+        // K21 promoted ReKey to a real handler; Phase 3.1 promoted
+        // ObtainLease — this matrix keeps shrinking as real handlers land.
         for op in [
-            crate::kmip30::Operation::ObtainLease,
             crate::kmip30::Operation::Certify,
             crate::kmip30::Operation::Cancel,
             crate::kmip30::Operation::DelegatedLogin,
@@ -979,31 +1253,38 @@ mod tests {
         )
     }
 
-    /// K4 — §8.1.2 `Asynchronous Indicator = Mandatory`: this server
-    /// has no asynchronous capability, so EVERY batch item fails with
-    /// `OperationFailed / OperationNotSupported (0x05)` instead of
-    /// being silently processed synchronously.
+    /// K4 / Phase 4 — §8.1.2 `Asynchronous Indicator = Mandatory`
+    /// against `Query`, which is deliberately excluded from
+    /// asynchronous eligibility (`dispatcher::is_async_eligible` — a
+    /// trivial negotiation op, not worth deferring): every such item
+    /// fails with `OperationFailed / OperationNotSupported (0x05)`
+    /// instead of being silently processed synchronously OR silently
+    /// enqueued. `Continue` mode is set explicitly so BOTH items are
+    /// processed independently and both responses come back — the
+    /// default `Stop` mode would (correctly, per §9.5) halt after the
+    /// first failure and return only one, which is covered by
+    /// `mandatory_ineligible_op_fails_only_that_item_not_the_whole_batch`
+    /// in `tests/async_ops_e2e.rs`.
     #[test]
     fn k4_async_mandatory_fails_every_batch_item() {
         use crate::codec::{Tag, TtlvFrame, Value};
         use crate::kmip30::wire::tags;
         let d = deps();
         let msg = k4_decode(
-            vec![TtlvFrame::new(Tag(tags::AsynchronousIndicator), Value::Enumeration(0x01))],
+            vec![
+                TtlvFrame::new(Tag(tags::AsynchronousIndicator), Value::Enumeration(0x01)),
+                TtlvFrame::new(Tag(tags::BatchErrorContinuationOption), Value::Enumeration(0x01)),
+            ],
             vec![k4_query_item(None), k4_query_item(None)],
         );
         let resp = dispatch(&d, msg);
-        assert_eq!(resp.batch_items.len(), 2, "every batch item gets a response");
+        assert_eq!(resp.batch_items.len(), 2, "Continue mode processes every batch item");
         for item in &resp.batch_items {
             assert_eq!(item.result_status, ResultStatus::OperationFailed);
             assert_eq!(
                 item.result_reason,
                 Some(crate::error::ResultReason::OperationNotSupported.to_wire_value()),
                 "must be OperationNotSupported (0x05)",
-            );
-            assert_eq!(
-                item.result_message.as_deref(),
-                Some("asynchronous processing not supported"),
             );
             assert_eq!(item.operation, Some(crate::kmip30::Operation::Query), "§8.2.3 echo");
         }
@@ -2149,6 +2430,120 @@ rules:
         assert!(
             d.store.get(&new_pub_uid).unwrap().is_none(),
             "Undo must delete the newly-minted replacement public key",
+        );
+    }
+
+    // ── Phase 1.4 (K14) — ticket-based session auth ─────────────────────
+
+    /// The real proof of T4: a Login-issued ticket authenticates a
+    /// LATER, otherwise-credential-free request — through the actual
+    /// `dispatch()` entry point, not just the `login`/`logout` op
+    /// functions in isolation. Query is a harmless op to probe with.
+    #[test]
+    fn login_ticket_authenticates_a_later_request() {
+        use crate::kmip30::{Credential, QueryFunction, QueryRequest, Ticket};
+        use crate::server::auth::{sha256_hex, AuthUser};
+
+        let mut d = deps();
+        d.config.auth_users = vec![AuthUser { username: "alice".into(), password_sha256: sha256_hex("pw") }];
+
+        // A request with no credential at all: rejected under configured auth.
+        let bare_query = || one_off_request(RequestPayload::Query(QueryRequest {
+            functions: vec![QueryFunction::QueryOperations],
+        }));
+        let resp = dispatch(&d, bare_query());
+        assert_eq!(resp.batch_items[0].result_status, ResultStatus::OperationFailed);
+
+        // Login with a real username/password credential in the header.
+        let login_req = RequestMessage {
+            header: crate::kmip30::RequestHeader {
+                authentication: vec![Credential::UsernameAndPassword {
+                    username: "alice".into(),
+                    password: Some("pw".into()),
+                }],
+                ..crate::kmip30::RequestHeader::v3()
+            },
+            batch_items: vec![RequestBatchItem {
+                operation: crate::kmip30::Operation::Login,
+                payload: RequestPayload::Login(crate::kmip30::LoginRequest {
+                    lease_time: None, request_count: None, usage_limits: None,
+                }),
+            }],
+        };
+        let login_resp = dispatch(&d, login_req);
+        assert_eq!(login_resp.batch_items[0].result_status, ResultStatus::Success);
+        let ticket = match &login_resp.batch_items[0].payload {
+            Some(ResponsePayload::Login(r)) => r.ticket.clone(),
+            other => panic!("expected Login response payload, got {other:?}"),
+        };
+
+        // A LATER, otherwise-bare Query — carrying ONLY the ticket, no
+        // username/password — must now authenticate.
+        let ticket_req = RequestMessage {
+            header: crate::kmip30::RequestHeader {
+                authentication: vec![Credential::Ticket(Ticket {
+                    ticket_type: ticket.ticket_type,
+                    ticket_value: ticket.ticket_value.clone(),
+                })],
+                ..crate::kmip30::RequestHeader::v3()
+            },
+            batch_items: vec![RequestBatchItem {
+                operation: crate::kmip30::Operation::Query,
+                payload: RequestPayload::Query(QueryRequest { functions: vec![QueryFunction::QueryOperations] }),
+            }],
+        };
+        let resp = dispatch(&d, ticket_req);
+        assert_eq!(
+            resp.batch_items[0].result_status,
+            ResultStatus::Success,
+            "a live Login ticket must authenticate a later request on its own"
+        );
+
+        // A ticket with tampered bytes must NOT authenticate.
+        let mut bad_ticket_value = ticket.ticket_value.clone();
+        bad_ticket_value[0] ^= 0xFF;
+        let bad_req = RequestMessage {
+            header: crate::kmip30::RequestHeader {
+                authentication: vec![Credential::Ticket(Ticket {
+                    ticket_type: ticket.ticket_type,
+                    ticket_value: bad_ticket_value,
+                })],
+                ..crate::kmip30::RequestHeader::v3()
+            },
+            batch_items: vec![RequestBatchItem {
+                operation: crate::kmip30::Operation::Query,
+                payload: RequestPayload::Query(QueryRequest { functions: vec![] }),
+            }],
+        };
+        assert_eq!(dispatch(&d, bad_req).batch_items[0].result_status, ResultStatus::OperationFailed);
+
+        // Logout invalidates the ticket; it stops working on a THIRD request.
+        let logout_req = RequestMessage {
+            header: crate::kmip30::RequestHeader {
+                authentication: vec![Credential::Ticket(ticket.clone())],
+                ..crate::kmip30::RequestHeader::v3()
+            },
+            batch_items: vec![RequestBatchItem {
+                operation: crate::kmip30::Operation::Logout,
+                payload: RequestPayload::Logout(crate::kmip30::LogoutRequest { ticket: ticket.clone() }),
+            }],
+        };
+        assert_eq!(dispatch(&d, logout_req).batch_items[0].result_status, ResultStatus::Success);
+
+        let ticket_req_again = RequestMessage {
+            header: crate::kmip30::RequestHeader {
+                authentication: vec![Credential::Ticket(ticket)],
+                ..crate::kmip30::RequestHeader::v3()
+            },
+            batch_items: vec![RequestBatchItem {
+                operation: crate::kmip30::Operation::Query,
+                payload: RequestPayload::Query(QueryRequest { functions: vec![] }),
+            }],
+        };
+        assert_eq!(
+            dispatch(&d, ticket_req_again).batch_items[0].result_status,
+            ResultStatus::OperationFailed,
+            "a logged-out ticket must stop authenticating"
         );
     }
 }

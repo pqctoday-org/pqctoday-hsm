@@ -778,6 +778,18 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
         // ML-KEM ek: 800 B (ML-KEM-512) … 1568 B (ML-KEM-1024) — FIPS 203 Table 3.
         CKM_ML_KEM_KEY_PAIR_GEN => (800, 1568, 0x00010000),
         CKM_ML_KEM => (800, 1568, 0x10000000 | 0x20000000),
+        // FrodoKEM (BSI TR-02102-1 §2.4.1) — ek: 9616 B (FrodoKEM-640) … 21520 B
+        // (FrodoKEM-1344), verified directly against `frodo-kem` v0.1.0's
+        // `AlgorithmParams::encryption_key_length` (not the spec PDF, to avoid
+        // a version mismatch between the two).
+        CKM_PQCTODAY_FRODOKEM_KEY_PAIR_GEN => (9616, 21520, 0x00010000),
+        CKM_PQCTODAY_FRODOKEM_ENCAPSULATE => (9616, 21520, 0x10000000 | 0x20000000),
+        // Classic McEliece (BSI TR-02102-1 §2.4.2) — scoped to mceliece6688128
+        // only (see implementation plan Phase 0.5); ek: 1,044,992 B, verified
+        // directly against `classic-mceliece-rust` v2.0.2's
+        // `CRYPTO_PUBLICKEYBYTES` for that parameter set.
+        CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN => (1_044_992, 1_044_992, 0x00010000),
+        CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE => (1_044_992, 1_044_992, 0x10000000 | 0x20000000),
         // ML-DSA pk: 1312 B (ML-DSA-44) … 2592 B (ML-DSA-87) — FIPS 204 Table 2.
         CKM_ML_DSA_KEY_PAIR_GEN => (1312, 2592, 0x00010000),
         // CKF_SIGN | CKF_VERIFY | CKF_MESSAGE_SIGN | CKF_MESSAGE_VERIFY —
@@ -1186,12 +1198,20 @@ pub fn C_GenerateKeyPair(
             CKM_SLH_DSA_KEY_PAIR_GEN => Some(CKK_SLH_DSA),
             CKM_RSA_PKCS_KEY_PAIR_GEN => Some(CKK_RSA),
             CKM_EC_KEY_PAIR_GEN => Some(CKK_EC),
-            // Stateful HBS keygen is not implemented, but the keytype-vs-mech
-            // consistency rule (V4) still applies up-front: a contradictory
-            // CKA_KEY_TYPE is CKR_TEMPLATE_INCONSISTENT before any keygen work.
+            // HSS, XMSS, and XMSS-MT keygen are all implemented below
+            // (real LMS/LM-OTS / XMSS tree generation), and this FFI
+            // layer's own C_Sign/C_Verify sign/verify both mechanisms
+            // for real too. Only the newer typed `native::sign` module
+            // hasn't been extended past HSS to XMSS/XMSS-MT yet (see
+            // that module's doc comment) — this FFI path is unaffected.
+            // The keytype-vs-mech consistency rule (V4) still applies
+            // up-front for all three here: a contradictory CKA_KEY_TYPE
+            // is CKR_TEMPLATE_INCONSISTENT before any keygen work runs.
             CKM_HSS_KEY_PAIR_GEN => Some(CKK_HSS),
             CKM_XMSS_KEY_PAIR_GEN => Some(CKK_XMSS),
             CKM_XMSSMT_KEY_PAIR_GEN => Some(CKK_XMSSMT),
+            CKM_PQCTODAY_FRODOKEM_KEY_PAIR_GEN => Some(CKK_PQCTODAY_FRODOKEM),
+            CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN => Some(CKK_PQCTODAY_CLASSIC_MCELIECE),
             _ => None,
         };
         if let Some(exp) = expected_kt {
@@ -2340,6 +2360,181 @@ pub fn C_GenerateKeyPair(
                 CKR_OK
             }
 
+            // BSI TR-02102-1 §2.4.1 — CKA_PARAMETER_SET selects one of the 6
+            // standard FrodoKEM variants; REQUIRED, same convention as
+            // ML-KEM above. No deterministic (CKA_SEED) keygen path exists —
+            // `frodo-kem` doesn't expose a keygen-from-seed entry point.
+            CKM_PQCTODAY_FRODOKEM_KEY_PAIR_GEN => {
+                let ps = match get_attr_ulong(
+                    p_public_key_template,
+                    ul_public_key_attribute_count,
+                    CKA_PARAMETER_SET,
+                ) {
+                    Some(p) => p,
+                    None => return CKR_TEMPLATE_INCOMPLETE,
+                };
+                let alg = match crate::native::keygen::frodokem_algorithm(ps) {
+                    Ok(a) => a,
+                    Err(_) => return CKR_ATTRIBUTE_VALUE_INVALID,
+                };
+                if get_attr_bytes(p_private_key_template, ul_private_key_attribute_count, CKA_SEED)
+                    .is_some()
+                    || get_attr_bytes(p_public_key_template, ul_public_key_attribute_count, CKA_SEED)
+                        .is_some()
+                {
+                    return CKR_ATTRIBUTE_VALUE_INVALID;
+                }
+
+                let mut pub_attrs = HashMap::new();
+                let mut prv_attrs = HashMap::new();
+                store_param_set(&mut pub_attrs, ps);
+                store_param_set(&mut prv_attrs, ps);
+                store_algo_family(&mut pub_attrs, ALGO_FRODOKEM);
+                store_algo_family(&mut prv_attrs, ALGO_FRODOKEM);
+                store_ulong(&mut pub_attrs, CKA_CLASS, CKO_PUBLIC_KEY);
+                store_ulong(&mut pub_attrs, CKA_KEY_TYPE, CKK_PQCTODAY_FRODOKEM);
+                store_ulong(&mut pub_attrs, CKA_PARAMETER_SET, ps);
+                store_ulong(&mut pub_attrs, CKA_KEY_GEN_MECHANISM, CKM_PQCTODAY_FRODOKEM_KEY_PAIR_GEN);
+                store_bool(&mut pub_attrs, CKA_TOKEN, false);
+                store_bool(&mut pub_attrs, CKA_PRIVATE, false);
+                store_bool(&mut pub_attrs, CKA_ENCRYPT, false);
+                store_bool(&mut pub_attrs, CKA_VERIFY, false);
+                store_bool(&mut pub_attrs, CKA_WRAP, false);
+                store_bool(&mut pub_attrs, CKA_ENCAPSULATE, true);
+                store_bool(&mut pub_attrs, CKA_DERIVE, false);
+                store_bool(&mut pub_attrs, CKA_LOCAL, true);
+                store_ulong(&mut prv_attrs, CKA_CLASS, CKO_PRIVATE_KEY);
+                store_ulong(&mut prv_attrs, CKA_KEY_TYPE, CKK_PQCTODAY_FRODOKEM);
+                store_ulong(&mut prv_attrs, CKA_PARAMETER_SET, ps);
+                store_ulong(&mut prv_attrs, CKA_KEY_GEN_MECHANISM, CKM_PQCTODAY_FRODOKEM_KEY_PAIR_GEN);
+                store_bool(&mut prv_attrs, CKA_TOKEN, false);
+                store_bool(&mut prv_attrs, CKA_PRIVATE, true);
+                store_bool(&mut prv_attrs, CKA_SENSITIVE, true);
+                store_bool(&mut prv_attrs, CKA_EXTRACTABLE, false);
+                store_bool(&mut prv_attrs, CKA_DECRYPT, false);
+                store_bool(&mut prv_attrs, CKA_SIGN, false);
+                store_bool(&mut prv_attrs, CKA_UNWRAP, false);
+                store_bool(&mut prv_attrs, CKA_DECAPSULATE, true);
+                store_bool(&mut prv_attrs, CKA_DERIVE, false);
+                store_bool(&mut prv_attrs, CKA_LOCAL, true);
+
+                // RNG note (see native::keygen::generate_frodokem_keypair):
+                // `frodo-kem` needs rand_core 0.10's CryptoRng, not this
+                // engine's usual rand 0.8 OsRng.
+                use getrandom_0_4::rand_core::UnwrapErr;
+                use getrandom_0_4::SysRng;
+                let mut rng = UnwrapErr(SysRng);
+                let (ek, dk) = alg.generate_keypair(&mut rng);
+                pub_attrs.insert(CKA_VALUE, ek.value().to_vec());
+                prv_attrs.insert(CKA_VALUE, dk.value().to_vec());
+
+                absorb_template_attrs(
+                    &mut pub_attrs,
+                    p_public_key_template,
+                    ul_public_key_attribute_count,
+                );
+                absorb_template_attrs(
+                    &mut prv_attrs,
+                    p_private_key_template,
+                    ul_private_key_attribute_count,
+                );
+                finalize_private_key_attrs(&mut prv_attrs);
+                compute_kcv(&mut pub_attrs);
+                compute_kcv(&mut prv_attrs);
+                *ph_public_key = allocate_handle_owned(_h_session, pub_attrs);
+                *ph_private_key = allocate_handle_owned(_h_session, prv_attrs);
+                CKR_OK
+            }
+
+            // BSI TR-02102-1 §2.4.2 — scoped to mceliece6688128 only
+            // (implementation plan Phase 0.5: classic-mceliece-rust can only
+            // have one parameter-set feature compiled in at a time).
+            CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN => {
+                let ps = match get_attr_ulong(
+                    p_public_key_template,
+                    ul_public_key_attribute_count,
+                    CKA_PARAMETER_SET,
+                ) {
+                    Some(p) => p,
+                    None => return CKR_TEMPLATE_INCOMPLETE,
+                };
+                if ps != CKP_CLASSIC_MCELIECE_6688128 {
+                    return CKR_ATTRIBUTE_VALUE_INVALID;
+                }
+                if get_attr_bytes(p_private_key_template, ul_private_key_attribute_count, CKA_SEED)
+                    .is_some()
+                    || get_attr_bytes(p_public_key_template, ul_public_key_attribute_count, CKA_SEED)
+                        .is_some()
+                {
+                    return CKR_ATTRIBUTE_VALUE_INVALID;
+                }
+
+                let mut pub_attrs = HashMap::new();
+                let mut prv_attrs = HashMap::new();
+                store_param_set(&mut pub_attrs, ps);
+                store_param_set(&mut prv_attrs, ps);
+                store_algo_family(&mut pub_attrs, ALGO_CLASSIC_MCELIECE);
+                store_algo_family(&mut prv_attrs, ALGO_CLASSIC_MCELIECE);
+                store_ulong(&mut pub_attrs, CKA_CLASS, CKO_PUBLIC_KEY);
+                store_ulong(&mut pub_attrs, CKA_KEY_TYPE, CKK_PQCTODAY_CLASSIC_MCELIECE);
+                store_ulong(&mut pub_attrs, CKA_PARAMETER_SET, ps);
+                store_ulong(
+                    &mut pub_attrs,
+                    CKA_KEY_GEN_MECHANISM,
+                    CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN,
+                );
+                store_bool(&mut pub_attrs, CKA_TOKEN, false);
+                store_bool(&mut pub_attrs, CKA_PRIVATE, false);
+                store_bool(&mut pub_attrs, CKA_ENCRYPT, false);
+                store_bool(&mut pub_attrs, CKA_VERIFY, false);
+                store_bool(&mut pub_attrs, CKA_WRAP, false);
+                store_bool(&mut pub_attrs, CKA_ENCAPSULATE, true);
+                store_bool(&mut pub_attrs, CKA_DERIVE, false);
+                store_bool(&mut pub_attrs, CKA_LOCAL, true);
+                store_ulong(&mut prv_attrs, CKA_CLASS, CKO_PRIVATE_KEY);
+                store_ulong(&mut prv_attrs, CKA_KEY_TYPE, CKK_PQCTODAY_CLASSIC_MCELIECE);
+                store_ulong(&mut prv_attrs, CKA_PARAMETER_SET, ps);
+                store_ulong(
+                    &mut prv_attrs,
+                    CKA_KEY_GEN_MECHANISM,
+                    CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN,
+                );
+                store_bool(&mut prv_attrs, CKA_TOKEN, false);
+                store_bool(&mut prv_attrs, CKA_PRIVATE, true);
+                store_bool(&mut prv_attrs, CKA_SENSITIVE, true);
+                store_bool(&mut prv_attrs, CKA_EXTRACTABLE, false);
+                store_bool(&mut prv_attrs, CKA_DECRYPT, false);
+                store_bool(&mut prv_attrs, CKA_SIGN, false);
+                store_bool(&mut prv_attrs, CKA_UNWRAP, false);
+                store_bool(&mut prv_attrs, CKA_DECAPSULATE, true);
+                store_bool(&mut prv_attrs, CKA_DERIVE, false);
+                store_bool(&mut prv_attrs, CKA_LOCAL, true);
+
+                // Unlike FrodoKEM, classic-mceliece-rust uses rand 0.8 — the
+                // same version this engine already uses elsewhere.
+                let mut rng = rand::rngs::OsRng;
+                let (pk, sk) = classic_mceliece_rust::keypair_boxed(&mut rng);
+                pub_attrs.insert(CKA_VALUE, pk.as_ref().to_vec());
+                prv_attrs.insert(CKA_VALUE, sk.as_ref().to_vec());
+
+                absorb_template_attrs(
+                    &mut pub_attrs,
+                    p_public_key_template,
+                    ul_public_key_attribute_count,
+                );
+                absorb_template_attrs(
+                    &mut prv_attrs,
+                    p_private_key_template,
+                    ul_private_key_attribute_count,
+                );
+                finalize_private_key_attrs(&mut prv_attrs);
+                compute_kcv(&mut pub_attrs);
+                compute_kcv(&mut prv_attrs);
+                *ph_public_key = allocate_handle_owned(_h_session, pub_attrs);
+                *ph_private_key = allocate_handle_owned(_h_session, prv_attrs);
+                CKR_OK
+            }
+
             _ => CKR_MECHANISM_INVALID,
         }
     }
@@ -2515,6 +2710,74 @@ pub fn C_EncapsulateKey(
     }
     unsafe {
         let mech_type = *(p_mechanism as *const u32);
+
+        // BSI TR-02102-1 §2.4.1/§2.4.2 vendor KEMs. Delegates the actual
+        // crypto to `native::encrypt::encapsulate` (shared with KMIP's
+        // native API) instead of a third copy of the
+        // frodo-kem/classic-mceliece-rust crate usage — unlike ML-KEM
+        // below, whose C-ABI path predates that shared module and
+        // reimplements the math directly.
+        if mech_type == CKM_PQCTODAY_FRODOKEM_ENCAPSULATE
+            || mech_type == CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE
+        {
+            let expected_kt = if mech_type == CKM_PQCTODAY_FRODOKEM_ENCAPSULATE {
+                CKK_PQCTODAY_FRODOKEM
+            } else {
+                CKK_PQCTODAY_CLASSIC_MCELIECE
+            };
+            if get_object_attr_u32(h_key, CKA_KEY_TYPE) != Some(expected_kt) {
+                return CKR_KEY_TYPE_INCONSISTENT;
+            }
+            let ps = get_object_param_set(h_key);
+            if ps == 0 {
+                return CKR_TEMPLATE_INCOMPLETE;
+            }
+            let ct_len: u32 = if mech_type == CKM_PQCTODAY_FRODOKEM_ENCAPSULATE {
+                match crate::native::keygen::frodokem_algorithm(ps) {
+                    Ok(alg) => alg.params().ciphertext_length as u32,
+                    Err(_) => return CKR_ARGUMENTS_BAD,
+                }
+            } else {
+                if ps != CKP_CLASSIC_MCELIECE_6688128 {
+                    return CKR_ARGUMENTS_BAD;
+                }
+                classic_mceliece_rust::CRYPTO_CIPHERTEXTBYTES as u32
+            };
+            if p_ciphertext.is_null() {
+                *pul_ciphertext_len = ct_len;
+                return CKR_OK;
+            }
+            if *pul_ciphertext_len < ct_len {
+                *pul_ciphertext_len = ct_len;
+                return CKR_BUFFER_TOO_SMALL;
+            }
+            let (ct, ss) = match crate::native::encrypt::encapsulate(_h_session, h_key, mech_type) {
+                Ok(r) => r,
+                Err(rv) => return rv,
+            };
+            debug_assert_eq!(ct.len(), ct_len as usize, "ct_len must match the actual ciphertext");
+            std::ptr::copy_nonoverlapping(ct.as_ptr(), p_ciphertext, ct_len as usize);
+            *pul_ciphertext_len = ct_len;
+            let ss_len = ss.len() as u32;
+            let mut ss_attrs = HashMap::new();
+            ss_attrs.insert(CKA_VALUE, ss);
+            store_ulong(&mut ss_attrs, CKA_CLASS, CKO_SECRET_KEY);
+            store_ulong(&mut ss_attrs, CKA_KEY_TYPE, CKK_GENERIC_SECRET);
+            store_bool(&mut ss_attrs, CKA_EXTRACTABLE, true);
+            store_bool(&mut ss_attrs, CKA_SENSITIVE, false);
+            store_ulong(&mut ss_attrs, CKA_VALUE_LEN, ss_len);
+            store_bool(&mut ss_attrs, CKA_TOKEN, false); // PKCS#11 v3.2 §4.1 default
+            store_bool(&mut ss_attrs, CKA_PRIVATE, false); // PKCS#11 v3.2 §4.1 default
+            store_bool(&mut ss_attrs, CKA_LOCAL, false); // PKCS#11 v3.2 §5.18.8 — KEM keys are not locally generated
+            store_ulong(&mut ss_attrs, CKA_KEY_GEN_MECHANISM, mech_type); // PKCS#11 v3.2 §4.3
+            absorb_template_attrs(&mut ss_attrs, _p_template, _ul_attribute_count);
+            // PKCS#11 v3.2 §5.18.8: unconditionally CK_FALSE for encapsulated keys
+            store_bool(&mut ss_attrs, CKA_ALWAYS_SENSITIVE, false);
+            store_bool(&mut ss_attrs, CKA_NEVER_EXTRACTABLE, false);
+            *ph_key = allocate_handle_owned(_h_session, ss_attrs);
+            return CKR_OK;
+        }
+
         if mech_type != CKM_ML_KEM {
             return CKR_MECHANISM_INVALID;
         }
@@ -2623,6 +2886,73 @@ pub fn C_DecapsulateKey(
     }
     unsafe {
         let mech_type = *(p_mechanism as *const u32);
+
+        // BSI TR-02102-1 §2.4.1/§2.4.2 vendor KEMs — mirrors
+        // `C_EncapsulateKey`'s delegation to `native::encrypt::decapsulate`.
+        if mech_type == CKM_PQCTODAY_FRODOKEM_ENCAPSULATE
+            || mech_type == CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE
+        {
+            let expected_kt = if mech_type == CKM_PQCTODAY_FRODOKEM_ENCAPSULATE {
+                CKK_PQCTODAY_FRODOKEM
+            } else {
+                CKK_PQCTODAY_CLASSIC_MCELIECE
+            };
+            if get_object_attr_u32(h_private_key, CKA_KEY_TYPE) != Some(expected_kt) {
+                return CKR_KEY_TYPE_INCONSISTENT;
+            }
+            let ps = get_object_param_set(h_private_key);
+            if ps == 0 {
+                return CKR_TEMPLATE_INCOMPLETE;
+            }
+            let expected_ct: u32 = if mech_type == CKM_PQCTODAY_FRODOKEM_ENCAPSULATE {
+                match crate::native::keygen::frodokem_algorithm(ps) {
+                    Ok(alg) => alg.params().ciphertext_length as u32,
+                    Err(_) => return CKR_ARGUMENTS_BAD,
+                }
+            } else {
+                if ps != CKP_CLASSIC_MCELIECE_6688128 {
+                    return CKR_ARGUMENTS_BAD;
+                }
+                classic_mceliece_rust::CRYPTO_CIPHERTEXTBYTES as u32
+            };
+            // PKCS#11 v3.2 §5.18.9 — a ciphertext of the wrong length for the
+            // key's parameter set is invalid input ciphertext.
+            if ul_ciphertext_len != expected_ct {
+                return CKR_ENCRYPTED_DATA_INVALID;
+            }
+            if p_ciphertext.is_null() {
+                return CKR_ARGUMENTS_BAD;
+            }
+            let ct_bytes =
+                std::slice::from_raw_parts(p_ciphertext, ul_ciphertext_len as usize).to_vec();
+            let ss = match crate::native::encrypt::decapsulate(
+                _h_session,
+                h_private_key,
+                mech_type,
+                &ct_bytes,
+            ) {
+                Ok(s) => s,
+                Err(rv) => return rv,
+            };
+            let mut ss_attrs = HashMap::new();
+            ss_attrs.insert(CKA_VALUE, ss);
+            store_ulong(&mut ss_attrs, CKA_CLASS, CKO_SECRET_KEY);
+            store_ulong(&mut ss_attrs, CKA_KEY_TYPE, CKK_GENERIC_SECRET);
+            store_bool(&mut ss_attrs, CKA_EXTRACTABLE, true);
+            store_bool(&mut ss_attrs, CKA_SENSITIVE, false);
+            store_ulong(&mut ss_attrs, CKA_VALUE_LEN, expected_ct);
+            store_bool(&mut ss_attrs, CKA_TOKEN, false); // PKCS#11 v3.2 §4.1 default
+            store_bool(&mut ss_attrs, CKA_PRIVATE, false); // PKCS#11 v3.2 §4.1 default
+            store_bool(&mut ss_attrs, CKA_LOCAL, false); // PKCS#11 v3.2 §5.18.9 — KEM keys are not locally generated
+            store_ulong(&mut ss_attrs, CKA_KEY_GEN_MECHANISM, mech_type); // PKCS#11 v3.2 §4.3
+            absorb_template_attrs(&mut ss_attrs, _p_template, _ul_attribute_count);
+            // PKCS#11 v3.2 §5.18.9: unconditionally CK_FALSE for decapsulated keys
+            store_bool(&mut ss_attrs, CKA_ALWAYS_SENSITIVE, false);
+            store_bool(&mut ss_attrs, CKA_NEVER_EXTRACTABLE, false);
+            *ph_key = allocate_handle_owned(_h_session, ss_attrs);
+            return CKR_OK;
+        }
+
         if mech_type != CKM_ML_KEM {
             return CKR_MECHANISM_INVALID;
         }
@@ -3326,8 +3656,45 @@ pub fn C_Sign(
             return CKR_OK;
         }
 
-        // ── LMS / HSS stateful sign — separate path (uses CKA_STATEFUL_KEY_STATE) ───
-        if mech == CKM_HSS || mech == CKM_XMSS || mech == CKM_XMSSMT {
+        // ── HSS/LMS stateful sign — single source of truth for the
+        // leaf advance-and-persist core lives in `native::hbs`, shared
+        // with the KMIP-facing `native::sign` path (see that module's
+        // doc comment: drift here means a leaf index gets reused,
+        // breaking the one-time-signature security property). ───────
+        if mech == CKM_HSS {
+            let msg = std::slice::from_raw_parts(p_data, ul_data_len as usize);
+            let rv = match crate::native::hbs::sign_prepare(hkey, msg) {
+                Ok(prepared) => {
+                    // PKCS#11 v3.2 §5.2 — for a one-time (stateful) key the leaf
+                    // MUST NOT be consumed until the caller's output buffer is
+                    // known to be adequate. Validate the buffer FIRST; on
+                    // CKR_BUFFER_TOO_SMALL leave the on-object key state
+                    // unchanged and keep the operation active so the caller can
+                    // retry with a larger buffer (re-signing the same leaf is
+                    // deterministic and idempotent here).
+                    if (*pul_signature_len as usize) < prepared.signature.len() {
+                        *pul_signature_len = prepared.signature.len() as u32;
+                        return CKR_BUFFER_TOO_SMALL;
+                    }
+                    // Buffer is adequate — now atomically advance and persist
+                    // the key state, then emit the signature.
+                    crate::native::hbs::sign_commit(hkey, &prepared);
+                    std::ptr::copy_nonoverlapping(
+                        prepared.signature.as_ptr(),
+                        p_signature,
+                        prepared.signature.len(),
+                    );
+                    *pul_signature_len = prepared.signature.len() as u32;
+                    CKR_OK
+                }
+                Err(e) => e,
+            };
+            SIGN_STATE.with(|s| s.borrow_mut().remove(&h_session));
+            return rv;
+        }
+
+        // ── XMSS / XMSS^MT stateful sign — separate path (uses CKA_STATEFUL_KEY_STATE) ───
+        if mech == CKM_XMSS || mech == CKM_XMSSMT {
             let priv_bytes = match get_object_attr_bytes(hkey, CKA_STATEFUL_KEY_STATE) {
                 Some(v) => v,
                 None => return CKR_KEY_TYPE_INCONSISTENT,
@@ -3351,7 +3718,7 @@ pub fn C_Sign(
                     },
                     Err(e) => Err(e),
                 }
-            } else if mech == CKM_XMSSMT {
+            } else {
                 let mt_param = get_object_attr_u32(hkey, CKA_XMSSMT_PARAM_SET)
                     .unwrap_or(CKP_XMSSMT_SHA2_20_2_256);
                 match crate::crypto::xmss_bridge::xmssmt_sign(mt_param, &priv_bytes, msg) {
@@ -3361,9 +3728,6 @@ pub fn C_Sign(
                     },
                     Err(e) => Err(e),
                 }
-            } else {
-                let lms_param = get_object_attr_u32(hkey, CKA_LMS_PARAM_SET).unwrap_or(0x05);
-                crate::crypto::lms::hss_sign(lms_param, &priv_bytes, msg, &mut update_fn)
             };
 
             let rv = match sign_result {
@@ -3384,28 +3748,7 @@ pub fn C_Sign(
                     if let Some(ref new_priv_bytes) = new_state {
                         set_object_attr_bytes(hkey, CKA_STATEFUL_KEY_STATE, new_priv_bytes.clone());
 
-                        if mech == CKM_HSS {
-                            // HSS: increment leaf index (managed externally; hss library handles internal state)
-                            let old_idx = get_object_attr_u64(hkey, CKA_LEAF_INDEX).unwrap_or(0);
-                            set_object_attr_bytes(
-                                hkey,
-                                CKA_LEAF_INDEX,
-                                (old_idx + 1).to_le_bytes().to_vec(),
-                            );
-                            // HSS: decrement CKA_HSS_KEYS_REMAINING by 1 per sign (PKCS#11 v3.2 §6.14)
-                            if let Some(mut remaining) =
-                                get_object_attr_u32(hkey, CKA_HSS_KEYS_REMAINING)
-                            {
-                                if remaining > 0 {
-                                    remaining -= 1;
-                                    set_object_attr_bytes(
-                                        hkey,
-                                        CKA_HSS_KEYS_REMAINING,
-                                        remaining.to_le_bytes().to_vec(),
-                                    );
-                                }
-                            }
-                        } else if mech == CKM_XMSSMT {
+                        if mech == CKM_XMSSMT {
                             // XMSS^MT: derive remaining from the MT signing-key
                             // state (the index width differs from single-tree).
                             let mt_param = get_object_attr_u32(hkey, CKA_XMSSMT_PARAM_SET)
@@ -11573,6 +11916,394 @@ mod return_code_ffi_tests {
                 &mut h_new,
             ),
             CKR_TEMPLATE_INCOMPLETE,
+        );
+    }
+}
+
+#[cfg(test)]
+mod pqc_vendor_kem_ffi_tests {
+    //! BSI TR-02102-1 §2.4.1/§2.4.2 — FrodoKEM / Classic McEliece reachable
+    //! through the raw PKCS#11 C-ABI (`C_GenerateKeyPair` /
+    //! `C_EncapsulateKey` / `C_DecapsulateKey`), not just the native Rust
+    //! API KMIP uses. The crypto itself is already exhaustively verified
+    //! (600/600 official FrodoKEM KAT vectors, 40/40 Classic McEliece `oqs`
+    //! cross-validation trials — see `native::encrypt`'s test module); these
+    //! tests instead prove the C-ABI *glue* — template parsing, the
+    //! buffer-probe convention, key-type/parameter-set gating, and object
+    //! allocation — actually reaches that already-verified crypto.
+    use super::*;
+    use crate::native::test_lock;
+
+    /// High fixed handles, disjoint from the other ffi test modules and the
+    /// `native::*` allocators.
+    const SESSION: u32 = 0x7770_1001;
+
+    /// The generated private keys are CKA_PRIVATE=TRUE (matching ML-KEM/
+    /// ML-DSA above), so `can_access_object` (state.rs §4.4) requires the
+    /// session's token to be logged in — otherwise every decapsulate call
+    /// sees CKR_KEY_HANDLE_INVALID via `check_key_usage`, not a crypto
+    /// error. Stamp slot 0's TOKEN_STORE entry as logged-in directly
+    /// (rather than a real C_InitToken/C_Login PIN flow, which other ffi
+    /// test modules also don't use for the same reason: minimal fixture).
+    fn setup() {
+        crate::state::set_initialized(true);
+        SESSIONS.with(|s| {
+            s.borrow_mut().insert(SESSION, crate::state::SessionState { slot_id: 0, rw_session: true });
+        });
+        TOKEN_STORE.with(|ts| {
+            ts.borrow_mut()
+                .entry(0)
+                .or_insert_with(|| crate::state::TokenState {
+                    slot_id: 0,
+                    initialized: true,
+                    label: [0u8; 32],
+                    login_state: crate::state::LoginState::User,
+                    so_pin_salt: [0u8; 16],
+                    so_pin_hash: [0u8; 32],
+                    user_pin_salt: None,
+                    user_pin_hash: None,
+                })
+                .login_state = crate::state::LoginState::User;
+        });
+    }
+
+    fn obj_attr(handle: u32, attr_type: u32) -> Option<Vec<u8>> {
+        OBJECTS.with(|o| o.borrow().get(&handle).and_then(|a| a.get(&attr_type).cloned()))
+    }
+
+    /// One-attribute CK_ATTRIBUTE template: `[type, &value as usize, 4]`,
+    /// matching this crate's `[usize; 3]`-per-attribute convention (see
+    /// `get_attr_ulong`/`absorb_template_attrs`).
+    fn ps_template(ps: &u32) -> [usize; 3] {
+        [CKA_PARAMETER_SET as usize, ps as *const u32 as usize, 4]
+    }
+
+    fn mech(m: u32) -> [usize; 3] {
+        [m as usize, 0, 0]
+    }
+
+    /// Full round trip through the raw C-ABI: generate a keypair, probe the
+    /// required ciphertext length (NULL `pCiphertext`, the standard PKCS#11
+    /// two-call convention), encapsulate, decapsulate, and confirm both
+    /// sides land on the same shared secret.
+    fn round_trip(keygen_mech: u32, kem_mech: u32, ps: u32, expected_ss_len: usize) {
+        let _guard = test_lock::acquire();
+        setup();
+
+        let ps_val = ps;
+        let mut pub_tpl = ps_template(&ps_val);
+        let mut prv_tpl = ps_template(&ps_val);
+        let mut kg_mech = mech(keygen_mech);
+        let mut h_pub: u32 = 0;
+        let mut h_prv: u32 = 0;
+        assert_eq!(
+            C_GenerateKeyPair(
+                SESSION,
+                kg_mech.as_mut_ptr() as *mut u8,
+                pub_tpl.as_mut_ptr() as *mut u8,
+                1,
+                prv_tpl.as_mut_ptr() as *mut u8,
+                1,
+                &mut h_pub,
+                &mut h_prv,
+            ),
+            CKR_OK,
+            "C_GenerateKeyPair"
+        );
+        assert_ne!(h_pub, 0);
+        assert_ne!(h_prv, 0);
+
+        // Probe: NULL pCiphertext returns the required buffer length.
+        let mut kem_mech_words = mech(kem_mech);
+        let mut ct_len: u32 = 0;
+        let mut h_ss1: u32 = 0;
+        assert_eq!(
+            C_EncapsulateKey(
+                SESSION,
+                kem_mech_words.as_mut_ptr() as *mut u8,
+                h_pub,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                &mut ct_len,
+                &mut h_ss1,
+            ),
+            CKR_OK,
+            "C_EncapsulateKey length probe"
+        );
+        assert!(ct_len > 0);
+
+        let mut ct = vec![0u8; ct_len as usize];
+        let mut actual_ct_len = ct_len;
+        assert_eq!(
+            C_EncapsulateKey(
+                SESSION,
+                kem_mech_words.as_mut_ptr() as *mut u8,
+                h_pub,
+                std::ptr::null_mut(),
+                0,
+                ct.as_mut_ptr(),
+                &mut actual_ct_len,
+                &mut h_ss1,
+            ),
+            CKR_OK,
+            "C_EncapsulateKey"
+        );
+        assert_eq!(actual_ct_len, ct_len);
+
+        let mut h_ss2: u32 = 0;
+        assert_eq!(
+            C_DecapsulateKey(
+                SESSION,
+                kem_mech_words.as_mut_ptr() as *mut u8,
+                h_prv,
+                std::ptr::null_mut(),
+                0,
+                ct.as_mut_ptr(),
+                ct_len,
+                &mut h_ss2,
+            ),
+            CKR_OK,
+            "C_DecapsulateKey"
+        );
+
+        let ss1 = obj_attr(h_ss1, CKA_VALUE).expect("encapsulate secret object");
+        let ss2 = obj_attr(h_ss2, CKA_VALUE).expect("decapsulate secret object");
+        assert_eq!(ss1, ss2, "encapsulator and decapsulator must derive the same shared secret");
+        assert_eq!(ss1.len(), expected_ss_len);
+    }
+
+    #[test]
+    fn frodokem_976_aes_round_trip() {
+        round_trip(
+            CKM_PQCTODAY_FRODOKEM_KEY_PAIR_GEN,
+            CKM_PQCTODAY_FRODOKEM_ENCAPSULATE,
+            CKP_FRODOKEM_976_AES,
+            24,
+        );
+    }
+
+    #[test]
+    fn frodokem_640_shake_round_trip() {
+        round_trip(
+            CKM_PQCTODAY_FRODOKEM_KEY_PAIR_GEN,
+            CKM_PQCTODAY_FRODOKEM_ENCAPSULATE,
+            CKP_FRODOKEM_640_SHAKE,
+            16,
+        );
+    }
+
+    /// `#[ignore]`: a single mceliece6688128 keygen (Goppa code generation)
+    /// takes minutes in an unoptimized debug build — too slow for every CI
+    /// run. Run manually with `cargo test --release -- --ignored
+    /// classic_mceliece_6688128_round_trip` (release mode is fast).
+    #[test]
+    #[ignore = "mceliece6688128 keygen is minutes-slow in debug builds — see doc comment"]
+    fn classic_mceliece_6688128_round_trip() {
+        round_trip(
+            CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN,
+            CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE,
+            CKP_CLASSIC_MCELIECE_6688128,
+            32,
+        );
+    }
+
+    /// PKCS#11 v3.2 §6.x — CKA_PARAMETER_SET is a REQUIRED keygen template
+    /// attribute for both vendor KEMs, same convention as ML-KEM/ML-DSA.
+    #[test]
+    fn keygen_missing_parameter_set_template_incomplete() {
+        let _guard = test_lock::acquire();
+        setup();
+        for keygen_mech in
+            [CKM_PQCTODAY_FRODOKEM_KEY_PAIR_GEN, CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN]
+        {
+            let mut kg_mech = mech(keygen_mech);
+            let mut h_pub: u32 = 0;
+            let mut h_prv: u32 = 0;
+            assert_eq!(
+                C_GenerateKeyPair(
+                    SESSION,
+                    kg_mech.as_mut_ptr() as *mut u8,
+                    std::ptr::null_mut(),
+                    0,
+                    std::ptr::null_mut(),
+                    0,
+                    &mut h_pub,
+                    &mut h_prv,
+                ),
+                CKR_TEMPLATE_INCOMPLETE,
+                "mech {keygen_mech:#x}"
+            );
+        }
+    }
+
+    /// Classic McEliece is scoped to `mceliece6688128` only (implementation
+    /// plan Phase 0.5) — any other CKA_PARAMETER_SET value is rejected, not
+    /// silently coerced.
+    #[test]
+    fn classic_mceliece_keygen_wrong_parameter_set_attribute_value_invalid() {
+        let _guard = test_lock::acquire();
+        setup();
+        let bogus_ps: u32 = 0x9999;
+        let mut pub_tpl = ps_template(&bogus_ps);
+        let mut kg_mech = mech(CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN);
+        let mut h_pub: u32 = 0;
+        let mut h_prv: u32 = 0;
+        assert_eq!(
+            C_GenerateKeyPair(
+                SESSION,
+                kg_mech.as_mut_ptr() as *mut u8,
+                pub_tpl.as_mut_ptr() as *mut u8,
+                1,
+                std::ptr::null_mut(),
+                0,
+                &mut h_pub,
+                &mut h_prv,
+            ),
+            CKR_ATTRIBUTE_VALUE_INVALID,
+        );
+    }
+
+    /// Neither vendor KEM has a deterministic (CKA_SEED) keygen path —
+    /// `frodo-kem` doesn't expose a keygen-from-seed entry point, and
+    /// scoping Classic McEliece's cross-validation to the random path keeps
+    /// its evidence honest (implementation plan Phase 0.8). A caller-supplied
+    /// CKA_SEED must be rejected, not silently ignored.
+    #[test]
+    fn keygen_rejects_seed() {
+        let _guard = test_lock::acquire();
+        setup();
+        let ps_frodo = CKP_FRODOKEM_976_AES;
+        let seed = [0u8; 32];
+        let seed_tpl: [usize; 3] = [CKA_SEED as usize, seed.as_ptr() as usize, seed.len()];
+        for (keygen_mech, ps) in [
+            (CKM_PQCTODAY_FRODOKEM_KEY_PAIR_GEN, ps_frodo),
+            (CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN, CKP_CLASSIC_MCELIECE_6688128),
+        ] {
+            let mut pub_tpl = ps_template(&ps);
+            let mut prv_tpl = seed_tpl;
+            let mut kg_mech = mech(keygen_mech);
+            let mut h_pub: u32 = 0;
+            let mut h_prv: u32 = 0;
+            assert_eq!(
+                C_GenerateKeyPair(
+                    SESSION,
+                    kg_mech.as_mut_ptr() as *mut u8,
+                    pub_tpl.as_mut_ptr() as *mut u8,
+                    1,
+                    prv_tpl.as_mut_ptr() as *mut u8,
+                    1,
+                    &mut h_pub,
+                    &mut h_prv,
+                ),
+                CKR_ATTRIBUTE_VALUE_INVALID,
+                "mech {keygen_mech:#x}"
+            );
+        }
+    }
+
+    /// S5-equivalent (mirrors `encap_decap_on_aes_key_key_type_inconsistent`
+    /// for ML-KEM) — encapsulate/decapsulate on a key of the wrong PQC
+    /// vendor KEM family → CKR_KEY_TYPE_INCONSISTENT, not a crypto attempt.
+    ///
+    /// `#[ignore]`: builds a real mceliece6688128 keypair first — minutes-slow
+    /// in an unoptimized debug build. Run manually with `cargo test --release
+    /// -- --ignored encapsulate_on_wrong_key_family` (release mode is fast).
+    #[test]
+    #[ignore = "mceliece6688128 keygen is minutes-slow in debug builds — see doc comment"]
+    fn encapsulate_on_wrong_key_family_key_type_inconsistent() {
+        let _guard = test_lock::acquire();
+        setup();
+
+        let h_mceliece_pub = {
+            let ps_val = CKP_CLASSIC_MCELIECE_6688128;
+            let mut pub_tpl = ps_template(&ps_val);
+            let mut prv_tpl = ps_template(&ps_val);
+            let mut kg_mech = mech(CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN);
+            let mut h_pub: u32 = 0;
+            let mut h_prv: u32 = 0;
+            assert_eq!(
+                C_GenerateKeyPair(
+                    SESSION,
+                    kg_mech.as_mut_ptr() as *mut u8,
+                    pub_tpl.as_mut_ptr() as *mut u8,
+                    1,
+                    prv_tpl.as_mut_ptr() as *mut u8,
+                    1,
+                    &mut h_pub,
+                    &mut h_prv,
+                ),
+                CKR_OK
+            );
+            h_pub
+        };
+
+        // A Classic McEliece key used with the FrodoKEM mechanism.
+        let mut kem_mech = mech(CKM_PQCTODAY_FRODOKEM_ENCAPSULATE);
+        let mut ct_len: u32 = 0;
+        let mut h_ss: u32 = 0;
+        assert_eq!(
+            C_EncapsulateKey(
+                SESSION,
+                kem_mech.as_mut_ptr() as *mut u8,
+                h_mceliece_pub,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                &mut ct_len,
+                &mut h_ss,
+            ),
+            CKR_KEY_TYPE_INCONSISTENT,
+        );
+    }
+
+    /// §5.18.9-equivalent — a ciphertext of the wrong length for the vendor
+    /// KEM's parameter set → CKR_ENCRYPTED_DATA_INVALID.
+    ///
+    /// `#[ignore]`: builds a real mceliece6688128 keypair first — minutes-slow
+    /// in an unoptimized debug build. Run manually with `cargo test --release
+    /// -- --ignored pqc_vendor_kem_ffi_tests::decapsulate_wrong_ciphertext_len`
+    /// (release mode is fast).
+    #[test]
+    #[ignore = "mceliece6688128 keygen is minutes-slow in debug builds — see doc comment"]
+    fn decapsulate_wrong_ciphertext_len_encrypted_data_invalid() {
+        let _guard = test_lock::acquire();
+        setup();
+        let ps_val = CKP_CLASSIC_MCELIECE_6688128;
+        let mut pub_tpl = ps_template(&ps_val);
+        let mut prv_tpl = ps_template(&ps_val);
+        let mut kg_mech = mech(CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN);
+        let mut h_pub: u32 = 0;
+        let mut h_prv: u32 = 0;
+        assert_eq!(
+            C_GenerateKeyPair(
+                SESSION,
+                kg_mech.as_mut_ptr() as *mut u8,
+                pub_tpl.as_mut_ptr() as *mut u8,
+                1,
+                prv_tpl.as_mut_ptr() as *mut u8,
+                1,
+                &mut h_pub,
+                &mut h_prv,
+            ),
+            CKR_OK
+        );
+
+        let mut kem_mech = mech(CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE);
+        let mut ct = [0u8; 10]; // mceliece6688128 expects 208
+        let mut h_ss: u32 = 0;
+        assert_eq!(
+            C_DecapsulateKey(
+                SESSION,
+                kem_mech.as_mut_ptr() as *mut u8,
+                h_prv,
+                std::ptr::null_mut(),
+                0,
+                ct.as_mut_ptr(),
+                ct.len() as u32,
+                &mut h_ss,
+            ),
+            CKR_ENCRYPTED_DATA_INVALID,
         );
     }
 }

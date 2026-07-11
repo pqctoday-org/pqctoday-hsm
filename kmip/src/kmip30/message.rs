@@ -26,14 +26,16 @@
 //!
 //! ## v0.1 simplifying assumptions
 //!
-//! - **One batch item per message.** The wire codec handles a single
-//!   Batch Item child of the Request/Response Message structure. Multi-op
-//!   batching is a spec feature deferred to v0.2.
 //! - **Protocol Version hardcoded `3.0`** (major=3, minor=0) — this is
 //!   the only version the engine speaks.
-//! - **Optional header fields omitted** — no Maximum Response Size,
-//!   Correlation Value, Asynchronous Indicator, Attestation, Authentication
-//!   in v0.1.
+//! - **Multi-item batching, Client/Server Correlation Value,
+//!   Asynchronous Indicator, and Authentication (Credential list) are
+//!   all genuinely implemented** — `batch_items: Vec<...>` on both
+//!   Request/ResponseMessage, `dispatcher::dispatch` iterates every item
+//!   (with Stop/Undo error-continuation semantics and §6.4 ID
+//!   Placeholder threading between items), Login/Logout issue and
+//!   validate real per-session tickets, and `AsynchronousIndicator`
+//!   drives `dispatcher`'s real async-job enqueue path for eligible ops.
 
 use time::OffsetDateTime;
 
@@ -70,10 +72,12 @@ pub struct RequestHeader {
     /// the encoded ResponseMessage would exceed it. `None` ≡ no
     /// limit.
     pub maximum_response_size: Option<i32>,
-    /// KMIP 3.0 §8.1.2 `Asynchronous Indicator` Enumeration. This
-    /// server has no asynchronous capability, so `Mandatory` fails
-    /// every batch item with `OperationNotSupported`; `Optional` /
-    /// `Prohibited` / absent all process synchronously (K4).
+    /// KMIP 3.0 §8.1.2 `Asynchronous Indicator` Enumeration. `Mandatory`
+    /// on an async-eligible op (`dispatcher::is_async_eligible`) enqueues
+    /// a real job (§9.1 Asynchronous Correlation Value) instead of
+    /// running inline, returning `OperationPending`; `Mandatory` on an
+    /// ineligible op fails that item with `OperationNotSupported`.
+    /// `Optional` / `Prohibited` / absent all process synchronously (K4).
     pub asynchronous_indicator: Option<AsynchronousIndicator>,
     /// KMIP 3.0 §8.1.2 / §9.4 `Authentication` Structure — "Credential,
     /// MAY be repeated" (spec Table 504). Empty ≡ the Authentication
@@ -84,16 +88,32 @@ pub struct RequestHeader {
     pub authentication: Vec<Credential>,
 }
 
+/// KMIP 3.0 §7.40 Table 494 `Ticket` structure — `Ticket Type`
+/// (Enumeration, e.g. `Login` = 1) + `Ticket Value` (ByteString, opaque
+/// server-issued session token). Shared by `Login`'s response,
+/// `Logout`'s request, and `Credential::Ticket` — all three carry the
+/// exact same wire shape.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Ticket {
+    pub ticket_type: u32,
+    pub ticket_value: Vec<u8>,
+}
+
+/// §11.58 `Ticket Type Enumeration` — `Login` is the only OASIS-assigned
+/// value; `Extensions` (`8XXXXXXX`) is reserved for vendor use.
+pub const TICKET_TYPE_LOGIN: u32 = 0x0000_0001;
+
 /// KMIP 3.0 §9.9 `Credential` — "a structure used for client
 /// identification purposes" carried inside the request header's
 /// `Authentication` structure. Shape per spec Table 509:
 /// `Credential Type` (Enumeration, required) + `Credential Value`
 /// (varies by type, required).
 ///
-/// K14 supports verification of `Username and Password` (0x01) only;
-/// every other published Credential Type (Device 0x02, Attestation
-/// 0x03, One Time Password 0x04, Hashed Password 0x05, Ticket 0x06,
-/// Password 0x07, Certificate 0x08 — per
+/// K14 supports verification of `Username and Password` (0x01) and
+/// `Ticket` (0x06, Phase 1.4 — a Login-issued session ticket presented
+/// on a later request); every other published Credential Type (Device
+/// 0x02, Attestation 0x03, One Time Password 0x04, Hashed Password
+/// 0x05, Password 0x07, Certificate 0x08 — per
 /// `kmip-spec-3.0-tags-enums.json` `Credential Type`) is decoded and
 /// carried as [`Credential::Unsupported`] so the header decode never
 /// fails on a credential we merely can't verify.
@@ -106,6 +126,11 @@ pub enum Credential {
         username: String,
         password: Option<String>,
     },
+    /// Credential Type `Ticket` (0x06). Credential Value per spec
+    /// Table 517: a single `Ticket` structure (§7.40 Table 494:
+    /// `Ticket Type` Enumeration + `Ticket Value` ByteString) — the
+    /// same structure `Login` returns and `Logout` invalidates.
+    Ticket(Ticket),
     /// Any other Credential Type — tolerated on decode, never
     /// verifiable, so under configured auth it fails verification.
     Unsupported { credential_type: u32 },
@@ -241,6 +266,12 @@ pub struct ResponseBatchItem {
     pub result_message: Option<String>,
     /// REQUIRED on success, omitted on failure.
     pub payload: Option<ResponsePayload>,
+    /// KMIP 3.0 §9.1 `Asynchronous Correlation Value` — "returned in
+    /// the immediate response to an operation that is pending and
+    /// that requires asynchronous polling." REQUIRED iff
+    /// `result_status == OperationPending` (Phase 4); `None` for
+    /// every synchronous response.
+    pub asynchronous_correlation_value: Option<Vec<u8>>,
 }
 
 /// §6.1 / §11.5 Result Status — wire-format Enumeration codepoint.
@@ -265,6 +296,61 @@ impl ResultStatus {
             1 => Some(Self::OperationFailed),
             2 => Some(Self::OperationPending),
             3 => Some(Self::OperationUndone),
+            _ => None,
+        }
+    }
+}
+
+/// Phase 4 — KMIP 3.0 §7.2 `Asynchronous Request` Structure's
+/// `Processing Stage` Enumeration: the three stages a server-tracked
+/// async job moves through. Codepoints verified from
+/// `kmip-spec-3.0-tags-enums.json` (`Processing Stage` enum).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[repr(u32)]
+pub enum ProcessingStage {
+    Submitted = 0x0000_0001,
+    InProcess = 0x0000_0002,
+    Completed = 0x0000_0003,
+}
+
+impl ProcessingStage {
+    pub const fn to_wire_value(self) -> u32 {
+        self as u32
+    }
+    pub const fn from_wire_value(v: u32) -> Option<Self> {
+        match v {
+            1 => Some(Self::Submitted),
+            2 => Some(Self::InProcess),
+            3 => Some(Self::Completed),
+            _ => None,
+        }
+    }
+}
+
+/// Phase 4 — KMIP 3.0 §6.1.5 `Cancel` response's `Cancellation Result`
+/// Enumeration. Codepoints verified from `kmip-spec-3.0-tags-enums.json`
+/// (`Cancellation Result` enum).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[repr(u32)]
+pub enum CancellationResult {
+    Canceled       = 0x0000_0001,
+    UnableToCancel = 0x0000_0002,
+    Completed      = 0x0000_0003,
+    Failed         = 0x0000_0004,
+    Unavailable    = 0x0000_0005,
+}
+
+impl CancellationResult {
+    pub const fn to_wire_value(self) -> u32 {
+        self as u32
+    }
+    pub const fn from_wire_value(v: u32) -> Option<Self> {
+        match v {
+            1 => Some(Self::Canceled),
+            2 => Some(Self::UnableToCancel),
+            3 => Some(Self::Completed),
+            4 => Some(Self::Failed),
+            5 => Some(Self::Unavailable),
             _ => None,
         }
     }
@@ -306,6 +392,9 @@ pub enum RequestPayload {
     Export(super::ops::ExportRequest),
     Deactivate(super::ops::DeactivateRequest),
     Check(super::ops::CheckRequest),
+    ObtainLease(super::ops::ObtainLeaseRequest),
+    CreateSplitKey(super::ops::CreateSplitKeyRequest),
+    JoinSplitKey(super::ops::JoinSplitKeyRequest),
     Archive(super::ops::ArchiveRequest),
     Recover(super::ops::RecoverRequest),
     Obliterate(super::ops::ObliterateRequest),
@@ -326,6 +415,7 @@ pub enum RequestPayload {
     // K19 — Baseline client-to-server ops (§6.1.26/27/58/59).
     GetUsageAllocation(super::ops::GetUsageAllocationRequest),
     GetConstraints(super::ops::GetConstraintsRequest),
+    SetConstraints(super::ops::SetConstraintsRequest),
     SetDefaults(super::ops::SetDefaultsRequest),
     SetEndpointRole(super::ops::SetEndpointRoleRequest),
     /// K20 — §6.1.18 Derive Key.
@@ -333,6 +423,12 @@ pub enum RequestPayload {
     /// K21 — §6.1.51 Re-key / §6.1.52 Re-key Key Pair.
     ReKey(super::ops::ReKeyRequest),
     ReKeyKeyPair(super::ops::ReKeyKeyPairRequest),
+    /// Phase 4 — §6.1.43 Poll / §6.1.5 Cancel / §6.1.44 Process /
+    /// §6.1.46 Query Asynchronous Requests.
+    Poll(super::ops::PollRequest),
+    Cancel(super::ops::CancelRequest),
+    Process(super::ops::ProcessRequest),
+    QueryAsynchronousRequests(super::ops::QueryAsynchronousRequestsRequest),
     /// R7 Phase 1 sentinel — emitted by `decode_request_message` when
     /// a per-BatchItem payload fails to decode but the outer envelope
     /// is intact. The dispatcher recognises it and emits a per-item
@@ -393,6 +489,9 @@ pub enum ResponsePayload {
     Export(super::ops::ExportResponse),
     Deactivate(super::ops::DeactivateResponse),
     Check(super::ops::CheckResponse),
+    ObtainLease(super::ops::ObtainLeaseResponse),
+    CreateSplitKey(super::ops::CreateSplitKeyResponse),
+    JoinSplitKey(super::ops::JoinSplitKeyResponse),
     Archive(super::ops::ArchiveResponse),
     Recover(super::ops::RecoverResponse),
     Obliterate(super::ops::ObliterateResponse),
@@ -413,6 +512,7 @@ pub enum ResponsePayload {
     // K19 — Baseline client-to-server ops (§6.1.26/27/58/59).
     GetUsageAllocation(super::ops::GetUsageAllocationResponse),
     GetConstraints(super::ops::GetConstraintsResponse),
+    SetConstraints(super::ops::SetConstraintsResponse),
     SetDefaults(super::ops::SetDefaultsResponse),
     /// K20 — §6.1.18 Derive Key.
     DeriveKey(super::ops::DeriveKeyResponse),
@@ -420,6 +520,15 @@ pub enum ResponsePayload {
     /// K21 — §6.1.51 Re-key / §6.1.52 Re-key Key Pair.
     ReKey(super::ops::ReKeyResponse),
     ReKeyKeyPair(super::ops::ReKeyKeyPairResponse),
+    /// Phase 4 — §6.1.5 Cancel / §6.1.44 Process / §6.1.46 Query
+    /// Asynchronous Requests. `Poll` (§6.1.43) has no variant here —
+    /// its successful response splices in whatever `ResponsePayload`
+    /// variant the ORIGINAL polled operation produced (see
+    /// `dispatcher::handle_poll`), and its not-yet-complete response
+    /// carries no payload at all.
+    Cancel(super::ops::CancelResponse),
+    Process(super::ops::ProcessResponse),
+    QueryAsynchronousRequests(super::ops::QueryAsynchronousRequestsResponse),
 }
 
 impl RequestPayload {
@@ -456,6 +565,9 @@ impl RequestPayload {
             Self::Export(_)           => Operation::Export,
             Self::Deactivate(_)       => Operation::Deactivate,
             Self::Check(_)            => Operation::Check,
+            Self::ObtainLease(_)      => Operation::ObtainLease,
+            Self::CreateSplitKey(_)   => Operation::CreateSplitKey,
+            Self::JoinSplitKey(_)     => Operation::JoinSplitKey,
             Self::Archive(_)          => Operation::Archive,
             Self::Recover(_)          => Operation::Recover,
             Self::Obliterate(_)       => Operation::Obliterate,
@@ -475,11 +587,16 @@ impl RequestPayload {
             Self::Pkcs11(_)           => Operation::Pkcs11,
             Self::GetUsageAllocation(_) => Operation::GetUsageAllocation,
             Self::GetConstraints(_)   => Operation::GetConstraints,
+            Self::SetConstraints(_)   => Operation::SetConstraints,
             Self::SetDefaults(_)      => Operation::SetDefaults,
             Self::SetEndpointRole(_)  => Operation::SetEndpointRole,
             Self::DeriveKey(_)        => Operation::DeriveKey,
             Self::ReKey(_)            => Operation::ReKey,
             Self::ReKeyKeyPair(_)     => Operation::ReKeyKeyPair,
+            Self::Poll(_)             => Operation::Poll,
+            Self::Cancel(_)           => Operation::Cancel,
+            Self::Process(_)          => Operation::Process,
+            Self::QueryAsynchronousRequests(_) => Operation::QueryAsynchronousRequests,
             // Echo the original Operation when we were able to read it
             // before the payload decode failed; fall back to `Ping`
             // (whose handler we already special-case in the
@@ -510,6 +627,9 @@ impl RequestPayload {
             Self::Revoke(r)           => vec![r.uid.as_str()],
             Self::Destroy(r)          => vec![r.uid.as_str()],
             Self::Deactivate(r)       => vec![r.uid.as_str()],
+            // Obtain Lease mutates the record (lease_expiry + Last Change
+            // Date), so a later batch-item failure must be able to Undo it.
+            Self::ObtainLease(r)      => vec![r.uid.as_str()],
             Self::Archive(r)          => vec![r.uid.as_str()],
             Self::Recover(r)          => vec![r.uid.as_str()],
             Self::Obliterate(r)       => vec![r.uid.as_str()],

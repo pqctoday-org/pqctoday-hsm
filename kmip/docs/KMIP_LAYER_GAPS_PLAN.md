@@ -1,3 +1,11 @@
+> **Historical record (2026-07).** Verified closed during the 2026-07-07
+> KMIP Honest-Maximum audit: P0 (ECDH keygen), P1 (Ed25519 first-class),
+> P2 (ECDH/X25519/X448 agreement, via classical-KEM Encapsulate rather than
+> the DeriveKey path originally proposed), and the separately-flagged
+> extractable-hybrid-KEM-private-key architecture violation are all fixed
+> in the current tree. Kept for provenance, not an open to-do list — see
+> `HONEST_MAXIMUM_PLAN.md` for current open work.
+
 # KMIP-layer algorithm gaps — implementation plan
 
 **Date**: 2026-07-05. **Trigger**: the 2026-07-04 CACP policy-gap audit

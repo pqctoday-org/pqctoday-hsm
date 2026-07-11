@@ -93,6 +93,13 @@ pub fn get_attribute_list(
     if obj.comment.is_some()                       { names.push("Comment".into()); }
     if obj.description.is_some()                   { names.push("Description".into()); }
     if obj.contact_information.is_some()           { names.push("Contact Information".into()); }
+    // §4.9 — genuine omission found via the OASIS TL-M-3 conformance
+    // transcript (Honest-Maximum Phase 2.1): ObjectRecord already tracks
+    // this (`application_specific_information`, set at Create/Register
+    // time), GetAttributes already surfaces it
+    // (`get_attributes.rs::attributes_from_record`), but this
+    // GetAttributeList name surface never checked for it.
+    if obj.application_specific_information.is_some() { names.push("Application Specific Information".into()); }
     // Object Class / Lease Time / Key Format Type / Digest /
     // Random Number Generator / Last Change Date are always
     // surfaced by GetAttributes — mirror them here.

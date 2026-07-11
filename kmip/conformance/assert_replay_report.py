@@ -3,20 +3,24 @@
 
 Belt-and-suspenders companion to ``dispatcher_replay.py``'s exit code.
 Parses the JSON sidecar the replay emits and fails (exit 1) unless the
-conformance posture is EXACTLY the documented baseline:
+conformance posture is EXACTLY the documented baseline
+(`HONEST_MAXIMUM_PLAN.md` Phases 0-4 + 6.1 — every non-deprecated
+transcript now passes for real, not just "at least 92 do"):
 
-  * PASS  >= 92   (the headline candidate pass count)
+  * PASS  == 97   (every non-deprecated transcript — the honest maximum
+                    this corpus supports)
   * FAIL  == 0
   * ERROR == 0
-  * SKIP set == the documented 10:
-        5 SKIP_DEPRECATED (DSA x2, 3DES x3 — out of scope by policy)
-      + 2 SKIP_PRECONDITION (inter-transcript state our hermetic harness wipes)
-      + 3 SKIP_POLICY_VARIANT (mutually-exclusive RNGSeed policy choices)
-  * No SKIP_OP / SKIP_PARSE (an op regressing into "unsupported" or a
-    transcript failing to parse is a coverage regression, not a skip).
+  * SKIP set == the documented 5, ALL of it SKIP_DEPRECATED
+    (DSA x2, 3DES x3 — out of scope by policy, `kmip/DEPRECATED.md`).
+  * No SKIP_OP / SKIP_PRECONDITION / SKIP_POLICY_VARIANT / SKIP_PARSE —
+    those categories used to carry 5 more transcripts (2 precondition +
+    3 policy-variant) before the chained-test-group harness feature and
+    the `--rng-seed-mode` CLI flag closed them for real; a NEW one
+    reappearing is a coverage regression, not a legitimate skip.
 
-A NEW skip silently appearing would otherwise shrink the pass-rate
-denominator and hide a regression (the 92->89 Locate regression that
+An unexpected skip would otherwise shrink the pass-rate denominator and
+hide a regression (the 92->89 Locate regression that originally
 motivated this gate). Asserting the exact skip breakdown closes that.
 
 Usage:
@@ -36,15 +40,15 @@ from pathlib import Path
 # op is implemented and a SKIP_OP becomes a PASS), update them here in the
 # same PR that regenerates REPLAY_REPORT.json — that is the whole point of
 # the gate.
-MIN_PASS = 92
+EXPECT_PASS = 97
 EXPECTED_SKIP = {
     "skip_deprecated": 5,
-    "skip_precondition": 2,
-    "skip_policy_variant": 3,
+    "skip_precondition": 0,
+    "skip_policy_variant": 0,
     "skip_op": 0,
     "skip_parse": 0,
 }
-EXPECTED_SKIP_TOTAL = sum(EXPECTED_SKIP.values())  # == 10
+EXPECTED_SKIP_TOTAL = sum(EXPECTED_SKIP.values())  # == 5
 
 
 def main(argv: list[str]) -> int:
@@ -66,8 +70,8 @@ def main(argv: list[str]) -> int:
     n_fail = summary.get("fail", -1)
     n_err = summary.get("error", -1)
 
-    if n_pass < MIN_PASS:
-        errors.append(f"PASS {n_pass} < required {MIN_PASS} (regression)")
+    if n_pass != EXPECT_PASS:
+        errors.append(f"PASS {n_pass} != expected {EXPECT_PASS} (regression, or an undocumented improvement)")
     if n_fail != 0:
         errors.append(f"FAIL {n_fail} != 0 (conformance regression)")
     if n_err != 0:
@@ -84,7 +88,7 @@ def main(argv: list[str]) -> int:
     if actual_skip_total != EXPECTED_SKIP_TOTAL:
         errors.append(
             f"total skips {actual_skip_total} != documented {EXPECTED_SKIP_TOTAL} "
-            f"(5 deprecated + 2 precondition + 3 policy-variant)"
+            f"(5 deprecated only)"
         )
 
     if errors:
@@ -96,7 +100,7 @@ def main(argv: list[str]) -> int:
 
     print(
         f"REPLAY GATE OK: {n_pass} PASS / {n_fail} FAIL / "
-        f"{actual_skip_total} SKIP (5 deprecated + 2 precondition + 3 policy-variant)"
+        f"{actual_skip_total} SKIP (5 deprecated only)"
     )
     return 0
 

@@ -29,6 +29,15 @@ WASM_BINDGEN_VERSION="0.2.117"                       # MUST match wasm/Cargo.tom
 HUB_SHIM_DIR="$HUB/src/wasm/kmip"
 HUB_WASM_DIR="$HUB/public/wasm/rust-kmip"
 
+# FrodoKEM's largest matrix (the 1344 parameter set's n×n generation) exceeds
+# wasm32-unknown-unknown's default ~1MiB shadow stack even in a --release
+# build — reproduced directly: `native::encrypt::encapsulate` traps with
+# "memory access out of bounds" at the default size, passes cleanly at 8MiB.
+# This is the same class of issue rust/build-wasm-bundle.sh already works
+# around for ML-DSA (there, only under --dev; FrodoKEM's matrices are large
+# enough to need the larger stack in --release too).
+export RUSTFLAGS="${RUSTFLAGS:-} -C link-arg=-zstack-size=8388608"
+
 # ── Pick a runner: host cargo, or `docker exec` into the build container ──────
 RUST_CONTAINER="${RUST_CONTAINER:-pqc-rust}"
 if command -v cargo >/dev/null 2>&1; then
@@ -50,7 +59,10 @@ else
     docker exec "$RUST_CONTAINER" rustup target add wasm32-unknown-unknown
     docker exec "$RUST_CONTAINER" sh -c "command -v wasm-bindgen >/dev/null 2>&1 || cargo install wasm-bindgen-cli --version $WASM_BINDGEN_VERSION"
   fi
-  run() { docker exec "$RUST_CONTAINER" sh -c "cd /ag/pqctoday-hsm/wasm && $*"; }
+  # The container mounts the parent of $ROOT at /ag, so derive the repo dir
+  # from $ROOT instead of hardcoding it — a `git worktree` checkout (e.g.
+  # pqctoday-hsm-kmip-honest-maximum) builds ITS OWN tree, not the main one.
+  run() { docker exec -e RUSTFLAGS="$RUSTFLAGS" "$RUST_CONTAINER" sh -c "cd /ag/$(basename "$ROOT")/wasm && $*"; }
   CARGO_TARGET_ROOT="/cargo-target"
 fi
 
@@ -94,7 +106,42 @@ cp "$ROOT"/kmip/policies/*.yaml "$HUB_POLICY_DIR/"
 # version matching the staged policies/engine.
 cp "$ROOT"/kmip/docs/CACP_GUIDE.md "$HUB_POLICY_DIR/"
 
+# ── 5. Stage the conformance corpus (Corpus Replay tab) ─────────────────────
+# The OASIS + PQC-interop XML fixtures the playground replays live in-browser,
+# plus the manifest.json the tab's loader fetches first. Re-staged on every
+# build so the browser replay can never drift from the engine's own corpus.
+HUB_CORPUS_DIR="$HUB/public/kmip-corpus"
+CONF="$ROOT/kmip/conformance"
+echo "[kmip-wasm] staging conformance corpus into $HUB_CORPUS_DIR"
+mkdir -p "$HUB_CORPUS_DIR/oasis/mandatory" "$HUB_CORPUS_DIR/oasis/optional" "$HUB_CORPUS_DIR/pqc"
+cp "$CONF"/oasis_corpus/mandatory/*.xml "$HUB_CORPUS_DIR/oasis/mandatory/"
+cp "$CONF"/oasis_corpus/optional/*.xml  "$HUB_CORPUS_DIR/oasis/optional/"
+cp "$CONF"/pqc_corpus/*.xml             "$HUB_CORPUS_DIR/pqc/"
+python3 - "$HUB_CORPUS_DIR" <<'PY'
+import json, os, sys
+root = sys.argv[1]
+tests = []
+def add(rel_dir, tier, category):
+    d = os.path.join(root, rel_dir)
+    for name in sorted(os.listdir(d)):
+        if not name.endswith('.xml'):
+            continue
+        # e.g. "CS-AC-M-1-30.xml" → "CS-AC" (profile prefix before -M-/-O-)
+        cat = category or name.split('-M-')[0].split('-O-')[0]
+        tests.append({'file': f'{rel_dir}/{name}', 'tier': tier, 'category': cat, 'name': name})
+add('oasis/mandatory', 'mandatory', None)
+add('oasis/optional', 'optional', None)
+add('pqc', 'pqc', 'PQC Interop')
+manifest = {'generated_by': 'scripts/build-kmip-wasm.sh (corpus staging step)',
+            'count': len(tests), 'tests': tests}
+with open(os.path.join(root, 'manifest.json'), 'w') as f:
+    json.dump(manifest, f, indent=2)
+    f.write('\n')
+print(f"[kmip-wasm]   manifest.json: {len(tests)} corpus tests")
+PY
+
 echo ""
 echo "[kmip-wasm] done."
 echo "  hub shim:   $HUB_SHIM_DIR/pqctoday_kmip_wasm.js"
 echo "  hub binary: $HUB_WASM_DIR/pqctoday_kmip_wasm_bg.wasm"
+echo "  hub corpus: $HUB_CORPUS_DIR/manifest.json"

@@ -1,8 +1,10 @@
 > **Superseded — historical baseline (2026-06-09).** Every figure below (0 pass,
-> 83 skip-op, 16 fail) describes the *initial* replay run. Current standing is
-> **92 PASS / 0 FAIL / 0 SKIP_OP / 10 deliberate skips** — see
-> `../conformance/REPLAY_REPORT.md` and `CONFORMANCE_REPORT.md`. Kept only to show
-> the starting point.
+> 83 skip-op, 16 fail) describes the *initial* replay run. Current standing (as of
+> 2026-07-08, `HONEST_MAXIMUM_PLAN.md` Phases 0–4 + 6.1) is
+> **97 PASS / 0 FAIL / 0 SKIP_OP / 5 deliberate skips** (DES/3DES/DSA only — the
+> precondition and policy-variant skip categories from the 10-skip era have since
+> closed for real) — see `../conformance/REPLAY_REPORT.md` and
+> `CONFORMANCE_REPORT.md`. Kept only to show the starting point.
 
 # OASIS KMIP 3.0 Dispatcher Replay — Baseline Analysis
 

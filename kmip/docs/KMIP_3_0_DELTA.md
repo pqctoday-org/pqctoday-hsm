@@ -94,11 +94,25 @@ LLM in the loop — pure DOM walk.
 ## 5. Operation codepoints — not yet extracted
 
 The `Operation` enumeration is in the extracted output under `enums.Operation`
-— 50 values. KMIP 3.0 reuses the existing `Encrypt` / `Decrypt` ops for
-ML-KEM encapsulation/decapsulation rather than introducing new
-`Encapsulate` / `Decapsulate` ops (verified against the OASIS HTML
-2026-06-04; see IMPLEMENTATION_PLAN.md §6 Phase 5 note). Phase 5 op handlers
-branch on key algorithm inside the handlers, not on the op name.
+— **64 values** (corrected; a prior revision of this section said 50 — see
+§7 below, which independently confirms 64). **(CSD01)** the published KMIP
+3.0 spec reuses the existing `Encrypt` / `Decrypt` ops for ML-KEM
+encapsulation/decapsulation rather than introducing new `Encapsulate` /
+`Decapsulate` ops (verified against the OASIS HTML 2026-06-04; see
+IMPLEMENTATION_PLAN.md §6 Phase 5 note) — the published `Operation` enum
+tops out at `Deactivate = 0x40`, and neither "Encapsulate" nor "Decapsulate"
+appears in it. **(WD19, later)** the 14-Feb-2025 working draft *does* add
+native `Encapsulate = 0x41` / `Decapsulate = 0x42` ops (§6.1.22/§6.1.15) plus
+a `KEM Algorithm` enumeration (§11.26, tag `0x4201C3`) — and this server now
+implements the WD19 pair as first-class ops (`ops::encapsulate`,
+`ops::decapsulate`) while *also* keeping the CSD01-era Encrypt/Decrypt
+overload for pre-WD19 clients (`ops/sign.rs`'s sibling `ops/encrypt.rs`
+handlers branch on key algorithm inside the handler, not on the op name, for
+that backward-compatible path — the sentence above was accurate for the
+CSD01-only design that predates the WD19 ops and is retained here as
+historical context, not current behavior). See
+`docs/CONFORMANCE_REPORT.md §4.1` and `spec/crossref/kem-encapsulate-decapsulate.yaml`
+for the authoritative, hand-verified current picture.
 
 ## 6. Maintenance
 

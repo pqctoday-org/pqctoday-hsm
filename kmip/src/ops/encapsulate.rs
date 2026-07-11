@@ -61,16 +61,22 @@ pub fn encapsulate(
     })?;
 
     // K6 — Encapsulate accepts ML-KEM, the hybrid KEMs (X25519MLKEM768 /
-    // SecP256r1MLKEM768), and (2026-07-05) classical ECDH/X25519/X448 in
-    // DHKEM mode — see `is_classical_kem`.
-    if !is_ml_kem(obj.algorithm) && !obj.algorithm.is_hybrid_kem() && !is_classical_kem(obj.algorithm) {
+    // SecP256r1MLKEM768), classical ECDH/X25519/X448 in DHKEM mode (see
+    // `is_classical_kem`), and (2026-07-06) BSI TR-02102-1's FrodoKEM /
+    // Classic McEliece.
+    if !is_ml_kem(obj.algorithm)
+        && !obj.algorithm.is_hybrid_kem()
+        && !is_classical_kem(obj.algorithm)
+        && !is_frodokem(obj.algorithm)
+        && !is_classic_mceliece(obj.algorithm)
+    {
         return Err(fail_err(
             deps,
             correlation_id,
             "Encapsulate",
             KmipError::failed(
                 ResultReason::OperationNotSupported,
-                format!("Encapsulate requires an ML-KEM, hybrid KEM, or classical ECDH/X25519/X448 key; {:?} is not", obj.algorithm),
+                format!("Encapsulate requires an ML-KEM, hybrid KEM, classical ECDH/X25519/X448, FrodoKEM, or Classic McEliece key; {:?} is not", obj.algorithm),
             ),
         ));
     }
@@ -431,6 +437,25 @@ pub(crate) fn is_ml_kem(a: KmipAlgorithm) -> bool {
 /// `create_key_pair.rs`'s `Ecdh` branch), so this matches the bare variant.
 pub(crate) fn is_classical_kem(a: KmipAlgorithm) -> bool {
     matches!(a, KmipAlgorithm::Ecdh)
+}
+
+/// FrodoKEM (BSI TR-02102-1 §2.4.1) — all 6 standard variants.
+pub(crate) fn is_frodokem(a: KmipAlgorithm) -> bool {
+    matches!(
+        a,
+        KmipAlgorithm::FrodoKem640Aes
+            | KmipAlgorithm::FrodoKem640Shake
+            | KmipAlgorithm::FrodoKem976Aes
+            | KmipAlgorithm::FrodoKem976Shake
+            | KmipAlgorithm::FrodoKem1344Aes
+            | KmipAlgorithm::FrodoKem1344Shake
+    )
+}
+
+/// Classic McEliece (BSI TR-02102-1 §2.4.2) — scoped to `mceliece6688128`
+/// only (implementation plan Phase 0.5).
+pub(crate) fn is_classic_mceliece(a: KmipAlgorithm) -> bool {
+    matches!(a, KmipAlgorithm::ClassicMcEliece6688128)
 }
 
 /// Persist the derived shared secret as a fresh managed `SecretData`

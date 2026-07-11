@@ -22,16 +22,18 @@
 //! [`RingSink`] for isolation. The trait is `Send + Sync` so one sink
 //! safely fans across concurrent emissions.
 //!
-//! ## What each plane emits (today vs planned)
+//! ## What each plane emits
 //!
-//! | Plane | Events | Status |
-//! |-------|--------|--------|
-//! | P1 — agility | `PolicyActivated`, `PolicyDecided`, `RekeyPlanned` | ✅ wired (this phase) |
-//! | P2 — KMIP    | `KmipRequestReceived`, `KmipResponseSent`, `KmipObjectStateChanged` | ⏳ Phase 5–6 |
-//! | P3 — PKCS#11 | `Pkcs11Call`, `Pkcs11SessionLifecycle` | ⏳ Phase 5 (when ops drive the bridge) |
+//! | Plane | Events |
+//! |-------|--------|
+//! | P1 — agility | `PolicyActivated`, `PolicyDecided`, `RekeyPlanned` |
+//! | P2 — KMIP    | `KmipRequestReceived`, `KmipResponseSent`, `KmipObjectStateChanged` |
+//! | P3 — PKCS#11 | `Pkcs11Call`, `Pkcs11SessionLifecycle` |
 //!
-//! Variant shape is committed wire-format — Phase 5 / 6 emitters fill in
-//! the payload fields, no schema change.
+//! All three planes are wired and emitted throughout `ops/*.rs` today
+//! (`emit_request`/`emit_success`/`emit_pkcs11*` helpers), driving real
+//! `Pkcs11Call` records with the actual softhsmrustv3 entry point + rv
+//! whenever `deps.engine_session` is present.
 
 pub mod composite;
 pub mod event;

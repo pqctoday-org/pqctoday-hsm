@@ -16,7 +16,7 @@ use bytes::BytesMut;
 use crate::codec::{decode_one, encode, Tag, TtlvFrame, Value};
 
 use super::algos::KmipAlgorithm;
-use super::attrs::{Attribute, ObjectType, RevocationReason, State, UsageMask};
+use super::attrs::{Attribute, CustomAttributeValue, ObjectType, RevocationReason, State, UsageMask};
 use super::message::{
     RequestBatchItem, RequestHeader, RequestMessage, RequestPayload, ResponseBatchItem,
     ResponseHeader, ResponseMessage, ResponsePayload, ResultStatus,
@@ -156,6 +156,28 @@ pub(crate) mod tags {
     // verified from `kmip-spec-3.0-tags-enums.json`. ────────────────
     /// §8.1.2 `Asynchronous Indicator` Enumeration (request header).
     pub const AsynchronousIndicator: u32  = 0x42_0007;
+    // ── Phase 4 — asynchronous subsystem (§6.1.5/§6.1.43/§6.1.44/
+    // §6.1.46, §9.1, §11.61 tag table 453). Codepoints verified from
+    // `kmip-spec-3.0-tags-enums.json`. ──────────────────────────────
+    /// §9.1 `Asynchronous Correlation Value` (Response Batch Item /
+    /// Poll+Cancel+Process request &c.) — ByteString.
+    pub const AsynchronousCorrelationValue: u32   = 0x42_0006;
+    /// §6.1.5 `Cancellation Result` Enumeration (Cancel response).
+    pub const CancellationResult: u32             = 0x42_0012;
+    /// §7.2 `Asynchronous Request` Structure (Query Asynchronous
+    /// Requests response, repeatable).
+    pub const AsynchronousRequest: u32            = 0x42_0173;
+    /// `Submission Date` (DateTimeExtended) inside Asynchronous Request.
+    pub const SubmissionDate: u32                 = 0x42_0174;
+    /// `Processing Stage` Enumeration inside Asynchronous Request.
+    pub const ProcessingStage: u32                = 0x42_0175;
+    /// §7.1 `Asynchronous Correlation Values` Structure (Query
+    /// Asynchronous Requests request — zero or more correlation values).
+    pub const AsynchronousCorrelationValues: u32  = 0x42_0176;
+    /// `Operations` Structure (Query Asynchronous Requests request —
+    /// zero or more `Operation` Enumeration filter values). Distinct
+    /// from the singular `Operation` tag (0x42005c) used elsewhere.
+    pub const Operations: u32                     = 0x42_014f;
     /// §8.1.3 `Message Extension` Structure (per batch item).
     pub const MessageExtension: u32       = 0x42_0051;
     /// `Criticality Indicator` Boolean inside Message Extension.
@@ -287,6 +309,15 @@ pub(crate) mod tags {
     /// KMIP 3.0 §6.1.7 Check request fields.
     pub const UsageLimitsCount: u32       = 0x42_0096;
     pub const LeaseTime: u32              = 0x42_0049;
+    // Phase 3.3 — Split Key (§2.2.8/§4.29/§4.30/§4.63-4.66), tag values
+    // verified against the spec's own Object tag table (§11.61).
+    pub const SplitKeyStructure: u32      = 0x42_0089;
+    pub const SplitKeyMethod: u32         = 0x42_008a;
+    pub const SplitKeyParts: u32          = 0x42_008b;
+    pub const SplitKeyThreshold: u32      = 0x42_008c;
+    pub const KeyPartIdentifier: u32      = 0x42_0044;
+    pub const PrimeFieldSize: u32         = 0x42_0062;
+    pub const SplitKeyPolynomial: u32     = 0x42_01b6;
     /// KMIP 3.0 §11 Cryptographic Parameters Structure (codepoint
     /// verified against kmip-spec-3.0-tags-enums.json).
     pub const CryptographicParameters: u32 = 0x42_002b;
@@ -347,6 +378,10 @@ pub(crate) mod tags {
     pub const Username: u32               = 0x42_0099;
     pub const Password: u32               = 0x42_00a1;
     pub const Ticket: u32                 = 0x42_0149;
+    // §7.40 Table 494 Ticket Structure — verified against the spec PDF
+    // (§11.61 Object tag table): Ticket Type 42014A, Ticket Value 42014B.
+    pub const TicketType: u32             = 0x42_014a;
+    pub const TicketValue: u32            = 0x42_014b;
     pub const LogMessage: u32             = 0x42_0141;
     pub const RequestCount: u32           = 0x42_014c;
     pub const UsageLimits: u32            = 0x42_0095;
@@ -393,6 +428,10 @@ pub(crate) mod tags {
     pub const RotateAutomatic: u32               = 0x42_016b;
     pub const ShortUniqueIdentifier: u32         = 0x42_0136;
     pub const AlternativeName: u32               = 0x42_00bf;
+    /// §4.5 Structure members — see the `tags::AlternativeName` decode
+    /// arm (`decode_attribute_v3`).
+    pub const AlternativeNameValue: u32          = 0x42_00c0;
+    pub const AlternativeNameType: u32           = 0x42_00c1;
     pub const Comment: u32                       = 0x42_00fd;
     pub const Description: u32                   = 0x42_00fc;
     pub const ContactInformation: u32            = 0x42_0022;
@@ -652,8 +691,22 @@ fn decode_credential(frame: &TtlvFrame) -> Result<crate::kmip30::Credential, Wir
         tag: tags::CredentialType,
         name: "Credential Type",
     })?;
-    // 0x01 = `Username and Password` per the OASIS enums JSON
-    // (`Credential Type` enum).
+    // 0x01 = `Username and Password`, 0x06 = `Ticket` per the OASIS
+    // enums JSON (`Credential Type` enum).
+    if credential_type == 0x06 {
+        let value_frame = value_frame.ok_or(WireError::Missing {
+            tag: tags::CredentialValue,
+            name: "Credential Value",
+        })?;
+        // §9.9 Table 517 — Credential Value for Ticket is a Structure
+        // wrapping exactly one nested §7.40 `Ticket` structure.
+        let ticket_frame = expect_structure(value_frame, "Credential Value")?
+            .iter()
+            .find(|c| c.tag.0 == tags::Ticket)
+            .ok_or(WireError::Missing { tag: tags::Ticket, name: "Ticket" })?;
+        let (ticket_type, ticket_value) = decode_ticket_structure(ticket_frame)?;
+        return Ok(Credential::Ticket(crate::kmip30::Ticket { ticket_type, ticket_value }));
+    }
     if credential_type != 0x01 {
         return Ok(Credential::Unsupported { credential_type });
     }
@@ -822,6 +875,16 @@ fn response_batch_item_to_frame(bi: &ResponseBatchItem) -> TtlvFrame {
         if let Some(msg) = &bi.result_message {
             children.push(TtlvFrame::new(Tag(tags::ResultMessage), Value::TextString(msg.clone())));
         }
+        // Phase 4 — §9.1: "returned in the immediate response to an
+        // operation that is pending and that requires asynchronous
+        // polling." REQUIRED iff `result_status == OperationPending`;
+        // `dispatch_one`/`handle_poll` only ever populate it then.
+        if let Some(cv) = &bi.asynchronous_correlation_value {
+            children.push(TtlvFrame::new(
+                Tag(tags::AsynchronousCorrelationValue),
+                Value::ByteString(cv.clone()),
+            ));
+        }
     }
     TtlvFrame::new(Tag(tags::BatchItem), Value::Structure(children))
 }
@@ -906,8 +969,52 @@ fn encode_credential(c: &crate::kmip30::Credential) -> Option<TtlvFrame> {
                 ]),
             ))
         }
+        Credential::Ticket(t) => Some(TtlvFrame::new(
+            Tag(tags::Credential),
+            Value::Structure(vec![
+                TtlvFrame::new(Tag(tags::CredentialType), Value::Enumeration(0x06)),
+                TtlvFrame::new(
+                    Tag(tags::CredentialValue),
+                    Value::Structure(vec![encode_ticket_frame(t.ticket_type, &t.ticket_value)]),
+                ),
+            ]),
+        )),
         Credential::Unsupported { .. } => None,
     }
+}
+
+/// Encode a §7.40 `Ticket` Structure: `Ticket Type` (Enumeration) +
+/// `Ticket Value` (ByteString). Shared by `Login`'s response, `Logout`'s
+/// request, and the `Ticket` `Credential` type — all three carry the
+/// exact same structure per spec.
+fn encode_ticket_frame(ticket_type: u32, ticket_value: &[u8]) -> TtlvFrame {
+    TtlvFrame::new(
+        Tag(tags::Ticket),
+        Value::Structure(vec![
+            TtlvFrame::new(Tag(tags::TicketType), Value::Enumeration(ticket_type)),
+            TtlvFrame::new(Tag(tags::TicketValue), Value::ByteString(ticket_value.to_vec())),
+        ]),
+    )
+}
+
+/// Decode a §7.40 `Ticket` Structure (mirror of [`encode_ticket_frame`]).
+fn decode_ticket_structure(frame: &TtlvFrame) -> Result<(u32, Vec<u8>), WireError> {
+    let mut ticket_type: Option<u32> = None;
+    let mut ticket_value: Option<Vec<u8>> = None;
+    for c in expect_structure(frame, "Ticket")? {
+        match c.tag.0 {
+            tags::TicketType => ticket_type = Some(expect_enum(c, "Ticket Type")?),
+            tags::TicketValue => {
+                if let Value::ByteString(b) = &c.value {
+                    ticket_value = Some(b.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+    let ticket_type = ticket_type.ok_or(WireError::Missing { tag: tags::TicketType, name: "Ticket Type" })?;
+    let ticket_value = ticket_value.ok_or(WireError::Missing { tag: tags::TicketValue, name: "Ticket Value" })?;
+    Ok((ticket_type, ticket_value))
 }
 
 fn request_batch_item_to_frame(bi: &RequestBatchItem) -> Option<TtlvFrame> {
@@ -1024,6 +1131,7 @@ fn request_payload_to_frame(p: &RequestPayload) -> Option<TtlvFrame> {
         RequestPayload::Activate(r) => vec![uid_frame(&r.uid)],
         RequestPayload::Destroy(r) => vec![uid_frame(&r.uid)],
         RequestPayload::Archive(r) => vec![uid_frame(&r.uid)],
+        RequestPayload::ObtainLease(r) => vec![uid_frame(&r.uid)],
         RequestPayload::Recover(r) => vec![uid_frame(&r.uid)],
         RequestPayload::Obliterate(r) => vec![uid_frame(&r.uid)],
         RequestPayload::Revoke(r) => vec![
@@ -1408,6 +1516,9 @@ fn decode_request_payload(op: Operation, frame: &TtlvFrame) -> Result<RequestPay
         Operation::Export           => RequestPayload::Export(decode_export_req(children)?),
         Operation::Deactivate       => RequestPayload::Deactivate(decode_deactivate_req(children)?),
         Operation::Check            => RequestPayload::Check(decode_check_req(children)?),
+        Operation::ObtainLease      => RequestPayload::ObtainLease(ObtainLeaseRequest { uid: required_uid(children)? }),
+        Operation::CreateSplitKey  => RequestPayload::CreateSplitKey(decode_create_split_key_req(children)?),
+        Operation::JoinSplitKey    => RequestPayload::JoinSplitKey(decode_join_split_key_req(children)?),
         Operation::Archive          => RequestPayload::Archive(ArchiveRequest { uid: required_uid(children)? }),
         Operation::Recover          => RequestPayload::Recover(RecoverRequest { uid: required_uid(children)? }),
         Operation::Obliterate       => RequestPayload::Obliterate(ObliterateRequest { uid: required_uid(children)? }),
@@ -1430,6 +1541,7 @@ fn decode_request_payload(op: Operation, frame: &TtlvFrame) -> Result<RequestPay
             RequestPayload::GetUsageAllocation(decode_get_usage_allocation_req(children)?)
         }
         Operation::GetConstraints   => RequestPayload::GetConstraints(GetConstraintsRequest),
+        Operation::SetConstraints   => RequestPayload::SetConstraints(decode_set_constraints_req(children)?),
         Operation::SetDefaults      => RequestPayload::SetDefaults(decode_set_defaults_req(children)?),
         Operation::SetEndpointRole  => {
             RequestPayload::SetEndpointRole(decode_set_endpoint_role_req(children)?)
@@ -1453,16 +1565,18 @@ fn decode_request_payload(op: Operation, frame: &TtlvFrame) -> Result<RequestPay
         // the `UnknownEnum` → InvalidMessage treatment.
         // K21 moved ReKey / ReKeyKeyPair out of this arm into real
         // §6.1.51 / §6.1.52 decode routes above.
-        Operation::ObtainLease
-        | Operation::Poll
-        | Operation::Notify
+        // Phase 4 moved Poll / Cancel / Process / QueryAsynchronousRequests
+        // out of this arm into real §6.1.43/§6.1.5/§6.1.44/§6.1.46 decode
+        // routes below. Notify / Put stay parked (Phase 5 — server-to-client,
+        // spec-undefined transport).
+        Operation::Poll             => RequestPayload::Poll(decode_poll_req(children)?),
+        Operation::Cancel           => RequestPayload::Cancel(decode_cancel_req(children)?),
+        Operation::Process          => RequestPayload::Process(decode_process_req(children)?),
+        Operation::QueryAsynchronousRequests => {
+            RequestPayload::QueryAsynchronousRequests(decode_query_async_req(children)?)
+        }
+        Operation::Notify
         | Operation::Put
-        | Operation::CreateSplitKey
-        | Operation::SetConstraints
-        | Operation::QueryAsynchronousRequests
-        | Operation::Process
-        | Operation::Cancel
-        | Operation::JoinSplitKey
         | Operation::DelegatedLogin
         | Operation::ReProvision => RequestPayload::Unsupported(op),
     })
@@ -1504,6 +1618,20 @@ fn response_payload_to_frame(payload: &ResponsePayload) -> TtlvFrame {
         ResponsePayload::Export(r)           => encode_export_resp(r),
         ResponsePayload::Deactivate(r)       => encode_uid_only_resp(&r.uid),
         ResponsePayload::Check(r)            => encode_uid_only_resp(&r.uid),
+        // §6.1.40 Table 371 — UniqueIdentifier + LeaseTime (Interval) +
+        // LastChangeDate (DateTime), all REQUIRED.
+        ResponsePayload::ObtainLease(r)      => vec![
+            uid_frame(&r.uid),
+            TtlvFrame::new(Tag(tags::LeaseTime), Value::Interval(r.lease_time)),
+            TtlvFrame::new(Tag(tags::LastChangeDate), Value::DateTime(r.last_change_date)),
+        ],
+        // §6.1.12 Table 287 — repeated UniqueIdentifier, one per created share.
+        ResponsePayload::CreateSplitKey(r)   => r
+            .uids
+            .iter()
+            .map(|u| TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString(u.clone())))
+            .collect(),
+        ResponsePayload::JoinSplitKey(r)     => encode_uid_only_resp(&r.uid),
         ResponsePayload::Archive(r)          => encode_uid_only_resp(&r.uid),
         ResponsePayload::Recover(r)          => encode_uid_only_resp(&r.uid),
         ResponsePayload::Obliterate(_)       => vec![],
@@ -1516,8 +1644,10 @@ fn response_payload_to_frame(payload: &ResponsePayload) -> TtlvFrame {
         ResponsePayload::CreateGroup(r)      => encode_uid_only_resp(&r.uid),
         ResponsePayload::CreateUser(r)       => encode_uid_only_resp(&r.uid),
         ResponsePayload::Log(_)              => vec![],
+        // KMIP 3.0 §7.40 Table 494 — Ticket is a Structure (Ticket Type +
+        // Ticket Value), not a bare TextString (fixed pre-existing bug).
         ResponsePayload::Login(r)            => vec![
-            TtlvFrame::new(Tag(tags::Ticket), Value::TextString(r.ticket.clone())),
+            encode_ticket_frame(r.ticket.ticket_type, &r.ticket.ticket_value),
         ],
         ResponsePayload::Logout(_)           => vec![],
         ResponsePayload::RngRetrieve(r)      => vec![
@@ -1530,6 +1660,7 @@ fn response_payload_to_frame(payload: &ResponsePayload) -> TtlvFrame {
         // K19 — Baseline client-to-server ops (§6.1.26/27/58/59).
         ResponsePayload::GetUsageAllocation(r) => encode_uid_only_resp(&r.uid),
         ResponsePayload::GetConstraints(r)   => encode_get_constraints_resp(r),
+        ResponsePayload::SetConstraints(_)   => vec![],
         // §6.1.58 Table 429 — Set Defaults response payload is empty.
         ResponsePayload::SetDefaults(_)      => vec![],
         ResponsePayload::SetEndpointRole(r)  => vec![TtlvFrame::new(
@@ -1552,6 +1683,49 @@ fn response_payload_to_frame(payload: &ResponsePayload) -> TtlvFrame {
                 Value::TextString(r.public_key_uid.clone()),
             ),
         ],
+        // Phase 4 — §6.1.5 Table 262: Asynchronous Correlation Value +
+        // Cancellation Result.
+        ResponsePayload::Cancel(r) => vec![
+            TtlvFrame::new(
+                Tag(tags::AsynchronousCorrelationValue),
+                Value::ByteString(r.asynchronous_correlation_value.clone()),
+            ),
+            TtlvFrame::new(
+                Tag(tags::CancellationResult),
+                Value::Enumeration(r.cancellation_result.to_wire_value()),
+            ),
+        ],
+        // §6.1.44 Table 379: empty response payload.
+        ResponsePayload::Process(_r) => Vec::new(),
+        // §6.1.46 Table 386: zero or more repeated Asynchronous Request
+        // structures (§7.2 Table 453).
+        ResponsePayload::QueryAsynchronousRequests(r) => r
+            .requests
+            .iter()
+            .map(|req| {
+                TtlvFrame::new(
+                    Tag(tags::AsynchronousRequest),
+                    Value::Structure(vec![
+                        TtlvFrame::new(
+                            Tag(tags::AsynchronousCorrelationValue),
+                            Value::ByteString(req.asynchronous_correlation_value.clone()),
+                        ),
+                        TtlvFrame::new(
+                            Tag(tags::Operation),
+                            Value::Enumeration(req.operation.to_wire_value()),
+                        ),
+                        TtlvFrame::new(
+                            Tag(tags::SubmissionDate),
+                            Value::DateTime(req.submission_date),
+                        ),
+                        TtlvFrame::new(
+                            Tag(tags::ProcessingStage),
+                            Value::Enumeration(req.processing_stage.to_wire_value()),
+                        ),
+                    ]),
+                )
+            })
+            .collect(),
     };
     TtlvFrame::new(Tag(tags::ResponsePayload), Value::Structure(children))
 }
@@ -2496,6 +2670,14 @@ fn decode_attribute_v3(frame: &TtlvFrame) -> Result<Option<Attribute>, WireError
         tags::Fresh => Attribute::Fresh(expect_boolean(frame, "Fresh")?),
         tags::KeyValuePresent => Attribute::KeyValuePresent(expect_boolean(frame, "Key Value Present")?),
         tags::QuantumSafe => Attribute::QuantumSafe(expect_boolean(frame, "Quantum Safe")?),
+        // Phase 3.3 — Split Key attributes (§4.29/§4.30/§4.63-4.66).
+        // Client-decodable so Create Split Key's generic Attributes
+        // list can carry Split Key Polynomial (§4.63).
+        tags::SplitKeyMethod => Attribute::SplitKeyMethod(expect_enum(frame, "Split Key Method")?),
+        tags::SplitKeyParts => Attribute::SplitKeyParts(expect_integer(frame, "Split Key Parts")? as u32),
+        tags::SplitKeyThreshold => Attribute::SplitKeyThreshold(expect_integer(frame, "Split Key Threshold")? as u32),
+        tags::KeyPartIdentifier => Attribute::KeyPartIdentifier(expect_integer(frame, "Key Part Identifier")? as u32),
+        tags::SplitKeyPolynomial => Attribute::SplitKeyPolynomial(expect_enum(frame, "Split Key Polynomial")?),
         // KMIP 3.0 §11 — `CryptographicParameters` Structure attached
         // to a key drives Plane-3 mechanism choice (RSA-OAEP padding /
         // MGF / label, MAC hash, ...). Captured here so Register's
@@ -2538,14 +2720,36 @@ fn decode_attribute_v3(frame: &TtlvFrame) -> Result<Option<Attribute>, WireError
         tags::Attribute => {
             let inner = expect_structure(frame, "Attribute")?;
             let mut name = String::new();
-            let mut value = String::new();
+            let mut value = CustomAttributeValue::Text(String::new());
             for c in inner {
                 match c.tag.0 {
                     tags::AttributeName => {
                         if let Value::TextString(s) = &c.value { name = s.clone(); }
                     }
+                    // Per §11, AttributeValue is client-typed on the wire
+                    // (its TTLV item-type byte, not the Attribute Name,
+                    // says what it is). Previously only `TextString` was
+                    // read — every Integer/DateTime/Boolean-typed custom
+                    // attribute silently decoded to an empty string
+                    // (found via the OASIS TL-M-2/TL-M-3 conformance
+                    // transcripts, which set an Integer- and a
+                    // DateTime-valued vendor attribute and expect
+                    // GetAttributes to round-trip the real type back —
+                    // Honest-Maximum Phase 2.1 follow-up).
                     tags::AttributeValue => {
-                        if let Value::TextString(s) = &c.value { value = s.clone(); }
+                        value = match &c.value {
+                            Value::TextString(s) => CustomAttributeValue::Text(s.clone()),
+                            Value::Integer(n) => CustomAttributeValue::Integer(*n as i64),
+                            Value::LongInteger(n) => CustomAttributeValue::Integer(*n),
+                            Value::DateTime(t) => CustomAttributeValue::DateTime(*t),
+                            Value::Boolean(b) => CustomAttributeValue::Boolean(*b),
+                            // ByteString / Enumeration / BigInteger / Structure
+                            // custom-attribute values: not exercised by any
+                            // known transcript. Falls back to the pre-existing
+                            // graceful-degradation posture (empty text) rather
+                            // than guessing a representation.
+                            _ => CustomAttributeValue::Text(String::new()),
+                        };
                     }
                     _ => {} // VendorIdentification + future fields ignored in v0.1
                 }
@@ -2571,9 +2775,40 @@ fn decode_attribute_v3(frame: &TtlvFrame) -> Result<Option<Attribute>, WireError
                 Attribute::ContactInformation(s.clone())
             } else { return Ok(None); }
         }
+        // KMIP 3.0 §4.5 — Alternative Name is a Structure { Alternative
+        // Name Value (TextString), Alternative Name Type (Enumeration) },
+        // not a bare TextString leaf. The previous arm only matched
+        // `Value::TextString` directly on the `AlternativeName` frame
+        // itself, so every real client-set AlternativeName (which always
+        // wire-encodes as a Structure) silently decoded to `Ok(None)` and
+        // was dropped — found via the OASIS TL-M-2/TL-M-3 conformance
+        // transcripts (Honest-Maximum Phase 2.1).
+        //
+        // Gap-remediation Phase H, Finding #11 — the Type enumeration is
+        // now decoded for real instead of being discarded. `1`
+        // (Uninterpreted Text String) is the spec default and also what
+        // a non-compliant bare-TextString frame implies.
         tags::AlternativeName => {
             if let Value::TextString(s) = &frame.value {
-                Attribute::AlternativeName(s.clone())
+                Attribute::AlternativeName { value: s.clone(), name_type: 1 }
+            } else if let Value::Structure(children) = &frame.value {
+                let mut value = None;
+                let mut name_type = 1u32;
+                for c in children {
+                    match c.tag.0 {
+                        tags::AlternativeNameValue => {
+                            if let Value::TextString(s) = &c.value { value = Some(s.clone()); }
+                        }
+                        tags::AlternativeNameType => {
+                            if let Value::Enumeration(v) = c.value { name_type = v; }
+                        }
+                        _ => {}
+                    }
+                }
+                match value {
+                    Some(value) => Attribute::AlternativeName { value, name_type },
+                    None => return Ok(None),
+                }
             } else { return Ok(None); }
         }
         tags::ObjectClass => {
@@ -2887,13 +3122,12 @@ fn decode_login_req(children: &[TtlvFrame]) -> Result<LoginRequest, WireError> {
 }
 
 fn decode_logout_req(children: &[TtlvFrame]) -> Result<LogoutRequest, WireError> {
-    let mut ticket = String::new();
-    for c in children {
-        if c.tag.0 == tags::Ticket {
-            if let Value::TextString(s) = &c.value { ticket = s.clone(); }
-        }
-    }
-    Ok(LogoutRequest { ticket })
+    let frame = children
+        .iter()
+        .find(|c| c.tag.0 == tags::Ticket)
+        .ok_or(WireError::Missing { tag: tags::Ticket, name: "Ticket" })?;
+    let (ticket_type, ticket_value) = decode_ticket_structure(frame)?;
+    Ok(LogoutRequest { ticket: crate::kmip30::Ticket { ticket_type, ticket_value } })
 }
 
 // ── Group E codecs: MAC / MACVerify / Hash ─────────────────────────────────
@@ -2925,8 +3159,34 @@ fn encode_cryptographic_parameters(cp: &CryptographicParameters) -> TtlvFrame {
     if let Some(v) = cp.block_cipher_mode {
         children.push(TtlvFrame::new(Tag(tags::BlockCipherMode), Value::Enumeration(v)));
     }
+    // Gap-remediation Phase C, Finding #6 — these 7 fields were fully
+    // decoded (see `decode_cryptographic_parameters` below) but never
+    // encoded back out, so a PQC signing object with Deterministic/
+    // ContextString set, or an AEAD object with TagLength set, lost
+    // those fields on every GetAttributes/Export response.
+    if let Some(v) = cp.tag_length {
+        children.push(TtlvFrame::new(Tag(tags::TagLength), Value::Integer(v)));
+    }
+    if let Some(v) = cp.random_iv {
+        children.push(TtlvFrame::new(Tag(tags::RandomIV), Value::Boolean(v)));
+    }
     if let Some(v) = cp.salt_length {
         children.push(TtlvFrame::new(Tag(tags::SaltLength), Value::Integer(v)));
+    }
+    if let Some(v) = cp.deterministic {
+        children.push(TtlvFrame::new(Tag(tags::Deterministic), Value::Boolean(v)));
+    }
+    if let Some(b) = &cp.context_string {
+        children.push(TtlvFrame::new(Tag(tags::ContextString), Value::ByteString(b.clone())));
+    }
+    if let Some(v) = cp.internal {
+        children.push(TtlvFrame::new(Tag(tags::Internal), Value::Boolean(v)));
+    }
+    if let Some(v) = cp.external_mu {
+        children.push(TtlvFrame::new(Tag(tags::ExternalMu), Value::Boolean(v)));
+    }
+    if let Some(b) = &cp.random {
+        children.push(TtlvFrame::new(Tag(tags::PqcRandom), Value::ByteString(b.clone())));
     }
     if let Some(k) = cp.kem_algorithm {
         children.push(TtlvFrame::new(Tag(tags::KemAlgorithm), Value::Enumeration(k.to_wire_value())));
@@ -3158,6 +3418,140 @@ fn decode_check_req(children: &[TtlvFrame]) -> Result<CheckRequest, WireError> {
     })
 }
 
+/// `Create Split Key` request per §6.1.12 Table 286: ObjectType
+/// (REQUIRED), UniqueIdentifier (optional — key to split), Split Key
+/// Parts / Threshold / Method (all REQUIRED), Prime Field Size
+/// (optional), Attributes (REQUIRED), Protection Storage Masks (optional).
+fn decode_create_split_key_req(children: &[TtlvFrame]) -> Result<CreateSplitKeyRequest, WireError> {
+    let mut object_type = None;
+    let mut uid = None;
+    let mut split_key_parts = None;
+    let mut split_key_threshold = None;
+    let mut split_key_method = None;
+    let mut prime_field_size = None;
+    let mut attributes = Vec::new();
+    let mut protection_storage_masks = None;
+    for c in children {
+        match c.tag.0 {
+            tags::ObjectType => {
+                let v = expect_enum(c, "Object Type")?;
+                object_type = Some(
+                    ObjectType::from_wire_value(v)
+                        .ok_or(WireError::UnknownEnum { field: "Object Type", value: v })?,
+                );
+            }
+            tags::UniqueIdentifier => {
+                if let Value::TextString(s) = &c.value {
+                    uid = Some(s.clone());
+                }
+            }
+            tags::SplitKeyParts => {
+                split_key_parts = Some(expect_integer(c, "Split Key Parts")? as u32);
+            }
+            tags::SplitKeyThreshold => {
+                split_key_threshold = Some(expect_integer(c, "Split Key Threshold")? as u32);
+            }
+            tags::SplitKeyMethod => {
+                split_key_method = Some(expect_enum(c, "Split Key Method")?);
+            }
+            tags::PrimeFieldSize => {
+                if let Value::BigInteger(b) = &c.value {
+                    prime_field_size = Some(b.clone());
+                }
+            }
+            tags::Attributes => {
+                for a in expect_structure(c, "Attributes")? {
+                    if let Some(decoded) = decode_attribute_v3(a)? {
+                        attributes.push(decoded);
+                    }
+                }
+            }
+            tags::ProtectionStorageMasks => {
+                let mut acc = 0u32;
+                for child in expect_structure(c, "Protection Storage Masks")? {
+                    if child.tag.0 == tags::ProtectionStorageMask {
+                        if let Value::Integer(n) = child.value {
+                            acc |= n as u32;
+                        }
+                    }
+                }
+                protection_storage_masks = Some(acc);
+            }
+            _ => {}
+        }
+    }
+    Ok(CreateSplitKeyRequest {
+        object_type: object_type.ok_or(WireError::Missing { tag: tags::ObjectType, name: "Object Type" })?,
+        uid,
+        split_key_parts: split_key_parts
+            .ok_or(WireError::Missing { tag: tags::SplitKeyParts, name: "Split Key Parts" })?,
+        split_key_threshold: split_key_threshold
+            .ok_or(WireError::Missing { tag: tags::SplitKeyThreshold, name: "Split Key Threshold" })?,
+        split_key_method: split_key_method
+            .ok_or(WireError::Missing { tag: tags::SplitKeyMethod, name: "Split Key Method" })?,
+        prime_field_size,
+        attributes,
+        protection_storage_masks,
+    })
+}
+
+/// `Join Split Key` request per §6.1.31 Table 343: ObjectType
+/// (REQUIRED), UniqueIdentifier (REQUIRED, repeated — the shares to
+/// combine), Secret Data Type (optional), Attributes (optional),
+/// Protection Storage Masks (optional).
+fn decode_join_split_key_req(children: &[TtlvFrame]) -> Result<JoinSplitKeyRequest, WireError> {
+    let mut object_type = None;
+    let mut uids: Vec<String> = Vec::new();
+    let mut secret_data_type = None;
+    let mut attributes = Vec::new();
+    let mut protection_storage_masks = None;
+    for c in children {
+        match c.tag.0 {
+            tags::ObjectType => {
+                let v = expect_enum(c, "Object Type")?;
+                object_type = Some(
+                    ObjectType::from_wire_value(v)
+                        .ok_or(WireError::UnknownEnum { field: "Object Type", value: v })?,
+                );
+            }
+            tags::UniqueIdentifier => {
+                if let Value::TextString(s) = &c.value {
+                    uids.push(s.clone());
+                }
+            }
+            tags::SecretDataType => {
+                secret_data_type = Some(expect_enum(c, "Secret Data Type")?);
+            }
+            tags::Attributes => {
+                for a in expect_structure(c, "Attributes")? {
+                    if let Some(decoded) = decode_attribute_v3(a)? {
+                        attributes.push(decoded);
+                    }
+                }
+            }
+            tags::ProtectionStorageMasks => {
+                let mut acc = 0u32;
+                for child in expect_structure(c, "Protection Storage Masks")? {
+                    if child.tag.0 == tags::ProtectionStorageMask {
+                        if let Value::Integer(n) = child.value {
+                            acc |= n as u32;
+                        }
+                    }
+                }
+                protection_storage_masks = Some(acc);
+            }
+            _ => {}
+        }
+    }
+    Ok(JoinSplitKeyRequest {
+        object_type: object_type.ok_or(WireError::Missing { tag: tags::ObjectType, name: "Object Type" })?,
+        uids,
+        secret_data_type,
+        attributes,
+        protection_storage_masks,
+    })
+}
+
 // ── K19 — Baseline client-to-server op codecs (§6.1.26/27/58/59) ────────────
 
 /// `Get Usage Allocation` request per §6.1.27 Table 329:
@@ -3226,6 +3620,96 @@ fn encode_get_constraints_resp(r: &GetConstraintsResponse) -> Vec<TtlvFrame> {
         })
         .collect();
     vec![TtlvFrame::new(Tag(tags::Constraints), Value::Structure(constraint_frames))]
+}
+
+/// `Set Constraints` request per §6.1.57 Table 427: one `Constraints`
+/// Structure (§7.7 Table 458) of repeated `Constraint` Structures
+/// (§7.6 Table 457) — mirror of [`encode_get_constraints_resp`]'s
+/// output shape, since Set/Get Constraints carry the identical
+/// `Constraints` structure on opposite sides of the wire.
+// ── Phase 4 — asynchronous subsystem (§6.1.5/§6.1.43/§6.1.44/§6.1.46) ──
+
+fn decode_poll_req(children: &[TtlvFrame]) -> Result<PollRequest, WireError> {
+    Ok(PollRequest {
+        asynchronous_correlation_value: required_asynchronous_correlation_value(children)?,
+    })
+}
+
+fn decode_cancel_req(children: &[TtlvFrame]) -> Result<CancelRequest, WireError> {
+    Ok(CancelRequest {
+        asynchronous_correlation_value: required_asynchronous_correlation_value(children)?,
+    })
+}
+
+fn decode_process_req(children: &[TtlvFrame]) -> Result<ProcessRequest, WireError> {
+    Ok(ProcessRequest {
+        asynchronous_correlation_value: required_asynchronous_correlation_value(children)?,
+    })
+}
+
+/// §6.1.46 Table 385 — both filters optional; either may be absent,
+/// empty, or populated.
+fn decode_query_async_req(
+    children: &[TtlvFrame],
+) -> Result<QueryAsynchronousRequestsRequest, WireError> {
+    let mut asynchronous_correlation_values = Vec::new();
+    let mut operations = Vec::new();
+    for c in children {
+        if c.tag.0 == tags::AsynchronousCorrelationValues {
+            for ic in expect_structure(c, "Asynchronous Correlation Values")? {
+                if ic.tag.0 == tags::AsynchronousCorrelationValue {
+                    asynchronous_correlation_values
+                        .push(expect_byte_string(ic, "Asynchronous Correlation Value")?);
+                }
+            }
+        } else if c.tag.0 == tags::Operations {
+            for ic in expect_structure(c, "Operations")? {
+                if ic.tag.0 == tags::Operation {
+                    let v = expect_enum(ic, "Operation")?;
+                    match Operation::from_wire_value(v) {
+                        Some(op) => operations.push(op),
+                        None => return Err(WireError::UnknownEnum { field: "Operation", value: v }),
+                    }
+                }
+            }
+        }
+    }
+    Ok(QueryAsynchronousRequestsRequest { asynchronous_correlation_values, operations })
+}
+
+fn decode_set_constraints_req(children: &[TtlvFrame]) -> Result<SetConstraintsRequest, WireError> {
+    let block = children
+        .iter()
+        .find(|c| c.tag.0 == tags::Constraints)
+        .ok_or(WireError::Missing { tag: tags::Constraints, name: "Constraints" })?;
+    let mut constraints = Vec::new();
+    for c in expect_structure(block, "Constraints")? {
+        if c.tag.0 != tags::Constraint {
+            continue;
+        }
+        let mut object_types = Vec::new();
+        let mut attributes = Vec::new();
+        for f in expect_structure(c, "Constraint")? {
+            match f.tag.0 {
+                tags::ObjectTypes => {
+                    for ot in expect_structure(f, "Object Types")? {
+                        if ot.tag.0 == tags::ObjectType {
+                            let v = expect_enum(ot, "Object Type")?;
+                            if let Some(t) = ObjectType::from_wire_value(v) {
+                                object_types.push(t);
+                            }
+                        }
+                    }
+                }
+                tags::Attributes => {
+                    attributes = decode_attributes_block(f)?;
+                }
+                _ => {}
+            }
+        }
+        constraints.push(Constraint { object_types, attributes });
+    }
+    Ok(SetConstraintsRequest { constraints })
 }
 
 /// K20 — `Derive Key` request per §6.1.18 Table 302: `Object Type`
@@ -3543,6 +4027,7 @@ fn decode_register_req(children: &[TtlvFrame]) -> Result<RegisterRequest, WireEr
     let mut managed_object = None;
     let mut protection_storage_masks = None;
     let mut certificate_payload: Option<(u32, Vec<u8>)> = None;
+    let mut secret_data_type: Option<u32> = None;
     for c in children {
         match c.tag.0 {
             tags::ObjectType => {
@@ -3564,12 +4049,19 @@ fn decode_register_req(children: &[TtlvFrame]) -> Result<RegisterRequest, WireEr
             }
             tags::SecretData => {
                 // KMIP 3.0 §6.2 SecretData Structure: SecretDataType
-                // (Enumeration) + KeyBlock. v0.1 captures the inner
-                // KeyBlock and silently drops the type; future Get
-                // can echo it as ObjectType=SecretData.
+                // (Enumeration) + KeyBlock. Gap-remediation Phase C,
+                // Finding #8 — the type is now captured too (mirroring
+                // the adjacent OpaqueObject arm's OpaqueDataType
+                // handling) instead of being silently dropped.
                 for child in expect_structure(c, "Secret Data")? {
-                    if child.tag.0 == tags::KeyBlock {
-                        managed_object = Some(decode_key_block(child)?);
+                    match child.tag.0 {
+                        tags::KeyBlock => {
+                            managed_object = Some(decode_key_block(child)?);
+                        }
+                        tags::SecretDataType => {
+                            secret_data_type = Some(expect_enum(child, "Secret Data Type")?);
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -3662,6 +4154,7 @@ fn decode_register_req(children: &[TtlvFrame]) -> Result<RegisterRequest, WireEr
         managed_object,
         protection_storage_masks,
         certificate_payload,
+        secret_data_type,
     })
 }
 
@@ -3946,6 +4439,60 @@ pub fn decode_transparent_rsa_private_key(
     for (field, tag, name) in [
         (&f.modulus, tags::Modulus, "Modulus"),
         (&f.private_exponent, tags::PrivateExponent, "Private Exponent"),
+        (&f.public_exponent, tags::PublicExponent, "Public Exponent"),
+    ] {
+        if field.is_empty() {
+            return Err(WireError::Missing { tag, name });
+        }
+    }
+    Ok(f)
+}
+
+/// `TransparentRSAPublicKey`'s `KeyMaterial` — just Modulus + Public
+/// Exponent (both mandatory per §6.2.1 Table 158).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TransparentRsaPublicKeyFields {
+    pub modulus: Vec<u8>,
+    pub public_exponent: Vec<u8>,
+}
+
+/// Gap-remediation Phase D/H (found via BL-M-8-30 conformance replay,
+/// not originally called out by name in Finding #3's text) — mirrors
+/// [`decode_transparent_rsa_private_key`] for the public-key half. Per
+/// `decode_key_block`'s own comment ("K8 stores its TTLV encoding
+/// verbatim... and the Register path can parse typed fields out of
+/// it" — citing BL-M-8 directly), this was always the intended design;
+/// only the private-key parser was ever implemented. Before this,
+/// `register_import_export.rs` fed the raw TTLV `KeyMaterial` bytes
+/// straight to `register_rsa_public_key_der` (which expects real DER),
+/// so a `TransparentRSAPublicKey` Register always failed internally —
+/// silently, while Finding #3's discarded-`Result` bug was still in
+/// place, and loudly (a regression this fix closes) once that bug was
+/// fixed.
+pub fn decode_transparent_rsa_public_key(
+    ttlv_key_material: &[u8],
+) -> Result<TransparentRsaPublicKeyFields, WireError> {
+    let frame = decode_one(ttlv_key_material)?;
+    if frame.tag.0 != tags::KeyMaterial {
+        return Err(WireError::UnexpectedTag {
+            got: frame.tag.0,
+            expected: tags::KeyMaterial,
+            name: "Transparent RSA Public Key material",
+        });
+    }
+    let mut f = TransparentRsaPublicKeyFields::default();
+    for c in expect_structure(&frame, "Key Material")? {
+        let dst = match c.tag.0 {
+            tags::Modulus        => &mut f.modulus,
+            tags::PublicExponent => &mut f.public_exponent,
+            _ => continue,
+        };
+        if let Value::BigInteger(b) = &c.value {
+            *dst = b.clone();
+        }
+    }
+    for (field, tag, name) in [
+        (&f.modulus, tags::Modulus, "Modulus"),
         (&f.public_exponent, tags::PublicExponent, "Public Exponent"),
     ] {
         if field.is_empty() {
@@ -4303,16 +4850,23 @@ fn encode_get_attribute_list_resp(r: &GetAttributeListResponse) -> Vec<TtlvFrame
         Tag(tags::UniqueIdentifier),
         Value::TextString(r.uid.clone()),
     )];
+    // Per §6.1.22 a spec-defined attribute name is carried as an
+    // AttributeReference Enumeration (the "enumerable Tag" form); a
+    // client-set custom/vendor attribute name (no defined codepoint —
+    // KMIP 3.0's own client-set generic `Attribute{VendorIdentification,
+    // AttributeName,AttributeValue}` mechanism, §11) has no Enumeration
+    // value and MUST still be reported per §4.1.2 item 5 ("the server
+    // returns a list of Attribute References for ALL Object attributes
+    // ... associated with the specified object"). `attribute_reference_frame`
+    // already implements both shapes correctly (used by GetAttributes'
+    // request encoder above) — reuse it here instead of the previous
+    // inline `if let Some(tag_code) = ...` which silently DROPPED any
+    // name it couldn't resolve to a codepoint, so every custom/vendor
+    // attribute an object had was omitted from GetAttributeList
+    // responses (found via the OASIS TL-M-3 conformance transcript,
+    // Honest-Maximum Phase 2.1).
     for name in &r.attribute_references {
-        // Per §6.1.22 each attribute name is carried as an
-        // AttributeReference Enumeration (the spec's "enumerable Tag"
-        // form — value is the 4-byte tag code).
-        if let Some(tag_code) = tag_code_from_name(name) {
-            out.push(TtlvFrame::new(
-                Tag(tags::AttributeReference),
-                Value::Enumeration(tag_code),
-            ));
-        }
+        out.push(attribute_reference_frame(name));
     }
     out
 }
@@ -4393,10 +4947,21 @@ fn encode_attribute_v3(a: &Attribute) -> TtlvFrame {
             // Attribute Structure { VendorIdentification, AttributeName,
             // AttributeValue }. v0.1 defaults VendorIdentification to "x".
             // BL-M-14 / SKFF-M-9 GetAttributes responses pin this shape.
+            // AttributeValue's TTLV item type mirrors what the client
+            // originally sent (mirrors the decode side) — an Integer- or
+            // DateTime-typed custom attribute round-trips as that type,
+            // not flattened to TextString (TL-M-3's GetAttributes step
+            // pins this for `VendorAttribute2`/`VendorAttribute3`).
+            let value_frame = match value {
+                CustomAttributeValue::Text(s) => Value::TextString(s.clone()),
+                CustomAttributeValue::Integer(n) => Value::Integer(*n as i32),
+                CustomAttributeValue::DateTime(t) => Value::DateTime(*t),
+                CustomAttributeValue::Boolean(b) => Value::Boolean(*b),
+            };
             TtlvFrame::new(Tag(tags::Attribute), Value::Structure(vec![
                 TtlvFrame::new(Tag(tags::VendorIdentification), Value::TextString("x".into())),
                 TtlvFrame::new(Tag(tags::AttributeName), Value::TextString(name.clone())),
-                TtlvFrame::new(Tag(tags::AttributeValue), Value::TextString(value.clone())),
+                TtlvFrame::new(Tag(tags::AttributeValue), value_frame),
             ]))
         }
         // ── Baseline Server profile attributes (KMIP Profiles v3.0 §5.1.2) ──
@@ -4430,7 +4995,18 @@ fn encode_attribute_v3(a: &Attribute) -> TtlvFrame {
                 .collect();
             TtlvFrame::new(Tag(tags::ShortUniqueIdentifier), Value::ByteString(bytes))
         }
-        Attribute::AlternativeName(s)          => TtlvFrame::new(Tag(tags::AlternativeName),          Value::TextString(s.clone())),
+        // KMIP 3.0 §4.5 — Structure { Alternative Name Value, Alternative
+        // Name Type }, mirroring the decode side. Gap-remediation Phase
+        // H, Finding #11 — `name_type` now genuinely round-trips instead
+        // of always being re-emitted as `1` (Uninterpreted Text String)
+        // regardless of what the client set.
+        Attribute::AlternativeName { value, name_type } => TtlvFrame::new(
+            Tag(tags::AlternativeName),
+            Value::Structure(vec![
+                TtlvFrame::new(Tag(tags::AlternativeNameValue), Value::TextString(value.clone())),
+                TtlvFrame::new(Tag(tags::AlternativeNameType), Value::Enumeration(*name_type)),
+            ]),
+        ),
         Attribute::Comment(s)                  => TtlvFrame::new(Tag(tags::Comment),                  Value::TextString(s.clone())),
         Attribute::Description(s)              => TtlvFrame::new(Tag(tags::Description),              Value::TextString(s.clone())),
         Attribute::ContactInformation(s)       => TtlvFrame::new(Tag(tags::ContactInformation),       Value::TextString(s.clone())),
@@ -4494,6 +5070,11 @@ fn encode_attribute_v3(a: &Attribute) -> TtlvFrame {
         Attribute::KeyFormatType(v)            => TtlvFrame::new(Tag(tags::KeyFormatType),            Value::Enumeration(*v)),
         Attribute::CertificateLength(n)        => TtlvFrame::new(Tag(tags::CertificateLength),        Value::Integer(*n)),
         Attribute::LeaseTime(n)                => TtlvFrame::new(Tag(tags::LeaseTime),                Value::Interval(*n)),
+        Attribute::SplitKeyMethod(v)           => TtlvFrame::new(Tag(tags::SplitKeyMethod),           Value::Enumeration(*v)),
+        Attribute::SplitKeyParts(n)            => TtlvFrame::new(Tag(tags::SplitKeyParts),            Value::Integer(*n as i32)),
+        Attribute::SplitKeyThreshold(n)        => TtlvFrame::new(Tag(tags::SplitKeyThreshold),        Value::Integer(*n as i32)),
+        Attribute::KeyPartIdentifier(n)        => TtlvFrame::new(Tag(tags::KeyPartIdentifier),        Value::Integer(*n as i32)),
+        Attribute::SplitKeyPolynomial(v)       => TtlvFrame::new(Tag(tags::SplitKeyPolynomial),       Value::Enumeration(*v)),
         Attribute::ProtectionPeriod(n)         => TtlvFrame::new(Tag(tags::ProtectionPeriod),         Value::Interval(*n)),
         Attribute::RotateInterval(n)           => TtlvFrame::new(Tag(tags::RotateInterval),           Value::Interval(*n)),
         Attribute::RotateOffset(n)             => TtlvFrame::new(Tag(tags::RotateOffset),             Value::Integer(*n)),
@@ -4618,6 +5199,18 @@ fn tag_code_from_name(name: &str) -> Option<u32> {
         "Digest"                 => tags::Digest,
         "RandomNumberGenerator"  => tags::RandomNumberGenerator,
         "CryptographicParameters" => tags::CryptographicParameters,
+        // Gap-remediation Phase C, Finding #7 — `decode_attribute_v3`
+        // already fully decodes these 6; the numeric-`AttributeReference`
+        // lookup table (used by AdjustAttribute/DeleteAttribute per the
+        // Phase B/T3 correction — SetAttribute/ModifyAttribute never
+        // call this) just never learned their names, so a reference by
+        // code resolved to "Unknown" instead of the real attribute.
+        "CryptographicDomainParameters" => tags::CryptographicDomainParameters,
+        "SplitKeyMethod"         => tags::SplitKeyMethod,
+        "SplitKeyParts"          => tags::SplitKeyParts,
+        "SplitKeyThreshold"      => tags::SplitKeyThreshold,
+        "KeyPartIdentifier"      => tags::KeyPartIdentifier,
+        "SplitKeyPolynomial"     => tags::SplitKeyPolynomial,
         _ => return None,
     })
 }
@@ -4697,6 +5290,14 @@ fn tag_name_from_code(code: u32) -> &'static str {
         tags::ReplacedObjectLink     => "Replaced Object Link",
         tags::ReplacementObjectLink  => "Replacement Object Link",
         tags::ApplicationSpecificInformation => "Application Specific Information",
+        // Gap-remediation Phase C, Finding #7 — inverse of the 6 entries
+        // just added to `tag_code_from_name`.
+        tags::CryptographicDomainParameters => "Cryptographic Domain Parameters",
+        tags::SplitKeyMethod         => "Split Key Method",
+        tags::SplitKeyParts          => "Split Key Parts",
+        tags::SplitKeyThreshold      => "Split Key Threshold",
+        tags::KeyPartIdentifier      => "Key Part Identifier",
+        tags::SplitKeyPolynomial     => "Split Key Polynomial",
         _ => "Unknown",
     }
 }
@@ -4772,6 +5373,28 @@ fn expect_boolean(frame: &TtlvFrame, name: &'static str) -> Result<bool, WireErr
         Value::Boolean(v) => Ok(*v),
         _ => Err(WireError::BadType { tag: frame.tag.0, name, msg: "expected Boolean".into() }),
     }
+}
+
+fn expect_byte_string(frame: &TtlvFrame, name: &'static str) -> Result<Vec<u8>, WireError> {
+    match &frame.value {
+        Value::ByteString(v) => Ok(v.clone()),
+        _ => Err(WireError::BadType { tag: frame.tag.0, name, msg: "expected ByteString".into() }),
+    }
+}
+
+/// Phase 4 — every `Poll` / `Cancel` / `Process` request payload is
+/// just `{ Asynchronous Correlation Value }` (§6.1.43/§6.1.5/§6.1.44
+/// Table 376/261/378, all identical shapes).
+fn required_asynchronous_correlation_value(children: &[TtlvFrame]) -> Result<Vec<u8>, WireError> {
+    for c in children {
+        if c.tag.0 == tags::AsynchronousCorrelationValue {
+            return expect_byte_string(c, "Asynchronous Correlation Value");
+        }
+    }
+    Err(WireError::Missing {
+        tag: tags::AsynchronousCorrelationValue,
+        name: "Asynchronous Correlation Value",
+    })
 }
 
 #[cfg(test)]
@@ -5119,6 +5742,7 @@ mod tests {
                     profile_information: None,
                     capability_information: None,
                 })),
+                asynchronous_correlation_value: None,
             }],
         };
         let bytes = encode_response_message(&resp);
@@ -5257,6 +5881,7 @@ mod tests {
                 payload: Some(ResponsePayload::Validate(ValidateResponse {
                     validity: SignatureValidity::Valid,
                 })),
+                asynchronous_correlation_value: None,
             }],
         };
         let bytes = encode_response_message(&resp);
@@ -5360,6 +5985,7 @@ mod tests {
                     result_reason: None,
                     result_message: None,
                     payload: Some(payload),
+                    asynchronous_correlation_value: None,
                 }],
             };
             let bytes = encode_response_message(&resp);
@@ -5916,6 +6542,48 @@ mod tests {
         assert_eq!(decode_cryptographic_parameters(&neg).unwrap().salt_length, Some(-1));
     }
 
+    /// Gap-remediation Phase C, Finding #6 — `encode_cryptographic_parameters`
+    /// dropped 7 real fields (`tag_length`, `random_iv`, `deterministic`,
+    /// `context_string`, `internal`, `external_mu`, `random`) that
+    /// `decode_cryptographic_parameters` already understood. This is the
+    /// test gap the original K18 test above didn't cover (it never
+    /// populated any of these 7 fields, so the encoder's silent drop
+    /// never surfaced). Populate every one and prove the round trip is
+    /// truly lossless — not just for the 3 fields K18 already exercised.
+    #[test]
+    fn cryptographic_parameters_full_field_set_round_trips() {
+        let frame = TtlvFrame::new(Tag(tags::CryptographicParameters), Value::Structure(vec![
+            TtlvFrame::new(Tag(tags::HashingAlgorithm), Value::Enumeration(0x06)), // SHA-256
+            TtlvFrame::new(Tag(tags::CryptographicAlgorithm), Value::Enumeration(
+                crate::kmip30::KmipAlgorithm::MlDsa65.to_wire_value(),
+            )),
+            TtlvFrame::new(Tag(tags::PaddingMethod), Value::Enumeration(0x0a)), // PSS
+            TtlvFrame::new(Tag(tags::MaskGenerator), Value::Enumeration(0x01)), // MGF1
+            TtlvFrame::new(Tag(tags::MaskGeneratorHashingAlgorithm), Value::Enumeration(0x06)),
+            TtlvFrame::new(Tag(tags::PSource), Value::ByteString(vec![0x01, 0x02])),
+            TtlvFrame::new(Tag(tags::BlockCipherMode), Value::Enumeration(0x06)), // GCM
+            TtlvFrame::new(Tag(tags::TagLength), Value::Integer(16)),
+            TtlvFrame::new(Tag(tags::RandomIV), Value::Boolean(true)),
+            TtlvFrame::new(Tag(tags::SaltLength), Value::Integer(32)),
+            TtlvFrame::new(Tag(tags::Deterministic), Value::Boolean(true)),
+            TtlvFrame::new(Tag(tags::ContextString), Value::ByteString(vec![0xAA, 0xBB])),
+            TtlvFrame::new(Tag(tags::Internal), Value::Boolean(true)),
+            TtlvFrame::new(Tag(tags::ExternalMu), Value::Boolean(false)),
+            TtlvFrame::new(Tag(tags::PqcRandom), Value::ByteString(vec![0xCC; 4])),
+        ]));
+        let cp = decode_cryptographic_parameters(&frame).unwrap();
+        assert_eq!(cp.tag_length, Some(16));
+        assert_eq!(cp.random_iv, Some(true));
+        assert_eq!(cp.deterministic, Some(true));
+        assert_eq!(cp.context_string, Some(vec![0xAA, 0xBB]));
+        assert_eq!(cp.internal, Some(true));
+        assert_eq!(cp.external_mu, Some(false));
+        assert_eq!(cp.random, Some(vec![0xCC; 4]));
+
+        let cp2 = decode_cryptographic_parameters(&encode_cryptographic_parameters(&cp)).unwrap();
+        assert_eq!(cp2, cp, "every field must survive an encode/decode round trip");
+    }
+
     /// K10 — ML-KEM decapsulation round-trip: the request decodes the
     /// encapsulation bytes from `Data`, and the response carries the
     /// recovered shared secret in `Data` — no IvCounterNonce, no
@@ -5941,5 +6609,75 @@ mod tests {
         assert_eq!(data.value, Value::ByteString(vec![0x55; 32]));
         assert!(frames.iter().all(|f| f.tag.0 != tags::IvCounterNonce
             && f.tag.0 != super::super::vendor_tags::PQCTODAY_SHARED_SECRET));
+    }
+
+    /// Gap-remediation Phase C, Finding #7 — `tag_code_from_name`/
+    /// `tag_name_from_code` omitted `CryptographicDomainParameters` and
+    /// all 5 Split Key attributes even though `decode_attribute_v3`
+    /// fully decodes them, so a numeric `AttributeReference` (used by
+    /// AdjustAttribute/DeleteAttribute) to any of them resolved to the
+    /// literal string "Unknown" instead of the real name.
+    #[test]
+    fn tag_name_table_covers_domain_parameters_and_split_key_attributes() {
+        let pairs: &[(u32, &str)] = &[
+            (tags::CryptographicDomainParameters, "CryptographicDomainParameters"),
+            (tags::SplitKeyMethod, "SplitKeyMethod"),
+            (tags::SplitKeyParts, "SplitKeyParts"),
+            (tags::SplitKeyThreshold, "SplitKeyThreshold"),
+            (tags::KeyPartIdentifier, "KeyPartIdentifier"),
+            (tags::SplitKeyPolynomial, "SplitKeyPolynomial"),
+        ];
+        for (code, canonical) in pairs {
+            assert_eq!(tag_code_from_name(canonical), Some(*code), "{canonical} → code");
+            let name = tag_name_from_code(*code);
+            assert_ne!(name, "Unknown", "{canonical} (0x{code:08x}) must resolve to a real name");
+            let round_trip: String = name.chars().filter(|c| c.is_alphanumeric()).collect();
+            assert_eq!(&round_trip, canonical, "name → canonical round trip for {canonical}");
+        }
+    }
+
+    /// `DeleteAttribute`'s `AttributeReference` MAY arrive as a numeric
+    /// Enumeration (the tag codepoint) rather than a name Structure —
+    /// this only resolves to the right attribute if `tag_name_from_code`
+    /// knows it. Proves the fix end-to-end through the actual decoder,
+    /// not just the lookup table in isolation.
+    #[test]
+    fn delete_attribute_resolves_numeric_reference_for_split_key_method() {
+        let frames = vec![
+            TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString("u".into())),
+            TtlvFrame::new(Tag(tags::AttributeReference), Value::Enumeration(tags::SplitKeyMethod)),
+        ];
+        let req = decode_delete_attribute_req(&frames).unwrap();
+        assert_eq!(req.attribute_reference.as_deref(), Some("Split Key Method"));
+    }
+
+    /// Gap-remediation Phase H, Finding #11 — `AlternativeNameType` must
+    /// survive decode → encode instead of being silently discarded on
+    /// decode and hardcoded to `1` (Uninterpreted Text String) on
+    /// encode regardless of what the client set. `2` = URI per §11.2.
+    #[test]
+    fn alternative_name_type_round_trips_through_structure_form() {
+        let frame = TtlvFrame::new(Tag(tags::AlternativeName), Value::Structure(vec![
+            TtlvFrame::new(Tag(tags::AlternativeNameValue), Value::TextString("https://example/asset/1".into())),
+            TtlvFrame::new(Tag(tags::AlternativeNameType), Value::Enumeration(2)), // URI
+        ]));
+        let decoded = decode_attribute_v3(&frame).unwrap().unwrap();
+        assert_eq!(
+            decoded,
+            Attribute::AlternativeName { value: "https://example/asset/1".into(), name_type: 2 },
+        );
+        let re_encoded = encode_attribute_v3(&decoded);
+        let round_tripped = decode_attribute_v3(&re_encoded).unwrap().unwrap();
+        assert_eq!(round_tripped, decoded, "Type must survive an encode/decode round trip, not just decode");
+    }
+
+    /// A bare `TextString` AlternativeName (non-compliant but seen in
+    /// the wild) defaults to Type `1` (Uninterpreted Text String), the
+    /// same default the encoder used to hardcode unconditionally.
+    #[test]
+    fn alternative_name_bare_text_string_defaults_to_uninterpreted_type() {
+        let frame = TtlvFrame::new(Tag(tags::AlternativeName), Value::TextString("legacy-label".into()));
+        let decoded = decode_attribute_v3(&frame).unwrap().unwrap();
+        assert_eq!(decoded, Attribute::AlternativeName { value: "legacy-label".into(), name_type: 1 });
     }
 }

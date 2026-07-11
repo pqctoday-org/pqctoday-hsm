@@ -290,6 +290,16 @@ pub fn get(deps: &Deps, req: GetRequest, correlation_id: &str) -> Result<GetResp
         }
     };
 
+    // KMIP 3.0 §11 `Fresh` — True only until the object's material has
+    // been exported once. A successful Get is an export, so a
+    // server-generated object stops being Fresh after its first Get
+    // (TL-M-3 pins False on a key that was Created then Got in TL-M-2).
+    if obj.fresh == Some(true) {
+        let mut updated = obj.clone();
+        updated.fresh = Some(false);
+        let _ = deps.store.update(updated);
+    }
+
     emit_success(deps, correlation_id, "Get");
 
     // OpaqueObject — echo back the client-supplied OpaqueDataType

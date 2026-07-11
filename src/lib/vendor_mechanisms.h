@@ -17,6 +17,15 @@
 
 #define CKM_KECCAK_256         0x80000010UL  /* vendor */
 
+// ── Vendor: Split Key secret sharing (G12 — KMIP 3.0 §6.1.12/§6.1.31, §13.1) ─
+// Rust engine only (KMIP server backend). PKCS#11 v3.2 has no mechanism for
+// this at all — verified directly against the spec text, not a gap-fill.
+// Covers all four §11.54 Split Key Method values (XOR / Prime Field /
+// GF(2^16) / GF(2^8)); the method + parameters travel in the mechanism's
+// native argument, not separate mechanism codepoints.
+
+#define CKM_PQCTODAY_SPLIT_KEY 0x80000012UL  /* vendor */
+
 // ── Vendor: stateful key attributes ──────────────────────────────────────────
 // Range: 0x80000101–0x80000105 (offset from CKM vendor range to avoid confusion)
 

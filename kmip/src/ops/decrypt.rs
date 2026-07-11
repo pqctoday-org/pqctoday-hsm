@@ -307,8 +307,13 @@ fn decrypt_classical(
         )
             .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Decrypt:find"))?
             .ok_or_else(|| KmipError::object_not_found(&req.uid))?;
-        let r =
-            softhsmrustv3::native::decrypt(session, handle, mech, &req.data, req.iv.as_deref());
+        // Gap-remediation Phase F, Finding #4 — same fix as Encrypt's
+        // handle-based branch: forward the already-computed
+        // oaep/aad/tag_len instead of letting the engine silently
+        // apply its hardcoded defaults for an engine-resident key.
+        let r = softhsmrustv3::native::decrypt(
+            session, handle, mech, &req.data, req.iv.as_deref(), oaep.as_ref(), aad, tag_len,
+        );
         emit_pkcs11_result(deps, correlation_id, "native::decrypt", Some(mech), &r);
         r.map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Decrypt"))?
     } else {

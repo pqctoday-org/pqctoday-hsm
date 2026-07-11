@@ -121,6 +121,7 @@ fn register_key(
     register(
         d,
         RegisterRequest {
+            secret_data_type: None,
             object_type,
             attributes: vec![
                 Attribute::CryptographicAlgorithm(alg),

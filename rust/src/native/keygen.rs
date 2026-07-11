@@ -22,8 +22,9 @@ use std::collections::HashMap;
 use super::CkRv;
 use crate::constants::*;
 use crate::crypto::{
-    ALGO_ECDH_P256, ALGO_ECDH_X25519, ALGO_ECDH_X448, ALGO_ECDSA, ALGO_EDDSA, ALGO_ML_DSA,
-    ALGO_ML_KEM, ALGO_RSA, ALGO_SLH_DSA, CURVE_K256, CURVE_P256, CURVE_P384, CURVE_P521,
+    ALGO_CLASSIC_MCELIECE, ALGO_ECDH_P256, ALGO_ECDH_X25519, ALGO_ECDH_X448, ALGO_ECDSA,
+    ALGO_EDDSA, ALGO_FRODOKEM, ALGO_ML_DSA, ALGO_ML_KEM, ALGO_RSA, ALGO_SLH_DSA, CURVE_K256,
+    CURVE_P256, CURVE_P384, CURVE_P521,
 };
 use crate::crypto::handlers::{
     build_ec_spki_p256, build_ec_spki_p384, build_ec_spki_p521, build_ed25519_spki,
@@ -1012,13 +1013,22 @@ pub fn register_rsa_private_key_pkcs8(
     Ok(alloc_in_session_slot(_session, attrs))
 }
 
-/// Register an existing RSA public key supplied as PKCS#1 (RSAPublicKey)
-/// DER bytes — `SEQUENCE { modulus, publicExponent }`. Parses the DER
-/// to extract `n` and `e`, stored as `CKA_MODULUS` + `CKA_PUBLIC_EXPONENT`
-/// (the form `verify_rsa` reads via `get_rsa_public_components`).
+/// Register an existing RSA public key supplied as either PKCS#1
+/// (RSAPublicKey, `SEQUENCE { modulus, publicExponent }`) or PKCS#8
+/// (SubjectPublicKeyInfo) DER bytes. Parses the DER to extract `n` and
+/// `e`, stored as `CKA_MODULUS` + `CKA_PUBLIC_EXPONENT` (the form
+/// `verify_rsa` reads via `get_rsa_public_components`).
 ///
 /// Used by KMIP Register when the client provides an RSA PublicKey.
 /// CS-AC-M-2 exercises this path against a SignatureVerify op.
+///
+/// Gap-remediation Phase D, Finding #3 — this previously accepted PKCS#1
+/// only, despite the KMIP-layer caller's own doc comment claiming PKCS#8
+/// support too; a PKCS#8-form Register call would fail here and the KMIP
+/// layer discarded the `Result`, so the client saw a wire `Success` with
+/// no real engine object. Same `from_public_key_der` → `from_pkcs1_der`
+/// fallback order `rsa_public_key_from_any_der` (`native/encrypt.rs`)
+/// already uses for the analogous Encrypt/Decrypt DER-parsing path.
 pub fn register_rsa_public_key_der(
     _session: u32,
     der: &[u8],
@@ -1030,8 +1040,11 @@ pub fn register_rsa_public_key_der(
         CKA_PUBLIC_EXPONENT, CKA_VALUE, CKA_VERIFY, CKK_RSA, CKO_PUBLIC_KEY,
     };
     use rsa::pkcs1::DecodeRsaPublicKey;
+    use rsa::pkcs8::DecodePublicKey;
     use rsa::traits::PublicKeyParts;
-    let pk = rsa::RsaPublicKey::from_pkcs1_der(der).map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+    let pk = rsa::RsaPublicKey::from_public_key_der(der)
+        .or_else(|_| rsa::RsaPublicKey::from_pkcs1_der(der))
+        .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
     let n_bytes = pk.n().to_bytes_be();
     let e_bytes = pk.e().to_bytes_be();
     let bits = (n_bytes.len() as u32) * 8;
@@ -1237,6 +1250,139 @@ pub fn register_ml_kem_public_key(
     ))
 }
 
+/// FrodoKEM parameter-set table: `CKP_FRODOKEM_*` → `(sk_len, pk_len)`,
+/// verified directly against `frodo-kem` v0.1.0's own `AlgorithmParams`
+/// (see the mechanism_info comment in ffi.rs for how — not the spec PDF,
+/// to avoid a crate/spec version mismatch).
+fn frodokem_key_lens(parameter_set: u32) -> Option<(usize, usize)> {
+    match parameter_set {
+        CKP_FRODOKEM_640_AES | CKP_FRODOKEM_640_SHAKE => Some((19888, 9616)),
+        CKP_FRODOKEM_976_AES | CKP_FRODOKEM_976_SHAKE => Some((31296, 15632)),
+        CKP_FRODOKEM_1344_AES | CKP_FRODOKEM_1344_SHAKE => Some((43088, 21520)),
+        _ => None,
+    }
+}
+
+/// Register an existing FrodoKEM private (decryption) key supplied as raw
+/// bytes. Sets `CKA_DECAPSULATE=TRUE`, mirroring keygen.
+pub fn register_frodokem_private_key(
+    _session: u32,
+    parameter_set: u32,
+    dk_bytes: &[u8],
+    cka_id: &[u8],
+    label: &str,
+) -> Result<u32, CkRv> {
+    let (dk_len, _) = frodokem_key_lens(parameter_set).ok_or(CKR_ARGUMENTS_BAD)?;
+    if dk_bytes.len() != dk_len {
+        return Err(CKR_ATTRIBUTE_VALUE_INVALID);
+    }
+    Ok(register_pqc_private(
+        _session,
+        parameter_set,
+        ALGO_FRODOKEM,
+        CKK_PQCTODAY_FRODOKEM,
+        CKM_PQCTODAY_FRODOKEM_KEY_PAIR_GEN,
+        false, // CKA_SIGN
+        true,  // CKA_DECAPSULATE
+        dk_bytes,
+        cka_id,
+        label,
+    ))
+}
+
+/// Register an existing FrodoKEM public (encryption) key supplied as raw
+/// bytes. Sets `CKA_ENCAPSULATE=TRUE`, mirroring keygen. No SPKI builder
+/// exists for FrodoKEM (no standard AlgorithmIdentifier OID is registered
+/// for it), so `CKA_PUBLIC_KEY_INFO` is left unset — same as any other
+/// algorithm without one (see `register_pqc_public`'s `spki.is_empty()`
+/// guard).
+pub fn register_frodokem_public_key(
+    _session: u32,
+    parameter_set: u32,
+    ek_bytes: &[u8],
+    cka_id: &[u8],
+    label: &str,
+) -> Result<u32, CkRv> {
+    let (_, ek_len) = frodokem_key_lens(parameter_set).ok_or(CKR_ARGUMENTS_BAD)?;
+    if ek_bytes.len() != ek_len {
+        return Err(CKR_ATTRIBUTE_VALUE_INVALID);
+    }
+    Ok(register_pqc_public(
+        _session,
+        parameter_set,
+        ALGO_FRODOKEM,
+        CKK_PQCTODAY_FRODOKEM,
+        CKM_PQCTODAY_FRODOKEM_KEY_PAIR_GEN,
+        false, // CKA_VERIFY
+        true,  // CKA_ENCAPSULATE
+        ek_bytes,
+        Vec::new(),
+        cka_id,
+        label,
+    ))
+}
+
+/// Register an existing Classic McEliece private (secret) key supplied as
+/// raw bytes. Scoped to `mceliece6688128` only (implementation plan Phase
+/// 0.5) — `parameter_set` MUST be `CKP_CLASSIC_MCELIECE_6688128`.
+pub fn register_classic_mceliece_private_key(
+    _session: u32,
+    parameter_set: u32,
+    sk_bytes: &[u8],
+    cka_id: &[u8],
+    label: &str,
+) -> Result<u32, CkRv> {
+    if parameter_set != CKP_CLASSIC_MCELIECE_6688128 {
+        return Err(CKR_ARGUMENTS_BAD);
+    }
+    if sk_bytes.len() != classic_mceliece_rust::CRYPTO_SECRETKEYBYTES {
+        return Err(CKR_ATTRIBUTE_VALUE_INVALID);
+    }
+    Ok(register_pqc_private(
+        _session,
+        parameter_set,
+        ALGO_CLASSIC_MCELIECE,
+        CKK_PQCTODAY_CLASSIC_MCELIECE,
+        CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN,
+        false, // CKA_SIGN
+        true,  // CKA_DECAPSULATE
+        sk_bytes,
+        cka_id,
+        label,
+    ))
+}
+
+/// Register an existing Classic McEliece public key supplied as raw bytes.
+/// Scoped to `mceliece6688128` only. No SPKI builder exists for Classic
+/// McEliece (no standard AlgorithmIdentifier OID is registered for it).
+pub fn register_classic_mceliece_public_key(
+    _session: u32,
+    parameter_set: u32,
+    pk_bytes: &[u8],
+    cka_id: &[u8],
+    label: &str,
+) -> Result<u32, CkRv> {
+    if parameter_set != CKP_CLASSIC_MCELIECE_6688128 {
+        return Err(CKR_ARGUMENTS_BAD);
+    }
+    if pk_bytes.len() != classic_mceliece_rust::CRYPTO_PUBLICKEYBYTES {
+        return Err(CKR_ATTRIBUTE_VALUE_INVALID);
+    }
+    Ok(register_pqc_public(
+        _session,
+        parameter_set,
+        ALGO_CLASSIC_MCELIECE,
+        CKK_PQCTODAY_CLASSIC_MCELIECE,
+        CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN,
+        false, // CKA_VERIFY
+        true,  // CKA_ENCAPSULATE
+        pk_bytes,
+        Vec::new(),
+        cka_id,
+        label,
+    ))
+}
+
 /// Register an existing SLH-DSA private key supplied as raw FIPS 205
 /// `sk` bytes. `parameter_set` is one of the 12 `CKP_SLH_DSA_*` values;
 /// length is `4n` per FIPS 205 §9.1 (64 / 96 / 128 for n = 16 / 24 / 32),
@@ -1298,6 +1444,93 @@ pub fn register_slh_dsa_public_key(
     ))
 }
 
+// ── HSS/LMS (RFC 8554) ───────────────────────────────────────────────────
+
+/// Register an existing HSS/LMS private key given the raw serialized
+/// `hbs-lms` private-key state blob (the same `CKA_STATEFUL_KEY_STATE`
+/// format `ffi::C_GenerateKeyPair @ CKM_HSS_KEY_PAIR_GEN` produces).
+///
+/// v0.1 supports exactly **one** parameter combination: single-level HSS
+/// (i.e. plain LMS — RFC 8554 §6: an HSS key with 1 level is an LMS key),
+/// `CKP_LMS_SHA256_M32_H5` / `CKP_LMOTS_SHA256_N32_W4` — the same default
+/// `ffi::C_GenerateKeyPair`'s HSS arm falls back to when the caller
+/// supplies no explicit params. KMIP has no attribute to select a
+/// different combination yet; broader coverage is a natural follow-up,
+/// not a correctness gap in what this does support.
+///
+/// The leaf index starts at 0 (fresh key). If the supplied state blob is
+/// not actually fresh (e.g. re-registering a partially-used key from a
+/// backup), the caller is responsible for that being true — this
+/// function has no way to verify a state blob's prior usage history.
+pub fn register_hss_private_key(
+    session: u32,
+    priv_state_bytes: &[u8],
+    cka_id: &[u8],
+    label: &str,
+) -> Result<u32, CkRv> {
+    if priv_state_bytes.is_empty() {
+        return Err(CKR_ATTRIBUTE_VALUE_INVALID);
+    }
+    let lms_param = CKP_LMS_SHA256_M32_H5;
+    let lmots_param = CKP_LMOTS_SHA256_N32_W4;
+    let total_sigs = crate::crypto::lms::lms_param_max_leaves(lms_param)
+        .unwrap_or(0)
+        .min(u32::MAX as u64) as u32;
+
+    let mut attrs: Attributes = HashMap::new();
+    store_ulong(&mut attrs, CKA_CLASS, CKO_PRIVATE_KEY);
+    store_ulong(&mut attrs, CKA_KEY_TYPE, CKK_HSS);
+    store_ulong(&mut attrs, CKA_HSS_LMS_TYPE, 1); // levels — single-level HSS = LMS
+    store_ulong(&mut attrs, CKA_LMS_PARAM_SET, lms_param);
+    store_ulong(&mut attrs, CKA_LMOTS_PARAM_SET, lmots_param);
+    store_ulong(&mut attrs, CKA_HSS_KEYS_REMAINING, total_sigs);
+    store_bool(&mut attrs, CKA_TOKEN, false);
+    store_bool(&mut attrs, CKA_PRIVATE, true);
+    store_bool(&mut attrs, CKA_SENSITIVE, true);
+    store_bool(&mut attrs, CKA_EXTRACTABLE, false);
+    store_bool(&mut attrs, CKA_SIGN, true);
+    attrs.insert(CKA_STATEFUL_KEY_STATE, priv_state_bytes.to_vec());
+    attrs.insert(CKA_LEAF_INDEX, 0u64.to_le_bytes().to_vec());
+    insert_id_and_label(&mut attrs, cka_id, label);
+    // Imported provenance — matches `register_pqc_private`'s convention.
+    store_bool(&mut attrs, CKA_LOCAL, false);
+    store_ulong(&mut attrs, CKA_KEY_GEN_MECHANISM, CKM_UNAVAILABLE_INFORMATION);
+    compute_kcv(&mut attrs);
+    Ok(alloc_in_session_slot(session, attrs))
+}
+
+/// Register an existing HSS/LMS public key given the raw `hbs-lms`
+/// public-key bytes. Same v0.1 single-parameter-combination scope as
+/// [`register_hss_private_key`].
+pub fn register_hss_public_key(
+    session: u32,
+    pub_key_bytes: &[u8],
+    cka_id: &[u8],
+    label: &str,
+) -> Result<u32, CkRv> {
+    if pub_key_bytes.is_empty() {
+        return Err(CKR_ATTRIBUTE_VALUE_INVALID);
+    }
+    let lms_param = CKP_LMS_SHA256_M32_H5;
+    let lmots_param = CKP_LMOTS_SHA256_N32_W4;
+
+    let mut attrs: Attributes = HashMap::new();
+    store_ulong(&mut attrs, CKA_CLASS, CKO_PUBLIC_KEY);
+    store_ulong(&mut attrs, CKA_KEY_TYPE, CKK_HSS);
+    store_ulong(&mut attrs, CKA_HSS_LMS_TYPE, 1);
+    store_ulong(&mut attrs, CKA_LMS_PARAM_SET, lms_param);
+    store_ulong(&mut attrs, CKA_LMOTS_PARAM_SET, lmots_param);
+    store_bool(&mut attrs, CKA_TOKEN, false);
+    store_bool(&mut attrs, CKA_PRIVATE, false);
+    store_bool(&mut attrs, CKA_VERIFY, true);
+    attrs.insert(CKA_VALUE, pub_key_bytes.to_vec());
+    insert_id_and_label(&mut attrs, cka_id, label);
+    store_bool(&mut attrs, CKA_LOCAL, false);
+    store_ulong(&mut attrs, CKA_KEY_GEN_MECHANISM, CKM_UNAVAILABLE_INFORMATION);
+    compute_kcv(&mut attrs);
+    Ok(alloc_in_session_slot(session, attrs))
+}
+
 /// Generate a Generic-Secret key (HMAC etc.). `bits` ∈ [8, 4096] in
 /// multiples of 8 (engine permits 1..=512 bytes).
 pub fn generate_generic_secret(
@@ -1324,6 +1557,110 @@ pub enum EccCurve {
     P384,
     P521,
     Secp256K1,
+}
+
+// ── FrodoKEM (BSI TR-02102-1 §2.4.1) ─────────────────────────────────────────
+
+/// Maps a `CKP_FRODOKEM_*` parameter set to the `frodo-kem` crate's
+/// `Algorithm` enum. Only the 6 standard variants are exposed — eFrodoKEM
+/// (ephemeral/one-time-use) intentionally is not (see the FrodoKEM /
+/// Classic-McEliece / HQC implementation plan, Phase 0.8: there is nothing
+/// to cross-validate the ephemeral variants against).
+pub(crate) fn frodokem_algorithm(parameter_set: u32) -> Result<frodo_kem::Algorithm, CkRv> {
+    use frodo_kem::Algorithm;
+    match parameter_set {
+        CKP_FRODOKEM_640_AES => Ok(Algorithm::FrodoKem640Aes),
+        CKP_FRODOKEM_640_SHAKE => Ok(Algorithm::FrodoKem640Shake),
+        CKP_FRODOKEM_976_AES => Ok(Algorithm::FrodoKem976Aes),
+        CKP_FRODOKEM_976_SHAKE => Ok(Algorithm::FrodoKem976Shake),
+        CKP_FRODOKEM_1344_AES => Ok(Algorithm::FrodoKem1344Aes),
+        CKP_FRODOKEM_1344_SHAKE => Ok(Algorithm::FrodoKem1344Shake),
+        _ => Err(CKR_ARGUMENTS_BAD),
+    }
+}
+
+/// Generate a FrodoKEM keypair. `parameter_set` ∈ the 6 `CKP_FRODOKEM_*`
+/// standard variants. Returns `(public_handle, private_handle)`.
+///
+/// RNG note: `frodo-kem` requires `rand_core 0.10`'s `CryptoRng`, not the
+/// engine's usual `rand 0.8`/`rand::rngs::OsRng` — incompatible major
+/// versions of the same trait. Uses `getrandom_0_4::SysRng` (already a
+/// engine dependency for the wasm32 entropy source) wrapped in
+/// `UnwrapErr`, exactly as `frodo-kem`'s own documented usage shows.
+pub fn generate_frodokem_keypair(
+    _session: u32,
+    parameter_set: u32,
+    cka_id: &[u8],
+    label: &str,
+) -> Result<(u32, u32), CkRv> {
+    use getrandom_0_4::rand_core::UnwrapErr;
+    use getrandom_0_4::SysRng;
+
+    let alg = frodokem_algorithm(parameter_set)?;
+
+    let mut pub_attrs: Attributes = HashMap::new();
+    let mut prv_attrs: Attributes = HashMap::new();
+
+    set_common_pub_attrs(&mut pub_attrs, parameter_set, ALGO_FRODOKEM, CKK_PQCTODAY_FRODOKEM, CKM_PQCTODAY_FRODOKEM_KEY_PAIR_GEN);
+    set_common_prv_attrs(&mut prv_attrs, parameter_set, ALGO_FRODOKEM, CKK_PQCTODAY_FRODOKEM, CKM_PQCTODAY_FRODOKEM_KEY_PAIR_GEN);
+    // FrodoKEM-specific flags: encapsulate / decapsulate, NOT sign / verify.
+    store_bool(&mut pub_attrs, CKA_VERIFY, false);
+    store_bool(&mut pub_attrs, CKA_ENCAPSULATE, true);
+    store_bool(&mut prv_attrs, CKA_SIGN, false);
+    store_bool(&mut prv_attrs, CKA_DECAPSULATE, true);
+
+    insert_id_and_label(&mut pub_attrs, cka_id, label);
+    insert_id_and_label(&mut prv_attrs, cka_id, label);
+
+    let mut rng = UnwrapErr(SysRng);
+    let (ek, dk) = alg.generate_keypair(&mut rng);
+    pub_attrs.insert(CKA_VALUE, ek.value().to_vec());
+    prv_attrs.insert(CKA_VALUE, dk.value().to_vec());
+
+    finalize_and_register(_session, pub_attrs, prv_attrs)
+}
+
+// ── Classic McEliece (BSI TR-02102-1 §2.4.2) ─────────────────────────────────
+
+/// Generate a Classic McEliece keypair. Scoped to `mceliece6688128` only
+/// (see implementation plan Phase 0.5 — `classic-mceliece-rust` can only
+/// have one parameter-set feature compiled in at a time); `parameter_set`
+/// MUST be `CKP_CLASSIC_MCELIECE_6688128`. Returns `(public_handle,
+/// private_handle)`.
+///
+/// Unlike FrodoKEM, `classic-mceliece-rust` uses `rand 0.8`'s
+/// `CryptoRng`/`RngCore` (confirmed against its own `Cargo.toml`) — the
+/// same version the rest of this engine already uses, so
+/// `rand::rngs::OsRng` works directly here.
+pub fn generate_classic_mceliece_keypair(
+    _session: u32,
+    parameter_set: u32,
+    cka_id: &[u8],
+    label: &str,
+) -> Result<(u32, u32), CkRv> {
+    if parameter_set != CKP_CLASSIC_MCELIECE_6688128 {
+        return Err(CKR_ARGUMENTS_BAD);
+    }
+
+    let mut pub_attrs: Attributes = HashMap::new();
+    let mut prv_attrs: Attributes = HashMap::new();
+
+    set_common_pub_attrs(&mut pub_attrs, parameter_set, ALGO_CLASSIC_MCELIECE, CKK_PQCTODAY_CLASSIC_MCELIECE, CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN);
+    set_common_prv_attrs(&mut prv_attrs, parameter_set, ALGO_CLASSIC_MCELIECE, CKK_PQCTODAY_CLASSIC_MCELIECE, CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN);
+    store_bool(&mut pub_attrs, CKA_VERIFY, false);
+    store_bool(&mut pub_attrs, CKA_ENCAPSULATE, true);
+    store_bool(&mut prv_attrs, CKA_SIGN, false);
+    store_bool(&mut prv_attrs, CKA_DECAPSULATE, true);
+
+    insert_id_and_label(&mut pub_attrs, cka_id, label);
+    insert_id_and_label(&mut prv_attrs, cka_id, label);
+
+    let mut rng = rand::rngs::OsRng;
+    let (pk, sk) = classic_mceliece_rust::keypair_boxed(&mut rng);
+    pub_attrs.insert(CKA_VALUE, pk.as_ref().to_vec());
+    prv_attrs.insert(CKA_VALUE, sk.as_ref().to_vec());
+
+    finalize_and_register(_session, pub_attrs, prv_attrs)
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -1450,7 +1787,7 @@ fn build_aes_attrs(key: Vec<u8>, key_len_bytes: u32, cka_id: &[u8], label: &str)
 
 /// Build the attribute map for a Generic-Secret key (HMAC). Mirrors
 /// `ffi::C_GenerateKey @ CKM_GENERIC_SECRET_KEY_GEN`.
-fn build_generic_secret_attrs(
+pub(crate) fn build_generic_secret_attrs(
     key: Vec<u8>,
     key_len_bytes: u32,
     cka_id: &[u8],
@@ -1692,12 +2029,12 @@ fn register_pqc_public(
 /// [`super::object::find_all_by_cka_id`]) attributes it to the right token.
 /// An unknown session stamps slot 0, the primary token, which preserves the
 /// single-slot KMIP/wasm behavior.
-fn alloc_in_session_slot(session: u32, mut attrs: Attributes) -> u32 {
+pub(crate) fn alloc_in_session_slot(session: u32, mut attrs: Attributes) -> u32 {
     crate::state::tag_object_slot(session, &mut attrs);
     allocate_handle(attrs)
 }
 
-fn insert_id_and_label(attrs: &mut Attributes, cka_id: &[u8], label: &str) {
+pub(crate) fn insert_id_and_label(attrs: &mut Attributes, cka_id: &[u8], label: &str) {
     if !cka_id.is_empty() {
         attrs.insert(CKA_ID, cka_id.to_vec());
     }
@@ -1800,6 +2137,84 @@ mod tests {
             generate_ml_kem_keypair(session, CKP_ML_KEM_1024, b"\x01", "kem1024").unwrap();
         assert_eq!(get_object_value(pub_h).unwrap().len(), 1568);
         assert_eq!(get_object_value(prv_h).unwrap().len(), 3168);
+        close_session(session).unwrap();
+    }
+
+    /// FrodoKEM-640-AES keygen produces a valid keypair with the sizes
+    /// verified directly against `frodo-kem` v0.1.0's own
+    /// `AlgorithmParams` (see mechanism_info comment in ffi.rs) — not the
+    /// spec PDF, to avoid any crate/spec version mismatch.
+    #[test]
+    fn frodokem_640_aes_keygen_produces_expected_length() {
+        let _guard = test_lock::acquire();
+        let session = fresh_session();
+        let (pub_h, prv_h) = generate_frodokem_keypair(
+            session,
+            CKP_FRODOKEM_640_AES,
+            b"\x01",
+            "frodo640aes-test",
+        )
+        .unwrap();
+        assert!(pub_h > 0 && prv_h > 0 && pub_h != prv_h);
+        assert_eq!(get_object_value(pub_h).unwrap().len(), 9616);
+        assert_eq!(get_object_value(prv_h).unwrap().len(), 19888);
+        close_session(session).unwrap();
+    }
+
+    /// FrodoKEM-1344-SHAKE (BSI's largest recommended parameter set,
+    /// §2.4.1) — pk = 21520 bytes, sk = 43088 bytes.
+    #[test]
+    fn frodokem_1344_shake_keygen_produces_expected_length() {
+        let _guard = test_lock::acquire();
+        let session = fresh_session();
+        let (pub_h, prv_h) = generate_frodokem_keypair(
+            session,
+            CKP_FRODOKEM_1344_SHAKE,
+            b"\x01",
+            "frodo1344shake-test",
+        )
+        .unwrap();
+        assert_eq!(get_object_value(pub_h).unwrap().len(), 21520);
+        assert_eq!(get_object_value(prv_h).unwrap().len(), 43088);
+        close_session(session).unwrap();
+    }
+
+    /// Classic McEliece (mceliece6688128 — BSI's recommended Category-5
+    /// pick, §2.4.2) — pk = 1,044,992 bytes, sk = 13,932 bytes, verified
+    /// directly against `classic-mceliece-rust` v2.0.2's
+    /// `CRYPTO_PUBLICKEYBYTES`/`CRYPTO_SECRETKEYBYTES` for this variant.
+    ///
+    /// `#[ignore]`: a single mceliece6688128 keygen (Goppa code generation)
+    /// takes minutes in an unoptimized debug build — too slow for every CI
+    /// run. Run manually with `cargo test --release -- --ignored
+    /// classic_mceliece_6688128_keygen` (release mode is fast).
+    #[test]
+    #[ignore = "mceliece6688128 keygen is minutes-slow in debug builds — see doc comment"]
+    fn classic_mceliece_6688128_keygen_produces_expected_length() {
+        let _guard = test_lock::acquire();
+        let session = fresh_session();
+        let (pub_h, prv_h) = generate_classic_mceliece_keypair(
+            session,
+            CKP_CLASSIC_MCELIECE_6688128,
+            b"\x01",
+            "mceliece-test",
+        )
+        .unwrap();
+        assert!(pub_h > 0 && prv_h > 0 && pub_h != prv_h);
+        assert_eq!(get_object_value(pub_h).unwrap().len(), 1_044_992);
+        assert_eq!(get_object_value(prv_h).unwrap().len(), 13_932);
+        close_session(session).unwrap();
+    }
+
+    /// Classic McEliece rejects any parameter set other than the one
+    /// scoped variant (Phase 0.5 — the crate can't compile in more than
+    /// one at a time).
+    #[test]
+    fn classic_mceliece_rejects_wrong_parameter_set() {
+        let _guard = test_lock::acquire();
+        let session = fresh_session();
+        let result = generate_classic_mceliece_keypair(session, 0xFF, b"\x01", "bad-ps");
+        assert_eq!(result.unwrap_err(), CKR_ARGUMENTS_BAD);
         close_session(session).unwrap();
     }
 
@@ -2159,10 +2574,85 @@ mod tests {
         let handle = generate_aes_key(session, 256, b"\x01", "aes-gcm").unwrap();
         let iv = vec![0x42u8; 12];
         let plaintext = b"the quick brown fox";
-        let ciphertext = encrypt(session, handle, CKM_AES_GCM, plaintext, Some(&iv)).unwrap();
+        let ciphertext =
+            encrypt(session, handle, CKM_AES_GCM, plaintext, Some(&iv), None, &[], None).unwrap();
         // AES-GCM ciphertext = plaintext.len() + 16-byte tag.
         assert_eq!(ciphertext.len(), plaintext.len() + 16);
-        let recovered = decrypt(session, handle, CKM_AES_GCM, &ciphertext, Some(&iv)).unwrap();
+        let recovered =
+            decrypt(session, handle, CKM_AES_GCM, &ciphertext, Some(&iv), None, &[], None).unwrap();
+        assert_eq!(recovered, plaintext);
+        close_session(session).unwrap();
+    }
+
+    /// Gap-remediation Phase F, Finding #4 — the handle-based `encrypt`/
+    /// `decrypt` previously hardcoded empty AAD unconditionally; real
+    /// client-supplied AAD must now genuinely authenticate the
+    /// ciphertext (round-trips when matched, fails when tampered),
+    /// exactly like the raw-bytes `encrypt_with_key_bytes` path already
+    /// did.
+    #[test]
+    fn aes_256_gcm_engine_handle_honors_real_aad() {
+        use crate::native::encrypt::{decrypt, encrypt};
+        let _guard = test_lock::acquire();
+        let session = fresh_session();
+        let handle = generate_aes_key(session, 256, b"\x01", "aes-gcm-aad").unwrap();
+        let iv = vec![0x24u8; 12];
+        let plaintext = b"Phase F: real AAD must genuinely authenticate";
+        let aad = b"associated-data-not-encrypted";
+
+        let ciphertext =
+            encrypt(session, handle, CKM_AES_GCM, plaintext, Some(&iv), None, aad, None).unwrap();
+        let recovered =
+            decrypt(session, handle, CKM_AES_GCM, &ciphertext, Some(&iv), None, aad, None).unwrap();
+        assert_eq!(recovered, plaintext, "decrypt with the matching AAD must recover the plaintext");
+
+        let err = decrypt(
+            session, handle, CKM_AES_GCM, &ciphertext, Some(&iv), None, b"wrong-aad", None,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err, CKR_ENCRYPTED_DATA_INVALID,
+            "decrypt with mismatched AAD must fail authentication, not silently succeed",
+        );
+        close_session(session).unwrap();
+    }
+
+    /// Gap-remediation Phase F, Finding #4 — the handle-based `encrypt`/
+    /// `decrypt` previously hardcoded SHA-256/MGF1-SHA-256 for RSA-OAEP
+    /// unconditionally. Proves an explicit non-default hash (SHA-384) is
+    /// genuinely used, not silently ignored: encrypting with SHA-384 and
+    /// decrypting with the SHA-256 default must fail (wrong padding
+    /// hash), while decrypting with SHA-384 explicitly must recover the
+    /// plaintext.
+    #[test]
+    fn rsa_oaep_engine_handle_honors_explicit_hash_override() {
+        use crate::native::encrypt::{decrypt, encrypt, OaepHash, OaepParams};
+        let _guard = test_lock::acquire();
+        let session = fresh_session();
+        let (pub_handle, priv_handle) =
+            generate_rsa_keypair(session, 2048, b"\x01", "rsa-oaep-hash").unwrap();
+        let plaintext = b"Phase F: OAEP hash override must be real";
+
+        let sha384 = OaepParams { hash: Some(OaepHash::Sha384), mgf_hash: Some(OaepHash::Sha384), label: None };
+        let ciphertext = encrypt(
+            session, pub_handle, CKM_RSA_PKCS_OAEP, plaintext, None, Some(&sha384), &[], None,
+        )
+        .unwrap();
+
+        // SHA-256 default (no override) must NOT decrypt SHA-384-OAEP
+        // ciphertext — proves encrypt genuinely used SHA-384, not a
+        // silently-ignored parameter.
+        let default_err = decrypt(
+            session, priv_handle, CKM_RSA_PKCS_OAEP, &ciphertext, None, None, &[], None,
+        )
+        .unwrap_err();
+        assert_eq!(default_err, CKR_ENCRYPTED_DATA_INVALID);
+
+        // The matching SHA-384 override on decrypt recovers the plaintext.
+        let recovered = decrypt(
+            session, priv_handle, CKM_RSA_PKCS_OAEP, &ciphertext, None, Some(&sha384), &[], None,
+        )
+        .unwrap();
         assert_eq!(recovered, plaintext);
         close_session(session).unwrap();
     }
@@ -2176,9 +2666,11 @@ mod tests {
         let session = fresh_session();
         let handle = generate_aes_key(session, 256, b"\x01", "tamper").unwrap();
         let iv = vec![0u8; 12];
-        let mut ct = encrypt(session, handle, CKM_AES_GCM, b"hello", Some(&iv)).unwrap();
+        let mut ct =
+            encrypt(session, handle, CKM_AES_GCM, b"hello", Some(&iv), None, &[], None).unwrap();
         ct[0] ^= 0xFF;
-        let err = decrypt(session, handle, CKM_AES_GCM, &ct, Some(&iv)).unwrap_err();
+        let err =
+            decrypt(session, handle, CKM_AES_GCM, &ct, Some(&iv), None, &[], None).unwrap_err();
         assert_eq!(err, CKR_ENCRYPTED_DATA_INVALID);
         close_session(session).unwrap();
     }

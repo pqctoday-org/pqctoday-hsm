@@ -75,10 +75,14 @@ pub struct ObjectRecord {
     /// `NextLink` round-trips correctly through OASIS test cases.
     pub links: std::collections::HashMap<String, String>,
     /// Arbitrary custom attributes carried per managed object (KMIP
-    /// `Custom Attribute` family, x-* / y- names). Populated by
-    /// AddAttribute / SetAttribute; surfaced by GetAttributes /
-    /// GetAttributeList.
-    pub custom_attributes: std::collections::HashMap<String, String>,
+    /// `Custom Attribute` family, x-* / y- names, AND genuine client-set
+    /// vendor `Attribute`s per §11 — e.g. TL-M-2's `Barcode`,
+    /// `VendorAttribute1-3`). Populated by AddAttribute / SetAttribute /
+    /// Create / Register; surfaced by GetAttributes / GetAttributeList.
+    /// Typed (not a bare `String`) so an Integer- or DateTime-valued
+    /// custom attribute round-trips its actual wire type instead of
+    /// losing it — see [`crate::kmip30::CustomAttributeValue`].
+    pub custom_attributes: std::collections::HashMap<String, crate::kmip30::CustomAttributeValue>,
     /// KMIP `Object Group` (0x420056) memberships — **multi-instance**:
     /// an object may belong to several groups, so this is a list of
     /// group-name labels rather than a single value. Populated from the
@@ -196,6 +200,13 @@ pub struct ObjectRecord {
     /// (last 8 hex chars of the UUID portion). Generated lazily.
     pub short_unique_identifier: Option<String>,
     pub alternative_name: Option<String>,
+    /// KMIP 3.0 §4.5 — `Alternative Name Type` (Enumeration). Gap-
+    /// remediation Phase H, Finding #11 — previously hardcoded to
+    /// `Uninterpreted Text String` (1) on encode regardless of what the
+    /// client set; now genuinely round-trips. `None` (e.g. an object
+    /// with no AlternativeName at all) renders the attribute absent,
+    /// same as before.
+    pub alternative_name_type: Option<u32>,
     pub comment: Option<String>,
     pub description: Option<String>,
     pub contact_information: Option<String>,
@@ -226,8 +237,28 @@ pub struct ObjectRecord {
     /// KMIP §6.1.14 `Deactivation Reason Code` — set on `Deactivate`.
     pub deactivation_reason_code: Option<u32>,
 
-    /// KMIP §4 `Lease Time` — Interval seconds.
+    /// KMIP §4.34 `Lease Time` — the MAXIMUM lease (seconds) this server
+    /// will ever grant for this object; server-set at creation,
+    /// read-only for clients. NOT the remaining time on a currently-held
+    /// lease — see `lease_expiry` for that.
     pub lease_time: Option<u32>,
+    /// Phase 3.1 — when a lease is currently held (via Obtain Lease),
+    /// the moment it expires. `None` before the first Obtain Lease, or
+    /// once a granted lease's `lease_time` has fully elapsed (this
+    /// server does not distinguish "never leased" from "lease expired
+    /// long ago" — both mean "no live lease" to Check/enforcement).
+    pub lease_expiry: Option<OffsetDateTime>,
+    /// Phase 3.3 — §2.2.8 / §4.29/§4.30/§4.64-4.66 Split Key object
+    /// metadata. `Some` only on `ObjectType::SplitKey` objects (each a
+    /// single share, `key_material` holding that share's bytes).
+    pub split_key_parts: Option<u32>,
+    pub split_key_threshold: Option<u32>,
+    /// §11.54 wire value (XOR=1, GF(2^16)=2, Prime Field=3, GF(2^8)=4).
+    pub split_key_method: Option<u32>,
+    /// §4.30 — this share's index (finite-field x-coordinate), 1..=Split Key Parts.
+    pub key_part_identifier: Option<u32>,
+    /// §11.55 wire value (283/285) — only set for the two GF(2^8)-based methods.
+    pub split_key_polynomial: Option<u32>,
     /// KMIP §4 `Protection Period` — Interval seconds.
     pub protection_period: Option<u32>,
     pub rotate_interval: Option<u32>,
@@ -263,6 +294,16 @@ pub struct ObjectRecord {
     /// KMIP §11 `Application Specific Information` Structure —
     /// `(namespace, data)` pair. TL-M-3 step #0 finds objects by it.
     pub application_specific_information: Option<(String, String)>,
+    /// KMIP §11 `Protection Storage Mask` — the storage class actually
+    /// used for this object. Every managed object in this server is
+    /// backed by software storage (`Software = 0x01`), so this is
+    /// always `Some(0x01)` once set; `None` only for records built
+    /// before this field existed (`GetAttributes` then falls back to
+    /// `0x01`, still the true value). Register honours a client-supplied
+    /// `Protection Storage Masks` permitted-set by rejecting the request
+    /// (`Result Reason Invalid Field`) if `Software` isn't in it — the
+    /// server has no other storage class to truthfully claim.
+    pub protection_storage_mask: Option<u32>,
     /// Storage status — KMIP 3.0 §6.1.4 Archive / §6.1.47 Recover.
     /// `true` = Archival storage (§12.3 Storage Status Mask bit
     /// 0x02): the material is off-line, so Get and cryptographic
@@ -334,6 +375,7 @@ impl From<BaselineDefaults> for ObjectRecord {
             rotate_automatic: None,
             short_unique_identifier: None,
             alternative_name: None,
+            alternative_name_type: None,
             comment: None,
             description: None,
             contact_information: None,
@@ -352,6 +394,12 @@ impl From<BaselineDefaults> for ObjectRecord {
             revocation_reason_code: None,
             deactivation_reason_code: None,
             lease_time: None,
+            lease_expiry: None,
+            split_key_parts: None,
+            split_key_threshold: None,
+            split_key_method: None,
+            key_part_identifier: None,
+            split_key_polynomial: None,
             protection_period: None,
             rotate_interval: None,
             rotate_offset: None,
@@ -363,6 +411,7 @@ impl From<BaselineDefaults> for ObjectRecord {
             usage_limits_unit: None,
             digest_value: None,
             application_specific_information: None,
+            protection_storage_mask: None,
             archived: false,
         }
     }

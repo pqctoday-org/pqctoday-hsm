@@ -1,10 +1,13 @@
 //! KMIP 3.0 Group D (lifecycle: Deactivate / Check / Archive / Recover /
-//! Obliterate) + leftover Group A (DiscoverVersions / Ping).
+//! Obliterate) + leftover Group A (DiscoverVersions / Ping) + Obtain
+//! Lease (§6.1.40, Phase 3.1 — grouped here since it shares Check's
+//! Lease Time semantics).
 //!
 //! Spec mapping:
 //!
 //! - Deactivate       §6.1.14 — Active → Deactivated, set Deactivation Date
-//! - Check            §6.1.7  — policy gate; v0.1 always allows
+//! - Check            §6.1.7  — Usage Mask / Usage Limits / Lease Time policy gate
+//! - Obtain Lease     §6.1.40 — grant/renew a lease up to the object's Lease Time cap
 //! - Archive          §6.1.4  — move object to Archival storage (K22: real)
 //! - Recover          §6.1.47 — move object back On-line
 //! - Obliterate       §6.1.39 — remove object + all metadata
@@ -18,8 +21,8 @@ use crate::error::{KmipError, Result};
 use crate::kmip30::{
     ArchiveRequest, ArchiveResponse, CheckRequest, CheckResponse, DeactivateRequest,
     DeactivateResponse, DiscoverVersionsRequest, DiscoverVersionsResponse, KMIP_VERSION_MAJOR,
-    KMIP_VERSION_MINOR, ObliterateRequest, ObliterateResponse, PingRequest, PingResponse,
-    RecoverRequest, RecoverResponse, State,
+    KMIP_VERSION_MINOR, ObliterateRequest, ObliterateResponse, ObtainLeaseRequest,
+    ObtainLeaseResponse, PingRequest, PingResponse, RecoverRequest, RecoverResponse, State,
 };
 use crate::policy::{Decision, PolicyRequest};
 
@@ -106,8 +109,75 @@ pub fn check(deps: &Deps, req: CheckRequest, correlation_id: &str) -> Result<Che
         }
     }
 
+    // Phase 3.1 (T1/T2) — Usage Limits Count: the client is asking the
+    // server to confirm this many units are available (§6.1.7 Table
+    // 269), not actually consuming them. Compare against the object's
+    // tracked remaining budget; no budget tracked ⇒ nothing to deny
+    // against (unbounded objects, e.g. asymmetric keys, always pass).
+    if let Some(requested) = req.usage_limits_count {
+        if let Some(remaining) = obj.usage_limits_remaining {
+            if requested > remaining {
+                return Err(fail_err(deps, correlation_id, "Check",
+                    KmipError::failed(
+                        crate::error::ResultReason::UsageLimitExceeded,
+                        format!(
+                            "Usage Limits Count {requested} exceeds the {remaining} units \
+                             remaining on the object's budget",
+                        ),
+                    )));
+            }
+        }
+    }
+
+    // Phase 3.1 (T3) — Lease Time: §6.1.7 Table 269 — "indicates the
+    // requested lease time value MAY be granted if requested by a
+    // subsequent Obtain Lease". This compares against the object's
+    // Lease Time CAP (§4.34, server-set maximum), not whether a lease
+    // is currently held — Obtain Lease is what actually grants one.
+    if let Some(requested) = req.lease_time {
+        let cap = obj.lease_time.unwrap_or(3600);
+        if requested > cap {
+            return Err(fail_err(deps, correlation_id, "Check",
+                KmipError::permission_denied(format!(
+                    "requested Lease Time {requested}s exceeds this object's {cap}s maximum",
+                ))));
+        }
+    }
+
     emit_success(deps, correlation_id, "Check");
     Ok(CheckResponse { uid: req.uid })
+}
+
+// ── Obtain Lease ─────────────────────────────────────────────────────────────
+
+pub fn obtain_lease(
+    deps: &Deps,
+    req: ObtainLeaseRequest,
+    correlation_id: &str,
+) -> Result<ObtainLeaseResponse> {
+    emit_request(deps, correlation_id, "ObtainLease", format!("uid={}", req.uid));
+
+    let mut obj = deps.store.get(&req.uid)?.ok_or_else(|| {
+        fail_err(deps, correlation_id, "ObtainLease", KmipError::object_not_found(&req.uid))
+    })?;
+
+    // §6.1.40: grants a lease "up to" the object's Lease Time cap
+    // (§4.34) — the request carries no client-requested duration to
+    // negotiate, so the server always grants the full cap. A `0`
+    // returned Lease Time would mean "no limit"; this server always
+    // has a real cap (3600s default), so that branch never fires here.
+    let now = OffsetDateTime::now_utc();
+    let granted = obj.lease_time.unwrap_or(3600);
+    obj.lease_expiry = Some(now + time::Duration::seconds(granted as i64));
+    obj.last_change_date = Some(now);
+    deps.store.update(obj)?;
+
+    emit_success(deps, correlation_id, "ObtainLease");
+    Ok(ObtainLeaseResponse {
+        uid: req.uid,
+        lease_time: granted,
+        last_change_date: now.unix_timestamp(),
+    })
 }
 
 // ── Archive ────────────────────────────────────────────────────────────────
@@ -313,6 +383,128 @@ mod tests {
             err.result_reason(),
             crate::error::ResultReason::IncompatibleCryptographicUsageMask,
         );
+    }
+
+    /// Phase 3.1 (T1/T2) — Check's Usage Limits Count sub-check: a
+    /// request for more units than the object's remaining budget fails
+    /// `Usage Limit Exceeded`; a request within budget passes.
+    #[test]
+    fn check_usage_limits_count_against_remaining_budget() {
+        let d = deps_with();
+        d.store.put(ObjectRecord {
+            uid: "u".into(), object_type: ObjectType::SymmetricKey, algorithm: KmipAlgorithm::Aes,
+            cryptographic_length: 128, usage_mask: UsageMask::ENCRYPT, state: State::Active,
+            pkcs11_cka_id: vec![], pkcs11_slot: 0, initial_date: OffsetDateTime::UNIX_EPOCH,
+            activation_date: None, supersedes: None, name: None, links: HashMap::new(),
+            custom_attributes: HashMap::new(), key_material: None, key_format_type: None,
+            usage_limits_total: Some(1000), usage_limits_remaining: Some(100),
+            ..ObjectRecord::default()
+        }).unwrap();
+
+        // Asking for more than remains → Usage Limit Exceeded.
+        let err = check(&d, CheckRequest {
+            uid: "u".into(), usage_limits_count: Some(200),
+            cryptographic_usage_mask: None, lease_time: None,
+        }, "c").unwrap_err();
+        assert_eq!(err.result_reason(), crate::error::ResultReason::UsageLimitExceeded);
+
+        // Asking for no more than remains → allowed.
+        check(&d, CheckRequest {
+            uid: "u".into(), usage_limits_count: Some(100),
+            cryptographic_usage_mask: None, lease_time: None,
+        }, "c").unwrap();
+    }
+
+    /// An object with no tracked Usage Limits budget (e.g. an
+    /// asymmetric key) has nothing to check the request against, so
+    /// Check must not fabricate a denial.
+    #[test]
+    fn check_usage_limits_count_passes_when_object_has_no_budget() {
+        let d = deps_with();
+        put(&d, "u", State::Active);
+        check(&d, CheckRequest {
+            uid: "u".into(), usage_limits_count: Some(1_000_000),
+            cryptographic_usage_mask: None, lease_time: None,
+        }, "c").unwrap();
+    }
+
+    /// Phase 3.1 (T3) — Check's Lease Time sub-check compares the
+    /// requested value against the object's Lease Time cap (§4.34),
+    /// not whether a lease is currently held.
+    #[test]
+    fn check_lease_time_against_object_cap() {
+        let d = deps_with();
+        d.store.put(ObjectRecord {
+            uid: "u".into(), object_type: ObjectType::SymmetricKey, algorithm: KmipAlgorithm::Aes,
+            cryptographic_length: 128, usage_mask: UsageMask::ENCRYPT, state: State::Active,
+            pkcs11_cka_id: vec![], pkcs11_slot: 0, initial_date: OffsetDateTime::UNIX_EPOCH,
+            activation_date: None, supersedes: None, name: None, links: HashMap::new(),
+            custom_attributes: HashMap::new(), key_material: None, key_format_type: None,
+            lease_time: Some(1800),
+            ..ObjectRecord::default()
+        }).unwrap();
+
+        let err = check(&d, CheckRequest {
+            uid: "u".into(), usage_limits_count: None,
+            cryptographic_usage_mask: None, lease_time: Some(3600),
+        }, "c").unwrap_err();
+        assert_eq!(err.result_reason(), crate::error::ResultReason::PermissionDenied);
+
+        check(&d, CheckRequest {
+            uid: "u".into(), usage_limits_count: None,
+            cryptographic_usage_mask: None, lease_time: Some(1800),
+        }, "c").unwrap();
+    }
+
+    // ── Obtain Lease (§6.1.40, Phase 3.1) ───────────────────────────────
+
+    #[test]
+    fn obtain_lease_grants_the_objects_cap_and_sets_expiry() {
+        let d = deps_with();
+        d.store.put(ObjectRecord {
+            uid: "u".into(), object_type: ObjectType::SymmetricKey, algorithm: KmipAlgorithm::Aes,
+            cryptographic_length: 128, usage_mask: UsageMask::ENCRYPT, state: State::Active,
+            pkcs11_cka_id: vec![], pkcs11_slot: 0, initial_date: OffsetDateTime::UNIX_EPOCH,
+            activation_date: None, supersedes: None, name: None, links: HashMap::new(),
+            custom_attributes: HashMap::new(), key_material: None, key_format_type: None,
+            lease_time: Some(1800),
+            ..ObjectRecord::default()
+        }).unwrap();
+
+        let before = OffsetDateTime::now_utc();
+        let resp = obtain_lease(&d, ObtainLeaseRequest { uid: "u".into() }, "c").unwrap();
+        assert_eq!(resp.uid, "u");
+        assert_eq!(resp.lease_time, 1800, "grants the object's Lease Time cap");
+
+        let rec = d.store.get("u").unwrap().unwrap();
+        let expiry = rec.lease_expiry.expect("Obtain Lease must record a real expiry");
+        assert!(expiry >= before + time::Duration::seconds(1799));
+        assert!(expiry <= before + time::Duration::seconds(1801));
+        assert_eq!(
+            rec.last_change_date.unwrap().unix_timestamp(),
+            resp.last_change_date,
+            "response Last Change Date must match the record"
+        );
+    }
+
+    #[test]
+    fn obtain_lease_on_unknown_uid_fails_object_not_found() {
+        let d = deps_with();
+        let err = obtain_lease(&d, ObtainLeaseRequest { uid: "ghost".into() }, "c").unwrap_err();
+        assert_eq!(err.result_reason(), crate::error::ResultReason::ObjectNotFound);
+    }
+
+    #[test]
+    fn obtain_lease_renews_and_advances_expiry() {
+        let d = deps_with();
+        put(&d, "u", State::Active); // default lease_time is None -> 3600s fallback
+        let r1 = obtain_lease(&d, ObtainLeaseRequest { uid: "u".into() }, "c1").unwrap();
+        let expiry1 = d.store.get("u").unwrap().unwrap().lease_expiry.unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let r2 = obtain_lease(&d, ObtainLeaseRequest { uid: "u".into() }, "c2").unwrap();
+        let expiry2 = d.store.get("u").unwrap().unwrap().lease_expiry.unwrap();
+        assert_eq!(r1.lease_time, r2.lease_time);
+        assert!(expiry2 > expiry1, "a renewed lease must push the expiry forward");
     }
 
     /// K22 — §6.1.4: Archive moves the record to Archival storage and

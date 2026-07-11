@@ -403,3 +403,68 @@ fn unique_id_present_and_distinct_on_generated_objects() {
     );
     close_session(session).unwrap();
 }
+
+/// HSS/LMS leaf-advance parity: `native::sign` and `ffi::C_Sign` must
+/// advance a stateful key's leaf index identically. This is the whole
+/// point of extracting `native::hbs` as the single shared
+/// implementation (see that module's doc comment) — before this change,
+/// `native::sign` had no HSS arm at all. Registers two independent
+/// objects from the SAME freshly-generated (leaf-0) private-key state,
+/// signs one leaf through each API, and confirms both consumed exactly
+/// one leaf with a signature the other API's verify accepts.
+#[test]
+fn hss_ffi_and_native_advance_the_leaf_index_identically() {
+    use crate::native::keygen::{register_hss_private_key, register_hss_public_key};
+
+    let _guard = test_lock::acquire();
+    let session = fresh_session();
+
+    let (pub_bytes, priv_bytes) =
+        crate::crypto::lms::hss_keygen(1, &[CKP_LMS_SHA256_M32_H5], &[CKP_LMOTS_SHA256_N32_W4])
+            .expect("hss_keygen must succeed");
+
+    let native_pub = register_hss_public_key(session, &pub_bytes, b"\x01", "hss-parity-n").unwrap();
+    let native_prv = register_hss_private_key(session, &priv_bytes, b"\x01", "hss-parity-n").unwrap();
+    let ffi_pub = register_hss_public_key(session, &pub_bytes, b"\x02", "hss-parity-f").unwrap();
+    let ffi_prv = register_hss_private_key(session, &priv_bytes, b"\x02", "hss-parity-f").unwrap();
+
+    let msg = b"parity check";
+
+    // Native path.
+    let native_sig = sign(session, native_prv, CKM_HSS, msg).unwrap();
+    assert!(verify(session, native_pub, CKM_HSS, msg, &native_sig).unwrap());
+    assert_eq!(
+        crate::state::get_object_attr_u64(native_prv, CKA_LEAF_INDEX).unwrap(),
+        1,
+        "native::sign must advance the leaf index by exactly one"
+    );
+
+    // FFI path — same packed-mechanism convention as the HMAC parity test
+    // above: CK_MECHANISM { mechanism: CKM_HSS, pParameter: NULL, ulParameterLen: 0 }.
+    let mut mech: [usize; 3] = [CKM_HSS as usize, 0, 0];
+    let rv = ffi::C_SignInit(session, mech.as_mut_ptr() as *mut u8, ffi_prv);
+    assert_eq!(rv, CKR_OK, "ffi::C_SignInit HSS: 0x{rv:x}");
+    let mut sig_buf = vec![0u8; 8192];
+    let mut sig_len = sig_buf.len() as u32;
+    let mut data_buf = msg.to_vec();
+    let rv = ffi::C_Sign(
+        session,
+        data_buf.as_mut_ptr(),
+        data_buf.len() as u32,
+        sig_buf.as_mut_ptr(),
+        &mut sig_len,
+    );
+    assert_eq!(rv, CKR_OK, "ffi::C_Sign HSS: 0x{rv:x}");
+    sig_buf.truncate(sig_len as usize);
+    assert_eq!(
+        crate::state::get_object_attr_u64(ffi_prv, CKA_LEAF_INDEX).unwrap(),
+        1,
+        "ffi::C_Sign must advance the leaf index by exactly one"
+    );
+    assert!(
+        verify(session, ffi_pub, CKM_HSS, msg, &sig_buf).unwrap(),
+        "native::verify must accept a signature produced by ffi::C_Sign"
+    );
+
+    close_session(session).unwrap();
+}

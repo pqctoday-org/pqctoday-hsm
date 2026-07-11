@@ -58,8 +58,12 @@ pub mod recommended_curve {
 // `0x8000_0000 | n`.
 
 pub use softhsmrustv3::constants::{
-    CKM_ML_DSA, CKM_ML_DSA_KEY_PAIR_GEN, CKM_ML_KEM, CKM_ML_KEM_KEY_PAIR_GEN,
-    CKM_SLH_DSA, CKM_SLH_DSA_KEY_PAIR_GEN,
+    CKM_HSS, CKM_HSS_KEY_PAIR_GEN, CKM_ML_DSA, CKM_ML_DSA_KEY_PAIR_GEN, CKM_ML_KEM,
+    CKM_ML_KEM_KEY_PAIR_GEN, CKM_SLH_DSA, CKM_SLH_DSA_KEY_PAIR_GEN,
+    // BSI TR-02102-1 recommended KEMs (vendor mechanisms — see
+    // pqctoday-priv/docs/platform/data/pkcs11-vendor-mech-allocation.md §1.4).
+    CKM_PQCTODAY_FRODOKEM_KEY_PAIR_GEN, CKM_PQCTODAY_FRODOKEM_ENCAPSULATE,
+    CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN, CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE,
 };
 
 // ── Standard PKCS#11 v3.2 mech codepoints used by classical algos ──────────
@@ -225,10 +229,59 @@ pub enum KmipAlgorithm {
     X25519MlKem768,     // 0x5c (WD19)
     SecP256r1MlKem768,  // 0x5d (WD19)
     // SecP384r1MLKEM1024 (draft-ietf-tls-ecdhe-mlkem group 0x11ED) has NO WD19
-    // CryptographicAlgorithm value (WD19 stops at 0x5D). Assigned a clearly
-    // vendor/extension codepoint in the reserved high-bit range, pending an
-    // OASIS assignment — same posture as unassigned composite codepoints.
-    SecP384r1MlKem1024, // 0x8000005e (vendor/extension — non-standard)
+    // CryptographicAlgorithm value (WD19 stops at 0x5D). Assigned a codepoint
+    // in the `8XXXXXXX` Extensions range — KMIP 3.0's OWN spec-sanctioned
+    // vendor-extension convention for enumeration values (every enum table,
+    // including this one — §11.12 Table 543 Cryptographic Algorithm
+    // Enumeration — lists "Extensions 8XXXXXXX" as a valid entry; confirmed
+    // present in 60 enum tables across the spec). This is a real, working
+    // extension codepoint per spec convention, not an ad hoc invention — it
+    // is simply not (yet) an OASIS-assigned standard value, pending a future
+    // official assignment for this algorithm.
+    SecP384r1MlKem1024, // 0x8000005e (spec-convention vendor extension, §11.12)
+
+    // ── BSI TR-02102-1 §2.4.2 — Classic McEliece ─────────────────────────
+    // KMIP's own `CryptographicAlgorithm` enum already has REAL OASIS
+    // codepoints for McEliece (0x34 generic, 0x35 = McEliece-6960119, 0x36 =
+    // McEliece-8192128 — confirmed directly in
+    // `spec/oasis-kmip-3.0/kmip-spec-3.0-tags-enums.json`) — but none
+    // specific to `mceliece6688128` (BSI's Category-5 pick, the only
+    // parameter set this engine implements — see the FrodoKEM/
+    // Classic-McEliece/HQC implementation plan Phase 0.5). Using the
+    // generic 0x34 codepoint here; if a second parameter set is added
+    // later, disambiguation will need a real attribute (mirrors how `Ecdh`
+    // is one variant covering multiple curves via `RecommendedCurve`), not
+    // a rename of this variant.
+    ClassicMcEliece6688128, // 0x00000034 (OASIS, generic "McEliece")
+
+    // ── BSI TR-02102-1 §2.4.1 — FrodoKEM ──────────────────────────────────
+    // No OASIS codepoint exists for FrodoKEM at all (confirmed: absent from
+    // the same tags-enums.json). Vendor/extension range, continuing after
+    // `SecP384r1MlKem1024` (0x8000005e) — same posture as that entry.
+    // eFrodoKEM (ephemeral) variants intentionally not included — see
+    // implementation plan Phase 0.8.
+    FrodoKem640Aes,     // 0x8000005f (vendor/extension — non-standard)
+    FrodoKem640Shake,   // 0x80000060 (vendor/extension — non-standard)
+    FrodoKem976Aes,     // 0x80000061 (vendor/extension — non-standard)
+    FrodoKem976Shake,   // 0x80000062 (vendor/extension — non-standard)
+    FrodoKem1344Aes,    // 0x80000063 (vendor/extension — non-standard)
+    FrodoKem1344Shake,  // 0x80000064 (vendor/extension — non-standard)
+
+    // ── HSS/LMS (RFC 8554) ─────────────────────────────────────────────────
+    // KMIP 3.0's Cryptographic Algorithm Enumeration (§11.12 Table 545) has
+    // NO entry for HSS/LMS — verified directly against the spec text (both
+    // the base CSD01 and the WD19 PQC draft): only `XMSS` (0x32) is listed,
+    // a genuine gap in the spec, not something missed here. Assigned the
+    // next free codepoint in the same `8XXXXXXX` Extensions range as
+    // `SecP384r1MlKem1024`/the FrodoKEM block above (0x80000065 — 0x5f-0x64
+    // are taken by FrodoKEM), following the identical spec-sanctioned
+    // vendor-extension convention (§11.12). Represents HSS generically —
+    // per RFC 8554 §6, a single-level HSS key IS an LMS key, so this one
+    // variant covers both; the specific LMS/LM-OTS parameter combination is
+    // carried as an engine attribute (`CKA_LMS_PARAM_SET`), the same pattern
+    // `Ecdsa` already uses for its curve ("covers ECDSA over any curve;
+    // curve = attribute").
+    Hss, // 0x80000065 (spec-convention vendor extension, §11.12)
 }
 
 impl KmipAlgorithm {
@@ -269,11 +322,21 @@ impl KmipAlgorithm {
             X25519MlKem768    => 0x0000005c,
             SecP256r1MlKem768 => 0x0000005d,
             SecP384r1MlKem1024 => 0x8000005e,
+            ClassicMcEliece6688128 => 0x00000034,
+            FrodoKem640Aes    => 0x8000005f,
+            FrodoKem640Shake  => 0x80000060,
+            FrodoKem976Aes    => 0x80000061,
+            FrodoKem976Shake  => 0x80000062,
+            FrodoKem1344Aes   => 0x80000063,
+            FrodoKem1344Shake => 0x80000064,
+            Hss => 0x80000065,
         }
     }
 
     /// Reverse of [`Self::to_wire_value`]. Returns `None` for values outside
-    /// the FIPS-certified set this v0.1 supports.
+    /// the algorithm set this v0.1 supports (mostly FIPS-certified
+    /// primitives, plus a couple of NIST-recognized or vendor-extension
+    /// entries — SecP384r1MlKem1024, Hss — that aren't FIPS numbers).
     pub const fn from_wire_value(v: u32) -> Option<Self> {
         use KmipAlgorithm::*;
         Some(match v {
@@ -308,6 +371,14 @@ impl KmipAlgorithm {
             0x0000005c => X25519MlKem768,
             0x0000005d => SecP256r1MlKem768,
             0x8000005e => SecP384r1MlKem1024,
+            0x00000034 => ClassicMcEliece6688128,
+            0x8000005f => FrodoKem640Aes,
+            0x80000060 => FrodoKem640Shake,
+            0x80000061 => FrodoKem976Aes,
+            0x80000062 => FrodoKem976Shake,
+            0x80000063 => FrodoKem1344Aes,
+            0x80000064 => FrodoKem1344Shake,
+            0x80000065 => Hss,
             _ => return None,
         })
     }
@@ -388,6 +459,20 @@ impl KmipAlgorithm {
             (MlKem512 | MlKem768 | MlKem1024, Encrypt | Decrypt) =>
                 Some(CKM_ML_KEM),
 
+            // ── FrodoKEM (BSI TR-02102-1 §2.4.1) ──────────────────────────
+            (FrodoKem640Aes | FrodoKem640Shake | FrodoKem976Aes
+                | FrodoKem976Shake | FrodoKem1344Aes | FrodoKem1344Shake, KeyGen)
+                => Some(CKM_PQCTODAY_FRODOKEM_KEY_PAIR_GEN),
+            (FrodoKem640Aes | FrodoKem640Shake | FrodoKem976Aes
+                | FrodoKem976Shake | FrodoKem1344Aes | FrodoKem1344Shake, Encrypt | Decrypt)
+                => Some(CKM_PQCTODAY_FRODOKEM_ENCAPSULATE),
+
+            // ── Classic McEliece (BSI TR-02102-1 §2.4.2) ──────────────────
+            (ClassicMcEliece6688128, KeyGen) =>
+                Some(CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN),
+            (ClassicMcEliece6688128, Encrypt | Decrypt) =>
+                Some(CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE),
+
             // ── ML-DSA (FIPS 204) ─────────────────────────────────────────
             (MlDsa44 | MlDsa65 | MlDsa87, KeyGen) =>
                 Some(CKM_ML_DSA_KEY_PAIR_GEN),
@@ -446,6 +531,10 @@ impl KmipAlgorithm {
             // ── Ed25519 (RFC 8032 EdDSA) ────────────────────────────────────
             (Ed25519, KeyGen) => Some(CKM_EC_EDWARDS_KEY_PAIR_GEN),
             (Ed25519, SignVerify) => Some(CKM_EDDSA),
+
+            // ── HSS/LMS (RFC 8554) ────────────────────────────────────────
+            (Hss, KeyGen) => Some(CKM_HSS_KEY_PAIR_GEN),
+            (Hss, SignVerify) => Some(CKM_HSS),
 
             // Any other (algorithm, op) pair is undefined.
             _ => None,
@@ -594,6 +683,14 @@ impl KmipAlgorithm {
             X25519MlKem768    => "X25519MLKEM768",
             SecP256r1MlKem768 => "SecP256r1MLKEM768",
             SecP384r1MlKem1024 => "SecP384r1MLKEM1024",
+            ClassicMcEliece6688128 => "Classic-McEliece-6688128",
+            FrodoKem640Aes    => "FrodoKEM-640-AES",
+            FrodoKem640Shake  => "FrodoKEM-640-SHAKE",
+            FrodoKem976Aes    => "FrodoKEM-976-AES",
+            FrodoKem976Shake  => "FrodoKEM-976-SHAKE",
+            FrodoKem1344Aes   => "FrodoKEM-1344-AES",
+            FrodoKem1344Shake => "FrodoKEM-1344-SHAKE",
+            Hss => "HSS",
         }
     }
 }
@@ -616,7 +713,11 @@ mod tests {
             SlhDsaShake128s, SlhDsaShake128f,
             SlhDsaShake192s, SlhDsaShake192f,
             SlhDsaShake256s, SlhDsaShake256f,
-            X25519MlKem768, SecP256r1MlKem768,
+            X25519MlKem768, SecP256r1MlKem768, SecP384r1MlKem1024,
+            ClassicMcEliece6688128,
+            FrodoKem640Aes, FrodoKem640Shake, FrodoKem976Aes, FrodoKem976Shake,
+            FrodoKem1344Aes, FrodoKem1344Shake,
+            Hss,
         ]
     }
 
@@ -625,6 +726,24 @@ mod tests {
         for &a in all_algos() {
             let v = a.to_wire_value();
             assert_eq!(KmipAlgorithm::from_wire_value(v), Some(a), "{}", a.spec_name());
+        }
+    }
+
+    /// Merge safety net: two independently-developed branches each picking
+    /// the "next free" vendor codepoint in the `8XXXXXXX` Extensions range
+    /// is exactly the kind of collision that merges silently — this would
+    /// have caught the real one found while merging Hss (0x8000005f) with
+    /// the FrodoKEM block (which also claimed 0x8000005f), before Hss was
+    /// renumbered to 0x80000065.
+    #[test]
+    fn every_wire_value_is_unique() {
+        use std::collections::HashMap;
+        let mut seen: HashMap<u32, KmipAlgorithm> = HashMap::new();
+        for &a in all_algos() {
+            let v = a.to_wire_value();
+            if let Some(prev) = seen.insert(v, a) {
+                panic!("codepoint {v:#x} claimed by both {} and {}", prev.spec_name(), a.spec_name());
+            }
         }
     }
 
@@ -716,8 +835,11 @@ mod tests {
     }
 
     /// K5 regression — every PQC family's `(op) → mech` selection emits the
-    /// standard PKCS#11 v3.2 codepoint, never the retired 0x4032–0x4037
-    /// pseudo-vendor block (which collides with CKM_HSS/CKM_XMSS*).
+    /// standard PKCS#11 v3.2 codepoint, never the retired CKM_PQCTODAY_*
+    /// pseudo-vendor block K5 removed. HSS (wired later, Phase 1.5) is a
+    /// deliberate, explicitly-asserted exception: 0x4032/0x4033 are its
+    /// own real standard codepoints, not the retired ones — see the
+    /// assertion below for why the numbers are identical either way.
     #[test]
     fn pqc_mech_selection_emits_standard_codepoints() {
         use KmipAlgorithm::*;
@@ -747,8 +869,23 @@ mod tests {
             assert_eq!(a.to_pkcs11_mech(SignVerify), Some(0x2e), "{}", a.spec_name());
         }
 
-        // No (algorithm, op) pair may emit a retired pseudo-vendor codepoint.
+        // HSS (Phase 1.5, post-dates K5): 0x4032/0x4033 are its REAL,
+        // OASIS-assigned standard codepoints (verified directly against
+        // `src/lib/pkcs11/pkcs11t.h`) — not the retired CKM_PQCTODAY_*
+        // pseudo-vendor block K5 removed. The numeric range is identical
+        // by construction (retiring the fake vendor scheme meant handing
+        // these exact numbers to the real mechanisms), which is why the
+        // blanket "nothing in 0x4032-0x4037" check below carves this
+        // pair out explicitly rather than asserting it can never appear.
+        assert_eq!(Hss.to_pkcs11_mech(KeyGen), Some(0x4032), "{}", Hss.spec_name());
+        assert_eq!(Hss.to_pkcs11_mech(SignVerify), Some(0x4033), "{}", Hss.spec_name());
+
+        // No OTHER (algorithm, op) pair may emit a retired pseudo-vendor
+        // codepoint — HSS is the sole, explicitly-checked-above exception.
         for &a in all_algos() {
+            if a == Hss {
+                continue;
+            }
             for op in [KeyGen, SignVerify, Encrypt, Decrypt, Mac] {
                 if let Some(m) = a.to_pkcs11_mech(op) {
                     assert!(

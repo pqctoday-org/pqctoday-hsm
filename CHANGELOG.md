@@ -62,6 +62,245 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   also reject unparseable Certificate DER up front instead of accepting
   and silently discarding it.
 
+## [0.13.1] — 2026-07-09
+
+CI-only follow-up to 0.13.0. No functional or behavioral changes to the
+engine or KMIP server.
+
+### Fixed
+
+- **PKCS#11 Constants Gate CI check.** `CKM_PQCTODAY_SPLIT_KEY`
+  (`0x80000012` — the Split Key vendor mechanism added in 0.12.0) was
+  never added to `scripts/check_pkcs11_constants.py`'s `PINNED`
+  allowlist, so the gate had been failing on every push/PR to `main`
+  since that merge. Added.
+
+### Internal
+
+- **`cargo test` no longer runs real Classic McEliece keygens by
+  default.** Six tests across `rust/` and `kmip/` each build a real
+  `mceliece6688128` keypair (Goppa code generation), which is
+  minutes-slow in an unoptimized debug build — the dominant cost in
+  every CI run of the "Rust Tests" job (up to ~41 minutes). Marked
+  `#[ignore]`, consistent with the two most expensive McEliece
+  cross-validation tests that already were; every ignored test is
+  still real coverage, documented, and runnable manually with
+  `cargo test --release -- --ignored <name>`.
+
+## [0.13.0] — 2026-07-09
+
+A follow-up audit of the `HONEST_MAXIMUM_PLAN.md` work in 0.12.0: a
+dedicated pass over the PKCS#11 and KMIP Rust crates looking specifically
+for stub/placeholder code and silently-dropped errors. It found 13 real
+gaps, all fixed here in 9 phases (documented in
+`kmip/docs/GAP_REMEDIATION_PLAN.md`), plus two further bugs the fix work
+itself surfaced along the way. Every fix ships with new tests, and the
+full OASIS mandatory conformance corpus (97 tests) still passes end to
+end.
+
+### Fixed
+
+- **`Destroy` now genuinely scrubs key material.** Registered/imported
+  objects had their raw key bytes zeroized in memory before being
+  dropped, and SQLite's `secure_delete` pragma is now enabled — "the key
+  material SHALL be destroyed" (§6.1.19) previously only flipped a
+  lifecycle flag while the plaintext sat in the database.
+- **`SetAttribute` / `ModifyAttribute` / `DeleteAttribute` no longer
+  silently drop attributes.** Several attributes (`CryptographicParameters`,
+  `UsageLimits`, `ProtectionLevel`, four Link types) returned a wire
+  `Success` while persisting nothing; a separate group
+  (`CryptographicDomainParameters`, `ProtectionStorageMask`, and 11
+  others) is now honestly rejected as Read-Only instead of the same
+  silent no-op. `UsageLimits` also gained its §4.69 guard: once `Get
+  Usage Allocation` has granted an allocation, the budget can no longer
+  be silently re-set. Auditing `DeleteAttribute`'s independent code path
+  for the same class of bug also caught two more real bugs: `AddAttribute`
+  wrongly rejected a legitimate first-time add, and `DeleteAttribute` by
+  name could never actually find a Link attribute due to a space-vs-no-space
+  string mismatch.
+- **Three wire-encoding round-trip gaps.** The attribute-name lookup table
+  used by `AdjustAttribute`/`DeleteAttribute` was missing 6 entries;
+  `CryptographicParameters` encoding dropped 7 real fields (tag length,
+  random IV, deterministic signing, context string, and more); and
+  `Register`ing a `SecretData` object always reported its type back as
+  `Password` regardless of what was actually registered.
+- **`Register` RSA public/private key honesty.** Engine-import failures
+  were previously discarded, so a malformed or unsupported key could
+  register successfully and only fail on first use. RSA public keys can
+  now genuinely be registered in PKCS#8 form (previously silently
+  produced no usable key), and — found via the OASIS conformance replay
+  while verifying this fix — the "Transparent RSA Public Key" wire form
+  never actually worked either; it does now.
+- **`CreateKeyPair` persists `CryptographicParameters` and rejects false
+  `QuantumSafe` claims.** A key's declared default padding/hash (e.g.
+  PSS/SHA-384) was silently lost, same as `Create` already handles
+  correctly; `QuantumSafe=true` on a non-PQC algorithm is now rejected,
+  matching `Create`'s existing check.
+- **`Encrypt`/`Decrypt` now pass real AAD and OAEP-hash choices through
+  for engine-generated keys.** Only `Register`'d (raw-material) keys
+  previously got the client's actual AAD / RSA-OAEP hash selection;
+  `Create`/`CreateKeyPair`'d keys silently got empty AAD and a hardcoded
+  SHA-256 default. Found and fixed along the way: RSA-OAEP encryption
+  against an engine-generated key had never worked at all, due to an
+  internal key-format mismatch.
+- **Batch `Undo` / `$IDPlaceholder` now cover every UID-minting
+  operation.** `Encapsulate`, `Decapsulate`, `CreateSplitKey`, and
+  `JoinSplitKey` were the only operations the dispatcher didn't know how
+  to roll back or chain — a batch `Undo` after one of them left the new
+  object behind instead of deleting it, and a later batch item couldn't
+  reference `$IDPlaceholder` after one ran.
+- **`Locate` can now filter by cryptographic length, usage mask, and
+  unique identifier** — previously accepted as valid filter syntax and
+  silently ignored, returning every object instead of narrowing.
+- **`AlternativeName`'s Type is no longer discarded.** Registering a name
+  as e.g. a URI previously always reported back as plain text; the type
+  now genuinely round-trips.
+- **SQLite storage now protects Initial Date / Original Creation Date**
+  from being overwritten on update, matching the guarantee in-memory
+  storage already provided.
+
+### Internal
+
+- Nine stale code comments corrected — several claimed features were
+  still unimplemented (session tickets, audit event emission, batch
+  processing, HSS/XMSS key generation, multi-part crypto operations)
+  when they had genuinely shipped since the comment was written.
+- The syslog audit sink now logs and counts dropped events on a send
+  failure, matching every other audit sink instead of failing silently.
+
+## [0.12.0] — 2026-07-08
+
+Closes the KMIP `HONEST_MAXIMUM_PLAN.md` initiative: every advertised KMIP 3.0
+capability the server claims is now genuinely implemented, replacing the last
+faked/placeholder operations with real ones. The two headline additions are a
+real asynchronous-processing subsystem and real Shamir-style key splitting;
+alongside them, the server's own `Query` response was audited down to
+"nothing advertised that isn't real," and the OASIS conformance report and CI
+gates were rewritten to match measured reality rather than an older, partly
+stale baseline.
+
+### Added
+
+- **Create Split Key / Join Split Key (§6.1.12 / §6.1.31).** All four KMIP
+  §11.54 secret-sharing methods — XOR, Polynomial Sharing GF(2⁸), Polynomial
+  Sharing GF(2¹⁶), and Polynomial Sharing Prime Field — implemented from
+  spec in the Rust engine as a new vendor mechanism
+  (`CKM_PQCTODAY_SPLIT_KEY`), reachable only through opaque PKCS#11 object
+  handles: the KMIP server never sees a raw secret byte, split or whole.
+  Splitting a key into N shares and joining any threshold-sized subset back
+  together reconstructs the exact original key; fewer than the threshold
+  fails cleanly instead of silently returning garbage.
+- **Real asynchronous processing (§6.1.43 Poll, §6.1.5 Cancel, §6.1.44
+  Process, §6.1.46 Query Asynchronous Requests).** A client requesting
+  `Mandatory` asynchronous handling on an eligible operation now gets a real
+  job — tracked by a server-generated correlation value, executed on a
+  genuine background thread in the production server — instead of the
+  request being rejected outright. `Poll` returns the real result once the
+  job completes; `Cancel` and `Process` correctly handle the underlying race
+  between a client request and the background executor. `Query` now
+  honestly reports `Asynchronous Capability = true`.
+
+### Changed
+
+- **`Query` now advertises only what's real.** Every operation and object
+  type the server ever listed as "supported" is genuinely implemented —
+  the internal "advertised but not implemented" lists are empty. Along the
+  way, a real mislabeling bug surfaced and was fixed: `User`, `Group`, and
+  the four credential object types were marked "unimplemented" in `Query`
+  despite `Create User` / `Create Group` / `Create Credential` genuinely
+  creating them; `Certificate Request` (genuinely never implemented) is no
+  longer advertised at all.
+- **OASIS conformance report rewritten** against the KMIP profiles spec's
+  actual Baseline Server checklist. Every condition is met except the
+  server-to-client operations (server-initiated `Notify` / `Put`), which
+  remain a deliberate, documented scope boundary — the spec itself leaves
+  that transport unspecified. Corrects an inaccuracy in the previous
+  report, which had speculated the async operations depended on that same
+  gap; they don't, and this release proves it by shipping them independently.
+
+### Fixed
+
+- **A genuine transcription bug in the KMIP 3.0 draft itself**, found while
+  implementing Polynomial Sharing GF(2¹⁶): the spec's own printed
+  multiplication formula misplaces a constant-term factor. Re-derived from
+  first principles and cross-checked against the spec's own inverse
+  formula before fixing the implementation (not the spec).
+
+### Internal
+
+- CI conformance gates (`assert_replay_report.py`) tightened from a
+  "pass at least N" floor with a partly-stale skip breakdown to an exact,
+  fully-current baseline (97 pass / 5 declined-by-policy / 0 everything
+  else) — a new skip category silently reappearing now fails CI immediately
+  instead of quietly shrinking the pass count.
+- New end-to-end test coverage closing three real gaps found by auditing
+  existing tests against what they actually exercised rather than what
+  their names implied: Split Key now has a test per secret-sharing method
+  (previously only one of four was tested end-to-end); a session ticket is
+  now proven to authenticate a real subsequent request through the actual
+  server dispatch path (previously only proven to exist in the session
+  store); and the PKCS#11 passthrough's `C_GetInfo` is now proven against a
+  real engine session (previously only tested against the no-engine
+  fallback path).
+
+## [0.11.0] — 2026-07-06
+
+FrodoKEM (all 6 parameter sets) and Classic McEliece-6688128 per BSI
+TR-02102-1, wired end to end: the Rust engine, the raw PKCS#11 C-ABI, the
+KMIP 3.0 layer, and the crypto-agility policy engine.
+
+### Added
+
+- **FrodoKEM (640/976/1344, AES and SHAKE variants) and Classic
+  McEliece-6688128 key generation, encapsulation, and decapsulation** in the
+  SoftHSMv3 Rust engine, via new `CKM_PQCTODAY_*` vendor mechanisms.
+  FrodoKEM passes all 600 official KAT vectors (6 variants x 100, from
+  microsoft/PQCrypto-LWEKE); Classic McEliece has no independent static KAT
+  file, so it's covered by 40 bidirectional cross-validation trials against
+  liboqs instead. `classic-mceliece-rust` bumped 2 → 3 to fix a spec
+  non-conformance (an extra non-spec confirmation-hash term in K).
+- **Both algorithms exposed via the raw PKCS#11 C-ABI**
+  (`C_GenerateKeyPair`/`C_EncapsulateKey`/`C_DecapsulateKey`), not just the
+  KMIP native API — the same convention already used for ML-KEM/ML-DSA
+  (`CKA_PARAMETER_SET`-required, no `CKA_SEED` support). 8 new C-ABI tests
+  cover full round trips plus negative-path cases (missing/wrong parameter
+  set, rejected seed, wrong key family, wrong ciphertext length).
+- **KMIP 3.0 wire codepoints and CreateKeyPair/Encapsulate/Decapsulate
+  dispatch** for both algorithms, with canonical naming for crypto-agility
+  policy matching.
+- **BSI TR-02102-1 policy support**: the crypto policy engine now allows
+  both algorithms under a BSI profile (tagged as needing a hybrid partner),
+  while FIPS/CNSA profiles deny both — matching the intended regional
+  divergence. Two policy scenarios (`bsi-allow-frodo`,
+  `bsi-deny-frodo-nopartner`, `fips-deny-frodo`) gained a `realExecution`
+  companion that runs a real CreateKeyPair round trip (or confirms a real
+  attempt is refused) rather than only simulating the policy decision.
+- **The in-browser KMIP wasm bundle vendored into the hub's CACP Playground**
+  now recognizes both algorithms in its own algorithm-name lookup and KMIP
+  codepoint patch table, and no longer overflows the wasm32 shadow stack on
+  FrodoKEM-1344's matrix generation (`build-kmip-wasm.sh` now reserves 8MiB).
+
+### Scope
+
+- Classic McEliece-6688128 only (BSI's Category-5 pick); the smaller
+  6960119 parameter set and HQC are deferred.
+
+
+- **FrodoKEM + Classic McEliece key exchange**, the two conservative
+  post-quantum algorithms Germany's BSI recommends for long-term
+  confidentiality (BSI TR-02102-1 §2.4.1/§2.4.2) alongside NIST's ML-KEM.
+  Available end to end: generate a keypair, encapsulate, and decapsulate
+  through both the standard PKCS#11 interface and the KMIP server, gated by
+  the same crypto-agility policy engine as everything else — a BSI-style
+  policy allows them (paired with a hybrid partner algorithm), while
+  FIPS/CNSA policies correctly reject them, matching each region's real
+  guidance. FrodoKEM ships all 6 standard sizes (640/976/1344 × AES/SHAKE);
+  Classic McEliece ships the Category-5 `mceliece6688128` parameter set BSI
+  recommends. Correctness is backed by all 600 official FrodoKEM test
+  vectors from the reference implementation, plus 40 independent
+  round-trip trials against `liboqs` for Classic McEliece (no official
+  test vectors exist for it). HQC is intentionally not included yet.
+
 ## [0.10.0] — 2026-07-05
 
 Label-only crypto agility: the KMIP policy engine can now drive a complete

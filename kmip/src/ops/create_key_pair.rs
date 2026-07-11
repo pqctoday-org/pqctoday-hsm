@@ -192,6 +192,30 @@ pub fn create_key_pair(
 
     let kmip_algo = parse_algorithm(&resolved_algorithm)?;
 
+    // Gap-remediation Phase E, Finding #13 — KMIP 3.0 §11 — reject
+    // `QuantumSafe=true` claims on non-PQC algorithms, same check
+    // `create.rs` already performs (QS-M-2 pins this with AES +
+    // QuantumSafe=true → `GeneralFailure` "NOT_SAFE"). QuantumSafe MAY
+    // ride on any of the three attribute baskets (Common/Private/Public),
+    // so check the full merged set like the Y1 custom-attribute lookup
+    // above does, not just one half.
+    {
+        let x = super::register_import_export::extract_attrs(&all_attrs);
+        if matches!(x.quantum_safe, Some(true))
+            && !super::register_import_export::algorithm_is_quantum_safe(kmip_algo)
+        {
+            return fail(
+                deps,
+                correlation_id,
+                op_canonical,
+                KmipError::failed(
+                    ResultReason::GeneralFailure,
+                    format!("QuantumSafe=true claimed for non-PQC algorithm {kmip_algo:?}"),
+                ),
+            );
+        }
+    }
+
     // Label-only Montgomery KEM: when the policy resolved the algorithm to
     // `X25519`/`X448` (a name, not a template CryptographicDomainParameters),
     // supply the matching RecommendedCurve + §6.7 mech-info length here so the
@@ -372,6 +396,14 @@ pub fn create_key_pair(
             // (Sign/Encrypt) can read the classification back off the object.
             custom_attributes: super::helpers::raw_custom_attrs(&all_attrs),
 
+            // Gap-remediation Phase E, Finding #5 — `create.rs`,
+            // `register_import_export.rs`, and `derive_key.rs` all
+            // persist this field; `create_key_pair.rs` never read it off
+            // `priv_x`/`pub_x`, so a key's declared default padding/hash
+            // (e.g. PSS/SHA-384) was silently lost and a later bare
+            // Sign/Verify fell back to the mechanism default.
+            cryptographic_parameters: priv_x.cryptographic_parameters.clone(),
+
 
             // K6 — hybrid private keys are engine-backed (two handles behind
             // pkcs11_cka_id + pkcs11_cka_id_secondary); no material here, so Get
@@ -407,6 +439,8 @@ pub fn create_key_pair(
             sensitive: req.seed.as_ref().map(|_| false),
             // KMIP §11 Fresh = True for server-generated objects.
             fresh: Some(true),
+            protection_storage_mask: Some(0x01),
+            lease_time: Some(3600),
     ..ObjectRecord::default()
 })?;
     deps.store.put(ObjectRecord {
@@ -438,6 +472,10 @@ pub fn create_key_pair(
 
             custom_attributes: std::collections::HashMap::new(),
 
+            // Gap-remediation Phase E, Finding #5 — same fix as the
+            // private half above; the public half has its own
+            // independently-templated CryptographicParameters basket.
+            cryptographic_parameters: pub_x.cryptographic_parameters.clone(),
 
             // K6 — composite public key material for a hybrid KEM.
             key_material: hybrid_pub_material,
@@ -461,6 +499,8 @@ pub fn create_key_pair(
             },
             // KMIP §11 Fresh = True for server-generated objects.
             fresh: Some(true),
+            protection_storage_mask: Some(0x01),
+            lease_time: Some(3600),
     ..ObjectRecord::default()
 })?;
 
@@ -671,6 +711,12 @@ fn canonical_name(a: KmipAlgorithm) -> String {
         X25519MlKem768 => "X25519MLKEM768",
         SecP256r1MlKem768 => "SecP256r1MLKEM768",
         SecP384r1MlKem1024 => "SecP384r1MLKEM1024",
+        // See the identical arms + rationale in `ops/helpers.rs::canonical_name`.
+        FrodoKem640Aes | FrodoKem640Shake => "FrodoKEM-640",
+        FrodoKem976Aes | FrodoKem976Shake => "FrodoKEM-976",
+        FrodoKem1344Aes | FrodoKem1344Shake => "FrodoKEM-1344",
+        ClassicMcEliece6688128 => "Classic-McEliece-6688128",
+        Hss => "HSS",
     }
     .into()
 }
@@ -715,6 +761,20 @@ pub(crate) fn parse_algorithm(s: &str) -> Result<KmipAlgorithm> {
         // a policy naming X25519/X448 failed to parse (the engine expected the
         // curve only in the request template's CryptographicDomainParameters).
         "X25519" | "X448" => Ecdh,
+        // BSI TR-02102-1 §2.4.1 — the bare policy-facing name doesn't
+        // distinguish AES vs SHAKE (see `canonical_name`, which collapses
+        // both to this same string). A bare "FrodoKEM-976" therefore can't
+        // round-trip to a unique variant; defaults to the AES matrix-
+        // generation variant (the more commonly deployed one, given
+        // widespread AES-NI hardware support). A caller that needs the
+        // SHAKE variant specifically must go through the fully-qualified
+        // wire `CryptographicAlgorithm` value directly, not this string path.
+        "FrodoKEM-640" => FrodoKem640Aes,
+        "FrodoKEM-976" => FrodoKem976Aes,
+        "FrodoKEM-1344" => FrodoKem1344Aes,
+        // BSI TR-02102-1 §2.4.2 — only one parameter set is implemented
+        // (see implementation plan Phase 0.5), so no ambiguity here.
+        "Classic-McEliece-6688128" => ClassicMcEliece6688128,
         // Size-suffixed classical algos collapse to their base enum.
         _ => match base {
             "AES" => Aes,
@@ -782,6 +842,49 @@ fn native_generate_keypair(
                     native::generate_ml_kem_keypair(session, ps, cka_id, label),
                 ),
             }
+        }
+        FrodoKem640Aes | FrodoKem640Shake | FrodoKem976Aes
+        | FrodoKem976Shake | FrodoKem1344Aes | FrodoKem1344Shake => {
+            // BSI TR-02102-1 §2.4.1. No seeded/deterministic keygen exists
+            // for FrodoKEM in this engine (no PQC-interop profile need for
+            // it, unlike ML-KEM) — reject rather than silently ignore a
+            // caller-supplied seed.
+            if seed.is_some() {
+                return Err(KmipError::failed(
+                    ResultReason::OperationNotSupported,
+                    format!("seeded keygen is not supported for {:?}", algo),
+                ));
+            }
+            let ps = super::helpers::native_parameter_set(algo).ok_or_else(|| {
+                KmipError::failed(
+                    ResultReason::OperationNotSupported,
+                    format!("no parameter-set codepoint for {:?}", algo),
+                )
+            })?;
+            (
+                "native::generate_frodokem_keypair",
+                native::generate_frodokem_keypair(session, ps, cka_id, label),
+            )
+        }
+        ClassicMcEliece6688128 => {
+            // BSI TR-02102-1 §2.4.2. No seeded/deterministic keygen exists
+            // for Classic McEliece in this engine.
+            if seed.is_some() {
+                return Err(KmipError::failed(
+                    ResultReason::OperationNotSupported,
+                    format!("seeded keygen is not supported for {:?}", algo),
+                ));
+            }
+            let ps = super::helpers::native_parameter_set(algo).ok_or_else(|| {
+                KmipError::failed(
+                    ResultReason::OperationNotSupported,
+                    format!("no parameter-set codepoint for {:?}", algo),
+                )
+            })?;
+            (
+                "native::generate_classic_mceliece_keypair",
+                native::generate_classic_mceliece_keypair(session, ps, cka_id, label),
+            )
         }
         MlDsa44 | MlDsa65 | MlDsa87 => {
             let ps = super::helpers::native_parameter_set(algo).unwrap();
@@ -1036,5 +1139,80 @@ rules: []
         // Classical sized names collapse to base.
         assert_eq!(parse_algorithm("AES-256").unwrap(), KmipAlgorithm::Aes);
         assert_eq!(parse_algorithm("ECDSA-P256").unwrap(), KmipAlgorithm::Ecdsa);
+    }
+
+    const PERMISSIVE_POLICY: &str = r#"
+schema_version: 1
+metadata: { name: t, description: t, authority: t, effective: "always" }
+rules: []
+"#;
+
+    /// Gap-remediation Phase E, Finding #5 — a key's declared default
+    /// `CryptographicParameters` (e.g. PSS/SHA-384) must survive onto
+    /// BOTH halves' stored `ObjectRecord`, independently per half, not
+    /// silently dropped (`create.rs`/`register_import_export.rs`/
+    /// `derive_key.rs` all persist this field already; `create_key_pair`
+    /// previously never read it off `priv_x`/`pub_x`).
+    #[test]
+    fn create_key_pair_persists_cryptographic_parameters_on_both_halves() {
+        let (_ring, d) = deps_with(PERMISSIVE_POLICY);
+        let priv_cp = crate::kmip30::ops::CryptographicParameters {
+            padding_method: Some(0x0a), // PSS
+            hashing_algorithm: Some(crate::kmip30::ops::HashingAlgorithm::Sha384),
+            ..Default::default()
+        };
+        let pub_cp = crate::kmip30::ops::CryptographicParameters {
+            padding_method: Some(0x0a),
+            hashing_algorithm: Some(crate::kmip30::ops::HashingAlgorithm::Sha256),
+            ..Default::default()
+        };
+        let req = CreateKeyPairRequest {
+            common_attributes: vec![Attribute::CryptographicAlgorithm(KmipAlgorithm::Rsa)],
+            private_key_attributes: vec![Attribute::CryptographicParameters(priv_cp.clone())],
+            public_key_attributes: vec![Attribute::CryptographicParameters(pub_cp.clone())],
+            seed: None,
+        };
+        let resp = create_key_pair(&d, req, "CreateKeyPair:Sign", "corr-cp").unwrap();
+        let priv_record = d.store.get(&resp.private_key_uid).unwrap().unwrap();
+        let pub_record = d.store.get(&resp.public_key_uid).unwrap().unwrap();
+        assert_eq!(priv_record.cryptographic_parameters, Some(priv_cp));
+        assert_eq!(pub_record.cryptographic_parameters, Some(pub_cp));
+    }
+
+    /// Gap-remediation Phase E, Finding #13 — `QuantumSafe=true` on a
+    /// non-PQC algorithm must be rejected, matching `create.rs`'s
+    /// existing check for the same scenario (QS-M-2).
+    #[test]
+    fn create_key_pair_quantum_safe_true_on_rsa_is_rejected() {
+        let (_ring, d) = deps_with(PERMISSIVE_POLICY);
+        let req = CreateKeyPairRequest {
+            common_attributes: vec![
+                Attribute::CryptographicAlgorithm(KmipAlgorithm::Rsa),
+                Attribute::QuantumSafe(true),
+            ],
+            private_key_attributes: vec![],
+            public_key_attributes: vec![],
+            seed: None,
+        };
+        let err = create_key_pair(&d, req, "CreateKeyPair:Sign", "corr-qs").unwrap_err();
+        assert_eq!(err.result_reason(), ResultReason::GeneralFailure);
+    }
+
+    /// A genuinely PQC algorithm with `QuantumSafe=true` must still
+    /// succeed — the check only rejects the false claim, not the
+    /// attribute itself.
+    #[test]
+    fn create_key_pair_quantum_safe_true_on_ml_dsa_succeeds() {
+        let (_ring, d) = deps_with(PERMISSIVE_POLICY);
+        let req = CreateKeyPairRequest {
+            common_attributes: vec![
+                Attribute::CryptographicAlgorithm(KmipAlgorithm::MlDsa87),
+                Attribute::QuantumSafe(true),
+            ],
+            private_key_attributes: vec![],
+            public_key_attributes: vec![],
+            seed: None,
+        };
+        create_key_pair(&d, req, "CreateKeyPair:Sign", "corr-qs-ok").unwrap();
     }
 }
