@@ -8,6 +8,60 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **KMIP-created RSA/ECDSA keys could not Sign or Verify at all.** The
+  `CKA_ALLOWED_MECHANISMS` whitelist auto-derived at key-creation time stored
+  a coarse mechanism (bare `CKM_RSA_PKCS_PSS` / `CKM_ECDSA`), while
+  Sign/Verify actually resolve a hash-qualified mechanism at call time — the
+  engine's exact-match gate rejected every one. AES non-GCM modes had the
+  same exposure. Fixed by deriving the full enumerated mechanism set instead
+  of one coarse value; the engine-side whitelist now also stays in sync when
+  a key's `CryptographicUsageMask` changes after creation via
+  Add/Modify/Set/AdjustAttribute (it previously never re-derived, so
+  widening or narrowing usage post-creation had no effect on engine-side
+  capability).
+- **`Register`-created certificates behaved differently from
+  `Certify`-created ones.** `Validate` always incorrectly returned
+  `Invalid`; `Get`/`Export` depended on a best-effort engine projection
+  succeeding; `Locate` had no Subject/Issuer search and could permanently
+  lose track of a certificate if that projection ever failed;
+  `SetAttribute` silently no-op'd instead of rejecting a `CertificateValue`
+  write; `Revoke` didn't tear down the certificate's PKCS#11-side mirror;
+  and `Import` with a Certificate payload was non-functional (wire decoder
+  silently dropped it, and even worked around, the handler discarded the
+  DER while still returning success). All fixed; `Import` now has full
+  Certificate support mirroring `Register`.
+- **Re-certifying a certificate could let a later `Destroy` remove the
+  wrong engine object.** `Re-certify` reuses the linked key's `CKA_ID` for
+  the renewed certificate but never destroyed the superseded certificate's
+  engine object, leaving two `CKO_CERTIFICATE` objects sharing one
+  `CKA_ID` — since the engine's object map has no iteration-order
+  guarantee, destroying the superseded UID could non-deterministically
+  remove the new, still-active certificate instead. The old engine object
+  is now torn down as part of Re-certify itself.
+- **Six remaining call sites** (batch-undo rollback, ML-KEM/RSA/AES
+  encrypt+decrypt, key-wrap KEK resolution) still resolved a shared
+  `CKA_ID` via a class-blind lookup, ambiguous now that a certified key
+  pair's public key, private key, and linked certificate can share one
+  `CKA_ID`. Switched to the class-aware lookup already used elsewhere.
+- **`C_CopyObject` didn't fully enforce the `CKA_TRUSTED` SO-only gate.**
+  An explicit `CKA_TRUSTED=TRUE` in a copy template was rejected for every
+  session including the Security Officer's (too strict); omitting it from
+  the template let it silently carry over from the source with no SO
+  check at all, and in the same call a non-SO caller could simultaneously
+  rewrite the copy's Subject/Issuer/Serial/ID/Label/Private — minting an
+  object that kept `CKA_TRUSTED=TRUE` but carried attacker-chosen identity
+  metadata. Both directions fixed.
+- **`C_SetAttributeValue` skipped the `CKA_ALLOWED_MECHANISMS` length
+  check** that `C_CreateObject` already enforced, allowing a malformed
+  value to be set post-creation and later silently mis-parsed.
+- **Certificate engine-projection failures were silent.** A failure to
+  mirror a KMIP certificate onto the engine (unparseable DER, or no
+  engine session) is now visible in the audit trail; `Register`/`Import`
+  also reject unparseable Certificate DER up front instead of accepting
+  and silently discarding it.
+
 ## [0.10.0] — 2026-07-05
 
 Label-only crypto agility: the KMIP policy engine can now drive a complete
