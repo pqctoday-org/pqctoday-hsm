@@ -557,6 +557,83 @@ impl KmipPlayground {
     pub fn clear_audit(&self) {
         self.ring.clear();
     }
+
+    /// WP-4 showcase — bypass the KMIP dispatcher and CACP policy plane
+    /// entirely, calling straight into the engine's native PKCS#11 Encrypt
+    /// path against a KMIP object's own engine handle. Demonstrates that
+    /// PKCS#11 v3.2 §4.8 Table 13 (`CKA_ALLOWED_MECHANISMS`) — derived from
+    /// the key's `CryptographicUsageMask` at `CreateKeyPair` time — is
+    /// enforced by the engine ITSELF, not just by KMIP/CACP's policy layer,
+    /// which this call never touches. RSA public keys default to
+    /// `CKA_ENCRYPT=true` in PKCS#11 regardless of KMIP usage (§4.8's own
+    /// key-generation defaults), so a boolean-flag check alone would NOT
+    /// catch a Sign/Verify-only key being used to encrypt — only the
+    /// mechanism whitelist does, which is exactly what this probes.
+    #[wasm_bindgen]
+    pub fn raw_pkcs11_encrypt_probe(&self, public_key_uid: &str) -> String {
+        let correlation_id = "wp4-raw-pkcs11-probe";
+        let outcome = (|| -> std::result::Result<Json, String> {
+            let session = self
+                .deps
+                .engine_session
+                .ok_or_else(|| "no engine session".to_string())?;
+            let rec = self
+                .deps
+                .store
+                .get(public_key_uid)
+                .map_err(|e| format!("store error: {e:?}"))?
+                .ok_or_else(|| "object not found".to_string())?;
+            let handle = pqctoday_kmip::ops::helpers::find_handle_for_object(
+                session,
+                &rec.pkcs11_cka_id,
+                rec.object_type,
+            )
+            .map_err(|rv| format!("engine lookup failed, rv=0x{rv:08x}"))?
+            .ok_or_else(|| "no engine object at this key's CKA_ID".to_string())?;
+
+            let mechanism = softhsmrustv3::constants::CKM_RSA_PKCS_OAEP;
+            let r = softhsmrustv3::native::encrypt(
+                session,
+                handle,
+                mechanism,
+                b"raw pkcs#11 bypass attempt",
+                None,
+                None,
+                &[],
+                None,
+            );
+            pqctoday_kmip::ops::helpers::emit_pkcs11_result(
+                &self.deps,
+                correlation_id,
+                "native::encrypt(raw bypass probe)",
+                Some(mechanism),
+                &r,
+            );
+            Ok(match r {
+                Ok(ct) => json!({
+                    "blocked": false,
+                    "mechanism": "CKM_RSA_PKCS_OAEP",
+                    "ciphertextLen": ct.len(),
+                    "message": format!(
+                        "engine ENCRYPTED {} bytes — bypass succeeded (this would be a bug)",
+                        ct.len()
+                    ),
+                }),
+                Err(rv) => json!({
+                    "blocked": true,
+                    "mechanism": "CKM_RSA_PKCS_OAEP",
+                    "rv": format!("0x{rv:08x}"),
+                    "rvName": pqctoday_kmip::ops::helpers::ckr_display_name(rv),
+                    "message": "the engine itself refused this raw call — CKM_RSA_PKCS_OAEP was never in this key's CKA_ALLOWED_MECHANISMS, because it was created Sign/Verify-only",
+                }),
+            })
+        })();
+        let value = match outcome {
+            Ok(v) => v,
+            Err(e) => json!({ "error": e }),
+        };
+        serde_json::to_string(&value).unwrap_or_else(|_| "{}".into())
+    }
 }
 
 /// Decode any KMIP TTLV frame (request or response wire bytes) to a JSON tree
