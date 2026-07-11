@@ -1767,6 +1767,11 @@ pub struct ImportRequest {
     pub key_wrap_type: Option<u32>,
     pub attributes: Vec<Attribute>,
     pub managed_object: Option<KeyBlock>,
+    /// WP-2 remediation — `(CertificateType, CertificateValue)` from a
+    /// wire `Certificate` Structure (§6.2), mirroring
+    /// `RegisterRequest::certificate_payload`. `None` for any non-
+    /// Certificate Import.
+    pub certificate_payload: Option<(u32, Vec<u8>)>,
 }
 
 #[derive(Clone, Debug, PartialEq)]

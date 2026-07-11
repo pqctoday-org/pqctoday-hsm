@@ -147,8 +147,8 @@ pub fn derive_key(
         // the (mis-scoped) rule didn't exist.
         match deps.engine.evaluate(&p_req) {
             Decision::Allow { .. } => {}
-            Decision::Deny { human, .. } => {
-                return Err(fail(KmipError::permission_denied(human)));
+            Decision::Deny { kmip_reason, human, .. } => {
+                return Err(fail(KmipError::failed(kmip_reason.to_result_reason(), human)));
             }
             Decision::RekeyAndProceed { .. } => {
                 return Err(fail(KmipError::failed(

@@ -161,12 +161,12 @@ pub fn sign(deps: &Deps, req: SignRequest, correlation_id: &str) -> Result<SignR
                 )),
             ));
         }
-        Decision::Deny { human, .. } => {
+        Decision::Deny { kmip_reason, human, .. } => {
             return Err(fail_err(
                 deps,
                 correlation_id,
                 "Sign",
-                KmipError::permission_denied(human),
+                KmipError::failed(kmip_reason.to_result_reason(), human),
             ));
         }
         Decision::RekeyAndProceed { new_algorithm, .. } => {

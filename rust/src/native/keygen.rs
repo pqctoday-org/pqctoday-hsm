@@ -144,7 +144,8 @@ fn ml_kem_keypair_impl(
         CKP_ML_KEM_512 => mlkem_gen!(ml_kem::MlKem512),
         CKP_ML_KEM_768 => mlkem_gen!(ml_kem::MlKem768),
         CKP_ML_KEM_1024 => mlkem_gen!(ml_kem::MlKem1024),
-        _ => return Err(CKR_ARGUMENTS_BAD),
+        // Table 6 — unrecognized CKA_PARAMETER_SET value in the template.
+        _ => return Err(CKR_PARAMETER_SET_NOT_SUPPORTED),
     }
     // Engine-side seed storage — sensitive-blocked readback set
     // (state::attr_is_sensitive_material).
@@ -267,7 +268,8 @@ fn ml_dsa_keypair_impl(
         CKP_ML_DSA_44 => mldsa_gen!(ml_dsa_44),
         CKP_ML_DSA_65 => mldsa_gen!(ml_dsa_65),
         CKP_ML_DSA_87 => mldsa_gen!(ml_dsa_87),
-        _ => return Err(CKR_ARGUMENTS_BAD),
+        // Table 6 — unrecognized CKA_PARAMETER_SET value in the template.
+        _ => return Err(CKR_PARAMETER_SET_NOT_SUPPORTED),
     }
     // Engine-side seed storage — sensitive-blocked readback set
     // (state::attr_is_sensitive_material).
@@ -366,7 +368,8 @@ fn slh_dsa_keypair_impl(
         CKP_SLH_DSA_SHAKE_256S => slh_keygen!(slh_dsa_shake_256s, seed, pub_attrs, prv_attrs),
         CKP_SLH_DSA_SHA2_256F => slh_keygen!(slh_dsa_sha2_256f, seed, pub_attrs, prv_attrs),
         CKP_SLH_DSA_SHAKE_256F => slh_keygen!(slh_dsa_shake_256f, seed, pub_attrs, prv_attrs),
-        _ => return Err(CKR_ARGUMENTS_BAD),
+        // Table 6 — unrecognized CKA_PARAMETER_SET value in the template.
+        _ => return Err(CKR_PARAMETER_SET_NOT_SUPPORTED),
     }
     // Engine-side seed storage — sensitive-blocked readback set
     // (state::attr_is_sensitive_material).
@@ -2274,13 +2277,15 @@ mod tests {
         close_session(session).unwrap();
     }
 
-    /// Bad parameter set → CKR_ARGUMENTS_BAD.
+    /// Bad parameter set → CKR_PARAMETER_SET_NOT_SUPPORTED (PKCS#11 v3.2
+    /// Table 6; was the generic CKR_ARGUMENTS_BAD before the dedicated code
+    /// was added — see also `unrecognized_parameter_set_is_rejected_with_dedicated_error`).
     #[test]
     fn ml_kem_invalid_parameter_set_returns_err() {
         let _guard = test_lock::acquire();
         let session = fresh_session();
         let result = generate_ml_kem_keypair(session, 0xDEADBEEF, b"\x01", "x");
-        assert!(matches!(result, Err(CKR_ARGUMENTS_BAD)));
+        assert!(matches!(result, Err(CKR_PARAMETER_SET_NOT_SUPPORTED)));
         close_session(session).unwrap();
     }
 
@@ -3194,6 +3199,32 @@ mod tests {
         let (b, _) =
             generate_slh_dsa_keypair(session, CKP_SLH_DSA_SHA2_128F, b"\x06", "r").unwrap();
         assert_ne!(get_object_value(a).unwrap(), get_object_value(b).unwrap());
+        close_session(session).unwrap();
+    }
+
+    /// PKCS#11 v3.2 Table 6 — an unrecognized CKA_PARAMETER_SET value must
+    /// fail with the dedicated `CKR_PARAMETER_SET_NOT_SUPPORTED`, not the
+    /// generic `CKR_ARGUMENTS_BAD`/`CKR_ATTRIBUTE_VALUE_INVALID`. Covers all
+    /// three PQC families' keygen entry points.
+    #[test]
+    fn unrecognized_parameter_set_is_rejected_with_dedicated_error() {
+        let _guard = test_lock::acquire();
+        let session = fresh_session();
+        const BOGUS_PARAM_SET: u32 = 0xffff_fffe;
+
+        assert_eq!(
+            generate_ml_kem_keypair(session, BOGUS_PARAM_SET, b"\x01", "bad-kem").unwrap_err(),
+            CKR_PARAMETER_SET_NOT_SUPPORTED
+        );
+        assert_eq!(
+            generate_ml_dsa_keypair(session, BOGUS_PARAM_SET, b"\x02", "bad-dsa").unwrap_err(),
+            CKR_PARAMETER_SET_NOT_SUPPORTED
+        );
+        assert_eq!(
+            generate_slh_dsa_keypair(session, BOGUS_PARAM_SET, b"\x03", "bad-slh").unwrap_err(),
+            CKR_PARAMETER_SET_NOT_SUPPORTED
+        );
+
         close_session(session).unwrap();
     }
 }

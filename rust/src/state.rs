@@ -378,6 +378,21 @@ pub fn session_logged_in(h_session: u32) -> bool {
     }
 }
 
+/// True if the session is logged in specifically as SO (Security Officer).
+/// PKCS#11 v3.2 §4.6 Table 19 footnote — `CKA_TRUSTED` on a certificate
+/// "can only be set to CK_TRUE by the SO user".
+pub fn session_is_so(h_session: u32) -> bool {
+    match session_slot(h_session) {
+        Some(slot) => TOKEN_STORE.with(|ts| {
+            ts.borrow()
+                .get(&slot)
+                .map(|t| t.login_state == LoginState::SO)
+                .unwrap_or(false)
+        }),
+        None => false,
+    }
+}
+
 /// Slot id of the token owning an object record. Objects are stamped with
 /// `CKA_PRIV_SLOT_ID` at creation ([`allocate_handle`]); records created
 /// before that (or hand-built test fixtures) default to slot 0, the primary
@@ -417,6 +432,37 @@ pub fn can_access_object(h_session: u32, attrs: &Attributes) -> bool {
         return true;
     }
     session_logged_in(h_session)
+}
+
+/// PKCS#11 v3.2 §4.8 Table 13 — `CKA_ALLOWED_MECHANISMS` restricts a key to
+/// a caller-specified mechanism whitelist. Absent attribute (the common
+/// case) means unrestricted, per the spec's default. Call AFTER key-handle
+/// validation and BEFORE any mechanism-parameter-specific parsing, using
+/// the caller's ORIGINAL requested mechanism (not an internal remap like
+/// CKM_EDDSA → CKM_EDDSA_PH) — §5.1.6 `CKR_MECHANISM_INVALID` is the code
+/// consumers (NSS, pkcs11-provider) expect for a disallowed mechanism.
+/// Shared by both the FFI (`ffi.rs`) and native (`native/*.rs`) entry
+/// points — KMIP calls the engine through the native surface, not FFI, so
+/// this can't live only on one side.
+pub fn check_mechanism_allowed(h_key: u32, mech_type: u32) -> Result<(), u32> {
+    let allowed = OBJECTS.with(|o| {
+        o.borrow()
+            .get(&h_key)
+            .and_then(|attrs| attrs.get(&CKA_ALLOWED_MECHANISMS).cloned())
+    });
+    match allowed {
+        None => Ok(()),
+        Some(bytes) => {
+            let is_allowed = bytes
+                .chunks_exact(4)
+                .any(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]) == mech_type);
+            if is_allowed {
+                Ok(())
+            } else {
+                Err(CKR_MECHANISM_INVALID)
+            }
+        }
+    }
 }
 
 /// Convenience: look up an object by handle and decide accessibility from the
@@ -514,6 +560,16 @@ pub fn attr_mutation_allowed(attrs: &Attributes, attr_type: u32, value: &[u8]) -
     ];
     if READ_ONLY.contains(&attr_type) {
         return Err(CKR_ATTRIBUTE_READ_ONLY);
+    }
+    // WP-6 remediation — §4.8 Table 13: CKA_ALLOWED_MECHANISMS is a packed
+    // CK_MECHANISM_TYPE[] (u32 LE); mirrors validate_create_template's
+    // identical check at creation time (ffi.rs), which this mutation path
+    // never ran through. Without this, C_SetAttributeValue accepted any
+    // byte length — including the exact malformed value C_CreateObject
+    // would reject — and check_mechanism_allowed's chunks_exact(4) would
+    // then silently drop a trailing partial chunk rather than erroring.
+    if attr_type == CKA_ALLOWED_MECHANISMS && value.len() % 4 != 0 {
+        return Err(CKR_ATTRIBUTE_VALUE_INVALID);
     }
     if attr_type == CKA_SENSITIVE || attr_type == CKA_EXTRACTABLE {
         let new_val = value.first().copied().unwrap_or(0) != 0;
@@ -873,8 +929,12 @@ pub fn compute_kcv(attrs: &mut Attributes) {
                 _ => return,
             }
         }
-        CKO_PUBLIC_KEY | CKO_PRIVATE_KEY => {
-            // Asymmetric keys: SHA-256 of CKA_VALUE → first 3 bytes
+        CKO_PUBLIC_KEY | CKO_PRIVATE_KEY | CKO_CERTIFICATE => {
+            // Asymmetric keys and certificates: SHA-256 of CKA_VALUE (the
+            // DER cert bytes, for CKO_CERTIFICATE) → first 3 bytes. §4.6
+            // Table 19 doesn't mandate a specific algorithm for
+            // certificates (token-defined) — reusing the same convention
+            // already used for public/private keys.
             let hash = Sha256::digest(&key_value);
             hash[..3].to_vec()
         }

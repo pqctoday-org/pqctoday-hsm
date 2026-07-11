@@ -202,8 +202,8 @@ pub fn hash(deps: &Deps, req: HashRequest, correlation_id: &str) -> Result<HashR
             &empty,
         );
         p_req.mechanism.hashing_algorithm = Some(algo as u32);
-        if let Decision::Deny { human, .. } = deps.engine.evaluate(&p_req) {
-            return Err(fail_err(deps, correlation_id, "Hash", KmipError::permission_denied(human)));
+        if let Decision::Deny { kmip_reason, human, .. } = deps.engine.evaluate(&p_req) {
+            return Err(fail_err(deps, correlation_id, "Hash", KmipError::failed(kmip_reason.to_result_reason(), human)));
         }
     }
 
@@ -238,8 +238,8 @@ fn policy_gate(deps: &Deps, obj: &ObjectRecord, op: &'static str, started: Offse
     let mut p_req = PolicyRequest::minimal(op, Some(&algo), started, correlation_id, &stored_attrs);
     p_req.state = Some(state_name(obj.state));
     p_req.target_uid = Some(&obj.uid);
-    if let Decision::Deny { human, .. } = deps.engine.evaluate(&p_req) {
-        return Err(fail_err(deps, correlation_id, op, KmipError::permission_denied(human)));
+    if let Decision::Deny { kmip_reason, human, .. } = deps.engine.evaluate(&p_req) {
+        return Err(fail_err(deps, correlation_id, op, KmipError::failed(kmip_reason.to_result_reason(), human)));
     }
     Ok(())
 }

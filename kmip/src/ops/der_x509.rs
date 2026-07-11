@@ -26,6 +26,41 @@ pub fn extract_subject_cn(der: &[u8]) -> Option<String> {
         .and_then(|attr| attr.as_str().ok().map(String::from))
 }
 
+/// Raw DER encoding of the certificate's Subject `Name` field — PKCS#11
+/// v3.2 §4.6.3 `CKA_SUBJECT` is defined as exactly this (not the CN
+/// string). `x509_parser::X509Name` retains the raw bytes it was parsed
+/// from, so this is a slice, not a re-encode.
+pub fn extract_subject_der(der: &[u8]) -> Option<Vec<u8>> {
+    let (_, cert) = X509Certificate::from_der(der).ok()?;
+    Some(cert.subject().as_raw().to_vec())
+}
+
+/// Raw DER encoding of the certificate's Issuer `Name` field — PKCS#11
+/// v3.2 §4.6.3 `CKA_ISSUER`.
+pub fn extract_issuer_der(der: &[u8]) -> Option<Vec<u8>> {
+    let (_, cert) = X509Certificate::from_der(der).ok()?;
+    Some(cert.issuer().as_raw().to_vec())
+}
+
+/// Raw (big-endian, as encoded) serial number bytes — PKCS#11 v3.2 §4.6.3
+/// `CKA_SERIAL_NUMBER` ("DER-encoding of the certificate serial number").
+pub fn extract_serial_number(der: &[u8]) -> Option<Vec<u8>> {
+    let (_, cert) = X509Certificate::from_der(der).ok()?;
+    Some(cert.raw_serial().to_vec())
+}
+
+/// True if `der` parses as a well-formed X.509 certificate (RFC 5280),
+/// independent of whether it has an extractable Subject — a certificate
+/// may legitimately carry an empty Subject with identity solely in a
+/// critical `subjectAltName` (RFC 5280 §4.1.2.6). WP-7 remediation: used
+/// by `Register` to reject genuinely malformed DER up front, distinct
+/// from the "no Subject" signal the `extract_subject_*` helpers return
+/// for a certificate that parses fine but has nothing to project onto
+/// the engine.
+pub fn is_parseable(der: &[u8]) -> bool {
+    X509Certificate::from_der(der).is_ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

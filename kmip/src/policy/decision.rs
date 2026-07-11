@@ -37,6 +37,35 @@ pub enum DenyReason {
     PolicyNotLoaded,
 }
 
+impl DenyReason {
+    /// KMIP 3.0 §9.2 `ResultReason` this deny reason maps to. Every op
+    /// handler used to discard `kmip_reason` entirely and hardcode
+    /// `KmipError::permission_denied` for any `Decision::Deny`, collapsing
+    /// all six reasons (and every rule that can fire each one) onto a
+    /// single generic code — this is the mapping this module's own doc
+    /// comment always claimed existed. `KeyExpired` and `PolicyNotLoaded`
+    /// have no dedicated KMIP-spec reason, so they fall back to the
+    /// closest existing codepoint rather than inventing a non-spec value.
+    pub fn to_result_reason(self) -> crate::error::ResultReason {
+        use crate::error::ResultReason;
+        match self {
+            DenyReason::PermissionDenied => ResultReason::PermissionDenied,
+            DenyReason::InvalidCryptographicParameters => ResultReason::BadCryptographicParameters,
+            DenyReason::ObjectArchived => ResultReason::ObjectArchived,
+            DenyReason::InvalidAttributeValue => ResultReason::InvalidAttributeValue,
+            // Closest existing spec concept to "this key has aged out":
+            // the op requires a usable-for-this-purpose key and this one
+            // no longer qualifies, echoing WrongKeyLifecycleState's own
+            // "requires Active" framing.
+            DenyReason::KeyExpired => ResultReason::WrongKeyLifecycleState,
+            // Genuinely the best fit: "no policy loaded, default deny" IS
+            // a permission denial from the client's perspective, and no
+            // KMIP reason for "server misconfigured" exists.
+            DenyReason::PolicyNotLoaded => ResultReason::PermissionDenied,
+        }
+    }
+}
+
 /// Mechanism parameters a policy *forces* onto a request (plan P3). The
 /// dispatcher merges any `Some(_)` field into the effective KMIP
 /// `CryptographicParameters` before resolving the PKCS#11 mechanism — so a
@@ -216,6 +245,28 @@ impl Decision {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deny_reason_maps_to_distinct_result_reasons_where_the_spec_allows() {
+        use crate::error::ResultReason;
+        // WP-1 remediation — every op handler used to discard `kmip_reason`
+        // and hardcode `PermissionDenied`; this pins the mapping so that
+        // regression can't silently return.
+        assert_eq!(DenyReason::PermissionDenied.to_result_reason(), ResultReason::PermissionDenied);
+        assert_eq!(
+            DenyReason::InvalidCryptographicParameters.to_result_reason(),
+            ResultReason::BadCryptographicParameters
+        );
+        assert_eq!(DenyReason::ObjectArchived.to_result_reason(), ResultReason::ObjectArchived);
+        assert_eq!(
+            DenyReason::InvalidAttributeValue.to_result_reason(),
+            ResultReason::InvalidAttributeValue
+        );
+        assert_eq!(DenyReason::KeyExpired.to_result_reason(), ResultReason::WrongKeyLifecycleState);
+        // No dedicated KMIP reason exists for a missing/unloaded policy —
+        // this one legitimately stays generic, unlike the others above.
+        assert_eq!(DenyReason::PolicyNotLoaded.to_result_reason(), ResultReason::PermissionDenied);
+    }
 
     #[test]
     fn allow_default_no_override() {

@@ -103,8 +103,16 @@ pub fn validate(
                 )),
             ));
         }
-        match obj.key_material {
-            Some(der) if !der.is_empty() => ders.push(der),
+        // WP-2 remediation — `Certify` sets both `key_material` and
+        // `certificate_value` identically, but `Register` only ever sets
+        // `certificate_value`; a Register-created certificate used to
+        // deterministically fail Validate here regardless of whether its
+        // DER was actually valid. Prefer `certificate_value` (the
+        // authoritative source for a Certificate object — see `Get`/
+        // `GetAttributes`), falling back to `key_material` for any
+        // pre-existing record that only has the latter populated.
+        match obj.certificate_value.as_ref().or(obj.key_material.as_ref()) {
+            Some(der) if !der.is_empty() => ders.push(der.clone()),
             _ => {
                 // A Certificate object with no stored DER cannot be
                 // validated — treat as an Invalid chain rather than a
@@ -386,6 +394,38 @@ mod tests {
         let r = validate(
             &d,
             ValidateRequest { certificates: vec![], uids: vec!["ca".into()], validity_date: None },
+            "c",
+        )
+        .unwrap();
+        assert_eq!(r.validity, SignatureValidity::Valid);
+    }
+
+    /// WP-2 remediation — a Register-created certificate only ever
+    /// populates `certificate_value`, never `key_material` (`Certify`
+    /// sets both identically). Before this fix, Validate keyed
+    /// exclusively on `key_material` and so deterministically returned
+    /// `Invalid` for every Register-created certificate regardless of
+    /// whether its DER was actually valid — this pins the fix against
+    /// exactly that storage shape.
+    #[test]
+    fn stored_self_signed_uid_with_only_certificate_value_is_valid() {
+        let d = deps_with();
+        let der = self_signed_der();
+        d.store
+            .put(ObjectRecord {
+                uid: "ca-registered".into(),
+                object_type: ObjectType::Certificate,
+                algorithm: KmipAlgorithm::Ecdsa,
+                usage_mask: UsageMask::VERIFY,
+                state: State::Active,
+                key_material: None,
+                certificate_value: Some(der),
+                ..ObjectRecord::default()
+            })
+            .unwrap();
+        let r = validate(
+            &d,
+            ValidateRequest { certificates: vec![], uids: vec!["ca-registered".into()], validity_date: None },
             "c",
         )
         .unwrap();

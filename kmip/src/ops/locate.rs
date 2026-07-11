@@ -41,12 +41,12 @@ pub fn locate(deps: &Deps, req: LocateRequest, correlation_id: &str) -> Result<L
     // Plane-1 policy gate.
     let empty: HashMap<String, String> = HashMap::new();
     let p_req = PolicyRequest::minimal("Locate", None, started, correlation_id, &empty);
-    if let Decision::Deny { human, .. } = deps.engine.evaluate(&p_req) {
+    if let Decision::Deny { kmip_reason, human, .. } = deps.engine.evaluate(&p_req) {
         return Err(fail_err(
             deps,
             correlation_id,
             "Locate",
-            KmipError::permission_denied(human),
+            KmipError::failed(kmip_reason.to_result_reason(), human),
         ));
     }
 
@@ -118,7 +118,18 @@ pub fn locate(deps: &Deps, req: LocateRequest, correlation_id: &str) -> Result<L
     // objects locatable.
     if let Some(session) = deps.engine_session {
         matches.retain(|r| {
-            if r.key_material.is_some() {
+            // WP-2 remediation — a Certificate's authoritative DER lives in
+            // `certificate_value` regardless of creation path (Certify
+            // sets both `key_material`/`certificate_value`; Register only
+            // `certificate_value`), and `Get` now reads it directly rather
+            // than depending on the engine mirror (see get.rs). A
+            // Certificate is therefore store-backed exactly like a
+            // Register'd raw key, and probing it here was actively wrong:
+            // a best-effort projection failure (der_x509 couldn't extract
+            // a Subject, or the engine session was absent) would make an
+            // otherwise-perfectly-servable certificate permanently
+            // unlocatable.
+            if r.key_material.is_some() || r.certificate_value.is_some() {
                 // Store-backed: locatable regardless of engine state.
                 return true;
             }
@@ -173,6 +184,12 @@ struct LocateFilters {
     /// equals this value (Object Group is multi-instance). This is the
     /// capability behind SASED-M-3 step #0's group-membership Locate.
     object_group: Option<String>,
+    /// WP-2 remediation — `Certificate Subject CN` filter (§4.6). Only
+    /// meaningful against Certificate records.
+    certificate_subject_cn: Option<String>,
+    /// WP-2 remediation — X.509 `Certificate Issuer` filter (§4.6). Only
+    /// meaningful against Certificate records.
+    x509_certificate_issuer: Option<String>,
     /// Gap-remediation Phase H, Finding #10 — previously accepted as
     /// valid Locate syntax and then silently dropped (over-broad
     /// results, not an error). The OASIS mandatory corpus's own
@@ -193,7 +210,15 @@ impl LocateFilters {
         // `locate()` before this runs (F-4). `matches` is now purely the
         // attribute filter set.
         if let Some(a) = self.algorithm {
-            if r.algorithm != a {
+            // Certificate records carry a `CryptographicAlgorithm`
+            // sentinel (always Rsa — see certify.rs / register_import_
+            // export.rs, "never inspected" by design) since the field has
+            // no real meaning for an X.509 object. Matching it as if it
+            // were genuine data would make `Locate(CryptographicAlgorithm
+            // =Rsa)` incorrectly return every certificate in the store;
+            // skip this filter dimension for certificates entirely rather
+            // than treat the sentinel as real (WP-2 remediation).
+            if r.object_type != ObjectType::Certificate && r.algorithm != a {
                 return false;
             }
         }
@@ -233,6 +258,21 @@ impl LocateFilters {
                 return false;
             }
         }
+        // WP-2 remediation — Certificate-specific search dimensions, since
+        // Certify/Register-created certs otherwise had no way to be found
+        // by anything but UID.
+        if let Some(want_cn) = &self.certificate_subject_cn {
+            match &r.certificate_subject_cn {
+                Some(have) if have == want_cn => {}
+                _ => return false,
+            }
+        }
+        if let Some(want_issuer) = &self.x509_certificate_issuer {
+            match &r.x509_certificate_issuer {
+                Some(have) if have == want_issuer => {}
+                _ => return false,
+            }
+        }
         if let Some(want) = self.cryptographic_length {
             if r.cryptographic_length != want {
                 return false;
@@ -265,6 +305,8 @@ fn build_filters(attrs: &[Attribute]) -> LocateFilters {
         application_specific_information: None,
         group_link: None,
         object_group: None,
+        certificate_subject_cn: None,
+        x509_certificate_issuer: None,
         cryptographic_length: None,
         cryptographic_usage_mask: None,
         unique_identifier: None,
@@ -291,6 +333,12 @@ fn build_filters(attrs: &[Attribute]) -> LocateFilters {
             Attribute::UniqueIdentifier(uid) => f.unique_identifier = Some(uid.clone()),
             Attribute::ObjectGroup(g) => {
                 f.object_group = Some(g.clone());
+            }
+            Attribute::CertificateSubjectCN(cn) => {
+                f.certificate_subject_cn = Some(cn.clone());
+            }
+            Attribute::X509CertificateIssuer(issuer) => {
+                f.x509_certificate_issuer = Some(issuer.clone());
             }
             _ => {}
         }

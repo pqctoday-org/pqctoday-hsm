@@ -14,14 +14,18 @@
 //!   `Active → Deactivated` (default) or `Active → Compromised` (when
 //!   `revocation_reason ∈ { KeyCompromise, CaCompromise }`). Other source
 //!   states rejected with `PermissionDenied`.
-//! - **Plane 3** — none. Revoke is a KMIP-only concept; PKCS#11 has no
-//!   equivalent op.
+//! - **Plane 3** — Revoke itself is a KMIP-only concept; PKCS#11 has no
+//!   equivalent op. But for a Certificate object specifically, a
+//!   Compromise-family transition also destroys the engine-side
+//!   `CKO_CERTIFICATE` mirror (WP-2 remediation): without this, a raw
+//!   PKCS#11 client (strongSwan, the OpenSSL provider) had no signal that
+//!   KMIP had revoked the certificate and would keep treating it as live.
 
 use std::collections::HashMap;
 use time::OffsetDateTime;
 
 use crate::error::{KmipError, Result};
-use crate::kmip30::{RevocationReason, RevokeRequest, RevokeResponse, State};
+use crate::kmip30::{ObjectType, RevocationReason, RevokeRequest, RevokeResponse, State};
 use crate::policy::{Decision, PolicyRequest};
 
 use super::deps::Deps;
@@ -78,13 +82,37 @@ pub fn revoke(deps: &Deps, req: RevokeRequest, correlation_id: &str) -> Result<R
     let mut p_req = PolicyRequest::minimal("Revoke", Some(&algo), started, correlation_id, &empty);
     p_req.state = Some(state_name(obj.state));
     p_req.target_uid = Some(&req.uid);
-    if let Decision::Deny { human, .. } = deps.engine.evaluate(&p_req) {
+    if let Decision::Deny { kmip_reason, human, .. } = deps.engine.evaluate(&p_req) {
         return Err(fail_err(
             deps,
             correlation_id,
             "Revoke",
-            KmipError::permission_denied(human),
+            KmipError::failed(kmip_reason.to_result_reason(), human),
         ));
+    }
+
+    // WP-2 remediation — a Certificate transitioning to a Compromise-family
+    // state loses its engine-side mirror, the same way Destroy already
+    // does, so a raw PKCS#11 client can no longer find/use a revoked
+    // certificate. Best-effort: if the handle is already gone, ignore —
+    // the KMIP lifecycle transition still proceeds regardless.
+    if obj.object_type == ObjectType::Certificate
+        && matches!(target_state, State::Compromised | State::DestroyedCompromised)
+    {
+        if let Some(session) = deps.engine_session {
+            if let Ok(Some(handle)) =
+                super::helpers::find_handle_for_object(session, &obj.pkcs11_cka_id, obj.object_type)
+            {
+                let r = softhsmrustv3::native::destroy_object(session, handle);
+                super::helpers::emit_pkcs11_result(
+                    deps,
+                    correlation_id,
+                    "native::destroy_object(revoked certificate)",
+                    None,
+                    &r,
+                );
+            }
+        }
     }
 
     // Lifecycle transition (already validated above against §3 list).

@@ -74,12 +74,12 @@ pub fn destroy(deps: &Deps, req: DestroyRequest, correlation_id: &str) -> Result
     let mut p_req = PolicyRequest::minimal("Destroy", Some(&algo), started, correlation_id, &empty);
     p_req.state = Some(state_name(obj.state));
     p_req.target_uid = Some(&req.uid);
-    if let Decision::Deny { human, .. } = deps.engine.evaluate(&p_req) {
+    if let Decision::Deny { kmip_reason, human, .. } = deps.engine.evaluate(&p_req) {
         return Err(fail_err(
             deps,
             correlation_id,
             "Destroy",
-            KmipError::permission_denied(human),
+            KmipError::failed(kmip_reason.to_result_reason(), human),
         ));
     }
 
@@ -91,7 +91,16 @@ pub fn destroy(deps: &Deps, req: DestroyRequest, correlation_id: &str) -> Result
         // Best-effort: if the handle is already gone (e.g. engine restart
         // between record creation and Destroy), ignore the error — the
         // KMIP lifecycle transition still proceeds.
-        if let Ok(Some(handle)) = softhsmrustv3::native::find_by_cka_id(session, &obj.pkcs11_cka_id) {
+        //
+        // Class-aware lookup, not the bare find_by_cka_id: a public key,
+        // its matching private key, AND (since WP-C) a linked certificate
+        // can all share one CKA_ID — see helpers::find_handle_for_object's
+        // doc comment. Destroying the KMIP record for one of them must
+        // remove only ITS engine object, not whichever handle a
+        // class-blind lookup happened to return first.
+        if let Ok(Some(handle)) =
+            super::helpers::find_handle_for_object(session, &obj.pkcs11_cka_id, obj.object_type)
+        {
             let r = softhsmrustv3::native::destroy_object(session, handle);
             super::helpers::emit_pkcs11_result(
                 deps,

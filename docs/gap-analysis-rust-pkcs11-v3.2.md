@@ -1,3 +1,77 @@
+> **Update (2026-07-10).** A follow-up audit against the final PKCS#11 v3.2
+> OASIS Standard (published 2026-06-03; content-identical to the CSD01
+> baseline this file already used — see `../../pkcs11-v32-final-vs-wd02-gap-report-07102026.md`
+> in the workspace root)
+> found and closed 3 more gaps (`CKR_PARAMETER_SET_NOT_SUPPORTED`, SP 800-108
+> `CK_SP800_108_COUNTER`/`KEY_HANDLE`/`DKM_LENGTH_SUM_OF_SEGMENTS`, and the
+> `CKO_TRUST` object class) — see `../../pkcs11-v32-gap-remediation-plan-07102026.md`
+> and the refreshed 222/0 conformance report. **`CKO_VALIDATION` (§4.15) is a
+> deliberate, documented hold, not a miss**: it's the module self-attesting
+> to real NIST CMVP/Common Criteria certification, which this engine does not
+> hold — implementing it now would mean shipping an object class that always
+> reports "no validation." Revisit only if a real FIPS 140-3/CC validation
+> effort exists to describe.
+>
+> **Update 2 (2026-07-10).** A second follow-up, from the same-day canonical-
+> header sweep that produced the update above, found and closed 2 more real
+> gaps plus a KMIP-side integration: `CKA_ALLOWED_MECHANISMS` (§4.8 Table 13
+> — engine-side mechanism whitelisting, wired into every FFI and native
+> operation that binds a key to a mechanism, auto-derived for KMIP-created
+> keys from their `CryptographicUsageMask`) and `CKO_CERTIFICATE` (§4.6,
+> X.509 only — WTLS/X.509-attribute-certs recognized-but-rejected, no
+> consumer for either). A third piece, projecting KMIP-issued/registered
+> certificates onto the engine as real `CKO_CERTIFICATE` objects (so a raw
+> PKCS#11 client like strongSwan can find them), found and fixed a genuine
+> pre-existing bug as a necessary side effect: `ops::destroy.rs` in the KMIP
+> crate resolved which engine handle to tear down via the class-blind
+> `find_by_cka_id`, which is ambiguous the moment more than one object class
+> shares a CKA_ID (now routine for cert+key pairs) — switched to the
+> class-aware `find_handle_for_object` everywhere. See
+> `../../pkcs11-v32-allowedmech-certobjects-remediation-plan-07102026.md`
+> and the refreshed 257/0 conformance report (up from 222/0).
+>
+> **Update 3 (2026-07-10).** A deep-dive audit (4 parallel reviews: KMIP
+> certificate-op coverage, CACP-vs-engine mechanism gating, a broadened
+> CKA_ID-ambiguity sweep, and a self-audit of Update 2's own WP-A/B/C work)
+> found 7 more real issues, all fixed same-day — see
+> `../../pkcs11-kmip-remaining-gaps-07102026.md` (findings) and
+> `../../pkcs11-kmip-remaining-gaps-remediation-plan-07102026.md` (plan),
+> executed on `fix/pkcs11-v32-gap-remediation-0710` (unpushed):
+> - **WP-1 (critical, live regression)** — `CKA_ALLOWED_MECHANISMS`
+>   auto-derivation stored a coarse mechanism (bare `CKM_RSA_PKCS_PSS` /
+>   `CKM_ECDSA` / `CKM_AES_GCM`) while Sign/Verify/Encrypt/Decrypt resolve
+>   hash-/mode-qualified mechanisms at call time — every RSA/ECDSA key
+>   created via KMIP `CreateKeyPair` could never Sign or Verify. Verified
+>   failing against the real test suite before the fix, green after.
+>   Bundled: 2 stale test assertions, CACP mechanism-gate wiring into
+>   Create/CreateKeyPair, a `DenyReason`→`ResultReason` mapping (declared,
+>   never implemented, across ~24 call sites), and an engine-whitelist
+>   refresh on `CryptographicUsageMask` mutation.
+> - **WP-2** — `Register`-created certificates diverged from
+>   `Certify`-created ones (Validate always wrong, Get/Export fragile,
+>   Locate missing filters, SetAttribute silently no-op'd, Revoke didn't
+>   signal the engine mirror, Import(Certificate) non-functional).
+> - **WP-3** — Re-certify left the superseded certificate's engine object
+>   orphaned at the same CKA_ID as the new one; a later Destroy of the old
+>   UID could non-deterministically remove the new, still-active
+>   certificate instead.
+> - **WP-4** — 6 more class-blind `find_by_cka_id` sites (batch-undo
+>   highest-risk, ML-KEM/RSA/AES encrypt+decrypt, KEK resolution) swapped
+>   to the class-aware helper.
+> - **WP-5** — `C_CopyObject` wrongly rejected `CKA_TRUSTED` for every
+>   session including SO, while separately letting it silently ride over
+>   from the source with no SO check at all — combined with an
+>   identity-field (Subject/Issuer/Serial/ID/Label/Private) respoofing
+>   gap on the same copy.
+> - **WP-6** — `C_SetAttributeValue` skipped the `CKA_ALLOWED_MECHANISMS`
+>   length check `C_CreateObject` enforces.
+> - **WP-7** — certificate engine-projection failures were silent;
+>   `Register`/`Import` now reject unparseable DER up front instead of
+>   accepting and silently discarding it.
+>
+> All 7 covered by new or extended tests; full suite green in both crates
+> (`rust`: 250 tests, `kmip`: 526 tests) after every step.
+>
 > **Historical record (2026-06).** These gaps are closed — the Rust engine now
 > passes its own 188/0 PKCS#11 v3.2 conformance suite (`../rust/RUST_P11_V32_CONFORMANCE_REPORT.md`),
 > shipped through v0.8.0. Kept for provenance, not an open to-do list.

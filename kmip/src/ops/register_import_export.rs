@@ -120,8 +120,8 @@ pub fn register(
     );
     p_req.key_length = resolved_length;
     p_req.usage_mask = usage_mask;
-    if let Decision::Deny { human, .. } = deps.engine.evaluate(&p_req) {
-        return Err(fail_err(deps, correlation_id, "Register", KmipError::permission_denied(human)));
+    if let Decision::Deny { kmip_reason, human, .. } = deps.engine.evaluate(&p_req) {
+        return Err(fail_err(deps, correlation_id, "Register", KmipError::failed(kmip_reason.to_result_reason(), human)));
     }
 
     // KMIP 3.0 §6.1.48 — Certificate / OpaqueObject Registers are not
@@ -520,6 +520,25 @@ pub fn register(
         }
     }
 
+    // WP-7 remediation — reject genuinely unparseable Certificate DER up
+    // front, rather than silently accepting it and later relying on
+    // project_certificate_to_engine's best-effort skip (which previously
+    // conflated "unparseable" with "parses fine but has no Subject" — a
+    // legitimate case per RFC 5280 §4.1.2.6 that must still be accepted).
+    // A malformed CertificateValue is a client error, not a KMIP-store
+    // concern, so it fails the whole Register rather than storing an
+    // opaque blob nothing can ever validate or find.
+    if req.object_type == ObjectType::Certificate {
+        if let Some((_, der)) = &req.certificate_payload {
+            if !super::der_x509::is_parseable(der) {
+                return Err(fail_err(deps, correlation_id, "Register", KmipError::failed(
+                    ResultReason::InvalidField,
+                    format!("Register: Certificate Value ({} bytes) does not parse as a valid X.509 certificate", der.len()),
+                )));
+            }
+        }
+    }
+
     // KMIP 3.0 §6.2 Certificate payload — populate cert-specific
     // attributes from the wire `Certificate` Structure (DER bytes +
     // type). `CertificateLength` is the DER byte count; the §11
@@ -554,6 +573,7 @@ pub fn register(
             .map(|b| Sha256::digest(b).to_vec())
     };
 
+    let cka_id_for_cert_projection = cka_id_bytes.clone();
     deps.store.put(ObjectRecord {
         uid: uid.clone(),
         object_type: req.object_type,
@@ -594,7 +614,7 @@ pub fn register(
         digest_value,
         cryptographic_parameters: x.cryptographic_parameters.clone(),
         certificate_type,
-        certificate_value,
+        certificate_value: certificate_value.clone(),
         certificate_length,
         certificate_subject_cn,
         // Gap-remediation Phase C, Finding #8 — previously dropped at
@@ -603,6 +623,26 @@ pub fn register(
         secret_data_type: req.secret_data_type,
         ..ObjectRecord::default()
     })?;
+
+    // PKCS#11 v3.2 §4.6 — mirror a registered X.509 certificate onto the
+    // engine too, same as Certify does (see
+    // ops::certify::project_certificate_to_engine's doc comment for why
+    // this is best-effort and KMIP-authoritative). Category is always
+    // TOKEN_USER here — Register has no "this is a CA cert" signal;
+    // AUTHORITY is reserved for the CA bootstrap path.
+    if req.object_type == ObjectType::Certificate {
+        if let Some(der) = certificate_value.as_deref() {
+            super::certify::project_certificate_to_engine(
+                deps,
+                correlation_id,
+                "Register",
+                &uid,
+                der,
+                &cka_id_for_cert_projection,
+                softhsmrustv3::constants::CK_CERTIFICATE_CATEGORY_TOKEN_USER,
+            );
+        }
+    }
 
     emit_success(deps, correlation_id, "Register");
     Ok(RegisterResponse { uid })
@@ -645,16 +685,25 @@ pub fn import_object(
     );
     p_req.key_length = resolved_length;
     p_req.usage_mask = usage_mask;
-    if let Decision::Deny { human, .. } = deps.engine.evaluate(&p_req) {
-        return Err(fail_err(deps, correlation_id, "Import", KmipError::permission_denied(human)));
+    if let Decision::Deny { kmip_reason, human, .. } = deps.engine.evaluate(&p_req) {
+        return Err(fail_err(deps, correlation_id, "Import", KmipError::failed(kmip_reason.to_result_reason(), human)));
     }
 
-    let kmip_algorithm = resolved_algorithm.ok_or_else(|| {
-        fail_err(deps, correlation_id, "Import", KmipError::failed(
-            ResultReason::MissingData,
-            "Import requires CryptographicAlgorithm".to_string(),
-        ))
-    })?;
+    // WP-2 remediation — a Certificate Import carries no
+    // CryptographicAlgorithm (the object isn't a cryptographic key in the
+    // §11 attribute-table sense), mirroring Register's identical
+    // carve-out. `Rsa` is a harmless sentinel, never inspected for
+    // Certificate records.
+    let kmip_algorithm = match resolved_algorithm {
+        Some(a) => a,
+        None if req.object_type == ObjectType::Certificate => crate::kmip30::KmipAlgorithm::Rsa,
+        None => {
+            return Err(fail_err(deps, correlation_id, "Import", KmipError::failed(
+                ResultReason::MissingData,
+                "Import requires CryptographicAlgorithm".to_string(),
+            )));
+        }
+    };
 
     // Per §6.1.29: "If absent or false [for ReplaceExisting] and an
     // object exists with the same Unique Identifier then an error
@@ -674,13 +723,48 @@ pub fn import_object(
     let now = OffsetDateTime::now_utc();
     let key_material = key_block.map(|kb| kb.key_value.clone());
     let key_format_type = key_block.map(|kb| kb.key_format_type as u32);
+
+    // WP-7 remediation — same upstream parseability guard as Register;
+    // see that function for the rationale.
+    if req.object_type == ObjectType::Certificate {
+        if let Some((_, der)) = &req.certificate_payload {
+            if !super::der_x509::is_parseable(der) {
+                return Err(fail_err(deps, correlation_id, "Import", KmipError::failed(
+                    ResultReason::InvalidField,
+                    format!("Import: Certificate Value ({} bytes) does not parse as a valid X.509 certificate", der.len()),
+                )));
+            }
+        }
+    }
+
+    // WP-2 remediation — populate cert-specific fields from the wire
+    // Certificate payload, mirroring Register's identical handling.
+    // Without this, Import(Certificate) either errored confusingly (no
+    // CryptographicAlgorithm) or, if a client worked around that, silently
+    // discarded the certificate DER entirely while still returning success.
+    let (certificate_type, certificate_value, certificate_length, certificate_subject_cn) =
+        match (&req.certificate_payload, req.object_type) {
+            (Some((wire_ct, der)), ObjectType::Certificate) => {
+                let len = der.len() as i32;
+                let cn = super::der_x509::extract_subject_cn(der);
+                (Some(*wire_ct), Some(der.clone()), Some(len), cn)
+            }
+            _ => (None, None, None, None),
+        };
+
     // K-14 — same Digest-at-creation rule as Register: SHA-256 over
-    // the supplied KeyMaterial bytes when present, otherwise omitted.
+    // the supplied KeyMaterial (or Certificate Value) bytes when present,
+    // otherwise omitted.
     let digest_value = {
         use sha2::{Digest as _, Sha256};
-        key_material.as_deref().map(|b| Sha256::digest(b).to_vec())
+        key_material
+            .as_deref()
+            .or(certificate_value.as_deref())
+            .map(|b| Sha256::digest(b).to_vec())
     };
 
+    let cka_id_bytes = Uuid::new_v4().as_bytes().to_vec();
+    let cka_id_for_cert_projection = cka_id_bytes.clone();
     deps.store.put(ObjectRecord {
         uid: req.uid.clone(),
         object_type: req.object_type,
@@ -688,7 +772,7 @@ pub fn import_object(
         cryptographic_length: resolved_length.unwrap_or(0),
         usage_mask: usage_mask.unwrap_or_else(UsageMask::empty),
         state: State::PreActive,
-        pkcs11_cka_id: Uuid::new_v4().as_bytes().to_vec(),
+        pkcs11_cka_id: cka_id_bytes,
         pkcs11_slot: deps.config.pkcs11_slot,
         initial_date: now,
         activation_date: None,
@@ -699,8 +783,30 @@ pub fn import_object(
         key_material,
         key_format_type,
         digest_value,
+        certificate_type,
+        certificate_value: certificate_value.clone(),
+        certificate_length,
+        certificate_subject_cn,
         ..ObjectRecord::default()
     })?;
+
+    // PKCS#11 v3.2 §4.6 — mirror an imported X.509 certificate onto the
+    // engine too, same as Register/Certify (see
+    // ops::certify::project_certificate_to_engine's doc comment for why
+    // this is best-effort and KMIP-authoritative).
+    if req.object_type == ObjectType::Certificate {
+        if let Some(der) = certificate_value.as_deref() {
+            super::certify::project_certificate_to_engine(
+                deps,
+                correlation_id,
+                "Import",
+                &req.uid,
+                der,
+                &cka_id_for_cert_projection,
+                softhsmrustv3::constants::CK_CERTIFICATE_CATEGORY_TOKEN_USER,
+            );
+        }
+    }
 
     emit_success(deps, correlation_id, "Import");
     Ok(ImportResponse { uid: req.uid })
@@ -752,6 +858,15 @@ pub fn export(
     // only the KeyBlock is suppressed.
     let key_material = if matches!(obj.state, State::Destroyed | State::DestroyedCompromised) {
         None
+    } else if obj.object_type == ObjectType::Certificate {
+        // WP-2 remediation — a Certificate's authoritative DER always
+        // lives in `certificate_value`: `Certify` sets both
+        // `key_material` and `certificate_value` identically, but
+        // `Register` only ever sets `certificate_value`. Unlike `key_material`
+        // (which stayed `None` for a Register-created cert), reading
+        // `certificate_value` here makes Export agree with `Get` and
+        // `GetAttributes(CertificateValue)` for both creation paths.
+        obj.certificate_value.clone()
     } else {
         obj.key_material.clone()
     };
@@ -780,10 +895,15 @@ pub fn export(
     let managed_object = match key_material {
         None => None,
         Some(bytes) => {
+            let default_format = if obj.object_type == ObjectType::Certificate {
+                KeyFormatType::X509
+            } else {
+                KeyFormatType::Raw
+            };
             let stored_format = obj
                 .key_format_type
                 .and_then(KeyFormatType::from_wire_value)
-                .unwrap_or(KeyFormatType::Raw);
+                .unwrap_or(default_format);
             let (key_format_type, key_value) = super::helpers::convert_key_format(
                 stored_format,
                 bytes,
@@ -1014,6 +1134,126 @@ mod tests {
         }
     }
 
+    /// PKCS#11 v3.2 §4.6 — WP-C: Register(Certificate) mirrors the
+    /// certificate onto the engine too, same as Certify — see
+    /// ops::certify::project_certificate_to_engine's doc comment. Uses a
+    /// real (rcgen-generated, self-signed) X.509 DER so the engine-side
+    /// x509-parser subject/issuer/serial extraction has real input, not a
+    /// synthetic fixture.
+    #[test]
+    fn register_certificate_projects_engine_object() {
+        use softhsmrustv3::constants as c;
+        use softhsmrustv3::native::session;
+        let _lock = crate::engine_test_lock::acquire();
+        let _ = session::finalize();
+        session::init().expect("engine init");
+        let sess = session::bootstrap_default_token(0, "so-pin", "user-pin", "register-cert-test")
+            .expect("bootstrap session");
+
+        let cert = rcgen::generate_simple_self_signed(vec!["wp-c.example.test".to_string()])
+            .expect("rcgen self-signed cert");
+        let der = cert.cert.der().to_vec();
+
+        let d = deps_with().with_engine_session(sess);
+        let resp = register(&d, RegisterRequest {
+            object_type: ObjectType::Certificate,
+            attributes: vec![Attribute::Name("wp-c-register-cert".into())],
+            managed_object: None,
+            protection_storage_masks: None,
+            certificate_payload: Some((0 /* X.509 */, der.clone())),
+            secret_data_type: None,
+        }, "c-wpc-register").unwrap();
+
+        let rec = d.store.get(&resp.uid).unwrap().unwrap();
+        assert_eq!(rec.certificate_value.as_deref(), Some(der.as_slice()));
+        assert!(!rec.pkcs11_cka_id.is_empty(), "Register must stamp a CKA_ID for engine lookup");
+
+        let handle = crate::ops::helpers::find_handle_for_object(sess, &rec.pkcs11_cka_id, ObjectType::Certificate)
+            .unwrap()
+            .expect("registered certificate must be projected onto the engine");
+        assert_eq!(
+            softhsmrustv3::native::get_attribute(sess, handle, c::CKA_VALUE).unwrap(),
+            der,
+            "engine CKA_VALUE must byte-equal the registered Certificate Value"
+        );
+        assert_eq!(
+            softhsmrustv3::native::get_attribute_u32(sess, handle, c::CKA_CERTIFICATE_CATEGORY),
+            Some(c::CK_CERTIFICATE_CATEGORY_TOKEN_USER),
+            "Register has no CA-designation signal — always TOKEN_USER"
+        );
+
+        let _ = session::finalize();
+    }
+
+    /// WP-7 remediation — Register must reject genuinely unparseable
+    /// Certificate DER up front (InvalidField), rather than silently
+    /// accepting it and later relying on project_certificate_to_engine's
+    /// best-effort skip.
+    #[test]
+    fn register_certificate_rejects_unparseable_der() {
+        let d = deps_with();
+        let err = register(&d, RegisterRequest {
+            object_type: ObjectType::Certificate,
+            attributes: vec![],
+            managed_object: None,
+            protection_storage_masks: None,
+            certificate_payload: Some((0, vec![0xde, 0xad, 0xbe, 0xef])),
+            secret_data_type: None,
+        }, "c-garbage-der").unwrap_err();
+        assert_eq!(err.result_reason(), crate::error::ResultReason::InvalidField);
+    }
+
+    /// WP-7 remediation — `project_certificate_to_engine`'s "no Subject
+    /// extracted" skip must be visible in the audit trail rather than
+    /// silently vanishing. Register's own parseability guard (the test
+    /// above) means this path is no longer reachable via `Register` for
+    /// ordinary client-supplied DER — but `project_certificate_to_engine`
+    /// is also called from `bootstrap_ca_certificate`/`Certify`/
+    /// `Re-certify` with server-generated DER, so the safety net earns
+    /// its own direct test against genuinely unparseable bytes (the only
+    /// input that can actually reach this branch — a certificate that
+    /// parses at all always has at least an empty-SEQUENCE-encoded
+    /// Subject, never zero raw bytes).
+    #[test]
+    fn project_certificate_to_engine_skip_is_audited() {
+        use softhsmrustv3::native::session;
+        let _lock = crate::engine_test_lock::acquire();
+        let _ = session::finalize();
+        session::init().expect("engine init");
+        let sess = session::bootstrap_default_token(0, "so-pin", "user-pin", "skip-audit-test")
+            .expect("bootstrap session");
+
+        let ring = Arc::new(RingSink::new(64));
+        let sink: Arc<dyn AuditSink> = ring.clone();
+        let engine = Engine::with_global_sink(sink.clone());
+        engine.activate(load_from_str(
+            "schema_version: 1\nmetadata: {name: t, description: t, authority: t, effective: always}\nrules: []\n",
+            std::path::Path::new("<t>"),
+        ).unwrap()).unwrap();
+        let d = Deps::new(engine, Arc::new(MemoryStore::new()), sink, super::super::deps::DepsConfig::default())
+            .with_engine_session(sess);
+
+        super::super::certify::project_certificate_to_engine(
+            &d,
+            "c-skip-audit",
+            "TestOp",
+            "urn:test:unparseable-cert",
+            &[0xde, 0xad, 0xbe, 0xef],
+            b"some-cka-id",
+            softhsmrustv3::constants::CK_CERTIFICATE_CATEGORY_TOKEN_USER,
+        );
+
+        let skipped = ring.filter_correlation_id("c-skip-audit").into_iter().any(|e| {
+            matches!(&e.event, crate::auditlog::EventPayload::Pkcs11Call { function, rv_name, .. }
+                if function.contains("project_certificate_to_engine")
+                    && rv_name.contains("no Subject extracted")
+                    && rv_name.contains("urn:test:unparseable-cert"))
+        });
+        assert!(skipped, "the engine-projection skip must be visible in the audit trail, not silent");
+
+        let _ = session::finalize();
+    }
+
     #[test]
     fn register_persists_record_with_uid_and_key_bytes() {
         let d = deps_with();
@@ -1127,6 +1367,7 @@ mod tests {
                 Attribute::CryptographicUsageMask(UsageMask::ENCRYPT),
             ],
             managed_object: Some(raw_aes128_kb()),
+            certificate_payload: None,
         }, "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::ObjectAlreadyExists);
     }
@@ -1159,6 +1400,7 @@ mod tests {
                 Attribute::CryptographicUsageMask(UsageMask::ENCRYPT),
             ],
             managed_object: Some(new_kb),
+            certificate_payload: None,
         }, "c").unwrap();
 
         let rec = d.store.get("u").unwrap().unwrap();
