@@ -15,7 +15,12 @@ cd rust && node test_p11_conformance.js
 
 ## Result
 
-**257 passed / 0 failed** across 40 sections.
+**257 passed / 0 failed** across 40 sections in this JS harness — unchanged
+by the 2026-07-17 remediation below, which is instead covered by the Rust
+`cargo test --lib` suite (301 passed / 0 failed / 9 ignored; see the two new
+sections listed below). The JS harness and the Rust unit suite exercise the
+same wasm-bindgen `_C_*` ABI; new coverage was added directly in Rust rather
+than hand-duplicated into this harness.
 
 This is the Rust engine's OWN conformance evidence. Previously the only checked-in
 compliance artifact (`cpp_compliance_report.md`) targeted the **C++** engine,
@@ -34,6 +39,56 @@ KMIP-issued/registered certificates onto the engine as real
 suite** (521 tests), not this wasm harness, since it's a KMIP-server-side
 integration rather than a raw PKCS#11 ABI behavior; see that plan's WP-C
 and the commit that shipped it for the evidence.
+
+## 2026-07-17 — PKCS#11 Profiles v3.2 Baseline Provider + generic pre-hash mechanisms
+
+Two gaps closed on `feat/pkcs11-v32-profile-and-hash-mechs` (branched from
+this commit, `a113611`):
+
+**Baseline Provider profile claim.** Every normative requirement from
+[PKCS#11 Profiles v3.2 §5.1](https://docs.oasis-open.org/pkcs11/pkcs11-profiles/v3.2/pkcs11-profiles-v3.2.html)
+is now met — verified item by item against the fetched spec text, not assumed:
+
+| Requirement (§5.1) | Status |
+|---|---|
+| Data types (CK_VERSION, CK_INFO, … CK_PROFILE_ID, CK_FUNCTION_LIST, CK_INTERFACE, CK_C_INITIALIZE_ARGS) | Already present (standard ABI) |
+| Attributes: CKA_CLASS, CKA_TOKEN, CKA_VALUE, CKA_ID, CKA_PRIVATE, CKA_MODIFIABLE, CKA_LABEL, CKA_UNIQUE_ID, CKA_PROFILE_ID | Already present + CKA_PROFILE_ID added this pass |
+| Object: `CKO_PROFILE` with `CKA_PROFILE_ID = CKP_BASELINE_PROVIDER` | **Added** — `state::init_profile_objects`, materialized at slot creation, public/read-only |
+| Functions: C_GetFunctionList, C_GetInterfaceList, C_GetInterface, C_Initialize, C_Finalize, C_GetInfo, C_GetSlotList, C_GetSlotInfo, C_GetTokenInfo, C_OpenSession, C_CloseSession, C_GetSessionInfo, C_FindObjectsInit, C_FindObjects, C_FindObjectsFinal, C_GetAttributeValue | Already present |
+| Mechanisms | None specified — no gate |
+
+Extended Provider is deliberately **not** claimed — its requirement list was
+not audited this pass; a second `CKO_PROFILE` object should only be added
+after every Extended item is checked the same way, not on assumption.
+
+Covered by `ffi::profile_object_ffi_tests` (3 tests): the profile object is
+public/findable pre-login, a client cannot create its own `CKO_PROFILE`
+(`validate_create_template`), and the object is immutable/non-copyable/
+non-destroyable (`CKA_MODIFIABLE`/`CKA_COPYABLE`/`CKA_DESTROYABLE` all
+FALSE — the last of these required adding general `CKA_DESTROYABLE`
+enforcement to `C_DestroyObject`, previously defined but unenforced).
+
+**Generic pre-hash mechanisms (§6.67.7/§6.69.7).** `CKM_HASH_ML_DSA` (0x1F)
+and `CKM_HASH_SLH_DSA` (0x34) are now advertised and implemented:
+`ffi::remap_generic_hash_mech` parses `CK_HASH_SIGN_ADDITIONAL_CONTEXT.hash`
+in `C_SignInit`/`C_VerifyInit`/`C_VerifySignatureInit` and remaps onto the
+matching hash-specific mechanism (`crypto::handlers::map_generic_hash_mech`),
+the same idiom already used for the `CKM_EDDSA` → `CKM_EDDSA_PH` phFlag
+remap. SHAKE128/256 remain reachable only via their own dedicated
+`CKM_HASH_{ML,SLH}_DSA_SHAKE128/256` mechanisms — the v3.2 header defines no
+standalone SHAKE digest `CKM_` identifier, so they cannot be named through
+the generic `hash` param.
+
+Covered by `ffi::mechanism_table_tests::p2_map_generic_hash_mech_matrix` (all
+8 real digest mappings + SHAKE/garbage rejection) and
+`ffi::generic_prehash_mech_ffi_tests` (4 tests: real ML-DSA-65 keypair,
+full `C_SignInit`→`C_Sign`→`C_VerifyInit`→`C_Verify` round trip through the
+generic mechanism, cross-verification against the specific mechanism name,
+and the missing-param / unknown-hash / SHAKE-as-hash negative cases).
+
+All constants verified against both the vendored `src/lib/pkcs11/pkcs11t.h`
+and a live fetch of `docs.oasis-open.org/pkcs11/pkcs11-spec/v3.2/os/include/
+pkcs11-v3.2/pkcs11t.h` — no value taken from memory.
 
 ## Sections covered
 

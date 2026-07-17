@@ -165,19 +165,50 @@ pub fn init_token_store() {
 /// online. There is no config file in this crate — this function IS the
 /// multi-slot configuration surface.
 pub fn ensure_slot(slot_id: u32) {
-    TOKEN_STORE.with(|ts| {
+    let is_new = TOKEN_STORE.with(|ts| {
         let mut store = ts.borrow_mut();
-        store.entry(slot_id).or_insert_with(|| TokenState {
-            slot_id,
-            initialized: false,
-            label: pad_label_32(DEFAULT_TOKEN_LABEL),
-            login_state: LoginState::Public,
-            so_pin_salt: [0u8; 16],
-            so_pin_hash: [0u8; 32],
-            user_pin_salt: None,
-            user_pin_hash: None,
-        });
+        if store.contains_key(&slot_id) {
+            false
+        } else {
+            store.insert(
+                slot_id,
+                TokenState {
+                    slot_id,
+                    initialized: false,
+                    label: pad_label_32(DEFAULT_TOKEN_LABEL),
+                    login_state: LoginState::Public,
+                    so_pin_salt: [0u8; 16],
+                    so_pin_hash: [0u8; 32],
+                    user_pin_salt: None,
+                    user_pin_hash: None,
+                },
+            );
+            true
+        }
     });
+    if is_new {
+        init_profile_objects(slot_id);
+    }
+}
+
+/// PKCS#11 Profiles v3.2 §3 — materialize this token's built-in `CKO_PROFILE`
+/// object(s) at slot creation: token-resident, public (no CKA_PRIVATE, so
+/// visible to C_FindObjects without login per can_access_object), and
+/// read-only (CKA_MODIFIABLE/COPYABLE/DESTROYABLE all FALSE — apply_object_defaults
+/// would otherwise default them to TRUE). Baseline Provider is the only
+/// profile this engine currently claims conformance to; add further profile
+/// objects here only after auditing every Profiles v3.2 requirement for
+/// that profile (see rust/RUST_P11_V32_CONFORMANCE_REPORT.md).
+fn init_profile_objects(slot_id: u32) {
+    let mut attrs: Attributes = HashMap::new();
+    attrs.insert(CKA_CLASS, CKO_PROFILE.to_le_bytes().to_vec());
+    attrs.insert(CKA_PROFILE_ID, CKP_BASELINE_PROVIDER.to_le_bytes().to_vec());
+    attrs.insert(CKA_TOKEN, vec![1]);
+    attrs.insert(CKA_PRIV_SLOT_ID, slot_id.to_le_bytes().to_vec());
+    store_bool(&mut attrs, CKA_MODIFIABLE, false);
+    store_bool(&mut attrs, CKA_COPYABLE, false);
+    store_bool(&mut attrs, CKA_DESTROYABLE, false);
+    allocate_handle(attrs);
 }
 
 pub struct EncryptCtx {

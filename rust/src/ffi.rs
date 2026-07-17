@@ -934,23 +934,22 @@ mod mechanism_table_tests {
         );
     }
 
-    /// P1 — the GENERIC pre-hash sign mechanisms must NOT be advertised while
-    /// their sign path is unimplemented (advertise-and-fail is worse than
-    /// not-advertising for a conformant client). The hash-SPECIFIC variants,
-    /// which are implemented, MUST be advertised so the capability is reachable.
+    /// P1 (remediated) — the GENERIC pre-hash sign mechanisms are now
+    /// advertised: `remap_generic_hash_mech` parses
+    /// `CK_HASH_SIGN_ADDITIONAL_CONTEXT.hash` in C_SignInit/C_VerifyInit/
+    /// C_VerifySignatureInit and remaps onto the hash-SPECIFIC mechanism
+    /// below, so advertise-and-fail no longer applies. The hash-SPECIFIC
+    /// variants remain advertised too (reachable directly, unchanged).
     #[test]
-    fn p1_generic_hash_sign_mechs_not_advertised_specific_are() {
+    fn p2_generic_hash_sign_mechs_advertised() {
         assert!(
-            !SUPPORTED_MECHS.contains(&CKM_HASH_ML_DSA),
-            "generic CKM_HASH_ML_DSA (0x1F) is advertise-and-fail — must stay unadvertised until the \
-             CK_HASH_SIGN_ADDITIONAL_CONTEXT.hash param is parsed"
+            SUPPORTED_MECHS.contains(&CKM_HASH_ML_DSA),
+            "generic CKM_HASH_ML_DSA (0x1F) must be advertised now that its hash param is parsed"
         );
         assert!(
-            !SUPPORTED_MECHS.contains(&CKM_HASH_SLH_DSA),
-            "generic CKM_HASH_SLH_DSA (0x34) is advertise-and-fail — must stay unadvertised"
+            SUPPORTED_MECHS.contains(&CKM_HASH_SLH_DSA),
+            "generic CKM_HASH_SLH_DSA (0x34) must be advertised now that its hash param is parsed"
         );
-        // The hash-specific variants (which the sign path DOES implement) remain
-        // advertised so pre-hash ML-DSA / SLH-DSA is still reachable.
         for m in [
             CKM_HASH_ML_DSA_SHA256,
             CKM_HASH_ML_DSA_SHA512,
@@ -959,6 +958,43 @@ mod mechanism_table_tests {
         ] {
             assert!(SUPPORTED_MECHS.contains(&m), "hash-specific mech {m:#06x} must stay advertised");
         }
+    }
+
+    /// P2 — `map_generic_hash_mech` covers exactly the 8 real digest
+    /// mechanisms (no SHAKE — SHAKE128/256 have no standalone digest CKM_
+    /// identifier in the v3.2 header, so they're reachable only through
+    /// their own dedicated CKM_HASH_{ML,SLH}_DSA_SHAKE128/256 mechanism).
+    #[test]
+    fn p2_map_generic_hash_mech_matrix() {
+        let cases: &[(u32, u32)] = &[
+            (CKM_SHA224, CKM_HASH_ML_DSA_SHA224),
+            (CKM_SHA256, CKM_HASH_ML_DSA_SHA256),
+            (CKM_SHA384, CKM_HASH_ML_DSA_SHA384),
+            (CKM_SHA512, CKM_HASH_ML_DSA_SHA512),
+            (CKM_SHA3_224, CKM_HASH_ML_DSA_SHA3_224),
+            (CKM_SHA3_256, CKM_HASH_ML_DSA_SHA3_256),
+            (CKM_SHA3_384, CKM_HASH_ML_DSA_SHA3_384),
+            (CKM_SHA3_512, CKM_HASH_ML_DSA_SHA3_512),
+        ];
+        for &(hash, expected) in cases {
+            assert_eq!(
+                crate::crypto::handlers::map_generic_hash_mech(CKM_HASH_ML_DSA, hash),
+                Some(expected)
+            );
+        }
+        assert_eq!(
+            crate::crypto::handlers::map_generic_hash_mech(CKM_HASH_SLH_DSA, CKM_SHA256),
+            Some(CKM_HASH_SLH_DSA_SHA256)
+        );
+        assert_eq!(
+            crate::crypto::handlers::map_generic_hash_mech(CKM_HASH_ML_DSA, CKM_HASH_ML_DSA_SHAKE128),
+            None,
+            "SHAKE has no digest CKM_ identifier — not selectable via the generic hash param"
+        );
+        assert_eq!(
+            crate::crypto::handlers::map_generic_hash_mech(CKM_HASH_ML_DSA, 0xdead_beef),
+            None
+        );
     }
 
     /// S6 — the four RSA hash-variant mechanisms are advertised at
@@ -3135,6 +3171,13 @@ fn validate_create_template(attrs: &Attributes) -> Result<(), u32> {
         Some(v) if v.len() < 4 => return Err(CKR_ATTRIBUTE_VALUE_INVALID),
         Some(_) => read_u32(CKA_CLASS).unwrap(),
     };
+    // PKCS#11 Profiles v3.2 §3 — CKO_PROFILE identity is entirely
+    // token-computed (state::init_profile_objects, at slot creation); a
+    // client-supplied one is never valid, mirroring how CREATE_READ_ONLY
+    // below rejects other token-computed attributes.
+    if class == CKO_PROFILE {
+        return Err(CKR_ATTRIBUTE_READ_ONLY);
+    }
     // §4.8 Table 13 — CKA_ALLOWED_MECHANISMS is a packed CK_MECHANISM_TYPE[]
     // (u32 LE); a length that isn't a whole number of entries is malformed.
     if let Some(v) = attrs.get(&CKA_ALLOWED_MECHANISMS) {
@@ -3376,6 +3419,26 @@ pub fn C_DestroyObject(h_session: u32, h_object: u32) -> u32 {
     if exists && !crate::state::can_access_handle(h_session, h_object) {
         return CKR_OBJECT_HANDLE_INVALID;
     }
+    // §4.1.3 — CKA_DESTROYABLE=FALSE forbids C_DestroyObject. Absent attr
+    // defaults TRUE (state::apply_object_defaults stamps it on every
+    // allocate path) — mirrors the CKA_COPYABLE/CKA_MODIFIABLE gates on
+    // C_CopyObject/C_SetAttributeValue. Protects token-managed objects such
+    // as the built-in CKO_PROFILE (state::init_profile_objects).
+    if exists {
+        let destroyable = OBJECTS.with(|o| {
+            o.borrow()
+                .get(&h_object)
+                .map(|a| {
+                    a.get(&CKA_DESTROYABLE)
+                        .map(|v| v.first().copied().unwrap_or(0) != 0)
+                        .unwrap_or(true)
+                })
+                .unwrap_or(true)
+        });
+        if !destroyable {
+            return CKR_ACTION_PROHIBITED;
+        }
+    }
     let removed = OBJECTS.with(|objs| {
         let mut store = objs.borrow_mut();
         if let Some(mut attrs) = store.remove(&h_object) {
@@ -3493,6 +3556,13 @@ pub fn C_SignInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
                 }
             }
         }
+        // GENERIC pre-hash mechanisms (CKM_HASH_ML_DSA/CKM_HASH_SLH_DSA)
+        // remap onto the concrete hash-specific mechanism via their
+        // CK_HASH_SIGN_ADDITIONAL_CONTEXT.hash param.
+        mech_type = match remap_generic_hash_mech(p_mechanism, mech_type) {
+            Ok(m) => m,
+            Err(rv) => return rv,
+        };
         // Parse CK_SIGN_ADDITIONAL_CONTEXT for SLH-DSA (FIPS 205 §9.2 + §10)
         // CK_SIGN_ADDITIONAL_CONTEXT — ML-DSA + SLH-DSA, pure and pre-hash
         // (PKCS#11 v3.2 §6.67/§6.69). Overlong ctx / bad hedge value → error.
@@ -3565,6 +3635,35 @@ pub fn C_SignInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
         });
     }
     CKR_OK
+}
+
+/// If `mech_type` is a GENERIC pre-hash mechanism (CKM_HASH_ML_DSA /
+/// CKM_HASH_SLH_DSA, §6.67.7/§6.69.7), parse
+/// `CK_HASH_SIGN_ADDITIONAL_CONTEXT.hash` and remap onto the concrete
+/// hash-specific mechanism so the rest of the sign/verify pipeline
+/// (`takes_sign_additional_ctx` / `parse_sign_additional_ctx` / dispatch)
+/// runs unchanged — same idiom as the CKM_EDDSA -> CKM_EDDSA_PH phFlag
+/// remap just above each call site. Returns `mech_type` unchanged for every
+/// other mechanism.
+///
+/// `CK_HASH_SIGN_ADDITIONAL_CONTEXT` shares `CK_SIGN_ADDITIONAL_CONTEXT`'s
+/// first 3 fields (hedgeVariant, pContext, ulContextLen — read later by
+/// `parse_sign_additional_ctx` against this same pointer) plus a trailing
+/// `hash` (CK_MECHANISM_TYPE) at native width; this only extracts `hash`.
+unsafe fn remap_generic_hash_mech(p_mechanism: *const u8, mech_type: u32) -> Result<u32, u32> {
+    if mech_type != CKM_HASH_ML_DSA && mech_type != CKM_HASH_SLH_DSA {
+        return Ok(mech_type);
+    }
+    let p_param = *((p_mechanism as *const usize).add(1));
+    let param_len = *((p_mechanism as *const usize).add(2));
+    let usz = core::mem::size_of::<usize>();
+    // The generic mechanism cannot select a digest without this field —
+    // absent/undersized params are a caller error, not a default.
+    if p_param == 0 || param_len < 4 * usz {
+        return Err(CKR_MECHANISM_PARAM_INVALID);
+    }
+    let hash = *((p_param as *const usize).add(3)) as u32;
+    map_generic_hash_mech(mech_type, hash).ok_or(CKR_MECHANISM_PARAM_INVALID)
 }
 
 /// True when `mech` takes a CK_SIGN_ADDITIONAL_CONTEXT parameter
@@ -3910,6 +4009,13 @@ pub fn C_VerifyInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
                 }
             }
         }
+        // GENERIC pre-hash mechanisms (CKM_HASH_ML_DSA/CKM_HASH_SLH_DSA)
+        // remap onto the concrete hash-specific mechanism via their
+        // CK_HASH_SIGN_ADDITIONAL_CONTEXT.hash param.
+        mech_type = match remap_generic_hash_mech(p_mechanism, mech_type) {
+            Ok(m) => m,
+            Err(rv) => return rv,
+        };
         // Parse CK_SIGN_ADDITIONAL_CONTEXT for SLH-DSA (context string, FIPS 205 §9.2)
         // CK_SIGN_ADDITIONAL_CONTEXT — ML-DSA + SLH-DSA, pure and pre-hash
         // (PKCS#11 v3.2 §6.67/§6.69). Overlong ctx / bad hedge value → error.
@@ -4499,6 +4605,13 @@ pub fn C_VerifySignatureInit(
                 }
             }
         }
+        // GENERIC pre-hash mechanisms (CKM_HASH_ML_DSA/CKM_HASH_SLH_DSA)
+        // remap onto the concrete hash-specific mechanism via their
+        // CK_HASH_SIGN_ADDITIONAL_CONTEXT.hash param.
+        mech_type = match remap_generic_hash_mech(p_mechanism, mech_type) {
+            Ok(m) => m,
+            Err(rv) => return rv,
+        };
         // CK_SIGN_ADDITIONAL_CONTEXT — ML-DSA + SLH-DSA, pure and pre-hash
         // (PKCS#11 v3.2 §6.67/§6.69). Overlong ctx / bad hedge value → error.
         let (slh_ctx, slh_det) = if takes_sign_additional_ctx(mech_type) {
@@ -13728,5 +13841,222 @@ mod message_stream_ffi_tests {
             )
         };
         assert_eq!(rv, CKR_OPERATION_NOT_INITIALIZED);
+    }
+}
+
+#[cfg(test)]
+mod profile_object_ffi_tests {
+    //! PKCS#11 Profiles v3.2 §3 — the token's built-in CKO_PROFILE object
+    //! (state::init_profile_objects): findable without login, immutable,
+    //! non-copyable, non-destroyable, never client-creatable.
+    use super::*;
+    use crate::native::test_lock;
+
+    const SESSION: u32 = 0x5439_1001;
+
+    fn setup() {
+        crate::state::set_initialized(true);
+        crate::state::ensure_slot(0);
+        SESSIONS.with(|s| {
+            s.borrow_mut().insert(
+                SESSION,
+                crate::state::SessionState { slot_id: 0, rw_session: true },
+            );
+        });
+    }
+
+    fn find_by_class(session: u32, class: u32) -> Vec<u32> {
+        let tmpl: [usize; 3] = [
+            CKA_CLASS as usize,
+            &class as *const u32 as usize,
+            4,
+        ];
+        assert_eq!(
+            C_FindObjectsInit(session, tmpl.as_ptr() as *mut u8, 1),
+            CKR_OK
+        );
+        let mut handles = [0u32; 8];
+        let mut count = 0u32;
+        assert_eq!(
+            C_FindObjects(session, handles.as_mut_ptr(), 8, &mut count),
+            CKR_OK
+        );
+        assert_eq!(C_FindObjectsFinal(session), CKR_OK);
+        handles[..count as usize].to_vec()
+    }
+
+    /// The Baseline Provider profile object is present at slot creation,
+    /// findable WITHOUT login (public object), and carries the right
+    /// CKA_PROFILE_ID.
+    #[test]
+    fn baseline_profile_object_is_public_and_findable() {
+        let _guard = test_lock::acquire();
+        setup();
+        let found = find_by_class(SESSION, CKO_PROFILE);
+        assert_eq!(found.len(), 1, "exactly one CKO_PROFILE object expected");
+        let h = found[0];
+        let profile_id = OBJECTS
+            .with(|o| o.borrow().get(&h).and_then(|a| a.get(&CKA_PROFILE_ID).cloned()))
+            .expect("CKA_PROFILE_ID present");
+        assert_eq!(
+            u32::from_le_bytes([profile_id[0], profile_id[1], profile_id[2], profile_id[3]]),
+            CKP_BASELINE_PROVIDER
+        );
+    }
+
+    /// A client can never create its own CKO_PROFILE object — identity is
+    /// entirely token-computed (validate_create_template).
+    #[test]
+    fn client_cannot_create_profile_object() {
+        let _guard = test_lock::acquire();
+        setup();
+        let mut attrs = Attributes::new();
+        store_ulong(&mut attrs, CKA_CLASS, CKO_PROFILE);
+        store_ulong(&mut attrs, CKA_PROFILE_ID, CKP_EXTENDED_PROVIDER);
+        assert_eq!(
+            create_object_from_attrs(SESSION, attrs),
+            Err(CKR_ATTRIBUTE_READ_ONLY)
+        );
+    }
+
+    /// The profile object is immutable, non-copyable, and non-destroyable.
+    #[test]
+    fn profile_object_is_fully_read_only() {
+        let _guard = test_lock::acquire();
+        setup();
+        let h = find_by_class(SESSION, CKO_PROFILE)[0];
+
+        // C_SetAttributeValue: CKA_MODIFIABLE=FALSE → CKR_ACTION_PROHIBITED.
+        let updates: Vec<(u32, Vec<u8>)> = vec![(crate::native::keygen::CKA_LABEL, b"x".to_vec())];
+        assert_eq!(
+            set_attribute_values_from_list(SESSION, h, &updates),
+            CKR_ACTION_PROHIBITED
+        );
+
+        // C_CopyObject: CKA_COPYABLE=FALSE → CKR_ACTION_PROHIBITED.
+        assert_eq!(
+            copy_object_from_attrs(SESSION, h, Attributes::new()),
+            Err(CKR_ACTION_PROHIBITED)
+        );
+
+        // C_DestroyObject: CKA_DESTROYABLE=FALSE → CKR_ACTION_PROHIBITED.
+        assert_eq!(C_DestroyObject(SESSION, h), CKR_ACTION_PROHIBITED);
+        assert!(
+            OBJECTS.with(|o| o.borrow().contains_key(&h)),
+            "the profile object must survive the rejected destroy"
+        );
+    }
+}
+
+#[cfg(test)]
+mod generic_prehash_mech_ffi_tests {
+    //! PKCS#11 v3.2 §6.67.7/§6.69.7 — the GENERIC pre-hash mechanisms
+    //! (CKM_HASH_ML_DSA / CKM_HASH_SLH_DSA) end-to-end through the real
+    //! FFI sign/verify path: CK_HASH_SIGN_ADDITIONAL_CONTEXT.hash parsing,
+    //! remap onto the hash-specific mechanism, and the negative-param cases.
+    use super::*;
+    use crate::native::test_lock;
+
+    /// ML-DSA private keys are CKA_PRIVATE — unlike the other ffi test
+    /// modules (which use public HMAC/AES keys and can hand-insert a bare
+    /// SessionState), this needs a REAL logged-in user session. Mirrors
+    /// `native::parity::fresh_session` / the bootstrap pattern used by
+    /// every native::* sign/keygen test.
+    fn setup() -> (u32, u32, u32) {
+        let _ = crate::native::session::finalize();
+        crate::native::session::init().unwrap();
+        let session =
+            crate::native::session::bootstrap_default_token(0, "so", "user", "prehash-test")
+                .unwrap();
+        SIGN_STATE.with(|s| s.borrow_mut().remove(&session));
+        VERIFY_STATE.with(|s| s.borrow_mut().remove(&session));
+        let (pub_h, priv_h) = crate::native::generate_ml_dsa_keypair(session, CKP_ML_DSA_65, b"t", "t")
+            .expect("ml-dsa-65 keygen");
+        (session, pub_h, priv_h)
+    }
+
+    /// Build a CK_MECHANISM(CKM_HASH_ML_DSA, &CK_HASH_SIGN_ADDITIONAL_CONTEXT)
+    /// pair at native width, matching the `[usize; N]` convention the rest
+    /// of this test suite uses for the wasm32-shaped struct layout.
+    fn hash_mech(base: u32, hash: u32) -> ([usize; 3], [usize; 4]) {
+        let ctx: [usize; 4] = [0 /* CKH_HEDGE_PREFERRED */, 0, 0, hash as usize];
+        let usz = std::mem::size_of::<usize>();
+        let m: [usize; 3] = [base as usize, 0, 4 * usz];
+        (m, ctx)
+    }
+
+    #[test]
+    fn generic_hash_ml_dsa_sign_verify_round_trip() {
+        let _guard = test_lock::acquire();
+        let (session, pub_h, priv_h) = setup();
+        let msg = b"generic pre-hash ML-DSA end-to-end";
+
+        let (mut m, ctx) = hash_mech(CKM_HASH_ML_DSA, CKM_SHA256);
+        m[1] = ctx.as_ptr() as usize;
+        assert_eq!(C_SignInit(session, m.as_mut_ptr() as *mut u8, priv_h), CKR_OK);
+        let mut sig = vec![0u8; 8192];
+        let mut sig_len = sig.len() as u32;
+        assert_eq!(
+            C_Sign(session, msg.as_ptr() as *mut u8, msg.len() as u32, sig.as_mut_ptr(), &mut sig_len),
+            CKR_OK
+        );
+        sig.truncate(sig_len as usize);
+
+        let (mut m2, ctx2) = hash_mech(CKM_HASH_ML_DSA, CKM_SHA256);
+        m2[1] = ctx2.as_ptr() as usize;
+        assert_eq!(C_VerifyInit(session, m2.as_mut_ptr() as *mut u8, pub_h), CKR_OK);
+        assert_eq!(
+            C_Verify(session, msg.as_ptr() as *mut u8, msg.len() as u32, sig.as_ptr() as *mut u8, sig.len() as u32),
+            CKR_OK
+        );
+
+        // Interop: a signature made via the GENERIC mechanism verifies
+        // under the SPECIFIC mechanism name too (remap makes them the same
+        // internal mech_type).
+        let mut m3: [usize; 3] = [CKM_HASH_ML_DSA_SHA256 as usize, 0, 0];
+        assert_eq!(C_VerifyInit(session, m3.as_mut_ptr() as *mut u8, pub_h), CKR_OK);
+        assert_eq!(
+            C_Verify(session, msg.as_ptr() as *mut u8, msg.len() as u32, sig.as_ptr() as *mut u8, sig.len() as u32),
+            CKR_OK
+        );
+    }
+
+    #[test]
+    fn generic_hash_slh_dsa_requires_the_hash_param() {
+        let _guard = test_lock::acquire();
+        let (session, _pub_h, priv_h) = setup();
+        // No parameter at all — the generic mechanism cannot select a digest.
+        let mut m: [usize; 3] = [CKM_HASH_SLH_DSA as usize, 0, 0];
+        assert_eq!(
+            C_SignInit(session, m.as_mut_ptr() as *mut u8, priv_h),
+            CKR_MECHANISM_PARAM_INVALID
+        );
+    }
+
+    #[test]
+    fn generic_hash_ml_dsa_rejects_unknown_hash_value() {
+        let _guard = test_lock::acquire();
+        let (session, _pub_h, priv_h) = setup();
+        // 0xdead_beef names no real digest mechanism.
+        let (mut m, ctx) = hash_mech(CKM_HASH_ML_DSA, 0xdead_beef);
+        m[1] = ctx.as_ptr() as usize;
+        assert_eq!(
+            C_SignInit(session, m.as_mut_ptr() as *mut u8, priv_h),
+            CKR_MECHANISM_PARAM_INVALID
+        );
+    }
+
+    #[test]
+    fn generic_hash_ml_dsa_rejects_shake_as_hash_value() {
+        let _guard = test_lock::acquire();
+        let (session, _pub_h, priv_h) = setup();
+        // SHAKE128 has no standalone digest CKM_ identifier — only reachable
+        // via its own dedicated CKM_HASH_ML_DSA_SHAKE128 mechanism.
+        let (mut m, ctx) = hash_mech(CKM_HASH_ML_DSA, CKM_HASH_ML_DSA_SHAKE128);
+        m[1] = ctx.as_ptr() as usize;
+        assert_eq!(
+            C_SignInit(session, m.as_mut_ptr() as *mut u8, priv_h),
+            CKR_MECHANISM_PARAM_INVALID
+        );
     }
 }

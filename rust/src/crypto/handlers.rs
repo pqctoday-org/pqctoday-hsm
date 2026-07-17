@@ -624,6 +624,30 @@ pub fn build_slhdsa_spki(ckp: u32, pk: &[u8]) -> Vec<u8> {
 
 // ── Pre-Hash Dispatch Helpers ────────────────────────────────────────────────
 
+/// PKCS#11 v3.2 §6.67.7/§6.69.7 — map a `CK_HASH_SIGN_ADDITIONAL_CONTEXT.hash`
+/// value onto this engine's concrete hash-specific pre-hash mechanism.
+/// `base` is the GENERIC mechanism the caller requested (CKM_HASH_ML_DSA or
+/// CKM_HASH_SLH_DSA); `hash` is the digest mechanism named in the param.
+/// Only the 8 real digest mechanisms are legal here — SHAKE128/256 have no
+/// standalone CKM_ digest identifier in the v3.2 header (only a KDF variant,
+/// CKM_SHAKE_128/256_KEY_DERIVATION), so SHAKE pre-hash is reachable ONLY via
+/// its own dedicated CKM_HASH_{ML,SLH}_DSA_SHAKE128/256 mechanism, never
+/// through this generic param path. Returns None for anything else.
+pub fn map_generic_hash_mech(base: u32, hash: u32) -> Option<u32> {
+    let is_ml_dsa = base == CKM_HASH_ML_DSA;
+    match hash {
+        CKM_SHA224 => Some(if is_ml_dsa { CKM_HASH_ML_DSA_SHA224 } else { CKM_HASH_SLH_DSA_SHA224 }),
+        CKM_SHA256 => Some(if is_ml_dsa { CKM_HASH_ML_DSA_SHA256 } else { CKM_HASH_SLH_DSA_SHA256 }),
+        CKM_SHA384 => Some(if is_ml_dsa { CKM_HASH_ML_DSA_SHA384 } else { CKM_HASH_SLH_DSA_SHA384 }),
+        CKM_SHA512 => Some(if is_ml_dsa { CKM_HASH_ML_DSA_SHA512 } else { CKM_HASH_SLH_DSA_SHA512 }),
+        CKM_SHA3_224 => Some(if is_ml_dsa { CKM_HASH_ML_DSA_SHA3_224 } else { CKM_HASH_SLH_DSA_SHA3_224 }),
+        CKM_SHA3_256 => Some(if is_ml_dsa { CKM_HASH_ML_DSA_SHA3_256 } else { CKM_HASH_SLH_DSA_SHA3_256 }),
+        CKM_SHA3_384 => Some(if is_ml_dsa { CKM_HASH_ML_DSA_SHA3_384 } else { CKM_HASH_SLH_DSA_SHA3_384 }),
+        CKM_SHA3_512 => Some(if is_ml_dsa { CKM_HASH_ML_DSA_SHA3_512 } else { CKM_HASH_SLH_DSA_SHA3_512 }),
+        _ => None,
+    }
+}
+
 /// Returns true if `mech` is one of the CKM_HASH_ML_DSA_* pre-hash variants.
 pub fn is_prehash_ml_dsa(mech: u32) -> bool {
     matches!(

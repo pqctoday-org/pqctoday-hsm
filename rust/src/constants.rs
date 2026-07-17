@@ -95,6 +95,25 @@ pub const CKO_SECRET_KEY: u32 = 0x0000_0004;
 /// key-specific validation applies (state::validate_create_template already
 /// falls through to `Ok(())` for any non-key class).
 pub const CKO_TRUST: u32 = 0x0000_000b;
+/// PKCS#11 Profiles v3.2 §3 — a token exposes one `CKO_PROFILE` object per
+/// conformance profile it supports, each with a fixed `CKA_PROFILE_ID`.
+/// Token-resident, public, read-only (state::init_profile_objects) — never
+/// client-created (validate_create_template rejects it explicitly).
+pub const CKO_PROFILE: u32 = 0x0000_0009;
+
+/// PKCS#11 Profiles v3.2 §3 Table 1 — identifies which conformance profile
+/// a `CKO_PROFILE` object represents. Read-only, set once at object creation.
+pub const CKA_PROFILE_ID: u32 = 0x0000_0601;
+
+// ── PKCS#11 Profiles v3.2 §3 Table 1 — CK_PROFILE_ID values ──────────────────
+
+pub const CKP_INVALID_ID: u32 = 0x0000_0000;
+pub const CKP_BASELINE_PROVIDER: u32 = 0x0000_0001;
+pub const CKP_EXTENDED_PROVIDER: u32 = 0x0000_0002;
+pub const CKP_AUTHENTICATION_TOKEN: u32 = 0x0000_0003;
+pub const CKP_PUBLIC_CERTIFICATES_TOKEN: u32 = 0x0000_0004;
+pub const CKP_COMPLETE_PROVIDER: u32 = 0x0000_0005;
+pub const CKP_HKDF_TLS_TOKEN: u32 = 0x0000_0006;
 
 // ── PKCS#11 v3.2 §4.7 — CK_TRUST values ──────────────────────────────────────
 
@@ -289,9 +308,11 @@ pub const CKH_DETERMINISTIC_REQUIRED: u32 = 0x0000_0002;
 
 // SHA Digest
 pub const CKM_SHA256: u32 = 0x0000_0250;
+pub const CKM_SHA224: u32 = 0x0000_0255;
 pub const CKM_SHA384: u32 = 0x0000_0260;
 pub const CKM_SHA512: u32 = 0x0000_0270;
 pub const CKM_SHA3_256: u32 = 0x0000_02B0;
+pub const CKM_SHA3_224: u32 = 0x0000_02B5;
 pub const CKM_SHA3_384: u32 = 0x0000_02C0;
 pub const CKM_SHA3_512: u32 = 0x0000_02D0;
 // RIPEMD-160 (historical) — digest + HMAC.
@@ -625,15 +646,13 @@ pub const SUPPORTED_MECHS: &[u32] = &[
     CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN,
     CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE,
     // ML-DSA (FIPS 204) — pure + pre-hash.
-    // NOTE: the GENERIC CKM_HASH_ML_DSA (0x1F) is intentionally NOT advertised
-    // (P1): it selects the pre-hash via the CK_HASH_SIGN_ADDITIONAL_CONTEXT.hash
-    // param, which the sign path does not yet parse — advertising it would be
-    // advertise-and-fail (C_SignInit ok, C_Sign → CKR_MECHANISM_INVALID). The
-    // hash-SPECIFIC variants below (CKM_HASH_ML_DSA_SHA256 …) provide the same
-    // capability and ARE implemented. Re-add 0x1F when the generic param parse
-    // lands. Its GetMechanismInfo arm is kept so a client can still probe it.
+    // GENERIC CKM_HASH_ML_DSA (0x1F) selects the pre-hash digest via
+    // CK_HASH_SIGN_ADDITIONAL_CONTEXT.hash (ffi::remap_generic_hash_mech
+    // parses it and remaps onto the matching hash-SPECIFIC mechanism below,
+    // same pattern as the CKM_EDDSA -> CKM_EDDSA_PH phFlag remap).
     CKM_ML_DSA_KEY_PAIR_GEN,
     CKM_ML_DSA,
+    CKM_HASH_ML_DSA,
     CKM_HASH_ML_DSA_SHA224,
     CKM_HASH_ML_DSA_SHA256,
     CKM_HASH_ML_DSA_SHA384,
@@ -645,10 +664,10 @@ pub const SUPPORTED_MECHS: &[u32] = &[
     CKM_HASH_ML_DSA_SHAKE128,
     CKM_HASH_ML_DSA_SHAKE256,
     // SLH-DSA (FIPS 205) — pure + pre-hash.
-    // Generic CKM_HASH_SLH_DSA (0x34) unadvertised for the same reason as
-    // CKM_HASH_ML_DSA above (P1); the hash-specific variants are implemented.
+    // Generic CKM_HASH_SLH_DSA (0x34) — same remap as CKM_HASH_ML_DSA above.
     CKM_SLH_DSA_KEY_PAIR_GEN,
     CKM_SLH_DSA,
+    CKM_HASH_SLH_DSA,
     CKM_HASH_SLH_DSA_SHA224,
     CKM_HASH_SLH_DSA_SHA256,
     CKM_HASH_SLH_DSA_SHA384,
