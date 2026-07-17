@@ -1660,7 +1660,7 @@ checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
 
 [[package]]
 name = "softhsmrustv3"
-version = "0.13.1"
+version = "0.14.0"
 dependencies = [
  "aes 0.8.4",
  "aes-gcm",
