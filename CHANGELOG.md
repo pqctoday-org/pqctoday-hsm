@@ -10,6 +10,56 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **`Register(Certificate)` was unreachable on `wasm32`.**
+  `register_import_export.rs`'s Register/Import call into
+  `certify::project_certificate_to_engine` unconditionally, but the
+  `certify` module is `#[cfg(feature = "native")]`-gated (its CSR/rcgen
+  issuance logic doesn't cross-compile to wasm32) — no wasm32 build of
+  the `kmip` crate had been attempted since certificate support was
+  added, so this was silently broken. Extracted the wasm-safe projection
+  helper (no `rcgen`/`aws_lc_rs` dependency) into its own
+  always-compiled `cert_projection` module; `certify.rs`'s own native
+  call sites are unaffected.
+- **`Register(Certificate)` didn't share its linked key's `CKA_ID`.**
+  Unlike the native `Certify` path (`store_certificate`), which reuses
+  the linked key's own `CKA_ID` so a raw PKCS#11 client can match
+  cert-to-key by `CKA_ID` (the strongSwan pattern), `Register` with a
+  `PublicKeyLink` always minted a fresh one — and since `Certify` is
+  native-only, `Register` was the only wasm-reachable path that could
+  carry this pattern into the browser. Fixed: `Register(Certificate)`
+  now reuses a linked `PublicKey`'s `CKA_ID` when supplied, falling back
+  to a fresh one otherwise.
+- **`FrodoKEM`/`Classic McEliece` encapsulate/decapsulate overflowed the
+  wasm shadow stack.** `CKM_PQCTODAY_FRODOKEM_ENCAPSULATE` /
+  `CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE` (BSI TR-02102-1
+  §2.4.1/§2.4.2) trapped with "memory access out of bounds" in the wasm
+  build — a genuine wasm32 shadow-stack overflow (Classic McEliece's
+  `mceliece6688128` public key alone is over 1MB, handled via on-stack
+  buffers, exceeding wasm's default 1MB shadow stack even in
+  `--release`). Never caught because no existing test exercised these
+  two mechanisms through the wasm build (FrodoKEM-1344 was untested even
+  natively). Fixed by bumping `build-wasm-bundle.sh`'s linker
+  stack-size flag to 8MB across every build profile; adds a permanent
+  native `frodokem_1344_aes_round_trip` test.
+
+### Added
+
+- **`raw_pkcs11_encrypt_probe`** — a wasm-bindgen export on
+  `KmipPlayground` that bypasses the KMIP dispatcher and CACP policy
+  plane entirely, calling straight into the engine's native PKCS#11
+  Encrypt path against a KMIP object's own engine handle. Demonstrates
+  that PKCS#11 v3.2 §4.8 Table 13 (`CKA_ALLOWED_MECHANISMS`) is enforced
+  by the engine itself, not just by KMIP/CACP's policy layer.
+- **`register_certificate_demo`** and **`engine_certificate_attributes`**
+  wasm exports — register a caller-supplied certificate DER linked to an
+  existing public key, and read back a Certificate object's real
+  engine-side PKCS#11 attributes (`CKA_ID`, `CKA_VALUE`, `CKA_SUBJECT`,
+  `CKA_ISSUER`, `CKA_SERIAL_NUMBER`), not just the KMIP store record.
+
+## [0.14.0] — 2026-07-11
+
+### Fixed
+
 - **KMIP-created RSA/ECDSA keys could not Sign or Verify at all.** The
   `CKA_ALLOWED_MECHANISMS` whitelist auto-derived at key-creation time stored
   a coarse mechanism (bare `CKM_RSA_PKCS_PSS` / `CKM_ECDSA`), while
