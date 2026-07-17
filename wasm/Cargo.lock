@@ -1321,7 +1321,7 @@ dependencies = [
 
 [[package]]
 name = "pqctoday-kmip"
-version = "0.13.1"
+version = "0.14.0"
 dependencies = [
  "anyhow",
  "bitflags",
@@ -1705,7 +1705,7 @@ checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
 
 [[package]]
 name = "softhsmrustv3"
-version = "0.13.1"
+version = "0.14.0"
 dependencies = [
  "aes 0.8.4",
  "aes-gcm",
