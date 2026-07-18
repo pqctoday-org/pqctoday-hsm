@@ -6,28 +6,29 @@
 //! identities — not by calling op handlers directly with a hand-built
 //! `AuthContext`.
 //!
-//! STATUS (2026-07-18, rev 2 — F7.3/F7.4 owner enforcement landed): the
-//! two gates now compose. Every by-UID handler wired so far (§F7's
-//! dispatcher slice: `CreateKeyPair`, `Sign`, `Encapsulate`,
+//! STATUS (2026-07-18, rev 3 — Encrypt/Decrypt wired, §J): the two
+//! gates compose. Every by-UID handler wired so far (§F7's dispatcher
+//! slice, plus §J's addition: `CreateKeyPair`, `Sign`, `Encapsulate`,
 //! `Decapsulate`, `ReKey`, `ReKeyKeyPair`, `Get`, `GetAttributes`,
-//! `Destroy`, `Locate`) does an owner check
-//! (`helpers::authorize_object` / Locate's predicate filter) against the
-//! KMIP store BEFORE anything else, using the SAME not-found error each
-//! operation already used for a genuinely missing UID — so "exists but
-//! not yours" and "doesn't exist" are indistinguishable, satisfying the
-//! anti-oracle requirement at the KMIP layer, not just the engine layer.
-//! `Sign`/`Encapsulate`/`Decapsulate` additionally still hit the
+//! `GetAttributeList`, `Destroy`, `Locate`, `Encrypt`, `Decrypt`) does
+//! an owner check (`helpers::authorize_object` / Locate's predicate
+//! filter) against the KMIP store BEFORE anything else, using the SAME
+//! not-found error each operation already used for a genuinely missing
+//! UID — so "exists but not yours" and "doesn't exist" are
+//! indistinguishable, satisfying the anti-oracle requirement at the
+//! KMIP layer, not just the engine layer. `Sign`/`Encapsulate`/
+//! `Decapsulate`/`Encrypt`/`Decrypt` additionally still hit the
 //! ENGINE's own token-scoped handle lookup (§F2–F5) as a second,
 //! independent barrier — defense in depth, verified below by checking
 //! that the fully-wired path denies at the FIRST gate (the KMIP owner
 //! check), not by relying on the engine gate alone.
 //!
-//! ~19 of the original ~28 `deps.engine_session`-reading files remain
-//! unwired for SESSION resolution (Encrypt, Decrypt, Certify, the
-//! composite/hybrid-cert family, split_key, derive_key's own creation
-//! path, attribute mutation, mac/hash, rng/pkcs11, register/import) —
-//! see the plan's §H3/H4 for the exact list. This file only asserts
-//! properties of the operations it actually exercises.
+//! ~17 of the original ~28 `deps.engine_session`-reading files remain
+//! unwired for SESSION resolution (Certify, the composite/hybrid-cert
+//! family, split_key, derive_key's own creation path, attribute
+//! mutation, mac/hash, rng/pkcs11, register/import) — see the plan's
+//! §H3/§J for the exact list. This file only asserts properties of the
+//! operations it actually exercises.
 
 #[cfg(test)]
 mod tests {
@@ -35,8 +36,9 @@ mod tests {
     use crate::dispatcher::{dispatch_with_transport_identity, one_off_request};
     use crate::error::ResultReason;
     use crate::kmip30::{
-        ActivateRequest, Attribute, CreateKeyPairRequest, GetAttributesRequest, KmipAlgorithm,
-        RequestPayload, ResponsePayload, ResultStatus, SignRequest, UsageMask,
+        ActivateRequest, Attribute, CreateKeyPairRequest, CreateRequest, DecryptRequest,
+        EncryptRequest, GetAttributesRequest, KmipAlgorithm, ObjectType, RequestPayload,
+        ResponsePayload, ResultStatus, SignRequest, UsageMask,
     };
     use crate::ops::deps::{Deps, DepsConfig, StrictTenantConfig, TenancyMode};
     use crate::ops::helpers::engine_lock;
@@ -365,5 +367,139 @@ mod tests {
             !bob_found.uids.contains(&alice_uid),
             "Bob must NOT see Alice's key in his Locate results"
         );
+    }
+
+    /// §J (Encrypt/Decrypt now wired) — two real engine sessions again
+    /// (Strict mode, slots 90/91, via `two_tenant_deps`), proving BOTH
+    /// gates now apply to the symmetric-crypto path the way they
+    /// already did for Sign: Bob's Encrypt/Decrypt against Alice's key
+    /// UID fails at the KMIP owner check (`authorize_object`) before
+    /// `resolve_tenant_session` or the engine's own token-scoping is
+    /// ever reached, and Alice's own round trip through the real
+    /// engine still works end to end.
+    #[test]
+    fn cross_tenant_encrypt_and_decrypt_fail_closed() {
+        let _guard = engine_lock();
+        let (deps, alice, bob) = two_tenant_deps();
+
+        let create_req = one_off_request(RequestPayload::Create(CreateRequest {
+            object_type: ObjectType::SymmetricKey,
+            template_attribute: vec![
+                Attribute::CryptographicAlgorithm(KmipAlgorithm::Aes),
+                Attribute::CryptographicLength(256),
+                Attribute::CryptographicUsageMask(UsageMask::ENCRYPT | UsageMask::DECRYPT),
+            ],
+        }));
+        let create_resp = dispatch_with_transport_identity(&deps, create_req, Some(alice.clone()));
+        assert_eq!(
+            create_resp.batch_items[0].result_status,
+            ResultStatus::Success,
+            "Alice creates her own AES key: {:?}",
+            create_resp.batch_items[0].result_reason
+        );
+        let ResponsePayload::Create(created) = create_resp.batch_items[0].payload.clone().unwrap() else {
+            panic!("expected Create response");
+        };
+        let activate_req = one_off_request(RequestPayload::Activate(ActivateRequest {
+            uid: created.uid.clone(),
+        }));
+        let activate_resp = dispatch_with_transport_identity(&deps, activate_req, Some(alice.clone()));
+        assert_eq!(activate_resp.batch_items[0].result_status, ResultStatus::Success);
+
+        // Alice encrypts with her own key through her own real engine
+        // session (slot 90) — proves the wiring works end to end, not
+        // just that it compiles.
+        let iv = vec![0x11u8; 12];
+        let alice_enc_req = one_off_request(RequestPayload::Encrypt(EncryptRequest {
+            uid: created.uid.clone(),
+            data: b"alice's secret".to_vec(),
+            iv: Some(iv.clone()),
+            cryptographic_parameters: None,
+            aad: None,
+            init_indicator: None,
+            final_indicator: None,
+            correlation_value: None,
+        }));
+        let alice_enc_resp = dispatch_with_transport_identity(&deps, alice_enc_req, Some(alice.clone()));
+        assert_eq!(
+            alice_enc_resp.batch_items[0].result_status,
+            ResultStatus::Success,
+            "Alice can Encrypt with her own key: {:?}",
+            alice_enc_resp.batch_items[0].result_reason
+        );
+        let ResponsePayload::Encrypt(alice_enc) = alice_enc_resp.batch_items[0].payload.clone().unwrap() else {
+            panic!("expected Encrypt response");
+        };
+
+        // Bob attempts to Encrypt using ALICE's key UID — denied at the
+        // KMIP owner check (authorize_object), the same ObjectNotFound
+        // this handler already used for a genuinely missing UID.
+        let bob_enc_req = one_off_request(RequestPayload::Encrypt(EncryptRequest {
+            uid: created.uid.clone(),
+            data: b"bob trying to use alice's key".to_vec(),
+            iv: Some(iv.clone()),
+            cryptographic_parameters: None,
+            aad: None,
+            init_indicator: None,
+            final_indicator: None,
+            correlation_value: None,
+        }));
+        let bob_enc_resp = dispatch_with_transport_identity(&deps, bob_enc_req, Some(bob.clone()));
+        assert_eq!(
+            bob_enc_resp.batch_items[0].result_status,
+            ResultStatus::OperationFailed,
+            "Bob must NOT be able to Encrypt with Alice's key"
+        );
+        assert_eq!(
+            bob_enc_resp.batch_items[0].result_reason,
+            Some(ResultReason::ObjectNotFound.to_wire_value())
+        );
+
+        // Bob attempts to Decrypt Alice's own ciphertext using her key
+        // UID — same denial, before his session (slot 91) ever gets
+        // near it.
+        let mut ct_and_tag = alice_enc.ciphertext.clone();
+        if let Some(tag) = &alice_enc.authenticated_encryption_tag {
+            ct_and_tag.extend_from_slice(tag);
+        }
+        let bob_dec_req = one_off_request(RequestPayload::Decrypt(DecryptRequest {
+            uid: created.uid.clone(),
+            data: ct_and_tag.clone(),
+            iv: Some(iv.clone()),
+            cryptographic_parameters: None,
+            aad: None,
+        }));
+        let bob_dec_resp = dispatch_with_transport_identity(&deps, bob_dec_req, Some(bob));
+        assert_eq!(
+            bob_dec_resp.batch_items[0].result_status,
+            ResultStatus::OperationFailed,
+            "Bob must NOT be able to Decrypt with Alice's key"
+        );
+        assert_eq!(
+            bob_dec_resp.batch_items[0].result_reason,
+            Some(ResultReason::ObjectNotFound.to_wire_value())
+        );
+
+        // Alice's own Decrypt of her own ciphertext still works — the
+        // owner check is a real gate, not a blanket deny, and the round
+        // trip through the real engine is intact end to end.
+        let alice_dec_req = one_off_request(RequestPayload::Decrypt(DecryptRequest {
+            uid: created.uid,
+            data: ct_and_tag,
+            iv: Some(iv),
+            cryptographic_parameters: None,
+            aad: None,
+        }));
+        let alice_dec_resp = dispatch_with_transport_identity(&deps, alice_dec_req, Some(alice));
+        assert_eq!(
+            alice_dec_resp.batch_items[0].result_status,
+            ResultStatus::Success,
+            "Alice can still Decrypt her own ciphertext: {:?}",
+            alice_dec_resp.batch_items[0].result_reason
+        );
+        let ResponsePayload::Decrypt(alice_dec) = alice_dec_resp.batch_items[0].payload.clone().unwrap() else {
+            panic!("expected Decrypt response");
+        };
+        assert_eq!(alice_dec.data, b"alice's secret");
     }
 }
