@@ -178,6 +178,7 @@ pub fn create(
     // Plane-3: real bridge call when a session is wired. K15 — the
     // audit record is emitted after the generate call with its real rv.
     let cka_id_bytes = Uuid::new_v4().as_bytes().to_vec();
+    let session = deps.resolve_tenant_session(auth.identity.as_ref()).ok();
     let digest_value = engine_generate_symmetric(
         deps,
         correlation_id,
@@ -187,6 +188,7 @@ pub fn create(
         mech,
         &cka_id_bytes,
         usage_mask.unwrap_or_else(UsageMask::empty),
+        session,
     )
     .map_err(|e| fail_err(deps, correlation_id, "Create", e))?;
 
@@ -257,7 +259,15 @@ pub fn create(
 /// session it audits the soft placeholder path and returns `None`
 /// (unit-test store record only). K15 — the `Pkcs11Call` audit record
 /// is emitted after the native call with its real rv; `op` names the
-/// calling KMIP operation in the error mapping.
+/// calling KMIP operation in the error mapping. `session` is the
+/// CALLER's already-resolved `deps.resolve_tenant_session(...)` result,
+/// not re-derived here — this helper has no `auth` context of its own,
+/// and reading the bare `deps.engine_session` field internally (as it
+/// did before this round) silently ignored tenancy: in Strict/Auto
+/// mode that field is never populated, so both Create and symmetric
+/// ReKey would fall through to the test-only placeholder path in
+/// production, leaving multi-tenant symmetric keys without real engine
+/// material on their own tenant's slot.
 pub(crate) fn engine_generate_symmetric(
     deps: &Deps,
     correlation_id: &str,
@@ -267,9 +277,10 @@ pub(crate) fn engine_generate_symmetric(
     mech: u32,
     cka_id_bytes: &[u8],
     usage_mask: UsageMask,
+    session: Option<u32>,
 ) -> Result<Option<Vec<u8>>> {
     let mut digest_value: Option<Vec<u8>> = None;
-    if let Some(session) = deps.engine_session {
+    if let Some(session) = session {
         let (native_fn, result) = match algo {
             KmipAlgorithm::Aes => {
                 let bits = key_length.unwrap_or(256);

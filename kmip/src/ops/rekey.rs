@@ -190,6 +190,7 @@ pub fn rekey(
         ))
     })?;
     let cka_id_bytes = Uuid::new_v4().as_bytes().to_vec();
+    let session = deps.resolve_tenant_session(auth.identity.as_ref()).ok();
     let digest_value = super::create::engine_generate_symmetric(
         deps,
         correlation_id,
@@ -199,6 +200,7 @@ pub fn rekey(
         mech,
         &cka_id_bytes,
         usage,
+        session,
     )
     .map_err(&fail)?;
 
