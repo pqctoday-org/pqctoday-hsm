@@ -90,6 +90,29 @@ impl AsyncJob {
         st.stage = crate::kmip30::ProcessingStage::InProcess;
     }
 
+    /// Atomically transition `Submitted` → `InProcess`, but ONLY if
+    /// still `Submitted`. Returns `false` (state left untouched) if the
+    /// job already left `Submitted` — e.g. `try_cancel_if_submitted`
+    /// won the race against the executor and already marked it
+    /// `Completed`. The executor (real background thread or the eager
+    /// inline fallback) MUST check this before running the real
+    /// operation: calling the unconditional `mark_in_process` here
+    /// instead would clobber an already-recorded cancellation outcome
+    /// with the real result moments later, and briefly resurrect an
+    /// already-`Completed` job's stage back to `InProcess` in between —
+    /// a genuine window where a concurrent `Poll` (sees `Completed`)
+    /// and a `QueryAsynchronousRequests` running immediately after (sees
+    /// the resurrected `InProcess`) visibly disagree about whether the
+    /// same job is done.
+    pub fn try_start_if_submitted(&self) -> bool {
+        let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if st.stage != crate::kmip30::ProcessingStage::Submitted {
+            return false;
+        }
+        st.stage = crate::kmip30::ProcessingStage::InProcess;
+        true
+    }
+
     pub fn mark_completed(&self, outcome: crate::error::Result<crate::kmip30::ResponsePayload>) {
         {
             let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());

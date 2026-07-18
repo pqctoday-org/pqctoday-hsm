@@ -619,16 +619,28 @@ fn spawn_or_run_async_job(
         let spawned = std::thread::Builder::new()
             .name("kmip-async-job".into())
             .spawn(move || {
-                job_for_thread.mark_in_process();
+                // Cancel may have already won the Submitted→Completed
+                // race by the time the OS actually schedules this
+                // thread — if so, the real operation must never run
+                // (it would clobber the recorded cancellation outcome
+                // moments later) and the job's state must not be
+                // touched at all.
+                if !job_for_thread.try_start_if_submitted() {
+                    return;
+                }
                 let outcome = handle_payload(&deps_arc, payload, &correlation_id, &auth);
                 job_for_thread.mark_completed(outcome);
             });
         if spawned.is_ok() {
             return;
         }
-        job.mark_completed(Err(KmipError::internal(
-            "failed to spawn background async-job thread",
-        )));
+        // Same race, narrower window: Cancel could have completed the
+        // job between the `insert` above and this failed `spawn` call.
+        if job.try_start_if_submitted() {
+            job.mark_completed(Err(KmipError::internal(
+                "failed to spawn background async-job thread",
+            )));
+        }
         return;
     }
     run_async_job_eagerly(deps, job, payload, correlation_id, &auth);
@@ -647,7 +659,15 @@ fn run_async_job_eagerly(
     correlation_id: String,
     auth: &crate::server::auth::AuthContext,
 ) {
-    job.mark_in_process();
+    // This path runs synchronously inside `enqueue_async_job`, before
+    // its caller could ever have dispatched a `Cancel` for this job —
+    // `try_start_if_submitted` can't actually observe `false` here
+    // today. Using it anyway (not the unconditional `mark_in_process`)
+    // keeps this symmetric with the real-thread executor above and
+    // stays correct if that ordering assumption ever changes.
+    if !job.try_start_if_submitted() {
+        return;
+    }
     let outcome = handle_payload(deps, payload, &correlation_id, auth);
     job.mark_completed(outcome);
 }
