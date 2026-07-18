@@ -166,25 +166,22 @@ async fn handle_conn(
         .and_then(|der| crate::ops::der_x509::extract_subject_cn(der.as_ref()))
         .map(|cn| crate::server::auth::Identity { username: cn });
     let frame_bytes = read_one_frame(&mut tls_stream).await?;
-    // Single decode (K15) — the decoded message is used both for the
-    // §9.10 `Maximum Response Size` capture and for dispatch.
-    let (response, max_resp_size) = match decode_request_message(&frame_bytes) {
+    // §9.10 `Maximum Response Size` enforcement now lives inside
+    // `dispatch_with_transport_identity` itself (`enforce_max_response_size`,
+    // transport-agnostic — the wasm `submit()` entry point applies the same
+    // check), so the response coming back here is already correctly capped.
+    let response = match decode_request_message(&frame_bytes) {
         Ok(request) => {
-            // KMIP 3.0 §9.10 — capture `Maximum Response Size` from the
-            // header (when present) BEFORE dispatch so we can compare
-            // it against the encoded response below.
-            let max_resp_size = request.header.maximum_response_size.filter(|&n| n > 0);
             // S-8 — the dispatch is synchronous and does real crypto (ML-DSA /
             // ML-KEM, plus the engine's global mutex). Run it on the blocking
             // pool so a slow op can't stall the tokio reactor and starve other
             // connections.
             let deps = Arc::clone(&deps);
-            let response = tokio::task::spawn_blocking(move || {
+            tokio::task::spawn_blocking(move || {
                 dispatch_with_transport_identity(&deps, request, transport_identity)
             })
             .await
-            .map_err(|e| ServerError::Io(std::io::Error::other(format!("dispatch task failed: {e}"))))?;
-            (response, max_resp_size)
+            .map_err(|e| ServerError::Io(std::io::Error::other(format!("dispatch task failed: {e}"))))?
         }
         // KMIP 3.0 §6.4: a wire-decode failure (unknown tag, unknown enum
         // value, malformed length, etc.) must produce a structured
@@ -192,53 +189,12 @@ async fn handle_conn(
         // — NOT a TCP/TLS connection drop. Closing the socket without a
         // response makes the client see a transport error instead of a
         // proper protocol-level rejection (and breaks OASIS conformance).
-        Err(e) => (wire_error_response(&e), None),
+        Err(e) => wire_error_response(&e),
     };
     let response_bytes = encode_response_message(&response);
-    // KMIP 3.0 §9.10 — when the encoded response would exceed the
-    // client's `Maximum Response Size`, send a single-item
-    // `OperationFailed / ResponseTooLarge` response instead.
-    let response_bytes = if let Some(limit) = max_resp_size {
-        if response_bytes.len() > limit as usize {
-            // Echo the first BatchItem's Operation per §8.2.3 so the
-            // client can correlate the failure with its original
-            // request.
-            let echoed_op = response.batch_items.first().and_then(|bi| bi.operation);
-            let small = response_too_large(response_bytes.len(), limit as usize, echoed_op);
-            encode_response_message(&small)
-        } else {
-            response_bytes
-        }
-    } else {
-        response_bytes
-    };
     tls_stream.write_all(&response_bytes).await?;
     tls_stream.shutdown().await?;
     Ok(())
-}
-
-/// Build a single-BatchItem ResponseMessage carrying
-/// `OperationFailed / ResponseTooLarge` per KMIP 3.0 §9.10 +
-/// §11. Used when the caller-supplied `Maximum Response Size` is
-/// smaller than the actually-encoded response.
-fn response_too_large(
-    actual: usize,
-    limit: usize,
-    operation: Option<crate::kmip30::Operation>,
-) -> crate::kmip30::ResponseMessage {
-    use crate::error::ResultReason;
-    use crate::kmip30::{ResponseBatchItem, ResponseHeader, ResponseMessage, ResultStatus};
-    ResponseMessage {
-        header: ResponseHeader::v3_now(),
-        batch_items: vec![ResponseBatchItem {
-            operation,
-            result_status: ResultStatus::OperationFailed,
-            result_reason: Some(ResultReason::ResponseTooLarge as u32),
-            result_message: Some(format!("TOO_LARGE: {actual} bytes > limit {limit}")),
-            payload: None,
-            asynchronous_correlation_value: None,
-        }],
-    }
 }
 
 /// Build a KMIP 3.0 §6.4 error ResponseMessage for an unparseable request.

@@ -134,6 +134,10 @@ pub fn dispatch_with_transport_identity(
         .header
         .batch_error_continuation_option
         .unwrap_or(BatchErrorContinuationOption::Stop);
+    // §9.10 `Maximum Response Size` — captured now (before `request.header`
+    // goes out of scope) so the assembled response can be checked against it
+    // just before returning. See `enforce_max_response_size` below.
+    let max_resp_size = request.header.maximum_response_size;
     let mut state = BatchState::default();
     let mut items: Vec<ResponseBatchItem> = Vec::with_capacity(request.batch_items.len());
     for item in request.batch_items {
@@ -164,9 +168,50 @@ pub fn dispatch_with_transport_identity(
             break;
         }
     }
+    enforce_max_response_size(
+        ResponseMessage {
+            header: ResponseHeader::v3_now(),
+            batch_items: items,
+        },
+        max_resp_size,
+    )
+}
+
+/// KMIP 3.0 §9.10 — when the fully-assembled response would encode to more
+/// bytes than the client's declared `Maximum Response Size`, replace it with
+/// a single-item `OperationFailed / ResponseTooLarge` response instead.
+///
+/// Transport-agnostic: operates on the already-dispatched [`ResponseMessage`]
+/// and the request header's declared limit, so it applies equally to the
+/// native TLS listener and the wasm `submit()` entry point — there is no
+/// actual TLS/HTTP dependency here, just an encode-and-measure step that
+/// happens to run after `dispatch()` returns rather than inside it. (Kept
+/// out of the per-item loop above because the limit bounds the *whole*
+/// assembled response, not any single batch item.)
+pub fn enforce_max_response_size(
+    response: ResponseMessage,
+    max_resp_size: Option<i32>,
+) -> ResponseMessage {
+    let Some(limit) = max_resp_size.filter(|&n| n > 0) else {
+        return response;
+    };
+    let encoded_len = crate::kmip30::encode_response_message(&response).len();
+    if encoded_len <= limit as usize {
+        return response;
+    }
+    // Echo the first BatchItem's Operation per §8.2.3 so the client can
+    // correlate the failure with its original request.
+    let echoed_op = response.batch_items.first().and_then(|bi| bi.operation);
     ResponseMessage {
         header: ResponseHeader::v3_now(),
-        batch_items: items,
+        batch_items: vec![ResponseBatchItem {
+            operation: echoed_op,
+            result_status: ResultStatus::OperationFailed,
+            result_reason: Some(crate::error::ResultReason::ResponseTooLarge.to_wire_value()),
+            result_message: Some(format!("TOO_LARGE: {encoded_len} bytes > limit {limit}")),
+            payload: None,
+            asynchronous_correlation_value: None,
+        }],
     }
 }
 
@@ -283,6 +328,18 @@ fn undo_wave(deps: &Deps, state: &mut BatchState, items: &mut [ResponseBatchItem
         }
     }
     for bi in items.iter_mut().take(undone_count) {
+        // 2026-07-17 — a batch item queued as a background job
+        // (`enqueue_async_job`, §8.1.2 Mandatory) returns before the
+        // snapshot-push above ever runs for it, so nothing in the stack
+        // just replayed corresponds to it — the job is still queued (or
+        // already running) completely independently of this batch's
+        // outcome. Relabeling it OperationUndone would be a bare false
+        // claim: nothing was undone, and the job may still complete and
+        // mint whatever it was going to mint. Leave Pending items as
+        // Pending; only relabel items this wave actually rolled back.
+        if bi.result_status == ResultStatus::OperationPending {
+            continue;
+        }
         bi.result_status = ResultStatus::OperationUndone;
         // Per spec, the response payload is still returned — the
         // status field is the only thing that changes.
@@ -2008,6 +2065,78 @@ mod tests {
                 "item {i} expected Success",
             );
         }
+    }
+
+    /// §9.10 — a generous `Maximum Response Size` leaves a normal response
+    /// untouched. Transport-agnostic: this runs through `dispatch()` (the
+    /// same entry point wasm's `submit()` uses), not the native listener —
+    /// proving the check needs no TLS/HTTP transport underneath it.
+    #[test]
+    fn max_response_size_under_limit_passes_through() {
+        let d = deps();
+        let mut header = RequestHeader::v3();
+        header.maximum_response_size = Some(1_000_000);
+        let msg = crate::kmip30::RequestMessage {
+            header,
+            batch_items: vec![RequestBatchItem {
+                operation: crate::kmip30::Operation::Query,
+                payload: RP::Query(crate::kmip30::QueryRequest { functions: vec![] }),
+            }],
+        };
+        let resp = dispatch(&d, msg);
+        assert_eq!(resp.batch_items.len(), 1);
+        assert_eq!(resp.batch_items[0].result_status, ResultStatus::Success);
+    }
+
+    /// §9.10 — a `Maximum Response Size` too small for the real response
+    /// gets a single-item `OperationFailed / ResponseTooLarge` instead,
+    /// echoing the first item's Operation per §8.2.3. This is the exact
+    /// check `MSGENC-HTTPS-M-1-30.xml` / `MSGENC-JSON-M-1-30.xml` /
+    /// `MSGENC-XML-M-1-30.xml` exercise — previously only implementable in
+    /// the native TLS listener; now the same transport-agnostic path the
+    /// browser replay's `submit()` also runs.
+    #[test]
+    fn max_response_size_over_limit_replaces_with_response_too_large() {
+        let d = deps();
+        let mut header = RequestHeader::v3();
+        header.maximum_response_size = Some(1); // No real response fits in 1 byte.
+        let msg = crate::kmip30::RequestMessage {
+            header,
+            batch_items: vec![RequestBatchItem {
+                operation: crate::kmip30::Operation::Query,
+                payload: RP::Query(crate::kmip30::QueryRequest { functions: vec![] }),
+            }],
+        };
+        let resp = dispatch(&d, msg);
+        assert_eq!(resp.batch_items.len(), 1, "replaced with a single item");
+        let bi = &resp.batch_items[0];
+        assert_eq!(bi.result_status, ResultStatus::OperationFailed);
+        assert_eq!(bi.operation, Some(crate::kmip30::Operation::Query), "echoes the original op");
+        assert_eq!(
+            bi.result_reason,
+            Some(crate::error::ResultReason::ResponseTooLarge.to_wire_value())
+        );
+        assert!(bi.payload.is_none());
+    }
+
+    /// A limit of 0 or an absent header field both mean "no limit" per
+    /// §9.10 ("If the response exceeds this length... 0 means no limit
+    /// specified"-style absence semantics mirrored from the native
+    /// listener's original `filter(|&n| n > 0)` guard).
+    #[test]
+    fn max_response_size_zero_means_no_limit() {
+        let d = deps();
+        let mut header = RequestHeader::v3();
+        header.maximum_response_size = Some(0);
+        let msg = crate::kmip30::RequestMessage {
+            header,
+            batch_items: vec![RequestBatchItem {
+                operation: crate::kmip30::Operation::Query,
+                payload: RP::Query(crate::kmip30::QueryRequest { functions: vec![] }),
+            }],
+        };
+        let resp = dispatch(&d, msg);
+        assert_eq!(resp.batch_items[0].result_status, ResultStatus::Success);
     }
 
     /// §9.5 — `BatchErrorContinuationOption = Stop` (the default). After

@@ -170,7 +170,7 @@ _SPEC_EXTRACT_PATCHES: dict[str, dict[str, int]] = {
     },
     "Operation": {
         "ReKey":        0x00000004,
-        "ReKeyKeyPair": 0x0000001E,
+        "ReKeyKeyPair": 0x0000001D,
         "ReCertify":    0x00000007,
         "Encapsulate":  0x00000041,
         "Decapsulate":  0x00000042,
