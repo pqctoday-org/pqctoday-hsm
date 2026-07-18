@@ -48,14 +48,29 @@ pub fn set_initialized(v: bool) {
     INITIALIZED.store(v, std::sync::atomic::Ordering::SeqCst);
 }
 
+// PERF-BENCH FIX (2026-07-18, B4 step 1): these three were
+// `GlobalState<u32>`/`GlobalState<u64>` (a `Mutex` behind `lazy_static!`),
+// each guarding nothing but a single integer counter with a plain
+// read-increment-write body. A `Mutex` here buys no correctness the
+// hardware's own atomic RMW doesn't already give — converting to
+// `AtomicU32`/`AtomicU64` removes three more global lock acquisitions
+// from the handle/session/object-creation hot path (keygen, session open,
+// every C_CreateObject) with no behavior change: NEXT_HANDLE keeps its
+// saturate-at-MAX semantics (`fetch_update`, a safe CAS-retry loop, so
+// concurrent callers can't race past u32::MAX), and the other two keep
+// their plain wrapping-increment semantics (`fetch_add`, matching the
+// original `u32`/`u64` release-mode wrapping arithmetic exactly).
+// `AtomicU32::new`/`AtomicU64::new` are `const fn`, so these no longer
+// need `lazy_static!` at all — a plain `pub static` suffices.
+pub static NEXT_HANDLE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(100);
+/// PKCS#11 v3.2 §4.4.1 — CKA_UNIQUE_ID source. Process-monotonic and never
+/// reset (not even by C_Finalize) so identifiers stay unique across
+/// initialize/finalize cycles within one process.
+pub static UNIQUE_ID_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+pub static NEXT_SESSION_HANDLE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+
 lazy_static! {
     pub static ref OBJECTS: GlobalState<HashMap<u32, Attributes>> = GlobalState::new(HashMap::new());
-    pub static ref NEXT_HANDLE: GlobalState<u32> = GlobalState::new(100);
-    /// PKCS#11 v3.2 §4.4.1 — CKA_UNIQUE_ID source. Process-monotonic and never
-    /// reset (not even by C_Finalize) so identifiers stay unique across
-    /// initialize/finalize cycles within one process.
-    pub static ref UNIQUE_ID_COUNTER: GlobalState<u64> = GlobalState::new(1);
-    pub static ref NEXT_SESSION_HANDLE: GlobalState<u32> = GlobalState::new(1);
     pub static ref SIGN_STATE: GlobalState<HashMap<u32, (u32, u32, Vec<u8>, bool)>> = GlobalState::new(HashMap::new());
     pub static ref VERIFY_STATE: GlobalState<HashMap<u32, (u32, u32, Vec<u8>, bool)>> = GlobalState::new(HashMap::new());
     pub static ref VERIFY_SIG_STATE: GlobalState<HashMap<u32, VerifySigCtx>> = GlobalState::new(HashMap::new());
@@ -698,12 +713,7 @@ pub fn allocate_handle(mut attrs: Attributes) -> u32 {
     // enter OBJECTS, so the attribute is guaranteed on every surface (FFI,
     // native, KMIP). Unconditional insert: the attribute is read-only and any
     // caller-supplied value has already been rejected/skipped upstream.
-    let uid = UNIQUE_ID_COUNTER.with(|c| {
-        let mut c = c.borrow_mut();
-        let v = *c;
-        *c += 1;
-        v
-    });
+    let uid = UNIQUE_ID_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     // §4.4.1 — render the monotonic counter as a canonical 36-char UUID
     // (8-4-4-4-12, v4 version/variant nibbles) so CKA_UNIQUE_ID is a portable,
     // fixed-width identifier. The KMIP store keeps its own UniqueIdentifier, so
@@ -714,19 +724,21 @@ pub fn allocate_handle(mut attrs: Attributes) -> u32 {
         uid & 0xffff_ffff_ffff,
     );
     attrs.insert(CKA_UNIQUE_ID, uuid.into_bytes());
-    NEXT_HANDLE.with(|h| {
-        let mut handle = h.borrow_mut();
-        if *handle == u32::MAX {
-            // Saturate at MAX rather than wrapping; callers get 0 as sentinel for failure.
-            return 0;
-        }
-        let current = *handle;
-        *handle += 1;
-        OBJECTS.with(|objs| {
-            objs.borrow_mut().insert(current, attrs);
-        });
-        current
-    })
+    // Saturate at MAX rather than wrapping; callers get 0 as sentinel for
+    // failure. `fetch_update` is a safe CAS-retry loop: concurrent callers
+    // cannot race past u32::MAX the way a naive load-then-store could.
+    let current = match NEXT_HANDLE.fetch_update(
+        std::sync::atomic::Ordering::Relaxed,
+        std::sync::atomic::Ordering::Relaxed,
+        |h| if h == u32::MAX { None } else { Some(h + 1) },
+    ) {
+        Ok(prev) => prev,
+        Err(_) => return 0,
+    };
+    OBJECTS.with(|objs| {
+        objs.borrow_mut().insert(current, attrs);
+    });
+    current
 }
 
 pub(crate) fn get_object_value(handle: u32) -> Option<Vec<u8>> {

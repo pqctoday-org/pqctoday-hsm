@@ -579,9 +579,18 @@ macro_rules! guard_gcm_msg_param {
 // ─────────────────────────────────────────────────────────────────────────
 
 /// Native CK_C_INITIALIZE_ARGS (pkcs11t.h): four mutex callbacks, flags,
-/// pReserved. The engine is single-threaded (thread-local state) — the
-/// mutex callbacks and CKF_* locking flags are accepted and ignored;
-/// pReserved must be NULL (PKCS#11 v3.2 §5.6).
+/// pReserved. CORRECTED 2026-07-18 (was stale): the engine is NOT
+/// single-threaded — its state is a global `Mutex` shared by every
+/// thread (see `native/mod.rs` "Threading model" and
+/// `tests/multitenant_concurrency.rs`'s 20-thread contention test), so
+/// it does its own internal locking regardless of what the caller
+/// requests. Per PKCS#11 v3.2 §5.6, a library that locks internally MAY
+/// ignore the caller's `CKF_OS_LOCKING_OK` flag and mutex callbacks — so
+/// accepting and ignoring them here is conformant, not a shortcut.
+/// pReserved must still be NULL (this crate has no C_Initialize
+/// extension reachable through the native ABI; the wasm-facing
+/// `ffi::C_Initialize` has a separate, `#[cfg(feature = "acvp")]`-gated
+/// pReserved use for test/KAT tooling only).
 #[repr(C)]
 struct CK_C_INITIALIZE_ARGS {
     CreateMutex: *mut c_void,

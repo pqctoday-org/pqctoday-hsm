@@ -35,10 +35,40 @@
 //!
 //! ## Threading model
 //!
-//! Native callers MUST pin all `native::*` calls to one OS thread (the
-//! engine's `OBJECTS` / `SESSIONS` storage is `thread_local!`). Phase 4's
-//! `Session: !Send` in `pqctoday-hsm/kmip/` already aligns the KMIP
-//! server with this constraint. See `docs/NATIVE_API.md` §4 (Option A).
+//! CORRECTED 2026-07-18 (was stale — see the hsm-perf-bench plan,
+//! `rust-hsm-perf-bench-scenario-plan-07182026.md` §B7, and the
+//! `test_lock` doc comment below, which already had this right). Engine
+//! storage (`OBJECTS`, `SESSIONS`, `TOKEN_STORE`, and everything else in
+//! `state.rs`) is `lazy_static! ref _: Mutex<T>` — **global, not
+//! `thread_local!`** — so `native::*` calls from multiple OS threads are
+//! memory-safe with no pinning requirement. This is empirically verified,
+//! not just source-read: `tests/multitenant_concurrency.rs` drives 20
+//! threads concurrently through keygen/sign/verify on one shared token
+//! (real contention on the global `OBJECTS` mutex) with zero corruption.
+//! `pqctoday-hsm/kmip/` has no `Session: !Send` wrapper (never
+//! implemented — the pinned-thread "Option A" design in
+//! `docs/NATIVE_API.md` §4 describes a plan that was superseded by the
+//! simpler global-mutex approach the code actually took); KMIP already
+//! calls `native::*` from tokio's multi-threaded blocking pool today.
+//!
+//! What IS still true and load-bearing: two DIFFERENT sessions must not
+//! share one multi-part operation across threads (SIGN_STATE etc. are
+//! keyed by session handle, not thread — see `state.rs`), and PKCS#11
+//! login state is per-TOKEN, not per-session (§5.6) — only the first
+//! `C_Login` on a token succeeds, so concurrent callers on one token
+//! should log in once, then open sessions without repeating login.
+//!
+//! One CONFIRMED, currently-open gap: unlike `ffi::C_*` (which enforces
+//! `state::can_access_object` token-scoping at 8 call sites), `native::*`
+//! does NOT enforce it — a native caller holding a numeric object handle
+//! can operate on it regardless of which slot/tenant it belongs to. KMIP
+//! uses `native::*` exclusively with one shared `engine_session` for
+//! every client and has no compensating ownership check of its own
+//! (verified: no owner/Identity field in the KeyStore trait, no
+//! ownership check in the dispatcher). This must be closed — either by
+//! adding the `can_access_object` gate to `native::*`, or by KMIP
+//! tracking per-Identity object ownership — before any multi-tenant
+//! design that relies on native-surface isolation is real.
 
 pub mod agree;
 pub mod derive;
