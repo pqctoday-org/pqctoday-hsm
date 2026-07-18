@@ -179,11 +179,15 @@ Three tabs; a **Guided/Expert** toggle gates the advanced controls.
   (`x-` prefix optional): e.g. `pqctoday-cnsa-classification=Secret` under
   CNSA 2.0, `pqctoday-hybrid-partner=ECDH-P384` for a standalone PQC KEM
   under BSI. Tag-gated policies are untestable without this.
-- **Spec-only algorithms** (LMS, HSS, XMSS, XMSS-MT, Ed25519, X25519,
-  FrodoKEM, Classic-McEliece): the policy verdict is real, the keygen is
-  not — the in-browser engine can't instantiate them; picking one shows the
-  policy decision without running crypto. Use them to prove e.g. "CNSA
-  allows LMS but denies HSS".
+- **Spec-only algorithms** (LMS, HSS, XMSS, XMSS-MT, X25519): the policy
+  verdict is real, the keygen is not — the in-browser engine can't
+  instantiate them; picking one shows the policy decision without running
+  crypto. Use them to prove e.g. "CNSA allows LMS but denies HSS". Of these,
+  only XMSS is an actual KMIP 3.0 `CryptographicAlgorithm` value — LMS, HSS,
+  and XMSS-MT exist only as CACP policy vocabulary (no KMIP codepoint in
+  either draft); X25519 is a WD19-only addition, absent from CSD01. Ed25519,
+  FrodoKEM, and Classic-McEliece are NOT in this list — they're genuinely
+  runnable (keygen/sign/encapsulate wired through the engine).
 
 ### 3.2 Policy tab
 
@@ -210,7 +214,7 @@ A batch is **one** KMIP Request Message carrying N operations:
 
 - **Recipes** (macros): provision-and-sign, provision-KEM, atomic-undo,
   inventory. Load one, then edit the sequence.
-- **`$IDPlaceholder`** (KMIP §6.4): an item's `uid` referencing the object
+- **`$IDPlaceholder`** (KMIP §6.1 preamble): an item's `uid` referencing the object
   the previous item created — `CreateKeyPair → Activate($IDPlaceholder) →
   Sign($IDPlaceholder)` with no copy-pasted UIDs.
 - **Error continuation** (KMIP §9.5): `Continue` (run everything), `Stop`
@@ -249,16 +253,27 @@ file encodes each fixed gap as a regression test.
 KMIP 3.0 is in committee: CSD01/WD16 (Aug 2024) → public review → **WD19
 (Feb 2025)**, the draft vendored in `kmip/spec/oasis-kmip-3.0/` and
 implemented here. **KMIP Test Cases 3.0 / Profiles 3.0 are work-in-progress —
-there are no official 3.0 test vectors yet**; this repo's KATs and
-conformance evidence are vendored-draft-based by necessity.
+neither is an OASIS Standard yet** — but OASIS HAS published draft-stage
+test vectors alongside Profiles CSD01 (102 XMLs, 95 mandatory + 7 optional):
+the exact set vendored here and replayed by "the 102 OASIS tests" in §5.
+"Draft, not yet Standard" is the accurate caveat, not "no official vectors".
 
 **PQC.** The 3.0 line adds ML-KEM, ML-DSA, SLH-DSA (all 12 sets) plus the
 `Encapsulate`/`Decapsulate` operations. The public-review snapshot's
 algorithm enum ends at `SLH-DSA-SHAKE-256f` (0x4A); **WD19 extends it to
 0x5D**, adding among others the pre-hash `HASH-SLH-DSA-…` variants and the
-hybrid KEMs. (Note: `kmip-spec-3.0-tags-enums.json` in this repo was
-extracted from the older snapshot and stops at 0x4A while the code
-implements WD19 values — regenerate it from WD19.)
+hybrid KEMs. (Note: `kmip-spec-3.0-tags-enums.json` in this repo is
+extracted from the CSD01 snapshot and stops at 0x4A; the code implements
+WD19 values. This is a durable gap, not a quick regen — OASIS never
+published a WD19 HTML export, only PDF/DOCX, and the extractor
+(`tools/extract_kmip_spec.rs`) only parses HTML. Every WD19-only value the
+code needs is hand-patched into `codepointTable.ts`'s
+`SPEC_EXTRACT_PATCHES`/`SPEC_EXTRACT_TAG_PATCHES` and `_ttlv.py`'s Python
+mirror, each individually cross-checked against `kmip/src/kmip30/
+{algos,ops}.rs` — that's the actual source of truth for anything past 0x4A,
+not this JSON file. **§-section citations throughout this guide and the
+Commands tab follow CSD01 numbering** (the HTML's own TOC) except where
+explicitly marked `WD19 §…` for the two WD19-only operations.)
 
 **Hybrid KEM — a pure hybrid key type; batches are NOT involved.**
 `X25519MLKEM768` (0x5C) and `SecP256r1MLKEM768` (0x5D) are first-class
@@ -328,11 +343,73 @@ and each has a hands-on surface:
   recipe.
 - **Conformance baseline.** The native CI gate pins an exact 97 PASS /
   5 deprecated-skip on the 102 OASIS tests. The playground's Corpus Replay
-  matches it except six honestly-labelled wasm-seam skips (three need the
-  native TLS listener's MaximumResponseSize enforcement; three need the
-  per-test RNG-seed mode the wasm binding doesn't expose).
+  matches it except three honestly-labelled wasm-seam skips — the native
+  TLS listener's MaximumResponseSize enforcement, which `KmipPlayground::
+  submit`'s direct `dispatch()` call has no seam for (94 PASS / 5 deprecated
+  / 3 transport-skip, still summing to the same 97 the native gate pins).
+  The RNG-seed-mode gap this used to also list is closed: the three
+  per-test-RngSeedMode corpus tests now pass by booting the wasm engine
+  pinned to each test's mode via its constructor. Re-verified 2026-07-10
+  against the cert-ops port's Certify/Re-certify/Validate change to
+  `classify.ts` (`runner.local.test.ts`'s full-corpus breakdown test) —
+  unaffected, still exactly this baseline.
 
-## 6. FAQ / pitfalls
+## 6. Certificate Services — pure-Rust cert-ops port (0.14, verified 2026-07-09)
+
+Through 0.13, §6.1.6 Certify, §6.1.50 Re-certify, and §6.1.62 Validate were
+real, spec'd operations with real NATIVE handlers — but this in-browser
+playground answered all three with `OperationNotSupported`, because their
+crypto backends (`rcgen` for Certify's CSR check, `ring`-backed
+`x509-parser` for Validate's chain-signature check) are C-backed and don't
+cross-compile to `wasm32-unknown-unknown`.
+
+The 0.14 cert-ops port replaced both with a single pure-Rust primitive —
+`ops::spki_verify::verify_with_spki` — built on RustCrypto's `x509-cert`/
+`der`/`spki` crates plus the SAME engine every other operation drives (no
+second crypto stack). Certify's CSR self-signature check and Validate's
+chain-link signature check both call it now. The identical source compiles
+for native and `wasm32-unknown-unknown`; the `native` Cargo feature no
+longer gates either module.
+
+**What's real here now:**
+- **Certify (§6.1.6).** Issues a certificate over a stored PublicKey UID or
+  a PKCS#10 CSR, signed by a designated CA key in the engine. Every
+  algorithm the engine signs with is issuable — RSA, ECDSA, Ed25519,
+  ML-DSA (all 3 parameter sets), and SLH-DSA (all 12 FIPS 205 parameter
+  sets, RFC 9909 OIDs). The stored-PublicKey-UID path needs that key's
+  real `SubjectPublicKeyInfo` on record (true for a `Register`'d key; NOT
+  true for a bare `CreateKeyPair` output, whose material lives only in the
+  engine) — use "Set up demo CA" (below) or a CSR to sidestep this.
+- **Re-certify (§6.1.50).** Renews an existing certificate with a fresh
+  validity window (`Offset` seconds from now), or re-keys it with a new
+  CSR. Links `Replaced`/`Replacement` back to the original.
+- **Validate (§6.1.62).** Checks a supplied/stored certificate chain:
+  `Valid` only when every certificate parses, is within its validity
+  window, every non-root signature verifies against its issuer, and the
+  chain reaches a self-signed trust anchor present in the set. Anything
+  that can't be affirmatively checked degrades to `Unknown`; anything that
+  affirmatively fails is `Invalid`. **A negative result is not a KMIP
+  error** — `ResultStatus` stays `Success`; only the `ValidityIndicator`
+  field carries the answer.
+- **NEW capability this unlocks — real PQC chains.** `rcgen`/`aws_lc_rs`
+  has no ML-DSA entry in its `SignatureAlgorithm` table at all, so a
+  genuinely valid, self-signed ML-DSA CSR was rejected as `Invalid CSR`
+  purely because the OLD checker couldn't evaluate it — not because
+  anything was wrong with it. Likewise, `ring` had no ML-DSA/SLH-DSA
+  verify path, so an all-PQC certificate chain could only ever come back
+  `Unknown` from Validate, never `Valid`. Both are fixed: PQC CSRs are
+  now acceptable, and PQC chains now genuinely validate.
+- **"Set up demo CA"** (Commands tab, Certificate Services category): a
+  one-click convenience — generate a fresh keypair (`RSA-2048 | ECDSA-P256
+  | ML-DSA-65 | SLH-DSA-SHA2-128f`) and self-sign it into a root CA via
+  the SAME `certify::bootstrap_ca_certificate` path the native server's
+  `--ca-key` bootstrap uses, then designate it. Not a KMIP wire operation
+  (there's no request/response for "become a CA") — a `KmipEngine`
+  convenience method (`setupDemoCa`) that reads the real SPKI straight off
+  the engine, sidestepping the stored-PublicKey-UID limitation above. Try
+  it: Learn walkthrough 10, or the Commands tab directly.
+
+## 7. FAQ / pitfalls
 
 - **"The policy allows the algorithm but the workbench says Deny."** Check
   the deny *reason* first (rule index + reason string are shown). Most
@@ -341,9 +418,11 @@ and each has a hands-on surface:
   sits past a cutoff.
 - **"An algorithm is allowed by policy but Create fails at Plane 2."**
   Spec-only: the policy plane can reference algorithms the engine can't
-  instantiate (LMS/XMSS/HSS/XMSS-MT, Ed25519 standalone, composites,
-  FrodoKEM, McEliece). The picker marks these; the deny/allow verdict is
-  still meaningful.
+  instantiate (LMS/HSS/XMSS/XMSS-MT, X25519 standalone — see §3.1). Ed25519,
+  the LAMPS composites, FrodoKEM, and Classic-McEliece are NOT in this list
+  — all four are genuinely runnable now (keygen/sign/encapsulate wired
+  through the engine). The picker marks the still-spec-only ones; the
+  deny/allow verdict is still meaningful either way.
 - **A rule you wrote "doesn't fire."** Run strict validation. If it names an
   algorithm the vocabulary doesn't know, strict lint flags it; if it names a
   hash/padding as an algorithm (§2.4), rewrite it as a mechanism rule.

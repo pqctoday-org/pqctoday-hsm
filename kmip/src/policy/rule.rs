@@ -2041,6 +2041,53 @@ mod tests {
         assert!(r.check_pass2(&req, Some("ML-DSA-65-ED25519")).is_none());
     }
 
+    /// WP-C12 (composite/hybrid remediation plan) — the test above
+    /// exercises `HybridDualSignRequirement` against a hand-typed string
+    /// standing in for a composite algorithm name; this closes the loop
+    /// against a REAL composite `KmipAlgorithm`'s own canonical name
+    /// (`spec_name()`), confirming the rule's speculative string-match
+    /// logic actually fires now that composite algorithms exist.
+    #[test]
+    fn hybrid_dual_sign_matches_real_composite_kmip_algorithm_canonical_name() {
+        use crate::kmip30::KmipAlgorithm;
+
+        let attrs = HashMap::new();
+        let r = Rule::HybridDualSignRequirement {
+            primary: "ML-DSA-65".into(),
+            secondary: "ECDSA-P256".into(),
+            effective_from: TimeBound::At(time::Date::from_calendar_date(2026, time::Month::January, 1).unwrap()),
+            effective_until: TimeBound::At(time::Date::from_calendar_date(2029, time::Month::December, 31).unwrap()),
+            ops_affected: vec!["CreateKeyPair".into()],
+            composite_oid: None,
+            triggered_by_custom_attribute: None,
+            reason: "Composite required in migration window".into(),
+            clause: None,
+        };
+        let mut req = req("CreateKeyPair", Some("ML-DSA-65"), &attrs);
+        req.ts = OffsetDateTime::from_unix_timestamp(1_800_000_000).unwrap(); // 2027
+
+        // Pure ML-DSA-65 inside the window → still denied (composite required).
+        assert!(r.check_pass2(&req, Some("ML-DSA-65")).is_some());
+
+        // The REAL CompositeMlDsa65EcdsaP256Sha512 variant's own
+        // canonical name — not hand-typed — must satisfy the rule. This
+        // is the exact string `create_key_pair.rs::canonical_name` /
+        // `qualify_algorithm_str` (a no-op for composite names, see its
+        // `_ => name.to_string()` fallthrough) hands to policy evaluation
+        // for a real CreateKeyPair request.
+        let composite_name = KmipAlgorithm::CompositeMlDsa65EcdsaP256Sha512.spec_name();
+        assert_eq!(composite_name, "ML-DSA-65-ECDSA-P256");
+        assert!(
+            r.check_pass2(&req, Some(composite_name)).is_none(),
+            "composite KmipAlgorithm canonical name {composite_name:?} must satisfy the rule"
+        );
+
+        // A DIFFERENT real composite algorithm (mismatched classical
+        // half) must still be denied — this isn't "any composite passes".
+        let wrong_composite = KmipAlgorithm::CompositeMlDsa87EcdsaP384Sha512.spec_name();
+        assert!(r.check_pass2(&req, Some(wrong_composite)).is_some());
+    }
+
     #[test]
     fn require_custom_attribute_at_create() {
         let mut attrs = HashMap::new();

@@ -41,6 +41,54 @@ def test_table_pqc_patches():
     assert "Decapsulate" in t.enum_name_to_value.get("Operation", {})
 
 
+def test_table_certificate_services_tag_patches():
+    # WP-py (cert-ops plan revision) — _SPEC_EXTRACT_TAG_PATCHES's
+    # Sec6.1.62 Validate / Sec6.1.6 Certify / Sec6.1.50 Re-certify
+    # additions, mirrored by hand from the hub's codepointTable.ts, had
+    # never actually been exercised by this client's own test suite.
+    # Values cross-checked against kmip/src/kmip30/wire.rs's tags::*
+    # constants (the source of truth both TS and Python copy from).
+    t = table()
+    assert t.tag_name_to_code["CertificateValue"] == 0x42001E
+    assert t.tag_name_to_code["CertificateRequestType"] == 0x420019
+    assert t.tag_name_to_code["CertificateRequest"] == 0x420018
+    assert t.tag_name_to_code["CertificateRequestValue"] == 0x420140
+    assert t.tag_name_to_code["CertificateRequestUniqueIdentifier"] == 0x420139
+    assert t.tag_name_to_code["ValidityDate"] == 0x42009A
+    assert t.tag_name_to_code["ValidityIndicator"] == 0x42009B
+    # Reverse mapping must resolve too — a decoded response's tag CODE has
+    # to name back to something a caller can match on, not just encode.
+    # `setdefault` means the patch's reverse entry only wins when the code
+    # wasn't ALREADY present — 0x42009B already existed in the base spec
+    # JSON under its canonical spaced form ("Validity Indicator"), so that
+    # wins; _norm() is the codec's own stable comparison for exactly this
+    # spaced-vs-PascalCase mismatch (see test_roundtrip_text_string).
+    from pqctoday_kmip._ttlv import _norm
+    assert _norm(t.tag_code_to_name[0x42009B]) == _norm("ValidityIndicator")
+
+
+def test_table_certificate_services_enum_patches():
+    # WP-py finding: `_SPEC_EXTRACT_PATCHES`'s comment claims
+    # CertificateRequestType is "absent from the spec-extraction JSON" —
+    # it isn't; the base JSON already defines it (as CRMF/PKCS10/PEM/
+    # Reserved). `.update()` ADDS the patch's "Crmf" key alongside the
+    # base's existing "CRMF" rather than replacing it (setdefault(tag, {})
+    # .update(...) is additive, not a swap) — harmless for encoding
+    # correctness (every name variant present resolves to the same wire
+    # value) but means the patch's own comment is inaccurate, and a dict-
+    # equality assertion against just the patch's three keys would be
+    # wrong. Assert what actually has to be true: every name a real
+    # caller (this client, or the hub's codepointTable.ts) uses resolves
+    # to the correct wire value.
+    t = table()
+    req_type = t.enum_name_to_value.get("CertificateRequestType", {})
+    assert req_type["PKCS10"] == 0x00000002
+    assert req_type["PEM"] == 0x00000003
+    assert req_type.get("Crmf") == 0x00000001 or req_type.get("CRMF") == 0x00000001
+    validity = t.enum_name_to_value.get("ValidityIndicator", {})
+    assert validity == {"Valid": 0x00000001, "Invalid": 0x00000002, "Unknown": 0x00000003}
+
+
 def test_table_mldsa_algorithm():
     t = table()
     alg = t.enum_name_to_value.get("CryptographicAlgorithm", {})
@@ -202,6 +250,49 @@ def test_roundtrip_nested_request():
     assert proto is not None
     maj = find(proto, "ProtocolVersionMajor")
     assert maj is not None and maj.value == 3
+
+
+def test_roundtrip_certify_request_with_csr():
+    # WP-py (cert-ops plan revision) — a §6.1.6 Certify request built from
+    # a PKCS#10 CSR, shaped like the hub's opTemplates.ts::certify()
+    # builder, round-tripped through THIS client's own encode/decode using
+    # its mirrored Certificate Services tag/enum patches end to end (not
+    # just isolated dict membership checks).
+    msg = ttlv_struct(
+        "BatchItem",
+        leaf("Operation", "Enumeration", "Certify"),
+        ttlv_struct(
+            "RequestPayload",
+            leaf("CertificateRequestType", "Enumeration", "PKCS10"),
+            leaf("CertificateRequest", "ByteString", "3082"),
+        ),
+    )
+    encoded = encode_node(msg)
+    decoded, consumed = decode_one(encoded)
+    assert consumed == len(encoded)
+    payload = find(decoded, "RequestPayload")
+    assert payload is not None
+    req_type = find(payload, "CertificateRequestType")
+    assert req_type is not None
+    assert req_type.value == 0x00000002  # PKCS10
+    req = find(payload, "CertificateRequest")
+    assert req is not None
+    assert req.value == "3082"
+
+
+def test_roundtrip_validate_response_validity_indicator():
+    # §6.1.62 Validate's response — ValidityIndicator is the field the
+    # hub's own test suite had to learn (this session) resolves to a raw
+    # enum codepoint, not a name; confirm the Python client agrees.
+    resp = ttlv_struct(
+        "ResponsePayload",
+        leaf("ValidityIndicator", "Enumeration", "Valid"),
+    )
+    encoded = encode_node(resp)
+    decoded, _ = decode_one(encoded)
+    indicator = find(decoded, "ValidityIndicator")
+    assert indicator is not None
+    assert indicator.value == 0x00000001
 
 
 def test_usage_mask_flags():

@@ -248,7 +248,7 @@ pub fn rekey_key_pair(
     let fail = |e: KmipError| fail_err(deps, correlation_id, "ReKeyKeyPair", e);
 
     // Table 410 — the UID "Determines the existing Asymmetric key
-    // pair". The canonical handle is the private key (§6.4 placeholder
+    // pair". The canonical handle is the private key (§6.1 preamble placeholder
     // order); a public-half UID is resolved to its pair mate via the
     // PrivateKeyLink so clients holding either half succeed.
     let target = deps

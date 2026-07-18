@@ -32,18 +32,27 @@ path = "tools/extract_kmip_spec.rs"
 [features]
 # `native` = the full server surface. Everything gated here either does NOT
 # compile to `wasm32-unknown-unknown` — the TLS transport (tokio + rustls),
-# the bundled-SQLite durable store (rusqlite), the rcgen/aws_lc_rs PQC CA
-# issuance path (Certify/Re-certify), the ring-backed certificate-chain
-# Validate, and the async OTLP/SSE audit legs — or is only needed by the
-# server binaries (Prometheus `/metrics`, the OASIS spec-extractor's HTML
-# scraper).
+# the bundled-SQLite durable store (rusqlite), and the async OTLP/SSE audit
+# legs — or is only needed by the server binaries (Prometheus `/metrics`,
+# the OASIS spec-extractor's HTML scraper). `dep:rcgen` stays here for now
+# too, but ONLY as a test-fixture generator (`certify.rs`'s/`validate.rs`'s
+# `#[cfg(test)]` modules use it to build independent CSR/cert fixtures to
+# verify against) — since the pure-Rust cert-ops port, neither Certify nor
+# Validate's PRODUCTION code calls rcgen or `x509-parser`'s `verify`
+# feature (dropped entirely — `x509-parser` is still a base dependency,
+# used unconditionally for pure-Rust PARSING only) for any crypto; both
+# now go through `ops::spki_verify::verify_with_spki` → the engine, same
+# as everything else. Certify/Validate remain behind this gate only
+# because `ops/mod.rs` and the dispatcher still `#[cfg(feature =
+# "native")]` those two modules structurally — removing that is tracked
+# separately (cert-ops plan WP4), not a crypto-backend limitation anymore.
 #
 # Disable with `--no-default-features` to build the lean, transport-free
 # library core that the in-browser wasm bundle (`../wasm`) links against:
-# codec + kmip30/wire + dispatcher + policy + ops (minus Certify/Validate) +
-# the in-memory `MemoryStore`, driving `softhsmrustv3` directly. The native
-# server build (`cargo build`, the three shipping `[[bin]]`s) keeps the
-# default features on and is completely unchanged.
+# codec + kmip30/wire + dispatcher + policy + ops (minus Certify/Validate,
+# pending WP4) + the in-memory `MemoryStore`, driving `softhsmrustv3`
+# directly. The native server build (`cargo build`, the three shipping
+# `[[bin]]`s) keeps the default features on and is completely unchanged.
 default = ["native"]
 native = [
     "dep:tokio",
@@ -55,7 +64,6 @@ native = [
     "dep:rusqlite_migration",
     "dep:prometheus",
     "dep:scraper",
-    "x509-parser/verify",
 ]
 
 [dependencies]
@@ -72,12 +80,19 @@ rustls-pemfile = { version = "2", optional = true }
 
 # Self-signed cert auto-gen for sandbox / dev runs (Phase 7).
 # Production deployments mount real certs via --tls-cert / --tls-key.
-# P2.3 — the `x509-parser` feature adds
-# `CertificateSigningRequestParams::from_der`, which parses + verifies
-# PKCS#10 CSRs (subject DN, SubjectPublicKeyInfo, self-signature) for
-# the §6.1.6 Certify CSR path. rcgen alone cannot ISSUE ML-DSA-signed
-# certs (no ML-DSA in its SignatureAlgorithm table) — issuance goes
-# through x509-cert + the engine — but it is a fine CSR PARSER.
+#
+# TEST-ONLY beyond that (as of the pure-Rust cert-ops port): the §6.1.6
+# Certify CSR path used to verify inbound CSRs via rcgen's `x509-parser`
+# feature (`CertificateSigningRequestParams::from_der`) — dropped because
+# rcgen/aws_lc_rs has no ML-DSA in its SignatureAlgorithm table, so a
+# genuinely-valid PQC-signed CSR was rejected as `Invalid CSR`.
+# `certify.rs::parse_pkcs10_csr` now verifies via
+# `ops::spki_verify::verify_with_spki` (pure-Rust `x509-cert`/`der`/`spki`
+# decode + the engine's own `C_Verify`), which has no such gap. rcgen
+# stays as a dependency purely so `certify.rs`'s tests can independently
+# CONSTRUCT rcgen-signed CSR/cert fixtures (a genuinely external producer
+# to verify against) — kept enabled, not test-scoped, since it also still
+# backs the sandbox/dev TLS auto-gen above.
 rcgen = { version = "0.13", default-features = false, features = ["aws_lc_rs", "pem", "x509-parser"], optional = true }
 
 # P2.3 — KMIP 3.0 §6.1.6 Certify / §6.1.50 Re-certify: the server acts as
@@ -155,14 +170,15 @@ anyhow    = "1"
 # Certificate Value DER bytes. PKCS#11 stores the DER as an opaque CKA_VALUE
 # blob with no parsing; the KMIP layer is responsible for the §11 attribute
 # surface. x509-parser is a no-std-compatible RFC 5280 parser used widely
-# (rustls-adjacent, Sequoia, ~7M/month downloads), MIT/Apache.
-# P2.2 — the `verify` feature pulls in `ring`-backed `verify_signature`
-# so the §6.1.62 Validate op can actually check certificate signatures
-# (RSA-PKCS1v15 + ECDSA over SHA-256/384/512) where the issuer is in the
-# supplied/stored chain, rather than returning a hollow Valid. `ring` does
-# not build for wasm32-unknown-unknown, so the `verify` feature is enabled
-# only by `native` (the wasm build gates the Validate op out); the base
-# RFC-5280 parser used for the §11 Certificate attributes stays available.
+# (rustls-adjacent, Sequoia, ~7M/month downloads), MIT/Apache. PARSING only,
+# no optional features enabled — default-features already excludes `verify`
+# (the `ring`-backed `verify_signature`, wasm32-incompatible), which
+# `validate.rs` used to opt into via `native`. Since the pure-Rust cert-ops
+# port, §6.1.62 Validate checks certificate signatures via
+# `ops::spki_verify::verify_with_spki` (the engine) instead — x509-parser
+# supplies only the parsed fields (issuer/subject DN, validity window, raw
+# TBS bytes, raw signature bytes), same as it always did for the §11
+# attribute surface.
 x509-parser = { version = "0.16" }
 
 # RSA — KMIP 3.0 §6.1.48 Register accepts client-supplied RSA private
@@ -211,6 +227,17 @@ fips205 = "0.4.1"
 # hybrid-KEM crypto lives in the softhsmrustv3 engine (K6). x25519-dalek / p256
 # were removed entirely (no longer used in src/ or tests/).
 ml-kem = "0.2.3"
+# rcgen is ALSO an optional `native`-gated [dependencies] entry above (the
+# sandbox/dev TLS auto-gen). This second, unconditional copy exists purely
+# because certify.rs's/validate.rs's `#[cfg(test)]` modules use it as an
+# independent CSR/cert fixture generator — and since WP4 ungated those two
+# modules entirely (no longer `#[cfg(feature = "native")]`), their tests
+# now compile under `--no-default-features` too, where `dep:rcgen` isn't
+# enabled. A `[dev-dependencies]` entry is available to every `cargo test`
+# run regardless of feature flags, without pulling rcgen into the actual
+# library artifact `--no-default-features` builds (dev-dependencies never
+# ship in a `cargo build`, so this has zero effect on the wasm bundle).
+rcgen = { version = "0.13", default-features = false, features = ["aws_lc_rs", "pem", "x509-parser"] }
 
 # Mirror the patches from `pqctoday-hsm/rust/Cargo.toml` so the `softhsmrustv3`
 # path dep above gets the FIPS-204 / FIPS-205 `Ph::SHA{224,384,3_*}` / `SHAKE256`

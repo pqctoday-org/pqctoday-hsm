@@ -1351,7 +1351,7 @@ dependencies = [
 
 [[package]]
 name = "pqctoday-kmip-wasm"
-version = "0.8.0"
+version = "0.13.1"
 dependencies = [
  "console_error_panic_hook",
  "getrandom 0.2.17",

@@ -8,6 +8,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Pure-Rust KMIP certificate operations.** The KMIP server now
+  implements `Certify`, `Validate`, and SPKI public-key verification in
+  pure Rust, with **no external crypto dependency in the cert-ops path** —
+  enforced by a `no_crypto_in_certops` guard test. Adds an OpenSSL
+  certificate cross-check and a hub/hybrid certificate cross-check test.
+  Exposes the cert-ops path through the KMIP WASM engine consumed by the
+  hub's KMIP 3.0 Command Lab.
+
 ### Fixed
 
 - **`Register(Certificate)` was unreachable on `wasm32`.**

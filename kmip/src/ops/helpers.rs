@@ -285,6 +285,10 @@ pub fn canonical_name(a: KmipAlgorithm) -> String {
         // BSI TR-02102-1 §2.4.2.
         ClassicMcEliece6688128 => "Classic-McEliece-6688128",
         Hss => "HSS",
+        // Matches `KmipAlgorithm::spec_name()`'s strings exactly.
+        CompositeMlDsa44Rsa2048PssSha256 => "ML-DSA-44-RSA2048-PSS",
+        CompositeMlDsa65EcdsaP256Sha512 => "ML-DSA-65-ECDSA-P256",
+        CompositeMlDsa87EcdsaP384Sha512 => "ML-DSA-87-ECDSA-P384",
     }
     .into()
 }
@@ -1380,6 +1384,21 @@ pub fn unwrap_key_value(
                 "Encoding Option {other:#x} is not a KMIP 3.0 codepoint",
             )))),
     }
+}
+
+/// Serialise every test (in any `ops::*` module) that touches a real
+/// engine session. The engine's session/token state is process-global
+/// (`lazy_static!`, not thread-local), and `cargo test` runs `#[test]`
+/// fns on separate threads by default — so two engine-touching tests in
+/// *different* files, each guarded only by a lock private to its own
+/// module, can still race each other (one test's `session::finalize()`
+/// invalidating a handle another test is mid-use with). This ONE shared
+/// lock, used by every such module (`certify.rs`, `spki_verify.rs`, …),
+/// is what actually prevents that.
+#[cfg(test)]
+pub(crate) fn engine_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner())
 }
 
 #[cfg(test)]
