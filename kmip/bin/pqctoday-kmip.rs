@@ -348,6 +348,12 @@ async fn main() -> anyhow::Result<()> {
         auth_users,
         ca_key,
         rng_seed_mode,
+        // Part F §F7.2 — tenant-registry infrastructure exists but is not
+        // yet wired into the dispatcher (see ops/deps.rs); every
+        // production deployment stays Single-mode (today's behavior)
+        // until that wiring lands.
+        tenancy_mode: Default::default(),
+        strict_tenants: Vec::new(),
     };
     let deps = Arc::new(
         Deps::new(engine, store, sink, config).with_engine_session(engine_session),
