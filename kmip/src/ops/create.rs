@@ -477,7 +477,7 @@ rules:
     /// mask (ENCRYPT|DECRYPT, no WRAP_KEY/UNWRAP_KEY) never allows.
     #[test]
     fn create_symmetric_auto_restricts_engine_key_from_usage_mask() {
-        let _lock = crate::engine_test_lock::acquire();
+        let _lock = crate::ops::helpers::engine_lock();
         use softhsmrustv3::constants as c;
         use softhsmrustv3::native::session;
         let _guard_reset = session::finalize();

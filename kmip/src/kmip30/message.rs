@@ -32,7 +32,7 @@
 //!   Asynchronous Indicator, and Authentication (Credential list) are
 //!   all genuinely implemented** — `batch_items: Vec<...>` on both
 //!   Request/ResponseMessage, `dispatcher::dispatch` iterates every item
-//!   (with Stop/Undo error-continuation semantics and §6.4 ID
+//!   (with Stop/Undo error-continuation semantics and §6.1 preamble ID
 //!   Placeholder threading between items), Login/Logout issue and
 //!   validate real per-session tickets, and `AsynchronousIndicator`
 //!   drives `dispatcher`'s real async-job enqueue path for eligible ops.
@@ -50,7 +50,7 @@ pub const KMIP_VERSION_MINOR: i32 = 0;
 pub struct RequestMessage {
     pub header: RequestHeader,
     /// Multi-item batches are fully supported — the dispatcher processes each
-    /// item with Batch Error Continuation Stop/Continue/Undo and the §6.4 ID
+    /// item with Batch Error Continuation Stop/Continue/Undo and the §6.1 preamble ID
     /// Placeholder. Most OASIS conformance transcripts are single-item.
     pub batch_items: Vec<RequestBatchItem>,
 }

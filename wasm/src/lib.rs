@@ -35,7 +35,7 @@ use pqctoday_kmip::codec::{decode_one, encode_to_vec, Tag, TtlvFrame, Value as T
 use pqctoday_kmip::dispatcher::{dispatch, one_off_request};
 use pqctoday_kmip::kmip30::{
     decode_request_message, encode_request_message, encode_response_message, ActivateRequest,
-    Attribute, BatchErrorContinuationOption, CreateKeyPairRequest, CreateRequest,
+    Attribute, AsynchronousIndicator, BatchErrorContinuationOption, CreateKeyPairRequest, CreateRequest,
     CustomAttributeValue,
     DecapsulateRequest, DecryptRequest, DestroyRequest, EncapsulateRequest, EncryptRequest,
     GetRequest, KmipAlgorithm, LocateRequest, ObjectType, QueryFunction, QueryRequest,
@@ -408,7 +408,7 @@ impl KmipPlayground {
     /// ```
     ///
     /// `$IDPlaceholder` in any `uid` resolves to the UID the previous
-    /// UID-producing item created (KMIP §6.4 ID Placeholder) — so Create →
+    /// UID-producing item created (KMIP §6.1 preamble ID Placeholder) — so Create →
     /// Activate → Sign chains in a single round trip. `errorContinuation`
     /// controls failure handling (§9.5): `Continue` runs every item, `Stop`
     /// halts after the first failure, `Undo` halts AND rolls earlier successes
@@ -432,6 +432,20 @@ impl KmipPlayground {
             Some("Stop") => Some(BatchErrorContinuationOption::Stop),
             _ => None,
         };
+        // §8.1.2 Asynchronous Indicator — one header-level setting for the
+        // WHOLE batch (KMIP 3.0 has no per-item async flag). `Mandatory`
+        // queues every async-eligible item as a real background job
+        // (OperationPending + a correlation value each); an ineligible item
+        // (Poll/Cancel/Process/QueryAsynchronousRequests/Query/
+        // DiscoverVersions/Ping — `dispatcher::is_async_eligible`) fails
+        // just that item with OperationNotSupported, same as a single-op
+        // async request.
+        let asynchronous_indicator = match spec.get("asynchronous").and_then(|v| v.as_str()) {
+            Some("Mandatory") => Some(AsynchronousIndicator::Mandatory),
+            Some("Optional") => Some(AsynchronousIndicator::Optional),
+            Some("Prohibited") => Some(AsynchronousIndicator::Prohibited),
+            _ => None,
+        };
         let items_json = match spec.get("items").and_then(|v| v.as_array()) {
             Some(a) if !a.is_empty() => a,
             _ => return error_json("batch spec needs a non-empty \"items\" array"),
@@ -453,6 +467,7 @@ impl KmipPlayground {
         let request = RequestMessage {
             header: RequestHeader {
                 batch_error_continuation_option: cont,
+                asynchronous_indicator,
                 ..RequestHeader::v3()
             },
             batch_items,
@@ -484,6 +499,12 @@ impl KmipPlayground {
                     "resultReason": item.result_reason,
                     "message": item.result_message,
                     "summary": item.payload.as_ref().map(summarize).unwrap_or(Json::Null),
+                    // §9.1 — the claim ticket a Pending item's own follow-up
+                    // Poll/Cancel/Process needs; absent on every other status.
+                    "asynchronousCorrelationValueHex": item
+                        .asynchronous_correlation_value
+                        .as_ref()
+                        .map(|v| to_hex(v)),
                 })
             })
             .collect();

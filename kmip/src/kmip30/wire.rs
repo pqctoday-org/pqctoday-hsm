@@ -892,7 +892,7 @@ fn response_batch_item_to_frame(bi: &ResponseBatchItem) -> TtlvFrame {
 // ── Request encoders (F-6) — client-side, the mirror of the request decoders ─
 //
 // Typed decode is intentionally LOSSY (it drops header/payload fields the server
-// doesn't model and folds the §6.4 IDPlaceholder enum to a sentinel string), so
+// doesn't model and folds the §6.1 preamble IDPlaceholder enum to a sentinel string), so
 // `encode_request_message(decode_request_message(x)) == x` byte-for-byte only
 // when the message carried nothing the typed model dropped. It is ALWAYS
 // decode-stable: `decode(encode(decode(x))) == decode(x)`. The encoder returns
@@ -1028,8 +1028,41 @@ fn request_batch_item_to_frame(bi: &RequestBatchItem) -> Option<TtlvFrame> {
     ))
 }
 
+/// 2026-07-17 audit (L5) — when `uid` is the ID Placeholder sentinel, the
+/// spec form is the `UniqueIdentifier` Enumeration `IDPlaceholder = 0x01`
+/// (see `required_uid`'s decode side, which already accepts only that
+/// form), not a literal TextString. Before this fix every request-encoding
+/// call site — including the Batch tab's Expert-mode "shared Request
+/// Message" wire-proof display — emitted the raw sentinel string, which a
+/// real OASIS-conformant server would reject as an unknown UID rather than
+/// resolve as a placeholder reference.
 fn uid_frame(uid: &str) -> TtlvFrame {
+    if uid == crate::dispatcher::ID_PLACEHOLDER_SENTINEL {
+        return TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::Enumeration(0x00000001));
+    }
     TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString(uid.to_string()))
+}
+
+/// Encapsulate's `CryptographicParameters` structure, PLUS the WD19
+/// `InputKeyMaterial` field nested inside it (`decode_encapsulate_req`
+/// hoists that same nesting out into `EncapsulateRequest::input_key_material`
+/// — this is its encode-side mirror). Returns `None` when neither is
+/// present, matching the field's OPTIONAL status on the wire.
+fn encode_encapsulate_params(
+    cp: Option<&CryptographicParameters>,
+    input_key_material: Option<&[u8]>,
+) -> Option<TtlvFrame> {
+    let mut children = match cp.map(encode_cryptographic_parameters) {
+        Some(TtlvFrame { value: Value::Structure(kids), .. }) => kids,
+        _ => Vec::new(),
+    };
+    if let Some(ikm) = input_key_material {
+        children.push(TtlvFrame::new(Tag(tags::InputKeyMaterial), Value::ByteString(ikm.to_vec())));
+    }
+    if children.is_empty() {
+        return None;
+    }
+    Some(TtlvFrame::new(Tag(tags::CryptographicParameters), Value::Structure(children)))
 }
 
 /// Encode a §6.2 `KeyWrappingSpecification` (mirror of `decode_key_wrapping_spec`).
@@ -1234,6 +1267,32 @@ fn request_payload_to_frame(p: &RequestPayload) -> Option<TtlvFrame> {
                     Value::ByteString(aad.clone()),
                 ));
             }
+            k
+        }
+        // 2026-07-17 audit — Encapsulate/Decapsulate (KMIP 3.0 WD19) had NO
+        // request-encoding arm at all, so `request_payload_to_frame` fell
+        // through to the final `_ => return None` and the whole batch's
+        // `encode_request_message` came back `None` — silently emitting
+        // EMPTY bytes for the Batch tab's "shared Request Message" wire
+        // proof (`run_batch` in wasm/src/lib.rs unwraps `None` to
+        // `vec![]`) whenever a batch contained either op, despite both
+        // being real `ADDABLE` ops with their own preset recipes.
+        RequestPayload::Encapsulate(r) => {
+            let mut k = vec![uid_frame(&r.uid)];
+            if let Some(f) = encode_encapsulate_params(
+                r.cryptographic_parameters.as_ref(),
+                r.input_key_material.as_deref(),
+            ) {
+                k.push(f);
+            }
+            k
+        }
+        RequestPayload::Decapsulate(r) => {
+            let mut k = vec![uid_frame(&r.uid)];
+            if let Some(cp) = &r.cryptographic_parameters {
+                k.push(encode_cryptographic_parameters(cp));
+            }
+            k.push(TtlvFrame::new(Tag(tags::Data), Value::ByteString(r.data.clone())));
             k
         }
         // §6.1.x signing / MAC / hash — UID, [CryptographicParameters], Data[, extra].
@@ -1672,7 +1731,7 @@ fn response_payload_to_frame(payload: &ResponsePayload) -> TtlvFrame {
         // K21 — §6.1.51 Table 406: UID-only response payload.
         ResponsePayload::ReKey(r)            => encode_uid_only_resp(&r.uid),
         // K21 — §6.1.52 Table 411: distinct typed tags per half, same
-        // shape as Create Key Pair (Private first — §6.4 placeholder).
+        // shape as Create Key Pair (Private first — §6.1 preamble placeholder).
         ResponsePayload::ReKeyKeyPair(r)     => vec![
             TtlvFrame::new(
                 Tag(tags::PrivateKeyUniqueIdentifier),
@@ -3732,7 +3791,7 @@ fn decode_derive_key_req(children: &[TtlvFrame]) -> Result<DeriveKeyRequest, Wir
             }
             tags::UniqueIdentifier => match &c.value {
                 Value::TextString(s) => uids.push(s.clone()),
-                // §6.4 ID Placeholder — same convention as `required_uid`.
+                // §6.1 preamble ID Placeholder — same convention as `required_uid`.
                 Value::Enumeration(v) if *v == 0x00000001 => {
                     uids.push(crate::dispatcher::ID_PLACEHOLDER_SENTINEL.to_string());
                 }
@@ -5309,7 +5368,7 @@ fn required_uid(children: &[TtlvFrame]) -> Result<String, WireError> {
         if c.tag.0 == tags::UniqueIdentifier {
             match &c.value {
                 Value::TextString(s) => return Ok(s.clone()),
-                // KMIP 3.0 §6.4 — `UniqueIdentifier` MAY be carried as
+                // KMIP 3.0 §6.1 preamble — `UniqueIdentifier` MAY be carried as
                 // an Enumeration referring to a previously-produced
                 // UID within the same batch. The OASIS Baseline corpus
                 // only exercises value `0x01` (`IDPlaceholder` — "the
@@ -5582,7 +5641,7 @@ mod tests {
         assert_eq!(dp.iteration_count, Some(4096));
         assert_eq!(req.template_attribute.len(), 2);
 
-        // §6.4 IDPlaceholder UID form.
+        // §6.1 preamble IDPlaceholder UID form.
         let placeholder = vec![
             TtlvFrame::new(Tag(tags::ObjectType),
                            Value::Enumeration(ObjectType::SecretData.to_wire_value())),
@@ -6609,6 +6668,114 @@ mod tests {
         assert_eq!(data.value, Value::ByteString(vec![0x55; 32]));
         assert!(frames.iter().all(|f| f.tag.0 != tags::IvCounterNonce
             && f.tag.0 != super::super::vendor_tags::PQCTODAY_SHARED_SECRET));
+    }
+
+    /// 2026-07-17 audit — `RequestPayload::Encapsulate`/`Decapsulate` had NO
+    /// arm in `request_payload_to_frame` at all (unlike every other
+    /// `ADDABLE` Batch-tab op), so encoding a batch containing either op
+    /// fell through to the function's final `_ => return None`, which
+    /// propagates through `request_message_to_frame`'s `?` to make
+    /// `encode_request_message` return `None` for the WHOLE message — the
+    /// Batch tab's "shared Request Message" Expert-mode hex silently
+    /// rendered as empty bytes (`run_batch`'s `.unwrap_or_default()`)
+    /// despite Encapsulate/Decapsulate being real, documented Batch-tab
+    /// ops with their own preset recipes ("Provision-KEM",
+    /// "Rollback reaches Encapsulate").
+    #[test]
+    fn encapsulate_request_encodes_and_round_trips_input_key_material() {
+        let req = RequestPayload::Encapsulate(EncapsulateRequest {
+            uid: "kem-pub".into(),
+            input_key_material: Some(vec![0x11; 32]),
+            cryptographic_parameters: None,
+        });
+        let frame = request_payload_to_frame(&req)
+            .expect("Encapsulate must have a request encoder");
+        let Value::Structure(children) = &frame.value else {
+            panic!("expected a Structure value");
+        };
+        let decoded = decode_encapsulate_req(children).expect("round-trips through the decoder");
+        assert_eq!(decoded.uid, "kem-pub");
+        assert_eq!(
+            decoded.input_key_material,
+            Some(vec![0x11; 32]),
+            "InputKeyMaterial must survive the CryptographicParameters-nested round trip",
+        );
+    }
+
+    #[test]
+    fn encapsulate_request_with_no_params_omits_the_optional_structure() {
+        let req = RequestPayload::Encapsulate(EncapsulateRequest {
+            uid: "kem-pub".into(),
+            input_key_material: None,
+            cryptographic_parameters: None,
+        });
+        let frame = request_payload_to_frame(&req).expect("Encapsulate must have a request encoder");
+        let Value::Structure(children) = &frame.value else {
+            panic!("expected a Structure value");
+        };
+        assert!(
+            children.iter().all(|c| c.tag.0 != tags::CryptographicParameters),
+            "nothing to carry ⇒ the optional CryptographicParameters structure is omitted, not sent empty",
+        );
+    }
+
+    #[test]
+    fn decapsulate_request_encodes_and_round_trips() {
+        let req = RequestPayload::Decapsulate(DecapsulateRequest {
+            uid: "kem-priv".into(),
+            data: vec![0x22; 1088],
+            cryptographic_parameters: None,
+        });
+        let frame = request_payload_to_frame(&req)
+            .expect("Decapsulate must have a request encoder");
+        let Value::Structure(children) = &frame.value else {
+            panic!("expected a Structure value");
+        };
+        let decoded = decode_decapsulate_req(children).expect("round-trips through the decoder");
+        assert_eq!(decoded.uid, "kem-priv");
+        assert_eq!(decoded.data, vec![0x22; 1088]);
+    }
+
+    /// The end-to-end regression this whole fix is really about: a batch
+    /// containing Encapsulate must produce a non-empty "shared Request
+    /// Message" — not silently fall back to `vec![]` the way
+    /// `run_batch`'s `.unwrap_or_default()` did before `Encapsulate`/
+    /// `Decapsulate` had encoders at all.
+    #[test]
+    fn batch_containing_encapsulate_encodes_a_non_empty_request_message() {
+        let msg = RequestMessage {
+            header: RequestHeader::v3(),
+            batch_items: vec![RequestBatchItem {
+                operation: Operation::Encapsulate,
+                payload: RequestPayload::Encapsulate(EncapsulateRequest {
+                    uid: "kem-pub".into(),
+                    input_key_material: None,
+                    cryptographic_parameters: None,
+                }),
+            }],
+        };
+        let bytes = encode_request_message(&msg);
+        assert!(bytes.is_some(), "a batch with Encapsulate must encode, not silently return None");
+        assert!(!bytes.unwrap().is_empty());
+    }
+
+    /// 2026-07-17 audit (L5) — the ID Placeholder sentinel encodes as the
+    /// spec's `UniqueIdentifier` Enumeration `IDPlaceholder = 0x01`, not a
+    /// literal TextString; every other UID still encodes as TextString as
+    /// before. Mirrors `required_uid`'s decode-side acceptance of exactly
+    /// this enum form.
+    #[test]
+    fn uid_frame_encodes_placeholder_sentinel_as_the_spec_enum() {
+        let placeholder = uid_frame(crate::dispatcher::ID_PLACEHOLDER_SENTINEL);
+        assert_eq!(placeholder.tag.0, tags::UniqueIdentifier);
+        assert_eq!(placeholder.value, Value::Enumeration(0x00000001));
+
+        let real = uid_frame("urn:some-real-uid");
+        assert_eq!(real.value, Value::TextString("urn:some-real-uid".to_string()));
+
+        // Round-trips through the decoder that already expected this form.
+        let decoded = required_uid(std::slice::from_ref(&placeholder)).unwrap();
+        assert_eq!(decoded, crate::dispatcher::ID_PLACEHOLDER_SENTINEL);
     }
 
     /// Gap-remediation Phase C, Finding #7 — `tag_code_from_name`/

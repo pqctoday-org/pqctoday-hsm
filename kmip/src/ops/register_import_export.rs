@@ -1205,7 +1205,7 @@ mod tests {
     fn register_certificate_projects_engine_object() {
         use softhsmrustv3::constants as c;
         use softhsmrustv3::native::session;
-        let _lock = crate::engine_test_lock::acquire();
+        let _lock = crate::ops::helpers::engine_lock();
         let _ = session::finalize();
         session::init().expect("engine init");
         let sess = session::bootstrap_default_token(0, "so-pin", "user-pin", "register-cert-test")
@@ -1258,7 +1258,7 @@ mod tests {
     fn register_certificate_with_public_key_link_shares_its_cka_id() {
         use softhsmrustv3::constants as c;
         use softhsmrustv3::native::{self, session, EccCurve};
-        let _lock = crate::engine_test_lock::acquire();
+        let _lock = crate::ops::helpers::engine_lock();
         let _ = session::finalize();
         session::init().expect("engine init");
         let sess = session::bootstrap_default_token(0, "so-pin", "user-pin", "register-cert-link-test")
@@ -1360,7 +1360,7 @@ mod tests {
     #[test]
     fn project_certificate_to_engine_skip_is_audited() {
         use softhsmrustv3::native::session;
-        let _lock = crate::engine_test_lock::acquire();
+        let _lock = crate::ops::helpers::engine_lock();
         let _ = session::finalize();
         session::init().expect("engine init");
         let sess = session::bootstrap_default_token(0, "so-pin", "user-pin", "skip-audit-test")

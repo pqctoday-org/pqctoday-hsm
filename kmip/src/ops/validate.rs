@@ -637,7 +637,14 @@ mod tests {
     /// exactly that storage shape.
     #[test]
     fn stored_self_signed_uid_with_only_certificate_value_is_valid() {
-        let d = deps_with();
+        // Needs a real engine session, exactly like
+        // `stored_self_signed_uid_is_valid` above — `validate_chain`
+        // verifies the signature via `verify_with_spki`, which degrades
+        // to `Unknown` (fails closed, not silently `Valid`) when no
+        // engine session is wired. A session-less `deps_with()` here
+        // made this test fail deterministically regardless of test
+        // ordering — it was never actually exercising the WP-2 fix.
+        let (d, _g) = deps_with_session();
         let der = self_signed_der();
         d.store
             .put(ObjectRecord {
