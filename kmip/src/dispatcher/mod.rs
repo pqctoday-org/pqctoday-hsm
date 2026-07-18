@@ -947,7 +947,7 @@ fn handle_payload(
         }
         RequestPayload::Get(r) => ResponsePayload::Get(get(deps, r, auth, correlation_id)?),
         RequestPayload::GetAttributes(r) => ResponsePayload::GetAttributes(get_attributes(deps, r, auth, correlation_id)?),
-        RequestPayload::GetAttributeList(r) => ResponsePayload::GetAttributeList(get_attribute_list(deps, r, correlation_id)?),
+        RequestPayload::GetAttributeList(r) => ResponsePayload::GetAttributeList(get_attribute_list(deps, r, auth, correlation_id)?),
         RequestPayload::Locate(r) => ResponsePayload::Locate(locate(deps, r, auth, correlation_id)?),
         RequestPayload::Activate(r) => ResponsePayload::Activate(activate(deps, r, correlation_id)?),
         RequestPayload::Revoke(r) => ResponsePayload::Revoke(revoke(deps, r, correlation_id)?),
