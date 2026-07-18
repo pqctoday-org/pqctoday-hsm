@@ -90,6 +90,7 @@ pub(crate) fn generate_replacement_symmetric(
     deps: &Deps,
     old: &ObjectRecord,
     new_algorithm: &str,
+    auth: &crate::server::auth::AuthContext,
     correlation_id: &str,
 ) -> Result<String> {
     let new_alg = super::create_key_pair::parse_algorithm(new_algorithm)?;
@@ -103,17 +104,17 @@ pub(crate) fn generate_replacement_symmetric(
     if let Some(name) = &old.name {
         attrs.push(Attribute::Name(name.clone()));
     }
-    // Encrypt's own by-UID lookup isn't owner-gated yet (see the
-    // tenancy_e2e module doc's "still unwired" list), so there is no
-    // caller identity to stamp here — anonymous preserves today's
-    // behavior exactly (owner stays `None`, same as before F7.3/F7.4).
+    // Encrypt is now owner-gated too (§J/this round), so the real
+    // caller identity is available and gets stamped on the
+    // replacement — the same tenant that owned `old` owns its
+    // auto-rekeyed successor.
     let created = super::create::create(
         deps,
         crate::kmip30::CreateRequest {
             object_type: crate::kmip30::ObjectType::SymmetricKey,
             template_attribute: attrs,
         },
-        &crate::server::auth::AuthContext::open(),
+        auth,
         correlation_id,
     )?;
     super::activate::activate(

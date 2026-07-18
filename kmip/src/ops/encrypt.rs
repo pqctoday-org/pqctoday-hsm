@@ -32,11 +32,16 @@ use crate::policy::{Decision, PolicyRequest};
 
 use super::deps::Deps;
 use super::helpers::{
-    emit_pkcs11, emit_pkcs11_result, emit_request, emit_success, fail_err,
+    authorize_object, emit_pkcs11, emit_pkcs11_result, emit_request, emit_success, fail_err,
     state_name,
 };
 
-pub fn encrypt(deps: &Deps, mut req: EncryptRequest, correlation_id: &str) -> Result<EncryptResponse> {
+pub fn encrypt(
+    deps: &Deps,
+    mut req: EncryptRequest,
+    auth: &crate::server::auth::AuthContext,
+    correlation_id: &str,
+) -> Result<EncryptResponse> {
     let started = OffsetDateTime::now_utc();
     emit_request(
         deps,
@@ -45,9 +50,9 @@ pub fn encrypt(deps: &Deps, mut req: EncryptRequest, correlation_id: &str) -> Re
         format!("uid={} data_len={}", req.uid, req.data.len()),
     );
 
-    let obj = deps.store.get(&req.uid)?.ok_or_else(|| {
-        fail_err(deps, correlation_id, "Encrypt", KmipError::object_not_found(&req.uid))
-    })?;
+    // Part F §F7.4 — owner-checked lookup (see get.rs for the pattern).
+    let obj = authorize_object(deps, auth, &req.uid, || KmipError::object_not_found(&req.uid))
+        .map_err(|e| fail_err(deps, correlation_id, "Encrypt", e))?;
 
     if obj.state != State::Active {
         return Err(fail_err(
@@ -178,7 +183,7 @@ pub fn encrypt(deps: &Deps, mut req: EncryptRequest, correlation_id: &str) -> Re
                     ),
                 ));
             }
-            return rekey_and_encrypt(deps, &req, &obj, &new_algorithm, correlation_id);
+            return rekey_and_encrypt(deps, &req, &obj, &new_algorithm, auth, correlation_id);
         }
     }
     if let Some(ov) = forced_cp.as_ref() {
@@ -195,9 +200,9 @@ pub fn encrypt(deps: &Deps, mut req: EncryptRequest, correlation_id: &str) -> Re
         encrypt_streaming(deps, &req, &obj, correlation_id)
     } else if is_ml_kem(obj.algorithm) {
         // Plane-3: branch on algorithm.
-        encrypt_ml_kem(deps, &req, &obj, correlation_id)
+        encrypt_ml_kem(deps, &req, &obj, auth, correlation_id)
     } else {
-        encrypt_classical(deps, &req, &obj, correlation_id)
+        encrypt_classical(deps, &req, &obj, auth, correlation_id)
     }?;
 
     emit_success(deps, correlation_id, "Encrypt");
@@ -213,12 +218,14 @@ fn rekey_and_encrypt(
     req: &EncryptRequest,
     old: &crate::store::ObjectRecord,
     new_algorithm: &str,
+    auth: &crate::server::auth::AuthContext,
     correlation_id: &str,
 ) -> Result<EncryptResponse> {
     // 1+2. Replacement symmetric key (Name carried over) + Activate.
-    let new_uid =
-        super::agility::generate_replacement_symmetric(deps, old, new_algorithm, correlation_id)
-            .map_err(|e| fail_err(deps, correlation_id, "Encrypt", e))?;
+    let new_uid = super::agility::generate_replacement_symmetric(
+        deps, old, new_algorithm, auth, correlation_id,
+    )
+    .map_err(|e| fail_err(deps, correlation_id, "Encrypt", e))?;
 
     // 3. Deactivate + supersede the old key.
     super::agility::supersede_old(deps, old, &new_uid, new_algorithm, correlation_id)?;
@@ -238,6 +245,7 @@ fn rekey_and_encrypt(
             final_indicator: req.final_indicator,
             correlation_value: req.correlation_value.clone(),
         },
+        auth,
         correlation_id,
     )?;
     resp.rekeyed = Some(crate::kmip30::RekeyInfo {
@@ -408,6 +416,7 @@ fn encrypt_ml_kem(
     deps: &Deps,
     req: &EncryptRequest,
     obj: &crate::store::ObjectRecord,
+    auth: &crate::server::auth::AuthContext,
     correlation_id: &str,
 ) -> Result<EncryptResponse> {
     let mech = obj.algorithm.to_pkcs11_mech(PkcsOp::Encrypt).ok_or_else(|| {
@@ -419,7 +428,7 @@ fn encrypt_ml_kem(
 
     // Phase 7b: real bridge call when a session is wired. K15 — the
     // Plane-3 record is emitted after the call with its real rv.
-    let (ciphertext, shared_secret) = match deps.engine_session {
+    let (ciphertext, shared_secret) = match deps.resolve_tenant_session(auth.identity.as_ref()).ok() {
         Some(session) => {
             // WP-4 remediation — class-aware, not the ambiguous class-blind
             // find_by_cka_id: a certified public key now shares its
@@ -471,6 +480,7 @@ fn encrypt_classical(
     deps: &Deps,
     req: &EncryptRequest,
     obj: &crate::store::ObjectRecord,
+    auth: &crate::server::auth::AuthContext,
     correlation_id: &str,
 ) -> Result<EncryptResponse> {
     // KMIP 3.0 §6.1.21 — the request MAY carry its own
@@ -631,7 +641,7 @@ fn encrypt_classical(
         );
         emit_pkcs11_result(deps, correlation_id, "native::encrypt_with_key_bytes", Some(mech), &r);
         r.map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Encrypt"))?
-    } else if let Some(session) = deps.engine_session {
+    } else if let Some(session) = deps.resolve_tenant_session(auth.identity.as_ref()).ok() {
         // WP-4 remediation — class-aware, not the ambiguous class-blind
         // find_by_cka_id: a certified RSA public key now shares its
         // CKA_ID with its private key AND a linked certificate.
@@ -813,7 +823,7 @@ mod tests {
     fn ml_kem_branch_returns_encapsulation_and_shared_secret() {
         let (ring, d) = deps_and_ring();
         put(&d, "k", KmipAlgorithm::MlKem1024, ObjectType::PublicKey, State::Active, UsageMask::KEY_AGREEMENT);
-        let r = encrypt(&d, EncryptRequest { uid: "k".into(), ..Default::default() }, "c").unwrap();
+        let r = encrypt(&d, EncryptRequest { uid: "k".into(), ..Default::default() }, &crate::server::auth::AuthContext::open(), "c").unwrap();
         assert!(r.shared_secret.is_some(), "ML-KEM must return shared secret");
         assert_eq!(r.ciphertext.len(), 32);
         // K15 — no engine session: the audit names the soft fallback
@@ -832,7 +842,7 @@ mod tests {
             data: b"plaintext".to_vec(),
             iv: Some(vec![0u8; 12]),
             ..Default::default()
-        }, "c").unwrap();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap();
         assert!(r.shared_secret.is_none(), "classical encrypt has no shared secret");
         // K15 — no key material + no session: the audit names the soft
         // classical-encrypt fallback that actually ran.
@@ -851,7 +861,7 @@ mod tests {
             data: b"x".to_vec(),
             iv: Some(vec![0u8; 12]),
             ..Default::default()
-        }, "c").unwrap_err();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::IncompatibleCryptographicUsageMask);
     }
 
@@ -867,14 +877,14 @@ mod tests {
             data: b"x".to_vec(),
             iv: Some(vec![0u8; 12]),
             ..Default::default()
-        }, "c").expect("empty mask must not block Encrypt");
+        }, &crate::server::auth::AuthContext::open(), "c").expect("empty mask must not block Encrypt");
     }
 
     #[test]
     fn encrypt_on_destroyed_returns_wrong_lifecycle_state() {
         let (_ring, d) = deps_and_ring();
         put(&d, "a", KmipAlgorithm::Aes, ObjectType::SymmetricKey, State::Destroyed, UsageMask::ENCRYPT);
-        let err = encrypt(&d, EncryptRequest { uid: "a".into(), ..Default::default() }, "c").unwrap_err();
+        let err = encrypt(&d, EncryptRequest { uid: "a".into(), ..Default::default() }, &crate::server::auth::AuthContext::open(), "c").unwrap_err();
         // KMIP 3.0 §11 — Destroyed is an FSM-rejection state, not
         // an archive state. CS-AC-M-8 pins WrongKeyLifecycleState
         // for crypto-ops against Destroyed keys.
@@ -893,7 +903,7 @@ mod tests {
         let mut rec = d.store.get("a").unwrap().unwrap();
         rec.archived = true;
         d.store.update(rec).unwrap();
-        let err = encrypt(&d, EncryptRequest { uid: "a".into(), ..Default::default() }, "c").unwrap_err();
+        let err = encrypt(&d, EncryptRequest { uid: "a".into(), ..Default::default() }, &crate::server::auth::AuthContext::open(), "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::ObjectArchived);
     }
 }
@@ -978,6 +988,7 @@ mod k6_no_silent_substitution_tests {
                 cryptographic_parameters: Some(cp_mode(4)),
                 ..Default::default()
             },
+            &crate::server::auth::AuthContext::open(),
             "c",
         )
         .unwrap_err();
@@ -1002,6 +1013,7 @@ mod k6_no_silent_substitution_tests {
                 cryptographic_parameters: Some(cp_mode(6)),
                 ..Default::default()
             },
+            &crate::server::auth::AuthContext::open(),
             "c-enc",
         )
         .unwrap();
@@ -1016,6 +1028,7 @@ mod k6_no_silent_substitution_tests {
                 cryptographic_parameters: Some(cp_mode(6)),
                 aad: None,
             },
+            &crate::server::auth::AuthContext::open(),
             "c-dec",
         )
         .unwrap();
@@ -1037,6 +1050,7 @@ mod k6_no_silent_substitution_tests {
                 cryptographic_parameters: Some(cp_mode(6)),
                 ..Default::default()
             },
+            &crate::server::auth::AuthContext::open(),
             "c",
         )
         .unwrap_err();
@@ -1071,6 +1085,7 @@ mod k6_no_silent_substitution_tests {
                 }),
                 ..Default::default()
             },
+            &crate::server::auth::AuthContext::open(),
             "c",
         )
         .unwrap_err();
@@ -1105,6 +1120,7 @@ mod k6_no_silent_substitution_tests {
         let err = encrypt(
             &d,
             EncryptRequest { uid: "r".into(), data: b"x".to_vec(), ..Default::default() },
+            &crate::server::auth::AuthContext::open(),
             "c1",
         )
         .unwrap_err();
@@ -1123,6 +1139,7 @@ mod k6_no_silent_substitution_tests {
                 }),
                 ..Default::default()
             },
+            &crate::server::auth::AuthContext::open(),
             "c2",
         )
         .expect("request CP must override object CP for OAEP params");

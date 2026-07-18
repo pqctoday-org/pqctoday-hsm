@@ -170,6 +170,7 @@ fn payments_cipher_rekeys_aes128_to_aes256_on_first_encrypt() {
             final_indicator: None,
             correlation_value: None,
         },
+        &AuthContext::open(),
         "enc",
     )
     .unwrap();
@@ -313,6 +314,7 @@ fn legacy_signature_still_verifies_after_owner_key_rekeys() {
             final_indicator: None,
             correlation_value: None,
         },
+        &AuthContext::open(),
         "enc",
     )
     .unwrap();
@@ -335,6 +337,7 @@ fn legacy_signature_still_verifies_after_owner_key_rekeys() {
             cryptographic_parameters: None,
             aad: None,
         },
+        &AuthContext::open(),
         "dec",
     )
     .unwrap();

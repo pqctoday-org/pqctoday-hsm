@@ -1185,6 +1185,7 @@ mod tests {
                 iv: Some(vec![0u8; 12]), // AES-GCM nonce
                 ..Default::default()
             },
+            &crate::server::auth::AuthContext::open(),
             "c-enc",
         ).unwrap();
         assert!(!enc.ciphertext.is_empty());

@@ -952,8 +952,8 @@ fn handle_payload(
         RequestPayload::Activate(r) => ResponsePayload::Activate(activate(deps, r, correlation_id)?),
         RequestPayload::Revoke(r) => ResponsePayload::Revoke(revoke(deps, r, correlation_id)?),
         RequestPayload::Destroy(r) => ResponsePayload::Destroy(destroy(deps, r, auth, correlation_id)?),
-        RequestPayload::Encrypt(r) => ResponsePayload::Encrypt(encrypt(deps, r, correlation_id)?),
-        RequestPayload::Decrypt(r) => ResponsePayload::Decrypt(decrypt(deps, r, correlation_id)?),
+        RequestPayload::Encrypt(r) => ResponsePayload::Encrypt(encrypt(deps, r, auth, correlation_id)?),
+        RequestPayload::Decrypt(r) => ResponsePayload::Decrypt(decrypt(deps, r, auth, correlation_id)?),
         RequestPayload::Encapsulate(r) => {
             ResponsePayload::Encapsulate(encapsulate(deps, r, auth, correlation_id)?)
         }

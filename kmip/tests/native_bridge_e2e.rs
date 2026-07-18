@@ -725,6 +725,7 @@ fn k9_register_ml_kem_768_encap_decap_roundtrip() {
             final_indicator: None,
             correlation_value: None,
         },
+        &AuthContext::open(),
         "k9-encap",
     )
     .expect("Encrypt(encapsulate) with registered ML-KEM-768 public key");
@@ -741,6 +742,7 @@ fn k9_register_ml_kem_768_encap_decap_roundtrip() {
             cryptographic_parameters: None,
             aad: None,
         },
+        &AuthContext::open(),
         "k9-decap",
     )
     .expect("Decrypt(decapsulate) with registered ML-KEM-768 private key");
@@ -1772,6 +1774,7 @@ fn k21_rekeyed_aes_key_encrypts_against_real_engine() {
             final_indicator: None,
             correlation_value: None,
         },
+        &AuthContext::open(),
         "k21-encrypt",
     )
     .expect("re-keyed AES key must encrypt through the engine");
@@ -1790,6 +1793,7 @@ fn k21_rekeyed_aes_key_encrypts_against_real_engine() {
             cryptographic_parameters: None,
             aad: None,
         },
+        &AuthContext::open(),
         "k21-decrypt",
     )
     .expect("re-keyed AES key must decrypt its own ciphertext");
