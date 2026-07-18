@@ -263,13 +263,17 @@ fn sign_after_destroy_fails_in_both_apis() {
         generate_ml_dsa_keypair(session, CKP_ML_DSA_65, b"\x01", "sign-after-destroy").unwrap();
     destroy_object(session, prv_h).unwrap();
 
-    // Native sign on destroyed handle — get_object_value returns None
-    // (object gone), so the gate is hit before reaching the sign primitive.
+    // Native sign on destroyed handle. Since Part F's isolation gate
+    // (rust-hsm-perf-bench-scenario-plan-07182026.md), `sign` now checks
+    // handle validity/token-scoping BEFORE the CKA_SIGN / CKA_VALUE
+    // checks — same object-handle-first priority the FFI assertion below
+    // already documents — so a destroyed handle uniformly returns
+    // CKR_OBJECT_HANDLE_INVALID now (an improvement: native:: and ffi::
+    // agree it's a handle-invalid-class error, not a permission or
+    // arguments error).
     let err = sign(session, prv_h, CKM_ML_DSA, b"data").unwrap_err();
-    // The exact error depends on which check fires first
-    // (CKA_SIGN gate or CKA_VALUE missing); both are valid failure modes.
-    assert!(
-        err == CKR_KEY_FUNCTION_NOT_PERMITTED || err == CKR_ARGUMENTS_BAD,
+    assert_eq!(
+        err, CKR_OBJECT_HANDLE_INVALID,
         "destroyed handle: got rv=0x{err:x}"
     );
 

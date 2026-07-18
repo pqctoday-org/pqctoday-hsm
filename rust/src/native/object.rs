@@ -11,7 +11,8 @@ use super::CkRv;
 use super::keygen::CKA_ID;
 use crate::constants::*;
 use crate::state::{
-    get_object_attr_bytes, get_object_attr_u32 as state_get_object_attr_u32, OBJECTS,
+    can_access_object_with, get_object_attr_bytes_from, resolve_session_access,
+    take_object_checked, with_object_checked, OBJECTS,
 };
 
 /// Destroy an object by handle. Wraps `ffi::C_DestroyObject`'s engine
@@ -21,26 +22,21 @@ use crate::state::{
 ///
 /// After this call the handle is invalid; subsequent ops return
 /// `CKR_OBJECT_HANDLE_INVALID`.
-pub fn destroy_object(_session: u32, handle: u32) -> Result<(), CkRv> {
+pub fn destroy_object(session: u32, handle: u32) -> Result<(), CkRv> {
     use crate::state::{DECRYPT_STATE, ENCRYPT_STATE, SIGN_STATE, VERIFY_STATE};
     use zeroize::Zeroize;
 
-    let removed = OBJECTS.with(|objs| {
-        let mut store = objs.borrow_mut();
-        if let Some(mut attrs) = store.remove(&handle) {
-            // Zeroise key material before deallocation (RS-02 — matches
-            // ffi::C_DestroyObject).
-            if let Some(val) = attrs.get_mut(&CKA_VALUE) {
-                val.zeroize();
-            }
-            true
-        } else {
-            false
-        }
-    });
-
-    if !removed {
-        return Err(CKR_OBJECT_HANDLE_INVALID);
+    // Isolation gate folded into the removal itself (take_object_checked
+    // verifies access BEFORE removing, under one write-lock acquisition —
+    // a failed check never mutates OBJECTS). Same error code
+    // (CKR_OBJECT_HANDLE_INVALID) the un-gated version already returned
+    // for a missing handle, now also covering cross-slot / not-logged-in.
+    let access = resolve_session_access(session)?;
+    let mut attrs = take_object_checked(&access, handle)?;
+    // Zeroise key material before deallocation (RS-02 — matches
+    // ffi::C_DestroyObject).
+    if let Some(val) = attrs.get_mut(&CKA_VALUE) {
+        val.zeroize();
     }
 
     // PKCS#11 v3.2 — clean up any active operation state referencing the
@@ -75,21 +71,25 @@ pub fn find_by_cka_id(session: u32, cka_id: &[u8]) -> Result<Option<u32>, CkRv> 
 ///
 /// T3 (multi-slot scoping) — enumeration is TOKEN-scoped: only objects owned
 /// by `session`'s slot match (PKCS#11 v3.2 §2.4 — tokens do not see each
-/// other's objects). An unknown session scopes to slot 0, the primary token,
-/// which preserves the single-slot KMIP/wasm behavior. By-handle native
-/// accessors (`get_attribute*`, `destroy_object`) intentionally stay
-/// handle-global: handles are unique across slots and the native surface is
-/// the engine-internal trusted boundary (the KMIP server owns one session on
-/// slot 0 and never holds foreign handles).
+/// other's objects).
+///
+/// CORRECTED 2026-07-18 (rust-hsm-perf-bench-scenario-plan-07182026.md
+/// Part F): by-handle native accessors are NO LONGER handle-global — every
+/// one gates through `state::can_access_object_with` (this function's own
+/// filter predicate below), the same token-scoping `ffi::C_*` has always
+/// enforced. An unknown session now errors (`CKR_SESSION_HANDLE_INVALID`)
+/// instead of silently scoping to slot 0. The filter also gains the LOGIN
+/// clause (`can_access_object_with`, not just a slot comparison), so
+/// FindObjects parity with `ffi::C_FindObjects`'s enumeration gate
+/// (ffi.rs ~5888) is exact: a private object on a not-logged-in token no
+/// longer matches.
 pub fn find_all_by_cka_id(session: u32, cka_id: &[u8]) -> Result<Vec<u32>, CkRv> {
-    let slot = crate::state::session_slot(session).unwrap_or(0);
+    let access = resolve_session_access(session)?;
     let matches: Vec<u32> = OBJECTS.with(|o| {
         o.borrow()
             .iter()
             .filter_map(|(handle, attrs)| match attrs.get(&CKA_ID) {
-                Some(v) if v == cka_id && crate::state::object_slot_of(attrs) == slot => {
-                    Some(*handle)
-                }
+                Some(v) if v == cka_id && can_access_object_with(&access, attrs) => Some(*handle),
                 _ => None,
             })
             .collect()
@@ -105,20 +105,25 @@ pub fn find_all_by_cka_id(session: u32, cka_id: &[u8]) -> Result<Vec<u32>, CkRv>
 /// For known-sized scalar attrs the caller decodes the returned bytes as
 /// LE u32 etc.; convenience wrappers [`get_attribute_u32`] and
 /// [`get_attribute_bool`] do the decode.
-pub fn get_attribute(_session: u32, handle: u32, attr_type: u32) -> Option<Vec<u8>> {
-    // Same predicates as ffi::C_GetAttributeValue (state::value_is_blocked +
+pub fn get_attribute(session: u32, handle: u32, attr_type: u32) -> Option<Vec<u8>> {
+    // Isolation gate + sensitivity policy, one borrow. Same predicates as
+    // ffi::C_GetAttributeValue (state::value_is_blocked +
     // state::attr_is_sensitive_material): CKA_VALUE / CKA_SEED of
     // private/secret keys are blocked when CKA_SENSITIVE=TRUE **or**
     // CKA_EXTRACTABLE=FALSE (PKCS#11 v3.2 §4.9/§4.10; the v3.2 PQC key tables
     // footnote CKA_SEED identically to CKA_VALUE). Sharing the predicates
-    // keeps the native and C-ABI surfaces from drifting.
-    if crate::state::attr_is_sensitive_material(attr_type) {
-        let blocked = OBJECTS.with(|o| o.borrow().get(&handle).map(crate::state::value_is_blocked));
-        if blocked == Some(true) {
+    // keeps the native and C-ABI surfaces from drifting. Gate failure (bad
+    // session, unknown/cross-slot/not-logged-in handle) folds into `None`,
+    // matching this function's existing "absent" contract.
+    let access = resolve_session_access(session).ok()?;
+    with_object_checked(&access, handle, |attrs| {
+        if crate::state::attr_is_sensitive_material(attr_type) && crate::state::value_is_blocked(attrs) {
             return None;
         }
-    }
-    get_object_attr_bytes(handle, attr_type)
+        get_object_attr_bytes_from(attrs, attr_type)
+    })
+    .ok()
+    .flatten()
 }
 
 /// SHA-256 digest of an object's `CKA_VALUE` bytes, computed inside the
@@ -132,9 +137,14 @@ pub fn get_attribute(_session: u32, handle: u32, attr_type: u32) -> Option<Vec<u
 ///
 /// Returns `None` when the object has no `CKA_VALUE` (e.g. a destroyed
 /// or value-less object).
-pub fn get_value_digest_sha256(_session: u32, handle: u32) -> Option<Vec<u8>> {
+pub fn get_value_digest_sha256(session: u32, handle: u32) -> Option<Vec<u8>> {
     use sha2::{Digest, Sha256};
-    get_object_attr_bytes(handle, CKA_VALUE).map(|v| Sha256::digest(&v).to_vec())
+    let access = resolve_session_access(session).ok()?;
+    with_object_checked(&access, handle, |attrs| {
+        get_object_attr_bytes_from(attrs, CKA_VALUE).map(|v| Sha256::digest(&v).to_vec())
+    })
+    .ok()
+    .flatten()
 }
 
 /// Mutate an attribute, enforcing PKCS#11 v3.2 §4.1.1 policy: server-managed
@@ -142,11 +152,17 @@ pub fn get_value_digest_sha256(_session: u32, handle: u32) -> Option<Vec<u8>> {
 /// CKA_EXTRACTABLE only TRUE→FALSE. Vendor stateful-key attrs (≥0x8000_0000)
 /// bypass the policy — they are the engine/KMIP internal state channel.
 pub fn set_attribute(
-    _session: u32,
+    session: u32,
     handle: u32,
     attr_type: u32,
     value: Vec<u8>,
 ) -> Result<(), CkRv> {
+    // Isolation gate first (separate lock — `set_object_attr_checked` is
+    // shared with `ffi::C_SetAttributeValue`'s mutation-policy logic and
+    // does its own locking; kept untouched rather than folded in, to
+    // avoid touching a function ffi.rs also depends on).
+    let access = resolve_session_access(session)?;
+    with_object_checked(&access, handle, |_| ())?;
     crate::state::set_object_attr_checked(handle, attr_type, value)
 }
 
@@ -208,24 +224,28 @@ pub fn register_certificate(
 /// Read a `u32` attribute (4-byte little-endian — engine's storage
 /// convention). Returns `None` if the attribute is absent or is
 /// blocked by sensitivity policy.
-pub fn get_attribute_u32(_session: u32, handle: u32, attr_type: u32) -> Option<u32> {
-    if crate::state::attr_is_sensitive_material(attr_type)
-        && get_attribute(_session, handle, attr_type).is_none()
-    {
-        return None;
+pub fn get_attribute_u32(session: u32, handle: u32, attr_type: u32) -> Option<u32> {
+    // Routes through the already-gated `get_attribute` (equivalent to the
+    // prior "only sensitivity-check for sensitive material" logic: for
+    // non-sensitive types `value_is_blocked` is never reached, so this is
+    // the same bytes, now also isolation-gated).
+    let bytes = get_attribute(session, handle, attr_type)?;
+    if bytes.len() >= 4 {
+        Some(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+    } else {
+        None
     }
-    state_get_object_attr_u32(handle, attr_type)
 }
 
 /// Read a `CK_BBOOL` attribute (1 byte: 0x01 = true, 0x00 = false).
 /// Returns `None` if the attribute is absent.
-pub fn get_attribute_bool(_session: u32, handle: u32, attr_type: u32) -> Option<bool> {
-    OBJECTS.with(|o| {
-        o.borrow()
-            .get(&handle)
-            .and_then(|attrs| attrs.get(&attr_type))
-            .map(|v| !v.is_empty() && v[0] == 0x01)
+pub fn get_attribute_bool(session: u32, handle: u32, attr_type: u32) -> Option<bool> {
+    let access = resolve_session_access(session).ok()?;
+    with_object_checked(&access, handle, |attrs| {
+        attrs.get(&attr_type).map(|v| !v.is_empty() && v[0] == 0x01)
     })
+    .ok()
+    .flatten()
 }
 
 #[cfg(test)]
@@ -304,6 +324,13 @@ mod tests {
     /// (and vice versa), even when both share the same CKA_ID. Slot 1 is
     /// brought online via the `state::ensure_slot` activation hook (the
     /// engine boots single-slot).
+    ///
+    /// FLIPPED 2026-07-18 (Part F, isolation gate): by-handle native
+    /// access is no longer handle-global — a foreign-slot handle now
+    /// correctly fails to resolve, same as `ffi::C_*` has always
+    /// enforced. This test used to assert the opposite (a documented,
+    /// intentional gap); see rust-hsm-perf-bench-scenario-plan-07182026.md
+    /// §E2/§F for the history.
     #[test]
     fn find_by_cka_id_is_token_scoped() {
         let _guard = test_lock::acquire();
@@ -320,9 +347,16 @@ mod tests {
         let found1 = find_all_by_cka_id(s1, cka_id).unwrap();
         assert_eq!(found1, vec![h1], "slot-1 search sees only slot-1's key");
 
-        // By-handle native access stays handle-global (engine-internal
-        // trusted surface) — the foreign handle still resolves.
-        assert_eq!(get_attribute_u32(s0, h1, CKA_VALUE_LEN), Some(32));
+        // Isolation gate now denies cross-tenant handle access: slot-0's
+        // session cannot use slot-1's object handle at all.
+        assert_eq!(
+            get_attribute_u32(s0, h1, CKA_VALUE_LEN),
+            None,
+            "cross-slot handle access must now be denied"
+        );
+        // Each token's own session still works normally.
+        assert_eq!(get_attribute_u32(s0, h0, CKA_VALUE_LEN), Some(32));
+        assert_eq!(get_attribute_u32(s1, h1, CKA_VALUE_LEN), Some(32));
 
         close_session(s0).unwrap();
         close_session(s1).unwrap();

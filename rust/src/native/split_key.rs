@@ -19,7 +19,7 @@ use super::CkRv;
 use crate::constants::{CKR_ARGUMENTS_BAD, CKR_DATA_LEN_RANGE, CKR_FUNCTION_FAILED};
 use crate::crypto::split_key::{self, Gf256Polynomial, SplitKeyError, SplitKeyMethod};
 use crate::native::keygen::{alloc_in_session_slot, build_generic_secret_attrs, insert_id_and_label};
-use crate::state::get_object_value;
+use crate::state::{get_object_value_from, resolve_session_access, with_object_checked};
 
 fn map_err(e: SplitKeyError) -> CkRv {
     match e {
@@ -54,7 +54,12 @@ pub fn split(
     cka_id_prefix: &[u8],
     label: &str,
 ) -> Result<Vec<(u32, u32)>, CkRv> {
-    let secret = get_object_value(secret_handle).ok_or(CKR_ARGUMENTS_BAD)?;
+    // Isolation gate — preserves this function's existing CKR_ARGUMENTS_BAD
+    // error code for missing, cross-slot, or not-logged-in handles alike.
+    let access = resolve_session_access(session).map_err(|_| CKR_ARGUMENTS_BAD)?;
+    let secret = with_object_checked(&access, secret_handle, get_object_value_from)
+        .map_err(|_| CKR_ARGUMENTS_BAD)?
+        .ok_or(CKR_ARGUMENTS_BAD)?;
 
     let register_share = |index: u32, bytes: Vec<u8>| -> u32 {
         // Distinguish each share's CKA_ID from the others and from the
@@ -126,9 +131,16 @@ pub fn join(
     cka_id: &[u8],
     label: &str,
 ) -> Result<u32, CkRv> {
+    // Isolation gate on EVERY share handle — the multi-handle case: all
+    // shares must pass the same-tenant check, first failure aborts the
+    // whole reconstruction (CKR_ARGUMENTS_BAD, matching this function's
+    // existing error vocabulary).
+    let access = resolve_session_access(session).map_err(|_| CKR_ARGUMENTS_BAD)?;
     let mut bytes_by_index: HashMap<u32, Vec<u8>> = HashMap::new();
     for &(idx, handle) in shares {
-        let bytes = get_object_value(handle).ok_or(CKR_ARGUMENTS_BAD)?;
+        let bytes = with_object_checked(&access, handle, get_object_value_from)
+            .map_err(|_| CKR_ARGUMENTS_BAD)?
+            .ok_or(CKR_ARGUMENTS_BAD)?;
         bytes_by_index.insert(idx, bytes);
     }
 

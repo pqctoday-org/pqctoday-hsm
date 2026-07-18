@@ -4,12 +4,12 @@
 //!
 //!   P0b — can 4 independent tenant tokens be brought online in one process
 //!         and used concurrently without cross-tenant interference? PASSES
-//!         for keygen/sign/verify; records a CONFIRMED, still-open gap:
-//!         `native::*` does not enforce `state::can_access_object`
-//!         token-scoping (only `ffi::C_*` does), so a native caller (e.g.
-//!         KMIP, which uses `native::*` exclusively) can reach across
-//!         tenants by handle. Not fixed here — flagged for a scoped
-//!         decision (touches KMIP's authorization model).
+//!         for keygen/sign/verify AND for isolation: `native::*` originally
+//!         did not enforce `state::can_access_object` token-scoping (only
+//!         `ffi::C_*` did), so a native caller (e.g. KMIP, which uses
+//!         `native::*` exclusively) could reach across tenants by handle.
+//!         Closed in Part F (2026-07-18): every by-handle `native::*`
+//!         function now gates through the same predicate.
 //!   P0c — 20 threads hammering ONE shared token concurrently (real
 //!         contention on the global `OBJECTS` mutex), every thread's
 //!         signature verified against its own key. PASSES after a real bug
@@ -93,37 +93,30 @@ fn p0b_four_independent_tenant_tokens() {
         native::verify_pqc(sess, keys[i].0, CKM_ML_DSA, msg, &sig, &[], false, false)
             .unwrap_or_else(|e| panic!("tenant {} self-verify failed: {:?}", i, e));
 
-        // KNOWN GAP found 2026-07-18 (see rust-hsm-perf-bench-scenario-plan
-        // §B1b): `state::can_access_object` — the token-scoping gate that
-        // enforces CKA_PRIV_SLOT_ID isolation — is called ONLY from
-        // `ffi::C_*` (8 call sites, all in ffi.rs). It is NEVER called from
-        // `native::*`. So the standard PKCS#11 C ABI (ffi/ck_abi, what a
-        // real dlopen'd application uses) correctly rejects cross-tenant
-        // handle use, but the `native::*` typed surface — which the KMIP
-        // server uses exclusively, with ONE shared engine_session for every
-        // client — does not. This test records TODAY'S actual (undesired)
-        // behavior: cross-tenant access via native:: currently SUCCEEDS.
-        // Grep confirmed no compensating check exists in kmip/src either
-        // (no owner/Identity field in the KeyStore trait, no ownership
-        // check in the dispatcher) — so KMIP has no object-level tenant
-        // isolation today. This must be closed (either by adding the
-        // can_access_object gate to native::*, or by KMIP tracking
-        // per-Identity object ownership) before "one token per tenant"
-        // multi-tenancy can be considered real over the KMIP access path.
+        // GAP CLOSED 2026-07-18 (rust-hsm-perf-bench-scenario-plan-07182026.md
+        // Part F): `state::can_access_object` used to be called ONLY from
+        // `ffi::C_*` (8 call sites); `native::*` never called it, so the
+        // KMIP server (which uses `native::*` exclusively) had no
+        // object-level tenant isolation even though the ffi/ck_abi C ABI
+        // always enforced it correctly. Every by-handle `native::*`
+        // function (sign/verify/encrypt/decrypt/encapsulate/decapsulate/
+        // agree/get+set attribute/destroy/split+join/hybrid) now routes
+        // through the same gate (`with_object_checked` /
+        // `resolve_session_access` in state.rs) — cross-tenant handle use
+        // must fail exactly like the ffi surface always has.
         let other = sessions[(i + 1) % sessions.len()];
         let cross = native::verify_pqc(other, keys[i].0, CKM_ML_DSA, msg, &sig, &[], false, false);
         assert!(
-            cross.is_ok(),
-            "cross-tenant isolation now enforced in native::* — great, but this test (and the plan's \
-             gap note) is stale and must be updated to assert isolation HOLDS, not that the gap exists"
+            cross.is_err(),
+            "tenant {} object was reachable from a different tenant's session — isolation gate regressed",
+            i
         );
     }
 
     println!(
         "P0b: 4 independent tenant tokens created, correctly slot-tagged, each signs/verifies its own \
-         key. CONFIRMED GAP: native::* does not enforce can_access_object — cross-tenant handle access \
-         succeeds today. The ffi::C_* / ck_abi::C_* PKCS#11 ABI surface DOES enforce it (8 call sites, \
-         source-verified) — the gap is specific to native::* / KMIP."
+         key, and cross-tenant handle access is now uniformly denied by native::* — the same isolation \
+         ffi::C_* / ck_abi::C_* always enforced."
     );
 }
 

@@ -202,6 +202,15 @@ pub fn decapsulate(
     classical_priv: u32,
     ciphertext: &[u8],
 ) -> Result<Vec<u8>, CkRv> {
+    // Isolation gate on the classical half's handle. NOTE: the ML-KEM
+    // half is gated TRANSITIVELY (native::encrypt::decapsulate below is
+    // gated in encrypt.rs) — this direct fetch is the one place a
+    // transitive gate is NOT enough, since this function reads
+    // classical_priv's CKA_VALUE itself rather than delegating.
+    let access = crate::state::resolve_session_access(session).map_err(|_| CKR_KEY_HANDLE_INVALID)?;
+    let scalar = crate::state::with_object_checked(&access, classical_priv, crate::state::get_object_value_from)
+        .map_err(|_| CKR_KEY_HANDLE_INVALID)?
+        .ok_or(CKR_KEY_HANDLE_INVALID)?;
     match hybrid {
         Hybrid::X25519MlKem768 => {
             if ciphertext.len() != MLKEM768_CT + X25519_LEN {
@@ -209,7 +218,6 @@ pub fn decapsulate(
             }
             let (ct_mlkem_b, eph_x_b) = ciphertext.split_at(MLKEM768_CT);
             let ss_mlkem = crate::native::encrypt::decapsulate(session, mlkem_priv, CKM_ML_KEM, ct_mlkem_b)?;
-            let scalar = crate::state::get_object_value(classical_priv).ok_or(CKR_KEY_HANDLE_INVALID)?;
             let x_sec: [u8; 32] = scalar.as_slice().try_into().map_err(|_| CKR_KEY_HANDLE_INVALID)?;
             let eph_pub: [u8; 32] = eph_x_b.try_into().map_err(|_| CKR_ARGUMENTS_BAD)?;
             let secret = x25519_dalek::StaticSecret::from(x_sec);
@@ -222,7 +230,6 @@ pub fn decapsulate(
             }
             let (eph_p_b, ct_mlkem_b) = ciphertext.split_at(P256_PUB);
             let ss_mlkem = crate::native::encrypt::decapsulate(session, mlkem_priv, CKM_ML_KEM, ct_mlkem_b)?;
-            let scalar = crate::state::get_object_value(classical_priv).ok_or(CKR_KEY_HANDLE_INVALID)?;
             let arr: [u8; 32] = scalar.as_slice().try_into().map_err(|_| CKR_KEY_HANDLE_INVALID)?;
             let secret = p256::SecretKey::from_bytes((&arr).into()).map_err(|_| CKR_KEY_HANDLE_INVALID)?;
             let eph_pub = p256::PublicKey::from_sec1_bytes(eph_p_b).map_err(|_| CKR_ARGUMENTS_BAD)?;
@@ -235,7 +242,6 @@ pub fn decapsulate(
             }
             let (eph_p_b, ct_mlkem_b) = ciphertext.split_at(P384_PUB);
             let ss_mlkem = crate::native::encrypt::decapsulate(session, mlkem_priv, CKM_ML_KEM, ct_mlkem_b)?;
-            let scalar = crate::state::get_object_value(classical_priv).ok_or(CKR_KEY_HANDLE_INVALID)?;
             let arr: [u8; 48] = scalar.as_slice().try_into().map_err(|_| CKR_KEY_HANDLE_INVALID)?;
             let secret = p384::SecretKey::from_bytes((&arr).into()).map_err(|_| CKR_KEY_HANDLE_INVALID)?;
             let eph_pub = p384::PublicKey::from_sec1_bytes(eph_p_b).map_err(|_| CKR_ARGUMENTS_BAD)?;
