@@ -127,14 +127,30 @@ fn try_create_sym(
 
 const CNSA_TAG: (&str, &str) = ("x-pqctoday-cnsa-classification", "TopSecret");
 
-// The op handlers wrap every `Decision::Deny` as `ResultReason::PermissionDenied`
-// regardless of the internal deny reason, so a policy denial is unambiguous. A
-// policy *allow* proceeds to key generation which, engine-less (integration
-// tests compile the crate in non-test mode, so the placeholder path is off),
-// fails with `CryptographicFailure` — that still means the POLICY allowed it.
-// We therefore assert on the policy decision, not on crypto execution.
+// The op handlers surface a `Decision::Deny` via `DenyReason::to_result_reason()`
+// (kmip/src/policy/decision.rs) — a specific KMIP 3.0 §9.2 ResultReason per rule
+// family (`min_key_length` -> BadCryptographicParameters, `require_usage_mask` /
+// `require_custom_attribute` -> InvalidAttributeValue, `lifecycle_state_gate` ->
+// ObjectArchived, `max_key_age_days` -> WrongKeyLifecycleState, everything else
+// -> PermissionDenied) rather than collapsing every denial onto one generic
+// code, so a policy denial can surface as any of these five reasons. A policy
+// *allow* proceeds to key generation which, engine-less (integration tests
+// compile the crate in non-test mode, so the placeholder path is off), fails
+// with `CryptographicFailure` — that still means the POLICY allowed it. We
+// therefore assert on the policy decision, not on crypto execution.
 fn policy_denied(r: &Result<(), String>) -> bool {
-    matches!(r, Err(reason) if reason == "PermissionDenied")
+    matches!(
+        r,
+        Err(reason)
+            if matches!(
+                reason.as_str(),
+                "PermissionDenied"
+                    | "BadCryptographicParameters"
+                    | "ObjectArchived"
+                    | "InvalidAttributeValue"
+                    | "WrongKeyLifecycleState"
+            )
+    )
 }
 fn policy_allowed(r: &Result<(), String>) -> bool {
     !policy_denied(r)
