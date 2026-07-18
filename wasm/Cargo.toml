@@ -1,6 +1,6 @@
 [package]
 name        = "pqctoday-kmip-wasm"
-version     = "0.8.0"
+version     = "0.15.0"
 edition     = "2024"
 license     = "MIT"
 description = "In-browser (WebAssembly) build of the pqctoday-kmip crypto-agile KMIP 3.0 control plane bundled with the softhsmrustv3 PKCS#11 v3.2 engine — drives real KMIP TTLV requests through the dispatcher with no server, network, or filesystem."

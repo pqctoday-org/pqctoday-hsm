@@ -252,7 +252,7 @@ impl KmipError {
         // `Item Not Found` (0x01). BL-M-4 step #5 pins this code.
         Self::failed(ResultReason::ObjectNotFound, format!("UID {uid:?} not found"))
     }
-    /// A batch item references `$IDPlaceholder` (§6.4) but no earlier item
+    /// A batch item references `$IDPlaceholder` (§6.1 preamble) but no earlier item
     /// in this batch has produced a UID yet — typically because the item
     /// that was supposed to (e.g. `CreateKeyPair`) failed. Same wire code
     /// as [`Self::object_not_found`] (0x37 — nothing by that name exists

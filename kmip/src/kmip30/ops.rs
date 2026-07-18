@@ -1839,7 +1839,7 @@ pub struct InteropResponse;
 #[derive(Clone, Debug, PartialEq)]
 pub struct GetUsageAllocationRequest {
     /// "The Unique Identifier of the object." REQUIRED per Table 329
-    /// (the §6.4 ID-placeholder enumeration form is also accepted).
+    /// (the §6.1 preamble ID-placeholder enumeration form is also accepted).
     pub uid: String,
     /// `Usage Limits Count` (0x420096, LongInteger) — "The number of
     /// Usage Limits Units to be protected." REQUIRED per Table 329.
@@ -2033,7 +2033,7 @@ pub struct DeriveKeyResponse {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ReKeyRequest {
     /// `Unique Identifier` — "Determines the existing Symmetric Key
-    /// being re-keyed." REQUIRED per Table 405 (the §6.4
+    /// being re-keyed." REQUIRED per Table 405 (the §6.1 preamble
     /// ID-placeholder enumeration form is also accepted).
     pub uid: String,
     /// `Offset` (0x420058, Interval seconds) — "indicating the
@@ -2067,7 +2067,7 @@ pub struct ReKeyKeyPairRequest {
     /// `Unique Identifier` — "Determines the existing Asymmetric key
     /// pair to be re-keyed." REQUIRED per Table 410. This server
     /// resolves either half but the canonical handle is the PRIVATE
-    /// key UID (§6.4: the pair response's first UID — the Private Key
+    /// key UID (§6.1 preamble: the pair response's first UID — the Private Key
     /// Unique Identifier — is the placeholder value).
     pub uid: String,
     /// `Offset` (0x420058, Interval seconds) — same semantics as

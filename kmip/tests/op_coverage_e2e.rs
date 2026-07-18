@@ -933,18 +933,15 @@ fn login_ticket_authenticates_a_later_dispatched_request() {
 /// self-signed Certificate validates to `Valid`; an inline expired cert
 /// → `Invalid`; a leaf whose issuer isn't supplied → `Unknown`; a UID
 /// that doesn't exist → `Object Not Found`; a UID naming a non-cert
-/// object → `Invalid Object Type`. Validate needs no engine session —
-/// it works off the stored/inline DER + `x509-parser`.
+/// object → `Invalid Object Type`. Since the pure-Rust cert-ops port
+/// (WP3), Validate's signature check runs through the engine
+/// (`ops::spki_verify::verify_with_spki`, replacing `x509-parser`'s
+/// `ring`-backed verify) — so this now needs a real engine session, same
+/// as every other engine-touching e2e test in this file.
 #[test]
 fn validate_stored_self_signed_cert_returns_valid_and_error_paths() {
-    let ring = Arc::new(RingSink::new(64));
-    let sink: Arc<dyn AuditSink> = ring.clone();
-    let deps = Deps::new(
-        Engine::permissive(),
-        Arc::new(MemoryStore::new()),
-        sink,
-        DepsConfig::default(),
-    );
+    let _guard = engine_test_lock();
+    let deps = build_deps_with_real_engine();
 
     // rcgen `CertificateParams::new(SAN)` leaves the *distinguished
     // name* empty; the chain-link check matches Issuer DN ⟷ Subject DN,

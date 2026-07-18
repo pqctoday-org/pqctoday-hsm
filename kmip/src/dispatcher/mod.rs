@@ -55,10 +55,8 @@ use crate::ops::{
     split_key::{create_split_key, join_split_key},
     Deps,
 };
-// Certify / Re-certify / Validate handlers compile only in the `native`
-// build (see `ops/mod.rs`); the wasm dispatcher answers those operations
-// with `OperationNotSupported` via the `not(native)` match arms below.
-#[cfg(feature = "native")]
+// Certify / Re-certify / Validate handlers — ungated since WP4 (pure
+// Rust, see `ops/mod.rs`); dispatched on wasm32 the same as native.
 use crate::ops::{validate::validate, certify::{certify, recertify}};
 
 use crate::kmip30::RequestPayload;
@@ -74,7 +72,7 @@ use crate::kmip30::RequestPayload;
 ///   successful items, relabelling them `OperationUndone` (see
 ///   [`undo_wave`]).
 ///
-/// Threads the §6.4 **ID Placeholder** through the batch: the
+/// Threads the §6.1 preamble **ID Placeholder** through the batch: the
 /// most-recently-produced UID is stashed in `BatchState` and any item
 /// that references the placeholder sentinel
 /// [`ID_PLACEHOLDER_SENTINEL`] gets it substituted on entry.
@@ -134,6 +132,10 @@ pub fn dispatch_with_transport_identity(
         .header
         .batch_error_continuation_option
         .unwrap_or(BatchErrorContinuationOption::Stop);
+    // §9.10 `Maximum Response Size` — captured now (before `request.header`
+    // goes out of scope) so the assembled response can be checked against it
+    // just before returning. See `enforce_max_response_size` below.
+    let max_resp_size = request.header.maximum_response_size;
     let mut state = BatchState::default();
     let mut items: Vec<ResponseBatchItem> = Vec::with_capacity(request.batch_items.len());
     for item in request.batch_items {
@@ -164,9 +166,50 @@ pub fn dispatch_with_transport_identity(
             break;
         }
     }
+    enforce_max_response_size(
+        ResponseMessage {
+            header: ResponseHeader::v3_now(),
+            batch_items: items,
+        },
+        max_resp_size,
+    )
+}
+
+/// KMIP 3.0 §9.10 — when the fully-assembled response would encode to more
+/// bytes than the client's declared `Maximum Response Size`, replace it with
+/// a single-item `OperationFailed / ResponseTooLarge` response instead.
+///
+/// Transport-agnostic: operates on the already-dispatched [`ResponseMessage`]
+/// and the request header's declared limit, so it applies equally to the
+/// native TLS listener and the wasm `submit()` entry point — there is no
+/// actual TLS/HTTP dependency here, just an encode-and-measure step that
+/// happens to run after `dispatch()` returns rather than inside it. (Kept
+/// out of the per-item loop above because the limit bounds the *whole*
+/// assembled response, not any single batch item.)
+pub fn enforce_max_response_size(
+    response: ResponseMessage,
+    max_resp_size: Option<i32>,
+) -> ResponseMessage {
+    let Some(limit) = max_resp_size.filter(|&n| n > 0) else {
+        return response;
+    };
+    let encoded_len = crate::kmip30::encode_response_message(&response).len();
+    if encoded_len <= limit as usize {
+        return response;
+    }
+    // Echo the first BatchItem's Operation per §8.2.3 so the client can
+    // correlate the failure with its original request.
+    let echoed_op = response.batch_items.first().and_then(|bi| bi.operation);
     ResponseMessage {
         header: ResponseHeader::v3_now(),
-        batch_items: items,
+        batch_items: vec![ResponseBatchItem {
+            operation: echoed_op,
+            result_status: ResultStatus::OperationFailed,
+            result_reason: Some(crate::error::ResultReason::ResponseTooLarge.to_wire_value()),
+            result_message: Some(format!("TOO_LARGE: {encoded_len} bytes > limit {limit}")),
+            payload: None,
+            asynchronous_correlation_value: None,
+        }],
     }
 }
 
@@ -283,13 +326,25 @@ fn undo_wave(deps: &Deps, state: &mut BatchState, items: &mut [ResponseBatchItem
         }
     }
     for bi in items.iter_mut().take(undone_count) {
+        // 2026-07-17 — a batch item queued as a background job
+        // (`enqueue_async_job`, §8.1.2 Mandatory) returns before the
+        // snapshot-push above ever runs for it, so nothing in the stack
+        // just replayed corresponds to it — the job is still queued (or
+        // already running) completely independently of this batch's
+        // outcome. Relabeling it OperationUndone would be a bare false
+        // claim: nothing was undone, and the job may still complete and
+        // mint whatever it was going to mint. Leave Pending items as
+        // Pending; only relabel items this wave actually rolled back.
+        if bi.result_status == ResultStatus::OperationPending {
+            continue;
+        }
         bi.result_status = ResultStatus::OperationUndone;
         // Per spec, the response payload is still returned — the
         // status field is the only thing that changes.
     }
 }
 
-/// Per-batch transient state per KMIP 3.0 §6.4 — "a temporary variable
+/// Per-batch transient state per KMIP 3.0 §6.1 preamble — "a temporary variable
 /// called the ID Placeholder. … only valid and preserved during the
 /// execution of a single request. After execution, the variable is
 /// discarded." Also tracks snapshot stacks for the §9.5 Undo wave.
@@ -462,14 +517,23 @@ fn dispatch_one(
                 asynchronous_correlation_value: None,
             }
         }
-        Err(err) => ResponseBatchItem {
-            operation: Some(op),
-            result_status: ResultStatus::OperationFailed,
-            result_reason: Some(err.result_reason().to_wire_value()),
-            result_message: Some(err.to_string()),
-            payload: None,
-            asynchronous_correlation_value: None,
-        },
+        Err(err) => {
+            // §6.1.7: "The Check operation clears the ID Placeholder if
+            // the requested Check fails" — Check-specific; other failed
+            // ops leave the placeholder as it was (the §6.1 preamble only
+            // mandates a refresh on SUCCESS for UID-producing ops).
+            if op == crate::kmip30::Operation::Check {
+                state.id_placeholder = None;
+            }
+            ResponseBatchItem {
+                operation: Some(op),
+                result_status: ResultStatus::OperationFailed,
+                result_reason: Some(err.result_reason().to_wire_value()),
+                result_message: Some(err.to_string()),
+                payload: None,
+                asynchronous_correlation_value: None,
+            }
+        }
     }
 }
 
@@ -782,8 +846,21 @@ fn substitute_id_placeholder(
 }
 
 /// After a successful op, refresh the per-batch ID Placeholder with
-/// the most-recently produced UID per KMIP 3.0 §6.4.
+/// the most-recently produced UID per the KMIP 3.0 §6.1 preamble.
 fn update_id_placeholder(state: &mut BatchState, payload: &ResponsePayload) {
+    // §6.1.32 Locate is the one op the preamble gives asymmetric
+    // treatment: exactly one match sets the placeholder, but zero or
+    // more-than-one SHALL EMPTY it — "This ensures that these batched
+    // operations SHALL proceed only if a single object is returned by
+    // Locate." Handled first, and returns, since it's the one case that
+    // must actively clear rather than leave whatever was there before.
+    if let ResponsePayload::Locate(r) = payload {
+        state.id_placeholder = match r.uids.as_slice() {
+            [only] => Some(only.clone()),
+            _ => None,
+        };
+        return;
+    }
     let uid: Option<&str> = match payload {
         ResponsePayload::Create(r)      => Some(&r.uid),
         ResponsePayload::CreateKeyPair(r) => Some(&r.private_key_uid),
@@ -796,18 +873,17 @@ fn update_id_placeholder(state: &mut BatchState, payload: &ResponsePayload) {
         ResponsePayload::Get(r)         => Some(&r.uid),
         ResponsePayload::GetAttributes(r) => Some(&r.uid),
         ResponsePayload::GetAttributeList(r) => Some(&r.uid),
-        ResponsePayload::Locate(r)      => r.uids.first().map(|s| s.as_str()),
-        // K20 — §6.4: Derive Key is one of the ops that "SHALL set the
-        // ID Placeholder" to the newly derived object's UID.
+        // K20 — §6.1 preamble: Derive Key is one of the ops that "SHALL
+        // set the ID Placeholder" to the newly derived object's UID.
         ResponsePayload::DeriveKey(r)   => Some(&r.uid),
-        // K21 — §6.4: the replacement UID; for the pair, "the first
-        // value in the response is the Unique Identifier value with
-        // respect to ID Placeholder handling" → the Private Key
+        // K21 — §6.1 preamble: the replacement UID; for the pair, "the
+        // first value in the response is the Unique Identifier value
+        // with respect to ID Placeholder handling" → the Private Key
         // Unique Identifier (Table 411 lists it first).
         ResponsePayload::ReKey(r)        => Some(&r.uid),
         ResponsePayload::ReKeyKeyPair(r) => Some(&r.private_key_uid),
-        // P2.3 — §6.4: the new Certificate's UID becomes the ID
-        // Placeholder for the rest of the batch.
+        // P2.3 — §6.1 preamble: the new Certificate's UID becomes the
+        // ID Placeholder for the rest of the batch.
         ResponsePayload::Certify(r)      => Some(&r.uid),
         ResponsePayload::ReCertify(r)    => Some(&r.uid),
         // Gap-remediation Phase G, Finding #9 — same 4 ops as
@@ -819,6 +895,18 @@ fn update_id_placeholder(state: &mut BatchState, payload: &ResponsePayload) {
         ResponsePayload::Decapsulate(r)   => Some(&r.uid),
         ResponsePayload::CreateSplitKey(r) => r.uids.first().map(|s| s.as_str()),
         ResponsePayload::JoinSplitKey(r)  => Some(&r.uid),
+        // 2026-07-17 audit — the §6.1 preamble's rule ("any operation
+        // that successfully completes and returns a Unique Identifier")
+        // isn't restricted to object-lifecycle ops; these 4 crypto ops
+        // carry a `uid` in their response too (Sign/SignatureVerify per
+        // Table 435; Encrypt/Decrypt symmetrically) and were previously
+        // falling through to `_ => None`, silently leaving a STALE
+        // placeholder in place after e.g. `CreateKeyPair → Sign(explicit
+        // other uid) → $IDPlaceholder`.
+        ResponsePayload::Sign(r)            => Some(&r.uid),
+        ResponsePayload::SignatureVerify(r) => Some(&r.uid),
+        ResponsePayload::Encrypt(r)         => Some(&r.uid),
+        ResponsePayload::Decrypt(r)         => Some(&r.uid),
         _ => None,
     };
     if let Some(u) = uid { state.id_placeholder = Some(u.to_string()); }
@@ -856,22 +944,13 @@ fn handle_payload(
         RequestPayload::SignatureVerify(r) => {
             ResponsePayload::SignatureVerify(signature_verify(deps, r, correlation_id)?)
         }
-        #[cfg(feature = "native")]
         RequestPayload::Validate(r) => ResponsePayload::Validate(validate(deps, r, correlation_id)?),
         // P2.3 — §6.1.6 Certify / §6.1.50 Re-certify (PQC-capable CA).
-        #[cfg(feature = "native")]
+        // Ungated since WP4 — pure Rust (`spki_verify` + the engine),
+        // dispatched on wasm32 the same as native; no more `not(native)`
+        // OperationNotSupported fallback for these three.
         RequestPayload::Certify(r) => ResponsePayload::Certify(certify(deps, r, correlation_id)?),
-        #[cfg(feature = "native")]
         RequestPayload::ReCertify(r) => ResponsePayload::ReCertify(recertify(deps, r, correlation_id)?),
-        // wasm core: the ring/rcgen-backed CA + chain-validation ops are not
-        // compiled in. Answer them like any recognized-but-unhandled op.
-        #[cfg(not(feature = "native"))]
-        RequestPayload::Validate(_) | RequestPayload::Certify(_) | RequestPayload::ReCertify(_) => {
-            return Err(KmipError::failed(
-                crate::error::ResultReason::OperationNotSupported,
-                "this build does not include certificate issuance / validation",
-            ));
-        }
         RequestPayload::Interop(r) => ResponsePayload::Interop(interop(deps, r, correlation_id)?),
         RequestPayload::AddAttribute(r) => ResponsePayload::AddAttribute(add_attribute(deps, r, correlation_id)?),
         RequestPayload::ModifyAttribute(r) => ResponsePayload::ModifyAttribute(modify_attribute(deps, r, correlation_id)?),
@@ -1688,7 +1767,7 @@ mod tests {
     /// K20 — Derive Key (§6.1.18) end-to-end over the wire: TTLV
     /// request (Object Type + UID + Derivation Method HMAC +
     /// Derivation Parameters + Attributes) → derived object with the
-    /// §6.1.18 link pair, then a follow-up GetAttributes via the §6.4
+    /// §6.1.18 link pair, then a follow-up GetAttributes via the §6.1 preamble
     /// ID Placeholder (Derive Key SHALL set it to the new UID).
     #[test]
     fn k20_derive_key_via_wire_with_id_placeholder() {
@@ -1740,7 +1819,7 @@ mod tests {
             ])),
         ]));
         // Second item — GetAttributes via `IDPlaceholder` (enum 0x01):
-        // §6.4 Derive Key sets the placeholder to the derived UID.
+        // §6.1 preamble Derive Key sets the placeholder to the derived UID.
         let ga_item = TtlvFrame::new(Tag(tags::BatchItem), Value::Structure(vec![
             TtlvFrame::new(
                 Tag(tags::Operation),
@@ -1782,7 +1861,7 @@ mod tests {
     /// K21 — Re-key (§6.1.51) end-to-end over the wire: TTLV request
     /// (UID + Offset Interval + Attributes override) → replacement
     /// object with the §6.1.51 link pair, then a follow-up
-    /// GetAttributes via the §6.4 ID Placeholder (Re-key SHALL set it
+    /// GetAttributes via the §6.1 preamble ID Placeholder (Re-key SHALL set it
     /// to the replacement UID). Pins the `Offset` tag decode
     /// (0x420058, Interval).
     #[test]
@@ -1821,7 +1900,7 @@ mod tests {
                 ])),
             ])),
         ]));
-        // §6.4 — Re-key sets the ID Placeholder to the replacement UID.
+        // §6.1 preamble — Re-key sets the ID Placeholder to the replacement UID.
         let ga_item = TtlvFrame::new(Tag(tags::BatchItem), Value::Structure(vec![
             TtlvFrame::new(
                 Tag(tags::Operation),
@@ -1862,7 +1941,7 @@ mod tests {
     }
 
     /// K21 — Re-key Key Pair (§6.1.52) over the wire: response carries
-    /// the two typed UID tags (Table 411) and the §6.4 placeholder is
+    /// the two typed UID tags (Table 411) and the §6.1 preamble placeholder is
     /// the PRIVATE half ("the first value in the response").
     #[test]
     fn k21_rekey_key_pair_via_wire_placeholder_is_private_half() {
@@ -1922,7 +2001,7 @@ mod tests {
             }
             other => panic!("expected ReKeyKeyPair payload, got {other:?}"),
         };
-        // §6.4 — placeholder is the private (first) UID.
+        // §6.1 preamble — placeholder is the private (first) UID.
         match &resp.batch_items[1].payload {
             Some(ResponsePayload::GetAttributes(r)) => assert_eq!(r.uid, new_priv),
             other => panic!("expected GetAttributes payload, got {other:?}"),
@@ -1964,7 +2043,7 @@ mod tests {
     // ── R7 multi-batch contracts ───────────────────────────────────────────
     //
     // These pin the spec-compliant behaviour for multi-item RequestMessage
-    // dispatch per KMIP 3.0 §8.1.1 / §8.2.1 / §9.5 / §6.4. They MUST
+    // dispatch per KMIP 3.0 §8.1.1 / §8.2.1 / §9.5 / §6.1 preamble. They MUST
     // continue to pass as the wire codec and dispatcher evolve.
 
     use crate::kmip30::{
@@ -2008,6 +2087,78 @@ mod tests {
                 "item {i} expected Success",
             );
         }
+    }
+
+    /// §9.10 — a generous `Maximum Response Size` leaves a normal response
+    /// untouched. Transport-agnostic: this runs through `dispatch()` (the
+    /// same entry point wasm's `submit()` uses), not the native listener —
+    /// proving the check needs no TLS/HTTP transport underneath it.
+    #[test]
+    fn max_response_size_under_limit_passes_through() {
+        let d = deps();
+        let mut header = RequestHeader::v3();
+        header.maximum_response_size = Some(1_000_000);
+        let msg = crate::kmip30::RequestMessage {
+            header,
+            batch_items: vec![RequestBatchItem {
+                operation: crate::kmip30::Operation::Query,
+                payload: RP::Query(crate::kmip30::QueryRequest { functions: vec![] }),
+            }],
+        };
+        let resp = dispatch(&d, msg);
+        assert_eq!(resp.batch_items.len(), 1);
+        assert_eq!(resp.batch_items[0].result_status, ResultStatus::Success);
+    }
+
+    /// §9.10 — a `Maximum Response Size` too small for the real response
+    /// gets a single-item `OperationFailed / ResponseTooLarge` instead,
+    /// echoing the first item's Operation per §8.2.3. This is the exact
+    /// check `MSGENC-HTTPS-M-1-30.xml` / `MSGENC-JSON-M-1-30.xml` /
+    /// `MSGENC-XML-M-1-30.xml` exercise — previously only implementable in
+    /// the native TLS listener; now the same transport-agnostic path the
+    /// browser replay's `submit()` also runs.
+    #[test]
+    fn max_response_size_over_limit_replaces_with_response_too_large() {
+        let d = deps();
+        let mut header = RequestHeader::v3();
+        header.maximum_response_size = Some(1); // No real response fits in 1 byte.
+        let msg = crate::kmip30::RequestMessage {
+            header,
+            batch_items: vec![RequestBatchItem {
+                operation: crate::kmip30::Operation::Query,
+                payload: RP::Query(crate::kmip30::QueryRequest { functions: vec![] }),
+            }],
+        };
+        let resp = dispatch(&d, msg);
+        assert_eq!(resp.batch_items.len(), 1, "replaced with a single item");
+        let bi = &resp.batch_items[0];
+        assert_eq!(bi.result_status, ResultStatus::OperationFailed);
+        assert_eq!(bi.operation, Some(crate::kmip30::Operation::Query), "echoes the original op");
+        assert_eq!(
+            bi.result_reason,
+            Some(crate::error::ResultReason::ResponseTooLarge.to_wire_value())
+        );
+        assert!(bi.payload.is_none());
+    }
+
+    /// A limit of 0 or an absent header field both mean "no limit" per
+    /// §9.10 ("If the response exceeds this length... 0 means no limit
+    /// specified"-style absence semantics mirrored from the native
+    /// listener's original `filter(|&n| n > 0)` guard).
+    #[test]
+    fn max_response_size_zero_means_no_limit() {
+        let d = deps();
+        let mut header = RequestHeader::v3();
+        header.maximum_response_size = Some(0);
+        let msg = crate::kmip30::RequestMessage {
+            header,
+            batch_items: vec![RequestBatchItem {
+                operation: crate::kmip30::Operation::Query,
+                payload: RP::Query(crate::kmip30::QueryRequest { functions: vec![] }),
+            }],
+        };
+        let resp = dispatch(&d, msg);
+        assert_eq!(resp.batch_items[0].result_status, ResultStatus::Success);
     }
 
     /// §9.5 — `BatchErrorContinuationOption = Stop` (the default). After
@@ -2079,7 +2230,7 @@ mod tests {
         assert_eq!(resp.batch_items[2].result_status, ResultStatus::Success);
     }
 
-    /// §6.4 ID Placeholder — "a temporary variable… only valid and
+    /// §6.1 preamble ID Placeholder — "a temporary variable… only valid and
     /// preserved during the execution of a single request." A
     /// subsequent BatchItem that uses `UniqueIdentifier =
     /// IDPlaceholder` (the well-known enum value `0x01`) MUST resolve
@@ -2170,6 +2321,287 @@ mod tests {
         );
     }
 
+    /// 2026-07-17 audit (M3) — §6.1.32 Locate: "If the Locate operation
+    /// matches more than one object... the server SHALL empty the ID
+    /// Placeholder, causing any subsequent operations that are batched
+    /// with the Locate... to fail." Before this fix, `update_id_placeholder`
+    /// copied `uids.first()` on ANY match count, so a multi-match Locate
+    /// silently set the placeholder to an arbitrary UID instead of
+    /// emptying it.
+    #[test]
+    fn locate_multi_match_empties_id_placeholder_not_first_uid() {
+        use crate::kmip30::{Attribute, LocateRequest, State};
+        use crate::store::ObjectRecord;
+        let d = deps();
+        for uid in ["urn:dup-1", "urn:dup-2"] {
+            d.store.put(ObjectRecord {
+                uid: uid.into(),
+                object_type: ObjectType::SymmetricKey,
+                algorithm: KmipAlgorithm::Aes,
+                cryptographic_length: 128,
+                usage_mask: UsageMask::ENCRYPT,
+                state: State::Active,
+                activation_date: Some(time::OffsetDateTime::UNIX_EPOCH),
+                initial_date: time::OffsetDateTime::UNIX_EPOCH,
+                ..ObjectRecord::default()
+            }).unwrap();
+        }
+
+        let msg = crate::kmip30::RequestMessage {
+            header: RequestHeader {
+                batch_error_continuation_option: Some(BatchErrorContinuationOption::Continue),
+                ..RequestHeader::v3()
+            },
+            batch_items: vec![
+                RequestBatchItem {
+                    operation: crate::kmip30::Operation::Locate,
+                    payload: RP::Locate(LocateRequest {
+                        attributes: vec![Attribute::CryptographicAlgorithm(KmipAlgorithm::Aes)],
+                        maximum_items: None,
+                        offset_items: None,
+                        storage_status_mask: None,
+                    }),
+                },
+                RequestBatchItem {
+                    operation: crate::kmip30::Operation::Get,
+                    payload: RP::Get(crate::kmip30::GetRequest {
+                        uid: ID_PLACEHOLDER_SENTINEL.to_string(),
+                        key_format_type: None,
+                        key_wrapping_specification: None,
+                    }),
+                },
+            ],
+        };
+        let resp = dispatch(&d, msg);
+        assert_eq!(resp.batch_items.len(), 2, "Continue keeps processing");
+        assert_eq!(
+            resp.batch_items[0].result_status,
+            ResultStatus::Success,
+            "Locate itself succeeds even though it matched >1 object",
+        );
+        let second = &resp.batch_items[1];
+        assert_eq!(
+            second.result_status,
+            ResultStatus::OperationFailed,
+            "a multi-match Locate must empty the placeholder, failing the chained Get",
+        );
+        let text = second.result_message.as_deref().unwrap_or("");
+        assert!(
+            text.contains("ID Placeholder not set"),
+            "expected the placeholder-unset message, got: {text}"
+        );
+    }
+
+    /// Companion to the above: exactly one match still sets the
+    /// placeholder (the spec's other branch of the same sentence), so a
+    /// chained follow-up resolves normally.
+    #[test]
+    fn locate_single_match_sets_id_placeholder() {
+        use crate::kmip30::{Attribute, LocateRequest, State};
+        use crate::store::ObjectRecord;
+        let d = deps();
+        d.store.put(ObjectRecord {
+            uid: "urn:only-one".into(),
+            object_type: ObjectType::SymmetricKey,
+            algorithm: KmipAlgorithm::Aes,
+            cryptographic_length: 128,
+            usage_mask: UsageMask::ENCRYPT,
+            state: State::Active,
+            activation_date: Some(time::OffsetDateTime::UNIX_EPOCH),
+            initial_date: time::OffsetDateTime::UNIX_EPOCH,
+            ..ObjectRecord::default()
+        }).unwrap();
+
+        let msg = crate::kmip30::RequestMessage {
+            header: RequestHeader::v3(),
+            batch_items: vec![
+                RequestBatchItem {
+                    operation: crate::kmip30::Operation::Locate,
+                    payload: RP::Locate(LocateRequest {
+                        attributes: vec![Attribute::CryptographicAlgorithm(KmipAlgorithm::Aes)],
+                        maximum_items: None,
+                        offset_items: None,
+                        storage_status_mask: None,
+                    }),
+                },
+                RequestBatchItem {
+                    operation: crate::kmip30::Operation::Get,
+                    payload: RP::Get(crate::kmip30::GetRequest {
+                        uid: ID_PLACEHOLDER_SENTINEL.to_string(),
+                        key_format_type: None,
+                        key_wrapping_specification: None,
+                    }),
+                },
+            ],
+        };
+        let resp = dispatch(&d, msg);
+        assert_eq!(resp.batch_items.len(), 2);
+        assert_eq!(resp.batch_items[0].result_status, ResultStatus::Success);
+        assert_eq!(
+            resp.batch_items[1].result_status,
+            ResultStatus::Success,
+            "a single-match Locate must set the placeholder so the chained Get resolves",
+        );
+    }
+
+    /// 2026-07-17 audit (L6) — the §6.1 preamble's ID-Placeholder-refresh
+    /// rule isn't restricted to object-lifecycle ops: "any operation that
+    /// successfully completes and returns a Unique Identifier" qualifies.
+    /// Sign carries a `uid` in its response (Table 435) but was previously
+    /// falling through `update_id_placeholder`'s `_ => None` arm, leaving
+    /// a STALE placeholder from an earlier item in place.
+    #[test]
+    fn sign_with_explicit_uid_refreshes_id_placeholder() {
+        use crate::kmip30::{Attribute, CreateKeyPairRequest};
+        let d = deps();
+        let now = time::OffsetDateTime::now_utc().unix_timestamp() - 3600;
+        // Born Active (past ActivationDate) so no separate Activate item is
+        // needed — real engine-generated key material, matching
+        // `op_coverage_e2e.rs`'s ReKeyKeyPair setup pattern.
+        let mk_signer = || CreateKeyPairRequest {
+            common_attributes: vec![
+                Attribute::CryptographicAlgorithm(KmipAlgorithm::Ecdsa),
+                Attribute::ActivationDate(now),
+            ],
+            private_key_attributes: vec![Attribute::CryptographicUsageMask(UsageMask::SIGN)],
+            public_key_attributes: vec![Attribute::CryptographicUsageMask(UsageMask::VERIFY)],
+            seed: None,
+        };
+
+        let setup = dispatch(&d, crate::kmip30::RequestMessage {
+            header: RequestHeader::v3(),
+            batch_items: vec![RequestBatchItem {
+                operation: crate::kmip30::Operation::CreateKeyPair,
+                payload: RP::CreateKeyPair(mk_signer()),
+            }],
+        });
+        let signer_a = match &setup.batch_items[0].payload {
+            Some(ResponsePayload::CreateKeyPair(r)) => r.private_key_uid.clone(),
+            other => panic!("expected a CreateKeyPair response, got {other:?}"),
+        };
+
+        let msg = crate::kmip30::RequestMessage {
+            header: RequestHeader::v3(),
+            batch_items: vec![
+                // Sets the placeholder to signer-b's private key first, so
+                // the test can tell the difference between "Sign refreshed
+                // it" and "Sign just left whatever was already there".
+                RequestBatchItem {
+                    operation: crate::kmip30::Operation::CreateKeyPair,
+                    payload: RP::CreateKeyPair(mk_signer()),
+                },
+                RequestBatchItem {
+                    operation: crate::kmip30::Operation::Sign,
+                    payload: RP::Sign(crate::kmip30::SignRequest {
+                        uid: signer_a.clone(),
+                        data: b"hello".to_vec(),
+                        cryptographic_parameters: None,
+                    }),
+                },
+                RequestBatchItem {
+                    operation: crate::kmip30::Operation::GetAttributes,
+                    payload: RP::GetAttributes(crate::kmip30::GetAttributesRequest {
+                        uid: ID_PLACEHOLDER_SENTINEL.to_string(),
+                        attribute_references: vec![],
+                    }),
+                },
+            ],
+        };
+        let resp = dispatch(&d, msg);
+        assert_eq!(resp.batch_items.len(), 3);
+        assert_eq!(resp.batch_items[0].result_status, ResultStatus::Success, "CreateKeyPair signer-b");
+        assert_eq!(resp.batch_items[1].result_status, ResultStatus::Success, "Sign against signer-a's explicit uid");
+        let third = &resp.batch_items[2];
+        assert_eq!(third.result_status, ResultStatus::Success);
+        match &third.payload {
+            Some(ResponsePayload::GetAttributes(r)) => {
+                assert_eq!(
+                    r.uid, signer_a,
+                    "the placeholder must resolve to Sign's own uid, not CreateKeyPair signer-b's",
+                );
+            }
+            other => panic!("expected a GetAttributes response payload, got {other:?}"),
+        }
+    }
+
+    /// 2026-07-17 audit (L7) — the §6.1.7 Check operation clears the ID
+    /// Placeholder if the requested Check fails (spec-mandated,
+    /// Check-specific — unlike ordinary op failures, which leave the
+    /// placeholder untouched).
+    #[test]
+    fn failed_check_clears_id_placeholder() {
+        use crate::kmip30::State;
+        use crate::store::ObjectRecord;
+        let d = deps();
+        d.store.put(ObjectRecord {
+            uid: "urn:verify-only".into(),
+            object_type: ObjectType::PublicKey,
+            algorithm: KmipAlgorithm::Ecdsa,
+            cryptographic_length: 256,
+            usage_mask: UsageMask::VERIFY,
+            state: State::Active,
+            activation_date: Some(time::OffsetDateTime::UNIX_EPOCH),
+            initial_date: time::OffsetDateTime::UNIX_EPOCH,
+            ..ObjectRecord::default()
+        }).unwrap();
+
+        let msg = crate::kmip30::RequestMessage {
+            header: RequestHeader {
+                batch_error_continuation_option: Some(BatchErrorContinuationOption::Continue),
+                ..RequestHeader::v3()
+            },
+            batch_items: vec![
+                // Sets the placeholder first, so the test can tell "Check
+                // cleared it" apart from "it was never set to begin with".
+                RequestBatchItem {
+                    operation: crate::kmip30::Operation::Get,
+                    payload: RP::Get(crate::kmip30::GetRequest {
+                        uid: "urn:verify-only".into(),
+                        key_format_type: None,
+                        key_wrapping_specification: None,
+                    }),
+                },
+                // Requests the SIGN bit on a VERIFY-only key — fails with
+                // IncompatibleCryptographicUsageMask.
+                RequestBatchItem {
+                    operation: crate::kmip30::Operation::Check,
+                    payload: RP::Check(crate::kmip30::CheckRequest {
+                        uid: "urn:verify-only".into(),
+                        usage_limits_count: None,
+                        cryptographic_usage_mask: Some(UsageMask::SIGN.bits()),
+                        lease_time: None,
+                    }),
+                },
+                RequestBatchItem {
+                    operation: crate::kmip30::Operation::GetAttributes,
+                    payload: RP::GetAttributes(crate::kmip30::GetAttributesRequest {
+                        uid: ID_PLACEHOLDER_SENTINEL.to_string(),
+                        attribute_references: vec![],
+                    }),
+                },
+            ],
+        };
+        let resp = dispatch(&d, msg);
+        assert_eq!(resp.batch_items.len(), 3, "Continue keeps processing");
+        assert_eq!(resp.batch_items[0].result_status, ResultStatus::Success);
+        assert_eq!(
+            resp.batch_items[1].result_status,
+            ResultStatus::OperationFailed,
+            "the Check must actually fail for this test to be meaningful",
+        );
+        let third = &resp.batch_items[2];
+        assert_eq!(
+            third.result_status,
+            ResultStatus::OperationFailed,
+            "a failed Check must clear the placeholder, failing the chained GetAttributes",
+        );
+        let text = third.result_message.as_deref().unwrap_or("");
+        assert!(
+            text.contains("ID Placeholder not set"),
+            "expected the placeholder-unset message, got: {text}"
+        );
+    }
+
     /// Sentinel string the wire codec emits when it sees
     /// `<UniqueIdentifier type="Enumeration" value="IDPlaceholder"/>`
     /// (enum value `0x00000001`). The dispatcher recognises it and
@@ -2241,6 +2673,55 @@ mod tests {
             ResultStatus::OperationFailed,
             "the failed Destroy keeps OperationFailed",
         );
+    }
+
+    /// 2026-07-17 — a batch item queued as an async job (§8.1.2 Mandatory)
+    /// returns from `dispatch_one` before the snapshot-push that
+    /// `undo_wave` replays, so nothing was captured for it and nothing was
+    /// actually rolled back. Undo used to relabel it OperationUndone
+    /// anyway — a bare false claim, since the queued job is still pending
+    /// (or already running) independently of this batch's own outcome.
+    #[test]
+    fn r7_phase4_undo_leaves_a_pending_async_item_pending_not_falsely_undone() {
+        let d = deps();
+        let msg = crate::kmip30::RequestMessage {
+            header: RequestHeader {
+                batch_error_continuation_option: Some(BatchErrorContinuationOption::Undo),
+                asynchronous_indicator: Some(crate::kmip30::AsynchronousIndicator::Mandatory),
+                ..RequestHeader::v3()
+            },
+            batch_items: vec![
+                RequestBatchItem {
+                    operation: crate::kmip30::Operation::Create,
+                    payload: RP::Create(CreateRequest {
+                        object_type: ObjectType::SymmetricKey,
+                        template_attribute: vec![
+                            Attribute::CryptographicAlgorithm(KmipAlgorithm::Aes),
+                            Attribute::CryptographicLength(128),
+                            Attribute::CryptographicUsageMask(UsageMask::ENCRYPT),
+                        ],
+                    }),
+                },
+                RequestBatchItem {
+                    // Query is never async-eligible — the guaranteed
+                    // failure that triggers this Undo wave.
+                    operation: crate::kmip30::Operation::Query,
+                    payload: RP::Query(crate::kmip30::QueryRequest { functions: vec![] }),
+                },
+            ],
+        };
+        let resp = dispatch(&d, msg);
+        assert_eq!(resp.batch_items.len(), 2);
+        assert_eq!(
+            resp.batch_items[0].result_status,
+            ResultStatus::OperationPending,
+            "a queued async job must NOT be relabelled Undone — nothing was actually rolled back",
+        );
+        assert!(
+            resp.batch_items[0].asynchronous_correlation_value.is_some(),
+            "the claim ticket must still be returned so the caller can Poll/Cancel it directly",
+        );
+        assert_eq!(resp.batch_items[1].result_status, ResultStatus::OperationFailed);
     }
 
     /// Snapshot/restore: the Activate's state mutation (PreActive →

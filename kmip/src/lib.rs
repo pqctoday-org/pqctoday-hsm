@@ -25,27 +25,16 @@ pub mod server;
 // Cross-plane infrastructure
 pub mod auditlog;
 
-/// Serializes tests that bootstrap a real `softhsmrustv3` engine session.
-/// The engine's object store / login state is process-global (not
-/// per-test-isolated — `rust/src/state.rs`'s `OBJECTS`/`TOKEN_STORE` are
-/// singletons), so two such tests running concurrently (the default
-/// `cargo test` behavior) can stomp each other's `C_InitToken`/login/object
-/// state. `softhsmrustv3` has its own equivalent (`native::test_lock`) for
-/// its own test suite, but that's `pub(crate)` there — not reachable from
-/// this crate — hence a second instance here, shared by every `ops::*`
-/// test module that needs it (see `ops::certify::tests` and
-/// `ops::create::tests` for usage).
-#[cfg(test)]
-pub(crate) mod engine_test_lock {
-    use std::sync::{Mutex, MutexGuard, OnceLock};
+// Tests that bootstrap a real `softhsmrustv3` engine session serialize on
+// `ops::helpers::engine_lock()` — the engine's object store / login state
+// is process-global (`rust/src/state.rs`'s `OBJECTS`/`TOKEN_STORE` are
+// singletons), so two such tests running concurrently (the default
+// `cargo test` behavior) can stomp each other's `C_InitToken`/login/object
+// state. There must be exactly ONE such lock crate-wide — a second,
+// independent `Mutex` here (as this module used to be) doesn't block the
+// first, so tests split across the two race each other anyway. See
+// `ops::helpers::engine_lock`'s doc for the canonical instance.
 
-    pub(crate) fn acquire() -> MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-    }
-}
 // Prometheus `/metrics` — `native` only (the wasm core has no scrape endpoint).
 #[cfg(feature = "native")]
 pub mod metrics;

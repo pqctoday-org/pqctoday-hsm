@@ -133,11 +133,26 @@ _SPEC_EXTRACT_TAG_PATCHES: dict[str, int] = {
     "Internal":         0x42_01C8,
     "ExternalMu":       0x42_01C9,
     "Random":           0x42_01CA,
+    # Sec6.1.62 Validate / Sec6.1.6 Certify / Sec6.1.50 Re-certify (Certificate
+    # Services) - also absent from the spec-extraction JSON. Mirrors the hub's
+    # codepointTable.ts patch (kept in sync per that file's own convention);
+    # values cross-checked against wire.rs's tags::* constants.
+    "CertificateValue":                   0x42_001E,
+    "CertificateRequestType":             0x42_0019,
+    "CertificateRequest":                 0x42_0018,
+    "CertificateRequestValue":            0x42_0140,
+    "CertificateRequestUniqueIdentifier": 0x42_0139,
+    "ValidityDate":                       0x42_009A,
+    "ValidityIndicator":                  0x42_009B,
 }
 
 _SPEC_EXTRACT_PATCHES: dict[str, dict[str, int]] = {
     "MaskGenerator": {"MGF1": 0x00000001},
     "KeyFormatType": {"SeedPrivateKey": 0x00000018},
+    # Certificate Services (WP5) - matches kmip30::ops::CertificateRequestType.
+    "CertificateRequestType": {"Crmf": 0x00000001, "PKCS10": 0x00000002, "PEM": 0x00000003},
+    # Validate's three-way answer - matches kmip30::ops::SignatureValidity.
+    "ValidityIndicator": {"Valid": 0x00000001, "Invalid": 0x00000002, "Unknown": 0x00000003},
     "CredentialType": {
         "UsernameAndPassword": 0x00000001,
         "Device":              0x00000002,
@@ -167,10 +182,17 @@ _SPEC_EXTRACT_PATCHES: dict[str, dict[str, int]] = {
         "FrodoKEM-1344-AES":        0x80000063,
         "FrodoKEM-1344-SHAKE":      0x80000064,
         "Classic-McEliece-6688128": 0x00000034,
+        # LAMPS composite signatures (draft-ietf-lamps-pq-composite-sigs-19,
+        # 2026-07-10) — vendor-extension range per KMIP 3.0 §11.12, right
+        # after Hss's 0x80000065. kmip/src/kmip30/algos.rs is the source of
+        # truth for these values; keep in sync with codepointTable.ts's copy.
+        "ML-DSA-44-RSA2048-PSS":    0x80000066,
+        "ML-DSA-65-ECDSA-P256":     0x80000067,
+        "ML-DSA-87-ECDSA-P384":     0x80000068,
     },
     "Operation": {
         "ReKey":        0x00000004,
-        "ReKeyKeyPair": 0x0000001E,
+        "ReKeyKeyPair": 0x0000001D,
         "ReCertify":    0x00000007,
         "Encapsulate":  0x00000041,
         "Decapsulate":  0x00000042,

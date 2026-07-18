@@ -8,6 +8,38 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.15.0] — 2026-07-18
+
+### Added
+
+- **Composite/hybrid certificate formats.** LAMPS composite signatures,
+  composite-KEM, Catalyst, RFC 9763 (delegated credentials), and Chameleon
+  certificates — validated end-to-end (self-signed chains, tamper
+  detection on both the classical and PQC component) alongside the
+  existing plain ML-DSA and composite chain tests.
+- **`Certify` / `Re-certify` / `Validate` now work on `wasm32`**, not just
+  native. These pure-Rust cert operations (`spki_verify` + the engine) had
+  no native-only dependency to begin with — the `#[cfg(feature =
+  "native")]` gate and its `OperationNotSupported` wasm fallback were
+  removed; the browser-side KMIP Playground can now exercise the full
+  cert lifecycle, not just a subset.
+- **KMIP 3.0 §9.10 `Maximum Response Size` enforcement.** When a client
+  declares a response-size limit and the assembled response would exceed
+  it, the server now returns a single-item `OperationFailed /
+  ResponseTooLarge` response instead of the oversized one — transport-
+  agnostic, so it applies to both the native TLS listener and the wasm
+  `submit()` entry point.
+- **§8.1.2 batch async wiring + Undo-honesty for pending async items** —
+  closes an audit gap where `Undo` on a still-pending asynchronous batch
+  item did not correctly unwind partial state.
+- **Pure-Rust KMIP certificate operations.** The KMIP server now
+  implements `Certify`, `Validate`, and SPKI public-key verification in
+  pure Rust, with **no external crypto dependency in the cert-ops path** —
+  enforced by a `no_crypto_in_certops` guard test. Adds an OpenSSL
+  certificate cross-check and a hub/hybrid certificate cross-check test.
+  Exposes the cert-ops path through the KMIP WASM engine consumed by the
+  hub's KMIP 3.0 Command Lab.
+
 ### Fixed
 
 - **`Register(Certificate)` was unreachable on `wasm32`.**

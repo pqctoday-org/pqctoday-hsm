@@ -133,6 +133,28 @@ pub(crate) fn digest_of(mech: u32, data: &[u8]) -> Result<Vec<u8>, CkRv> {
     })
 }
 
+/// One-shot digest, plain `CKM_SHA*` codepoints (as opposed to
+/// [`digest_of`]'s `CKM_SHA*_KEY_DERIVATION` set) — the `native::*`
+/// counterpart of `ffi::C_DigestInit`/`C_Digest`'s SHA-2 arms, for a
+/// caller that wants a one-shot hash without a session-scoped multi-part
+/// `C_DigestInit`/`Update`/`Final` sequence. Added so KMIP-layer callers
+/// that need a hash (e.g. a §11 Digest attribute, or a certificate's
+/// own content digest) can get one from THIS engine instead of reaching
+/// for a `sha2` crate dependency of their own — kmip holds no crypto
+/// crate; every primitive, hashing included, executes here.
+///
+/// `CKR_MECHANISM_INVALID` for anything outside `CKM_SHA256` /
+/// `CKM_SHA384` / `CKM_SHA512`.
+pub fn digest(mech: u32, data: &[u8]) -> Result<Vec<u8>, CkRv> {
+    use sha2::Digest as _;
+    Ok(match mech {
+        CKM_SHA256 => sha2::Sha256::digest(data).to_vec(),
+        CKM_SHA384 => sha2::Sha384::digest(data).to_vec(),
+        CKM_SHA512 => sha2::Sha512::digest(data).to_vec(),
+        _ => return Err(CKR_MECHANISM_INVALID),
+    })
+}
+
 /// HKDF (RFC 5869) over the PRF selected by `prf` — `Extract(salt, ikm)` then
 /// `Expand(info)` to `len` bytes. Mirrors the `hkdf` crate usage in the FFI
 /// `C_DeriveKey` HKDF arm (`ffi.rs`) so the mechanism→hasher mapping is
@@ -371,6 +393,29 @@ mod tests {
         let trunc =
             digest_key_derivation(session, base2, CKM_SHA512_KEY_DERIVATION, Some(32)).unwrap();
         assert_eq!(get_object_value(trunc).unwrap(), full_v[..32].to_vec());
+    }
+
+    #[test]
+    fn digest_matches_known_sha256() {
+        // Same canonical KAT as digest_key_derivation_matches_known_sha256,
+        // through the plain CKM_SHA256 one-shot entry point instead of the
+        // CKM_SHA256_KEY_DERIVATION combinator path.
+        let expect: Vec<u8> = (0..32)
+            .map(|i| {
+                u8::from_str_radix(
+                    &"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+                        [i * 2..i * 2 + 2],
+                    16,
+                )
+                .unwrap()
+            })
+            .collect();
+        assert_eq!(digest(CKM_SHA256, b"abc").unwrap(), expect);
+    }
+
+    #[test]
+    fn digest_unsupported_mechanism_is_mechanism_invalid() {
+        assert_eq!(digest(CKM_SHA256_KEY_DERIVATION, b"abc"), Err(CKR_MECHANISM_INVALID));
     }
 
     // ── run_combiner executor ────────────────────────────────────────────────
