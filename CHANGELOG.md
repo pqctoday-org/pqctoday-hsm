@@ -8,6 +8,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`policy_op_layer` test suite: stale `policy_denied()` helper gave 3
+  false failures, not a policy regression.** `DenyReason::to_result_reason()`
+  maps each rule family to its own KMIP `ResultReason` (`min_key_length` →
+  `BadCryptographicParameters`, `require_custom_attribute` /
+  `require_usage_mask` → `InvalidAttributeValue`, …) instead of collapsing
+  every denial onto `PermissionDenied` — the local-only op-layer suite's
+  helper still only recognized the old collapsed string, so it misread 3
+  correct denials (FIPS RSA-2048 below `min_key_length`, CNSA ML-DSA-87
+  without its classification tag, BSI FrodoKEM/Classic-McEliece without
+  the hybrid-partner tag) as allows. No production code changed; the
+  helper now recognizes all 5 deny-mapped reasons.
+
 ## [0.15.0] — 2026-07-18
 
 ### Added
