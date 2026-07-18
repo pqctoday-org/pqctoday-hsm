@@ -41,6 +41,7 @@ use pqctoday_kmip::ops::sign::sign;
 use pqctoday_kmip::ops::signature_verify::signature_verify;
 use pqctoday_kmip::ops::{Deps, DepsConfig};
 use pqctoday_kmip::policy::{load_from_str, Engine};
+use pqctoday_kmip::server::auth::AuthContext;
 use pqctoday_kmip::store::MemoryStore;
 
 /// Serialise all e2e tests that touch the engine. The engine's
@@ -116,7 +117,7 @@ fn ml_dsa_65_create_sign_verify_destroy_against_real_engine() {
     seed: None,
     };
     let kp_resp =
-        create_key_pair(&deps, create_req, "CreateKeyPair:Sign", "e2e-create").unwrap();
+        create_key_pair(&deps, create_req, "CreateKeyPair:Sign", &AuthContext::open(), "e2e-create").unwrap();
 
     // Both halves of the keypair share the same CKA_ID — verify via the store.
     let priv_rec = deps.store.get(&kp_resp.private_key_uid).unwrap().unwrap();
@@ -148,6 +149,7 @@ fn ml_dsa_65_create_sign_verify_destroy_against_real_engine() {
             data: message.to_vec(),
             cryptographic_parameters: None,
         },
+        &AuthContext::open(),
         "e2e-sign",
     )
     .unwrap();
@@ -240,7 +242,7 @@ fn ml_dsa_87_create_sign_verify_against_real_engine() {
     seed: None,
     };
     let kp_resp =
-        create_key_pair(&deps, create_req, "CreateKeyPair:Sign", "e2e87-create").unwrap();
+        create_key_pair(&deps, create_req, "CreateKeyPair:Sign", &AuthContext::open(), "e2e87-create").unwrap();
 
     let priv_rec = deps.store.get(&kp_resp.private_key_uid).unwrap().unwrap();
     let pub_rec = deps.store.get(&kp_resp.public_key_uid).unwrap().unwrap();
@@ -256,6 +258,7 @@ fn ml_dsa_87_create_sign_verify_against_real_engine() {
             data: b"hello".to_vec(),
             cryptographic_parameters: None,
         },
+        &AuthContext::open(),
         "s",
     )
     .unwrap();
@@ -305,7 +308,7 @@ fn k6_rsa_sha384_sha512_sign_verify_against_real_engine() {
         public_key_attributes: vec![Attribute::CryptographicUsageMask(UsageMask::VERIFY)],
     seed: None,
     };
-    let kp = create_key_pair(&deps, create_req, "CreateKeyPair:Sign", "k6-create").unwrap();
+    let kp = create_key_pair(&deps, create_req, "CreateKeyPair:Sign", &AuthContext::open(), "k6-create").unwrap();
     let priv_uid = kp.private_key_uid;
     let pub_uid = kp.public_key_uid;
     activate(&deps, ActivateRequest { uid: priv_uid.clone() }, "k6-a1").unwrap();
@@ -333,6 +336,7 @@ fn k6_rsa_sha384_sha512_sign_verify_against_real_engine() {
                 data: message.clone(),
                 cryptographic_parameters: Some(cp(hash, padding)),
             },
+            &AuthContext::open(),
             "k6-sign",
         )
         .unwrap_or_else(|e| panic!("sign {hash:?}/{padding:?} failed: {e:?}"));
@@ -398,6 +402,7 @@ fn k6_rsa_sha384_sha512_sign_verify_against_real_engine() {
             data: message,
             cryptographic_parameters: Some(cp(HashingAlgorithm::Sha1, Some(0x08))),
         },
+        &AuthContext::open(),
         "k6-sign-sha1",
     )
     .unwrap_err();
@@ -441,7 +446,7 @@ fn k18_rsa_pss_salt_length_threads_to_engine() {
         public_key_attributes: vec![Attribute::CryptographicUsageMask(UsageMask::VERIFY)],
     seed: None,
     };
-    let kp = create_key_pair(&deps, create_req, "CreateKeyPair:Sign", "k18-create").unwrap();
+    let kp = create_key_pair(&deps, create_req, "CreateKeyPair:Sign", &AuthContext::open(), "k18-create").unwrap();
     let priv_uid = kp.private_key_uid;
     let pub_uid = kp.public_key_uid;
     activate(&deps, ActivateRequest { uid: priv_uid.clone() }, "k18-a1").unwrap();
@@ -462,6 +467,7 @@ fn k18_rsa_pss_salt_length_threads_to_engine() {
                 data: message.clone(),
                 cryptographic_parameters: cp,
             },
+            &AuthContext::open(),
             "k18-sign",
         )
     };
@@ -648,6 +654,7 @@ fn k9_register_ml_dsa_65_sign_verify_roundtrip() {
             data: message.clone(),
             cryptographic_parameters: None,
         },
+        &AuthContext::open(),
         "k9-sign",
     )
     .expect("Sign with registered ML-DSA-65 private key");
@@ -783,6 +790,7 @@ fn k9_register_slh_dsa_shake_128f_sign_verify_roundtrip() {
             data: message.clone(),
             cryptographic_parameters: None,
         },
+        &AuthContext::open(),
         "k9-slh-sign",
     )
     .expect("Sign with registered SLH-DSA private key");
@@ -936,6 +944,7 @@ fn k11_digest_persisted_from_real_engine_material() {
         seed: None,
         },
         "CreateKeyPair:Sign",
+        &AuthContext::open(),
         "k11-kp",
     )
     .unwrap();
@@ -1072,6 +1081,7 @@ fn k15_audit_records_real_rv_and_native_entry_point() {
             data: b"k15".to_vec(),
             cryptographic_parameters: None,
         },
+        &AuthContext::open(),
         "k15-sign-fail",
     )
     .expect_err("CKM_ML_DSA over an AES secret key must fail in the engine");
@@ -1442,6 +1452,7 @@ fn wd19_encapsulate_decapsulate_byte_exact_against_real_engine() {
             input_key_material: Some(coins.clone()),
             cryptographic_parameters: None,
         },
+        &AuthContext::open(),
         "wd19-encap-1",
     )
     .expect("Encapsulate with ML-KEM-768 public key");
@@ -1459,6 +1470,7 @@ fn wd19_encapsulate_decapsulate_byte_exact_against_real_engine() {
             input_key_material: Some(coins.clone()),
             cryptographic_parameters: None,
         },
+        &AuthContext::open(),
         "wd19-encap-2",
     )
     .expect("second deterministic Encapsulate");
@@ -1495,6 +1507,7 @@ fn wd19_encapsulate_decapsulate_byte_exact_against_real_engine() {
             input_key_material: Some(vec![0xAB; 32]),
             cryptographic_parameters: None,
         },
+        &AuthContext::open(),
         "wd19-encap-3",
     )
     .unwrap();
@@ -1625,6 +1638,7 @@ fn wd19_encapsulate_matches_oasis_transcript_vectors() {
             input_key_material: Some(coins),
             cryptographic_parameters: None,
         },
+        &AuthContext::open(),
         "wd19-transcript-encap",
     )
     .expect("transcript Encapsulate");
@@ -1792,7 +1806,7 @@ fn rsa_create_respects_cryptographic_length_attribute() {
         public_key_attributes: vec![Attribute::CryptographicUsageMask(UsageMask::VERIFY)],
     seed: None,
     };
-    let kp = create_key_pair(&deps, create_req, "CreateKeyPair:Sign", "rsa-len").unwrap();
+    let kp = create_key_pair(&deps, create_req, "CreateKeyPair:Sign", &AuthContext::open(), "rsa-len").unwrap();
     let priv_rec = deps.store.get(&kp.private_key_uid).unwrap().unwrap();
     assert_eq!(priv_rec.cryptographic_length, 2048);
 
@@ -1816,7 +1830,7 @@ fn rsa_create_rejects_unsupported_length() {
         public_key_attributes: vec![Attribute::CryptographicUsageMask(UsageMask::VERIFY)],
     seed: None,
     };
-    let err = create_key_pair(&deps, create_req, "CreateKeyPair:Sign", "rsa-bad")
+    let err = create_key_pair(&deps, create_req, "CreateKeyPair:Sign", &AuthContext::open(), "rsa-bad")
         .expect_err("RSA-1024 must be rejected");
     assert_eq!(err.result_reason(), ResultReason::InvalidAttributeValue);
 
@@ -1841,7 +1855,7 @@ fn ecdsa_create_respects_cryptographic_length_attribute() {
         public_key_attributes: vec![Attribute::CryptographicUsageMask(UsageMask::VERIFY)],
     seed: None,
     };
-    let kp = create_key_pair(&deps, create_req, "CreateKeyPair:Sign", "ec-384").unwrap();
+    let kp = create_key_pair(&deps, create_req, "CreateKeyPair:Sign", &AuthContext::open(), "ec-384").unwrap();
     let priv_rec = deps.store.get(&kp.private_key_uid).unwrap().unwrap();
     assert_eq!(priv_rec.cryptographic_length, 384);
 
@@ -1874,7 +1888,7 @@ fn ecdh_create_key_pair_succeeds_for_all_three_nist_curves() {
             )],
             seed: None,
         };
-        let kp = create_key_pair(&deps, create_req, "CreateKeyPair:KeyAgreement", "ecdh-e2e")
+        let kp = create_key_pair(&deps, create_req, "CreateKeyPair:KeyAgreement", &AuthContext::open(), "ecdh-e2e")
             .unwrap_or_else(|e| panic!("ECDH-P{length} CreateKeyPair failed: {e:?}"));
         let priv_rec = deps.store.get(&kp.private_key_uid).unwrap().unwrap();
         assert_eq!(priv_rec.algorithm, KmipAlgorithm::Ecdh);
@@ -1904,7 +1918,7 @@ fn ed25519_create_sign_verify_round_trip() {
         )],
         seed: None,
     };
-    let kp_resp = create_key_pair(&deps, create_req, "CreateKeyPair:Sign", "ed25519-e2e").unwrap();
+    let kp_resp = create_key_pair(&deps, create_req, "CreateKeyPair:Sign", &AuthContext::open(), "ed25519-e2e").unwrap();
     let priv_rec = deps.store.get(&kp_resp.private_key_uid).unwrap().unwrap();
     let pub_rec = deps.store.get(&kp_resp.public_key_uid).unwrap().unwrap();
     assert_eq!(priv_rec.algorithm, KmipAlgorithm::Ed25519);
@@ -1922,6 +1936,7 @@ fn ed25519_create_sign_verify_round_trip() {
             data: message.to_vec(),
             cryptographic_parameters: None,
         },
+        &AuthContext::open(),
         "ed25519-sign",
     )
     .unwrap();
@@ -1980,7 +1995,7 @@ fn locate_drops_orphans_when_engine_handle_is_gone() {
         public_key_attributes: vec![Attribute::CryptographicUsageMask(UsageMask::VERIFY)],
     seed: None,
     };
-    let _ = create_key_pair(&deps, create_req, "CreateKeyPair:Sign", "loc-create").unwrap();
+    let _ = create_key_pair(&deps, create_req, "CreateKeyPair:Sign", &AuthContext::open(), "loc-create").unwrap();
 
     // Sanity: locate finds both halves.
     let before = locate(
@@ -2176,6 +2191,7 @@ fn hss_register_sign_verify_against_real_engine() {
     let sig1 = sign(
         &deps,
         SignRequest { uid: priv_uid.clone(), data: b"message one".to_vec(), cryptographic_parameters: None },
+        &AuthContext::open(),
         "hss-e2e-sign-1",
     )
     .unwrap();
@@ -2196,6 +2212,7 @@ fn hss_register_sign_verify_against_real_engine() {
     let sig2 = sign(
         &deps,
         SignRequest { uid: priv_uid.clone(), data: b"message two".to_vec(), cryptographic_parameters: None },
+        &AuthContext::open(),
         "hss-e2e-sign-2",
     )
     .unwrap();
@@ -2508,6 +2525,7 @@ fn k3_register_rsa_public_key_accepts_both_pkcs1_and_pkcs8_der() {
     let sig = sign(
         &deps,
         SignRequest { uid: priv_uid, data: message.clone(), cryptographic_parameters: None },
+        &AuthContext::open(),
         "k3-sign",
     )
     .expect("Sign with PKCS#8-registered RSA private key");
@@ -2823,6 +2841,7 @@ fn k3_register_transparent_rsa_public_key_produces_usable_engine_object() {
     let sig = sign(
         &deps,
         SignRequest { uid: priv_uid, data: message.clone(), cryptographic_parameters: None },
+        &AuthContext::open(),
         "k3-sign-transparent",
     )
     .expect("Sign with PKCS#8-registered RSA private key");

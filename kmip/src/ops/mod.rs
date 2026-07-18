@@ -88,6 +88,11 @@ pub mod split_key;
 pub mod validate;
 pub mod certify;
 
+// Part F §F9 — end-to-end two-tenant isolation proof, driven through the
+// real dispatcher. Test-only.
+#[cfg(test)]
+mod tenancy_e2e;
+
 pub use deps::{AsyncJob, AsyncJobState, AsyncJobStore, Deps, DepsConfig, RngSeedMode};
 
 /// K8 test fixture — the BL-M-9-30 Transparent RSA Private Key

@@ -43,8 +43,10 @@ use super::helpers::{
 pub fn encapsulate(
     deps: &Deps,
     req: EncapsulateRequest,
+    auth: &crate::server::auth::AuthContext,
     correlation_id: &str,
 ) -> Result<EncapsulateResponse> {
+    let session = deps.resolve_tenant_session(auth.identity.as_ref()).ok();
     emit_request(
         deps,
         correlation_id,
@@ -139,7 +141,7 @@ pub fn encapsulate(
             // `policy::rule::is_consumer_op` — the engine hard-excludes it),
             // so this is sound specifically because Encapsulate originates
             // fresh output each call.
-            return rekey_and_encapsulate(deps, &req, &obj, &new_algorithm, correlation_id);
+            return rekey_and_encapsulate(deps, &req, &obj, &new_algorithm, auth, correlation_id);
         }
     }
 
@@ -155,7 +157,7 @@ pub fn encapsulate(
                 "hybrid KEM public key has no stored material".to_string(),
             )
         })?;
-        let session = deps.engine_session.ok_or_else(|| {
+        let session = session.ok_or_else(|| {
             KmipError::failed(
                 ResultReason::CryptographicFailure,
                 "hybrid KEM encapsulate requires an engine session".to_string(),
@@ -179,7 +181,7 @@ pub fn encapsulate(
     // or only nested in CryptographicParameters — prefer the hoisted form.
     let coins = req.input_key_material.clone();
 
-    let (ciphertext, shared_secret) = match deps.engine_session {
+    let (ciphertext, shared_secret) = match session {
         Some(session) => {
             // Resolve the handle by PKCS#11 class: a CreateKeyPair-generated
             // ML-KEM pair stores BOTH halves under one shared CKA_ID, so a
@@ -316,6 +318,7 @@ fn rekey_and_encapsulate(
     req: &EncapsulateRequest,
     old: &ObjectRecord,
     new_algorithm: &str,
+    auth: &crate::server::auth::AuthContext,
     correlation_id: &str,
 ) -> Result<EncapsulateResponse> {
     use crate::kmip30::{ActivateRequest, Attribute, CreateKeyPairRequest, UsageMask};
@@ -344,6 +347,7 @@ fn rekey_and_encapsulate(
             seed: None,
         },
         "CreateKeyPair:KeyAgreement",
+        auth,
         correlation_id,
     )?;
 
@@ -415,6 +419,7 @@ fn rekey_and_encapsulate(
             input_key_material: req.input_key_material.clone(),
             cryptographic_parameters: req.cryptographic_parameters.clone(),
         },
+        auth,
         correlation_id,
     )?;
     resp.rekeyed = Some(crate::kmip30::EncapsulateRekeyInfo {
@@ -527,6 +532,7 @@ mod tests {
     use crate::auditlog::{AuditSink, RingSink};
     use crate::kmip30::{DecapsulateRequest, UsageMask};
     use crate::policy::Engine;
+    use crate::server::auth::AuthContext;
     use crate::store::MemoryStore;
     use std::sync::Arc;
     use super::super::decapsulate::decapsulate;
@@ -582,6 +588,7 @@ mod tests {
                 input_key_material: Some(vec![0x11; 32]),
                 cryptographic_parameters: None,
             },
+            &AuthContext::open(),
             "t",
         )
         .unwrap();
@@ -610,6 +617,7 @@ mod tests {
         let err = encapsulate(
             &d,
             EncapsulateRequest { uid: "rsa".to_string(), ..Default::default() },
+            &AuthContext::open(),
             "t",
         )
         .unwrap_err();
@@ -625,6 +633,7 @@ mod tests {
         let resp = encapsulate(
             &d,
             EncapsulateRequest { uid: "ecdh-pk".to_string(), ..Default::default() },
+            &AuthContext::open(),
             "t",
         )
         .unwrap();
@@ -704,6 +713,7 @@ rules:
         let resp = encapsulate(
             &d,
             EncapsulateRequest { uid: "urn:ecdh-pub".into(), ..Default::default() },
+            &AuthContext::open(),
             "corr-rk",
         )
         .unwrap();

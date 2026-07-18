@@ -581,6 +581,7 @@ fn rekey_key_pair_mints_both_halves_with_links_and_retires_originals() {
         seed: None,
         },
         "CreateKeyPair:Sign",
+        &AuthContext::open(),
         "rkkp-create",
     )
     .unwrap();
@@ -595,6 +596,7 @@ fn rekey_key_pair_mints_both_halves_with_links_and_retires_originals() {
             private_key_attributes: vec![],
             public_key_attributes: vec![],
         },
+        &AuthContext::open(),
         "rkkp-rekey",
     )
     .unwrap();
@@ -1093,6 +1095,7 @@ fn certify_issues_certificate_get_able_with_links() {
         seed: None,
         },
         "CreateKeyPair",
+        &AuthContext::open(),
         "e2e-ca-keygen",
     )
     .unwrap();

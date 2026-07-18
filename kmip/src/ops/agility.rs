@@ -45,6 +45,7 @@ pub(crate) fn generate_replacement_pair(
     new_algorithm: &str,
     usage: UsageMask,
     op_canonical: &str,
+    auth: &crate::server::auth::AuthContext,
     correlation_id: &str,
 ) -> Result<ReplacementPair> {
     let new_alg = super::create_key_pair::parse_algorithm(new_algorithm)?;
@@ -64,6 +65,7 @@ pub(crate) fn generate_replacement_pair(
             seed: None,
         },
         op_canonical,
+        auth,
         correlation_id,
     )?;
     super::activate::activate(

@@ -81,6 +81,7 @@ fn create_ecdh(d: &Deps, curve: u32) -> String {
             seed: None,
         },
         "CreateKeyPair:KeyAgreement",
+        &pqctoday_kmip::server::auth::AuthContext::open(),
         "ckp",
     )
     .expect("ecdh keygen");
@@ -106,6 +107,7 @@ fn create_ecdh_pair(d: &Deps, curve: u32) -> (String, String) {
             seed: None,
         },
         "CreateKeyPair:KeyAgreement",
+        &pqctoday_kmip::server::auth::AuthContext::open(),
         "ckp",
     )
     .expect("ecdh keygen");

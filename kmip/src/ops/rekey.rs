@@ -229,8 +229,10 @@ pub fn rekey(deps: &Deps, req: ReKeyRequest, correlation_id: &str) -> Result<ReK
 pub fn rekey_key_pair(
     deps: &Deps,
     req: ReKeyKeyPairRequest,
+    auth: &crate::server::auth::AuthContext,
     correlation_id: &str,
 ) -> Result<ReKeyKeyPairResponse> {
+    let session = deps.resolve_tenant_session(auth.identity.as_ref()).ok();
     let started = OffsetDateTime::now_utc();
     emit_request(
         deps,
@@ -350,6 +352,7 @@ pub fn rekey_key_pair(
     let generated = super::create_key_pair::engine_generate_keypair(
         deps,
         correlation_id,
+        session,
         algo,
         key_length,
         mech,
@@ -623,6 +626,7 @@ mod tests {
     use crate::auditlog::{AuditSink, RingSink};
     use crate::kmip30::{Attribute, KmipAlgorithm, UsageMask};
     use crate::policy::{load_from_str, Engine};
+    use crate::server::auth::AuthContext;
     use crate::store::MemoryStore;
     use std::sync::Arc;
 
@@ -856,7 +860,7 @@ mod tests {
             common_attributes: vec![],
             private_key_attributes: vec![],
             public_key_attributes: vec![],
-        }, "c").unwrap();
+        }, &AuthContext::open(), "c").unwrap();
 
         let new_priv = d.store.get(&resp.private_key_uid).unwrap().unwrap();
         let new_pub = d.store.get(&resp.public_key_uid).unwrap().unwrap();
@@ -892,7 +896,7 @@ mod tests {
             common_attributes: vec![],
             private_key_attributes: vec![Attribute::Name("new-priv".into())],
             public_key_attributes: vec![Attribute::Name("new-pub".into())],
-        }, "c").unwrap();
+        }, &AuthContext::open(), "c").unwrap();
         let new_priv = d.store.get(&resp.private_key_uid).unwrap().unwrap();
         let new_pub = d.store.get(&resp.public_key_uid).unwrap().unwrap();
         assert_eq!(new_priv.name.as_deref(), Some("new-priv"));
@@ -907,14 +911,14 @@ mod tests {
         let err = rekey_key_pair(&d, ReKeyKeyPairRequest {
             uid: "ghost".into(), offset: None,
             common_attributes: vec![], private_key_attributes: vec![], public_key_attributes: vec![],
-        }, "c").unwrap_err();
+        }, &AuthContext::open(), "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::ObjectNotFound);
 
         put_aes(&d, "sym", State::Active);
         let err = rekey_key_pair(&d, ReKeyKeyPairRequest {
             uid: "sym".into(), offset: None,
             common_attributes: vec![], private_key_attributes: vec![], public_key_attributes: vec![],
-        }, "c").unwrap_err();
+        }, &AuthContext::open(), "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::InvalidObjectType);
 
         let (priv_uid, _) = put_pair(&d);
@@ -924,7 +928,7 @@ mod tests {
         let err = rekey_key_pair(&d, ReKeyKeyPairRequest {
             uid: priv_uid, offset: None,
             common_attributes: vec![], private_key_attributes: vec![], public_key_attributes: vec![],
-        }, "c").unwrap_err();
+        }, &AuthContext::open(), "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::WrongKeyLifecycleState);
     }
 

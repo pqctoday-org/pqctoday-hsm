@@ -923,7 +923,7 @@ fn handle_payload(
         RequestPayload::Create(r) => ResponsePayload::Create(create(deps, r, correlation_id)?),
         RequestPayload::CreateKeyPair(r) => {
             let op_canonical = canonical_create_key_pair_op(&r);
-            ResponsePayload::CreateKeyPair(create_key_pair(deps, r, &op_canonical, correlation_id)?)
+            ResponsePayload::CreateKeyPair(create_key_pair(deps, r, &op_canonical, auth, correlation_id)?)
         }
         RequestPayload::Get(r) => ResponsePayload::Get(get(deps, r, correlation_id)?),
         RequestPayload::GetAttributes(r) => ResponsePayload::GetAttributes(get_attributes(deps, r, correlation_id)?),
@@ -935,12 +935,12 @@ fn handle_payload(
         RequestPayload::Encrypt(r) => ResponsePayload::Encrypt(encrypt(deps, r, correlation_id)?),
         RequestPayload::Decrypt(r) => ResponsePayload::Decrypt(decrypt(deps, r, correlation_id)?),
         RequestPayload::Encapsulate(r) => {
-            ResponsePayload::Encapsulate(encapsulate(deps, r, correlation_id)?)
+            ResponsePayload::Encapsulate(encapsulate(deps, r, auth, correlation_id)?)
         }
         RequestPayload::Decapsulate(r) => {
             ResponsePayload::Decapsulate(decapsulate(deps, r, correlation_id)?)
         }
-        RequestPayload::Sign(r) => ResponsePayload::Sign(sign(deps, r, correlation_id)?),
+        RequestPayload::Sign(r) => ResponsePayload::Sign(sign(deps, r, auth, correlation_id)?),
         RequestPayload::SignatureVerify(r) => {
             ResponsePayload::SignatureVerify(signature_verify(deps, r, correlation_id)?)
         }
@@ -1023,7 +1023,7 @@ fn handle_payload(
         // K21 — §6.1.51 Re-key / §6.1.52 Re-key Key Pair.
         RequestPayload::ReKey(r) => ResponsePayload::ReKey(rekey(deps, r, correlation_id)?),
         RequestPayload::ReKeyKeyPair(r) => {
-            ResponsePayload::ReKeyKeyPair(rekey_key_pair(deps, r, correlation_id)?)
+            ResponsePayload::ReKeyKeyPair(rekey_key_pair(deps, r, auth, correlation_id)?)
         }
         // Phase 4 — `Poll` never reaches here: `dispatch_one` intercepts
         // it before calling `handle_payload` (its response impersonates

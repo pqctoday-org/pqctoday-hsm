@@ -22,6 +22,7 @@ use pqctoday_kmip::ops::get::get;
 use pqctoday_kmip::ops::activate::activate;
 use pqctoday_kmip::ops::{Deps, DepsConfig};
 use pqctoday_kmip::policy::Engine;
+use pqctoday_kmip::server::auth::AuthContext;
 use pqctoday_kmip::store::MemoryStore;
 
 // The softhsmrustv3 engine is global (lazy_static Mutex state); serialize the
@@ -66,6 +67,7 @@ fn round_trip(alg: KmipAlgorithm, ss_len: usize) {
             seed: None,
         },
         "CreateKeyPair:KeyAgreement",
+        &AuthContext::open(),
         "ckp",
     )
     .unwrap_or_else(|e| panic!("{alg:?}: keygen failed: {e:?}"));
@@ -81,6 +83,7 @@ fn round_trip(alg: KmipAlgorithm, ss_len: usize) {
             input_key_material: None,
             cryptographic_parameters: None,
         },
+        &AuthContext::open(),
         "encap",
     )
     .unwrap_or_else(|e| panic!("{alg:?}: encapsulate failed: {e:?}"));

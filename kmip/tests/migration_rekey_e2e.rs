@@ -23,6 +23,7 @@ use pqctoday_kmip::ops::rekey::{rekey, rekey_key_pair};
 use pqctoday_kmip::ops::sign::sign;
 use pqctoday_kmip::ops::{Deps, DepsConfig};
 use pqctoday_kmip::policy::{load_from_file, Engine};
+use pqctoday_kmip::server::auth::AuthContext;
 use pqctoday_kmip::store::MemoryStore;
 
 fn engine_test_lock() -> std::sync::MutexGuard<'static, ()> {
@@ -84,6 +85,7 @@ fn gen_pair(deps: &Deps, name: &str, usage: UsageMask) -> (String, String) {
         } else {
             "CreateKeyPair:Sign"
         },
+        &AuthContext::open(),
         "gen",
     )
     .unwrap();
@@ -115,6 +117,7 @@ fn firmware_signing_key_rekeys_rsa2048_to_mldsa44_on_first_sign() {
     let resp = sign(
         &deps,
         SignRequest { uid: priv_uid.clone(), data: b"release".to_vec(), cryptographic_parameters: None },
+        &AuthContext::open(),
         "sign",
     )
     .unwrap();
@@ -193,6 +196,7 @@ fn x448_kex_rekeys_to_mlkem1024_on_first_encapsulate() {
     let resp = encapsulate(
         &deps,
         EncapsulateRequest { uid: pub_uid.clone(), ..Default::default() },
+        &AuthContext::open(),
         "encap",
     )
     .unwrap();
@@ -252,6 +256,7 @@ fn sweep_rekeys_via_rekey_and_rekeykeypair() {
             private_key_attributes: vec![],
             public_key_attributes: vec![],
         },
+        &AuthContext::open(),
         "sweep",
     )
     .unwrap();

@@ -1422,6 +1422,7 @@ fn fail(deps: &Deps, correlation_id: &str, op: &str, err: KmipError) -> KmipErro
 pub(crate) mod tests {
     use super::*;
     use crate::auditlog::RingSink;
+    use crate::server::auth::AuthContext;
     use crate::store::MemoryStore;
     use std::sync::Arc;
 
@@ -1965,6 +1966,7 @@ pub(crate) mod tests {
                 seed: None,
             },
             "CreateKeyPair",
+            &AuthContext::open(),
             "c-subj-fresh",
         )
         .unwrap();
@@ -2456,7 +2458,7 @@ pub(crate) mod tests {
             seed: None,
         };
         let resp = super::super::create_key_pair::create_key_pair(
-            &deps, req, "CreateKeyPair:KeyAgreement", "corr-hybrid-leaf",
+            &deps, req, "CreateKeyPair:KeyAgreement", &AuthContext::open(), "corr-hybrid-leaf",
         )
         .expect("hybrid-KEM CreateKeyPair");
         let pub_record = deps.store.get(&resp.public_key_uid).unwrap().unwrap();
@@ -2519,7 +2521,7 @@ pub(crate) mod tests {
             seed: None,
         };
         let resp = super::super::create_key_pair::create_key_pair(
-            &deps, req, "CreateKeyPair:KeyAgreement", "corr-hybrid-p256-leaf",
+            &deps, req, "CreateKeyPair:KeyAgreement", &AuthContext::open(), "corr-hybrid-p256-leaf",
         )
         .expect("hybrid-KEM CreateKeyPair");
 
