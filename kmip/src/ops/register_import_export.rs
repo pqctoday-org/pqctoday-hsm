@@ -1171,6 +1171,7 @@ mod tests {
     use crate::auditlog::{AuditSink, RingSink};
     use crate::kmip30::KmipAlgorithm;
     use crate::policy::{load_from_str, Engine};
+    use crate::server::auth::AuthContext;
     use crate::store::MemoryStore;
     use std::sync::Arc;
 
@@ -2085,7 +2086,7 @@ mod tests {
             uid: resp.uid,
             key_format_type: None,
             key_wrapping_specification: None,
-        }, "c").unwrap();
+        }, &AuthContext::open(), "c").unwrap();
         assert_eq!(got.secret_data_type, Some(0x02));
     }
 
@@ -2143,7 +2144,7 @@ mod tests {
             uid: resp.uid.clone(),
             key_format_type: None,
             key_wrapping_specification: None,
-        }, "c-get-ec").expect("Get must succeed");
+        }, &AuthContext::open(), "c-get-ec").expect("Get must succeed");
         assert_eq!(
             got.key_block.key_value, external_spki,
             "Get must return the EXACT bytes that were Registered"

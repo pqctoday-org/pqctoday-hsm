@@ -624,6 +624,46 @@ pub fn non_active_state_error(uid: &str, state: crate::kmip30::State) -> KmipErr
     KmipError::wrong_key_lifecycle_state(uid, state_name(state))
 }
 
+/// Part F §F7.3/F7.4 (rust-hsm-perf-bench-scenario-plan-07182026.md) —
+/// the single choke point for owner-checked-by-UID object access.
+/// Fetches `uid` and verifies the requester's identity matches the
+/// object's recorded owner (`ObjectRecord::owner` — exact
+/// `Option<String>` equality; see that field's doc for why this is not
+/// a one-sided "no owner ⇒ public" rule). On ANY mismatch — missing
+/// object OR wrong owner — calls `not_found()` for the error, so a
+/// caller passes whatever "this UID doesn't exist" error THIS
+/// operation already used before ownership existed (`Get` uses
+/// `KmipError::object_not_found`, most others use the generic
+/// `KmipError::not_found`) and gets the exact same code for "not
+/// yours" — the anti-oracle property the user required (2026-07-18):
+/// within any one operation, a foreign tenant's object is
+/// indistinguishable from one that was never created.
+pub(crate) fn authorize_object(
+    deps: &super::deps::Deps,
+    auth: &crate::server::auth::AuthContext,
+    uid: &str,
+    not_found: impl Fn() -> KmipError,
+) -> std::result::Result<crate::store::ObjectRecord, KmipError> {
+    let requester = auth.identity.as_ref().map(|i| i.username.clone());
+    let obj = deps.store.get(uid)?.ok_or_else(&not_found)?;
+    if obj.owner != requester {
+        return Err(not_found());
+    }
+    Ok(obj)
+}
+
+/// Part F §F7.3 — stamp the creating identity onto a freshly-built
+/// `ObjectRecord` BEFORE `store.put(...)`. `None` (Single mode / no
+/// authenticated identity) stamps `owner: None`, matching every
+/// existing test fixture and preserving today's behavior exactly.
+pub(crate) fn stamp_owner(
+    mut record: crate::store::ObjectRecord,
+    auth: &crate::server::auth::AuthContext,
+) -> crate::store::ObjectRecord {
+    record.owner = auth.identity.as_ref().map(|i| i.username.clone());
+    record
+}
+
 pub fn state_name(s: crate::kmip30::State) -> &'static str {
     use crate::kmip30::State::*;
     match s {

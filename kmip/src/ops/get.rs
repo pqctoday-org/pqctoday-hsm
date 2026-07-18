@@ -25,16 +25,22 @@ use crate::kmip30::{GetRequest, GetResponse, KeyBlock, KeyFormatType, ObjectType
 use crate::policy::{Decision, PolicyRequest};
 
 use super::deps::Deps;
-use super::helpers::{canonical_name, emit_pkcs11, emit_request, emit_success, fail_err, state_name};
+use super::helpers::{authorize_object, canonical_name, emit_pkcs11, emit_request, emit_success, fail_err, state_name};
 
-pub fn get(deps: &Deps, req: GetRequest, correlation_id: &str) -> Result<GetResponse> {
+pub fn get(
+    deps: &Deps,
+    req: GetRequest,
+    auth: &crate::server::auth::AuthContext,
+    correlation_id: &str,
+) -> Result<GetResponse> {
     let started = OffsetDateTime::now_utc();
     emit_request(deps, correlation_id, "Get", format!("uid={}", req.uid));
 
-    let obj = deps
-        .store
-        .get(&req.uid)?
-        .ok_or_else(|| fail_err(deps, correlation_id, "Get", KmipError::object_not_found(&req.uid)))?;
+    // Part F §F7.4 — owner-checked lookup. Same `ObjectNotFound` this
+    // handler already used for a genuinely missing UID now also covers
+    // "exists but belongs to a different tenant" (anti-oracle).
+    let obj = authorize_object(deps, auth, &req.uid, || KmipError::object_not_found(&req.uid))
+        .map_err(|e| fail_err(deps, correlation_id, "Get", e))?;
 
     // Per the lifecycle table in docs/IMPLEMENTATION_PLAN.md §3.4, Get is
     // allowed in every state including Deactivated / Compromised
@@ -178,7 +184,7 @@ pub fn get(deps: &Deps, req: GetRequest, correlation_id: &str) -> Result<GetResp
                 },
             ));
         }
-        match deps.engine_session {
+        match deps.resolve_tenant_session(auth.identity.as_ref()).ok() {
             Some(session) => {
                 // CreateKeyPair stores BOTH halves under one shared CKA_ID,
                 // so a bare `find_by_cka_id` would return whichever the
@@ -338,6 +344,7 @@ mod tests {
     use crate::auditlog::{AuditSink, RingSink};
     use crate::kmip30::{KmipAlgorithm, UsageMask};
     use crate::policy::{load_from_str, Engine};
+    use crate::server::auth::AuthContext;
     use crate::store::{MemoryStore, ObjectRecord};
     use std::sync::Arc;
 
@@ -395,7 +402,7 @@ mod tests {
         d.store.update(rec).unwrap();
         let err = get(&d, GetRequest {
             uid: "u".into(), key_format_type: None, key_wrapping_specification: None,
-        }, "c").unwrap_err();
+        }, &AuthContext::open(), "c").unwrap_err();
         assert_eq!(err.result_reason(), crate::error::ResultReason::ObjectArchived);
         // Recover semantics: storage status back On-line → Get succeeds.
         let mut rec = d.store.get("u").unwrap().unwrap();
@@ -403,14 +410,14 @@ mod tests {
         d.store.update(rec).unwrap();
         assert!(get(&d, GetRequest {
             uid: "u".into(), key_format_type: None, key_wrapping_specification: None,
-        }, "c").is_ok());
+        }, &AuthContext::open(), "c").is_ok());
     }
 
     #[test]
     fn get_symmetric_returns_raw_format() {
         let d = deps_with();
         put(&d, "u", ObjectType::SymmetricKey, State::Active);
-        let r = get(&d, GetRequest { uid: "u".into(), key_format_type: None, key_wrapping_specification: None }, "c").unwrap();
+        let r = get(&d, GetRequest { uid: "u".into(), key_format_type: None, key_wrapping_specification: None }, &AuthContext::open(), "c").unwrap();
         assert_eq!(r.key_block.key_format_type, KeyFormatType::Raw);
         assert_eq!(r.key_block.cryptographic_length, 256);
     }
@@ -421,7 +428,7 @@ mod tests {
         // FAIL, never surface as a zero-length OpaqueObject KeyValue.
         let d = deps_with();
         put(&d, "u", ObjectType::PrivateKey, State::Active);
-        let err = get(&d, GetRequest { uid: "u".into(), key_format_type: None, key_wrapping_specification: None }, "c").unwrap_err();
+        let err = get(&d, GetRequest { uid: "u".into(), key_format_type: None, key_wrapping_specification: None }, &AuthContext::open(), "c").unwrap_err();
         assert_eq!(err.result_reason(), crate::error::ResultReason::NotExtractable);
     }
 
@@ -432,7 +439,7 @@ mod tests {
         let mut obj = d.store.get("u").unwrap().unwrap();
         obj.sensitive = Some(true);
         d.store.update(obj).unwrap();
-        let err = get(&d, GetRequest { uid: "u".into(), key_format_type: None, key_wrapping_specification: None }, "c").unwrap_err();
+        let err = get(&d, GetRequest { uid: "u".into(), key_format_type: None, key_wrapping_specification: None }, &AuthContext::open(), "c").unwrap_err();
         assert_eq!(err.result_reason(), crate::error::ResultReason::Sensitive);
     }
 
@@ -444,7 +451,7 @@ mod tests {
         obj.sensitive = Some(true);
         obj.key_material = Some(vec![0x11; 32]);
         d.store.update(obj).unwrap();
-        let err = get(&d, GetRequest { uid: "u".into(), key_format_type: None, key_wrapping_specification: None }, "c").unwrap_err();
+        let err = get(&d, GetRequest { uid: "u".into(), key_format_type: None, key_wrapping_specification: None }, &AuthContext::open(), "c").unwrap_err();
         assert_eq!(err.result_reason(), crate::error::ResultReason::Sensitive);
     }
 
@@ -470,7 +477,7 @@ mod tests {
             encoding_option: None,
             mac_signature_key_information_present: false,
         };
-        let r = get(&d, GetRequest { uid: "u".into(), key_format_type: None, key_wrapping_specification: Some(spec.clone()) }, "c").unwrap();
+        let r = get(&d, GetRequest { uid: "u".into(), key_format_type: None, key_wrapping_specification: Some(spec.clone()) }, &AuthContext::open(), "c").unwrap();
         assert_eq!(r.key_block.key_wrapping_data, Some(spec));
         assert!(!r.key_block.key_value.is_empty(), "wrapped material returned");
         // AES-KW output = TTLV(KeyValue) length + 8-byte integrity block.
@@ -486,7 +493,7 @@ mod tests {
         obj.key_material = Some(vec![0x11; 32]);
         d.store.update(obj).unwrap();
         // Without wrapping.
-        let err = get(&d, GetRequest { uid: "u".into(), key_format_type: None, key_wrapping_specification: None }, "c").unwrap_err();
+        let err = get(&d, GetRequest { uid: "u".into(), key_format_type: None, key_wrapping_specification: None }, &AuthContext::open(), "c").unwrap_err();
         assert_eq!(err.result_reason(), crate::error::ResultReason::NotExtractable);
         // With wrapping — Extractable=false is unconditional.
         let spec = crate::kmip30::KeyWrappingSpec {
@@ -496,7 +503,7 @@ mod tests {
             encoding_option: None,
             mac_signature_key_information_present: false,
         };
-        let err = get(&d, GetRequest { uid: "u".into(), key_format_type: None, key_wrapping_specification: Some(spec) }, "c").unwrap_err();
+        let err = get(&d, GetRequest { uid: "u".into(), key_format_type: None, key_wrapping_specification: Some(spec) }, &AuthContext::open(), "c").unwrap_err();
         assert_eq!(err.result_reason(), crate::error::ResultReason::NotExtractable);
     }
 
@@ -504,14 +511,14 @@ mod tests {
     fn get_destroyed_returns_object_destroyed() {
         let d = deps_with();
         put(&d, "u", ObjectType::SymmetricKey, State::Destroyed);
-        let err = get(&d, GetRequest { uid: "u".into(), key_format_type: None, key_wrapping_specification: None }, "c").unwrap_err();
+        let err = get(&d, GetRequest { uid: "u".into(), key_format_type: None, key_wrapping_specification: None }, &AuthContext::open(), "c").unwrap_err();
         assert_eq!(err.result_reason(), crate::error::ResultReason::ObjectDestroyed);
     }
 
     #[test]
     fn get_missing_uid() {
         let d = deps_with();
-        let err = get(&d, GetRequest { uid: "ghost".into(), key_format_type: None, key_wrapping_specification: None }, "c").unwrap_err();
+        let err = get(&d, GetRequest { uid: "ghost".into(), key_format_type: None, key_wrapping_specification: None }, &AuthContext::open(), "c").unwrap_err();
         assert_eq!(err.result_reason(), crate::error::ResultReason::ObjectNotFound);
     }
 
@@ -530,7 +537,7 @@ mod tests {
             uid: uid.into(),
             key_format_type: requested,
             key_wrapping_specification: None,
-        }, "c")
+        }, &AuthContext::open(), "c")
     }
 
     #[test]

@@ -111,7 +111,12 @@ const LINK_REPLACEMENT_OBJECT: &str = "ReplacementObjectLink";
 
 // ── Re-key (§6.1.51) ────────────────────────────────────────────────────────
 
-pub fn rekey(deps: &Deps, req: ReKeyRequest, correlation_id: &str) -> Result<ReKeyResponse> {
+pub fn rekey(
+    deps: &Deps,
+    req: ReKeyRequest,
+    auth: &crate::server::auth::AuthContext,
+    correlation_id: &str,
+) -> Result<ReKeyResponse> {
     let started = OffsetDateTime::now_utc();
     emit_request(
         deps,
@@ -121,10 +126,10 @@ pub fn rekey(deps: &Deps, req: ReKeyRequest, correlation_id: &str) -> Result<ReK
     );
     let fail = |e: KmipError| fail_err(deps, correlation_id, "ReKey", e);
 
-    let orig = deps
-        .store
-        .get(&req.uid)?
-        .ok_or_else(|| fail(KmipError::object_not_found(&req.uid)))?;
+    // Part F §F7.4 — owner-checked lookup; the replacement inherits this
+    // owner via `inherited_replacement_base`'s clone-from-orig.
+    let orig = super::helpers::authorize_object(deps, auth, &req.uid, || KmipError::object_not_found(&req.uid))
+        .map_err(&fail)?;
 
     // §6.1.51 — "a replacement key for an existing symmetric key";
     // anything else → `Invalid Object Type` (Table 407).
@@ -253,10 +258,11 @@ pub fn rekey_key_pair(
     // pair". The canonical handle is the private key (§6.1 preamble placeholder
     // order); a public-half UID is resolved to its pair mate via the
     // PrivateKeyLink so clients holding either half succeed.
-    let target = deps
-        .store
-        .get(&req.uid)?
-        .ok_or_else(|| fail(KmipError::object_not_found(&req.uid)))?;
+    // Part F §F7.4 — owner-checked lookup. The new halves below inherit
+    // this owner via `inherited_replacement_base`'s clone-from-orig, so
+    // a rekey correctly stays with the same tenant.
+    let target = super::helpers::authorize_object(deps, auth, &req.uid, || KmipError::object_not_found(&req.uid))
+        .map_err(&fail)?;
     let (old_priv, old_pub) = match target.object_type {
         ObjectType::PrivateKey => {
             let pub_rec = pair_mate(deps, &target, "PublicKeyLink").map_err(&fail)?;
@@ -714,7 +720,7 @@ mod tests {
         put_aes(&d, "orig", State::Active);
         let resp = rekey(&d, ReKeyRequest {
             uid: "orig".into(), offset: None, template_attribute: vec![],
-        }, "c").unwrap();
+        }, &AuthContext::open(), "c").unwrap();
         assert_ne!(resp.uid, "orig", "Unique Identifier — new value generated");
 
         let new = d.store.get(&resp.uid).unwrap().unwrap();
@@ -758,7 +764,7 @@ mod tests {
                 Attribute::CryptographicUsageMask(UsageMask::WRAP_KEY),
                 Attribute::Name("rotated-aes".into()),
             ],
-        }, "c").unwrap();
+        }, &AuthContext::open(), "c").unwrap();
         let new = d.store.get(&resp.uid).unwrap().unwrap();
         assert_eq!(new.cryptographic_length, 128, "request length wins over inherited 256");
         assert_eq!(new.usage_mask, UsageMask::WRAP_KEY);
@@ -781,7 +787,7 @@ mod tests {
         let off = 3600u32; // replacement activates in an hour
         let resp = rekey(&d, ReKeyRequest {
             uid: "orig".into(), offset: Some(off), template_attribute: vec![],
-        }, "c").unwrap();
+        }, &AuthContext::open(), "c").unwrap();
         let new = d.store.get(&resp.uid).unwrap().unwrap();
 
         // AT2 = IT2 + Offset (IT2 = the re-key instant).
@@ -811,7 +817,7 @@ mod tests {
         put_aes(&d, "orig", State::PreActive);
         let resp = rekey(&d, ReKeyRequest {
             uid: "orig".into(), offset: None, template_attribute: vec![],
-        }, "c").unwrap();
+        }, &AuthContext::open(), "c").unwrap();
         assert_eq!(d.store.get(&resp.uid).unwrap().unwrap().state, State::PreActive);
         let old = d.store.get("orig").unwrap().unwrap();
         assert_eq!(old.state, State::PreActive, "no PreActive→Deactivated transition");
@@ -826,25 +832,25 @@ mod tests {
         // Object Not Found.
         let err = rekey(&d, ReKeyRequest {
             uid: "ghost".into(), offset: None, template_attribute: vec![],
-        }, "c").unwrap_err();
+        }, &AuthContext::open(), "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::ObjectNotFound);
         // Invalid Object Type — ReKey on an asymmetric half.
         let (priv_uid, _) = put_pair(&d);
         let err = rekey(&d, ReKeyRequest {
             uid: priv_uid, offset: None, template_attribute: vec![],
-        }, "c").unwrap_err();
+        }, &AuthContext::open(), "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::InvalidObjectType);
         // Wrong Key Lifecycle State — Deactivated original.
         put_aes(&d, "dead", State::Deactivated);
         let err = rekey(&d, ReKeyRequest {
             uid: "dead".into(), offset: None, template_attribute: vec![],
-        }, "c").unwrap_err();
+        }, &AuthContext::open(), "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::WrongKeyLifecycleState);
         // Wrong Key Lifecycle State — Compromised original.
         put_aes(&d, "comp", State::Compromised);
         let err = rekey(&d, ReKeyRequest {
             uid: "comp".into(), offset: None, template_attribute: vec![],
-        }, "c").unwrap_err();
+        }, &AuthContext::open(), "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::WrongKeyLifecycleState);
     }
 
@@ -950,7 +956,7 @@ mod tests {
         put_aes(&d, "orig", State::Active);
         let resp = rekey(&d, ReKeyRequest {
             uid: "orig".into(), offset: None, template_attribute: vec![],
-        }, "c").unwrap();
+        }, &AuthContext::open(), "c").unwrap();
         let new = d.store.get(&resp.uid).unwrap().unwrap();
         assert_eq!(new.cryptographic_length, 256, "inherited length outranks the default");
         assert_eq!(new.usage_mask, UsageMask::ENCRYPT | UsageMask::DECRYPT);

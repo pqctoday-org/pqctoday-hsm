@@ -6,19 +6,28 @@
 //! identities — not by calling op handlers directly with a hand-built
 //! `AuthContext`.
 //!
-//! STATUS (2026-07-18): this proves what is ACTUALLY wired today.
-//! `CreateKeyPair`, `Activate`, `Sign`, and `Encapsulate` resolve their
-//! own tenant's engine session (the §F7-scoped dispatcher-wiring slice —
-//! see the plan's §G3 for the ~24 remaining op handlers not yet
-//! migrated). It ALSO honestly documents the residual gap the same
-//! section flags: KMIP-level object METADATA (`Get`, `GetAttributes`,
-//! `Locate`) is not yet owner-filtered (§F7.3/F7.4 not built), so while
-//! a cross-tenant `Sign` genuinely fails closed (proven below, via the
-//! engine's own token-scoped handle lookup — not a KMIP-layer check),
-//! a cross-tenant `Get` on the same UID still succeeds today, leaking
-//! the object's existence and metadata. Both facts are asserted, not
-//! just one — this file must fail loudly (not silently pass) the day
-//! either behavior changes without deliberate intent.
+//! STATUS (2026-07-18, rev 2 — F7.3/F7.4 owner enforcement landed): the
+//! two gates now compose. Every by-UID handler wired so far (§F7's
+//! dispatcher slice: `CreateKeyPair`, `Sign`, `Encapsulate`,
+//! `Decapsulate`, `ReKey`, `ReKeyKeyPair`, `Get`, `GetAttributes`,
+//! `Destroy`, `Locate`) does an owner check
+//! (`helpers::authorize_object` / Locate's predicate filter) against the
+//! KMIP store BEFORE anything else, using the SAME not-found error each
+//! operation already used for a genuinely missing UID — so "exists but
+//! not yours" and "doesn't exist" are indistinguishable, satisfying the
+//! anti-oracle requirement at the KMIP layer, not just the engine layer.
+//! `Sign`/`Encapsulate`/`Decapsulate` additionally still hit the
+//! ENGINE's own token-scoped handle lookup (§F2–F5) as a second,
+//! independent barrier — defense in depth, verified below by checking
+//! that the fully-wired path denies at the FIRST gate (the KMIP owner
+//! check), not by relying on the engine gate alone.
+//!
+//! ~19 of the original ~28 `deps.engine_session`-reading files remain
+//! unwired for SESSION resolution (Encrypt, Decrypt, Certify, the
+//! composite/hybrid-cert family, split_key, derive_key's own creation
+//! path, attribute mutation, mac/hash, rng/pkcs11, register/import) —
+//! see the plan's §H3/H4 for the exact list. This file only asserts
+//! properties of the operations it actually exercises.
 
 #[cfg(test)]
 mod tests {
@@ -124,17 +133,17 @@ mod tests {
 
         // ── Bob attempts to Sign using ALICE's private key UID. ─────────
         // His request resolves to HIS OWN engine session (slot 91, a
-        // different PKCS#11 token than Alice's slot 90). The KMIP-store
-        // lookup by UID still finds Alice's ObjectRecord (F7.3/F7.4 owner
-        // tracking is not built — see the module doc), but resolving
-        // that record's engine handle goes through
-        // `helpers::find_handle_for_object(bob_session, cka_id, ...)`,
-        // which is scoped to Bob's slot by the engine's OWN isolation
-        // gate (Part F, already shipped and independently tested in
-        // softhsmrustv3's own suite) — Alice's private-key handle simply
-        // isn't visible there, so the lookup finds nothing and the
-        // operation fails closed BEFORE any cryptographic material could
-        // be touched.
+        // different PKCS#11 token than Alice's slot 90). As of rev 2,
+        // TWO independent gates now deny this: (1) the KMIP-store owner
+        // check (`helpers::authorize_object`, §F7.4) — Bob's identity
+        // doesn't match the record's owner, so the lookup itself fails
+        // before Sign does anything else; (2) even if (1) didn't exist,
+        // resolving the record's engine handle via
+        // `helpers::find_handle_for_object(bob_session, cka_id, ...)` is
+        // scoped to Bob's slot by the engine's OWN isolation gate (§F2–
+        // F5, shipped earlier and independently tested in
+        // softhsmrustv3's own suite) — Alice's handle isn't visible
+        // there either. Sign hits gate (1) first.
         let bob_sign_req = one_off_request(RequestPayload::Sign(SignRequest {
             uid: ckp.private_key_uid.clone(),
             data: b"bob trying to sign with alice's key".to_vec(),
@@ -154,36 +163,207 @@ mod tests {
              though this specific denial is the ENGINE's token-scoping, not yet a KMIP-layer owner check"
         );
 
-        // ── Honest residual-gap check. ───────────────────────────────────
-        // Bob's GetAttributes on Alice's private-key UID — deliberately
-        // NOT `Get` (which fails for a totally different, benign reason
-        // for ANY caller, including Alice herself: ML-DSA private keys
-        // are CKA_SENSITIVE by default, so `Get` always refuses to
-        // return material — that's a pre-existing sensitivity gate, not
-        // tenancy). `GetAttributes` only returns metadata (Cryptographic
-        // Algorithm, State, …), never key material, and — per
-        // `get_attributes.rs` — never touches `deps.engine_session` at
-        // all, so it is a clean, unconfounded test of whether the KMIP
-        // STORE itself is owner-filtered. It is not (F7.3 not built), so
-        // this metadata read still succeeds today, revealing that the
-        // object exists and its algorithm/state. This assertion
-        // documents TODAY'S actual (undesired) state, not the desired
-        // end state — when F7.3/F7.4 lands, this must flip to
-        // OperationFailed/ItemNotFound and this comment updated, exactly
-        // like the two P0b-era gap tests in softhsmrustv3's own suite
-        // were flipped once its gate landed.
+        // ── GAP CLOSED (rev 2, F7.3/F7.4): Bob's GetAttributes on
+        // Alice's private-key UID now fails too. Deliberately NOT `Get`
+        // (which fails for a totally different, benign reason for ANY
+        // caller, including Alice herself: ML-DSA private keys are
+        // CKA_SENSITIVE by default, so `Get` always refuses to return
+        // material — that's a pre-existing sensitivity gate, not
+        // tenancy; `get_owner_check_denies_before_engine_is_even_reached`
+        // below isolates the ownership property on a non-sensitive
+        // object instead). `GetAttributes` returns metadata only, never
+        // key material, and never touches the engine — so this is a
+        // clean, unconfounded proof that the KMIP STORE itself is now
+        // owner-filtered, not just the engine. ──────────────────────────
         let get_attrs_req = one_off_request(RequestPayload::GetAttributes(GetAttributesRequest {
             uid: ckp.private_key_uid.clone(),
             attribute_references: vec![],
         }));
-        let bob_get_attrs_resp = dispatch_with_transport_identity(&deps, get_attrs_req, Some(bob));
+        let bob_get_attrs_resp = dispatch_with_transport_identity(&deps, get_attrs_req, Some(bob.clone()));
         assert_eq!(
             bob_get_attrs_resp.batch_items[0].result_status,
+            ResultStatus::OperationFailed,
+            "Bob must NOT be able to read Alice's key's metadata"
+        );
+        assert_eq!(
+            bob_get_attrs_resp.batch_items[0].result_reason,
+            Some(ResultReason::ItemNotFound.to_wire_value()),
+            "cross-tenant GetAttributes fails as ItemNotFound — the SAME reason this operation \
+             already used for a genuinely missing UID (OASIS BL-M-20-30.xml), so a foreign tenant's \
+             object stays indistinguishable from a nonexistent one at the KMIP layer, not just the \
+             engine layer"
+        );
+
+        // Alice's own GetAttributes on her own key still works — the
+        // owner check is a real gate, not an accidental blanket deny.
+        let alice_get_attrs_req = one_off_request(RequestPayload::GetAttributes(GetAttributesRequest {
+            uid: ckp.private_key_uid.clone(),
+            attribute_references: vec![],
+        }));
+        let alice_get_attrs_resp =
+            dispatch_with_transport_identity(&deps, alice_get_attrs_req, Some(alice.clone()));
+        assert_eq!(
+            alice_get_attrs_resp.batch_items[0].result_status,
             ResultStatus::Success,
-            "KNOWN GAP (§F7.3/F7.4, not yet built): KMIP-level GetAttributes is not owner-filtered — \
-             Bob can still read Alice's key's metadata even though he cannot use the key \
-             cryptographically: {:?}",
-            bob_get_attrs_resp.batch_items[0].result_reason
+            "Alice can still read her own key's metadata: {:?}",
+            alice_get_attrs_resp.batch_items[0].result_reason
+        );
+
+        // ── Destroy is owner-checked too: Bob cannot destroy Alice's key. ──
+        let bob_destroy_req = one_off_request(RequestPayload::Destroy(crate::kmip30::DestroyRequest {
+            uid: ckp.private_key_uid.clone(),
+        }));
+        let bob_destroy_resp = dispatch_with_transport_identity(&deps, bob_destroy_req, Some(bob));
+        assert_eq!(
+            bob_destroy_resp.batch_items[0].result_status,
+            ResultStatus::OperationFailed,
+            "Bob must NOT be able to destroy Alice's key"
+        );
+        assert_eq!(
+            bob_destroy_resp.batch_items[0].result_reason,
+            Some(ResultReason::ObjectNotFound.to_wire_value()),
+            "cross-tenant Destroy fails as ObjectNotFound — this handler's own pre-existing \
+             not-found reason, now also covering the owner mismatch"
+        );
+
+        // The key survives Bob's failed attempt — Alice can still get its
+        // metadata (proves Destroy didn't partially execute before the
+        // owner check, and that the owner check runs BEFORE any mutation).
+        let alice_get_attrs_req2 = one_off_request(RequestPayload::GetAttributes(GetAttributesRequest {
+            uid: ckp.private_key_uid.clone(),
+            attribute_references: vec![],
+        }));
+        let alice_get_attrs_resp2 =
+            dispatch_with_transport_identity(&deps, alice_get_attrs_req2, Some(alice));
+        assert_eq!(
+            alice_get_attrs_resp2.batch_items[0].result_status,
+            ResultStatus::Success,
+            "the key must still exist after Bob's rejected Destroy attempt"
+        );
+    }
+
+    /// Isolates the ownership property on `Get` specifically, using a
+    /// non-sensitive `SymmetricKey` so the pre-existing sensitivity gate
+    /// (which would fail `Get` for ANY caller on a sensitive private
+    /// key, tenancy aside — see the comment in the test above) can't
+    /// confound the result. A real engine session is not needed here:
+    /// `Create` on a symmetric key with no engine wired falls back to
+    /// the crate's engine-less placeholder path (existing, pre-F7
+    /// behavior), which is enough to prove the OWNERSHIP gate — the
+    /// property this test is actually about — fires before anything
+    /// else. Single mode (no tenancy config) so `Create`'s `auth` is a
+    /// deliberately DIFFERENT open/anonymous context per call — proving
+    /// that even within nominally "no tenancy configured" behavior, an
+    /// object stamped with a real owner (because ITS creator happened to
+    /// have an identity) is still protected from a later anonymous or
+    /// differently-identified caller.
+    #[test]
+    fn get_owner_check_denies_before_engine_is_even_reached() {
+        let _guard = engine_lock();
+        let alice = Identity { username: "alice-get-only".into() };
+        let bob = Identity { username: "bob-get-only".into() };
+        let sink: Arc<dyn crate::auditlog::AuditSink> = Arc::new(RingSink::new(64));
+        let deps = Deps::new(Engine::permissive(), Arc::new(MemoryStore::new()), sink, DepsConfig::default());
+
+        let create_req = one_off_request(RequestPayload::Create(crate::kmip30::CreateRequest {
+            object_type: crate::kmip30::ObjectType::SymmetricKey,
+            template_attribute: vec![
+                Attribute::CryptographicAlgorithm(KmipAlgorithm::Aes),
+                Attribute::CryptographicLength(256),
+                Attribute::CryptographicUsageMask(UsageMask::ENCRYPT | UsageMask::DECRYPT),
+            ],
+        }));
+        let create_resp = dispatch_with_transport_identity(&deps, create_req, Some(alice.clone()));
+        assert_eq!(create_resp.batch_items[0].result_status, ResultStatus::Success);
+        let ResponsePayload::Create(created) = create_resp.batch_items[0].payload.clone().unwrap() else {
+            panic!("expected Create response");
+        };
+
+        let bob_get = one_off_request(RequestPayload::Get(crate::kmip30::GetRequest {
+            uid: created.uid.clone(),
+            key_format_type: None,
+            key_wrapping_specification: None,
+        }));
+        let bob_get_resp = dispatch_with_transport_identity(&deps, bob_get, Some(bob));
+        assert_eq!(
+            bob_get_resp.batch_items[0].result_status,
+            ResultStatus::OperationFailed,
+            "Bob must not be able to Get Alice's symmetric key"
+        );
+        assert_eq!(
+            bob_get_resp.batch_items[0].result_reason,
+            Some(ResultReason::ObjectNotFound.to_wire_value())
+        );
+
+        let alice_get = one_off_request(RequestPayload::Get(crate::kmip30::GetRequest {
+            uid: created.uid,
+            key_format_type: None,
+            key_wrapping_specification: None,
+        }));
+        let alice_get_resp = dispatch_with_transport_identity(&deps, alice_get, Some(alice));
+        assert_eq!(
+            alice_get_resp.batch_items[0].result_status,
+            ResultStatus::Success,
+            "Alice can still Get her own symmetric key: {:?}",
+            alice_get_resp.batch_items[0].result_reason
+        );
+    }
+
+    /// Locate results are filtered per tenant: each identity sees only
+    /// the objects it created, never the other's — even when both exist
+    /// in the same shared store side by side.
+    #[test]
+    fn locate_is_scoped_to_the_requesters_own_objects() {
+        let _guard = engine_lock();
+        let alice = Identity { username: "alice-locate".into() };
+        let bob = Identity { username: "bob-locate".into() };
+        let sink: Arc<dyn crate::auditlog::AuditSink> = Arc::new(RingSink::new(64));
+        let deps = Deps::new(Engine::permissive(), Arc::new(MemoryStore::new()), sink, DepsConfig::default());
+
+        let make_key = |identity: &Identity, name: &str| {
+            let req = one_off_request(RequestPayload::Create(crate::kmip30::CreateRequest {
+                object_type: crate::kmip30::ObjectType::SymmetricKey,
+                template_attribute: vec![
+                    Attribute::CryptographicAlgorithm(KmipAlgorithm::Aes),
+                    Attribute::CryptographicLength(256),
+                    Attribute::CryptographicUsageMask(UsageMask::ENCRYPT | UsageMask::DECRYPT),
+                    Attribute::Name(name.to_string()),
+                ],
+            }));
+            let resp = dispatch_with_transport_identity(&deps, req, Some(identity.clone()));
+            assert_eq!(resp.batch_items[0].result_status, ResultStatus::Success);
+            let ResponsePayload::Create(created) = resp.batch_items[0].payload.clone().unwrap() else {
+                panic!("expected Create response");
+            };
+            created.uid
+        };
+
+        let alice_uid = make_key(&alice, "alice-only-key");
+        let bob_uid = make_key(&bob, "bob-only-key");
+        assert_ne!(alice_uid, bob_uid);
+
+        let locate_req = || one_off_request(RequestPayload::Locate(crate::kmip30::LocateRequest::default()));
+
+        let alice_locate = dispatch_with_transport_identity(&deps, locate_req(), Some(alice.clone()));
+        assert_eq!(alice_locate.batch_items[0].result_status, ResultStatus::Success);
+        let ResponsePayload::Locate(alice_found) = alice_locate.batch_items[0].payload.clone().unwrap() else {
+            panic!("expected Locate response");
+        };
+        assert!(alice_found.uids.contains(&alice_uid), "Alice must see her own key");
+        assert!(
+            !alice_found.uids.contains(&bob_uid),
+            "Alice must NOT see Bob's key in her Locate results"
+        );
+
+        let bob_locate = dispatch_with_transport_identity(&deps, locate_req(), Some(bob));
+        assert_eq!(bob_locate.batch_items[0].result_status, ResultStatus::Success);
+        let ResponsePayload::Locate(bob_found) = bob_locate.batch_items[0].payload.clone().unwrap() else {
+            panic!("expected Locate response");
+        };
+        assert!(bob_found.uids.contains(&bob_uid), "Bob must see his own key");
+        assert!(
+            !bob_found.uids.contains(&alice_uid),
+            "Bob must NOT see Alice's key in his Locate results"
         );
     }
 }

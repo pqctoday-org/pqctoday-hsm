@@ -220,6 +220,7 @@ fn ml_dsa_65_create_sign_verify_destroy_against_real_engine() {
         DestroyRequest {
             uid: priv_rec.uid.clone(),
         },
+        &AuthContext::open(),
         "e2e-destroy",
     )
     .unwrap();
@@ -964,6 +965,7 @@ fn k11_digest_persisted_from_real_engine_material() {
             uid: kp.private_key_uid.clone(),
             attribute_references: vec!["Digest".into()],
         },
+        &AuthContext::open(),
         "k11-ga",
     )
     .unwrap();
@@ -983,6 +985,7 @@ fn k11_digest_persisted_from_real_engine_material() {
                 Attribute::CryptographicUsageMask(UsageMask::ENCRYPT | UsageMask::DECRYPT),
             ],
         },
+        &AuthContext::open(),
         "k11-create",
     )
     .unwrap();
@@ -1045,6 +1048,7 @@ fn k15_audit_records_real_rv_and_native_entry_point() {
                 Attribute::CryptographicUsageMask(UsageMask::ENCRYPT),
             ],
         },
+        &AuthContext::open(),
         "k15-create-ok",
     )
     .unwrap();
@@ -1126,6 +1130,7 @@ fn k15_hmac_mac_and_verify_route_through_engine() {
                 ),
             ],
         },
+        &AuthContext::open(),
         "k15-hmac-create",
     )
     .unwrap();
@@ -1420,6 +1425,7 @@ fn get_shared_secret(deps: &Deps, uid: &str) -> Vec<u8> {
     let r = get(
         deps,
         GetRequest { uid: uid.to_string(), key_format_type: None, key_wrapping_specification: None },
+        &AuthContext::open(),
         "kem-get-ss",
     )
     .expect("Get shared-secret object");
@@ -1489,6 +1495,7 @@ fn wd19_encapsulate_decapsulate_byte_exact_against_real_engine() {
             data: enc1.data.clone(),
             cryptographic_parameters: None,
         },
+        &AuthContext::open(),
         "wd19-decap",
     )
     .expect("Decapsulate with ML-KEM-768 private key");
@@ -1698,6 +1705,7 @@ fn k21_rekeyed_aes_key_encrypts_against_real_engine() {
                 Attribute::CryptographicUsageMask(UsageMask::ENCRYPT | UsageMask::DECRYPT),
             ],
         },
+        &AuthContext::open(),
         "k21-create",
     )
     .unwrap();
@@ -1707,6 +1715,7 @@ fn k21_rekeyed_aes_key_encrypts_against_real_engine() {
     let r = rekey(
         &deps,
         ReKeyRequest { uid: c.uid.clone(), offset: None, template_attribute: vec![] },
+        &AuthContext::open(),
         "k21-rekey",
     )
     .unwrap();
@@ -2005,6 +2014,7 @@ fn locate_drops_orphans_when_engine_handle_is_gone() {
             maximum_items: None,
             ..Default::default()
         },
+        &AuthContext::open(),
         "loc-before",
     )
     .unwrap();
@@ -2037,6 +2047,7 @@ fn locate_drops_orphans_when_engine_handle_is_gone() {
             maximum_items: None,
             ..Default::default()
         },
+        &AuthContext::open(),
         "loc-after",
     )
     .unwrap();
@@ -2076,6 +2087,7 @@ fn narrowing_usage_mask_via_set_attribute_shrinks_engine_whitelist() {
                 ),
             ],
         },
+        &AuthContext::open(),
         "narrow-create",
     )
     .unwrap();
@@ -2278,6 +2290,7 @@ fn create_split_key_then_join_threshold_subset_reconstructs_via_real_engine() {
         get(
             &deps,
             GetRequest { uid: uid.to_string(), key_format_type: None, key_wrapping_specification: None },
+            &AuthContext::open(),
             "split-key-e2e-get",
         )
         .unwrap()
@@ -2378,6 +2391,7 @@ fn create_split_key_then_join_covers_every_11_54_method_via_real_engine() {
         get(
             &deps,
             GetRequest { uid: uid.to_string(), key_format_type: None, key_wrapping_specification: None },
+            &AuthContext::open(),
             "split-key-methods-e2e-get",
         )
         .unwrap()

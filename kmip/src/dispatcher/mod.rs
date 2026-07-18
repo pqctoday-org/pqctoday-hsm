@@ -920,25 +920,25 @@ fn handle_payload(
 ) -> Result<ResponsePayload, KmipError> {
     Ok(match payload {
         RequestPayload::Query(r) => ResponsePayload::Query(query(deps, r, correlation_id)?),
-        RequestPayload::Create(r) => ResponsePayload::Create(create(deps, r, correlation_id)?),
+        RequestPayload::Create(r) => ResponsePayload::Create(create(deps, r, auth, correlation_id)?),
         RequestPayload::CreateKeyPair(r) => {
             let op_canonical = canonical_create_key_pair_op(&r);
             ResponsePayload::CreateKeyPair(create_key_pair(deps, r, &op_canonical, auth, correlation_id)?)
         }
-        RequestPayload::Get(r) => ResponsePayload::Get(get(deps, r, correlation_id)?),
-        RequestPayload::GetAttributes(r) => ResponsePayload::GetAttributes(get_attributes(deps, r, correlation_id)?),
+        RequestPayload::Get(r) => ResponsePayload::Get(get(deps, r, auth, correlation_id)?),
+        RequestPayload::GetAttributes(r) => ResponsePayload::GetAttributes(get_attributes(deps, r, auth, correlation_id)?),
         RequestPayload::GetAttributeList(r) => ResponsePayload::GetAttributeList(get_attribute_list(deps, r, correlation_id)?),
-        RequestPayload::Locate(r) => ResponsePayload::Locate(locate(deps, r, correlation_id)?),
+        RequestPayload::Locate(r) => ResponsePayload::Locate(locate(deps, r, auth, correlation_id)?),
         RequestPayload::Activate(r) => ResponsePayload::Activate(activate(deps, r, correlation_id)?),
         RequestPayload::Revoke(r) => ResponsePayload::Revoke(revoke(deps, r, correlation_id)?),
-        RequestPayload::Destroy(r) => ResponsePayload::Destroy(destroy(deps, r, correlation_id)?),
+        RequestPayload::Destroy(r) => ResponsePayload::Destroy(destroy(deps, r, auth, correlation_id)?),
         RequestPayload::Encrypt(r) => ResponsePayload::Encrypt(encrypt(deps, r, correlation_id)?),
         RequestPayload::Decrypt(r) => ResponsePayload::Decrypt(decrypt(deps, r, correlation_id)?),
         RequestPayload::Encapsulate(r) => {
             ResponsePayload::Encapsulate(encapsulate(deps, r, auth, correlation_id)?)
         }
         RequestPayload::Decapsulate(r) => {
-            ResponsePayload::Decapsulate(decapsulate(deps, r, correlation_id)?)
+            ResponsePayload::Decapsulate(decapsulate(deps, r, auth, correlation_id)?)
         }
         RequestPayload::Sign(r) => ResponsePayload::Sign(sign(deps, r, auth, correlation_id)?),
         RequestPayload::SignatureVerify(r) => {
@@ -1021,7 +1021,7 @@ fn handle_payload(
             ResponsePayload::DeriveKey(derive_key(deps, r, correlation_id)?)
         }
         // K21 — §6.1.51 Re-key / §6.1.52 Re-key Key Pair.
-        RequestPayload::ReKey(r) => ResponsePayload::ReKey(rekey(deps, r, correlation_id)?),
+        RequestPayload::ReKey(r) => ResponsePayload::ReKey(rekey(deps, r, auth, correlation_id)?),
         RequestPayload::ReKeyKeyPair(r) => {
             ResponsePayload::ReKeyKeyPair(rekey_key_pair(deps, r, auth, correlation_id)?)
         }

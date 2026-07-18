@@ -237,6 +237,7 @@ fn mlkem768_openssl_encap_our_decap() {
     let dec = decapsulate(
         &d,
         DecapsulateRequest { uid: priv_uid, data: ct, cryptographic_parameters: None },
+        &AuthContext::open(),
         "decap",
     )
     .expect("KMIP decapsulate");
@@ -394,6 +395,7 @@ fn x25519mlkem768_openssl_component_encap_our_decap() {
     let dec = decapsulate(
         &d,
         DecapsulateRequest { uid: kp.private_key_uid, data: hybrid_ct, cryptographic_parameters: None },
+        &AuthContext::open(),
         "decap",
     )
     .expect("KMIP hybrid decapsulate");

@@ -53,11 +53,9 @@ pub fn sign(
         },
     ));
 
-    // ── Plane 2: store lookup ───────────────────────────────────────────
-    let obj = deps
-        .store
-        .get(&req.uid)?
-        .ok_or_else(|| fail_err(deps, correlation_id, "Sign", KmipError::object_not_found(&req.uid)))?;
+    // ── Plane 2: store lookup (Part F §F7.4 — owner-checked) ─────────────
+    let obj = super::helpers::authorize_object(deps, auth, &req.uid, || KmipError::object_not_found(&req.uid))
+        .map_err(|e| fail_err(deps, correlation_id, "Sign", e))?;
 
     // ── Lifecycle gate (KMIP 3.0 §3.x — Sign requires Active) ───────────
     if obj.state != State::Active {

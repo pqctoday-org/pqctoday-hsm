@@ -2101,6 +2101,7 @@ pub(crate) mod tests {
         super::super::destroy::destroy(
             &f.deps,
             crate::kmip30::DestroyRequest { uid: resp.uid.clone() },
+            &AuthContext::open(),
             "c-wpc-destroy",
         )
         .unwrap();
@@ -2279,6 +2280,7 @@ pub(crate) mod tests {
         super::super::destroy::destroy(
             &f.deps,
             crate::kmip30::DestroyRequest { uid: issued.uid.clone() },
+            &AuthContext::open(),
             "c-destroy-old",
         )
         .unwrap();

@@ -171,6 +171,7 @@ fn ecdh_curve25519_makes_x25519_and_reports_domain_params() {
     let ga = get_attributes(
         &d,
         GetAttributesRequest { uid: priv_uid.clone(), attribute_references: vec![] },
+        &pqctoday_kmip::server::auth::AuthContext::open(),
         "ga",
     )
     .expect("get_attributes");
@@ -186,6 +187,7 @@ fn ecdh_curve25519_makes_x25519_and_reports_domain_params() {
     let got = get(
         &d,
         GetRequest { uid: priv_uid, key_format_type: None, key_wrapping_specification: None },
+        &pqctoday_kmip::server::auth::AuthContext::open(),
         "get",
     );
     assert!(got.is_err(), "Get on the X25519 private key must be refused");

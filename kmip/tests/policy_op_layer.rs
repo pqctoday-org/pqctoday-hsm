@@ -122,7 +122,7 @@ fn try_create_sym(
     for (k, v) in custom {
         t.push(Attribute::Custom { name: (*k).to_string(), value: pqctoday_kmip::kmip30::CustomAttributeValue::Text((*v).to_string()) });
     }
-    create(deps, CreateRequest { object_type: ObjectType::SymmetricKey, template_attribute: t }, "cr")
+    create(deps, CreateRequest { object_type: ObjectType::SymmetricKey, template_attribute: t }, &AuthContext::open(), "cr")
         .map(|_| ())
         .map_err(|e| format!("{:?}", e.result_reason()))
 }

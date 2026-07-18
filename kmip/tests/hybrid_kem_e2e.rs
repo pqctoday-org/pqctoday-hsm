@@ -92,6 +92,7 @@ fn round_trip(alg: KmipAlgorithm, ss_len: usize) {
             data: enc.data.clone(),
             cryptographic_parameters: None,
         },
+        &AuthContext::open(),
         "decap",
     )
     .expect("decapsulate");
@@ -115,6 +116,7 @@ fn round_trip(alg: KmipAlgorithm, ss_len: usize) {
             key_format_type: None,
             key_wrapping_specification: None,
         },
+        &AuthContext::open(),
         "get",
     );
     assert!(

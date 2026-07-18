@@ -149,6 +149,7 @@ fn payments_cipher_rekeys_aes128_to_aes256_on_first_encrypt() {
                 Attribute::Name("payments-db-cipher".into()),
             ],
         },
+        &AuthContext::open(),
         "create",
     )
     .unwrap();
@@ -225,6 +226,7 @@ fn sweep_rekeys_via_rekey_and_rekeykeypair() {
                 Attribute::Name("payments-db-cipher".into()),
             ],
         },
+        &AuthContext::open(),
         "create",
     )
     .unwrap();
@@ -240,6 +242,7 @@ fn sweep_rekeys_via_rekey_and_rekeykeypair() {
     let rk_sym = rekey(
         &deps,
         ReKeyRequest { uid: sym.uid.clone(), offset: None, template_attribute: vec![] },
+        &AuthContext::open(),
         "sweep",
     )
     .unwrap();
@@ -290,6 +293,7 @@ fn legacy_signature_still_verifies_after_owner_key_rekeys() {
                 Attribute::Name("payments-db-cipher".into()),
             ],
         },
+        &AuthContext::open(),
         "create",
     )
     .unwrap();

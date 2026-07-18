@@ -28,9 +28,14 @@ use crate::policy::{Decision, PolicyRequest};
 use crate::store::ObjectRecord;
 
 use super::deps::Deps;
-use super::helpers::{emit_request, emit_success, fail_err};
+use super::helpers::{emit_request, emit_success, fail_err, stamp_owner};
 
-pub fn create(deps: &Deps, mut req: CreateRequest, correlation_id: &str) -> Result<CreateResponse> {
+pub fn create(
+    deps: &Deps,
+    mut req: CreateRequest,
+    auth: &crate::server::auth::AuthContext,
+    correlation_id: &str,
+) -> Result<CreateResponse> {
     let started = OffsetDateTime::now_utc();
     emit_request(
         deps,
@@ -194,7 +199,7 @@ pub fn create(deps: &Deps, mut req: CreateRequest, correlation_id: &str) -> Resu
     let x = super::register_import_export::extract_attrs(&req.template_attribute);
     let initial_state = super::register_import_export::compute_initial_state(now, &x);
     let cp = x.cryptographic_parameters.clone();
-    deps.store.put(ObjectRecord {
+    deps.store.put(stamp_owner(ObjectRecord {
         uid: uid.clone(),
         object_type: req.object_type,
         algorithm: algo,
@@ -234,7 +239,7 @@ pub fn create(deps: &Deps, mut req: CreateRequest, correlation_id: &str) -> Resu
         // with nothing behind it).
         lease_time: Some(3600),
     ..ObjectRecord::default()
-})?;
+}, auth))?;
 
     emit_success(deps, correlation_id, "Create");
 
@@ -424,7 +429,7 @@ rules:
         let resp = create(&d, CreateRequest {
             object_type: ObjectType::SymmetricKey,
             template_attribute: vec![],
-        }, "c").unwrap();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap();
         let rec = d.store.get(&resp.uid).unwrap().unwrap();
         assert_eq!(rec.algorithm, KmipAlgorithm::Aes);
         assert_eq!(rec.object_type, ObjectType::SymmetricKey);
@@ -437,7 +442,7 @@ rules:
         let err = create(&d, CreateRequest {
             object_type: ObjectType::PrivateKey,
             template_attribute: vec![],
-        }, "c").unwrap_err();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::InvalidAttributeValue);
     }
 
@@ -447,7 +452,7 @@ rules:
         let err = create(&d, CreateRequest {
             object_type: ObjectType::SymmetricKey,
             template_attribute: vec![Attribute::CryptographicAlgorithm(KmipAlgorithm::MlDsa87)],
-        }, "c").unwrap_err();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::InvalidAttributeValue);
     }
 
@@ -459,7 +464,7 @@ rules:
             template_attribute: vec![
                 Attribute::CryptographicAlgorithm(KmipAlgorithm::HmacSha256),
             ],
-        }, "c").unwrap();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap();
         let rec = d.store.get(&resp.uid).unwrap().unwrap();
         assert_eq!(rec.algorithm, KmipAlgorithm::HmacSha256);
     }
@@ -495,7 +500,7 @@ rules:
                 Attribute::CryptographicLength(256),
                 Attribute::CryptographicUsageMask(UsageMask::ENCRYPT | UsageMask::DECRYPT),
             ],
-        }, "c").unwrap();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap();
         let rec = d.store.get(&resp.uid).unwrap().unwrap();
 
         let handle =

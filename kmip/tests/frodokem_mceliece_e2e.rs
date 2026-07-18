@@ -96,6 +96,7 @@ fn round_trip(alg: KmipAlgorithm, ss_len: usize) {
             data: enc.data.clone(),
             cryptographic_parameters: None,
         },
+        &AuthContext::open(),
         "decap",
     )
     .unwrap_or_else(|e| panic!("{alg:?}: decapsulate failed: {e:?}"));
@@ -117,6 +118,7 @@ fn round_trip(alg: KmipAlgorithm, ss_len: usize) {
             key_format_type: None,
             key_wrapping_specification: None,
         },
+        &AuthContext::open(),
         "get",
     );
     assert!(got.is_err(), "{alg:?}: Get on the private key must be refused (non-extractable)");

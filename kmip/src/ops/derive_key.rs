@@ -644,6 +644,7 @@ mod tests {
     use crate::auditlog::{AuditSink, EventPayload, RingSink};
     use crate::kmip30::{Attribute, CryptographicParameters, DerivationParameters};
     use crate::policy::{load_from_str, Engine};
+    use crate::server::auth::AuthContext;
     use crate::store::MemoryStore;
     use std::sync::Arc;
 
@@ -1110,6 +1111,7 @@ mod tests {
         let ga = super::super::get_attributes::get_attributes(
             &d,
             crate::kmip30::GetAttributesRequest { uid: resp.uid.clone(), attribute_references: vec![] },
+            &AuthContext::open(),
             "c2",
         ).unwrap();
         assert!(ga.attributes.iter().any(|a| matches!(
@@ -1119,6 +1121,7 @@ mod tests {
         let ga = super::super::get_attributes::get_attributes(
             &d,
             crate::kmip30::GetAttributesRequest { uid: "key".into(), attribute_references: vec![] },
+            &AuthContext::open(),
             "c3",
         ).unwrap();
         assert!(ga.attributes.iter().any(|a| matches!(

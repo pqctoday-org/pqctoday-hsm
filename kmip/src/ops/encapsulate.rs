@@ -58,9 +58,8 @@ pub fn encapsulate(
         ),
     );
 
-    let obj = deps.store.get(&req.uid)?.ok_or_else(|| {
-        fail_err(deps, correlation_id, "Encapsulate", KmipError::object_not_found(&req.uid))
-    })?;
+    let obj = super::helpers::authorize_object(deps, auth, &req.uid, || KmipError::object_not_found(&req.uid))
+        .map_err(|e| fail_err(deps, correlation_id, "Encapsulate", e))?;
 
     // K6 — Encapsulate accepts ML-KEM, the hybrid KEMs (X25519MLKEM768 /
     // SecP256r1MLKEM768), classical ECDH/X25519/X448 in DHKEM mode (see
@@ -172,7 +171,7 @@ pub fn encapsulate(
             )
         })?;
         emit_pkcs11(deps, correlation_id, "soft::hybrid_kem_encapsulate", None, 0, "CKR_OK");
-        let ss_uid = store_shared_secret(deps, obj.algorithm, enc.shared_secret)?;
+        let ss_uid = store_shared_secret(deps, obj.algorithm, enc.shared_secret, auth)?;
         emit_success(deps, correlation_id, "Encapsulate");
         return Ok(EncapsulateResponse { uid: ss_uid, data: enc.ciphertext, rekeyed: None });
     }
@@ -283,7 +282,7 @@ pub fn encapsulate(
     };
 
     // Create the NEW managed SecretData object holding the shared secret.
-    let ss_uid = store_shared_secret(deps, obj.algorithm, shared_secret)?;
+    let ss_uid = store_shared_secret(deps, obj.algorithm, shared_secret, auth)?;
 
     emit_success(deps, correlation_id, "Encapsulate");
 
@@ -473,10 +472,11 @@ pub(crate) fn store_shared_secret(
     deps: &Deps,
     source_algorithm: KmipAlgorithm,
     shared_secret: Vec<u8>,
+    auth: &crate::server::auth::AuthContext,
 ) -> Result<String> {
     let uid = format!("urn:pqctoday:obj:{}", Uuid::new_v4());
     let now = OffsetDateTime::now_utc();
-    deps.store.put(ObjectRecord {
+    deps.store.put(super::helpers::stamp_owner(ObjectRecord {
         uid: uid.clone(),
         object_type: ObjectType::SecretData,
         // The shared secret is opaque bytes; record the source KEM
@@ -510,7 +510,7 @@ pub(crate) fn store_shared_secret(
         sensitive: Some(false),
         fresh: Some(true),
         ..ObjectRecord::default()
-    })?;
+    }, auth))?;
     Ok(uid)
 }
 
@@ -757,6 +757,7 @@ rules:
                 data: resp.data.clone(),
                 ..Default::default()
             },
+            &AuthContext::open(),
             "corr-good",
         );
         assert!(good.is_ok(), "new key must decapsulate the ciphertext Encapsulate just produced");

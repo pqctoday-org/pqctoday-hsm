@@ -542,7 +542,7 @@ pub fn create_key_pair(
     let priv_state = super::register_import_export::compute_initial_state(now, &priv_x);
     let pub_state = super::register_import_export::compute_initial_state(now, &pub_x);
     let _ = (usage_mask, key_length); // silence unused warnings
-    deps.store.put(ObjectRecord {
+    deps.store.put(super::helpers::stamp_owner(ObjectRecord {
         uid: priv_uid.clone(),
         object_type: ObjectType::PrivateKey,
         algorithm: kmip_algo,
@@ -621,8 +621,8 @@ pub fn create_key_pair(
             protection_storage_mask: Some(0x01),
             lease_time: Some(3600),
     ..ObjectRecord::default()
-})?;
-    deps.store.put(ObjectRecord {
+}, auth))?;
+    deps.store.put(super::helpers::stamp_owner(ObjectRecord {
         uid: pub_uid.clone(),
         object_type: ObjectType::PublicKey,
         algorithm: kmip_algo,
@@ -681,7 +681,7 @@ pub fn create_key_pair(
             protection_storage_mask: Some(0x01),
             lease_time: Some(3600),
     ..ObjectRecord::default()
-})?;
+}, auth))?;
 
     deps.sink.emit(AuditEvent::at(
         OffsetDateTime::now_utc(),
