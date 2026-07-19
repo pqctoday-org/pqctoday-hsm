@@ -19,8 +19,10 @@
 //! function table.
 
 use softhsmrustv3::ck_abi::{
-    CK_ATTRIBUTE, CK_FLAGS, CK_FUNCTION_LIST, CK_FUNCTION_LIST_PTR, CK_MECHANISM,
+    CK_ATTRIBUTE, CK_ATTRIBUTE_TYPE, CK_FLAGS, CK_FUNCTION_LIST, CK_FUNCTION_LIST_3_2,
+    CK_FUNCTION_LIST_PTR, CK_INTERFACE_PTR, CK_INTERFACE_PTR_PTR, CK_MECHANISM,
     CK_OBJECT_HANDLE, CK_RV, CK_SESSION_HANDLE, CK_SLOT_ID, CK_ULONG, CK_USER_TYPE,
+    CK_VERSION, CK_VOID_PTR,
 };
 use softhsmrustv3::constants::{CKF_RW_SESSION, CKF_SERIAL_SESSION, CKR_OK, CKU_SO, CKU_USER};
 
@@ -45,9 +47,17 @@ const CKR_OK_RV: CK_RV = CKR_OK as CK_RV;
 /// own binary.
 pub struct Engine {
     // Never read after construction — kept alive so the dlopen'd image
-    // (and the function pointers `functions` points into) stays mapped.
+    // (and the function pointers `functions`/`functions_3_2` point into)
+    // stays mapped.
     _library: libloading::Library,
     functions: *const CK_FUNCTION_LIST,
+    /// The v3.2 interface (§5.3/§5.5 `C_GetInterface`), needed for
+    /// functions added after v2.40 — `C_EncapsulateKey`/`C_DecapsulateKey`
+    /// here. `C_GetFunctionList` is frozen at v2.40 for ABI back-compat
+    /// (confirmed against `rust/src/ck_abi.rs`'s own doc comments); a
+    /// v3.2-aware client resolves the newer functions through the
+    /// interface mechanism instead, exactly as done here.
+    functions_3_2: *const CK_FUNCTION_LIST_3_2,
 }
 
 // SAFETY: `CK_FUNCTION_LIST`'s entries are `unsafe extern "C" fn` pointers
@@ -91,7 +101,39 @@ impl Engine {
             bail!("C_GetFunctionList failed: rv=0x{rv:x}");
         }
 
-        Ok(Self { _library: library, functions: list_ptr })
+        // §5.3/§5.5 — resolve the v3.2 interface via C_GetInterface, the
+        // standard way to reach functions added after v2.40. Interface
+        // name is the literal "PKCS 11" (with a space) per the spec;
+        // requesting version {3,2} explicitly avoids relying on the
+        // library's default-interface ordering.
+        type GetInterfaceFn = unsafe extern "C" fn(
+            *mut u8,
+            *mut CK_VERSION,
+            CK_INTERFACE_PTR_PTR,
+            CK_FLAGS,
+        ) -> CK_RV;
+        let get_interface: libloading::Symbol<GetInterfaceFn> =
+            unsafe { library.get(b"C_GetInterface\0") }.context("resolve C_GetInterface")?;
+        let mut interface_name: [u8; 8] = *b"PKCS 11\0";
+        let mut version_3_2 = CK_VERSION { major: 3, minor: 2 };
+        let mut interface_ptr: CK_INTERFACE_PTR = std::ptr::null_mut();
+        // SAFETY: `interface_name`/`version_3_2` are valid buffers for the
+        // duration of this call; `interface_ptr` is a valid non-null
+        // out-pointer per §5.5.
+        let rv = unsafe {
+            get_interface(interface_name.as_mut_ptr(), &mut version_3_2, &mut interface_ptr, 0)
+        };
+        if rv != CKR_OK_RV || interface_ptr.is_null() {
+            bail!("C_GetInterface(\"PKCS 11\", 3.2) failed: rv=0x{rv:x}");
+        }
+        // SAFETY: a successful C_GetInterface returns a CK_INTERFACE whose
+        // pFunctionList, per the {3,2} version we requested, points to a
+        // CK_FUNCTION_LIST_3_2 — the engine's own C_GetInterface dispatch
+        // (rust/src/ck_abi.rs) only ever populates it that way for a 3.2
+        // match.
+        let functions_3_2 = unsafe { (*interface_ptr).pFunctionList as *const CK_FUNCTION_LIST_3_2 };
+
+        Ok(Self { _library: library, functions: list_ptr, functions_3_2 })
     }
 
     // SAFETY (every accessor below): `self.functions` was populated by a
@@ -102,6 +144,12 @@ impl Engine {
     // per-function pointer table; `funcs()` skips straight to it.
     fn funcs(&self) -> &softhsmrustv3::ck_abi::FnListV240 {
         unsafe { &(*self.functions).f }
+    }
+
+    /// The v3.2-only function segment (`C_EncapsulateKey`/`C_DecapsulateKey`),
+    /// resolved via `C_GetInterface` in `load()`.
+    fn funcs_32(&self) -> &softhsmrustv3::ck_abi::FnListV32Ext {
+        unsafe { &(*self.functions_3_2).f32 }
     }
 
     pub fn initialize(&self) -> Result<()> {
@@ -238,6 +286,138 @@ impl Engine {
         let user_session = self.open_session(slot)?;
         self.login_user(user_session, user_pin)?;
         Ok(user_session)
+    }
+
+    /// §5.7.5 two-call convention. `CKR_ATTRIBUTE_TYPE_INVALID` (attribute
+    /// absent on this object — not this crate's harness-only convention,
+    /// the engine's own real return code, see `ffi.rs::C_GetAttributeValue`)
+    /// is surfaced as a normal `Err`, same as any other non-OK `rv`.
+    pub fn get_attribute_value(&self, session: CK_SESSION_HANDLE, object: CK_OBJECT_HANDLE, attr_type: u32) -> Result<Vec<u8>> {
+        let mut attr = CK_ATTRIBUTE { attrType: attr_type as CK_ATTRIBUTE_TYPE, pValue: std::ptr::null_mut(), ulValueLen: 0 };
+        ck(
+            unsafe { (self.funcs().C_GetAttributeValue)(session, object, &mut attr, 1) },
+            "C_GetAttributeValue(size)",
+        )?;
+        let mut buf = vec![0u8; attr.ulValueLen as usize];
+        attr.pValue = buf.as_mut_ptr() as CK_VOID_PTR;
+        ck(
+            unsafe { (self.funcs().C_GetAttributeValue)(session, object, &mut attr, 1) },
+            "C_GetAttributeValue(fill)",
+        )?;
+        buf.truncate(attr.ulValueLen as usize);
+        Ok(buf)
+    }
+
+    /// §5.18.5 `C_DeriveKey` with `CKM_ECDH1_DERIVE` (§6.7 — also the
+    /// mechanism for X25519/X448 Montgomery-curve agreement, dispatched by
+    /// the engine from the base key's own stored algorithm family; see
+    /// `algos::KeyAgreementAlgo`'s doc comment). Builds the standard
+    /// `CK_ECDH1_DERIVE_PARAMS` internally — nothing outside this module
+    /// needs to know that struct's raw layout, same discipline as `funcs()`
+    /// keeping the function table private. `kdf = CKD_NULL` (§6.7 — no
+    /// post-processing; the raw shared value becomes the key), no shared
+    /// data, `peer_public_point` is the peer's `CKA_EC_POINT` value
+    /// (DER-OCTET-STRING-wrapped — the engine strips the wrapper itself,
+    /// confirmed against `ffi.rs`'s `C_DeriveKey` ECDH branch).
+    pub fn ecdh1_derive(
+        &self,
+        session: CK_SESSION_HANDLE,
+        base_key: CK_OBJECT_HANDLE,
+        peer_public_point: &mut [u8],
+    ) -> Result<CK_OBJECT_HANDLE> {
+        const CKD_NULL: CK_ULONG = 1; // PKCS#11 v3.2 §6.7 Table 26 — no KDF.
+        #[repr(C)]
+        struct CkEcdh1DeriveParams {
+            kdf: CK_ULONG,
+            ul_shared_data_len: CK_ULONG,
+            p_shared_data: CK_VOID_PTR,
+            ul_public_data_len: CK_ULONG,
+            p_public_data: CK_VOID_PTR,
+        }
+        let mut params = CkEcdh1DeriveParams {
+            kdf: CKD_NULL,
+            ul_shared_data_len: 0,
+            p_shared_data: std::ptr::null_mut(),
+            ul_public_data_len: peer_public_point.len() as CK_ULONG,
+            p_public_data: peer_public_point.as_mut_ptr() as CK_VOID_PTR,
+        };
+        let mut mech = CK_MECHANISM {
+            mechanism: softhsmrustv3::constants::CKM_ECDH1_DERIVE as CK_ULONG,
+            pParameter: &mut params as *mut CkEcdh1DeriveParams as CK_VOID_PTR,
+            ulParameterLen: std::mem::size_of::<CkEcdh1DeriveParams>() as CK_ULONG,
+        };
+        let mut derived: CK_OBJECT_HANDLE = 0;
+        ck(
+            unsafe {
+                (self.funcs().C_DeriveKey)(session, &mut mech, base_key, std::ptr::null_mut(), 0, &mut derived)
+            },
+            "C_DeriveKey(ECDH1)",
+        )?;
+        Ok(derived)
+    }
+
+    /// §5.18.8 `C_EncapsulateKey`. `public_key` must carry `CKA_ENCAPSULATE`
+    /// (engine-set by default on ML-KEM public keys). Two-call convention
+    /// for the ciphertext buffer, same pattern as `sign`.
+    pub fn encapsulate_key(
+        &self,
+        session: CK_SESSION_HANDLE,
+        mechanism: u32,
+        public_key: CK_OBJECT_HANDLE,
+        template: &mut [CK_ATTRIBUTE],
+    ) -> Result<(Vec<u8>, CK_OBJECT_HANDLE)> {
+        let mut mech = CK_MECHANISM { mechanism: mechanism as CK_ULONG, pParameter: std::ptr::null_mut(), ulParameterLen: 0 };
+        let mut ct_len: CK_ULONG = 0;
+        let mut ss_handle: CK_OBJECT_HANDLE = 0;
+        ck(
+            unsafe {
+                (self.funcs_32().C_EncapsulateKey)(
+                    session, &mut mech, public_key,
+                    template.as_mut_ptr(), template.len() as CK_ULONG,
+                    std::ptr::null_mut(), &mut ct_len, &mut ss_handle,
+                )
+            },
+            "C_EncapsulateKey(size)",
+        )?;
+        let mut ciphertext = vec![0u8; ct_len as usize];
+        ck(
+            unsafe {
+                (self.funcs_32().C_EncapsulateKey)(
+                    session, &mut mech, public_key,
+                    template.as_mut_ptr(), template.len() as CK_ULONG,
+                    ciphertext.as_mut_ptr(), &mut ct_len, &mut ss_handle,
+                )
+            },
+            "C_EncapsulateKey(fill)",
+        )?;
+        ciphertext.truncate(ct_len as usize);
+        Ok((ciphertext, ss_handle))
+    }
+
+    /// §5.18.9 `C_DecapsulateKey`. `private_key` must carry `CKA_DECAPSULATE`
+    /// (engine-set by default on ML-KEM private keys).
+    pub fn decapsulate_key(
+        &self,
+        session: CK_SESSION_HANDLE,
+        mechanism: u32,
+        private_key: CK_OBJECT_HANDLE,
+        ciphertext: &[u8],
+        template: &mut [CK_ATTRIBUTE],
+    ) -> Result<CK_OBJECT_HANDLE> {
+        let mut mech = CK_MECHANISM { mechanism: mechanism as CK_ULONG, pParameter: std::ptr::null_mut(), ulParameterLen: 0 };
+        let mut ciphertext = ciphertext.to_vec();
+        let mut ss_handle: CK_OBJECT_HANDLE = 0;
+        ck(
+            unsafe {
+                (self.funcs_32().C_DecapsulateKey)(
+                    session, &mut mech, private_key,
+                    template.as_mut_ptr(), template.len() as CK_ULONG,
+                    ciphertext.as_mut_ptr(), ciphertext.len() as CK_ULONG, &mut ss_handle,
+                )
+            },
+            "C_DecapsulateKey",
+        )?;
+        Ok(ss_handle)
     }
 
     pub fn generate_key_pair(
