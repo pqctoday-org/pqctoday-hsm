@@ -91,6 +91,15 @@ struct Cli {
     /// the matrix).
     #[arg(long, default_value_t = false)]
     include_slow: bool,
+    /// Print the configured (algorithm, op) matrix as JSON and exit —
+    /// NO engine load, NO dlopen, NO C_Initialize. Lets a caller (e.g.
+    /// the sandbox UI's job backend, hsm-perf-bench-ui-implementation-
+    /// plan-07192026.md §2.4) learn the exact expected row count/labels
+    /// up front from the harness's own real algorithm list, instead of
+    /// duplicating it as a separately-maintained constant that could
+    /// drift from `algos.rs`.
+    #[arg(long, default_value_t = false)]
+    list_algorithms: bool,
     /// INTERNAL — set by the parent orchestrator on every child it spawns
     /// so the child stamps its JSONL rows as one of an N-instance
     /// Topology-B run even though it always executes as a plain,
@@ -228,10 +237,50 @@ fn provision_tenant(
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    if cli.list_algorithms {
+        return list_algorithms(&cli);
+    }
     if cli.instances > 1 {
         return run_parent(&cli);
     }
     run_instance(&cli)
+}
+
+#[derive(serde::Serialize)]
+struct AlgoCell {
+    category: &'static str,
+    algorithm: &'static str,
+    security_level: &'static str,
+    op: &'static str,
+}
+
+/// `--list-algorithms`: the configured matrix's exact (category,
+/// algorithm, security_level, op) cells, in the same vocabulary
+/// `measure::ResultRow` uses for those fields — so a caller can match
+/// this list's entries directly against streamed JSONL rows with no
+/// translation. Touches nothing but `algos.rs`'s own const data; no
+/// `Engine::load` anywhere in this path.
+fn list_algorithms(cli: &Cli) -> Result<()> {
+    let sig_algos: Vec<algos::SignatureAlgo> = algos::SIGNATURE_ALGOS.iter().copied().filter(|a| cli.include_slow || !a.slow).collect();
+
+    let mut cells = Vec::new();
+    for algo in &sig_algos {
+        for op in ["keygen", "sign", "verify"] {
+            cells.push(AlgoCell { category: "signature", algorithm: algo.name, security_level: algo.security_level, op });
+        }
+    }
+    for algo in algos::KEY_AGREEMENT_ALGOS {
+        for op in ["keygen", "derive"] {
+            cells.push(AlgoCell { category: "key_establishment", algorithm: algo.name, security_level: algo.security_level, op });
+        }
+    }
+    for algo in algos::KEM_ALGOS {
+        for op in ["keygen", "encapsulate", "decapsulate"] {
+            cells.push(AlgoCell { category: "key_establishment", algorithm: algo.name, security_level: algo.security_level, op });
+        }
+    }
+    println!("{}", serde_json::to_string(&cells)?);
+    Ok(())
 }
 
 /// Topology B orchestrator: spawn `cli.instances` fresh child processes of
