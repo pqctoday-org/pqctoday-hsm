@@ -462,48 +462,65 @@ fn run_instance(cli: &Cli) -> Result<()> {
 
     // ── Cross-tenant isolation, proven with a real PKCS#11 v3.2 error
     // code — not asserted, not assumed. Bob's session attempting to sign
-    // with ALICE's private-key handle (Ed25519, guaranteed present in
-    // every matrix configuration) must fail: her handle is not
-    // visible/usable from his session's token scope. §6.3.2/§6.3.3
-    // (SignInit/Sign) list CKR_KEY_HANDLE_INVALID for exactly this case;
-    // this engine's own object-handle validation (`can_access_object`,
-    // hardened across this whole tenancy effort) may also surface the
-    // more general CKR_OBJECT_HANDLE_INVALID — both are spec-defined,
-    // and either is an honest "no", so both are accepted here. ─────────
-    let alice_ed25519_priv = alice.sig[algos::ED25519.name].priv_handle;
-    let bob_ed25519 = &bob.sig[algos::ED25519.name];
-    let cross_tenant_result = engine.sign_init(bob.session, algos::ED25519.sign_mechanism, alice_ed25519_priv);
-    match cross_tenant_result {
-        Ok(()) => {
-            panic!(
-                "SECURITY REGRESSION: Bob's session (slot {}) could SignInit with \
-                 Alice's private key handle {alice_ed25519_priv} (her slot {}) — cross-tenant isolation failed",
-                bob.slot, alice.slot
-            );
+    // with ALICE's private-key handle (using whichever signature
+    // algorithm this run's --algorithms selection actually includes) must
+    // fail: her handle is not visible/usable from his session's token
+    // scope. §6.3.2/§6.3.3 (SignInit/Sign) list CKR_KEY_HANDLE_INVALID for
+    // exactly this case; this engine's own object-handle validation
+    // (`can_access_object`, hardened across this whole tenancy effort)
+    // may also surface the more general CKR_OBJECT_HANDLE_INVALID — both
+    // are spec-defined, and either is an honest "no", so both are
+    // accepted here. ─────────────────────────────────────────────────
+    // Used to hardcode algos::ED25519 on the assumption it was
+    // "guaranteed present in every matrix configuration" — true when the
+    // only matrix-shaping toggle was --include-slow, false once
+    // --algorithms could restrict the run to an arbitrary subset.
+    // Confirmed live: an --algorithms ML-DSA-44,ML-DSA-65,ML-DSA-87
+    // selection panicked here ("no entry found for key") since alice's
+    // .sig map never had an "Ed25519" entry to begin with. Probing with
+    // whichever signature algorithm actually got provisioned fixes this
+    // for any signature-only selection; a selection with NO signature
+    // algorithm at all (pure key-establishment) has no natural probe for
+    // THIS specific check, so it's skipped with a clearly-logged reason
+    // rather than silently claimed as verified.
+    if let Some(probe) = sig_algos.first() {
+        let alice_probe_priv = alice.sig[probe.name].priv_handle;
+        let bob_probe = &bob.sig[probe.name];
+        let cross_tenant_result = engine.sign_init(bob.session, probe.sign_mechanism, alice_probe_priv);
+        match cross_tenant_result {
+            Ok(()) => {
+                panic!(
+                    "SECURITY REGRESSION: Bob's session (slot {}) could SignInit with \
+                     Alice's private key handle {alice_probe_priv} (her slot {}) — cross-tenant isolation failed",
+                    bob.slot, alice.slot
+                );
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                let is_expected = msg.contains(&format!("0x{CKR_KEY_HANDLE_INVALID:x}"))
+                    || msg.contains(&format!("0x{CKR_OBJECT_HANDLE_INVALID:x}"));
+                assert!(
+                    is_expected,
+                    "expected CKR_KEY_HANDLE_INVALID (0x{CKR_KEY_HANDLE_INVALID:x}) or \
+                     CKR_OBJECT_HANDLE_INVALID (0x{CKR_OBJECT_HANDLE_INVALID:x}), got: {msg}"
+                );
+                eprintln!("[ok] cross-tenant isolation verified via {}: Bob cannot use Alice's key handle ({msg})", probe.name);
+            }
         }
-        Err(e) => {
-            let msg = e.to_string();
-            let is_expected = msg.contains(&format!("0x{CKR_KEY_HANDLE_INVALID:x}"))
-                || msg.contains(&format!("0x{CKR_OBJECT_HANDLE_INVALID:x}"));
-            assert!(
-                is_expected,
-                "expected CKR_KEY_HANDLE_INVALID (0x{CKR_KEY_HANDLE_INVALID:x}) or \
-                 CKR_OBJECT_HANDLE_INVALID (0x{CKR_OBJECT_HANDLE_INVALID:x}), got: {msg}"
-            );
-            eprintln!("[ok] cross-tenant isolation verified: Bob cannot use Alice's key handle ({msg})");
-        }
-    }
 
-    // Bob's OWN key still works after the rejected cross-tenant attempt —
-    // proves the isolation check is a real gate, not a session-poisoning
-    // side effect.
-    let message = b"bob signs after the rejected cross-tenant attempt";
-    engine.sign_init(bob.session, algos::ED25519.sign_mechanism, bob_ed25519.priv_handle).context("C_SignInit (bob, post-check)")?;
-    let sig = engine.sign(bob.session, message).context("C_Sign (bob, post-check)")?;
-    engine.verify_init(bob.session, algos::ED25519.sign_mechanism, bob_ed25519.pub_handle).context("C_VerifyInit (bob, post-check)")?;
-    let valid = engine.verify(bob.session, message, &sig).context("C_Verify (bob, post-check)")?;
-    assert!(valid, "bob's own key must still work after the rejected cross-tenant attempt");
-    eprintln!("[ok] bob's own key still works after the rejected cross-tenant attempt — real gate, not a blanket deny");
+        // Bob's OWN key still works after the rejected cross-tenant
+        // attempt — proves the isolation check is a real gate, not a
+        // session-poisoning side effect.
+        let message = b"bob signs after the rejected cross-tenant attempt";
+        engine.sign_init(bob.session, probe.sign_mechanism, bob_probe.priv_handle).context("C_SignInit (bob, post-check)")?;
+        let sig = engine.sign(bob.session, message).context("C_Sign (bob, post-check)")?;
+        engine.verify_init(bob.session, probe.sign_mechanism, bob_probe.pub_handle).context("C_VerifyInit (bob, post-check)")?;
+        let valid = engine.verify(bob.session, message, &sig).context("C_Verify (bob, post-check)")?;
+        assert!(valid, "bob's own key must still work after the rejected cross-tenant attempt");
+        eprintln!("[ok] bob's own key still works after the rejected cross-tenant attempt — real gate, not a blanket deny");
+    } else {
+        eprintln!("[ok] cross-tenant isolation sign-based check skipped — no signature algorithm in this run's --algorithms selection to probe with (key-establishment-only run)");
+    }
 
     // ── ECDH-derive category, every key-agreement algorithm — genuine
     // two-party key agreement across alice's and bob's SEPARATE tokens,
