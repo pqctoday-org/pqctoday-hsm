@@ -57,7 +57,6 @@ use pkcs11::Engine;
 use softhsmrustv3::ck_abi::{CK_OBJECT_HANDLE, CK_SESSION_HANDLE, CK_SLOT_ID};
 use softhsmrustv3::constants::{CKA_EC_POINT, CKA_VALUE, CKR_KEY_HANDLE_INVALID, CKR_OBJECT_HANDLE_INVALID};
 use std::collections::HashMap;
-use std::io::Read;
 use std::process::Stdio;
 use std::sync::Arc;
 
@@ -294,13 +293,26 @@ fn list_algorithms(cli: &Cli) -> Result<()> {
 /// Topology B orchestrator: spawn `cli.instances` fresh child processes of
 /// this same binary, each forced to `--instances 1` (so it runs the exact
 /// same single-instance code path as Topology A) but stamped with
-/// `--topology-instances N` so its JSONL rows self-report as one instance
-/// of an N-instance independent topology. Each child's whole stdout is a
-/// bounded number of short JSON lines — well under any OS pipe buffer, so
-/// reading each child fully before moving to the next cannot deadlock on
-/// a full pipe; if a future increment makes a single instance's JSONL
-/// output pipe-buffer-sized (megabytes), switch to draining each child's
-/// stdout on its own thread instead of sequentially.
+/// `--topology-instances N` + a distinct `--instance-id` so its JSONL
+/// rows self-report as one specific instance of an N-instance independent
+/// topology.
+///
+/// Each child's stdout is read on its OWN thread, one line at a time, and
+/// forwarded to the parent's own stdout AS EACH LINE ARRIVES (via an
+/// mpsc channel drained by the main thread) — not read to completion
+/// child-by-child. An earlier version of this function read one child's
+/// ENTIRE stdout via a blocking `read_to_string()` before even starting
+/// the next child; that is correct for the data itself (nothing was ever
+/// lost or corrupted) but defeats LIVE progress for any caller streaming
+/// the parent's stdout (the sandbox job runner, `hsm_perf_bench_job.py`):
+/// confirmed live — a real 2-instance run showed 0/152 completed cells
+/// for the entire ~15s runtime, then jumped straight to 152/152 the
+/// instant the last child exited, with no intermediate value ever
+/// observed. Rust's `Stdout` is a `LineWriter` regardless of whether it's
+/// attached to a tty or a pipe (unlike C's stdio, which block-buffers
+/// non-tty output), so each child already flushes every JSONL row to its
+/// pipe as soon as that row is written — the blocking was entirely on
+/// this function's READING side, not the children's writing side.
 fn run_parent(cli: &Cli) -> Result<()> {
     let self_exe = std::env::current_exe().context("resolving current_exe for child re-exec")?;
     eprintln!(
@@ -308,7 +320,9 @@ fn run_parent(cli: &Cli) -> Result<()> {
         cli.instances
     );
 
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
     let mut children = Vec::new();
+    let mut readers = Vec::new();
     for instance_id in 0..cli.instances {
         let mut cmd = std::process::Command::new(&self_exe);
         cmd.arg("--library").arg(&cli.library)
@@ -321,18 +335,42 @@ fn run_parent(cli: &Cli) -> Result<()> {
         if cli.include_slow {
             cmd.arg("--include-slow");
         }
-        let child = cmd
+        let mut child = cmd
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()
             .with_context(|| format!("spawning instance {instance_id}"))?;
+        let stdout = child.stdout.take().expect("piped stdout");
+        let tx = tx.clone();
+        readers.push(std::thread::spawn(move || -> Result<()> {
+            for line in std::io::BufRead::lines(std::io::BufReader::new(stdout)) {
+                let line = line.with_context(|| format!("reading instance {instance_id} stdout"))?;
+                // `.lines()` strips the trailing newline `println!` wrote on
+                // the child side; put it back so what reaches the parent's
+                // own stdout is byte-identical to shared-1-instance mode's
+                // output shape (one JSON object per line).
+                if tx.send(format!("{line}\n")).is_err() {
+                    break; // receiver already gone — main thread is exiting
+                }
+            }
+            Ok(())
+        }));
         children.push(child);
     }
+    drop(tx); // only the per-child clones keep the channel open now
 
+    // Print each line the instant it arrives, interleaved across
+    // instances in real arrival order — this loop ends once every
+    // sender (one per reader thread) has been dropped, i.e. once every
+    // child's stdout has hit EOF.
+    for line in rx {
+        print!("{line}");
+    }
+
+    for reader in readers {
+        reader.join().expect("reader thread panicked")?;
+    }
     for (instance_id, mut child) in children.into_iter().enumerate() {
-        let mut jsonl = String::new();
-        child.stdout.take().expect("piped stdout").read_to_string(&mut jsonl).context("reading child stdout")?;
-        print!("{jsonl}");
         let status = child.wait().with_context(|| format!("waiting on instance {instance_id}"))?;
         if !status.success() {
             bail!("instance {instance_id} exited with {status}");
@@ -451,28 +489,42 @@ fn run_instance(cli: &Cli) -> Result<()> {
     }
 
     // ── Fixed-duration, multi-threaded measurement (§A7): one point per
-    // (algorithm, op), `cli.threads` workers round-robin across the 2
-    // tenants, each worker on its OWN session (an operation's state —
-    // SignInit/Sign, etc. — lives on the session, so concurrent workers
-    // sharing one session would race each other's operation context).
-    // Login state is per-TOKEN not per-session (verified against
-    // `ffi.rs::C_Login` — `token.login_state` lives in `TOKEN_STORE`
-    // keyed by slot), so a worker session on an already-logged-in tenant
-    // slot needs no separate login; and `can_access_object` gates by
-    // slot, not by creating session, so every worker can use its
-    // tenant's key material without regenerating it. ────────────────────
+    // (tenant, algorithm, op) — `cli.threads` workers round-robin across
+    // the 2 tenants, each worker on its OWN session (an operation's
+    // state — SignInit/Sign, etc. — lives on the session, so concurrent
+    // workers sharing one session would race each other's operation
+    // context). Login state is per-TOKEN not per-session (verified
+    // against `ffi.rs::C_Login` — `token.login_state` lives in
+    // `TOKEN_STORE` keyed by slot), so a worker session on an already-
+    // logged-in tenant slot needs no separate login; and
+    // `can_access_object` gates by slot, not by creating session, so
+    // every worker can use its tenant's key material without
+    // regenerating it.
+    //
+    // Grouped by tenant (not pooled across all threads into one row per
+    // op, as this used to be) so each tenant's own throughput is its own
+    // real, separate measurement — telemetry plan §2.2: pooling silently
+    // averaged away exactly the per-tenant fairness/contention question
+    // a shared-vs-independent-topology benchmark exists to answer. An
+    // odd `--threads` value gives one tenant one more worker than the
+    // other (`⌈N/2⌉` vs `⌊N/2⌋`) — a real property of the run, now
+    // visible as different `total_ops` between the two tenants' rows at
+    // the same `threads` value, not hidden inside a pooled average. ────
     let tenants = [&alice, &bob];
-    let mut worker_sessions: Vec<(CK_SESSION_HANDLE, usize)> = Vec::new();
+    let mut worker_sessions_by_tenant: Vec<Vec<CK_SESSION_HANDLE>> = vec![Vec::new(); tenants.len()];
     for w in 0..cli.threads {
         let tenant_idx = (w as usize) % tenants.len();
         let session = engine.open_session(tenants[tenant_idx].slot).with_context(|| format!("C_OpenSession (worker {w})"))?;
-        worker_sessions.push((session, tenant_idx));
+        worker_sessions_by_tenant[tenant_idx].push(session);
     }
-    eprintln!("[ok] {} worker sessions opened across {} tenants", worker_sessions.len(), tenants.len());
+    eprintln!(
+        "[ok] {} worker sessions opened across {} tenants ({} / {} split)",
+        cli.threads, tenants.len(), worker_sessions_by_tenant[0].len(), worker_sessions_by_tenant[1].len()
+    );
 
     let engine = Arc::new(engine);
     let engine_version = engine.library_version().context("C_GetInfo")?;
-    let common = |op: &'static str, category: &'static str, algorithm: &'static str, security_level: &'static str, total_ops: u64, latencies_ms: Vec<f64>, duration_s: f64| {
+    let common = |op: &'static str, category: &'static str, algorithm: &'static str, security_level: &'static str, tenant_index: u32, slot: u64, total_ops: u64, latencies_ms: Vec<f64>, duration_s: f64| {
         let (p50_ms, p99_ms) = measure::percentiles_ms(latencies_ms);
         measure::ResultRow {
             access_path: "pkcs11-direct",
@@ -480,6 +532,8 @@ fn run_instance(cli: &Cli) -> Result<()> {
             instances: topology_instances,
             instance_id: this_instance_id,
             tenants: tenants.len() as u32,
+            tenant_index,
+            slot,
             threads: cli.threads,
             category, algorithm, security_level, op,
             ops_per_sec: total_ops as f64 / duration_s,
@@ -488,125 +542,146 @@ fn run_instance(cli: &Cli) -> Result<()> {
         }
     };
     let stdout = std::io::stdout();
-    let emit = |op: &'static str, category: &'static str, algorithm: &'static str, security_level: &'static str, total_ops: u64, latencies_ms: Vec<f64>, duration_s: f64| -> Result<()> {
-        let row = common(op, category, algorithm, security_level, total_ops, latencies_ms, duration_s);
-        eprintln!("[ok] measured {}/{}: {:.0} ops/sec over {:.2}s ({} ops)", row.algorithm, row.op, row.ops_per_sec, row.duration_s, row.total_ops);
+    #[allow(clippy::too_many_arguments)]
+    let emit = |op: &'static str, category: &'static str, algorithm: &'static str, security_level: &'static str, tenant_index: u32, slot: u64, total_ops: u64, latencies_ms: Vec<f64>, duration_s: f64| -> Result<()> {
+        let row = common(op, category, algorithm, security_level, tenant_index, slot, total_ops, latencies_ms, duration_s);
+        eprintln!("[ok] measured {}/{} (tenant {} slot {}): {:.0} ops/sec over {:.2}s ({} ops)", row.algorithm, row.op, row.tenant_index, row.slot, row.ops_per_sec, row.duration_s, row.total_ops);
         serde_json::to_writer(&stdout, &row)?;
         println!();
         Ok(())
     };
 
-    // keygen — one real sample per tenant (2 total), NOT a hot loop:
-    // these are the SAME `C_GenerateKeyPair` calls `provision_tenant`
-    // already had to make, timed in place — no extra calls made just to
+    // keygen — one real sample per tenant, NOT a hot loop: this is the
+    // SAME `C_GenerateKeyPair` call `provision_tenant` already had to
+    // make for that tenant, timed in place — no extra calls made just to
     // produce this row, and every sign/verify/derive/encapsulate/
     // decapsulate closure below still excludes keygen entirely (§A7).
-    // `duration_s` here is the sum of the 2 real samples' wall-clock
-    // time, not a fixed measurement window like the other rows.
-    let emit_keygen = |category: &'static str, name: &'static str, security_level: &'static str| -> Result<()> {
-        let latencies_ms = vec![alice_keygen_ms[name], bob_keygen_ms[name]];
-        let duration_s = (latencies_ms.iter().sum::<f64>() / 1000.0).max(1e-9);
-        emit("keygen", category, name, security_level, latencies_ms.len() as u64, latencies_ms, duration_s)
+    // One row per tenant now (previously one row pooling both tenants'
+    // 2 samples together) — matches the per-tenant model the rest of
+    // this loop uses, and is more natural besides: each tenant's own
+    // real keygen sample stands on its own instead of being averaged
+    // with a different tenant's.
+    let emit_keygen = |category: &'static str, name: &'static str, security_level: &'static str, tenant_index: u32, slot: u64, latency_ms: f64| -> Result<()> {
+        let duration_s = (latency_ms / 1000.0).max(1e-9);
+        emit("keygen", category, name, security_level, tenant_index, slot, 1, vec![latency_ms], duration_s)
     };
     for algo in &sig_algos {
-        emit_keygen("signature", algo.name, algo.security_level)?;
+        emit_keygen("signature", algo.name, algo.security_level, 0, alice.slot as u64, alice_keygen_ms[algo.name])?;
+        emit_keygen("signature", algo.name, algo.security_level, 1, bob.slot as u64, bob_keygen_ms[algo.name])?;
     }
     for algo in &kex_algos {
-        emit_keygen("key_establishment", algo.name, algo.security_level)?;
+        emit_keygen("key_establishment", algo.name, algo.security_level, 0, alice.slot as u64, alice_keygen_ms[algo.name])?;
+        emit_keygen("key_establishment", algo.name, algo.security_level, 1, bob.slot as u64, bob_keygen_ms[algo.name])?;
     }
     for algo in &kem_algos {
-        emit_keygen("key_establishment", algo.name, algo.security_level)?;
+        emit_keygen("key_establishment", algo.name, algo.security_level, 0, alice.slot as u64, alice_keygen_ms[algo.name])?;
+        emit_keygen("key_establishment", algo.name, algo.security_level, 1, bob.slot as u64, bob_keygen_ms[algo.name])?;
     }
 
-    // sign + verify, every signature algorithm
+    // sign + verify, every signature algorithm, per tenant
     for algo in &sig_algos {
-        {
-            let workers: Vec<_> = worker_sessions.iter().map(|&(session, idx)| {
-                let engine = Arc::clone(&engine);
-                let priv_handle = tenants[idx].sig[algo.name].priv_handle;
-                let mechanism = algo.sign_mechanism;
-                let message = format!("hsm-perf-bench measured sign {} — tenant {idx}", algo.name).into_bytes();
-                move || -> Result<()> {
-                    engine.sign_init(session, mechanism, priv_handle)?;
-                    engine.sign(session, &message)?;
-                    Ok(())
-                }
-            }).collect();
-            let (total_ops, latencies_ms, duration_s) = measure::run_point(cli.duration_secs, cli.warmup_secs, workers)?;
-            emit("sign", "signature", algo.name, algo.security_level, total_ops, latencies_ms, duration_s)?;
-        }
-        // verify — each worker signs ONE message once (setup, unmeasured)
-        // then the timed loop repeatedly verifies that same signature,
-        // exercising the real C_VerifyInit/C_Verify path only.
-        {
-            let workers: Vec<_> = worker_sessions.iter().map(|&(session, idx)| {
-                let engine = Arc::clone(&engine);
-                let material = &tenants[idx].sig[algo.name];
-                let (priv_handle, pub_handle) = (material.priv_handle, material.pub_handle);
-                let mechanism = algo.sign_mechanism;
-                let message = format!("hsm-perf-bench measured verify {} — tenant {idx}", algo.name).into_bytes();
-                engine.sign_init(session, mechanism, priv_handle)?;
-                let signature = engine.sign(session, &message)?;
-                Ok::<_, anyhow::Error>(move || -> Result<()> {
-                    engine.verify_init(session, mechanism, pub_handle)?;
-                    engine.verify(session, &message, &signature)?;
-                    Ok(())
-                })
-            }).collect::<Result<Vec<_>>>()?;
-            let (total_ops, latencies_ms, duration_s) = measure::run_point(cli.duration_secs, cli.warmup_secs, workers)?;
-            emit("verify", "signature", algo.name, algo.security_level, total_ops, latencies_ms, duration_s)?;
-        }
-    }
-
-    // derive, every key-agreement algorithm
-    for algo in &kex_algos {
-        let workers: Vec<_> = worker_sessions.iter().map(|&(session, idx)| {
-            let engine = Arc::clone(&engine);
-            let priv_handle = tenants[idx].kex[algo.name].priv_handle;
-            let mut peer_point = tenants[idx].kex[algo.name].peer_point.clone();
-            move || -> Result<()> {
-                engine.ecdh1_derive(session, priv_handle, &mut peer_point)?;
-                Ok(())
+        for (tenant_index, tenant) in tenants.iter().enumerate() {
+            let tenant_index = tenant_index as u32;
+            let slot = tenant.slot as u64;
+            {
+                let workers: Vec<_> = worker_sessions_by_tenant[tenant_index as usize].iter().map(|&session| {
+                    let engine = Arc::clone(&engine);
+                    let priv_handle = tenant.sig[algo.name].priv_handle;
+                    let mechanism = algo.sign_mechanism;
+                    let message = format!("hsm-perf-bench measured sign {} — tenant {tenant_index}", algo.name).into_bytes();
+                    move || -> Result<()> {
+                        engine.sign_init(session, mechanism, priv_handle)?;
+                        engine.sign(session, &message)?;
+                        Ok(())
+                    }
+                }).collect();
+                let (total_ops, latencies_ms, duration_s) = measure::run_point(cli.duration_secs, cli.warmup_secs, workers)?;
+                emit("sign", "signature", algo.name, algo.security_level, tenant_index, slot, total_ops, latencies_ms, duration_s)?;
             }
-        }).collect();
-        let (total_ops, latencies_ms, duration_s) = measure::run_point(cli.duration_secs, cli.warmup_secs, workers)?;
-        emit("derive", "key_establishment", algo.name, algo.security_level, total_ops, latencies_ms, duration_s)?;
+            // verify — each worker signs ONE message once (setup,
+            // unmeasured) then the timed loop repeatedly verifies that
+            // same signature, exercising the real C_VerifyInit/C_Verify
+            // path only.
+            {
+                let workers: Vec<_> = worker_sessions_by_tenant[tenant_index as usize].iter().map(|&session| {
+                    let engine = Arc::clone(&engine);
+                    let material = &tenant.sig[algo.name];
+                    let (priv_handle, pub_handle) = (material.priv_handle, material.pub_handle);
+                    let mechanism = algo.sign_mechanism;
+                    let message = format!("hsm-perf-bench measured verify {} — tenant {tenant_index}", algo.name).into_bytes();
+                    engine.sign_init(session, mechanism, priv_handle)?;
+                    let signature = engine.sign(session, &message)?;
+                    Ok::<_, anyhow::Error>(move || -> Result<()> {
+                        engine.verify_init(session, mechanism, pub_handle)?;
+                        engine.verify(session, &message, &signature)?;
+                        Ok(())
+                    })
+                }).collect::<Result<Vec<_>>>()?;
+                let (total_ops, latencies_ms, duration_s) = measure::run_point(cli.duration_secs, cli.warmup_secs, workers)?;
+                emit("verify", "signature", algo.name, algo.security_level, tenant_index, slot, total_ops, latencies_ms, duration_s)?;
+            }
+        }
     }
 
-    // encapsulate + decapsulate, every KEM
+    // derive, every key-agreement algorithm, per tenant
+    for algo in &kex_algos {
+        for (tenant_index, tenant) in tenants.iter().enumerate() {
+            let tenant_index = tenant_index as u32;
+            let slot = tenant.slot as u64;
+            let workers: Vec<_> = worker_sessions_by_tenant[tenant_index as usize].iter().map(|&session| {
+                let engine = Arc::clone(&engine);
+                let priv_handle = tenant.kex[algo.name].priv_handle;
+                let mut peer_point = tenant.kex[algo.name].peer_point.clone();
+                move || -> Result<()> {
+                    engine.ecdh1_derive(session, priv_handle, &mut peer_point)?;
+                    Ok(())
+                }
+            }).collect();
+            let (total_ops, latencies_ms, duration_s) = measure::run_point(cli.duration_secs, cli.warmup_secs, workers)?;
+            emit("derive", "key_establishment", algo.name, algo.security_level, tenant_index, slot, total_ops, latencies_ms, duration_s)?;
+        }
+    }
+
+    // encapsulate + decapsulate, every KEM, per tenant
     for algo in &kem_algos {
-        {
-            let workers: Vec<_> = worker_sessions.iter().map(|&(session, idx)| {
-                let engine = Arc::clone(&engine);
-                let kem_pub = tenants[idx].kem[algo.name].pub_handle;
-                let mechanism = algo.kem_mechanism;
-                move || -> Result<()> {
-                    engine.encapsulate_key(session, mechanism, kem_pub, &mut [])?;
-                    Ok(())
-                }
-            }).collect();
-            let (total_ops, latencies_ms, duration_s) = measure::run_point(cli.duration_secs, cli.warmup_secs, workers)?;
-            emit("encapsulate", "key_establishment", algo.name, algo.security_level, total_ops, latencies_ms, duration_s)?;
-        }
-        {
-            let workers: Vec<_> = worker_sessions.iter().map(|&(session, idx)| {
-                let engine = Arc::clone(&engine);
-                let material = &tenants[idx].kem[algo.name];
-                let kem_priv = material.priv_handle;
-                let ciphertext = material.ciphertext.clone();
-                let mechanism = algo.kem_mechanism;
-                move || -> Result<()> {
-                    engine.decapsulate_key(session, mechanism, kem_priv, &ciphertext, &mut [])?;
-                    Ok(())
-                }
-            }).collect();
-            let (total_ops, latencies_ms, duration_s) = measure::run_point(cli.duration_secs, cli.warmup_secs, workers)?;
-            emit("decapsulate", "key_establishment", algo.name, algo.security_level, total_ops, latencies_ms, duration_s)?;
+        for (tenant_index, tenant) in tenants.iter().enumerate() {
+            let tenant_index = tenant_index as u32;
+            let slot = tenant.slot as u64;
+            {
+                let workers: Vec<_> = worker_sessions_by_tenant[tenant_index as usize].iter().map(|&session| {
+                    let engine = Arc::clone(&engine);
+                    let kem_pub = tenant.kem[algo.name].pub_handle;
+                    let mechanism = algo.kem_mechanism;
+                    move || -> Result<()> {
+                        engine.encapsulate_key(session, mechanism, kem_pub, &mut [])?;
+                        Ok(())
+                    }
+                }).collect();
+                let (total_ops, latencies_ms, duration_s) = measure::run_point(cli.duration_secs, cli.warmup_secs, workers)?;
+                emit("encapsulate", "key_establishment", algo.name, algo.security_level, tenant_index, slot, total_ops, latencies_ms, duration_s)?;
+            }
+            {
+                let workers: Vec<_> = worker_sessions_by_tenant[tenant_index as usize].iter().map(|&session| {
+                    let engine = Arc::clone(&engine);
+                    let material = &tenant.kem[algo.name];
+                    let kem_priv = material.priv_handle;
+                    let ciphertext = material.ciphertext.clone();
+                    let mechanism = algo.kem_mechanism;
+                    move || -> Result<()> {
+                        engine.decapsulate_key(session, mechanism, kem_priv, &ciphertext, &mut [])?;
+                        Ok(())
+                    }
+                }).collect();
+                let (total_ops, latencies_ms, duration_s) = measure::run_point(cli.duration_secs, cli.warmup_secs, workers)?;
+                emit("decapsulate", "key_establishment", algo.name, algo.security_level, tenant_index, slot, total_ops, latencies_ms, duration_s)?;
+            }
         }
     }
 
-    for (session, _) in worker_sessions {
-        engine.close_session(session).context("C_CloseSession (worker)")?;
+    for sessions in worker_sessions_by_tenant {
+        for session in sessions {
+            engine.close_session(session).context("C_CloseSession (worker)")?;
+        }
     }
     engine.close_session(alice.session).context("C_CloseSession (alice)")?;
     engine.close_session(bob.session).context("C_CloseSession (bob)")?;
