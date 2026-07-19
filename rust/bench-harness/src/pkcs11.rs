@@ -162,6 +162,17 @@ impl Engine {
         ck(unsafe { (self.funcs().C_Finalize)(std::ptr::null_mut()) }, "C_Finalize")
     }
 
+    /// §5.4 `C_GetInfo` — `libraryVersion` as `"major.minor"`. Stamped on
+    /// every JSONL result row (plan §A7 honesty item: "engine version...
+    /// stamped on every result set") so before/after engine-side changes
+    /// (e.g. the F2–F5 lock-collapse gate) are distinguishable in the data,
+    /// not just asserted in a commit message.
+    pub fn library_version(&self) -> Result<String> {
+        let mut info: softhsmrustv3::ck_abi::CK_INFO = unsafe { std::mem::zeroed() };
+        ck(unsafe { (self.funcs().C_GetInfo)(&mut info) }, "C_GetInfo")?;
+        Ok(format!("{}.{}", info.libraryVersion.major, info.libraryVersion.minor))
+    }
+
     /// §5.5 two-call convention: query the count, allocate, fill.
     /// Per this engine's own `C_GetSlotList` (mirroring real SoftHSM):
     /// if every existing slot already has an initialized token, the call
