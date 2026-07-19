@@ -36,9 +36,11 @@ mod tests {
     use crate::dispatcher::{dispatch_with_transport_identity, one_off_request};
     use crate::error::ResultReason;
     use crate::kmip30::{
-        ActivateRequest, Attribute, CreateKeyPairRequest, CreateRequest, DecryptRequest,
-        EncryptRequest, GetAttributesRequest, KmipAlgorithm, ObjectType, RequestPayload,
-        ResponsePayload, ResultStatus, SignRequest, UsageMask,
+        ActivateRequest, AsynchronousIndicator, Attribute, CreateKeyPairRequest, CreateRequest,
+        CryptographicParameters, DecryptRequest, EncryptRequest, GetAttributesRequest,
+        HashRequest, HashingAlgorithm, KmipAlgorithm, ObjectType, PollRequest,
+        QueryAsynchronousRequestsRequest, RequestBatchItem, RequestHeader, RequestMessage,
+        RequestPayload, ResponsePayload, ResultStatus, SignRequest, UsageMask,
     };
     use crate::ops::deps::{Deps, DepsConfig, StrictTenantConfig, TenancyMode};
     use crate::ops::helpers::engine_lock;
@@ -786,6 +788,172 @@ mod tests {
             ResultStatus::Success,
             "Alice can add an attribute to her own key: {:?}",
             alice_add_resp.batch_items[0].result_reason
+        );
+    }
+
+    /// §F7.5 (async_jobs owner-scoped) — the sharpest edge: `Poll`
+    /// returns the deferred operation's FULL response payload, so a
+    /// foreign tenant Polling another's async correlation value would
+    /// receive that tenant's result (for a deferred Get/Export/Decrypt,
+    /// key material). Bob can neither Poll nor see (via
+    /// QueryAsynchronousRequests) Alice's async job; Alice's own Poll
+    /// works. Driven through the real dispatcher with a Mandatory-async
+    /// Hash — the correlation values are monotonic/predictable, so this
+    /// is a real guess-the-CV attack, not a theoretical one.
+    #[test]
+    fn cross_tenant_async_poll_and_query_are_owner_scoped() {
+        let _guard = engine_lock();
+        let alice = Identity { username: "alice-async".into() };
+        let bob = Identity { username: "bob-async".into() };
+        let sink: Arc<dyn crate::auditlog::AuditSink> = Arc::new(RingSink::new(64));
+        let deps = Deps::new(Engine::permissive(), Arc::new(MemoryStore::new()), sink, DepsConfig::default());
+
+        // A Mandatory-async Hash enqueues a real job (Hash is
+        // async-eligible) and returns OperationPending + a correlation
+        // value, per §8.1.2.
+        let async_hash = || {
+            let payload = RequestPayload::Hash(HashRequest {
+                cryptographic_parameters: CryptographicParameters {
+                    hashing_algorithm: Some(HashingAlgorithm::Sha256),
+                    ..Default::default()
+                },
+                data: b"defer me".to_vec(),
+            });
+            RequestMessage {
+                header: RequestHeader {
+                    asynchronous_indicator: Some(AsynchronousIndicator::Mandatory),
+                    ..RequestHeader::v3()
+                },
+                batch_items: vec![RequestBatchItem {
+                    operation: payload.operation(),
+                    payload,
+                }],
+            }
+        };
+
+        let alice_enqueue = dispatch_with_transport_identity(&deps, async_hash(), Some(alice.clone()));
+        assert_eq!(
+            alice_enqueue.batch_items[0].result_status,
+            ResultStatus::OperationPending,
+            "Mandatory-async Hash enqueues: {:?}",
+            alice_enqueue.batch_items[0].result_reason
+        );
+        let alice_cv = alice_enqueue.batch_items[0]
+            .asynchronous_correlation_value
+            .clone()
+            .expect("async job returns a correlation value");
+
+        let poll = |cv: &[u8]| {
+            one_off_request(RequestPayload::Poll(PollRequest {
+                asynchronous_correlation_value: cv.to_vec(),
+            }))
+        };
+
+        // Bob polls Alice's correlation value — MUST fail as an invalid
+        // correlation value, indistinguishable from a nonexistent one
+        // (anti-oracle). This is what stops him reading her deferred
+        // result.
+        let bob_poll = dispatch_with_transport_identity(&deps, poll(&alice_cv), Some(bob.clone()));
+        assert_eq!(
+            bob_poll.batch_items[0].result_status,
+            ResultStatus::OperationFailed,
+            "Bob must NOT be able to Poll Alice's async job"
+        );
+        assert_eq!(
+            bob_poll.batch_items[0].result_reason,
+            Some(ResultReason::InvalidAsynchronousCorrelationValue.to_wire_value()),
+            "cross-tenant Poll fails as InvalidAsynchronousCorrelationValue — same as a \
+             genuinely unknown correlation value"
+        );
+
+        // Bob's QueryAsynchronousRequests must not list Alice's job.
+        let bob_query = dispatch_with_transport_identity(
+            &deps,
+            one_off_request(RequestPayload::QueryAsynchronousRequests(
+                QueryAsynchronousRequestsRequest::default(),
+            )),
+            Some(bob),
+        );
+        let ResponsePayload::QueryAsynchronousRequests(bob_jobs) =
+            bob_query.batch_items[0].payload.clone().unwrap()
+        else {
+            panic!("expected QueryAsynchronousRequests response");
+        };
+        assert!(
+            bob_jobs.requests.iter().all(|r| r.asynchronous_correlation_value != alice_cv),
+            "Bob must NOT see Alice's job in his async-request listing"
+        );
+
+        // Alice polls her own job — succeeds (the job may still be
+        // pending or already complete; either is a Poll SUCCESS-shape
+        // for HER, never the InvalidAsynchronousCorrelationValue Bob
+        // got). The owner check is a real gate, not a blanket deny.
+        let alice_poll = dispatch_with_transport_identity(&deps, poll(&alice_cv), Some(alice));
+        assert_ne!(
+            alice_poll.batch_items[0].result_reason,
+            Some(ResultReason::InvalidAsynchronousCorrelationValue.to_wire_value()),
+            "Alice's own Poll must NOT be rejected as an invalid correlation value: {:?}",
+            alice_poll.batch_items[0].result_status
+        );
+    }
+
+    /// §F7.5 (object_defaults per-tenant) — one tenant's Set Defaults
+    /// affects only its own factory operations. Alice sets a default
+    /// Name for SymmetricKey; her later Create picks it up, Bob's does
+    /// not. Store-backed (no engine session): Create with no session
+    /// still persists a record with the merged template, so the applied
+    /// default is observable on the stored object.
+    #[test]
+    fn set_defaults_is_per_tenant() {
+        let _guard = engine_lock();
+        let alice = Identity { username: "alice-defaults".into() };
+        let bob = Identity { username: "bob-defaults".into() };
+        let sink: Arc<dyn crate::auditlog::AuditSink> = Arc::new(RingSink::new(64));
+        let deps = Deps::new(Engine::permissive(), Arc::new(MemoryStore::new()), sink, DepsConfig::default());
+
+        // Alice sets a per-Object-Type default Name for symmetric keys.
+        let set_req = one_off_request(RequestPayload::SetDefaults(crate::kmip30::SetDefaultsRequest {
+            defaults_information: Some(vec![crate::kmip30::ObjectDefaults {
+                object_types: vec![ObjectType::SymmetricKey],
+                attributes: vec![Attribute::Name("alice-default-name".into())],
+            }]),
+        }));
+        let set_resp = dispatch_with_transport_identity(&deps, set_req, Some(alice.clone()));
+        assert_eq!(set_resp.batch_items[0].result_status, ResultStatus::Success);
+
+        let create_aes = || {
+            one_off_request(RequestPayload::Create(CreateRequest {
+                object_type: ObjectType::SymmetricKey,
+                template_attribute: vec![
+                    Attribute::CryptographicAlgorithm(KmipAlgorithm::Aes),
+                    Attribute::CryptographicLength(256),
+                    Attribute::CryptographicUsageMask(UsageMask::ENCRYPT | UsageMask::DECRYPT),
+                ],
+            }))
+        };
+
+        // Alice's Create inherits her default Name.
+        let alice_create = dispatch_with_transport_identity(&deps, create_aes(), Some(alice));
+        let ResponsePayload::Create(alice_obj) = alice_create.batch_items[0].payload.clone().unwrap() else {
+            panic!("expected Create response");
+        };
+        let alice_rec = deps.store.get(&alice_obj.uid).unwrap().unwrap();
+        assert_eq!(
+            alice_rec.name.as_deref(),
+            Some("alice-default-name"),
+            "Alice's Create must inherit her own Set Defaults Name"
+        );
+
+        // Bob's Create — same request, but he set no defaults — gets no
+        // Name (Alice's default is invisible to him).
+        let bob_create = dispatch_with_transport_identity(&deps, create_aes(), Some(bob));
+        let ResponsePayload::Create(bob_obj) = bob_create.batch_items[0].payload.clone().unwrap() else {
+            panic!("expected Create response");
+        };
+        let bob_rec = deps.store.get(&bob_obj.uid).unwrap().unwrap();
+        assert_eq!(
+            bob_rec.name, None,
+            "Bob must NOT inherit Alice's per-tenant default"
         );
     }
 }

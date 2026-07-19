@@ -452,7 +452,7 @@ fn dispatch_one(
     // synchronously"), which `handle_payload`'s uniform per-op wrapping
     // can't express. Handled first and returns early.
     if let RequestPayload::Poll(req) = &payload {
-        return handle_poll(deps, req);
+        return handle_poll(deps, req, auth);
     }
 
     // Async subsystem — KMIP 3.0 §8.1.2 `Asynchronous Indicator =
@@ -576,7 +576,10 @@ fn enqueue_async_job(
     auth: crate::server::auth::AuthContext,
 ) -> ResponseBatchItem {
     let cv = deps.new_correlation_value();
-    let job = crate::ops::AsyncJob::new(op);
+    // Part F §F7.5 — stamp the submitting tenant so Poll/Cancel/Process/
+    // QueryAsyncRequests can scope this job to its owner.
+    let owner = auth.identity.as_ref().map(|i| i.username.clone());
+    let job = crate::ops::AsyncJob::new(op, owner);
     deps.async_jobs
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -682,12 +685,23 @@ fn run_async_job_eagerly(
 ///   sent if the operation had completed synchronously" (§6.1.43):
 ///   echoes the ORIGINAL polled operation + its real outcome, exactly
 ///   as `dispatch_one`'s normal Success/Failed wrapping would have.
-fn handle_poll(deps: &Deps, req: &crate::kmip30::PollRequest) -> ResponseBatchItem {
+fn handle_poll(
+    deps: &Deps,
+    req: &crate::kmip30::PollRequest,
+    auth: &crate::server::auth::AuthContext,
+) -> ResponseBatchItem {
     use crate::kmip30::{Operation, ProcessingStage};
+    let requester = auth.identity.as_ref().map(|i| i.username.clone());
     let job = {
         let jobs = deps.async_jobs.lock().unwrap_or_else(|e| e.into_inner());
         jobs.get(&req.asynchronous_correlation_value).cloned()
     };
+    // Part F §F7.5 — a job owned by a different tenant is indistinguishable
+    // from a nonexistent one (anti-oracle): same `Invalid Asynchronous
+    // Correlation Value` a genuinely unknown CV produces. This is the
+    // load-bearing check — Poll below returns the deferred op's full
+    // payload, which for a deferred Get/Export/Decrypt is key material.
+    let job = job.filter(|j| j.state.lock().unwrap_or_else(|e| e.into_inner()).owner == requester);
     let Some(job) = job else {
         let err = KmipError::invalid_asynchronous_correlation_value();
         return ResponseBatchItem {
@@ -1032,7 +1046,7 @@ fn handle_payload(
             ResponsePayload::SetConstraints(set_constraints(deps, r, correlation_id)?)
         }
         RequestPayload::SetDefaults(r) => {
-            ResponsePayload::SetDefaults(set_defaults(deps, r, correlation_id)?)
+            ResponsePayload::SetDefaults(set_defaults(deps, r, auth, correlation_id)?)
         }
         RequestPayload::SetEndpointRole(r) => {
             ResponsePayload::SetEndpointRole(set_endpoint_role(deps, r, correlation_id)?)
@@ -1055,10 +1069,10 @@ fn handle_payload(
                 "Poll must be intercepted by dispatch_one before handle_payload",
             ));
         }
-        RequestPayload::Cancel(r) => ResponsePayload::Cancel(cancel(deps, r, correlation_id)?),
-        RequestPayload::Process(r) => ResponsePayload::Process(process(deps, r, correlation_id)?),
+        RequestPayload::Cancel(r) => ResponsePayload::Cancel(cancel(deps, r, auth, correlation_id)?),
+        RequestPayload::Process(r) => ResponsePayload::Process(process(deps, r, auth, correlation_id)?),
         RequestPayload::QueryAsynchronousRequests(r) => ResponsePayload::QueryAsynchronousRequests(
-            query_asynchronous_requests(deps, r, correlation_id)?,
+            query_asynchronous_requests(deps, r, auth, correlation_id)?,
         ),
     })
 }

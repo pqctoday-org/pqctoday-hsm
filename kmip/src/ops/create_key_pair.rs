@@ -82,12 +82,14 @@ pub fn create_key_pair(
         ObjectType::PrivateKey,
         &req.common_attributes,
         &mut req.private_key_attributes,
+        auth,
     );
     super::allocation_and_config::apply_object_defaults(
         deps,
         ObjectType::PublicKey,
         &req.common_attributes,
         &mut req.public_key_attributes,
+        auth,
     );
 
     // KMIP 3.0 Spec §6.1.10 CreateKeyPair — three distinct attribute

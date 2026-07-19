@@ -91,6 +91,7 @@ pub fn register(
         req.object_type,
         &[],
         &mut req.attributes,
+        auth,
     );
 
     // Per §6.1.48 Table 395: if the object is cryptographic, certain

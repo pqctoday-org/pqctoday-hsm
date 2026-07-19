@@ -197,7 +197,7 @@ pub fn encrypt(
     // stream, `Correlation Value` chains parts, `Final Indicator`
     // closes it (emitting the AEAD tag). CS-BC-M-GCM-3 pins this flow.
     let resp = if req.init_indicator == Some(true) || req.correlation_value.is_some() {
-        encrypt_streaming(deps, &req, &obj, correlation_id)
+        encrypt_streaming(deps, &req, &obj, auth, correlation_id)
     } else if is_ml_kem(obj.algorithm) {
         // Plane-3: branch on algorithm.
         encrypt_ml_kem(deps, &req, &obj, auth, correlation_id)
@@ -264,6 +264,7 @@ fn encrypt_streaming(
     deps: &Deps,
     req: &EncryptRequest,
     obj: &crate::store::ObjectRecord,
+    auth: &crate::server::auth::AuthContext,
     correlation_id: &str,
 ) -> Result<EncryptResponse> {
     use softhsmrustv3::crypto::multipart::{
@@ -350,7 +351,12 @@ fn encrypt_streaming(
         let cv = deps.new_correlation_value();
         deps.streams.lock().unwrap().insert(
             cv.clone(),
-            StreamCtx { cipher, uid: req.uid.clone() },
+            StreamCtx {
+                cipher,
+                uid: req.uid.clone(),
+                // Part F §F7.5 — tag the opening tenant (see StreamCtx).
+                owner: auth.identity.as_ref().map(|i| i.username.clone()),
+            },
         );
         return Ok(EncryptResponse {
             uid: req.uid.clone(),
@@ -366,6 +372,16 @@ fn encrypt_streaming(
     let mut ctx = streams.remove(cv).ok_or_else(|| {
         fail_err(deps, correlation_id, "Encrypt", invalid("unknown-correlation-value"))
     })?;
+    // Part F §F7.5 — a continuation from a different tenant is treated as
+    // an unknown correlation value (anti-oracle), not a distinct error.
+    // NB: `ctx` was already removed above, so on this reject path we must
+    // put it back or a foreign continuation would DESTROY the owner's
+    // in-flight stream — restore it before failing.
+    if ctx.owner != auth.identity.as_ref().map(|i| i.username.clone()) {
+        streams.insert(cv.clone(), ctx);
+        return Err(fail_err(deps, correlation_id, "Encrypt",
+            invalid("unknown-correlation-value")));
+    }
     if ctx.uid != req.uid {
         return Err(fail_err(deps, correlation_id, "Encrypt",
             invalid("correlation-value/uid mismatch")));

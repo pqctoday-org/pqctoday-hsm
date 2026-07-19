@@ -208,6 +208,7 @@ pub fn derive_key(
         req.object_type,
         &[],
         &mut req.template_attribute,
+        auth,
     );
     let x = super::register_import_export::extract_attrs(&req.template_attribute);
 

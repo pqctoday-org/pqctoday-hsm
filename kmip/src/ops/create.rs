@@ -71,6 +71,7 @@ pub fn create(
         req.object_type,
         &[],
         &mut req.template_attribute,
+        auth,
     );
 
     let (algorithm_in, algo_enum, key_length, usage_mask) = extract_template(&req.template_attribute);

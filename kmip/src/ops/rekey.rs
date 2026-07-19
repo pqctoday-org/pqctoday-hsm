@@ -954,7 +954,7 @@ mod tests {
                     Attribute::CryptographicUsageMask(UsageMask::EXPORT),
                 ],
             }]),
-        }, "c").unwrap();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap();
         put_aes(&d, "orig", State::Active);
         let resp = rekey(&d, ReKeyRequest {
             uid: "orig".into(), offset: None, template_attribute: vec![],

@@ -28,6 +28,13 @@ pub struct StreamCtx {
     /// UID the stream was initialised against — §6.1.21 requires every
     /// part to target the same key.
     pub uid: String,
+    /// Part F §F7.5 — the tenant that opened this stream. A continuation
+    /// part from a different identity is rejected as an unknown
+    /// correlation value (anti-oracle), even though the entry-level
+    /// owner check on the stream's `uid` already blocks the direct
+    /// cross-tenant path — this makes the stream map self-defending
+    /// rather than relying on that distant check.
+    pub owner: Option<String>,
 }
 
 /// Phase 4 — mutable state of one server-tracked asynchronous job
@@ -42,6 +49,16 @@ pub struct AsyncJobState {
     /// the async subsystem changes *when* the client learns the
     /// result, never *what* the result is.
     pub outcome: Option<crate::error::Result<crate::kmip30::ResponsePayload>>,
+    /// Part F §F7.5 — the tenant that submitted this job. `Poll` returns
+    /// the deferred operation's FULL response payload (which for a
+    /// deferred `Get`/`Export`/`Decrypt` is key material), so
+    /// Poll/Cancel/Process must reject a foreign tenant's correlation
+    /// value as the same `Invalid Asynchronous Correlation Value` a
+    /// genuinely unknown one produces, and `QueryAsynchronousRequests`
+    /// must list only the caller's own jobs. Without this, a tenant
+    /// could Poll another tenant's deferred material by guessing its
+    /// (monotonic, predictable) correlation value.
+    pub owner: Option<String>,
 }
 
 /// One server-tracked async job (§6.1.43 Poll / §6.1.5 Cancel / §6.1.44
@@ -59,13 +76,14 @@ pub struct AsyncJob {
 }
 
 impl AsyncJob {
-    pub fn new(operation: crate::kmip30::Operation) -> Arc<Self> {
+    pub fn new(operation: crate::kmip30::Operation, owner: Option<String>) -> Arc<Self> {
         Arc::new(Self {
             state: Mutex::new(AsyncJobState {
                 operation,
                 stage: crate::kmip30::ProcessingStage::Submitted,
                 submitted_at: time::OffsetDateTime::now_utc(),
                 outcome: None,
+                owner,
             }),
             done: Condvar::new(),
         })
@@ -371,8 +389,15 @@ pub struct Deps {
     /// template > Set Defaults > server hardcoded). In-memory only —
     /// server-config state, not a managed object, so it is not
     /// persisted in the object store and is reset on restart.
-    pub object_defaults:
-        Mutex<HashMap<crate::kmip30::ObjectType, Vec<crate::kmip30::Attribute>>>,
+    ///
+    /// Part F §F7.5 — PER-TENANT: the outer key is the setting tenant's
+    /// identity (`None` = the `Single`-mode / anonymous bucket). One
+    /// tenant's `Set Defaults` only affects its own factory operations,
+    /// matching the isolation model of every managed object — a tenant
+    /// can't silently change another tenant's key-generation defaults.
+    pub object_defaults: Mutex<
+        HashMap<Option<String>, HashMap<crate::kmip30::ObjectType, Vec<crate::kmip30::Attribute>>>,
+    >,
     /// Phase 3.2 — client-set §6.1.57 Constraints, replacing the
     /// engine-bounds default `Get Constraints` (§6.1.26) otherwise
     /// reports. `None` ⇒ no client override yet; `get_constraints`

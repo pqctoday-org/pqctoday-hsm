@@ -739,6 +739,7 @@ fn set_defaults_inherited_by_create_unless_client_overrides() {
                 attributes: vec![Attribute::Name("server-default-name".into())],
             }]),
         },
+        &AuthContext::open(),
         "sd-set",
     )
     .unwrap();
