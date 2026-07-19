@@ -25,7 +25,8 @@ use softhsmrustv3::ck_abi::{
     CK_VERSION, CK_VOID_PTR,
 };
 use softhsmrustv3::constants::{
-    CKA_EC_PARAMS, CKA_PARAMETER_SET, CKF_RW_SESSION, CKF_SERIAL_SESSION, CKR_OK, CKU_SO, CKU_USER,
+    CKA_EC_PARAMS, CKA_MODULUS_BITS, CKA_PARAMETER_SET, CKF_RW_SESSION, CKF_SERIAL_SESSION, CKR_OK,
+    CKU_SO, CKU_USER,
 };
 
 use crate::algos::KeygenParam;
@@ -501,6 +502,20 @@ impl Engine {
                 }];
                 self.generate_key_pair(session, mechanism, &mut pub_template, &mut [])
             }
+            KeygenParam::RsaModulusBits(bits) => {
+                // Same plain-4-byte-u32 convention as ParameterSet above —
+                // confirmed against ffi.rs's CKM_RSA_PKCS_KEY_PAIR_GEN
+                // dispatch (get_attr_ulong), not native CK_ULONG width.
+                // No CKA_PUBLIC_EXPONENT: the engine generates and stores
+                // that itself, not caller-supplied.
+                let mut bits = bits;
+                let mut pub_template = [CK_ATTRIBUTE {
+                    attrType: CKA_MODULUS_BITS as CK_ATTRIBUTE_TYPE,
+                    pValue: &mut bits as *mut u32 as CK_VOID_PTR,
+                    ulValueLen: std::mem::size_of::<u32>() as CK_ULONG,
+                }];
+                self.generate_key_pair(session, mechanism, &mut pub_template, &mut [])
+            }
         }
     }
 
@@ -566,6 +581,95 @@ impl Engine {
             other => bail!("C_Verify failed: rv=0x{other:x}"),
         }
     }
+
+    /// Builds a real `CK_RSA_PKCS_OAEP_PARAMS` (§6.4.4) at native width —
+    /// `#[repr(C)]` struct of `CK_ULONG`/`CK_VOID_PTR` fields, same pattern
+    /// as `ecdh1_derive`'s own params struct above. `mechanism` comes from
+    /// the caller (`algo.encrypt_mechanism`, matching how `sign_init`
+    /// takes `algo.sign_mechanism` rather than hardcoding it here) — one
+    /// fixed, standard OAEP configuration regardless of which RSA-OAEP
+    /// mechanism is passed: SHA-256 / MGF1-SHA256 / CKZ_DATA_SPECIFIED
+    /// with an empty label, no per-algorithm parameterization needed.
+    fn oaep_mechanism(mechanism: u32) -> (CK_MECHANISM, Box<CkRsaPkcsOaepParams>) {
+        use softhsmrustv3::constants::{CKG_MGF1_SHA256, CKM_SHA256, CKZ_DATA_SPECIFIED};
+        let mut params = Box::new(CkRsaPkcsOaepParams {
+            hash_alg: CKM_SHA256 as CK_ULONG,
+            mgf: CKG_MGF1_SHA256 as CK_ULONG,
+            source: CKZ_DATA_SPECIFIED as CK_ULONG,
+            p_source_data: std::ptr::null_mut(),
+            ul_source_data_len: 0,
+        });
+        let mech = CK_MECHANISM {
+            mechanism: mechanism as CK_ULONG,
+            pParameter: params.as_mut() as *mut CkRsaPkcsOaepParams as CK_VOID_PTR,
+            ulParameterLen: std::mem::size_of::<CkRsaPkcsOaepParams>() as CK_ULONG,
+        };
+        (mech, params)
+    }
+
+    pub fn encrypt_init(&self, session: CK_SESSION_HANDLE, mechanism: u32, key: CK_OBJECT_HANDLE) -> Result<()> {
+        let (mut mech, _params) = Self::oaep_mechanism(mechanism);
+        ck(unsafe { (self.funcs().C_EncryptInit)(session, &mut mech, key) }, "C_EncryptInit")
+    }
+
+    /// Two-call convention, same as `sign`.
+    pub fn encrypt(&self, session: CK_SESSION_HANDLE, data: &[u8]) -> Result<Vec<u8>> {
+        let mut data = data.to_vec();
+        let mut out_len: CK_ULONG = 0;
+        ck(
+            unsafe {
+                (self.funcs().C_Encrypt)(session, data.as_mut_ptr(), data.len() as CK_ULONG, std::ptr::null_mut(), &mut out_len)
+            },
+            "C_Encrypt(size)",
+        )?;
+        let mut out = vec![0u8; out_len as usize];
+        ck(
+            unsafe {
+                (self.funcs().C_Encrypt)(session, data.as_mut_ptr(), data.len() as CK_ULONG, out.as_mut_ptr(), &mut out_len)
+            },
+            "C_Encrypt(fill)",
+        )?;
+        out.truncate(out_len as usize);
+        Ok(out)
+    }
+
+    pub fn decrypt_init(&self, session: CK_SESSION_HANDLE, mechanism: u32, key: CK_OBJECT_HANDLE) -> Result<()> {
+        let (mut mech, _params) = Self::oaep_mechanism(mechanism);
+        ck(unsafe { (self.funcs().C_DecryptInit)(session, &mut mech, key) }, "C_DecryptInit")
+    }
+
+    /// Two-call convention, same as `sign`.
+    pub fn decrypt(&self, session: CK_SESSION_HANDLE, ciphertext: &[u8]) -> Result<Vec<u8>> {
+        let mut ct = ciphertext.to_vec();
+        let mut out_len: CK_ULONG = 0;
+        ck(
+            unsafe {
+                (self.funcs().C_Decrypt)(session, ct.as_mut_ptr(), ct.len() as CK_ULONG, std::ptr::null_mut(), &mut out_len)
+            },
+            "C_Decrypt(size)",
+        )?;
+        let mut out = vec![0u8; out_len as usize];
+        ck(
+            unsafe {
+                (self.funcs().C_Decrypt)(session, ct.as_mut_ptr(), ct.len() as CK_ULONG, out.as_mut_ptr(), &mut out_len)
+            },
+            "C_Decrypt(fill)",
+        )?;
+        out.truncate(out_len as usize);
+        Ok(out)
+    }
+}
+
+/// `CK_RSA_PKCS_OAEP_PARAMS` (§6.4.4) — `CK_ULONG`/`CK_VOID_PTR` fields are
+/// native width on this platform (matching the fixed `parse_oaep_params`
+/// on the engine side, see hsm-perf-bench FIPS-gap plan Part B2).
+#[repr(C)]
+struct CkRsaPkcsOaepParams {
+    hash_alg: CK_ULONG,
+    mgf: CK_ULONG,
+    source: CK_ULONG,
+    p_source_data: CK_VOID_PTR,
+    ul_source_data_len: CK_ULONG,
 }
 
 fn ck(rv: CK_RV, op: &str) -> Result<()> {

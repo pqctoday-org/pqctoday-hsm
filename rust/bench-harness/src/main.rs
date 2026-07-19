@@ -170,6 +170,12 @@ struct Tenant {
     sig: HashMap<&'static str, SigMaterial>,
     kex: HashMap<&'static str, KexMaterial>,
     kem: HashMap<&'static str, KemMaterial>,
+    // Keyed by EncAlgo.name, not SignatureAlgo.name — even when the
+    // handles are reused from `sig` (the common case), this map still
+    // needs its OWN entries so lookups by the enc algorithm's own name
+    // work. Reuses SigMaterial's shape (just a pub/priv keypair) rather
+    // than a near-identical duplicate struct.
+    enc: HashMap<&'static str, SigMaterial>,
 }
 
 /// Claim the next free slot (standard §5.4 `C_GetSlotList` auto-replenish
@@ -194,6 +200,7 @@ fn provision_tenant(
     sig_algos: &[algos::SignatureAlgo],
     kex_algos: &[algos::KeyAgreementAlgo],
     kem_algos: &[algos::KemAlgo],
+    enc_algos: &[algos::EncAlgo],
 ) -> Result<(Tenant, HashMap<&'static str, f64>)> {
     let slots_before = engine.get_slot_list().context("C_GetSlotList")?;
     let slot = *slots_before
@@ -260,7 +267,37 @@ fn provision_tenant(
         kem.insert(algo.name, KemMaterial { pub_handle, priv_handle, ciphertext });
     }
 
-    Ok((Tenant { slot, session, sig, kex, kem }, keygen_ms))
+    let mut enc = HashMap::new();
+    for algo in enc_algos {
+        // Reuse the matching RSA-PSS keypair when it was ALSO provisioned
+        // for this run (the common case, and the whole point of this
+        // reuse — see EncAlgo's doc comment); otherwise fall back to an
+        // independent keygen (only reachable if a run selects an EncAlgo
+        // without its matching SignatureAlgo, e.g. `--algorithms
+        // RSA-OAEP-2048` alone). No `keygen_ms` entry in the fallback
+        // case — RSA-OAEP has no dedicated "keygen" cell (see
+        // list_algorithms()); when the reuse path is taken, the keypair's
+        // real cost is already reported under its RSA-PSS entry's own
+        // keygen row, so reporting it again here would double-count it.
+        let (pub_handle, priv_handle) = if let Some(shared) = sig.get(algo.sig_algo_name) {
+            (shared.pub_handle, shared.priv_handle)
+        } else {
+            engine
+                .generate_key_pair_with_param(session, algo.keygen_mechanism, algo.keygen_param)
+                .with_context(|| format!("C_GenerateKeyPair({}, tenant={name})", algo.name))?
+        };
+        // Self-contained sanity: encrypt+decrypt round-trip with this
+        // tenant's own key.
+        let message = format!("hsm-perf-bench harness proof — {} — tenant {name}", algo.name).into_bytes();
+        engine.encrypt_init(session, algo.encrypt_mechanism, pub_handle).with_context(|| format!("C_EncryptInit({})", algo.name))?;
+        let ciphertext = engine.encrypt(session, &message).with_context(|| format!("C_Encrypt({})", algo.name))?;
+        engine.decrypt_init(session, algo.encrypt_mechanism, priv_handle).with_context(|| format!("C_DecryptInit({})", algo.name))?;
+        let recovered = engine.decrypt(session, &ciphertext).with_context(|| format!("C_Decrypt({})", algo.name))?;
+        assert_eq!(recovered, message, "tenant {name}'s {} decrypt must recover the original plaintext", algo.name);
+        enc.insert(algo.name, SigMaterial { pub_handle, priv_handle });
+    }
+
+    Ok((Tenant { slot, session, sig, kex, kem, enc }, keygen_ms))
 }
 
 fn main() -> Result<()> {
@@ -300,7 +337,10 @@ fn list_algorithms(cli: &Cli) -> Result<()> {
     let kem_algos: Vec<algos::KemAlgo> = algos::KEM_ALGOS.iter().copied()
         .filter(|a| algo_allowed(a.name, &selected))
         .collect();
-    if sig_algos.is_empty() && kex_algos.is_empty() && kem_algos.is_empty() {
+    let enc_algos: Vec<algos::EncAlgo> = algos::ENC_ALGOS.iter().copied()
+        .filter(|a| algo_allowed(a.name, &selected))
+        .collect();
+    if sig_algos.is_empty() && kex_algos.is_empty() && kem_algos.is_empty() && enc_algos.is_empty() {
         bail!("--algorithms matched no known algorithm: {:?}", cli.algorithms);
     }
 
@@ -317,6 +357,14 @@ fn list_algorithms(cli: &Cli) -> Result<()> {
     }
     for algo in &kem_algos {
         for op in ["keygen", "encapsulate", "decapsulate"] {
+            cells.push(AlgoCell { category: "key_establishment", algorithm: algo.name, security_level: algo.security_level, op });
+        }
+    }
+    // No "keygen" op here — RSA-OAEP's keypair is normally reused from its
+    // matching RSA-PSS entry (see EncAlgo's doc comment in algos.rs), so
+    // there's no dedicated keygen cost to report as its own cell.
+    for algo in &enc_algos {
+        for op in ["encrypt", "decrypt"] {
             cells.push(AlgoCell { category: "key_establishment", algorithm: algo.name, security_level: algo.security_level, op });
         }
     }
@@ -439,7 +487,10 @@ fn run_instance(cli: &Cli) -> Result<()> {
     let kem_algos: Vec<algos::KemAlgo> = algos::KEM_ALGOS.iter().copied()
         .filter(|a| algo_allowed(a.name, &selected))
         .collect();
-    if sig_algos.is_empty() && kex_algos.is_empty() && kem_algos.is_empty() {
+    let enc_algos: Vec<algos::EncAlgo> = algos::ENC_ALGOS.iter().copied()
+        .filter(|a| algo_allowed(a.name, &selected))
+        .collect();
+    if sig_algos.is_empty() && kex_algos.is_empty() && kem_algos.is_empty() && enc_algos.is_empty() {
         bail!("--algorithms matched no known algorithm: {:?}", cli.algorithms);
     }
 
@@ -447,15 +498,15 @@ fn run_instance(cli: &Cli) -> Result<()> {
     engine.initialize().context("C_Initialize")?;
     eprintln!("[ok] engine initialized: {}", cli.library);
     eprintln!(
-        "[ok] algorithm matrix: {} signature, {} key-agreement, {} KEM ({})",
-        sig_algos.len(), kex_algos.len(), kem_algos.len(),
+        "[ok] algorithm matrix: {} signature, {} key-agreement, {} KEM, {} key-transport ({})",
+        sig_algos.len(), kex_algos.len(), kem_algos.len(), enc_algos.len(),
         if cli.include_slow { "including slow algorithms" } else { "slow algorithms excluded, pass --include-slow to add them" }
     );
 
     // ── Two tenants, two real tokens, standard PKCS#11 v3.2 calls only. ─
-    let (mut alice, alice_keygen_ms) = provision_tenant(&engine, "alice", &sig_algos, &kex_algos, &kem_algos)?;
+    let (mut alice, alice_keygen_ms) = provision_tenant(&engine, "alice", &sig_algos, &kex_algos, &kem_algos, &enc_algos)?;
     eprintln!("[ok] alice bootstrapped on slot {}: session={}", alice.slot, alice.session);
-    let (mut bob, bob_keygen_ms) = provision_tenant(&engine, "bob", &sig_algos, &kex_algos, &kem_algos)?;
+    let (mut bob, bob_keygen_ms) = provision_tenant(&engine, "bob", &sig_algos, &kex_algos, &kem_algos, &enc_algos)?;
     eprintln!("[ok] bob bootstrapped on slot {}: session={}", bob.slot, bob.session);
     assert_ne!(alice.slot, bob.slot, "each tenant must land on its own slot");
     eprintln!("[ok] alice and bob each have their own token and full key material, every algorithm's own sign/verify or encap/decap round-trip verified");
@@ -739,6 +790,55 @@ fn run_instance(cli: &Cli) -> Result<()> {
                 }).collect();
                 let (total_ops, latencies_ms, duration_s) = measure::run_point(cli.duration_secs, cli.warmup_secs, workers)?;
                 emit("decapsulate", "key_establishment", algo.name, algo.security_level, tenant_index, slot, total_ops, latencies_ms, duration_s)?;
+            }
+        }
+    }
+
+    // encrypt + decrypt, every RSA-OAEP key-transport algorithm, per
+    // tenant — same shape as encapsulate/decapsulate above, just
+    // C_Encrypt/C_Decrypt instead of C_EncapsulateKey/C_DecapsulateKey.
+    // No keygen row: see EncAlgo's doc comment (algos.rs) and
+    // list_algorithms() above for why.
+    for algo in &enc_algos {
+        for (tenant_index, tenant) in tenants.iter().enumerate() {
+            let tenant_index = tenant_index as u32;
+            let slot = tenant.slot as u64;
+            {
+                let workers: Vec<_> = worker_sessions_by_tenant[tenant_index as usize].iter().map(|&session| {
+                    let engine = Arc::clone(&engine);
+                    let pub_handle = tenant.enc[algo.name].pub_handle;
+                    let mechanism = algo.encrypt_mechanism;
+                    let message = format!("hsm-perf-bench measured encrypt {} — tenant {tenant_index}", algo.name).into_bytes();
+                    move || -> Result<()> {
+                        engine.encrypt_init(session, mechanism, pub_handle)?;
+                        engine.encrypt(session, &message)?;
+                        Ok(())
+                    }
+                }).collect();
+                let (total_ops, latencies_ms, duration_s) = measure::run_point(cli.duration_secs, cli.warmup_secs, workers)?;
+                emit("encrypt", "key_establishment", algo.name, algo.security_level, tenant_index, slot, total_ops, latencies_ms, duration_s)?;
+            }
+            // decrypt — each worker encrypts ONE message once (setup,
+            // unmeasured) then the timed loop repeatedly decrypts that
+            // same ciphertext, exercising the real C_DecryptInit/C_Decrypt
+            // path only (same pattern as the `verify` block above).
+            {
+                let workers: Vec<_> = worker_sessions_by_tenant[tenant_index as usize].iter().map(|&session| {
+                    let engine = Arc::clone(&engine);
+                    let material = &tenant.enc[algo.name];
+                    let (pub_handle, priv_handle) = (material.pub_handle, material.priv_handle);
+                    let mechanism = algo.encrypt_mechanism;
+                    let message = format!("hsm-perf-bench measured decrypt {} — tenant {tenant_index}", algo.name).into_bytes();
+                    engine.encrypt_init(session, mechanism, pub_handle)?;
+                    let ciphertext = engine.encrypt(session, &message)?;
+                    Ok::<_, anyhow::Error>(move || -> Result<()> {
+                        engine.decrypt_init(session, mechanism, priv_handle)?;
+                        engine.decrypt(session, &ciphertext)?;
+                        Ok(())
+                    })
+                }).collect::<Result<Vec<_>>>()?;
+                let (total_ops, latencies_ms, duration_s) = measure::run_point(cli.duration_secs, cli.warmup_secs, workers)?;
+                emit("decrypt", "key_establishment", algo.name, algo.security_level, tenant_index, slot, total_ops, latencies_ms, duration_s)?;
             }
         }
     }
