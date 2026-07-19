@@ -107,6 +107,14 @@ struct Cli {
     /// on the child's own invocation). Not meant to be set by hand.
     #[arg(long, hide = true)]
     topology_instances: Option<u32>,
+    /// INTERNAL — set by the parent orchestrator alongside
+    /// `--topology-instances`, distinct value per child (0..N), so each
+    /// child's rows are individually attributable instead of all N
+    /// children's rows carrying the same bare instance COUNT with no way
+    /// to tell which instance produced which row. Not meant to be set by
+    /// hand.
+    #[arg(long, hide = true)]
+    instance_id: Option<u32>,
 }
 
 struct SigMaterial {
@@ -308,7 +316,8 @@ fn run_parent(cli: &Cli) -> Result<()> {
             .arg("--duration-secs").arg(cli.duration_secs.to_string())
             .arg("--warmup-secs").arg(cli.warmup_secs.to_string())
             .arg("--instances").arg("1")
-            .arg("--topology-instances").arg(cli.instances.to_string());
+            .arg("--topology-instances").arg(cli.instances.to_string())
+            .arg("--instance-id").arg(instance_id.to_string());
         if cli.include_slow {
             cmd.arg("--include-slow");
         }
@@ -338,6 +347,11 @@ fn run_instance(cli: &Cli) -> Result<()> {
         Some(n) => ("independent-n-instances", n),
         None => ("shared-1-instance", 1),
     };
+    // §1 of the telemetry plan: this instance's OWN identity within the
+    // topology (0..topology_instances), set by the parent orchestrator
+    // alongside --topology-instances. Always 0 under shared-1-instance
+    // (there's only ever one instance to be).
+    let this_instance_id = cli.instance_id.unwrap_or(0);
 
     let sig_algos: Vec<algos::SignatureAlgo> = algos::SIGNATURE_ALGOS.iter().copied().filter(|a| cli.include_slow || !a.slow).collect();
     let kex_algos: Vec<algos::KeyAgreementAlgo> = algos::KEY_AGREEMENT_ALGOS.to_vec();
@@ -464,6 +478,7 @@ fn run_instance(cli: &Cli) -> Result<()> {
             access_path: "pkcs11-direct",
             topology,
             instances: topology_instances,
+            instance_id: this_instance_id,
             tenants: tenants.len() as u32,
             threads: cli.threads,
             category, algorithm, security_level, op,

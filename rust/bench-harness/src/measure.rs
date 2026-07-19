@@ -12,13 +12,23 @@ use anyhow::Result;
 
 /// One JSONL result row — field set and order match the harness's output
 /// contract from the plan (§A4.1 component 1): `{access_path, topology,
-/// instances, tenants, threads, category, algorithm, security_level, op,
-/// ops_per_sec, p50_ms, p99_ms, duration_s, total_ops, engine_version}`.
+/// instances, instance_id, tenants, threads, category, algorithm,
+/// security_level, op, ops_per_sec, p50_ms, p99_ms, duration_s, total_ops,
+/// engine_version}`.
+///
+/// `instances` is the COUNT of independent-topology instances in this run
+/// (e.g. `3`); `instance_id` is WHICH one produced this specific row
+/// (`0..instances`, always `0` under shared-1-instance topology, where
+/// there's only ever one). Conflating the two was a real gap
+/// (hsm-perf-bench-instance-slot-telemetry-plan-07192026.md §1, row 1) —
+/// every row in a 3-instance run used to carry `instances: 3` with
+/// nothing distinguishing which instance it came from.
 #[derive(serde::Serialize)]
 pub struct ResultRow {
     pub access_path: &'static str,
     pub topology: &'static str,
     pub instances: u32,
+    pub instance_id: u32,
     pub tenants: u32,
     pub threads: u32,
     pub category: &'static str,
