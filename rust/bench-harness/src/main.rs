@@ -56,7 +56,7 @@ use clap::Parser;
 use pkcs11::Engine;
 use softhsmrustv3::ck_abi::{CK_OBJECT_HANDLE, CK_SESSION_HANDLE, CK_SLOT_ID};
 use softhsmrustv3::constants::{CKA_EC_POINT, CKA_VALUE, CKR_KEY_HANDLE_INVALID, CKR_OBJECT_HANDLE_INVALID};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::process::Stdio;
 use std::sync::Arc;
 
@@ -90,6 +90,13 @@ struct Cli {
     /// the matrix).
     #[arg(long, default_value_t = false)]
     include_slow: bool,
+    /// Comma-separated exact algorithm names (algos.rs `.name` values, e.g.
+    /// "Ed25519,ML-DSA-65") to restrict the matrix to. Absent = full matrix
+    /// (unchanged default behavior, same pattern as --include-slow). Lets a
+    /// caller (the sandbox UI's algorithm picker) scope a run down instead
+    /// of always executing all 16 algorithms.
+    #[arg(long)]
+    algorithms: Option<String>,
     /// Print the configured (algorithm, op) matrix as JSON and exit —
     /// NO engine load, NO dlopen, NO C_Initialize. Lets a caller (e.g.
     /// the sandbox UI's job backend, hsm-perf-bench-ui-implementation-
@@ -114,6 +121,20 @@ struct Cli {
     /// hand.
     #[arg(long, hide = true)]
     instance_id: Option<u32>,
+}
+
+/// Parses `--algorithms` into a name set once per invocation. `None` means
+/// "no filter" (the flag was absent) — distinct from `Some(empty set)`,
+/// which can't actually happen since `_build_argv` on the Flask side never
+/// sends an empty `--algorithms` value.
+fn selected_algo_names(cli: &Cli) -> Option<HashSet<String>> {
+    cli.algorithms.as_ref().map(|s| {
+        s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect()
+    })
+}
+
+fn algo_allowed(name: &str, selected: &Option<HashSet<String>>) -> bool {
+    selected.as_ref().is_none_or(|s| s.contains(name))
 }
 
 struct SigMaterial {
@@ -268,7 +289,20 @@ struct AlgoCell {
 /// translation. Touches nothing but `algos.rs`'s own const data; no
 /// `Engine::load` anywhere in this path.
 fn list_algorithms(cli: &Cli) -> Result<()> {
-    let sig_algos: Vec<algos::SignatureAlgo> = algos::SIGNATURE_ALGOS.iter().copied().filter(|a| cli.include_slow || !a.slow).collect();
+    let selected = selected_algo_names(cli);
+    let sig_algos: Vec<algos::SignatureAlgo> = algos::SIGNATURE_ALGOS.iter().copied()
+        .filter(|a| cli.include_slow || !a.slow)
+        .filter(|a| algo_allowed(a.name, &selected))
+        .collect();
+    let kex_algos: Vec<algos::KeyAgreementAlgo> = algos::KEY_AGREEMENT_ALGOS.iter().copied()
+        .filter(|a| algo_allowed(a.name, &selected))
+        .collect();
+    let kem_algos: Vec<algos::KemAlgo> = algos::KEM_ALGOS.iter().copied()
+        .filter(|a| algo_allowed(a.name, &selected))
+        .collect();
+    if sig_algos.is_empty() && kex_algos.is_empty() && kem_algos.is_empty() {
+        bail!("--algorithms matched no known algorithm: {:?}", cli.algorithms);
+    }
 
     let mut cells = Vec::new();
     for algo in &sig_algos {
@@ -276,12 +310,12 @@ fn list_algorithms(cli: &Cli) -> Result<()> {
             cells.push(AlgoCell { category: "signature", algorithm: algo.name, security_level: algo.security_level, op });
         }
     }
-    for algo in algos::KEY_AGREEMENT_ALGOS {
+    for algo in &kex_algos {
         for op in ["keygen", "derive"] {
             cells.push(AlgoCell { category: "key_establishment", algorithm: algo.name, security_level: algo.security_level, op });
         }
     }
-    for algo in algos::KEM_ALGOS {
+    for algo in &kem_algos {
         for op in ["keygen", "encapsulate", "decapsulate"] {
             cells.push(AlgoCell { category: "key_establishment", algorithm: algo.name, security_level: algo.security_level, op });
         }
@@ -334,6 +368,9 @@ fn run_parent(cli: &Cli) -> Result<()> {
             .arg("--instance-id").arg(instance_id.to_string());
         if cli.include_slow {
             cmd.arg("--include-slow");
+        }
+        if let Some(algorithms) = &cli.algorithms {
+            cmd.arg("--algorithms").arg(algorithms);
         }
         let mut child = cmd
             .stdout(Stdio::piped())
@@ -391,9 +428,20 @@ fn run_instance(cli: &Cli) -> Result<()> {
     // (there's only ever one instance to be).
     let this_instance_id = cli.instance_id.unwrap_or(0);
 
-    let sig_algos: Vec<algos::SignatureAlgo> = algos::SIGNATURE_ALGOS.iter().copied().filter(|a| cli.include_slow || !a.slow).collect();
-    let kex_algos: Vec<algos::KeyAgreementAlgo> = algos::KEY_AGREEMENT_ALGOS.to_vec();
-    let kem_algos: Vec<algos::KemAlgo> = algos::KEM_ALGOS.to_vec();
+    let selected = selected_algo_names(cli);
+    let sig_algos: Vec<algos::SignatureAlgo> = algos::SIGNATURE_ALGOS.iter().copied()
+        .filter(|a| cli.include_slow || !a.slow)
+        .filter(|a| algo_allowed(a.name, &selected))
+        .collect();
+    let kex_algos: Vec<algos::KeyAgreementAlgo> = algos::KEY_AGREEMENT_ALGOS.iter().copied()
+        .filter(|a| algo_allowed(a.name, &selected))
+        .collect();
+    let kem_algos: Vec<algos::KemAlgo> = algos::KEM_ALGOS.iter().copied()
+        .filter(|a| algo_allowed(a.name, &selected))
+        .collect();
+    if sig_algos.is_empty() && kex_algos.is_empty() && kem_algos.is_empty() {
+        bail!("--algorithms matched no known algorithm: {:?}", cli.algorithms);
+    }
 
     let engine = Engine::load(&cli.library).with_context(|| format!("loading engine library at {:?}", cli.library))?;
     engine.initialize().context("C_Initialize")?;
