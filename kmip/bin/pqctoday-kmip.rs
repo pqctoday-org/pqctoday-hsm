@@ -23,8 +23,9 @@ use clap::Parser;
 
 use pqctoday_kmip::auditlog::{AuditSink, CompositeSink, JsonlSink, OtlpSink, RingSink, SseSink, SyslogSink};
 use pqctoday_kmip::cert_init::init_certs_if_missing;
-use pqctoday_kmip::ops::{Deps, DepsConfig, RngSeedMode};
+use pqctoday_kmip::ops::{Deps, DepsConfig, RngSeedMode, TenancyMode};
 use pqctoday_kmip::policy::{load_from_str, Engine, PolicyStore};
+use pqctoday_kmip::server::auth::Identity;
 use pqctoday_kmip::server::{serve, tls_from_pem, tls_mtls, tls_self_signed, AuthUser};
 use pqctoday_kmip::store::{KeyStore, MemoryStore, SqliteStore};
 
@@ -168,6 +169,26 @@ struct Cli {
     /// be exercised, since a deployed server picks exactly one.
     #[arg(long = "rng-seed-mode", default_value = "full")]
     rng_seed_mode: String,
+
+    /// Part F §F7 / hsm-perf-bench plan §P0.5/§P3 — per-client tenancy
+    /// mode: `single` (default, today's behavior — every request shares
+    /// one engine session), `auto` (first request from each
+    /// mTLS-CN-derived identity auto-provisions a fresh token: next
+    /// free PKCS#11 slot, server-minted PIN pair recorded for operator
+    /// readback), or `strict` (only identities named via
+    /// `--strict-tenant` may operate; every other identity is rejected
+    /// before touching the engine). `strict` with no `--strict-tenant`
+    /// entries rejects every identity — a deliberate fail-closed
+    /// default, not a silent no-op.
+    #[arg(long = "tenancy", default_value = "single")]
+    tenancy: String,
+
+    /// One pre-configured tenant for `--tenancy strict`, repeatable:
+    /// `<identity-cn>:<slot>:<so-pin>:<user-pin>`. Ignored for
+    /// `single`/`auto`. Example:
+    /// `--strict-tenant alice:1:so-pin-1:user-pin-1`.
+    #[arg(long = "strict-tenant")]
+    strict_tenant: Vec<String>,
 }
 
 #[tokio::main]
@@ -340,6 +361,43 @@ async fn main() -> anyhow::Result<()> {
             );
         }
     };
+    let tenancy_mode = match cli.tenancy.as_str() {
+        "single" => TenancyMode::Single,
+        "auto" => TenancyMode::Auto,
+        "strict" => TenancyMode::Strict,
+        other => {
+            anyhow::bail!("--tenancy: unknown value {other:?} (expected single|auto|strict)");
+        }
+    };
+    if !matches!(tenancy_mode, TenancyMode::Strict) && !cli.strict_tenant.is_empty() {
+        anyhow::bail!("--strict-tenant requires --tenancy strict");
+    }
+    let strict_tenants = cli
+        .strict_tenant
+        .iter()
+        .map(|entry| {
+            let parts: Vec<&str> = entry.splitn(4, ':').collect();
+            let [cn, slot, so_pin, user_pin] = parts.as_slice() else {
+                anyhow::bail!(
+                    "--strict-tenant {entry:?}: expected <identity-cn>:<slot>:<so-pin>:<user-pin>"
+                );
+            };
+            let slot: u32 = slot
+                .parse()
+                .map_err(|_| anyhow::anyhow!("--strict-tenant {entry:?}: slot {slot:?} is not a valid u32"))?;
+            Ok(pqctoday_kmip::ops::StrictTenantConfig {
+                identity: Identity { username: cn.to_string() },
+                slot,
+                so_pin: so_pin.to_string(),
+                user_pin: user_pin.to_string(),
+            })
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    if matches!(tenancy_mode, TenancyMode::Strict) {
+        tracing::info!(tenants = strict_tenants.len(), "tenancy mode: strict");
+    } else if matches!(tenancy_mode, TenancyMode::Auto) {
+        tracing::info!("tenancy mode: auto (per-identity token auto-provisioning)");
+    }
     let config = DepsConfig {
         pkcs11_slot: cli.slot,
         pkcs11_pin: cli.pin,
@@ -348,12 +406,14 @@ async fn main() -> anyhow::Result<()> {
         auth_users,
         ca_key,
         rng_seed_mode,
-        // Part F §F7.2 — tenant-registry infrastructure exists but is not
-        // yet wired into the dispatcher (see ops/deps.rs); every
-        // production deployment stays Single-mode (today's behavior)
-        // until that wiring lands.
-        tenancy_mode: Default::default(),
-        strict_tenants: Vec::new(),
+        // Part F §F7 is fully wired into the dispatcher as of the
+        // 2026-07-18/19 tenancy work (commits ee62b0f..77381b8) — every
+        // by-UID handler and every shared Deps map is tenant-scoped.
+        // Single (this flag's default) preserves today's behavior
+        // byte-for-byte; --tenancy auto/strict is what the hsm-perf-bench
+        // plan's KMIP-axis multi-tenant benchmark cells need (§P2/§P3).
+        tenancy_mode,
+        strict_tenants,
     };
     let deps = Arc::new(
         Deps::new(engine, store, sink, config).with_engine_session(engine_session),

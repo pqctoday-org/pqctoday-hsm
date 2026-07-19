@@ -93,7 +93,10 @@ pub mod certify;
 #[cfg(test)]
 mod tenancy_e2e;
 
-pub use deps::{AsyncJob, AsyncJobState, AsyncJobStore, Deps, DepsConfig, RngSeedMode};
+pub use deps::{
+    AsyncJob, AsyncJobState, AsyncJobStore, Deps, DepsConfig, RngSeedMode, StrictTenantConfig,
+    TenancyMode,
+};
 
 /// K8 test fixture — the BL-M-9-30 Transparent RSA Private Key
 /// components (OASIS corpus, 1024-bit), shared by the Register /
