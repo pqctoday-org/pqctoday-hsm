@@ -84,6 +84,7 @@ use super::spki_verify::{verify_with_spki, SpkiVerdict};
 pub fn validate(
     deps: &Deps,
     req: ValidateRequest,
+    auth: &crate::server::auth::AuthContext,
     correlation_id: &str,
 ) -> Result<ValidateResponse> {
     emit_request(
@@ -104,9 +105,13 @@ pub fn validate(
     // §6.1.62 Table 442 (Object Not Found / Invalid Object Type).
     let mut ders: Vec<Vec<u8>> = Vec::with_capacity(req.certificates.len() + req.uids.len());
     for uid in &req.uids {
-        let obj = deps.store.get(uid)?.ok_or_else(|| {
-            fail_err(deps, correlation_id, "Validate", KmipError::object_not_found(uid))
-        })?;
+        // Part F §F7.4 — owner-checked: referencing a foreign tenant's
+        // stored certificate fails as the same ObjectNotFound a missing
+        // UID produces (anti-oracle).
+        let obj = super::helpers::authorize_object(deps, auth, uid, || {
+            KmipError::object_not_found(uid)
+        })
+        .map_err(|e| fail_err(deps, correlation_id, "Validate", e))?;
         if obj.object_type != ObjectType::Certificate {
             return Err(fail_err(
                 deps,
@@ -147,17 +152,21 @@ pub fn validate(
         return Ok(ValidateResponse { validity: SignatureValidity::Unknown });
     }
 
+    // Part F §F7 — every engine touch downstream (the transient-import
+    // verify helpers) happens inside the CALLER's own token.
+    let session = deps.resolve_tenant_session(auth.identity.as_ref()).ok();
     let validity =
-        validate_chain(deps, &ders, req.validity_date.unwrap_or_else(OffsetDateTime::now_utc));
+        validate_chain(session, &ders, req.validity_date.unwrap_or_else(OffsetDateTime::now_utc));
     emit_success(deps, correlation_id, "Validate");
     Ok(ValidateResponse { validity })
 }
 
 /// Core chain check. See the module doc for the exact Valid/Invalid/
-/// Unknown contract. Takes `deps` (unlike the pre-port version) because
-/// signature verification now goes through the engine via
+/// Unknown contract. Takes the caller's resolved tenant `session` (Part
+/// F §F7 — was `deps`, needed only to reach `deps.engine_session`)
+/// because signature verification goes through the engine via
 /// `verify_with_spki`, not a self-contained `ring` call.
-pub(crate) fn validate_chain(deps: &Deps, ders: &[Vec<u8>], at: OffsetDateTime) -> SignatureValidity {
+pub(crate) fn validate_chain(session: Option<u32>, ders: &[Vec<u8>], at: OffsetDateTime) -> SignatureValidity {
     // 1. Parse every certificate. Any parse failure → Invalid.
     let mut certs: Vec<X509Certificate> = Vec::with_capacity(ders.len());
     for der in ders {
@@ -244,9 +253,9 @@ pub(crate) fn validate_chain(deps: &Deps, ders: &[Vec<u8>], at: OffsetDateTime) 
                 // first on the issuance side (`certify.rs::resolve_ca`).
                 let verdict = match super::composite_sig::profile_for_oid(&sig_alg.oid.to_string()) {
                     Some(profile) => super::composite_sig::verify_composite_signature(
-                        deps, profile, &issuer_spki, tbs_bytes, sig_bytes,
+                        session, profile, &issuer_spki, tbs_bytes, sig_bytes,
                     ),
-                    None => verify_with_spki(deps, &issuer_spki, &sig_alg, tbs_bytes, sig_bytes),
+                    None => verify_with_spki(session, &issuer_spki, &sig_alg, tbs_bytes, sig_bytes),
                 };
 
                 match verdict {
@@ -287,7 +296,7 @@ pub(crate) fn validate_chain(deps: &Deps, ders: &[Vec<u8>], at: OffsetDateTime) 
                             Ok(None) => {} // not Catalyst-shaped — nothing more to check
                             Ok(Some(fields)) => {
                                 let alt_verdict = super::catalyst::tbs_minus_alt_sig_value(&typed_tbs).and_then(
-                                    |tbs_minus_alt| super::catalyst::verify_alt_signature(deps, &fields, &tbs_minus_alt),
+                                    |tbs_minus_alt| super::catalyst::verify_alt_signature(session, &fields, &tbs_minus_alt),
                                 );
                                 match alt_verdict {
                                     Ok(SpkiVerdict::Valid) => {}
@@ -307,7 +316,7 @@ pub(crate) fn validate_chain(deps: &Deps, ders: &[Vec<u8>], at: OffsetDateTime) 
                         // signature above is confirmed" reasoning.
                         match super::chameleon::reconstruct_delta(&typed_tbs) {
                             Ok(None) => {} // not Chameleon-shaped — nothing more to check
-                            Ok(Some(delta)) => match super::chameleon::verify_delta_signature(deps, &delta) {
+                            Ok(Some(delta)) => match super::chameleon::verify_delta_signature(session, &delta) {
                                 Ok(SpkiVerdict::Valid) => {}
                                 Ok(SpkiVerdict::Invalid) => return SignatureValidity::Invalid,
                                 Ok(SpkiVerdict::UnsupportedAlgorithm) | Err(_) => degrade_unknown = true,
@@ -329,7 +338,7 @@ pub(crate) fn validate_chain(deps: &Deps, ders: &[Vec<u8>], at: OffsetDateTime) 
                     Ok(None) => {} // no RelatedCertificate extension — nothing to check
                     Ok(Some(ext)) => match super::related_certs::extract_related_cert_claim(ext.value) {
                         Ok((hash_alg_oid, claimed_hash)) => match super::related_certs::resolve_related_cert(
-                            deps, &hash_alg_oid, &claimed_hash, ders, idx,
+                            session, &hash_alg_oid, &claimed_hash, ders, idx,
                         ) {
                             Ok(super::related_certs::RelatedCertVerdict::Bound) => {}
                             Ok(super::related_certs::RelatedCertVerdict::Unknown) => degrade_unknown = true,
@@ -439,7 +448,7 @@ mod tests {
         let (deps, _g) = deps_with_session();
         let der = self_signed_der();
         assert_eq!(
-            validate_chain(&deps, &[der], OffsetDateTime::now_utc()),
+            validate_chain(deps.engine_session, &[der], OffsetDateTime::now_utc()),
             SignatureValidity::Valid
         );
     }
@@ -452,7 +461,7 @@ mod tests {
         let deps = deps_with();
         let der = self_signed_der();
         let far_future = OffsetDateTime::now_utc() + ::time::Duration::days(365 * 100);
-        assert_eq!(validate_chain(&deps, &[der], far_future), SignatureValidity::Invalid);
+        assert_eq!(validate_chain(deps.engine_session, &[der], far_future), SignatureValidity::Invalid);
     }
 
     #[test]
@@ -461,7 +470,7 @@ mod tests {
         let deps = deps_with();
         let der = self_signed_der();
         let far_past = OffsetDateTime::from_unix_timestamp(0).unwrap();
-        assert_eq!(validate_chain(&deps, &[der], far_past), SignatureValidity::Invalid);
+        assert_eq!(validate_chain(deps.engine_session, &[der], far_past), SignatureValidity::Invalid);
     }
 
     #[test]
@@ -478,7 +487,7 @@ mod tests {
 
         // Leaf alone — issuer (CA) absent.
         assert_eq!(
-            validate_chain(&deps, &[leaf.der().to_vec()], OffsetDateTime::now_utc()),
+            validate_chain(deps.engine_session, &[leaf.der().to_vec()], OffsetDateTime::now_utc()),
             SignatureValidity::Unknown
         );
     }
@@ -498,7 +507,7 @@ mod tests {
         // single self-signed check.
         assert_eq!(
             validate_chain(
-                &deps,
+                deps.engine_session,
                 &[leaf.der().to_vec(), ca_cert.der().to_vec()],
                 OffsetDateTime::now_utc()
             ),
@@ -520,7 +529,7 @@ mod tests {
         der[n - 1] ^= 0x01;
         // Either the signature fails (Invalid) — the intended outcome.
         assert_eq!(
-            validate_chain(&deps, &[der], OffsetDateTime::now_utc()),
+            validate_chain(deps.engine_session, &[der], OffsetDateTime::now_utc()),
             SignatureValidity::Invalid
         );
     }
@@ -530,7 +539,7 @@ mod tests {
         // Fails at parse (step 1), before any engine call.
         let deps = deps_with();
         assert_eq!(
-            validate_chain(&deps, &[vec![0xff, 0x00, 0x01]], OffsetDateTime::now_utc()),
+            validate_chain(deps.engine_session, &[vec![0xff, 0x00, 0x01]], OffsetDateTime::now_utc()),
             SignatureValidity::Invalid
         );
     }
@@ -541,6 +550,7 @@ mod tests {
         let err = validate(
             &d,
             ValidateRequest { certificates: vec![], uids: vec!["nope".into()], validity_date: None },
+            &crate::server::auth::AuthContext::open(),
             "c",
         )
         .unwrap_err();
@@ -563,6 +573,7 @@ mod tests {
         let err = validate(
             &d,
             ValidateRequest { certificates: vec![], uids: vec!["sym".into()], validity_date: None },
+            &crate::server::auth::AuthContext::open(),
             "c",
         )
         .unwrap_err();
@@ -576,6 +587,7 @@ mod tests {
         let r = validate(
             &d,
             ValidateRequest { certificates: vec![], uids: vec!["ca".into()], validity_date: None },
+            &crate::server::auth::AuthContext::open(),
             "c",
         )
         .unwrap();
@@ -622,7 +634,7 @@ mod tests {
         .expect("bootstrap ML-DSA CA cert");
 
         assert_eq!(
-            validate_chain(&deps, &[cert_der], OffsetDateTime::now_utc()),
+            validate_chain(deps.engine_session, &[cert_der], OffsetDateTime::now_utc()),
             SignatureValidity::Valid,
             "a self-signed ML-DSA chain must validate — ring never supported this"
         );
@@ -661,6 +673,7 @@ mod tests {
         let r = validate(
             &d,
             ValidateRequest { certificates: vec![], uids: vec!["ca-registered".into()], validity_date: None },
+            &crate::server::auth::AuthContext::open(),
             "c",
         )
         .unwrap();
@@ -707,7 +720,7 @@ mod tests {
         .expect("bootstrap composite CA cert");
 
         assert_eq!(
-            validate_chain(&deps, &[cert_der.clone()], OffsetDateTime::now_utc()),
+            validate_chain(deps.engine_session, &[cert_der.clone()], OffsetDateTime::now_utc()),
             SignatureValidity::Valid,
             "a self-signed composite chain must validate — both components verify independently"
         );
@@ -716,7 +729,7 @@ mod tests {
         let last = tampered.len() - 1;
         tampered[last] ^= 0xff;
         assert_eq!(
-            validate_chain(&deps, &[tampered], OffsetDateTime::now_utc()),
+            validate_chain(deps.engine_session, &[tampered], OffsetDateTime::now_utc()),
             SignatureValidity::Invalid,
             "a tampered composite signature must never come back Valid"
         );
@@ -736,7 +749,7 @@ mod tests {
 
         let (valid_cert_der, _tbs) = super::super::catalyst::tests::build_catalyst_tbs_and_sign(session, false);
         assert_eq!(
-            validate_chain(&deps, &[valid_cert_der], OffsetDateTime::now_utc()),
+            validate_chain(deps.engine_session, &[valid_cert_der], OffsetDateTime::now_utc()),
             SignatureValidity::Valid,
             "a self-signed Catalyst cert with a genuine alt signature must validate"
         );
@@ -747,7 +760,7 @@ mod tests {
         // whichever signature happens to be examined first.
         let (tampered_alt_cert_der, _tbs2) = super::super::catalyst::tests::build_catalyst_tbs_and_sign(session, true);
         assert_eq!(
-            validate_chain(&deps, &[tampered_alt_cert_der], OffsetDateTime::now_utc()),
+            validate_chain(deps.engine_session, &[tampered_alt_cert_der], OffsetDateTime::now_utc()),
             SignatureValidity::Invalid,
             "a tampered Catalyst alt signature must invalidate the chain even though the primary signature is untouched"
         );
@@ -780,7 +793,7 @@ mod tests {
         // Both companions supplied together — Bound, both self-signed,
         // both primary signatures verify → Valid overall.
         assert_eq!(
-            validate_chain(&deps, &[cert_a_der.clone(), cert_b_der.clone()], OffsetDateTime::now_utc()),
+            validate_chain(deps.engine_session, &[cert_a_der.clone(), cert_b_der.clone()], OffsetDateTime::now_utc()),
             SignatureValidity::Valid,
             "cert B's real companion (cert A) supplied alongside it must bind and validate"
         );
@@ -788,7 +801,7 @@ mod tests {
         // Cert B alone — nothing else supplied to check the claim
         // against → Unknown, not Invalid (honest "can't confirm").
         assert_eq!(
-            validate_chain(&deps, &[cert_b_der.clone()], OffsetDateTime::now_utc()),
+            validate_chain(deps.engine_session, &[cert_b_der.clone()], OffsetDateTime::now_utc()),
             SignatureValidity::Unknown,
             "no companion supplied at all must degrade to Unknown, not guess Invalid"
         );
@@ -798,7 +811,7 @@ mod tests {
         // Invalid, a real checkable failure.
         let unrelated_der = params_with_cn("related-unrelated").self_signed(&rcgen::KeyPair::generate().unwrap()).unwrap().der().to_vec();
         assert_eq!(
-            validate_chain(&deps, &[cert_b_der, unrelated_der], OffsetDateTime::now_utc()),
+            validate_chain(deps.engine_session, &[cert_b_der, unrelated_der], OffsetDateTime::now_utc()),
             SignatureValidity::Invalid,
             "an unrelated companion that doesn't hash-match the claim must be Invalid"
         );
@@ -816,7 +829,7 @@ mod tests {
 
         let (valid_cert_der, _tbs) = super::super::chameleon::tests::build_chameleon_primary_tbs(session, false);
         assert_eq!(
-            validate_chain(&deps, &[valid_cert_der], OffsetDateTime::now_utc()),
+            validate_chain(deps.engine_session, &[valid_cert_der], OffsetDateTime::now_utc()),
             SignatureValidity::Valid,
             "a self-signed Chameleon cert with a genuine delta signature must validate"
         );
@@ -827,7 +840,7 @@ mod tests {
         let (tampered_delta_cert_der, _tbs2) =
             super::super::chameleon::tests::build_chameleon_primary_tbs(session, true);
         assert_eq!(
-            validate_chain(&deps, &[tampered_delta_cert_der], OffsetDateTime::now_utc()),
+            validate_chain(deps.engine_session, &[tampered_delta_cert_der], OffsetDateTime::now_utc()),
             SignatureValidity::Invalid,
             "a tampered Chameleon delta signature must invalidate the chain even though the primary signature is untouched"
         );

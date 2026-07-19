@@ -601,6 +601,7 @@ fn register_pqc(
             protection_storage_masks: None,
             certificate_payload: None,
         },
+        &AuthContext::open(),
         "k9-register",
     )
     .map(|r| r.uid)
@@ -878,6 +879,7 @@ fn k9_register_pqc_length_mismatch_fails_invalid_attribute_value() {
             protection_storage_masks: None,
             certificate_payload: None,
         },
+        &AuthContext::open(),
         "k9-len-mismatch",
     )
     .expect_err("declared-length mismatch must fail Register");
@@ -1260,6 +1262,7 @@ fn k17_register_wrapped_hmac_key_then_mac_against_real_engine() {
                 protection_storage_masks: None,
                 certificate_payload: None,
             },
+            &AuthContext::open(),
             cid,
         )
         .unwrap()
@@ -1317,6 +1320,7 @@ fn k17_register_wrapped_hmac_key_then_mac_against_real_engine() {
             key_compression_type: None,
             key_wrapping_specification: Some(kws.clone()),
         },
+        &AuthContext::open(),
         "k17-export-wrapped",
     )
     .unwrap();
@@ -2191,6 +2195,7 @@ fn hss_register_sign_verify_against_real_engine() {
                 protection_storage_masks: None,
                 certificate_payload: None,
             },
+            &AuthContext::open(),
             cid,
         )
         .unwrap()
@@ -2531,6 +2536,7 @@ fn k3_register_rsa_public_key_accepts_both_pkcs1_and_pkcs8_der() {
                 protection_storage_masks: None,
                 certificate_payload: None,
             },
+            &AuthContext::open(),
             "k3-register",
         )
         .map(|r| r.uid)
@@ -2616,6 +2622,7 @@ fn k3_register_rsa_private_key_malformed_pkcs1_fails_register_not_silently() {
             protection_storage_masks: None,
             certificate_payload: None,
         },
+        &AuthContext::open(),
         "k3-register-malformed",
     )
     .unwrap_err();
@@ -2840,6 +2847,7 @@ fn k3_register_transparent_rsa_public_key_produces_usable_engine_object() {
                 protection_storage_masks: None,
                 certificate_payload: None,
             },
+            &AuthContext::open(),
             "k3-register-transparent",
         )
         .map(|r| r.uid)

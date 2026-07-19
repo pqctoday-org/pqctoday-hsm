@@ -964,22 +964,22 @@ fn handle_payload(
         RequestPayload::SignatureVerify(r) => {
             ResponsePayload::SignatureVerify(signature_verify(deps, r, correlation_id)?)
         }
-        RequestPayload::Validate(r) => ResponsePayload::Validate(validate(deps, r, correlation_id)?),
+        RequestPayload::Validate(r) => ResponsePayload::Validate(validate(deps, r, auth, correlation_id)?),
         // P2.3 — §6.1.6 Certify / §6.1.50 Re-certify (PQC-capable CA).
         // Ungated since WP4 — pure Rust (`spki_verify` + the engine),
         // dispatched on wasm32 the same as native; no more `not(native)`
         // OperationNotSupported fallback for these three.
-        RequestPayload::Certify(r) => ResponsePayload::Certify(certify(deps, r, correlation_id)?),
-        RequestPayload::ReCertify(r) => ResponsePayload::ReCertify(recertify(deps, r, correlation_id)?),
+        RequestPayload::Certify(r) => ResponsePayload::Certify(certify(deps, r, auth, correlation_id)?),
+        RequestPayload::ReCertify(r) => ResponsePayload::ReCertify(recertify(deps, r, auth, correlation_id)?),
         RequestPayload::Interop(r) => ResponsePayload::Interop(interop(deps, r, correlation_id)?),
         RequestPayload::AddAttribute(r) => ResponsePayload::AddAttribute(add_attribute(deps, r, correlation_id)?),
         RequestPayload::ModifyAttribute(r) => ResponsePayload::ModifyAttribute(modify_attribute(deps, r, correlation_id)?),
         RequestPayload::DeleteAttribute(r) => ResponsePayload::DeleteAttribute(delete_attribute(deps, r, correlation_id)?),
         RequestPayload::SetAttribute(r) => ResponsePayload::SetAttribute(set_attribute(deps, r, correlation_id)?),
         RequestPayload::AdjustAttribute(r) => ResponsePayload::AdjustAttribute(adjust_attribute(deps, r, correlation_id)?),
-        RequestPayload::Register(r) => ResponsePayload::Register(register(deps, r, correlation_id)?),
-        RequestPayload::Import(r) => ResponsePayload::Import(import_object(deps, r, correlation_id)?),
-        RequestPayload::Export(r) => ResponsePayload::Export(export(deps, r, correlation_id)?),
+        RequestPayload::Register(r) => ResponsePayload::Register(register(deps, r, auth, correlation_id)?),
+        RequestPayload::Import(r) => ResponsePayload::Import(import_object(deps, r, auth, correlation_id)?),
+        RequestPayload::Export(r) => ResponsePayload::Export(export(deps, r, auth, correlation_id)?),
         RequestPayload::Deactivate(r) => ResponsePayload::Deactivate(deactivate(deps, r, correlation_id)?),
         RequestPayload::Check(r) => ResponsePayload::Check(check(deps, r, correlation_id)?),
         RequestPayload::ObtainLease(r) => ResponsePayload::ObtainLease(obtain_lease(deps, r, correlation_id)?),

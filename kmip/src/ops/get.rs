@@ -291,7 +291,7 @@ pub fn get(
             // checks, TTLV KeyValue encode, AES-KW) is shared with
             // Export via `helpers::wrap_key_value`.
             let wrapped =
-                super::helpers::wrap_key_value(deps, "Get", spec, &key_value, correlation_id)?;
+                super::helpers::wrap_key_value(deps, "Get", spec, &key_value, auth, correlation_id)?;
             (wrapped, Some(spec.clone()))
         }
     };

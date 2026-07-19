@@ -1554,6 +1554,7 @@ rules: []
                 certificate_request: None,
                 attributes: vec![],
             },
+            &AuthContext::open(),
             "corr-certify-leaf",
         )
         .expect("Certify the composite leaf under the composite CA");
@@ -1568,7 +1569,7 @@ rules: []
 
         // ── Validate the resulting 2-cert chain end to end.
         assert_eq!(
-            super::super::validate::validate_chain(&d, &[leaf_cert_der.clone(), ca_cert_der], time::OffsetDateTime::now_utc()),
+            super::super::validate::validate_chain(d.engine_session, &[leaf_cert_der.clone(), ca_cert_der], time::OffsetDateTime::now_utc()),
             SignatureValidity::Valid,
             "a CreateKeyPair-generated composite leaf, certified by a composite CA, must validate"
         );
@@ -1578,7 +1579,7 @@ rules: []
         tampered[last] ^= 0xff;
         let ca_cert_der_2 = d.store.get(&ca_cert_uid).unwrap().unwrap().key_material.unwrap();
         assert_eq!(
-            super::super::validate::validate_chain(&d, &[tampered, ca_cert_der_2], time::OffsetDateTime::now_utc()),
+            super::super::validate::validate_chain(d.engine_session, &[tampered, ca_cert_der_2], time::OffsetDateTime::now_utc()),
             SignatureValidity::Invalid,
             "a tampered leaf signature must never come back Valid"
         );

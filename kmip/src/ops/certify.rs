@@ -383,6 +383,7 @@ struct SubjectInputs {
 fn resolve_subject(
     deps: &Deps,
     op: &str,
+    auth: &crate::server::auth::AuthContext,
     uid: Option<&str>,
     csr_type: Option<CertificateRequestType>,
     csr: Option<&[u8]>,
@@ -401,7 +402,7 @@ fn resolve_subject(
                     ));
                 }
             }
-            parse_pkcs10_csr(deps, op, csr_bytes)
+            parse_pkcs10_csr(deps.resolve_tenant_session(auth.identity.as_ref()).ok(), op, csr_bytes)
         }
         (None, _) => {
             // No CSR — certify a stored PublicKey by UID. Its DER public
@@ -413,10 +414,12 @@ fn resolve_subject(
                     format!("{op}: neither a Certificate Request nor a Unique Identifier supplied"),
                 )
             })?;
-            let rec = deps
-                .store
-                .get(uid)?
-                .ok_or_else(|| KmipError::object_not_found(uid))?;
+            // Part F §F7.4 — owner-checked: certifying a foreign
+            // tenant's PublicKey fails as the same ObjectNotFound a
+            // missing UID produces (anti-oracle).
+            let rec = super::helpers::authorize_object(deps, auth, uid, || {
+                KmipError::object_not_found(uid)
+            })?;
             if rec.object_type != ObjectType::PublicKey {
                 return Err(KmipError::invalid_object_type(format!(
                     "{op}: {uid:?} is a {:?}, not a PublicKey to certify",
@@ -453,7 +456,12 @@ fn resolve_subject(
                 match rec.key_material.as_deref() {
                     Some(bytes) => bytes,
                     None => {
-                        let session = deps.engine_session.ok_or_else(|| {
+                        // Part F §F7 — the subject's PublicKey lives in
+                        // the CALLING tenant's own token (ownership just
+                        // verified above), so the live SPKI lookup uses
+                        // the caller's resolved session, not the bare
+                        // engine_session field.
+                        let session = deps.resolve_tenant_session(auth.identity.as_ref()).ok().ok_or_else(|| {
                             KmipError::failed(
                                 ResultReason::KeyValueNotPresent,
                                 format!(
@@ -562,13 +570,13 @@ pub(crate) fn live_composite_public_key_spki(
 /// every other signature check removes that gap: any algorithm
 /// `verify_with_spki` supports (RSA/ECDSA/ML-DSA/Ed25519) is now
 /// checkable, PQC included.
-fn parse_pkcs10_csr(deps: &Deps, op: &str, csr: &[u8]) -> Result<SubjectInputs> {
+fn parse_pkcs10_csr(session: Option<u32>, op: &str, csr: &[u8]) -> Result<SubjectInputs> {
     let req = x509_cert::request::CertReq::from_der(csr).map_err(|e| {
         KmipError::invalid_csr(format!("{op}: PKCS#10 CSR DER unparseable: {e}"))
     })?;
     let signed_bytes = req.info.to_der().map_err(der_err)?;
     let verdict = super::spki_verify::verify_with_spki(
-        deps,
+        session,
         &req.info.public_key,
         &req.algorithm,
         &signed_bytes,
@@ -687,6 +695,19 @@ fn sign_tbs_in_engine(
     ca: &CaContext,
     tbs_der: &[u8],
 ) -> Result<Vec<u8>> {
+    // Part F §F7 — DELIBERATELY the bare `deps.engine_session`, not a
+    // per-tenant resolved session (user decision, plan §L): the CA
+    // signing key is server-wide shared infrastructure (one
+    // `DepsConfig::ca_key` designation for the whole server), living in
+    // the server's own base token where the operator configured it —
+    // NOT in any calling tenant's token. The tenant-owned halves of a
+    // Certify (the subject key lookup, the issued certificate's engine
+    // projection) each use the caller's resolved session; only this CA
+    // signature is issued from the base token, matching how a real CA
+    // is shared signing infrastructure with per-tenant subjects. In
+    // Strict/Auto mode with no base token bootstrapped, this correctly
+    // fails closed ("CA key unavailable") — an operator running a
+    // multi-tenant CA must provision the base token the CA key lives in.
     match deps.engine_session {
         Some(session) => sign_tbs_with_plan(deps, session, op, correlation_id, &ca.plan, &ca.private_record, &ca.private_uid, tbs_der),
         None => {
@@ -1036,8 +1057,13 @@ pub fn bootstrap_ca_certificate(
         pkcs11_cka_id: priv_rec.pkcs11_cka_id.clone(),
         ..ObjectRecord::default()
     })?;
+    // Base session, not a tenant session — the CA root cert is server
+    // infrastructure bootstrapped into the server's own token (see
+    // `sign_tbs_in_engine`'s Part F comment); this function has no
+    // caller identity and is not dispatcher-reachable.
     project_certificate_to_engine(
         deps,
+        Some(session),
         "bootstrap",
         "BootstrapCa",
         certificate_uid,
@@ -1050,7 +1076,12 @@ pub fn bootstrap_ca_certificate(
 
 // ── Certify (§6.1.6) ────────────────────────────────────────────────────────
 
-pub fn certify(deps: &Deps, req: CertifyRequest, correlation_id: &str) -> Result<CertifyResponse> {
+pub fn certify(
+    deps: &Deps,
+    req: CertifyRequest,
+    auth: &crate::server::auth::AuthContext,
+    correlation_id: &str,
+) -> Result<CertifyResponse> {
     let started = OffsetDateTime::now_utc();
     emit_request(deps, correlation_id, "Certify", format!(
         "csr={} uid={:?}",
@@ -1058,10 +1089,15 @@ pub fn certify(deps: &Deps, req: CertifyRequest, correlation_id: &str) -> Result
         req.uid
     ));
 
+    // `resolve_ca` deliberately takes no `auth`: the CA designation is
+    // operator config, its key/cert records are server infrastructure
+    // (ownerless), and the lookup is not caller-scoped — see
+    // `sign_tbs_in_engine`'s Part F comment for the full rationale.
     let ca = resolve_ca(deps, "Certify").map_err(|e| fail(deps, correlation_id, "Certify", e))?;
     let subject_inputs = resolve_subject(
         deps,
         "Certify",
+        auth,
         req.uid.as_deref(),
         req.certificate_request_type,
         req.certificate_request.as_deref(),
@@ -1079,6 +1115,7 @@ pub fn certify(deps: &Deps, req: CertifyRequest, correlation_id: &str) -> Result
 
     let uid = store_certificate(
         deps,
+        auth,
         correlation_id,
         &cert_der,
         not_before,
@@ -1098,6 +1135,7 @@ pub fn certify(deps: &Deps, req: CertifyRequest, correlation_id: &str) -> Result
 pub fn recertify(
     deps: &Deps,
     req: ReCertifyRequest,
+    auth: &crate::server::auth::AuthContext,
     correlation_id: &str,
 ) -> Result<ReCertifyResponse> {
     emit_request(deps, correlation_id, "Re-certify", format!("uid={}", req.uid));
@@ -1105,11 +1143,13 @@ pub fn recertify(
     let ca =
         resolve_ca(deps, "Re-certify").map_err(|e| fail(deps, correlation_id, "Re-certify", e))?;
 
-    // The existing certificate being renewed.
-    let existing = deps
-        .store
-        .get(&req.uid)?
-        .ok_or_else(|| fail(deps, correlation_id, "Re-certify", KmipError::object_not_found(&req.uid)))?;
+    // The existing certificate being renewed. Part F §F7.4 —
+    // owner-checked: renewing a foreign tenant's certificate fails as
+    // the same ObjectNotFound a missing UID produces (anti-oracle).
+    let existing = super::helpers::authorize_object(deps, auth, &req.uid, || {
+        KmipError::object_not_found(&req.uid)
+    })
+    .map_err(|e| fail(deps, correlation_id, "Re-certify", e))?;
     if existing.object_type != ObjectType::Certificate {
         return Err(fail(
             deps,
@@ -1153,7 +1193,7 @@ pub fn recertify(
     // in place). The PublicKey link is carried over from the existing
     // certificate record if present.
     let subject_inputs = if let Some(csr) = req.certificate_request.as_deref() {
-        parse_pkcs10_csr(deps, "Re-certify", csr)
+        parse_pkcs10_csr(deps.resolve_tenant_session(auth.identity.as_ref()).ok(), "Re-certify", csr)
             .map_err(|e| fail(deps, correlation_id, "Re-certify", e))?
     } else {
         SubjectInputs {
@@ -1206,7 +1246,11 @@ pub fn recertify(
     // still-active certificate. Best-effort: if the handle is already
     // gone, proceed anyway — the KMIP-side lifecycle transition below is
     // authoritative regardless.
-    if let Some(session) = deps.engine_session {
+    // Part F §F7 — the old cert's engine mirror lives in the CALLING
+    // tenant's own token (its ownership was just verified above), so
+    // its teardown uses the caller's resolved session — the same one
+    // `store_certificate` below projects the replacement into.
+    if let Some(session) = deps.resolve_tenant_session(auth.identity.as_ref()).ok() {
         if let Ok(Some(handle)) = super::helpers::find_handle_for_object(
             session, &existing.pkcs11_cka_id, existing.object_type,
         ) {
@@ -1225,6 +1269,7 @@ pub fn recertify(
     // existing cert's Name (§6.1.50: the new cert takes over the Name).
     let new_uid = store_certificate(
         deps,
+        auth,
         correlation_id,
         &cert_der,
         not_before,
@@ -1274,6 +1319,7 @@ pub fn recertify(
 /// Certificate/PublicKey cross-links. Returns the new UID.
 fn store_certificate(
     deps: &Deps,
+    auth: &crate::server::auth::AuthContext,
     correlation_id: &str,
     cert_der: &[u8],
     not_before: OffsetDateTime,
@@ -1307,7 +1353,7 @@ fn store_certificate(
     // projection is still independently addressable and destroyable.
     let cka_id = linked_cka_id.unwrap_or_else(|| uuid::Uuid::new_v4().as_bytes().to_vec());
 
-    deps.store.put(ObjectRecord {
+    deps.store.put(super::helpers::stamp_owner(ObjectRecord {
         uid: uid.clone(),
         object_type: ObjectType::Certificate,
         // X.509 certificate object — the §11 surface treats the DER as
@@ -1341,7 +1387,7 @@ fn store_certificate(
         // below by the same CKA_ID later — see ops::destroy (#141).
         pkcs11_cka_id: cka_id.clone(),
         ..ObjectRecord::default()
-    })?;
+    }, auth))?;
 
     // §6.1.6: "For the public key, the server SHALL create a Certificate
     // Link attribute pointing to the generated certificate."
@@ -1355,6 +1401,7 @@ fn store_certificate(
 
     project_certificate_to_engine(
         deps,
+        deps.resolve_tenant_session(auth.identity.as_ref()).ok(),
         correlation_id,
         "Certify",
         &uid,
@@ -1459,14 +1506,14 @@ pub(crate) mod tests {
     #[test]
     fn certify_without_ca_configured_is_permission_denied() {
         let deps = deps_no_engine();
-        let err = certify(&deps, CertifyRequest::default(), "c").unwrap_err();
+        let err = certify(&deps, CertifyRequest::default(), &AuthContext::open(), "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::PermissionDenied);
     }
 
     #[test]
     fn certify_ca_key_not_found_is_object_not_found() {
         let deps = deps_no_engine().with_ca_key("urn:nope-priv", "urn:nope-cert");
-        let err = certify(&deps, CertifyRequest::default(), "c").unwrap_err();
+        let err = certify(&deps, CertifyRequest::default(), &AuthContext::open(), "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::ObjectNotFound);
     }
 
@@ -1482,7 +1529,7 @@ pub(crate) mod tests {
                 ..ObjectRecord::default()
             })
             .unwrap();
-        let err = certify(&deps, CertifyRequest::default(), "c").unwrap_err();
+        let err = certify(&deps, CertifyRequest::default(), &AuthContext::open(), "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::InvalidObjectType);
     }
 
@@ -1508,6 +1555,7 @@ pub(crate) mod tests {
                 certificate_request: Some(csr_der),
                 ..CertifyRequest::default()
             },
+            &AuthContext::open(),
             "c",
         )
         .unwrap_err();
@@ -1647,6 +1695,7 @@ pub(crate) mod tests {
                 certificate_request: Some(csr.der().to_vec()),
                 ..CertifyRequest::default()
             },
+            &AuthContext::open(),
             "c-issue",
         )
         .unwrap();
@@ -1826,6 +1875,7 @@ pub(crate) mod tests {
                 certificate_request: Some(csr_der),
                 ..CertifyRequest::default()
             },
+            &AuthContext::open(),
             "c-pqc-csr",
         )
         .expect("a genuinely self-signature-valid ML-DSA CSR must be accepted");
@@ -1850,6 +1900,7 @@ pub(crate) mod tests {
                 certificate_request: Some(csr_der),
                 ..CertifyRequest::default()
             },
+            &AuthContext::open(),
             "c-pqc-csr-bad",
         )
         .unwrap_err();
@@ -1926,6 +1977,7 @@ pub(crate) mod tests {
         let resp = certify(
             &f.deps,
             CertifyRequest { uid: Some("urn:subj-pub".into()), ..CertifyRequest::default() },
+            &AuthContext::open(),
             "c-supplied",
         )
         .unwrap();
@@ -1986,6 +2038,7 @@ pub(crate) mod tests {
         let resp = certify(
             &f.deps,
             CertifyRequest { uid: Some(subj.public_key_uid.clone()), ..CertifyRequest::default() },
+            &AuthContext::open(),
             "c-fresh",
         )
         .unwrap_or_else(|e| panic!("{algo:?}: Certify a freshly-created PublicKey UID must \
@@ -2067,6 +2120,7 @@ pub(crate) mod tests {
                 certificate_request: Some(csr.der().to_vec()),
                 ..CertifyRequest::default()
             },
+            &AuthContext::open(),
             "c-wpc-leaf",
         )
         .unwrap();
@@ -2155,6 +2209,7 @@ pub(crate) mod tests {
                 ],
                 ..CertifyRequest::default()
             },
+            &AuthContext::open(),
             "c-first",
         )
         .unwrap();
@@ -2167,6 +2222,7 @@ pub(crate) mod tests {
                 offset: Some(3600),
                 ..ReCertifyRequest::default()
             },
+            &AuthContext::open(),
             "c-renew",
         )
         .unwrap();
@@ -2240,6 +2296,7 @@ pub(crate) mod tests {
         let issued = certify(
             &f.deps,
             CertifyRequest { uid: Some("urn:leaf-pub".into()), ..CertifyRequest::default() },
+            &AuthContext::open(),
             "c-initial",
         )
         .unwrap();
@@ -2252,6 +2309,7 @@ pub(crate) mod tests {
         let renewed = recertify(
             &f.deps,
             ReCertifyRequest { uid: issued.uid.clone(), ..ReCertifyRequest::default() },
+            &AuthContext::open(),
             "c-renew",
         )
         .unwrap();
@@ -2475,6 +2533,7 @@ pub(crate) mod tests {
                 certificate_request: None,
                 attributes: vec![],
             },
+            &AuthContext::open(),
             "corr-certify-kem-leaf",
         )
         .expect("Certify the hybrid-KEM leaf under the ML-DSA CA");
@@ -2499,7 +2558,7 @@ pub(crate) mod tests {
         // an otherwise-normal, already-proven certificate.
         let ca_cert_der = deps.store.get("urn:ca-cert").unwrap().unwrap().key_material.unwrap();
         assert_eq!(
-            super::super::validate::validate_chain(&deps, &[leaf_cert_der, ca_cert_der], OffsetDateTime::now_utc()),
+            super::super::validate::validate_chain(deps.engine_session, &[leaf_cert_der, ca_cert_der], OffsetDateTime::now_utc()),
             SignatureValidity::Valid,
             "a hybrid-KEM leaf certified by a plain ML-DSA CA must validate"
         );
@@ -2535,6 +2594,7 @@ pub(crate) mod tests {
                 certificate_request: None,
                 attributes: vec![],
             },
+            &AuthContext::open(),
             "corr-certify-kem-p256-leaf",
         )
         .unwrap_err();

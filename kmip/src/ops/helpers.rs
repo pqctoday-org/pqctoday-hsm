@@ -1226,6 +1226,7 @@ pub fn wrap_key_value(
     op: &str,
     spec: &crate::kmip30::KeyWrappingSpec,
     key_material: &[u8],
+    auth: &crate::server::auth::AuthContext,
     correlation_id: &str,
 ) -> crate::error::Result<Vec<u8>> {
     use crate::error::ResultReason;
@@ -1254,7 +1255,7 @@ pub fn wrap_key_value(
     let kek = resolve_kek(
         deps, op, &spec.encryption_key_uid,
         crate::kmip30::UsageMask::WRAP_KEY, "WrapKey",
-        correlation_id,
+        auth, correlation_id,
     )?;
     // Wrap target: TTLV-encoded KeyValue (default TTLV Encoding Option);
     // TTLV framing pads to 8 bytes, satisfying AES-KW's input contract.
@@ -1281,6 +1282,7 @@ fn resolve_kek(
     kek_uid: &str,
     required_usage: crate::kmip30::UsageMask,
     usage_name: &str,
+    auth: &crate::server::auth::AuthContext,
     correlation_id: &str,
 ) -> crate::error::Result<Vec<u8>> {
     use crate::error::ResultReason;
@@ -1291,12 +1293,18 @@ fn resolve_kek(
     // `WrongKeyLifecycleState` (0x43). The spec reserves these codes
     // precisely for KeyWrappingSpecification / KeyWrappingData KEK
     // resolution; verified against `kmip-spec-3.0-tags-enums.json`.
+    //
+    // Part F §F7.4 — the KEK is itself a by-UID key reference, so the
+    // owner check applies here exactly like every other by-UID lookup:
+    // a foreign tenant's KEK gets the SAME `Wrapping Object Not Found`
+    // a genuinely missing KEK UID produces (anti-oracle). Without this,
+    // any tenant could wrap/unwrap under another tenant's KEK by
+    // guessing its UID.
     use crate::kmip30::State;
-    let kek_obj = deps
-        .store
-        .get(kek_uid)?
-        .ok_or_else(|| fail_err(deps, correlation_id, op,
-            KmipError::wrapping_object_not_found(kek_uid)))?;
+    let kek_obj = authorize_object(deps, auth, kek_uid, || {
+        KmipError::wrapping_object_not_found(kek_uid)
+    })
+    .map_err(|e| fail_err(deps, correlation_id, op, e))?;
     // Archived (off-line via the Archive op) takes precedence over the
     // lifecycle FSM — the material is unreachable until Recover.
     if kek_obj.archived {
@@ -1325,7 +1333,8 @@ fn resolve_kek(
     match &kek_obj.key_material {
         Some(bytes) => Ok(bytes.clone()),
         None => deps
-            .engine_session
+            .resolve_tenant_session(auth.identity.as_ref())
+            .ok()
             .and_then(|session| {
                 // WP-4 remediation — class-aware, not the ambiguous
                 // class-blind find_by_cka_id (low urgency in practice: the
@@ -1369,6 +1378,7 @@ pub fn unwrap_key_value(
     op: &str,
     kwd: &crate::kmip30::KeyWrappingSpec,
     wrapped: &[u8],
+    auth: &crate::server::auth::AuthContext,
     correlation_id: &str,
 ) -> crate::error::Result<Vec<u8>> {
     // MAC/Signature Key Information — we support Encrypt-method
@@ -1402,7 +1412,7 @@ pub fn unwrap_key_value(
     let kek = resolve_kek(
         deps, op, &kwd.encryption_key_uid,
         crate::kmip30::UsageMask::UNWRAP_KEY, "UnwrapKey",
-        correlation_id,
+        auth, correlation_id,
     )?;
     let r = softhsmrustv3::native::aes_key_unwrap(&kek, wrapped);
     emit_pkcs11_result(deps, correlation_id, "native::aes_key_unwrap",
@@ -1913,7 +1923,7 @@ mod tests {
     #[test]
     fn wrap_kek_missing_returns_wrapping_object_not_found() {
         let d = wrap_deps();
-        let err = wrap_key_value(&d, "Get", &wrap_spec("nope"), &[0u8; 32], "c").unwrap_err();
+        let err = wrap_key_value(&d, "Get", &wrap_spec("nope"), &[0u8; 32], &crate::server::auth::AuthContext::open(), "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::WrappingObjectNotFound);
     }
 
@@ -1921,7 +1931,7 @@ mod tests {
     fn wrap_kek_archived_returns_wrapping_object_archived() {
         let d = wrap_deps();
         put_kek(&d, "kek", crate::kmip30::State::Active, true);
-        let err = wrap_key_value(&d, "Get", &wrap_spec("kek"), &[0u8; 32], "c").unwrap_err();
+        let err = wrap_key_value(&d, "Get", &wrap_spec("kek"), &[0u8; 32], &crate::server::auth::AuthContext::open(), "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::WrappingObjectArchived);
     }
 
@@ -1929,7 +1939,7 @@ mod tests {
     fn wrap_kek_destroyed_returns_wrapping_object_destroyed() {
         let d = wrap_deps();
         put_kek(&d, "kek", crate::kmip30::State::Destroyed, false);
-        let err = wrap_key_value(&d, "Get", &wrap_spec("kek"), &[0u8; 32], "c").unwrap_err();
+        let err = wrap_key_value(&d, "Get", &wrap_spec("kek"), &[0u8; 32], &crate::server::auth::AuthContext::open(), "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::WrappingObjectDestroyed);
     }
 
@@ -1940,7 +1950,7 @@ mod tests {
         // specific reason for Deactivated/Compromised/PreActive.
         let d = wrap_deps();
         put_kek(&d, "kek", crate::kmip30::State::Deactivated, false);
-        let err = wrap_key_value(&d, "Get", &wrap_spec("kek"), &[0u8; 32], "c").unwrap_err();
+        let err = wrap_key_value(&d, "Get", &wrap_spec("kek"), &[0u8; 32], &crate::server::auth::AuthContext::open(), "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::WrongKeyLifecycleState);
     }
 }

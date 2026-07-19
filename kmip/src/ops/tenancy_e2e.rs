@@ -502,4 +502,185 @@ mod tests {
         };
         assert_eq!(alice_dec.data, b"alice's secret");
     }
+
+    /// §L (Register/Export wired) — Register stamps the caller as owner,
+    /// and Export (the one MATERIAL-RETURNING by-UID handler missed by
+    /// the original F7.4 enumeration, found in the §L audit) is
+    /// owner-checked: Bob can neither Export nor Get Alice's registered
+    /// key, while Alice's own Export round-trips her exact bytes. Store-
+    /// backed raw material — no engine session involved, so this
+    /// isolates the OWNERSHIP property with no tenancy-provisioning
+    /// confound (plain Single-mode deps, identities only).
+    #[test]
+    fn register_stamps_owner_and_export_is_owner_checked() {
+        let _guard = engine_lock();
+        let alice = Identity { username: "alice-export".into() };
+        let bob = Identity { username: "bob-export".into() };
+        let sink: Arc<dyn crate::auditlog::AuditSink> = Arc::new(RingSink::new(64));
+        let deps = Deps::new(Engine::permissive(), Arc::new(MemoryStore::new()), sink, DepsConfig::default());
+
+        let key_bytes = vec![0xA5u8; 32];
+        let register_req = one_off_request(RequestPayload::Register(crate::kmip30::RegisterRequest {
+            object_type: ObjectType::SymmetricKey,
+            attributes: vec![
+                Attribute::CryptographicAlgorithm(KmipAlgorithm::Aes),
+                Attribute::CryptographicLength(256),
+                Attribute::CryptographicUsageMask(UsageMask::ENCRYPT | UsageMask::DECRYPT),
+            ],
+            managed_object: Some(crate::kmip30::KeyBlock {
+                key_format_type: crate::kmip30::KeyFormatType::Raw,
+                cryptographic_algorithm: KmipAlgorithm::Aes,
+                cryptographic_length: 256,
+                key_value: key_bytes.clone(),
+                key_wrapping_data: None,
+            }),
+            protection_storage_masks: None,
+            certificate_payload: None,
+            secret_data_type: None,
+        }));
+        let register_resp = dispatch_with_transport_identity(&deps, register_req, Some(alice.clone()));
+        assert_eq!(
+            register_resp.batch_items[0].result_status,
+            ResultStatus::Success,
+            "Alice registers her own key: {:?}",
+            register_resp.batch_items[0].result_reason
+        );
+        let ResponsePayload::Register(registered) = register_resp.batch_items[0].payload.clone().unwrap() else {
+            panic!("expected Register response");
+        };
+
+        let export_req = |uid: &str| {
+            one_off_request(RequestPayload::Export(crate::kmip30::ExportRequest {
+                uid: uid.to_string(),
+                key_format_type: None,
+                key_wrap_type: None,
+                key_compression_type: None,
+                key_wrapping_specification: None,
+            }))
+        };
+
+        let bob_export = dispatch_with_transport_identity(&deps, export_req(&registered.uid), Some(bob));
+        assert_eq!(
+            bob_export.batch_items[0].result_status,
+            ResultStatus::OperationFailed,
+            "Bob must NOT be able to Export Alice's key material"
+        );
+        assert_eq!(
+            bob_export.batch_items[0].result_reason,
+            Some(ResultReason::ObjectNotFound.to_wire_value()),
+            "cross-tenant Export fails as ObjectNotFound — anti-oracle"
+        );
+
+        let alice_export = dispatch_with_transport_identity(&deps, export_req(&registered.uid), Some(alice));
+        assert_eq!(
+            alice_export.batch_items[0].result_status,
+            ResultStatus::Success,
+            "Alice can still Export her own key: {:?}",
+            alice_export.batch_items[0].result_reason
+        );
+        let ResponsePayload::Export(exported) = alice_export.batch_items[0].payload.clone().unwrap() else {
+            panic!("expected Export response");
+        };
+        assert_eq!(
+            exported.managed_object.expect("Alice's export carries her key material").key_value,
+            key_bytes,
+            "Alice's Export must round-trip her exact registered bytes"
+        );
+    }
+
+    /// §L (KEK owner check in `resolve_kek`) — a wrap key referenced by
+    /// UID inside a KeyWrappingSpecification is itself a by-UID key
+    /// reference, and using a FOREIGN tenant's KEK must fail exactly
+    /// like a nonexistent one (`Wrapping Object Not Found`, the same
+    /// reason a genuinely missing KEK UID produces). Before §L, any
+    /// tenant could wrap/unwrap under another tenant's KEK by knowing
+    /// its UID. All store-backed raw material — no engine sessions.
+    #[test]
+    fn cross_tenant_kek_is_invisible_for_wrapping() {
+        let _guard = engine_lock();
+        let alice = Identity { username: "alice-kek".into() };
+        let bob = Identity { username: "bob-kek".into() };
+        let sink: Arc<dyn crate::auditlog::AuditSink> = Arc::new(RingSink::new(64));
+        let deps = Deps::new(Engine::permissive(), Arc::new(MemoryStore::new()), sink, DepsConfig::default());
+
+        let register = |identity: &Identity, usage: UsageMask, activation_past: bool, bytes: Vec<u8>| {
+            let mut attrs = vec![
+                Attribute::CryptographicAlgorithm(KmipAlgorithm::Aes),
+                Attribute::CryptographicLength(256),
+                Attribute::CryptographicUsageMask(usage),
+            ];
+            if activation_past {
+                // Past ActivationDate ⇒ born Active (compute_initial_state)
+                // — resolve_kek requires an Active KEK.
+                attrs.push(Attribute::ActivationDate(
+                    time::OffsetDateTime::now_utc().unix_timestamp() - 3600,
+                ));
+            }
+            let req = one_off_request(RequestPayload::Register(crate::kmip30::RegisterRequest {
+                object_type: ObjectType::SymmetricKey,
+                attributes: attrs,
+                managed_object: Some(crate::kmip30::KeyBlock {
+                    key_format_type: crate::kmip30::KeyFormatType::Raw,
+                    cryptographic_algorithm: KmipAlgorithm::Aes,
+                    cryptographic_length: 256,
+                    key_value: bytes,
+                    key_wrapping_data: None,
+                }),
+                protection_storage_masks: None,
+                certificate_payload: None,
+                secret_data_type: None,
+            }));
+            let resp = dispatch_with_transport_identity(&deps, req, Some(identity.clone()));
+            assert_eq!(resp.batch_items[0].result_status, ResultStatus::Success);
+            let ResponsePayload::Register(r) = resp.batch_items[0].payload.clone().unwrap() else {
+                panic!("expected Register response");
+            };
+            r.uid
+        };
+
+        // Alice's KEK (Active, WrapKey usage) and Bob's own data key.
+        let alice_kek_uid = register(&alice, UsageMask::WRAP_KEY, true, vec![0x11u8; 32]);
+        let bob_key_uid = register(&bob, UsageMask::ENCRYPT | UsageMask::DECRYPT, false, vec![0x22u8; 32]);
+
+        let wrapped_get = |key_uid: &str, kek_uid: &str| {
+            one_off_request(RequestPayload::Get(crate::kmip30::GetRequest {
+                uid: key_uid.to_string(),
+                key_format_type: None,
+                key_wrapping_specification: Some(crate::kmip30::KeyWrappingSpec {
+                    wrapping_method: 0x01, // Encrypt
+                    encryption_key_uid: kek_uid.to_string(),
+                    cryptographic_parameters: None, // defaults to NISTKeyWrap
+                    encoding_option: None,
+                    mac_signature_key_information_present: false,
+                }),
+            }))
+        };
+
+        // Bob requests HIS OWN key wrapped under ALICE's KEK — the data
+        // key is his, so the object gate passes; the KEK gate must not.
+        let bob_get = dispatch_with_transport_identity(&deps, wrapped_get(&bob_key_uid, &alice_kek_uid), Some(bob.clone()));
+        assert_eq!(
+            bob_get.batch_items[0].result_status,
+            ResultStatus::OperationFailed,
+            "Bob must NOT be able to wrap under Alice's KEK"
+        );
+        assert_eq!(
+            bob_get.batch_items[0].result_reason,
+            Some(ResultReason::WrappingObjectNotFound.to_wire_value()),
+            "a foreign KEK fails as Wrapping Object Not Found — the SAME reason a \
+             genuinely missing KEK UID produces (anti-oracle at the KEK layer)"
+        );
+
+        // Alice wrapping her own... key under her own KEK works — the KEK
+        // owner check is a real gate, not a blanket deny. (Her KEK wraps
+        // ITSELF here — a legal, if unusual, request that avoids needing
+        // a second Alice-owned object.)
+        let alice_get = dispatch_with_transport_identity(&deps, wrapped_get(&alice_kek_uid, &alice_kek_uid), Some(alice));
+        assert_eq!(
+            alice_get.batch_items[0].result_status,
+            ResultStatus::Success,
+            "Alice can wrap under her own KEK: {:?}",
+            alice_get.batch_items[0].result_reason
+        );
+    }
 }

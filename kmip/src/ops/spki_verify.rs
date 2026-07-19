@@ -36,6 +36,7 @@ use spki::{AlgorithmIdentifierOwned, SubjectPublicKeyInfoOwned};
 
 use crate::error::{KmipError, Result, ResultReason};
 
+#[cfg(test)]
 use super::deps::Deps;
 
 /// The three-way verdict [`verify_with_spki`] returns — mirrors KMIP's
@@ -154,8 +155,16 @@ impl Drop for DestroyOnDrop {
 /// returns. `Ok(SpkiVerdict::UnsupportedAlgorithm)` (not an `Err`) for a
 /// `sig_alg` OID this server has no mechanism for, matching KMIP's
 /// honest-degrade contract for Signature Verify / Validate.
+///
+/// Part F §F7 — `session` is the CALLER's already-resolved
+/// `deps.resolve_tenant_session(...)` result (this helper has no auth
+/// context of its own; reading the bare `deps.engine_session` field
+/// here, as it did before, silently ignored tenancy). The key material
+/// verified against is caller-supplied bytes, not a stored object — but
+/// the transient import still creates (and destroys) an object inside
+/// whatever token `session` names, so it must be the caller's own.
 pub fn verify_with_spki(
-    deps: &Deps,
+    session: Option<u32>,
     spki: &SubjectPublicKeyInfoOwned,
     sig_alg: &AlgorithmIdentifierOwned,
     msg: &[u8],
@@ -163,7 +172,7 @@ pub fn verify_with_spki(
 ) -> Result<SpkiVerdict> {
     use softhsmrustv3::constants::CKR_SIGNATURE_INVALID;
 
-    let session = deps.engine_session.ok_or_else(|| {
+    let session = session.ok_or_else(|| {
         KmipError::failed(
             ResultReason::CryptographicFailure,
             "verify_with_spki: no engine session — cannot verify without key material",
@@ -318,7 +327,7 @@ mod tests {
         let spki = SubjectPublicKeyInfoOwned::from_der(&spki_der).unwrap();
         let sig_alg = alg_id(OID_ECDSA_SHA256);
 
-        let verdict = verify_with_spki(&deps, &spki, &sig_alg, msg, &der_sig).unwrap();
+        let verdict = verify_with_spki(deps.engine_session, &spki, &sig_alg, msg, &der_sig).unwrap();
         assert_eq!(verdict, SpkiVerdict::Valid);
 
         let mut tampered = der_sig.clone();
@@ -328,7 +337,7 @@ mod tests {
         // a valid Ecdsa-Sig-Value (CryptographicFailure) or it parses but
         // no longer verifies (Invalid) — either is an honest "not valid",
         // never a false Valid.
-        match verify_with_spki(&deps, &spki, &sig_alg, msg, &tampered) {
+        match verify_with_spki(deps.engine_session, &spki, &sig_alg, msg, &tampered) {
             Ok(v) => assert_eq!(v, SpkiVerdict::Invalid),
             Err(e) => assert_eq!(e.result_reason(), ResultReason::CryptographicFailure),
         }
@@ -356,7 +365,7 @@ mod tests {
         // not in the supported table.
         let sig_alg = alg_id("1.2.840.113549.1.1.4");
 
-        let verdict = verify_with_spki(&deps, &spki, &sig_alg, b"x", b"not a real signature").unwrap();
+        let verdict = verify_with_spki(deps.engine_session, &spki, &sig_alg, b"x", b"not a real signature").unwrap();
         assert_eq!(verdict, SpkiVerdict::UnsupportedAlgorithm);
 
         softhsmrustv3::native::close_session(session).unwrap();
@@ -393,7 +402,7 @@ mod tests {
         let spki = SubjectPublicKeyInfoOwned::from_der(&spki_der).unwrap();
         let sig_alg = alg_id(OID_ECDSA_SHA256);
 
-        let err = verify_with_spki(&deps, &spki, &sig_alg, b"x", b"y").unwrap_err();
+        let err = verify_with_spki(deps.engine_session, &spki, &sig_alg, b"x", b"y").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::CryptographicFailure);
         softhsmrustv3::native::close_session(session).unwrap();
     }
@@ -425,7 +434,7 @@ mod tests {
         // Transient imports use CKA_ID = TRANSIENT_ID = b"\x00", distinct
         // from this test's own b"\x01" keys, so a lookup by that ID
         // finding nothing after the call proves cleanup ran.
-        verify_with_spki(&deps, &spki, &sig_alg, msg, &der_sig).unwrap();
+        verify_with_spki(deps.engine_session, &spki, &sig_alg, msg, &der_sig).unwrap();
         let leftover = softhsmrustv3::native::find_all_by_cka_id(session, b"\x00").unwrap();
         assert!(leftover.is_empty(), "transient verify object was not destroyed: {leftover:?}");
 

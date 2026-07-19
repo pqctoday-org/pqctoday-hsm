@@ -54,6 +54,7 @@ use x509_cert::TbsCertificate;
 
 use crate::error::{KmipError, Result, ResultReason};
 
+#[cfg(test)]
 use super::deps::Deps;
 use super::spki_verify::{verify_with_spki, SpkiVerdict};
 
@@ -134,9 +135,10 @@ pub fn reconstruct_delta(primary_tbs: &TbsCertificate) -> Result<Option<DeltaCer
 /// Verify the reconstructed delta certificate's own signature against
 /// its own SPKI — an entirely independent check from the primary
 /// certificate's signature (which `validate.rs`'s ordinary path already
-/// verifies).
-pub fn verify_delta_signature(deps: &Deps, delta: &DeltaCert) -> Result<SpkiVerdict> {
-    verify_with_spki(deps, &delta.spki, &delta.sig_alg, &delta.tbs_der, &delta.signature)
+/// verifies). `session` is the caller's resolved tenant session (Part F
+/// §F7) — see `verify_with_spki`'s doc comment.
+pub fn verify_delta_signature(session: Option<u32>, delta: &DeltaCert) -> Result<SpkiVerdict> {
+    verify_with_spki(session, &delta.spki, &delta.sig_alg, &delta.tbs_der, &delta.signature)
 }
 
 #[cfg(test)]
@@ -341,7 +343,7 @@ pub(crate) mod tests {
             reparsed.extensions.unwrap_or_default().iter().map(|e| e.extn_id.to_string()).collect();
         assert_eq!(remaining_oids, vec![KeyUsage::OID.to_string()]);
 
-        let verdict = verify_delta_signature(&deps, &delta).unwrap();
+        let verdict = verify_delta_signature(deps.engine_session, &delta).unwrap();
         assert_eq!(verdict, SpkiVerdict::Valid, "a real ECDSA delta signature over the reconstructed TBS must verify");
     }
 
@@ -352,7 +354,7 @@ pub(crate) mod tests {
         let (_cert_der, tbs) = build_chameleon_primary_tbs(session, true);
 
         let delta = reconstruct_delta(&tbs).unwrap().expect("DeltaCertificateDescriptor present");
-        let verdict = verify_delta_signature(&deps, &delta).unwrap();
+        let verdict = verify_delta_signature(deps.engine_session, &delta).unwrap();
         assert_eq!(verdict, SpkiVerdict::Invalid, "a tampered delta signature must never verify");
     }
 

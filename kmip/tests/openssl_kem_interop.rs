@@ -141,6 +141,7 @@ fn register_key(
             protection_storage_masks: None,
             certificate_payload: None,
         },
+        &AuthContext::open(),
         "interop-register",
     )
     .expect("register")

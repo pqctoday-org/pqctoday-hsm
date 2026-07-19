@@ -699,7 +699,7 @@ mod tests {
             }),
             protection_storage_masks: None,
             certificate_payload: None,
-        }, "c").unwrap();
+        }, &AuthContext::open(), "c").unwrap();
 
         let r = get_attributes(&d, GetAttributesRequest {
             uid: resp.uid,

@@ -251,6 +251,7 @@ fn import_aes_with_material(deps: &Deps, uid: &str, material: Vec<u8>) -> String
             }),
             certificate_payload: None,
         },
+        &AuthContext::open(),
         "import",
     )
     .unwrap();
@@ -283,6 +284,7 @@ fn import_material_round_trips_through_get_and_export() {
             key_compression_type: None,
             key_wrapping_specification: None,
         },
+        &AuthContext::open(),
         "ie-export",
     )
     .unwrap();
@@ -989,6 +991,7 @@ fn validate_stored_self_signed_cert_returns_valid_and_error_paths() {
     let r = validate(
         &deps,
         ValidateRequest { certificates: vec![], uids: vec!["cert-ca".into()], validity_date: None },
+        &AuthContext::open(),
         "v-valid",
     )
     .unwrap();
@@ -1003,6 +1006,7 @@ fn validate_stored_self_signed_cert_returns_valid_and_error_paths() {
             uids: vec![],
             validity_date: Some(OffsetDateTime::now_utc() + time::Duration::days(365 * 100)),
         },
+        &AuthContext::open(),
         "v-expired",
     )
     .unwrap();
@@ -1016,6 +1020,7 @@ fn validate_stored_self_signed_cert_returns_valid_and_error_paths() {
     let r = validate(
         &deps,
         ValidateRequest { certificates: vec![leaf.der().to_vec()], uids: vec![], validity_date: None },
+        &AuthContext::open(),
         "v-unknown",
     )
     .unwrap();
@@ -1029,6 +1034,7 @@ fn validate_stored_self_signed_cert_returns_valid_and_error_paths() {
             uids: vec![],
             validity_date: None,
         },
+        &AuthContext::open(),
         "v-chain",
     )
     .unwrap();
@@ -1038,6 +1044,7 @@ fn validate_stored_self_signed_cert_returns_valid_and_error_paths() {
     let err = validate(
         &deps,
         ValidateRequest { certificates: vec![], uids: vec!["ghost".into()], validity_date: None },
+        &AuthContext::open(),
         "v-nf",
     )
     .unwrap_err();
@@ -1057,6 +1064,7 @@ fn validate_stored_self_signed_cert_returns_valid_and_error_paths() {
     let err = validate(
         &deps,
         ValidateRequest { certificates: vec![], uids: vec!["sym".into()], validity_date: None },
+        &AuthContext::open(),
         "v-iot",
     )
     .unwrap_err();
@@ -1135,6 +1143,7 @@ fn certify_issues_certificate_get_able_with_links() {
             certificate_request: Some(csr.der().to_vec()),
             ..CertifyRequest::default()
         },
+        &AuthContext::open(),
         "e2e-certify",
     )
     .unwrap();
@@ -1347,6 +1356,7 @@ fn import_certificate_round_trips_der_no_algorithm_attribute_required() {
             managed_object: None,
             certificate_payload: Some((0 /* X.509 */, der.clone())),
         },
+        &AuthContext::open(),
         "import-cert",
     )
     .unwrap();

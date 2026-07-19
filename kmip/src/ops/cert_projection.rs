@@ -34,8 +34,13 @@ use super::deps::Deps;
 /// all; it remains a safety net for the server-generated paths
 /// (`bootstrap_ca_certificate`, `Certify`, `Re-certify`), where hitting it
 /// would indicate a real bug upstream.
+/// Part F §F7 — `session` is the CALLER's already-resolved tenant
+/// session (`deps.resolve_tenant_session(...)`), so the projected
+/// `CKO_CERTIFICATE` lands in the requesting tenant's own token, not a
+/// shared one. `deps` stays for audit emission only.
 pub(crate) fn project_certificate_to_engine(
     deps: &Deps,
+    session: Option<u32>,
     correlation_id: &str,
     op: &str,
     uid: &str,
@@ -43,7 +48,7 @@ pub(crate) fn project_certificate_to_engine(
     cka_id: &[u8],
     category: u32,
 ) {
-    let Some(session) = deps.engine_session else {
+    let Some(session) = session else {
         return;
     };
     let subject = super::der_x509::extract_subject_der(cert_der).unwrap_or_default();

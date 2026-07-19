@@ -313,6 +313,7 @@ mod tests {
                 key_compression_type: None,
                 key_wrapping_specification: None,
             },
+            &AuthContext::open(),
             "c",
         )
         .unwrap();
