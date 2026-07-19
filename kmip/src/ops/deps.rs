@@ -697,28 +697,23 @@ mod tests {
         );
     }
 
-    // Several pre-existing tests elsewhere in this crate (e.g. ops::certify)
-    // call softhsmrustv3::native::session::finalize() directly against the
-    // process-global engine, with no cross-file synchronization — a
-    // pre-existing test-suite hygiene gap, not a production concern
-    // (production KMIP's C_Finalize handling deliberately does NOT call the
-    // real engine finalize(), so this class of interference cannot occur
-    // outside `cargo test`; see the pkcs11_virtual_initialized doc comment
-    // above). Verified: both tests below pass reliably every time run
-    // together in isolation (`cargo test -- <these two test names>`) and
-    // fail only when raced against the full suite's parallel finalize()
-    // callers. Ignored rather than serialized against files this change
-    // doesn't otherwise touch; run manually with `--include-ignored` (or
-    // filtered, as above) to exercise them.
+    // These two tests exercise the real engine (via `resolve_tenant_session`'s
+    // Strict/Auto provisioning path). The engine's session/token state is
+    // process-global and `cargo test` runs lib tests in parallel, so any
+    // other test's `native::session::finalize()` would wipe the slot this
+    // one just provisioned. The fix (2026-07-19, closing §G2's finalize()
+    // gap) is the same one every other engine-touching lib test in this
+    // crate already uses: hold the crate-wide `engine_lock()` for the whole
+    // test. Every finalize()-calling test acquires that same lock (verified:
+    // certify via `ca_engine_deps`, register_import_export, create, and the
+    // helper-based spki_verify/catalyst/chameleon/… fixtures all do), so
+    // while this test holds it no concurrent finalize() can run. Slots 61/72
+    // remain unique to these two tests, and neither finalizes at the end —
+    // the next engine test's own start-of-test finalize() clears them, since
+    // it can only run once this one releases the lock.
     #[test]
-    #[ignore = "races other tests' direct native::session::finalize() calls under full-suite parallelism — run in isolation, see comment above"]
     fn strict_mode_provisions_configured_tenant_and_caches_it() {
-        // NOTE: deliberately no native::session::finalize() here — this
-        // engine state is process-global, and cargo test runs this crate's
-        // lib tests in parallel by default; wiping it would race every
-        // other concurrently-running test that also touches the engine
-        // (several already do). Using a slot (61) no other test in this
-        // crate touches is what makes this test safe without it.
+        let _guard = crate::ops::helpers::engine_lock();
         let alice = crate::server::auth::Identity { username: "alice-strict-provision".into() };
         let config = DepsConfig {
             tenancy_mode: TenancyMode::Strict,
@@ -759,21 +754,15 @@ mod tests {
 
     /// The engine-touching half: one auto-provisioned tenant actually
     /// lands on the requested slot, with a real USER-logged-in session
-    /// and a recorded PIN pair. Deliberately ONE tenant, not two — a
-    /// second provisioning call in the same test opens a window where a
-    /// concurrently-running test's own `finalize()` (several pre-existing
-    /// tests elsewhere in this crate call it, sharing the same
-    /// process-global engine) can land between the two calls and wipe
-    /// the slot this test just created (observed: deterministic
-    /// CKR_SLOT_ID_INVALID under cargo test's default parallelism with a
-    /// two-tenant version of this test). `resolve_tenant_session`'s Auto
-    /// branch runs the identical provisioning path regardless of which
-    /// identity or slot number is involved, so this single-tenant,
-    /// single-engine-call test — combined with the slot-numbering test
-    /// above — covers the same property without the vulnerable window.
+    /// and a recorded PIN pair. Holds `engine_lock()` for the whole test
+    /// (see `strict_mode_provisions_configured_tenant_and_caches_it`),
+    /// which serialises it against every other engine-touching test — so
+    /// a second provisioning call is now safe (no concurrent finalize()
+    /// can land between the two), and this test exercises the cache-hit
+    /// path directly rather than deferring it to the slot-numbering test.
     #[test]
-    #[ignore = "races other tests' direct native::session::finalize() calls under full-suite parallelism — run in isolation, see the comment on strict_mode_provisions_configured_tenant_and_caches_it above"]
     fn auto_mode_provisions_tenant_with_recorded_pins() {
+        let _guard = crate::ops::helpers::engine_lock();
         let config = DepsConfig { tenancy_mode: TenancyMode::Auto, ..DepsConfig::default() };
         let deps = test_deps(config);
         deps.next_auto_slot.store(72, std::sync::atomic::Ordering::Relaxed);
