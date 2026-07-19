@@ -16,16 +16,36 @@
 //! measurement point per op and emits one JSONL row per point (§A4.1's
 //! output contract) to stdout.
 //!
-//! Scope note (this increment): 2 fixed tenants, shared-1-instance
-//! topology, pkcs11-direct access path only. Topology B (independent
-//! N instances), the full ~18-algorithm matrix (§A5), and kmip mode
-//! (§P2) are later, separately-verified increments — not built here.
+//! Topology B (§A4.1/§A4.2, "independent-N-instances"): `--instances N`
+//! (N>1) turns this invocation into a PARENT that spawns N SEPARATE OS
+//! PROCESSES of this same binary, each running the identical single-
+//! instance measurement in complete isolation, and relays their JSONL
+//! rows to its own stdout. Real process separation, not simulated —
+//! `rust/src/state.rs`'s `TOKEN_STORE`/`OBJECTS`/`SESSIONS` are
+//! `lazy_static!` (process-global, Mutex-guarded), confirmed by reading
+//! that file before designing this: multiple OS THREADS in one process
+//! genuinely share and contend on that state (exactly what
+//! shared-1-instance measures), while multiple OS PROCESSES each get
+//! their own independent copy purely from address-space separation — no
+//! IPC or explicit reset needed for the isolation to be real. Children
+//! are spawned via `Command::new(current_exe)` (a fresh process image),
+//! not a raw POSIX `fork()`: forking a multi-threaded process is a
+//! well-known hazard (only the forking thread survives in the child;
+//! mutexes held by other threads at fork time stay locked forever) —
+//! spawning a new process achieves the identical "separate process,
+//! separate dlopen'd engine copy" independence this topology needs,
+//! without that hazard.
+//!
+//! Scope note (this increment): 2 fixed tenants per instance,
+//! pkcs11-direct access path only, 5 of the ~18-algorithm matrix (§A5).
+//! The full algorithm matrix and kmip mode (§P2) are later, separately-
+//! verified increments — not built here.
 
 mod algos;
 mod measure;
 mod pkcs11;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use clap::Parser;
 use pkcs11::Engine;
 use softhsmrustv3::ck_abi::{
@@ -33,6 +53,8 @@ use softhsmrustv3::ck_abi::{
     CK_VOID_PTR,
 };
 use softhsmrustv3::constants::{CKA_EC_POINT, CKA_VALUE, CKR_KEY_HANDLE_INVALID, CKR_OBJECT_HANDLE_INVALID};
+use std::io::Read;
+use std::process::Stdio;
 use std::sync::Arc;
 
 #[derive(Parser, Debug)]
@@ -43,7 +65,9 @@ struct Cli {
     library: String,
     /// Worker threads for the measured loop (§A4.2 axis — round-robin
     /// across the 2 tenants, each on its OWN session so concurrent ops
-    /// don't race on one session's operation state, §6.5.1).
+    /// don't race on one session's operation state, §6.5.1). Per §A4.2,
+    /// this is PER INSTANCE: total concurrency under Topology B is
+    /// `threads * instances`.
     #[arg(long, default_value_t = 4)]
     threads: u32,
     /// Measured window per point, seconds (§A6 "seconds-per-point", §A7
@@ -53,6 +77,18 @@ struct Cli {
     /// Unmeasured warm-up per point, seconds (§A7).
     #[arg(long, default_value_t = 0.5)]
     warmup_secs: f64,
+    /// Topology B (§A4.2): number of independent instances, 1-4. `1`
+    /// (default) is Topology A (shared-1-instance) — unchanged in-process
+    /// behavior. `>1` makes this invocation the parent orchestrator.
+    #[arg(long, default_value_t = 1)]
+    instances: u32,
+    /// INTERNAL — set by the parent orchestrator on every child it spawns
+    /// so the child stamps its JSONL rows as one of an N-instance
+    /// Topology-B run even though it always executes as a plain,
+    /// single-instance measurement itself (`instances` is forced to `1`
+    /// on the child's own invocation). Not meant to be set by hand.
+    #[arg(long, hide = true)]
+    topology_instances: Option<u32>,
 }
 
 /// One tenant's bootstrapped token + real, sanity-checked key material for
@@ -151,6 +187,64 @@ fn provision_tenant(engine: &Engine, name: &str) -> Result<Tenant> {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    if cli.instances > 1 {
+        return run_parent(&cli);
+    }
+    run_instance(&cli)
+}
+
+/// Topology B orchestrator: spawn `cli.instances` fresh child processes of
+/// this same binary, each forced to `--instances 1` (so it runs the exact
+/// same single-instance code path as Topology A) but stamped with
+/// `--topology-instances N` so its JSONL rows self-report as one instance
+/// of an N-instance independent topology. Each child's whole stdout is a
+/// few short JSON lines (5 rows for this increment's algorithm set) —
+/// well under any OS pipe buffer, so reading each child fully before
+/// moving to the next cannot deadlock on a full pipe; this stays true as
+/// long as no future increment makes a single instance's JSONL output
+/// pipe-buffer-sized (megabytes) — if that changes, switch to draining
+/// each child's stdout on its own thread instead of sequentially.
+fn run_parent(cli: &Cli) -> Result<()> {
+    let self_exe = std::env::current_exe().context("resolving current_exe for child re-exec")?;
+    eprintln!(
+        "[[parent]] topology B: spawning {} independent instances (separate processes, separate dlopen'd engine copies)",
+        cli.instances
+    );
+
+    let mut children = Vec::new();
+    for instance_id in 0..cli.instances {
+        let child = std::process::Command::new(&self_exe)
+            .arg("--library").arg(&cli.library)
+            .arg("--threads").arg(cli.threads.to_string())
+            .arg("--duration-secs").arg(cli.duration_secs.to_string())
+            .arg("--warmup-secs").arg(cli.warmup_secs.to_string())
+            .arg("--instances").arg("1")
+            .arg("--topology-instances").arg(cli.instances.to_string())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .with_context(|| format!("spawning instance {instance_id}"))?;
+        children.push(child);
+    }
+
+    for (instance_id, mut child) in children.into_iter().enumerate() {
+        let mut jsonl = String::new();
+        child.stdout.take().expect("piped stdout").read_to_string(&mut jsonl).context("reading child stdout")?;
+        print!("{jsonl}");
+        let status = child.wait().with_context(|| format!("waiting on instance {instance_id}"))?;
+        if !status.success() {
+            bail!("instance {instance_id} exited with {status}");
+        }
+    }
+    eprintln!("[[parent]] all {} instances completed successfully", cli.instances);
+    Ok(())
+}
+
+fn run_instance(cli: &Cli) -> Result<()> {
+    let (topology, topology_instances): (&'static str, u32) = match cli.topology_instances {
+        Some(n) => ("independent-n-instances", n),
+        None => ("shared-1-instance", 1),
+    };
 
     let engine = Engine::load(&cli.library).with_context(|| format!("loading engine library at {:?}", cli.library))?;
     engine.initialize().context("C_Initialize")?;
@@ -265,8 +359,8 @@ fn main() -> Result<()> {
         let (p50_ms, p99_ms) = measure::percentiles_ms(latencies_ms);
         measure::ResultRow {
             access_path: "pkcs11-direct",
-            topology: "shared-1-instance",
-            instances: 1,
+            topology,
+            instances: topology_instances,
             tenants: tenants.len() as u32,
             threads: cli.threads,
             category, algorithm, security_level, op,
