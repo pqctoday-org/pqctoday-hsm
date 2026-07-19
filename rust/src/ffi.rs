@@ -4828,27 +4828,40 @@ fn oaep_padding(hash_alg: u32, mgf: u32, label: &[u8]) -> Result<rsa::Oaep, u32>
     })
 }
 
-/// Parse CK_RSA_PKCS_OAEP_PARAMS (wasm32, 20 B: hashAlg, mgf, source,
-/// pSourceData, ulSourceDataLen) → (hashAlg, mgf, label). Absent/short param
-/// keeps the legacy default (SHA-256, MGF1-SHA256, no label).
+/// Parse CK_RSA_PKCS_OAEP_PARAMS (§6.4.4: hashAlg, mgf, source, pSourceData,
+/// ulSourceDataLen) at NATIVE width → (hashAlg, mgf, label). Absent/short
+/// param keeps the legacy default (SHA-256, MGF1-SHA256, no label).
+///
+/// Fixed from a hardcoded-4-byte-word parse (`*const u32`), which only
+/// matched wasm32's 4-byte `usize`/`CK_ULONG` layout and misparsed on
+/// native 64-bit builds (where `CK_ULONG`/pointer fields are 8 bytes —
+/// `pSourceData` at word-index 3 would land at the wrong byte offset
+/// entirely, and `ulSourceDataLen` past it further still). Same bug class
+/// `CKM_AES_GCM`'s and `CKM_CHACHA20_POLY1305`'s params parsing already
+/// had fixed elsewhere in this file (see `parse_chacha20_params` above for
+/// the exact precedent this copies: read as `*const usize`, which is 4
+/// bytes on wasm32 and 8 bytes on native 64-bit — one code path, both
+/// targets, matching the real struct's actual field width on each).
 unsafe fn parse_oaep_params(p_param: *const u8, ul_param_len: u32) -> Result<(u32, u32, Vec<u8>), u32> {
-    if p_param.is_null() || ul_param_len < 4 {
+    let usz = core::mem::size_of::<usize>();
+    if p_param.is_null() || (ul_param_len as usize) < usz {
         return Ok((CKM_SHA256, CKG_MGF1_SHA256, Vec::new()));
     }
-    let hash_alg = std::ptr::read_unaligned(p_param as *const u32);
-    if ul_param_len < 20 {
+    let prm = p_param as *const usize;
+    let hash_alg = *prm as u32;
+    if (ul_param_len as usize) < 5 * usz {
         return Ok((hash_alg, 0, Vec::new()));
     }
-    let mgf = std::ptr::read_unaligned((p_param as *const u32).add(1));
-    let source = std::ptr::read_unaligned((p_param as *const u32).add(2));
-    let src_ptr = std::ptr::read_unaligned((p_param as *const u32).add(3));
-    let src_len = std::ptr::read_unaligned((p_param as *const u32).add(4)) as usize;
-    let label = if src_ptr != 0 && src_len > 0 {
+    let mgf = *prm.add(1) as u32;
+    let source = *prm.add(2) as u32;
+    let src_ptr = *prm.add(3) as *const u8;
+    let src_len = *prm.add(4);
+    let label = if !src_ptr.is_null() && src_len > 0 {
         // §6.4.4 — only CKZ_DATA_SPECIFIED carries a label.
         if source != CKZ_DATA_SPECIFIED {
             return Err(CKR_MECHANISM_PARAM_INVALID);
         }
-        std::slice::from_raw_parts(src_ptr as *const u8, src_len).to_vec()
+        std::slice::from_raw_parts(src_ptr, src_len).to_vec()
     } else {
         Vec::new()
     };
