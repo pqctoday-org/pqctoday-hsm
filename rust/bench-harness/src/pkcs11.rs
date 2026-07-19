@@ -24,8 +24,11 @@ use softhsmrustv3::ck_abi::{
     CK_OBJECT_HANDLE, CK_RV, CK_SESSION_HANDLE, CK_SLOT_ID, CK_ULONG, CK_USER_TYPE,
     CK_VERSION, CK_VOID_PTR,
 };
-use softhsmrustv3::constants::{CKF_RW_SESSION, CKF_SERIAL_SESSION, CKR_OK, CKU_SO, CKU_USER};
+use softhsmrustv3::constants::{
+    CKA_EC_PARAMS, CKA_PARAMETER_SET, CKF_RW_SESSION, CKF_SERIAL_SESSION, CKR_OK, CKU_SO, CKU_USER,
+};
 
+use crate::algos::KeygenParam;
 use anyhow::{bail, Context, Result};
 
 /// `CK_ULONG`/`CK_RV`/`CK_FLAGS` are all `c_ulong` in the engine's ABI
@@ -461,6 +464,44 @@ impl Engine {
             "C_GenerateKeyPair",
         )?;
         Ok((pub_handle, priv_handle))
+    }
+
+    /// `generate_key_pair`, but builds the public-key template from an
+    /// `algos::KeygenParam` — the one place that knows how to encode each
+    /// kind of required attribute (raw `CKA_EC_PARAMS` OID bytes at their
+    /// real declared length, vs. `CKA_PARAMETER_SET` as a bare 4-byte
+    /// `u32` regardless of this platform's 8-byte native `CK_ULONG` —
+    /// see `crypto/handlers.rs::get_attr_ulong`, which reads exactly 4
+    /// bytes at `pValue` no matter what `ulValueLen` says). Keeping this
+    /// encoding logic here, not in `algos.rs`, matches the module's own
+    /// rule: nothing outside `pkcs11.rs` builds a `CK_ATTRIBUTE` by hand.
+    pub fn generate_key_pair_with_param(
+        &self,
+        session: CK_SESSION_HANDLE,
+        mechanism: u32,
+        param: KeygenParam,
+    ) -> Result<(CK_OBJECT_HANDLE, CK_OBJECT_HANDLE)> {
+        match param {
+            KeygenParam::None => self.generate_key_pair(session, mechanism, &mut [], &mut []),
+            KeygenParam::EcParamsOid(oid) => {
+                let mut oid = oid.to_vec();
+                let mut pub_template = [CK_ATTRIBUTE {
+                    attrType: CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE,
+                    pValue: oid.as_mut_ptr() as CK_VOID_PTR,
+                    ulValueLen: oid.len() as CK_ULONG,
+                }];
+                self.generate_key_pair(session, mechanism, &mut pub_template, &mut [])
+            }
+            KeygenParam::ParameterSet(value) => {
+                let mut value = value;
+                let mut pub_template = [CK_ATTRIBUTE {
+                    attrType: CKA_PARAMETER_SET as CK_ATTRIBUTE_TYPE,
+                    pValue: &mut value as *mut u32 as CK_VOID_PTR,
+                    ulValueLen: std::mem::size_of::<u32>() as CK_ULONG,
+                }];
+                self.generate_key_pair(session, mechanism, &mut pub_template, &mut [])
+            }
+        }
     }
 
     pub fn sign_init(&self, session: CK_SESSION_HANDLE, mechanism: u32, key: CK_OBJECT_HANDLE) -> Result<()> {
