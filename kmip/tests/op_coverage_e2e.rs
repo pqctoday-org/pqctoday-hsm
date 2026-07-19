@@ -391,6 +391,7 @@ fn set_attribute_writes_value_and_rejects_read_only() {
     set_attribute(
         &deps,
         SetAttributeRequest { uid: uid.clone(), new_attribute: Attribute::Name("rotated-key-7".into()) },
+        &AuthContext::open(),
         "sa-set",
     )
     .unwrap();
@@ -410,6 +411,7 @@ fn set_attribute_writes_value_and_rejects_read_only() {
     let err = set_attribute(
         &deps,
         SetAttributeRequest { uid, new_attribute: Attribute::State(State::Compromised) },
+        &AuthContext::open(),
         "sa-ro",
     )
     .unwrap_err();
@@ -438,6 +440,7 @@ fn adjust_attribute_increments_usage_mask_by_delta() {
             adjustment_type: AdjustmentType::Increment,
             adjustment_value: Some(UsageMask::SIGN.bits() as i64),
         },
+        &AuthContext::open(),
         "adj",
     )
     .unwrap();
@@ -497,6 +500,7 @@ fn derive_key_produces_usable_derived_object_with_links() {
                 Attribute::CryptographicUsageMask(UsageMask::ENCRYPT | UsageMask::DECRYPT),
             ],
         },
+        &AuthContext::open(),
         "dk-derive",
     )
     .unwrap();
@@ -1280,18 +1284,18 @@ fn pkcs11_get_info_returns_real_ck_info_bytes_against_real_engine() {
     // C_Initialize (0x01) — the KMIP-server-side virtual lifecycle
     // flag; the real engine is already initialized for the server's
     // whole lifetime, this just tracks THIS client's view of it.
-    assert_eq!(pkcs11(&deps, req(1), "pkcs11-e2e-init").unwrap().return_code, 0);
+    assert_eq!(pkcs11(&deps, req(1), &AuthContext::open(), "pkcs11-e2e-init").unwrap().return_code, 0);
 
     // C_GetInfo (0x03) against the REAL engine session — must return
     // actual, non-empty CK_INFO bytes, not the honest-`None` fallback.
-    let info_resp = pkcs11(&deps, req(3), "pkcs11-e2e-getinfo").unwrap();
+    let info_resp = pkcs11(&deps, req(3), &AuthContext::open(), "pkcs11-e2e-getinfo").unwrap();
     assert_eq!(info_resp.return_code, 0);
     let info_bytes = info_resp.output_parameters.expect("real engine must return real CK_INFO bytes");
     assert_eq!(info_bytes.len(), 72, "CK_INFO is 72 bytes per PKCS#11 v3.2 §5.4");
     assert!(info_bytes.iter().any(|&b| b != 0), "real CK_INFO is not all-zero filler");
 
     // C_Finalize (0x02) — clean teardown of the virtual lifecycle flag.
-    assert_eq!(pkcs11(&deps, req(2), "pkcs11-e2e-finalize").unwrap().return_code, 0);
+    assert_eq!(pkcs11(&deps, req(2), &AuthContext::open(), "pkcs11-e2e-finalize").unwrap().return_code, 0);
 
     let _ = softhsmrustv3::native::session::finalize();
 }

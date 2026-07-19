@@ -683,4 +683,109 @@ mod tests {
             alice_get.batch_items[0].result_reason
         );
     }
+
+    /// §M (final sweep — MAC + attribute mutation wired) — the two
+    /// remaining non-crypto-material by-UID op families are owner-checked
+    /// too: Bob can neither MAC with Alice's registered HMAC key nor
+    /// mutate its attributes, while Alice's own MAC and AddAttribute
+    /// succeed. Store-backed HMAC material (no engine session), so this
+    /// isolates the ownership property with no provisioning confound.
+    #[test]
+    fn cross_tenant_mac_and_attribute_ops_are_owner_checked() {
+        let _guard = engine_lock();
+        let alice = Identity { username: "alice-mac".into() };
+        let bob = Identity { username: "bob-mac".into() };
+        let sink: Arc<dyn crate::auditlog::AuditSink> = Arc::new(RingSink::new(64));
+        let deps = Deps::new(Engine::permissive(), Arc::new(MemoryStore::new()), sink, DepsConfig::default());
+
+        // Alice registers a store-backed HMAC key, born Active (past
+        // ActivationDate), with MAC_GENERATE|MAC_VERIFY usage.
+        let register_req = one_off_request(RequestPayload::Register(crate::kmip30::RegisterRequest {
+            object_type: ObjectType::SymmetricKey,
+            attributes: vec![
+                Attribute::CryptographicAlgorithm(KmipAlgorithm::HmacSha256),
+                Attribute::CryptographicLength(256),
+                Attribute::CryptographicUsageMask(UsageMask::MAC_GENERATE | UsageMask::MAC_VERIFY),
+                Attribute::ActivationDate(time::OffsetDateTime::now_utc().unix_timestamp() - 3600),
+            ],
+            managed_object: Some(crate::kmip30::KeyBlock {
+                key_format_type: crate::kmip30::KeyFormatType::Raw,
+                cryptographic_algorithm: KmipAlgorithm::HmacSha256,
+                cryptographic_length: 256,
+                key_value: vec![0x5Au8; 32],
+                key_wrapping_data: None,
+            }),
+            protection_storage_masks: None,
+            certificate_payload: None,
+            secret_data_type: None,
+        }));
+        let register_resp = dispatch_with_transport_identity(&deps, register_req, Some(alice.clone()));
+        assert_eq!(
+            register_resp.batch_items[0].result_status,
+            ResultStatus::Success,
+            "Alice registers her HMAC key: {:?}",
+            register_resp.batch_items[0].result_reason
+        );
+        let ResponsePayload::Register(registered) = register_resp.batch_items[0].payload.clone().unwrap() else {
+            panic!("expected Register response");
+        };
+
+        let mac_req = |uid: &str| {
+            one_off_request(RequestPayload::Mac(crate::kmip30::MacRequest {
+                uid: uid.to_string(),
+                cryptographic_parameters: None,
+                data: b"authenticate me".to_vec(),
+            }))
+        };
+
+        // Bob's MAC with Alice's key — denied at the owner check.
+        let bob_mac = dispatch_with_transport_identity(&deps, mac_req(&registered.uid), Some(bob.clone()));
+        assert_eq!(
+            bob_mac.batch_items[0].result_status,
+            ResultStatus::OperationFailed,
+            "Bob must NOT be able to MAC with Alice's key"
+        );
+        assert_eq!(
+            bob_mac.batch_items[0].result_reason,
+            Some(ResultReason::ObjectNotFound.to_wire_value())
+        );
+
+        // Alice's own MAC works.
+        let alice_mac = dispatch_with_transport_identity(&deps, mac_req(&registered.uid), Some(alice.clone()));
+        assert_eq!(
+            alice_mac.batch_items[0].result_status,
+            ResultStatus::Success,
+            "Alice can MAC with her own key: {:?}",
+            alice_mac.batch_items[0].result_reason
+        );
+
+        // Bob's AddAttribute on Alice's key — denied.
+        let bob_add = one_off_request(RequestPayload::AddAttribute(crate::kmip30::AddAttributeRequest {
+            uid: registered.uid.clone(),
+            new_attribute: Attribute::Name("bob-was-here".into()),
+        }));
+        let bob_add_resp = dispatch_with_transport_identity(&deps, bob_add, Some(bob));
+        assert_eq!(
+            bob_add_resp.batch_items[0].result_status,
+            ResultStatus::OperationFailed,
+            "Bob must NOT be able to mutate Alice's key's attributes"
+        );
+        assert_eq!(
+            bob_add_resp.batch_items[0].result_reason,
+            Some(ResultReason::ObjectNotFound.to_wire_value())
+        );
+
+        // Alice's own AddAttribute works — a real gate, not a blanket deny.
+        let alice_add = one_off_request(RequestPayload::AddAttribute(crate::kmip30::AddAttributeRequest {
+            uid: registered.uid,
+            new_attribute: Attribute::Name("alices-mac-key".into()),
+        }));
+        let alice_add_resp = dispatch_with_transport_identity(&deps, alice_add, Some(alice));
+        assert_eq!(
+            alice_add_resp.batch_items[0].result_status,
+            ResultStatus::Success,
+            "Alice can add an attribute to her own key: {:?}",
+            alice_add_resp.batch_items[0].result_reason
+        );
+    }
 }

@@ -169,6 +169,7 @@ fn ml_dsa_65_create_sign_verify_destroy_against_real_engine() {
             signature: sig_resp.signature.clone(),
             cryptographic_parameters: None,
         },
+        &AuthContext::open(),
         "e2e-verify-ok",
     )
     .unwrap();
@@ -190,6 +191,7 @@ fn ml_dsa_65_create_sign_verify_destroy_against_real_engine() {
             signature: tampered,
             cryptographic_parameters: None,
         },
+        &AuthContext::open(),
         "e2e-verify-bad",
     )
     .unwrap();
@@ -212,6 +214,7 @@ fn ml_dsa_65_create_sign_verify_destroy_against_real_engine() {
             uid: priv_rec.uid.clone(),
             reason: RevocationReason::CessationOfOperation,
         },
+        &AuthContext::open(),
         "e2e-revoke",
     )
     .unwrap();
@@ -277,6 +280,7 @@ fn ml_dsa_87_create_sign_verify_against_real_engine() {
             signature: sig.signature,
             cryptographic_parameters: None,
         },
+        &AuthContext::open(),
         "v",
     )
     .unwrap();
@@ -351,6 +355,7 @@ fn k6_rsa_sha384_sha512_sign_verify_against_real_engine() {
                 signature: sig.signature.clone(),
                 cryptographic_parameters: Some(cp(hash, padding)),
             },
+            &AuthContext::open(),
             "k6-verify",
         )
         .unwrap();
@@ -370,6 +375,7 @@ fn k6_rsa_sha384_sha512_sign_verify_against_real_engine() {
                 signature: sig.signature,
                 cryptographic_parameters: Some(cp(other, padding)),
             },
+            &AuthContext::open(),
             "k6-verify-cross",
         )
         .unwrap();
@@ -390,6 +396,7 @@ fn k6_rsa_sha384_sha512_sign_verify_against_real_engine() {
             signature: vec![0u8; 256],
             cryptographic_parameters: Some(cp(HashingAlgorithm::Sha1, Some(0x0a))),
         },
+        &AuthContext::open(),
         "k6-verify-sha1",
     )
     .unwrap();
@@ -481,6 +488,7 @@ fn k18_rsa_pss_salt_length_threads_to_engine() {
                 signature: sig,
                 cryptographic_parameters: cp,
             },
+            &AuthContext::open(),
             "k18-verify",
         )
         .unwrap()
@@ -670,6 +678,7 @@ fn k9_register_ml_dsa_65_sign_verify_roundtrip() {
             signature: sig.signature,
             cryptographic_parameters: None,
         },
+        &AuthContext::open(),
         "k9-verify",
     )
     .expect("SignatureVerify with registered ML-DSA-65 public key");
@@ -808,6 +817,7 @@ fn k9_register_slh_dsa_shake_128f_sign_verify_roundtrip() {
             signature: sig.signature,
             cryptographic_parameters: None,
         },
+        &AuthContext::open(),
         "k9-slh-verify",
     )
     .expect("SignatureVerify with registered SLH-DSA public key");
@@ -1151,6 +1161,7 @@ fn k15_hmac_mac_and_verify_route_through_engine() {
             cryptographic_parameters: None,
             data: data.clone(),
         },
+        &AuthContext::open(),
         "k15-hmac-mac",
     )
     .unwrap();
@@ -1191,6 +1202,7 @@ fn k15_hmac_mac_and_verify_route_through_engine() {
             data: data.clone(),
             mac_data: m.mac_data.clone(),
         },
+        &AuthContext::open(),
         "k15-hmac-verify",
     )
     .unwrap();
@@ -1213,6 +1225,7 @@ fn k15_hmac_mac_and_verify_route_through_engine() {
             data,
             mac_data: bad,
         },
+        &AuthContext::open(),
         "k15-hmac-verify-bad",
     )
     .unwrap();
@@ -1358,6 +1371,7 @@ fn k17_register_wrapped_hmac_key_then_mac_against_real_engine() {
             cryptographic_parameters: None,
             data: data.clone(),
         },
+        &AuthContext::open(),
         "k17-mac",
     )
     .unwrap();
@@ -1967,6 +1981,7 @@ fn ed25519_create_sign_verify_round_trip() {
             signature: sig_resp.signature.clone(),
             cryptographic_parameters: None,
         },
+        &AuthContext::open(),
         "ed25519-verify-ok",
     )
     .unwrap();
@@ -1983,6 +1998,7 @@ fn ed25519_create_sign_verify_round_trip() {
             signature: tampered,
             cryptographic_parameters: None,
         },
+        &AuthContext::open(),
         "ed25519-verify-bad",
     )
     .unwrap();
@@ -2129,6 +2145,7 @@ fn narrowing_usage_mask_via_set_attribute_shrinks_engine_whitelist() {
             uid: created.uid.clone(),
             new_attribute: Attribute::CryptographicUsageMask(UsageMask::ENCRYPT | UsageMask::DECRYPT),
         },
+        &AuthContext::open(),
         "narrow-set",
     )
     .unwrap();
@@ -2224,6 +2241,7 @@ fn hss_register_sign_verify_against_real_engine() {
             signature: sig1.signature.clone(),
             cryptographic_parameters: None,
         },
+        &AuthContext::open(),
         "hss-e2e-verify-1",
     )
     .unwrap();
@@ -2249,6 +2267,7 @@ fn hss_register_sign_verify_against_real_engine() {
             signature: sig2.signature,
             cryptographic_parameters: None,
         },
+        &AuthContext::open(),
         "hss-e2e-verify-2",
     )
     .unwrap();
@@ -2266,6 +2285,7 @@ fn hss_register_sign_verify_against_real_engine() {
             signature: tampered,
             cryptographic_parameters: None,
         },
+        &AuthContext::open(),
         "hss-e2e-verify-bad",
     )
     .unwrap();
@@ -2326,6 +2346,7 @@ fn create_split_key_then_join_threshold_subset_reconstructs_via_real_engine() {
             ],
             protection_storage_masks: None,
         },
+        &AuthContext::open(),
         "split-key-e2e-create",
     )
     .unwrap();
@@ -2350,6 +2371,7 @@ fn create_split_key_then_join_threshold_subset_reconstructs_via_real_engine() {
             attributes: vec![],
             protection_storage_masks: None,
         },
+        &AuthContext::open(),
         "split-key-e2e-join",
     )
     .unwrap();
@@ -2367,6 +2389,7 @@ fn create_split_key_then_join_threshold_subset_reconstructs_via_real_engine() {
             attributes: vec![],
             protection_storage_masks: None,
         },
+        &AuthContext::open(),
         "split-key-e2e-join-insufficient",
     )
     .unwrap_err();
@@ -2442,6 +2465,7 @@ fn create_split_key_then_join_covers_every_11_54_method_via_real_engine() {
                 attributes,
                 protection_storage_masks: None,
             },
+            &AuthContext::open(),
             "split-key-methods-e2e-create",
         )
         .unwrap_or_else(|e| panic!("method {method}: Create Split Key failed: {e}"));
@@ -2474,6 +2498,7 @@ fn create_split_key_then_join_covers_every_11_54_method_via_real_engine() {
                 attributes: vec![],
                 protection_storage_masks: None,
             },
+            &AuthContext::open(),
             "split-key-methods-e2e-join",
         )
         .unwrap_or_else(|e| panic!("method {method}: Join Split Key failed: {e}"));
@@ -2566,6 +2591,7 @@ fn k3_register_rsa_public_key_accepts_both_pkcs1_and_pkcs8_der() {
             signature: sig.signature.clone(),
             cryptographic_parameters: None,
         },
+        &AuthContext::open(),
         "k3-verify-pkcs8",
     )
     .expect("SignatureVerify against a PKCS#8-registered RSA public key");
@@ -2583,6 +2609,7 @@ fn k3_register_rsa_public_key_accepts_both_pkcs1_and_pkcs8_der() {
             signature: sig.signature,
             cryptographic_parameters: None,
         },
+        &AuthContext::open(),
         "k3-verify-pkcs1",
     )
     .expect("SignatureVerify against a PKCS#1-registered RSA public key");
@@ -2731,6 +2758,7 @@ fn k9_id_placeholder_resolves_after_join_split_key() {
             ],
             protection_storage_masks: None,
         },
+        &AuthContext::open(),
         "k9-precreate-parts",
     )
     .expect("Create Split Key");
@@ -2879,6 +2907,7 @@ fn k3_register_transparent_rsa_public_key_produces_usable_engine_object() {
             signature: sig.signature,
             cryptographic_parameters: None,
         },
+        &AuthContext::open(),
         "k3-verify-transparent",
     )
     .expect("SignatureVerify against a TransparentRSAPublicKey-registered public key");

@@ -143,6 +143,7 @@ fn derive_agree(d: &Deps, priv_uid: &str, peer_public: &[u8]) -> Vec<u8> {
             },
             template_attribute: vec![Attribute::CryptographicLength(256)], // 32 bytes
         },
+        &pqctoday_kmip::server::auth::AuthContext::open(),
         "derive",
     )
     .expect("derive_key ecdh agreement");

@@ -950,7 +950,7 @@ fn handle_payload(
         RequestPayload::GetAttributeList(r) => ResponsePayload::GetAttributeList(get_attribute_list(deps, r, auth, correlation_id)?),
         RequestPayload::Locate(r) => ResponsePayload::Locate(locate(deps, r, auth, correlation_id)?),
         RequestPayload::Activate(r) => ResponsePayload::Activate(activate(deps, r, correlation_id)?),
-        RequestPayload::Revoke(r) => ResponsePayload::Revoke(revoke(deps, r, correlation_id)?),
+        RequestPayload::Revoke(r) => ResponsePayload::Revoke(revoke(deps, r, auth, correlation_id)?),
         RequestPayload::Destroy(r) => ResponsePayload::Destroy(destroy(deps, r, auth, correlation_id)?),
         RequestPayload::Encrypt(r) => ResponsePayload::Encrypt(encrypt(deps, r, auth, correlation_id)?),
         RequestPayload::Decrypt(r) => ResponsePayload::Decrypt(decrypt(deps, r, auth, correlation_id)?),
@@ -962,7 +962,7 @@ fn handle_payload(
         }
         RequestPayload::Sign(r) => ResponsePayload::Sign(sign(deps, r, auth, correlation_id)?),
         RequestPayload::SignatureVerify(r) => {
-            ResponsePayload::SignatureVerify(signature_verify(deps, r, correlation_id)?)
+            ResponsePayload::SignatureVerify(signature_verify(deps, r, auth, correlation_id)?)
         }
         RequestPayload::Validate(r) => ResponsePayload::Validate(validate(deps, r, auth, correlation_id)?),
         // P2.3 — §6.1.6 Certify / §6.1.50 Re-certify (PQC-capable CA).
@@ -972,30 +972,30 @@ fn handle_payload(
         RequestPayload::Certify(r) => ResponsePayload::Certify(certify(deps, r, auth, correlation_id)?),
         RequestPayload::ReCertify(r) => ResponsePayload::ReCertify(recertify(deps, r, auth, correlation_id)?),
         RequestPayload::Interop(r) => ResponsePayload::Interop(interop(deps, r, correlation_id)?),
-        RequestPayload::AddAttribute(r) => ResponsePayload::AddAttribute(add_attribute(deps, r, correlation_id)?),
-        RequestPayload::ModifyAttribute(r) => ResponsePayload::ModifyAttribute(modify_attribute(deps, r, correlation_id)?),
-        RequestPayload::DeleteAttribute(r) => ResponsePayload::DeleteAttribute(delete_attribute(deps, r, correlation_id)?),
-        RequestPayload::SetAttribute(r) => ResponsePayload::SetAttribute(set_attribute(deps, r, correlation_id)?),
-        RequestPayload::AdjustAttribute(r) => ResponsePayload::AdjustAttribute(adjust_attribute(deps, r, correlation_id)?),
+        RequestPayload::AddAttribute(r) => ResponsePayload::AddAttribute(add_attribute(deps, r, auth, correlation_id)?),
+        RequestPayload::ModifyAttribute(r) => ResponsePayload::ModifyAttribute(modify_attribute(deps, r, auth, correlation_id)?),
+        RequestPayload::DeleteAttribute(r) => ResponsePayload::DeleteAttribute(delete_attribute(deps, r, auth, correlation_id)?),
+        RequestPayload::SetAttribute(r) => ResponsePayload::SetAttribute(set_attribute(deps, r, auth, correlation_id)?),
+        RequestPayload::AdjustAttribute(r) => ResponsePayload::AdjustAttribute(adjust_attribute(deps, r, auth, correlation_id)?),
         RequestPayload::Register(r) => ResponsePayload::Register(register(deps, r, auth, correlation_id)?),
         RequestPayload::Import(r) => ResponsePayload::Import(import_object(deps, r, auth, correlation_id)?),
         RequestPayload::Export(r) => ResponsePayload::Export(export(deps, r, auth, correlation_id)?),
         RequestPayload::Deactivate(r) => ResponsePayload::Deactivate(deactivate(deps, r, correlation_id)?),
         RequestPayload::Check(r) => ResponsePayload::Check(check(deps, r, correlation_id)?),
         RequestPayload::ObtainLease(r) => ResponsePayload::ObtainLease(obtain_lease(deps, r, correlation_id)?),
-        RequestPayload::CreateSplitKey(r) => ResponsePayload::CreateSplitKey(create_split_key(deps, r, correlation_id)?),
-        RequestPayload::JoinSplitKey(r) => ResponsePayload::JoinSplitKey(join_split_key(deps, r, correlation_id)?),
+        RequestPayload::CreateSplitKey(r) => ResponsePayload::CreateSplitKey(create_split_key(deps, r, auth, correlation_id)?),
+        RequestPayload::JoinSplitKey(r) => ResponsePayload::JoinSplitKey(join_split_key(deps, r, auth, correlation_id)?),
         RequestPayload::Archive(r) => ResponsePayload::Archive(archive(deps, r, correlation_id)?),
         RequestPayload::Recover(r) => ResponsePayload::Recover(recover(deps, r, correlation_id)?),
         RequestPayload::Obliterate(r) => ResponsePayload::Obliterate(obliterate(deps, r, correlation_id)?),
         RequestPayload::DiscoverVersions(r) => ResponsePayload::DiscoverVersions(discover_versions(deps, r, correlation_id)?),
         RequestPayload::Ping(r) => ResponsePayload::Ping(ping(deps, r, correlation_id)?),
-        RequestPayload::Mac(r) => ResponsePayload::Mac(mac(deps, r, correlation_id)?),
-        RequestPayload::MacVerify(r) => ResponsePayload::MacVerify(mac_verify(deps, r, correlation_id)?),
+        RequestPayload::Mac(r) => ResponsePayload::Mac(mac(deps, r, auth, correlation_id)?),
+        RequestPayload::MacVerify(r) => ResponsePayload::MacVerify(mac_verify(deps, r, auth, correlation_id)?),
         RequestPayload::Hash(r) => ResponsePayload::Hash(hash(deps, r, correlation_id)?),
-        RequestPayload::CreateCredential(r) => ResponsePayload::CreateCredential(create_credential(deps, r, correlation_id)?),
-        RequestPayload::CreateGroup(r) => ResponsePayload::CreateGroup(create_group(deps, r, correlation_id)?),
-        RequestPayload::CreateUser(r) => ResponsePayload::CreateUser(create_user(deps, r, correlation_id)?),
+        RequestPayload::CreateCredential(r) => ResponsePayload::CreateCredential(create_credential(deps, r, auth, correlation_id)?),
+        RequestPayload::CreateGroup(r) => ResponsePayload::CreateGroup(create_group(deps, r, auth, correlation_id)?),
+        RequestPayload::CreateUser(r) => ResponsePayload::CreateUser(create_user(deps, r, auth, correlation_id)?),
         RequestPayload::Log(r) => ResponsePayload::Log(log(deps, r, correlation_id)?),
         RequestPayload::Login(r) => ResponsePayload::Login(login(deps, r, auth, correlation_id)?),
         RequestPayload::Logout(r) => ResponsePayload::Logout(logout(deps, r, correlation_id)?),
@@ -1020,7 +1020,7 @@ fn handle_payload(
         }
         RequestPayload::RngRetrieve(r) => ResponsePayload::RngRetrieve(rng_retrieve(deps, r, correlation_id)?),
         RequestPayload::RngSeed(r) => ResponsePayload::RngSeed(rng_seed(deps, r, correlation_id)?),
-        RequestPayload::Pkcs11(r) => ResponsePayload::Pkcs11(pkcs11(deps, r, correlation_id)?),
+        RequestPayload::Pkcs11(r) => ResponsePayload::Pkcs11(pkcs11(deps, r, auth, correlation_id)?),
         // K19 — Baseline client-to-server ops (§6.1.26/27/58/59).
         RequestPayload::GetUsageAllocation(r) => {
             ResponsePayload::GetUsageAllocation(get_usage_allocation(deps, r, correlation_id)?)
@@ -1038,7 +1038,7 @@ fn handle_payload(
             ResponsePayload::SetEndpointRole(set_endpoint_role(deps, r, correlation_id)?)
         }
         RequestPayload::DeriveKey(r) => {
-            ResponsePayload::DeriveKey(derive_key(deps, r, correlation_id)?)
+            ResponsePayload::DeriveKey(derive_key(deps, r, auth, correlation_id)?)
         }
         // K21 — §6.1.51 Re-key / §6.1.52 Re-key Key Pair.
         RequestPayload::ReKey(r) => ResponsePayload::ReKey(rekey(deps, r, auth, correlation_id)?),

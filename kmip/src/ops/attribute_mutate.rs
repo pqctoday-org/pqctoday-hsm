@@ -44,14 +44,17 @@ use super::helpers::{canonical_name, emit_request, emit_success, fail_err, state
 pub fn add_attribute(
     deps: &Deps,
     req: AddAttributeRequest,
+    auth: &crate::server::auth::AuthContext,
     correlation_id: &str,
 ) -> Result<AddAttributeResponse> {
     emit_request(deps, correlation_id, "AddAttribute",
                  format!("uid={} attr={:?}", req.uid, attribute_name(&req.new_attribute)));
 
-    let mut obj = deps.store.get(&req.uid)?.ok_or_else(|| {
-        fail_err(deps, correlation_id, "AddAttribute", KmipError::object_not_found(&req.uid))
-    })?;
+    // Part F §F7.4 — owner-checked lookup (see get.rs for the pattern).
+    let mut obj = super::helpers::authorize_object(deps, auth, &req.uid, || {
+        KmipError::object_not_found(&req.uid)
+    })
+    .map_err(|e| fail_err(deps, correlation_id, "AddAttribute", e))?;
     policy_gate(deps, &obj, "AddAttribute", correlation_id)?;
 
     // KMIP 3.0 §6.1.48 + §11 — `Name` MUST be unique across the
@@ -97,7 +100,7 @@ pub fn add_attribute(
 
     check_circular_link(deps, "AddAttribute", &req.uid, &req.new_attribute, correlation_id)?;
     apply_attribute(&mut obj, &req.new_attribute);
-    commit_mutation(deps, correlation_id, obj)?;
+    commit_mutation(deps, auth, correlation_id, obj)?;
     emit_success(deps, correlation_id, "AddAttribute");
     Ok(AddAttributeResponse { uid: req.uid })
 }
@@ -107,14 +110,17 @@ pub fn add_attribute(
 pub fn modify_attribute(
     deps: &Deps,
     req: ModifyAttributeRequest,
+    auth: &crate::server::auth::AuthContext,
     correlation_id: &str,
 ) -> Result<ModifyAttributeResponse> {
     emit_request(deps, correlation_id, "ModifyAttribute",
                  format!("uid={} attr={:?}", req.uid, attribute_name(&req.new_attribute)));
 
-    let mut obj = deps.store.get(&req.uid)?.ok_or_else(|| {
-        fail_err(deps, correlation_id, "ModifyAttribute", KmipError::object_not_found(&req.uid))
-    })?;
+    // Part F §F7.4 — owner-checked lookup (see get.rs for the pattern).
+    let mut obj = super::helpers::authorize_object(deps, auth, &req.uid, || {
+        KmipError::object_not_found(&req.uid)
+    })
+    .map_err(|e| fail_err(deps, correlation_id, "ModifyAttribute", e))?;
     policy_gate(deps, &obj, "ModifyAttribute", correlation_id)?;
 
     // Per KMIP 3.0 §6.1.38 + §11 attribute table — Read-Only attributes
@@ -176,7 +182,7 @@ pub fn modify_attribute(
 
     check_circular_link(deps, "ModifyAttribute", &req.uid, &req.new_attribute, correlation_id)?;
     apply_attribute(&mut obj, &req.new_attribute);
-    commit_mutation(deps, correlation_id, obj)?;
+    commit_mutation(deps, auth, correlation_id, obj)?;
     emit_success(deps, correlation_id, "ModifyAttribute");
     Ok(ModifyAttributeResponse { uid: req.uid })
 }
@@ -186,14 +192,17 @@ pub fn modify_attribute(
 pub fn delete_attribute(
     deps: &Deps,
     req: DeleteAttributeRequest,
+    auth: &crate::server::auth::AuthContext,
     correlation_id: &str,
 ) -> Result<DeleteAttributeResponse> {
     emit_request(deps, correlation_id, "DeleteAttribute",
                  format!("uid={} ref={:?}", req.uid, req.attribute_reference));
 
-    let mut obj = deps.store.get(&req.uid)?.ok_or_else(|| {
-        fail_err(deps, correlation_id, "DeleteAttribute", KmipError::object_not_found(&req.uid))
-    })?;
+    // Part F §F7.4 — owner-checked lookup (see get.rs for the pattern).
+    let mut obj = super::helpers::authorize_object(deps, auth, &req.uid, || {
+        KmipError::object_not_found(&req.uid)
+    })
+    .map_err(|e| fail_err(deps, correlation_id, "DeleteAttribute", e))?;
     policy_gate(deps, &obj, "DeleteAttribute", correlation_id)?;
 
     // Per §6.1.17:
@@ -268,7 +277,7 @@ pub fn delete_attribute(
             )));
     }
 
-    commit_mutation(deps, correlation_id, obj)?;
+    commit_mutation(deps, auth, correlation_id, obj)?;
     emit_success(deps, correlation_id, "DeleteAttribute");
     Ok(DeleteAttributeResponse { uid: req.uid })
 }
@@ -278,14 +287,17 @@ pub fn delete_attribute(
 pub fn set_attribute(
     deps: &Deps,
     req: SetAttributeRequest,
+    auth: &crate::server::auth::AuthContext,
     correlation_id: &str,
 ) -> Result<SetAttributeResponse> {
     emit_request(deps, correlation_id, "SetAttribute",
                  format!("uid={} attr={:?}", req.uid, attribute_name(&req.new_attribute)));
 
-    let mut obj = deps.store.get(&req.uid)?.ok_or_else(|| {
-        fail_err(deps, correlation_id, "SetAttribute", KmipError::object_not_found(&req.uid))
-    })?;
+    // Part F §F7.4 — owner-checked lookup (see get.rs for the pattern).
+    let mut obj = super::helpers::authorize_object(deps, auth, &req.uid, || {
+        KmipError::object_not_found(&req.uid)
+    })
+    .map_err(|e| fail_err(deps, correlation_id, "SetAttribute", e))?;
     policy_gate(deps, &obj, "SetAttribute", correlation_id)?;
 
     // Per §6.1.56: "Read-Only attributes SHALL NOT be added or modified
@@ -314,7 +326,7 @@ pub fn set_attribute(
 
     check_circular_link(deps, "SetAttribute", &req.uid, &req.new_attribute, correlation_id)?;
     apply_attribute(&mut obj, &req.new_attribute);
-    commit_mutation(deps, correlation_id, obj)?;
+    commit_mutation(deps, auth, correlation_id, obj)?;
     emit_success(deps, correlation_id, "SetAttribute");
     Ok(SetAttributeResponse { uid: req.uid })
 }
@@ -324,14 +336,17 @@ pub fn set_attribute(
 pub fn adjust_attribute(
     deps: &Deps,
     req: AdjustAttributeRequest,
+    auth: &crate::server::auth::AuthContext,
     correlation_id: &str,
 ) -> Result<AdjustAttributeResponse> {
     emit_request(deps, correlation_id, "AdjustAttribute",
                  format!("uid={} ref={:?} type={:?}", req.uid, req.attribute_reference, req.adjustment_type));
 
-    let mut obj = deps.store.get(&req.uid)?.ok_or_else(|| {
-        fail_err(deps, correlation_id, "AdjustAttribute", KmipError::object_not_found(&req.uid))
-    })?;
+    // Part F §F7.4 — owner-checked lookup (see get.rs for the pattern).
+    let mut obj = super::helpers::authorize_object(deps, auth, &req.uid, || {
+        KmipError::object_not_found(&req.uid)
+    })
+    .map_err(|e| fail_err(deps, correlation_id, "AdjustAttribute", e))?;
 
     // K22 — §6.1.3.1 Error Handling – Adjust Attribute is the only
     // attribute-mutation error table that lists `Object Archived`
@@ -377,7 +392,7 @@ pub fn adjust_attribute(
         }
     }
 
-    commit_mutation(deps, correlation_id, obj)?;
+    commit_mutation(deps, auth, correlation_id, obj)?;
     emit_success(deps, correlation_id, "AdjustAttribute");
     Ok(AdjustAttributeResponse { uid: req.uid })
 }
@@ -389,9 +404,14 @@ pub fn adjust_attribute(
 /// attribute of the managed object changes (K-13); stamping it here,
 /// immediately before `store.update`, guarantees no mutation op can
 /// forget it.
-fn commit_mutation(deps: &Deps, correlation_id: &str, mut obj: ObjectRecord) -> Result<()> {
+fn commit_mutation(
+    deps: &Deps,
+    auth: &crate::server::auth::AuthContext,
+    correlation_id: &str,
+    mut obj: ObjectRecord,
+) -> Result<()> {
     obj.last_change_date = Some(OffsetDateTime::now_utc());
-    refresh_engine_mechanism_whitelist(deps, correlation_id, &obj);
+    refresh_engine_mechanism_whitelist(deps, auth, correlation_id, &obj);
     deps.store.update(obj)
 }
 
@@ -411,7 +431,12 @@ fn commit_mutation(deps: &Deps, correlation_id: &str, mut obj: ObjectRecord) -> 
 /// family) and have no PKCS#11 concept of a mechanism whitelist. Best-effort,
 /// same posture as key creation: a set_attribute failure here doesn't unwind
 /// the already-decided KMIP-side mutation.
-fn refresh_engine_mechanism_whitelist(deps: &Deps, correlation_id: &str, obj: &ObjectRecord) {
+fn refresh_engine_mechanism_whitelist(
+    deps: &Deps,
+    auth: &crate::server::auth::AuthContext,
+    correlation_id: &str,
+    obj: &ObjectRecord,
+) {
     use crate::kmip30::ObjectType;
     if !matches!(
         obj.object_type,
@@ -419,7 +444,11 @@ fn refresh_engine_mechanism_whitelist(deps: &Deps, correlation_id: &str, obj: &O
     ) {
         return;
     }
-    let Some(session) = deps.engine_session else { return };
+    // Part F §F7 — the mutated object's engine mirror lives in the
+    // CALLING tenant's own token (ownership verified upstream by
+    // authorize_object), so the whitelist refresh uses the caller's
+    // resolved session.
+    let Some(session) = deps.resolve_tenant_session(auth.identity.as_ref()).ok() else { return };
     let Ok(Some(handle)) =
         super::helpers::find_handle_for_object(session, &obj.pkcs11_cka_id, obj.object_type)
     else {
@@ -993,7 +1022,7 @@ mod tests {
         add_attribute(&d, AddAttributeRequest {
             uid: "u".into(),
             new_attribute: Attribute::Name("my-key".into()),
-        }, "c").unwrap();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap();
         assert_eq!(d.store.get("u").unwrap().unwrap().name.as_deref(), Some("my-key"));
     }
 
@@ -1004,13 +1033,13 @@ mod tests {
         // First add succeeds.
         add_attribute(&d, AddAttributeRequest {
             uid: "u".into(), new_attribute: Attribute::Name("x".into()),
-        }, "c").unwrap();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap();
         // Second add on same attribute must fail per §6.1.2 with
         // `AttributeSingleValued` (v0.1 carries only one Name per
         // record; multi-valued Name support would relax this).
         let err = add_attribute(&d, AddAttributeRequest {
             uid: "u".into(), new_attribute: Attribute::Name("y".into()),
-        }, "c").unwrap_err();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::AttributeSingleValued);
     }
 
@@ -1021,7 +1050,7 @@ mod tests {
         let err = add_attribute(&d, AddAttributeRequest {
             uid: "u".into(),
             new_attribute: Attribute::ObjectType(ObjectType::SymmetricKey),
-        }, "c").unwrap_err();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap_err();
         // §6.1.2 — Add against an always-present (single-valued)
         // attribute fails the presence check first → `AttributeSingleValued`.
         assert_eq!(err.result_reason(), ResultReason::AttributeSingleValued);
@@ -1033,11 +1062,11 @@ mod tests {
         put(&d, "u");
         add_attribute(&d, AddAttributeRequest {
             uid: "u".into(), new_attribute: Attribute::Name("v1".into()),
-        }, "c").unwrap();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap();
         modify_attribute(&d, ModifyAttributeRequest {
             uid: "u".into(), current_attribute: None,
             new_attribute: Attribute::Name("v2".into()),
-        }, "c").unwrap();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap();
         assert_eq!(d.store.get("u").unwrap().unwrap().name.as_deref(), Some("v2"));
     }
 
@@ -1052,7 +1081,7 @@ mod tests {
             uid: "u".into(),
             current_attribute: None,
             new_attribute: Attribute::State(crate::kmip30::State::Compromised),
-        }, "c").unwrap_err();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::AttributeReadOnly);
     }
 
@@ -1069,7 +1098,7 @@ mod tests {
             uid: "u".into(),
             current_attribute: None,
             new_attribute: Attribute::ActivationDate(123_456_789),
-        }, "c").unwrap_err();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::WrongKeyLifecycleState);
     }
 
@@ -1104,7 +1133,7 @@ mod tests {
             uid: "p".into(),
             current_attribute: None,
             new_attribute: Attribute::ActivationDate(42),
-        }, "c").unwrap();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap();
         let rec = d.store.get("p").unwrap().unwrap();
         assert_eq!(rec.activation_date.unwrap().unix_timestamp(), 42);
     }
@@ -1117,7 +1146,7 @@ mod tests {
         let err = modify_attribute(&d, ModifyAttributeRequest {
             uid: "u".into(), current_attribute: None,
             new_attribute: Attribute::Name("v".into()),
-        }, "c").unwrap_err();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::ItemNotFound);
     }
 
@@ -1127,11 +1156,11 @@ mod tests {
         put(&d, "u");
         add_attribute(&d, AddAttributeRequest {
             uid: "u".into(), new_attribute: Attribute::Name("x".into()),
-        }, "c").unwrap();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap();
         delete_attribute(&d, DeleteAttributeRequest {
             uid: "u".into(), current_attribute: None,
             attribute_reference: Some("Name".into()),
-        }, "c").unwrap();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap();
         assert!(d.store.get("u").unwrap().unwrap().name.is_none());
     }
 
@@ -1142,7 +1171,7 @@ mod tests {
         let err = delete_attribute(&d, DeleteAttributeRequest {
             uid: "u".into(), current_attribute: None,
             attribute_reference: Some("CryptographicAlgorithm".into()),
-        }, "c").unwrap_err();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::InvalidField);
     }
 
@@ -1152,7 +1181,7 @@ mod tests {
         put(&d, "u");
         set_attribute(&d, SetAttributeRequest {
             uid: "u".into(), new_attribute: Attribute::Name("first".into()),
-        }, "c").unwrap();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap();
         assert_eq!(d.store.get("u").unwrap().unwrap().name.as_deref(), Some("first"));
     }
 
@@ -1162,10 +1191,10 @@ mod tests {
         put(&d, "u");
         set_attribute(&d, SetAttributeRequest {
             uid: "u".into(), new_attribute: Attribute::Name("first".into()),
-        }, "c").unwrap();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap();
         set_attribute(&d, SetAttributeRequest {
             uid: "u".into(), new_attribute: Attribute::Name("second".into()),
-        }, "c").unwrap();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap();
         assert_eq!(d.store.get("u").unwrap().unwrap().name.as_deref(), Some("second"));
     }
 
@@ -1180,7 +1209,7 @@ mod tests {
         assert!(d.store.get("u").unwrap().unwrap().last_change_date.is_none());
         add_attribute(&d, AddAttributeRequest {
             uid: "u".into(), new_attribute: Attribute::Name("n".into()),
-        }, "c").unwrap();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap();
         assert!(d.store.get("u").unwrap().unwrap().last_change_date.is_some());
     }
 
@@ -1190,7 +1219,7 @@ mod tests {
         put(&d, "u");
         set_attribute(&d, SetAttributeRequest {
             uid: "u".into(), new_attribute: Attribute::Comment("c".into()),
-        }, "c").unwrap();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap();
         assert!(d.store.get("u").unwrap().unwrap().last_change_date.is_some());
     }
 
@@ -1200,12 +1229,12 @@ mod tests {
         put(&d, "u");
         add_attribute(&d, AddAttributeRequest {
             uid: "u".into(), new_attribute: Attribute::Name("v1".into()),
-        }, "c").unwrap();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap();
         let after_add = d.store.get("u").unwrap().unwrap().last_change_date.unwrap();
         modify_attribute(&d, ModifyAttributeRequest {
             uid: "u".into(), current_attribute: None,
             new_attribute: Attribute::Name("v2".into()),
-        }, "c").unwrap();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap();
         let after_modify = d.store.get("u").unwrap().unwrap().last_change_date.unwrap();
         assert!(after_modify >= after_add);
     }
@@ -1216,11 +1245,11 @@ mod tests {
         put(&d, "u");
         add_attribute(&d, AddAttributeRequest {
             uid: "u".into(), new_attribute: Attribute::Name("x".into()),
-        }, "c").unwrap();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap();
         delete_attribute(&d, DeleteAttributeRequest {
             uid: "u".into(), current_attribute: None,
             attribute_reference: Some("Name".into()),
-        }, "c").unwrap();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap();
         assert!(d.store.get("u").unwrap().unwrap().last_change_date.is_some());
     }
 
@@ -1233,7 +1262,7 @@ mod tests {
             attribute_reference: "Cryptographic Usage Mask".into(),
             adjustment_type: AdjustmentType::Increment,
             adjustment_value: Some(UsageMask::SIGN.bits() as i64),
-        }, "c").unwrap();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap();
         assert!(d.store.get("u").unwrap().unwrap().last_change_date.is_some());
     }
 
@@ -1246,7 +1275,7 @@ mod tests {
             attribute_reference: "Cryptographic Usage Mask".into(),
             adjustment_type: AdjustmentType::Increment,
             adjustment_value: Some(UsageMask::SIGN.bits() as i64),
-        }, "c").unwrap();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap();
         let rec = d.store.get("u").unwrap().unwrap();
         assert!(rec.usage_mask.contains(UsageMask::ENCRYPT));
         assert!(rec.usage_mask.contains(UsageMask::SIGN));
@@ -1263,7 +1292,7 @@ mod tests {
         let err = add_attribute(&d, AddAttributeRequest {
             uid: "u".into(),
             new_attribute: Attribute::NextLink("u".into()),
-        }, "c").unwrap_err();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::CircularLinkError);
         // The link must not have been committed.
         assert!(d.store.get("u").unwrap().unwrap().links.is_empty());
@@ -1281,12 +1310,12 @@ mod tests {
         add_attribute(&d, AddAttributeRequest {
             uid: "b".into(),
             new_attribute: Attribute::NextLink("a".into()),
-        }, "c").unwrap();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap();
         // a → b via NextLink now closes a same-type 2-cycle.
         let err = add_attribute(&d, AddAttributeRequest {
             uid: "a".into(),
             new_attribute: Attribute::NextLink("b".into()),
-        }, "c").unwrap_err();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::CircularLinkError);
     }
 
@@ -1304,12 +1333,12 @@ mod tests {
         add_attribute(&d, AddAttributeRequest {
             uid: "a".into(),
             new_attribute: Attribute::NextLink("b".into()),
-        }, "c").unwrap();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap();
         // b → a via PreviousLink (the spec inverse — the back edge).
         add_attribute(&d, AddAttributeRequest {
             uid: "b".into(),
             new_attribute: Attribute::PreviousLink("a".into()),
-        }, "c").unwrap();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap();
         assert_eq!(
             d.store.get("b").unwrap().unwrap().links.get("PreviousLink").map(String::as_str),
             Some("a")
@@ -1320,11 +1349,11 @@ mod tests {
         add_attribute(&d, AddAttributeRequest {
             uid: "priv".into(),
             new_attribute: Attribute::PublicKeyLink("pub".into()),
-        }, "c").unwrap();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap();
         add_attribute(&d, AddAttributeRequest {
             uid: "pub".into(),
             new_attribute: Attribute::PrivateKeyLink("priv".into()),
-        }, "c").unwrap();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap();
     }
 
     /// A non-cyclic link (A → B with no back-link) is accepted.
@@ -1336,7 +1365,7 @@ mod tests {
         add_attribute(&d, AddAttributeRequest {
             uid: "a".into(),
             new_attribute: Attribute::NextLink("b".into()),
-        }, "c").unwrap();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap();
         assert_eq!(
             d.store.get("a").unwrap().unwrap().links.get("NextLink").map(String::as_str),
             Some("b")
@@ -1359,7 +1388,7 @@ mod tests {
         set_attribute(&d, SetAttributeRequest {
             uid: "u".into(),
             new_attribute: Attribute::CryptographicParameters(cp.clone()),
-        }, "c").unwrap();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap();
         assert_eq!(
             d.store.get("u").unwrap().unwrap().cryptographic_parameters,
             Some(cp),
@@ -1374,7 +1403,7 @@ mod tests {
         set_attribute(&d, SetAttributeRequest {
             uid: "u".into(),
             new_attribute: Attribute::ProtectionLevel(1),
-        }, "c").unwrap();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap();
         assert_eq!(d.store.get("u").unwrap().unwrap().protection_level, Some(1));
     }
 
@@ -1387,7 +1416,7 @@ mod tests {
         set_attribute(&d, SetAttributeRequest {
             uid: "u".into(),
             new_attribute: Attribute::UsageLimits { total: 500, count: None, unit: Some(1) },
-        }, "c").unwrap();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap();
         let rec = d.store.get("u").unwrap().unwrap();
         assert_eq!(rec.usage_limits_total, Some(500));
         assert_eq!(rec.usage_limits_unit, Some(1));
@@ -1408,14 +1437,14 @@ mod tests {
         let err = set_attribute(&d, SetAttributeRequest {
             uid: "u".into(),
             new_attribute: Attribute::UsageLimits { total: 2000, count: None, unit: None },
-        }, "c").unwrap_err();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::InvalidField);
 
         let err = modify_attribute(&d, ModifyAttributeRequest {
             uid: "u".into(),
             current_attribute: None,
             new_attribute: Attribute::UsageLimits { total: 2000, count: None, unit: None },
-        }, "c").unwrap_err();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::InvalidField);
 
         // The stored value must be untouched by the rejected attempts.
@@ -1432,7 +1461,7 @@ mod tests {
         let err = set_attribute(&d, SetAttributeRequest {
             uid: "u".into(),
             new_attribute: Attribute::CryptographicDomainParameters { qlength: None, recommended_curve: None },
-        }, "c").unwrap_err();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::InvalidField);
     }
 
@@ -1444,7 +1473,7 @@ mod tests {
         let err = set_attribute(&d, SetAttributeRequest {
             uid: "u".into(),
             new_attribute: Attribute::ProtectionStorageMask(1),
-        }, "c").unwrap_err();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::InvalidField);
     }
 
@@ -1456,7 +1485,7 @@ mod tests {
         let err = set_attribute(&d, SetAttributeRequest {
             uid: "u".into(),
             new_attribute: Attribute::KeyFormatType(0x01), // Raw
-        }, "c").unwrap_err();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::InvalidField);
     }
 
@@ -1472,7 +1501,7 @@ mod tests {
         set_attribute(&d, SetAttributeRequest {
             uid: "a".into(),
             new_attribute: Attribute::DerivationBaseObjectLink("b".into()),
-        }, "c").unwrap();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap();
         assert_eq!(
             d.store.get("a").unwrap().unwrap().links.get("DerivationBaseObjectLink").map(String::as_str),
             Some("b")
@@ -1482,7 +1511,7 @@ mod tests {
         let err = set_attribute(&d, SetAttributeRequest {
             uid: "b".into(),
             new_attribute: Attribute::DerivationBaseObjectLink("a".into()),
-        }, "c").unwrap_err();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::CircularLinkError);
 
         // b → a via the spec INVERSE (DerivedObjectLink) is the
@@ -1490,7 +1519,7 @@ mod tests {
         set_attribute(&d, SetAttributeRequest {
             uid: "b".into(),
             new_attribute: Attribute::DerivedObjectLink("a".into()),
-        }, "c").unwrap();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap();
         assert_eq!(
             d.store.get("b").unwrap().unwrap().links.get("DerivedObjectLink").map(String::as_str),
             Some("a")
@@ -1511,7 +1540,7 @@ mod tests {
         add_attribute(&d, AddAttributeRequest {
             uid: "u".into(),
             new_attribute: Attribute::ProtectionLevel(1),
-        }, "c").unwrap();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap();
         assert_eq!(d.store.get("u").unwrap().unwrap().protection_level, Some(1));
     }
 
@@ -1524,7 +1553,7 @@ mod tests {
         add_attribute(&d, AddAttributeRequest {
             uid: "a".into(),
             new_attribute: Attribute::DerivationBaseObjectLink("b".into()),
-        }, "c").unwrap();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap();
         assert_eq!(
             d.store.get("a").unwrap().unwrap().links.get("DerivationBaseObjectLink").map(String::as_str),
             Some("b")
@@ -1541,24 +1570,24 @@ mod tests {
         put(&d, "u");
         set_attribute(&d, SetAttributeRequest {
             uid: "u".into(), new_attribute: Attribute::ProtectionLevel(2),
-        }, "c").unwrap();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap();
         delete_attribute(&d, DeleteAttributeRequest {
             uid: "u".into(),
             current_attribute: Some(Attribute::ProtectionLevel(2)),
             attribute_reference: None,
-        }, "c").unwrap();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap();
         assert_eq!(d.store.get("u").unwrap().unwrap().protection_level, None);
 
         put(&d, "a");
         put(&d, "b");
         set_attribute(&d, SetAttributeRequest {
             uid: "a".into(), new_attribute: Attribute::NextLink("b".into()),
-        }, "c").unwrap();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap();
         delete_attribute(&d, DeleteAttributeRequest {
             uid: "a".into(),
             current_attribute: Some(Attribute::NextLink("b".into())),
             attribute_reference: None,
-        }, "c").unwrap();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap();
         assert!(d.store.get("a").unwrap().unwrap().links.get("NextLink").is_none());
     }
 
@@ -1574,13 +1603,13 @@ mod tests {
         put(&d, "b");
         set_attribute(&d, SetAttributeRequest {
             uid: "a".into(), new_attribute: Attribute::NextLink("b".into()),
-        }, "c").unwrap();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap();
         // Simulates the space-cased name `tag_name_from_code` decodes.
         delete_attribute(&d, DeleteAttributeRequest {
             uid: "a".into(),
             current_attribute: None,
             attribute_reference: Some("Next Link".into()),
-        }, "c").unwrap();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap();
         assert!(d.store.get("a").unwrap().unwrap().links.get("NextLink").is_none());
     }
 
@@ -1594,12 +1623,12 @@ mod tests {
         set_attribute(&d, SetAttributeRequest {
             uid: "u".into(),
             new_attribute: Attribute::UsageLimits { total: 100, count: None, unit: Some(1) },
-        }, "c").unwrap();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap();
         delete_attribute(&d, DeleteAttributeRequest {
             uid: "u".into(),
             current_attribute: None,
             attribute_reference: Some("Usage Limits".into()),
-        }, "c").unwrap();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap();
         assert_eq!(d.store.get("u").unwrap().unwrap().usage_limits_total, None);
     }
 
@@ -1619,14 +1648,14 @@ mod tests {
             uid: "u".into(),
             current_attribute: Some(Attribute::UsageLimits { total: 1000, count: None, unit: None }),
             attribute_reference: None,
-        }, "c").unwrap_err();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::InvalidField);
 
         let err = delete_attribute(&d, DeleteAttributeRequest {
             uid: "u".into(),
             current_attribute: None,
             attribute_reference: Some("Usage Limits".into()),
-        }, "c").unwrap_err();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::InvalidField);
 
         assert_eq!(d.store.get("u").unwrap().unwrap().usage_limits_total, Some(1000));

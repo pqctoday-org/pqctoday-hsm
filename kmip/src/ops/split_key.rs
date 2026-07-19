@@ -84,6 +84,7 @@ fn is_gf_method(m: SplitKeyMethod) -> bool {
 pub fn create_split_key(
     deps: &Deps,
     req: CreateSplitKeyRequest,
+    auth: &crate::server::auth::AuthContext,
     correlation_id: &str,
 ) -> Result<CreateSplitKeyResponse> {
     emit_request(
@@ -96,7 +97,9 @@ pub fn create_split_key(
         ),
     );
 
-    let session = deps.engine_session.ok_or_else(|| {
+    // Part F §F7 — caller's own token: the source key lives there and
+    // every generated share lands there.
+    let session = deps.resolve_tenant_session(auth.identity.as_ref()).ok().ok_or_else(|| {
         fail_err(
             deps,
             correlation_id,
@@ -147,9 +150,12 @@ pub fn create_split_key(
     // generate a fresh one from the request's Attributes.
     let (secret_handle, algorithm, length_bits) = match &req.uid {
         Some(uid) => {
-            let obj = deps.store.get(uid)?.ok_or_else(|| {
-                fail_err(deps, correlation_id, "CreateSplitKey", KmipError::not_found(uid))
-            })?;
+            // Part F §F7.4 — owner-checked: splitting a foreign tenant's
+            // key fails as the same ItemNotFound a missing UID produces.
+            let obj = super::helpers::authorize_object(deps, auth, uid, || {
+                KmipError::not_found(uid)
+            })
+            .map_err(|e| fail_err(deps, correlation_id, "CreateSplitKey", e))?;
             let handle =
                 find_handle_for_object(session, &obj.pkcs11_cka_id, obj.object_type)
                     .map_err(|rv| ck_rv_to_kmip_error(rv, "CreateSplitKey:find"))?
@@ -215,7 +221,7 @@ pub fn create_split_key(
         cka_id.extend_from_slice(&key_part_identifier.to_be_bytes());
 
         let uid = format!("urn:pqctoday:obj:{}", Uuid::new_v4());
-        deps.store.put(ObjectRecord {
+        deps.store.put(super::helpers::stamp_owner(ObjectRecord {
             uid: uid.clone(),
             object_type: ObjectType::SplitKey,
             algorithm,
@@ -240,7 +246,7 @@ pub fn create_split_key(
             protection_storage_mask: Some(0x01),
             lease_time: Some(3600),
             ..ObjectRecord::default()
-        })?;
+        }, auth))?;
         uids.push(uid);
     }
 
@@ -253,6 +259,7 @@ pub fn create_split_key(
 pub fn join_split_key(
     deps: &Deps,
     req: JoinSplitKeyRequest,
+    auth: &crate::server::auth::AuthContext,
     correlation_id: &str,
 ) -> Result<JoinSplitKeyResponse> {
     emit_request(
@@ -262,7 +269,8 @@ pub fn join_split_key(
         format!("object_type={:?} uids={}", req.object_type, req.uids.len()),
     );
 
-    let session = deps.engine_session.ok_or_else(|| {
+    // Part F §F7 — caller's own token, same as CreateSplitKey.
+    let session = deps.resolve_tenant_session(auth.identity.as_ref()).ok().ok_or_else(|| {
         fail_err(
             deps,
             correlation_id,
@@ -282,9 +290,12 @@ pub fn join_split_key(
 
     let mut records = Vec::with_capacity(req.uids.len());
     for uid in &req.uids {
-        let obj = deps.store.get(uid)?.ok_or_else(|| {
-            fail_err(deps, correlation_id, "JoinSplitKey", KmipError::not_found(uid))
-        })?;
+        // Part F §F7.4 — owner-checked: joining foreign tenants' shares
+        // fails as the same ItemNotFound a missing UID produces.
+        let obj = super::helpers::authorize_object(deps, auth, uid, || {
+            KmipError::not_found(uid)
+        })
+        .map_err(|e| fail_err(deps, correlation_id, "JoinSplitKey", e))?;
         if obj.object_type != ObjectType::SplitKey {
             return Err(fail_err(
                 deps,
@@ -377,7 +388,7 @@ pub fn join_split_key(
 
     let now = OffsetDateTime::now_utc();
     let uid = format!("urn:pqctoday:obj:{}", Uuid::new_v4());
-    deps.store.put(ObjectRecord {
+    deps.store.put(super::helpers::stamp_owner(ObjectRecord {
         uid: uid.clone(),
         object_type: req.object_type,
         algorithm,
@@ -397,7 +408,7 @@ pub fn join_split_key(
         protection_storage_mask: Some(0x01),
         lease_time: Some(3600),
         ..ObjectRecord::default()
-    })?;
+    }, auth))?;
 
     emit_success(deps, correlation_id, "JoinSplitKey");
     Ok(JoinSplitKeyResponse { uid })
