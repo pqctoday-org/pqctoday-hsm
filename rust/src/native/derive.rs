@@ -19,7 +19,8 @@ use super::CkRv;
 use crate::constants::*;
 use crate::crypto::handlers::Attributes;
 use crate::state::{
-    allocate_handle_owned, compute_kcv, get_object_value, store_bool, store_ulong,
+    allocate_handle_owned, compute_kcv, get_object_value, get_object_value_from,
+    resolve_session_access, store_bool, store_ulong, with_object_checked,
 };
 
 /// Register a freshly-derived generic-secret key `value` as a session object
@@ -65,8 +66,17 @@ fn register_derived_secret(session: u32, value: Vec<u8>) -> u32 {
 /// **Pre-condition**: `session` must be a valid R/W user session; both
 /// handles must reference secret-key objects with a `CKA_VALUE`.
 pub fn concatenate_keys(session: u32, base: u32, second: u32) -> Result<u32, CkRv> {
-    let base_val = get_object_value(base).ok_or(CKR_KEY_HANDLE_INVALID)?;
-    let second_val = get_object_value(second).ok_or(CKR_KEY_HANDLE_INVALID)?;
+    // Isolation gate on both component handles — preserves this
+    // function's existing CKR_KEY_HANDLE_INVALID error code (the
+    // derive-context vocabulary C_DeriveKey callers expect) for missing,
+    // cross-slot, or not-logged-in handles alike.
+    let access = resolve_session_access(session).map_err(|_| CKR_KEY_HANDLE_INVALID)?;
+    let base_val = with_object_checked(&access, base, get_object_value_from)
+        .map_err(|_| CKR_KEY_HANDLE_INVALID)?
+        .ok_or(CKR_KEY_HANDLE_INVALID)?;
+    let second_val = with_object_checked(&access, second, get_object_value_from)
+        .map_err(|_| CKR_KEY_HANDLE_INVALID)?
+        .ok_or(CKR_KEY_HANDLE_INVALID)?;
     let combined = [base_val.as_slice(), second_val.as_slice()].concat();
     Ok(register_derived_secret(session, combined))
 }
@@ -80,7 +90,10 @@ pub fn concatenate_keys(session: u32, base: u32, second: u32) -> Result<u32, CkR
 ///
 /// **Pre-condition**: `session` valid R/W; `base` a secret key with a value.
 pub fn concatenate_data(session: u32, base: u32, data: &[u8]) -> Result<u32, CkRv> {
-    let base_val = get_object_value(base).ok_or(CKR_KEY_HANDLE_INVALID)?;
+    let access = resolve_session_access(session).map_err(|_| CKR_KEY_HANDLE_INVALID)?;
+    let base_val = with_object_checked(&access, base, get_object_value_from)
+        .map_err(|_| CKR_KEY_HANDLE_INVALID)?
+        .ok_or(CKR_KEY_HANDLE_INVALID)?;
     let combined = [base_val.as_slice(), data].concat();
     Ok(register_derived_secret(session, combined))
 }
@@ -103,7 +116,10 @@ pub fn digest_key_derivation(
     mech: u32,
     out_len: Option<usize>,
 ) -> Result<u32, CkRv> {
-    let base_val = get_object_value(base).ok_or(CKR_KEY_HANDLE_INVALID)?;
+    let access = resolve_session_access(session).map_err(|_| CKR_KEY_HANDLE_INVALID)?;
+    let base_val = with_object_checked(&access, base, get_object_value_from)
+        .map_err(|_| CKR_KEY_HANDLE_INVALID)?
+        .ok_or(CKR_KEY_HANDLE_INVALID)?;
     let mut digest = digest_of(mech, &base_val)?;
     if let Some(n) = out_len {
         if n > digest.len() {

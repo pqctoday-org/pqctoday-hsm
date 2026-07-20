@@ -28,9 +28,14 @@ use crate::policy::{Decision, PolicyRequest};
 use crate::store::ObjectRecord;
 
 use super::deps::Deps;
-use super::helpers::{emit_request, emit_success, fail_err};
+use super::helpers::{emit_request, emit_success, fail_err, stamp_owner};
 
-pub fn create(deps: &Deps, mut req: CreateRequest, correlation_id: &str) -> Result<CreateResponse> {
+pub fn create(
+    deps: &Deps,
+    mut req: CreateRequest,
+    auth: &crate::server::auth::AuthContext,
+    correlation_id: &str,
+) -> Result<CreateResponse> {
     let started = OffsetDateTime::now_utc();
     emit_request(
         deps,
@@ -66,6 +71,7 @@ pub fn create(deps: &Deps, mut req: CreateRequest, correlation_id: &str) -> Resu
         req.object_type,
         &[],
         &mut req.template_attribute,
+        auth,
     );
 
     let (algorithm_in, algo_enum, key_length, usage_mask) = extract_template(&req.template_attribute);
@@ -173,6 +179,7 @@ pub fn create(deps: &Deps, mut req: CreateRequest, correlation_id: &str) -> Resu
     // Plane-3: real bridge call when a session is wired. K15 — the
     // audit record is emitted after the generate call with its real rv.
     let cka_id_bytes = Uuid::new_v4().as_bytes().to_vec();
+    let session = deps.resolve_tenant_session(auth.identity.as_ref()).ok();
     let digest_value = engine_generate_symmetric(
         deps,
         correlation_id,
@@ -182,6 +189,7 @@ pub fn create(deps: &Deps, mut req: CreateRequest, correlation_id: &str) -> Resu
         mech,
         &cka_id_bytes,
         usage_mask.unwrap_or_else(UsageMask::empty),
+        session,
     )
     .map_err(|e| fail_err(deps, correlation_id, "Create", e))?;
 
@@ -194,7 +202,7 @@ pub fn create(deps: &Deps, mut req: CreateRequest, correlation_id: &str) -> Resu
     let x = super::register_import_export::extract_attrs(&req.template_attribute);
     let initial_state = super::register_import_export::compute_initial_state(now, &x);
     let cp = x.cryptographic_parameters.clone();
-    deps.store.put(ObjectRecord {
+    deps.store.put(stamp_owner(ObjectRecord {
         uid: uid.clone(),
         object_type: req.object_type,
         algorithm: algo,
@@ -234,7 +242,7 @@ pub fn create(deps: &Deps, mut req: CreateRequest, correlation_id: &str) -> Resu
         // with nothing behind it).
         lease_time: Some(3600),
     ..ObjectRecord::default()
-})?;
+}, auth))?;
 
     emit_success(deps, correlation_id, "Create");
 
@@ -252,7 +260,15 @@ pub fn create(deps: &Deps, mut req: CreateRequest, correlation_id: &str) -> Resu
 /// session it audits the soft placeholder path and returns `None`
 /// (unit-test store record only). K15 — the `Pkcs11Call` audit record
 /// is emitted after the native call with its real rv; `op` names the
-/// calling KMIP operation in the error mapping.
+/// calling KMIP operation in the error mapping. `session` is the
+/// CALLER's already-resolved `deps.resolve_tenant_session(...)` result,
+/// not re-derived here — this helper has no `auth` context of its own,
+/// and reading the bare `deps.engine_session` field internally (as it
+/// did before this round) silently ignored tenancy: in Strict/Auto
+/// mode that field is never populated, so both Create and symmetric
+/// ReKey would fall through to the test-only placeholder path in
+/// production, leaving multi-tenant symmetric keys without real engine
+/// material on their own tenant's slot.
 pub(crate) fn engine_generate_symmetric(
     deps: &Deps,
     correlation_id: &str,
@@ -262,9 +278,10 @@ pub(crate) fn engine_generate_symmetric(
     mech: u32,
     cka_id_bytes: &[u8],
     usage_mask: UsageMask,
+    session: Option<u32>,
 ) -> Result<Option<Vec<u8>>> {
     let mut digest_value: Option<Vec<u8>> = None;
-    if let Some(session) = deps.engine_session {
+    if let Some(session) = session {
         let (native_fn, result) = match algo {
             KmipAlgorithm::Aes => {
                 let bits = key_length.unwrap_or(256);
@@ -424,7 +441,7 @@ rules:
         let resp = create(&d, CreateRequest {
             object_type: ObjectType::SymmetricKey,
             template_attribute: vec![],
-        }, "c").unwrap();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap();
         let rec = d.store.get(&resp.uid).unwrap().unwrap();
         assert_eq!(rec.algorithm, KmipAlgorithm::Aes);
         assert_eq!(rec.object_type, ObjectType::SymmetricKey);
@@ -437,7 +454,7 @@ rules:
         let err = create(&d, CreateRequest {
             object_type: ObjectType::PrivateKey,
             template_attribute: vec![],
-        }, "c").unwrap_err();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::InvalidAttributeValue);
     }
 
@@ -447,7 +464,7 @@ rules:
         let err = create(&d, CreateRequest {
             object_type: ObjectType::SymmetricKey,
             template_attribute: vec![Attribute::CryptographicAlgorithm(KmipAlgorithm::MlDsa87)],
-        }, "c").unwrap_err();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::InvalidAttributeValue);
     }
 
@@ -459,7 +476,7 @@ rules:
             template_attribute: vec![
                 Attribute::CryptographicAlgorithm(KmipAlgorithm::HmacSha256),
             ],
-        }, "c").unwrap();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap();
         let rec = d.store.get(&resp.uid).unwrap().unwrap();
         assert_eq!(rec.algorithm, KmipAlgorithm::HmacSha256);
     }
@@ -495,7 +512,7 @@ rules:
                 Attribute::CryptographicLength(256),
                 Attribute::CryptographicUsageMask(UsageMask::ENCRYPT | UsageMask::DECRYPT),
             ],
-        }, "c").unwrap();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap();
         let rec = d.store.get(&resp.uid).unwrap().unwrap();
 
         let handle =

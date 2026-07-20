@@ -48,14 +48,29 @@ pub fn set_initialized(v: bool) {
     INITIALIZED.store(v, std::sync::atomic::Ordering::SeqCst);
 }
 
+// PERF-BENCH FIX (2026-07-18, B4 step 1): these three were
+// `GlobalState<u32>`/`GlobalState<u64>` (a `Mutex` behind `lazy_static!`),
+// each guarding nothing but a single integer counter with a plain
+// read-increment-write body. A `Mutex` here buys no correctness the
+// hardware's own atomic RMW doesn't already give — converting to
+// `AtomicU32`/`AtomicU64` removes three more global lock acquisitions
+// from the handle/session/object-creation hot path (keygen, session open,
+// every C_CreateObject) with no behavior change: NEXT_HANDLE keeps its
+// saturate-at-MAX semantics (`fetch_update`, a safe CAS-retry loop, so
+// concurrent callers can't race past u32::MAX), and the other two keep
+// their plain wrapping-increment semantics (`fetch_add`, matching the
+// original `u32`/`u64` release-mode wrapping arithmetic exactly).
+// `AtomicU32::new`/`AtomicU64::new` are `const fn`, so these no longer
+// need `lazy_static!` at all — a plain `pub static` suffices.
+pub static NEXT_HANDLE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(100);
+/// PKCS#11 v3.2 §4.4.1 — CKA_UNIQUE_ID source. Process-monotonic and never
+/// reset (not even by C_Finalize) so identifiers stay unique across
+/// initialize/finalize cycles within one process.
+pub static UNIQUE_ID_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+pub static NEXT_SESSION_HANDLE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+
 lazy_static! {
     pub static ref OBJECTS: GlobalState<HashMap<u32, Attributes>> = GlobalState::new(HashMap::new());
-    pub static ref NEXT_HANDLE: GlobalState<u32> = GlobalState::new(100);
-    /// PKCS#11 v3.2 §4.4.1 — CKA_UNIQUE_ID source. Process-monotonic and never
-    /// reset (not even by C_Finalize) so identifiers stay unique across
-    /// initialize/finalize cycles within one process.
-    pub static ref UNIQUE_ID_COUNTER: GlobalState<u64> = GlobalState::new(1);
-    pub static ref NEXT_SESSION_HANDLE: GlobalState<u32> = GlobalState::new(1);
     pub static ref SIGN_STATE: GlobalState<HashMap<u32, (u32, u32, Vec<u8>, bool)>> = GlobalState::new(HashMap::new());
     pub static ref VERIFY_STATE: GlobalState<HashMap<u32, (u32, u32, Vec<u8>, bool)>> = GlobalState::new(HashMap::new());
     pub static ref VERIFY_SIG_STATE: GlobalState<HashMap<u32, VerifySigCtx>> = GlobalState::new(HashMap::new());
@@ -465,6 +480,125 @@ pub fn can_access_object(h_session: u32, attrs: &Attributes) -> bool {
     session_logged_in(h_session)
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// Isolation gate for `native::*` (rust-hsm-perf-bench-scenario-plan-07182026.md
+// Part F, added 2026-07-18). `ffi::C_*` has enforced `can_access_object` at
+// 8 call sites all along; `native::*` — the surface KMIP uses exclusively —
+// never did. These are ADDITIVE: `can_access_object` above is untouched
+// (zero risk to existing ffi behavior), and every native::* by-handle
+// function is being migrated onto the primitives below.
+//
+// Design note: `can_access_object(h_session, attrs)` independently locks
+// SESSIONS (via `session_slot`) and TOKEN_STORE (via `session_logged_in`)
+// on every call. Native crypto ops call several by-handle accessors per
+// operation (e.g. sign: usage check, mechanism check, value fetch, param
+// fetch — 4 separate OBJECTS locks today), so re-deriving slot/login state
+// from scratch inside each one would multiply SESSIONS/TOKEN_STORE lock
+// traffic too. Instead: resolve the session's slot + login state ONCE
+// per operation (`resolve_session_access`, one SESSIONS lock + one
+// TOKEN_STORE lock), then fold the access check into the SAME OBJECTS
+// borrow every accessor already needs (`with_object_checked[_mut]`,
+// `take_object_checked`) — collapsing native sign's 4 OBJECTS locks to 1
+// while adding the gate, not trading contention for correctness.
+//
+// Lock ordering (load-bearing — audited 2026-07-18 across every native/*
+// call site that uses these primitives, see F5 in the plan): SESSIONS
+// and/or TOKEN_STORE are always acquired and FULLY RELEASED (not nested)
+// before OBJECTS is acquired — `resolve_session_access` runs to
+// completion and returns an owned `SessionAccess` before
+// `with_object_checked` et al. ever touch OBJECTS. This is stricter than
+// `ffi.rs`'s existing pattern (e.g. `C_GetObjectSize`), which nests a
+// `can_access_object` call — and its own SESSIONS/TOKEN_STORE locks —
+// INSIDE an open OBJECTS borrow. That nested pattern is untouched and
+// presumed safe (no reverse-order site was found), but new code should
+// prefer this module's sequential resolve-then-access shape.
+
+/// Pre-resolved session identity for the isolation gate — computed ONCE
+/// per operation so the OBJECTS-locked accessors below never need to
+/// touch SESSIONS or TOKEN_STORE.
+#[derive(Clone, Copy)]
+pub struct SessionAccess {
+    pub slot: u32,
+    pub logged_in: bool,
+}
+
+/// Resolve a session handle to the slot/login state the isolation gate
+/// needs. `Err(CKR_SESSION_HANDLE_INVALID)` for an unknown handle — this
+/// is new, correct validation for `native::*` callers (which today mostly
+/// ignore their session parameter entirely and never reject a bogus
+/// handle); it does not change any `ffi::*` behavior, since `ffi::*`
+/// does not call this function.
+pub fn resolve_session_access(h_session: u32) -> Result<SessionAccess, u32> {
+    let slot = session_slot(h_session).ok_or(CKR_SESSION_HANDLE_INVALID)?;
+    let logged_in = session_logged_in(h_session);
+    Ok(SessionAccess { slot, logged_in })
+}
+
+/// Same predicate as [`can_access_object`], evaluated against a
+/// pre-resolved [`SessionAccess`] instead of re-locking SESSIONS/TOKEN_STORE.
+/// Kept in exact lockstep with `can_access_object`'s logic.
+pub fn can_access_object_with(access: &SessionAccess, attrs: &Attributes) -> bool {
+    if object_slot_of(attrs) != access.slot {
+        return false;
+    }
+    if !read_bool_attr(attrs, CKA_PRIVATE) {
+        return true;
+    }
+    access.logged_in
+}
+
+/// Fetch `handle`'s attributes, apply the isolation gate, and run `f` over
+/// the borrowed attributes — all under ONE `OBJECTS` lock acquisition.
+/// `Err(CKR_OBJECT_HANDLE_INVALID)` uniformly for an unknown handle OR a
+/// cross-slot / not-logged-in-for-private object (PKCS#11 v3.2 §2.4/§4.4 —
+/// no existence oracle, same choke point `ffi::*` already uses).
+pub fn with_object_checked<R>(
+    access: &SessionAccess,
+    handle: u32,
+    f: impl FnOnce(&Attributes) -> R,
+) -> Result<R, u32> {
+    OBJECTS.with(|o| {
+        let store = o.borrow();
+        let attrs = store.get(&handle).ok_or(CKR_OBJECT_HANDLE_INVALID)?;
+        if !can_access_object_with(access, attrs) {
+            return Err(CKR_OBJECT_HANDLE_INVALID);
+        }
+        Ok(f(attrs))
+    })
+}
+
+/// Mutable counterpart of [`with_object_checked`] — for in-place attribute
+/// writes (e.g. HSS/XMSS stateful-key state advancement) under one
+/// `OBJECTS` write-lock acquisition.
+pub fn with_object_checked_mut<R>(
+    access: &SessionAccess,
+    handle: u32,
+    f: impl FnOnce(&mut Attributes) -> R,
+) -> Result<R, u32> {
+    OBJECTS.with(|o| {
+        let mut store = o.borrow_mut();
+        let attrs = store.get_mut(&handle).ok_or(CKR_OBJECT_HANDLE_INVALID)?;
+        if !can_access_object_with(access, attrs) {
+            return Err(CKR_OBJECT_HANDLE_INVALID);
+        }
+        Ok(f(attrs))
+    })
+}
+
+/// Gate-checked object removal (for `destroy_object`) — verifies access
+/// BEFORE removing, under one `OBJECTS` write-lock acquisition, so a
+/// failed check never mutates the map.
+pub fn take_object_checked(access: &SessionAccess, handle: u32) -> Result<Attributes, u32> {
+    OBJECTS.with(|o| {
+        let mut store = o.borrow_mut();
+        let attrs = store.get(&handle).ok_or(CKR_OBJECT_HANDLE_INVALID)?;
+        if !can_access_object_with(access, attrs) {
+            return Err(CKR_OBJECT_HANDLE_INVALID);
+        }
+        Ok(store.remove(&handle).expect("presence just confirmed under the same lock"))
+    })
+}
+
 /// PKCS#11 v3.2 §4.8 Table 13 — `CKA_ALLOWED_MECHANISMS` restricts a key to
 /// a caller-specified mechanism whitelist. Absent attribute (the common
 /// case) means unrestricted, per the spec's default. Call AFTER key-handle
@@ -475,13 +609,8 @@ pub fn can_access_object(h_session: u32, attrs: &Attributes) -> bool {
 /// Shared by both the FFI (`ffi.rs`) and native (`native/*.rs`) entry
 /// points — KMIP calls the engine through the native surface, not FFI, so
 /// this can't live only on one side.
-pub fn check_mechanism_allowed(h_key: u32, mech_type: u32) -> Result<(), u32> {
-    let allowed = OBJECTS.with(|o| {
-        o.borrow()
-            .get(&h_key)
-            .and_then(|attrs| attrs.get(&CKA_ALLOWED_MECHANISMS).cloned())
-    });
-    match allowed {
+pub fn check_mechanism_allowed_from(attrs: &Attributes, mech_type: u32) -> Result<(), u32> {
+    match attrs.get(&CKA_ALLOWED_MECHANISMS) {
         None => Ok(()),
         Some(bytes) => {
             let is_allowed = bytes
@@ -493,6 +622,13 @@ pub fn check_mechanism_allowed(h_key: u32, mech_type: u32) -> Result<(), u32> {
                 Err(CKR_MECHANISM_INVALID)
             }
         }
+    }
+}
+
+pub fn check_mechanism_allowed(h_key: u32, mech_type: u32) -> Result<(), u32> {
+    match OBJECTS.with(|o| o.borrow().get(&h_key).map(|attrs| check_mechanism_allowed_from(attrs, mech_type))) {
+        Some(result) => result,
+        None => Ok(()), // unknown handle: preserve prior behavior (caller's later fetch fails closed)
     }
 }
 
@@ -698,12 +834,7 @@ pub fn allocate_handle(mut attrs: Attributes) -> u32 {
     // enter OBJECTS, so the attribute is guaranteed on every surface (FFI,
     // native, KMIP). Unconditional insert: the attribute is read-only and any
     // caller-supplied value has already been rejected/skipped upstream.
-    let uid = UNIQUE_ID_COUNTER.with(|c| {
-        let mut c = c.borrow_mut();
-        let v = *c;
-        *c += 1;
-        v
-    });
+    let uid = UNIQUE_ID_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     // §4.4.1 — render the monotonic counter as a canonical 36-char UUID
     // (8-4-4-4-12, v4 version/variant nibbles) so CKA_UNIQUE_ID is a portable,
     // fixed-width identifier. The KMIP store keeps its own UniqueIdentifier, so
@@ -714,27 +845,98 @@ pub fn allocate_handle(mut attrs: Attributes) -> u32 {
         uid & 0xffff_ffff_ffff,
     );
     attrs.insert(CKA_UNIQUE_ID, uuid.into_bytes());
-    NEXT_HANDLE.with(|h| {
-        let mut handle = h.borrow_mut();
-        if *handle == u32::MAX {
-            // Saturate at MAX rather than wrapping; callers get 0 as sentinel for failure.
-            return 0;
+    // Saturate at MAX rather than wrapping; callers get 0 as sentinel for
+    // failure. `fetch_update` is a safe CAS-retry loop: concurrent callers
+    // cannot race past u32::MAX the way a naive load-then-store could.
+    let current = match NEXT_HANDLE.fetch_update(
+        std::sync::atomic::Ordering::Relaxed,
+        std::sync::atomic::Ordering::Relaxed,
+        |h| if h == u32::MAX { None } else { Some(h + 1) },
+    ) {
+        Ok(prev) => prev,
+        Err(_) => return 0,
+    };
+    OBJECTS.with(|objs| {
+        objs.borrow_mut().insert(current, attrs);
+    });
+    current
+}
+
+// ── `_from` pure variants (operate on an already-borrowed `&Attributes`,
+// take no lock) — added alongside the isolation gate (Part F) so a
+// gated `native::*` call can fetch several attributes inside the ONE
+// `OBJECTS` borrow `with_object_checked` already holds, instead of each
+// handle-taking accessor below re-locking OBJECTS on its own. Every
+// handle-taking accessor is now a thin `OBJECTS.with(...)` wrapper over
+// its `_from` twin — same signature, same behavior, zero call-site churn
+// for the ~50+ existing (ungated) callers across the crate. ──────────────
+
+pub fn get_object_value_from(attrs: &Attributes) -> Option<Vec<u8>> {
+    attrs.get(&CKA_VALUE).cloned()
+}
+
+/// PKCS#11 v3.2 §2.3.3 — strip the DER OCTET STRING header some CKA_EC_POINT
+/// values carry around the raw SEC1 point. See [`get_ec_point_sec1_from`].
+fn strip_ec_point_der(ec_point: Vec<u8>) -> Vec<u8> {
+    // Two encodings exist:
+    //   - Short form  : 0x04 <len ≤ 127> <data>            (len = data.len())
+    //   - Long form 1B: 0x04 0x81 <len> <data>             (P-521 path — data=133)
+    // P-256 / P-384 / secp256k1 fit short form (65 / 97 / 65 ≤ 127).
+    // P-521's 133-byte SEC1 point requires long form.
+    if ec_point.len() > 2 && ec_point[0] == 0x04 {
+        if ec_point[1] as usize == ec_point.len() - 2 {
+            return ec_point[2..].to_vec();
         }
-        let current = *handle;
-        *handle += 1;
-        OBJECTS.with(|objs| {
-            objs.borrow_mut().insert(current, attrs);
-        });
-        current
+        if ec_point.len() > 3 && ec_point[1] == 0x81 && ec_point[2] as usize == ec_point.len() - 3
+        {
+            return ec_point[3..].to_vec();
+        }
+    }
+    ec_point
+}
+
+/// Return the raw SEC1 point bytes for an EC public key object. Some
+/// internal paths (C_GenerateKeyPair) store the raw SEC1 bytes directly
+/// without the DER header — [`strip_ec_point_der`] handles both formats.
+pub fn get_ec_point_sec1_from(attrs: &Attributes) -> Option<Vec<u8>> {
+    attrs.get(&CKA_EC_POINT).cloned().map(strip_ec_point_der)
+}
+
+/// Return (modulus, public_exponent) bytes for an RSA public key object.
+pub fn get_rsa_public_components_from(attrs: &Attributes) -> Option<(Vec<u8>, Vec<u8>)> {
+    let n = attrs.get(&CKA_MODULUS)?.clone();
+    let e = attrs.get(&CKA_PUBLIC_EXPONENT)?.clone();
+    Some((n, e))
+}
+
+pub fn get_object_param_set_from(attrs: &Attributes) -> u32 {
+    attrs
+        .get(&CKA_PRIV_PARAM_SET)
+        .map(|v| if v.len() >= 4 { u32::from_le_bytes([v[0], v[1], v[2], v[3]]) } else { 0 })
+        .unwrap_or(0)
+}
+
+pub fn get_object_attr_bytes_from(attrs: &Attributes, attr_type: u32) -> Option<Vec<u8>> {
+    attrs.get(&attr_type).cloned()
+}
+
+pub fn get_object_attr_u32_from(attrs: &Attributes, attr_type: u32) -> Option<u32> {
+    get_object_attr_bytes_from(attrs, attr_type)
+        .and_then(|v| if v.len() >= 4 { Some(u32::from_le_bytes([v[0], v[1], v[2], v[3]])) } else { None })
+}
+
+pub fn get_object_attr_u64_from(attrs: &Attributes, attr_type: u32) -> Option<u64> {
+    get_object_attr_bytes_from(attrs, attr_type).and_then(|v| {
+        if v.len() >= 8 {
+            Some(u64::from_le_bytes([v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7]]))
+        } else {
+            None
+        }
     })
 }
 
 pub(crate) fn get_object_value(handle: u32) -> Option<Vec<u8>> {
-    OBJECTS.with(|objs| {
-        objs.borrow()
-            .get(&handle)
-            .and_then(|attrs| attrs.get(&CKA_VALUE).cloned())
-    })
+    OBJECTS.with(|objs| objs.borrow().get(&handle).and_then(get_object_value_from))
 }
 
 /// Return the raw SEC1 point bytes for an EC public key object.
@@ -743,113 +945,42 @@ pub(crate) fn get_object_value(handle: u32) -> Option<Vec<u8>> {
 /// Some internal paths (C_GenerateKeyPair) store the raw SEC1 bytes directly
 /// without the DER header. This function handles both formats.
 pub fn get_ec_point_sec1(handle: u32) -> Option<Vec<u8>> {
-    OBJECTS
-        .with(|objs| {
-            objs.borrow()
-                .get(&handle)
-                .and_then(|attrs| attrs.get(&CKA_EC_POINT).cloned())
-        })
-        .map(|ec_point| {
-            // CKA_EC_POINT stores a DER OCTET STRING wrapping the SEC1 point
-            // (PKCS#11 v3.2 §2.3.3). Strip the header to return the raw SEC1
-            // bytes. Two encodings exist:
-            //   - Short form  : 0x04 <len ≤ 127> <data>            (len = data.len())
-            //   - Long form 1B: 0x04 0x81 <len> <data>             (P-521 path — data=133)
-            // P-256 / P-384 / secp256k1 fit short form (65 / 97 / 65 ≤ 127).
-            // P-521's 133-byte SEC1 point requires long form.
-            if ec_point.len() > 2 && ec_point[0] == 0x04 {
-                if ec_point[1] as usize == ec_point.len() - 2 {
-                    // Short form
-                    return ec_point[2..].to_vec();
-                }
-                if ec_point.len() > 3
-                    && ec_point[1] == 0x81
-                    && ec_point[2] as usize == ec_point.len() - 3
-                {
-                    // Long form, 1-byte length (covers all SEC1 points up to 255 B)
-                    return ec_point[3..].to_vec();
-                }
-            }
-            ec_point
-        })
+    OBJECTS.with(|objs| objs.borrow().get(&handle).and_then(get_ec_point_sec1_from))
 }
 
 /// Return (modulus, public_exponent) bytes for an RSA public key object.
 /// PKCS#11 v3.2: RSA public key material is in CKA_MODULUS + CKA_PUBLIC_EXPONENT.
 /// CKA_VALUE is NOT defined for CKO_PUBLIC_KEY/CKK_RSA objects.
 pub fn get_rsa_public_components(handle: u32) -> Option<(Vec<u8>, Vec<u8>)> {
-    OBJECTS.with(|objs| {
-        let store = objs.borrow();
-        let attrs = store.get(&handle)?;
-        let n = attrs.get(&CKA_MODULUS)?.clone();
-        let e = attrs.get(&CKA_PUBLIC_EXPONENT)?.clone();
-        Some((n, e))
-    })
+    OBJECTS.with(|objs| objs.borrow().get(&handle).and_then(get_rsa_public_components_from))
 }
 
 pub fn get_object_param_set(handle: u32) -> u32 {
-    OBJECTS.with(|objs| {
-        objs.borrow()
-            .get(&handle)
-            .and_then(|attrs| attrs.get(&CKA_PRIV_PARAM_SET))
-            .map(|v| {
-                if v.len() >= 4 {
-                    u32::from_le_bytes([v[0], v[1], v[2], v[3]])
-                } else {
-                    0
-                }
-            })
-            .unwrap_or(0)
-    })
+    OBJECTS.with(|objs| objs.borrow().get(&handle).map(get_object_param_set_from).unwrap_or(0))
 }
 
 pub fn get_object_algo_family(handle: u32) -> u32 {
     OBJECTS.with(|objs| {
         objs.borrow()
             .get(&handle)
-            .and_then(|attrs| attrs.get(&CKA_PRIV_ALGO_FAMILY))
-            .map(|v| {
-                if v.len() >= 4 {
-                    u32::from_le_bytes([v[0], v[1], v[2], v[3]])
-                } else {
-                    0
-                }
-            })
+            .and_then(|attrs| get_object_attr_u32_from(attrs, CKA_PRIV_ALGO_FAMILY))
             .unwrap_or(0)
     })
 }
 
 /// Read an arbitrary attribute from an existing object in the store.
 pub(crate) fn get_object_attr_bytes(handle: u32, attr_type: u32) -> Option<Vec<u8>> {
-    OBJECTS.with(|objs| {
-        objs.borrow()
-            .get(&handle)
-            .and_then(|attrs| attrs.get(&attr_type).cloned())
-    })
+    OBJECTS.with(|objs| objs.borrow().get(&handle).and_then(|attrs| get_object_attr_bytes_from(attrs, attr_type)))
 }
 
 /// Read a u32 attribute (4-byte LE) from an existing object in the store.
 pub(crate) fn get_object_attr_u32(handle: u32, attr_type: u32) -> Option<u32> {
-    get_object_attr_bytes(handle, attr_type).and_then(|v| {
-        if v.len() >= 4 {
-            Some(u32::from_le_bytes([v[0], v[1], v[2], v[3]]))
-        } else {
-            None
-        }
-    })
+    OBJECTS.with(|objs| objs.borrow().get(&handle).and_then(|attrs| get_object_attr_u32_from(attrs, attr_type)))
 }
 
 /// Read a u64 attribute (8-byte LE) from an existing object in the store.
 pub(crate) fn get_object_attr_u64(handle: u32, attr_type: u32) -> Option<u64> {
-    get_object_attr_bytes(handle, attr_type).and_then(|v| {
-        if v.len() >= 8 {
-            Some(u64::from_le_bytes([
-                v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7],
-            ]))
-        } else {
-            None
-        }
-    })
+    OBJECTS.with(|objs| objs.borrow().get(&handle).and_then(|attrs| get_object_attr_u64_from(attrs, attr_type)))
 }
 
 /// Overwrite an attribute on an existing object in the store. Returns true on success.

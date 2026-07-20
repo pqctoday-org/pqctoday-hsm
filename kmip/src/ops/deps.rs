@@ -28,6 +28,13 @@ pub struct StreamCtx {
     /// UID the stream was initialised against — §6.1.21 requires every
     /// part to target the same key.
     pub uid: String,
+    /// Part F §F7.5 — the tenant that opened this stream. A continuation
+    /// part from a different identity is rejected as an unknown
+    /// correlation value (anti-oracle), even though the entry-level
+    /// owner check on the stream's `uid` already blocks the direct
+    /// cross-tenant path — this makes the stream map self-defending
+    /// rather than relying on that distant check.
+    pub owner: Option<String>,
 }
 
 /// Phase 4 — mutable state of one server-tracked asynchronous job
@@ -42,6 +49,16 @@ pub struct AsyncJobState {
     /// the async subsystem changes *when* the client learns the
     /// result, never *what* the result is.
     pub outcome: Option<crate::error::Result<crate::kmip30::ResponsePayload>>,
+    /// Part F §F7.5 — the tenant that submitted this job. `Poll` returns
+    /// the deferred operation's FULL response payload (which for a
+    /// deferred `Get`/`Export`/`Decrypt` is key material), so
+    /// Poll/Cancel/Process must reject a foreign tenant's correlation
+    /// value as the same `Invalid Asynchronous Correlation Value` a
+    /// genuinely unknown one produces, and `QueryAsynchronousRequests`
+    /// must list only the caller's own jobs. Without this, a tenant
+    /// could Poll another tenant's deferred material by guessing its
+    /// (monotonic, predictable) correlation value.
+    pub owner: Option<String>,
 }
 
 /// One server-tracked async job (§6.1.43 Poll / §6.1.5 Cancel / §6.1.44
@@ -59,13 +76,14 @@ pub struct AsyncJob {
 }
 
 impl AsyncJob {
-    pub fn new(operation: crate::kmip30::Operation) -> Arc<Self> {
+    pub fn new(operation: crate::kmip30::Operation, owner: Option<String>) -> Arc<Self> {
         Arc::new(Self {
             state: Mutex::new(AsyncJobState {
                 operation,
                 stage: crate::kmip30::ProcessingStage::Submitted,
                 submitted_at: time::OffsetDateTime::now_utc(),
                 outcome: None,
+                owner,
             }),
             done: Condvar::new(),
         })
@@ -88,6 +106,29 @@ impl AsyncJob {
     pub fn mark_in_process(&self) {
         let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
         st.stage = crate::kmip30::ProcessingStage::InProcess;
+    }
+
+    /// Atomically transition `Submitted` → `InProcess`, but ONLY if
+    /// still `Submitted`. Returns `false` (state left untouched) if the
+    /// job already left `Submitted` — e.g. `try_cancel_if_submitted`
+    /// won the race against the executor and already marked it
+    /// `Completed`. The executor (real background thread or the eager
+    /// inline fallback) MUST check this before running the real
+    /// operation: calling the unconditional `mark_in_process` here
+    /// instead would clobber an already-recorded cancellation outcome
+    /// with the real result moments later, and briefly resurrect an
+    /// already-`Completed` job's stage back to `InProcess` in between —
+    /// a genuine window where a concurrent `Poll` (sees `Completed`)
+    /// and a `QueryAsynchronousRequests` running immediately after (sees
+    /// the resurrected `InProcess`) visibly disagree about whether the
+    /// same job is done.
+    pub fn try_start_if_submitted(&self) -> bool {
+        let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if st.stage != crate::kmip30::ProcessingStage::Submitted {
+            return false;
+        }
+        st.stage = crate::kmip30::ProcessingStage::InProcess;
+        true
     }
 
     pub fn mark_completed(&self, outcome: crate::error::Result<crate::kmip30::ResponsePayload>) {
@@ -160,6 +201,13 @@ pub struct DepsConfig {
     /// §6.1.55 RNG Seed behavior — see [`RngSeedMode`]. Defaults to
     /// full-consume (the pre-existing behavior; CS-RNG-O-1 pins it).
     pub rng_seed_mode: RngSeedMode,
+
+    /// Part F §F7.2 — see [`TenancyMode`]. Defaults to `Single` (today's
+    /// behavior, unchanged).
+    pub tenancy_mode: TenancyMode,
+    /// Pre-configured tenants for `TenancyMode::Strict`. Ignored in
+    /// `Single`/`Auto` modes.
+    pub strict_tenants: Vec<StrictTenantConfig>,
 }
 
 /// P2.3 — designates the single key/cert pair the server may use as a
@@ -222,6 +270,59 @@ pub enum RngSeedMode {
 /// exactly 16 regardless of the client-supplied seed length.
 pub const RNG_SEED_PARTIAL_CONSUME_CAP: usize = 16;
 
+/// Part F (rust-hsm-perf-bench-scenario-plan-07182026.md §F7.2) — how a
+/// KMIP client identity gets its own PKCS#11 token. `Single` (the
+/// default) is EXACTLY today's behavior: every request shares
+/// `Deps::engine_session`, one tenant, zero config needed, zero change
+/// to any of the ~60 existing `deps.engine_session` call sites.
+///
+/// STATUS: the resolution primitive (`Deps::resolve_tenant_session`)
+/// exists and is tested for all three modes, but is NOT YET called by
+/// the dispatcher or any op handler — those still read
+/// `deps.engine_session` directly, so today every deployment runs
+/// (and behaves) as `Single` regardless of this field's value. Wiring
+/// the dispatcher to authenticate-then-resolve-then-thread the tenant
+/// session into op handlers is the remaining piece of §F7 (a
+/// signature-level change across every op handler, tracked separately —
+/// see the plan's F7/rev-5 status note).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum TenancyMode {
+    #[default]
+    Single,
+    /// First connection from a CA-validated identity auto-provisions a
+    /// fresh token: next free slot, a server-generated PIN recorded in
+    /// `Deps::tenant_pins` (readable by the operator) so the token
+    /// stays openable by out-of-band PKCS#11 tooling — the user's
+    /// "per-tenant configured PINs" decision, reconciled with
+    /// auto-onboarding by having the server mint (rather than
+    /// pre-collect) the PIN.
+    Auto,
+    /// Only identities in `DepsConfig::strict_tenants` may operate;
+    /// every other identity is rejected before touching the engine.
+    Strict,
+}
+
+/// One pre-configured tenant for `TenancyMode::Strict` — identity, the
+/// PKCS#11 slot it owns, and its token's PINs (per-tenant CONFIGURED
+/// PINs, per the user's decision — the same PIN an operator could use
+/// to open this tenant's token directly through raw PKCS#11 tooling).
+#[derive(Clone, Debug)]
+pub struct StrictTenantConfig {
+    pub identity: crate::server::auth::Identity,
+    pub slot: u32,
+    pub so_pin: String,
+    pub user_pin: String,
+}
+
+/// A provisioned tenant's live engine binding — the slot its token
+/// occupies and the open, USER-logged-in session requests for that
+/// tenant should use.
+#[derive(Clone, Copy, Debug)]
+pub struct TenantCtx {
+    pub slot: u32,
+    pub engine_session: u32,
+}
+
 impl DepsConfig {
     /// `true` when a credential store is configured (auth enforced).
     pub fn auth_enabled(&self) -> bool {
@@ -239,6 +340,8 @@ impl Default for DepsConfig {
             auth_users: Vec::new(), // open-auth — replay harness depends on this
             ca_key: None,           // not a CA unless explicitly configured
             rng_seed_mode: RngSeedMode::FullConsume,
+            tenancy_mode: TenancyMode::Single, // today's behavior, unchanged
+            strict_tenants: Vec::new(),
         }
     }
 }
@@ -260,6 +363,20 @@ pub struct Deps {
     /// engine and passes `Some(session)`. Closes the §12.7.7 lock from
     /// `IMPLEMENTATION_PLAN.md` once every op handler honours this branch.
     pub engine_session: Option<u32>,
+    /// Part F §F7.2 — live per-identity tenant bindings (populated by
+    /// `resolve_tenant_session` in `Auto`/`Strict` modes; empty and
+    /// unused in `Single` mode). Slot 0 is reserved for `engine_session`
+    /// (the `Single`-mode / `cli.slot` default); tenant provisioning
+    /// starts at `next_auto_slot`.
+    pub tenants: Mutex<HashMap<crate::server::auth::Identity, TenantCtx>>,
+    /// `Auto`-mode server-generated PINs, recorded so an operator can
+    /// read them back and open a tenant's token directly through raw
+    /// PKCS#11 tooling (the user's "per-tenant configured PINs"
+    /// decision, reconciled with auto-onboarding — see [`TenancyMode::Auto`]).
+    pub tenant_pins: Mutex<HashMap<crate::server::auth::Identity, (String, String)>>,
+    /// Next PKCS#11 slot `Auto` mode will provision. Starts at 1 (slot 0
+    /// is the `Single`-mode default token).
+    pub next_auto_slot: std::sync::atomic::AtomicU32,
     /// Active multi-part Encrypt/Decrypt streams, keyed by the
     /// server-issued `Correlation Value` (KMIP 3.0 §6.1.21). Lives on
     /// `Deps` so streams survive across requests on the same server.
@@ -272,8 +389,15 @@ pub struct Deps {
     /// template > Set Defaults > server hardcoded). In-memory only —
     /// server-config state, not a managed object, so it is not
     /// persisted in the object store and is reset on restart.
-    pub object_defaults:
-        Mutex<HashMap<crate::kmip30::ObjectType, Vec<crate::kmip30::Attribute>>>,
+    ///
+    /// Part F §F7.5 — PER-TENANT: the outer key is the setting tenant's
+    /// identity (`None` = the `Single`-mode / anonymous bucket). One
+    /// tenant's `Set Defaults` only affects its own factory operations,
+    /// matching the isolation model of every managed object — a tenant
+    /// can't silently change another tenant's key-generation defaults.
+    pub object_defaults: Mutex<
+        HashMap<Option<String>, HashMap<crate::kmip30::ObjectType, Vec<crate::kmip30::Attribute>>>,
+    >,
     /// Phase 3.2 — client-set §6.1.57 Constraints, replacing the
     /// engine-bounds default `Get Constraints` (§6.1.26) otherwise
     /// reports. `None` ⇒ no client override yet; `get_constraints`
@@ -332,6 +456,9 @@ impl Deps {
             sink,
             config,
             engine_session: None,
+            tenants: Mutex::new(HashMap::new()),
+            tenant_pins: Mutex::new(HashMap::new()),
+            next_auto_slot: std::sync::atomic::AtomicU32::new(1),
             streams: Mutex::new(HashMap::new()),
             next_correlation: std::sync::atomic::AtomicU64::new(1),
             object_defaults: Mutex::new(HashMap::new()),
@@ -369,6 +496,112 @@ impl Deps {
         self
     }
 
+    /// Part F §F7.2 — resolve the PKCS#11 engine session an authenticated
+    /// request should use.
+    ///
+    /// `Single` mode (default) returns `self.engine_session` unchanged —
+    /// `identity` is ignored, so this is a drop-in, zero-behavior-change
+    /// replacement for reading `deps.engine_session` directly wherever a
+    /// call site is migrated to it.
+    ///
+    /// `Auto`/`Strict` require `identity`; each looks up (or, in `Auto`,
+    /// provisions) that identity's own token, so different tenants get
+    /// different sessions on different slots — which is what makes the
+    /// Part F engine-side isolation gate (already merged) actually
+    /// separate KMIP clients from each other, instead of every client
+    /// sharing the one `Single`-mode token.
+    pub fn resolve_tenant_session(
+        &self,
+        identity: Option<&crate::server::auth::Identity>,
+    ) -> crate::error::Result<u32> {
+        match self.config.tenancy_mode {
+            TenancyMode::Single => self.engine_session.ok_or_else(|| {
+                crate::error::KmipError::failed(
+                    crate::error::ResultReason::GeneralFailure,
+                    "engine not initialised (no engine_session)",
+                )
+            }),
+            TenancyMode::Strict => {
+                let identity = identity.ok_or_else(Self::no_identity_err)?;
+                if let Some(ctx) = self.tenants_lock().get(identity) {
+                    return Ok(ctx.engine_session);
+                }
+                let cfg = self
+                    .config
+                    .strict_tenants
+                    .iter()
+                    .find(|t| &t.identity == identity)
+                    .cloned()
+                    .ok_or_else(|| {
+                        crate::error::KmipError::failed(
+                            crate::error::ResultReason::AuthenticationNotSuccessful,
+                            "identity is not a configured strict tenant",
+                        )
+                    })?;
+                self.provision_tenant(identity.clone(), cfg.slot, &cfg.so_pin, &cfg.user_pin)
+            }
+            TenancyMode::Auto => {
+                let identity = identity.ok_or_else(Self::no_identity_err)?;
+                if let Some(ctx) = self.tenants_lock().get(identity) {
+                    return Ok(ctx.engine_session);
+                }
+                let slot = self
+                    .next_auto_slot
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let so_pin = generate_tenant_pin();
+                let user_pin = generate_tenant_pin();
+                let session = self.provision_tenant(identity.clone(), slot, &so_pin, &user_pin)?;
+                self.tenant_pins
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(identity.clone(), (so_pin, user_pin));
+                Ok(session)
+            }
+        }
+    }
+
+    fn no_identity_err() -> crate::error::KmipError {
+        crate::error::KmipError::failed(
+            crate::error::ResultReason::AuthenticationNotSuccessful,
+            "this tenancy mode requires an authenticated identity",
+        )
+    }
+
+    fn tenants_lock(&self) -> std::sync::MutexGuard<'_, HashMap<crate::server::auth::Identity, TenantCtx>> {
+        self.tenants.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Bring a brand-new tenant's token online (§F7.2: `ensure_slot` +
+    /// `C_InitToken` + `C_InitPIN` + USER login, via the engine's own
+    /// `bootstrap_default_token` helper — the same sequence the
+    /// `Single`-mode production binary already runs for slot 0) and
+    /// record its live session in `self.tenants`.
+    fn provision_tenant(
+        &self,
+        identity: crate::server::auth::Identity,
+        slot: u32,
+        so_pin: &str,
+        user_pin: &str,
+    ) -> crate::error::Result<u32> {
+        // Multi-slot activation hook — the engine boots single-slot (slot
+        // 0), and `C_InitToken` on any other slot fails CKR_SLOT_ID_INVALID
+        // until this runs first (found the hard way during the
+        // hsm-perf-bench P0 spikes; see the plan's §E2/§F1).
+        softhsmrustv3::state::ensure_slot(slot);
+        let label = format!("kmip-tenant-{}", identity.username);
+        let session = softhsmrustv3::native::session::bootstrap_default_token(
+            slot, so_pin, user_pin, &label,
+        )
+        .map_err(|rv| {
+            crate::error::KmipError::failed(
+                crate::error::ResultReason::GeneralFailure,
+                format!("tenant token provisioning failed for slot {slot}: engine rv=0x{rv:x}"),
+            )
+        })?;
+        self.tenants_lock().insert(identity, TenantCtx { slot, engine_session: session });
+        Ok(session)
+    }
+
     /// P2.3 — designate the CA key/cert pair this server signs issuances
     /// with (see [`CaKeyDesignation`]). Used by tests and the production
     /// binary's `--ca-key` / `--ca-cert` flags.
@@ -379,6 +612,19 @@ impl Deps {
         });
         self
     }
+}
+
+/// Part F §F7.2 (`TenancyMode::Auto`) — mint a fresh PIN for a
+/// newly-provisioned tenant token. 16 random bytes, hex-encoded (32
+/// chars) — well over PKCS#11's typical minimum PIN length, and, being
+/// server-generated and per-tenant, never reused across tenants. `hex`
+/// is dev-dependency-only in this crate (see Cargo.toml), so this is a
+/// small inline encoder rather than a new production dependency.
+fn generate_tenant_pin() -> String {
+    use rand::RngCore;
+    let mut bytes = [0u8; 16];
+    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 #[cfg(test)]
@@ -403,5 +649,141 @@ mod tests {
         let c = DepsConfig::default();
         assert!(!c.vendor_identification.is_empty());
         assert!(!c.server_version.is_empty());
+    }
+
+    // ── Part F §F7.2 — resolve_tenant_session ────────────────────────────
+    // Distinct, high slot numbers per test (the engine's slot/token store
+    // is process-global) to avoid colliding with other tests' slot 0 use
+    // or with each other under cargo test's default parallelism.
+
+    fn test_deps(config: DepsConfig) -> Deps {
+        let sink: Arc<dyn AuditSink> = Arc::new(RingSink::new(64));
+        Deps::new(Engine::permissive(), Arc::new(MemoryStore::new()), sink, config)
+    }
+
+    #[test]
+    fn single_mode_returns_engine_session_ignoring_identity() {
+        let deps = test_deps(DepsConfig::default()).with_engine_session(4242);
+        assert_eq!(deps.resolve_tenant_session(None).unwrap(), 4242);
+        let someone = crate::server::auth::Identity { username: "anyone".into() };
+        assert_eq!(deps.resolve_tenant_session(Some(&someone)).unwrap(), 4242);
+    }
+
+    #[test]
+    fn single_mode_without_engine_session_errors() {
+        let deps = test_deps(DepsConfig::default());
+        assert!(deps.resolve_tenant_session(None).is_err());
+    }
+
+    #[test]
+    fn strict_mode_rejects_no_identity_and_unconfigured_identity() {
+        let alice = crate::server::auth::Identity { username: "alice-strict".into() };
+        let config = DepsConfig {
+            tenancy_mode: TenancyMode::Strict,
+            strict_tenants: vec![StrictTenantConfig {
+                identity: alice.clone(),
+                slot: 60,
+                so_pin: "so-pin-60".into(),
+                user_pin: "user-pin-60".into(),
+            }],
+            ..DepsConfig::default()
+        };
+        let deps = test_deps(config);
+        assert!(deps.resolve_tenant_session(None).is_err(), "no identity must be rejected");
+        let mallory = crate::server::auth::Identity { username: "mallory-not-configured".into() };
+        assert!(
+            deps.resolve_tenant_session(Some(&mallory)).is_err(),
+            "an identity absent from strict_tenants must be rejected"
+        );
+    }
+
+    // These two tests exercise the real engine (via `resolve_tenant_session`'s
+    // Strict/Auto provisioning path). The engine's session/token state is
+    // process-global and `cargo test` runs lib tests in parallel, so any
+    // other test's `native::session::finalize()` would wipe the slot this
+    // one just provisioned. The fix (2026-07-19, closing §G2's finalize()
+    // gap) is the same one every other engine-touching lib test in this
+    // crate already uses: hold the crate-wide `engine_lock()` for the whole
+    // test. Every finalize()-calling test acquires that same lock (verified:
+    // certify via `ca_engine_deps`, register_import_export, create, and the
+    // helper-based spki_verify/catalyst/chameleon/… fixtures all do), so
+    // while this test holds it no concurrent finalize() can run. Slots 61/72
+    // remain unique to these two tests, and neither finalizes at the end —
+    // the next engine test's own start-of-test finalize() clears them, since
+    // it can only run once this one releases the lock.
+    #[test]
+    fn strict_mode_provisions_configured_tenant_and_caches_it() {
+        let _guard = crate::ops::helpers::engine_lock();
+        let alice = crate::server::auth::Identity { username: "alice-strict-provision".into() };
+        let config = DepsConfig {
+            tenancy_mode: TenancyMode::Strict,
+            strict_tenants: vec![StrictTenantConfig {
+                identity: alice.clone(),
+                slot: 61,
+                so_pin: "so-pin-61".into(),
+                user_pin: "user-pin-61".into(),
+            }],
+            ..DepsConfig::default()
+        };
+        let deps = test_deps(config);
+        let session1 = deps.resolve_tenant_session(Some(&alice)).expect("provision must succeed");
+        assert_eq!(softhsmrustv3::state::session_slot(session1), Some(61));
+        // Second call for the same identity returns the SAME session — no
+        // re-provisioning (which would fail: C_InitToken on a token with
+        // an open session errors CKR_SESSION_EXISTS).
+        let session2 = deps.resolve_tenant_session(Some(&alice)).expect("cached lookup must succeed");
+        assert_eq!(session1, session2, "second resolve must reuse the cached session");
+    }
+
+    /// Slot allocation is pure Rust logic (`AtomicU32::fetch_add`, no
+    /// engine call) — verified without touching the process-global
+    /// engine at all, so this half of "distinct tenants get distinct
+    /// slots" is fully race-free regardless of what other tests do
+    /// concurrently.
+    #[test]
+    fn auto_mode_allocates_a_fresh_slot_number_per_new_identity() {
+        let config = DepsConfig { tenancy_mode: TenancyMode::Auto, ..DepsConfig::default() };
+        let deps = test_deps(config);
+        let start = deps.next_auto_slot.load(std::sync::atomic::Ordering::Relaxed);
+        let first = deps.next_auto_slot.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let second = deps.next_auto_slot.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(first, start);
+        assert_eq!(second, start + 1);
+        assert_ne!(first, second, "each new identity gets a distinct slot number");
+    }
+
+    /// The engine-touching half: one auto-provisioned tenant actually
+    /// lands on the requested slot, with a real USER-logged-in session
+    /// and a recorded PIN pair. Holds `engine_lock()` for the whole test
+    /// (see `strict_mode_provisions_configured_tenant_and_caches_it`),
+    /// which serialises it against every other engine-touching test — so
+    /// a second provisioning call is now safe (no concurrent finalize()
+    /// can land between the two), and this test exercises the cache-hit
+    /// path directly rather than deferring it to the slot-numbering test.
+    #[test]
+    fn auto_mode_provisions_tenant_with_recorded_pins() {
+        let _guard = crate::ops::helpers::engine_lock();
+        let config = DepsConfig { tenancy_mode: TenancyMode::Auto, ..DepsConfig::default() };
+        let deps = test_deps(config);
+        deps.next_auto_slot.store(72, std::sync::atomic::Ordering::Relaxed);
+
+        let alice = crate::server::auth::Identity { username: "alice-auto-single".into() };
+        let session = deps.resolve_tenant_session(Some(&alice)).expect("auto-provision alice");
+        assert_eq!(softhsmrustv3::state::session_slot(session), Some(72));
+
+        // Cached on the second call (no re-provisioning).
+        let session2 = deps.resolve_tenant_session(Some(&alice)).expect("cached lookup");
+        assert_eq!(session, session2);
+
+        // PINs were generated and recorded (readable by an operator, per
+        // the user's "per-tenant configured PINs" decision).
+        let pins = deps.tenant_pins.lock().unwrap();
+        let (so_pin, user_pin) = pins.get(&alice).expect("PIN pair recorded");
+        assert_eq!(so_pin.len(), 32, "16 random bytes hex-encoded");
+        assert_ne!(so_pin, user_pin, "SO and USER PINs must differ");
+        drop(pins);
+
+        // Auto mode still requires an identity.
+        assert!(deps.resolve_tenant_session(None).is_err());
     }
 }

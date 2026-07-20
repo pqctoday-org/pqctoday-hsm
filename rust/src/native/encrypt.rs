@@ -22,7 +22,11 @@
 
 use super::CkRv;
 use crate::constants::*;
-use crate::state::{get_ec_point_sec1, get_object_attr_u32, get_object_param_set, get_object_value, OBJECTS};
+use crate::state::{
+    check_mechanism_allowed_from, get_ec_point_sec1_from, get_object_attr_u32_from,
+    get_object_param_set_from, get_object_value, get_object_value_from, read_bool_attr,
+    resolve_session_access, with_object_checked, SessionAccess, OBJECTS,
+};
 
 // PKCS#11 v3.2 §5.18 — KEM permission flags. CKA_ENCAPSULATE / CKA_DECAPSULATE.
 use crate::constants::{CKA_DECAPSULATE, CKA_DECRYPT, CKA_ENCAPSULATE, CKA_ENCRYPT};
@@ -51,42 +55,54 @@ use crate::constants::{CKA_DECAPSULATE, CKA_DECRYPT, CKA_ENCAPSULATE, CKA_ENCRYP
 /// - ECDH-P256/P384/P521: ct = SEC1 uncompressed point (65/97/133), ss = curve field size (32/48/66).
 /// - X25519/X448 (RFC 7748): ct = 32/56, ss = 32/56.
 pub fn encapsulate(
-    _session: u32,
+    session: u32,
     public_key_handle: u32,
     mechanism: u32,
 ) -> Result<(Vec<u8>, Vec<u8>), CkRv> {
     use ml_kem::{kem::Encapsulate, EncodedSizeUser, KemCore};
 
+    let access = resolve_session_access(session)?;
+
     if mechanism == CKM_ECDH1_DERIVE || mechanism == CKM_EC_MONTGOMERY_KEY_DERIVE {
-        return classical_encapsulate(public_key_handle, mechanism);
+        return classical_encapsulate(&access, public_key_handle, mechanism);
     }
     if mechanism == CKM_PQCTODAY_FRODOKEM_ENCAPSULATE {
-        return frodokem_encapsulate(public_key_handle);
+        return frodokem_encapsulate(&access, public_key_handle);
     }
     if mechanism == CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE {
-        return classic_mceliece_encapsulate(public_key_handle);
+        return classic_mceliece_encapsulate(&access, public_key_handle);
     }
     if mechanism != CKM_ML_KEM {
         return Err(CKR_MECHANISM_INVALID);
     }
-    if !check_flag(public_key_handle, CKA_ENCAPSULATE) {
+
+    // Isolation gate + CKA_ENCAPSULATE + CKA_ALLOWED_MECHANISMS +
+    // CKA_KEY_TYPE + CKA_PRIV_PARAM_SET + CKA_VALUE, all from ONE borrow.
+    let (can_encap, mech_ok, key_type, ps, pub_key_bytes) =
+        with_object_checked(&access, public_key_handle, |attrs| {
+            (
+                read_bool_attr(attrs, CKA_ENCAPSULATE),
+                check_mechanism_allowed_from(attrs, mechanism),
+                get_object_attr_u32_from(attrs, CKA_KEY_TYPE),
+                get_object_param_set_from(attrs),
+                get_object_value_from(attrs),
+            )
+        })?;
+    if !can_encap {
         return Err(CKR_KEY_FUNCTION_NOT_PERMITTED);
     }
-    // PKCS#11 v3.2 §4.8 Table 13 — CKA_ALLOWED_MECHANISMS.
-    crate::state::check_mechanism_allowed(public_key_handle, mechanism)?;
-
+    mech_ok?;
     // PKCS#11 v3.2 §5.18.8 — CKM_ML_KEM requires an ML-KEM key
     // (compliance-audit P-10).
-    if get_object_attr_u32(public_key_handle, CKA_KEY_TYPE) != Some(CKK_ML_KEM) {
+    if key_type != Some(CKK_ML_KEM) {
         return Err(CKR_KEY_TYPE_INCONSISTENT);
     }
-    let ps = get_object_param_set(public_key_handle);
     // P-10: no silent ML-KEM-768 default — a key without
     // CKA_PARAMETER_SET is an incomplete object.
     if ps == 0 {
         return Err(CKR_TEMPLATE_INCOMPLETE);
     }
-    let pub_key_bytes = get_object_value(public_key_handle).ok_or(CKR_ARGUMENTS_BAD)?;
+    let pub_key_bytes = pub_key_bytes.ok_or(CKR_ARGUMENTS_BAD)?;
     let mut rng = rand::rngs::OsRng;
 
     let (ct, ss) = match ps {
@@ -136,7 +152,7 @@ pub fn encapsulate(
 ///
 /// `coins` must be exactly 32 bytes → otherwise `CKR_ARGUMENTS_BAD`.
 pub fn encapsulate_deterministic(
-    _session: u32,
+    session: u32,
     public_key_handle: u32,
     mechanism: u32,
     coins: &[u8],
@@ -146,21 +162,30 @@ pub fn encapsulate_deterministic(
     if mechanism != CKM_ML_KEM {
         return Err(CKR_MECHANISM_INVALID);
     }
-    if !check_flag(public_key_handle, CKA_ENCAPSULATE) {
+    let access = resolve_session_access(session)?;
+    let (can_encap, mech_ok, key_type, ps, pub_key_bytes) =
+        with_object_checked(&access, public_key_handle, |attrs| {
+            (
+                read_bool_attr(attrs, CKA_ENCAPSULATE),
+                check_mechanism_allowed_from(attrs, mechanism),
+                get_object_attr_u32_from(attrs, CKA_KEY_TYPE),
+                get_object_param_set_from(attrs),
+                get_object_value_from(attrs),
+            )
+        })?;
+    if !can_encap {
         return Err(CKR_KEY_FUNCTION_NOT_PERMITTED);
     }
-    // PKCS#11 v3.2 §4.8 Table 13 — CKA_ALLOWED_MECHANISMS.
-    crate::state::check_mechanism_allowed(public_key_handle, mechanism)?;
-    if get_object_attr_u32(public_key_handle, CKA_KEY_TYPE) != Some(CKK_ML_KEM) {
+    mech_ok?;
+    if key_type != Some(CKK_ML_KEM) {
         return Err(CKR_KEY_TYPE_INCONSISTENT);
     }
-    let ps = get_object_param_set(public_key_handle);
     if ps == 0 {
         return Err(CKR_TEMPLATE_INCOMPLETE);
     }
     // FIPS 203 §7.2 — m is exactly 32 bytes.
     let m = ml_kem::B32::try_from(coins).map_err(|_| CKR_ARGUMENTS_BAD)?;
-    let pub_key_bytes = get_object_value(public_key_handle).ok_or(CKR_ARGUMENTS_BAD)?;
+    let pub_key_bytes = pub_key_bytes.ok_or(CKR_ARGUMENTS_BAD)?;
 
     let (ct, ss) = match ps {
         CKP_ML_KEM_512 => {
@@ -201,37 +226,47 @@ pub fn encapsulate_deterministic(
 /// `CKA_DECAPSULATE = true`. `ciphertext` length must match the
 /// parameter set's ML-KEM ct size (768 / 1088 / 1568 for 512 / 768 / 1024).
 pub fn decapsulate(
-    _session: u32,
+    session: u32,
     private_key_handle: u32,
     mechanism: u32,
     ciphertext: &[u8],
 ) -> Result<Vec<u8>, CkRv> {
     use ml_kem::{kem::Decapsulate, EncodedSizeUser, KemCore};
 
+    let access = resolve_session_access(session)?;
+
     if mechanism == CKM_ECDH1_DERIVE || mechanism == CKM_EC_MONTGOMERY_KEY_DERIVE {
-        return classical_decapsulate(private_key_handle, mechanism, ciphertext);
+        return classical_decapsulate(&access, private_key_handle, mechanism, ciphertext);
     }
     if mechanism == CKM_PQCTODAY_FRODOKEM_ENCAPSULATE {
-        return frodokem_decapsulate(private_key_handle, ciphertext);
+        return frodokem_decapsulate(&access, private_key_handle, ciphertext);
     }
     if mechanism == CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE {
-        return classic_mceliece_decapsulate(private_key_handle, ciphertext);
+        return classic_mceliece_decapsulate(&access, private_key_handle, ciphertext);
     }
     if mechanism != CKM_ML_KEM {
         return Err(CKR_MECHANISM_INVALID);
     }
-    if !check_flag(private_key_handle, CKA_DECAPSULATE) {
+
+    let (can_decap, mech_ok, key_type, ps, prv_key_bytes) =
+        with_object_checked(&access, private_key_handle, |attrs| {
+            (
+                read_bool_attr(attrs, CKA_DECAPSULATE),
+                check_mechanism_allowed_from(attrs, mechanism),
+                get_object_attr_u32_from(attrs, CKA_KEY_TYPE),
+                get_object_param_set_from(attrs),
+                get_object_value_from(attrs),
+            )
+        })?;
+    if !can_decap {
         return Err(CKR_KEY_FUNCTION_NOT_PERMITTED);
     }
-    // PKCS#11 v3.2 §4.8 Table 13 — CKA_ALLOWED_MECHANISMS.
-    crate::state::check_mechanism_allowed(private_key_handle, mechanism)?;
-
+    mech_ok?;
     // PKCS#11 v3.2 §5.18.9 — CKM_ML_KEM requires an ML-KEM key
     // (compliance-audit P-10).
-    if get_object_attr_u32(private_key_handle, CKA_KEY_TYPE) != Some(CKK_ML_KEM) {
+    if key_type != Some(CKK_ML_KEM) {
         return Err(CKR_KEY_TYPE_INCONSISTENT);
     }
-    let ps = get_object_param_set(private_key_handle);
     // P-10: no silent ML-KEM-768 default — a key without
     // CKA_PARAMETER_SET is an incomplete object.
     if ps == 0 {
@@ -247,7 +282,7 @@ pub fn decapsulate(
         return Err(CKR_ARGUMENTS_BAD);
     }
 
-    let prv_key_bytes = get_object_value(private_key_handle).ok_or(CKR_ARGUMENTS_BAD)?;
+    let prv_key_bytes = prv_key_bytes.ok_or(CKR_ARGUMENTS_BAD)?;
 
     let ss = match ps {
         CKP_ML_KEM_512 => {
@@ -286,20 +321,39 @@ pub fn decapsulate(
 /// classical half (KAT-verified there — see `classical_kem` unit tests
 /// below for the standalone curve-by-curve coverage), reused here rather
 /// than duplicated.
-fn classical_encapsulate(public_key_handle: u32, mechanism: u32) -> Result<(Vec<u8>, Vec<u8>), CkRv> {
-    if !check_flag(public_key_handle, CKA_ENCAPSULATE) {
+fn classical_encapsulate(
+    access: &SessionAccess,
+    public_key_handle: u32,
+    mechanism: u32,
+) -> Result<(Vec<u8>, Vec<u8>), CkRv> {
+    // Isolation gate + CKA_ENCAPSULATE + CKA_ALLOWED_MECHANISMS +
+    // CKA_KEY_TYPE + CKA_PRIV_PARAM_SET + CKA_EC_POINT + CKA_VALUE — every
+    // field either mechanism branch below might need, fetched together
+    // under ONE OBJECTS lock (cheap absent-key lookups for the branch not
+    // taken, rather than a second lock acquisition per branch).
+    let (can_encap, mech_ok, key_type, ps, ec_point, raw_value) =
+        with_object_checked(access, public_key_handle, |attrs| {
+            (
+                read_bool_attr(attrs, CKA_ENCAPSULATE),
+                check_mechanism_allowed_from(attrs, mechanism),
+                get_object_attr_u32_from(attrs, CKA_KEY_TYPE),
+                get_object_param_set_from(attrs),
+                get_ec_point_sec1_from(attrs),
+                get_object_value_from(attrs),
+            )
+        })?;
+    if !can_encap {
         return Err(CKR_KEY_FUNCTION_NOT_PERMITTED);
     }
-    // PKCS#11 v3.2 §4.8 Table 13 — CKA_ALLOWED_MECHANISMS.
-    crate::state::check_mechanism_allowed(public_key_handle, mechanism)?;
+    mech_ok?;
     let mut rng = rand::rngs::OsRng;
     match mechanism {
         CKM_ECDH1_DERIVE => {
-            if get_object_attr_u32(public_key_handle, CKA_KEY_TYPE) != Some(CKK_EC) {
+            if key_type != Some(CKK_EC) {
                 return Err(CKR_KEY_TYPE_INCONSISTENT);
             }
-            let point = get_ec_point_sec1(public_key_handle).ok_or(CKR_ARGUMENTS_BAD)?;
-            match get_object_param_set(public_key_handle) {
+            let point = ec_point.ok_or(CKR_ARGUMENTS_BAD)?;
+            match ps {
                 256 => {
                     let peer = p256::PublicKey::from_sec1_bytes(&point)
                         .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
@@ -328,10 +382,10 @@ fn classical_encapsulate(public_key_handle: u32, mechanism: u32) -> Result<(Vec<
             }
         }
         CKM_EC_MONTGOMERY_KEY_DERIVE => {
-            if get_object_attr_u32(public_key_handle, CKA_KEY_TYPE) != Some(CKK_EC_MONTGOMERY) {
+            if key_type != Some(CKK_EC_MONTGOMERY) {
                 return Err(CKR_KEY_TYPE_INCONSISTENT);
             }
-            let point = get_object_value(public_key_handle).ok_or(CKR_ARGUMENTS_BAD)?;
+            let point = raw_value.ok_or(CKR_ARGUMENTS_BAD)?;
             match point.len() {
                 32 => {
                     let peer: [u8; 32] = point.as_slice().try_into().map_err(|_| CKR_ARGUMENTS_BAD)?;
@@ -359,19 +413,33 @@ fn classical_encapsulate(public_key_handle: u32, mechanism: u32) -> Result<(Vec<
 /// Classical-KEM decapsulation — the inverse of `classical_encapsulate`.
 /// Reads the static scalar from its handle (never exported) and DHs it
 /// against the ephemeral public key carried in `ciphertext`.
-fn classical_decapsulate(private_key_handle: u32, mechanism: u32, ciphertext: &[u8]) -> Result<Vec<u8>, CkRv> {
-    if !check_flag(private_key_handle, CKA_DECAPSULATE) {
+fn classical_decapsulate(
+    access: &SessionAccess,
+    private_key_handle: u32,
+    mechanism: u32,
+    ciphertext: &[u8],
+) -> Result<Vec<u8>, CkRv> {
+    let (can_decap, mech_ok, key_type, ps, scalar) =
+        with_object_checked(access, private_key_handle, |attrs| {
+            (
+                read_bool_attr(attrs, CKA_DECAPSULATE),
+                check_mechanism_allowed_from(attrs, mechanism),
+                get_object_attr_u32_from(attrs, CKA_KEY_TYPE),
+                get_object_param_set_from(attrs),
+                get_object_value_from(attrs),
+            )
+        })?;
+    if !can_decap {
         return Err(CKR_KEY_FUNCTION_NOT_PERMITTED);
     }
-    // PKCS#11 v3.2 §4.8 Table 13 — CKA_ALLOWED_MECHANISMS.
-    crate::state::check_mechanism_allowed(private_key_handle, mechanism)?;
+    mech_ok?;
     match mechanism {
         CKM_ECDH1_DERIVE => {
-            if get_object_attr_u32(private_key_handle, CKA_KEY_TYPE) != Some(CKK_EC) {
+            if key_type != Some(CKK_EC) {
                 return Err(CKR_KEY_TYPE_INCONSISTENT);
             }
-            let scalar = get_object_value(private_key_handle).ok_or(CKR_ARGUMENTS_BAD)?;
-            match get_object_param_set(private_key_handle) {
+            let scalar = scalar.ok_or(CKR_ARGUMENTS_BAD)?;
+            match ps {
                 256 => {
                     let secret = p256::SecretKey::from_slice(&scalar).map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
                     let eph_pub = p256::PublicKey::from_sec1_bytes(ciphertext)
@@ -397,10 +465,10 @@ fn classical_decapsulate(private_key_handle: u32, mechanism: u32, ciphertext: &[
             }
         }
         CKM_EC_MONTGOMERY_KEY_DERIVE => {
-            if get_object_attr_u32(private_key_handle, CKA_KEY_TYPE) != Some(CKK_EC_MONTGOMERY) {
+            if key_type != Some(CKK_EC_MONTGOMERY) {
                 return Err(CKR_KEY_TYPE_INCONSISTENT);
             }
-            let scalar = get_object_value(private_key_handle).ok_or(CKR_ARGUMENTS_BAD)?;
+            let scalar = scalar.ok_or(CKR_ARGUMENTS_BAD)?;
             match scalar.len() {
                 32 => {
                     let arr: [u8; 32] = scalar.as_slice().try_into().map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
@@ -433,22 +501,30 @@ fn classical_decapsulate(private_key_handle: u32, mechanism: u32, ciphertext: &[
 /// RNG note — see [`super::keygen::generate_frodokem_keypair`]: `frodo-kem`
 /// needs `rand_core 0.10`'s `CryptoRng`, not this engine's usual
 /// `rand::rngs::OsRng`.
-fn frodokem_encapsulate(public_key_handle: u32) -> Result<(Vec<u8>, Vec<u8>), CkRv> {
+fn frodokem_encapsulate(access: &SessionAccess, public_key_handle: u32) -> Result<(Vec<u8>, Vec<u8>), CkRv> {
     use getrandom_0_4::rand_core::UnwrapErr;
     use getrandom_0_4::SysRng;
 
-    if !check_flag(public_key_handle, CKA_ENCAPSULATE) {
+    let (can_encap, key_type, ps, pub_key_bytes) =
+        with_object_checked(access, public_key_handle, |attrs| {
+            (
+                read_bool_attr(attrs, CKA_ENCAPSULATE),
+                get_object_attr_u32_from(attrs, CKA_KEY_TYPE),
+                get_object_param_set_from(attrs),
+                get_object_value_from(attrs),
+            )
+        })?;
+    if !can_encap {
         return Err(CKR_KEY_FUNCTION_NOT_PERMITTED);
     }
-    if get_object_attr_u32(public_key_handle, CKA_KEY_TYPE) != Some(CKK_PQCTODAY_FRODOKEM) {
+    if key_type != Some(CKK_PQCTODAY_FRODOKEM) {
         return Err(CKR_KEY_TYPE_INCONSISTENT);
     }
-    let ps = get_object_param_set(public_key_handle);
     if ps == 0 {
         return Err(CKR_TEMPLATE_INCOMPLETE);
     }
     let alg = super::keygen::frodokem_algorithm(ps)?;
-    let pub_key_bytes = get_object_value(public_key_handle).ok_or(CKR_ARGUMENTS_BAD)?;
+    let pub_key_bytes = pub_key_bytes.ok_or(CKR_ARGUMENTS_BAD)?;
     let ek = frodo_kem::EncryptionKey::from_bytes(alg, &pub_key_bytes)
         .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
     let mut rng = UnwrapErr(SysRng);
@@ -460,19 +536,27 @@ fn frodokem_encapsulate(public_key_handle: u32) -> Result<(Vec<u8>, Vec<u8>), Ck
 
 /// FrodoKEM decapsulation (`CKM_PQCTODAY_FRODOKEM_ENCAPSULATE`). Returns the
 /// recovered shared secret.
-fn frodokem_decapsulate(private_key_handle: u32, ciphertext: &[u8]) -> Result<Vec<u8>, CkRv> {
-    if !check_flag(private_key_handle, CKA_DECAPSULATE) {
+fn frodokem_decapsulate(access: &SessionAccess, private_key_handle: u32, ciphertext: &[u8]) -> Result<Vec<u8>, CkRv> {
+    let (can_decap, key_type, ps, prv_key_bytes) =
+        with_object_checked(access, private_key_handle, |attrs| {
+            (
+                read_bool_attr(attrs, CKA_DECAPSULATE),
+                get_object_attr_u32_from(attrs, CKA_KEY_TYPE),
+                get_object_param_set_from(attrs),
+                get_object_value_from(attrs),
+            )
+        })?;
+    if !can_decap {
         return Err(CKR_KEY_FUNCTION_NOT_PERMITTED);
     }
-    if get_object_attr_u32(private_key_handle, CKA_KEY_TYPE) != Some(CKK_PQCTODAY_FRODOKEM) {
+    if key_type != Some(CKK_PQCTODAY_FRODOKEM) {
         return Err(CKR_KEY_TYPE_INCONSISTENT);
     }
-    let ps = get_object_param_set(private_key_handle);
     if ps == 0 {
         return Err(CKR_TEMPLATE_INCOMPLETE);
     }
     let alg = super::keygen::frodokem_algorithm(ps)?;
-    let prv_key_bytes = get_object_value(private_key_handle).ok_or(CKR_ARGUMENTS_BAD)?;
+    let prv_key_bytes = prv_key_bytes.ok_or(CKR_ARGUMENTS_BAD)?;
     let dk = frodo_kem::DecryptionKey::from_bytes(alg, &prv_key_bytes)
         .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
     let ct = frodo_kem::Ciphertext::from_bytes(alg, ciphertext).map_err(|_| CKR_ARGUMENTS_BAD)?;
@@ -491,19 +575,28 @@ fn frodokem_decapsulate(private_key_handle: u32, ciphertext: &[u8]) -> Result<Ve
 /// Unlike FrodoKEM, `classic-mceliece-rust` uses `rand 0.8` — the same
 /// version this engine already uses elsewhere — so `rand::rngs::OsRng`
 /// works directly.
-fn classic_mceliece_encapsulate(public_key_handle: u32) -> Result<(Vec<u8>, Vec<u8>), CkRv> {
+fn classic_mceliece_encapsulate(access: &SessionAccess, public_key_handle: u32) -> Result<(Vec<u8>, Vec<u8>), CkRv> {
     use classic_mceliece_rust::{encapsulate_boxed, PublicKey, CRYPTO_PUBLICKEYBYTES};
 
-    if !check_flag(public_key_handle, CKA_ENCAPSULATE) {
+    let (can_encap, key_type, ps, pub_key_bytes) =
+        with_object_checked(access, public_key_handle, |attrs| {
+            (
+                read_bool_attr(attrs, CKA_ENCAPSULATE),
+                get_object_attr_u32_from(attrs, CKA_KEY_TYPE),
+                get_object_param_set_from(attrs),
+                get_object_value_from(attrs),
+            )
+        })?;
+    if !can_encap {
         return Err(CKR_KEY_FUNCTION_NOT_PERMITTED);
     }
-    if get_object_attr_u32(public_key_handle, CKA_KEY_TYPE) != Some(CKK_PQCTODAY_CLASSIC_MCELIECE) {
+    if key_type != Some(CKK_PQCTODAY_CLASSIC_MCELIECE) {
         return Err(CKR_KEY_TYPE_INCONSISTENT);
     }
-    if get_object_param_set(public_key_handle) != CKP_CLASSIC_MCELIECE_6688128 {
+    if ps != CKP_CLASSIC_MCELIECE_6688128 {
         return Err(CKR_ARGUMENTS_BAD);
     }
-    let pub_key_bytes = get_object_value(public_key_handle).ok_or(CKR_ARGUMENTS_BAD)?;
+    let pub_key_bytes = pub_key_bytes.ok_or(CKR_ARGUMENTS_BAD)?;
     let mut pk_arr: [u8; CRYPTO_PUBLICKEYBYTES] = pub_key_bytes
         .as_slice()
         .try_into()
@@ -518,22 +611,31 @@ fn classic_mceliece_encapsulate(public_key_handle: u32) -> Result<(Vec<u8>, Vec<
 
 /// Classic McEliece decapsulation (`CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE`).
 /// Returns the recovered shared secret.
-fn classic_mceliece_decapsulate(private_key_handle: u32, ciphertext: &[u8]) -> Result<Vec<u8>, CkRv> {
+fn classic_mceliece_decapsulate(access: &SessionAccess, private_key_handle: u32, ciphertext: &[u8]) -> Result<Vec<u8>, CkRv> {
     use classic_mceliece_rust::{decapsulate_boxed, Ciphertext, SecretKey, CRYPTO_CIPHERTEXTBYTES, CRYPTO_SECRETKEYBYTES};
 
-    if !check_flag(private_key_handle, CKA_DECAPSULATE) {
+    let (can_decap, key_type, ps, prv_key_bytes) =
+        with_object_checked(access, private_key_handle, |attrs| {
+            (
+                read_bool_attr(attrs, CKA_DECAPSULATE),
+                get_object_attr_u32_from(attrs, CKA_KEY_TYPE),
+                get_object_param_set_from(attrs),
+                get_object_value_from(attrs),
+            )
+        })?;
+    if !can_decap {
         return Err(CKR_KEY_FUNCTION_NOT_PERMITTED);
     }
-    if get_object_attr_u32(private_key_handle, CKA_KEY_TYPE) != Some(CKK_PQCTODAY_CLASSIC_MCELIECE) {
+    if key_type != Some(CKK_PQCTODAY_CLASSIC_MCELIECE) {
         return Err(CKR_KEY_TYPE_INCONSISTENT);
     }
-    if get_object_param_set(private_key_handle) != CKP_CLASSIC_MCELIECE_6688128 {
+    if ps != CKP_CLASSIC_MCELIECE_6688128 {
         return Err(CKR_ARGUMENTS_BAD);
     }
     if ciphertext.len() != CRYPTO_CIPHERTEXTBYTES {
         return Err(CKR_ARGUMENTS_BAD);
     }
-    let mut prv_key_bytes = get_object_value(private_key_handle).ok_or(CKR_ARGUMENTS_BAD)?;
+    let mut prv_key_bytes = prv_key_bytes.ok_or(CKR_ARGUMENTS_BAD)?;
     let sk_arr: &mut [u8; CRYPTO_SECRETKEYBYTES] = (&mut prv_key_bytes[..])
         .try_into()
         .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
@@ -575,7 +677,7 @@ fn classic_mceliece_decapsulate(private_key_handle: u32, ciphertext: &[u8]) -> R
 /// paths run the identical match body instead of two copies that used
 /// to silently drift apart.
 pub fn encrypt(
-    _session: u32,
+    session: u32,
     key_handle: u32,
     mechanism: u32,
     plaintext: &[u8],
@@ -584,12 +686,19 @@ pub fn encrypt(
     aad: &[u8],
     tag_len: Option<usize>,
 ) -> Result<Vec<u8>, CkRv> {
-    if !check_flag(key_handle, CKA_ENCRYPT) {
+    let access = resolve_session_access(session)?;
+    let (can_encrypt, mech_ok, key_bytes) = with_object_checked(&access, key_handle, |attrs| {
+        (
+            read_bool_attr(attrs, CKA_ENCRYPT),
+            check_mechanism_allowed_from(attrs, mechanism),
+            get_object_value_from(attrs),
+        )
+    })?;
+    if !can_encrypt {
         return Err(CKR_KEY_FUNCTION_NOT_PERMITTED);
     }
-    // PKCS#11 v3.2 §4.8 Table 13 — CKA_ALLOWED_MECHANISMS.
-    crate::state::check_mechanism_allowed(key_handle, mechanism)?;
-    let key_bytes = get_object_value(key_handle).ok_or(CKR_ARGUMENTS_BAD)?;
+    mech_ok?;
+    let key_bytes = key_bytes.ok_or(CKR_ARGUMENTS_BAD)?;
     encrypt_with_key_bytes(&key_bytes, mechanism, plaintext, iv, oaep, aad, tag_len)
 }
 
@@ -597,7 +706,7 @@ pub fn encrypt(
 /// Gap-remediation Phase F note on why this now delegates to
 /// [`decrypt_with_key_bytes`].
 pub fn decrypt(
-    _session: u32,
+    session: u32,
     key_handle: u32,
     mechanism: u32,
     ciphertext: &[u8],
@@ -606,12 +715,19 @@ pub fn decrypt(
     aad: &[u8],
     tag_len: Option<usize>,
 ) -> Result<Vec<u8>, CkRv> {
-    if !check_flag(key_handle, CKA_DECRYPT) {
+    let access = resolve_session_access(session)?;
+    let (can_decrypt, mech_ok, key_bytes) = with_object_checked(&access, key_handle, |attrs| {
+        (
+            read_bool_attr(attrs, CKA_DECRYPT),
+            check_mechanism_allowed_from(attrs, mechanism),
+            get_object_value_from(attrs),
+        )
+    })?;
+    if !can_decrypt {
         return Err(CKR_KEY_FUNCTION_NOT_PERMITTED);
     }
-    // PKCS#11 v3.2 §4.8 Table 13 — CKA_ALLOWED_MECHANISMS.
-    crate::state::check_mechanism_allowed(key_handle, mechanism)?;
-    let key_bytes = get_object_value(key_handle).ok_or(CKR_ARGUMENTS_BAD)?;
+    mech_ok?;
+    let key_bytes = key_bytes.ok_or(CKR_ARGUMENTS_BAD)?;
     decrypt_with_key_bytes(&key_bytes, mechanism, ciphertext, iv, oaep, aad, tag_len)
 }
 
@@ -1221,20 +1337,10 @@ fn aes_cbc_decrypt(key: &[u8], iv: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, 
     Ok(out)
 }
 
-// ── Helpers ─────────────────────────────────────────────────────────────────
-
-/// Check a single CK_BBOOL attribute on the key. Returns `false` if the
-/// key is missing or the flag is not set. Mirrors `check_can_sign`
-/// in [`super::sign`].
-fn check_flag(key_handle: u32, attr_type: u32) -> bool {
-    OBJECTS.with(|o| {
-        o.borrow()
-            .get(&key_handle)
-            .and_then(|attrs| attrs.get(&attr_type))
-            .map(|v| !v.is_empty() && v[0] == 0x01)
-            .unwrap_or(false)
-    })
-}
+// The former `check_flag(key_handle, attr_type)` free function (a direct,
+// ungated OBJECTS lock) is gone — CKA_ENCAPSULATE/CKA_DECAPSULATE/
+// CKA_ENCRYPT/CKA_DECRYPT are now read via `read_bool_attr` inside the
+// isolation gate's single borrow (`with_object_checked` above).
 
 #[cfg(test)]
 mod tests {

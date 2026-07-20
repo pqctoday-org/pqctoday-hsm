@@ -37,7 +37,12 @@ use super::helpers::{emit_request, emit_success, fail_err};
 /// it. A job already `Completed` reports `Completed` (succeeded) or
 /// `Failed` (the operation itself errored) — either way, too late to
 /// cancel. `Unavailable` is never produced by this implementation.
-pub fn cancel(deps: &Deps, req: CancelRequest, correlation_id: &str) -> Result<CancelResponse> {
+pub fn cancel(
+    deps: &Deps,
+    req: CancelRequest,
+    auth: &crate::server::auth::AuthContext,
+    correlation_id: &str,
+) -> Result<CancelResponse> {
     emit_request(
         deps,
         correlation_id,
@@ -45,13 +50,18 @@ pub fn cancel(deps: &Deps, req: CancelRequest, correlation_id: &str) -> Result<C
         format!("correlation_value={} bytes", req.asynchronous_correlation_value.len()),
     );
 
+    let requester = auth.identity.as_ref().map(|i| i.username.clone());
     let job = {
         let jobs = deps.async_jobs.lock().unwrap_or_else(|e| e.into_inner());
         jobs.get(&req.asynchronous_correlation_value).cloned()
     };
-    let job = job.ok_or_else(|| {
-        fail_err(deps, correlation_id, "Cancel", KmipError::invalid_asynchronous_correlation_value())
-    })?;
+    // Part F §F7.5 — a foreign tenant's job is indistinguishable from a
+    // nonexistent one (anti-oracle), same as Poll.
+    let job = job
+        .filter(|j| j.state.lock().unwrap_or_else(|e| e.into_inner()).owner == requester)
+        .ok_or_else(|| {
+            fail_err(deps, correlation_id, "Cancel", KmipError::invalid_asynchronous_correlation_value())
+        })?;
 
     let cancellation_result = if job.try_cancel_if_submitted() {
         CancellationResult::Canceled
@@ -83,7 +93,12 @@ pub fn cancel(deps: &Deps, req: CancelRequest, correlation_id: &str) -> Result<C
 /// named job reaches `Completed`. Never re-runs the operation itself
 /// (that would risk double-executing a side-effecting handler); it
 /// only waits on the same `Condvar` the executor signals.
-pub fn process(deps: &Deps, req: ProcessRequest, correlation_id: &str) -> Result<ProcessResponse> {
+pub fn process(
+    deps: &Deps,
+    req: ProcessRequest,
+    auth: &crate::server::auth::AuthContext,
+    correlation_id: &str,
+) -> Result<ProcessResponse> {
     emit_request(
         deps,
         correlation_id,
@@ -91,13 +106,19 @@ pub fn process(deps: &Deps, req: ProcessRequest, correlation_id: &str) -> Result
         format!("correlation_value={} bytes", req.asynchronous_correlation_value.len()),
     );
 
+    let requester = auth.identity.as_ref().map(|i| i.username.clone());
     let job = {
         let jobs = deps.async_jobs.lock().unwrap_or_else(|e| e.into_inner());
         jobs.get(&req.asynchronous_correlation_value).cloned()
     };
-    let job = job.ok_or_else(|| {
-        fail_err(deps, correlation_id, "Process", KmipError::invalid_asynchronous_correlation_value())
-    })?;
+    // Part F §F7.5 — foreign-tenant job indistinguishable from missing
+    // (anti-oracle); Process otherwise blocks until it can read the
+    // outcome, which is another tenant's result.
+    let job = job
+        .filter(|j| j.state.lock().unwrap_or_else(|e| e.into_inner()).owner == requester)
+        .ok_or_else(|| {
+            fail_err(deps, correlation_id, "Process", KmipError::invalid_asynchronous_correlation_value())
+        })?;
 
     job.wait_until_completed();
 
@@ -115,6 +136,7 @@ pub fn process(deps: &Deps, req: ProcessRequest, correlation_id: &str) -> Result
 pub fn query_asynchronous_requests(
     deps: &Deps,
     req: QueryAsynchronousRequestsRequest,
+    auth: &crate::server::auth::AuthContext,
     correlation_id: &str,
 ) -> Result<QueryAsynchronousRequestsResponse> {
     emit_request(
@@ -128,10 +150,18 @@ pub fn query_asynchronous_requests(
         ),
     );
 
+    let requester = auth.identity.as_ref().map(|i| i.username.clone());
     let jobs = deps.async_jobs.lock().unwrap_or_else(|e| e.into_inner());
     let mut requests = Vec::new();
     for (cv, job) in jobs.iter() {
         let st = job.state.lock().unwrap_or_else(|e| e.into_inner());
+        // Part F §F7.5 — a tenant sees only its OWN outstanding jobs,
+        // never another tenant's (which would leak that tenant's
+        // operation types + submission times, and expose correlation
+        // values to guess for a Poll).
+        if st.owner != requester {
+            continue;
+        }
         if st.stage == ProcessingStage::Completed {
             continue;
         }
@@ -183,7 +213,7 @@ mod tests {
 
     fn insert_job(deps: &Deps, op: Operation) -> (Vec<u8>, Arc<AsyncJob>) {
         let cv = deps.new_correlation_value();
-        let job = AsyncJob::new(op);
+        let job = AsyncJob::new(op, None);
         deps.async_jobs.lock().unwrap().insert(cv.clone(), job.clone());
         (cv, job)
     }
@@ -194,6 +224,7 @@ mod tests {
         let err = cancel(
             &deps,
             CancelRequest { asynchronous_correlation_value: vec![0xaa; 8] },
+            &crate::server::auth::AuthContext::open(),
             "t",
         )
         .unwrap_err();
@@ -204,7 +235,7 @@ mod tests {
     fn cancel_submitted_job_reports_canceled_and_poll_sees_the_cancellation() {
         let deps = deps();
         let (cv, job) = insert_job(&deps, Operation::Hash);
-        let resp = cancel(&deps, CancelRequest { asynchronous_correlation_value: cv }, "t").unwrap();
+        let resp = cancel(&deps, CancelRequest { asynchronous_correlation_value: cv }, &crate::server::auth::AuthContext::open(), "t").unwrap();
         assert_eq!(resp.cancellation_result, CancellationResult::Canceled);
         let st = job.state.lock().unwrap();
         assert_eq!(st.stage, ProcessingStage::Completed);
@@ -216,7 +247,7 @@ mod tests {
         let deps = deps();
         let (cv, job) = insert_job(&deps, Operation::Hash);
         job.mark_in_process();
-        let resp = cancel(&deps, CancelRequest { asynchronous_correlation_value: cv }, "t").unwrap();
+        let resp = cancel(&deps, CancelRequest { asynchronous_correlation_value: cv }, &crate::server::auth::AuthContext::open(), "t").unwrap();
         assert_eq!(resp.cancellation_result, CancellationResult::UnableToCancel);
     }
 
@@ -225,12 +256,12 @@ mod tests {
         let deps = deps();
         let (cv_ok, job_ok) = insert_job(&deps, Operation::Hash);
         job_ok.mark_completed(Ok(crate::kmip30::ResponsePayload::Process(ProcessResponse {})));
-        let resp = cancel(&deps, CancelRequest { asynchronous_correlation_value: cv_ok }, "t").unwrap();
+        let resp = cancel(&deps, CancelRequest { asynchronous_correlation_value: cv_ok }, &crate::server::auth::AuthContext::open(), "t").unwrap();
         assert_eq!(resp.cancellation_result, CancellationResult::Completed);
 
         let (cv_err, job_err) = insert_job(&deps, Operation::Hash);
         job_err.mark_completed(Err(KmipError::internal("boom")));
-        let resp = cancel(&deps, CancelRequest { asynchronous_correlation_value: cv_err }, "t").unwrap();
+        let resp = cancel(&deps, CancelRequest { asynchronous_correlation_value: cv_err }, &crate::server::auth::AuthContext::open(), "t").unwrap();
         assert_eq!(resp.cancellation_result, CancellationResult::Failed);
     }
 
@@ -239,7 +270,7 @@ mod tests {
         let deps = deps();
         let (cv, job) = insert_job(&deps, Operation::Hash);
         job.mark_completed(Ok(crate::kmip30::ResponsePayload::Process(ProcessResponse {})));
-        process(&deps, ProcessRequest { asynchronous_correlation_value: cv }, "t").unwrap();
+        process(&deps, ProcessRequest { asynchronous_correlation_value: cv }, &crate::server::auth::AuthContext::open(), "t").unwrap();
     }
 
     #[test]
@@ -248,6 +279,7 @@ mod tests {
         let err = process(
             &deps,
             ProcessRequest { asynchronous_correlation_value: vec![0xbb; 8] },
+            &crate::server::auth::AuthContext::open(),
             "t",
         )
         .unwrap_err();
@@ -262,7 +294,7 @@ mod tests {
         // Completed jobs are no longer "outstanding".
         job_sign.mark_completed(Ok(crate::kmip30::ResponsePayload::Process(ProcessResponse {})));
 
-        let all = query_asynchronous_requests(&deps, QueryAsynchronousRequestsRequest::default(), "t")
+        let all = query_asynchronous_requests(&deps, QueryAsynchronousRequestsRequest::default(), &crate::server::auth::AuthContext::open(), "t")
             .unwrap();
         assert_eq!(all.requests.len(), 1);
         assert_eq!(all.requests[0].asynchronous_correlation_value, cv_hash);
@@ -275,6 +307,7 @@ mod tests {
                 asynchronous_correlation_values: vec![],
                 operations: vec![Operation::Sign],
             },
+            &crate::server::auth::AuthContext::open(),
             "t",
         )
         .unwrap();

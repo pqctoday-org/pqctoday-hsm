@@ -44,6 +44,7 @@ use x509_cert::TbsCertificate;
 
 use crate::error::{KmipError, Result, ResultReason};
 
+#[cfg(test)]
 use super::deps::Deps;
 use super::spki_verify::{verify_with_spki, SpkiVerdict};
 
@@ -123,8 +124,8 @@ pub fn tbs_minus_alt_sig_value(tbs: &TbsCertificate) -> Result<Vec<u8>> {
 /// AND-combining both verdicts — this function only speaks to the alt
 /// half, mirroring the split `verify_composite_signature` uses for
 /// composite-signature's two halves (WP-C4).
-pub fn verify_alt_signature(deps: &Deps, fields: &AltSigFields, tbs_minus_alt: &[u8]) -> Result<SpkiVerdict> {
-    verify_with_spki(deps, &fields.alt_spki, &fields.alt_sig_alg, tbs_minus_alt, &fields.alt_sig_value)
+pub fn verify_alt_signature(session: Option<u32>, fields: &AltSigFields, tbs_minus_alt: &[u8]) -> Result<SpkiVerdict> {
+    verify_with_spki(session, &fields.alt_spki, &fields.alt_sig_alg, tbs_minus_alt, &fields.alt_sig_value)
 }
 
 #[cfg(test)]
@@ -299,7 +300,7 @@ pub(crate) mod tests {
         let reparsed = TbsCertificate::from_der(&tbs_minus_alt).unwrap();
         assert_eq!(reparsed.extensions.as_ref().map(|e| e.len()), Some(2));
 
-        let verdict = verify_alt_signature(&deps, &fields, &tbs_minus_alt).unwrap();
+        let verdict = verify_alt_signature(deps.engine_session, &fields, &tbs_minus_alt).unwrap();
         assert_eq!(verdict, SpkiVerdict::Valid, "a real ML-DSA alt signature over the correct bytes must verify");
     }
 
@@ -311,7 +312,7 @@ pub(crate) mod tests {
 
         let fields = extract_alt_sig_fields(&tbs).unwrap().expect("Catalyst extensions present");
         let tbs_minus_alt = tbs_minus_alt_sig_value(&tbs).unwrap();
-        let verdict = verify_alt_signature(&deps, &fields, &tbs_minus_alt).unwrap();
+        let verdict = verify_alt_signature(deps.engine_session, &fields, &tbs_minus_alt).unwrap();
         assert_eq!(verdict, SpkiVerdict::Invalid, "a tampered alt signature must never verify");
     }
 

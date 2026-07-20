@@ -1,0 +1,27 @@
+[package]
+name = "bench-harness"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "bench-harness"
+path = "src/main.rs"
+
+[dependencies]
+# hsm-perf-bench plan §A4.1/§P4 — path dependency used ONLY for its
+# public CK_* type/const definitions (the Rust-native equivalent of
+# #include-ing pkcs11.h/pkcs11t.h/pkcs11f.h). This harness never calls
+# a softhsmrustv3 function directly: every PKCS#11 operation goes
+# through the dlopen'd .dylib/.so's own function-pointer table, so all
+# engine state lives in ONE loaded instance — the same one a real
+# PKCS#11 application would load. Depending on the crate for types only
+# is inert at runtime: lazy_static globals are never touched unless a
+# function that reads them is called, and this crate calls none.
+softhsmrustv3 = { path = "..", default-features = false }
+libloading = "0.8"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rand = "0.8"
+anyhow = "1"

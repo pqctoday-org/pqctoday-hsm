@@ -27,17 +27,22 @@ use crate::policy::{Decision, PolicyRequest};
 
 use super::deps::Deps;
 use super::helpers::{
-    canonical_name, emit_request, emit_state_change, emit_success, fail_err,
+    authorize_object, canonical_name, emit_request, emit_state_change, emit_success, fail_err,
     state_name,
 };
 
-pub fn destroy(deps: &Deps, req: DestroyRequest, correlation_id: &str) -> Result<DestroyResponse> {
+pub fn destroy(
+    deps: &Deps,
+    req: DestroyRequest,
+    auth: &crate::server::auth::AuthContext,
+    correlation_id: &str,
+) -> Result<DestroyResponse> {
     let started = OffsetDateTime::now_utc();
     emit_request(deps, correlation_id, "Destroy", format!("uid={}", req.uid));
 
-    let mut obj = deps.store.get(&req.uid)?.ok_or_else(|| {
-        fail_err(deps, correlation_id, "Destroy", KmipError::object_not_found(&req.uid))
-    })?;
+    // Part F §F7.4 — owner-checked lookup (see get.rs for the pattern).
+    let mut obj = authorize_object(deps, auth, &req.uid, || KmipError::object_not_found(&req.uid))
+        .map_err(|e| fail_err(deps, correlation_id, "Destroy", e))?;
 
     // KMIP 3.0 §3.x lifecycle — Active cannot transition directly to Destroyed;
     // already-Destroyed is terminal.
@@ -87,7 +92,7 @@ pub fn destroy(deps: &Deps, req: DestroyRequest, correlation_id: &str) -> Result
     // audit record is emitted after the call with its real rv; when no
     // engine call happens (no session / handle already gone) no
     // `Pkcs11Call` record is fabricated.
-    if let Some(session) = deps.engine_session {
+    if let Some(session) = deps.resolve_tenant_session(auth.identity.as_ref()).ok() {
         // Best-effort: if the handle is already gone (e.g. engine restart
         // between record creation and Destroy), ignore the error — the
         // KMIP lifecycle transition still proceeds.
@@ -159,6 +164,7 @@ mod tests {
     use crate::auditlog::{AuditSink, RingSink};
     use crate::kmip30::{KmipAlgorithm, ObjectType, UsageMask};
     use crate::policy::{load_from_str, Engine};
+    use crate::server::auth::AuthContext;
     use crate::store::{MemoryStore, ObjectRecord};
     use std::sync::Arc;
 
@@ -207,7 +213,7 @@ mod tests {
     fn pre_active_to_destroyed() {
         let d = deps_with();
         put(&d, "u", State::PreActive);
-        let r = destroy(&d, DestroyRequest { uid: "u".into() }, "c").unwrap();
+        let r = destroy(&d, DestroyRequest { uid: "u".into() }, &AuthContext::open(), "c").unwrap();
         assert_eq!(r.state, State::Destroyed);
     }
 
@@ -215,7 +221,7 @@ mod tests {
     fn deactivated_to_destroyed() {
         let d = deps_with();
         put(&d, "u", State::Deactivated);
-        let r = destroy(&d, DestroyRequest { uid: "u".into() }, "c").unwrap();
+        let r = destroy(&d, DestroyRequest { uid: "u".into() }, &AuthContext::open(), "c").unwrap();
         assert_eq!(r.state, State::Destroyed);
     }
 
@@ -223,7 +229,7 @@ mod tests {
     fn compromised_to_destroyed_compromised() {
         let d = deps_with();
         put(&d, "u", State::Compromised);
-        let r = destroy(&d, DestroyRequest { uid: "u".into() }, "c").unwrap();
+        let r = destroy(&d, DestroyRequest { uid: "u".into() }, &AuthContext::open(), "c").unwrap();
         assert_eq!(r.state, State::DestroyedCompromised);
     }
 
@@ -231,7 +237,7 @@ mod tests {
     fn active_rejected_must_revoke_first() {
         let d = deps_with();
         put(&d, "u", State::Active);
-        let err = destroy(&d, DestroyRequest { uid: "u".into() }, "c").unwrap_err();
+        let err = destroy(&d, DestroyRequest { uid: "u".into() }, &AuthContext::open(), "c").unwrap_err();
         // KMIP 3.0 §11 — the FSM rejection reason is
         // `WrongKeyLifecycleState` (0x43), not the generic
         // `PermissionDenied`. AKLC-M-2 msg #5 pins this code.
@@ -245,7 +251,7 @@ mod tests {
     fn already_destroyed_rejected() {
         let d = deps_with();
         put(&d, "u", State::Destroyed);
-        let err = destroy(&d, DestroyRequest { uid: "u".into() }, "c").unwrap_err();
+        let err = destroy(&d, DestroyRequest { uid: "u".into() }, &AuthContext::open(), "c").unwrap_err();
         assert_eq!(err.result_reason(), crate::error::ResultReason::ObjectDestroyed);
     }
 
@@ -286,7 +292,7 @@ mod tests {
             })
             .unwrap();
 
-        destroy(&d, DestroyRequest { uid: "u".into() }, "c").unwrap();
+        destroy(&d, DestroyRequest { uid: "u".into() }, &AuthContext::open(), "c").unwrap();
 
         let stored = d.store.get("u").unwrap().unwrap();
         assert!(
@@ -307,6 +313,7 @@ mod tests {
                 key_compression_type: None,
                 key_wrapping_specification: None,
             },
+            &AuthContext::open(),
             "c",
         )
         .unwrap();

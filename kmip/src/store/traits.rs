@@ -314,6 +314,25 @@ pub struct ObjectRecord {
     /// KMIP *attribute* — the spec only exposes it as the Locate
     /// Storage Status Mask filter (K22).
     pub archived: bool,
+    /// Part F §F7.3 (rust-hsm-perf-bench-scenario-plan-07182026.md,
+    /// workspace root) — the KMIP identity's username that created this
+    /// object (`server::auth::Identity::username`, stored as a plain
+    /// `String` rather than the `Identity` type to keep `store`
+    /// decoupled from `server`). `None` for objects created by a
+    /// request with no authenticated identity (Single tenancy mode —
+    /// today's default — or every object that existed before this
+    /// field). `#[serde(default)]` keeps pre-existing sqlite/memory
+    /// records readable.
+    ///
+    /// Per the user's decision (2026-07-18): an ownerless object is
+    /// accessible ONLY to a requester who is ALSO unauthenticated —
+    /// enforcement (`ops::helpers::authorize_object`) does exact
+    /// `Option<String>` equality between this field and the requester's
+    /// identity, never a one-sided "no owner ⇒ public" rule. `None ==
+    /// None` covers "both anonymous"; `Some(a) == Some(a)` covers "same
+    /// tenant"; every other combination is a mismatch.
+    #[serde(default)]
+    pub owner: Option<String>,
 }
 
 impl ObjectRecord {
@@ -413,6 +432,7 @@ impl From<BaselineDefaults> for ObjectRecord {
             application_specific_information: None,
             protection_storage_mask: None,
             archived: false,
+            owner: None,
         }
     }
 }

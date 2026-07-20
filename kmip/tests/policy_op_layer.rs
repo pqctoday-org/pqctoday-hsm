@@ -31,6 +31,7 @@ use pqctoday_kmip::ops::create::create;
 use pqctoday_kmip::ops::create_key_pair::create_key_pair;
 use pqctoday_kmip::ops::{Deps, DepsConfig};
 use pqctoday_kmip::policy::{load_from_str, Engine};
+use pqctoday_kmip::server::auth::AuthContext;
 use pqctoday_kmip::store::MemoryStore;
 
 const POLICIES_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/policies");
@@ -97,6 +98,7 @@ fn try_create_key_pair(
             seed: None,
         },
         canonical_op_for(intent),
+        &AuthContext::open(),
         "ckp",
     )
     .map(|_| ())
@@ -120,7 +122,7 @@ fn try_create_sym(
     for (k, v) in custom {
         t.push(Attribute::Custom { name: (*k).to_string(), value: pqctoday_kmip::kmip30::CustomAttributeValue::Text((*v).to_string()) });
     }
-    create(deps, CreateRequest { object_type: ObjectType::SymmetricKey, template_attribute: t }, "cr")
+    create(deps, CreateRequest { object_type: ObjectType::SymmetricKey, template_attribute: t }, &AuthContext::open(), "cr")
         .map(|_| ())
         .map_err(|e| format!("{:?}", e.result_reason()))
 }

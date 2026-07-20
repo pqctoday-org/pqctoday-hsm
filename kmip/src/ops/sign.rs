@@ -34,7 +34,13 @@ use crate::policy::{Decision, PolicyRequest};
 
 use super::deps::Deps;
 
-pub fn sign(deps: &Deps, req: SignRequest, correlation_id: &str) -> Result<SignResponse> {
+pub fn sign(
+    deps: &Deps,
+    req: SignRequest,
+    auth: &crate::server::auth::AuthContext,
+    correlation_id: &str,
+) -> Result<SignResponse> {
+    let session = deps.resolve_tenant_session(auth.identity.as_ref()).ok();
     let started = OffsetDateTime::now_utc();
     deps.sink.emit(AuditEvent::at(
         started,
@@ -47,11 +53,9 @@ pub fn sign(deps: &Deps, req: SignRequest, correlation_id: &str) -> Result<SignR
         },
     ));
 
-    // ── Plane 2: store lookup ───────────────────────────────────────────
-    let obj = deps
-        .store
-        .get(&req.uid)?
-        .ok_or_else(|| fail_err(deps, correlation_id, "Sign", KmipError::object_not_found(&req.uid)))?;
+    // ── Plane 2: store lookup (Part F §F7.4 — owner-checked) ─────────────
+    let obj = super::helpers::authorize_object(deps, auth, &req.uid, || KmipError::object_not_found(&req.uid))
+        .map_err(|e| fail_err(deps, correlation_id, "Sign", e))?;
 
     // ── Lifecycle gate (KMIP 3.0 §3.x — Sign requires Active) ───────────
     if obj.state != State::Active {
@@ -175,7 +179,7 @@ pub fn sign(deps: &Deps, req: SignRequest, correlation_id: &str) -> Result<SignR
             // → activate → deactivate+supersede the old → re-issue the Sign) and
             // return the signature under the migrated algorithm. The application
             // signed with an unchanged call; the engine migrated the key.
-            return rekey_and_sign(deps, &req, &obj, &new_algorithm, correlation_id);
+            return rekey_and_sign(deps, &req, &obj, &new_algorithm, auth, correlation_id);
         }
     };
 
@@ -185,7 +189,7 @@ pub fn sign(deps: &Deps, req: SignRequest, correlation_id: &str) -> Result<SignR
     // worse than no log). Falls back to a deterministic SHA-256
     // placeholder (audited as `soft::placeholder_sign`) for unit tests
     // that don't bootstrap an engine.
-    let signature = match deps.engine_session {
+    let signature = match session {
         Some(session) => {
             // KMIP UID → CKA_ID → engine handle → native::sign. Filter
             // by ObjectType because pub + prv share CKA_ID per PKCS#11
@@ -326,6 +330,7 @@ fn rekey_and_sign(
     req: &SignRequest,
     old: &crate::store::ObjectRecord,
     new_algorithm: &str,
+    auth: &crate::server::auth::AuthContext,
     correlation_id: &str,
 ) -> Result<SignResponse> {
     use crate::kmip30::UsageMask;
@@ -337,6 +342,7 @@ fn rekey_and_sign(
         new_algorithm,
         UsageMask::SIGN | UsageMask::VERIFY,
         "CreateKeyPair:Sign",
+        auth,
         correlation_id,
     )
     .map_err(|e| fail_err(deps, correlation_id, "Sign", e))?;
@@ -372,6 +378,7 @@ fn rekey_and_sign(
             data: req.data.clone(),
             cryptographic_parameters: req.cryptographic_parameters.clone(),
         },
+        auth,
         correlation_id,
     )?;
     resp.rekeyed = Some(crate::kmip30::SignRekeyInfo {
@@ -416,6 +423,7 @@ mod tests {
     use crate::auditlog::RingSink;
     use crate::kmip30::{KmipAlgorithm, ObjectType, UsageMask};
     use crate::policy::{load_from_str, Engine};
+    use crate::server::auth::AuthContext;
     use crate::store::{MemoryStore, ObjectRecord};
     use std::sync::Arc;
 
@@ -508,7 +516,7 @@ rules:
             uid: "u".into(),
             data: b"x".to_vec(),
             cryptographic_parameters: None,
-        }, "c").unwrap_err();
+        }, &AuthContext::open(), "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::IncompatibleCryptographicUsageMask);
     }
 
@@ -523,6 +531,7 @@ rules:
                 data: b"hello".to_vec(),
             cryptographic_parameters: None,
         },
+            &AuthContext::open(),
             "corr-sign",
         )
         .unwrap();
@@ -548,6 +557,7 @@ rules:
             SignRequest { uid: "urn:nope".into(), data: vec![],
             cryptographic_parameters: None,
         },
+            &AuthContext::open(),
             "corr-404",
         )
         .unwrap_err();
@@ -586,7 +596,7 @@ rules:
         d.store.put(rec).unwrap();
         let err = sign(&d, SignRequest { uid: "urn:pre".into(), data: vec![],
             cryptographic_parameters: None,
-        }, "corr").unwrap_err();
+        }, &AuthContext::open(), "corr").unwrap_err();
         // KMIP 3.0 §11 — PreActive is a lifecycle-state failure.
         assert_eq!(err.result_reason(), ResultReason::WrongKeyLifecycleState);
     }
@@ -603,6 +613,7 @@ rules:
             SignRequest { uid: "urn:ecdsa".into(), data: b"x".to_vec(),
             cryptographic_parameters: None,
         },
+            &AuthContext::open(),
             "corr-rk",
         )
         .unwrap();

@@ -97,7 +97,12 @@ const C_INITIALIZE: u32 = 1;
 const C_FINALIZE: u32 = 2;
 const C_GET_INFO: u32 = 3;
 
-pub fn pkcs11(deps: &Deps, req: Pkcs11Request, correlation_id: &str) -> Result<Pkcs11Response> {
+pub fn pkcs11(
+    deps: &Deps,
+    req: Pkcs11Request,
+    auth: &crate::server::auth::AuthContext,
+    correlation_id: &str,
+) -> Result<Pkcs11Response> {
     emit_request(
         deps,
         correlation_id,
@@ -137,7 +142,13 @@ pub fn pkcs11(deps: &Deps, req: Pkcs11Request, correlation_id: &str) -> Result<P
         C_GET_INFO => {
             if !deps.pkcs11_virtual_initialized.load(Ordering::SeqCst) {
                 (softhsmrustv3::constants::CKR_CRYPTOKI_NOT_INITIALIZED as i32, None)
-            } else if deps.engine_session.is_some() {
+            } else if deps.resolve_tenant_session(auth.identity.as_ref()).is_ok() {
+                // Part F §F7 — presence check only: C_GetInfo is global
+                // library identity (no session parameter, no tenant
+                // data), but "is a real engine wired for THIS caller"
+                // must account for tenancy mode, which the old bare
+                // `engine_session.is_some()` did not (always false in
+                // Strict/Auto).
                 // The real engine (bootstrapped at server startup, so
                 // its own global init state is already true) — genuine
                 // CK_INFO bytes, 72 B per PKCS#11 v3.2 §5.4.
@@ -274,7 +285,7 @@ mod tests {
             function: 0x01, // C_Initialize (KMIP 3.0 §11.39 PKCS#11 Function enum)
             correlation_value: Some(vec![0xCA, 0xFE]),
             input_parameters: None,
-        }, "c").unwrap();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap();
         assert_eq!(r.return_code, 0);
         assert_eq!(r.correlation_value, Some(vec![0xCA, 0xFE]));
         assert_eq!(r.function, 0x01);
@@ -292,46 +303,46 @@ mod tests {
     #[test]
     fn pkcs11_initialize_then_getinfo_then_finalize_round_trips() {
         let d = deps_with();
-        assert_eq!(pkcs11(&d, pkcs11_req(C_INITIALIZE), "c").unwrap().return_code, 0);
-        assert_eq!(pkcs11(&d, pkcs11_req(C_GET_INFO), "c").unwrap().return_code, 0);
-        assert_eq!(pkcs11(&d, pkcs11_req(C_FINALIZE), "c").unwrap().return_code, 0);
+        assert_eq!(pkcs11(&d, pkcs11_req(C_INITIALIZE), &crate::server::auth::AuthContext::open(), "c").unwrap().return_code, 0);
+        assert_eq!(pkcs11(&d, pkcs11_req(C_GET_INFO), &crate::server::auth::AuthContext::open(), "c").unwrap().return_code, 0);
+        assert_eq!(pkcs11(&d, pkcs11_req(C_FINALIZE), &crate::server::auth::AuthContext::open(), "c").unwrap().return_code, 0);
     }
 
     #[test]
     fn pkcs11_double_initialize_without_finalize_fails() {
         let d = deps_with();
-        assert_eq!(pkcs11(&d, pkcs11_req(C_INITIALIZE), "c").unwrap().return_code, 0);
-        let second = pkcs11(&d, pkcs11_req(C_INITIALIZE), "c").unwrap();
+        assert_eq!(pkcs11(&d, pkcs11_req(C_INITIALIZE), &crate::server::auth::AuthContext::open(), "c").unwrap().return_code, 0);
+        let second = pkcs11(&d, pkcs11_req(C_INITIALIZE), &crate::server::auth::AuthContext::open(), "c").unwrap();
         assert_eq!(second.return_code, softhsmrustv3::constants::CKR_CRYPTOKI_ALREADY_INITIALIZED as i32);
     }
 
     #[test]
     fn pkcs11_finalize_without_initialize_fails() {
         let d = deps_with();
-        let r = pkcs11(&d, pkcs11_req(C_FINALIZE), "c").unwrap();
+        let r = pkcs11(&d, pkcs11_req(C_FINALIZE), &crate::server::auth::AuthContext::open(), "c").unwrap();
         assert_eq!(r.return_code, softhsmrustv3::constants::CKR_CRYPTOKI_NOT_INITIALIZED as i32);
     }
 
     #[test]
     fn pkcs11_get_info_before_initialize_fails() {
         let d = deps_with();
-        let r = pkcs11(&d, pkcs11_req(C_GET_INFO), "c").unwrap();
+        let r = pkcs11(&d, pkcs11_req(C_GET_INFO), &crate::server::auth::AuthContext::open(), "c").unwrap();
         assert_eq!(r.return_code, softhsmrustv3::constants::CKR_CRYPTOKI_NOT_INITIALIZED as i32);
     }
 
     #[test]
     fn pkcs11_unsupported_function_returns_function_not_supported() {
         let d = deps_with();
-        let r = pkcs11(&d, pkcs11_req(0xffff), "c").unwrap();
+        let r = pkcs11(&d, pkcs11_req(0xffff), &crate::server::auth::AuthContext::open(), "c").unwrap();
         assert_eq!(r.return_code, softhsmrustv3::constants::CKR_FUNCTION_NOT_SUPPORTED as i32);
     }
 
     #[test]
     fn pkcs11_finalize_allows_reinitialize() {
         let d = deps_with();
-        assert_eq!(pkcs11(&d, pkcs11_req(C_INITIALIZE), "c").unwrap().return_code, 0);
-        assert_eq!(pkcs11(&d, pkcs11_req(C_FINALIZE), "c").unwrap().return_code, 0);
+        assert_eq!(pkcs11(&d, pkcs11_req(C_INITIALIZE), &crate::server::auth::AuthContext::open(), "c").unwrap().return_code, 0);
+        assert_eq!(pkcs11(&d, pkcs11_req(C_FINALIZE), &crate::server::auth::AuthContext::open(), "c").unwrap().return_code, 0);
         // A fresh C_Initialize after C_Finalize must succeed again.
-        assert_eq!(pkcs11(&d, pkcs11_req(C_INITIALIZE), "c").unwrap().return_code, 0);
+        assert_eq!(pkcs11(&d, pkcs11_req(C_INITIALIZE), &crate::server::auth::AuthContext::open(), "c").unwrap().return_code, 0);
     }
 }

@@ -31,6 +31,7 @@ use pqctoday_kmip::ops::encapsulate::encapsulate;
 use pqctoday_kmip::ops::register_import_export::register;
 use pqctoday_kmip::ops::{Deps, DepsConfig};
 use pqctoday_kmip::policy::Engine;
+use pqctoday_kmip::server::auth::AuthContext;
 use pqctoday_kmip::store::MemoryStore;
 
 const MLKEM768_EK: usize = 1184;
@@ -140,6 +141,7 @@ fn register_key(
             protection_storage_masks: None,
             certificate_payload: None,
         },
+        &AuthContext::open(),
         "interop-register",
     )
     .expect("register")
@@ -174,6 +176,7 @@ fn mlkem768_our_encap_openssl_decap() {
     let enc = encapsulate(
         &d,
         EncapsulateRequest { uid: pub_uid, input_key_material: None, cryptographic_parameters: None },
+        &AuthContext::open(),
         "encap",
     )
     .expect("KMIP encapsulate");
@@ -235,6 +238,7 @@ fn mlkem768_openssl_encap_our_decap() {
     let dec = decapsulate(
         &d,
         DecapsulateRequest { uid: priv_uid, data: ct, cryptographic_parameters: None },
+        &AuthContext::open(),
         "decap",
     )
     .expect("KMIP decapsulate");
@@ -288,6 +292,7 @@ fn x25519mlkem768_our_encap_openssl_component_decap() {
     let enc = encapsulate(
         &d,
         EncapsulateRequest { uid: pub_uid, input_key_material: None, cryptographic_parameters: None },
+        &AuthContext::open(),
         "encap",
     )
     .expect("KMIP hybrid encapsulate");
@@ -349,6 +354,7 @@ fn x25519mlkem768_openssl_component_encap_our_decap() {
             seed: None,
         },
         "CreateKeyPair:KeyAgreement",
+        &AuthContext::open(),
         "ckp",
     )
     .expect("hybrid keygen");
@@ -390,6 +396,7 @@ fn x25519mlkem768_openssl_component_encap_our_decap() {
     let dec = decapsulate(
         &d,
         DecapsulateRequest { uid: kp.private_key_uid, data: hybrid_ct, cryptographic_parameters: None },
+        &AuthContext::open(),
         "decap",
     )
     .expect("KMIP hybrid decapsulate");

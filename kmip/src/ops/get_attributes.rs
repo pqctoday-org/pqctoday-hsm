@@ -28,11 +28,12 @@ use crate::policy::{Decision, PolicyRequest};
 use crate::store::ObjectRecord;
 
 use super::deps::Deps;
-use super::helpers::{canonical_name, emit_request, emit_success, fail_err, state_name};
+use super::helpers::{authorize_object, canonical_name, emit_request, emit_success, fail_err, state_name};
 
 pub fn get_attributes(
     deps: &Deps,
     req: GetAttributesRequest,
+    auth: &crate::server::auth::AuthContext,
     correlation_id: &str,
 ) -> Result<GetAttributesResponse> {
     let started = OffsetDateTime::now_utc();
@@ -43,11 +44,13 @@ pub fn get_attributes(
         format!("uid={} refs={}", req.uid, req.attribute_references.len()),
     );
 
-    let obj = deps.store.get(&req.uid)?.ok_or_else(|| {
-        // OASIS corpus BL-M-20-30.xml pins ItemNotFound here (msg #7,
-        // GetAttributes after Obliterate) — K2 keeps this site on the
-        // generic reason; do NOT sweep to ObjectNotFound.
-        fail_err(deps, correlation_id, "GetAttributes", KmipError::not_found(&req.uid))
+    // Part F §F7.4 — owner-checked lookup (closes the gap
+    // `ops::tenancy_e2e` documented empirically). Same ItemNotFound this
+    // handler already used for a genuinely missing UID (OASIS corpus
+    // BL-M-20-30.xml pins it — K2, do NOT sweep to ObjectNotFound) now
+    // also covers "exists but belongs to a different tenant".
+    let obj = authorize_object(deps, auth, &req.uid, || KmipError::not_found(&req.uid)).map_err(|e| {
+        fail_err(deps, correlation_id, "GetAttributes", e)
     })?;
 
     // Plane-1 gate. Read-only — uncommon to deny but spec allows it.
@@ -417,6 +420,7 @@ mod tests {
     use crate::auditlog::{AuditSink, RingSink};
     use crate::kmip30::{KmipAlgorithm, ObjectType, State, UsageMask};
     use crate::policy::{load_from_str, Engine};
+    use crate::server::auth::AuthContext;
     use crate::store::MemoryStore;
     use std::sync::Arc;
 
@@ -473,7 +477,7 @@ mod tests {
         let r = get_attributes(&d, GetAttributesRequest {
             uid: "u".into(),
             attribute_references: vec![],
-        }, "c").unwrap();
+        }, &AuthContext::open(), "c").unwrap();
         assert!(r.attributes.iter().any(|a| matches!(a, Attribute::CryptographicAlgorithm(_))));
     }
 
@@ -484,7 +488,7 @@ mod tests {
         let r = get_attributes(&d, GetAttributesRequest {
             uid: "u".into(),
             attribute_references: vec![],
-        }, "c").unwrap();
+        }, &AuthContext::open(), "c").unwrap();
         assert!(r.attributes.iter().any(|a| matches!(a, Attribute::CryptographicAlgorithm(_))));
         assert!(r.attributes.iter().any(|a| matches!(a, Attribute::CryptographicLength(_))));
         assert!(r.attributes.iter().any(|a| matches!(a, Attribute::State(_))));
@@ -497,7 +501,7 @@ mod tests {
         let r = get_attributes(&d, GetAttributesRequest {
             uid: "u".into(),
             attribute_references: vec!["State".into()],
-        }, "c").unwrap();
+        }, &AuthContext::open(), "c").unwrap();
         assert_eq!(r.attributes.len(), 1);
         assert!(matches!(r.attributes[0], Attribute::State(_)));
     }
@@ -520,7 +524,7 @@ mod tests {
         let r = get_attributes(&d, GetAttributesRequest {
             uid: "km".into(),
             attribute_references: vec!["Digest".into()],
-        }, "c").unwrap();
+        }, &AuthContext::open(), "c").unwrap();
         assert_eq!(r.attributes.len(), 1);
         match &r.attributes[0] {
             Attribute::Digest(dg) => {
@@ -548,7 +552,7 @@ mod tests {
         let r = get_attributes(&d, GetAttributesRequest {
             uid: "dv".into(),
             attribute_references: vec!["Digest".into()],
-        }, "c").unwrap();
+        }, &AuthContext::open(), "c").unwrap();
         match &r.attributes[0] {
             Attribute::Digest(dg) => assert_eq!(dg.digest_value, vec![0x42; 32]),
             other => panic!("expected Digest, got {other:?}"),
@@ -564,7 +568,7 @@ mod tests {
         let r = get_attributes(&d, GetAttributesRequest {
             uid: "u".into(),
             attribute_references: vec![],
-        }, "c").unwrap();
+        }, &AuthContext::open(), "c").unwrap();
         assert!(
             !r.attributes.iter().any(|a| matches!(a, Attribute::Digest(_))),
             "Digest must be omitted when no material was ever available"
@@ -595,7 +599,7 @@ mod tests {
         let r = get_attributes(&d, GetAttributesRequest {
             uid: "ln".into(),
             attribute_references: vec![],
-        }, "c").unwrap();
+        }, &AuthContext::open(), "c").unwrap();
         assert!(r.attributes.iter().any(|a| matches!(a, Attribute::PublicKeyLink(u) if u == "pub-1")));
         assert!(r.attributes.iter().any(|a| matches!(a, Attribute::PrivateKeyLink(u) if u == "prv-1")));
         assert!(r.attributes.iter().any(|a| matches!(a, Attribute::NextLink(u) if u == "next-1")));
@@ -623,7 +627,7 @@ mod tests {
         let r = get_attributes(&d, GetAttributesRequest {
             uid: "ul".into(),
             attribute_references: vec!["UsageLimits".into()],
-        }, "c").unwrap();
+        }, &AuthContext::open(), "c").unwrap();
         assert_eq!(r.attributes.len(), 1);
         match &r.attributes[0] {
             Attribute::UsageLimits { total, count, unit } => {
@@ -644,7 +648,7 @@ mod tests {
         let r = get_attributes(&d, GetAttributesRequest {
             uid: "u".into(),
             attribute_references: vec!["RandomNumberGenerator".into()],
-        }, "c").unwrap();
+        }, &AuthContext::open(), "c").unwrap();
         match &r.attributes[0] {
             Attribute::RandomNumberGenerator(rng) => {
                 assert_eq!(rng.rng_algorithm, 0x01);
@@ -661,7 +665,7 @@ mod tests {
         let err = get_attributes(&d, GetAttributesRequest {
             uid: "missing".into(),
             attribute_references: vec![],
-        }, "c").unwrap_err();
+        }, &AuthContext::open(), "c").unwrap_err();
         // OASIS corpus BL-M-20-30.xml pins ItemNotFound for a missing
         // UID on GetAttributes (corpus is authoritative over the sweep).
         assert_eq!(err.result_reason(), crate::error::ResultReason::ItemNotFound);
@@ -695,12 +699,12 @@ mod tests {
             }),
             protection_storage_masks: None,
             certificate_payload: None,
-        }, "c").unwrap();
+        }, &AuthContext::open(), "c").unwrap();
 
         let r = get_attributes(&d, GetAttributesRequest {
             uid: resp.uid,
             attribute_references: vec![],
-        }, "c").unwrap();
+        }, &AuthContext::open(), "c").unwrap();
         let found = r.attributes.iter().find_map(|a| match a {
             Attribute::AlternativeName { value, name_type } => Some((value.clone(), *name_type)),
             _ => None,

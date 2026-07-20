@@ -25,8 +25,9 @@ use crate::crypto::handlers::{
     verify_ml_dsa_internal, verify_rsa, verify_slh_dsa, verify_slh_dsa_internal,
 };
 use crate::state::{
-    get_ec_point_sec1, get_object_attr_u32, get_object_param_set, get_object_value,
-    get_rsa_public_components, OBJECTS,
+    check_mechanism_allowed_from, get_ec_point_sec1_from, get_object_attr_u32_from,
+    get_object_param_set_from, get_object_value_from, get_rsa_public_components_from,
+    read_bool_attr, resolve_session_access, with_object_checked,
 };
 
 // PKCS#11 v3.2 §5.12.4 — `CKA_SIGN` (private key) / `CKA_VERIFY` (public key)
@@ -61,24 +62,41 @@ pub fn sign(
 /// length). Ignored for non-PSS mechanisms. KMIP slice K18 threads the
 /// `Cryptographic Parameters` `Salt Length` field through here.
 pub fn sign_with_pss_salt(
-    _session: u32,
+    session: u32,
     key_handle: u32,
     mechanism: u32,
     data: &[u8],
     pss_salt_len: Option<usize>,
 ) -> Result<Vec<u8>, CkRv> {
-    // CKA_SIGN gate.
-    if !check_can_sign(key_handle, CKA_SIGN) {
+    // Isolation gate (rust-hsm-perf-bench-scenario-plan-07182026.md Part F)
+    // + CKA_SIGN + CKA_ALLOWED_MECHANISMS + CKA_VALUE + CKA_PRIV_PARAM_SET,
+    // ALL read from the SAME borrowed attrs — one OBJECTS lock instead of
+    // the four separate locks this function used to take. `sk_bytes` is
+    // `None` for HSS keys (their material lives in
+    // `CKA_STATEFUL_KEY_STATE`, not `CKA_VALUE`) — harmless, discarded on
+    // the HSS branch below.
+    let access = resolve_session_access(session)?;
+    let (can_sign, mech_ok, sk_bytes, ps) = with_object_checked(&access, key_handle, |attrs| {
+        (
+            read_bool_attr(attrs, CKA_SIGN),
+            check_mechanism_allowed_from(attrs, mechanism),
+            get_object_value_from(attrs),
+            get_object_param_set_from(attrs),
+        )
+    })?;
+    if !can_sign {
         return Err(CKR_KEY_FUNCTION_NOT_PERMITTED);
     }
-    // PKCS#11 v3.2 §4.8 Table 13 — CKA_ALLOWED_MECHANISMS.
-    crate::state::check_mechanism_allowed(key_handle, mechanism)?;
+    mech_ok?;
 
     // HSS/LMS is stateful and keeps its key material in
     // `CKA_STATEFUL_KEY_STATE`, not `CKA_VALUE` (mirrors `ffi::C_Sign`'s
     // separate stateful-sign branch) — dispatch it BEFORE the generic
-    // `CKA_VALUE` fetch below, which would otherwise fail closed with
-    // `CKR_ARGUMENTS_BAD` for every HSS key.
+    // `sk_bytes` use below, which would otherwise fail closed with
+    // `CKR_ARGUMENTS_BAD` for every HSS key. The gate above already
+    // covers HSS (CKA_SIGN + slot/login) — `hbs::sign_prepare`/
+    // `sign_commit` are `pub(crate)` and deliberately ungated; this
+    // function is their only caller and is where the gate must live.
     if mechanism == CKM_HSS {
         // Stateful — the two-phase prepare/commit in `native::hbs` is the
         // single source of truth for leaf advance-and-persist, shared
@@ -90,8 +108,7 @@ pub fn sign_with_pss_salt(
         return Ok(prepared.signature);
     }
 
-    let sk_bytes = get_object_value(key_handle).ok_or(CKR_ARGUMENTS_BAD)?;
-    let ps = get_object_param_set(key_handle);
+    let sk_bytes = sk_bytes.ok_or(CKR_ARGUMENTS_BAD)?;
 
     match mechanism {
         m if m == CKM_ML_DSA || is_prehash_ml_dsa(m) => {
@@ -148,25 +165,38 @@ pub fn verify(
 /// two-candidate acceptance (salt = hash length, salt = maximal — see
 /// `crypto::handlers::verify_rsa`). Ignored for non-PSS mechanisms.
 pub fn verify_with_pss_salt(
-    _session: u32,
+    session: u32,
     key_handle: u32,
     mechanism: u32,
     data: &[u8],
     signature: &[u8],
     pss_salt_len: Option<usize>,
 ) -> Result<bool, CkRv> {
-    // CKA_VERIFY gate.
-    if !check_can_sign(key_handle, CKA_VERIFY) {
+    // Isolation gate + CKA_VERIFY + CKA_ALLOWED_MECHANISMS + every
+    // key-material shape a verify mechanism might need, ALL read from one
+    // borrowed attrs — one OBJECTS lock. `CKA_VALUE` holds the
+    // verification key bytes for most algorithms (ML-DSA, SLH-DSA, EdDSA,
+    // HMAC, KMAC, HSS); RSA/ECDSA public keys additionally need the
+    // dedicated modulus+exponent / EC-point attributes, fetched
+    // unconditionally here (cheap absent-key lookups) rather than
+    // re-locking per mechanism branch below.
+    let access = resolve_session_access(session)?;
+    let (can_verify, mech_ok, pk_bytes, ps, ec_point, rsa_components, lms_param) =
+        with_object_checked(&access, key_handle, |attrs| {
+            (
+                read_bool_attr(attrs, CKA_VERIFY),
+                check_mechanism_allowed_from(attrs, mechanism),
+                get_object_value_from(attrs).unwrap_or_default(),
+                get_object_param_set_from(attrs),
+                get_ec_point_sec1_from(attrs),
+                get_rsa_public_components_from(attrs),
+                get_object_attr_u32_from(attrs, CKA_LMS_PARAM_SET).unwrap_or(0x05),
+            )
+        })?;
+    if !can_verify {
         return Err(CKR_KEY_FUNCTION_NOT_PERMITTED);
     }
-    // PKCS#11 v3.2 §4.8 Table 13 — CKA_ALLOWED_MECHANISMS.
-    crate::state::check_mechanism_allowed(key_handle, mechanism)?;
-
-    // For most algorithms `CKA_VALUE` holds the verification key bytes
-    // (ML-DSA, SLH-DSA, EdDSA, HMAC, KMAC). RSA/ECDSA public keys are
-    // stored in dedicated attributes (modulus+exp / EC point).
-    let pk_bytes = get_object_value(key_handle).unwrap_or_default();
-    let ps = get_object_param_set(key_handle);
+    mech_ok?;
 
     let result: Result<(), CkRv> = match mechanism {
         m if m == CKM_ML_DSA || is_prehash_ml_dsa(m) => {
@@ -194,14 +224,14 @@ pub fn verify_with_pss_salt(
         }
         CKM_SHA256_RSA_PKCS | CKM_SHA384_RSA_PKCS | CKM_SHA512_RSA_PKCS
         | CKM_SHA256_RSA_PKCS_PSS | CKM_SHA384_RSA_PKCS_PSS | CKM_SHA512_RSA_PKCS_PSS => {
-            match get_rsa_public_components(key_handle) {
+            match rsa_components {
                 Some((n, e)) => verify_rsa(mechanism, &n, &e, data, signature, pss_salt_len),
                 None => Err(CKR_KEY_TYPE_INCONSISTENT),
             }
         }
         CKM_ECDSA | CKM_ECDSA_SHA256 | CKM_ECDSA_SHA384 | CKM_ECDSA_SHA512
         | CKM_ECDSA_SHA3_224 | CKM_ECDSA_SHA3_256 | CKM_ECDSA_SHA3_384
-        | CKM_ECDSA_SHA3_512 => match get_ec_point_sec1(key_handle) {
+        | CKM_ECDSA_SHA3_512 => match ec_point {
             Some(point) => verify_ecdsa(mechanism, ps, &point, data, signature),
             None => Err(CKR_KEY_TYPE_INCONSISTENT),
         },
@@ -210,7 +240,6 @@ pub fn verify_with_pss_salt(
         CKM_HSS => {
             // Stateless — RFC 8554 verification needs no key-object
             // mutation, unlike sign's leaf advance-and-persist.
-            let lms_param = get_object_attr_u32(key_handle, CKA_LMS_PARAM_SET).unwrap_or(0x05);
             if crate::crypto::lms::hss_verify(&pk_bytes, data, signature, lms_param) {
                 Ok(())
             } else {
@@ -239,7 +268,7 @@ pub fn verify_with_pss_salt(
 /// hedge randomizer (ML-DSA rnd / SLH-DSA addrnd) when not deterministic.
 #[allow(clippy::too_many_arguments)]
 pub fn sign_pqc(
-    _session: u32,
+    session: u32,
     key_handle: u32,
     mechanism: u32,
     data: &[u8],
@@ -249,14 +278,21 @@ pub fn sign_pqc(
     external_mu: bool,
     random: Option<&[u8]>,
 ) -> Result<Vec<u8>, CkRv> {
-    if !check_can_sign(key_handle, CKA_SIGN) {
+    let access = resolve_session_access(session)?;
+    let (can_sign, mech_ok, sk, ps) = with_object_checked(&access, key_handle, |attrs| {
+        (
+            read_bool_attr(attrs, CKA_SIGN),
+            check_mechanism_allowed_from(attrs, mechanism),
+            get_object_value_from(attrs),
+            get_object_param_set_from(attrs),
+        )
+    })?;
+    if !can_sign {
         return Err(CKR_KEY_FUNCTION_NOT_PERMITTED);
     }
-    // PKCS#11 v3.2 §4.8 Table 13 — CKA_ALLOWED_MECHANISMS.
-    crate::state::check_mechanism_allowed(key_handle, mechanism)?;
+    mech_ok?;
+    let sk = sk.ok_or(CKR_ARGUMENTS_BAD)?;
     use rand::RngCore;
-    let sk = get_object_value(key_handle).ok_or(CKR_ARGUMENTS_BAD)?;
-    let ps = get_object_param_set(key_handle);
     match mechanism {
         m if m == CKM_ML_DSA || is_prehash_ml_dsa(m) => {
             // rnd: deterministic ⇒ 0^32; hedged ⇒ explicit <Random> (must be
@@ -317,7 +353,7 @@ fn slh_dsa_n(ps: u32) -> usize {
 /// 64-byte µ; `internal` ⇒ `*.Verify_internal`.
 #[allow(clippy::too_many_arguments)]
 pub fn verify_pqc(
-    _session: u32,
+    session: u32,
     key_handle: u32,
     mechanism: u32,
     data: &[u8],
@@ -326,13 +362,20 @@ pub fn verify_pqc(
     internal: bool,
     external_mu: bool,
 ) -> Result<(), CkRv> {
-    if !check_can_sign(key_handle, CKA_VERIFY) {
+    let access = resolve_session_access(session)?;
+    let (can_verify, mech_ok, pk, ps) = with_object_checked(&access, key_handle, |attrs| {
+        (
+            read_bool_attr(attrs, CKA_VERIFY),
+            check_mechanism_allowed_from(attrs, mechanism),
+            get_object_value_from(attrs),
+            get_object_param_set_from(attrs),
+        )
+    })?;
+    if !can_verify {
         return Err(CKR_KEY_FUNCTION_NOT_PERMITTED);
     }
-    // PKCS#11 v3.2 §4.8 Table 13 — CKA_ALLOWED_MECHANISMS.
-    crate::state::check_mechanism_allowed(key_handle, mechanism)?;
-    let pk = get_object_value(key_handle).ok_or(CKR_ARGUMENTS_BAD)?;
-    let ps = get_object_param_set(key_handle);
+    mech_ok?;
+    let pk = pk.ok_or(CKR_ARGUMENTS_BAD)?;
     match mechanism {
         m if m == CKM_ML_DSA || is_prehash_ml_dsa(m) => {
             if external_mu {
@@ -354,16 +397,11 @@ pub fn verify_pqc(
     }
 }
 
-fn check_can_sign(key_handle: u32, attr_type: u32) -> bool {
-    // PKCS#11 v3.2 §5.12.4 — single-byte CK_BBOOL: 0x01 = true.
-    OBJECTS.with(|o| {
-        o.borrow()
-            .get(&key_handle)
-            .and_then(|attrs| attrs.get(&attr_type))
-            .map(|v| !v.is_empty() && v[0] == 0x01)
-            .unwrap_or(false)
-    })
-}
+// The former `check_can_sign(key_handle, attr_type)` free function (a
+// direct, ungated OBJECTS lock) is gone — CKA_SIGN/CKA_VERIFY are now
+// read via `read_bool_attr` inside the isolation gate's single borrow
+// (`with_object_checked` above), the same predicate `can_access_object`
+// already uses for CKA_PRIVATE.
 
 #[cfg(test)]
 mod tests {

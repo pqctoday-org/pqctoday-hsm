@@ -23,6 +23,7 @@ use pqctoday_kmip::ops::rekey::{rekey, rekey_key_pair};
 use pqctoday_kmip::ops::sign::sign;
 use pqctoday_kmip::ops::{Deps, DepsConfig};
 use pqctoday_kmip::policy::{load_from_file, Engine};
+use pqctoday_kmip::server::auth::AuthContext;
 use pqctoday_kmip::store::MemoryStore;
 
 fn engine_test_lock() -> std::sync::MutexGuard<'static, ()> {
@@ -84,6 +85,7 @@ fn gen_pair(deps: &Deps, name: &str, usage: UsageMask) -> (String, String) {
         } else {
             "CreateKeyPair:Sign"
         },
+        &AuthContext::open(),
         "gen",
     )
     .unwrap();
@@ -115,6 +117,7 @@ fn firmware_signing_key_rekeys_rsa2048_to_mldsa44_on_first_sign() {
     let resp = sign(
         &deps,
         SignRequest { uid: priv_uid.clone(), data: b"release".to_vec(), cryptographic_parameters: None },
+        &AuthContext::open(),
         "sign",
     )
     .unwrap();
@@ -146,6 +149,7 @@ fn payments_cipher_rekeys_aes128_to_aes256_on_first_encrypt() {
                 Attribute::Name("payments-db-cipher".into()),
             ],
         },
+        &AuthContext::open(),
         "create",
     )
     .unwrap();
@@ -166,6 +170,7 @@ fn payments_cipher_rekeys_aes128_to_aes256_on_first_encrypt() {
             final_indicator: None,
             correlation_value: None,
         },
+        &AuthContext::open(),
         "enc",
     )
     .unwrap();
@@ -193,6 +198,7 @@ fn x448_kex_rekeys_to_mlkem1024_on_first_encapsulate() {
     let resp = encapsulate(
         &deps,
         EncapsulateRequest { uid: pub_uid.clone(), ..Default::default() },
+        &AuthContext::open(),
         "encap",
     )
     .unwrap();
@@ -221,6 +227,7 @@ fn sweep_rekeys_via_rekey_and_rekeykeypair() {
                 Attribute::Name("payments-db-cipher".into()),
             ],
         },
+        &AuthContext::open(),
         "create",
     )
     .unwrap();
@@ -236,6 +243,7 @@ fn sweep_rekeys_via_rekey_and_rekeykeypair() {
     let rk_sym = rekey(
         &deps,
         ReKeyRequest { uid: sym.uid.clone(), offset: None, template_attribute: vec![] },
+        &AuthContext::open(),
         "sweep",
     )
     .unwrap();
@@ -252,6 +260,7 @@ fn sweep_rekeys_via_rekey_and_rekeykeypair() {
             private_key_attributes: vec![],
             public_key_attributes: vec![],
         },
+        &AuthContext::open(),
         "sweep",
     )
     .unwrap();
@@ -285,6 +294,7 @@ fn legacy_signature_still_verifies_after_owner_key_rekeys() {
                 Attribute::Name("payments-db-cipher".into()),
             ],
         },
+        &AuthContext::open(),
         "create",
     )
     .unwrap();
@@ -304,6 +314,7 @@ fn legacy_signature_still_verifies_after_owner_key_rekeys() {
             final_indicator: None,
             correlation_value: None,
         },
+        &AuthContext::open(),
         "enc",
     )
     .unwrap();
@@ -326,6 +337,7 @@ fn legacy_signature_still_verifies_after_owner_key_rekeys() {
             cryptographic_parameters: None,
             aad: None,
         },
+        &AuthContext::open(),
         "dec",
     )
     .unwrap();

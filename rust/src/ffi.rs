@@ -15,14 +15,29 @@ use rand::SeedableRng;
 use rand::rngs::OsRng;
 
 /// ACVP-aware RNG selection macro.
-/// In ACVP mode, uses the persistent ChaCha20Rng from thread-local state
-/// so the counter advances across operations (matching C++ OpenSSL behaviour).
+/// In ACVP mode, uses the persistent ChaCha20Rng from global engine state
+/// (`ACVP_RNG`, a `Mutex<Option<ChaCha20Rng>>` — see `state.rs`) so the
+/// counter advances across operations (matching C++ OpenSSL behaviour).
 /// In normal mode, uses OsRng for non-deterministic randomness.
 ///
-/// Implementation: `take()` extracts the RNG from thread-local into a local
+/// Implementation: `take()` extracts the RNG from `ACVP_RNG` into a local
 /// variable, runs $body inline (NOT in a closure — so `return` works normally),
-/// then restores the advanced RNG back to thread-local. If $body exits via
+/// then restores the advanced RNG back to `ACVP_RNG`. If $body exits via
 /// `return` (error paths), the RNG is lost but `C_Initialize` recreates it.
+///
+/// PERF-BENCH FIX (2026-07-18, B4 step 1): the `acvp` Cargo feature is
+/// opt-in and OFF in every shipped artifact (KMIP server, wasm playground
+/// bundle, this crate's cdylib — see the feature doc comment in
+/// Cargo.toml). `C_Initialize` only ever populates `ACVP_RNG` with `Some`
+/// under `#[cfg(feature = "acvp")]`; without that feature it is `None`
+/// for the lifetime of the process. So every production `with_rng!` call
+/// was taking the `ACVP_RNG` mutex, finding `None`, and moving on — a
+/// pure-overhead lock acquisition on every rng-using FFI operation with
+/// zero chance of ever finding work to do. Below, the `acvp`-feature
+/// build keeps the original mutex-checking macro; the default
+/// (non-`acvp`) build gets a second definition that goes straight to
+/// `OsRng`, touching no lock at all.
+#[cfg(feature = "acvp")]
 macro_rules! with_rng {
     ($rng:ident, $body:block) => {{
         let mut _acvp_rng_cell = crate::state::ACVP_RNG.with(|r| r.borrow_mut().take());
@@ -34,7 +49,7 @@ macro_rules! with_rng {
             // `&mut $rng` borrow-check on wasm32 (E0596).
             let mut $rng = _acvp;
             let _with_rng_result = { $body };
-            // Restore the (now-advanced) RNG back to thread-local state
+            // Restore the (now-advanced) RNG back to global state
             crate::state::ACVP_RNG.with(|r| {
                 *r.borrow_mut() = _acvp_rng_cell;
             });
@@ -43,6 +58,14 @@ macro_rules! with_rng {
             let mut $rng = OsRng;
             $body
         }
+    }};
+}
+
+#[cfg(not(feature = "acvp"))]
+macro_rules! with_rng {
+    ($rng:ident, $body:block) => {{
+        let mut $rng = OsRng;
+        $body
     }};
 }
 
@@ -149,7 +172,7 @@ pub fn C_Finalize(p_reserved: *mut u8) -> u32 {
         }
         store.clear();
     });
-    NEXT_HANDLE.with(|h| *h.borrow_mut() = 100);
+    NEXT_HANDLE.store(100, std::sync::atomic::Ordering::Relaxed);
     SIGN_STATE.with(|s| s.borrow_mut().clear());
     VERIFY_STATE.with(|s| s.borrow_mut().clear());
     VERIFY_SIG_STATE.with(|s| s.borrow_mut().clear());
@@ -323,11 +346,7 @@ pub fn C_OpenSession(
         return CKR_SESSION_READ_WRITE_SO_EXISTS;
     }
     unsafe {
-        let handle = NEXT_SESSION_HANDLE.with(|h| {
-            let current = *h.borrow();
-            *h.borrow_mut() = current + 1;
-            current
-        });
+        let handle = NEXT_SESSION_HANDLE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         *ph_session = handle;
         SESSIONS.with(|s| {
             s.borrow_mut().insert(
@@ -503,71 +522,74 @@ pub fn C_Login(h_session: u32, user_type: u32, p_pin: *mut u8, ul_pin_len: u32) 
         return CKR_SESSION_READ_ONLY_EXISTS;
     }
 
-    let token_opt = TOKEN_STORE.with(|ts| ts.borrow().get(&slot_id).cloned());
-    let token = if let Some(t) = token_opt {
-        t
-    } else {
-        return CKR_GENERAL_ERROR;
-    };
-    if !token.initialized {
-        return CKR_OPERATION_NOT_INITIALIZED;
-    }
+    // PERF-BENCH FIX (2026-07-18): the exclusivity check (§5.6 "only one
+    // login wins") and the login_state write used to happen in two SEPARATE
+    // TOKEN_STORE lock acquisitions, with the check evaluated against a
+    // `.cloned()` snapshot taken before the write. Under concurrent
+    // C_Login calls on the same token (20-thread spike,
+    // p0_spike_multitenant_concurrency.rs::p0c) this is a TOCTOU race: many
+    // threads can all read the pre-login snapshot before any of them
+    // writes, so all of them pass the "not already logged in" check and
+    // all "succeed" — silently violating the one-login-wins guarantee.
+    // Fixed by making read-check-PIN-hash-write one atomic critical
+    // section per branch, inside a single lock acquisition (matching the
+    // pattern C_Logout already used correctly). `has_ro` still reads
+    // SESSIONS before entering the TOKEN_STORE closure, preserving the
+    // existing lock-acquisition order used throughout this file.
+    let has_ro = SESSIONS.with(|s| {
+        s.borrow()
+            .values()
+            .any(|sess| sess.slot_id == slot_id && !sess.rw_session)
+    });
+    let pin_bytes = unsafe { std::slice::from_raw_parts(p_pin, ul_pin_len as usize) };
 
-    // Evaluate PKCS#11 v3.2 Exclusivity Boundaries
-    match user_type {
-        CKU_SO => {
-            if token.login_state == LoginState::SO {
-                return CKR_USER_ALREADY_LOGGED_IN;
-            }
-            if token.login_state == LoginState::User {
-                return CKR_USER_ANOTHER_ALREADY_LOGGED_IN;
-            }
-            let has_ro = SESSIONS.with(|s| {
-                s.borrow()
-                    .values()
-                    .any(|sess| sess.slot_id == slot_id && !sess.rw_session)
-            });
-            if has_ro {
-                return CKR_SESSION_READ_ONLY_EXISTS;
-            }
-
-            let pin_bytes = unsafe { std::slice::from_raw_parts(p_pin, ul_pin_len as usize) };
-            if hash_pin(pin_bytes, &token.so_pin_salt) != token.so_pin_hash {
-                return CKR_PIN_INCORRECT;
-            }
-            TOKEN_STORE.with(|ts| {
-                if let Some(mut t) = ts.borrow_mut().get_mut(&slot_id) {
-                    t.login_state = LoginState::SO;
-                }
-            });
+    TOKEN_STORE.with(|ts| {
+        let mut store = ts.borrow_mut();
+        let token = match store.get_mut(&slot_id) {
+            Some(t) => t,
+            None => return CKR_GENERAL_ERROR,
+        };
+        if !token.initialized {
+            return CKR_OPERATION_NOT_INITIALIZED;
         }
-        CKU_USER => {
-            if token.login_state == LoginState::User {
-                return CKR_USER_ALREADY_LOGGED_IN;
-            }
-            if token.login_state == LoginState::SO {
-                return CKR_USER_ANOTHER_ALREADY_LOGGED_IN;
-            }
-            if token.user_pin_hash.is_none() || token.user_pin_salt.is_none() {
-                return CKR_USER_PIN_NOT_INITIALIZED;
-            }
-            let pin_bytes = unsafe { std::slice::from_raw_parts(p_pin, ul_pin_len as usize) };
-            if let (Some(salt), Some(hash)) = (&token.user_pin_salt, &token.user_pin_hash) {
-                if hash_pin(pin_bytes, salt) != *hash {
+
+        // Evaluate PKCS#11 v3.2 Exclusivity Boundaries
+        match user_type {
+            CKU_SO => {
+                if token.login_state == LoginState::SO {
+                    return CKR_USER_ALREADY_LOGGED_IN;
+                }
+                if token.login_state == LoginState::User {
+                    return CKR_USER_ANOTHER_ALREADY_LOGGED_IN;
+                }
+                if has_ro {
+                    return CKR_SESSION_READ_ONLY_EXISTS;
+                }
+                if hash_pin(pin_bytes, &token.so_pin_salt) != token.so_pin_hash {
                     return CKR_PIN_INCORRECT;
                 }
-            } else {
-                return CKR_USER_PIN_NOT_INITIALIZED;
+                token.login_state = LoginState::SO;
             }
-            TOKEN_STORE.with(|ts| {
-                if let Some(mut t) = ts.borrow_mut().get_mut(&slot_id) {
-                    t.login_state = LoginState::User;
+            CKU_USER => {
+                if token.login_state == LoginState::User {
+                    return CKR_USER_ALREADY_LOGGED_IN;
                 }
-            });
+                if token.login_state == LoginState::SO {
+                    return CKR_USER_ANOTHER_ALREADY_LOGGED_IN;
+                }
+                let (salt, hash) = match (&token.user_pin_salt, &token.user_pin_hash) {
+                    (Some(salt), Some(hash)) => (*salt, *hash),
+                    _ => return CKR_USER_PIN_NOT_INITIALIZED,
+                };
+                if hash_pin(pin_bytes, &salt) != hash {
+                    return CKR_PIN_INCORRECT;
+                }
+                token.login_state = LoginState::User;
+            }
+            _ => return CKR_USER_TYPE_INVALID,
         }
-        _ => return CKR_USER_TYPE_INVALID,
-    }
-    CKR_OK
+        CKR_OK
+    })
 }
 
 #[wasm_bindgen(js_name = _C_Logout)]
@@ -4806,27 +4828,40 @@ fn oaep_padding(hash_alg: u32, mgf: u32, label: &[u8]) -> Result<rsa::Oaep, u32>
     })
 }
 
-/// Parse CK_RSA_PKCS_OAEP_PARAMS (wasm32, 20 B: hashAlg, mgf, source,
-/// pSourceData, ulSourceDataLen) → (hashAlg, mgf, label). Absent/short param
-/// keeps the legacy default (SHA-256, MGF1-SHA256, no label).
+/// Parse CK_RSA_PKCS_OAEP_PARAMS (§6.4.4: hashAlg, mgf, source, pSourceData,
+/// ulSourceDataLen) at NATIVE width → (hashAlg, mgf, label). Absent/short
+/// param keeps the legacy default (SHA-256, MGF1-SHA256, no label).
+///
+/// Fixed from a hardcoded-4-byte-word parse (`*const u32`), which only
+/// matched wasm32's 4-byte `usize`/`CK_ULONG` layout and misparsed on
+/// native 64-bit builds (where `CK_ULONG`/pointer fields are 8 bytes —
+/// `pSourceData` at word-index 3 would land at the wrong byte offset
+/// entirely, and `ulSourceDataLen` past it further still). Same bug class
+/// `CKM_AES_GCM`'s and `CKM_CHACHA20_POLY1305`'s params parsing already
+/// had fixed elsewhere in this file (see `parse_chacha20_params` above for
+/// the exact precedent this copies: read as `*const usize`, which is 4
+/// bytes on wasm32 and 8 bytes on native 64-bit — one code path, both
+/// targets, matching the real struct's actual field width on each).
 unsafe fn parse_oaep_params(p_param: *const u8, ul_param_len: u32) -> Result<(u32, u32, Vec<u8>), u32> {
-    if p_param.is_null() || ul_param_len < 4 {
+    let usz = core::mem::size_of::<usize>();
+    if p_param.is_null() || (ul_param_len as usize) < usz {
         return Ok((CKM_SHA256, CKG_MGF1_SHA256, Vec::new()));
     }
-    let hash_alg = std::ptr::read_unaligned(p_param as *const u32);
-    if ul_param_len < 20 {
+    let prm = p_param as *const usize;
+    let hash_alg = *prm as u32;
+    if (ul_param_len as usize) < 5 * usz {
         return Ok((hash_alg, 0, Vec::new()));
     }
-    let mgf = std::ptr::read_unaligned((p_param as *const u32).add(1));
-    let source = std::ptr::read_unaligned((p_param as *const u32).add(2));
-    let src_ptr = std::ptr::read_unaligned((p_param as *const u32).add(3));
-    let src_len = std::ptr::read_unaligned((p_param as *const u32).add(4)) as usize;
-    let label = if src_ptr != 0 && src_len > 0 {
+    let mgf = *prm.add(1) as u32;
+    let source = *prm.add(2) as u32;
+    let src_ptr = *prm.add(3) as *const u8;
+    let src_len = *prm.add(4);
+    let label = if !src_ptr.is_null() && src_len > 0 {
         // §6.4.4 — only CKZ_DATA_SPECIFIED carries a label.
         if source != CKZ_DATA_SPECIFIED {
             return Err(CKR_MECHANISM_PARAM_INVALID);
         }
-        std::slice::from_raw_parts(src_ptr as *const u8, src_len).to_vec()
+        std::slice::from_raw_parts(src_ptr, src_len).to_vec()
     } else {
         Vec::new()
     };

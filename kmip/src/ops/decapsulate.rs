@@ -21,11 +21,12 @@ use crate::kmip30::{DecapsulateRequest, DecapsulateResponse, PkcsOp, State};
 
 use super::deps::Deps;
 use super::encapsulate::{is_classic_mceliece, is_classical_kem, is_frodokem, is_ml_kem, store_shared_secret};
-use super::helpers::{emit_pkcs11, emit_pkcs11_result, emit_request, emit_success, fail_err, state_name};
+use super::helpers::{authorize_object, emit_pkcs11, emit_pkcs11_result, emit_request, emit_success, fail_err, state_name};
 
 pub fn decapsulate(
     deps: &Deps,
     req: DecapsulateRequest,
+    auth: &crate::server::auth::AuthContext,
     correlation_id: &str,
 ) -> Result<DecapsulateResponse> {
     emit_request(
@@ -35,9 +36,8 @@ pub fn decapsulate(
         format!("uid={} ct_len={}", req.uid, req.data.len()),
     );
 
-    let obj = deps.store.get(&req.uid)?.ok_or_else(|| {
-        fail_err(deps, correlation_id, "Decapsulate", KmipError::object_not_found(&req.uid))
-    })?;
+    let obj = authorize_object(deps, auth, &req.uid, || KmipError::object_not_found(&req.uid))
+        .map_err(|e| fail_err(deps, correlation_id, "Decapsulate", e))?;
 
     // K6 — Decapsulate accepts ML-KEM, the hybrid KEMs, classical
     // ECDH/X25519/X448 in DHKEM mode, and (2026-07-06) BSI TR-02102-1's
@@ -145,7 +145,7 @@ pub fn decapsulate(
     // material never enters this layer (that is the non-extractability fix);
     // ML-KEM implicit rejection is preserved inside the engine.
     if let Some(hybrid) = obj.algorithm.hybrid_kem() {
-        let session = deps.engine_session.ok_or_else(|| {
+        let session = deps.resolve_tenant_session(auth.identity.as_ref()).ok().ok_or_else(|| {
             KmipError::failed(
                 ResultReason::CryptographicFailure,
                 "hybrid KEM decapsulate requires an engine session".to_string(),
@@ -187,12 +187,12 @@ pub fn decapsulate(
             )
         })?;
         emit_pkcs11(deps, correlation_id, "soft::hybrid_kem_decapsulate", None, 0, "CKR_OK");
-        let ss_uid = store_shared_secret(deps, obj.algorithm, shared_secret)?;
+        let ss_uid = store_shared_secret(deps, obj.algorithm, shared_secret, auth)?;
         emit_success(deps, correlation_id, "Decapsulate");
         return Ok(DecapsulateResponse { uid: ss_uid });
     }
 
-    let shared_secret = match deps.engine_session {
+    let shared_secret = match deps.resolve_tenant_session(auth.identity.as_ref()).ok() {
         Some(session) => {
             // Resolve by PKCS#11 class: Decapsulate needs the PRIVATE key, but
             // a CreateKeyPair pair shares one CKA_ID across both halves, so a
@@ -254,7 +254,7 @@ pub fn decapsulate(
         }
     };
 
-    let ss_uid = store_shared_secret(deps, obj.algorithm, shared_secret)?;
+    let ss_uid = store_shared_secret(deps, obj.algorithm, shared_secret, auth)?;
 
     emit_success(deps, correlation_id, "Decapsulate");
 
@@ -279,6 +279,7 @@ mod tests {
     use crate::auditlog::{AuditSink, RingSink};
     use crate::kmip30::{KmipAlgorithm, ObjectType, UsageMask};
     use crate::policy::Engine;
+    use crate::server::auth::AuthContext;
     use crate::store::{MemoryStore, ObjectRecord};
     use std::sync::Arc;
 
@@ -313,6 +314,7 @@ mod tests {
                 data: vec![0u8; 1088],
                 cryptographic_parameters: None,
             },
+            &AuthContext::open(),
             "t",
         )
         .unwrap();
@@ -347,6 +349,7 @@ mod tests {
                 data: vec![0u8; 65], // SEC1 uncompressed P-256 point length
                 cryptographic_parameters: None,
             },
+            &AuthContext::open(),
             "t",
         )
         .unwrap();

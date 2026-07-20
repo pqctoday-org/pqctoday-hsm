@@ -1,0 +1,857 @@
+//! hsm-perf-bench harness — pkcs11-direct mode (plan §A4.1/§P4).
+//!
+//! Proves the harness mechanism end to end against the REAL engine,
+//! through the REAL dlopen'd C ABI: load the library, bootstrap two
+//! SEPARATE tenant tokens via nothing but standard PKCS#11 v3.2
+//! operations (`C_GetSlotList`/`C_InitToken`/`C_OpenSession`/`C_Login`/
+//! `C_InitPIN`/`C_Logout`/`C_CloseSession` — no vendor extensions),
+//! generate real key material per tenant, sign/verify/derive/encapsulate/
+//! decapsulate, and prove cross-tenant isolation with a real spec-defined
+//! error code, not an assumption. Then, per §A7 ("fixed-duration
+//! points... not fixed-op-count"), runs a real fixed-duration
+//! multi-threaded measurement point per (algorithm, op) and emits one
+//! JSONL row per point (§A4.1's output contract) to stdout.
+//!
+//! Algorithm coverage (§A5, `algos.rs`): 9 signature algorithms (Ed25519,
+//! ECDSA P-256/384/521, ML-DSA-44/65/87, SLH-DSA-SHA2-128s/256s behind
+//! `--include-slow`), 4 key-agreement algorithms (X25519, ECDH
+//! P-256/384/521), 3 KEMs (ML-KEM-512/768/1024) — 16 algorithms, every
+//! mechanism/attribute verified against `rust/src/ffi.rs`'s real dispatch
+//! before use (see `algos.rs`'s own doc comment for the two categories
+//! deliberately NOT here: composite/hybrid signatures have no native
+//! mechanism in this engine, "modeled not native" per §A5 itself; hybrid/
+//! native KEMs like X25519MLKEM768 exist ONLY behind the KMIP server's
+//! own tenant bookkeeping, unreachable from a pkcs11-direct harness).
+//!
+//! Topology B (§A4.1/§A4.2, "independent-N-instances"): `--instances N`
+//! (N>1) turns this invocation into a PARENT that spawns N SEPARATE OS
+//! PROCESSES of this same binary, each running the identical single-
+//! instance measurement in complete isolation, and relays their JSONL
+//! rows to its own stdout. Real process separation, not simulated —
+//! `rust/src/state.rs`'s `TOKEN_STORE`/`OBJECTS`/`SESSIONS` are
+//! `lazy_static!` (process-global, Mutex-guarded), confirmed by reading
+//! that file before designing this: multiple OS THREADS in one process
+//! genuinely share and contend on that state (exactly what
+//! shared-1-instance measures), while multiple OS PROCESSES each get
+//! their own independent copy purely from address-space separation — no
+//! IPC or explicit reset needed for the isolation to be real. Children
+//! are spawned via `Command::new(current_exe)` (a fresh process image),
+//! not a raw POSIX `fork()`: forking a multi-threaded process is a
+//! well-known hazard (only the forking thread survives in the child;
+//! mutexes held by other threads at fork time stay locked forever) —
+//! spawning a new process achieves the identical "separate process,
+//! separate dlopen'd engine copy" independence this topology needs,
+//! without that hazard.
+//!
+//! Scope note (this increment): 2 fixed tenants per instance,
+//! pkcs11-direct access path only. kmip mode (§P2) is a later,
+//! separately-verified increment — not built here.
+
+mod algos;
+mod measure;
+mod pkcs11;
+
+use anyhow::{bail, Context, Result};
+use clap::Parser;
+use pkcs11::Engine;
+use softhsmrustv3::ck_abi::{CK_OBJECT_HANDLE, CK_SESSION_HANDLE, CK_SLOT_ID};
+use softhsmrustv3::constants::{CKA_EC_POINT, CKA_VALUE, CKR_KEY_HANDLE_INVALID, CKR_OBJECT_HANDLE_INVALID};
+use std::collections::{HashMap, HashSet};
+use std::process::Stdio;
+use std::sync::Arc;
+
+#[derive(Parser, Debug)]
+#[command(name = "bench-harness", about = "hsm-perf-bench PKCS#11-direct measurement harness")]
+struct Cli {
+    /// Path to the compiled softhsmrustv3 shared library.
+    #[arg(long, default_value = "../target/release/libsofthsmrustv3.dylib")]
+    library: String,
+    /// Worker threads for the measured loop (§A4.2 axis — round-robin
+    /// across the 2 tenants, each on its OWN session so concurrent ops
+    /// don't race on one session's operation state, §6.5.1). Per §A4.2,
+    /// this is PER INSTANCE: total concurrency under Topology B is
+    /// `threads * instances`.
+    #[arg(long, default_value_t = 4)]
+    threads: u32,
+    /// Measured window per point, seconds (§A6 "seconds-per-point", §A7
+    /// "fixed-duration points").
+    #[arg(long, default_value_t = 2.0)]
+    duration_secs: f64,
+    /// Unmeasured warm-up per point, seconds (§A7).
+    #[arg(long, default_value_t = 0.5)]
+    warmup_secs: f64,
+    /// Topology B (§A4.2): number of independent instances, 1-4. `1`
+    /// (default) is Topology A (shared-1-instance) — unchanged in-process
+    /// behavior. `>1` makes this invocation the parent orchestrator.
+    #[arg(long, default_value_t = 1)]
+    instances: u32,
+    /// §A6 "Include-slow-algorithms toggle" — includes SLH-DSA-SHA2-128s/
+    /// 256s (orders of magnitude slower to sign than everything else in
+    /// the matrix).
+    #[arg(long, default_value_t = false)]
+    include_slow: bool,
+    /// Comma-separated exact algorithm names (algos.rs `.name` values, e.g.
+    /// "Ed25519,ML-DSA-65") to restrict the matrix to. Absent = full matrix
+    /// (unchanged default behavior, same pattern as --include-slow). Lets a
+    /// caller (the sandbox UI's algorithm picker) scope a run down instead
+    /// of always executing all 16 algorithms.
+    #[arg(long)]
+    algorithms: Option<String>,
+    /// Print the configured (algorithm, op) matrix as JSON and exit —
+    /// NO engine load, NO dlopen, NO C_Initialize. Lets a caller (e.g.
+    /// the sandbox UI's job backend, hsm-perf-bench-ui-implementation-
+    /// plan-07192026.md §2.4) learn the exact expected row count/labels
+    /// up front from the harness's own real algorithm list, instead of
+    /// duplicating it as a separately-maintained constant that could
+    /// drift from `algos.rs`.
+    #[arg(long, default_value_t = false)]
+    list_algorithms: bool,
+    /// INTERNAL — set by the parent orchestrator on every child it spawns
+    /// so the child stamps its JSONL rows as one of an N-instance
+    /// Topology-B run even though it always executes as a plain,
+    /// single-instance measurement itself (`instances` is forced to `1`
+    /// on the child's own invocation). Not meant to be set by hand.
+    #[arg(long, hide = true)]
+    topology_instances: Option<u32>,
+    /// INTERNAL — set by the parent orchestrator alongside
+    /// `--topology-instances`, distinct value per child (0..N), so each
+    /// child's rows are individually attributable instead of all N
+    /// children's rows carrying the same bare instance COUNT with no way
+    /// to tell which instance produced which row. Not meant to be set by
+    /// hand.
+    #[arg(long, hide = true)]
+    instance_id: Option<u32>,
+}
+
+/// Parses `--algorithms` into a name set once per invocation. `None` means
+/// "no filter" (the flag was absent) — distinct from `Some(empty set)`,
+/// which can't actually happen since `_build_argv` on the Flask side never
+/// sends an empty `--algorithms` value.
+fn selected_algo_names(cli: &Cli) -> Option<HashSet<String>> {
+    cli.algorithms.as_ref().map(|s| {
+        s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect()
+    })
+}
+
+fn algo_allowed(name: &str, selected: &Option<HashSet<String>>) -> bool {
+    selected.as_ref().is_none_or(|s| s.contains(name))
+}
+
+struct SigMaterial {
+    pub_handle: CK_OBJECT_HANDLE,
+    priv_handle: CK_OBJECT_HANDLE,
+}
+
+struct KexMaterial {
+    priv_handle: CK_OBJECT_HANDLE,
+    own_point: Vec<u8>,
+    peer_point: Vec<u8>,
+}
+
+struct KemMaterial {
+    pub_handle: CK_OBJECT_HANDLE,
+    priv_handle: CK_OBJECT_HANDLE,
+    ciphertext: Vec<u8>,
+}
+
+/// One tenant's bootstrapped token + real, sanity-checked key material for
+/// every algorithm in the configured matrix, keyed by algorithm name.
+/// Signature keys sign/verify their own sanity check inline; KEM keys
+/// encapsulate/decapsulate their own sanity check inline (the resulting
+/// ciphertext is kept, reused by the measured decapsulate loop so it
+/// doesn't need a fresh encapsulate call per iteration — decapsulate is
+/// deterministic given (sk, ct), so this still exercises the real math
+/// each call). Key-agreement keys need a REAL peer, so their cross-tenant
+/// derive proof happens in `run_instance` once both tenants exist;
+/// `peer_point` is filled in there too.
+struct Tenant {
+    slot: CK_SLOT_ID,
+    session: CK_SESSION_HANDLE,
+    sig: HashMap<&'static str, SigMaterial>,
+    kex: HashMap<&'static str, KexMaterial>,
+    kem: HashMap<&'static str, KemMaterial>,
+    // Keyed by EncAlgo.name, not SignatureAlgo.name — even when the
+    // handles are reused from `sig` (the common case), this map still
+    // needs its OWN entries so lookups by the enc algorithm's own name
+    // work. Reuses SigMaterial's shape (just a pub/priv keypair) rather
+    // than a near-identical duplicate struct.
+    enc: HashMap<&'static str, SigMaterial>,
+}
+
+/// Claim the next free slot (standard §5.4 `C_GetSlotList` auto-replenish
+/// — see `pkcs11.rs::get_slot_list`'s doc comment) and bring up a real
+/// token with sanity-checked key material for every algorithm in
+/// `sig_algos`/`kex_algos`/`kem_algos`, per-tenant PINs so each tenant's
+/// token stays independently openable (matching the KMIP server's own
+/// per-tenant-PIN tenancy model).
+///
+/// Also returns this tenant's own real `C_GenerateKeyPair` wall-clock
+/// time per algorithm (keyed by algo name — unique across sig/kex/kem,
+/// so one map covers all three). This is ONLY used to report a `keygen`
+/// JSONL row later; every timed sign/verify/derive/encapsulate/
+/// decapsulate closure built from this tenant's material still excludes
+/// keygen entirely (plan §A7: "Keys pre-generated per tenant before
+/// timing — keygen excluded from the measured loop") — these are the
+/// SAME keygen calls provisioning already had to make, timed in place,
+/// not extra calls made just to produce a number.
+fn provision_tenant(
+    engine: &Engine,
+    name: &str,
+    sig_algos: &[algos::SignatureAlgo],
+    kex_algos: &[algos::KeyAgreementAlgo],
+    kem_algos: &[algos::KemAlgo],
+    enc_algos: &[algos::EncAlgo],
+) -> Result<(Tenant, HashMap<&'static str, f64>)> {
+    let slots_before = engine.get_slot_list().context("C_GetSlotList")?;
+    let slot = *slots_before
+        .last()
+        .expect("engine always reports at least one slot (§5.4 auto-replenish)");
+
+    let session = engine
+        .bootstrap_token(slot, &format!("so-pin-{name}"), &format!("user-pin-{name}"), &format!("bench-{name}"))
+        .with_context(|| format!("bootstrap_token(slot={slot}, tenant={name})"))?;
+
+    let mut keygen_ms: HashMap<&'static str, f64> = HashMap::new();
+
+    let mut sig = HashMap::new();
+    for algo in sig_algos {
+        let keygen_start = std::time::Instant::now();
+        let (pub_handle, priv_handle) = engine
+            .generate_key_pair_with_param(session, algo.keygen_mechanism, algo.keygen_param)
+            .with_context(|| format!("C_GenerateKeyPair({}, tenant={name})", algo.name))?;
+        keygen_ms.insert(algo.name, keygen_start.elapsed().as_secs_f64() * 1000.0);
+        // Self-contained sanity: this tenant's own key round-trips.
+        let message = format!("hsm-perf-bench harness proof — {} — tenant {name}", algo.name).into_bytes();
+        engine.sign_init(session, algo.sign_mechanism, priv_handle).with_context(|| format!("C_SignInit({})", algo.name))?;
+        let signature = engine.sign(session, &message).with_context(|| format!("C_Sign({})", algo.name))?;
+        engine.verify_init(session, algo.sign_mechanism, pub_handle).with_context(|| format!("C_VerifyInit({})", algo.name))?;
+        let valid = engine.verify(session, &message, &signature).with_context(|| format!("C_Verify({})", algo.name))?;
+        assert!(valid, "tenant {name}'s own {} signature must verify", algo.name);
+        sig.insert(algo.name, SigMaterial { pub_handle, priv_handle });
+    }
+
+    let mut kex = HashMap::new();
+    for algo in kex_algos {
+        // Keygen only here; the derive proof needs a real peer, done in
+        // `run_instance` once both tenants exist.
+        let keygen_start = std::time::Instant::now();
+        let (pub_handle, priv_handle) = engine
+            .generate_key_pair_with_param(session, algo.keygen_mechanism, algo.keygen_param)
+            .with_context(|| format!("C_GenerateKeyPair({}, tenant={name})", algo.name))?;
+        keygen_ms.insert(algo.name, keygen_start.elapsed().as_secs_f64() * 1000.0);
+        let own_point = engine
+            .get_attribute_value(session, pub_handle, CKA_EC_POINT)
+            .with_context(|| format!("C_GetAttributeValue({} CKA_EC_POINT, tenant={name})", algo.name))?;
+        kex.insert(algo.name, KexMaterial { priv_handle, own_point, peer_point: Vec::new() });
+    }
+
+    let mut kem = HashMap::new();
+    for algo in kem_algos {
+        let keygen_start = std::time::Instant::now();
+        let (pub_handle, priv_handle) = engine
+            .generate_key_pair_with_param(session, algo.keygen_mechanism, algos::KeygenParam::ParameterSet(algo.parameter_set))
+            .with_context(|| format!("C_GenerateKeyPair({}, tenant={name})", algo.name))?;
+        keygen_ms.insert(algo.name, keygen_start.elapsed().as_secs_f64() * 1000.0);
+        // Self-contained sanity: encapsulate against this tenant's own
+        // public key, decapsulate with its own private key.
+        let (ciphertext, encap_ss_handle) = engine
+            .encapsulate_key(session, algo.kem_mechanism, pub_handle, &mut [])
+            .with_context(|| format!("C_EncapsulateKey({}, tenant={name})", algo.name))?;
+        let decap_ss_handle = engine
+            .decapsulate_key(session, algo.kem_mechanism, priv_handle, &ciphertext, &mut [])
+            .with_context(|| format!("C_DecapsulateKey({}, tenant={name})", algo.name))?;
+        let encap_ss = engine.get_attribute_value(session, encap_ss_handle, CKA_VALUE).with_context(|| format!("C_GetAttributeValue(encap CKA_VALUE, {})", algo.name))?;
+        let decap_ss = engine.get_attribute_value(session, decap_ss_handle, CKA_VALUE).with_context(|| format!("C_GetAttributeValue(decap CKA_VALUE, {})", algo.name))?;
+        assert_eq!(encap_ss, decap_ss, "tenant {name}'s {} decapsulate must recover the SAME shared secret encapsulate produced", algo.name);
+        assert_eq!(encap_ss.len(), 32, "{} shared secret must be 32 bytes (FIPS 203)", algo.name);
+        kem.insert(algo.name, KemMaterial { pub_handle, priv_handle, ciphertext });
+    }
+
+    let mut enc = HashMap::new();
+    for algo in enc_algos {
+        // Reuse the matching RSA-PSS keypair when it was ALSO provisioned
+        // for this run (the common case, and the whole point of this
+        // reuse — see EncAlgo's doc comment); otherwise fall back to an
+        // independent keygen (only reachable if a run selects an EncAlgo
+        // without its matching SignatureAlgo, e.g. `--algorithms
+        // RSA-OAEP-2048` alone). No `keygen_ms` entry in the fallback
+        // case — RSA-OAEP has no dedicated "keygen" cell (see
+        // list_algorithms()); when the reuse path is taken, the keypair's
+        // real cost is already reported under its RSA-PSS entry's own
+        // keygen row, so reporting it again here would double-count it.
+        let (pub_handle, priv_handle) = if let Some(shared) = sig.get(algo.sig_algo_name) {
+            (shared.pub_handle, shared.priv_handle)
+        } else {
+            engine
+                .generate_key_pair_with_param(session, algo.keygen_mechanism, algo.keygen_param)
+                .with_context(|| format!("C_GenerateKeyPair({}, tenant={name})", algo.name))?
+        };
+        // Self-contained sanity: encrypt+decrypt round-trip with this
+        // tenant's own key.
+        let message = format!("hsm-perf-bench harness proof — {} — tenant {name}", algo.name).into_bytes();
+        engine.encrypt_init(session, algo.encrypt_mechanism, pub_handle).with_context(|| format!("C_EncryptInit({})", algo.name))?;
+        let ciphertext = engine.encrypt(session, &message).with_context(|| format!("C_Encrypt({})", algo.name))?;
+        engine.decrypt_init(session, algo.encrypt_mechanism, priv_handle).with_context(|| format!("C_DecryptInit({})", algo.name))?;
+        let recovered = engine.decrypt(session, &ciphertext).with_context(|| format!("C_Decrypt({})", algo.name))?;
+        assert_eq!(recovered, message, "tenant {name}'s {} decrypt must recover the original plaintext", algo.name);
+        enc.insert(algo.name, SigMaterial { pub_handle, priv_handle });
+    }
+
+    Ok((Tenant { slot, session, sig, kex, kem, enc }, keygen_ms))
+}
+
+fn main() -> Result<()> {
+    let cli = Cli::parse();
+    if cli.list_algorithms {
+        return list_algorithms(&cli);
+    }
+    if cli.instances > 1 {
+        return run_parent(&cli);
+    }
+    run_instance(&cli)
+}
+
+#[derive(serde::Serialize)]
+struct AlgoCell {
+    category: &'static str,
+    algorithm: &'static str,
+    security_level: &'static str,
+    op: &'static str,
+}
+
+/// `--list-algorithms`: the configured matrix's exact (category,
+/// algorithm, security_level, op) cells, in the same vocabulary
+/// `measure::ResultRow` uses for those fields — so a caller can match
+/// this list's entries directly against streamed JSONL rows with no
+/// translation. Touches nothing but `algos.rs`'s own const data; no
+/// `Engine::load` anywhere in this path.
+fn list_algorithms(cli: &Cli) -> Result<()> {
+    let selected = selected_algo_names(cli);
+    let sig_algos: Vec<algos::SignatureAlgo> = algos::SIGNATURE_ALGOS.iter().copied()
+        .filter(|a| cli.include_slow || !a.slow)
+        .filter(|a| algo_allowed(a.name, &selected))
+        .collect();
+    let kex_algos: Vec<algos::KeyAgreementAlgo> = algos::KEY_AGREEMENT_ALGOS.iter().copied()
+        .filter(|a| algo_allowed(a.name, &selected))
+        .collect();
+    let kem_algos: Vec<algos::KemAlgo> = algos::KEM_ALGOS.iter().copied()
+        .filter(|a| algo_allowed(a.name, &selected))
+        .collect();
+    let enc_algos: Vec<algos::EncAlgo> = algos::ENC_ALGOS.iter().copied()
+        .filter(|a| algo_allowed(a.name, &selected))
+        .collect();
+    if sig_algos.is_empty() && kex_algos.is_empty() && kem_algos.is_empty() && enc_algos.is_empty() {
+        bail!("--algorithms matched no known algorithm: {:?}", cli.algorithms);
+    }
+
+    let mut cells = Vec::new();
+    for algo in &sig_algos {
+        for op in ["keygen", "sign", "verify"] {
+            cells.push(AlgoCell { category: "signature", algorithm: algo.name, security_level: algo.security_level, op });
+        }
+    }
+    for algo in &kex_algos {
+        for op in ["keygen", "derive"] {
+            cells.push(AlgoCell { category: "key_establishment", algorithm: algo.name, security_level: algo.security_level, op });
+        }
+    }
+    for algo in &kem_algos {
+        for op in ["keygen", "encapsulate", "decapsulate"] {
+            cells.push(AlgoCell { category: "key_establishment", algorithm: algo.name, security_level: algo.security_level, op });
+        }
+    }
+    // No "keygen" op here — RSA-OAEP's keypair is normally reused from its
+    // matching RSA-PSS entry (see EncAlgo's doc comment in algos.rs), so
+    // there's no dedicated keygen cost to report as its own cell.
+    for algo in &enc_algos {
+        for op in ["encrypt", "decrypt"] {
+            cells.push(AlgoCell { category: "key_establishment", algorithm: algo.name, security_level: algo.security_level, op });
+        }
+    }
+    println!("{}", serde_json::to_string(&cells)?);
+    Ok(())
+}
+
+/// Topology B orchestrator: spawn `cli.instances` fresh child processes of
+/// this same binary, each forced to `--instances 1` (so it runs the exact
+/// same single-instance code path as Topology A) but stamped with
+/// `--topology-instances N` + a distinct `--instance-id` so its JSONL
+/// rows self-report as one specific instance of an N-instance independent
+/// topology.
+///
+/// Each child's stdout is read on its OWN thread, one line at a time, and
+/// forwarded to the parent's own stdout AS EACH LINE ARRIVES (via an
+/// mpsc channel drained by the main thread) — not read to completion
+/// child-by-child. An earlier version of this function read one child's
+/// ENTIRE stdout via a blocking `read_to_string()` before even starting
+/// the next child; that is correct for the data itself (nothing was ever
+/// lost or corrupted) but defeats LIVE progress for any caller streaming
+/// the parent's stdout (the sandbox job runner, `hsm_perf_bench_job.py`):
+/// confirmed live — a real 2-instance run showed 0/152 completed cells
+/// for the entire ~15s runtime, then jumped straight to 152/152 the
+/// instant the last child exited, with no intermediate value ever
+/// observed. Rust's `Stdout` is a `LineWriter` regardless of whether it's
+/// attached to a tty or a pipe (unlike C's stdio, which block-buffers
+/// non-tty output), so each child already flushes every JSONL row to its
+/// pipe as soon as that row is written — the blocking was entirely on
+/// this function's READING side, not the children's writing side.
+fn run_parent(cli: &Cli) -> Result<()> {
+    let self_exe = std::env::current_exe().context("resolving current_exe for child re-exec")?;
+    eprintln!(
+        "[[parent]] topology B: spawning {} independent instances (separate processes, separate dlopen'd engine copies)",
+        cli.instances
+    );
+
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    let mut children = Vec::new();
+    let mut readers = Vec::new();
+    for instance_id in 0..cli.instances {
+        let mut cmd = std::process::Command::new(&self_exe);
+        cmd.arg("--library").arg(&cli.library)
+            .arg("--threads").arg(cli.threads.to_string())
+            .arg("--duration-secs").arg(cli.duration_secs.to_string())
+            .arg("--warmup-secs").arg(cli.warmup_secs.to_string())
+            .arg("--instances").arg("1")
+            .arg("--topology-instances").arg(cli.instances.to_string())
+            .arg("--instance-id").arg(instance_id.to_string());
+        if cli.include_slow {
+            cmd.arg("--include-slow");
+        }
+        if let Some(algorithms) = &cli.algorithms {
+            cmd.arg("--algorithms").arg(algorithms);
+        }
+        let mut child = cmd
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .with_context(|| format!("spawning instance {instance_id}"))?;
+        let stdout = child.stdout.take().expect("piped stdout");
+        let tx = tx.clone();
+        readers.push(std::thread::spawn(move || -> Result<()> {
+            for line in std::io::BufRead::lines(std::io::BufReader::new(stdout)) {
+                let line = line.with_context(|| format!("reading instance {instance_id} stdout"))?;
+                // `.lines()` strips the trailing newline `println!` wrote on
+                // the child side; put it back so what reaches the parent's
+                // own stdout is byte-identical to shared-1-instance mode's
+                // output shape (one JSON object per line).
+                if tx.send(format!("{line}\n")).is_err() {
+                    break; // receiver already gone — main thread is exiting
+                }
+            }
+            Ok(())
+        }));
+        children.push(child);
+    }
+    drop(tx); // only the per-child clones keep the channel open now
+
+    // Print each line the instant it arrives, interleaved across
+    // instances in real arrival order — this loop ends once every
+    // sender (one per reader thread) has been dropped, i.e. once every
+    // child's stdout has hit EOF.
+    for line in rx {
+        print!("{line}");
+    }
+
+    for reader in readers {
+        reader.join().expect("reader thread panicked")?;
+    }
+    for (instance_id, mut child) in children.into_iter().enumerate() {
+        let status = child.wait().with_context(|| format!("waiting on instance {instance_id}"))?;
+        if !status.success() {
+            bail!("instance {instance_id} exited with {status}");
+        }
+    }
+    eprintln!("[[parent]] all {} instances completed successfully", cli.instances);
+    Ok(())
+}
+
+fn run_instance(cli: &Cli) -> Result<()> {
+    let (topology, topology_instances): (&'static str, u32) = match cli.topology_instances {
+        Some(n) => ("independent-n-instances", n),
+        None => ("shared-1-instance", 1),
+    };
+    // §1 of the telemetry plan: this instance's OWN identity within the
+    // topology (0..topology_instances), set by the parent orchestrator
+    // alongside --topology-instances. Always 0 under shared-1-instance
+    // (there's only ever one instance to be).
+    let this_instance_id = cli.instance_id.unwrap_or(0);
+
+    let selected = selected_algo_names(cli);
+    let sig_algos: Vec<algos::SignatureAlgo> = algos::SIGNATURE_ALGOS.iter().copied()
+        .filter(|a| cli.include_slow || !a.slow)
+        .filter(|a| algo_allowed(a.name, &selected))
+        .collect();
+    let kex_algos: Vec<algos::KeyAgreementAlgo> = algos::KEY_AGREEMENT_ALGOS.iter().copied()
+        .filter(|a| algo_allowed(a.name, &selected))
+        .collect();
+    let kem_algos: Vec<algos::KemAlgo> = algos::KEM_ALGOS.iter().copied()
+        .filter(|a| algo_allowed(a.name, &selected))
+        .collect();
+    let enc_algos: Vec<algos::EncAlgo> = algos::ENC_ALGOS.iter().copied()
+        .filter(|a| algo_allowed(a.name, &selected))
+        .collect();
+    if sig_algos.is_empty() && kex_algos.is_empty() && kem_algos.is_empty() && enc_algos.is_empty() {
+        bail!("--algorithms matched no known algorithm: {:?}", cli.algorithms);
+    }
+
+    let engine = Engine::load(&cli.library).with_context(|| format!("loading engine library at {:?}", cli.library))?;
+    engine.initialize().context("C_Initialize")?;
+    eprintln!("[ok] engine initialized: {}", cli.library);
+    eprintln!(
+        "[ok] algorithm matrix: {} signature, {} key-agreement, {} KEM, {} key-transport ({})",
+        sig_algos.len(), kex_algos.len(), kem_algos.len(), enc_algos.len(),
+        if cli.include_slow { "including slow algorithms" } else { "slow algorithms excluded, pass --include-slow to add them" }
+    );
+
+    // ── Two tenants, two real tokens, standard PKCS#11 v3.2 calls only. ─
+    let (mut alice, alice_keygen_ms) = provision_tenant(&engine, "alice", &sig_algos, &kex_algos, &kem_algos, &enc_algos)?;
+    eprintln!("[ok] alice bootstrapped on slot {}: session={}", alice.slot, alice.session);
+    let (mut bob, bob_keygen_ms) = provision_tenant(&engine, "bob", &sig_algos, &kex_algos, &kem_algos, &enc_algos)?;
+    eprintln!("[ok] bob bootstrapped on slot {}: session={}", bob.slot, bob.session);
+    assert_ne!(alice.slot, bob.slot, "each tenant must land on its own slot");
+    eprintln!("[ok] alice and bob each have their own token and full key material, every algorithm's own sign/verify or encap/decap round-trip verified");
+
+    // ── Cross-tenant isolation, proven with a real PKCS#11 v3.2 error
+    // code — not asserted, not assumed. Bob's session attempting to sign
+    // with ALICE's private-key handle (using whichever signature
+    // algorithm this run's --algorithms selection actually includes) must
+    // fail: her handle is not visible/usable from his session's token
+    // scope. §6.3.2/§6.3.3 (SignInit/Sign) list CKR_KEY_HANDLE_INVALID for
+    // exactly this case; this engine's own object-handle validation
+    // (`can_access_object`, hardened across this whole tenancy effort)
+    // may also surface the more general CKR_OBJECT_HANDLE_INVALID — both
+    // are spec-defined, and either is an honest "no", so both are
+    // accepted here. ─────────────────────────────────────────────────
+    // Used to hardcode algos::ED25519 on the assumption it was
+    // "guaranteed present in every matrix configuration" — true when the
+    // only matrix-shaping toggle was --include-slow, false once
+    // --algorithms could restrict the run to an arbitrary subset.
+    // Confirmed live: an --algorithms ML-DSA-44,ML-DSA-65,ML-DSA-87
+    // selection panicked here ("no entry found for key") since alice's
+    // .sig map never had an "Ed25519" entry to begin with. Probing with
+    // whichever signature algorithm actually got provisioned fixes this
+    // for any signature-only selection; a selection with NO signature
+    // algorithm at all (pure key-establishment) has no natural probe for
+    // THIS specific check, so it's skipped with a clearly-logged reason
+    // rather than silently claimed as verified.
+    if let Some(probe) = sig_algos.first() {
+        let alice_probe_priv = alice.sig[probe.name].priv_handle;
+        let bob_probe = &bob.sig[probe.name];
+        let cross_tenant_result = engine.sign_init(bob.session, probe.sign_mechanism, alice_probe_priv);
+        match cross_tenant_result {
+            Ok(()) => {
+                panic!(
+                    "SECURITY REGRESSION: Bob's session (slot {}) could SignInit with \
+                     Alice's private key handle {alice_probe_priv} (her slot {}) — cross-tenant isolation failed",
+                    bob.slot, alice.slot
+                );
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                let is_expected = msg.contains(&format!("0x{CKR_KEY_HANDLE_INVALID:x}"))
+                    || msg.contains(&format!("0x{CKR_OBJECT_HANDLE_INVALID:x}"));
+                assert!(
+                    is_expected,
+                    "expected CKR_KEY_HANDLE_INVALID (0x{CKR_KEY_HANDLE_INVALID:x}) or \
+                     CKR_OBJECT_HANDLE_INVALID (0x{CKR_OBJECT_HANDLE_INVALID:x}), got: {msg}"
+                );
+                eprintln!("[ok] cross-tenant isolation verified via {}: Bob cannot use Alice's key handle ({msg})", probe.name);
+            }
+        }
+
+        // Bob's OWN key still works after the rejected cross-tenant
+        // attempt — proves the isolation check is a real gate, not a
+        // session-poisoning side effect.
+        let message = b"bob signs after the rejected cross-tenant attempt";
+        engine.sign_init(bob.session, probe.sign_mechanism, bob_probe.priv_handle).context("C_SignInit (bob, post-check)")?;
+        let sig = engine.sign(bob.session, message).context("C_Sign (bob, post-check)")?;
+        engine.verify_init(bob.session, probe.sign_mechanism, bob_probe.pub_handle).context("C_VerifyInit (bob, post-check)")?;
+        let valid = engine.verify(bob.session, message, &sig).context("C_Verify (bob, post-check)")?;
+        assert!(valid, "bob's own key must still work after the rejected cross-tenant attempt");
+        eprintln!("[ok] bob's own key still works after the rejected cross-tenant attempt — real gate, not a blanket deny");
+    } else {
+        eprintln!("[ok] cross-tenant isolation sign-based check skipped — no signature algorithm in this run's --algorithms selection to probe with (key-establishment-only run)");
+    }
+
+    // ── ECDH-derive category, every key-agreement algorithm — genuine
+    // two-party key agreement across alice's and bob's SEPARATE tokens,
+    // each already holding her/his own keypair from `provision_tenant`.
+    // The only real correctness check a DH exchange offers: both sides
+    // must independently derive the IDENTICAL shared secret. ──────────
+    for algo in &kex_algos {
+        let alice_own = alice.kex[algo.name].own_point.clone();
+        let bob_own = bob.kex[algo.name].own_point.clone();
+        let alice_priv = alice.kex[algo.name].priv_handle;
+        let bob_priv = bob.kex[algo.name].priv_handle;
+
+        let mut bob_point_for_alice = bob_own.clone();
+        let mut alice_point_for_bob = alice_own.clone();
+        let alice_shared_handle = engine.ecdh1_derive(alice.session, alice_priv, &mut bob_point_for_alice).with_context(|| format!("C_DeriveKey(ECDH1, {}, alice)", algo.name))?;
+        let bob_shared_handle = engine.ecdh1_derive(bob.session, bob_priv, &mut alice_point_for_bob).with_context(|| format!("C_DeriveKey(ECDH1, {}, bob)", algo.name))?;
+        let alice_shared = engine.get_attribute_value(alice.session, alice_shared_handle, CKA_VALUE).with_context(|| format!("C_GetAttributeValue(alice shared CKA_VALUE, {})", algo.name))?;
+        let bob_shared = engine.get_attribute_value(bob.session, bob_shared_handle, CKA_VALUE).with_context(|| format!("C_GetAttributeValue(bob shared CKA_VALUE, {})", algo.name))?;
+        assert_eq!(alice_shared, bob_shared, "{} ECDH must produce the SAME shared secret on both sides", algo.name);
+        eprintln!("[ok] {} key agreement verified: alice and bob independently derived the SAME {}-byte shared secret", algo.name, alice_shared.len());
+
+        alice.kex.get_mut(algo.name).unwrap().peer_point = bob_own;
+        bob.kex.get_mut(algo.name).unwrap().peer_point = alice_own;
+    }
+
+    for algo in &kem_algos {
+        eprintln!(
+            "[ok] {} KEM round-trip verified for both tenants during provisioning: {}-byte ciphertexts, matching encap/decap shared secrets",
+            algo.name, alice.kem[algo.name].ciphertext.len()
+        );
+    }
+
+    // ── Fixed-duration, multi-threaded measurement (§A7): one point per
+    // (tenant, algorithm, op) — `cli.threads` workers round-robin across
+    // the 2 tenants, each worker on its OWN session (an operation's
+    // state — SignInit/Sign, etc. — lives on the session, so concurrent
+    // workers sharing one session would race each other's operation
+    // context). Login state is per-TOKEN not per-session (verified
+    // against `ffi.rs::C_Login` — `token.login_state` lives in
+    // `TOKEN_STORE` keyed by slot), so a worker session on an already-
+    // logged-in tenant slot needs no separate login; and
+    // `can_access_object` gates by slot, not by creating session, so
+    // every worker can use its tenant's key material without
+    // regenerating it.
+    //
+    // Grouped by tenant (not pooled across all threads into one row per
+    // op, as this used to be) so each tenant's own throughput is its own
+    // real, separate measurement — telemetry plan §2.2: pooling silently
+    // averaged away exactly the per-tenant fairness/contention question
+    // a shared-vs-independent-topology benchmark exists to answer. An
+    // odd `--threads` value gives one tenant one more worker than the
+    // other (`⌈N/2⌉` vs `⌊N/2⌋`) — a real property of the run, now
+    // visible as different `total_ops` between the two tenants' rows at
+    // the same `threads` value, not hidden inside a pooled average. ────
+    let tenants = [&alice, &bob];
+    let mut worker_sessions_by_tenant: Vec<Vec<CK_SESSION_HANDLE>> = vec![Vec::new(); tenants.len()];
+    for w in 0..cli.threads {
+        let tenant_idx = (w as usize) % tenants.len();
+        let session = engine.open_session(tenants[tenant_idx].slot).with_context(|| format!("C_OpenSession (worker {w})"))?;
+        worker_sessions_by_tenant[tenant_idx].push(session);
+    }
+    eprintln!(
+        "[ok] {} worker sessions opened across {} tenants ({} / {} split)",
+        cli.threads, tenants.len(), worker_sessions_by_tenant[0].len(), worker_sessions_by_tenant[1].len()
+    );
+
+    let engine = Arc::new(engine);
+    let engine_version = engine.library_version().context("C_GetInfo")?;
+    let common = |op: &'static str, category: &'static str, algorithm: &'static str, security_level: &'static str, tenant_index: u32, slot: u64, total_ops: u64, latencies_ms: Vec<f64>, duration_s: f64| {
+        let (p50_ms, p99_ms) = measure::percentiles_ms(latencies_ms);
+        measure::ResultRow {
+            access_path: "pkcs11-direct",
+            topology,
+            instances: topology_instances,
+            instance_id: this_instance_id,
+            tenants: tenants.len() as u32,
+            tenant_index,
+            slot,
+            threads: cli.threads,
+            category, algorithm, security_level, op,
+            ops_per_sec: total_ops as f64 / duration_s,
+            p50_ms, p99_ms, duration_s, total_ops,
+            engine_version: engine_version.clone(),
+        }
+    };
+    let stdout = std::io::stdout();
+    #[allow(clippy::too_many_arguments)]
+    let emit = |op: &'static str, category: &'static str, algorithm: &'static str, security_level: &'static str, tenant_index: u32, slot: u64, total_ops: u64, latencies_ms: Vec<f64>, duration_s: f64| -> Result<()> {
+        let row = common(op, category, algorithm, security_level, tenant_index, slot, total_ops, latencies_ms, duration_s);
+        eprintln!("[ok] measured {}/{} (tenant {} slot {}): {:.0} ops/sec over {:.2}s ({} ops)", row.algorithm, row.op, row.tenant_index, row.slot, row.ops_per_sec, row.duration_s, row.total_ops);
+        serde_json::to_writer(&stdout, &row)?;
+        println!();
+        Ok(())
+    };
+
+    // keygen — one real sample per tenant, NOT a hot loop: this is the
+    // SAME `C_GenerateKeyPair` call `provision_tenant` already had to
+    // make for that tenant, timed in place — no extra calls made just to
+    // produce this row, and every sign/verify/derive/encapsulate/
+    // decapsulate closure below still excludes keygen entirely (§A7).
+    // One row per tenant now (previously one row pooling both tenants'
+    // 2 samples together) — matches the per-tenant model the rest of
+    // this loop uses, and is more natural besides: each tenant's own
+    // real keygen sample stands on its own instead of being averaged
+    // with a different tenant's.
+    let emit_keygen = |category: &'static str, name: &'static str, security_level: &'static str, tenant_index: u32, slot: u64, latency_ms: f64| -> Result<()> {
+        let duration_s = (latency_ms / 1000.0).max(1e-9);
+        emit("keygen", category, name, security_level, tenant_index, slot, 1, vec![latency_ms], duration_s)
+    };
+    for algo in &sig_algos {
+        emit_keygen("signature", algo.name, algo.security_level, 0, alice.slot as u64, alice_keygen_ms[algo.name])?;
+        emit_keygen("signature", algo.name, algo.security_level, 1, bob.slot as u64, bob_keygen_ms[algo.name])?;
+    }
+    for algo in &kex_algos {
+        emit_keygen("key_establishment", algo.name, algo.security_level, 0, alice.slot as u64, alice_keygen_ms[algo.name])?;
+        emit_keygen("key_establishment", algo.name, algo.security_level, 1, bob.slot as u64, bob_keygen_ms[algo.name])?;
+    }
+    for algo in &kem_algos {
+        emit_keygen("key_establishment", algo.name, algo.security_level, 0, alice.slot as u64, alice_keygen_ms[algo.name])?;
+        emit_keygen("key_establishment", algo.name, algo.security_level, 1, bob.slot as u64, bob_keygen_ms[algo.name])?;
+    }
+
+    // sign + verify, every signature algorithm, per tenant
+    for algo in &sig_algos {
+        for (tenant_index, tenant) in tenants.iter().enumerate() {
+            let tenant_index = tenant_index as u32;
+            let slot = tenant.slot as u64;
+            {
+                let workers: Vec<_> = worker_sessions_by_tenant[tenant_index as usize].iter().map(|&session| {
+                    let engine = Arc::clone(&engine);
+                    let priv_handle = tenant.sig[algo.name].priv_handle;
+                    let mechanism = algo.sign_mechanism;
+                    let message = format!("hsm-perf-bench measured sign {} — tenant {tenant_index}", algo.name).into_bytes();
+                    move || -> Result<()> {
+                        engine.sign_init(session, mechanism, priv_handle)?;
+                        engine.sign(session, &message)?;
+                        Ok(())
+                    }
+                }).collect();
+                let (total_ops, latencies_ms, duration_s) = measure::run_point(cli.duration_secs, cli.warmup_secs, workers)?;
+                emit("sign", "signature", algo.name, algo.security_level, tenant_index, slot, total_ops, latencies_ms, duration_s)?;
+            }
+            // verify — each worker signs ONE message once (setup,
+            // unmeasured) then the timed loop repeatedly verifies that
+            // same signature, exercising the real C_VerifyInit/C_Verify
+            // path only.
+            {
+                let workers: Vec<_> = worker_sessions_by_tenant[tenant_index as usize].iter().map(|&session| {
+                    let engine = Arc::clone(&engine);
+                    let material = &tenant.sig[algo.name];
+                    let (priv_handle, pub_handle) = (material.priv_handle, material.pub_handle);
+                    let mechanism = algo.sign_mechanism;
+                    let message = format!("hsm-perf-bench measured verify {} — tenant {tenant_index}", algo.name).into_bytes();
+                    engine.sign_init(session, mechanism, priv_handle)?;
+                    let signature = engine.sign(session, &message)?;
+                    Ok::<_, anyhow::Error>(move || -> Result<()> {
+                        engine.verify_init(session, mechanism, pub_handle)?;
+                        engine.verify(session, &message, &signature)?;
+                        Ok(())
+                    })
+                }).collect::<Result<Vec<_>>>()?;
+                let (total_ops, latencies_ms, duration_s) = measure::run_point(cli.duration_secs, cli.warmup_secs, workers)?;
+                emit("verify", "signature", algo.name, algo.security_level, tenant_index, slot, total_ops, latencies_ms, duration_s)?;
+            }
+        }
+    }
+
+    // derive, every key-agreement algorithm, per tenant
+    for algo in &kex_algos {
+        for (tenant_index, tenant) in tenants.iter().enumerate() {
+            let tenant_index = tenant_index as u32;
+            let slot = tenant.slot as u64;
+            let workers: Vec<_> = worker_sessions_by_tenant[tenant_index as usize].iter().map(|&session| {
+                let engine = Arc::clone(&engine);
+                let priv_handle = tenant.kex[algo.name].priv_handle;
+                let mut peer_point = tenant.kex[algo.name].peer_point.clone();
+                move || -> Result<()> {
+                    engine.ecdh1_derive(session, priv_handle, &mut peer_point)?;
+                    Ok(())
+                }
+            }).collect();
+            let (total_ops, latencies_ms, duration_s) = measure::run_point(cli.duration_secs, cli.warmup_secs, workers)?;
+            emit("derive", "key_establishment", algo.name, algo.security_level, tenant_index, slot, total_ops, latencies_ms, duration_s)?;
+        }
+    }
+
+    // encapsulate + decapsulate, every KEM, per tenant
+    for algo in &kem_algos {
+        for (tenant_index, tenant) in tenants.iter().enumerate() {
+            let tenant_index = tenant_index as u32;
+            let slot = tenant.slot as u64;
+            {
+                let workers: Vec<_> = worker_sessions_by_tenant[tenant_index as usize].iter().map(|&session| {
+                    let engine = Arc::clone(&engine);
+                    let kem_pub = tenant.kem[algo.name].pub_handle;
+                    let mechanism = algo.kem_mechanism;
+                    move || -> Result<()> {
+                        engine.encapsulate_key(session, mechanism, kem_pub, &mut [])?;
+                        Ok(())
+                    }
+                }).collect();
+                let (total_ops, latencies_ms, duration_s) = measure::run_point(cli.duration_secs, cli.warmup_secs, workers)?;
+                emit("encapsulate", "key_establishment", algo.name, algo.security_level, tenant_index, slot, total_ops, latencies_ms, duration_s)?;
+            }
+            {
+                let workers: Vec<_> = worker_sessions_by_tenant[tenant_index as usize].iter().map(|&session| {
+                    let engine = Arc::clone(&engine);
+                    let material = &tenant.kem[algo.name];
+                    let kem_priv = material.priv_handle;
+                    let ciphertext = material.ciphertext.clone();
+                    let mechanism = algo.kem_mechanism;
+                    move || -> Result<()> {
+                        engine.decapsulate_key(session, mechanism, kem_priv, &ciphertext, &mut [])?;
+                        Ok(())
+                    }
+                }).collect();
+                let (total_ops, latencies_ms, duration_s) = measure::run_point(cli.duration_secs, cli.warmup_secs, workers)?;
+                emit("decapsulate", "key_establishment", algo.name, algo.security_level, tenant_index, slot, total_ops, latencies_ms, duration_s)?;
+            }
+        }
+    }
+
+    // encrypt + decrypt, every RSA-OAEP key-transport algorithm, per
+    // tenant — same shape as encapsulate/decapsulate above, just
+    // C_Encrypt/C_Decrypt instead of C_EncapsulateKey/C_DecapsulateKey.
+    // No keygen row: see EncAlgo's doc comment (algos.rs) and
+    // list_algorithms() above for why.
+    for algo in &enc_algos {
+        for (tenant_index, tenant) in tenants.iter().enumerate() {
+            let tenant_index = tenant_index as u32;
+            let slot = tenant.slot as u64;
+            {
+                let workers: Vec<_> = worker_sessions_by_tenant[tenant_index as usize].iter().map(|&session| {
+                    let engine = Arc::clone(&engine);
+                    let pub_handle = tenant.enc[algo.name].pub_handle;
+                    let mechanism = algo.encrypt_mechanism;
+                    let message = format!("hsm-perf-bench measured encrypt {} — tenant {tenant_index}", algo.name).into_bytes();
+                    move || -> Result<()> {
+                        engine.encrypt_init(session, mechanism, pub_handle)?;
+                        engine.encrypt(session, &message)?;
+                        Ok(())
+                    }
+                }).collect();
+                let (total_ops, latencies_ms, duration_s) = measure::run_point(cli.duration_secs, cli.warmup_secs, workers)?;
+                emit("encrypt", "key_establishment", algo.name, algo.security_level, tenant_index, slot, total_ops, latencies_ms, duration_s)?;
+            }
+            // decrypt — each worker encrypts ONE message once (setup,
+            // unmeasured) then the timed loop repeatedly decrypts that
+            // same ciphertext, exercising the real C_DecryptInit/C_Decrypt
+            // path only (same pattern as the `verify` block above).
+            {
+                let workers: Vec<_> = worker_sessions_by_tenant[tenant_index as usize].iter().map(|&session| {
+                    let engine = Arc::clone(&engine);
+                    let material = &tenant.enc[algo.name];
+                    let (pub_handle, priv_handle) = (material.pub_handle, material.priv_handle);
+                    let mechanism = algo.encrypt_mechanism;
+                    let message = format!("hsm-perf-bench measured decrypt {} — tenant {tenant_index}", algo.name).into_bytes();
+                    engine.encrypt_init(session, mechanism, pub_handle)?;
+                    let ciphertext = engine.encrypt(session, &message)?;
+                    Ok::<_, anyhow::Error>(move || -> Result<()> {
+                        engine.decrypt_init(session, mechanism, priv_handle)?;
+                        engine.decrypt(session, &ciphertext)?;
+                        Ok(())
+                    })
+                }).collect::<Result<Vec<_>>>()?;
+                let (total_ops, latencies_ms, duration_s) = measure::run_point(cli.duration_secs, cli.warmup_secs, workers)?;
+                emit("decrypt", "key_establishment", algo.name, algo.security_level, tenant_index, slot, total_ops, latencies_ms, duration_s)?;
+            }
+        }
+    }
+
+    for sessions in worker_sessions_by_tenant {
+        for session in sessions {
+            engine.close_session(session).context("C_CloseSession (worker)")?;
+        }
+    }
+    engine.close_session(alice.session).context("C_CloseSession (alice)")?;
+    engine.close_session(bob.session).context("C_CloseSession (bob)")?;
+    engine.finalize().context("C_Finalize")?;
+    eprintln!("[ok] mechanism + isolation proof + measurement complete — engine finalized cleanly");
+
+    Ok(())
+}

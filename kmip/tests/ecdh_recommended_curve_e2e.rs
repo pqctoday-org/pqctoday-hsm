@@ -81,6 +81,7 @@ fn create_ecdh(d: &Deps, curve: u32) -> String {
             seed: None,
         },
         "CreateKeyPair:KeyAgreement",
+        &pqctoday_kmip::server::auth::AuthContext::open(),
         "ckp",
     )
     .expect("ecdh keygen");
@@ -106,6 +107,7 @@ fn create_ecdh_pair(d: &Deps, curve: u32) -> (String, String) {
             seed: None,
         },
         "CreateKeyPair:KeyAgreement",
+        &pqctoday_kmip::server::auth::AuthContext::open(),
         "ckp",
     )
     .expect("ecdh keygen");
@@ -141,6 +143,7 @@ fn derive_agree(d: &Deps, priv_uid: &str, peer_public: &[u8]) -> Vec<u8> {
             },
             template_attribute: vec![Attribute::CryptographicLength(256)], // 32 bytes
         },
+        &pqctoday_kmip::server::auth::AuthContext::open(),
         "derive",
     )
     .expect("derive_key ecdh agreement");
@@ -169,6 +172,7 @@ fn ecdh_curve25519_makes_x25519_and_reports_domain_params() {
     let ga = get_attributes(
         &d,
         GetAttributesRequest { uid: priv_uid.clone(), attribute_references: vec![] },
+        &pqctoday_kmip::server::auth::AuthContext::open(),
         "ga",
     )
     .expect("get_attributes");
@@ -184,6 +188,7 @@ fn ecdh_curve25519_makes_x25519_and_reports_domain_params() {
     let got = get(
         &d,
         GetRequest { uid: priv_uid, key_format_type: None, key_wrapping_specification: None },
+        &pqctoday_kmip::server::auth::AuthContext::open(),
         "get",
     );
     assert!(got.is_err(), "Get on the X25519 private key must be refused");

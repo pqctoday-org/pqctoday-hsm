@@ -128,6 +128,7 @@ fn create_aes(deps: &Deps, extra: Vec<Attribute>, cid: &str) -> String {
             object_type: ObjectType::SymmetricKey,
             template_attribute: aes_template(extra),
         },
+        &AuthContext::open(),
         cid,
     )
     .unwrap()
@@ -143,6 +144,7 @@ fn state_via_get_attributes(deps: &Deps, uid: &str) -> State {
             uid: uid.to_string(),
             attribute_references: vec!["State".into()],
         },
+        &AuthContext::open(),
         "ga-state",
     )
     .unwrap();
@@ -169,12 +171,12 @@ fn archive_then_get_fails_then_recover_restores() {
     let uid = import_aes_with_material(&deps, "ar-mat", vec![0x11; 32]);
 
     // Get works before Archive.
-    let before = get(&deps, GetRequest { uid: uid.clone(), key_format_type: None, key_wrapping_specification: None }, "ar-get1").unwrap();
+    let before = get(&deps, GetRequest { uid: uid.clone(), key_format_type: None, key_wrapping_specification: None }, &AuthContext::open(), "ar-get1").unwrap();
     assert_eq!(before.key_block.key_value, vec![0x11; 32]);
 
     // Archive → record moves off-line.
     archive(&deps, ArchiveRequest { uid: uid.clone() }, "ar-archive").unwrap();
-    let err = get(&deps, GetRequest { uid: uid.clone(), key_format_type: None, key_wrapping_specification: None }, "ar-get2").unwrap_err();
+    let err = get(&deps, GetRequest { uid: uid.clone(), key_format_type: None, key_wrapping_specification: None }, &AuthContext::open(), "ar-get2").unwrap_err();
     assert_eq!(
         err.result_reason(),
         ResultReason::ObjectArchived,
@@ -183,7 +185,7 @@ fn archive_then_get_fails_then_recover_restores() {
 
     // Recover → back on-line, Get returns the same bytes.
     recover(&deps, RecoverRequest { uid: uid.clone() }, "ar-recover").unwrap();
-    let after = get(&deps, GetRequest { uid, key_format_type: None, key_wrapping_specification: None }, "ar-get3").unwrap();
+    let after = get(&deps, GetRequest { uid, key_format_type: None, key_wrapping_specification: None }, &AuthContext::open(), "ar-get3").unwrap();
     assert_eq!(after.key_block.key_value, vec![0x11; 32], "Recover restores the same material");
 
     let _ = softhsmrustv3::native::session::finalize();
@@ -249,6 +251,7 @@ fn import_aes_with_material(deps: &Deps, uid: &str, material: Vec<u8>) -> String
             }),
             certificate_payload: None,
         },
+        &AuthContext::open(),
         "import",
     )
     .unwrap();
@@ -268,7 +271,7 @@ fn import_material_round_trips_through_get_and_export() {
 
     // Import lands in PreActive; Get serves the material in any
     // non-Destroyed state, so no activation needed.
-    let g = get(&deps, GetRequest { uid: uid.clone(), key_format_type: None, key_wrapping_specification: None }, "ie-get").unwrap();
+    let g = get(&deps, GetRequest { uid: uid.clone(), key_format_type: None, key_wrapping_specification: None }, &AuthContext::open(), "ie-get").unwrap();
     assert_eq!(g.key_block.key_value, material, "Get recovers the imported material verbatim");
     assert_eq!(g.key_block.cryptographic_algorithm, KmipAlgorithm::Aes);
 
@@ -281,6 +284,7 @@ fn import_material_round_trips_through_get_and_export() {
             key_compression_type: None,
             key_wrapping_specification: None,
         },
+        &AuthContext::open(),
         "ie-export",
     )
     .unwrap();
@@ -322,6 +326,7 @@ fn object_group_create_into_group_then_locate_by_group_in_one_session() {
     let mut g1 = locate(
         &deps,
         LocateRequest { attributes: vec![Attribute::ObjectGroup("G1".into())], ..Default::default() },
+        &AuthContext::open(),
         "og-loc-g1",
     )
     .unwrap()
@@ -335,6 +340,7 @@ fn object_group_create_into_group_then_locate_by_group_in_one_session() {
     let g2 = locate(
         &deps,
         LocateRequest { attributes: vec![Attribute::ObjectGroup("G2".into())], ..Default::default() },
+        &AuthContext::open(),
         "og-loc-g2",
     )
     .unwrap()
@@ -345,6 +351,7 @@ fn object_group_create_into_group_then_locate_by_group_in_one_session() {
     let none = locate(
         &deps,
         LocateRequest { attributes: vec![Attribute::ObjectGroup("ghost".into())], ..Default::default() },
+        &AuthContext::open(),
         "og-loc-ghost",
     )
     .unwrap()
@@ -357,6 +364,7 @@ fn object_group_create_into_group_then_locate_by_group_in_one_session() {
     let ga = get_attributes(
         &deps,
         GetAttributesRequest { uid: a.clone(), attribute_references: vec!["GroupLink".into()] },
+        &AuthContext::open(),
         "og-ga",
     )
     .unwrap();
@@ -383,12 +391,14 @@ fn set_attribute_writes_value_and_rejects_read_only() {
     set_attribute(
         &deps,
         SetAttributeRequest { uid: uid.clone(), new_attribute: Attribute::Name("rotated-key-7".into()) },
+        &AuthContext::open(),
         "sa-set",
     )
     .unwrap();
     let r = get_attributes(
         &deps,
         GetAttributesRequest { uid: uid.clone(), attribute_references: vec!["Name".into()] },
+        &AuthContext::open(),
         "sa-ga",
     )
     .unwrap();
@@ -401,6 +411,7 @@ fn set_attribute_writes_value_and_rejects_read_only() {
     let err = set_attribute(
         &deps,
         SetAttributeRequest { uid, new_attribute: Attribute::State(State::Compromised) },
+        &AuthContext::open(),
         "sa-ro",
     )
     .unwrap_err();
@@ -429,6 +440,7 @@ fn adjust_attribute_increments_usage_mask_by_delta() {
             adjustment_type: AdjustmentType::Increment,
             adjustment_value: Some(UsageMask::SIGN.bits() as i64),
         },
+        &AuthContext::open(),
         "adj",
     )
     .unwrap();
@@ -465,6 +477,7 @@ fn derive_key_produces_usable_derived_object_with_links() {
                 Attribute::ActivationDate(OffsetDateTime::now_utc().unix_timestamp() - 3600),
             ],
         },
+        &AuthContext::open(),
         "dk-base",
     )
     .unwrap()
@@ -487,6 +500,7 @@ fn derive_key_produces_usable_derived_object_with_links() {
                 Attribute::CryptographicUsageMask(UsageMask::ENCRYPT | UsageMask::DECRYPT),
             ],
         },
+        &AuthContext::open(),
         "dk-derive",
     )
     .unwrap();
@@ -500,6 +514,7 @@ fn derive_key_produces_usable_derived_object_with_links() {
     let derived_attrs = get_attributes(
         &deps,
         GetAttributesRequest { uid: resp.uid.clone(), attribute_references: vec![] },
+        &AuthContext::open(),
         "dk-ga-derived",
     )
     .unwrap();
@@ -510,6 +525,7 @@ fn derive_key_produces_usable_derived_object_with_links() {
     let base_attrs = get_attributes(
         &deps,
         GetAttributesRequest { uid: base_uid, attribute_references: vec![] },
+        &AuthContext::open(),
         "dk-ga-base",
     )
     .unwrap();
@@ -542,6 +558,7 @@ fn rekey_mints_replacement_with_links_and_retires_original() {
     let resp = rekey(
         &deps,
         ReKeyRequest { uid: orig.clone(), offset: None, template_attribute: vec![] },
+        &AuthContext::open(),
         "rk-rekey",
     )
     .unwrap();
@@ -581,6 +598,7 @@ fn rekey_key_pair_mints_both_halves_with_links_and_retires_originals() {
         seed: None,
         },
         "CreateKeyPair:Sign",
+        &AuthContext::open(),
         "rkkp-create",
     )
     .unwrap();
@@ -595,6 +613,7 @@ fn rekey_key_pair_mints_both_halves_with_links_and_retires_originals() {
             private_key_attributes: vec![],
             public_key_attributes: vec![],
         },
+        &AuthContext::open(),
         "rkkp-rekey",
     )
     .unwrap();
@@ -720,6 +739,7 @@ fn set_defaults_inherited_by_create_unless_client_overrides() {
                 attributes: vec![Attribute::Name("server-default-name".into())],
             }]),
         },
+        &AuthContext::open(),
         "sd-set",
     )
     .unwrap();
@@ -976,6 +996,7 @@ fn validate_stored_self_signed_cert_returns_valid_and_error_paths() {
     let r = validate(
         &deps,
         ValidateRequest { certificates: vec![], uids: vec!["cert-ca".into()], validity_date: None },
+        &AuthContext::open(),
         "v-valid",
     )
     .unwrap();
@@ -990,6 +1011,7 @@ fn validate_stored_self_signed_cert_returns_valid_and_error_paths() {
             uids: vec![],
             validity_date: Some(OffsetDateTime::now_utc() + time::Duration::days(365 * 100)),
         },
+        &AuthContext::open(),
         "v-expired",
     )
     .unwrap();
@@ -1003,6 +1025,7 @@ fn validate_stored_self_signed_cert_returns_valid_and_error_paths() {
     let r = validate(
         &deps,
         ValidateRequest { certificates: vec![leaf.der().to_vec()], uids: vec![], validity_date: None },
+        &AuthContext::open(),
         "v-unknown",
     )
     .unwrap();
@@ -1016,6 +1039,7 @@ fn validate_stored_self_signed_cert_returns_valid_and_error_paths() {
             uids: vec![],
             validity_date: None,
         },
+        &AuthContext::open(),
         "v-chain",
     )
     .unwrap();
@@ -1025,6 +1049,7 @@ fn validate_stored_self_signed_cert_returns_valid_and_error_paths() {
     let err = validate(
         &deps,
         ValidateRequest { certificates: vec![], uids: vec!["ghost".into()], validity_date: None },
+        &AuthContext::open(),
         "v-nf",
     )
     .unwrap_err();
@@ -1044,6 +1069,7 @@ fn validate_stored_self_signed_cert_returns_valid_and_error_paths() {
     let err = validate(
         &deps,
         ValidateRequest { certificates: vec![], uids: vec!["sym".into()], validity_date: None },
+        &AuthContext::open(),
         "v-iot",
     )
     .unwrap_err();
@@ -1093,6 +1119,7 @@ fn certify_issues_certificate_get_able_with_links() {
         seed: None,
         },
         "CreateKeyPair",
+        &AuthContext::open(),
         "e2e-ca-keygen",
     )
     .unwrap();
@@ -1121,12 +1148,13 @@ fn certify_issues_certificate_get_able_with_links() {
             certificate_request: Some(csr.der().to_vec()),
             ..CertifyRequest::default()
         },
+        &AuthContext::open(),
         "e2e-certify",
     )
     .unwrap();
 
     // ── The issued Certificate is Get-able with §11 attrs. ──
-    let g = get(&deps, GetRequest { uid: resp.uid.clone(), key_format_type: None, key_wrapping_specification: None }, "e2e-get").unwrap();
+    let g = get(&deps, GetRequest { uid: resp.uid.clone(), key_format_type: None, key_wrapping_specification: None }, &AuthContext::open(), "e2e-get").unwrap();
     assert_eq!(g.object_type, ObjectType::Certificate);
     assert!(!g.key_block.key_value.is_empty(), "issued cert DER is returned by Get");
 
@@ -1257,18 +1285,18 @@ fn pkcs11_get_info_returns_real_ck_info_bytes_against_real_engine() {
     // C_Initialize (0x01) — the KMIP-server-side virtual lifecycle
     // flag; the real engine is already initialized for the server's
     // whole lifetime, this just tracks THIS client's view of it.
-    assert_eq!(pkcs11(&deps, req(1), "pkcs11-e2e-init").unwrap().return_code, 0);
+    assert_eq!(pkcs11(&deps, req(1), &AuthContext::open(), "pkcs11-e2e-init").unwrap().return_code, 0);
 
     // C_GetInfo (0x03) against the REAL engine session — must return
     // actual, non-empty CK_INFO bytes, not the honest-`None` fallback.
-    let info_resp = pkcs11(&deps, req(3), "pkcs11-e2e-getinfo").unwrap();
+    let info_resp = pkcs11(&deps, req(3), &AuthContext::open(), "pkcs11-e2e-getinfo").unwrap();
     assert_eq!(info_resp.return_code, 0);
     let info_bytes = info_resp.output_parameters.expect("real engine must return real CK_INFO bytes");
     assert_eq!(info_bytes.len(), 72, "CK_INFO is 72 bytes per PKCS#11 v3.2 §5.4");
     assert!(info_bytes.iter().any(|&b| b != 0), "real CK_INFO is not all-zero filler");
 
     // C_Finalize (0x02) — clean teardown of the virtual lifecycle flag.
-    assert_eq!(pkcs11(&deps, req(2), "pkcs11-e2e-finalize").unwrap().return_code, 0);
+    assert_eq!(pkcs11(&deps, req(2), &AuthContext::open(), "pkcs11-e2e-finalize").unwrap().return_code, 0);
 
     let _ = softhsmrustv3::native::session::finalize();
 }
@@ -1333,6 +1361,7 @@ fn import_certificate_round_trips_der_no_algorithm_attribute_required() {
             managed_object: None,
             certificate_payload: Some((0 /* X.509 */, der.clone())),
         },
+        &AuthContext::open(),
         "import-cert",
     )
     .unwrap();
@@ -1344,6 +1373,6 @@ fn import_certificate_round_trips_der_no_algorithm_attribute_required() {
 
     // Get must return the exact same DER — proves the store-side fix,
     // independent of any engine session (none is wired in this test).
-    let got = get(&deps, GetRequest { uid: "cert-import".into(), key_format_type: None, key_wrapping_specification: None }, "get-cert").unwrap();
+    let got = get(&deps, GetRequest { uid: "cert-import".into(), key_format_type: None, key_wrapping_specification: None }, &AuthContext::open(), "get-cert").unwrap();
     assert_eq!(got.key_block.key_value, der);
 }

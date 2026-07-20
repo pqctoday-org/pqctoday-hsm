@@ -90,6 +90,34 @@ All constants verified against both the vendored `src/lib/pkcs11/pkcs11t.h`
 and a live fetch of `docs.oasis-open.org/pkcs11/pkcs11-spec/v3.2/os/include/
 pkcs11-v3.2/pkcs11t.h` — no value taken from memory.
 
+## 2026-07-18 — `native::*` token-scoping isolation gate (§2.4/§4.4)
+
+`ffi::C_*` (the wasm-bindgen ABI this report's harness exercises) has always
+enforced `state::can_access_object` — token-scoped handles, §2.4/§4.4 — at 8
+call sites. The typed `native::*` surface (no wasm32 pointer marshalling;
+what the KMIP server calls exclusively) did not: found and closed on
+`feat/hsm-perf-bench` (see `rust-hsm-perf-bench-scenario-plan-07182026.md`
+Part F in the workspace root for the full design/audit trail). Every
+by-handle `native::*` function (sign/verify, encrypt/decrypt,
+encapsulate/decapsulate, ECDH agree, get/set attribute, destroy, split/join,
+hybrid) now routes through the same predicate via new `state::`
+primitives (`resolve_session_access`, `with_object_checked[_mut]`,
+`take_object_checked`), so a handle from another token uniformly fails
+with `CKR_OBJECT_HANDLE_INVALID` on **both** surfaces — no PKCS#11-visible
+behavior change on `ffi::*`, `native::*` now conformant where it previously
+was not (native has no ABI/wasm harness of its own; verified by
+`tests/multitenant_concurrency.rs` and `native::object::tests::
+find_by_cka_id_is_token_scoped`, plus the unmodified `cargo test` suites of
+both this crate — 309/309 — and the KMIP crate — 655+ lib tests, all
+integration suites — confirming zero behavior change for existing
+single-tenant callers).
+
+Found and fixed in the same pass: a TOCTOU race in `ffi::C_Login` where the
+per-token login-exclusivity check (§5.6 — only one login wins) read a stale
+snapshot before the state write, letting concurrent logins on one token
+silently double-succeed. Regression test:
+`tests/multitenant_concurrency.rs::login_exclusivity_holds_under_concurrent_attempts`.
+
 ## Sections covered
 
 - R1.2 — initialization gate (§5.4/§5.6)

@@ -29,8 +29,21 @@ use super::deps::Deps;
 use super::helpers::{emit_request, emit_success, fail_err};
 use crate::error::KmipError;
 
-pub fn locate(deps: &Deps, req: LocateRequest, correlation_id: &str) -> Result<LocateResponse> {
+pub fn locate(
+    deps: &Deps,
+    req: LocateRequest,
+    auth: &crate::server::auth::AuthContext,
+    correlation_id: &str,
+) -> Result<LocateResponse> {
     let started = OffsetDateTime::now_utc();
+    // Part F §F7.4 — Locate results are filtered to the requester's own
+    // objects (user decision, 2026-07-18): exact `Option<String>`
+    // equality against `ObjectRecord::owner`, same rule
+    // `helpers::authorize_object` uses for single-object lookups.
+    // Without this, Locate would be the one operation that still lets a
+    // tenant enumerate every UID in the system even though it can't act
+    // on any of them.
+    let requester = auth.identity.as_ref().map(|i| i.username.clone());
     emit_request(
         deps,
         correlation_id,
@@ -88,7 +101,7 @@ pub fn locate(deps: &Deps, req: LocateRequest, correlation_id: &str) -> Result<L
         } else {
             storage_mask & STORAGE_STATUS_ONLINE != 0
         };
-        storage_ok && filters.matches(r)
+        storage_ok && filters.matches(r) && r.owner == requester
     })?;
 
     // Plane-3 reconciliation: when a real engine is wired, drop records
@@ -116,7 +129,7 @@ pub fn locate(deps: &Deps, req: LocateRequest, correlation_id: &str) -> Result<L
     // `key_material.is_none()` keeps the orphan guard sound for the
     // engine-resident case it was written for while leaving store-backed
     // objects locatable.
-    if let Some(session) = deps.engine_session {
+    if let Some(session) = deps.resolve_tenant_session(auth.identity.as_ref()).ok() {
         matches.retain(|r| {
             // WP-2 remediation — a Certificate's authoritative DER lives in
             // `certificate_value` regardless of creation path (Certify
@@ -352,6 +365,7 @@ mod tests {
     use crate::auditlog::{AuditSink, RingSink};
     use crate::kmip30::UsageMask;
     use crate::policy::{load_from_str, Engine};
+    use crate::server::auth::AuthContext;
     use crate::store::{MemoryStore, ObjectRecord};
     use std::sync::Arc;
 
@@ -425,20 +439,20 @@ mod tests {
         let mut g1 = locate(&d, LocateRequest {
             attributes: vec![Attribute::ObjectGroup("G1".into())],
             ..Default::default()
-        }, "cid").unwrap().uids;
+        }, &AuthContext::open(), "cid").unwrap().uids;
         g1.sort();
         assert_eq!(g1, vec!["a", "b"]);
 
         let g2 = locate(&d, LocateRequest {
             attributes: vec![Attribute::ObjectGroup("G2".into())],
             ..Default::default()
-        }, "cid").unwrap().uids;
+        }, &AuthContext::open(), "cid").unwrap().uids;
         assert_eq!(g2, vec!["c"]);
 
         let none = locate(&d, LocateRequest {
             attributes: vec![Attribute::ObjectGroup("nope".into())],
             ..Default::default()
-        }, "cid").unwrap().uids;
+        }, &AuthContext::open(), "cid").unwrap().uids;
         assert!(none.is_empty());
     }
 
@@ -452,7 +466,7 @@ mod tests {
             let r = locate(&d, LocateRequest {
                 attributes: vec![Attribute::ObjectGroup(g.into())],
                 ..Default::default()
-            }, "cid").unwrap();
+            }, &AuthContext::open(), "cid").unwrap();
             assert_eq!(r.uids, vec!["multi"], "should be found by group {g}");
         }
     }
@@ -480,7 +494,7 @@ mod tests {
                 Attribute::ObjectType(ObjectType::SymmetricKey),
             ],
             ..Default::default()
-        }, "cid").unwrap();
+        }, &AuthContext::open(), "cid").unwrap();
         assert_eq!(r.uids, vec!["b"]);
     }
 
@@ -493,7 +507,7 @@ mod tests {
             attributes: vec![Attribute::CryptographicAlgorithm(KmipAlgorithm::MlDsa87)],
             maximum_items: None,
             ..Default::default()
-        }, "c").unwrap();
+        }, &AuthContext::open(), "c").unwrap();
         assert_eq!(r.uids, vec!["b"]);
     }
 
@@ -506,7 +520,7 @@ mod tests {
             attributes: vec![Attribute::State(State::Active)],
             maximum_items: None,
             ..Default::default()
-        }, "c").unwrap();
+        }, &AuthContext::open(), "c").unwrap();
         assert_eq!(r.uids, vec!["a"]);
     }
 
@@ -523,7 +537,7 @@ mod tests {
             ],
             maximum_items: None,
             ..Default::default()
-        }, "c").unwrap();
+        }, &AuthContext::open(), "c").unwrap();
         assert_eq!(r.uids, vec!["a"]);
     }
 
@@ -537,7 +551,7 @@ mod tests {
             attributes: vec![],
             maximum_items: Some(2),
             ..Default::default()
-        }, "c").unwrap();
+        }, &AuthContext::open(), "c").unwrap();
         assert_eq!(r.uids.len(), 2);
     }
 
@@ -554,13 +568,13 @@ mod tests {
             offset_items: Some(1),
             maximum_items: Some(1),
             ..Default::default()
-        }, "c").unwrap();
+        }, &AuthContext::open(), "c").unwrap();
         assert_eq!(r.uids, vec!["b"]);
         // Offset past the end → empty, not a panic.
         let r = locate(&d, LocateRequest {
             offset_items: Some(9),
             ..Default::default()
-        }, "c").unwrap();
+        }, &AuthContext::open(), "c").unwrap();
         assert!(r.uids.is_empty());
     }
 
@@ -575,16 +589,16 @@ mod tests {
         let r = locate(&d, LocateRequest {
             storage_status_mask: Some(0x02),
             ..Default::default()
-        }, "c").unwrap();
+        }, &AuthContext::open(), "c").unwrap();
         assert!(r.uids.is_empty());
         // On-line (0x01) → results.
         let r = locate(&d, LocateRequest {
             storage_status_mask: Some(0x01),
             ..Default::default()
-        }, "c").unwrap();
+        }, &AuthContext::open(), "c").unwrap();
         assert_eq!(r.uids, vec!["a"]);
         // Absent → spec default is On-line-only → results.
-        let r = locate(&d, LocateRequest::default(), "c").unwrap();
+        let r = locate(&d, LocateRequest::default(), &AuthContext::open(), "c").unwrap();
         assert_eq!(r.uids, vec!["a"]);
     }
 
@@ -626,6 +640,7 @@ mod tests {
                 attributes: vec![Attribute::CryptographicAlgorithm(KmipAlgorithm::Aes)],
                 ..Default::default()
             },
+            &AuthContext::open(),
             "c",
         )
         .unwrap();
@@ -650,25 +665,25 @@ mod tests {
         d.store.update(rec).unwrap();
 
         // Absent mask → On-line only: archived object excluded.
-        let r = locate(&d, LocateRequest::default(), "c").unwrap();
+        let r = locate(&d, LocateRequest::default(), &AuthContext::open(), "c").unwrap();
         assert_eq!(r.uids, vec!["online"]);
         // On-line only (0x01) → archived excluded.
         let r = locate(&d, LocateRequest {
             storage_status_mask: Some(0x01),
             ..Default::default()
-        }, "c").unwrap();
+        }, &AuthContext::open(), "c").unwrap();
         assert_eq!(r.uids, vec!["online"]);
         // Archival only (0x02) → ONLY the archived object.
         let r = locate(&d, LocateRequest {
             storage_status_mask: Some(0x02),
             ..Default::default()
-        }, "c").unwrap();
+        }, &AuthContext::open(), "c").unwrap();
         assert_eq!(r.uids, vec!["arch"]);
         // Both (0x03) → both, in stable (InitialDate, UID) order.
         let r = locate(&d, LocateRequest {
             storage_status_mask: Some(0x03),
             ..Default::default()
-        }, "c").unwrap();
+        }, &AuthContext::open(), "c").unwrap();
         assert_eq!(r.uids, vec!["arch", "online"]);
     }
 
@@ -682,19 +697,19 @@ mod tests {
         put(&d, "dead", KmipAlgorithm::Aes, ObjectType::SymmetricKey, State::Destroyed);
 
         // Default (On-line) → tombstone hidden.
-        let r = locate(&d, LocateRequest::default(), "c").unwrap();
+        let r = locate(&d, LocateRequest::default(), &AuthContext::open(), "c").unwrap();
         assert_eq!(r.uids, vec!["live"]);
         // Destroyed bit (0x04) alone → only the tombstone.
         let r = locate(&d, LocateRequest {
             storage_status_mask: Some(0x04),
             ..Default::default()
-        }, "c").unwrap();
+        }, &AuthContext::open(), "c").unwrap();
         assert_eq!(r.uids, vec!["dead"]);
         // On-line + Destroyed (0x05) → both, in stable (InitialDate, UID) order.
         let r = locate(&d, LocateRequest {
             storage_status_mask: Some(0x05),
             ..Default::default()
-        }, "c").unwrap();
+        }, &AuthContext::open(), "c").unwrap();
         assert_eq!(r.uids, vec!["dead", "live"]);
     }
 
@@ -720,7 +735,7 @@ mod tests {
         let r = locate(&d, LocateRequest {
             attributes: vec![Attribute::CryptographicLength(256)],
             ..Default::default()
-        }, "c").unwrap();
+        }, &AuthContext::open(), "c").unwrap();
         assert_eq!(r.uids, vec!["aes256"]);
     }
 
@@ -751,7 +766,7 @@ mod tests {
         let mut r = locate(&d, LocateRequest {
             attributes: vec![Attribute::CryptographicUsageMask(UsageMask::DECRYPT)],
             ..Default::default()
-        }, "c").unwrap().uids;
+        }, &AuthContext::open(), "c").unwrap().uids;
         r.sort();
         assert_eq!(r, vec!["enc-dec"]);
     }
@@ -769,7 +784,7 @@ mod tests {
         let r = locate(&d, LocateRequest {
             attributes: vec![Attribute::UniqueIdentifier("target".into())],
             ..Default::default()
-        }, "c").unwrap();
+        }, &AuthContext::open(), "c").unwrap();
         assert_eq!(r.uids, vec!["target"]);
     }
 }

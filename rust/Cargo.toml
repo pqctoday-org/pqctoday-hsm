@@ -4,6 +4,22 @@ version = "0.15.0"
 edition = "2024"
 description = "A native Rust WebAssembly clone of SoftHSMv3"
 
+# hsm-perf-bench plan §A4.1/§P4 — makes this crate the workspace root, with
+# `bench-harness/` as a sibling member. Purely structural: does not change
+# this crate's own compiled output (cdylib/wasm/rlib) in any way, and
+# `cargo build`/`cargo test` invoked from `rust/` for THIS package alone
+# behave identically to before. What it DOES do: bench-harness now shares
+# this file's `[patch.crates-io]` section (below) and this directory's
+# Cargo.lock — patches only apply within a shared workspace, so a
+# standalone sibling crate depending on this one via a bare path dependency
+# would silently re-resolve the UNPATCHED upstream fips204/fips205 (same
+# version number, missing the added Ph variants / _internal_*_external_mu
+# functions this crate's own crypto/handlers.rs needs) — confirmed the
+# hard way: bench-harness's first build failed on exactly those symbols
+# before this workspace declaration was added.
+[workspace]
+members = ["bench-harness"]
+
 [lib]
 crate-type = ["cdylib", "rlib"]
 

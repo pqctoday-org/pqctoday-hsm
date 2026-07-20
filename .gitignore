@@ -59,6 +59,7 @@ Makefile.in
 .vscode/
 .idea/
 rust/target/
+rust/bench-harness/target/
 openmls-provider/target/
 kmip/target/
 

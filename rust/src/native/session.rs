@@ -21,8 +21,10 @@ use crate::ffi as ffi;
 /// this typed wrapper absorbs it so callers like
 /// [`bootstrap_default_token`] can call `init()` defensively.
 ///
-/// Native callers pin all subsequent `native::*` calls to the same OS
-/// thread as the `init()` call (`thread_local!` storage in the engine).
+/// Engine storage is a global `Mutex`, not `thread_local!` — subsequent
+/// `native::*` calls are NOT required to stay on the `init()` call's OS
+/// thread (see the corrected "Threading model" section in
+/// `native/mod.rs`).
 pub fn init() -> Result<(), CkRv> {
     use crate::constants::CKR_CRYPTOKI_ALREADY_INITIALIZED;
     let rv = ffi::C_Initialize(std::ptr::null_mut());
@@ -123,7 +125,8 @@ pub fn close_session(session: u32) -> Result<(), CkRv> {
 
 /// Initialise a token on `slot` with the security-officer PIN + label.
 /// Token state survives `close_session` and engine `init()` re-entries
-/// within the same process (storage is `thread_local!`).
+/// within the same process (storage is a global `Mutex`, shared by every
+/// thread — not `thread_local!`).
 ///
 /// `label` is padded with spaces to PKCS#11's required 32 bytes by the
 /// engine; callers pass any printable string.

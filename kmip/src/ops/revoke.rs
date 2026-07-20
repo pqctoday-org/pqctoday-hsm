@@ -33,7 +33,12 @@ use super::helpers::{
     canonical_name, emit_request, emit_state_change, emit_success, fail_err, state_name,
 };
 
-pub fn revoke(deps: &Deps, req: RevokeRequest, correlation_id: &str) -> Result<RevokeResponse> {
+pub fn revoke(
+    deps: &Deps,
+    req: RevokeRequest,
+    auth: &crate::server::auth::AuthContext,
+    correlation_id: &str,
+) -> Result<RevokeResponse> {
     let started = OffsetDateTime::now_utc();
     emit_request(
         deps,
@@ -42,10 +47,11 @@ pub fn revoke(deps: &Deps, req: RevokeRequest, correlation_id: &str) -> Result<R
         format!("uid={} reason={:?}", req.uid, req.reason),
     );
 
-    let mut obj = deps
-        .store
-        .get(&req.uid)?
-        .ok_or_else(|| fail_err(deps, correlation_id, "Revoke", KmipError::object_not_found(&req.uid)))?;
+    // Part F §F7.4 — owner-checked lookup (see get.rs for the pattern).
+    let mut obj = super::helpers::authorize_object(deps, auth, &req.uid, || {
+        KmipError::object_not_found(&req.uid)
+    })
+    .map_err(|e| fail_err(deps, correlation_id, "Revoke", e))?;
 
     // KMIP 3.0 §3 state-transition list — only Revoke transitions
     // permitted (enumerated by the spec under the State attribute
@@ -99,7 +105,9 @@ pub fn revoke(deps: &Deps, req: RevokeRequest, correlation_id: &str) -> Result<R
     if obj.object_type == ObjectType::Certificate
         && matches!(target_state, State::Compromised | State::DestroyedCompromised)
     {
-        if let Some(session) = deps.engine_session {
+        // Part F §F7 — the revoked cert's engine mirror lives in the
+        // caller's own token (ownership verified above).
+        if let Some(session) = deps.resolve_tenant_session(auth.identity.as_ref()).ok() {
             if let Ok(Some(handle)) =
                 super::helpers::find_handle_for_object(session, &obj.pkcs11_cka_id, obj.object_type)
             {
@@ -199,7 +207,7 @@ mod tests {
     fn unspecified_reason_yields_deactivated() {
         let d = deps_with(ALLOW);
         active(&d, "u");
-        let resp = revoke(&d, RevokeRequest { uid: "u".into(), reason: RevocationReason::Unspecified }, "c").unwrap();
+        let resp = revoke(&d, RevokeRequest { uid: "u".into(), reason: RevocationReason::Unspecified }, &crate::server::auth::AuthContext::open(), "c").unwrap();
         assert_eq!(resp.state, State::Deactivated);
     }
 
@@ -207,7 +215,7 @@ mod tests {
     fn key_compromise_yields_compromised() {
         let d = deps_with(ALLOW);
         active(&d, "u2");
-        let resp = revoke(&d, RevokeRequest { uid: "u2".into(), reason: RevocationReason::KeyCompromise }, "c").unwrap();
+        let resp = revoke(&d, RevokeRequest { uid: "u2".into(), reason: RevocationReason::KeyCompromise }, &crate::server::auth::AuthContext::open(), "c").unwrap();
         assert_eq!(resp.state, State::Compromised);
     }
 
@@ -240,7 +248,7 @@ mod tests {
         }).unwrap();
         let resp = revoke(&d, RevokeRequest {
             uid: "d".into(), reason: RevocationReason::KeyCompromise,
-        }, "c").unwrap();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap();
         assert_eq!(resp.state, State::Compromised);
     }
 
@@ -270,7 +278,7 @@ mod tests {
         }).unwrap();
         let resp = revoke(&d, RevokeRequest {
             uid: "p".into(), reason: RevocationReason::CaCompromise,
-        }, "c").unwrap();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap();
         assert_eq!(resp.state, State::Compromised);
     }
 
@@ -300,7 +308,7 @@ mod tests {
         }).unwrap();
         let err = revoke(&d, RevokeRequest {
             uid: "pu".into(), reason: RevocationReason::Unspecified,
-        }, "c").unwrap_err();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap_err();
         assert_eq!(err.result_reason(), crate::error::ResultReason::WrongKeyLifecycleState);
     }
 

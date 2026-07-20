@@ -12,6 +12,7 @@ use pqctoday_kmip::ops::activate::activate;
 use pqctoday_kmip::ops::create::create;
 use pqctoday_kmip::ops::{Deps, DepsConfig};
 use pqctoday_kmip::policy::{load_from_str, Engine};
+use pqctoday_kmip::server::auth::AuthContext;
 use pqctoday_kmip::store::{KeyStore, MemoryStore, SqliteStore};
 
 const POLICY: &str = r#"
@@ -57,6 +58,7 @@ fn create_then_activate_then_sign_works_on_both_backends() {
                 object_type: ObjectType::SymmetricKey,
                 template_attribute: vec![],
             },
+            &AuthContext::open(),
             &format!("c-{backend_name}-create"),
         )
         .unwrap();

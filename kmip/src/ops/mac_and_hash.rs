@@ -44,13 +44,20 @@ use super::helpers::{
 
 // ── MAC ────────────────────────────────────────────────────────────────────
 
-pub fn mac(deps: &Deps, req: MacRequest, correlation_id: &str) -> Result<MacResponse> {
+pub fn mac(
+    deps: &Deps,
+    req: MacRequest,
+    auth: &crate::server::auth::AuthContext,
+    correlation_id: &str,
+) -> Result<MacResponse> {
     let started = OffsetDateTime::now_utc();
     emit_request(deps, correlation_id, "MAC", format!("uid={} data_len={}", req.uid, req.data.len()));
 
-    let obj = deps.store.get(&req.uid)?.ok_or_else(|| {
-        fail_err(deps, correlation_id, "MAC", KmipError::object_not_found(&req.uid))
-    })?;
+    // Part F §F7.4 — owner-checked lookup (see get.rs for the pattern).
+    let obj = super::helpers::authorize_object(deps, auth, &req.uid, || {
+        KmipError::object_not_found(&req.uid)
+    })
+    .map_err(|e| fail_err(deps, correlation_id, "MAC", e))?;
     require_active(&obj, "MAC")?;
     // KMIP 3.0 §11 Cryptographic Usage Mask — MAC requires the
     // `MAC Generate` bit (0x80); missing → 0x29 (K12, audit K-9).
@@ -74,7 +81,7 @@ pub fn mac(deps: &Deps, req: MacRequest, correlation_id: &str) -> Result<MacResp
 
     // K15 (B-9) — engine-resident keys MAC through the engine; the
     // in-process `hmac` crate runs ONLY for KMIP-store-only keys.
-    let mac_bytes = match (&obj.key_material, deps.engine_session) {
+    let mac_bytes = match (&obj.key_material, deps.resolve_tenant_session(auth.identity.as_ref()).ok()) {
         (None, Some(session)) => {
             let (handle, mech) =
                 engine_hmac_target(deps, correlation_id, "MAC", session, &obj, mac_algo)?;
@@ -109,15 +116,18 @@ pub fn mac(deps: &Deps, req: MacRequest, correlation_id: &str) -> Result<MacResp
 pub fn mac_verify(
     deps: &Deps,
     req: MacVerifyRequest,
+    auth: &crate::server::auth::AuthContext,
     correlation_id: &str,
 ) -> Result<MacVerifyResponse> {
     let started = OffsetDateTime::now_utc();
     emit_request(deps, correlation_id, "MACVerify",
                  format!("uid={} data_len={} mac_len={}", req.uid, req.data.len(), req.mac_data.len()));
 
-    let obj = deps.store.get(&req.uid)?.ok_or_else(|| {
-        fail_err(deps, correlation_id, "MACVerify", KmipError::object_not_found(&req.uid))
-    })?;
+    // Part F §F7.4 — owner-checked lookup (see get.rs for the pattern).
+    let obj = super::helpers::authorize_object(deps, auth, &req.uid, || {
+        KmipError::object_not_found(&req.uid)
+    })
+    .map_err(|e| fail_err(deps, correlation_id, "MACVerify", e))?;
     require_active(&obj, "MACVerify")?;
     // KMIP 3.0 §11 Cryptographic Usage Mask — MAC Verify requires the
     // `MAC Verify` bit (0x100); missing → 0x29 (K12, audit K-9).
@@ -138,7 +148,7 @@ pub fn mac_verify(
     // K15 (B-9) — engine-resident keys verify through the engine
     // (`native::verify` HMAC dispatch); in-process recompute-and-compare
     // ONLY for KMIP-store-only keys.
-    let validity = match (&obj.key_material, deps.engine_session) {
+    let validity = match (&obj.key_material, deps.resolve_tenant_session(auth.identity.as_ref()).ok()) {
         (None, Some(session)) => {
             let (handle, mech) =
                 engine_hmac_target(deps, correlation_id, "MACVerify", session, &obj, mac_algo)?;
@@ -399,7 +409,7 @@ mod tests {
             uid: "v".into(),
             cryptographic_parameters: None,
             data: b"x".to_vec(),
-        }, "c").unwrap_err();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::IncompatibleCryptographicUsageMask);
         // … and a key with only MAC_GENERATE can't MACVerify.
         d.store.put(ObjectRecord {
@@ -416,7 +426,7 @@ mod tests {
             cryptographic_parameters: None,
             data: b"x".to_vec(),
             mac_data: vec![0u8; 32],
-        }, "c").unwrap_err();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::IncompatibleCryptographicUsageMask);
     }
 
@@ -428,14 +438,14 @@ mod tests {
             uid: "u".into(),
             cryptographic_parameters: None,
             data: b"hello world".to_vec(),
-        }, "c").unwrap();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap();
         assert_eq!(m.mac_data.len(), 32, "HMAC-SHA-256 output is 32 bytes");
         let v = mac_verify(&d, MacVerifyRequest {
             uid: "u".into(),
             cryptographic_parameters: None,
             data: b"hello world".to_vec(),
             mac_data: m.mac_data,
-        }, "c").unwrap();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap();
         assert_eq!(v.validity, SignatureValidity::Valid);
     }
 
@@ -459,13 +469,13 @@ mod tests {
             uid: "u".into(),
             cryptographic_parameters: None,
             data: b"payload".to_vec(),
-        }, "c-soft").unwrap();
+        }, &crate::server::auth::AuthContext::open(), "c-soft").unwrap();
         mac_verify(&d, MacVerifyRequest {
             uid: "u".into(),
             cryptographic_parameters: None,
             data: b"payload".to_vec(),
             mac_data: m.mac_data,
-        }, "c-soft").unwrap();
+        }, &crate::server::auth::AuthContext::open(), "c-soft").unwrap();
         let p3 = ring.filter_plane(Plane::Pkcs11);
         assert_eq!(p3.len(), 2, "one soft-path record per MAC + MACVerify");
         for e in &p3 {
@@ -485,7 +495,7 @@ mod tests {
             cryptographic_parameters: None,
             data: b"hello world".to_vec(),
             mac_data: vec![0xff; 32],
-        }, "c").unwrap();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap();
         assert_eq!(v.validity, SignatureValidity::Invalid);
     }
 

@@ -71,6 +71,7 @@ const LINK_DERIVED_OBJECT: &str = "DerivedObjectLink";
 pub fn derive_key(
     deps: &Deps,
     mut req: DeriveKeyRequest,
+    auth: &crate::server::auth::AuthContext,
     correlation_id: &str,
 ) -> Result<DeriveKeyResponse> {
     let started = OffsetDateTime::now_utc();
@@ -111,10 +112,13 @@ pub fn derive_key(
     // (Incompatible Cryptographic Usage Mask, K12/audit K-9).
     let mut bases: Vec<ObjectRecord> = Vec::with_capacity(req.uids.len());
     for uid in &req.uids {
-        let obj = deps
-            .store
-            .get(uid)?
-            .ok_or_else(|| fail(KmipError::object_not_found(uid)))?;
+        // Part F §F7.4 — owner-checked: deriving from a foreign tenant's
+        // base object fails as the same ObjectNotFound a missing UID
+        // produces (anti-oracle).
+        let obj = super::helpers::authorize_object(deps, auth, uid, || {
+            KmipError::object_not_found(uid)
+        })
+        .map_err(&fail)?;
         if obj.state != State::Active {
             return Err(fail(super::helpers::non_active_state_error(&obj.uid, obj.state)));
         }
@@ -204,6 +208,7 @@ pub fn derive_key(
         req.object_type,
         &[],
         &mut req.template_attribute,
+        auth,
     );
     let x = super::register_import_export::extract_attrs(&req.template_attribute);
 
@@ -272,7 +277,7 @@ pub fn derive_key(
                      (algorithm {:?}; §7.13 — Cryptographic Parameters are ignored)",
                     base.uid, base.algorithm
                 ))))?;
-            let out = hmac_prf(deps, correlation_id, base, hash)?(data)?;
+            let out = hmac_prf(deps, deps.resolve_tenant_session(auth.identity.as_ref()).ok(), correlation_id, base, hash)?(data)?;
             // §6.1.18 — "If the specified length exceeds the output of
             // the derivation method, then the server SHALL return an
             // error." Single HMAC ⇒ output = one hash block.
@@ -378,7 +383,7 @@ pub fn derive_key(
             let hash = request_hash
                 .or_else(|| base_key_prf_hash(base))
                 .unwrap_or(HashingAlgorithm::Sha256);
-            let prf = hmac_prf(deps, correlation_id, base, hash)?;
+            let prf = hmac_prf(deps, deps.resolve_tenant_session(auth.identity.as_ref()).ok(), correlation_id, base, hash)?;
             let mut out: Vec<u8> = Vec::with_capacity(len_bytes);
             let mut counter: u32 = 1;
             while out.len() < len_bytes {
@@ -405,7 +410,9 @@ pub fn derive_key(
                      Derivation Data (§7.13 Table 465)",
                 ))
             })?;
-            let session = deps.engine_session.ok_or_else(|| {
+            // Part F §F7 — the base private key lives in the caller's
+            // own token (ownership verified above).
+            let session = deps.resolve_tenant_session(auth.identity.as_ref()).ok().ok_or_else(|| {
                 fail(KmipError::failed(
                     ResultReason::CryptographicFailure,
                     "Asymmetric Key derivation requires an engine session".to_string(),
@@ -448,7 +455,7 @@ pub fn derive_key(
     // machinery) so MAC / future derives can use the engine handle;
     // other derived material stays KMIP-store-held (same as Register'd
     // raw AES, which Encrypt serves from `key_material`).
-    if let (Some(session), ObjectType::SymmetricKey) = (deps.engine_session, req.object_type) {
+    if let (Some(session), ObjectType::SymmetricKey) = (deps.resolve_tenant_session(auth.identity.as_ref()).ok(), req.object_type) {
         if matches!(
             derived_algorithm,
             KmipAlgorithm::HmacSha256 | KmipAlgorithm::HmacSha384 | KmipAlgorithm::HmacSha512
@@ -473,7 +480,7 @@ pub fn derive_key(
     // mirror DerivedObjectLink on EVERY base below).
     links.insert(LINK_DERIVATION_BASE.to_string(), base.uid.clone());
 
-    deps.store.put(ObjectRecord {
+    deps.store.put(super::helpers::stamp_owner(ObjectRecord {
         uid: uid.clone(),
         object_type: req.object_type,
         algorithm: derived_algorithm,
@@ -508,7 +515,7 @@ pub fn derive_key(
         // KMIP §11 Fresh = True for server-generated objects.
         fresh: Some(true),
         ..ObjectRecord::default()
-    })?;
+    }, auth))?;
 
     // §6.1.18 — "the server SHALL create a Derived Object Link
     // attribute pointing to the … object derived as a result of this
@@ -542,12 +549,13 @@ fn base_key_prf_hash(base: &ObjectRecord) -> Option<HashingAlgorithm> {
 #[allow(clippy::type_complexity)]
 fn hmac_prf<'a>(
     deps: &'a Deps,
+    session: Option<u32>,
     correlation_id: &'a str,
     base: &'a ObjectRecord,
     hash: HashingAlgorithm,
 ) -> Result<Box<dyn Fn(&[u8]) -> Result<Vec<u8>> + 'a>> {
     let fail = move |e: KmipError| fail_err(deps, correlation_id, "DeriveKey", e);
-    match (&base.key_material, deps.engine_session) {
+    match (&base.key_material, session) {
         (Some(key), _) => {
             let key = key.clone();
             Ok(Box::new(move |data: &[u8]| {
@@ -644,6 +652,7 @@ mod tests {
     use crate::auditlog::{AuditSink, EventPayload, RingSink};
     use crate::kmip30::{Attribute, CryptographicParameters, DerivationParameters};
     use crate::policy::{load_from_str, Engine};
+    use crate::server::auth::AuthContext;
     use crate::store::MemoryStore;
     use std::sync::Arc;
 
@@ -734,7 +743,7 @@ mod tests {
                 ..Default::default()
             },
             aes_template(256),
-        ), "c").unwrap();
+        ), &AuthContext::open(), "c").unwrap();
         let rec = d.store.get(&resp.uid).unwrap().unwrap();
         assert_eq!(
             hex::encode(rec.key_material.as_deref().unwrap()),
@@ -762,7 +771,7 @@ mod tests {
         };
         let resp = derive_key(&d, request(
             DerivationMethod::Hmac, vec!["b1"], dp(), aes_template(128),
-        ), "c").unwrap();
+        ), &AuthContext::open(), "c").unwrap();
         let rec = d.store.get(&resp.uid).unwrap().unwrap();
         assert_eq!(
             hex::encode(rec.key_material.as_deref().unwrap()),
@@ -770,7 +779,7 @@ mod tests {
         );
         let err = derive_key(&d, request(
             DerivationMethod::Hmac, vec!["b1"], dp(), aes_template(512),
-        ), "c").unwrap_err();
+        ), &AuthContext::open(), "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::InvalidAttribute);
     }
 
@@ -794,7 +803,7 @@ mod tests {
                 ..Default::default()
             },
             template_attribute: vec![Attribute::CryptographicLength(256)],
-        }, "c").unwrap();
+        }, &AuthContext::open(), "c").unwrap();
         let rec = d.store.get(&resp.uid).unwrap().unwrap();
         assert_eq!(
             hex::encode(rec.key_material.as_deref().unwrap()),
@@ -813,7 +822,7 @@ mod tests {
         let err = derive_key(&d, request(
             DerivationMethod::Hash, vec!["b1"],
             DerivationParameters::default(), aes_template(128),
-        ), "c").unwrap_err();
+        ), &AuthContext::open(), "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::BadCryptographicParameters);
     }
 
@@ -837,7 +846,7 @@ mod tests {
                 ..Default::default()
             },
             aes_template(512),
-        ), "c").unwrap();
+        ), &AuthContext::open(), "c").unwrap();
         let rec = d.store.get(&resp.uid).unwrap().unwrap();
         assert_eq!(
             hex::encode(rec.key_material.as_deref().unwrap()),
@@ -860,7 +869,7 @@ mod tests {
                 ..Default::default()
             },
             aes_template(128),
-        ), "c").unwrap_err();
+        ), &AuthContext::open(), "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::InvalidField);
         let err = derive_key(&d, request(
             DerivationMethod::Pbkdf2, vec!["pw"],
@@ -869,7 +878,7 @@ mod tests {
                 ..Default::default()
             },
             aes_template(128),
-        ), "c").unwrap_err();
+        ), &AuthContext::open(), "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::InvalidField);
     }
 
@@ -892,7 +901,7 @@ mod tests {
                 ..Default::default()
             },
             aes_template(256),
-        ), "c").unwrap();
+        ), &AuthContext::open(), "c").unwrap();
         let rec = d.store.get(&resp.uid).unwrap().unwrap();
 
         let mut input = 1u32.to_be_bytes().to_vec();
@@ -919,7 +928,7 @@ mod tests {
                 ..Default::default()
             },
             template_attribute: vec![Attribute::CryptographicLength(72 * 8)],
-        }, "c").unwrap();
+        }, &AuthContext::open(), "c").unwrap();
         let rec = d.store.get(&resp.uid).unwrap().unwrap();
 
         let mut expected = Vec::new();
@@ -949,13 +958,13 @@ mod tests {
         let err = derive_key(&d, request(
             DerivationMethod::Hmac, vec!["b1"], dp(),
             vec![Attribute::CryptographicAlgorithm(KmipAlgorithm::Aes)],
-        ), "c").unwrap_err();
+        ), &AuthContext::open(), "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::InvalidField);
         // SymmetricKey without CryptographicAlgorithm.
         let err = derive_key(&d, request(
             DerivationMethod::Hmac, vec!["b1"], dp(),
             vec![Attribute::CryptographicLength(128)],
-        ), "c").unwrap_err();
+        ), &AuthContext::open(), "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::InvalidField);
     }
 
@@ -966,7 +975,7 @@ mod tests {
         let err = derive_key(&d, request(
             DerivationMethod::Hmac, vec!["ghost"],
             DerivationParameters::default(), aes_template(128),
-        ), "c").unwrap_err();
+        ), &AuthContext::open(), "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::ObjectNotFound);
         // PreActive base → Wrong Key Lifecycle State (0x43).
         put_base(&d, "pre", ObjectType::SymmetricKey, KmipAlgorithm::HmacSha256,
@@ -974,7 +983,7 @@ mod tests {
         let err = derive_key(&d, request(
             DerivationMethod::Hmac, vec!["pre"],
             DerivationParameters::default(), aes_template(128),
-        ), "c").unwrap_err();
+        ), &AuthContext::open(), "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::WrongKeyLifecycleState);
         // Mask without the Derive Key bit (§6.1.18: "SHALL only apply
         // to Managed Objects that have the Derive Key bit set") → 0x29.
@@ -983,7 +992,7 @@ mod tests {
         let err = derive_key(&d, request(
             DerivationMethod::Hmac, vec!["nomask"],
             DerivationParameters::default(), aes_template(128),
-        ), "c").unwrap_err();
+        ), &AuthContext::open(), "c").unwrap_err();
         assert_eq!(
             err.result_reason(),
             ResultReason::IncompatibleCryptographicUsageMask
@@ -1011,7 +1020,7 @@ mod tests {
                     ..Default::default()
                 },
                 aes_template(128),
-            ), "c").unwrap_err();
+            ), &AuthContext::open(), "c").unwrap_err();
             assert_eq!(
                 err.result_reason(),
                 ResultReason::OperationNotSupported,
@@ -1030,7 +1039,7 @@ mod tests {
             DerivationParameters::default(), aes_template(128),
         );
         req.object_type = ObjectType::PrivateKey;
-        let err = derive_key(&d, req, "c").unwrap_err();
+        let err = derive_key(&d, req, &AuthContext::open(), "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::InvalidObjectType);
     }
 
@@ -1050,7 +1059,7 @@ mod tests {
                 ..Default::default()
             },
             aes_template(128),
-        ), "c").unwrap_err();
+        ), &AuthContext::open(), "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::InvalidField);
     }
 
@@ -1067,7 +1076,7 @@ mod tests {
         let resp = derive_key(&d, request(
             DerivationMethod::Hmac, vec!["key", "sd"],
             DerivationParameters::default(), aes_template(256),
-        ), "c").unwrap();
+        ), &AuthContext::open(), "c").unwrap();
 
         // Same KAT as the explicit-data path (RFC 4231 case 2).
         let derived = d.store.get(&resp.uid).unwrap().unwrap();
@@ -1105,11 +1114,12 @@ mod tests {
                 ..Default::default()
             },
             aes_template(128),
-        ), "c").unwrap();
+        ), &AuthContext::open(), "c").unwrap();
 
         let ga = super::super::get_attributes::get_attributes(
             &d,
             crate::kmip30::GetAttributesRequest { uid: resp.uid.clone(), attribute_references: vec![] },
+            &AuthContext::open(),
             "c2",
         ).unwrap();
         assert!(ga.attributes.iter().any(|a| matches!(
@@ -1119,6 +1129,7 @@ mod tests {
         let ga = super::super::get_attributes::get_attributes(
             &d,
             crate::kmip30::GetAttributesRequest { uid: "key".into(), attribute_references: vec![] },
+            &AuthContext::open(),
             "c3",
         ).unwrap();
         assert!(ga.attributes.iter().any(|a| matches!(
@@ -1139,7 +1150,7 @@ mod tests {
                 ..Default::default()
             },
             aes_template(128),
-        ), "c").unwrap();
+        ), &AuthContext::open(), "c").unwrap();
         let events = ring.snapshot();
         assert!(events.iter().any(|e| matches!(
             &e.event,
@@ -1169,7 +1180,7 @@ mod tests {
                     OffsetDateTime::now_utc().unix_timestamp() - 3600,
                 ),
             ],
-        ), "c").unwrap();
+        ), &AuthContext::open(), "c").unwrap();
         let rec = d.store.get(&resp.uid).unwrap().unwrap();
         assert_eq!(rec.state, State::Active);
         assert_eq!(rec.key_material.as_ref().map(|m| m.len()), Some(32));
@@ -1182,6 +1193,7 @@ mod tests {
                 iv: Some(vec![0u8; 12]), // AES-GCM nonce
                 ..Default::default()
             },
+            &crate::server::auth::AuthContext::open(),
             "c-enc",
         ).unwrap();
         assert!(!enc.ciphertext.is_empty());

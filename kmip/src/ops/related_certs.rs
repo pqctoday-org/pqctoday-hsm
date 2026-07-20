@@ -51,6 +51,7 @@ use spki::AlgorithmIdentifierOwned;
 
 use crate::error::{KmipError, Result, ResultReason};
 
+#[cfg(test)]
 use super::deps::Deps;
 
 /// RelatedCertificate — RFC 9763, id-pe 36.
@@ -95,7 +96,7 @@ pub fn extract_related_cert_claim(ext_value: &[u8]) -> Result<(String, Vec<u8>)>
 /// `self_index` is skipped (a certificate never counts as its own
 /// companion).
 pub fn resolve_related_cert(
-    deps: &Deps,
+    session: Option<u32>,
     hash_algorithm_oid: &str,
     claimed_hash: &[u8],
     all_der: &[Vec<u8>],
@@ -110,7 +111,13 @@ pub fn resolve_related_cert(
             ),
         ));
     }
-    let _session = deps.engine_session.ok_or_else(|| {
+    // Presence gate only — `native::digest` is session-less by design
+    // (no stored object is touched, nothing lands in any token), so no
+    // handle is actually consumed here. The caller-resolved tenant
+    // session (Part F §F7) stands in for the old bare
+    // `deps.engine_session` read purely as the fail-closed
+    // "an engine is initialized for this caller" check.
+    let _session = session.ok_or_else(|| {
         KmipError::failed(ResultReason::CryptographicFailure, "RelatedCertificate: no engine session to compute digests")
     })?;
 
@@ -190,7 +197,7 @@ pub(crate) mod tests {
         let real_hash = softhsmrustv3::native::digest(softhsmrustv3::constants::CKM_SHA256, &companion).unwrap();
 
         let all = vec![b"self placeholder DER".to_vec(), companion];
-        let verdict = resolve_related_cert(&deps, SHA256_OID, &real_hash, &all, 0).unwrap();
+        let verdict = resolve_related_cert(deps.engine_session, SHA256_OID, &real_hash, &all, 0).unwrap();
         assert_eq!(verdict, RelatedCertVerdict::Bound);
     }
 
@@ -199,7 +206,7 @@ pub(crate) mod tests {
         let (deps, _g) = deps_with_session();
         let claimed = vec![0x11u8; 32];
         let all = vec![b"self placeholder DER".to_vec()];
-        let verdict = resolve_related_cert(&deps, SHA256_OID, &claimed, &all, 0).unwrap();
+        let verdict = resolve_related_cert(deps.engine_session, SHA256_OID, &claimed, &all, 0).unwrap();
         assert_eq!(verdict, RelatedCertVerdict::Unknown);
     }
 
@@ -208,14 +215,14 @@ pub(crate) mod tests {
         let (deps, _g) = deps_with_session();
         let claimed = vec![0x11u8; 32]; // matches nothing real
         let all = vec![b"self placeholder DER".to_vec(), b"an unrelated companion DER".to_vec()];
-        let verdict = resolve_related_cert(&deps, SHA256_OID, &claimed, &all, 0).unwrap();
+        let verdict = resolve_related_cert(deps.engine_session, SHA256_OID, &claimed, &all, 0).unwrap();
         assert_eq!(verdict, RelatedCertVerdict::Invalid);
     }
 
     #[test]
     fn unsupported_hash_algorithm_is_honest_not_guessed() {
         let (deps, _g) = deps_with_session();
-        let err = resolve_related_cert(&deps, "2.16.840.1.101.3.4.2.3" /* SHA-512 */, &[0u8; 64], &[vec![], vec![]], 0)
+        let err = resolve_related_cert(deps.engine_session, "2.16.840.1.101.3.4.2.3" /* SHA-512 */, &[0u8; 64], &[vec![], vec![]], 0)
             .unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::OperationNotSupported);
     }

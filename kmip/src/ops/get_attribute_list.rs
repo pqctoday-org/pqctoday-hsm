@@ -12,11 +12,12 @@ use crate::kmip30::{GetAttributeListRequest, GetAttributeListResponse};
 use crate::policy::{Decision, PolicyRequest};
 
 use super::deps::Deps;
-use super::helpers::{canonical_name, emit_request, emit_success, fail_err, state_name};
+use super::helpers::{authorize_object, canonical_name, emit_request, emit_success, fail_err, state_name};
 
 pub fn get_attribute_list(
     deps: &Deps,
     req: GetAttributeListRequest,
+    auth: &crate::server::auth::AuthContext,
     correlation_id: &str,
 ) -> Result<GetAttributeListResponse> {
     let started = OffsetDateTime::now_utc();
@@ -27,9 +28,15 @@ pub fn get_attribute_list(
         format!("uid={}", req.uid),
     );
 
-    let obj = deps.store.get(&req.uid)?.ok_or_else(|| {
-        fail_err(deps, correlation_id, "GetAttributeList", KmipError::object_not_found(&req.uid))
-    })?;
+    // Part F §F7.4 — owner-checked lookup (see get.rs for the pattern).
+    // Never found in any prior by-UID enumeration until this pass:
+    // GetAttributeList only returns attribute NAMES, not values, but a
+    // foreign tenant's object existing at all is still information a
+    // caller shouldn't get for free — same ObjectNotFound this handler
+    // already used for a genuinely missing UID now also covers "exists
+    // but belongs to someone else" (anti-oracle).
+    let obj = authorize_object(deps, auth, &req.uid, || KmipError::object_not_found(&req.uid))
+        .map_err(|e| fail_err(deps, correlation_id, "GetAttributeList", e))?;
 
     let empty: HashMap<String, String> = HashMap::new();
     let algo = canonical_name(obj.algorithm);
@@ -195,7 +202,12 @@ mod tests {
         ..ObjectRecord::default()
 }).unwrap();
 
-        let r = get_attribute_list(&d, GetAttributeListRequest { uid: "u".into() }, "c").unwrap();
+        let r = get_attribute_list(
+            &d,
+            GetAttributeListRequest { uid: "u".into() },
+            &crate::server::auth::AuthContext::open(),
+            "c",
+        ).unwrap();
         assert!(r.attribute_references.contains(&"Cryptographic Algorithm".to_string()));
         assert!(r.attribute_references.contains(&"State".to_string()));
         assert!(r.attribute_references.contains(&"Cryptographic Length".to_string()));

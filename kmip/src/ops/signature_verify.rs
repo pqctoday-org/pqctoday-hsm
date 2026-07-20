@@ -42,6 +42,7 @@ use super::helpers::{
 pub fn signature_verify(
     deps: &Deps,
     req: SignatureVerifyRequest,
+    auth: &crate::server::auth::AuthContext,
     correlation_id: &str,
 ) -> Result<SignatureVerifyResponse> {
     let started = OffsetDateTime::now_utc();
@@ -52,9 +53,11 @@ pub fn signature_verify(
         format!("uid={} data_len={} sig_len={}", req.uid, req.data.len(), req.signature.len()),
     );
 
-    let obj = deps.store.get(&req.uid)?.ok_or_else(|| {
-        fail_err(deps, correlation_id, "SignatureVerify", KmipError::object_not_found(&req.uid))
-    })?;
+    // Part F §F7.4 — owner-checked lookup (see get.rs for the pattern).
+    let obj = super::helpers::authorize_object(deps, auth, &req.uid, || {
+        KmipError::object_not_found(&req.uid)
+    })
+    .map_err(|e| fail_err(deps, correlation_id, "SignatureVerify", e))?;
 
     // KMIP 3.0 §3.x lifecycle — Verify allowed in Active / Deactivated /
     // Compromised (need to verify legacy artefacts). Blocked in PreActive
@@ -148,7 +151,7 @@ pub fn signature_verify(
     // audit record is emitted after `native::verify` returns with the
     // call's real rv. Falls back to the SHA-256 stamp comparison
     // (audited as `soft::placeholder_verify`) for unit tests.
-    let validity = match deps.engine_session {
+    let validity = match deps.resolve_tenant_session(auth.identity.as_ref()).ok() {
         Some(session) => {
             let handle =
                 super::helpers::find_handle_for_object(session, &obj.pkcs11_cka_id, obj.object_type)
@@ -356,7 +359,7 @@ mod tests {
             data: b"x".to_vec(),
             signature: vec![0u8; 32],
             cryptographic_parameters: None,
-        }, "c").unwrap_err();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap_err();
         assert_eq!(
             err.result_reason(),
             crate::error::ResultReason::IncompatibleCryptographicUsageMask
@@ -369,7 +372,7 @@ mod tests {
         active(&d, "u");
         let data = b"hello world".to_vec();
         let sig = placeholder_signature("u", &data);
-        let r = signature_verify(&d, SignatureVerifyRequest { uid: "u".into(), data, signature: sig, cryptographic_parameters: None }, "c").unwrap();
+        let r = signature_verify(&d, SignatureVerifyRequest { uid: "u".into(), data, signature: sig, cryptographic_parameters: None }, &crate::server::auth::AuthContext::open(), "c").unwrap();
         assert_eq!(r.validity, SignatureValidity::Valid);
     }
 
@@ -382,7 +385,7 @@ mod tests {
             data: b"hello".to_vec(),
             signature: vec![0xff; 32],
             cryptographic_parameters: None,
-        }, "c").unwrap();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap();
         assert_eq!(r.validity, SignatureValidity::Invalid);
     }
 
@@ -419,7 +422,7 @@ mod tests {
             data: vec![],
             signature: vec![],
             cryptographic_parameters: None,
-        }, "c").unwrap();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap();
         // success — Verify is permitted in Deactivated state per §3.4
     }
 
@@ -456,7 +459,7 @@ mod tests {
             data: vec![],
             signature: vec![],
             cryptographic_parameters: None,
-        }, "c").unwrap_err();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap_err();
         // KMIP 3.0 §11 — Destroyed is an FSM-rejection state. See
         // `ops::helpers::non_active_state_error` for the citation.
         assert_eq!(err.result_reason(), ResultReason::WrongKeyLifecycleState);

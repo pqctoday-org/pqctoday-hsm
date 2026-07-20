@@ -47,6 +47,7 @@ use pqctoday_kmip::kmip30::{
 use pqctoday_kmip::ops::certify::{bootstrap_ca_certificate, certify};
 use pqctoday_kmip::ops::{Deps, DepsConfig};
 use pqctoday_kmip::policy::Engine;
+use pqctoday_kmip::server::auth::AuthContext;
 use pqctoday_kmip::store::{MemoryStore, ObjectRecord};
 
 use softhsmrustv3::constants as c;
@@ -230,6 +231,7 @@ fn issue_leaf(deps: &Deps) -> Vec<u8> {
             certificate_request: Some(csr.der().to_vec()),
             ..CertifyRequest::default()
         },
+        &AuthContext::open(),
         "crosscheck-issue",
     )
     .unwrap();

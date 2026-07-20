@@ -33,11 +33,16 @@ use crate::policy::{Decision, PolicyRequest};
 
 use super::deps::Deps;
 use super::helpers::{
-    emit_pkcs11, emit_pkcs11_result, emit_request, emit_success, fail_err,
+    authorize_object, emit_pkcs11, emit_pkcs11_result, emit_request, emit_success, fail_err,
     state_name,
 };
 
-pub fn decrypt(deps: &Deps, req: DecryptRequest, correlation_id: &str) -> Result<DecryptResponse> {
+pub fn decrypt(
+    deps: &Deps,
+    req: DecryptRequest,
+    auth: &crate::server::auth::AuthContext,
+    correlation_id: &str,
+) -> Result<DecryptResponse> {
     let started = OffsetDateTime::now_utc();
     emit_request(
         deps,
@@ -46,9 +51,9 @@ pub fn decrypt(deps: &Deps, req: DecryptRequest, correlation_id: &str) -> Result
         format!("uid={} data_len={}", req.uid, req.data.len()),
     );
 
-    let obj = deps.store.get(&req.uid)?.ok_or_else(|| {
-        fail_err(deps, correlation_id, "Decrypt", KmipError::object_not_found(&req.uid))
-    })?;
+    // Part F §F7.4 — owner-checked lookup (see get.rs for the pattern).
+    let obj = authorize_object(deps, auth, &req.uid, || KmipError::object_not_found(&req.uid))
+        .map_err(|e| fail_err(deps, correlation_id, "Decrypt", e))?;
 
     // Lifecycle gate per §3.4 — Decrypt allowed in Active / Deactivated /
     // Compromised; PreActive and Destroyed rejected.
@@ -157,9 +162,9 @@ pub fn decrypt(deps: &Deps, req: DecryptRequest, correlation_id: &str) -> Result
 
     // Plane-3: branch on algorithm.
     let resp = if is_ml_kem(obj.algorithm) {
-        decrypt_ml_kem(deps, &req, &obj, correlation_id)
+        decrypt_ml_kem(deps, &req, &obj, auth, correlation_id)
     } else {
-        decrypt_classical(deps, &req, &obj, correlation_id)
+        decrypt_classical(deps, &req, &obj, auth, correlation_id)
     }?;
 
     emit_success(deps, correlation_id, "Decrypt");
@@ -176,6 +181,7 @@ fn decrypt_ml_kem(
     deps: &Deps,
     req: &DecryptRequest,
     obj: &crate::store::ObjectRecord,
+    auth: &crate::server::auth::AuthContext,
     correlation_id: &str,
 ) -> Result<DecryptResponse> {
     let mech = obj.algorithm.to_pkcs11_mech(PkcsOp::Decrypt).ok_or_else(|| {
@@ -186,7 +192,7 @@ fn decrypt_ml_kem(
     })?;
 
     // K15 — the Plane-3 record is emitted after the call with its real rv.
-    let shared_secret = match deps.engine_session {
+    let shared_secret = match deps.resolve_tenant_session(auth.identity.as_ref()).ok() {
         Some(session) => {
             // WP-4 remediation — class-aware, not the ambiguous class-blind
             // find_by_cka_id: a certified private key now shares its
@@ -231,6 +237,7 @@ fn decrypt_classical(
     deps: &Deps,
     req: &DecryptRequest,
     obj: &crate::store::ObjectRecord,
+    auth: &crate::server::auth::AuthContext,
     correlation_id: &str,
 ) -> Result<DecryptResponse> {
     // KMIP 3.0 §6.1.21 — request-time `CryptographicParameters`
@@ -298,7 +305,7 @@ fn decrypt_classical(
         );
         emit_pkcs11_result(deps, correlation_id, "native::decrypt_with_key_bytes", Some(mech), &r);
         r.map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Decrypt"))?
-    } else if let Some(session) = deps.engine_session {
+    } else if let Some(session) = deps.resolve_tenant_session(auth.identity.as_ref()).ok() {
         // WP-4 remediation — class-aware, not the ambiguous class-blind
         // find_by_cka_id: a certified RSA private key now shares its
         // CKA_ID with its public key AND a linked certificate.
@@ -407,7 +414,7 @@ mod tests {
     fn ml_kem_branch_calls_decapsulate() {
         let (ring, d) = deps_and_ring();
         put(&d, "k", KmipAlgorithm::MlKem1024, ObjectType::PrivateKey, State::Active, UsageMask::KEY_AGREEMENT);
-        let r = decrypt(&d, DecryptRequest { uid: "k".into(), data: vec![0u8; 1568], iv: None , cryptographic_parameters: None, aad: None}, "c").unwrap();
+        let r = decrypt(&d, DecryptRequest { uid: "k".into(), data: vec![0u8; 1568], iv: None , cryptographic_parameters: None, aad: None}, &crate::server::auth::AuthContext::open(), "c").unwrap();
         assert_eq!(r.data.len(), 32, "shared secret length");
         // K15 — no engine session: the audit names the soft decap
         // fallback that actually ran, not the classical decrypt path.
@@ -431,7 +438,7 @@ mod tests {
             iv: Some(vec![0; 12]),
             cryptographic_parameters: None,
             aad: None,
-        }, "c").unwrap_err();
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap_err();
         assert_eq!(
             err.result_reason(),
             crate::error::ResultReason::IncompatibleCryptographicUsageMask
@@ -442,7 +449,7 @@ mod tests {
     fn classical_branch_audits_soft_decrypt_path() {
         let (ring, d) = deps_and_ring();
         put(&d, "a", KmipAlgorithm::Aes, ObjectType::SymmetricKey, State::Active, UsageMask::DECRYPT);
-        let _r = decrypt(&d, DecryptRequest { uid: "a".into(), data: vec![0; 32], iv: Some(vec![0; 12]) , cryptographic_parameters: None, aad: None}, "c").unwrap();
+        let _r = decrypt(&d, DecryptRequest { uid: "a".into(), data: vec![0; 32], iv: Some(vec![0; 12]) , cryptographic_parameters: None, aad: None}, &crate::server::auth::AuthContext::open(), "c").unwrap();
         // K15 — no key material + no session: soft fallback is named.
         let p3: Vec<_> = ring.filter_plane(Plane::Pkcs11);
         assert!(p3.iter().any(|e| matches!(&e.event, EventPayload::Pkcs11Call { function, .. } if function == "soft::placeholder_decrypt")));
@@ -455,14 +462,14 @@ mod tests {
         // AES-GCM (the default for KmipAlgorithm::Aes) requires a
         // 12-byte IV per KMIP 3.0 §6.1.21 + NIST SP 800-38D. Supply
         // one so the lifecycle gate is what's actually under test.
-        let _ = decrypt(&d, DecryptRequest { uid: "a".into(), data: vec![0; 32], iv: Some(vec![0; 12]) , cryptographic_parameters: None, aad: None}, "c").unwrap();
+        let _ = decrypt(&d, DecryptRequest { uid: "a".into(), data: vec![0; 32], iv: Some(vec![0; 12]) , cryptographic_parameters: None, aad: None}, &crate::server::auth::AuthContext::open(), "c").unwrap();
     }
 
     #[test]
     fn decrypt_pre_active_rejected() {
         let (_ring, d) = deps_and_ring();
         put(&d, "a", KmipAlgorithm::Aes, ObjectType::SymmetricKey, State::PreActive, UsageMask::DECRYPT);
-        let err = decrypt(&d, DecryptRequest { uid: "a".into(), data: vec![0; 32], iv: None , cryptographic_parameters: None, aad: None}, "c").unwrap_err();
+        let err = decrypt(&d, DecryptRequest { uid: "a".into(), data: vec![0; 32], iv: None , cryptographic_parameters: None, aad: None}, &crate::server::auth::AuthContext::open(), "c").unwrap_err();
         // KMIP 3.0 §11: PreActive is a lifecycle-state failure, not
         // "object archived". ObjectArchived (0x0d) is reserved for
         // Destroyed* per §6.1.19.

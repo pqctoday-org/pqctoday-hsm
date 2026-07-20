@@ -178,41 +178,72 @@ pub fn init_pin(session: u32, user_pin: &str) -> Result<(), CkRv>;
 
 ## 4. Threading model
 
+CORRECTED 2026-07-18 — this section previously documented "Option A
+(pinned engine thread)" as the v0.1 decision, including a `Session:
+!Send` constraint in `pqctoday-hsm/kmip/`. That plan was never
+implemented; the code instead took the shape of Option B below without
+this doc being updated. Fixed now — see
+`rust-hsm-perf-bench-scenario-plan-07182026.md` §B7 in the workspace root
+for the audit that caught this.
+
 The engine's internal storage (`OBJECTS`, `SESSIONS`, `SIGN_STATE`,
-`ENCRYPT_STATE`, etc.) is currently `thread_local!`. That's correct for
-wasm32 (single-threaded execution model).
+`ENCRYPT_STATE`, `TOKEN_STORE`, etc., all in `state.rs`) is **global
+`lazy_static! ref _: Mutex<T>`, not `thread_local!`**. This is what
+Option B below describes, and it is what the engine actually is today —
+on both wasm32 (where the `Mutex` is simply uncontended, since wasm32 is
+single-threaded) and native.
 
-For native callers (tokio multi-threaded), two viable approaches:
+**Empirically verified**, not just source-read:
+`tests/multitenant_concurrency.rs` drives 20 threads concurrently through
+keygen/sign/verify on one shared token — real contention on the global
+`OBJECTS` mutex — with zero corruption, every thread's signature
+verifying against its own key. The same work also found and fixed a real
+concurrency bug in `ffi::C_Login`: a TOCTOU race where the per-token
+login-exclusivity check read a stale snapshot before the state write,
+letting concurrent logins silently double-succeed. Fixed by making the
+check-then-write one atomic critical section (single lock acquisition);
+see `login_exclusivity_holds_under_concurrent_attempts` in the same test
+file for the regression test.
 
-### Option A — pinned engine thread (recommended)
+`pqctoday-hsm/kmip/` has **no** `Session: !Send` wrapper (never
+implemented) and needs none — it already calls `native::*` from tokio's
+multi-threaded blocking pool today, relying on the engine's own global
+mutexes for safety, which is exactly Option B's model.
 
-The `softhsmrustv3::native` API documents that **all calls must come from
-a single thread**. Native callers pin one OS thread (e.g.
-`tokio::task::spawn_blocking` onto a single-thread runtime) and route all
-crypto requests through it. Phase 4's `Session: !Send` already encodes
-this constraint.
+### Still-open gap: `native::*` does not enforce token-scoping
 
-**Pros**: No engine changes. Thread-local storage is correct as-is. Lowest
-risk of state corruption.
+Unlike `ffi::C_*` (which enforces `state::can_access_object` — the
+`CKA_PRIV_SLOT_ID` tenant-isolation gate — at 8 call sites), `native::*`
+does **not** call it anywhere. A native caller holding a numeric object
+handle can operate on it regardless of which slot/tenant it belongs to.
+KMIP, which uses `native::*` exclusively with one shared
+`engine_session` for every client, has no compensating ownership check
+of its own (verified: no owner/Identity field anywhere in the KeyStore
+trait, no ownership check in the dispatcher). **This must be closed —
+either by adding the `can_access_object` gate to `native::*`, or by KMIP
+tracking per-Identity object ownership — before any multi-tenant design
+that relies on native-surface isolation is real.** Not fixed as part of
+this pass; it's a scoped decision that touches KMIP's authorization
+model, tracked in the hsm-perf-bench plan.
 
-**Cons**: Caller has to manage thread affinity. KMIP `Deps` needs an
-`Arc<Mutex<Session>>` and all crypto goes through a single-thread executor.
+### Option A — pinned engine thread (historical, not taken)
 
-### Option B — replace thread_local with parking_lot::Mutex
+Native callers would pin one OS thread and route all crypto requests
+through it (`tokio::task::spawn_blocking` onto a single-thread runtime).
+Would have avoided any engine-side locking change, at the cost of thread
+affinity management in every caller. Superseded by the simpler approach
+below, which the code already implements.
 
-Convert `OBJECTS`, `SESSIONS`, `SIGN_STATE`, `ENCRYPT_STATE` to global
+### Option B — global `Mutex` (what the engine actually does)
+
+`OBJECTS`, `SESSIONS`, `SIGN_STATE`, `ENCRYPT_STATE`, etc. are global
 `Mutex<HashMap<...>>`. Multi-threaded callers serialise via the mutex.
-
-**Pros**: API users don't need thread affinity.
-
-**Cons**: Wider engine change. Mutex contention under load. Risk of
-deadlocks if engine internals ever call out and back.
-
-### Decision: **Option A for v0.1; Option B as a future option if profiling shows contention.**
-
-The Phase 4 `Session: !Send` constraint already aligns the KMIP server
-with Option A. The KMIP server can route crypto through a single
-`tokio::task::spawn_blocking` thread without touching the engine.
+Hot crypto paths copy key material out under a brief lock, drop it, then
+compute lock-free — so the mutex only guards map access, not the
+cryptographic work itself. API users need no thread affinity.
+Contention-reduction work (per-token sharding, atomic allocators, etc.)
+is tracked incrementally in the hsm-perf-bench plan rather than
+addressed all at once.
 
 ## 5. C ABI relationship
 

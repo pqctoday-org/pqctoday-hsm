@@ -33,7 +33,12 @@ use time::OffsetDateTime;
 use crate::kmip30::Credential;
 
 /// The authenticated principal a request acts as.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// `Hash` (added for the Part F tenant registry,
+/// rust-hsm-perf-bench-scenario-plan-07182026.md §F7) lets `Identity`
+/// key a `HashMap` directly — one tenant token per authenticated
+/// principal.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Identity {
     /// KMIP username (configured-auth) or mTLS client-cert subject CN.
     pub username: String,

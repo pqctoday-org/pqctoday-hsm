@@ -35,6 +35,7 @@ use super::helpers::{canonical_name, emit_request, emit_success, fail_err};
 pub fn register(
     deps: &Deps,
     mut req: RegisterRequest,
+    auth: &crate::server::auth::AuthContext,
     correlation_id: &str,
 ) -> Result<RegisterResponse> {
     let started = OffsetDateTime::now_utc();
@@ -77,7 +78,7 @@ pub fn register(
     if let Some(kb) = req.managed_object.as_mut() {
         if let Some(kwd) = kb.key_wrapping_data.take() {
             kb.key_value = super::helpers::unwrap_key_value(
-                deps, "Register", &kwd, &kb.key_value, correlation_id,
+                deps, "Register", &kwd, &kb.key_value, auth, correlation_id,
             )?;
         }
     }
@@ -90,6 +91,7 @@ pub fn register(
         req.object_type,
         &[],
         &mut req.attributes,
+        auth,
     );
 
     // Per §6.1.48 Table 395: if the object is cryptographic, certain
@@ -309,9 +311,13 @@ pub fn register(
     // corpus transcript Registers PQC material (QS-M-1 is
     // Query-only, QS-M-2 a Create negative) — the K9 e2e tests in
     // tests/native_bridge_e2e.rs pin the PQC flow.
-    if let (Some(material), Some(fmt), Some(session)) =
-        (key_material.as_ref(), key_format_type, deps.engine_session)
-    {
+    // Part F §F7 — client-supplied private-key material is imported
+    // into the CALLING tenant's own token, not a shared one.
+    if let (Some(material), Some(fmt), Some(session)) = (
+        key_material.as_ref(),
+        key_format_type,
+        deps.resolve_tenant_session(auth.identity.as_ref()).ok(),
+    ) {
         match (req.object_type, kmip_algorithm) {
             (ObjectType::PrivateKey, crate::kmip30::KmipAlgorithm::Rsa) => {
                 // PKCS_1 = 3 (RSAPrivateKey), PKCS_8 = 4
@@ -635,7 +641,7 @@ pub fn register(
     };
 
     let cka_id_for_cert_projection = cka_id_bytes.clone();
-    deps.store.put(ObjectRecord {
+    deps.store.put(super::helpers::stamp_owner(ObjectRecord {
         uid: uid.clone(),
         object_type: req.object_type,
         algorithm: kmip_algorithm,
@@ -683,7 +689,7 @@ pub fn register(
         // regardless of what was actually registered.
         secret_data_type: req.secret_data_type,
         ..ObjectRecord::default()
-    })?;
+    }, auth))?;
 
     // PKCS#11 v3.2 §4.6 — mirror a registered X.509 certificate onto the
     // engine too, same as Certify does (see
@@ -695,6 +701,7 @@ pub fn register(
         if let Some(der) = certificate_value.as_deref() {
             super::cert_projection::project_certificate_to_engine(
                 deps,
+                deps.resolve_tenant_session(auth.identity.as_ref()).ok(),
                 correlation_id,
                 "Register",
                 &uid,
@@ -714,6 +721,7 @@ pub fn register(
 pub fn import_object(
     deps: &Deps,
     req: ImportRequest,
+    auth: &crate::server::auth::AuthContext,
     correlation_id: &str,
 ) -> Result<ImportResponse> {
     let started = OffsetDateTime::now_utc();
@@ -770,8 +778,17 @@ pub fn import_object(
     // object exists with the same Unique Identifier then an error
     // SHALL be returned."
     let existing = deps.store.get(&req.uid)?;
-    if existing.is_some() {
-        if req.replace_existing {
+    if let Some(existing) = existing {
+        // Part F §F7.4 — ReplaceExisting must never overwrite a FOREIGN
+        // tenant's object: without this, any tenant could destroy (by
+        // replacement) another tenant's record just by knowing its UID.
+        // A foreign-owned collision reports the same ObjectAlreadyExists
+        // the no-replace path does — the UID namespace is genuinely
+        // global (one store keyed by UID), so collision-existence is
+        // inherently observable here; what matters is that the foreign
+        // object is untouchable.
+        let requester = auth.identity.as_ref().map(|i| i.username.clone());
+        if req.replace_existing && existing.owner == requester {
             deps.store.remove(&req.uid)?;
         } else {
             return Err(fail_err(deps, correlation_id, "Import", KmipError::failed(
@@ -826,7 +843,7 @@ pub fn import_object(
 
     let cka_id_bytes = Uuid::new_v4().as_bytes().to_vec();
     let cka_id_for_cert_projection = cka_id_bytes.clone();
-    deps.store.put(ObjectRecord {
+    deps.store.put(super::helpers::stamp_owner(ObjectRecord {
         uid: req.uid.clone(),
         object_type: req.object_type,
         algorithm: kmip_algorithm,
@@ -849,7 +866,7 @@ pub fn import_object(
         certificate_length,
         certificate_subject_cn,
         ..ObjectRecord::default()
-    })?;
+    }, auth))?;
 
     // PKCS#11 v3.2 §4.6 — mirror an imported X.509 certificate onto the
     // engine too, same as Register/Certify (see
@@ -859,6 +876,7 @@ pub fn import_object(
         if let Some(der) = certificate_value.as_deref() {
             super::cert_projection::project_certificate_to_engine(
                 deps,
+                deps.resolve_tenant_session(auth.identity.as_ref()).ok(),
                 correlation_id,
                 "Import",
                 &req.uid,
@@ -878,13 +896,19 @@ pub fn import_object(
 pub fn export(
     deps: &Deps,
     req: ExportRequest,
+    auth: &crate::server::auth::AuthContext,
     correlation_id: &str,
 ) -> Result<ExportResponse> {
     emit_request(deps, correlation_id, "Export", format!("uid={}", req.uid));
 
-    let obj = deps.store.get(&req.uid)?.ok_or_else(|| {
-        fail_err(deps, correlation_id, "Export", KmipError::object_not_found(&req.uid))
-    })?;
+    // Part F §F7.4 — owner-checked lookup. Export returns KEY MATERIAL,
+    // so this closes a real cross-tenant leak: it was the one
+    // material-returning by-UID handler missed by the original F7.4
+    // enumeration (found during the §L certificate-family audit).
+    let obj = super::helpers::authorize_object(deps, auth, &req.uid, || {
+        KmipError::object_not_found(&req.uid)
+    })
+    .map_err(|e| fail_err(deps, correlation_id, "Export", e))?;
 
     // KMIP 3.0 §11 — `Extractable=false` blocks all material export:
     // `Not Extractable` (0x17). Mirrors the Get check (K7 / B-4).
@@ -987,6 +1011,7 @@ pub fn export(
                         "Export",
                         spec,
                         &key_value,
+                        auth,
                         correlation_id,
                     )?;
                     (wrapped, Some(spec.clone()))
@@ -1171,6 +1196,7 @@ mod tests {
     use crate::auditlog::{AuditSink, RingSink};
     use crate::kmip30::KmipAlgorithm;
     use crate::policy::{load_from_str, Engine};
+    use crate::server::auth::AuthContext;
     use crate::store::MemoryStore;
     use std::sync::Arc;
 
@@ -1223,7 +1249,7 @@ mod tests {
             protection_storage_masks: None,
             certificate_payload: Some((0 /* X.509 */, der.clone())),
             secret_data_type: None,
-        }, "c-wpc-register").unwrap();
+        }, &AuthContext::open(), "c-wpc-register").unwrap();
 
         let rec = d.store.get(&resp.uid).unwrap().unwrap();
         assert_eq!(rec.certificate_value.as_deref(), Some(der.as_slice()));
@@ -1306,6 +1332,7 @@ mod tests {
                 certificate_payload: Some((0, der.clone())),
                 secret_data_type: None,
             },
+            &AuthContext::open(),
             "c-wp3-register-linked",
         )
         .unwrap();
@@ -1342,7 +1369,7 @@ mod tests {
             protection_storage_masks: None,
             certificate_payload: Some((0, vec![0xde, 0xad, 0xbe, 0xef])),
             secret_data_type: None,
-        }, "c-garbage-der").unwrap_err();
+        }, &AuthContext::open(), "c-garbage-der").unwrap_err();
         assert_eq!(err.result_reason(), crate::error::ResultReason::InvalidField);
     }
 
@@ -1378,6 +1405,7 @@ mod tests {
 
         super::super::cert_projection::project_certificate_to_engine(
             &d,
+            d.engine_session,
             "c-skip-audit",
             "TestOp",
             "urn:test:unparseable-cert",
@@ -1412,7 +1440,7 @@ mod tests {
             managed_object: Some(raw_aes128_kb()),
             protection_storage_masks: None,
             certificate_payload: None,
-        }, "c").unwrap();
+        }, &AuthContext::open(), "c").unwrap();
         let rec = d.store.get(&resp.uid).unwrap().unwrap();
         assert_eq!(rec.algorithm, KmipAlgorithm::Aes);
         assert_eq!(rec.cryptographic_length, 128);
@@ -1436,9 +1464,9 @@ mod tests {
             protection_storage_masks: None,
             certificate_payload: None,
         };
-        let resp = register(&d, req(), "c").unwrap();
+        let resp = register(&d, req(), &AuthContext::open(), "c").unwrap();
         assert_eq!(resp.uid, "urn:fixed");
-        let err = register(&d, req(), "c").unwrap_err();
+        let err = register(&d, req(), &AuthContext::open(), "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::ObjectAlreadyExists);
     }
 
@@ -1457,7 +1485,7 @@ mod tests {
             // Client permits Software (0x01) among others — server can satisfy it.
             protection_storage_masks: Some(0x03),
             certificate_payload: None,
-        }, "c").unwrap();
+        }, &AuthContext::open(), "c").unwrap();
         let rec = d.store.get(&resp.uid).unwrap().unwrap();
         assert_eq!(rec.protection_storage_mask, Some(0x01));
     }
@@ -1478,7 +1506,7 @@ mod tests {
             managed_object: Some(raw_aes128_kb()),
             protection_storage_masks: Some(0x02),
             certificate_payload: None,
-        }, "c").unwrap_err();
+        }, &AuthContext::open(), "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::InvalidField);
     }
 
@@ -1498,7 +1526,7 @@ mod tests {
             managed_object: Some(raw_aes128_kb()),
             protection_storage_masks: None,
             certificate_payload: None,
-        }, "c").unwrap();
+        }, &AuthContext::open(), "c").unwrap();
 
         let err = import_object(&d, ImportRequest {
             uid: "u".into(),
@@ -1511,7 +1539,7 @@ mod tests {
             ],
             managed_object: Some(raw_aes128_kb()),
             certificate_payload: None,
-        }, "c").unwrap_err();
+        }, &AuthContext::open(), "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::ObjectAlreadyExists);
     }
 
@@ -1530,7 +1558,7 @@ mod tests {
             managed_object: Some(raw_aes128_kb()),
             protection_storage_masks: None,
             certificate_payload: None,
-        }, "c").unwrap();
+        }, &AuthContext::open(), "c").unwrap();
 
         let new_kb = KeyBlock { key_value: vec![0xAA; 16], ..raw_aes128_kb() };
         import_object(&d, ImportRequest {
@@ -1544,7 +1572,7 @@ mod tests {
             ],
             managed_object: Some(new_kb),
             certificate_payload: None,
-        }, "c").unwrap();
+        }, &AuthContext::open(), "c").unwrap();
 
         let rec = d.store.get("u").unwrap().unwrap();
         assert_eq!(rec.key_material.unwrap(), vec![0xAA; 16]);
@@ -1565,14 +1593,14 @@ mod tests {
             managed_object: Some(raw_aes128_kb()),
             protection_storage_masks: None,
             certificate_payload: None,
-        }, "c").unwrap();
+        }, &AuthContext::open(), "c").unwrap();
         let exp = export(&d, ExportRequest {
             uid: r.uid.clone(),
             key_format_type: None,
             key_wrap_type: None,
             key_compression_type: None,
             key_wrapping_specification: None,
-        }, "c").unwrap();
+        }, &AuthContext::open(), "c").unwrap();
         assert_eq!(exp.uid, r.uid);
         assert_eq!(exp.object_type, ObjectType::SymmetricKey);
         assert!(exp.attributes.iter().any(|a| matches!(a, Attribute::Name(n) if n == "named")));
@@ -1593,7 +1621,7 @@ mod tests {
             managed_object: Some(raw_aes128_kb()),
             protection_storage_masks: None,
             certificate_payload: None,
-        }, "c").unwrap();
+        }, &AuthContext::open(), "c").unwrap();
         // Force Destroyed state via store.
         let mut rec = d.store.get(&r.uid).unwrap().unwrap();
         rec.state = State::Destroyed;
@@ -1604,7 +1632,7 @@ mod tests {
             key_wrap_type: None,
             key_compression_type: None,
             key_wrapping_specification: None,
-        }, "c").unwrap();
+        }, &AuthContext::open(), "c").unwrap();
         assert!(exp.managed_object.is_none(), "Destroyed objects MUST NOT return key material");
     }
 
@@ -1624,7 +1652,7 @@ mod tests {
             managed_object: Some(raw_aes128_kb()),
             protection_storage_masks: None,
             certificate_payload: None,
-        }, "c").unwrap();
+        }, &AuthContext::open(), "c").unwrap();
         let rec = d.store.get(&r.uid).unwrap().unwrap();
         assert_eq!(rec.sensitive, Some(true));
         assert_eq!(rec.always_sensitive, Some(true));
@@ -1647,7 +1675,7 @@ mod tests {
             managed_object: Some(raw_aes128_kb()),
             protection_storage_masks: None,
             certificate_payload: None,
-        }, "c").unwrap().uid
+        }, &AuthContext::open(), "c").unwrap().uid
     }
 
     #[test]
@@ -1662,7 +1690,7 @@ mod tests {
             key_wrap_type: None,
             key_compression_type: None,
             key_wrapping_specification: None,
-        }, "c").unwrap_err();
+        }, &AuthContext::open(), "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::Sensitive);
     }
 
@@ -1676,7 +1704,7 @@ mod tests {
             key_wrap_type: None,
             key_compression_type: None,
             key_wrapping_specification: None,
-        }, "c").unwrap_err();
+        }, &AuthContext::open(), "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::NotExtractable);
     }
 
@@ -1690,7 +1718,7 @@ mod tests {
             key_wrap_type: None,
             key_compression_type: None,
             key_wrapping_specification: None,
-        }, "c").unwrap();
+        }, &AuthContext::open(), "c").unwrap();
         assert!(exp.managed_object.is_some());
     }
 
@@ -1728,7 +1756,7 @@ mod tests {
             key_wrap_type: None,
             key_compression_type: None,
             key_wrapping_specification: Some(kws(kek_uid)),
-        }, "c")
+        }, &AuthContext::open(), "c")
     }
 
     #[test]
@@ -1808,7 +1836,7 @@ mod tests {
             }),
             protection_storage_masks: None,
             certificate_payload: None,
-        }, "c")
+        }, &AuthContext::open(), "c")
     }
 
     #[test]
@@ -1919,7 +1947,7 @@ mod tests {
             }),
             protection_storage_masks: None,
             certificate_payload: None,
-        }, "c")
+        }, &AuthContext::open(), "c")
     }
 
     #[test]
@@ -1962,7 +1990,7 @@ mod tests {
             }),
             protection_storage_masks: None,
             certificate_payload: None,
-        }, "c").unwrap();
+        }, &AuthContext::open(), "c").unwrap();
         let rec = d.store.get(&r.uid).unwrap().unwrap();
         assert_eq!(rec.key_format_type, Some(0x0B));
         let stored = rec.key_material.expect("material stored");
@@ -1992,7 +2020,7 @@ mod tests {
             }),
             protection_storage_masks: None,
             certificate_payload: None,
-        }, "c").unwrap_err();
+        }, &AuthContext::open(), "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::KeyFormatTypeNotSupported);
     }
 
@@ -2011,7 +2039,7 @@ mod tests {
             }),
             protection_storage_masks: None,
             certificate_payload: None,
-        }, "c").unwrap().uid
+        }, &AuthContext::open(), "c").unwrap().uid
     }
 
     #[test]
@@ -2025,7 +2053,7 @@ mod tests {
             key_wrap_type: None,
             key_compression_type: None,
             key_wrapping_specification: None,
-        }, "c").unwrap();
+        }, &AuthContext::open(), "c").unwrap();
         let kb = exp.managed_object.unwrap();
         assert_eq!(kb.key_format_type, KeyFormatType::TransparentSymmetricKey);
         assert_eq!(kb.key_value, vec![0x01; 16]);
@@ -2042,7 +2070,7 @@ mod tests {
             key_wrap_type: None,
             key_compression_type: None,
             key_wrapping_specification: None,
-        }, "c").unwrap();
+        }, &AuthContext::open(), "c").unwrap();
         assert_eq!(exp.managed_object.unwrap().key_format_type, KeyFormatType::Raw);
         // TransparentSymmetricKey → PKCS#8 is not.
         let err = export(&d, ExportRequest {
@@ -2051,7 +2079,7 @@ mod tests {
             key_wrap_type: None,
             key_compression_type: None,
             key_wrapping_specification: None,
-        }, "c").unwrap_err();
+        }, &AuthContext::open(), "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::KeyFormatTypeNotSupported);
     }
 
@@ -2076,7 +2104,7 @@ mod tests {
             }),
             protection_storage_masks: None,
             certificate_payload: None,
-        }, "c").unwrap();
+        }, &AuthContext::open(), "c").unwrap();
 
         let rec = d.store.get(&resp.uid).unwrap().unwrap();
         assert_eq!(rec.secret_data_type, Some(0x02));
@@ -2085,7 +2113,7 @@ mod tests {
             uid: resp.uid,
             key_format_type: None,
             key_wrapping_specification: None,
-        }, "c").unwrap();
+        }, &AuthContext::open(), "c").unwrap();
         assert_eq!(got.secret_data_type, Some(0x02));
     }
 
@@ -2136,14 +2164,14 @@ mod tests {
             }),
             protection_storage_masks: None,
             certificate_payload: None,
-        }, "c-register-ec").expect("Register an external ECDSA SPKI must succeed");
+        }, &AuthContext::open(), "c-register-ec").expect("Register an external ECDSA SPKI must succeed");
 
         // Byte-identical round trip through Get.
         let got = super::super::get::get(&deps, crate::kmip30::GetRequest {
             uid: resp.uid.clone(),
             key_format_type: None,
             key_wrapping_specification: None,
-        }, "c-get-ec").expect("Get must succeed");
+        }, &AuthContext::open(), "c-get-ec").expect("Get must succeed");
         assert_eq!(
             got.key_block.key_value, external_spki,
             "Get must return the EXACT bytes that were Registered"
@@ -2169,11 +2197,12 @@ mod tests {
             }),
             protection_storage_masks: None,
             certificate_payload: None,
-        }, "c-register-ec-2").expect("Register on the CA-fixture session must also succeed");
+        }, &AuthContext::open(), "c-register-ec-2").expect("Register on the CA-fixture session must also succeed");
 
         let cert = super::super::certify::certify(
             &ca.deps,
             crate::kmip30::CertifyRequest { uid: Some(reregistered.uid.clone()), ..Default::default() },
+            &AuthContext::open(),
             "c-certify-external-ec",
         ).expect("Certify a Registered external ECDSA public key by UID must succeed");
         let cert_rec = ca.deps.store.get(&cert.uid).unwrap().unwrap();
@@ -2223,7 +2252,7 @@ mod tests {
             }),
             protection_storage_masks: None,
             certificate_payload: None,
-        }, "c").unwrap_err();
+        }, &AuthContext::open(), "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::InvalidField);
 
         let _ = session::finalize();
@@ -2265,7 +2294,7 @@ mod tests {
             }),
             protection_storage_masks: None,
             certificate_payload: None,
-        }, "c").unwrap_err();
+        }, &AuthContext::open(), "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::KeyFormatTypeNotSupported);
 
         let _ = session::finalize();

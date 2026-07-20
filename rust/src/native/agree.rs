@@ -9,7 +9,9 @@
 
 use super::CkRv;
 use crate::constants::*;
-use crate::state::{get_object_attr_u32, get_object_value};
+use crate::state::{
+    get_object_attr_u32_from, get_object_value_from, resolve_session_access, with_object_checked,
+};
 
 /// Compute the ECDH shared secret between the private key at `priv_handle` and
 /// `peer_public`. The curve is inferred from the private key's PKCS#11 type +
@@ -21,9 +23,21 @@ use crate::state::{get_object_attr_u32, get_object_value};
 ///
 /// Returns `CKR_KEY_TYPE_INCONSISTENT` for any other key, `CKR_ARGUMENTS_BAD`
 /// for a malformed peer public.
-pub fn ecdh_agree(_session: u32, priv_handle: u32, peer_public: &[u8]) -> Result<Vec<u8>, CkRv> {
-    let key_type = get_object_attr_u32(priv_handle, CKA_KEY_TYPE).ok_or(CKR_KEY_HANDLE_INVALID)?;
-    let scalar = get_object_value(priv_handle).ok_or(CKR_KEY_HANDLE_INVALID)?;
+pub fn ecdh_agree(session: u32, priv_handle: u32, peer_public: &[u8]) -> Result<Vec<u8>, CkRv> {
+    // Isolation gate folded into the existing single lookup. This
+    // function's pre-existing error vocabulary (CKR_KEY_HANDLE_INVALID,
+    // the derive-context code C_DeriveKey callers expect) is preserved
+    // for missing/cross-slot/not-logged-in alike — the gate's generic
+    // CKR_OBJECT_HANDLE_INVALID is remapped so callers see no behavior
+    // change, while cross-tenant access now denies exactly like a
+    // missing handle (same anti-oracle property, this function's code).
+    let access = resolve_session_access(session)?;
+    let (key_type, scalar) = with_object_checked(&access, priv_handle, |attrs| {
+        (get_object_attr_u32_from(attrs, CKA_KEY_TYPE), get_object_value_from(attrs))
+    })
+    .map_err(|_| CKR_KEY_HANDLE_INVALID)?;
+    let key_type = key_type.ok_or(CKR_KEY_HANDLE_INVALID)?;
+    let scalar = scalar.ok_or(CKR_KEY_HANDLE_INVALID)?;
     match (key_type, scalar.len()) {
         // ── X25519 (RFC 7748) ───────────────────────────────────────────────
         (CKK_EC_MONTGOMERY, 32) => {

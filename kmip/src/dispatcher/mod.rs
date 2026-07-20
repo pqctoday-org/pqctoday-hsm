@@ -452,7 +452,7 @@ fn dispatch_one(
     // synchronously"), which `handle_payload`'s uniform per-op wrapping
     // can't express. Handled first and returns early.
     if let RequestPayload::Poll(req) = &payload {
-        return handle_poll(deps, req);
+        return handle_poll(deps, req, auth);
     }
 
     // Async subsystem — KMIP 3.0 §8.1.2 `Asynchronous Indicator =
@@ -576,7 +576,10 @@ fn enqueue_async_job(
     auth: crate::server::auth::AuthContext,
 ) -> ResponseBatchItem {
     let cv = deps.new_correlation_value();
-    let job = crate::ops::AsyncJob::new(op);
+    // Part F §F7.5 — stamp the submitting tenant so Poll/Cancel/Process/
+    // QueryAsyncRequests can scope this job to its owner.
+    let owner = auth.identity.as_ref().map(|i| i.username.clone());
+    let job = crate::ops::AsyncJob::new(op, owner);
     deps.async_jobs
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -619,16 +622,28 @@ fn spawn_or_run_async_job(
         let spawned = std::thread::Builder::new()
             .name("kmip-async-job".into())
             .spawn(move || {
-                job_for_thread.mark_in_process();
+                // Cancel may have already won the Submitted→Completed
+                // race by the time the OS actually schedules this
+                // thread — if so, the real operation must never run
+                // (it would clobber the recorded cancellation outcome
+                // moments later) and the job's state must not be
+                // touched at all.
+                if !job_for_thread.try_start_if_submitted() {
+                    return;
+                }
                 let outcome = handle_payload(&deps_arc, payload, &correlation_id, &auth);
                 job_for_thread.mark_completed(outcome);
             });
         if spawned.is_ok() {
             return;
         }
-        job.mark_completed(Err(KmipError::internal(
-            "failed to spawn background async-job thread",
-        )));
+        // Same race, narrower window: Cancel could have completed the
+        // job between the `insert` above and this failed `spawn` call.
+        if job.try_start_if_submitted() {
+            job.mark_completed(Err(KmipError::internal(
+                "failed to spawn background async-job thread",
+            )));
+        }
         return;
     }
     run_async_job_eagerly(deps, job, payload, correlation_id, &auth);
@@ -647,7 +662,15 @@ fn run_async_job_eagerly(
     correlation_id: String,
     auth: &crate::server::auth::AuthContext,
 ) {
-    job.mark_in_process();
+    // This path runs synchronously inside `enqueue_async_job`, before
+    // its caller could ever have dispatched a `Cancel` for this job —
+    // `try_start_if_submitted` can't actually observe `false` here
+    // today. Using it anyway (not the unconditional `mark_in_process`)
+    // keeps this symmetric with the real-thread executor above and
+    // stays correct if that ordering assumption ever changes.
+    if !job.try_start_if_submitted() {
+        return;
+    }
     let outcome = handle_payload(deps, payload, &correlation_id, auth);
     job.mark_completed(outcome);
 }
@@ -662,12 +685,23 @@ fn run_async_job_eagerly(
 ///   sent if the operation had completed synchronously" (§6.1.43):
 ///   echoes the ORIGINAL polled operation + its real outcome, exactly
 ///   as `dispatch_one`'s normal Success/Failed wrapping would have.
-fn handle_poll(deps: &Deps, req: &crate::kmip30::PollRequest) -> ResponseBatchItem {
+fn handle_poll(
+    deps: &Deps,
+    req: &crate::kmip30::PollRequest,
+    auth: &crate::server::auth::AuthContext,
+) -> ResponseBatchItem {
     use crate::kmip30::{Operation, ProcessingStage};
+    let requester = auth.identity.as_ref().map(|i| i.username.clone());
     let job = {
         let jobs = deps.async_jobs.lock().unwrap_or_else(|e| e.into_inner());
         jobs.get(&req.asynchronous_correlation_value).cloned()
     };
+    // Part F §F7.5 — a job owned by a different tenant is indistinguishable
+    // from a nonexistent one (anti-oracle): same `Invalid Asynchronous
+    // Correlation Value` a genuinely unknown CV produces. This is the
+    // load-bearing check — Poll below returns the deferred op's full
+    // payload, which for a deferred Get/Export/Decrypt is key material.
+    let job = job.filter(|j| j.state.lock().unwrap_or_else(|e| e.into_inner()).owner == requester);
     let Some(job) = job else {
         let err = KmipError::invalid_asynchronous_correlation_value();
         return ResponseBatchItem {
@@ -920,62 +954,62 @@ fn handle_payload(
 ) -> Result<ResponsePayload, KmipError> {
     Ok(match payload {
         RequestPayload::Query(r) => ResponsePayload::Query(query(deps, r, correlation_id)?),
-        RequestPayload::Create(r) => ResponsePayload::Create(create(deps, r, correlation_id)?),
+        RequestPayload::Create(r) => ResponsePayload::Create(create(deps, r, auth, correlation_id)?),
         RequestPayload::CreateKeyPair(r) => {
             let op_canonical = canonical_create_key_pair_op(&r);
-            ResponsePayload::CreateKeyPair(create_key_pair(deps, r, &op_canonical, correlation_id)?)
+            ResponsePayload::CreateKeyPair(create_key_pair(deps, r, &op_canonical, auth, correlation_id)?)
         }
-        RequestPayload::Get(r) => ResponsePayload::Get(get(deps, r, correlation_id)?),
-        RequestPayload::GetAttributes(r) => ResponsePayload::GetAttributes(get_attributes(deps, r, correlation_id)?),
-        RequestPayload::GetAttributeList(r) => ResponsePayload::GetAttributeList(get_attribute_list(deps, r, correlation_id)?),
-        RequestPayload::Locate(r) => ResponsePayload::Locate(locate(deps, r, correlation_id)?),
+        RequestPayload::Get(r) => ResponsePayload::Get(get(deps, r, auth, correlation_id)?),
+        RequestPayload::GetAttributes(r) => ResponsePayload::GetAttributes(get_attributes(deps, r, auth, correlation_id)?),
+        RequestPayload::GetAttributeList(r) => ResponsePayload::GetAttributeList(get_attribute_list(deps, r, auth, correlation_id)?),
+        RequestPayload::Locate(r) => ResponsePayload::Locate(locate(deps, r, auth, correlation_id)?),
         RequestPayload::Activate(r) => ResponsePayload::Activate(activate(deps, r, correlation_id)?),
-        RequestPayload::Revoke(r) => ResponsePayload::Revoke(revoke(deps, r, correlation_id)?),
-        RequestPayload::Destroy(r) => ResponsePayload::Destroy(destroy(deps, r, correlation_id)?),
-        RequestPayload::Encrypt(r) => ResponsePayload::Encrypt(encrypt(deps, r, correlation_id)?),
-        RequestPayload::Decrypt(r) => ResponsePayload::Decrypt(decrypt(deps, r, correlation_id)?),
+        RequestPayload::Revoke(r) => ResponsePayload::Revoke(revoke(deps, r, auth, correlation_id)?),
+        RequestPayload::Destroy(r) => ResponsePayload::Destroy(destroy(deps, r, auth, correlation_id)?),
+        RequestPayload::Encrypt(r) => ResponsePayload::Encrypt(encrypt(deps, r, auth, correlation_id)?),
+        RequestPayload::Decrypt(r) => ResponsePayload::Decrypt(decrypt(deps, r, auth, correlation_id)?),
         RequestPayload::Encapsulate(r) => {
-            ResponsePayload::Encapsulate(encapsulate(deps, r, correlation_id)?)
+            ResponsePayload::Encapsulate(encapsulate(deps, r, auth, correlation_id)?)
         }
         RequestPayload::Decapsulate(r) => {
-            ResponsePayload::Decapsulate(decapsulate(deps, r, correlation_id)?)
+            ResponsePayload::Decapsulate(decapsulate(deps, r, auth, correlation_id)?)
         }
-        RequestPayload::Sign(r) => ResponsePayload::Sign(sign(deps, r, correlation_id)?),
+        RequestPayload::Sign(r) => ResponsePayload::Sign(sign(deps, r, auth, correlation_id)?),
         RequestPayload::SignatureVerify(r) => {
-            ResponsePayload::SignatureVerify(signature_verify(deps, r, correlation_id)?)
+            ResponsePayload::SignatureVerify(signature_verify(deps, r, auth, correlation_id)?)
         }
-        RequestPayload::Validate(r) => ResponsePayload::Validate(validate(deps, r, correlation_id)?),
+        RequestPayload::Validate(r) => ResponsePayload::Validate(validate(deps, r, auth, correlation_id)?),
         // P2.3 — §6.1.6 Certify / §6.1.50 Re-certify (PQC-capable CA).
         // Ungated since WP4 — pure Rust (`spki_verify` + the engine),
         // dispatched on wasm32 the same as native; no more `not(native)`
         // OperationNotSupported fallback for these three.
-        RequestPayload::Certify(r) => ResponsePayload::Certify(certify(deps, r, correlation_id)?),
-        RequestPayload::ReCertify(r) => ResponsePayload::ReCertify(recertify(deps, r, correlation_id)?),
+        RequestPayload::Certify(r) => ResponsePayload::Certify(certify(deps, r, auth, correlation_id)?),
+        RequestPayload::ReCertify(r) => ResponsePayload::ReCertify(recertify(deps, r, auth, correlation_id)?),
         RequestPayload::Interop(r) => ResponsePayload::Interop(interop(deps, r, correlation_id)?),
-        RequestPayload::AddAttribute(r) => ResponsePayload::AddAttribute(add_attribute(deps, r, correlation_id)?),
-        RequestPayload::ModifyAttribute(r) => ResponsePayload::ModifyAttribute(modify_attribute(deps, r, correlation_id)?),
-        RequestPayload::DeleteAttribute(r) => ResponsePayload::DeleteAttribute(delete_attribute(deps, r, correlation_id)?),
-        RequestPayload::SetAttribute(r) => ResponsePayload::SetAttribute(set_attribute(deps, r, correlation_id)?),
-        RequestPayload::AdjustAttribute(r) => ResponsePayload::AdjustAttribute(adjust_attribute(deps, r, correlation_id)?),
-        RequestPayload::Register(r) => ResponsePayload::Register(register(deps, r, correlation_id)?),
-        RequestPayload::Import(r) => ResponsePayload::Import(import_object(deps, r, correlation_id)?),
-        RequestPayload::Export(r) => ResponsePayload::Export(export(deps, r, correlation_id)?),
+        RequestPayload::AddAttribute(r) => ResponsePayload::AddAttribute(add_attribute(deps, r, auth, correlation_id)?),
+        RequestPayload::ModifyAttribute(r) => ResponsePayload::ModifyAttribute(modify_attribute(deps, r, auth, correlation_id)?),
+        RequestPayload::DeleteAttribute(r) => ResponsePayload::DeleteAttribute(delete_attribute(deps, r, auth, correlation_id)?),
+        RequestPayload::SetAttribute(r) => ResponsePayload::SetAttribute(set_attribute(deps, r, auth, correlation_id)?),
+        RequestPayload::AdjustAttribute(r) => ResponsePayload::AdjustAttribute(adjust_attribute(deps, r, auth, correlation_id)?),
+        RequestPayload::Register(r) => ResponsePayload::Register(register(deps, r, auth, correlation_id)?),
+        RequestPayload::Import(r) => ResponsePayload::Import(import_object(deps, r, auth, correlation_id)?),
+        RequestPayload::Export(r) => ResponsePayload::Export(export(deps, r, auth, correlation_id)?),
         RequestPayload::Deactivate(r) => ResponsePayload::Deactivate(deactivate(deps, r, correlation_id)?),
         RequestPayload::Check(r) => ResponsePayload::Check(check(deps, r, correlation_id)?),
         RequestPayload::ObtainLease(r) => ResponsePayload::ObtainLease(obtain_lease(deps, r, correlation_id)?),
-        RequestPayload::CreateSplitKey(r) => ResponsePayload::CreateSplitKey(create_split_key(deps, r, correlation_id)?),
-        RequestPayload::JoinSplitKey(r) => ResponsePayload::JoinSplitKey(join_split_key(deps, r, correlation_id)?),
+        RequestPayload::CreateSplitKey(r) => ResponsePayload::CreateSplitKey(create_split_key(deps, r, auth, correlation_id)?),
+        RequestPayload::JoinSplitKey(r) => ResponsePayload::JoinSplitKey(join_split_key(deps, r, auth, correlation_id)?),
         RequestPayload::Archive(r) => ResponsePayload::Archive(archive(deps, r, correlation_id)?),
         RequestPayload::Recover(r) => ResponsePayload::Recover(recover(deps, r, correlation_id)?),
         RequestPayload::Obliterate(r) => ResponsePayload::Obliterate(obliterate(deps, r, correlation_id)?),
         RequestPayload::DiscoverVersions(r) => ResponsePayload::DiscoverVersions(discover_versions(deps, r, correlation_id)?),
         RequestPayload::Ping(r) => ResponsePayload::Ping(ping(deps, r, correlation_id)?),
-        RequestPayload::Mac(r) => ResponsePayload::Mac(mac(deps, r, correlation_id)?),
-        RequestPayload::MacVerify(r) => ResponsePayload::MacVerify(mac_verify(deps, r, correlation_id)?),
+        RequestPayload::Mac(r) => ResponsePayload::Mac(mac(deps, r, auth, correlation_id)?),
+        RequestPayload::MacVerify(r) => ResponsePayload::MacVerify(mac_verify(deps, r, auth, correlation_id)?),
         RequestPayload::Hash(r) => ResponsePayload::Hash(hash(deps, r, correlation_id)?),
-        RequestPayload::CreateCredential(r) => ResponsePayload::CreateCredential(create_credential(deps, r, correlation_id)?),
-        RequestPayload::CreateGroup(r) => ResponsePayload::CreateGroup(create_group(deps, r, correlation_id)?),
-        RequestPayload::CreateUser(r) => ResponsePayload::CreateUser(create_user(deps, r, correlation_id)?),
+        RequestPayload::CreateCredential(r) => ResponsePayload::CreateCredential(create_credential(deps, r, auth, correlation_id)?),
+        RequestPayload::CreateGroup(r) => ResponsePayload::CreateGroup(create_group(deps, r, auth, correlation_id)?),
+        RequestPayload::CreateUser(r) => ResponsePayload::CreateUser(create_user(deps, r, auth, correlation_id)?),
         RequestPayload::Log(r) => ResponsePayload::Log(log(deps, r, correlation_id)?),
         RequestPayload::Login(r) => ResponsePayload::Login(login(deps, r, auth, correlation_id)?),
         RequestPayload::Logout(r) => ResponsePayload::Logout(logout(deps, r, correlation_id)?),
@@ -1000,7 +1034,7 @@ fn handle_payload(
         }
         RequestPayload::RngRetrieve(r) => ResponsePayload::RngRetrieve(rng_retrieve(deps, r, correlation_id)?),
         RequestPayload::RngSeed(r) => ResponsePayload::RngSeed(rng_seed(deps, r, correlation_id)?),
-        RequestPayload::Pkcs11(r) => ResponsePayload::Pkcs11(pkcs11(deps, r, correlation_id)?),
+        RequestPayload::Pkcs11(r) => ResponsePayload::Pkcs11(pkcs11(deps, r, auth, correlation_id)?),
         // K19 — Baseline client-to-server ops (§6.1.26/27/58/59).
         RequestPayload::GetUsageAllocation(r) => {
             ResponsePayload::GetUsageAllocation(get_usage_allocation(deps, r, correlation_id)?)
@@ -1012,18 +1046,18 @@ fn handle_payload(
             ResponsePayload::SetConstraints(set_constraints(deps, r, correlation_id)?)
         }
         RequestPayload::SetDefaults(r) => {
-            ResponsePayload::SetDefaults(set_defaults(deps, r, correlation_id)?)
+            ResponsePayload::SetDefaults(set_defaults(deps, r, auth, correlation_id)?)
         }
         RequestPayload::SetEndpointRole(r) => {
             ResponsePayload::SetEndpointRole(set_endpoint_role(deps, r, correlation_id)?)
         }
         RequestPayload::DeriveKey(r) => {
-            ResponsePayload::DeriveKey(derive_key(deps, r, correlation_id)?)
+            ResponsePayload::DeriveKey(derive_key(deps, r, auth, correlation_id)?)
         }
         // K21 — §6.1.51 Re-key / §6.1.52 Re-key Key Pair.
-        RequestPayload::ReKey(r) => ResponsePayload::ReKey(rekey(deps, r, correlation_id)?),
+        RequestPayload::ReKey(r) => ResponsePayload::ReKey(rekey(deps, r, auth, correlation_id)?),
         RequestPayload::ReKeyKeyPair(r) => {
-            ResponsePayload::ReKeyKeyPair(rekey_key_pair(deps, r, correlation_id)?)
+            ResponsePayload::ReKeyKeyPair(rekey_key_pair(deps, r, auth, correlation_id)?)
         }
         // Phase 4 — `Poll` never reaches here: `dispatch_one` intercepts
         // it before calling `handle_payload` (its response impersonates
@@ -1035,10 +1069,10 @@ fn handle_payload(
                 "Poll must be intercepted by dispatch_one before handle_payload",
             ));
         }
-        RequestPayload::Cancel(r) => ResponsePayload::Cancel(cancel(deps, r, correlation_id)?),
-        RequestPayload::Process(r) => ResponsePayload::Process(process(deps, r, correlation_id)?),
+        RequestPayload::Cancel(r) => ResponsePayload::Cancel(cancel(deps, r, auth, correlation_id)?),
+        RequestPayload::Process(r) => ResponsePayload::Process(process(deps, r, auth, correlation_id)?),
         RequestPayload::QueryAsynchronousRequests(r) => ResponsePayload::QueryAsynchronousRequests(
-            query_asynchronous_requests(deps, r, correlation_id)?,
+            query_asynchronous_requests(deps, r, auth, correlation_id)?,
         ),
     })
 }

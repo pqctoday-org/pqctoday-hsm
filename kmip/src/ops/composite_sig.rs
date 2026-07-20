@@ -41,7 +41,6 @@ use spki::SubjectPublicKeyInfoOwned;
 use crate::error::{KmipError, Result, ResultReason};
 use crate::kmip30::KmipAlgorithm;
 
-use super::deps::Deps;
 
 /// Fixed Prefix per draft-19 §2.2 — ASCII "CompositeAlgorithmSignatures2025",
 /// byte-identical to `certBuilder.ts::COMPOSITE_DRAFT19_PREFIX` (verified
@@ -286,7 +285,7 @@ impl Drop for DestroyOnDrop {
 /// exactly like it already does for `verify_with_spki`, never surfacing
 /// it as a false `Invalid`.
 pub fn verify_composite_signature(
-    deps: &Deps,
+    session: Option<u32>,
     profile: &CompositeSigProfile,
     composite_spki: &SubjectPublicKeyInfoOwned,
     tbs_der: &[u8],
@@ -295,7 +294,10 @@ pub fn verify_composite_signature(
     use super::spki_verify::SpkiVerdict;
     use softhsmrustv3::constants::CKR_SIGNATURE_INVALID;
 
-    let session = deps.engine_session.ok_or_else(|| {
+    // Part F §F7 — caller-resolved tenant session; see
+    // `spki_verify::verify_with_spki`'s doc comment for why this is an
+    // explicit parameter rather than a `deps.engine_session` read.
+    let session = session.ok_or_else(|| {
         KmipError::failed(
             ResultReason::CryptographicFailure,
             "verify_composite_signature: no engine session — cannot verify without key material",

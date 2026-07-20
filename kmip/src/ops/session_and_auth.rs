@@ -53,6 +53,7 @@ fn credential_object_type(credential_type: u32) -> ObjectType {
 pub fn create_credential(
     deps: &Deps,
     req: CreateCredentialRequest,
+    auth: &crate::server::auth::AuthContext,
     correlation_id: &str,
 ) -> Result<CreateCredentialResponse> {
     emit_request(
@@ -103,7 +104,7 @@ pub fn create_credential(
 
     // K4 — persist under the true Credential Object Type, not Secret Data.
     let uid =
-        persist_simple_record(deps, credential_object_type(req.credential_type), req.attributes)?;
+        persist_simple_record(deps, credential_object_type(req.credential_type), req.attributes, auth)?;
     emit_success(deps, correlation_id, "CreateCredential");
     Ok(CreateCredentialResponse { uid })
 }
@@ -113,12 +114,13 @@ pub fn create_credential(
 pub fn create_group(
     deps: &Deps,
     req: CreateGroupRequest,
+    auth: &crate::server::auth::AuthContext,
     correlation_id: &str,
 ) -> Result<CreateGroupResponse> {
     emit_request(deps, correlation_id, "CreateGroup", format!("attrs={}", req.attributes.len()));
     // K4 — KMIP 3.0 Object Type enum defines Group (0x0c); persist under it so
     // GetAttributes/Locate report the true type (was Secret Data).
-    let uid = persist_simple_record(deps, ObjectType::Group, req.attributes)?;
+    let uid = persist_simple_record(deps, ObjectType::Group, req.attributes, auth)?;
     emit_success(deps, correlation_id, "CreateGroup");
     Ok(CreateGroupResponse { uid })
 }
@@ -128,11 +130,12 @@ pub fn create_group(
 pub fn create_user(
     deps: &Deps,
     req: CreateUserRequest,
+    auth: &crate::server::auth::AuthContext,
     correlation_id: &str,
 ) -> Result<CreateUserResponse> {
     emit_request(deps, correlation_id, "CreateUser", format!("attrs={}", req.attributes.len()));
     // K4 — KMIP 3.0 Object Type enum defines User (0x0b); persist under it.
-    let uid = persist_simple_record(deps, ObjectType::User, req.attributes)?;
+    let uid = persist_simple_record(deps, ObjectType::User, req.attributes, auth)?;
     emit_success(deps, correlation_id, "CreateUser");
     Ok(CreateUserResponse { uid })
 }
@@ -242,6 +245,7 @@ fn persist_simple_record(
     deps: &Deps,
     object_type: ObjectType,
     attrs: Vec<Attribute>,
+    auth: &crate::server::auth::AuthContext,
 ) -> Result<String> {
     let uid = format!("urn:pqctoday:obj:{}", Uuid::new_v4());
     let now = OffsetDateTime::now_utc();
@@ -249,7 +253,7 @@ fn persist_simple_record(
         Attribute::Name(n) => Some(n.clone()),
         _ => None,
     });
-    deps.store.put(ObjectRecord {
+    deps.store.put(super::helpers::stamp_owner(ObjectRecord {
         uid: uid.clone(),
         object_type,
         // No cryptographic algorithm for a User / Group / Credential —
@@ -271,7 +275,7 @@ fn persist_simple_record(
         key_material: None,
         key_format_type: None,
     ..ObjectRecord::default()
-})?;
+}, auth))?;
     Ok(uid)
 }
 
@@ -305,7 +309,7 @@ mod tests {
                 username: "alice".into(),
                 password: Some("secret".into()),
             }),
-        }, "c").unwrap();
+        }, &AuthContext::open(), "c").unwrap();
         assert!(d.store.get(&r.uid).unwrap().is_some());
     }
 
@@ -316,7 +320,7 @@ mod tests {
             credential_type: 0x01,
             attributes: vec![],
             password_credential: None,
-        }, "c").unwrap_err();
+        }, &AuthContext::open(), "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::MissingData);
     }
 
@@ -326,10 +330,10 @@ mod tests {
         // (0x0b/0x0c/0x0d–0x10), not Secret Data, so GetAttributes/Locate report it.
         let d = deps_with();
 
-        let u = create_user(&d, CreateUserRequest { attributes: vec![Attribute::Name("bob".into())] }, "u").unwrap();
+        let u = create_user(&d, CreateUserRequest { attributes: vec![Attribute::Name("bob".into())] }, &AuthContext::open(), "u").unwrap();
         assert_eq!(d.store.get(&u.uid).unwrap().unwrap().object_type, ObjectType::User);
 
-        let g = create_group(&d, CreateGroupRequest { attributes: vec![Attribute::Name("admins".into())] }, "g").unwrap();
+        let g = create_group(&d, CreateGroupRequest { attributes: vec![Attribute::Name("admins".into())] }, &AuthContext::open(), "g").unwrap();
         assert_eq!(d.store.get(&g.uid).unwrap().unwrap().object_type, ObjectType::Group);
 
         // Password/Username (0x01) → PasswordCredential; Device (0x02) → DeviceCredential;
@@ -337,18 +341,18 @@ mod tests {
         let c1 = create_credential(&d, CreateCredentialRequest {
             credential_type: 0x01, attributes: vec![],
             password_credential: Some(PasswordCredential { username: "a".into(), password: Some("p".into()) }),
-        }, "c1").unwrap();
+        }, &AuthContext::open(), "c1").unwrap();
         assert_eq!(d.store.get(&c1.uid).unwrap().unwrap().object_type, ObjectType::PasswordCredential);
 
         let c2 = create_credential(&d, CreateCredentialRequest {
             credential_type: 0x02, attributes: vec![], password_credential: None,
-        }, "c2").unwrap();
+        }, &AuthContext::open(), "c2").unwrap();
         assert_eq!(d.store.get(&c2.uid).unwrap().unwrap().object_type, ObjectType::DeviceCredential);
 
         let c5 = create_credential(&d, CreateCredentialRequest {
             credential_type: 0x05, attributes: vec![],
             password_credential: Some(PasswordCredential { username: "a".into(), password: Some("h".into()) }),
-        }, "c5").unwrap();
+        }, &AuthContext::open(), "c5").unwrap();
         assert_eq!(d.store.get(&c5.uid).unwrap().unwrap().object_type, ObjectType::HashedPasswordCredential);
     }
 
@@ -362,7 +366,7 @@ mod tests {
             credential_type: 0x02, // Device
             attributes: vec![],
             password_credential: None,
-        }, "c").unwrap();
+        }, &AuthContext::open(), "c").unwrap();
         assert!(!resp.uid.is_empty());
     }
 
@@ -373,7 +377,7 @@ mod tests {
             credential_type: 0xFF, // unassigned
             attributes: vec![],
             password_credential: None,
-        }, "c").unwrap_err();
+        }, &AuthContext::open(), "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::InvalidField);
     }
 
@@ -478,7 +482,7 @@ mod tests {
         let d = deps_with();
         let r = create_group(&d, CreateGroupRequest {
             attributes: vec![Attribute::Name("admins".into())],
-        }, "c").unwrap();
+        }, &AuthContext::open(), "c").unwrap();
         let rec = d.store.get(&r.uid).unwrap().unwrap();
         assert_eq!(rec.name.as_deref(), Some("admins"));
     }

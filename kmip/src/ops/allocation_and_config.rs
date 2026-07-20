@@ -240,6 +240,7 @@ fn server_constraints() -> Vec<Constraint> {
 pub fn set_defaults(
     deps: &Deps,
     req: SetDefaultsRequest,
+    auth: &crate::server::auth::AuthContext,
     correlation_id: &str,
 ) -> Result<SetDefaultsResponse> {
     emit_request(
@@ -252,8 +253,12 @@ pub fn set_defaults(
         ),
     );
 
-    let mut map = deps.object_defaults.lock().unwrap();
-    map.clear();
+    // Part F §F7.5 — per-tenant: this Set Defaults replaces only the
+    // CALLING tenant's bucket, leaving every other tenant's untouched.
+    let requester = auth.identity.as_ref().map(|i| i.username.clone());
+    let mut outer = deps.object_defaults.lock().unwrap();
+    let mut map: std::collections::HashMap<ObjectType, Vec<Attribute>> =
+        std::collections::HashMap::new();
     if let Some(object_defaults) = req.defaults_information {
         for od in object_defaults {
             for ot in &od.object_types {
@@ -264,7 +269,15 @@ pub fn set_defaults(
             }
         }
     }
-    drop(map);
+    // Table 428 — a new set REPLACES the old one; an absent (or empty)
+    // Defaults Information removes this tenant's defaults entirely
+    // rather than leaving a dangling empty bucket in the shared map.
+    if map.is_empty() {
+        outer.remove(&requester);
+    } else {
+        outer.insert(requester, map);
+    }
+    drop(outer);
 
     emit_success(deps, correlation_id, "SetDefaults");
     Ok(SetDefaultsResponse)
@@ -284,8 +297,12 @@ pub fn apply_object_defaults(
     object_type: ObjectType,
     also_present: &[Attribute],
     template: &mut Vec<Attribute>,
+    auth: &crate::server::auth::AuthContext,
 ) {
-    let map = deps.object_defaults.lock().unwrap();
+    // Part F §F7.5 — read only the CALLING tenant's own defaults.
+    let requester = auth.identity.as_ref().map(|i| i.username.clone());
+    let outer = deps.object_defaults.lock().unwrap();
+    let Some(map) = outer.get(&requester) else { return };
     let Some(defaults) = map.get(&object_type) else { return };
     let missing: Vec<Attribute> = defaults
         .iter()
@@ -359,6 +376,7 @@ mod tests {
     use crate::auditlog::{AuditSink, RingSink};
     use crate::error::ResultReason;
     use crate::kmip30::{ObjectDefaults, UsageMask};
+    use crate::server::auth::AuthContext;
     use crate::policy::{load_from_str, Engine};
     use crate::store::{MemoryStore, ObjectRecord};
     use std::sync::Arc;
@@ -568,19 +586,23 @@ mod tests {
         set_defaults(&d, defaults_req(
             ObjectType::SymmetricKey,
             vec![Attribute::CryptographicUsageMask(UsageMask::ENCRYPT | UsageMask::DECRYPT)],
-        ), "c").unwrap();
+        ), &AuthContext::open(), "c").unwrap();
+        // One tenant bucket (the anonymous/open one), with one type in it.
         assert_eq!(d.object_defaults.lock().unwrap().len(), 1);
+        assert!(d.object_defaults.lock().unwrap().get(&None).unwrap().contains_key(&ObjectType::SymmetricKey));
         // Table 428 — a new set REPLACES the old one…
         set_defaults(&d, defaults_req(
             ObjectType::SecretData,
             vec![Attribute::Description("dflt".into())],
-        ), "c").unwrap();
-        let map = d.object_defaults.lock().unwrap();
+        ), &AuthContext::open(), "c").unwrap();
+        let outer = d.object_defaults.lock().unwrap();
+        let map = outer.get(&None).unwrap();
         assert!(!map.contains_key(&ObjectType::SymmetricKey), "old set replaced");
         assert!(map.contains_key(&ObjectType::SecretData));
-        drop(map);
-        // …and an absent Defaults Information removes all defaults.
-        set_defaults(&d, SetDefaultsRequest { defaults_information: None }, "c").unwrap();
+        drop(outer);
+        // …and an absent Defaults Information removes all defaults (the
+        // whole tenant bucket, so the shared outer map is empty again).
+        set_defaults(&d, SetDefaultsRequest { defaults_information: None }, &AuthContext::open(), "c").unwrap();
         assert!(d.object_defaults.lock().unwrap().is_empty());
     }
 
@@ -594,8 +616,9 @@ mod tests {
                 object_types: vec![ObjectType::PublicKey, ObjectType::PrivateKey],
                 attributes: vec![Attribute::Extractable(false)],
             }]),
-        }, "c").unwrap();
-        let map = d.object_defaults.lock().unwrap();
+        }, &AuthContext::open(), "c").unwrap();
+        let outer = d.object_defaults.lock().unwrap();
+        let map = outer.get(&None).unwrap();
         assert_eq!(map.get(&ObjectType::PublicKey), Some(&vec![Attribute::Extractable(false)]));
         assert_eq!(map.get(&ObjectType::PrivateKey), Some(&vec![Attribute::Extractable(false)]));
     }
@@ -612,17 +635,17 @@ mod tests {
                 Attribute::CryptographicUsageMask(UsageMask::ENCRYPT),
                 Attribute::Description("server default".into()),
             ],
-        ), "c").unwrap();
+        ), &AuthContext::open(), "c").unwrap();
 
         // Client omits both → both defaults applied.
         let mut t1 = vec![Attribute::CryptographicAlgorithm(KmipAlgorithm::Aes)];
-        apply_object_defaults(&d, ObjectType::SymmetricKey, &[], &mut t1);
+        apply_object_defaults(&d, ObjectType::SymmetricKey, &[], &mut t1, &AuthContext::open());
         assert!(t1.contains(&Attribute::CryptographicUsageMask(UsageMask::ENCRYPT)));
         assert!(t1.contains(&Attribute::Description("server default".into())));
 
         // Client supplies a mask → the default mask yields.
         let mut t2 = vec![Attribute::CryptographicUsageMask(UsageMask::SIGN)];
-        apply_object_defaults(&d, ObjectType::SymmetricKey, &[], &mut t2);
+        apply_object_defaults(&d, ObjectType::SymmetricKey, &[], &mut t2, &AuthContext::open());
         assert!(t2.contains(&Attribute::CryptographicUsageMask(UsageMask::SIGN)));
         assert!(!t2.contains(&Attribute::CryptographicUsageMask(UsageMask::ENCRYPT)));
 
@@ -630,13 +653,13 @@ mod tests {
         // Common Attributes) also suppresses the default.
         let common = vec![Attribute::CryptographicUsageMask(UsageMask::VERIFY)];
         let mut t3 = Vec::new();
-        apply_object_defaults(&d, ObjectType::SymmetricKey, &common, &mut t3);
+        apply_object_defaults(&d, ObjectType::SymmetricKey, &common, &mut t3, &AuthContext::open());
         assert!(!t3.iter().any(|a| matches!(a, Attribute::CryptographicUsageMask(_))));
         assert!(t3.contains(&Attribute::Description("server default".into())));
 
         // No defaults stored for the type → template untouched.
         let mut t4 = vec![Attribute::Sensitive(true)];
-        apply_object_defaults(&d, ObjectType::Certificate, &[], &mut t4);
+        apply_object_defaults(&d, ObjectType::Certificate, &[], &mut t4, &AuthContext::open());
         assert_eq!(t4, vec![Attribute::Sensitive(true)]);
     }
 

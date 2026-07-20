@@ -47,8 +47,15 @@ pub fn create_key_pair(
     deps: &Deps,
     mut req: CreateKeyPairRequest,
     op_canonical: &str,
+    auth: &crate::server::auth::AuthContext,
     correlation_id: &str,
 ) -> Result<CreateKeyPairResponse> {
+    // Part F §F7 — this tenant's own engine session (Single mode: the
+    // one shared `engine_session`, unchanged; Auto/Strict: this
+    // identity's own token). `.ok()` folds a resolution failure into
+    // `None`, matching every existing "no engine session" fallback path
+    // below exactly (including the engine-less unit-test placeholder).
+    let session = deps.resolve_tenant_session(auth.identity.as_ref()).ok();
     let started = OffsetDateTime::now_utc();
     deps.sink.emit(AuditEvent::at(
         started,
@@ -75,12 +82,14 @@ pub fn create_key_pair(
         ObjectType::PrivateKey,
         &req.common_attributes,
         &mut req.private_key_attributes,
+        auth,
     );
     super::allocation_and_config::apply_object_defaults(
         deps,
         ObjectType::PublicKey,
         &req.common_attributes,
         &mut req.public_key_attributes,
+        auth,
     );
 
     // KMIP 3.0 Spec §6.1.10 CreateKeyPair — three distinct attribute
@@ -257,7 +266,7 @@ pub fn create_key_pair(
     // both handles.
     let (generated, hybrid_pub_material, hybrid_priv_material, hybrid_secondary_cka_id) =
         if let Some(hybrid) = kmip_algo.hybrid_kem() {
-            match deps.engine_session {
+            match session {
                 Some(session) => {
                     let mlkem_cka_id = Uuid::new_v4().as_bytes().to_vec();
                     let classical_cka_id = Uuid::new_v4().as_bytes().to_vec();
@@ -345,7 +354,7 @@ pub fn create_key_pair(
             // `live_composite_public_key_spki`, ported from
             // `certBuilder.ts::buildCompositeCertDraft19`'s own SPKI
             // builder).
-            match deps.engine_session {
+            match session {
                 Some(session) => {
                     let mldsa_cka_id = Uuid::new_v4().as_bytes().to_vec();
                     let classical_cka_id = Uuid::new_v4().as_bytes().to_vec();
@@ -505,6 +514,7 @@ pub fn create_key_pair(
             match engine_generate_keypair(
                 deps,
                 correlation_id,
+                session,
                 kmip_algo,
                 key_length,
                 mech,
@@ -534,7 +544,7 @@ pub fn create_key_pair(
     let priv_state = super::register_import_export::compute_initial_state(now, &priv_x);
     let pub_state = super::register_import_export::compute_initial_state(now, &pub_x);
     let _ = (usage_mask, key_length); // silence unused warnings
-    deps.store.put(ObjectRecord {
+    deps.store.put(super::helpers::stamp_owner(ObjectRecord {
         uid: priv_uid.clone(),
         object_type: ObjectType::PrivateKey,
         algorithm: kmip_algo,
@@ -613,8 +623,8 @@ pub fn create_key_pair(
             protection_storage_mask: Some(0x01),
             lease_time: Some(3600),
     ..ObjectRecord::default()
-})?;
-    deps.store.put(ObjectRecord {
+}, auth))?;
+    deps.store.put(super::helpers::stamp_owner(ObjectRecord {
         uid: pub_uid.clone(),
         object_type: ObjectType::PublicKey,
         algorithm: kmip_algo,
@@ -673,7 +683,7 @@ pub fn create_key_pair(
             protection_storage_mask: Some(0x01),
             lease_time: Some(3600),
     ..ObjectRecord::default()
-})?;
+}, auth))?;
 
     deps.sink.emit(AuditEvent::at(
         OffsetDateTime::now_utc(),
@@ -713,6 +723,7 @@ pub(crate) struct GeneratedKeyPair {
 pub(crate) fn engine_generate_keypair(
     deps: &Deps,
     correlation_id: &str,
+    session: Option<u32>,
     kmip_algo: KmipAlgorithm,
     key_length: Option<u32>,
     mech: u32,
@@ -721,7 +732,10 @@ pub(crate) fn engine_generate_keypair(
     usage_pub: UsageMask,
     usage_priv: UsageMask,
 ) -> std::result::Result<GeneratedKeyPair, KmipError> {
-    if let Some(session) = deps.engine_session {
+    // Part F §F7 — `session` is the CALLER's resolved per-tenant engine
+    // session (`Deps::resolve_tenant_session`), not the raw shared
+    // `deps.engine_session` — see the plan's dispatcher-wiring note.
+    if let Some(session) = session {
         // K15 — `native_generate_keypair` emits the Pkcs11Call audit
         // record itself, after the native call, with the real rv and
         // the actual entry-point name.
@@ -1216,6 +1230,7 @@ mod tests {
     use super::*;
     use crate::auditlog::RingSink;
     use crate::policy::{load_from_str, Engine};
+    use crate::server::auth::AuthContext;
     use crate::store::MemoryStore;
     use std::sync::Arc;
 
@@ -1267,7 +1282,7 @@ rules:
     #[test]
     fn defaults_pqc_signing_under_pqc_policy() {
         let (ring, d) = deps_with(PQC_DEFAULTS);
-        let resp = create_key_pair(&d, empty_req(), "CreateKeyPair:Sign", "corr-1").unwrap();
+        let resp = create_key_pair(&d, empty_req(), "CreateKeyPair:Sign", &AuthContext::open(), "corr-1").unwrap();
         let priv_record = d.store.get(&resp.private_key_uid).unwrap().unwrap();
         assert_eq!(priv_record.algorithm, KmipAlgorithm::MlDsa87);
         // Audit: 1 RequestReceived (p2) + 1 PolicyDecided (p1) + 1 Pkcs11Call (p3)
@@ -1280,7 +1295,7 @@ rules:
     fn defaults_pqc_kem_under_pqc_policy() {
         let (_ring, d) = deps_with(PQC_DEFAULTS);
         let resp =
-            create_key_pair(&d, empty_req(), "CreateKeyPair:KeyAgreement", "corr-2").unwrap();
+            create_key_pair(&d, empty_req(), "CreateKeyPair:KeyAgreement", &AuthContext::open(), "corr-2").unwrap();
         let priv_record = d.store.get(&resp.private_key_uid).unwrap().unwrap();
         assert_eq!(priv_record.algorithm, KmipAlgorithm::MlKem1024);
     }
@@ -1294,7 +1309,7 @@ metadata: { name: empty, description: empty, authority: t, effective: "always" }
 rules: []
 "#,
         );
-        let err = create_key_pair(&d, empty_req(), "CreateKeyPair:Sign", "corr-3").unwrap_err();
+        let err = create_key_pair(&d, empty_req(), "CreateKeyPair:Sign", &AuthContext::open(), "corr-3").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::MissingData);
     }
 
@@ -1371,7 +1386,7 @@ rules: []
             public_key_attributes: vec![Attribute::CryptographicParameters(pub_cp.clone())],
             seed: None,
         };
-        let resp = create_key_pair(&d, req, "CreateKeyPair:Sign", "corr-cp").unwrap();
+        let resp = create_key_pair(&d, req, "CreateKeyPair:Sign", &AuthContext::open(), "corr-cp").unwrap();
         let priv_record = d.store.get(&resp.private_key_uid).unwrap().unwrap();
         let pub_record = d.store.get(&resp.public_key_uid).unwrap().unwrap();
         assert_eq!(priv_record.cryptographic_parameters, Some(priv_cp));
@@ -1393,7 +1408,7 @@ rules: []
             public_key_attributes: vec![],
             seed: None,
         };
-        let err = create_key_pair(&d, req, "CreateKeyPair:Sign", "corr-qs").unwrap_err();
+        let err = create_key_pair(&d, req, "CreateKeyPair:Sign", &AuthContext::open(), "corr-qs").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::GeneralFailure);
     }
 
@@ -1412,7 +1427,7 @@ rules: []
             public_key_attributes: vec![],
             seed: None,
         };
-        create_key_pair(&d, req, "CreateKeyPair:Sign", "corr-qs-ok").unwrap();
+        create_key_pair(&d, req, "CreateKeyPair:Sign", &AuthContext::open(), "corr-qs-ok").unwrap();
     }
 
     /// `deps_with` plus a real engine session — same pattern as
@@ -1494,7 +1509,7 @@ rules: []
             public_key_attributes: vec![],
             seed: None,
         };
-        let resp = create_key_pair(&d, req, "CreateKeyPair:Sign", "corr-leaf").unwrap();
+        let resp = create_key_pair(&d, req, "CreateKeyPair:Sign", &AuthContext::open(), "corr-leaf").unwrap();
         let priv_record = d.store.get(&resp.private_key_uid).unwrap().unwrap();
         let pub_record = d.store.get(&resp.public_key_uid).unwrap().unwrap();
 
@@ -1541,6 +1556,7 @@ rules: []
                 certificate_request: None,
                 attributes: vec![],
             },
+            &AuthContext::open(),
             "corr-certify-leaf",
         )
         .expect("Certify the composite leaf under the composite CA");
@@ -1555,7 +1571,7 @@ rules: []
 
         // ── Validate the resulting 2-cert chain end to end.
         assert_eq!(
-            super::super::validate::validate_chain(&d, &[leaf_cert_der.clone(), ca_cert_der], time::OffsetDateTime::now_utc()),
+            super::super::validate::validate_chain(d.engine_session, &[leaf_cert_der.clone(), ca_cert_der], time::OffsetDateTime::now_utc()),
             SignatureValidity::Valid,
             "a CreateKeyPair-generated composite leaf, certified by a composite CA, must validate"
         );
@@ -1565,7 +1581,7 @@ rules: []
         tampered[last] ^= 0xff;
         let ca_cert_der_2 = d.store.get(&ca_cert_uid).unwrap().unwrap().key_material.unwrap();
         assert_eq!(
-            super::super::validate::validate_chain(&d, &[tampered, ca_cert_der_2], time::OffsetDateTime::now_utc()),
+            super::super::validate::validate_chain(d.engine_session, &[tampered, ca_cert_der_2], time::OffsetDateTime::now_utc()),
             SignatureValidity::Invalid,
             "a tampered leaf signature must never come back Valid"
         );
