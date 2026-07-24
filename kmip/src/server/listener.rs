@@ -183,12 +183,18 @@ async fn handle_conn(
             .await
             .map_err(|e| ServerError::Io(std::io::Error::other(format!("dispatch task failed: {e}"))))?
         }
-        // KMIP 3.0 §6.4: a wire-decode failure (unknown tag, unknown enum
-        // value, malformed length, etc.) must produce a structured
+        // KMIP 3.0: a wire-decode failure (unknown tag, unknown enum value,
+        // malformed length, etc.) must produce a structured
         // `OperationFailed` response with `ResultReason = InvalidMessage`
-        // — NOT a TCP/TLS connection drop. Closing the socket without a
-        // response makes the client see a transport error instead of a
-        // proper protocol-level rejection (and breaks OASIS conformance).
+        // (see the Result Reason Enumeration's "Invalid Message" member,
+        // used across the per-op Error Handling tables) — NOT a TCP/TLS
+        // connection drop. Closing the socket without a response makes the
+        // client see a transport error instead of a proper protocol-level
+        // rejection (and breaks OASIS conformance). No single spec section
+        // states this general policy explicitly under either the CSD01 or
+        // WD19 baseline (checked both, 2026-07-23) — the "§6.4" citation
+        // this comment used to carry didn't exist and was removed rather
+        // than replaced with another guess.
         Err(e) => wire_error_response(&e),
     };
     let response_bytes = encode_response_message(&response);
@@ -197,7 +203,9 @@ async fn handle_conn(
     Ok(())
 }
 
-/// Build a KMIP 3.0 §6.4 error ResponseMessage for an unparseable request.
+/// Build a KMIP 3.0 error ResponseMessage for an unparseable request (see
+/// `handle_conn`'s error arm above for why there's no single spec section
+/// to cite here).
 ///
 /// Used when our codec can't decode the inbound frame — e.g. unknown
 /// algorithm enum value, missing required field, malformed Structure

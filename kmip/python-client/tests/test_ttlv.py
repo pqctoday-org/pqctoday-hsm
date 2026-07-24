@@ -3,6 +3,8 @@
 All tests are pure-Python, no network, no server.  Run with:
     cd kmip/python-client && python -m pytest tests/
 """
+import json
+
 import pytest
 
 from pqctoday_kmip._ttlv import (
@@ -335,3 +337,201 @@ def test_placeholder_raises():
     from pqctoday_kmip._ttlv import EncodeError
     with pytest.raises(EncodeError, match="unresolved placeholder"):
         encode_node(leaf("UniqueIdentifier", "TextString", "$placeholder"))
+
+
+# ── WD19 delta completeness + non-corruption guard (2026-07-23 re-audit, X1) ──
+#
+# Python-side counterpart to hub's wd19Delta.local.test.ts. Every entry in
+# _SPEC_EXTRACT_TAG_PATCHES/_SPEC_EXTRACT_PATCHES must be accounted for by
+# ONE of: the base CSD01 spec JSON itself (exact or case-insensitive _norm()
+# match — the fallback exists because several patches are the same
+# case-sensitive-norm-collision class of bug as the original H1/ReKeyKeyPair
+# defect, e.g. ReKeyKeyPair vs the spec's "Re-key Key Pair"), the WD19 delta
+# file, or an explicit justified exception below. This is the test that
+# would have caught the 2026-07-23 RC4 bug (RC4 patched to 0x00000005 —
+# DSA's real codepoint — instead of the real 0x00000016) and the two other
+# gaps found the same day (missing X25519MLKEM768/SecP256r1MLKEM768, and a
+# missing DeactivationReasonCode patch entirely) — this table was NOT
+# independently re-verified against the base JSON before this pass; it was
+# only assumed to mirror codepointTable.ts's copy, which it did not.
+import importlib.resources as _ir
+from pathlib import Path as _Path
+
+from pqctoday_kmip._ttlv import _SPEC_EXTRACT_PATCHES, _SPEC_EXTRACT_TAG_PATCHES, _norm
+
+_BASE_JSON = json.loads(
+    _ir.files("pqctoday_kmip").joinpath("data/kmip-spec-3.0-tags-enums.json").read_text(encoding="utf-8")
+)
+# Read directly from the canonical spec/ directory, not a vendored copy —
+# this file has no runtime consumer (CodepointTable.load() never reads it),
+# only this test does, so there is nothing to vendor for.
+_DELTA_JSON = json.loads(
+    (_Path(__file__).resolve().parents[2] / "spec/oasis-kmip-3.0/kmip-spec-3.0-wd19-delta.json").read_text(
+        encoding="utf-8"
+    )
+)
+
+# Enum-member patches with no match in base or delta, each with why it's
+# legitimately absent from both KMIP spec baselines. Independently
+# classified against THIS file's actual patch tables (see the 2026-07-23
+# session notes above) — not copied from the TS side's allowlist, though the
+# underlying facts happen to be identical since both files patch the same
+# real values.
+_ENUM_ALLOWLIST: dict[str, dict[str, str]] = {
+    "CryptographicAlgorithm": {
+        "DES3": "naming-convention alias for CSD01's '3DES' (0x00000002, digit-order differs, not a case issue)",
+        "FrodoKEM-640": "BSI TR-02102-1 vendor KEM, not an OASIS codepoint under either baseline",
+        "FrodoKEM-640-AES": "BSI TR-02102-1 vendor KEM, not an OASIS codepoint under either baseline",
+        "FrodoKEM-640-SHAKE": "BSI TR-02102-1 vendor KEM, not an OASIS codepoint under either baseline",
+        "FrodoKEM-976": "BSI TR-02102-1 vendor KEM, not an OASIS codepoint under either baseline",
+        "FrodoKEM-976-AES": "BSI TR-02102-1 vendor KEM, not an OASIS codepoint under either baseline",
+        "FrodoKEM-976-SHAKE": "BSI TR-02102-1 vendor KEM, not an OASIS codepoint under either baseline",
+        "FrodoKEM-1344": "BSI TR-02102-1 vendor KEM, not an OASIS codepoint under either baseline",
+        "FrodoKEM-1344-AES": "BSI TR-02102-1 vendor KEM, not an OASIS codepoint under either baseline",
+        "FrodoKEM-1344-SHAKE": "BSI TR-02102-1 vendor KEM, not an OASIS codepoint under either baseline",
+        "Classic-McEliece-6688128": (
+            "parameter-set-specific display name for CSD01's real 'McEliece' entry "
+            "(0x00000034) — same OASIS codepoint, not a vendor value"
+        ),
+        "ML-DSA-44-RSA2048-PSS": "LAMPS composite signature, vendor-extension range, not an OASIS codepoint",
+        "ML-DSA-65-ECDSA-P256": "LAMPS composite signature, vendor-extension range, not an OASIS codepoint",
+        "ML-DSA-87-ECDSA-P384": "LAMPS composite signature, vendor-extension range, not an OASIS codepoint",
+    },
+    "MaskGenerator": {
+        "MGF1": (
+            "CSD01 PDF-extraction typo — the spec JSON has 'MFG1' (transposed letters) "
+            "at the same codepoint (0x00000001), not a WD19 addition"
+        ),
+    },
+    "DeactivationReasonCode": {
+        "KeyCompromise": (
+            "CSD01's own 'Deactivation Reason Code' table is a PDF-extraction mismatch "
+            "(wrong table extracted) — verified against kmip30::ops::DeactivationReason "
+            "directly, not WD19-new"
+        ),
+        "CACompromise": "same CSD01 extraction defect as KeyCompromise above",
+        "AffiliationChanged": "same CSD01 extraction defect as KeyCompromise above",
+        "Superseded": "same CSD01 extraction defect as KeyCompromise above",
+        "CessationOfOperation": "same CSD01 extraction defect as KeyCompromise above",
+        "PrivilegeWithdrawn": "same CSD01 extraction defect as KeyCompromise above",
+    },
+    "PKCS11Function": {
+        "*": "PKCS#11 function-call constants for the bridge, not KMIP OASIS operations — out of CSD01/WD19 scope entirely",
+    },
+    "PKCS11ReturnCode": {
+        "*": "PKCS#11 return-code constants for the bridge, not KMIP OASIS values — out of CSD01/WD19 scope entirely",
+    },
+    "MaskGeneratorHashingAlgorithm": {
+        "*": (
+            "reuses the base JSON's 'Hashing Algorithm' enum values under a field-specific "
+            "name (SHA1=4 matches 'SHA-1'=4, etc. — verified 1:1) — not WD19-new, not vendor"
+        ),
+    },
+}
+
+# No unmatched TAG patches this pass (all 8 genuinely-new WD19 tags are in
+# the delta file; the other 7 SPEC_EXTRACT_TAG_PATCHES entries are redundant
+# aliases for CSD01 entries and match via exact/case-insensitive norm).
+_TAG_ALLOWLIST: dict[str, str] = {}
+
+
+def _find_match(name, pool):
+    """pool: iterable of (name, value). Exact _norm() match first, then a
+    case-insensitive fallback (same two-rule structure as the TS test —
+    Python's _norm() has the identical strip-non-alnum, case-sensitive
+    behavior, confirmed by reading the source before writing this)."""
+    n = _norm(name)
+    for pn, pv in pool:
+        if _norm(pn) == n:
+            return pv
+    nl = n.lower()
+    for pn, pv in pool:
+        if _norm(pn).lower() == nl:
+            return pv
+    return None
+
+
+def test_tag_patches_are_verified_aliases_delta_entries_or_explicit_exceptions():
+    base_tags = [(t["name"], int(t["codepoint"], 16)) for t in _BASE_JSON["tags"]]
+    delta_tags = [(t["name"], int(t["codepoint"], 16)) for t in _DELTA_JSON.get("tags", [])]
+    for name, patched_code in _SPEC_EXTRACT_TAG_PATCHES.items():
+        m = _find_match(name, base_tags)
+        if m is not None:
+            assert patched_code == m, f"tag '{name}' patch value diverges from CSD01's own value"
+            continue
+        m = _find_match(name, delta_tags)
+        if m is not None:
+            assert patched_code == m, f"tag '{name}' patch value diverges from the WD19 delta file"
+            continue
+        assert name in _TAG_ALLOWLIST, (
+            f"tag '{name}' (0x{patched_code:x}) is not in CSD01, not in the WD19 delta file, "
+            "and not an explicit exception — is this a new WD19-only value that needs adding "
+            "to kmip-spec-3.0-wd19-delta.json?"
+        )
+
+
+def test_enum_patches_are_verified_aliases_delta_entries_or_explicit_exceptions():
+    for enum_name, members in _SPEC_EXTRACT_PATCHES.items():
+        base_enum_key = next(
+            (
+                bn
+                for bn in _BASE_JSON["enums"]
+                if _norm(bn) == _norm(enum_name) or _norm(bn).lower() == _norm(enum_name).lower()
+            ),
+            None,
+        )
+        base_members = (
+            [(m["name"], int(m["value"], 16)) for m in _BASE_JSON["enums"][base_enum_key]]
+            if base_enum_key
+            else []
+        )
+        delta_enum_key = next(
+            (
+                dn
+                for dn in _DELTA_JSON.get("enums", {})
+                if _norm(dn) == _norm(enum_name) or _norm(dn).lower() == _norm(enum_name).lower()
+            ),
+            None,
+        )
+        delta_members = (
+            [(m["name"], int(m["value"], 16)) for m in _DELTA_JSON["enums"][delta_enum_key]]
+            if delta_enum_key
+            else []
+        )
+        allowlist_for_enum = _ENUM_ALLOWLIST.get(enum_name, {})
+
+        for member_name, patched_value in members.items():
+            m = _find_match(member_name, base_members)
+            if m is not None:
+                assert patched_value == m, (
+                    f"{enum_name}.{member_name} patch value diverges from CSD01's own value"
+                )
+                continue
+            m = _find_match(member_name, delta_members)
+            if m is not None:
+                assert patched_value == m, (
+                    f"{enum_name}.{member_name} patch value diverges from the WD19 delta file"
+                )
+                continue
+            allowed = allowlist_for_enum.get(member_name) or allowlist_for_enum.get("*")
+            assert allowed is not None, (
+                f"{enum_name}.{member_name} (0x{patched_value:x}) is not in CSD01, not in the "
+                "WD19 delta file, and not an explicit exception — is this a new WD19-only value "
+                "that needs adding to kmip-spec-3.0-wd19-delta.json?"
+            )
+
+
+def test_allowlist_is_not_vacuous():
+    """Sanity check the completeness test itself can fail: prove
+    _ENUM_ALLOWLIST is load-bearing by removing one real exception (DES3)
+    and confirming it has no other match, mirroring the TS test's approach."""
+    without_des3 = dict(_ENUM_ALLOWLIST["CryptographicAlgorithm"])
+    del without_des3["DES3"]
+
+    base_algos = [(m["name"], int(m["value"], 16)) for m in _BASE_JSON["enums"]["Cryptographic Algorithm"]]
+    delta_algos = [
+        (m["name"], int(m["value"], 16)) for m in _DELTA_JSON.get("enums", {}).get("Cryptographic Algorithm", [])
+    ]
+    assert _find_match("DES3", base_algos) is None, "DES3 unexpectedly matches CSD01 by name — probe assumption invalid"
+    assert _find_match("DES3", delta_algos) is None, "DES3 unexpectedly matches the WD19 delta — probe assumption invalid"
+    assert "DES3" not in without_des3, "probe removal failed"
