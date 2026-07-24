@@ -237,18 +237,63 @@ mod emscripten_exports {
     use super::*;
     use crate::state::GlobalState;
 
+    /// MEMFS path the atexit hook (`pqctoday_hsm_atexit_stash`, below) and
+    /// `stash_before_finalize` both write to — the primary handoff for any
+    /// embedder reached via `callMain` (the real OpenSSL CLI), not just
+    /// direct C-API calls. See `pqctoday_hsm_atexit_stash`'s doc comment for
+    /// why this is a file, not the STASH pull further down.
+    pub const HSM_STATE_FILE_PATH: &str = "/tmp/.pqctoday_hsm_state.bin";
+
     lazy_static::lazy_static! {
-        /// Snapshot parked by `stash_before_finalize` so it survives the
-        /// `C_Finalize` wipe until the embedder reads it out (the module's
-        /// linear memory stays readable after `callMain` returns).
+        /// Snapshot parked by `stash_before_finalize`, for callers that can
+        /// pull it out via `pqctoday_hsm_state_take` while still inside a
+        /// LIVE module instance that never called `callMain` — see that
+        /// function's doc comment for why this is NOT safe for a
+        /// callMain-based caller.
         static ref STASH: GlobalState<Option<Vec<u8>>> = GlobalState::new(None);
+    }
+
+    fn write_state_file() {
+        let blob = serialize_token_state();
+        let _ = std::fs::write(HSM_STATE_FILE_PATH, &blob);
+    }
+
+    /// C-callable, unconditional stash — call this from a process-wide
+    /// `atexit()` hook, NOT from `C_Finalize`. See the doc comment below for
+    /// why: `C_Finalize` is only reachable from a caller that explicitly
+    /// tears the provider down, which the real openssl.wasm CLI embedding
+    /// never does.
+    ///
+    /// Deliberately unconditional (no `require_init!` gate): if the engine
+    /// was never used this command, `serialize_token_state()` just produces
+    /// an empty-but-valid snapshot — harmless to overwrite the file with.
+    #[unsafe(no_mangle)]
+    pub extern "C" fn pqctoday_hsm_atexit_stash() {
+        write_state_file();
     }
 
     /// Called by `ffi::C_Finalize` (emscripten builds only) BEFORE it wipes
     /// the object store. Deliberately NOT compiled on native: parking key
     /// material past finalize would defeat the zeroize pass there.
+    ///
+    /// CORRECTED 2026-07-24, after this was found not to fire in practice:
+    /// this function is reachable ONLY when something explicitly calls
+    /// `OSSL_PROVIDER_unload()` on the pkcs11 provider (verified directly —
+    /// `C_Finalize` works correctly when called that way) — but
+    /// `OPENSSL_cleanup()`, which DOES run at the end of every `callMain`
+    /// (confirmed empirically), does NOT unload providers registered via an
+    /// explicit `OSSL_PROVIDER_load()` call (as `pqctoday_cms_init()` does);
+    /// it has no code path that even mentions "provider" or "libctx". So in
+    /// the real openssl.wasm CLI embedding, this function is NEVER called
+    /// during a normal command's lifecycle — the real handoff mechanism is
+    /// `pqctoday_hsm_atexit_stash` above, registered via a genuine C
+    /// `atexit()` in `cms_provider_init.c`, which reaches the SAME MEMFS
+    /// file. This function is kept for the one caller where it IS correct:
+    /// an embedder that explicitly calls `pqctoday_cms_shutdown()` (which
+    /// does call `OSSL_PROVIDER_unload`) before letting `callMain` return.
     pub fn stash_before_finalize() {
         let blob = serialize_token_state();
+        let _ = std::fs::write(HSM_STATE_FILE_PATH, &blob);
         STASH.with(|s| *s.borrow_mut() = Some(blob));
     }
 
@@ -256,6 +301,9 @@ mod emscripten_exports {
     /// otherwise a snapshot of live state. Ownership transfers to the
     /// caller — copy it out, then call `pqctoday_hsm_state_free`.
     /// Returns NULL (len 0) only on alloc-level impossibilities.
+    ///
+    /// SAFE ONLY when called on a module instance that has not (yet)
+    /// returned from a `callMain` invocation — see `stash_before_finalize`.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn pqctoday_hsm_state_take(len_out: *mut u32) -> *mut u8 {
         if len_out.is_null() {
