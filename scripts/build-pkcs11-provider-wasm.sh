@@ -50,6 +50,14 @@ if [[ -f "$OUTPUT_AR" && "${FORCE:-0}" != "1" ]]; then
     exit 0
 fi
 
+# config.h is produced by upstream's meson build, which we bypass (we compile
+# the sources directly with emcc), and it is .gitignore'd — so a clean
+# checkout would fail on the first source file with "'config.h' file not
+# found". Generate it here. Cheap and idempotent, so regenerate every run:
+# it encodes which PKCS#11 engine is being linked, and a stale one would
+# mislabel the provider in the UI.
+bash "$ROOT/scripts/gen-pkcs11-provider-config-h.sh"
+
 echo "[p11prov-wasm] emcc        : $(emcc --version 2>&1 | head -1)"
 echo "[p11prov-wasm] OpenSSL WASM: $OPENSSL_WASM"
 echo "[p11prov-wasm] build dir   : $BUILD_DIR"
