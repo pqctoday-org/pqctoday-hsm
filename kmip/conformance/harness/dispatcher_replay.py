@@ -412,7 +412,7 @@ def find_child(node: TtlvNode, tag: str) -> TtlvNode | None:
 # Format: tag-name → spec citation. Codec citations point to PDF page
 # numbers in `spec/oasis-kmip-3.0/kmip-profiles-v3.0.pdf`.
 _VARIABLE_ITEM_TAGS: dict[str, str] = {
-    # Envelope fields the main spec §6.4 marks as transient.
+    # Envelope fields the main spec §8.2.3 marks as transient.
     _norm("TimeStamp"): "§4.1.1 item 6 — Time Stamp",
     _norm("ServerCorrelationValue"): "§4.1.1 item 18",
     _norm("ClientCorrelationValue"): "§4.1.1 item 19",
@@ -457,7 +457,7 @@ def is_volatile_tag(tag: str) -> bool:
 
 
 # A handful of §4.1.1 Variable Items are ALSO optional-presence per the
-# main KMIP 3.0 spec §6.4 Message-Envelope rules — the server MAY emit
+# KMIP 3.0 §8.2.3 Response Batch Item structure table — the server MAY emit
 # them or omit them. Different OASIS XML fixtures pick one form or the
 # other for the same op, so the comparator must tolerate presence/absence
 # in BOTH directions: drop these tags from both sides before structural

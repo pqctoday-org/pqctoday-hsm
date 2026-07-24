@@ -153,6 +153,22 @@ _SPEC_EXTRACT_PATCHES: dict[str, dict[str, int]] = {
     "CertificateRequestType": {"Crmf": 0x00000001, "PKCS10": 0x00000002, "PEM": 0x00000003},
     # Validate's three-way answer - matches kmip30::ops::SignatureValidity.
     "ValidityIndicator": {"Valid": 0x00000001, "Invalid": 0x00000002, "Unknown": 0x00000003},
+    # Deactivate's 'Deactivation Reason Code' - found missing from this file
+    # entirely 2026-07-23 (codepointTable.ts has always had it). Without this
+    # patch, lookups fell through to the base JSON's own corrupted
+    # extraction for this table (wrong table matched during PDF extraction -
+    # 4 bogus members, not the real 7). Values verified against
+    # kmip30::ops::DeactivationReason directly (mirrors RevocationReason's
+    # codepoints exactly, both from the same table shape).
+    "DeactivationReasonCode": {
+        "Unspecified":          0x00000001,
+        "KeyCompromise":        0x00000002,
+        "CACompromise":         0x00000003,
+        "AffiliationChanged":   0x00000004,
+        "Superseded":           0x00000005,
+        "CessationOfOperation": 0x00000006,
+        "PrivilegeWithdrawn":   0x00000007,
+    },
     "CredentialType": {
         "UsernameAndPassword": 0x00000001,
         "Device":              0x00000002,
@@ -164,7 +180,18 @@ _SPEC_EXTRACT_PATCHES: dict[str, dict[str, int]] = {
     "CryptographicAlgorithm": {
         "DES":  0x00000001,
         "DES3": 0x00000002,
-        "RC4":  0x00000005,
+        # Found 2026-07-23 (Python-side re-check of the WD19-delta
+        # completeness work done on codepointTable.ts's copy of this table):
+        # was 0x00000005 — that's DSA's codepoint, not RC4's. Real RC4 is
+        # 0x00000016 per the spec extraction's own 'RC4' entry.
+        "RC4":  0x00000016,
+        # WD19 hybrid KEMs — real OASIS codepoints (0x5C/0x5D), just newer
+        # than the vendored spec-extraction JSON's CSD01 baseline (stops at
+        # 0x4A). Matches kmip/src/kmip30/algos.rs's KmipAlgorithm::X25519MlKem768
+        # / SecP256r1MlKem768 and codepointTable.ts's copy of this same
+        # patch exactly. Found missing entirely from this file 2026-07-23.
+        "X25519MLKEM768":    0x0000005C,
+        "SecP256r1MLKEM768": 0x0000005D,
         # BSI TR-02102-1 vendor KEMs (2026-07-06) — not in the published-3.0
         # spec JSON since they're vendor extensions, not OASIS codepoints
         # (Classic McEliece's 0x34 is a real OASIS value; FrodoKEM's

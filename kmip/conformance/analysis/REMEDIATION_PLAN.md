@@ -304,7 +304,7 @@ Sensitive boolean inner fields.
 - KMIP 3.0 Spec §8.1.3 / §8.2.3 — Batch Items are positionally
   correlated. The server SHALL return one response BatchItem per
   request BatchItem, in order, including failure responses.
-- §6.4 / §6.4.1 Batch Error Continuation Option — `Stop` (default),
+- §9.5 / §9.5.1 Batch Error Continuation Option — `Stop` (default),
   `Undo`, `Continue` modes are all defined; the request header in
   AX-M-1 sets `<BatchErrorContinuationOption value="Undo"/>` but a
   decode error before reaching the per-item dispatch means the
@@ -478,7 +478,7 @@ provided the test corpus has no further hidden interactions.
    the rest of the corpus uses? Or do we need full TransparentDSA
    round-trip?
 
-2. **Family R7 / Batch error continuation.** Spec §6.4.1 defines
+2. **Family R7 / Batch error continuation.** Spec §9.5.1 defines
    `Stop`, `Undo`, `Continue`. AX-M-* uses `Undo`. Implementing `Undo`
    requires journaling each BatchItem's side effects so we can roll
    them back when a later item fails. **Question:** is `Stop` (default)

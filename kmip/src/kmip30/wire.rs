@@ -836,7 +836,7 @@ fn header_to_frame(h: &ResponseHeader) -> TtlvFrame {
     TtlvFrame::new(Tag(tags::ResponseHeader), Value::Structure(children))
 }
 
-/// Encode a KMIP 3.0 §6.4.2 response BatchItem.
+/// Encode a KMIP 3.0 §8.2.3 response BatchItem.
 ///
 /// Spec-mandated child sequencing depends on `ResultStatus`:
 ///
