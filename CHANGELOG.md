@@ -6,7 +6,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
-## [Unreleased]
+## [0.15.1] — 2026-07-24
 
 ### Fixed
 
@@ -21,6 +21,27 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   without its classification tag, BSI FrodoKEM/Classic-McEliece without
   the hybrid-partner tag) as allows. No production code changed; the
   helper now recognizes all 5 deny-mapped reasons.
+- **KMIP 3.0 spec-citation cleanup (2026-07-23/24 playground re-audit).**
+  Nine "§6.4" citations across the conformance harness
+  (`dispatcher_replay.py`), the wire encoder (`wire.rs`), the TLS listener
+  (`listener.rs`), and a planning doc cited a section that doesn't exist
+  under either the CSD01 or WD19 baseline — verified against both spec
+  documents directly. Eight now cite the real section (§8.2.3 Response
+  Batch Item, or §9.5 Batch Error Continuation); `listener.rs`'s general
+  wire-decode-failure policy statement doesn't map to any single spec
+  section under either baseline, so it's now stated without a false
+  citation rather than guessing one.
+- **Python conformance client (`_ttlv.py`): three codepoint-table gaps
+  found and closed.** `RC4` was mapped to DSA's real codepoint instead of
+  its own (mirrors a bug already fixed on the hub side);
+  `X25519MLKEM768`/`SecP256r1MLKEM768` were missing from the algorithm
+  table entirely; `DeactivationReasonCode` had no patch at all and was
+  silently falling through to the base spec extraction's own corrupted
+  4-member table for that enum. All three were unreachable from any
+  current test or client code path — no behavior changed for anything
+  that runs today — fixed anyway, and a new completeness test
+  (`test_ttlv.py`) now fails the build if a future patch-table edit
+  reintroduces this class of drift.
 
 ## [0.15.0] — 2026-07-18
 
