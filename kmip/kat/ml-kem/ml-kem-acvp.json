@@ -3,6 +3,11 @@
   "algorithm": "ML-KEM",
   "mode": "encapDecap",
   "revision": "1.0",
+  "_provenance": {
+    "note": "Source/download-date/ACVTS-release not recorded when this file was added \u2014 unlike this repo's other KAT families (see e.g. kat/frodokem/README.md), which all document exact provenance. Re-established here as an honest 'unknown, needs re-verification' rather than a guessed source (2026-07-24 CSD02 remediation, finding L).",
+    "revision_meaning": "the 'revision' field above is the ACVP algorithm-registration/JSON-schema revision (FIPS 203/204 final), NOT a vector-set version or generation date.",
+    "known_gap": "test groups below carry no 'signatureInterface'/'preHash'/'externalMu' fields \u2014 the ACVP internal-interface-only shape. NIST states vectors from before ACVTS v1.1.0.38 cannot be used with later releases; re-pulling from a current ACVP-Server generator run (not attempted this session \u2014 needs the reference generator or live ACVP demo-server access, neither available here) would both fix that and let this file test the CSD02 pre-hash CryptographicAlgorithm values added in kmip30/algos.rs."
+  },
   "testGroups": [
     {
       "tgId": 1,
