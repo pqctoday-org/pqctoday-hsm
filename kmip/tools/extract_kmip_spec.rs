@@ -65,7 +65,11 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 use std::process::ExitCode;
 
-const SPEC_HTML: &str = "spec/oasis-kmip-3.0/kmip-spec-v3.0.html";
+// Re-pointed at CSD02 (2026-05-07) 2026-07-24 — CSD01 (2024-08-23) is
+// superseded; the WD19 draft that briefly stood in for it (see
+// KMIP_3_0_DELTA.md) was never itself published and is no longer needed
+// once a real HTML export of the newer baseline exists.
+const SPEC_HTML: &str = "spec/oasis-kmip-3.0/kmip-spec-v3.0-csd02.html";
 const OUTPUT_JSON: &str = "spec/oasis-kmip-3.0/kmip-spec-3.0-tags-enums.json";
 
 #[derive(Serialize)]
@@ -257,13 +261,20 @@ fn extract_enum_name(heading: &str) -> Option<String> {
     if name.is_empty() { None } else { Some(name) }
 }
 
-/// Concatenate all descendant text nodes of an element.
+/// Concatenate all descendant text nodes of an element, normalizing
+/// whitespace to single spaces. CSD02's HTML export (unlike CSD01's) wraps
+/// some multi-word headings/cells across a line break inside the element —
+/// naive concatenation left a literal `"Derivation\nMethod"` instead of
+/// `"Derivation Method"`, silently splitting several enum tables under a
+/// name distinct from their real one (2026-07-24, found regenerating the
+/// extraction against CSD02: 9 enums appeared "missing" post-swap, but every
+/// member was present — just keyed under the un-normalized heading text).
 fn element_plain_text(e: scraper::ElementRef) -> String {
     let mut s = String::new();
     for t in e.text() {
         s.push_str(t);
     }
-    s
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn hex_sha256(bytes: &[u8]) -> String {
