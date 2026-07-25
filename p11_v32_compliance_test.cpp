@@ -2464,16 +2464,19 @@ void test_ecdh_derivations() {
         rv = fl->C_DeriveKey(hSess, &deriveMech, hPriv, deriveTmpl, 4, &hSecret);
         record_result("ECDH", "Derive_X25519", rv == CKR_OK ? "PASS" : "FAIL", "RV=" + std::to_string(rv));
         
-        // Cofactor variant: only assert success if the token ADVERTISES
-        // CKM_ECDH1_COFACTOR_DERIVE; otherwise record an explicit SKIP.
-        // CKR_MECHANISM_INVALID must never silently count as PASS.
+        // Cofactor variant against an X25519 (CKK_EC_MONTGOMERY) key MUST be
+        // REJECTED: PKCS#11 v3.2 §6.3.18 Table 79 restricts
+        // CKM_ECDH1_COFACTOR_DERIVE to CKK_EC only (Table 78's plain-ECDH
+        // entry is the one that allows CKK_EC_MONTGOMERY). This used to
+        // assert CKR_OK here, which was itself non-conformant — see the
+        // 2026-07-25 C++/Rust PKCS#11 parity remediation.
         CK_MECHANISM cofactorMech = { CKM_ECDH1_COFACTOR_DERIVE, &ecdhParams, sizeof(ecdhParams) };
         CK_OBJECT_HANDLE hSecretCofactor;
         if (mech_advertised(CKM_ECDH1_COFACTOR_DERIVE)) {
             rv = fl->C_DeriveKey(hSess, &cofactorMech, hPriv, deriveTmpl, 4, &hSecretCofactor);
-            record_result("ECDH", "Derive_X25519_Cofactor", rv == CKR_OK ? "PASS" : "FAIL", "RV=" + std::to_string(rv));
+            record_result("ECDH", "Derive_X25519_Cofactor_Rejected", rv == CKR_KEY_TYPE_INCONSISTENT ? "PASS" : "FAIL", "RV=" + std::to_string(rv));
         } else {
-            record_result("ECDH", "Derive_X25519_Cofactor", "SKIP", "CKM_ECDH1_COFACTOR_DERIVE not advertised");
+            record_result("ECDH", "Derive_X25519_Cofactor_Rejected", "SKIP", "CKM_ECDH1_COFACTOR_DERIVE not advertised");
         }
     }
 }

@@ -5856,6 +5856,18 @@ CK_RV SoftHSM::deriveEDDSA
 {
 	*phKey = CK_INVALID_HANDLE;
 
+	// PKCS#11 v3.2 §6.3.18, Table 79 ("ECDH with cofactor: Allowed Key
+	// Types") restricts CKM_ECDH1_COFACTOR_DERIVE to CKK_EC — unlike plain
+	// ECDH (§6.3.17, Table 78), which allows both CKK_EC and
+	// CKK_EC_MONTGOMERY. This function is only ever reached for
+	// CKK_EC_MONTGOMERY/CKK_EC_EDWARDS base keys (see the CKA_KEY_TYPE
+	// dispatch in C_DeriveKey), so the cofactor variant is never valid here.
+	if (pMechanism->mechanism == CKM_ECDH1_COFACTOR_DERIVE)
+	{
+		DEBUG_MSG("CKM_ECDH1_COFACTOR_DERIVE is not valid for CKK_EC_MONTGOMERY/CKK_EC_EDWARDS keys (PKCS#11 v3.2 Table 79)");
+		return CKR_KEY_TYPE_INCONSISTENT;
+	}
+
 	if ((pMechanism->pParameter == NULL_PTR) ||
 	    (pMechanism->ulParameterLen != sizeof(CK_ECDH1_DERIVE_PARAMS)))
 	{

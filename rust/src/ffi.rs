@@ -6594,6 +6594,19 @@ pub fn C_DeriveKey(
                 };
                 let algo = get_object_algo_family(h_base_key);
                 let curve = get_object_param_set(h_base_key);
+                // PKCS#11 v3.2 §6.3.18, Table 79 ("ECDH with cofactor:
+                // Allowed Key Types") restricts CKM_ECDH1_COFACTOR_DERIVE to
+                // CKK_EC — unlike plain ECDH (§6.3.17, Table 78), which also
+                // allows CKK_EC_MONTGOMERY (X25519/X448). Reject up front
+                // rather than silently computing the same result standard
+                // ECDH1_DERIVE would (RFC 7748 clamping already applies its
+                // own cofactor clearing, so the math wouldn't even be wrong —
+                // but the mechanism is not spec-valid for this key type).
+                if mech_type == CKM_ECDH1_COFACTOR_DERIVE
+                    && (algo == ALGO_ECDH_X25519 || algo == ALGO_ECDH_X448)
+                {
+                    return CKR_KEY_TYPE_INCONSISTENT;
+                }
                 let shared = match (algo, curve) {
                     (ALGO_ECDSA, CURVE_P256) | (ALGO_ECDH_P256, _) | (0, CURVE_P256) => {
                         let sk = match p256::NonZeroScalar::try_from(our_sk_bytes.as_slice()) {
@@ -14093,5 +14106,150 @@ mod generic_prehash_mech_ffi_tests {
             C_SignInit(session, m.as_mut_ptr() as *mut u8, priv_h),
             CKR_MECHANISM_PARAM_INVALID
         );
+    }
+}
+
+#[cfg(test)]
+mod ecdh_cofactor_ffi_tests {
+    //! PKCS#11 v3.2 §6.3.18, Table 79 ("ECDH with cofactor: Allowed Key
+    //! Types") restricts CKM_ECDH1_COFACTOR_DERIVE to CKK_EC — unlike plain
+    //! ECDH (§6.3.17, Table 78), which also allows CKK_EC_MONTGOMERY
+    //! (X25519/X448). Exercises the real C_DeriveKey FFI path (not the
+    //! mechanism-agnostic native::agree helper, which has no way to select
+    //! cofactor mode at all) to confirm the gate added 2026-07-25.
+    use super::*;
+    use crate::native::keygen::{generate_ecdh_keypair, generate_x25519_keypair, EccCurve};
+    use crate::native::test_lock;
+    use crate::state::{get_ec_point_sec1, get_object_value};
+
+    fn setup() -> u32 {
+        let _ = crate::native::session::finalize();
+        crate::native::session::init().unwrap();
+        crate::native::session::bootstrap_default_token(0, "so", "user", "ecdh-cofactor-test").unwrap()
+    }
+
+    /// Native-width CK_MECHANISM(mechanism, &CK_ECDH1_DERIVE_PARAMS) pair,
+    /// matching the `[usize; N]` convention this file's own C_DeriveKey ECDH
+    /// branch reads (`kdf, ulSharedDataLen, pSharedData, ulPublicDataLen,
+    /// pPublicData`, all native-width per that code's own comment).
+    fn ecdh_mech(mechanism: u32, peer_public: &[u8]) -> ([usize; 3], [usize; 5]) {
+        let params: [usize; 5] = [
+            1, /* CKD_NULL */
+            0,
+            0,
+            peer_public.len(),
+            peer_public.as_ptr() as usize,
+        ];
+        let m: [usize; 3] = [mechanism as usize, 0 /* filled by caller */, std::mem::size_of::<[usize; 5]>()];
+        (m, params)
+    }
+
+    /// Minimal derived-key template: generic secret, 32 bytes, extractable —
+    /// matches the shape `C_DeriveKey`'s ECDH branch expects (CKA_VALUE_LEN
+    /// drives `key_len`; the class/type/extractable trio lets the resulting
+    /// object be created and read back). Inlined per-test rather than
+    /// factored into a helper: the attribute-value locals must live in the
+    /// SAME stack frame as `tmpl` (`CK_ATTRIBUTE.pValue` points at them, and
+    /// a `macro_rules!` expansion is hygienic in Rust — `let` bindings it
+    /// introduces are not visible to hand-written code after the
+    /// invocation, unlike a C macro).
+
+    #[test]
+    fn cofactor_derive_rejected_for_x25519_key() {
+        let _guard = test_lock::acquire();
+        let session = setup();
+        let (_pub_a, priv_a) = generate_x25519_keypair(session, b"a", "a").unwrap();
+        let (pub_b, _priv_b) = generate_x25519_keypair(session, b"b", "b").unwrap();
+        let peer_pub = get_object_value(pub_b).unwrap(); // X25519 public = raw 32-byte point
+
+        let (mut m, mut params) = ecdh_mech(CKM_ECDH1_COFACTOR_DERIVE, &peer_pub);
+        m[1] = params.as_mut_ptr() as usize;
+        let class: u32 = CKO_SECRET_KEY;
+        let key_type: u32 = CKK_GENERIC_SECRET;
+        let extractable: u8 = 1; // CK_TRUE
+        let value_len: u32 = 32;
+        let mut tmpl: [usize; 12] = [
+            CKA_CLASS as usize, &class as *const u32 as usize, std::mem::size_of::<u32>(),
+            CKA_KEY_TYPE as usize, &key_type as *const u32 as usize, std::mem::size_of::<u32>(),
+            CKA_EXTRACTABLE as usize, &extractable as *const u8 as usize, std::mem::size_of::<u8>(),
+            CKA_VALUE_LEN as usize, &value_len as *const u32 as usize, std::mem::size_of::<u32>(),
+        ];
+        let mut key_handle: u32 = 0;
+        let rv = C_DeriveKey(
+            session,
+            m.as_mut_ptr() as *mut u8,
+            priv_a,
+            tmpl.as_mut_ptr() as *mut u8,
+            4,
+            &mut key_handle,
+        );
+        assert_eq!(rv, CKR_KEY_TYPE_INCONSISTENT, "cofactor mode is not valid for CKK_EC_MONTGOMERY (Table 79)");
+    }
+
+    #[test]
+    fn standard_derive_still_works_for_x25519_key() {
+        // Regression guard: the new gate must not have broken the valid,
+        // already-working CKM_ECDH1_DERIVE path for the same key type.
+        let _guard = test_lock::acquire();
+        let session = setup();
+        let (_pub_a, priv_a) = generate_x25519_keypair(session, b"c", "c").unwrap();
+        let (pub_b, _priv_b) = generate_x25519_keypair(session, b"d", "d").unwrap();
+        let peer_pub = get_object_value(pub_b).unwrap();
+
+        let (mut m, mut params) = ecdh_mech(CKM_ECDH1_DERIVE, &peer_pub);
+        m[1] = params.as_mut_ptr() as usize;
+        let class: u32 = CKO_SECRET_KEY;
+        let key_type: u32 = CKK_GENERIC_SECRET;
+        let extractable: u8 = 1; // CK_TRUE
+        let value_len: u32 = 32;
+        let mut tmpl: [usize; 12] = [
+            CKA_CLASS as usize, &class as *const u32 as usize, std::mem::size_of::<u32>(),
+            CKA_KEY_TYPE as usize, &key_type as *const u32 as usize, std::mem::size_of::<u32>(),
+            CKA_EXTRACTABLE as usize, &extractable as *const u8 as usize, std::mem::size_of::<u8>(),
+            CKA_VALUE_LEN as usize, &value_len as *const u32 as usize, std::mem::size_of::<u32>(),
+        ];
+        let mut key_handle: u32 = 0;
+        let rv = C_DeriveKey(
+            session,
+            m.as_mut_ptr() as *mut u8,
+            priv_a,
+            tmpl.as_mut_ptr() as *mut u8,
+            4,
+            &mut key_handle,
+        );
+        assert_eq!(rv, CKR_OK, "plain ECDH1_DERIVE must still succeed for CKK_EC_MONTGOMERY (Table 78)");
+    }
+
+    #[test]
+    fn cofactor_derive_still_works_for_p256_key() {
+        // The valid case (CKK_EC) must be unaffected by the new gate.
+        let _guard = test_lock::acquire();
+        let session = setup();
+        let (_pub_a, priv_a) = generate_ecdh_keypair(session, EccCurve::P256, b"e", "e").unwrap();
+        let (pub_b, _priv_b) = generate_ecdh_keypair(session, EccCurve::P256, b"f", "f").unwrap();
+        let peer_pub = get_ec_point_sec1(pub_b).unwrap();
+
+        let (mut m, mut params) = ecdh_mech(CKM_ECDH1_COFACTOR_DERIVE, &peer_pub);
+        m[1] = params.as_mut_ptr() as usize;
+        let class: u32 = CKO_SECRET_KEY;
+        let key_type: u32 = CKK_GENERIC_SECRET;
+        let extractable: u8 = 1; // CK_TRUE
+        let value_len: u32 = 32;
+        let mut tmpl: [usize; 12] = [
+            CKA_CLASS as usize, &class as *const u32 as usize, std::mem::size_of::<u32>(),
+            CKA_KEY_TYPE as usize, &key_type as *const u32 as usize, std::mem::size_of::<u32>(),
+            CKA_EXTRACTABLE as usize, &extractable as *const u8 as usize, std::mem::size_of::<u8>(),
+            CKA_VALUE_LEN as usize, &value_len as *const u32 as usize, std::mem::size_of::<u32>(),
+        ];
+        let mut key_handle: u32 = 0;
+        let rv = C_DeriveKey(
+            session,
+            m.as_mut_ptr() as *mut u8,
+            priv_a,
+            tmpl.as_mut_ptr() as *mut u8,
+            4,
+            &mut key_handle,
+        );
+        assert_eq!(rv, CKR_OK, "cofactor mode must remain valid for CKK_EC (P-256)");
     }
 }
