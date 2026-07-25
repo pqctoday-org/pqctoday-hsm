@@ -6,6 +6,61 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.17.0] — 2026-07-25
+
+C++/Rust PKCS#11 v3.2 parity work, prompted by a full coverage audit of
+both engines validated against the ratified OASIS PKCS#11 v3.2 Standard
+text (not just each engine's own conformance report). Full detail in
+`docs/gap-analysis-cpp-rust-realignment-2026-07-25.md` and
+`docs/remediation-plan-cpp-rust-pkcs11-parity-2026-07-25.md`.
+
+### Fixed
+
+- **`CKM_ECDH1_COFACTOR_DERIVE` was silently accepted against X25519/X448
+  keys in both engines** — PKCS#11 v3.2 §6.3.18 Table 79 restricts the
+  cofactor variant to `CKK_EC` only (Weierstrass curves); Table 78's plain
+  ECDH is the one that also allows `CKK_EC_MONTGOMERY`. Neither engine's
+  math was actually producing a wrong answer (P-256/384/521 have cofactor
+  h=1, and X25519/X448 already fold cofactor-clearing into RFC 7748's
+  scalar clamping regardless of which mechanism name invoked it), but the
+  mechanism should never have been reachable for these key types. C++
+  (`SoftHSM::deriveEDDSA`) and Rust (`ffi.rs`'s `C_DeriveKey`) now both
+  reject it with `CKR_KEY_TYPE_INCONSISTENT`.
+
+### Added
+
+- **RSA sign/verify-with-recovery (Rust engine)** — `C_SignRecoverInit`/
+  `C_SignRecover`/`C_VerifyRecoverInit`/`C_VerifyRecover` (PKCS#11 v3.2
+  §5.13), `CKM_RSA_PKCS`/`CKM_RSA_X_509` only, matching the C++ engine's
+  long-standing support for this (previously a hard
+  `CKR_FUNCTION_NOT_SUPPORTED` stub in Rust). `CKM_RSA_X_509` had no prior
+  support at all in the Rust engine — added the raw RSASP1/RSAVP1
+  primitives via a new `rsa` crate `hazmat` feature. Verified byte-exact
+  against 78 real NIST ACVP `RSA-SignaturePrimitive-2.0` test vectors plus
+  12 deliberately out-of-range negative cases (vectors now checked in at
+  `rust/kat/rsa-signature-primitive-acvp.json`).
+- **ECDH-as-KEM under `C_EncapsulateKey`/`C_DecapsulateKey` (C++ engine)**
+  — `CKM_ECDH1_DERIVE` is spec-legal there (§6.3.17 Table 78: "an
+  ephemeral key pair is generated"), for both `CKK_EC` and
+  `CKK_EC_MONTGOMERY`, but this engine's KEM functions previously accepted
+  only `CKM_ML_KEM`. This is the real building block a caller needs to
+  construct a hybrid classical+PQC KEM (e.g. the TLS 1.3
+  `X25519MLKEM768` group) against this engine using only standard PKCS#11
+  calls — there is no dedicated "hybrid KEM" mechanism in the PKCS#11
+  spec, and the Rust engine's own hybrid support is KMIP-layer
+  orchestration over the same kind of ordinary KEM calls, not a PKCS#11
+  mechanism of its own. Also fixed a related gap found along the way:
+  `CKA_ENCAPSULATE`/`CKA_DECAPSULATE` were only recognized as legal
+  attributes on ML-KEM key objects, so generating an EC/X25519 key with
+  either attribute set failed outright. Verified with a new end-to-end
+  test constructing the full `X25519MLKEM768` combination through real
+  PKCS#11 calls (two independent `C_EncapsulateKey` calls +
+  `CKM_CONCATENATE_BASE_AND_KEY`, then the reverse on decapsulate) —
+  sender and receiver reconstruct an identical shared secret.
+
+Full native compliance suite: 324/324 passing (up from 315). Full Rust
+lib test suite: 319/319 passing (up from 312). Zero regressions in either.
+
 ## [0.16.0] — 2026-07-25
 
 `kmip`/`rust`/`wasm` bump together (0.15.1 → 0.16.0); `kmip/python-client`

@@ -1,6 +1,6 @@
 [package]
 name        = "pqctoday-kmip"
-version     = "0.16.0"
+version     = "0.17.0"
 edition     = "2024"
 license     = "MIT"
 description = "KMIP 3.0 PQC + classical key management wrapper over pqctoday-hsm PKCS#11"

@@ -447,6 +447,14 @@ private:
 	);
 	CK_RV getMLKEMPrivateKey(MLKEMPrivateKey* privateKey, Token* token, OSObject* key);
 	CK_RV getMLKEMPublicKey(MLKEMPublicKey* publicKey, Token* token, OSObject* key);
+	// ECDH-as-KEM (2026-07-25) — CKM_ECDH1_DERIVE under C_EncapsulateKey/
+	// C_DecapsulateKey (PKCS#11 v3.2 Table 78), CKK_EC or CKK_EC_MONTGOMERY.
+	CK_RV encapsulateECDH(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hPublicKey,
+		CK_ATTRIBUTE_PTR pTemplate, CK_ULONG ulAttributeCount,
+		CK_BYTE_PTR pCiphertext, CK_ULONG_PTR pulCiphertextLen, CK_OBJECT_HANDLE_PTR phKey);
+	CK_RV decapsulateECDH(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hPrivateKey,
+		CK_ATTRIBUTE_PTR pTemplate, CK_ULONG ulAttributeCount,
+		CK_BYTE_PTR pCiphertext, CK_ULONG ulCiphertextLen, CK_OBJECT_HANDLE_PTR phKey);
 	CK_RV getECDHPublicKey(ECPublicKey* publicKey, ECPrivateKey* privateKey, ByteString& pubData);
 	CK_RV getEDDHPublicKey(EDPublicKey* publicKey, EDPrivateKey* privateKey, ByteString& pubData);
 	CK_RV getSymmetricKey(SymmetricKey* skey, Token* token, OSObject* key);

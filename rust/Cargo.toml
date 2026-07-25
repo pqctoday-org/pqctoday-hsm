@@ -1,6 +1,6 @@
 [package]
 name = "softhsmrustv3"
-version = "0.16.0"
+version = "0.17.0"
 edition = "2024"
 description = "A native Rust WebAssembly clone of SoftHSMv3"
 
@@ -90,7 +90,14 @@ p384 = { version = "0.13", features = ["ecdsa", "ecdh"] }
 p521 = { version = "0.13", features = ["ecdsa", "ecdh"] }
 k256 = { version = "0.13", features = ["ecdsa", "ecdh"] }
 pkcs8 = { version = "0.11.0-rc.11", features = ["alloc"] }  # TODO: upgrade when stable release available
-rsa = { version = "0.9", features = ["sha2"] }
+# "hazmat" — the raw RSASP1/RSAVP1 modexp primitives (rsa::hazmat::
+# rsa_decrypt/rsa_encrypt), needed by C_SignRecover/C_VerifyRecover's
+# CKM_RSA_X_509 path and by CKM_RSA_PKCS verify-recover (the `rsa` crate's
+# safe high-level API is verify-or-fail, not verify-and-recover). The
+# padding-format check for the PKCS variant (rsa_pkcs1v15_unpad in ffi.rs)
+# stays hand-written per RFC 8017 §9.2 rather than relying on any hazmat
+# padding helper.
+rsa = { version = "0.9", features = ["sha2", "hazmat"] }
 # G12 — Split Key Polynomial Sharing Prime Field (PKCS#11 v3.2 has no
 # secret-sharing mechanism to build on; this is a new vendor mechanism,
 # CKM_PQCTODAY_SPLIT_KEY, implemented from KMIP 3.0 §13.1 directly).

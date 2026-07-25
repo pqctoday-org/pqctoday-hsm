@@ -73,6 +73,16 @@ lazy_static! {
     pub static ref OBJECTS: GlobalState<HashMap<u32, Attributes>> = GlobalState::new(HashMap::new());
     pub static ref SIGN_STATE: GlobalState<HashMap<u32, (u32, u32, Vec<u8>, bool)>> = GlobalState::new(HashMap::new());
     pub static ref VERIFY_STATE: GlobalState<HashMap<u32, (u32, u32, Vec<u8>, bool)>> = GlobalState::new(HashMap::new());
+    /// §5.13 sign/verify-WITH-RECOVERY state (2026-07-25 — RSA_PKCS/RSA_X_509
+    /// only, single-part-only per spec; `(mech_type, h_key)`, no ctx/det
+    /// fields needed since RSA sign-recover takes no additional params).
+    /// Kept separate from SIGN_STATE/VERIFY_STATE rather than folding a
+    /// "recover mode" flag into their 4-tuple: the two operation families
+    /// are mutually exclusive per session (checked at *Init time) but have
+    /// different single-part-only lifecycle rules, and this avoids touching
+    /// every existing SIGN_STATE/VERIFY_STATE call site's tuple shape.
+    pub static ref SIGN_RECOVER_STATE: GlobalState<HashMap<u32, (u32, u32)>> = GlobalState::new(HashMap::new());
+    pub static ref VERIFY_RECOVER_STATE: GlobalState<HashMap<u32, (u32, u32)>> = GlobalState::new(HashMap::new());
     pub static ref VERIFY_SIG_STATE: GlobalState<HashMap<u32, VerifySigCtx>> = GlobalState::new(HashMap::new());
     pub static ref ENCRYPT_STATE: GlobalState<HashMap<u32, EncryptCtx>> = GlobalState::new(HashMap::new());
     pub static ref DECRYPT_STATE: GlobalState<HashMap<u32, EncryptCtx>> = GlobalState::new(HashMap::new());

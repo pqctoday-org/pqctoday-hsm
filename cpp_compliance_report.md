@@ -1,18 +1,12 @@
 # PKCS#11 v3.2 Compliance Report
 
-**Engine:** `./build-f1/src/lib/libsofthsmv3.dylib`
-**Engine commit:** `1a60782+sp800-108-keyed-mac-prf-fix (this commit)`
-**Date:** 2026-06-12 18:12:41 CDT
-
-> Reproduce with: `cd build-f1 && ctest -R p11_v32_compliance` (or run
-> `p11_v32_compliance_test --engine <libsofthsmv3> --workdir <scratch> --report <base>`).
-> This report supersedes the former `compliance_report.{md,json}` (stale May 2026
-> partial run against an old engine build; deleted in the F4 test-integrity slice).
+**Engine:** `/Users/pqctoday/Antigravity/.worktrees/pqctoday-hsm-pkcs11-parity/build/src/lib/libsofthsmv3.dylib`
+**Date:** 2026-07-25 13:46:22 CDT
 
 ## Summary
-- **Total PASS:** 193
+- **Total PASS:** 324
 - **Total FAIL:** 0
-- **Total SKIP:** 1
+- **Total SKIP:** 0
 - **Total XFAIL (known engine bugs, documented in-line):** 0
 
 Status legend: PASS = spec-conformant behavior for an advertised feature; FAIL = unexpected non-conformance; SKIP = feature not advertised by the token (v3.2 mandates no particular mechanism set); XFAIL = known, pre-existing engine non-conformance reported here but outside this suite's scope to fix.
@@ -154,7 +148,7 @@ Status legend: PASS = spec-conformant behavior for an advertised feature; FAIL =
 |---|---|---|
 | Generate_X25519 | ✅ PASS | RV=0 |
 | Derive_X25519 | ✅ PASS | RV=0 |
-| Derive_X25519_Cofactor | ✅ PASS | RV=0 |
+| Derive_X25519_Cofactor_Rejected | ✅ PASS | RV=99 |
 
 ### ECDSA
 
@@ -188,6 +182,198 @@ Status legend: PASS = spec-conformant behavior for an advertised feature; FAIL =
 | ML-KEM_Implicit_Rejection | ✅ PASS | Yielded deterministic random secret per FIPS 203 |
 | ML-DSA_Oversized_Ctx | ✅ PASS | ctx>255 must be rejected, RV=7 |
 
+### G-DA-X
+
+| Test | Status | Details |
+|---|---|---|
+| RIPEMD160_digest_KAT | ✅ PASS | RIPEMD-160(abc) matches KAT, distinct from SHA-1 |
+| RIPEMD160_HMAC_roundtrip | ✅ PASS | HMAC-RIPEMD-160 sign/verify round-trip OK (20-byte MAC) |
+
+### G1Security
+
+| Test | Status | Details |
+|---|---|---|
+| GCM_zeroIV_EncryptInit_rejected | ✅ PASS | C++C-1 expect CKR_MECHANISM_PARAM_INVALID, RV=113 |
+| GCM_zeroIV_DecryptInit_rejected | ✅ PASS | C++C-1 expect CKR_MECHANISM_PARAM_INVALID, RV=113 |
+| GCM_validIV_EncryptInit_accepted | ✅ PASS | valid 12-byte IV must still work, RV=0 |
+| ChaCha_wrongNonce_rejected | ✅ PASS | C++C-2 expect CKR_MECHANISM_PARAM_INVALID for 8-byte nonce, RV=113 |
+| ChaCha_zeroNonce_rejected | ✅ PASS | C++C-1/2 expect CKR_MECHANISM_PARAM_INVALID for 0-byte nonce, RV=113 |
+| XMSS_largeMsg_sign | ✅ PASS | C++C-3 64KiB message sign, RV=0 |
+| HSS_private_roundtrip | ✅ PASS | V-13 keygen→sign→verify, verify RV=0 |
+
+### G2ChaCha20
+
+| Test | Status | Details |
+|---|---|---|
+| Keygen_KeyType | ✅ PASS | CKA_KEY_TYPE=0x51 want CKK_CHACHA20(0x33) |
+| Keygen_GenMech | ✅ PASS | CKA_KEY_GEN_MECHANISM=0x4645 |
+| Encrypt | ✅ PASS | ctLen=38 |
+| RoundTrip | ✅ PASS | decrypt matched plaintext |
+
+### G2Derive
+
+| Test | Status | Details |
+|---|---|---|
+| X25519_Reachable | ✅ PASS | C_DeriveKey RV=5 (must not be CKR_MECHANISM_INVALID) |
+| BIP32_Reachable | ✅ PASS | C_DeriveKey RV=7 (must not be CKR_MECHANISM_INVALID) |
+
+### G2MechTable
+
+| Test | Status | Details |
+|---|---|---|
+| Size_ML_DSA_KEY_PAIR_GEN | ✅ PASS | min=1312 max=2592 expected 1312/2592 |
+| Size_ML_DSA | ✅ PASS | min=1312 max=2592 expected 1312/2592 |
+| Size_SLH_DSA_KEY_PAIR_GEN | ✅ PASS | min=32 max=64 expected 32/64 |
+| Size_SLH_DSA | ✅ PASS | min=32 max=64 expected 32/64 |
+| Advertised_CKM_RIPEMD160 | ✅ PASS | RIPEMD-160 digest dispatched (legacy provider) |
+| Advertised_CKM_RIPEMD160_HMAC | ✅ PASS | HMAC-RIPEMD-160 dispatched (legacy provider) |
+| NotAdvertised_CKM_KECCAK_256 | ✅ PASS | correctly absent from C_GetMechanismList |
+| Advertised_CKM_CHACHA20 | ✅ PASS | bare ChaCha20 stream dispatched |
+| Advertised_CKM_X25519 | ✅ PASS | X25519 derive |
+| Advertised_CKM_X448 | ✅ PASS | X448 derive |
+| Advertised_CKM_BIP32_MASTER_DERIVE | ✅ PASS | BIP32 derive |
+| Advertised_CKM_RSA_PKCS_PSS | ✅ PASS | raw RSA-PSS |
+| Flag_AES_GCM_MESSAGE | ✅ PASS | flags=0x774 want 0x6 |
+| Flag_ML_DSA_MESSAGE | ✅ PASS | flags=0x10264 want 0x24 |
+| Flag_SLH_DSA_MESSAGE | ✅ PASS | flags=0x10264 want 0x24 |
+| AdvertiseSubsetDispatch | ✅ PASS | 126 advertised, 0 rejected by C_GetMechanismInfo |
+
+### G3Keygen
+
+| Test | Status | Details |
+|---|---|---|
+| V4_wrongKeyType_ML_KEM_vs_XMSSMT | ✅ PASS | expect CKR_TEMPLATE_INCONSISTENT, RV=209 |
+| V4_wrongKeyType_EC_vs_ML_KEM | ✅ PASS | expect CKR_TEMPLATE_INCONSISTENT, RV=209 |
+| V4_wrongKeyType_HSS_vs_XMSS | ✅ PASS | expect CKR_TEMPLATE_INCONSISTENT, RV=209 |
+| V4_wrongKeyType_XMSS_vs_HSS | ✅ PASS | expect CKR_TEMPLATE_INCONSISTENT, RV=209 |
+| V4_wrongKeyType_XMSSMT_vs_XMSS | ✅ PASS | expect CKR_TEMPLATE_INCONSISTENT, RV=209 |
+| V4_wrongKeyType_ChaCha20_vs_AES | ✅ PASS | expect CKR_TEMPLATE_INCONSISTENT, RV=209 |
+| V3_missingParamSet_ML_DSA | ✅ PASS | expect CKR_TEMPLATE_INCOMPLETE, RV=208 |
+| V3_missingParamSet_ML_KEM | ✅ PASS | expect CKR_TEMPLATE_INCOMPLETE, RV=208 |
+| V3_missingParamSet_SLH_DSA | ✅ PASS | expect CKR_TEMPLATE_INCOMPLETE, RV=208 |
+| V8_XMSSMT_keygen | ✅ PASS | XMSSMT key generated |
+| V9_XMSSMT_sign_verify_roundtrip | ✅ PASS | Verify RV=0 |
+| V21_HSS_keys_remaining | ✅ PASS | expect 2^5=32 for default LMS_SHA256_N32_H5, got 32 (RV=0) |
+| V5V6_AES_CBC_wrap_unwrap | ✅ PASS | round-trip byte-exact; recoveredLen=32 expected=32 (RV=0) |
+| V5V6_AES_CBC_PAD_wrap_unwrap | ✅ PASS | round-trip byte-exact; recoveredLen=20 expected=20 (RV=0) |
+
+### G4Retcodes
+
+| Test | Status | Details |
+|---|---|---|
+| V19_GSVF_pre_init | ✅ PASS | expect CKR_CRYPTOKI_NOT_INITIALIZED, RV=400 |
+| GA_AsyncComplete_pre_init | ✅ PASS | expect CKR_CRYPTOKI_NOT_INITIALIZED, RV=400 |
+| GA_AsyncGetID_pre_init | ✅ PASS | expect CKR_CRYPTOKI_NOT_INITIALIZED, RV=400 |
+| GA_AsyncJoin_pre_init | ✅ PASS | expect CKR_CRYPTOKI_NOT_INITIALIZED, RV=400 |
+| V20_Initialize_pReserved_nonNULL | ✅ PASS | expect CKR_ARGUMENTS_BAD(0x7), RV=7 |
+| V7_AESKW_tampered_unwrap | ✅ PASS | expect CKR_WRAPPED_KEY_INVALID(0x110), RV=272 |
+| V16_SessionCancel_flags0_noop | ✅ PASS | flags==0 expect CKR_OK no-op, RV=0 |
+| V16_SessionCancel_unmatched_ignored | ✅ PASS | unmatched flag expect CKR_OK ignore, RV=0 |
+| V16_SessionCancel_unmatched_keeps_op | ✅ PASS | sign op survives unmatched cancel, RV=0 |
+| V16_SessionCancel_CKF_MESSAGE_SIGN | ✅ PASS | cancel active message-sign expect CKR_OK, RV=0 |
+| V17_Digest_after_DigestUpdate | ✅ PASS | expect CKR_OPERATION_ACTIVE(0x90), RV=144 |
+| V17_Digest_op_survives | ✅ PASS | C_DigestFinal after rejected one-shot, RV=0 |
+| V17_Sign_after_SignUpdate | ✅ PASS | expect CKR_OPERATION_ACTIVE(0x90), RV=144 |
+| V17_Sign_op_survives | ✅ PASS | C_SignFinal after rejected one-shot, RV=0 |
+| V18_WrapAuth_buffer_too_small_sets_len | ✅ PASS | expect CKR_BUFFER_TOO_SMALL + outLen==48, got RV=336 outLen=48 |
+| V19_GSVF_bad_handle | ✅ PASS | expect CKR_SESSION_HANDLE_INVALID, RV=179 |
+| V19_GSVF_valid | ✅ PASS | expect CKR_OK + flags=0, RV=0 flags=0 |
+| V19_GSVF_bad_type | ✅ PASS | expect CKR_ARGUMENTS_BAD, RV=7 |
+| GAP24_Encap_bad_pubkey | ✅ PASS | expect CKR_KEY_HANDLE_INVALID(0x60), RV=96 |
+| GAP65_DeriveKey_bad_base | ✅ PASS | expect CKR_KEY_HANDLE_INVALID(0x60), RV=96 |
+
+### G5Attrs
+
+| Test | Status | Details |
+|---|---|---|
+| UniqueId_readable_on_private_key | ✅ PASS | CKA_UNIQUE_ID on a PRIVATE/SENSITIVE key must read in clear (36-byte UUID), expect RV=CKR_OK; got RV=0 len=36 |
+| UniqueId_readable_on_sensitive_secret | ✅ PASS | CKA_UNIQUE_ID on a SENSITIVE secret key must read in clear (36-byte UUID), expect RV=CKR_OK; got RV=0 len=36 |
+| V14_CopyObject_freshUniqueId | ✅ PASS | src and copy must each have a distinct CKA_UNIQUE_ID (src len=36 copy len=36 distinct=yes) |
+| V15_CreateObject_uniqueId_readonly | ✅ PASS | caller-supplied CKA_UNIQUE_ID must be rejected, expect CKR_ATTRIBUTE_READ_ONLY(0x10) RV=16 |
+| V15_DeriveKey_uniqueId_tokenAssigned | ✅ PASS | forged CKA_UNIQUE_ID rejected with CKR_ATTRIBUTE_READ_ONLY |
+| CKA_SEED_deterministic_ML_DSA_44 | ✅ PASS | same seed must yield identical public key (lenA=1312 lenB=1312) |
+| CKA_SEED_sensitive_ML_DSA_44 | ✅ PASS | seed on a sensitive key must not leak, expect CKR_ATTRIBUTE_SENSITIVE(0x11) RV=17 |
+| CKA_SEED_wronglen_ML_DSA_44 | ✅ PASS | wrong seed length must be rejected, expect CKR_ATTRIBUTE_VALUE_INVALID(0x13) RV=19 |
+| CKA_SEED_deterministic_ML_KEM_768 | ✅ PASS | same seed must yield identical public key (lenA=1184 lenB=1184) |
+| CKA_SEED_sensitive_ML_KEM_768 | ✅ PASS | seed on a sensitive key must not leak, expect CKR_ATTRIBUTE_SENSITIVE(0x11) RV=17 |
+| CKA_SEED_wronglen_ML_KEM_768 | ✅ PASS | wrong seed length must be rejected, expect CKR_ATTRIBUTE_VALUE_INVALID(0x13) RV=19 |
+| CKA_SEED_deterministic_SLH_DSA_128s | ✅ PASS | same seed must yield identical public key (lenA=32 lenB=32) |
+| CKA_SEED_sensitive_SLH_DSA_128s | ✅ PASS | seed on a sensitive key must not leak, expect CKR_ATTRIBUTE_SENSITIVE(0x11) RV=17 |
+| CKA_SEED_wronglen_SLH_DSA_128s | ✅ PASS | wrong seed length must be rejected, expect CKR_ATTRIBUTE_VALUE_INVALID(0x13) RV=19 |
+
+### G7Sha3Rsa
+
+| Test | Status | Details |
+|---|---|---|
+| Advertised_CKM_SHA3_384_RSA_PKCS | ✅ PASS | SHA3-384 RSA PKCS#1 v1.5 |
+| Advertised_CKM_SHA3_384_RSA_PKCS_PSS | ✅ PASS | SHA3-384 RSA-PSS |
+| Generate_RSA_2048 | ✅ PASS | RV=0 |
+| C_SignInit_PKCS | ✅ PASS | RV=0 |
+| C_Sign_PKCS | ✅ PASS | RV=0 |
+| C_Verify_PKCS | ✅ PASS | RV=0 |
+| C_SignInit_PSS | ✅ PASS | RV=0 |
+| C_Sign_PSS | ✅ PASS | RV=0 |
+| C_Verify_PSS | ✅ PASS | RV=0 |
+| C_SignInit_PSS_wrong_hashAlg | ✅ PASS | expected ARGUMENTS_BAD/MECHANISM_PARAM_INVALID, RV=7 |
+
+### G8Dual
+
+| Test | Status | Details |
+|---|---|---|
+| DigestEncrypt_dual_init | ✅ PASS | DigestInit+EncryptInit must coexist (§5.13) RV=0 |
+| DigestEncrypt_ciphertext_matches | ✅ PASS | dual ciphertext == standalone encrypt, RV=0 |
+| DigestEncrypt_digest_matches | ✅ PASS | dual digest == standalone SHA-256, RV=0 |
+| DecryptDigest_dual_init | ✅ PASS | DecryptInit+DigestInit must coexist (§5.13) RV=0 |
+| DecryptDigest_digest_roundtrip | ✅ PASS | digest of decrypted plaintext == original digest, RV=0 |
+| SignEncrypt_dual_init | ✅ PASS | SignInit+EncryptInit must coexist (§5.13) RV=0 |
+| SignEncrypt_ciphertext_matches | ✅ PASS | dual ciphertext == standalone encrypt, RV=0 |
+| SignEncrypt_signature_verifies | ✅ PASS | ECDSA signature over streamed data verifies RV=0 |
+| DecryptVerify_dual_init | ✅ PASS | DecryptInit+VerifyInit must coexist (§5.13) RV=0 |
+| DecryptVerify_roundtrip | ✅ PASS | verify of decrypted plaintext succeeds RV=0 |
+| DigestEncrypt_missing_digest_rejected | ✅ PASS | expect CKR_OPERATION_NOT_INITIALIZED(0x91) RV=145 |
+| DigestFinal_then_DigestUpdate_safe | ✅ PASS | freed digest half: C_DigestUpdate must return 0x91, not crash, RV=145 |
+| DigestFinal_then_Digest_safe | ✅ PASS | freed digest half: one-shot C_Digest must return 0x91, not crash, RV=145 |
+| DigestFinal_then_EncryptFinal_correct | ✅ PASS | surviving cipher half finalises to correct ciphertext after digest ended, RV=0 |
+| EncryptFinal_then_DigestFinal_correct | ✅ PASS | reverse-order finalise: cipher then digest both correct, RV=0 |
+
+### GAsync
+
+| Test | Status | Details |
+|---|---|---|
+| TokenInfo_no_async_support | ✅ PASS | CKF_ASYNC_SESSION_SUPPORTED must not be set, flags=0x1069 |
+| OpenSession_async_rejected | ✅ PASS | expect CKR_SESSION_ASYNC_NOT_SUPPORTED(0x205), RV=517 |
+| OpenSession_sync_ok | ✅ PASS | expect CKR_OK, RV=0 |
+| C_AsyncComplete_not_supported | ✅ PASS | expect CKR_FUNCTION_NOT_SUPPORTED(0x54), RV=84 |
+| C_AsyncGetID_not_supported | ✅ PASS | expect CKR_FUNCTION_NOT_SUPPORTED(0x54), RV=84 |
+| C_AsyncJoin_not_supported | ✅ PASS | expect CKR_FUNCTION_NOT_SUPPORTED(0x54), RV=84 |
+
+### GIsolation
+
+| Test | Status | Details |
+|---|---|---|
+| InitTokenB | ✅ PASS | second token initialized on slot 1 |
+| CreateTokenObjectA | ✅ PASS | token object handle minted on token A |
+| SameToken_CrossSession_resolves | ✅ PASS | token object must be visible to all sessions on token A, RV=0 |
+| CrossToken_GetAttributeValue_rejected | ✅ PASS | §2.4 expect CKR_OBJECT_HANDLE_INVALID, RV=130 |
+| CrossToken_SetAttributeValue_rejected | ✅ PASS | §2.4 expect CKR_OBJECT_HANDLE_INVALID, RV=130 |
+| CrossToken_AsKeyHandle_rejected | ✅ PASS | §2.4 key-use must be rejected (engine returns OBJECT_HANDLE_INVALID), RV=130 |
+| CrossToken_DestroyObject_rejected | ✅ PASS | §2.4 expect CKR_OBJECT_HANDLE_INVALID, RV=130 |
+| CrossToken_Destroy_didNotAffectA | ✅ PASS | A's object must survive a rejected cross-token destroy, RV=0 |
+
+### HybridKEM
+
+| Test | Status | Details |
+|---|---|---|
+| Generate_X25519 | ✅ PASS |  |
+| Generate_ML_KEM_768 | ✅ PASS |  |
+| Encapsulate_X25519_half | ✅ PASS | ephemeral pubkey len=34 |
+| Encapsulate_MLKEM_half | ✅ PASS | ct len=1088 |
+| Combine_send | ✅ PASS |  |
+| Decapsulate_X25519_half | ✅ PASS |  |
+| Decapsulate_MLKEM_half | ✅ PASS |  |
+| Combine_recv | ✅ PASS |  |
+| X25519MLKEM768_round_trip | ✅ PASS | combined secret len=64 (32 ss_mlkem || 32 ss_x25519) |
+
 ### Init
 
 | Test | Status | Details |
@@ -198,10 +384,10 @@ Status legend: PASS = spec-conformant behavior for an advertised feature; FAIL =
 
 | Test | Status | Details |
 |---|---|---|
-| AES_Generate_KCV_Present | ✅ PASS | 3 bytes: 1B79A8 |
-| AES_Generate_KCV_Equals_OracleEcbZeroBlock | ✅ PASS | HSM=1B79A8 == oracle=1B79A8 |
-| AES_Unwrap_KCV_Present | ✅ PASS | 3 bytes: 4446AD |
-| AES_Unwrap_KCV_Equals_Original | ✅ PASS | original=4446AD unwrapped=4446AD |
+| AES_Generate_KCV_Present | ✅ PASS | 3 bytes: B44E1B |
+| AES_Generate_KCV_Equals_OracleEcbZeroBlock | ✅ PASS | HSM=B44E1B == oracle=B44E1B |
+| AES_Unwrap_KCV_Present | ✅ PASS | 3 bytes: A451B8 |
+| AES_Unwrap_KCV_Equals_Original | ✅ PASS | original=A451B8 unwrapped=A451B8 |
 | AES_Unwrap_KCV_Equals_OracleEcbZeroBlock | ✅ PASS | matches AES-ECB(zero block)[0:3] oracle |
 | HKDF_Derive_KCV_Present | ✅ PASS | 3 bytes: BEEF61 |
 | HKDF_Derive_KCV_Equals_OracleSha1 | ✅ PASS | HSM=BEEF61 == oracle=BEEF61 |
@@ -344,5 +530,8 @@ Status legend: PASS = spec-conformant behavior for an advertised feature; FAIL =
 |---|---|---|
 | Generate_XMSS_SHA2_10_256 | ✅ PASS | Gen XMSS_SHA2_10_256 |
 | C_Sign_XMSS_SHA2_10_256 | ✅ PASS | RV=0 |
-| Generate_XMSSMT_SHA2_20_2_256 | ⚠️ SKIP | Mech unavailable |
+| StatefulSign_size_query_idempotent | ✅ PASS | two C_Sign(NULL) → same size 2500 RV1=0 RV2=0 |
+| StatefulSign_buffer_too_small | ✅ PASS | too-small buffer → CKR_BUFFER_TOO_SMALL(0x150), size echoed, RV=336 |
+| StatefulSign_signs_after_queries | ✅ PASS | real C_Sign after queries verifies (leaf not burned) signRV=0 verifyRV=0 |
+| Generate_XMSSMT_SHA2_20_2_256 | ✅ PASS | Gen XMSSMT_SHA2_20_2_256 |
 
