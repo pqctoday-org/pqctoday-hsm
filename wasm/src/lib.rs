@@ -95,7 +95,7 @@ impl KmipPlayground {
     /// (its own doc comment) that brings a new slot online before
     /// `C_InitToken` will accept it; skipping this for a non-zero slot
     /// fails with `CKR_SLOT_ID_INVALID` (confirmed empirically).
-    /// `rng_seed_mode` — the server's §6.1.55 RNG Seed policy choice
+    /// `rng_seed_mode` — the server's §6.1.57 RNG Seed policy choice
     /// (`RngSeedMode`): `"full-consume"` (default) / `"partial-consume"` /
     /// `"ignore"` / `"deny"`. Server-chosen and mutually exclusive per the
     /// spec, so it's a CONSTRUCTOR parameter, not per-request — exposed so
@@ -1399,7 +1399,7 @@ fn summarize(payload: &ResponsePayload) -> Json {
         ResponsePayload::Destroy(r) => json!({ "uid": r.uid, "state": format!("{:?}", r.state) }),
         // Sweep-driven rekey: the replacement UID(s). The new algorithm is read
         // from the keystore (list_objects) after the op — the response carries
-        // only the KMIP §6.1.51/52 UIDs.
+        // only the KMIP §6.1.53/54 UIDs.
         ResponsePayload::ReKey(r) => json!({ "uid": r.uid }),
         ResponsePayload::ReKeyKeyPair(r) => json!({
             "privateKeyUid": r.private_key_uid, "publicKeyUid": r.public_key_uid,

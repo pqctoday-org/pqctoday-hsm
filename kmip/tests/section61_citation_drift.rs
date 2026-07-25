@@ -193,6 +193,14 @@ fn section61_citations_are_not_still_csd01_numbered() {
     if Path::new("conformance/harness").exists() {
         roots.push("conformance/harness".to_string());
     }
+    // The sibling wasm/ crate (bridge code, doc comments ported from kmip/'s
+    // own) was missed by the original migration sweep — found only when a
+    // real wasm rebuild regenerated its .d.ts bindings and the diff showed
+    // a citation going the WRONG direction (§6.1.57 -> §6.1.55). Covered
+    // here so that class of gap can't recur silently.
+    if Path::new("../wasm/src").exists() {
+        roots.push("../wasm/src".to_string());
+    }
     let mut files = Vec::new();
     for root in &roots {
         walk_rs_files(Path::new(root), &mut files);
