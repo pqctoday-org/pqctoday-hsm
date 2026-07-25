@@ -927,23 +927,32 @@ bool P11ECPublicKeyObj::init(OSObject *inobject)
 	// Create attributes
 	P11Attribute* attrEcParams = new P11AttrEcParams(osobject,P11Attribute::ck3);
 	P11Attribute* attrEcPoint = new P11AttrEcPoint(osobject);
+	// CKA_ENCAPSULATE (2026-07-25) — this class also backs the CKK_EC public
+	// key side of ECDH-as-KEM (C_EncapsulateKey with CKM_ECDH1_DERIVE,
+	// PKCS#11 v3.2 Table 78); not ML-KEM-specific, so registered here too,
+	// matching P11MLKEMPublicKeyObj's own registration. Defaults CK_FALSE
+	// like CKA_SIGN/CKA_VERIFY/CKA_DERIVE already do on this class.
+	P11Attribute* attrEncapsulate = new P11AttrEncapsulate(osobject);
 
 	// Initialize the attributes
 	if
 	(
 		!attrEcParams->init() ||
-		!attrEcPoint->init()
+		!attrEcPoint->init() ||
+		!attrEncapsulate->init()
 	)
 	{
 		ERROR_MSG("Could not initialize the attribute");
 		delete attrEcParams;
 		delete attrEcPoint;
+		delete attrEncapsulate;
 		return false;
 	}
 
 	// Add them to the map
 	attributes[attrEcParams->getType()] = attrEcParams;
 	attributes[attrEcPoint->getType()] = attrEcPoint;
+	attributes[attrEncapsulate->getType()] = attrEncapsulate;
 
 	initialized = true;
 	return true;
@@ -976,23 +985,30 @@ bool P11EDPublicKeyObj::init(OSObject *inobject)
 	// Create attributes
 	P11Attribute* attrEcParams = new P11AttrEcParams(osobject,P11Attribute::ck3);
 	P11Attribute* attrEcPoint = new P11AttrEcPoint(osobject);
+	// CKA_ENCAPSULATE (2026-07-25) — this class also backs the
+	// CKK_EC_MONTGOMERY (X25519/X448) public key side of ECDH-as-KEM
+	// (C_EncapsulateKey with CKM_ECDH1_DERIVE, PKCS#11 v3.2 Table 78).
+	P11Attribute* attrEncapsulate = new P11AttrEncapsulate(osobject);
 
 	// Initialize the attributes
 	if
 	(
 		!attrEcParams->init() ||
-		!attrEcPoint->init()
+		!attrEcPoint->init() ||
+		!attrEncapsulate->init()
 	)
 	{
 		ERROR_MSG("Could not initialize the attribute");
 		delete attrEcParams;
 		delete attrEcPoint;
+		delete attrEncapsulate;
 		return false;
 	}
 
 	// Add them to the map
 	attributes[attrEcParams->getType()] = attrEcParams;
 	attributes[attrEcPoint->getType()] = attrEcPoint;
+	attributes[attrEncapsulate->getType()] = attrEncapsulate;
 
 	initialized = true;
 	return true;
@@ -1288,23 +1304,30 @@ bool P11ECPrivateKeyObj::init(OSObject *inobject)
 	// Create attributes
 	P11Attribute* attrEcParams = new P11AttrEcParams(osobject,P11Attribute::ck4|P11Attribute::ck6);
 	P11Attribute* attrValue = new P11AttrValue(osobject,P11Attribute::ck1|P11Attribute::ck4|P11Attribute::ck6|P11Attribute::ck7);
+	// CKA_DECAPSULATE (2026-07-25) — this class also backs the CKK_EC
+	// private key side of ECDH-as-KEM (C_DecapsulateKey with
+	// CKM_ECDH1_DERIVE, PKCS#11 v3.2 Table 78).
+	P11Attribute* attrDecapsulate = new P11AttrDecapsulate(osobject);
 
 	// Initialize the attributes
 	if
 	(
 		!attrEcParams->init() ||
-		!attrValue->init()
+		!attrValue->init() ||
+		!attrDecapsulate->init()
 	)
 	{
 		ERROR_MSG("Could not initialize the attribute");
 		delete attrEcParams;
 		delete attrValue;
+		delete attrDecapsulate;
 		return false;
 	}
 
 	// Add them to the map
 	attributes[attrEcParams->getType()] = attrEcParams;
 	attributes[attrValue->getType()] = attrValue;
+	attributes[attrDecapsulate->getType()] = attrDecapsulate;
 
 	initialized = true;
 	return true;
@@ -1337,23 +1360,30 @@ bool P11EDPrivateKeyObj::init(OSObject *inobject)
 	// Create attributes
 	P11Attribute* attrEcParams = new P11AttrEcParams(osobject,P11Attribute::ck4|P11Attribute::ck6);
 	P11Attribute* attrValue = new P11AttrValue(osobject,P11Attribute::ck1|P11Attribute::ck4|P11Attribute::ck6|P11Attribute::ck7);
+	// CKA_DECAPSULATE (2026-07-25) — this class also backs the
+	// CKK_EC_MONTGOMERY (X25519/X448) private key side of ECDH-as-KEM
+	// (C_DecapsulateKey with CKM_ECDH1_DERIVE, PKCS#11 v3.2 Table 78).
+	P11Attribute* attrDecapsulate = new P11AttrDecapsulate(osobject);
 
 	// Initialize the attributes
 	if
 	(
 		!attrEcParams->init() ||
-		!attrValue->init()
+		!attrValue->init() ||
+		!attrDecapsulate->init()
 	)
 	{
 		ERROR_MSG("Could not initialize the attribute");
 		delete attrEcParams;
 		delete attrValue;
+		delete attrDecapsulate;
 		return false;
 	}
 
 	// Add them to the map
 	attributes[attrEcParams->getType()] = attrEcParams;
 	attributes[attrValue->getType()] = attrValue;
+	attributes[attrDecapsulate->getType()] = attrDecapsulate;
 
 	initialized = true;
 	return true;

@@ -650,6 +650,173 @@ void test_pqc_kem() {
     }
 }
 
+// Hybrid KEM (2026-07-25) — X25519MLKEM768-shaped construction built ENTIRELY
+// from three real, independently-existing PKCS#11 mechanisms: the new
+// CKM_ECDH1_DERIVE-under-C_EncapsulateKey/C_DecapsulateKey path (added this
+// pass), the pre-existing CKM_ML_KEM KEM, and the pre-existing
+// CKM_CONCATENATE_BASE_AND_KEY derive. There is no dedicated PKCS#11 "hybrid
+// KEM" mechanism in this engine, in the spec, or in the Rust engine's own
+// PKCS#11 surface — draft-ietf-tls-ecdhe-mlkem combines two ordinary KEMs at
+// the CALLER's level (Rust does this in its KMIP layer; this test does it
+// directly against the raw PKCS#11 API, proving the same construction is
+// reachable here with no new mechanism). Byte order matches
+// rust/src/native/hybrid.rs's documented X25519MLKEM768 combiner exactly:
+// shared secret = ss_mlkem || ss_x25519 (ML-KEM's secret is the
+// C_DeriveKey base key; X25519's is the CKM_CONCATENATE_BASE_AND_KEY
+// mechanism parameter).
+void test_hybrid_kem() {
+    typedef CK_RV (*C_EncapsulateKey_t)(CK_SESSION_HANDLE, CK_MECHANISM_PTR, CK_OBJECT_HANDLE, CK_ATTRIBUTE_PTR, CK_ULONG, CK_BYTE_PTR, CK_ULONG_PTR, CK_OBJECT_HANDLE_PTR);
+    typedef CK_RV (*C_DecapsulateKey_t)(CK_SESSION_HANDLE, CK_MECHANISM_PTR, CK_OBJECT_HANDLE, CK_ATTRIBUTE_PTR, CK_ULONG, CK_BYTE_PTR, CK_ULONG, CK_OBJECT_HANDLE_PTR);
+    void* dlib = dlopen(opt_engine.c_str(), RTLD_NOW);
+    C_EncapsulateKey_t EncapFn = (C_EncapsulateKey_t)dlsym(dlib, "C_EncapsulateKey");
+    C_DecapsulateKey_t DecapFn = (C_DecapsulateKey_t)dlsym(dlib, "C_DecapsulateKey");
+    if (!EncapFn || !DecapFn) {
+        record_result("HybridKEM", "X25519MLKEM768", "SKIP", "Function pointers missing");
+        return;
+    }
+
+    CK_BBOOL bTrue = CK_TRUE, bFalse = CK_FALSE;
+
+    // ── Recipient's static X25519 keypair ───────────────────────────────
+    CK_OBJECT_CLASS pubClass = CKO_PUBLIC_KEY, privClass = CKO_PRIVATE_KEY;
+    CK_KEY_TYPE ecType = CKK_EC_MONTGOMERY;
+    CK_BYTE oid_x25519[] = { 0x13, 0x0a, 0x63, 0x75, 0x72, 0x76, 0x65, 0x32, 0x35, 0x35, 0x31, 0x39 };
+    CK_ATTRIBUTE xPubTmpl[] = {
+        { CKA_CLASS, &pubClass, sizeof(pubClass) },
+        { CKA_KEY_TYPE, &ecType, sizeof(ecType) },
+        { CKA_EC_PARAMS, oid_x25519, sizeof(oid_x25519) },
+        { CKA_ENCAPSULATE, &bTrue, sizeof(bTrue) },
+    };
+    CK_ATTRIBUTE xPrivTmpl[] = {
+        { CKA_CLASS, &privClass, sizeof(privClass) },
+        { CKA_KEY_TYPE, &ecType, sizeof(ecType) },
+        { CKA_DECAPSULATE, &bTrue, sizeof(bTrue) },
+        { CKA_SENSITIVE, &bTrue, sizeof(bTrue) },
+    };
+    CK_MECHANISM xKeygenMech = { CKM_EC_MONTGOMERY_KEY_PAIR_GEN, NULL_PTR, 0 };
+    CK_OBJECT_HANDLE hXPub, hXPriv;
+    CK_RV rv = fl->C_GenerateKeyPair(hSess, &xKeygenMech, xPubTmpl, 4, xPrivTmpl, 4, &hXPub, &hXPriv);
+    if (rv != CKR_OK) { record_result("HybridKEM", "Generate_X25519", "FAIL", "RV=" + std::to_string(rv)); return; }
+    record_result("HybridKEM", "Generate_X25519", "PASS", "");
+
+    // ── Recipient's static ML-KEM-768 keypair ───────────────────────────
+    CK_KEY_TYPE ktypeKem = CKK_ML_KEM;
+    CK_ULONG paramSetMlKem768 = 2; // CKP_ML_KEM_768 (matches test_pqc_kem's kemParams[1])
+    CK_ATTRIBUTE mPubTmpl[] = {
+        { CKA_CLASS, &pubClass, sizeof(pubClass) },
+        { CKA_KEY_TYPE, &ktypeKem, sizeof(ktypeKem) },
+        { CKA_ENCAPSULATE, &bTrue, sizeof(bTrue) },
+        { CKA_PARAMETER_SET, &paramSetMlKem768, sizeof(paramSetMlKem768) },
+        { CKA_TOKEN, &bFalse, sizeof(bFalse) },
+    };
+    CK_ATTRIBUTE mPrivTmpl[] = {
+        { CKA_CLASS, &privClass, sizeof(privClass) },
+        { CKA_KEY_TYPE, &ktypeKem, sizeof(ktypeKem) },
+        { CKA_DECAPSULATE, &bTrue, sizeof(bTrue) },
+        { CKA_PARAMETER_SET, &paramSetMlKem768, sizeof(paramSetMlKem768) },
+        { CKA_TOKEN, &bFalse, sizeof(bFalse) },
+    };
+    CK_MECHANISM mKeygenMech = { CKM_ML_KEM_KEY_PAIR_GEN, NULL_PTR, 0 };
+    CK_OBJECT_HANDLE hMPub, hMPriv;
+    rv = fl->C_GenerateKeyPair(hSess, &mKeygenMech, mPubTmpl, 5, mPrivTmpl, 5, &hMPub, &hMPriv);
+    if (rv != CKR_OK) { record_result("HybridKEM", "Generate_ML_KEM_768", "FAIL", "RV=" + std::to_string(rv)); return; }
+    record_result("HybridKEM", "Generate_ML_KEM_768", "PASS", "");
+
+    CK_OBJECT_CLASS secClass = CKO_SECRET_KEY;
+    CK_KEY_TYPE secType = CKK_GENERIC_SECRET;
+    CK_ULONG secLen = 32;
+    // CKA_DERIVE=true: these secrets are themselves the BASE/param keys for
+    // the CKM_CONCATENATE_BASE_AND_KEY combine step below -- C_DeriveKey
+    // requires it on the base key (PKCS#11 v3.2 SS5.18.5 CKA_DERIVE check),
+    // same as any other derive.
+    CK_ATTRIBUTE ssTmpl[] = {
+        { CKA_CLASS, &secClass, sizeof(secClass) },
+        { CKA_KEY_TYPE, &secType, sizeof(secType) },
+        { CKA_VALUE_LEN, &secLen, sizeof(secLen) },
+        { CKA_TOKEN, &bFalse, sizeof(bFalse) },
+        { CKA_EXTRACTABLE, &bTrue, sizeof(bTrue) },
+        { CKA_DERIVE, &bTrue, sizeof(bTrue) },
+    };
+
+    // ── Sender side: two independent encapsulations ─────────────────────
+    CK_MECHANISM ecdhEncapMech = { CKM_ECDH1_DERIVE, NULL_PTR, 0 };
+    CK_BYTE xCt[128]; CK_ULONG xCtLen = sizeof(xCt);
+    CK_OBJECT_HANDLE hXSecretSend;
+    rv = EncapFn(hSess, &ecdhEncapMech, hXPub, ssTmpl, 6, xCt, &xCtLen, &hXSecretSend);
+    if (rv != CKR_OK) { record_result("HybridKEM", "Encapsulate_X25519_half", "FAIL", "RV=" + std::to_string(rv)); return; }
+    // 32 (RFC 7748 raw) or 34 (this engine's internal DER OCTET STRING wrapper,
+    // 0x04 0x20 <32 bytes> -- confirmed via OSSLEDPublicKey::setFromOSSL's
+    // DERUTIL::raw2Octet(); getEDDHPublicKey strips it back off on the
+    // receiving side, same as CKA_EC_POINT's stored form). Rust's own
+    // convention is raw 32-byte (rust/src/native/hybrid.rs X25519_LEN) --
+    // a real wire-format difference between engines worth noting if this
+    // ciphertext is ever compared byte-for-byte across them, but not a bug
+    // in either engine on its own.
+    if (xCtLen != 32 && xCtLen != 34) { record_result("HybridKEM", "Encapsulate_X25519_half", "FAIL", "ephemeral pubkey len=" + std::to_string(xCtLen) + " (want 32 or 34)"); return; }
+    record_result("HybridKEM", "Encapsulate_X25519_half", "PASS", "ephemeral pubkey len=" + std::to_string(xCtLen));
+
+    CK_MECHANISM mlkemEncapMech = { CKM_ML_KEM, NULL_PTR, 0 };
+    CK_BYTE mCt[2000]; CK_ULONG mCtLen = sizeof(mCt);
+    CK_OBJECT_HANDLE hMSecretSend;
+    rv = EncapFn(hSess, &mlkemEncapMech, hMPub, ssTmpl, 6, mCt, &mCtLen, &hMSecretSend);
+    if (rv != CKR_OK) { record_result("HybridKEM", "Encapsulate_MLKEM_half", "FAIL", "RV=" + std::to_string(rv)); return; }
+    record_result("HybridKEM", "Encapsulate_MLKEM_half", "PASS", "ct len=" + std::to_string(mCtLen));
+
+    // Combine template: NO CKA_VALUE_LEN -- PKCS#11 v3.2 SS6.43.3: "If no
+    // length or key type is provided ... length will be equal to the sum of
+    // the lengths of the values of the two original keys." ssTmpl's fixed
+    // 32-byte CKA_VALUE_LEN (correct for the two KEM secrets themselves)
+    // would otherwise truncate this 64-byte concatenation down to 32.
+    CK_ATTRIBUTE combineTmpl[] = {
+        { CKA_CLASS, &secClass, sizeof(secClass) },
+        { CKA_KEY_TYPE, &secType, sizeof(secType) },
+        { CKA_TOKEN, &bFalse, sizeof(bFalse) },
+        { CKA_EXTRACTABLE, &bTrue, sizeof(bTrue) },
+    };
+
+    // ── Combine (sender): ss_mlkem || ss_x25519 via CKM_CONCATENATE_BASE_AND_KEY,
+    // base key = ML-KEM secret (hMSecretSend), mechanism param = X25519 secret handle.
+    CK_MECHANISM combineMechSend = { CKM_CONCATENATE_BASE_AND_KEY, &hXSecretSend, sizeof(hXSecretSend) };
+    CK_OBJECT_HANDLE hCombinedSend;
+    rv = fl->C_DeriveKey(hSess, &combineMechSend, hMSecretSend, combineTmpl, 4, &hCombinedSend);
+    if (rv != CKR_OK) { record_result("HybridKEM", "Combine_send", "FAIL", "RV=" + std::to_string(rv)); return; }
+    record_result("HybridKEM", "Combine_send", "PASS", "");
+
+    // ── Receiver side: decapsulate both halves from the ciphertexts ─────
+    CK_OBJECT_HANDLE hXSecretRecv;
+    rv = DecapFn(hSess, &ecdhEncapMech, hXPriv, ssTmpl, 6, xCt, xCtLen, &hXSecretRecv);
+    if (rv != CKR_OK) { record_result("HybridKEM", "Decapsulate_X25519_half", "FAIL", "RV=" + std::to_string(rv)); return; }
+    record_result("HybridKEM", "Decapsulate_X25519_half", "PASS", "");
+
+    CK_OBJECT_HANDLE hMSecretRecv;
+    rv = DecapFn(hSess, &mlkemEncapMech, hMPriv, ssTmpl, 6, mCt, mCtLen, &hMSecretRecv);
+    if (rv != CKR_OK) { record_result("HybridKEM", "Decapsulate_MLKEM_half", "FAIL", "RV=" + std::to_string(rv)); return; }
+    record_result("HybridKEM", "Decapsulate_MLKEM_half", "PASS", "");
+
+    CK_MECHANISM combineMechRecv = { CKM_CONCATENATE_BASE_AND_KEY, &hXSecretRecv, sizeof(hXSecretRecv) };
+    CK_OBJECT_HANDLE hCombinedRecv;
+    rv = fl->C_DeriveKey(hSess, &combineMechRecv, hMSecretRecv, combineTmpl, 4, &hCombinedRecv);
+    if (rv != CKR_OK) { record_result("HybridKEM", "Combine_recv", "FAIL", "RV=" + std::to_string(rv)); return; }
+    record_result("HybridKEM", "Combine_recv", "PASS", "");
+
+    // ── Sender's and receiver's combined secrets MUST match — this is the
+    // actual hybrid-KEM correctness property (both encapsulate/decapsulate
+    // + combiner steps reconstruct the identical secret).
+    CK_BYTE sendVal[128]; CK_ATTRIBUTE sendAttr = { CKA_VALUE, sendVal, sizeof(sendVal) };
+    CK_BYTE recvVal[128]; CK_ATTRIBUTE recvAttr = { CKA_VALUE, recvVal, sizeof(recvVal) };
+    fl->C_GetAttributeValue(hSess, hCombinedSend, &sendAttr, 1);
+    fl->C_GetAttributeValue(hSess, hCombinedRecv, &recvAttr, 1);
+    if (sendAttr.ulValueLen == 64 && sendAttr.ulValueLen == recvAttr.ulValueLen &&
+        memcmp(sendVal, recvVal, sendAttr.ulValueLen) == 0) {
+        record_result("HybridKEM", "X25519MLKEM768_round_trip", "PASS",
+                       "combined secret len=" + std::to_string(sendAttr.ulValueLen) + " (32 ss_mlkem || 32 ss_x25519)");
+    } else {
+        record_result("HybridKEM", "X25519MLKEM768_round_trip", "FAIL",
+                       "len=" + std::to_string(sendAttr.ulValueLen) + " (want 64), match=" +
+                       std::string((sendAttr.ulValueLen == recvAttr.ulValueLen && memcmp(sendVal, recvVal, sendAttr.ulValueLen) == 0) ? "yes" : "no"));
+    }
+}
+
 
 #ifndef CKM_HASH_ML_DSA_SHA512
 #define CKM_HASH_ML_DSA_SHA512 0x00000026UL
@@ -5542,6 +5709,7 @@ int main(int argc, char** argv) {
     if (opt_category == "all" || opt_category == "discovery") { refresh_session(); test_mechanism_discovery(); }
     if (opt_category == "all" || opt_category == "attr") { refresh_session(); test_key_attributes(); }
     if (opt_category == "all" || opt_category == "pqc-kem") { refresh_session(); test_pqc_kem(); }
+    if (opt_category == "all" || opt_category == "pqc-kem") { refresh_session(); test_hybrid_kem(); }
     if (opt_category == "all" || opt_category == "pqc-dsa") { refresh_session(); test_pqc_dsa(); }
     if (opt_category == "all" || opt_category == "pqc-dsa") { refresh_session(); test_mldsa_context_binding(); }
     if (opt_category == "all" || opt_category == "pqc-dsa") { refresh_session(); test_multipart_signing(); }
