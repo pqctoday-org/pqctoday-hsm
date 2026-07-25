@@ -858,7 +858,12 @@ impl KmipPlayground {
                 certificate_payload: Some((0, der)),
                 secret_data_type: None,
             };
-            pqctoday_kmip::ops::register_import_export::register(&self.deps, req, "wp3-register-cert-demo")
+            // No transport/credential identity in this in-browser demo helper —
+            // same open-auth context dispatch() builds for credential-free
+            // requests (`AuthContext { identity: transport_identity }` with
+            // `transport_identity = None`).
+            let auth = pqctoday_kmip::server::auth::AuthContext::open();
+            pqctoday_kmip::ops::register_import_export::register(&self.deps, req, &auth, "wp3-register-cert-demo")
                 .map(|resp| json!({ "ok": true, "uid": resp.uid }))
                 .map_err(|e| format!("{e:?}"))
         })();
