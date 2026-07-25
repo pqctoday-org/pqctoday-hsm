@@ -1,9 +1,9 @@
-//! KMIP 3.0 WD19 (PQC Updates) **Decapsulate** operation.
+//! KMIP 3.0 CSD02 (PQC Updates) **Decapsulate** operation.
 //!
 //! > "This operation requests the server to perform an ML-KEM
 //! > decapsulation against the referenced private (decapsulation) key."
 //!
-//! Op codepoint `0x42` (WD19 — right after `Encapsulate = 0x41`).
+//! Op codepoint `0x42` (CSD02 — right after `Encapsulate = 0x41`).
 //!
 //! Unlike the `Decrypt`-overload decapsulation path
 //! ([`super::decrypt::decrypt`]), `Decapsulate` does **not** return the

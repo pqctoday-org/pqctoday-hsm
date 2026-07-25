@@ -130,7 +130,7 @@ pub struct ObjectRecord {
     /// shared secret round-trips as the OASIS PQC interop KATs expect.
     pub secret_data_type: Option<u32>,
 
-    /// KMIP 3.0 WD19 §3.4 — the deterministic generation seed (ML-DSA ξ,
+    /// KMIP 3.0 CSD02 §3.4 — the deterministic generation seed (ML-DSA ξ,
     /// ML-KEM d‖z, SLH-DSA seed) supplied to `CreateKeyPair`. Stored on
     /// the private-key record so `Get` with `KeyFormatType=SeedPrivateKey`
     /// can return the `{ Seed, Key }` KeyMaterial structure. `None` for

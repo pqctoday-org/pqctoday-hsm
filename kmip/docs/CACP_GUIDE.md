@@ -184,10 +184,11 @@ Three tabs; a **Guided/Expert** toggle gates the advanced controls.
   instantiate them; picking one shows the policy decision without running
   crypto. Use them to prove e.g. "CNSA allows LMS but denies HSS". Of these,
   only XMSS is an actual KMIP 3.0 `CryptographicAlgorithm` value — LMS, HSS,
-  and XMSS-MT exist only as CACP policy vocabulary (no KMIP codepoint in
-  either draft); X25519 is a WD19-only addition, absent from CSD01. Ed25519,
-  FrodoKEM, and Classic-McEliece are NOT in this list — they're genuinely
-  runnable (keygen/sign/encapsulate wired through the engine).
+  and XMSS-MT exist only as CACP policy vocabulary (no KMIP codepoint under
+  CSD02); X25519 (0x5A, published) and X448 (0x5B, published) are both
+  standard values under CSD02. Ed25519, FrodoKEM, and Classic-McEliece are
+  NOT in this list — they're genuinely runnable (keygen/sign/encapsulate
+  wired through the engine).
 
 ### 3.2 Policy tab
 
@@ -247,47 +248,58 @@ engine and the visual simulator. Every policy change needs matching
 positive/negative scenarios — the 2026-07-04 audit block at the end of the
 file encodes each fixed gap as a regression test.
 
-## 4. KMIP 3.0 status — hybrid KEMs and hybrid signatures (verified 2026-07-04)
+## 4. KMIP 3.0 status — hybrid KEMs and hybrid signatures (verified 2026-07-24)
 
 **Status.** The newest published OASIS *Standard* is **KMIP 2.1** (Dec 2020).
-KMIP 3.0 is in committee: CSD01/WD16 (Aug 2024) → public review → **WD19
-(Feb 2025)**, the draft vendored in `kmip/spec/oasis-kmip-3.0/` and
-implemented here. **KMIP Test Cases 3.0 / Profiles 3.0 are work-in-progress —
-neither is an OASIS Standard yet** — but OASIS HAS published draft-stage
-test vectors alongside Profiles CSD01 (102 XMLs, 95 mandatory + 7 optional):
-the exact set vendored here and replayed by "the 102 OASIS tests" in §5.
-"Draft, not yet Standard" is the accurate caveat, not "no official vectors".
+KMIP 3.0 is in committee: CSD01 (Aug 2024) → **CSD02 (7 May 2026)**, the
+current draft vendored in `kmip/spec/oasis-kmip-3.0/` and implemented here.
+CSD02 supersedes both CSD01 and the never-independently-published WD19
+draft this codebase previously tracked by hand — CSD02 turned out to be
+WD19 promoted to a real published stage, so the engine's behavior didn't
+need to change, only its citations and its spec-extraction source. **KMIP
+Test Cases 3.0 / Profiles 3.0 are also work-in-progress — neither is an
+OASIS Standard yet** — but OASIS HAS published draft-stage test vectors
+alongside Profiles CSD02 (102 XMLs, 95 mandatory + 7 optional): the exact
+set vendored here and replayed by "the 102 OASIS tests" in §5. "Draft, not
+yet Standard" is the accurate caveat, not "no official vectors".
 
 **PQC.** The 3.0 line adds ML-KEM, ML-DSA, SLH-DSA (all 12 sets) plus the
-`Encapsulate`/`Decapsulate` operations. The public-review snapshot's
-algorithm enum ends at `SLH-DSA-SHAKE-256f` (0x4A); **WD19 extends it to
-0x5D**, adding among others the pre-hash `HASH-SLH-DSA-…` variants and the
-hybrid KEMs. (Note: `kmip-spec-3.0-tags-enums.json` in this repo is
-extracted from the CSD01 snapshot and stops at 0x4A; the code implements
-WD19 values. This is a durable gap, not a quick regen — OASIS never
-published a WD19 HTML export, only PDF/DOCX, and the extractor
-(`tools/extract_kmip_spec.rs`) only parses HTML. Every WD19-only value the
-code needs is hand-patched into `codepointTable.ts`'s
-`SPEC_EXTRACT_PATCHES`/`SPEC_EXTRACT_TAG_PATCHES` and `_ttlv.py`'s Python
-mirror, each individually cross-checked against `kmip/src/kmip30/
-{algos,ops}.rs` — that's the actual source of truth for anything past 0x4A,
-not this JSON file. **§-section citations throughout this guide and the
-Commands tab follow CSD01 numbering** (the HTML's own TOC) except where
-explicitly marked `WD19 §…` for the two WD19-only operations.)
+`Encapsulate`/`Decapsulate` operations. CSD02's algorithm enum runs through
+`0x59` (the 15 pre-hash `Hash-ML-DSA-*`/`Hash-SLH-DSA-*` values, §11.12
+Table 552) and separately assigns the hybrid KEMs at `0x5C`/`0x5D`.
+`kmip-spec-3.0-tags-enums.json` in this repo is extracted directly from the
+published CSD02 HTML (`tools/extract_kmip_spec.rs`) and matches these
+values natively — no hand-patched WD19-era gap remains. What's still
+hand-patched in `codepointTable.ts`'s `SPEC_EXTRACT_PATCHES`/
+`SPEC_EXTRACT_TAG_PATCHES` and `_ttlv.py`'s Python mirror are only genuine
+`norm()`-collision aliases (the spec's own hyphenation/casing doesn't
+match the request-builder's option strings), real vendor extensions
+(FrodoKEM, Classic-McEliece, LAMPS composites), and one enum table
+(`Deactivation Reason Code`) the HTML extractor still mis-attributes under
+CSD02 too — see that file's own comments for the current, much shorter
+list. **§-section citations throughout this guide and the Commands tab
+follow CSD02 numbering** — guarded by `kmip/tests/section61_citation_drift.rs`
+and the hub-side `section61CitationDrift.local.test.ts`, both checked
+against `kmip-spec-3.0-section61-headings.json`.
 
 **Hybrid KEM — a pure hybrid key type; batches are NOT involved.**
-`X25519MLKEM768` (0x5C) and `SecP256r1MLKEM768` (0x5D) are first-class
-Cryptographic Algorithm values in WD19 (per `draft-ietf-tls-ecdhe-mlkem`):
-one managed object, standard Encapsulate/Decapsulate, combiner inside the
-engine (`hybrid_kem.rs`). These are draft-track codepoints — if the final
-OASIS Standard renumbers, it's a one-line constant swap.
+`X25519MLKEM768` (0x5C) and `SecP256r1MLKEM768` (0x5D) are first-class,
+published Cryptographic Algorithm values in CSD02 §11.12 (per
+`draft-ietf-tls-ecdhe-mlkem`): one managed object, standard
+Encapsulate/Decapsulate, combiner inside the engine (`hybrid_kem.rs`).
+Profiles CSD02 §3.3.3 additionally *mandates* a third group,
+`SecP384r1MLKEM1024`, as a required TLS key-exchange group for the KMIP
+transport itself — the Specification still assigns it no managed-object
+codepoint (this engine registers it under the spec's own `8XXXXXXX`
+vendor-extension range, see `algos.rs`), so the two documents are
+currently out of step on that one algorithm. If a future Specification
+draft assigns it a standard codepoint, it's a one-line constant swap.
 
 **Hybrid (composite) signature — KMIP has no native answer.** No KMIP
 version or draft defines classical+PQC composite signature algorithms, a
-hybrid key object type, or a dual-sign operation (the WD19
-`HASH-SLH-DSA-…-with-SHA256` names are FIPS 205 pre-hash modes, not
-composites; KMIP's Split Key is n-of-m custody of one key, unrelated). Two
-compliant patterns:
+hybrid key object type, or a dual-sign operation (the `Hash-SLH-DSA-*-with-
+SHA256` names are FIPS 205 pre-hash modes, not composites; KMIP's Split Key
+is n-of-m custody of one key, unrelated). Two compliant patterns:
 
 1. **Extension codepoint (recommended, planned):** every KMIP enum reserves
    `8XXXXXXX` for extensions. Register e.g. `ML-DSA-65-Ed25519` =
@@ -303,11 +315,12 @@ compliant patterns:
    LAMPS encoding assembled client-side. No extensions — but the server sees
    two independent signatures, so policy cannot attest "this was dual-signed".
 
-Sources: [KMIP 3.0 CSD01](https://docs.oasis-open.org/kmip/kmip-spec/v3.0/csd01/kmip-spec-v3.0-csd01.pdf) ·
-[P6R KMIP 2.1↔3.0 diff (WD19)](https://www.p6r.com/articles/2024/06/16/detailed-differences-between-kmip-2-1-and-3-0/) ·
+Sources: [KMIP 3.0 CSD02](https://docs.oasis-open.org/kmip/kmip-spec/v3.0/csd02/kmip-spec-v3.0-csd02.pdf) ·
+[KMIP Profiles 3.0 CSD02](https://docs.oasis-open.org/kmip/kmip-profiles/v3.0/csd02/kmip-profiles-v3.0-csd02.pdf) ·
+[P6R KMIP 2.1↔3.0 diff](https://www.p6r.com/articles/2024/06/16/detailed-differences-between-kmip-2-1-and-3-0/) ·
 [OASIS KMIP TC](https://www.oasis-open.org/committees/tc_home.php?wg_abbrev=kmip) ·
 [KMIP 2.1 OS announcement](https://www.oasis-open.org/2020/12/18/key-management-interoperability-protocol-specification-and-key-management-interoperability-protocol-profiles-oasis-standards-published/) ·
-vendored `kmip-spec-v3.0-wd19-clean.pdf` (Table 552) + `kmip-spec-v3.0.html`.
+vendored `kmip-spec-v3.0-csd02.pdf` (Table 552) + `kmip-spec-v3.0-csd02.html`.
 
 ## 5. Engine 0.12/0.13 — the "honest maximum" additions (verified 2026-07-09)
 

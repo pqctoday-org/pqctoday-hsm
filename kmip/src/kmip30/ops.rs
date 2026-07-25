@@ -14,7 +14,7 @@
 //! encrypt, decrypt, sign, signature_verify
 //! ```
 //!
-//! KMIP 3.0 WD19 (PQC Updates) DOES add native `Encapsulate` (0x41) /
+//! KMIP 3.0 CSD02 (PQC Updates) DOES add native `Encapsulate` (0x41) /
 //! `Decapsulate` (0x42) ops, and this server implements them (see the
 //! Encapsulate/Decapsulate structs below and `ops::encapsulate` /
 //! `ops::decapsulate`). For backward compatibility with pre-WD19 clients the
@@ -87,9 +87,9 @@ pub enum Operation {
     CreateCredential = 0x3f,
     Deactivate       = 0x40,
 
-    // ── KMIP 3.0 WD19 (PQC Updates) — KEM ops ─────────────────────────────
+    // ── KMIP 3.0 CSD02 (PQC Updates) — KEM ops ─────────────────────────────
     // ML-KEM encapsulation / decapsulation as first-class operations.
-    // Codepoints confirmed from the WD19 Operation enum (right after
+    // Codepoints confirmed from the CSD02 Operation enum (right after
     // Deactivate = 0x40).
     Encapsulate      = 0x41,
     Decapsulate      = 0x42,
@@ -376,7 +376,7 @@ pub struct CreateKeyPairRequest {
     pub common_attributes: Vec<Attribute>,
     pub private_key_attributes: Vec<Attribute>,
     pub public_key_attributes: Vec<Attribute>,
-    /// `Seed` (0x4201C6, KMIP 3.0 WD19) — ByteString. When present, the key
+    /// `Seed` (0x4201C6, KMIP 3.0 CSD02) — ByteString. When present, the key
     /// pair is generated deterministically from this seed (FIPS 204 ξ /
     /// FIPS 203 d‖z / FIPS 205 SK.seed‖SK.prf‖PK.seed) instead of the RNG.
     pub seed: Option<Vec<u8>>,
@@ -444,7 +444,7 @@ pub struct GetResponse {
     /// (Password = 0x01, Seed = 0x02). `None` renders as the Password
     /// default. Only meaningful when `object_type == SecretData`.
     pub secret_data_type: Option<u32>,
-    /// KMIP 3.0 WD19 §3.4 — the generation seed, present only when the
+    /// KMIP 3.0 CSD02 §3.4 — the generation seed, present only when the
     /// client requested `KeyFormatType=SeedPrivateKey`. The wire encoder
     /// emits the `KeyMaterial` as a `{ Seed, Key }` structure.
     pub seed: Option<Vec<u8>>,
@@ -490,7 +490,7 @@ pub enum KeyFormatType {
     TransparentEcPublicKey   = 0x15,
     Pkcs12                   = 0x16,
     Pkcs10                   = 0x17,
-    /// KMIP 3.0 WD19 §3.4 (Table 575) — seed-based private-key format
+    /// KMIP 3.0 CSD02 §3.4 (Table 575) — seed-based private-key format
     /// for algorithms with a deterministic seed (ML-DSA ξ, ML-KEM d‖z,
     /// SLH-DSA seed). `KeyMaterial` is a Structure of `Seed` + `Key`.
     SeedPrivateKey           = 0x18,
@@ -714,14 +714,14 @@ pub struct DecryptResponse {
     pub data: Vec<u8>,
 }
 
-// ── Encapsulate / Decapsulate (KMIP 3.0 WD19, PQC Updates) ──────────────────
+// ── Encapsulate / Decapsulate (KMIP 3.0 CSD02, PQC Updates) ──────────────────
 //
 // First-class ML-KEM KEM operations. Unlike the Encrypt/Decrypt overload
 // (which returns the shared secret inline), these create a NEW managed
 // Secret-Data object holding the derived shared secret and return its UID;
 // a subsequent Get on that UID retrieves the 32-byte shared secret.
 
-/// `Encapsulate` request (KMIP 3.0 WD19) — the public/encapsulation key
+/// `Encapsulate` request (KMIP 3.0 CSD02) — the public/encapsulation key
 /// UID plus, inside `CryptographicParameters`, the optional 32-byte
 /// `InputKeyMaterial` (the FIPS 203 §7.2 coins `m`). When the coins are
 /// present, encapsulation is deterministic (interop / KAT reproducibility);
@@ -739,7 +739,7 @@ pub struct EncapsulateRequest {
     pub cryptographic_parameters: Option<CryptographicParameters>,
 }
 
-/// `Encapsulate` response (KMIP 3.0 WD19) — the UID of the NEW managed
+/// `Encapsulate` response (KMIP 3.0 CSD02) — the UID of the NEW managed
 /// shared-secret object the server created, plus the ciphertext (the
 /// encapsulation) in `Data`. A subsequent `Get` on `uid` returns the
 /// shared secret as KeyMaterial.
@@ -769,7 +769,7 @@ pub struct EncapsulateRekeyInfo {
     pub new_private_key_uid: String,
 }
 
-/// `Decapsulate` request (KMIP 3.0 WD19) — the private/decapsulation key
+/// `Decapsulate` request (KMIP 3.0 CSD02) — the private/decapsulation key
 /// UID plus the ciphertext (the encapsulation) in `Data`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct DecapsulateRequest {
@@ -780,7 +780,7 @@ pub struct DecapsulateRequest {
     pub cryptographic_parameters: Option<CryptographicParameters>,
 }
 
-/// `Decapsulate` response (KMIP 3.0 WD19) — the UID of the NEW managed
+/// `Decapsulate` response (KMIP 3.0 CSD02) — the UID of the NEW managed
 /// shared-secret object the server created. A subsequent `Get` on `uid`
 /// returns the recovered shared secret as KeyMaterial.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -1388,7 +1388,7 @@ pub struct CryptographicParameters {
     /// Ignored for non-PSS mechanisms (CryptographicParameters is a
     /// grab-bag; irrelevant fields are not an error).
     pub salt_length: Option<i32>,
-    // ── PQC fields (KMIP 3.0 WD19; tags 0x4201C4–0x4201CA) ──────────────
+    // ── PQC fields (KMIP 3.0 CSD02; tags 0x4201C4–0x4201CA) ──────────────
     /// `Deterministic` (0x4201C4) — Boolean. ML-DSA/SLH-DSA deterministic
     /// signing variant (rnd←0^32 / addrnd←PK.seed) when `true`.
     pub deterministic: Option<bool>,
@@ -1404,7 +1404,7 @@ pub struct CryptographicParameters {
     /// `Random` (0x4201CA) — ByteString. Explicit signing randomizer for the
     /// hedged (non-deterministic) variant, making it reproducible.
     pub random: Option<Vec<u8>>,
-    /// `KEM Algorithm` (0x4201C3) — Enumeration (KMIP 3.0 WD19 §11.26,
+    /// `KEM Algorithm` (0x4201C3) — Enumeration (KMIP 3.0 CSD02 §11.26,
     /// Table 572). Disambiguates *which* KEM construction an `Encapsulate`/
     /// `Decapsulate` call is running — `DHKEM` (classical ephemeral-static
     /// ECDH), `MLKEM`, or `RSASVE`. See
@@ -1412,7 +1412,7 @@ pub struct CryptographicParameters {
     pub kem_algorithm: Option<KemAlgorithm>,
 }
 
-/// `KEM Algorithm` Enumeration — KMIP 3.0 WD19 §11.26, Table 572.
+/// `KEM Algorithm` Enumeration — KMIP 3.0 CSD02 §11.26, Table 572.
 /// `DhKem` is the spec's own name for the classical ephemeral-static ECDH
 /// construction (PKCS#11 v3.2 §6.3.17's `CKM_ECDH1_DERIVE`-under-
 /// `C_EncapsulateKey` mode) — not a vendor extension.
@@ -2230,7 +2230,7 @@ mod tests {
 
     /// K3 — every published KMIP 3.0 Operation codepoint (0x01–0x40,
     /// 64 total per `kmip-spec-3.0-tags-enums.json`) decodes, and
-    /// every decode round-trips back to the same wire value. The WD19
+    /// every decode round-trips back to the same wire value. The CSD02
     /// PQC-Updates KEM ops (`Encapsulate = 0x41`, `Decapsulate = 0x42`)
     /// also decode and round-trip; the first unknown codepoint is 0x43.
     #[test]
@@ -2241,7 +2241,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("codepoint {v:#04x} must decode"));
             assert_eq!(op.to_wire_value(), v, "round-trip for {v:#04x}");
         }
-        // WD19 PQC-Updates KEM ops.
+        // CSD02 PQC-Updates KEM ops.
         assert_eq!(Operation::from_wire_value(0x41), Some(Operation::Encapsulate));
         assert_eq!(Operation::from_wire_value(0x42), Some(Operation::Decapsulate));
         assert_eq!(Operation::Encapsulate.to_wire_value(), 0x41);

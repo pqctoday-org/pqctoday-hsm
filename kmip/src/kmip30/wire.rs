@@ -1043,7 +1043,7 @@ fn uid_frame(uid: &str) -> TtlvFrame {
     TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString(uid.to_string()))
 }
 
-/// Encapsulate's `CryptographicParameters` structure, PLUS the WD19
+/// Encapsulate's `CryptographicParameters` structure, PLUS the CSD02
 /// `InputKeyMaterial` field nested inside it (`decode_encapsulate_req`
 /// hoists that same nesting out into `EncapsulateRequest::input_key_material`
 /// — this is its encode-side mirror). Returns `None` when neither is
@@ -1272,7 +1272,7 @@ fn request_payload_to_frame(p: &RequestPayload) -> Option<TtlvFrame> {
             }
             k
         }
-        // 2026-07-17 audit — Encapsulate/Decapsulate (KMIP 3.0 WD19) had NO
+        // 2026-07-17 audit — Encapsulate/Decapsulate (KMIP 3.0 CSD02) had NO
         // request-encoding arm at all, so `request_payload_to_frame` fell
         // through to the final `_ => return None` and the whole batch's
         // `encode_request_message` came back `None` — silently emitting
@@ -1954,7 +1954,7 @@ fn decode_create_key_pair_req(children: &[TtlvFrame]) -> Result<CreateKeyPairReq
                     }
                 }
             }
-            // `Seed` (0x4201C6) — KMIP 3.0 WD19 deterministic keygen.
+            // `Seed` (0x4201C6) — KMIP 3.0 CSD02 deterministic keygen.
             tags::PqcSeed => {
                 if let Value::ByteString(b) = &c.value {
                     seed = Some(b.clone());
@@ -2380,9 +2380,9 @@ fn encode_decrypt_resp(r: &DecryptResponse) -> Vec<TtlvFrame> {
     ]
 }
 
-// ── Encapsulate / Decapsulate (KMIP 3.0 WD19) ───────────────────────────────
+// ── Encapsulate / Decapsulate (KMIP 3.0 CSD02) ───────────────────────────────
 
-/// Decode an `Encapsulate` request payload (KMIP 3.0 WD19):
+/// Decode an `Encapsulate` request payload (KMIP 3.0 CSD02):
 /// `{ UniqueIdentifier, CryptographicParameters? }` where the optional
 /// `CryptographicParameters` Structure nests the 32-byte
 /// `InputKeyMaterial` (0x4201C7, the deterministic coins `m`).
@@ -2395,7 +2395,7 @@ fn decode_encapsulate_req(children: &[TtlvFrame]) -> Result<EncapsulateRequest, 
             tags::CryptographicParameters => {
                 cp = Some(decode_cryptographic_parameters(c)?);
                 // InputKeyMaterial rides inside CryptographicParameters
-                // per the WD19 transcript; it is not a field of the
+                // per the CSD02 transcript; it is not a field of the
                 // CryptographicParameters struct, so pull it out here.
                 for cc in expect_structure(c, "Cryptographic Parameters")? {
                     if cc.tag.0 == tags::InputKeyMaterial {
@@ -2417,7 +2417,7 @@ fn decode_encapsulate_req(children: &[TtlvFrame]) -> Result<EncapsulateRequest, 
     Ok(EncapsulateRequest { uid, input_key_material, cryptographic_parameters: cp })
 }
 
-/// Encode an `Encapsulate` response payload (KMIP 3.0 WD19):
+/// Encode an `Encapsulate` response payload (KMIP 3.0 CSD02):
 /// `{ UniqueIdentifier (new shared-secret object), Data (ciphertext) }`.
 fn encode_encapsulate_resp(r: &EncapsulateResponse) -> Vec<TtlvFrame> {
     vec![
@@ -2426,7 +2426,7 @@ fn encode_encapsulate_resp(r: &EncapsulateResponse) -> Vec<TtlvFrame> {
     ]
 }
 
-/// Decode a `Decapsulate` request payload (KMIP 3.0 WD19):
+/// Decode a `Decapsulate` request payload (KMIP 3.0 CSD02):
 /// `{ UniqueIdentifier, Data (ciphertext), CryptographicParameters? }`.
 fn decode_decapsulate_req(children: &[TtlvFrame]) -> Result<DecapsulateRequest, WireError> {
     let uid = required_uid(children)?;
@@ -2446,7 +2446,7 @@ fn decode_decapsulate_req(children: &[TtlvFrame]) -> Result<DecapsulateRequest, 
     Ok(DecapsulateRequest { uid, data, cryptographic_parameters: cp })
 }
 
-/// Encode a `Decapsulate` response payload (KMIP 3.0 WD19):
+/// Encode a `Decapsulate` response payload (KMIP 3.0 CSD02):
 /// `{ UniqueIdentifier (new shared-secret object) }`.
 fn encode_decapsulate_resp(r: &DecapsulateResponse) -> Vec<TtlvFrame> {
     vec![TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString(r.uid.clone()))]
@@ -3304,7 +3304,7 @@ fn decode_cryptographic_parameters(frame: &TtlvFrame) -> Result<CryptographicPar
             tags::SaltLength => {
                 cp.salt_length = Some(expect_integer(c, "Salt Length")?);
             }
-            // PQC signing fields (KMIP 3.0 WD19). Previously fell through the
+            // PQC signing fields (KMIP 3.0 CSD02). Previously fell through the
             // `_ => {}` arm and were silently dropped — now honored.
             tags::Deterministic => {
                 cp.deterministic = Some(expect_boolean(c, "Deterministic")?);
@@ -3325,7 +3325,7 @@ fn decode_cryptographic_parameters(frame: &TtlvFrame) -> Result<CryptographicPar
                     cp.random = Some(b.clone());
                 }
             }
-            // KMIP 3.0 WD19 §11.26 — disambiguates DHKEM/MLKEM/RSASVE for
+            // KMIP 3.0 CSD02 §11.26 — disambiguates DHKEM/MLKEM/RSASVE for
             // Encapsulate/Decapsulate (2026-07-05, classical-KEM agility).
             tags::KemAlgorithm => {
                 let v = expect_enum(c, "KEM Algorithm")?;
@@ -4580,7 +4580,7 @@ fn encode_export_resp(r: &ExportResponse) -> Vec<TtlvFrame> {
         Value::Structure(r.attributes.iter().map(encode_attribute_v3).collect()),
     ));
     if let Some(kb) = &r.managed_object {
-        // Export does not emit the WD19 SeedPrivateKey form (it returns
+        // Export does not emit the CSD02 SeedPrivateKey form (it returns
         // the stored Raw/transparent material), so no seed is threaded.
         let kb_frame = encode_key_block(kb, None);
         let managed_object_tag = match r.object_type {
@@ -4605,7 +4605,7 @@ fn encode_key_block(kb: &KeyBlock, seed: Option<&[u8]>) -> TtlvFrame {
         TtlvFrame::new(Tag(tags::KeyValue), Value::ByteString(kb.key_value.clone()))
     } else {
         let key_material = match kb.key_format_type {
-            // KMIP 3.0 WD19 §3.4 — SeedPrivateKey KeyMaterial is a
+            // KMIP 3.0 CSD02 §3.4 — SeedPrivateKey KeyMaterial is a
             // Structure of `Seed` (the generation seed) + `Key` (the raw
             // private bytes), in that order.
             KeyFormatType::SeedPrivateKey => {
@@ -6339,7 +6339,7 @@ mod tests {
             (F::TransparentEcPublicKey, 0x15),
             (F::Pkcs12, 0x16),
             (F::Pkcs10, 0x17),
-            // KMIP 3.0 WD19 §3.4 — seed-based private-key format.
+            // KMIP 3.0 CSD02 §3.4 — seed-based private-key format.
             (F::SeedPrivateKey, 0x18),
         ] {
             assert_eq!(variant as u32, code, "{variant:?}");

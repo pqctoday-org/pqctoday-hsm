@@ -253,7 +253,7 @@ pub enum KmipAlgorithm {
     HashMlDsa65WithSha512,           // 0x58
     HashMlDsa87WithSha512,           // 0x59
 
-    // ── KMIP 3.0 WD19 hybrid KEMs (K6) ────────────────────────────────────
+    // ── KMIP 3.0 CSD02 hybrid KEMs (K6) ────────────────────────────────────
     // ML-KEM composed with a classical ECDH per draft-ietf-tls-ecdhe-mlkem.
     // These do NOT map to a single PKCS#11 mechanism — the engine composes the
     // two component keys (see `softhsmrustv3::native::hybrid`).
@@ -495,7 +495,7 @@ impl KmipAlgorithm {
         )
     }
 
-    /// `true` if this is a KMIP 3.0 WD19 hybrid KEM (K6), composed in-process
+    /// `true` if this is a KMIP 3.0 CSD02 hybrid KEM (K6), composed in-process
     /// from ML-KEM-768 + a classical ECDH rather than a single PKCS#11 mech.
     pub const fn is_hybrid_kem(self) -> bool {
         matches!(

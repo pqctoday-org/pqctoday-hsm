@@ -22,7 +22,7 @@ Loaded at server start via `pqctoday-kmip --policy-dir policies --policy <name>`
 | [`cnsa-2.0.yaml`](cnsa-2.0.yaml) | NSA Commercial National Security Algorithm Suite 2.0 (CNSA 2.0): ML-KEM-1024 + ML-DSA-87 + AES-256 + SHA-384. |
 | [`fips-hashing.yaml`](fips-hashing.yaml) | **Mechanism dimension (hashing).** Restrict Sign/Verify hashing to FIPS SHA-2/SHA-3; deny SHA-1 — gates the KMIP `Hashing Algorithm`, not just the key algorithm. |
 | [`aead-only.yaml`](aead-only.yaml) | **Mechanism dimension (mode/padding).** AES Encrypt/Decrypt must be GCM/CCM; RSA must be OAEP — gates KMIP `Block Cipher Mode` / `Padding Method`. |
-| [`deterministic-signing.yaml`](deterministic-signing.yaml) | **Mechanism forcing.** Forces deterministic ML-DSA/SLH-DSA via the WD19 `Deterministic` flag — policy *sets* the mechanism param, transparent to the app. |
+| [`deterministic-signing.yaml`](deterministic-signing.yaml) | **Mechanism forcing.** Forces deterministic ML-DSA/SLH-DSA via the CSD02 `Deterministic` flag — policy *sets* the mechanism param, transparent to the app. |
 | [`auto-migrate-on-use.yaml`](auto-migrate-on-use.yaml) | Auto-rekey classical key handles to their PQC equivalent on first use (Sign/Encapsulate), via `algorithm_substitution`. |
 | [`bsi-tr-02102.yaml`](bsi-tr-02102.yaml) | German BSI TR-02102 profile: allowed PQC + classical algorithms and key lengths per the BSI technical guideline. |
 | [`pkcs11-mechanism-lockdown.yaml`](pkcs11-mechanism-lockdown.yaml) | **Mechanism dimension.** Allowlists the specific PKCS#11 mechanisms permitted (keygen + sign/verify families), denying everything else. |
@@ -124,7 +124,7 @@ dimension" advertised by `fips-hashing.yaml`, `aead-only.yaml`,
 | `hash_algorithm_allowlist` | Restrict the KMIP `Hashing Algorithm` for Sign/Verify to an allowed set (e.g. deny SHA-1). |
 | `mac_mechanism_policy` | Constrain the MAC mechanism family (e.g. require HMAC-SHA2+). |
 | `mechanism_parameter_constraint` | Gate a mechanism parameter — e.g. AES `Block Cipher Mode` ∈ {GCM, CCM}, RSA `Padding Method` = OAEP. |
-| `mechanism_parameter_default` | Resolution rule (Pass 1): *set* a mechanism parameter the request omitted — e.g. force the WD19 `Deterministic` flag on ML-DSA/SLH-DSA. |
+| `mechanism_parameter_default` | Resolution rule (Pass 1): *set* a mechanism parameter the request omitted — e.g. force the CSD02 `Deterministic` flag on ML-DSA/SLH-DSA. |
 
 ## Decisions
 

@@ -396,7 +396,7 @@ pub const HANDLED_OPERATIONS: &[crate::kmip30::Operation] = {
         Op::SetAttribute, Op::AdjustAttribute,
         Op::Locate, Op::Activate, Op::Revoke, Op::Destroy,
         Op::Encrypt, Op::Decrypt, Op::Sign, Op::SignatureVerify,
-        // KMIP 3.0 WD19 — first-class ML-KEM Encapsulate / Decapsulate.
+        // KMIP 3.0 CSD02 — first-class ML-KEM Encapsulate / Decapsulate.
         Op::Encapsulate, Op::Decapsulate,
         Op::Interop, Op::Register, Op::Import, Op::Export,
         Op::Deactivate, Op::Check, Op::ObtainLease, Op::Archive, Op::Recover,

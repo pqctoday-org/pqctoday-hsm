@@ -254,7 +254,7 @@ mod tests {
         assert!(ops.contains(&Operation::Sign));
         assert!(ops.contains(&Operation::Encrypt));
         assert!(ops.contains(&Operation::Decrypt));
-        // WD19 — first-class ML-KEM KEM ops.
+        // CSD02 — first-class ML-KEM KEM ops.
         assert!(ops.contains(&Operation::Encapsulate));
         assert!(ops.contains(&Operation::Decapsulate));
         assert!(ops.contains(&Operation::GetAttributes));

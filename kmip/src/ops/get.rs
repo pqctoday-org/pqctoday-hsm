@@ -160,7 +160,7 @@ pub fn get(
         // Engine-held private key: the material lives behind the PKCS#11
         // CKA_SENSITIVE gate and is normally never extractable in the
         // clear (compliance-audit B-4: fail instead of the old
-        // zero-length OpaqueObject hack). The KMIP 3.0 WD19 PQC interop
+        // zero-length OpaqueObject hack). The KMIP 3.0 CSD02 PQC interop
         // profile is the carve-out: a CreateKeyPair-from-seed key is
         // marked Extractable && !Sensitive (KMIP §4 Extractable), so its
         // generated material can be Got for byte-exact verification.
@@ -235,7 +235,7 @@ pub fn get(
     // (Raw ↔ TransparentSymmetricKey, PKCS#1 ↔ PKCS#8 for RSA) →
     // convert; otherwise `Key Format Type Not Supported (0x10)`.
     //
-    // SeedPrivateKey (KMIP 3.0 WD19 §3.4) is handled here rather than in
+    // SeedPrivateKey (KMIP 3.0 CSD02 §3.4) is handled here rather than in
     // `convert_key_format` because its `KeyMaterial` pairs the engine's
     // raw private bytes (the `Key` leaf) with the generation `Seed`
     // stored on the record — `convert_key_format` only sees the bytes.

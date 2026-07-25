@@ -1,9 +1,9 @@
-//! KMIP 3.0 WD19 (PQC Updates) **Encapsulate** operation.
+//! KMIP 3.0 CSD02 (PQC Updates) **Encapsulate** operation.
 //!
 //! > "This operation requests the server to perform an ML-KEM
 //! > encapsulation against the referenced public (encapsulation) key."
 //!
-//! Op codepoint `0x41` (WD19 — right after `Deactivate = 0x40`).
+//! Op codepoint `0x41` (CSD02 — right after `Deactivate = 0x40`).
 //!
 //! Unlike the `Encrypt`-overload encapsulation path
 //! ([`super::encrypt::encrypt`]), `Encapsulate` does **not** return the
@@ -433,7 +433,7 @@ pub(crate) fn is_ml_kem(a: KmipAlgorithm) -> bool {
     matches!(a, KmipAlgorithm::MlKem512 | KmipAlgorithm::MlKem768 | KmipAlgorithm::MlKem1024)
 }
 
-/// Classical ephemeral-static ECDH as a KEM (2026-07-05) — KMIP 3.0 WD19's
+/// Classical ephemeral-static ECDH as a KEM (2026-07-05) — KMIP 3.0 CSD02's
 /// `DHKEM` (§11.26), PKCS#11 v3.2 §6.3.17's `CKM_ECDH1_DERIVE`-under-
 /// `C_EncapsulateKey`/`C_DecapsulateKey` mode. There is no standalone
 /// X25519/X448 `KmipAlgorithm` codepoint — both are modelled as `Ecdh` with

@@ -37,7 +37,7 @@
 //! 6. Persist any store mutations.
 //! 7. Emit Plane-2 `KmipResponseSent`.
 //!
-//! Note: KMIP 3.0 WD19 adds native `Encapsulate`/`Decapsulate` ops (implemented
+//! Note: KMIP 3.0 CSD02 adds native `Encapsulate`/`Decapsulate` ops (implemented
 //! in `encapsulate`/`decapsulate`); the ML-KEM flow ALSO rides `Encrypt`/
 //! `Decrypt` for pre-WD19 clients (the handler branches on key algorithm).
 

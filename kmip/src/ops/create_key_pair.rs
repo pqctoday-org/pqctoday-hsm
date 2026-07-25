@@ -608,7 +608,7 @@ pub fn create_key_pair(
                 crate::kmip30::KmipAlgorithm::Rsa => Some(0x03),
                 _ => None,
             },
-            // KMIP 3.0 WD19 §3.4 — persist the deterministic seed so a
+            // KMIP 3.0 CSD02 §3.4 — persist the deterministic seed so a
             // later Get(SeedPrivateKey) can return the {Seed,Key}
             // KeyMaterial. Only the seeded (interop) path carries one.
             pqc_seed: req.seed.clone(),

@@ -229,7 +229,7 @@ pub fn sign(
             let pss_salt = super::helpers::pss_salt_from_cp(native_mech, effective_cp)
                 .map_err(|e| fail_err(deps, correlation_id, "Sign", e))?;
             // I4 — ML-DSA / SLH-DSA honor the PQC interface knobs from
-            // CryptographicParameters (KMIP 3.0 WD19): Deterministic, Internal,
+            // CryptographicParameters (KMIP 3.0 CSD02): Deterministic, Internal,
             // External Mu, Context String, Random. Classical mechanisms keep
             // the RSA-PSS-salt bridge.
             let r = if super::helpers::is_pqc_sign_mech(native_mech) {

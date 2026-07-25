@@ -376,7 +376,7 @@ pub enum RequestPayload {
     Destroy(super::ops::DestroyRequest),
     Encrypt(super::ops::EncryptRequest),
     Decrypt(super::ops::DecryptRequest),
-    /// KMIP 3.0 WD19 — ML-KEM Encapsulate / Decapsulate.
+    /// KMIP 3.0 CSD02 — ML-KEM Encapsulate / Decapsulate.
     Encapsulate(super::ops::EncapsulateRequest),
     Decapsulate(super::ops::DecapsulateRequest),
     Sign(super::ops::SignRequest),
@@ -473,7 +473,7 @@ pub enum ResponsePayload {
     Destroy(super::ops::DestroyResponse),
     Encrypt(super::ops::EncryptResponse),
     Decrypt(super::ops::DecryptResponse),
-    /// KMIP 3.0 WD19 — ML-KEM Encapsulate / Decapsulate.
+    /// KMIP 3.0 CSD02 — ML-KEM Encapsulate / Decapsulate.
     Encapsulate(super::ops::EncapsulateResponse),
     Decapsulate(super::ops::DecapsulateResponse),
     Sign(super::ops::SignResponse),
