@@ -1,18 +1,18 @@
 //! KMIP 3.0 Group D (lifecycle: Deactivate / Check / Archive / Recover /
 //! Obliterate) + leftover Group A (DiscoverVersions / Ping) + Obtain
-//! Lease (§6.1.40, Phase 3.1 — grouped here since it shares Check's
+//! Lease (§6.1.42, Phase 3.1 — grouped here since it shares Check's
 //! Lease Time semantics).
 //!
 //! Spec mapping:
 //!
 //! - Deactivate       §6.1.14 — Active → Deactivated, set Deactivation Date
 //! - Check            §6.1.7  — Usage Mask / Usage Limits / Lease Time policy gate
-//! - Obtain Lease     §6.1.40 — grant/renew a lease up to the object's Lease Time cap
+//! - Obtain Lease     §6.1.42 — grant/renew a lease up to the object's Lease Time cap
 //! - Archive          §6.1.4  — move object to Archival storage (K22: real)
-//! - Recover          §6.1.47 — move object back On-line
-//! - Obliterate       §6.1.39 — remove object + all metadata
-//! - DiscoverVersions §6.1.20 — protocol version negotiation
-//! - Ping             §6.1.41 — liveness check (no payload)
+//! - Recover          §6.1.49 — move object back On-line
+//! - Obliterate       §6.1.41 — remove object + all metadata
+//! - DiscoverVersions §6.1.21 — protocol version negotiation
+//! - Ping             §6.1.43 — liveness check (no payload)
 
 use std::collections::HashMap;
 use time::OffsetDateTime;
@@ -202,7 +202,7 @@ pub fn archive(deps: &Deps, req: ArchiveRequest, correlation_id: &str) -> Result
     // archive the object." K22: this server's policy is to honour the
     // indication immediately — the record moves to Archival storage
     // (§12.3 mask bit 0x02) and the material goes off-line until
-    // Recover (§6.1.47). No lifecycle-state precondition: the
+    // Recover (§6.1.49). No lifecycle-state precondition: the
     // §6.1.4.1 error table lists neither `Object Destroyed` nor
     // `Wrong Key Lifecycle State`, so any stored object (including
     // Destroyed tombstones) may be archived.
@@ -225,7 +225,7 @@ pub fn recover(deps: &Deps, req: RecoverRequest, correlation_id: &str) -> Result
     // Managed Object that has been archived. … Once the response is
     // received, the object is now on-line, and MAY be obtained (e.g.,
     // via a Get operation)." Recover of an already-on-line object is
-    // idempotent success: the §6.1.47.1 error table lists no
+    // idempotent success: the §6.1.49.1 error table lists no
     // applicable reason (only Object Not Found + generics), and the
     // postcondition — "the object is now on-line" — already holds.
     if obj.archived {
@@ -294,7 +294,7 @@ pub fn discover_versions(
 // ── Ping ───────────────────────────────────────────────────────────────────
 
 pub fn ping(deps: &Deps, _req: PingRequest, correlation_id: &str) -> Result<PingResponse> {
-    // Per §6.1.41: server MAY treat Ping as a non-logged operation.
+    // Per §6.1.43: server MAY treat Ping as a non-logged operation.
     // We still emit a tiny audit trail for traceability since the
     // sandbox is dev-oriented; production deployments can filter.
     emit_request(deps, correlation_id, "Ping", String::new());
@@ -456,7 +456,7 @@ mod tests {
         }, "c").unwrap();
     }
 
-    // ── Obtain Lease (§6.1.40, Phase 3.1) ───────────────────────────────
+    // ── Obtain Lease (§6.1.42, Phase 3.1) ───────────────────────────────
 
     #[test]
     fn obtain_lease_grants_the_objects_cap_and_sets_expiry() {
@@ -541,7 +541,7 @@ mod tests {
         assert!(d.store.get("u").unwrap().unwrap().archived);
     }
 
-    /// K22 — §6.1.47: "Once the response is received, the object is
+    /// K22 — §6.1.49: "Once the response is received, the object is
     /// now on-line" — Recover flips the record back.
     #[test]
     fn recover_restores_online_storage() {

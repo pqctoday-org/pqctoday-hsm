@@ -14,7 +14,7 @@
 //! encrypt, decrypt, sign, signature_verify
 //! ```
 //!
-//! KMIP 3.0 WD19 (PQC Updates) DOES add native `Encapsulate` (0x41) /
+//! KMIP 3.0 CSD02 (PQC Updates) DOES add native `Encapsulate` (0x41) /
 //! `Decapsulate` (0x42) ops, and this server implements them (see the
 //! Encapsulate/Decapsulate structs below and `ops::encapsulate` /
 //! `ops::decapsulate`). For backward compatibility with pre-WD19 clients the
@@ -87,9 +87,9 @@ pub enum Operation {
     CreateCredential = 0x3f,
     Deactivate       = 0x40,
 
-    // ── KMIP 3.0 WD19 (PQC Updates) — KEM ops ─────────────────────────────
+    // ── KMIP 3.0 CSD02 (PQC Updates) — KEM ops ─────────────────────────────
     // ML-KEM encapsulation / decapsulation as first-class operations.
-    // Codepoints confirmed from the WD19 Operation enum (right after
+    // Codepoints confirmed from the CSD02 Operation enum (right after
     // Deactivate = 0x40).
     Encapsulate      = 0x41,
     Decapsulate      = 0x42,
@@ -376,7 +376,7 @@ pub struct CreateKeyPairRequest {
     pub common_attributes: Vec<Attribute>,
     pub private_key_attributes: Vec<Attribute>,
     pub public_key_attributes: Vec<Attribute>,
-    /// `Seed` (0x4201C6, KMIP 3.0 WD19) — ByteString. When present, the key
+    /// `Seed` (0x4201C6, KMIP 3.0 CSD02) — ByteString. When present, the key
     /// pair is generated deterministically from this seed (FIPS 204 ξ /
     /// FIPS 203 d‖z / FIPS 205 SK.seed‖SK.prf‖PK.seed) instead of the RNG.
     pub seed: Option<Vec<u8>>,
@@ -444,7 +444,7 @@ pub struct GetResponse {
     /// (Password = 0x01, Seed = 0x02). `None` renders as the Password
     /// default. Only meaningful when `object_type == SecretData`.
     pub secret_data_type: Option<u32>,
-    /// KMIP 3.0 WD19 §3.4 — the generation seed, present only when the
+    /// KMIP 3.0 CSD02 §3.4 — the generation seed, present only when the
     /// client requested `KeyFormatType=SeedPrivateKey`. The wire encoder
     /// emits the `KeyMaterial` as a `{ Seed, Key }` structure.
     pub seed: Option<Vec<u8>>,
@@ -490,7 +490,7 @@ pub enum KeyFormatType {
     TransparentEcPublicKey   = 0x15,
     Pkcs12                   = 0x16,
     Pkcs10                   = 0x17,
-    /// KMIP 3.0 WD19 §3.4 (Table 575) — seed-based private-key format
+    /// KMIP 3.0 CSD02 §3.4 (Table 575) — seed-based private-key format
     /// for algorithms with a deterministic seed (ML-DSA ξ, ML-KEM d‖z,
     /// SLH-DSA seed). `KeyMaterial` is a Structure of `Seed` + `Key`.
     SeedPrivateKey           = 0x18,
@@ -714,14 +714,14 @@ pub struct DecryptResponse {
     pub data: Vec<u8>,
 }
 
-// ── Encapsulate / Decapsulate (KMIP 3.0 WD19, PQC Updates) ──────────────────
+// ── Encapsulate / Decapsulate (KMIP 3.0 CSD02, PQC Updates) ──────────────────
 //
 // First-class ML-KEM KEM operations. Unlike the Encrypt/Decrypt overload
 // (which returns the shared secret inline), these create a NEW managed
 // Secret-Data object holding the derived shared secret and return its UID;
 // a subsequent Get on that UID retrieves the 32-byte shared secret.
 
-/// `Encapsulate` request (KMIP 3.0 WD19) — the public/encapsulation key
+/// `Encapsulate` request (KMIP 3.0 CSD02) — the public/encapsulation key
 /// UID plus, inside `CryptographicParameters`, the optional 32-byte
 /// `InputKeyMaterial` (the FIPS 203 §7.2 coins `m`). When the coins are
 /// present, encapsulation is deterministic (interop / KAT reproducibility);
@@ -739,7 +739,7 @@ pub struct EncapsulateRequest {
     pub cryptographic_parameters: Option<CryptographicParameters>,
 }
 
-/// `Encapsulate` response (KMIP 3.0 WD19) — the UID of the NEW managed
+/// `Encapsulate` response (KMIP 3.0 CSD02) — the UID of the NEW managed
 /// shared-secret object the server created, plus the ciphertext (the
 /// encapsulation) in `Data`. A subsequent `Get` on `uid` returns the
 /// shared secret as KeyMaterial.
@@ -769,7 +769,7 @@ pub struct EncapsulateRekeyInfo {
     pub new_private_key_uid: String,
 }
 
-/// `Decapsulate` request (KMIP 3.0 WD19) — the private/decapsulation key
+/// `Decapsulate` request (KMIP 3.0 CSD02) — the private/decapsulation key
 /// UID plus the ciphertext (the encapsulation) in `Data`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct DecapsulateRequest {
@@ -780,7 +780,7 @@ pub struct DecapsulateRequest {
     pub cryptographic_parameters: Option<CryptographicParameters>,
 }
 
-/// `Decapsulate` response (KMIP 3.0 WD19) — the UID of the NEW managed
+/// `Decapsulate` response (KMIP 3.0 CSD02) — the UID of the NEW managed
 /// shared-secret object the server created. A subsequent `Get` on `uid`
 /// returns the recovered shared secret as KeyMaterial.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -850,9 +850,9 @@ pub enum SignatureValidity {
     Unknown     = 0x03,
 }
 
-// ── Validate (§6.1.62) ─────────────────────────────────────────────────────
+// ── Validate (§6.1.64) ─────────────────────────────────────────────────────
 
-/// `Validate` request (KMIP 3.0 §6.1.62, Table 440). The request MAY
+/// `Validate` request (KMIP 3.0 §6.1.64, Table 440). The request MAY
 /// carry inline `Certificate` DER blobs and/or `Unique Identifier`s of
 /// stored Certificate objects — together they compose one certificate
 /// chain to validate — plus an OPTIONAL `Validity Date`.
@@ -870,7 +870,7 @@ pub struct ValidateRequest {
     pub validity_date: Option<time::OffsetDateTime>,
 }
 
-/// `Validate` response (KMIP 3.0 §6.1.62, Table 441) — a single
+/// `Validate` response (KMIP 3.0 §6.1.64, Table 441) — a single
 /// `Validity Indicator` (Valid / Invalid / Unknown). Reuses
 /// [`SignatureValidity`] since it is the identical 0x42009b enum
 /// (Valid=1 / Invalid=2 / Unknown=3).
@@ -879,7 +879,7 @@ pub struct ValidateResponse {
     pub validity: SignatureValidity,
 }
 
-// ── Certify (§6.1.6) / Re-certify (§6.1.50) ────────────────────────────────
+// ── Certify (§6.1.6) / Re-certify (§6.1.52) ────────────────────────────────
 
 /// KMIP 3.0 §11 `Certificate Request Type` Enumeration — the encoding of
 /// the inline `Certificate Request` ByteString. Values verified against
@@ -933,7 +933,7 @@ pub struct CertifyResponse {
     pub uid: String,
 }
 
-/// `Re-certify` request (KMIP 3.0 §6.1.50, Table 400). `uid` (REQUIRED)
+/// `Re-certify` request (KMIP 3.0 §6.1.52, Table 400). `uid` (REQUIRED)
 /// names the existing Certificate being renewed. An OPTIONAL `offset`
 /// (Interval, seconds) shifts the new Activation Date relative to the
 /// new Initial Date per the §6.1.50 date table.
@@ -955,7 +955,7 @@ pub struct ReCertifyRequest {
     pub attributes: Vec<Attribute>,
 }
 
-/// `Re-certify` response (KMIP 3.0 §6.1.50, Table 401) — the UID of the
+/// `Re-certify` response (KMIP 3.0 §6.1.52, Table 401) — the UID of the
 /// new Certificate object.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ReCertifyResponse {
@@ -1014,7 +1014,7 @@ pub struct AddAttributeResponse {
     pub uid: String,
 }
 
-/// `ModifyAttribute` (KMIP 3.0 §6.1.38 / Table 364) — change an existing
+/// `ModifyAttribute` (KMIP 3.0 §6.1.40 / Table 364) — change an existing
 /// attribute's value. The optional `current_attribute` lets the client
 /// disambiguate between multi-instance attributes; if omitted, the
 /// single instance is selected automatically.
@@ -1032,7 +1032,7 @@ pub struct ModifyAttributeResponse {
     pub uid: String,
 }
 
-/// `DeleteAttribute` (KMIP 3.0 §6.1.17 / Table 301) — remove an
+/// `DeleteAttribute` (KMIP 3.0 §6.1.18 / Table 301) — remove an
 /// attribute. Spec semantics: if `current_attribute` is given, delete
 /// that specific value; if only `attribute_reference` is given, delete
 /// all instances of the named attribute. Always-required attributes
@@ -1053,7 +1053,7 @@ pub struct DeleteAttributeResponse {
     pub uid: String,
 }
 
-/// `SetAttribute` (KMIP 3.0 §6.1.56 / Table 424) — atomic
+/// `SetAttribute` (KMIP 3.0 §6.1.58 / Table 424) — atomic
 /// add-or-modify. If no instance exists, creates it. If exactly one
 /// instance exists, modifies it. Multiple instances → error.
 /// Read-Only attributes SHALL NOT be added or modified.
@@ -1118,7 +1118,7 @@ impl AdjustmentType {
 
 // ── Group G: RNG + PKCS#11 passthrough (KMIP 3.0 §6.1.{42,54,55}) ──────────
 
-/// `RNG Retrieve` (KMIP 3.0 §6.1.54 / Table 418) — request random
+/// `RNG Retrieve` (KMIP 3.0 §6.1.56 / Table 418) — request random
 /// bytes. Server returns at most `data_length` bytes.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RngRetrieveRequest {
@@ -1131,7 +1131,7 @@ pub struct RngRetrieveResponse {
     pub data: Vec<u8>,
 }
 
-/// `RNG Seed` (KMIP 3.0 §6.1.55 / Table 421) — provide entropy to
+/// `RNG Seed` (KMIP 3.0 §6.1.57 / Table 421) — provide entropy to
 /// the server's RNG. Response carries the number of bytes consumed.
 /// Per spec, server MAY ignore the seed and return 0.
 #[derive(Clone, Debug, PartialEq)]
@@ -1146,7 +1146,7 @@ pub struct RngSeedResponse {
     pub data_length: i32,
 }
 
-/// `PKCS#11` (KMIP 3.0 §6.1.42 / Table 375) — passthrough invocation
+/// `PKCS#11` (KMIP 3.0 §6.1.44 / Table 375) — passthrough invocation
 /// of a PKCS#11 function via KMIP. v0.1 acknowledges the request and
 /// returns `CKR_OK` without actually proxying to softhsmrustv3 — the
 /// real Plane-3 bridge for this op lands when the sandbox MVP needs it.
@@ -1230,7 +1230,7 @@ pub struct CreateUserResponse {
     pub uid: String,
 }
 
-/// `Log` (KMIP 3.0 §6.1.33 / Table 349) — log a message to the
+/// `Log` (KMIP 3.0 §6.1.35 / Table 349) — log a message to the
 /// server log. Response is empty.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LogRequest {
@@ -1241,7 +1241,7 @@ pub struct LogRequest {
 #[derive(Clone, Debug, PartialEq)]
 pub struct LogResponse;
 
-/// `Login` (KMIP 3.0 §6.1.34 / Table 352) — request authentication
+/// `Login` (KMIP 3.0 §6.1.36 / Table 352) — request authentication
 /// ticket. Lease Time / Request Count / Usage Limits are all optional
 /// hints; server returns a Ticket the client uses in subsequent
 /// requests.
@@ -1264,7 +1264,7 @@ pub struct LoginResponse {
     pub ticket: crate::kmip30::Ticket,
 }
 
-/// `Logout` (KMIP 3.0 §6.1.35 / Table 355) — invalidate a Login
+/// `Logout` (KMIP 3.0 §6.1.37 / Table 355) — invalidate a Login
 /// ticket. Empty response.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LogoutRequest {
@@ -1278,12 +1278,12 @@ pub struct LogoutResponse;
 //
 // Spec mapping (single-part forms only — multi-part state machine deferred):
 //
-// - MAC       §6.1.36 / Tbl 358  UID + CryptoParams? + Data → UID + MACData
-// - MACVerify §6.1.37 / Tbl 361  UID + CryptoParams? + Data? + MACData →
+// - MAC       §6.1.38 / Tbl 358  UID + CryptoParams? + Data → UID + MACData
+// - MACVerify §6.1.39 / Tbl 361  UID + CryptoParams? + Data? + MACData →
 //                                  UID + ValidityIndicator
-// - Hash      §6.1.28 / Tbl 334  CryptoParams + Data → Data
+// - Hash      §6.1.30 / Tbl 334  CryptoParams + Data → Data
 
-/// `MAC` (KMIP 3.0 §6.1.36) — compute a MAC over `data` using the keyed
+/// `MAC` (KMIP 3.0 §6.1.38) — compute a MAC over `data` using the keyed
 /// Managed Cryptographic Object referenced by `uid`. v0.1 supports
 /// single-part HMAC-SHA-256 / -384 / -512 (mapped from the key's
 /// `CryptographicAlgorithm`).
@@ -1305,7 +1305,7 @@ pub struct MacResponse {
     pub mac_data: Vec<u8>,
 }
 
-/// `MACVerify` (KMIP 3.0 §6.1.37) — verify a previously computed MAC.
+/// `MACVerify` (KMIP 3.0 §6.1.39) — verify a previously computed MAC.
 /// The original `data` is supplied alongside the `mac_data` to verify.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MacVerifyRequest {
@@ -1323,7 +1323,7 @@ pub struct MacVerifyResponse {
     pub validity: SignatureValidity,
 }
 
-/// `Hash` (KMIP 3.0 §6.1.28) — keyless cryptographic hash. The
+/// `Hash` (KMIP 3.0 §6.1.30) — keyless cryptographic hash. The
 /// `cryptographic_parameters.hashing_algorithm` field selects SHA-256 /
 /// -384 / -512 / -1 etc.
 #[derive(Clone, Debug, PartialEq)]
@@ -1388,7 +1388,7 @@ pub struct CryptographicParameters {
     /// Ignored for non-PSS mechanisms (CryptographicParameters is a
     /// grab-bag; irrelevant fields are not an error).
     pub salt_length: Option<i32>,
-    // ── PQC fields (KMIP 3.0 WD19; tags 0x4201C4–0x4201CA) ──────────────
+    // ── PQC fields (KMIP 3.0 CSD02; tags 0x4201C4–0x4201CA) ──────────────
     /// `Deterministic` (0x4201C4) — Boolean. ML-DSA/SLH-DSA deterministic
     /// signing variant (rnd←0^32 / addrnd←PK.seed) when `true`.
     pub deterministic: Option<bool>,
@@ -1404,7 +1404,7 @@ pub struct CryptographicParameters {
     /// `Random` (0x4201CA) — ByteString. Explicit signing randomizer for the
     /// hedged (non-deterministic) variant, making it reproducible.
     pub random: Option<Vec<u8>>,
-    /// `KEM Algorithm` (0x4201C3) — Enumeration (KMIP 3.0 WD19 §11.26,
+    /// `KEM Algorithm` (0x4201C3) — Enumeration (KMIP 3.0 CSD02 §11.26,
     /// Table 572). Disambiguates *which* KEM construction an `Encapsulate`/
     /// `Decapsulate` call is running — `DHKEM` (classical ephemeral-static
     /// ECDH), `MLKEM`, or `RSASVE`. See
@@ -1412,7 +1412,7 @@ pub struct CryptographicParameters {
     pub kem_algorithm: Option<KemAlgorithm>,
 }
 
-/// `KEM Algorithm` Enumeration — KMIP 3.0 WD19 §11.26, Table 572.
+/// `KEM Algorithm` Enumeration — KMIP 3.0 CSD02 §11.26, Table 572.
 /// `DhKem` is the spec's own name for the classical ephemeral-static ECDH
 /// construction (PKCS#11 v3.2 §6.3.17's `CKM_ECDH1_DERIVE`-under-
 /// `C_EncapsulateKey` mode) — not a vendor extension.
@@ -1568,7 +1568,7 @@ pub struct CheckResponse {
     pub uid: String,
 }
 
-/// `Obtain Lease` (KMIP 3.0 §6.1.40 / Table 370-371) — grant/renew a
+/// `Obtain Lease` (KMIP 3.0 §6.1.42 / Table 370-371) — grant/renew a
 /// lease for `uid`, up to the object's `Lease Time` attribute cap
 /// (§4.34 — server-set, client read-only). Response echoes the granted
 /// interval + the object's current `Last Change Date` (so the client
@@ -1619,7 +1619,7 @@ pub struct CreateSplitKeyResponse {
     pub uids: Vec<String>,
 }
 
-/// `Join Split Key` (KMIP 3.0 §6.1.31 / Table 343) — Phase 3.3.
+/// `Join Split Key` (KMIP 3.0 §6.1.33 / Table 343) — Phase 3.3.
 #[derive(Clone, Debug, PartialEq)]
 pub struct JoinSplitKeyRequest {
     pub object_type: ObjectType,
@@ -1650,7 +1650,7 @@ pub struct ArchiveResponse {
     pub uid: String,
 }
 
-/// `Recover` (KMIP 3.0 §6.1.47 / Table 390) — recover an archived
+/// `Recover` (KMIP 3.0 §6.1.49 / Table 390) — recover an archived
 /// object. v0.1 emits success since archival is a no-op.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RecoverRequest {
@@ -1662,7 +1662,7 @@ pub struct RecoverResponse {
     pub uid: String,
 }
 
-/// `Obliterate` (KMIP 3.0 §6.1.39 / Table 367) — remove the Managed
+/// `Obliterate` (KMIP 3.0 §6.1.41 / Table 367) — remove the Managed
 /// Object completely. "All meta-data SHALL also be removed". Response
 /// SHALL be empty per spec.
 #[derive(Clone, Debug, PartialEq)]
@@ -1673,7 +1673,7 @@ pub struct ObliterateRequest {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ObliterateResponse;
 
-/// `Discover Versions` (KMIP 3.0 §6.1.20 / Table 310) — protocol
+/// `Discover Versions` (KMIP 3.0 §6.1.21 / Table 310) — protocol
 /// version negotiation. Request has optional list of versions the
 /// client supports (ranked); response has the versions the server
 /// supports (filtered to intersect the client's list if supplied).
@@ -1689,7 +1689,7 @@ pub struct DiscoverVersionsResponse {
     pub protocol_versions: Vec<(i32, i32)>,
 }
 
-/// `Ping` (KMIP 3.0 §6.1.41 / Table 373) — liveness check. Both
+/// `Ping` (KMIP 3.0 §6.1.43 / Table 373) — liveness check. Both
 /// request and response payloads are empty per spec.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PingRequest;
@@ -1697,9 +1697,9 @@ pub struct PingRequest;
 #[derive(Clone, Debug, PartialEq)]
 pub struct PingResponse;
 
-// ── Group C: Register / Import / Export (KMIP 3.0 §6.1.48, 6.1.29, 6.1.22) ─
+// ── Group C: Register / Import / Export (KMIP 3.0 §6.1.50, 6.1.29, 6.1.22) ─
 
-/// `Register` (KMIP 3.0 §6.1.48 / Table 393) — register a Managed
+/// `Register` (KMIP 3.0 §6.1.50 / Table 393) — register a Managed
 /// Object that was created or obtained by the client through some other
 /// means, allowing the server to manage it. Spec-mandated request shape:
 ///
@@ -1750,7 +1750,7 @@ pub struct RegisterResponse {
     pub uid: String,
 }
 
-/// `Import` (KMIP 3.0 §6.1.29 / Table 337) — import a managed object
+/// `Import` (KMIP 3.0 §6.1.31 / Table 337) — import a managed object
 /// at a specific client-supplied UID. Distinct from Register in that
 /// the client *always* dictates the UID; Register lets the server
 /// generate one if no UID attribute is in the request.
@@ -1779,7 +1779,7 @@ pub struct ImportResponse {
     pub uid: String,
 }
 
-/// `Export` (KMIP 3.0 §6.1.22 / Table 316) — return a Managed Object
+/// `Export` (KMIP 3.0 §6.1.24 / Table 316) — return a Managed Object
 /// + its attributes + the actual object value. Larger response than
 /// Get because it also carries the attribute set.
 #[derive(Clone, Debug, PartialEq)]
@@ -1833,7 +1833,7 @@ pub struct InteropResponse;
 
 // ── K19 — Baseline client-to-server ops (§5.1.2 item 9) ────────────────────
 
-/// `Get Usage Allocation` (KMIP 3.0 §6.1.27 / Table 329) — obtain an
+/// `Get Usage Allocation` (KMIP 3.0 §6.1.29 / Table 329) — obtain an
 /// allocation from the object's current `Usage Limits` value before
 /// applying cryptographic protection with it.
 #[derive(Clone, Debug, PartialEq)]
@@ -1852,7 +1852,7 @@ pub struct GetUsageAllocationResponse {
     pub uid: String,
 }
 
-/// `Get Constraints` (KMIP 3.0 §6.1.26 / Table 326) — the request
+/// `Get Constraints` (KMIP 3.0 §6.1.28 / Table 326) — the request
 /// payload is empty per the spec table.
 #[derive(Clone, Debug, PartialEq)]
 pub struct GetConstraintsRequest;
@@ -1877,10 +1877,10 @@ pub struct Constraint {
     pub attributes: Vec<Attribute>,
 }
 
-/// `Set Constraints` (KMIP 3.0 §6.1.57 / Table 427) — "set the
+/// `Set Constraints` (KMIP 3.0 §6.1.59 / Table 427) — "set the
 /// constraints that will be applied to Managed Objects during
 /// operations." Replaces the stored set entirely (mirrors Set
-/// Defaults' replace semantics, §6.1.58) — Get Constraints (§6.1.26)
+/// Defaults' replace semantics, §6.1.60) — Get Constraints (§6.1.28)
 /// reads it back.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SetConstraintsRequest {
@@ -1891,7 +1891,7 @@ pub struct SetConstraintsRequest {
 #[derive(Clone, Debug, PartialEq)]
 pub struct SetConstraintsResponse;
 
-/// `Set Defaults` (KMIP 3.0 §6.1.58 / Table 428) — "set the default
+/// `Set Defaults` (KMIP 3.0 §6.1.60 / Table 428) — "set the default
 /// attributes that will be applied to Managed Objects during factory
 /// operations if the client does not supply values".
 #[derive(Clone, Debug, PartialEq)]
@@ -1920,7 +1920,7 @@ pub struct ObjectDefaults {
     pub attributes: Vec<Attribute>,
 }
 
-// ── Derive Key (K20 — KMIP 3.0 §6.1.18) ────────────────────────────────────
+// ── Derive Key (K20 — KMIP 3.0 §6.1.19) ────────────────────────────────────
 
 /// `Derivation Method` Enumeration (KMIP 3.0 §11.15 Table 547). All
 /// ten codepoints verified against `kmip-spec-3.0-tags-enums.json`
@@ -1995,7 +1995,7 @@ pub struct DerivationParameters {
     pub iteration_count: Option<i32>,
 }
 
-/// `Derive Key` request payload (KMIP 3.0 §6.1.18 Table 302).
+/// `Derive Key` request payload (KMIP 3.0 §6.1.19 Table 302).
 #[derive(Clone, Debug, PartialEq)]
 pub struct DeriveKeyRequest {
     /// `Object Type` — "Determines the type of object to be created"
@@ -2021,9 +2021,9 @@ pub struct DeriveKeyResponse {
     pub uid: String,
 }
 
-// ── Re-key / Re-key Key Pair (K21 — KMIP 3.0 §6.1.51 / §6.1.52) ────────────
+// ── Re-key / Re-key Key Pair (K21 — KMIP 3.0 §6.1.53 / §6.1.54) ────────────
 
-/// `Re-key` request payload (KMIP 3.0 §6.1.51 Table 405).
+/// `Re-key` request payload (KMIP 3.0 §6.1.53 Table 405).
 ///
 /// > "This request is used to generate a replacement key for an
 /// > existing symmetric key. It is analogous to the Create operation,
@@ -2052,7 +2052,7 @@ pub struct ReKeyResponse {
     pub uid: String,
 }
 
-/// `Re-key Key Pair` request payload (KMIP 3.0 §6.1.52 Table 410).
+/// `Re-key Key Pair` request payload (KMIP 3.0 §6.1.54 Table 410).
 ///
 /// > "This request is used to generate a replacement key pair for an
 /// > existing public/private key pair. It is analogous to the Create
@@ -2106,7 +2106,7 @@ impl EndpointRole {
     }
 }
 
-/// `Set Endpoint Role` (KMIP 3.0 §6.1.59 / Table 431) — request that
+/// `Set Endpoint Role` (KMIP 3.0 §6.1.61 / Table 431) — request that
 /// the server apply the given endpoint role for subsequent traffic on
 /// the current channel ("After successful completion of the operation
 /// the server assumes the client role, and the client assumes the
@@ -2124,10 +2124,10 @@ pub struct SetEndpointRoleResponse {
     pub endpoint_role: EndpointRole,
 }
 
-// ── Phase 4 — asynchronous subsystem (§6.1.5 Cancel / §6.1.43 Poll /
-// §6.1.44 Process / §6.1.46 Query Asynchronous Requests) ───────────────
+// ── Phase 4 — asynchronous subsystem (§6.1.5 Cancel / §6.1.45 Poll /
+// §6.1.48 Process / §6.1.48 Query Asynchronous Requests) ───────────────
 
-/// `Poll` (KMIP 3.0 §6.1.43 / Table 376). Has no `PollResponse` type —
+/// `Poll` (KMIP 3.0 §6.1.45 / Table 376). Has no `PollResponse` type —
 /// per spec its response "SHALL be identical to the response that
 /// would have been sent if the operation had completed synchronously"
 /// (or, if not yet complete, the same no-payload/Pending shape the
@@ -2151,7 +2151,7 @@ pub struct CancelResponse {
     pub cancellation_result: super::message::CancellationResult,
 }
 
-/// `Process` (KMIP 3.0 §6.1.44 / Table 378-379). Empty response
+/// `Process` (KMIP 3.0 §6.1.46 / Table 378-379). Empty response
 /// payload per spec (Table 379 lists no items) — the struct exists so
 /// `Process` still fits this codebase's one-typed-struct-per-op
 /// pattern rather than a bare `()`.
@@ -2163,7 +2163,7 @@ pub struct ProcessRequest {
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct ProcessResponse {}
 
-/// `Query Asynchronous Requests` (KMIP 3.0 §6.1.46 / Table 385-386).
+/// `Query Asynchronous Requests` (KMIP 3.0 §6.1.48 / Table 385-386).
 /// Both filters are optional; an empty request reports every
 /// outstanding job. Non-empty filters combine as OR-within-field,
 /// AND-across-fields (a job matches if its correlation value is
@@ -2230,7 +2230,7 @@ mod tests {
 
     /// K3 — every published KMIP 3.0 Operation codepoint (0x01–0x40,
     /// 64 total per `kmip-spec-3.0-tags-enums.json`) decodes, and
-    /// every decode round-trips back to the same wire value. The WD19
+    /// every decode round-trips back to the same wire value. The CSD02
     /// PQC-Updates KEM ops (`Encapsulate = 0x41`, `Decapsulate = 0x42`)
     /// also decode and round-trip; the first unknown codepoint is 0x43.
     #[test]
@@ -2241,7 +2241,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("codepoint {v:#04x} must decode"));
             assert_eq!(op.to_wire_value(), v, "round-trip for {v:#04x}");
         }
-        // WD19 PQC-Updates KEM ops.
+        // CSD02 PQC-Updates KEM ops.
         assert_eq!(Operation::from_wire_value(0x41), Some(Operation::Encapsulate));
         assert_eq!(Operation::from_wire_value(0x42), Some(Operation::Decapsulate));
         assert_eq!(Operation::Encapsulate.to_wire_value(), 0x41);

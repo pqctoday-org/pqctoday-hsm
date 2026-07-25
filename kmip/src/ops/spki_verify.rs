@@ -40,7 +40,7 @@ use crate::error::{KmipError, Result, ResultReason};
 use super::deps::Deps;
 
 /// The three-way verdict [`verify_with_spki`] returns — mirrors KMIP's
-/// own Signature Verify / Validate contract (§6.1.61/§6.1.62): a
+/// own Signature Verify / Validate contract (§6.1.63/§6.1.64): a
 /// cryptographically negative result is not an error, and an algorithm
 /// this server cannot evaluate is reported honestly rather than folded
 /// into either `Valid` or `Invalid`.

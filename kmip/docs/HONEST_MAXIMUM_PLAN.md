@@ -110,9 +110,9 @@ Effort S/M/L · Risk L/M/H · each task carries its own exit test.
 
 ### Phase 1 — De-fake the surface
 
-**1.1 Real PKCS#11 passthrough** — §6.1.42 · *(M / M)*. `rng_and_pkcs11.rs:60-89` returns canned `CKR_OK`.
+**1.1 Real PKCS#11 passthrough** — §6.1.44 · *(M / M)*. `rng_and_pkcs11.rs:60-89` returns canned `CKR_OK`.
 - T1 map each exercised PKCS#11 function code to a `softhsmrustv3::native` entry.
-- T2 replace blanket-OK with a real dispatch returning the true `CKR_*` + output parameters; correlation value stays the §6.1.42 wrapper only.
+- T2 replace blanket-OK with a real dispatch returning the true `CKR_*` + output parameters; correlation value stays the §6.1.44 wrapper only.
 - T3 unsupported function → real `CKR_FUNCTION_NOT_SUPPORTED`.
 - *Exit:* `PKCS11-M-1` passes via a real side-effect; a bogus function returns a real error.
 - *Confidence:* shape grounded; exact function set to confirm at build.
@@ -171,7 +171,7 @@ change, not a Check-specific gap. 6 new unit tests; `BL-M-2` unaffected
 **1.3 Truthful Protection Storage Mask** — §4.50 · *(S / L)*. `get_attributes.rs:190` hardcodes `0x01`.
 - T1 record the mask actually used at create/register on `ObjectRecord`; emit that. *Exit:* value tracks the request.
 
-**1.4 Real auth/session** — Login §6.1.34 / Logout §6.1.35 / Create Credential §6.1.9 / Create User §6.1.13 / Create Group §6.1.10 / Log §6.1.33; Credential §9.9 · *(M / M)*. `session_and_auth.rs` acknowledge-only; verifier exists (`server/auth.rs`, mTLS CN→`Identity`).
+**1.4 Real auth/session** — Login §6.1.36 / Logout §6.1.37 / Create Credential §6.1.9 / Create User §6.1.13 / Create Group §6.1.10 / Log §6.1.37; Credential §9.9 · *(M / M)*. `session_and_auth.rs` acknowledge-only; verifier exists (`server/auth.rs`, mTLS CN→`Identity`).
 - T1 session/ticket store (ticket → `Identity`).
 - T2 Create Credential/User/Group persist real objects (these also back the object types Query advertises → feeds 6.1).
 - T3 Login verifies a §9.9 Credential via `CredentialVerifier`, issues a ticket; Logout invalidates; Log → audit sink.
@@ -272,7 +272,7 @@ KMIP-wire support rather than engine-only:
   6. **`Fresh` never flipped to `false` after a Get.** KMIP 3.0 §11 defines `Fresh` as True only until the object's material is exported once; `create.rs` sets `fresh: Some(true)` at creation but nothing ever cleared it, so `TL-M-2`'s Create→Get sequence left the flag permanently `true`, contradicting `TL-M-3`'s expected `false`. Fixed by flipping `fresh` to `false` and persisting via `store.update()` on the first successful `Get` (`get.rs`).
 - **Corpus result: 97 PASS / 0 FAIL / 5 SKIP_DEPRECATED** (up from 93/1/8 at audit start) — the Phase 2 target is met.
 
-**2.2 RNG-seed variants** — §6.1.55 · *(M / L)*. `rng_and_pkcs11.rs:47-53` full-consume only.
+**2.2 RNG-seed variants** — §6.1.57 · *(M / L)*. `rng_and_pkcs11.rs:47-53` full-consume only.
 - T1 implement partial-consume, ignore (`DataLength=0`), deny (`PermissionDenied`).
 - T2 make the behavior selectable by a CACP seed-handling policy (`src/policy/`); harness drives each variant.
 - T3 reclassify `CS-RNG-O-2/3/4` to expected-PASS.
@@ -282,7 +282,7 @@ KMIP-wire support rather than engine-only:
 
 ### Phase 3 — Feasible advertised ops (no new subsystems)
 
-**3.1 Lease manager + Obtain Lease** — §6.1.40, §4.34 · *(S–M / L)*.
+**3.1 Lease manager + Obtain Lease** — §6.1.42, §4.34 · *(S–M / L)*.
 - T1 add lease_expiry + last_change to `ObjectRecord`; a per-object max-lease policy (server-set, client read-only per §4.34).
 - T2 implement Obtain Lease (issue/renew Lease Time + Last Change Date); stop faking `LeaseTime(3600)` (`get_attributes.rs:186`) — derive from the record.
 - T3 expose expiry to Check (1.2-T2).
@@ -293,7 +293,7 @@ added; `ObtainLease` wired end to end (new `ObtainLeaseRequest`/
 `ObtainLeaseResponse` types, wire codec, dispatcher entry, moved from
 `ADVERTISED_UNIMPLEMENTED_OPERATIONS` to `HANDLED_OPERATIONS`) — grants
 the object's real Lease Time cap, sets `lease_expiry = now + cap`,
-stamps `last_change_date`, returns both per §6.1.40 Table 371.
+stamps `last_change_date`, returns both per §6.1.42 Table 371.
 Renewable: a second Obtain Lease call advances the expiry further
 (tested). Every object-creation site (Create/CreateKeyPair/Register/
 DeriveKey) now sets a real `lease_time: Some(3600)` instead of relying
@@ -302,7 +302,7 @@ on `get_attributes.rs`'s read-time fallback. 9 new unit tests
 see 1.2). `cargo test`: 541 lib tests + all integration binaries green.
 Corpus unchanged 97/0/5.
 
-**3.2 Set Constraints** — §6.1.57 (pairs Get §6.1.26) · *(S–M / L)*.
+**3.2 Set Constraints** — §6.1.59 (pairs Get §6.1.26) · *(S–M / L)*.
 - T1 back `server_constraints()` (`allocation_and_config.rs:152`) with a mutable store.
 - T2 implement Set Constraints writing that store; Get reads it back.
 - *Exit:* Set→Get round-trips.
@@ -318,11 +318,11 @@ replaces rather than merges. Moved from `ADVERTISED_UNIMPLEMENTED_OPERATIONS`
 to `HANDLED_OPERATIONS`. 3 new unit tests. `cargo test`: 544 lib tests +
 all integration binaries green. Corpus unchanged 97/0/5.
 
-**3.3 Create / Join Split Key** — §6.1.12 / §6.1.31; attrs §4.64–4.66; enums §11.54/§11.55 · *(M–L / M)*.
+**3.3 Create / Join Split Key** — §6.1.12 / §6.1.33; attrs §4.64–4.66; enums §11.54/§11.55 · *(M–L / M)*.
 Types exist (`attrs.rs:64` SplitKey=0x05; `ops.rs:115/134`) → route to Unsupported. **Engine has no secret-sharing primitive — implement from spec.**
 - T1 implement the **four §11.54 methods**: XOR (0x01), Polynomial Sharing GF(2¹⁶) (0x02), Polynomial Sharing Prime Field (0x03), Polynomial Sharing GF(2⁸) (0x04); with the §11.55 polynomials (Polynomial-283, Polynomial-285) for the GF variants (Shamir threshold sharing).
 - T2 Create Split Key (§6.1.12): generate key, split into `Split Key Parts` (§4.65) with `Split Key Threshold` (§4.66) + `Split Key Method` (§4.64), register each share as a `SplitKey` object.
-- T3 Join Split Key (§6.1.31): require ≥ threshold identifiers (SHALL), reconstruct, register the joined object.
+- T3 Join Split Key (§6.1.33): require ≥ threshold identifiers (SHALL), reconstruct, register the joined object.
 - T4 remove `SplitKey` from `ADVERTISED_UNIMPLEMENTED_OBJECT_TYPES` (`query.rs:212`).
 - *Exit:* Create N shares; Join of ≥threshold reconstructs the exact key; fewer-than-threshold fails (§6.1.31); KATs per method.
 
@@ -355,7 +355,7 @@ per this codebase's standing security model (confirmed with the user
 before writing any KMIP-layer code). Each share/joined result is
 registered as a real `CKO_SECRET_KEY` engine object.
 KMIP layer: `Create Split Key` (§6.1.12, both the "split an existing
-key" and "generate a fresh key" paths) and `Join Split Key` (§6.1.31,
+key" and "generate a fresh key" paths) and `Join Split Key` (§6.1.33,
 rejects fewer-than-threshold identifiers and mismatched
 method/threshold/polynomial across the supplied shares) — new
 `ops/split_key.rs` handler, wire codec (`SplitKeyStructure` +
@@ -387,10 +387,10 @@ Grounded: indicator parsed (`message.rs:73-77`, `wire.rs:558`); `ResultStatus::O
 - *Exit:* async-flagged request → Pending + correlation value; job completes out-of-band.
 
 **4.2 Async ops.**
-- Poll §6.1.43: by correlation value → *Pending (no payload)* or the completed op's payload.
+- Poll §6.1.45: by correlation value → *Pending (no payload)* or the completed op's payload.
 - Cancel §6.1.5: abort → response = correlation value + `Cancellation Result` enum.
-- Process §6.1.44: mark a pending job so the next Poll ≠ pending.
-- Query Asynchronous Requests §6.1.46: optional correlation-values/operations filter → list outstanding.
+- Process §6.1.48: mark a pending job so the next Poll ≠ pending.
+- Query Asynchronous Requests §6.1.48: optional correlation-values/operations filter → list outstanding.
 - Move these four out of `ADVERTISED_UNIMPLEMENTED_OPERATIONS` (`query.rs:160-176`).
 - *Exit:* Pending→Poll→result; Cancel/Process/QueryAsync operate on live jobs.
 
@@ -436,7 +436,7 @@ rather than re-running the operation — re-running would risk
 double-executing a side-effecting handler (e.g. double-decrementing a
 Usage Limits counter).
 
-`Poll` (§6.1.43) doesn't get its own `ResponsePayload` variant —
+`Poll` (§6.1.45) doesn't get its own `ResponsePayload` variant —
 per spec its completed response is "identical to the response that
 would have been sent if the operation had completed synchronously",
 so `dispatcher::handle_poll` splices in the ORIGINAL polled

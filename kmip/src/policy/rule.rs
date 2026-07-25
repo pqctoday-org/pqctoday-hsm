@@ -294,7 +294,7 @@ pub enum Rule {
     /// leaves that field unconstrained. `algorithm` (optional) narrows the rule
     /// to one algorithm. Names are the KMIP enum names: `Block Cipher Mode`
     /// ("GCM", "CBC", "CCM", …) and `Padding Method` ("OAEP", "PSS", "PKCS1 v1.5",
-    /// …). `require_deterministic` gates the WD19 PQC `Deterministic` flag.
+    /// …). `require_deterministic` gates the CSD02 PQC `Deterministic` flag.
     MechanismParameterConstraint {
         ops: Vec<String>,
         #[serde(default)]
@@ -374,7 +374,7 @@ pub enum Rule {
     // (KMAC, KDFs). Gates on the request's *canonical* mechanism
     // (`PolicyRequest.mechanism.canonical_mech`, P0/P1), so a rule means the
     // same thing whether the request arrived via a standard KMIP op or the
-    // PKCS#11 passthrough (§6.1.42) — bypass-proof by construction. Mechanisms
+    // PKCS#11 passthrough (§6.1.44) — bypass-proof by construction. Mechanisms
     // are PKCS#11 `CKM_*` names resolved from pkcs11t.h (via constants.rs). ──
     /// `op ∈ ops` AND the request's canonical `CKM_*` ∉ `mechanisms` → Deny.
     MechanismAllowlist {
@@ -1482,7 +1482,7 @@ fn matches_class(algorithm: &str, class: &str) -> bool {
         // composite PQC names carry a PQC primary, e.g. ML-DSA-65-ED25519
         || algorithm.contains("ML-DSA")
         || algorithm.contains("ML-KEM")
-        // hybrid KEMs spell the component without a hyphen (KMIP 3.0 WD19:
+        // hybrid KEMs spell the component without a hyphen (KMIP 3.0 CSD02:
         // X25519MLKEM768, SecP256r1MLKEM768) — they carry a PQC component and
         // must not fall through to "classical" (2026-07-04 gap audit).
         || algorithm.contains("MLKEM");
@@ -2172,7 +2172,7 @@ mod tests {
 
     #[test]
     fn matches_class_hybrid_kems_are_pqc() {
-        // KMIP 3.0 WD19 hybrid KEM spellings carry no hyphen in the ML-KEM
+        // KMIP 3.0 CSD02 hybrid KEM spellings carry no hyphen in the ML-KEM
         // component; they must classify as PQC, not fall through to classical.
         assert!(matches_class("X25519MLKEM768", "pqc"));
         assert!(matches_class("SecP256r1MLKEM768", "pqc"));

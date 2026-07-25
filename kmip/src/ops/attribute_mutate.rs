@@ -6,9 +6,9 @@
 //! | Op              | Spec       | Pre-condition           | Effect               |
 //! |-----------------|------------|-------------------------|----------------------|
 //! | AddAttribute    | §6.1.2     | attribute MUST NOT exist | create attribute    |
-//! | ModifyAttribute | §6.1.38    | attribute MUST exist     | change value         |
-//! | DeleteAttribute | §6.1.17    | attribute MUST exist     | remove value         |
-//! | SetAttribute    | §6.1.56    | (none)                   | create or modify    |
+//! | ModifyAttribute | §6.1.40    | attribute MUST exist     | change value         |
+//! | DeleteAttribute | §6.1.18    | attribute MUST exist     | remove value         |
+//! | SetAttribute    | §6.1.58    | (none)                   | create or modify    |
 //! | AdjustAttribute | §6.1.3     | numeric / boolean attr   | apply delta / negate |
 //!
 //! Spec mandates per-op error result reasons; we honour the ones the
@@ -1142,7 +1142,7 @@ mod tests {
     fn modify_missing_attribute_fails() {
         let d = deps_with();
         put(&d, "u");
-        // Name doesn't exist yet → Modify must fail per §6.1.38.
+        // Name doesn't exist yet → Modify must fail per §6.1.40.
         let err = modify_attribute(&d, ModifyAttributeRequest {
             uid: "u".into(), current_attribute: None,
             new_attribute: Attribute::Name("v".into()),

@@ -1,4 +1,4 @@
-//! KMIP 3.0 §6.1.21 **Encrypt** operation.
+//! KMIP 3.0 §6.1.23 **Encrypt** operation.
 //!
 //! > "This operation requests the server to perform an encryption
 //! > operation on the provided data using the specified key."
@@ -65,7 +65,7 @@ pub fn encrypt(
 
     // K22 — KMIP 3.0 §11 `Object Archived` (0x0d): "The object SHALL
     // be recovered from the archive before performing the operation."
-    // Archived material is off-line (§6.1.4 / §6.1.47), so crypto ops
+    // Archived material is off-line (§6.1.4 / §6.1.49), so crypto ops
     // fail until Recover.
     if obj.archived {
         return Err(fail_err(deps, correlation_id, "Encrypt",
@@ -256,7 +256,7 @@ fn rekey_and_encrypt(
     Ok(resp)
 }
 
-/// Multi-part Encrypt (KMIP 3.0 §6.1.21 streaming). Drives the engine's
+/// Multi-part Encrypt (KMIP 3.0 §6.1.23 streaming). Drives the engine's
 /// PKCS#11 §5.2 Update/Final state machines
 /// (`softhsmrustv3::crypto::multipart`) — one `StreamCtx` per
 /// server-issued `Correlation Value`, held on [`Deps::streams`].

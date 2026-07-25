@@ -183,7 +183,7 @@ CREATE INDEX IF NOT EXISTS idx_audit_log_correlation_id ON audit_log(correlation
 ### 3.4 Lifecycle FSM
 
 State transitions allowed per KMIP 3.0 §3.2 (numbered state diagram) and
-§6.1.19 (Destroy constraint); rejected otherwise with `PermissionDenied`
+§6.1.20 (Destroy constraint); rejected otherwise with `PermissionDenied`
 (store FSM) / `WrongKeyLifecycleState` (op handler). §3.2 transition
 numbers in parentheses. Authoritative encoding lives in
 `State::can_transition_to` and the exhaustive matrix test in
@@ -627,26 +627,26 @@ at startup. Sandbox must explicitly load `training-permissive.yaml`.
       emit_state_change / emit_success / fail_err / canonical_name /
       state_name. Each op file stays focused on its KMIP semantics.
 - [x] `src/ops/activate.rs` — KMIP 3.0 §6.1.1 Activate (op 0x12).
-- [x] `src/ops/revoke.rs` — KMIP 3.0 §6.1.49 Revoke (op 0x13). Branches on
+- [x] `src/ops/revoke.rs` — KMIP 3.0 §6.1.51 Revoke (op 0x13). Branches on
       RevocationReason: KeyCompromise/CaCompromise → Compromised, else
       → Deactivated.
-- [x] `src/ops/destroy.rs` — KMIP 3.0 §6.1.19 Destroy (op 0x14). PreActive
+- [x] `src/ops/destroy.rs` — KMIP 3.0 §6.1.20 Destroy (op 0x14). PreActive
       | Deactivated → Destroyed; Compromised → DestroyedCompromised;
       Active rejected (must Revoke first per §3.4). C_DestroyObject.
 - [x] `src/ops/create.rs` — KMIP 3.0 §6.1.8 Create (op 0x01) symmetric +
       secret data only; asymmetric rejected. C_GenerateKey.
-- [x] `src/ops/get.rs` — KMIP 3.0 §6.1.23 Get (op 0x0a). Private-key
+- [x] `src/ops/get.rs` — KMIP 3.0 §6.1.25 Get (op 0x0a). Private-key
       material never extracted (CKA_SENSITIVE) — returns OpaqueObject
       with empty value. C_GetAttributeValue.
-- [x] `src/ops/locate.rs` — KMIP 3.0 §6.1.32 Locate (op 0x08). Filters
+- [x] `src/ops/locate.rs` — KMIP 3.0 §6.1.34 Locate (op 0x08). Filters
       by CryptographicAlgorithm / ObjectType / State. C_FindObjects*.
-- [x] `src/ops/signature_verify.rs` — KMIP 3.0 §6.1.61 (op 0x22). Failed
+- [x] `src/ops/signature_verify.rs` — KMIP 3.0 §6.1.63 (op 0x22). Failed
       verify is NOT a KMIP error — returns success with validity=Invalid.
       C_VerifyInit + C_Verify.
-- [x] `src/ops/encrypt.rs` — KMIP 3.0 §6.1.21 Encrypt (op 0x1f). Branches:
+- [x] `src/ops/encrypt.rs` — KMIP 3.0 §6.1.23 Encrypt (op 0x1f). Branches:
       ML-KEM → C_EncapsulateKey (ciphertext + shared_secret); classical
       → C_EncryptInit + C_Encrypt (ciphertext only).
-- [x] `src/ops/decrypt.rs` — KMIP 3.0 §6.1.15 Decrypt (op 0x20). Branches:
+- [x] `src/ops/decrypt.rs` — KMIP 3.0 §6.1.16 Decrypt (op 0x20). Branches:
       ML-KEM → C_DecapsulateKey (shared secret); classical →
       C_DecryptInit + C_Decrypt (plaintext). Allowed in Active /
       Deactivated / Compromised (need to decrypt old ciphertexts post-rotation).
@@ -691,7 +691,7 @@ of placeholder.
       Phase 6 replaces `MemoryStore` with SQLite-backed durable store.
 - [x] `src/ops/deps.rs` — `Deps` shared bundle: `engine`, `store`, `sink`,
       `config` (slot, pin, vendor identification, server version).
-- [x] `src/ops/query.rs` — **KMIP 3.0 §6.1.45 Query** (op `0x18`).
+- [x] `src/ops/query.rs` — **KMIP 3.0 §6.1.47 Query** (op `0x18`).
       Returns supported operations / object types / server information.
       Phase-3 capability list (12 ops). PKCS#11 v3.2 §C.5.3 `C_GetInfo`
       not yet called — v0.1 uses static config.
@@ -704,7 +704,7 @@ of placeholder.
       `KmipResponseSent`. Persists `PreActive` records for both public +
       private keys. PKCS#11 v3.2 §C.7.1 entry-point signature verified
       against `rust/src/ffi.rs::C_GenerateKeyPair`.
-- [x] `src/ops/sign.rs` — **KMIP 3.0 §6.1.60 Sign** (op `0x21`). Store
+- [x] `src/ops/sign.rs` — **KMIP 3.0 §6.1.62 Sign** (op `0x21`). Store
       lookup → lifecycle gate (only `Active` per §3.4) → Plane-1 engine.
       Surfaces `Decision::RekeyAndProceed` as `PermissionDenied` with an
       actionable hint (`"rekey required: policy substitutes X → Y for
@@ -1095,7 +1095,7 @@ Phase 1 (the entire subsystem, standalone) is NOT complete until ALL of these ar
 | Web UI | Lives in `pqctoday-hub`, not here |
 | Multi-tenancy / per-tenant slot isolation | Single-slot v0.1 |
 | Replication / clustering / HA | Standalone single-process |
-| ~~KMIP-as-CA (cert issuance via Register Cert)~~ | ~~Out of scope~~ → **Reversed & shipped (P2.3, 2026-06-13): §6.1.6 Certify + §6.1.50 Re-certify implement a PQC-capable X.509 CA.** The prior assessment found rcgen 0.13 cannot issue ML-DSA-signed certs (no ML-DSA in its `SignatureAlgorithm` table), so issuance uses a uniform lower-level path for ALL algorithms: the `TBSCertificate` is built with `x509-cert` (RustCrypto — accepts arbitrary `AlgorithmIdentifier` OIDs, incl. id-ml-dsa-44/65/87 = 2.16.840.1.101.3.4.3.{17,18,19}) and the TBS DER is signed **in the engine** via `native::sign` — the CA private key never leaves the cryptographic boundary. Signature-format conversions: RSA PKCS#1 v1.5 as-is, ECDSA raw `r‖s` → DER `Ecdsa-Sig-Value`, ML-DSA FIPS-204 as-is. CSRs (PKCS#10) are parsed + self-signature-verified via rcgen (`Invalid CSR`/0x2f on failure); `x509-cert::CertReq` supplies the subject DN + SPKI. **CA-key model:** an operator generates a CA keypair (CreateKeyPair), mints the self-signed root via `ops::certify::bootstrap_ca_certificate`, and designates the pair with `--ca-key <PRIV_UID> --ca-cert <CERT_UID>` (`DepsConfig::ca_key` / `CaKeyDesignation`); only that designated key may sign issuances (authorisation gate; un-configured ⇒ `Permission Denied`). Issued certs set the §11 `Public Key Link` / `Certificate Link`; Re-certify recomputes the validity window from `Offset`, sets `Replaced`/`Replacement` Object Links, and retires the old cert. Per-algorithm issuance+verification is test-pinned (RSA, ECDSA, **ML-DSA-65** — the issued cert's signature is verified against the CA public key in the engine). Register-Cert (importing an externally-issued cert) was already supported separately. |
+| ~~KMIP-as-CA (cert issuance via Register Cert)~~ | ~~Out of scope~~ → **Reversed & shipped (P2.3, 2026-06-13): §6.1.6 Certify + §6.1.52 Re-certify implement a PQC-capable X.509 CA.** The prior assessment found rcgen 0.13 cannot issue ML-DSA-signed certs (no ML-DSA in its `SignatureAlgorithm` table), so issuance uses a uniform lower-level path for ALL algorithms: the `TBSCertificate` is built with `x509-cert` (RustCrypto — accepts arbitrary `AlgorithmIdentifier` OIDs, incl. id-ml-dsa-44/65/87 = 2.16.840.1.101.3.4.3.{17,18,19}) and the TBS DER is signed **in the engine** via `native::sign` — the CA private key never leaves the cryptographic boundary. Signature-format conversions: RSA PKCS#1 v1.5 as-is, ECDSA raw `r‖s` → DER `Ecdsa-Sig-Value`, ML-DSA FIPS-204 as-is. CSRs (PKCS#10) are parsed + self-signature-verified via rcgen (`Invalid CSR`/0x2f on failure); `x509-cert::CertReq` supplies the subject DN + SPKI. **CA-key model:** an operator generates a CA keypair (CreateKeyPair), mints the self-signed root via `ops::certify::bootstrap_ca_certificate`, and designates the pair with `--ca-key <PRIV_UID> --ca-cert <CERT_UID>` (`DepsConfig::ca_key` / `CaKeyDesignation`); only that designated key may sign issuances (authorisation gate; un-configured ⇒ `Permission Denied`). Issued certs set the §11 `Public Key Link` / `Certificate Link`; Re-certify recomputes the validity window from `Offset`, sets `Replaced`/`Replacement` Object Links, and retires the old cert. Per-algorithm issuance+verification is test-pinned (RSA, ECDSA, **ML-DSA-65** — the issued cert's signature is verified against the CA public key in the engine). Register-Cert (importing an externally-issued cert) was already supported separately. |
 | Standalone `pqctoday-kmip` repo on GitHub | Decided no — subsystem only |
 | `ThalesGroup/kmip-go` dependency | Explicitly NOT used — Rust, no Go |
 | `miekg/pkcs11` Go binding | Explicitly NOT used — no Go |

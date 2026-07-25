@@ -73,7 +73,7 @@ pub fn create_key_pair(
         },
     ));
 
-    // K19 — KMIP 3.0 §6.1.58 Set Defaults: fill attributes the client
+    // K19 — KMIP 3.0 §6.1.60 Set Defaults: fill attributes the client
     // omitted from the stored per-Object-Type defaults, per half. A
     // default yields to a client attribute of the same kind in either
     // the half-specific basket OR the Common Attributes basket.
@@ -608,7 +608,7 @@ pub fn create_key_pair(
                 crate::kmip30::KmipAlgorithm::Rsa => Some(0x03),
                 _ => None,
             },
-            // KMIP 3.0 WD19 §3.4 — persist the deterministic seed so a
+            // KMIP 3.0 CSD02 §3.4 — persist the deterministic seed so a
             // later Get(SeedPrivateKey) can return the {Seed,Key}
             // KeyMaterial. Only the seeded (interop) path carries one.
             pqc_seed: req.seed.clone(),
@@ -703,7 +703,7 @@ pub fn create_key_pair(
 }
 
 /// Output of the Plane-3 keypair generation path shared by Create Key
-/// Pair (§6.1.11) and Re-key Key Pair (§6.1.52, K21).
+/// Pair (§6.1.11) and Re-key Key Pair (§6.1.54, K21).
 pub(crate) struct GeneratedKeyPair {
     pub cka_id_priv: Vec<u8>,
     pub cka_id_pub: Vec<u8>,
@@ -893,6 +893,25 @@ fn canonical_name(a: KmipAlgorithm) -> String {
         SlhDsaShake192f => "SLH-DSA-SHAKE-192f",
         SlhDsaShake256s => "SLH-DSA-SHAKE-256s",
         SlhDsaShake256f => "SLH-DSA-SHAKE-256f",
+        // CSD02 pre-hash Sign-time selectors (§11.12) — never a CreateKeyPair
+        // target, only reachable via `CryptographicParameters.CryptographicAlgorithm`
+        // on Sign/SignatureVerify (see `algos.rs`'s doc comment on the enum
+        // variants). Matches `KmipAlgorithm::spec_name()`'s strings exactly.
+        HashSlhDsaSha2_128sWithSha256 => "Hash-SLH-DSA-SHA2-128s-with-SHA256",
+        HashSlhDsaSha2_128fWithSha256 => "Hash-SLH-DSA-SHA2-128f-with-SHA256",
+        HashSlhDsaSha2_192sWithSha512 => "Hash-SLH-DSA-SHA2-192s-with-SHA512",
+        HashSlhDsaSha2_192fWithSha512 => "Hash-SLH-DSA-SHA2-192f-with-SHA512",
+        HashSlhDsaSha2_256sWithSha512 => "Hash-SLH-DSA-SHA2-256s-with-SHA512",
+        HashSlhDsaSha2_256fWithSha512 => "Hash-SLH-DSA-SHA2-256f-with-SHA512",
+        HashSlhDsaShake128sWithShake128 => "Hash-SLH-DSA-SHAKE-128s-with-SHAKE128",
+        HashSlhDsaShake128fWithShake128 => "Hash-SLH-DSA-SHAKE-128f-with-SHAKE128",
+        HashSlhDsaShake192sWithShake256 => "Hash-SLH-DSA-SHAKE-192s-with-SHAKE256",
+        HashSlhDsaShake192fWithShake256 => "Hash-SLH-DSA-SHAKE-192f-with-SHAKE256",
+        HashSlhDsaShake256sWithShake256 => "Hash-SLH-DSA-SHAKE-256s-with-SHAKE256",
+        HashSlhDsaShake256fWithShake256 => "Hash-SLH-DSA-SHAKE-256f-with-SHAKE256",
+        HashMlDsa44WithSha512 => "Hash-ML-DSA-44-with-SHA512",
+        HashMlDsa65WithSha512 => "Hash-ML-DSA-65-with-SHA512",
+        HashMlDsa87WithSha512 => "Hash-ML-DSA-87-with-SHA512",
         X25519MlKem768 => "X25519MLKEM768",
         SecP256r1MlKem768 => "SecP256r1MLKEM768",
         SecP384r1MlKem1024 => "SecP384r1MLKEM1024",

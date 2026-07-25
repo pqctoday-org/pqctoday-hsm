@@ -12,7 +12,7 @@ across the **full PKCS#11 v3.2 mechanism surface**, leveraging **KMIP 3.0
 **Architecture decision (locked):** policies are **authored in KMIP 3.0 terms**
 (CryptographicAlgorithm + CryptographicParameters), but **enforced on a
 canonical PKCS#11 `CKM_*` mechanism identity**, so the KMIP **PKCS#11 passthrough**
-op (KMIP 3.0 §6.1.42, `ops.rs:1035`) cannot bypass KMIP-layer rules.
+op (KMIP 3.0 §6.1.44, `ops.rs:1035`) cannot bypass KMIP-layer rules.
 
 > **Source-of-truth rule (non-negotiable):** every KMIP enum/tag value comes
 > from `kmip/spec/oasis-kmip-3.0/kmip-spec-3.0-tags-enums.json` (PQC additions:
@@ -109,7 +109,7 @@ RSA-OAEP-SHA256 / deterministic ML-DSA" with zero app change.
 - **Accept:** policy can *set*, not just *reject*, mechanism parameters.
 
 ### P4 — PKCS#11 passthrough gating + `CKM_*` rule dialect (closes **G3**, prevents bypass)
-- Resolve the KMIP **PKCS#11** op's (§6.1.42, `ops.rs:1035`) raw `CKM_*` to the
+- Resolve the KMIP **PKCS#11** op's (§6.1.44, `ops.rs:1035`) raw `CKM_*` to the
   **same canonical identity** as standard ops, and run the same rules. This
   closes the bypass (denied AES-CBC at KMIP ⇒ also denied via raw `CKM_AES_CBC`).
 - Add a `MechanismAllowlist`/`MechanismDenylist` keyed directly on `CKM_*`

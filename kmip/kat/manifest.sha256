@@ -12,8 +12,8 @@ e18b554dcba05f475dfa07a406a67fb5a976a2699f5e57d22d6a99aa267bf1f0  ./ecdsa/ecdsa-
 7057811b1211d3a1dd123f6097bc137fccddf04529d8e68ec40fe1f652609694  ./hmac/hmac-sha384-acvp.json
 b033a71cefa5e93a52a530dfff253150a65d2ad0233dd4cc8c6b2cb751b713cb  ./hmac/hmac-sha512-acvp.json
 97d25c3ed2f9e8bfc5d2bd9f7f70363ad4d08d212ebed429194a64052c733634  ./ml-dsa/composite-sigs-acvp.json
-08f40c870cb7feacfee88c52a5dc0a83c62ee14e70e2da1b42b03250f3087784  ./ml-dsa/ml-dsa-acvp.json
-ec9f1569b148f7034678967c410e1a6bf75b0deaa7a38c216a0d3e845a7c866e  ./ml-kem/ml-kem-acvp.json
+5a9041bb78b9a9ffdcda6b67fdb84bf2dbc530c0161ee83106dd01307f709443  ./ml-dsa/ml-dsa-acvp.json
+282db073d6aac35a2c4de4420d9bcb125fbf3b1f61f9420d391221eba5b6ce69  ./ml-kem/ml-kem-acvp.json
 348ff210057ebfeb99085e8bb0cb359434937bf34a12c7f12ea8f10a5872f4bd  ./oasis-kmip-3.0/mandatory/AKLC-M-1-30.xml
 b8f94ad9071ba2e7d79e2300257e4892f08e0c43d3b8f4545999a8fa03758303  ./oasis-kmip-3.0/mandatory/AKLC-M-2-30.xml
 2551fab2d97bcc6e483af06d8b5eca29f10178fbc44af81e72fe0613b622cee7  ./oasis-kmip-3.0/mandatory/AKLC-M-3-30.xml
@@ -76,8 +76,8 @@ f1f2312b380bb5272461b50172f10db3d52fe5be586773f2182a818e1e4e1d6b  ./oasis-kmip-3
 d96f74ebbb05f94ad61b70d345671d43323d993075ca118867221d284f054282  ./oasis-kmip-3.0/mandatory/CS-BC-M-CHACHA20-2-30.xml
 2e4aa2af05be8917dd248cad8726c922c4ad7365e3d46fa1a7317fd8b248a916  ./oasis-kmip-3.0/mandatory/CS-BC-M-CHACHA20-3-30.xml
 9535ff675ccb962efc7aad9602381594063bde4cf93d831bde93e3240ba3b4aa  ./oasis-kmip-3.0/mandatory/CS-BC-M-CHACHA20-4-30.xml
-f210ff4e10277474496622a3f50f3c4ee79f29992dbe61463b3ec88bd853a1bb  ./oasis-kmip-3.0/mandatory/CS-BC-M-CHACHA20POLY1305-1-30.xml
-3aa6c7a208a403dcd0cb6c0358d1ff5cba300eb365842e6b1573e2cea9391fa8  ./oasis-kmip-3.0/mandatory/CS-BC-M-GCM-1-30.xml
+d3aa8dc126e0637cebe157288e99f0a70d138ffe920f6d3a179a5dc5ce6a8fc1  ./oasis-kmip-3.0/mandatory/CS-BC-M-CHACHA20POLY1305-1-30.xml
+1459198e17debe5c0778f6fcc793938d096186a29806babd22b7efbe40ad24be  ./oasis-kmip-3.0/mandatory/CS-BC-M-GCM-1-30.xml
 b9fd18a2b1c5d2251c3776ee3af6b224f06c0abea428aa7798a2f8c0ae7152c8  ./oasis-kmip-3.0/mandatory/CS-BC-M-GCM-2-30.xml
 bab08023c2f2fcf2c614e4be384c16cc8f4d5cab4695784b20561a57c89f6493  ./oasis-kmip-3.0/mandatory/CS-BC-M-GCM-3-30.xml
 171a6ab8145252a12c8d3281d6b18388a1cbeaecf56a681fe1842a479983fb12  ./oasis-kmip-3.0/mandatory/CS-RNG-M-1-30.xml
@@ -125,7 +125,7 @@ cac949c449029ab79422a16e286dc44b725bdc1dbeac299a987b1e19c08316ce  ./sha/sha256-a
 00a9af9630701fd775ed70332311841d231e58eb4cb833291699f8c83ca7ba5f  ./sha/sha3-512-acvp.json
 c41de0a792153dc01b4525f670c7995e5d3e51db3612cee1ce41f9ce7516ab19  ./sha/sha384-acvp.json
 724c56a05b1d3e9b07118a011e95298cfdf365e2d241971c09a9448a4e103516  ./sha/sha512-acvp.json
-1a816747299e27597bd1f96cb31411647ec37c2101ccfbccbc5f8bcffd3f5b1e  ./slh-dsa/slh-dsa-acvp.json
+0a96c7581a2d3113c392f705b25f8968f51966fd608e05974584b8bdce70efd3  ./slh-dsa/slh-dsa-acvp.json
 ed46a5054b2dca53d60df524ffe3a7f8dfbee58c12ea6465a8ef7d59f8c2fbf4  ./frodokem/raw/PQCkemKAT_19888.rsp
 712ed35063d8b8329f610c42d6e3037cd1c24346f85f21651e927d6cb7057b0d  ./frodokem/raw/PQCkemKAT_19888_shake.rsp
 d1bc19050269a99bfa84038ad466688428ebc98417ba35b48a06f3c05aefc9bd  ./frodokem/raw/PQCkemKAT_31296.rsp

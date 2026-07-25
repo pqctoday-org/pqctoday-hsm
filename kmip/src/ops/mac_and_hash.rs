@@ -2,9 +2,9 @@
 //!
 //! Spec mapping:
 //!
-//! - MAC       §6.1.36 — keyed MAC over `data` using the Managed Object
-//! - MACVerify §6.1.37 — verify a MAC against `data + mac_data`
-//! - Hash      §6.1.28 — keyless cryptographic hash
+//! - MAC       §6.1.38 — keyed MAC over `data` using the Managed Object
+//! - MACVerify §6.1.39 — verify a MAC against `data + mac_data`
+//! - Hash      §6.1.30 — keyless cryptographic hash
 //!
 //! Single-part HMAC-SHA-{256,384,512} (driven by the key's
 //! CryptographicAlgorithm) and Hash with SHA-{256,384,512}.
@@ -66,7 +66,7 @@ pub fn mac(
     )?;
     policy_gate(deps, &obj, "MAC", started, correlation_id)?;
 
-    // KMIP 3.0 §6.1.36 — MAC algorithm selection: request's
+    // KMIP 3.0 §6.1.38 — MAC algorithm selection: request's
     // CryptographicParameters wins; else the object's stored
     // CryptographicParameters attribute; else the object's
     // CryptographicAlgorithm (e.g. a key registered as HmacShaXxx
@@ -233,7 +233,7 @@ fn require_active(obj: &ObjectRecord, _op: &'static str) -> Result<()> {
     }
     // K22 — KMIP 3.0 §11 `Object Archived` (0x0d): "The object SHALL
     // be recovered from the archive before performing the operation."
-    // Archived material is off-line (§6.1.4 / §6.1.47), so MAC /
+    // Archived material is off-line (§6.1.4 / §6.1.49), so MAC /
     // MACVerify fail until Recover.
     if obj.archived {
         return Err(KmipError::object_archived(&obj.uid));

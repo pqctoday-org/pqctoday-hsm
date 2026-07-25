@@ -3,12 +3,12 @@
 //!
 //! - `Cancel` §6.1.5 — best-effort stop of a job that hasn't started
 //!   executing yet.
-//! - `Process` §6.1.44 — block until a job reaches `Completed`
+//! - `Process` §6.1.46 — block until a job reaches `Completed`
 //!   ("effectively changing the processing mode for that batch item to
 //!   that resembling synchronous processing").
-//! - `Query Asynchronous Requests` §6.1.46 — list outstanding jobs.
+//! - `Query Asynchronous Requests` §6.1.48 — list outstanding jobs.
 //!
-//! `Poll` (§6.1.43) is deliberately NOT here — its successful response
+//! `Poll` (§6.1.45) is deliberately NOT here — its successful response
 //! impersonates whatever operation it's polling for, which this
 //! module's normal per-op `ResponsePayload` wrapping can't express.
 //! See `dispatcher::handle_poll`.
@@ -89,7 +89,7 @@ pub fn cancel(
     })
 }
 
-/// `Process` (KMIP 3.0 §6.1.44) — blocks the calling thread until the
+/// `Process` (KMIP 3.0 §6.1.46) — blocks the calling thread until the
 /// named job reaches `Completed`. Never re-runs the operation itself
 /// (that would risk double-executing a side-effecting handler); it
 /// only waits on the same `Condvar` the executor signals.
@@ -126,7 +126,7 @@ pub fn process(
     Ok(ProcessResponse {})
 }
 
-/// `Query Asynchronous Requests` (KMIP 3.0 §6.1.46). Reports jobs that
+/// `Query Asynchronous Requests` (KMIP 3.0 §6.1.48). Reports jobs that
 /// are still genuinely outstanding — this implementation treats
 /// `stage == Completed` as "results obtained" (a `Poll` or `Cancel`
 /// can retrieve them at any time after that point, so there is nothing

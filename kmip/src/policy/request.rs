@@ -58,7 +58,7 @@ pub struct MechanismParams {
     pub tag_length: Option<i32>,
     /// KMIP `Salt Length` (RSA-PSS sLen, bytes).
     pub salt_length: Option<i32>,
-    /// WD19 PQC signing flags.
+    /// CSD02 PQC signing flags.
     pub deterministic: Option<bool>,
     pub internal: Option<bool>,
     pub external_mu: Option<bool>,

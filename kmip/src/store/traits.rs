@@ -130,7 +130,7 @@ pub struct ObjectRecord {
     /// shared secret round-trips as the OASIS PQC interop KATs expect.
     pub secret_data_type: Option<u32>,
 
-    /// KMIP 3.0 WD19 §3.4 — the deterministic generation seed (ML-DSA ξ,
+    /// KMIP 3.0 CSD02 §3.4 — the deterministic generation seed (ML-DSA ξ,
     /// ML-KEM d‖z, SLH-DSA seed) supplied to `CreateKeyPair`. Stored on
     /// the private-key record so `Get` with `KeyFormatType=SeedPrivateKey`
     /// can return the `{ Seed, Key }` KeyMaterial structure. `None` for
@@ -141,7 +141,7 @@ pub struct ObjectRecord {
     /// Drives the Plane-3 mechanism choice — most importantly the
     /// RSA-OAEP family (PaddingMethod / HashingAlgorithm / MaskGenerator
     /// / MaskGeneratorHashingAlgorithm / PSource), which Encrypt /
-    /// Decrypt read off the *key* per §6.1.21 rather than off the
+    /// Decrypt read off the *key* per §6.1.23 rather than off the
     /// request payload. Stored as the typed struct from
     /// [`crate::kmip30::CryptographicParameters`].
     pub cryptographic_parameters: Option<crate::kmip30::CryptographicParameters>,
@@ -232,7 +232,7 @@ pub struct ObjectRecord {
     pub nist_key_type: Option<u32>,
     /// KMIP §11 `Protection Level` — Enumeration codepoint.
     pub protection_level: Option<u32>,
-    /// KMIP §6.1.49 `Revocation Reason Code` — set on `Revoke`.
+    /// KMIP §6.1.51 `Revocation Reason Code` — set on `Revoke`.
     pub revocation_reason_code: Option<u32>,
     /// KMIP §6.1.14 `Deactivation Reason Code` — set on `Deactivate`.
     pub deactivation_reason_code: Option<u32>,
@@ -304,7 +304,7 @@ pub struct ObjectRecord {
     /// (`Result Reason Invalid Field`) if `Software` isn't in it — the
     /// server has no other storage class to truthfully claim.
     pub protection_storage_mask: Option<u32>,
-    /// Storage status — KMIP 3.0 §6.1.4 Archive / §6.1.47 Recover.
+    /// Storage status — KMIP 3.0 §6.1.4 Archive / §6.1.49 Recover.
     /// `true` = Archival storage (§12.3 Storage Status Mask bit
     /// 0x02): the material is off-line, so Get and cryptographic
     /// operations fail with `ObjectArchived` (0x0d, §11: "The object

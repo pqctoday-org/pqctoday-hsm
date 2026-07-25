@@ -123,20 +123,16 @@ class CodepointTable:
         return t
 
 
-# WD19 PQC tags absent from the published-3.0 spec JSON.
+# Cross-check entries against wire.rs's tags::* constants - every one of
+# these is ALSO present natively in the spec-extraction JSON under its
+# spaced name, so norm()-based lookup would find it anyway. Mirrors the
+# hub's codepointTable.ts copy of this same block.
+#
+# (2026-07-24 CSD02 migration: the 8 WD19-only KEM/PQC tags this block used
+# to carry - KEMAlgorithm, Deterministic, ContextString, Seed,
+# InputKeyMaterial, Internal, ExternalMu, Random - are now supplied natively
+# by the regenerated spec JSON and were removed.)
 _SPEC_EXTRACT_TAG_PATCHES: dict[str, int] = {
-    "KEMAlgorithm":     0x42_01C3,
-    "Deterministic":    0x42_01C4,
-    "ContextString":    0x42_01C5,
-    "Seed":             0x42_01C6,
-    "InputKeyMaterial": 0x42_01C7,
-    "Internal":         0x42_01C8,
-    "ExternalMu":       0x42_01C9,
-    "Random":           0x42_01CA,
-    # Sec6.1.62 Validate / Sec6.1.6 Certify / Sec6.1.50 Re-certify (Certificate
-    # Services) - also absent from the spec-extraction JSON. Mirrors the hub's
-    # codepointTable.ts patch (kept in sync per that file's own convention);
-    # values cross-checked against wire.rs's tags::* constants.
     "CertificateValue":                   0x42_001E,
     "CertificateRequestType":             0x42_0019,
     "CertificateRequest":                 0x42_0018,
@@ -146,20 +142,34 @@ _SPEC_EXTRACT_TAG_PATCHES: dict[str, int] = {
     "ValidityIndicator":                  0x42_009B,
 }
 
+# Enum members the spec-extraction JSON either omits or gets wrong, plus
+# norm()-collision aliases - _norm() only strips non-alphanumerics, so it's
+# still case-sensitive (spec's own "Re-key" norms to "Rekey", not our
+# request-builder's "ReKey" - a real collision, not a redundant safety net).
+#
+# (2026-07-24 CSD02 migration: every entry here was re-verified against the
+# regenerated CSD02-sourced JSON. Entries that turned out to be exact
+# case-sensitive matches natively - KeyFormatType.SeedPrivateKey,
+# CertificateRequestType.PKCS10/PEM, all of ValidityIndicator, CredentialType's
+# 5 members other than UsernameAndPassword, CryptographicAlgorithm's
+# DES/RC4/X25519MLKEM768, and Operation.Encapsulate/Decapsulate - were
+# removed. What survives below is either a genuine casing/hyphenation alias,
+# a vendor extension, or the DeactivationReasonCode table the extractor
+# still mis-attributes. Keep in sync with codepointTable.ts's copy.)
 _SPEC_EXTRACT_PATCHES: dict[str, dict[str, int]] = {
+    # Spec's own table has a typo - "MFG1", not "MGF1" - a real alias.
     "MaskGenerator": {"MGF1": 0x00000001},
-    "KeyFormatType": {"SeedPrivateKey": 0x00000018},
-    # Certificate Services (WP5) - matches kmip30::ops::CertificateRequestType.
-    "CertificateRequestType": {"Crmf": 0x00000001, "PKCS10": 0x00000002, "PEM": 0x00000003},
-    # Validate's three-way answer - matches kmip30::ops::SignatureValidity.
-    "ValidityIndicator": {"Valid": 0x00000001, "Invalid": 0x00000002, "Unknown": 0x00000003},
-    # Deactivate's 'Deactivation Reason Code' - found missing from this file
-    # entirely 2026-07-23 (codepointTable.ts has always had it). Without this
-    # patch, lookups fell through to the base JSON's own corrupted
-    # extraction for this table (wrong table matched during PDF extraction -
-    # 4 bogus members, not the real 7). Values verified against
-    # kmip30::ops::DeactivationReason directly (mirrors RevocationReason's
-    # codepoints exactly, both from the same table shape).
+    # Certificate Services - matches kmip30::ops::CertificateRequestType.
+    # Spec's own member is "CRMF" (all-caps); ours is "Crmf". PKCS10/PEM
+    # already match natively and need no patch.
+    "CertificateRequestType": {"Crmf": 0x00000001},
+    # Deactivate's 'Deactivation Reason Code' - the spec-extraction JSON's
+    # table is still a PDF/HTML-extraction mismatch under CSD02 too
+    # (re-confirmed 2026-07-24: same wrong table - Unspecified/"Deactivation
+    # Date"/"Protect Stop Date"/"Usage Limit"), not the 7-member set
+    # kmip30::ops::DeactivationReason actually implements. Values verified
+    # against kmip30::ops::DeactivationReason directly (mirrors
+    # RevocationReason's codepoints exactly, both from the same table shape).
     "DeactivationReasonCode": {
         "Unspecified":          0x00000001,
         "KeyCompromise":        0x00000002,
@@ -169,36 +179,23 @@ _SPEC_EXTRACT_PATCHES: dict[str, dict[str, int]] = {
         "CessationOfOperation": 0x00000006,
         "PrivilegeWithdrawn":   0x00000007,
     },
+    # Spec's own member is "Username and Password" (lowercase "and"); ours
+    # is "UsernameAndPassword" - real casing alias. The other 5 members
+    # match the spec natively now.
     "CredentialType": {
         "UsernameAndPassword": 0x00000001,
-        "Device":              0x00000002,
-        "Attestation":         0x00000003,
-        "OneTimePassword":     0x00000004,
-        "HashedPassword":      0x00000005,
-        "Ticket":              0x00000006,
     },
     "CryptographicAlgorithm": {
-        "DES":  0x00000001,
+        # Spec's own member is "3DES"; ours is "DES3" - a real alias, not
+        # just a casing difference.
         "DES3": 0x00000002,
-        # Found 2026-07-23 (Python-side re-check of the WD19-delta
-        # completeness work done on codepointTable.ts's copy of this table):
-        # was 0x00000005 — that's DSA's codepoint, not RC4's. Real RC4 is
-        # 0x00000016 per the spec extraction's own 'RC4' entry.
-        "RC4":  0x00000016,
-        # WD19 hybrid KEMs — real OASIS codepoints (0x5C/0x5D), just newer
-        # than the vendored spec-extraction JSON's CSD01 baseline (stops at
-        # 0x4A). Matches kmip/src/kmip30/algos.rs's KmipAlgorithm::X25519MlKem768
-        # / SecP256r1MlKem768 and codepointTable.ts's copy of this same
-        # patch exactly. Found missing entirely from this file 2026-07-23.
-        "X25519MLKEM768":    0x0000005C,
-        "SecP256r1MLKEM768": 0x0000005D,
-        # BSI TR-02102-1 vendor KEMs (2026-07-06) — not in the published-3.0
+        # BSI TR-02102-1 vendor KEMs (2026-07-06) - not in the published
         # spec JSON since they're vendor extensions, not OASIS codepoints
-        # (Classic McEliece's 0x34 is a real OASIS value; FrodoKEM's
-        # 0x8000_005f-0x64 range is ours). Keep in sync with
-        # codepointTable.ts's copy of this same patch. Bare family names
-        # default to the AES variant, matching
-        # create_key_pair.rs::parse_algorithm's convention.
+        # (Classic McEliece's 0x34 is a real OASIS value, reused here under
+        # our own parameter-set-specific name; FrodoKEM's 0x8000_005f-0x64
+        # range is ours outright). Keep in sync with codepointTable.ts's
+        # copy of this same patch. Bare family names default to the AES
+        # variant, matching create_key_pair.rs::parse_algorithm's convention.
         "FrodoKEM-640":             0x8000005F,
         "FrodoKEM-640-AES":         0x8000005F,
         "FrodoKEM-640-SHAKE":       0x80000060,
@@ -216,13 +213,21 @@ _SPEC_EXTRACT_PATCHES: dict[str, dict[str, int]] = {
         "ML-DSA-44-RSA2048-PSS":    0x80000066,
         "ML-DSA-65-ECDSA-P256":     0x80000067,
         "ML-DSA-87-ECDSA-P384":     0x80000068,
+        # Published CSD02 hybrid KEM (§11.12) - spec's own member is
+        # "SECP256R1MLKEM768" (all-caps); ours is "SecP256r1MLKEM768"
+        # (matching the Rust engine's own naming) - real casing alias.
+        # X25519MLKEM768 matches the spec's own casing exactly now.
+        "SecP256r1MLKEM768": 0x0000005D,
     },
     "Operation": {
+        # Spec's own hyphenated names ("Re-key", "Re-key Key Pair",
+        # "Re-certify") norm to Rekey/RekeyKeyPair/Recertify - different
+        # capitalization than our request-builder's option strings below.
+        # Encapsulate/Decapsulate matched the spec's own casing exactly and
+        # needed no patch even before this migration.
         "ReKey":        0x00000004,
         "ReKeyKeyPair": 0x0000001D,
         "ReCertify":    0x00000007,
-        "Encapsulate":  0x00000041,
-        "Decapsulate":  0x00000042,
     },
     "OpaqueDataType": {},
     "PKCS11Function": {

@@ -222,22 +222,62 @@ pub enum KmipAlgorithm {
     SlhDsaShake256s,  // 0x49
     SlhDsaShake256f,  // 0x4a
 
-    // ── KMIP 3.0 WD19 hybrid KEMs (K6) ────────────────────────────────────
+    // ── CSD02 pre-hash ML-DSA/SLH-DSA (§11.12 Table 552, added 2026-05-07) ─
+    // Compound "algorithm+fixed-hash" values a client sets on
+    // `CryptographicParameters.CryptographicAlgorithm` to select FIPS
+    // 204/205's own HashML-DSA/HashSLH-DSA pre-hash signing mode — NOT a
+    // separate key type; the managed object underneath is still plain
+    // MlDsa44/65/87 or the matching SlhDsa* variant (see
+    // `native_sign_mech_with_params`, the only place these are matched
+    // exhaustively; every other exhaustive `KmipAlgorithm` match rejects
+    // them the same way it already rejects e.g. `Hss` for CreateKeyPair
+    // combinations it doesn't support — these were never valid key-type
+    // algorithms either). Each SLH-DSA member pairs one fixed hash per the
+    // spec table (no caller choice, unlike RSA/ECDSA): SHA2 parameter sets
+    // use SHA-256 (128-bit) or SHA-512 (192/256-bit); SHAKE parameter sets
+    // use SHAKE128 (128-bit) or SHAKE256 (192/256-bit). All 3 ML-DSA members
+    // are fixed at SHA-512.
+    HashSlhDsaSha2_128sWithSha256,   // 0x4b
+    HashSlhDsaSha2_128fWithSha256,   // 0x4c
+    HashSlhDsaSha2_192sWithSha512,   // 0x4d
+    HashSlhDsaSha2_192fWithSha512,   // 0x4e
+    HashSlhDsaSha2_256sWithSha512,   // 0x4f
+    HashSlhDsaSha2_256fWithSha512,   // 0x50
+    HashSlhDsaShake128sWithShake128, // 0x51
+    HashSlhDsaShake128fWithShake128, // 0x52
+    HashSlhDsaShake192sWithShake256, // 0x53
+    HashSlhDsaShake192fWithShake256, // 0x54
+    HashSlhDsaShake256sWithShake256, // 0x55
+    HashSlhDsaShake256fWithShake256, // 0x56
+    HashMlDsa44WithSha512,           // 0x57
+    HashMlDsa65WithSha512,           // 0x58
+    HashMlDsa87WithSha512,           // 0x59
+
+    // ── KMIP 3.0 CSD02 hybrid KEMs (K6) ────────────────────────────────────
     // ML-KEM composed with a classical ECDH per draft-ietf-tls-ecdhe-mlkem.
     // These do NOT map to a single PKCS#11 mechanism — the engine composes the
     // two component keys (see `softhsmrustv3::native::hybrid`).
-    X25519MlKem768,     // 0x5c (WD19)
-    SecP256r1MlKem768,  // 0x5d (WD19)
-    // SecP384r1MLKEM1024 (draft-ietf-tls-ecdhe-mlkem group 0x11ED) has NO WD19
-    // CryptographicAlgorithm value (WD19 stops at 0x5D). Assigned a codepoint
-    // in the `8XXXXXXX` Extensions range — KMIP 3.0's OWN spec-sanctioned
+    X25519MlKem768,     // 0x5c (published, CSD02 §11.12 Table 552)
+    SecP256r1MlKem768,  // 0x5d (published, CSD02 §11.12 Table 552)
+    // SecP384r1MLKEM1024 (draft-ietf-tls-ecdhe-mlkem group 0x11ED) still has
+    // NO Specification CryptographicAlgorithm value as of CSD02 (2026-05-07)
+    // — the enum stops at 0x5D (re-confirmed directly against the CSD02
+    // extraction, 93 members total). Assigned a codepoint in the
+    // `8XXXXXXX` Extensions range instead — KMIP 3.0's OWN spec-sanctioned
     // vendor-extension convention for enumeration values (every enum table,
-    // including this one — §11.12 Table 543 Cryptographic Algorithm
+    // including this one — §11.12 Table 552 Cryptographic Algorithm
     // Enumeration — lists "Extensions 8XXXXXXX" as a valid entry; confirmed
     // present in 60 enum tables across the spec). This is a real, working
     // extension codepoint per spec convention, not an ad hoc invention — it
     // is simply not (yet) an OASIS-assigned standard value, pending a future
     // official assignment for this algorithm.
+    //
+    // Worth teaching: Profiles v3.0 CSD02 (2026-05-21) §3.3.3 "Quantum Safe
+    // Authentication Key Exchange Groups" now MANDATES SecP384r1MLKEM1024 as
+    // a required TLS key-exchange group for the KMIP transport itself — the
+    // Specification and the Profiles documents have moved out of step here:
+    // one requires the algorithm at the transport layer, the other still
+    // assigns it no managed-object identity.
     SecP384r1MlKem1024, // 0x8000005e (spec-convention vendor extension, §11.12)
 
     // ── BSI TR-02102-1 §2.4.2 — Classic McEliece ─────────────────────────
@@ -342,6 +382,21 @@ impl KmipAlgorithm {
             SlhDsaShake192f  => 0x00000048,
             SlhDsaShake256s  => 0x00000049,
             SlhDsaShake256f  => 0x0000004a,
+            HashSlhDsaSha2_128sWithSha256   => 0x0000004b,
+            HashSlhDsaSha2_128fWithSha256   => 0x0000004c,
+            HashSlhDsaSha2_192sWithSha512   => 0x0000004d,
+            HashSlhDsaSha2_192fWithSha512   => 0x0000004e,
+            HashSlhDsaSha2_256sWithSha512   => 0x0000004f,
+            HashSlhDsaSha2_256fWithSha512   => 0x00000050,
+            HashSlhDsaShake128sWithShake128 => 0x00000051,
+            HashSlhDsaShake128fWithShake128 => 0x00000052,
+            HashSlhDsaShake192sWithShake256 => 0x00000053,
+            HashSlhDsaShake192fWithShake256 => 0x00000054,
+            HashSlhDsaShake256sWithShake256 => 0x00000055,
+            HashSlhDsaShake256fWithShake256 => 0x00000056,
+            HashMlDsa44WithSha512           => 0x00000057,
+            HashMlDsa65WithSha512           => 0x00000058,
+            HashMlDsa87WithSha512           => 0x00000059,
             X25519MlKem768    => 0x0000005c,
             SecP256r1MlKem768 => 0x0000005d,
             SecP384r1MlKem1024 => 0x8000005e,
@@ -394,6 +449,21 @@ impl KmipAlgorithm {
             0x00000048 => SlhDsaShake192f,
             0x00000049 => SlhDsaShake256s,
             0x0000004a => SlhDsaShake256f,
+            0x0000004b => HashSlhDsaSha2_128sWithSha256,
+            0x0000004c => HashSlhDsaSha2_128fWithSha256,
+            0x0000004d => HashSlhDsaSha2_192sWithSha512,
+            0x0000004e => HashSlhDsaSha2_192fWithSha512,
+            0x0000004f => HashSlhDsaSha2_256sWithSha512,
+            0x00000050 => HashSlhDsaSha2_256fWithSha512,
+            0x00000051 => HashSlhDsaShake128sWithShake128,
+            0x00000052 => HashSlhDsaShake128fWithShake128,
+            0x00000053 => HashSlhDsaShake192sWithShake256,
+            0x00000054 => HashSlhDsaShake192fWithShake256,
+            0x00000055 => HashSlhDsaShake256sWithShake256,
+            0x00000056 => HashSlhDsaShake256fWithShake256,
+            0x00000057 => HashMlDsa44WithSha512,
+            0x00000058 => HashMlDsa65WithSha512,
+            0x00000059 => HashMlDsa87WithSha512,
             0x0000005c => X25519MlKem768,
             0x0000005d => SecP256r1MlKem768,
             0x8000005e => SecP384r1MlKem1024,
@@ -425,7 +495,7 @@ impl KmipAlgorithm {
         )
     }
 
-    /// `true` if this is a KMIP 3.0 WD19 hybrid KEM (K6), composed in-process
+    /// `true` if this is a KMIP 3.0 CSD02 hybrid KEM (K6), composed in-process
     /// from ML-KEM-768 + a classical ECDH rather than a single PKCS#11 mech.
     pub const fn is_hybrid_kem(self) -> bool {
         matches!(
@@ -730,6 +800,21 @@ impl KmipAlgorithm {
             SlhDsaShake192f  => "SLH-DSA-SHAKE-192f",
             SlhDsaShake256s  => "SLH-DSA-SHAKE-256s",
             SlhDsaShake256f  => "SLH-DSA-SHAKE-256f",
+            HashSlhDsaSha2_128sWithSha256   => "Hash-SLH-DSA-SHA2-128s-with-SHA256",
+            HashSlhDsaSha2_128fWithSha256   => "Hash-SLH-DSA-SHA2-128f-with-SHA256",
+            HashSlhDsaSha2_192sWithSha512   => "Hash-SLH-DSA-SHA2-192s-with-SHA512",
+            HashSlhDsaSha2_192fWithSha512   => "Hash-SLH-DSA-SHA2-192f-with-SHA512",
+            HashSlhDsaSha2_256sWithSha512   => "Hash-SLH-DSA-SHA2-256s-with-SHA512",
+            HashSlhDsaSha2_256fWithSha512   => "Hash-SLH-DSA-SHA2-256f-with-SHA512",
+            HashSlhDsaShake128sWithShake128 => "Hash-SLH-DSA-SHAKE-128s-with-SHAKE128",
+            HashSlhDsaShake128fWithShake128 => "Hash-SLH-DSA-SHAKE-128f-with-SHAKE128",
+            HashSlhDsaShake192sWithShake256 => "Hash-SLH-DSA-SHAKE-192s-with-SHAKE256",
+            HashSlhDsaShake192fWithShake256 => "Hash-SLH-DSA-SHAKE-192f-with-SHAKE256",
+            HashSlhDsaShake256sWithShake256 => "Hash-SLH-DSA-SHAKE-256s-with-SHAKE256",
+            HashSlhDsaShake256fWithShake256 => "Hash-SLH-DSA-SHAKE-256f-with-SHAKE256",
+            HashMlDsa44WithSha512           => "Hash-ML-DSA-44-with-SHA512",
+            HashMlDsa65WithSha512           => "Hash-ML-DSA-65-with-SHA512",
+            HashMlDsa87WithSha512           => "Hash-ML-DSA-87-with-SHA512",
             X25519MlKem768    => "X25519MLKEM768",
             SecP256r1MlKem768 => "SecP256r1MLKEM768",
             SecP384r1MlKem1024 => "SecP384r1MLKEM1024",
@@ -812,9 +897,15 @@ mod tests {
 
     #[test]
     fn unknown_wire_value_is_none() {
-        // 0x4b is one past the last FIPS PQC entry we ship.
-        assert_eq!(KmipAlgorithm::from_wire_value(0x0000004b), None);
-        // Falcon would be at 0x4b+ if added; parked indefinitely per
+        // 0x5e is one past the last standard-range (non-`8XXXXXXX`-Extensions)
+        // OASIS codepoint this engine implements (CSD02's own standard range
+        // is fully contiguous 0x01-0x5d with no gaps — verified directly
+        // against the spec-extraction JSON, so any value in that span is a
+        // real spec member, just possibly one we don't support). 0x4b used
+        // to be this boundary before CSD02's 15 pre-hash ML-DSA/SLH-DSA
+        // values (Hash-ML-DSA-*/Hash-SLH-DSA-*) filled 0x4b-0x59.
+        assert_eq!(KmipAlgorithm::from_wire_value(0x0000005e), None);
+        // Falcon would be at 0x5e+ if added; parked indefinitely per
         // workflow decision §4.
         assert_eq!(KmipAlgorithm::from_wire_value(0x00000100), None);
     }

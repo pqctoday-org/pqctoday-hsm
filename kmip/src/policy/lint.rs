@@ -257,7 +257,7 @@ pub fn is_known_algorithm_name(name: &str) -> bool {
         "AES", "RSA", "ECDSA", "ECDH", "DSA", "DH", "DES", "3DES", "MD5", "SHA1",
         "ChaCha20", "ChaCha20-Poly1305", "LMS", "HSS", "XMSS", "XMSS-MT",
         "Ed25519", "Ed448", "X25519", "X448", "RSA-PKCS1-v1_5", "ECDSA-SHA1",
-        // K6 hybrid KEMs (KMIP 3.0 WD19).
+        // K6 hybrid KEMs (KMIP 3.0 CSD02).
         "X25519MLKEM768", "SecP256r1MLKEM768",
     ];
     if BARE.contains(&name) {

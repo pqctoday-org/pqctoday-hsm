@@ -1,4 +1,4 @@
-//! KMIP 3.0 §6.1.6 **Certify** + §6.1.50 **Re-certify** — the server as a
+//! KMIP 3.0 §6.1.6 **Certify** + §6.1.52 **Re-certify** — the server as a
 //! PQC-capable X.509 Certificate Authority.
 //!
 //! ## What this does
@@ -1130,7 +1130,7 @@ pub fn certify(
     Ok(CertifyResponse { uid })
 }
 
-// ── Re-certify (§6.1.50) ─────────────────────────────────────────────────────
+// ── Re-certify (§6.1.52) ─────────────────────────────────────────────────────
 
 pub fn recertify(
     deps: &Deps,

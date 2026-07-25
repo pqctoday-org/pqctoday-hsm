@@ -2,12 +2,12 @@
 //!
 //! Spec mapping:
 //!
-//! - Register §6.1.48 — register a managed object the client created
+//! - Register §6.1.50 — register a managed object the client created
 //!   elsewhere; server assigns a UID (or honors a client-supplied one
 //!   if not already in use).
-//! - Import   §6.1.29 — like Register but the client always specifies
+//! - Import   §6.1.31 — like Register but the client always specifies
 //!   the UID; ReplaceExisting flag controls overwrite semantics.
-//! - Export   §6.1.22 — return a managed object + all of its
+//! - Export   §6.1.24 — return a managed object + all of its
 //!   attributes (richer than Get, which omits the attribute set).
 //!
 //! All three honor the spec-mandated error reasons listed in their
@@ -83,7 +83,7 @@ pub fn register(
         }
     }
 
-    // K19 — KMIP 3.0 §6.1.58 Set Defaults: Register is a factory
+    // K19 — KMIP 3.0 §6.1.60 Set Defaults: Register is a factory
     // operation, so the stored per-Object-Type defaults fill any
     // attributes the client omitted (client attributes win).
     super::allocation_and_config::apply_object_defaults(
@@ -997,7 +997,7 @@ pub fn export(
                 obj.object_type,
             )
             .map_err(|e| fail_err(deps, correlation_id, "Export", e))?;
-            // K16 — §6.1.22 Key Wrapping Specification: wrap the
+            // K16 — §6.1.24 Key Wrapping Specification: wrap the
             // TTLV-encoded KeyValue under the named KEK via the
             // machinery shared with Get (KEK must be Active with
             // WrapKey usage; AES-KW per AX-M-2). The response KeyBlock

@@ -23,34 +23,34 @@ pub enum ResultReason {
     /// `Feature Not Supported` — KMIP 3.0 §9.2 / §11. The request is
     /// well-formed and the operation is implemented, but it asks for a
     /// capability this server does not provide (e.g. Set Endpoint Role
-    /// requesting the §6.2 role switch — K19). Listed in the §6.1.59
+    /// requesting the §6.2 role switch — K19). Listed in the §6.1.61
     /// Table 433 error table.
     FeatureNotSupported   = 0x0000_0008,
     CryptographicFailure  = 0x0000_000a,
     /// `Usage Limit Exceeded` — KMIP 3.0 §11. A Get Usage Allocation
-    /// (§6.1.27, Table 331) asked for more Usage Limits Units than the
+    /// (§6.1.29, Table 331) asked for more Usage Limits Units than the
     /// object's remaining `Usage Limits Count` can grant.
     UsageLimitExceeded    = 0x0000_001a,
-    /// `Invalid Ticket` — KMIP 3.0 §11 / §6.1.35 Table 357. Logout's
+    /// `Invalid Ticket` — KMIP 3.0 §11 / §6.1.37 Table 357. Logout's
     /// ticket doesn't name a live session (unknown, already logged
     /// out, or expired).
     InvalidTicket          = 0x0000_0019,
     /// `Operation Canceled By Requester` — KMIP 3.0 §11. Phase 4: a
     /// `Cancel` (§6.1.5) against a job that had not yet started
-    /// executing succeeded, so a later `Poll` (§6.1.43) on the same
+    /// executing succeeded, so a later `Poll` (§6.1.45) on the same
     /// Asynchronous Correlation Value reports this instead of a real
     /// result. Codepoint verified from `kmip-spec-3.0-tags-enums.json`
     /// (`Result Reason` 0x09).
     OperationCanceledByRequester = 0x0000_0009,
     /// `Invalid Asynchronous Correlation Value` — KMIP 3.0 §11. Phase
-    /// 4: `Poll` / `Cancel` / `Process` (§6.1.43/§6.1.5/§6.1.44) named
+    /// 4: `Poll` / `Cancel` / `Process` (§6.1.45/§6.1.5/§6.1.46) named
     /// a correlation value this server never issued (or already
     /// forgot). Codepoint verified from `kmip-spec-3.0-tags-enums.json`
     /// (`Result Reason` 0x2b).
     InvalidAsynchronousCorrelationValue = 0x0000_002b,
     /// `Attribute Not Found` — KMIP 3.0 §11. The operation requires an
     /// attribute the object does not carry (e.g. Get Usage Allocation
-    /// against an object with no Usage Limits attribute — §6.1.27
+    /// against an object with no Usage Limits attribute — §6.1.29
     /// Table 331 error table).
     AttributeNotFound     = 0x0000_0021,
     PermissionDenied      = 0x0000_000c,
@@ -123,7 +123,7 @@ pub enum ResultReason {
     UnsupportedCryptographicParameters = 0x0000_003e,
     /// `Key Value Not Present` — KMIP 3.0 §11. The operation needs the
     /// raw key bytes but the managed object carries none the server
-    /// can reach (K20 — Derive Key §6.1.18 Table 304 lists this for a
+    /// can reach (K20 — Derive Key §6.1.19 Table 304 lists this for a
     /// base key whose material is neither in the KMIP store nor
     /// reachable through an engine primitive for the chosen method).
     /// Codepoint verified from `kmip-spec-3.0-tags-enums.json`.
@@ -138,7 +138,7 @@ pub enum ResultReason {
     BadCryptographicParameters = 0x0000_0024,
     /// `Invalid Object Type` — KMIP 3.0 §11. The operation cannot act
     /// on the requested / referenced Object Type (e.g. Derive Key for
-    /// anything but SymmetricKey / SecretData per §6.1.18). Codepoint
+    /// anything but SymmetricKey / SecretData per §6.1.19). Codepoint
     /// verified from `kmip-spec-3.0-tags-enums.json`.
     InvalidObjectType      = 0x0000_0030,
     /// `Unsupported Protocol Version` — KMIP 3.0 §11. The request
@@ -147,8 +147,8 @@ pub enum ResultReason {
     /// which signals a malformed frame.
     UnsupportedProtocolVersion = 0x0000_003f,
     /// `Wrapping Object Archived` — KMIP 3.0 §11. The KEK named by a
-    /// Get `KeyWrappingSpecification` (K16, §6.1.23) or a Register
-    /// `KeyWrappingData` (K17, §6.1.48) has been moved off-line by the
+    /// Get `KeyWrappingSpecification` (K16, §6.1.25) or a Register
+    /// `KeyWrappingData` (K17, §6.1.50) has been moved off-line by the
     /// `Archive` op and must be `Recover`-ed before it can wrap/unwrap.
     /// Distinct from the data object's own `ObjectArchived` (0x0d) —
     /// this names the *wrapping* object. Codepoint verified from
@@ -174,7 +174,7 @@ pub enum ResultReason {
     /// from `kmip-spec-3.0-tags-enums.json` (`Result Reason` 0x4d).
     CircularLinkError = 0x0000_004d,
     /// `Invalid CSR` — KMIP 3.0 §11. The Certificate Request Value
-    /// supplied to a §6.1.6 Certify / §6.1.50 Re-certify request could
+    /// supplied to a §6.1.6 Certify / §6.1.52 Re-certify request could
     /// not be parsed as the declared `Certificate Request Type`, or its
     /// embedded self-signature failed to verify (a tampered / malformed
     /// PKCS#10 CSR). Codepoint `0x2f` verified from
@@ -247,7 +247,7 @@ impl KmipError {
         Self::failed(ResultReason::ItemNotFound, format!("UID {uid:?} not found"))
     }
     pub fn object_not_found(uid: &str) -> Self {
-        // KMIP 3.0 §11 + §6.1.23 — `Get` against an unknown UID
+        // KMIP 3.0 §11 + §6.1.25 — `Get` against an unknown UID
         // returns `Object Not Found` (0x37), not the generic
         // `Item Not Found` (0x01). BL-M-4 step #5 pins this code.
         Self::failed(ResultReason::ObjectNotFound, format!("UID {uid:?} not found"))
@@ -430,7 +430,7 @@ mod tests {
         assert_eq!(ResultReason::UnsupportedProtocolVersion.to_wire_value(), 0x0000_003f);
         // K19 additions — `Result Reason` rows in the OASIS enums JSON.
         assert_eq!(ResultReason::FeatureNotSupported.to_wire_value(),   0x0000_0008);
-        // K20 — Derive Key (§6.1.18 Table 304) error-table reasons.
+        // K20 — Derive Key (§6.1.19 Table 304) error-table reasons.
         assert_eq!(ResultReason::KeyValueNotPresent.to_wire_value(),    0x0000_0013);
         assert_eq!(ResultReason::BadCryptographicParameters.to_wire_value(), 0x0000_0024);
         assert_eq!(ResultReason::InvalidObjectType.to_wire_value(),     0x0000_0030);

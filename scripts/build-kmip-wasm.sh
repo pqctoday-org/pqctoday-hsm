@@ -118,13 +118,20 @@ cp "$CONF"/oasis_corpus/mandatory/*.xml "$HUB_CORPUS_DIR/oasis/mandatory/"
 cp "$CONF"/oasis_corpus/optional/*.xml  "$HUB_CORPUS_DIR/oasis/optional/"
 cp "$CONF"/pqc_corpus/*.xml             "$HUB_CORPUS_DIR/pqc/"
 
-# Spec-extraction JSON + its WD19 delta (2026-07-23 re-audit, finding X1):
-# this was previously staged manually, out of band from this script, so a
-# real rebuild would silently leave hub's copy stale. Re-staged here so it
-# can never drift from the engine's own spec/ directory again.
+# Spec-extraction JSON (2026-07-23 re-audit, finding X1): this was
+# previously staged manually, out of band from this script, so a real
+# rebuild would silently leave hub's copy stale. Re-staged here so it can
+# never drift from the engine's own spec/ directory again. As of 2026-07-24
+# this is extracted straight from the published CSD02 HTML — no separate
+# delta file is needed (that existed only because OASIS had never published
+# an HTML export of the WD19 draft this previously trailed).
 SPEC_DIR="$ROOT/kmip/spec/oasis-kmip-3.0"
 cp "$SPEC_DIR/kmip-spec-3.0-tags-enums.json" "$HUB_CORPUS_DIR/tags-enums.json"
-cp "$SPEC_DIR/kmip-spec-3.0-wd19-delta.json" "$HUB_CORPUS_DIR/tags-enums-wd19-delta.json"
+# §6.1.x operation-number-to-name table (both CSD01 and CSD02) — feeds the
+# citation-drift guard test on both sides (kmip/tests/section61_citation_drift.rs,
+# src/wasm/kmip/section61CitationDrift.local.test.ts). Re-staged for the same
+# never-drift-out-of-band reason as tags-enums.json above.
+cp "$SPEC_DIR/kmip-spec-3.0-section61-headings.json" "$HUB_CORPUS_DIR/section61-headings.json"
 
 python3 - "$HUB_CORPUS_DIR" <<'PY'
 import json, os, sys

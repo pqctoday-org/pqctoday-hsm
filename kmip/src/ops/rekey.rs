@@ -1,11 +1,11 @@
-//! K21 — KMIP 3.0 §6.1.51 **Re-key** (op `0x04`) and §6.1.52 **Re-key
+//! K21 — KMIP 3.0 §6.1.53 **Re-key** (op `0x04`) and §6.1.54 **Re-key
 //! Key Pair** (op `0x1d`).
 //!
 //! > "This request is used to generate a replacement key for an
 //! > existing symmetric key. It is analogous to the Create operation,
 //! > except that attributes of the replacement key are copied from
 //! > the existing key, with the exception of the attributes listed in
-//! > Re-key Attribute Requirements." (§6.1.51; §6.1.52 says the same
+//! > Re-key Attribute Requirements." (§6.1.53; §6.1.52 says the same
 //! > of Create Key Pair.)
 //!
 //! ## Attribute inheritance (Table 404 / Table 409)
@@ -26,7 +26,7 @@
 //! | Random Number Generator | "Set to the random number generator used for creating the new managed object. Not copied" — both report the honest `Unspecified` OsRng (see `get_attributes`) |
 //!
 //! **Precedence** (documented for K19 interplay): request `Attributes`
-//! > inherited values > Set Defaults. The §6.1.58 Object Defaults are
+//! > inherited values > Set Defaults. The §6.1.60 Object Defaults are
 //! NOT applied here at all — defaults only fill gaps, and inheritance
 //! always supplies algorithm / length / usage mask from the existing
 //! object, so there is never a gap for a default to fill.
@@ -60,7 +60,7 @@
 //!
 //! ## Retiring the existing object
 //!
-//! §6.1.51 itself does not order a state transition, but Table 97
+//! §6.1.53 itself does not order a state transition, but Table 97
 //! (`Deactivation Date` attribute rules) lists Re-key / Re-key Key
 //! Pair among the operations that implicitly set Deactivation Date,
 //! and "the replacement key takes over the name attribute of the
@@ -109,7 +109,7 @@ use super::register_import_export::ExtractedAttrs;
 const LINK_REPLACED_OBJECT: &str = "ReplacedObjectLink";
 const LINK_REPLACEMENT_OBJECT: &str = "ReplacementObjectLink";
 
-// ── Re-key (§6.1.51) ────────────────────────────────────────────────────────
+// ── Re-key (§6.1.53) ────────────────────────────────────────────────────────
 
 pub fn rekey(
     deps: &Deps,
@@ -143,7 +143,7 @@ pub fn rekey(
     gate_rekeyable_state(&orig).map_err(&fail)?;
 
     // Request `Attributes` override the inherited values (request >
-    // inherited > defaults; see module doc for why §6.1.58 Set
+    // inherited > defaults; see module doc for why §6.1.60 Set
     // Defaults never fire here).
     let x = super::register_import_export::extract_attrs(&req.template_attribute);
     let mut algo = x.algorithm.unwrap_or(orig.algorithm);
@@ -151,7 +151,7 @@ pub fn rekey(
     let usage = x.usage.unwrap_or(orig.usage_mask);
 
     // Plane-1 policy gate against the object being replaced. Unlike the
-    // client-driven §6.1.51 ReKey (like-for-like), the crypto-agility engine
+    // client-driven §6.1.53 ReKey (like-for-like), the crypto-agility engine
     // can SUBSTITUTE the replacement algorithm: a `Decision::RekeyAndProceed`
     // (e.g. AES-128 → AES-256) means the sweep-driven ReKey adopts the policy's
     // target. An explicit client-template algorithm still wins (request >
@@ -231,7 +231,7 @@ pub fn rekey(
     Ok(ReKeyResponse { uid: new_uid })
 }
 
-// ── Re-key Key Pair (§6.1.52) ───────────────────────────────────────────────
+// ── Re-key Key Pair (§6.1.54) ───────────────────────────────────────────────
 
 pub fn rekey_key_pair(
     deps: &Deps,

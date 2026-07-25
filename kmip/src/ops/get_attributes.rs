@@ -227,12 +227,12 @@ fn attributes_from_record(r: &ObjectRecord) -> Vec<Attribute> {
                 "NextLink"       => out.push(Attribute::NextLink(uid)),
                 "PreviousLink"   => out.push(Attribute::PreviousLink(uid)),
                 "GroupLink"      => out.push(Attribute::GroupLink(uid)),
-                // K20 — Derive Key link pair (§6.1.18 / §4.35.5).
+                // K20 — Derive Key link pair (§6.1.19 / §4.35.5).
                 "DerivationBaseObjectLink" => {
                     out.push(Attribute::DerivationBaseObjectLink(uid))
                 }
                 "DerivedObjectLink" => out.push(Attribute::DerivedObjectLink(uid)),
-                // K21 — Re-key link pair (§6.1.51 / §6.1.52).
+                // K21 — Re-key link pair (§6.1.53 / §6.1.52).
                 "ReplacedObjectLink" => out.push(Attribute::ReplacedObjectLink(uid)),
                 "ReplacementObjectLink" => {
                     out.push(Attribute::ReplacementObjectLink(uid))
@@ -383,10 +383,10 @@ pub(crate) fn canonical_attribute_name(attr: &Attribute) -> &'static str {
         Attribute::PreviousLink(_)           => "PreviousLink",
         Attribute::GroupLink(_)              => "GroupLink",
         Attribute::ObjectGroup(_)            => "ObjectGroup",
-        // K20 — Derive Key link pair (§6.1.18 / §4.35.5).
+        // K20 — Derive Key link pair (§6.1.19 / §4.35.5).
         Attribute::DerivationBaseObjectLink(_) => "DerivationBaseObjectLink",
         Attribute::DerivedObjectLink(_)      => "DerivedObjectLink",
-        // K21 — Re-key link pair (§6.1.51 / §6.1.52).
+        // K21 — Re-key link pair (§6.1.53 / §6.1.52).
         Attribute::ReplacedObjectLink(_)     => "ReplacedObjectLink",
         Attribute::ReplacementObjectLink(_)  => "ReplacementObjectLink",
         Attribute::ApplicationSpecificInformation { .. } => "ApplicationSpecificInformation",
@@ -463,7 +463,7 @@ mod tests {
 }).unwrap();
     }
 
-    /// K22 — §6.1.24.1 Error Handling – Get Attributes does NOT list
+    /// K22 — §6.1.26.1 Error Handling – Get Attributes does NOT list
     /// `Object Archived`: an archived object's attributes remain
     /// readable (only the material is off-line — Get / crypto ops are
     /// the gated paths).

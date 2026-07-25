@@ -96,7 +96,7 @@ pub(crate) mod tags {
     pub const EncodingOption: u32              = 0x42_00a3;
     pub const MacSignatureKeyInformation: u32  = 0x42_004e;
     pub const MaximumItems: u32           = 0x42_004f;
-    // KMIP 3.0 §6.1.32 Locate paging — values verified against
+    // KMIP 3.0 §6.1.34 Locate paging — values verified against
     // kmip-spec-3.0-tags-enums.json.
     pub const OffsetItems: u32            = 0x42_00d4;
     pub const StorageStatusMask: u32      = 0x42_008e;
@@ -125,7 +125,7 @@ pub(crate) mod tags {
     /// KMIP 3.0 §6.1.39 — `Application Namespace` TextString (zero or
     /// more) returned for `QueryFunction::QueryApplicationNamespaces`.
     pub const ApplicationNamespace: u32   = 0x42_0003;
-    // ── K3 — Query Profiles / Capabilities reporting (§6.1.45) ─────────
+    // ── K3 — Query Profiles / Capabilities reporting (§6.1.47) ─────────
     // Codepoints verified from `kmip-spec-3.0-tags-enums.json`.
     pub const ProfileInformation: u32     = 0x42_00eb;
     pub const ProfileName: u32            = 0x42_00ec;
@@ -146,7 +146,7 @@ pub(crate) mod tags {
     pub const State: u32                  = 0x42_008d;
     pub const TimeStamp: u32              = 0x42_0092;
     pub const UniqueIdentifier: u32       = 0x42_0094;
-    /// KMIP 3.0 §6.1.62 — `Validity Date` (DateTime) in the Validate
+    /// KMIP 3.0 §6.1.64 — `Validity Date` (DateTime) in the Validate
     /// request payload. Codepoint verified from
     /// `kmip-spec-3.0-tags-enums.json` (`Validity Date` → 0x42009a).
     pub const ValidityDate: u32           = 0x42_009a;
@@ -255,7 +255,7 @@ pub(crate) mod tags {
     /// 0x420056 on input as 2.x compatibility (normalised to the same internal
     /// membership set). Encodes as a TextString.
     pub const ObjectGroup: u32            = 0x42_0056;
-    // K20 — Derive Key (§6.1.18 / §7.13). All six codepoints verified
+    // K20 — Derive Key (§6.1.19 / §7.13). All six codepoints verified
     // against `kmip-spec-3.0-tags-enums.json`.
     /// `Derivation Method` Enumeration (§11.15).
     pub const DerivationMethod: u32       = 0x42_0031;
@@ -278,7 +278,7 @@ pub(crate) mod tags {
     /// `Derived Object Link` — on the base object, points at the
     /// object derived from it (§6.1.18).
     pub const DerivedObjectLink: u32      = 0x42_0193;
-    /// K21 — §6.1.51/§6.1.52 Re-key link pair. Codepoints verified
+    /// K21 — §6.1.53/§6.1.52 Re-key link pair. Codepoints verified
     /// against `kmip-spec-3.0-tags-enums.json`: `Replaced Object
     /// Link` 0x42019b (on the replacement, points at the existing
     /// object), `Replacement Object Link` 0x42019c (on the existing
@@ -363,7 +363,7 @@ pub(crate) mod tags {
     /// sub-field. Codepoints verified against the spec extraction.
     pub const RandomNumberGenerator: u32  = 0x42_00de;
     pub const RngAlgorithm: u32           = 0x42_00da;
-    /// KMIP 3.0 §6.1.36/37 MAC Data ByteString.
+    /// KMIP 3.0 §6.1.38/37 MAC Data ByteString.
     pub const MacData: u32                = 0x42_00c6;
     /// KMIP 3.0 §6.1.9/34/35 session + auth tags.
     /// K14 — §8.1.2 / §9.4 `Authentication` header Structure
@@ -397,7 +397,7 @@ pub(crate) mod tags {
     pub const Constraint: u32             = 0x42_0169;
     /// KMIP 3.0 §6.1.{54,55} RNG tags.
     pub const DataLength: u32             = 0x42_00c4;
-    /// KMIP 3.0 §6.1.42 PKCS#11 passthrough tags.
+    /// KMIP 3.0 §6.1.44 PKCS#11 passthrough tags.
     pub const Pkcs11Interface: u32        = 0x42_0159;
     pub const Pkcs11Function: u32         = 0x42_015a;
     pub const Pkcs11InputParameters: u32  = 0x42_015b;
@@ -448,7 +448,7 @@ pub(crate) mod tags {
     pub const CertificateValue: u32              = 0x42_001e;
     /// KMIP 3.0 §11 — Certificate Subject CN extracted from the DER.
     pub const CertificateSubjectCN: u32          = 0x42_0108;
-    /// P2.3 — §6.1.6 Certify / §6.1.50 Re-certify `Certificate Request`
+    /// P2.3 — §6.1.6 Certify / §6.1.52 Re-certify `Certificate Request`
     /// ByteString: the inline CSR (PKCS#10 / PEM / CRMF) bytes. The
     /// §6.1.6 payload table names the item "Certificate Request Value",
     /// but the KMIP TTLV encoding carries the inline CSR under the
@@ -1043,7 +1043,7 @@ fn uid_frame(uid: &str) -> TtlvFrame {
     TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString(uid.to_string()))
 }
 
-/// Encapsulate's `CryptographicParameters` structure, PLUS the WD19
+/// Encapsulate's `CryptographicParameters` structure, PLUS the CSD02
 /// `InputKeyMaterial` field nested inside it (`decode_encapsulate_req`
 /// hoists that same nesting out into `EncapsulateRequest::input_key_material`
 /// — this is its encode-side mirror). Returns `None` when neither is
@@ -1124,6 +1124,9 @@ fn revocation_reason_code(r: RevocationReason) -> u32 {
         RevocationReason::Superseded => 5,
         RevocationReason::CessationOfOperation => 6,
         RevocationReason::PrivilegeWithdrawn => 7,
+        RevocationReason::CertificateHold => 8,
+        RevocationReason::RemoveFromCrl => 9,
+        RevocationReason::AaCompromise => 10,
     }
 }
 
@@ -1223,7 +1226,7 @@ fn request_payload_to_frame(p: &RequestPayload) -> Option<TtlvFrame> {
             }
             k
         }
-        // §6.1.21 Encrypt / §6.1.22 Decrypt share the request shape. Spec child
+        // §6.1.23 Encrypt / §6.1.22 Decrypt share the request shape. Spec child
         // order: UID, [CryptographicParameters], Data, [IV], [CorrelationValue],
         // [InitIndicator], [FinalIndicator], [AAD].
         RequestPayload::Encrypt(r) => {
@@ -1269,7 +1272,7 @@ fn request_payload_to_frame(p: &RequestPayload) -> Option<TtlvFrame> {
             }
             k
         }
-        // 2026-07-17 audit — Encapsulate/Decapsulate (KMIP 3.0 WD19) had NO
+        // 2026-07-17 audit — Encapsulate/Decapsulate (KMIP 3.0 CSD02) had NO
         // request-encoding arm at all, so `request_payload_to_frame` fell
         // through to the final `_ => return None` and the whole batch's
         // `encode_request_message` came back `None` — silently emitting
@@ -1338,7 +1341,7 @@ fn request_payload_to_frame(p: &RequestPayload) -> Option<TtlvFrame> {
             vec![TtlvFrame::new(Tag(tags::DataLength), Value::Integer(r.data_length))]
         }
         RequestPayload::RngSeed(r) => vec![data_frame(&r.data)],
-        // §6.1.42 PKCS#11 passthrough.
+        // §6.1.44 PKCS#11 passthrough.
         RequestPayload::Pkcs11(r) => {
             let mut k = Vec::new();
             if let Some(iface) = &r.interface {
@@ -1474,7 +1477,7 @@ fn request_payload_to_frame(p: &RequestPayload) -> Option<TtlvFrame> {
             }
             k
         }
-        // §6.1.48 Register — ObjectType + Attributes + the managed object,
+        // §6.1.50 Register — ObjectType + Attributes + the managed object,
         // wrapped per type (mirror of decode_register_req's six branches).
         RequestPayload::Register(r) => {
             let mut k = vec![
@@ -1559,9 +1562,9 @@ fn decode_request_payload(op: Operation, frame: &TtlvFrame) -> Result<RequestPay
         Operation::Decapsulate      => RequestPayload::Decapsulate(decode_decapsulate_req(children)?),
         Operation::Sign             => RequestPayload::Sign(decode_sign_req(children)?),
         Operation::SignatureVerify  => RequestPayload::SignatureVerify(decode_sigverify_req(children)?),
-        // P2.2 — §6.1.62 Validate (certificate-chain validation).
+        // P2.2 — §6.1.64 Validate (certificate-chain validation).
         Operation::Validate         => RequestPayload::Validate(decode_validate_req(children)?),
-        // P2.3 — §6.1.6 Certify / §6.1.50 Re-certify.
+        // P2.3 — §6.1.6 Certify / §6.1.52 Re-certify.
         Operation::Certify          => RequestPayload::Certify(decode_certify_req(children)?),
         Operation::ReCertify        => RequestPayload::ReCertify(decode_recertify_req(children)?),
         Operation::Interop          => RequestPayload::Interop(decode_interop_req(children)?),
@@ -1605,9 +1608,9 @@ fn decode_request_payload(op: Operation, frame: &TtlvFrame) -> Result<RequestPay
         Operation::SetEndpointRole  => {
             RequestPayload::SetEndpointRole(decode_set_endpoint_role_req(children)?)
         }
-        // K20 — §6.1.18 Derive Key.
+        // K20 — §6.1.19 Derive Key.
         Operation::DeriveKey        => RequestPayload::DeriveKey(decode_derive_key_req(children)?),
-        // K21 — §6.1.51 Re-key / §6.1.52 Re-key Key Pair.
+        // K21 — §6.1.53 Re-key / §6.1.54 Re-key Key Pair.
         Operation::ReKey            => RequestPayload::ReKey(decode_rekey_req(children)?),
         Operation::ReKeyKeyPair     => {
             RequestPayload::ReKeyKeyPair(decode_rekey_key_pair_req(children)?)
@@ -1623,9 +1626,9 @@ fn decode_request_payload(op: Operation, frame: &TtlvFrame) -> Result<RequestPay
         // `None` in `decode_request_batch_item` and the message gets
         // the `UnknownEnum` → InvalidMessage treatment.
         // K21 moved ReKey / ReKeyKeyPair out of this arm into real
-        // §6.1.51 / §6.1.52 decode routes above.
+        // §6.1.53 / §6.1.54 decode routes above.
         // Phase 4 moved Poll / Cancel / Process / QueryAsynchronousRequests
-        // out of this arm into real §6.1.43/§6.1.5/§6.1.44/§6.1.46 decode
+        // out of this arm into real §6.1.45/§6.1.5/§6.1.48/§6.1.48 decode
         // routes below. Notify / Put stay parked (Phase 5 — server-to-client,
         // spec-undefined transport).
         Operation::Poll             => RequestPayload::Poll(decode_poll_req(children)?),
@@ -1720,15 +1723,15 @@ fn response_payload_to_frame(payload: &ResponsePayload) -> TtlvFrame {
         ResponsePayload::GetUsageAllocation(r) => encode_uid_only_resp(&r.uid),
         ResponsePayload::GetConstraints(r)   => encode_get_constraints_resp(r),
         ResponsePayload::SetConstraints(_)   => vec![],
-        // §6.1.58 Table 429 — Set Defaults response payload is empty.
+        // §6.1.60 Table 429 — Set Defaults response payload is empty.
         ResponsePayload::SetDefaults(_)      => vec![],
         ResponsePayload::SetEndpointRole(r)  => vec![TtlvFrame::new(
             Tag(tags::EndpointRole),
             Value::Enumeration(r.endpoint_role.to_wire_value()),
         )],
-        // K20 — §6.1.18 Table 303: UID-only response payload.
+        // K20 — §6.1.19 Table 303: UID-only response payload.
         ResponsePayload::DeriveKey(r)        => encode_uid_only_resp(&r.uid),
-        // K21 — §6.1.51 Table 406: UID-only response payload.
+        // K21 — §6.1.53 Table 406: UID-only response payload.
         ResponsePayload::ReKey(r)            => encode_uid_only_resp(&r.uid),
         // K21 — §6.1.52 Table 411: distinct typed tags per half, same
         // shape as Create Key Pair (Private first — §6.1 preamble placeholder).
@@ -1754,7 +1757,7 @@ fn response_payload_to_frame(payload: &ResponsePayload) -> TtlvFrame {
                 Value::Enumeration(r.cancellation_result.to_wire_value()),
             ),
         ],
-        // §6.1.44 Table 379: empty response payload.
+        // §6.1.46 Table 379: empty response payload.
         ResponsePayload::Process(_r) => Vec::new(),
         // §6.1.46 Table 386: zero or more repeated Asynchronous Request
         // structures (§7.2 Table 453).
@@ -1951,7 +1954,7 @@ fn decode_create_key_pair_req(children: &[TtlvFrame]) -> Result<CreateKeyPairReq
                     }
                 }
             }
-            // `Seed` (0x4201C6) — KMIP 3.0 WD19 deterministic keygen.
+            // `Seed` (0x4201C6) — KMIP 3.0 CSD02 deterministic keygen.
             tags::PqcSeed => {
                 if let Value::ByteString(b) = &c.value {
                     seed = Some(b.clone());
@@ -1990,7 +1993,7 @@ fn decode_get_req(children: &[TtlvFrame]) -> Result<GetRequest, WireError> {
     let mut key_wrapping_specification = None;
     for c in children {
         match c.tag.0 {
-            // K8 — §6.1.23 requested output format. Kept as the raw
+            // K8 — §6.1.25 requested output format. Kept as the raw
             // codepoint: the Get handler owns the supported / 0x10
             // decision so the failure is a per-item KMIP error, not a
             // decode error.
@@ -2162,7 +2165,7 @@ fn decode_locate_req(children: &[TtlvFrame]) -> Result<LocateRequest, WireError>
     let mut storage_status_mask = None;
     for c in children {
         match c.tag.0 {
-            // KMIP 3.0 §6.1.32: Locate request body carries an `Attributes`
+            // KMIP 3.0 §6.1.34: Locate request body carries an `Attributes`
             // Structure whose children are direct typed tags used as
             // search filters.
             tags::Attributes => {
@@ -2219,6 +2222,9 @@ fn decode_revoke_req(children: &[TtlvFrame]) -> Result<RevokeRequest, WireError>
                         5 => RevocationReason::Superseded,
                         6 => RevocationReason::CessationOfOperation,
                         7 => RevocationReason::PrivilegeWithdrawn,
+                        8 => RevocationReason::CertificateHold,
+                        9 => RevocationReason::RemoveFromCrl,
+                        10 => RevocationReason::AaCompromise,
                         other => return Err(WireError::UnknownEnum { field: "Revocation Reason Code", value: other }),
                     };
                 }
@@ -2291,7 +2297,7 @@ fn decode_encrypt_req(children: &[TtlvFrame]) -> Result<EncryptRequest, WireErro
 }
 
 fn encode_encrypt_resp(r: &EncryptResponse) -> Vec<TtlvFrame> {
-    // Field order follows the §6.1.21 Encrypt response-payload table:
+    // Field order follows the §6.1.23 Encrypt response-payload table:
     // Unique Identifier, Data, IV/Counter/Nonce, Correlation Value,
     // Authenticated Encryption Tag. CS-BC-M-GCM-2 pair #111 pins the
     // IV-before-tag ordering when RandomIV generates both.
@@ -2374,9 +2380,9 @@ fn encode_decrypt_resp(r: &DecryptResponse) -> Vec<TtlvFrame> {
     ]
 }
 
-// ── Encapsulate / Decapsulate (KMIP 3.0 WD19) ───────────────────────────────
+// ── Encapsulate / Decapsulate (KMIP 3.0 CSD02) ───────────────────────────────
 
-/// Decode an `Encapsulate` request payload (KMIP 3.0 WD19):
+/// Decode an `Encapsulate` request payload (KMIP 3.0 CSD02):
 /// `{ UniqueIdentifier, CryptographicParameters? }` where the optional
 /// `CryptographicParameters` Structure nests the 32-byte
 /// `InputKeyMaterial` (0x4201C7, the deterministic coins `m`).
@@ -2389,7 +2395,7 @@ fn decode_encapsulate_req(children: &[TtlvFrame]) -> Result<EncapsulateRequest, 
             tags::CryptographicParameters => {
                 cp = Some(decode_cryptographic_parameters(c)?);
                 // InputKeyMaterial rides inside CryptographicParameters
-                // per the WD19 transcript; it is not a field of the
+                // per the CSD02 transcript; it is not a field of the
                 // CryptographicParameters struct, so pull it out here.
                 for cc in expect_structure(c, "Cryptographic Parameters")? {
                     if cc.tag.0 == tags::InputKeyMaterial {
@@ -2411,7 +2417,7 @@ fn decode_encapsulate_req(children: &[TtlvFrame]) -> Result<EncapsulateRequest, 
     Ok(EncapsulateRequest { uid, input_key_material, cryptographic_parameters: cp })
 }
 
-/// Encode an `Encapsulate` response payload (KMIP 3.0 WD19):
+/// Encode an `Encapsulate` response payload (KMIP 3.0 CSD02):
 /// `{ UniqueIdentifier (new shared-secret object), Data (ciphertext) }`.
 fn encode_encapsulate_resp(r: &EncapsulateResponse) -> Vec<TtlvFrame> {
     vec![
@@ -2420,7 +2426,7 @@ fn encode_encapsulate_resp(r: &EncapsulateResponse) -> Vec<TtlvFrame> {
     ]
 }
 
-/// Decode a `Decapsulate` request payload (KMIP 3.0 WD19):
+/// Decode a `Decapsulate` request payload (KMIP 3.0 CSD02):
 /// `{ UniqueIdentifier, Data (ciphertext), CryptographicParameters? }`.
 fn decode_decapsulate_req(children: &[TtlvFrame]) -> Result<DecapsulateRequest, WireError> {
     let uid = required_uid(children)?;
@@ -2440,7 +2446,7 @@ fn decode_decapsulate_req(children: &[TtlvFrame]) -> Result<DecapsulateRequest, 
     Ok(DecapsulateRequest { uid, data, cryptographic_parameters: cp })
 }
 
-/// Encode a `Decapsulate` response payload (KMIP 3.0 WD19):
+/// Encode a `Decapsulate` response payload (KMIP 3.0 CSD02):
 /// `{ UniqueIdentifier (new shared-secret object) }`.
 fn encode_decapsulate_resp(r: &DecapsulateResponse) -> Vec<TtlvFrame> {
     vec![TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString(r.uid.clone()))]
@@ -2494,7 +2500,7 @@ fn encode_sigverify_resp(r: &SignatureVerifyResponse) -> Vec<TtlvFrame> {
     ]
 }
 
-/// P2.2 — decode the §6.1.62 Validate Request Payload (Table 440).
+/// P2.2 — decode the §6.1.64 Validate Request Payload (Table 440).
 ///
 /// Each `Certificate` (0x420013) child is an outer Structure carrying a
 /// `Certificate Value` (0x42001e) ByteString of DER bytes — we pull the
@@ -2543,7 +2549,7 @@ fn decode_validate_req(children: &[TtlvFrame]) -> Result<ValidateRequest, WireEr
     Ok(ValidateRequest { certificates, uids, validity_date })
 }
 
-/// P2.2 — encode the §6.1.62 Validate Response Payload (Table 441):
+/// P2.2 — encode the §6.1.64 Validate Response Payload (Table 441):
 /// a single `Validity Indicator` (0x42009b) Enumeration.
 fn encode_validate_resp(r: &ValidateResponse) -> Vec<TtlvFrame> {
     vec![TtlvFrame::new(
@@ -2590,7 +2596,7 @@ fn decode_certify_req(children: &[TtlvFrame]) -> Result<CertifyRequest, WireErro
     Ok(req)
 }
 
-/// P2.3 — decode the §6.1.50 Re-certify Request Payload (Table 400).
+/// P2.3 — decode the §6.1.52 Re-certify Request Payload (Table 400).
 /// `Unique Identifier` (the existing Certificate) is REQUIRED; `Offset`
 /// is an Interval (seconds); the CSR / type / attributes mirror Certify.
 fn decode_recertify_req(children: &[TtlvFrame]) -> Result<ReCertifyRequest, WireError> {
@@ -2913,7 +2919,7 @@ fn decode_attribute_v3(frame: &TtlvFrame) -> Result<Option<Attribute>, WireError
                 Attribute::ObjectGroup(s.clone())
             } else { return Ok(None); }
         }
-        // K20 — Derive Key link pair (§4.35.5 / §6.1.18).
+        // K20 — Derive Key link pair (§4.35.5 / §6.1.19).
         tags::DerivationObjectLink => {
             if let Value::TextString(s) = &frame.value {
                 Attribute::DerivationBaseObjectLink(s.clone())
@@ -2924,7 +2930,7 @@ fn decode_attribute_v3(frame: &TtlvFrame) -> Result<Option<Attribute>, WireError
                 Attribute::DerivedObjectLink(s.clone())
             } else { return Ok(None); }
         }
-        // K21 — Re-key link pair (§6.1.51 / §6.1.52).
+        // K21 — Re-key link pair (§6.1.53 / §6.1.52).
         tags::ReplacedObjectLink => {
             if let Value::TextString(s) = &frame.value {
                 Attribute::ReplacedObjectLink(s.clone())
@@ -3052,7 +3058,7 @@ fn encode_pkcs11_resp(r: &Pkcs11Response) -> Vec<TtlvFrame> {
         out.push(TtlvFrame::new(Tag(tags::CorrelationValue), Value::ByteString(cv.clone())));
     }
     if let Some(op) = &r.output_parameters {
-        // KMIP 3.0 §6.1.42 PKCS#11 — `Output Parameters` is OPTIONAL.
+        // KMIP 3.0 §6.1.44 PKCS#11 — `Output Parameters` is OPTIONAL.
         // Emit only when non-empty; OASIS tests treat an empty body as
         // omission (PKCS11-M-1 explicitly checks this).
         if !op.is_empty() {
@@ -3069,9 +3075,9 @@ fn encode_pkcs11_resp(r: &Pkcs11Response) -> Vec<TtlvFrame> {
 // - CreateCredential §6.1.9  — CredentialType + Attributes + Credential? (Structure)
 // - CreateGroup      §6.1.10 — Attributes only
 // - CreateUser       §6.1.13 — Attributes only
-// - Log              §6.1.33 — LogMessage (TextString)
-// - Login            §6.1.34 — LeaseTime? + RequestCount? + UsageLimits?
-// - Logout           §6.1.35 — Ticket (TextString)
+// - Log              §6.1.35 — LogMessage (TextString)
+// - Login            §6.1.36 — LeaseTime? + RequestCount? + UsageLimits?
+// - Logout           §6.1.37 — Ticket (TextString)
 
 fn decode_attributes_block(frame: &TtlvFrame) -> Result<Vec<Attribute>, WireError> {
     let mut out = Vec::new();
@@ -3298,7 +3304,7 @@ fn decode_cryptographic_parameters(frame: &TtlvFrame) -> Result<CryptographicPar
             tags::SaltLength => {
                 cp.salt_length = Some(expect_integer(c, "Salt Length")?);
             }
-            // PQC signing fields (KMIP 3.0 WD19). Previously fell through the
+            // PQC signing fields (KMIP 3.0 CSD02). Previously fell through the
             // `_ => {}` arm and were silently dropped — now honored.
             tags::Deterministic => {
                 cp.deterministic = Some(expect_boolean(c, "Deterministic")?);
@@ -3319,7 +3325,7 @@ fn decode_cryptographic_parameters(frame: &TtlvFrame) -> Result<CryptographicPar
                     cp.random = Some(b.clone());
                 }
             }
-            // KMIP 3.0 WD19 §11.26 — disambiguates DHKEM/MLKEM/RSASVE for
+            // KMIP 3.0 CSD02 §11.26 — disambiguates DHKEM/MLKEM/RSASVE for
             // Encapsulate/Decapsulate (2026-07-05, classical-KEM agility).
             tags::KemAlgorithm => {
                 let v = expect_enum(c, "KEM Algorithm")?;
@@ -3412,7 +3418,7 @@ fn encode_hash_resp(r: &HashResponse) -> Vec<TtlvFrame> {
 //   a Structure containing a DeactivationReasonCode Enumeration.
 // - Check §6.1.7 — UID + UsageLimitsCount? + CryptographicUsageMask? + LeaseTime?
 //   Per spec the optional fields are NOT wrapped in an Attribute envelope.
-// - Discover Versions §6.1.20 — repeatable ProtocolVersion Structures.
+// - Discover Versions §6.1.21 — repeatable ProtocolVersion Structures.
 
 fn decode_deactivate_req(children: &[TtlvFrame]) -> Result<DeactivateRequest, WireError> {
     let uid = required_uid(children)?;
@@ -3554,7 +3560,7 @@ fn decode_create_split_key_req(children: &[TtlvFrame]) -> Result<CreateSplitKeyR
     })
 }
 
-/// `Join Split Key` request per §6.1.31 Table 343: ObjectType
+/// `Join Split Key` request per §6.1.33 Table 343: ObjectType
 /// (REQUIRED), UniqueIdentifier (REQUIRED, repeated — the shares to
 /// combine), Secret Data Type (optional), Attributes (optional),
 /// Protection Storage Masks (optional).
@@ -3613,7 +3619,7 @@ fn decode_join_split_key_req(children: &[TtlvFrame]) -> Result<JoinSplitKeyReque
 
 // ── K19 — Baseline client-to-server op codecs (§6.1.26/27/58/59) ────────────
 
-/// `Get Usage Allocation` request per §6.1.27 Table 329:
+/// `Get Usage Allocation` request per §6.1.29 Table 329:
 /// `Unique Identifier` (REQUIRED) + `Usage Limits Count` (REQUIRED,
 /// LongInteger per the §4.x Usage Limits attribute encoding).
 fn decode_get_usage_allocation_req(
@@ -3643,7 +3649,7 @@ fn decode_get_usage_allocation_req(
     Ok(GetUsageAllocationRequest { uid, usage_limits_count })
 }
 
-/// `Get Constraints` response per §6.1.26 Table 327 — one
+/// `Get Constraints` response per §6.1.28 Table 327 — one
 /// `Constraints` Structure (§7.7 Table 458) of repeated `Constraint`
 /// Structures (§7.6 Table 457: Object Types / Object Groups /
 /// Attributes, all optional).
@@ -3681,7 +3687,7 @@ fn encode_get_constraints_resp(r: &GetConstraintsResponse) -> Vec<TtlvFrame> {
     vec![TtlvFrame::new(Tag(tags::Constraints), Value::Structure(constraint_frames))]
 }
 
-/// `Set Constraints` request per §6.1.57 Table 427: one `Constraints`
+/// `Set Constraints` request per §6.1.59 Table 427: one `Constraints`
 /// Structure (§7.7 Table 458) of repeated `Constraint` Structures
 /// (§7.6 Table 457) — mirror of [`encode_get_constraints_resp`]'s
 /// output shape, since Set/Get Constraints carry the identical
@@ -3771,7 +3777,7 @@ fn decode_set_constraints_req(children: &[TtlvFrame]) -> Result<SetConstraintsRe
     Ok(SetConstraintsRequest { constraints })
 }
 
-/// K20 — `Derive Key` request per §6.1.18 Table 302: `Object Type`
+/// K20 — `Derive Key` request per §6.1.19 Table 302: `Object Type`
 /// (REQUIRED), `Unique Identifier` (REQUIRED, "MAY be repeated"),
 /// `Derivation Method` (REQUIRED Enumeration), `Derivation
 /// Parameters` (REQUIRED Structure), `Attributes` (REQUIRED).
@@ -3874,7 +3880,7 @@ fn decode_derivation_parameters(
     Ok(dp)
 }
 
-/// K21 — `Re-key` request per §6.1.51 Table 405: REQUIRED
+/// K21 — `Re-key` request per §6.1.53 Table 405: REQUIRED
 /// `Unique Identifier` (ID-placeholder form accepted), optional
 /// `Offset` (Interval) and `Attributes`. `Protection Storage Masks`
 /// is accepted-and-ignored (this server stores everything in
@@ -3901,7 +3907,7 @@ fn decode_rekey_req(children: &[TtlvFrame]) -> Result<ReKeyRequest, WireError> {
     Ok(ReKeyRequest { uid, offset, template_attribute })
 }
 
-/// K21 — `Re-key Key Pair` request per §6.1.52 Table 410: REQUIRED
+/// K21 — `Re-key Key Pair` request per §6.1.54 Table 410: REQUIRED
 /// `Unique Identifier`, optional `Offset` plus the same three
 /// attribute baskets as Create Key Pair (`Common` / `Private Key` /
 /// `Public Key` Attributes). The per-half Protection Storage Masks
@@ -3952,7 +3958,7 @@ fn decode_rekey_key_pair_req(
     })
 }
 
-/// `Set Defaults` request per §6.1.58 Table 428 — optional
+/// `Set Defaults` request per §6.1.60 Table 428 — optional
 /// `Defaults Information` Structure (§7.12 Table 464) of repeated
 /// `Object Defaults` Structures (§7.23 Table 475). Absent
 /// `Defaults Information` ⇒ `None` (= remove all Object Defaults).
@@ -4011,7 +4017,7 @@ fn decode_object_defaults(frame: &TtlvFrame) -> Result<ObjectDefaults, WireError
     Ok(ObjectDefaults { object_types, attributes })
 }
 
-/// `Set Endpoint Role` request per §6.1.59 Table 431 — one REQUIRED
+/// `Set Endpoint Role` request per §6.1.61 Table 431 — one REQUIRED
 /// `Endpoint Role` Enumeration (Client = 0x01, Server = 0x02 per the
 /// OASIS extraction).
 fn decode_set_endpoint_role_req(
@@ -4068,11 +4074,11 @@ fn encode_discover_versions_resp(r: &DiscoverVersionsResponse) -> Vec<TtlvFrame>
 //
 // Spec mapping:
 //
-// - Register §6.1.48 / Table 393 — Request: ObjectType + Attributes +
+// - Register §6.1.50 / Table 393 — Request: ObjectType + Attributes +
 //   Any Object + ProtectionStorageMasks?  → Response: UID
-// - Import   §6.1.29 / Table 337 — Request: UID + ObjectType +
+// - Import   §6.1.31 / Table 337 — Request: UID + ObjectType +
 //   ReplaceExisting? + KeyWrapType? + Attributes + Any Object → Response: UID
-// - Export   §6.1.22 / Table 316 — Request: UID + format options →
+// - Export   §6.1.24 / Table 316 — Request: UID + format options →
 //   Response: ObjectType + UID + Attributes + Any Object
 //
 // "Any Object (Section 2)" resolves to one of SymmetricKey / PublicKey /
@@ -4365,7 +4371,7 @@ fn decode_key_block(frame: &TtlvFrame) -> Result<KeyBlock, WireError> {
                 length = expect_integer(c, "Cryptographic Length")? as u32;
             }
             tags::KeyValue => key_value_frame = Some(c),
-            // K17 — inbound `KeyWrappingData` (Register §6.1.48): the
+            // K17 — inbound `KeyWrappingData` (Register §6.1.50): the
             // KeyValue is AES-KW-wrapped ciphertext, and this structure
             // (same shape as a KeyWrappingSpecification) names the KEK.
             tags::KeyWrappingData => {
@@ -4561,7 +4567,7 @@ pub fn decode_transparent_rsa_public_key(
     Ok(f)
 }
 
-/// Encode an Export response payload per §6.1.22 / Table 317:
+/// Encode an Export response payload per §6.1.24 / Table 317:
 /// ObjectType + UID + Attributes (Structure) + Any Object (SymmetricKey
 /// / PublicKey / PrivateKey wrapping a KeyBlock).
 fn encode_export_resp(r: &ExportResponse) -> Vec<TtlvFrame> {
@@ -4574,7 +4580,7 @@ fn encode_export_resp(r: &ExportResponse) -> Vec<TtlvFrame> {
         Value::Structure(r.attributes.iter().map(encode_attribute_v3).collect()),
     ));
     if let Some(kb) = &r.managed_object {
-        // Export does not emit the WD19 SeedPrivateKey form (it returns
+        // Export does not emit the CSD02 SeedPrivateKey form (it returns
         // the stored Raw/transparent material), so no seed is threaded.
         let kb_frame = encode_key_block(kb, None);
         let managed_object_tag = match r.object_type {
@@ -4599,7 +4605,7 @@ fn encode_key_block(kb: &KeyBlock, seed: Option<&[u8]>) -> TtlvFrame {
         TtlvFrame::new(Tag(tags::KeyValue), Value::ByteString(kb.key_value.clone()))
     } else {
         let key_material = match kb.key_format_type {
-            // KMIP 3.0 WD19 §3.4 — SeedPrivateKey KeyMaterial is a
+            // KMIP 3.0 CSD02 §3.4 — SeedPrivateKey KeyMaterial is a
             // Structure of `Seed` (the generation seed) + `Key` (the raw
             // private bytes), in that order.
             KeyFormatType::SeedPrivateKey => {
@@ -4682,9 +4688,9 @@ fn encode_key_block(kb: &KeyBlock, seed: Option<&[u8]>) -> TtlvFrame {
 //
 // - AddAttribute     §6.1.2  / Table 254 — UID + NewAttribute (Structure)
 // - AdjustAttribute  §6.1.3  / Table 257 — UID + AttributeReference + AdjustmentType + AdjustmentValue?
-// - DeleteAttribute  §6.1.17 / Table 301 — UID + CurrentAttribute? + AttributeReference?
-// - ModifyAttribute  §6.1.38 / Table 364 — UID + CurrentAttribute? + NewAttribute
-// - SetAttribute     §6.1.56 / Table 424 — UID + NewAttribute
+// - DeleteAttribute  §6.1.18 / Table 301 — UID + CurrentAttribute? + AttributeReference?
+// - ModifyAttribute  §6.1.40 / Table 364 — UID + CurrentAttribute? + NewAttribute
+// - SetAttribute     §6.1.58 / Table 424 — UID + NewAttribute
 //
 // All responses: UID only — emitted via `encode_uid_only_resp`.
 
@@ -5442,7 +5448,7 @@ fn expect_byte_string(frame: &TtlvFrame, name: &'static str) -> Result<Vec<u8>, 
 }
 
 /// Phase 4 — every `Poll` / `Cancel` / `Process` request payload is
-/// just `{ Asynchronous Correlation Value }` (§6.1.43/§6.1.5/§6.1.44
+/// just `{ Asynchronous Correlation Value }` (§6.1.45/§6.1.5/§6.1.46
 /// Table 376/261/378, all identical shapes).
 fn required_asynchronous_correlation_value(children: &[TtlvFrame]) -> Result<Vec<u8>, WireError> {
     for c in children {
@@ -5546,7 +5552,7 @@ mod tests {
         }
     }
 
-    /// K19 — Get Constraints response shape per §6.1.26 Table 327 +
+    /// K19 — Get Constraints response shape per §6.1.28 Table 327 +
     /// §7.6/§7.7: one `Constraints` Structure (0x420168) of repeated
     /// `Constraint` Structures (0x420169) carrying `Object Types`
     /// (0x420167, repeated Object Type Enumerations) and `Attributes`
@@ -5599,7 +5605,7 @@ mod tests {
     /// `Defaults Information` decodes to `None` (= remove all).
     #[test]
     fn k20_derive_key_request_decode_forms() {
-        // Full §6.1.18 Table 302 payload — every field decodes; the
+        // Full §6.1.19 Table 302 payload — every field decodes; the
         // repeated `Derivation Data` ("May be repeated", Table 465)
         // concatenates in wire order.
         let full = vec![
@@ -5855,7 +5861,7 @@ mod tests {
         }
     }
 
-    /// P2.2 — §6.1.62 Validate request decodes (inline Certificate DER +
+    /// P2.2 — §6.1.64 Validate request decodes (inline Certificate DER +
     /// stored UID + Validity Date) and the response (Validity Indicator)
     /// encodes, proving the codec round-trips both directions.
     #[test]
@@ -5948,7 +5954,7 @@ mod tests {
         assert!(bytes.len() >= 8);
     }
 
-    /// P2.3 — §6.1.6 Certify + §6.1.50 Re-certify request/response wire
+    /// P2.3 — §6.1.6 Certify + §6.1.52 Re-certify request/response wire
     /// round-trip. Certify carries a Certificate Request Type + inline
     /// CSR ByteString; Re-certify carries a UID + Offset Interval. Both
     /// responses encode the new Certificate's UID.
@@ -6333,7 +6339,7 @@ mod tests {
             (F::TransparentEcPublicKey, 0x15),
             (F::Pkcs12, 0x16),
             (F::Pkcs10, 0x17),
-            // KMIP 3.0 WD19 §3.4 — seed-based private-key format.
+            // KMIP 3.0 CSD02 §3.4 — seed-based private-key format.
             (F::SeedPrivateKey, 0x18),
         ] {
             assert_eq!(variant as u32, code, "{variant:?}");
@@ -6358,7 +6364,7 @@ mod tests {
 
     #[test]
     fn k17_decode_key_block_captures_inbound_key_wrapping_data() {
-        // Register §6.1.48 — KeyValue is a leaf ByteString (the AES-KW
+        // Register §6.1.50 — KeyValue is a leaf ByteString (the AES-KW
         // ciphertext) and KeyWrappingData names the KEK. The decoder
         // must capture both verbatim, including EncodingOption.
         let frame = TtlvFrame::new(Tag(tags::KeyBlock), Value::Structure(vec![
@@ -6409,6 +6415,51 @@ mod tests {
         assert_eq!(ttlv_decode_key_value(&encoded).unwrap(), material);
         // Garbage fails decode instead of yielding fake material.
         assert!(ttlv_decode_key_value(&[0xde, 0xad, 0xbe, 0xef]).is_err());
+    }
+
+    fn revoke_req_frame(reason_code: u32) -> Vec<TtlvFrame> {
+        vec![
+            TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString("u".into())),
+            TtlvFrame::new(
+                Tag(tags::RevocationReason),
+                Value::Structure(vec![TtlvFrame::new(
+                    Tag(tags::RevocationReasonCode),
+                    Value::Enumeration(reason_code),
+                )]),
+            ),
+        ]
+    }
+
+    /// CSD02 Table 598's 3 new Revocation Reason Code members (0x08-0x0A —
+    /// CertificateHold/RemoveFromCrl/AaCompromise, absent from CSD01) decode
+    /// correctly and round-trip back through the encoder unchanged.
+    #[test]
+    fn revoke_req_decodes_csd02_revocation_reasons() {
+        for (code, expected) in [
+            (8, RevocationReason::CertificateHold),
+            (9, RevocationReason::RemoveFromCrl),
+            (10, RevocationReason::AaCompromise),
+        ] {
+            let req = decode_revoke_req(&revoke_req_frame(code)).unwrap();
+            assert_eq!(req.reason, expected, "decoding code {code}");
+            assert_eq!(
+                revocation_reason_code(req.reason),
+                code,
+                "re-encoding {expected:?} must reproduce the same wire value"
+            );
+        }
+    }
+
+    /// The boundary past the last real member (0x0A AaCompromise) must
+    /// still be rejected, not silently coerced — same discipline as
+    /// `k8_decode_key_block_rejects_unknown_format_no_raw_coercion` below.
+    #[test]
+    fn revoke_req_rejects_unknown_revocation_reason_past_csd02_range() {
+        let err = decode_revoke_req(&revoke_req_frame(11)).unwrap_err();
+        assert!(
+            matches!(err, WireError::UnknownEnum { field: "Revocation Reason Code", value: 11 }),
+            "got {err:?}"
+        );
     }
 
     #[test]

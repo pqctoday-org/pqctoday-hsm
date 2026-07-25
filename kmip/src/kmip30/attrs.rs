@@ -106,7 +106,7 @@ impl ObjectType {
 /// KMIP managed-object lifecycle state.
 ///
 /// Transitions in [`Self::can_transition_to`] are authoritative against the
-/// KMIP 3.0 §3.2 numbered state diagram and the §6.1.19 Destroy constraint;
+/// KMIP 3.0 §3.2 numbered state diagram and the §6.1.20 Destroy constraint;
 /// `docs/IMPLEMENTATION_PLAN.md` §3.4 mirrors the same edges. Phase 6
 /// ([`crate::store::lifecycle`]) owns the enforcement; this module just
 /// defines the type.
@@ -144,7 +144,7 @@ impl State {
     /// Edges are taken verbatim from the KMIP 3.0 §3.2 numbered state
     /// diagram (transitions cross-referenced in §4 Initial/Activation/
     /// Deactivation/Destroy/Compromise Date attribute rules) and the
-    /// §6.1.19 Destroy constraint:
+    /// §6.1.20 Destroy constraint:
     ///
     /// - **PreActive** → {Active (t1 activation), Compromised (t3),
     ///   Destroyed (t2)} — there is **no** PreActive→Deactivated edge;
@@ -172,7 +172,12 @@ impl State {
 // ── RevocationReason (KMIP 3.0 §10.2 Revocation Reason Code enum) ──────────
 
 /// `Revocation Reason Code` — required field on `Revoke` op requests.
-/// Subset shown is the one exercised by the v0.1 op set; spec has more.
+/// CertificateHold/RemoveFromCrl/AaCompromise (0x08-0x0A) are new in CSD02
+/// (Table 598 §11.50) — absent from CSD01. None of them join the
+/// `KeyCompromise`/`CaCompromise` "Compromised" family the §3 state-machine
+/// prose defines (verified against CSD02 §3 transitions #3/#5/#8/#10, which
+/// name only Key Compromise / CA Compromise) — informational reason codes,
+/// no new state-transition semantics.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum RevocationReason {
     Unspecified           = 0x01,
@@ -182,6 +187,9 @@ pub enum RevocationReason {
     Superseded            = 0x05,
     CessationOfOperation  = 0x06,
     PrivilegeWithdrawn    = 0x07,
+    CertificateHold       = 0x08,
+    RemoveFromCrl         = 0x09,
+    AaCompromise          = 0x0a,
 }
 
 impl RevocationReason {
@@ -398,7 +406,7 @@ pub enum Attribute {
     DerivedObjectLink(String),
     /// `Replaced Object Link` (0x42019b) — K21: on the replacement
     /// object created by Re-key / Re-key Key Pair, points at the
-    /// existing (replaced) object: §6.1.51 "For the replacement key,
+    /// existing (replaced) object: §6.1.53 "For the replacement key,
     /// the server SHALL create a Replaced Object Link attribute
     /// pointing to the existing key."
     ReplacedObjectLink(String),

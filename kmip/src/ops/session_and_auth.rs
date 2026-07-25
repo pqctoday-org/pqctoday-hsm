@@ -13,9 +13,9 @@
 //! - CreateCredential §6.1.9  / Tbl 276
 //! - CreateGroup      §6.1.10 / Tbl 279
 //! - CreateUser       §6.1.13 / Tbl 289
-//! - Log              §6.1.33 / Tbl 349
-//! - Login            §6.1.34 / Tbl 352
-//! - Logout           §6.1.35 / Tbl 355
+//! - Log              §6.1.35 / Tbl 349
+//! - Login            §6.1.36 / Tbl 352
+//! - Logout           §6.1.37 / Tbl 355
 
 use std::collections::HashMap;
 use time::OffsetDateTime;
@@ -143,7 +143,7 @@ pub fn create_user(
 // ── Log ────────────────────────────────────────────────────────────────────
 
 pub fn log(deps: &Deps, req: LogRequest, correlation_id: &str) -> Result<LogResponse> {
-    // Per §6.1.33: forward the message to the server log. We emit an
+    // Per §6.1.35: forward the message to the server log. We emit an
     // audit event with the message — the ring buffer + JSONL sink
     // both capture it.
     emit_request(deps, correlation_id, "Log", format!("msg={:?}", req.message));
@@ -160,7 +160,7 @@ pub fn login(
     correlation_id: &str,
 ) -> Result<LoginResponse> {
     emit_request(deps, correlation_id, "Login", String::new());
-    // K14 — KMIP 3.0 §6.1.34: when a credential store is configured,
+    // K14 — KMIP 3.0 §6.1.36: when a credential store is configured,
     // a ticket is only issued to a request that authenticated. The
     // KMIP 3.0 Login payload carries no Credential (Table 350 lists
     // only LeaseTime / RequestCount / UsageLimits) — the credential
@@ -217,7 +217,7 @@ pub fn login(
 
 pub fn logout(deps: &Deps, req: LogoutRequest, correlation_id: &str) -> Result<LogoutResponse> {
     emit_request(deps, correlation_id, "Logout", String::new());
-    // KMIP 3.0 §6.1.35 error table: an unknown/already-invalidated
+    // KMIP 3.0 §6.1.37 error table: an unknown/already-invalidated
     // ticket is `Invalid Ticket`, not a silent no-op success.
     let removed = deps
         .sessions

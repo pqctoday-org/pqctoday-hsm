@@ -72,7 +72,7 @@ impl DenyReason {
 /// policy can transparently mandate e.g. AES-GCM, RSA-OAEP, or deterministic
 /// ML-DSA with zero application change. Values are KMIP enum codepoints
 /// (HashingAlgorithm / BlockCipherMode / PaddingMethod); `deterministic` is the
-/// WD19 PQC flag. Parallel to `Decision::Allow::algorithm_override`, but for
+/// CSD02 PQC flag. Parallel to `Decision::Allow::algorithm_override`, but for
 /// the mechanism dimension.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CpOverride {

@@ -45,7 +45,7 @@ pub struct Identity {
 }
 
 /// A live `Login`-issued session, keyed by the ticket's `Ticket Value`
-/// bytes in [`crate::ops::Deps::sessions`]. KMIP 3.0 §6.1.34: "allow
+/// bytes in [`crate::ops::Deps::sessions`]. KMIP 3.0 §6.1.36: "allow
 /// future requests to be authenticated using a ticket" — this is the
 /// server-side half of that promise; `Logout` removes the entry,
 /// `expires_at` (from the Login request's `Lease Time`, when supplied)
