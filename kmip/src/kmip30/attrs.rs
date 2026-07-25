@@ -106,7 +106,7 @@ impl ObjectType {
 /// KMIP managed-object lifecycle state.
 ///
 /// Transitions in [`Self::can_transition_to`] are authoritative against the
-/// KMIP 3.0 §3.2 numbered state diagram and the §6.1.19 Destroy constraint;
+/// KMIP 3.0 §3.2 numbered state diagram and the §6.1.20 Destroy constraint;
 /// `docs/IMPLEMENTATION_PLAN.md` §3.4 mirrors the same edges. Phase 6
 /// ([`crate::store::lifecycle`]) owns the enforcement; this module just
 /// defines the type.
@@ -144,7 +144,7 @@ impl State {
     /// Edges are taken verbatim from the KMIP 3.0 §3.2 numbered state
     /// diagram (transitions cross-referenced in §4 Initial/Activation/
     /// Deactivation/Destroy/Compromise Date attribute rules) and the
-    /// §6.1.19 Destroy constraint:
+    /// §6.1.20 Destroy constraint:
     ///
     /// - **PreActive** → {Active (t1 activation), Compromised (t3),
     ///   Destroyed (t2)} — there is **no** PreActive→Deactivated edge;
@@ -406,7 +406,7 @@ pub enum Attribute {
     DerivedObjectLink(String),
     /// `Replaced Object Link` (0x42019b) — K21: on the replacement
     /// object created by Re-key / Re-key Key Pair, points at the
-    /// existing (replaced) object: §6.1.51 "For the replacement key,
+    /// existing (replaced) object: §6.1.53 "For the replacement key,
     /// the server SHALL create a Replaced Object Link attribute
     /// pointing to the existing key."
     ReplacedObjectLink(String),

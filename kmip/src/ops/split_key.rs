@@ -1,4 +1,4 @@
-//! KMIP 3.0 §6.1.12 **Create Split Key** / §6.1.31 **Join Split Key**
+//! KMIP 3.0 §6.1.12 **Create Split Key** / §6.1.33 **Join Split Key**
 //! (Phase 3.3).
 //!
 //! The engine has no secret-sharing primitive of its own to route

@@ -78,7 +78,7 @@ pub use ops::{
     SignatureVerifyRequest, SignatureVerifyResponse,
     SignRekeyInfo, SignRequest, SignResponse,
     ValidateRequest, ValidateResponse,
-    // P2.3 — Certify (§6.1.6) / Re-certify (§6.1.50).
+    // P2.3 — Certify (§6.1.6) / Re-certify (§6.1.52).
     CertificateRequestType,
     CertifyRequest, CertifyResponse,
     ReCertifyRequest, ReCertifyResponse,
@@ -89,10 +89,10 @@ pub use ops::{
     SetConstraintsRequest, SetConstraintsResponse,
     SetDefaultsRequest, SetDefaultsResponse,
     SetEndpointRoleRequest, SetEndpointRoleResponse,
-    // K20 — Derive Key (§6.1.18 / §7.13 / §11.15).
+    // K20 — Derive Key (§6.1.19 / §7.13 / §11.15).
     DerivationMethod, DerivationParameters,
     DeriveKeyRequest, DeriveKeyResponse,
-    // K21 — Re-key / Re-key Key Pair (§6.1.51 / §6.1.52).
+    // K21 — Re-key / Re-key Key Pair (§6.1.53 / §6.1.54).
     ReKeyKeyPairRequest, ReKeyKeyPairResponse, ReKeyRequest, ReKeyResponse,
     // Phase 4 — asynchronous subsystem (§6.1.5/§6.1.43/§6.1.44/§6.1.46).
     PollRequest,

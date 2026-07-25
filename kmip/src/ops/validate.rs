@@ -1,4 +1,4 @@
-//! KMIP 3.0 §6.1.62 **Validate** operation — certificate-chain validation.
+//! KMIP 3.0 §6.1.64 **Validate** operation — certificate-chain validation.
 //!
 //! > "This operation requests the server to validate a certificate chain
 //! > and return information on its validity."

@@ -201,7 +201,7 @@ OASIS corpus shape**, not server-tracked state
 | Attribute | Emitted value | Why |
 |---|---|---|
 | `Object Class` | `"User"` (unless explicitly set) | Baseline corpus expects `User` on every test-created object |
-| `Lease Time` | `3600` s (unless explicitly set) | BL-M-14 / AKLC-O-1 / SKLC-O-1 pin 3600 on fresh keys; also the real cap `Obtain Lease` (§6.1.40, Phase 3.1) grants against |
+| `Lease Time` | `3600` s (unless explicitly set) | BL-M-14 / AKLC-O-1 / SKLC-O-1 pin 3600 on fresh keys; also the real cap `Obtain Lease` (§6.1.42, Phase 3.1) grants against |
 | `Protection Storage Mask` | `0x01` (Software) | BL-M-14 / SKLC-O-1 / AKLC-O-1 step #3 pin Software |
 | `Key Format Type` | `Raw` (0x01) when the record carries none | §6.2 default for Create/CreateKeyPair (no KeyBlock); SKLC-O-1 step #3 |
 
@@ -228,8 +228,8 @@ FFI/native byte-identical output) rather than corpus replay.
 
 ### 4.4 Asynchronous processing: real, not a stub (Phase 4)
 
-`Poll` / `Cancel` / `Process` / `Query Asynchronous Requests` (§6.1.43,
-§6.1.5, §6.1.44, §6.1.46) are backed by a genuine job store and
+`Poll` / `Cancel` / `Process` / `Query Asynchronous Requests` (§6.1.45,
+§6.1.5, §6.1.48, §6.1.48) are backed by a genuine job store and
 executor, not a canned "always pending" or "always complete" response.
 A `Mandatory`-async request against an eligible operation enqueues a
 real job (keyed by a server-generated Asynchronous Correlation Value)
@@ -249,7 +249,7 @@ per-stage behavior.
 
 ### 4.5 Split Key: real secret-sharing math, not a placeholder (Phase 3.3)
 
-`Create Split Key` / `Join Split Key` (§6.1.12, §6.1.31) implement all
+`Create Split Key` / `Join Split Key` (§6.1.12, §6.1.33) implement all
 four §11.54 methods from spec (XOR, Polynomial Sharing GF(2⁸)/GF(2¹⁶)/
 Prime Field) in the engine layer, reachable only via opaque PKCS#11
 object handles — the KMIP server never sees a raw secret byte, split or
@@ -280,7 +280,7 @@ own 13-item list rather than approximated:
 | 1 | KMIP Server Implementation Conformance clauses | Met — the dispatcher/codec/op-handler layers below are the evidence |
 | 2–3 | System/User Objects: User, Group, Password Credential, Certificate | **Met** (Phase 6.1 correction — these were genuinely implemented all along via `CreateUser`/`CreateGroup`/`CreateCredential`; a stale Query-advertisement doc comment had mislabeled them "unimplemented" since before this server could actually create them) |
 | 4–8, 11–12 | Attribute/Message/Object/Operation data structures, message protocols | Met — evidenced by §2 codec conformance + §4 dispatcher conformance |
-| 9 | 32 named Client-to-Server Operations (Activate…Set Endpoint Role) | **Met** — every one of the 32 is a real, `HANDLED_OPERATIONS` handler. `Set Endpoint Role` itself accepts the identity request (role=Server) and rejects the actual §6.2 role switch with `Feature Not Supported (0x08)` per the §6.1.59.1 error table — this server has no client-mode machinery, which is the honest boundary of what "met" means here |
+| 9 | 32 named Client-to-Server Operations (Activate…Set Endpoint Role) | **Met** — every one of the 32 is a real, `HANDLED_OPERATIONS` handler. `Set Endpoint Role` itself accepts the identity request (role=Server) and rejects the actual §6.2 role switch with `Feature Not Supported (0x08)` per the §6.1.61.1 error table — this server has no client-mode machinery, which is the honest boundary of what "met" means here |
 | 10 | 5 named Server-to-Client Operations (Discover Versions, Notify, Put, Query, Set Endpoint Role, all issued *by the server*) | **Not met — the only unmet condition.** No server-initiated outbound channel exists; §6.2.2/§6.2.3 themselves leave the transport "unspecified", so there is no wire shape to build against yet. Deliberately parked as `HONEST_MAXIMUM_PLAN.md` Phase 5 |
 | 13 | Optional non-contradicting extensions | N/A (optional) |
 

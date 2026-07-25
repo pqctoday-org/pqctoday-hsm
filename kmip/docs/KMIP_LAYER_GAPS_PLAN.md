@@ -234,7 +234,7 @@ actually succeeds at Plane 2, matching what the policy layer already allows.
 
 Needs an actual Diffie-Hellman **operation**, not just keygen:
 
-- Implement `DeriveKey`'s `Asymmetric Key` method (§6.1.18.1 Table 304) —
+- Implement `DeriveKey`'s `Asymmetric Key` method (§6.1.19.1 Table 304) —
   given a private key UID + a peer public value, perform ECDH/X25519/X448
   agreement and return the shared secret as a `Secret Data`/`Symmetric Key`
   object per the request's `object_type`. `rust/`'s `CKM_ECDH1_DERIVE` /

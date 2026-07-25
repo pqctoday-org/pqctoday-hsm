@@ -124,7 +124,7 @@ pub fn dispatch_with_transport_identity(
     // moved from a single whole-batch gate here into per-item logic in
     // `dispatch_one`: each batch item can be a different operation, and
     // Poll/Cancel/Process/Query Asynchronous Requests themselves can
-    // never be asynchronous (§6.1.43/§6.1.5/§6.1.44 each say so
+    // never be asynchronous (§6.1.45/§6.1.5/§6.1.48 each say so
     // explicitly), so a blanket batch-level check was too coarse once
     // the server gained real asynchronous capability. `Optional` /
     // `Prohibited` / absent all proceed synchronously, unchanged.
@@ -406,18 +406,18 @@ pub const HANDLED_OPERATIONS: &[crate::kmip30::Operation] = {
         Op::CreateCredential, Op::CreateGroup, Op::CreateUser,
         Op::Log, Op::Login, Op::Logout,
         Op::RNGRetrieve, Op::RNGSeed, Op::Pkcs11,
-        // K19 — Baseline client-to-server ops (§6.1.26/27/58/59).
+        // K19 — Baseline client-to-server ops (§6.1.28/27/58/59).
         Op::GetUsageAllocation, Op::GetConstraints, Op::SetConstraints,
         Op::SetDefaults, Op::SetEndpointRole,
-        // K20 — §6.1.18 Derive Key.
+        // K20 — §6.1.19 Derive Key.
         Op::DeriveKey,
-        // K21 — §6.1.51 Re-key / §6.1.52 Re-key Key Pair.
+        // K21 — §6.1.53 Re-key / §6.1.54 Re-key Key Pair.
         Op::ReKey, Op::ReKeyKeyPair,
-        // P2.2 — §6.1.62 Validate (certificate-chain validation).
+        // P2.2 — §6.1.64 Validate (certificate-chain validation).
         Op::Validate,
-        // P2.3 — §6.1.6 Certify / §6.1.50 Re-certify (PQC-capable CA).
+        // P2.3 — §6.1.6 Certify / §6.1.52 Re-certify (PQC-capable CA).
         Op::Certify, Op::ReCertify,
-        // Phase 4 — asynchronous subsystem (§6.1.43/§6.1.5/§6.1.44/§6.1.46).
+        // Phase 4 — asynchronous subsystem (§6.1.45/§6.1.5/§6.1.48/§6.1.48).
         Op::Poll, Op::Cancel, Op::Process, Op::QueryAsynchronousRequests,
     ]
 };
@@ -445,7 +445,7 @@ fn dispatch_one(
         }
     };
 
-    // Async subsystem — §6.1.43 `Poll` never runs through the normal
+    // Async subsystem — §6.1.45 `Poll` never runs through the normal
     // Success/Failed handler wrapping below: its response impersonates
     // whatever op it's polling for ("SHALL be identical to the response
     // that would have been sent if the operation had completed
@@ -457,7 +457,7 @@ fn dispatch_one(
 
     // Async subsystem — KMIP 3.0 §8.1.2 `Asynchronous Indicator =
     // Mandatory`. Poll/Cancel/Process/QueryAsynchronousRequests are
-    // themselves never asynchronous (§6.1.5/§6.1.44/§6.1.46 all say so
+    // themselves never asynchronous (§6.1.5/§6.1.48/§6.1.48 all say so
     // explicitly) and Query/DiscoverVersions/Ping are trivial
     // negotiation ops not worth deferring — every other handled op is
     // eligible (`is_async_eligible`). An eligible op is enqueued as a
@@ -675,7 +675,7 @@ fn run_async_job_eagerly(
     job.mark_completed(outcome);
 }
 
-/// Async subsystem — §6.1.43 `Poll`. Looks up the job by its
+/// Async subsystem — §6.1.45 `Poll`. Looks up the job by its
 /// Asynchronous Correlation Value:
 /// - unknown value → `OperationFailed / Invalid Asynchronous
 ///   Correlation Value`, echoing `Poll` itself as the operation.
@@ -758,10 +758,10 @@ fn newly_created_uids(payload: &ResponsePayload) -> Vec<String> {
         ResponsePayload::CreateCredential(r) => vec![r.uid.clone()],
         ResponsePayload::CreateGroup(r) => vec![r.uid.clone()],
         ResponsePayload::CreateUser(r) => vec![r.uid.clone()],
-        // K20 — the derived object is freshly minted (§6.1.18).
+        // K20 — the derived object is freshly minted (§6.1.19).
         ResponsePayload::DeriveKey(r) => vec![r.uid.clone()],
         // K21 — the replacement objects are freshly minted
-        // (§6.1.51 / §6.1.52); Undo deletes them.
+        // (§6.1.53 / §6.1.52); Undo deletes them.
         ResponsePayload::ReKey(r) => vec![r.uid.clone()],
         ResponsePayload::ReKeyKeyPair(r) => {
             vec![r.private_key_uid.clone(), r.public_key_uid.clone()]
@@ -841,7 +841,7 @@ fn substitute_id_placeholder(
         RequestPayload::Decapsulate(r)     => fix(&mut r.uid, live, &mut missing),
         RequestPayload::Sign(r)            => fix(&mut r.uid, live, &mut missing),
         RequestPayload::SignatureVerify(r) => fix(&mut r.uid, live, &mut missing),
-        // P2.2 — Validate carries a repeatable UID list (§6.1.62).
+        // P2.2 — Validate carries a repeatable UID list (§6.1.64).
         RequestPayload::Validate(r) => {
             for uid in &mut r.uids { fix(uid, live, &mut missing); }
         }
@@ -859,11 +859,11 @@ fn substitute_id_placeholder(
         RequestPayload::Mac(r)             => fix(&mut r.uid, live, &mut missing),
         RequestPayload::MacVerify(r)       => fix(&mut r.uid, live, &mut missing),
         RequestPayload::GetUsageAllocation(r) => fix(&mut r.uid, live, &mut missing),
-        // K20 — Derive Key carries a repeatable UID list (§6.1.18).
+        // K20 — Derive Key carries a repeatable UID list (§6.1.19).
         RequestPayload::DeriveKey(r) => {
             for uid in &mut r.uids { fix(uid, live, &mut missing); }
         }
-        // K21 — §6.1.51 / §6.1.52 Re-key targets.
+        // K21 — §6.1.53 / §6.1.52 Re-key targets.
         RequestPayload::ReKey(r)           => fix(&mut r.uid, live, &mut missing),
         RequestPayload::ReKeyKeyPair(r)    => fix(&mut r.uid, live, &mut missing),
         // P2.3 — Certify MAY name a PublicKey by UID (Option); Re-certify
@@ -882,7 +882,7 @@ fn substitute_id_placeholder(
 /// After a successful op, refresh the per-batch ID Placeholder with
 /// the most-recently produced UID per the KMIP 3.0 §6.1 preamble.
 fn update_id_placeholder(state: &mut BatchState, payload: &ResponsePayload) {
-    // §6.1.32 Locate is the one op the preamble gives asymmetric
+    // §6.1.34 Locate is the one op the preamble gives asymmetric
     // treatment: exactly one match sets the placeholder, but zero or
     // more-than-one SHALL EMPTY it — "This ensures that these batched
     // operations SHALL proceed only if a single object is returned by
@@ -979,7 +979,7 @@ fn handle_payload(
             ResponsePayload::SignatureVerify(signature_verify(deps, r, auth, correlation_id)?)
         }
         RequestPayload::Validate(r) => ResponsePayload::Validate(validate(deps, r, auth, correlation_id)?),
-        // P2.3 — §6.1.6 Certify / §6.1.50 Re-certify (PQC-capable CA).
+        // P2.3 — §6.1.6 Certify / §6.1.52 Re-certify (PQC-capable CA).
         // Ungated since WP4 — pure Rust (`spki_verify` + the engine),
         // dispatched on wasm32 the same as native; no more `not(native)`
         // OperationNotSupported fallback for these three.
@@ -1054,7 +1054,7 @@ fn handle_payload(
         RequestPayload::DeriveKey(r) => {
             ResponsePayload::DeriveKey(derive_key(deps, r, auth, correlation_id)?)
         }
-        // K21 — §6.1.51 Re-key / §6.1.52 Re-key Key Pair.
+        // K21 — §6.1.53 Re-key / §6.1.54 Re-key Key Pair.
         RequestPayload::ReKey(r) => ResponsePayload::ReKey(rekey(deps, r, auth, correlation_id)?),
         RequestPayload::ReKeyKeyPair(r) => {
             ResponsePayload::ReKeyKeyPair(rekey_key_pair(deps, r, auth, correlation_id)?)
@@ -1627,7 +1627,7 @@ mod tests {
 
     // ── K19 — Baseline client-to-server ops through real wire bytes ────
 
-    /// K19 — Get Usage Allocation (§6.1.27) end-to-end: TTLV request
+    /// K19 — Get Usage Allocation (§6.1.29) end-to-end: TTLV request
     /// bytes → decode → dispatch → the store's remaining Usage Limits
     /// budget is decremented by the granted allocation; the response
     /// echoes the UID and survives response encoding.
@@ -1674,7 +1674,7 @@ mod tests {
         assert_eq!(bytes.len() % 8, 0, "§9.6 alignment");
     }
 
-    /// K19 — Get Constraints (§6.1.26) end-to-end: empty request
+    /// K19 — Get Constraints (§6.1.28) end-to-end: empty request
     /// payload per Table 326; Success with a non-empty Constraints set.
     #[test]
     fn k19_get_constraints_via_wire_returns_constraint_table() {
@@ -1700,7 +1700,7 @@ mod tests {
         assert_eq!(bytes.len() % 8, 0, "§9.6 alignment");
     }
 
-    /// K19 — Set Defaults (§6.1.58) end-to-end: the wire-decoded
+    /// K19 — Set Defaults (§6.1.60) end-to-end: the wire-decoded
     /// Object Defaults are stored and a subsequent Create that omits
     /// the defaulted attribute picks it up (a client-supplied value
     /// would win — pinned in `ops::allocation_and_config` tests).
@@ -1759,7 +1759,7 @@ mod tests {
         );
     }
 
-    /// K19 — Set Endpoint Role (§6.1.59) end-to-end: `Server` (the
+    /// K19 — Set Endpoint Role (§6.1.61) end-to-end: `Server` (the
     /// identity request) is acknowledged with the accepted role per
     /// Table 432; `Client` (the §6.2 role switch we don't support) is
     /// rejected with `Feature Not Supported (0x08)` per Table 433.
@@ -1798,10 +1798,10 @@ mod tests {
         );
     }
 
-    /// K20 — Derive Key (§6.1.18) end-to-end over the wire: TTLV
+    /// K20 — Derive Key (§6.1.19) end-to-end over the wire: TTLV
     /// request (Object Type + UID + Derivation Method HMAC +
     /// Derivation Parameters + Attributes) → derived object with the
-    /// §6.1.18 link pair, then a follow-up GetAttributes via the §6.1 preamble
+    /// §6.1.19 link pair, then a follow-up GetAttributes via the §6.1 preamble
     /// ID Placeholder (Derive Key SHALL set it to the new UID).
     #[test]
     fn k20_derive_key_via_wire_with_id_placeholder() {
@@ -1892,9 +1892,9 @@ mod tests {
         assert_eq!(bytes.len() % 8, 0, "§9.6 alignment");
     }
 
-    /// K21 — Re-key (§6.1.51) end-to-end over the wire: TTLV request
+    /// K21 — Re-key (§6.1.53) end-to-end over the wire: TTLV request
     /// (UID + Offset Interval + Attributes override) → replacement
-    /// object with the §6.1.51 link pair, then a follow-up
+    /// object with the §6.1.53 link pair, then a follow-up
     /// GetAttributes via the §6.1 preamble ID Placeholder (Re-key SHALL set it
     /// to the replacement UID). Pins the `Offset` tag decode
     /// (0x420058, Interval).
@@ -1974,7 +1974,7 @@ mod tests {
         assert_eq!(bytes.len() % 8, 0, "§9.6 alignment");
     }
 
-    /// K21 — Re-key Key Pair (§6.1.52) over the wire: response carries
+    /// K21 — Re-key Key Pair (§6.1.54) over the wire: response carries
     /// the two typed UID tags (Table 411) and the §6.1 preamble placeholder is
     /// the PRIVATE half ("the first value in the response").
     #[test]
@@ -2355,7 +2355,7 @@ mod tests {
         );
     }
 
-    /// 2026-07-17 audit (M3) — §6.1.32 Locate: "If the Locate operation
+    /// 2026-07-17 audit (M3) — §6.1.34 Locate: "If the Locate operation
     /// matches more than one object... the server SHALL empty the ID
     /// Placeholder, causing any subsequent operations that are batched
     /// with the Locate... to fail." Before this fix, `update_id_placeholder`

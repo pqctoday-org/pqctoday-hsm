@@ -374,7 +374,7 @@ pub enum Rule {
     // (KMAC, KDFs). Gates on the request's *canonical* mechanism
     // (`PolicyRequest.mechanism.canonical_mech`, P0/P1), so a rule means the
     // same thing whether the request arrived via a standard KMIP op or the
-    // PKCS#11 passthrough (§6.1.42) — bypass-proof by construction. Mechanisms
+    // PKCS#11 passthrough (§6.1.44) — bypass-proof by construction. Mechanisms
     // are PKCS#11 `CKM_*` names resolved from pkcs11t.h (via constants.rs). ──
     /// `op ∈ ops` AND the request's canonical `CKM_*` ∉ `mechanisms` → Deny.
     MechanismAllowlist {

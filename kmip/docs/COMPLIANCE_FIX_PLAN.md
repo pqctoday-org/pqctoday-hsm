@@ -260,7 +260,7 @@ check corpus first; OASIS transcripts use placeholder digests, expected safe.
    constants) → `IncompatibleCryptographicUsageMask (0x29)`. Corpus sets masks
    correctly; expected no regression.
 2. **Locate paging** (`src/kmip30/ops.rs:321-327`): decode `Offset Items` and
-   `Storage Status Mask` (§6.1.32); apply offset after the existing sort; mask
+   `Storage Status Mask` (§6.1.34); apply offset after the existing sort; mask
    against storage status (all objects On-line while Archive is a no-op).
 
 ## K13 — Conformance-claim decision + Baseline ops (L / doc-first) · finding K-10

@@ -1,4 +1,4 @@
-//! KMIP 3.0 §6.1.60 **Sign** operation.
+//! KMIP 3.0 §6.1.62 **Sign** operation.
 //!
 //! > "This operation requests the server to perform a signature operation
 //! > on the provided data using the specified signing key."

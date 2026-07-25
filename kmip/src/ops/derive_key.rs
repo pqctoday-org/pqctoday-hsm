@@ -1,4 +1,4 @@
-//! K20 — KMIP 3.0 §6.1.18 **Derive Key** (op codepoint `0x05`).
+//! K20 — KMIP 3.0 §6.1.19 **Derive Key** (op codepoint `0x05`).
 //!
 //! > "This request is used to derive a Symmetric Key or Secret Data
 //! > object from keys or Secret Data objects that are already known to
@@ -201,7 +201,7 @@ pub fn derive_key(
             (explicit, implicit) => explicit.or(implicit),
         };
 
-    // K19 — §6.1.58 Set Defaults under the client template, then lift
+    // K19 — §6.1.60 Set Defaults under the client template, then lift
     // the template attributes (same pipeline as Create).
     super::allocation_and_config::apply_object_defaults(
         deps,
@@ -218,7 +218,7 @@ pub fn derive_key(
     // Algorithm." Missing → `Invalid Field` (Table 304).
     let length_bits = x.length.ok_or_else(|| {
         fail(KmipError::invalid_field(
-            "DeriveKey requires CryptographicLength in Attributes (§6.1.18)",
+            "DeriveKey requires CryptographicLength in Attributes (§6.1.19)",
         ))
     })?;
     if length_bits == 0 || length_bits % 8 != 0 {
@@ -232,11 +232,11 @@ pub fn derive_key(
         (None, ObjectType::SymmetricKey) => {
             return Err(fail(KmipError::invalid_field(
                 "DeriveKey requires CryptographicAlgorithm for a SymmetricKey \
-                 (§6.1.18: \"the length and algorithm SHALL always be specified \
+                 (§6.1.19: \"the length and algorithm SHALL always be specified \
                  for the creation of a symmetric key\")",
             )));
         }
-        // SecretData — same sentinel convention as Register (§6.1.48):
+        // SecretData — same sentinel convention as Register (§6.1.50):
         // CryptographicAlgorithm is not in the SecretData §11 attribute
         // table; the slot is never surfaced.
         (None, _) => KmipAlgorithm::Rsa,
@@ -985,7 +985,7 @@ mod tests {
             DerivationParameters::default(), aes_template(128),
         ), &AuthContext::open(), "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::WrongKeyLifecycleState);
-        // Mask without the Derive Key bit (§6.1.18: "SHALL only apply
+        // Mask without the Derive Key bit (§6.1.19: "SHALL only apply
         // to Managed Objects that have the Derive Key bit set") → 0x29.
         put_base(&d, "nomask", ObjectType::SymmetricKey, KmipAlgorithm::HmacSha256,
                  Some(b"k".to_vec()), UsageMask::ENCRYPT, State::Active);

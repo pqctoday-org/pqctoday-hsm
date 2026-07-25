@@ -2,9 +2,9 @@
 //!
 //! Spec mapping:
 //!
-//! - RNG Retrieve §6.1.54 / Tbl 418 — Data Length → Data
-//! - RNG Seed     §6.1.55 / Tbl 421 — Data        → Data Length
-//! - PKCS#11      §6.1.42 / Tbl 375 — PKCS#11 Function + parameters →
+//! - RNG Retrieve §6.1.56 / Tbl 418 — Data Length → Data
+//! - RNG Seed     §6.1.57 / Tbl 421 — Data        → Data Length
+//! - PKCS#11      §6.1.44 / Tbl 375 — PKCS#11 Function + parameters →
 //!                                    PKCS#11 Function + Return Code +
 //!                                    optional parameters
 //!
@@ -44,7 +44,7 @@ pub fn rng_retrieve(
 
 pub fn rng_seed(deps: &Deps, req: RngSeedRequest, correlation_id: &str) -> Result<RngSeedResponse> {
     emit_request(deps, correlation_id, "RNGSeed", format!("seed_len={}", req.data.len()));
-    // Per §6.1.55: "The server MAY elect to ignore the information
+    // Per §6.1.57: "The server MAY elect to ignore the information
     // provided by the client and MAY indicate this to the client by
     // returning zero as the value in the Data Length response." All
     // four branches are independently spec-conformant — which one
@@ -170,7 +170,7 @@ pub fn pkcs11(
         _ => (softhsmrustv3::constants::CKR_FUNCTION_NOT_SUPPORTED as i32, None),
     };
     emit_success(deps, correlation_id, "PKCS_11");
-    // KMIP 3.0 §6.1.42 — the server SHALL include a
+    // KMIP 3.0 §6.1.44 — the server SHALL include a
     // `Correlation Value` in the response. Echo what the client
     // supplied (so chained calls share a value); generate a fresh
     // 16-byte token otherwise (the OASIS test corpus uses the

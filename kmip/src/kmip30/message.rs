@@ -381,9 +381,9 @@ pub enum RequestPayload {
     Decapsulate(super::ops::DecapsulateRequest),
     Sign(super::ops::SignRequest),
     SignatureVerify(super::ops::SignatureVerifyRequest),
-    /// P2.2 — §6.1.62 Validate (certificate-chain validation).
+    /// P2.2 — §6.1.64 Validate (certificate-chain validation).
     Validate(super::ops::ValidateRequest),
-    /// P2.3 — §6.1.6 Certify / §6.1.50 Re-certify (PQC-capable CA).
+    /// P2.3 — §6.1.6 Certify / §6.1.52 Re-certify (PQC-capable CA).
     Certify(super::ops::CertifyRequest),
     ReCertify(super::ops::ReCertifyRequest),
     Interop(super::ops::InteropRequest),
@@ -418,13 +418,13 @@ pub enum RequestPayload {
     SetConstraints(super::ops::SetConstraintsRequest),
     SetDefaults(super::ops::SetDefaultsRequest),
     SetEndpointRole(super::ops::SetEndpointRoleRequest),
-    /// K20 — §6.1.18 Derive Key.
+    /// K20 — §6.1.19 Derive Key.
     DeriveKey(super::ops::DeriveKeyRequest),
-    /// K21 — §6.1.51 Re-key / §6.1.52 Re-key Key Pair.
+    /// K21 — §6.1.53 Re-key / §6.1.54 Re-key Key Pair.
     ReKey(super::ops::ReKeyRequest),
     ReKeyKeyPair(super::ops::ReKeyKeyPairRequest),
-    /// Phase 4 — §6.1.43 Poll / §6.1.5 Cancel / §6.1.44 Process /
-    /// §6.1.46 Query Asynchronous Requests.
+    /// Phase 4 — §6.1.45 Poll / §6.1.5 Cancel / §6.1.48 Process /
+    /// §6.1.48 Query Asynchronous Requests.
     Poll(super::ops::PollRequest),
     Cancel(super::ops::CancelRequest),
     Process(super::ops::ProcessRequest),
@@ -478,9 +478,9 @@ pub enum ResponsePayload {
     Decapsulate(super::ops::DecapsulateResponse),
     Sign(super::ops::SignResponse),
     SignatureVerify(super::ops::SignatureVerifyResponse),
-    /// P2.2 — §6.1.62 Validate.
+    /// P2.2 — §6.1.64 Validate.
     Validate(super::ops::ValidateResponse),
-    /// P2.3 — §6.1.6 Certify / §6.1.50 Re-certify.
+    /// P2.3 — §6.1.6 Certify / §6.1.52 Re-certify.
     Certify(super::ops::CertifyResponse),
     ReCertify(super::ops::ReCertifyResponse),
     Interop(super::ops::InteropResponse),
@@ -514,14 +514,14 @@ pub enum ResponsePayload {
     GetConstraints(super::ops::GetConstraintsResponse),
     SetConstraints(super::ops::SetConstraintsResponse),
     SetDefaults(super::ops::SetDefaultsResponse),
-    /// K20 — §6.1.18 Derive Key.
+    /// K20 — §6.1.19 Derive Key.
     DeriveKey(super::ops::DeriveKeyResponse),
     SetEndpointRole(super::ops::SetEndpointRoleResponse),
-    /// K21 — §6.1.51 Re-key / §6.1.52 Re-key Key Pair.
+    /// K21 — §6.1.53 Re-key / §6.1.54 Re-key Key Pair.
     ReKey(super::ops::ReKeyResponse),
     ReKeyKeyPair(super::ops::ReKeyKeyPairResponse),
-    /// Phase 4 — §6.1.5 Cancel / §6.1.44 Process / §6.1.46 Query
-    /// Asynchronous Requests. `Poll` (§6.1.43) has no variant here —
+    /// Phase 4 — §6.1.5 Cancel / §6.1.48 Process / §6.1.48 Query
+    /// Asynchronous Requests. `Poll` (§6.1.45) has no variant here —
     /// its successful response splices in whatever `ResponsePayload`
     /// variant the ORIGINAL polled operation produced (see
     /// `dispatcher::handle_poll`), and its not-yet-complete response
@@ -646,10 +646,10 @@ impl RequestPayload {
             // remaining Usage Limits Count; snapshot for §9.5 Undo.
             Self::GetUsageAllocation(r) => vec![r.uid.as_str()],
             // K20 — Derive Key writes a `Derived Object Link` onto
-            // every base object (§6.1.18); snapshot them for Undo.
+            // every base object (§6.1.19); snapshot them for Undo.
             Self::DeriveKey(r) => r.uids.iter().map(|s| s.as_str()).collect(),
             // K21 — Re-key mutates the existing object (Replacement
-            // Object Link + Name removal + deactivation, §6.1.51);
+            // Object Link + Name removal + deactivation, §6.1.53);
             // snapshot it for §9.5 Undo. The newly-created replacement
             // UIDs are captured post-hoc via `newly_created_uids`.
             // Re-key Key Pair limitation (documented): only the

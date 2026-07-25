@@ -1,4 +1,4 @@
-//! KMIP 3.0 §6.1.32 **Locate** operation.
+//! KMIP 3.0 §6.1.34 **Locate** operation.
 //!
 //! > "This operation requests that the server search for one or more
 //! > Managed Objects, depending on the attributes specified in the

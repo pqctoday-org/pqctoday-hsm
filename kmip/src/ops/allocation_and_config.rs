@@ -1,14 +1,14 @@
 //! K19 — the four KMIP 3.0 Baseline client-to-server operations from
 //! Profiles v3.0 §5.1.2 item 9 that round 1 left advertised-only:
 //!
-//! - Get Usage Allocation §6.1.27 (op `0x11`) — grant an allocation
+//! - Get Usage Allocation §6.1.29 (op `0x11`) — grant an allocation
 //!   against the object's tracked `Usage Limits Count`.
-//! - Get Constraints      §6.1.26 (op `0x38`) — report the constraint
+//! - Get Constraints      §6.1.28 (op `0x38`) — report the constraint
 //!   table the server applies to object-creating operations.
-//! - Set Defaults         §6.1.58 (op `0x36`) — store per-Object-Type
+//! - Set Defaults         §6.1.60 (op `0x36`) — store per-Object-Type
 //!   default attributes applied beneath client templates on factory
 //!   operations (Create / CreateKeyPair / Register).
-//! - Set Endpoint Role    §6.1.59 (op `0x32`) — endpoint-role
+//! - Set Endpoint Role    §6.1.61 (op `0x32`) — endpoint-role
 //!   negotiation; see [`set_endpoint_role`] for the policy decision.
 //!
 //! Op codepoints verified against
@@ -31,9 +31,9 @@ use crate::kmip30::{
 use super::deps::Deps;
 use super::helpers::{emit_request, emit_success, fail_err};
 
-// ── Get Usage Allocation (§6.1.27) ──────────────────────────────────────────
+// ── Get Usage Allocation (§6.1.29) ──────────────────────────────────────────
 
-/// Handle a `Get Usage Allocation` request per KMIP 3.0 §6.1.27.
+/// Handle a `Get Usage Allocation` request per KMIP 3.0 §6.1.29.
 ///
 /// "This operation requests the server to obtain an allocation from
 /// the current Usage Limits value … The server SHALL assume that the
@@ -132,9 +132,9 @@ pub fn get_usage_allocation(
     Ok(GetUsageAllocationResponse { uid: req.uid })
 }
 
-// ── Get Constraints (§6.1.26) ───────────────────────────────────────────────
+// ── Get Constraints (§6.1.28) ───────────────────────────────────────────────
 
-/// Handle a `Get Constraints` request per KMIP 3.0 §6.1.26 — "return
+/// Handle a `Get Constraints` request per KMIP 3.0 §6.1.28 — "return
 /// the constraints that are being applied to Managed Objects during
 /// operations".
 ///
@@ -162,10 +162,10 @@ pub fn get_constraints(
     Ok(resp)
 }
 
-/// `Set Constraints` (KMIP 3.0 §6.1.57 / Table 427) — "set the
+/// `Set Constraints` (KMIP 3.0 §6.1.59 / Table 427) — "set the
 /// constraints that will be applied to Managed Objects during
 /// operations." Replaces the stored set entirely; `Get Constraints`
-/// (§6.1.26) reads it back. Genuinely mutable — before Phase 3.2 the
+/// (§6.1.28) reads it back. Genuinely mutable — before Phase 3.2 the
 /// server always reported a hardcoded engine-bounds table regardless
 /// of what a client tried to set.
 pub fn set_constraints(
@@ -225,9 +225,9 @@ fn server_constraints() -> Vec<Constraint> {
     ]
 }
 
-// ── Set Defaults (§6.1.58) ──────────────────────────────────────────────────
+// ── Set Defaults (§6.1.60) ──────────────────────────────────────────────────
 
-/// Handle a `Set Defaults` request per KMIP 3.0 §6.1.58 — "set the
+/// Handle a `Set Defaults` request per KMIP 3.0 §6.1.60 — "set the
 /// default attributes that will be applied to Managed Objects during
 /// factory operations if the client does not supply values".
 ///
@@ -317,9 +317,9 @@ pub fn apply_object_defaults(
     template.extend(missing);
 }
 
-// ── Set Endpoint Role (§6.1.59) ─────────────────────────────────────────────
+// ── Set Endpoint Role (§6.1.61) ─────────────────────────────────────────────
 
-/// Handle a `Set Endpoint Role` request per KMIP 3.0 §6.1.59.
+/// Handle a `Set Endpoint Role` request per KMIP 3.0 §6.1.61.
 ///
 /// The request carries "the endpoint role for the server to apply"
 /// (Table 431); "after successful completion of the operation the
@@ -338,7 +338,7 @@ pub fn apply_object_defaults(
 ///   432) = `Server`, and no roles change.
 /// - `Endpoint Role = Client` — the role switch. Rejected with
 ///   `Operation Failed / Feature Not Supported (0x08)` from the
-///   §6.1.59.1 Table 433 error table, naming the missing capability.
+///   §6.1.61.1 Table 433 error table, naming the missing capability.
 pub fn set_endpoint_role(
     deps: &Deps,
     req: SetEndpointRoleRequest,

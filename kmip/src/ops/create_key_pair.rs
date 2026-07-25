@@ -73,7 +73,7 @@ pub fn create_key_pair(
         },
     ));
 
-    // K19 — KMIP 3.0 §6.1.58 Set Defaults: fill attributes the client
+    // K19 — KMIP 3.0 §6.1.60 Set Defaults: fill attributes the client
     // omitted from the stored per-Object-Type defaults, per half. A
     // default yields to a client attribute of the same kind in either
     // the half-specific basket OR the Common Attributes basket.
@@ -703,7 +703,7 @@ pub fn create_key_pair(
 }
 
 /// Output of the Plane-3 keypair generation path shared by Create Key
-/// Pair (§6.1.11) and Re-key Key Pair (§6.1.52, K21).
+/// Pair (§6.1.11) and Re-key Key Pair (§6.1.54, K21).
 pub(crate) struct GeneratedKeyPair {
     pub cka_id_priv: Vec<u8>,
     pub cka_id_pub: Vec<u8>,

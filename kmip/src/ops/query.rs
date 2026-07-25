@@ -1,4 +1,4 @@
-//! KMIP 3.0 §6.1.45 **Query** operation.
+//! KMIP 3.0 §6.1.47 **Query** operation.
 //!
 //! > "This operation is used by the client to interrogate the server to
 //! > determine its capabilities and/or protocol mechanisms."

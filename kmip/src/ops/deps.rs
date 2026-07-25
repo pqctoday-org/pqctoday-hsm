@@ -61,8 +61,8 @@ pub struct AsyncJobState {
     pub owner: Option<String>,
 }
 
-/// One server-tracked async job (§6.1.43 Poll / §6.1.5 Cancel / §6.1.44
-/// Process / §6.1.46 Query Asynchronous Requests all key off the same
+/// One server-tracked async job (§6.1.45 Poll / §6.1.5 Cancel / §6.1.48
+/// Process / §6.1.48 Query Asynchronous Requests all key off the same
 /// record via its `Asynchronous Correlation Value`).
 ///
 /// `done` is signalled exactly once, when `state.stage` transitions to
@@ -90,7 +90,7 @@ impl AsyncJob {
     }
 
     /// Block the calling thread until this job reaches `Completed`.
-    /// Used by `Process` (§6.1.44: "effectively changing the
+    /// Used by `Process` (§6.1.46: "effectively changing the
     /// processing mode for that batch item to that resembling
     /// synchronous processing") and by the `Deps::new`-only (no
     /// `self_handle`) eager-fallback executor, where the predicate is
@@ -174,7 +174,7 @@ pub struct DepsConfig {
     /// will switch to a secret-store abstraction.
     pub pkcs11_pin: String,
     /// KMIP `Vendor Identification` for `Query → ServerInformation`.
-    /// KMIP 3.0 §6.1.45 — free-form string identifying the implementation.
+    /// KMIP 3.0 §6.1.47 — free-form string identifying the implementation.
     pub vendor_identification: String,
     /// KMIP `Server Version` for `Query → ServerInformation`.
     pub server_version: String,
@@ -189,7 +189,7 @@ pub struct DepsConfig {
     pub auth_users: Vec<crate::server::auth::AuthUser>,
 
     /// P2.3 — the server-configured Certificate Authority used by the
-    /// §6.1.6 Certify / §6.1.50 Re-certify operations. `None` (the
+    /// §6.1.6 Certify / §6.1.52 Re-certify operations. `None` (the
     /// default) means **the server is not configured as a CA**: every
     /// Certify request fails `Permission Denied` (there is no key
     /// authorised to sign issuances). Set via `--ca-key <PRIV_UID>
@@ -198,7 +198,7 @@ pub struct DepsConfig {
     /// [`CaKeyDesignation`] for the authorisation model.
     pub ca_key: Option<CaKeyDesignation>,
 
-    /// §6.1.55 RNG Seed behavior — see [`RngSeedMode`]. Defaults to
+    /// §6.1.57 RNG Seed behavior — see [`RngSeedMode`]. Defaults to
     /// full-consume (the pre-existing behavior; CS-RNG-O-1 pins it).
     pub rng_seed_mode: RngSeedMode,
 
@@ -211,7 +211,7 @@ pub struct DepsConfig {
 }
 
 /// P2.3 — designates the single key/cert pair the server may use as a
-/// Certificate Authority for §6.1.6 Certify / §6.1.50 Re-certify.
+/// Certificate Authority for §6.1.6 Certify / §6.1.52 Re-certify.
 ///
 /// ## CA-key authorisation model (the net-new infra for this slice)
 ///
@@ -243,7 +243,7 @@ pub struct CaKeyDesignation {
     pub certificate_uid: String,
 }
 
-/// KMIP 3.0 §6.1.55 `RNG Seed` — the spec text: "The server MAY elect to
+/// KMIP 3.0 §6.1.57 `RNG Seed` — the spec text: "The server MAY elect to
 /// ignore the information provided by the client and MAY indicate this
 /// to the client by returning zero as the value in the Data Length
 /// response." This is a server-chosen, mutually-exclusive policy
@@ -378,12 +378,12 @@ pub struct Deps {
     /// is the `Single`-mode default token).
     pub next_auto_slot: std::sync::atomic::AtomicU32,
     /// Active multi-part Encrypt/Decrypt streams, keyed by the
-    /// server-issued `Correlation Value` (KMIP 3.0 §6.1.21). Lives on
+    /// server-issued `Correlation Value` (KMIP 3.0 §6.1.23). Lives on
     /// `Deps` so streams survive across requests on the same server.
     pub streams: Mutex<HashMap<Vec<u8>, StreamCtx>>,
     /// Monotonic source for fresh correlation values.
     pub next_correlation: std::sync::atomic::AtomicU64,
-    /// K19 — KMIP 3.0 §6.1.58 `Set Defaults` state: per-Object-Type
+    /// K19 — KMIP 3.0 §6.1.60 `Set Defaults` state: per-Object-Type
     /// default attributes applied to factory operations (Create /
     /// CreateKeyPair / Register) beneath the client template (client
     /// template > Set Defaults > server hardcoded). In-memory only —
@@ -399,7 +399,7 @@ pub struct Deps {
         HashMap<Option<String>, HashMap<crate::kmip30::ObjectType, Vec<crate::kmip30::Attribute>>>,
     >,
     /// Phase 3.2 — client-set §6.1.57 Constraints, replacing the
-    /// engine-bounds default `Get Constraints` (§6.1.26) otherwise
+    /// engine-bounds default `Get Constraints` (§6.1.28) otherwise
     /// reports. `None` ⇒ no client override yet; `get_constraints`
     /// falls back to the static engine-derived table. `Some(vec![])`
     /// (an explicit empty Set Constraints) is a real override meaning
@@ -413,7 +413,7 @@ pub struct Deps {
     /// per-connection) — matches this server's other session-scale
     /// state (`pkcs11_virtual_initialized`).
     pub sessions: Mutex<HashMap<Vec<u8>, crate::server::auth::SessionRecord>>,
-    /// KMIP §6.1.42 PKCS_11 passthrough — tracks whether a client has
+    /// KMIP §6.1.44 PKCS_11 passthrough — tracks whether a client has
     /// issued `C_Initialize` without an intervening `C_Finalize`
     /// (PKCS#11 v3.2 §5.6 library-lifecycle state). Deliberately
     /// SEPARATE from `engine_session`'s real init state: the engine

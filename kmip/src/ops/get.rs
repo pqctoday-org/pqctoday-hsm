@@ -1,4 +1,4 @@
-//! KMIP 3.0 §6.1.23 **Get** operation.
+//! KMIP 3.0 §6.1.25 **Get** operation.
 //!
 //! > "This operation requests that the server returns the Managed Object
 //! > specified by its Unique Identifier."
@@ -59,13 +59,13 @@ pub fn get(
         ));
     }
 
-    // K22 — storage status gate. §6.1.47 Recover: "Once the response
+    // K22 — storage status gate. §6.1.49 Recover: "Once the response
     // is received, the object is now on-line, and MAY be obtained
     // (e.g., via a Get operation)" — i.e. while in Archival storage
     // the material is off-line and NOT obtainable. The §11 description
     // of `Object Archived` (0x0d) is the permitting text: "The object
     // SHALL be recovered from the archive before performing the
-    // operation." (Get's own §6.1.23.1 error table only lists the
+    // operation." (Get's own §6.1.25.1 error table only lists the
     // Wrapping variant, but this server emulates material that is
     // genuinely off-line, so the honest answer is 0x0d — never an
     // auto-recover or fabricated bytes.)

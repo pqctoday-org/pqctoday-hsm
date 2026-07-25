@@ -203,7 +203,7 @@ def is_precondition_test(name: str) -> str | None:
 
 # OASIS conformance tests that pin a specific server policy choice from a
 # set of MUTUALLY EXCLUSIVE conformant behaviors. RNGSeed is the canonical
-# example: KMIP 3.0 §6.1.55 lets a conformant server (a) consume the full
+# example: KMIP 3.0 §6.1.57 lets a conformant server (a) consume the full
 # seed, (b) consume only N bytes and report DataLength=N, (c) ignore the
 # seed entirely and report DataLength=0, or (d) deny the op outright with
 # `PermissionDenied`. CS-RNG-O-1 exercises (a) — the server's default.
@@ -469,7 +469,7 @@ def is_volatile_tag(tag: str) -> bool:
 _OPTIONAL_PRESENCE_TAGS: dict[str, str] = {
     _norm("ServerCorrelationValue"): "§8.2.2 — optional in ResponseHeader",
     _norm("ClientCorrelationValue"): "§8.1.2 — optional in RequestHeader",
-    # KMIP 3.0 §6.1.42 — `PKCS_11OutputParameters` is optional on
+    # KMIP 3.0 §6.1.44 — `PKCS_11OutputParameters` is optional on
     # responses where the underlying PKCS#11 function returns no
     # output buffer (`C_Initialize`, `C_Finalize`, etc.) and present
     # only for the few functions that do (`C_GetInfo`, `C_GetSlotInfo`,

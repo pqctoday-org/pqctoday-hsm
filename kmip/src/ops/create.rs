@@ -62,7 +62,7 @@ pub fn create(
         ));
     }
 
-    // K19 — KMIP 3.0 §6.1.58 Set Defaults: fill attributes the client
+    // K19 — KMIP 3.0 §6.1.60 Set Defaults: fill attributes the client
     // omitted from the stored per-Object-Type defaults. Merge order:
     // client template > Set Defaults > the hardcoded fallbacks below
     // (policy algorithm_default, usage-mask default, …).
@@ -253,7 +253,7 @@ pub fn create(
 }
 
 /// Plane-3 symmetric keygen shared by Create (§6.1.8) and Re-key
-/// (§6.1.51, K21). Generates the key inside the engine when a session
+/// (§6.1.53, K21). Generates the key inside the engine when a session
 /// is wired (AES → `native::generate_aes_key`, HMAC →
 /// `native::generate_generic_secret`) and returns the K-14 engine-
 /// computed SHA-256 `Digest` over the fresh `CKA_VALUE`; without a

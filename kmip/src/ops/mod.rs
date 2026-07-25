@@ -80,7 +80,7 @@ pub mod sign;
 pub mod signature_verify;
 pub mod spki_verify;
 pub mod split_key;
-// §6.1.62 Validate and §6.1.6/§6.1.50 Certify / Re-certify: pure Rust
+// §6.1.64 Validate and §6.1.6/§6.1.52 Certify / Re-certify: pure Rust
 // since the cert-ops port (WP1-WP3) — both now verify/issue via
 // `ops::spki_verify::verify_with_spki` + the engine, not `ring`/rcgen, so
 // there is no crypto-backend reason left to gate these behind `native`.

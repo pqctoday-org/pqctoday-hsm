@@ -1,4 +1,4 @@
-//! KMIP 3.0 §6.1.15 **Decrypt** operation.
+//! KMIP 3.0 §6.1.16 **Decrypt** operation.
 //!
 //! > "This operation requests the server to perform a decryption operation
 //! > on the provided data using the specified key."
@@ -240,7 +240,7 @@ fn decrypt_classical(
     auth: &crate::server::auth::AuthContext,
     correlation_id: &str,
 ) -> Result<DecryptResponse> {
-    // KMIP 3.0 §6.1.21 — request-time `CryptographicParameters`
+    // KMIP 3.0 §6.1.23 — request-time `CryptographicParameters`
     // override the key-attached value (mirrors Encrypt). The Baseline
     // CS-BC tests put the mode on the call, not the key.
     let effective_cp = req
@@ -263,11 +263,11 @@ fn decrypt_classical(
         })?,
     };
 
-    // KMIP 3.0 §6.1.21 + §11 — IV presence/size mismatches surface
+    // KMIP 3.0 §6.1.23 + §11 — IV presence/size mismatches surface
     // as `InvalidMessage` per spec (mirror of the Encrypt path).
     super::encrypt::validate_iv_for_mech(deps, correlation_id, mech, req.iv.as_deref())?;
 
-    // KMIP 3.0 §6.1.21 Decrypt — Plane-3 dispatch through the
+    // KMIP 3.0 §6.1.23 Decrypt — Plane-3 dispatch through the
     // PKCS#11 bridge. Mirrors the Encrypt path:
     //   1. obj.key_material set (Register'd by client) → bridge with
     //      raw bytes (RSA-OAEP private key DER for OAEP-* tests).

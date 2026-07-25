@@ -1,4 +1,4 @@
-//! KMIP 3.0 §6.1.61 **Signature Verify** operation.
+//! KMIP 3.0 §6.1.63 **Signature Verify** operation.
 //!
 //! > "This operation requests the server to perform a signature verify
 //! > operation on the provided data using the specified verification key."

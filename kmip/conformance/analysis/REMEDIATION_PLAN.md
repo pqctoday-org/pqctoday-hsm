@@ -45,7 +45,7 @@ Active.
   Activation Date attribute drives the PreActive → Active transition.
   When the supplied date is in the past at Register time, the object
   is born Active.
-- KMIP 3.0 Spec §6.1.48 (Register) — "The server SHALL assign
+- KMIP 3.0 Spec §6.1.50 (Register) — "The server SHALL assign
   attribute values when not specified by the client" — i.e. an
   attribute that IS specified must be honoured.
 - KMIP Profiles v3.0 §5.1.2 Baseline Server item 5 — Activation Date
@@ -195,7 +195,7 @@ Three discrete code mappings to add:
 | ------------------------------------------------------ | ---------------------------------------------------- | -------------------------------------------------------- | ----------------------------------------------------------------------- |
 | Register with duplicate Name                           | `InvalidField` (0x07)                                | **`NonUniqueNameAttribute` (0x35)** per §11 Result Reason | `register_import_export.rs` duplicate-name detection                    |
 | Crypto-op on `Deactivated` / `Compromised`             | `ObjectArchived` (0x0d)                              | **`WrongKeyLifecycleState` (0x43)** per §11              | `encrypt.rs`, `decrypt.rs`, `sign.rs`, `signature_verify.rs` state gate |
-| RNGSeed without sufficient permission                  | (varies, currently `InvalidField`)                   | `OperationNotSupported` per Spec §6.1.55                 | `rng_and_pkcs11.rs::rng_seed`                                           |
+| RNGSeed without sufficient permission                  | (varies, currently `InvalidField`)                   | `OperationNotSupported` per Spec §6.1.57                 | `rng_and_pkcs11.rs::rng_seed`                                           |
 
 **Normative reference:** OASIS extraction
 `spec/oasis-kmip-3.0/kmip-spec-3.0-tags-enums.json` enum `Result

@@ -283,7 +283,7 @@ def test_roundtrip_certify_request_with_csr():
 
 
 def test_roundtrip_validate_response_validity_indicator():
-    # §6.1.62 Validate's response — ValidityIndicator is the field the
+    # §6.1.64 Validate's response — ValidityIndicator is the field the
     # hub's own test suite had to learn (this session) resolves to a raw
     # enum codepoint, not a name; confirm the Python client agrees.
     resp = ttlv_struct(

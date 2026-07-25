@@ -1,4 +1,4 @@
-//! KMIP 3.0 §6.1.49 **Revoke** operation.
+//! KMIP 3.0 §6.1.51 **Revoke** operation.
 //!
 //! > "This operation requests the server to revoke a Managed Cryptographic
 //! > Object or an Opaque Object."

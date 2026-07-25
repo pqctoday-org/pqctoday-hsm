@@ -481,7 +481,7 @@ pub fn strip_x_prefixes(
 /// - `Destroyed` / `DestroyedCompromised` → `ObjectArchived` (0x0d)
 ///   per Spec §6.1.19 — the object's material is gone.
 /// - `Deactivated` / `Compromised` → `WrongKeyLifecycleState` (0x43)
-///   per Spec §6.1.49 (Revoke) — the object exists but the FSM
+///   per Spec §6.1.51 (Revoke) — the object exists but the FSM
 ///   forbids the requested op.
 /// - `PreActive` → `WrongKeyLifecycleState` (0x43) — same family
 ///   (key isn't ready yet).
@@ -1224,7 +1224,7 @@ pub fn ck_rv_to_kmip_error(rv: u32, op: &str) -> KmipError {
 }
 
 /// K8 — apply the client-requested `Key Format Type` to material the
-/// server holds in `stored` format (KMIP 3.0 §6.1.23 Get / §6.1.22
+/// server holds in `stored` format (KMIP 3.0 §6.1.25 Get / §6.1.24
 /// Export, compliance-audit B-5). Conversion table:
 ///
 /// - absent → stored format, material as-is
@@ -1291,7 +1291,7 @@ pub fn convert_key_format(
 
 /// K16 — AES-KW wrap of the TTLV-encoded KeyValue under the wrap key
 /// named by a request's `KeyWrappingSpecification`. Shared by `Get`
-/// (§6.1.23, AX-M-2) and `Export` (§6.1.22) so both ops enforce the
+/// (§6.1.25, AX-M-2) and `Export` (§6.1.24) so both ops enforce the
 /// same KEK lifecycle (Active) + usage-mask (WrapKey) gates and emit
 /// the same wrapped shape; `op` names the caller for audit events.
 pub fn wrap_key_value(
@@ -1436,7 +1436,7 @@ fn resolve_kek(
 }
 
 /// K17 — AES-KW unwrap of a Register KeyBlock's wrapped `KeyValue`
-/// (§2.1.5 / §6.1.48: KeyWrappingData present on an inbound KeyBlock).
+/// (§2.1.5 / §6.1.50: KeyWrappingData present on an inbound KeyBlock).
 /// Reverse of [`wrap_key_value`] with the unwrap-direction gates: the
 /// KEK must be `Active` and carry `UnwrapKey (0x20)` — NOT `WrapKey`.
 /// Validates WrappingMethod=Encrypt + BlockCipherMode=NISTKeyWrap

@@ -1,4 +1,4 @@
-//! KMIP 3.0 §6.1.19 **Destroy** operation.
+//! KMIP 3.0 §6.1.20 **Destroy** operation.
 //!
 //! > "This operation is used to indicate to the server that the key
 //! > material for the specified Managed Object SHALL be destroyed."
@@ -260,7 +260,7 @@ mod tests {
     /// destroy). Destroy must scrub that field for real, not just flip
     /// the lifecycle state and leave the plaintext sitting in the
     /// store. Also confirms the pre-existing Export-side suppression
-    /// (§6.1.22: Destroyed objects never return key material) still
+    /// (§6.1.24: Destroyed objects never return key material) still
     /// holds — that check becomes redundant-but-harmless defense in
     /// depth after this fix, not the only thing standing between a
     /// client and a "destroyed" key's plaintext.
@@ -301,7 +301,7 @@ mod tests {
         );
 
         // Export still honestly reports no material for a Destroyed
-        // object (pre-existing §6.1.22 behavior) — proves this path
+        // object (pre-existing §6.1.24 behavior) — proves this path
         // stays correct now that it's no longer the only thing hiding
         // the plaintext.
         let exported = export(

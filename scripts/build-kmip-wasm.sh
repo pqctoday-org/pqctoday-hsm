@@ -127,6 +127,11 @@ cp "$CONF"/pqc_corpus/*.xml             "$HUB_CORPUS_DIR/pqc/"
 # an HTML export of the WD19 draft this previously trailed).
 SPEC_DIR="$ROOT/kmip/spec/oasis-kmip-3.0"
 cp "$SPEC_DIR/kmip-spec-3.0-tags-enums.json" "$HUB_CORPUS_DIR/tags-enums.json"
+# §6.1.x operation-number-to-name table (both CSD01 and CSD02) — feeds the
+# citation-drift guard test on both sides (kmip/tests/section61_citation_drift.rs,
+# src/wasm/kmip/section61CitationDrift.local.test.ts). Re-staged for the same
+# never-drift-out-of-band reason as tags-enums.json above.
+cp "$SPEC_DIR/kmip-spec-3.0-section61-headings.json" "$HUB_CORPUS_DIR/section61-headings.json"
 
 python3 - "$HUB_CORPUS_DIR" <<'PY'
 import json, os, sys

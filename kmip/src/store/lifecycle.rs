@@ -7,7 +7,7 @@
 //! [`crate::kmip30::State::can_transition_to`]; this module wraps it in a
 //! `Result` shape for the store's `update` paths.
 //!
-//! Per KMIP 3.0 §3.2 (numbered state diagram) and §6.1.19 (Destroy
+//! Per KMIP 3.0 §3.2 (numbered state diagram) and §6.1.20 (Destroy
 //! constraint), mirrored in `docs/IMPLEMENTATION_PLAN.md` §3.4:
 //!
 //! ```text
@@ -81,7 +81,7 @@ mod tests {
     }
 
     /// Exhaustive 6×6 transition matrix asserted against the KMIP 3.0 §3.2
-    /// numbered state diagram and the §6.1.19 Destroy constraint. This is
+    /// numbered state diagram and the §6.1.20 Destroy constraint. This is
     /// the regression guard: any future drift in
     /// [`State::can_transition_to`] (or [`enforce_transition`]) names the
     /// exact `(from, to)` cell that broke.
