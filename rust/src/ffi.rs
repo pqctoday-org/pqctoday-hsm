@@ -786,8 +786,24 @@ pub fn C_GetMechanismInfo(_slot_id: u32, mech_type: u32, p_info: *mut u8) -> u32
 pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
     let info = match mech_type {
         CKM_RSA_PKCS_KEY_PAIR_GEN => (1024, 4096, 0x00010000u32),
-        // Raw RSA PKCS#1 v1.5 — sign/verify + encrypt/decrypt.
-        CKM_RSA_PKCS => (1024, 4096, 0x00000800 | 0x00002000 | 0x00000100 | 0x00000200),
+        // Raw RSA PKCS#1 v1.5 — sign/verify + encrypt/decrypt + (2026-07-25)
+        // sign-recover/verify-recover (CKF_SIGN_RECOVER 0x1000 |
+        // CKF_VERIFY_RECOVER 0x4000; C_SignRecover reuses this mechanism's
+        // existing sign_rsa() primitive directly, see that fn's doc comment).
+        CKM_RSA_PKCS => (
+            1024,
+            4096,
+            0x00000800 | 0x00002000 | 0x00000100 | 0x00000200 | 0x00001000 | 0x00004000,
+        ),
+        // CKM_RSA_X_509 — raw RSASP1/RSAVP1, no padding. Added 2026-07-25
+        // for sign-recover/verify-recover ONLY; CKF_SIGN/CKF_VERIFY/
+        // CKF_ENCRYPT/CKF_DECRYPT are deliberately NOT set here — this
+        // mechanism has no regular Sign/Verify/Encrypt/Decrypt
+        // implementation in this engine, and advertising flags for
+        // operations that don't exist would be exactly the kind of
+        // dishonest capability claim this engine's conformance work has
+        // consistently avoided elsewhere.
+        CKM_RSA_X_509 => (1024, 4096, 0x00001000 | 0x00004000),
         CKM_SHA256_RSA_PKCS | CKM_SHA384_RSA_PKCS | CKM_SHA512_RSA_PKCS
         | CKM_SHA256_RSA_PKCS_PSS | CKM_SHA384_RSA_PKCS_PSS | CKM_SHA512_RSA_PKCS_PSS
         | CKM_RSA_PKCS_PSS | CKM_SHA3_384_RSA_PKCS | CKM_SHA3_384_RSA_PKCS_PSS => {
@@ -8528,38 +8544,274 @@ pub fn C_WaitForSlotEvent(flags: u32, _p_slot: *mut u32, _p_reserved: *mut u8) -
     }
 }
 
-// §5.13 — signatures-with-recovery: not provided by this token.
+// §5.13 — signatures-with-recovery. RSA only (CKM_RSA_PKCS / CKM_RSA_X_509),
+// matching the C++ engine's restriction (PKCS#11 v3.2 Tables 39/44/45 also
+// permit CKM_RSA_9796; neither engine implements that one — a separate,
+// lower-priority gap, not closed here). Single-part-only per §5.13.5/§5.13.6:
+// *RecoverInit, then exactly one *Recover call.
+//
+// CKM_RSA_PKCS sign-recover is the IDENTICAL RSASSA-PKCS1-v1_5 raw-sign
+// primitive `sign_rsa(CKM_RSA_PKCS, ...)` already performs for regular
+// C_Sign (PKCS#11 v3.2 Table 39: `C_Sign1`/`C_SignRecover1` have the same
+// key type / length row) — reused directly, not reimplemented. Only
+// CKM_RSA_X_509 (raw RSASP1, no padding at all) and the VerifyRecover
+// direction (recover the message rather than compare a caller-supplied
+// one) need new primitives, via `rsa::hazmat`'s raw modexp functions.
 #[wasm_bindgen(js_name = _C_SignRecoverInit)]
-pub fn C_SignRecoverInit(_h_session: u32, _p_mechanism: *mut u8, _h_key: u32) -> u32 {
+pub fn C_SignRecoverInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
     require_init!();
-    CKR_FUNCTION_NOT_SUPPORTED
+    require_session!(h_session);
+    // A regular Sign and a Sign-Recover op are mutually exclusive on one
+    // session (both are "the signing category" per §5.13's own grouping).
+    if SIGN_STATE.with(|s| s.borrow().contains_key(&h_session))
+        || SIGN_RECOVER_STATE.with(|s| s.borrow().contains_key(&h_session))
+    {
+        return CKR_OPERATION_ACTIVE;
+    }
+    if p_mechanism.is_null() {
+        return CKR_ARGUMENTS_BAD;
+    }
+    let mech_type = unsafe { *(p_mechanism as *const u32) };
+    if mech_type != CKM_RSA_PKCS && mech_type != CKM_RSA_X_509 {
+        return CKR_MECHANISM_INVALID;
+    }
+    if let Err(rv) = check_key_usage(h_session, h_key, CKA_SIGN_RECOVER) {
+        return rv;
+    }
+    if let Err(rv) = check_mechanism_allowed(h_key, mech_type) {
+        return rv;
+    }
+    SIGN_RECOVER_STATE.with(|s| {
+        s.borrow_mut().insert(h_session, (mech_type, h_key));
+    });
+    CKR_OK
 }
+
 #[wasm_bindgen(js_name = _C_SignRecover)]
 pub fn C_SignRecover(
-    _h_session: u32,
-    _p_data: *mut u8,
-    _ul_data_len: u32,
-    _p_signature: *mut u8,
-    _pul_signature_len: *mut u32,
+    h_session: u32,
+    p_data: *mut u8,
+    ul_data_len: u32,
+    p_signature: *mut u8,
+    pul_signature_len: *mut u32,
 ) -> u32 {
     require_init!();
-    CKR_FUNCTION_NOT_SUPPORTED
+    require_session!(h_session);
+    if pul_signature_len.is_null() || (p_data.is_null() && ul_data_len > 0) {
+        return CKR_ARGUMENTS_BAD;
+    }
+    let state = SIGN_RECOVER_STATE.with(|s| s.borrow().get(&h_session).cloned());
+    let (mech, hkey) = match state {
+        Some(s) => s,
+        None => return CKR_OPERATION_NOT_INITIALIZED,
+    };
+    let sk_bytes = match get_object_value(hkey) {
+        Some(v) => v,
+        None => return CKR_ARGUMENTS_BAD,
+    };
+    unsafe {
+        let msg = std::slice::from_raw_parts(p_data, ul_data_len as usize);
+        let result: Result<Vec<u8>, u32> = if mech == CKM_RSA_PKCS {
+            sign_rsa(CKM_RSA_PKCS, &sk_bytes, msg, None)
+        } else {
+            rsa_x509_sign_recover(&sk_bytes, msg)
+        };
+        match result {
+            Ok(sig) => {
+                if p_signature.is_null() {
+                    *pul_signature_len = sig.len() as u32;
+                    return CKR_OK; // length query — op stays active
+                }
+                if (*pul_signature_len as usize) < sig.len() {
+                    *pul_signature_len = sig.len() as u32;
+                    return CKR_BUFFER_TOO_SMALL; // op stays active, retry with a bigger buffer
+                }
+                std::ptr::copy_nonoverlapping(sig.as_ptr(), p_signature, sig.len());
+                *pul_signature_len = sig.len() as u32;
+                SIGN_RECOVER_STATE.with(|s| s.borrow_mut().remove(&h_session));
+                CKR_OK
+            }
+            Err(rv) => {
+                SIGN_RECOVER_STATE.with(|s| s.borrow_mut().remove(&h_session));
+                rv
+            }
+        }
+    }
 }
+
 #[wasm_bindgen(js_name = _C_VerifyRecoverInit)]
-pub fn C_VerifyRecoverInit(_h_session: u32, _p_mechanism: *mut u8, _h_key: u32) -> u32 {
+pub fn C_VerifyRecoverInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
     require_init!();
-    CKR_FUNCTION_NOT_SUPPORTED
+    require_session!(h_session);
+    if VERIFY_STATE.with(|s| s.borrow().contains_key(&h_session))
+        || VERIFY_RECOVER_STATE.with(|s| s.borrow().contains_key(&h_session))
+    {
+        return CKR_OPERATION_ACTIVE;
+    }
+    if p_mechanism.is_null() {
+        return CKR_ARGUMENTS_BAD;
+    }
+    let mech_type = unsafe { *(p_mechanism as *const u32) };
+    if mech_type != CKM_RSA_PKCS && mech_type != CKM_RSA_X_509 {
+        return CKR_MECHANISM_INVALID;
+    }
+    if let Err(rv) = check_key_usage(h_session, h_key, CKA_VERIFY_RECOVER) {
+        return rv;
+    }
+    if let Err(rv) = check_mechanism_allowed(h_key, mech_type) {
+        return rv;
+    }
+    VERIFY_RECOVER_STATE.with(|s| {
+        s.borrow_mut().insert(h_session, (mech_type, h_key));
+    });
+    CKR_OK
 }
+
 #[wasm_bindgen(js_name = _C_VerifyRecover)]
 pub fn C_VerifyRecover(
-    _h_session: u32,
-    _p_signature: *mut u8,
-    _ul_signature_len: u32,
-    _p_data: *mut u8,
-    _pul_data_len: *mut u32,
+    h_session: u32,
+    p_signature: *mut u8,
+    ul_signature_len: u32,
+    p_data: *mut u8,
+    pul_data_len: *mut u32,
 ) -> u32 {
     require_init!();
-    CKR_FUNCTION_NOT_SUPPORTED
+    require_session!(h_session);
+    if pul_data_len.is_null() || (p_signature.is_null() && ul_signature_len > 0) {
+        return CKR_ARGUMENTS_BAD;
+    }
+    let state = VERIFY_RECOVER_STATE.with(|s| s.borrow().get(&h_session).cloned());
+    let (mech, hkey) = match state {
+        Some(s) => s,
+        None => return CKR_OPERATION_NOT_INITIALIZED,
+    };
+    let (n, e) = match get_rsa_public_components(hkey) {
+        Some(v) => v,
+        None => return CKR_ARGUMENTS_BAD,
+    };
+    unsafe {
+        let sig = std::slice::from_raw_parts(p_signature, ul_signature_len as usize);
+        let result: Result<Vec<u8>, u32> = if mech == CKM_RSA_PKCS {
+            rsa_pkcs_verify_recover(&n, &e, sig)
+        } else {
+            rsa_x509_verify_recover(&n, &e, sig)
+        };
+        match result {
+            Ok(data) => {
+                if p_data.is_null() {
+                    *pul_data_len = data.len() as u32;
+                    return CKR_OK; // length query — op stays active
+                }
+                if (*pul_data_len as usize) < data.len() {
+                    *pul_data_len = data.len() as u32;
+                    return CKR_BUFFER_TOO_SMALL;
+                }
+                std::ptr::copy_nonoverlapping(data.as_ptr(), p_data, data.len());
+                *pul_data_len = data.len() as u32;
+                VERIFY_RECOVER_STATE.with(|s| s.borrow_mut().remove(&h_session));
+                CKR_OK
+            }
+            Err(rv) => {
+                VERIFY_RECOVER_STATE.with(|s| s.borrow_mut().remove(&h_session));
+                rv
+            }
+        }
+    }
+}
+
+/// CKM_RSA_X_509 sign-recover — raw RSASP1 (RFC 8017 §5.2.1), no padding.
+/// PKCS#11 v3.2 Table 45: input length ≤ k (modulus bytes), output exactly
+/// k bytes (left-zero-padded if the numeric result is shorter). Uses
+/// `rsa::hazmat::rsa_decrypt` — the same raw primitive `RSA-SignaturePrimitive-2.0`
+/// (NIST ACVP) exercises; blinded (RNG passed) against timing side channels.
+fn rsa_x509_sign_recover(sk_bytes: &[u8], msg: &[u8]) -> Result<Vec<u8>, u32> {
+    use rsa::pkcs8::DecodePrivateKey;
+    use rsa::traits::PublicKeyParts;
+    let priv_key =
+        rsa::RsaPrivateKey::from_pkcs8_der(sk_bytes).map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+    let k = priv_key.size();
+    if msg.len() > k {
+        return Err(CKR_DATA_LEN_RANGE);
+    }
+    let m = rsa::BigUint::from_bytes_be(msg);
+    let mut rng = rand::rngs::OsRng;
+    let sig = rsa::hazmat::rsa_decrypt(Some(&mut rng), &priv_key, &m)
+        .map_err(|_| CKR_DATA_LEN_RANGE)?; // "message representative >= modulus" (Table 45 note)
+    let mut sig_bytes = sig.to_bytes_be();
+    if sig_bytes.len() < k {
+        let mut padded = vec![0u8; k - sig_bytes.len()];
+        padded.extend_from_slice(&sig_bytes);
+        sig_bytes = padded;
+    }
+    Ok(sig_bytes)
+}
+
+/// CKM_RSA_X_509 verify-recover — raw RSAVP1 (RFC 8017 §5.2.2), no padding.
+/// Output is the raw modexp result with natural leading zeros dropped
+/// (Table 45: output length "≤ k", not always exactly k).
+fn rsa_x509_verify_recover(n_bytes: &[u8], e_bytes: &[u8], sig: &[u8]) -> Result<Vec<u8>, u32> {
+    use rsa::traits::PublicKeyParts;
+    if n_bytes.is_empty() || e_bytes.is_empty() {
+        return Err(CKR_KEY_TYPE_INCONSISTENT);
+    }
+    let n = rsa::BigUint::from_bytes_be(n_bytes);
+    let e = rsa::BigUint::from_bytes_be(e_bytes);
+    let pub_key = rsa::RsaPublicKey::new(n, e).map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+    let k = pub_key.size();
+    if sig.len() != k {
+        return Err(CKR_SIGNATURE_LEN_RANGE);
+    }
+    let c = rsa::BigUint::from_bytes_be(sig);
+    let m = rsa::hazmat::rsa_encrypt(&pub_key, &c).map_err(|_| CKR_SIGNATURE_INVALID)?;
+    Ok(m.to_bytes_be())
+}
+
+/// CKM_RSA_PKCS verify-recover — raw RSAVP1, then strip the EMSA-PKCS1-v1_5
+/// padding block (RFC 8017 §9.2: `EM = 0x00 || 0x01 || PS(0xFF, >=8 bytes)
+/// || 0x00 || M`) to recover `M`. This is the "verify AND recover" half
+/// the `rsa` crate's high-level `Pkcs1v15Sign`/`Verifier` API doesn't
+/// expose (it's verify-or-fail against a caller-supplied expected value);
+/// the padding-format check below IS the security-relevant part of this
+/// primitive, so it follows RFC 8017 exactly rather than a loose scan.
+fn rsa_pkcs_verify_recover(n_bytes: &[u8], e_bytes: &[u8], sig: &[u8]) -> Result<Vec<u8>, u32> {
+    use rsa::traits::PublicKeyParts;
+    if n_bytes.is_empty() || e_bytes.is_empty() {
+        return Err(CKR_KEY_TYPE_INCONSISTENT);
+    }
+    let n = rsa::BigUint::from_bytes_be(n_bytes);
+    let e = rsa::BigUint::from_bytes_be(e_bytes);
+    let pub_key = rsa::RsaPublicKey::new(n, e).map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+    let k = pub_key.size();
+    if sig.len() != k {
+        return Err(CKR_SIGNATURE_LEN_RANGE);
+    }
+    let c = rsa::BigUint::from_bytes_be(sig);
+    let m = rsa::hazmat::rsa_encrypt(&pub_key, &c).map_err(|_| CKR_SIGNATURE_INVALID)?;
+    let mut em = m.to_bytes_be();
+    if em.len() < k {
+        let mut padded = vec![0u8; k - em.len()];
+        padded.extend_from_slice(&em);
+        em = padded;
+    }
+    rsa_pkcs1v15_unpad(&em)
+}
+
+/// RFC 8017 §9.2 EMSA-PKCS1-v1_5 decode: `0x00 || 0x01 || PS || 0x00 || M`,
+/// `PS` all-0xFF and at least 8 bytes. Any deviation is `CKR_SIGNATURE_INVALID`
+/// — this is the actual security boundary of RSA_PKCS verify-recover, so it
+/// rejects rather than best-effort-parses on any malformed byte.
+fn rsa_pkcs1v15_unpad(em: &[u8]) -> Result<Vec<u8>, u32> {
+    if em.len() < 11 || em[0] != 0x00 || em[1] != 0x01 {
+        return Err(CKR_SIGNATURE_INVALID);
+    }
+    let mut i = 2;
+    while i < em.len() && em[i] == 0xFF {
+        i += 1;
+    }
+    if i - 2 < 8 || i >= em.len() || em[i] != 0x00 {
+        return Err(CKR_SIGNATURE_INVALID);
+    }
+    Ok(em[i + 1..].to_vec())
 }
 
 // §5.16 — dual-function cryptographic operations. Each composes the two
@@ -14251,5 +14503,258 @@ mod ecdh_cofactor_ffi_tests {
             &mut key_handle,
         );
         assert_eq!(rv, CKR_OK, "cofactor mode must remain valid for CKK_EC (P-256)");
+    }
+}
+
+#[cfg(test)]
+mod rsa_sign_verify_recover_tests {
+    //! PKCS#11 v3.2 §5.13 C_SignRecover/C_VerifyRecover, added 2026-07-25.
+    //! `CKM_RSA_PKCS` round-trips through this crate's own machinery
+    //! (regular Sign for the SignRecover half, since it's the identical
+    //! RSASSA-PKCS1-v1_5 primitive; a hand-decoded EMSA-PKCS1-v1_5 padding
+    //! block for VerifyRecover). `CKM_RSA_X_509` is checked byte-exact
+    //! against real NIST ACVP `RSA-SignaturePrimitive-2.0` vectors
+    //! (`rust/kat/rsa-signature-primitive-acvp.json`, 90 cases across 6
+    //! groups, 12 deliberately out-of-range negative cases) — this is the
+    //! RSASP1/RSAVP1 primitive verbatim, so it's a genuine third-party KAT,
+    //! not a self-consistency round trip.
+    use super::*;
+    use crate::native::test_lock;
+    use rsa::pkcs8::EncodePrivateKey;
+    use rsa::{BigUint, RsaPrivateKey};
+
+    fn hex_decode(s: &str) -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).expect("valid hex in KAT fixture"))
+            .collect()
+    }
+
+    // ── CKM_RSA_X_509 vs real NIST ACVP RSASP1/RSAVP1 vectors ──────────────
+
+    #[test]
+    fn x509_sign_recover_matches_acvp_signature_primitive() {
+        let doc_str = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/kat/rsa-signature-primitive-acvp.json"
+        ))
+        .expect("read rsa-signature-primitive-acvp.json");
+        let doc: serde_json::Value = serde_json::from_str(&doc_str).expect("parse KAT JSON");
+        let mut n_pass = 0;
+        let mut n_reject = 0;
+        for group in doc["testGroups"].as_array().unwrap() {
+            for t in group["tests"].as_array().unwrap() {
+                let n = BigUint::from_bytes_be(&hex_decode(t["n"].as_str().unwrap()));
+                let e = BigUint::from_bytes_be(&hex_decode(t["e"].as_str().unwrap()));
+                let d = BigUint::from_bytes_be(&hex_decode(t["d"].as_str().unwrap()));
+                let p = BigUint::from_bytes_be(&hex_decode(t["p"].as_str().unwrap()));
+                let q = BigUint::from_bytes_be(&hex_decode(t["q"].as_str().unwrap()));
+                let sk = RsaPrivateKey::from_components(n, e, d, vec![p, q])
+                    .expect("assemble RSA priv key from ACVP n/e/d/p/q");
+                let sk_bytes = sk.to_pkcs8_der().expect("pkcs8 der").as_bytes().to_vec();
+                let message = hex_decode(t["message"].as_str().unwrap());
+                let test_passed = t["testPassed"].as_bool().unwrap();
+
+                let result = rsa_x509_sign_recover(&sk_bytes, &message);
+                if test_passed {
+                    let want = hex_decode(t["signature"].as_str().unwrap());
+                    assert_eq!(
+                        result,
+                        Ok(want),
+                        "tcId {} sign-recover mismatch",
+                        t["tcId"]
+                    );
+                    n_pass += 1;
+                } else {
+                    // 12 deliberately out-of-range cases (message representative
+                    // >= modulus) — the crate's own rsa_decrypt rejects these;
+                    // must not silently succeed.
+                    assert!(
+                        result.is_err(),
+                        "tcId {} should have been rejected (message representative >= n)",
+                        t["tcId"]
+                    );
+                    n_reject += 1;
+                }
+            }
+        }
+        assert_eq!(n_pass, 78, "expected 78 passing ACVP RSASP1 vectors (90 total - 12 negative)");
+        assert_eq!(n_reject, 12, "expected 12 deliberately out-of-range ACVP vectors");
+    }
+
+    #[test]
+    fn x509_verify_recover_matches_acvp_signature_primitive() {
+        let doc_str = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/kat/rsa-signature-primitive-acvp.json"
+        ))
+        .expect("read rsa-signature-primitive-acvp.json");
+        let doc: serde_json::Value = serde_json::from_str(&doc_str).expect("parse KAT JSON");
+        let mut n = 0;
+        for group in doc["testGroups"].as_array().unwrap() {
+            for t in group["tests"].as_array().unwrap() {
+                if !t["testPassed"].as_bool().unwrap() {
+                    continue; // no signature to recover-verify for the negative cases
+                }
+                let n_bytes = hex_decode(t["n"].as_str().unwrap());
+                let e_bytes = hex_decode(t["e"].as_str().unwrap());
+                let signature = hex_decode(t["signature"].as_str().unwrap());
+                let message = hex_decode(t["message"].as_str().unwrap());
+
+                let recovered = rsa_x509_verify_recover(&n_bytes, &e_bytes, &signature)
+                    .unwrap_or_else(|rv| panic!("tcId {} verify-recover failed: rv={rv:#x}", t["tcId"]));
+                assert_eq!(recovered, message, "tcId {} recovered message mismatch", t["tcId"]);
+                n += 1;
+            }
+        }
+        assert_eq!(n, 78, "expected 78 verify-recover checks (the 78 passing sign vectors)");
+    }
+
+    // ── CKM_RSA_PKCS: reuses the engine's own regular-sign primitive for the
+    // sign-recover half (they're the identical operation per PKCS#11 v3.2
+    // Table 39), so this is a real round trip through independently-written
+    // sign vs. verify-recover code, not the same function checked against
+    // itself twice. ──────────────────────────────────────────────────────
+
+    #[test]
+    fn pkcs_sign_recover_then_verify_recover_round_trip() {
+        let _guard = test_lock::acquire();
+        let mut rng = rand::rngs::OsRng;
+        let sk = RsaPrivateKey::new(&mut rng, 2048).expect("keygen");
+        use rsa::traits::PublicKeyParts;
+        let pk = rsa::RsaPublicKey::from(&sk);
+        let sk_bytes = sk.to_pkcs8_der().expect("pkcs8 der").as_bytes().to_vec();
+        let n_bytes = pk.n().to_bytes_be();
+        let e_bytes = pk.e().to_bytes_be();
+
+        let msg = b"recover-mode PKCS#1 v1.5 test message";
+        let sig = sign_rsa(CKM_RSA_PKCS, &sk_bytes, msg, None).expect("sign-recover (raw RSASP1+PKCS1v15 pad)");
+        let recovered =
+            rsa_pkcs_verify_recover(&n_bytes, &e_bytes, &sig).expect("verify-recover should decode the padding");
+        assert_eq!(recovered, msg, "recovered message must equal the original");
+    }
+
+    #[test]
+    fn pkcs_verify_recover_rejects_corrupted_signature() {
+        let _guard = test_lock::acquire();
+        let mut rng = rand::rngs::OsRng;
+        let sk = RsaPrivateKey::new(&mut rng, 2048).expect("keygen");
+        use rsa::traits::PublicKeyParts;
+        let pk = rsa::RsaPublicKey::from(&sk);
+        let sk_bytes = sk.to_pkcs8_der().expect("pkcs8 der").as_bytes().to_vec();
+        let n_bytes = pk.n().to_bytes_be();
+        let e_bytes = pk.e().to_bytes_be();
+
+        let msg = b"tamper test";
+        let mut sig = sign_rsa(CKM_RSA_PKCS, &sk_bytes, msg, None).expect("sign-recover");
+        let last = sig.len() - 1;
+        sig[last] ^= 0x01; // flip one bit -> must not decode to a valid EMSA-PKCS1-v1_5 block
+        assert_eq!(
+            rsa_pkcs_verify_recover(&n_bytes, &e_bytes, &sig),
+            Err(CKR_SIGNATURE_INVALID),
+            "a corrupted signature must never recover a message"
+        );
+    }
+
+    // ── Full C-ABI round trip (Init -> Recover, single-part, via the real
+    // C_SignRecoverInit/C_SignRecover/C_VerifyRecoverInit/C_VerifyRecover
+    // entry points, not the bare helper functions above) ───────────────────
+
+    #[test]
+    fn full_c_abi_sign_recover_verify_recover_round_trip() {
+        let _guard = test_lock::acquire();
+        let _ = crate::native::session::finalize();
+        crate::native::session::init().unwrap();
+        let session =
+            crate::native::session::bootstrap_default_token(0, "so", "user", "recover-abi-test").unwrap();
+        let (pub_h, priv_h) =
+            crate::native::generate_rsa_keypair(session, 2048, b"recover-test", "recover-test").unwrap();
+        // CKA_SIGN_RECOVER/CKA_VERIFY_RECOVER default to CK_FALSE (unset) per
+        // PKCS#11 v3.2 (like CKA_SIGN itself) -- generate_rsa_keypair doesn't
+        // request them, so set them directly for this test, matching what a
+        // real caller would do via the keygen template.
+        OBJECTS.with(|o| {
+            let mut m = o.borrow_mut();
+            store_bool(m.get_mut(&priv_h).unwrap(), CKA_SIGN_RECOVER, true);
+            store_bool(m.get_mut(&pub_h).unwrap(), CKA_VERIFY_RECOVER, true);
+        });
+
+        let mut mech: [usize; 3] = [CKM_RSA_PKCS as usize, 0, 0];
+        assert_eq!(C_SignRecoverInit(session, mech.as_mut_ptr() as *mut u8, priv_h), CKR_OK);
+
+        let msg = b"full C-ABI sign-recover round trip";
+        let mut sig_len: u32 = 0;
+        // Length query first (NULL output buffer) -- must not consume the op.
+        assert_eq!(
+            C_SignRecover(session, msg.as_ptr() as *mut u8, msg.len() as u32, std::ptr::null_mut(), &mut sig_len),
+            CKR_OK
+        );
+        assert_eq!(sig_len, 256, "2048-bit key -> 256-byte signature");
+        let mut sig = vec![0u8; sig_len as usize];
+        assert_eq!(
+            C_SignRecover(session, msg.as_ptr() as *mut u8, msg.len() as u32, sig.as_mut_ptr(), &mut sig_len),
+            CKR_OK
+        );
+
+        // Operation must be OVER after one Recover call (§5.13.6, single-part-only) --
+        // a second call must see CKR_OPERATION_NOT_INITIALIZED, not CKR_OK.
+        let mut probe_len: u32 = 0;
+        assert_eq!(
+            C_SignRecover(session, msg.as_ptr() as *mut u8, msg.len() as u32, std::ptr::null_mut(), &mut probe_len),
+            CKR_OPERATION_NOT_INITIALIZED
+        );
+
+        let mut mech2: [usize; 3] = [CKM_RSA_PKCS as usize, 0, 0];
+        assert_eq!(C_VerifyRecoverInit(session, mech2.as_mut_ptr() as *mut u8, pub_h), CKR_OK);
+        let mut data_len: u32 = 0;
+        assert_eq!(
+            C_VerifyRecover(session, sig.as_mut_ptr(), sig.len() as u32, std::ptr::null_mut(), &mut data_len),
+            CKR_OK
+        );
+        let mut recovered = vec![0u8; data_len as usize];
+        assert_eq!(
+            C_VerifyRecover(session, sig.as_mut_ptr(), sig.len() as u32, recovered.as_mut_ptr(), &mut data_len),
+            CKR_OK
+        );
+        assert_eq!(recovered, msg, "full C-ABI round trip must recover the original message");
+    }
+
+    #[test]
+    fn sign_recover_init_rejects_key_without_sign_recover_attribute() {
+        // Regression guard for the CKA_SIGN_RECOVER gate itself: a freshly
+        // generated key (attribute unset, defaults CK_FALSE) must be refused.
+        let _guard = test_lock::acquire();
+        let _ = crate::native::session::finalize();
+        crate::native::session::init().unwrap();
+        let session =
+            crate::native::session::bootstrap_default_token(0, "so", "user", "recover-gate-test").unwrap();
+        let (_pub_h, priv_h) =
+            crate::native::generate_rsa_keypair(session, 2048, b"no-recover", "no-recover").unwrap();
+        let mut mech: [usize; 3] = [CKM_RSA_PKCS as usize, 0, 0];
+        assert_eq!(
+            C_SignRecoverInit(session, mech.as_mut_ptr() as *mut u8, priv_h),
+            CKR_KEY_FUNCTION_NOT_PERMITTED
+        );
+    }
+
+    #[test]
+    fn sign_recover_init_rejects_unsupported_mechanism() {
+        let _guard = test_lock::acquire();
+        let _ = crate::native::session::finalize();
+        crate::native::session::init().unwrap();
+        let session =
+            crate::native::session::bootstrap_default_token(0, "so", "user", "recover-mech-test").unwrap();
+        let (_pub_h, priv_h) =
+            crate::native::generate_rsa_keypair(session, 2048, b"mech-test", "mech-test").unwrap();
+        OBJECTS.with(|o| {
+            store_bool(o.borrow_mut().get_mut(&priv_h).unwrap(), CKA_SIGN_RECOVER, true);
+        });
+        // CKM_SHA256_RSA_PKCS is a real, supported RSA sign mechanism -- just
+        // not one of the two (RSA_PKCS/RSA_X_509) recovery permits.
+        let mut mech: [usize; 3] = [CKM_SHA256_RSA_PKCS as usize, 0, 0];
+        assert_eq!(
+            C_SignRecoverInit(session, mech.as_mut_ptr() as *mut u8, priv_h),
+            CKR_MECHANISM_INVALID
+        );
     }
 }

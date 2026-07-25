@@ -184,7 +184,9 @@ pub const CKA_DECRYPT: u32 = 0x0000_0105;
 pub const CKA_WRAP: u32 = 0x0000_0106;
 pub const CKA_UNWRAP: u32 = 0x0000_0107;
 pub const CKA_SIGN: u32 = 0x0000_0108;
+pub const CKA_SIGN_RECOVER: u32 = 0x0000_0109;
 pub const CKA_VERIFY: u32 = 0x0000_010a;
+pub const CKA_VERIFY_RECOVER: u32 = 0x0000_010b;
 pub const CKA_DERIVE: u32 = 0x0000_010c;
 pub const CKA_EXTRACTABLE: u32 = 0x0000_0162;
 pub const CKA_LOCAL: u32 = 0x0000_0163;
@@ -271,6 +273,11 @@ pub const CKM_SHA384_RSA_PKCS_PSS: u32 = 0x0000_0044;
 pub const CKM_SHA512_RSA_PKCS_PSS: u32 = 0x0000_0045;
 // Raw RSA PKCS#1 v1.5 sign/verify/encrypt (caller supplies the data; no hash).
 pub const CKM_RSA_PKCS: u32 = 0x0000_0001;
+// Raw RSA, X.509-style — no padding at all (RSASP1/RSAVP1 directly on the
+// caller's data as a big-endian integer). Added 2026-07-25 for
+// C_SignRecover/C_VerifyRecover — this mechanism previously had zero
+// plumbing anywhere in this engine (no regular Sign/Encrypt support either).
+pub const CKM_RSA_X_509: u32 = 0x0000_0003;
 // Raw RSA-PSS (caller supplies the pre-computed hash) — advertised in §6.4.
 pub const CKM_RSA_PKCS_PSS: u32 = 0x0000_000D;
 // RSA private-key CRT components (§2.1.3) — sensitive material, never extractable
@@ -633,6 +640,11 @@ pub const SUPPORTED_MECHS: &[u32] = &[
     CKM_SHA384_RSA_PKCS_PSS,
     CKM_SHA512_RSA_PKCS_PSS,
     CKM_RSA_PKCS,
+    // CKM_RSA_X_509 — added 2026-07-25, advertised for sign-recover/
+    // verify-recover ONLY (see its CKF_* flags in ffi.rs's mechanism_info).
+    // Not CKF_SIGN/CKF_VERIFY/CKF_ENCRYPT/CKF_DECRYPT — those aren't
+    // implemented for this mechanism, so they're deliberately not claimed.
+    CKM_RSA_X_509,
     CKM_RSA_PKCS_PSS,
     CKM_SHA3_384_RSA_PKCS,
     CKM_SHA3_384_RSA_PKCS_PSS,
