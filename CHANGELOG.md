@@ -6,6 +6,107 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.16.0] — 2026-07-25
+
+`kmip`/`rust`/`wasm` bump together (0.15.1 → 0.16.0); `kmip/python-client`
+bumps independently (0.8.1 → 0.8.2). OASIS published KMIP 3.0 Committee
+Specification Draft 02 (2026-05-07), Profiles v3.0 CSD02 (2026-05-21), and
+a v3.0 Usage Guide (2026-06-18), superseding CSD01 and the never-published
+WD19 draft this codebase previously tracked by hand. This release migrates
+the whole KMIP 3.0 surface (engine, wire, docs, spec-extraction tooling,
+conformance corpus, KAT provenance) onto the published CSD02 baseline.
+
+### Added
+
+- **Pre-hash ML-DSA/SLH-DSA support (§11.12 Table 552).** CSD02 defines 15
+  compound `Hash-ML-DSA-*`/`Hash-SLH-DSA-*` `CryptographicAlgorithm`
+  values, each selecting a fixed hash with no caller choice. The engine
+  already implemented the corresponding PKCS#11 mechanisms
+  (`CKM_HASH_ML_DSA_SHA512`, `CKM_HASH_SLH_DSA_{SHA256,SHA512,SHAKE128,
+  SHAKE256}`) but the KMIP layer had no way to select them. Added all 15
+  as new `KmipAlgorithm` variants and wired `Sign`'s
+  `CryptographicParameters.CryptographicAlgorithm` to select the matching
+  fixed mechanism, validated against the stored key's own algorithm
+  (a mismatched parameter set, e.g. requesting the ML-DSA-87 pre-hash
+  variant on an ML-DSA-44 key, is rejected rather than silently signed
+  under the wrong parameters).
+- **3 new `RevocationReason` members (§11.50 Table 598).** `CertificateHold`
+  (8), `RemoveFromCrl` (9), `AaCompromise` (10) — extended the enum, wire
+  encoder/decoder, and Revoke's reason picker to the full CSD02 10-member
+  set (which was also missing 2 CSD01 members, `AffiliationChanged`/
+  `PrivilegeWithdrawn`, before this). Verified against CSD02's
+  state-transition prose that none of the 3 new codes join the
+  "Compromised" family that forces immediate destruction, so the existing
+  lifecycle FSM needed no change — they fall through the default
+  Active → Deactivated path, same as `Unspecified`.
+
+### Changed
+
+- **Spec baseline: WD19 (hand-tracked delta) → CSD02 (published).** Vendored
+  the CSD02 spec/Profiles/Usage Guide documents, re-pointed
+  `extract_kmip_spec.rs` at CSD02's HTML export (closing the gap that the
+  WD19 delta file existed to work around — OASIS never published a WD19
+  HTML export), and regenerated `kmip-spec-3.0-tags-enums.json`. Fixed a
+  real extractor bug found in the process: multi-line heading/cell text
+  was concatenated without a space separator, silently mangling 5 enum
+  tables (present in the shipping CSD01-derived JSON too, never surfaced
+  because none of the affected enums were on a lookup path any code
+  exercised). Pruned every hand-maintained `SPEC_EXTRACT_PATCHES` entry
+  (Rust and Python) now supplied correctly by the regenerated JSON,
+  re-verified per entry rather than assumed. Replaced the WD19-delta
+  cross-check tests with a single-baseline completeness test
+  (`codepointPatches.local.test.ts` / Python counterpart).
+- **~480 `§6.1.x` operation citations re-based from CSD01 to CSD02
+  numbering.** CSD02 inserted Decapsulate/Encapsulate into the §6.1.x
+  operation list, shifting every subsequent section by one or two. Citations
+  were re-based using a name-driven match (a citation is only rewritten
+  when the surrounding text names the operation CSD01 actually assigned
+  to that number), not blind substitution. Added
+  `kmip/tests/section61_citation_drift.rs`, a permanent regression guard
+  using the same word-boundary-safe, shadow-aware matching rule against a
+  checked-in spec-derived JSON table (deliberately not hand-transcribed
+  into Rust source, after an earlier hand-transcription attempt silently
+  dropped one entry and shifted 43 others — caught by the table's own
+  length assertion, not by luck). Also fixed 2 citations in the sibling
+  `wasm/` crate that the original sweep's file-walk roots missed.
+  `CACP_GUIDE.md`'s citation-numbering convention statement now correctly
+  says CSD02.
+- **Stale "KMIP 3.0 WD19" language replaced with CSD02** across ~40 module
+  docs and field comments (comment-only; zero functional diff). Genuinely
+  historical references ("predates WD19", changelog-style "History:"
+  comments) were left untouched, since rewriting those to CSD02 would make
+  them factually wrong in the other direction.
+- **OASIS conformance corpus refreshed to its CSD02 revision** (2 XML
+  transcripts with a cosmetic `ResultMessage` change under Profiles
+  §4.1.1 item 3 — both comparators already treat it as optional; native
+  replay unchanged at 97 PASS/0 FAIL/5 SKIP).
+
+### Fixed
+
+- **`wasm/` crate failed to compile**, blocking every wasm-bundle rebuild:
+  a demo helper (`register_certificate_demo`) called
+  `ops::register_import_export::register()` without the `&AuthContext`
+  argument the multi-tenancy work had added to that signature. Fixed by
+  passing the same open-auth context `dispatch()` uses for
+  credential-free requests.
+- **PQC KAT provenance gap.** `ml-kem-acvp.json`, `ml-dsa-acvp.json`, and
+  `slh-dsa-acvp.json` were the only KAT families with no recorded source
+  — their `revision: "1.0"` field is the ACVP schema revision (FIPS
+  203/204 final), not a vector-set version, and was easy to mistake for
+  "known current." Added an honest `_provenance` block to each: what's
+  actually known, what isn't, and the concrete downstream consequence
+  that our ML-DSA test groups predate ACVTS's external-interface fields
+  and don't exercise this release's 15 new pre-hash algorithm values.
+  Checked for a newer OASIS/NIST vector set to adopt instead — none
+  exists yet.
+
+### Python client (`kmip/python-client`, 0.8.1 → 0.8.2)
+
+Regenerated against the CSD02 `kmip-spec-3.0-tags-enums.json` baseline
+above; `_ttlv.py`'s hand-maintained patch table shrank accordingly (see
+"Spec baseline" above — every patch the regenerated JSON now supplies
+correctly was removed, re-verified per entry).
+
 ## [0.15.1] — 2026-07-24
 
 ### Fixed
