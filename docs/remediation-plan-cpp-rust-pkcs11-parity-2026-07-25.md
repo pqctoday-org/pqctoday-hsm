@@ -1,7 +1,39 @@
 # Remediation plan — closing the C++/Rust PKCS#11 coverage gaps (2026-07-25)
 
-Companion to [`gap-analysis-cpp-rust-realignment-2026-07-25.md`](gap-analysis-cpp-rust-realignment-2026-07-25.md).
-Plan only — no code changes made. Every mechanism-level claim below is
+**Execution status (2026-07-25, branch `fix/pkcs11-v32-parity-remediation-0725`,
+committed locally, not pushed):** Items 1–3 EXECUTED and verified; item 4
+still gated on the go/no-go this doc always said it needed.
+
+- **Item 1 (ECDH cofactor, both engines)** — done as planned. C++:
+  `SoftHSM::deriveEDDSA` now rejects `CKM_ECDH1_COFACTOR_DERIVE` for
+  `CKK_EC_MONTGOMERY`/`CKK_EC_EDWARDS`; Rust: same gate in `ffi.rs`. Full
+  compliance suite green on the C++ side; 312/312 → 319/319 (adds this
+  item's 3 new tests) on the Rust side.
+- **Item 2 (RSA sign/verify-recovery, Rust)** — done as planned, including
+  wiring the real ACVP `RSA-SignaturePrimitive-2.0` vectors in as
+  `rust/kat/rsa-signature-primitive-acvp.json`. 78/78 + 12/12 negative cases
+  byte-exact, plus round-trip/gate tests. Rust suite: 319/319.
+- **Item 3 (hybrid KEM, C++)** — **pivoted during implementation**, with an
+  explicit check-in: building turned up that Rust's own hybrid KEM has no
+  PKCS#11-level mechanism to mirror (it's KMIP-layer orchestration over two
+  ordinary KEMs), and that this engine's `C_EncapsulateKey`/
+  `C_DecapsulateKey` hard-rejected everything except `CKM_ML_KEM` — so
+  `CKM_ECDH1_DERIVE` (spec-legal there per Table 78) was simply missing.
+  Closed that instead of building a new `OSSLHybridKEM` mechanism nobody
+  asked for once the premise changed. New `SoftHSM::encapsulateECDH`/
+  `decapsulateECDH`, plus a real attribute-registration gap found along the
+  way (`CKA_ENCAPSULATE`/`CKA_DECAPSULATE` were ML-KEM-object-only). Proved
+  via a new end-to-end `test_hybrid_kem()` — full X25519MLKEM768-shaped
+  round trip through real PKCS#11 calls, sender/receiver reconstruct an
+  identical 64-byte secret. Full compliance suite: 324/324, 0 regressions.
+  Full technical detail in this file's §3 update below and the commit
+  message (`feat(cpp): ECDH-as-KEM under C_EncapsulateKey/C_DecapsulateKey`).
+- **Item 4 (FrodoKEM/McEliece, C++)** — not started; still needs the
+  go/no-go this doc's §4 always flagged before any work begins.
+
+Everything below is the ORIGINAL plan text, left intact for the record
+except where a status note like the one above marks what actually
+happened. Every mechanism-level claim below is
 validated against the ratified OASIS PKCS#11 v3.2 Standard text
 (`docs/refs/pkcs11-spec-v3.2-os.pdf`, the final version — not the older CSD01
 draft this repo also carries), with inline section citations; see §5 for the
