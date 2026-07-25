@@ -76,8 +76,8 @@ f1f2312b380bb5272461b50172f10db3d52fe5be586773f2182a818e1e4e1d6b  ./oasis-kmip-3
 d96f74ebbb05f94ad61b70d345671d43323d993075ca118867221d284f054282  ./oasis-kmip-3.0/mandatory/CS-BC-M-CHACHA20-2-30.xml
 2e4aa2af05be8917dd248cad8726c922c4ad7365e3d46fa1a7317fd8b248a916  ./oasis-kmip-3.0/mandatory/CS-BC-M-CHACHA20-3-30.xml
 9535ff675ccb962efc7aad9602381594063bde4cf93d831bde93e3240ba3b4aa  ./oasis-kmip-3.0/mandatory/CS-BC-M-CHACHA20-4-30.xml
-f210ff4e10277474496622a3f50f3c4ee79f29992dbe61463b3ec88bd853a1bb  ./oasis-kmip-3.0/mandatory/CS-BC-M-CHACHA20POLY1305-1-30.xml
-3aa6c7a208a403dcd0cb6c0358d1ff5cba300eb365842e6b1573e2cea9391fa8  ./oasis-kmip-3.0/mandatory/CS-BC-M-GCM-1-30.xml
+d3aa8dc126e0637cebe157288e99f0a70d138ffe920f6d3a179a5dc5ce6a8fc1  ./oasis-kmip-3.0/mandatory/CS-BC-M-CHACHA20POLY1305-1-30.xml
+1459198e17debe5c0778f6fcc793938d096186a29806babd22b7efbe40ad24be  ./oasis-kmip-3.0/mandatory/CS-BC-M-GCM-1-30.xml
 b9fd18a2b1c5d2251c3776ee3af6b224f06c0abea428aa7798a2f8c0ae7152c8  ./oasis-kmip-3.0/mandatory/CS-BC-M-GCM-2-30.xml
 bab08023c2f2fcf2c614e4be384c16cc8f4d5cab4695784b20561a57c89f6493  ./oasis-kmip-3.0/mandatory/CS-BC-M-GCM-3-30.xml
 171a6ab8145252a12c8d3281d6b18388a1cbeaecf56a681fe1842a479983fb12  ./oasis-kmip-3.0/mandatory/CS-RNG-M-1-30.xml
