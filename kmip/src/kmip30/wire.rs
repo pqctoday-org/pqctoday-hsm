@@ -1124,6 +1124,9 @@ fn revocation_reason_code(r: RevocationReason) -> u32 {
         RevocationReason::Superseded => 5,
         RevocationReason::CessationOfOperation => 6,
         RevocationReason::PrivilegeWithdrawn => 7,
+        RevocationReason::CertificateHold => 8,
+        RevocationReason::RemoveFromCrl => 9,
+        RevocationReason::AaCompromise => 10,
     }
 }
 
@@ -2219,6 +2222,9 @@ fn decode_revoke_req(children: &[TtlvFrame]) -> Result<RevokeRequest, WireError>
                         5 => RevocationReason::Superseded,
                         6 => RevocationReason::CessationOfOperation,
                         7 => RevocationReason::PrivilegeWithdrawn,
+                        8 => RevocationReason::CertificateHold,
+                        9 => RevocationReason::RemoveFromCrl,
+                        10 => RevocationReason::AaCompromise,
                         other => return Err(WireError::UnknownEnum { field: "Revocation Reason Code", value: other }),
                     };
                 }
@@ -6409,6 +6415,51 @@ mod tests {
         assert_eq!(ttlv_decode_key_value(&encoded).unwrap(), material);
         // Garbage fails decode instead of yielding fake material.
         assert!(ttlv_decode_key_value(&[0xde, 0xad, 0xbe, 0xef]).is_err());
+    }
+
+    fn revoke_req_frame(reason_code: u32) -> Vec<TtlvFrame> {
+        vec![
+            TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString("u".into())),
+            TtlvFrame::new(
+                Tag(tags::RevocationReason),
+                Value::Structure(vec![TtlvFrame::new(
+                    Tag(tags::RevocationReasonCode),
+                    Value::Enumeration(reason_code),
+                )]),
+            ),
+        ]
+    }
+
+    /// CSD02 Table 598's 3 new Revocation Reason Code members (0x08-0x0A —
+    /// CertificateHold/RemoveFromCrl/AaCompromise, absent from CSD01) decode
+    /// correctly and round-trip back through the encoder unchanged.
+    #[test]
+    fn revoke_req_decodes_csd02_revocation_reasons() {
+        for (code, expected) in [
+            (8, RevocationReason::CertificateHold),
+            (9, RevocationReason::RemoveFromCrl),
+            (10, RevocationReason::AaCompromise),
+        ] {
+            let req = decode_revoke_req(&revoke_req_frame(code)).unwrap();
+            assert_eq!(req.reason, expected, "decoding code {code}");
+            assert_eq!(
+                revocation_reason_code(req.reason),
+                code,
+                "re-encoding {expected:?} must reproduce the same wire value"
+            );
+        }
+    }
+
+    /// The boundary past the last real member (0x0A AaCompromise) must
+    /// still be rejected, not silently coerced — same discipline as
+    /// `k8_decode_key_block_rejects_unknown_format_no_raw_coercion` below.
+    #[test]
+    fn revoke_req_rejects_unknown_revocation_reason_past_csd02_range() {
+        let err = decode_revoke_req(&revoke_req_frame(11)).unwrap_err();
+        assert!(
+            matches!(err, WireError::UnknownEnum { field: "Revocation Reason Code", value: 11 }),
+            "got {err:?}"
+        );
     }
 
     #[test]

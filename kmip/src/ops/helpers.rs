@@ -271,6 +271,25 @@ pub fn canonical_name(a: KmipAlgorithm) -> String {
         SlhDsaShake192f => "SLH-DSA-SHAKE-192f",
         SlhDsaShake256s => "SLH-DSA-SHAKE-256s",
         SlhDsaShake256f => "SLH-DSA-SHAKE-256f",
+        // CSD02 pre-hash Sign-time selectors (§11.12) — never a CreateKeyPair
+        // target, only reachable via `CryptographicParameters.CryptographicAlgorithm`
+        // on Sign/SignatureVerify. See the identical arms in
+        // `ops/create_key_pair.rs::canonical_name`.
+        HashSlhDsaSha2_128sWithSha256 => "Hash-SLH-DSA-SHA2-128s-with-SHA256",
+        HashSlhDsaSha2_128fWithSha256 => "Hash-SLH-DSA-SHA2-128f-with-SHA256",
+        HashSlhDsaSha2_192sWithSha512 => "Hash-SLH-DSA-SHA2-192s-with-SHA512",
+        HashSlhDsaSha2_192fWithSha512 => "Hash-SLH-DSA-SHA2-192f-with-SHA512",
+        HashSlhDsaSha2_256sWithSha512 => "Hash-SLH-DSA-SHA2-256s-with-SHA512",
+        HashSlhDsaSha2_256fWithSha512 => "Hash-SLH-DSA-SHA2-256f-with-SHA512",
+        HashSlhDsaShake128sWithShake128 => "Hash-SLH-DSA-SHAKE-128s-with-SHAKE128",
+        HashSlhDsaShake128fWithShake128 => "Hash-SLH-DSA-SHAKE-128f-with-SHAKE128",
+        HashSlhDsaShake192sWithShake256 => "Hash-SLH-DSA-SHAKE-192s-with-SHAKE256",
+        HashSlhDsaShake192fWithShake256 => "Hash-SLH-DSA-SHAKE-192f-with-SHAKE256",
+        HashSlhDsaShake256sWithShake256 => "Hash-SLH-DSA-SHAKE-256s-with-SHAKE256",
+        HashSlhDsaShake256fWithShake256 => "Hash-SLH-DSA-SHAKE-256f-with-SHAKE256",
+        HashMlDsa44WithSha512 => "Hash-ML-DSA-44-with-SHA512",
+        HashMlDsa65WithSha512 => "Hash-ML-DSA-65-with-SHA512",
+        HashMlDsa87WithSha512 => "Hash-ML-DSA-87-with-SHA512",
         X25519MlKem768 => "X25519MLKEM768",
         SecP256r1MlKem768 => "SecP256r1MLKEM768",
         SecP384r1MlKem1024 => "SecP384r1MLKEM1024",
@@ -733,6 +752,60 @@ pub fn native_sign_mech_with_params(
     use crate::kmip30::HashingAlgorithm as H;
     use softhsmrustv3::constants as c;
     use KmipAlgorithm::*;
+
+    // CSD02 §11.12 pre-hash selectors (K23) — a client sets
+    // `CryptographicParameters.CryptographicAlgorithm` to one of the 15
+    // `Hash-ML-DSA-*-with-SHA512` / `Hash-SLH-DSA-*-with-*` values to invoke
+    // FIPS 204/205's own pre-hash signing mode, alongside the stored key's
+    // ordinary base algorithm (`a`) — these are Sign-time selectors, not a
+    // second key type (see the enum variants' doc comment in algos.rs). Each
+    // one names both a specific parameter set AND its one fixed hash (no
+    // caller choice, unlike RSA/ECDSA's `HashingAlgorithm` below) — reject
+    // a mismatch against the stored key's actual parameter set rather than
+    // silently signing under the wrong one.
+    if let Some(requested) = cp.and_then(|p| p.cryptographic_algorithm) {
+        let prehash = match requested {
+            HashMlDsa44WithSha512 => Some((MlDsa44, c::CKM_HASH_ML_DSA_SHA512)),
+            HashMlDsa65WithSha512 => Some((MlDsa65, c::CKM_HASH_ML_DSA_SHA512)),
+            HashMlDsa87WithSha512 => Some((MlDsa87, c::CKM_HASH_ML_DSA_SHA512)),
+            HashSlhDsaSha2_128sWithSha256 => Some((SlhDsaSha2_128s, c::CKM_HASH_SLH_DSA_SHA256)),
+            HashSlhDsaSha2_128fWithSha256 => Some((SlhDsaSha2_128f, c::CKM_HASH_SLH_DSA_SHA256)),
+            HashSlhDsaSha2_192sWithSha512 => Some((SlhDsaSha2_192s, c::CKM_HASH_SLH_DSA_SHA512)),
+            HashSlhDsaSha2_192fWithSha512 => Some((SlhDsaSha2_192f, c::CKM_HASH_SLH_DSA_SHA512)),
+            HashSlhDsaSha2_256sWithSha512 => Some((SlhDsaSha2_256s, c::CKM_HASH_SLH_DSA_SHA512)),
+            HashSlhDsaSha2_256fWithSha512 => Some((SlhDsaSha2_256f, c::CKM_HASH_SLH_DSA_SHA512)),
+            HashSlhDsaShake128sWithShake128 => {
+                Some((SlhDsaShake128s, c::CKM_HASH_SLH_DSA_SHAKE128))
+            }
+            HashSlhDsaShake128fWithShake128 => {
+                Some((SlhDsaShake128f, c::CKM_HASH_SLH_DSA_SHAKE128))
+            }
+            HashSlhDsaShake192sWithShake256 => {
+                Some((SlhDsaShake192s, c::CKM_HASH_SLH_DSA_SHAKE256))
+            }
+            HashSlhDsaShake192fWithShake256 => {
+                Some((SlhDsaShake192f, c::CKM_HASH_SLH_DSA_SHAKE256))
+            }
+            HashSlhDsaShake256sWithShake256 => {
+                Some((SlhDsaShake256s, c::CKM_HASH_SLH_DSA_SHAKE256))
+            }
+            HashSlhDsaShake256fWithShake256 => {
+                Some((SlhDsaShake256f, c::CKM_HASH_SLH_DSA_SHAKE256))
+            }
+            _ => None,
+        };
+        if let Some((expected_base, mech)) = prehash {
+            if a != expected_base {
+                return Err(KmipError::unsupported_cryptographic_parameters(format!(
+                    "Sign/Verify: CryptographicParameters.CryptographicAlgorithm \
+                     {requested:?} requires a {expected_base:?} key, but this object \
+                     is {a:?}",
+                )));
+            }
+            return Ok(mech);
+        }
+    }
+
     let hash = cp.and_then(|p| p.hashing_algorithm);
     let unsupported_hash = |family: &str| {
         KmipError::unsupported_cryptographic_parameters(format!(

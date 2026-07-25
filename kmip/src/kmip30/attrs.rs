@@ -172,7 +172,12 @@ impl State {
 // ── RevocationReason (KMIP 3.0 §10.2 Revocation Reason Code enum) ──────────
 
 /// `Revocation Reason Code` — required field on `Revoke` op requests.
-/// Subset shown is the one exercised by the v0.1 op set; spec has more.
+/// CertificateHold/RemoveFromCrl/AaCompromise (0x08-0x0A) are new in CSD02
+/// (Table 598 §11.50) — absent from CSD01. None of them join the
+/// `KeyCompromise`/`CaCompromise` "Compromised" family the §3 state-machine
+/// prose defines (verified against CSD02 §3 transitions #3/#5/#8/#10, which
+/// name only Key Compromise / CA Compromise) — informational reason codes,
+/// no new state-transition semantics.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum RevocationReason {
     Unspecified           = 0x01,
@@ -182,6 +187,9 @@ pub enum RevocationReason {
     Superseded            = 0x05,
     CessationOfOperation  = 0x06,
     PrivilegeWithdrawn    = 0x07,
+    CertificateHold       = 0x08,
+    RemoveFromCrl         = 0x09,
+    AaCompromise          = 0x0a,
 }
 
 impl RevocationReason {

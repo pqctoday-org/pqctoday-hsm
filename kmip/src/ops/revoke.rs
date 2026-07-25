@@ -219,6 +219,32 @@ mod tests {
         assert_eq!(resp.state, State::Compromised);
     }
 
+    /// CSD02 Table 598's 3 new Revocation Reason Code members (0x08-0x0A,
+    /// absent from CSD01) join the default "everything but Key/CA
+    /// Compromise" path — verified against CSD02 §3 transitions #3/#5/#8/#10,
+    /// which name only Key Compromise / CA Compromise for the Compromised
+    /// transition. AaCompromise in particular has "Compromise" in its name
+    /// but is NOT part of that family per the spec text.
+    #[test]
+    fn csd02_revocation_reasons_yield_deactivated_not_compromised() {
+        for (uid, reason) in [
+            ("ch", RevocationReason::CertificateHold),
+            ("rc", RevocationReason::RemoveFromCrl),
+            ("aa", RevocationReason::AaCompromise),
+        ] {
+            let d = deps_with(ALLOW);
+            active(&d, uid);
+            let resp = revoke(
+                &d,
+                RevokeRequest { uid: uid.into(), reason },
+                &crate::server::auth::AuthContext::open(),
+                "c",
+            )
+            .unwrap();
+            assert_eq!(resp.state, State::Deactivated, "reason {reason:?}");
+        }
+    }
+
     /// KMIP 3.0 §3 transition #8: Deactivated → Compromised via
     /// Revoke(KeyCompromise). BL-M-7 step #3 pins this — the registered
     /// key has ActivationDate + DeactivationDate both in the past, so
