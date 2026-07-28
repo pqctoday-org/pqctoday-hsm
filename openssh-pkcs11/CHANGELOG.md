@@ -7,6 +7,46 @@ file. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/
 
 ## [Unreleased]
 
+### Added — SLH-DSA-SHA2-128s SSH authentication, realigning this connector with the sandbox (2026-07-27)
+
+This connector's patch set had silently fallen behind the copy it was forked
+from, leaving every build that consumes it with less SSH PQC capability than
+the sandbox's own network image.
+
+- **`ssh-slhdsa.c` + the full SLH-DSA patch block are now here.**
+  `patches/apply_mldsa_patches.py` gains 12 further patch steps implementing
+  SLH-DSA-SHA2-128s host-key and user authentication
+  (`draft-josefsson-ssh-sphincs-02`), alongside the existing ML-DSA-65
+  (`draft-sfluhrer-ssh-mldsa-06`) support. Signature verification runs through
+  OpenSSL's `SLH-DSA-SHA2-128s` provider (requires OpenSSL ≥ 3.5; the WASM
+  build already links 3.6.x).
+- **`build-wasm.sh` now copies `ssh-slhdsa.c` alongside `ssh-mldsa.c`.** This is
+  required, not cosmetic: the patch script's S1 step rewrites `Makefile.in` to
+  reference both `ssh-mldsa.o` and `ssh-slhdsa.o`, so omitting the source file
+  fails the build at link time rather than at patch time.
+
+**Why it drifted.** This connector was imported from `pqctoday-sandbox` on
+2026-04-18, one day after ML-DSA-65 SSH auth landed there. The sandbox added
+SLH-DSA on 2026-05-25; this copy was never updated, so it stayed ML-DSA-only
+for roughly nine weeks with nothing recording the difference.
+
+**Guarding against a recurrence.** `patches/apply_mldsa_patches.py` is now
+**byte-identical** to `pqctoday-sandbox/docker/apply_mldsa_patches.py`. A plain
+`diff` between the two files is the drift check — please keep them identical
+when either side changes.
+
+**Verification.** Applied against a clean `V_10_3_P1` checkout: 24 edits,
+exit 0. All nine touched files (`Makefile.in`, `myproposal.h`, `sshkey.h`,
+`sshkey.c`, `ssh-pkcs11.c`, `sshd-auth.c`, `sshd.c`, `ssh-mldsa.c`,
+`ssh-slhdsa.c`) are byte-identical to a sandbox-patched tree. Not yet compiled
+or WASM-rebuilt.
+
+**Known follow-up.** On a future OpenSSH 10.4 bump, the `sshkey.h` anchor in
+step 3 needs widening to `\s+KEY_ED25519_SK_CERT,\n(?:\s+KEY_\w+,\n)*\s+KEY_UNSPEC`
+— upstream 10.4 inserts `KEY_MLDSA44_ED25519[_CERT]` between the current anchor
+lines. Because the two copies are now identical, that fix can be made once and
+copied across.
+
 ### Added — selectable KEX + host-key profile and an in-WASM PKCS#11 trace tap (2026-06-27)
 
 For the hub playground integration:

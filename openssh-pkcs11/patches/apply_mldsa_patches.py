@@ -320,5 +320,282 @@ replace_once(
     "\t\tcase KEY_ECDSA_SK:\n\t\tcase KEY_ED25519_SK:\n\t\t/* draft-sfluhrer-ssh-mldsa-06 */\n\t\tcase KEY_MLDSA_65:\n\t\t\tif (have_agent || key != NULL)\n\t\t\t\tsensitive_data.have_ssh2_key = 1;\n\t\t\tbreak;"
 )
 
-print("All patches applied successfully.")
-print("Next: autoreconf -i && ./configure ... && make")
+# ══════════════════════════════════════════════════════════════════════════════
+# SLH-DSA-SHA2-128s patches (draft-josefsson-ssh-sphincs-02)
+# These target the ML-DSA-patched file state produced above.
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── S1. Makefile.in — add ssh-slhdsa.o ───────────────────────────────────────
+replace_once(
+    "Makefile.in",
+    r"\tssh-mldsa\.o msg\.o",
+    r"	ssh-mldsa.o ssh-slhdsa.o msg.o"
+)
+
+# ── S2. myproposal.h — add ssh-slh-dsa-sha2-128s to default PK alg list ──────
+replace_once(
+    "myproposal.h",
+    r'"ssh-mldsa-65," \\\n\t"ssh-ed25519-cert-v01@openssh\.com,"',
+    '"ssh-mldsa-65," \\\n\t"ssh-slh-dsa-sha2-128s," \\\n\t"ssh-ed25519-cert-v01@openssh.com,"'
+)
+
+# ── S3. sshkey.h — add KEY_SLH_DSA_SHA2_128S after KEY_MLDSA_65 ──────────────
+replace_once(
+    "sshkey.h",
+    r"\tKEY_MLDSA_65,\n\s+KEY_UNSPEC",
+    "\tKEY_MLDSA_65,\n\tKEY_SLH_DSA_SHA2_128S,\n\tKEY_UNSPEC"
+)
+
+# ── S4. sshkey.c — extern + register sshkey_slhdsa_sha2_128s_impl ────────────
+# 4a: extern declaration after ML-DSA extern
+replace_once(
+    "sshkey.c",
+    r"extern const struct sshkey_impl sshkey_mldsa65_impl;\n",
+    "extern const struct sshkey_impl sshkey_mldsa65_impl;\nextern const struct sshkey_impl sshkey_slhdsa_sha2_128s_impl;\n"
+)
+# 4b: register after ML-DSA entry in keyimpls[]
+replace_once(
+    "sshkey.c",
+    r"&sshkey_mldsa65_impl,\n# ifdef ENABLE_SK",
+    "&sshkey_mldsa65_impl,\n\n\t&sshkey_slhdsa_sha2_128s_impl,\n# ifdef ENABLE_SK"
+)
+
+# ── S5. ssh-pkcs11.c — SLH-DSA constants + fetch + sign + dispatch ───────────
+PKCS11_SLH_CONSTANTS = r"""
+/* SLH-DSA PKCS#11 v3.2 -- draft-josefsson-ssh-sphincs-02
+ * Constants from SoftHSMv3 src/lib/pkcs11/pkcs11t.h */
+#ifndef CKK_SLH_DSA
+#define CKK_SLH_DSA              0x0000004bUL
+#endif
+#ifndef CKM_SLH_DSA_KEY_PAIR_GEN
+#define CKM_SLH_DSA_KEY_PAIR_GEN 0x0000002dUL
+#endif
+#ifndef CKM_SLH_DSA
+#define CKM_SLH_DSA              0x0000002eUL
+#endif
+/* FIPS 205 §10 Table 2 + draft s3 */
+#define SSH_SLHDSA128S_PK_SZ  32
+#define SSH_SLHDSA128S_SIG_SZ 7856
+
+"""
+
+FETCH_SLHDSA = r"""
+/*
+ * pkcs11_fetch_slhdsa_pubkey -- draft-josefsson-ssh-sphincs-02 s4
+ *
+ * Two-path pubkey extraction (softhsmv3 populates both):
+ *   1. CKA_PUBLIC_KEY_INFO -- DER SubjectPublicKeyInfo (PKCS#11 v3.2 §4.9).
+ *      Parsed via d2i_PUBKEY(); OpenSSL 3.5+ handles SLH-DSA-SHA2-128s SPKI.
+ *   2. CKA_VALUE -- raw 32-byte pk (PKCS#11 v3.2 §6.X SLH-DSA).
+ *      Fallback: imported via EVP_PKEY_new_raw_public_key_ex(..., "SLH-DSA-SHA2-128s").
+ */
+static struct sshkey *
+pkcs11_fetch_slhdsa_pubkey(struct pkcs11_provider *p, CK_ULONG slotidx,
+    CK_OBJECT_HANDLE *obj)
+{
+	CK_ATTRIBUTE		 key_attr[3];
+	CK_SESSION_HANDLE	 session;
+	CK_FUNCTION_LIST	*f = NULL;
+	CK_RV			 rv;
+	struct sshkey		*key = NULL;
+	EVP_PKEY		*pkey = NULL;
+	int			 success = -1, i;
+	const unsigned char	*spki_p;
+
+	memset(&key_attr, 0, sizeof(key_attr));
+	key_attr[0].type = CKA_ID;
+	key_attr[1].type = CKA_PUBLIC_KEY_INFO;
+	key_attr[2].type = CKA_VALUE;
+
+	session = p->slotinfo[slotidx].session;
+	f = p->function_list;
+
+	rv = f->C_GetAttributeValue(session, *obj, key_attr, 3);
+	if (rv != CKR_OK && rv != CKR_ATTRIBUTE_TYPE_INVALID) {
+		error("C_GetAttributeValue (probe) failed: %lu", rv);
+		return NULL;
+	}
+	if (key_attr[1].ulValueLen == (CK_ULONG)-1)
+		key_attr[1].ulValueLen = 0;
+	if (key_attr[2].ulValueLen == (CK_ULONG)-1)
+		key_attr[2].ulValueLen = 0;
+	if (key_attr[1].ulValueLen == 0 && key_attr[2].ulValueLen == 0) {
+		error_f("no SLH-DSA pubkey material on token object");
+		return NULL;
+	}
+	for (i = 0; i < 3; i++)
+		if (key_attr[i].ulValueLen > 0)
+			key_attr[i].pValue = xcalloc(1, key_attr[i].ulValueLen);
+	rv = f->C_GetAttributeValue(session, *obj, key_attr, 3);
+	if (rv != CKR_OK && rv != CKR_ATTRIBUTE_TYPE_INVALID) {
+		error("C_GetAttributeValue (fetch) failed: %lu", rv);
+		goto fail;
+	}
+
+	/* Path 1: DER SPKI */
+	if (key_attr[1].ulValueLen > 0) {
+		spki_p = (const unsigned char *)key_attr[1].pValue;
+		pkey = d2i_PUBKEY(NULL, &spki_p,
+		    (long)key_attr[1].ulValueLen);
+		if (pkey == NULL)
+			debug_f("d2i_PUBKEY failed; trying CKA_VALUE fallback");
+	}
+	/* Path 2: raw 32-byte pk fallback */
+	if (pkey == NULL && key_attr[2].ulValueLen == SSH_SLHDSA128S_PK_SZ) {
+		pkey = EVP_PKEY_new_raw_public_key_ex(NULL, "SLH-DSA-SHA2-128s",
+		    NULL, key_attr[2].pValue, key_attr[2].ulValueLen);
+	}
+	if (pkey == NULL) {
+		error_f("could not materialise SLH-DSA-SHA2-128s pubkey "
+		    "(spki=%lu bytes, raw=%lu bytes)",
+		    (u_long)key_attr[1].ulValueLen,
+		    (u_long)key_attr[2].ulValueLen);
+		goto fail;
+	}
+	if ((key = sshkey_new(KEY_UNSPEC)) == NULL)
+		fatal_f("sshkey_new failed");
+	EVP_PKEY_free(key->pkey);
+	key->pkey = pkey;
+	pkey = NULL;
+	key->type = KEY_SLH_DSA_SHA2_128S;
+	key->flags |= SSHKEY_FLAG_EXT;
+	if (pkcs11_record_key(p, slotidx, &key_attr[0], key))
+		goto fail;
+	success = 0;
+fail:
+	if (success != 0) {
+		EVP_PKEY_free(pkey);
+		sshkey_free(key);
+		key = NULL;
+	}
+	for (i = 0; i < 3; i++)
+		free(key_attr[i].pValue);
+	return key;
+}
+
+"""
+
+SIGN_SLHDSA = r"""
+/*
+ * pkcs11_sign_slhdsa -- draft-josefsson-ssh-sphincs-02
+ *
+ * s5. Signature Algorithm
+ *   Pure SLH-DSA (FIPS 205 §9.2), empty context string.
+ *   CKM_SLH_DSA (0x2e) NULL_PTR param: full message to C_Sign.
+ *
+ * s6. Signature Format
+ *   string  "ssh-slh-dsa-sha2-128s"
+ *   string  signature  (7856 raw bytes)
+ */
+static int
+pkcs11_sign_slhdsa(struct sshkey *key,
+    u_char **sigp, size_t *lenp,
+    const u_char *data, size_t datalen,
+    const char *alg, const char *sk_provider,
+    const char *sk_pin, u_int compat)
+{
+	struct pkcs11_key	*k11;
+	struct pkcs11_slotinfo	*si;
+	CK_FUNCTION_LIST	*f;
+	CK_MECHANISM		 mech = { CKM_SLH_DSA, NULL_PTR, 0 };
+	CK_ULONG		 slen = SSH_SLHDSA128S_SIG_SZ;
+	CK_RV			 rv;
+	u_char			*sig = NULL;
+	struct sshbuf		*b = NULL;
+	int			 ret = SSH_ERR_INTERNAL_ERROR;
+
+	if (sigp != NULL) *sigp = NULL;
+	if (lenp != NULL) *lenp = 0;
+	if ((k11 = pkcs11_lookup_key(key)) == NULL) {
+		error_f("no key found");
+		return SSH_ERR_KEY_NOT_FOUND;
+	}
+	if (pkcs11_get_key(k11, CKM_SLH_DSA) == -1)
+		return SSH_ERR_AGENT_FAILURE;
+	f = k11->provider->function_list;
+	si = &k11->provider->slotinfo[k11->slotidx];
+	sig = xmalloc(slen);
+	rv = f->C_Sign(si->session, (CK_BYTE_PTR)data, (CK_ULONG)datalen,
+	    sig, &slen);
+	if (rv != CKR_OK) {
+		error("C_Sign failed: %lu", rv);
+		goto done;
+	}
+	if (slen != SSH_SLHDSA128S_SIG_SZ) {
+		error_f("bad signature length: %lu (expected %d)",
+		    (u_long)slen, SSH_SLHDSA128S_SIG_SZ);
+		goto done;
+	}
+	if ((b = sshbuf_new()) == NULL)
+		fatal_f("sshbuf_new failed");
+	if (sshbuf_put_cstring(b, "ssh-slh-dsa-sha2-128s") != 0 ||
+	    sshbuf_put_string(b, sig, slen) != 0)
+		fatal_f("sshbuf_put failed");
+	if (sigp != NULL) {
+		*sigp = xmalloc(sshbuf_len(b));
+		memcpy(*sigp, sshbuf_ptr(b), sshbuf_len(b));
+	}
+	if (lenp != NULL)
+		*lenp = sshbuf_len(b);
+	ret = 0;
+done:
+	sshbuf_free(b);
+	freezero(sig, slen);
+	return ret;
+}
+
+"""
+
+# S5a: insert SLH-DSA constants after ML-DSA constants block
+replace_once(
+    "ssh-pkcs11.c",
+    r"#define SSH_MLDSA65_SIG_SZ 3309\n\n",
+    "#define SSH_MLDSA65_SIG_SZ 3309\n\n" + PKCS11_SLH_CONSTANTS
+)
+
+# S5b: insert pkcs11_fetch_slhdsa_pubkey after pkcs11_fetch_mldsa_pubkey
+replace_once(
+    "ssh-pkcs11.c",
+    r"\n#\s*ifdef WITH_OPENSSL /\* libcrypto needed for certificate parsing \*/",
+    "\n" + FETCH_SLHDSA + "# ifdef WITH_OPENSSL /* libcrypto needed for certificate parsing */"
+)
+
+# S5c: add CKK_SLH_DSA case in pkcs11_fetch_keys() after CKK_ML_DSA case
+replace_once(
+    "ssh-pkcs11.c",
+    r"\t\t/\* draft-sfluhrer-ssh-mldsa-06 \*/\n\t\tcase CKK_ML_DSA:\n\t\t\tkey = pkcs11_fetch_mldsa_pubkey\(p, slotidx, &obj\);\n\t\t\tbreak;\n\t\tdefault:",
+    "\t\t/* draft-sfluhrer-ssh-mldsa-06 */\n\t\tcase CKK_ML_DSA:\n\t\t\tkey = pkcs11_fetch_mldsa_pubkey(p, slotidx, &obj);\n\t\t\tbreak;\n\t\t/* draft-josefsson-ssh-sphincs-02 */\n\t\tcase CKK_SLH_DSA:\n\t\t\tkey = pkcs11_fetch_slhdsa_pubkey(p, slotidx, &obj);\n\t\t\tbreak;\n\t\tdefault:"
+)
+
+# S5d: insert pkcs11_sign_slhdsa before pkcs11_sign()
+replace_once(
+    "ssh-pkcs11.c",
+    r"\nint\npkcs11_sign\(struct sshkey \*key,",
+    "\n" + SIGN_SLHDSA + "int\npkcs11_sign(struct sshkey *key,"
+)
+
+# S5e: add KEY_SLH_DSA_SHA2_128S case in pkcs11_sign() after ML-DSA case
+replace_once(
+    "ssh-pkcs11.c",
+    r"\t/\* draft-sfluhrer-ssh-mldsa-06 \*/\n\tcase KEY_MLDSA_65:\n\t\treturn pkcs11_sign_mldsa\(key, sigp, lenp, data, datalen,\n\t\t    alg, sk_provider, sk_pin, compat\);\n\tdefault:",
+    "\t/* draft-sfluhrer-ssh-mldsa-06 */\n\tcase KEY_MLDSA_65:\n\t\treturn pkcs11_sign_mldsa(key, sigp, lenp, data, datalen,\n\t\t    alg, sk_provider, sk_pin, compat);\n\t/* draft-josefsson-ssh-sphincs-02 */\n\tcase KEY_SLH_DSA_SHA2_128S:\n\t\treturn pkcs11_sign_slhdsa(key, sigp, lenp, data, datalen,\n\t\t    alg, sk_provider, sk_pin, compat);\n\tdefault:"
+)
+
+# ── S6. sshd-auth.c — add KEY_SLH_DSA_SHA2_128S to list_hostkey_types() ──────
+replace_once(
+    "sshd-auth.c",
+    r"\t\t/\* draft-sfluhrer-ssh-mldsa-06: agent-backed ML-DSA-65 host key \*/\n\t\tcase KEY_MLDSA_65:\n\t\t\tappend_hostkey_type\(b, sshkey_ssh_name\(key\)\);\n\t\t\tbreak;",
+    "\t\t/* draft-sfluhrer-ssh-mldsa-06: agent-backed ML-DSA-65 host key */\n\t\tcase KEY_MLDSA_65:\n\t\t/* draft-josefsson-ssh-sphincs-02: agent-backed SLH-DSA-SHA2-128s host key */\n\t\tcase KEY_SLH_DSA_SHA2_128S:\n\t\t\tappend_hostkey_type(b, sshkey_ssh_name(key));\n\t\t\tbreak;"
+)
+
+# ── S7. sshd.c — add KEY_SLH_DSA_SHA2_128S to have_ssh2_key switch ───────────
+replace_once(
+    "sshd.c",
+    r"\t\t/\* draft-sfluhrer-ssh-mldsa-06 \*/\n\t\tcase KEY_MLDSA_65:\n\t\t\tif \(have_agent \|\| key != NULL\)\n\t\t\t\tsensitive_data\.have_ssh2_key = 1;\n\t\t\tbreak;",
+    "\t\t/* draft-sfluhrer-ssh-mldsa-06 */\n\t\tcase KEY_MLDSA_65:\n\t\t/* draft-josefsson-ssh-sphincs-02 */\n\t\tcase KEY_SLH_DSA_SHA2_128S:\n\t\t\tif (have_agent || key != NULL)\n\t\t\t\tsensitive_data.have_ssh2_key = 1;\n\t\t\tbreak;"
+)
+
+print("All patches applied successfully (ML-DSA-65 + SLH-DSA-SHA2-128s).")
+print("Next: ensure ssh-mldsa.c AND ssh-slhdsa.c are in the source tree "
+      "(Makefile.in now references both objects), then "
+      "autoreconf -i && ./configure ... && make")
