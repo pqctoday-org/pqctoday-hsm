@@ -6,6 +6,50 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.19.0] — 2026-07-29
+
+### Changed
+
+- **OpenSSL WASM bumped 3.6.2 → 3.6.3** (drop-in CVE/bugfix patch, same
+  Configure line). Deliberately NOT OpenSSL 4.0: a same-day evidence-backed
+  audit (`pqctoday-sandbox/docs/pqc-upgrade-plan-07272026.md`) built 3.6.2
+  and 4.0.1 side-by-side with this project's exact flags and found zero net
+  PQC gain (only unused `curveSM2`/`curveSM2MLKEM768` + an `ML-DSA-MU`
+  digest) against 5 of 7 downstream tools breaking (removed `ENGINE_*` API,
+  SONAME `.so.3`→`.so.4`). 3.6.x is also not OpenSSL's LTS branch (EOLs
+  2026-11-01 vs 3.5.x LTS to 2030-04-08, which already carries every PQC
+  algorithm this project uses) — migrating branches was deferred, not
+  rejected, as a separate decision from this patch bump.
+
+### Fixed
+
+- **`softhsmv3`'s CMake WASM target broke under emsdk 6.0.4**: Emscripten's
+  linker now defaults `SIDE_MODULE=1` whenever `-shared` is on the command
+  line (which CMake always passes for a `SHARED` library target). This
+  target was never a WASM dynamic-linking side module — it's a standalone
+  `MODULARIZE` JS+WASM blob (`createSoftHSMModule`) — so `EXPORTED_FUNCTIONS`
+  silently became a no-op and `_free` could no longer be resolved as an
+  export. Fixed with an explicit `-sSIDE_MODULE=0` in
+  `src/lib/CMakeLists.txt`. `tests/smoke-wasm.mjs` passes, including a live
+  ML-KEM-768 encapsulate/decapsulate round-trip.
+- **`openssh-pkcs11`'s WASM build failed against OpenSSL 3.6.x**: `cipher.c`
+  calls `EVP_CIPHER_CTX_get_iv`/`_set_iv`, names OpenSSL renamed to
+  `_get_updated_iv`/dropped entirely before any 3.x release (resolving a
+  LibreSSL clash). `configure`'s `AC_CHECK_FUNC` cross-compile test falsely
+  reported both as present (Emscripten's linker doesn't hard-fail on
+  undefined symbols the way a native linker does), so OpenSSH's own
+  `openbsd-compat` fallback was skipped. Added both to the existing
+  leaked-`HAVE_*`-defines patch list in
+  `openssh-pkcs11/scripts/build-wasm.sh` (same fix shape as the pre-existing
+  musl false-positives there, different root cause). `sm1-smoke.cjs`
+  (ML-DSA-65 host-key + user-key auth over a real in-process
+  PKCS#11-backed SSH handshake) passes end-to-end against the rebuilt
+  artifacts, which now also link in `ssh-slhdsa.o` from the v0.18.0
+  backport for the first time.
+- Also required installing `autoconf`/`automake` locally (`brew install
+  autoconf automake`) — `openssh-pkcs11`'s build depends on `autoreconf`,
+  which wasn't present.
+
 ## [0.18.0] — 2026-07-27
 
 ### Fixed

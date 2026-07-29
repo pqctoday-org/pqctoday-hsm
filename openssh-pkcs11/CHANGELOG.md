@@ -38,8 +38,15 @@ when either side changes.
 **Verification.** Applied against a clean `V_10_3_P1` checkout: 24 edits,
 exit 0. All nine touched files (`Makefile.in`, `myproposal.h`, `sshkey.h`,
 `sshkey.c`, `ssh-pkcs11.c`, `sshd-auth.c`, `sshd.c`, `ssh-mldsa.c`,
-`ssh-slhdsa.c`) are byte-identical to a sandbox-patched tree. Not yet compiled
-or WASM-rebuilt.
+`ssh-slhdsa.c`) are byte-identical to a sandbox-patched tree.
+
+**Update (2026-07-29): WASM-rebuilt.** `ssh-mldsa.o`/`ssh-slhdsa.o` both link
+cleanly into `dist/openssh-server.wasm` and `dist/openssh-client.wasm` as
+part of the toolchain update below (see the new `[0.19.0]` entry in the root
+`CHANGELOG.md`). `sm1-smoke.cjs` (ML-DSA-65 host-key + user-key auth over a
+real in-process PKCS#11-backed handshake) passes end-to-end. SLH-DSA itself
+is compiled and linked but has no dedicated runtime smoke test yet — that's
+a distinct follow-up, not part of this rebuild.
 
 **Known follow-up.** On a future OpenSSH 10.4 bump, the `sshkey.h` anchor in
 step 3 needs widening to `\s+KEY_ED25519_SK_CERT,\n(?:\s+KEY_\w+,\n)*\s+KEY_UNSPEC`

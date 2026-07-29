@@ -140,6 +140,15 @@ if(EMSCRIPTEN)
     string(CONCAT PKCS11_EXPORTS_STR ${PKCS11_EXPORTS})
 
     target_link_options(${PROJECT_NAME} PRIVATE
+        # 2026-07-29: explicit opt-out, required since emsdk 6.0.4. Emscripten's
+        # linker now defaults SIDE_MODULE=1 whenever `-shared` is on the command
+        # line (CMake always passes `-shared` for a SHARED library target), which
+        # broke this build: EXPORTED_FUNCTIONS became a no-op, "_free" could no
+        # longer be resolved as an export, and only a bare .wasm was emitted (no
+        # .js). This target was never a WASM dynamic-linking side module — it's a
+        # standalone MODULARIZE JS+WASM blob (createSoftHSMModule) — so force the
+        # old "main module" style linking back on.
+        "-sSIDE_MODULE=0"
         "-sMODULARIZE=1"
         "-sEXPORT_NAME=createSoftHSMModule"
         "-sEXPORTED_FUNCTIONS=[${PKCS11_EXPORTS_STR}]"

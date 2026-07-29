@@ -1,15 +1,28 @@
 #!/usr/bin/env bash
-# build-openssl-wasm.sh — Build OpenSSL 3.6.2 as a static WASM library.
+# build-openssl-wasm.sh — Build OpenSSL 3.6.3 as a static WASM library.
 #
 # Output: deps/openssl-wasm/lib/libcrypto.a  (+ headers in deps/openssl-wasm/include/)
 # Idempotent: skips the build if the output already exists.
 #
 # Requirements: emcc 3.x+ in PATH.
+#
+# 2026-07-29: bumped 3.6.2 -> 3.6.3 (drop-in CVE/bugfix patch release, same
+# Configure line, no API change). NOT a jump to OpenSSL 4: a same-day
+# evidence-backed audit (pqctoday-sandbox/docs/pqc-upgrade-plan-07272026.md)
+# built 3.6.2 and 4.0.1 side-by-side with this project's exact Configure
+# flags and found 4.0's only additions are curveSM2/curveSM2MLKEM768
+# (unused Chinese national crypto) + an ML-DSA-MU digest — SLH-DSA tables
+# byte-identical, net PQC gain zero — while breaking 5 of 7 downstream
+# consumers (removed ENGINE_* API, SONAME .so.3->.so.4). Also note: 3.6.x
+# is NOT the OpenSSL LTS branch (EOLs 2026-11-01); 3.5.x is LTS to
+# 2030-04-08 and already carries every PQC algorithm this project uses.
+# Migrating branches was explicitly deferred, not rejected — flagged as a
+# separate decision from this patch bump.
 
 set -euo pipefail
 
-OSSL_VERSION=3.6.2
-OSSL_SHA256="aaf51a1fe064384f811daeaeb4ec4dce7340ec8bd893027eee676af31e83a04f"
+OSSL_VERSION=3.6.3
+OSSL_SHA256="243a86649cf6f23eeb6a2ff2456e09e5d77dd9018a54d3d96b0c6bdd6ba6c7f1"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"

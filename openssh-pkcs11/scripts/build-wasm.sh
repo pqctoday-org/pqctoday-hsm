@@ -211,11 +211,26 @@ mkdir -p "$ROOT/build/ssh-wasm"
 # implementation / no-op for each. Every function listed has an openbsd-compat source:
 # getrrsetbyname.c, setproctitle.c, daemon.c, bsd-getpeereid.c, bsd-misc.c (pledge),
 # bsd-closefrom.c (close_range), base64.c (b64_*), blowfish.c (Blowfish_*/blf_enc).
+#
+# 2026-07-29 (OpenSSL 3.6.3 bump): EVP_CIPHER_CTX_GET_IV / _SET_IV join this list for
+# a different reason — not a musl false positive, an OpenSSL one. OpenSSL renamed
+# EVP_CIPHER_CTX_get_iv/set_iv to EVP_CIPHER_CTX_get_updated_iv (pre-3.0 release,
+# resolving a LibreSSL name clash); the old names haven't existed in any real OpenSSL
+# 3.x release. configure's AC_CHECK_FUNC test still reports HAVE_EVP_CIPHER_CTX_GET_IV=1
+# because Emscripten's cross-compile link step doesn't hard-fail on the undefined
+# symbol the way a native linker would — same "leaked positive" failure mode as the
+# musl case above, different underlying cause. Root-caused by diffing the exact
+# symbol against `emnm libcrypto.a` (absent) vs the real OpenSSL 3.6.3 source (also
+# absent) before landing on this; openssh-portable's own openbsd-compat/openssl-compat.h
+# already has the correct fallback (alias to get_updated_iv, or its own
+# libressl-api-compat.c implementation for set_iv) — it just needs HAVE_* cleared to
+# engage it, exactly like the pre-existing entries below.
 LEAKED_HAVE_DEFINES=(
     GETRRSETBYNAME SETPROCTITLE
     DAEMON GETPEEREID PLEDGE CLOSE_RANGE
     B64_NTOP B64_PTON __B64_NTOP __B64_PTON
     BLF_ENC BLOWFISH_INITSTATE BLOWFISH_EXPANDSTATE BLOWFISH_EXPAND0STATE BLOWFISH_STREAM2WORD
+    EVP_CIPHER_CTX_GET_IV EVP_CIPHER_CTX_SET_IV
 )
 for cfg in "$ROOT/build/sshd-wasm/config.h" "$ROOT/build/ssh-wasm/config.h"; do
     [[ -f "$cfg" ]] || continue
