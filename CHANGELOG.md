@@ -6,6 +6,29 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.20.0] — 2026-07-29
+
+### Added
+
+- **`openssh-pkcs11`'s WASM sshd shim gained a third host-key profile:
+  SLH-DSA-SHA2-128s.** The v0.18.0 backport landed `ssh-slhdsa.c` and the
+  PKCS#11 provider wiring (`pkcs11_fetch_slhdsa_pubkey`/`pkcs11_sign_slhdsa`
+  in `ssh-pkcs11.c`) but the WASM test harness (`sshd_wasm_main.c`) only
+  ever drove ML-DSA-65 or ECDSA P-256 — SLH-DSA had never actually been
+  exercised end-to-end, only compiled. Extended `sm1_provision`,
+  `sm1_prove_sign`, and `drive_kex`'s host-key selection with a third
+  branch (`CKK_SLH_DSA`/`CKM_SLH_DSA_KEY_PAIR_GEN`/`CKM_SLH_DSA`/
+  `CKP_SLH_DSA_SHA2_128S`, `KEY_SLH_DSA_SHA2_128S`), selectable via
+  `set_handshake_config(kex, "ssh-slh-dsa-sha2-128s")` — no OpenSSH source
+  changes needed, since v0.18.0 already did that part.
+- **New `sm5-slhdsa-smoke.cjs`**, mirroring `sm1-smoke.cjs`: a real
+  in-process PKCS#11-backed SSH handshake with an SLH-DSA-SHA2-128s host
+  key generated on the token. Passes end-to-end — host-key exchange-hash
+  signature via `C_Sign` (7856 raw bytes, FIPS 205 §10 Table 2), NEWKEYS,
+  and publickey userauth to `USERAUTH_SUCCESS` with the user key also
+  signed via `C_Sign` and verified by `sshkey_verify`. `sm1-smoke.cjs`
+  (ML-DSA-65) reverified as a regression check — unchanged, still passes.
+
 ## [0.19.0] — 2026-07-29
 
 ### Changed

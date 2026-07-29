@@ -81,6 +81,20 @@ static CK_OBJECT_HANDLE   g_host_key = CK_INVALID_HANDLE;
 #ifndef CKK_ML_DSA
 #define CKK_ML_DSA 0x0000004aUL
 #endif
+
+/* SLH-DSA constants — confirmed against src/lib/pkcs11/pkcs11t.h. */
+#ifndef CKM_SLH_DSA_KEY_PAIR_GEN
+#define CKM_SLH_DSA_KEY_PAIR_GEN 0x0000002dUL
+#endif
+#ifndef CKM_SLH_DSA
+#define CKM_SLH_DSA 0x0000002eUL
+#endif
+#ifndef CKK_SLH_DSA
+#define CKK_SLH_DSA 0x0000004bUL
+#endif
+#ifndef CKP_SLH_DSA_SHA2_128S
+#define CKP_SLH_DSA_SHA2_128S 0x00000001UL
+#endif
 #ifndef CKA_PARAMETER_SET
 #define CKA_PARAMETER_SET 0x0000061dUL
 #endif
@@ -116,7 +130,7 @@ static const CK_BYTE EC_PARAMS_P256[] = {
 /* ── Handshake config (set from JS via set_handshake_config before __wrap_main) ──
  * Selects the KEX and the host-key profile. Defaults reproduce the original
  * hardcoded PQC run (mlkem768x25519-sha256 + ssh-mldsa-65). */
-enum { HOSTKEY_MLDSA65 = 0, HOSTKEY_ECDSA_P256 = 1 };
+enum { HOSTKEY_MLDSA65 = 0, HOSTKEY_ECDSA_P256 = 1, HOSTKEY_SLHDSA_128S = 2 };
 static char g_cfg_kex[64]     = "mlkem768x25519-sha256";
 static char g_cfg_hostalg[40] = "ssh-mldsa-65";
 static int  g_cfg_keytype     = HOSTKEY_MLDSA65;
@@ -127,8 +141,12 @@ void set_handshake_config(const char *kex, const char *hostalg) {
                            g_cfg_kex[sizeof g_cfg_kex - 1] = '\0'; }
     if (hostalg && *hostalg) { strncpy(g_cfg_hostalg, hostalg, sizeof g_cfg_hostalg - 1);
                                g_cfg_hostalg[sizeof g_cfg_hostalg - 1] = '\0'; }
-    g_cfg_keytype = (strcmp(g_cfg_hostalg, "ecdsa-sha2-nistp256") == 0)
-                        ? HOSTKEY_ECDSA_P256 : HOSTKEY_MLDSA65;
+    if (strcmp(g_cfg_hostalg, "ecdsa-sha2-nistp256") == 0)
+        g_cfg_keytype = HOSTKEY_ECDSA_P256;
+    else if (strcmp(g_cfg_hostalg, "ssh-slh-dsa-sha2-128s") == 0)
+        g_cfg_keytype = HOSTKEY_SLHDSA_128S;
+    else
+        g_cfg_keytype = HOSTKEY_MLDSA65;
 }
 
 static void emit_rv(const char *ctx, CK_RV rv) {
@@ -188,7 +206,8 @@ static int pkcs11_bootstrap(void) {
     return 0;
 }
 
-/* Provision an ML-DSA-65 host key (CKA_ID="sshd-host-key") into the open token. */
+/* Provision a host key (CKA_ID="sshd-host-key") into the open token, in the
+ * profile selected by g_cfg_keytype (ML-DSA-65 / ECDSA P-256 / SLH-DSA-SHA2-128s). */
 static int sm1_provision(void) {
     CK_OBJECT_CLASS pub_cls  = CKO_PUBLIC_KEY;
     CK_OBJECT_CLASS priv_cls = CKO_PRIVATE_KEY;
@@ -198,7 +217,7 @@ static int sm1_provision(void) {
 
     /* Key-type-specific bits. */
     CK_KEY_TYPE  kt;
-    CK_ULONG     pset = CKP_ML_DSA_65;       /* ML-DSA only */
+    CK_ULONG     pset = CKP_ML_DSA_65;       /* ML-DSA or SLH-DSA parameter set; set per-branch below */
     CK_MECHANISM gen;
     const char  *trace_key;
     long         trace_mech;
@@ -222,8 +241,23 @@ static int sm1_provision(void) {
             { CKA_ID,        (void*)host_id, sizeof host_id },
         };
         memcpy(pub_tmpl, p, sizeof p); npub = 6;
+    } else if (g_cfg_keytype == HOSTKEY_SLHDSA_128S) {
+        kt = CKK_SLH_DSA;
+        pset = CKP_SLH_DSA_SHA2_128S;
+        gen.mechanism = CKM_SLH_DSA_KEY_PAIR_GEN; gen.pParameter = NULL_PTR; gen.ulParameterLen = 0;
+        trace_key = "SLH-DSA-SHA2-128s host key"; trace_mech = (long)CKM_SLH_DSA_KEY_PAIR_GEN;
+        CK_ATTRIBUTE p[] = {
+            { CKA_CLASS,         &pub_cls, sizeof pub_cls },
+            { CKA_KEY_TYPE,      &kt,      sizeof kt      },
+            { CKA_TOKEN,         &yes,     sizeof yes     },
+            { CKA_VERIFY,        &yes,     sizeof yes     },
+            { CKA_PARAMETER_SET, &pset,    sizeof pset    },
+            { CKA_ID,            (void*)host_id, sizeof host_id },
+        };
+        memcpy(pub_tmpl, p, sizeof p); npub = 6;
     } else {
         kt = CKK_ML_DSA;
+        pset = CKP_ML_DSA_65;
         gen.mechanism = CKM_ML_DSA_KEY_PAIR_GEN; gen.pParameter = NULL_PTR; gen.ulParameterLen = 0;
         trace_key = "ML-DSA-65 host key"; trace_mech = (long)CKM_ML_DSA_KEY_PAIR_GEN;
         CK_ATTRIBUTE p[] = {
@@ -281,10 +315,12 @@ static int pkcs11_find_host_key(void) {
 
 /* SM1 proof: one single-part C_Sign with the token host key (mechanism per the
  * selected host-key profile). For ECDSA the input is a 32-byte digest; for
- * ML-DSA (pure) it is the message itself. */
+ * ML-DSA and SLH-DSA (both pure signature schemes) it is the message itself. */
 static int sm1_prove_sign(void) {
-    CK_MECHANISM mech = { (g_cfg_keytype == HOSTKEY_ECDSA_P256) ? CKM_ECDSA : CKM_ML_DSA,
-                          NULL_PTR, 0 };
+    CK_MECHANISM_TYPE sign_mech = CKM_ML_DSA;
+    if (g_cfg_keytype == HOSTKEY_ECDSA_P256) sign_mech = CKM_ECDSA;
+    else if (g_cfg_keytype == HOSTKEY_SLHDSA_128S) sign_mech = CKM_SLH_DSA;
+    CK_MECHANISM mech = { sign_mech, NULL_PTR, 0 };
     CK_BYTE data[32]; memset(data, 0xA5, sizeof data);
     CK_RV rv = g_p11->C_SignInit(g_session, &mech, g_host_key);
     if (rv != CKR_OK) { emit_rv("C_SignInit", rv); return -1; }
@@ -431,7 +467,9 @@ static int drive_kex(void) {
     if (nkeys <= 0) { emit_rv("pkcs11_add_provider", (CK_RV)(long)nkeys); return -1; }
     { char b[48]; snprintf(b, sizeof b, "{\"nkeys\":%d}", nkeys); wasm_emit_event("provider", b); }
     /* Pick the host key matching the configured profile. */
-    int want_type = (g_cfg_keytype == HOSTKEY_ECDSA_P256) ? KEY_ECDSA : KEY_MLDSA_65;
+    int want_type = KEY_MLDSA_65;
+    if (g_cfg_keytype == HOSTKEY_ECDSA_P256) want_type = KEY_ECDSA;
+    else if (g_cfg_keytype == HOSTKEY_SLHDSA_128S) want_type = KEY_SLH_DSA_SHA2_128S;
     for (i = 0; i < nkeys; i++) {
         if (keys[i] != NULL && keys[i]->type == want_type) { hostkey = keys[i]; break; }
     }

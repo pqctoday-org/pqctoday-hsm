@@ -42,11 +42,21 @@ exit 0. All nine touched files (`Makefile.in`, `myproposal.h`, `sshkey.h`,
 
 **Update (2026-07-29): WASM-rebuilt.** `ssh-mldsa.o`/`ssh-slhdsa.o` both link
 cleanly into `dist/openssh-server.wasm` and `dist/openssh-client.wasm` as
-part of the toolchain update below (see the new `[0.19.0]` entry in the root
+part of the toolchain update below (see the `[0.19.0]` entry in the root
 `CHANGELOG.md`). `sm1-smoke.cjs` (ML-DSA-65 host-key + user-key auth over a
-real in-process PKCS#11-backed handshake) passes end-to-end. SLH-DSA itself
-is compiled and linked but has no dedicated runtime smoke test yet — that's
-a distinct follow-up, not part of this rebuild.
+real in-process PKCS#11-backed handshake) passes end-to-end.
+
+**Update (2026-07-29): SLH-DSA now runtime-verified, not just compiled.**
+The WASM test harness (`wasm-shims/sshd_wasm_main.c`) only ever drove
+ML-DSA-65 or ECDSA P-256 — SLH-DSA had no path to actually run. Added a
+third host-key profile (`HOSTKEY_SLHDSA_128S`) covering key generation,
+signing, and host-key selection, selectable via
+`set_handshake_config(kex, "ssh-slh-dsa-sha2-128s")`. New
+`sm5-slhdsa-smoke.cjs` passes end-to-end: host key generated on the token,
+KEX exchange-hash signed via `C_Sign` (7856 raw bytes, FIPS 205 §10 Table
+2), NEWKEYS reached, publickey userauth to `USERAUTH_SUCCESS` with the user
+key also token-signed and server-verified. See the `[0.20.0]` root
+changelog entry for the full detail.
 
 **Known follow-up.** On a future OpenSSH 10.4 bump, the `sshkey.h` anchor in
 step 3 needs widening to `\s+KEY_ED25519_SK_CERT,\n(?:\s+KEY_\w+,\n)*\s+KEY_UNSPEC`
