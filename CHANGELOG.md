@@ -6,6 +6,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.18.0] — 2026-07-27
+
+### Fixed
+
+- **`openssh-pkcs11` connector realigned with the sandbox on SLH-DSA SSH
+  auth.** The connector's patch set had silently drifted ML-DSA-only for
+  about nine weeks after being forked from `pqctoday-sandbox`, which had
+  since added SLH-DSA-SHA2-128s host-key/user authentication. Backported
+  `ssh-slhdsa.c` and the corresponding 12 patch steps in
+  `apply_mldsa_patches.py`, which is now byte-identical to the sandbox's
+  copy (the drift guard going forward: a plain `diff` between the two).
+  Verified by applying the patches against a clean `V_10_3_P1` checkout —
+  all nine touched files byte-identical to a sandbox-patched tree. **Not
+  yet WASM-recompiled**; `dist/openssh-server.wasm` / `openssh-client.wasm`
+  still reflect the pre-backport patch set until the next WASM build.
+  See `openssh-pkcs11/CHANGELOG.md` for full detail.
+
 ## [0.17.0] — 2026-07-25
 
 C++/Rust PKCS#11 v3.2 parity work, prompted by a full coverage audit of
