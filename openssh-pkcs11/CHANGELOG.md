@@ -53,7 +53,7 @@ third host-key profile (`HOSTKEY_SLHDSA_128S`) covering key generation,
 signing, and host-key selection, selectable via
 `set_handshake_config(kex, "ssh-slh-dsa-sha2-128s")`. New
 `sm5-slhdsa-smoke.cjs` passes end-to-end: host key generated on the token,
-KEX exchange-hash signed via `C_Sign` (7856 raw bytes, FIPS 205 §10 Table
+KEX exchange-hash signed via `C_Sign` (7856 raw bytes, FIPS 205 §11 Table
 2), NEWKEYS reached, publickey userauth to `USERAUTH_SUCCESS` with the user
 key also token-signed and server-verified. See the `[0.20.0]` root
 changelog entry for the full detail.

@@ -373,7 +373,7 @@ PKCS11_SLH_CONSTANTS = r"""
 #ifndef CKM_SLH_DSA
 #define CKM_SLH_DSA              0x0000002eUL
 #endif
-/* FIPS 205 §10 Table 2 + draft s3 */
+/* FIPS 205 §11 Table 2 + draft s3 */
 #define SSH_SLHDSA128S_PK_SZ  32
 #define SSH_SLHDSA128S_SIG_SZ 7856
 

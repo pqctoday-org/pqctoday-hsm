@@ -24,7 +24,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **New `sm5-slhdsa-smoke.cjs`**, mirroring `sm1-smoke.cjs`: a real
   in-process PKCS#11-backed SSH handshake with an SLH-DSA-SHA2-128s host
   key generated on the token. Passes end-to-end — host-key exchange-hash
-  signature via `C_Sign` (7856 raw bytes, FIPS 205 §10 Table 2), NEWKEYS,
+  signature via `C_Sign` (7856 raw bytes, FIPS 205 §11 Table 2), NEWKEYS,
   and publickey userauth to `USERAUTH_SUCCESS` with the user key also
   signed via `C_Sign` and verified by `sshkey_verify`. `sm1-smoke.cjs`
   (ML-DSA-65) reverified as a regression check — unchanged, still passes.

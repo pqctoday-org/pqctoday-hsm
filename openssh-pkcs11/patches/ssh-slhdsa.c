@@ -9,7 +9,7 @@
  *
  * s4. Public Key Format
  *   string  "ssh-slh-dsa-sha2-128s"
- *   string  key     (32 raw bytes; SLH-DSA.KeyGen pk per FIPS 205 §10.1)
+ *   string  key     (32 raw bytes; SLH-DSA.KeyGen pk per FIPS 205 §9.1)
  *
  * s5. Signature Algorithm
  *   Pure SLH-DSA (FIPS 205 §9.2). Context string always empty.
@@ -17,7 +17,7 @@
  *
  * s6. Signature Format
  *   string  "ssh-slh-dsa-sha2-128s"
- *   string  signature   (7856 raw bytes; FIPS 205 §10 Table 2)
+ *   string  signature   (7856 raw bytes; FIPS 205 §11 Table 2)
  *
  * s8. Verification Algorithm
  *   Step 1: Reject if sig length != 7856 bytes for SLH-DSA-SHA2-128S.
@@ -34,7 +34,7 @@
 #include "sshbuf.h"
 #include "sshkey.h"
 
-/* FIPS 205 §10 Table 2 -- SLH-DSA-SHA2-128s */
+/* FIPS 205 §11 Table 2 -- SLH-DSA-SHA2-128s */
 #define SSH_SLHDSA128S_PK_SZ  32
 #define SSH_SLHDSA128S_SIG_SZ 7856
 

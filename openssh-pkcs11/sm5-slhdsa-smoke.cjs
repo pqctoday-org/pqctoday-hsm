@@ -7,7 +7,7 @@ const path = require('path')
 const assert = require('assert')
 const SERVER_JS = path.join(__dirname, 'dist', 'openssh-server.js')
 
-const SLHDSA128S_SIG_LEN = 7856 // FIPS 205 §10 Table 2, raw signature bytes
+const SLHDSA128S_SIG_LEN = 7856 // FIPS 205 §11 Table 2, raw signature bytes
 
 let factory = require(SERVER_JS)
 if (typeof factory !== 'function' && factory && typeof factory.default === 'function') {
