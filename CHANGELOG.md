@@ -6,6 +6,25 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.20.1] — 2026-07-30
+
+### Fixed
+
+- **Three wrong FIPS 205 / PKCS#11 v3.2 section citations, comment- and
+  doc-only.** The SLH-DSA-SHA2-128s signature/public-key size citations
+  (7856-byte signature, 32-byte public key) pointed at FIPS 205 §10 Table 2
+  and §10.1 — the published spec's parameter table and PK.seed||PK.root
+  layout actually live at §11 Table 2 and §9.1 (`openssh-pkcs11/patches/
+  ssh-slhdsa.c`, `apply_mldsa_patches.py`, `sm5-slhdsa-smoke.cjs`, both
+  root and `openssh-pkcs11/` CHANGELOG.md). Separately, `SoftHSM_slots.cpp`
+  and `vendor_mechanisms.h` cited PKCS#11 v3.2 §6.14 (AES CMAC in the
+  ratified TOC) for the HSS/XMSS mechanism defines and for
+  `CKR_KEY_EXHAUSTED`; the real sections are §6.65 (HSS) / §6.66 (XMSS),
+  and `CKR_KEY_EXHAUSTED` is a §5.1 error-code assignment, not a mechanism
+  section. Byte values, behavior, and test results were always correct —
+  citations only. Found in lockstep with the same sweep in
+  `pqctoday-sandbox`.
+
 ## [0.20.0] — 2026-07-29
 
 ### Added
