@@ -6,6 +6,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.20.2] — 2026-07-30
+
+### Security
+
+- **`rust/Cargo.lock`: `cmov` 0.5.2 → 0.5.4 and `rand` 0.8.5 → 0.8.6, 0.10.0 →
+  0.10.1** — GitHub Dependabot alerts #11 (aarch64 `cmov`/`cmov_eq` can
+  produce wrong results if the high bits of a register are set) and #9/#1
+  (`rand` unsound when paired with a custom logger calling `rand::rng()`).
+  `kmip/`, `wasm/`, and `openmls-provider/` were already on the patched
+  versions — only `rust/` (softhsmrustv3 + bench-harness workspace) was
+  behind. Precise patch-level bumps within the existing semver range, no
+  Cargo.toml change; `cargo check --workspace` clean.
+
 ## [0.20.1] — 2026-07-30
 
 ### Fixed
