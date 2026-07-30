@@ -585,7 +585,7 @@ void SoftHSM::prepareSupportedMechanisms(std::map<std::string, CK_MECHANISM_TYPE
 	t["CKM_ML_KEM"]			= CKM_ML_KEM;
 
 	// LMS / HSS stateful hash-based signatures (G10)
-	// CKM_HSS / CKM_HSS_KEY_PAIR_GEN are standard PKCS#11 v3.2 §6.14
+	// CKM_HSS / CKM_HSS_KEY_PAIR_GEN are standard PKCS#11 v3.2 §6.65
 	t["CKM_HSS_KEY_PAIR_GEN"]	= CKM_HSS_KEY_PAIR_GEN;
 	t["CKM_HSS"]			= CKM_HSS;
 	t["CKM_XMSS_KEY_PAIR_GEN"]      = 0x00004034;
@@ -1111,7 +1111,7 @@ CK_RV SoftHSM::C_GetMechanismInfo(CK_SLOT_ID slotID, CK_MECHANISM_TYPE type, CK_
 			pInfo->flags = CKF_ENCAPSULATE | CKF_DECAPSULATE;
 			break;
 		// LMS / HSS stateful hash-based signatures (G10)
-		// Standard PKCS#11 v3.2 §6.14 entries (HSS + keygen)
+		// Standard PKCS#11 v3.2 §6.65 entries (HSS + keygen)
 		case CKM_HSS_KEY_PAIR_GEN:
 			pInfo->ulMinKeySize = 0;
 			pInfo->ulMaxKeySize = 0;

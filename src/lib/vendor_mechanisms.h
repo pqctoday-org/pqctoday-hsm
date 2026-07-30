@@ -86,7 +86,7 @@
 #define CKP_LMOTS_SHAKE_N24_W4   0x0000000FUL
 #define CKP_LMOTS_SHAKE_N24_W8   0x00000010UL
 
-// ── Standard PKCS#11 v3.2 §6.14: HSS/LMS/XMSS mechanisms ────────────────────
+// ── Standard PKCS#11 v3.2 §6.65 (HSS) / §6.66 (XMSS) mechanisms ────────────────────
 
 #define CKM_HSS_KEY_PAIR_GEN   0x00004032UL
 #define CKM_HSS                0x00004033UL
@@ -98,7 +98,7 @@
 #define CKK_XMSSMT             0x00000048UL
 
 // Standard CKR extension
-#define CKR_KEY_EXHAUSTED      0x00000203UL  /* PKCS#11 v3.2 §6.14 */
+#define CKR_KEY_EXHAUSTED      0x00000203UL  /* PKCS#11 v3.2 §5.1 error code */
 
 // ── HSS key generation parameters (CKM_HSS_KEY_PAIR_GEN mechanism parameter) ─
 
