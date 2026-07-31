@@ -601,6 +601,7 @@ struct CK_C_INITIALIZE_ARGS {
     pReserved: CK_VOID_PTR,
 }
 
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn C_Initialize(pInitArgs: CK_VOID_PTR) -> CK_RV {
     if pInitArgs.is_null() {
         return rv(crate::ffi::C_Initialize(std::ptr::null_mut()));
@@ -612,10 +613,12 @@ pub unsafe extern "C" fn C_Initialize(pInitArgs: CK_VOID_PTR) -> CK_RV {
     rv(crate::ffi::C_Initialize(std::ptr::null_mut()))
 }
 
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn C_Finalize(pReserved: CK_VOID_PTR) -> CK_RV {
     rv(crate::ffi::C_Finalize(pReserved as *mut u8))
 }
 
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn C_GetInfo(pInfo: *mut CK_INFO) -> CK_RV {
     if pInfo.is_null() {
         return rv(CKR_ARGUMENTS_BAD);
@@ -637,6 +640,7 @@ pub unsafe extern "C" fn C_GetInfo(pInfo: *mut CK_INFO) -> CK_RV {
 
 // C_GetFunctionList — defined below with the statics (exported symbol).
 
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn C_GetSlotList(
     tokenPresent: CK_BBOOL,
     pSlotList: CK_SLOT_ID_PTR,
@@ -647,6 +651,7 @@ pub unsafe extern "C" fn C_GetSlotList(
     })
 }
 
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn C_GetSlotInfo(slotID: CK_SLOT_ID, pInfo: *mut CK_SLOT_INFO) -> CK_RV {
     let slot = narrow_or!(slotID, CKR_SLOT_ID_INVALID);
     if pInfo.is_null() {
@@ -666,6 +671,7 @@ pub unsafe extern "C" fn C_GetSlotInfo(slotID: CK_SLOT_ID, pInfo: *mut CK_SLOT_I
     rv(code)
 }
 
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn C_GetTokenInfo(slotID: CK_SLOT_ID, pInfo: *mut CK_TOKEN_INFO) -> CK_RV {
     let slot = narrow_or!(slotID, CKR_SLOT_ID_INVALID);
     if pInfo.is_null() {
@@ -701,6 +707,7 @@ pub unsafe extern "C" fn C_GetTokenInfo(slotID: CK_SLOT_ID, pInfo: *mut CK_TOKEN
     rv(code)
 }
 
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn C_GetMechanismList(
     slotID: CK_SLOT_ID,
     pMechanismList: CK_MECHANISM_TYPE_PTR,
@@ -712,6 +719,7 @@ pub unsafe extern "C" fn C_GetMechanismList(
     })
 }
 
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn C_GetMechanismInfo(
     slotID: CK_SLOT_ID,
     mechType: CK_MECHANISM_TYPE,
@@ -734,6 +742,7 @@ pub unsafe extern "C" fn C_GetMechanismInfo(
     rv(code)
 }
 
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn C_InitToken(
     slotID: CK_SLOT_ID,
     pPin: CK_UTF8CHAR_PTR,
@@ -748,6 +757,7 @@ pub unsafe extern "C" fn C_InitToken(
 shim_sess_buf!(C_InitPIN);
 shim_sess_buf_buf!(C_SetPIN);
 
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn C_OpenSession(
     slotID: CK_SLOT_ID,
     flags: CK_FLAGS,
@@ -766,11 +776,13 @@ pub unsafe extern "C" fn C_OpenSession(
 
 shim_session_only!(C_CloseSession);
 
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn C_CloseAllSessions(slotID: CK_SLOT_ID) -> CK_RV {
     let slot = narrow_or!(slotID, CKR_SLOT_ID_INVALID);
     rv(crate::ffi::C_CloseAllSessions(slot))
 }
 
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn C_GetSessionInfo(
     hSession: CK_SESSION_HANDLE,
     pInfo: *mut CK_SESSION_INFO,
@@ -794,6 +806,7 @@ pub unsafe extern "C" fn C_GetSessionInfo(
 
 shim_sess_outlen!(C_GetOperationState);
 
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn C_SetOperationState(
     hSession: CK_SESSION_HANDLE,
     pOperationState: CK_BYTE_PTR,
@@ -808,6 +821,7 @@ pub unsafe extern "C" fn C_SetOperationState(
     rv(crate::ffi::C_SetOperationState(h, pOperationState, l, he, ha))
 }
 
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn C_Login(
     hSession: CK_SESSION_HANDLE,
     userType: CK_USER_TYPE,
@@ -822,6 +836,7 @@ pub unsafe extern "C" fn C_Login(
 
 shim_session_only!(C_Logout);
 
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn C_CreateObject(
     hSession: CK_SESSION_HANDLE,
     pTemplate: CK_ATTRIBUTE_PTR,
@@ -835,6 +850,7 @@ pub unsafe extern "C" fn C_CreateObject(
     })
 }
 
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn C_CopyObject(
     hSession: CK_SESSION_HANDLE,
     hObject: CK_OBJECT_HANDLE,
@@ -850,6 +866,7 @@ pub unsafe extern "C" fn C_CopyObject(
     })
 }
 
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn C_DestroyObject(
     hSession: CK_SESSION_HANDLE,
     hObject: CK_OBJECT_HANDLE,
@@ -859,6 +876,7 @@ pub unsafe extern "C" fn C_DestroyObject(
     rv(crate::ffi::C_DestroyObject(h, ho))
 }
 
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn C_GetObjectSize(
     hSession: CK_SESSION_HANDLE,
     hObject: CK_OBJECT_HANDLE,
@@ -877,6 +895,7 @@ pub unsafe extern "C" fn C_GetObjectSize(
     rv(code)
 }
 
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn C_GetAttributeValue(
     hSession: CK_SESSION_HANDLE,
     hObject: CK_OBJECT_HANDLE,
@@ -902,6 +921,7 @@ pub unsafe extern "C" fn C_GetAttributeValue(
     rv(code)
 }
 
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn C_SetAttributeValue(
     hSession: CK_SESSION_HANDLE,
     hObject: CK_OBJECT_HANDLE,
@@ -914,6 +934,7 @@ pub unsafe extern "C" fn C_SetAttributeValue(
     rv(crate::ffi::C_SetAttributeValue(h, ho, tmpl_ptr(&mut tmpl), n))
 }
 
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn C_FindObjectsInit(
     hSession: CK_SESSION_HANDLE,
     pTemplate: CK_ATTRIBUTE_PTR,
@@ -924,6 +945,7 @@ pub unsafe extern "C" fn C_FindObjectsInit(
     rv(crate::ffi::C_FindObjectsInit(h, tmpl_ptr(&mut tmpl), n))
 }
 
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn C_FindObjects(
     hSession: CK_SESSION_HANDLE,
     phObject: CK_OBJECT_HANDLE_PTR,
@@ -958,6 +980,7 @@ shim_mech_key!(C_DecryptInit);
 shim_sess_in_outlen!(C_Decrypt, C_DecryptUpdate);
 shim_sess_outlen!(C_DecryptFinal);
 
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn C_DigestInit(
     hSession: CK_SESSION_HANDLE,
     pMechanism: CK_MECHANISM_PTR,
@@ -970,6 +993,7 @@ pub unsafe extern "C" fn C_DigestInit(
 shim_sess_in_outlen!(C_Digest);
 shim_sess_buf!(C_DigestUpdate);
 
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn C_DigestKey(hSession: CK_SESSION_HANDLE, hKey: CK_OBJECT_HANDLE) -> CK_RV {
     let h = narrow_or!(hSession, CKR_SESSION_HANDLE_INVALID);
     let k = narrow_or!(hKey, CKR_OBJECT_HANDLE_INVALID);
@@ -998,6 +1022,7 @@ shim_sess_in_outlen!(
     C_DecryptVerifyUpdate,
 );
 
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn C_GenerateKey(
     hSession: CK_SESSION_HANDLE,
     pMechanism: CK_MECHANISM_PTR,
@@ -1013,6 +1038,7 @@ pub unsafe extern "C" fn C_GenerateKey(
     })
 }
 
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn C_GenerateKeyPair(
     hSession: CK_SESSION_HANDLE,
     pMechanism: CK_MECHANISM_PTR,
@@ -1049,6 +1075,7 @@ pub unsafe extern "C" fn C_GenerateKeyPair(
     rv(code)
 }
 
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn C_WrapKey(
     hSession: CK_SESSION_HANDLE,
     pMechanism: CK_MECHANISM_PTR,
@@ -1066,6 +1093,7 @@ pub unsafe extern "C" fn C_WrapKey(
     })
 }
 
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn C_UnwrapKey(
     hSession: CK_SESSION_HANDLE,
     pMechanism: CK_MECHANISM_PTR,
@@ -1095,6 +1123,7 @@ pub unsafe extern "C" fn C_UnwrapKey(
     })
 }
 
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn C_DeriveKey(
     hSession: CK_SESSION_HANDLE,
     pMechanism: CK_MECHANISM_PTR,
@@ -1115,6 +1144,7 @@ pub unsafe extern "C" fn C_DeriveKey(
 shim_sess_buf!(C_SeedRandom, C_GenerateRandom);
 shim_session_only!(C_GetFunctionStatus, C_CancelFunction);
 
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn C_WaitForSlotEvent(
     flags: CK_FLAGS,
     pSlot: CK_SLOT_ID_PTR,
@@ -1246,6 +1276,7 @@ pub unsafe extern "C" fn C_EncryptMessageNext(
 
 shim_session_only!(C_MessageEncryptFinal, C_MessageDecryptFinal);
 
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn C_DecryptMessage(
     hSession: CK_SESSION_HANDLE,
     pParameter: CK_VOID_PTR,
@@ -1277,6 +1308,7 @@ pub unsafe extern "C" fn C_DecryptMessage(
     })
 }
 
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn C_DecryptMessageBegin(
     hSession: CK_SESSION_HANDLE,
     pParameter: CK_VOID_PTR,
@@ -1297,6 +1329,7 @@ pub unsafe extern "C" fn C_DecryptMessageBegin(
     ))
 }
 
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn C_DecryptMessageNext(
     hSession: CK_SESSION_HANDLE,
     pParameter: CK_VOID_PTR,
@@ -1402,6 +1435,7 @@ pub unsafe extern "C" fn C_DecapsulateKey(
     })
 }
 
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn C_VerifySignatureInit(
     hSession: CK_SESSION_HANDLE,
     pMechanism: CK_MECHANISM_PTR,

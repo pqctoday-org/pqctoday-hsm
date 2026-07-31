@@ -162,6 +162,13 @@ pub fn C_Finalize(p_reserved: *mut u8) -> u32 {
     if !p_reserved.is_null() {
         return CKR_ARGUMENTS_BAD;
     }
+    // Emscripten staticlib embedding only (openssl.wasm): park a snapshot of
+    // token-resident state BEFORE the wipe below, so the next callMain()'s
+    // fresh module can rehydrate it. Native/wasm-bindgen builds skip this —
+    // there, parking key material past finalize would defeat the zeroize.
+    // See state_snapshot.rs and openssl-studio-pkcs11-wiring-plan-07242026.md.
+    #[cfg(target_os = "emscripten")]
+    crate::state_snapshot::stash_before_finalize();
     // Zeroize all key material (CKA_VALUE) before clearing object store
     OBJECTS.with(|o| {
         let mut store = o.borrow_mut();

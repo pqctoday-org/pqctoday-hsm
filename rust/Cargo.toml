@@ -21,7 +21,12 @@ description = "A native Rust WebAssembly clone of SoftHSMv3"
 members = ["bench-harness"]
 
 [lib]
-crate-type = ["cdylib", "rlib"]
+# `staticlib` added for the wasm32-unknown-emscripten target: emcc links the
+# resulting .a into openssl.wasm so pkcs11-provider's C_GetFunctionList /
+# C_GetInterface* externs resolve to this crate's ck_abi (see
+# openssl-studio-pkcs11-wiring-plan-07242026.md WP1/WP2). cdylib+rlib
+# outputs for the existing wasm-pack / native builds are unchanged.
+crate-type = ["cdylib", "rlib", "staticlib"]
 
 [features]
 # Vendor ACVP known-answer-test hook: lets C_Initialize seed a deterministic
