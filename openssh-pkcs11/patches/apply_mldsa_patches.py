@@ -38,10 +38,16 @@ replace_once(
 )
 
 # ── 3. sshkey.h ──────────────────────────────────────────────────────────────
+# Anchor tolerates key types upstream inserts between KEY_ED25519_SK_CERT and
+# KEY_UNSPEC, and PRESERVES them via the capture group. OpenSSH 10.4 added
+# KEY_MLDSA44_ED25519 + KEY_MLDSA44_ED25519_CERT in exactly this slot, which
+# broke the previous fixed-adjacency anchor. Keeping KEY_ED25519_SK_CERT in the
+# pattern (rather than anchoring on KEY_UNSPEC alone) means a future upstream
+# reorganisation still fails loudly instead of inserting in the wrong place.
 replace_once(
     "sshkey.h",
-    r"\s+KEY_ED25519_SK_CERT,\n\s+KEY_UNSPEC",
-    "\n\tKEY_ED25519_SK_CERT,\n\tKEY_MLDSA_65,\n\tKEY_UNSPEC"
+    r"(\s+KEY_ED25519_SK_CERT,\n(?:\s+KEY_\w+,\n)*)(\s+KEY_UNSPEC)",
+    r"\g<1>\tKEY_MLDSA_65,\n\g<2>"
 )
 
 # ── 4. sshkey.c ──────────────────────────────────────────────────────────────
