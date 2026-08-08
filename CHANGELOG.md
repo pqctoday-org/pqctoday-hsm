@@ -6,6 +6,66 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [Unreleased]
+
+### Added
+
+- **PKCS#11 operation-evidence log (`SOFTHSM3_OP_LOG`)** — a new, separate
+  logging facility (`src/lib/common/OpLog.{h,cpp}`) that emits one
+  machine-parseable line per completed cryptographic operation, so a consumer
+  can prove *after the fact* which mechanism ran inside the token, on which
+  key, with what result:
+
+  ```
+  PQCEV v=1 ts=… pid=… op=C_Sign sess=3 mech=CKM_ML_DSA mech_id=0x0000001d \
+    key=ssh-host-mldsa-65 keytype=CKK_ML_DSA paramset=ML-DSA-65 out=3309 \
+    probe=0 rv=CKR_OK rv_id=0x00000000
+  ```
+
+  Instrumented: `C_SignInit` / `C_Sign` / `C_SignFinal`, `C_EncapsulateKey` /
+  `C_DecapsulateKey` (ciphertext **and** shared-secret lengths — the latter is
+  the one number the caller never sees, because the secret goes into a key
+  object), and `C_GenerateKeyPair` (mechanism, parameter set, and the
+  `CKA_EXTRACTABLE` / `CKA_SENSITIVE` / `CKA_NEVER_EXTRACTABLE` /
+  `CKA_ALWAYS_SENSITIVE` / `CKA_LOCAL` custody attributes that decide whether
+  "generated in-HSM and non-extractable" is true).
+
+  This is **not** `log.h`. `log.h` is diagnostic: syslog-bound, prose, and
+  dominated by error paths — `SoftHSM_sign.cpp` carried 73 `ERROR_MSG` calls
+  and *no* success-path logging at any level, so `log.level = DEBUG` told you
+  when signing broke, never which mechanism signed what. Every "HSM-backed
+  ML-DSA" claim was unverifiable except by reading the source.
+
+  Three properties are load-bearing:
+
+  - **Runtime gating, never a compile-time feature.** `SOFTHSM3_OP_LOG` is
+    unset by default (disabled); `stderr` or `-` writes to stderr — the only
+    retrieval path in a distroless container — and any other value is a file
+    path, opened append so several processes in one run can share it. The
+    artifact evidence is collected from is byte-identical to the shipped one.
+  - **Stable output grammar**, because things parse it. Unknown keys may be
+    added over time; a parser must ignore keys it does not recognise.
+  - **Correct labels on private keys.** Every byte-string attribute of a
+    private object, `CKA_LABEL` included, is stored encrypted at rest
+    (`P11Attribute::updateAttr`), so the label is decrypted through the token
+    exactly as `C_GetAttributeValue` does. Reading it raw yielded 48 bytes of
+    ciphertext — caught and fixed before this shipped.
+
+  Mechanism naming covers the pre-hash ML-DSA and SLH-DSA variants
+  (`CKM_HASH_ML_DSA_*`, `CKM_HASH_SLH_DSA_*`) alongside the pure ones: those
+  are still PQC signatures, and leaving them unnamed would let a consumer
+  conclude no PQC signing happened when it did. Classical mechanisms are named
+  too, so "no classical fallback where PQC is claimed" is assertable rather
+  than merely hoped for.
+
+  `C_EncapsulateKey` / `C_DecapsulateKey` / `C_GenerateKeyPair` keep their
+  original bodies as private `*Impl` methods with thin logging wrappers around
+  them, rather than restructuring working code with many early returns around
+  a log statement.
+
+  Verified: `p11_v32_compliance_test` reports **324 PASS / 0 FAIL** both with
+  the log enabled and with it unset, and produces no output at all when unset.
+
 ## [0.20.2] — 2026-07-30
 
 ### Security

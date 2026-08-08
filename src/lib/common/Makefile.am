@@ -9,6 +9,7 @@ noinst_LTLIBRARIES =		libsofthsm_common.la
 libsofthsm_common_la_SOURCES =	Configuration.cpp \
 				fatal.cpp \
 				log.cpp \
+				OpLog.cpp \
 				osmutex.cpp \
 				SimpleConfigLoader.cpp \
 				MutexFactory.cpp

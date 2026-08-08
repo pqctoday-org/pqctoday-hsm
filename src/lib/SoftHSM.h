@@ -449,6 +449,29 @@ private:
 	CK_RV getMLKEMPublicKey(MLKEMPublicKey* publicKey, Token* token, OSObject* key);
 	// ECDH-as-KEM (2026-07-25) — CKM_ECDH1_DERIVE under C_EncapsulateKey/
 	// C_DecapsulateKey (PKCS#11 v3.2 Table 78), CKK_EC or CKK_EC_MONTGOMERY.
+	// The real body of C_GenerateKeyPair; the public entry point wraps it to
+	// record an operation-evidence line. Same rationale as the KEM impls below.
+	CK_RV generateKeyPairImpl(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechanism,
+		CK_ATTRIBUTE_PTR pPublicKeyTemplate, CK_ULONG ulPublicKeyAttributeCount,
+		CK_ATTRIBUTE_PTR pPrivateKeyTemplate, CK_ULONG ulPrivateKeyAttributeCount,
+		CK_OBJECT_HANDLE_PTR phPublicKey, CK_OBJECT_HANDLE_PTR phPrivateKey);
+
+	// The real bodies of C_EncapsulateKey / C_DecapsulateKey. The public
+	// entry points are thin wrappers that record an operation-evidence line
+	// (OpLog.h) around these. Splitting them keeps the many early returns in
+	// the bodies intact rather than restructuring working KEM code for the
+	// sake of a log statement. `opLogSecretLen`, when non-NULL, receives the
+	// shared-secret length -- the one number the caller never sees, because
+	// the secret goes into a key object rather than a caller buffer.
+	CK_RV encapsulateKeyImpl(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechanism,
+		CK_OBJECT_HANDLE hPublicKey, CK_ATTRIBUTE_PTR pTemplate, CK_ULONG ulAttributeCount,
+		CK_BYTE_PTR pCiphertext, CK_ULONG_PTR pulCiphertextLen, CK_OBJECT_HANDLE_PTR phKey,
+		unsigned long* opLogSecretLen);
+	CK_RV decapsulateKeyImpl(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechanism,
+		CK_OBJECT_HANDLE hPrivateKey, CK_ATTRIBUTE_PTR pTemplate, CK_ULONG ulAttributeCount,
+		CK_BYTE_PTR pCiphertext, CK_ULONG ulCiphertextLen, CK_OBJECT_HANDLE_PTR phKey,
+		unsigned long* opLogSecretLen);
+
 	CK_RV encapsulateECDH(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hPublicKey,
 		CK_ATTRIBUTE_PTR pTemplate, CK_ULONG ulAttributeCount,
 		CK_BYTE_PTR pCiphertext, CK_ULONG_PTR pulCiphertextLen, CK_OBJECT_HANDLE_PTR phKey);
@@ -569,6 +592,22 @@ private:
 	// Returns true when an init of newOp may proceed even though activeOp is
 	// already running, because they form one of the four §5.13 dual pairings.
 	static bool isComplementaryDualOp(int activeOp, int newOp);
+
+	// Best-effort identity of a key, rendered as the `key=` `keytype=`
+	// `paramset=` fragment of an operation-evidence record (OpLog.h). Read-only,
+	// never throws, and reports "-" for anything it cannot resolve -- an
+	// unresolvable handle is the caller's error to report, not this helper's.
+	// `mech` disambiguates CKA_PARAMETER_SET, whose values are mechanism-
+	// relative. Only ever called behind OpLog::enabled(), so it costs nothing in
+	// a normal run.
+	std::string opLogKeyFields(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hKey,
+	                           CK_MECHANISM_TYPE mech);
+
+	// The custody half of the same record: the attributes that decide whether
+	// "generated in the HSM and never leaves it" is true. Several scenarios
+	// assert non-extractability today with nothing behind the assertion; logging
+	// these at generation is what turns it into evidence.
+	std::string opLogKeyCustodyFields(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hKey);
 
 	// Symmetric multi-part cipher primitives, shared between the single-op
 	// C_EncryptUpdate / C_DecryptUpdate paths and the §5.13 dual-function
