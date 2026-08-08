@@ -25,6 +25,11 @@ pub mod constants;
 pub mod crypto;
 pub mod ffi;
 pub mod native;
+/// PKCS#11 operation-evidence log — one machine-parseable record per completed
+/// cryptographic operation, gated at runtime by `SOFTHSM3_OP_LOG`. Emits the
+/// same grammar as the C++ engine so one consumer parses both. The sink (not
+/// the call sites) is cfg-gated away from `wasm32-unknown-unknown`.
+pub mod oplog;
 pub mod state;
 /// Token-state snapshot/restore — persistence surface for the emscripten
 /// staticlib embedding (openssl.wasm tears the runtime down per command);

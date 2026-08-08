@@ -66,6 +66,41 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Verified: `p11_v32_compliance_test` reports **324 PASS / 0 FAIL** both with
   the log enabled and with it unset, and produces no output at all when unset.
 
+- **The same operation-evidence log in the Rust engine (`rust/src/oplog.rs`).**
+  The shipped Rust library previously emitted **nothing at all** — the only
+  `println!`/`eprintln!` in the tree live in a KAT generator — so the two
+  scenarios it backs (`hsm-perf-bench`, `pqctoday-kmip`) could assert that
+  ML-DSA ran inside the token but never show it.
+
+  It emits the **same record grammar** as the C++ engine, so one consumer parses
+  both without knowing which produced a line. `C_SignInit` / `C_Sign` /
+  `C_SignFinal` / `C_GenerateKeyPair` / `C_EncapsulateKey` / `C_DecapsulateKey`
+  keep their original bodies as `*_impl` functions with thin wrappers around
+  them — the same shape used on the C++ side, for the same reason.
+
+  Deliberately **not** the `log` facade, despite the plan calling for it: a
+  facade routes through whatever logger the host installs and formats records
+  however that logger sees fit, which would break the one property that makes
+  this useful. A self-contained sink is closer to the requirement and one
+  dependency lighter; "zero cost when off" is met by a `OnceLock` check.
+
+  Gates, all measured rather than argued:
+
+  | Gate | Result |
+  |---|---|
+  | V2 — Rust logging emits | `tests/oplog_evidence.rs`: `CKM_ML_DSA` / `ML-DSA-65` / `out=3309` records, asserted field by field |
+  | V3 — zero cost when off | 2881 → 2893 ops/sec (**+0.42%**, run-to-run noise) against the pre-instrumentation commit |
+  | V4 — WASM still builds | `wasm32-unknown-unknown` builds (sink cfg-gated out); `wasm32-unknown-emscripten` **links** a 110 MB staticlib in an emsdk container |
+  | Existing suite | 326 passed / 0 failed |
+
+  One bug caught by its own unit test before it shipped: `CKR_DEVICE_ERROR` is
+  absent from `constants.rs`, so in a match arm Rust reinterpreted it as an
+  irrefutable **binding** that swallowed every arm after it — `rv_name` returned
+  `"CKR_DEVICE_ERROR"` for every input. The only signal was an `unreachable
+  pattern` warning among the crate's other 57. The module now carries
+  `#![deny(unreachable_patterns)]` so the next such typo fails the build, and
+  the constant is defined locally with its value cited from `pkcs11t.h:1384`.
+
 ## [0.20.2] — 2026-07-30
 
 ### Security
