@@ -258,6 +258,33 @@ pub fn exchange(endpoint: &KmipEndpoint, request: &RequestMessage) -> Result<Exc
     Ok(Exchange { response, kx_group })
 }
 
+/// Send N operations in ONE Request Message, over one connection.
+///
+/// Amortises the TCP + TLS handshake across the batch, which is the only way
+/// this server can avoid paying it per operation (it closes after one
+/// Request Message, so keepalive is not available).
+///
+/// **This measures something different from the per-operation arm.** The
+/// timing covers the whole batch, so there is no per-operation latency to
+/// report — a batched row's p50/p99 describe the batch, not an operation.
+/// They must never be compared with per-operation percentiles.
+pub fn exchange_batch(
+    endpoint: &KmipEndpoint,
+    payloads: Vec<RequestPayload>,
+) -> Result<Exchange> {
+    let batch_items: Vec<_> = payloads
+        .into_iter()
+        .map(|payload| pqctoday_kmip::kmip30::RequestBatchItem {
+            operation: payload.operation(),
+            payload,
+        })
+        .collect();
+    let mut header = pqctoday_kmip::kmip30::RequestHeader::v3();
+    header.authentication = endpoint.credentials();
+    let req = RequestMessage { header, batch_items };
+    exchange(endpoint, &req)
+}
+
 /// Decode a response frame and return its top-level tag plus the batch
 /// item's Result Status, without a typed decoder.
 pub fn response_status(response: &[u8]) -> Result<(u32, Option<i32>)> {
@@ -757,6 +784,12 @@ pub struct KmipArgs {
     /// Overriding the port alone silently dialled the primary server with the
     /// comparison client's profile, which the primary then refused —
     /// `HandshakeFailure`, from a mistake that looked like a TLS problem.
+    /// Operations per Request Message. 1 (default) is the per-operation arm.
+    /// Larger values amortise the handshake — but the timing then covers the
+    /// whole batch, so per-operation percentiles do not exist and the rows
+    /// are marked accordingly.
+    #[arg(long, default_value_t = 1)]
+    pub batch: u32,
     #[arg(long)]
     pub compare_host: Option<String>,
     /// Port for the `--compare-tls` server. Defaults to `--port`.
@@ -794,6 +827,9 @@ struct KmipRow<'a> {
     /// one session. Only interleaved rows may be compared against each
     /// other; sequential ones carry drift.
     interleaved: bool,
+    /// Operations per request. When >1 the p50/p99 below describe the BATCH,
+    /// not an operation, and must not be compared with per-operation rows.
+    batch: u32,
     p50_ms: f64,
     p99_ms: f64,
     duration_s: f64,
@@ -988,9 +1024,9 @@ pub fn run(args: &KmipArgs) -> Result<()> {
         // Build the arms to measure. With --compare-tls there are two, and
         // they alternate A,B,A,B… inside this loop rather than running all
         // of A then all of B — so machine drift lands on both equally.
-        let mut arms: Vec<(&str, Arc<dyn KmipTransport + Send + Sync>, Option<String>, KeyPair)> =
+        let mut arms: Vec<(&str, Arc<dyn KmipTransport + Send + Sync>, Option<String>, KeyPair, Option<Arc<KmipEndpoint>>)> =
             Vec::new();
-        arms.push((tls_label, Arc::clone(&carrier), negotiated.clone(), kp));
+        arms.push((tls_label, Arc::clone(&carrier), negotiated.clone(), kp, endpoint.clone().map(Arc::new)));
         if let Some((cmp_ep, cmp_label)) = &compare {
             let cmp_carrier: Arc<dyn KmipTransport + Send + Sync> = Arc::new(cmp_ep.clone());
             // Its own keys: a UID minted on one server does not exist on the
@@ -998,22 +1034,48 @@ pub fn run(args: &KmipArgs) -> Result<()> {
             let cmp_kp = create_and_activate(cmp_carrier.as_ref(), cell)
                 .with_context(|| format!("{}: setup on the compare arm", cell.label))?;
             let cmp_group = query(cmp_ep).ok().and_then(|e| e.kx_group);
-            arms.push((cmp_label, cmp_carrier, cmp_group, cmp_kp));
+            arms.push((cmp_label, cmp_carrier, cmp_group, cmp_kp, Some(Arc::new(cmp_ep.clone()))));
         }
 
         let mut samples: Vec<Vec<(f64, f64, f64, u64, f64)>> = vec![Vec::new(); arms.len()];
         for _ in 0..args.repeats.max(1) {
-            for (i, (_, arm_carrier, _, arm_kp)) in arms.iter().enumerate() {
+            for (i, (_, arm_carrier, _, arm_kp, arm_endpoint)) in arms.iter().enumerate() {
                 let workers: Vec<_> = (0..args.threads)
                     .map(|_| {
                         let t = Arc::clone(arm_carrier);
                         let kp_priv = arm_kp.private_uid.clone();
                         let kp_pub = arm_kp.public_uid.clone();
                         let class = cell.class;
+                        let batch = args.batch.max(1);
+                        let batch_ep = arm_endpoint.clone();
                         move || -> Result<()> {
-                            match class {
-                                KmipClass::Signature => sign(t.as_ref(), &kp_priv, b"bench").map(|_| ()),
-                                KmipClass::Kem => encapsulate_and_get(t.as_ref(), &kp_pub).map(|_| ()),
+                            if batch > 1 {
+                                // One connection, N operations. Only the wire
+                                // arm can batch — the control has no
+                                // connection to amortise.
+                                let ep = batch_ep.as_ref().ok_or_else(|| {
+                                    anyhow!("--batch >1 applies to --arm wire only")
+                                })?;
+                                let payloads = (0..batch)
+                                    .map(|_| match class {
+                                        KmipClass::Signature => RequestPayload::Sign(SignRequest {
+                                            uid: kp_priv.clone(),
+                                            data: b"bench".to_vec(),
+                                            cryptographic_parameters: None,
+                                        }),
+                                        KmipClass::Kem => RequestPayload::Encapsulate(EncapsulateRequest {
+                                            uid: kp_pub.clone(),
+                                            input_key_material: None,
+                                            cryptographic_parameters: None,
+                                        }),
+                                    })
+                                    .collect();
+                                exchange_batch(ep, payloads).map(|_| ())
+                            } else {
+                                match class {
+                                    KmipClass::Signature => sign(t.as_ref(), &kp_priv, b"bench").map(|_| ()),
+                                    KmipClass::Kem => encapsulate_and_get(t.as_ref(), &kp_pub).map(|_| ()),
+                                }
                             }
                         }
                     })
@@ -1025,7 +1087,7 @@ pub fn run(args: &KmipArgs) -> Result<()> {
             }
         }
 
-        for (i, (arm_label, _, arm_group, _)) in arms.iter().enumerate() {
+        for (i, (arm_label, _, arm_group, _, _)) in arms.iter().enumerate() {
             // Median, not mean: one cold run should not drag the figure.
             let mut by_rate = samples[i].clone();
             by_rate.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
@@ -1043,7 +1105,8 @@ pub fn run(args: &KmipArgs) -> Result<()> {
                 ops_per_sec_min: by_rate.first().unwrap().0,
                 ops_per_sec_max: by_rate.last().unwrap().0,
                 repeats: args.repeats.max(1),
-                interleaved: arms.len() > 1,
+                    interleaved: arms.len() > 1,
+                batch: args.batch.max(1),
                 p50_ms: p50,
                 p99_ms: p99,
                 duration_s: elapsed,
