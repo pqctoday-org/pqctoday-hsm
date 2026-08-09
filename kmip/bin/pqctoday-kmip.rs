@@ -158,8 +158,12 @@ struct Cli {
     /// §3.3.3 is met in PART — `SecP384r1MLKEM1024` does not exist in
     /// rustls 0.23, so two of the three required groups are offered. Do not
     /// describe this server as conformant to the suite.
+    /// Also settable as `KMIP_TLS_PROFILE`, which is how a container flips
+    /// posture without a rebuild: the sandbox runtime is distroless, so
+    /// exec-form CMD cannot expand variables and there is no shell to do it
+    /// in. Reading the env here keeps the escape hatch available.
     #[arg(long = "tls-profile", default_value = "permissive",
-          value_parser = TlsProfile::parse)]
+          env = "KMIP_TLS_PROFILE", value_parser = TlsProfile::parse)]
     tls_profile: TlsProfile,
 
     /// PKCS#11 slot (single-slot v0.1).
