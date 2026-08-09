@@ -104,6 +104,8 @@ class KmipClient:
         ca_cert: Optional[str] = None,
         username: Optional[str] = None,
         password: Optional[str] = None,
+        client_cert: Optional[str] = None,
+        client_key: Optional[str] = None,
     ):
         self.host = host
         self.port = port
@@ -126,6 +128,18 @@ class KmipClient:
                 ssl.Purpose.SERVER_AUTH,
                 cafile=ca_cert,
             )
+        # Client certificate for mutual TLS. KMIP 3.0 Profiles §3.3.4 says a
+        # server SHOULD require mTLS and derive the client's identity from it;
+        # a server started with --tls-client-ca will refuse a connection that
+        # presents no certificate, so without this the client cannot reach
+        # such a deployment at all — regardless of credentials, which are a
+        # separate, application-layer identity the same clause also allows.
+        #
+        # Both may be supplied at once: the channel proves who is connecting,
+        # the credential proves who is asking. §3.3.4 gives the credential
+        # precedence when both are present.
+        if client_cert is not None:
+            self._ctx.load_cert_chain(certfile=client_cert, keyfile=client_key)
 
     # ── transport ───────────────────────────────────────────────────────────
 

@@ -196,6 +196,38 @@ async fn quantum_safe_tls_round_trip_query_request() {
     let _ = handle.await;
 }
 
+/// mTLS must build a usable config under BOTH profiles.
+///
+/// Regression test for a real bug: `tls_mtls_with_profile` built its
+/// `WebPkiClientVerifier` with the plain `builder()`, which resolves the
+/// PROCESS-LEVEL default crypto provider and *panics* when it cannot find
+/// one. The verifier is constructed before `profile_builder` runs, so the
+/// quantum-safe path (which passes its provider explicitly and never
+/// installs a process default) blew up with "Could not automatically
+/// determine the process-level CryptoProvider" — and the permissive path
+/// installed one too late to help. Every mTLS deployment would have crashed
+/// at startup, and nothing caught it because no test covered mTLS at all.
+#[test]
+fn mtls_config_builds_under_both_profiles() {
+    let dir = std::env::temp_dir().join(format!("kmip-mtls-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let paths = pqctoday_kmip::cert_init::init_certs_if_missing(&dir).expect("mint certs");
+    let server_cert = std::fs::read(&paths.server_cert).unwrap();
+    let server_key = std::fs::read(&paths.server_key).unwrap();
+    let ca = std::fs::read(&paths.ca_cert).unwrap();
+
+    for profile in [TlsProfile::Permissive, TlsProfile::QuantumSafe] {
+        let cfg = pqctoday_kmip::server::listener::tls_mtls_with_profile(
+            &server_cert,
+            &server_key,
+            &ca,
+            profile,
+        );
+        assert!(cfg.is_ok(), "mTLS config must build under {profile:?}: {cfg:?}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ── §3.3 refusal matrix ────────────────────────────────────────────────────
 //
 // One case per SHALL NOT. These exist because the quantum-safe profile's

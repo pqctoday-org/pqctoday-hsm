@@ -271,9 +271,26 @@ pub fn tls_mtls_with_profile(
             .add(cert.map_err(|e| ServerError::Tls(format!("client CA: {e}")))?)
             .map_err(|e| ServerError::Tls(format!("root store add: {e}")))?;
     }
-    let verifier = WebPkiClientVerifier::builder(Arc::new(root_store))
-        .build()
-        .map_err(|e| ServerError::Tls(e.to_string()))?;
+    // `builder_with_provider`, NOT `builder`. The plain builder resolves the
+    // PROCESS-LEVEL default provider and panics outright when it cannot
+    // ("Could not automatically determine the process-level CryptoProvider")
+    // — exactly what happens here, because the verifier is built BEFORE
+    // `profile_builder` runs: the quantum-safe path never installs a process
+    // default at all (it passes its provider explicitly), and the permissive
+    // path installs one too late to help. Confirmed live: every mTLS start
+    // aborted on this before the fix.
+    //
+    // Passing the profile's own provider also keeps client-certificate
+    // verification on the same crypto as the handshake, rather than on
+    // whichever provider happened to win the install_default() race.
+    let verifier_provider = Arc::new(match profile {
+        TlsProfile::Permissive => rustls::crypto::ring::default_provider(),
+        TlsProfile::QuantumSafe => quantum_safe_provider(),
+    });
+    let verifier =
+        WebPkiClientVerifier::builder_with_provider(Arc::new(root_store), verifier_provider)
+            .build()
+            .map_err(|e| ServerError::Tls(e.to_string()))?;
     let config = profile_builder(profile)?
         .with_client_cert_verifier(verifier)
         .with_single_cert(certs, key)
