@@ -738,8 +738,16 @@ pub struct KmipArgs {
     /// alternates A,B,A,B… within one session so drift hits both equally.
     #[arg(long)]
     pub compare_tls: Option<String>,
-    /// Port for the `--compare-tls` server (it is a different posture, so a
-    /// different listener).
+    /// Host for the `--compare-tls` server. Defaults to `--host`.
+    ///
+    /// Load-bearing in containers: the sandbox's two postures run as
+    /// separate containers BOTH listening on 5696, so only the host differs.
+    /// Overriding the port alone silently dialled the primary server with the
+    /// comparison client's profile, which the primary then refused —
+    /// `HandshakeFailure`, from a mistake that looked like a TLS problem.
+    #[arg(long)]
+    pub compare_host: Option<String>,
+    /// Port for the `--compare-tls` server. Defaults to `--port`.
     #[arg(long)]
     pub compare_port: Option<u16>,
 }
@@ -895,12 +903,23 @@ pub fn run(args: &KmipArgs) -> Result<()> {
                 "permissive" => ClientTlsProfile::Permissive,
                 o => return Err(anyhow!("--compare-tls: unknown profile {o:?}")),
             };
-            let port = args
-                .compare_port
-                .ok_or_else(|| anyhow!("--compare-tls requires --compare-port"))?;
             let mut ep = base.clone();
             ep.tls = other;
-            ep.port = port;
+            if let Some(p) = args.compare_port {
+                ep.port = p;
+            }
+            if let Some(h) = &args.compare_host {
+                ep.host = h.clone();
+            }
+            if ep.host == base.host && ep.port == base.port {
+                return Err(anyhow!(
+                    "--compare-tls needs a DIFFERENT endpoint: set --compare-host and/or \
+                     --compare-port. One server process serves one TLS posture, so pointing \
+                     both arms at {}:{} would just ask the same server for two postures.",
+                    base.host,
+                    base.port
+                ));
+            }
             // Fail fast here too, so a broken comparison endpoint is one
             // clear error rather than half a matrix of missing rows.
             query(&ep).context("pre-run probe of the --compare-tls endpoint failed")?;
