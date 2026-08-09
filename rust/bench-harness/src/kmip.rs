@@ -421,6 +421,7 @@ const TAG_PRIVATE_KEY_UID: u32 = 0x42_0066;
 const TAG_PUBLIC_KEY_UID: u32 = 0x42_006f;
 const TAG_UNIQUE_IDENTIFIER: u32 = 0x42_0094;
 const TAG_SIGNATURE_DATA: u32 = 0x42_00c3;
+const TAG_DATA: u32 = 0x42_00c2;
 const TAG_VALIDITY_INDICATOR: u32 = 0x42_009b;
 
 /// A created, activated key pair ready for the hot loop.
@@ -524,8 +525,18 @@ pub fn signature_verify(
 /// TWO round trips, timed together and labelled as such: Encapsulate returns
 /// only a UID, so the shared secret needs the follow-up Get. Reporting just
 /// the first call would understate a KEM operation's real cost.
+/// What an Encapsulate produced: the retrieved secret and the ciphertext a
+/// Decapsulate needs to recover it.
+pub struct Encapsulation {
+    pub secret_response: Vec<u8>,
+    /// `Data` (0x4200C2) — the ML-KEM ciphertext. Returned because without
+    /// it Decapsulate cannot be exercised at all, which is why that half of
+    /// the KEM went untested while this half was measured.
+    pub ciphertext: Vec<u8>,
+}
+
 pub fn encapsulate_and_get(
-    t: &dyn KmipTransport, public_uid: &str) -> Result<Vec<u8>> {
+    t: &dyn KmipTransport, public_uid: &str) -> Result<Encapsulation> {
     let (resp, _) = t.send(
         RequestPayload::Encapsulate(EncapsulateRequest {
             uid: public_uid.to_string(),
@@ -535,10 +546,11 @@ pub fn encapsulate_and_get(
     )?;
     let secret_uid = text_field(&resp, TAG_UNIQUE_IDENTIFIER)
         .ok_or_else(|| anyhow!("Encapsulate response carried no Unique Identifier"))?;
+    let ciphertext = bytes_field(&resp, TAG_DATA).unwrap_or_default();
     let (get_resp, _) = t.send(
         RequestPayload::Get(GetRequest { uid: secret_uid, key_format_type: None, key_wrapping_specification: None }),
     )?;
-    Ok(get_resp)
+    Ok(Encapsulation { secret_response: get_resp, ciphertext })
 }
 
 /// Decapsulate a ciphertext, then Get the recovered secret — same two-round-
@@ -1154,8 +1166,19 @@ mod tests {
                 KmipClass::Kem => {
                     let enc = encapsulate_and_get(&endpoint, &kp.public_uid)
                         .unwrap_or_else(|e| panic!("{}: encapsulate failed: {e:#}", cell.label));
-                    assert!(!enc.is_empty(), "{}: empty encapsulate result", cell.label);
-                    eprintln!("  {:<11} encapsulate+Get OK ({} B response)", cell.label, enc.len());
+                    assert!(!enc.secret_response.is_empty(), "{}: empty encapsulate result", cell.label);
+                    assert!(!enc.ciphertext.is_empty(), "{}: no ciphertext returned", cell.label);
+
+                    // The other half of the KEM, which went untested while
+                    // encapsulate was being measured: recover the same secret
+                    // from the ciphertext using the PRIVATE key.
+                    let dec = decapsulate_and_get(&endpoint, &kp.private_uid, &enc.ciphertext)
+                        .unwrap_or_else(|e| panic!("{}: decapsulate failed: {e:#}", cell.label));
+                    assert!(!dec.is_empty(), "{}: empty decapsulate result", cell.label);
+                    eprintln!(
+                        "  {:<11} encapsulate+Get OK ({} B, ct {} B) · decapsulate+Get OK ({} B)",
+                        cell.label, enc.secret_response.len(), enc.ciphertext.len(), dec.len()
+                    );
                 }
             }
         }
