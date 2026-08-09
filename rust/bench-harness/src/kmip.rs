@@ -210,6 +210,261 @@ pub fn query(endpoint: &KmipEndpoint) -> Result<Exchange> {
     exchange(endpoint, &req)
 }
 
+// ── the operation matrix ────────────────────────────────────────────────────
+//
+// Representative set, not the full 26: one classical and one post-quantum per
+// operation class keeps a run short while the machinery settles. Widening is
+// a table change, not a code change.
+//
+// Two mappings are NOT one-to-one with the PKCS#11 arm and must never be
+// plotted against it:
+//   * Encapsulate/Decapsulate return a UID for a new SecretData object, so
+//     retrieving the shared secret needs a follow-up Get. Both round trips
+//     are timed together and labelled as such.
+//   * KMIP DeriveKey is KDF-based (HMAC/PBKDF2/SP800-108), not the ECDH key
+//     agreement PKCS#11 calls "derive". It is deliberately absent here
+//     rather than silently mapped onto the wrong primitive.
+
+use pqctoday_kmip::kmip30::{
+    ops::{
+        ActivateRequest, CreateKeyPairRequest, DecapsulateRequest, EncapsulateRequest, GetRequest,
+        SignRequest, SignatureVerifyRequest,
+    },
+    Attribute, KmipAlgorithm, UsageMask,
+};
+
+/// One (algorithm, operation-class) cell the KMIP arms can measure.
+#[derive(Debug, Clone, Copy)]
+pub struct KmipCell {
+    pub label: &'static str,
+    pub algorithm: KmipAlgorithm,
+    pub class: KmipClass,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KmipClass {
+    /// CreateKeyPair + Activate + Sign + SignatureVerify
+    Signature,
+    /// CreateKeyPair + Activate + Encapsulate(+Get) + Decapsulate(+Get)
+    Kem,
+}
+
+pub const REPRESENTATIVE_CELLS: &[KmipCell] = &[
+    KmipCell { label: "Ed25519", algorithm: KmipAlgorithm::Ed25519, class: KmipClass::Signature },
+    KmipCell { label: "ML-DSA-65", algorithm: KmipAlgorithm::MlDsa65, class: KmipClass::Signature },
+    KmipCell { label: "ML-KEM-768", algorithm: KmipAlgorithm::MlKem768, class: KmipClass::Kem },
+];
+
+fn send(endpoint: &KmipEndpoint, payload: RequestPayload) -> Result<(Vec<u8>, Option<String>)> {
+    let mut req = one_off_request(payload);
+    req.header.authentication = endpoint.credentials();
+    let ex = exchange(endpoint, &req)?;
+    let (tag, status) = response_status(&ex.response)?;
+    if tag != 0x42_007b {
+        return Err(anyhow!("unexpected top-level tag {tag:#x}"));
+    }
+    // Result Status 0 = Success. Anything else is a protocol-level failure
+    // and must abort the cell rather than be timed as if it worked.
+    if status != Some(0) {
+        return Err(anyhow!("KMIP operation failed, Result Status {status:?}"));
+    }
+    Ok((ex.response, ex.kx_group))
+}
+
+/// Pull the first TextString under a Response Payload with `tag`.
+fn text_field(response: &[u8], tag: u32) -> Option<String> {
+    fn walk(v: &codec::Value, tag: u32, out: &mut Option<String>) {
+        if let codec::Value::Structure(children) = v {
+            for c in children {
+                if c.tag.0 == tag {
+                    if let codec::Value::TextString(s) = &c.value {
+                        if out.is_none() {
+                            *out = Some(s.clone());
+                        }
+                    }
+                }
+                walk(&c.value, tag, out);
+            }
+        }
+    }
+    let (frame, _) = codec::decode(response).ok()?;
+    let mut out = None;
+    walk(&frame.value, tag, &mut out);
+    out
+}
+
+fn bytes_field(response: &[u8], tag: u32) -> Option<Vec<u8>> {
+    fn walk(v: &codec::Value, tag: u32, out: &mut Option<Vec<u8>>) {
+        if let codec::Value::Structure(children) = v {
+            for c in children {
+                if c.tag.0 == tag {
+                    if let codec::Value::ByteString(b) = &c.value {
+                        if out.is_none() {
+                            *out = Some(b.clone());
+                        }
+                    }
+                }
+                walk(&c.value, tag, out);
+            }
+        }
+    }
+    let (frame, _) = codec::decode(response).ok()?;
+    let mut out = None;
+    walk(&frame.value, tag, &mut out);
+    out
+}
+
+const TAG_PRIVATE_KEY_UID: u32 = 0x42_0066;
+const TAG_PUBLIC_KEY_UID: u32 = 0x42_006f;
+const TAG_UNIQUE_IDENTIFIER: u32 = 0x42_0094;
+const TAG_SIGNATURE_DATA: u32 = 0x42_00c3;
+const TAG_VALIDITY_INDICATOR: u32 = 0x42_009b;
+
+/// A created, activated key pair ready for the hot loop.
+pub struct KeyPair {
+    pub private_uid: String,
+    pub public_uid: String,
+}
+
+/// CreateKeyPair + Activate on both halves.
+///
+/// Activation is not optional: the server rejects any operation on an object
+/// whose state is still PreActive (KMIP 3.0 §11), so a pair created but not
+/// activated fails every subsequent call.
+pub fn create_and_activate(endpoint: &KmipEndpoint, cell: &KmipCell) -> Result<KeyPair> {
+    let (usage_priv, usage_pub) = match cell.class {
+        KmipClass::Signature => (UsageMask::SIGN, UsageMask::VERIFY),
+        // A KEM pair encapsulates to the public half and decapsulates with
+        // the private one.
+        KmipClass::Kem => (UsageMask::DECRYPT, UsageMask::ENCRYPT),
+    };
+    let (resp, _) = send(
+        endpoint,
+        RequestPayload::CreateKeyPair(CreateKeyPairRequest {
+            common_attributes: vec![Attribute::CryptographicAlgorithm(cell.algorithm)],
+            private_key_attributes: vec![Attribute::CryptographicUsageMask(usage_priv)],
+            public_key_attributes: vec![Attribute::CryptographicUsageMask(usage_pub)],
+            seed: None,
+        }),
+    )
+    .with_context(|| format!("CreateKeyPair({})", cell.label))?;
+
+    let private_uid = text_field(&resp, TAG_PRIVATE_KEY_UID)
+        .ok_or_else(|| anyhow!("CreateKeyPair response carried no Private Key UID"))?;
+    let public_uid = text_field(&resp, TAG_PUBLIC_KEY_UID)
+        .ok_or_else(|| anyhow!("CreateKeyPair response carried no Public Key UID"))?;
+
+    for uid in [&private_uid, &public_uid] {
+        send(
+            endpoint,
+            RequestPayload::Activate(ActivateRequest { uid: uid.clone() }),
+        )
+        .with_context(|| format!("Activate({uid})"))?;
+    }
+    Ok(KeyPair { private_uid, public_uid })
+}
+
+/// Sign, returning the signature bytes.
+pub fn sign(endpoint: &KmipEndpoint, uid: &str, data: &[u8]) -> Result<Vec<u8>> {
+    let (resp, _) = send(
+        endpoint,
+        RequestPayload::Sign(SignRequest {
+            uid: uid.to_string(),
+            data: data.to_vec(),
+            cryptographic_parameters: None,
+        }),
+    )?;
+    bytes_field(&resp, TAG_SIGNATURE_DATA)
+        .ok_or_else(|| anyhow!("Sign response carried no Signature Data"))
+}
+
+/// SignatureVerify, returning the Validity Indicator.
+///
+/// **A failed verification is not a KMIP error.** The call returns Success
+/// with `ValidityIndicator = Invalid` (2), so a harness that only checked
+/// Result Status would score a forged signature as a passing verify.
+pub fn signature_verify(
+    endpoint: &KmipEndpoint,
+    uid: &str,
+    data: &[u8],
+    signature: &[u8],
+) -> Result<u32> {
+    let (resp, _) = send(
+        endpoint,
+        RequestPayload::SignatureVerify(SignatureVerifyRequest {
+            uid: uid.to_string(),
+            data: data.to_vec(),
+            signature: signature.to_vec(),
+            cryptographic_parameters: None,
+        }),
+    )?;
+    let (frame, _) = codec::decode(&resp)?;
+    fn find_enum(v: &codec::Value, tag: u32, out: &mut Option<u32>) {
+        if let codec::Value::Structure(children) = v {
+            for c in children {
+                if c.tag.0 == tag {
+                    if let codec::Value::Enumeration(e) = &c.value {
+                        if out.is_none() {
+                            *out = Some(*e);
+                        }
+                    }
+                }
+                find_enum(&c.value, tag, out);
+            }
+        }
+    }
+    let mut out = None;
+    find_enum(&frame.value, TAG_VALIDITY_INDICATOR, &mut out);
+    out.ok_or_else(|| anyhow!("SignatureVerify response carried no Validity Indicator"))
+}
+
+/// Encapsulate, then Get the minted SecretData.
+///
+/// TWO round trips, timed together and labelled as such: Encapsulate returns
+/// only a UID, so the shared secret needs the follow-up Get. Reporting just
+/// the first call would understate a KEM operation's real cost.
+pub fn encapsulate_and_get(endpoint: &KmipEndpoint, public_uid: &str) -> Result<Vec<u8>> {
+    let (resp, _) = send(
+        endpoint,
+        RequestPayload::Encapsulate(EncapsulateRequest {
+            uid: public_uid.to_string(),
+            input_key_material: None,
+            cryptographic_parameters: None,
+        }),
+    )?;
+    let secret_uid = text_field(&resp, TAG_UNIQUE_IDENTIFIER)
+        .ok_or_else(|| anyhow!("Encapsulate response carried no Unique Identifier"))?;
+    let (get_resp, _) = send(
+        endpoint,
+        RequestPayload::Get(GetRequest { uid: secret_uid, key_format_type: None, key_wrapping_specification: None }),
+    )?;
+    Ok(get_resp)
+}
+
+/// Decapsulate a ciphertext, then Get the recovered secret — same two-round-
+/// trip shape as [`encapsulate_and_get`].
+pub fn decapsulate_and_get(
+    endpoint: &KmipEndpoint,
+    private_uid: &str,
+    ciphertext: &[u8],
+) -> Result<Vec<u8>> {
+    let (resp, _) = send(
+        endpoint,
+        RequestPayload::Decapsulate(DecapsulateRequest {
+            uid: private_uid.to_string(),
+            data: ciphertext.to_vec(),
+            cryptographic_parameters: None,
+        }),
+    )?;
+    let secret_uid = text_field(&resp, TAG_UNIQUE_IDENTIFIER)
+        .ok_or_else(|| anyhow!("Decapsulate response carried no Unique Identifier"))?;
+    let (get_resp, _) = send(
+        endpoint,
+        RequestPayload::Get(GetRequest { uid: secret_uid, key_format_type: None, key_wrapping_specification: None }),
+    )?;
+    Ok(get_resp)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -255,5 +510,70 @@ mod tests {
         let group = ex.kx_group.expect("rustls should name the negotiated group");
         assert!(group.contains("MLKEM"), "expected a hybrid group, got {group}");
         eprintln!("live round trip OK — negotiated {group}, status {status:?}");
+    }
+
+    fn endpoint_from_env() -> Option<KmipEndpoint> {
+        let host = std::env::var("KMIP_BENCH_HOST").ok()?;
+        let port = std::env::var("KMIP_BENCH_PORT").ok()?.parse().ok()?;
+        let ca = std::env::var("KMIP_BENCH_CA").ok()?;
+        Some(KmipEndpoint {
+            host,
+            port,
+            ca_pem: std::fs::read(&ca).expect("reading KMIP_BENCH_CA"),
+            server_name: std::env::var("KMIP_BENCH_NAME").unwrap_or_else(|_| "localhost".into()),
+            tls: ClientTlsProfile::QuantumSafe,
+            username: std::env::var("KMIP_BENCH_USER").ok(),
+            password: std::env::var("KMIP_BENCH_PASS").ok(),
+        })
+    }
+
+    /// Every cell in the representative set, through its full operation
+    /// sequence, against a live server. This is the gate on the arms being
+    /// buildable at all: if a cell cannot complete once here, timing it N
+    /// thousand times would only produce confident nonsense.
+    #[test]
+    fn live_operation_matrix() {
+        let Some(endpoint) = endpoint_from_env() else {
+            eprintln!("skipping: set KMIP_BENCH_HOST/PORT/CA for the operation matrix");
+            return;
+        };
+
+        for cell in REPRESENTATIVE_CELLS {
+            let kp = create_and_activate(&endpoint, cell)
+                .unwrap_or_else(|e| panic!("{}: create+activate failed: {e:#}", cell.label));
+
+            match cell.class {
+                KmipClass::Signature => {
+                    let data = b"pqctoday kmip arm";
+                    let sig = sign(&endpoint, &kp.private_uid, data)
+                        .unwrap_or_else(|e| panic!("{}: sign failed: {e:#}", cell.label));
+                    assert!(!sig.is_empty(), "{}: empty signature", cell.label);
+
+                    let good = signature_verify(&endpoint, &kp.public_uid, data, &sig)
+                        .unwrap_or_else(|e| panic!("{}: verify failed: {e:#}", cell.label));
+                    assert_eq!(good, 1, "{}: a valid signature must verify", cell.label);
+
+                    // The trap, asserted here too: a forged signature is a
+                    // SUCCESSFUL call with Validity Indicator = Invalid (2).
+                    // A harness reading only Result Status would time
+                    // forgeries as passing verifies.
+                    let mut forged = sig.clone();
+                    let mid = forged.len() / 2;
+                    forged[mid] ^= 0xFF;
+                    let bad = signature_verify(&endpoint, &kp.public_uid, data, &forged)
+                        .unwrap_or_else(|e| panic!("{}: forged verify errored: {e:#}", cell.label));
+                    assert_eq!(bad, 2, "{}: a forged signature must be Invalid", cell.label);
+
+                    eprintln!("  {:<11} sign {:>5} B · verify Valid · forged Invalid",
+                              cell.label, sig.len());
+                }
+                KmipClass::Kem => {
+                    let enc = encapsulate_and_get(&endpoint, &kp.public_uid)
+                        .unwrap_or_else(|e| panic!("{}: encapsulate failed: {e:#}", cell.label));
+                    assert!(!enc.is_empty(), "{}: empty encapsulate result", cell.label);
+                    eprintln!("  {:<11} encapsulate+Get OK ({} B response)", cell.label, enc.len());
+                }
+            }
+        }
     }
 }
