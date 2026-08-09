@@ -85,6 +85,7 @@ pqctoday-kmip [OPTIONS]
   --tls-cert <PEM>           Server cert (omit ⇒ self-signed sandbox cert)
   --tls-key  <PEM>           Server key (pairs with --tls-cert)
   --tls-client-ca <PEM>      Require + verify client certs (mutual TLS on the data plane)
+  --tls-profile <NAME>       permissive | quantum-safe      [default permissive] (§4.1)
   --admin-listen <ADDR>      Enable the REST policy-admin facade (e.g. 127.0.0.1:5697)
   --admin-tls-cert/key <PEM> Admin facade server cert/key   (required with --admin-listen)
   --admin-client-ca <PEM>    Admin mTLS client-CA bundle    (required with --admin-listen)
@@ -109,6 +110,67 @@ pqctoday-kmip [OPTIONS]
   --admin-client-ca admin-certs/ca.crt \
   --admin-write-cn kms-operator
 ```
+
+### 4.1 Quantum-safe TLS profile (`--tls-profile quantum-safe`)
+
+KMIP 3.0 **Profiles v3.0 §3.3, "Quantum Safe Authentication Suite"**, is a set
+of SHALL / SHALL NOT clauses on the client channel — not a preference. Its
+normative reference is `draft-ietf-tls-ecdhe-mlkem` (hybrid ECDHE-ML-KEM key
+agreement for TLS 1.3).
+
+`--tls-profile quantum-safe` enforces them. It is **opt-in**: the default stays
+`permissive`, because §3.1.1 (the *Basic* suite) explicitly says servers SHOULD
+support TLS 1.2, so tightening globally would put this server out of line with
+the profile most deployments actually run.
+
+| Clause | Enforced |
+|---|---|
+| §3.3.1 | TLS **1.3 only** — TLS 1.2 and below are refused, not merely deprioritised |
+| §3.3.2 | exactly `TLS13_CHACHA20_POLY1305_SHA256` + `TLS13_AES_256_GCM_SHA384`. `TLS13_AES_128_GCM_SHA256` is **dropped**, as the clause forbids it |
+| §3.3.3 | only hybrid ML-KEM groups — **classical groups are refused** (see the gap below) |
+| §3.3.4 | refuses to **start** with neither `--auth-user` nor `--tls-client-ca`: the clause permits channel identity *or* credentials, not neither |
+| §3.3.5 | port 5696 (unchanged) |
+
+```bash
+# Credentials as the identity source
+./target/release/pqctoday-kmip --tls-profile quantum-safe --store-memory \
+  --auth-user "alice:$(printf %s 'pw' | shasum -a 256 | cut -d' ' -f1)"
+
+# …or mutual TLS, or both (§3.3.4 accepts either; a credential wins when both are sent)
+./target/release/pqctoday-kmip --tls-profile quantum-safe --store-memory \
+  --tls-cert admin-certs/server.crt --tls-key admin-certs/server.key \
+  --tls-client-ca admin-certs/ca.crt
+```
+
+The startup log prints the groups and suites actually in force, including the
+gap below, so an operator can see the posture without reading the source.
+
+#### Known gap — §3.3.3 is met in PART
+
+§3.3.3 requires servers to support **all three** of `X25519MLKEM768`,
+`SecP256r1MLKEM768` and `SecP384r1MLKEM1024`. This server offers the **first
+two**. `SecP384r1MLKEM1024` (IANA `0x11ed`) does not exist in rustls 0.23: it
+is absent from `crypto::aws_lc_rs::kx_group`, has no `NamedGroup` codepoint,
+and the `hybrid` module it would be composed from is private. It is a rustls
+limitation, not a platform one — OpenSSL 3.6 carries all three, and this repo's
+own `rust/src/native/hybrid.rs` already implements the `0x11ED` construction as
+a KEM. Closing it needs a rustls key-exchange binding, not new cryptography.
+
+> **Wording rule.** Because of that gap, describe this server as **measured
+> against** the Quantum Safe Authentication Suite — **never as conformant to
+> it**. That applies to docs, UI copy, scenario text and benchmark output
+> alike, and it stays true until `0x11ed` is actually offered.
+
+#### Proving a channel is quantum-safe from the client
+
+The Python client cannot *pin* its key exchange group: `SSLContext.set_groups`
+only exists from Python 3.13, and `set_ecdh_curve` rejects hybrid names. It
+therefore proves the property by exclusion instead —
+`KmipClient.assert_quantum_safe_channel()` opens a deliberately classical-only
+TLS 1.3 connection and requires it to **fail**, so any connection that succeeds
+must have used a hybrid group. It raises rather than certifying when the linked
+OpenSSL is below 3.5 (no hybrid groups at all) or when the server accepts
+classical key exchange.
 
 ---
 
