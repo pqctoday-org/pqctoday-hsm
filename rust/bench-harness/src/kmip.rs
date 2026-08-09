@@ -69,6 +69,13 @@ pub enum ClientTlsProfile {
     /// handshake is not merely unlikely, it is unofferable, so a completed
     /// connection is proof the exchange was hybrid.
     QuantumSafe,
+    /// **Measurement baseline only.** Same provider, TLS version and cipher
+    /// suites as [`ClientTlsProfile::QuantumSafe`]; classical groups instead
+    /// of hybrid. Pair it with the server's `classical-baseline` profile so
+    /// a comparison isolates the key exchange group — see the note on
+    /// [`ClientTlsProfile::Permissive`] for why `permissive` cannot serve
+    /// that purpose.
+    ClassicalBaseline,
 }
 
 /// Connection parameters for one KMIP endpoint.
@@ -163,16 +170,25 @@ impl KmipEndpoint {
                     None => b.with_no_client_auth(),
                 }
             }
-            ClientTlsProfile::QuantumSafe => {
+            ClientTlsProfile::ClassicalBaseline | ClientTlsProfile::QuantumSafe => {
+                let hybrid = self.tls == ClientTlsProfile::QuantumSafe;
                 let provider = rustls::crypto::CryptoProvider {
                     cipher_suites: vec![
                         rustls::crypto::aws_lc_rs::cipher_suite::TLS13_CHACHA20_POLY1305_SHA256,
                         rustls::crypto::aws_lc_rs::cipher_suite::TLS13_AES_256_GCM_SHA384,
                     ],
-                    kx_groups: vec![
-                        rustls::crypto::aws_lc_rs::kx_group::X25519MLKEM768,
-                        rustls::crypto::aws_lc_rs::kx_group::SECP256R1MLKEM768,
-                    ],
+                    // The ONLY thing that differs between the two arms.
+                    kx_groups: if hybrid {
+                        vec![
+                            rustls::crypto::aws_lc_rs::kx_group::X25519MLKEM768,
+                            rustls::crypto::aws_lc_rs::kx_group::SECP256R1MLKEM768,
+                        ]
+                    } else {
+                        vec![
+                            rustls::crypto::aws_lc_rs::kx_group::X25519,
+                            rustls::crypto::aws_lc_rs::kx_group::SECP256R1,
+                        ]
+                    },
                     ..rustls::crypto::aws_lc_rs::default_provider()
                 };
                 let b = rustls::ClientConfig::builder_with_provider(Arc::new(provider))
@@ -748,6 +764,24 @@ struct KmipRow<'a> {
     round_trips_per_op: u32,
 }
 
+/// **This harness cannot currently resolve a PQC-TLS premium.** Measured
+/// 2026-08-09 with RELEASE builds, one server at a time, 5 repeats:
+///
+///   classical      Ed25519 1920  ML-DSA-65  696  ML-KEM-768 555
+///   quantum-safe           672             1158             902
+///
+/// Quantum-safe is 65% slower on one algorithm and 60%+ FASTER on the other
+/// two, from a change that touches only the TLS key exchange group. That is
+/// not an effect, it is noise: one quantum-safe range spanned 456-1689 ops/s,
+/// nearly 4x. Sequential arms are measured minutes apart, and this machine
+/// is shared with container builds whose load varies over exactly that
+/// timescale.
+///
+/// To resolve it: INTERLEAVE the arms (A,B,A,B,… inside one session, so
+/// drift hits both equally) rather than running all of A then all of B,
+/// lengthen the window well past 2s, and measure on an idle machine. Until
+/// then, quote no premium in either direction.
+///
 /// **Single runs are not evidence.** Measured 2026-08-09 on this harness:
 /// three repeats of the SAME configuration (ML-DSA-65 sign, 2 threads, 2s)
 /// spread 143-169 ops/s in-process and 134-145 on the wire — 15-18%
@@ -764,7 +798,10 @@ pub fn run(args: &KmipArgs) -> Result<()> {
     let tls = match args.tls.as_str() {
         "quantum-safe" => ClientTlsProfile::QuantumSafe,
         "permissive" => ClientTlsProfile::Permissive,
-        other => return Err(anyhow!("--tls must be quantum-safe or permissive, got {other:?}")),
+        "classical-baseline" => ClientTlsProfile::ClassicalBaseline,
+        other => return Err(anyhow!(
+            "--tls must be quantum-safe, classical-baseline or permissive, got {other:?}"
+        )),
     };
 
     // The in-process control never touches TLS, so demanding a CA for it

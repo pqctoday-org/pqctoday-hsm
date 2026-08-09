@@ -62,6 +62,21 @@ pub enum TlsProfile {
     /// hybrid ML-KEM groups only. See [`quantum_safe_provider`] for the
     /// documented gap against §3.3.3.
     QuantumSafe,
+    /// **Measurement baseline only — not a deployment posture.**
+    ///
+    /// Identical to [`TlsProfile::QuantumSafe`] in every respect except the
+    /// key exchange groups: same aws-lc-rs provider, same TLS 1.3
+    /// restriction, same two §3.3.2 cipher suites — but CLASSICAL groups
+    /// instead of hybrid ML-KEM.
+    ///
+    /// It exists because comparing `Permissive` against `QuantumSafe` does
+    /// not measure post-quantum key exchange: `Permissive` runs on `ring`
+    /// and `QuantumSafe` on aws-lc-rs, so that comparison varies the crypto
+    /// PROVIDER too. Measured 2026-08-09 it read as "PQC TLS is 46% faster
+    /// than classical", which is a provider difference wearing a migration
+    /// costume. Against this profile, the only thing that changes is the
+    /// group — so the difference is the premium.
+    ClassicalBaseline,
 }
 
 impl TlsProfile {
@@ -71,8 +86,10 @@ impl TlsProfile {
         match s {
             "permissive" => Ok(Self::Permissive),
             "quantum-safe" | "quantum_safe" => Ok(Self::QuantumSafe),
+            "classical-baseline" | "classical_baseline" => Ok(Self::ClassicalBaseline),
             other => Err(format!(
-                "unknown TLS profile {other:?} (expected 'permissive' or 'quantum-safe')"
+                "unknown TLS profile {other:?} (expected 'permissive', 'quantum-safe' \
+                 or 'classical-baseline')"
             )),
         }
     }
@@ -118,6 +135,17 @@ pub fn quantum_safe_provider() -> rustls::crypto::CryptoProvider {
     }
 }
 
+/// The measurement baseline's provider: [`quantum_safe_provider`] with the
+/// hybrid groups swapped for classical ones. Everything else — provider,
+/// suites — is deliberately identical, so a comparison isolates the group.
+pub fn classical_baseline_provider() -> rustls::crypto::CryptoProvider {
+    use rustls::crypto::aws_lc_rs;
+    rustls::crypto::CryptoProvider {
+        kx_groups: vec![aws_lc_rs::kx_group::X25519, aws_lc_rs::kx_group::SECP256R1],
+        ..quantum_safe_provider()
+    }
+}
+
 /// Human-readable summary of what a profile actually enforces, for the
 /// startup log. An operator should be able to see the groups and suites in
 /// force without reading this file.
@@ -125,6 +153,13 @@ pub fn tls_profile_summary(profile: TlsProfile) -> String {
     match profile {
         TlsProfile::Permissive => {
             "permissive (rustls defaults: TLS1.2+1.3, default suites and groups)".to_string()
+        }
+        TlsProfile::ClassicalBaseline => {
+            "classical-baseline (MEASUREMENT ONLY, not a deployment posture): \
+             TLS1.3 only; same suites and provider as quantum-safe; groups \
+             X25519, SecP256r1 — exists so a PQC-TLS premium isolates the \
+             key exchange group rather than the crypto provider"
+                .to_string()
         }
         TlsProfile::QuantumSafe => {
             "quantum-safe (KMIP 3.0 §3.3): TLS1.3 only; suites \
@@ -151,6 +186,11 @@ fn profile_builder(
         TlsProfile::Permissive => {
             install_crypto_provider();
             Ok(ServerConfig::builder())
+        }
+        TlsProfile::ClassicalBaseline => {
+            ServerConfig::builder_with_provider(Arc::new(classical_baseline_provider()))
+                .with_protocol_versions(&[&rustls::version::TLS13])
+                .map_err(|e| ServerError::Tls(format!("classical-baseline TLS setup: {e}")))
         }
         TlsProfile::QuantumSafe => {
             // Explicit provider rather than the process-wide default: the
@@ -286,6 +326,7 @@ pub fn tls_mtls_with_profile(
     let verifier_provider = Arc::new(match profile {
         TlsProfile::Permissive => rustls::crypto::ring::default_provider(),
         TlsProfile::QuantumSafe => quantum_safe_provider(),
+        TlsProfile::ClassicalBaseline => classical_baseline_provider(),
     });
     let verifier =
         WebPkiClientVerifier::builder_with_provider(Arc::new(root_store), verifier_provider)
