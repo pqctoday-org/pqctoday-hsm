@@ -102,10 +102,21 @@ class KmipClient:
         timeout: float = 5.0,
         insecure: bool = True,
         ca_cert: Optional[str] = None,
+        username: Optional[str] = None,
+        password: Optional[str] = None,
     ):
         self.host = host
         self.port = port
         self.timeout = timeout
+        # KMIP 3.0 §8.1.2 Authentication credentials. Without these the
+        # client can only talk to a server in open-auth mode; any server
+        # started with --auth-user answers every operation with
+        # "authentication not successful". Send the password in the CLEAR
+        # here (inside TLS) — the server hashes it and compares against the
+        # SHA-256 it was configured with, so pre-hashing on this side would
+        # authenticate the hash of a hash and always fail.
+        self.username = username
+        self.password = password
         if insecure:
             self._ctx = ssl.create_default_context()
             self._ctx.check_hostname = False
@@ -139,11 +150,46 @@ class KmipClient:
         node, _ = _ttlv.decode_one(resp_bytes)
         return node
 
+    def _auth_nodes(self) -> list[_ttlv.TtlvNode]:
+        """The §8.1.2 `Authentication` structure, or nothing when no
+        credentials are configured.
+
+        Shape per §9.4 Table 504 / §9.9 Table 509-510, which is also exactly
+        what the server's `decode_credential` walks:
+
+            Authentication              (0x42000C, Structure)
+              Credential                (0x420023, Structure)
+                CredentialType          (0x420024, Enumeration = 1)
+                CredentialValue         (0x420025, Structure)
+                  Username              (0x420099, TextString)
+                  Password              (0x4200A1, TextString)
+
+        Omitted entirely when unset rather than sent empty: an empty
+        Authentication is not the same as no Authentication, and a
+        password-less credential is rejected by the verifier anyway.
+        """
+        if self.username is None or self.password is None:
+            return []
+        return [
+            _struct(
+                "Authentication",
+                _struct(
+                    "Credential",
+                    _leaf("CredentialType", "Enumeration", "UsernameAndPassword"),
+                    _struct(
+                        "CredentialValue",
+                        _leaf("Username", "TextString", self.username),
+                        _leaf("Password", "TextString", self.password),
+                    ),
+                ),
+            )
+        ]
+
     def request(self, operation: str, *payload: _ttlv.TtlvNode) -> KmipResult:
         """Send a single-batch-item request for ``operation`` and decode it."""
         msg = _struct(
             "RequestMessage",
-            _struct("RequestHeader", _proto()),
+            _struct("RequestHeader", _proto(), *self._auth_nodes()),
             _struct(
                 "BatchItem",
                 _leaf("Operation", "Enumeration", operation),
