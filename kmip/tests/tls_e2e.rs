@@ -196,6 +196,92 @@ async fn quantum_safe_tls_round_trip_query_request() {
     let _ = handle.await;
 }
 
+/// Mint a CA + server + client cert set into a unique temp dir.
+fn mint_certs(tag: &str) -> (std::path::PathBuf, pqctoday_kmip::cert_init::AdminCertPaths) {
+    let dir = std::env::temp_dir().join(format!("kmip-{tag}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let paths = pqctoday_kmip::cert_init::init_certs_if_missing(&dir).expect("mint certs");
+    (dir, paths)
+}
+
+/// The disk-PEM constructor must apply the profile too — and be shown to
+/// ENFORCE it, not merely to build.
+///
+/// `tls_from_pem` is the path a production deployment uses (`--tls-cert` /
+/// `--tls-key` without a client CA), and it was the one config constructor
+/// with no test at any profile. That is exactly the shape of the gap that
+/// hid the mTLS startup crash for six commits: enforcement lives in one
+/// shared function, but "one shared function" is a claim each entry point
+/// has to demonstrate, not inherit.
+#[tokio::test(flavor = "current_thread")]
+async fn tls_from_pem_enforces_the_quantum_safe_profile() {
+    use rustls::crypto::aws_lc_rs::{cipher_suite, kx_group};
+    let (dir, paths) = mint_certs("frompem");
+
+    // Builds under both profiles.
+    for profile in [TlsProfile::Permissive, TlsProfile::QuantumSafe] {
+        let cfg = pqctoday_kmip::server::listener::tls_from_pem_with_profile(
+            &paths.server_cert,
+            &paths.server_key,
+            profile,
+        );
+        assert!(cfg.is_ok(), "tls_from_pem must build under {profile:?}: {cfg:?}");
+    }
+
+    // ...and a server built THIS way actually refuses classical clients.
+    let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+    let bound = listener.local_addr().unwrap();
+    drop(listener);
+    let tls_cfg = pqctoday_kmip::server::listener::tls_from_pem_with_profile(
+        &paths.server_cert,
+        &paths.server_key,
+        TlsProfile::QuantumSafe,
+    )
+    .expect("quantum-safe from PEM");
+    let deps = build_deps();
+    let handle = tokio::spawn(async move {
+        if let Err(e) = serve(bound, tls_cfg, deps).await {
+            eprintln!("server: {e}");
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Trust the CA (the server cert is CA-signed, not self-signed) and use a
+    // name the cert actually carries.
+    let cert_pem = std::fs::read_to_string(&paths.ca_cert).unwrap();
+
+    // Positive control first, so a "refused" below cannot just mean "no server".
+    let ok = handshake_error_named(
+        bound,
+        &cert_pem,
+        "localhost",
+        vec![cipher_suite::TLS13_AES_256_GCM_SHA384],
+        vec![kx_group::X25519MLKEM768],
+        &[&rustls::version::TLS13],
+    )
+    .await;
+    assert!(ok.is_none(), "control: hybrid client must connect, got {ok:?}");
+
+    let err = handshake_error_named(
+        bound,
+        &cert_pem,
+        "localhost",
+        vec![cipher_suite::TLS13_AES_256_GCM_SHA384],
+        vec![kx_group::X25519],
+        &[&rustls::version::TLS13],
+    )
+    .await;
+    assert!(
+        err.is_some(),
+        "a server built from tls_from_pem under quantum-safe must refuse classical X25519"
+    );
+
+    handle.abort();
+    let _ = handle.await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// mTLS must build a usable config under BOTH profiles.
 ///
 /// Regression test for a real bug: `tls_mtls_with_profile` built its
@@ -278,6 +364,21 @@ async fn handshake_error(
     groups: Vec<&'static dyn rustls::crypto::SupportedKxGroup>,
     versions: &[&'static rustls::SupportedProtocolVersion],
 ) -> Option<String> {
+    handshake_error_named(bound, cert_pem, "kmip.test", suites, groups, versions).await
+}
+
+/// As [`handshake_error`], for certs whose SANs are not `kmip.test` — the
+/// minted CA-signed set uses `pqc-kmip` / `localhost` / `127.0.0.1`, so a
+/// hardcoded name would fail hostname verification and be misread as the
+/// profile refusing the connection.
+async fn handshake_error_named(
+    bound: SocketAddr,
+    cert_pem: &str,
+    server_name: &'static str,
+    suites: Vec<rustls::SupportedCipherSuite>,
+    groups: Vec<&'static dyn rustls::crypto::SupportedKxGroup>,
+    versions: &[&'static rustls::SupportedProtocolVersion],
+) -> Option<String> {
     let provider = rustls::crypto::CryptoProvider {
         cipher_suites: suites,
         kx_groups: groups,
@@ -295,8 +396,8 @@ async fn handshake_error(
     };
     let connector = TlsConnector::from(Arc::new(config));
     let tcp = TcpStream::connect(bound).await.unwrap();
-    let server_name = ServerName::try_from("kmip.test").unwrap();
-    match connector.connect(server_name, tcp).await {
+    let name = ServerName::try_from(server_name).unwrap();
+    match connector.connect(name, tcp).await {
         Ok(_) => None,
         Err(e) => Some(e.to_string()),
     }
