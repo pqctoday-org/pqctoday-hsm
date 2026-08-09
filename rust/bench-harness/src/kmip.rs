@@ -465,6 +465,295 @@ pub fn decapsulate_and_get(
     Ok(get_resp)
 }
 
+// ── in-process control arm ──────────────────────────────────────────────────
+//
+// The same KMIP requests, dispatched directly with NO sockets. Its only job
+// is to make the wire arms interpretable:
+//
+//     wire − in-process  =  TCP + TLS handshake + framing + network hop
+//     in-process         =  TTLV codec + dispatch + the crypto itself
+//
+// It is a CONTROL, never a headline. Presenting it as "KMIP performance"
+// would describe a deployment nobody runs: real KMIP clients are remote, and
+// the transport they pay for is the entire reason the protocol exists.
+
+
+use pqctoday_kmip::auditlog::{AuditSink, RingSink};
+use pqctoday_kmip::dispatcher::dispatch;
+use pqctoday_kmip::ops::{Deps, DepsConfig};
+use pqctoday_kmip::policy::{load_from_str, Engine};
+use pqctoday_kmip::store::MemoryStore;
+
+/// Permissive policy: the control arm measures transport-free protocol cost,
+/// so a restrictive policy would be measuring the policy engine instead.
+const CONTROL_POLICY: &str = r#"
+schema_version: 1
+metadata: { name: bench-control, description: bench, authority: bench, effective: always }
+rules: []
+"#;
+
+/// An in-process KMIP endpoint: real dispatcher, real engine, no network.
+pub struct InProcessKmip {
+    deps: Arc<Deps>,
+}
+
+impl InProcessKmip {
+    pub fn new() -> Result<Self> {
+        let sink: Arc<dyn AuditSink> = Arc::new(RingSink::new(64));
+        let engine = Engine::with_global_sink(sink.clone());
+        engine
+            .activate(
+                load_from_str(CONTROL_POLICY, std::path::Path::new("<bench>"))
+                    .map_err(|e| anyhow!("control policy parse: {e}"))?,
+            )
+            .map_err(|e| anyhow!("control policy activate: {e}"))?;
+        Ok(Self {
+            deps: Arc::new(Deps::new(
+                engine,
+                Arc::new(MemoryStore::new()),
+                sink,
+                DepsConfig::default(),
+            )),
+        })
+    }
+
+    /// Dispatch one request in-process, returning the ENCODED response.
+    ///
+    /// Deliberately encodes the response even though the caller could read
+    /// the typed struct: the wire arms pay TTLV encode+decode, so a control
+    /// that skipped it would flatter itself and inflate the apparent
+    /// network cost by the codec's share.
+    pub fn dispatch_encoded(&self, request: RequestMessage) -> Vec<u8> {
+        let response = dispatch(&self.deps, request);
+        pqctoday_kmip::kmip30::wire::encode_response_message(&response)
+    }
+
+    /// Query, mirroring [`query`] on the wire arm.
+    pub fn query(&self) -> Vec<u8> {
+        self.dispatch_encoded(one_off_request(RequestPayload::Query(QueryRequest {
+            functions: vec![QueryFunction::QueryOperations],
+        })))
+    }
+}
+
+// ── the `kmip` subcommand ───────────────────────────────────────────────────
+
+/// Which arm to measure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum Arm {
+    /// Real client over TLS, one connection per operation — what a KMIP
+    /// deployment actually costs.
+    Wire,
+    /// No sockets. A CONTROL for attributing cost, never a headline.
+    InProcess,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct KmipArgs {
+    #[arg(long, default_value = "127.0.0.1")]
+    pub host: String,
+    #[arg(long, default_value_t = 5696)]
+    pub port: u16,
+    /// PEM trust anchor for the server certificate (required for --arm wire).
+    #[arg(long)]
+    pub ca: Option<String>,
+    /// Name to verify against the server certificate's SANs.
+    #[arg(long, default_value = "localhost")]
+    pub server_name: String,
+    #[arg(long)]
+    pub user: Option<String>,
+    #[arg(long)]
+    pub password: Option<String>,
+    /// TLS posture the CLIENT offers. `quantum-safe` offers ONLY hybrid
+    /// ML-KEM groups, so a completed handshake proves the exchange was
+    /// hybrid — the client states what it offered rather than inferring it.
+    #[arg(long, default_value = "quantum-safe")]
+    pub tls: String,
+    #[arg(long, value_enum, default_value_t = Arm::Wire)]
+    pub arm: Arm,
+    #[arg(long, default_value_t = 2)]
+    pub threads: u32,
+    #[arg(long, default_value_t = 2.0)]
+    pub duration_secs: f64,
+    #[arg(long, default_value_t = 0.5)]
+    pub warmup_secs: f64,
+}
+
+/// One emitted row. Mirrors `measure::ResultRow`'s shape so both arms land
+/// in one JSONL stream, plus the two fields that make a KMIP row
+/// interpretable on its own.
+#[derive(serde::Serialize)]
+struct KmipRow<'a> {
+    access_path: &'a str,
+    /// NEW: `wire-per-op` or `in-process`. Without this a reader cannot tell
+    /// whether a number includes a TLS handshake.
+    transport: &'a str,
+    /// NEW: the posture the client offered, and — when the runtime can name
+    /// it — the group actually negotiated. A row that cannot say which group
+    /// it used cannot claim to have measured PQC-TLS.
+    tls: &'a str,
+    negotiated_group: Option<String>,
+    algorithm: &'a str,
+    category: &'a str,
+    op: &'a str,
+    threads: u32,
+    ops_per_sec: f64,
+    p50_ms: f64,
+    p99_ms: f64,
+    duration_s: f64,
+    total_ops: u64,
+    /// Two-round-trip operations (Encapsulate+Get) are flagged, never
+    /// silently reported as one call.
+    round_trips_per_op: u32,
+}
+
+/// Run the representative matrix and print one JSONL row per measured cell.
+pub fn run(args: &KmipArgs) -> Result<()> {
+    let tls = match args.tls.as_str() {
+        "quantum-safe" => ClientTlsProfile::QuantumSafe,
+        "permissive" => ClientTlsProfile::Permissive,
+        other => return Err(anyhow!("--tls must be quantum-safe or permissive, got {other:?}")),
+    };
+
+    // The in-process control never touches TLS, so demanding a CA for it
+    // would be theatre.
+    let endpoint = if args.arm == Arm::Wire {
+        let ca = args
+            .ca
+            .as_ref()
+            .ok_or_else(|| anyhow!("--ca is required for --arm wire (PEM trust anchor)"))?;
+        Some(KmipEndpoint {
+            host: args.host.clone(),
+            port: args.port,
+            ca_pem: std::fs::read(ca).with_context(|| format!("reading --ca {ca}"))?,
+            server_name: args.server_name.clone(),
+            tls,
+            username: args.user.clone(),
+            password: args.password.clone(),
+        })
+    } else {
+        None
+    };
+
+    // Fail fast on a misconfigured endpoint: one clear error beats N
+    // thousand timing rows describing a connection that never worked.
+    let mut negotiated = None;
+    if let Some(ep) = &endpoint {
+        let probe = query(ep).context("pre-run KMIP probe failed")?;
+        negotiated = probe.kx_group.clone();
+        if tls == ClientTlsProfile::QuantumSafe {
+            match &negotiated {
+                Some(g) if g.contains("MLKEM") => {}
+                Some(g) => return Err(anyhow!("quantum-safe requested but negotiated {g}")),
+                // rustls should always name it; refuse to claim otherwise.
+                None => return Err(anyhow!("could not determine the negotiated group")),
+            }
+        }
+    }
+    // Arc, because measure::run_point requires `F: 'static` — its workers are
+    // spawned onto real OS threads, so a closure borrowing a local here
+    // cannot satisfy it.
+    let control: Option<Arc<InProcessKmip>> = if endpoint.is_none() {
+        Some(Arc::new(InProcessKmip::new()?))
+    } else {
+        None
+    };
+
+    let (transport, tls_label) = match args.arm {
+        Arm::Wire => ("wire-per-op", args.tls.as_str()),
+        Arm::InProcess => ("in-process", "none"),
+    };
+
+    for cell in REPRESENTATIVE_CELLS {
+        // Signing is the one operation both classes share a shape for; the
+        // KEM cells measure encapsulate instead.
+        let (op, category, round_trips) = match cell.class {
+            KmipClass::Signature => ("sign", "signature", 1),
+            KmipClass::Kem => ("encapsulate+get", "key_establishment", 2),
+        };
+
+        let (total_ops, latencies, elapsed) = match (&endpoint, &control) {
+            (Some(ep), _) => {
+                let kp = create_and_activate(ep, cell)
+                    .with_context(|| format!("{}: setup", cell.label))?;
+                let workers: Vec<_> = (0..args.threads)
+                    .map(|_| {
+                        let ep = ep.clone();
+                        let kp_priv = kp.private_uid.clone();
+                        let kp_pub = kp.public_uid.clone();
+                        let class = cell.class;
+                        move || -> Result<()> {
+                            match class {
+                                KmipClass::Signature => {
+                                    sign(&ep, &kp_priv, b"bench").map(|_| ())
+                                }
+                                KmipClass::Kem => {
+                                    encapsulate_and_get(&ep, &kp_pub).map(|_| ())
+                                }
+                            }
+                        }
+                    })
+                    .collect();
+                crate::measure::run_point(args.duration_secs, args.warmup_secs, workers)?
+            }
+            (None, Some(ctrl)) => {
+                // The control measures the protocol path only: encode,
+                // dispatch, encode the response. Keys are not created per
+                // iteration, matching the wire arm's hot loop.
+                let workers: Vec<_> = (0..1)
+                    .map(|_| {
+                        let ctrl = Arc::clone(ctrl);
+                        move || -> Result<()> {
+                            let _ = ctrl.query();
+                            Ok(())
+                        }
+                    })
+                    .collect();
+                crate::measure::run_point(args.duration_secs, args.warmup_secs, workers)?
+            }
+            _ => unreachable!("either an endpoint or a control is always present"),
+        };
+
+        let (p50, p99) = crate::measure::percentiles_ms(latencies);
+        // The control loop dispatches a Query, NOT this cell's operation, so
+        // it must not borrow the cell's labels. An earlier version emitted
+        // `algorithm: Ed25519, op: sign` for a row that measured neither —
+        // precisely the mislabelling this scenario exists to avoid. Until the
+        // control runs the real op matrix in-process (next increment), it
+        // says what it actually did.
+        let (row_algorithm, row_category, row_op) = if endpoint.is_some() {
+            (cell.label, category, op)
+        } else {
+            ("n/a", "protocol", "query")
+        };
+        let row = KmipRow {
+            access_path: "kmip",
+            transport,
+            tls: tls_label,
+            negotiated_group: negotiated.clone(),
+            algorithm: row_algorithm,
+            category: row_category,
+            op: row_op,
+            threads: if endpoint.is_some() { args.threads } else { 1 },
+            ops_per_sec: total_ops as f64 / elapsed,
+            p50_ms: p50,
+            p99_ms: p99,
+            duration_s: elapsed,
+            total_ops,
+            round_trips_per_op: round_trips,
+        };
+        println!("{}", serde_json::to_string(&row)?);
+
+        // The control arm's cells are all the same measurement (Query), so
+        // running it per algorithm would emit three identical rows dressed
+        // as different ones.
+        if endpoint.is_none() {
+            break;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -575,5 +864,20 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The control arm needs no server, so unlike the live tests it runs
+    /// every time — and it must produce a real, decodable Response Message,
+    /// not a stub.
+    #[test]
+    fn in_process_control_answers_without_a_network() {
+        let control = InProcessKmip::new().expect("build in-process deps");
+        let encoded = control.query();
+        let (tag, status) = response_status(&encoded).expect("decode control response");
+        assert_eq!(tag, 0x42_007b, "control must return a Response Message");
+        assert_eq!(status, Some(0), "control Query must succeed");
+        // Encoding is part of the control's cost on purpose — see
+        // dispatch_encoded. A zero-length body would mean it was skipped.
+        assert!(encoded.len() > 8, "control response must carry a real body");
     }
 }
