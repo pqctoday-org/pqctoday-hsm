@@ -46,6 +46,19 @@ use pqctoday_kmip::kmip30::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClientTlsProfile {
     /// rustls defaults — classical groups permitted.
+    ///
+    /// **Not a valid baseline for a PQC-TLS premium.** The server's
+    /// permissive profile installs the `ring` provider while its
+    /// quantum-safe profile uses `aws-lc-rs`, so a permissive-vs-quantum-safe
+    /// comparison varies the CRYPTO PROVIDER as well as the key exchange
+    /// group. Measured 2026-08-09, permissive vs quantum-safe, 3 repeats,
+    /// non-overlapping ranges: Ed25519 1083 -> 1577 ops/s, ML-KEM-768
+    /// 385 -> 488. Read naively that says "PQC TLS is 46% faster than
+    /// classical", which is not credible — aws-lc-rs is simply quicker than
+    /// ring here.
+    ///
+    /// A real premium needs both arms on the SAME provider, differing only
+    /// in the offered groups. That baseline does not exist yet.
     Permissive,
     /// KMIP 3.0 Profiles §3.3: TLS 1.3 only, the two §3.3.2 suites, and
     /// ONLY hybrid ML-KEM groups.
@@ -129,7 +142,20 @@ impl KmipEndpoint {
 
         let config = match self.tls {
             ClientTlsProfile::Permissive => {
-                let b = rustls::ClientConfig::builder().with_root_certificates(roots);
+                // builder_with_provider, NOT builder(): the plain builder
+                // resolves the PROCESS-LEVEL default provider and panics
+                // when it cannot ("Could not automatically determine the
+                // process-level CryptoProvider"). Same failure mode as the
+                // server's WebPkiClientVerifier::builder — and it hid here
+                // until the classical arm was actually run for the first
+                // time, because every earlier run used the quantum-safe
+                // profile, which passes its provider explicitly.
+                let b = rustls::ClientConfig::builder_with_provider(Arc::new(
+                    rustls::crypto::aws_lc_rs::default_provider(),
+                ))
+                .with_safe_default_protocol_versions()
+                .context("permissive client TLS setup")?
+                .with_root_certificates(roots);
                 match client_auth {
                     Some((certs, key)) => b
                         .with_client_auth_cert(certs, key)
@@ -674,6 +700,17 @@ pub struct KmipArgs {
     pub duration_secs: f64,
     #[arg(long, default_value_t = 0.5)]
     pub warmup_secs: f64,
+    /// How many times to measure each cell. The reported ops/sec is the
+    /// MEDIAN, and `ops_per_sec_min`/`_max` carry the spread.
+    ///
+    /// Defaults to 3, not 1, on purpose. Measured on this harness
+    /// (2026-08-09): repeats of one configuration spread 15-18%, and a
+    /// single-sample comparison once showed the wire arm "13% faster" than
+    /// the in-process control — an inversion that vanished under repeats.
+    /// A one-shot number here is not a measurement, it is a sample, and the
+    /// default should not quietly hand someone a sample to publish.
+    #[arg(long, default_value_t = 3)]
+    pub repeats: u32,
 }
 
 /// One emitted row. Mirrors `measure::ResultRow`'s shape so both arms land
@@ -694,7 +731,14 @@ struct KmipRow<'a> {
     category: &'a str,
     op: &'a str,
     threads: u32,
+    /// Median across `repeats`.
     ops_per_sec: f64,
+    /// Spread across repeats. When min and max are far apart the median is
+    /// not a stable figure and no cross-arm delta smaller than that spread
+    /// should be quoted from it.
+    ops_per_sec_min: f64,
+    ops_per_sec_max: f64,
+    repeats: u32,
     p50_ms: f64,
     p99_ms: f64,
     duration_s: f64,
@@ -815,10 +859,40 @@ pub fn run(args: &KmipArgs) -> Result<()> {
                 }
             })
             .collect();
-        let (total_ops, latencies, elapsed) =
-            crate::measure::run_point(args.duration_secs, args.warmup_secs, workers)?;
+        // Repeat the whole measured window, rebuilding the workers each
+        // time (a `FnMut` is consumed by run_point). Keys are created ONCE
+        // above, so repeats measure the operation, not key generation.
+        let mut samples: Vec<(f64, f64, f64, u64, f64)> = Vec::new();
+        for _ in 0..args.repeats.max(1) {
+            let workers: Vec<_> = (0..args.threads)
+                .map(|_| {
+                    let t = Arc::clone(&carrier);
+                    let kp_priv = kp.private_uid.clone();
+                    let kp_pub = kp.public_uid.clone();
+                    let class = cell.class;
+                    move || -> Result<()> {
+                        match class {
+                            KmipClass::Signature => sign(t.as_ref(), &kp_priv, b"bench").map(|_| ()),
+                            KmipClass::Kem => encapsulate_and_get(t.as_ref(), &kp_pub).map(|_| ()),
+                        }
+                    }
+                })
+                .collect();
+            let (total_ops, latencies, elapsed) =
+                crate::measure::run_point(args.duration_secs, args.warmup_secs, workers)?;
+            let (p50, p99) = crate::measure::percentiles_ms(latencies);
+            samples.push((total_ops as f64 / elapsed, p50, p99, total_ops, elapsed));
+        }
 
-        let (p50, p99) = crate::measure::percentiles_ms(latencies);
+        // Median, not mean: one cold first run (engine bootstrap landing in
+        // the first cell) should not drag the reported figure, which is
+        // exactly what happened before repeats existed.
+        let mut by_rate = samples.clone();
+        by_rate.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        let mid = by_rate[by_rate.len() / 2];
+        let (ops_per_sec, p50, p99, total_ops, elapsed) = mid;
+        let ops_min = by_rate.first().unwrap().0;
+        let ops_max = by_rate.last().unwrap().0;
         let row = KmipRow {
             access_path: "kmip",
             transport,
@@ -828,7 +902,10 @@ pub fn run(args: &KmipArgs) -> Result<()> {
             category,
             op,
             threads: args.threads,
-            ops_per_sec: total_ops as f64 / elapsed,
+            ops_per_sec,
+            ops_per_sec_min: ops_min,
+            ops_per_sec_max: ops_max,
+            repeats: args.repeats.max(1),
             p50_ms: p50,
             p99_ms: p99,
             duration_s: elapsed,
