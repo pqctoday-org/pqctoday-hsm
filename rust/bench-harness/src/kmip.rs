@@ -72,6 +72,16 @@ pub struct KmipEndpoint {
     /// once `--auth-user` is configured.
     pub username: Option<String>,
     pub password: Option<String>,
+    /// Client certificate + key for mutual TLS (§3.3.4 channel identity).
+    ///
+    /// Not optional in practice for the sandbox: `pqc-kmip` runs with
+    /// `--tls-client-ca`, so a client presenting no certificate is rejected
+    /// during the handshake with `CertificateRequired` — before any KMIP
+    /// message is exchanged, and regardless of credentials. This was found
+    /// only by pointing the harness at the real deployment; a self-signed
+    /// test server without a client CA had hidden it.
+    pub client_cert_pem: Option<Vec<u8>>,
+    pub client_key_pem: Option<Vec<u8>>,
 }
 
 impl KmipEndpoint {
@@ -98,10 +108,35 @@ impl KmipEndpoint {
             roots.add(c).context("adding CA to trust store")?;
         }
 
+        // Parse the client identity once, so both profile branches share it.
+        let client_auth = match (&self.client_cert_pem, &self.client_key_pem) {
+            (Some(cert_pem), Some(key_pem)) => {
+                let certs: Vec<_> = rustls_pemfile::certs(&mut &cert_pem[..])
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                    .context("parsing client cert PEM")?;
+                let key = rustls_pemfile::private_key(&mut &key_pem[..])
+                    .context("parsing client key PEM")?
+                    .ok_or_else(|| anyhow!("no private key found in the client key PEM"))?;
+                Some((certs, key))
+            }
+            (None, None) => None,
+            // Half a client identity is a configuration error, not a
+            // fallback to anonymous — say so rather than silently
+            // connecting without a certificate and failing later with an
+            // opaque TLS alert.
+            _ => return Err(anyhow!("client cert and key must be supplied together")),
+        };
+
         let config = match self.tls {
-            ClientTlsProfile::Permissive => rustls::ClientConfig::builder()
-                .with_root_certificates(roots)
-                .with_no_client_auth(),
+            ClientTlsProfile::Permissive => {
+                let b = rustls::ClientConfig::builder().with_root_certificates(roots);
+                match client_auth {
+                    Some((certs, key)) => b
+                        .with_client_auth_cert(certs, key)
+                        .context("client certificate rejected")?,
+                    None => b.with_no_client_auth(),
+                }
+            }
             ClientTlsProfile::QuantumSafe => {
                 let provider = rustls::crypto::CryptoProvider {
                     cipher_suites: vec![
@@ -114,11 +149,16 @@ impl KmipEndpoint {
                     ],
                     ..rustls::crypto::aws_lc_rs::default_provider()
                 };
-                rustls::ClientConfig::builder_with_provider(Arc::new(provider))
+                let b = rustls::ClientConfig::builder_with_provider(Arc::new(provider))
                     .with_protocol_versions(&[&rustls::version::TLS13])
                     .context("quantum-safe client TLS setup")?
-                    .with_root_certificates(roots)
-                    .with_no_client_auth()
+                    .with_root_certificates(roots);
+                match client_auth {
+                    Some((certs, key)) => b
+                        .with_client_auth_cert(certs, key)
+                        .context("client certificate rejected")?,
+                    None => b.with_no_client_auth(),
+                }
             }
         };
         Ok(Arc::new(config))
@@ -564,6 +604,13 @@ pub struct KmipArgs {
     pub user: Option<String>,
     #[arg(long)]
     pub password: Option<String>,
+    /// Client certificate for mutual TLS. Required when the server runs
+    /// with --tls-client-ca (the sandbox's pqc-kmip does), otherwise the
+    /// handshake fails with CertificateRequired before any KMIP message.
+    #[arg(long)]
+    pub client_cert: Option<String>,
+    #[arg(long)]
+    pub client_key: Option<String>,
     /// TLS posture the CLIENT offers. `quantum-safe` offers ONLY hybrid
     /// ML-KEM groups, so a completed handshake proves the exchange was
     /// hybrid — the client states what it offered rather than inferring it.
@@ -630,6 +677,16 @@ pub fn run(args: &KmipArgs) -> Result<()> {
             tls,
             username: args.user.clone(),
             password: args.password.clone(),
+            client_cert_pem: args
+                .client_cert
+                .as_ref()
+                .map(|p| std::fs::read(p).with_context(|| format!("reading --client-cert {p}")))
+                .transpose()?,
+            client_key_pem: args
+                .client_key
+                .as_ref()
+                .map(|p| std::fs::read(p).with_context(|| format!("reading --client-key {p}")))
+                .transpose()?,
         })
     } else {
         None
@@ -786,6 +843,8 @@ mod tests {
             tls: ClientTlsProfile::QuantumSafe,
             username: std::env::var("KMIP_BENCH_USER").ok(),
             password: std::env::var("KMIP_BENCH_PASS").ok(),
+            client_cert_pem: std::env::var("KMIP_BENCH_CLIENT_CERT").ok().map(|p| std::fs::read(p).expect("client cert")),
+            client_key_pem: std::env::var("KMIP_BENCH_CLIENT_KEY").ok().map(|p| std::fs::read(p).expect("client key")),
         };
 
         let ex = query(&endpoint).expect("KMIP Query round trip");
@@ -813,6 +872,8 @@ mod tests {
             tls: ClientTlsProfile::QuantumSafe,
             username: std::env::var("KMIP_BENCH_USER").ok(),
             password: std::env::var("KMIP_BENCH_PASS").ok(),
+            client_cert_pem: std::env::var("KMIP_BENCH_CLIENT_CERT").ok().map(|p| std::fs::read(p).expect("client cert")),
+            client_key_pem: std::env::var("KMIP_BENCH_CLIENT_KEY").ok().map(|p| std::fs::read(p).expect("client key")),
         })
     }
 
