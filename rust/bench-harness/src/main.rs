@@ -48,6 +48,7 @@
 //! separately-verified increment — not built here.
 
 mod algos;
+mod kmip;
 mod measure;
 mod pkcs11;
 
