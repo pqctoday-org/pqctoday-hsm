@@ -1804,6 +1804,33 @@ fn C_GenerateKeyPair_impl(
                 // CKA_PUBLIC_EXPONENT as distinct attributes (not packed into CKA_VALUE).
                 pub_attrs.insert(CKA_MODULUS, n_bytes.clone());
                 pub_attrs.insert(CKA_PUBLIC_EXPONENT, e_bytes.clone());
+                // …and so MUST the PRIVATE key. v3.2's RSA private-key object table
+                // lists CKA_MODULUS and CKA_PUBLIC_EXPONENT alongside the private
+                // factors; they are public values, so exposing them leaks nothing.
+                //
+                // Omitting them broke a real consumer. pkcs11-provider's
+                // fetch_rsa_key() requests CKA_MODULUS and CKA_PUBLIC_EXPONENT with
+                // required=true and CKA_ID/CKA_LABEL with required=false
+                // (src/vendor/pkcs11-provider/src/objects.c). Run against a private
+                // key that had neither, the required fetch failed and the optional
+                // CKA_ID was never populated on the provider's cached object — which
+                // surfaced far away, and misleadingly, as:
+                //
+                //   p11prov_obj_find_associated: No CKA_ID in source object
+                //                                (objects.c:1646)
+                //
+                // reached from p11prov_obj_export_public_rsa_key (objects.c:2229).
+                // The engine DOES store CKA_ID correctly; the provider simply never
+                // got as far as reading it.
+                //
+                // Only RSA is affected: an EC or ML-DSA public key is derivable from
+                // its private key, so the provider never needs to resolve a sibling
+                // object. That is why the LAMPS composite
+                // id-MLDSA44-RSA2048-PSS-SHA256 failed while
+                // id-MLDSA65-ECDSA-P256-SHA512 passed — the ML-DSA half was never
+                // the problem (pqctoday-hub e2e/cms-workshop-crypto.spec.ts:392).
+                prv_attrs.insert(CKA_MODULUS, n_bytes.clone());
+                prv_attrs.insert(CKA_PUBLIC_EXPONENT, e_bytes.clone());
                 store_ulong(&mut pub_attrs, CKA_MODULUS_BITS, bits as u32);
                 // SubjectPublicKeyInfo DER (CKA_PUBLIC_KEY_INFO)
                 {
@@ -10745,6 +10772,66 @@ mod attr_integrity_ffi_tests {
 
     fn obj_bool(handle: u32, attr_type: u32) -> Option<bool> {
         obj_attr(handle, attr_type).map(|v| !v.is_empty() && v[0] == 0x01)
+    }
+
+    /// PKCS#11 v3.2 — an RSA PRIVATE key object must expose CKA_MODULUS and
+    /// CKA_PUBLIC_EXPONENT, not only the public key. Both are public values, so
+    /// nothing is leaked by returning them.
+    ///
+    /// This is a CONSUMER contract, not a formality. pkcs11-provider's
+    /// fetch_rsa_key() requests both with required=true and CKA_ID with
+    /// required=false; a private key missing them made the required fetch fail
+    /// and left CKA_ID unpopulated on the provider's cached object, which
+    /// surfaced later as "No CKA_ID in source object" from
+    /// p11prov_obj_find_associated(). Only RSA hits that path — EC and ML-DSA
+    /// public keys are derivable from their private half — which is why the
+    /// LAMPS composite id-MLDSA44-RSA2048-PSS-SHA256 failed while the
+    /// ECDSA-P256 composite passed.
+    #[test]
+    fn rsa_private_key_exposes_modulus_and_public_exponent() {
+        let _guard = test_lock::acquire();
+        setup();
+
+        let mut mech = [0usize; 3];
+        mech[0] = CKM_RSA_PKCS_KEY_PAIR_GEN as usize;
+        let mut h_pub: u32 = 0;
+        let mut h_prv: u32 = 0;
+        let bits: usize = 2048;
+        let mut pub_tmpl = [0usize; 3];
+        pub_tmpl[0] = CKA_MODULUS_BITS as usize;
+        pub_tmpl[1] = (&bits as *const usize) as usize;
+        pub_tmpl[2] = std::mem::size_of::<usize>();
+
+        let rv = unsafe {
+            C_GenerateKeyPair_impl(
+                SESSION,
+                mech.as_mut_ptr() as *mut u8,
+                pub_tmpl.as_mut_ptr() as *mut u8,
+                1,
+                std::ptr::null_mut(),
+                0,
+                &mut h_pub,
+                &mut h_prv,
+            )
+        };
+        assert_eq!(rv, CKR_OK, "RSA-2048 keygen must succeed");
+
+        let pub_n = obj_attr(h_pub, CKA_MODULUS).expect("public key must carry CKA_MODULUS");
+        let pub_e =
+            obj_attr(h_pub, CKA_PUBLIC_EXPONENT).expect("public key must carry CKA_PUBLIC_EXPONENT");
+
+        // The regression: these were absent on the private key.
+        let prv_n = obj_attr(h_prv, CKA_MODULUS).expect("PRIVATE key must carry CKA_MODULUS");
+        let prv_e = obj_attr(h_prv, CKA_PUBLIC_EXPONENT)
+            .expect("PRIVATE key must carry CKA_PUBLIC_EXPONENT");
+
+        // Same key pair — the values must agree, not merely exist.
+        assert_eq!(prv_n, pub_n, "private CKA_MODULUS must equal the public one");
+        assert_eq!(
+            prv_e, pub_e,
+            "private CKA_PUBLIC_EXPONENT must equal the public one"
+        );
+        assert_eq!(prv_e, vec![0x01, 0x00, 0x01], "public exponent is 65537");
     }
 
     /// §4.9/§4.10 — a key imported via C_CreateObject with CKA_SENSITIVE=TRUE
