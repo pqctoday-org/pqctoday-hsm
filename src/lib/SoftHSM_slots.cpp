@@ -35,6 +35,7 @@
 
 #include "config.h"
 #include "log.h"
+#include "OpLog.h"
 #include "access.h"
 #include "SoftHSM.h"
 #include "SoftHSMHelpers.h"
@@ -239,6 +240,11 @@ CK_RV SoftHSM::C_Initialize(CK_VOID_PTR pInitArgs)
 		return CKR_GENERAL_ERROR;
 	}
 
+	// Open the operation-evidence log if SOFTHSM3_OP_LOG names a sink. Runtime
+	// gated on purpose (see OpLog.h): the shipped binary and the binary evidence
+	// is collected from must be the same binary.
+	OpLog::init();
+
 	// Configure object store storage backend used by all tokens.
 	if (!ObjectStoreToken::selectBackend(Configuration::i()->getString("objectstore.backend", DEFAULT_OBJECTSTORE_BACKEND)))
 	{
@@ -288,6 +294,10 @@ CK_RV SoftHSM::C_Finalize(CK_VOID_PTR pReserved)
 
 	// Must be set to NULL_PTR in this version of PKCS#11
 	if (pReserved != NULL_PTR) return CKR_ARGUMENTS_BAD;
+
+	// Close the evidence sink before the teardown branch below, so a run that
+	// ends via process exit still leaves a properly closed, complete log.
+	OpLog::shutdown();
 
 	// During process teardown (OpenSSL's atexit cleanup unloading the provider),
 	// OpenSSL's globals are already being freed. The cleanup below reaches back

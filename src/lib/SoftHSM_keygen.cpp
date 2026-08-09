@@ -40,6 +40,7 @@
 
 #include "config.h"
 #include "log.h"
+#include "OpLog.h"
 #include "access.h"
 #include "SoftHSM.h"
 #include "SoftHSMHelpers.h"
@@ -396,6 +397,52 @@ CK_RV SoftHSM::C_GenerateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMecha
 
 // Generate a key-pair using the specified mechanism
 CK_RV SoftHSM::C_GenerateKeyPair
+(
+	CK_SESSION_HANDLE hSession,
+	CK_MECHANISM_PTR pMechanism,
+	CK_ATTRIBUTE_PTR pPublicKeyTemplate,
+	CK_ULONG ulPublicKeyAttributeCount,
+	CK_ATTRIBUTE_PTR pPrivateKeyTemplate,
+	CK_ULONG ulPrivateKeyAttributeCount,
+	CK_OBJECT_HANDLE_PTR phPublicKey,
+	CK_OBJECT_HANDLE_PTR phPrivateKey
+)
+{
+	CK_RV rv = generateKeyPairImpl(hSession, pMechanism,
+	                               pPublicKeyTemplate, ulPublicKeyAttributeCount,
+	                               pPrivateKeyTemplate, ulPrivateKeyAttributeCount,
+	                               phPublicKey, phPrivateKey);
+
+	if (OpLog::enabled())
+	{
+		const CK_MECHANISM_TYPE mech = (pMechanism != NULL_PTR) ? pMechanism->mechanism : 0;
+
+		// Read back from the private key, and only on success: the custody
+		// attributes are what "generated in-HSM, non-extractable" means, and
+		// they only exist once the object does.
+		const bool haveKey = (rv == CKR_OK && phPrivateKey != NULL_PTR &&
+		                      *phPrivateKey != CK_INVALID_HANDLE);
+		const std::string keyFields = haveKey
+			? opLogKeyFields(hSession, *phPrivateKey, mech)
+			: std::string("key=- keytype=- paramset=-");
+		const std::string custody = haveKey
+			? opLogKeyCustodyFields(hSession, *phPrivateKey)
+			: std::string("extractable=- sensitive=- never_extractable=- always_sensitive=- local=-");
+
+		OpLog::emit("C_GenerateKeyPair",
+		            "sess=%lu mech=%s mech_id=0x%08lx %s %s hpub=%lu hpriv=%lu rv=%s rv_id=0x%08lx",
+		            (unsigned long)hSession,
+		            OpLog::mechName(mech), (unsigned long)mech,
+		            keyFields.c_str(), custody.c_str(),
+		            (unsigned long)(phPublicKey  != NULL_PTR ? *phPublicKey  : CK_INVALID_HANDLE),
+		            (unsigned long)(phPrivateKey != NULL_PTR ? *phPrivateKey : CK_INVALID_HANDLE),
+		            OpLog::rvName(rv), (unsigned long)rv);
+	}
+
+	return rv;
+}
+
+CK_RV SoftHSM::generateKeyPairImpl
 (
 	CK_SESSION_HANDLE hSession,
 	CK_MECHANISM_PTR pMechanism,

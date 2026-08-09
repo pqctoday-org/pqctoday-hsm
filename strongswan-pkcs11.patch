@@ -1,0 +1,1647 @@
+# strongSwan PKCS#11 plugin — ML-DSA/ML-KEM PQC extension
+#
+# Generated 2026-08-08 (upgrade plan B6) against pristine strongSwan 6.0.7
+# src/libstrongswan/plugins/pkcs11/. Regenerate with
+# regen-strongswan-pkcs11-patch.sh whenever strongswan-pkcs11/ changes or the
+# pinned strongSwan version bumps.
+#
+# Replaces a wholesale `COPY pqctoday-hsm/strongswan-pkcs11 .../plugins/pkcs11`
+# in Dockerfile.network that silently discarded upstream changes to any file
+# it overwrote — discovered 2026-08-08 when 6.0.7 renamed OID_SECT*R1 to
+# OID_SECP*R1 and removed the old names inside this same directory; a naive
+# COPY-based bump would have shipped 6.0.7 while keeping the pre-rename names,
+# which would not even compile. Applying via `patch -p1` instead means a
+# future upstream change to any of these 6 modified files surfaces as a fuzzy
+# hunk or an outright failure, not silence.
+#
+# Modified from upstream (6 files):
+#   src/libstrongswan/plugins/pkcs11/Makefile.am          (+pkcs11_kem.{c,h} to SOURCES)
+#   src/libstrongswan/plugins/pkcs11/pkcs11.h             (ML-DSA/ML-KEM mechanism + key type decls)
+#   src/libstrongswan/plugins/pkcs11/pkcs11_dh.c          (ML-KEM key agreement path)
+#   src/libstrongswan/plugins/pkcs11/pkcs11_plugin.c      (PLUGIN_PROVIDE for KEY_ML_DSA_*, KE_ML_KEM_*)
+#   src/libstrongswan/plugins/pkcs11/pkcs11_private_key.c (ML-DSA sign via CKM_ML_DSA)
+#   src/libstrongswan/plugins/pkcs11/pkcs11_public_key.c  (ML-DSA verify + SPKI decode; OID_SECP*R1 usage)
+#
+# New files, not present upstream (4 files):
+#   src/libstrongswan/plugins/pkcs11/pkcs11_kem.{c,h}     (CKM_ML_KEM encapsulate/decapsulate wiring)
+#   src/libstrongswan/plugins/pkcs11/test_ss.c            (standalone PKCS#11 smoke test)
+#   src/libstrongswan/plugins/pkcs11/README.md            (fork notes)
+#
+# The other 13 files in strongswan-pkcs11/ (pkcs11_creds.*, pkcs11_hasher.*,
+# pkcs11_library.*, pkcs11_manager.*, pkcs11_plugin.h, pkcs11_private_key.h,
+# pkcs11_public_key.h, pkcs11_rng.*, pkcs11_dh.h) are byte-identical to
+# upstream and are intentionally NOT part of this patch — they come from the
+# strongSwan tarball unmodified, so an upstream change to any of them is a
+# real, visible diff the next time this patch is regenerated, rather than an
+# invisible overwrite.
+#
+diff --git a/src/libstrongswan/plugins/pkcs11/Makefile.am b/src/libstrongswan/plugins/pkcs11/Makefile.am
+index a2a1bcf..6a95b74 100644
+--- a/src/libstrongswan/plugins/pkcs11/Makefile.am
++++ b/src/libstrongswan/plugins/pkcs11/Makefile.am
+@@ -19,6 +19,7 @@ libstrongswan_pkcs11_la_SOURCES = \
+ 	pkcs11_hasher.h pkcs11_hasher.c \
+ 	pkcs11_rng.h pkcs11_rng.c \
+ 	pkcs11_dh.h pkcs11_dh.c \
++	pkcs11_kem.h pkcs11_kem.c \
+ 	pkcs11_manager.h pkcs11_manager.c
+ 
+ libstrongswan_pkcs11_la_LDFLAGS = -module -avoid-version
+diff --git b/src/libstrongswan/plugins/pkcs11/README.md b/src/libstrongswan/plugins/pkcs11/README.md
+new file mode 100644
+index 0000000..adce69d
+--- /dev/null
++++ b/src/libstrongswan/plugins/pkcs11/README.md
+@@ -0,0 +1,53 @@
++# strongswan-pkcs11 — PQC-enabled strongSwan PKCS#11 plugin
++
++A drop-in replacement for strongSwan's stock `pkcs11` plugin, extended so that
++IKEv2 can perform **ML-KEM key exchange** and **ML-DSA authentication** through
++a PKCS#11 v3.2 token — i.e. against the softhsmv3 module. Private keys stay
++inside the token; charon calls `C_EncapsulateKey` / `C_DecapsulateKey` and
++`C_Sign` on the module.
++
++## What it is
++
++These are strongSwan plugin sources (the `libstrongswan-pkcs11.la` plugin, per
++`Makefile.am`) — they compile *inside* the strongSwan tree, not standalone. Key
++additions over upstream:
++
++| File | Role |
++|---|---|
++| `pkcs11_kem.c/.h` | `key_exchange_t` backed by ML-KEM `C_EncapsulateKey`/`C_DecapsulateKey` (IKEv2 KE payload) |
++| `pkcs11_private_key.c` / `pkcs11_public_key.c` | ML-DSA sign/verify + SPKI handling via the token |
++| `pkcs11_library.c`, `pkcs11_manager.c` | Module load + slot/token management |
++| `pkcs11_creds.c`, `pkcs11_hasher.c`, `pkcs11_rng.c`, `pkcs11_dh.c` | Credentials, hashing, RNG, classical DH |
++| `test_ss.c` | Minimal standalone smoke of the key-type constants |
++
++## Build
++
++Layer these sources into a strongSwan 6.0.5/6.0.6 tree (the ML-DSA core patch is
++`../strongswan-6.0.5-pqc.patch` / `../strongswan-6.0.6-pqc.patch`) and configure
++with the plugin enabled:
++
++```bash
++./configure --enable-pkcs11    # plus your usual strongSwan options
++make && make install
++```
++
++For the WASM path see `../strongswan-wasm-shims/` (the actively-maintained shim
++tree) and `../scripts/build-strongswan-wasm.sh`.
++
++## Test against softhsmv3
++
++1. Build/install softhsmv3 and initialize a token with an ML-DSA-65 key
++   (see `../docs/softhsmv3opsguide.md` §4).
++2. Point the plugin at the module in `strongswan.conf`:
++
++   ```ini
++   charon { plugins { pkcs11 { modules {
++     softhsmv3 { path = /usr/local/lib/softhsm/libsofthsmv3.so }
++   } } } }
++   ```
++
++3. Configure an IKEv2 connection that negotiates a PQC key-exchange group
++   (ML-KEM-768) and `auth = pubkey` referencing the token cert
++   (`pkcs11:token=...;id=...;type=cert`), then initiate — the KE and the
++   authentication signature both run through the token. See
++   `../docs/softhsmv3opsguide.md` §4 for the full `swanctl.conf` example.
+diff --git a/src/libstrongswan/plugins/pkcs11/pkcs11.h b/src/libstrongswan/plugins/pkcs11/pkcs11.h
+index b27bd84..1818d0b 100644
+--- a/src/libstrongswan/plugins/pkcs11/pkcs11.h
++++ b/src/libstrongswan/plugins/pkcs11/pkcs11.h
+@@ -380,6 +380,13 @@ typedef unsigned long ck_key_type_t;
+ #define CKK_GOST28147           (0x32UL)
+ #define CKK_EC_EDWARDS          (0x40UL)
+ #define CKK_EC_MONTGOMERY       (0x41UL)
++/* Aligned with softhsmv3's src/lib/pkcs11/pkcs11t.h:439 (0x49).  Prior
++ * value 0x42 caused softhsmv3 to reject C_CreateObject(peer pubkey)
++ * with CKR_ATTRIBUTE_VALUE_INVALID because the CKA_KEY_TYPE value
++ * didn't match any registered type. */
++#define CKK_ML_KEM              (0x00000049UL)
++#define CKK_ML_DSA              (0x0000004aUL)
++#define CKK_SLH_DSA             (0x0000004bUL)
+ #define CKK_VENDOR_DEFINED      (1UL << 31)
+ 
+ 
+@@ -457,6 +464,7 @@ typedef unsigned long ck_attribute_type_t;
+ #define CKA_ECDSA_PARAMS                (0x180UL)
+ #define CKA_EC_PARAMS                   (0x180UL)
+ #define CKA_EC_POINT                    (0x181UL)
++#define CKA_ML_KEM_PARAMS               (0x182UL)
+ #define CKA_SECONDARY_AUTH              (0x200UL)
+ #define CKA_AUTH_PIN_FLAGS              (0x201UL)
+ #define CKA_ALWAYS_AUTHENTICATE         (0x202UL)
+@@ -499,8 +507,46 @@ typedef unsigned long ck_attribute_type_t;
+ #define CKA_OTP_TIME                    (0x22FUL)
+ #define CKA_ALLOWED_MECHANISMS          (CKF_ARRAY_ATTRIBUTE | 0x600UL)
+ #define CKA_PROFILE_ID                  (0x601UL)
++/* PKCS#11 v3.2 §6.67.1 / §6.68.1 — shared parameter-set attribute
++ * used by ML-KEM and ML-DSA keys. */
++#define CKA_PARAMETER_SET               (0x61dUL)
++/* PKCS#11 v3.2 KEM capability attributes — aligned with softhsmv3
++ * src/lib/pkcs11/pkcs11t.h lines 672-673. Public key imported via
++ * C_CreateObject must have CKA_ENCAPSULATE=TRUE for C_EncapsulateKey to
++ * succeed (SoftHSM_kem.cpp checks this; without it, returns
++ * CKR_KEY_FUNCTION_NOT_PERMITTED). Same for CKA_DECAPSULATE on the
++ * private-key side. */
++#define CKA_ENCAPSULATE                 (0x00000633UL)
++#define CKA_DECAPSULATE                 (0x00000634UL)
+ #define CKA_VENDOR_DEFINED              (1UL << 31)
+ 
++/* PKCS#11 v3.2 §6.67.2 — ML-DSA parameter set values */
++typedef unsigned long CK_ML_DSA_PARAMETER_SET_TYPE;
++#define CKP_ML_DSA_44                   (1UL)
++#define CKP_ML_DSA_65                   (2UL)
++#define CKP_ML_DSA_87                   (3UL)
++
++/* PKCS#11 v3.2 §6.68.2 — ML-KEM parameter set values */
++typedef unsigned long CK_ML_KEM_PARAMETER_SET_TYPE;
++#define CKP_ML_KEM_512                  (1UL)
++#define CKP_ML_KEM_768                  (2UL)
++#define CKP_ML_KEM_1024                 (3UL)
++
++/* PKCS#11 v3.2 §6.66.2 — SLH-DSA parameter set values (RFC 9909) */
++typedef unsigned long CK_SLH_DSA_PARAMETER_SET_TYPE;
++#define CKP_SLH_DSA_SHA2_128S           (0x00000001UL)
++#define CKP_SLH_DSA_SHAKE_128S          (0x00000002UL)
++#define CKP_SLH_DSA_SHA2_128F           (0x00000003UL)
++#define CKP_SLH_DSA_SHAKE_128F          (0x00000004UL)
++#define CKP_SLH_DSA_SHA2_192S           (0x00000005UL)
++#define CKP_SLH_DSA_SHAKE_192S          (0x00000006UL)
++#define CKP_SLH_DSA_SHA2_192F           (0x00000007UL)
++#define CKP_SLH_DSA_SHAKE_192F          (0x00000008UL)
++#define CKP_SLH_DSA_SHA2_256S           (0x00000009UL)
++#define CKP_SLH_DSA_SHAKE_256S          (0x0000000aUL)
++#define CKP_SLH_DSA_SHA2_256F           (0x0000000bUL)
++#define CKP_SLH_DSA_SHAKE_256F          (0x0000000cUL)
++
+ 
+ struct ck_attribute
+ {
+@@ -748,6 +794,19 @@ typedef unsigned long ck_mechanism_type_t;
+ #define CKM_EC_EDWARDS_KEY_PAIR_GEN     (0x1055UL)
+ #define CKM_EC_MONTGOMERY_KEY_PAIR_GEN  (0x1056UL)
+ #define CKM_EDDSA                       (0x1057UL)
++/* Aligned with softhsmv3's src/lib/pkcs11/pkcs11t.h — those are the OIDs
++ * the linked-in token advertises via C_GetMechanismList. Without this
++ * match pkcs11_kem.c:find_token silently fails and strongSwan's
++ * crypto_factory falls through to the openssl plugin, bypassing the HSM
++ * for ML-KEM. softhsmv3 uses SEPARATE OIDs for keygen vs encap; prior
++ * code collapsed both to 0x1058 (non-existent in softhsmv3) which is why
++ * C_GenerateKeyPair returned CKR_MECHANISM_INVALID. */
++#define CKM_ML_KEM_KEY_PAIR_GEN         (0x0000000FUL)
++#define CKM_ML_KEM                      (0x00000017UL)
++#define CKM_ML_DSA_KEY_PAIR_GEN         (0x0000001cUL)
++#define CKM_ML_DSA                      (0x0000001dUL)
++#define CKM_SLH_DSA_KEY_PAIR_GEN        (0x0000002dUL)
++#define CKM_SLH_DSA                     (0x0000002eUL)
+ #define CKM_JUNIPER_KEY_GEN             (0x1060UL)
+ #define CKM_JUNIPER_ECB128              (0x1061UL)
+ #define CKM_JUNIPER_CBC128              (0x1062UL)
+@@ -1543,6 +1602,27 @@ struct ck_function_list_3_0
+   CK_C_VerifyMessageBegin C_VerifyMessageBegin;
+   CK_C_VerifyMessageNext C_VerifyMessageNext;
+   CK_C_MessageVerifyFinal C_MessageVerifyFinal;
++  /* KEM functions — PKCS#11 v3.2 §5.20 (C_EncapsulateKey, C_DecapsulateKey).
++ * The secret-key attribute template + count are REQUIRED by the spec; our
++ * initial fork copy omitted them, causing softhsmv3 to read garbage as
++ * hKey/ciphertext and return OBJECT_HANDLE_INVALID / ATTRIBUTE_VALUE_INVALID.
++ * Signatures verified against pqctoday-hsm/p11_v32_compliance_test.cpp. */
++  ck_rv_t (*C_EncapsulateKey)(ck_session_handle_t hSession,
++                              struct ck_mechanism* pMech,
++                              ck_object_handle_t hPublicKey,
++                              struct ck_attribute* pTemplate,
++                              unsigned long ulAttributeCount,
++                              unsigned char* pCiphertext,
++                              unsigned long* pulCiphertextLen,
++                              ck_object_handle_t* phKey);
++  ck_rv_t (*C_DecapsulateKey)(ck_session_handle_t hSession,
++                              struct ck_mechanism* pMech,
++                              ck_object_handle_t hPrivateKey,
++                              struct ck_attribute* pTemplate,
++                              unsigned long ulAttributeCount,
++                              unsigned char* pCiphertext,
++                              unsigned long ulCiphertextLen,
++                              ck_object_handle_t* phKey);
+ };
+ 
+ 
+diff --git a/src/libstrongswan/plugins/pkcs11/pkcs11_dh.c b/src/libstrongswan/plugins/pkcs11/pkcs11_dh.c
+index 892bb5b..9453e91 100644
+--- a/src/libstrongswan/plugins/pkcs11/pkcs11_dh.c
++++ b/src/libstrongswan/plugins/pkcs11/pkcs11_dh.c
+@@ -61,10 +61,22 @@ struct private_pkcs11_dh_t {
+ 	chunk_t pub_key;
+ 
+ 	/**
+-	 * Public value provided by peer
++	 * Public value provided by peer. For ECP curves this holds a cloned
++	 * CK_ECDH1_DERIVE_PARAMS struct whose pPublicData points into
++	 * `peer_pub_key` below — NOT into a transient stack buffer.
+ 	 */
+ 	chunk_t other;
+ 
++	/**
++	 * Heap copy of the peer's tagged EC public value (0x04 || x || y).
++	 * Kept alive for the lifetime of the object because
++	 * CK_ECDH1_DERIVE_PARAMS.pPublicData (inside `other`) points here.
++	 * Upstream pkcs11_dh.c uses chunk_cata (alloca) for this buffer,
++	 * which is freed when set_public_key() returns — softhsmv3 then
++	 * reads garbage at derive time and returns CKR_GENERAL_ERROR.
++	 */
++	chunk_t peer_pub_key;
++
+ 	/**
+ 	 * Shared secret
+ 	 */
+@@ -91,9 +103,20 @@ static bool derive_secret(private_pkcs11_dh_t *this, chunk_t other)
+ {
+ 	CK_OBJECT_CLASS klass = CKO_SECRET_KEY;
+ 	CK_KEY_TYPE type = CKK_GENERIC_SECRET;
++	CK_BBOOL ck_false = CK_FALSE;
++	CK_BBOOL ck_true  = CK_TRUE;
++	/* PKCS#11 v3.2 requires CKA_SENSITIVE=FALSE + CKA_EXTRACTABLE=TRUE on
++	 * the derived secret for get_ck_attribute(CKA_VALUE) to succeed;
++	 * softhsmv3 defaults derived keys to SENSITIVE=TRUE / EXTRACTABLE=FALSE
++	 * which makes CKA_VALUE return CKR_ATTRIBUTE_SENSITIVE. Without these
++	 * two attributes the IKE shared secret cannot be read back into
++	 * strongSwan after C_DeriveKey succeeds. Upstream omits them, which
++	 * works on softhsm2 (different default) but fails on softhsmv3. */
+ 	CK_ATTRIBUTE attr[] = {
+-		{ CKA_CLASS, &klass, sizeof(klass) },
+-		{ CKA_KEY_TYPE, &type, sizeof(type) },
++		{ CKA_CLASS,       &klass,    sizeof(klass)    },
++		{ CKA_KEY_TYPE,    &type,     sizeof(type)     },
++		{ CKA_SENSITIVE,   &ck_false, sizeof(ck_false) },
++		{ CKA_EXTRACTABLE, &ck_true,  sizeof(ck_true)  },
+ 	};
+ 	CK_MECHANISM mech = {
+ 		this->mech_derive,
+@@ -136,15 +159,19 @@ METHOD(key_exchange_t, set_public_key, bool,
+ 		case ECP_384_BIT:
+ 		case ECP_521_BIT:
+ 		{	/* we expect the public value to just be the concatenated x and y
+-			 * coordinates, so we tag the value as an uncompressed ECPoint */
+-			chunk_t tag = chunk_from_chars(0x04);
+-			chunk_t pubkey = chunk_cata("cc", tag, value);
++			 * coordinates, so we tag the value as an uncompressed ECPoint.
++			 * Persist on the heap (not alloca) — `other` holds a struct that
++			 * points at these bytes and must stay valid until derive_secret(). */
++			chunk_clear(&this->peer_pub_key);
++			this->peer_pub_key = chunk_alloc(1 + value.len);
++			this->peer_pub_key.ptr[0] = 0x04;
++			memcpy(this->peer_pub_key.ptr + 1, value.ptr, value.len);
+ 			CK_ECDH1_DERIVE_PARAMS params = {
+ 				CKD_NULL,
+ 				0,
+ 				NULL,
+-				pubkey.len,
+-				pubkey.ptr,
++				this->peer_pub_key.len,
++				this->peer_pub_key.ptr,
+ 			};
+ 			this->other = chunk_clone(chunk_from_thing(params));
+ 			break;
+@@ -188,6 +215,7 @@ METHOD(key_exchange_t, destroy, void,
+ 	chunk_clear(&this->pub_key);
+ 	chunk_clear(&this->secret);
+ 	chunk_clear(&this->other);
++	chunk_clear(&this->peer_pub_key);
+ 	free(this);
+ }
+ 
+@@ -307,6 +335,26 @@ static pkcs11_library_t *find_token(private_pkcs11_dh_t *this,
+ 				if (current->f->C_OpenSession(slot, CKF_SERIAL_SESSION,
+ 											  NULL, NULL, session) == CKR_OK)
+ 				{
++#ifdef __EMSCRIPTEN__
++					/* WASM static-link path: DH/ECDH private keys default to
++					 * CKA_PRIVATE=TRUE per PKCS#11 v3.2 §4.7, so
++					 * C_GenerateKeyPair without C_Login returns
++					 * CKR_USER_NOT_LOGGED_IN (§5.18.2). The slot was
++					 * provisioned by wasm_hsm_init with USER_PIN="1234";
++					 * uninitialized append-on-probe slots will fail login
++					 * and be skipped (we try the next slot). */
++					static const CK_UTF8CHAR wasm_pin[] = {'1','2','3','4'};
++					CK_RV login_rv = current->f->C_Login(*session, CKU_USER,
++						(CK_UTF8CHAR_PTR)wasm_pin, sizeof(wasm_pin));
++					if (login_rv != CKR_OK &&
++						login_rv != CKR_USER_ALREADY_LOGGED_IN)
++					{
++						DBG2(DBG_CFG, "pkcs11_dh WASM C_Login slot=%lu: %N — skipping",
++							 (unsigned long)slot, ck_rv_names, login_rv);
++						current->f->C_CloseSession(*session);
++						break;
++					}
++#endif
+ 					found = current;
+ 					break;
+ 				}
+diff --git b/src/libstrongswan/plugins/pkcs11/pkcs11_kem.c b/src/libstrongswan/plugins/pkcs11/pkcs11_kem.c
+new file mode 100644
+index 0000000..7236bad
+--- /dev/null
++++ b/src/libstrongswan/plugins/pkcs11/pkcs11_kem.c
+@@ -0,0 +1,548 @@
++/*
++ * Copyright (C) 2026 PQC Timeline Project
++ *
++ * This program is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License as published by the
++ * Free Software Foundation; either version 2 of the License, or (at your
++ * option) any later version.  See <http://www.fsf.org/copyleft/gpl.txt>.
++ */
++
++#include "pkcs11_kem.h"
++
++#include <utils/debug.h>
++#include <library.h>
++#include <asn1/asn1.h>
++#include <asn1/oid.h>
++
++#include "pkcs11_manager.h"
++
++typedef struct private_pkcs11_kem_t private_pkcs11_kem_t;
++
++/**
++ * Private data of a pkcs11_kem_t object.
++ */
++struct private_pkcs11_kem_t {
++	/** Public interface */
++	pkcs11_kem_t public;
++
++	/** PKCS#11 library */
++	pkcs11_library_t *lib;
++
++	/** Session handle */
++	CK_SESSION_HANDLE session;
++
++	/** KEM Group / Algorithm */
++	key_exchange_method_t group;
++
++	/** Handle for own private key */
++	CK_OBJECT_HANDLE pri_key;
++
++	/** Public key */
++	chunk_t pub_key;
++
++	/** Ciphertext to send/receive */
++	chunk_t ciphertext;
++
++	/** Shared secret */
++	chunk_t secret;
++
++	/** Mechanism to use to generate a key pair */
++	CK_MECHANISM_TYPE mech_key;
++
++	/** Mechanism to use for encapsulation/decapsulation */
++	CK_MECHANISM_TYPE mech_encap;
++};
++
++/**
++ * Finds a token supporting the requested mechanism.
++ */
++static pkcs11_library_t *find_token(private_pkcs11_kem_t *this, CK_SESSION_HANDLE *session)
++{
++	enumerator_t *tokens, *mechs;
++	pkcs11_manager_t *manager;
++	pkcs11_library_t *current, *found = NULL;
++	CK_MECHANISM_TYPE type;
++	CK_SLOT_ID slot;
++
++	manager = lib->get(lib, "pkcs11-manager");
++	if (!manager) {
++		return NULL;
++	}
++	tokens = manager->create_token_enumerator(manager);
++	while (tokens->enumerate(tokens, &current, &slot)) {
++		mechs = current->create_mechanism_enumerator(current, slot);
++		while (mechs->enumerate(mechs, &type, NULL)) {
++			/* Look for proper KEM mechanism support */
++			if (type == this->mech_encap) {
++				if (current->f->C_OpenSession(slot, CKF_SERIAL_SESSION, NULL, NULL, session) == CKR_OK) {
++#ifdef __EMSCRIPTEN__
++					/* WASM static-link path: ML-KEM private keys default to
++					 * CKA_PRIVATE=TRUE per PKCS#11 v3.2 §6.68.3 + §4.7, so
++					 * C_GenerateKeyPair without C_Login returns
++					 * CKR_USER_NOT_LOGGED_IN (§5.18.2). The slot was
++					 * provisioned by wasm_hsm_init with USER_PIN="1234";
++					 * uninitialized append-on-probe slots will fail login
++					 * and be skipped (we try the next slot). */
++					static const CK_UTF8CHAR wasm_pin[] = {'1','2','3','4'};
++					CK_RV login_rv = current->f->C_Login(*session, CKU_USER,
++						(CK_UTF8CHAR_PTR)wasm_pin, sizeof(wasm_pin));
++					if (login_rv != CKR_OK &&
++						login_rv != CKR_USER_ALREADY_LOGGED_IN)
++					{
++						DBG2(DBG_CFG, "pkcs11_kem WASM C_Login slot=%lu: %N — skipping",
++							 (unsigned long)slot, ck_rv_names, login_rv);
++						current->f->C_CloseSession(*session);
++						break;
++					}
++#endif
++					found = current;
++					break;
++				}
++			}
++		}
++		mechs->destroy(mechs);
++		if (found) break;
++	}
++	tokens->destroy(tokens);
++	return found;
++}
++
++/**
++ * Initiator: Generates an ML-KEM key pair and returns the public key
++ * Responder: Encapsulates against initiator's public key, returning the ciphertext
++ */
++METHOD(key_exchange_t, get_public_key, bool,
++	private_pkcs11_kem_t *this, chunk_t *value)
++{
++	/* If we already have a ciphertext, we are the responder and should return the ciphertext! */
++	if (this->ciphertext.ptr) {
++		*value = chunk_clone(this->ciphertext);
++		return TRUE;
++	}
++
++	/* Otherwise, we are the initiator. Let's generate a key pair */
++	CK_MECHANISM mech = { this->mech_key, NULL, 0 };
++	CK_OBJECT_HANDLE pub_key;
++	CK_BBOOL ck_true = CK_TRUE;
++	/* softhsmv3 requires CKA_PARAMETER_SET on the ML-KEM keygen template
++	 * to select the variant (512/768/1024). Without it C_GenerateKeyPair
++	 * returns CKR_TEMPLATE_INCOMPLETE. Currently pkcs11_kem only supports
++	 * ML-KEM-768; hardcode CKP_ML_KEM_768. */
++	CK_ULONG parameter_set = CKP_ML_KEM_768;
++
++	/* PKCS#11 v3.2 KEM flags. softhsmv3 also sets these internally during
++	 * keygen (SoftHSM_keygen.cpp 6651/6732) but being explicit is safer
++	 * and documents intent. */
++	CK_ATTRIBUTE pub_attr[] = {
++		{ CKA_DERIVE,        &ck_true,       sizeof(ck_true)       },
++		{ CKA_ENCAPSULATE,   &ck_true,       sizeof(ck_true)       },
++		{ CKA_PARAMETER_SET, &parameter_set, sizeof(parameter_set) },
++	};
++	CK_ATTRIBUTE pri_attr[] = {
++		{ CKA_DERIVE,        &ck_true,       sizeof(ck_true)       },
++		{ CKA_DECAPSULATE,   &ck_true,       sizeof(ck_true)       },
++		{ CKA_PARAMETER_SET, &parameter_set, sizeof(parameter_set) },
++	};
++
++	CK_RV rv = this->lib->f->C_GenerateKeyPair(this->session, &mech,
++												pub_attr, countof(pub_attr),
++												pri_attr, countof(pri_attr),
++												&pub_key, &this->pri_key);
++	if (rv != CKR_OK) {
++		DBG1(DBG_CFG, "PKCS#11 C_GenerateKeyPair() KEM error: %N", ck_rv_names, rv);
++		return FALSE;
++	}
++	DBG1(DBG_CFG, "PKCS#11 KEM keygen OK: session=%lu pub=%lu pri=%lu",
++	     (unsigned long)this->session, (unsigned long)pub_key,
++	     (unsigned long)this->pri_key);
++
++	/* Grab the public key value */
++	if (!this->lib->get_ck_attribute(this->lib, this->session, pub_key, CKA_VALUE, &this->pub_key)) {
++		chunk_free(&this->pub_key);
++		return FALSE;
++	}
++
++	*value = chunk_clone(this->pub_key);
++	return TRUE;
++}
++
++/**
++ * Initiator: Receives the ciphertext
++ * Responder: Receives the initiator's public key
++ */
++/* FIPS 203 ML-KEM pubkey sizes — strongSwan's upstream
++ * key_exchange_verify_pubkey() codes all ML_KEM_* cases as
++ * `valid = FALSE` with comment "verification currently not supported, do
++ * in plugin". So if we delegate to that helper, it fails. Do the check
++ * ourselves. */
++static bool pkcs11_kem_verify_pubkey(key_exchange_method_t group, chunk_t value)
++{
++	switch (group) {
++		case ML_KEM_512:  return value.len == 800;
++		case ML_KEM_768:  return value.len == 1184;
++		case ML_KEM_1024: return value.len == 1568;
++		default:          return key_exchange_verify_pubkey(group, value);
++	}
++}
++
++/* Resolve the v3.2 KEM entry points directly from the underlying softhsmv3
++ * module.  pkcs11-spy < 0.26 doesn't forward C_EncapsulateKey/C_DecapsulateKey
++ * in its exposed CK_FUNCTION_LIST, so the cast of `this->lib->f` to
++ * CK_FUNCTION_LIST_3_0* reads garbage at the v3 slot offsets. We dlopen the
++ * real module named in $PKCS11SPY (or fall back to the common install path)
++ * and dlsym the two symbols. They are set as the DSO's top-level C_* symbols
++ * by softhsmv3, so no session/handle sharing concern — the call still targets
++ * the same in-process instance via the same handleManager state. */
++#include <dlfcn.h>
++typedef CK_RV (*encap_fn_t)(CK_SESSION_HANDLE, CK_MECHANISM_PTR, CK_OBJECT_HANDLE,
++                            CK_ATTRIBUTE_PTR, CK_ULONG,
++                            CK_BYTE_PTR, CK_ULONG_PTR, CK_OBJECT_HANDLE_PTR);
++typedef CK_RV (*decap_fn_t)(CK_SESSION_HANDLE, CK_MECHANISM_PTR, CK_OBJECT_HANDLE,
++                            CK_ATTRIBUTE_PTR, CK_ULONG,
++                            CK_BYTE_PTR, CK_ULONG, CK_OBJECT_HANDLE_PTR);
++
++static bool get_v3_kem_funcs(encap_fn_t *enc, decap_fn_t *dec)
++{
++#ifdef __EMSCRIPTEN__
++	/* WASM static-link: softhsmv3 is linked directly into charon.wasm and
++	 * the browser has no dynamic linker, so dlopen always fails. The PKCS#11
++	 * v3.2 entry points are in scope as ordinary C symbols — bind them once
++	 * via extern declarations matching encap_fn_t / decap_fn_t. Same in-
++	 * process instance as everything else (handleManager state shared). */
++	extern CK_RV C_EncapsulateKey(CK_SESSION_HANDLE, CK_MECHANISM_PTR,
++	                              CK_OBJECT_HANDLE, CK_ATTRIBUTE_PTR, CK_ULONG,
++	                              CK_BYTE_PTR, CK_ULONG_PTR,
++	                              CK_OBJECT_HANDLE_PTR);
++	extern CK_RV C_DecapsulateKey(CK_SESSION_HANDLE, CK_MECHANISM_PTR,
++	                              CK_OBJECT_HANDLE, CK_ATTRIBUTE_PTR, CK_ULONG,
++	                              CK_BYTE_PTR, CK_ULONG,
++	                              CK_OBJECT_HANDLE_PTR);
++	*enc = C_EncapsulateKey;
++	*dec = C_DecapsulateKey;
++	return TRUE;
++#else
++	static encap_fn_t cached_enc = NULL;
++	static decap_fn_t cached_dec = NULL;
++	if (cached_enc && cached_dec) {
++		*enc = cached_enc;
++		*dec = cached_dec;
++		return TRUE;
++	}
++	const char *real = getenv("PKCS11SPY");
++	if (!real || !*real) {
++		real = "/usr/local/lib/softhsm/libsofthsmv3.so";
++	}
++	void *h = dlopen(real, RTLD_NOW | RTLD_NOLOAD);
++	if (!h) h = dlopen(real, RTLD_NOW);
++	if (!h) {
++		DBG1(DBG_CFG, "PKCS#11 KEM: dlopen(%s) failed: %s", real, dlerror());
++		return FALSE;
++	}
++	cached_enc = (encap_fn_t)dlsym(h, "C_EncapsulateKey");
++	cached_dec = (decap_fn_t)dlsym(h, "C_DecapsulateKey");
++	if (!cached_enc || !cached_dec) {
++		DBG1(DBG_CFG, "PKCS#11 KEM: dlsym C_Encap/Decap missing on %s", real);
++		return FALSE;
++	}
++	*enc = cached_enc;
++	*dec = cached_dec;
++	return TRUE;
++#endif
++}
++
++/* Responder encapsulation — produces ciphertext + shared secret from
++ * the initiator's public key. Called eagerly at set_public_key() time so
++ * get_public_key() can immediately return the ciphertext (IKE flow calls
++ * get_public_key BEFORE get_shared_secret on the responder). */
++static bool encapsulate_on_responder(private_pkcs11_kem_t *this)
++{
++	encap_fn_t encap_fn = NULL;
++	decap_fn_t decap_fn = NULL;
++	if (!get_v3_kem_funcs(&encap_fn, &decap_fn)) {
++		DBG1(DBG_CFG, "PKCS#11 KEM: v3 function resolution failed");
++		return FALSE;
++	}
++
++	CK_OBJECT_CLASS klass_key = CKO_PUBLIC_KEY;
++	CK_KEY_TYPE type_key = CKK_ML_KEM;
++	CK_ULONG parameter_set = CKP_ML_KEM_768;
++	CK_BBOOL ck_true_encap = CK_TRUE;
++	/* softhsmv3 enforces CKA_ENCAPSULATE=TRUE on the pub key for
++	 * C_EncapsulateKey (SoftHSM_kem.cpp returns
++	 * CKR_KEY_FUNCTION_NOT_PERMITTED otherwise). */
++	CK_ATTRIBUTE key_template[] = {
++		{ CKA_CLASS,         &klass_key,         sizeof(klass_key)     },
++		{ CKA_KEY_TYPE,      &type_key,          sizeof(type_key)      },
++		{ CKA_PARAMETER_SET, &parameter_set,     sizeof(parameter_set) },
++		{ CKA_ENCAPSULATE,   &ck_true_encap,     sizeof(ck_true_encap) },
++		{ CKA_VALUE,         this->pub_key.ptr,  this->pub_key.len     },
++	};
++
++	CK_OBJECT_HANDLE hPublicKey, hSecretKey;
++	CK_RV rv = this->lib->f->C_CreateObject(this->session, key_template,
++	                                        countof(key_template), &hPublicKey);
++	if (rv != CKR_OK) {
++		DBG1(DBG_CFG, "PKCS#11 KEM C_CreateObject(peer pubkey) failed: %N",
++		     ck_rv_names, rv);
++		return FALSE;
++	}
++
++	/* Output secret-key template per PKCS#11 v3.2 §5.20 and
++	 * pqctoday-hsm/p11_v32_compliance_test.cpp. Without this the call
++	 * mis-parses its argument list, reading garbage as ciphertext-buffer
++	 * and returning OBJECT_HANDLE_INVALID / ATTRIBUTE_VALUE_INVALID. */
++	CK_OBJECT_CLASS sec_class = CKO_SECRET_KEY;
++	CK_KEY_TYPE     sec_type  = CKK_GENERIC_SECRET;
++	CK_ULONG        sec_len   = 32;  /* ML-KEM shared secret is 32 bytes */
++	CK_BBOOL        ck_true2  = CK_TRUE;
++	CK_BBOOL        ck_false  = CK_FALSE;
++	CK_ATTRIBUTE secret_tmpl[] = {
++		{ CKA_CLASS,       &sec_class, sizeof(sec_class) },
++		{ CKA_KEY_TYPE,    &sec_type,  sizeof(sec_type)  },
++		{ CKA_VALUE_LEN,   &sec_len,   sizeof(sec_len)   },
++		{ CKA_TOKEN,       &ck_false,  sizeof(ck_false)  },
++		{ CKA_EXTRACTABLE, &ck_true2,  sizeof(ck_true2)  },
++	};
++
++	CK_MECHANISM encap_mech = { this->mech_encap, NULL, 0 };
++	unsigned long ct_len = 0;
++	rv = encap_fn(this->session, &encap_mech, hPublicKey,
++	              secret_tmpl, countof(secret_tmpl),
++	              NULL, &ct_len, &hSecretKey);
++#ifdef __EMSCRIPTEN__
++	{
++		extern void wasm_pkcs11_trace_kem(const char *op, uint32_t sess,
++		                                  uint32_t mech, int in_a, int in_b,
++		                                  int rv_, int out_a, int out_b);
++		wasm_pkcs11_trace_kem("C_EncapsulateKey(size)",
++		                      (uint32_t)this->session,
++		                      (uint32_t)this->mech_encap,
++		                      (int)hPublicKey, 0, (int)rv,
++		                      (int)ct_len, 0);
++	}
++#endif
++	if (rv != CKR_OK) {
++		DBG1(DBG_CFG, "PKCS#11 KEM C_EncapsulateKey(size query) failed: %N",
++		     ck_rv_names, rv);
++		return FALSE;
++	}
++
++	this->ciphertext = chunk_alloc(ct_len);
++	rv = encap_fn(this->session, &encap_mech, hPublicKey,
++	              secret_tmpl, countof(secret_tmpl),
++	              this->ciphertext.ptr, &ct_len, &hSecretKey);
++#ifdef __EMSCRIPTEN__
++	{
++		extern void wasm_pkcs11_trace_kem(const char *op, uint32_t sess,
++		                                  uint32_t mech, int in_a, int in_b,
++		                                  int rv_, int out_a, int out_b);
++		wasm_pkcs11_trace_kem("C_EncapsulateKey",
++		                      (uint32_t)this->session,
++		                      (uint32_t)this->mech_encap,
++		                      (int)hPublicKey, 0, (int)rv,
++		                      (int)ct_len, (int)hSecretKey);
++	}
++#endif
++	if (rv != CKR_OK) {
++		DBG1(DBG_CFG, "PKCS#11 KEM C_EncapsulateKey failed: %N",
++		     ck_rv_names, rv);
++		return FALSE;
++	}
++
++	if (!this->lib->get_ck_attribute(this->lib, this->session, hSecretKey,
++	                                  CKA_VALUE, &this->secret)) {
++		DBG1(DBG_CFG, "PKCS#11 KEM get CKA_VALUE on secret failed");
++		return FALSE;
++	}
++
++	DBG1(DBG_CFG, "PKCS#11 KEM encap OK: session=%lu ct_len=%lu secret_len=%zu",
++	     (unsigned long)this->session, (unsigned long)ct_len, this->secret.len);
++	return TRUE;
++}
++
++/* Expected ciphertext sizes (FIPS 203). */
++static size_t kem_ciphertext_size(key_exchange_method_t group)
++{
++	switch (group) {
++		case ML_KEM_512:  return 768;
++		case ML_KEM_768:  return 1088;
++		case ML_KEM_1024: return 1568;
++		default:          return 0;
++	}
++}
++
++METHOD(key_exchange_t, set_public_key, bool,
++	private_pkcs11_kem_t *this, chunk_t value)
++{
++	/* Strongswan's KEM flow denotes whether we have generated our own key first.
++       If we have pri_key, we are the initiator, so this value is literally CIPHERTEXT.
++       If we do not have pri_key, we are the responder, so this value is the PUBLIC KEY.
++       The length check therefore depends on role: ciphertext size (1088 for
++       ML-KEM-768) on the initiator, public key size (1184) on the responder.
++       Previous code always required pubkey-size and rejected initiator input. */
++
++	if (this->pri_key != CK_INVALID_HANDLE) {
++		size_t expected = kem_ciphertext_size(this->group);
++		if (!expected || value.len != expected) {
++			DBG1(DBG_CFG, "PKCS#11 KEM initiator: bad ciphertext size %zu (expected %zu)",
++			     value.len, expected);
++			return FALSE;
++		}
++		this->ciphertext = chunk_clone(value);
++		return TRUE;
++	}
++
++	if (!pkcs11_kem_verify_pubkey(this->group, value)) {
++		return FALSE;
++	}
++	this->pub_key = chunk_clone(value);
++	return encapsulate_on_responder(this);
++}
++
++/**
++ * Encap/Decap Execution
++ */
++METHOD(key_exchange_t, get_shared_secret, bool,
++	private_pkcs11_kem_t *this, chunk_t *secret)
++{
++	/* Resolve v3.2 KEM entry points from the real softhsmv3 module
++	 * (bypassing pkcs11-spy's v2-only function table). */
++	encap_fn_t encap_fn = NULL;
++	decap_fn_t decap_fn = NULL;
++	if (!get_v3_kem_funcs(&encap_fn, &decap_fn)) {
++		return FALSE;
++	}
++
++	if (this->pri_key == CK_INVALID_HANDLE) {
++		/* We are RESPONDER — encapsulation already done in set_public_key.
++		 * Just verify we have the secret computed. */
++		if (!this->secret.ptr) {
++			DBG1(DBG_CFG, "PKCS#11 KEM responder: no secret (encap skipped?)");
++			return FALSE;
++		}
++	} else {
++		/* We are INITIATOR. We must DECAPSULATE using this->pri_key and this->ciphertext */
++		CK_MECHANISM decap_mech = { this->mech_encap, NULL, 0 };
++		CK_OBJECT_HANDLE hSecretKey;
++
++		DBG1(DBG_CFG, "PKCS#11 KEM decap attempt: session=%lu pri=%lu ct_len=%zu",
++		     (unsigned long)this->session, (unsigned long)this->pri_key,
++		     this->ciphertext.len);
++
++		/* Output secret-key template — PKCS#11 v3.2 §5.20 (same shape as
++		 * encap side). Omitting it shifts args and softhsmv3 returns
++		 * spurious OBJECT_HANDLE_INVALID. */
++		CK_OBJECT_CLASS sec_class = CKO_SECRET_KEY;
++		CK_KEY_TYPE     sec_type  = CKK_GENERIC_SECRET;
++		CK_ULONG        sec_len   = 32;
++		CK_BBOOL        ck_true3  = CK_TRUE;
++		CK_BBOOL        ck_false2 = CK_FALSE;
++		CK_ATTRIBUTE decap_tmpl[] = {
++			{ CKA_CLASS,       &sec_class, sizeof(sec_class) },
++			{ CKA_KEY_TYPE,    &sec_type,  sizeof(sec_type)  },
++			{ CKA_VALUE_LEN,   &sec_len,   sizeof(sec_len)   },
++			{ CKA_TOKEN,       &ck_false2, sizeof(ck_false2) },
++			{ CKA_EXTRACTABLE, &ck_true3,  sizeof(ck_true3)  },
++		};
++
++		CK_RV rv = decap_fn(this->session, &decap_mech,
++		                    this->pri_key,
++		                    decap_tmpl, countof(decap_tmpl),
++		                    this->ciphertext.ptr,
++		                    this->ciphertext.len,
++		                    &hSecretKey);
++#ifdef __EMSCRIPTEN__
++		{
++			extern void wasm_pkcs11_trace_kem(const char *op, uint32_t sess,
++			                                  uint32_t mech, int in_a, int in_b,
++			                                  int rv_, int out_a, int out_b);
++			wasm_pkcs11_trace_kem("C_DecapsulateKey",
++			                      (uint32_t)this->session,
++			                      (uint32_t)this->mech_encap,
++			                      (int)this->pri_key,
++			                      (int)this->ciphertext.len,
++			                      (int)rv,
++			                      (int)hSecretKey, 0);
++		}
++#endif
++		if (rv != CKR_OK) {
++			DBG1(DBG_CFG, "PKCS#11 C_DecapsulateKey() failed: %N", ck_rv_names, rv);
++			return FALSE;
++		}
++
++		if (!this->lib->get_ck_attribute(this->lib, this->session, hSecretKey, CKA_VALUE, &this->secret)) return FALSE;
++	}
++
++	*secret = chunk_clone(this->secret);
++	return TRUE;
++}
++
++METHOD(key_exchange_t, get_method, key_exchange_method_t,
++	private_pkcs11_kem_t *this)
++{
++	return this->group;
++}
++
++METHOD(key_exchange_t, destroy, void,
++	private_pkcs11_kem_t *this)
++{
++	if (this->session != CK_INVALID_HANDLE) {
++		this->lib->f->C_CloseSession(this->session);
++	}
++	chunk_clear(&this->pub_key);
++	chunk_clear(&this->ciphertext);
++	chunk_clear(&this->secret);
++	free(this);
++}
++
++/**
++ * See header
++ *
++ * The variadic args are required by ke_constructor_t (crypto_factory.h) for
++ * MODP_CUSTOM-style runtime parameters; ML-KEM ignores them but the signature
++ * MUST match the typedef or wasm-ld emits a function-pointer-cast trap when
++ * the plugin loader calls this through the (*)(method, ...) dispatcher.
++ */
++pkcs11_kem_t *pkcs11_kem_create(key_exchange_method_t group, ...)
++{
++	private_pkcs11_kem_t *this;
++	CK_MECHANISM_TYPE key_gen_mech = 0;
++	CK_MECHANISM_TYPE encap_mech = 0;
++
++	if (group == ML_KEM_768) {
++		/* softhsmv3 uses SEPARATE OIDs: CKM_ML_KEM_KEY_PAIR_GEN (0x0F)
++		 * for generating the Alice keypair, CKM_ML_KEM (0x17) for the
++		 * Bob encapsulate + Alice decapsulate call.  Prior code used
++		 * CKM_ML_KEM for both, which made C_GenerateKeyPair return
++		 * CKR_MECHANISM_INVALID and strongSwan silently fall through
++		 * to the openssl plugin — see pkcs11.h note above. */
++		key_gen_mech = CKM_ML_KEM_KEY_PAIR_GEN;
++		encap_mech = CKM_ML_KEM;
++	} else {
++		return NULL;
++	}
++
++	INIT(this,
++		.public = {
++			.ke = {
++				.get_shared_secret = _get_shared_secret,
++				.set_public_key = _set_public_key,
++				.get_public_key = _get_public_key,
++				.get_method = _get_method,
++				.destroy = _destroy,
++			},
++		},
++		.group = ML_KEM_768,
++		.mech_key = key_gen_mech,
++		.mech_encap = encap_mech,
++		.pri_key = CK_INVALID_HANDLE,
++		.session = CK_INVALID_HANDLE,
++	);
++
++	this->lib = find_token(this, &this->session);
++	if (!this->lib) {
++		free(this);
++		return NULL;
++	}
++	return &this->public;
++}
+diff --git b/src/libstrongswan/plugins/pkcs11/pkcs11_kem.h b/src/libstrongswan/plugins/pkcs11/pkcs11_kem.h
+new file mode 100644
+index 0000000..976b635
+--- /dev/null
++++ b/src/libstrongswan/plugins/pkcs11/pkcs11_kem.h
+@@ -0,0 +1,40 @@
++/*
++ * Copyright (C) 2026
++ *
++ * This program is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License as published by the
++ * Free Software Foundation; either version 2 of the License, or (at your
++ * option) any later version.  See <http://www.fsf.org/copyleft/gpl.txt>.
++ */
++
++#ifndef PKCS11_KEM_H_
++#define PKCS11_KEM_H_
++
++typedef struct pkcs11_kem_t pkcs11_kem_t;
++
++#include <crypto/key_exchange.h>
++
++/**
++ * Implementation of a Key Encapsulation Mechanism (KEM) using PKCS#11 
++ */
++struct pkcs11_kem_t {
++
++	/**
++	 * Implements key_exchange_t interface
++	 */
++	key_exchange_t ke;
++};
++
++/**
++ * Create a pkcs11_kem_t instance for a specific method.
++ *
++ * @param group		key exchange algorithm
++ * @param ...		variadic args required by ke_constructor_t typedef (unused
++ *					for ML-KEM; matching the typedef avoids a WASM
++ *					function-signature trap when the plugin loader casts this
++ *					pointer to (*)(method, ...))
++ * @return			pkcs11_kem_t instance, or NULL
++ */
++pkcs11_kem_t *pkcs11_kem_create(key_exchange_method_t group, ...);
++
++#endif
+diff --git a/src/libstrongswan/plugins/pkcs11/pkcs11_plugin.c b/src/libstrongswan/plugins/pkcs11/pkcs11_plugin.c
+index aa27f1e..dfc01de 100644
+--- a/src/libstrongswan/plugins/pkcs11/pkcs11_plugin.c
++++ b/src/libstrongswan/plugins/pkcs11/pkcs11_plugin.c
+@@ -30,6 +30,7 @@
+ #include "pkcs11_hasher.h"
+ #include "pkcs11_rng.h"
+ #include "pkcs11_dh.h"
++#include "pkcs11_kem.h"
+ 
+ typedef struct private_pkcs11_plugin_t private_pkcs11_plugin_t;
+ 
+@@ -218,6 +219,36 @@ METHOD(plugin_t, get_features, int,
+ 			PLUGIN_PROVIDE(KE, ECP_384_BIT),
+ 			PLUGIN_PROVIDE(KE, ECP_521_BIT),
+ 	};
++	static plugin_feature_t f_pqc[] = {
++		PLUGIN_REGISTER(KE, pkcs11_kem_create),
++			PLUGIN_PROVIDE(KE, ML_KEM_768),
++		PLUGIN_REGISTER(PRIVKEY, pkcs11_private_key_connect, FALSE),
++			PLUGIN_PROVIDE(PRIVKEY, KEY_ML_DSA_44),
++			PLUGIN_PROVIDE(PRIVKEY, KEY_ML_DSA_65),
++			PLUGIN_PROVIDE(PRIVKEY, KEY_ML_DSA_87),
++			PLUGIN_PROVIDE(PRIVKEY_SIGN, SIGN_ML_DSA_44),
++			PLUGIN_PROVIDE(PRIVKEY_SIGN, SIGN_ML_DSA_65),
++			PLUGIN_PROVIDE(PRIVKEY_SIGN, SIGN_ML_DSA_87),
++			PLUGIN_PROVIDE(PRIVKEY, KEY_SLH_DSA_SHA2_128S),
++			PLUGIN_PROVIDE(PRIVKEY, KEY_SLH_DSA_SHA2_192S),
++			PLUGIN_PROVIDE(PRIVKEY, KEY_SLH_DSA_SHA2_256S),
++			PLUGIN_PROVIDE(PRIVKEY_SIGN, SIGN_SLH_DSA_SHA2_128S),
++			PLUGIN_PROVIDE(PRIVKEY_SIGN, SIGN_SLH_DSA_SHA2_192S),
++			PLUGIN_PROVIDE(PRIVKEY_SIGN, SIGN_SLH_DSA_SHA2_256S),
++		PLUGIN_REGISTER(PUBKEY, pkcs11_public_key_load, TRUE),
++			PLUGIN_PROVIDE(PUBKEY, KEY_ML_DSA_44),
++			PLUGIN_PROVIDE(PUBKEY, KEY_ML_DSA_65),
++			PLUGIN_PROVIDE(PUBKEY, KEY_ML_DSA_87),
++			PLUGIN_PROVIDE(PUBKEY_VERIFY, SIGN_ML_DSA_44),
++			PLUGIN_PROVIDE(PUBKEY_VERIFY, SIGN_ML_DSA_65),
++			PLUGIN_PROVIDE(PUBKEY_VERIFY, SIGN_ML_DSA_87),
++			PLUGIN_PROVIDE(PUBKEY, KEY_SLH_DSA_SHA2_128S),
++			PLUGIN_PROVIDE(PUBKEY, KEY_SLH_DSA_SHA2_192S),
++			PLUGIN_PROVIDE(PUBKEY, KEY_SLH_DSA_SHA2_256S),
++			PLUGIN_PROVIDE(PUBKEY_VERIFY, SIGN_SLH_DSA_SHA2_128S),
++			PLUGIN_PROVIDE(PUBKEY_VERIFY, SIGN_SLH_DSA_SHA2_192S),
++			PLUGIN_PROVIDE(PUBKEY_VERIFY, SIGN_SLH_DSA_SHA2_256S),
++	};
+ 	static plugin_feature_t f_rng[] = {
+ 		PLUGIN_REGISTER(RNG, pkcs11_rng_create),
+ 			PLUGIN_PROVIDE(RNG, RNG_STRONG),
+@@ -239,7 +270,7 @@ METHOD(plugin_t, get_features, int,
+ 	};
+ 	static plugin_feature_t f[countof(f_hash) + countof(f_dh) + countof(f_rng) +
+ 							  countof(f_ecdh) + countof(f_privkey) +
+-							  countof(f_pubkey) + countof(f_manager)] = {};
++							  countof(f_pubkey) + countof(f_manager) + countof(f_pqc)] = {};
+ 	static int count = 0;
+ 
+ 	if (!count)
+@@ -273,6 +304,7 @@ METHOD(plugin_t, get_features, int,
+ 			{
+ 				plugin_features_add(f, f_ecdh, countof(f_ecdh), &count);
+ 			}
++			plugin_features_add(f, f_pqc, countof(f_pqc), &count);
+ 		}
+ 	}
+ 	*features = f;
+diff --git a/src/libstrongswan/plugins/pkcs11/pkcs11_private_key.c b/src/libstrongswan/plugins/pkcs11/pkcs11_private_key.c
+index 6a54b3f..bca3ddf 100644
+--- a/src/libstrongswan/plugins/pkcs11/pkcs11_private_key.c
++++ b/src/libstrongswan/plugins/pkcs11/pkcs11_private_key.c
+@@ -194,6 +194,19 @@ CK_MECHANISM_PTR pkcs11_signature_scheme_to_mech(pkcs11_library_t *p11,
+ 		 KEY_ECDSA, 384,									HASH_SHA384},
+ 		{SIGN_ECDSA_521,				{CKM_ECDSA,				NULL, 0},
+ 		 KEY_ECDSA, 521,									HASH_SHA512},
++		{SIGN_ML_DSA_44,				{CKM_ML_DSA,			NULL, 0},
++		 KEY_ML_DSA_44, 0,								  HASH_IDENTITY},
++		{SIGN_ML_DSA_65,				{CKM_ML_DSA,			NULL, 0},
++		 KEY_ML_DSA_65, 0,								  HASH_IDENTITY},
++		{SIGN_ML_DSA_87,				{CKM_ML_DSA,			NULL, 0},
++		 KEY_ML_DSA_87, 0,								  HASH_IDENTITY},
++		{SIGN_SLH_DSA_SHA2_128S,		{CKM_SLH_DSA,			NULL, 0},
++		 KEY_SLH_DSA_SHA2_128S, 0,						  HASH_IDENTITY},
++		{SIGN_SLH_DSA_SHA2_192S,		{CKM_SLH_DSA,			NULL, 0},
++		 KEY_SLH_DSA_SHA2_192S, 0,						  HASH_IDENTITY},
++		{SIGN_SLH_DSA_SHA2_256S,		{CKM_SLH_DSA,			NULL, 0},
++		 KEY_SLH_DSA_SHA2_256S, 0,						  HASH_IDENTITY},
++
+ 	};
+ 
+ 	CK_MECHANISM_PTR mechanism;
+@@ -459,7 +472,7 @@ METHOD(private_key_t, sign, bool,
+ 		DBG1(DBG_LIB, "C_SignInit() failed: %N", ck_rv_names, rv);
+ 		goto end;
+ 	}
+-	if (hash_alg != HASH_UNKNOWN)
++	if (hash_alg != HASH_UNKNOWN && hash_alg != HASH_IDENTITY)
+ 	{
+ 		hasher_t *hasher;
+ 
+@@ -488,10 +501,33 @@ METHOD(private_key_t, sign, bool,
+ 		}
+ 		data = hash;
+ 	}
+-	len = (get_keysize(this) + 7) / 8;
+-	if (this->type == KEY_ECDSA)
+-	{	/* signature is twice the length of the base point order */
+-		len *= 2;
++	switch (scheme)
++	{
++		case SIGN_ML_DSA_44:
++		case SIGN_ML_DSA_65:
++		case SIGN_ML_DSA_87:
++		case SIGN_SLH_DSA_SHA2_128S:
++		case SIGN_SLH_DSA_SHA2_192S:
++		case SIGN_SLH_DSA_SHA2_256S:
++			/* ML-DSA (2420/3293/4595 B) and SLH-DSA (7856/16224/29792 B)
++			 * signatures are fixed per variant but cannot be derived from
++			 * public key size. Query the token for the required buffer first. */
++			len = 0;
++			rv = this->lib->f->C_Sign(session, data.ptr, data.len, NULL, &len);
++			if (rv != CKR_OK || len == 0)
++			{
++				DBG1(DBG_LIB, "C_Sign() size query failed: %N", ck_rv_names, rv);
++				this->lib->f->C_CloseSession(session);
++				goto end;
++			}
++			break;
++		default:
++			len = (get_keysize(this) + 7) / 8;
++			if (this->type == KEY_ECDSA)
++			{	/* signature is twice the length of the base point order */
++				len *= 2;
++			}
++			break;
+ 	}
+ 	buf = malloc(len);
+ 	rv = this->lib->f->C_Sign(session, data.ptr, data.len, buf, &len);
+@@ -877,6 +913,86 @@ static bool find_key(private_pkcs11_private_key_t *this, chunk_t keyid)
+ 				this->object = object;
+ 				found = TRUE;
+ 				break;
++			case CKK_ML_DSA:
++			{
++				CK_ML_DSA_PARAMETER_SET_TYPE param_set = 0;
++				CK_ATTRIBUTE attr_ps[] = {
++					{CKA_PARAMETER_SET, &param_set, sizeof(param_set)},
++				};
++				if (this->lib->f->C_GetAttributeValue(this->session, object,
++												attr_ps, 1) != CKR_OK)
++				{
++					DBG1(DBG_CFG, "PKCS#11 CKA_PARAMETER_SET missing on "
++						 "CKK_ML_DSA key");
++					break;
++				}
++				switch (param_set)
++				{
++					case CKP_ML_DSA_44:
++						this->type = KEY_ML_DSA_44;
++						break;
++					case CKP_ML_DSA_65:
++						this->type = KEY_ML_DSA_65;
++						break;
++					case CKP_ML_DSA_87:
++						this->type = KEY_ML_DSA_87;
++						break;
++					default:
++						DBG1(DBG_CFG, "PKCS#11 unknown ML-DSA parameter set: %lu",
++							 param_set);
++						break;
++				}
++				if (this->type != KEY_RSA)
++				{
++					if (attr[1].ulValueLen != CK_UNAVAILABLE_INFORMATION)
++					{
++						this->reauth = reauth;
++					}
++					this->object = object;
++					found = TRUE;
++				}
++				break;
++			}
++			case CKK_SLH_DSA:
++			{
++				CK_SLH_DSA_PARAMETER_SET_TYPE param_set = 0;
++				CK_ATTRIBUTE attr_ps[] = {
++					{CKA_PARAMETER_SET, &param_set, sizeof(param_set)},
++				};
++				if (this->lib->f->C_GetAttributeValue(this->session, object,
++												attr_ps, 1) != CKR_OK)
++				{
++					DBG1(DBG_CFG, "PKCS#11 CKA_PARAMETER_SET missing on "
++						 "CKK_SLH_DSA key");
++					break;
++				}
++				switch (param_set)
++				{
++					case CKP_SLH_DSA_SHA2_128S:
++						this->type = KEY_SLH_DSA_SHA2_128S;
++						break;
++					case CKP_SLH_DSA_SHA2_192S:
++						this->type = KEY_SLH_DSA_SHA2_192S;
++						break;
++					case CKP_SLH_DSA_SHA2_256S:
++						this->type = KEY_SLH_DSA_SHA2_256S;
++						break;
++					default:
++						DBG1(DBG_CFG, "PKCS#11 unknown SLH-DSA parameter set: %lu",
++							 param_set);
++						break;
++				}
++				if (this->type != KEY_RSA)
++				{
++					if (attr[1].ulValueLen != CK_UNAVAILABLE_INFORMATION)
++					{
++						this->reauth = reauth;
++					}
++					this->object = object;
++					found = TRUE;
++				}
++				break;
++			}
+ 			default:
+ 				DBG1(DBG_CFG, "PKCS#11 key type %d not supported", type);
+ 				break;
+diff --git a/src/libstrongswan/plugins/pkcs11/pkcs11_public_key.c b/src/libstrongswan/plugins/pkcs11/pkcs11_public_key.c
+index 70dbbf5..954f884 100644
+--- a/src/libstrongswan/plugins/pkcs11/pkcs11_public_key.c
++++ b/src/libstrongswan/plugins/pkcs11/pkcs11_public_key.c
+@@ -249,6 +249,12 @@ METHOD(public_key_t, verify, bool,
+ 			memcpy(sig.ptr + (len - r.len), r.ptr, r.len);
+ 			memcpy(sig.ptr + len + (len - s.len), s.ptr, s.len);
+ 			break;
++		case SIGN_ML_DSA_44:
++		case SIGN_ML_DSA_65:
++		case SIGN_ML_DSA_87:
++			/* ML-DSA signatures are opaque raw byte blobs — do not strip leading
++			 * zero bytes, which would corrupt the signature. */
++			break;
+ 		default:
+ 			sig = chunk_skip_zero(sig);
+ 			break;
+@@ -267,7 +273,7 @@ METHOD(public_key_t, verify, bool,
+ 		DBG1(DBG_LIB, "C_VerifyInit() failed: %N", ck_rv_names, rv);
+ 		goto end;
+ 	}
+-	if (hash_alg != HASH_UNKNOWN)
++	if (hash_alg != HASH_UNKNOWN && hash_alg != HASH_IDENTITY)
+ 	{
+ 		hasher_t *hasher;
+ 
+@@ -482,6 +488,91 @@ static bool encode_rsa(private_pkcs11_public_key_t *this,
+ 	return success;
+ }
+ 
++/**
++ * Encode/fingerprint an ML-DSA public key.
++ *
++ * The raw ML-DSA public key bytes are read from CKA_VALUE and either returned
++ * as a SubjectPublicKeyInfo (for PUBKEY_SPKI_ASN1_DER / PUBKEY_PEM) or hashed
++ * for KEYID_PUBKEY_SHA1 / KEYID_PUBKEY_INFO_SHA1. Writes its result into out.
++ */
++static bool encode_ml_dsa(private_pkcs11_public_key_t *this,
++						  cred_encoding_type_t type, chunk_t *out)
++{
++	chunk_t raw = chunk_empty;
++	chunk_t asn1 = chunk_empty;
++	int oid;
++	bool success = FALSE;
++
++	if (type != PUBKEY_SPKI_ASN1_DER && type != PUBKEY_PEM &&
++		type != KEYID_PUBKEY_INFO_SHA1 && type != KEYID_PUBKEY_SHA1)
++	{
++		return FALSE;
++	}
++	if (!this->lib->get_ck_attribute(this->lib, this->session, this->object,
++									 CKA_VALUE, &raw))
++	{
++		return FALSE;
++	}
++	oid = key_type_to_oid(this->type);
++	if (oid == OID_UNKNOWN)
++	{
++		chunk_free(&raw);
++		return FALSE;
++	}
++
++	switch (type)
++	{
++		case KEYID_PUBKEY_SHA1:
++		{
++			hasher_t *hasher = lib->crypto->create_hasher(lib->crypto,
++														  HASH_SHA1);
++			if (hasher && hasher->allocate_hash(hasher, raw, out))
++			{
++				success = TRUE;
++			}
++			DESTROY_IF(hasher);
++			chunk_free(&raw);
++			if (success)
++			{
++				lib->encoding->cache(lib->encoding, type, this, out);
++			}
++			return success;
++		}
++		case PUBKEY_SPKI_ASN1_DER:
++			*out = public_key_info_encode(raw, oid);
++			chunk_free(&raw);
++			return TRUE;
++		case PUBKEY_PEM:
++			asn1 = public_key_info_encode(raw, oid);
++			chunk_free(&raw);
++			success = lib->encoding->encode(lib->encoding, PUBKEY_PEM, NULL,
++							out, CRED_PART_PUB_ASN1_DER, asn1, CRED_PART_END);
++			chunk_clear(&asn1);
++			return success;
++		case KEYID_PUBKEY_INFO_SHA1:
++		{
++			hasher_t *hasher;
++			asn1 = public_key_info_encode(raw, oid);
++			chunk_free(&raw);
++			hasher = lib->crypto->create_hasher(lib->crypto, HASH_SHA1);
++			if (hasher && hasher->allocate_hash(hasher, asn1, out))
++			{
++				success = TRUE;
++			}
++			DESTROY_IF(hasher);
++			chunk_clear(&asn1);
++			if (success)
++			{
++				lib->encoding->cache(lib->encoding, type, this, out);
++			}
++			return success;
++		}
++		default:
++			chunk_free(&raw);
++			return FALSE;
++	}
++}
++
+ METHOD(public_key_t, get_encoding, bool,
+ 	private_pkcs11_public_key_t *this, cred_encoding_type_t type,
+ 	chunk_t *encoding)
+@@ -492,6 +583,13 @@ METHOD(public_key_t, get_encoding, bool,
+ 			return encode_rsa(this, type, NULL, encoding);
+ 		case KEY_ECDSA:
+ 			return encode_ecdsa(this, type, encoding);
++		case KEY_ML_DSA_44:
++		case KEY_ML_DSA_65:
++		case KEY_ML_DSA_87:
++		case KEY_SLH_DSA_SHA2_128S:
++		case KEY_SLH_DSA_SHA2_192S:
++		case KEY_SLH_DSA_SHA2_256S:
++			return encode_ml_dsa(this, type, encoding);
+ 		default:
+ 			return FALSE;
+ 	}
+@@ -510,6 +608,13 @@ METHOD(public_key_t, get_fingerprint, bool,
+ 			return encode_rsa(this, type, this, fp);
+ 		case KEY_ECDSA:
+ 			return fingerprint_ecdsa(this, type, fp);
++		case KEY_ML_DSA_44:
++		case KEY_ML_DSA_65:
++		case KEY_ML_DSA_87:
++		case KEY_SLH_DSA_SHA2_128S:
++		case KEY_SLH_DSA_SHA2_192S:
++		case KEY_SLH_DSA_SHA2_256S:
++			return encode_ml_dsa(this, type, fp);
+ 		default:
+ 			return FALSE;
+ 	}
+@@ -783,16 +888,138 @@ static private_pkcs11_public_key_t* create_ecdsa_key(chunk_t ecparams,
+ 					  countof(mechs), tmpl, countof(tmpl));
+ }
+ 
++/**
++ * Map a strongSwan ML-DSA key type to the PKCS#11 v3.2 parameter-set value.
++ */
++static CK_ML_DSA_PARAMETER_SET_TYPE ml_dsa_param_set(key_type_t type)
++{
++	switch (type)
++	{
++		case KEY_ML_DSA_44:
++			return CKP_ML_DSA_44;
++		case KEY_ML_DSA_65:
++			return CKP_ML_DSA_65;
++		case KEY_ML_DSA_87:
++			return CKP_ML_DSA_87;
++		default:
++			return 0;
++	}
++}
++
++/**
++ * Map a strongSwan SLH-DSA key type to the PKCS#11 v3.2 parameter-set value.
++ */
++static CK_SLH_DSA_PARAMETER_SET_TYPE slh_dsa_param_set(key_type_t type)
++{
++	switch (type)
++	{
++		case KEY_SLH_DSA_SHA2_128S:
++			return CKP_SLH_DSA_SHA2_128S;
++		case KEY_SLH_DSA_SHA2_192S:
++			return CKP_SLH_DSA_SHA2_192S;
++		case KEY_SLH_DSA_SHA2_256S:
++			return CKP_SLH_DSA_SHA2_256S;
++		default:
++			return 0;
++	}
++}
++
++/**
++ * Find an SLH-DSA key object matching the given raw public-key bytes and
++ * parameter set.
++ */
++static private_pkcs11_public_key_t* find_slh_dsa_key(chunk_t pubkey,
++													 key_type_t key_type,
++													 size_t keylen)
++{
++	CK_OBJECT_CLASS class = CKO_PUBLIC_KEY;
++	CK_KEY_TYPE type = CKK_SLH_DSA;
++	CK_SLH_DSA_PARAMETER_SET_TYPE param_set = slh_dsa_param_set(key_type);
++	CK_ATTRIBUTE tmpl[] = {
++		{CKA_CLASS, &class, sizeof(class)},
++		{CKA_KEY_TYPE, &type, sizeof(type)},
++		{CKA_PARAMETER_SET, &param_set, sizeof(param_set)},
++		{CKA_VALUE, pubkey.ptr, pubkey.len},
++	};
++	return find_key(key_type, keylen, tmpl, countof(tmpl));
++}
++
++/**
++ * Create an SLH-DSA public key object in a suitable token session.
++ */
++static private_pkcs11_public_key_t* create_slh_dsa_key(chunk_t pubkey,
++													   key_type_t key_type,
++													   size_t keylen)
++{
++	CK_OBJECT_CLASS class = CKO_PUBLIC_KEY;
++	CK_KEY_TYPE type = CKK_SLH_DSA;
++	CK_SLH_DSA_PARAMETER_SET_TYPE param_set = slh_dsa_param_set(key_type);
++	CK_ATTRIBUTE tmpl[] = {
++		{CKA_CLASS, &class, sizeof(class)},
++		{CKA_KEY_TYPE, &type, sizeof(type)},
++		{CKA_PARAMETER_SET, &param_set, sizeof(param_set)},
++		{CKA_VALUE, pubkey.ptr, pubkey.len},
++	};
++	CK_MECHANISM_TYPE mechs[] = {
++		CKM_SLH_DSA,
++	};
++	return create_key(key_type, keylen, mechs, countof(mechs), tmpl,
++					  countof(tmpl));
++}
++
++/**
++ * Find an ML-DSA key object matching the given raw public-key bytes and
++ * parameter set.
++ */
++static private_pkcs11_public_key_t* find_ml_dsa_key(chunk_t pubkey,
++													key_type_t key_type,
++													size_t keylen)
++{
++	CK_OBJECT_CLASS class = CKO_PUBLIC_KEY;
++	CK_KEY_TYPE type = CKK_ML_DSA;
++	CK_ML_DSA_PARAMETER_SET_TYPE param_set = ml_dsa_param_set(key_type);
++	CK_ATTRIBUTE tmpl[] = {
++		{CKA_CLASS, &class, sizeof(class)},
++		{CKA_KEY_TYPE, &type, sizeof(type)},
++		{CKA_PARAMETER_SET, &param_set, sizeof(param_set)},
++		{CKA_VALUE, pubkey.ptr, pubkey.len},
++	};
++	return find_key(key_type, keylen, tmpl, countof(tmpl));
++}
++
++/**
++ * Create an ML-DSA public key object in a suitable token session
++ */
++static private_pkcs11_public_key_t* create_ml_dsa_key(chunk_t pubkey,
++													  key_type_t key_type,
++													  size_t keylen)
++{
++	CK_OBJECT_CLASS class = CKO_PUBLIC_KEY;
++	CK_KEY_TYPE type = CKK_ML_DSA;
++	CK_ML_DSA_PARAMETER_SET_TYPE param_set = ml_dsa_param_set(key_type);
++	CK_ATTRIBUTE tmpl[] = {
++		{CKA_CLASS, &class, sizeof(class)},
++		{CKA_KEY_TYPE, &type, sizeof(type)},
++		{CKA_PARAMETER_SET, &param_set, sizeof(param_set)},
++		{CKA_VALUE, pubkey.ptr, pubkey.len},
++	};
++	CK_MECHANISM_TYPE mechs[] = {
++		CKM_ML_DSA,
++	};
++	return create_key(key_type, keylen, mechs, countof(mechs), tmpl,
++					  countof(tmpl));
++}
++
+ /**
+  * See header
+  */
+ pkcs11_public_key_t *pkcs11_public_key_load(key_type_t type, va_list args)
+ {
+ 	private_pkcs11_public_key_t *this;
+-	chunk_t n, e, blob;
++	chunk_t n, e, blob, raw;
+ 	size_t keylen = 0;
+ 
+-	n = e = blob = chunk_empty;
++	n = e = blob = raw = chunk_empty;
+ 	while (TRUE)
+ 	{
+ 		switch (va_arg(args, builder_part_t))
+@@ -800,6 +1027,12 @@ pkcs11_public_key_t *pkcs11_public_key_load(key_type_t type, va_list args)
+ 			case BUILD_BLOB_ASN1_DER:
+ 				blob = va_arg(args, chunk_t);
+ 				continue;
++			case BUILD_BLOB:
++				/* Raw public key bytes — used by pkcs1_builder's
++				 * parse_public_key for ML-DSA (it unwraps the SPKI and
++				 * re-enters the builder chain with the raw key material). */
++				raw = va_arg(args, chunk_t);
++				continue;
+ 			case BUILD_RSA_MODULUS:
+ 				n = va_arg(args, chunk_t);
+ 				continue;
+@@ -849,6 +1082,77 @@ pkcs11_public_key_t *pkcs11_public_key_load(key_type_t type, va_list args)
+ 			}
+ 		}
+ 	}
++	else if (type == KEY_ML_DSA_44 || type == KEY_ML_DSA_65 ||
++			 type == KEY_ML_DSA_87)
++	{
++		chunk_t pubkey = chunk_empty;
++
++		/* Two inputs possible from the builder chain:
++		 *   BUILD_BLOB          — raw FIPS 204 public key (unwrapped from
++		 *                         SPKI by pkcs1_builder's parse_public_key)
++		 *   BUILD_BLOB_ASN1_DER — full SubjectPublicKeyInfo (alternative
++		 *                         entry point, e.g., from a direct caller)
++		 */
++		if (raw.ptr)
++		{
++			pubkey = raw;
++		}
++		else if (blob.ptr)
++		{
++			if (public_key_info_decode(blob, &pubkey) != type)
++			{
++				return NULL;
++			}
++		}
++		if (pubkey.ptr && pubkey.len == (size_t)get_public_key_size(type))
++		{
++			keylen = pubkey.len * 8;
++			this = find_ml_dsa_key(pubkey, type, keylen);
++			if (!this)
++			{
++				this = create_ml_dsa_key(pubkey, type, keylen);
++			}
++			if (this)
++			{
++				return &this->public;
++			}
++		}
++	}
++	else if (type == KEY_SLH_DSA_SHA2_128S || type == KEY_SLH_DSA_SHA2_192S ||
++			 type == KEY_SLH_DSA_SHA2_256S)
++	{
++		chunk_t pubkey = chunk_empty;
++
++		/* Two inputs possible from the builder chain:
++		 *   BUILD_BLOB          — raw FIPS 205 public key (unwrapped from
++		 *                         SPKI by pkcs1_builder's parse_public_key)
++		 *   BUILD_BLOB_ASN1_DER — full SubjectPublicKeyInfo
++		 */
++		if (raw.ptr)
++		{
++			pubkey = raw;
++		}
++		else if (blob.ptr)
++		{
++			if (public_key_info_decode(blob, &pubkey) != type)
++			{
++				return NULL;
++			}
++		}
++		if (pubkey.ptr && pubkey.len == (size_t)get_public_key_size(type))
++		{
++			keylen = pubkey.len * 8;
++			this = find_slh_dsa_key(pubkey, type, keylen);
++			if (!this)
++			{
++				this = create_slh_dsa_key(pubkey, type, keylen);
++			}
++			if (this)
++			{
++				return &this->public;
++			}
++		}
++	}
+ 	return NULL;
+ }
+ 
+@@ -882,6 +1186,16 @@ static private_pkcs11_public_key_t *find_key_by_keyid(pkcs11_library_t *p11,
+ 		case KEY_ECDSA:
+ 			type = CKK_ECDSA;
+ 			break;
++		case KEY_ML_DSA_44:
++		case KEY_ML_DSA_65:
++		case KEY_ML_DSA_87:
++			type = CKK_ML_DSA;
++			break;
++		case KEY_SLH_DSA_SHA2_128S:
++		case KEY_SLH_DSA_SHA2_192S:
++		case KEY_SLH_DSA_SHA2_256S:
++			type = CKK_SLH_DSA;
++			break;
+ 		default:
+ 			/* don't specify key type on KEY_ANY */
+ 			count--;
+@@ -929,6 +1243,74 @@ static private_pkcs11_public_key_t *find_key_by_keyid(pkcs11_library_t *p11,
+ 				}
+ 				break;
+ 			}
++			case CKK_ML_DSA:
++			{
++				CK_ML_DSA_PARAMETER_SET_TYPE param_set = 0;
++				CK_ATTRIBUTE attr_ps[] = {
++					{CKA_PARAMETER_SET, &param_set, sizeof(param_set)},
++				};
++				if (p11->f->C_GetAttributeValue(session, object, attr_ps, 1)
++					!= CKR_OK)
++				{
++					DBG1(DBG_CFG, "PKCS#11 CKA_PARAMETER_SET missing on "
++						 "CKK_ML_DSA key");
++					break;
++				}
++				switch (param_set)
++				{
++					case CKP_ML_DSA_44:
++						key_type = KEY_ML_DSA_44;
++						break;
++					case CKP_ML_DSA_65:
++						key_type = KEY_ML_DSA_65;
++						break;
++					case CKP_ML_DSA_87:
++						key_type = KEY_ML_DSA_87;
++						break;
++					default:
++						DBG1(DBG_CFG, "PKCS#11 unknown ML-DSA parameter set: "
++							 "%lu", param_set);
++						goto ml_dsa_done;
++				}
++				keylen = get_public_key_size(key_type) * 8;
++				found = TRUE;
++			ml_dsa_done:
++				break;
++			}
++			case CKK_SLH_DSA:
++			{
++				CK_SLH_DSA_PARAMETER_SET_TYPE param_set = 0;
++				CK_ATTRIBUTE attr_ps[] = {
++					{CKA_PARAMETER_SET, &param_set, sizeof(param_set)},
++				};
++				if (p11->f->C_GetAttributeValue(session, object, attr_ps, 1)
++					!= CKR_OK)
++				{
++					DBG1(DBG_CFG, "PKCS#11 CKA_PARAMETER_SET missing on "
++						 "CKK_SLH_DSA key");
++					break;
++				}
++				switch (param_set)
++				{
++					case CKP_SLH_DSA_SHA2_128S:
++						key_type = KEY_SLH_DSA_SHA2_128S;
++						break;
++					case CKP_SLH_DSA_SHA2_192S:
++						key_type = KEY_SLH_DSA_SHA2_192S;
++						break;
++					case CKP_SLH_DSA_SHA2_256S:
++						key_type = KEY_SLH_DSA_SHA2_256S;
++						break;
++					default:
++						DBG1(DBG_CFG, "PKCS#11 unknown SLH-DSA parameter set: "
++							 "%lu", param_set);
++						goto slh_dsa_done;
++				}
++				keylen = get_public_key_size(key_type) * 8;
++				found = TRUE;
++			slh_dsa_done:
++				break;
++			}
+ 			default:
+ 				DBG1(DBG_CFG, "PKCS#11 key type %d not supported", type);
+ 				break;
+diff --git b/src/libstrongswan/plugins/pkcs11/test_ss.c b/src/libstrongswan/plugins/pkcs11/test_ss.c
+new file mode 100644
+index 0000000..d81880e
+--- /dev/null
++++ b/src/libstrongswan/plugins/pkcs11/test_ss.c
+@@ -0,0 +1,7 @@
++#include <library.h>
++#include <credentials/keys/public_key.h>
++#include <stdio.h>
++int main() {
++    printf("%d\n", KEY_ML_DSA);
++    return 0;
++}

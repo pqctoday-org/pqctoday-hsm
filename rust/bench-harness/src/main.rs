@@ -48,6 +48,7 @@
 //! separately-verified increment — not built here.
 
 mod algos;
+mod kmip;
 mod measure;
 mod pkcs11;
 
@@ -60,9 +61,28 @@ use std::collections::{HashMap, HashSet};
 use std::process::Stdio;
 use std::sync::Arc;
 
+/// KMIP arms live behind their own subcommand, so the two access paths do
+/// not share a flag namespace (a `--host` on a PKCS#11 run would be
+/// meaningless, and `--library` on a KMIP run equally so).
+///
+/// It is OPTIONAL on purpose: with no subcommand this binary behaves exactly
+/// as before, so the sandbox job runner's existing argv
+/// (`bench-harness --library … --threads …`) keeps working untouched. A
+/// mandatory subcommand would have broken every current caller for a
+/// cosmetic gain.
+#[derive(clap::Subcommand, Debug)]
+enum Command {
+    /// Measure the KMIP 3.0 arms (real client over TLS, or the in-process
+    /// control).
+    Kmip(kmip::KmipArgs),
+}
+
 #[derive(Parser, Debug)]
 #[command(name = "bench-harness", about = "hsm-perf-bench PKCS#11-direct measurement harness")]
 struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+
     /// Path to the compiled softhsmrustv3 shared library.
     #[arg(long, default_value = "../target/release/libsofthsmrustv3.dylib")]
     library: String,
@@ -302,6 +322,9 @@ fn provision_tenant(
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    if let Some(Command::Kmip(args)) = &cli.command {
+        return kmip::run(args);
+    }
     if cli.list_algorithms {
         return list_algorithms(&cli);
     }

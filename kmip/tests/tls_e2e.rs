@@ -23,6 +23,7 @@ use pqctoday_kmip::kmip30::{
 };
 use pqctoday_kmip::ops::{Deps, DepsConfig};
 use pqctoday_kmip::policy::{load_from_str, Engine};
+use pqctoday_kmip::server::listener::{tls_self_signed_with_profile, TlsProfile};
 use pqctoday_kmip::server::{serve, tls_self_signed};
 use pqctoday_kmip::store::MemoryStore;
 
@@ -104,6 +105,448 @@ async fn tls_round_trip_query_request() {
     let (frame, _) = pqctoday_kmip::codec::decode(&resp_bytes).expect("valid TTLV");
     // Top-level tag should be Response Message = 0x42007b.
     assert_eq!(frame.tag.0, 0x42_007b, "top-level Response Message tag");
+
+    handle.abort();
+    let _ = handle.await;
+}
+
+/// End-to-end KMIP round trip over the §3.3 quantum-safe profile.
+///
+/// The permissive test above proves the KMIP path works over TLS. This one
+/// proves it works over a channel whose ONLY key exchange options are hybrid
+/// ML-KEM groups — i.e. that turning the profile on does not break the
+/// protocol it is protecting. It asserts the negotiated group rather than
+/// inferring it, so a future provider change that silently dropped back to a
+/// classical group would fail here instead of passing quietly.
+#[tokio::test(flavor = "current_thread")]
+async fn quantum_safe_tls_round_trip_query_request() {
+    let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+    let bound = listener.local_addr().unwrap();
+    drop(listener);
+
+    let (tls_cfg, server_cert_pem) =
+        tls_self_signed_with_profile("kmip.test", TlsProfile::QuantumSafe)
+            .expect("quantum-safe self-signed cert");
+    let deps = build_deps();
+
+    let server_cfg = tls_cfg.clone();
+    let server_deps = deps.clone();
+    let handle = tokio::spawn(async move {
+        if let Err(e) = serve(bound, server_cfg, server_deps).await {
+            eprintln!("server: {e}");
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Client built from the SAME restricted provider, so this also proves the
+    // two ends can actually agree on a hybrid group rather than merely that
+    // the server starts.
+    let mut root_store = rustls::RootCertStore::empty();
+    root_store
+        .add(rustls::pki_types::CertificateDer::from(pem_to_der(
+            &server_cert_pem,
+        )))
+        .unwrap();
+    let client_config = rustls::ClientConfig::builder_with_provider(Arc::new(
+        pqctoday_kmip::server::listener::quantum_safe_provider(),
+    ))
+    .with_protocol_versions(&[&rustls::version::TLS13])
+    .expect("TLS1.3-only client")
+    .with_root_certificates(root_store)
+    .with_no_client_auth();
+    let connector = TlsConnector::from(Arc::new(client_config));
+    let tcp = TcpStream::connect(bound).await.unwrap();
+    let server_name = ServerName::try_from("kmip.test").unwrap();
+    let mut tls = connector.connect(server_name, tcp).await.unwrap();
+
+    // The handshake actually used a hybrid ML-KEM group, and TLS 1.3.
+    {
+        let (_, conn) = tls.get_ref();
+        let group = conn
+            .negotiated_key_exchange_group()
+            .expect("a key exchange group was negotiated");
+        let name = format!("{:?}", group.name());
+        assert!(
+            name.contains("MLKEM"),
+            "expected a hybrid ML-KEM group, negotiated {name}"
+        );
+        assert_eq!(
+            conn.protocol_version(),
+            Some(rustls::ProtocolVersion::TLSv1_3),
+            "§3.3.1 — TLS 1.3 only"
+        );
+    }
+
+    // A real KMIP operation over that channel.
+    let req = one_off_request(RequestPayload::Query(QueryRequest {
+        functions: vec![QueryFunction::QueryOperations],
+    }));
+    let req_bytes = build_request_bytes(&req);
+    tls.write_all(&req_bytes).await.unwrap();
+
+    let resp_bytes = read_one_frame_async(&mut tls).await;
+    let (frame, _) = pqctoday_kmip::codec::decode(&resp_bytes).expect("valid TTLV");
+    assert_eq!(
+        frame.tag.0, 0x42_007b,
+        "top-level Response Message tag over the quantum-safe channel"
+    );
+
+    handle.abort();
+    let _ = handle.await;
+}
+
+/// Mint a CA + server + client cert set into a unique temp dir.
+fn mint_certs(tag: &str) -> (std::path::PathBuf, pqctoday_kmip::cert_init::AdminCertPaths) {
+    let dir = std::env::temp_dir().join(format!("kmip-{tag}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let paths = pqctoday_kmip::cert_init::init_certs_if_missing(&dir).expect("mint certs");
+    (dir, paths)
+}
+
+/// The disk-PEM constructor must apply the profile too — and be shown to
+/// ENFORCE it, not merely to build.
+///
+/// `tls_from_pem` is the path a production deployment uses (`--tls-cert` /
+/// `--tls-key` without a client CA), and it was the one config constructor
+/// with no test at any profile. That is exactly the shape of the gap that
+/// hid the mTLS startup crash for six commits: enforcement lives in one
+/// shared function, but "one shared function" is a claim each entry point
+/// has to demonstrate, not inherit.
+#[tokio::test(flavor = "current_thread")]
+async fn tls_from_pem_enforces_the_quantum_safe_profile() {
+    use rustls::crypto::aws_lc_rs::{cipher_suite, kx_group};
+    let (dir, paths) = mint_certs("frompem");
+
+    // Builds under both profiles.
+    for profile in [TlsProfile::Permissive, TlsProfile::QuantumSafe] {
+        let cfg = pqctoday_kmip::server::listener::tls_from_pem_with_profile(
+            &paths.server_cert,
+            &paths.server_key,
+            profile,
+        );
+        assert!(cfg.is_ok(), "tls_from_pem must build under {profile:?}: {cfg:?}");
+    }
+
+    // ...and a server built THIS way actually refuses classical clients.
+    let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+    let bound = listener.local_addr().unwrap();
+    drop(listener);
+    let tls_cfg = pqctoday_kmip::server::listener::tls_from_pem_with_profile(
+        &paths.server_cert,
+        &paths.server_key,
+        TlsProfile::QuantumSafe,
+    )
+    .expect("quantum-safe from PEM");
+    let deps = build_deps();
+    let handle = tokio::spawn(async move {
+        if let Err(e) = serve(bound, tls_cfg, deps).await {
+            eprintln!("server: {e}");
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Trust the CA (the server cert is CA-signed, not self-signed) and use a
+    // name the cert actually carries.
+    let cert_pem = std::fs::read_to_string(&paths.ca_cert).unwrap();
+
+    // Positive control first, so a "refused" below cannot just mean "no server".
+    let ok = handshake_error_named(
+        bound,
+        &cert_pem,
+        "localhost",
+        vec![cipher_suite::TLS13_AES_256_GCM_SHA384],
+        vec![kx_group::X25519MLKEM768],
+        &[&rustls::version::TLS13],
+    )
+    .await;
+    assert!(ok.is_none(), "control: hybrid client must connect, got {ok:?}");
+
+    let err = handshake_error_named(
+        bound,
+        &cert_pem,
+        "localhost",
+        vec![cipher_suite::TLS13_AES_256_GCM_SHA384],
+        vec![kx_group::X25519],
+        &[&rustls::version::TLS13],
+    )
+    .await;
+    assert!(
+        err.is_some(),
+        "a server built from tls_from_pem under quantum-safe must refuse classical X25519"
+    );
+
+    handle.abort();
+    let _ = handle.await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// mTLS must build a usable config under BOTH profiles.
+///
+/// Regression test for a real bug: `tls_mtls_with_profile` built its
+/// `WebPkiClientVerifier` with the plain `builder()`, which resolves the
+/// PROCESS-LEVEL default crypto provider and *panics* when it cannot find
+/// one. The verifier is constructed before `profile_builder` runs, so the
+/// quantum-safe path (which passes its provider explicitly and never
+/// installs a process default) blew up with "Could not automatically
+/// determine the process-level CryptoProvider" — and the permissive path
+/// installed one too late to help. Every mTLS deployment would have crashed
+/// at startup, and nothing caught it because no test covered mTLS at all.
+#[test]
+fn mtls_config_builds_under_both_profiles() {
+    let dir = std::env::temp_dir().join(format!("kmip-mtls-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let paths = pqctoday_kmip::cert_init::init_certs_if_missing(&dir).expect("mint certs");
+    let server_cert = std::fs::read(&paths.server_cert).unwrap();
+    let server_key = std::fs::read(&paths.server_key).unwrap();
+    let ca = std::fs::read(&paths.ca_cert).unwrap();
+
+    for profile in [TlsProfile::Permissive, TlsProfile::QuantumSafe] {
+        let cfg = pqctoday_kmip::server::listener::tls_mtls_with_profile(
+            &server_cert,
+            &server_key,
+            &ca,
+            profile,
+        );
+        assert!(cfg.is_ok(), "mTLS config must build under {profile:?}: {cfg:?}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ── §3.3 refusal matrix ────────────────────────────────────────────────────
+//
+// One case per SHALL NOT. These exist because the quantum-safe profile's
+// enforcement was originally proven by hand with `openssl s_client` and
+// nothing then held it in place: a provider swap, a rustls bump or an edit
+// to `profile_builder` could silently re-admit TLS 1.2 or a classical group
+// and every other test in this repo would still pass. A strict profile that
+// quietly stops being strict still LOOKS enforced, which is precisely why
+// the negative cases are the ones worth automating.
+//
+// Every client below is built from an explicitly restricted provider, so
+// each test states what it offered rather than inheriting defaults that
+// might change underneath it.
+
+/// Spawn a quantum-safe server, returning its address and cert PEM.
+async fn spawn_quantum_safe_server() -> (SocketAddr, String, tokio::task::JoinHandle<()>) {
+    let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+    let bound = listener.local_addr().unwrap();
+    drop(listener);
+
+    let (tls_cfg, cert_pem) = tls_self_signed_with_profile("kmip.test", TlsProfile::QuantumSafe)
+        .expect("quantum-safe self-signed cert");
+    let deps = build_deps();
+    let handle = tokio::spawn(async move {
+        if let Err(e) = serve(bound, tls_cfg, deps).await {
+            eprintln!("server: {e}");
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    (bound, cert_pem, handle)
+}
+
+fn root_store_for(cert_pem: &str) -> rustls::RootCertStore {
+    let mut root_store = rustls::RootCertStore::empty();
+    root_store
+        .add(rustls::pki_types::CertificateDer::from(pem_to_der(cert_pem)))
+        .unwrap();
+    root_store
+}
+
+/// Attempt a handshake with a client restricted to `groups` / `suites` over
+/// `versions`. Returns the handshake error, or `None` if it succeeded.
+async fn handshake_error(
+    bound: SocketAddr,
+    cert_pem: &str,
+    suites: Vec<rustls::SupportedCipherSuite>,
+    groups: Vec<&'static dyn rustls::crypto::SupportedKxGroup>,
+    versions: &[&'static rustls::SupportedProtocolVersion],
+) -> Option<String> {
+    handshake_error_named(bound, cert_pem, "kmip.test", suites, groups, versions).await
+}
+
+/// As [`handshake_error`], for certs whose SANs are not `kmip.test` — the
+/// minted CA-signed set uses `pqc-kmip` / `localhost` / `127.0.0.1`, so a
+/// hardcoded name would fail hostname verification and be misread as the
+/// profile refusing the connection.
+async fn handshake_error_named(
+    bound: SocketAddr,
+    cert_pem: &str,
+    server_name: &'static str,
+    suites: Vec<rustls::SupportedCipherSuite>,
+    groups: Vec<&'static dyn rustls::crypto::SupportedKxGroup>,
+    versions: &[&'static rustls::SupportedProtocolVersion],
+) -> Option<String> {
+    let provider = rustls::crypto::CryptoProvider {
+        cipher_suites: suites,
+        kx_groups: groups,
+        ..rustls::crypto::aws_lc_rs::default_provider()
+    };
+    let config = match rustls::ClientConfig::builder_with_provider(Arc::new(provider))
+        .with_protocol_versions(versions)
+    {
+        Ok(b) => b
+            .with_root_certificates(root_store_for(cert_pem))
+            .with_no_client_auth(),
+        // A provider with no suites valid for the requested version can fail
+        // to build; that is still a refusal of the configuration under test.
+        Err(e) => return Some(format!("client config: {e}")),
+    };
+    let connector = TlsConnector::from(Arc::new(config));
+    let tcp = TcpStream::connect(bound).await.unwrap();
+    let name = ServerName::try_from(server_name).unwrap();
+    match connector.connect(name, tcp).await {
+        Ok(_) => None,
+        Err(e) => Some(e.to_string()),
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn quantum_safe_refuses_classical_and_tls12() {
+    use rustls::crypto::aws_lc_rs::{cipher_suite, kx_group};
+    let (bound, cert_pem, handle) = spawn_quantum_safe_server().await;
+
+    // Positive control FIRST. Without it, every "refused" below could just
+    // mean the server never came up, and the whole matrix would be vacuous.
+    let ok = handshake_error(
+        bound,
+        &cert_pem,
+        vec![cipher_suite::TLS13_AES_256_GCM_SHA384],
+        vec![kx_group::X25519MLKEM768],
+        &[&rustls::version::TLS13],
+    )
+    .await;
+    assert!(ok.is_none(), "control: X25519MLKEM768 must connect, got {ok:?}");
+
+    // §3.3.3 — classical-only clients are refused, not downgraded to.
+    for (label, group) in [
+        ("X25519", kx_group::X25519),
+        ("secp256r1", kx_group::SECP256R1),
+        ("secp384r1", kx_group::SECP384R1),
+    ] {
+        let err = handshake_error(
+            bound,
+            &cert_pem,
+            vec![cipher_suite::TLS13_AES_256_GCM_SHA384],
+            vec![group],
+            &[&rustls::version::TLS13],
+        )
+        .await;
+        assert!(
+            err.is_some(),
+            "§3.3.3: classical group {label} must be refused, but the handshake succeeded"
+        );
+    }
+
+    // §3.3.2 — AES-128-GCM is not on the permitted list, even over TLS 1.3
+    // with an acceptable group.
+    let err = handshake_error(
+        bound,
+        &cert_pem,
+        vec![cipher_suite::TLS13_AES_128_GCM_SHA256],
+        vec![kx_group::X25519MLKEM768],
+        &[&rustls::version::TLS13],
+    )
+    .await;
+    assert!(
+        err.is_some(),
+        "§3.3.2: TLS13_AES_128_GCM_SHA256 must be refused, but the handshake succeeded"
+    );
+
+    // §3.3.1 — TLS 1.2 is a SHALL NOT.
+    let err = handshake_error(
+        bound,
+        &cert_pem,
+        vec![cipher_suite::TLS13_AES_256_GCM_SHA384],
+        vec![kx_group::X25519MLKEM768],
+        &[&rustls::version::TLS12],
+    )
+    .await;
+    assert!(
+        err.is_some(),
+        "§3.3.1: TLS 1.2 must be refused, but the handshake succeeded"
+    );
+
+    handle.abort();
+    let _ = handle.await;
+}
+
+/// The permitted §3.3.2 suites and §3.3.3 groups all actually work — the
+/// mirror of the test above, so a change that over-restricts (breaking a
+/// conformant client) fails just as loudly as one that under-restricts.
+#[tokio::test(flavor = "current_thread")]
+async fn quantum_safe_accepts_every_permitted_suite_and_group() {
+    use rustls::crypto::aws_lc_rs::{cipher_suite, kx_group};
+    let (bound, cert_pem, handle) = spawn_quantum_safe_server().await;
+
+    for (label, suite) in [
+        ("TLS13_CHACHA20_POLY1305_SHA256", cipher_suite::TLS13_CHACHA20_POLY1305_SHA256),
+        ("TLS13_AES_256_GCM_SHA384", cipher_suite::TLS13_AES_256_GCM_SHA384),
+    ] {
+        let err = handshake_error(
+            bound,
+            &cert_pem,
+            vec![suite],
+            vec![kx_group::X25519MLKEM768],
+            &[&rustls::version::TLS13],
+        )
+        .await;
+        assert!(err.is_none(), "§3.3.2 suite {label} must connect, got {err:?}");
+    }
+
+    // Both groups this build can offer. SecP384r1MLKEM1024 is absent from
+    // rustls 0.23 and is therefore NOT asserted here -- see the documented
+    // partial-§3.3.3 gap.
+    for (label, group) in [
+        ("X25519MLKEM768", kx_group::X25519MLKEM768),
+        ("SECP256R1MLKEM768", kx_group::SECP256R1MLKEM768),
+    ] {
+        let err = handshake_error(
+            bound,
+            &cert_pem,
+            vec![cipher_suite::TLS13_AES_256_GCM_SHA384],
+            vec![group],
+            &[&rustls::version::TLS13],
+        )
+        .await;
+        assert!(err.is_none(), "§3.3.3 group {label} must connect, got {err:?}");
+    }
+
+    handle.abort();
+    let _ = handle.await;
+}
+
+/// The permissive default is genuinely unchanged: classical groups and
+/// TLS 1.2 still work. This is the regression guard for every existing
+/// caller (kms-proxy, sandbox scenario 22, the wasm playground), which the
+/// opt-in design exists to protect.
+#[tokio::test(flavor = "current_thread")]
+async fn permissive_profile_still_accepts_classical() {
+    let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+    let bound = listener.local_addr().unwrap();
+    drop(listener);
+    let (tls_cfg, cert_pem) = tls_self_signed("kmip.test").expect("self-signed cert");
+    let deps = build_deps();
+    let handle = tokio::spawn(async move {
+        if let Err(e) = serve(bound, tls_cfg, deps).await {
+            eprintln!("server: {e}");
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let config = rustls::ClientConfig::builder()
+        .with_root_certificates(root_store_for(&cert_pem))
+        .with_no_client_auth();
+    let connector = TlsConnector::from(Arc::new(config));
+    let tcp = TcpStream::connect(bound).await.unwrap();
+    let server_name = ServerName::try_from("kmip.test").unwrap();
+    assert!(
+        connector.connect(server_name, tcp).await.is_ok(),
+        "permissive profile must keep accepting a default (classical-capable) client"
+    );
 
     handle.abort();
     let _ = handle.await;

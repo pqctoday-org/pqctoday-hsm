@@ -1253,8 +1253,7 @@ mod mechanism_table_tests {
 
 // ── Key Generation ───────────────────────────────────────────────────────────
 
-#[wasm_bindgen(js_name = _C_GenerateKeyPair)]
-pub fn C_GenerateKeyPair(
+fn C_GenerateKeyPair_impl(
     _h_session: u32,
     p_mechanism: *mut u8,
     p_public_key_template: *mut u8,
@@ -2769,8 +2768,7 @@ pub fn C_GenerateKey(
 
 // ── ML-KEM Encapsulate/Decapsulate ──────────────────────────────────────────
 
-#[wasm_bindgen(js_name = _C_EncapsulateKey)]
-pub fn C_EncapsulateKey(
+fn C_EncapsulateKey_impl(
     _h_session: u32,
     p_mechanism: *mut u8,
     h_key: u32,
@@ -2945,8 +2943,7 @@ pub fn C_EncapsulateKey(
     CKR_OK
 }
 
-#[wasm_bindgen(js_name = _C_DecapsulateKey)]
-pub fn C_DecapsulateKey(
+fn C_DecapsulateKey_impl(
     _h_session: u32,
     p_mechanism: *mut u8,
     h_private_key: u32,
@@ -3558,8 +3555,7 @@ fn rsa_pss_mech_params(mech: u32) -> Option<(u32, u32)> {
     }
 }
 
-#[wasm_bindgen(js_name = _C_SignInit)]
-pub fn C_SignInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
+fn C_SignInit_impl(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
     require_init!();
     require_session!(h_session);
     // PKCS#11 v3.2 §5.12 — a sign operation is already active on this session.
@@ -3761,8 +3757,7 @@ unsafe fn parse_sign_additional_ctx(p_mechanism: *const u8) -> Result<(Vec<u8>, 
     Ok((context, deterministic))
 }
 
-#[wasm_bindgen(js_name = _C_Sign)]
-pub fn C_Sign(
+fn C_Sign_impl(
     h_session: u32,
     p_data: *mut u8,
     ul_data_len: u32,
@@ -7984,8 +7979,7 @@ pub fn C_SignUpdate(h_session: u32, p_part: *mut u8, ul_part_len: u32) -> u32 {
     CKR_OK
 }
 
-#[wasm_bindgen(js_name = _C_SignFinal)]
-pub fn C_SignFinal(h_session: u32, p_signature: *mut u8, pul_signature_len: *mut u32) -> u32 {
+fn C_SignFinal_impl(h_session: u32, p_signature: *mut u8, pul_signature_len: *mut u32) -> u32 {
     require_init!();
     // §5.2 error priority — session handle before operation state.
     require_session!(h_session);
@@ -14764,4 +14758,308 @@ mod rsa_sign_verify_recover_tests {
             CKR_MECHANISM_INVALID
         );
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Operation-evidence wrappers (crate::oplog).
+//
+// Each exported entry point is a thin wrapper around the `*_impl` function that
+// holds the real body. The bodies are left untouched on purpose: they have many
+// early returns, and restructuring working PKCS#11 code around a log statement
+// is a bad trade. This mirrors exactly what the C++ engine does for the same
+// three call families.
+//
+// The records use the SAME grammar the C++ engine emits, so one consumer
+// (pqctoday-sandbox/tests/_evidence.sh) parses both engines without knowing
+// which produced a line. C_Sign carries no mechanism or key of its own -- the
+// session holds those -- so a consumer joins it to the preceding C_SignInit on
+// (pid, sess).
+//
+// Every wrapper is guarded by `oplog::enabled()`, which is a single relaxed
+// load when SOFTHSM3_OP_LOG is unset. That matters here more than in the C++
+// engine: hsm-perf-bench drives this crate at ~62k signs/sec, and its published
+// numbers must come from a logging-off run.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[wasm_bindgen(js_name = _C_SignInit)]
+pub fn C_SignInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
+    // Read the mechanism and key identity BEFORE dispatch: a failed init can
+    // tear down session state, and the key identity is most wanted on exactly
+    // those records.
+    let logging = crate::oplog::enabled();
+    let mech = if logging && !p_mechanism.is_null() {
+        unsafe { *(p_mechanism as *const u32) }
+    } else {
+        0
+    };
+    let key_fields = if logging {
+        crate::oplog::key_fields(h_key, mech)
+    } else {
+        String::new()
+    };
+
+    let rv = C_SignInit_impl(h_session, p_mechanism, h_key);
+
+    if logging {
+        crate::oplog::emit(
+            "C_SignInit",
+            &format!(
+                "sess={} mech={} mech_id=0x{:08x} {} rv={} rv_id=0x{:08x}",
+                h_session,
+                crate::oplog::mech_name(mech),
+                mech,
+                key_fields,
+                crate::oplog::rv_name(rv),
+                rv
+            ),
+        );
+    }
+    rv
+}
+
+#[wasm_bindgen(js_name = _C_Sign)]
+pub fn C_Sign(
+    h_session: u32,
+    p_data: *mut u8,
+    ul_data_len: u32,
+    p_signature: *mut u8,
+    pul_signature_len: *mut u32,
+) -> u32 {
+    let rv = C_Sign_impl(h_session, p_data, ul_data_len, p_signature, pul_signature_len);
+
+    if crate::oplog::enabled() {
+        // probe=1 marks the mandatory PKCS#11 length-query call (p_signature
+        // null) that every caller makes before the real one. A consumer
+        // counting signatures must skip those rather than double every count.
+        let out = if pul_signature_len.is_null() {
+            0
+        } else {
+            unsafe { *pul_signature_len }
+        };
+        crate::oplog::emit(
+            "C_Sign",
+            &format!(
+                "sess={} in={} out={} probe={} rv={} rv_id=0x{:08x}",
+                h_session,
+                ul_data_len,
+                out,
+                if p_signature.is_null() { 1 } else { 0 },
+                crate::oplog::rv_name(rv),
+                rv
+            ),
+        );
+    }
+    rv
+}
+
+#[wasm_bindgen(js_name = _C_SignFinal)]
+pub fn C_SignFinal(h_session: u32, p_signature: *mut u8, pul_signature_len: *mut u32) -> u32 {
+    let rv = C_SignFinal_impl(h_session, p_signature, pul_signature_len);
+
+    if crate::oplog::enabled() {
+        // C_SignUpdate is deliberately NOT recorded: it produces no signature,
+        // and instrumenting it would emit one line per chunk of a large input
+        // for no added evidence.
+        let out = if pul_signature_len.is_null() {
+            0
+        } else {
+            unsafe { *pul_signature_len }
+        };
+        crate::oplog::emit(
+            "C_SignFinal",
+            &format!(
+                "sess={} out={} probe={} rv={} rv_id=0x{:08x}",
+                h_session,
+                out,
+                if p_signature.is_null() { 1 } else { 0 },
+                crate::oplog::rv_name(rv),
+                rv
+            ),
+        );
+    }
+    rv
+}
+
+#[wasm_bindgen(js_name = _C_GenerateKeyPair)]
+pub fn C_GenerateKeyPair(
+    h_session: u32,
+    p_mechanism: *mut u8,
+    p_public_key_template: *mut u8,
+    ul_public_key_attribute_count: u32,
+    p_private_key_template: *mut u8,
+    ul_private_key_attribute_count: u32,
+    ph_public_key: *mut u32,
+    ph_private_key: *mut u32,
+) -> u32 {
+    let rv = C_GenerateKeyPair_impl(
+        h_session,
+        p_mechanism,
+        p_public_key_template,
+        ul_public_key_attribute_count,
+        p_private_key_template,
+        ul_private_key_attribute_count,
+        ph_public_key,
+        ph_private_key,
+    );
+
+    if crate::oplog::enabled() {
+        let mech = if p_mechanism.is_null() {
+            0
+        } else {
+            unsafe { *(p_mechanism as *const u32) }
+        };
+        // Read back from the PRIVATE key, and only on success: the custody
+        // attributes are what "generated in-HSM, non-extractable" means, and
+        // they exist only once the object does.
+        let h_priv = if rv == CKR_OK && !ph_private_key.is_null() {
+            unsafe { *ph_private_key }
+        } else {
+            0
+        };
+        let (key_fields, custody) = if h_priv != 0 {
+            (
+                crate::oplog::key_fields(h_priv, mech),
+                crate::oplog::key_custody_fields(h_priv),
+            )
+        } else {
+            (
+                "key=- keytype=- paramset=-".to_string(),
+                "extractable=- sensitive=- never_extractable=- always_sensitive=- local=-"
+                    .to_string(),
+            )
+        };
+        let h_pub = if rv == CKR_OK && !ph_public_key.is_null() {
+            unsafe { *ph_public_key }
+        } else {
+            0
+        };
+        crate::oplog::emit(
+            "C_GenerateKeyPair",
+            &format!(
+                "sess={} mech={} mech_id=0x{:08x} {} {} hpub={} hpriv={} rv={} rv_id=0x{:08x}",
+                h_session,
+                crate::oplog::mech_name(mech),
+                mech,
+                key_fields,
+                custody,
+                h_pub,
+                h_priv,
+                crate::oplog::rv_name(rv),
+                rv
+            ),
+        );
+    }
+    rv
+}
+
+#[wasm_bindgen(js_name = _C_EncapsulateKey)]
+pub fn C_EncapsulateKey(
+    h_session: u32,
+    p_mechanism: *mut u8,
+    h_key: u32,
+    p_template: *mut u8,
+    ul_attribute_count: u32,
+    p_ciphertext: *mut u8,
+    pul_ciphertext_len: *mut u32,
+    ph_key: *mut u32,
+) -> u32 {
+    let logging = crate::oplog::enabled();
+    let mech = if logging && !p_mechanism.is_null() {
+        unsafe { *(p_mechanism as *const u32) }
+    } else {
+        0
+    };
+    let key_fields = if logging {
+        crate::oplog::key_fields(h_key, mech)
+    } else {
+        String::new()
+    };
+
+    let rv = C_EncapsulateKey_impl(
+        h_session,
+        p_mechanism,
+        h_key,
+        p_template,
+        ul_attribute_count,
+        p_ciphertext,
+        pul_ciphertext_len,
+        ph_key,
+    );
+
+    if logging {
+        let ct = if pul_ciphertext_len.is_null() {
+            0
+        } else {
+            unsafe { *pul_ciphertext_len }
+        };
+        crate::oplog::emit(
+            "C_EncapsulateKey",
+            &format!(
+                "sess={} mech={} mech_id=0x{:08x} {} ct={} probe={} rv={} rv_id=0x{:08x}",
+                h_session,
+                crate::oplog::mech_name(mech),
+                mech,
+                key_fields,
+                ct,
+                if p_ciphertext.is_null() { 1 } else { 0 },
+                crate::oplog::rv_name(rv),
+                rv
+            ),
+        );
+    }
+    rv
+}
+
+#[wasm_bindgen(js_name = _C_DecapsulateKey)]
+pub fn C_DecapsulateKey(
+    h_session: u32,
+    p_mechanism: *mut u8,
+    h_private_key: u32,
+    p_template: *mut u8,
+    ul_attribute_count: u32,
+    p_ciphertext: *mut u8,
+    ul_ciphertext_len: u32,
+    ph_key: *mut u32,
+) -> u32 {
+    let logging = crate::oplog::enabled();
+    let mech = if logging && !p_mechanism.is_null() {
+        unsafe { *(p_mechanism as *const u32) }
+    } else {
+        0
+    };
+    let key_fields = if logging {
+        crate::oplog::key_fields(h_private_key, mech)
+    } else {
+        String::new()
+    };
+
+    let rv = C_DecapsulateKey_impl(
+        h_session,
+        p_mechanism,
+        h_private_key,
+        p_template,
+        ul_attribute_count,
+        p_ciphertext,
+        ul_ciphertext_len,
+        ph_key,
+    );
+
+    if logging {
+        // No probe field: decapsulation takes the ciphertext by value and has
+        // no length-query form to distinguish.
+        crate::oplog::emit(
+            "C_DecapsulateKey",
+            &format!(
+                "sess={} mech={} mech_id=0x{:08x} {} ct={} rv={} rv_id=0x{:08x}",
+                h_session,
+                crate::oplog::mech_name(mech),
+                mech,
+                key_fields,
+                ul_ciphertext_len,
+                crate::oplog::rv_name(rv),
+                rv
+            ),
+        );
+    }
+    rv
 }

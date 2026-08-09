@@ -19,6 +19,17 @@ path = "src/main.rs"
 # is inert at runtime: lazy_static globals are never touched unless a
 # function that reads them is called, and this crate calls none.
 softhsmrustv3 = { path = "..", default-features = false }
+# KMIP-mode arms (hsm-perf-bench KMIP client plan, WS-D). Cross-workspace
+# edge: this crate lives in the `rust/` workspace, `pqctoday-kmip` in its
+# own, and pqctoday-kmip itself depends back on `softhsmrustv3` (the root
+# of THIS workspace). That is not a cycle — bench-harness is a separate
+# package — but it is the kind of build-graph edge worth proving early
+# rather than discovering at integration time.
+pqctoday-kmip = { path = "../../kmip" }
+# Blocking TLS for the KMIP arms: measure::run_point drives OS threads in
+# tight loops, which wants blocking sockets, not the server's tokio stack.
+rustls = { version = "0.23", features = ["aws_lc_rs"] }
+rustls-pemfile = "2"
 libloading = "0.8"
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }

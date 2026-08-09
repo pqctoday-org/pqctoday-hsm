@@ -1,11 +1,88 @@
 #!/usr/bin/env python3
 """
 apply_mldsa_patches.py
-Applies ML-DSA-65 support to openssh-portable source tree.
-Implements draft-sfluhrer-ssh-mldsa-06.
+Applies ML-DSA-65 + SLH-DSA-SHA2-128s support to an openssh-portable source tree.
+Implements draft-sfluhrer-ssh-mldsa-06 and draft-josefsson-ssh-sphincs-02.
 Run from within the openssh-portable directory.
+
+--dry-run / --check : report whether every anchor would apply, WITHOUT
+    touching this checkout. Copies the 7 files this script patches into a
+    temp directory, re-invokes this same script (without the flag) against
+    the copy, reports the result, and discards the copy. This replays the
+    real sequential patch order rather than checking each anchor against the
+    pristine tree in isolation, which matters: several later anchors (e.g.
+    the SLH-DSA sshkey.h edit) only match text an EARLIER patch in this same
+    run inserted, so checking them independently would report false failures.
+
+Added 2026-08-08 (upgrade plan A6) after a 10.3->10.4 bump broke 2 of the then
+24 anchors mid-run, leaving a partially-patched tree — this exists so that
+kind of break is caught before anything is touched, and so CI can check an
+upstream bump without a full image build.
 """
-import os, sys, re
+import os, sys, re, shutil, subprocess, tempfile
+
+DRY_RUN = any(a in ('--dry-run', '--check') for a in sys.argv[1:])
+
+# Self-counted, not hand-maintained: every patch below is a top-level
+# `replace_once(` call, so this can never silently drift from the real count.
+_SELF_SOURCE = open(__file__).read()
+ANCHOR_COUNT = len(re.findall(r'^replace_once\(', _SELF_SOURCE, re.M))
+
+PATCHED_FILES = ["Makefile.in", "myproposal.h", "sshkey.h", "sshkey.c",
+                  "ssh-pkcs11.c", "sshd-auth.c", "sshd.c"]
+
+
+def _detect_version():
+    """Best-effort — informational only, never blocks a run."""
+    try:
+        out = subprocess.run(["git", "describe", "--tags", "--always"],
+                              capture_output=True, text=True, timeout=5)
+        if out.returncode == 0 and out.stdout.strip():
+            return out.stdout.strip()
+    except Exception:
+        pass
+    try:
+        out = subprocess.run(["git", "rev-parse", "--short", "HEAD"],
+                              capture_output=True, text=True, timeout=5)
+        if out.returncode == 0 and out.stdout.strip():
+            return f"commit {out.stdout.strip()} (untagged or shallow clone)"
+    except Exception:
+        pass
+    return "unknown (not a git checkout, or git unavailable)"
+
+
+print(f"apply_mldsa_patches.py — preflight")
+print(f"  target tree     : {os.getcwd()}")
+print(f"  detected version: {_detect_version()}")
+print(f"  anchors declared: {ANCHOR_COUNT} across {len(PATCHED_FILES)} files")
+print(f"  mode            : {'DRY RUN (no files will be modified)' if DRY_RUN else 'apply'}")
+
+if DRY_RUN:
+    missing = [f for f in PATCHED_FILES if not os.path.isfile(f)]
+    if missing:
+        print(f"DRY RUN FAILED: source file(s) not found in {os.getcwd()}: {missing}",
+              file=sys.stderr)
+        sys.exit(1)
+    with tempfile.TemporaryDirectory(prefix="mldsa-patch-dryrun-") as tmp:
+        for f in PATCHED_FILES:
+            shutil.copy(f, os.path.join(tmp, f))
+        # Re-invoke this same script with no flag, so the real replace_once
+        # logic below runs unchanged against the throwaway copy.
+        result = subprocess.run([sys.executable, os.path.abspath(__file__)],
+                                 cwd=tmp, capture_output=True, text=True)
+        if result.returncode == 0:
+            print(f"DRY RUN OK: all {ANCHOR_COUNT} anchors would apply cleanly.")
+            sys.exit(0)
+        else:
+            print("DRY RUN FAILED — this tree would NOT patch cleanly:", file=sys.stderr)
+            print(result.stderr.strip(), file=sys.stderr)
+            sys.exit(1)
+
+# ─────────────────────────────────────────────────────────────────────────
+# Real application from here down. Also what the --dry-run subprocess above
+# runs against its temp copy (invoked with no flags, so DRY_RUN is False
+# there) — the sequential patch logic itself is untouched by A6.
+# ─────────────────────────────────────────────────────────────────────────
 
 def read(path):
     with open(path) as f:
@@ -38,10 +115,16 @@ replace_once(
 )
 
 # ── 3. sshkey.h ──────────────────────────────────────────────────────────────
+# Anchor tolerates key types upstream inserts between KEY_ED25519_SK_CERT and
+# KEY_UNSPEC, and PRESERVES them via the capture group. OpenSSH 10.4 added
+# KEY_MLDSA44_ED25519 + KEY_MLDSA44_ED25519_CERT in exactly this slot, which
+# broke the previous fixed-adjacency anchor. Keeping KEY_ED25519_SK_CERT in the
+# pattern (rather than anchoring on KEY_UNSPEC alone) means a future upstream
+# reorganisation still fails loudly instead of inserting in the wrong place.
 replace_once(
     "sshkey.h",
-    r"\s+KEY_ED25519_SK_CERT,\n\s+KEY_UNSPEC",
-    "\n\tKEY_ED25519_SK_CERT,\n\tKEY_MLDSA_65,\n\tKEY_UNSPEC"
+    r"(\s+KEY_ED25519_SK_CERT,\n(?:\s+KEY_\w+,\n)*)(\s+KEY_UNSPEC)",
+    r"\g<1>\tKEY_MLDSA_65,\n\g<2>"
 )
 
 # ── 4. sshkey.c ──────────────────────────────────────────────────────────────

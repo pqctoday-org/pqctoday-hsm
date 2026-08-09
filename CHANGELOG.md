@@ -6,6 +6,231 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.21.0] — 2026-08-08
+
+### Added
+
+- **KMIP 3.0 quantum-safe TLS profile (`--tls-profile <permissive|quantum-safe>`,
+  default `permissive`).** Profiles §3.3 "Quantum Safe Authentication Suite" is a
+  set of SHALL / SHALL NOT clauses on the client channel, not a preference — and
+  the listener could not meet any of them. It installed the `ring` rustls
+  provider, which has no ML-KEM at all, so no hybrid group could ever be
+  negotiated; and all three config constructors used a bare
+  `ServerConfig::builder()`, leaving TLS 1.2, AES-128-GCM and every classical
+  group enabled, each of which §3.3 forbids.
+
+  Under `quantum-safe`:
+
+  | Clause | Enforced as |
+  |---|---|
+  | §3.3.1 | TLS 1.3 only (TLS 1.2 is a SHALL NOT) |
+  | §3.3.2 | exactly `TLS13_CHACHA20_POLY1305_SHA256` + `TLS13_AES_256_GCM_SHA384`; AES-128-GCM dropped |
+  | §3.3.3 | exactly `X25519MLKEM768` + `SecP256r1MLKEM768` — classical groups are **refused**, not deprioritised |
+  | §3.3.4 | refuses to start with neither `--auth-user` nor `--tls-client-ca` |
+
+  It is a profile rather than a global tightening because the suites genuinely
+  differ: Basic §3.1.1 says servers SHOULD support TLS 1.2. The profile is
+  applied in ONE place (`profile_builder`) that `tls_from_pem` /
+  `tls_self_signed` / `tls_mtls` all route through — which of those runs depends
+  on startup flags, so per-constructor enforcement would have been three chances
+  to get it wrong. `KMIP_TLS_PROFILE` works as an env fallback for the flag.
+
+- **KMIP Python client: `§8.1.2` Username/Password credentials, `SignatureVerify`,
+  mTLS, and a proof that the channel is actually quantum-safe.**
+
+  `SignatureVerify` (§6.1.63) closes the six-operation matrix the benchmark
+  needs, and closes a trap with it: a failed verification is **not** a KMIP
+  error. A forged signature returns a SUCCESSFUL response carrying
+  `ValidityIndicator = Invalid`, so a client that reads `ResultStatus` scores a
+  forgery as passing. `validity()` therefore returns the verdict as a *name*
+  ("Valid"/"Invalid"/"Unknown") rather than a bool — folding Unknown into either
+  answer is wrong in a security check. Demonstrated against a real ML-DSA-65 key
+  pair (3309-byte signature) over `X25519MLKEM768`: good → `Valid`, forged →
+  `Invalid`, wrong data → `Invalid`, with `call_ok=True` in all three.
+
+  `assert_quantum_safe_channel()` proves the channel by **exclusion**, because
+  pinning is not available: `SSLContext.set_groups` landed in Python 3.13, and
+  `set_ecdh_curve` rejects hybrid names outright (it uses the legacy EC-curve
+  lookup, so `"X25519MLKEM768"` raises "unknown elliptic curve name"). The
+  client cannot state what it offered — so it opens a deliberately
+  classical-only TLS 1.3 connection and REQUIRES it to fail. If the server
+  refuses classical key exchange, any connection that succeeds necessarily used
+  a hybrid. It refuses to certify at all below OpenSSL 3.5, where no hybrid
+  group exists. Verified to **discriminate**, not merely pass: pointed at a
+  permissive server it raises "accepted a classical-only handshake, so this
+  channel is NOT quantum-safe".
+
+- **`bench-harness kmip` — the KMIP arms, over a real TLS client or a
+  no-network control.** The subcommand is optional: with none, the binary
+  behaves exactly as before, so the sandbox job runner's argv keeps working.
+
+  Live wire arm, quantum-safe, 2 threads, against a real server:
+
+  | Algorithm | Operation | Throughput | p50 | p99 |
+  |---|---|---|---|---|
+  | Ed25519 | sign | 2429.9 ops/s | 0.80 ms | 1.09 ms |
+  | ML-DSA-65 | sign | 164.6 ops/s | 10.07 ms | 39.22 ms |
+  | ML-KEM-768 | encapsulate+get | 604.6 ops/s | 3.28 ms | 3.71 ms |
+
+  Two new schema fields make a KMIP row interpretable on its own: `transport`
+  (wire-per-op vs in-process — without it nobody can tell whether a number
+  includes a TLS handshake) and `tls` + `negotiated_group` (a row that cannot
+  say which group it used cannot claim to have measured PQC-TLS). The run
+  refuses to start if a quantum-safe run negotiates anything without MLKEM in
+  the name, or if the group cannot be determined — one clear error instead of
+  thousands of confidently mislabelled rows.
+
+- **PKCS#11 operation-evidence log (`SOFTHSM3_OP_LOG`)** — a new, separate
+  logging facility (`src/lib/common/OpLog.{h,cpp}`) that emits one
+  machine-parseable line per completed cryptographic operation, so a consumer
+  can prove *after the fact* which mechanism ran inside the token, on which
+  key, with what result:
+
+  ```
+  PQCEV v=1 ts=… pid=… op=C_Sign sess=3 mech=CKM_ML_DSA mech_id=0x0000001d \
+    key=ssh-host-mldsa-65 keytype=CKK_ML_DSA paramset=ML-DSA-65 out=3309 \
+    probe=0 rv=CKR_OK rv_id=0x00000000
+  ```
+
+  Instrumented: `C_SignInit` / `C_Sign` / `C_SignFinal`, `C_EncapsulateKey` /
+  `C_DecapsulateKey` (ciphertext **and** shared-secret lengths — the latter is
+  the one number the caller never sees, because the secret goes into a key
+  object), and `C_GenerateKeyPair` (mechanism, parameter set, and the
+  `CKA_EXTRACTABLE` / `CKA_SENSITIVE` / `CKA_NEVER_EXTRACTABLE` /
+  `CKA_ALWAYS_SENSITIVE` / `CKA_LOCAL` custody attributes that decide whether
+  "generated in-HSM and non-extractable" is true).
+
+  This is **not** `log.h`. `log.h` is diagnostic: syslog-bound, prose, and
+  dominated by error paths — `SoftHSM_sign.cpp` carried 73 `ERROR_MSG` calls
+  and *no* success-path logging at any level, so `log.level = DEBUG` told you
+  when signing broke, never which mechanism signed what. Every "HSM-backed
+  ML-DSA" claim was unverifiable except by reading the source.
+
+  Three properties are load-bearing:
+
+  - **Runtime gating, never a compile-time feature.** `SOFTHSM3_OP_LOG` is
+    unset by default (disabled); `stderr` or `-` writes to stderr — the only
+    retrieval path in a distroless container — and any other value is a file
+    path, opened append so several processes in one run can share it. The
+    artifact evidence is collected from is byte-identical to the shipped one.
+  - **Stable output grammar**, because things parse it. Unknown keys may be
+    added over time; a parser must ignore keys it does not recognise.
+  - **Correct labels on private keys.** Every byte-string attribute of a
+    private object, `CKA_LABEL` included, is stored encrypted at rest
+    (`P11Attribute::updateAttr`), so the label is decrypted through the token
+    exactly as `C_GetAttributeValue` does. Reading it raw yielded 48 bytes of
+    ciphertext — caught and fixed before this shipped.
+
+  Mechanism naming covers the pre-hash ML-DSA and SLH-DSA variants
+  (`CKM_HASH_ML_DSA_*`, `CKM_HASH_SLH_DSA_*`) alongside the pure ones: those
+  are still PQC signatures, and leaving them unnamed would let a consumer
+  conclude no PQC signing happened when it did. Classical mechanisms are named
+  too, so "no classical fallback where PQC is claimed" is assertable rather
+  than merely hoped for.
+
+  `C_EncapsulateKey` / `C_DecapsulateKey` / `C_GenerateKeyPair` keep their
+  original bodies as private `*Impl` methods with thin logging wrappers around
+  them, rather than restructuring working code with many early returns around
+  a log statement.
+
+  Verified: `p11_v32_compliance_test` reports **324 PASS / 0 FAIL** both with
+  the log enabled and with it unset, and produces no output at all when unset.
+
+- **The same operation-evidence log in the Rust engine (`rust/src/oplog.rs`).**
+  The shipped Rust library previously emitted **nothing at all** — the only
+  `println!`/`eprintln!` in the tree live in a KAT generator — so the two
+  scenarios it backs (`hsm-perf-bench`, `pqctoday-kmip`) could assert that
+  ML-DSA ran inside the token but never show it.
+
+  It emits the **same record grammar** as the C++ engine, so one consumer parses
+  both without knowing which produced a line. `C_SignInit` / `C_Sign` /
+  `C_SignFinal` / `C_GenerateKeyPair` / `C_EncapsulateKey` / `C_DecapsulateKey`
+  keep their original bodies as `*_impl` functions with thin wrappers around
+  them — the same shape used on the C++ side, for the same reason.
+
+  Deliberately **not** the `log` facade, despite the plan calling for it: a
+  facade routes through whatever logger the host installs and formats records
+  however that logger sees fit, which would break the one property that makes
+  this useful. A self-contained sink is closer to the requirement and one
+  dependency lighter; "zero cost when off" is met by a `OnceLock` check.
+
+  Gates, all measured rather than argued:
+
+  | Gate | Result |
+  |---|---|
+  | V2 — Rust logging emits | `tests/oplog_evidence.rs`: `CKM_ML_DSA` / `ML-DSA-65` / `out=3309` records, asserted field by field |
+  | V3 — zero cost when off | 2881 → 2893 ops/sec (**+0.42%**, run-to-run noise) against the pre-instrumentation commit |
+  | V4 — WASM still builds | `wasm32-unknown-unknown` builds (sink cfg-gated out); `wasm32-unknown-emscripten` **links** a 110 MB staticlib in an emsdk container |
+  | Existing suite | 326 passed / 0 failed |
+
+  One bug caught by its own unit test before it shipped: `CKR_DEVICE_ERROR` is
+  absent from `constants.rs`, so in a match arm Rust reinterpreted it as an
+  irrefutable **binding** that swallowed every arm after it — `rv_name` returned
+  `"CKR_DEVICE_ERROR"` for every input. The only signal was an `unreachable
+  pattern` warning among the crate's other 57. The module now carries
+  `#![deny(unreachable_patterns)]` so the next such typo fails the build, and
+  the constant is defined locally with its value cited from `pkcs11t.h:1384`.
+
+### Changed
+
+- **The strongSwan PKCS#11 fork now applies as a real patch, not a directory
+  copy.** `strongswan-pkcs11/` (22 files, 9076 lines) was dropped onto the
+  strongSwan source tree by a wholesale directory COPY in `Dockerfile.network`,
+  which silently discarded upstream changes to every file it overwrote — exactly
+  how the 6.0.7 `OID_SECT*` → `OID_SECP*` rename went unnoticed until it broke
+  the build. `strongswan-pkcs11.patch` was generated by diffing the fork against
+  a pristine 6.0.7 checkout, and it is deliberately narrower than the copy was:
+
+  | Category | Count | In the patch? |
+  |---|---|---|
+  | Modified from upstream | 6 | yes |
+  | New, no upstream equivalent | 4 | yes |
+  | **Byte-identical to upstream** | **13** | **no — excluded on purpose** |
+
+  That exclusion is the whole point: an upstream change to any of those 13 now
+  shows up as a genuine new diff next time the patch is regenerated, instead of
+  staying invisible under a copy that carried it along unasked.
+  `regen-strongswan-pkcs11-patch.sh` automates the regeneration and verifies the
+  result applies before overwriting the committed patch.
+
+- **`openssh-pkcs11` patcher gained a `--dry-run` preflight**, so a version bump
+  can be checked against a pristine checkout without mutating it.
+
+### Fixed
+
+- **OpenSSH 10.4 broke the ML-DSA patcher; strongSwan 6.0.7 broke the plugin
+  build.** OpenSSH 10.4 inserted `KEY_MLDSA44_ED25519` +
+  `KEY_MLDSA44_ED25519_CERT` into `enum sshkey_types` at exactly the slot
+  `apply_mldsa_patches.py` anchored on, so 2 of its 24 edits stopped matching
+  and the patcher exited on the first miss. The anchor now tolerates types
+  upstream inserts there **and preserves them** via a capture group; anchoring on
+  `KEY_ED25519_SK_CERT` is deliberate, since anchoring on `KEY_UNSPEC` alone
+  would silently insert in the wrong place if upstream ever reorganised the
+  enum, where this form still fails loudly. Verified against pristine checkouts
+  of both tags — 24/24 edits apply to `V_10_3_P1` and `V_10_4_P1`, upstream's
+  two composite key types survive alongside ours on 10.4, and a deliberately
+  corrupted anchor still exits non-zero.
+
+  Separately, strongSwan 6.0.7 renamed `OID_SECT{224,384,521}R1` to `OID_SECP…`
+  and removed the old names. The numeric values are unchanged (407/408/409), so
+  the forked plugin was never behaviourally wrong — but it does not compile
+  against 6.0.7 until renamed. This is a build requirement rather than a bug
+  fix, and it had to land with the version bump: 6.0.6 does not define the SECP
+  names, so applying it alone would break the current build.
+
+- **Every mTLS start aborted on boot** with "Could not automatically determine
+  the process-level CryptoProvider" — a regression from this release's own TLS
+  profile work. `tls_mtls_with_profile` built its `WebPkiClientVerifier` with
+  the plain `builder()`, which resolves the process-level default provider and
+  **panics** when it cannot find one; the verifier is constructed before
+  `profile_builder` runs, and quantum-safe never installs a process default at
+  all (it passes its provider explicitly) while permissive installs one too
+  late. Fixed with `builder_with_provider`, so client-cert verification runs on
+  the same crypto as the handshake rather than on whichever provider won the
+  `install_default()` race. The crash shipped unnoticed through six commits
+  because there was **no mTLS test at all**; `mtls_config_builds_under_both_profiles`
+  is that test.
+
 ## [0.20.2] — 2026-07-30
 
 ### Security

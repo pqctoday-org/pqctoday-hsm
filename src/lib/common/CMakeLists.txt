@@ -9,6 +9,7 @@ set(INCLUDE_DIRS ${PROJECT_SOURCE_DIR}
 set(SOURCES Configuration.cpp
             fatal.cpp
             log.cpp
+            OpLog.cpp
             MutexFactory.cpp
             osmutex.cpp
             SimpleConfigLoader.cpp

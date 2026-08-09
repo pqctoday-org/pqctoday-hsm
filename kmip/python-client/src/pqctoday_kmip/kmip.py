@@ -102,10 +102,23 @@ class KmipClient:
         timeout: float = 5.0,
         insecure: bool = True,
         ca_cert: Optional[str] = None,
+        username: Optional[str] = None,
+        password: Optional[str] = None,
+        client_cert: Optional[str] = None,
+        client_key: Optional[str] = None,
     ):
         self.host = host
         self.port = port
         self.timeout = timeout
+        # KMIP 3.0 §8.1.2 Authentication credentials. Without these the
+        # client can only talk to a server in open-auth mode; any server
+        # started with --auth-user answers every operation with
+        # "authentication not successful". Send the password in the CLEAR
+        # here (inside TLS) — the server hashes it and compares against the
+        # SHA-256 it was configured with, so pre-hashing on this side would
+        # authenticate the hash of a hash and always fail.
+        self.username = username
+        self.password = password
         if insecure:
             self._ctx = ssl.create_default_context()
             self._ctx.check_hostname = False
@@ -115,6 +128,117 @@ class KmipClient:
                 ssl.Purpose.SERVER_AUTH,
                 cafile=ca_cert,
             )
+        # Client certificate for mutual TLS. KMIP 3.0 Profiles §3.3.4 says a
+        # server SHOULD require mTLS and derive the client's identity from it;
+        # a server started with --tls-client-ca will refuse a connection that
+        # presents no certificate, so without this the client cannot reach
+        # such a deployment at all — regardless of credentials, which are a
+        # separate, application-layer identity the same clause also allows.
+        #
+        # Both may be supplied at once: the channel proves who is connecting,
+        # the credential proves who is asking. §3.3.4 gives the credential
+        # precedence when both are present.
+        if client_cert is not None:
+            self._ctx.load_cert_chain(certfile=client_cert, keyfile=client_key)
+
+    # ── channel assurance (§3.3.3) ──────────────────────────────────────────
+
+    @staticmethod
+    def openssl_is_hybrid_capable() -> bool:
+        """Whether the linked OpenSSL can offer hybrid ML-KEM groups at all.
+
+        3.5 is the first release carrying X25519MLKEM768 in the default
+        group list. Against an older library every connection is classical,
+        and a benchmark that did not check would report classical numbers
+        under a quantum-safe label.
+        """
+        try:
+            parts = ssl.OPENSSL_VERSION.split()[1].split(".")
+            return (int(parts[0]), int(parts[1])) >= (3, 5)
+        except (IndexError, ValueError):
+            return False
+
+    def negotiated_group(self) -> Optional[str]:
+        """The key exchange group of a fresh handshake, or ``None`` when the
+        runtime cannot report it.
+
+        ``SSLSocket.group()`` arrived in Python 3.13. On 3.12 there is no
+        API for this at all, which is why :meth:`assert_quantum_safe_channel`
+        does not rely on it.
+        """
+        raw = socket.create_connection((self.host, self.port), timeout=self.timeout)
+        try:
+            sock = self._ctx.wrap_socket(raw, server_hostname=self.host)
+            try:
+                getter = getattr(sock, "group", None)
+                return getter() if callable(getter) else None
+            finally:
+                sock.close()
+        finally:
+            raw.close()
+
+    def assert_quantum_safe_channel(self) -> str:
+        """Prove this connection cannot be classical, or raise.
+
+        **Why this proves rather than pins.** A client should ideally insist
+        on a hybrid group. Python 3.12 cannot: ``SSLContext.set_groups``
+        only exists from 3.13, and ``set_ecdh_curve`` rejects hybrid names
+        outright (verified — it uses the legacy EC-curve lookup, so
+        ``"X25519MLKEM768"`` raises "unknown elliptic curve name"). The
+        client therefore inherits OpenSSL's default group list, which
+        *includes* the hybrids but also every classical group.
+
+        Inheriting a hybrid is not the same as requiring one: point the same
+        client at a permissive server and it will happily use X25519, and a
+        run would be classical while labelled quantum-safe.
+
+        So instead of asserting what we offered, this asserts what the
+        SERVER will refuse: it opens a deliberately classical-only
+        connection and requires it to fail. If the server rejects classical
+        key exchange, then any connection that does succeed used a hybrid —
+        proof by exclusion, which needs no client-side group API.
+
+        Returns a short description of the evidence. Raises RuntimeError if
+        the channel cannot be shown to be quantum-safe.
+        """
+        if not self.openssl_is_hybrid_capable():
+            raise RuntimeError(
+                f"linked OpenSSL is {ssl.OPENSSL_VERSION}; hybrid ML-KEM groups need 3.5+. "
+                "This client cannot establish a quantum-safe channel at all."
+            )
+
+        # A context restricted to a classical curve. set_ecdh_curve is the
+        # one group control 3.12 does expose, and classical names are
+        # exactly what it accepts.
+        probe = ssl.create_default_context()
+        probe.check_hostname = False
+        probe.verify_mode = ssl.CERT_NONE
+        probe.minimum_version = ssl.TLSVersion.TLSv1_3
+        probe.set_ecdh_curve("X25519")
+
+        refused = None
+        raw = socket.create_connection((self.host, self.port), timeout=self.timeout)
+        try:
+            try:
+                probe.wrap_socket(raw, server_hostname=self.host).close()
+            except ssl.SSLError as e:
+                refused = str(e)
+        finally:
+            try:
+                raw.close()
+            except OSError:
+                pass
+
+        if refused is None:
+            raise RuntimeError(
+                f"{self.host}:{self.port} accepted a classical-only (X25519) TLS 1.3 "
+                "handshake, so this channel is NOT quantum-safe. Any measurement taken "
+                "over it would be classical regardless of what the run is labelled."
+            )
+
+        group = self.negotiated_group()
+        detail = f"; negotiated group reported as {group}" if group else ""
+        return f"server refused classical X25519 ({refused.splitlines()[0]}){detail}"
 
     # ── transport ───────────────────────────────────────────────────────────
 
@@ -139,11 +263,46 @@ class KmipClient:
         node, _ = _ttlv.decode_one(resp_bytes)
         return node
 
+    def _auth_nodes(self) -> list[_ttlv.TtlvNode]:
+        """The §8.1.2 `Authentication` structure, or nothing when no
+        credentials are configured.
+
+        Shape per §9.4 Table 504 / §9.9 Table 509-510, which is also exactly
+        what the server's `decode_credential` walks:
+
+            Authentication              (0x42000C, Structure)
+              Credential                (0x420023, Structure)
+                CredentialType          (0x420024, Enumeration = 1)
+                CredentialValue         (0x420025, Structure)
+                  Username              (0x420099, TextString)
+                  Password              (0x4200A1, TextString)
+
+        Omitted entirely when unset rather than sent empty: an empty
+        Authentication is not the same as no Authentication, and a
+        password-less credential is rejected by the verifier anyway.
+        """
+        if self.username is None or self.password is None:
+            return []
+        return [
+            _struct(
+                "Authentication",
+                _struct(
+                    "Credential",
+                    _leaf("CredentialType", "Enumeration", "UsernameAndPassword"),
+                    _struct(
+                        "CredentialValue",
+                        _leaf("Username", "TextString", self.username),
+                        _leaf("Password", "TextString", self.password),
+                    ),
+                ),
+            )
+        ]
+
     def request(self, operation: str, *payload: _ttlv.TtlvNode) -> KmipResult:
         """Send a single-batch-item request for ``operation`` and decode it."""
         msg = _struct(
             "RequestMessage",
-            _struct("RequestHeader", _proto()),
+            _struct("RequestHeader", _proto(), *self._auth_nodes()),
             _struct(
                 "BatchItem",
                 _leaf("Operation", "Enumeration", operation),
@@ -243,6 +402,53 @@ class KmipClient:
             ),
             _leaf("Data", "ByteString", data.hex()),
         )
+
+    def signature_verify(
+        self,
+        uid: str,
+        data: bytes,
+        signature: bytes,
+        algorithm: Optional[str] = None,
+    ) -> KmipResult:
+        """§6.1.63 Signature Verify.
+
+        **A failed verification is not a KMIP error.** A forged signature
+        comes back as a SUCCESSFUL response carrying
+        ``ValidityIndicator = Invalid``; KMIP errors are reserved for
+        protocol-level problems (missing UID, archived key, policy denial).
+        So ``result.ok`` answers "did the call work", NOT "is the signature
+        good" — reading it as the latter scores a broken engine as passing.
+        Use :meth:`validity` for the verdict.
+        """
+        payload = [
+            _leaf("UniqueIdentifier", "TextString", uid),
+            _leaf("Data", "ByteString", data.hex()),
+            _leaf("SignatureData", "ByteString", signature.hex()),
+        ]
+        if algorithm is not None:
+            payload.insert(
+                1,
+                _struct(
+                    "CryptographicParameters",
+                    _leaf("CryptographicAlgorithm", "Enumeration", algorithm),
+                ),
+            )
+        return self.request("SignatureVerify", *payload)
+
+    @staticmethod
+    def validity(result: KmipResult) -> Optional[str]:
+        """The verdict from a :meth:`signature_verify` result: ``"Valid"``,
+        ``"Invalid"``, ``"Unknown"``, or ``None`` if the call itself failed
+        or carried no indicator.
+
+        Deliberately returns the name rather than a bool: a two-valued
+        answer would have to fold ``Unknown`` into one of the other two,
+        and both choices are wrong in a security check.
+        """
+        value = result.get("ValidityIndicator")
+        if value is None:
+            return None
+        return {1: "Valid", 2: "Invalid", 3: "Unknown"}.get(int(value))
 
     def encapsulate(self, uid: str) -> KmipResult:
         """ML-KEM encapsulate against a public key UID."""

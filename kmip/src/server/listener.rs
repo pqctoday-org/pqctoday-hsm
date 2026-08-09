@@ -46,9 +46,137 @@ pub enum ServerError {
     Rcgen(String),
 }
 
-/// Build a `rustls::ServerConfig` from on-disk PEM cert + key.
+/// Which TLS posture the listener enforces.
+///
+/// KMIP 3.0 Profiles §3.3 ("Quantum Safe Authentication Suite") is not a
+/// preference — it is a set of SHALL / SHALL NOT clauses. [`TlsProfile::QuantumSafe`]
+/// enforces them; [`TlsProfile::Permissive`] is the historical behaviour and
+/// stays the default so existing callers (kms-proxy, sandbox scenario 22, the
+/// wasm playground) are unaffected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TlsProfile {
+    /// rustls defaults: TLS 1.2 + 1.3, the full default suite and group lists.
+    #[default]
+    Permissive,
+    /// KMIP 3.0 Profiles §3.3 — TLS 1.3 only, §3.3.2 suites only, §3.3.3
+    /// hybrid ML-KEM groups only. See [`quantum_safe_provider`] for the
+    /// documented gap against §3.3.3.
+    QuantumSafe,
+}
+
+impl TlsProfile {
+    /// Parse the `--tls-profile` CLI value. Kept here rather than in the
+    /// binary so the accepted spellings live next to the enum they select.
+    pub fn parse(s: &str) -> Result<Self, String> {
+        match s {
+            "permissive" => Ok(Self::Permissive),
+            "quantum-safe" | "quantum_safe" => Ok(Self::QuantumSafe),
+            other => Err(format!(
+                "unknown TLS profile {other:?} (expected 'permissive' or 'quantum-safe')"
+            )),
+        }
+    }
+}
+
+/// The §3.3 crypto provider: aws-lc-rs restricted to exactly the cipher
+/// suites and key exchange groups the Quantum Safe Authentication Suite
+/// permits.
+///
+/// **aws-lc-rs, not `ring`.** `ring` has no ML-KEM at all, so under it no
+/// hybrid group can be negotiated and §3.3.3 is unreachable. aws-lc-rs is
+/// already linked (see `Cargo.toml`'s rustls features and rcgen's own
+/// dependency), so this selects between providers already present rather
+/// than adding one.
+///
+/// **Known gap — §3.3.3 is met in part, not in full.** The clause requires
+/// servers to support `X25519MLKEM768`, `SecP256r1MLKEM768` *and*
+/// `SecP384r1MLKEM1024`. rustls 0.23.40 has no `SecP384r1MLKEM1024`: it is
+/// absent from `crypto::aws_lc_rs::kx_group`, has no `NamedGroup` codepoint
+/// for `0x11ed`, and the `hybrid` module it would be built from is private,
+/// so it cannot be composed downstream either. Two of three are offered.
+/// This is a rustls limitation rather than a platform one — OpenSSL 3.6
+/// carries all three. Until it lands upstream, describe this server as
+/// *measured against* the Quantum Safe Authentication Suite, never as
+/// *conformant to* it.
+///
+/// §3.3.2 is met in full: exactly `TLS13_CHACHA20_POLY1305_SHA256` and
+/// `TLS13_AES_256_GCM_SHA384`. Note this deliberately drops
+/// `TLS13_AES_128_GCM_SHA256`, which the clause forbids and which is
+/// otherwise on by default.
+pub fn quantum_safe_provider() -> rustls::crypto::CryptoProvider {
+    use rustls::crypto::aws_lc_rs;
+    rustls::crypto::CryptoProvider {
+        cipher_suites: vec![
+            aws_lc_rs::cipher_suite::TLS13_CHACHA20_POLY1305_SHA256,
+            aws_lc_rs::cipher_suite::TLS13_AES_256_GCM_SHA384,
+        ],
+        kx_groups: vec![
+            aws_lc_rs::kx_group::X25519MLKEM768,
+            aws_lc_rs::kx_group::SECP256R1MLKEM768,
+        ],
+        ..aws_lc_rs::default_provider()
+    }
+}
+
+/// Human-readable summary of what a profile actually enforces, for the
+/// startup log. An operator should be able to see the groups and suites in
+/// force without reading this file.
+pub fn tls_profile_summary(profile: TlsProfile) -> String {
+    match profile {
+        TlsProfile::Permissive => {
+            "permissive (rustls defaults: TLS1.2+1.3, default suites and groups)".to_string()
+        }
+        TlsProfile::QuantumSafe => {
+            "quantum-safe (KMIP 3.0 §3.3): TLS1.3 only; suites \
+             TLS13_CHACHA20_POLY1305_SHA256, TLS13_AES_256_GCM_SHA384; \
+             groups X25519MLKEM768, SecP256r1MLKEM768 \
+             [gap: SecP384r1MLKEM1024 unavailable in rustls 0.23 — partial §3.3.3]"
+                .to_string()
+        }
+    }
+}
+
+/// The one place a `ServerConfig` builder is created, so every TLS entry
+/// point below gets the same posture.
+///
+/// This function existing at all is the point: there are three public config
+/// constructors ([`tls_from_pem`], [`tls_self_signed`], [`tls_mtls`]) and
+/// which one runs depends on startup flags. Enforcing the profile in each of
+/// them separately would mean a server that is quantum-safe or not depending
+/// on how it was launched — an intermittent, configuration-dependent gap.
+fn profile_builder(
+    profile: TlsProfile,
+) -> Result<rustls::ConfigBuilder<ServerConfig, rustls::WantsVerifier>, ServerError> {
+    match profile {
+        TlsProfile::Permissive => {
+            install_crypto_provider();
+            Ok(ServerConfig::builder())
+        }
+        TlsProfile::QuantumSafe => {
+            // Explicit provider rather than the process-wide default: the
+            // default may already have been installed as `ring` by another
+            // code path, and install_default() is first-call-wins.
+            ServerConfig::builder_with_provider(Arc::new(quantum_safe_provider()))
+                // §3.3.1 — TLS 1.3 only. TLS 1.2 and below are a SHALL NOT,
+                // so this is a restriction, not a minimum version.
+                .with_protocol_versions(&[&rustls::version::TLS13])
+                .map_err(|e| ServerError::Tls(format!("quantum-safe TLS setup: {e}")))
+        }
+    }
+}
+
+/// Build a `rustls::ServerConfig` from on-disk PEM cert + key, under the
+/// historical permissive posture. Prefer [`tls_from_pem_with_profile`].
 pub fn tls_from_pem(cert_pem_path: &Path, key_pem_path: &Path) -> Result<Arc<ServerConfig>, ServerError> {
-    install_crypto_provider();
+    tls_from_pem_with_profile(cert_pem_path, key_pem_path, TlsProfile::Permissive)
+}
+
+/// Build a `rustls::ServerConfig` from on-disk PEM cert + key.
+pub fn tls_from_pem_with_profile(
+    cert_pem_path: &Path,
+    key_pem_path: &Path,
+    profile: TlsProfile,
+) -> Result<Arc<ServerConfig>, ServerError> {
     let cert_bytes = std::fs::read(cert_pem_path)?;
     let key_bytes = std::fs::read(key_pem_path)?;
     let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut &cert_bytes[..])
@@ -57,7 +185,7 @@ pub fn tls_from_pem(cert_pem_path: &Path, key_pem_path: &Path) -> Result<Arc<Ser
     let key = rustls_pemfile::private_key(&mut &key_bytes[..])
         .map_err(|e| ServerError::Tls(format!("key: {e}")))?
         .ok_or_else(|| ServerError::Tls("no private key in PEM".into()))?;
-    let config = ServerConfig::builder()
+    let config = profile_builder(profile)?
         .with_no_client_auth()
         .with_single_cert(certs, key)
         .map_err(|e| ServerError::Tls(e.to_string()))?;
@@ -67,6 +195,12 @@ pub fn tls_from_pem(cert_pem_path: &Path, key_pem_path: &Path) -> Result<Arc<Ser
 /// Install the `ring` crypto provider as rustls' default. Required when
 /// multiple providers are linked (rcgen's `aws_lc_rs` + rustls' `ring`).
 /// Idempotent — subsequent calls are no-ops.
+///
+/// Applies to [`TlsProfile::Permissive`] only. The quantum-safe profile
+/// passes an aws-lc-rs provider explicitly instead of relying on this
+/// process-wide default, because `ring` cannot negotiate ML-KEM hybrids at
+/// all and `install_default()` is first-call-wins — whichever path ran first
+/// would otherwise decide the posture.
 pub fn install_crypto_provider() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 }
@@ -76,7 +210,14 @@ pub fn install_crypto_provider() {
 /// via [`tls_from_pem`]. Returns the config + the PEM-encoded cert so the
 /// caller can log the fingerprint for clients to pin.
 pub fn tls_self_signed(common_name: &str) -> Result<(Arc<ServerConfig>, String), ServerError> {
-    install_crypto_provider();
+    tls_self_signed_with_profile(common_name, TlsProfile::Permissive)
+}
+
+/// As [`tls_self_signed`], under an explicit TLS profile.
+pub fn tls_self_signed_with_profile(
+    common_name: &str,
+    profile: TlsProfile,
+) -> Result<(Arc<ServerConfig>, String), ServerError> {
     let subject_alt_names = vec![common_name.to_string(), "localhost".to_string()];
     let cert = rcgen::generate_simple_self_signed(subject_alt_names)
         .map_err(|e| ServerError::Rcgen(e.to_string()))?;
@@ -85,7 +226,7 @@ pub fn tls_self_signed(common_name: &str) -> Result<(Arc<ServerConfig>, String),
     let key_der: PrivateKeyDer<'static> =
         PrivateKeyDer::try_from(cert.key_pair.serialize_der())
             .map_err(|e| ServerError::Tls(format!("key: {e}")))?;
-    let config = ServerConfig::builder()
+    let config = profile_builder(profile)?
         .with_no_client_auth()
         .with_single_cert(vec![cert_der], key_der)
         .map_err(|e| ServerError::Tls(e.to_string()))?;
@@ -103,6 +244,21 @@ pub fn tls_mtls(
     server_key_pem: &[u8],
     client_ca_pem: &[u8],
 ) -> Result<Arc<ServerConfig>, ServerError> {
+    tls_mtls_with_profile(
+        server_cert_pem,
+        server_key_pem,
+        client_ca_pem,
+        TlsProfile::Permissive,
+    )
+}
+
+/// As [`tls_mtls`], under an explicit TLS profile.
+pub fn tls_mtls_with_profile(
+    server_cert_pem: &[u8],
+    server_key_pem: &[u8],
+    client_ca_pem: &[u8],
+    profile: TlsProfile,
+) -> Result<Arc<ServerConfig>, ServerError> {
     let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut &server_cert_pem[..])
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| ServerError::Tls(format!("server cert: {e}")))?;
@@ -115,10 +271,27 @@ pub fn tls_mtls(
             .add(cert.map_err(|e| ServerError::Tls(format!("client CA: {e}")))?)
             .map_err(|e| ServerError::Tls(format!("root store add: {e}")))?;
     }
-    let verifier = WebPkiClientVerifier::builder(Arc::new(root_store))
-        .build()
-        .map_err(|e| ServerError::Tls(e.to_string()))?;
-    let config = ServerConfig::builder()
+    // `builder_with_provider`, NOT `builder`. The plain builder resolves the
+    // PROCESS-LEVEL default provider and panics outright when it cannot
+    // ("Could not automatically determine the process-level CryptoProvider")
+    // — exactly what happens here, because the verifier is built BEFORE
+    // `profile_builder` runs: the quantum-safe path never installs a process
+    // default at all (it passes its provider explicitly), and the permissive
+    // path installs one too late to help. Confirmed live: every mTLS start
+    // aborted on this before the fix.
+    //
+    // Passing the profile's own provider also keeps client-certificate
+    // verification on the same crypto as the handshake, rather than on
+    // whichever provider happened to win the install_default() race.
+    let verifier_provider = Arc::new(match profile {
+        TlsProfile::Permissive => rustls::crypto::ring::default_provider(),
+        TlsProfile::QuantumSafe => quantum_safe_provider(),
+    });
+    let verifier =
+        WebPkiClientVerifier::builder_with_provider(Arc::new(root_store), verifier_provider)
+            .build()
+            .map_err(|e| ServerError::Tls(e.to_string()))?;
+    let config = profile_builder(profile)?
         .with_client_cert_verifier(verifier)
         .with_single_cert(certs, key)
         .map_err(|e| ServerError::Tls(e.to_string()))?;
