@@ -33,6 +33,7 @@
 
 #include "config.h"
 #include "log.h"
+#include "OpLog.h"
 #include "access.h"
 #include "SoftHSM.h"
 #include "SoftHSMHelpers.h"
@@ -131,6 +132,53 @@ CK_RV SoftHSM::C_EncapsulateKey
 	CK_BYTE_PTR pCiphertext,
 	CK_ULONG_PTR pulCiphertextLen,
 	CK_OBJECT_HANDLE_PTR phKey
+)
+{
+	const bool logging = OpLog::enabled();
+	const std::string keyFields = (logging && pMechanism != NULL_PTR)
+		? opLogKeyFields(hSession, hPublicKey, pMechanism->mechanism)
+		: std::string("key=- keytype=- paramset=-");
+
+	unsigned long secretLen = 0;
+	CK_RV rv = encapsulateKeyImpl(hSession, pMechanism, hPublicKey, pTemplate,
+	                              ulAttributeCount, pCiphertext, pulCiphertextLen,
+	                              phKey, logging ? &secretLen : NULL);
+
+	if (logging)
+	{
+		// secret=- rather than secret=0 when the length is unknown: the ECDH
+		// branch does not report one, and a literal 0 would read as "a zero-byte
+		// shared secret", which is a different and much more alarming claim.
+		char secret[24];
+		if (secretLen > 0) snprintf(secret, sizeof(secret), "%lu", secretLen);
+		else               snprintf(secret, sizeof(secret), "-");
+
+		OpLog::emit("C_EncapsulateKey",
+		            "sess=%lu mech=%s mech_id=0x%08lx %s ct=%lu secret=%s probe=%d rv=%s rv_id=0x%08lx",
+		            (unsigned long)hSession,
+		            OpLog::mechName(pMechanism != NULL_PTR ? pMechanism->mechanism : 0),
+		            (unsigned long)(pMechanism != NULL_PTR ? pMechanism->mechanism : 0),
+		            keyFields.c_str(),
+		            (unsigned long)(pulCiphertextLen != NULL_PTR ? *pulCiphertextLen : 0),
+		            secret,
+		            (pCiphertext == NULL_PTR) ? 1 : 0,
+		            OpLog::rvName(rv), (unsigned long)rv);
+	}
+
+	return rv;
+}
+
+CK_RV SoftHSM::encapsulateKeyImpl
+(
+	CK_SESSION_HANDLE hSession,
+	CK_MECHANISM_PTR pMechanism,
+	CK_OBJECT_HANDLE hPublicKey,
+	CK_ATTRIBUTE_PTR pTemplate,
+	CK_ULONG ulAttributeCount,
+	CK_BYTE_PTR pCiphertext,
+	CK_ULONG_PTR pulCiphertextLen,
+	CK_OBJECT_HANDLE_PTR phKey,
+	unsigned long* opLogSecretLen
 )
 {
 	if (!isInitialised) return CKR_CRYPTOKI_NOT_INITIALIZED;
@@ -232,6 +280,9 @@ CK_RV SoftHSM::C_EncapsulateKey
 	// Write ciphertext to caller's buffer
 	memcpy(pCiphertext, ciphertext.const_byte_str(), ciphertext.size());
 	*pulCiphertextLen = (CK_ULONG)ciphertext.size();
+
+	// Captured here, before sharedSecret is moved into the key object and wiped.
+	if (opLogSecretLen != NULL) *opLogSecretLen = (unsigned long)sharedSecret.size();
 
 	mlkem->recyclePublicKey(publicKey);
 	CryptoFactory::i()->recycleAsymmetricAlgorithm(mlkem);
@@ -347,6 +398,51 @@ CK_RV SoftHSM::C_DecapsulateKey
 	CK_OBJECT_HANDLE_PTR phKey
 )
 {
+	const bool logging = OpLog::enabled();
+	const std::string keyFields = (logging && pMechanism != NULL_PTR)
+		? opLogKeyFields(hSession, hPrivateKey, pMechanism->mechanism)
+		: std::string("key=- keytype=- paramset=-");
+
+	unsigned long secretLen = 0;
+	CK_RV rv = decapsulateKeyImpl(hSession, pMechanism, hPrivateKey, pTemplate,
+	                              ulAttributeCount, pCiphertext, ulCiphertextLen,
+	                              phKey, logging ? &secretLen : NULL);
+
+	if (logging)
+	{
+		char secret[24];
+		if (secretLen > 0) snprintf(secret, sizeof(secret), "%lu", secretLen);
+		else               snprintf(secret, sizeof(secret), "-");
+
+		// No probe field: decapsulation takes the ciphertext by value and has no
+		// length-query form to distinguish.
+		OpLog::emit("C_DecapsulateKey",
+		            "sess=%lu mech=%s mech_id=0x%08lx %s ct=%lu secret=%s rv=%s rv_id=0x%08lx",
+		            (unsigned long)hSession,
+		            OpLog::mechName(pMechanism != NULL_PTR ? pMechanism->mechanism : 0),
+		            (unsigned long)(pMechanism != NULL_PTR ? pMechanism->mechanism : 0),
+		            keyFields.c_str(),
+		            (unsigned long)ulCiphertextLen,
+		            secret,
+		            OpLog::rvName(rv), (unsigned long)rv);
+	}
+
+	return rv;
+}
+
+CK_RV SoftHSM::decapsulateKeyImpl
+(
+	CK_SESSION_HANDLE hSession,
+	CK_MECHANISM_PTR pMechanism,
+	CK_OBJECT_HANDLE hPrivateKey,
+	CK_ATTRIBUTE_PTR pTemplate,
+	CK_ULONG ulAttributeCount,
+	CK_BYTE_PTR pCiphertext,
+	CK_ULONG ulCiphertextLen,
+	CK_OBJECT_HANDLE_PTR phKey,
+	unsigned long* opLogSecretLen
+)
+{
 	if (!isInitialised) return CKR_CRYPTOKI_NOT_INITIALIZED;
 	if (pMechanism == NULL_PTR) return CKR_ARGUMENTS_BAD;
 	if (pCiphertext == NULL_PTR) return CKR_ARGUMENTS_BAD;
@@ -429,6 +525,9 @@ CK_RV SoftHSM::C_DecapsulateKey
 
 	mlkem->recyclePrivateKey(privateKey);
 	CryptoFactory::i()->recycleAsymmetricAlgorithm(mlkem);
+
+	// Captured here, before sharedSecret is moved into the key object and wiped.
+	if (opLogSecretLen != NULL) *opLogSecretLen = (unsigned long)sharedSecret.size();
 
 	// Create the shared-secret key object from pTemplate
 	CK_OBJECT_CLASS objClass = CKO_SECRET_KEY;

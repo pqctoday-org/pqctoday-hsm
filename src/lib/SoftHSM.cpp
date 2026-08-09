@@ -34,6 +34,7 @@
 
 #include "config.h"
 #include "log.h"
+#include "OpLog.h"
 #include "access.h"
 #include "Configuration.h"
 #include "SimpleConfigLoader.h"
@@ -190,6 +191,97 @@ CK_RV SoftHSM::acquireSessionTokenKey(CK_SESSION_HANDLE hSession,
 	if (pMechanism != NULL_PTR && !isMechanismPermitted(outKey, pMechanism->mechanism))
 		return CKR_MECHANISM_INVALID;
 	return CKR_OK;
+}
+
+std::string SoftHSM::opLogKeyFields(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hKey,
+                                    CK_MECHANISM_TYPE mech)
+{
+	static const char* unresolved = "key=- keytype=- paramset=-";
+
+	if (handleManager == NULL) return unresolved;
+
+	// The guard is taken and released entirely inside this function, before the
+	// caller dispatches into the real operation, so it never overlaps the guard
+	// that operation takes for itself.
+	auto guard = handleManager->getSessionShared(hSession);
+	Session* session = guard.get();
+	if (session == NULL || session->getSlot() == NULL) return unresolved;
+
+	OSObject* obj = (OSObject*)handleManager->getObject(hKey, session->getSlot()->getSlotID());
+	if (obj == NULL || !obj->isValid()) return unresolved;
+
+	// Every byte-string attribute of a private object -- CKA_LABEL included --
+	// is stored encrypted at rest (P11Attribute::updateAttr). Reading it raw
+	// yields the ciphertext, so private keys must be decrypted through the token
+	// exactly as C_GetAttributeValue does. Decryption needs the token key, so it
+	// fails when nobody is logged in; that reports "-" rather than ciphertext.
+	ByteString label = obj->getByteStringValue(CKA_LABEL);
+	if (label.size() > 0 && obj->getBooleanValue(CKA_PRIVATE, true))
+	{
+		Token* token = session->getToken();
+		ByteString plain;
+		if (token != NULL && token->decrypt(label, plain)) label = plain;
+		else                                               label.wipe();
+	}
+	const std::string labelStr = (label.size() > 0)
+		? OpLog::value(label.const_byte_str(), label.size())
+		: std::string("-");
+
+	const CK_KEY_TYPE keyType = obj->getUnsignedLongValue(CKA_KEY_TYPE, CK_UNAVAILABLE_INFORMATION);
+
+	// CKA_PARAMETER_SET is absent on classical keys; "-" rather than a bogus 0.
+	std::string paramSetStr = "-";
+	if (obj->attributeExists(CKA_PARAMETER_SET))
+	{
+		const unsigned long ps = obj->getUnsignedLongValue(CKA_PARAMETER_SET, 0);
+		paramSetStr = OpLog::paramSetName(mech, ps);
+	}
+
+	std::string out = "key=";
+	out += labelStr;
+	out += " keytype=";
+	out += (keyType == CK_UNAVAILABLE_INFORMATION) ? "-" : OpLog::keyTypeName(keyType);
+	out += " paramset=";
+	out += paramSetStr;
+	return out;
+}
+
+std::string SoftHSM::opLogKeyCustodyFields(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hKey)
+{
+	static const char* unresolved =
+		"extractable=- sensitive=- never_extractable=- always_sensitive=- local=-";
+
+	if (handleManager == NULL) return unresolved;
+
+	auto guard = handleManager->getSessionShared(hSession);
+	Session* session = guard.get();
+	if (session == NULL || session->getSlot() == NULL) return unresolved;
+
+	OSObject* obj = (OSObject*)handleManager->getObject(hKey, session->getSlot()->getSlotID());
+	if (obj == NULL || !obj->isValid()) return unresolved;
+
+	// Each attribute is reported as "-" when absent rather than defaulted, so a
+	// consumer can tell "the token says false" from "the token never said".
+	struct { const char* name; CK_ATTRIBUTE_TYPE type; } fields[] = {
+		{ "extractable",       CKA_EXTRACTABLE       },
+		{ "sensitive",         CKA_SENSITIVE         },
+		{ "never_extractable", CKA_NEVER_EXTRACTABLE },
+		{ "always_sensitive",  CKA_ALWAYS_SENSITIVE  },
+		{ "local",             CKA_LOCAL             },
+	};
+
+	std::string out;
+	for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); i++)
+	{
+		if (i > 0) out += ' ';
+		out += fields[i].name;
+		out += '=';
+		if (!obj->attributeExists(fields[i].type))
+			out += '-';
+		else
+			out += obj->getBooleanValue(fields[i].type, false) ? "true" : "false";
+	}
+	return out;
 }
 
 void SoftHSM::cleanupKeyPair(AsymmetricAlgorithm* algo,

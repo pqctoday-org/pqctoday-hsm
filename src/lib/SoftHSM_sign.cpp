@@ -39,6 +39,7 @@
 
 #include "config.h"
 #include "log.h"
+#include "OpLog.h"
 #include "access.h"
 #include "SoftHSM.h"
 #include "SoftHSMHelpers.h"
@@ -1218,14 +1219,35 @@ CK_RV SoftHSM::StatefulSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMe
 CK_RV SoftHSM::C_SignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechanism, CK_OBJECT_HANDLE hKey)
 {
 	if (pMechanism == NULL_PTR) return CKR_ARGUMENTS_BAD;
-	
+
+	// Resolved before dispatch: a failed init can leave the session op state
+	// torn down, and the key identity is most wanted on exactly those records.
+	const bool logging = OpLog::enabled();
+	const std::string keyFields = logging
+		? opLogKeyFields(hSession, hKey, pMechanism->mechanism)
+		: std::string();
+
+	CK_RV rv;
 	if (isMacMechanism(pMechanism))
-		return MacSignInit(hSession, pMechanism, hKey);
+		rv = MacSignInit(hSession, pMechanism, hKey);
 	else if (pMechanism->mechanism == CKM_HSS ||
 	         pMechanism->mechanism == CKM_XMSS || pMechanism->mechanism == CKM_XMSSMT)
-		return StatefulSignInit(hSession, pMechanism, hKey);
+		rv = StatefulSignInit(hSession, pMechanism, hKey);
 	else
-		return AsymSignInit(hSession, pMechanism, hKey);
+		rv = AsymSignInit(hSession, pMechanism, hKey);
+
+	// `sess` is the join key: C_Sign / C_SignFinal cannot cheaply recover the
+	// CK_MECHANISM_TYPE (the session stores the internal AsymMech::Type), so a
+	// consumer pairs the init record with the operation records by session.
+	if (logging)
+		OpLog::emit("C_SignInit", "sess=%lu mech=%s mech_id=0x%08lx %s rv=%s rv_id=0x%08lx",
+		            (unsigned long)hSession,
+		            OpLog::mechName(pMechanism->mechanism),
+		            (unsigned long)pMechanism->mechanism,
+		            keyFields.c_str(),
+		            OpLog::rvName(rv), (unsigned long)rv);
+
+	return rv;
 }
 
 // MacAlgorithm version of C_Sign
@@ -1602,16 +1624,32 @@ CK_RV SoftHSM::C_Sign(CK_SESSION_HANDLE hSession, CK_BYTE_PTR pData, CK_ULONG ul
 		return CKR_OPERATION_NOT_INITIALIZED;
 
 	AsymMech::Type mechanism = session->getMechanism();
-	if (mechanism == (AsymMech::Type)1000 || mechanism == (AsymMech::Type)1001 || mechanism == (AsymMech::Type)1002) {
-		return StatefulSign(session, pData, ulDataLen, pSignature, pulSignatureLen);
-	}
 
-	if (session->getMacOp() != NULL)
-		return MacSign(session, pData, ulDataLen,
-			       pSignature, pulSignatureLen);
+	CK_RV rv;
+	if (mechanism == (AsymMech::Type)1000 || mechanism == (AsymMech::Type)1001 || mechanism == (AsymMech::Type)1002) {
+		rv = StatefulSign(session, pData, ulDataLen, pSignature, pulSignatureLen);
+	}
+	else if (session->getMacOp() != NULL)
+		rv = MacSign(session, pData, ulDataLen,
+			     pSignature, pulSignatureLen);
 	else
-		return AsymSign(session, pData, ulDataLen,
-				pSignature, pulSignatureLen);
+		rv = AsymSign(session, pData, ulDataLen,
+			      pSignature, pulSignatureLen);
+
+	// probe=1 marks the mandatory PKCS#11 length-query call (pSignature NULL).
+	// Callers make it before every real signature, so a consumer counting
+	// signatures must ignore probe records rather than halve its count.
+	// The guard clauses above are deliberately not recorded: they reject the
+	// call before it reaches the token, so nothing cryptographic happened.
+	if (OpLog::enabled())
+		OpLog::emit("C_Sign", "sess=%lu in=%lu out=%lu probe=%d rv=%s rv_id=0x%08lx",
+		            (unsigned long)hSession,
+		            (unsigned long)ulDataLen,
+		            (unsigned long)*pulSignatureLen,
+		            (pSignature == NULL_PTR) ? 1 : 0,
+		            OpLog::rvName(rv), (unsigned long)rv);
+
+	return rv;
 }
 
 // MacAlgorithm version of C_SignUpdate
@@ -1813,10 +1851,23 @@ CK_RV SoftHSM::C_SignFinal(CK_SESSION_HANDLE hSession, CK_BYTE_PTR pSignature, C
 	if ((session->getOpType() != SESSION_OP_SIGN && !dualSignSurvivor) || !session->getAllowMultiPartOp())
 		return CKR_OPERATION_NOT_INITIALIZED;
 
+	CK_RV rv;
 	if (session->getMacOp() != NULL)
-		return MacSignFinal(session, pSignature, pulSignatureLen);
+		rv = MacSignFinal(session, pSignature, pulSignatureLen);
 	else
-		return AsymSignFinal(session, pSignature, pulSignatureLen);
+		rv = AsymSignFinal(session, pSignature, pulSignatureLen);
+
+	// The multi-part counterpart of the C_Sign record. C_SignUpdate is
+	// deliberately not recorded -- it produces no signature, and instrumenting
+	// it would emit one line per chunk of a large input for no added evidence.
+	if (OpLog::enabled())
+		OpLog::emit("C_SignFinal", "sess=%lu out=%lu probe=%d rv=%s rv_id=0x%08lx",
+		            (unsigned long)hSession,
+		            (unsigned long)*pulSignatureLen,
+		            (pSignature == NULL_PTR) ? 1 : 0,
+		            OpLog::rvName(rv), (unsigned long)rv);
+
+	return rv;
 }
 
 // Initialise a signing operation that allows recovery of the signed data
