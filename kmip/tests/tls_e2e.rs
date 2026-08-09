@@ -23,6 +23,7 @@ use pqctoday_kmip::kmip30::{
 };
 use pqctoday_kmip::ops::{Deps, DepsConfig};
 use pqctoday_kmip::policy::{load_from_str, Engine};
+use pqctoday_kmip::server::listener::{tls_self_signed_with_profile, TlsProfile};
 use pqctoday_kmip::server::{serve, tls_self_signed};
 use pqctoday_kmip::store::MemoryStore;
 
@@ -104,6 +105,92 @@ async fn tls_round_trip_query_request() {
     let (frame, _) = pqctoday_kmip::codec::decode(&resp_bytes).expect("valid TTLV");
     // Top-level tag should be Response Message = 0x42007b.
     assert_eq!(frame.tag.0, 0x42_007b, "top-level Response Message tag");
+
+    handle.abort();
+    let _ = handle.await;
+}
+
+/// End-to-end KMIP round trip over the §3.3 quantum-safe profile.
+///
+/// The permissive test above proves the KMIP path works over TLS. This one
+/// proves it works over a channel whose ONLY key exchange options are hybrid
+/// ML-KEM groups — i.e. that turning the profile on does not break the
+/// protocol it is protecting. It asserts the negotiated group rather than
+/// inferring it, so a future provider change that silently dropped back to a
+/// classical group would fail here instead of passing quietly.
+#[tokio::test(flavor = "current_thread")]
+async fn quantum_safe_tls_round_trip_query_request() {
+    let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+    let bound = listener.local_addr().unwrap();
+    drop(listener);
+
+    let (tls_cfg, server_cert_pem) =
+        tls_self_signed_with_profile("kmip.test", TlsProfile::QuantumSafe)
+            .expect("quantum-safe self-signed cert");
+    let deps = build_deps();
+
+    let server_cfg = tls_cfg.clone();
+    let server_deps = deps.clone();
+    let handle = tokio::spawn(async move {
+        if let Err(e) = serve(bound, server_cfg, server_deps).await {
+            eprintln!("server: {e}");
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Client built from the SAME restricted provider, so this also proves the
+    // two ends can actually agree on a hybrid group rather than merely that
+    // the server starts.
+    let mut root_store = rustls::RootCertStore::empty();
+    root_store
+        .add(rustls::pki_types::CertificateDer::from(pem_to_der(
+            &server_cert_pem,
+        )))
+        .unwrap();
+    let client_config = rustls::ClientConfig::builder_with_provider(Arc::new(
+        pqctoday_kmip::server::listener::quantum_safe_provider(),
+    ))
+    .with_protocol_versions(&[&rustls::version::TLS13])
+    .expect("TLS1.3-only client")
+    .with_root_certificates(root_store)
+    .with_no_client_auth();
+    let connector = TlsConnector::from(Arc::new(client_config));
+    let tcp = TcpStream::connect(bound).await.unwrap();
+    let server_name = ServerName::try_from("kmip.test").unwrap();
+    let mut tls = connector.connect(server_name, tcp).await.unwrap();
+
+    // The handshake actually used a hybrid ML-KEM group, and TLS 1.3.
+    {
+        let (_, conn) = tls.get_ref();
+        let group = conn
+            .negotiated_key_exchange_group()
+            .expect("a key exchange group was negotiated");
+        let name = format!("{:?}", group.name());
+        assert!(
+            name.contains("MLKEM"),
+            "expected a hybrid ML-KEM group, negotiated {name}"
+        );
+        assert_eq!(
+            conn.protocol_version(),
+            Some(rustls::ProtocolVersion::TLSv1_3),
+            "§3.3.1 — TLS 1.3 only"
+        );
+    }
+
+    // A real KMIP operation over that channel.
+    let req = one_off_request(RequestPayload::Query(QueryRequest {
+        functions: vec![QueryFunction::QueryOperations],
+    }));
+    let req_bytes = build_request_bytes(&req);
+    tls.write_all(&req_bytes).await.unwrap();
+
+    let resp_bytes = read_one_frame_async(&mut tls).await;
+    let (frame, _) = pqctoday_kmip::codec::decode(&resp_bytes).expect("valid TTLV");
+    assert_eq!(
+        frame.tag.0, 0x42_007b,
+        "top-level Response Message tag over the quantum-safe channel"
+    );
 
     handle.abort();
     let _ = handle.await;
