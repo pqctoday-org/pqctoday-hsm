@@ -295,11 +295,23 @@ pub const REPRESENTATIVE_CELLS: &[KmipCell] = &[
     KmipCell { label: "ML-KEM-768", algorithm: KmipAlgorithm::MlKem768, class: KmipClass::Kem },
 ];
 
-fn send(endpoint: &KmipEndpoint, payload: RequestPayload) -> Result<(Vec<u8>, Option<String>)> {
-    let mut req = one_off_request(payload);
-    req.header.authentication = endpoint.credentials();
-    let ex = exchange(endpoint, &req)?;
-    let (tag, status) = response_status(&ex.response)?;
+/// One KMIP request/response, however it is carried.
+///
+/// This trait exists so the operation matrix below is written ONCE and can
+/// run over the wire or in-process. Before it, the ops were bound directly
+/// to a `KmipEndpoint`, so the control arm could only ever dispatch a
+/// generic Query — which meant the two arms measured different work and
+/// could not legitimately be subtracted from one another. That gap is the
+/// whole reason the cost breakdown was unavailable.
+pub trait KmipTransport {
+    /// Send one operation, verifying it succeeded at the KMIP layer.
+    /// Returns the encoded response and, where meaningful, the negotiated
+    /// key exchange group.
+    fn send(&self, payload: RequestPayload) -> Result<(Vec<u8>, Option<String>)>;
+}
+
+fn check_response(response: Vec<u8>, group: Option<String>) -> Result<(Vec<u8>, Option<String>)> {
+    let (tag, status) = response_status(&response)?;
     if tag != 0x42_007b {
         return Err(anyhow!("unexpected top-level tag {tag:#x}"));
     }
@@ -308,7 +320,16 @@ fn send(endpoint: &KmipEndpoint, payload: RequestPayload) -> Result<(Vec<u8>, Op
     if status != Some(0) {
         return Err(anyhow!("KMIP operation failed, Result Status {status:?}"));
     }
-    Ok((ex.response, ex.kx_group))
+    Ok((response, group))
+}
+
+impl KmipTransport for KmipEndpoint {
+    fn send(&self, payload: RequestPayload) -> Result<(Vec<u8>, Option<String>)> {
+        let mut req = one_off_request(payload);
+        req.header.authentication = self.credentials();
+        let ex = exchange(self, &req)?;
+        check_response(ex.response, ex.kx_group)
+    }
 }
 
 /// Pull the first TextString under a Response Payload with `tag`.
@@ -371,15 +392,15 @@ pub struct KeyPair {
 /// Activation is not optional: the server rejects any operation on an object
 /// whose state is still PreActive (KMIP 3.0 §11), so a pair created but not
 /// activated fails every subsequent call.
-pub fn create_and_activate(endpoint: &KmipEndpoint, cell: &KmipCell) -> Result<KeyPair> {
+pub fn create_and_activate(
+    t: &dyn KmipTransport, cell: &KmipCell) -> Result<KeyPair> {
     let (usage_priv, usage_pub) = match cell.class {
         KmipClass::Signature => (UsageMask::SIGN, UsageMask::VERIFY),
         // A KEM pair encapsulates to the public half and decapsulates with
         // the private one.
         KmipClass::Kem => (UsageMask::DECRYPT, UsageMask::ENCRYPT),
     };
-    let (resp, _) = send(
-        endpoint,
+    let (resp, _) = t.send(
         RequestPayload::CreateKeyPair(CreateKeyPairRequest {
             common_attributes: vec![Attribute::CryptographicAlgorithm(cell.algorithm)],
             private_key_attributes: vec![Attribute::CryptographicUsageMask(usage_priv)],
@@ -395,8 +416,7 @@ pub fn create_and_activate(endpoint: &KmipEndpoint, cell: &KmipCell) -> Result<K
         .ok_or_else(|| anyhow!("CreateKeyPair response carried no Public Key UID"))?;
 
     for uid in [&private_uid, &public_uid] {
-        send(
-            endpoint,
+        t.send(
             RequestPayload::Activate(ActivateRequest { uid: uid.clone() }),
         )
         .with_context(|| format!("Activate({uid})"))?;
@@ -405,9 +425,9 @@ pub fn create_and_activate(endpoint: &KmipEndpoint, cell: &KmipCell) -> Result<K
 }
 
 /// Sign, returning the signature bytes.
-pub fn sign(endpoint: &KmipEndpoint, uid: &str, data: &[u8]) -> Result<Vec<u8>> {
-    let (resp, _) = send(
-        endpoint,
+pub fn sign(
+    t: &dyn KmipTransport, uid: &str, data: &[u8]) -> Result<Vec<u8>> {
+    let (resp, _) = t.send(
         RequestPayload::Sign(SignRequest {
             uid: uid.to_string(),
             data: data.to_vec(),
@@ -424,13 +444,12 @@ pub fn sign(endpoint: &KmipEndpoint, uid: &str, data: &[u8]) -> Result<Vec<u8>> 
 /// with `ValidityIndicator = Invalid` (2), so a harness that only checked
 /// Result Status would score a forged signature as a passing verify.
 pub fn signature_verify(
-    endpoint: &KmipEndpoint,
+    t: &dyn KmipTransport,
     uid: &str,
     data: &[u8],
     signature: &[u8],
 ) -> Result<u32> {
-    let (resp, _) = send(
-        endpoint,
+    let (resp, _) = t.send(
         RequestPayload::SignatureVerify(SignatureVerifyRequest {
             uid: uid.to_string(),
             data: data.to_vec(),
@@ -463,9 +482,9 @@ pub fn signature_verify(
 /// TWO round trips, timed together and labelled as such: Encapsulate returns
 /// only a UID, so the shared secret needs the follow-up Get. Reporting just
 /// the first call would understate a KEM operation's real cost.
-pub fn encapsulate_and_get(endpoint: &KmipEndpoint, public_uid: &str) -> Result<Vec<u8>> {
-    let (resp, _) = send(
-        endpoint,
+pub fn encapsulate_and_get(
+    t: &dyn KmipTransport, public_uid: &str) -> Result<Vec<u8>> {
+    let (resp, _) = t.send(
         RequestPayload::Encapsulate(EncapsulateRequest {
             uid: public_uid.to_string(),
             input_key_material: None,
@@ -474,8 +493,7 @@ pub fn encapsulate_and_get(endpoint: &KmipEndpoint, public_uid: &str) -> Result<
     )?;
     let secret_uid = text_field(&resp, TAG_UNIQUE_IDENTIFIER)
         .ok_or_else(|| anyhow!("Encapsulate response carried no Unique Identifier"))?;
-    let (get_resp, _) = send(
-        endpoint,
+    let (get_resp, _) = t.send(
         RequestPayload::Get(GetRequest { uid: secret_uid, key_format_type: None, key_wrapping_specification: None }),
     )?;
     Ok(get_resp)
@@ -484,12 +502,11 @@ pub fn encapsulate_and_get(endpoint: &KmipEndpoint, public_uid: &str) -> Result<
 /// Decapsulate a ciphertext, then Get the recovered secret — same two-round-
 /// trip shape as [`encapsulate_and_get`].
 pub fn decapsulate_and_get(
-    endpoint: &KmipEndpoint,
+    t: &dyn KmipTransport,
     private_uid: &str,
     ciphertext: &[u8],
 ) -> Result<Vec<u8>> {
-    let (resp, _) = send(
-        endpoint,
+    let (resp, _) = t.send(
         RequestPayload::Decapsulate(DecapsulateRequest {
             uid: private_uid.to_string(),
             data: ciphertext.to_vec(),
@@ -498,8 +515,7 @@ pub fn decapsulate_and_get(
     )?;
     let secret_uid = text_field(&resp, TAG_UNIQUE_IDENTIFIER)
         .ok_or_else(|| anyhow!("Decapsulate response carried no Unique Identifier"))?;
-    let (get_resp, _) = send(
-        endpoint,
+    let (get_resp, _) = t.send(
         RequestPayload::Get(GetRequest { uid: secret_uid, key_format_type: None, key_wrapping_specification: None }),
     )?;
     Ok(get_resp)
@@ -547,13 +563,30 @@ impl InProcessKmip {
                     .map_err(|e| anyhow!("control policy parse: {e}"))?,
             )
             .map_err(|e| anyhow!("control policy activate: {e}"))?;
+        // Bootstrap a real engine session, exactly as the server binary does.
+        // Without it Query still answers (no crypto involved) but every
+        // CreateKeyPair fails with Result Status 1 — which is precisely how
+        // the control's first version got away with measuring a Query and
+        // nothing else. A control that cannot run the operation matrix is
+        // not a control; it is a different benchmark.
+        let engine_session = softhsmrustv3::native::session::bootstrap_default_token(
+            0,
+            "so-pin",
+            "1234",
+            "bench-control",
+        )
+        .map_err(|rv| anyhow!("engine bootstrap failed: CK_RV=0x{rv:08x}"))?;
+
         Ok(Self {
-            deps: Arc::new(Deps::new(
-                engine,
-                Arc::new(MemoryStore::new()),
-                sink,
-                DepsConfig::default(),
-            )),
+            deps: Arc::new(
+                Deps::new(
+                    engine,
+                    Arc::new(MemoryStore::new()),
+                    sink,
+                    DepsConfig::default(),
+                )
+                .with_engine_session(engine_session),
+            ),
         })
     }
 
@@ -573,6 +606,23 @@ impl InProcessKmip {
         self.dispatch_encoded(one_off_request(RequestPayload::Query(QueryRequest {
             functions: vec![QueryFunction::QueryOperations],
         })))
+    }
+}
+
+impl KmipTransport for InProcessKmip {
+    /// The same operation, minus the socket.
+    ///
+    /// No Authentication header: this dispatcher runs open-auth, so adding
+    /// credentials would measure a verifier the wire arm's server also runs
+    /// — but the wire arm pays for it too, so including it here would double
+    /// count. The difference between the arms should be TRANSPORT, and
+    /// nothing else.
+    fn send(&self, payload: RequestPayload) -> Result<(Vec<u8>, Option<String>)> {
+        let encoded = self.dispatch_encoded(one_off_request(payload));
+        // No negotiated group: there is no handshake. Reported as None
+        // rather than a placeholder, so a row cannot imply it measured a
+        // key exchange it never performed.
+        check_response(encoded, None)
     }
 }
 
@@ -729,69 +779,44 @@ pub fn run(args: &KmipArgs) -> Result<()> {
             KmipClass::Kem => ("encapsulate+get", "key_establishment", 2),
         };
 
-        let (total_ops, latencies, elapsed) = match (&endpoint, &control) {
-            (Some(ep), _) => {
-                let kp = create_and_activate(ep, cell)
-                    .with_context(|| format!("{}: setup", cell.label))?;
-                let workers: Vec<_> = (0..args.threads)
-                    .map(|_| {
-                        let ep = ep.clone();
-                        let kp_priv = kp.private_uid.clone();
-                        let kp_pub = kp.public_uid.clone();
-                        let class = cell.class;
-                        move || -> Result<()> {
-                            match class {
-                                KmipClass::Signature => {
-                                    sign(&ep, &kp_priv, b"bench").map(|_| ())
-                                }
-                                KmipClass::Kem => {
-                                    encapsulate_and_get(&ep, &kp_pub).map(|_| ())
-                                }
-                            }
-                        }
-                    })
-                    .collect();
-                crate::measure::run_point(args.duration_secs, args.warmup_secs, workers)?
-            }
-            (None, Some(ctrl)) => {
-                // The control measures the protocol path only: encode,
-                // dispatch, encode the response. Keys are not created per
-                // iteration, matching the wire arm's hot loop.
-                let workers: Vec<_> = (0..1)
-                    .map(|_| {
-                        let ctrl = Arc::clone(ctrl);
-                        move || -> Result<()> {
-                            let _ = ctrl.query();
-                            Ok(())
-                        }
-                    })
-                    .collect();
-                crate::measure::run_point(args.duration_secs, args.warmup_secs, workers)?
-            }
+        // ONE code path for both arms. The transport differs; the work does
+        // not — which is the entire point: a difference between the arms is
+        // now attributable to transport, because nothing else varies.
+        let carrier: Arc<dyn KmipTransport + Send + Sync> = match (&endpoint, &control) {
+            (Some(ep), _) => Arc::new(ep.clone()),
+            (None, Some(ctrl)) => Arc::clone(ctrl) as Arc<dyn KmipTransport + Send + Sync>,
             _ => unreachable!("either an endpoint or a control is always present"),
         };
 
+        let kp = create_and_activate(carrier.as_ref(), cell)
+            .with_context(|| format!("{}: setup", cell.label))?;
+        let workers: Vec<_> = (0..args.threads)
+            .map(|_| {
+                let t = Arc::clone(&carrier);
+                let kp_priv = kp.private_uid.clone();
+                let kp_pub = kp.public_uid.clone();
+                let class = cell.class;
+                move || -> Result<()> {
+                    match class {
+                        KmipClass::Signature => sign(t.as_ref(), &kp_priv, b"bench").map(|_| ()),
+                        KmipClass::Kem => encapsulate_and_get(t.as_ref(), &kp_pub).map(|_| ()),
+                    }
+                }
+            })
+            .collect();
+        let (total_ops, latencies, elapsed) =
+            crate::measure::run_point(args.duration_secs, args.warmup_secs, workers)?;
+
         let (p50, p99) = crate::measure::percentiles_ms(latencies);
-        // The control loop dispatches a Query, NOT this cell's operation, so
-        // it must not borrow the cell's labels. An earlier version emitted
-        // `algorithm: Ed25519, op: sign` for a row that measured neither —
-        // precisely the mislabelling this scenario exists to avoid. Until the
-        // control runs the real op matrix in-process (next increment), it
-        // says what it actually did.
-        let (row_algorithm, row_category, row_op) = if endpoint.is_some() {
-            (cell.label, category, op)
-        } else {
-            ("n/a", "protocol", "query")
-        };
         let row = KmipRow {
             access_path: "kmip",
             transport,
             tls: tls_label,
             negotiated_group: negotiated.clone(),
-            algorithm: row_algorithm,
-            category: row_category,
-            op: row_op,
-            threads: if endpoint.is_some() { args.threads } else { 1 },
+            algorithm: cell.label,
+            category,
+            op,
+            threads: args.threads,
             ops_per_sec: total_ops as f64 / elapsed,
             p50_ms: p50,
             p99_ms: p99,
@@ -801,12 +826,6 @@ pub fn run(args: &KmipArgs) -> Result<()> {
         };
         println!("{}", serde_json::to_string(&row)?);
 
-        // The control arm's cells are all the same measurement (Query), so
-        // running it per algorithm would emit three identical rows dressed
-        // as different ones.
-        if endpoint.is_none() {
-            break;
-        }
     }
     Ok(())
 }
