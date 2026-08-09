@@ -141,6 +141,105 @@ class KmipClient:
         if client_cert is not None:
             self._ctx.load_cert_chain(certfile=client_cert, keyfile=client_key)
 
+    # ── channel assurance (§3.3.3) ──────────────────────────────────────────
+
+    @staticmethod
+    def openssl_is_hybrid_capable() -> bool:
+        """Whether the linked OpenSSL can offer hybrid ML-KEM groups at all.
+
+        3.5 is the first release carrying X25519MLKEM768 in the default
+        group list. Against an older library every connection is classical,
+        and a benchmark that did not check would report classical numbers
+        under a quantum-safe label.
+        """
+        try:
+            parts = ssl.OPENSSL_VERSION.split()[1].split(".")
+            return (int(parts[0]), int(parts[1])) >= (3, 5)
+        except (IndexError, ValueError):
+            return False
+
+    def negotiated_group(self) -> Optional[str]:
+        """The key exchange group of a fresh handshake, or ``None`` when the
+        runtime cannot report it.
+
+        ``SSLSocket.group()`` arrived in Python 3.13. On 3.12 there is no
+        API for this at all, which is why :meth:`assert_quantum_safe_channel`
+        does not rely on it.
+        """
+        raw = socket.create_connection((self.host, self.port), timeout=self.timeout)
+        try:
+            sock = self._ctx.wrap_socket(raw, server_hostname=self.host)
+            try:
+                getter = getattr(sock, "group", None)
+                return getter() if callable(getter) else None
+            finally:
+                sock.close()
+        finally:
+            raw.close()
+
+    def assert_quantum_safe_channel(self) -> str:
+        """Prove this connection cannot be classical, or raise.
+
+        **Why this proves rather than pins.** A client should ideally insist
+        on a hybrid group. Python 3.12 cannot: ``SSLContext.set_groups``
+        only exists from 3.13, and ``set_ecdh_curve`` rejects hybrid names
+        outright (verified — it uses the legacy EC-curve lookup, so
+        ``"X25519MLKEM768"`` raises "unknown elliptic curve name"). The
+        client therefore inherits OpenSSL's default group list, which
+        *includes* the hybrids but also every classical group.
+
+        Inheriting a hybrid is not the same as requiring one: point the same
+        client at a permissive server and it will happily use X25519, and a
+        run would be classical while labelled quantum-safe.
+
+        So instead of asserting what we offered, this asserts what the
+        SERVER will refuse: it opens a deliberately classical-only
+        connection and requires it to fail. If the server rejects classical
+        key exchange, then any connection that does succeed used a hybrid —
+        proof by exclusion, which needs no client-side group API.
+
+        Returns a short description of the evidence. Raises RuntimeError if
+        the channel cannot be shown to be quantum-safe.
+        """
+        if not self.openssl_is_hybrid_capable():
+            raise RuntimeError(
+                f"linked OpenSSL is {ssl.OPENSSL_VERSION}; hybrid ML-KEM groups need 3.5+. "
+                "This client cannot establish a quantum-safe channel at all."
+            )
+
+        # A context restricted to a classical curve. set_ecdh_curve is the
+        # one group control 3.12 does expose, and classical names are
+        # exactly what it accepts.
+        probe = ssl.create_default_context()
+        probe.check_hostname = False
+        probe.verify_mode = ssl.CERT_NONE
+        probe.minimum_version = ssl.TLSVersion.TLSv1_3
+        probe.set_ecdh_curve("X25519")
+
+        refused = None
+        raw = socket.create_connection((self.host, self.port), timeout=self.timeout)
+        try:
+            try:
+                probe.wrap_socket(raw, server_hostname=self.host).close()
+            except ssl.SSLError as e:
+                refused = str(e)
+        finally:
+            try:
+                raw.close()
+            except OSError:
+                pass
+
+        if refused is None:
+            raise RuntimeError(
+                f"{self.host}:{self.port} accepted a classical-only (X25519) TLS 1.3 "
+                "handshake, so this channel is NOT quantum-safe. Any measurement taken "
+                "over it would be classical regardless of what the run is labelled."
+            )
+
+        group = self.negotiated_group()
+        detail = f"; negotiated group reported as {group}" if group else ""
+        return f"server refused classical X25519 ({refused.splitlines()[0]}){detail}"
+
     # ── transport ───────────────────────────────────────────────────────────
 
     def _send(self, request: _ttlv.TtlvNode) -> _ttlv.TtlvNode:

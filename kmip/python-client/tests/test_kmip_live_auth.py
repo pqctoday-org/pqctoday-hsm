@@ -135,6 +135,33 @@ def test_signature_over_different_data_is_invalid(signing_pair):
     assert KmipClient.validity(r) == "Invalid"
 
 
+# ── §3.3.3 channel assurance ────────────────────────────────────────────────
+
+def test_linked_openssl_can_do_hybrid_groups():
+    """If this fails, nothing else in this file can be quantum-safe: an
+    OpenSSL below 3.5 offers no ML-KEM group at all, so every connection is
+    classical no matter what the server allows."""
+    assert KmipClient.openssl_is_hybrid_capable(), (
+        f"linked OpenSSL is too old for hybrid groups: {__import__('ssl').OPENSSL_VERSION}"
+    )
+
+
+@pytest.mark.skipif(
+    os.environ.get("KMIP_TEST_QUANTUM_SAFE", "0") not in ("1", "true", "yes"),
+    reason="set KMIP_TEST_QUANTUM_SAFE=1 when the target server runs --tls-profile quantum-safe",
+)
+def test_channel_is_provably_quantum_safe():
+    """The server must REFUSE classical key exchange.
+
+    This is proof by exclusion, and it is the only proof available here:
+    Python 3.12 cannot pin its own group list, so the client cannot assert
+    what it offered — only that classical is impossible, which makes any
+    successful connection necessarily hybrid.
+    """
+    evidence = _authed().assert_quantum_safe_channel()
+    assert "refused classical" in evidence, evidence
+
+
 # ── §3.3.4 transport identity ───────────────────────────────────────────────
 
 @pytest.mark.skipif(not CERTS, reason="KMIP_TEST_CERTS not set — no client cert available")
