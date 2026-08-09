@@ -26,7 +26,10 @@ use pqctoday_kmip::cert_init::init_certs_if_missing;
 use pqctoday_kmip::ops::{Deps, DepsConfig, RngSeedMode, TenancyMode};
 use pqctoday_kmip::policy::{load_from_str, Engine, PolicyStore};
 use pqctoday_kmip::server::auth::Identity;
-use pqctoday_kmip::server::{serve, tls_from_pem, tls_mtls, tls_self_signed, AuthUser};
+use pqctoday_kmip::server::listener::{
+    tls_from_pem_with_profile, tls_mtls_with_profile, tls_self_signed_with_profile, TlsProfile,
+};
+use pqctoday_kmip::server::{serve, AuthUser};
 use pqctoday_kmip::store::{KeyStore, MemoryStore, SqliteStore};
 
 const PERMISSIVE_FALLBACK: &str = r#"
@@ -138,6 +141,26 @@ struct Cli {
     /// mTLS-verified client certificate.
     #[arg(long = "auth-user")]
     auth_user: Vec<String>,
+
+    /// TLS posture: `permissive` (default, historical behaviour) or
+    /// `quantum-safe`.
+    ///
+    /// `quantum-safe` enforces KMIP 3.0 Profiles §3.3 "Quantum Safe
+    /// Authentication Suite": TLS 1.3 only (§3.3.1 makes TLS 1.2 a SHALL
+    /// NOT), only the two §3.3.2 cipher suites, and only hybrid ML-KEM key
+    /// exchange groups (§3.3.3) — classical groups are refused, not merely
+    /// deprioritised. It also requires an identity source (§3.3.4): at
+    /// least one `--auth-user`, or mTLS via `--tls-client-ca`.
+    ///
+    /// Opt-in by design: making it the default would break every classical
+    /// client of this server at once.
+    ///
+    /// §3.3.3 is met in PART — `SecP384r1MLKEM1024` does not exist in
+    /// rustls 0.23, so two of the three required groups are offered. Do not
+    /// describe this server as conformant to the suite.
+    #[arg(long = "tls-profile", default_value = "permissive",
+          value_parser = TlsProfile::parse)]
+    tls_profile: TlsProfile,
 
     /// PKCS#11 slot (single-slot v0.1).
     #[arg(long, default_value_t = 0)]
@@ -299,6 +322,29 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("authentication ENFORCED for {} configured user(s)", auth_users.len());
     }
 
+    // KMIP 3.0 Profiles §3.3.4 — a conformant server derives client identity
+    // from mutual TLS or from the Authentication credential. It permits
+    // either; it does not permit NEITHER. Open-auth mode ignores the
+    // Authentication header entirely, so open-auth + no client CA under the
+    // quantum-safe profile is a server that transports quantum-safely and
+    // then accepts anyone — the precise combination §3.3.4 rules out. Refuse
+    // at startup rather than serve a posture that looks enforced and isn't.
+    if cli.tls_profile == TlsProfile::QuantumSafe
+        && auth_users.is_empty()
+        && cli.tls_client_ca.is_none()
+    {
+        anyhow::bail!(
+            "--tls-profile quantum-safe requires an identity source (KMIP 3.0 Profiles §3.3.4): \
+             pass at least one --auth-user, or enable mTLS with --tls-client-ca. \
+             Neither is configured, which would leave every request unauthenticated."
+        );
+    }
+
+    tracing::info!(
+        "TLS profile: {}",
+        pqctoday_kmip::server::listener::tls_profile_summary(cli.tls_profile)
+    );
+
     // ── cryptopolicy-manager admin facade (W4, optional) ───────────────
     // Spawn BEFORE `engine` is moved into Deps — `Engine` is Clone over a
     // shared `Arc<RwLock>`, so the facade's clone enforces activations on the
@@ -434,21 +480,22 @@ async fn main() -> anyhow::Result<()> {
             tracing::info!(
                 "mTLS: loading server cert {c:?} / key {k:?}; requiring client certs signed by {ca:?}"
             );
-            pqctoday_kmip::server::listener::install_crypto_provider();
-            tls_mtls(
+            tls_mtls_with_profile(
                 &std::fs::read(c)?,
                 &std::fs::read(k)?,
                 &std::fs::read(ca)?,
+                cli.tls_profile,
             )
             .map_err(|e| anyhow::anyhow!("mTLS config: {e}"))?
         }
         (Some(c), Some(k)) => {
             tracing::info!("loading TLS cert from {c:?} / key from {k:?}");
-            tls_from_pem(c, k).map_err(|e| anyhow::anyhow!("TLS PEM load: {e}"))?
+            tls_from_pem_with_profile(c, k, cli.tls_profile)
+                .map_err(|e| anyhow::anyhow!("TLS PEM load: {e}"))?
         }
         _ => {
             tracing::warn!("auto-generating self-signed TLS cert for sandbox — clients need verify=False or pin the printed fingerprint");
-            let (cfg, pem) = tls_self_signed("kmip.pqctoday.local")
+            let (cfg, pem) = tls_self_signed_with_profile("kmip.pqctoday.local", cli.tls_profile)
                 .map_err(|e| anyhow::anyhow!("TLS self-signed: {e}"))?;
             tracing::info!("self-signed cert PEM (copy to client trust store):\n{pem}");
             cfg
