@@ -704,6 +704,17 @@ struct KmipRow<'a> {
     round_trips_per_op: u32,
 }
 
+/// **Single runs are not evidence.** Measured 2026-08-09 on this harness:
+/// three repeats of the SAME configuration (ML-DSA-65 sign, 2 threads, 2s)
+/// spread 143-169 ops/s in-process and 134-145 on the wire — 15-18%
+/// run-to-run. A one-shot comparison across arms once showed the wire arm
+/// "13% faster" than the in-process control, an inversion that simply
+/// vanished under repeats (means: 157.8 in-process vs 138.3 wire, i.e.
+/// transport ~12%). The outlier was almost certainly first-run engine
+/// bootstrap landing in the first cell despite the warmup.
+///
+/// So: take repeats before quoting any cross-arm delta, and treat a
+/// difference smaller than ~20% as unresolved rather than real.
 /// Run the representative matrix and print one JSONL row per measured cell.
 pub fn run(args: &KmipArgs) -> Result<()> {
     let tls = match args.tls.as_str() {
