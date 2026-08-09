@@ -290,6 +290,53 @@ class KmipClient:
             _leaf("Data", "ByteString", data.hex()),
         )
 
+    def signature_verify(
+        self,
+        uid: str,
+        data: bytes,
+        signature: bytes,
+        algorithm: Optional[str] = None,
+    ) -> KmipResult:
+        """§6.1.63 Signature Verify.
+
+        **A failed verification is not a KMIP error.** A forged signature
+        comes back as a SUCCESSFUL response carrying
+        ``ValidityIndicator = Invalid``; KMIP errors are reserved for
+        protocol-level problems (missing UID, archived key, policy denial).
+        So ``result.ok`` answers "did the call work", NOT "is the signature
+        good" — reading it as the latter scores a broken engine as passing.
+        Use :meth:`validity` for the verdict.
+        """
+        payload = [
+            _leaf("UniqueIdentifier", "TextString", uid),
+            _leaf("Data", "ByteString", data.hex()),
+            _leaf("SignatureData", "ByteString", signature.hex()),
+        ]
+        if algorithm is not None:
+            payload.insert(
+                1,
+                _struct(
+                    "CryptographicParameters",
+                    _leaf("CryptographicAlgorithm", "Enumeration", algorithm),
+                ),
+            )
+        return self.request("SignatureVerify", *payload)
+
+    @staticmethod
+    def validity(result: KmipResult) -> Optional[str]:
+        """The verdict from a :meth:`signature_verify` result: ``"Valid"``,
+        ``"Invalid"``, ``"Unknown"``, or ``None`` if the call itself failed
+        or carried no indicator.
+
+        Deliberately returns the name rather than a bool: a two-valued
+        answer would have to fold ``Unknown`` into one of the other two,
+        and both choices are wrong in a security check.
+        """
+        value = result.get("ValidityIndicator")
+        if value is None:
+            return None
+        return {1: "Valid", 2: "Invalid", 3: "Unknown"}.get(int(value))
+
     def encapsulate(self, uid: str) -> KmipResult:
         """ML-KEM encapsulate against a public key UID."""
         return self.request("Encapsulate", _leaf("UniqueIdentifier", "TextString", uid))
