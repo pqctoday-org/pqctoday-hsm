@@ -727,6 +727,21 @@ pub struct KmipArgs {
     /// default should not quietly hand someone a sample to publish.
     #[arg(long, default_value_t = 3)]
     pub repeats: u32,
+    /// Second TLS profile to measure INTERLEAVED with `--tls`, against
+    /// `--compare-port`.
+    ///
+    /// Running all of arm A then all of arm B puts them minutes apart, and
+    /// on a machine whose load varies on that timescale the drift lands
+    /// entirely on one arm. Measured 2026-08-09, sequential arms produced a
+    /// "premium" that was 65% one way on one algorithm and 60% the other way
+    /// on two others — noise wearing a result's clothes. Interleaving
+    /// alternates A,B,A,B… within one session so drift hits both equally.
+    #[arg(long)]
+    pub compare_tls: Option<String>,
+    /// Port for the `--compare-tls` server (it is a different posture, so a
+    /// different listener).
+    #[arg(long)]
+    pub compare_port: Option<u16>,
 }
 
 /// One emitted row. Mirrors `measure::ResultRow`'s shape so both arms land
@@ -755,6 +770,10 @@ struct KmipRow<'a> {
     ops_per_sec_min: f64,
     ops_per_sec_max: f64,
     repeats: u32,
+    /// True when this row was measured ALTERNATING with another profile in
+    /// one session. Only interleaved rows may be compared against each
+    /// other; sequential ones carry drift.
+    interleaved: bool,
     p50_ms: f64,
     p99_ms: f64,
     duration_s: f64,
@@ -764,7 +783,21 @@ struct KmipRow<'a> {
     round_trips_per_op: u32,
 }
 
-/// **This harness cannot currently resolve a PQC-TLS premium.** Measured
+/// **Interleaved comparison is the only valid one.** With `--compare-tls`
+/// the arms alternate A,B,A,B… inside one session. Measured 2026-08-09,
+/// release builds, 5 repeats, 3s windows:
+///
+///   Ed25519     classical 834 -> quantum-safe 786   +5.8%
+///   ML-DSA-65             545 ->              530   +2.7%
+///   ML-KEM-768            581 ->              513  +11.6%
+///
+/// The sign is now CONSISTENT across three independent algorithms, which
+/// sequential runs never managed — they flipped direction per algorithm.
+/// Treat the magnitude as indicative, not final: the ranges still overlap
+/// and this machine is not idle. Consistent sign across independent cells
+/// is the evidence here, not any single percentage.
+///
+/// **Sequentially measured arms cannot be compared at all.** Measured
 /// 2026-08-09 with RELEASE builds, one server at a time, 5 repeats:
 ///
 ///   classical      Ed25519 1920  ML-DSA-65  696  ML-KEM-768 555
@@ -852,6 +885,31 @@ pub fn run(args: &KmipArgs) -> Result<()> {
     // Arc, because measure::run_point requires `F: 'static` — its workers are
     // spawned onto real OS threads, so a closure borrowing a local here
     // cannot satisfy it.
+    // The comparison arm, when asked for. Same everything except the TLS
+    // profile and the port it dials.
+    let compare: Option<(KmipEndpoint, &str)> = match (&args.compare_tls, &endpoint) {
+        (Some(name), Some(base)) => {
+            let other = match name.as_str() {
+                "quantum-safe" => ClientTlsProfile::QuantumSafe,
+                "classical-baseline" => ClientTlsProfile::ClassicalBaseline,
+                "permissive" => ClientTlsProfile::Permissive,
+                o => return Err(anyhow!("--compare-tls: unknown profile {o:?}")),
+            };
+            let port = args
+                .compare_port
+                .ok_or_else(|| anyhow!("--compare-tls requires --compare-port"))?;
+            let mut ep = base.clone();
+            ep.tls = other;
+            ep.port = port;
+            // Fail fast here too, so a broken comparison endpoint is one
+            // clear error rather than half a matrix of missing rows.
+            query(&ep).context("pre-run probe of the --compare-tls endpoint failed")?;
+            Some((ep, name.as_str()))
+        }
+        (Some(_), None) => return Err(anyhow!("--compare-tls only applies to --arm wire")),
+        (None, _) => None,
+    };
+
     let control: Option<Arc<InProcessKmip>> = if endpoint.is_none() {
         Some(Arc::new(InProcessKmip::new()?))
     } else {
@@ -896,60 +954,73 @@ pub fn run(args: &KmipArgs) -> Result<()> {
                 }
             })
             .collect();
-        // Repeat the whole measured window, rebuilding the workers each
-        // time (a `FnMut` is consumed by run_point). Keys are created ONCE
-        // above, so repeats measure the operation, not key generation.
-        let mut samples: Vec<(f64, f64, f64, u64, f64)> = Vec::new();
-        for _ in 0..args.repeats.max(1) {
-            let workers: Vec<_> = (0..args.threads)
-                .map(|_| {
-                    let t = Arc::clone(&carrier);
-                    let kp_priv = kp.private_uid.clone();
-                    let kp_pub = kp.public_uid.clone();
-                    let class = cell.class;
-                    move || -> Result<()> {
-                        match class {
-                            KmipClass::Signature => sign(t.as_ref(), &kp_priv, b"bench").map(|_| ()),
-                            KmipClass::Kem => encapsulate_and_get(t.as_ref(), &kp_pub).map(|_| ()),
-                        }
-                    }
-                })
-                .collect();
-            let (total_ops, latencies, elapsed) =
-                crate::measure::run_point(args.duration_secs, args.warmup_secs, workers)?;
-            let (p50, p99) = crate::measure::percentiles_ms(latencies);
-            samples.push((total_ops as f64 / elapsed, p50, p99, total_ops, elapsed));
+        // Build the arms to measure. With --compare-tls there are two, and
+        // they alternate A,B,A,B… inside this loop rather than running all
+        // of A then all of B — so machine drift lands on both equally.
+        let mut arms: Vec<(&str, Arc<dyn KmipTransport + Send + Sync>, Option<String>, KeyPair)> =
+            Vec::new();
+        arms.push((tls_label, Arc::clone(&carrier), negotiated.clone(), kp));
+        if let Some((cmp_ep, cmp_label)) = &compare {
+            let cmp_carrier: Arc<dyn KmipTransport + Send + Sync> = Arc::new(cmp_ep.clone());
+            // Its own keys: a UID minted on one server does not exist on the
+            // other.
+            let cmp_kp = create_and_activate(cmp_carrier.as_ref(), cell)
+                .with_context(|| format!("{}: setup on the compare arm", cell.label))?;
+            let cmp_group = query(cmp_ep).ok().and_then(|e| e.kx_group);
+            arms.push((cmp_label, cmp_carrier, cmp_group, cmp_kp));
         }
 
-        // Median, not mean: one cold first run (engine bootstrap landing in
-        // the first cell) should not drag the reported figure, which is
-        // exactly what happened before repeats existed.
-        let mut by_rate = samples.clone();
-        by_rate.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
-        let mid = by_rate[by_rate.len() / 2];
-        let (ops_per_sec, p50, p99, total_ops, elapsed) = mid;
-        let ops_min = by_rate.first().unwrap().0;
-        let ops_max = by_rate.last().unwrap().0;
-        let row = KmipRow {
-            access_path: "kmip",
-            transport,
-            tls: tls_label,
-            negotiated_group: negotiated.clone(),
-            algorithm: cell.label,
-            category,
-            op,
-            threads: args.threads,
-            ops_per_sec,
-            ops_per_sec_min: ops_min,
-            ops_per_sec_max: ops_max,
-            repeats: args.repeats.max(1),
-            p50_ms: p50,
-            p99_ms: p99,
-            duration_s: elapsed,
-            total_ops,
-            round_trips_per_op: round_trips,
-        };
-        println!("{}", serde_json::to_string(&row)?);
+        let mut samples: Vec<Vec<(f64, f64, f64, u64, f64)>> = vec![Vec::new(); arms.len()];
+        for _ in 0..args.repeats.max(1) {
+            for (i, (_, arm_carrier, _, arm_kp)) in arms.iter().enumerate() {
+                let workers: Vec<_> = (0..args.threads)
+                    .map(|_| {
+                        let t = Arc::clone(arm_carrier);
+                        let kp_priv = arm_kp.private_uid.clone();
+                        let kp_pub = arm_kp.public_uid.clone();
+                        let class = cell.class;
+                        move || -> Result<()> {
+                            match class {
+                                KmipClass::Signature => sign(t.as_ref(), &kp_priv, b"bench").map(|_| ()),
+                                KmipClass::Kem => encapsulate_and_get(t.as_ref(), &kp_pub).map(|_| ()),
+                            }
+                        }
+                    })
+                    .collect();
+                let (total_ops, latencies, elapsed) =
+                    crate::measure::run_point(args.duration_secs, args.warmup_secs, workers)?;
+                let (p50, p99) = crate::measure::percentiles_ms(latencies);
+                samples[i].push((total_ops as f64 / elapsed, p50, p99, total_ops, elapsed));
+            }
+        }
+
+        for (i, (arm_label, _, arm_group, _)) in arms.iter().enumerate() {
+            // Median, not mean: one cold run should not drag the figure.
+            let mut by_rate = samples[i].clone();
+            by_rate.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+            let (ops_per_sec, p50, p99, total_ops, elapsed) = by_rate[by_rate.len() / 2];
+            let row = KmipRow {
+                access_path: "kmip",
+                transport,
+                tls: arm_label,
+                negotiated_group: arm_group.clone(),
+                algorithm: cell.label,
+                category,
+                op,
+                threads: args.threads,
+                ops_per_sec,
+                ops_per_sec_min: by_rate.first().unwrap().0,
+                ops_per_sec_max: by_rate.last().unwrap().0,
+                repeats: args.repeats.max(1),
+                interleaved: arms.len() > 1,
+                p50_ms: p50,
+                p99_ms: p99,
+                duration_s: elapsed,
+                total_ops,
+                round_trips_per_op: round_trips,
+            };
+            println!("{}", serde_json::to_string(&row)?);
+        }
 
     }
     Ok(())
