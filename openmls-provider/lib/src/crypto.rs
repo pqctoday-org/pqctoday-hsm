@@ -42,10 +42,25 @@ fn hash_len(h: HashType) -> usize {
 // ── OpenMlsCrypto impl ───────────────────────────────────────────────────────
 
 impl OpenMlsCrypto for PqcTodayCrypto {
+    // Suite 3 added 2026-08-10. It was ALREADY WORKING and simply undeclared:
+    // suite 3 is suite 1 with ChaCha20Poly1305 in place of AES-128-GCM, and this
+    // file implements ChaCha20Poly1305 explicitly for it (see sw_chacha20_encrypt
+    // below, whose own comment says "used by MLS cipher suite 3"). The primitive
+    // landed; the declaration never followed.
+    //
+    // Evidence it works rather than an assumption that it should: the first real
+    // run of the IETF WG interop rig (2026-08-09) put our client through 8 suite-3
+    // cases and all 8 passed. The runner uses the UNION of the two clients'
+    // advertised suites, so it reached suite 3 despite our not claiming it.
+    //
+    // Under-declaring is not harmless: a peer negotiating honestly will never
+    // choose suite 3 with us, so a capability we have and test stays unreachable
+    // in any real deployment.
     fn supports(&self, ciphersuite: Ciphersuite) -> Result<(), CryptoError> {
         match ciphersuite {
             Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519
-            | Ciphersuite::MLS_128_DHKEMP256_AES128GCM_SHA256_P256 => Ok(()),
+            | Ciphersuite::MLS_128_DHKEMP256_AES128GCM_SHA256_P256
+            | Ciphersuite::MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519 => Ok(()),
             _ => Err(CryptoError::UnsupportedCiphersuite),
         }
     }
@@ -54,6 +69,7 @@ impl OpenMlsCrypto for PqcTodayCrypto {
         vec![
             Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519,
             Ciphersuite::MLS_128_DHKEMP256_AES128GCM_SHA256_P256,
+            Ciphersuite::MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519,
         ]
     }
 

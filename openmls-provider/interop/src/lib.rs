@@ -64,7 +64,10 @@ use mls_client::mls_client_server::MlsClient;
 use mls_client::*;
 
 pub const IMPLEMENTATION_NAME: &str = "pqctoday-mls";
-pub const SUPPORTED_CIPHERSUITES: &[u32] = &[1, 2];
+// 3 added 2026-08-10 — the provider implements it (ChaCha20Poly1305) and the
+// WG interop rig passed 8 suite-3 cases against it on 2026-08-09. It was only
+// ever missing from this list. See openmls-provider/lib/src/crypto.rs.
+pub const SUPPORTED_CIPHERSUITES: &[u32] = &[1, 2, 3];
 
 // Per RFC 9420 §13.1: the default extension types
 // (ApplicationId, RatchetTree, RequiredCapabilities, ExternalPub,
