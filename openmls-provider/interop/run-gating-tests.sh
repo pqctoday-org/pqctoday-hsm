@@ -55,9 +55,29 @@ GATING_SCENARIOS="${GATING_SCENARIOS:-welcome_join}"
 # whether our gap is visible. Pinning the set here makes the gate measure what
 # we claim to support instead of whatever the peer happens to offer.
 #
-# Widen this the day the signer supports more. Confirm the algorithms behind
-# 4-7 against RFC 9420 first; they were deliberately NOT recorded here, because
-# only the suite numbers were measured.
+# The mapping, CONFIRMED 2026-08-10 against two independent implementations
+# (openmls traits/src/types.rs and mls-rs-core/src/crypto/cipher_suite.rs,
+# which agree exactly) rather than recalled:
+#
+#   1  X25519 / AES-128-GCM / SHA-256 / Ed25519          SUPPORTED
+#   2  P-256  / AES-128-GCM / SHA-256 / ECDSA P-256      SUPPORTED
+#   3  X25519 / ChaCha20    / SHA-256 / Ed25519          SUPPORTED
+#   4  X448   / AES-256-GCM / SHA-512 / Ed448            missing: Ed448
+#   5  P-521  / AES-256-GCM / SHA-512 / ECDSA P-521      missing: P-521
+#   6  X448   / ChaCha20    / SHA-512 / Ed448            missing: Ed448
+#   7  P-384  / AES-256-GCM / SHA-384 / ECDSA P-384      missing: P-384
+#
+# So the gap is exactly three signature schemes — Ed448, ECDSA P-521 and
+# ECDSA P-384 — not seven unrelated problems. Adding Ed448 alone would close
+# suites 4 and 6.
+#
+# WORTH KNOWING for this project specifically: MLS now has PQC ciphersuites,
+# behind openmls's `draft-ietf-mls-pq-ciphersuites` feature —
+# MLS_256_MLKEM1024_AES256GCM_SHA512_MLDSA87 (0x0906) and an X-Wing suite
+# (0x004D). ML-KEM-1024 and ML-DSA-87 are algorithms this HSM already
+# implements, so the interesting question is not really Ed448; it is whether
+# this rig should be testing the PQC suites, which is the whole point of the
+# engine underneath it.
 SUITES="${SUITES:-1 2 3}"
 
 # ── Peers that gate, versus peers that report ────────────────────────────────
