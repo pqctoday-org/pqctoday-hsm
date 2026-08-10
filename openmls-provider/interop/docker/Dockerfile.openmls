@@ -4,7 +4,12 @@
 # Pin the commit via --build-arg OPENMLS_REF=<sha>.
 ARG OPENMLS_REF=main
 
-FROM rust:1.87-bookworm AS openmls-builder
+# rust:1.91, not 1.87 (2026-08-09). Two separate MSRV floors apply and the
+# HIGHER one governs: tonic 0.14 / darling 0.23 need 1.88, and openmls
+# 0.9.0-rc.1 and its companion crates need 1.91. Cargo refuses at dependency
+# RESOLUTION, before compiling anything. Set to one version across all three
+# images deliberately — bumping them one at a time just moves the failure.
+FROM rust:1.91-bookworm AS openmls-builder
 
 ARG OPENMLS_REF
 
