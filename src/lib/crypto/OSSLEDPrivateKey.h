@@ -71,7 +71,10 @@ public:
 	virtual bool PKCS8Decode(const ByteString& ber);
 
 	// Set from OpenSSL representation
-	virtual void setFromOSSL(const EVP_PKEY* inPKEY);
+	// Returns false when the key could NOT be populated. Was void, and every
+	// caller therefore treated an empty key as a success — see the comment on
+	// the definition.
+	virtual bool setFromOSSL(const EVP_PKEY* inPKEY);
 
 	// Retrieve the OpenSSL representation of the key
 	EVP_PKEY* getOSSLKey();

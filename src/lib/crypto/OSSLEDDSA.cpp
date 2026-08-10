@@ -313,8 +313,26 @@ bool OSSLEDDSA::generateKeyPair(AsymmetricKeyPair** ppKeyPair, AsymmetricParamet
 	// Create an asymmetric key-pair object to return
 	OSSLEDKeyPair* kp = new OSSLEDKeyPair();
 
-	((OSSLEDPublicKey*) kp->getPublicKey())->setFromOSSL(pkey);
-	((OSSLEDPrivateKey*) kp->getPrivateKey())->setFromOSSL(pkey);
+	// Both extractions can fail and leave the key EMPTY. Until 2026-08-10 their
+	// results were discarded and this function returned true regardless, so a
+	// caller could receive a "successfully generated" key pair with nothing in
+	// it. The error then surfaced later and elsewhere as a generic non-CKR_OK —
+	// which is why the intermittent p11test EdDSA failures reported themselves
+	// in derive and sign when both were in fact dying here, in keygen.
+	// Deliberately NOT short-circuited with ||. This change exists to make the
+	// next failure diagnosable, and each setFromOSSL logs which branch it took —
+	// so both must run even when the first has already failed, or half the
+	// evidence is lost exactly when it is needed.
+	bool pubOk  = ((OSSLEDPublicKey*)  kp->getPublicKey() )->setFromOSSL(pkey);
+	bool privOk = ((OSSLEDPrivateKey*) kp->getPrivateKey())->setFromOSSL(pkey);
+	if (!pubOk || !privOk)
+	{
+		ERROR_MSG("EDDSA keygen: could not extract the generated key (nid %d, public %s, private %s)",
+		          nid, pubOk ? "ok" : "FAILED", privOk ? "ok" : "FAILED");
+		delete kp;
+		EVP_PKEY_free(pkey);
+		return false;
+	}
 
 	*ppKeyPair = kp;
 
