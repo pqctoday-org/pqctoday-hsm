@@ -3,7 +3,10 @@
 #
 # The test runner drives pairwise scenarios across any two gRPC clients
 # that implement the mls_client.proto contract.
-ARG MLS_IMPL_REF=main
+# PINNED, not tracking main. This is the very commit awslabs/mls-rs pins in its
+# own interop_tests.yml, so it is a ref upstream itself runs against rather than
+# one chosen here. Bump deliberately.
+ARG MLS_IMPL_REF=7066309c555bfc11fbc74f8288a8563c927637b2
 
 FROM golang:1.22-bookworm AS runner-builder
 
@@ -17,8 +20,14 @@ RUN go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.33.0 \
     && go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.3.0
 
 WORKDIR /src
-RUN git clone --depth 1 https://github.com/mlswg/mls-implementations.git . \
-    && git checkout "${MLS_IMPL_REF}"
+# Fetch BY COMMIT — see the same note in Dockerfile.mls-rs. `clone --depth 1`
+# brings down only the default branch tip, so the following `checkout <sha>`
+# worked only while the pin equalled that tip; against any real pin it fails.
+RUN git init -q . \
+    && git remote add origin https://github.com/mlswg/mls-implementations.git \
+    && git fetch --depth 1 -q origin "${MLS_IMPL_REF}" \
+    && git checkout -q FETCH_HEAD \
+    && echo "mls-implementations at $(git rev-parse HEAD)"
 
 # Generate Go protobuf stubs that the test-runner imports.
 RUN protoc --go_out=. --go-grpc_out=. \

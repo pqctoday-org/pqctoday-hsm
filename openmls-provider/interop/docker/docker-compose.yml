@@ -77,7 +77,10 @@ services:
       context: .
       dockerfile: Dockerfile.mls-rs
       args:
-        MLS_RS_REF: main
+        # PINNED here as well as in the Dockerfile — this build arg OVERRIDES
+        # the Dockerfile's default, so pinning only there would have achieved
+        # nothing while looking like it had.
+        MLS_RS_REF: 6fc9223d8ce2e4d8ec8ca5140422338dccc34394
     ports:
       - "50054:50054"
     healthcheck:
