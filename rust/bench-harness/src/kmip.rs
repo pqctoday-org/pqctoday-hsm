@@ -46,6 +46,19 @@ use pqctoday_kmip::kmip30::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClientTlsProfile {
     /// rustls defaults — classical groups permitted.
+    ///
+    /// **Not a valid baseline for a PQC-TLS premium.** The server's
+    /// permissive profile installs the `ring` provider while its
+    /// quantum-safe profile uses `aws-lc-rs`, so a permissive-vs-quantum-safe
+    /// comparison varies the CRYPTO PROVIDER as well as the key exchange
+    /// group. Measured 2026-08-09, permissive vs quantum-safe, 3 repeats,
+    /// non-overlapping ranges: Ed25519 1083 -> 1577 ops/s, ML-KEM-768
+    /// 385 -> 488. Read naively that says "PQC TLS is 46% faster than
+    /// classical", which is not credible — aws-lc-rs is simply quicker than
+    /// ring here.
+    ///
+    /// A real premium needs both arms on the SAME provider, differing only
+    /// in the offered groups. That baseline does not exist yet.
     Permissive,
     /// KMIP 3.0 Profiles §3.3: TLS 1.3 only, the two §3.3.2 suites, and
     /// ONLY hybrid ML-KEM groups.
@@ -56,6 +69,13 @@ pub enum ClientTlsProfile {
     /// handshake is not merely unlikely, it is unofferable, so a completed
     /// connection is proof the exchange was hybrid.
     QuantumSafe,
+    /// **Measurement baseline only.** Same provider, TLS version and cipher
+    /// suites as [`ClientTlsProfile::QuantumSafe`]; classical groups instead
+    /// of hybrid. Pair it with the server's `classical-baseline` profile so
+    /// a comparison isolates the key exchange group — see the note on
+    /// [`ClientTlsProfile::Permissive`] for why `permissive` cannot serve
+    /// that purpose.
+    ClassicalBaseline,
 }
 
 /// Connection parameters for one KMIP endpoint.
@@ -72,6 +92,16 @@ pub struct KmipEndpoint {
     /// once `--auth-user` is configured.
     pub username: Option<String>,
     pub password: Option<String>,
+    /// Client certificate + key for mutual TLS (§3.3.4 channel identity).
+    ///
+    /// Not optional in practice for the sandbox: `pqc-kmip` runs with
+    /// `--tls-client-ca`, so a client presenting no certificate is rejected
+    /// during the handshake with `CertificateRequired` — before any KMIP
+    /// message is exchanged, and regardless of credentials. This was found
+    /// only by pointing the harness at the real deployment; a self-signed
+    /// test server without a client CA had hidden it.
+    pub client_cert_pem: Option<Vec<u8>>,
+    pub client_key_pem: Option<Vec<u8>>,
 }
 
 impl KmipEndpoint {
@@ -98,27 +128,79 @@ impl KmipEndpoint {
             roots.add(c).context("adding CA to trust store")?;
         }
 
+        // Parse the client identity once, so both profile branches share it.
+        let client_auth = match (&self.client_cert_pem, &self.client_key_pem) {
+            (Some(cert_pem), Some(key_pem)) => {
+                let certs: Vec<_> = rustls_pemfile::certs(&mut &cert_pem[..])
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                    .context("parsing client cert PEM")?;
+                let key = rustls_pemfile::private_key(&mut &key_pem[..])
+                    .context("parsing client key PEM")?
+                    .ok_or_else(|| anyhow!("no private key found in the client key PEM"))?;
+                Some((certs, key))
+            }
+            (None, None) => None,
+            // Half a client identity is a configuration error, not a
+            // fallback to anonymous — say so rather than silently
+            // connecting without a certificate and failing later with an
+            // opaque TLS alert.
+            _ => return Err(anyhow!("client cert and key must be supplied together")),
+        };
+
         let config = match self.tls {
-            ClientTlsProfile::Permissive => rustls::ClientConfig::builder()
-                .with_root_certificates(roots)
-                .with_no_client_auth(),
-            ClientTlsProfile::QuantumSafe => {
+            ClientTlsProfile::Permissive => {
+                // builder_with_provider, NOT builder(): the plain builder
+                // resolves the PROCESS-LEVEL default provider and panics
+                // when it cannot ("Could not automatically determine the
+                // process-level CryptoProvider"). Same failure mode as the
+                // server's WebPkiClientVerifier::builder — and it hid here
+                // until the classical arm was actually run for the first
+                // time, because every earlier run used the quantum-safe
+                // profile, which passes its provider explicitly.
+                let b = rustls::ClientConfig::builder_with_provider(Arc::new(
+                    rustls::crypto::aws_lc_rs::default_provider(),
+                ))
+                .with_safe_default_protocol_versions()
+                .context("permissive client TLS setup")?
+                .with_root_certificates(roots);
+                match client_auth {
+                    Some((certs, key)) => b
+                        .with_client_auth_cert(certs, key)
+                        .context("client certificate rejected")?,
+                    None => b.with_no_client_auth(),
+                }
+            }
+            ClientTlsProfile::ClassicalBaseline | ClientTlsProfile::QuantumSafe => {
+                let hybrid = self.tls == ClientTlsProfile::QuantumSafe;
                 let provider = rustls::crypto::CryptoProvider {
                     cipher_suites: vec![
                         rustls::crypto::aws_lc_rs::cipher_suite::TLS13_CHACHA20_POLY1305_SHA256,
                         rustls::crypto::aws_lc_rs::cipher_suite::TLS13_AES_256_GCM_SHA384,
                     ],
-                    kx_groups: vec![
-                        rustls::crypto::aws_lc_rs::kx_group::X25519MLKEM768,
-                        rustls::crypto::aws_lc_rs::kx_group::SECP256R1MLKEM768,
-                    ],
+                    // The ONLY thing that differs between the two arms.
+                    kx_groups: if hybrid {
+                        vec![
+                            rustls::crypto::aws_lc_rs::kx_group::X25519MLKEM768,
+                            rustls::crypto::aws_lc_rs::kx_group::SECP256R1MLKEM768,
+                        ]
+                    } else {
+                        vec![
+                            rustls::crypto::aws_lc_rs::kx_group::X25519,
+                            rustls::crypto::aws_lc_rs::kx_group::SECP256R1,
+                        ]
+                    },
                     ..rustls::crypto::aws_lc_rs::default_provider()
                 };
-                rustls::ClientConfig::builder_with_provider(Arc::new(provider))
+                let b = rustls::ClientConfig::builder_with_provider(Arc::new(provider))
                     .with_protocol_versions(&[&rustls::version::TLS13])
                     .context("quantum-safe client TLS setup")?
-                    .with_root_certificates(roots)
-                    .with_no_client_auth()
+                    .with_root_certificates(roots);
+                match client_auth {
+                    Some((certs, key)) => b
+                        .with_client_auth_cert(certs, key)
+                        .context("client certificate rejected")?,
+                    None => b.with_no_client_auth(),
+                }
             }
         };
         Ok(Arc::new(config))
@@ -174,6 +256,33 @@ pub fn exchange(endpoint: &KmipEndpoint, request: &RequestMessage) -> Result<Exc
         .map(|g| format!("{:?}", g.name()));
 
     Ok(Exchange { response, kx_group })
+}
+
+/// Send N operations in ONE Request Message, over one connection.
+///
+/// Amortises the TCP + TLS handshake across the batch, which is the only way
+/// this server can avoid paying it per operation (it closes after one
+/// Request Message, so keepalive is not available).
+///
+/// **This measures something different from the per-operation arm.** The
+/// timing covers the whole batch, so there is no per-operation latency to
+/// report — a batched row's p50/p99 describe the batch, not an operation.
+/// They must never be compared with per-operation percentiles.
+pub fn exchange_batch(
+    endpoint: &KmipEndpoint,
+    payloads: Vec<RequestPayload>,
+) -> Result<Exchange> {
+    let batch_items: Vec<_> = payloads
+        .into_iter()
+        .map(|payload| pqctoday_kmip::kmip30::RequestBatchItem {
+            operation: payload.operation(),
+            payload,
+        })
+        .collect();
+    let mut header = pqctoday_kmip::kmip30::RequestHeader::v3();
+    header.authentication = endpoint.credentials();
+    let req = RequestMessage { header, batch_items };
+    exchange(endpoint, &req)
 }
 
 /// Decode a response frame and return its top-level tag plus the batch
@@ -255,11 +364,23 @@ pub const REPRESENTATIVE_CELLS: &[KmipCell] = &[
     KmipCell { label: "ML-KEM-768", algorithm: KmipAlgorithm::MlKem768, class: KmipClass::Kem },
 ];
 
-fn send(endpoint: &KmipEndpoint, payload: RequestPayload) -> Result<(Vec<u8>, Option<String>)> {
-    let mut req = one_off_request(payload);
-    req.header.authentication = endpoint.credentials();
-    let ex = exchange(endpoint, &req)?;
-    let (tag, status) = response_status(&ex.response)?;
+/// One KMIP request/response, however it is carried.
+///
+/// This trait exists so the operation matrix below is written ONCE and can
+/// run over the wire or in-process. Before it, the ops were bound directly
+/// to a `KmipEndpoint`, so the control arm could only ever dispatch a
+/// generic Query — which meant the two arms measured different work and
+/// could not legitimately be subtracted from one another. That gap is the
+/// whole reason the cost breakdown was unavailable.
+pub trait KmipTransport {
+    /// Send one operation, verifying it succeeded at the KMIP layer.
+    /// Returns the encoded response and, where meaningful, the negotiated
+    /// key exchange group.
+    fn send(&self, payload: RequestPayload) -> Result<(Vec<u8>, Option<String>)>;
+}
+
+fn check_response(response: Vec<u8>, group: Option<String>) -> Result<(Vec<u8>, Option<String>)> {
+    let (tag, status) = response_status(&response)?;
     if tag != 0x42_007b {
         return Err(anyhow!("unexpected top-level tag {tag:#x}"));
     }
@@ -268,7 +389,16 @@ fn send(endpoint: &KmipEndpoint, payload: RequestPayload) -> Result<(Vec<u8>, Op
     if status != Some(0) {
         return Err(anyhow!("KMIP operation failed, Result Status {status:?}"));
     }
-    Ok((ex.response, ex.kx_group))
+    Ok((response, group))
+}
+
+impl KmipTransport for KmipEndpoint {
+    fn send(&self, payload: RequestPayload) -> Result<(Vec<u8>, Option<String>)> {
+        let mut req = one_off_request(payload);
+        req.header.authentication = self.credentials();
+        let ex = exchange(self, &req)?;
+        check_response(ex.response, ex.kx_group)
+    }
 }
 
 /// Pull the first TextString under a Response Payload with `tag`.
@@ -318,6 +448,7 @@ const TAG_PRIVATE_KEY_UID: u32 = 0x42_0066;
 const TAG_PUBLIC_KEY_UID: u32 = 0x42_006f;
 const TAG_UNIQUE_IDENTIFIER: u32 = 0x42_0094;
 const TAG_SIGNATURE_DATA: u32 = 0x42_00c3;
+const TAG_DATA: u32 = 0x42_00c2;
 const TAG_VALIDITY_INDICATOR: u32 = 0x42_009b;
 
 /// A created, activated key pair ready for the hot loop.
@@ -331,15 +462,15 @@ pub struct KeyPair {
 /// Activation is not optional: the server rejects any operation on an object
 /// whose state is still PreActive (KMIP 3.0 §11), so a pair created but not
 /// activated fails every subsequent call.
-pub fn create_and_activate(endpoint: &KmipEndpoint, cell: &KmipCell) -> Result<KeyPair> {
+pub fn create_and_activate(
+    t: &dyn KmipTransport, cell: &KmipCell) -> Result<KeyPair> {
     let (usage_priv, usage_pub) = match cell.class {
         KmipClass::Signature => (UsageMask::SIGN, UsageMask::VERIFY),
         // A KEM pair encapsulates to the public half and decapsulates with
         // the private one.
         KmipClass::Kem => (UsageMask::DECRYPT, UsageMask::ENCRYPT),
     };
-    let (resp, _) = send(
-        endpoint,
+    let (resp, _) = t.send(
         RequestPayload::CreateKeyPair(CreateKeyPairRequest {
             common_attributes: vec![Attribute::CryptographicAlgorithm(cell.algorithm)],
             private_key_attributes: vec![Attribute::CryptographicUsageMask(usage_priv)],
@@ -355,8 +486,7 @@ pub fn create_and_activate(endpoint: &KmipEndpoint, cell: &KmipCell) -> Result<K
         .ok_or_else(|| anyhow!("CreateKeyPair response carried no Public Key UID"))?;
 
     for uid in [&private_uid, &public_uid] {
-        send(
-            endpoint,
+        t.send(
             RequestPayload::Activate(ActivateRequest { uid: uid.clone() }),
         )
         .with_context(|| format!("Activate({uid})"))?;
@@ -365,9 +495,9 @@ pub fn create_and_activate(endpoint: &KmipEndpoint, cell: &KmipCell) -> Result<K
 }
 
 /// Sign, returning the signature bytes.
-pub fn sign(endpoint: &KmipEndpoint, uid: &str, data: &[u8]) -> Result<Vec<u8>> {
-    let (resp, _) = send(
-        endpoint,
+pub fn sign(
+    t: &dyn KmipTransport, uid: &str, data: &[u8]) -> Result<Vec<u8>> {
+    let (resp, _) = t.send(
         RequestPayload::Sign(SignRequest {
             uid: uid.to_string(),
             data: data.to_vec(),
@@ -384,13 +514,12 @@ pub fn sign(endpoint: &KmipEndpoint, uid: &str, data: &[u8]) -> Result<Vec<u8>> 
 /// with `ValidityIndicator = Invalid` (2), so a harness that only checked
 /// Result Status would score a forged signature as a passing verify.
 pub fn signature_verify(
-    endpoint: &KmipEndpoint,
+    t: &dyn KmipTransport,
     uid: &str,
     data: &[u8],
     signature: &[u8],
 ) -> Result<u32> {
-    let (resp, _) = send(
-        endpoint,
+    let (resp, _) = t.send(
         RequestPayload::SignatureVerify(SignatureVerifyRequest {
             uid: uid.to_string(),
             data: data.to_vec(),
@@ -423,9 +552,19 @@ pub fn signature_verify(
 /// TWO round trips, timed together and labelled as such: Encapsulate returns
 /// only a UID, so the shared secret needs the follow-up Get. Reporting just
 /// the first call would understate a KEM operation's real cost.
-pub fn encapsulate_and_get(endpoint: &KmipEndpoint, public_uid: &str) -> Result<Vec<u8>> {
-    let (resp, _) = send(
-        endpoint,
+/// What an Encapsulate produced: the retrieved secret and the ciphertext a
+/// Decapsulate needs to recover it.
+pub struct Encapsulation {
+    pub secret_response: Vec<u8>,
+    /// `Data` (0x4200C2) — the ML-KEM ciphertext. Returned because without
+    /// it Decapsulate cannot be exercised at all, which is why that half of
+    /// the KEM went untested while this half was measured.
+    pub ciphertext: Vec<u8>,
+}
+
+pub fn encapsulate_and_get(
+    t: &dyn KmipTransport, public_uid: &str) -> Result<Encapsulation> {
+    let (resp, _) = t.send(
         RequestPayload::Encapsulate(EncapsulateRequest {
             uid: public_uid.to_string(),
             input_key_material: None,
@@ -434,22 +573,21 @@ pub fn encapsulate_and_get(endpoint: &KmipEndpoint, public_uid: &str) -> Result<
     )?;
     let secret_uid = text_field(&resp, TAG_UNIQUE_IDENTIFIER)
         .ok_or_else(|| anyhow!("Encapsulate response carried no Unique Identifier"))?;
-    let (get_resp, _) = send(
-        endpoint,
+    let ciphertext = bytes_field(&resp, TAG_DATA).unwrap_or_default();
+    let (get_resp, _) = t.send(
         RequestPayload::Get(GetRequest { uid: secret_uid, key_format_type: None, key_wrapping_specification: None }),
     )?;
-    Ok(get_resp)
+    Ok(Encapsulation { secret_response: get_resp, ciphertext })
 }
 
 /// Decapsulate a ciphertext, then Get the recovered secret — same two-round-
 /// trip shape as [`encapsulate_and_get`].
 pub fn decapsulate_and_get(
-    endpoint: &KmipEndpoint,
+    t: &dyn KmipTransport,
     private_uid: &str,
     ciphertext: &[u8],
 ) -> Result<Vec<u8>> {
-    let (resp, _) = send(
-        endpoint,
+    let (resp, _) = t.send(
         RequestPayload::Decapsulate(DecapsulateRequest {
             uid: private_uid.to_string(),
             data: ciphertext.to_vec(),
@@ -458,8 +596,7 @@ pub fn decapsulate_and_get(
     )?;
     let secret_uid = text_field(&resp, TAG_UNIQUE_IDENTIFIER)
         .ok_or_else(|| anyhow!("Decapsulate response carried no Unique Identifier"))?;
-    let (get_resp, _) = send(
-        endpoint,
+    let (get_resp, _) = t.send(
         RequestPayload::Get(GetRequest { uid: secret_uid, key_format_type: None, key_wrapping_specification: None }),
     )?;
     Ok(get_resp)
@@ -507,13 +644,30 @@ impl InProcessKmip {
                     .map_err(|e| anyhow!("control policy parse: {e}"))?,
             )
             .map_err(|e| anyhow!("control policy activate: {e}"))?;
+        // Bootstrap a real engine session, exactly as the server binary does.
+        // Without it Query still answers (no crypto involved) but every
+        // CreateKeyPair fails with Result Status 1 — which is precisely how
+        // the control's first version got away with measuring a Query and
+        // nothing else. A control that cannot run the operation matrix is
+        // not a control; it is a different benchmark.
+        let engine_session = softhsmrustv3::native::session::bootstrap_default_token(
+            0,
+            "so-pin",
+            "1234",
+            "bench-control",
+        )
+        .map_err(|rv| anyhow!("engine bootstrap failed: CK_RV=0x{rv:08x}"))?;
+
         Ok(Self {
-            deps: Arc::new(Deps::new(
-                engine,
-                Arc::new(MemoryStore::new()),
-                sink,
-                DepsConfig::default(),
-            )),
+            deps: Arc::new(
+                Deps::new(
+                    engine,
+                    Arc::new(MemoryStore::new()),
+                    sink,
+                    DepsConfig::default(),
+                )
+                .with_engine_session(engine_session),
+            ),
         })
     }
 
@@ -533,6 +687,23 @@ impl InProcessKmip {
         self.dispatch_encoded(one_off_request(RequestPayload::Query(QueryRequest {
             functions: vec![QueryFunction::QueryOperations],
         })))
+    }
+}
+
+impl KmipTransport for InProcessKmip {
+    /// The same operation, minus the socket.
+    ///
+    /// No Authentication header: this dispatcher runs open-auth, so adding
+    /// credentials would measure a verifier the wire arm's server also runs
+    /// — but the wire arm pays for it too, so including it here would double
+    /// count. The difference between the arms should be TRANSPORT, and
+    /// nothing else.
+    fn send(&self, payload: RequestPayload) -> Result<(Vec<u8>, Option<String>)> {
+        let encoded = self.dispatch_encoded(one_off_request(payload));
+        // No negotiated group: there is no handshake. Reported as None
+        // rather than a placeholder, so a row cannot imply it measured a
+        // key exchange it never performed.
+        check_response(encoded, None)
     }
 }
 
@@ -564,6 +735,13 @@ pub struct KmipArgs {
     pub user: Option<String>,
     #[arg(long)]
     pub password: Option<String>,
+    /// Client certificate for mutual TLS. Required when the server runs
+    /// with --tls-client-ca (the sandbox's pqc-kmip does), otherwise the
+    /// handshake fails with CertificateRequired before any KMIP message.
+    #[arg(long)]
+    pub client_cert: Option<String>,
+    #[arg(long)]
+    pub client_key: Option<String>,
     /// TLS posture the CLIENT offers. `quantum-safe` offers ONLY hybrid
     /// ML-KEM groups, so a completed handshake proves the exchange was
     /// hybrid — the client states what it offered rather than inferring it.
@@ -577,6 +755,46 @@ pub struct KmipArgs {
     pub duration_secs: f64,
     #[arg(long, default_value_t = 0.5)]
     pub warmup_secs: f64,
+    /// How many times to measure each cell. The reported ops/sec is the
+    /// MEDIAN, and `ops_per_sec_min`/`_max` carry the spread.
+    ///
+    /// Defaults to 3, not 1, on purpose. Measured on this harness
+    /// (2026-08-09): repeats of one configuration spread 15-18%, and a
+    /// single-sample comparison once showed the wire arm "13% faster" than
+    /// the in-process control — an inversion that vanished under repeats.
+    /// A one-shot number here is not a measurement, it is a sample, and the
+    /// default should not quietly hand someone a sample to publish.
+    #[arg(long, default_value_t = 3)]
+    pub repeats: u32,
+    /// Second TLS profile to measure INTERLEAVED with `--tls`, against
+    /// `--compare-port`.
+    ///
+    /// Running all of arm A then all of arm B puts them minutes apart, and
+    /// on a machine whose load varies on that timescale the drift lands
+    /// entirely on one arm. Measured 2026-08-09, sequential arms produced a
+    /// "premium" that was 65% one way on one algorithm and 60% the other way
+    /// on two others — noise wearing a result's clothes. Interleaving
+    /// alternates A,B,A,B… within one session so drift hits both equally.
+    #[arg(long)]
+    pub compare_tls: Option<String>,
+    /// Host for the `--compare-tls` server. Defaults to `--host`.
+    ///
+    /// Load-bearing in containers: the sandbox's two postures run as
+    /// separate containers BOTH listening on 5696, so only the host differs.
+    /// Overriding the port alone silently dialled the primary server with the
+    /// comparison client's profile, which the primary then refused —
+    /// `HandshakeFailure`, from a mistake that looked like a TLS problem.
+    /// Operations per Request Message. 1 (default) is the per-operation arm.
+    /// Larger values amortise the handshake — but the timing then covers the
+    /// whole batch, so per-operation percentiles do not exist and the rows
+    /// are marked accordingly.
+    #[arg(long, default_value_t = 1)]
+    pub batch: u32,
+    #[arg(long)]
+    pub compare_host: Option<String>,
+    /// Port for the `--compare-tls` server. Defaults to `--port`.
+    #[arg(long)]
+    pub compare_port: Option<u16>,
 }
 
 /// One emitted row. Mirrors `measure::ResultRow`'s shape so both arms land
@@ -597,7 +815,21 @@ struct KmipRow<'a> {
     category: &'a str,
     op: &'a str,
     threads: u32,
+    /// Median across `repeats`.
     ops_per_sec: f64,
+    /// Spread across repeats. When min and max are far apart the median is
+    /// not a stable figure and no cross-arm delta smaller than that spread
+    /// should be quoted from it.
+    ops_per_sec_min: f64,
+    ops_per_sec_max: f64,
+    repeats: u32,
+    /// True when this row was measured ALTERNATING with another profile in
+    /// one session. Only interleaved rows may be compared against each
+    /// other; sequential ones carry drift.
+    interleaved: bool,
+    /// Operations per request. When >1 the p50/p99 below describe the BATCH,
+    /// not an operation, and must not be compared with per-operation rows.
+    batch: u32,
     p50_ms: f64,
     p99_ms: f64,
     duration_s: f64,
@@ -607,12 +839,58 @@ struct KmipRow<'a> {
     round_trips_per_op: u32,
 }
 
+/// **Interleaved comparison is the only valid one.** With `--compare-tls`
+/// the arms alternate A,B,A,B… inside one session. Measured 2026-08-09,
+/// release builds, 5 repeats, 3s windows:
+///
+///   Ed25519     classical 834 -> quantum-safe 786   +5.8%
+///   ML-DSA-65             545 ->              530   +2.7%
+///   ML-KEM-768            581 ->              513  +11.6%
+///
+/// The sign is now CONSISTENT across three independent algorithms, which
+/// sequential runs never managed — they flipped direction per algorithm.
+/// Treat the magnitude as indicative, not final: the ranges still overlap
+/// and this machine is not idle. Consistent sign across independent cells
+/// is the evidence here, not any single percentage.
+///
+/// **Sequentially measured arms cannot be compared at all.** Measured
+/// 2026-08-09 with RELEASE builds, one server at a time, 5 repeats:
+///
+///   classical      Ed25519 1920  ML-DSA-65  696  ML-KEM-768 555
+///   quantum-safe           672             1158             902
+///
+/// Quantum-safe is 65% slower on one algorithm and 60%+ FASTER on the other
+/// two, from a change that touches only the TLS key exchange group. That is
+/// not an effect, it is noise: one quantum-safe range spanned 456-1689 ops/s,
+/// nearly 4x. Sequential arms are measured minutes apart, and this machine
+/// is shared with container builds whose load varies over exactly that
+/// timescale.
+///
+/// To resolve it: INTERLEAVE the arms (A,B,A,B,… inside one session, so
+/// drift hits both equally) rather than running all of A then all of B,
+/// lengthen the window well past 2s, and measure on an idle machine. Until
+/// then, quote no premium in either direction.
+///
+/// **Single runs are not evidence.** Measured 2026-08-09 on this harness:
+/// three repeats of the SAME configuration (ML-DSA-65 sign, 2 threads, 2s)
+/// spread 143-169 ops/s in-process and 134-145 on the wire — 15-18%
+/// run-to-run. A one-shot comparison across arms once showed the wire arm
+/// "13% faster" than the in-process control, an inversion that simply
+/// vanished under repeats (means: 157.8 in-process vs 138.3 wire, i.e.
+/// transport ~12%). The outlier was almost certainly first-run engine
+/// bootstrap landing in the first cell despite the warmup.
+///
+/// So: take repeats before quoting any cross-arm delta, and treat a
+/// difference smaller than ~20% as unresolved rather than real.
 /// Run the representative matrix and print one JSONL row per measured cell.
 pub fn run(args: &KmipArgs) -> Result<()> {
     let tls = match args.tls.as_str() {
         "quantum-safe" => ClientTlsProfile::QuantumSafe,
         "permissive" => ClientTlsProfile::Permissive,
-        other => return Err(anyhow!("--tls must be quantum-safe or permissive, got {other:?}")),
+        "classical-baseline" => ClientTlsProfile::ClassicalBaseline,
+        other => return Err(anyhow!(
+            "--tls must be quantum-safe, classical-baseline or permissive, got {other:?}"
+        )),
     };
 
     // The in-process control never touches TLS, so demanding a CA for it
@@ -630,6 +908,16 @@ pub fn run(args: &KmipArgs) -> Result<()> {
             tls,
             username: args.user.clone(),
             password: args.password.clone(),
+            client_cert_pem: args
+                .client_cert
+                .as_ref()
+                .map(|p| std::fs::read(p).with_context(|| format!("reading --client-cert {p}")))
+                .transpose()?,
+            client_key_pem: args
+                .client_key
+                .as_ref()
+                .map(|p| std::fs::read(p).with_context(|| format!("reading --client-key {p}")))
+                .transpose()?,
         })
     } else {
         None
@@ -653,6 +941,42 @@ pub fn run(args: &KmipArgs) -> Result<()> {
     // Arc, because measure::run_point requires `F: 'static` — its workers are
     // spawned onto real OS threads, so a closure borrowing a local here
     // cannot satisfy it.
+    // The comparison arm, when asked for. Same everything except the TLS
+    // profile and the port it dials.
+    let compare: Option<(KmipEndpoint, &str)> = match (&args.compare_tls, &endpoint) {
+        (Some(name), Some(base)) => {
+            let other = match name.as_str() {
+                "quantum-safe" => ClientTlsProfile::QuantumSafe,
+                "classical-baseline" => ClientTlsProfile::ClassicalBaseline,
+                "permissive" => ClientTlsProfile::Permissive,
+                o => return Err(anyhow!("--compare-tls: unknown profile {o:?}")),
+            };
+            let mut ep = base.clone();
+            ep.tls = other;
+            if let Some(p) = args.compare_port {
+                ep.port = p;
+            }
+            if let Some(h) = &args.compare_host {
+                ep.host = h.clone();
+            }
+            if ep.host == base.host && ep.port == base.port {
+                return Err(anyhow!(
+                    "--compare-tls needs a DIFFERENT endpoint: set --compare-host and/or \
+                     --compare-port. One server process serves one TLS posture, so pointing \
+                     both arms at {}:{} would just ask the same server for two postures.",
+                    base.host,
+                    base.port
+                ));
+            }
+            // Fail fast here too, so a broken comparison endpoint is one
+            // clear error rather than half a matrix of missing rows.
+            query(&ep).context("pre-run probe of the --compare-tls endpoint failed")?;
+            Some((ep, name.as_str()))
+        }
+        (Some(_), None) => return Err(anyhow!("--compare-tls only applies to --arm wire")),
+        (None, _) => None,
+    };
+
     let control: Option<Arc<InProcessKmip>> = if endpoint.is_none() {
         Some(Arc::new(InProcessKmip::new()?))
     } else {
@@ -672,84 +996,126 @@ pub fn run(args: &KmipArgs) -> Result<()> {
             KmipClass::Kem => ("encapsulate+get", "key_establishment", 2),
         };
 
-        let (total_ops, latencies, elapsed) = match (&endpoint, &control) {
-            (Some(ep), _) => {
-                let kp = create_and_activate(ep, cell)
-                    .with_context(|| format!("{}: setup", cell.label))?;
+        // ONE code path for both arms. The transport differs; the work does
+        // not — which is the entire point: a difference between the arms is
+        // now attributable to transport, because nothing else varies.
+        let carrier: Arc<dyn KmipTransport + Send + Sync> = match (&endpoint, &control) {
+            (Some(ep), _) => Arc::new(ep.clone()),
+            (None, Some(ctrl)) => Arc::clone(ctrl) as Arc<dyn KmipTransport + Send + Sync>,
+            _ => unreachable!("either an endpoint or a control is always present"),
+        };
+
+        let kp = create_and_activate(carrier.as_ref(), cell)
+            .with_context(|| format!("{}: setup", cell.label))?;
+        let workers: Vec<_> = (0..args.threads)
+            .map(|_| {
+                let t = Arc::clone(&carrier);
+                let kp_priv = kp.private_uid.clone();
+                let kp_pub = kp.public_uid.clone();
+                let class = cell.class;
+                move || -> Result<()> {
+                    match class {
+                        KmipClass::Signature => sign(t.as_ref(), &kp_priv, b"bench").map(|_| ()),
+                        KmipClass::Kem => encapsulate_and_get(t.as_ref(), &kp_pub).map(|_| ()),
+                    }
+                }
+            })
+            .collect();
+        // Build the arms to measure. With --compare-tls there are two, and
+        // they alternate A,B,A,B… inside this loop rather than running all
+        // of A then all of B — so machine drift lands on both equally.
+        let mut arms: Vec<(&str, Arc<dyn KmipTransport + Send + Sync>, Option<String>, KeyPair, Option<Arc<KmipEndpoint>>)> =
+            Vec::new();
+        arms.push((tls_label, Arc::clone(&carrier), negotiated.clone(), kp, endpoint.clone().map(Arc::new)));
+        if let Some((cmp_ep, cmp_label)) = &compare {
+            let cmp_carrier: Arc<dyn KmipTransport + Send + Sync> = Arc::new(cmp_ep.clone());
+            // Its own keys: a UID minted on one server does not exist on the
+            // other.
+            let cmp_kp = create_and_activate(cmp_carrier.as_ref(), cell)
+                .with_context(|| format!("{}: setup on the compare arm", cell.label))?;
+            let cmp_group = query(cmp_ep).ok().and_then(|e| e.kx_group);
+            arms.push((cmp_label, cmp_carrier, cmp_group, cmp_kp, Some(Arc::new(cmp_ep.clone()))));
+        }
+
+        let mut samples: Vec<Vec<(f64, f64, f64, u64, f64)>> = vec![Vec::new(); arms.len()];
+        for _ in 0..args.repeats.max(1) {
+            for (i, (_, arm_carrier, _, arm_kp, arm_endpoint)) in arms.iter().enumerate() {
                 let workers: Vec<_> = (0..args.threads)
                     .map(|_| {
-                        let ep = ep.clone();
-                        let kp_priv = kp.private_uid.clone();
-                        let kp_pub = kp.public_uid.clone();
+                        let t = Arc::clone(arm_carrier);
+                        let kp_priv = arm_kp.private_uid.clone();
+                        let kp_pub = arm_kp.public_uid.clone();
                         let class = cell.class;
+                        let batch = args.batch.max(1);
+                        let batch_ep = arm_endpoint.clone();
                         move || -> Result<()> {
-                            match class {
-                                KmipClass::Signature => {
-                                    sign(&ep, &kp_priv, b"bench").map(|_| ())
-                                }
-                                KmipClass::Kem => {
-                                    encapsulate_and_get(&ep, &kp_pub).map(|_| ())
+                            if batch > 1 {
+                                // One connection, N operations. Only the wire
+                                // arm can batch — the control has no
+                                // connection to amortise.
+                                let ep = batch_ep.as_ref().ok_or_else(|| {
+                                    anyhow!("--batch >1 applies to --arm wire only")
+                                })?;
+                                let payloads = (0..batch)
+                                    .map(|_| match class {
+                                        KmipClass::Signature => RequestPayload::Sign(SignRequest {
+                                            uid: kp_priv.clone(),
+                                            data: b"bench".to_vec(),
+                                            cryptographic_parameters: None,
+                                        }),
+                                        KmipClass::Kem => RequestPayload::Encapsulate(EncapsulateRequest {
+                                            uid: kp_pub.clone(),
+                                            input_key_material: None,
+                                            cryptographic_parameters: None,
+                                        }),
+                                    })
+                                    .collect();
+                                exchange_batch(ep, payloads).map(|_| ())
+                            } else {
+                                match class {
+                                    KmipClass::Signature => sign(t.as_ref(), &kp_priv, b"bench").map(|_| ()),
+                                    KmipClass::Kem => encapsulate_and_get(t.as_ref(), &kp_pub).map(|_| ()),
                                 }
                             }
                         }
                     })
                     .collect();
-                crate::measure::run_point(args.duration_secs, args.warmup_secs, workers)?
+                let (total_ops, latencies, elapsed) =
+                    crate::measure::run_point(args.duration_secs, args.warmup_secs, workers)?;
+                let (p50, p99) = crate::measure::percentiles_ms(latencies);
+                samples[i].push((total_ops as f64 / elapsed, p50, p99, total_ops, elapsed));
             }
-            (None, Some(ctrl)) => {
-                // The control measures the protocol path only: encode,
-                // dispatch, encode the response. Keys are not created per
-                // iteration, matching the wire arm's hot loop.
-                let workers: Vec<_> = (0..1)
-                    .map(|_| {
-                        let ctrl = Arc::clone(ctrl);
-                        move || -> Result<()> {
-                            let _ = ctrl.query();
-                            Ok(())
-                        }
-                    })
-                    .collect();
-                crate::measure::run_point(args.duration_secs, args.warmup_secs, workers)?
-            }
-            _ => unreachable!("either an endpoint or a control is always present"),
-        };
-
-        let (p50, p99) = crate::measure::percentiles_ms(latencies);
-        // The control loop dispatches a Query, NOT this cell's operation, so
-        // it must not borrow the cell's labels. An earlier version emitted
-        // `algorithm: Ed25519, op: sign` for a row that measured neither —
-        // precisely the mislabelling this scenario exists to avoid. Until the
-        // control runs the real op matrix in-process (next increment), it
-        // says what it actually did.
-        let (row_algorithm, row_category, row_op) = if endpoint.is_some() {
-            (cell.label, category, op)
-        } else {
-            ("n/a", "protocol", "query")
-        };
-        let row = KmipRow {
-            access_path: "kmip",
-            transport,
-            tls: tls_label,
-            negotiated_group: negotiated.clone(),
-            algorithm: row_algorithm,
-            category: row_category,
-            op: row_op,
-            threads: if endpoint.is_some() { args.threads } else { 1 },
-            ops_per_sec: total_ops as f64 / elapsed,
-            p50_ms: p50,
-            p99_ms: p99,
-            duration_s: elapsed,
-            total_ops,
-            round_trips_per_op: round_trips,
-        };
-        println!("{}", serde_json::to_string(&row)?);
-
-        // The control arm's cells are all the same measurement (Query), so
-        // running it per algorithm would emit three identical rows dressed
-        // as different ones.
-        if endpoint.is_none() {
-            break;
         }
+
+        for (i, (arm_label, _, arm_group, _, _)) in arms.iter().enumerate() {
+            // Median, not mean: one cold run should not drag the figure.
+            let mut by_rate = samples[i].clone();
+            by_rate.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+            let (ops_per_sec, p50, p99, total_ops, elapsed) = by_rate[by_rate.len() / 2];
+            let row = KmipRow {
+                access_path: "kmip",
+                transport,
+                tls: arm_label,
+                negotiated_group: arm_group.clone(),
+                algorithm: cell.label,
+                category,
+                op,
+                threads: args.threads,
+                ops_per_sec,
+                ops_per_sec_min: by_rate.first().unwrap().0,
+                ops_per_sec_max: by_rate.last().unwrap().0,
+                repeats: args.repeats.max(1),
+                    interleaved: arms.len() > 1,
+                batch: args.batch.max(1),
+                p50_ms: p50,
+                p99_ms: p99,
+                duration_s: elapsed,
+                total_ops,
+                round_trips_per_op: round_trips,
+            };
+            println!("{}", serde_json::to_string(&row)?);
+        }
+
     }
     Ok(())
 }
@@ -786,6 +1152,8 @@ mod tests {
             tls: ClientTlsProfile::QuantumSafe,
             username: std::env::var("KMIP_BENCH_USER").ok(),
             password: std::env::var("KMIP_BENCH_PASS").ok(),
+            client_cert_pem: std::env::var("KMIP_BENCH_CLIENT_CERT").ok().map(|p| std::fs::read(p).expect("client cert")),
+            client_key_pem: std::env::var("KMIP_BENCH_CLIENT_KEY").ok().map(|p| std::fs::read(p).expect("client key")),
         };
 
         let ex = query(&endpoint).expect("KMIP Query round trip");
@@ -813,6 +1181,8 @@ mod tests {
             tls: ClientTlsProfile::QuantumSafe,
             username: std::env::var("KMIP_BENCH_USER").ok(),
             password: std::env::var("KMIP_BENCH_PASS").ok(),
+            client_cert_pem: std::env::var("KMIP_BENCH_CLIENT_CERT").ok().map(|p| std::fs::read(p).expect("client cert")),
+            client_key_pem: std::env::var("KMIP_BENCH_CLIENT_KEY").ok().map(|p| std::fs::read(p).expect("client key")),
         })
     }
 
@@ -859,8 +1229,19 @@ mod tests {
                 KmipClass::Kem => {
                     let enc = encapsulate_and_get(&endpoint, &kp.public_uid)
                         .unwrap_or_else(|e| panic!("{}: encapsulate failed: {e:#}", cell.label));
-                    assert!(!enc.is_empty(), "{}: empty encapsulate result", cell.label);
-                    eprintln!("  {:<11} encapsulate+Get OK ({} B response)", cell.label, enc.len());
+                    assert!(!enc.secret_response.is_empty(), "{}: empty encapsulate result", cell.label);
+                    assert!(!enc.ciphertext.is_empty(), "{}: no ciphertext returned", cell.label);
+
+                    // The other half of the KEM, which went untested while
+                    // encapsulate was being measured: recover the same secret
+                    // from the ciphertext using the PRIVATE key.
+                    let dec = decapsulate_and_get(&endpoint, &kp.private_uid, &enc.ciphertext)
+                        .unwrap_or_else(|e| panic!("{}: decapsulate failed: {e:#}", cell.label));
+                    assert!(!dec.is_empty(), "{}: empty decapsulate result", cell.label);
+                    eprintln!(
+                        "  {:<11} encapsulate+Get OK ({} B, ct {} B) · decapsulate+Get OK ({} B)",
+                        cell.label, enc.secret_response.len(), enc.ciphertext.len(), dec.len()
+                    );
                 }
             }
         }
