@@ -6,6 +6,66 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.21.1] — 2026-08-09
+
+Follow-ups to 0.21.0's KMIP benchmark work. The headline is a retraction: with
+the crypto-provider confound removed, **the quantum-safe TLS premium does not
+resolve, and no premium should be quoted in either direction** — including
+against the 0.21.0 table below, which was measured under conditions that cannot
+support a comparison.
+
+### Added
+
+- **`TlsProfile::ClassicalBaseline`, on both server and client** (`kmip/src/server/listener.rs`).
+  Identical to `quantum-safe` in provider, TLS version and cipher suites,
+  differing ONLY in the key exchange groups. It exists because
+  `permissive`-vs-`quantum-safe` is not a migration comparison: `permissive`
+  runs on `ring`, `quantum-safe` on `aws-lc-rs`, so that pairing varies the
+  crypto provider too — and read as *"PQC TLS is 46% faster than classical"*.
+
+- **Mutual TLS, interleaving, `--compare-host` and batching in `bench-harness kmip`**
+  (`rust/bench-harness/src/kmip.rs`). `--compare-tls` interleaves the arms
+  A,B,A,B within one session so drift hits both equally; sequential arms put
+  −65% / +60% on the same change. `--compare-host` was found by the first real
+  container run — the comparison overrode the port but not the host, so with two
+  postures on 5696 it dialled the primary server with the comparison profile and
+  got a `HandshakeFailure`, a configuration mistake wearing a TLS fault's
+  clothes. `--batch N` gives 3.8x throughput at batch=8; batch=32 is worse, so
+  bigger is not better, and batched p50/p99 describe the BATCH, never an
+  operation.
+
+- **`decapsulate_and_get` is now actually exercised** — encapsulate returns the
+  ciphertext and the live test recovers the secret (ct 1088 B, secret 336 B).
+  It was the untested half of the KEM.
+
+### Fixed
+
+- **The ML-DSA-65 wire-vs-control "inversion" was a single-sample artefact.**
+  An earlier commit reported the wire arm as 13% faster than the in-process
+  control and flagged it as needing explanation. It needed none: three repeats
+  put in-process at mean 157.8 ops/s against wire's 138.3, so the control is
+  ~12% faster, which is what a floor should be. The inversion came from one
+  in-process sample of 113.2 — almost certainly first-run engine bootstrap
+  landing in the first cell despite the warmup. The companion hypothesis (two
+  threads serialising on one engine session) is also dead: in-process scales
+  1.85x from 1 to 2 threads.
+
+### Changed — read before quoting any benchmark number
+
+- **The 0.21.0 throughput table below is not comparable across postures, and
+  its figures came from debug builds.** Release artefacts — what the sandbox
+  images actually ship — are 10-50x faster and far less noisy. Run-to-run
+  spread is 15-40%, wider than most effects being reported as findings.
+  The rules, now recorded in the code where the next person meets them: same
+  crypto provider on both arms; release builds only; repeats, reporting median
+  and spread; interleave the arms; and treat consistent sign across independent
+  algorithms as the evidence rather than any single percentage. Measure on a
+  quiet machine — that is a precondition, not an optimisation.
+
+- **Say "measured against" the Quantum Safe Authentication Suite, never
+  "conformant to" it.** The server offers 2 of §3.3.3's 3 groups;
+  `SecP384r1MLKEM1024` does not exist in rustls 0.23.
+
 ## [0.21.0] — 2026-08-08
 
 ### Added
