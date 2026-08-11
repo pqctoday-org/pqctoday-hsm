@@ -309,3 +309,63 @@ fn xwing_decapsulate_matches_draft_vector() {
         "X-Wing shared secret does not match the draft vector"
     );
 }
+
+// ── ChaCha20-Poly1305 ───────────────────────────────────────────────────────
+
+/// ChaCha20-Poly1305 against a known answer.
+///
+/// The engine has supported `CKM_CHACHA20_POLY1305` since 2026-06, but
+/// `cryptoki` cannot name it, so `crypto.rs` was doing this in software for
+/// ciphersuite 3. Vector generated with Python `cryptography`, not recalled.
+#[test]
+fn chacha20_poly1305_matches_known_answer() {
+    let f = hsm!();
+
+    let key: Vec<u8> = (0u8..32).collect();
+    let nonce: Vec<u8> = (0u8..12).collect();
+    let aad = b"aad-test";
+    let pt = b"post-quantum MLS";
+    let expected = "f9947b740466d021d9f74a9eb8504230bd98b19137baba92bbb1746ab710b38c";
+
+    let ct = f
+        .chacha20_poly1305(true, &key, &nonce, aad, pt)
+        .expect("chacha20-poly1305 seal");
+    assert_eq!(hex::encode(&ct), expected, "ChaCha20-Poly1305 ciphertext mismatch");
+    assert_eq!(ct.len(), pt.len() + 16, "output should be ciphertext + 16-byte tag");
+
+    let back = f
+        .chacha20_poly1305(false, &key, &nonce, aad, &ct)
+        .expect("chacha20-poly1305 open");
+    assert_eq!(&back, pt, "decryption did not recover the plaintext");
+}
+
+/// The AEAD must reject a tampered tag rather than returning garbage.
+///
+/// Without this, an implementation that ignored authentication entirely would
+/// pass every other test here.
+#[test]
+fn chacha20_poly1305_rejects_tampering() {
+    let f = hsm!();
+    let key: Vec<u8> = (0u8..32).collect();
+    let nonce: Vec<u8> = (0u8..12).collect();
+
+    let mut ct = f
+        .chacha20_poly1305(true, &key, &nonce, b"aad", b"secret message")
+        .expect("seal");
+
+    // Flip a bit in the tag.
+    let last = ct.len() - 1;
+    ct[last] ^= 0x01;
+    assert!(
+        f.chacha20_poly1305(false, &key, &nonce, b"aad", &ct).is_err(),
+        "a tampered tag was accepted"
+    );
+
+    // And a mismatched AAD must fail too — the AAD has to be authenticated, not
+    // merely accepted and dropped.
+    ct[last] ^= 0x01; // restore
+    assert!(
+        f.chacha20_poly1305(false, &key, &nonce, b"different", &ct).is_err(),
+        "the AAD is not being authenticated"
+    );
+}

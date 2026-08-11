@@ -94,6 +94,18 @@ const CKA_DERIVE: CkAttributeType = 0x0000_010c;
 const CKA_PARAMETER_SET: CkAttributeType = 0x0000_061d;
 const CKA_SEED: CkAttributeType = 0x0000_0637;
 
+const CKM_CHACHA20_POLY1305: CkMechanismType = 0x0000_4021;
+const CKK_CHACHA20: CkUlong = 0x0000_0033;
+
+/// `CK_SALSA20_CHACHA20_POLY1305_PARAMS`, pkcs11t.h line 2564.
+#[repr(C)]
+struct CkChaChaParams {
+    p_nonce: *mut u8,
+    nonce_len: CkUlong,
+    p_aad: *mut u8,
+    aad_len: CkUlong,
+}
+
 const CKO_SECRET_KEY: CkUlong = 0x0000_0004;
 const CKK_GENERIC_SECRET: CkUlong = 0x0000_0010;
 const CKP_ML_KEM_768: CkUlong = 0x0000_0002;
@@ -170,6 +182,15 @@ type FnCreateObject = unsafe extern "C" fn(
     CkUlong,
     *mut CkObjectHandle,
 ) -> CkRv;
+type FnCryptInit =
+    unsafe extern "C" fn(CkSessionHandle, *const CkMechanism, CkObjectHandle) -> CkRv;
+type FnCrypt = unsafe extern "C" fn(
+    CkSessionHandle,
+    *const c_uchar,
+    CkUlong,
+    *mut c_uchar,
+    *mut CkUlong,
+) -> CkRv;
 type FnDigestInit = unsafe extern "C" fn(CkSessionHandle, *const CkMechanism) -> CkRv;
 type FnDigest = unsafe extern "C" fn(
     CkSessionHandle,
@@ -197,6 +218,10 @@ pub struct KemFfi {
     create_object: FnCreateObject,
     digest_init: FnDigestInit,
     digest: FnDigest,
+    encrypt_init: FnCryptInit,
+    encrypt_op: FnCrypt,
+    decrypt_init: FnCryptInit,
+    decrypt_op: FnCrypt,
 }
 
 // Safety: every method takes `&self` and performs one PKCS#11 call on a session
@@ -253,6 +278,10 @@ impl KemFfi {
         let create_object = sym!(lib, "C_CreateObject", FnCreateObject);
         let digest_init = sym!(lib, "C_DigestInit", FnDigestInit);
         let digest = sym!(lib, "C_Digest", FnDigest);
+        let encrypt_init = sym!(lib, "C_EncryptInit", FnCryptInit);
+        let encrypt_op = sym!(lib, "C_Encrypt", FnCrypt);
+        let decrypt_init = sym!(lib, "C_DecryptInit", FnCryptInit);
+        let decrypt_op = sym!(lib, "C_Decrypt", FnCrypt);
 
         // The module is already initialised by cryptoki. ALREADY_INITIALIZED is
         // the expected answer and means exactly what we want: we are attached to
@@ -309,6 +338,10 @@ impl KemFfi {
             create_object,
             digest_init,
             digest,
+            encrypt_init,
+            encrypt_op,
+            decrypt_init,
+            decrypt_op,
         })
     }
 
@@ -419,8 +452,16 @@ impl KemFfi {
     /// them. Marked extractable and non-sensitive: it is KDF input we already
     /// hold in memory, and the derived output has to be readable anyway.
     fn import_secret(&self, value: &[u8]) -> Result<CkObjectHandle, PqcTodayError> {
+        self.import_secret_of_type(value, CKK_GENERIC_SECRET)
+    }
+
+    fn import_secret_of_type(
+        &self,
+        value: &[u8],
+        kt: CkUlong,
+    ) -> Result<CkObjectHandle, PqcTodayError> {
         let mut class = CKO_SECRET_KEY;
-        let mut key_type = CKK_GENERIC_SECRET;
+        let mut key_type = kt;
         let mut ck_false: u8 = 0;
         let mut ck_true: u8 = 1;
         let mut val = value.to_vec();
@@ -478,6 +519,116 @@ impl KemFfi {
             )));
         }
         Ok(h)
+    }
+
+    /// ChaCha20-Poly1305 AEAD, inside the HSM.
+    ///
+    /// `encrypt == true` seals (returns ciphertext ‖ 16-byte tag), otherwise it
+    /// opens. Used by MLS ciphersuites 3 and `0x004D`.
+    ///
+    /// The engine has had `CKM_CHACHA20_POLY1305` since 2026-06; `cryptoki`
+    /// still cannot name it, because its `MechanismType` conversion is an
+    /// exhaustive allowlist with no ChaCha entry. `crypto.rs` therefore fell
+    /// back to a software implementation and carried a comment saying the HSM
+    /// could not do it — true when written, out of date since.
+    pub fn chacha20_poly1305(
+        &self,
+        encrypt: bool,
+        key: &[u8],
+        nonce: &[u8],
+        aad: &[u8],
+        input: &[u8],
+    ) -> Result<Vec<u8>, PqcTodayError> {
+        if key.len() != 32 {
+            return Err(PqcTodayError::Kem(format!(
+                "ChaCha20-Poly1305 key must be 32 bytes, got {}",
+                key.len()
+            )));
+        }
+        if nonce.len() != 12 {
+            return Err(PqcTodayError::Kem(format!(
+                "ChaCha20-Poly1305 nonce must be 12 bytes, got {}",
+                nonce.len()
+            )));
+        }
+
+        let h_key = self.import_secret_of_type(key, CKK_CHACHA20)?;
+
+        // CK_SALSA20_CHACHA20_POLY1305_PARAMS: pNonce, ulNonceLen, pAAD, ulAADLen.
+        // Buffers are bound to locals so they outlive the call.
+        let mut nonce_buf = nonce.to_vec();
+        let mut aad_buf = aad.to_vec();
+        let mut params = CkChaChaParams {
+            p_nonce: nonce_buf.as_mut_ptr(),
+            // BYTES, not bits. The engine checks `ulNonceLen != 12` directly
+            // (SoftHSM_cipher.cpp), so a bit count silently fails the check.
+            nonce_len: nonce_buf.len() as CkUlong,
+            p_aad: if aad_buf.is_empty() {
+                std::ptr::null_mut()
+            } else {
+                aad_buf.as_mut_ptr()
+            },
+            aad_len: aad_buf.len() as CkUlong,
+        };
+        let mech = CkMechanism {
+            mechanism: CKM_CHACHA20_POLY1305,
+            p_parameter: &mut params as *mut _ as *mut c_void,
+            parameter_len: std::mem::size_of::<CkChaChaParams>() as CkUlong,
+        };
+
+        let (init, oneshot): (FnCryptInit, FnCrypt) = if encrypt {
+            (self.encrypt_init, self.encrypt_op)
+        } else {
+            (self.decrypt_init, self.decrypt_op)
+        };
+
+        // Safety: mechanism parameter and its buffers outlive the call.
+        let rv = unsafe { init(self.session, &mech, h_key) };
+        if rv != CKR_OK {
+            return Err(PqcTodayError::Kem(format!(
+                "ChaCha20-Poly1305 {} init failed: 0x{rv:08x}",
+                if encrypt { "encrypt" } else { "decrypt" }
+            )));
+        }
+
+        // Length probe, then the real call — the tag makes the output length
+        // differ from the input in both directions, so it is not assumed.
+        let mut out_len: CkUlong = 0;
+        // Safety: NULL output buffer is the defined length-probe form.
+        let rv = unsafe {
+            oneshot(
+                self.session,
+                input.as_ptr(),
+                input.len() as CkUlong,
+                std::ptr::null_mut(),
+                &mut out_len,
+            )
+        };
+        if rv != CKR_OK {
+            return Err(PqcTodayError::Kem(format!(
+                "ChaCha20-Poly1305 length probe failed: 0x{rv:08x}"
+            )));
+        }
+
+        let mut out = vec![0u8; out_len as usize];
+        // Safety: `out` is `out_len` bytes, as just reported.
+        let rv = unsafe {
+            oneshot(
+                self.session,
+                input.as_ptr(),
+                input.len() as CkUlong,
+                out.as_mut_ptr(),
+                &mut out_len,
+            )
+        };
+        if rv != CKR_OK {
+            return Err(PqcTodayError::Kem(format!(
+                "ChaCha20-Poly1305 {} failed: 0x{rv:08x}",
+                if encrypt { "encrypt" } else { "decrypt" }
+            )));
+        }
+        out.truncate(out_len as usize);
+        Ok(out)
     }
 
     /// Generate an ML-KEM-768 key pair on the token.
