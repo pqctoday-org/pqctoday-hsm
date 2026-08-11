@@ -78,6 +78,7 @@ const CKU_USER: CkUlong = 1;
 const CKM_ML_KEM_KEY_PAIR_GEN: CkMechanismType = 0x0000_000f;
 const CKM_ML_KEM: CkMechanismType = 0x0000_0017;
 const CKM_SHA3_256: CkMechanismType = 0x0000_02b0;
+const CKM_SHAKE_256_KEY_DERIVATION: CkMechanismType = 0x0000_039c;
 
 const CKA_CLASS: CkAttributeType = 0x0000_0000;
 const CKA_TOKEN: CkAttributeType = 0x0000_0001;
@@ -85,6 +86,11 @@ const CKA_VALUE: CkAttributeType = 0x0000_0011;
 const CKA_KEY_TYPE: CkAttributeType = 0x0000_0100;
 const CKA_SENSITIVE: CkAttributeType = 0x0000_0103;
 const CKA_EXTRACTABLE: CkAttributeType = 0x0000_0162;
+const CKA_VALUE_LEN: CkAttributeType = 0x0000_0161;
+/// Without this on the KDF's base key, `C_DeriveKey` returns
+/// `CKR_KEY_FUNCTION_NOT_PERMITTED` (0x68) — the object exists and is readable,
+/// it simply is not allowed to be derived from.
+const CKA_DERIVE: CkAttributeType = 0x0000_010c;
 const CKA_PARAMETER_SET: CkAttributeType = 0x0000_061d;
 
 const CKO_SECRET_KEY: CkUlong = 0x0000_0004;
@@ -149,6 +155,20 @@ type FnDecapsulateKey = unsafe extern "C" fn(
 ) -> CkRv;
 type FnGetAttributeValue =
     unsafe extern "C" fn(CkSessionHandle, CkObjectHandle, *mut CkAttribute, CkUlong) -> CkRv;
+type FnDeriveKey = unsafe extern "C" fn(
+    CkSessionHandle,
+    *const CkMechanism,
+    CkObjectHandle,
+    *const CkAttribute,
+    CkUlong,
+    *mut CkObjectHandle,
+) -> CkRv;
+type FnCreateObject = unsafe extern "C" fn(
+    CkSessionHandle,
+    *const CkAttribute,
+    CkUlong,
+    *mut CkObjectHandle,
+) -> CkRv;
 type FnDigestInit = unsafe extern "C" fn(CkSessionHandle, *const CkMechanism) -> CkRv;
 type FnDigest = unsafe extern "C" fn(
     CkSessionHandle,
@@ -172,6 +192,8 @@ pub struct KemFfi {
     encapsulate: FnEncapsulateKey,
     decapsulate: FnDecapsulateKey,
     get_attribute_value: FnGetAttributeValue,
+    derive_key: FnDeriveKey,
+    create_object: FnCreateObject,
     digest_init: FnDigestInit,
     digest: FnDigest,
 }
@@ -226,6 +248,8 @@ impl KemFfi {
         let encapsulate = sym!(lib, "C_EncapsulateKey", FnEncapsulateKey);
         let decapsulate = sym!(lib, "C_DecapsulateKey", FnDecapsulateKey);
         let get_attribute_value = sym!(lib, "C_GetAttributeValue", FnGetAttributeValue);
+        let derive_key = sym!(lib, "C_DeriveKey", FnDeriveKey);
+        let create_object = sym!(lib, "C_CreateObject", FnCreateObject);
         let digest_init = sym!(lib, "C_DigestInit", FnDigestInit);
         let digest = sym!(lib, "C_Digest", FnDigest);
 
@@ -280,6 +304,8 @@ impl KemFfi {
             encapsulate,
             decapsulate,
             get_attribute_value,
+            derive_key,
+            create_object,
             digest_init,
             digest,
         })
@@ -320,6 +346,137 @@ impl KemFfi {
         }
         out.truncate(out_len as usize);
         Ok(out)
+    }
+
+    /// SHAKE-256 as an extendable-output function, squeezing `out_len` bytes
+    /// from `input`, entirely inside the token.
+    ///
+    /// X-Wing's decapsulation key is a 32-byte seed expanded to 96 bytes — 64
+    /// for ML-KEM's `KeyGen_internal(d, z)` and 32 for the X25519 scalar. Doing
+    /// that expansion in software would derive the private key outside the HSM
+    /// while still calling the result HSM-backed, so it runs here instead
+    /// (`CKM_SHAKE_256_KEY_DERIVATION`, added to the engine for this).
+    ///
+    /// Implemented as import-then-derive: PKCS#11 KDFs operate on a key object,
+    /// not a byte string, so the input is first created as a session-only
+    /// generic secret. Both objects die with the session.
+    pub fn shake256(&self, input: &[u8], out_len: usize) -> Result<Vec<u8>, PqcTodayError> {
+        let base = self.import_secret(input)?;
+        let mech = CkMechanism {
+            mechanism: CKM_SHAKE_256_KEY_DERIVATION,
+            p_parameter: std::ptr::null_mut(),
+            parameter_len: 0,
+        };
+
+        let mut value_len: CkUlong = out_len as CkUlong;
+        let tmpl = SecretTemplate::new();
+        // CKA_VALUE_LEN is mandatory here: an XOF has no natural output size,
+        // so the engine rejects a template without it rather than guessing.
+        let mut attrs: Vec<CkAttribute> = Vec::with_capacity(5);
+        for a in tmpl.attrs.iter() {
+            attrs.push(CkAttribute {
+                attr_type: a.attr_type,
+                p_value: a.p_value,
+                value_len: a.value_len,
+            });
+        }
+        attrs.push(CkAttribute {
+            attr_type: CKA_VALUE_LEN,
+            p_value: &mut value_len as *mut _ as *mut c_void,
+            value_len: std::mem::size_of::<CkUlong>() as CkUlong,
+        });
+
+        let mut h_out: CkObjectHandle = 0;
+        // Safety: template and its backing store outlive the call.
+        let rv = unsafe {
+            (self.derive_key)(
+                self.session,
+                &mech,
+                base,
+                attrs.as_ptr(),
+                attrs.len() as CkUlong,
+                &mut h_out,
+            )
+        };
+        if rv != CKR_OK {
+            return Err(PqcTodayError::Kem(format!(
+                "C_DeriveKey(SHAKE-256, {out_len} bytes) failed: 0x{rv:08x}"
+            )));
+        }
+
+        let out = self.read_secret(h_out)?;
+        if out.len() != out_len {
+            return Err(PqcTodayError::Kem(format!(
+                "SHAKE-256 returned {} bytes, expected {out_len}",
+                out.len()
+            )));
+        }
+        Ok(out)
+    }
+
+    /// Import raw bytes as a session-only generic secret so a KDF can consume
+    /// them. Marked extractable and non-sensitive: it is KDF input we already
+    /// hold in memory, and the derived output has to be readable anyway.
+    fn import_secret(&self, value: &[u8]) -> Result<CkObjectHandle, PqcTodayError> {
+        let mut class = CKO_SECRET_KEY;
+        let mut key_type = CKK_GENERIC_SECRET;
+        let mut ck_false: u8 = 0;
+        let mut ck_true: u8 = 1;
+        let mut val = value.to_vec();
+
+        let tmpl = [
+            CkAttribute {
+                attr_type: CKA_CLASS,
+                p_value: &mut class as *mut _ as *mut c_void,
+                value_len: std::mem::size_of::<CkUlong>() as CkUlong,
+            },
+            CkAttribute {
+                attr_type: CKA_KEY_TYPE,
+                p_value: &mut key_type as *mut _ as *mut c_void,
+                value_len: std::mem::size_of::<CkUlong>() as CkUlong,
+            },
+            CkAttribute {
+                attr_type: CKA_TOKEN,
+                p_value: &mut ck_false as *mut _ as *mut c_void,
+                value_len: 1,
+            },
+            CkAttribute {
+                attr_type: CKA_SENSITIVE,
+                p_value: &mut ck_false as *mut _ as *mut c_void,
+                value_len: 1,
+            },
+            CkAttribute {
+                attr_type: CKA_EXTRACTABLE,
+                p_value: &mut ck_true as *mut _ as *mut c_void,
+                value_len: 1,
+            },
+            // Required, and not obviously so: without CKA_DERIVE the object is
+            // created happily and C_DeriveKey then fails with
+            // CKR_KEY_FUNCTION_NOT_PERMITTED, which reads like a mechanism
+            // problem rather than a missing attribute on the input.
+            CkAttribute {
+                attr_type: CKA_DERIVE,
+                p_value: &mut ck_true as *mut _ as *mut c_void,
+                value_len: 1,
+            },
+            CkAttribute {
+                attr_type: CKA_VALUE,
+                p_value: val.as_mut_ptr() as *mut c_void,
+                value_len: val.len() as CkUlong,
+            },
+        ];
+
+        let mut h: CkObjectHandle = 0;
+        // Safety: template and `val` outlive the call.
+        let rv = unsafe {
+            (self.create_object)(self.session, tmpl.as_ptr(), tmpl.len() as CkUlong, &mut h)
+        };
+        if rv != CKR_OK {
+            return Err(PqcTodayError::Kem(format!(
+                "C_CreateObject for KDF input failed: 0x{rv:08x}"
+            )));
+        }
+        Ok(h)
     }
 
     /// Generate an ML-KEM-768 key pair on the token.

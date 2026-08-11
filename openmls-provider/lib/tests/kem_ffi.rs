@@ -73,6 +73,62 @@ fn sha3_256_matches_known_answers() {
     );
 }
 
+/// SHAKE-256 as an XOF, against known answers.
+///
+/// This mechanism was added to the engine specifically so X-Wing's seed
+/// expansion happens inside the HSM rather than in software. The 96-byte case
+/// is the exact call X-Wing makes.
+///
+/// The second vector expands the X-Wing draft's own test seed, so a mismatch
+/// here localises the fault to the XOF before any KEM work is involved.
+/// Values generated with `openssl dgst -shake256 -xoflen`, not recalled.
+#[test]
+fn shake256_matches_known_answers() {
+    let f = hsm!();
+
+    let empty96 = f.shake256(b"", 96).expect("shake256 of empty input");
+    assert_eq!(
+        hex::encode(&empty96),
+        "46b9dd2b0ba88d13233b3feb743eeb243fcd52ea62b81b82b50c27646ed5762f\
+         d75dc4ddd8c0f200cb05019d67b592f6fc821c49479ab48640292eacb3b7c4be\
+         141e96616fb13957692cc7edd0b45ae3dc07223c8e92937bef84bc0eab862853",
+        "SHAKE256(\"\", 96) mismatch"
+    );
+
+    // The X-Wing draft's test-vector seed, expanded exactly as GenerateKeyPair
+    // does: 32 bytes in, 96 out.
+    let seed = hex::decode("7f9c2ba4e88f827d616045507605853ed73b8093f6efbc88eb1a6eacfa66ef26")
+        .expect("seed hex");
+    let expanded = f.shake256(&seed, 96).expect("shake256 of the X-Wing seed");
+    assert_eq!(
+        hex::encode(&expanded),
+        "c44829d2b269887f6150dfaee5a25a704cbc607e57d18a2ffc8734633333cff0\
+         f0fc6fa4e4827531168087ef223e9b070c5a78a789fd46d4c604d69b1139d4da\
+         cd3f2cce66ed130e5e73a0ebd454e15488885a2a1544252a20e0f58b6e8fc27b",
+        "SHAKE256(X-Wing test seed, 96) mismatch"
+    );
+}
+
+/// An XOF must actually extend — not emit its nominal 32-byte digest padded or
+/// truncated. Guards the specific mistake of calling `EVP_DigestFinal_ex`
+/// instead of `EVP_DigestFinalXOF`, which returns 32 bytes and silently ignores
+/// the requested length.
+#[test]
+fn shake256_output_length_is_honoured() {
+    let f = hsm!();
+    for len in [16usize, 32, 64, 96, 200] {
+        let out = f.shake256(b"length check", len).expect("shake256");
+        assert_eq!(out.len(), len, "SHAKE256 returned the wrong length for {len}");
+    }
+
+    // A longer output must be a strict extension of a shorter one — that is the
+    // defining property of an XOF, and it fails if the length is being folded
+    // into the state rather than just squeezed.
+    let short = f.shake256(b"prefix property", 32).unwrap();
+    let long = f.shake256(b"prefix property", 96).unwrap();
+    assert_eq!(&long[..32], &short[..], "SHAKE256 output is not a prefix-extension");
+}
+
 /// The core claim: ML-KEM encapsulation and decapsulation, through the HSM,
 /// agree on a shared secret.
 #[test]
