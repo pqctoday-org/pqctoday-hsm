@@ -45,6 +45,12 @@ serde = { version = "1", features = ["derive"] }
 # directly as a Rust dependency — see `src/session.rs` for the dispatch.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 cryptoki = "0.10"
+# Direct symbol resolution for the PKCS#11 v3.2 KEM entry points and SHA3-256,
+# neither of which `cryptoki` 0.10 can express: its function-list enum stops at
+# CK_FUNCTION_LIST_3_0, and its mechanism allowlist has no SHA3. See
+# `src/kem_ffi.rs` for the full reasoning. Same crate cryptoki itself uses, so
+# this adds no new transitive dependency.
+libloading = "0.8"
 
 # When compiling to wasm32, force `getrandom` to use the JS RNG (Crypto API
 # via web-sys). Transitive deps in the openmls / hpke-rs chain pull

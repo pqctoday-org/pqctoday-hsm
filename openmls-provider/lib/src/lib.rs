@@ -38,6 +38,8 @@ mod crypto;
 mod error;
 mod handle;
 mod hpke;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod kem_ffi;
 pub mod persistence;
 mod provider;
 mod rand;

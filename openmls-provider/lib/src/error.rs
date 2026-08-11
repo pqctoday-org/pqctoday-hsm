@@ -38,6 +38,12 @@ pub enum PqcTodayError {
 
     #[error("HPKE: {0}")]
     Hpke(String),
+
+    /// Raw PKCS#11 v3.2 KEM path (`kem_ffi`). Distinct from `Pkcs11` because
+    /// those calls do not go through `cryptoki` and so have no `CryptokiError`
+    /// to wrap — the CK_RV is formatted into the message at the call site.
+    #[error("KEM: {0}")]
+    Kem(String),
 }
 
 impl From<PqcTodayError> for CryptoError {

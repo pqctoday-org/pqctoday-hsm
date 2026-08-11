@@ -1,0 +1,588 @@
+//! Raw PKCS#11 v3.2 access for the two operations `cryptoki` cannot express.
+//!
+//! # Why this module exists
+//!
+//! X-Wing (`MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519`, ciphersuite
+//! `0x004D`) needs ML-KEM encapsulation and SHA3-256. Our engine implements
+//! both. The `cryptoki` crate cannot reach either:
+//!
+//! * **`C_EncapsulateKey` / `C_DecapsulateKey` are PKCS#11 v3.2 functions.**
+//!   `cryptoki` 0.10's `Function` enum stops at `CK_FUNCTION_LIST_3_0`. It does
+//!   not merely lack a wrapper — it lacks the 3.2 function-list structure the
+//!   pointers live in.
+//! * **`CKM_SHA3_256` is not in `cryptoki`'s `MechanismType` allowlist.**
+//!   `TryFrom<CK_MECHANISM_TYPE>` is an exhaustive `match`, so an unrecognised
+//!   mechanism value is rejected rather than passed through.
+//!
+//! And we cannot borrow `cryptoki`'s session to do the calls ourselves:
+//! `Session::handle()` is `pub(crate)`, and the entire public surface of
+//! `Session` is `close()`. `ObjectHandle`'s accessors are sealed the same way.
+//!
+//! (`ObjectHandle` does implement `Display`/`LowerHex`, so a handle *can* be
+//! recovered by formatting it and parsing the number back. That is deliberately
+//! not done here. Round-tripping a key handle through a decimal string in a
+//! crypto path is the kind of shortcut that reads as a bug forever after.)
+//!
+//! # What it does instead
+//!
+//! Opens its **own** session on the same slot, through symbols resolved
+//! directly from the module. The library is already loaded and `C_Initialize`d
+//! by `cryptoki`; `dlopen` on the same path returns the same image, so we
+//! attach to the existing instance rather than starting a second one.
+//! `CKR_CRYPTOKI_ALREADY_INITIALIZED` is therefore the expected, correct
+//! response to our `C_Initialize` and is treated as success.
+//!
+//! # Symbol resolution, and why not the function list
+//!
+//! Functions are resolved by name with `dlsym`, not by indexing
+//! `CK_FUNCTION_LIST_3_2`. Indexing means asserting that `C_EncapsulateKey`
+//! sits at a particular slot — measured at 92 in our build, but that is an
+//! artefact of the struct layout, not a contract, and a silent off-by-one there
+//! would call an adjacent function with the wrong argument types. Resolving by
+//! name is checkable and fails loudly.
+//!
+//! The trade-off: a PKCS#11 module that exports only `C_GetFunctionList` and
+//! hides the rest would not work here. Ours exports all of them (verified), and
+//! [`KemFfi::open`] reports precisely which symbol was missing if a different
+//! module is ever pointed at this path.
+
+#![cfg(not(target_arch = "wasm32"))]
+
+use std::ffi::c_void;
+use std::os::raw::c_uchar;
+
+use crate::error::PqcTodayError;
+
+// ── PKCS#11 types ────────────────────────────────────────────────────────────
+
+type CkRv = std::os::raw::c_ulong;
+type CkFlags = std::os::raw::c_ulong;
+type CkSlotId = std::os::raw::c_ulong;
+type CkSessionHandle = std::os::raw::c_ulong;
+type CkObjectHandle = std::os::raw::c_ulong;
+type CkMechanismType = std::os::raw::c_ulong;
+type CkAttributeType = std::os::raw::c_ulong;
+type CkUlong = std::os::raw::c_ulong;
+
+const CKR_OK: CkRv = 0x0000_0000;
+const CKR_CRYPTOKI_ALREADY_INITIALIZED: CkRv = 0x0000_0191;
+
+/// `CKF_SERIAL_SESSION | CKF_RW_SESSION` — PKCS#11 v3.2 §5.6.
+const CKF_SERIAL_SESSION: CkFlags = 0x0000_0004;
+const CKF_RW_SESSION: CkFlags = 0x0000_0002;
+
+const CKU_USER: CkUlong = 1;
+
+// Values below are taken from `src/lib/pkcs11/pkcs11t.h`, the normative header
+// vendored in this repo — never from memory. See CLAUDE.md: pkcs11t.h wins.
+const CKM_ML_KEM_KEY_PAIR_GEN: CkMechanismType = 0x0000_000f;
+const CKM_ML_KEM: CkMechanismType = 0x0000_0017;
+const CKM_SHA3_256: CkMechanismType = 0x0000_02b0;
+
+const CKA_CLASS: CkAttributeType = 0x0000_0000;
+const CKA_TOKEN: CkAttributeType = 0x0000_0001;
+const CKA_VALUE: CkAttributeType = 0x0000_0011;
+const CKA_KEY_TYPE: CkAttributeType = 0x0000_0100;
+const CKA_SENSITIVE: CkAttributeType = 0x0000_0103;
+const CKA_EXTRACTABLE: CkAttributeType = 0x0000_0162;
+const CKA_PARAMETER_SET: CkAttributeType = 0x0000_061d;
+
+const CKO_SECRET_KEY: CkUlong = 0x0000_0004;
+const CKK_GENERIC_SECRET: CkUlong = 0x0000_0010;
+const CKP_ML_KEM_768: CkUlong = 0x0000_0002;
+
+#[repr(C)]
+struct CkMechanism {
+    mechanism: CkMechanismType,
+    p_parameter: *mut c_void,
+    parameter_len: CkUlong,
+}
+
+#[repr(C)]
+struct CkAttribute {
+    attr_type: CkAttributeType,
+    p_value: *mut c_void,
+    value_len: CkUlong,
+}
+
+// ── Function signatures ──────────────────────────────────────────────────────
+
+type FnInitialize = unsafe extern "C" fn(*mut c_void) -> CkRv;
+type FnOpenSession = unsafe extern "C" fn(
+    CkSlotId,
+    CkFlags,
+    *mut c_void,
+    *mut c_void,
+    *mut CkSessionHandle,
+) -> CkRv;
+type FnCloseSession = unsafe extern "C" fn(CkSessionHandle) -> CkRv;
+type FnLogin = unsafe extern "C" fn(CkSessionHandle, CkUlong, *const c_uchar, CkUlong) -> CkRv;
+type FnGenerateKeyPair = unsafe extern "C" fn(
+    CkSessionHandle,
+    *const CkMechanism,
+    *const CkAttribute,
+    CkUlong,
+    *const CkAttribute,
+    CkUlong,
+    *mut CkObjectHandle,
+    *mut CkObjectHandle,
+) -> CkRv;
+type FnEncapsulateKey = unsafe extern "C" fn(
+    CkSessionHandle,
+    *const CkMechanism,
+    CkObjectHandle,
+    *const CkAttribute,
+    CkUlong,
+    *mut c_uchar,
+    *mut CkUlong,
+    *mut CkObjectHandle,
+) -> CkRv;
+type FnDecapsulateKey = unsafe extern "C" fn(
+    CkSessionHandle,
+    *const CkMechanism,
+    CkObjectHandle,
+    *const CkAttribute,
+    CkUlong,
+    *const c_uchar,
+    CkUlong,
+    *mut CkObjectHandle,
+) -> CkRv;
+type FnGetAttributeValue =
+    unsafe extern "C" fn(CkSessionHandle, CkObjectHandle, *mut CkAttribute, CkUlong) -> CkRv;
+type FnDigestInit = unsafe extern "C" fn(CkSessionHandle, *const CkMechanism) -> CkRv;
+type FnDigest = unsafe extern "C" fn(
+    CkSessionHandle,
+    *const c_uchar,
+    CkUlong,
+    *mut c_uchar,
+    *mut CkUlong,
+) -> CkRv;
+
+// ── The FFI handle ───────────────────────────────────────────────────────────
+
+/// Own session onto the PKCS#11 module, for the v3.2 operations `cryptoki`
+/// cannot reach. Independent of the `cryptoki` session; shares only the slot.
+pub struct KemFfi {
+    // Held to keep the library loaded for the lifetime of the resolved symbols.
+    _lib: libloading::Library,
+    session: CkSessionHandle,
+
+    close_session: FnCloseSession,
+    generate_key_pair: FnGenerateKeyPair,
+    encapsulate: FnEncapsulateKey,
+    decapsulate: FnDecapsulateKey,
+    get_attribute_value: FnGetAttributeValue,
+    digest_init: FnDigestInit,
+    digest: FnDigest,
+}
+
+// Safety: every method takes `&self` and performs one PKCS#11 call on a session
+// opened with CKF_SERIAL_SESSION, which the spec defines as serialised by the
+// module. Callers wrap this in a Mutex anyway (see `backend.rs`), matching how
+// `HsmSession` guards the cryptoki session.
+unsafe impl Send for KemFfi {}
+unsafe impl Sync for KemFfi {}
+
+macro_rules! sym {
+    ($lib:expr, $name:literal, $ty:ty) => {{
+        let n: &[u8] = concat!($name, "\0").as_bytes();
+        // Safety: the symbol's type is asserted here and matches the PKCS#11
+        // v3.2 prototype transcribed above from the vendored pkcs11f.h.
+        let s: libloading::Symbol<$ty> = unsafe {
+            $lib.get(n).map_err(|_| {
+                PqcTodayError::Kem(format!(
+                    "PKCS#11 module does not export {} — this module needs the \
+                     v3.2 entry points resolvable by name",
+                    $name
+                ))
+            })?
+        };
+        *s
+    }};
+}
+
+impl KemFfi {
+    /// Attach to the already-loaded module and open an independent session on
+    /// `slot_id`.
+    ///
+    /// `module_path` must be the same path `cryptoki` was given, so `dlopen`
+    /// returns the same image and we share its initialised state.
+    pub fn open(
+        module_path: &std::path::Path,
+        slot_id: u64,
+        user_pin: Option<&str>,
+    ) -> Result<Self, PqcTodayError> {
+        // Safety: loading a PKCS#11 module is what this crate exists to do; the
+        // path comes from the caller's own HsmConfig.
+        let lib = unsafe { libloading::Library::new(module_path) }.map_err(|e| {
+            PqcTodayError::Kem(format!("cannot load PKCS#11 module for KEM path: {e}"))
+        })?;
+
+        let initialize = sym!(lib, "C_Initialize", FnInitialize);
+        let open_session = sym!(lib, "C_OpenSession", FnOpenSession);
+        let close_session = sym!(lib, "C_CloseSession", FnCloseSession);
+        let login = sym!(lib, "C_Login", FnLogin);
+        let generate_key_pair = sym!(lib, "C_GenerateKeyPair", FnGenerateKeyPair);
+        let encapsulate = sym!(lib, "C_EncapsulateKey", FnEncapsulateKey);
+        let decapsulate = sym!(lib, "C_DecapsulateKey", FnDecapsulateKey);
+        let get_attribute_value = sym!(lib, "C_GetAttributeValue", FnGetAttributeValue);
+        let digest_init = sym!(lib, "C_DigestInit", FnDigestInit);
+        let digest = sym!(lib, "C_Digest", FnDigest);
+
+        // The module is already initialised by cryptoki. ALREADY_INITIALIZED is
+        // the expected answer and means exactly what we want: we are attached to
+        // the live instance, not a second one.
+        // Safety: NULL args means "no threading callbacks", per §5.6.
+        let rv = unsafe { initialize(std::ptr::null_mut()) };
+        if rv != CKR_OK && rv != CKR_CRYPTOKI_ALREADY_INITIALIZED {
+            return Err(PqcTodayError::Kem(format!(
+                "C_Initialize for KEM path failed: 0x{rv:08x}"
+            )));
+        }
+
+        let mut session: CkSessionHandle = 0;
+        // Safety: out-param is a live local; NULL notify/app per §5.6.
+        let rv = unsafe {
+            open_session(
+                slot_id as CkSlotId,
+                CKF_SERIAL_SESSION | CKF_RW_SESSION,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut session,
+            )
+        };
+        if rv != CKR_OK {
+            return Err(PqcTodayError::Kem(format!(
+                "C_OpenSession for KEM path failed: 0x{rv:08x}"
+            )));
+        }
+
+        if let Some(pin) = user_pin {
+            // Safety: pin bytes outlive the call.
+            let rv = unsafe { login(session, CKU_USER, pin.as_ptr(), pin.len() as CkUlong) };
+            // Already logged in on this token is fine — login state is per-token,
+            // and cryptoki's session may have got there first.
+            const CKR_USER_ALREADY_LOGGED_IN: CkRv = 0x0000_0100;
+            if rv != CKR_OK && rv != CKR_USER_ALREADY_LOGGED_IN {
+                // Safety: session handle is valid.
+                unsafe { close_session(session) };
+                return Err(PqcTodayError::Kem(format!(
+                    "C_Login for KEM path failed: 0x{rv:08x}"
+                )));
+            }
+        }
+
+        Ok(Self {
+            _lib: lib,
+            session,
+            close_session,
+            generate_key_pair,
+            encapsulate,
+            decapsulate,
+            get_attribute_value,
+            digest_init,
+            digest,
+        })
+    }
+
+    /// SHA3-256. Needed by the X-Wing combiner and unreachable through
+    /// `cryptoki`, whose mechanism allowlist has no SHA3 at all.
+    pub fn sha3_256(&self, data: &[u8]) -> Result<Vec<u8>, PqcTodayError> {
+        let mech = CkMechanism {
+            mechanism: CKM_SHA3_256,
+            p_parameter: std::ptr::null_mut(),
+            parameter_len: 0,
+        };
+        // Safety: mechanism has no parameter; session handle is valid.
+        let rv = unsafe { (self.digest_init)(self.session, &mech) };
+        if rv != CKR_OK {
+            return Err(PqcTodayError::Kem(format!(
+                "C_DigestInit(SHA3-256) failed: 0x{rv:08x}"
+            )));
+        }
+
+        let mut out = vec![0u8; 32];
+        let mut out_len: CkUlong = 32;
+        // Safety: `out` is 32 bytes and `out_len` says so; SHA3-256 emits 32.
+        let rv = unsafe {
+            (self.digest)(
+                self.session,
+                data.as_ptr(),
+                data.len() as CkUlong,
+                out.as_mut_ptr(),
+                &mut out_len,
+            )
+        };
+        if rv != CKR_OK {
+            return Err(PqcTodayError::Kem(format!(
+                "C_Digest(SHA3-256) failed: 0x{rv:08x}"
+            )));
+        }
+        out.truncate(out_len as usize);
+        Ok(out)
+    }
+
+    /// Generate an ML-KEM-768 key pair on the token.
+    /// Returns `(public_handle, private_handle)`.
+    pub fn ml_kem_768_keygen(&self) -> Result<(u64, u64), PqcTodayError> {
+        let mech = CkMechanism {
+            mechanism: CKM_ML_KEM_KEY_PAIR_GEN,
+            p_parameter: std::ptr::null_mut(),
+            parameter_len: 0,
+        };
+        let mut param_set: CkUlong = CKP_ML_KEM_768;
+        let mut ck_false: u8 = 0;
+        let mut ck_true: u8 = 1;
+
+        let pub_tmpl = [
+            CkAttribute {
+                attr_type: CKA_PARAMETER_SET,
+                p_value: &mut param_set as *mut _ as *mut c_void,
+                value_len: std::mem::size_of::<CkUlong>() as CkUlong,
+            },
+            CkAttribute {
+                attr_type: CKA_TOKEN,
+                p_value: &mut ck_false as *mut _ as *mut c_void,
+                value_len: 1,
+            },
+        ];
+        // Session key, extractable, not sensitive: the X-Wing combiner runs over
+        // the raw shared secret, so it has to come back out. It never touches
+        // the token and dies with the session.
+        let priv_tmpl = [
+            CkAttribute {
+                attr_type: CKA_PARAMETER_SET,
+                p_value: &mut param_set as *mut _ as *mut c_void,
+                value_len: std::mem::size_of::<CkUlong>() as CkUlong,
+            },
+            CkAttribute {
+                attr_type: CKA_TOKEN,
+                p_value: &mut ck_false as *mut _ as *mut c_void,
+                value_len: 1,
+            },
+            CkAttribute {
+                attr_type: CKA_EXTRACTABLE,
+                p_value: &mut ck_true as *mut _ as *mut c_void,
+                value_len: 1,
+            },
+        ];
+
+        let mut h_pub: CkObjectHandle = 0;
+        let mut h_priv: CkObjectHandle = 0;
+        // Safety: templates outlive the call; out-params are live locals.
+        let rv = unsafe {
+            (self.generate_key_pair)(
+                self.session,
+                &mech,
+                pub_tmpl.as_ptr(),
+                pub_tmpl.len() as CkUlong,
+                priv_tmpl.as_ptr(),
+                priv_tmpl.len() as CkUlong,
+                &mut h_pub,
+                &mut h_priv,
+            )
+        };
+        if rv != CKR_OK {
+            return Err(PqcTodayError::Kem(format!(
+                "C_GenerateKeyPair(ML-KEM-768) failed: 0x{rv:08x}"
+            )));
+        }
+        Ok((h_pub as u64, h_priv as u64))
+    }
+
+    /// ML-KEM encapsulation. Returns `(ciphertext, shared_secret)`.
+    ///
+    /// Two calls: the first with a NULL buffer to learn the ciphertext length
+    /// (§5.2's standard probe), the second to fill it. The shared secret comes
+    /// back as an object handle, so it is read out with `C_GetAttributeValue`.
+    pub fn ml_kem_encapsulate(&self, public_handle: u64) -> Result<(Vec<u8>, Vec<u8>), PqcTodayError> {
+        let mech = CkMechanism {
+            mechanism: CKM_ML_KEM,
+            p_parameter: std::ptr::null_mut(),
+            parameter_len: 0,
+        };
+        let tmpl = self.secret_template();
+
+        let mut ct_len: CkUlong = 0;
+        let mut h_secret: CkObjectHandle = 0;
+        // Safety: NULL ciphertext buffer is the defined length-probe form.
+        let rv = unsafe {
+            (self.encapsulate)(
+                self.session,
+                &mech,
+                public_handle as CkObjectHandle,
+                tmpl.attrs.as_ptr(),
+                tmpl.attrs.len() as CkUlong,
+                std::ptr::null_mut(),
+                &mut ct_len,
+                &mut h_secret,
+            )
+        };
+        if rv != CKR_OK {
+            return Err(PqcTodayError::Kem(format!(
+                "C_EncapsulateKey length probe failed: 0x{rv:08x}"
+            )));
+        }
+
+        let mut ct = vec![0u8; ct_len as usize];
+        // Safety: `ct` is `ct_len` bytes, as just reported by the probe.
+        let rv = unsafe {
+            (self.encapsulate)(
+                self.session,
+                &mech,
+                public_handle as CkObjectHandle,
+                tmpl.attrs.as_ptr(),
+                tmpl.attrs.len() as CkUlong,
+                ct.as_mut_ptr(),
+                &mut ct_len,
+                &mut h_secret,
+            )
+        };
+        if rv != CKR_OK {
+            return Err(PqcTodayError::Kem(format!(
+                "C_EncapsulateKey failed: 0x{rv:08x}"
+            )));
+        }
+        ct.truncate(ct_len as usize);
+
+        let ss = self.read_secret(h_secret)?;
+        Ok((ct, ss))
+    }
+
+    /// ML-KEM decapsulation. Returns the shared secret.
+    pub fn ml_kem_decapsulate(
+        &self,
+        private_handle: u64,
+        ciphertext: &[u8],
+    ) -> Result<Vec<u8>, PqcTodayError> {
+        let mech = CkMechanism {
+            mechanism: CKM_ML_KEM,
+            p_parameter: std::ptr::null_mut(),
+            parameter_len: 0,
+        };
+        let tmpl = self.secret_template();
+
+        let mut h_secret: CkObjectHandle = 0;
+        // Safety: ciphertext outlives the call; out-param is a live local.
+        let rv = unsafe {
+            (self.decapsulate)(
+                self.session,
+                &mech,
+                private_handle as CkObjectHandle,
+                tmpl.attrs.as_ptr(),
+                tmpl.attrs.len() as CkUlong,
+                ciphertext.as_ptr(),
+                ciphertext.len() as CkUlong,
+                &mut h_secret,
+            )
+        };
+        if rv != CKR_OK {
+            return Err(PqcTodayError::Kem(format!(
+                "C_DecapsulateKey failed: 0x{rv:08x}"
+            )));
+        }
+        self.read_secret(h_secret)
+    }
+
+    /// Template for the derived shared-secret object. Kept in one place so
+    /// encapsulate and decapsulate cannot drift apart — if they asked for
+    /// different attributes, the two sides would produce objects that compare
+    /// unequal for reasons unrelated to the cryptography.
+    fn secret_template(&self) -> SecretTemplate {
+        SecretTemplate::new()
+    }
+
+    /// Read `CKA_VALUE` off a derived secret object.
+    fn read_secret(&self, handle: CkObjectHandle) -> Result<Vec<u8>, PqcTodayError> {
+        let mut probe = [CkAttribute {
+            attr_type: CKA_VALUE,
+            p_value: std::ptr::null_mut(),
+            value_len: 0,
+        }];
+        // Safety: NULL p_value is the defined length-probe form (§5.7).
+        let rv = unsafe {
+            (self.get_attribute_value)(self.session, handle, probe.as_mut_ptr(), 1)
+        };
+        if rv != CKR_OK {
+            return Err(PqcTodayError::Kem(format!(
+                "C_GetAttributeValue(CKA_VALUE) probe failed: 0x{rv:08x} — the \
+                 derived secret is probably not extractable"
+            )));
+        }
+
+        let mut buf = vec![0u8; probe[0].value_len as usize];
+        let mut attr = [CkAttribute {
+            attr_type: CKA_VALUE,
+            p_value: buf.as_mut_ptr() as *mut c_void,
+            value_len: probe[0].value_len,
+        }];
+        // Safety: buffer is exactly the length the probe reported.
+        let rv =
+            unsafe { (self.get_attribute_value)(self.session, handle, attr.as_mut_ptr(), 1) };
+        if rv != CKR_OK {
+            return Err(PqcTodayError::Kem(format!(
+                "C_GetAttributeValue(CKA_VALUE) failed: 0x{rv:08x}"
+            )));
+        }
+        Ok(buf)
+    }
+}
+
+/// Owns the attribute backing store so the pointers in `attrs` stay valid.
+/// Returning a bare `[CkAttribute; N]` from a helper would leave those pointers
+/// dangling at the caller — the values they point at would have been locals of
+/// the helper.
+struct SecretTemplate {
+    attrs: [CkAttribute; 4],
+    _class: Box<CkUlong>,
+    _key_type: Box<CkUlong>,
+    _flags: Box<[u8; 2]>,
+}
+
+impl SecretTemplate {
+    fn new() -> Self {
+        let mut class = Box::new(CKO_SECRET_KEY);
+        let mut key_type = Box::new(CKK_GENERIC_SECRET);
+        // [0] = CKA_SENSITIVE false, [1] = CKA_EXTRACTABLE true.
+        let mut flags = Box::new([0u8, 1u8]);
+
+        let attrs = [
+            CkAttribute {
+                attr_type: CKA_CLASS,
+                p_value: &mut *class as *mut _ as *mut c_void,
+                value_len: std::mem::size_of::<CkUlong>() as CkUlong,
+            },
+            CkAttribute {
+                attr_type: CKA_KEY_TYPE,
+                p_value: &mut *key_type as *mut _ as *mut c_void,
+                value_len: std::mem::size_of::<CkUlong>() as CkUlong,
+            },
+            CkAttribute {
+                attr_type: CKA_SENSITIVE,
+                p_value: &mut flags[0] as *mut _ as *mut c_void,
+                value_len: 1,
+            },
+            CkAttribute {
+                attr_type: CKA_EXTRACTABLE,
+                p_value: &mut flags[1] as *mut _ as *mut c_void,
+                value_len: 1,
+            },
+        ];
+
+        Self {
+            attrs,
+            _class: class,
+            _key_type: key_type,
+            _flags: flags,
+        }
+    }
+}
+
+impl Drop for KemFfi {
+    fn drop(&mut self) {
+        // Safety: session handle was returned by C_OpenSession and is closed
+        // exactly once. Errors are ignored — there is nothing useful to do with
+        // a failure here, and panicking in Drop is worse.
+        unsafe { (self.close_session)(self.session) };
+    }
+}
