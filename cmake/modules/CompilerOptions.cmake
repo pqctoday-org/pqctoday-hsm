@@ -518,4 +518,11 @@ else(BUILD_TESTS)
     message(STATUS "Not building tests")
 endif(BUILD_TESTS)
 
+if(LOG_TO_STDERR)
+    set(DEBUG_LOG_STDERR 1)
+    message(STATUS "Engine log: mirrored to stderr (test diagnostics visible in CI)")
+else()
+    message(STATUS "Engine log: syslog only")
+endif()
+
 configure_file(config.h.in.cmake ${CMAKE_BINARY_DIR}/config.h)

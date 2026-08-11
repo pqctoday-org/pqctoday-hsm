@@ -163,6 +163,27 @@
 /* Compile with RIPEMD-160 (native legacy provider; OFF for WASM/FIPS) */
 #cmakedefine WITH_RIPEMD160 @WITH_RIPEMD160@
 
+/* Mirror the engine's log to stderr as well as syslog.
+ *
+ * Driven by the LOG_TO_STDERR CMake option, which defaults ON for test builds.
+ *
+ * DELIBERATELY PLACED HERE, above the _WIN32 block below. It used to sit inside
+ * that block — whose #endif is the LAST LINE OF THIS FILE — so on Linux and
+ * macOS this setting was unreachable entirely. Not merely off by default:
+ * uncommenting the old `#define` by hand would have done nothing on the
+ * platforms CI actually runs. Combined with ERROR_MSG otherwise going only to
+ * syslog, which nothing in CI or in a container reads, the practical effect was
+ * that the engine's error messages could never be seen during a test failure.
+ * Three days of intermittent p11test failures were investigated from test names
+ * alone because of it.
+ *
+ * Caught by a positive control: with the define supposedly on, a program that
+ * calls ERROR_MSG printed nothing, and `g++ -dM -E` showed the macro was not
+ * defined at all. Verifying that the switch turns something ON is what found
+ * this; checking only that the healthy path still passed would not have. */
+
+#cmakedefine DEBUG_LOG_STDERR 1
+
 /*
  * Remainder is specific for Windows build to
  * set some default that aren't configured from
@@ -233,10 +254,7 @@ int setenv(const char *name, const char *value, int overwrite);
 #undef min
 #undef max
 
-/* Temporary for debug */
-
-#undef DEBUG_LOG_STDERR
-// #define DEBUG_LOG_STDERR 1
+/* DEBUG_LOG_STDERR is defined above, OUTSIDE the _WIN32 block — see there. */
 
 /* To avoid unsafe warnings (off) */
 

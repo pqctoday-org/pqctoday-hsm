@@ -7,6 +7,10 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # ---- Build Options ----------------------------------------------------------
 
 option(BUILD_TESTS "Compile tests along with libraries" OFF)
+# Defaults to ON whenever tests are built: a failing test whose engine errors
+# go only to syslog tells you nothing, which is exactly how the 2026-08 p11test
+# flake stayed unexplained. Off for production builds.
+option(LOG_TO_STDERR "Mirror engine log messages to stderr (default: on for test builds)" ${BUILD_TESTS})
 option(DISABLE_NON_PAGED_MEMORY "Disable non-paged memory for secure storage" OFF)
 option(DISABLE_VISIBILITY "Disables and unsets -fvisibility=hidden" OFF)
 option(ENABLE_PEDANTIC "Enable pedantic compile mode" OFF)

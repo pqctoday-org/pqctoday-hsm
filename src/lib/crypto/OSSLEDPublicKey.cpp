@@ -101,12 +101,20 @@ unsigned long OSSLEDPublicKey::getOrderLength() const
 }
 
 // Set from OpenSSL representation
-void OSSLEDPublicKey::setFromOSSL(const EVP_PKEY* inPKEY)
+// Returns false when the key could not be populated.
+//
+// CHANGED FROM void 2026-08-10. Every early return below leaves the key
+// object EMPTY, and because this reported nothing, OSSLEDDSA::generateKeyPair
+// and OSSLEDPrivateKey::PKCS8Decode both went on to return success with an
+// unpopulated key. The failure then resurfaced somewhere unrelated as a
+// generic non-CKR_OK, which is why the intermittent p11test EdDSA failures
+// pointed at derive and sign when both were actually dying in KEYGEN.
+bool OSSLEDPublicKey::setFromOSSL(const EVP_PKEY* inPKEY)
 {
 	nid = EVP_PKEY_id(inPKEY);
 	if (nid == NID_undef)
 	{
-		return;
+		return false;
 	}
 	ByteString inEC = OSSL::oid2ByteString(nid);
 	EDPublicKey::setEC(inEC);
@@ -117,7 +125,7 @@ void OSSLEDPublicKey::setFromOSSL(const EVP_PKEY* inPKEY)
 	if (len <= 0)
 	{
 		ERROR_MSG("Could not encode EDDSA public key");
-		return;
+		return false;
 	}
 	ByteString der;
 	der.resize(len);
@@ -130,7 +138,7 @@ void OSSLEDPublicKey::setFromOSSL(const EVP_PKEY* inPKEY)
 		if (len != (X25519_KEYLEN + PREFIXLEN))
 		{
 			ERROR_MSG("Invalid size. Expected: %lu, Actual: %lu", X25519_KEYLEN + PREFIXLEN, len);
-			return;
+			return false;
 		}
 		raw.resize(X25519_KEYLEN);
 		memcpy(&raw[0], &der[PREFIXLEN], X25519_KEYLEN);
@@ -139,7 +147,7 @@ void OSSLEDPublicKey::setFromOSSL(const EVP_PKEY* inPKEY)
 		if (len != (X448_KEYLEN + PREFIXLEN))
 		{
 			ERROR_MSG("Invalid size. Expected: %lu, Actual: %lu", X448_KEYLEN + PREFIXLEN, len);
-			return;
+			return false;
 		}
 		raw.resize(X448_KEYLEN);
 		memcpy(&raw[0], &der[PREFIXLEN], X448_KEYLEN);
@@ -149,15 +157,17 @@ void OSSLEDPublicKey::setFromOSSL(const EVP_PKEY* inPKEY)
 		{
 			ERROR_MSG("Invalid size. Expected: %lu, Actual: %lu",
 				  ED448_KEYLEN + PREFIXLEN, len);
-			return;
+			return false;
 		}
 		raw.resize(ED448_KEYLEN);
 		memcpy(&raw[0], &der[PREFIXLEN], ED448_KEYLEN);
 		break;
 	default:
-		return;
+		return false;
 	}
 	setA(DERUTIL::raw2Octet(raw));
+
+	return true;
 }
 
 // Check if the key is of the given type
