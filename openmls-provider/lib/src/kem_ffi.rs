@@ -92,6 +92,7 @@ const CKA_VALUE_LEN: CkAttributeType = 0x0000_0161;
 /// it simply is not allowed to be derived from.
 const CKA_DERIVE: CkAttributeType = 0x0000_010c;
 const CKA_PARAMETER_SET: CkAttributeType = 0x0000_061d;
+const CKA_SEED: CkAttributeType = 0x0000_0637;
 
 const CKO_SECRET_KEY: CkUlong = 0x0000_0004;
 const CKK_GENERIC_SECRET: CkUlong = 0x0000_0010;
@@ -482,6 +483,10 @@ impl KemFfi {
     /// Generate an ML-KEM-768 key pair on the token.
     /// Returns `(public_handle, private_handle)`.
     pub fn ml_kem_768_keygen(&self) -> Result<(u64, u64), PqcTodayError> {
+        self.keygen_inner(None)
+    }
+
+    fn keygen_inner(&self, seed: Option<&[u8]>) -> Result<(u64, u64), PqcTodayError> {
         let mech = CkMechanism {
             mechanism: CKM_ML_KEM_KEY_PAIR_GEN,
             p_parameter: std::ptr::null_mut(),
@@ -524,6 +529,21 @@ impl KemFfi {
             },
         ];
 
+        // Deterministic keygen: append CKA_SEED. The vector must outlive the
+        // call, so it is bound here rather than built inline.
+        let mut seed_buf = seed.map(|s| s.to_vec());
+        let mut priv_attrs: Vec<CkAttribute> = priv_tmpl
+            .iter()
+            .map(|a| CkAttribute { attr_type: a.attr_type, p_value: a.p_value, value_len: a.value_len })
+            .collect();
+        if let Some(sb) = seed_buf.as_mut() {
+            priv_attrs.push(CkAttribute {
+                attr_type: CKA_SEED,
+                p_value: sb.as_mut_ptr() as *mut c_void,
+                value_len: sb.len() as CkUlong,
+            });
+        }
+
         let mut h_pub: CkObjectHandle = 0;
         let mut h_priv: CkObjectHandle = 0;
         // Safety: templates outlive the call; out-params are live locals.
@@ -533,8 +553,8 @@ impl KemFfi {
                 &mech,
                 pub_tmpl.as_ptr(),
                 pub_tmpl.len() as CkUlong,
-                priv_tmpl.as_ptr(),
-                priv_tmpl.len() as CkUlong,
+                priv_attrs.as_ptr(),
+                priv_attrs.len() as CkUlong,
                 &mut h_pub,
                 &mut h_priv,
             )
@@ -545,6 +565,27 @@ impl KemFfi {
             )));
         }
         Ok((h_pub as u64, h_priv as u64))
+    }
+
+    /// Deterministic ML-KEM-768 key generation from a 64-byte `d ‖ z` seed
+    /// (FIPS 203 `KeyGen_internal`), via `CKA_SEED`.
+    ///
+    /// X-Wing needs this: its keypair is defined as a function of a seed, so a
+    /// randomly generated ML-KEM key cannot reproduce a published test vector
+    /// and cannot round-trip through X-Wing's 32-byte private key encoding.
+    pub fn ml_kem_768_keygen_from_seed(&self, seed: &[u8]) -> Result<(u64, u64), PqcTodayError> {
+        if seed.len() != 64 {
+            return Err(PqcTodayError::Kem(format!(
+                "ML-KEM seed must be 64 bytes (d ‖ z), got {}",
+                seed.len()
+            )));
+        }
+        self.keygen_inner(Some(seed))
+    }
+
+    /// Read an ML-KEM public key's raw bytes.
+    pub fn read_public_key(&self, handle: u64) -> Result<Vec<u8>, PqcTodayError> {
+        self.read_attribute(handle as CkObjectHandle, CKA_VALUE)
     }
 
     /// ML-KEM encapsulation. Returns `(ciphertext, shared_secret)`.
@@ -651,8 +692,16 @@ impl KemFfi {
 
     /// Read `CKA_VALUE` off a derived secret object.
     fn read_secret(&self, handle: CkObjectHandle) -> Result<Vec<u8>, PqcTodayError> {
+        self.read_attribute(handle, CKA_VALUE)
+    }
+
+    fn read_attribute(
+        &self,
+        handle: CkObjectHandle,
+        attr_type: CkAttributeType,
+    ) -> Result<Vec<u8>, PqcTodayError> {
         let mut probe = [CkAttribute {
-            attr_type: CKA_VALUE,
+            attr_type,
             p_value: std::ptr::null_mut(),
             value_len: 0,
         }];
@@ -669,7 +718,7 @@ impl KemFfi {
 
         let mut buf = vec![0u8; probe[0].value_len as usize];
         let mut attr = [CkAttribute {
-            attr_type: CKA_VALUE,
+            attr_type,
             p_value: buf.as_mut_ptr() as *mut c_void,
             value_len: probe[0].value_len,
         }];
