@@ -108,6 +108,26 @@ run_step_host "wasm CACP smoke" \
   "cd '$ROOT/wasm' && node smoke/smoke.cjs 2>&1 | tail -2 | grep -q 'PASS'"
 
 if [[ $RUN_CPP == 1 ]]; then
+  # Preflight. $RUST_CONTAINER is a long-lived pet container built for Rust, and
+  # it shipped without cmake, ctest or cppunit — so this step failed during
+  # SETUP, never reaching a single test, while looking like an ordinary build
+  # error. Check for the tools and install them once rather than rediscovering
+  # this. Found 2026-08-10.
+  say "step $((STEP+1)) preflight: C++ toolchain in $RUST_CONTAINER"
+  if ! dexec "command -v cmake >/dev/null && command -v ctest >/dev/null && pkg-config --exists cppunit" 2>/dev/null; then
+    echo "  installing cmake + libcppunit-dev (one-off, container is not rebuilt)"
+    dexec "apt-get update -qq >/dev/null 2>&1 && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq cmake libcppunit-dev >/dev/null 2>&1" || true
+  fi
+  if dexec "command -v cmake >/dev/null && command -v ctest >/dev/null && pkg-config --exists cppunit" 2>/dev/null; then
+    ok "C++ toolchain present ($(dexec 'cmake --version | head -1' 2>/dev/null))"
+  else
+    bad "C++ toolchain missing in $RUST_CONTAINER — cannot run ctest"
+  fi
+
+  # NOTE ON COVERAGE: this container is arm64 and links a RELEASE OpenSSL, while
+  # CI is amd64. It therefore cannot reproduce arch- or OpenSSL-specific faults —
+  # the 2026-08 EdDSA keygen flake (CI building OpenSSL master; see PR #160) was
+  # invisible here by construction. Green locally is necessary, not sufficient.
   run_step "C++ ctest (incl. PKCS#11 v3.2 compliance harness)" \
     "cd /ag/pqctoday-hsm && (test -d build || cmake -S . -B build -DWITH_RIPEMD160=ON >/dev/null) && \
      cmake --build build -j\$(nproc) >/dev/null && cd build && ctest --output-on-failure"
