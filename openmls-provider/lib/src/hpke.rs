@@ -29,33 +29,95 @@ use x25519_dalek::{PublicKey, StaticSecret};
 use crate::backend::PkcsOps;
 use crate::error::PqcTodayError;
 
-// RFC 9180 §7.1 / §7.2 constants for DhKem25519 + HKDF-SHA256 + AES-128-GCM.
-const KEM_ID: u16 = 0x0020;
-const KDF_ID: u16 = 0x0001;
-const AEAD_ID: u16 = 0x0001;
-const NK: usize = 16; // AEAD key length
-const NN: usize = 12; // AEAD nonce length
 const NH: usize = 32; // HKDF-SHA256 output length
-const NSECRET: usize = 32; // DHKEM(X25519) shared-secret length
 const MODE_BASE: u8 = 0x00;
 
-pub(crate) fn supports_pkcs11_path(cfg: &HpkeConfig) -> bool {
-    matches!(cfg.0, HpkeKemType::DhKem25519)
-        && matches!(cfg.1, HpkeKdfType::HkdfSha256)
-        && matches!(cfg.2, HpkeAeadType::AesGcm128)
+/// Which KEM a suite uses. The two have different *shapes*, not just different
+/// algorithms: DH derives a secret from a private scalar and a peer public key,
+/// while X-Wing encapsulates — the sender produces a ciphertext and a secret
+/// from the recipient's public key alone.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum KemKind {
+    /// DHKEM(X25519, HKDF-SHA256) — RFC 9180 §4.1.
+    DhX25519,
+    /// X-Wing = ML-KEM-768 + X25519 — draft-connolly-cfrg-xwing-kem.
+    XWing,
 }
 
-fn kem_suite_id() -> Vec<u8> {
+/// A supported HPKE suite, as data. These were hard-coded constants for
+/// ciphersuite 1; adding a second suite is the reason they are not any more.
+#[derive(Clone, Copy)]
+pub(crate) struct Suite {
+    pub(crate) kem: KemKind,
+    kem_id: u16,
+    kdf_id: u16,
+    aead_id: u16,
+    /// AEAD key length.
+    nk: usize,
+    /// AEAD nonce length.
+    nn: usize,
+    /// KEM shared-secret length.
+    nsecret: usize,
+    /// KEM ciphertext ("enc") length.
+    pub(crate) nenc: usize,
+    /// KEM public key length.
+    pub(crate) npk: usize,
+}
+
+/// RFC 9180 §7.1–7.3 for the DH suite; draft-connolly-cfrg-xwing-kem §7 for
+/// X-Wing, whose registered HPKE KEM id is 25722 (0x647a).
+const DHKEM_X25519_SHA256_AES128: Suite = Suite {
+    kem: KemKind::DhX25519,
+    kem_id: 0x0020,
+    kdf_id: 0x0001,
+    aead_id: 0x0001,
+    nk: 16,
+    nn: 12,
+    nsecret: 32,
+    nenc: 32,
+    npk: 32,
+};
+
+const XWING_SHA256_CHACHA20: Suite = Suite {
+    kem: KemKind::XWing,
+    kem_id: 0x647a,
+    kdf_id: 0x0001,
+    aead_id: 0x0003,
+    nk: 32,
+    nn: 12,
+    nsecret: 32,
+    nenc: 1120,
+    npk: 1216,
+};
+
+/// The suite for this config, if we can run it on the HSM path.
+pub(crate) fn select(cfg: &HpkeConfig) -> Option<Suite> {
+    match (cfg.0, cfg.1, cfg.2) {
+        (HpkeKemType::DhKem25519, HpkeKdfType::HkdfSha256, HpkeAeadType::AesGcm128) => {
+            Some(DHKEM_X25519_SHA256_AES128)
+        }
+        (HpkeKemType::XWingKemDraft6, HpkeKdfType::HkdfSha256, HpkeAeadType::ChaCha20Poly1305) => {
+            Some(XWING_SHA256_CHACHA20)
+        }
+        _ => None,
+    }
+}
+
+pub(crate) fn supports_pkcs11_path(cfg: &HpkeConfig) -> bool {
+    select(cfg).is_some()
+}
+
+fn kem_suite_id(s: &Suite) -> Vec<u8> {
     let mut v = b"KEM".to_vec();
-    v.extend_from_slice(&KEM_ID.to_be_bytes());
+    v.extend_from_slice(&s.kem_id.to_be_bytes());
     v
 }
 
-fn hpke_suite_id() -> Vec<u8> {
+fn hpke_suite_id(s: &Suite) -> Vec<u8> {
     let mut v = b"HPKE".to_vec();
-    v.extend_from_slice(&KEM_ID.to_be_bytes());
-    v.extend_from_slice(&KDF_ID.to_be_bytes());
-    v.extend_from_slice(&AEAD_ID.to_be_bytes());
+    v.extend_from_slice(&s.kem_id.to_be_bytes());
+    v.extend_from_slice(&s.kdf_id.to_be_bytes());
+    v.extend_from_slice(&s.aead_id.to_be_bytes());
     v
 }
 
@@ -146,9 +208,10 @@ fn dh_in_hsm(ops: &dyn PkcsOps, sk: &[u8], peer_pk: &[u8]) -> Result<Vec<u8>, Pq
 
 fn derive_keypair_x25519(
     ops: &dyn PkcsOps,
+    su: &Suite,
     ikm: &[u8],
 ) -> Result<([u8; 32], [u8; 32]), PqcTodayError> {
-    let sid = kem_suite_id();
+    let sid = kem_suite_id(su);
     let dkp_prk = labeled_extract(ops, &sid, &[], b"dkp_prk", ikm)?;
     let sk_bytes = labeled_expand(ops, &sid, &dkp_prk, b"sk", &[], 32)?;
     let mut sk = [0u8; 32];
@@ -161,41 +224,150 @@ fn derive_keypair_x25519(
 
 fn extract_and_expand(
     ops: &dyn PkcsOps,
+    su: &Suite,
     dh: &[u8],
     kem_context: &[u8],
 ) -> Result<Vec<u8>, PqcTodayError> {
-    let sid = kem_suite_id();
+    let sid = kem_suite_id(su);
     let eae_prk = labeled_extract(ops, &sid, &[], b"eae_prk", dh)?;
-    labeled_expand(ops, &sid, &eae_prk, b"shared_secret", kem_context, NSECRET)
+    labeled_expand(ops, &sid, &eae_prk, b"shared_secret", kem_context, su.nsecret)
 }
 
+// ── X-Wing — draft-connolly-cfrg-xwing-kem §5 ────────────────────────────────
+//
+// §5.6: X-Wing satisfies the HPKE KEM interface directly. Encap() IS
+// Encapsulate() and the serialize functions are the identity, so unlike DHKEM
+// there is no extract-and-expand wrapper — the KEM's own output is the shared
+// secret.
+
+/// §5.3: SHA3-256(ss_M ‖ ss_X ‖ ct_X ‖ pk_X ‖ XWingLabel), label = 5c2e2f2f5e5c.
+const XWING_LABEL: [u8; 6] = [0x5c, 0x2e, 0x2f, 0x2f, 0x5e, 0x5c];
+
+fn xwing_combine(
+    ops: &dyn PkcsOps,
+    ss_m: &[u8],
+    ss_x: &[u8],
+    ct_x: &[u8],
+    pk_x: &[u8],
+) -> Result<Vec<u8>, PqcTodayError> {
+    let mut buf = Vec::with_capacity(32 * 4 + XWING_LABEL.len());
+    buf.extend_from_slice(ss_m);
+    buf.extend_from_slice(ss_x);
+    buf.extend_from_slice(ct_x);
+    buf.extend_from_slice(pk_x);
+    buf.extend_from_slice(&XWING_LABEL);
+    ops.sha3_256(&buf)
+}
+
+/// §5.2: expandDecapsulationKey — SHAKE256(sk, 96) split into ML-KEM's
+/// (d ‖ z) and the X25519 scalar. The private key IS the 32-byte seed.
+fn xwing_expand(
+    ops: &dyn PkcsOps,
+    sk: &[u8],
+) -> Result<(Vec<u8>, [u8; 32]), PqcTodayError> {
+    if sk.len() != 32 {
+        return Err(PqcTodayError::Hpke(format!(
+            "X-Wing decapsulation key must be 32 bytes, got {}",
+            sk.len()
+        )));
+    }
+    let expanded = ops.shake256(sk, 96)?;
+    let mut sk_x = [0u8; 32];
+    sk_x.copy_from_slice(&expanded[64..96]);
+    Ok((expanded[0..64].to_vec(), sk_x))
+}
+
+fn xwing_encap(
+    ops: &dyn PkcsOps,
+    pk: &[u8],
+    ephemeral_ikm: &[u8],
+) -> Result<(Vec<u8>, Vec<u8>), PqcTodayError> {
+    if pk.len() != 1216 {
+        return Err(PqcTodayError::Hpke(format!(
+            "X-Wing encapsulation key must be 1216 bytes, got {}",
+            pk.len()
+        )));
+    }
+    let (pk_m, pk_x) = pk.split_at(1184);
+
+    let (ct_m, ss_m) = ops.ml_kem_encapsulate_to(pk_m)?;
+
+    // §5.4: ek_X = random(32); ct_X = X25519(ek_X, base); ss_X = X25519(ek_X, pk_X).
+    // The ephemeral scalar comes from the caller's ikm so the caller controls
+    // the randomness source, matching the DH path.
+    let mut ek_x = [0u8; 32];
+    let seed = ops.shake256(ephemeral_ikm, 32)?;
+    ek_x.copy_from_slice(&seed);
+    let sec = StaticSecret::from(ek_x);
+    let ct_x = PublicKey::from(&sec).to_bytes();
+    let ss_x = dh_in_hsm(ops, &ek_x, pk_x)?;
+
+    let ss = xwing_combine(ops, &ss_m, &ss_x, &ct_x, pk_x)?;
+    let mut enc = Vec::with_capacity(1120);
+    enc.extend_from_slice(&ct_m);
+    enc.extend_from_slice(&ct_x);
+    Ok((ss, enc))
+}
+
+fn xwing_decap(ops: &dyn PkcsOps, enc: &[u8], sk: &[u8]) -> Result<Vec<u8>, PqcTodayError> {
+    if enc.len() != 1120 {
+        return Err(PqcTodayError::Hpke(format!(
+            "X-Wing ciphertext must be 1120 bytes, got {}",
+            enc.len()
+        )));
+    }
+    let (dz, sk_x) = xwing_expand(ops, sk)?;
+    let (_pk_m, priv_handle) = ops.ml_kem_768_keygen_from_seed(&dz)?;
+
+    let (ct_m, ct_x) = enc.split_at(1088);
+    let ss_m = ops.ml_kem_decapsulate(priv_handle, ct_m)?;
+    let ss_x = dh_in_hsm(ops, &sk_x, ct_x)?;
+    let pk_x = PublicKey::from(&StaticSecret::from(sk_x)).to_bytes();
+
+    xwing_combine(ops, &ss_m, &ss_x, ct_x, &pk_x)
+}
+
+/// Encapsulate. Returns `(shared_secret, enc)`.
 fn encap(
     ops: &dyn PkcsOps,
-    pk_r: &[u8; 32],
+    su: &Suite,
+    pk_r: &[u8],
     ephemeral_ikm: &[u8],
-) -> Result<([u8; 32], [u8; 32]), PqcTodayError> {
-    // (shared_secret, enc)
-    let (sk_e, pk_e) = derive_keypair_x25519(ops, ephemeral_ikm)?;
-    let dh = dh_in_hsm(ops, &sk_e, pk_r)?;
-    let mut kem_context = Vec::with_capacity(64);
-    kem_context.extend_from_slice(&pk_e);
-    kem_context.extend_from_slice(pk_r);
-    let ss = extract_and_expand(ops, &dh, &kem_context)?;
-    let mut out_ss = [0u8; 32];
-    out_ss.copy_from_slice(&ss);
-    Ok((out_ss, pk_e))
+) -> Result<(Vec<u8>, Vec<u8>), PqcTodayError> {
+    match su.kem {
+        KemKind::XWing => xwing_encap(ops, pk_r, ephemeral_ikm),
+        KemKind::DhX25519 => {
+            let pk_r = fixed_32(pk_r)?;
+            let (sk_e, pk_e) = derive_keypair_x25519(ops, su, ephemeral_ikm)?;
+            let dh = dh_in_hsm(ops, &sk_e, &pk_r)?;
+            let mut kem_context = Vec::with_capacity(64);
+            kem_context.extend_from_slice(&pk_e);
+            kem_context.extend_from_slice(&pk_r);
+            let ss = extract_and_expand(ops, su, &dh, &kem_context)?;
+            Ok((ss, pk_e.to_vec()))
+        }
+    }
 }
 
-fn decap(ops: &dyn PkcsOps, enc: &[u8; 32], sk_r: &[u8; 32]) -> Result<[u8; 32], PqcTodayError> {
-    let dh = dh_in_hsm(ops, sk_r, enc)?;
-    let pk_r = PublicKey::from(&StaticSecret::from(*sk_r)).to_bytes();
-    let mut kem_context = Vec::with_capacity(64);
-    kem_context.extend_from_slice(enc);
-    kem_context.extend_from_slice(&pk_r);
-    let ss = extract_and_expand(ops, &dh, &kem_context)?;
-    let mut out_ss = [0u8; 32];
-    out_ss.copy_from_slice(&ss);
-    Ok(out_ss)
+fn decap(
+    ops: &dyn PkcsOps,
+    su: &Suite,
+    enc: &[u8],
+    sk_r: &[u8],
+) -> Result<Vec<u8>, PqcTodayError> {
+    match su.kem {
+        KemKind::XWing => xwing_decap(ops, enc, sk_r),
+        KemKind::DhX25519 => {
+            let enc = fixed_32(enc)?;
+            let sk_r = fixed_32(sk_r)?;
+            let dh = dh_in_hsm(ops, &sk_r, &enc)?;
+            let pk_r = PublicKey::from(&StaticSecret::from(sk_r)).to_bytes();
+            let mut kem_context = Vec::with_capacity(64);
+            kem_context.extend_from_slice(&enc);
+            kem_context.extend_from_slice(&pk_r);
+            extract_and_expand(ops, su, &dh, &kem_context)
+        }
+    }
 }
 
 // ── Key Schedule — RFC 9180 §5.1, mode_base only ────────────────────────────
@@ -209,10 +381,11 @@ struct Schedule {
 
 fn key_schedule_base(
     ops: &dyn PkcsOps,
+    su: &Suite,
     shared_secret: &[u8],
     info: &[u8],
 ) -> Result<Schedule, PqcTodayError> {
-    let sid = hpke_suite_id();
+    let sid = hpke_suite_id(su);
     let psk_id_hash = labeled_extract(ops, &sid, &[], b"psk_id_hash", b"")?;
     let info_hash = labeled_extract(ops, &sid, &[], b"info_hash", info)?;
     let mut ksctx = Vec::with_capacity(1 + psk_id_hash.len() + info_hash.len());
@@ -220,8 +393,8 @@ fn key_schedule_base(
     ksctx.extend_from_slice(&psk_id_hash);
     ksctx.extend_from_slice(&info_hash);
     let secret = labeled_extract(ops, &sid, shared_secret, b"secret", b"")?;
-    let key = labeled_expand(ops, &sid, &secret, b"key", &ksctx, NK)?;
-    let base_nonce = labeled_expand(ops, &sid, &secret, b"base_nonce", &ksctx, NN)?;
+    let key = labeled_expand(ops, &sid, &secret, b"key", &ksctx, su.nk)?;
+    let base_nonce = labeled_expand(ops, &sid, &secret, b"base_nonce", &ksctx, su.nn)?;
     let exporter_secret = labeled_expand(ops, &sid, &secret, b"exp", &ksctx, NH)?;
     Ok(Schedule {
         key,
@@ -232,24 +405,37 @@ fn key_schedule_base(
 
 // ── AEAD via PkcsOps ─────────────────────────────────────────────────────────
 
+/// AEAD id 0x0003 is ChaCha20-Poly1305, which `aead_encrypt` does not cover —
+/// that method is AES-GCM only. Routed to the HSM's ChaCha mechanism rather
+/// than a software fallback.
 fn aead_seal(
     ops: &dyn PkcsOps,
+    su: &Suite,
     key: &[u8],
     nonce: &[u8],
     aad: &[u8],
     pt: &[u8],
 ) -> Result<Vec<u8>, PqcTodayError> {
-    ops.aead_encrypt(key, nonce, aad, pt)
+    if su.aead_id == 0x0003 {
+        ops.chacha20_poly1305(true, key, nonce, aad, pt)
+    } else {
+        ops.aead_encrypt(key, nonce, aad, pt)
+    }
 }
 
 fn aead_open(
     ops: &dyn PkcsOps,
+    su: &Suite,
     key: &[u8],
     nonce: &[u8],
     aad: &[u8],
     ct: &[u8],
 ) -> Result<Vec<u8>, PqcTodayError> {
-    ops.aead_decrypt(key, nonce, aad, ct)
+    if su.aead_id == 0x0003 {
+        ops.chacha20_poly1305(false, key, nonce, aad, ct)
+    } else {
+        ops.aead_decrypt(key, nonce, aad, ct)
+    }
 }
 
 // ── Public entry points ─────────────────────────────────────────────────────
@@ -266,46 +452,75 @@ fn fixed_32(b: &[u8]) -> Result<[u8; 32], PqcTodayError> {
     Ok(out)
 }
 
-pub(crate) fn derive_keypair(ops: &dyn PkcsOps, ikm: &[u8]) -> Result<HpkeKeyPair, CryptoError> {
-    let (sk, pk) = derive_keypair_x25519(ops, ikm).map_err(CryptoError::from)?;
-    Ok(HpkeKeyPair {
-        private: HpkePrivateKey::from(sk.to_vec()),
-        public: pk.to_vec(),
-    })
+pub(crate) fn derive_keypair(
+    ops: &dyn PkcsOps,
+    su: &Suite,
+    ikm: &[u8],
+) -> Result<HpkeKeyPair, CryptoError> {
+    match su.kem {
+        KemKind::DhX25519 => {
+            let (sk, pk) = derive_keypair_x25519(ops, su, ikm).map_err(CryptoError::from)?;
+            Ok(HpkeKeyPair {
+                private: HpkePrivateKey::from(sk.to_vec()),
+                public: pk.to_vec(),
+            })
+        }
+        KemKind::XWing => {
+            // §5.6: DeriveKeyPair(ikm) = SHAKE256(ikm, 32) → GenerateKeyPairDerand.
+            // The private key IS that 32-byte seed; the public key is derived
+            // from it, never stored alongside it.
+            let sk = ops.shake256(ikm, 32).map_err(CryptoError::from)?;
+            let (dz, sk_x) = xwing_expand(ops, &sk).map_err(CryptoError::from)?;
+            let (pk_m, _h) = ops
+                .ml_kem_768_keygen_from_seed(&dz)
+                .map_err(CryptoError::from)?;
+            let pk_x = PublicKey::from(&StaticSecret::from(sk_x)).to_bytes();
+            let mut pk = Vec::with_capacity(su.npk);
+            pk.extend_from_slice(&pk_m);
+            pk.extend_from_slice(&pk_x);
+            Ok(HpkeKeyPair {
+                private: HpkePrivateKey::from(sk),
+                public: pk,
+            })
+        }
+    }
 }
 
 pub(crate) fn seal(
     ops: &dyn PkcsOps,
+    su: &Suite,
     pk_r_bytes: &[u8],
     info: &[u8],
     aad: &[u8],
     pt: &[u8],
     ephemeral_ikm: &[u8],
 ) -> Result<HpkeCiphertext, CryptoError> {
-    let pk_r = fixed_32(pk_r_bytes).map_err(CryptoError::from)?;
-    let (shared_secret, enc) = encap(ops, &pk_r, ephemeral_ikm).map_err(CryptoError::from)?;
-    let sch = key_schedule_base(ops, &shared_secret, info).map_err(CryptoError::from)?;
+    let (shared_secret, enc) =
+        encap(ops, su, pk_r_bytes, ephemeral_ikm).map_err(CryptoError::from)?;
+    let sch = key_schedule_base(ops, su, &shared_secret, info).map_err(CryptoError::from)?;
     // Single-shot Seal: seq = 0 → nonce = base_nonce.
-    let ct = aead_seal(ops, &sch.key, &sch.base_nonce, aad, pt).map_err(CryptoError::from)?;
+    let ct =
+        aead_seal(ops, su, &sch.key, &sch.base_nonce, aad, pt).map_err(CryptoError::from)?;
     Ok(HpkeCiphertext {
-        kem_output: enc.to_vec().into(),
+        kem_output: enc.into(),
         ciphertext: ct.into(),
     })
 }
 
 pub(crate) fn open(
     ops: &dyn PkcsOps,
+    su: &Suite,
     ciphertext: &HpkeCiphertext,
     sk_r_bytes: &[u8],
     info: &[u8],
     aad: &[u8],
 ) -> Result<Vec<u8>, CryptoError> {
-    let sk_r = fixed_32(sk_r_bytes).map_err(CryptoError::from)?;
-    let enc = fixed_32(ciphertext.kem_output.as_slice()).map_err(CryptoError::from)?;
-    let shared_secret = decap(ops, &enc, &sk_r).map_err(CryptoError::from)?;
-    let sch = key_schedule_base(ops, &shared_secret, info).map_err(CryptoError::from)?;
+    let shared_secret = decap(ops, su, ciphertext.kem_output.as_slice(), sk_r_bytes)
+        .map_err(CryptoError::from)?;
+    let sch = key_schedule_base(ops, su, &shared_secret, info).map_err(CryptoError::from)?;
     aead_open(
         ops,
+        su,
         &sch.key,
         &sch.base_nonce,
         aad,
@@ -316,16 +531,17 @@ pub(crate) fn open(
 
 pub(crate) fn setup_sender_and_export(
     ops: &dyn PkcsOps,
+    su: &Suite,
     pk_r_bytes: &[u8],
     info: &[u8],
     exporter_context: &[u8],
     exporter_length: usize,
     ephemeral_ikm: &[u8],
 ) -> Result<(KemOutput, ExporterSecret), CryptoError> {
-    let pk_r = fixed_32(pk_r_bytes).map_err(CryptoError::from)?;
-    let (shared_secret, enc) = encap(ops, &pk_r, ephemeral_ikm).map_err(CryptoError::from)?;
-    let sch = key_schedule_base(ops, &shared_secret, info).map_err(CryptoError::from)?;
-    let sid = hpke_suite_id();
+    let (shared_secret, enc) =
+        encap(ops, su, pk_r_bytes, ephemeral_ikm).map_err(CryptoError::from)?;
+    let sch = key_schedule_base(ops, su, &shared_secret, info).map_err(CryptoError::from)?;
+    let sid = hpke_suite_id(su);
     let exported = labeled_expand(
         ops,
         &sid,
@@ -335,22 +551,21 @@ pub(crate) fn setup_sender_and_export(
         exporter_length,
     )
     .map_err(CryptoError::from)?;
-    Ok((enc.to_vec(), ExporterSecret::from(exported)))
+    Ok((enc, ExporterSecret::from(exported)))
 }
 
 pub(crate) fn setup_receiver_and_export(
     ops: &dyn PkcsOps,
+    su: &Suite,
     enc_bytes: &[u8],
     sk_r_bytes: &[u8],
     info: &[u8],
     exporter_context: &[u8],
     exporter_length: usize,
 ) -> Result<ExporterSecret, CryptoError> {
-    let sk_r = fixed_32(sk_r_bytes).map_err(CryptoError::from)?;
-    let enc = fixed_32(enc_bytes).map_err(CryptoError::from)?;
-    let shared_secret = decap(ops, &enc, &sk_r).map_err(CryptoError::from)?;
-    let sch = key_schedule_base(ops, &shared_secret, info).map_err(CryptoError::from)?;
-    let sid = hpke_suite_id();
+    let shared_secret = decap(ops, su, enc_bytes, sk_r_bytes).map_err(CryptoError::from)?;
+    let sch = key_schedule_base(ops, su, &shared_secret, info).map_err(CryptoError::from)?;
+    let sid = hpke_suite_id(su);
     let exported = labeled_expand(
         ops,
         &sid,
