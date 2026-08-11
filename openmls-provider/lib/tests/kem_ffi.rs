@@ -369,3 +369,35 @@ fn chacha20_poly1305_rejects_tampering() {
         "the AAD is not being authenticated"
     );
 }
+
+/// Encapsulating against a raw public key must agree with decapsulating on the
+/// handle side — the shape the wire actually uses, where the sender has only
+/// bytes and the receiver has only its own key object.
+#[test]
+fn ml_kem_encapsulate_to_raw_key_round_trips() {
+    let f = hsm!();
+    let seed: Vec<u8> = (0u8..64).collect();
+    let (h_pub, h_priv) = f.ml_kem_768_keygen_from_seed(&seed).expect("keygen");
+    let pk = f.read_public_key(h_pub).expect("read public key");
+    assert_eq!(pk.len(), 1184);
+
+    let (ct, ss_send) = f.ml_kem_encapsulate_to(&pk).expect("encapsulate to raw key");
+    let ss_recv = f.ml_kem_decapsulate(h_priv, &ct).expect("decapsulate");
+    assert_eq!(ss_send, ss_recv, "sender and receiver disagree on the secret");
+}
+
+/// Deterministic keygen must be deterministic: the same seed twice gives the
+/// same public key. Without this, the KAT could pass by luck on a path that
+/// quietly ignored the seed and generated randomly.
+#[test]
+fn ml_kem_keygen_from_seed_is_deterministic() {
+    let f = hsm!();
+    let seed: Vec<u8> = (0u8..64).map(|i| i.wrapping_mul(7)).collect();
+    let (a, _) = f.ml_kem_768_keygen_from_seed(&seed).expect("keygen a");
+    let (b, _) = f.ml_kem_768_keygen_from_seed(&seed).expect("keygen b");
+    assert_eq!(
+        f.read_public_key(a).unwrap(),
+        f.read_public_key(b).unwrap(),
+        "the same seed produced different keys — CKA_SEED is being ignored"
+    );
+}

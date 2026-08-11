@@ -267,6 +267,54 @@ pub trait PkcsOps: Send + Sync {
 
     // ── X25519 Diffie-Hellman (used by HPKE) ─────────────────────────────────
 
+    // ── Operations `cryptoki` cannot express (see `kem_ffi`) ─────────────────
+    //
+    // Default to "unsupported" so a backend that has no route to them — the
+    // wasm32 one — keeps compiling and fails loudly at the call site rather
+    // than silently doing the work in software. Silent software fallback is
+    // exactly how ChaCha20-Poly1305 stayed off the HSM for months.
+
+    /// SHAKE-256 XOF, squeezing `out_len` bytes. Needed by X-Wing's seed
+    /// expansion.
+    fn shake256(&self, _input: &[u8], _out_len: usize) -> Result<Vec<u8>, PqcTodayError> {
+        Err(PqcTodayError::Kem("SHAKE-256 not available on this backend".into()))
+    }
+
+    /// SHA3-256. Needed by the X-Wing combiner.
+    fn sha3_256(&self, _data: &[u8]) -> Result<Vec<u8>, PqcTodayError> {
+        Err(PqcTodayError::Kem("SHA3-256 not available on this backend".into()))
+    }
+
+    /// ChaCha20-Poly1305 AEAD. `encrypt` seals, otherwise opens.
+    fn chacha20_poly1305(
+        &self,
+        _encrypt: bool,
+        _key: &[u8],
+        _nonce: &[u8],
+        _aad: &[u8],
+        _input: &[u8],
+    ) -> Result<Vec<u8>, PqcTodayError> {
+        Err(PqcTodayError::Kem("ChaCha20-Poly1305 not available on this backend".into()))
+    }
+
+    /// Deterministic ML-KEM-768 keygen from a 64-byte `d ‖ z` seed.
+    /// Returns `(public_key_bytes, private_handle)`.
+    fn ml_kem_768_keygen_from_seed(&self, _seed: &[u8]) -> Result<(Vec<u8>, u64), PqcTodayError> {
+        Err(PqcTodayError::Kem("ML-KEM not available on this backend".into()))
+    }
+
+    /// ML-KEM decapsulation against a handle from
+    /// [`Self::ml_kem_768_keygen_from_seed`].
+    fn ml_kem_decapsulate(&self, _priv: u64, _ct: &[u8]) -> Result<Vec<u8>, PqcTodayError> {
+        Err(PqcTodayError::Kem("ML-KEM not available on this backend".into()))
+    }
+
+    /// ML-KEM encapsulation against a raw encapsulation key.
+    /// Returns `(ciphertext, shared_secret)`.
+    fn ml_kem_encapsulate_to(&self, _pk: &[u8]) -> Result<(Vec<u8>, Vec<u8>), PqcTodayError> {
+        Err(PqcTodayError::Kem("ML-KEM not available on this backend".into()))
+    }
+
     /// Compute a Diffie-Hellman shared secret via `CKM_ECDH1_DERIVE` (X25519).
     /// `sk` is the raw 32-byte private scalar; `peer_pk` is the raw 32-byte
     /// peer public key. Returns the raw 32-byte shared secret.
@@ -325,17 +373,75 @@ pub trait PkcsOps: Send + Sync {
 #[cfg(not(target_arch = "wasm32"))]
 pub struct CryptokiBackend {
     pub(crate) hsm: crate::session::HsmSession,
+    /// Opened on first use. Lazy because most sessions never touch a
+    /// post-quantum suite, and opening it eagerly would make every provider pay
+    /// a second `C_OpenSession` and login.
+    kem: std::sync::OnceLock<Option<crate::kem_ffi::KemFfi>>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl CryptokiBackend {
     pub fn new(hsm: crate::session::HsmSession) -> Self {
-        Self { hsm }
+        Self { hsm, kem: std::sync::OnceLock::new() }
+    }
+
+    /// The raw v3.2 path, opened on first use.
+    fn kem(&self) -> Result<&crate::kem_ffi::KemFfi, PqcTodayError> {
+        self.kem
+            .get_or_init(|| {
+                crate::kem_ffi::KemFfi::open(
+                    &self.hsm.module_path,
+                    self.hsm.slot.id(),
+                    self.hsm.user_pin.as_deref(),
+                )
+                .ok()
+            })
+            .as_ref()
+            .ok_or_else(|| {
+                PqcTodayError::Kem(
+                    "could not open the PKCS#11 v3.2 KEM session — the module may \
+                     not export the v3.2 entry points"
+                        .into(),
+                )
+            })
     }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl PkcsOps for CryptokiBackend {
+    fn shake256(&self, input: &[u8], out_len: usize) -> Result<Vec<u8>, PqcTodayError> {
+        self.kem()?.shake256(input, out_len)
+    }
+
+    fn sha3_256(&self, data: &[u8]) -> Result<Vec<u8>, PqcTodayError> {
+        self.kem()?.sha3_256(data)
+    }
+
+    fn chacha20_poly1305(
+        &self,
+        encrypt: bool,
+        key: &[u8],
+        nonce: &[u8],
+        aad: &[u8],
+        input: &[u8],
+    ) -> Result<Vec<u8>, PqcTodayError> {
+        self.kem()?.chacha20_poly1305(encrypt, key, nonce, aad, input)
+    }
+
+    fn ml_kem_768_keygen_from_seed(&self, seed: &[u8]) -> Result<(Vec<u8>, u64), PqcTodayError> {
+        let k = self.kem()?;
+        let (h_pub, h_priv) = k.ml_kem_768_keygen_from_seed(seed)?;
+        Ok((k.read_public_key(h_pub)?, h_priv))
+    }
+
+    fn ml_kem_decapsulate(&self, priv_handle: u64, ct: &[u8]) -> Result<Vec<u8>, PqcTodayError> {
+        self.kem()?.ml_kem_decapsulate(priv_handle, ct)
+    }
+
+    fn ml_kem_encapsulate_to(&self, pk: &[u8]) -> Result<(Vec<u8>, Vec<u8>), PqcTodayError> {
+        self.kem()?.ml_kem_encapsulate_to(pk)
+    }
+
     fn random(&self, n: usize) -> Result<Vec<u8>, PqcTodayError> {
         self.hsm
             .with_session(|s| Ok(s.generate_random_vec(n as u32)?))

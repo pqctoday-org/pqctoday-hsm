@@ -107,6 +107,9 @@ struct CkChaChaParams {
 }
 
 const CKO_SECRET_KEY: CkUlong = 0x0000_0004;
+const CKO_PUBLIC_KEY: CkUlong = 0x0000_0002;
+const CKK_ML_KEM: CkUlong = 0x0000_0049;
+const CKA_ENCAPSULATE: CkAttributeType = 0x0000_0633;
 const CKK_GENERIC_SECRET: CkUlong = 0x0000_0010;
 const CKP_ML_KEM_768: CkUlong = 0x0000_0002;
 
@@ -796,6 +799,47 @@ impl KemFfi {
 
         let ss = self.read_secret(h_secret)?;
         Ok((ct, ss))
+    }
+
+    /// Encapsulate against a raw ML-KEM-768 encapsulation key.
+    ///
+    /// The sender only ever has the peer's public key as bytes off the wire, so
+    /// it is imported as a session object first. PKCS#11 has no
+    /// encapsulate-against-raw-bytes form.
+    pub fn ml_kem_encapsulate_to(&self, pk: &[u8]) -> Result<(Vec<u8>, Vec<u8>), PqcTodayError> {
+        let mut class = CKO_PUBLIC_KEY;
+        let mut key_type = CKK_ML_KEM;
+        let mut param_set: CkUlong = CKP_ML_KEM_768;
+        let mut ck_false: u8 = 0;
+        let mut ck_true: u8 = 1;
+        let mut val = pk.to_vec();
+
+        let tmpl = [
+            CkAttribute { attr_type: CKA_CLASS, p_value: &mut class as *mut _ as *mut c_void,
+                          value_len: std::mem::size_of::<CkUlong>() as CkUlong },
+            CkAttribute { attr_type: CKA_KEY_TYPE, p_value: &mut key_type as *mut _ as *mut c_void,
+                          value_len: std::mem::size_of::<CkUlong>() as CkUlong },
+            CkAttribute { attr_type: CKA_PARAMETER_SET, p_value: &mut param_set as *mut _ as *mut c_void,
+                          value_len: std::mem::size_of::<CkUlong>() as CkUlong },
+            CkAttribute { attr_type: CKA_TOKEN, p_value: &mut ck_false as *mut _ as *mut c_void,
+                          value_len: 1 },
+            CkAttribute { attr_type: CKA_ENCAPSULATE, p_value: &mut ck_true as *mut _ as *mut c_void,
+                          value_len: 1 },
+            CkAttribute { attr_type: CKA_VALUE, p_value: val.as_mut_ptr() as *mut c_void,
+                          value_len: val.len() as CkUlong },
+        ];
+
+        let mut h: CkObjectHandle = 0;
+        // Safety: template and `val` outlive the call.
+        let rv = unsafe {
+            (self.create_object)(self.session, tmpl.as_ptr(), tmpl.len() as CkUlong, &mut h)
+        };
+        if rv != CKR_OK {
+            return Err(PqcTodayError::Kem(format!(
+                "importing the peer ML-KEM encapsulation key failed: 0x{rv:08x}"
+            )));
+        }
+        self.ml_kem_encapsulate(h as u64)
     }
 
     /// ML-KEM decapsulation. Returns the shared secret.
