@@ -6,6 +6,98 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.21.2] — 2026-08-10
+
+CI was measuring this project against the wrong OpenSSL. The headline is that a
+week of intermittent `p11test` failures, investigated as a bug in our EdDSA
+code, was **not our code at all** — CI built OpenSSL from `master` and ran the
+C++ suite against unreleased OpenSSL 4 development code.
+
+### Fixed
+
+- **OpenSSL is now pinned to the 3.6.3 release in both workflows** (#160).
+  `ci.yml` and `openmls-provider.yml` installed OpenSSL via
+  `git clone --depth 1 https://github.com/openssl/openssl.git` — no tag, no
+  branch — into a directory named `/opt/openssl-3.6`. That directory actually
+  held **OpenSSL 4.1.0-dev**, linking `libcrypto.so.4`. The job was additionally
+  *titled* "OpenSSL 3.3". Three versions claimed in one file, none of them the
+  one that ran.
+
+  Measured in an amd64 container matching CI — same tree, same OS, same
+  compiler, same target, same test loop, only the linked `libcrypto` differing:
+
+  | OpenSSL | `p11test` |
+  |---|---|
+  | 4.1.0-dev (what CI built) | 18 passed, **7 failed** |
+  | 3.5.0 release | 25 passed, **0 failed** |
+  | 3.6.3 release | 25 passed, **0 failed** |
+
+  Across all runs the development build failed **36 of 140**; two release builds
+  went 50 for 50. Every failure was the same event — `EVP_PKEY_CTX_new_id()`
+  returning NULL at `OSSLEDDSA.cpp:293`, before any cryptography — surfacing
+  under whichever EdDSA/X-curve test reached it first. That is why the failing
+  case appeared to wander between X448, X25519 and Ed25519, and why it read as
+  three separate faults instead of one.
+
+  3.6.3 rather than the 3.5.0 `Dockerfile.pqctoday` pinned: `pkcs11-provider`
+  needs `OSSL_PKEY_PARAM_CMS_RI_TYPE`, absent before 3.6, so 3.5.0 cannot build
+  the full tree. That Dockerfile is now aligned to 3.6.3 as well, so the repo
+  names one OpenSSL everywhere — the divergence between it and CI is precisely
+  what let CI drift unnoticed.
+
+  Two supporting changes, both of which had to exist for the fix to hold:
+  the **cache key now carries the version**, without which the stale
+  `Linux-openssl-3.6-master-v1` entry would have survived and kept serving
+  4.1.0-dev; and the **verify step asserts rather than prints**. It printed
+  `OpenSSL 4.1.0-dev` on every run for weeks and nobody read it.
+
+- **EdDSA key generation could not report failure** (#159).
+  `OSSLEDDSA::generateKeyPair` returned `true` unconditionally.
+  `setFromOSSL` returned `void` and had four early-exit paths, so a failed key
+  extraction produced an empty key object reported as a successful generation.
+  Not the cause of the above, but the reason it surfaced three call frames from
+  where it happened. `setFromOSSL` now returns `bool` on both the public and
+  private key classes, and the caller checks both — deliberately not
+  short-circuited, so a failure names which side failed.
+
+- **The stderr log switch was unreachable on Linux** (#159).
+  `DEBUG_LOG_STDERR` sat inside the `#ifdef _WIN32` block of
+  `config.h.in.cmake`, whose `#endif` is the last line of the file, so on every
+  non-Windows build the define was never emitted and `ERROR_MSG` went only to
+  syslog — which no CI runner reads and no container runs a daemon for. Every
+  error message the engine produced during a test failure was discarded. Now
+  driven by a `LOG_TO_STDERR` cmake option, defaulting ON for `BUILD_TESTS` and
+  OFF otherwise. Turning it on is what produced the message that located the
+  fault.
+
+- **`local-gate.sh --cpp` could never run.** The `pqc-rust` container it
+  executes in has no `cmake`, `ctest` or cppunit, so the step died during setup
+  without reaching a test, presenting as an ordinary build error. Now
+  preflighted. Note the limit, recorded in the script: that container is arm64
+  and links a release OpenSSL while CI is amd64, so it could not have caught
+  this fault under any circumstances.
+
+### Added
+
+- **Ciphersuite 3 is now declared** (#158).
+  `MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519` was implemented and
+  working — `crypto.rs` has ChaCha20Poly1305 specifically for it — but absent
+  from both `supports()` and `supported_ciphersuites()`. It passed 32/32 in
+  interop only because the IETF runner uses the union of both peers' advertised
+  suites; a peer negotiating honestly would never have selected it. A shipped,
+  working ciphersuite was unreachable in any real deployment. The unit test that
+  pinned the count at 2 now asserts the relation instead — every advertised
+  suite must be accepted by `supports()` — because a count cannot catch the two
+  lists drifting apart, which is exactly what had happened.
+
+### Note on versioning
+
+`package.json` remains at 0.12.0. It versions the `@pqctoday/softhsm-wasm` npm
+package and has moved independently of the changelog and tags since 0.11.0;
+releases 0.13 through 0.21 did not touch it. Flagged rather than silently
+changed — given the OpenSSL finding above, a third divergent version number in
+this repo is worth someone deciding about deliberately.
+
 ## [0.21.1] — 2026-08-09
 
 Follow-ups to 0.21.0's KMIP benchmark work. The headline is a retraction: with
