@@ -310,11 +310,22 @@ fn supported_ciphersuites_v0_1() {
     let suites = provider.crypto().supported_ciphersuites();
     assert!(suites.contains(&Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519));
     assert!(suites.contains(&Ciphersuite::MLS_128_DHKEMP256_AES128GCM_SHA256_P256));
-    assert_eq!(suites.len(), 2);
-    assert!(provider
-        .crypto()
-        .supports(Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519)
-        .is_ok());
+    // Suite 3 added 2026-08-10. It was always implemented — crypto.rs carries
+    // ChaCha20Poly1305 specifically for it — and the WG interop rig passed 32
+    // suite-3 cases against this provider. Only the declaration was missing.
+    assert!(suites.contains(&Ciphersuite::MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519));
+    assert_eq!(suites.len(), 3);
+
+    // Every advertised suite must also be accepted by supports(). The two used
+    // to be maintained by hand in separate match arms and had already drifted
+    // apart once; asserting the relation rather than one example is what keeps
+    // "what we claim" and "what we allow" from diverging again.
+    for cs in &suites {
+        assert!(
+            provider.crypto().supports(*cs).is_ok(),
+            "advertised {cs:?} but supports() rejects it"
+        );
+    }
 }
 
 #[test]
