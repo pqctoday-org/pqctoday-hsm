@@ -211,6 +211,10 @@ pub struct KemFfi {
     // Held to keep the library loaded for the lifetime of the resolved symbols.
     _lib: libloading::Library,
     session: CkSessionHandle,
+    /// Serialises access to `session`. PKCS#11 gives no thread-safety guarantee
+    /// for concurrent calls on one session handle — CKF_SERIAL_SESSION is a
+    /// promise we make to the module, not one it makes to us.
+    call_lock: std::sync::Mutex<()>,
 
     close_session: FnCloseSession,
     generate_key_pair: FnGenerateKeyPair,
@@ -227,10 +231,15 @@ pub struct KemFfi {
     decrypt_op: FnCrypt,
 }
 
-// Safety: every method takes `&self` and performs one PKCS#11 call on a session
-// opened with CKF_SERIAL_SESSION, which the spec defines as serialised by the
-// module. Callers wrap this in a Mutex anyway (see `backend.rs`), matching how
-// `HsmSession` guards the cryptoki session.
+// Safety: the raw pointers are function addresses in a module that is never
+// unloaded while this lives, so they are valid to call from any thread. Shared
+// mutable state — the session — is behind `call_lock`; see below.
+//
+// An earlier version of this comment claimed CKF_SERIAL_SESSION meant "the
+// module serialises calls for us". That is backwards, and it caused a SIGSEGV
+// under `cargo test`'s default parallelism. The flag is the APPLICATION
+// promising not to make concurrent calls on the session. Honouring that promise
+// is our job, and `call_lock` is how.
 unsafe impl Send for KemFfi {}
 unsafe impl Sync for KemFfi {}
 
@@ -332,6 +341,7 @@ impl KemFfi {
         Ok(Self {
             _lib: lib,
             session,
+            call_lock: std::sync::Mutex::new(()),
             close_session,
             generate_key_pair,
             encapsulate,
@@ -351,6 +361,9 @@ impl KemFfi {
     /// SHA3-256. Needed by the X-Wing combiner and unreachable through
     /// `cryptoki`, whose mechanism allowlist has no SHA3 at all.
     pub fn sha3_256(&self, data: &[u8]) -> Result<Vec<u8>, PqcTodayError> {
+        let _guard = self.call_lock.lock().map_err(|_| {
+            PqcTodayError::Kem("KEM session lock poisoned".into())
+        })?;
         let mech = CkMechanism {
             mechanism: CKM_SHA3_256,
             p_parameter: std::ptr::null_mut(),
@@ -398,6 +411,9 @@ impl KemFfi {
     /// not a byte string, so the input is first created as a session-only
     /// generic secret. Both objects die with the session.
     pub fn shake256(&self, input: &[u8], out_len: usize) -> Result<Vec<u8>, PqcTodayError> {
+        let _guard = self.call_lock.lock().map_err(|_| {
+            PqcTodayError::Kem("KEM session lock poisoned".into())
+        })?;
         let base = self.import_secret(input)?;
         let mech = CkMechanism {
             mechanism: CKM_SHAKE_256_KEY_DERIVATION,
@@ -542,6 +558,9 @@ impl KemFfi {
         aad: &[u8],
         input: &[u8],
     ) -> Result<Vec<u8>, PqcTodayError> {
+        let _guard = self.call_lock.lock().map_err(|_| {
+            PqcTodayError::Kem("KEM session lock poisoned".into())
+        })?;
         if key.len() != 32 {
             return Err(PqcTodayError::Kem(format!(
                 "ChaCha20-Poly1305 key must be 32 bytes, got {}",
@@ -637,6 +656,9 @@ impl KemFfi {
     /// Generate an ML-KEM-768 key pair on the token.
     /// Returns `(public_handle, private_handle)`.
     pub fn ml_kem_768_keygen(&self) -> Result<(u64, u64), PqcTodayError> {
+        let _guard = self.call_lock.lock().map_err(|_| {
+            PqcTodayError::Kem("KEM session lock poisoned".into())
+        })?;
         self.keygen_inner(None)
     }
 
@@ -728,6 +750,9 @@ impl KemFfi {
     /// randomly generated ML-KEM key cannot reproduce a published test vector
     /// and cannot round-trip through X-Wing's 32-byte private key encoding.
     pub fn ml_kem_768_keygen_from_seed(&self, seed: &[u8]) -> Result<(u64, u64), PqcTodayError> {
+        let _guard = self.call_lock.lock().map_err(|_| {
+            PqcTodayError::Kem("KEM session lock poisoned".into())
+        })?;
         if seed.len() != 64 {
             return Err(PqcTodayError::Kem(format!(
                 "ML-KEM seed must be 64 bytes (d ‖ z), got {}",
@@ -739,6 +764,9 @@ impl KemFfi {
 
     /// Read an ML-KEM public key's raw bytes.
     pub fn read_public_key(&self, handle: u64) -> Result<Vec<u8>, PqcTodayError> {
+        let _guard = self.call_lock.lock().map_err(|_| {
+            PqcTodayError::Kem("KEM session lock poisoned".into())
+        })?;
         self.read_attribute(handle as CkObjectHandle, CKA_VALUE)
     }
 
@@ -748,6 +776,17 @@ impl KemFfi {
     /// (§5.2's standard probe), the second to fill it. The shared secret comes
     /// back as an object handle, so it is read out with `C_GetAttributeValue`.
     pub fn ml_kem_encapsulate(&self, public_handle: u64) -> Result<(Vec<u8>, Vec<u8>), PqcTodayError> {
+        let _guard = self.call_lock.lock().map_err(|_| {
+            PqcTodayError::Kem("KEM session lock poisoned".into())
+        })?;
+        self.encapsulate_locked(public_handle as CkObjectHandle)
+    }
+
+    /// Caller must already hold `call_lock`.
+    fn encapsulate_locked(
+        &self,
+        public_handle: CkObjectHandle,
+    ) -> Result<(Vec<u8>, Vec<u8>), PqcTodayError> {
         let mech = CkMechanism {
             mechanism: CKM_ML_KEM,
             p_parameter: std::ptr::null_mut(),
@@ -762,7 +801,7 @@ impl KemFfi {
             (self.encapsulate)(
                 self.session,
                 &mech,
-                public_handle as CkObjectHandle,
+                public_handle,
                 tmpl.attrs.as_ptr(),
                 tmpl.attrs.len() as CkUlong,
                 std::ptr::null_mut(),
@@ -782,7 +821,7 @@ impl KemFfi {
             (self.encapsulate)(
                 self.session,
                 &mech,
-                public_handle as CkObjectHandle,
+                public_handle,
                 tmpl.attrs.as_ptr(),
                 tmpl.attrs.len() as CkUlong,
                 ct.as_mut_ptr(),
@@ -807,6 +846,9 @@ impl KemFfi {
     /// it is imported as a session object first. PKCS#11 has no
     /// encapsulate-against-raw-bytes form.
     pub fn ml_kem_encapsulate_to(&self, pk: &[u8]) -> Result<(Vec<u8>, Vec<u8>), PqcTodayError> {
+        let _guard = self.call_lock.lock().map_err(|_| {
+            PqcTodayError::Kem("KEM session lock poisoned".into())
+        })?;
         let mut class = CKO_PUBLIC_KEY;
         let mut key_type = CKK_ML_KEM;
         let mut param_set: CkUlong = CKP_ML_KEM_768;
@@ -839,7 +881,9 @@ impl KemFfi {
                 "importing the peer ML-KEM encapsulation key failed: 0x{rv:08x}"
             )));
         }
-        self.ml_kem_encapsulate(h as u64)
+        // NOT self.ml_kem_encapsulate(): we already hold call_lock and a
+        // std Mutex is not reentrant, so that would deadlock.
+        self.encapsulate_locked(h)
     }
 
     /// ML-KEM decapsulation. Returns the shared secret.
@@ -848,6 +892,9 @@ impl KemFfi {
         private_handle: u64,
         ciphertext: &[u8],
     ) -> Result<Vec<u8>, PqcTodayError> {
+        let _guard = self.call_lock.lock().map_err(|_| {
+            PqcTodayError::Kem("KEM session lock poisoned".into())
+        })?;
         let mech = CkMechanism {
             mechanism: CKM_ML_KEM,
             p_parameter: std::ptr::null_mut(),
