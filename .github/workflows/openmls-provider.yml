@@ -21,6 +21,7 @@ jobs:
     name: Check / Test / Clippy (Ubuntu 24.04)
     runs-on: ubuntu-24.04
     env:
+      OPENSSL_VERSION: 3.6.3
       PKG_CONFIG_PATH: /opt/openssl-3.6/lib64/pkgconfig:/opt/openssl-3.6/lib/pkgconfig
       LD_LIBRARY_PATH: /opt/openssl-3.6/lib64:/opt/openssl-3.6/lib
 
@@ -42,23 +43,37 @@ jobs:
             libcppunit-dev \
             protobuf-compiler
 
-      - name: Cache OpenSSL 3.6
+      # PINNED to a release — see the same block in ci.yml for why. In short: this
+      # used to clone openssl master, so /opt/openssl-3.6 held OpenSSL 4.1.0-dev.
+      # Keep this in step with ci.yml; both jobs share the cache path.
+      - name: Cache OpenSSL ${{ env.OPENSSL_VERSION }}
         id: cache-openssl
         uses: actions/cache@v4
         with:
           path: /opt/openssl-3.6
-          key: ${{ runner.os }}-openssl-3.6-master-v1
+          key: ${{ runner.os }}-openssl-${{ env.OPENSSL_VERSION }}-release-v1
 
-      - name: Build and Install OpenSSL 3.6
+      - name: Build and Install OpenSSL ${{ env.OPENSSL_VERSION }}
         if: steps.cache-openssl.outputs.cache-hit != 'true'
         run: |
           sudo mkdir -p /opt/openssl-3.6
           sudo chown -R $USER:$USER /opt/openssl-3.6
-          git clone --depth 1 https://github.com/openssl/openssl.git
-          cd openssl
-          ./config --prefix=/opt/openssl-3.6 --openssldir=/opt/openssl-3.6/ssl shared
+          curl -fsSL -o openssl.tar.gz \
+            "https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VERSION}/openssl-${OPENSSL_VERSION}.tar.gz"
+          tar xzf openssl.tar.gz
+          cd "openssl-${OPENSSL_VERSION}"
+          ./Configure --prefix=/opt/openssl-3.6 --openssldir=/opt/openssl-3.6/ssl shared
           make -j$(nproc)
-          make install
+          make install_sw
+
+      - name: Verify OpenSSL version
+        run: |
+          ACTUAL="$(/opt/openssl-3.6/bin/openssl version)"
+          echo "$ACTUAL"
+          case "$ACTUAL" in
+            "OpenSSL ${OPENSSL_VERSION} "*) ;;
+            *) echo "::error::expected OpenSSL ${OPENSSL_VERSION}, got: $ACTUAL"; exit 1 ;;
+          esac
 
       - name: Build softhsmv3 (provides libsofthsmv3.so for interop tests)
         run: |

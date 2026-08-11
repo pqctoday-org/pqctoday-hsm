@@ -2,7 +2,14 @@
 # debian:bookworm ships OpenSSL 3.0; softhsmv3 requires >= 3.5.0.
 FROM debian:bookworm AS openssl-builder
 
-ARG OPENSSL_VERSION=3.5.0
+# 3.6.3, matching the pin CI now uses (ci.yml / openmls-provider.yml). Was 3.5.0.
+# Aligned so the repo names ONE OpenSSL everywhere: the 2026-08 EdDSA keygen
+# flake came from CI silently building openssl master while this file pinned a
+# release, and nobody noticed the two had diverged. 3.5.0 also cannot build the
+# full tree — src/vendor/pkcs11-provider needs OSSL_PKEY_PARAM_CMS_RI_TYPE,
+# absent before 3.6 — though this image only builds the softhsmv3 target and so
+# never hit that.
+ARG OPENSSL_VERSION=3.6.3
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         wget make perl ca-certificates g++ \

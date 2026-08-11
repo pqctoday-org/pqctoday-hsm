@@ -8,9 +8,10 @@ on:
 
 jobs:
   build:
-    name: Build & Test (Ubuntu 24.04 / OpenSSL 3.3)
+    name: Build & Test (Ubuntu 24.04 / OpenSSL 3.6.3)
     runs-on: ubuntu-24.04
     env:
+      OPENSSL_VERSION: 3.6.3
       PKG_CONFIG_PATH: /opt/openssl-3.6/lib64/pkgconfig:/opt/openssl-3.6/lib/pkgconfig
       LD_LIBRARY_PATH: /opt/openssl-3.6/lib64:/opt/openssl-3.6/lib
 
@@ -26,26 +27,47 @@ jobs:
             cmake g++ pkg-config \
             libcppunit-dev
 
-      - name: Cache OpenSSL 3.6
+      # PINNED to a release. This used to `git clone` openssl master, which meant
+      # the directory named "openssl-3.6" actually contained OpenSSL 4.1.0-dev and
+      # every C++ result was measured against unreleased code. That is what caused
+      # the intermittent EdDSA keygen failures: with master, p11test failed 36 runs
+      # in 140 (EVP_PKEY_CTX_new_id returning NULL at OSSLEDDSA.cpp:293); with the
+      # 3.6.3 release, 25 of 25 clean, same tree/OS/arch/compiler. Measured
+      # 2026-08-10. Do not un-pin — bump OPENSSL_VERSION and the cache key together.
+      #
+      # 3.5.x is too old: src/vendor/pkcs11-provider needs OSSL_PKEY_PARAM_CMS_RI_TYPE.
+      - name: Cache OpenSSL ${{ env.OPENSSL_VERSION }}
         id: cache-openssl
         uses: actions/cache@v4
         with:
           path: /opt/openssl-3.6
-          key: ${{ runner.os }}-openssl-3.6-master-v1
+          # Key includes the exact version — a stale cache from the master era
+          # would otherwise silently survive this fix.
+          key: ${{ runner.os }}-openssl-${{ env.OPENSSL_VERSION }}-release-v1
 
-      - name: Build and Install OpenSSL 3.6
+      - name: Build and Install OpenSSL ${{ env.OPENSSL_VERSION }}
         if: steps.cache-openssl.outputs.cache-hit != 'true'
         run: |
           sudo mkdir -p /opt/openssl-3.6
           sudo chown -R $USER:$USER /opt/openssl-3.6
-          git clone --depth 1 https://github.com/openssl/openssl.git
-          cd openssl
-          ./config --prefix=/opt/openssl-3.6 --openssldir=/opt/openssl-3.6/ssl shared
+          curl -fsSL -o openssl.tar.gz \
+            "https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VERSION}/openssl-${OPENSSL_VERSION}.tar.gz"
+          tar xzf openssl.tar.gz
+          cd "openssl-${OPENSSL_VERSION}"
+          ./Configure --prefix=/opt/openssl-3.6 --openssldir=/opt/openssl-3.6/ssl shared
           make -j$(nproc)
-          make install
+          make install_sw
 
+      # Assert, don't just print. The old step printed the version and nobody read
+      # it, so "OpenSSL 4.1.0-dev" scrolled past in every run for weeks.
       - name: Verify OpenSSL version
-        run: /opt/openssl-3.6/bin/openssl version
+        run: |
+          ACTUAL="$(/opt/openssl-3.6/bin/openssl version)"
+          echo "$ACTUAL"
+          case "$ACTUAL" in
+            "OpenSSL ${OPENSSL_VERSION} "*) ;;
+            *) echo "::error::expected OpenSSL ${OPENSSL_VERSION}, got: $ACTUAL"; exit 1 ;;
+          esac
 
       - name: CMake configure
         run: |
