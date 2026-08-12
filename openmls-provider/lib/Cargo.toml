@@ -45,6 +45,11 @@ serde = { version = "1", features = ["derive"] }
 # directly as a Rust dependency — see `src/session.rs` for the dispatch.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 cryptoki = "0.10"
+# The Rust engine, as an ordinary rlib dependency — no dlopen, no C ABI, no
+# cryptoki mechanism allowlist. This is the engine CACP already ships; see
+# rust/RUST_P11_V32_CONFORMANCE_REPORT.md (257+301 tests). Used for the
+# post-quantum path, where cryptoki cannot express the mechanisms at all.
+softhsmrustv3 = { path = "../../rust" }
 # Direct symbol resolution for the PKCS#11 v3.2 KEM entry points and SHA3-256,
 # neither of which `cryptoki` 0.10 can express: its function-list enum stops at
 # CK_FUNCTION_LIST_3_0, and its mechanism allowlist has no SHA3. See
@@ -64,6 +69,9 @@ softhsmrustv3 = { path = "../../rust" }
 [dev-dependencies]
 env_logger = "0.11"
 hex = "0.4"
+# Same crate the Rust engine uses for SHA3/SHAKE, so the X-Wing test exercises
+# the engine's own arithmetic rather than an independent second opinion.
+sha3 = "0.10"
 tempfile = "3"
 
 # Real openmls dependency — used by the `two_member_group` example to drive
