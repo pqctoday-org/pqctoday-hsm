@@ -103,9 +103,6 @@ pub(crate) fn select(cfg: &HpkeConfig) -> Option<Suite> {
     }
 }
 
-pub(crate) fn supports_pkcs11_path(cfg: &HpkeConfig) -> bool {
-    select(cfg).is_some()
-}
 
 fn kem_suite_id(s: &Suite) -> Vec<u8> {
     let mut v = b"KEM".to_vec();
@@ -282,9 +279,11 @@ fn xwing_encap(
     pk: &[u8],
     ephemeral_ikm: &[u8],
 ) -> Result<(Vec<u8>, Vec<u8>), PqcTodayError> {
-    if pk.len() != 1216 {
+    // Length from the suite table, not a literal — the two cannot drift.
+    if pk.len() != XWING_SHA256_CHACHA20.npk {
         return Err(PqcTodayError::Hpke(format!(
-            "X-Wing encapsulation key must be 1216 bytes, got {}",
+            "X-Wing encapsulation key must be {} bytes, got {}",
+            XWING_SHA256_CHACHA20.npk,
             pk.len()
         )));
     }
@@ -310,9 +309,10 @@ fn xwing_encap(
 }
 
 fn xwing_decap(ops: &dyn PkcsOps, enc: &[u8], sk: &[u8]) -> Result<Vec<u8>, PqcTodayError> {
-    if enc.len() != 1120 {
+    if enc.len() != XWING_SHA256_CHACHA20.nenc {
         return Err(PqcTodayError::Hpke(format!(
-            "X-Wing ciphertext must be 1120 bytes, got {}",
+            "X-Wing ciphertext must be {} bytes, got {}",
+            XWING_SHA256_CHACHA20.nenc,
             enc.len()
         )));
     }
