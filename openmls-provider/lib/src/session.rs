@@ -72,6 +72,11 @@ pub struct HsmSession {
     pub(crate) ctx: Arc<Pkcs11>,
     pub(crate) slot: Slot,
     pub(crate) session: Arc<Mutex<Session>>,
+    /// Kept so `kem_ffi` can open its own session on the same module. It cannot
+    /// reuse this one: `cryptoki`'s `Session::handle()` is `pub(crate)`, so the
+    /// raw handle is unreachable from outside the crate. See `kem_ffi`.
+    pub(crate) module_path: std::path::PathBuf,
+    pub(crate) user_pin: Option<String>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -96,6 +101,8 @@ impl HsmSession {
             ctx: Arc::new(ctx),
             slot,
             session: Arc::new(Mutex::new(session)),
+            module_path: cfg.module_path.clone(),
+            user_pin: cfg.user_pin.clone(),
         })
     }
 
@@ -119,6 +126,8 @@ impl HsmSession {
             ctx: Arc::clone(&self.ctx),
             slot: self.slot,
             session: Arc::new(Mutex::new(session)),
+            module_path: self.module_path.clone(),
+            user_pin: user_pin.map(|s| s.to_string()).or_else(|| self.user_pin.clone()),
         })
     }
 
@@ -138,6 +147,8 @@ impl Clone for HsmSession {
         Self {
             ctx: Arc::clone(&self.ctx),
             slot: self.slot,
+            module_path: self.module_path.clone(),
+            user_pin: self.user_pin.clone(),
             session: Arc::clone(&self.session),
         }
     }

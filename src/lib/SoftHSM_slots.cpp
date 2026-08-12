@@ -469,6 +469,9 @@ void SoftHSM::prepareSupportedMechanisms(std::map<std::string, CK_MECHANISM_TYPE
 	// NIST SP 800-108 KBKDFs (PKCS#11 v3.2 §2.44)
 	t["CKM_SP800_108_COUNTER_KDF"]	= CKM_SP800_108_COUNTER_KDF;
 	t["CKM_SP800_108_FEEDBACK_KDF"]	= CKM_SP800_108_FEEDBACK_KDF;
+	// SHAKE-256 as an XOF-based KDF. Needed by X-Wing, whose 32-byte
+	// decapsulation key expands to 96 bytes of ML-KEM + X25519 key material.
+	t["CKM_SHAKE_256_KEY_DERIVATION"]	= CKM_SHAKE_256_KEY_DERIVATION;
 
 	// RSA
 	t["CKM_RSA_PKCS_KEY_PAIR_GEN"]	= CKM_RSA_PKCS_KEY_PAIR_GEN;
@@ -1156,6 +1159,7 @@ CK_RV SoftHSM::C_GetMechanismInfo(CK_SLOT_ID slotID, CK_MECHANISM_TYPE type, CK_
 	    case CKM_HKDF_DERIVE:
 	    case CKM_SP800_108_COUNTER_KDF:
 	    case CKM_SP800_108_FEEDBACK_KDF:
+	    case CKM_SHAKE_256_KEY_DERIVATION:
 	        pInfo->ulMinKeySize = 1;
 	        pInfo->ulMaxKeySize = MAX_HMAC_KEY_BYTES;
 	        pInfo->flags = CKF_DERIVE;

@@ -314,7 +314,17 @@ fn supported_ciphersuites_v0_1() {
     // ChaCha20Poly1305 specifically for it — and the WG interop rig passed 32
     // suite-3 cases against this provider. Only the declaration was missing.
     assert!(suites.contains(&Ciphersuite::MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519));
-    assert_eq!(suites.len(), 3);
+    // Post-quantum, added 2026-08-10: X-Wing (ML-KEM-768 + X25519) with Ed25519.
+    // Its KEM, SHAKE-256 seed expansion, SHA3-256 combiner and ChaCha20-Poly1305
+    // all run inside the HSM, verified against draft-connolly-cfrg-xwing-kem's
+    // own test vectors.
+    assert!(suites.contains(&Ciphersuite::MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519));
+
+    // Deliberately NOT asserting a count here. A count says nothing about which
+    // suites are present, has to be edited every time one is added, and — when
+    // the relation below already covers drift — its only real effect is to fail
+    // on correct changes. One was left behind when that relation was added in
+    // #158 and this is it.
 
     // Every advertised suite must also be accepted by supports(). The two used
     // to be maintained by hand in separate match arms and had already drifted

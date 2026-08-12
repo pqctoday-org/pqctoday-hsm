@@ -60,7 +60,12 @@ impl OpenMlsCrypto for PqcTodayCrypto {
         match ciphersuite {
             Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519
             | Ciphersuite::MLS_128_DHKEMP256_AES128GCM_SHA256_P256
-            | Ciphersuite::MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519 => Ok(()),
+            | Ciphersuite::MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519
+            // Post-quantum: X-Wing (ML-KEM-768 + X25519) with Ed25519 signatures.
+            // The only PQ suite the released openmls_traits defines; its KEM,
+            // SHAKE-256 expansion, SHA3-256 combiner and ChaCha20-Poly1305 all
+            // run inside the HSM. Verified against the draft's own vectors.
+            | Ciphersuite::MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519 => Ok(()),
             _ => Err(CryptoError::UnsupportedCiphersuite),
         }
     }
@@ -70,6 +75,7 @@ impl OpenMlsCrypto for PqcTodayCrypto {
             Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519,
             Ciphersuite::MLS_128_DHKEMP256_AES128GCM_SHA256_P256,
             Ciphersuite::MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519,
+            Ciphersuite::MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519,
         ]
     }
 
@@ -243,9 +249,9 @@ impl OpenMlsCrypto for PqcTodayCrypto {
         aad: &[u8],
         ptxt: &[u8],
     ) -> Result<HpkeCiphertext, CryptoError> {
-        if pqhpke::supports_pkcs11_path(&config) {
+        if let Some(su) = pqhpke::select(&config) {
             let ephemeral_ikm = self.ops.random(32).map_err(CryptoError::from)?;
-            return pqhpke::seal(self.ops.as_ref(), pk_r, info, aad, ptxt, &ephemeral_ikm);
+            return pqhpke::seal(self.ops.as_ref(), &su, pk_r, info, aad, ptxt, &ephemeral_ikm);
         }
         let mut hpke = mk_hpke(config)?;
         let pk = hpke_rs::HpkePublicKey::new(pk_r.to_vec());
@@ -266,8 +272,8 @@ impl OpenMlsCrypto for PqcTodayCrypto {
         info: &[u8],
         aad: &[u8],
     ) -> Result<Vec<u8>, CryptoError> {
-        if pqhpke::supports_pkcs11_path(&config) {
-            return pqhpke::open(self.ops.as_ref(), input, sk_r, info, aad);
+        if let Some(su) = pqhpke::select(&config) {
+            return pqhpke::open(self.ops.as_ref(), &su, input, sk_r, info, aad);
         }
         let hpke = mk_hpke(config)?;
         let sk = hpke_rs::HpkePrivateKey::new(sk_r.to_vec());
@@ -292,10 +298,11 @@ impl OpenMlsCrypto for PqcTodayCrypto {
         exporter_context: &[u8],
         exporter_length: usize,
     ) -> Result<(KemOutput, ExporterSecret), CryptoError> {
-        if pqhpke::supports_pkcs11_path(&config) {
+        if let Some(su) = pqhpke::select(&config) {
             let ephemeral_ikm = self.ops.random(32).map_err(CryptoError::from)?;
             return pqhpke::setup_sender_and_export(
                 self.ops.as_ref(),
+                &su,
                 pk_r,
                 info,
                 exporter_context,
@@ -323,9 +330,10 @@ impl OpenMlsCrypto for PqcTodayCrypto {
         exporter_context: &[u8],
         exporter_length: usize,
     ) -> Result<ExporterSecret, CryptoError> {
-        if pqhpke::supports_pkcs11_path(&config) {
+        if let Some(su) = pqhpke::select(&config) {
             return pqhpke::setup_receiver_and_export(
                 self.ops.as_ref(),
+                &su,
                 enc,
                 sk_r,
                 info,
@@ -349,8 +357,8 @@ impl OpenMlsCrypto for PqcTodayCrypto {
         config: HpkeConfig,
         ikm: &[u8],
     ) -> Result<HpkeKeyPair, CryptoError> {
-        if pqhpke::supports_pkcs11_path(&config) {
-            return pqhpke::derive_keypair(self.ops.as_ref(), ikm);
+        if let Some(su) = pqhpke::select(&config) {
+            return pqhpke::derive_keypair(self.ops.as_ref(), &su, ikm);
         }
         let hpke = mk_hpke(config)?;
         let kp = hpke

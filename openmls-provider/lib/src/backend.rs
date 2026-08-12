@@ -267,6 +267,54 @@ pub trait PkcsOps: Send + Sync {
 
     // ── X25519 Diffie-Hellman (used by HPKE) ─────────────────────────────────
 
+    // ── Operations `cryptoki` cannot express (served by softhsmrustv3) ──────
+    //
+    // Default to "unsupported" so a backend that has no route to them — the
+    // wasm32 one — keeps compiling and fails loudly at the call site rather
+    // than silently doing the work in software. Silent software fallback is
+    // exactly how ChaCha20-Poly1305 stayed off the HSM for months.
+
+    /// SHAKE-256 XOF, squeezing `out_len` bytes. Needed by X-Wing's seed
+    /// expansion.
+    fn shake256(&self, _input: &[u8], _out_len: usize) -> Result<Vec<u8>, PqcTodayError> {
+        Err(PqcTodayError::Kem("SHAKE-256 not available on this backend".into()))
+    }
+
+    /// SHA3-256. Needed by the X-Wing combiner.
+    fn sha3_256(&self, _data: &[u8]) -> Result<Vec<u8>, PqcTodayError> {
+        Err(PqcTodayError::Kem("SHA3-256 not available on this backend".into()))
+    }
+
+    /// ChaCha20-Poly1305 AEAD. `encrypt` seals, otherwise opens.
+    fn chacha20_poly1305(
+        &self,
+        _encrypt: bool,
+        _key: &[u8],
+        _nonce: &[u8],
+        _aad: &[u8],
+        _input: &[u8],
+    ) -> Result<Vec<u8>, PqcTodayError> {
+        Err(PqcTodayError::Kem("ChaCha20-Poly1305 not available on this backend".into()))
+    }
+
+    /// Deterministic ML-KEM-768 keygen from a 64-byte `d ‖ z` seed.
+    /// Returns `(public_key_bytes, private_handle)`.
+    fn ml_kem_768_keygen_from_seed(&self, _seed: &[u8]) -> Result<(Vec<u8>, u64), PqcTodayError> {
+        Err(PqcTodayError::Kem("ML-KEM not available on this backend".into()))
+    }
+
+    /// ML-KEM decapsulation against a handle from
+    /// [`Self::ml_kem_768_keygen_from_seed`].
+    fn ml_kem_decapsulate(&self, _priv: u64, _ct: &[u8]) -> Result<Vec<u8>, PqcTodayError> {
+        Err(PqcTodayError::Kem("ML-KEM not available on this backend".into()))
+    }
+
+    /// ML-KEM encapsulation against a raw encapsulation key.
+    /// Returns `(ciphertext, shared_secret)`.
+    fn ml_kem_encapsulate_to(&self, _pk: &[u8]) -> Result<(Vec<u8>, Vec<u8>), PqcTodayError> {
+        Err(PqcTodayError::Kem("ML-KEM not available on this backend".into()))
+    }
+
     /// Compute a Diffie-Hellman shared secret via `CKM_ECDH1_DERIVE` (X25519).
     /// `sk` is the raw 32-byte private scalar; `peer_pk` is the raw 32-byte
     /// peer public key. Returns the raw 32-byte shared secret.
@@ -332,10 +380,121 @@ impl CryptokiBackend {
     pub fn new(hsm: crate::session::HsmSession) -> Self {
         Self { hsm }
     }
+
+    /// Session on the **Rust** engine (`softhsmrustv3`), opened on first use.
+    ///
+    /// The post-quantum mechanisms — ML-KEM, SHA3-256, SHAKE-256,
+    /// ChaCha20-Poly1305 — are unreachable through `cryptoki`, whose function
+    /// list stops at PKCS#11 v3.0 and whose mechanism conversion is a closed
+    /// allowlist. Rather than a second raw-FFI session onto the C++ module
+    /// (which needed dlopen, hand-written marshalling and four workarounds, and
+    /// crashed under parallelism), these run on the Rust engine linked in as an
+    /// ordinary rlib. Its state is process-global behind a real Mutex, so a
+    /// single shared session is correct.
+    fn pq_session(&self) -> Result<u32, PqcTodayError> {
+        // Copied out of the OnceLock; the handle is a u32.
+        use softhsmrustv3::native::session;
+        static SESSION: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
+        SESSION
+            .get_or_init(|| {
+                session::init().ok()?;
+                session::bootstrap_default_token(0, "so", "user", "pqctoday-mls").ok()
+            })
+            .as_ref()
+            .copied()
+            .ok_or_else(|| {
+                PqcTodayError::Kem("could not open a softhsmrustv3 session".into())
+            })
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl PkcsOps for CryptokiBackend {
+    fn shake256(&self, input: &[u8], out_len: usize) -> Result<Vec<u8>, PqcTodayError> {
+        use sha3::digest::{ExtendableOutput, Update, XofReader};
+        let mut h = sha3::Shake256::default();
+        h.update(input);
+        let mut out = vec![0u8; out_len];
+        h.finalize_xof().read(&mut out);
+        Ok(out)
+    }
+
+    fn sha3_256(&self, data: &[u8]) -> Result<Vec<u8>, PqcTodayError> {
+        use sha3::Digest;
+        Ok(sha3::Sha3_256::digest(data).to_vec())
+    }
+
+    fn chacha20_poly1305(
+        &self,
+        encrypt: bool,
+        key: &[u8],
+        nonce: &[u8],
+        aad: &[u8],
+        input: &[u8],
+    ) -> Result<Vec<u8>, PqcTodayError> {
+        // Reached via encrypt_with_key_bytes / decrypt_with_key_bytes, which are
+        // public and take the key as raw bytes — exactly the shape HPKE has, so
+        // no key object is needed. CKM_CHACHA20_POLY1305 = 0x4021.
+        //
+        // The earlier note here said this was unreachable because
+        // chacha20_poly1305_encrypt is pub(crate). That was true of THAT
+        // function and false of the operation: the public raw-key entry point
+        // dispatches to it. Looking one level up found it.
+        use softhsmrustv3::native::encrypt as enc;
+        const CKM_CHACHA20_POLY1305: u32 = 0x0000_4021;
+        let r = if encrypt {
+            enc::encrypt_with_key_bytes(
+                key, CKM_CHACHA20_POLY1305, input, Some(nonce), None, aad, None,
+            )
+        } else {
+            enc::decrypt_with_key_bytes(
+                key, CKM_CHACHA20_POLY1305, input, Some(nonce), None, aad, None,
+            )
+        };
+        r.map_err(|rv| {
+            PqcTodayError::Kem(format!(
+                "ChaCha20-Poly1305 {} failed: 0x{rv:08x}",
+                if encrypt { "encrypt" } else { "decrypt" }
+            ))
+        })
+    }
+
+    fn ml_kem_768_keygen_from_seed(&self, seed: &[u8]) -> Result<(Vec<u8>, u64), PqcTodayError> {
+        use softhsmrustv3::native::keygen;
+        let sess = self.pq_session()?;
+        // CKP_ML_KEM_768 = 2. Extractable so the public key can be read back;
+        // the private half never leaves the engine.
+        let (h_pub, h_priv) = keygen::generate_ml_kem_keypair_from_seed_extractable(
+            sess, 2, seed, b"mls-xwing", "mls-xwing",
+        )
+        .map_err(|rv| PqcTodayError::Kem(format!("ML-KEM keygen failed: 0x{rv:08x}")))?;
+        let pk = softhsmrustv3::native::object::get_attribute(sess, h_pub, 0x0000_0011)
+            .ok_or_else(|| PqcTodayError::Kem("ML-KEM public key has no CKA_VALUE".into()))?;
+        Ok((pk, h_priv as u64))
+    }
+
+    fn ml_kem_decapsulate(&self, priv_handle: u64, ct: &[u8]) -> Result<Vec<u8>, PqcTodayError> {
+        let sess = self.pq_session()?;
+        softhsmrustv3::native::encrypt::decapsulate(sess, priv_handle as u32, 0x0000_0017, ct)
+            .map_err(|rv| PqcTodayError::Kem(format!("ML-KEM decapsulate failed: 0x{rv:08x}")))
+    }
+
+    fn ml_kem_encapsulate_to(&self, pk: &[u8]) -> Result<(Vec<u8>, Vec<u8>), PqcTodayError> {
+        let sess = self.pq_session()?;
+        // The engine already had the importer — keygen::register_ml_kem_public_key,
+        // which validates the length against the parameter set (FIPS 203 Table 3)
+        // rather than trusting it. I nearly re-wrote this from scratch because an
+        // earlier grep was truncated and hid it.
+        let h = softhsmrustv3::native::keygen::register_ml_kem_public_key(
+            sess, 2, pk, b"mls-peer", "mls-peer",
+        )
+        .map_err(|rv| {
+            PqcTodayError::Kem(format!("importing the peer ML-KEM key failed: 0x{rv:08x}"))
+        })?;
+        softhsmrustv3::native::encrypt::encapsulate(sess, h, 0x0000_0017)
+            .map_err(|rv| PqcTodayError::Kem(format!("ML-KEM encapsulate failed: 0x{rv:08x}")))
+    }
+
     fn random(&self, n: usize) -> Result<Vec<u8>, PqcTodayError> {
         self.hsm
             .with_session(|s| Ok(s.generate_random_vec(n as u32)?))

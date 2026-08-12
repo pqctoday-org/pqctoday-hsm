@@ -2659,6 +2659,13 @@ CK_RV SoftHSM::C_DeriveKey
 		case CKM_SP800_108_FEEDBACK_KDF:
 		case CKM_BIP32_MASTER_DERIVE:
 		case CKM_BIP32_CHILD_DERIVE:
+		// SHAKE-256 as an extendable-output function, per PKCS#11 v3.2 §2.x.
+		// Added for X-Wing (draft-connolly-cfrg-xwing-kem), whose decapsulation
+		// key is a 32-byte seed expanded to 96 bytes: 64 for ML-KEM's
+		// KeyGen_internal(d, z) and 32 for the X25519 scalar. Without this the
+		// expansion has to happen outside the token, which would put private
+		// key derivation in software while claiming an HSM-backed key.
+		case CKM_SHAKE_256_KEY_DERIVATION:
 			break;
 
 		default:
@@ -3004,7 +3011,12 @@ CK_RV SoftHSM::C_DeriveKey
 	CK_CERTIFICATE_TYPE dummy;
     bool isImplicit = pMechanism->mechanism == CKM_CONCATENATE_DATA_AND_BASE ||
 			pMechanism->mechanism == CKM_CONCATENATE_BASE_AND_DATA ||
-			pMechanism->mechanism == CKM_CONCATENATE_BASE_AND_KEY;
+			pMechanism->mechanism == CKM_CONCATENATE_BASE_AND_KEY ||
+			// SHAKE-256 KD defaults to a generic secret like the concatenate
+			// family, but unlike them it still REQUIRES CKA_VALUE_LEN: an XOF
+			// has no natural output length to fall back on, so "no length
+			// given" is a template error rather than something to infer.
+			pMechanism->mechanism == CKM_SHAKE_256_KEY_DERIVATION;
     if (isImplicit) {
         // PKCS#11 2.40 section 2.31.5: if no key type is provided then the key produced by this mechanism will
         // be a generic secret key
@@ -3745,7 +3757,8 @@ CK_RV SoftHSM::C_DeriveKey
 	    pMechanism->mechanism == CKM_AES_CBC_ENCRYPT_DATA ||
 	    pMechanism->mechanism == CKM_CONCATENATE_DATA_AND_BASE ||
 	    pMechanism->mechanism == CKM_CONCATENATE_BASE_AND_DATA ||
-	    pMechanism->mechanism == CKM_CONCATENATE_BASE_AND_KEY)
+	    pMechanism->mechanism == CKM_CONCATENATE_BASE_AND_KEY ||
+	    pMechanism->mechanism == CKM_SHAKE_256_KEY_DERIVATION)
 	{
 		// Check key class and type
 		CK_KEY_TYPE baseKeyType = key->getUnsignedLongValue(CKA_KEY_TYPE, CKK_VENDOR_DEFINED);
@@ -6300,7 +6313,12 @@ CK_RV SoftHSM::deriveSymmetric
 	CK_OBJECT_HANDLE_PTR phOtherKey = CK_INVALID_HANDLE;
 	OSObject *otherKey = NULL_PTR;
 
-	if (pMechanism->pParameter == NULL_PTR)
+	// Every mechanism handled here historically carried a parameter, so this
+	// check was unconditional. SHAKE-256 KD legitimately has none — its only
+	// input is the base key and CKA_VALUE_LEN — so it is exempt rather than
+	// being made to pass an empty parameter it has no use for.
+	if (pMechanism->pParameter == NULL_PTR &&
+	    pMechanism->mechanism != CKM_SHAKE_256_KEY_DERIVATION)
 	{
 		DEBUG_MSG("pParameter must be supplied");
 		return CKR_MECHANISM_PARAM_INVALID;
@@ -6374,6 +6392,13 @@ CK_RV SoftHSM::deriveSymmetric
 			return CKR_MECHANISM_PARAM_INVALID;
 		}
 		DEBUG_MSG("(0x%08X) Other key handle is (0x%08X)", phOtherKey, *phOtherKey);
+	}
+	else if (pMechanism->mechanism == CKM_SHAKE_256_KEY_DERIVATION)
+	{
+		// No parameter, and `data` stays empty — the XOF consumes the base key
+		// value alone. The strict form (a non-NULL parameter is an error) is
+		// enforced in the derivation branch itself, not here, so that a caller
+		// passing junk gets a specific message rather than this generic one.
 	}
 	else
 	{
@@ -6480,6 +6505,7 @@ CK_RV SoftHSM::deriveSymmetric
 	    case CKM_CONCATENATE_DATA_AND_BASE:
 	    case CKM_CONCATENATE_BASE_AND_DATA:
 	    case CKM_CONCATENATE_BASE_AND_KEY:
+	    case CKM_SHAKE_256_KEY_DERIVATION:
 	        break;
 		default:
 			return CKR_MECHANISM_INVALID;
@@ -6492,9 +6518,13 @@ CK_RV SoftHSM::deriveSymmetric
     // Get the data
     ByteString secretValue;
 
+    // SHAKE-256 KD joins this branch rather than the cipher branch below: like
+    // the concatenate family it works on the base key's raw value, it just
+    // squeezes it through an XOF instead of appending to it.
     if (pMechanism->mechanism == CKM_CONCATENATE_DATA_AND_BASE ||
 			pMechanism->mechanism == CKM_CONCATENATE_BASE_AND_DATA ||
-			pMechanism->mechanism == CKM_CONCATENATE_BASE_AND_KEY) {
+			pMechanism->mechanism == CKM_CONCATENATE_BASE_AND_KEY ||
+			pMechanism->mechanism == CKM_SHAKE_256_KEY_DERIVATION) {
         // Get the key data
         ByteString keydata;
 
@@ -6517,6 +6547,44 @@ CK_RV SoftHSM::deriveSymmetric
 				pMechanism->mechanism == CKM_CONCATENATE_BASE_AND_KEY) {
 			secretValue += keydata;
 			secretValue += data;
+		} else if (pMechanism->mechanism == CKM_SHAKE_256_KEY_DERIVATION) {
+			// SHAKE-256 XOF over the base key value, squeezed to CKA_VALUE_LEN.
+			//
+			// Unlike the concatenate family this needs an explicit length: an
+			// XOF has no natural digest size, so byteLen == 0 is a template
+			// error rather than something to infer from the inputs.
+			if (byteLen == 0) {
+				INFO_MSG("CKM_SHAKE_256_KEY_DERIVATION requires CKA_VALUE_LEN");
+				return CKR_TEMPLATE_INCOMPLETE;
+			}
+			// Any mechanism parameter is a caller mistake, not something to
+			// quietly ignore — this KDF takes none.
+			if (pMechanism->pParameter != NULL_PTR || pMechanism->ulParameterLen != 0) {
+				INFO_MSG("CKM_SHAKE_256_KEY_DERIVATION takes no mechanism parameter");
+				return CKR_MECHANISM_PARAM_INVALID;
+			}
+
+			EVP_MD_CTX* xof = EVP_MD_CTX_new();
+			if (xof == NULL) return CKR_HOST_MEMORY;
+
+			std::vector<unsigned char> out(byteLen);
+			// EVP_DigestFinalXOF, not EVP_DigestFinal_ex: the latter would
+			// emit SHAKE-256's nominal 32-byte digest and silently ignore the
+			// requested length, which for X-Wing's 96-byte expansion would
+			// produce a short key that still looked like a success.
+			if (EVP_DigestInit_ex(xof, EVP_shake256(), NULL) != 1 ||
+			    EVP_DigestUpdate(xof, keydata.const_byte_str(), keydata.size()) != 1 ||
+			    EVP_DigestFinalXOF(xof, out.data(), byteLen) != 1)
+			{
+				EVP_MD_CTX_free(xof);
+				ERROR_MSG("SHAKE-256 key derivation failed");
+				return CKR_FUNCTION_FAILED;
+			}
+			EVP_MD_CTX_free(xof);
+
+			secretValue.resize(byteLen);
+			memcpy(&secretValue[0], out.data(), byteLen);
+			OPENSSL_cleanse(out.data(), out.size());
         } else {
         	return CKR_MECHANISM_INVALID;
         }
