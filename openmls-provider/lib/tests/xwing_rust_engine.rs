@@ -208,3 +208,66 @@ fn ml_kem_encapsulate_to_raw_key_round_trips() {
     assert_eq!(ss_send, ss_recv, "sender and receiver disagree on the secret");
     assert!(ss_send.iter().any(|&b| b != 0), "secret is all zeroes");
 }
+
+/// X-Wing ENCAPSULATION reproduces the draft's published ciphertext and secret.
+///
+/// The direction the C++ path could never check. `C_EncapsulateKey` takes no
+/// randomness parameter, so encapsulation there could only ever be
+/// round-tripped against our own decapsulation — self-consistent, and blind to
+/// a systematically wrong construction. The Rust engine exposes
+/// `encapsulate_deterministic`, so the draft's own eseed can be supplied and
+/// its own ct compared byte for byte.
+///
+/// §5.4.1: pk_M = pk[0:1184]; pk_X = pk[1184:1216]; ek_X = eseed[32:64];
+///         ct_X = X25519(ek_X, base); ss_X = X25519(ek_X, pk_X);
+///         (ss_M, ct_M) = ML-KEM-768.EncapsDerand(pk_M, eseed[0:32]);
+///         ss = Combiner(...); ct = ct_M ‖ ct_X
+#[test]
+fn xwing_encapsulate_matches_draft_vector() {
+    use softhsmrustv3::native::keygen;
+    let sess = shared_session();
+
+    let pk = vector("pk");
+    assert_eq!(pk.len(), 1216, "X-Wing encapsulation key is 1216 bytes");
+    let (pk_m, pk_x) = pk.split_at(1184);
+
+    let eseed = vector("eseed");
+    assert_eq!(eseed.len(), 64, "eseed MUST be 64 bytes (§5.4.1)");
+
+    let h_peer = keygen::register_ml_kem_public_key(sess, 2, pk_m, b"xw-enc", "xw-enc")
+        .expect("import the draft's ML-KEM encapsulation key");
+    let (ct_m, ss_m) =
+        encrypt::encapsulate_deterministic(sess, h_peer, 0x0000_0017, &eseed[0..32])
+            .expect("derandomised ML-KEM encapsulation");
+
+    let mut ek_x = [0u8; 32];
+    ek_x.copy_from_slice(&eseed[32..64]);
+    let ek_x = x25519_dalek::StaticSecret::from(ek_x);
+    let ct_x = x25519_dalek::PublicKey::from(&ek_x);
+
+    let mut pk_x_arr = [0u8; 32];
+    pk_x_arr.copy_from_slice(pk_x);
+    let ss_x = ek_x.diffie_hellman(&x25519_dalek::PublicKey::from(pk_x_arr));
+
+    let mut combiner = Vec::with_capacity(32 * 4 + XWING_LABEL.len());
+    combiner.extend_from_slice(&ss_m);
+    combiner.extend_from_slice(ss_x.as_bytes());
+    combiner.extend_from_slice(ct_x.as_bytes());
+    combiner.extend_from_slice(pk_x);
+    combiner.extend_from_slice(&XWING_LABEL);
+
+    let mut ct = Vec::with_capacity(1120);
+    ct.extend_from_slice(&ct_m);
+    ct.extend_from_slice(ct_x.as_bytes());
+
+    assert_eq!(
+        hex::encode(&ct),
+        hex::encode(vector("ct")),
+        "X-Wing ciphertext does not match the draft vector"
+    );
+    assert_eq!(
+        hex::encode(sha3_256(&combiner)),
+        hex::encode(vector("ss")),
+        "X-Wing shared secret does not match the draft vector"
+    );
+}
