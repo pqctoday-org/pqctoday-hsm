@@ -67,7 +67,12 @@ pub const IMPLEMENTATION_NAME: &str = "pqctoday-mls";
 // 3 added 2026-08-10 — the provider implements it (ChaCha20Poly1305) and the
 // WG interop rig passed 8 suite-3 cases against it on 2026-08-09. It was only
 // ever missing from this list. See openmls-provider/lib/src/crypto.rs.
-pub const SUPPORTED_CIPHERSUITES: &[u32] = &[1, 2, 3];
+// 0x004D (77) added 2026-08-11 — X-Wing (ML-KEM-768 + X25519) with Ed25519,
+// the only post-quantum suite the released openmls_traits 0.5.0 defines. Both
+// directions verified against draft-connolly-cfrg-xwing-kem's own published
+// vectors, and the KEM, SHA3-256 combiner and ChaCha20-Poly1305 all run on the
+// softhsmrustv3 engine. Advertising it is what lets the WG runner negotiate it.
+pub const SUPPORTED_CIPHERSUITES: &[u32] = &[1, 2, 3, 77];
 
 // Per RFC 9420 §13.1: the default extension types
 // (ApplicationId, RatchetTree, RequiredCapabilities, ExternalPub,
