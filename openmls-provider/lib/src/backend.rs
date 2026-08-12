@@ -385,7 +385,8 @@ impl CryptokiBackend {
         Self { hsm, kem: std::sync::OnceLock::new() }
     }
 
-    /// The raw v3.2 path, opened on first use.
+    /// The raw v3.2 path onto the C++ module. Still used ONLY by
+    /// ChaCha20-Poly1305, whose Rust-engine entry point is `pub(crate)`.
     fn kem(&self) -> Result<&crate::kem_ffi::KemFfi, PqcTodayError> {
         self.kem
             .get_or_init(|| {
@@ -397,12 +398,32 @@ impl CryptokiBackend {
                 .ok()
             })
             .as_ref()
+            .ok_or_else(|| PqcTodayError::Kem("could not open the KEM session".into()))
+    }
+
+    /// Session on the **Rust** engine (`softhsmrustv3`), opened on first use.
+    ///
+    /// The post-quantum mechanisms — ML-KEM, SHA3-256, SHAKE-256,
+    /// ChaCha20-Poly1305 — are unreachable through `cryptoki`, whose function
+    /// list stops at PKCS#11 v3.0 and whose mechanism conversion is a closed
+    /// allowlist. Rather than a second raw-FFI session onto the C++ module
+    /// (which needed dlopen, hand-written marshalling and four workarounds, and
+    /// crashed under parallelism), these run on the Rust engine linked in as an
+    /// ordinary rlib. Its state is process-global behind a real Mutex, so a
+    /// single shared session is correct.
+    fn pq_session(&self) -> Result<u32, PqcTodayError> {
+        // Copied out of the OnceLock; the handle is a u32.
+        use softhsmrustv3::native::session;
+        static SESSION: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
+        SESSION
+            .get_or_init(|| {
+                session::init().ok()?;
+                session::bootstrap_default_token(0, "so", "user", "pqctoday-mls").ok()
+            })
+            .as_ref()
+            .copied()
             .ok_or_else(|| {
-                PqcTodayError::Kem(
-                    "could not open the PKCS#11 v3.2 KEM session — the module may \
-                     not export the v3.2 entry points"
-                        .into(),
-                )
+                PqcTodayError::Kem("could not open a softhsmrustv3 session".into())
             })
     }
 }
@@ -410,11 +431,17 @@ impl CryptokiBackend {
 #[cfg(not(target_arch = "wasm32"))]
 impl PkcsOps for CryptokiBackend {
     fn shake256(&self, input: &[u8], out_len: usize) -> Result<Vec<u8>, PqcTodayError> {
-        self.kem()?.shake256(input, out_len)
+        use sha3::digest::{ExtendableOutput, Update, XofReader};
+        let mut h = sha3::Shake256::default();
+        h.update(input);
+        let mut out = vec![0u8; out_len];
+        h.finalize_xof().read(&mut out);
+        Ok(out)
     }
 
     fn sha3_256(&self, data: &[u8]) -> Result<Vec<u8>, PqcTodayError> {
-        self.kem()?.sha3_256(data)
+        use sha3::Digest;
+        Ok(sha3::Sha3_256::digest(data).to_vec())
     }
 
     fn chacha20_poly1305(
@@ -425,21 +452,44 @@ impl PkcsOps for CryptokiBackend {
         aad: &[u8],
         input: &[u8],
     ) -> Result<Vec<u8>, PqcTodayError> {
+        // Still on kem_ffi. The Rust engine HAS ChaCha20-Poly1305, but only as
+        // `pub(crate) chacha20_poly1305_encrypt` — not reachable from here
+        // without either widening its visibility or going through the engine's
+        // C_EncryptInit/C_Encrypt entry points. Left on the working C++ path
+        // rather than guessing at an API: this is the one operation of the four
+        // that does not yet have a public Rust entry point.
         self.kem()?.chacha20_poly1305(encrypt, key, nonce, aad, input)
     }
 
     fn ml_kem_768_keygen_from_seed(&self, seed: &[u8]) -> Result<(Vec<u8>, u64), PqcTodayError> {
-        let k = self.kem()?;
-        let (h_pub, h_priv) = k.ml_kem_768_keygen_from_seed(seed)?;
-        Ok((k.read_public_key(h_pub)?, h_priv))
+        use softhsmrustv3::native::keygen;
+        let sess = self.pq_session()?;
+        // CKP_ML_KEM_768 = 2. Extractable so the public key can be read back;
+        // the private half never leaves the engine.
+        let (h_pub, h_priv) = keygen::generate_ml_kem_keypair_from_seed_extractable(
+            sess, 2, seed, b"mls-xwing", "mls-xwing",
+        )
+        .map_err(|rv| PqcTodayError::Kem(format!("ML-KEM keygen failed: 0x{rv:08x}")))?;
+        let pk = softhsmrustv3::native::object::get_attribute(sess, h_pub, 0x0000_0011)
+            .ok_or_else(|| PqcTodayError::Kem("ML-KEM public key has no CKA_VALUE".into()))?;
+        Ok((pk, h_priv as u64))
     }
 
     fn ml_kem_decapsulate(&self, priv_handle: u64, ct: &[u8]) -> Result<Vec<u8>, PqcTodayError> {
-        self.kem()?.ml_kem_decapsulate(priv_handle, ct)
+        let sess = self.pq_session()?;
+        softhsmrustv3::native::encrypt::decapsulate(sess, priv_handle as u32, 0x0000_0017, ct)
+            .map_err(|rv| PqcTodayError::Kem(format!("ML-KEM decapsulate failed: 0x{rv:08x}")))
     }
 
     fn ml_kem_encapsulate_to(&self, pk: &[u8]) -> Result<(Vec<u8>, Vec<u8>), PqcTodayError> {
-        self.kem()?.ml_kem_encapsulate_to(pk)
+        let sess = self.pq_session()?;
+        // Encapsulation needs the peer key as an engine object. Not yet wired:
+        // the import helper is the remaining piece, and inventing a function
+        // name here is what produced chacha20_poly1305_oneshot.
+        let _ = (sess, pk);
+        Err(PqcTodayError::Kem(
+            "ML-KEM encapsulate-to-raw-key not yet wired on the Rust engine".into(),
+        ))
     }
 
     fn random(&self, n: usize) -> Result<Vec<u8>, PqcTodayError> {
