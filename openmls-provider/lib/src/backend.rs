@@ -452,13 +452,31 @@ impl PkcsOps for CryptokiBackend {
         aad: &[u8],
         input: &[u8],
     ) -> Result<Vec<u8>, PqcTodayError> {
-        // Still on kem_ffi. The Rust engine HAS ChaCha20-Poly1305, but only as
-        // `pub(crate) chacha20_poly1305_encrypt` — not reachable from here
-        // without either widening its visibility or going through the engine's
-        // C_EncryptInit/C_Encrypt entry points. Left on the working C++ path
-        // rather than guessing at an API: this is the one operation of the four
-        // that does not yet have a public Rust entry point.
-        self.kem()?.chacha20_poly1305(encrypt, key, nonce, aad, input)
+        // Reached via encrypt_with_key_bytes / decrypt_with_key_bytes, which are
+        // public and take the key as raw bytes — exactly the shape HPKE has, so
+        // no key object is needed. CKM_CHACHA20_POLY1305 = 0x4021.
+        //
+        // The earlier note here said this was unreachable because
+        // chacha20_poly1305_encrypt is pub(crate). That was true of THAT
+        // function and false of the operation: the public raw-key entry point
+        // dispatches to it. Looking one level up found it.
+        use softhsmrustv3::native::encrypt as enc;
+        const CKM_CHACHA20_POLY1305: u32 = 0x0000_4021;
+        let r = if encrypt {
+            enc::encrypt_with_key_bytes(
+                key, CKM_CHACHA20_POLY1305, input, Some(nonce), None, aad, None,
+            )
+        } else {
+            enc::decrypt_with_key_bytes(
+                key, CKM_CHACHA20_POLY1305, input, Some(nonce), None, aad, None,
+            )
+        };
+        r.map_err(|rv| {
+            PqcTodayError::Kem(format!(
+                "ChaCha20-Poly1305 {} failed: 0x{rv:08x}",
+                if encrypt { "encrypt" } else { "decrypt" }
+            ))
+        })
     }
 
     fn ml_kem_768_keygen_from_seed(&self, seed: &[u8]) -> Result<(Vec<u8>, u64), PqcTodayError> {

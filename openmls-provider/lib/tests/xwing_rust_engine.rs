@@ -131,3 +131,39 @@ fn xwing_decapsulate_matches_draft_vector() {
     );
     let _ = h_pub;
 }
+
+/// ChaCha20-Poly1305 on the Rust engine, against a known answer.
+///
+/// Reached through the public raw-key entry point rather than the `pub(crate)`
+/// primitive — HPKE hands us key bytes, not a key object, so this is the
+/// natural shape. Vector generated with Python `cryptography`.
+#[test]
+fn chacha20_poly1305_matches_known_answer() {
+    use softhsmrustv3::native::encrypt as enc;
+    const M: u32 = 0x0000_4021;
+
+    let key: Vec<u8> = (0u8..32).collect();
+    let nonce: Vec<u8> = (0u8..12).collect();
+    let (aad, pt) = (b"aad-test".as_slice(), b"post-quantum MLS".as_slice());
+
+    let ct = enc::encrypt_with_key_bytes(&key, M, pt, Some(&nonce), None, aad, None)
+        .expect("chacha seal");
+    assert_eq!(
+        hex::encode(&ct),
+        "f9947b740466d021d9f74a9eb8504230bd98b19137baba92bbb1746ab710b38c",
+        "ChaCha20-Poly1305 ciphertext mismatch"
+    );
+
+    let back = enc::decrypt_with_key_bytes(&key, M, &ct, Some(&nonce), None, aad, None)
+        .expect("chacha open");
+    assert_eq!(back, pt);
+
+    // Authentication must be real: a flipped tag bit has to fail.
+    let mut bad = ct.clone();
+    let last = bad.len() - 1;
+    bad[last] ^= 0x01;
+    assert!(
+        enc::decrypt_with_key_bytes(&key, M, &bad, Some(&nonce), None, aad, None).is_err(),
+        "a tampered tag was accepted"
+    );
+}
