@@ -74,20 +74,60 @@ fn ml_kem_functions_are_directly_callable() {
 }
 
 /// X-Wing decapsulation against the draft's published ciphertext and secret,
-/// with the ML-KEM half computed by the Rust engine.
+/// with ML-KEM computed by the Rust engine.
 ///
-/// Same assertion as the C++-path test, so the two are directly comparable:
-/// if this passes, the engines agree with each other AND with the draft.
+/// The whole construction in one assertion: seed expansion, deterministic
+/// ML-KEM keygen from the derived d‖z, ML-KEM decapsulation in the engine,
+/// X25519, and the SHA3-256 combiner. One wrong byte anywhere fails it.
 #[test]
-#[ignore = "needs an initialised engine session; enable once the backend lands"]
 fn xwing_decapsulate_matches_draft_vector() {
-    // Deliberately left ignored rather than half-written. Wiring a session
-    // requires C_Initialize/C_OpenSession/C_GenerateKeyPair with CKA_SEED
-    // through the engine's C-shaped entry points, which belongs in the backend
-    // rather than duplicated in a test. The two tests above already prove the
-    // crate links, the primitives are correct, and the KEM API is callable.
+    use softhsmrustv3::native::{keygen, session};
+
+    let _ = session::finalize();
+    session::init().expect("engine init");
+    let sess = session::bootstrap_default_token(0, "so", "user", "xwing-kat")
+        .expect("bootstrap session");
+
+    // §5.2: expanded = SHAKE256(sk, 96); (d,z) = [0..64]; sk_X = [64..96]
+    let expanded = shake256(&vector("seed"), 96);
+
+    // CKP_ML_KEM_768 = 2 (pkcs11t.h). Extractable so the KAT can read the
+    // public key back out; the live path has no such need.
+    let (h_pub, h_priv) = keygen::generate_ml_kem_keypair_from_seed_extractable(
+        sess, 2, &expanded[0..64], b"xwing-kat", "xwing-kat",
+    )
+    .expect("deterministic ML-KEM-768 keygen");
+
+    let mut sk_x = [0u8; 32];
+    sk_x.copy_from_slice(&expanded[64..96]);
+    let sk_x = x25519_dalek::StaticSecret::from(sk_x);
+    let pk_x = x25519_dalek::PublicKey::from(&sk_x);
+
+    // §5.5: ct_M = ct[0..1088], ct_X = ct[1088..1120]
     let ct = vector("ct");
-    assert_eq!(ct.len(), 1120);
-    let _ = (XWING_LABEL, sha3_256(b""));
-    unimplemented!("wire through PkcsOps once the Rust-engine backend exists");
+    assert_eq!(ct.len(), 1120, "X-Wing ciphertext is 1120 bytes");
+    let (ct_m, ct_x) = ct.split_at(1088);
+
+    // CKM_ML_KEM = 0x17
+    let ss_m = encrypt::decapsulate(sess, h_priv, 0x0000_0017, ct_m)
+        .expect("ML-KEM decapsulate");
+
+    let mut ct_x_arr = [0u8; 32];
+    ct_x_arr.copy_from_slice(ct_x);
+    let ss_x = sk_x.diffie_hellman(&x25519_dalek::PublicKey::from(ct_x_arr));
+
+    // §5.3: SHA3-256(ss_M ‖ ss_X ‖ ct_X ‖ pk_X ‖ XWingLabel)
+    let mut input = Vec::with_capacity(32 * 4 + XWING_LABEL.len());
+    input.extend_from_slice(&ss_m);
+    input.extend_from_slice(ss_x.as_bytes());
+    input.extend_from_slice(ct_x);
+    input.extend_from_slice(pk_x.as_bytes());
+    input.extend_from_slice(&XWING_LABEL);
+
+    assert_eq!(
+        hex::encode(sha3_256(&input)),
+        hex::encode(vector("ss")),
+        "X-Wing shared secret does not match the draft vector"
+    );
+    let _ = h_pub;
 }
