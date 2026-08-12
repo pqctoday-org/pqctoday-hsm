@@ -5,6 +5,7 @@ build-san/
 build-pqctoday/
 build_fresh/
 build-wasm-fresh/
+build-wasm-native/
 test-results/
 *.o
 *.a
