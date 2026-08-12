@@ -13,6 +13,23 @@
 
 use softhsmrustv3::native::encrypt;
 
+
+/// One engine session for the whole binary.
+///
+/// Each test used to call `finalize()` then `init()`, which works alone and
+/// races when cargo runs them in parallel — they tear down each other's global
+/// engine state. The engine is process-global by design; the tests have to
+/// share it rather than each own it.
+fn shared_session() -> u32 {
+    use softhsmrustv3::native::session;
+    static S: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *S.get_or_init(|| {
+        session::init().expect("engine init");
+        session::bootstrap_default_token(0, "so", "user", "xwing-tests")
+            .expect("bootstrap session")
+    })
+}
+
 /// draft-connolly-cfrg-xwing-kem-10 §5.3 — XWingLabel, 6 bytes.
 const XWING_LABEL: [u8; 6] = [0x5c, 0x2e, 0x2f, 0x2f, 0x5e, 0x5c];
 
@@ -81,12 +98,8 @@ fn ml_kem_functions_are_directly_callable() {
 /// X25519, and the SHA3-256 combiner. One wrong byte anywhere fails it.
 #[test]
 fn xwing_decapsulate_matches_draft_vector() {
-    use softhsmrustv3::native::{keygen, session};
-
-    let _ = session::finalize();
-    session::init().expect("engine init");
-    let sess = session::bootstrap_default_token(0, "so", "user", "xwing-kat")
-        .expect("bootstrap session");
+    use softhsmrustv3::native::keygen;
+    let sess = shared_session();
 
     // §5.2: expanded = SHAKE256(sk, 96); (d,z) = [0..64]; sk_X = [64..96]
     let expanded = shake256(&vector("seed"), 96);
@@ -166,4 +179,32 @@ fn chacha20_poly1305_matches_known_answer() {
         enc::decrypt_with_key_bytes(&key, M, &bad, Some(&nonce), None, aad, None).is_err(),
         "a tampered tag was accepted"
     );
+}
+
+/// Encapsulate against a raw peer key, decapsulate on the handle side.
+///
+/// The shape the wire actually uses: the sender has only bytes, the receiver
+/// only its own object. Also the last operation that was still on the C++ FFI.
+#[test]
+fn ml_kem_encapsulate_to_raw_key_round_trips() {
+    use softhsmrustv3::native::{keygen, object};
+    let sess = shared_session();
+
+    let seed: Vec<u8> = (0u8..64).collect();
+    let (h_pub, h_priv) = keygen::generate_ml_kem_keypair_from_seed_extractable(
+        sess, 2, &seed, b"encap-rt", "encap-rt",
+    )
+    .expect("keygen");
+
+    let pk = object::get_attribute(sess, h_pub, 0x0000_0011).expect("CKA_VALUE");
+    assert_eq!(pk.len(), 1184, "ML-KEM-768 encapsulation key is 1184 bytes");
+
+    let h_peer = keygen::register_ml_kem_public_key(sess, 2, &pk, b"peer", "peer")
+        .expect("import peer key");
+    let (ct, ss_send) = encrypt::encapsulate(sess, h_peer, 0x0000_0017).expect("encapsulate");
+    assert_eq!(ct.len(), 1088, "ML-KEM-768 ciphertext is 1088 bytes");
+
+    let ss_recv = encrypt::decapsulate(sess, h_priv, 0x0000_0017, &ct).expect("decapsulate");
+    assert_eq!(ss_send, ss_recv, "sender and receiver disagree on the secret");
+    assert!(ss_send.iter().any(|&b| b != 0), "secret is all zeroes");
 }

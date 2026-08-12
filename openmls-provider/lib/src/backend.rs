@@ -267,7 +267,7 @@ pub trait PkcsOps: Send + Sync {
 
     // ── X25519 Diffie-Hellman (used by HPKE) ─────────────────────────────────
 
-    // ── Operations `cryptoki` cannot express (see `kem_ffi`) ─────────────────
+    // ── Operations `cryptoki` cannot express (served by softhsmrustv3) ──────
     //
     // Default to "unsupported" so a backend that has no route to them — the
     // wasm32 one — keeps compiling and fails loudly at the call site rather
@@ -373,32 +373,12 @@ pub trait PkcsOps: Send + Sync {
 #[cfg(not(target_arch = "wasm32"))]
 pub struct CryptokiBackend {
     pub(crate) hsm: crate::session::HsmSession,
-    /// Opened on first use. Lazy because most sessions never touch a
-    /// post-quantum suite, and opening it eagerly would make every provider pay
-    /// a second `C_OpenSession` and login.
-    kem: std::sync::OnceLock<Option<crate::kem_ffi::KemFfi>>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl CryptokiBackend {
     pub fn new(hsm: crate::session::HsmSession) -> Self {
-        Self { hsm, kem: std::sync::OnceLock::new() }
-    }
-
-    /// The raw v3.2 path onto the C++ module. Still used ONLY by
-    /// ChaCha20-Poly1305, whose Rust-engine entry point is `pub(crate)`.
-    fn kem(&self) -> Result<&crate::kem_ffi::KemFfi, PqcTodayError> {
-        self.kem
-            .get_or_init(|| {
-                crate::kem_ffi::KemFfi::open(
-                    &self.hsm.module_path,
-                    self.hsm.slot.id(),
-                    self.hsm.user_pin.as_deref(),
-                )
-                .ok()
-            })
-            .as_ref()
-            .ok_or_else(|| PqcTodayError::Kem("could not open the KEM session".into()))
+        Self { hsm }
     }
 
     /// Session on the **Rust** engine (`softhsmrustv3`), opened on first use.
@@ -501,13 +481,18 @@ impl PkcsOps for CryptokiBackend {
 
     fn ml_kem_encapsulate_to(&self, pk: &[u8]) -> Result<(Vec<u8>, Vec<u8>), PqcTodayError> {
         let sess = self.pq_session()?;
-        // Encapsulation needs the peer key as an engine object. Not yet wired:
-        // the import helper is the remaining piece, and inventing a function
-        // name here is what produced chacha20_poly1305_oneshot.
-        let _ = (sess, pk);
-        Err(PqcTodayError::Kem(
-            "ML-KEM encapsulate-to-raw-key not yet wired on the Rust engine".into(),
-        ))
+        // The engine already had the importer — keygen::register_ml_kem_public_key,
+        // which validates the length against the parameter set (FIPS 203 Table 3)
+        // rather than trusting it. I nearly re-wrote this from scratch because an
+        // earlier grep was truncated and hid it.
+        let h = softhsmrustv3::native::keygen::register_ml_kem_public_key(
+            sess, 2, pk, b"mls-peer", "mls-peer",
+        )
+        .map_err(|rv| {
+            PqcTodayError::Kem(format!("importing the peer ML-KEM key failed: 0x{rv:08x}"))
+        })?;
+        softhsmrustv3::native::encrypt::encapsulate(sess, h, 0x0000_0017)
+            .map_err(|rv| PqcTodayError::Kem(format!("ML-KEM encapsulate failed: 0x{rv:08x}")))
     }
 
     fn random(&self, n: usize) -> Result<Vec<u8>, PqcTodayError> {
