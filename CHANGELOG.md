@@ -6,6 +6,82 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.22.0] — 2026-08-12
+
+**Post-quantum MLS works.** Ciphersuite `0x004D` (X-Wing: ML-KEM-768 + X25519,
+Ed25519 signatures) runs end to end through the IETF MLS working group's own
+test runner, between two instances of our client:
+
+| Ciphersuite | Cases | Failures |
+|---|---|---|
+| 1, 2, 3 | 96 each | 0 |
+| **77 (X-Wing)** | **96** | **0** |
+
+384 scripts across CreateGroup, CreateKeyPackage, AddProposal, Commit,
+HandlePendingCommit, ExternalPSKProposal and JoinGroup.
+
+### Added
+
+- **X-Wing (`0x004D`) — the only post-quantum ciphersuite the released
+  `openmls_traits` 0.5.0 defines.** Declared in `supports()` and
+  `supported_ciphersuites()`, and advertised by the interop client.
+
+  **Both directions verified against `draft-connolly-cfrg-xwing-kem`'s own
+  published vectors, byte for byte.** The encapsulation check matters
+  disproportionately: `C_EncapsulateKey` takes no randomness parameter, so on a
+  PKCS#11 C path encapsulation can only be round-tripped against our own
+  decapsulation — which is blind to a construction that is wrong in both
+  directions at once. The Rust engine's `encapsulate_deterministic` accepts
+  explicit coins, so the draft's own `eseed` goes in and its own ciphertext
+  comes out for comparison.
+
+- **`CKM_SHAKE_256_KEY_DERIVATION` in the C++ engine.** X-Wing expands a 32-byte
+  seed to 96 bytes with SHAKE-256; the engine had SHAKE only inside ML-DSA and
+  SLH-DSA, never as a callable mechanism. Uses `EVP_DigestFinalXOF`, not
+  `EVP_DigestFinal_ex` — the latter emits SHAKE's nominal 32 bytes and ignores
+  the requested length, which would produce a short key and still report
+  success.
+
+- **HPKE generalised over the KEM.** Suite parameters were hard-coded constants
+  and `encap`/`decap` were typed `[u8; 32]`. Fine for one DH suite, impossible
+  for a KEM with 1120-byte ciphertexts. Now a `Suite` is data and the KEM
+  dispatches on shape — DH derives from a scalar and a peer key, X-Wing
+  encapsulates against a public key alone.
+
+### Changed
+
+- **The post-quantum path now runs on `softhsmrustv3`, not the C++ module.**
+
+  Every blocker on the C++ path was a *binding* problem: `C_EncapsulateKey` is a
+  PKCS#11 v3.2 function and `cryptoki` 0.10 stops at v3.0; SHA3-256, SHAKE-256
+  and ChaCha20-Poly1305 are absent from its mechanism allowlist, which is an
+  exhaustive `match` that rejects rather than passes through unknown values; and
+  its session cannot be borrowed because `Session::handle()` is `pub(crate)`.
+
+  The workaround — a second PKCS#11 session over hand-written FFI — also
+  crashed under parallel tests. The Rust engine is a native `rlib` with its own
+  conformance evidence (257 + 301 tests), plain Rust APIs and process-global
+  state behind a real `Mutex`. **~700 lines of `unsafe` C ABI deleted, and the
+  crash with it.** Not fixed: removed.
+
+- **ChaCha20-Poly1305 moved off software onto the engine.** `crypto.rs` carried
+  a comment saying the engine could not do it — true when written, and the
+  engine gained `CKM_CHACHA20_POLY1305` in June. Ciphersuite 3, which ships,
+  had been encrypting in software ever since because a stale comment made the
+  fallback look deliberate.
+
+### Known limits
+
+- **Cross-vendor post-quantum interop is impossible today.** openmls and mls-rs
+  have chosen non-overlapping code points (`0x0042`/`0x0051`/`0x0906` versus
+  `65001`–`65100`). This resolves upstream when the registry settles, not here.
+  Self-interop is the available result.
+- Two pre-existing defects found and filed rather than fixed: #163
+  (`integration.rs` crashes under parallel test execution) and #164 (two
+  `rfc9420_kats` assertions fail). Both reproduce on `main` without any of this
+  work, and both are invisible in a default environment because the tests skip
+  silently when `PKCS11_MODULE` is unset.
+
 ## [0.21.2] — 2026-08-10
 
 CI was measuring this project against the wrong OpenSSL. The headline is that a
