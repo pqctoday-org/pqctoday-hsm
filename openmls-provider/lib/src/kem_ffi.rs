@@ -73,6 +73,22 @@ const CKF_RW_SESSION: CkFlags = 0x0000_0002;
 
 const CKU_USER: CkUlong = 1;
 
+/// `CKF_OS_LOCKING_OK` — tells the module the application is multi-threaded and
+/// it should use OS primitives to protect its own internal state.
+const CKF_OS_LOCKING_OK: CkFlags = 0x0000_0002;
+
+/// `CK_C_INITIALIZE_ARGS`. Only the flags field matters to us; the four
+/// callbacks stay NULL, which with CKF_OS_LOCKING_OK means "use OS locking".
+#[repr(C)]
+struct CkInitializeArgs {
+    create_mutex: *mut c_void,
+    destroy_mutex: *mut c_void,
+    lock_mutex: *mut c_void,
+    unlock_mutex: *mut c_void,
+    flags: CkFlags,
+    p_reserved: *mut c_void,
+}
+
 // Values below are taken from `src/lib/pkcs11/pkcs11t.h`, the normative header
 // vendored in this repo — never from memory. See CLAUDE.md: pkcs11t.h wins.
 const CKM_ML_KEM_KEY_PAIR_GEN: CkMechanismType = 0x0000_000f;
@@ -295,11 +311,28 @@ impl KemFfi {
         let decrypt_init = sym!(lib, "C_DecryptInit", FnCryptInit);
         let decrypt_op = sym!(lib, "C_Decrypt", FnCrypt);
 
-        // The module is already initialised by cryptoki. ALREADY_INITIALIZED is
-        // the expected answer and means exactly what we want: we are attached to
-        // the live instance, not a second one.
-        // Safety: NULL args means "no threading callbacks", per §5.6.
-        let rv = unsafe { initialize(std::ptr::null_mut()) };
+        // MUST pass CKF_OS_LOCKING_OK, not NULL.
+        //
+        // NULL args declares the application single-threaded, so the module is
+        // free to leave its internal state unguarded. When cryptoki initialises
+        // first that does not matter — ALREADY_INITIALIZED, its flags win. But
+        // in a process where THIS is the first initialiser (kem_ffi's own tests
+        // have no cryptoki at all), NULL locked the engine into single-threaded
+        // mode for everyone. Running those tests in parallel then corrupted a
+        // std::map inside the engine and crashed in
+        // std::__tree_is_left_child with a null node — a fault that looked
+        // exactly like a bug in this FFI and was not.
+        let mut init_args = CkInitializeArgs {
+            create_mutex: std::ptr::null_mut(),
+            destroy_mutex: std::ptr::null_mut(),
+            lock_mutex: std::ptr::null_mut(),
+            unlock_mutex: std::ptr::null_mut(),
+            flags: CKF_OS_LOCKING_OK,
+            p_reserved: std::ptr::null_mut(),
+        };
+        // Safety: args outlive the call; ALREADY_INITIALIZED is expected and
+        // fine — it means cryptoki got there first and its flags apply.
+        let rv = unsafe { initialize(&mut init_args as *mut _ as *mut c_void) };
         if rv != CKR_OK && rv != CKR_CRYPTOKI_ALREADY_INITIALIZED {
             return Err(PqcTodayError::Kem(format!(
                 "C_Initialize for KEM path failed: 0x{rv:08x}"
