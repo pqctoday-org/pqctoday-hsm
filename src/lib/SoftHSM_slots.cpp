@@ -1022,6 +1022,14 @@ CK_RV SoftHSM::C_GetMechanismInfo(CK_SLOT_ID slotID, CK_MECHANISM_TYPE type, CK_
 #endif
 #if defined(WITH_ECC) || defined(WITH_EDDSA)
 		case CKM_ECDH1_DERIVE:
+			// N3 remediation 2026-08-13: plain ECDH1 is also dispatched by
+			// C_EncapsulateKey/C_DecapsulateKey (SoftHSM_kem.cpp, PKCS#11
+			// v3.2 §6.3.17 Table 78) — advertise it, mirroring the
+			// CKM_ML_KEM entry below. The cofactor variant stays derive-only.
+			pInfo->ulMinKeySize = ecdhMinSize ? ecdhMinSize : eddsaMinSize;
+			pInfo->ulMaxKeySize = ecdhMaxSize ? ecdhMaxSize : eddsaMaxSize;
+			pInfo->flags = CKF_DERIVE | CKF_ENCAPSULATE | CKF_DECAPSULATE;
+			break;
 		case CKM_ECDH1_COFACTOR_DERIVE:
 			pInfo->ulMinKeySize = ecdhMinSize ? ecdhMinSize : eddsaMinSize;
 			pInfo->ulMaxKeySize = ecdhMaxSize ? ecdhMaxSize : eddsaMaxSize;

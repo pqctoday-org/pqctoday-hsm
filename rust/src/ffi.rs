@@ -863,7 +863,13 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
         }
         // T1 — C_DeriveKey dispatches P-256 / secp256k1 / P-384 / P-521 for
         // both ECDH1 mechanisms; advertise the full dispatched range.
-        CKM_ECDH1_DERIVE | CKM_ECDH1_COFACTOR_DERIVE => (256, 521, 0x00080000),
+        // 2026-08-13 (ECDH-as-KEM parity with the C++ engine): plain
+        // CKM_ECDH1_DERIVE is also dispatched by C_EncapsulateKey /
+        // C_DecapsulateKey (§6.3.17 Table 78) — advertise
+        // CKF_ENCAPSULATE (0x10000000) | CKF_DECAPSULATE (0x20000000),
+        // mirroring CKM_ML_KEM above. The cofactor variant stays derive-only.
+        CKM_ECDH1_DERIVE => (256, 521, 0x00080000 | 0x10000000 | 0x20000000),
+        CKM_ECDH1_COFACTOR_DERIVE => (256, 521, 0x00080000),
         CKM_EC_EDWARDS_KEY_PAIR_GEN => (255, 255, 0x00010000),
         CKM_EDDSA => (255, 255, 0x00000800 | 0x00002000),
         // PKCS#11 v3.2 §6.7 — Montgomery-curve key pair generation (X25519=255-bit, X448=448-bit)
@@ -2795,6 +2801,44 @@ pub fn C_GenerateKey(
 
 // ── ML-KEM Encapsulate/Decapsulate ──────────────────────────────────────────
 
+/// DER-wrap an uncompressed SEC1 EC point exactly the way the engines encode
+/// CKA_EC_POINT (OCTET STRING, short form or 0x81 long form). This is the
+/// byte format the C++ engine's `encapsulateECDH` emits as the KEM
+/// "ciphertext" (`ephPub->getQ()`), so cross-engine decapsulation works.
+fn der_wrap_ec_point(point: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(3 + point.len());
+    out.push(0x04); // DER OCTET STRING tag
+    if point.len() < 0x80 {
+        out.push(point.len() as u8);
+    } else {
+        out.push(0x81);
+        out.push(point.len() as u8);
+    }
+    out.extend_from_slice(point);
+    out
+}
+
+/// Strip a DER OCTET STRING wrapper from an EC point if present. Mirrors the
+/// C++ engine's `getECDHPubData` tolerance: raw uncompressed SEC1 points for
+/// the supported curves (65/97/133 bytes) pass through untouched — length is
+/// checked FIRST because a raw point also starts with 0x04 and could
+/// otherwise be misread as a DER header.
+fn ec_point_unwrap(bytes: &[u8]) -> &[u8] {
+    match bytes.len() {
+        65 | 97 | 133 => bytes, // raw uncompressed SEC1 (P-256 / P-384 / P-521)
+        _ if bytes.len() >= 2 && bytes[0] == 0x04 => {
+            if bytes[1] < 0x80 && bytes[1] as usize + 2 == bytes.len() {
+                &bytes[2..]
+            } else if bytes.len() >= 3 && bytes[1] == 0x81 && bytes[2] as usize + 3 == bytes.len() {
+                &bytes[3..]
+            } else {
+                bytes
+            }
+        }
+        _ => bytes,
+    }
+}
+
 fn C_EncapsulateKey_impl(
     _h_session: u32,
     p_mechanism: *mut u8,
@@ -2833,6 +2877,12 @@ fn C_EncapsulateKey_impl(
             };
             if get_object_attr_u32(h_key, CKA_KEY_TYPE) != Some(expected_kt) {
                 return CKR_KEY_TYPE_INCONSISTENT;
+            }
+            // §4.8 Table 13 — CKA_ALLOWED_MECHANISMS. N5 remediation
+            // 2026-08-13: this vendor arm returned before the shared check
+            // further down, so a restricted key was never enforced here.
+            if let Err(rv) = check_mechanism_allowed(h_key, mech_type) {
+                return rv;
             }
             let ps = get_object_param_set(h_key);
             if ps == 0 {
@@ -2876,6 +2926,97 @@ fn C_EncapsulateKey_impl(
             store_bool(&mut ss_attrs, CKA_PRIVATE, false); // PKCS#11 v3.2 §4.1 default
             store_bool(&mut ss_attrs, CKA_LOCAL, false); // PKCS#11 v3.2 §5.18.8 — KEM keys are not locally generated
             store_ulong(&mut ss_attrs, CKA_KEY_GEN_MECHANISM, mech_type); // PKCS#11 v3.2 §4.3
+            absorb_template_attrs(&mut ss_attrs, _p_template, _ul_attribute_count);
+            // PKCS#11 v3.2 §5.18.8: unconditionally CK_FALSE for encapsulated keys
+            store_bool(&mut ss_attrs, CKA_ALWAYS_SENSITIVE, false);
+            store_bool(&mut ss_attrs, CKA_NEVER_EXTRACTABLE, false);
+            *ph_key = allocate_handle_owned(_h_session, ss_attrs);
+            return CKR_OK;
+        }
+
+        // ── ECDH-as-KEM (PKCS#11 v3.2 §6.3.17 Table 78) ─────────────────────
+        // 2026-08-13 parity with the C++ engine's encapsulateECDH
+        // (SoftHSM_kem.cpp): the "ciphertext" is a fresh ephemeral public EC
+        // point, byte-identical to the C++ wire form (DER OCTET STRING
+        // wrapping the uncompressed SEC1 point — the CKA_EC_POINT encoding);
+        // the shared secret is the raw ECDH X coordinate, no KDF (combining
+        // is the CALLER's job, e.g. CKM_CONCATENATE_BASE_AND_KEY — same
+        // "DHKEM" ephemeral-static pattern as native/hybrid.rs).
+        if mech_type == CKM_ECDH1_DERIVE {
+            // §4.8 Table 13 — CKA_ALLOWED_MECHANISMS (N5).
+            if let Err(rv) = check_mechanism_allowed(h_key, mech_type) {
+                return rv;
+            }
+            if get_object_attr_u32(h_key, CKA_KEY_TYPE) != Some(CKK_EC) {
+                return CKR_KEY_TYPE_INCONSISTENT;
+            }
+            let curve = get_object_param_set(h_key);
+            // Ciphertext = DER wrapper (2 or 3 bytes) + uncompressed point.
+            let ct_len: u32 = match curve {
+                CURVE_P256 => 2 + 65,
+                CURVE_P384 => 2 + 97,
+                CURVE_P521 => 3 + 133,
+                // secp256k1 / Montgomery curves are not offered as KEM here
+                // (the C++ mirror is matched for the NIST prime curves;
+                // X25519/X448-as-KEM remains a recorded divergence).
+                _ => return CKR_KEY_TYPE_INCONSISTENT,
+            };
+            if p_ciphertext.is_null() {
+                *pul_ciphertext_len = ct_len;
+                return CKR_OK;
+            }
+            if *pul_ciphertext_len < ct_len {
+                *pul_ciphertext_len = ct_len;
+                return CKR_BUFFER_TOO_SMALL;
+            }
+            // Peer static public point (CKA_EC_POINT is DER-wrapped; raw
+            // SEC1 tolerated, mirroring the C++ getECDHPubData).
+            let peer_point_attr = match get_object_attr_bytes(h_key, CKA_EC_POINT) {
+                Some(v) => v,
+                None => return CKR_ARGUMENTS_BAD,
+            };
+            let peer_point = ec_point_unwrap(&peer_point_attr);
+            use p256::elliptic_curve::sec1::ToEncodedPoint;
+            macro_rules! ecdh_encap {
+                ($c:ident, $rng:expr) => {{
+                    let peer = match $c::PublicKey::from_sec1_bytes(peer_point) {
+                        Ok(pk) => pk,
+                        Err(_) => return CKR_ARGUMENTS_BAD,
+                    };
+                    // §6.3.17: one fresh ephemeral pair per encapsulation.
+                    let eph = $c::SecretKey::random($rng);
+                    let eph_pub = eph.public_key().to_encoded_point(false);
+                    let ss =
+                        $c::ecdh::diffie_hellman(eph.to_nonzero_scalar(), peer.as_affine());
+                    (
+                        der_wrap_ec_point(eph_pub.as_bytes()),
+                        ss.raw_secret_bytes().to_vec(),
+                    )
+                }};
+            }
+            let (ct, ss) = with_rng!(rng, {
+                match curve {
+                    CURVE_P256 => ecdh_encap!(p256, &mut rng),
+                    CURVE_P384 => ecdh_encap!(p384, &mut rng),
+                    CURVE_P521 => ecdh_encap!(p521, &mut rng),
+                    _ => return CKR_KEY_TYPE_INCONSISTENT,
+                }
+            });
+            debug_assert_eq!(ct.len(), ct_len as usize, "ct_len must match the emitted point");
+            std::ptr::copy_nonoverlapping(ct.as_ptr(), p_ciphertext, ct.len());
+            *pul_ciphertext_len = ct.len() as u32;
+            let ss_len = ss.len() as u32;
+            let mut ss_attrs = HashMap::new();
+            ss_attrs.insert(CKA_VALUE, ss);
+            store_ulong(&mut ss_attrs, CKA_CLASS, CKO_SECRET_KEY);
+            store_ulong(&mut ss_attrs, CKA_KEY_TYPE, CKK_GENERIC_SECRET);
+            store_bool(&mut ss_attrs, CKA_EXTRACTABLE, true);
+            store_bool(&mut ss_attrs, CKA_SENSITIVE, false);
+            store_ulong(&mut ss_attrs, CKA_VALUE_LEN, ss_len);
+            store_bool(&mut ss_attrs, CKA_TOKEN, false); // PKCS#11 v3.2 §4.1 default
+            store_bool(&mut ss_attrs, CKA_PRIVATE, false); // PKCS#11 v3.2 §4.1 default
+            store_bool(&mut ss_attrs, CKA_LOCAL, false); // §5.18.8 — KEM keys are not locally generated
+            store_ulong(&mut ss_attrs, CKA_KEY_GEN_MECHANISM, CKM_ECDH1_DERIVE); // §4.3
             absorb_template_attrs(&mut ss_attrs, _p_template, _ul_attribute_count);
             // PKCS#11 v3.2 §5.18.8: unconditionally CK_FALSE for encapsulated keys
             store_bool(&mut ss_attrs, CKA_ALWAYS_SENSITIVE, false);
@@ -3005,6 +3146,12 @@ fn C_DecapsulateKey_impl(
             if get_object_attr_u32(h_private_key, CKA_KEY_TYPE) != Some(expected_kt) {
                 return CKR_KEY_TYPE_INCONSISTENT;
             }
+            // §4.8 Table 13 — CKA_ALLOWED_MECHANISMS. N5 remediation
+            // 2026-08-13: this vendor arm returned before the shared check
+            // further down, so a restricted key was never enforced here.
+            if let Err(rv) = check_mechanism_allowed(h_private_key, mech_type) {
+                return rv;
+            }
             let ps = get_object_param_set(h_private_key);
             if ps == 0 {
                 return CKR_TEMPLATE_INCOMPLETE;
@@ -3050,6 +3197,71 @@ fn C_DecapsulateKey_impl(
             store_bool(&mut ss_attrs, CKA_PRIVATE, false); // PKCS#11 v3.2 §4.1 default
             store_bool(&mut ss_attrs, CKA_LOCAL, false); // PKCS#11 v3.2 §5.18.9 — KEM keys are not locally generated
             store_ulong(&mut ss_attrs, CKA_KEY_GEN_MECHANISM, mech_type); // PKCS#11 v3.2 §4.3
+            absorb_template_attrs(&mut ss_attrs, _p_template, _ul_attribute_count);
+            // PKCS#11 v3.2 §5.18.9: unconditionally CK_FALSE for decapsulated keys
+            store_bool(&mut ss_attrs, CKA_ALWAYS_SENSITIVE, false);
+            store_bool(&mut ss_attrs, CKA_NEVER_EXTRACTABLE, false);
+            *ph_key = allocate_handle_owned(_h_session, ss_attrs);
+            return CKR_OK;
+        }
+
+        // ── ECDH-as-KEM (PKCS#11 v3.2 §6.3.17 Table 78) ─────────────────────
+        // 2026-08-13 parity with the C++ engine's decapsulateECDH
+        // (SoftHSM_kem.cpp): the ciphertext is the encapsulator's ephemeral
+        // public EC point (DER-wrapped or raw SEC1, both accepted); the
+        // shared secret is the raw ECDH X coordinate of static-scalar ×
+        // ephemeral-point, no KDF.
+        if mech_type == CKM_ECDH1_DERIVE {
+            // §4.8 Table 13 — CKA_ALLOWED_MECHANISMS (N5).
+            if let Err(rv) = check_mechanism_allowed(h_private_key, mech_type) {
+                return rv;
+            }
+            if get_object_attr_u32(h_private_key, CKA_KEY_TYPE) != Some(CKK_EC) {
+                return CKR_KEY_TYPE_INCONSISTENT;
+            }
+            let curve = get_object_param_set(h_private_key);
+            let scalar = match get_object_value(h_private_key) {
+                Some(v) => v,
+                None => return CKR_ARGUMENTS_BAD,
+            };
+            let ct_bytes =
+                std::slice::from_raw_parts(p_ciphertext, ul_ciphertext_len as usize);
+            let peer_point = ec_point_unwrap(ct_bytes);
+            macro_rules! ecdh_decap {
+                ($c:ident) => {{
+                    let sk = match $c::NonZeroScalar::try_from(scalar.as_slice()) {
+                        Ok(s) => s,
+                        Err(_) => return CKR_KEY_TYPE_INCONSISTENT,
+                    };
+                    let peer = match $c::PublicKey::from_sec1_bytes(peer_point) {
+                        Ok(pk) => pk,
+                        // §5.18.9 — an undecodable point is invalid input
+                        // ciphertext (this file's ML-KEM convention).
+                        Err(_) => return CKR_ENCRYPTED_DATA_INVALID,
+                    };
+                    $c::ecdh::diffie_hellman(&sk, peer.as_affine())
+                        .raw_secret_bytes()
+                        .to_vec()
+                }};
+            }
+            let ss = match curve {
+                CURVE_P256 => ecdh_decap!(p256),
+                CURVE_P384 => ecdh_decap!(p384),
+                CURVE_P521 => ecdh_decap!(p521),
+                _ => return CKR_KEY_TYPE_INCONSISTENT,
+            };
+            let ss_len = ss.len() as u32;
+            let mut ss_attrs = HashMap::new();
+            ss_attrs.insert(CKA_VALUE, ss);
+            store_ulong(&mut ss_attrs, CKA_CLASS, CKO_SECRET_KEY);
+            store_ulong(&mut ss_attrs, CKA_KEY_TYPE, CKK_GENERIC_SECRET);
+            store_bool(&mut ss_attrs, CKA_EXTRACTABLE, true);
+            store_bool(&mut ss_attrs, CKA_SENSITIVE, false);
+            store_ulong(&mut ss_attrs, CKA_VALUE_LEN, ss_len);
+            store_bool(&mut ss_attrs, CKA_TOKEN, false); // PKCS#11 v3.2 §4.1 default
+            store_bool(&mut ss_attrs, CKA_PRIVATE, false); // PKCS#11 v3.2 §4.1 default
+            store_bool(&mut ss_attrs, CKA_LOCAL, false); // §5.18.9 — KEM keys are not locally generated
+            store_ulong(&mut ss_attrs, CKA_KEY_GEN_MECHANISM, CKM_ECDH1_DERIVE); // §4.3
             absorb_template_attrs(&mut ss_attrs, _p_template, _ul_attribute_count);
             // PKCS#11 v3.2 §5.18.9: unconditionally CK_FALSE for decapsulated keys
             store_bool(&mut ss_attrs, CKA_ALWAYS_SENSITIVE, false);
@@ -15149,4 +15361,251 @@ pub fn C_DecapsulateKey(
         );
     }
     rv
+}
+
+// ── ECDH-as-KEM FFI tests (2026-08-13 C++-parity implementation) ─────────────
+#[cfg(test)]
+mod ecdh_kem_ffi_tests {
+    use super::*;
+    use crate::native::test_lock;
+
+    // High fixed handles to avoid colliding with parallel native tests that
+    // allocate via NEXT_HANDLE / NEXT_SESSION_HANDLE (same convention as
+    // multipart_ffi_tests above).
+    const SESSION: u32 = 0x4D50_2001;
+    const H_PUB: u32 = 0x4D50_2002;
+    const H_PRV: u32 = 0x4D50_2003;
+
+    fn setup() {
+        // §5.4 — entry points are gated by `require_init!()`; flip the
+        // lifecycle flag directly (tests hold `test_lock`, so this cannot
+        // race the lifecycle dance of the `native::*` tests).
+        crate::state::set_initialized(true);
+        SESSIONS.with(|s| {
+            s.borrow_mut()
+                .insert(SESSION, crate::state::SessionState { slot_id: 0, rw_session: true });
+        });
+    }
+
+    /// Install a static EC keypair shaped exactly like CKM_EC_KEY_PAIR_GEN's
+    /// output: DER-wrapped CKA_EC_POINT on the public, raw big-endian scalar
+    /// CKA_VALUE on the private, CURVE_* in the param set.
+    fn install_ec_keypair(curve: u32) {
+        use p256::elliptic_curve::sec1::ToEncodedPoint;
+        let mut rng = OsRng;
+        macro_rules! gen_ec {
+            ($c:ident) => {{
+                let sk = $c::SecretKey::random(&mut rng);
+                (
+                    sk.to_bytes().to_vec(),
+                    sk.public_key().to_encoded_point(false).as_bytes().to_vec(),
+                )
+            }};
+        }
+        let (scalar, point): (Vec<u8>, Vec<u8>) = match curve {
+            CURVE_P256 => gen_ec!(p256),
+            CURVE_P384 => gen_ec!(p384),
+            CURVE_P521 => gen_ec!(p521),
+            _ => unreachable!("unsupported test curve"),
+        };
+        OBJECTS.with(|o| {
+            let mut store = o.borrow_mut();
+            let mut pub_attrs = Attributes::new();
+            store_ulong(&mut pub_attrs, CKA_CLASS, CKO_PUBLIC_KEY);
+            store_ulong(&mut pub_attrs, CKA_KEY_TYPE, CKK_EC);
+            store_param_set(&mut pub_attrs, curve);
+            store_bool(&mut pub_attrs, CKA_ENCAPSULATE, true);
+            pub_attrs.insert(CKA_EC_POINT, der_wrap_ec_point(&point));
+            store.insert(H_PUB, pub_attrs);
+            let mut prv_attrs = Attributes::new();
+            store_ulong(&mut prv_attrs, CKA_CLASS, CKO_PRIVATE_KEY);
+            store_ulong(&mut prv_attrs, CKA_KEY_TYPE, CKK_EC);
+            store_param_set(&mut prv_attrs, curve);
+            store_bool(&mut prv_attrs, CKA_DECAPSULATE, true);
+            prv_attrs.insert(CKA_VALUE, scalar);
+            store.insert(H_PRV, prv_attrs);
+        });
+    }
+
+    /// encapsulate → decapsulate: secrets match, and the ciphertext is
+    /// byte-shape-identical to what the C++ engine's encapsulateECDH emits
+    /// (DER OCTET STRING wrapping an uncompressed SEC1 point).
+    fn roundtrip(curve: u32, expected_ct_len: usize, point_len: usize) {
+        setup();
+        install_ec_keypair(curve);
+        let mut mech: [usize; 3] = [CKM_ECDH1_DERIVE as usize, 0, 0];
+        let mut ct_len: u32 = 0;
+        let mut h_ss_e: u32 = 0;
+        // NULL-output size query first (§5.2 convention).
+        let rv = C_EncapsulateKey_impl(
+            SESSION,
+            mech.as_mut_ptr() as *mut u8,
+            H_PUB,
+            std::ptr::null_mut(),
+            0,
+            std::ptr::null_mut(),
+            &mut ct_len,
+            &mut h_ss_e,
+        );
+        assert_eq!(rv, CKR_OK, "size query: 0x{rv:x}");
+        assert_eq!(ct_len as usize, expected_ct_len, "advertised ciphertext length");
+        let mut ct = vec![0u8; ct_len as usize];
+        let rv = C_EncapsulateKey_impl(
+            SESSION,
+            mech.as_mut_ptr() as *mut u8,
+            H_PUB,
+            std::ptr::null_mut(),
+            0,
+            ct.as_mut_ptr(),
+            &mut ct_len,
+            &mut h_ss_e,
+        );
+        assert_eq!(rv, CKR_OK, "encapsulate: 0x{rv:x}");
+        // C++ wire-format cross-check (SoftHSM_kem.cpp emits ephPub->getQ(),
+        // the CKA_EC_POINT DER encoding).
+        assert_eq!(ct[0], 0x04, "DER OCTET STRING tag");
+        let inner = ec_point_unwrap(&ct).to_vec();
+        assert_eq!(inner.len(), point_len, "uncompressed SEC1 point length");
+        assert_eq!(inner[0], 0x04, "uncompressed SEC1 point marker");
+        let ss_e = get_object_value(h_ss_e).expect("encapsulated secret stored");
+        let mut h_ss_d: u32 = 0;
+        let rv = C_DecapsulateKey_impl(
+            SESSION,
+            mech.as_mut_ptr() as *mut u8,
+            H_PRV,
+            std::ptr::null_mut(),
+            0,
+            ct.as_mut_ptr(),
+            ct_len,
+            &mut h_ss_d,
+        );
+        assert_eq!(rv, CKR_OK, "decapsulate: 0x{rv:x}");
+        let ss_d = get_object_value(h_ss_d).expect("decapsulated secret stored");
+        assert_eq!(ss_e, ss_d, "both sides must derive the same shared secret");
+        assert_eq!(ss_e.len(), (point_len - 1) / 2, "raw X-coordinate shared secret");
+
+        // Raw-SEC1 ciphertext (no DER wrapper) must decapsulate identically —
+        // the same tolerance the C++ getECDHPubData applies.
+        let mut raw = inner.clone();
+        let mut h_ss_r: u32 = 0;
+        let rv = C_DecapsulateKey_impl(
+            SESSION,
+            mech.as_mut_ptr() as *mut u8,
+            H_PRV,
+            std::ptr::null_mut(),
+            0,
+            raw.as_mut_ptr(),
+            raw.len() as u32,
+            &mut h_ss_r,
+        );
+        assert_eq!(rv, CKR_OK, "raw-SEC1 decapsulate: 0x{rv:x}");
+        assert_eq!(get_object_value(h_ss_r).unwrap(), ss_e);
+    }
+
+    #[test]
+    fn ecdh_as_kem_roundtrip_p256() {
+        let _guard = test_lock::acquire();
+        roundtrip(CURVE_P256, 2 + 65, 65);
+    }
+
+    #[test]
+    fn ecdh_as_kem_roundtrip_p384() {
+        let _guard = test_lock::acquire();
+        roundtrip(CURVE_P384, 2 + 97, 97);
+    }
+
+    #[test]
+    fn ecdh_as_kem_roundtrip_p521() {
+        let _guard = test_lock::acquire();
+        roundtrip(CURVE_P521, 3 + 133, 133);
+    }
+
+    /// N5 — CKA_ALLOWED_MECHANISMS excluding CKM_ECDH1_DERIVE must block
+    /// both KEM directions with CKR_MECHANISM_INVALID (§4.8 Table 13).
+    #[test]
+    fn ecdh_as_kem_blocked_by_allowed_mechanisms() {
+        let _guard = test_lock::acquire();
+        setup();
+        install_ec_keypair(CURVE_P256);
+        OBJECTS.with(|o| {
+            let mut store = o.borrow_mut();
+            for h in [H_PUB, H_PRV] {
+                store
+                    .get_mut(&h)
+                    .unwrap()
+                    .insert(CKA_ALLOWED_MECHANISMS, CKM_ML_KEM.to_le_bytes().to_vec());
+            }
+        });
+        let mut mech: [usize; 3] = [CKM_ECDH1_DERIVE as usize, 0, 0];
+        let mut ct_len: u32 = 0;
+        let mut h_ss: u32 = 0;
+        let rv = C_EncapsulateKey_impl(
+            SESSION,
+            mech.as_mut_ptr() as *mut u8,
+            H_PUB,
+            std::ptr::null_mut(),
+            0,
+            std::ptr::null_mut(),
+            &mut ct_len,
+            &mut h_ss,
+        );
+        assert_eq!(rv, CKR_MECHANISM_INVALID, "encapsulate must be blocked");
+        let mut dummy_ct = vec![0u8; 67];
+        let rv = C_DecapsulateKey_impl(
+            SESSION,
+            mech.as_mut_ptr() as *mut u8,
+            H_PRV,
+            std::ptr::null_mut(),
+            0,
+            dummy_ct.as_mut_ptr(),
+            67,
+            &mut h_ss,
+        );
+        assert_eq!(rv, CKR_MECHANISM_INVALID, "decapsulate must be blocked");
+    }
+
+    /// N5 — the FrodoKEM / Classic-McEliece vendor arms previously returned
+    /// before the shared CKA_ALLOWED_MECHANISMS check; they must now enforce
+    /// it too. The check fires before any key material or parameter set is
+    /// touched, so a minimal restricted object suffices.
+    #[test]
+    fn vendor_kem_arms_enforce_allowed_mechanisms() {
+        let _guard = test_lock::acquire();
+        setup();
+        OBJECTS.with(|o| {
+            let mut attrs = Attributes::new();
+            store_ulong(&mut attrs, CKA_CLASS, CKO_PUBLIC_KEY);
+            store_ulong(&mut attrs, CKA_KEY_TYPE, CKK_PQCTODAY_FRODOKEM);
+            store_bool(&mut attrs, CKA_ENCAPSULATE, true);
+            store_bool(&mut attrs, CKA_DECAPSULATE, true);
+            attrs.insert(CKA_ALLOWED_MECHANISMS, CKM_ML_KEM.to_le_bytes().to_vec());
+            o.borrow_mut().insert(H_PUB, attrs);
+        });
+        let mut mech: [usize; 3] = [CKM_PQCTODAY_FRODOKEM_ENCAPSULATE as usize, 0, 0];
+        let mut ct_len: u32 = 0;
+        let mut h_ss: u32 = 0;
+        let rv = C_EncapsulateKey_impl(
+            SESSION,
+            mech.as_mut_ptr() as *mut u8,
+            H_PUB,
+            std::ptr::null_mut(),
+            0,
+            std::ptr::null_mut(),
+            &mut ct_len,
+            &mut h_ss,
+        );
+        assert_eq!(rv, CKR_MECHANISM_INVALID, "vendor encapsulate must be blocked");
+        let mut dummy_ct = vec![0u8; 16];
+        let rv = C_DecapsulateKey_impl(
+            SESSION,
+            mech.as_mut_ptr() as *mut u8,
+            H_PUB,
+            std::ptr::null_mut(),
+            0,
+            dummy_ct.as_mut_ptr(),
+            16,
+            &mut h_ss,
+        );
+        assert_eq!(rv, CKR_MECHANISM_INVALID, "vendor decapsulate must be blocked");
+    }
 }

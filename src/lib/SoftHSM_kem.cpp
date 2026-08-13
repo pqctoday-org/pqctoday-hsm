@@ -222,6 +222,12 @@ CK_RV SoftHSM::encapsulateKeyImpl
 	if (!keyObj->getBooleanValue(CKA_ENCAPSULATE, false))
 		return CKR_KEY_FUNCTION_NOT_PERMITTED;
 
+	// N5 remediation 2026-08-13: CKA_ALLOWED_MECHANISMS was never enforced on
+	// the KEM paths — apply the same shared gate every other operation uses
+	// (its convention: CKR_MECHANISM_INVALID for a disallowed mechanism).
+	if (!isMechanismPermitted(keyObj, pMechanism->mechanism))
+		return CKR_MECHANISM_INVALID;
+
 	// Check key type
 	if (keyObj->getUnsignedLongValue(CKA_CLASS, CKO_VENDOR_DEFINED) != CKO_PUBLIC_KEY ||
 	    keyObj->getUnsignedLongValue(CKA_KEY_TYPE, CKK_VENDOR_DEFINED) != CKK_ML_KEM)
@@ -485,6 +491,11 @@ CK_RV SoftHSM::decapsulateKeyImpl
 	if (!keyObj->getBooleanValue(CKA_DECAPSULATE, false))
 		return CKR_KEY_FUNCTION_NOT_PERMITTED;
 
+	// N5 remediation 2026-08-13: CKA_ALLOWED_MECHANISMS was never enforced on
+	// the KEM paths — apply the same shared gate every other operation uses.
+	if (!isMechanismPermitted(keyObj, pMechanism->mechanism))
+		return CKR_MECHANISM_INVALID;
+
 	// Check key type
 	if (keyObj->getUnsignedLongValue(CKA_CLASS, CKO_VENDOR_DEFINED) != CKO_PRIVATE_KEY ||
 	    keyObj->getUnsignedLongValue(CKA_KEY_TYPE, CKK_VENDOR_DEFINED) != CKK_ML_KEM)
@@ -673,6 +684,12 @@ CK_RV SoftHSM::encapsulateECDH
 
 	if (!keyObj->getBooleanValue(CKA_ENCAPSULATE, false))
 		return CKR_KEY_FUNCTION_NOT_PERMITTED;
+
+	// N5 remediation 2026-08-13: CKA_ALLOWED_MECHANISMS was never enforced on
+	// the KEM paths. This helper is only ever dispatched for
+	// CKM_ECDH1_DERIVE (see encapsulateKeyImpl), so the mechanism is fixed.
+	if (!isMechanismPermitted(keyObj, CKM_ECDH1_DERIVE))
+		return CKR_MECHANISM_INVALID;
 
 	CK_ULONG peerKeyType = keyObj->getUnsignedLongValue(CKA_KEY_TYPE, CKK_VENDOR_DEFINED);
 	if (keyObj->getUnsignedLongValue(CKA_CLASS, CKO_VENDOR_DEFINED) != CKO_PUBLIC_KEY ||
@@ -910,6 +927,12 @@ CK_RV SoftHSM::decapsulateECDH
 
 	if (!keyObj->getBooleanValue(CKA_DECAPSULATE, false))
 		return CKR_KEY_FUNCTION_NOT_PERMITTED;
+
+	// N5 remediation 2026-08-13: CKA_ALLOWED_MECHANISMS was never enforced on
+	// the KEM paths. This helper is only ever dispatched for
+	// CKM_ECDH1_DERIVE (see decapsulateKeyImpl), so the mechanism is fixed.
+	if (!isMechanismPermitted(keyObj, CKM_ECDH1_DERIVE))
+		return CKR_MECHANISM_INVALID;
 
 	CK_ULONG ourKeyType = keyObj->getUnsignedLongValue(CKA_KEY_TYPE, CKK_VENDOR_DEFINED);
 	if (keyObj->getUnsignedLongValue(CKA_CLASS, CKO_VENDOR_DEFINED) != CKO_PRIVATE_KEY ||

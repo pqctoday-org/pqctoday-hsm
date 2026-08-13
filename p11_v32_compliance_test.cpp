@@ -818,6 +818,149 @@ void test_hybrid_kem() {
 }
 
 
+// N5 remediation (2026-08-13) — CKA_ALLOWED_MECHANISMS must be enforced on
+// the C_EncapsulateKey / C_DecapsulateKey paths (PKCS#11 v3.2 §4.8 Table 13),
+// through the same shared isMechanismPermitted gate every other operation
+// uses (its convention: CKR_MECHANISM_INVALID for a disallowed mechanism).
+// Negative-style cases in the spirit of G5Attrs/test_negative_paths: a key
+// whose CKA_ALLOWED_MECHANISMS excludes the KEM mechanism must be refused in
+// both directions; a whitelist that INCLUDES it must keep working.
+void test_kem_allowed_mechanisms() {
+    const char* CAT = "KEMNeg";
+    typedef CK_RV (*C_EncapsulateKey_t)(CK_SESSION_HANDLE, CK_MECHANISM_PTR, CK_OBJECT_HANDLE, CK_ATTRIBUTE_PTR, CK_ULONG, CK_BYTE_PTR, CK_ULONG_PTR, CK_OBJECT_HANDLE_PTR);
+    typedef CK_RV (*C_DecapsulateKey_t)(CK_SESSION_HANDLE, CK_MECHANISM_PTR, CK_OBJECT_HANDLE, CK_ATTRIBUTE_PTR, CK_ULONG, CK_BYTE_PTR, CK_ULONG, CK_OBJECT_HANDLE_PTR);
+    void* dlib = dlopen(opt_engine.c_str(), RTLD_NOW);
+    C_EncapsulateKey_t EncapFn = (C_EncapsulateKey_t)dlsym(dlib, "C_EncapsulateKey");
+    C_DecapsulateKey_t DecapFn = (C_DecapsulateKey_t)dlsym(dlib, "C_DecapsulateKey");
+    if (!EncapFn || !DecapFn) {
+        record_result(CAT, "AllowedMechs_KEM", "SKIP", "Function pointers missing");
+        return;
+    }
+
+    CK_BBOOL bTrue = CK_TRUE, bFalse = CK_FALSE;
+    CK_OBJECT_CLASS pubClass = CKO_PUBLIC_KEY, privClass = CKO_PRIVATE_KEY;
+
+    // ── ML-KEM-768 keypair restricted to a DIFFERENT mechanism ──────────
+    {
+        CK_KEY_TYPE kemType = 0x00000049; // CKK_ML_KEM
+        CK_ULONG ps768 = 2;
+        CK_MECHANISM_TYPE onlyMlDsa[] = { CKM_ML_DSA };
+        CK_ATTRIBUTE pubTmpl[] = {
+            { CKA_CLASS,              &pubClass, sizeof(pubClass) },
+            { CKA_KEY_TYPE,           &kemType,  sizeof(kemType) },
+            { CKA_ENCAPSULATE,        &bTrue,    sizeof(bTrue) },
+            { CKA_PARAMETER_SET,      &ps768,    sizeof(ps768) },
+            { CKA_TOKEN,              &bFalse,   sizeof(bFalse) },
+            { CKA_ALLOWED_MECHANISMS, onlyMlDsa, sizeof(onlyMlDsa) }
+        };
+        CK_ATTRIBUTE privTmpl[] = {
+            { CKA_CLASS,              &privClass, sizeof(privClass) },
+            { CKA_KEY_TYPE,           &kemType,   sizeof(kemType) },
+            { CKA_DECAPSULATE,        &bTrue,     sizeof(bTrue) },
+            { CKA_PARAMETER_SET,      &ps768,     sizeof(ps768) },
+            { CKA_TOKEN,              &bFalse,    sizeof(bFalse) },
+            { CKA_ALLOWED_MECHANISMS, onlyMlDsa,  sizeof(onlyMlDsa) }
+        };
+        CK_MECHANISM kemGen = { CKM_ML_KEM_KEY_PAIR_GEN, NULL_PTR, 0 };
+        CK_OBJECT_HANDLE hPub, hPriv;
+        CK_RV rv = fl->C_GenerateKeyPair(hSess, &kemGen, pubTmpl, 6, privTmpl, 6, &hPub, &hPriv);
+        if (rv != CKR_OK) {
+            record_result(CAT, "Generate_MLKEM_restricted", "FAIL", "RV=" + std::to_string(rv));
+        } else {
+            CK_MECHANISM encapMech = { CKM_ML_KEM, NULL_PTR, 0 };
+            CK_BYTE ct[2000]; CK_ULONG ctLen = sizeof(ct);
+            CK_OBJECT_HANDLE hSS;
+            rv = EncapFn(hSess, &encapMech, hPub, NULL_PTR, 0, ct, &ctLen, &hSS);
+            record_result(CAT, "Encap_MLKEM_restricted",
+                          rv == CKR_MECHANISM_INVALID ? "PASS" : "FAIL",
+                          "RV=" + std::to_string(rv) + " (want CKR_MECHANISM_INVALID)");
+            CK_BYTE dummyCt[1088]; memset(dummyCt, 0, sizeof(dummyCt));
+            rv = DecapFn(hSess, &encapMech, hPriv, NULL_PTR, 0, dummyCt, sizeof(dummyCt), &hSS);
+            record_result(CAT, "Decap_MLKEM_restricted",
+                          rv == CKR_MECHANISM_INVALID ? "PASS" : "FAIL",
+                          "RV=" + std::to_string(rv) + " (want CKR_MECHANISM_INVALID)");
+        }
+    }
+
+    // ── ML-KEM-768 keypair whose whitelist INCLUDES CKM_ML_KEM ──────────
+    // (guards against the gate over-blocking a legitimate whitelist)
+    {
+        CK_KEY_TYPE kemType = 0x00000049; // CKK_ML_KEM
+        CK_ULONG ps768 = 2;
+        CK_MECHANISM_TYPE onlyMlKem[] = { CKM_ML_KEM };
+        CK_ATTRIBUTE pubTmpl[] = {
+            { CKA_CLASS,              &pubClass, sizeof(pubClass) },
+            { CKA_KEY_TYPE,           &kemType,  sizeof(kemType) },
+            { CKA_ENCAPSULATE,        &bTrue,    sizeof(bTrue) },
+            { CKA_PARAMETER_SET,      &ps768,    sizeof(ps768) },
+            { CKA_TOKEN,              &bFalse,   sizeof(bFalse) },
+            { CKA_ALLOWED_MECHANISMS, onlyMlKem, sizeof(onlyMlKem) }
+        };
+        CK_ATTRIBUTE privTmpl[] = {
+            { CKA_CLASS,         &privClass, sizeof(privClass) },
+            { CKA_KEY_TYPE,      &kemType,   sizeof(kemType) },
+            { CKA_DECAPSULATE,   &bTrue,     sizeof(bTrue) },
+            { CKA_PARAMETER_SET, &ps768,     sizeof(ps768) },
+            { CKA_TOKEN,         &bFalse,    sizeof(bFalse) }
+        };
+        CK_MECHANISM kemGen = { CKM_ML_KEM_KEY_PAIR_GEN, NULL_PTR, 0 };
+        CK_OBJECT_HANDLE hPub, hPriv;
+        CK_RV rv = fl->C_GenerateKeyPair(hSess, &kemGen, pubTmpl, 6, privTmpl, 5, &hPub, &hPriv);
+        if (rv != CKR_OK) {
+            record_result(CAT, "Generate_MLKEM_whitelisted", "FAIL", "RV=" + std::to_string(rv));
+        } else {
+            CK_MECHANISM encapMech = { CKM_ML_KEM, NULL_PTR, 0 };
+            CK_BYTE ct[2000]; CK_ULONG ctLen = sizeof(ct);
+            CK_OBJECT_HANDLE hSS;
+            rv = EncapFn(hSess, &encapMech, hPub, NULL_PTR, 0, ct, &ctLen, &hSS);
+            record_result(CAT, "Encap_MLKEM_whitelisted",
+                          rv == CKR_OK ? "PASS" : "FAIL",
+                          "RV=" + std::to_string(rv) + " (whitelist includes CKM_ML_KEM)");
+        }
+    }
+
+    // ── P-256 keypair restricted to CKM_ECDSA: ECDH-as-KEM must refuse ──
+    {
+        CK_KEY_TYPE ecType = CKK_EC;
+        CK_BYTE oid_p256[] = { 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07 };
+        CK_MECHANISM_TYPE onlyEcdsa[] = { CKM_ECDSA };
+        CK_ATTRIBUTE pubTmpl[] = {
+            { CKA_CLASS,              &pubClass, sizeof(pubClass) },
+            { CKA_KEY_TYPE,           &ecType,   sizeof(ecType) },
+            { CKA_EC_PARAMS,          oid_p256,  sizeof(oid_p256) },
+            { CKA_ENCAPSULATE,        &bTrue,    sizeof(bTrue) },
+            { CKA_TOKEN,              &bFalse,   sizeof(bFalse) },
+            { CKA_ALLOWED_MECHANISMS, onlyEcdsa, sizeof(onlyEcdsa) }
+        };
+        CK_ATTRIBUTE privTmpl[] = {
+            { CKA_CLASS,              &privClass, sizeof(privClass) },
+            { CKA_KEY_TYPE,           &ecType,    sizeof(ecType) },
+            { CKA_DECAPSULATE,        &bTrue,     sizeof(bTrue) },
+            { CKA_TOKEN,              &bFalse,    sizeof(bFalse) },
+            { CKA_ALLOWED_MECHANISMS, onlyEcdsa,  sizeof(onlyEcdsa) }
+        };
+        CK_MECHANISM ecGen = { CKM_EC_KEY_PAIR_GEN, NULL_PTR, 0 };
+        CK_OBJECT_HANDLE hPub, hPriv;
+        CK_RV rv = fl->C_GenerateKeyPair(hSess, &ecGen, pubTmpl, 6, privTmpl, 5, &hPub, &hPriv);
+        if (rv != CKR_OK) {
+            record_result(CAT, "Generate_EC_restricted", "FAIL", "RV=" + std::to_string(rv));
+        } else {
+            CK_MECHANISM ecdhMech = { CKM_ECDH1_DERIVE, NULL_PTR, 0 };
+            CK_BYTE ct[200]; CK_ULONG ctLen = sizeof(ct);
+            CK_OBJECT_HANDLE hSS;
+            rv = EncapFn(hSess, &ecdhMech, hPub, NULL_PTR, 0, ct, &ctLen, &hSS);
+            record_result(CAT, "Encap_ECDH_restricted",
+                          rv == CKR_MECHANISM_INVALID ? "PASS" : "FAIL",
+                          "RV=" + std::to_string(rv) + " (want CKR_MECHANISM_INVALID)");
+            CK_BYTE dummyPoint[67]; memset(dummyPoint, 0, sizeof(dummyPoint));
+            rv = DecapFn(hSess, &ecdhMech, hPriv, NULL_PTR, 0, dummyPoint, sizeof(dummyPoint), &hSS);
+            record_result(CAT, "Decap_ECDH_restricted",
+                          rv == CKR_MECHANISM_INVALID ? "PASS" : "FAIL",
+                          "RV=" + std::to_string(rv) + " (want CKR_MECHANISM_INVALID)");
+        }
+    }
+}
+
 #ifndef CKM_HASH_ML_DSA_SHA512
 #define CKM_HASH_ML_DSA_SHA512 0x00000026UL
 #define CKM_HASH_ML_DSA_SHA3_512 0x0000002aUL
@@ -5710,6 +5853,7 @@ int main(int argc, char** argv) {
     if (opt_category == "all" || opt_category == "attr") { refresh_session(); test_key_attributes(); }
     if (opt_category == "all" || opt_category == "pqc-kem") { refresh_session(); test_pqc_kem(); }
     if (opt_category == "all" || opt_category == "pqc-kem") { refresh_session(); test_hybrid_kem(); }
+    if (opt_category == "all" || opt_category == "pqc-kem") { refresh_session(); test_kem_allowed_mechanisms(); }
     if (opt_category == "all" || opt_category == "pqc-dsa") { refresh_session(); test_pqc_dsa(); }
     if (opt_category == "all" || opt_category == "pqc-dsa") { refresh_session(); test_mldsa_context_binding(); }
     if (opt_category == "all" || opt_category == "pqc-dsa") { refresh_session(); test_multipart_signing(); }
