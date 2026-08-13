@@ -342,6 +342,7 @@ pub fn apply_object_defaults(
 pub fn set_endpoint_role(
     deps: &Deps,
     req: SetEndpointRoleRequest,
+    auth: &crate::server::auth::AuthContext,
     correlation_id: &str,
 ) -> Result<SetEndpointRoleResponse> {
     emit_request(
@@ -357,16 +358,33 @@ pub fn set_endpoint_role(
             emit_success(deps, correlation_id, "SetEndpointRole");
             Ok(SetEndpointRoleResponse { endpoint_role: EndpointRole::Server })
         }
-        EndpointRole::Client => Err(fail_err(
-            deps,
-            correlation_id,
-            "SetEndpointRole",
-            KmipError::feature_not_supported(
-                "endpoint role switching is not supported — this server has no \
-                 client-mode machinery for KMIP 3.0 §6.2 server-to-client operations \
-                 and always operates in the Server role",
-            ),
-        )),
+        // The real role switch. §6.1.61: "After successful completion of the
+        // operation the server assumes the client role, and the client assumes
+        // the server role, but the communication channel remains as
+        // established" — so this is an instruction about THIS connection, and
+        // the listener acts on a successful response by flipping it.
+        //
+        // Gated on a verified identity. An anonymous peer must not be able to
+        // convert a connection into one the server pushes managed-object
+        // attributes down: §6.2.2 notifications describe real objects, and in
+        // open-auth mode there is no identity to scope them to, so there would
+        // be no answer to "whose objects may this caller be told about".
+        EndpointRole::Client => {
+            if auth.identity.is_none() {
+                return Err(fail_err(
+                    deps,
+                    correlation_id,
+                    "SetEndpointRole",
+                    KmipError::permission_denied(
+                        "endpoint role switching requires an authenticated identity — \
+                         notifications are scoped to the objects an identity owns, and \
+                         an anonymous connection has no such scope",
+                    ),
+                ));
+            }
+            emit_success(deps, correlation_id, "SetEndpointRole");
+            Ok(SetEndpointRoleResponse { endpoint_role: EndpointRole::Client })
+        }
     }
 }
 
@@ -672,20 +690,38 @@ mod tests {
         let d = deps();
         let r = set_endpoint_role(&d, SetEndpointRoleRequest {
             endpoint_role: EndpointRole::Server,
-        }, "c").unwrap();
+        }, &crate::server::auth::AuthContext { identity: None }, "c").unwrap();
         assert_eq!(r.endpoint_role, EndpointRole::Server);
     }
 
-    /// §6.1.59.1 Table 433 — the role switch (`Client`) is rejected
-    /// with `Feature Not Supported (0x08)`: this server has no §6.2
-    /// client-mode machinery (documented K19 policy decision).
+    /// The role switch is honoured for an AUTHENTICATED caller: §6.1.61
+    /// says the server then "assumes the client role", which the response
+    /// echoes back per Table 432. The listener acts on this to reverse the
+    /// direction of the channel.
     #[test]
-    fn set_endpoint_role_client_is_feature_not_supported() {
+    fn set_endpoint_role_client_is_accepted_for_an_authenticated_caller() {
         let d = deps();
+        let auth = crate::server::auth::AuthContext {
+            identity: Some(crate::server::auth::Identity { username: "alice".into() }),
+        };
+        let r = set_endpoint_role(&d, SetEndpointRoleRequest {
+            endpoint_role: EndpointRole::Client,
+        }, &auth, "c").unwrap();
+        assert_eq!(r.endpoint_role, EndpointRole::Client);
+    }
+
+    /// …and refused for an anonymous one. §6.2.2 notifications name real
+    /// managed objects, so a connection the server pushes them down has to
+    /// belong to an identity those objects can be scoped to; with no identity
+    /// there is no answer to "whose objects may this caller be told about".
+    #[test]
+    fn set_endpoint_role_client_is_denied_without_an_identity() {
+        let d = deps();
+        let anon = crate::server::auth::AuthContext { identity: None };
         let err = set_endpoint_role(&d, SetEndpointRoleRequest {
             endpoint_role: EndpointRole::Client,
-        }, "c").unwrap_err();
-        assert_eq!(err.result_reason(), ResultReason::FeatureNotSupported);
+        }, &anon, "c").unwrap_err();
+        assert_eq!(err.result_reason(), ResultReason::PermissionDenied);
     }
 
     #[test]

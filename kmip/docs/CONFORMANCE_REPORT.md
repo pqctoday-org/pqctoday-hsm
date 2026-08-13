@@ -267,10 +267,10 @@ the threshold fails instead of silently reconstructing garbage).
 ### 5.1 Conformance claim — scope statement
 
 **The claim this subsystem makes: *"OASIS KMIP 3.0 (CSD01 corpus) + WD19 PQC extensions —
-Baseline Server profile conditions met except the parked server-to-client operations (item 10).
-Drafts, not a ratified Standard."*** Every actionable transcript in the official
-`kmip-profiles-v3.0.zip` test suite passes (97/97 non-deprecated), and the TTLV codec
-round-trips the full corpus byte-exactly.
+Baseline Server profile conditions met, except that item 10's server-to-client operations are
+implemented for `Notify` and `Put` only. Drafts, not a ratified Standard."*** Every actionable
+transcript in the official `kmip-profiles-v3.0.zip` test suite passes (97/97 non-deprecated), and
+the TTLV codec round-trips the full corpus byte-exactly.
 
 Baseline Server profile conditions (kmip-profiles-v3.0 §5.1.2), checked against the spec's
 own 13-item list rather than approximated:
@@ -280,8 +280,8 @@ own 13-item list rather than approximated:
 | 1 | KMIP Server Implementation Conformance clauses | Met — the dispatcher/codec/op-handler layers below are the evidence |
 | 2–3 | System/User Objects: User, Group, Password Credential, Certificate | **Met** (Phase 6.1 correction — these were genuinely implemented all along via `CreateUser`/`CreateGroup`/`CreateCredential`; a stale Query-advertisement doc comment had mislabeled them "unimplemented" since before this server could actually create them) |
 | 4–8, 11–12 | Attribute/Message/Object/Operation data structures, message protocols | Met — evidenced by §2 codec conformance + §4 dispatcher conformance |
-| 9 | 32 named Client-to-Server Operations (Activate…Set Endpoint Role) | **Met** — every one of the 32 is a real, `HANDLED_OPERATIONS` handler. `Set Endpoint Role` itself accepts the identity request (role=Server) and rejects the actual §6.2 role switch with `Feature Not Supported (0x08)` per the §6.1.61.1 error table — this server has no client-mode machinery, which is the honest boundary of what "met" means here |
-| 10 | 5 named Server-to-Client Operations (Discover Versions, Notify, Put, Query, Set Endpoint Role, all issued *by the server*) | **Not met — the only unmet condition.** No server-initiated outbound channel exists; §6.2.2/§6.2.3 themselves leave the transport "unspecified", so there is no wire shape to build against yet. Deliberately parked as `HONEST_MAXIMUM_PLAN.md` Phase 5 |
+| 9 | 32 named Client-to-Server Operations (Activate…Set Endpoint Role) | **Met** — every one of the 32 is a real, `HANDLED_OPERATIONS` handler. `Set Endpoint Role` accepts the identity request (role=Server) and, since 2026-08-13, also performs the real role switch (role=Client) for an authenticated caller — see §5.1.4 |
+| 10 | 5 named Server-to-Client Operations (Discover Versions, Notify, Put, Query, Set Endpoint Role, all issued *by the server*) | **Partially met (2026-08-13).** `Notify` and `Put` are implemented and the server genuinely pushes them: a client hands over the server role via §6.1.61 and receives them on the same channel, proven end to end against a real client (§5.1.4). Server-issued `Discover Versions`, `Query` and `Set Endpoint Role` are NOT implemented — those are the server interrogating the client, for which nothing here has a use. So this is no longer "no outbound channel exists", but it is not the full five either |
 | 13 | Optional non-contradicting extensions | N/A (optional) |
 
 **Correction from the prior revision of this report:** that version speculated the async
@@ -292,6 +292,50 @@ separately, as message-layer plumbing, by item 11.a `Asynchronous Indicator`). P
 proved them as a fully independent piece of work with no dependency on the server-to-client
 channel, and item 10 remains — as it always was — a pure client-to-server-only gap: the server can
 answer `Poll` all day without ever being able to push a `Notify` to anyone.
+
+### 5.1.4 Server-to-client push — what was built, and how it is proven
+
+Implemented 2026-08-13. The channel is the one §6.1.61 specifies, not an invented
+one: a client sends `Set Endpoint Role` with `Endpoint Role = Client`, and "the
+server assumes the client role, and the client assumes the server role, but the
+communication channel remains as established". The listener acts on that response
+by reversing direction on the very connection the client opened — so no server
+ever dials out, and the "which client, and where" question §6.2 leaves open never
+has to be answered.
+
+**Trigger.** Every attribute mutation (Add / Modify / Set / Adjust / Delete funnel
+through one `commit_mutation`) queues a `Notify` for the object's owner, carrying
+the Last Change Date §6.2.2 requires. Queued *after* the store update — a
+notification for a change that then failed to commit would be a lie — and queued
+rather than sent inline, because an attribute write must not block on, or fail
+because of, whether anyone is listening.
+
+**Scoping and authorisation.** Queues are per identity, exactly like
+`object_defaults`, so one tenant is never told about another's objects. The role
+switch is refused (`Permission Denied`) to an anonymous caller: notifications name
+real managed objects, and an unauthenticated connection has no identity to scope
+them to. Queues are capped per identity — an identity that never listens must not
+become an unbounded memory sink.
+
+**Delivery.** Each push waits for the client's empty-payload acknowledgement
+(§6.2.2/§6.2.3: "The client SHALL send a response … containing no payload") before
+the next is sent, so delivery is observable rather than assumed. A peer that closes
+instead of answering stops the loop rather than failing the connection — that is
+precisely the "prior knowledge that the client is not able to respond" case the
+same clause allows for.
+
+**Evidence.** `python-client/tests/test_server_to_client_push.py` runs against a
+real server over TLS and asserts a real client receives a `Notify` naming the
+object it changed, that a delivered notification is not delivered twice, that an
+anonymous client cannot take the server role, and that listening with nothing
+queued returns cleanly instead of hanging. Proven non-vacuous by disabling the
+queue hook: the delivery test fails, and the rest still pass, so it is measuring
+delivery specifically.
+
+**Still missing for a full item 10**: server-issued `Discover Versions`, `Query`
+and `Set Endpoint Role`. Those have the server interrogating the client, which
+nothing in this system needs; they are listed here so the gap is explicit rather
+than implied by silence.
 
 ## 6. How to re-run the codec compliance test
 

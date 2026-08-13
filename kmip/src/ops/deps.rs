@@ -347,6 +347,12 @@ impl Default for DepsConfig {
 }
 
 /// Shared dependencies passed to every op handler.
+/// Cap on notifications held for one identity that is not listening. KMIP
+/// defines no store-and-forward guarantee for §6.2 pushes, so an unbounded
+/// queue would be a memory sink an unauthenticated peer could grow by simply
+/// never connecting back.
+const MAX_PENDING_NOTIFICATIONS: usize = 256;
+
 pub struct Deps {
     pub engine: Engine,
     pub store: Arc<dyn KeyStore>,
@@ -398,6 +404,16 @@ pub struct Deps {
     pub object_defaults: Mutex<
         HashMap<Option<String>, HashMap<crate::kmip30::ObjectType, Vec<crate::kmip30::Attribute>>>,
     >,
+    /// KMIP 3.0 §6.2.2 `Notify` — pending server-to-client notifications,
+    /// keyed by the owning identity exactly like `object_defaults` above, so
+    /// one tenant is never told about another tenant's objects.
+    ///
+    /// Filled when an attribute-mutating op succeeds; drained by a connection
+    /// that has handed the server the client role via §6.1.61 `Set Endpoint
+    /// Role`. Bounded per identity (`MAX_PENDING_NOTIFICATIONS`) — a client
+    /// that never listens must not grow this without limit, and the oldest
+    /// entries are the ones worth dropping.
+    pub notifications: Mutex<HashMap<Option<String>, std::collections::VecDeque<crate::kmip30::ops::NotifyRequest>>>,
     /// Phase 3.2 — client-set §6.1.57 Constraints, replacing the
     /// engine-bounds default `Get Constraints` (§6.1.28) otherwise
     /// reports. `None` ⇒ no client override yet; `get_constraints`
@@ -462,12 +478,51 @@ impl Deps {
             streams: Mutex::new(HashMap::new()),
             next_correlation: std::sync::atomic::AtomicU64::new(1),
             object_defaults: Mutex::new(HashMap::new()),
+            notifications: Mutex::new(HashMap::new()),
             constraints: Mutex::new(None),
             sessions: Mutex::new(HashMap::new()),
             pkcs11_virtual_initialized: std::sync::atomic::AtomicBool::new(false),
             async_jobs: Mutex::new(HashMap::new()),
             self_handle: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Queue a §6.2.2 `Notify` for `owner`, to be delivered the next time that
+    /// identity holds a channel in the server role.
+    ///
+    /// Deliberately silent about delivery: KMIP has no store-and-forward
+    /// guarantee here, and an attribute change must not fail because nobody
+    /// was listening. The queue is capped so an identity that never listens
+    /// cannot grow it without bound — the OLDEST entries are dropped, because
+    /// the newest state of an object is the interesting one.
+    pub fn queue_notification(
+        &self,
+        owner: Option<String>,
+        notify: crate::kmip30::ops::NotifyRequest,
+    ) {
+        let mut q = match self.notifications.lock() {
+            Ok(q) => q,
+            // A poisoned lock must not take down an attribute write; the
+            // notification is advisory, the mutation already happened.
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let per_identity = q.entry(owner).or_default();
+        while per_identity.len() >= MAX_PENDING_NOTIFICATIONS {
+            per_identity.pop_front();
+        }
+        per_identity.push_back(notify);
+    }
+
+    /// Take everything queued for `owner`, leaving the queue empty.
+    pub fn drain_notifications(
+        &self,
+        owner: &Option<String>,
+    ) -> Vec<crate::kmip30::ops::NotifyRequest> {
+        let mut q = match self.notifications.lock() {
+            Ok(q) => q,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        q.remove(owner).map(|d| d.into_iter().collect()).unwrap_or_default()
     }
 
     /// Issue a fresh 8-byte correlation value for a new multi-part stream

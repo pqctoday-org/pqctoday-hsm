@@ -241,6 +241,36 @@ python -m pqctoday_kmip demo --audit-log /var/log/agile-audit.jsonl   # correlat
 python -m pqctoday_kmip audit /var/log/agile-audit.jsonl              # pretty-print an existing log
 ```
 
+### 5.1 Server-to-client push (KMIP §6.2)
+
+The server can push `Notify` (§6.2.2) messages when an object's attributes
+change. It never dials out — a client offers its own connection by handing over
+the server role, which is exactly the channel §6.1.61 describes ("the server
+assumes the client role … but the communication channel remains as
+established"):
+
+```python
+c = KmipClient("127.0.0.1", 5696, username="alice", password="pw")
+for msg in c.serve_as_endpoint():
+    print(msg["operation"], msg["uid"], msg["attributes"])
+    # -> Notify urn:pqctoday:obj:… ['Last Change Date']
+```
+
+- Every attribute mutation queues a notification for the object's owner,
+  carrying the Last Change Date §6.2.2 requires.
+- **Authentication is required** — the role switch is refused to an anonymous
+  caller, since notifications name real objects and need an identity to be
+  scoped to. Queues are per identity and capped.
+- Each push waits for the client's empty-payload acknowledgement before the
+  next is sent, so delivery is observable rather than assumed.
+- `Put` (§6.2.3) is encoded and tested but not yet triggered by anything;
+  server-issued `Discover Versions` / `Query` / `Set Endpoint Role` are not
+  implemented. See `docs/CONFORMANCE_REPORT.md` §5.1.4 for exactly where the
+  line falls.
+
+Proof lives in `python-client/tests/test_server_to_client_push.py`, which runs a
+real client against a real server over TLS.
+
 ---
 
 ## 6. Conformance & interop testing

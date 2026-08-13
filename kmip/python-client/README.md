@@ -40,6 +40,36 @@ ct = enc.get("Data")
 ss = c.decapsulate(kpriv, bytes.fromhex(ct))
 ```
 
+## Receiving server pushes (KMIP §6.2)
+
+The server can push `Notify` (§6.2.2) messages describing attribute changes. It
+never dials out: a client offers its own connection by handing over the server
+role (§6.1.61 — "the server assumes the client role … but the communication
+channel remains as established"), then reads what arrives on that same socket
+and acknowledges each message.
+
+```python
+c = KmipClient("127.0.0.1", 5696, username="alice", password="pw")
+
+# Blocks on one connection, returns what the server pushed.
+for msg in c.serve_as_endpoint():
+    print(msg["operation"], msg["uid"], msg["attributes"])
+    # -> Notify urn:pqctoday:obj:… ['Last Change Date']
+
+# …or react as each arrives, rather than collecting:
+c.serve_as_endpoint(on_message=lambda m: print("changed:", m["uid"]))
+```
+
+Notes worth knowing before relying on it:
+
+- **Credentials or mTLS are required.** An anonymous caller is refused the role
+  switch — notifications name real managed objects, and there is no identity to
+  scope them to otherwise.
+- **Delivery consumes the queue.** A second call returns only what has changed
+  since; nothing is re-delivered.
+- **Notifications are per identity.** You are told about your own objects.
+- **It returns promptly when nothing is queued**, so it is safe to poll.
+
 ## Control plane — policy management
 
 ```python

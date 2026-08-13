@@ -379,6 +379,7 @@ async fn handle_conn(
         .and_then(|certs| certs.first())
         .and_then(|der| crate::ops::der_x509::extract_subject_cn(der.as_ref()))
         .map(|cn| crate::server::auth::Identity { username: cn });
+    let identity_for_push = transport_identity.clone();
     let frame_bytes = read_one_frame(&mut tls_stream).await?;
     // §9.10 `Maximum Response Size` enforcement now lives inside
     // `dispatch_with_transport_identity` itself (`enforce_max_response_size`,
@@ -411,9 +412,100 @@ async fn handle_conn(
         // than replaced with another guess.
         Err(e) => wire_error_response(&e),
     };
+    // Did the client just hand us the server role on this channel? §6.1.61 says
+    // the swap applies to "the current client-to-server communication channel"
+    // and that it "remains as established" — so the decision is made from the
+    // response we are about to send, and acted on right here rather than
+    // through any global state.
+    //
+    // The auth gate lives in the op handler (which sees the verified identity);
+    // reaching Success at all therefore means the caller was authenticated.
+    let flip_to_push = endpoint_role_handed_over(&response);
+
     let response_bytes = encode_response_message(&response);
     tls_stream.write_all(&response_bytes).await?;
+
+    if flip_to_push {
+        // The identity whose objects we may talk about. Credential-authenticated
+        // callers are covered by the op-handler gate; for the push scope we use
+        // the transport identity when there is one, and otherwise the
+        // credential the request carried.
+        let owner = identity_for_push
+            .map(|i| i.username)
+            .or_else(|| credential_username(&frame_bytes));
+        serve_pushes(&mut tls_stream, &deps, &owner).await?;
+    }
+
     tls_stream.shutdown().await?;
+    Ok(())
+}
+
+/// True when this response is a successful `Set Endpoint Role` that put the
+/// SERVER into the client role — i.e. the point at which this connection
+/// reverses direction.
+fn endpoint_role_handed_over(response: &crate::kmip30::ResponseMessage) -> bool {
+    use crate::kmip30::{EndpointRole, Operation, ResponsePayload, ResultStatus};
+    response.batch_items.iter().any(|item| {
+        item.operation == Some(Operation::SetEndpointRole)
+            && item.result_status == ResultStatus::Success
+            && matches!(
+                &item.payload,
+                Some(ResponsePayload::SetEndpointRole(r)) if r.endpoint_role == EndpointRole::Client
+            )
+    })
+}
+
+/// Recover the username from a request's §8.1.2 Authentication header, for
+/// scoping pushes on a credential-authenticated (non-mTLS) connection.
+fn credential_username(frame_bytes: &[u8]) -> Option<String> {
+    use crate::kmip30::Credential;
+    let request = decode_request_message(frame_bytes).ok()?;
+    request.header.authentication.iter().find_map(|c| match c {
+        Credential::UsernameAndPassword { username, .. } => Some(username.clone()),
+        _ => None,
+    })
+}
+
+/// Serve §6.2 server-to-client messages on a channel whose roles have been
+/// swapped, until the queue drains or the peer goes away.
+///
+/// Each message is a REQUEST from the server, and §6.2.2/§6.2.3 both say the
+/// client "SHALL send a response … containing no payload", so this reads that
+/// acknowledgement before sending the next one. Draining without waiting would
+/// make delivery unobservable and turn a dead peer into silent data loss.
+async fn serve_pushes<S>(
+    stream: &mut S,
+    deps: &Arc<Deps>,
+    owner: &Option<String>,
+) -> Result<(), ServerError>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let pending = deps.drain_notifications(owner);
+    if pending.is_empty() {
+        return Ok(());
+    }
+    let now = time::OffsetDateTime::now_utc().unix_timestamp();
+    for notify in pending {
+        let uid = notify.unique_identifier.clone();
+        let bytes = crate::kmip30::wire::encode_notify_message(&notify, now);
+        stream.write_all(&bytes).await?;
+        // Read the client's acknowledgement. A peer that closes instead of
+        // answering is not an error worth failing the connection over — it is
+        // exactly the "prior knowledge that the client is not able to respond"
+        // case §6.2.2 allows — but we stop pushing, because continuing to write
+        // into a closed socket proves nothing.
+        match read_one_frame(stream).await {
+            Ok(_ack) => {
+                tracing::debug!(target: "kmip::push", uid = %uid, "Notify acknowledged");
+            }
+            Err(e) => {
+                tracing::debug!(target: "kmip::push", uid = %uid, error = %e,
+                    "client did not acknowledge; stopping pushes on this channel");
+                break;
+            }
+        }
+    }
     Ok(())
 }
 

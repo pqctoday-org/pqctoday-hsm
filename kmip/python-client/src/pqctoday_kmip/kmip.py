@@ -47,6 +47,37 @@ def _find(node: _ttlv.TtlvNode, tag: str) -> Optional[_ttlv.TtlvNode]:
     return None
 
 
+def _operation_name(value) -> str:
+    """Map a decoded `Operation` enumeration back to its spec name.
+
+    The TTLV decoder returns enumerations as raw integers, which is right for a
+    codec but wrong for a caller: a pushed message reporting operation ``27``
+    rather than ``"Notify"`` is one lookup away from being unreadable. Resolved
+    against the same shipped CSD02 enum table the encoder uses, so the two can
+    never disagree. Falls back to the number when it is unknown — better an
+    honest integer than a guessed name.
+    """
+    if value is None:
+        return "Unknown"
+    if isinstance(value, str) and not value.lstrip("-").isdigit():
+        return value
+    try:
+        wanted = int(str(value), 0)
+        table = _ttlv.table().enum_name_to_value
+        # The table keys enums by their spec name; try the exact key first and
+        # a case-insensitive match second, so a future normalisation change
+        # cannot silently turn every pushed operation back into a bare number.
+        members = table.get("Operation") or next(
+            (v for k, v in table.items() if k.lower() == "operation"), {}
+        )
+        for name, code in members.items():
+            if code == wanted:
+                return name
+    except (ValueError, AttributeError):
+        pass
+    return str(value)
+
+
 def _proto() -> _ttlv.TtlvNode:
     return _struct(
         "ProtocolVersion",
@@ -261,6 +292,120 @@ class KmipClient:
         if not resp_bytes:
             raise ConnectionError("server returned 0 bytes")
         node, _ = _ttlv.decode_one(resp_bytes)
+        return node
+
+    def serve_as_endpoint(self, on_message=None, *, max_messages: int = 64) -> list[dict]:
+        """Hand the server the client role, then receive what it pushes.
+
+        KMIP 3.0 §6.1.61: after a successful `Set Endpoint Role`, "the server
+        assumes the client role, and the client assumes the server role, but
+        the communication channel remains as established". So this opens ONE
+        connection, sends the role switch on it, and then keeps reading —
+        server-originated `Notify` (§6.2.2) and `Put` (§6.2.3) requests arrive
+        on that same socket.
+
+        Each one is answered with a Response carrying no payload, which
+        §6.2.2/§6.2.3 both require ("The client SHALL send a response in the
+        form of a Response containing no payload").
+
+        Returns one dict per message received: ``{"operation", "uid",
+        "attributes"}``. ``on_message`` is called with each dict as it
+        arrives, for callers that want to act rather than collect.
+
+        Requires credentials or mTLS — the server refuses the role switch to an
+        anonymous caller, because notifications are scoped to the objects an
+        identity owns.
+
+        ``max_messages`` bounds the loop so a misbehaving or chatty server
+        cannot pin this call open forever.
+        """
+        request = _struct(
+            "RequestMessage",
+            _struct("RequestHeader", _proto(), *self._auth_nodes()),
+            _struct(
+                "BatchItem",
+                _leaf("Operation", "Enumeration", "SetEndpointRole"),
+                _struct("RequestPayload", _leaf("EndpointRole", "Enumeration", "Client")),
+            ),
+        )
+
+        received: list[dict] = []
+        raw = socket.create_connection((self.host, self.port), timeout=self.timeout)
+        sock = self._ctx.wrap_socket(raw, server_hostname=self.host)
+        try:
+            sock.sendall(_ttlv.encode_node(request))
+            sock.settimeout(self.timeout)
+
+            # 1. The response to the role switch itself, still client-to-server.
+            frame = self._recv_frame(sock)
+            if frame is None:
+                raise ConnectionError("server closed before answering SetEndpointRole")
+            batch = _find(frame, "BatchItem")
+            status = _find(batch, "ResultStatus") if batch else None
+            if status is None or int(status.value) != RESULT_SUCCESS:
+                msg = _find(batch, "ResultMessage") if batch else None
+                raise PermissionError(
+                    f"server refused the endpoint role switch: "
+                    f"{msg.value if msg is not None else 'no reason given'}"
+                )
+
+            # 2. Roles are now swapped: every further frame is a REQUEST from
+            #    the server, and we owe it an empty-payload Response.
+            while len(received) < max_messages:
+                pushed = self._recv_frame(sock)
+                if pushed is None:
+                    break  # server finished pushing and closed
+                op_node = _find(pushed, "Operation")
+                operation = _operation_name(op_node.value if op_node is not None else None)
+                uid_node = _find(pushed, "UniqueIdentifier")
+                attrs = _find(pushed, "Attributes")
+                entry = {
+                    "operation": operation,
+                    "uid": uid_node.value if uid_node is not None else None,
+                    "attributes": [c.tag_name for c in attrs.children] if attrs else [],
+                }
+                received.append(entry)
+                if on_message is not None:
+                    on_message(entry)
+
+                ack = _struct(
+                    "ResponseMessage",
+                    _struct("ResponseHeader", _proto()),
+                    _struct(
+                        "BatchItem",
+                        _leaf("Operation", "Enumeration", operation),
+                        _leaf("ResultStatus", "Enumeration", "Success"),
+                    ),
+                )
+                sock.sendall(_ttlv.encode_node(ack))
+        finally:
+            sock.close()
+        return received
+
+    @staticmethod
+    def _recv_frame(sock) -> Optional[_ttlv.TtlvNode]:
+        """Read exactly one TTLV frame, or ``None`` if the peer closed.
+
+        Needed because the role-swapped channel carries MANY messages on one
+        socket: the ordinary `_send` reads to EOF, which would swallow every
+        later frame into one buffer. §9.6 gives the framing — 8-byte header,
+        then a value padded to an 8-byte boundary.
+        """
+        header = b""
+        while len(header) < 8:
+            chunk = sock.recv(8 - len(header))
+            if not chunk:
+                return None
+            header += chunk
+        length = int.from_bytes(header[4:8], "big")
+        padded = (length + 7) // 8 * 8  # §9.6: value is zero-padded to 8 bytes
+        body = b""
+        while len(body) < padded:
+            chunk = sock.recv(padded - len(body))
+            if not chunk:
+                return None
+            body += chunk
+        node, _ = _ttlv.decode_one(header + body)
         return node
 
     def _auth_nodes(self) -> list[_ttlv.TtlvNode]:

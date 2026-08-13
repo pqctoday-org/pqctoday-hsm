@@ -772,11 +772,21 @@ fn set_endpoint_role_server_ok_client_unsupported() {
     let _guard = engine_test_lock();
     let deps = build_deps_with_real_engine();
 
-    let ok = set_endpoint_role(&deps, SetEndpointRoleRequest { endpoint_role: EndpointRole::Server }, "ser-ok").unwrap();
+    let anon = pqctoday_kmip::server::auth::AuthContext { identity: None };
+    let alice = pqctoday_kmip::server::auth::AuthContext {
+        identity: Some(pqctoday_kmip::server::auth::Identity { username: "alice".into() }),
+    };
+
+    let ok = set_endpoint_role(&deps, SetEndpointRoleRequest { endpoint_role: EndpointRole::Server }, &anon, "ser-ok").unwrap();
     assert_eq!(ok.endpoint_role, EndpointRole::Server, "identity request accepted, role echoed");
 
-    let err = set_endpoint_role(&deps, SetEndpointRoleRequest { endpoint_role: EndpointRole::Client }, "ser-bad").unwrap_err();
-    assert_eq!(err.result_reason(), ResultReason::FeatureNotSupported, "role switch unsupported");
+    // §6.1.61 role switch: honoured for an authenticated caller…
+    let flipped = set_endpoint_role(&deps, SetEndpointRoleRequest { endpoint_role: EndpointRole::Client }, &alice, "ser-flip").unwrap();
+    assert_eq!(flipped.endpoint_role, EndpointRole::Client, "server takes the client role");
+
+    // …and refused for an anonymous one, since §6.2 pushes name real objects.
+    let err = set_endpoint_role(&deps, SetEndpointRoleRequest { endpoint_role: EndpointRole::Client }, &anon, "ser-bad").unwrap_err();
+    assert_eq!(err.result_reason(), ResultReason::PermissionDenied, "anonymous role switch refused");
 
     let _ = softhsmrustv3::native::session::finalize();
 }

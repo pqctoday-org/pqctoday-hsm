@@ -412,7 +412,32 @@ fn commit_mutation(
 ) -> Result<()> {
     obj.last_change_date = Some(OffsetDateTime::now_utc());
     refresh_engine_mechanism_whitelist(deps, auth, correlation_id, &obj);
-    deps.store.update(obj)
+    let uid = obj.uid.clone();
+    let last_change = obj.last_change_date;
+    let owner = obj.owner.clone();
+    deps.store.update(obj)?;
+
+    // KMIP 3.0 §6.2.2 — "notify a client of events that resulted in changes to
+    // attributes of an object … includes at least the Last Change Date
+    // attribute". Every attribute mutation funnels through here (Add / Modify /
+    // Set / Adjust / Delete), so this is the one place that has to queue it.
+    //
+    // AFTER the store update, deliberately: a notification for a change that
+    // then failed to commit would be a lie. And queued, never sent inline —
+    // delivery belongs to whichever connection has taken the server role
+    // (§6.1.61), and an attribute write must not block on, or fail because of,
+    // whether anyone is listening.
+    if let Some(changed_at) = last_change {
+        deps.queue_notification(
+            owner,
+            crate::kmip30::ops::NotifyRequest {
+                unique_identifier: uid,
+                attributes: vec![crate::kmip30::Attribute::LastChangeDate(changed_at.unix_timestamp())],
+                deleted_attributes: Vec::new(),
+            },
+        );
+    }
+    Ok(())
 }
 
 /// PKCS#11 v3.2 §4.8 Table 13 — keep the engine-side `CKA_ALLOWED_MECHANISMS`
