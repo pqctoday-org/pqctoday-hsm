@@ -1543,9 +1543,13 @@ pub fn get_sig_len(mech: u32, hkey: u32) -> u32 {
         CKM_XMSS => {
             let xmss_param =
                 get_object_attr_u32(hkey, CKA_XMSS_PARAM_SET).unwrap_or(CKP_XMSS_SHA2_10_256);
+            // SHAKE256_10_192 is the one n=24 set (SP 800-208): len=51, h=10.
+            if xmss_param == CKP_XMSS_SHAKE256_10_192 {
+                return 4 + 24 + (51 + 10) * 24;
+            }
             let h: u32 = match xmss_param {
-                CKP_XMSS_SHA2_16_256 | CKP_XMSS_SHAKE_16_256 => 16,
-                CKP_XMSS_SHA2_20_256 | CKP_XMSS_SHAKE_20_256 => 20,
+                CKP_XMSS_SHA2_16_256 | CKP_XMSS_SHAKE_16_256 | CKP_XMSS_SHAKE256_16_256 => 16,
+                CKP_XMSS_SHA2_20_256 | CKP_XMSS_SHAKE_20_256 | CKP_XMSS_SHAKE256_20_256 => 20,
                 _ => 10,
             };
             4 + 32 + 67 * 32 + h * 32

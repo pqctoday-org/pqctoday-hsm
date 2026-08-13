@@ -905,12 +905,22 @@ pub const CKP_LMOTS_SHAKE_N24_W8: u32 = 0x10;
 
 // ── XMSS Parameter Set Constants ─────────────────────────────────────────────
 
+// Values are the RFC 8391 §8 / NIST SP 800-208 §5.3 (IANA "XMSS Signatures")
+// numeric identifiers — the same numbering the C++ engine's
+// xmss-reference params.c uses. N1 remediation 2026-08-13: the SHAKE
+// (SHAKE128-based) sets moved from the engine's historical 0x11-0x13 to
+// their standard 0x07-0x09 ids; 0x11-0x13 now denote the SHAKE256-based
+// sets they stand for in the registry (previously those ids silently ran
+// SHAKE128 — a numbering collision with the standard).
 pub const CKP_XMSS_SHA2_10_256: u32 = 0x01;
 pub const CKP_XMSS_SHA2_16_256: u32 = 0x02;
 pub const CKP_XMSS_SHA2_20_256: u32 = 0x03;
-pub const CKP_XMSS_SHAKE_10_256: u32 = 0x11;
-pub const CKP_XMSS_SHAKE_16_256: u32 = 0x12;
-pub const CKP_XMSS_SHAKE_20_256: u32 = 0x13;
+pub const CKP_XMSS_SHAKE_10_256: u32 = 0x07; // XMSS-SHAKE_10_256 (SHAKE128)
+pub const CKP_XMSS_SHAKE_16_256: u32 = 0x08; // XMSS-SHAKE_16_256 (SHAKE128)
+pub const CKP_XMSS_SHAKE_20_256: u32 = 0x09; // XMSS-SHAKE_20_256 (SHAKE128)
+pub const CKP_XMSS_SHAKE256_16_256: u32 = 0x11; // XMSS-SHAKE256_16_256
+pub const CKP_XMSS_SHAKE256_20_256: u32 = 0x12; // XMSS-SHAKE256_20_256
+pub const CKP_XMSS_SHAKE256_10_192: u32 = 0x13; // XMSS-SHAKE256_10_192
 
 // ── XMSS-MT Parameter Set Constants (RFC 8391 OIDs, matching C++ xmssmt_parse_oid) ──────────────
 // SHA2 / 256-bit (most common; selected subset for PKCS#11 v3.2 §6.66.6)

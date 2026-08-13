@@ -91,15 +91,21 @@ PINNED = {
     "CKP_LMOTS_SHAKE_N24_W2": (0x0E, "iana"),
     "CKP_LMOTS_SHAKE_N24_W4": (0x0F, "iana"),
     "CKP_LMOTS_SHAKE_N24_W8": (0x10, "iana"),
-    # XMSS parameter sets (engine values; SHA2 block matches RFC 8391 §8,
-    # SHAKE block is the engine's historical numbering — pinned as-is so
-    # any silent change still fails; see rust/src/constants.rs).
+    # XMSS parameter sets (RFC 8391 §8 / NIST SP 800-208 §5.3 IANA "XMSS
+    # Signatures" registry ids — the same numbering the C++ engine's
+    # xmss-reference params.c uses). N1 remediation 2026-08-13: the SHAKE
+    # (SHAKE128) sets moved to their standard 0x07-0x09 ids; 0x11-0x13 are
+    # the SHAKE256-based sets those ids actually denote in the registry
+    # (previously mislabeled here as SHAKE128 under "historical numbering").
     "CKP_XMSS_SHA2_10_256": (0x01, "iana"),
     "CKP_XMSS_SHA2_16_256": (0x02, "iana"),
     "CKP_XMSS_SHA2_20_256": (0x03, "iana"),
-    "CKP_XMSS_SHAKE_10_256": (0x11, "iana"),
-    "CKP_XMSS_SHAKE_16_256": (0x12, "iana"),
-    "CKP_XMSS_SHAKE_20_256": (0x13, "iana"),
+    "CKP_XMSS_SHAKE_10_256": (0x07, "iana"),
+    "CKP_XMSS_SHAKE_16_256": (0x08, "iana"),
+    "CKP_XMSS_SHAKE_20_256": (0x09, "iana"),
+    "CKP_XMSS_SHAKE256_16_256": (0x11, "iana"),
+    "CKP_XMSS_SHAKE256_20_256": (0x12, "iana"),
+    "CKP_XMSS_SHAKE256_10_192": (0x13, "iana"),
     # XMSS-MT parameter sets (RFC 8391 §8 numeric IDs, matching C++
     # xmssmt_parse_oid)
     "CKP_XMSSMT_SHA2_20_2_256": (0x01, "iana"),
