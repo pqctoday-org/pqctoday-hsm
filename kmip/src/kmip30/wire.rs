@@ -213,6 +213,12 @@ pub(crate) mod tags {
     pub const PrimeExponentQ: u32         = 0x42_0061;
     pub const CrtCoefficient: u32         = 0x42_0027;
     pub const AttributeReference: u32     = 0x42_013b;
+    /// KMIP 3.0 §6.2.3 `Put Function` — whether a pushed object is New
+    /// (0x01) or a Replace (0x02) for one the client already holds.
+    pub const PutFunction: u32            = 0x42_0070;
+    /// KMIP 3.0 §6.2.3 `Replaced Unique Identifier` — the object the
+    /// pushed one supersedes. Present only when Put Function = Replace.
+    pub const ReplacedUniqueIdentifier: u32 = 0x42_0076;
     /// KMIP 3.0 §6.1.{2,38,56} `New Attribute` — Structure wrapping the
     /// typed-tag attribute being added / modified / set.
     pub const NewAttribute: u32           = 0x42_013d;
@@ -5460,6 +5466,251 @@ fn required_asynchronous_correlation_value(children: &[TtlvFrame]) -> Result<Vec
         tag: tags::AsynchronousCorrelationValue,
         name: "Asynchronous Correlation Value",
     })
+}
+
+// ── §6.2 Server-to-Client messages ──────────────────────────────────────────
+//
+// Notify (§6.2.2) and Put (§6.2.3) run in the opposite direction to everything
+// else in this file: the SERVER originates the request and the client answers.
+// So these are encoders for requests we SEND, with decoders alongside them so a
+// client (and the round-trip tests) can read what was sent — the mirror image
+// of the client-request path above, which decodes then encodes a response.
+//
+// The channel they travel on is not left to invention: §6.1.61 Set Endpoint
+// Role says the roles swap "over the current client-to-server communication
+// channel … the communication channel remains as established". A server does
+// not dial out; a client volunteers to receive.
+
+/// Build a complete server-originated `RequestMessage` carrying one payload.
+///
+/// Protocol version and the §6.1 batch shape are identical to a client
+/// request — only the direction of travel differs, which is exactly why the
+/// client can decode it with its ordinary request decoder.
+fn server_request_message(operation: Operation, payload: TtlvFrame, time_stamp: i64) -> Vec<u8> {
+    let header = TtlvFrame::new(
+        Tag(tags::RequestHeader),
+        Value::Structure(vec![
+            TtlvFrame::new(
+                Tag(tags::ProtocolVersion),
+                Value::Structure(vec![
+                    TtlvFrame::new(Tag(tags::ProtocolVersionMajor), Value::Integer(3)),
+                    TtlvFrame::new(Tag(tags::ProtocolVersionMinor), Value::Integer(0)),
+                ]),
+            ),
+            TtlvFrame::new(Tag(tags::TimeStamp), Value::DateTime(time_stamp)),
+        ]),
+    );
+    let batch_item = TtlvFrame::new(
+        Tag(tags::BatchItem),
+        Value::Structure(vec![
+            TtlvFrame::new(Tag(tags::Operation), Value::Enumeration(operation.to_wire_value())),
+            payload,
+        ]),
+    );
+    let frame = TtlvFrame::new(
+        Tag(tags::RequestMessage),
+        Value::Structure(vec![header, batch_item]),
+    );
+    let mut buf = BytesMut::new();
+    encode(&frame, &mut buf);
+    buf.to_vec()
+}
+
+/// Encode a §6.2.2 `Notify` message (Table: Unique Identifier / Attributes /
+/// Attribute Reference).
+pub fn encode_notify_message(req: &NotifyRequest, time_stamp: i64) -> Vec<u8> {
+    let mut children = vec![uid_frame(&req.unique_identifier)];
+    if !req.attributes.is_empty() {
+        children.push(TtlvFrame::new(
+            Tag(tags::Attributes),
+            Value::Structure(req.attributes.iter().map(encode_attribute_v3).collect()),
+        ));
+    }
+    // "The attributes that have been deleted" — repeated, NOT wrapped in a
+    // containing Structure (the payload table lists it as a sibling that "may
+    // be repeated", unlike Attributes which is a single Structure).
+    for name in &req.deleted_attributes {
+        children.push(attribute_reference_frame(name));
+    }
+    server_request_message(
+        Operation::Notify,
+        TtlvFrame::new(Tag(tags::RequestPayload), Value::Structure(children)),
+        time_stamp,
+    )
+}
+
+/// Encode a §6.2.3 `Put` message.
+pub fn encode_put_message(req: &PutRequest, time_stamp: i64) -> Vec<u8> {
+    let mut children = vec![
+        uid_frame(&req.unique_identifier),
+        TtlvFrame::new(
+            Tag(tags::PutFunction),
+            Value::Enumeration(req.put_function.to_wire_value()),
+        ),
+    ];
+    // Only meaningful for Replace; emitting it beside New would state that the
+    // object both is and is not superseding something.
+    if req.put_function == PutFunction::Replace {
+        if let Some(replaced) = &req.replaced_unique_identifier {
+            children.push(TtlvFrame::new(
+                Tag(tags::ReplacedUniqueIdentifier),
+                Value::TextString(replaced.clone()),
+            ));
+        }
+    }
+    if !req.attributes.is_empty() {
+        children.push(TtlvFrame::new(
+            Tag(tags::Attributes),
+            Value::Structure(req.attributes.iter().map(encode_attribute_v3).collect()),
+        ));
+    }
+    server_request_message(
+        Operation::Put,
+        TtlvFrame::new(Tag(tags::RequestPayload), Value::Structure(children)),
+        time_stamp,
+    )
+}
+
+/// The empty-payload `ResponseMessage` a client owes a pushed request:
+/// "The client SHALL send a response in the form of a Response containing no
+/// payload" (§6.2.2, §6.2.3).
+pub fn encode_server_to_client_ack(operation: Operation, time_stamp: i64) -> Vec<u8> {
+    let header = TtlvFrame::new(
+        Tag(tags::ResponseHeader),
+        Value::Structure(vec![
+            TtlvFrame::new(
+                Tag(tags::ProtocolVersion),
+                Value::Structure(vec![
+                    TtlvFrame::new(Tag(tags::ProtocolVersionMajor), Value::Integer(3)),
+                    TtlvFrame::new(Tag(tags::ProtocolVersionMinor), Value::Integer(0)),
+                ]),
+            ),
+            TtlvFrame::new(Tag(tags::TimeStamp), Value::DateTime(time_stamp)),
+        ]),
+    );
+    let batch_item = TtlvFrame::new(
+        Tag(tags::BatchItem),
+        Value::Structure(vec![
+            TtlvFrame::new(Tag(tags::Operation), Value::Enumeration(operation.to_wire_value())),
+            TtlvFrame::new(Tag(tags::ResultStatus), Value::Enumeration(0x00)),
+        ]),
+    );
+    let frame = TtlvFrame::new(
+        Tag(tags::ResponseMessage),
+        Value::Structure(vec![header, batch_item]),
+    );
+    let mut buf = BytesMut::new();
+    encode(&frame, &mut buf);
+    buf.to_vec()
+}
+
+/// What a client reads off a flipped channel.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ServerToClientMessage {
+    Notify(NotifyRequest),
+    Put(PutRequest),
+}
+
+/// Decode a server-originated message. Used by the round-trip tests and by any
+/// Rust client acting as the receiving endpoint.
+pub fn decode_server_to_client_message(bytes: &[u8]) -> Result<ServerToClientMessage, WireError> {
+    let frame = decode_one(bytes).map_err(|e| WireError::Codec(e.to_string()))?;
+    let children = match &frame.value {
+        Value::Structure(c) => c,
+        _ => return Err(WireError::BadType {
+            tag: tags::RequestMessage, name: "Request Message",
+            msg: "not a Structure".into() }),
+    };
+    let batch_item = children
+        .iter()
+        .find(|c| c.tag.0 == tags::BatchItem)
+        .ok_or(WireError::Missing { tag: tags::BatchItem, name: "Batch Item" })?;
+    let bi_children = match &batch_item.value {
+        Value::Structure(c) => c,
+        _ => return Err(WireError::BadType {
+            tag: tags::BatchItem, name: "Batch Item", msg: "not a Structure".into() }),
+    };
+    let op = bi_children
+        .iter()
+        .find_map(|c| match (c.tag.0, &c.value) {
+            (t, Value::Enumeration(v)) if t == tags::Operation => Operation::from_wire_value(*v),
+            _ => None,
+        })
+        .ok_or(WireError::Missing { tag: tags::Operation, name: "Operation" })?;
+    let payload = bi_children
+        .iter()
+        .find(|c| c.tag.0 == tags::RequestPayload)
+        .ok_or(WireError::Missing { tag: tags::RequestPayload, name: "Request Payload" })?;
+    let p = match &payload.value {
+        Value::Structure(c) => c,
+        _ => return Err(WireError::BadType {
+            tag: tags::RequestPayload, name: "Request Payload",
+            msg: "not a Structure".into() }),
+    };
+
+    let uid = p
+        .iter()
+        .find_map(|c| match (c.tag.0, &c.value) {
+            (t, Value::TextString(s)) if t == tags::UniqueIdentifier => Some(s.clone()),
+            _ => None,
+        })
+        .ok_or(WireError::Missing { tag: tags::UniqueIdentifier, name: "Unique Identifier" })?;
+
+    let attributes = p
+        .iter()
+        .find(|c| c.tag.0 == tags::Attributes)
+        .map(|a| match &a.value {
+            Value::Structure(list) => {
+                list.iter().filter_map(|f| decode_attribute_v3(f).ok().flatten()).collect()
+            }
+            _ => Vec::new(),
+        })
+        .unwrap_or_default();
+
+    match op {
+        Operation::Notify => {
+            let deleted = p
+                .iter()
+                .filter(|c| c.tag.0 == tags::AttributeReference)
+                .filter_map(|c| match &c.value {
+                    Value::Enumeration(code) => Some(tag_name_from_code(*code).to_string()),
+                    Value::TextString(s) => Some(s.clone()),
+                    _ => None,
+                })
+                .collect();
+            Ok(ServerToClientMessage::Notify(NotifyRequest {
+                unique_identifier: uid,
+                attributes,
+                deleted_attributes: deleted,
+            }))
+        }
+        Operation::Put => {
+            let put_function = p
+                .iter()
+                .find_map(|c| match (c.tag.0, &c.value) {
+                    (t, Value::Enumeration(v)) if t == tags::PutFunction => {
+                        PutFunction::from_wire_value(*v)
+                    }
+                    _ => None,
+                })
+                .ok_or(WireError::Missing { tag: tags::PutFunction, name: "Put Function" })?;
+            let replaced = p.iter().find_map(|c| match (c.tag.0, &c.value) {
+                (t, Value::TextString(s)) if t == tags::ReplacedUniqueIdentifier => Some(s.clone()),
+                _ => None,
+            });
+            Ok(ServerToClientMessage::Put(PutRequest {
+                unique_identifier: uid,
+                put_function,
+                replaced_unique_identifier: replaced,
+                attributes,
+            }))
+        }
+        other => Err(WireError::BadType {
+            tag: tags::Operation,
+            name: "Operation",
+            msg: format!("{other:?} is not a §6.2 server-to-client push message"),
+        }),
+    }
 }
 
 #[cfg(test)]

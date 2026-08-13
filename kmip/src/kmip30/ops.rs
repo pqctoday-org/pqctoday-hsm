@@ -2106,6 +2106,66 @@ impl EndpointRole {
     }
 }
 
+/// `Put Function` (KMIP 3.0 §6.2.3) — whether a pushed Managed Object is
+/// new to the client, or replaces one it already holds (the spec's own
+/// example: pushing a certificate to replace one about to expire).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PutFunction {
+    New = 0x01,
+    Replace = 0x02,
+}
+
+impl PutFunction {
+    pub const fn to_wire_value(self) -> u32 { self as u32 }
+    pub const fn from_wire_value(v: u32) -> Option<Self> {
+        match v {
+            0x01 => Some(Self::New),
+            0x02 => Some(Self::Replace),
+            _ => None,
+        }
+    }
+}
+
+/// `Notify` (KMIP 3.0 §6.2.2) — a **server-to-client** message: "used to
+/// notify a client of events that resulted in changes to attributes of an
+/// object".
+///
+/// This is a request the SERVER originates, so unlike every other request
+/// type in this module it is something this crate *encodes* rather than
+/// decodes. The client "SHALL send a response in the form of a Response
+/// containing no payload".
+#[derive(Clone, Debug, PartialEq)]
+pub struct NotifyRequest {
+    /// "The Unique Identifier of the object." REQUIRED.
+    pub unique_identifier: String,
+    /// "The attributes that have changed. This includes at least the Last
+    /// Change Date attribute." OPTIONAL in the table, but the same sentence
+    /// makes Last Change Date mandatory in practice whenever any attribute
+    /// changed — `notify_attribute_change` enforces that rather than leaving
+    /// it to each caller.
+    pub attributes: Vec<Attribute>,
+    /// "The attributes that have been deleted." OPTIONAL, may be repeated.
+    /// Carried as spec tag-names (e.g. `"Object Group"`), matching the
+    /// `AttributeReference` encoder.
+    pub deleted_attributes: Vec<String>,
+}
+
+/// `Put` (KMIP 3.0 §6.2.3) — a **server-to-client** message that pushes a
+/// Managed Object to the client. Server-originated, like [`NotifyRequest`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct PutRequest {
+    /// "The Unique Identifier of the object that is being sent." REQUIRED.
+    pub unique_identifier: String,
+    /// New, or a replacement for something the client already holds. REQUIRED.
+    pub put_function: PutFunction,
+    /// The object being replaced. Meaningful only with
+    /// [`PutFunction::Replace`]; encoding it alongside `New` would be a
+    /// contradiction, so the encoder drops it in that case.
+    pub replaced_unique_identifier: Option<String>,
+    /// Attributes accompanying the pushed object.
+    pub attributes: Vec<Attribute>,
+}
+
 /// `Set Endpoint Role` (KMIP 3.0 §6.1.61 / Table 431) — request that
 /// the server apply the given endpoint role for subsequent traffic on
 /// the current channel ("After successful completion of the operation
