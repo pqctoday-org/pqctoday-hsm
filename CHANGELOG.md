@@ -6,6 +6,69 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [Unreleased]
+
+PKCS#11 v3.2 audit remediation (2026-08-13; findings N1–N15 from the
+audit at `786d56e`).
+
+### Fixed
+
+- **XMSS SHAKE parameter-set numbering collision (N1, HIGH).** The Rust
+  engine defined `CKP_XMSS_SHAKE_10/16/20_256` as `0x11/0x12/0x13` and ran
+  the SHAKE128-based RFC 8391 sets under them — but in the IANA "XMSS
+  Signatures" registry (the numbering the C++ engine's xmss-reference uses
+  raw) those ids mean XMSS-**SHAKE256**_16_256 / SHAKE256_20_256 /
+  SHAKE256_10_192, and the SHAKE128 sets are `0x07/0x08/0x09`. Rust now uses
+  the standard numbering, and `0x11–0x13` are **implemented as the real
+  SHAKE256 parameter sets** (not rejected).
+  - **Token migration impact:** Rust-engine XMSS keys generated under the
+    old `0x11–0x13` ids will FAIL sign/verify after this upgrade (the stored
+    key material's embedded OID no longer matches the algorithm the id now
+    selects — a clean error, never a silent wrong-algorithm run). Re-label
+    such keys' `CKA_PARAMETER_SET`/`CKA_XMSS_PARAM_SET` to `0x07–0x09` to
+    keep using them. SHA2-based XMSS keys (`0x01–0x03`) are unaffected.
+  - **Hub note:** the pqctoday-hub's vendored wasm engine must be rebuilt
+    to pick this up (not done here).
+- **C++ ECDH-as-KEM not advertised (N3).** `C_GetMechanismInfo` for
+  `CKM_ECDH1_DERIVE` now reports `CKF_ENCAPSULATE|CKF_DECAPSULATE` alongside
+  `CKF_DERIVE`, matching what `C_EncapsulateKey`/`C_DecapsulateKey` actually
+  dispatch. The cofactor variant stays derive-only.
+- **`CKA_ALLOWED_MECHANISMS` now enforced on every KEM path (N5).** C++
+  routed no KEM arm through the shared `isMechanismPermitted` gate; Rust's
+  FrodoKEM/Classic-McEliece vendor arms returned before its shared check.
+  All arms (ML-KEM, ECDH, vendor KEMs) now refuse a disallowed mechanism
+  with `CKR_MECHANISM_INVALID`, with negative tests on both engines.
+- **Constants-gate blind spots (N9).** `scripts/check_pkcs11_constants.py`
+  now validates `src/lib/vendor_mechanisms.h` and sha256-pins
+  `src/lib/pkcs11/pkcs11f.h` against a newly vendored canonical OASIS v3.2
+  function header (`docs/refs/pkcs11f-canonical-v3.2.h`); its docstring no
+  longer overstates coverage.
+- **`constants.js` was missing the ChaCha20 mechanisms (N10).**
+  `CKM_CHACHA20_KEY_GEN`/`CKM_CHACHA20`/`CKM_CHACHA20_POLY1305` added
+  (values from the canonical header) and gate-validated.
+- **Stale documentation (N2/N6/N15).** Rust conformance report's false
+  `C_SignRecoverInit` stub row and mechanism count corrected;
+  `docs/rust-engine.md`'s export count (45 → 102 wasm + 104-function C ABI)
+  and six wrongly-"Not implemented" rows corrected; spec citations moved to
+  the PKCS#11 v3.2 OS (2026-06-03); `CLAUDE.md` release pointer and
+  hybrid-KEM attribution fixed.
+
+### Added
+
+- **Rust ECDH-as-KEM (N4, parity restored).** `CKM_ECDH1_DERIVE` under
+  `C_EncapsulateKey`/`C_DecapsulateKey` for P-256/P-384/P-521,
+  wire-compatible with the C++ engine (DER-wrapped ephemeral point as the
+  ciphertext, raw SEC1 accepted on decapsulation, raw X-coordinate shared
+  secret); advertised via `CKF_ENCAPSULATE|CKF_DECAPSULATE` and covered by
+  per-curve round-trip + negative tests. secp256k1 and X25519/X448-as-KEM
+  remain C++-only (recorded divergence).
+- **Engine-divergence record (N4/N11/N12)** appended to
+  `docs/gap-analysis-cpp-rust-realignment-2026-07-25.md`: C_DigestKey /
+  C_SeedRandom behavior differences (both spec-legal) and the
+  non-portable hybrid-combiner building blocks between the two engines.
+
+---
+
 ## [0.22.0] — 2026-08-12
 
 **Post-quantum MLS works.** Ciphersuite `0x004D` (X-Wing: ML-KEM-768 + X25519,

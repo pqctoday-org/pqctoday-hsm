@@ -43,7 +43,12 @@ in §3.1–§3.3.**)
 **Prior:** 2026-04-06 (v11 — G-ATTR1a/b/c resolved: ML-DSA/SLH-DSA/ML-KEM public key `CKA_VALUE` now `ck1|ck4`; TypeScript template updated for XMSS `CKA_PARAMETER_SET`; all open items closed)
 **Prior:** 2026-04-01 (v9 — SLH-DSA context string G4 + deterministic mode G5 resolved, full C++/Rust/TypeScript parity)
 **Baseline:** Post-Phase-8 + G4 (SLH-DSA context string, FIPS 205 §9.2) + G5 (SLH-DSA deterministic mode, FIPS 205 §10) — all tracked gaps resolved
-**Spec reference:** OASIS PKCS#11 v3.2 CSD01 (<http://docs.oasis-open.org/pkcs11/pkcs11-base/v3.2/>)
+**Spec reference:** OASIS PKCS#11 v3.2 — now the OS (Committee Specification /
+OASIS Standard track, 2026-06-03): <https://docs.oasis-open.org/pkcs11/pkcs11-spec/v3.2/os/>.
+(Corrected 2026-08-13: this document originally cited CSD01 via a
+`pkcs11-base` URL — the v3.0-era repository, a dead pattern for v3.2. The
+v3.2 OS is content-identical to CSD01 at header level, so the analysis
+below is unaffected.)
 **Prior baseline (v8):** CKM_KMAC_128/256 vendor extension (G-KMAC1/KMAC2), C_GetMechanismInfo full coverage (2026-03-13).
 
 ---

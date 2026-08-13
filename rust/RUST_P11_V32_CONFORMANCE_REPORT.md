@@ -4,7 +4,11 @@
 **Harness:** `rust/test_p11_conformance.js` (table-driven negative-path + KAT
 matrix asserting exact `CKR_*` codes in spec priority order §5.4/§5.12, plus
 PQC keygen/param-set, SP800-108 KBKDF, and message-based-crypto checks).
-**Engine commit:** `9490a0b` · **Generated:** 2026-07-10
+**Engine commit:** `9490a0b` · **Generated:** 2026-07-10 ·
+**Refreshed:** 2026-08-13 (N2 remediation — surgical corrections only: the
+stale C_SignRecoverInit "stub" row and the advertised-mechanism count below
+were wrong against the code as of `eed556e`; the harness itself was not
+re-run for this refresh)
 **Regenerate:** `scripts/local-gate.sh --rust-p11` (see below), or manually:
 ```
 docker exec pqc-rust bash -c 'cd /ag/pqctoday-hsm/rust && \
@@ -273,11 +277,16 @@ silently double-succeed. Regression test:
   ✅ C_CancelFunction → FUNCTION_NOT_PARALLEL
   ✅ C_WaitForSlotEvent(DONT_BLOCK) → NO_EVENT
   ✅ C_WaitForSlotEvent(blocking) → FUNCTION_NOT_SUPPORTED
-  ✅ C_SignRecoverInit → FUNCTION_NOT_SUPPORTED
+  ~~C_SignRecoverInit → FUNCTION_NOT_SUPPORTED~~ — STALE (corrected
+  2026-08-13): C_SignRecoverInit/C_SignRecover are IMPLEMENTED since
+  `eed556e` (rust/src/ffi.rs), so this row no longer describes a
+  spec-mandated stub and its old PASS claim was false against current code
   ✅ C_DigestEncryptUpdate (no active ops) → OPERATION_NOT_INITIALIZED
 
 ── F1 — mechanism table reconciliation (R6.2) ──
-  ✅ all 109 advertised mechanisms answerable → 0 missing
+  ✅ all advertised mechanisms answerable → 0 missing
+  (116 mechanisms in SUPPORTED_MECHS as of 2026-08-13; the "109" this
+  report originally recorded reflected the 2026-07-10 table)
 
 ── R3.1 — C_CreateObject template validation (§4.1.1) ──
   ✅ no CKA_CLASS → TEMPLATE_INCOMPLETE

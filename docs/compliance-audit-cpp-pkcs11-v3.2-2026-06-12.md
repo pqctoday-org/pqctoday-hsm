@@ -3,6 +3,7 @@
 **Date**: 2026-06-12 · **Branch**: `feat/wasm-vpn-frag-multike-childsa` (post round-3, `main`-merged compliance baseline)
 **Scope**: `src/lib/` C++ engine — the engine round 1–3 deliberately scoped OUT (rust was the focus).
 **Reference**: canonical OASIS v3.2 (`src/lib/pkcs11/pkcs11{t,f}.h`, canonical-synced commit `2e65832`; pin `docs/refs/pkcs11t-canonical-v3.2.h`) + spec PDF `docs/refs/pkcs11-spec-v3.2-csd01.pdf`.
+*(Note, 2026-08-13: the CSD01 baseline cited here was superseded by the v3.2 OS on 2026-06-03 — <https://docs.oasis-open.org/pkcs11/pkcs11-spec/v3.2/os/> — whose canonical headers are content-identical, so the audit's findings stand as written.)*
 **Method**: four parallel read-only audits (API/lifecycle, mechanism table, object/attribute, crypto/return-codes), benchmarked against every bug class the rust engine fixed in rounds 1–3.
 
 This audit supersedes the intentional-omission claims (G7/G8/G9) in
