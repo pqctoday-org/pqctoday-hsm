@@ -97,6 +97,11 @@ run_step "rust engine cargo test" \
   "cd $AG_RUST && RUST_MIN_STACK=134217728 cargo test --quiet 2>&1 | grep -E 'test result: FAILED|[1-9][0-9]* failed' && exit 1; \
    RUST_MIN_STACK=134217728 cargo test --quiet 2>&1 | grep -E 'test result' | awk '{p+=\$4; f+=\$6} END {print \"  \"p\" passed, \"f\" failed\"; exit (f>0)}'"
 
+# Cheap, and it runs BEFORE the replay on purpose: if the corpus is not the
+# corpus we think it is, the replay figure below is measuring something else.
+run_step "OASIS corpus provenance (102 transcripts vs the CSD02 zip)" \
+  "cd $AG_KMIP && python3 conformance/verify_corpus_provenance.py"
+
 run_step "OASIS KMIP 3.0 replay (97 PASS / 0 FAIL / 5 SKIP_DEPRECATED)" \
   "cd $AG_KMIP && cargo build --release --bin pqctoday-kmip --quiet && \
    mkdir -p target/release && ln -sf \$(readlink -f \${CARGO_TARGET_DIR:-/cargo-target}/release/pqctoday-kmip) target/release/pqctoday-kmip 2>/dev/null; \

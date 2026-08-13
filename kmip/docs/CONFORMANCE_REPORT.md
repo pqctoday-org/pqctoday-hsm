@@ -105,6 +105,16 @@ Corpus is checked in at `kmip/conformance/oasis_corpus/`, refreshed only when OA
 publishes a new revision of the profiles package (last: the CSD02 revision, release
 0.16.0 — 2 transcripts changed cosmetically).
 
+**Provenance is machine-checked** (added 2026-08-13). `conformance/corpus_provenance.json`
+records the source zip, its SHA-256, and a digest per transcript;
+`conformance/verify_corpus_provenance.py` re-derives all of it and, when the zip is present,
+extracts it and asserts the checked-in corpus is byte-identical to what OASIS published.
+Before this, the only way to answer "is this corpus current?" was to fetch both revisions and
+diff them by hand — which is how the CSD01→CSD02 delta above was established, and is not a
+procedure that survives contact with the next revision. The check runs in `scripts/local-gate.sh`
+and reports PARTIAL rather than OK if the zip is absent, so a shallow checkout cannot claim
+provenance it did not verify.
+
 **PQC transcripts (separate corpus).** The OASIS mandatory/optional corpus above predates
 the PQC surface and exercises none of it. `kmip/conformance/pqc_corpus/` holds a vendored
 **42-transcript** subset of the OASIS `kmip-3-0-pqc-tests-03.zip` package (full set: 1452);
