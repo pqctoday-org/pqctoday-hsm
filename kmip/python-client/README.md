@@ -93,6 +93,23 @@ for msg in c.serve_as_endpoint():
 c.serve_as_endpoint(on_message=lambda m: print("changed:", m["uid"]))
 ```
 
+Before it pushes, the server asks this endpoint two questions and answers them
+itself at the end of the session — `Discover Versions`, `Query`, and a closing
+`Set Endpoint Role` that hands the role back. `serve_as_endpoint()` answers all
+three for you. Two keyword arguments control what it answers with:
+
+```python
+# Tell the server we speak only KMIP 2.1 -> it declines to push anything,
+# and leaves the notifications queued for a client that can receive them.
+c.serve_as_endpoint(speaks_versions=((2, 1),))
+
+# Tell it we handle Put but not Notify -> no Notify is sent.
+c.serve_as_endpoint(handles_operations=("Put",))
+
+# See the negotiation itself, not just the pushes.
+c.serve_as_endpoint(include_control=True)
+```
+
 Notes worth knowing before relying on it:
 
 - **Credentials or mTLS are required.** An anonymous caller is refused the role

@@ -1,7 +1,10 @@
 {
   "_comment": "Where the checked-in OASIS transcripts came from. Verified by conformance/verify_corpus_provenance.py; re-record with --update after a deliberate re-baseline.",
   "delta_from_previous_revision": "vs kmip-profiles-v3.0.zip (CSD01, 23 Aug 2024): 2 of 102 transcripts differ. CS-BC-M-GCM-1-30.xml and CS-BC-M-CHACHA20POLY1305-1-30.xml drop a vendor-internal prefix from an expected ResultMessage ('L_KMIPCRYPTO_random:invalid-tag-length' -> 'invalid-tag-length'). The replay comparator discards ResultMessage entirely per Profiles 4.1.1 item 3, so the change cannot move the replay figure; both transcripts were replayed in CSD02 form and PASS. No other file differs.",
+  "public_review_closed": "2026-08-13",
   "recorded": "2026-08-13",
+  "revision_status": "committee-draft",
+  "revisit_note": "CSD02's 30-day OASIS public review closed 2026-08-13, the step preceding Committee Specification. A newer revision (CS01 or CSD03) is therefore expected rather than hypothetical; verify_corpus_provenance.py prints REVISIT once that date has passed. Clear the flag by re-vendoring against the new revision and re-running with --update, or by moving public_review_closed forward if OASIS has not in fact published.",
   "source_url": "https://docs.oasis-open.org/kmip/kmip-profiles/v3.0/csd02/",
   "source_zip": "kmip-profiles-v3.0-csd02.zip",
   "source_zip_sha256": "b60453bfb4c8c04703edd33ce9213801f9f204ef1a18a854aa288cad50f0b9fa",

@@ -10,6 +10,46 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **KMIP 3.0 Baseline Server profile: all 13 conditions now met.** Item 10 names
+  five server-to-client operations. `Notify` and `Put` were built earlier; the
+  remaining three — `Discover Versions`, `Query` and `Set Endpoint Role`, issued
+  *by the server* — are now implemented on the same §6.1.61 role-swapped
+  channel, closing the last open Baseline condition.
+
+  They were built under a rule worth stating, because this repo has already had
+  to remediate a round of operations whose results were silently discarded:
+  **each exists only because the server behaves differently depending on the
+  answer.** A peer sharing no protocol version is sent nothing at all (and its
+  notifications stay queued rather than being consumed by the refusal); a peer
+  whose `Query` answer omits an operation is not sent that operation; and a
+  session ends by handing the role back, so "the server is done" is an event
+  rather than something inferred from a socket that went quiet.
+
+  Silence is read as *unknown*, not *incapable* — a conformant §6.2-only client
+  answers an unexpected request with the empty acknowledgement §6.2.2 defines,
+  and withholding notifications it can plainly handle would invent a requirement
+  the spec does not make. An explicit empty list means the opposite, and the two
+  stay distinguishable through the decoder.
+
+  Proven end to end against a real Python client over TLS, and each behaviour
+  proven non-vacuous by disabling it and confirming exactly the matching tests
+  fail — four sabotage runs, each recompiled first.
+
+- **The OASIS corpus now carries machine-checked provenance.** Nothing recorded
+  which OASIS download the 102 transcripts came from, so answering "is this
+  corpus current?" meant fetching both revisions of the profiles package and
+  diffing them by hand. `kmip/conformance/corpus_provenance.json` records the
+  source zip, its SHA-256 and a digest per transcript;
+  `verify_corpus_provenance.py` re-derives all of it and, when the zip is
+  present, extracts it to assert byte-identity with what OASIS published. It
+  runs on the local gate ahead of the replay step — if the corpus is not the
+  corpus we think it is, the replay figure is measuring something else.
+
+  It also prints a REVISIT line once the pinned revision's public review has
+  closed, which is the seam that was missing: CSD02 was published in May 2026
+  and the conformance report still described CSD01 in August, because nothing
+  routed a new OASIS revision to the document carrying the claim.
+
 - **`SecP384r1MLKEM1024` — KMIP Profiles v3.0 CSD02 §3.3.3 is now met in
   full.** The Quantum Safe Authentication Suite requires all three of
   `X25519MLKEM768`, `SecP256r1MLKEM768` and `SecP384r1MLKEM1024`; the server

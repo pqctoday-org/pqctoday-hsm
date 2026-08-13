@@ -1,0 +1,551 @@
+Start testing: Aug 12 21:11 CDT
+----------------------------------------------------------
+8/8 Testing: p11test
+8/8 Test: p11test
+Command: "/Users/pqctoday/Antigravity/pqctoday-hsm/build_audit_0812/src/lib/test/p11test"
+Directory: /Users/pqctoday/Antigravity/pqctoday-hsm/build_audit_0812/src/lib/test
+"p11test" start time: Aug 12 21:11 CDT
+Output:
+----------------------------------------------------------
+SymmetricAlgorithmTests::testAesEncryptDecrypt/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+ : OK
+SymmetricAlgorithmTests::testChaCha20EncryptDecrypt/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+ : OK
+SymmetricAlgorithmTests::testAesCtrOverflow/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+ : OK
+SymmetricAlgorithmTests::testGenericKey/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+ : OK
+SymmetricAlgorithmTests::testEncDecFinalNULLValidation/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+ : OK
+SymmetricAlgorithmTests::testOpTermIssue585/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+ : OK
+DigestTests::testDigestInit/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+ : OK
+DigestTests::testDigest/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+ : OK
+DigestTests::testDigestUpdate/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+ : OK
+DigestTests::testDigestKey/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+ : OK
+DigestTests::testDigestFinal/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+ : OK
+DigestTests::testDigestAll/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+ : OK
+InitTests::testInit1/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/SoftHSM_slots.cpp(100): SoftHSM is already initialized
+ : OK
+InitTests::testInit2/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/SoftHSM_slots.cpp(140): pInitArgs->pReserved must be set to NULL_PTR
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/SoftHSM_slots.cpp(100): SoftHSM is already initialized
+ : OK
+InitTests::testInit3/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/SoftHSM_slots.cpp(185): Not all mutex functions are supplied
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/SoftHSM_slots.cpp(100): SoftHSM is already initialized
+ : OK
+InitTests::testInit4/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/SoftHSM_slots.cpp(185): Not all mutex functions are supplied
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/SoftHSM_slots.cpp(100): SoftHSM is already initialized
+ : OK
+InitTests::testInit5/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/SoftHSM_slots.cpp(185): Not all mutex functions are supplied
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/SoftHSM_slots.cpp(100): SoftHSM is already initialized
+ : OK
+InitTests::testInit6/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/SoftHSM_slots.cpp(185): Not all mutex functions are supplied
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/SoftHSM_slots.cpp(100): SoftHSM is already initialized
+ : OK
+InitTests::testFinal/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+ : OK
+InfoTests::testGetInfo/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+ : OK
+InfoTests::testGetFunctionList/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+ : OK
+InfoTests::testGetSlotList/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+ : OK
+InfoTests::testGetSlotInfo/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+ : OK
+InfoTests::testGetTokenInfo/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+ : OK
+InfoTests::testGetMechanismList/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+ : OK
+InfoTests::testGetSlotInfoAlt/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+ : OK
+InfoTests::testGetMechanismListConfig/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+ : OK
+InfoTests::testGetMechanismNegativeListConfig/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+ : OK
+InfoTests::testWaitForSlotEvent/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+ : OK
+RandomTests::testSeedRandom/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+ : OK
+RandomTests::testGenerateRandom/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+ : OK
+SessionTests::testOpenSession/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+ : OK
+SessionTests::testCloseSession/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+ : OK
+SessionTests::testCloseAllSessions/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+ : OK
+SessionTests::testGetSessionInfo/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+ : OK
+SessionTests::testSessionCancel/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+ : OK
+TokenTests::testInitToken/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/crypto/OSSLEVPSymmetricAlgorithm.cpp(596): EVP_DecryptFinal failed (0x00000000): error:1C800064:Provider routines::bad decrypt
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/slot_mgr/Token.cpp(400): Incorrect SO PIN
+ : OK
+UserTests::testInitPIN/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+ : OK
+UserTests::testLogin/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/crypto/OSSLEVPSymmetricAlgorithm.cpp(596): EVP_DecryptFinal failed (0x00000000): error:1C800064:Provider routines::bad decrypt
+ : OK
+UserTests::testLogout/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+ : OK
+UserTests::testSetPIN/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/crypto/OSSLEVPSymmetricAlgorithm.cpp(596): EVP_DecryptFinal failed (0x00000000): error:1C800064:Provider routines::bad decrypt
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/crypto/OSSLEVPSymmetricAlgorithm.cpp(596): EVP_DecryptFinal failed (0x00000000): error:1C800064:Provider routines::bad decrypt
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/crypto/OSSLEVPSymmetricAlgorithm.cpp(596): EVP_DecryptFinal failed (0x00000000): error:1C800064:Provider routines::bad decrypt
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/crypto/OSSLEVPSymmetricAlgorithm.cpp(596): EVP_DecryptFinal failed (0x00000000): error:1C800064:Provider routines::bad decrypt
+ : OK
+ObjectTests::testCreateObject/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/SoftHSM_objects.cpp(909): User is not authorized
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/SoftHSM_objects.cpp(911): Session is read-only
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/SoftHSM_objects.cpp(911): Session is read-only
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/SoftHSM_objects.cpp(911): Session is read-only
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/SoftHSM_objects.cpp(911): Session is read-only
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/SoftHSM_objects.cpp(909): User is not authorized
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/SoftHSM_objects.cpp(909): User is not authorized
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/SoftHSM_objects.cpp(909): User is not authorized
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/SoftHSM_objects.cpp(909): User is not authorized
+ : OK
+ObjectTests::testCopyObject/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/SoftHSM_objects.cpp(378): Session is read-only
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/SoftHSM_objects.cpp(376): User is not authorized
+ : OK
+ObjectTests::testDestroyObject/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/SoftHSM_objects.cpp(524): Session is read-only
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/SoftHSM_objects.cpp(524): Session is read-only
+ : OK
+ObjectTests::testGetObjectSize/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+ : OK
+ObjectTests::testGetAttributeValue/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+ : OK
+ObjectTests::testSetAttributeValue/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/SoftHSM_objects.cpp(646): Session is read-only
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/SoftHSM_objects.cpp(646): Session is read-only
+ : OK
+ObjectTests::testFindObjects/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+ : OK
+ObjectTests::testGenerateKeys/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+ : OK
+ObjectTests::testCreateCertificates/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/SoftHSM_objects.cpp(900): Mandatory attribute not present in template
+ : OK
+ObjectTests::testDefaultDataAttributes/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+ : OK
+ObjectTests::testDefaultX509CertAttributes/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+ : OK
+ObjectTests::testDefaultRSAPubAttributes/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+ : OK
+ObjectTests::testDefaultRSAPrivAttributes/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+ : OK
+ObjectTests::testAlwaysNeverAttribute/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+ : OK
+ObjectTests::testSensitiveAttributes/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+ : OK
+ObjectTests::testGetInvalidAttribute/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+ : OK
+ObjectTests::testAllowedMechanisms/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+ : OK
+ObjectTests::testReAuthentication/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/crypto/OSSLEVPSymmetricAlgorithm.cpp(596): EVP_DecryptFinal failed (0x00000000): error:1C800064:Provider routines::bad decrypt
+ : OK
+ObjectTests::testTemplateAttribute/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+ : OK
+ObjectTests::testCreateSecretKey/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+ : OK
+DeriveTests::testEcdsaDerive/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+ : OK
+DeriveTests::testEddsaDerive with parameter: X25519/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+ : OK
+DeriveTests::testEddsaDerive with parameter: X448/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+ : OK
+DeriveTests::testSymDerive/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+ : OK
+DeriveTests::testMiscDerivations/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+ : OK
+SignVerifyTests::testEcSignVerify/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+ : OK
+SignVerifyTests::testEdSignVerify with parameter: Ed25519/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+ : OK
+SignVerifyTests::testEdSignVerify with parameter: Ed448/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+ : OK
+AsymEncryptDecryptTests::testRsaEncryptDecrypt/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/SoftHSM_keygen.cpp(7704): pParameter must be of type CK_RSA_PKCS_OAEP_PARAMS
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/SoftHSM_keygen.cpp(7704): pParameter must be of type CK_RSA_PKCS_OAEP_PARAMS
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/SoftHSM_keygen.cpp(7719): Invalid hashAlg/mgf combination for RSA-OAEP
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/SoftHSM_keygen.cpp(7719): Invalid hashAlg/mgf combination for RSA-OAEP
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/SoftHSM_keygen.cpp(7724): source must be CKZ_DATA_SPECIFIED
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/SoftHSM_keygen.cpp(7729): pSourceData must be NULL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/SoftHSM_keygen.cpp(7729): pSourceData must be NULL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/SoftHSM_keygen.cpp(7734): ulSourceDataLen must be 0
+ : OK
+AsymWrapUnwrapTests::testRsaWrapUnwrap/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+ : OK
+ForkTests::testFork/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/SoftHSM_slots.cpp(100): SoftHSM is already initialized
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(132): Missing library.reset_on_fork in configuration. Using default value: false
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/SoftHSM_slots.cpp(100): SoftHSM is already initialized
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(132): Missing library.reset_on_fork in configuration. Using default value: false
+ : OK
+ForkTests::testResetOnFork/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/SoftHSM_slots.cpp(100): SoftHSM is already initialized
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(113): Missing objectstore.umask in configuration. Using default value: 077
+/Users/pqctoday/Antigravity/pqctoday-hsm/src/lib/common/Configuration.cpp(97): Missing slots.mechanisms in configuration. Using default value: ALL
+ : OK
+
+OK (73 tests)
+
+
+<end of output>
+Test time =   8.66 sec
+----------------------------------------------------------
+Test Passed.
+"p11test" end time: Aug 12 21:12 CDT
+"p11test" time elapsed: 00:00:08
+----------------------------------------------------------
+
+End testing: Aug 12 21:12 CDT

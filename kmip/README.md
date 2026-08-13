@@ -296,10 +296,17 @@ for msg in c.serve_as_endpoint():
   scoped to. Queues are per identity and capped.
 - Each push waits for the client's empty-payload acknowledgement before the
   next is sent, so delivery is observable rather than assumed.
-- `Put` (§6.2.3) is encoded and tested but not yet triggered by anything;
-  server-issued `Discover Versions` / `Query` / `Set Endpoint Role` are not
-  implemented. See `docs/CONFORMANCE_REPORT.md` §5.1.4 for exactly where the
-  line falls.
+- Before pushing, the server asks the endpoint what it speaks (`Discover
+  Versions`, §6.1.21) and what it can service (`Query`, §6.1.39), and ends the
+  session by handing the role back (`Set Endpoint Role`, §6.1.61). The answers
+  are acted on: no common version means nothing is pushed and the queue is left
+  intact; an operation the peer does not advertise is not sent.
+- A peer that does not answer is treated as *unknown*, not incapable — a
+  §6.2-only client still gets its notifications.
+- `Put` (§6.2.3) is encoded, tested and gated, but nothing queues one yet.
+
+With those three, all five of Baseline §5.1.2 item 10's server-to-client
+operations are implemented — see `docs/CONFORMANCE_REPORT.md` §5.1.4.
 
 Proof lives in `python-client/tests/test_server_to_client_push.py`, which runs a
 real client against a real server over TLS.

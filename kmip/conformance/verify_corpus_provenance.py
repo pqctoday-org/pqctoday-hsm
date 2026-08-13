@@ -34,6 +34,7 @@ import shutil
 import sys
 import tempfile
 import zipfile
+from datetime import date
 from pathlib import Path
 
 KMIP_ROOT = Path(__file__).resolve().parent.parent
@@ -128,6 +129,36 @@ def check_provenance(record: dict) -> tuple[list[str], bool]:
     return problems, True
 
 
+def revisit_signal(record: dict) -> str | None:
+    """Say so when the pinned revision is one OASIS has likely superseded.
+
+    Not an age nag. The trigger is a specific procedural fact: a committee
+    draft's public review closing is the step immediately before Committee
+    Specification, so once that date has passed a newer revision is *expected*
+    rather than merely possible. That is the moment someone should go and look.
+
+    Deliberately not a failure. Nothing is wrong with the corpus — the check
+    above proves that — and failing a build because a standards body kept to its
+    own schedule would train people to ignore this line.
+    """
+    if record.get("revision_status") != "committee-draft":
+        return None
+    closed = record.get("public_review_closed")
+    if not closed:
+        return None
+    try:
+        closed_date = date.fromisoformat(closed)
+    except ValueError:
+        return f"public_review_closed is not a date: {closed!r}"
+    if date.today() < closed_date:
+        return None
+    return (
+        f"the pinned revision is a committee draft whose public review closed "
+        f"{closed}; check whether OASIS has published a newer one (CS01 / CSD03) "
+        f"and re-vendor if so"
+    )
+
+
 def update() -> int:
     record = json.loads(PROVENANCE.read_text()) if PROVENANCE.exists() else {}
     zip_name = record.get("source_zip", "kmip-profiles-v3.0-csd02.zip")
@@ -168,6 +199,8 @@ def main(argv: list[str]) -> int:
             print(f"  - {p}", file=sys.stderr)
         return 1
 
+    revisit = revisit_signal(record)
+
     n = record["transcript_count"]
     if prov_ran:
         print(
@@ -180,6 +213,8 @@ def main(argv: list[str]) -> int:
             f"{record['source_zip']} is absent — provenance against the OASIS "
             f"download was NOT verified"
         )
+    if revisit:
+        print(f"CORPUS PROVENANCE REVISIT: {revisit}")
     return 0
 
 

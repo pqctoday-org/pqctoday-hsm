@@ -1,0 +1,1710 @@
+{
+    "AES-CTR": [
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "EncryptInit"
+        }
+    ],
+    "Attributes": [
+        {
+            "details": "§1.21 G-ATTR1 check",
+            "status": "PASS",
+            "test": "CKA_VALUE_Pub"
+        },
+        {
+            "details": "Required for all PQC keys",
+            "status": "PASS",
+            "test": "CKA_PUBLIC_KEY_INFO_Pub"
+        },
+        {
+            "details": "Required to be exposed on private objects",
+            "status": "PASS",
+            "test": "CKA_PUBLIC_KEY_INFO_Priv"
+        },
+        {
+            "details": "Remaining=32",
+            "status": "PASS",
+            "test": "CKA_HSS_KEYS_REMAINING_Gen"
+        },
+        {
+            "details": "Count decreased correctly",
+            "status": "PASS",
+            "test": "CKA_HSS_KEYS_REMAINING_Consume"
+        },
+        {
+            "details": "§1.21 G-ATTR1 check",
+            "status": "PASS",
+            "test": "ML_KEM_512_CKA_VALUE_Pub"
+        },
+        {
+            "details": "SPKI exposed",
+            "status": "PASS",
+            "test": "ML_KEM_512_CKA_PUBLIC_KEY_INFO_Pub"
+        },
+        {
+            "details": "SPKI exposed on private",
+            "status": "PASS",
+            "test": "ML_KEM_512_CKA_PUBLIC_KEY_INFO_Priv"
+        },
+        {
+            "details": "",
+            "status": "PASS",
+            "test": "ML_KEM_512_CKA_ENCAPSULATE"
+        },
+        {
+            "details": "",
+            "status": "PASS",
+            "test": "ML_KEM_512_CKA_DECAPSULATE"
+        },
+        {
+            "details": "§1.21 G-ATTR1 check",
+            "status": "PASS",
+            "test": "ML_KEM_768_CKA_VALUE_Pub"
+        },
+        {
+            "details": "SPKI exposed",
+            "status": "PASS",
+            "test": "ML_KEM_768_CKA_PUBLIC_KEY_INFO_Pub"
+        },
+        {
+            "details": "SPKI exposed on private",
+            "status": "PASS",
+            "test": "ML_KEM_768_CKA_PUBLIC_KEY_INFO_Priv"
+        },
+        {
+            "details": "",
+            "status": "PASS",
+            "test": "ML_KEM_768_CKA_ENCAPSULATE"
+        },
+        {
+            "details": "",
+            "status": "PASS",
+            "test": "ML_KEM_768_CKA_DECAPSULATE"
+        },
+        {
+            "details": "§1.21 G-ATTR1 check",
+            "status": "PASS",
+            "test": "ML_KEM_1024_CKA_VALUE_Pub"
+        },
+        {
+            "details": "SPKI exposed",
+            "status": "PASS",
+            "test": "ML_KEM_1024_CKA_PUBLIC_KEY_INFO_Pub"
+        },
+        {
+            "details": "SPKI exposed on private",
+            "status": "PASS",
+            "test": "ML_KEM_1024_CKA_PUBLIC_KEY_INFO_Priv"
+        },
+        {
+            "details": "",
+            "status": "PASS",
+            "test": "ML_KEM_1024_CKA_ENCAPSULATE"
+        },
+        {
+            "details": "",
+            "status": "PASS",
+            "test": "ML_KEM_1024_CKA_DECAPSULATE"
+        },
+        {
+            "details": "§1.21 G-ATTR1 check",
+            "status": "PASS",
+            "test": "ML_DSA_44_CKA_VALUE_Pub"
+        },
+        {
+            "details": "SPKI exposed",
+            "status": "PASS",
+            "test": "ML_DSA_44_CKA_PUBLIC_KEY_INFO_Pub"
+        },
+        {
+            "details": "SPKI exposed on private",
+            "status": "PASS",
+            "test": "ML_DSA_44_CKA_PUBLIC_KEY_INFO_Priv"
+        },
+        {
+            "details": "",
+            "status": "PASS",
+            "test": "ML_DSA_44_CKA_VERIFY"
+        },
+        {
+            "details": "",
+            "status": "PASS",
+            "test": "ML_DSA_44_CKA_SIGN"
+        },
+        {
+            "details": "§1.21 G-ATTR1 check",
+            "status": "PASS",
+            "test": "ML_DSA_65_CKA_VALUE_Pub"
+        },
+        {
+            "details": "SPKI exposed",
+            "status": "PASS",
+            "test": "ML_DSA_65_CKA_PUBLIC_KEY_INFO_Pub"
+        },
+        {
+            "details": "SPKI exposed on private",
+            "status": "PASS",
+            "test": "ML_DSA_65_CKA_PUBLIC_KEY_INFO_Priv"
+        },
+        {
+            "details": "",
+            "status": "PASS",
+            "test": "ML_DSA_65_CKA_VERIFY"
+        },
+        {
+            "details": "",
+            "status": "PASS",
+            "test": "ML_DSA_65_CKA_SIGN"
+        },
+        {
+            "details": "§1.21 G-ATTR1 check",
+            "status": "PASS",
+            "test": "ML_DSA_87_CKA_VALUE_Pub"
+        },
+        {
+            "details": "SPKI exposed",
+            "status": "PASS",
+            "test": "ML_DSA_87_CKA_PUBLIC_KEY_INFO_Pub"
+        },
+        {
+            "details": "SPKI exposed on private",
+            "status": "PASS",
+            "test": "ML_DSA_87_CKA_PUBLIC_KEY_INFO_Priv"
+        },
+        {
+            "details": "",
+            "status": "PASS",
+            "test": "ML_DSA_87_CKA_VERIFY"
+        },
+        {
+            "details": "",
+            "status": "PASS",
+            "test": "ML_DSA_87_CKA_SIGN"
+        }
+    ],
+    "AuthWrap": [
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_WrapKeyAuthenticated"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_UnwrapKeyAuthenticated"
+        },
+        {
+            "details": "Unwrapped keys perfectly match",
+            "status": "PASS",
+            "test": "Value_Match"
+        },
+        {
+            "details": "Unwrapped GCM payload perfectly matches NIST Test Case 4 PT",
+            "status": "PASS",
+            "test": "NIST_SP800_38D_KAT"
+        }
+    ],
+    "ChaCha20": [
+        {
+            "details": "Created CKK_CHACHA20 Secret Key",
+            "status": "PASS",
+            "test": "C_CreateObject"
+        },
+        {
+            "details": "Generated properly with 16 byte MAC tag",
+            "status": "PASS",
+            "test": "C_Encrypt"
+        }
+    ],
+    "CkaIdRetrieval": [
+        {
+            "details": "ML-DSA-65 keypair generated with explicit CKA_ID + CKA_PRIVATE=false on pubkey",
+            "status": "PASS",
+            "test": "Setup_KeyGen"
+        },
+        {
+            "details": "C_FindObjects(CKA_CLASS=PUBLIC,CKA_ID) returned 1 object(s)",
+            "status": "PASS",
+            "test": "FindByCkaId_Pubkey_LoggedIn"
+        },
+        {
+            "details": "C_FindObjects(CKA_CLASS=PRIVATE,CKA_ID) returned 1 object(s)",
+            "status": "PASS",
+            "test": "FindByCkaId_Privkey_LoggedIn"
+        },
+        {
+            "details": "C_FindObjects(public RO,CKA_CLASS=PUBLIC,CKA_ID) returned 1 object(s); CKA_PRIVATE on hit = 0",
+            "status": "PASS",
+            "test": "FindByCkaId_Pubkey_NoLogin"
+        },
+        {
+            "details": "PKCS#11 v3.2 §4.5: pubkey CKA_PRIVATE default expected FALSE; got 0",
+            "status": "PASS",
+            "test": "Default_CkaPrivate_Pubkey"
+        },
+        {
+            "details": "Default-CKA_PRIVATE pubkey findable from no-login session: count=1",
+            "status": "PASS",
+            "test": "Default_CkaPrivate_Pubkey_NoLoginFind"
+        }
+    ],
+    "Classical": [
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "Generate_RSA_2048"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_Sign_RSA_SHA256"
+        }
+    ],
+    "DSA": [
+        {
+            "details": "Gen ML-DSA-44",
+            "status": "PASS",
+            "test": "Generate_ML_DSA_44"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_Sign_44_Pure"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_Verify_44_Pure"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_Sign_44_PreHash_SHA512"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_Verify_44_PreHash_SHA512"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_Sign_44_PreHash_SHA3_512"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_Verify_44_PreHash_SHA3_512"
+        },
+        {
+            "details": "Gen ML-DSA-65",
+            "status": "PASS",
+            "test": "Generate_ML_DSA_65"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_Sign_65_Pure"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_Verify_65_Pure"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_Sign_65_PreHash_SHA512"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_Verify_65_PreHash_SHA512"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_Sign_65_PreHash_SHA3_512"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_Verify_65_PreHash_SHA3_512"
+        },
+        {
+            "details": "Gen ML-DSA-87",
+            "status": "PASS",
+            "test": "Generate_ML_DSA_87"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_Sign_87_Pure"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_Verify_87_Pure"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_Sign_87_PreHash_SHA512"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_Verify_87_PreHash_SHA512"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_Sign_87_PreHash_SHA3_512"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_Verify_87_PreHash_SHA3_512"
+        }
+    ],
+    "DSA-CTX": [
+        {
+            "details": "ML-DSA-65 keypair generated",
+            "status": "PASS",
+            "test": "Setup_KeyGen_MLDSA65"
+        },
+        {
+            "details": "siglen=3309",
+            "status": "PASS",
+            "test": "Sign_ctxA"
+        },
+        {
+            "details": "expected CKR_OK got RV=0",
+            "status": "PASS",
+            "test": "Verify_ctxA_matching"
+        },
+        {
+            "details": "binding works; RV=192",
+            "status": "PASS",
+            "test": "Verify_ctxB_should_fail"
+        },
+        {
+            "details": "binding enforced; RV=192",
+            "status": "PASS",
+            "test": "Verify_noctx_should_fail"
+        },
+        {
+            "details": "deterministic mode produces identical signatures (FIPS 204)",
+            "status": "PASS",
+            "test": "Deterministic_byte_equal"
+        },
+        {
+            "details": "hedged mode produces distinct signatures (probabilistic)",
+            "status": "PASS",
+            "test": "Hedge_non_deterministic"
+        }
+    ],
+    "Discovery": [
+        {
+            "details": "PQC KEM support advertised",
+            "status": "PASS",
+            "test": "CKM_ML_KEM"
+        },
+        {
+            "details": "PQC DSA support advertised",
+            "status": "PASS",
+            "test": "CKM_ML_DSA"
+        },
+        {
+            "details": "PQC SLH-DSA support advertised",
+            "status": "PASS",
+            "test": "CKM_SLH_DSA"
+        },
+        {
+            "details": "PQC XMSS support advertised",
+            "status": "PASS",
+            "test": "CKM_XMSS"
+        },
+        {
+            "details": "AES CTR support (v3.2/5G) advertised",
+            "status": "PASS",
+            "test": "CKM_AES_CTR"
+        },
+        {
+            "details": "ChaCha20 support (RFC 7539) advertised",
+            "status": "PASS",
+            "test": "CKM_CHACHA20_POLY1305"
+        },
+        {
+            "details": "HKDF support (v3.0/5G) advertised",
+            "status": "PASS",
+            "test": "CKM_HKDF_DERIVE"
+        },
+        {
+            "details": "RIPEMD160 support advertised",
+            "status": "PASS",
+            "test": "CKM_RIPEMD160"
+        }
+    ],
+    "ECDH": [
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "Generate_X25519"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "Derive_X25519"
+        },
+        {
+            "details": "RV=99",
+            "status": "PASS",
+            "test": "Derive_X25519_Cofactor_Rejected"
+        }
+    ],
+    "ECDSA": [
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "Generate_P256"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "Sign_P256"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "Generate_P521"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "Sign_P521"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "Generate_secp256k1"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "Sign_secp256k1"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "Generate_P256_SHA3_256"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "Sign_P256_SHA3_256"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "Generate_P521_SHA3_512"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "Sign_P521_SHA3_512"
+        }
+    ],
+    "EdDSA": [
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "Generate_Ed25519"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "Sign_Ed25519"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "Generate_Ed448"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "Sign_Ed448"
+        }
+    ],
+    "FIPS": [
+        {
+            "details": "RV=274",
+            "status": "PASS",
+            "test": "ML-KEM_Truncated_CT"
+        },
+        {
+            "details": "Yielded deterministic random secret per FIPS 203",
+            "status": "PASS",
+            "test": "ML-KEM_Implicit_Rejection"
+        },
+        {
+            "details": "ctx>255 must be rejected, RV=7",
+            "status": "PASS",
+            "test": "ML-DSA_Oversized_Ctx"
+        }
+    ],
+    "G-DA-X": [
+        {
+            "details": "RIPEMD-160(abc) matches KAT, distinct from SHA-1",
+            "status": "PASS",
+            "test": "RIPEMD160_digest_KAT"
+        },
+        {
+            "details": "HMAC-RIPEMD-160 sign/verify round-trip OK (20-byte MAC)",
+            "status": "PASS",
+            "test": "RIPEMD160_HMAC_roundtrip"
+        }
+    ],
+    "G1Security": [
+        {
+            "details": "C++C-1 expect CKR_MECHANISM_PARAM_INVALID, RV=113",
+            "status": "PASS",
+            "test": "GCM_zeroIV_EncryptInit_rejected"
+        },
+        {
+            "details": "C++C-1 expect CKR_MECHANISM_PARAM_INVALID, RV=113",
+            "status": "PASS",
+            "test": "GCM_zeroIV_DecryptInit_rejected"
+        },
+        {
+            "details": "valid 12-byte IV must still work, RV=0",
+            "status": "PASS",
+            "test": "GCM_validIV_EncryptInit_accepted"
+        },
+        {
+            "details": "C++C-2 expect CKR_MECHANISM_PARAM_INVALID for 8-byte nonce, RV=113",
+            "status": "PASS",
+            "test": "ChaCha_wrongNonce_rejected"
+        },
+        {
+            "details": "C++C-1/2 expect CKR_MECHANISM_PARAM_INVALID for 0-byte nonce, RV=113",
+            "status": "PASS",
+            "test": "ChaCha_zeroNonce_rejected"
+        },
+        {
+            "details": "C++C-3 64KiB message sign, RV=0",
+            "status": "PASS",
+            "test": "XMSS_largeMsg_sign"
+        },
+        {
+            "details": "V-13 keygen→sign→verify, verify RV=0",
+            "status": "PASS",
+            "test": "HSS_private_roundtrip"
+        }
+    ],
+    "G2ChaCha20": [
+        {
+            "details": "CKA_KEY_TYPE=0x51 want CKK_CHACHA20(0x33)",
+            "status": "PASS",
+            "test": "Keygen_KeyType"
+        },
+        {
+            "details": "CKA_KEY_GEN_MECHANISM=0x4645",
+            "status": "PASS",
+            "test": "Keygen_GenMech"
+        },
+        {
+            "details": "ctLen=38",
+            "status": "PASS",
+            "test": "Encrypt"
+        },
+        {
+            "details": "decrypt matched plaintext",
+            "status": "PASS",
+            "test": "RoundTrip"
+        }
+    ],
+    "G2Derive": [
+        {
+            "details": "C_DeriveKey RV=5 (must not be CKR_MECHANISM_INVALID)",
+            "status": "PASS",
+            "test": "X25519_Reachable"
+        },
+        {
+            "details": "C_DeriveKey RV=7 (must not be CKR_MECHANISM_INVALID)",
+            "status": "PASS",
+            "test": "BIP32_Reachable"
+        }
+    ],
+    "G2MechTable": [
+        {
+            "details": "min=1312 max=2592 expected 1312/2592",
+            "status": "PASS",
+            "test": "Size_ML_DSA_KEY_PAIR_GEN"
+        },
+        {
+            "details": "min=1312 max=2592 expected 1312/2592",
+            "status": "PASS",
+            "test": "Size_ML_DSA"
+        },
+        {
+            "details": "min=32 max=64 expected 32/64",
+            "status": "PASS",
+            "test": "Size_SLH_DSA_KEY_PAIR_GEN"
+        },
+        {
+            "details": "min=32 max=64 expected 32/64",
+            "status": "PASS",
+            "test": "Size_SLH_DSA"
+        },
+        {
+            "details": "RIPEMD-160 digest dispatched (legacy provider)",
+            "status": "PASS",
+            "test": "Advertised_CKM_RIPEMD160"
+        },
+        {
+            "details": "HMAC-RIPEMD-160 dispatched (legacy provider)",
+            "status": "PASS",
+            "test": "Advertised_CKM_RIPEMD160_HMAC"
+        },
+        {
+            "details": "correctly absent from C_GetMechanismList",
+            "status": "PASS",
+            "test": "NotAdvertised_CKM_KECCAK_256"
+        },
+        {
+            "details": "bare ChaCha20 stream dispatched",
+            "status": "PASS",
+            "test": "Advertised_CKM_CHACHA20"
+        },
+        {
+            "details": "X25519 derive",
+            "status": "PASS",
+            "test": "Advertised_CKM_X25519"
+        },
+        {
+            "details": "X448 derive",
+            "status": "PASS",
+            "test": "Advertised_CKM_X448"
+        },
+        {
+            "details": "BIP32 derive",
+            "status": "PASS",
+            "test": "Advertised_CKM_BIP32_MASTER_DERIVE"
+        },
+        {
+            "details": "raw RSA-PSS",
+            "status": "PASS",
+            "test": "Advertised_CKM_RSA_PKCS_PSS"
+        },
+        {
+            "details": "flags=0x774 want 0x6",
+            "status": "PASS",
+            "test": "Flag_AES_GCM_MESSAGE"
+        },
+        {
+            "details": "flags=0x10264 want 0x24",
+            "status": "PASS",
+            "test": "Flag_ML_DSA_MESSAGE"
+        },
+        {
+            "details": "flags=0x10264 want 0x24",
+            "status": "PASS",
+            "test": "Flag_SLH_DSA_MESSAGE"
+        },
+        {
+            "details": "127 advertised, 0 rejected by C_GetMechanismInfo",
+            "status": "PASS",
+            "test": "AdvertiseSubsetDispatch"
+        }
+    ],
+    "G3Keygen": [
+        {
+            "details": "expect CKR_TEMPLATE_INCONSISTENT, RV=209",
+            "status": "PASS",
+            "test": "V4_wrongKeyType_ML_KEM_vs_XMSSMT"
+        },
+        {
+            "details": "expect CKR_TEMPLATE_INCONSISTENT, RV=209",
+            "status": "PASS",
+            "test": "V4_wrongKeyType_EC_vs_ML_KEM"
+        },
+        {
+            "details": "expect CKR_TEMPLATE_INCONSISTENT, RV=209",
+            "status": "PASS",
+            "test": "V4_wrongKeyType_HSS_vs_XMSS"
+        },
+        {
+            "details": "expect CKR_TEMPLATE_INCONSISTENT, RV=209",
+            "status": "PASS",
+            "test": "V4_wrongKeyType_XMSS_vs_HSS"
+        },
+        {
+            "details": "expect CKR_TEMPLATE_INCONSISTENT, RV=209",
+            "status": "PASS",
+            "test": "V4_wrongKeyType_XMSSMT_vs_XMSS"
+        },
+        {
+            "details": "expect CKR_TEMPLATE_INCONSISTENT, RV=209",
+            "status": "PASS",
+            "test": "V4_wrongKeyType_ChaCha20_vs_AES"
+        },
+        {
+            "details": "expect CKR_TEMPLATE_INCOMPLETE, RV=208",
+            "status": "PASS",
+            "test": "V3_missingParamSet_ML_DSA"
+        },
+        {
+            "details": "expect CKR_TEMPLATE_INCOMPLETE, RV=208",
+            "status": "PASS",
+            "test": "V3_missingParamSet_ML_KEM"
+        },
+        {
+            "details": "expect CKR_TEMPLATE_INCOMPLETE, RV=208",
+            "status": "PASS",
+            "test": "V3_missingParamSet_SLH_DSA"
+        },
+        {
+            "details": "XMSSMT key generated",
+            "status": "PASS",
+            "test": "V8_XMSSMT_keygen"
+        },
+        {
+            "details": "Verify RV=0",
+            "status": "PASS",
+            "test": "V9_XMSSMT_sign_verify_roundtrip"
+        },
+        {
+            "details": "expect 2^5=32 for default LMS_SHA256_N32_H5, got 32 (RV=0)",
+            "status": "PASS",
+            "test": "V21_HSS_keys_remaining"
+        },
+        {
+            "details": "round-trip byte-exact; recoveredLen=32 expected=32 (RV=0)",
+            "status": "PASS",
+            "test": "V5V6_AES_CBC_wrap_unwrap"
+        },
+        {
+            "details": "round-trip byte-exact; recoveredLen=20 expected=20 (RV=0)",
+            "status": "PASS",
+            "test": "V5V6_AES_CBC_PAD_wrap_unwrap"
+        }
+    ],
+    "G4Retcodes": [
+        {
+            "details": "expect CKR_CRYPTOKI_NOT_INITIALIZED, RV=400",
+            "status": "PASS",
+            "test": "V19_GSVF_pre_init"
+        },
+        {
+            "details": "expect CKR_CRYPTOKI_NOT_INITIALIZED, RV=400",
+            "status": "PASS",
+            "test": "GA_AsyncComplete_pre_init"
+        },
+        {
+            "details": "expect CKR_CRYPTOKI_NOT_INITIALIZED, RV=400",
+            "status": "PASS",
+            "test": "GA_AsyncGetID_pre_init"
+        },
+        {
+            "details": "expect CKR_CRYPTOKI_NOT_INITIALIZED, RV=400",
+            "status": "PASS",
+            "test": "GA_AsyncJoin_pre_init"
+        },
+        {
+            "details": "expect CKR_ARGUMENTS_BAD(0x7), RV=7",
+            "status": "PASS",
+            "test": "V20_Initialize_pReserved_nonNULL"
+        },
+        {
+            "details": "expect CKR_WRAPPED_KEY_INVALID(0x110), RV=272",
+            "status": "PASS",
+            "test": "V7_AESKW_tampered_unwrap"
+        },
+        {
+            "details": "flags==0 expect CKR_OK no-op, RV=0",
+            "status": "PASS",
+            "test": "V16_SessionCancel_flags0_noop"
+        },
+        {
+            "details": "unmatched flag expect CKR_OK ignore, RV=0",
+            "status": "PASS",
+            "test": "V16_SessionCancel_unmatched_ignored"
+        },
+        {
+            "details": "sign op survives unmatched cancel, RV=0",
+            "status": "PASS",
+            "test": "V16_SessionCancel_unmatched_keeps_op"
+        },
+        {
+            "details": "cancel active message-sign expect CKR_OK, RV=0",
+            "status": "PASS",
+            "test": "V16_SessionCancel_CKF_MESSAGE_SIGN"
+        },
+        {
+            "details": "expect CKR_OPERATION_ACTIVE(0x90), RV=144",
+            "status": "PASS",
+            "test": "V17_Digest_after_DigestUpdate"
+        },
+        {
+            "details": "C_DigestFinal after rejected one-shot, RV=0",
+            "status": "PASS",
+            "test": "V17_Digest_op_survives"
+        },
+        {
+            "details": "expect CKR_OPERATION_ACTIVE(0x90), RV=144",
+            "status": "PASS",
+            "test": "V17_Sign_after_SignUpdate"
+        },
+        {
+            "details": "C_SignFinal after rejected one-shot, RV=0",
+            "status": "PASS",
+            "test": "V17_Sign_op_survives"
+        },
+        {
+            "details": "expect CKR_BUFFER_TOO_SMALL + outLen==48, got RV=336 outLen=48",
+            "status": "PASS",
+            "test": "V18_WrapAuth_buffer_too_small_sets_len"
+        },
+        {
+            "details": "expect CKR_SESSION_HANDLE_INVALID, RV=179",
+            "status": "PASS",
+            "test": "V19_GSVF_bad_handle"
+        },
+        {
+            "details": "expect CKR_OK + flags=0, RV=0 flags=0",
+            "status": "PASS",
+            "test": "V19_GSVF_valid"
+        },
+        {
+            "details": "expect CKR_ARGUMENTS_BAD, RV=7",
+            "status": "PASS",
+            "test": "V19_GSVF_bad_type"
+        },
+        {
+            "details": "expect CKR_KEY_HANDLE_INVALID(0x60), RV=96",
+            "status": "PASS",
+            "test": "GAP24_Encap_bad_pubkey"
+        },
+        {
+            "details": "expect CKR_KEY_HANDLE_INVALID(0x60), RV=96",
+            "status": "PASS",
+            "test": "GAP65_DeriveKey_bad_base"
+        }
+    ],
+    "G5Attrs": [
+        {
+            "details": "CKA_UNIQUE_ID on a PRIVATE/SENSITIVE key must read in clear (36-byte UUID), expect RV=CKR_OK; got RV=0 len=36",
+            "status": "PASS",
+            "test": "UniqueId_readable_on_private_key"
+        },
+        {
+            "details": "CKA_UNIQUE_ID on a SENSITIVE secret key must read in clear (36-byte UUID), expect RV=CKR_OK; got RV=0 len=36",
+            "status": "PASS",
+            "test": "UniqueId_readable_on_sensitive_secret"
+        },
+        {
+            "details": "src and copy must each have a distinct CKA_UNIQUE_ID (src len=36 copy len=36 distinct=yes)",
+            "status": "PASS",
+            "test": "V14_CopyObject_freshUniqueId"
+        },
+        {
+            "details": "caller-supplied CKA_UNIQUE_ID must be rejected, expect CKR_ATTRIBUTE_READ_ONLY(0x10) RV=16",
+            "status": "PASS",
+            "test": "V15_CreateObject_uniqueId_readonly"
+        },
+        {
+            "details": "forged CKA_UNIQUE_ID rejected with CKR_ATTRIBUTE_READ_ONLY",
+            "status": "PASS",
+            "test": "V15_DeriveKey_uniqueId_tokenAssigned"
+        },
+        {
+            "details": "same seed must yield identical public key (lenA=1312 lenB=1312)",
+            "status": "PASS",
+            "test": "CKA_SEED_deterministic_ML_DSA_44"
+        },
+        {
+            "details": "seed on a sensitive key must not leak, expect CKR_ATTRIBUTE_SENSITIVE(0x11) RV=17",
+            "status": "PASS",
+            "test": "CKA_SEED_sensitive_ML_DSA_44"
+        },
+        {
+            "details": "wrong seed length must be rejected, expect CKR_ATTRIBUTE_VALUE_INVALID(0x13) RV=19",
+            "status": "PASS",
+            "test": "CKA_SEED_wronglen_ML_DSA_44"
+        },
+        {
+            "details": "same seed must yield identical public key (lenA=1184 lenB=1184)",
+            "status": "PASS",
+            "test": "CKA_SEED_deterministic_ML_KEM_768"
+        },
+        {
+            "details": "seed on a sensitive key must not leak, expect CKR_ATTRIBUTE_SENSITIVE(0x11) RV=17",
+            "status": "PASS",
+            "test": "CKA_SEED_sensitive_ML_KEM_768"
+        },
+        {
+            "details": "wrong seed length must be rejected, expect CKR_ATTRIBUTE_VALUE_INVALID(0x13) RV=19",
+            "status": "PASS",
+            "test": "CKA_SEED_wronglen_ML_KEM_768"
+        },
+        {
+            "details": "same seed must yield identical public key (lenA=32 lenB=32)",
+            "status": "PASS",
+            "test": "CKA_SEED_deterministic_SLH_DSA_128s"
+        },
+        {
+            "details": "seed on a sensitive key must not leak, expect CKR_ATTRIBUTE_SENSITIVE(0x11) RV=17",
+            "status": "PASS",
+            "test": "CKA_SEED_sensitive_SLH_DSA_128s"
+        },
+        {
+            "details": "wrong seed length must be rejected, expect CKR_ATTRIBUTE_VALUE_INVALID(0x13) RV=19",
+            "status": "PASS",
+            "test": "CKA_SEED_wronglen_SLH_DSA_128s"
+        }
+    ],
+    "G7Sha3Rsa": [
+        {
+            "details": "SHA3-384 RSA PKCS#1 v1.5",
+            "status": "PASS",
+            "test": "Advertised_CKM_SHA3_384_RSA_PKCS"
+        },
+        {
+            "details": "SHA3-384 RSA-PSS",
+            "status": "PASS",
+            "test": "Advertised_CKM_SHA3_384_RSA_PKCS_PSS"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "Generate_RSA_2048"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_SignInit_PKCS"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_Sign_PKCS"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_Verify_PKCS"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_SignInit_PSS"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_Sign_PSS"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_Verify_PSS"
+        },
+        {
+            "details": "expected ARGUMENTS_BAD/MECHANISM_PARAM_INVALID, RV=7",
+            "status": "PASS",
+            "test": "C_SignInit_PSS_wrong_hashAlg"
+        }
+    ],
+    "G8Dual": [
+        {
+            "details": "DigestInit+EncryptInit must coexist (§5.13) RV=0",
+            "status": "PASS",
+            "test": "DigestEncrypt_dual_init"
+        },
+        {
+            "details": "dual ciphertext == standalone encrypt, RV=0",
+            "status": "PASS",
+            "test": "DigestEncrypt_ciphertext_matches"
+        },
+        {
+            "details": "dual digest == standalone SHA-256, RV=0",
+            "status": "PASS",
+            "test": "DigestEncrypt_digest_matches"
+        },
+        {
+            "details": "DecryptInit+DigestInit must coexist (§5.13) RV=0",
+            "status": "PASS",
+            "test": "DecryptDigest_dual_init"
+        },
+        {
+            "details": "digest of decrypted plaintext == original digest, RV=0",
+            "status": "PASS",
+            "test": "DecryptDigest_digest_roundtrip"
+        },
+        {
+            "details": "SignInit+EncryptInit must coexist (§5.13) RV=0",
+            "status": "PASS",
+            "test": "SignEncrypt_dual_init"
+        },
+        {
+            "details": "dual ciphertext == standalone encrypt, RV=0",
+            "status": "PASS",
+            "test": "SignEncrypt_ciphertext_matches"
+        },
+        {
+            "details": "ECDSA signature over streamed data verifies RV=0",
+            "status": "PASS",
+            "test": "SignEncrypt_signature_verifies"
+        },
+        {
+            "details": "DecryptInit+VerifyInit must coexist (§5.13) RV=0",
+            "status": "PASS",
+            "test": "DecryptVerify_dual_init"
+        },
+        {
+            "details": "verify of decrypted plaintext succeeds RV=0",
+            "status": "PASS",
+            "test": "DecryptVerify_roundtrip"
+        },
+        {
+            "details": "expect CKR_OPERATION_NOT_INITIALIZED(0x91) RV=145",
+            "status": "PASS",
+            "test": "DigestEncrypt_missing_digest_rejected"
+        },
+        {
+            "details": "freed digest half: C_DigestUpdate must return 0x91, not crash, RV=145",
+            "status": "PASS",
+            "test": "DigestFinal_then_DigestUpdate_safe"
+        },
+        {
+            "details": "freed digest half: one-shot C_Digest must return 0x91, not crash, RV=145",
+            "status": "PASS",
+            "test": "DigestFinal_then_Digest_safe"
+        },
+        {
+            "details": "surviving cipher half finalises to correct ciphertext after digest ended, RV=0",
+            "status": "PASS",
+            "test": "DigestFinal_then_EncryptFinal_correct"
+        },
+        {
+            "details": "reverse-order finalise: cipher then digest both correct, RV=0",
+            "status": "PASS",
+            "test": "EncryptFinal_then_DigestFinal_correct"
+        }
+    ],
+    "GAsync": [
+        {
+            "details": "CKF_ASYNC_SESSION_SUPPORTED must not be set, flags=0x1069",
+            "status": "PASS",
+            "test": "TokenInfo_no_async_support"
+        },
+        {
+            "details": "expect CKR_SESSION_ASYNC_NOT_SUPPORTED(0x205), RV=517",
+            "status": "PASS",
+            "test": "OpenSession_async_rejected"
+        },
+        {
+            "details": "expect CKR_OK, RV=0",
+            "status": "PASS",
+            "test": "OpenSession_sync_ok"
+        },
+        {
+            "details": "expect CKR_FUNCTION_NOT_SUPPORTED(0x54), RV=84",
+            "status": "PASS",
+            "test": "C_AsyncComplete_not_supported"
+        },
+        {
+            "details": "expect CKR_FUNCTION_NOT_SUPPORTED(0x54), RV=84",
+            "status": "PASS",
+            "test": "C_AsyncGetID_not_supported"
+        },
+        {
+            "details": "expect CKR_FUNCTION_NOT_SUPPORTED(0x54), RV=84",
+            "status": "PASS",
+            "test": "C_AsyncJoin_not_supported"
+        }
+    ],
+    "GIsolation": [
+        {
+            "details": "second token initialized on slot 1",
+            "status": "PASS",
+            "test": "InitTokenB"
+        },
+        {
+            "details": "token object handle minted on token A",
+            "status": "PASS",
+            "test": "CreateTokenObjectA"
+        },
+        {
+            "details": "token object must be visible to all sessions on token A, RV=0",
+            "status": "PASS",
+            "test": "SameToken_CrossSession_resolves"
+        },
+        {
+            "details": "§2.4 expect CKR_OBJECT_HANDLE_INVALID, RV=130",
+            "status": "PASS",
+            "test": "CrossToken_GetAttributeValue_rejected"
+        },
+        {
+            "details": "§2.4 expect CKR_OBJECT_HANDLE_INVALID, RV=130",
+            "status": "PASS",
+            "test": "CrossToken_SetAttributeValue_rejected"
+        },
+        {
+            "details": "§2.4 key-use must be rejected (engine returns OBJECT_HANDLE_INVALID), RV=130",
+            "status": "PASS",
+            "test": "CrossToken_AsKeyHandle_rejected"
+        },
+        {
+            "details": "§2.4 expect CKR_OBJECT_HANDLE_INVALID, RV=130",
+            "status": "PASS",
+            "test": "CrossToken_DestroyObject_rejected"
+        },
+        {
+            "details": "A's object must survive a rejected cross-token destroy, RV=0",
+            "status": "PASS",
+            "test": "CrossToken_Destroy_didNotAffectA"
+        }
+    ],
+    "HybridKEM": [
+        {
+            "details": "",
+            "status": "PASS",
+            "test": "Generate_X25519"
+        },
+        {
+            "details": "",
+            "status": "PASS",
+            "test": "Generate_ML_KEM_768"
+        },
+        {
+            "details": "ephemeral pubkey len=34",
+            "status": "PASS",
+            "test": "Encapsulate_X25519_half"
+        },
+        {
+            "details": "ct len=1088",
+            "status": "PASS",
+            "test": "Encapsulate_MLKEM_half"
+        },
+        {
+            "details": "",
+            "status": "PASS",
+            "test": "Combine_send"
+        },
+        {
+            "details": "",
+            "status": "PASS",
+            "test": "Decapsulate_X25519_half"
+        },
+        {
+            "details": "",
+            "status": "PASS",
+            "test": "Decapsulate_MLKEM_half"
+        },
+        {
+            "details": "",
+            "status": "PASS",
+            "test": "Combine_recv"
+        },
+        {
+            "details": "combined secret len=64 (32 ss_mlkem || 32 ss_x25519)",
+            "status": "PASS",
+            "test": "X25519MLKEM768_round_trip"
+        }
+    ],
+    "Init": [
+        {
+            "details": "Initialized token and session",
+            "status": "PASS",
+            "test": "TokenSetup"
+        }
+    ],
+    "KCV": [
+        {
+            "details": "3 bytes: F6D5BE",
+            "status": "PASS",
+            "test": "AES_Generate_KCV_Present"
+        },
+        {
+            "details": "HSM=F6D5BE == oracle=F6D5BE",
+            "status": "PASS",
+            "test": "AES_Generate_KCV_Equals_OracleEcbZeroBlock"
+        },
+        {
+            "details": "3 bytes: EE0187",
+            "status": "PASS",
+            "test": "AES_Unwrap_KCV_Present"
+        },
+        {
+            "details": "original=EE0187 unwrapped=EE0187",
+            "status": "PASS",
+            "test": "AES_Unwrap_KCV_Equals_Original"
+        },
+        {
+            "details": "matches AES-ECB(zero block)[0:3] oracle",
+            "status": "PASS",
+            "test": "AES_Unwrap_KCV_Equals_OracleEcbZeroBlock"
+        },
+        {
+            "details": "3 bytes: BEEF61",
+            "status": "PASS",
+            "test": "HKDF_Derive_KCV_Present"
+        },
+        {
+            "details": "HSM=BEEF61 == oracle=BEEF61",
+            "status": "PASS",
+            "test": "HKDF_Derive_KCV_Equals_OracleSha1"
+        },
+        {
+            "details": "3 bytes: 89AE12",
+            "status": "PASS",
+            "test": "PBKD2_Derive_KCV_Present"
+        },
+        {
+            "details": "HSM=89AE12 == oracle=89AE12",
+            "status": "PASS",
+            "test": "PBKD2_Derive_KCV_Equals_OracleSha1"
+        },
+        {
+            "details": "3 bytes: C2450B",
+            "status": "PASS",
+            "test": "SP800_108_Counter_Derive_KCV_Present"
+        },
+        {
+            "details": "HSM=C2450B == oracle=C2450B",
+            "status": "PASS",
+            "test": "SP800_108_Counter_Derive_KCV_Equals_OracleSha1"
+        },
+        {
+            "details": "3 bytes: 4A4E69",
+            "status": "PASS",
+            "test": "SP800_108_Feedback_Derive_KCV_Present"
+        },
+        {
+            "details": "HSM=4A4E69 == oracle=4A4E69",
+            "status": "PASS",
+            "test": "SP800_108_Feedback_Derive_KCV_Equals_OracleSha1"
+        }
+    ],
+    "KDF": [
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "CKM_PKCS5_PBKD2"
+        },
+        {
+            "details": "HMAC-SHA256 PRF, RV=0",
+            "status": "PASS",
+            "test": "CKM_SP800_108_COUNTER_KDF"
+        },
+        {
+            "details": "bare CKM_SHA256 PRF correctly rejected, RV=113",
+            "status": "PASS",
+            "test": "SP800_108_BareHash_PRF_Rejected"
+        },
+        {
+            "details": "AES-CMAC PRF, RV=0",
+            "status": "PASS",
+            "test": "CKM_SP800_108_COUNTER_KDF_CMAC"
+        },
+        {
+            "details": "AES-CMAC PRF, RV=0",
+            "status": "PASS",
+            "test": "CKM_SP800_108_FEEDBACK_KDF"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "CKM_HKDF_DERIVE"
+        }
+    ],
+    "KEM": [
+        {
+            "details": "Gen ML-KEM-512",
+            "status": "PASS",
+            "test": "Generate_ML_KEM_512"
+        },
+        {
+            "details": "CT len=768",
+            "status": "PASS",
+            "test": "C_EncapsulateKey_512"
+        },
+        {
+            "details": "SS matched",
+            "status": "PASS",
+            "test": "C_DecapsulateKey_512"
+        },
+        {
+            "details": "Gen ML-KEM-768",
+            "status": "PASS",
+            "test": "Generate_ML_KEM_768"
+        },
+        {
+            "details": "CT len=1088",
+            "status": "PASS",
+            "test": "C_EncapsulateKey_768"
+        },
+        {
+            "details": "SS matched",
+            "status": "PASS",
+            "test": "C_DecapsulateKey_768"
+        },
+        {
+            "details": "Gen ML-KEM-1024",
+            "status": "PASS",
+            "test": "Generate_ML_KEM_1024"
+        },
+        {
+            "details": "CT len=1568",
+            "status": "PASS",
+            "test": "C_EncapsulateKey_1024"
+        },
+        {
+            "details": "SS matched",
+            "status": "PASS",
+            "test": "C_DecapsulateKey_1024"
+        }
+    ],
+    "MsgCrypt": [
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_MessageEncryptInit"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_EncryptMessageBegin_IV12"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_EncryptMessageBegin_IV16"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_EncryptMessageBegin_IV8"
+        }
+    ],
+    "MsgSign": [
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_MessageSignInit"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_SignMessageBegin"
+        },
+        {
+            "details": "RV=0 SigLen=128",
+            "status": "PASS",
+            "test": "C_SignMessageNext"
+        },
+        {
+            "details": "expected CKR_MECHANISM_PARAM_INVALID, got RV=113",
+            "status": "PASS",
+            "test": "C_MessageSignInit_RSA_RejectsSignCtxParam"
+        }
+    ],
+    "MultiPart": [
+        {
+            "details": "ML-DSA-65 key pair generated",
+            "status": "PASS",
+            "test": "Setup_KeyGen"
+        },
+        {
+            "details": "PKCS#11 v3.2 §5.2 — RV=0",
+            "status": "PASS",
+            "test": "C_SignInit"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_SignUpdate_chunk1"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_SignUpdate_chunk2"
+        },
+        {
+            "details": "SigLen=3309 RV=0",
+            "status": "PASS",
+            "test": "C_SignFinal"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_VerifyInit"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_VerifyUpdate_chunk1"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_VerifyUpdate_chunk2"
+        },
+        {
+            "details": "PKCS#11 v3.2 §5.2 round-trip — RV=0",
+            "status": "PASS",
+            "test": "C_VerifyFinal"
+        },
+        {
+            "details": "Multi-part sig matches one-shot verify — RV=0",
+            "status": "PASS",
+            "test": "C_Verify_oneshot_xcheck"
+        }
+    ],
+    "MultiPart_ECDSA": [
+        {
+            "details": "P-256 key pair generated",
+            "status": "PASS",
+            "test": "Setup_KeyGen"
+        },
+        {
+            "details": "CKM_ECDSA_SHA256 — RV=0",
+            "status": "PASS",
+            "test": "C_SignInit"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_SignUpdate_chunk1"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_SignUpdate_chunk2"
+        },
+        {
+            "details": "SigLen=64 RV=0",
+            "status": "PASS",
+            "test": "C_SignFinal"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_VerifyInit"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_VerifyUpdate_chunk1"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_VerifyUpdate_chunk2"
+        },
+        {
+            "details": "PKCS#11 v3.2 §5.2 P-256 round-trip — RV=0",
+            "status": "PASS",
+            "test": "C_VerifyFinal"
+        },
+        {
+            "details": "Multi-part sig matches one-shot verify — RV=0",
+            "status": "PASS",
+            "test": "C_Verify_oneshot_xcheck"
+        }
+    ],
+    "MultiPart_EdDSA": [
+        {
+            "details": "Ed25519 key pair generated",
+            "status": "PASS",
+            "test": "Setup_KeyGen"
+        },
+        {
+            "details": "CKM_EDDSA — RV=0",
+            "status": "PASS",
+            "test": "C_SignInit"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_SignUpdate_chunk1"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_SignUpdate_chunk2"
+        },
+        {
+            "details": "SigLen=64 RV=0",
+            "status": "PASS",
+            "test": "C_SignFinal"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_VerifyInit"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_VerifyUpdate_chunk1"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_VerifyUpdate_chunk2"
+        },
+        {
+            "details": "PKCS#11 v3.2 §5.2 Ed25519 round-trip — RV=0",
+            "status": "PASS",
+            "test": "C_VerifyFinal"
+        },
+        {
+            "details": "Multi-part sig matches one-shot verify — RV=0",
+            "status": "PASS",
+            "test": "C_Verify_oneshot_xcheck"
+        }
+    ],
+    "Negative": [
+        {
+            "details": "Expected CKR_KEY_FUNCTION_NOT_PERMITTED, got 99",
+            "status": "PASS",
+            "test": "Sign_With_KEM_Key"
+        },
+        {
+            "details": "Expected CKR_KEY_FUNCTION_NOT_PERMITTED, got 104",
+            "status": "PASS",
+            "test": "Boolean_Policy_Violation"
+        },
+        {
+            "details": "Expected CKR_ATTRIBUTE_SENSITIVE, got 17",
+            "status": "PASS",
+            "test": "Extraction_Constraint"
+        },
+        {
+            "details": "Expected CKR_TEMPLATE_INCOMPLETE, got 208",
+            "status": "PASS",
+            "test": "Template_Incomplete_Create"
+        },
+        {
+            "details": "Expected CKR_SIGNATURE_LEN_RANGE, got 193",
+            "status": "PASS",
+            "test": "Signature_Len_Range"
+        },
+        {
+            "details": "Expected CKR_SIGNATURE_INVALID, got 192",
+            "status": "PASS",
+            "test": "Signature_Forgery_Invalid"
+        }
+    ],
+    "SHA-3": [
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "DigestInit_256"
+        }
+    ],
+    "SLHDSA": [
+        {
+            "details": "Gen SLH-DSA-SHA2_128S",
+            "status": "PASS",
+            "test": "Generate_SLH_DSA_SHA2_128S"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_Sign_SHA2_128S_Deterministic_Ctx"
+        },
+        {
+            "details": "Gen SLH-DSA-SHA2_128F",
+            "status": "PASS",
+            "test": "Generate_SLH_DSA_SHA2_128F"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_Sign_SHA2_128F_Deterministic_Ctx"
+        },
+        {
+            "details": "Gen SLH-DSA-SHA2_256F",
+            "status": "PASS",
+            "test": "Generate_SLH_DSA_SHA2_256F"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_Sign_SHA2_256F_Deterministic_Ctx"
+        }
+    ],
+    "Session": [
+        {
+            "details": "RV=3",
+            "status": "PASS",
+            "test": "C_OpenSession_InvalidSlot"
+        },
+        {
+            "details": "RV=181",
+            "status": "PASS",
+            "test": "C_SetAttributeValue_RO"
+        },
+        {
+            "details": "Visible (Compliant)",
+            "status": "PASS",
+            "test": "Session_Object_CrossVisibility"
+        },
+        {
+            "details": "cancel OK; post-cancel C_Sign expected CKR_OPERATION_NOT_INITIALIZED, got RV=145",
+            "status": "PASS",
+            "test": "C_SessionCancel"
+        },
+        {
+            "details": "RV=256",
+            "status": "PASS",
+            "test": "C_LoginUser"
+        }
+    ],
+    "XMSS": [
+        {
+            "details": "Gen XMSS_SHA2_10_256",
+            "status": "PASS",
+            "test": "Generate_XMSS_SHA2_10_256"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_Sign_XMSS_SHA2_10_256"
+        },
+        {
+            "details": "two C_Sign(NULL) → same size 2500 RV1=0 RV2=0",
+            "status": "PASS",
+            "test": "StatefulSign_size_query_idempotent"
+        },
+        {
+            "details": "too-small buffer → CKR_BUFFER_TOO_SMALL(0x150), size echoed, RV=336",
+            "status": "PASS",
+            "test": "StatefulSign_buffer_too_small"
+        },
+        {
+            "details": "real C_Sign after queries verifies (leaf not burned) signRV=0 verifyRV=0",
+            "status": "PASS",
+            "test": "StatefulSign_signs_after_queries"
+        },
+        {
+            "details": "Gen XMSSMT_SHA2_20_2_256",
+            "status": "PASS",
+            "test": "Generate_XMSSMT_SHA2_20_2_256"
+        }
+    ],
+    "_summary": {
+        "engine": "/Users/pqctoday/Antigravity/pqctoday-hsm/build_audit_0812/src/lib/libsofthsmv3.dylib",
+        "engine_commit": "",
+        "fail": 0,
+        "pass": 324,
+        "skip": 0,
+        "xfail_known_engine_bugs": 0
+    }
+}
