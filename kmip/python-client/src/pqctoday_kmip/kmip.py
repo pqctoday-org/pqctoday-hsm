@@ -595,12 +595,87 @@ class KmipClient:
             return None
         return {1: "Valid", 2: "Invalid", 3: "Unknown"}.get(int(value))
 
+    def register(
+        self,
+        key_material: bytes,
+        *,
+        algorithm: str = "AES",
+        length: Optional[int] = None,
+        usage: str = "Encrypt Decrypt",
+        name: Optional[str] = None,
+        key_format_type: str = "Raw",
+    ) -> KmipResult:
+        """KMIP Register (§6.1.56) — hand the server a key you already hold,
+        instead of asking it to generate one.
+
+        This is the import half of key management: `create_symmetric` mints
+        material inside the HSM, `register` adopts material from outside it
+        (a migration from another KMS, a key escrowed elsewhere, a test
+        vector). The returned UID then behaves like any other managed
+        object — activate, encrypt, locate, revoke, destroy.
+
+        ``length`` defaults to the true bit length of ``key_material``.
+        Passing a value that disagrees with the bytes is a client-side error
+        rather than something to forward: the server would store an attribute
+        contradicting its own key, and the mismatch would only surface much
+        later as a puzzling mechanism failure.
+
+        Scope: symmetric keys. The server's `Register` accepts asymmetric and
+        certificate payloads too, but they take a different managed-object
+        structure; this helper covers the symmetric path the conformance
+        corpus exercises (see `CS-BC-M-*` transcripts).
+        """
+        true_bits = len(key_material) * 8
+        if length is None:
+            length = true_bits
+        elif length != true_bits:
+            raise ValueError(
+                f"length={length} contradicts key_material ({true_bits} bits from "
+                f"{len(key_material)} bytes) — the server would store an attribute "
+                "that disagrees with its own key material"
+            )
+
+        attrs = [
+            _leaf("CryptographicAlgorithm", "Enumeration", algorithm),
+            _leaf("CryptographicLength", "Integer", length),
+            _leaf("CryptographicUsageMask", "Integer", usage),
+        ]
+        if name:
+            attrs.append(_leaf("Name", "TextString", name))
+
+        return self.request(
+            "Register",
+            _leaf("ObjectType", "Enumeration", "SymmetricKey"),
+            _struct("Attributes", *attrs),
+            _struct(
+                "SymmetricKey",
+                _struct(
+                    "KeyBlock",
+                    _leaf("KeyFormatType", "Enumeration", key_format_type),
+                    _struct("KeyValue", _leaf("KeyMaterial", "ByteString", key_material.hex())),
+                    _leaf("CryptographicAlgorithm", "Enumeration", algorithm),
+                    _leaf("CryptographicLength", "Integer", length),
+                ),
+            ),
+        )
+
     def encapsulate(self, uid: str) -> KmipResult:
-        """ML-KEM encapsulate against a public key UID."""
+        """Encapsulate against a public key UID.
+
+        Works for ML-KEM, for the hybrid groups (``X25519MLKEM768``,
+        ``SecP256r1MLKEM768``), and for classical ECDH-as-DHKEM — the
+        operation is algorithm-agnostic by design (§6.1.22 says "a key
+        encapsulation mechanism", not "ML-KEM"). Returns the ciphertext via
+        ``.get("Data")`` and the derived secret's UID via
+        ``.get("UniqueIdentifier")``.
+        """
         return self.request("Encapsulate", _leaf("UniqueIdentifier", "TextString", uid))
 
     def decapsulate(self, uid: str, ciphertext: bytes) -> KmipResult:
-        """ML-KEM decapsulate ``ciphertext`` against a private key UID."""
+        """Decapsulate ``ciphertext`` against a private key UID.
+
+        The peer of :meth:`encapsulate`, and equally algorithm-agnostic.
+        """
         return self.request(
             "Decapsulate",
             _leaf("UniqueIdentifier", "TextString", uid),

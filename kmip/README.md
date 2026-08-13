@@ -186,6 +186,8 @@ pip install -e .        # or just: PYTHONPATH=src python -m pqctoday_kmip ...
 ### Data plane
 
 ```python
+import os
+
 from pqctoday_kmip import KmipClient
 
 c = KmipClient("127.0.0.1", 5696)          # sandbox: add verify=False / pin the fingerprint
@@ -205,9 +207,17 @@ enc = c.encapsulate(kpub)
 ss  = c.decapsulate(kpriv, bytes.fromhex(enc.get("Data")))
 
 # Symmetric + encrypt, then locate / inspect / revoke / destroy
+# The key must be ACTIVE, and an IV is required — the algorithm itself comes
+# from the stored key, not from the call. Never reuse an IV with the same key.
 aes = c.create_symmetric("AES", 256, name="demo-aes")
-c.encrypt(aes.get("UniqueIdentifier"), b"plaintext", "AES")
+c.activate(aes.get("UniqueIdentifier"))
+c.encrypt(aes.get("UniqueIdentifier"), b"plaintext",
+          block_cipher_mode="GCM", iv=os.urandom(12))
 c.locate(); c.get_attributes(priv); c.revoke(priv); c.destroy(priv)
+
+# Register — adopt key material you already hold (import, not generate)
+imported = c.register(bytes(32), algorithm="AES", name="migrated-from-old-kms")
+c.activate(imported.get("UniqueIdentifier"))
 ```
 
 Available `KmipClient` methods: `create_key_pair`, `create_symmetric`,

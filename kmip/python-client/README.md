@@ -19,6 +19,8 @@ PYTHONPATH=src python -m pqctoday_kmip demo
 ## Data plane — KMIP 3.0 operations
 
 ```python
+import os
+
 from pqctoday_kmip import KmipClient
 
 c = KmipClient("127.0.0.1", 5696)
@@ -38,6 +40,37 @@ c.activate(kpub); c.activate(kpriv)
 enc = c.encapsulate(kpub)
 ct = enc.get("Data")
 ss = c.decapsulate(kpriv, bytes.fromhex(ct))
+
+# Hybrid KEM — one managed object, not two keys stapled together
+#
+# X25519MLKEM768 (0x5C) and SecP256r1MLKEM768 (0x5D) are first-class
+# CryptographicAlgorithm values in KMIP 3.0 CSD02, so a hybrid is created
+# and used through exactly the same three calls as ML-KEM above. The
+# classical and post-quantum halves are combined inside the engine; the
+# shared secret a peer recovers is the concatenation of both, so it stays
+# secure if EITHER primitive survives.
+hyb   = c.create_key_pair("X25519MLKEM768", "KeyAgreement")
+hpub  = hyb.get("PublicKeyUniqueIdentifier")
+hpriv = hyb.get("PrivateKeyUniqueIdentifier")
+c.activate(hpub); c.activate(hpriv)
+
+enc = c.encapsulate(hpub)                       # ct = ek_mlkem ‖ x25519 share
+ss  = c.decapsulate(hpriv, bytes.fromhex(enc.get("Data")))
+# Both sides now hold the same secret; enc.get("UniqueIdentifier") and
+# ss.get("UniqueIdentifier") are managed SecretData objects, so the raw
+# bytes never have to leave the HSM at all.
+
+# Register — adopt a key you already hold, rather than minting a new one
+#
+# The import half of key management: use it to migrate material out of
+# another KMS, or to pin a known test vector. The UID behaves like any
+# other managed object afterwards.
+imported = c.register(bytes(32), algorithm="AES", name="migrated-from-old-kms")
+uid = imported.get("UniqueIdentifier")
+c.activate(uid)
+# The algorithm comes from the stored key, not the call. An IV is required —
+# and must never repeat for a given key.
+c.encrypt(uid, b"plaintext", block_cipher_mode="GCM", iv=os.urandom(12))
 ```
 
 ## Receiving server pushes (KMIP §6.2)
