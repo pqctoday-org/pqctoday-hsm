@@ -6,6 +6,52 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [Unreleased]
+
+### Added
+
+- **`SecP384r1MLKEM1024` — KMIP Profiles v3.0 CSD02 §3.3.3 is now met in
+  full.** The Quantum Safe Authentication Suite requires all three of
+  `X25519MLKEM768`, `SecP256r1MLKEM768` and `SecP384r1MLKEM1024`; the server
+  offered two, so the clause was partial and the posture had to be described as
+  *measured against* the suite rather than *conformant to* it.
+
+  rustls 0.23 has no `0x11ed` — no `NamedGroup` variant, no `kx_group` entry,
+  and the generic hybrid combinator behind the other two is private. No
+  cryptography was missing though: both halves and the `hybrid_component()`
+  seams are public API, so the group is composed in
+  `kmip/src/server/secp384r1mlkem1024.rs` from primitives already in use.
+
+  **Proven against OpenSSL 3.6, not against itself.** A locally-composed hybrid
+  that only round-trips with itself proves nothing about the wire — reverse the
+  combiner and both ends reverse it identically. `--tls-interop` on the local
+  gate handshakes with OpenSSL 3.6.3, asserts the negotiated group by name (so
+  falling back to the bare P-384 component cannot pass), requires application
+  data to flow, and runs a negative control where a classical-only client must
+  be refused.
+
+### Changed
+
+- KMIP conformance documentation now states the **CSD02** baseline it has
+  tracked since 0.16.0. `kmip/docs/CONFORMANCE_REPORT.md` still described
+  CSD01 + WD19 and stamped itself "current as of v0.13.0", and claimed the
+  corpus replay was gated by `cargo test` — it is gated by the three Python
+  scripts (`dispatcher_replay.py` → `assert_replay_report.py` →
+  `check_report_fresh.py`). Adds explicit deviation sections for the
+  deprecated-algorithm skips, the server-to-client operations, and third-party
+  interop.
+- `kmip/spec/README.md` gains a "Spec watch" checklist for the next OASIS
+  revision; the KEM crossref fact sheet was re-verified against CSD02 by hand
+  (every fact held — only page numbers moved).
+- The staged conformance corpus now carries provenance (`hsmCommit`,
+  `builtAt`, `specBaseline`, tier counts), so it can no longer drift from the
+  wasm bundle that replays it without a test failing.
+- `scripts/local-gate.sh` reported the replay as "92/0/10" while asserting
+  97/0/5, and the Rust PKCS#11 conformance as 188 checks where the committed
+  report records 257.
+
+---
+
 ## [0.22.0] — 2026-08-12
 
 **Post-quantum MLS works.** Ciphersuite `0x004D` (X-Wing: ML-KEM-768 + X25519,
