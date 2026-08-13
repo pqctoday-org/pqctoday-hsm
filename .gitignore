@@ -6,6 +6,7 @@ build-pqctoday/
 build_fresh/
 build-wasm-fresh/
 build-wasm-native/
+build_remediation/
 test-results/
 *.o
 *.a
