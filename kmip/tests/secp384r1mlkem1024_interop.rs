@@ -27,8 +27,8 @@
 //! too old — a skipped interop test that reports success is exactly the kind of
 //! evidence gap this whole exercise exists to close.
 
-use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::io::Write;
+use std::net::TcpListener;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::thread;
@@ -302,12 +302,4 @@ fn quantum_safe_provider_offers_exactly_the_three_mandated_groups() {
         3,
         "§3.3.3 says the server SHALL NOT offer groups outside the list; got {names:?}"
     );
-}
-
-/// A TLS connection needs a reader too — keeps `Read` imported and honest about
-/// what the echo above proves.
-#[allow(dead_code)]
-fn drain(mut s: TcpStream) {
-    let mut buf = Vec::new();
-    let _ = s.read_to_end(&mut buf);
 }
