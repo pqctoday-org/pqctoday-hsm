@@ -11,11 +11,11 @@
 #   2. kmip  cargo test -- --include-ignored  — the local-only suites CI skips
 #                                               (op-layer policy conformance …)
 #   3. rust  cargo test                       — softhsmrustv3 engine tests
-#   4. OASIS KMIP 3.0 replay + baseline assert + staleness guard (92/0/10)
+#   4. OASIS KMIP 3.0 replay + baseline assert + staleness guard (97/0/5)
 #   5. wasm  smoke.cjs                         — CACP bundle boots + round-trips
 #   6. (--cpp)  C++ ctest incl. the v3.2 compliance harness  [opt-in, slow]
 #   7. (--acvp-wasm)  20-suite ACVP wasm harness              [opt-in, slow]
-#   8. (--rust-p11)  Rust engine PKCS#11 v3.2 conformance (188 checks) [opt-in]
+#   8. (--rust-p11)  Rust engine PKCS#11 v3.2 conformance (257 checks) [opt-in]
 #
 # On success it writes .gate-ok-<HEAD-sha> so a pre-push hook can verify the
 # gate ran on the current commit.
@@ -94,7 +94,7 @@ run_step "rust engine cargo test" \
   "cd $AG_RUST && RUST_MIN_STACK=134217728 cargo test --quiet 2>&1 | grep -E 'test result: FAILED|[1-9][0-9]* failed' && exit 1; \
    RUST_MIN_STACK=134217728 cargo test --quiet 2>&1 | grep -E 'test result' | awk '{p+=\$4; f+=\$6} END {print \"  \"p\" passed, \"f\" failed\"; exit (f>0)}'"
 
-run_step "OASIS KMIP 3.0 replay (92/0/10)" \
+run_step "OASIS KMIP 3.0 replay (97 PASS / 0 FAIL / 5 SKIP_DEPRECATED)" \
   "cd $AG_KMIP && cargo build --release --bin pqctoday-kmip --quiet && \
    mkdir -p target/release && ln -sf \$(readlink -f \${CARGO_TARGET_DIR:-/cargo-target}/release/pqctoday-kmip) target/release/pqctoday-kmip 2>/dev/null; \
    python3 conformance/harness/dispatcher_replay.py >/dev/null && \
@@ -143,7 +143,7 @@ if [[ $RUN_RUST_P11 == 1 ]]; then
   # real PKCS#11 ABI through the v3.2 conformance matrix. This is the Rust-engine
   # conformance evidence (report gap P2/T1) — the wasm build runs in the
   # container, the node driver on the host.
-  STEP=$((STEP+1)); say "step $STEP: Rust PKCS#11 v3.2 conformance (188 checks)"
+  STEP=$((STEP+1)); say "step $STEP: Rust PKCS#11 v3.2 conformance (257 checks)"
   if dexec "cd $AG_RUST && RUSTFLAGS='-C link-arg=-zstack-size=2097152' wasm-pack build --target bundler --out-dir pkg --dev -- --features acvp >/dev/null 2>&1" \
      && ( cd "$ROOT/rust" && node test_p11_conformance.js 2>&1 | grep -q 'RESULT: .* 0 failed' ); then
     ok "Rust PKCS#11 v3.2 conformance"

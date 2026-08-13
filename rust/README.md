@@ -32,7 +32,7 @@ See also `build-wasm-bundle.sh` for the packaged bundle build.
 | Harness | What it checks |
 |---|---|
 | `cargo test` | Engine unit + integration tests |
-| `node test_p11_conformance.js` | **PKCS#11 v3.2 conformance** — 188 checks / 36 sections, exact `CKR_*` codes in spec priority order, PQC keygen/param-set, SP800-108 KBKDF, message-based crypto |
+| `node test_p11_conformance.js` | **PKCS#11 v3.2 conformance** — 257 checks / 40 sections, exact `CKR_*` codes in spec priority order, PQC keygen/param-set, SP800-108 KBKDF, message-based crypto |
 | `node test_kat_parity.js` | KAT parity vs the C++ engine |
 | `node test_r36_paramset.js` | R3.6 parameter-set coverage |
 
