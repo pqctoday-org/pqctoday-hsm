@@ -2839,6 +2839,94 @@ fn ec_point_unwrap(bytes: &[u8]) -> &[u8] {
     }
 }
 
+// ── KEM template CKA_VALUE_LEN reconciliation (PKCS#11 v3.2) ────────────────
+//
+// SPEC BASIS (all quotes from pkcs11-spec-v3.2-os, docs/refs/):
+//
+// §4.1.1 "Creating objects" names the KEM functions as object-creation
+// functions: "Objects may be created with the Cryptoki functions
+// C_CreateObject …, C_GenerateKey, C_GenerateKeyPair, C_UnwrapKey,
+// C_DeriveKey, C_EncapsulateKey, and C_DecapsulateKey (see Section 5.18)."
+// Rule 5: "If the attribute values in the supplied template, together with any
+// default attribute values and any attribute values contributed to the object
+// by the object-creation function itself, are inconsistent, then the attempt
+// should fail with the error code CKR_TEMPLATE_INCONSISTENT."
+// Rule 6: a template value that merely repeats what the function contributes
+// MAY succeed, and "Library developers are encouraged to make their libraries
+// behave as though the attribute had only appeared once in the template."
+//
+// §6.68.5 (CKM_ML_KEM, and by construction the vendor FrodoKEM /
+// Classic-McEliece arms): "The mechanism contributes the result as the
+// CKA_VALUE attribute of the new key; other attributes required by the key
+// type must be specified in the template." There is no length knob — the
+// shared-secret length is fixed by the mechanism.
+//
+// §6.8.2 Table 103 defines CKA_VALUE_LEN on a CKK_GENERIC_SECRET object as
+// "Length in bytes of key value", i.e. of CKA_VALUE. A CKA_VALUE_LEN that is
+// not len(CKA_VALUE) is therefore self-contradictory on the object.
+//
+// §5.18.8 / §5.18.9: "If a call to C_EncapsulateKey [C_DecapsulateKey] cannot
+// support the precise template supplied to it, it will fail and return without
+// creating any key object." Both list CKR_TEMPLATE_INCONSISTENT.
+//
+// => fixed-length KEMs: a matching caller CKA_VALUE_LEN is accepted silently
+//    (rule 6), a differing one is CKR_TEMPLATE_INCONSISTENT (rule 5), and the
+//    engine's own value is always the one stored.
+
+/// Reconcile a caller-supplied CKA_VALUE_LEN against the length the mechanism
+/// itself contributes, for a KEM whose shared-secret length is fixed
+/// (CKM_ML_KEM §6.68.5, vendor FrodoKEM / Classic-McEliece).
+/// See the §4.1.1 rules 5/6 block above.
+unsafe fn kem_check_template_value_len(
+    template: *mut u8,
+    count: u32,
+    actual: usize,
+) -> Result<(), u32> {
+    match get_attr_ulong(template, count, CKA_VALUE_LEN) {
+        // §4.1.1 rule 6 — same value the function contributes: behave as though
+        // it had only appeared once.
+        Some(want) if want as usize == actual => Ok(()),
+        // §4.1.1 rule 5 — cannot be satisfied alongside the contributed
+        // CKA_VALUE; §5.18.8/§5.18.9 forbid creating the key object anyway.
+        Some(_) => Err(CKR_TEMPLATE_INCONSISTENT),
+        None => Ok(()),
+    }
+}
+
+/// ECDH-as-KEM (CKM_ECDH1_DERIVE) is the one arm where the spec makes the
+/// template's CKA_VALUE_LEN an *input*, not a claim to be checked:
+///
+/// §6.3.17: "This mechanism derives a secret value, and truncates the result
+/// according to the CKA_KEY_TYPE attribute of the template and, if it has one
+/// and the key type supports it, the CKA_VALUE_LEN attribute of the template.
+/// (The truncation removes bytes from the leading end of the secret value.)"
+///
+/// and the same section binds encapsulate/decapsulate to that very operation:
+/// "For C_EncapsulateKey, an ephemeral key pair is generated. … The generated
+/// private key is used with public key provided in the API to generate a
+/// symmetric key using EC Derive … For C_DecapsulateKey, the ciphertext is
+/// used with the private key provided in the API to generate a symmetric key
+/// using EC Derive."
+///
+/// A length LONGER than the raw shared secret cannot be produced by truncation,
+/// so it falls back to §4.1.1 rule 5 → CKR_TEMPLATE_INCONSISTENT.
+/// Either way `ss.len()` is afterwards the authoritative CKA_VALUE_LEN.
+unsafe fn ecdh_kem_apply_template_value_len(
+    template: *mut u8,
+    count: u32,
+    ss: &mut Vec<u8>,
+) -> Result<(), u32> {
+    if let Some(want) = get_attr_ulong(template, count, CKA_VALUE_LEN) {
+        let want = want as usize;
+        if want > ss.len() || want == 0 {
+            return Err(CKR_TEMPLATE_INCONSISTENT);
+        }
+        // §6.3.17 — "removes bytes from the leading end of the secret value".
+        ss.drain(..ss.len() - want);
+    }
+    Ok(())
+}
+
 fn C_EncapsulateKey_impl(
     _h_session: u32,
     p_mechanism: *mut u8,
@@ -2914,6 +3002,14 @@ fn C_EncapsulateKey_impl(
             debug_assert_eq!(ct.len(), ct_len as usize, "ct_len must match the actual ciphertext");
             std::ptr::copy_nonoverlapping(ct.as_ptr(), p_ciphertext, ct_len as usize);
             *pul_ciphertext_len = ct_len;
+            // PKCS#11 v3.2 §4.1.1 rules 5/6 (see kem_check_template_value_len):
+            // a caller CKA_VALUE_LEN that contradicts the mechanism-contributed
+            // CKA_VALUE is CKR_TEMPLATE_INCONSISTENT, before any key object exists.
+            if let Err(rv) =
+                kem_check_template_value_len(_p_template, _ul_attribute_count, ss.len())
+            {
+                return rv;
+            }
             let ss_len = ss.len() as u32;
             let mut ss_attrs = HashMap::new();
             ss_attrs.insert(CKA_VALUE, ss);
@@ -2921,12 +3017,15 @@ fn C_EncapsulateKey_impl(
             store_ulong(&mut ss_attrs, CKA_KEY_TYPE, CKK_GENERIC_SECRET);
             store_bool(&mut ss_attrs, CKA_EXTRACTABLE, true);
             store_bool(&mut ss_attrs, CKA_SENSITIVE, false);
-            store_ulong(&mut ss_attrs, CKA_VALUE_LEN, ss_len);
             store_bool(&mut ss_attrs, CKA_TOKEN, false); // PKCS#11 v3.2 §4.1 default
             store_bool(&mut ss_attrs, CKA_PRIVATE, false); // PKCS#11 v3.2 §4.1 default
             store_bool(&mut ss_attrs, CKA_LOCAL, false); // PKCS#11 v3.2 §5.18.8 — KEM keys are not locally generated
             store_ulong(&mut ss_attrs, CKA_KEY_GEN_MECHANISM, mech_type); // PKCS#11 v3.2 §4.3
             absorb_template_attrs(&mut ss_attrs, _p_template, _ul_attribute_count);
+            // §6.8.2 Table 103 — CKA_VALUE_LEN is "Length in bytes of key
+            // value", so it is engine truth and is written AFTER absorb: it can
+            // never be made to contradict CKA_VALUE by a caller template.
+            store_ulong(&mut ss_attrs, CKA_VALUE_LEN, ss_len);
             // PKCS#11 v3.2 §5.18.8: unconditionally CK_FALSE for encapsulated keys
             store_bool(&mut ss_attrs, CKA_ALWAYS_SENSITIVE, false);
             store_bool(&mut ss_attrs, CKA_NEVER_EXTRACTABLE, false);
@@ -2994,7 +3093,7 @@ fn C_EncapsulateKey_impl(
                     )
                 }};
             }
-            let (ct, ss) = with_rng!(rng, {
+            let (ct, mut ss) = with_rng!(rng, {
                 match curve {
                     CURVE_P256 => ecdh_encap!(p256, &mut rng),
                     CURVE_P384 => ecdh_encap!(p384, &mut rng),
@@ -3005,6 +3104,14 @@ fn C_EncapsulateKey_impl(
             debug_assert_eq!(ct.len(), ct_len as usize, "ct_len must match the emitted point");
             std::ptr::copy_nonoverlapping(ct.as_ptr(), p_ciphertext, ct.len());
             *pul_ciphertext_len = ct.len() as u32;
+            // §6.3.17 — for this mechanism (unlike the fixed-length KEMs above)
+            // the template's CKA_VALUE_LEN is a truncation request, applied
+            // from the leading end of the secret value.
+            if let Err(rv) =
+                ecdh_kem_apply_template_value_len(_p_template, _ul_attribute_count, &mut ss)
+            {
+                return rv;
+            }
             let ss_len = ss.len() as u32;
             let mut ss_attrs = HashMap::new();
             ss_attrs.insert(CKA_VALUE, ss);
@@ -3012,12 +3119,14 @@ fn C_EncapsulateKey_impl(
             store_ulong(&mut ss_attrs, CKA_KEY_TYPE, CKK_GENERIC_SECRET);
             store_bool(&mut ss_attrs, CKA_EXTRACTABLE, true);
             store_bool(&mut ss_attrs, CKA_SENSITIVE, false);
-            store_ulong(&mut ss_attrs, CKA_VALUE_LEN, ss_len);
             store_bool(&mut ss_attrs, CKA_TOKEN, false); // PKCS#11 v3.2 §4.1 default
             store_bool(&mut ss_attrs, CKA_PRIVATE, false); // PKCS#11 v3.2 §4.1 default
             store_bool(&mut ss_attrs, CKA_LOCAL, false); // §5.18.8 — KEM keys are not locally generated
             store_ulong(&mut ss_attrs, CKA_KEY_GEN_MECHANISM, CKM_ECDH1_DERIVE); // §4.3
             absorb_template_attrs(&mut ss_attrs, _p_template, _ul_attribute_count);
+            // §6.8.2 Table 103 — CKA_VALUE_LEN is the length of the (possibly
+            // truncated) CKA_VALUE; written AFTER absorb so it always agrees.
+            store_ulong(&mut ss_attrs, CKA_VALUE_LEN, ss_len);
             // PKCS#11 v3.2 §5.18.8: unconditionally CK_FALSE for encapsulated keys
             store_bool(&mut ss_attrs, CKA_ALWAYS_SENSITIVE, false);
             store_bool(&mut ss_attrs, CKA_NEVER_EXTRACTABLE, false);
@@ -3080,18 +3189,27 @@ fn C_EncapsulateKey_impl(
                     ct_len as usize,
                 );
                 *pul_ciphertext_len = ct_len;
+                // §6.68.5 gives CKM_ML_KEM no length knob — §4.1.1 rules 5/6.
+                if let Err(rv) = kem_check_template_value_len(
+                    _p_template,
+                    _ul_attribute_count,
+                    ss.as_slice().len(),
+                ) {
+                    return rv;
+                }
                 let mut ss_attrs = HashMap::new();
                 ss_attrs.insert(CKA_VALUE, ss.as_slice().to_vec());
                 store_ulong(&mut ss_attrs, CKA_CLASS, CKO_SECRET_KEY);
                 store_ulong(&mut ss_attrs, CKA_KEY_TYPE, CKK_GENERIC_SECRET);
                 store_bool(&mut ss_attrs, CKA_EXTRACTABLE, true);
                 store_bool(&mut ss_attrs, CKA_SENSITIVE, false);
-                store_ulong(&mut ss_attrs, CKA_VALUE_LEN, ss.as_slice().len() as u32);
                 store_bool(&mut ss_attrs, CKA_TOKEN, false);   // PKCS#11 v3.2 §4.1 default
                 store_bool(&mut ss_attrs, CKA_PRIVATE, false); // PKCS#11 v3.2 §4.1 default
                 store_bool(&mut ss_attrs, CKA_LOCAL, false); // PKCS#11 v3.2 §5.18.8 — KEM keys are not locally generated
                 store_ulong(&mut ss_attrs, CKA_KEY_GEN_MECHANISM, CKM_ML_KEM); // PKCS#11 v3.2 §4.3
                 absorb_template_attrs(&mut ss_attrs, _p_template, _ul_attribute_count);
+                // §6.8.2 Table 103 — engine truth, written AFTER absorb.
+                store_ulong(&mut ss_attrs, CKA_VALUE_LEN, ss.as_slice().len() as u32);
                 // PKCS#11 v3.2 §5.18.8: unconditionally CK_FALSE for encapsulated keys
                 store_bool(&mut ss_attrs, CKA_ALWAYS_SENSITIVE, false);
                 store_bool(&mut ss_attrs, CKA_NEVER_EXTRACTABLE, false);
@@ -3186,18 +3304,29 @@ fn C_DecapsulateKey_impl(
                 Ok(s) => s,
                 Err(rv) => return rv,
             };
+            // §4.1.1 rules 5/6 — reject a contradicting caller CKA_VALUE_LEN.
+            if let Err(rv) =
+                kem_check_template_value_len(_p_template, _ul_attribute_count, ss.len())
+            {
+                return rv;
+            }
+            let ss_len = ss.len() as u32;
             let mut ss_attrs = HashMap::new();
             ss_attrs.insert(CKA_VALUE, ss);
             store_ulong(&mut ss_attrs, CKA_CLASS, CKO_SECRET_KEY);
             store_ulong(&mut ss_attrs, CKA_KEY_TYPE, CKK_GENERIC_SECRET);
             store_bool(&mut ss_attrs, CKA_EXTRACTABLE, true);
             store_bool(&mut ss_attrs, CKA_SENSITIVE, false);
-            store_ulong(&mut ss_attrs, CKA_VALUE_LEN, expected_ct);
             store_bool(&mut ss_attrs, CKA_TOKEN, false); // PKCS#11 v3.2 §4.1 default
             store_bool(&mut ss_attrs, CKA_PRIVATE, false); // PKCS#11 v3.2 §4.1 default
             store_bool(&mut ss_attrs, CKA_LOCAL, false); // PKCS#11 v3.2 §5.18.9 — KEM keys are not locally generated
             store_ulong(&mut ss_attrs, CKA_KEY_GEN_MECHANISM, mech_type); // PKCS#11 v3.2 §4.3
             absorb_template_attrs(&mut ss_attrs, _p_template, _ul_attribute_count);
+            // §6.8.2 Table 103 — "Length in bytes of key value". This stored the
+            // CIPHERTEXT length (`expected_ct`) until 2026-08-13: FrodoKEM-640
+            // reported CKA_VALUE_LEN = 9720 for a 16-byte CKA_VALUE. Engine
+            // truth, and written AFTER absorb so no template can override it.
+            store_ulong(&mut ss_attrs, CKA_VALUE_LEN, ss_len);
             // PKCS#11 v3.2 §5.18.9: unconditionally CK_FALSE for decapsulated keys
             store_bool(&mut ss_attrs, CKA_ALWAYS_SENSITIVE, false);
             store_bool(&mut ss_attrs, CKA_NEVER_EXTRACTABLE, false);
@@ -3244,12 +3373,19 @@ fn C_DecapsulateKey_impl(
                         .to_vec()
                 }};
             }
-            let ss = match curve {
+            let mut ss = match curve {
                 CURVE_P256 => ecdh_decap!(p256),
                 CURVE_P384 => ecdh_decap!(p384),
                 CURVE_P521 => ecdh_decap!(p521),
                 _ => return CKR_KEY_TYPE_INCONSISTENT,
             };
+            // §6.3.17 — template CKA_VALUE_LEN truncates from the leading end
+            // (mirrors the encapsulate side so both peers get the same key).
+            if let Err(rv) =
+                ecdh_kem_apply_template_value_len(_p_template, _ul_attribute_count, &mut ss)
+            {
+                return rv;
+            }
             let ss_len = ss.len() as u32;
             let mut ss_attrs = HashMap::new();
             ss_attrs.insert(CKA_VALUE, ss);
@@ -3257,12 +3393,13 @@ fn C_DecapsulateKey_impl(
             store_ulong(&mut ss_attrs, CKA_KEY_TYPE, CKK_GENERIC_SECRET);
             store_bool(&mut ss_attrs, CKA_EXTRACTABLE, true);
             store_bool(&mut ss_attrs, CKA_SENSITIVE, false);
-            store_ulong(&mut ss_attrs, CKA_VALUE_LEN, ss_len);
             store_bool(&mut ss_attrs, CKA_TOKEN, false); // PKCS#11 v3.2 §4.1 default
             store_bool(&mut ss_attrs, CKA_PRIVATE, false); // PKCS#11 v3.2 §4.1 default
             store_bool(&mut ss_attrs, CKA_LOCAL, false); // §5.18.9 — KEM keys are not locally generated
             store_ulong(&mut ss_attrs, CKA_KEY_GEN_MECHANISM, CKM_ECDH1_DERIVE); // §4.3
             absorb_template_attrs(&mut ss_attrs, _p_template, _ul_attribute_count);
+            // §6.8.2 Table 103 — engine truth, written AFTER absorb.
+            store_ulong(&mut ss_attrs, CKA_VALUE_LEN, ss_len);
             // PKCS#11 v3.2 §5.18.9: unconditionally CK_FALSE for decapsulated keys
             store_bool(&mut ss_attrs, CKA_ALWAYS_SENSITIVE, false);
             store_bool(&mut ss_attrs, CKA_NEVER_EXTRACTABLE, false);
@@ -3326,18 +3463,27 @@ fn C_DecapsulateKey_impl(
                     Ok(s) => s,
                     Err(_) => return CKR_FUNCTION_FAILED,
                 };
+                // §6.68.5 gives CKM_ML_KEM no length knob — §4.1.1 rules 5/6.
+                if let Err(rv) = kem_check_template_value_len(
+                    _p_template,
+                    _ul_attribute_count,
+                    ss.as_slice().len(),
+                ) {
+                    return rv;
+                }
                 let mut ss_attrs = HashMap::new();
                 ss_attrs.insert(CKA_VALUE, ss.as_slice().to_vec());
                 store_ulong(&mut ss_attrs, CKA_CLASS, CKO_SECRET_KEY);
                 store_ulong(&mut ss_attrs, CKA_KEY_TYPE, CKK_GENERIC_SECRET);
                 store_bool(&mut ss_attrs, CKA_EXTRACTABLE, true);
                 store_bool(&mut ss_attrs, CKA_SENSITIVE, false);
-                store_ulong(&mut ss_attrs, CKA_VALUE_LEN, ss.as_slice().len() as u32);
                 store_bool(&mut ss_attrs, CKA_TOKEN, false);   // PKCS#11 v3.2 §4.1 default
                 store_bool(&mut ss_attrs, CKA_PRIVATE, false); // PKCS#11 v3.2 §4.1 default
                 store_bool(&mut ss_attrs, CKA_LOCAL, false); // PKCS#11 v3.2 §5.18.9 — KEM keys are not locally generated
                 store_ulong(&mut ss_attrs, CKA_KEY_GEN_MECHANISM, CKM_ML_KEM); // PKCS#11 v3.2 §4.3
                 absorb_template_attrs(&mut ss_attrs, _p_template, _ul_attribute_count);
+                // §6.8.2 Table 103 — engine truth, written AFTER absorb.
+                store_ulong(&mut ss_attrs, CKA_VALUE_LEN, ss.as_slice().len() as u32);
                 // PKCS#11 v3.2 §5.18.9: unconditionally CK_FALSE for decapsulated keys
                 store_bool(&mut ss_attrs, CKA_ALWAYS_SENSITIVE, false);
                 store_bool(&mut ss_attrs, CKA_NEVER_EXTRACTABLE, false);
@@ -12784,6 +12930,153 @@ mod pqc_vendor_kem_ffi_tests {
         let ss2 = obj_attr(h_ss2, CKA_VALUE).expect("decapsulate secret object");
         assert_eq!(ss1, ss2, "encapsulator and decapsulator must derive the same shared secret");
         assert_eq!(ss1.len(), expected_ss_len);
+
+        // PKCS#11 v3.2 §6.8.2 Table 103 — CKA_VALUE_LEN is the "Length in bytes
+        // of key value". The decapsulate arm stored the CIPHERTEXT length here
+        // until 2026-08-13 (FrodoKEM-640-SHAKE: 9720 for a 16-byte secret), so
+        // this assertion is what fails if anyone reintroduces that.
+        for (h, side) in [(h_ss1, "encapsulate"), (h_ss2, "decapsulate")] {
+            let vlen = get_object_attr_u32(h, CKA_VALUE_LEN)
+                .unwrap_or_else(|| panic!("{side}: CKA_VALUE_LEN must exist")) as usize;
+            assert_eq!(
+                vlen, expected_ss_len,
+                "{side}: CKA_VALUE_LEN must be the SHARED SECRET length, not the ciphertext length"
+            );
+            assert_eq!(
+                vlen,
+                obj_attr(h, CKA_VALUE).unwrap().len(),
+                "{side}: CKA_VALUE_LEN must equal len(CKA_VALUE)"
+            );
+            assert_ne!(vlen, ct_len as usize, "{side}: CKA_VALUE_LEN must not be the ciphertext length");
+        }
+    }
+
+    /// One-attribute CKA_VALUE_LEN template, the shape callers actually send.
+    fn value_len_template(v: &u32) -> [usize; 3] {
+        [CKA_VALUE_LEN as usize, v as *const u32 as usize, 4]
+    }
+
+    /// PKCS#11 v3.2 §4.1.1 rule 5 — a caller CKA_VALUE_LEN that contradicts the
+    /// CKA_VALUE the mechanism contributes is CKR_TEMPLATE_INCONSISTENT, and
+    /// §5.18.8/§5.18.9 require the call to "fail and return without creating any
+    /// key object". Uses the ciphertext length as the bogus value: exactly the
+    /// value the engine itself used to store.
+    #[test]
+    fn kem_conflicting_template_value_len_template_inconsistent() {
+        let _guard = test_lock::acquire();
+        setup();
+        let ps_val = CKP_FRODOKEM_640_SHAKE;
+        let mut pub_tpl = ps_template(&ps_val);
+        let mut prv_tpl = ps_template(&ps_val);
+        let mut kg_mech = mech(CKM_PQCTODAY_FRODOKEM_KEY_PAIR_GEN);
+        let (mut h_pub, mut h_prv) = (0u32, 0u32);
+        assert_eq!(
+            C_GenerateKeyPair(
+                SESSION,
+                kg_mech.as_mut_ptr() as *mut u8,
+                pub_tpl.as_mut_ptr() as *mut u8,
+                1,
+                prv_tpl.as_mut_ptr() as *mut u8,
+                1,
+                &mut h_pub,
+                &mut h_prv,
+            ),
+            CKR_OK
+        );
+
+        let mut kem_mech = mech(CKM_PQCTODAY_FRODOKEM_ENCAPSULATE);
+        let mut ct_len: u32 = 0;
+        let mut h_ss: u32 = 0;
+        assert_eq!(
+            C_EncapsulateKey(
+                SESSION,
+                kem_mech.as_mut_ptr() as *mut u8,
+                h_pub,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                &mut ct_len,
+                &mut h_ss,
+            ),
+            CKR_OK
+        );
+        let mut ct = vec![0u8; ct_len as usize];
+        let mut n = ct_len;
+
+        // Conflicting value (the ciphertext length) on ENCAPSULATE.
+        let bogus = ct_len;
+        let mut bad_tpl = value_len_template(&bogus);
+        let mut h_bad: u32 = 0;
+        assert_eq!(
+            C_EncapsulateKey(
+                SESSION,
+                kem_mech.as_mut_ptr() as *mut u8,
+                h_pub,
+                bad_tpl.as_mut_ptr() as *mut u8,
+                1,
+                ct.as_mut_ptr(),
+                &mut n,
+                &mut h_bad,
+            ),
+            CKR_TEMPLATE_INCONSISTENT,
+            "encapsulate must reject a CKA_VALUE_LEN that contradicts CKA_VALUE"
+        );
+        assert_eq!(h_bad, 0, "§5.18.8 — no key object may be created");
+
+        // Matching value (§4.1.1 rule 6) must succeed on ENCAPSULATE.
+        let good: u32 = 16; // FrodoKEM-640 shared secret
+        let mut good_tpl = value_len_template(&good);
+        let mut n2 = ct_len;
+        let mut h_ok: u32 = 0;
+        assert_eq!(
+            C_EncapsulateKey(
+                SESSION,
+                kem_mech.as_mut_ptr() as *mut u8,
+                h_pub,
+                good_tpl.as_mut_ptr() as *mut u8,
+                1,
+                ct.as_mut_ptr(),
+                &mut n2,
+                &mut h_ok,
+            ),
+            CKR_OK,
+            "a CKA_VALUE_LEN that restates the contributed value must be accepted"
+        );
+        assert_eq!(get_object_attr_u32(h_ok, CKA_VALUE_LEN), Some(good));
+
+        // Same two cases on DECAPSULATE, using the ciphertext just produced.
+        let mut h_bad_d: u32 = 0;
+        assert_eq!(
+            C_DecapsulateKey(
+                SESSION,
+                kem_mech.as_mut_ptr() as *mut u8,
+                h_prv,
+                bad_tpl.as_mut_ptr() as *mut u8,
+                1,
+                ct.as_mut_ptr(),
+                ct_len,
+                &mut h_bad_d,
+            ),
+            CKR_TEMPLATE_INCONSISTENT,
+            "decapsulate must reject a CKA_VALUE_LEN that contradicts CKA_VALUE"
+        );
+        assert_eq!(h_bad_d, 0, "§5.18.9 — no key object may be created");
+        let mut h_ok_d: u32 = 0;
+        assert_eq!(
+            C_DecapsulateKey(
+                SESSION,
+                kem_mech.as_mut_ptr() as *mut u8,
+                h_prv,
+                good_tpl.as_mut_ptr() as *mut u8,
+                1,
+                ct.as_mut_ptr(),
+                ct_len,
+                &mut h_ok_d,
+            ),
+            CKR_OK
+        );
+        assert_eq!(get_object_attr_u32(h_ok_d, CKA_VALUE_LEN), Some(good));
+        assert_eq!(obj_attr(h_ok_d, CKA_VALUE).unwrap().len(), good as usize);
     }
 
     #[test]
@@ -15500,6 +15793,155 @@ mod ecdh_kem_ffi_tests {
         );
         assert_eq!(rv, CKR_OK, "raw-SEC1 decapsulate: 0x{rv:x}");
         assert_eq!(get_object_value(h_ss_r).unwrap(), ss_e);
+
+        // §6.8.2 Table 103 — CKA_VALUE_LEN is the length of CKA_VALUE, on both
+        // sides, with no template supplied.
+        for (h, side) in [(h_ss_e, "encapsulate"), (h_ss_d, "decapsulate")] {
+            assert_eq!(
+                value_len_of(h),
+                ss_e.len(),
+                "{side}: CKA_VALUE_LEN must equal the shared-secret length"
+            );
+        }
+    }
+
+    /// CKA_VALUE_LEN of an object, as a usize.
+    fn value_len_of(handle: u32) -> usize {
+        get_object_attr_u32(handle, CKA_VALUE_LEN)
+            .expect("CKA_VALUE_LEN must be set on a KEM-produced key") as usize
+    }
+
+    fn value_len_template(v: &u32) -> [usize; 3] {
+        [CKA_VALUE_LEN as usize, v as *const u32 as usize, 4]
+    }
+
+    /// PKCS#11 v3.2 §6.3.17 — unlike the fixed-length KEMs, CKM_ECDH1_DERIVE
+    /// "truncates the result according to … the CKA_VALUE_LEN attribute of the
+    /// template. (The truncation removes bytes from the leading end of the
+    /// secret value.)", and §6.3.17 routes C_Encapsulate/DecapsulateKey through
+    /// that same EC Derive. Both sides must truncate identically or the peers
+    /// end up with different keys.
+    #[test]
+    fn ecdh_as_kem_template_value_len_truncates_both_sides() {
+        let _guard = test_lock::acquire();
+        setup();
+        install_ec_keypair(CURVE_P256);
+        let mut mech: [usize; 3] = [CKM_ECDH1_DERIVE as usize, 0, 0];
+        let want: u32 = 16; // half of the 32-byte P-256 X coordinate
+        let mut tpl = value_len_template(&want);
+
+        let mut ct_len: u32 = 2 + 65;
+        let mut ct = vec![0u8; ct_len as usize];
+        let mut h_e: u32 = 0;
+        let rv = C_EncapsulateKey_impl(
+            SESSION,
+            mech.as_mut_ptr() as *mut u8,
+            H_PUB,
+            tpl.as_mut_ptr() as *mut u8,
+            1,
+            ct.as_mut_ptr(),
+            &mut ct_len,
+            &mut h_e,
+        );
+        assert_eq!(rv, CKR_OK, "encapsulate with CKA_VALUE_LEN: 0x{rv:x}");
+        let ss_e = get_object_value(h_e).unwrap();
+        assert_eq!(ss_e.len(), want as usize, "§6.3.17 truncation");
+        assert_eq!(value_len_of(h_e), want as usize);
+
+        let mut h_d: u32 = 0;
+        let rv = C_DecapsulateKey_impl(
+            SESSION,
+            mech.as_mut_ptr() as *mut u8,
+            H_PRV,
+            tpl.as_mut_ptr() as *mut u8,
+            1,
+            ct.as_mut_ptr(),
+            ct_len,
+            &mut h_d,
+        );
+        assert_eq!(rv, CKR_OK, "decapsulate with CKA_VALUE_LEN: 0x{rv:x}");
+        assert_eq!(get_object_value(h_d).unwrap(), ss_e, "both peers must agree after truncation");
+        assert_eq!(value_len_of(h_d), want as usize);
+
+        // Untruncated run must yield the full 32 bytes ENDING in the same 16 —
+        // proves the truncation removed bytes from the LEADING end (§6.3.17).
+        let mut h_full: u32 = 0;
+        let rv = C_DecapsulateKey_impl(
+            SESSION,
+            mech.as_mut_ptr() as *mut u8,
+            H_PRV,
+            std::ptr::null_mut(),
+            0,
+            ct.as_mut_ptr(),
+            ct_len,
+            &mut h_full,
+        );
+        assert_eq!(rv, CKR_OK);
+        let full = get_object_value(h_full).unwrap();
+        assert_eq!(full.len(), 32);
+        assert_eq!(&full[16..], &ss_e[..], "truncation must keep the trailing bytes");
+    }
+
+    /// §6.3.17 truncation cannot LENGTHEN a secret, so an over-long
+    /// CKA_VALUE_LEN falls back to §4.1.1 rule 5 → CKR_TEMPLATE_INCONSISTENT,
+    /// with no key object created (§5.18.8/§5.18.9).
+    #[test]
+    fn ecdh_as_kem_oversized_template_value_len_template_inconsistent() {
+        let _guard = test_lock::acquire();
+        setup();
+        install_ec_keypair(CURVE_P256);
+        let mut mech: [usize; 3] = [CKM_ECDH1_DERIVE as usize, 0, 0];
+        let want: u32 = 64; // > the 32-byte P-256 shared secret
+        let mut tpl = value_len_template(&want);
+        let mut ct_len: u32 = 2 + 65;
+        let mut ct = vec![0u8; ct_len as usize];
+        let mut h_e: u32 = 0;
+        assert_eq!(
+            C_EncapsulateKey_impl(
+                SESSION,
+                mech.as_mut_ptr() as *mut u8,
+                H_PUB,
+                tpl.as_mut_ptr() as *mut u8,
+                1,
+                ct.as_mut_ptr(),
+                &mut ct_len,
+                &mut h_e,
+            ),
+            CKR_TEMPLATE_INCONSISTENT
+        );
+        assert_eq!(h_e, 0, "no key object may be created");
+
+        // Produce a valid ciphertext, then try the same on decapsulate.
+        let mut ct_len2: u32 = 2 + 65;
+        let mut h_ok: u32 = 0;
+        assert_eq!(
+            C_EncapsulateKey_impl(
+                SESSION,
+                mech.as_mut_ptr() as *mut u8,
+                H_PUB,
+                std::ptr::null_mut(),
+                0,
+                ct.as_mut_ptr(),
+                &mut ct_len2,
+                &mut h_ok,
+            ),
+            CKR_OK
+        );
+        let mut h_d: u32 = 0;
+        assert_eq!(
+            C_DecapsulateKey_impl(
+                SESSION,
+                mech.as_mut_ptr() as *mut u8,
+                H_PRV,
+                tpl.as_mut_ptr() as *mut u8,
+                1,
+                ct.as_mut_ptr(),
+                ct_len2,
+                &mut h_d,
+            ),
+            CKR_TEMPLATE_INCONSISTENT
+        );
+        assert_eq!(h_d, 0, "no key object may be created");
     }
 
     #[test]
@@ -15607,5 +16049,238 @@ mod ecdh_kem_ffi_tests {
             &mut h_ss,
         );
         assert_eq!(rv, CKR_MECHANISM_INVALID, "vendor decapsulate must be blocked");
+    }
+}
+
+/// CKA_VALUE_LEN on ML-KEM-produced shared-secret keys (PKCS#11 v3.2 §6.68.5 +
+/// §6.8.2 Table 103 + §4.1.1 rules 5/6). The FrodoKEM / Classic-McEliece and
+/// ECDH arms are covered in `pqc_vendor_kem_ffi_tests` / `ecdh_kem_ffi_tests`;
+/// this module closes the ML-KEM corner of the same invariant.
+#[cfg(test)]
+mod mlkem_value_len_ffi_tests {
+    use super::*;
+    use crate::native::test_lock;
+
+    const SESSION: u32 = 0x4D50_3001;
+
+    fn setup() {
+        crate::state::set_initialized(true);
+        SESSIONS.with(|s| {
+            s.borrow_mut()
+                .insert(SESSION, crate::state::SessionState { slot_id: 0, rw_session: true });
+        });
+        TOKEN_STORE.with(|ts| {
+            ts.borrow_mut()
+                .entry(0)
+                .or_insert_with(|| crate::state::TokenState {
+                    slot_id: 0,
+                    initialized: true,
+                    label: [0u8; 32],
+                    login_state: crate::state::LoginState::User,
+                    so_pin_salt: [0u8; 16],
+                    so_pin_hash: [0u8; 32],
+                    user_pin_salt: None,
+                    user_pin_hash: None,
+                })
+                .login_state = crate::state::LoginState::User;
+        });
+    }
+
+    fn obj_attr(handle: u32, attr_type: u32) -> Option<Vec<u8>> {
+        OBJECTS.with(|o| o.borrow().get(&handle).and_then(|a| a.get(&attr_type).cloned()))
+    }
+
+    fn value_len_of(handle: u32) -> usize {
+        get_object_attr_u32(handle, CKA_VALUE_LEN).expect("CKA_VALUE_LEN must be set") as usize
+    }
+
+    fn ulong_template(t: u32, v: &u32) -> [usize; 3] {
+        [t as usize, v as *const u32 as usize, 4]
+    }
+
+    /// Generate an ML-KEM keypair for `ps` and return (public, private) handles.
+    fn keypair(ps: u32) -> (u32, u32) {
+        let ps_val = ps;
+        let mut pub_tpl = ulong_template(CKA_PARAMETER_SET, &ps_val);
+        let mut prv_tpl = ulong_template(CKA_PARAMETER_SET, &ps_val);
+        let mut kg = [CKM_ML_KEM_KEY_PAIR_GEN as usize, 0usize, 0usize];
+        let (mut h_pub, mut h_prv) = (0u32, 0u32);
+        assert_eq!(
+            C_GenerateKeyPair(
+                SESSION,
+                kg.as_mut_ptr() as *mut u8,
+                pub_tpl.as_mut_ptr() as *mut u8,
+                1,
+                prv_tpl.as_mut_ptr() as *mut u8,
+                1,
+                &mut h_pub,
+                &mut h_prv,
+            ),
+            CKR_OK,
+            "CKM_ML_KEM_KEY_PAIR_GEN"
+        );
+        (h_pub, h_prv)
+    }
+
+    /// §6.68.5 — the mechanism "contributes the result as the CKA_VALUE
+    /// attribute of the new key"; §6.8.2 Table 103 defines CKA_VALUE_LEN as the
+    /// "Length in bytes of key value". FIPS 203 fixes that at 32 bytes for every
+    /// ML-KEM parameter set — never the (768/1088/1568-byte) ciphertext length.
+    fn value_len_round_trip(ps: u32, expected_ct_len: u32) {
+        setup();
+        let (h_pub, h_prv) = keypair(ps);
+        let mut kem = [CKM_ML_KEM as usize, 0usize, 0usize];
+        let mut ct_len: u32 = 0;
+        let mut h_e: u32 = 0;
+        assert_eq!(
+            C_EncapsulateKey(
+                SESSION,
+                kem.as_mut_ptr() as *mut u8,
+                h_pub,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                &mut ct_len,
+                &mut h_e,
+            ),
+            CKR_OK
+        );
+        assert_eq!(ct_len, expected_ct_len);
+        let mut ct = vec![0u8; ct_len as usize];
+        let mut n = ct_len;
+        assert_eq!(
+            C_EncapsulateKey(
+                SESSION,
+                kem.as_mut_ptr() as *mut u8,
+                h_pub,
+                std::ptr::null_mut(),
+                0,
+                ct.as_mut_ptr(),
+                &mut n,
+                &mut h_e,
+            ),
+            CKR_OK
+        );
+        let mut h_d: u32 = 0;
+        assert_eq!(
+            C_DecapsulateKey(
+                SESSION,
+                kem.as_mut_ptr() as *mut u8,
+                h_prv,
+                std::ptr::null_mut(),
+                0,
+                ct.as_mut_ptr(),
+                ct_len,
+                &mut h_d,
+            ),
+            CKR_OK
+        );
+        for (h, side) in [(h_e, "encapsulate"), (h_d, "decapsulate")] {
+            assert_eq!(value_len_of(h), 32, "{side}: FIPS 203 shared secret is 32 bytes");
+            assert_eq!(
+                value_len_of(h),
+                obj_attr(h, CKA_VALUE).unwrap().len(),
+                "{side}: CKA_VALUE_LEN must equal len(CKA_VALUE)"
+            );
+            assert_ne!(
+                value_len_of(h),
+                ct_len as usize,
+                "{side}: CKA_VALUE_LEN must not be the ciphertext length"
+            );
+        }
+    }
+
+    #[test]
+    fn ml_kem_512_value_len_is_secret_len() {
+        let _guard = test_lock::acquire();
+        value_len_round_trip(CKP_ML_KEM_512, 768);
+    }
+
+    #[test]
+    fn ml_kem_768_value_len_is_secret_len() {
+        let _guard = test_lock::acquire();
+        value_len_round_trip(CKP_ML_KEM_768, 1088);
+    }
+
+    #[test]
+    fn ml_kem_1024_value_len_is_secret_len() {
+        let _guard = test_lock::acquire();
+        value_len_round_trip(CKP_ML_KEM_1024, 1568);
+    }
+
+    /// §4.1.1 rule 5 (conflicting) / rule 6 (restating) applied to CKM_ML_KEM,
+    /// whose §6.68.5 definition offers no length knob at all.
+    #[test]
+    fn ml_kem_template_value_len_conflict_and_match() {
+        let _guard = test_lock::acquire();
+        setup();
+        let (h_pub, h_prv) = keypair(CKP_ML_KEM_768);
+        let mut kem = [CKM_ML_KEM as usize, 0usize, 0usize];
+        let mut ct = vec![0u8; 1088];
+        let mut n: u32 = 1088;
+        let mut h_ref: u32 = 0;
+        assert_eq!(
+            C_EncapsulateKey(
+                SESSION,
+                kem.as_mut_ptr() as *mut u8,
+                h_pub,
+                std::ptr::null_mut(),
+                0,
+                ct.as_mut_ptr(),
+                &mut n,
+                &mut h_ref,
+            ),
+            CKR_OK
+        );
+
+        let bogus: u32 = 16;
+        let mut bad = ulong_template(CKA_VALUE_LEN, &bogus);
+        let good: u32 = 32;
+        let mut ok = ulong_template(CKA_VALUE_LEN, &good);
+
+        for (tpl, want_rv, label) in [
+            (bad.as_mut_ptr(), CKR_TEMPLATE_INCONSISTENT, "conflicting"),
+            (ok.as_mut_ptr(), CKR_OK, "restating"),
+        ] {
+            let mut n2: u32 = 1088;
+            let mut h_e: u32 = 0;
+            assert_eq!(
+                C_EncapsulateKey(
+                    SESSION,
+                    kem.as_mut_ptr() as *mut u8,
+                    h_pub,
+                    tpl as *mut u8,
+                    1,
+                    ct.as_mut_ptr(),
+                    &mut n2,
+                    &mut h_e,
+                ),
+                want_rv,
+                "encapsulate with a {label} CKA_VALUE_LEN"
+            );
+            let mut h_d: u32 = 0;
+            assert_eq!(
+                C_DecapsulateKey(
+                    SESSION,
+                    kem.as_mut_ptr() as *mut u8,
+                    h_prv,
+                    tpl as *mut u8,
+                    1,
+                    ct.as_mut_ptr(),
+                    1088,
+                    &mut h_d,
+                ),
+                want_rv,
+                "decapsulate with a {label} CKA_VALUE_LEN"
+            );
+            if want_rv == CKR_OK {
+                assert_eq!(value_len_of(h_e), 32);
+                assert_eq!(value_len_of(h_d), 32);
+            } else {
+                // §5.18.8/§5.18.9 — no key object on failure.
+                assert_eq!(h_e, 0);
+                assert_eq!(h_d, 0);
+            }
+        }
     }
 }

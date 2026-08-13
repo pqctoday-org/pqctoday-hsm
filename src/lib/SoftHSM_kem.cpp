@@ -340,6 +340,22 @@ CK_RV SoftHSM::encapsulateKeyImpl
 			// CKA_VALUE must not be caller-supplied for encapsulated keys
 			case CKA_VALUE:
 				return CKR_ATTRIBUTE_VALUE_INVALID;
+			// PKCS#11 v3.2 §4.1.1 (which names C_EncapsulateKey as an
+			// object-creation function) rule 5: a template that is inconsistent
+			// with "any attribute values contributed to the object by the
+			// object-creation function itself" is CKR_TEMPLATE_INCONSISTENT.
+			// §6.68.5 gives CKM_ML_KEM no length knob ("The mechanism contributes
+			// the result as the CKA_VALUE attribute of the new key") and §6.8.2
+			// Table 103 defines CKA_VALUE_LEN as the "Length in bytes of key
+			// value" — so any other value contradicts CKA_VALUE. Rule 6 lets a
+			// template that merely restates the contributed value succeed.
+			case CKA_VALUE_LEN:
+				if (pTemplate[i].pValue == NULL_PTR ||
+				    pTemplate[i].ulValueLen != sizeof(CK_ULONG))
+					return CKR_ATTRIBUTE_VALUE_INVALID;
+				if (*(CK_ULONG*)pTemplate[i].pValue != (CK_ULONG)sharedSecret.size())
+					return CKR_TEMPLATE_INCONSISTENT;
+				continue; // engine writes the authoritative value below
 			default:
 				if (secretAttribsCount >= maxAttribs)
 					return CKR_TEMPLATE_INCONSISTENT;
@@ -364,6 +380,10 @@ CK_RV SoftHSM::encapsulateKeyImpl
 	bOK = bOK && osobject->setAttribute(CKA_NEVER_EXTRACTABLE, false);
 
 	// Store the shared secret as CKA_VALUE (encrypted if isPrivate)
+	// PKCS#11 v3.2 §6.8.2 Table 103 — CKA_VALUE_LEN is the "Length in bytes of
+	// key value", i.e. of the PLAINTEXT secret, never of the token-encrypted
+	// storedValue. Captured before the wipe below.
+	const unsigned long ssPlainLen = (unsigned long)sharedSecret.size();
 	ByteString storedValue;
 	if (isPrivate)
 		// Fold token->encrypt() into bOK: false (output wiped) on RNG/AES/not-logged-in
@@ -372,6 +392,11 @@ CK_RV SoftHSM::encapsulateKeyImpl
 	else
 		storedValue = sharedSecret;
 	bOK = bOK && osobject->setAttribute(CKA_VALUE, storedValue);
+	// P11GenericSecretKeyObj registers CKA_VALUE_LEN (P11AttrValueLen) and its
+	// setDefault() seeds it to 0, so leaving it unset published a key whose
+	// CKA_VALUE_LEN (0) contradicted its own CKA_VALUE — the §4.1.1-rule-5
+	// inconsistency, visible through C_GetAttributeValue. Fixed 2026-08-13.
+	bOK = bOK && osobject->setAttribute(CKA_VALUE_LEN, OSAttribute(ssPlainLen));
 	sharedSecret.wipe();
 	storedValue.wipe();
 
@@ -587,6 +612,18 @@ CK_RV SoftHSM::decapsulateKeyImpl
 			// CKA_VALUE must not be caller-supplied for decapsulated keys
 			case CKA_VALUE:
 				return CKR_ATTRIBUTE_VALUE_INVALID;
+			// PKCS#11 v3.2 §4.1.1 rules 5/6 — see the identical block in
+			// C_EncapsulateKey above. §6.68.5 fixes the ML-KEM shared-secret
+			// length; §6.8.2 Table 103 defines CKA_VALUE_LEN as the length of
+			// CKA_VALUE, so a differing template value cannot be satisfied and
+			// §5.18.9 forbids creating any key object in that case.
+			case CKA_VALUE_LEN:
+				if (pTemplate[i].pValue == NULL_PTR ||
+				    pTemplate[i].ulValueLen != sizeof(CK_ULONG))
+					return CKR_ATTRIBUTE_VALUE_INVALID;
+				if (*(CK_ULONG*)pTemplate[i].pValue != (CK_ULONG)sharedSecret.size())
+					return CKR_TEMPLATE_INCONSISTENT;
+				continue; // engine writes the authoritative value below
 			default:
 				if (secretAttribsCount >= maxAttribs)
 					return CKR_TEMPLATE_INCONSISTENT;
@@ -611,6 +648,9 @@ CK_RV SoftHSM::decapsulateKeyImpl
 	bOK = bOK && osobject->setAttribute(CKA_NEVER_EXTRACTABLE, false);
 
 	// Store the shared secret as CKA_VALUE (encrypted if isPrivate)
+	// §6.8.2 Table 103 — CKA_VALUE_LEN is the PLAINTEXT length, captured before
+	// the wipe below (never the length of the token-encrypted storedValue).
+	const unsigned long ssPlainLen = (unsigned long)sharedSecret.size();
 	ByteString storedValue;
 	if (isPrivate)
 		// Fold token->encrypt() into bOK: false (output wiped) on RNG/AES/not-logged-in
@@ -619,6 +659,9 @@ CK_RV SoftHSM::decapsulateKeyImpl
 	else
 		storedValue = sharedSecret;
 	bOK = bOK && osobject->setAttribute(CKA_VALUE, storedValue);
+	// Was never set before 2026-08-13: P11AttrValueLen::setDefault() left it 0,
+	// contradicting CKA_VALUE on every decapsulated key (§4.1.1 rule 5).
+	bOK = bOK && osobject->setAttribute(CKA_VALUE_LEN, OSAttribute(ssPlainLen));
 	sharedSecret.wipe();
 	storedValue.wipe();
 
@@ -844,6 +887,26 @@ CK_RV SoftHSM::encapsulateECDH
 				continue;
 			case CKA_VALUE:
 				return CKR_ATTRIBUTE_VALUE_INVALID;
+			// PKCS#11 v3.2 §6.3.17 makes CKA_VALUE_LEN an INPUT for this
+			// mechanism, not a claim to be checked: "This mechanism derives a
+			// secret value, and truncates the result according to the
+			// CKA_KEY_TYPE attribute of the template and, if it has one and the
+			// key type supports it, the CKA_VALUE_LEN attribute of the template.
+			// (The truncation removes bytes from the leading end of the secret
+			// value.)" — and the same section routes C_EncapsulateKey through
+			// that very "EC Derive". A length LONGER than the raw secret cannot
+			// be produced by truncation → §4.1.1 rule 5.
+			case CKA_VALUE_LEN:
+			{
+				if (pTemplate[i].pValue == NULL_PTR ||
+				    pTemplate[i].ulValueLen != sizeof(CK_ULONG))
+					return CKR_ATTRIBUTE_VALUE_INVALID;
+				CK_ULONG wantLen = *(CK_ULONG*)pTemplate[i].pValue;
+				if (wantLen == 0 || wantLen > (CK_ULONG)sharedSecret.size())
+					return CKR_TEMPLATE_INCONSISTENT;
+				sharedSecret = sharedSecret.substr(sharedSecret.size() - wantLen, wantLen);
+				continue; // engine writes the resulting length below
+			}
 			default:
 				if (secretAttribsCount >= maxAttribs)
 					return CKR_TEMPLATE_INCONSISTENT;
@@ -867,12 +930,16 @@ CK_RV SoftHSM::encapsulateECDH
 	bOK = bOK && osobject->setAttribute(CKA_ALWAYS_SENSITIVE, false);
 	bOK = bOK && osobject->setAttribute(CKA_NEVER_EXTRACTABLE, false);
 
+	// §6.8.2 Table 103 — plaintext length of the (possibly §6.3.17-truncated)
+	// secret, captured before the wipe below.
+	const unsigned long ssPlainLen = (unsigned long)sharedSecret.size();
 	ByteString storedValue;
 	if (isPrivate)
 		bOK = bOK && token->encrypt(sharedSecret, storedValue);
 	else
 		storedValue = sharedSecret;
 	bOK = bOK && osobject->setAttribute(CKA_VALUE, storedValue);
+	bOK = bOK && osobject->setAttribute(CKA_VALUE_LEN, OSAttribute(ssPlainLen));
 	sharedSecret.wipe();
 	storedValue.wipe();
 
@@ -1039,6 +1106,21 @@ CK_RV SoftHSM::decapsulateECDH
 				continue;
 			case CKA_VALUE:
 				return CKR_ATTRIBUTE_VALUE_INVALID;
+			// §6.3.17 — CKA_VALUE_LEN truncates "from the leading end of the
+			// secret value"; the same section routes C_DecapsulateKey through
+			// that same "EC Derive", so this must mirror encapsulateECDH
+			// exactly or the two peers derive different keys.
+			case CKA_VALUE_LEN:
+			{
+				if (pTemplate[i].pValue == NULL_PTR ||
+				    pTemplate[i].ulValueLen != sizeof(CK_ULONG))
+					return CKR_ATTRIBUTE_VALUE_INVALID;
+				CK_ULONG wantLen = *(CK_ULONG*)pTemplate[i].pValue;
+				if (wantLen == 0 || wantLen > (CK_ULONG)sharedSecret.size())
+					return CKR_TEMPLATE_INCONSISTENT;
+				sharedSecret = sharedSecret.substr(sharedSecret.size() - wantLen, wantLen);
+				continue; // engine writes the resulting length below
+			}
 			default:
 				if (secretAttribsCount >= maxAttribs)
 					return CKR_TEMPLATE_INCONSISTENT;
@@ -1062,12 +1144,16 @@ CK_RV SoftHSM::decapsulateECDH
 	bOK = bOK && osobject->setAttribute(CKA_ALWAYS_SENSITIVE, false);
 	bOK = bOK && osobject->setAttribute(CKA_NEVER_EXTRACTABLE, false);
 
+	// §6.8.2 Table 103 — plaintext length of the (possibly §6.3.17-truncated)
+	// secret, captured before the wipe below.
+	const unsigned long ssPlainLen = (unsigned long)sharedSecret.size();
 	ByteString storedValue;
 	if (isPrivate)
 		bOK = bOK && token->encrypt(sharedSecret, storedValue);
 	else
 		storedValue = sharedSecret;
 	bOK = bOK && osobject->setAttribute(CKA_VALUE, storedValue);
+	bOK = bOK && osobject->setAttribute(CKA_VALUE_LEN, OSAttribute(ssPlainLen));
 	sharedSecret.wipe();
 	storedValue.wipe();
 

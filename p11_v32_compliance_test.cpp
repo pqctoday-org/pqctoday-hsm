@@ -961,6 +961,266 @@ void test_kem_allowed_mechanisms() {
     }
 }
 
+// CKA_VALUE_LEN on KEM-produced shared-secret keys (2026-08-13 remediation).
+//
+// PKCS#11 v3.2 §6.8.2 Table 103 defines CKA_VALUE_LEN on a CKK_GENERIC_SECRET
+// object as the "Length in bytes of key value" — i.e. of CKA_VALUE. Until this
+// pass the C++ engine set CKA_VALUE on encapsulated/decapsulated keys but never
+// CKA_VALUE_LEN, and P11GenericSecretKeyObj registers the attribute with a
+// setDefault() of 0 — so every KEM-produced key published a CKA_VALUE_LEN of 0
+// alongside a 32-byte CKA_VALUE: the §4.1.1 rule-5 inconsistency, readable
+// straight out of C_GetAttributeValue.
+//
+// §4.1.1 names C_EncapsulateKey/C_DecapsulateKey as object-creation functions;
+// rule 5 makes a template that contradicts what the function contributes
+// CKR_TEMPLATE_INCONSISTENT, rule 6 lets one that merely restates it succeed.
+// §6.68.5 gives CKM_ML_KEM no length knob; §6.3.17 explicitly makes
+// CKA_VALUE_LEN a truncation request for CKM_ECDH1_DERIVE ("The truncation
+// removes bytes from the leading end of the secret value.").
+void test_kem_value_len() {
+    const char* CAT = "KEMValueLen";
+    typedef CK_RV (*C_EncapsulateKey_t)(CK_SESSION_HANDLE, CK_MECHANISM_PTR, CK_OBJECT_HANDLE, CK_ATTRIBUTE_PTR, CK_ULONG, CK_BYTE_PTR, CK_ULONG_PTR, CK_OBJECT_HANDLE_PTR);
+    typedef CK_RV (*C_DecapsulateKey_t)(CK_SESSION_HANDLE, CK_MECHANISM_PTR, CK_OBJECT_HANDLE, CK_ATTRIBUTE_PTR, CK_ULONG, CK_BYTE_PTR, CK_ULONG, CK_OBJECT_HANDLE_PTR);
+    void* dlib = dlopen(opt_engine.c_str(), RTLD_NOW);
+    C_EncapsulateKey_t EncapFn = (C_EncapsulateKey_t)dlsym(dlib, "C_EncapsulateKey");
+    C_DecapsulateKey_t DecapFn = (C_DecapsulateKey_t)dlsym(dlib, "C_DecapsulateKey");
+    if (!EncapFn || !DecapFn) {
+        record_result(CAT, "KEM_CKA_VALUE_LEN", "SKIP", "Function pointers missing");
+        return;
+    }
+
+    CK_BBOOL bTrue = CK_TRUE, bFalse = CK_FALSE;
+    CK_OBJECT_CLASS pubClass = CKO_PUBLIC_KEY, privClass = CKO_PRIVATE_KEY;
+    CK_OBJECT_CLASS secClass = CKO_SECRET_KEY;
+    CK_KEY_TYPE secType = CKK_GENERIC_SECRET;
+
+    // Minimal secret-key template WITHOUT CKA_VALUE_LEN — the engine must
+    // supply it itself.
+    CK_ATTRIBUTE ssTmpl[] = {
+        { CKA_CLASS,       &secClass, sizeof(secClass) },
+        { CKA_KEY_TYPE,    &secType,  sizeof(secType) },
+        { CKA_TOKEN,       &bFalse,   sizeof(bFalse) },
+        { CKA_EXTRACTABLE, &bTrue,    sizeof(bTrue) },
+        { CKA_SENSITIVE,   &bFalse,   sizeof(bFalse) },
+    };
+
+    // Read CKA_VALUE_LEN + CKA_VALUE and report whether they agree.
+    auto checkPair = [&](const std::string& name, CK_OBJECT_HANDLE h, CK_ULONG wantLen) {
+        CK_ULONG vlen = 0xDEADBEEF;
+        CK_ATTRIBUTE lenAttr = { CKA_VALUE_LEN, &vlen, sizeof(vlen) };
+        CK_RV r1 = fl->C_GetAttributeValue(hSess, h, &lenAttr, 1);
+        CK_BYTE val[256];
+        CK_ATTRIBUTE valAttr = { CKA_VALUE, val, sizeof(val) };
+        CK_RV r2 = fl->C_GetAttributeValue(hSess, h, &valAttr, 1);
+        if (r1 != CKR_OK || r2 != CKR_OK) {
+            record_result(CAT, name, "FAIL",
+                          "C_GetAttributeValue RV=" + std::to_string(r1) + "/" + std::to_string(r2));
+            return;
+        }
+        bool ok = (vlen == wantLen) && (vlen == valAttr.ulValueLen);
+        record_result(CAT, name, ok ? "PASS" : "FAIL",
+                      "CKA_VALUE_LEN=" + std::to_string(vlen) +
+                      " len(CKA_VALUE)=" + std::to_string(valAttr.ulValueLen) +
+                      " (want " + std::to_string(wantLen) + ")");
+    };
+
+    // ── ML-KEM-768: §6.68.5 + FIPS 203 → 32-byte shared secret ──────────
+    CK_OBJECT_HANDLE hPub = 0, hPriv = 0;
+    {
+        CK_KEY_TYPE kemType = CKK_ML_KEM;
+        CK_ULONG ps768 = 2;
+        CK_ATTRIBUTE pubTmpl[] = {
+            { CKA_CLASS,         &pubClass, sizeof(pubClass) },
+            { CKA_KEY_TYPE,      &kemType,  sizeof(kemType) },
+            { CKA_ENCAPSULATE,   &bTrue,    sizeof(bTrue) },
+            { CKA_PARAMETER_SET, &ps768,    sizeof(ps768) },
+            { CKA_TOKEN,         &bFalse,   sizeof(bFalse) }
+        };
+        CK_ATTRIBUTE privTmpl[] = {
+            { CKA_CLASS,         &privClass, sizeof(privClass) },
+            { CKA_KEY_TYPE,      &kemType,   sizeof(kemType) },
+            { CKA_DECAPSULATE,   &bTrue,     sizeof(bTrue) },
+            { CKA_PARAMETER_SET, &ps768,     sizeof(ps768) },
+            { CKA_TOKEN,         &bFalse,    sizeof(bFalse) }
+        };
+        CK_MECHANISM kemGen = { CKM_ML_KEM_KEY_PAIR_GEN, NULL_PTR, 0 };
+        CK_RV rv = fl->C_GenerateKeyPair(hSess, &kemGen, pubTmpl, 5, privTmpl, 5, &hPub, &hPriv);
+        if (rv != CKR_OK) {
+            record_result(CAT, "Generate_ML_KEM_768", "FAIL", "RV=" + std::to_string(rv));
+            return;
+        }
+        record_result(CAT, "Generate_ML_KEM_768", "PASS", "");
+    }
+
+    CK_MECHANISM mlkemMech = { CKM_ML_KEM, NULL_PTR, 0 };
+    CK_BYTE ct[2000]; CK_ULONG ctLen = sizeof(ct);
+    CK_OBJECT_HANDLE hEnc = 0, hDec = 0;
+    CK_RV rv = EncapFn(hSess, &mlkemMech, hPub, ssTmpl, 5, ct, &ctLen, &hEnc);
+    if (rv != CKR_OK) {
+        record_result(CAT, "Encap_MLKEM768", "FAIL", "RV=" + std::to_string(rv));
+        return;
+    }
+    record_result(CAT, "Encap_MLKEM768", "PASS", "ct len=" + std::to_string(ctLen));
+    checkPair("Encap_MLKEM768_VALUE_LEN", hEnc, 32);
+
+    rv = DecapFn(hSess, &mlkemMech, hPriv, ssTmpl, 5, ct, ctLen, &hDec);
+    if (rv != CKR_OK) {
+        record_result(CAT, "Decap_MLKEM768", "FAIL", "RV=" + std::to_string(rv));
+    } else {
+        record_result(CAT, "Decap_MLKEM768", "PASS", "");
+        checkPair("Decap_MLKEM768_VALUE_LEN", hDec, 32);
+    }
+
+    // ── §4.1.1 rule 5: a CKA_VALUE_LEN contradicting the contributed
+    // CKA_VALUE must be refused, in BOTH directions, without creating a key.
+    {
+        CK_ULONG bogus = 16; // ML-KEM's secret is 32
+        CK_ATTRIBUTE badTmpl[] = {
+            { CKA_CLASS,       &secClass, sizeof(secClass) },
+            { CKA_KEY_TYPE,    &secType,  sizeof(secType) },
+            { CKA_TOKEN,       &bFalse,   sizeof(bFalse) },
+            { CKA_EXTRACTABLE, &bTrue,    sizeof(bTrue) },
+            { CKA_VALUE_LEN,   &bogus,    sizeof(bogus) },
+        };
+        CK_BYTE ct2[2000]; CK_ULONG ct2Len = sizeof(ct2);
+        CK_OBJECT_HANDLE hBad = CK_INVALID_HANDLE;
+        CK_RV r = EncapFn(hSess, &mlkemMech, hPub, badTmpl, 5, ct2, &ct2Len, &hBad);
+        record_result(CAT, "Encap_MLKEM768_conflicting_VALUE_LEN",
+                      r == CKR_TEMPLATE_INCONSISTENT ? "PASS" : "FAIL",
+                      "RV=" + std::to_string(r) + " (want CKR_TEMPLATE_INCONSISTENT)");
+        hBad = CK_INVALID_HANDLE;
+        r = DecapFn(hSess, &mlkemMech, hPriv, badTmpl, 5, ct, ctLen, &hBad);
+        record_result(CAT, "Decap_MLKEM768_conflicting_VALUE_LEN",
+                      r == CKR_TEMPLATE_INCONSISTENT ? "PASS" : "FAIL",
+                      "RV=" + std::to_string(r) + " (want CKR_TEMPLATE_INCONSISTENT)");
+    }
+
+    // ── §4.1.1 rule 6: a CKA_VALUE_LEN that RESTATES the contributed value
+    // must be accepted (this is also what test_pqc_kem/test_hybrid_kem send).
+    {
+        CK_ULONG good = 32;
+        CK_ATTRIBUTE okTmpl[] = {
+            { CKA_CLASS,       &secClass, sizeof(secClass) },
+            { CKA_KEY_TYPE,    &secType,  sizeof(secType) },
+            { CKA_TOKEN,       &bFalse,   sizeof(bFalse) },
+            { CKA_EXTRACTABLE, &bTrue,    sizeof(bTrue) },
+            { CKA_VALUE_LEN,   &good,     sizeof(good) },
+        };
+        CK_OBJECT_HANDLE hOk = CK_INVALID_HANDLE;
+        CK_RV r = DecapFn(hSess, &mlkemMech, hPriv, okTmpl, 5, ct, ctLen, &hOk);
+        if (r != CKR_OK) {
+            record_result(CAT, "Decap_MLKEM768_matching_VALUE_LEN", "FAIL", "RV=" + std::to_string(r));
+        } else {
+            record_result(CAT, "Decap_MLKEM768_matching_VALUE_LEN", "PASS", "");
+            checkPair("Decap_MLKEM768_matching_VALUE_LEN_readback", hOk, 32);
+        }
+    }
+
+    // ── ECDH-as-KEM on P-256: §6.3.17 truncation semantics ──────────────
+    {
+        CK_KEY_TYPE ecType = CKK_EC;
+        CK_BYTE oid_p256[] = { 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07 };
+        CK_ATTRIBUTE pubTmpl[] = {
+            { CKA_CLASS,       &pubClass, sizeof(pubClass) },
+            { CKA_KEY_TYPE,    &ecType,   sizeof(ecType) },
+            { CKA_EC_PARAMS,   oid_p256,  sizeof(oid_p256) },
+            { CKA_ENCAPSULATE, &bTrue,    sizeof(bTrue) },
+            { CKA_TOKEN,       &bFalse,   sizeof(bFalse) }
+        };
+        CK_ATTRIBUTE privTmpl[] = {
+            { CKA_CLASS,       &privClass, sizeof(privClass) },
+            { CKA_KEY_TYPE,    &ecType,    sizeof(ecType) },
+            { CKA_DECAPSULATE, &bTrue,     sizeof(bTrue) },
+            { CKA_TOKEN,       &bFalse,    sizeof(bFalse) }
+        };
+        CK_MECHANISM ecGen = { CKM_EC_KEY_PAIR_GEN, NULL_PTR, 0 };
+        CK_OBJECT_HANDLE hEcPub = 0, hEcPriv = 0;
+        CK_RV r = fl->C_GenerateKeyPair(hSess, &ecGen, pubTmpl, 5, privTmpl, 4, &hEcPub, &hEcPriv);
+        if (r != CKR_OK) {
+            record_result(CAT, "Generate_EC_P256", "FAIL", "RV=" + std::to_string(r));
+            return;
+        }
+        record_result(CAT, "Generate_EC_P256", "PASS", "");
+
+        CK_MECHANISM ecdhMech = { CKM_ECDH1_DERIVE, NULL_PTR, 0 };
+
+        // (a) no CKA_VALUE_LEN → full 32-byte X coordinate on both sides.
+        CK_BYTE ecCt[200]; CK_ULONG ecCtLen = sizeof(ecCt);
+        CK_OBJECT_HANDLE hE = 0, hD = 0;
+        r = EncapFn(hSess, &ecdhMech, hEcPub, ssTmpl, 5, ecCt, &ecCtLen, &hE);
+        if (r != CKR_OK) {
+            record_result(CAT, "Encap_ECDH_P256", "FAIL", "RV=" + std::to_string(r));
+            return;
+        }
+        record_result(CAT, "Encap_ECDH_P256", "PASS", "ct len=" + std::to_string(ecCtLen));
+        checkPair("Encap_ECDH_P256_VALUE_LEN", hE, 32);
+        r = DecapFn(hSess, &ecdhMech, hEcPriv, ssTmpl, 5, ecCt, ecCtLen, &hD);
+        if (r != CKR_OK) {
+            record_result(CAT, "Decap_ECDH_P256", "FAIL", "RV=" + std::to_string(r));
+        } else {
+            record_result(CAT, "Decap_ECDH_P256", "PASS", "");
+            checkPair("Decap_ECDH_P256_VALUE_LEN", hD, 32);
+        }
+
+        // (b) CKA_VALUE_LEN=16 → §6.3.17 truncation, and both peers must
+        // still agree (the encapsulator and decapsulator truncate the same).
+        CK_ULONG want16 = 16;
+        CK_ATTRIBUTE truncTmpl[] = {
+            { CKA_CLASS,       &secClass, sizeof(secClass) },
+            { CKA_KEY_TYPE,    &secType,  sizeof(secType) },
+            { CKA_TOKEN,       &bFalse,   sizeof(bFalse) },
+            { CKA_EXTRACTABLE, &bTrue,    sizeof(bTrue) },
+            { CKA_SENSITIVE,   &bFalse,   sizeof(bFalse) },
+            { CKA_VALUE_LEN,   &want16,   sizeof(want16) },
+        };
+        CK_BYTE tCt[200]; CK_ULONG tCtLen = sizeof(tCt);
+        CK_OBJECT_HANDLE hTE = 0, hTD = 0;
+        r = EncapFn(hSess, &ecdhMech, hEcPub, truncTmpl, 6, tCt, &tCtLen, &hTE);
+        if (r != CKR_OK) {
+            record_result(CAT, "Encap_ECDH_P256_truncated", "FAIL", "RV=" + std::to_string(r));
+        } else {
+            record_result(CAT, "Encap_ECDH_P256_truncated", "PASS", "");
+            checkPair("Encap_ECDH_P256_truncated_VALUE_LEN", hTE, 16);
+            r = DecapFn(hSess, &ecdhMech, hEcPriv, truncTmpl, 6, tCt, tCtLen, &hTD);
+            if (r != CKR_OK) {
+                record_result(CAT, "Decap_ECDH_P256_truncated", "FAIL", "RV=" + std::to_string(r));
+            } else {
+                checkPair("Decap_ECDH_P256_truncated_VALUE_LEN", hTD, 16);
+                CK_BYTE v1[64]; CK_ATTRIBUTE a1 = { CKA_VALUE, v1, sizeof(v1) };
+                CK_BYTE v2[64]; CK_ATTRIBUTE a2 = { CKA_VALUE, v2, sizeof(v2) };
+                fl->C_GetAttributeValue(hSess, hTE, &a1, 1);
+                fl->C_GetAttributeValue(hSess, hTD, &a2, 1);
+                bool ok = a1.ulValueLen == 16 && a1.ulValueLen == a2.ulValueLen &&
+                          memcmp(v1, v2, a1.ulValueLen) == 0;
+                record_result(CAT, "Decap_ECDH_P256_truncated", ok ? "PASS" : "FAIL",
+                              "truncated secrets must match on both sides");
+            }
+        }
+
+        // (c) CKA_VALUE_LEN longer than the secret cannot be produced by
+        // truncation → §4.1.1 rule 5.
+        CK_ULONG want64 = 64;
+        CK_ATTRIBUTE bigTmpl[] = {
+            { CKA_CLASS,       &secClass, sizeof(secClass) },
+            { CKA_KEY_TYPE,    &secType,  sizeof(secType) },
+            { CKA_TOKEN,       &bFalse,   sizeof(bFalse) },
+            { CKA_EXTRACTABLE, &bTrue,    sizeof(bTrue) },
+            { CKA_VALUE_LEN,   &want64,   sizeof(want64) },
+        };
+        CK_BYTE bCt[200]; CK_ULONG bCtLen = sizeof(bCt);
+        CK_OBJECT_HANDLE hB = CK_INVALID_HANDLE;
+        r = EncapFn(hSess, &ecdhMech, hEcPub, bigTmpl, 5, bCt, &bCtLen, &hB);
+        record_result(CAT, "Encap_ECDH_P256_oversized_VALUE_LEN",
+                      r == CKR_TEMPLATE_INCONSISTENT ? "PASS" : "FAIL",
+                      "RV=" + std::to_string(r) + " (want CKR_TEMPLATE_INCONSISTENT)");
+        hB = CK_INVALID_HANDLE;
+        r = DecapFn(hSess, &ecdhMech, hEcPriv, bigTmpl, 5, ecCt, ecCtLen, &hB);
+        record_result(CAT, "Decap_ECDH_P256_oversized_VALUE_LEN",
+                      r == CKR_TEMPLATE_INCONSISTENT ? "PASS" : "FAIL",
+                      "RV=" + std::to_string(r) + " (want CKR_TEMPLATE_INCONSISTENT)");
+    }
+}
+
 #ifndef CKM_HASH_ML_DSA_SHA512
 #define CKM_HASH_ML_DSA_SHA512 0x00000026UL
 #define CKM_HASH_ML_DSA_SHA3_512 0x0000002aUL
@@ -5854,6 +6114,7 @@ int main(int argc, char** argv) {
     if (opt_category == "all" || opt_category == "pqc-kem") { refresh_session(); test_pqc_kem(); }
     if (opt_category == "all" || opt_category == "pqc-kem") { refresh_session(); test_hybrid_kem(); }
     if (opt_category == "all" || opt_category == "pqc-kem") { refresh_session(); test_kem_allowed_mechanisms(); }
+    if (opt_category == "all" || opt_category == "pqc-kem") { refresh_session(); test_kem_value_len(); }
     if (opt_category == "all" || opt_category == "pqc-dsa") { refresh_session(); test_pqc_dsa(); }
     if (opt_category == "all" || opt_category == "pqc-dsa") { refresh_session(); test_mldsa_context_binding(); }
     if (opt_category == "all" || opt_category == "pqc-dsa") { refresh_session(); test_multipart_signing(); }
