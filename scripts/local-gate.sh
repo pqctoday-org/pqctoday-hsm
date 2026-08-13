@@ -16,6 +16,7 @@
 #   6. (--cpp)  C++ ctest incl. the v3.2 compliance harness  [opt-in, slow]
 #   7. (--acvp-wasm)  20-suite ACVP wasm harness              [opt-in, slow]
 #   8. (--rust-p11)  Rust engine PKCS#11 v3.2 conformance (257 checks) [opt-in]
+#   9. (--tls-interop) §3.3.3 hybrid TLS groups vs real OpenSSL 3.6  [opt-in]
 #
 # On success it writes .gate-ok-<HEAD-sha> so a pre-push hook can verify the
 # gate ran on the current commit.
@@ -40,12 +41,14 @@ AG_RUST="/ag/pqctoday-hsm/rust"
 RUN_CPP=0
 RUN_ACVP_WASM=0
 RUN_RUST_P11=0
+RUN_TLS_INTEROP=0
 for arg in "$@"; do
   case "$arg" in
     --cpp) RUN_CPP=1 ;;
     --acvp-wasm) RUN_ACVP_WASM=1 ;;
     --rust-p11) RUN_RUST_P11=1 ;;
-    --all) RUN_CPP=1; RUN_ACVP_WASM=1; RUN_RUST_P11=1 ;;
+    --tls-interop) RUN_TLS_INTEROP=1 ;;
+    --all) RUN_CPP=1; RUN_ACVP_WASM=1; RUN_RUST_P11=1; RUN_TLS_INTEROP=1 ;;
     *) echo "unknown flag: $arg" >&2; exit 2 ;;
   esac
 done
@@ -150,6 +153,30 @@ if [[ $RUN_RUST_P11 == 1 ]]; then
   else
     bad "Rust PKCS#11 v3.2 conformance"
   fi
+fi
+
+if [[ $RUN_TLS_INTEROP == 1 ]]; then
+  # §3.3.3 requires all three hybrid TLS groups. SecP384r1MLKEM1024 is composed
+  # locally (src/server/secp384r1mlkem1024.rs) because rustls 0.23 lacks it, and
+  # a locally-composed hybrid MUST be proven against an independent peer: a
+  # reversed combiner agrees perfectly with itself and with nobody else. OpenSSL
+  # 3.6 has the group natively, so it is that peer.
+  #
+  # The container ships OpenSSL 3.5.6, which has ML-KEM but NOT this hybrid, so
+  # point OPENSSL_BIN at a >= 3.6 build. One way, if a container on this host has
+  # one (e.g. the sandbox network image):
+  #   docker exec <ossl36-container> tar -cf - -C /usr/local ssl \
+  #     | docker exec -i $RUST_CONTAINER tar -xf - -C /usr/local
+  # then LD_LIBRARY_PATH=/usr/local/ssl/lib OPENSSL_BIN=/usr/local/ssl/bin/openssl.
+  # The test FAILS (never skips) if the tool is missing or too old.
+  OSSL_BIN="${OPENSSL_BIN:-/usr/local/ssl/bin/openssl}"
+  OSSL_LIB="${OPENSSL_LIB_DIR:-/usr/local/ssl/lib}"
+  # `touch` first: cargo has missed source changes across this bind mount, and a
+  # stale binary once made a deliberately-sabotaged combiner report all-green.
+  run_step "§3.3.3 hybrid TLS groups vs OpenSSL 3.6" \
+    "cd $AG_KMIP && touch src/server/secp384r1mlkem1024.rs && \
+     LD_LIBRARY_PATH=$OSSL_LIB OPENSSL_BIN=$OSSL_BIN RUST_MIN_STACK=134217728 \
+     cargo test --quiet --test secp384r1mlkem1024_interop -- --ignored --test-threads=1"
 fi
 
 # ── verdict ─────────────────────────────────────────────────────────────────

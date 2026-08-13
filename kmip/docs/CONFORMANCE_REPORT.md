@@ -45,7 +45,7 @@ covered separately by the 42-transcript vendored subset in `../conformance/pqc_c
 | Asynchronous processing | ✅ **real** — job store + background executor | Poll/Cancel/Process/Query Asynchronous Requests all genuinely implemented (Phase 4) |
 | Stateful hash-based signatures | ✅ **real** — HSS/LMS wired to the engine | KMIP `Sign` on an HSS/LMS key advances + persists the real leaf index (Phase 1.5) |
 | Baseline Server profile (§5.1.2) | ⚠️ **all conditions met except item 10** (server-to-client) | §5 below — a documented deviation, not a gap discovered late |
-| Quantum Safe Authentication Suite (Profiles §3.3) | ⚠️ **§3.3.1/2/4/5 met; §3.3.3 partial** — 2 of 3 mandated hybrid groups | §5.2 below. Say *measured against*, never *conformant to* |
+| Quantum Safe Authentication Suite (Profiles §3.3) | ✅ **all clauses met** — all 3 mandated hybrid groups, interop-proven vs OpenSSL 3.6 | §5.2 below |
 | Third-party interop (PyKMIP / vendor) | ⏸️ never run — **not currently possible** | KMIP 3.0 has no compatible OSS client; see §5.3 |
 
 **Bottom line**: the wire bytes match the KMIP 3.0 CSD02 draft byte-for-byte AND the dispatcher
@@ -362,9 +362,9 @@ or a product requirement for full 13/13 Baseline Server conformance. The impleme
 path, if reopened, is `HONEST_MAXIMUM_PLAN.md` Phase 5 — plus a client-side receive loop
 in the Python client, without which the feature cannot be demonstrated.
 
-## 5.2 Quantum Safe Authentication Suite (Profiles CSD02 §3.3): partial
+## 5.2 Quantum Safe Authentication Suite (Profiles CSD02 §3.3): all clauses met
 
-The KMIP server can enforce the §3.3 quantum-safe TLS profile via
+The KMIP server enforces the §3.3 quantum-safe TLS profile via
 `--tls-profile quantum-safe` (opt-in; `permissive` remains the default so existing
 deployments do not break). Clause by clause:
 
@@ -372,21 +372,40 @@ deployments do not break). Clause by clause:
 |---|---|---|
 | §3.3.1 | TLS 1.3 only; TLS 1.2 and below SHALL NOT | **Met** — `.with_protocol_versions(&[&TLS13])` |
 | §3.3.2 | Only `TLS13-CHACHA20-POLY1305-SHA256` + `TLS13-AES-256-GCM-SHA384` | **Met** — AES-128-GCM deliberately excluded |
-| §3.3.3 | Server SHALL support `X25519MLKEM768`, `SecP256r1MLKEM768`, **`SecP384r1MLKEM1024`**; SHALL NOT offer unlisted groups | **PARTIAL — 2 of 3.** Classical groups are correctly absent; `SecP384r1MLKEM1024` is unavailable |
+| §3.3.3 | Server SHALL support `X25519MLKEM768`, `SecP256r1MLKEM768`, **`SecP384r1MLKEM1024`**; SHALL NOT offer unlisted groups | **Met (2026-08-12)** — all three offered and interop-proven; classical groups absent, not deprioritised |
 | §3.3.4 | mTLS SHOULD; absent it the client SHALL send credentials | **Met** — the server refuses to start with neither `--auth-user` nor `--tls-client-ca` |
 | §3.3.5 | Port 5696 | **Met** |
 
-**Why §3.3.3 is partial**: rustls 0.23 has no `SecP384r1MLKEM1024` — the group is absent
-from `crypto::aws_lc_rs::kx_group`, there is no `NamedGroup` codepoint for `0x11ed`, and
-the `hybrid` module is private, so it cannot be composed from downstream. This is a
-dependency limitation, not a platform one: OpenSSL 3.6 has the group, and
-`rust/src/native/hybrid.rs` already implements the `0x11ED` construction as a KEM. The
-startup summary prints the gap explicitly rather than reporting a clean profile.
+**How §3.3.3 was closed.** rustls 0.23 ships only two of the three: `0x11ed` has no
+`NamedGroup` variant, no `crypto::aws_lc_rs::kx_group` entry, and the generic `Hybrid`
+combinator behind the other two is a private module. The third is therefore composed in
+`src/server/secp384r1mlkem1024.rs` from the halves rustls does export publicly
+(`kx_group::SECP384R1`, `kx_group::MLKEM1024`) via the public `hybrid_component()` /
+`complete_hybrid_component()` seams. Wire order and combiner follow
+`draft-ietf-tls-ecdhe-mlkem` — classical element first (`p384 ‖ mlkem` in shares,
+`ss_p384 ‖ ss_mlkem` in the secret), cross-checked against this repo's independent
+PKCS#11-layer implementation in `rust/src/native/hybrid.rs`. No new cryptography was
+written; both halves are aws-lc-rs primitives already in use.
 
-**Wording rule, repo-wide**: describe this server as ***measured against*** the Quantum
-Safe Authentication Suite — **never as *conformant to* it** — until all three groups are
-offered. This rule applies to the README, the benchmark reports, the hub playground and
-any external material.
+**Evidence, and why self-tests were not enough.** A locally-composed hybrid that only
+round-trips against itself proves nothing about the wire format: reverse the combiner and
+both ends reverse it identically — perfect agreement, universal incompatibility. The gate
+is therefore a handshake against an implementation from outside this codebase, OpenSSL 3.6,
+which carries the group natively (`tests/secp384r1mlkem1024_interop.rs`, run by
+`scripts/local-gate.sh --tls-interop`). It asserts the negotiated group **by name**, so a
+silent fallback to the bare P-384 component cannot pass; requires application data to flow,
+so agreeing keys are demonstrated rather than assumed; and carries a negative control in
+which a classical-only client must be refused. The suite was verified non-vacuous by
+deliberately reversing the combiner — the interop test fails, as does the self round-trip.
+(That check first appeared to pass against a stale build; `--tls-interop` now `touch`es the
+source before building, because cargo has missed changes across the container bind mount.)
+
+**Wording rule, repo-wide (revised 2026-08-12)**: "§3.3 conformant" is now defensible for
+the server's TLS posture. Two caveats still attach to any wider claim, and neither is
+affected by this work: KMIP 3.0 is a **committee draft (CSD02)**, not a ratified Standard,
+and no third-party KMIP client exists to interop the protocol against (§5.3). Benchmark
+material keeps its "measured against" language — that phrasing was about measurement
+methodology, not about this gap.
 
 **Codepoint note.** At the managed-object layer `SecP384r1MLKEM1024` is registered at the
 vendor-extension codepoint `0x8000005e` (`kmip30/algos.rs`), because Profiles CSD02

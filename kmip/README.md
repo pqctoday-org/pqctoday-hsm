@@ -142,24 +142,47 @@ the profile most deployments actually run.
   --tls-client-ca admin-certs/ca.crt
 ```
 
-The startup log prints the groups and suites actually in force, including the
-gap below, so an operator can see the posture without reading the source.
+The startup log prints the groups and suites actually in force, so an operator
+can see the posture without reading the source.
 
-#### Known gap — §3.3.3 is met in PART
+#### §3.3.3 — all three groups, as of 2026-08-12
 
 §3.3.3 requires servers to support **all three** of `X25519MLKEM768`,
-`SecP256r1MLKEM768` and `SecP384r1MLKEM1024`. This server offers the **first
-two**. `SecP384r1MLKEM1024` (IANA `0x11ed`) does not exist in rustls 0.23: it
-is absent from `crypto::aws_lc_rs::kx_group`, has no `NamedGroup` codepoint,
-and the `hybrid` module it would be composed from is private. It is a rustls
-limitation, not a platform one — OpenSSL 3.6 carries all three, and this repo's
-own `rust/src/native/hybrid.rs` already implements the `0x11ED` construction as
-a KEM. Closing it needs a rustls key-exchange binding, not new cryptography.
+`SecP256r1MLKEM768` and `SecP384r1MLKEM1024`, and to offer nothing outside that
+list. All three are now offered, and classical groups are absent entirely
+rather than merely deprioritised.
 
-> **Wording rule.** Because of that gap, describe this server as **measured
-> against** the Quantum Safe Authentication Suite — **never as conformant to
-> it**. That applies to docs, UI copy, scenario text and benchmark output
-> alike, and it stays true until `0x11ed` is actually offered.
+`SecP384r1MLKEM1024` (IANA `0x11ed`) does not exist in rustls 0.23 — it has no
+`NamedGroup` variant, no entry in `crypto::aws_lc_rs::kx_group`, and the generic
+`Hybrid` combinator the other two are built from is private. It is therefore
+composed here, in [`src/server/secp384r1mlkem1024.rs`](src/server/secp384r1mlkem1024.rs),
+from the two halves rustls *does* export (`kx_group::SECP384R1`,
+`kx_group::MLKEM1024`) through the public `hybrid_component()` seams. No new
+cryptography — only the wiring rustls had not published.
+
+**How it is proven.** A locally-composed hybrid that is self-consistent proves
+nothing: reverse the combiner and both sides reverse it identically, agreeing
+with each other and with no one else. So the gate is a handshake against an
+implementation that did not come from this codebase — OpenSSL 3.6, which has
+the group natively:
+
+```bash
+bash scripts/local-gate.sh --tls-interop
+```
+
+`tests/secp384r1mlkem1024_interop.rs` asserts the negotiated group **by name**
+(so a fallback to the bare P-384 component cannot pass), requires application
+data to actually flow, and includes a negative control proving a classical-only
+client is refused. It was verified non-vacuous by deliberately reversing the
+combiner: the interop test fails, as does the self round-trip.
+
+> **Wording rule.** With all three groups offered and interop-proven, "§3.3
+> conformant" is defensible for the server's TLS posture. Two caveats still
+> attach to any broader claim: KMIP 3.0 itself is a **committee draft (CSD02)**,
+> not a ratified standard, and no third-party KMIP client exists to interop the
+> *protocol* against (see `docs/CONFORMANCE_REPORT.md` §5.3). Benchmarks
+> comparing postures remain "measured against" language — that phrase was about
+> measurement methodology, not this gap.
 
 #### Proving a channel is quantum-safe from the client
 
