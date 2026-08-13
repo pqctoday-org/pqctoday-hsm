@@ -105,16 +105,17 @@ impl TlsProfile {
 /// dependency), so this selects between providers already present rather
 /// than adding one.
 ///
-/// **Known gap — §3.3.3 is met in part, not in full.** The clause requires
-/// servers to support `X25519MLKEM768`, `SecP256r1MLKEM768` *and*
-/// `SecP384r1MLKEM1024`. rustls 0.23.40 has no `SecP384r1MLKEM1024`: it is
-/// absent from `crypto::aws_lc_rs::kx_group`, has no `NamedGroup` codepoint
-/// for `0x11ed`, and the `hybrid` module it would be built from is private,
-/// so it cannot be composed downstream either. Two of three are offered.
-/// This is a rustls limitation rather than a platform one — OpenSSL 3.6
-/// carries all three. Until it lands upstream, describe this server as
-/// *measured against* the Quantum Safe Authentication Suite, never as
-/// *conformant to* it.
+/// **§3.3.3 is met in full as of 2026-08-12.** The clause requires servers to
+/// support `X25519MLKEM768`, `SecP256r1MLKEM768` *and* `SecP384r1MLKEM1024`,
+/// and to offer nothing outside that list. rustls 0.23.40 ships only the first
+/// two — `0x11ed` has no `NamedGroup` variant and the generic `Hybrid`
+/// combinator is in a private module — so the third is composed downstream in
+/// [`crate::server::secp384r1mlkem1024`] from the two halves rustls *does*
+/// export publicly (`kx_group::SECP384R1`, `kx_group::MLKEM1024`) via the
+/// public `hybrid_component()` seams. Its wire format and combiner order are
+/// proven against OpenSSL 3.6 in `tests/secp384r1mlkem1024_interop.rs`, not
+/// merely against itself. Classical groups are absent entirely, as the clause
+/// requires — they are not merely deprioritised.
 ///
 /// §3.3.2 is met in full: exactly `TLS13_CHACHA20_POLY1305_SHA256` and
 /// `TLS13_AES_256_GCM_SHA384`. Note this deliberately drops
@@ -130,6 +131,7 @@ pub fn quantum_safe_provider() -> rustls::crypto::CryptoProvider {
         kx_groups: vec![
             aws_lc_rs::kx_group::X25519MLKEM768,
             aws_lc_rs::kx_group::SECP256R1MLKEM768,
+            crate::server::secp384r1mlkem1024::SECP384R1MLKEM1024,
         ],
         ..aws_lc_rs::default_provider()
     }
@@ -164,8 +166,9 @@ pub fn tls_profile_summary(profile: TlsProfile) -> String {
         TlsProfile::QuantumSafe => {
             "quantum-safe (KMIP 3.0 §3.3): TLS1.3 only; suites \
              TLS13_CHACHA20_POLY1305_SHA256, TLS13_AES_256_GCM_SHA384; \
-             groups X25519MLKEM768, SecP256r1MLKEM768 \
-             [gap: SecP384r1MLKEM1024 unavailable in rustls 0.23 — partial §3.3.3]"
+             groups X25519MLKEM768, SecP256r1MLKEM768, SecP384r1MLKEM1024 \
+             [all three §3.3.3 groups; SecP384r1MLKEM1024 composed locally, \
+             OpenSSL-3.6-interop-proven]"
                 .to_string()
         }
     }

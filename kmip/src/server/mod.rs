@@ -23,6 +23,7 @@ pub mod auth;
 // and `DepsConfig` reference them regardless of transport.
 #[cfg(feature = "native")]
 pub mod listener;
+pub mod secp384r1mlkem1024;
 
 pub use auth::{AuthContext, AuthUser, ConfigVerifier, CredentialVerifier, Identity, SessionRecord};
 #[cfg(feature = "native")]

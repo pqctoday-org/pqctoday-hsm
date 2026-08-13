@@ -10,16 +10,22 @@ disputed.
 
 `../oasis-kmip-3.0/kmip-spec-3.0-tags-enums.json` is a **mechanically
 generated** artifact: `kmip/tools/extract_kmip_spec.rs` walks
-`kmip-spec-v3.0.html` (the CSD01 baseline) and regex-extracts every
+`kmip-spec-v3.0-csd02.html` (the current baseline) and regex-extracts every
 `(name, codepoint)` table row into JSON. It's consumed by an automated Rust
 test (`kmip/tests/spec_crosscheck.rs`) that asserts the engine's own
-tag/enum constants agree with it. It is exhaustive but shallow (numeric
-codepoints only) and it **only covers CSD01** — none of the PQC material
-(Encapsulate/Decapsulate, KEM Algorithm enum, ML-DSA/ML-KEM, hybrid KEM
-codepoints) exists in CSD01; it was added in later working drafts (WD17+).
-So nothing in this `crossref/` directory is covered by that automated check
-— facts here were verified by hand against the PDF and must be
-**re-verified by hand** if the source WD is superseded, not just diffed.
+tag/enum constants agree with it. It is exhaustive but **shallow** — numeric
+codepoints only.
+
+Since the 2026-07-25 CSD02 migration that artifact *does* cover the PQC
+codepoints (they moved into the published spec), so the original reason this
+directory existed — "PQC facts live only in WD19, which the extractor cannot
+read" — no longer applies. What the extractor still cannot produce is
+everything **non-numeric**: operation semantics, REQUIRED/OPTIONAL payload
+shapes, error tables, normative SHALL language, and cross-spec PKCS#11
+mechanism rows. That is what these files carry, and none of it is covered by
+any automated check — facts here are verified **by hand** against the source
+document and must be **re-verified by hand** when that document is
+superseded, not just diffed.
 
 Files in `crossref/` are **curated, prose-inclusive** fact sheets: they carry
 the operation descriptions, error tables, and cross-spec mechanism notes an
@@ -53,8 +59,9 @@ next to every fact so it can be independently re-checked.
 
 ## Index
 
-| File | Topic |
-|---|---|
-| [`kem-encapsulate-decapsulate.yaml`](kem-encapsulate-decapsulate.yaml) | KMIP 3.0 WD19 `Encapsulate`/`Decapsulate` ops + `KEM Algorithm` enum, PKCS#11 v3.2 `C_EncapsulateKey`/`C_DecapsulateKey` mechanism table rows (RSA, ECDH, DH, X9.42 DH) — the classical-vs-PQC-vs-hybrid KEM question. |
+| File | Topic | Verified against |
+|---|---|---|
+| [`kem-encapsulate-decapsulate.yaml`](kem-encapsulate-decapsulate.yaml) | KMIP 3.0 `Encapsulate`/`Decapsulate` ops + `KEM Algorithm` enum, PKCS#11 v3.2 `C_EncapsulateKey`/`C_DecapsulateKey` mechanism table rows (RSA, ECDH, DH, X9.42 DH) — the classical-vs-PQC-vs-hybrid KEM question. | KMIP 3.0 **CSD02** (2026-08-12) |
 
-Add a row here whenever a new topic file is added.
+Add a row here whenever a new topic file is added, and update the "Verified against"
+column — not just the file's own header — whenever a file is re-verified.
