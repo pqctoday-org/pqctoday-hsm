@@ -133,9 +133,18 @@ cp "$SPEC_DIR/kmip-spec-3.0-tags-enums.json" "$HUB_CORPUS_DIR/tags-enums.json"
 # never-drift-out-of-band reason as tags-enums.json above.
 cp "$SPEC_DIR/kmip-spec-3.0-section61-headings.json" "$HUB_CORPUS_DIR/section61-headings.json"
 
-python3 - "$HUB_CORPUS_DIR" <<'PY'
+# Provenance for the manifest below. Without these the staged corpus carries no
+# statement of WHAT it is or WHERE it came from — freshness was inferable only
+# from file mtimes, and a corpus silently drifting from the bundle that replays
+# it looks identical to one that is in sync (2026-08-12 audit, NC-8). hsmCommit
+# is asserted against the wasm bundle's own provenance manifest by the hub-side
+# test src/wasm/kmip/corpus/runner.local.test.ts.
+HSM_COMMIT="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
+BUILT_AT="$(date -u +%Y-%m-%d)"
+
+python3 - "$HUB_CORPUS_DIR" "$HSM_COMMIT" "$BUILT_AT" <<'PY'
 import json, os, sys
-root = sys.argv[1]
+root, hsm_commit, built_at = sys.argv[1], sys.argv[2], sys.argv[3]
 tests = []
 def add(rel_dir, tier, category):
     d = os.path.join(root, rel_dir)
@@ -148,12 +157,24 @@ def add(rel_dir, tier, category):
 add('oasis/mandatory', 'mandatory', None)
 add('oasis/optional', 'optional', None)
 add('pqc', 'pqc', 'PQC Interop')
+tiers = {}
+for t in tests:
+    tiers[t['tier']] = tiers.get(t['tier'], 0) + 1
 manifest = {'generated_by': 'scripts/build-kmip-wasm.sh (corpus staging step)',
+            'hsmCommit': hsm_commit,
+            'builtAt': built_at,
+            'specBaseline': 'KMIP 3.0 CSD02 (2026-05-07); Profiles 3.0 CSD02 (2026-05-21)',
+            'corpusSource': {
+                'oasis': 'kmip-profiles-v3.0-csd02.zip test-cases/kmip-v3.0/{mandatory,optional}',
+                'pqc': 'vendored subset of OASIS kmip-3-0-pqc-tests-03.zip',
+            },
+            'tierCounts': tiers,
             'count': len(tests), 'tests': tests}
 with open(os.path.join(root, 'manifest.json'), 'w') as f:
     json.dump(manifest, f, indent=2)
     f.write('\n')
-print(f"[kmip-wasm]   manifest.json: {len(tests)} corpus tests")
+print(f"[kmip-wasm]   manifest.json: {len(tests)} corpus tests "
+      f"({', '.join(f'{k}={v}' for k, v in sorted(tiers.items()))}) @ {hsm_commit[:9]}")
 PY
 
 echo ""
