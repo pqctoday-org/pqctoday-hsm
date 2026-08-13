@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CI guard for PKCS#11 constant integrity across every surface of this repo.
+"""CI guard for PKCS#11 constant integrity.
 
 Validated sources (all diffed against the normative src/lib/pkcs11/pkcs11t.h):
   1. rust/src/constants.rs           — engine constants (u32)
@@ -7,6 +7,16 @@ Validated sources (all diffed against the normative src/lib/pkcs11/pkcs11t.h):
   3. kmip/pkcs11-mech-manifest.json  — `standard_pkcs11_v3_2` block
   4. src/lib/pkcs11/pkcs11t.h itself — diffed against the pinned canonical
      OASIS v3.2 include (docs/refs/pkcs11t-canonical-v3.2.h, sha256-pinned)
+  5. src/lib/vendor_mechanisms.h     — C++ vendor constants (N9 remediation
+     2026-08-13; previously a blind spot)
+  6. src/lib/pkcs11/pkcs11f.h        — asserted byte-identical to the pinned
+     canonical OASIS v3.2 function header
+     (docs/refs/pkcs11f-canonical-v3.2.h, sha256-pinned); on divergence the
+     CK_PKCS11_FUNCTION_INFO name sets are diff-reported
+
+NOT validated here (known, deliberate): constants embedded in prose/docs,
+per-protocol wrapper sources (openssh-pkcs11/, strongswan-pkcs11/, JavaJCE/,
+openpgp/), and pkcs11.h itself (a thin include shim).
 
 Rules:
   * Every CK* name in a source must either match the header value exactly or
@@ -30,12 +40,20 @@ REPO = Path(__file__).resolve().parent.parent
 RUST = REPO / "rust" / "src" / "constants.rs"
 JS = REPO / "constants.js"
 HEADER = REPO / "src" / "lib" / "pkcs11" / "pkcs11t.h"
+VENDOR_HEADER = REPO / "src" / "lib" / "vendor_mechanisms.h"
 CANONICAL = REPO / "docs" / "refs" / "pkcs11t-canonical-v3.2.h"
+FUNC_HEADER = REPO / "src" / "lib" / "pkcs11" / "pkcs11f.h"
+CANONICAL_F = REPO / "docs" / "refs" / "pkcs11f-canonical-v3.2.h"
 MANIFEST = REPO / "kmip" / "pkcs11-mech-manifest.json"
 
 # sha256 of the canonical OASIS PKCS#11 v3.2 pkcs11t.h pinned in F1.
 # https://docs.oasis-open.org/pkcs11/pkcs11-spec/v3.2/include/pkcs11-v3.2/pkcs11t.h
 CANONICAL_SHA256 = "95738fdcd9b5c9c73f55f9132aefa87354556cec1c46f681b8a2000b8b5dbccb"
+
+# sha256 of the canonical OASIS PKCS#11 v3.2 pkcs11f.h (N9 remediation
+# 2026-08-13; same pinning pattern as pkcs11t.h above).
+# https://docs.oasis-open.org/pkcs11/pkcs11-spec/v3.2/os/include/pkcs11-v3.2/pkcs11f.h
+CANONICAL_F_SHA256 = "3a205ff9a12247108193d124571fac88e38b59f1273e462baa1b5e00cd182fa0"
 
 VENDOR_BASE = 0x80000000
 
@@ -467,6 +485,43 @@ def check_canonical(spec: dict) -> list:
     return errors
 
 
+def check_canonical_f() -> list:
+    """N9 remediation 2026-08-13 — pkcs11f.h pin, following the pkcs11t.h
+    pattern: the vendored canonical OASIS function header is sha256-pinned,
+    and the in-tree header must match it byte-for-byte (it does today). If
+    the two ever legitimately diverge, the CK_PKCS11_FUNCTION_INFO name sets
+    are diff-reported so the delta is visible instead of silent."""
+    errors = []
+    if not CANONICAL_F.exists():
+        return [f"CANONICAL-F-MISSING  {CANONICAL_F} not found"]
+    digest = hashlib.sha256(CANONICAL_F.read_bytes()).hexdigest()
+    if digest != CANONICAL_F_SHA256:
+        return [
+            f"CANONICAL-F-SHA256  {CANONICAL_F.name} hash {digest} != pinned "
+            f"{CANONICAL_F_SHA256} — the canonical reference must never "
+            f"change without re-pinning"
+        ]
+    if not FUNC_HEADER.exists():
+        return [f"FUNC-HEADER-MISSING  {FUNC_HEADER} not found"]
+    if FUNC_HEADER.read_bytes() == CANONICAL_F.read_bytes():
+        return errors
+    # Diverged: report the function-name delta (and flag the byte diff even
+    # when the name sets agree — e.g. a changed prototype).
+    fn_pat = re.compile(r"CK_PKCS11_FUNCTION_INFO\((C_\w+)\)")
+    local_fns = set(fn_pat.findall(FUNC_HEADER.read_text(errors="replace")))
+    canon_fns = set(fn_pat.findall(CANONICAL_F.read_text(errors="replace")))
+    for name in sorted(canon_fns - local_fns):
+        errors.append(f"CANONICAL-F-DELTA  {name} missing from local pkcs11f.h")
+    for name in sorted(local_fns - canon_fns):
+        errors.append(f"CANONICAL-F-DELTA  local-only function {name} (not in the OASIS header)")
+    if not errors:
+        errors.append(
+            "CANONICAL-F-DELTA  pkcs11f.h differs from the canonical header "
+            "in content (same function names) — inspect the diff manually"
+        )
+    return errors
+
+
 def check_manifest(spec: dict) -> list:
     errors = []
     if not MANIFEST.exists():
@@ -502,15 +557,21 @@ def main() -> int:
 
     rust = parse_rust(RUST)
     js, js_errors = parse_js(JS)
+    # N9 — the C++ vendor header uses the same #define grammar as pkcs11t.h,
+    # so the same parser applies (duplicate/vendor-range/pinned rules too).
+    vend = parse_header(VENDOR_HEADER)
 
     sections = [
         ("pkcs11t.h vs canonical OASIS v3.2 (sha256-pinned)", check_canonical(spec)),
+        ("pkcs11f.h vs canonical OASIS v3.2 (sha256-pinned)", check_canonical_f()),
         ("pkcs11t.h duplicate codepoints", check_duplicates("header", spec)),
         ("PINNED hygiene", check_pinned_hygiene(spec)),
         (f"rust/src/constants.rs ({len(rust)} constants)",
          check_source("rust", rust, spec) + check_duplicates("rust", rust)),
         (f"constants.js ({len(js)} constants)",
          js_errors + check_source("js", js, spec) + check_duplicates("js", js)),
+        (f"src/lib/vendor_mechanisms.h ({len(vend)} constants)",
+         check_source("vendor-hdr", vend, spec) + check_duplicates("vendor-hdr", vend)),
         ("kmip/pkcs11-mech-manifest.json (standard_pkcs11_v3_2)",
          check_manifest(spec)),
     ]
@@ -524,7 +585,7 @@ def main() -> int:
         total_errors += len(errors)
 
     print(f"\nheader defines parsed: {len(spec)}; "
-          f"rust: {len(rust)}; js: {len(js)}; "
+          f"rust: {len(rust)}; js: {len(js)}; vendor-hdr: {len(vend)}; "
           f"pinned: {len(PINNED)}; failures: {total_errors}")
     return 1 if total_errors else 0
 

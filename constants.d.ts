@@ -212,6 +212,9 @@ export declare const CKM_AES_CTR: number
 export declare const CKM_AES_CMAC: number
 export declare const CKM_AES_KEY_WRAP: number
 export declare const CKM_AES_KEY_WRAP_KWP: number
+export declare const CKM_CHACHA20_KEY_GEN: number
+export declare const CKM_CHACHA20: number
+export declare const CKM_CHACHA20_POLY1305: number
 export declare const CKM_PKCS5_PBKD2: number
 export declare const CKM_EC_EDWARDS_KEY_PAIR_GEN: number
 export declare const CKM_GENERIC_SECRET_KEY_GEN: number
