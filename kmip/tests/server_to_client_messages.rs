@@ -207,3 +207,165 @@ fn a_non_push_operation_is_rejected_by_the_push_decoder() {
         "Create is not a §6.2 push message and must not decode as one"
     );
 }
+
+// ── The other three item-10 operations ──────────────────────────────────────
+//
+// `Notify` and `Put` are pushes; these three are the server interrogating the
+// client. Same direction on the wire, opposite purpose — and unlike the pushes,
+// the client's answer carries a payload the server actually reads, so each one
+// is tested in both directions.
+
+/// The server asking "what do you speak?" must be a Request, and an empty
+/// version list is the §6.1.21 way of saying "everything you have" — not a
+/// malformed payload to be filled in with a default.
+#[test]
+fn discover_versions_message_is_a_request_with_the_versions_asked_for() {
+    let bytes = pqctoday_kmip::kmip30::wire::encode_discover_versions_message(&[], TS);
+    let frame = decode_one(&bytes).expect("decodes");
+    assert_eq!(frame.tag.0, 0x42_0078, "Request Message");
+
+    let batch = structure(child(&frame, 0x42_000f).expect("Batch Item"));
+    let op = batch.iter().find(|c| c.tag.0 == 0x42_005c).expect("Operation");
+    assert_eq!(
+        op.value,
+        Value::Enumeration(Operation::DiscoverVersions.to_wire_value()),
+        "operation must be DiscoverVersions"
+    );
+    let payload = batch.iter().find(|c| c.tag.0 == 0x42_0079).expect("Request Payload");
+    assert!(
+        structure(&payload.value).is_empty(),
+        "an empty request list is meaningful (§6.1.21: return everything); it must \
+         not be silently populated"
+    );
+
+    // And a non-empty ask round-trips the exact pairs.
+    let bytes = pqctoday_kmip::kmip30::wire::encode_discover_versions_message(&[(3, 0), (2, 1)], TS);
+    match decode_server_to_client_message(&bytes).expect("decodes") {
+        ServerToClientMessage::DiscoverVersions(req) => {
+            assert_eq!(req.protocol_versions, vec![(3, 0), (2, 1)]);
+        }
+        other => panic!("expected DiscoverVersions, got {other:?}"),
+    }
+}
+
+/// A server-issued `Query` carries Query Functions, and the one that matters
+/// for pushing is Query Operations.
+#[test]
+fn query_message_carries_the_requested_query_functions() {
+    use pqctoday_kmip::kmip30::ops::QueryFunction;
+    let bytes = pqctoday_kmip::kmip30::wire::encode_query_message(
+        &[QueryFunction::QueryOperations],
+        TS,
+    );
+    match decode_server_to_client_message(&bytes).expect("decodes") {
+        ServerToClientMessage::Query(functions) => {
+            assert_eq!(functions, vec![QueryFunction::QueryOperations]);
+        }
+        other => panic!("expected Query, got {other:?}"),
+    }
+}
+
+/// The handback. The field names the role the RECIPIENT applies, so returning
+/// the peer to the client role is what makes us the server again — sending
+/// `Server` here would tell the peer to stay put, which is the opposite.
+#[test]
+fn set_endpoint_role_handback_tells_the_peer_to_become_the_client() {
+    use pqctoday_kmip::kmip30::EndpointRole;
+    let bytes =
+        pqctoday_kmip::kmip30::wire::encode_set_endpoint_role_message(EndpointRole::Client, TS);
+    match decode_server_to_client_message(&bytes).expect("decodes") {
+        ServerToClientMessage::SetEndpointRole(req) => {
+            assert_eq!(req.endpoint_role, EndpointRole::Client);
+        }
+        other => panic!("expected SetEndpointRole, got {other:?}"),
+    }
+}
+
+/// None of the three names a managed object, so requiring a Unique Identifier
+/// (as the push decoder does) would reject every one of them. This pins that
+/// the decoder branches before that check rather than after it.
+#[test]
+fn interrogation_messages_decode_without_a_unique_identifier() {
+    use pqctoday_kmip::kmip30::ops::QueryFunction;
+    use pqctoday_kmip::kmip30::EndpointRole;
+    for bytes in [
+        pqctoday_kmip::kmip30::wire::encode_discover_versions_message(&[(3, 0)], TS),
+        pqctoday_kmip::kmip30::wire::encode_query_message(&[QueryFunction::QueryOperations], TS),
+        pqctoday_kmip::kmip30::wire::encode_set_endpoint_role_message(EndpointRole::Client, TS),
+    ] {
+        assert!(
+            decode_server_to_client_message(&bytes).is_ok(),
+            "an interrogation message must decode without a Unique Identifier"
+        );
+    }
+}
+
+// ── The client's answers, as the server reads them ──────────────────────────
+
+/// A Discover Versions answer must survive the trip back as the same pairs —
+/// this is the value the server intersects against its own list, so a decode
+/// that silently drops entries would look exactly like an incompatible peer.
+#[test]
+fn client_discover_versions_answer_round_trips() {
+    use pqctoday_kmip::kmip30::wire::{decode_client_response, ClientResponsePayload};
+    let bytes = pqctoday_kmip::kmip30::wire::encode_discover_versions_client_response(
+        &[(3, 0), (2, 1)],
+        TS,
+    );
+    let resp = decode_client_response(&bytes).expect("decodes");
+    assert!(resp.succeeded());
+    assert_eq!(resp.operation, Some(Operation::DiscoverVersions));
+    match resp.payload {
+        ClientResponsePayload::DiscoverVersions(v) => assert_eq!(v, vec![(3, 0), (2, 1)]),
+        other => panic!("expected a version list, got {other:?}"),
+    }
+}
+
+/// A Query answer round-trips as the operation list the server gates pushes on.
+#[test]
+fn client_query_answer_round_trips_the_operation_list() {
+    use pqctoday_kmip::kmip30::wire::{decode_client_response, ClientResponsePayload};
+    let bytes = pqctoday_kmip::kmip30::wire::encode_query_client_response(
+        &[Operation::Notify, Operation::Put],
+        TS,
+    );
+    match decode_client_response(&bytes).expect("decodes").payload {
+        ClientResponsePayload::Query(ops) => {
+            assert_eq!(ops, vec![Operation::Notify, Operation::Put]);
+        }
+        other => panic!("expected an operation list, got {other:?}"),
+    }
+}
+
+/// An empty operation list is a real answer — "I can service nothing" — and
+/// must NOT decode to the same thing as no answer at all, because the server
+/// treats those two cases oppositely (drop everything vs. push everything).
+#[test]
+fn an_empty_query_answer_is_not_the_same_as_no_answer() {
+    use pqctoday_kmip::kmip30::wire::{decode_client_response, ClientResponsePayload};
+    let answered = pqctoday_kmip::kmip30::wire::encode_query_client_response(&[], TS);
+    assert_eq!(
+        decode_client_response(&answered).expect("decodes").payload,
+        ClientResponsePayload::Query(vec![]),
+        "an empty list must survive as an empty list"
+    );
+
+    let silent = encode_server_to_client_ack(Operation::Query, TS);
+    assert_eq!(
+        decode_client_response(&silent).expect("decodes").payload,
+        ClientResponsePayload::None,
+        "a no-payload acknowledgement must stay distinguishable from an empty list"
+    );
+}
+
+/// The §6.2 acknowledgement still decodes as "no payload" — the push path was
+/// working before these three operations existed and must keep working.
+#[test]
+fn push_acknowledgement_still_decodes_as_no_payload() {
+    use pqctoday_kmip::kmip30::wire::{decode_client_response, ClientResponsePayload};
+    let bytes = encode_server_to_client_ack(Operation::Notify, TS);
+    let resp = decode_client_response(&bytes).expect("decodes");
+    assert_eq!(resp.operation, Some(Operation::Notify));
+    assert!(resp.succeeded());
+    assert_eq!(resp.payload, ClientResponsePayload::None);
+}

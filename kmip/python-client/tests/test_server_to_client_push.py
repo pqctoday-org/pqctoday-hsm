@@ -107,3 +107,91 @@ def test_listening_with_nothing_queued_returns_cleanly():
     c = _authed()
     c.serve_as_endpoint()  # drain anything this suite already queued
     assert c.serve_as_endpoint() == []
+
+
+# ── The other three item-10 operations, server-issued ───────────────────────
+#
+# These are the half of item 10 the server does NOT push but asks. Each is
+# tested by what the server DOES with the answer, not by observing the question
+# — a question whose answer changes nothing would be exactly the checkbox
+# behaviour this repo has already had to remediate once.
+
+
+def test_the_server_asks_this_endpoint_what_it_speaks_and_can_do():
+    """§6.1.21 and §6.1.39, issued server-to-client. Both must arrive before
+    any push, since their whole purpose is to decide what may be pushed."""
+    tag = uuid.uuid4().hex[:8]
+    c = _authed()
+    _mutate_an_attribute(c, tag)
+
+    seen = c.serve_as_endpoint(include_control=True)
+    ops = [m["operation"] for m in seen]
+
+    assert "DiscoverVersions" in ops, f"server never asked for versions: {ops}"
+    assert "Query" in ops, f"server never asked what we support: {ops}"
+    assert ops.index("DiscoverVersions") < ops.index("Notify"), (
+        f"version negotiation must precede the first push, got {ops}"
+    )
+    assert ops.index("Query") < ops.index("Notify"), (
+        f"capability negotiation must precede the first push, got {ops}"
+    )
+
+
+def test_a_client_that_speaks_no_common_version_is_not_pushed_to():
+    """The consumer of the Discover Versions answer. A peer that shares no
+    protocol version with the server cannot parse what we would send, so the
+    correct behaviour is silence — not pushing bytes we know are undecodable."""
+    tag = uuid.uuid4().hex[:8]
+    c = _authed()
+    _mutate_an_attribute(c, tag)
+
+    got = c.serve_as_endpoint(speaks_versions=((2, 1),))
+    assert got == [], f"pushed to an endpoint with no common version: {got}"
+
+    # And the notification was NOT consumed by that refusal — it is still there
+    # for an endpoint that can actually receive it. Dropping it would turn a
+    # version mismatch into silent data loss.
+    assert c.serve_as_endpoint(), "the withheld notification was lost, not held"
+
+
+def test_a_client_that_does_not_advertise_notify_is_not_sent_one():
+    """The consumer of the Query answer. Answering Query without `Notify` says
+    "I cannot service that", and the server must believe it."""
+    tag = uuid.uuid4().hex[:8]
+    c = _authed()
+    _mutate_an_attribute(c, tag)
+
+    got = c.serve_as_endpoint(handles_operations=("Put",))
+    assert got == [], f"sent a Notify to an endpoint that does not handle it: {got}"
+
+
+def test_the_session_ends_with_the_role_handed_back():
+    """§6.1.61 in the other direction. Ending by handback rather than by socket
+    close is what makes "the server is done" an observable event instead of
+    something the client has to infer from a read returning nothing."""
+    tag = uuid.uuid4().hex[:8]
+    c = _authed()
+    _mutate_an_attribute(c, tag)
+
+    seen = c.serve_as_endpoint(include_control=True)
+    ops = [m["operation"] for m in seen]
+
+    assert ops, "nothing at all arrived"
+    assert ops[-1] == "SetEndpointRole", (
+        f"session did not end with a role handback; ended with {ops[-1]!r} ({ops})"
+    )
+
+
+def test_the_role_is_handed_back_even_when_nothing_was_queued():
+    """A client that listens and finds nothing still asked to receive. Telling
+    it "nothing for you" beats dropping the connection, which is
+    indistinguishable from a fault."""
+    c = _authed()
+    c.serve_as_endpoint()  # drain
+
+    seen = c.serve_as_endpoint(include_control=True)
+    ops = [m["operation"] for m in seen]
+    assert "SetEndpointRole" in ops, f"no handback on an empty session: {ops}"
+    assert not [m for m in seen if m["operation"] in ("Notify", "Put")], (
+        "nothing was queued, so nothing should have been pushed"
+    )

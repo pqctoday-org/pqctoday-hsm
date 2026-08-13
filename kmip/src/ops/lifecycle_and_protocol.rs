@@ -262,6 +262,14 @@ pub fn obliterate(
 /// §6.1.20. v0.1 only supports KMIP 3.0; later versions add 2.1 and 1.4.
 const SUPPORTED_VERSIONS: &[(i32, i32)] = &[(KMIP_VERSION_MAJOR, KMIP_VERSION_MINOR)];
 
+/// The same list, for callers outside this module — the listener needs it to
+/// intersect against what a push endpoint says it speaks (§6.1.21 in the
+/// server-to-client direction). Exposed as a function so there is exactly one
+/// definition of "what this server speaks", not a copy that can drift.
+pub fn supported_versions() -> &'static [(i32, i32)] {
+    SUPPORTED_VERSIONS
+}
+
 pub fn discover_versions(
     deps: &Deps,
     req: DiscoverVersionsRequest,

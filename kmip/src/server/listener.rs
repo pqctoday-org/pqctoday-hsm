@@ -484,12 +484,40 @@ async fn serve_pushes<S>(
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
-    let pending = deps.drain_notifications(owner);
-    if pending.is_empty() {
+    let now = time::OffsetDateTime::now_utc().unix_timestamp();
+
+    // ── Negotiate, once per swapped session ────────────────────────────────
+    //
+    // Three server-issued requests round-trip before the first push. Doing this
+    // per notification would add three round trips to every attribute change,
+    // which for a queue that is usually one or two deep would be a real
+    // regression for no information gained — the answers cannot change mid
+    // session.
+    let endpoint = negotiate_push_endpoint(stream, now).await;
+
+    if !endpoint.version_compatible {
+        // Nothing we send can be parsed by this peer. Pushing anyway would be
+        // writing bytes we know to be undecodable, which is worse than silence:
+        // the queue would drain into a peer that cannot act on it.
+        tracing::info!(target: "kmip::push",
+            "push endpoint speaks no version this server does; not pushing");
         return Ok(());
     }
-    let now = time::OffsetDateTime::now_utc().unix_timestamp();
+
+    let pending = deps.drain_notifications(owner);
+    if pending.is_empty() {
+        // Still hand the role back — the peer asked to receive, and "nothing for
+        // you" is a better answer than a dropped connection.
+        hand_role_back(stream, now).await;
+        return Ok(());
+    }
+
     for notify in pending {
+        if !endpoint.supports(crate::kmip30::Operation::Notify) {
+            tracing::debug!(target: "kmip::push", uid = %notify.unique_identifier,
+                "endpoint does not advertise Notify; dropping without sending");
+            continue;
+        }
         let uid = notify.unique_identifier.clone();
         let bytes = crate::kmip30::wire::encode_notify_message(&notify, now);
         stream.write_all(&bytes).await?;
@@ -505,11 +533,130 @@ where
             Err(e) => {
                 tracing::debug!(target: "kmip::push", uid = %uid, error = %e,
                     "client did not acknowledge; stopping pushes on this channel");
-                break;
+                return Ok(());
             }
         }
     }
+
+    hand_role_back(stream, now).await;
     Ok(())
+}
+
+/// What the peer at the far end of a swapped channel told us about itself.
+#[derive(Debug)]
+struct PushEndpoint {
+    /// False only when the peer answered `Discover Versions` with a list that
+    /// shares nothing with [`supported_versions`]. An unanswered question
+    /// leaves this true — see [`negotiate_push_endpoint`].
+    version_compatible: bool,
+    /// `None` when the peer did not answer `Query`, which means "unknown", not
+    /// "nothing".
+    advertised_operations: Option<Vec<crate::kmip30::Operation>>,
+}
+
+impl PushEndpoint {
+    /// Permissive on silence, restrictive on an actual answer.
+    ///
+    /// A peer that answers and omits an operation is telling us it cannot
+    /// service it, and we believe it. A peer that says nothing may simply be an
+    /// implementation of §6.2 alone — which is legal, since §6.2.2 contemplates
+    /// clients that cannot respond at all — and denying it the notifications it
+    /// *can* handle would be inventing a requirement the spec does not make.
+    fn supports(&self, op: crate::kmip30::Operation) -> bool {
+        match &self.advertised_operations {
+            Some(ops) => ops.contains(&op),
+            None => true,
+        }
+    }
+}
+
+/// Ask the peer what it speaks and what it can do (§6.1.21, §6.1.39, issued by
+/// the server — two of item 10's five operations).
+///
+/// Both questions tolerate silence. A peer that treats our request as an opaque
+/// push and returns the §6.2 empty acknowledgement, or that closes, is recorded
+/// as "unknown" rather than "incapable": the alternative is to withhold
+/// notifications from a conformant §6.2-only client on the strength of a
+/// question it never agreed to answer.
+async fn negotiate_push_endpoint<S>(stream: &mut S, now: i64) -> PushEndpoint
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    use crate::kmip30::wire::ClientResponsePayload;
+
+    let mut endpoint =
+        PushEndpoint { version_compatible: true, advertised_operations: None };
+
+    // §6.1.21 — an empty request list means "tell me everything you have".
+    let ask = crate::kmip30::wire::encode_discover_versions_message(&[], now);
+    if let Some(resp) = ask_endpoint(stream, &ask).await {
+        if let ClientResponsePayload::DiscoverVersions(theirs) = resp.payload {
+            let ours = crate::ops::lifecycle_and_protocol::supported_versions();
+            endpoint.version_compatible = theirs.iter().any(|v| ours.contains(v));
+            tracing::debug!(target: "kmip::push",
+                theirs = ?theirs, compatible = endpoint.version_compatible,
+                "push endpoint declared its protocol versions");
+        }
+    }
+    if !endpoint.version_compatible {
+        return endpoint;
+    }
+
+    // §6.1.39 — only the operation list bears on what we may push.
+    let ask = crate::kmip30::wire::encode_query_message(
+        &[crate::kmip30::QueryFunction::QueryOperations],
+        now,
+    );
+    if let Some(resp) = ask_endpoint(stream, &ask).await {
+        if let ClientResponsePayload::Query(ops) = resp.payload {
+            tracing::debug!(target: "kmip::push", ops = ?ops,
+                "push endpoint declared its operations");
+            endpoint.advertised_operations = Some(ops);
+        }
+    }
+
+    endpoint
+}
+
+/// Write one server-issued request and read the peer's answer, mapping any
+/// transport or decode failure to `None` ("it did not tell us").
+async fn ask_endpoint<S>(
+    stream: &mut S,
+    request: &[u8],
+) -> Option<crate::kmip30::wire::ClientResponse>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    if stream.write_all(request).await.is_err() {
+        return None;
+    }
+    let frame = read_one_frame(stream).await.ok()?;
+    crate::kmip30::wire::decode_client_response(&frame).ok()
+}
+
+/// End the swapped session the way §6.1.61 began it, rather than by hanging up.
+///
+/// The field names the role the *recipient* is to apply, which is why both
+/// directions carry `Client`: the client's original request put us into the
+/// client role, and this one puts the peer back into it — leaving us the server
+/// again. Failures are logged and swallowed: the session is over either way,
+/// and the connection is about to be shut down.
+async fn hand_role_back<S>(stream: &mut S, now: i64)
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    use crate::kmip30::EndpointRole;
+    let bytes =
+        crate::kmip30::wire::encode_set_endpoint_role_message(EndpointRole::Client, now);
+    if stream.write_all(&bytes).await.is_err() {
+        tracing::debug!(target: "kmip::push", "peer gone before the role could be handed back");
+        return;
+    }
+    match read_one_frame(stream).await {
+        Ok(_) => tracing::debug!(target: "kmip::push", "server role handed back; session closed"),
+        Err(e) => tracing::debug!(target: "kmip::push", error = %e,
+            "peer did not confirm the role handback"),
+    }
 }
 
 /// Build a KMIP 3.0 error ResponseMessage for an unparseable request (see

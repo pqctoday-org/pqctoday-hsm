@@ -294,7 +294,15 @@ class KmipClient:
         node, _ = _ttlv.decode_one(resp_bytes)
         return node
 
-    def serve_as_endpoint(self, on_message=None, *, max_messages: int = 64) -> list[dict]:
+    def serve_as_endpoint(
+        self,
+        on_message=None,
+        *,
+        max_messages: int = 64,
+        speaks_versions: tuple[tuple[int, int], ...] = ((3, 0),),
+        handles_operations: tuple[str, ...] = ("Notify", "Put"),
+        include_control: bool = False,
+    ) -> list[dict]:
         """Hand the server the client role, then receive what it pushes.
 
         KMIP 3.0 §6.1.61: after a successful `Set Endpoint Role`, "the server
@@ -318,6 +326,21 @@ class KmipClient:
 
         ``max_messages`` bounds the loop so a misbehaving or chatty server
         cannot pin this call open forever.
+
+        Before pushing, the server interrogates this endpoint — `Discover
+        Versions` (§6.1.21) and `Query` (§6.1.39), issued server-to-client —
+        and ends the session by handing the role back with `Set Endpoint Role`
+        (§6.1.61). All three are answered here.
+
+        ``speaks_versions`` and ``handles_operations`` are what we answer with.
+        The defaults are the truth for this client; they are parameters because
+        the server is supposed to *act* on the answers, and a test cannot prove
+        that without being able to answer differently. Narrowing them is
+        therefore how you demonstrate the server declining to push.
+
+        ``include_control`` adds the three interrogation messages to the
+        returned list. Off by default: callers want the pushes, not the
+        handshake around them.
         """
         request = _struct(
             "RequestMessage",
@@ -350,13 +373,82 @@ class KmipClient:
                 )
 
             # 2. Roles are now swapped: every further frame is a REQUEST from
-            #    the server, and we owe it an empty-payload Response.
-            while len(received) < max_messages:
+            #    the server. Two kinds arrive — the §6.2 pushes we came for,
+            #    and the server interrogating us before it sends them.
+            for _ in range(max_messages):
                 pushed = self._recv_frame(sock)
                 if pushed is None:
-                    break  # server finished pushing and closed
+                    break  # server finished and closed
                 op_node = _find(pushed, "Operation")
                 operation = _operation_name(op_node.value if op_node is not None else None)
+
+                if operation == "DiscoverVersions":
+                    # §6.1.21 in the server-to-client direction. Answering
+                    # truthfully is what lets the server decline to push frames
+                    # we could not parse.
+                    sock.sendall(_ttlv.encode_node(_struct(
+                        "ResponseMessage",
+                        _struct("ResponseHeader", _proto()),
+                        _struct(
+                            "BatchItem",
+                            _leaf("Operation", "Enumeration", "DiscoverVersions"),
+                            _leaf("ResultStatus", "Enumeration", "Success"),
+                            _struct("ResponsePayload", *[
+                                _struct(
+                                    "ProtocolVersion",
+                                    _leaf("ProtocolVersionMajor", "Integer", major),
+                                    _leaf("ProtocolVersionMinor", "Integer", minor),
+                                )
+                                for major, minor in speaks_versions
+                            ]),
+                        ),
+                    )))
+                    if include_control:
+                        received.append({"operation": operation, "uid": None, "attributes": []})
+                    continue
+
+                if operation == "Query":
+                    # §6.1.39. We report only the operations we can service in
+                    # the server role — the server uses this to avoid pushing a
+                    # message type we would drop on the floor.
+                    sock.sendall(_ttlv.encode_node(_struct(
+                        "ResponseMessage",
+                        _struct("ResponseHeader", _proto()),
+                        _struct(
+                            "BatchItem",
+                            _leaf("Operation", "Enumeration", "Query"),
+                            _leaf("ResultStatus", "Enumeration", "Success"),
+                            _struct("ResponsePayload", *[
+                                _leaf("Operation", "Enumeration", op)
+                                for op in handles_operations
+                            ]),
+                        ),
+                    )))
+                    if include_control:
+                        received.append({"operation": operation, "uid": None, "attributes": []})
+                    continue
+
+                if operation == "SetEndpointRole":
+                    # The server handing the role back: the session is over, and
+                    # we are told so rather than discovering it from a closed
+                    # socket. Acknowledge, then stop reading.
+                    sock.sendall(_ttlv.encode_node(_struct(
+                        "ResponseMessage",
+                        _struct("ResponseHeader", _proto()),
+                        _struct(
+                            "BatchItem",
+                            _leaf("Operation", "Enumeration", "SetEndpointRole"),
+                            _leaf("ResultStatus", "Enumeration", "Success"),
+                            _struct(
+                                "ResponsePayload",
+                                _leaf("EndpointRole", "Enumeration", "Client"),
+                            ),
+                        ),
+                    )))
+                    if include_control:
+                        received.append({"operation": operation, "uid": None, "attributes": []})
+                    break
+
                 uid_node = _find(pushed, "UniqueIdentifier")
                 attrs = _find(pushed, "Attributes")
                 entry = {
