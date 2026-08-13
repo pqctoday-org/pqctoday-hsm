@@ -23,7 +23,7 @@ exists. When OASIS publishes the next revision (CS01 or CSD03), follow the re-ve
 `../spec/README.md` § "Spec watch" before updating any claim in this report.
 
 See `../docs/HONEST_MAXIMUM_PLAN.md` for the roadmap this report reflects the completion of (Phases
-0–4 and 6.1; Phase 5 — server-to-client — is deliberately parked, see §5), and
+0–4 and 6.1; Phase 5 — server-to-client — remains the one open item, see §5.1.3), and
 `GAP_REMEDIATION_PLAN.md` for a follow-up audit (13 findings, all fixed) that specifically
 targeted silently-dropped errors and stub/placeholder behavior the dispatcher-conformance figures
 below wouldn't have caught on their own (they test observable request/response shape, not every
@@ -330,7 +330,7 @@ own 13-item list rather than approximated:
 | 2–3 | System/User Objects: User, Group, Password Credential, Certificate | **Met** (Phase 6.1 correction — these were genuinely implemented all along via `CreateUser`/`CreateGroup`/`CreateCredential`; a stale Query-advertisement doc comment had mislabeled them "unimplemented" since before this server could actually create them) |
 | 4–8, 11–12 | Attribute/Message/Object/Operation data structures, message protocols | Met — evidenced by §2 codec conformance + §4 dispatcher conformance |
 | 9 | 32 named Client-to-Server Operations (Activate…Set Endpoint Role) | **Met** — every one of the 32 is a real, `HANDLED_OPERATIONS` handler. `Set Endpoint Role` itself accepts the identity request (role=Server) and rejects the actual §6.2 role switch with `Feature Not Supported (0x08)` per the §6.1.61.1 error table — this server has no client-mode machinery, which is the honest boundary of what "met" means here |
-| 10 | 5 named Server-to-Client Operations (Discover Versions, Notify, Put, Query, Set Endpoint Role, all issued *by the server*) | **Not met — the only unmet condition; a documented deviation, see §5.1.3.** No server-initiated outbound channel exists; §6.2.2/§6.2.3 themselves leave the transport "unspecified", so there is no wire shape to build against yet. Parked as `HONEST_MAXIMUM_PLAN.md` Phase 5 |
+| 10 | 5 named Server-to-Client Operations (Discover Versions, Notify, Put, Query, Set Endpoint Role, all issued *by the server*) | **Not met — the only unmet condition; see §5.1.3.** No server-initiated outbound channel exists yet. What remains is the §6.2 message layer, the channel role reversal, and the push loop — see §5.1.3 for why that is a smaller job than first stated |
 | 13 | Optional non-contradicting extensions | N/A (optional) |
 
 **Correction from the prior revision of this report:** that version speculated the async
@@ -347,9 +347,22 @@ answer `Poll` all day without ever being able to push a `Notify` to anyone.
 **Decision (2026-08-12): item 10 is a documented deviation, not a backlog item.** The
 reasoning, stated so a reader can disagree with it on the merits:
 
-- CSD02 §6.2.2/§6.2.3 leave the server-to-client **transport unspecified**. There is no
-  normative wire shape to implement against, so an implementation would be inventing one
-  and calling it conformance.
+- CSD02 §6.2.2/§6.2.3 say each message is "only ever sent by a server to a client **via
+  means outside of the normal client request/response protocol**, using information known
+  to the server via unspecified configuration or administrative mechanisms". So a server
+  that spontaneously reaches an arbitrary client has no normative transport to build
+  against — the delivery channel and the "which client, and where" question are both left
+  to the implementer.
+
+  **Correction (2026-08-13):** an earlier revision of this section said the transport was
+  unspecified full stop. That is too broad, and the distinction matters. §6.1.61 `Set
+  Endpoint Role` *does* define one channel precisely — the roles swap "over the current
+  client-to-server communication channel … the communication channel remains as
+  established". A client that has already connected can therefore volunteer to receive
+  pushes, on the connection it opened, with no invented transport at all. What remains
+  genuinely unspecified is only the unsolicited case. Item 10 is consequently a smaller
+  and better-defined piece of work than this section first claimed: a client that opts in
+  via Set Endpoint Role can be pushed to over its own connection.
 - No KMIP 3.0 client exists anywhere that could receive such a message (§5.3), so the
   feature could not be proven to work even if built — it would ship as untested code
   behind a conformance checkbox, which is the opposite of what this report is for.
