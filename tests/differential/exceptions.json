@@ -105,12 +105,12 @@
       "citation": "PKCS#11 v3.2 §5.5.2 CK_INFO — these fields are descriptive, blank-padded strings with no constrained content."
     },
     {
-      "id": "DEFECT-RUST-NO-PROFILE-OBJECT-AFTER-INIT-TOKEN",
-      "status": "defect",
+      "id": "LEGAL-PROFILE-SET-CLAIMED",
+      "status": "legal",
       "scenario": "env.profile_objects",
       "path": "count|profile_ids",
-      "justification": "After C_InitToken, C++ publishes two CKO_PROFILE objects (ids 1 and 2) and Rust publishes none, so on this path Rust has not established that it is a conforming Provider at all. The 2026-08-13 divergence report recorded the opposite polarity (Rust published one, C++ none), which means C_InitToken destroys Rust's profile object without recreating it.",
-      "citation": "PKCS #11 Profiles v3.2, Baseline Provider condition 4: 'Supports the following objects: a. CKO_PROFILE with value CKP_BASELINE_PROVIDER.' PKCS#11 v3.2 §5.5.7: initialisation destroys all objects that can be destroyed — a profile object should not be one of them, or must be reinstated."
+      "justification": "C++ publishes CKO_PROFILE ids 1 and 2 (Baseline Provider and Extended Provider); Rust publishes id 1 only. Which profiles a provider CLAIMS is the provider's own conformance statement, and claiming one it does not meet would be the advertise-without-implement fault this programme exists to prevent. Both engines publish at least CKP_BASELINE_PROVIDER, which is the condition that actually matters. This entry REPLACES DEFECT-RUST-NO-PROFILE-OBJECT-AFTER-INIT-TOKEN, whose real cause was not C_InitToken at all: Rust stored the profile object's CKA_CLASS as four bytes, so an LP64 caller's find template could never byte-match it and the object was unfindable, not absent.",
+      "citation": "PKCS#11 v3.2 §7.2: 'An implementation is a conforming PKCS#11 Provider if the implementation meets the conditions specified in ONE OR MORE provider profiles specified in [PKCS11-Prof].' Profiles v3.2 §5.1 condition 5 requires CKO_PROFILE with CKP_BASELINE_PROVIDER; §5.3 condition 5 requires CKP_EXTENDED_PROVIDER for the separate Extended profile."
     },
     {
       "id": "LEGAL-UNWRAPPED-KEY-EXTRACTABLE-DEFAULT",
@@ -161,14 +161,6 @@
       "citation": "PKCS#11 v3.2 §6.14 Table (AES secret key): CKA_VALUE_LEN is 'Length in bytes of key value'."
     },
     {
-      "id": "DEFECT-RUST-IMPORTED-AES-NO-VALUE-LEN",
-      "status": "defect",
-      "scenario": "create.create_object.aes_secret",
-      "path": "*CKA_VALUE_LEN*",
-      "justification": "The mirror image: for an AES key imported through C_CreateObject with an explicit CKA_VALUE, Rust does not derive CKA_VALUE_LEN at all while C++ does. Rust derives it correctly on the generate and unwrap paths, so this is an inconsistency within one engine.",
-      "citation": "PKCS#11 v3.2 §6.14: CKA_VALUE_LEN is defined for AES keys regardless of how the object was created."
-    },
-    {
       "id": "DEFECT-RUST-UNWRAPPED-PRIVATE-VALUE-LEN",
       "status": "defect",
       "scenario": "encoding.wrap_private_key_pkcs8",
@@ -183,14 +175,6 @@
       "path": "*CKA_*SENSITIVE*",
       "justification": "Rust makes an SLH-DSA private key sensitive by default and C++ does not. §6.69 attaches the MUST-be-sensitive rule to HSS and XMSS only, so both are permitted; Rust's choice is the safer one.",
       "citation": "PKCS#11 v3.2 §6.65.3 and §6.66.4/§6.66.5 impose CKA_SENSITIVE on the hash-based families; §6.69 (SLH-DSA) imposes nothing."
-    },
-    {
-      "id": "DEFECT-RUST-DATA-OBJECT-CARRIES-KEY-ATTRIBUTES",
-      "status": "defect",
-      "scenario": "create.create_object.data",
-      "path": "*CKA_LOCAL*|*CKA_KEY_GEN_MECHANISM*",
-      "justification": "A CKO_DATA object in Rust answers CKA_LOCAL and CKA_KEY_GEN_MECHANISM. Neither is defined for the data-object class; C++ correctly returns CKR_ATTRIBUTE_TYPE_INVALID for both.",
-      "citation": "PKCS#11 v3.2 §4.5 Table 12 (data objects) defines CKA_APPLICATION, CKA_OBJECT_ID and CKA_VALUE only. CKA_LOCAL and CKA_KEY_GEN_MECHANISM are common KEY attributes (§4.9)."
     },
     {
       "id": "DEFECT-XMSS-PUBLIC-KEY-ATTRIBUTE-SPREAD",
@@ -217,15 +201,6 @@
       "citation": "PKCS#11 v3.2 §4.11 defines CKA_CHECK_VALUE per key type over the key's own value; the public-key tables define no check value."
     },
     {
-      "id": "DEFECT-RUST-SENSITIVE-OUTRANKS-ATTRIBUTE-TYPE-INVALID",
-      "status": "defect",
-      "path": "*.rv",
-      "justification": "Rust answers CKR_ATTRIBUTE_SENSITIVE for attributes the object does not possess at all — CKA_SEED on EC, Edwards, Montgomery, XMSS and AES keys, and the RSA CRT attributes (CKA_PRIME_1/2, CKA_EXPONENT_1/2, CKA_COEFFICIENT) on every non-RSA private key. Its sensitivity check runs before the does-this-object-have-this-attribute check, so it tells a caller the object HAS a secret it may not read. C++ correctly answers CKR_ATTRIBUTE_TYPE_INVALID. The matcher pins the DIRECTION: the reverse pairing (C++ sensitive, Rust OK) is a different and worse problem and is NOT covered here.",
-      "citation": "PKCS#11 v3.2 §5.7.5 C_GetAttributeValue: CKR_ATTRIBUTE_TYPE_INVALID when 'the object does not possess such an attribute'; CKR_ATTRIBUTE_SENSITIVE is for an attribute the object has but will not disclose. §6.67.4/§6.68.4 define CKA_SEED for ML-DSA and ML-KEM only; Table 38 defines the CRT attributes for RSA only.",
-      "cpp": "CKR_ATTRIBUTE_TYPE_INVALID",
-      "rust": "CKR_ATTRIBUTE_SENSITIVE"
-    },
-    {
       "id": "LEGAL-KEY-GEN-MECHANISM-ON-ENCAPSULATED-KEY",
       "status": "legal",
       "path": "*CKA_KEY_GEN_MECHANISM*",
@@ -233,15 +208,6 @@
       "rust": "1700000000000000",
       "justification": "For a key produced by C_EncapsulateKey, Rust records CKM_ML_KEM as the generating mechanism and C++ records CK_UNAVAILABLE_INFORMATION. Encapsulation does generate the key material, so Rust's answer is the more useful one and neither is wrong.",
       "citation": "PKCS#11 v3.2 §4.9: CKA_KEY_GEN_MECHANISM is the mechanism used to generate the key material, or CK_UNAVAILABLE_INFORMATION if the key was not generated by one."
-    },
-    {
-      "id": "DEFECT-RUST-KEY-GEN-MECHANISM-NARROWED",
-      "status": "defect",
-      "path": "*CKA_KEY_GEN_MECHANISM*",
-      "cpp": "ffffffffffffffff",
-      "rust": "ffffffff00000000",
-      "justification": "Rust writes CK_UNAVAILABLE_INFORMATION as a 32-bit -1 zero-extended into eight bytes (0x00000000FFFFFFFF) where the LP64 ABI value is eight bytes of 0xFF. A caller comparing against CK_UNAVAILABLE_INFORMATION therefore sees mechanism 4294967295 instead. Same width-narrowing family as S9.",
-      "citation": "PKCS#11 v3.2 §3.1: CK_UNAVAILABLE_INFORMATION is (~0UL); CK_ULONG is 'an unsigned value, at least 32 bits long' and is 8 bytes on LP64, which is what this ABI exports."
     },
     {
       "id": "LEGAL-OPTIONAL-ATTR-NOT-MATERIALISED-ALLOWED-MECHANISMS",

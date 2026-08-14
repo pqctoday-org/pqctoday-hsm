@@ -4159,7 +4159,25 @@ pub fn C_GetAttributeValue(h_session: u32, h_object: u32, p_template: *mut u8, c
                 // Block CKA_VALUE / CKA_SEED (raw secret material — see
                 // state::attr_is_sensitive_material) for sensitive or
                 // non-extractable private/secret keys → CKR_ATTRIBUTE_SENSITIVE.
-                if attr_is_sensitive_material(attr_type) && (sensitive || !extractable) {
+                //
+                // The `contains_key` guard is load-bearing. §5.7.5 gives the
+                // two codes different meanings: CKR_ATTRIBUTE_TYPE_INVALID is
+                // for when "the object does not possess such an attribute",
+                // CKR_ATTRIBUTE_SENSITIVE for one the object HAS and will not
+                // disclose. Without the guard this engine answered
+                // CKR_ATTRIBUTE_SENSITIVE for attributes an object does not
+                // have at all — CKA_SEED on EC, Edwards, Montgomery, XMSS and
+                // AES keys (§6.67.4/§6.68.4 define it for ML-DSA and ML-KEM
+                // only), and the RSA CRT attributes on every non-RSA private
+                // key (Table 38 defines them for RSA only). That is not merely
+                // the wrong code: it tells a caller the object holds a secret
+                // it may not read, when the object holds nothing of the kind.
+                // Forty-one observations in the differential harness, against
+                // C++'s correct CKR_ATTRIBUTE_TYPE_INVALID.
+                if attr_is_sensitive_material(attr_type)
+                    && (sensitive || !extractable)
+                    && obj_attrs.contains_key(&attr_type)
+                {
                     *val_len_ptr = usize::MAX; // CK_UNAVAILABLE_INFORMATION (native width)
                     had_sensitive = true;
                     continue;
@@ -4392,24 +4410,52 @@ pub(crate) fn create_object_from_attrs(
             },
         );
     }
-    // PKCS#11 v3.2 §4.3 — CKA_LOCAL=FALSE is mandatory for imported objects;
-    // override any caller-provided value since this is a server-managed attribute.
-    store_bool(&mut new_attrs, CKA_LOCAL, false);
-    // PKCS#11 v3.2 §4.3 — CKA_KEY_GEN_MECHANISM = CKM_UNAVAILABLE_INFORMATION
-    // for imported keys (unconditional — caller-supplied values are rejected above).
-    store_ulong(
-        &mut new_attrs,
-        CKA_KEY_GEN_MECHANISM,
-        CKM_UNAVAILABLE_INFORMATION,
-    );
-    // PKCS#11 v3.2 §4.9/§4.10 — an object created via C_CreateObject was born
-    // OUTSIDE the token, so it can never claim CKA_ALWAYS_SENSITIVE or
-    // CKA_NEVER_EXTRACTABLE, regardless of the template's CKA_SENSITIVE /
-    // CKA_EXTRACTABLE values (mirrors the C_UnwrapKey / C_DeriveKey paths).
     let class = new_attrs
         .get(&CKA_CLASS)
         .filter(|v| v.len() >= 4)
         .map(|v| u32::from_le_bytes([v[0], v[1], v[2], v[3]]));
+    let is_key = matches!(
+        class,
+        Some(CKO_PUBLIC_KEY) | Some(CKO_PRIVATE_KEY) | Some(CKO_SECRET_KEY)
+    );
+
+    // PKCS#11 v3.2 §4.3 — CKA_LOCAL=FALSE is mandatory for imported objects and
+    // CKA_KEY_GEN_MECHANISM = CKM_UNAVAILABLE_INFORMATION for imported keys;
+    // both override any caller-provided value, since they are server-managed.
+    //
+    // ONLY ON KEYS. Both are COMMON KEY attributes (§4.9 Table 27); the
+    // data-object table (§4.5 Table 12) defines CKA_APPLICATION, CKA_OBJECT_ID
+    // and CKA_VALUE and nothing else. Stamping them on every class made a
+    // CKO_DATA object answer CKA_LOCAL and CKA_KEY_GEN_MECHANISM with CKR_OK
+    // where C++ correctly answers CKR_ATTRIBUTE_TYPE_INVALID — the harness's
+    // DEFECT-RUST-DATA-OBJECT-CARRIES-KEY-ATTRIBUTES, eight observations.
+    if is_key {
+        store_bool(&mut new_attrs, CKA_LOCAL, false);
+        store_ulong(
+            &mut new_attrs,
+            CKA_KEY_GEN_MECHANISM,
+            CKM_UNAVAILABLE_INFORMATION,
+        );
+    }
+
+    // PKCS#11 v3.2 §6.14 (and every other secret-key table): CKA_VALUE_LEN is
+    // "Length in bytes of key value", defined for the key type regardless of
+    // how the object came into being. The generate and unwrap paths already
+    // derive it; C_CreateObject did not, so an AES key imported with an
+    // explicit CKA_VALUE answered CKR_ATTRIBUTE_TYPE_INVALID for its own
+    // length while C++ answered 32 — DEFECT-RUST-IMPORTED-AES-NO-VALUE-LEN.
+    // Derived, never taken from the template: §4.1.1 rule 5 already rejects a
+    // contradicting caller value upstream.
+    if class == Some(CKO_SECRET_KEY) && !new_attrs.contains_key(&CKA_VALUE_LEN) {
+        if let Some(len) = new_attrs.get(&CKA_VALUE).map(|v| v.len() as u32) {
+            store_ulong(&mut new_attrs, CKA_VALUE_LEN, len);
+        }
+    }
+
+    // PKCS#11 v3.2 §4.9/§4.10 — an object created via C_CreateObject was born
+    // OUTSIDE the token, so it can never claim CKA_ALWAYS_SENSITIVE or
+    // CKA_NEVER_EXTRACTABLE, regardless of the template's CKA_SENSITIVE /
+    // CKA_EXTRACTABLE values (mirrors the C_UnwrapKey / C_DeriveKey paths).
     if matches!(class, Some(CKO_PRIVATE_KEY) | Some(CKO_SECRET_KEY)) {
         store_bool(&mut new_attrs, CKA_ALWAYS_SENSITIVE, false);
         store_bool(&mut new_attrs, CKA_NEVER_EXTRACTABLE, false);
@@ -15893,10 +15939,16 @@ mod profile_object_ffi_tests {
     }
 
     fn find_by_class(session: u32, class: u32) -> Vec<u32> {
+        // §5.7.7 makes find matching "an exact byte-for-byte match", and a
+        // CK_OBJECT_CLASS is a CK_ULONG — 8 bytes on LP64. This helper
+        // declared 4, which is a 32-bit caller's template, and stopped
+        // matching the moment the profile object started storing its
+        // CKA_CLASS at native width like every other object.
+        let class_native = class as crate::ck_abi::CK_ULONG;
         let tmpl: [usize; 3] = [
             CKA_CLASS as usize,
-            &class as *const u32 as usize,
-            4,
+            &class_native as *const crate::ck_abi::CK_ULONG as usize,
+            core::mem::size_of::<crate::ck_abi::CK_ULONG>(),
         ];
         assert_eq!(
             C_FindObjectsInit(session, tmpl.as_ptr() as *mut u8, 1),

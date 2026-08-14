@@ -286,11 +286,21 @@ fn sign_after_destroy_fails_in_both_apis() {
     close_session(session).unwrap();
 }
 
-/// S3 — CKA_SEED sensitive-class parity: on a sensitive private key the
-/// seed is blocked through BOTH surfaces — `native::object::get_attribute`
-/// returns None and `ffi::C_GetAttributeValue` returns
-/// CKR_ATTRIBUTE_SENSITIVE (same shared predicate
-/// `state::attr_is_sensitive_material` + `state::value_is_blocked`).
+/// S3 — CKA_SEED sensitive-class parity on a sensitive private key.
+///
+/// The key here is generated RANDOMLY (`b"\x01"` is its CKA_ID, not a seed —
+/// see `generate_ml_dsa_keypair`'s signature), so it carries **no CKA_SEED at
+/// all**. §5.7.5 gives that its own code: CKR_ATTRIBUTE_TYPE_INVALID is for
+/// when "the object does not possess such an attribute"; CKR_ATTRIBUTE_SENSITIVE
+/// is for one it has and will not disclose. This test asserted SENSITIVE for
+/// the absent case until 2026-08-14 — it encoded the defect the differential
+/// harness recorded as DEFECT-RUST-SENSITIVE-OUTRANKS-ATTRIBUTE-TYPE-INVALID
+/// (41 observations, against C++'s correct TYPE_INVALID). The sibling test
+/// `deterministic_keygen_seed_stored_but_blocked_in_both_apis` covers the
+/// case where the seed IS present, and still expects SENSITIVE.
+///
+/// The native surface answers None either way: absent and withheld are the
+/// same non-answer through `get_attribute`, which has no error channel.
 #[test]
 fn seed_blocked_on_sensitive_key_in_both_apis() {
     use crate::native::object::get_attribute;
@@ -308,12 +318,21 @@ fn seed_blocked_on_sensitive_key_in_both_apis() {
     // CKA_VALUE blocked identically (control).
     assert!(get_attribute(session, prv_h, CKA_VALUE).is_none());
 
-    // FFI path: CK_ATTRIBUTE { CKA_SEED, NULL, 0 } size query — blocked with
-    // CKR_ATTRIBUTE_SENSITIVE and ulValueLen = CK_UNAVAILABLE_INFORMATION.
+    // FFI path, CKA_SEED: the object does not possess it, so §5.7.5's
+    // CKR_ATTRIBUTE_TYPE_INVALID — not SENSITIVE, which would tell the caller
+    // this key holds a seed it may not read.
     let mut tmpl: [usize; 3] = [CKA_SEED as usize, 0, 0];
     let rv = ffi::C_GetAttributeValue(session, prv_h, tmpl.as_mut_ptr() as *mut u8, 1);
-    assert_eq!(rv, CKR_ATTRIBUTE_SENSITIVE);
+    assert_eq!(rv, CKR_ATTRIBUTE_TYPE_INVALID);
     assert_eq!(tmpl[2], usize::MAX);
+
+    // FFI path, CKA_VALUE: the object DOES possess it and withholds it —
+    // CKR_ATTRIBUTE_SENSITIVE. Kept alongside so the two codes are pinned
+    // against each other on one object.
+    let mut tmpl_v: [usize; 3] = [CKA_VALUE as usize, 0, 0];
+    let rv = ffi::C_GetAttributeValue(session, prv_h, tmpl_v.as_mut_ptr() as *mut u8, 1);
+    assert_eq!(rv, CKR_ATTRIBUTE_SENSITIVE);
+    assert_eq!(tmpl_v[2], usize::MAX);
     close_session(session).unwrap();
 }
 

@@ -226,8 +226,17 @@ pub fn ensure_slot(slot_id: u32) {
 /// that profile (see rust/RUST_P11_V32_CONFORMANCE_REPORT.md).
 fn init_profile_objects(slot_id: u32) {
     let mut attrs: Attributes = HashMap::new();
-    attrs.insert(CKA_CLASS, CKO_PROFILE.to_le_bytes().to_vec());
-    attrs.insert(CKA_PROFILE_ID, CKP_BASELINE_PROVIDER.to_le_bytes().to_vec());
+    // store_ulong, NOT u32::to_le_bytes. §5.7.7 makes C_FindObjects "an exact
+    // byte-for-byte match with all attributes in the template", so a four-byte
+    // CKA_CLASS cannot match the eight-byte CK_OBJECT_CLASS an LP64 caller
+    // supplies — which is why the differential harness saw Rust publish ZERO
+    // findable CKO_PROFILE objects while C++ published two. The object existed
+    // the whole time and was simply unfindable at native width; C_InitToken
+    // never destroyed it (CKA_DESTROYABLE=FALSE already protects it, and
+    // destroy_destroyable_objects_on_slot honours that). Every other object in
+    // this engine goes through store_ulong; this one was the outlier.
+    store_ulong(&mut attrs, CKA_CLASS, CKO_PROFILE);
+    store_ulong(&mut attrs, CKA_PROFILE_ID, CKP_BASELINE_PROVIDER);
     attrs.insert(CKA_TOKEN, vec![1]);
     attrs.insert(CKA_PRIV_SLOT_ID, slot_id.to_le_bytes().to_vec());
     store_bool(&mut attrs, CKA_MODIFIABLE, false);
@@ -1335,8 +1344,25 @@ pub fn store_bool(attrs: &mut Attributes, attr_type: u32, value: bool) {
 /// CK_ULONG compares byte-exact in `C_FindObjects`, and the value reads back at
 /// native width through `C_GetAttributeValue`. All map readers take the low
 /// 4 bytes (`from_le_bytes([v[0..3]])`), so widening is backward-compatible.
+///
+/// **`CK_UNAVAILABLE_INFORMATION` is widened, not zero-extended.** §3.1 makes
+/// it `(~0UL)`, so on LP64 it is eight bytes of `0xFF`. The engine's internal
+/// value is the 32-bit sentinel `0xFFFF_FFFF`, and `(0xFFFF_FFFF as
+/// usize).to_le_bytes()` is `ff ff ff ff 00 00 00 00` — mechanism 4294967295,
+/// which is not `CK_UNAVAILABLE_INFORMATION` and which a caller comparing
+/// against the macro will never match. That is what the differential harness
+/// recorded as DEFECT-RUST-KEY-GEN-MECHANISM-NARROWED on four objects
+/// (imported, derived, unwrapped and unwrapped-private keys), against C++'s
+/// `ffffffffffffffff`. `ck_abi::widen` already applies exactly this rule to
+/// scalar out-parameters; applying it here makes one rule cover both surfaces.
+/// Readers are unaffected — they take the low four bytes, which round-trip.
 pub fn store_ulong(attrs: &mut Attributes, attr_type: u32, value: u32) {
-    attrs.insert(attr_type, (value as usize).to_le_bytes().to_vec());
+    let native = if value == crate::constants::CK_UNAVAILABLE_INFORMATION {
+        usize::MAX
+    } else {
+        value as usize
+    };
+    attrs.insert(attr_type, native.to_le_bytes().to_vec());
 }
 
 /// Read a CK_BBOOL attribute back from an attrs HashMap (returns false if absent).
