@@ -455,7 +455,7 @@ fn refresh_engine_mechanism_whitelist(
         return;
     };
     let mechs = obj.algorithm.usage_mask_to_allowed_mechanisms(obj.usage_mask);
-    let packed: Vec<u8> = mechs.iter().flat_map(|m| m.to_le_bytes()).collect();
+    let packed = crate::kmip30::algos::pack_allowed_mechanisms(&mechs);
     let r = softhsmrustv3::native::set_attribute(
         session,
         handle,

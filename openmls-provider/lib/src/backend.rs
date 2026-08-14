@@ -71,8 +71,46 @@ mod native_helpers {
         }
     }
 
+    /// Read `CKA_EC_POINT` on an **Edwards or Montgomery** public key.
+    ///
+    /// PKCS#11 v3.2 encodes this attribute differently per curve family. The
+    /// Weierstrass table says *"DER-encoding of ANSI X9.62 ECPoint value Q"*;
+    /// the Edwards and Montgomery tables say *"Public key bytes in little
+    /// endian order as defined in [RFC 8032]"* — bare, unwrapped. The engines
+    /// were DER-wrapping both until 2026-08-13 (C++ `OSSLEDPublicKey.cpp`
+    /// E4 / Rust `ffi.rs`), which is what `unwrap_ec_point` below was written
+    /// against; measured against the fixed C++ engine, an Ed25519 public key
+    /// now reads back as **32 bare bytes** and `unwrap_ec_point` returned
+    /// `MalformedKeyHandle`.
+    ///
+    /// The consumer was depending on non-conformant engine behaviour, so this
+    /// reads the spec form first and keeps the DER form as a fallback so the
+    /// provider still works against an older module. `expected` is the curve's
+    /// defined public-key length, which is what disambiguates the two forms —
+    /// a bare point carries no self-describing header.
+    pub(super) fn unwrap_ec_point_bare(
+        pt: &[u8],
+        expected: usize,
+    ) -> Result<Vec<u8>, PqcTodayError> {
+        // v3.2 form: bare little-endian public key bytes.
+        if pt.len() == expected {
+            return Ok(pt.to_vec());
+        }
+        // Legacy form: DER OCTET STRING wrapper. Accept only if what comes
+        // out is the right length — otherwise a bare point that happens to
+        // start `04 <len>` would yield a short, silently wrong key.
+        let inner = unwrap_ec_point(pt)?;
+        if inner.len() == expected {
+            return Ok(inner);
+        }
+        Err(PqcTodayError::MalformedKeyHandle)
+    }
+
     /// PKCS#11 returns `CKA_EC_POINT` as a DER OCTET STRING wrapping the raw
     /// point bytes. RFC 9420 / MLS wants the raw bytes. Strip the wrapper.
+    ///
+    /// **Weierstrass curves only** — see `unwrap_ec_point_bare` for the
+    /// Edwards/Montgomery encoding, which v3.2 defines as unwrapped.
     pub(super) fn unwrap_ec_point(der: &[u8]) -> Result<Vec<u8>, PqcTodayError> {
         if der.len() >= 2 && der[0] == 0x04 {
             let len = der[1] as usize;
@@ -645,7 +683,11 @@ impl PkcsOps for CryptokiBackend {
         // Mint a fresh CKA_ID from the HSM RNG.
         let cka_id = self.random(16)?;
 
-        let (gen_mech, pub_tmpl, priv_tmpl) = match scheme {
+        // The 4th element is the RFC 8032 public-key length for curve families
+        // whose `CKA_EC_POINT` PKCS#11 v3.2 defines as BARE (Edwards /
+        // Montgomery); `None` means the Weierstrass DER `ECPoint` encoding,
+        // which v3.2 leaves wrapped.
+        let (gen_mech, pub_tmpl, priv_tmpl, bare_point_len) = match scheme {
             SignatureScheme::ED25519 => (
                 Mechanism::EccEdwardsKeyPairGen,
                 vec![
@@ -665,6 +707,7 @@ impl PkcsOps for CryptokiBackend {
                     Attribute::Sign(true),
                     Attribute::Id(cka_id.clone()),
                 ],
+                Some(32),
             ),
             SignatureScheme::ECDSA_SECP256R1_SHA256 => (
                 Mechanism::EccKeyPairGen,
@@ -687,6 +730,7 @@ impl PkcsOps for CryptokiBackend {
                     Attribute::Sign(true),
                     Attribute::Id(cka_id.clone()),
                 ],
+                None,
             ),
             other => return Err(PqcTodayError::UnsupportedSignatureScheme(other)),
         };
@@ -699,7 +743,10 @@ impl PkcsOps for CryptokiBackend {
             let attrs = s.get_attributes(pub_handle, &[AttributeType::EcPoint])?;
             for a in attrs {
                 if let Attribute::EcPoint(pt) = a {
-                    return native_helpers::unwrap_ec_point(&pt);
+                    return match bare_point_len {
+                        Some(n) => native_helpers::unwrap_ec_point_bare(&pt, n),
+                        None => native_helpers::unwrap_ec_point(&pt),
+                    };
                 }
             }
             Err(PqcTodayError::ObjectNotFound)
@@ -1449,19 +1496,33 @@ mod wasm_backend {
 
             let (mech_id, pub_bytes) = match scheme {
                 SignatureScheme::ED25519 => {
-                    // Ed25519 keygen: no template attrs needed beyond CKA_TOKEN + CKA_ID.
+                    // PKCS#11 v3.2 §6.3.10 — the Edwards curves "can only be
+                    // specified in the CKA_EC_PARAMS attribute of the template
+                    // for the public key using the curveName or the oID
+                    // methods". The engine used to ignore the attribute and
+                    // hardcode Ed25519 (so an Ed448 request silently returned
+                    // an Ed25519 key); since the W2 fix it reads CKA_EC_PARAMS
+                    // from the public template, falls back to the private, and
+                    // returns CKR_TEMPLATE_INCOMPLETE when neither carries it.
+                    // The comment that used to sit here — "no template attrs
+                    // needed beyond CKA_TOKEN + CKA_ID" — described the
+                    // non-conformant behaviour, not the specification. The
+                    // P-256 arm below always supplied its curve OID and was
+                    // never affected.
                     let mut mech: [u32; 3] = [CKM_EC_EDWARDS_KEY_PAIR_GEN, 0, 0];
 
-                    // Public key template: CKA_TOKEN=true, CKA_ID=cka_id
+                    // Public key template: CKA_TOKEN, CKA_VERIFY, CKA_ID,
+                    // CKA_EC_PARAMS = id-Ed25519.
                     let mut pub_token_buf: u8 = 0;
                     let mut pub_verify_buf: u8 = 0;
                     let pub_token_ptr = bool_attr(&mut pub_token_buf, true);
                     let pub_verify_ptr = bool_attr(&mut pub_verify_buf, true);
                     #[rustfmt::skip]
-                    let mut pub_tmpl: [u32; 9] = [
-                        CKA_TOKEN,  pub_token_ptr as u32,      1,
-                        CKA_VERIFY, pub_verify_ptr as u32,     1,
-                        CKA_ID,     cka_id.as_ptr() as u32,    cka_id.len() as u32,
+                    let mut pub_tmpl: [u32; 12] = [
+                        CKA_TOKEN,     pub_token_ptr as u32,          1,
+                        CKA_VERIFY,    pub_verify_ptr as u32,         1,
+                        CKA_ID,        cka_id.as_ptr() as u32,        cka_id.len() as u32,
+                        CKA_EC_PARAMS, ED25519_OID.as_ptr() as u32,   ED25519_OID.len() as u32,
                     ];
                     // Private key template: CKA_TOKEN=true, CKA_SIGN=true, CKA_ID=cka_id
                     let mut prv_token_buf: u8 = 0;
@@ -1481,7 +1542,7 @@ mod wasm_backend {
                         h_sess,
                         mech.as_mut_ptr() as *mut u8,
                         pub_tmpl.as_mut_ptr() as *mut u8,
-                        3,
+                        4,
                         prv_tmpl.as_mut_ptr() as *mut u8,
                         3,
                         &mut h_pub,
@@ -1490,8 +1551,30 @@ mod wasm_backend {
                     if rv != CKR_OK {
                         return Err(PqcTodayError::Pkcs11Raw(rv));
                     }
-                    // Ed25519 public key is stored as raw 32 B in CKA_VALUE on the public obj.
-                    let pub_bytes = get_single_attr(h_sess, h_pub, CKA_VALUE)?;
+                    // PKCS#11 v3.2's Edwards public-key table: "Public key
+                    // bytes in little endian order as defined in [RFC 8032]",
+                    // in CKA_EC_POINT — bare, NOT DER-wrapped (that wording is
+                    // deliberately different from the Weierstrass table's
+                    // "DER-encoding of ANSI X9.62 ECPoint value Q"), and there
+                    // is no CKA_VALUE on a public key at all. This used to read
+                    // CKA_VALUE, which the E4 fix deleted for Edwards and
+                    // Montgomery public keys; the old comment ("raw 32 B in
+                    // CKA_VALUE") documented the engine's non-conformant
+                    // layout. No unwrapping: the bytes are already raw.
+                    let raw = get_single_attr(h_sess, h_pub, CKA_EC_POINT)?;
+                    // Tolerate an older module that still DER-wraps this to 34
+                    // bytes, but only when the unwrapped result is the right
+                    // length — never hand MLS a short key. Mirrors
+                    // `native_helpers::unwrap_ec_point_bare` on the native path.
+                    let pub_bytes = if raw.len() == 32 {
+                        raw
+                    } else {
+                        let inner = unwrap_ec_point(&raw)?;
+                        if inner.len() != 32 {
+                            return Err(PqcTodayError::MalformedKeyHandle);
+                        }
+                        inner
+                    };
                     (scheme, pub_bytes)
                 }
 

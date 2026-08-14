@@ -326,7 +326,7 @@ pub(crate) fn engine_generate_symmetric(
                 // logged via emit_pkcs11 same as any other bridge call.
                 let mechs = algo.usage_mask_to_allowed_mechanisms(usage_mask);
                 if !mechs.is_empty() {
-                    let packed: Vec<u8> = mechs.iter().flat_map(|m| m.to_le_bytes()).collect();
+                    let packed = crate::kmip30::algos::pack_allowed_mechanisms(&mechs);
                     let r = softhsmrustv3::native::set_attribute(
                         session,
                         handle,
@@ -522,15 +522,43 @@ rules:
 
         let allowed = softhsmrustv3::native::get_attribute(sess, handle, c::CKA_ALLOWED_MECHANISMS)
             .expect("CKA_ALLOWED_MECHANISMS was set by Create");
-        let expected: Vec<u8> = [c::CKM_AES_CBC, c::CKM_AES_CBC_PAD, c::CKM_AES_ECB, c::CKM_AES_CTR, c::CKM_AES_GCM]
-            .iter()
-            .flat_map(|m| m.to_le_bytes())
-            .collect();
+        // This assertion previously built `expected` with a hardcoded
+        // `.flat_map(|m| m.to_le_bytes())`, i.e. a 4-byte stride — it was
+        // PINNING THE DEFECT, not guarding against it. On this 64-bit host
+        // the engine strides at 8 (`state::MECHANISM_TYPE_SIZE`), so the
+        // 20-byte value Create wrote was refused outright with
+        // CKR_ATTRIBUTE_VALUE_INVALID and the key was left unrestricted;
+        // the `.expect` above is where that surfaced. Both sides now go
+        // through the one packer.
+        let expected = crate::kmip30::algos::pack_allowed_mechanisms(&[
+            c::CKM_AES_CBC, c::CKM_AES_CBC_PAD, c::CKM_AES_ECB, c::CKM_AES_CTR, c::CKM_AES_GCM,
+        ]);
         assert_eq!(allowed, expected);
+        // Byte equality is necessary but not sufficient — assert the ENGINE
+        // reads back the same five mechanisms, which is what actually gates
+        // use. Under the old packing this returned half the list.
+        assert_eq!(
+            softhsmrustv3::state::parse_allowed_mechanisms(&allowed),
+            vec![c::CKM_AES_CBC, c::CKM_AES_CBC_PAD, c::CKM_AES_ECB, c::CKM_AES_CTR, c::CKM_AES_GCM],
+            "engine must parse exactly the five mechanisms Create intended"
+        );
 
         // Enforcement, not just presence: AES-KEY-WRAP is a real AES
         // mechanism, but this key's mask (ENCRYPT|DECRYPT only, no
         // WRAP_KEY/UNWRAP_KEY) never allows it.
+        //
+        // CAVEAT, measured: this particular assertion is WEAK. `native::encrypt`
+        // returns CKR_MECHANISM_INVALID for CKM_AES_KEY_WRAP even on a key with
+        // NO whitelist at all, so it passed unchanged through the whole fail-open
+        // window. Assert the restriction directly as well — `check_mechanism_allowed`
+        // can only answer from the stored list. The end-to-end fail-closed proof
+        // lives in `tests/native_bridge_e2e.rs::
+        // kmip_created_key_refuses_a_mechanism_outside_its_allowed_list`.
+        assert_eq!(
+            softhsmrustv3::state::check_mechanism_allowed(handle, c::CKM_AES_KEY_WRAP),
+            Err(c::CKR_MECHANISM_INVALID),
+            "the stored whitelist itself must refuse AES-KEY-WRAP"
+        );
         let err = softhsmrustv3::native::encrypt(sess, handle, c::CKM_AES_KEY_WRAP, b"0123456789012345", None, None, &[], None)
             .unwrap_err();
         assert_eq!(err, c::CKR_MECHANISM_INVALID);

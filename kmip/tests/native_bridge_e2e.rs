@@ -2126,13 +2126,17 @@ fn narrowing_usage_mask_via_set_attribute_shrinks_engine_whitelist() {
     // Before narrowing: full 7-mechanism set (5 cipher modes + 2 wrap).
     let before = softhsmrustv3::native::get_attribute(session, handle, c::CKA_ALLOWED_MECHANISMS)
         .expect("CKA_ALLOWED_MECHANISMS was set by Create");
-    let full: Vec<u8> = [
+    // Both `full` and `cipher_only` below used to be built with a hardcoded
+    // `.flat_map(|m| m.to_le_bytes())` 4-byte stride. That was PINNING THE
+    // DEFECT: `CK_MECHANISM_TYPE` is `CK_ULONG`, 8 bytes on this 64-bit host,
+    // so the 28-byte value Create wrote was refused with
+    // CKR_ATTRIBUTE_VALUE_INVALID (the `.expect` above is where it surfaced)
+    // and the key carried no restriction at all. Both sides now derive the
+    // stride from `state::MECHANISM_TYPE_SIZE` via the one packer.
+    let full = pqctoday_kmip::kmip30::algos::pack_allowed_mechanisms(&[
         c::CKM_AES_CBC, c::CKM_AES_CBC_PAD, c::CKM_AES_ECB, c::CKM_AES_CTR, c::CKM_AES_GCM,
         c::CKM_AES_KEY_WRAP, c::CKM_AES_KEY_WRAP_KWP,
-    ]
-    .iter()
-    .flat_map(|m| m.to_le_bytes())
-    .collect();
+    ]);
     assert_eq!(before, full, "whitelist must start with cipher + wrap mechanisms");
 
     // Enforcement, pre-narrowing: the wrap mechanism is genuinely allowed.
@@ -2152,10 +2156,9 @@ fn narrowing_usage_mask_via_set_attribute_shrinks_engine_whitelist() {
 
     let after = softhsmrustv3::native::get_attribute(session, handle, c::CKA_ALLOWED_MECHANISMS)
         .expect("CKA_ALLOWED_MECHANISMS still present after narrowing");
-    let cipher_only: Vec<u8> = [c::CKM_AES_CBC, c::CKM_AES_CBC_PAD, c::CKM_AES_ECB, c::CKM_AES_CTR, c::CKM_AES_GCM]
-        .iter()
-        .flat_map(|m| m.to_le_bytes())
-        .collect();
+    let cipher_only = pqctoday_kmip::kmip30::algos::pack_allowed_mechanisms(&[
+        c::CKM_AES_CBC, c::CKM_AES_CBC_PAD, c::CKM_AES_ECB, c::CKM_AES_CTR, c::CKM_AES_GCM,
+    ]);
     assert_eq!(after, cipher_only, "whitelist must shrink once WRAP_KEY/UNWRAP_KEY are removed");
 
     // Enforcement, post-narrowing: the wrap mechanism is no longer allowed —
@@ -2914,4 +2917,150 @@ fn k3_register_transparent_rsa_public_key_produces_usable_engine_object() {
     assert_eq!(verified.validity, SignatureValidity::Valid);
 
     let _ = softhsmrustv3::native::session::finalize();
+}
+
+/// **Fail-closed proof for the `CKA_ALLOWED_MECHANISMS` restriction over the
+/// KMIP seam.** PKCS#11 v3.2 §4.8 Table 13.
+///
+/// The other two whitelist tests in this repo assert *bytes* — that the
+/// attribute Create wrote reads back as expected. That is not enough, and
+/// measurement showed why: both were built with a hardcoded 4-byte element
+/// stride while `CK_MECHANISM_TYPE` is `CK_ULONG` (8 bytes on this 64-bit
+/// host), so on an odd mechanism count the engine refused the write with
+/// `CKR_ATTRIBUTE_VALUE_INVALID`, the KMIP layer swallowed the refusal (the
+/// write is deliberately best-effort), and the key was left carrying **no
+/// restriction at all** — a fail-open on a security control that a byte
+/// assertion cannot see.
+///
+/// This test asserts the control *bites*, end to end over the KMIP protocol
+/// surface:
+///
+///  1. KMIP `Create` an HMAC-SHA-256 key. Its usage mask maps to exactly ONE
+///     mechanism — `CKM_SHA256_HMAC` — i.e. the odd-count shape that used to
+///     fail open. (`usage_mask_to_allowed_mechanisms`; DERIVE_KEY and
+///     MAC_GENERATE|MAC_VERIFY all resolve to the same single mechanism.)
+///  2. KMIP `DeriveKey`, method `NIST800-108-C`, asking for a **SHA-384** PRF
+///     in `Cryptographic Parameters`. §7.13 lets the request's parameters win
+///     for this method, so the KMIP layer legitimately calls the engine with
+///     `CKM_SHA384_HMAC` — a mechanism the engine fully supports but which
+///     this key's whitelist does not contain. It MUST be refused.
+///  3. Positive control — the same derive with SHA-256 succeeds, so the
+///     refusal is not "derive is broken".
+///  4. Non-vacuity control — widen the engine whitelist to include
+///     `CKM_SHA384_HMAC` and re-issue the *identical* SHA-384 request; it now
+///     succeeds. This is what proves step 2's refusal came from the
+///     restriction and not from a missing mechanism, an unsupported hash, or
+///     a KMIP-layer usage-mask gate.
+///
+/// Before the packing fix, step 2 SUCCEEDED (the whitelist was never
+/// installed) and this test fails on `expect_err`.
+#[test]
+fn kmip_created_key_refuses_a_mechanism_outside_its_allowed_list() {
+    use pqctoday_kmip::kmip30::{
+        CryptographicParameters, DerivationMethod, DerivationParameters, DeriveKeyRequest,
+        HashingAlgorithm,
+    };
+    use pqctoday_kmip::ops::derive_key::derive_key;
+    use softhsmrustv3::constants as c;
+    use softhsmrustv3::native::session;
+
+    let _guard = engine_test_lock();
+    let (_ring, deps) = build_deps_with_real_engine_and_ring();
+
+    // 1 ── Create the restricted key through the real KMIP op handler.
+    let created = create(
+        &deps,
+        CreateRequest {
+            object_type: ObjectType::SymmetricKey,
+            template_attribute: vec![
+                Attribute::CryptographicAlgorithm(KmipAlgorithm::HmacSha256),
+                Attribute::CryptographicLength(256),
+                Attribute::CryptographicUsageMask(
+                    UsageMask::MAC_GENERATE | UsageMask::MAC_VERIFY | UsageMask::DERIVE_KEY,
+                ),
+            ],
+        },
+        &AuthContext::open(),
+        "failclosed-create",
+    )
+    .expect("Create HMAC-SHA-256 derivation key");
+
+    use pqctoday_kmip::kmip30::ActivateRequest;
+    activate(&deps, ActivateRequest { uid: created.uid.clone() }, "failclosed-activate").unwrap();
+
+    let rec = deps.store.get(&created.uid).unwrap().unwrap();
+    assert!(
+        rec.key_material.is_none(),
+        "the base key must live in the engine, or the derive never reaches the whitelist check"
+    );
+    let session = deps.engine_session.unwrap();
+    let handle = pqctoday_kmip::ops::helpers::find_handle_for_object(
+        session, &rec.pkcs11_cka_id, rec.object_type,
+    )
+    .expect("lookup ok")
+    .expect("engine handle exists");
+
+    // The restriction must actually be ON the object. Under the old 4-byte
+    // packing this was `None`: one mechanism packed to 4 bytes, 4 % 8 != 0,
+    // CKR_ATTRIBUTE_VALUE_INVALID, swallowed.
+    let allowed = softhsmrustv3::native::get_attribute(session, handle, c::CKA_ALLOWED_MECHANISMS)
+        .expect("Create must install CKA_ALLOWED_MECHANISMS (fail-open if absent)");
+    assert_eq!(
+        softhsmrustv3::state::parse_allowed_mechanisms(&allowed),
+        vec![c::CKM_SHA256_HMAC],
+        "a single-mechanism whitelist must survive the round trip intact"
+    );
+
+    let derive_with = |hash: HashingAlgorithm, cid: &str| {
+        derive_key(
+            &deps,
+            DeriveKeyRequest {
+                object_type: ObjectType::SymmetricKey,
+                uids: vec![created.uid.clone()],
+                derivation_method: DerivationMethod::Nist800_108C,
+                derivation_parameters: DerivationParameters {
+                    cryptographic_parameters: Some(CryptographicParameters {
+                        hashing_algorithm: Some(hash),
+                        ..Default::default()
+                    }),
+                    derivation_data: Some(b"label\x00context".to_vec()),
+                    ..Default::default()
+                },
+                template_attribute: vec![
+                    Attribute::CryptographicAlgorithm(KmipAlgorithm::Aes),
+                    Attribute::CryptographicLength(256),
+                    Attribute::CryptographicUsageMask(UsageMask::ENCRYPT | UsageMask::DECRYPT),
+                ],
+            },
+            &AuthContext::open(),
+            cid,
+        )
+    };
+
+    // 2 ── The disallowed mechanism, over the KMIP protocol path. FAIL CLOSED.
+    let err = derive_with(HashingAlgorithm::Sha384, "failclosed-derive-384")
+        .expect_err("CKM_SHA384_HMAC is not in this key's CKA_ALLOWED_MECHANISMS: DeriveKey MUST be refused");
+    assert_eq!(
+        err.result_reason(),
+        pqctoday_kmip::error::ResultReason::OperationNotSupported,
+        "the engine's CKR_MECHANISM_INVALID must surface as a KMIP failure, not a success"
+    );
+
+    // 3 ── Positive control: the whitelisted mechanism still works.
+    derive_with(HashingAlgorithm::Sha256, "failclosed-derive-256")
+        .expect("CKM_SHA256_HMAC IS whitelisted: DeriveKey must still succeed");
+
+    // 4 ── Non-vacuity control: widen the whitelist and the SAME rejected
+    //      request now succeeds, proving step 2 was the restriction talking.
+    let widened = pqctoday_kmip::kmip30::algos::pack_allowed_mechanisms(&[
+        c::CKM_SHA256_HMAC,
+        c::CKM_SHA384_HMAC,
+    ]);
+    softhsmrustv3::native::set_attribute(session, handle, c::CKA_ALLOWED_MECHANISMS, widened)
+        .expect("widening the whitelist must be accepted at the engine's own element width");
+    derive_with(HashingAlgorithm::Sha384, "failclosed-derive-384-widened")
+        .expect("with CKM_SHA384_HMAC whitelisted the identical request must succeed \
+                 — this is what makes step 2's refusal meaningful");
+
+    let _ = session::finalize();
 }
