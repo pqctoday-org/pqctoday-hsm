@@ -94,7 +94,7 @@
       "scenario": "env.mechanism_set",
       "path": "mech*",
       "justification": "The two engines advertise different mechanism sets (127 vs 116, 47 differences) and no profile requires any mechanism, so this is a product decision, not a conformance gap.",
-      "citation": "PKCS #11 Profiles v3.2 OS: Baseline Provider, Complete Provider, Extended Provider, Authentication Token and Public Certificates Token each state 'Supports the following mechanisms: a. None specified.' Only the HKDF TLS Token profile names one."
+      "citation": "PKCS #11 Profiles v3.2 OS §5.1/§5.3/§5.4/§5.5 (Baseline, Extended, Authentication Token, Public Certificates Token) each state \"Supports the following mechanisms: a. None specified\"; this engine claims Baseline. NOTE §5.2 Complete Provider condition 6 requires \"Supports all mechanisms [PKCS11_Spec] Section 6\" — under THAT profile these divergences would be defects, which is why neither engine claims it."
     },
     {
       "id": "LEGAL-IDENTITY-STRINGS",
