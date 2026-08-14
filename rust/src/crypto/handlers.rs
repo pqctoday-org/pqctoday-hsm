@@ -204,9 +204,11 @@ pub unsafe fn get_attr_ulong_native(
             // Anything else — including the 0/CK_UNAVAILABLE_INFORMATION
             // length a caller uses to SIZE the attribute rather than supply it
             // — is not a value this reader may take.
-            if !val_ptr.is_null()
-                && val_len == core::mem::size_of::<crate::ck_abi::CK_ULONG>()
-            {
+            // Width comes from `ck_param::WORD`, not `ck_abi::CK_ULONG`: ck_abi
+            // is cfg'd out on wasm32-unknown-unknown, so naming it here broke
+            // the browser build — a target CI does not compile. ck_param is
+            // compiled on every target and exists to own exactly this fact.
+            if !val_ptr.is_null() && val_len as usize == crate::ck_param::WORD {
                 // CK_ATTRIBUTE.pValue carries NO alignment guarantee — an aligned
                 // deref panics (misaligned pointer) on a legal caller template.
                 return Some(std::ptr::read_unaligned(val_ptr as *const usize));
