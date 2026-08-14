@@ -47,6 +47,37 @@ def _find(node: _ttlv.TtlvNode, tag: str) -> Optional[_ttlv.TtlvNode]:
     return None
 
 
+def _operation_name(value) -> str:
+    """Map a decoded `Operation` enumeration back to its spec name.
+
+    The TTLV decoder returns enumerations as raw integers, which is right for a
+    codec but wrong for a caller: a pushed message reporting operation ``27``
+    rather than ``"Notify"`` is one lookup away from being unreadable. Resolved
+    against the same shipped CSD02 enum table the encoder uses, so the two can
+    never disagree. Falls back to the number when it is unknown — better an
+    honest integer than a guessed name.
+    """
+    if value is None:
+        return "Unknown"
+    if isinstance(value, str) and not value.lstrip("-").isdigit():
+        return value
+    try:
+        wanted = int(str(value), 0)
+        table = _ttlv.table().enum_name_to_value
+        # The table keys enums by their spec name; try the exact key first and
+        # a case-insensitive match second, so a future normalisation change
+        # cannot silently turn every pushed operation back into a bare number.
+        members = table.get("Operation") or next(
+            (v for k, v in table.items() if k.lower() == "operation"), {}
+        )
+        for name, code in members.items():
+            if code == wanted:
+                return name
+    except (ValueError, AttributeError):
+        pass
+    return str(value)
+
+
 def _proto() -> _ttlv.TtlvNode:
     return _struct(
         "ProtocolVersion",
@@ -263,6 +294,212 @@ class KmipClient:
         node, _ = _ttlv.decode_one(resp_bytes)
         return node
 
+    def serve_as_endpoint(
+        self,
+        on_message=None,
+        *,
+        max_messages: int = 64,
+        speaks_versions: tuple[tuple[int, int], ...] = ((3, 0),),
+        handles_operations: tuple[str, ...] = ("Notify", "Put"),
+        include_control: bool = False,
+    ) -> list[dict]:
+        """Hand the server the client role, then receive what it pushes.
+
+        KMIP 3.0 §6.1.61: after a successful `Set Endpoint Role`, "the server
+        assumes the client role, and the client assumes the server role, but
+        the communication channel remains as established". So this opens ONE
+        connection, sends the role switch on it, and then keeps reading —
+        server-originated `Notify` (§6.2.2) and `Put` (§6.2.3) requests arrive
+        on that same socket.
+
+        Each one is answered with a Response carrying no payload, which
+        §6.2.2/§6.2.3 both require ("The client SHALL send a response in the
+        form of a Response containing no payload").
+
+        Returns one dict per message received: ``{"operation", "uid",
+        "attributes"}``. ``on_message`` is called with each dict as it
+        arrives, for callers that want to act rather than collect.
+
+        Requires credentials or mTLS — the server refuses the role switch to an
+        anonymous caller, because notifications are scoped to the objects an
+        identity owns.
+
+        ``max_messages`` bounds the loop so a misbehaving or chatty server
+        cannot pin this call open forever.
+
+        Before pushing, the server interrogates this endpoint — `Discover
+        Versions` (§6.1.21) and `Query` (§6.1.39), issued server-to-client —
+        and ends the session by handing the role back with `Set Endpoint Role`
+        (§6.1.61). All three are answered here.
+
+        ``speaks_versions`` and ``handles_operations`` are what we answer with.
+        The defaults are the truth for this client; they are parameters because
+        the server is supposed to *act* on the answers, and a test cannot prove
+        that without being able to answer differently. Narrowing them is
+        therefore how you demonstrate the server declining to push.
+
+        ``include_control`` adds the three interrogation messages to the
+        returned list. Off by default: callers want the pushes, not the
+        handshake around them.
+        """
+        request = _struct(
+            "RequestMessage",
+            _struct("RequestHeader", _proto(), *self._auth_nodes()),
+            _struct(
+                "BatchItem",
+                _leaf("Operation", "Enumeration", "SetEndpointRole"),
+                _struct("RequestPayload", _leaf("EndpointRole", "Enumeration", "Client")),
+            ),
+        )
+
+        received: list[dict] = []
+        raw = socket.create_connection((self.host, self.port), timeout=self.timeout)
+        sock = self._ctx.wrap_socket(raw, server_hostname=self.host)
+        try:
+            sock.sendall(_ttlv.encode_node(request))
+            sock.settimeout(self.timeout)
+
+            # 1. The response to the role switch itself, still client-to-server.
+            frame = self._recv_frame(sock)
+            if frame is None:
+                raise ConnectionError("server closed before answering SetEndpointRole")
+            batch = _find(frame, "BatchItem")
+            status = _find(batch, "ResultStatus") if batch else None
+            if status is None or int(status.value) != RESULT_SUCCESS:
+                msg = _find(batch, "ResultMessage") if batch else None
+                raise PermissionError(
+                    f"server refused the endpoint role switch: "
+                    f"{msg.value if msg is not None else 'no reason given'}"
+                )
+
+            # 2. Roles are now swapped: every further frame is a REQUEST from
+            #    the server. Two kinds arrive — the §6.2 pushes we came for,
+            #    and the server interrogating us before it sends them.
+            for _ in range(max_messages):
+                pushed = self._recv_frame(sock)
+                if pushed is None:
+                    break  # server finished and closed
+                op_node = _find(pushed, "Operation")
+                operation = _operation_name(op_node.value if op_node is not None else None)
+
+                if operation == "DiscoverVersions":
+                    # §6.1.21 in the server-to-client direction. Answering
+                    # truthfully is what lets the server decline to push frames
+                    # we could not parse.
+                    sock.sendall(_ttlv.encode_node(_struct(
+                        "ResponseMessage",
+                        _struct("ResponseHeader", _proto()),
+                        _struct(
+                            "BatchItem",
+                            _leaf("Operation", "Enumeration", "DiscoverVersions"),
+                            _leaf("ResultStatus", "Enumeration", "Success"),
+                            _struct("ResponsePayload", *[
+                                _struct(
+                                    "ProtocolVersion",
+                                    _leaf("ProtocolVersionMajor", "Integer", major),
+                                    _leaf("ProtocolVersionMinor", "Integer", minor),
+                                )
+                                for major, minor in speaks_versions
+                            ]),
+                        ),
+                    )))
+                    if include_control:
+                        received.append({"operation": operation, "uid": None, "attributes": []})
+                    continue
+
+                if operation == "Query":
+                    # §6.1.39. We report only the operations we can service in
+                    # the server role — the server uses this to avoid pushing a
+                    # message type we would drop on the floor.
+                    sock.sendall(_ttlv.encode_node(_struct(
+                        "ResponseMessage",
+                        _struct("ResponseHeader", _proto()),
+                        _struct(
+                            "BatchItem",
+                            _leaf("Operation", "Enumeration", "Query"),
+                            _leaf("ResultStatus", "Enumeration", "Success"),
+                            _struct("ResponsePayload", *[
+                                _leaf("Operation", "Enumeration", op)
+                                for op in handles_operations
+                            ]),
+                        ),
+                    )))
+                    if include_control:
+                        received.append({"operation": operation, "uid": None, "attributes": []})
+                    continue
+
+                if operation == "SetEndpointRole":
+                    # The server handing the role back: the session is over, and
+                    # we are told so rather than discovering it from a closed
+                    # socket. Acknowledge, then stop reading.
+                    sock.sendall(_ttlv.encode_node(_struct(
+                        "ResponseMessage",
+                        _struct("ResponseHeader", _proto()),
+                        _struct(
+                            "BatchItem",
+                            _leaf("Operation", "Enumeration", "SetEndpointRole"),
+                            _leaf("ResultStatus", "Enumeration", "Success"),
+                            _struct(
+                                "ResponsePayload",
+                                _leaf("EndpointRole", "Enumeration", "Client"),
+                            ),
+                        ),
+                    )))
+                    if include_control:
+                        received.append({"operation": operation, "uid": None, "attributes": []})
+                    break
+
+                uid_node = _find(pushed, "UniqueIdentifier")
+                attrs = _find(pushed, "Attributes")
+                entry = {
+                    "operation": operation,
+                    "uid": uid_node.value if uid_node is not None else None,
+                    "attributes": [c.tag_name for c in attrs.children] if attrs else [],
+                }
+                received.append(entry)
+                if on_message is not None:
+                    on_message(entry)
+
+                ack = _struct(
+                    "ResponseMessage",
+                    _struct("ResponseHeader", _proto()),
+                    _struct(
+                        "BatchItem",
+                        _leaf("Operation", "Enumeration", operation),
+                        _leaf("ResultStatus", "Enumeration", "Success"),
+                    ),
+                )
+                sock.sendall(_ttlv.encode_node(ack))
+        finally:
+            sock.close()
+        return received
+
+    @staticmethod
+    def _recv_frame(sock) -> Optional[_ttlv.TtlvNode]:
+        """Read exactly one TTLV frame, or ``None`` if the peer closed.
+
+        Needed because the role-swapped channel carries MANY messages on one
+        socket: the ordinary `_send` reads to EOF, which would swallow every
+        later frame into one buffer. §9.6 gives the framing — 8-byte header,
+        then a value padded to an 8-byte boundary.
+        """
+        header = b""
+        while len(header) < 8:
+            chunk = sock.recv(8 - len(header))
+            if not chunk:
+                return None
+            header += chunk
+        length = int.from_bytes(header[4:8], "big")
+        padded = (length + 7) // 8 * 8  # §9.6: value is zero-padded to 8 bytes
+        body = b""
+        while len(body) < padded:
+            chunk = sock.recv(padded - len(body))
+            if not chunk:
+                return None
+            body += chunk
+        node, _ = _ttlv.decode_one(header + body)
+        return node
+
     def _auth_nodes(self) -> list[_ttlv.TtlvNode]:
         """The §8.1.2 `Authentication` structure, or nothing when no
         credentials are configured.
@@ -450,12 +687,87 @@ class KmipClient:
             return None
         return {1: "Valid", 2: "Invalid", 3: "Unknown"}.get(int(value))
 
+    def register(
+        self,
+        key_material: bytes,
+        *,
+        algorithm: str = "AES",
+        length: Optional[int] = None,
+        usage: str = "Encrypt Decrypt",
+        name: Optional[str] = None,
+        key_format_type: str = "Raw",
+    ) -> KmipResult:
+        """KMIP Register (§6.1.56) — hand the server a key you already hold,
+        instead of asking it to generate one.
+
+        This is the import half of key management: `create_symmetric` mints
+        material inside the HSM, `register` adopts material from outside it
+        (a migration from another KMS, a key escrowed elsewhere, a test
+        vector). The returned UID then behaves like any other managed
+        object — activate, encrypt, locate, revoke, destroy.
+
+        ``length`` defaults to the true bit length of ``key_material``.
+        Passing a value that disagrees with the bytes is a client-side error
+        rather than something to forward: the server would store an attribute
+        contradicting its own key, and the mismatch would only surface much
+        later as a puzzling mechanism failure.
+
+        Scope: symmetric keys. The server's `Register` accepts asymmetric and
+        certificate payloads too, but they take a different managed-object
+        structure; this helper covers the symmetric path the conformance
+        corpus exercises (see `CS-BC-M-*` transcripts).
+        """
+        true_bits = len(key_material) * 8
+        if length is None:
+            length = true_bits
+        elif length != true_bits:
+            raise ValueError(
+                f"length={length} contradicts key_material ({true_bits} bits from "
+                f"{len(key_material)} bytes) — the server would store an attribute "
+                "that disagrees with its own key material"
+            )
+
+        attrs = [
+            _leaf("CryptographicAlgorithm", "Enumeration", algorithm),
+            _leaf("CryptographicLength", "Integer", length),
+            _leaf("CryptographicUsageMask", "Integer", usage),
+        ]
+        if name:
+            attrs.append(_leaf("Name", "TextString", name))
+
+        return self.request(
+            "Register",
+            _leaf("ObjectType", "Enumeration", "SymmetricKey"),
+            _struct("Attributes", *attrs),
+            _struct(
+                "SymmetricKey",
+                _struct(
+                    "KeyBlock",
+                    _leaf("KeyFormatType", "Enumeration", key_format_type),
+                    _struct("KeyValue", _leaf("KeyMaterial", "ByteString", key_material.hex())),
+                    _leaf("CryptographicAlgorithm", "Enumeration", algorithm),
+                    _leaf("CryptographicLength", "Integer", length),
+                ),
+            ),
+        )
+
     def encapsulate(self, uid: str) -> KmipResult:
-        """ML-KEM encapsulate against a public key UID."""
+        """Encapsulate against a public key UID.
+
+        Works for ML-KEM, for the hybrid groups (``X25519MLKEM768``,
+        ``SecP256r1MLKEM768``), and for classical ECDH-as-DHKEM — the
+        operation is algorithm-agnostic by design (§6.1.22 says "a key
+        encapsulation mechanism", not "ML-KEM"). Returns the ciphertext via
+        ``.get("Data")`` and the derived secret's UID via
+        ``.get("UniqueIdentifier")``.
+        """
         return self.request("Encapsulate", _leaf("UniqueIdentifier", "TextString", uid))
 
     def decapsulate(self, uid: str, ciphertext: bytes) -> KmipResult:
-        """ML-KEM decapsulate ``ciphertext`` against a private key UID."""
+        """Decapsulate ``ciphertext`` against a private key UID.
+
+        The peer of :meth:`encapsulate`, and equally algorithm-agnostic.
+        """
         return self.request(
             "Decapsulate",
             _leaf("UniqueIdentifier", "TextString", uid),

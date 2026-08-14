@@ -1,4 +1,19 @@
-# KMIP 3.0 Delta — divergence between our pre-extraction draft and OASIS
+# KMIP 3.0 Delta — RETIRED, HISTORICAL ONLY
+
+> **⚠️ RETIRED 2026-07-25 (commit `753a357`), superseded by the CSD02 migration.**
+> Every number, citation and table below was checked against **CSD01** — the
+> baseline this repo no longer tracks. The current baseline is **CSD02
+> (7 May 2026)**; §6.1.x operation numbering, table numbers and page references
+> below are therefore WRONG for the code as it stands today.
+>
+> **Do not cite this file.** Current sources of truth:
+> - Spec baseline + conformance claim → [`CONFORMANCE_REPORT.md`](CONFORMANCE_REPORT.md)
+> - Vendored documents + re-vendor checklist → [`../spec/README.md`](../spec/README.md)
+> - CSD01↔CSD02 operation renumbering → `../spec/oasis-kmip-3.0/kmip-spec-3.0-section61-headings.json`
+>   (and the guard test `../tests/section61_citation_drift.rs`)
+>
+> Kept only so a pre-CSD02 citation found elsewhere can be traced back to what
+> it originally meant.
 
 This document records every place our pre-extraction working notes diverged
 from the authoritative OASIS KMIP 3.0 spec, so future readers know which

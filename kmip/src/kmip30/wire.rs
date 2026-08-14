@@ -213,6 +213,12 @@ pub(crate) mod tags {
     pub const PrimeExponentQ: u32         = 0x42_0061;
     pub const CrtCoefficient: u32         = 0x42_0027;
     pub const AttributeReference: u32     = 0x42_013b;
+    /// KMIP 3.0 §6.2.3 `Put Function` — whether a pushed object is New
+    /// (0x01) or a Replace (0x02) for one the client already holds.
+    pub const PutFunction: u32            = 0x42_0070;
+    /// KMIP 3.0 §6.2.3 `Replaced Unique Identifier` — the object the
+    /// pushed one supersedes. Present only when Put Function = Replace.
+    pub const ReplacedUniqueIdentifier: u32 = 0x42_0076;
     /// KMIP 3.0 §6.1.{2,38,56} `New Attribute` — Structure wrapping the
     /// typed-tag attribute being added / modified / set.
     pub const NewAttribute: u32           = 0x42_013d;
@@ -1148,6 +1154,22 @@ fn query_function_code(q: QueryFunction) -> u32 {
     }
 }
 
+/// Inverse of [`query_function_code`]. Codepoints per
+/// `kmip-spec-3.0-tags-enums.json` `enums."Query Function"` — Profiles = 0x0a,
+/// Capabilities = 0x0b (fixed in K3; 0x07/0x09 are Query Attestation Types /
+/// Query Validations).
+fn query_function_from_code(v: u32) -> Option<QueryFunction> {
+    Some(match v {
+        0x01 => QueryFunction::QueryOperations,
+        0x02 => QueryFunction::QueryObjects,
+        0x03 => QueryFunction::QueryServerInformation,
+        0x04 => QueryFunction::QueryApplicationNamespaces,
+        0x0a => QueryFunction::QueryProfiles,
+        0x0b => QueryFunction::QueryCapabilities,
+        _ => return None,
+    })
+}
+
 fn deactivation_reason_code(r: DeactivationReason) -> u32 {
     match r {
         DeactivationReason::Unspecified => 0x01,
@@ -1803,15 +1825,10 @@ fn decode_query_req(children: &[TtlvFrame]) -> Result<QueryRequest, WireError> {
             // `enums."Query Function"` — Profiles = 0x0a,
             // Capabilities = 0x0b (fixed in K3; 0x07/0x09 are Query
             // Attestation Types / Query Validations).
-            functions.push(match v {
-                0x01 => QueryFunction::QueryOperations,
-                0x02 => QueryFunction::QueryObjects,
-                0x03 => QueryFunction::QueryServerInformation,
-                0x04 => QueryFunction::QueryApplicationNamespaces,
-                0x0a => QueryFunction::QueryProfiles,
-                0x0b => QueryFunction::QueryCapabilities,
-                other => return Err(WireError::UnknownEnum { field: "Query Function", value: other }),
-            });
+            functions.push(query_function_from_code(v).ok_or(WireError::UnknownEnum {
+                field: "Query Function",
+                value: v,
+            })?);
         }
     }
     Ok(QueryRequest { functions })
@@ -5460,6 +5477,576 @@ fn required_asynchronous_correlation_value(children: &[TtlvFrame]) -> Result<Vec
         tag: tags::AsynchronousCorrelationValue,
         name: "Asynchronous Correlation Value",
     })
+}
+
+// ── §6.2 Server-to-Client messages ──────────────────────────────────────────
+//
+// Notify (§6.2.2) and Put (§6.2.3) run in the opposite direction to everything
+// else in this file: the SERVER originates the request and the client answers.
+// So these are encoders for requests we SEND, with decoders alongside them so a
+// client (and the round-trip tests) can read what was sent — the mirror image
+// of the client-request path above, which decodes then encodes a response.
+//
+// The channel they travel on is not left to invention: §6.1.61 Set Endpoint
+// Role says the roles swap "over the current client-to-server communication
+// channel … the communication channel remains as established". A server does
+// not dial out; a client volunteers to receive.
+
+/// Build a complete server-originated `RequestMessage` carrying one payload.
+///
+/// Protocol version and the §6.1 batch shape are identical to a client
+/// request — only the direction of travel differs, which is exactly why the
+/// client can decode it with its ordinary request decoder.
+fn server_request_message(operation: Operation, payload: TtlvFrame, time_stamp: i64) -> Vec<u8> {
+    let header = TtlvFrame::new(
+        Tag(tags::RequestHeader),
+        Value::Structure(vec![
+            TtlvFrame::new(
+                Tag(tags::ProtocolVersion),
+                Value::Structure(vec![
+                    TtlvFrame::new(Tag(tags::ProtocolVersionMajor), Value::Integer(3)),
+                    TtlvFrame::new(Tag(tags::ProtocolVersionMinor), Value::Integer(0)),
+                ]),
+            ),
+            TtlvFrame::new(Tag(tags::TimeStamp), Value::DateTime(time_stamp)),
+        ]),
+    );
+    let batch_item = TtlvFrame::new(
+        Tag(tags::BatchItem),
+        Value::Structure(vec![
+            TtlvFrame::new(Tag(tags::Operation), Value::Enumeration(operation.to_wire_value())),
+            payload,
+        ]),
+    );
+    let frame = TtlvFrame::new(
+        Tag(tags::RequestMessage),
+        Value::Structure(vec![header, batch_item]),
+    );
+    let mut buf = BytesMut::new();
+    encode(&frame, &mut buf);
+    buf.to_vec()
+}
+
+/// Encode a §6.2.2 `Notify` message (Table: Unique Identifier / Attributes /
+/// Attribute Reference).
+pub fn encode_notify_message(req: &NotifyRequest, time_stamp: i64) -> Vec<u8> {
+    let mut children = vec![uid_frame(&req.unique_identifier)];
+    if !req.attributes.is_empty() {
+        children.push(TtlvFrame::new(
+            Tag(tags::Attributes),
+            Value::Structure(req.attributes.iter().map(encode_attribute_v3).collect()),
+        ));
+    }
+    // "The attributes that have been deleted" — repeated, NOT wrapped in a
+    // containing Structure (the payload table lists it as a sibling that "may
+    // be repeated", unlike Attributes which is a single Structure).
+    for name in &req.deleted_attributes {
+        children.push(attribute_reference_frame(name));
+    }
+    server_request_message(
+        Operation::Notify,
+        TtlvFrame::new(Tag(tags::RequestPayload), Value::Structure(children)),
+        time_stamp,
+    )
+}
+
+/// Encode a §6.2.3 `Put` message.
+pub fn encode_put_message(req: &PutRequest, time_stamp: i64) -> Vec<u8> {
+    let mut children = vec![
+        uid_frame(&req.unique_identifier),
+        TtlvFrame::new(
+            Tag(tags::PutFunction),
+            Value::Enumeration(req.put_function.to_wire_value()),
+        ),
+    ];
+    // Only meaningful for Replace; emitting it beside New would state that the
+    // object both is and is not superseding something.
+    if req.put_function == PutFunction::Replace {
+        if let Some(replaced) = &req.replaced_unique_identifier {
+            children.push(TtlvFrame::new(
+                Tag(tags::ReplacedUniqueIdentifier),
+                Value::TextString(replaced.clone()),
+            ));
+        }
+    }
+    if !req.attributes.is_empty() {
+        children.push(TtlvFrame::new(
+            Tag(tags::Attributes),
+            Value::Structure(req.attributes.iter().map(encode_attribute_v3).collect()),
+        ));
+    }
+    server_request_message(
+        Operation::Put,
+        TtlvFrame::new(Tag(tags::RequestPayload), Value::Structure(children)),
+        time_stamp,
+    )
+}
+
+/// The empty-payload `ResponseMessage` a client owes a pushed request:
+/// "The client SHALL send a response in the form of a Response containing no
+/// payload" (§6.2.2, §6.2.3).
+pub fn encode_server_to_client_ack(operation: Operation, time_stamp: i64) -> Vec<u8> {
+    let header = TtlvFrame::new(
+        Tag(tags::ResponseHeader),
+        Value::Structure(vec![
+            TtlvFrame::new(
+                Tag(tags::ProtocolVersion),
+                Value::Structure(vec![
+                    TtlvFrame::new(Tag(tags::ProtocolVersionMajor), Value::Integer(3)),
+                    TtlvFrame::new(Tag(tags::ProtocolVersionMinor), Value::Integer(0)),
+                ]),
+            ),
+            TtlvFrame::new(Tag(tags::TimeStamp), Value::DateTime(time_stamp)),
+        ]),
+    );
+    let batch_item = TtlvFrame::new(
+        Tag(tags::BatchItem),
+        Value::Structure(vec![
+            TtlvFrame::new(Tag(tags::Operation), Value::Enumeration(operation.to_wire_value())),
+            TtlvFrame::new(Tag(tags::ResultStatus), Value::Enumeration(0x00)),
+        ]),
+    );
+    let frame = TtlvFrame::new(
+        Tag(tags::ResponseMessage),
+        Value::Structure(vec![header, batch_item]),
+    );
+    let mut buf = BytesMut::new();
+    encode(&frame, &mut buf);
+    buf.to_vec()
+}
+
+/// Encode a server-issued `Discover Versions` (§6.1.21) — the server asking the
+/// client which protocol versions it speaks.
+///
+/// Same payload shape as the client-issued form: zero or more `Protocol
+/// Version` structures. An empty list means "tell me everything you have",
+/// exactly as §6.1.21 defines for the ordinary direction.
+pub fn encode_discover_versions_message(versions: &[(i32, i32)], time_stamp: i64) -> Vec<u8> {
+    let children: Vec<TtlvFrame> = versions
+        .iter()
+        .map(|&(major, minor)| {
+            TtlvFrame::new(
+                Tag(tags::ProtocolVersion),
+                Value::Structure(vec![
+                    TtlvFrame::new(Tag(tags::ProtocolVersionMajor), Value::Integer(major)),
+                    TtlvFrame::new(Tag(tags::ProtocolVersionMinor), Value::Integer(minor)),
+                ]),
+            )
+        })
+        .collect();
+    server_request_message(
+        Operation::DiscoverVersions,
+        TtlvFrame::new(Tag(tags::RequestPayload), Value::Structure(children)),
+        time_stamp,
+    )
+}
+
+/// Encode a server-issued `Query` (§6.1.39) — the server asking the client what
+/// it can do.
+pub fn encode_query_message(functions: &[QueryFunction], time_stamp: i64) -> Vec<u8> {
+    let children: Vec<TtlvFrame> = functions
+        .iter()
+        .map(|f| TtlvFrame::new(Tag(tags::QueryFunction), Value::Enumeration(query_function_code(*f))))
+        .collect();
+    server_request_message(
+        Operation::Query,
+        TtlvFrame::new(Tag(tags::RequestPayload), Value::Structure(children)),
+        time_stamp,
+    )
+}
+
+/// Encode a server-issued `Set Endpoint Role` (§6.1.61) — used to hand the
+/// server role back when the push session is over, so the peer learns the
+/// session ended rather than inferring it from a closed socket.
+pub fn encode_set_endpoint_role_message(role: EndpointRole, time_stamp: i64) -> Vec<u8> {
+    server_request_message(
+        Operation::SetEndpointRole,
+        TtlvFrame::new(
+            Tag(tags::RequestPayload),
+            Value::Structure(vec![TtlvFrame::new(
+                Tag(tags::EndpointRole),
+                Value::Enumeration(role.to_wire_value()),
+            )]),
+        ),
+        time_stamp,
+    )
+}
+
+/// What a client reads off a flipped channel.
+///
+/// `Notify` and `Put` are the pushes §6.2 defines. The other three are the
+/// server interrogating the client — the remaining half of Baseline §5.1.2
+/// item 10's five server-to-client operations.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ServerToClientMessage {
+    Notify(NotifyRequest),
+    Put(PutRequest),
+    DiscoverVersions(DiscoverVersionsRequest),
+    Query(Vec<QueryFunction>),
+    SetEndpointRole(SetEndpointRoleRequest),
+}
+
+/// A client's answer to a server-issued request, read back by the server.
+///
+/// `Notify` and `Put` are acknowledged with no payload (§6.2.2/§6.2.3); the
+/// other three carry a real one, which is the whole reason the server asks.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ClientResponsePayload {
+    /// The empty-payload acknowledgement §6.2.2/§6.2.3 requires.
+    None,
+    DiscoverVersions(Vec<(i32, i32)>),
+    /// The operations the client says it can service in the server role.
+    Query(Vec<Operation>),
+    SetEndpointRole(EndpointRole),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ClientResponse {
+    pub operation: Option<Operation>,
+    /// `Result Status` as sent (0x00 Success, 0x01 OperationFailed, …).
+    pub result_status: u32,
+    pub payload: ClientResponsePayload,
+}
+
+impl ClientResponse {
+    pub fn succeeded(&self) -> bool {
+        self.result_status == 0x00
+    }
+}
+
+/// Encode the client-side answer to a server-issued `Discover Versions`.
+pub fn encode_discover_versions_client_response(
+    versions: &[(i32, i32)],
+    time_stamp: i64,
+) -> Vec<u8> {
+    let children: Vec<TtlvFrame> = versions
+        .iter()
+        .map(|&(major, minor)| {
+            TtlvFrame::new(
+                Tag(tags::ProtocolVersion),
+                Value::Structure(vec![
+                    TtlvFrame::new(Tag(tags::ProtocolVersionMajor), Value::Integer(major)),
+                    TtlvFrame::new(Tag(tags::ProtocolVersionMinor), Value::Integer(minor)),
+                ]),
+            )
+        })
+        .collect();
+    client_response_message(Operation::DiscoverVersions, Some(children), time_stamp)
+}
+
+/// Encode the client-side answer to a server-issued `Query`.
+///
+/// Only the `Operation` list is emitted: what the server does with the answer
+/// is decide which pushes this peer can service, and nothing else in a Query
+/// response bears on that.
+pub fn encode_query_client_response(operations: &[Operation], time_stamp: i64) -> Vec<u8> {
+    let children: Vec<TtlvFrame> = operations
+        .iter()
+        .map(|op| TtlvFrame::new(Tag(tags::Operation), Value::Enumeration(op.to_wire_value())))
+        .collect();
+    client_response_message(Operation::Query, Some(children), time_stamp)
+}
+
+/// Encode the client-side answer to a server-issued `Set Endpoint Role`.
+pub fn encode_set_endpoint_role_client_response(role: EndpointRole, time_stamp: i64) -> Vec<u8> {
+    client_response_message(
+        Operation::SetEndpointRole,
+        Some(vec![TtlvFrame::new(
+            Tag(tags::EndpointRole),
+            Value::Enumeration(role.to_wire_value()),
+        )]),
+        time_stamp,
+    )
+}
+
+/// Shared shell for a client-side response. `payload: None` produces the
+/// no-payload acknowledgement; `Some(children)` wraps them in a Response
+/// Payload.
+fn client_response_message(
+    operation: Operation,
+    payload: Option<Vec<TtlvFrame>>,
+    time_stamp: i64,
+) -> Vec<u8> {
+    let header = TtlvFrame::new(
+        Tag(tags::ResponseHeader),
+        Value::Structure(vec![
+            TtlvFrame::new(
+                Tag(tags::ProtocolVersion),
+                Value::Structure(vec![
+                    TtlvFrame::new(Tag(tags::ProtocolVersionMajor), Value::Integer(3)),
+                    TtlvFrame::new(Tag(tags::ProtocolVersionMinor), Value::Integer(0)),
+                ]),
+            ),
+            TtlvFrame::new(Tag(tags::TimeStamp), Value::DateTime(time_stamp)),
+        ]),
+    );
+    let mut bi_children = vec![
+        TtlvFrame::new(Tag(tags::Operation), Value::Enumeration(operation.to_wire_value())),
+        TtlvFrame::new(Tag(tags::ResultStatus), Value::Enumeration(0x00)),
+    ];
+    if let Some(children) = payload {
+        bi_children.push(TtlvFrame::new(Tag(tags::ResponsePayload), Value::Structure(children)));
+    }
+    let frame = TtlvFrame::new(
+        Tag(tags::ResponseMessage),
+        Value::Structure(vec![
+            header,
+            TtlvFrame::new(Tag(tags::BatchItem), Value::Structure(bi_children)),
+        ]),
+    );
+    let mut buf = BytesMut::new();
+    encode(&frame, &mut buf);
+    buf.to_vec()
+}
+
+/// Decode what a client sent back on a flipped channel.
+///
+/// Deliberately tolerant about the payload: a client that answers a `Notify`
+/// with the required empty payload, and one that answers a `Query` with a list
+/// of operations, are both well-formed, and the caller decides which it wanted.
+/// A missing or unreadable payload yields [`ClientResponsePayload::None`]
+/// rather than an error, so a sparse-but-legal answer is not treated as a
+/// protocol violation.
+pub fn decode_client_response(bytes: &[u8]) -> Result<ClientResponse, WireError> {
+    let frame = decode_one(bytes).map_err(|e| WireError::Codec(e.to_string()))?;
+    let children = match &frame.value {
+        Value::Structure(c) => c,
+        _ => {
+            return Err(WireError::BadType {
+                tag: tags::ResponseMessage,
+                name: "Response Message",
+                msg: "not a Structure".into(),
+            })
+        }
+    };
+    let batch_item = children
+        .iter()
+        .find(|c| c.tag.0 == tags::BatchItem)
+        .ok_or(WireError::Missing { tag: tags::BatchItem, name: "Batch Item" })?;
+    let bi = match &batch_item.value {
+        Value::Structure(c) => c,
+        _ => {
+            return Err(WireError::BadType {
+                tag: tags::BatchItem,
+                name: "Batch Item",
+                msg: "not a Structure".into(),
+            })
+        }
+    };
+
+    let operation = bi.iter().find_map(|c| match (c.tag.0, &c.value) {
+        (t, Value::Enumeration(v)) if t == tags::Operation => Operation::from_wire_value(*v),
+        _ => None,
+    });
+    let result_status = bi
+        .iter()
+        .find_map(|c| match (c.tag.0, &c.value) {
+            (t, Value::Enumeration(v)) if t == tags::ResultStatus => Some(*v),
+            _ => None,
+        })
+        .unwrap_or(0x00);
+
+    let payload_children = bi
+        .iter()
+        .find(|c| c.tag.0 == tags::ResponsePayload)
+        .and_then(|p| match &p.value {
+            Value::Structure(c) => Some(c),
+            _ => None,
+        });
+
+    let payload = match (operation, payload_children) {
+        (Some(Operation::DiscoverVersions), Some(p)) => {
+            ClientResponsePayload::DiscoverVersions(decode_protocol_versions(p))
+        }
+        (Some(Operation::Query), Some(p)) => ClientResponsePayload::Query(
+            p.iter()
+                .filter_map(|c| match (c.tag.0, &c.value) {
+                    (t, Value::Enumeration(v)) if t == tags::Operation => {
+                        Operation::from_wire_value(*v)
+                    }
+                    _ => None,
+                })
+                .collect(),
+        ),
+        (Some(Operation::SetEndpointRole), Some(p)) => p
+            .iter()
+            .find_map(|c| match (c.tag.0, &c.value) {
+                (t, Value::Enumeration(v)) if t == tags::EndpointRole => {
+                    EndpointRole::from_wire_value(*v)
+                }
+                _ => None,
+            })
+            .map(ClientResponsePayload::SetEndpointRole)
+            .unwrap_or(ClientResponsePayload::None),
+        _ => ClientResponsePayload::None,
+    };
+
+    Ok(ClientResponse { operation, result_status, payload })
+}
+
+/// Pull `(major, minor)` pairs out of a list of `Protocol Version` structures.
+fn decode_protocol_versions(children: &[TtlvFrame]) -> Vec<(i32, i32)> {
+    children
+        .iter()
+        .filter(|c| c.tag.0 == tags::ProtocolVersion)
+        .filter_map(|c| match &c.value {
+            Value::Structure(pv) => {
+                let major = pv.iter().find_map(|f| match (f.tag.0, &f.value) {
+                    (t, Value::Integer(v)) if t == tags::ProtocolVersionMajor => Some(*v),
+                    _ => None,
+                })?;
+                let minor = pv.iter().find_map(|f| match (f.tag.0, &f.value) {
+                    (t, Value::Integer(v)) if t == tags::ProtocolVersionMinor => Some(*v),
+                    _ => None,
+                })?;
+                Some((major, minor))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Decode a server-originated message. Used by the round-trip tests and by any
+/// Rust client acting as the receiving endpoint.
+pub fn decode_server_to_client_message(bytes: &[u8]) -> Result<ServerToClientMessage, WireError> {
+    let frame = decode_one(bytes).map_err(|e| WireError::Codec(e.to_string()))?;
+    let children = match &frame.value {
+        Value::Structure(c) => c,
+        _ => return Err(WireError::BadType {
+            tag: tags::RequestMessage, name: "Request Message",
+            msg: "not a Structure".into() }),
+    };
+    let batch_item = children
+        .iter()
+        .find(|c| c.tag.0 == tags::BatchItem)
+        .ok_or(WireError::Missing { tag: tags::BatchItem, name: "Batch Item" })?;
+    let bi_children = match &batch_item.value {
+        Value::Structure(c) => c,
+        _ => return Err(WireError::BadType {
+            tag: tags::BatchItem, name: "Batch Item", msg: "not a Structure".into() }),
+    };
+    let op = bi_children
+        .iter()
+        .find_map(|c| match (c.tag.0, &c.value) {
+            (t, Value::Enumeration(v)) if t == tags::Operation => Operation::from_wire_value(*v),
+            _ => None,
+        })
+        .ok_or(WireError::Missing { tag: tags::Operation, name: "Operation" })?;
+    let payload = bi_children
+        .iter()
+        .find(|c| c.tag.0 == tags::RequestPayload)
+        .ok_or(WireError::Missing { tag: tags::RequestPayload, name: "Request Payload" })?;
+    let p = match &payload.value {
+        Value::Structure(c) => c,
+        _ => return Err(WireError::BadType {
+            tag: tags::RequestPayload, name: "Request Payload",
+            msg: "not a Structure".into() }),
+    };
+
+    // Only the two push operations name a managed object; the three
+    // interrogation operations have no Unique Identifier at all, so this has to
+    // be read per-arm rather than up front.
+    let require_uid = || -> Result<String, WireError> {
+        p.iter()
+            .find_map(|c| match (c.tag.0, &c.value) {
+                (t, Value::TextString(s)) if t == tags::UniqueIdentifier => Some(s.clone()),
+                _ => None,
+            })
+            .ok_or(WireError::Missing { tag: tags::UniqueIdentifier, name: "Unique Identifier" })
+    };
+
+    let attributes: Vec<Attribute> = p
+        .iter()
+        .find(|c| c.tag.0 == tags::Attributes)
+        .map(|a| match &a.value {
+            Value::Structure(list) => {
+                list.iter().filter_map(|f| decode_attribute_v3(f).ok().flatten()).collect()
+            }
+            _ => Vec::new(),
+        })
+        .unwrap_or_default();
+
+    match op {
+        Operation::DiscoverVersions => {
+            return Ok(ServerToClientMessage::DiscoverVersions(DiscoverVersionsRequest {
+                protocol_versions: decode_protocol_versions(p),
+            }))
+        }
+        Operation::Query => {
+            return Ok(ServerToClientMessage::Query(
+                p.iter()
+                    .filter_map(|c| match (c.tag.0, &c.value) {
+                        (t, Value::Enumeration(v)) if t == tags::QueryFunction => {
+                            query_function_from_code(*v)
+                        }
+                        _ => None,
+                    })
+                    .collect(),
+            ))
+        }
+        Operation::SetEndpointRole => {
+            let role = p
+                .iter()
+                .find_map(|c| match (c.tag.0, &c.value) {
+                    (t, Value::Enumeration(v)) if t == tags::EndpointRole => {
+                        EndpointRole::from_wire_value(*v)
+                    }
+                    _ => None,
+                })
+                .ok_or(WireError::Missing { tag: tags::EndpointRole, name: "Endpoint Role" })?;
+            return Ok(ServerToClientMessage::SetEndpointRole(SetEndpointRoleRequest {
+                endpoint_role: role,
+            }));
+        }
+        _ => {}
+    }
+
+    let uid = require_uid()?;
+
+    match op {
+        Operation::Notify => {
+            let deleted = p
+                .iter()
+                .filter(|c| c.tag.0 == tags::AttributeReference)
+                .filter_map(|c| match &c.value {
+                    Value::Enumeration(code) => Some(tag_name_from_code(*code).to_string()),
+                    Value::TextString(s) => Some(s.clone()),
+                    _ => None,
+                })
+                .collect();
+            Ok(ServerToClientMessage::Notify(NotifyRequest {
+                unique_identifier: uid,
+                attributes,
+                deleted_attributes: deleted,
+            }))
+        }
+        Operation::Put => {
+            let put_function = p
+                .iter()
+                .find_map(|c| match (c.tag.0, &c.value) {
+                    (t, Value::Enumeration(v)) if t == tags::PutFunction => {
+                        PutFunction::from_wire_value(*v)
+                    }
+                    _ => None,
+                })
+                .ok_or(WireError::Missing { tag: tags::PutFunction, name: "Put Function" })?;
+            let replaced = p.iter().find_map(|c| match (c.tag.0, &c.value) {
+                (t, Value::TextString(s)) if t == tags::ReplacedUniqueIdentifier => Some(s.clone()),
+                _ => None,
+            });
+            Ok(ServerToClientMessage::Put(PutRequest {
+                unique_identifier: uid,
+                put_function,
+                replaced_unique_identifier: replaced,
+                attributes,
+            }))
+        }
+        other => Err(WireError::BadType {
+            tag: tags::Operation,
+            name: "Operation",
+            msg: format!("{other:?} is not a §6.2 server-to-client push message"),
+        }),
+    }
 }
 
 #[cfg(test)]
