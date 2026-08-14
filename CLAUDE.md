@@ -77,7 +77,7 @@ engine. It has its own checked-in PKCS#11 v3.2 conformance evidence
 The original Phase 0–6 roadmap (import + strip legacy, OpenSSL 3.x EVP
 migration, ML-DSA, ML-KEM, Emscripten WASM, npm package, app integration) is
 **complete**, as is the later hardening/conformance work. Current release is
-tracked in `CHANGELOG.md` (**0.22.0**, 2026-08-12 — always trust the
+tracked in `CHANGELOG.md` (**0.23.0**, 2026-08-14 — always trust the
 CHANGELOG's top entry over any version echoed in this file). Recent programs: composite/
 hybrid certificate formats (LAMPS, Catalyst, RFC 9763, Chameleon), KMIP 3.0
 §9.10 Maximum Response Size enforcement, PKCS#11 v3.2 conformance evidence

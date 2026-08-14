@@ -8,7 +8,116 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+_Nothing yet._
+
+---
+
+## [0.23.0] — 2026-08-14
+
+**PKCS#11 v3.2 conformance, adjudicated against the Standard rather than against
+the other engine.** Both engines were audited against the v3.2 OASIS Standard
+(03 June 2026) and its two normative references, which the repo did not have —
+`docs/refs/` now vendors all three. That absence had been producing wrong
+answers: conformance is defined by the **Profiles** document (§7 of the spec
+contains no technical requirement at all), and the session/login/object-access
+model lives in the **Usage Guide**.
+
+Two conclusions reversed as a result. **No profile mandates any mechanism** —
+every profile but one says "None specified" — so the 47 mechanism differences
+between the engines are product decisions, not defects. And **a token declares
+conformance by publishing a profile object**, which the C++ engine did not, so
+it could not claim conformance to anything.
+
+### If you are upgrading, read these three
+
+- **AES-CTR ciphertext from the native Rust library was wrong.** `CK_AES_CTR_PARAMS`
+  was decoded assuming a 4-byte `CK_ULONG`; on 64-bit that placed the counter
+  block four bytes early, so every AES-CTR ciphertext the native library ever
+  produced is not decryptable by OpenSSL, the C++ engine, or any conformant
+  implementation. Confirmed against **NIST SP 800-38A** vectors, not against the
+  other engine. Data encrypted through that path is unrecoverable without the
+  old code — no consumer in this repo is affected (KMIP calls the streaming API
+  directly; wasm genuinely has a 4-byte `CK_ULONG`), but an external application
+  loading the native library for `CKM_AES_CTR` is.
+- **EdDSA `phFlag` was read as four bytes over a one-byte `CK_BBOOL`.** A caller
+  setting `CK_FALSE` on an un-zeroed struct got Ed25519**ph** where it asked for
+  pure Ed25519 — a silently wrong signature from a valid call. This one was
+  never wasm-safe either.
+- **Stored and wire formats changed to match the spec.** Post-quantum private
+  keys are raw FIPS bytes rather than PKCS#8-wrapped; the ECDH-as-KEM ciphertext
+  is the raw ephemeral public key (65 bytes for P-256, not 67); Edwards and
+  Montgomery public points are bare little-endian rather than DER-wrapped; EC
+  keys now carry `CKA_EC_PARAMS`. Old artefacts will not parse. Both engines
+  still *accept* the old forms on read.
+
+### Fixed — security
+
+- **Token takeover.** Rust `C_InitToken` re-initialised an initialised token
+  without verifying the existing SO PIN (§5.5.7 MUST), and destroyed nothing.
+- **`CKA_WRAP_TEMPLATE`/`CKA_UNWRAP_TEMPLATE` did not exist in Rust.** A
+  wrapping key an application believed was partitioned was not (§5.18.3 SHALL).
+- **`CKA_WRAP_WITH_TRUSTED` and `CKA_COPYABLE` were not one-way**, so both locks
+  could be cleared and the protection bypassed.
+- **Stateful signature keys were rewindable.** LMS/XMSS state sat in a vendor
+  attribute exempt from mutation policy; rewinding a one-time key permits
+  forgery. Moved to the engine-private range; the snapshot format is bumped and
+  **old-format keys are refused**, never silently reinterpreted.
+- **C++ hash-based private keys were extractable** — §6.65.3/§6.66.4/§6.66.5
+  MUST sensitive + non-extractable (+ non-copyable for HSS).
+- **`CKA_ALLOWED_MECHANISMS` was parsed at the wrong element width**, so on
+  64-bit every restricted key silently also permitted mechanism 0. The KMIP
+  server packed it at the same wrong width — a key restricted to one mechanism
+  **permitted a different one**, and its existing "enforcement" test was vacuous.
+- **Logout invalidated nothing** in Rust, close-all-sessions did not log out,
+  five functions had no read-only-session gate, and security officers could read
+  private objects (Usage Guide §2.6.3).
+- **The KMIP-facing native surface enforced no mechanism restrictions at all**
+  on derive/agree/hybrid/split-key — the lock was on one of two doors.
+
+### Fixed — silent wrong results
+
+- Unrecognised or absent EC curves returned **a P-256 key with `CKR_OK`**; Ed448
+  requests silently yielded Ed25519; XMSS parameter sets were read from the
+  wrong place in **both** engines, in opposite directions; searches widened to
+  match everything; `C_GetMechanismInfo` ignored `slotID`; the ChaCha20 block
+  counter could not be set.
+
 ### Added
+
+- **A cross-engine differential harness** (`tests/differential/`, run via
+  `scripts/run-differential-harness.sh`): 49 scenarios, 3991 observations, and a
+  52-entry exception list where every legal divergence carries a spec citation.
+  It found the AES-CTR defect on its first real run.
+- **Fork-tolerant semantics** are now explicit and advertised via
+  `CKF_INTERFACE_FORK_SAFE`, with the RNG reseeded in the child — a hazard the
+  Standard does not mention. The claim tracks configuration: `reset_on_fork`
+  clears the flag.
+- Profile object (`CKO_PROFILE` / `CKP_BASELINE_PROVIDER`) on the C++ engine.
+
+### Verified
+
+| Gate | Result |
+|---|---|
+| C++ v3.2 reference suite | 503 pass / 0 fail (from 349) |
+| C++ unit suite | 8/8, 182 cases |
+| Rust suite | 390 pass / 0 fail (from 346) |
+| KMIP suite | 860 pass / 0 fail |
+| OASIS main replay | 97 pass / 0 fail / 5 deprecated-skip |
+| OASIS PQC corpus | 42 / 42 |
+| Differential harness | 0 uncovered |
+
+Every fix ships with a test demonstrated failing **before** it. Several existing
+tests had encoded the defects and were corrected rather than accommodated.
+
+### Known open
+
+19 recorded harness defects remain a worklist. The harness drives the Cryptoki
+surface only, so the native path KMIP uses is untested. The engines disagree on
+`CKA_CHECK_VALUE` for unwrapped private keys and the spec does not cover the
+case — it needs a human ruling. A shared typed reader that would make the
+`CK_ULONG`-width class unrepresentable is recommended and unbuilt.
+
+### Added — from the KMIP item-10 work merged into this release
 
 - **KMIP 3.0 Baseline Server profile: all 13 conditions now met.** Item 10 names
   five server-to-client operations. `Notify` and `Put` were built earlier; the
