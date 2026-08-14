@@ -149,9 +149,45 @@ pub struct FindCtx {
 
 // ── Template Parsing ─────────────────────────────────────────────────────────
 
-/// Read a CK_ULONG attribute from a CK_ATTRIBUTE template array.
-/// Each CK_ATTRIBUTE is 12 bytes: type(4) + pValue(4) + ulValueLen(4).
-pub unsafe fn get_attr_ulong(template: *mut u8, count: u32, attr_type: u32) -> Option<u32> {
+/// Read a `CK_ULONG`-valued attribute from a `CK_ATTRIBUTE` template array, at
+/// the target ABI's **native** `CK_ULONG` width.
+///
+/// `CK_ATTRIBUTE` is three words — `type` (`CK_ATTRIBUTE_TYPE`, a `CK_ULONG`),
+/// `pValue` (`CK_VOID_PTR`) and `ulValueLen` (`CK_ULONG`) — so the `i * 3`
+/// stride below is ABI-correct on every target this engine builds for; it is
+/// deliberately unchanged. What was wrong until 2026-08-14 is what happened at
+/// the end of that stride:
+///
+/// ```text
+/// let val_ptr = *ptr.add(i * 3 + 1) as *const u32;   // <- 4 bytes, always
+/// return Some(read_unaligned(val_ptr));              // <- ulValueLen ignored
+/// ```
+///
+/// Two defects in two lines, reported twice before being fixed:
+///
+/// 1. **`ulValueLen` was never consulted.** A caller passing a one-byte
+///    `pValue` — a malformed template, or a `CK_BBOOL` where the engine
+///    expected a `CK_ULONG` — got a **four**-byte read. Three of those bytes
+///    are outside the buffer the caller lent the library. Unbounded on every
+///    target.
+/// 2. **The value was read as `u32`, not `CK_ULONG`.** Latent on
+///    little-endian LP64 (the low half of the word happens to be the value)
+///    and correct on wasm32 (`CK_ULONG` is 4 bytes there), but it reads the
+///    wrong half on any big-endian LP64 target.
+///
+/// Now: `ulValueLen` must equal `sizeof(CK_ULONG)` on this target, and the
+/// value is read at that width. A matching entry whose length is anything else
+/// is not a `CK_ULONG` and is skipped, so the caller sees the attribute as
+/// absent rather than as a number assembled from adjacent memory.
+///
+/// # Safety
+/// `template` must be NULL or point to `count` readable `CK_ATTRIBUTE`s, whose
+/// `pValue`/`ulValueLen` pairs describe readable memory.
+pub unsafe fn get_attr_ulong_native(
+    template: *mut u8,
+    count: u32,
+    attr_type: u32,
+) -> Option<usize> {
     if template.is_null() {
         return None;
     }
@@ -162,15 +198,32 @@ pub unsafe fn get_attr_ulong(template: *mut u8, count: u32, attr_type: u32) -> O
     for i in 0..count {
         let t = *ptr.add((i * 3) as usize) as u32;
         if t == attr_type {
-            let val_ptr = *ptr.add((i * 3 + 1) as usize) as usize as *const u32;
-            if !val_ptr.is_null() {
+            let val_ptr = *ptr.add((i * 3 + 1) as usize) as usize as *const u8;
+            let val_len = *ptr.add((i * 3 + 2) as usize);
+            // A CK_ULONG-valued attribute is exactly sizeof(CK_ULONG) bytes.
+            // Anything else — including the 0/CK_UNAVAILABLE_INFORMATION
+            // length a caller uses to SIZE the attribute rather than supply it
+            // — is not a value this reader may take.
+            if !val_ptr.is_null()
+                && val_len == core::mem::size_of::<crate::ck_abi::CK_ULONG>()
+            {
                 // CK_ATTRIBUTE.pValue carries NO alignment guarantee — an aligned
                 // deref panics (misaligned pointer) on a legal caller template.
-                return Some(std::ptr::read_unaligned(val_ptr));
+                return Some(std::ptr::read_unaligned(val_ptr as *const usize));
             }
         }
     }
     None
+}
+
+/// [`get_attr_ulong_native`] narrowed to the engine's internal 32-bit width —
+/// the same deliberate narrowing `ck_param::ulong32` performs, and what all
+/// nineteen call sites want (key types, parameter-set codes, key lengths).
+///
+/// # Safety
+/// As [`get_attr_ulong_native`].
+pub unsafe fn get_attr_ulong(template: *mut u8, count: u32, attr_type: u32) -> Option<u32> {
+    get_attr_ulong_native(template, count, attr_type).map(|v| v as u32)
 }
 
 /// Read a byte-array attribute from a CK_ATTRIBUTE template array.

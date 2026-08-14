@@ -13896,11 +13896,25 @@ mod pqc_vendor_kem_ffi_tests {
         OBJECTS.with(|o| o.borrow().get(&handle).and_then(|a| a.get(&attr_type).cloned()))
     }
 
-    /// One-attribute CK_ATTRIBUTE template: `[type, &value as usize, 4]`,
-    /// matching this crate's `[usize; 3]`-per-attribute convention (see
+    /// One-attribute CK_ATTRIBUTE template:
+    /// `[type, &value, sizeof(CK_ULONG)]`, matching this crate's
+    /// `[usize; 3]`-per-attribute convention (see
     /// `get_attr_ulong`/`absorb_template_attrs`).
     fn ps_template(ps: &u32) -> [usize; 3] {
-        [CKA_PARAMETER_SET as usize, ps as *const u32 as usize, 4]
+        // A real LP64 caller sends `sizeof(CK_ULONG)` — 8 bytes — for a
+        // CK_ULONG-valued attribute, not 4. This helper used to declare 4,
+        // which modelled a 32-bit caller on a 64-bit ABI and only "worked"
+        // because get_attr_ulong ignored ulValueLen entirely. It now widens
+        // the caller's u32 into an owned native word. Leaked deliberately:
+        // the template must outlive this call and a unit test's address space
+        // is the right lifetime for three words.
+        let v: &'static crate::ck_abi::CK_ULONG =
+            Box::leak(Box::new(*ps as crate::ck_abi::CK_ULONG));
+        [
+            CKA_PARAMETER_SET as usize,
+            v as *const crate::ck_abi::CK_ULONG as usize,
+            core::mem::size_of::<crate::ck_abi::CK_ULONG>(),
+        ]
     }
 
     fn mech(m: u32) -> [usize; 3] {
@@ -14019,7 +14033,20 @@ mod pqc_vendor_kem_ffi_tests {
 
     /// One-attribute CKA_VALUE_LEN template, the shape callers actually send.
     fn value_len_template(v: &u32) -> [usize; 3] {
-        [CKA_VALUE_LEN as usize, v as *const u32 as usize, 4]
+        // A real LP64 caller sends `sizeof(CK_ULONG)` — 8 bytes — for a
+        // CK_ULONG-valued attribute, not 4. This helper used to declare 4,
+        // which modelled a 32-bit caller on a 64-bit ABI and only "worked"
+        // because get_attr_ulong ignored ulValueLen entirely. It now widens
+        // the caller's u32 into an owned native word. Leaked deliberately:
+        // the template must outlive this call and a unit test's address space
+        // is the right lifetime for three words.
+        let w: &'static crate::ck_abi::CK_ULONG =
+            Box::leak(Box::new(*v as crate::ck_abi::CK_ULONG));
+        [
+            CKA_VALUE_LEN as usize,
+            w as *const crate::ck_abi::CK_ULONG as usize,
+            core::mem::size_of::<crate::ck_abi::CK_ULONG>(),
+        ]
     }
 
     /// PKCS#11 v3.2 §4.1.1 rule 5 — a caller CKA_VALUE_LEN that contradicts the
@@ -16894,7 +16921,20 @@ mod ecdh_kem_ffi_tests {
     }
 
     fn value_len_template(v: &u32) -> [usize; 3] {
-        [CKA_VALUE_LEN as usize, v as *const u32 as usize, 4]
+        // A real LP64 caller sends `sizeof(CK_ULONG)` — 8 bytes — for a
+        // CK_ULONG-valued attribute, not 4. This helper used to declare 4,
+        // which modelled a 32-bit caller on a 64-bit ABI and only "worked"
+        // because get_attr_ulong ignored ulValueLen entirely. It now widens
+        // the caller's u32 into an owned native word. Leaked deliberately:
+        // the template must outlive this call and a unit test's address space
+        // is the right lifetime for three words.
+        let w: &'static crate::ck_abi::CK_ULONG =
+            Box::leak(Box::new(*v as crate::ck_abi::CK_ULONG));
+        [
+            CKA_VALUE_LEN as usize,
+            w as *const crate::ck_abi::CK_ULONG as usize,
+            core::mem::size_of::<crate::ck_abi::CK_ULONG>(),
+        ]
     }
 
     /// PKCS#11 v3.2 §6.3.17 — unlike the fixed-length KEMs, CKM_ECDH1_DERIVE
@@ -17177,7 +17217,20 @@ mod mlkem_value_len_ffi_tests {
     }
 
     fn ulong_template(t: u32, v: &u32) -> [usize; 3] {
-        [t as usize, v as *const u32 as usize, 4]
+        // A real LP64 caller sends `sizeof(CK_ULONG)` — 8 bytes — for a
+        // CK_ULONG-valued attribute, not 4. This helper used to declare 4,
+        // which modelled a 32-bit caller on a 64-bit ABI and only "worked"
+        // because get_attr_ulong ignored ulValueLen entirely. It now widens
+        // the caller's u32 into an owned native word. Leaked deliberately:
+        // the template must outlive this call and a unit test's address space
+        // is the right lifetime for three words.
+        let w: &'static crate::ck_abi::CK_ULONG =
+            Box::leak(Box::new(*v as crate::ck_abi::CK_ULONG));
+        [
+            t as usize,
+            w as *const crate::ck_abi::CK_ULONG as usize,
+            core::mem::size_of::<crate::ck_abi::CK_ULONG>(),
+        ]
     }
 
     /// Generate an ML-KEM keypair for `ps` and return (public, private) handles.
@@ -17546,5 +17599,173 @@ mod param_struct_width_tests {
     #[test]
     fn mac_general_params_is_one_ck_ulong() {
         assert_eq!(size_of::<crate::ck_abi::CK_ULONG>(), size_of::<usize>());
+    }
+
+    // ── get_attr_ulong: the template-side twin of the same bug class ──────
+    //
+    // Every test below is written so that it FAILS against the pre-2026-08-14
+    // body, which was:
+    //
+    //     let val_ptr = *ptr.add(i * 3 + 1) as *const u32;
+    //     if !val_ptr.is_null() { return Some(read_unaligned(val_ptr)); }
+    //
+    // — a fixed four-byte read with `ulValueLen` never consulted. The old
+    // reading is reconstructed inline in each test and asserted to differ, so
+    // the evidence does not depend on anyone remembering what it used to say.
+
+    /// Build a packed `CK_ATTRIBUTE` array: three words per entry
+    /// (`type`, `pValue`, `ulValueLen`), which is the layout `get_attr_ulong`
+    /// strides over.
+    fn packed_template(entries: &[(u32, *const u8, usize)]) -> Vec<usize> {
+        let mut v = Vec::with_capacity(entries.len() * 3);
+        for &(t, p, len) in entries {
+            v.push(t as usize);
+            v.push(p as usize);
+            v.push(len);
+        }
+        v
+    }
+
+    /// The old reading, reconstructed: four bytes from `pValue`, no length
+    /// check. Used only to demonstrate the divergence.
+    unsafe fn old_get_attr_ulong(template: *mut u8, count: u32, attr_type: u32) -> Option<u32> {
+        let ptr = template as *mut usize;
+        for i in 0..count {
+            if *ptr.add((i * 3) as usize) as u32 == attr_type {
+                let val_ptr = *ptr.add((i * 3 + 1) as usize) as *const u32;
+                if !val_ptr.is_null() {
+                    return Some(std::ptr::read_unaligned(val_ptr));
+                }
+            }
+        }
+        None
+    }
+
+    /// **The reported defect.** A caller supplying a one-byte `pValue` got a
+    /// four-byte read: three bytes of whatever followed it in the caller's
+    /// address space, assembled into a "key type" the caller never wrote.
+    ///
+    /// The buffer here places `0x07` where the attribute points and `ff ff ff`
+    /// immediately after it, so the old body's answer is deterministic —
+    /// `Some(0xffffff07)` on little-endian — and demonstrably not the caller's
+    /// value.
+    #[test]
+    fn get_attr_ulong_refuses_a_short_value_instead_of_reading_past_it() {
+        let buf: [u8; 4] = [0x07, 0xff, 0xff, 0xff];
+        let tpl = packed_template(&[(CKA_KEY_TYPE, buf.as_ptr(), 1)]);
+        let p = tpl.as_ptr() as *mut u8;
+
+        let old = unsafe { old_get_attr_ulong(p, 1, CKA_KEY_TYPE) };
+        assert_eq!(
+            old,
+            Some(u32::from_ne_bytes(buf)),
+            "precondition: the old body reads all four bytes, ulValueLen=1 notwithstanding",
+        );
+
+        assert_eq!(
+            unsafe { crate::crypto::handlers::get_attr_ulong(p, 1, CKA_KEY_TYPE) },
+            None,
+            "ulValueLen=1 is not a CK_ULONG; the attribute must read as absent, \
+             not as three bytes of the caller's neighbouring memory",
+        );
+    }
+
+    /// The zero-length form — how a caller asks C_GetAttributeValue to SIZE an
+    /// attribute, and a shape the engine must never take a value from. The old
+    /// body dereferenced `pValue` regardless.
+    #[test]
+    fn get_attr_ulong_refuses_a_zero_length_value() {
+        let buf = 0xdeadbeefu32.to_ne_bytes();
+        let tpl = packed_template(&[(CKA_VALUE_LEN, buf.as_ptr(), 0)]);
+        let p = tpl.as_ptr() as *mut u8;
+
+        assert_eq!(unsafe { old_get_attr_ulong(p, 1, CKA_VALUE_LEN) }, Some(0xdeadbeef));
+        assert_eq!(
+            unsafe { crate::crypto::handlers::get_attr_ulong(p, 1, CKA_VALUE_LEN) },
+            None,
+        );
+    }
+
+    /// An over-long value is equally not a `CK_ULONG`. Sixteen bytes is what a
+    /// caller who passed a struct, or a byte-array attribute, would present;
+    /// the old body silently took its first four.
+    #[test]
+    fn get_attr_ulong_refuses_an_over_long_value() {
+        let buf = [0x11u8; 16];
+        let tpl = packed_template(&[(CKA_VALUE_LEN, buf.as_ptr(), 16)]);
+        let p = tpl.as_ptr() as *mut u8;
+
+        assert_eq!(unsafe { old_get_attr_ulong(p, 1, CKA_VALUE_LEN) }, Some(0x11111111));
+        assert_eq!(
+            unsafe { crate::crypto::handlers::get_attr_ulong(p, 1, CKA_VALUE_LEN) },
+            None,
+        );
+    }
+
+    /// A well-formed `CK_ULONG` attribute is read at the target's **native**
+    /// width. The value's top half is non-zero, so the old four-byte read
+    /// loses it: `get_attr_ulong_native` returns the whole word where the old
+    /// body could only ever return the low one.
+    #[test]
+    fn get_attr_ulong_reads_the_whole_ck_ulong() {
+        let w = size_of::<crate::ck_abi::CK_ULONG>();
+        assert_eq!(w, size_of::<usize>());
+
+        // 0x0000_0005_0000_0001 on LP64 — low half 1, top half 5.
+        let value: usize = if w == 8 { (5usize << 32) | 1 } else { 1 };
+        let buf = value.to_ne_bytes();
+        let tpl = packed_template(&[(CKA_PARAMETER_SET, buf.as_ptr(), w)]);
+        let p = tpl.as_ptr() as *mut u8;
+
+        assert_eq!(
+            unsafe { crate::crypto::handlers::get_attr_ulong_native(p, 1, CKA_PARAMETER_SET) },
+            Some(value),
+            "the reader must take sizeof(CK_ULONG) bytes, not four",
+        );
+
+        if w == 8 {
+            // The old body could not distinguish this word from a bare 1.
+            assert_eq!(unsafe { old_get_attr_ulong(p, 1, CKA_PARAMETER_SET) }, Some(1));
+            assert_ne!(
+                unsafe { crate::crypto::handlers::get_attr_ulong_native(p, 1, CKA_PARAMETER_SET) },
+                Some(1),
+            );
+        }
+
+        // The narrowing wrapper is the engine's internal 32-bit view and is
+        // documented as such — it agrees with the low half by design.
+        assert_eq!(
+            unsafe { crate::crypto::handlers::get_attr_ulong(p, 1, CKA_PARAMETER_SET) },
+            Some(1),
+        );
+    }
+
+    /// The `i * 3` stride is ABI-correct and stays: an attribute in the third
+    /// slot of a four-entry template is still found, and the entries before it
+    /// (one of them malformed) do not derail the walk.
+    #[test]
+    fn get_attr_ulong_stride_reaches_a_later_entry() {
+        let w = size_of::<usize>();
+        let bad = [0xaau8; 2];
+        let kt = (CKK_AES as usize).to_ne_bytes();
+        let vl = (32usize).to_ne_bytes();
+        let tpl = packed_template(&[
+            (CKA_CLASS, bad.as_ptr(), 2),      // wrong length — skipped
+            (CKA_TOKEN, core::ptr::null(), w), // null pValue — skipped
+            (CKA_KEY_TYPE, kt.as_ptr(), w),
+            (CKA_VALUE_LEN, vl.as_ptr(), w),
+        ]);
+        let p = tpl.as_ptr() as *mut u8;
+
+        assert_eq!(unsafe { crate::crypto::handlers::get_attr_ulong(p, 4, CKA_CLASS) }, None);
+        assert_eq!(unsafe { crate::crypto::handlers::get_attr_ulong(p, 4, CKA_TOKEN) }, None);
+        assert_eq!(
+            unsafe { crate::crypto::handlers::get_attr_ulong(p, 4, CKA_KEY_TYPE) },
+            Some(CKK_AES),
+        );
+        assert_eq!(
+            unsafe { crate::crypto::handlers::get_attr_ulong(p, 4, CKA_VALUE_LEN) },
+            Some(32),
+        );
     }
 }
