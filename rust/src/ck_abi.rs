@@ -2664,4 +2664,256 @@ mod tests {
             C_CloseSession(session);
         }
     }
+
+    // ── CKM_AES_CTR through the NATIVE ABI ──────────────────────────────────
+    //
+    // The engine's CTR primitive (crypto::multipart::CtrState) was already
+    // KAT-anchored, and native::encrypt's one-shot dispatch was too. Neither
+    // covered the surface an actual PKCS#11 caller uses: a native
+    // CK_AES_CTR_PARAMS handed to the exported C_EncryptInit. That is where
+    // the differential harness found AES-256-CTR ciphertext disagreeing with
+    // both the C++ engine and OpenSSL, because the struct was being decoded
+    // with a 4-byte CK_ULONG on an LP64 build.
+    //
+    // `cb` is therefore read here exactly as a caller supplies it — through
+    // the real struct, at whatever width this target's CK_ULONG happens to
+    // be — and checked against the published NIST vectors.
+
+    /// PKCS#11 v3.2 §6.11.2, at NATIVE layout (`CK_ULONG` = `c_ulong`).
+    #[repr(C)]
+    struct CK_AES_CTR_PARAMS {
+        ulCounterBits: CK_ULONG,
+        cb: [u8; 16],
+    }
+
+    fn unhex(s: &str) -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
+    /// Create a secret AES key with a caller-chosen CKA_VALUE, through the
+    /// exported native `C_CreateObject`.
+    unsafe fn create_aes_key(session: CK_SESSION_HANDLE, value: &[u8]) -> CK_OBJECT_HANDLE {
+        let class = CKO_SECRET_KEY as CK_ULONG;
+        let ktype = CKK_AES as CK_ULONG;
+        let btrue: u8 = 1;
+        let ulong = size_of::<CK_ULONG>() as CK_ULONG;
+        let mut tmpl = [
+            CK_ATTRIBUTE {
+                attrType: CKA_CLASS as CK_ATTRIBUTE_TYPE,
+                pValue: &class as *const _ as CK_VOID_PTR,
+                ulValueLen: ulong,
+            },
+            CK_ATTRIBUTE {
+                attrType: CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE,
+                pValue: &ktype as *const _ as CK_VOID_PTR,
+                ulValueLen: ulong,
+            },
+            CK_ATTRIBUTE {
+                attrType: CKA_VALUE as CK_ATTRIBUTE_TYPE,
+                pValue: value.as_ptr() as CK_VOID_PTR,
+                ulValueLen: value.len() as CK_ULONG,
+            },
+            CK_ATTRIBUTE {
+                attrType: CKA_ENCRYPT as CK_ATTRIBUTE_TYPE,
+                pValue: &btrue as *const _ as CK_VOID_PTR,
+                ulValueLen: 1,
+            },
+            CK_ATTRIBUTE {
+                attrType: CKA_DECRYPT as CK_ATTRIBUTE_TYPE,
+                pValue: &btrue as *const _ as CK_VOID_PTR,
+                ulValueLen: 1,
+            },
+        ];
+        let mut h: CK_OBJECT_HANDLE = 0;
+        assert_eq!(
+            C_CreateObject(session, tmpl.as_mut_ptr(), tmpl.len() as CK_ULONG, &mut h),
+            rv(CKR_OK),
+            "C_CreateObject for the KAT key"
+        );
+        assert_ne!(h, 0);
+        h
+    }
+
+    /// One AES-CTR encrypt through the native ABI at a given ulCounterBits.
+    unsafe fn native_ctr_encrypt(
+        session: CK_SESSION_HANDLE,
+        key: CK_OBJECT_HANDLE,
+        counter_bits: CK_ULONG,
+        cb: &[u8; 16],
+        input: &[u8],
+    ) -> Vec<u8> {
+        let mut params = CK_AES_CTR_PARAMS { ulCounterBits: counter_bits, cb: *cb };
+        let mut mech = CK_MECHANISM {
+            mechanism: CKM_AES_CTR as CK_MECHANISM_TYPE,
+            pParameter: &mut params as *mut _ as CK_VOID_PTR,
+            ulParameterLen: size_of::<CK_AES_CTR_PARAMS>() as CK_ULONG,
+        };
+        assert_eq!(C_EncryptInit(session, &mut mech, key), rv(CKR_OK), "C_EncryptInit");
+        let mut out = vec![0u8; input.len() + 32];
+        let mut olen = out.len() as CK_ULONG;
+        assert_eq!(
+            C_Encrypt(
+                session,
+                input.as_ptr() as CK_BYTE_PTR,
+                input.len() as CK_ULONG,
+                out.as_mut_ptr(),
+                &mut olen
+            ),
+            rv(CKR_OK),
+            "C_Encrypt"
+        );
+        out.truncate(olen as usize);
+        out
+    }
+
+    unsafe fn native_ctr_decrypt(
+        session: CK_SESSION_HANDLE,
+        key: CK_OBJECT_HANDLE,
+        counter_bits: CK_ULONG,
+        cb: &[u8; 16],
+        input: &[u8],
+    ) -> Vec<u8> {
+        let mut params = CK_AES_CTR_PARAMS { ulCounterBits: counter_bits, cb: *cb };
+        let mut mech = CK_MECHANISM {
+            mechanism: CKM_AES_CTR as CK_MECHANISM_TYPE,
+            pParameter: &mut params as *mut _ as CK_VOID_PTR,
+            ulParameterLen: size_of::<CK_AES_CTR_PARAMS>() as CK_ULONG,
+        };
+        assert_eq!(C_DecryptInit(session, &mut mech, key), rv(CKR_OK), "C_DecryptInit");
+        let mut out = vec![0u8; input.len() + 32];
+        let mut olen = out.len() as CK_ULONG;
+        assert_eq!(
+            C_Decrypt(
+                session,
+                input.as_ptr() as CK_BYTE_PTR,
+                input.len() as CK_ULONG,
+                out.as_mut_ptr(),
+                &mut olen
+            ),
+            rv(CKR_OK),
+            "C_Decrypt"
+        );
+        out.truncate(olen as usize);
+        out
+    }
+
+    /// NIST SP 800-38A §F.5.1 (CTR-AES128) and §F.5.5 (CTR-AES256), all four
+    /// blocks, driven through the exported native PKCS#11 entry points.
+    ///
+    /// The published vectors are the authority here — not the C++ engine and
+    /// not OpenSSL, both of which merely agree with them.
+    #[test]
+    fn aes_ctr_nist_sp800_38a_kat_through_native_abi() {
+        let _guard = crate::native::test_lock::acquire();
+        // Same plaintext for both vectors (SP 800-38A Appendix F block set).
+        let pt = unhex(
+            "6bc1bee22e409f96e93d7e117393172a\
+             ae2d8a571e03ac9c9eb76fac45af8e51\
+             30c81c46a35ce411e5fbc1191a0a52ef\
+             f69f2445df4f9b17ad2b417be66c3710",
+        );
+        let cb: [u8; 16] = unhex("f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff").try_into().unwrap();
+        let vectors: [(&str, &str, &str); 2] = [
+            (
+                "F.5.1 CTR-AES128.Encrypt",
+                "2b7e151628aed2a6abf7158809cf4f3c",
+                "874d6191b620e3261bef6864990db6ce\
+                 9806f66b7970fdff8617187bb9fffdff\
+                 5ae4df3edbd5d35e5b4f09020db03eab\
+                 1e031dda2fbe03d1792170a0f3009cee",
+            ),
+            (
+                "F.5.5 CTR-AES256.Encrypt",
+                "603deb1015ca71be2b73aef0857d77811f352c073b6108d72d9810a30914dff4",
+                "601ec313775789a5b7a7f504bbf3d228\
+                 f443e3ca4d62b59aca84e990cacaf5c5\
+                 2b0930daa23de94ce87017ba2d84988d\
+                 dfc9c58db67aada613c2dd08457941a6",
+            ),
+        ];
+        unsafe {
+            crate::state::set_initialized(true);
+            crate::state::ensure_slot(0);
+            let mut session: CK_SESSION_HANDLE = 0;
+            let flags = (CKF_SERIAL_SESSION | CKF_RW_SESSION) as CK_FLAGS;
+            assert_eq!(
+                C_OpenSession(0, flags, std::ptr::null_mut(), None, &mut session),
+                rv(CKR_OK)
+            );
+            for (name, key_hex, ct_hex) in vectors {
+                let key = unhex(key_hex);
+                let expect = unhex(&ct_hex.replace(' ', ""));
+                let h = create_aes_key(session, &key);
+                let ct = native_ctr_encrypt(session, h, 128, &cb, &pt);
+                assert_eq!(hex(&ct), hex(&expect), "{name}: ciphertext");
+                let back = native_ctr_decrypt(session, h, 128, &cb, &ct);
+                assert_eq!(hex(&back), hex(&pt), "{name}: decrypt round-trip");
+                // §6.11.2 — the counter bits are the LOW bits of cb, the rest
+                // is nonce. cb's low 32 bits here are f0f1f2f3, so four blocks
+                // never carry out of them: a 32-bit counter field must produce
+                // exactly the same keystream as the full-width one.
+                let ct32 = native_ctr_encrypt(session, h, 32, &cb, &pt);
+                assert_eq!(hex(&ct32), hex(&expect), "{name}: ulCounterBits=32");
+            }
+            C_CloseSession(session);
+        }
+    }
+
+    /// §6.11.2 — "The counter bits are the least significant bits of the
+    /// counter block (cb) ... The rest of 'cb' is for the nonce".
+    ///
+    /// The KAT above cannot distinguish a 32-bit counter field from a
+    /// 128-bit one (its low word never carries). This one can: the low 32
+    /// bits start at 0xfffffffe, so block 3 must WRAP back inside the
+    /// 32-bit field and leave the 96-bit nonce untouched — where a
+    /// full-width counter would carry into the nonce instead.
+    ///
+    /// Expected keystream is built here by encrypting the four counter
+    /// blocks directly with the `aes` crate, so nothing in the engine's own
+    /// CTR path is used to justify the engine's own CTR path.
+    #[test]
+    fn aes_ctr_counter_bits_confines_the_increment_to_the_low_field() {
+        use aes::cipher::{BlockEncrypt, KeyInit, generic_array::GenericArray};
+        let _guard = crate::native::test_lock::acquire();
+        let key = unhex("603deb1015ca71be2b73aef0857d77811f352c073b6108d72d9810a30914dff4");
+        let cb: [u8; 16] = unhex("a0a1a2a3a4a5a6a7a8a9aaabfffffffe").try_into().unwrap();
+        let pt = vec![0u8; 64]; // zero plaintext ⇒ ciphertext IS the keystream
+
+        // Independent expectation: counter blocks with only the low 32 bits
+        // advancing, 0xfffffffe → ffffffff → 00000000 → 00000001.
+        let cipher = aes::Aes256::new(GenericArray::from_slice(&key));
+        let mut expect = Vec::new();
+        for low in [0xfffffffeu32, 0xffffffff, 0x00000000, 0x00000001] {
+            let mut blk = cb;
+            blk[12..16].copy_from_slice(&low.to_be_bytes());
+            let mut ga = *GenericArray::from_slice(&blk);
+            cipher.encrypt_block(&mut ga);
+            expect.extend_from_slice(&ga);
+        }
+        unsafe {
+            crate::state::set_initialized(true);
+            crate::state::ensure_slot(0);
+            let mut session: CK_SESSION_HANDLE = 0;
+            let flags = (CKF_SERIAL_SESSION | CKF_RW_SESSION) as CK_FLAGS;
+            assert_eq!(
+                C_OpenSession(0, flags, std::ptr::null_mut(), None, &mut session),
+                rv(CKR_OK)
+            );
+            let h = create_aes_key(session, &key);
+            let ks = native_ctr_encrypt(session, h, 32, &cb, &pt);
+            assert_eq!(hex(&ks), hex(&expect), "ulCounterBits=32 keystream");
+            // A full-width counter carries out of the low word instead, so
+            // the two must NOT agree — proving ulCounterBits is honoured.
+            let ks128 = native_ctr_encrypt(session, h, 128, &cb, &pt);
+            assert_ne!(hex(&ks128), hex(&ks), "128-bit counter must carry into the nonce");
+            C_CloseSession(session);
+        }
+    }
+
+    fn hex(b: &[u8]) -> String {
+        b.iter().map(|x| format!("{x:02x}")).collect()
+    }
 }
