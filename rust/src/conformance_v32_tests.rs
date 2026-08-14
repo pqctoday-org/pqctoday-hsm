@@ -1226,3 +1226,1088 @@ fn s12_native_derive_and_agree_enforce_allowed_mechanisms() {
         "a mechanism-restricted key must be refused over the native split-key surface"
     );
 }
+
+// ═════════════════════════════════════════════════════════════════════════
+// PHASE 2 — silent wrong results
+// ═════════════════════════════════════════════════════════════════════════
+
+const W_SESSION: u32 = 0x5721_0001;
+
+fn w_setup() {
+    crate::state::set_initialized(true);
+    crate::state::ensure_slot(0);
+    put_session(W_SESSION, 0, true);
+}
+
+/// DER OBJECT IDENTIFIER for a named curve.
+fn oid(body: &[u8]) -> Vec<u8> {
+    let mut v = vec![0x06, body.len() as u8];
+    v.extend_from_slice(body);
+    v
+}
+
+/// DER PrintableString curve name.
+fn curve_name(name: &str) -> Vec<u8> {
+    let mut v = vec![0x13, name.len() as u8];
+    v.extend_from_slice(name.as_bytes());
+    v
+}
+
+fn gen_ec(params: Option<Vec<u8>>, mech: u32) -> (u32, u32, u32) {
+    let mut m = [0usize; 3];
+    m[0] = mech as usize;
+    let entries = match params {
+        Some(p) => vec![(CKA_EC_PARAMS, p)],
+        None => vec![],
+    };
+    let mut pub_t = Tmpl::new(entries);
+    let count = pub_t.count();
+    let (mut hp, mut hs) = (0u32, 0u32);
+    let rv = unsafe {
+        C_GenerateKeyPair_impl(
+            W_SESSION,
+            m.as_mut_ptr() as *mut u8,
+            pub_t.ptr(),
+            count,
+            std::ptr::null_mut(),
+            0,
+            &mut hp,
+            &mut hs,
+        )
+    };
+    (rv, hp, hs)
+}
+
+// ── W1 — unsupported curves must NOT silently become P-256 ──────────────
+
+#[test]
+fn w1_ec_params_are_decoded_never_defaulted() {
+    let _guard = test_lock::acquire();
+    w_setup();
+
+    // brainpoolP256r1 — 1.3.36.3.3.2.8.1.1.7. A well-formed OID this token
+    // does not implement. It previously produced a P-256 key, stamped P-256,
+    // returning success.
+    let brainpool = oid(&[0x2b, 0x24, 0x03, 0x03, 0x02, 0x08, 0x01, 0x01, 0x07]);
+    let (rv, _, _) = gen_ec(Some(brainpool), CKM_EC_KEY_PAIR_GEN);
+    assert_eq!(
+        rv, CKR_CURVE_NOT_SUPPORTED,
+        "an unimplemented curve must be refused, not silently substituted"
+    );
+
+    // P-384 must be a genuine P-384 key.
+    let (rv, hp, hs) = gen_ec(Some(oid(&[0x2b, 0x81, 0x04, 0x00, 0x22])), CKM_EC_KEY_PAIR_GEN);
+    assert_eq!(rv, CKR_OK);
+    assert_eq!(
+        obj_attr(hs, CKA_VALUE).unwrap().len(),
+        48,
+        "P-384 private scalar is 48 bytes — a substituted P-256 key would be 32"
+    );
+    assert!(obj_attr(hp, CKA_EC_POINT).is_some());
+
+    // Absent attribute — mandatory at generation (§6.3.9).
+    let (rv, _, _) = gen_ec(None, CKM_EC_KEY_PAIR_GEN);
+    assert_eq!(
+        rv, CKR_TEMPLATE_INCOMPLETE,
+        "CKA_EC_PARAMS is mandatory at key-pair generation"
+    );
+
+    // The curveName form the spec RECOMMENDS was never recognised before.
+    let (rv, _, hs) = gen_ec(Some(curve_name("P-256")), CKM_EC_KEY_PAIR_GEN);
+    assert_eq!(rv, CKR_OK, "the curveName CHOICE arm must be accepted");
+    assert_eq!(obj_attr(hs, CKA_VALUE).unwrap().len(), 32);
+
+    // Undecodable representation.
+    let (rv, _, _) = gen_ec(Some(vec![0x05, 0x00]), CKM_EC_KEY_PAIR_GEN);
+    assert_eq!(
+        rv, CKR_DOMAIN_PARAMS_INVALID,
+        "implicitCA is forbidden — an invalid representation, not a curve"
+    );
+
+    // Last-byte collision: 1.3.36.3.3.2.8.1.1.10 ends in 0x0a, the byte the
+    // old code read as "secp256k1".
+    let collide = oid(&[0x2b, 0x24, 0x03, 0x03, 0x02, 0x08, 0x01, 0x01, 0x0a]);
+    let (rv, _, _) = gen_ec(Some(collide), CKM_EC_KEY_PAIR_GEN);
+    assert_eq!(
+        rv, CKR_CURVE_NOT_SUPPORTED,
+        "last-byte matching is collision-prone across the OID space"
+    );
+}
+
+// ── W2 — Ed448 must not silently yield Ed25519 ──────────────────────────
+
+#[test]
+fn w2_edwards_keygen_reads_ec_params() {
+    let _guard = test_lock::acquire();
+    w_setup();
+
+    // Ed448 — 1.3.101.113. §6.3.14 lets a token support only one of the two.
+    let (rv, _, _) = gen_ec(Some(oid(&[0x2b, 0x65, 0x71])), CKM_EC_EDWARDS_KEY_PAIR_GEN);
+    assert_eq!(
+        rv, CKR_CURVE_NOT_SUPPORTED,
+        "an Ed448 request must fail, not return an Ed25519 key"
+    );
+    let (rv, _, _) = gen_ec(
+        Some(curve_name("edwards448")),
+        CKM_EC_EDWARDS_KEY_PAIR_GEN,
+    );
+    assert_eq!(rv, CKR_CURVE_NOT_SUPPORTED, "…in the curveName form too");
+
+    // Ed25519 in both legal forms still works.
+    let (rv, _, hs) = gen_ec(Some(oid(&[0x2b, 0x65, 0x70])), CKM_EC_EDWARDS_KEY_PAIR_GEN);
+    assert_eq!(rv, CKR_OK);
+    assert_eq!(obj_attr(hs, CKA_VALUE).unwrap().len(), 32);
+    let (rv, _, _) = gen_ec(
+        Some(curve_name("edwards25519")),
+        CKM_EC_EDWARDS_KEY_PAIR_GEN,
+    );
+    assert_eq!(rv, CKR_OK, "the curveName form must be accepted on input");
+
+    // Absent attribute.
+    let (rv, _, _) = gen_ec(None, CKM_EC_EDWARDS_KEY_PAIR_GEN);
+    assert_eq!(rv, CKR_TEMPLATE_INCOMPLETE);
+}
+
+// ── W3 — XMSS sign/verify source the STANDARD parameter set ─────────────
+
+#[test]
+fn w3_xmss_parameter_set_comes_from_the_standard_attribute() {
+    let _guard = test_lock::acquire();
+    w_setup();
+
+    // A key carrying ONLY the standard attribute — what an import via
+    // C_CreateObject produces. The vendor attribute is absent, so the old
+    // code fell through to its default parameter set and signed under it.
+    let h = put_object(
+        0,
+        vec![
+            (CKA_CLASS, ulong(CKO_PRIVATE_KEY)),
+            (CKA_KEY_TYPE, ulong(CKK_XMSS)),
+            (CKA_PARAMETER_SET, ulong(CKP_XMSS_SHA2_16_256)),
+        ],
+    );
+    assert_eq!(
+        xmss_param_set_of(h, false),
+        Some(CKP_XMSS_SHA2_16_256),
+        "the standard CKA_PARAMETER_SET must be the source of truth"
+    );
+
+    // The standard attribute WINS over a stale vendor one.
+    let h2 = put_object(
+        0,
+        vec![
+            (CKA_CLASS, ulong(CKO_PRIVATE_KEY)),
+            (CKA_KEY_TYPE, ulong(CKK_XMSS)),
+            (CKA_PARAMETER_SET, ulong(CKP_XMSS_SHA2_16_256)),
+            (CKA_XMSS_PARAM_SET, ulong(CKP_XMSS_SHA2_10_256)),
+        ],
+    );
+    assert_eq!(xmss_param_set_of(h2, false), Some(CKP_XMSS_SHA2_16_256));
+
+    // Neither present ⇒ no silent default.
+    let h3 = put_object(
+        0,
+        vec![
+            (CKA_CLASS, ulong(CKO_PRIVATE_KEY)),
+            (CKA_KEY_TYPE, ulong(CKK_XMSS)),
+        ],
+    );
+    assert_eq!(xmss_param_set_of(h3, false), None);
+}
+
+// ── W5 — object search must never silently widen ────────────────────────
+
+#[test]
+fn w5_find_objects_never_silently_widens() {
+    let _guard = test_lock::acquire();
+    w_setup();
+    let _a = put_object(
+        0,
+        vec![
+            (CKA_CLASS, ulong(CKO_SECRET_KEY)),
+            (CKA_KEY_TYPE, ulong(CKK_AES)),
+            (CKA_VALUE, vec![0x01u8; 16]),
+        ],
+    );
+
+    // §5.7.7 — "To find all objects, set ulCount to 0." A NULL template with
+    // a non-zero count is a malformed request, not a find-all.
+    assert_eq!(
+        C_FindObjectsInit(W_SESSION, std::ptr::null_mut(), 5),
+        CKR_ARGUMENTS_BAD,
+        "a NULL template with a non-zero count must not become a find-all"
+    );
+    // An over-limit count must not silently drop the filter either.
+    let mut t = Tmpl::new(vec![(CKA_CLASS, ulong(CKO_SECRET_KEY))]);
+    assert_eq!(
+        C_FindObjectsInit(W_SESSION, t.ptr(), 70000),
+        CKR_ARGUMENTS_BAD
+    );
+    // Count 0 IS the sanctioned find-all.
+    assert_eq!(C_FindObjectsInit(W_SESSION, std::ptr::null_mut(), 0), CKR_OK);
+    assert_eq!(C_FindObjectsFinal(W_SESSION), CKR_OK);
+}
+
+// ── W6 — the slot argument must be honoured ─────────────────────────────
+
+#[test]
+fn w6_slot_id_is_validated() {
+    let _guard = test_lock::acquire();
+    w_setup();
+    let mut info = [0u8; 64];
+    assert_eq!(
+        C_GetMechanismInfo(9999, CKM_AES_KEY_GEN, info.as_mut_ptr()),
+        CKR_SLOT_ID_INVALID,
+        "§5.5.6 — slotID is the ID of the token's slot; 9999 has no token"
+    );
+    assert_eq!(
+        C_GetMechanismInfo(0, CKM_AES_KEY_GEN, info.as_mut_ptr()),
+        CKR_OK
+    );
+    // Sibling entry point audited alongside (W6's "audit the siblings").
+    let mut slot_info = [0u8; 104];
+    assert_eq!(
+        C_GetSlotInfo(9999, slot_info.as_mut_ptr()),
+        CKR_SLOT_ID_INVALID
+    );
+    assert_eq!(C_GetSlotInfo(0, slot_info.as_mut_ptr()), CKR_OK);
+}
+
+// ── W7 — ChaCha20 counter width and random access ───────────────────────
+
+#[test]
+fn w7_chacha20_honours_a_non_zero_start_counter() {
+    let _guard = test_lock::acquire();
+    let key = [0x42u8; 32];
+    let nonce = [0x07u8; 12];
+
+    // Two blocks of zeros from counter 0 …
+    let long = crate::native::encrypt::chacha20_encrypt_at(&key, &nonce, &[0u8; 128], 0)
+        .expect("counter 0");
+    // … and one block from counter 1 must equal the SECOND block of it.
+    // §6.20: the counter exists so blocks can be addressed in random order.
+    let second = crate::native::encrypt::chacha20_encrypt_at(&key, &nonce, &[0u8; 64], 1)
+        .expect("counter 1");
+    assert_eq!(
+        second,
+        long[64..128].to_vec(),
+        "a non-zero start counter must seek the keystream, not be refused"
+    );
+    assert_ne!(second, long[0..64].to_vec());
+}
+
+#[test]
+fn w7_chacha20_counter_width_must_be_32_or_64() {
+    let _guard = test_lock::acquire();
+    // CK_CHACHA20_PARAMS: pBlockCounter, blockCounterBits, pNonce, ulNonceBits
+    let counter: u64 = 1;
+    let nonce12 = [0x07u8; 12];
+    let nonce8 = [0x07u8; 8];
+
+    let mk = |ctr_bits: usize, nonce: &[u8], nonce_bits: usize| -> [usize; 4] {
+        [
+            (&counter as *const u64) as usize,
+            ctr_bits,
+            nonce.as_ptr() as usize,
+            nonce_bits,
+        ]
+    };
+
+    // §6.20 — "can be either 32 or 64". 48 is neither.
+    let mut bad = mk(48, &nonce12, 96);
+    assert_eq!(
+        unsafe { parse_chacha20_params(bad.as_mut_ptr() as *const u8, 32) },
+        Err(CKR_MECHANISM_PARAM_INVALID),
+        "a counter width outside {{32, 64}} must be refused"
+    );
+    let mut bad2 = mk(16, &nonce8, 64);
+    assert_eq!(
+        unsafe { parse_chacha20_params(bad2.as_mut_ptr() as *const u8, 32) },
+        Err(CKR_MECHANISM_PARAM_INVALID)
+    );
+
+    // The IETF variant: 96-bit nonce with a 32-bit counter.
+    let mut ietf = mk(32, &nonce12, 96);
+    assert_eq!(
+        unsafe { parse_chacha20_params(ietf.as_mut_ptr() as *const u8, 32) },
+        Ok((nonce12.to_vec(), 1)),
+        "a non-zero start counter must be RETURNED, not rejected"
+    );
+    // The original variant: 64-bit nonce with a 64-bit counter.
+    let mut legacy = mk(64, &nonce8, 64);
+    assert_eq!(
+        unsafe { parse_chacha20_params(legacy.as_mut_ptr() as *const u8, 32) },
+        Ok((nonce8.to_vec(), 1))
+    );
+    // Mismatched pair.
+    let mut mixed = mk(64, &nonce12, 96);
+    assert_eq!(
+        unsafe { parse_chacha20_params(mixed.as_mut_ptr() as *const u8, 32) },
+        Err(CKR_MECHANISM_PARAM_INVALID),
+        "the nonce/counter pair must match one of the defined variants"
+    );
+}
+
+// ═════════════════════════════════════════════════════════════════════════
+// PHASE 3 — spec-defined encodings
+// ═════════════════════════════════════════════════════════════════════════
+
+const E_SESSION: u32 = 0x5E33_0001;
+
+/// S8 made private-object access require the NORMAL USER role, and EC /
+/// Edwards private keys are generated CKA_PRIVATE=TRUE — so these tests have
+/// to actually log in.
+fn e_setup() {
+    let slot = 78u32;
+    s6_bring_up_token(slot);
+    let mut user = *b"5678";
+    put_session(E_SESSION, slot, true);
+    assert_eq!(C_Login(E_SESSION, CKU_USER, user.as_mut_ptr(), 4), CKR_OK);
+}
+
+fn gen_pair(mech: u32, pub_entries: Vec<(u32, Vec<u8>)>) -> (u32, u32, u32) {
+    let mut m = [0usize; 3];
+    m[0] = mech as usize;
+    let mut t = Tmpl::new(pub_entries);
+    let count = t.count();
+    let (mut hp, mut hs) = (0u32, 0u32);
+    let rv = unsafe {
+        C_GenerateKeyPair_impl(
+            E_SESSION,
+            m.as_mut_ptr() as *mut u8,
+            t.ptr(),
+            count,
+            std::ptr::null_mut(),
+            0,
+            &mut hp,
+            &mut hs,
+        )
+    };
+    (rv, hp, hs)
+}
+
+// ── E1 — the ECDH-KEM ciphertext is the RAW ephemeral public key ────────
+
+#[test]
+fn e1_ecdh_kem_ciphertext_is_the_raw_ephemeral_point() {
+    let _guard = test_lock::acquire();
+    e_setup();
+    let (rv, hp, hs) = gen_pair(
+        CKM_EC_KEY_PAIR_GEN,
+        vec![(
+            CKA_EC_PARAMS,
+            vec![0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07],
+        )],
+    );
+    assert_eq!(rv, CKR_OK);
+    // The KEM path needs CKA_ENCAPSULATE / CKA_DECAPSULATE.
+    crate::state::set_object_attr_bytes(hp, CKA_ENCAPSULATE, vec![1]);
+    crate::state::set_object_attr_bytes(hs, CKA_DECAPSULATE, vec![1]);
+
+    let mut mech = [0usize; 3];
+    mech[0] = CKM_ECDH1_DERIVE as usize;
+    let mut ct = vec![0u8; 512];
+    let mut ct_len: u32 = ct.len() as u32;
+    let mut h_ss: u32 = 0;
+    assert_eq!(
+        unsafe {
+            C_EncapsulateKey_impl(
+                E_SESSION,
+                mech.as_mut_ptr() as *mut u8,
+                hp,
+                std::ptr::null_mut(),
+                0,
+                ct.as_mut_ptr(),
+                &mut ct_len,
+                &mut h_ss,
+            )
+        },
+        CKR_OK
+    );
+    // §6.3.17 — "The value of the generated public key is returned as the
+    // ciphertext", and that value is a RAW octet string. 65 bytes for P-256,
+    // not the 67 a DER OCTET STRING wrapper produces.
+    assert_eq!(ct_len, 65, "P-256 ECDH-KEM ciphertext must be exactly 65 bytes");
+    assert_eq!(
+        ct[0], 0x04,
+        "the first byte must be SEC1's uncompressed marker, not a DER tag"
+    );
+
+    // The tolerant reader on decapsulation is KEPT: both the raw form and the
+    // historical DER-wrapped form must still decapsulate to the same secret.
+    let raw_ct = ct[..65].to_vec();
+    let mut der_ct = vec![0x04u8, 65u8];
+    der_ct.extend_from_slice(&raw_ct);
+
+    let mut decap = |bytes: &[u8]| -> Vec<u8> {
+        let mut b = bytes.to_vec();
+        let mut h: u32 = 0;
+        assert_eq!(
+            unsafe {
+                C_DecapsulateKey_impl(
+                    E_SESSION,
+                    mech.as_mut_ptr() as *mut u8,
+                    hs,
+                    std::ptr::null_mut(),
+                    0,
+                    b.as_mut_ptr(),
+                    b.len() as u32,
+                    &mut h,
+                )
+            },
+            CKR_OK
+        );
+        obj_attr(h, CKA_VALUE).unwrap()
+    };
+    let from_raw = decap(&raw_ct);
+    let from_der = decap(&der_ct);
+    assert_eq!(
+        from_raw, from_der,
+        "decapsulation must stay tolerant of the old DER-wrapped form"
+    );
+    assert_eq!(
+        from_raw,
+        obj_attr(h_ss, CKA_VALUE).unwrap(),
+        "encapsulated and decapsulated secrets must agree"
+    );
+}
+
+// ── E2 — CKA_EC_PARAMS on BOTH halves at EC keygen ──────────────────────
+
+#[test]
+fn e2_ec_keygen_writes_domain_parameters_on_both_halves() {
+    let _guard = test_lock::acquire();
+    e_setup();
+    let p256 = vec![0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07];
+    let (rv, hp, hs) = gen_pair(CKM_EC_KEY_PAIR_GEN, vec![(CKA_EC_PARAMS, p256.clone())]);
+    assert_eq!(rv, CKR_OK);
+    // §6.3.9 — "the mechanism contributes the CKA_CLASS, CKA_KEY_TYPE,
+    // CKA_EC_PARAMS and CKA_VALUE attributes to the new private key".
+    assert_eq!(
+        obj_attr(hs, CKA_EC_PARAMS),
+        Some(p256.clone()),
+        "the PRIVATE half must carry the domain parameters"
+    );
+    assert_eq!(obj_attr(hp, CKA_EC_PARAMS), Some(p256));
+
+    // P-384 — and the value must be the P-384 OID, not an echo of the caller.
+    let (rv, hp, hs) = gen_pair(
+        CKM_EC_KEY_PAIR_GEN,
+        vec![(CKA_EC_PARAMS, curve_name("P-384"))],
+    );
+    assert_eq!(rv, CKR_OK);
+    let expected = vec![0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x22];
+    assert_eq!(obj_attr(hp, CKA_EC_PARAMS), Some(expected.clone()));
+    assert_eq!(obj_attr(hs, CKA_EC_PARAMS), Some(expected));
+}
+
+// ── E4 — Edwards / Montgomery public-key encoding ───────────────────────
+
+#[test]
+fn e4_edwards_and_montgomery_public_keys_are_bare_little_endian() {
+    let _guard = test_lock::acquire();
+    e_setup();
+
+    // Ed25519 — the table says "Public key bytes in little endian order as
+    // defined in [RFC 8032]", not the Weierstrass table's DER ECPoint.
+    let (rv, hp, _) = gen_pair(
+        CKM_EC_EDWARDS_KEY_PAIR_GEN,
+        vec![(CKA_EC_PARAMS, oid(&[0x2b, 0x65, 0x70]))],
+    );
+    assert_eq!(rv, CKR_OK);
+    let pt = obj_attr(hp, CKA_EC_POINT).expect("Edwards public key must carry CKA_EC_POINT");
+    assert_eq!(pt.len(), 32, "bare 32 bytes — no DER wrapper");
+    assert_ne!(pt[0], 0x04, "…and therefore no OCTET STRING tag");
+    assert!(
+        obj_attr(hp, CKA_EC_PARAMS).is_some(),
+        "the parameters attribute must be present"
+    );
+    assert!(
+        obj_attr(hp, CKA_VALUE).is_none(),
+        "no CKA_VALUE is defined for an Edwards PUBLIC key"
+    );
+
+    // X25519 — same rule (RFC 7748).
+    let (rv, hp, _) = gen_pair(
+        CKM_EC_MONTGOMERY_KEY_PAIR_GEN,
+        vec![(CKA_EC_PARAMS, oid(&[0x2b, 0x65, 0x6e]))],
+    );
+    assert_eq!(rv, CKR_OK);
+    let pt = obj_attr(hp, CKA_EC_POINT).expect("Montgomery public key must carry CKA_EC_POINT");
+    assert_eq!(pt.len(), 32);
+    assert!(obj_attr(hp, CKA_VALUE).is_none());
+
+    // …and the curveName form is accepted on input (the interop note).
+    let (rv, _, _) = gen_pair(
+        CKM_EC_MONTGOMERY_KEY_PAIR_GEN,
+        vec![(CKA_EC_PARAMS, curve_name("curve25519"))],
+    );
+    assert_eq!(rv, CKR_OK, "both CHOICE forms must be accepted on input");
+}
+
+// ── E5 — RSA private keys expose the private exponent (and CRT set) ─────
+
+#[test]
+fn e5_rsa_private_key_exposes_the_private_exponent() {
+    let _guard = test_lock::acquire();
+    e_setup();
+    let bits: usize = 2048;
+    let mut m = [0usize; 3];
+    m[0] = CKM_RSA_PKCS_KEY_PAIR_GEN as usize;
+    let mut pub_tmpl: Vec<usize> = vec![
+        CKA_MODULUS_BITS as usize,
+        (&bits as *const usize) as usize,
+        std::mem::size_of::<usize>(),
+    ];
+    let (mut hp, mut hs) = (0u32, 0u32);
+    assert_eq!(
+        unsafe {
+            C_GenerateKeyPair_impl(
+                E_SESSION,
+                m.as_mut_ptr() as *mut u8,
+                pub_tmpl.as_mut_ptr() as *mut u8,
+                1,
+                std::ptr::null_mut(),
+                0,
+                &mut hp,
+                &mut hs,
+            )
+        },
+        CKR_OK
+    );
+    // §6.1.3 — "The only attributes from Table 38 for which a Cryptoki
+    // implementation is required to be able to return values are
+    // CKA_MODULUS, CKA_PUBLIC_EXPONENT and CKA_PRIVATE_EXPONENT."
+    let d = obj_attr(hs, CKA_PRIVATE_EXPONENT)
+        .expect("CKA_PRIVATE_EXPONENT is required to be returnable");
+    assert!(!d.is_empty());
+    // The full CRT set — §6.7 forbids preparing a key for wrapping without it.
+    for (attr, name) in [
+        (CKA_PRIME_1, "CKA_PRIME_1"),
+        (CKA_PRIME_2, "CKA_PRIME_2"),
+        (CKA_EXPONENT_1, "CKA_EXPONENT_1"),
+        (CKA_EXPONENT_2, "CKA_EXPONENT_2"),
+        (CKA_COEFFICIENT, "CKA_COEFFICIENT"),
+    ] {
+        assert!(
+            obj_attr(hs, attr).is_some_and(|v| !v.is_empty()),
+            "{name} must be written at generation"
+        );
+    }
+}
+
+// ── E6 — wrapped private keys are PKCS#8 PrivateKeyInfo ─────────────────
+
+#[test]
+fn e6_wrapped_private_keys_are_pkcs8_and_public_keys_are_refused() {
+    let _guard = test_lock::acquire();
+    e_setup();
+
+    let kek = put_object(
+        78,
+        vec![
+            (CKA_CLASS, ulong(CKO_SECRET_KEY)),
+            (CKA_KEY_TYPE, ulong(CKK_AES)),
+            (CKA_WRAP, bbool(true)),
+            (CKA_VALUE, vec![0x31u8; 32]),
+        ],
+    );
+    let (rv, hp, hs) = gen_pair(
+        CKM_EC_KEY_PAIR_GEN,
+        vec![(
+            CKA_EC_PARAMS,
+            vec![0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07],
+        )],
+    );
+    assert_eq!(rv, CKR_OK);
+    // EC private keys are generated CKA_EXTRACTABLE=FALSE; the point of this
+    // test is the ENCODING, so make it wrappable.
+    crate::state::set_object_attr_bytes(hs, CKA_EXTRACTABLE, vec![1]);
+
+    // AES-KWP (RFC 5649), not plain AES-KW: a PKCS#8 PrivateKeyInfo is not a
+    // whole number of 8-byte semiblocks, which is exactly why the padded
+    // variant exists.
+    let mut mech = [0usize; 3];
+    mech[0] = CKM_AES_KEY_WRAP_KWP as usize;
+    let mut out = vec![0u8; 512];
+    let mut out_len: u32 = out.len() as u32;
+    assert_eq!(
+        C_WrapKey(
+            E_SESSION,
+            mech.as_mut_ptr() as *mut u8,
+            kek,
+            hs,
+            out.as_mut_ptr(),
+            &mut out_len,
+        ),
+        CKR_OK
+    );
+    // Unwrap it back to check the plaintext structure the engine produced.
+    let mut blob = out[..out_len as usize].to_vec();
+    let mut want = Tmpl::new(vec![
+        (CKA_CLASS, ulong(CKO_SECRET_KEY)),
+        (CKA_KEY_TYPE, ulong(CKK_GENERIC_SECRET)),
+    ]);
+    let want_count = want.count();
+    let mut h_round: u32 = 0;
+    let kek_unwrap = put_object(
+        78,
+        vec![
+            (CKA_CLASS, ulong(CKO_SECRET_KEY)),
+            (CKA_KEY_TYPE, ulong(CKK_AES)),
+            (CKA_UNWRAP, bbool(true)),
+            (CKA_VALUE, vec![0x31u8; 32]),
+        ],
+    );
+    assert_eq!(
+        C_UnwrapKey(
+            E_SESSION,
+            mech.as_mut_ptr() as *mut u8,
+            kek_unwrap,
+            blob.as_mut_ptr(),
+            blob.len() as u32,
+            want.ptr(),
+            want_count,
+            &mut h_round,
+        ),
+        CKR_OK
+    );
+    let plain = obj_attr(h_round, CKA_VALUE).unwrap();
+    // §6.7 — "a private key is BER-encoded according to [PKCS #8]
+    // PrivateKeyInfo ASN.1 type". Previously an EC private key came out as
+    // the 32 raw scalar bytes.
+    assert_eq!(plain[0], 0x30, "PrivateKeyInfo is a DER SEQUENCE");
+    assert!(
+        plain.len() > 32,
+        "a bare 32-byte scalar is not a PrivateKeyInfo (got {} bytes)",
+        plain.len()
+    );
+    // version INTEGER 0 immediately inside the SEQUENCE.
+    let body_off = if plain[1] & 0x80 == 0 { 2 } else { 2 + (plain[1] & 0x7f) as usize };
+    assert_eq!(&plain[body_off..body_off + 3], &[0x02, 0x01, 0x00]);
+
+    // §5.18.3 class check — a PUBLIC key is not a wrappable object.
+    crate::state::set_object_attr_bytes(hp, CKA_EXTRACTABLE, vec![1]);
+    let mut out2 = vec![0u8; 512];
+    let mut out2_len: u32 = out2.len() as u32;
+    assert_eq!(
+        C_WrapKey(
+            E_SESSION,
+            mech.as_mut_ptr() as *mut u8,
+            kek,
+            hp,
+            out2.as_mut_ptr(),
+            &mut out2_len,
+        ),
+        CKR_KEY_NOT_WRAPPABLE,
+        "C_WrapKey wraps a private or secret key — not a public one"
+    );
+}
+
+// ── E7 — CKA_SEED is not defined for SLH-DSA ────────────────────────────
+
+#[test]
+fn e7_slh_dsa_does_not_persist_a_seed() {
+    let _guard = test_lock::acquire();
+    e_setup();
+    let seed = vec![0x5Au8; 48]; // 3n for the 128-bit parameter sets (n = 16)
+    let mut m = [0usize; 3];
+    m[0] = CKM_SLH_DSA_KEY_PAIR_GEN as usize;
+    let ps = CKP_SLH_DSA_SHA2_128S as usize;
+    let mut words: Vec<usize> = vec![
+        CKA_PARAMETER_SET as usize,
+        (&ps as *const usize) as usize,
+        std::mem::size_of::<usize>(),
+        CKA_SEED as usize,
+        seed.as_ptr() as usize,
+        seed.len(),
+    ];
+    let (mut hp, mut hs) = (0u32, 0u32);
+    let rv = unsafe {
+        C_GenerateKeyPair_impl(
+            E_SESSION,
+            m.as_mut_ptr() as *mut u8,
+            words.as_mut_ptr() as *mut u8,
+            2,
+            std::ptr::null_mut(),
+            0,
+            &mut hp,
+            &mut hs,
+        )
+    };
+    assert_eq!(rv, CKR_OK, "deterministic SLH-DSA keygen must still work");
+    // §6.69.4 does NOT list CKA_SEED among the attributes the mechanism
+    // contributes, and the SLH-DSA private-key table defines no such
+    // attribute. The seed is CONSUMED, not stored.
+    assert!(
+        obj_attr(hs, CKA_SEED).is_none(),
+        "CKA_SEED is undefined for SLH-DSA and must not be persisted"
+    );
+    // ML-DSA, where §6.67.4 DOES list it, is unchanged.
+    let ps2 = CKP_ML_DSA_44 as usize;
+    let seed2 = vec![0x11u8; 32];
+    let mut words2: Vec<usize> = vec![
+        CKA_PARAMETER_SET as usize,
+        (&ps2 as *const usize) as usize,
+        std::mem::size_of::<usize>(),
+        CKA_SEED as usize,
+        seed2.as_ptr() as usize,
+        seed2.len(),
+    ];
+    let mut m2 = [0usize; 3];
+    m2[0] = CKM_ML_DSA_KEY_PAIR_GEN as usize;
+    let (mut hp2, mut hs2) = (0u32, 0u32);
+    assert_eq!(
+        unsafe {
+            C_GenerateKeyPair_impl(
+                E_SESSION,
+                m2.as_mut_ptr() as *mut u8,
+                words2.as_mut_ptr() as *mut u8,
+                2,
+                std::ptr::null_mut(),
+                0,
+                &mut hp2,
+                &mut hs2,
+            )
+        },
+        CKR_OK
+    );
+    assert_eq!(
+        obj_attr(hs2, CKA_SEED),
+        Some(seed2),
+        "§6.67.4 DOES list CKA_SEED for ML-DSA — that must not regress"
+    );
+}
+
+// ═════════════════════════════════════════════════════════════════════════
+// PHASE 4 — conformance posture, error codes, advertised capabilities
+// ═════════════════════════════════════════════════════════════════════════
+
+const C_SESSION: u32 = 0x5C44_0001;
+
+fn c_setup() {
+    crate::state::set_initialized(true);
+    crate::state::ensure_slot(0);
+    put_session(C_SESSION, 0, true);
+}
+
+// ── C3 — advertised capabilities must equal dispatch ────────────────────
+
+#[test]
+fn c3_every_ec_mechanism_advertises_the_mandated_flags() {
+    let _guard = test_lock::acquire();
+    // §6.3.3 says three times that a library performing EC mechanisms "must
+    // set" the field type, the CKA_EC_PARAMS encodings and the point forms
+    // on EACH EC mechanism. Values come from the pinned canonical OASIS
+    // header (docs/refs/pkcs11t-canonical-v3.2.h), not a PDF rendering.
+    assert_eq!(CKF_EC_F_P, 0x0010_0000);
+    assert_eq!(CKF_EC_OID, 0x0080_0000);
+    assert_eq!(CKF_EC_CURVENAME, 0x0400_0000);
+    assert_eq!(CKF_EC_UNCOMPRESS, 0x0100_0000);
+
+    let ec_mechs = [
+        CKM_EC_KEY_PAIR_GEN,
+        CKM_ECDSA,
+        CKM_ECDSA_SHA256,
+        CKM_ECDSA_SHA384,
+        CKM_ECDSA_SHA512,
+        CKM_ECDSA_SHA3_224,
+        CKM_ECDSA_SHA3_256,
+        CKM_ECDSA_SHA3_384,
+        CKM_ECDSA_SHA3_512,
+        CKM_ECDH1_DERIVE,
+        CKM_ECDH1_COFACTOR_DERIVE,
+        CKM_EC_EDWARDS_KEY_PAIR_GEN,
+        CKM_EDDSA,
+        CKM_EDDSA_PH,
+        CKM_EC_MONTGOMERY_KEY_PAIR_GEN,
+        CKM_EC_MONTGOMERY_KEY_DERIVE,
+        CKM_X25519,
+        CKM_X448,
+    ];
+    for m in ec_mechs {
+        let (_, _, flags) = mechanism_info(m)
+            .unwrap_or_else(|| panic!("mechanism {m:#06x} must have a C_GetMechanismInfo arm"));
+        assert_ne!(
+            flags & CKF_EC_F_P,
+            0,
+            "{m:#06x} must set the field-type flag (this engine does prime curves)"
+        );
+        assert_ne!(
+            flags & (CKF_EC_OID | CKF_EC_CURVENAME),
+            0,
+            "{m:#06x} must state which CKA_EC_PARAMS encodings it accepts"
+        );
+        assert_ne!(
+            flags & CKF_EC_UNCOMPRESS,
+            0,
+            "{m:#06x} must state which point forms it accepts"
+        );
+        // Accurate NEGATIVES matter as much: this engine has no binary-field
+        // curves, rejects explicit parameters, and does not do compressed points.
+        assert_eq!(flags & CKF_EC_F_2M, 0, "{m:#06x} must not claim F_2^m");
+        assert_eq!(
+            flags & CKF_EC_ECPARAMETERS,
+            0,
+            "{m:#06x} must not claim explicit ECParameters — decode_ec_params refuses them"
+        );
+        assert_eq!(flags & CKF_EC_COMPRESS, 0, "{m:#06x} must not claim compressed points");
+    }
+}
+
+#[test]
+fn c3_wrap_capable_mechanisms_advertise_wrap() {
+    let _guard = test_lock::acquire();
+    // A mechanism flag is DEFINED as "the mechanism can be used with
+    // function F". C_WrapKey / C_UnwrapKey accept all three of these.
+    for m in [CKM_RSA_PKCS_OAEP, CKM_AES_CBC, CKM_AES_CBC_PAD] {
+        let (_, _, flags) = mechanism_info(m).unwrap();
+        assert_ne!(flags & CKF_WRAP, 0, "{m:#06x} is accepted by C_WrapKey");
+        assert_ne!(flags & CKF_UNWRAP, 0, "{m:#06x} is accepted by C_UnwrapKey");
+    }
+    // …and CKM_AES_ECB, which the wrap path does NOT accept, must not claim it.
+    let (_, _, ecb) = mechanism_info(CKM_AES_ECB).unwrap();
+    assert_eq!(ecb & (CKF_WRAP | CKF_UNWRAP), 0);
+}
+
+// ── C2 — error codes ────────────────────────────────────────────────────
+
+#[test]
+fn c2_null_mechanism_cancels_the_active_operation() {
+    let _guard = test_lock::acquire();
+    c_setup();
+    let key = put_object(
+        0,
+        vec![
+            (CKA_CLASS, ulong(CKO_SECRET_KEY)),
+            (CKA_KEY_TYPE, ulong(CKK_AES)),
+            (CKA_ENCRYPT, bbool(true)),
+            (CKA_DECRYPT, bbool(true)),
+            (CKA_VALUE, vec![0x21u8; 32]),
+        ],
+    );
+    // Start a real encryption operation…
+    let iv = [0u8; 16];
+    let mut mech: Vec<usize> = vec![
+        CKM_AES_CBC as usize,
+        iv.as_ptr() as usize,
+        iv.len(),
+    ];
+    assert_eq!(
+        C_EncryptInit(C_SESSION, mech.as_mut_ptr() as *mut u8, key),
+        CKR_OK
+    );
+    // …and cancel it with the NULL-mechanism form. §5.11: "C_EncryptInit can
+    // be called with pMechanism set to NULL_PTR to terminate an active
+    // encryption operation." CKR_ARGUMENTS_BAD was an inapplicable code.
+    assert_eq!(
+        C_EncryptInit(C_SESSION, std::ptr::null_mut(), key),
+        CKR_OK,
+        "the NULL-mechanism cancel form must succeed"
+    );
+    // The operation really is gone: a fresh Init must not see it as active.
+    assert_eq!(
+        C_EncryptInit(C_SESSION, mech.as_mut_ptr() as *mut u8, key),
+        CKR_OK
+    );
+    assert_eq!(C_EncryptInit(C_SESSION, std::ptr::null_mut(), key), CKR_OK);
+
+    // Same shape for the other families.
+    assert_eq!(C_DigestInit(C_SESSION, std::ptr::null_mut()), CKR_OK);
+    assert_eq!(
+        C_DecryptInit(C_SESSION, std::ptr::null_mut(), key),
+        CKR_OK
+    );
+    assert_eq!(C_VerifyInit(C_SESSION, std::ptr::null_mut(), key), CKR_OK);
+    assert_eq!(C_SignInit(C_SESSION, std::ptr::null_mut(), key), CKR_OK);
+    assert_eq!(
+        C_SignRecoverInit(C_SESSION, std::ptr::null_mut(), key),
+        CKR_OK
+    );
+    assert_eq!(
+        C_VerifyRecoverInit(C_SESSION, std::ptr::null_mut(), key),
+        CKR_OK
+    );
+}
+
+#[test]
+fn c2_session_handle_takes_precedence_over_argument_codes() {
+    let _guard = test_lock::acquire();
+    c_setup();
+    const BOGUS: u32 = 0x0BAD_5E55;
+    // §5.2 — the session-handle class takes MANDATORY precedence. Each of
+    // these previously returned an argument/operation code first, so an
+    // application debugging a stale handle was told the wrong thing.
+    let mut info = [0u8; 64];
+    assert_eq!(
+        C_GetSessionValidationFlags(BOGUS, 0, info.as_mut_ptr() as *mut u32),
+        CKR_SESSION_HANDLE_INVALID
+    );
+    assert_eq!(
+        C_GenerateRandom(BOGUS, std::ptr::null_mut(), 0),
+        CKR_SESSION_HANDLE_INVALID
+    );
+    assert_eq!(
+        C_CreateObject(BOGUS, std::ptr::null_mut(), 3, std::ptr::null_mut()),
+        CKR_SESSION_HANDLE_INVALID
+    );
+    assert_eq!(
+        C_GetAttributeValue(BOGUS, 0, std::ptr::null_mut(), 3),
+        CKR_SESSION_HANDLE_INVALID
+    );
+    assert_eq!(
+        C_CopyObject(BOGUS, 0, std::ptr::null_mut(), 3, std::ptr::null_mut()),
+        CKR_SESSION_HANDLE_INVALID
+    );
+    assert_eq!(
+        C_SetAttributeValue(BOGUS, 0, std::ptr::null_mut(), 3),
+        CKR_SESSION_HANDLE_INVALID
+    );
+    assert_eq!(
+        C_DeriveKey(BOGUS, std::ptr::null_mut(), 0, std::ptr::null_mut(), 0, std::ptr::null_mut()),
+        CKR_SESSION_HANDLE_INVALID
+    );
+    assert_eq!(
+        C_WrapKey(BOGUS, std::ptr::null_mut(), 0, 0, std::ptr::null_mut(), std::ptr::null_mut()),
+        CKR_SESSION_HANDLE_INVALID
+    );
+    assert_eq!(
+        C_DigestUpdate(BOGUS, std::ptr::null_mut(), 0),
+        CKR_SESSION_HANDLE_INVALID
+    );
+    assert_eq!(
+        C_SignUpdate(BOGUS, std::ptr::null_mut(), 0),
+        CKR_SESSION_HANDLE_INVALID
+    );
+    assert_eq!(
+        C_VerifyUpdate(BOGUS, std::ptr::null_mut(), 0),
+        CKR_SESSION_HANDLE_INVALID
+    );
+    assert_eq!(
+        C_FindObjectsInit(BOGUS, std::ptr::null_mut(), 5),
+        CKR_SESSION_HANDLE_INVALID
+    );
+    // And a NULL-mechanism cancel on a bogus session is still a bad handle.
+    assert_eq!(
+        C_EncryptInit(BOGUS, std::ptr::null_mut(), 0),
+        CKR_SESSION_HANDLE_INVALID
+    );
+}
+
+#[test]
+fn c2_context_specific_login_is_a_valid_user_type() {
+    let _guard = test_lock::acquire();
+    let slot = 79u32;
+    s6_bring_up_token(slot);
+    let s = 0x5C44_9001;
+    put_session(s, slot, true);
+    let mut pin = *b"5678";
+    // CKU_CONTEXT_SPECIFIC is one of the three VALID CK_USER_TYPE values.
+    // Answering CKR_USER_TYPE_INVALID claimed it does not exist; with no
+    // re-authentication pending the correct answer is
+    // CKR_OPERATION_NOT_INITIALIZED.
+    assert_eq!(
+        C_Login(s, CKU_CONTEXT_SPECIFIC, pin.as_mut_ptr(), 4),
+        CKR_OPERATION_NOT_INITIALIZED
+    );
+    // A genuinely undefined user type is still CKR_USER_TYPE_INVALID.
+    assert_eq!(
+        C_Login(s, 99, pin.as_mut_ptr(), 4),
+        CKR_USER_TYPE_INVALID
+    );
+    drop_session(s);
+}
+
+#[test]
+fn c2_unsupported_xmss_parameter_set_has_its_own_code() {
+    let _guard = test_lock::acquire();
+    c_setup();
+    let mut m = [0usize; 3];
+    m[0] = CKM_XMSS_KEY_PAIR_GEN as usize;
+    let bogus: usize = 0xdead;
+    let mut words: Vec<usize> = vec![
+        CKA_PARAMETER_SET as usize,
+        (&bogus as *const usize) as usize,
+        std::mem::size_of::<usize>(),
+    ];
+    let (mut hp, mut hs) = (0u32, 0u32);
+    let rv = unsafe {
+        C_GenerateKeyPair_impl(
+            C_SESSION,
+            m.as_mut_ptr() as *mut u8,
+            words.as_mut_ptr() as *mut u8,
+            1,
+            std::ptr::null_mut(),
+            0,
+            &mut hp,
+            &mut hs,
+        )
+    };
+    // §5.1.6 Table 6 — "This parameter set is not supported by this token."
+    // The engine already uses this code correctly for ML-DSA / ML-KEM /
+    // SLH-DSA; CKR_FUNCTION_FAILED said nothing about why.
+    assert_eq!(rv, CKR_PARAMETER_SET_NOT_SUPPORTED);
+}
+
+// ── V-09 — CKK_EC_MONTGOMERY under encapsulate / decapsulate ────────────
+
+#[test]
+fn v09_montgomery_keys_are_accepted_by_the_kem_entry_points() {
+    let _guard = test_lock::acquire();
+    e_setup();
+    let (rv, hp, hs) = gen_pair(
+        CKM_EC_MONTGOMERY_KEY_PAIR_GEN,
+        vec![(CKA_EC_PARAMS, oid(&[0x2b, 0x65, 0x6e]))],
+    );
+    assert_eq!(rv, CKR_OK);
+    crate::state::set_object_attr_bytes(hp, CKA_ENCAPSULATE, vec![1]);
+    crate::state::set_object_attr_bytes(hs, CKA_DECAPSULATE, vec![1]);
+
+    let mut mech = [0usize; 3];
+    mech[0] = CKM_ECDH1_DERIVE as usize;
+    let mut ct = vec![0u8; 256];
+    let mut ct_len: u32 = ct.len() as u32;
+    let mut h_ss: u32 = 0;
+    // Table 78 lists CKK_EC_MONTGOMERY for this mechanism; the engine
+    // advertised CKF_ENCAPSULATE on CKM_ECDH1_DERIVE but accepted only
+    // CKK_EC, so the advertised capability was partly untrue.
+    assert_eq!(
+        unsafe {
+            C_EncapsulateKey_impl(
+                E_SESSION,
+                mech.as_mut_ptr() as *mut u8,
+                hp,
+                std::ptr::null_mut(),
+                0,
+                ct.as_mut_ptr(),
+                &mut ct_len,
+                &mut h_ss,
+            )
+        },
+        CKR_OK
+    );
+    // E1 — X25519's ciphertext is the bare 32-byte little-endian point.
+    assert_eq!(ct_len, 32, "X25519 ECDH-KEM ciphertext must be exactly 32 bytes");
+    let mut ctb = ct[..32].to_vec();
+    let mut h_out: u32 = 0;
+    assert_eq!(
+        unsafe {
+            C_DecapsulateKey_impl(
+                E_SESSION,
+                mech.as_mut_ptr() as *mut u8,
+                hs,
+                std::ptr::null_mut(),
+                0,
+                ctb.as_mut_ptr(),
+                ctb.len() as u32,
+                &mut h_out,
+            )
+        },
+        CKR_OK
+    );
+    assert_eq!(
+        obj_attr(h_out, CKA_VALUE).unwrap(),
+        obj_attr(h_ss, CKA_VALUE).unwrap(),
+        "both ends must derive the same shared secret"
+    );
+}

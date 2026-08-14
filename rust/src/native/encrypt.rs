@@ -1276,7 +1276,9 @@ pub(crate) fn chacha20_encrypt_at(
     // (RFC 7539 "legacy" / DJB original) or 12-byte (IETF) nonce.
     // OASIS BC-CHACHA20-* tests use the 8-byte legacy form.
     let mut buf = plaintext.to_vec();
-    let offset = 0u64 * block_counter;
+    let offset = block_counter
+        .checked_mul(64)
+        .ok_or(CKR_MECHANISM_PARAM_INVALID)?;
     match nonce.len() {
         8 => {
             let mut cipher = chacha20::ChaCha20Legacy::new(key.into(), nonce.into());

@@ -1761,8 +1761,14 @@ pub fn get_sig_len(mech: u32, hkey: u32) -> u32 {
         },
         // XMSS — sig = idx(4) + random(n) + WOTS+_sig(len*n) + auth_path(h*n); n=32, len=67 (w=16)
         CKM_XMSS => {
-            let xmss_param =
-                get_object_attr_u32(hkey, CKA_XMSS_PARAM_SET).unwrap_or(CKP_XMSS_SHA2_10_256);
+            // W3 — prefer the STANDARD CKA_PARAMETER_SET (§6.66.6); the
+            // legacy vendor attribute is only a fallback. A signature-length
+            // estimate computed from the wrong parameter set under-sizes the
+            // caller's buffer.
+            let xmss_param = get_object_attr_u32(hkey, CKA_PARAMETER_SET)
+                .filter(|v| *v != 0)
+                .or_else(|| get_object_attr_u32(hkey, CKA_XMSS_PARAM_SET).filter(|v| *v != 0))
+                .unwrap_or(CKP_XMSS_SHA2_10_256);
             // SHAKE256_10_192 is the one n=24 set (SP 800-208): len=51, h=10.
             if xmss_param == CKP_XMSS_SHAKE256_10_192 {
                 return 4 + 24 + (51 + 10) * 24;

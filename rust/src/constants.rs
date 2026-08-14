@@ -364,6 +364,10 @@ pub const CKM_RSA_PKCS_PSS: u32 = 0x0000_000D;
 // RSA private-key CRT components (§2.1.3) — sensitive material, never extractable
 // in clear from a sensitive key. CKA_PRIVATE_EXPONENT .. CKA_COEFFICIENT.
 pub const CKA_PRIVATE_EXPONENT: u32 = 0x0000_0123;
+pub const CKA_PRIME_1: u32 = 0x0000_0124;
+pub const CKA_PRIME_2: u32 = 0x0000_0125;
+pub const CKA_EXPONENT_1: u32 = 0x0000_0126;
+pub const CKA_EXPONENT_2: u32 = 0x0000_0127;
 pub const CKA_COEFFICIENT: u32 = 0x0000_0128;
 // SHA3-384 RSA composite sign mechanisms (§6.4).
 pub const CKM_SHA3_384_RSA_PKCS: u32 = 0x0000_0061;

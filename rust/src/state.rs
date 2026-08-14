@@ -1190,6 +1190,28 @@ fn strip_ec_point_der(ec_point: Vec<u8>) -> Vec<u8> {
     ec_point
 }
 
+/// E4 (2026-08-13) — the raw public-key MATERIAL of any key object,
+/// whichever attribute the object's type puts it in.
+///
+/// Edwards and Montgomery PUBLIC keys no longer carry `CKA_VALUE` (the spec
+/// defines none for them; their material is the bare little-endian bytes in
+/// `CKA_EC_POINT`), so every internal reader that used to reach for
+/// `CKA_VALUE` unconditionally must come through here or it will see an
+/// absent attribute on exactly those keys. `CKA_VALUE` still wins where it
+/// exists — private keys, secret keys, RSA, the PQC families — so this is a
+/// strict superset of the old behaviour.
+pub fn get_key_material_from(attrs: &Attributes) -> Option<Vec<u8>> {
+    attrs
+        .get(&CKA_VALUE)
+        .cloned()
+        .or_else(|| get_ec_point_sec1_from(attrs))
+}
+
+/// [`get_key_material_from`] by handle.
+pub fn get_key_material(handle: u32) -> Option<Vec<u8>> {
+    OBJECTS.with(|objs| objs.borrow().get(&handle).and_then(get_key_material_from))
+}
+
 /// Return the raw SEC1 point bytes for an EC public key object. Some
 /// internal paths (C_GenerateKeyPair) store the raw SEC1 bytes directly
 /// without the DER header — [`strip_ec_point_der`] handles both formats.

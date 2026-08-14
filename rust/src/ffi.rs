@@ -110,6 +110,86 @@ macro_rules! nonnull {
     };
 }
 
+/// C2 (2026-08-13) — the NULL-mechanism CANCEL form the `C_*Init` functions
+/// all share: "C_EncryptInit can be called with pMechanism set to NULL_PTR to
+/// terminate an active encryption operation. If an active operation
+/// operations cannot be cancelled, CKR_OPERATION_CANCEL_FAILED must be
+/// returned." (§5.11, and the identical sentence in §5.12/§5.13/§5.14 for
+/// sign, verify, digest, sign-recover, verify-recover and
+/// verify-signature.)
+///
+/// Every one of these entry points previously answered a NULL mechanism with
+/// CKR_ARGUMENTS_BAD, an inapplicable code — the usual "return-value latitude"
+/// argument does not apply, because the cancel form is a DOCUMENTED call
+/// shape, not an error.
+///
+/// Returns `Some(rv)` when the call was the cancel form and has been handled;
+/// `None` when the caller supplied a real mechanism and should carry on.
+/// Every operation this engine runs is cancellable (state is a map entry),
+/// so CKR_OPERATION_CANCEL_FAILED is unreachable in practice — it is wired
+/// through `cancelled` so that stops being true silently if some future
+/// operation cannot be torn down.
+fn cancel_active_operation(
+    h_session: u32,
+    p_mechanism: *mut u8,
+    op: OpFamily,
+) -> Option<u32> {
+    if !p_mechanism.is_null() {
+        return None;
+    }
+    let cancelled = match op {
+        OpFamily::Encrypt => {
+            ENCRYPT_STATE.with(|s| s.borrow_mut().remove(&h_session));
+            true
+        }
+        OpFamily::Decrypt => {
+            DECRYPT_STATE.with(|s| s.borrow_mut().remove(&h_session));
+            true
+        }
+        OpFamily::Sign => {
+            SIGN_STATE.with(|s| s.borrow_mut().remove(&h_session));
+            SIGN_MULTIPART_ACC.with(|s| s.borrow_mut().remove(&h_session));
+            true
+        }
+        OpFamily::Verify => {
+            VERIFY_STATE.with(|s| s.borrow_mut().remove(&h_session));
+            VERIFY_MULTIPART_ACC.with(|s| s.borrow_mut().remove(&h_session));
+            true
+        }
+        OpFamily::Digest => {
+            DIGEST_STATE.with(|s| s.borrow_mut().remove(&h_session));
+            DIGEST_MULTIPART.with(|s| s.borrow_mut().remove(&h_session));
+            true
+        }
+        OpFamily::SignRecover => {
+            SIGN_RECOVER_STATE.with(|s| s.borrow_mut().remove(&h_session));
+            true
+        }
+        OpFamily::VerifyRecover => {
+            VERIFY_RECOVER_STATE.with(|s| s.borrow_mut().remove(&h_session));
+            true
+        }
+        OpFamily::VerifySignature => {
+            VERIFY_SIG_STATE.with(|s| s.borrow_mut().remove(&h_session));
+            true
+        }
+    };
+    Some(if cancelled { CKR_OK } else { CKR_OPERATION_CANCEL_FAILED })
+}
+
+/// The operation families that share the NULL-mechanism cancel form.
+#[derive(Clone, Copy)]
+enum OpFamily {
+    Encrypt,
+    Decrypt,
+    Sign,
+    Verify,
+    Digest,
+    SignRecover,
+    VerifyRecover,
+    VerifySignature,
+}
+
 #[wasm_bindgen(js_name = _C_Initialize)]
 pub fn C_Initialize(p_init_args: *mut u8) -> u32 {
     // PKCS#11 v3.2 §5.6 — a second C_Initialize without an intervening
@@ -560,13 +640,26 @@ pub fn C_LoginUser(
 #[wasm_bindgen(js_name = _C_Login)]
 pub fn C_Login(h_session: u32, user_type: u32, p_pin: *mut u8, ul_pin_len: u32) -> u32 {
     require_init!();
-    if p_pin.is_null() {
-        return CKR_ARGUMENTS_BAD;
-    }
+    // §5.2 error priority (C2, 2026-08-13) — the session-handle class takes
+    // MANDATORY precedence over argument codes.
     let session = match SESSIONS.with(|s| s.borrow().get(&h_session).cloned()) {
         Some(s) => s,
         None => return CKR_SESSION_HANDLE_INVALID,
     };
+    if p_pin.is_null() {
+        return CKR_ARGUMENTS_BAD;
+    }
+    // C2 (2026-08-13) — CKU_CONTEXT_SPECIFIC is one of the THREE valid
+    // CK_USER_TYPE values; returning CKR_USER_TYPE_INVALID for it (the old
+    // behaviour, via the catch-all arm below) told the application the type
+    // does not exist. It is the per-operation re-authentication login used
+    // with CKA_ALWAYS_AUTHENTICATE keys. This engine has no operation that
+    // sets a re-authentication pending state, so the correct answer is
+    // "accepted, but there is nothing to authenticate for":
+    // CKR_OPERATION_NOT_INITIALIZED.
+    if user_type == CKU_CONTEXT_SPECIFIC {
+        return CKR_OPERATION_NOT_INITIALIZED;
+    }
     let slot_id = session.slot_id;
 
     if user_type == CKU_SO && !session.rw_session {
@@ -845,8 +938,16 @@ pub fn C_GetTokenInfo(slot_id: u32, p_info: *mut u8) -> u32 {
 }
 
 #[wasm_bindgen(js_name = _C_GetMechanismInfo)]
-pub fn C_GetMechanismInfo(_slot_id: u32, mech_type: u32, p_info: *mut u8) -> u32 {
+pub fn C_GetMechanismInfo(slot_id: u32, mech_type: u32, p_info: *mut u8) -> u32 {
     require_init!();
+    // W6 (2026-08-13) — §5.5.6: "slotID is the ID of the token's slot", with
+    // CKR_SLOT_ID_INVALID enumerated. The parameter was bound as `_slot_id`
+    // and never read, so ANY slot id returned success with slot-0 data.
+    // C_GetMechanismList (right above) already validated it; the two are now
+    // consistent.
+    if !TOKEN_STORE.with(|ts| ts.borrow().contains_key(&slot_id)) {
+        return CKR_SLOT_ID_INVALID;
+    }
     if p_info.is_null() {
         return CKR_ARGUMENTS_BAD;
     }
@@ -867,6 +968,26 @@ pub fn C_GetMechanismInfo(_slot_id: u32, mech_type: u32, p_info: *mut u8) -> u32
 /// single source backing C_GetMechanismInfo. A unit test asserts every entry
 /// of `SUPPORTED_MECHS` is answerable here, so the advertised list and this
 /// table can never drift apart (gap-analysis R6.2).
+/// C3 (2026-08-13) — PKCS#11 v3.2 §6.3.3 states three times, once per flag
+/// group, that a library performing EC mechanisms **must set** these on EACH
+/// EC mechanism: the field type (`CKF_EC_F_P` / `CKF_EC_F_2M`), the
+/// CKA_EC_PARAMS encodings it accepts (`CKF_EC_OID` / `CKF_EC_CURVENAME` /
+/// `CKF_EC_ECPARAMETERS`), and the point forms it accepts
+/// (`CKF_EC_UNCOMPRESS` / `CKF_EC_COMPRESS`).
+///
+/// This engine advertised NONE of them on ANY EC mechanism, though it
+/// supports prime-field curves, both named-curve encodings (W1's
+/// `decode_ec_params` accepts the OID and curveName CHOICE arms) and
+/// uncompressed points. Ten mechanisms were affected. Flag VALUES are taken
+/// from the pinned canonical OASIS header, not from a pdftotext rendering.
+///
+/// Not set, deliberately and accurately: `CKF_EC_F_2M` (no binary-field
+/// curves), `CKF_EC_ECPARAMETERS` (explicit parameters are rejected — see
+/// `decode_ec_params`), and `CKF_EC_COMPRESS` (the engine emits and expects
+/// uncompressed points).
+const EC_CAPABILITY_FLAGS: u32 =
+    CKF_EC_F_P | CKF_EC_OID | CKF_EC_CURVENAME | CKF_EC_UNCOMPRESS;
+
 pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
     let info = match mech_type {
         CKM_RSA_PKCS_KEY_PAIR_GEN => (1024, 4096, 0x00010000u32),
@@ -893,7 +1014,16 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
         | CKM_RSA_PKCS_PSS | CKM_SHA3_384_RSA_PKCS | CKM_SHA3_384_RSA_PKCS_PSS => {
             (2048, 4096, 0x00000800 | 0x00002000)
         }
-        CKM_RSA_PKCS_OAEP => (2048, 4096, 0x00000100 | 0x00000200),
+        // C3 (2026-08-13) — a mechanism flag is DEFINED as "the mechanism can
+        // be used with function F". C_WrapKey / C_UnwrapKey accept
+        // CKM_RSA_PKCS_OAEP, CKM_AES_CBC and CKM_AES_CBC_PAD, so all three
+        // under-advertised wrap: an application checking capabilities before
+        // use would conclude the engine could not do what it in fact does.
+        CKM_RSA_PKCS_OAEP => (
+            2048,
+            4096,
+            0x00000100 | 0x00000200 | CKF_WRAP | CKF_UNWRAP,
+        ),
         // PKCS#11 v3.2 §6.67–§6.69: ulMin/MaxKeySize for ML-DSA / ML-KEM /
         // SLH-DSA are PUBLIC-KEY sizes in BYTES (FIPS 203/204/205), not
         // parameter-set numbers.
@@ -934,9 +1064,9 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
         CKM_GENERIC_SECRET_KEY_GEN => (1, 512, 0x00008000),
         // Engine generates P-256/P-384/P-521 (+ secp256k1) — range unified
         // with CKM_ECDSA below (compliance-audit P-15).
-        CKM_EC_KEY_PAIR_GEN => (256, 521, 0x00010000),
+        CKM_EC_KEY_PAIR_GEN => (256, 521, 0x00010000 | EC_CAPABILITY_FLAGS),
         CKM_ECDSA_SHA256 | CKM_ECDSA_SHA384 | CKM_ECDSA_SHA512 => {
-            (256, 521, 0x00000800 | 0x00002000)
+            (256, 521, 0x00000800 | 0x00002000 | EC_CAPABILITY_FLAGS)
         }
         // T1 — C_DeriveKey dispatches P-256 / secp256k1 / P-384 / P-521 for
         // both ECDH1 mechanisms; advertise the full dispatched range.
@@ -945,26 +1075,33 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
         // C_DecapsulateKey (§6.3.17 Table 78) — advertise
         // CKF_ENCAPSULATE (0x10000000) | CKF_DECAPSULATE (0x20000000),
         // mirroring CKM_ML_KEM above. The cofactor variant stays derive-only.
-        CKM_ECDH1_DERIVE => (256, 521, 0x00080000 | 0x10000000 | 0x20000000),
-        CKM_ECDH1_COFACTOR_DERIVE => (256, 521, 0x00080000),
-        CKM_EC_EDWARDS_KEY_PAIR_GEN => (255, 255, 0x00010000),
-        CKM_EDDSA => (255, 255, 0x00000800 | 0x00002000),
+        CKM_ECDH1_DERIVE => (
+            256,
+            521,
+            0x00080000 | 0x10000000 | 0x20000000 | EC_CAPABILITY_FLAGS,
+        ),
+        CKM_ECDH1_COFACTOR_DERIVE => (256, 521, 0x00080000 | EC_CAPABILITY_FLAGS),
+        CKM_EC_EDWARDS_KEY_PAIR_GEN => (255, 255, 0x00010000 | EC_CAPABILITY_FLAGS),
+        CKM_EDDSA => (255, 255, 0x00000800 | 0x00002000 | EC_CAPABILITY_FLAGS),
         // PKCS#11 v3.2 §6.7 — Montgomery-curve key pair generation (X25519=255-bit, X448=448-bit)
-        CKM_EC_MONTGOMERY_KEY_PAIR_GEN => (255, 448, 0x00010000),
+        CKM_EC_MONTGOMERY_KEY_PAIR_GEN => (255, 448, 0x00010000 | EC_CAPABILITY_FLAGS),
         // PKCS#11 v3.2 §6.7 — Montgomery key derivation (X25519 or X448)
-        CKM_EC_MONTGOMERY_KEY_DERIVE => (255, 448, 0x00080000),
+        CKM_EC_MONTGOMERY_KEY_DERIVE => (255, 448, 0x00080000 | EC_CAPABILITY_FLAGS),
         // PKCS#11 v3.2 §6.7 — dedicated X25519 / X448 Diffie-Hellman (CKF_DERIVE)
-        CKM_X25519 => (255, 255, 0x00080000),
-        CKM_X448 => (448, 448, 0x00080000),
+        CKM_X25519 => (255, 255, 0x00080000 | EC_CAPABILITY_FLAGS),
+        CKM_X448 => (448, 448, 0x00080000 | EC_CAPABILITY_FLAGS),
         CKM_AES_KEY_GEN => (16, 32, 0x00008000),
         // §6.20 — ChaCha20 key generation (fixed 256-bit key, CKF_GENERATE).
         CKM_CHACHA20_KEY_GEN => (32, 32, 0x00008000),
         // AES-GCM additionally has C_EncryptMessage/C_DecryptMessage support
         // (CKF_MESSAGE_ENCRYPT 0x2 | CKF_MESSAGE_DECRYPT 0x4, pkcs11t.h).
         CKM_AES_GCM => (16, 32, 0x00000100 | 0x00000200 | 0x0002 | 0x0004),
-        CKM_AES_CBC_PAD | CKM_AES_CBC | CKM_AES_ECB => {
-            (16, 32, 0x00000100 | 0x00000200)
+        // C3 — CKM_AES_CBC / CKM_AES_CBC_PAD are accepted by the wrap path;
+        // CKM_AES_ECB is NOT, so it keeps encrypt/decrypt only.
+        CKM_AES_CBC_PAD | CKM_AES_CBC => {
+            (16, 32, 0x00000100 | 0x00000200 | CKF_WRAP | CKF_UNWRAP)
         }
+        CKM_AES_ECB => (16, 32, 0x00000100 | 0x00000200),
         CKM_AES_KEY_WRAP | CKM_AES_KEY_WRAP_KWP | CKM_AES_KEY_WRAP_PAD => {
             (16, 32, 0x00040000 | 0x00020000)
         }
@@ -995,7 +1132,7 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
         // same named curves as the SHA-2 composites (P-256 / secp256k1 /
         // P-384 / P-521), so the range is unified with CKM_ECDSA_SHAx above.
         CKM_ECDSA_SHA3_224 | CKM_ECDSA_SHA3_256 | CKM_ECDSA_SHA3_384 | CKM_ECDSA_SHA3_512 => {
-            (256, 521, 0x00000800 | 0x00002000)
+            (256, 521, 0x00000800 | 0x00002000 | EC_CAPABILITY_FLAGS)
         }
         // Key derivation functions
         CKM_PKCS5_PBKD2
@@ -1006,9 +1143,9 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
         // (a unit test iterates SUPPORTED_MECHS and asserts none of them
         //  return CKR_MECHANISM_INVALID here — keep the two in sync)
         // Raw ECDSA (§6.3.12) — pre-hashed input, sign/verify only
-        CKM_ECDSA => (256, 521, 0x00000800 | 0x00002000),
+        CKM_ECDSA => (256, 521, 0x00000800 | 0x00002000 | EC_CAPABILITY_FLAGS),
         // Ed25519ph (pkcs11t.h CKM_EDDSA_PH 0x80001057)
-        CKM_EDDSA_PH => (255, 255, 0x00000800 | 0x00002000),
+        CKM_EDDSA_PH => (255, 255, 0x00000800 | 0x00002000 | EC_CAPABILITY_FLAGS),
         // Parametrized pre-hash mechanisms (hash chosen via param, §6.67.7/§6.69.7)
         CKM_HASH_ML_DSA => (1312, 2592, 0x00000800 | 0x00002000),
         CKM_HASH_SLH_DSA => (32, 64, 0x00000800 | 0x00002000),
@@ -1335,6 +1472,25 @@ mod mechanism_table_tests {
 }
 
 // ── Key Generation ───────────────────────────────────────────────────────────
+
+/// W3 (2026-08-13) — resolve an XMSS / XMSS^MT key's parameter set.
+///
+/// §6.66.6: the key pair is generated "using an oid, as specified in the
+/// CKA_PARAMETER_SET attribute of the template for the public key", and the
+/// mechanism itself "does not have a parameter". Generation already reads and
+/// stores the STANDARD attribute; sign and verify read only the legacy vendor
+/// attribute and defaulted to one parameter set when it was absent — so a key
+/// imported through C_CreateObject carrying only CKA_PARAMETER_SET signed
+/// under the WRONG parameter set, silently.
+///
+/// Order: standard attribute, then the legacy vendor attribute (keys this
+/// engine generated carry both), then `None` — no silent default.
+fn xmss_param_set_of(h_key: u32, multi_tree: bool) -> Option<u32> {
+    let vendor = if multi_tree { CKA_XMSSMT_PARAM_SET } else { CKA_XMSS_PARAM_SET };
+    get_object_attr_u32(h_key, CKA_PARAMETER_SET)
+        .filter(|v| *v != 0)
+        .or_else(|| get_object_attr_u32(h_key, vendor).filter(|v| *v != 0))
+}
 
 fn C_GenerateKeyPair_impl(
     _h_session: u32,
@@ -1797,11 +1953,17 @@ fn C_GenerateKeyPair_impl(
                     // Table 6 — unrecognized CKA_PARAMETER_SET value in the template.
                     _ => return CKR_PARAMETER_SET_NOT_SUPPORTED,
                 }
-                // Store the seed on the private object — engine-side, in the
-                // sensitive-blocked readback set (state::attr_is_sensitive_material).
-                if let Some(s) = seed {
-                    prv_attrs.insert(CKA_SEED, s);
-                }
+                // E7 (2026-08-13) — §6.69.4 lists the attributes CKM_SLH_DSA_
+                // KEY_PAIR_GEN contributes to the new private key, and
+                // CKA_SEED is NOT among them; the SLH-DSA private-key table
+                // defines no such attribute at all. (§6.67.4 and §6.68.4 DO
+                // list it for ML-DSA and ML-KEM, which is why those two arms
+                // still persist it above.) A caller-supplied seed is still
+                // honoured for deterministic generation — it is CONSUMED,
+                // producing the same key FIPS 205 Algorithm 18 would, and then
+                // dropped rather than stored under an attribute the spec does
+                // not define for this key type.
+                let _ = &seed;
                 // CKA_PUBLIC_KEY_INFO (SPKI) — PKCS#11 v3.2 §4.14
                 if let Some(pk_bytes) = pub_attrs.get(&CKA_VALUE).cloned() {
                     let spki = build_slhdsa_spki(ps, &pk_bytes);
@@ -1929,6 +2091,41 @@ fn C_GenerateKeyPair_impl(
                 // the problem (pqctoday-hub e2e/cms-workshop-crypto.spec.ts:392).
                 prv_attrs.insert(CKA_MODULUS, n_bytes.clone());
                 prv_attrs.insert(CKA_PUBLIC_EXPONENT, e_bytes.clone());
+                // E5 (2026-08-13) — §6.1.3: "The only attributes from Table 38
+                // for which a Cryptoki implementation is required to be able
+                // to return values are CKA_MODULUS, CKA_PUBLIC_EXPONENT and
+                // CKA_PRIVATE_EXPONENT." The private exponent was NEVER
+                // written, so a required-to-be-returnable attribute simply did
+                // not exist. The RSA tables define no CKA_VALUE at all, and
+                // §6.7 forbids preparing a key for wrapping without the CRT
+                // set — which is why E6's PKCS#8 wrapping depends on this.
+                // The full CRT set is written, not just the minimum.
+                {
+                    use rsa::traits::PrivateKeyParts;
+                    use rsa::traits::PublicKeyParts as _;
+                    let _ = private_key.size();
+                    let be = |v: &rsa::BigUint| v.to_bytes_be();
+                    prv_attrs.insert(CKA_PRIVATE_EXPONENT, be(private_key.d()));
+                    let primes = private_key.primes();
+                    if primes.len() == 2 {
+                        prv_attrs.insert(CKA_PRIME_1, be(&primes[0]));
+                        prv_attrs.insert(CKA_PRIME_2, be(&primes[1]));
+                    }
+                    if let Some(dp) = private_key.dp() {
+                        prv_attrs.insert(CKA_EXPONENT_1, be(dp));
+                    }
+                    if let Some(dq) = private_key.dq() {
+                        prv_attrs.insert(CKA_EXPONENT_2, be(dq));
+                    }
+                    if let Some(qinv) = private_key.qinv() {
+                        // qinv is a signed BigInt in the `rsa` crate; it is
+                        // mathematically positive for a valid key.
+                        prv_attrs.insert(
+                            CKA_COEFFICIENT,
+                            qinv.to_biguint().map(|v| v.to_bytes_be()).unwrap_or_default(),
+                        );
+                    }
+                }
                 store_ulong(&mut pub_attrs, CKA_MODULUS_BITS, bits as u32);
                 // SubjectPublicKeyInfo DER (CKA_PUBLIC_KEY_INFO)
                 {
@@ -1971,20 +2168,43 @@ fn C_GenerateKeyPair_impl(
             }
 
             CKM_EC_KEY_PAIR_GEN => {
+                // W1 (2026-08-13) — decode CKA_EC_PARAMS properly and NEVER
+                // default a curve. The attribute is mandatory at generation
+                // (§6.3.9), so absence is CKR_TEMPLATE_INCOMPLETE; a
+                // recognised-but-unimplemented curve is
+                // CKR_CURVE_NOT_SUPPORTED; an undecodable representation is
+                // CKR_DOMAIN_PARAMS_INVALID. Accepts the private-key
+                // template as a fallback source, matching the Montgomery arm.
                 let ec_params = get_attr_bytes(
                     p_public_key_template,
                     ul_public_key_attribute_count,
                     CKA_EC_PARAMS,
-                );
-                let is_p521 = ec_params
-                    .as_ref()
-                    .is_some_and(|b| b.len() >= 7 && b[b.len() - 1] == 0x23);
-                let is_p384 = ec_params
-                    .as_ref()
-                    .is_some_and(|b| b.len() >= 7 && b[b.len() - 1] == 0x22);
-                let is_secp256k1 = ec_params
-                    .as_ref()
-                    .is_some_and(|b| b.len() >= 7 && b[b.len() - 1] == 0x0a);
+                )
+                .or_else(|| {
+                    get_attr_bytes(
+                        p_private_key_template,
+                        ul_private_key_attribute_count,
+                        CKA_EC_PARAMS,
+                    )
+                });
+                let ec_params = match ec_params {
+                    Some(p) => p,
+                    None => return CKR_TEMPLATE_INCOMPLETE,
+                };
+                let curve = match crate::crypto::handlers::decode_ec_params(&ec_params) {
+                    Ok(c) => c,
+                    Err(rv) => return rv,
+                };
+                let (is_p521, is_p384, is_secp256k1) = match curve {
+                    CURVE_P521 => (true, false, false),
+                    CURVE_P384 => (false, true, false),
+                    CURVE_K256 => (false, false, true),
+                    CURVE_P256 => (false, false, false),
+                    // Edwards / Montgomery curves have their own mechanisms
+                    // (§6.3.10); asking for one here names a curve this
+                    // mechanism cannot generate.
+                    _ => return CKR_CURVE_NOT_SUPPORTED,
+                };
 
                 let mut pub_attrs = HashMap::new();
                 let mut prv_attrs = HashMap::new();
@@ -2015,6 +2235,30 @@ fn C_GenerateKeyPair_impl(
                 store_bool(&mut prv_attrs, CKA_LOCAL, true);
                 store_ulong(&mut prv_attrs, CKA_KEY_GEN_MECHANISM, CKM_EC_KEY_PAIR_GEN);
 
+                // E2 (2026-08-13) — §6.3.9: "the mechanism contributes the
+                // CKA_CLASS, CKA_KEY_TYPE, CKA_EC_PARAMS and CKA_VALUE
+                // attributes to the new private key", and the attribute is
+                // mandatory on the public key. This engine wrote it to
+                // NEITHER half — the curve lived only in an engine-internal
+                // attribute that is filtered out of client templates, and the
+                // public key kept it purely by accident of the caller's
+                // template being echoed back. That is the direct cause of an
+                // already-observed interop break: the C++ engine's KEM path
+                // requires the attribute and therefore rejected every
+                // Rust-generated EC key. Written in the OID form (both forms
+                // are legal; decode_ec_params accepts either on input).
+                let curve_oid: Vec<u8> = match curve {
+                    CURVE_P521 => vec![0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x23],
+                    CURVE_P384 => vec![0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x22],
+                    CURVE_K256 => vec![0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x0a],
+                    _ => vec![
+                        0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07,
+                    ],
+                };
+                // Written AFTER absorb_template_attrs below — the attribute
+                // must describe the key the engine ACTUALLY generated, so a
+                // caller who supplied the curveName form gets the canonical
+                // OID back rather than their own bytes echoed.
                 if is_p521 {
                     store_param_set(&mut pub_attrs, CURVE_P521);
                     store_param_set(&mut prv_attrs, CURVE_P521);
@@ -2099,6 +2343,9 @@ fn C_GenerateKeyPair_impl(
                     p_private_key_template,
                     ul_private_key_attribute_count,
                 );
+                // E2 — engine truth, after absorb (see the curve_oid comment).
+                pub_attrs.insert(CKA_EC_PARAMS, curve_oid.clone());
+                prv_attrs.insert(CKA_EC_PARAMS, curve_oid);
                 finalize_private_key_attrs(&mut prv_attrs);
                 compute_kcv(&mut pub_attrs);
                 compute_kcv(&mut prv_attrs);
@@ -2108,6 +2355,41 @@ fn C_GenerateKeyPair_impl(
             }
 
             CKM_EC_EDWARDS_KEY_PAIR_GEN => {
+                // W2 (2026-08-13) — §6.3.10: these curves "can only be
+                // specified in the CKA_EC_PARAMS attribute of the template for
+                // the public key using the curveName or the oID methods.
+                // Attempts to generate keys over these curves using any other
+                // EC key pair generation mechanism will fail with
+                // CKR_CURVE_NOT_SUPPORTED." This arm never read the attribute
+                // at all and hardcoded Ed25519, so an Ed448 request returned
+                // an Ed25519 key with success. §6.3.14 permits supporting only
+                // one of the two — this engine implements Ed25519 and
+                // advertises min = max = 255 accordingly.
+                //
+                // The Montgomery arm below already switched on the attribute,
+                // which is why Edwards was the outlier rather than a position.
+                let ed_params = get_attr_bytes(
+                    p_public_key_template,
+                    ul_public_key_attribute_count,
+                    CKA_EC_PARAMS,
+                )
+                .or_else(|| {
+                    get_attr_bytes(
+                        p_private_key_template,
+                        ul_private_key_attribute_count,
+                        CKA_EC_PARAMS,
+                    )
+                });
+                let ed_params = match ed_params {
+                    Some(p) => p,
+                    None => return CKR_TEMPLATE_INCOMPLETE,
+                };
+                match crate::crypto::handlers::decode_ec_params(&ed_params) {
+                    Ok(CURVE_ED25519) => {}
+                    // Ed448 is recognised and deliberately not implemented.
+                    Ok(_) => return CKR_CURVE_NOT_SUPPORTED,
+                    Err(rv) => return rv,
+                }
                 let sk = with_rng!(rng, { ed25519_dalek::SigningKey::generate(&mut rng) });
                 let vk = sk.verifying_key();
 
@@ -2149,7 +2431,18 @@ fn C_GenerateKeyPair_impl(
                 );
                 let vk_bytes = vk.to_bytes().to_vec();
                 prv_attrs.insert(CKA_VALUE, sk.to_bytes().to_vec());
-                pub_attrs.insert(CKA_VALUE, vk_bytes.clone());
+                // E4 (2026-08-13) — the Edwards public-key table says "Public
+                // key bytes in little endian order as defined in [RFC 8032]",
+                // deliberately different wording from the Weierstrass table's
+                // "DER-encoding of ANSI X9.62 ECPoint value Q". That
+                // difference IS the specification. This arm previously put
+                // the key in CKA_VALUE with no EC point and no parameters at
+                // all — the worst of the three engines' variants. Now:
+                // CKA_EC_POINT holds the BARE 32 bytes, CKA_EC_PARAMS is
+                // present, and there is no CKA_VALUE on a public key.
+                pub_attrs.insert(CKA_EC_POINT, vk_bytes.clone());
+                pub_attrs.insert(CKA_EC_PARAMS, vec![0x06, 0x03, 0x2b, 0x65, 0x70]);
+                prv_attrs.insert(CKA_EC_PARAMS, vec![0x06, 0x03, 0x2b, 0x65, 0x70]);
                 // SubjectPublicKeyInfo DER for Ed25519 (32-byte key)
                 // 30 2a 30 05 06 03 2b6570 03 22 00 <32 bytes>
                 let spki = build_ed25519_spki(&vk_bytes);
@@ -2188,11 +2481,21 @@ fn C_GenerateKeyPair_impl(
                         CKA_EC_PARAMS,
                     )
                 });
-                let is_x448 = oid_bytes
-                    .as_ref()
-                    .and_then(|b| b.last().copied())
-                    .map(|last| last == 0x6f)
-                    .unwrap_or(false);
+                // W1 / E4 — decode the CHOICE instead of sniffing the last
+                // byte, and accept the curveName form as well as the OID
+                // (§6.3.10's interop note: C++ emits curve names, Rust OIDs,
+                // and "both engines accept both forms on input" is the fix).
+                let oid_bytes = match oid_bytes {
+                    Some(p) => p,
+                    None => return CKR_TEMPLATE_INCOMPLETE,
+                };
+                let is_x448 = match crate::crypto::handlers::decode_ec_params(&oid_bytes) {
+                    Ok(CURVE_X448) => true,
+                    Ok(CURVE_X25519) => false,
+                    Ok(_) => return CKR_CURVE_NOT_SUPPORTED,
+                    Err(rv) => return rv,
+                };
+
                 let mut pub_attrs = HashMap::new();
                 let mut prv_attrs = HashMap::new();
                 store_ulong(&mut pub_attrs, CKA_CLASS, CKO_PUBLIC_KEY);
@@ -2239,21 +2542,19 @@ fn C_GenerateKeyPair_impl(
                     let sk_bytes = sk.as_bytes().to_vec();
                     store_algo_family(&mut pub_attrs, ALGO_ECDH_X448);
                     store_algo_family(&mut prv_attrs, ALGO_ECDH_X448);
-                    pub_attrs.insert(CKA_VALUE, pk_bytes.clone());
                     prv_attrs.insert(CKA_VALUE, sk_bytes);
                     let spki = build_x448_spki(&pk_bytes);
                     pub_attrs.insert(CKA_PUBLIC_KEY_INFO, spki);
-                    // PKCS#11 v3.2 §6.7 — CKA_EC_PARAMS required on CKK_EC_MONTGOMERY keys;
-                    // store DER OID for id-X448 (RFC 8410, OID 1.3.101.111 = 06 03 2b 65 6f)
+                    // CKA_EC_PARAMS — DER OID for id-X448 (RFC 8410, 1.3.101.111).
                     let oid_x448: Vec<u8> = vec![0x06, 0x03, 0x2b, 0x65, 0x6f];
                     pub_attrs.insert(CKA_EC_PARAMS, oid_x448.clone());
                     prv_attrs.insert(CKA_EC_PARAMS, oid_x448);
-                    // PKCS#11 v3.2 §6.7 — CKA_EC_POINT: DER OCTET STRING wrapping raw 56-byte public key
-                    let mut ec_point_x448 = Vec::with_capacity(2 + pk_bytes.len());
-                    ec_point_x448.push(0x04u8); // DER OCTET STRING tag
-                    ec_point_x448.push(pk_bytes.len() as u8); // 0x38 = 56
-                    ec_point_x448.extend_from_slice(&pk_bytes);
-                    pub_attrs.insert(CKA_EC_POINT, ec_point_x448);
+                    // E4 (2026-08-13) — the Montgomery public-key table says
+                    // "Public key bytes in little endian order as defined in
+                    // [RFC 7748]". No DER wrapper, and no CKA_VALUE on a
+                    // public key: this arm previously DER-wrapped the point
+                    // AND duplicated it into CKA_VALUE.
+                    pub_attrs.insert(CKA_EC_POINT, pk_bytes.clone());
                 } else {
                     // X25519 — 32-byte keys (RFC 8410, OID 1.3.101.110)
                     let sk = with_rng!(rng, {
@@ -2264,21 +2565,16 @@ fn C_GenerateKeyPair_impl(
                     let sk_bytes = sk.to_bytes().to_vec();
                     store_algo_family(&mut pub_attrs, ALGO_ECDH_X25519);
                     store_algo_family(&mut prv_attrs, ALGO_ECDH_X25519);
-                    pub_attrs.insert(CKA_VALUE, pk_bytes.clone());
                     prv_attrs.insert(CKA_VALUE, sk_bytes);
                     let spki = build_x25519_spki(&pk_bytes);
                     pub_attrs.insert(CKA_PUBLIC_KEY_INFO, spki);
-                    // PKCS#11 v3.2 §6.7 — CKA_EC_PARAMS required on CKK_EC_MONTGOMERY keys;
-                    // store DER OID for id-X25519 (RFC 8410, OID 1.3.101.110 = 06 03 2b 65 6e)
+                    // CKA_EC_PARAMS — DER OID for id-X25519 (RFC 8410, 1.3.101.110).
                     let oid_x25519: Vec<u8> = vec![0x06, 0x03, 0x2b, 0x65, 0x6e];
                     pub_attrs.insert(CKA_EC_PARAMS, oid_x25519.clone());
                     prv_attrs.insert(CKA_EC_PARAMS, oid_x25519);
-                    // PKCS#11 v3.2 §6.7 — CKA_EC_POINT: DER OCTET STRING wrapping raw 32-byte public key
-                    let mut ec_point_x25519 = Vec::with_capacity(2 + pk_bytes.len());
-                    ec_point_x25519.push(0x04u8); // DER OCTET STRING tag
-                    ec_point_x25519.push(pk_bytes.len() as u8); // 0x20 = 32
-                    ec_point_x25519.extend_from_slice(&pk_bytes);
-                    pub_attrs.insert(CKA_EC_POINT, ec_point_x25519);
+                    // E4 — bare little-endian bytes, no DER, no CKA_VALUE on
+                    // the public half (see the X448 arm above).
+                    pub_attrs.insert(CKA_EC_POINT, pk_bytes.clone());
                 }
 
                 absorb_template_attrs(
@@ -2421,10 +2717,17 @@ fn C_GenerateKeyPair_impl(
                     xmss_param = CKP_XMSS_SHA2_10_256;
                 }
 
+                // C2 (2026-08-13) — an unrecognised CKA_PARAMETER_SET is
+                // CKR_PARAMETER_SET_NOT_SUPPORTED ("This parameter set is not
+                // supported by this token", §5.1.6 Table 6), the code this
+                // engine already uses correctly for ML-DSA / ML-KEM /
+                // SLH-DSA. CKR_FUNCTION_FAILED said nothing about WHY.
+                // xmss_keygen's only failure mode besides an entropy failure
+                // is an unknown parameter set.
                 let (pub_bytes, priv_bytes) =
                     match crate::crypto::xmss_bridge::xmss_keygen(xmss_param) {
                         Ok(pair) => pair,
-                        Err(_) => return CKR_FUNCTION_FAILED,
+                        Err(_) => return CKR_PARAMETER_SET_NOT_SUPPORTED,
                     };
 
                 let mut pub_attrs = HashMap::new();
@@ -2512,10 +2815,11 @@ fn C_GenerateKeyPair_impl(
                 if mt_param == 0 {
                     mt_param = CKP_XMSSMT_SHA2_20_2_256;
                 }
+                // C2 — see the XMSS arm above.
                 let (pub_bytes, priv_bytes) =
                     match crate::crypto::xmss_bridge::xmssmt_keygen(mt_param) {
                         Ok(pair) => pair,
-                        Err(_) => return CKR_FUNCTION_FAILED,
+                        Err(_) => return CKR_PARAMETER_SET_NOT_SUPPORTED,
                     };
                 let mut pub_attrs = HashMap::new();
                 let mut prv_attrs = HashMap::new();
@@ -3162,19 +3466,54 @@ fn C_EncapsulateKey_impl(
             if let Err(rv) = check_mechanism_allowed(h_key, mech_type) {
                 return rv;
             }
-            if get_object_attr_u32(h_key, CKA_KEY_TYPE) != Some(CKK_EC) {
+            // V-09 (divergence report, 2026-08-13) — Table 78 lists
+            // CKK_EC_MONTGOMERY for this mechanism under C_EncapsulateKey /
+            // C_DecapsulateKey. The engine advertised the encapsulate flags on
+            // CKM_ECDH1_DERIVE but accepted only CKK_EC, so the advertised
+            // capability was partly untrue; accepting is preferred over
+            // dropping the flags.
+            let key_type = get_object_attr_u32(h_key, CKA_KEY_TYPE);
+            if key_type != Some(CKK_EC) && key_type != Some(CKK_EC_MONTGOMERY) {
                 return CKR_KEY_TYPE_INCONSISTENT;
             }
-            let curve = get_object_param_set(h_key);
-            // Ciphertext = DER wrapper (2 or 3 bytes) + uncompressed point.
+            let curve = if key_type == Some(CKK_EC_MONTGOMERY) {
+                match get_object_attr_bytes(h_key, CKA_EC_PARAMS)
+                    .map(|p| crate::crypto::handlers::decode_ec_params(&p))
+                {
+                    Some(Ok(c)) => c,
+                    Some(Err(rv)) => return rv,
+                    None => return CKR_TEMPLATE_INCOMPLETE,
+                }
+            } else {
+                get_object_param_set(h_key)
+            };
+            // E1 (2026-08-13) — §6.3.17: "an ephemeral key pair is generated.
+            // The value of the generated public key is returned as the
+            // ciphertext", and that value "has the same format as the public
+            // key used in C_DeriveKey" — which is specified as "a token MUST
+            // be able to accept this value encoded as a raw octet string … A
+            // token MAY, in addition, support accepting this value as a
+            // DER-encoded ECPoint." For Montgomery keys "the public key is
+            // provided as bytes in little endian order" and there is no DER
+            // option at all.
+            //
+            // Both engines emitted the DER-wrapped form — P-256 at 67 bytes
+            // where 65 are mandated. Mutual agreement is not a defence; the
+            // spec footnotes precisely this hazard ("The encoding in V2.20
+            // was not specified and resulted in different implementations
+            // choosing different encodings"). The tolerant READER on
+            // decapsulation stays, which is correct practice and keeps
+            // anything already deployed working.
             let ct_len: u32 = match curve {
-                CURVE_P256 => 2 + 65,
-                CURVE_P384 => 2 + 97,
-                CURVE_P521 => 3 + 133,
-                // secp256k1 / Montgomery curves are not offered as KEM here
-                // (the C++ mirror is matched for the NIST prime curves;
-                // X25519/X448-as-KEM remains a recorded divergence).
-                _ => return CKR_KEY_TYPE_INCONSISTENT,
+                CURVE_P256 => 65,
+                CURVE_P384 => 97,
+                CURVE_P521 => 133,
+                CURVE_X25519 => 32,
+                CURVE_X448 => 56,
+                // secp256k1-as-KEM is not offered (the C++ mirror covers the
+                // NIST prime curves; this arm adds the Montgomery curves
+                // Table 78 lists).
+                _ => return CKR_CURVE_NOT_SUPPORTED,
             };
             if p_ciphertext.is_null() {
                 *pul_ciphertext_len = ct_len;
@@ -3203,8 +3542,9 @@ fn C_EncapsulateKey_impl(
                     let eph_pub = eph.public_key().to_encoded_point(false);
                     let ss =
                         $c::ecdh::diffie_hellman(eph.to_nonzero_scalar(), peer.as_affine());
+                    // E1 — RAW ephemeral public key, not DER.
                     (
-                        der_wrap_ec_point(eph_pub.as_bytes()),
+                        eph_pub.as_bytes().to_vec(),
                         ss.raw_secret_bytes().to_vec(),
                     )
                 }};
@@ -3214,7 +3554,37 @@ fn C_EncapsulateKey_impl(
                     CURVE_P256 => ecdh_encap!(p256, &mut rng),
                     CURVE_P384 => ecdh_encap!(p384, &mut rng),
                     CURVE_P521 => ecdh_encap!(p521, &mut rng),
-                    _ => return CKR_KEY_TYPE_INCONSISTENT,
+                    // V-09 — Montgomery: the peer public and the emitted
+                    // ephemeral are both bare little-endian bytes (§6.3.10),
+                    // so there is no encoding to strip or add.
+                    CURVE_X25519 => {
+                        let peer: [u8; 32] = match peer_point.try_into() {
+                            Ok(p) => p,
+                            Err(_) => return CKR_ARGUMENTS_BAD,
+                        };
+                        let eph = x25519_dalek::EphemeralSecret::random_from_rng(&mut rng);
+                        let eph_pub = x25519_dalek::PublicKey::from(&eph);
+                        let ss = eph.diffie_hellman(&x25519_dalek::PublicKey::from(peer));
+                        (eph_pub.as_bytes().to_vec(), ss.as_bytes().to_vec())
+                    }
+                    CURVE_X448 => {
+                        let peer: [u8; 56] = match peer_point.try_into() {
+                            Ok(p) => p,
+                            Err(_) => return CKR_ARGUMENTS_BAD,
+                        };
+                        let mut eph_sk = [0u8; 56];
+                        if getrandom::getrandom(&mut eph_sk).is_err() {
+                            return CKR_FUNCTION_FAILED;
+                        }
+                        let sk = x448::StaticSecret::from(eph_sk);
+                        let eph_pub = x448::PublicKey::from(&sk);
+                        let ss = match x448::x448(eph_sk, peer) {
+                            Some(v) => v.to_vec(),
+                            None => return CKR_ARGUMENTS_BAD,
+                        };
+                        (eph_pub.as_bytes().to_vec(), ss)
+                    }
+                    _ => return CKR_CURVE_NOT_SUPPORTED,
                 }
             });
             debug_assert_eq!(ct.len(), ct_len as usize, "ct_len must match the emitted point");
@@ -3293,7 +3663,7 @@ fn C_EncapsulateKey_impl(
             return CKR_BUFFER_TOO_SMALL;
         }
 
-        let pub_key_bytes = match get_object_value(h_key) {
+        let pub_key_bytes = match crate::state::get_key_material(h_key) {
             Some(v) => v,
             None => return CKR_ARGUMENTS_BAD,
         };
@@ -3488,10 +3858,22 @@ fn C_DecapsulateKey_impl(
             if let Err(rv) = check_mechanism_allowed(h_private_key, mech_type) {
                 return rv;
             }
-            if get_object_attr_u32(h_private_key, CKA_KEY_TYPE) != Some(CKK_EC) {
+            // V-09 — Table 78 lists CKK_EC_MONTGOMERY here too.
+            let key_type = get_object_attr_u32(h_private_key, CKA_KEY_TYPE);
+            if key_type != Some(CKK_EC) && key_type != Some(CKK_EC_MONTGOMERY) {
                 return CKR_KEY_TYPE_INCONSISTENT;
             }
-            let curve = get_object_param_set(h_private_key);
+            let curve = if key_type == Some(CKK_EC_MONTGOMERY) {
+                match get_object_attr_bytes(h_private_key, CKA_EC_PARAMS)
+                    .map(|p| crate::crypto::handlers::decode_ec_params(&p))
+                {
+                    Some(Ok(c)) => c,
+                    Some(Err(rv)) => return rv,
+                    None => return CKR_TEMPLATE_INCOMPLETE,
+                }
+            } else {
+                get_object_param_set(h_private_key)
+            };
             let scalar = match get_object_value(h_private_key) {
                 Some(v) => v,
                 None => return CKR_ARGUMENTS_BAD,
@@ -3520,7 +3902,40 @@ fn C_DecapsulateKey_impl(
                 CURVE_P256 => ecdh_decap!(p256),
                 CURVE_P384 => ecdh_decap!(p384),
                 CURVE_P521 => ecdh_decap!(p521),
-                _ => return CKR_KEY_TYPE_INCONSISTENT,
+                // V-09 — Montgomery: bare little-endian bytes both ways.
+                // E1 keeps the TOLERANT READER on this side, which for
+                // Montgomery means accepting the historical DER-wrapped
+                // form as well as the raw 32/56 bytes the spec mandates
+                // (ec_point_unwrap above already normalises it).
+                CURVE_X25519 => {
+                    let sk: [u8; 32] = match scalar.as_slice().try_into() {
+                        Ok(v) => v,
+                        Err(_) => return CKR_KEY_TYPE_INCONSISTENT,
+                    };
+                    let peer: [u8; 32] = match peer_point.try_into() {
+                        Ok(v) => v,
+                        Err(_) => return CKR_ENCRYPTED_DATA_INVALID,
+                    };
+                    x25519_dalek::StaticSecret::from(sk)
+                        .diffie_hellman(&x25519_dalek::PublicKey::from(peer))
+                        .as_bytes()
+                        .to_vec()
+                }
+                CURVE_X448 => {
+                    let sk: [u8; 56] = match scalar.as_slice().try_into() {
+                        Ok(v) => v,
+                        Err(_) => return CKR_KEY_TYPE_INCONSISTENT,
+                    };
+                    let peer: [u8; 56] = match peer_point.try_into() {
+                        Ok(v) => v,
+                        Err(_) => return CKR_ENCRYPTED_DATA_INVALID,
+                    };
+                    match x448::x448(sk, peer) {
+                        Some(v) => v.to_vec(),
+                        None => return CKR_ENCRYPTED_DATA_INVALID,
+                    }
+                }
+                _ => return CKR_CURVE_NOT_SUPPORTED,
             };
             // §6.3.17 — template CKA_VALUE_LEN truncates from the leading end
             // (mirrors the encapsulate side so both peers get the same key).
@@ -4133,6 +4548,10 @@ fn rsa_pss_mech_params(mech: u32) -> Option<(u32, u32)> {
 fn C_SignInit_impl(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
     require_init!();
     require_session!(h_session);
+    // C2 — the NULL-mechanism CANCEL form (see cancel_active_operation).
+    if let Some(rv) = cancel_active_operation(h_session, p_mechanism, OpFamily::Sign) {
+        return rv;
+    }
     // PKCS#11 v3.2 §5.12 — a sign operation is already active on this session.
     if SIGN_STATE.with(|s| s.borrow().contains_key(&h_session)) {
         return CKR_OPERATION_ACTIVE;
@@ -4340,9 +4759,12 @@ fn C_Sign_impl(
     pul_signature_len: *mut u32,
 ) -> u32 {
     require_init!();
+    // §5.2 error priority (C2, 2026-08-13) — the session-handle class
+    // takes MANDATORY precedence over argument and capability codes, so
+    // this must precede every other check in the function.
+    require_session!(h_session);
     // §5.2 error priority — session-handle validity outranks
     // CKR_OPERATION_NOT_INITIALIZED and argument checks.
-    require_session!(h_session);
     // §5.13.2 — "C_Sign ... MUST be called after C_SignInit without
     // intervening C_SignUpdate calls". A sign op already in its multi-part
     // phase is a sequencing error (mirror C_Digest-after-Update, round-1
@@ -4424,7 +4846,10 @@ fn C_Sign_impl(
 
             let sign_result = if mech == CKM_XMSS {
                 let xmss_param =
-                    get_object_attr_u32(hkey, CKA_XMSS_PARAM_SET).unwrap_or(CKP_XMSS_SHA2_10_256);
+                    match xmss_param_set_of(hkey, false) {
+                        Some(p) => p,
+                        None => return CKR_TEMPLATE_INCOMPLETE,
+                    };
                 match crate::crypto::xmss_bridge::xmss_sign(xmss_param, &priv_bytes, msg) {
                     Ok((sig, updated_sk)) => match update_fn(&updated_sk) {
                         Ok(_) => Ok(sig),
@@ -4433,8 +4858,10 @@ fn C_Sign_impl(
                     Err(e) => Err(e),
                 }
             } else {
-                let mt_param = get_object_attr_u32(hkey, CKA_XMSSMT_PARAM_SET)
-                    .unwrap_or(CKP_XMSSMT_SHA2_20_2_256);
+                let mt_param = match xmss_param_set_of(hkey, true) {
+                    Some(p) => p,
+                    None => return CKR_TEMPLATE_INCOMPLETE,
+                };
                 match crate::crypto::xmss_bridge::xmssmt_sign(mt_param, &priv_bytes, msg) {
                     Ok((sig, updated_sk)) => match update_fn(&updated_sk) {
                         Ok(_) => Ok(sig),
@@ -4465,7 +4892,7 @@ fn C_Sign_impl(
                         if mech == CKM_XMSSMT {
                             // XMSS^MT: derive remaining from the MT signing-key
                             // state (the index width differs from single-tree).
-                            let mt_param = get_object_attr_u32(hkey, CKA_XMSSMT_PARAM_SET)
+                            let mt_param = xmss_param_set_of(hkey, true)
                                 .unwrap_or(CKP_XMSSMT_SHA2_20_2_256);
                             let remaining = crate::crypto::xmss_bridge::xmssmt_keys_remaining(
                                 mt_param,
@@ -4482,7 +4909,7 @@ fn C_Sign_impl(
                             // The xmss crate stores the leaf index as big-endian bytes at offset 4
                             // inside the serialised signing key. Reading it directly is more accurate
                             // than a simple -1 decrement (the crate may skip leaves internally).
-                            let xmss_param = get_object_attr_u32(hkey, CKA_XMSS_PARAM_SET)
+                            let xmss_param = xmss_param_set_of(hkey, false)
                                 .unwrap_or(CKP_XMSS_SHA2_10_256);
                             let remaining = crate::crypto::xmss_bridge::xmss_keys_remaining(
                                 xmss_param,
@@ -4596,6 +5023,10 @@ fn C_Sign_impl(
 pub fn C_VerifyInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
     require_init!();
     require_session!(h_session);
+    // C2 — the NULL-mechanism CANCEL form (see cancel_active_operation).
+    if let Some(rv) = cancel_active_operation(h_session, p_mechanism, OpFamily::Verify) {
+        return rv;
+    }
     // PKCS#11 v3.2 §5.12 — a verify operation is already active on this session.
     if VERIFY_STATE.with(|s| s.borrow().contains_key(&h_session)) {
         return CKR_OPERATION_ACTIVE;
@@ -4714,7 +5145,9 @@ pub fn C_Verify(
     ul_signature_len: u32,
 ) -> u32 {
     require_init!();
-    // §5.2 error priority — session handle before operation state.
+    // §5.2 error priority (C2, 2026-08-13) — the session-handle class
+    // takes MANDATORY precedence over argument and capability codes, so
+    // this must precede every other check in the function.
     require_session!(h_session);
     // §5.15.2 — "C_Verify ... MUST be called after C_VerifyInit without
     // intervening C_VerifyUpdate calls" (mirror the C_Sign guard above); the
@@ -4776,7 +5209,9 @@ pub fn C_Verify(
     unsafe {
         // ── LMS / HSS stateful verify — separate path (public key in CKA_VALUE) ───
         if mech == CKM_HSS || mech == CKM_XMSS || mech == CKM_XMSSMT {
-            let pub_bytes = match get_object_value(hkey) {
+            // E4 — Edwards / Montgomery public keys keep their material in
+            // CKA_EC_POINT, not CKA_VALUE.
+            let pub_bytes = match crate::state::get_key_material(hkey) {
                 Some(v) => v,
                 None => return CKR_KEY_TYPE_INCONSISTENT,
             };
@@ -4784,11 +5219,16 @@ pub fn C_Verify(
             let sig_bytes = std::slice::from_raw_parts(p_signature, ul_signature_len as usize);
             let ok = if mech == CKM_XMSS {
                 let xmss_param =
-                    get_object_attr_u32(hkey, CKA_XMSS_PARAM_SET).unwrap_or(CKP_XMSS_SHA2_10_256);
+                    match xmss_param_set_of(hkey, false) {
+                        Some(p) => p,
+                        None => return CKR_TEMPLATE_INCOMPLETE,
+                    };
                 crate::crypto::xmss_bridge::xmss_verify(xmss_param, &pub_bytes, msg, sig_bytes)
             } else if mech == CKM_XMSSMT {
-                let mt_param = get_object_attr_u32(hkey, CKA_XMSSMT_PARAM_SET)
-                    .unwrap_or(CKP_XMSSMT_SHA2_20_2_256);
+                let mt_param = match xmss_param_set_of(hkey, true) {
+                    Some(p) => p,
+                    None => return CKR_TEMPLATE_INCOMPLETE,
+                };
                 crate::crypto::xmss_bridge::xmssmt_verify(mt_param, &pub_bytes, msg, sig_bytes)
             } else {
                 // The key material is self-describing (lms_type embedded in
@@ -4805,7 +5245,9 @@ pub fn C_Verify(
 
         // CKA_VALUE: raw key bytes for symmetric/asymmetric keys (RSA, HMAC, ML-DSA,
         //            SLH-DSA, EdDSA).  May be absent for EC public keys.
-        let pk_bytes = get_object_value(hkey).unwrap_or_default();
+        // E4 — see get_key_material: Edwards / Montgomery public keys have
+        // no CKA_VALUE.
+        let pk_bytes = crate::state::get_key_material(hkey).unwrap_or_default();
         // CKA_EC_POINT: PKCS#11 v3.2 standard attribute for EC public key material.
         // get_ec_point_sec1 strips the DER OCTET STRING header when present so the
         // result is always raw SEC1 (04 || x || y) ready for from_sec1_bytes().
@@ -5197,6 +5639,10 @@ pub fn C_VerifySignatureInit(
 ) -> u32 {
     require_init!();
     require_session!(h_session);
+    // C2 — the NULL-mechanism CANCEL form (see cancel_active_operation).
+    if let Some(rv) = cancel_active_operation(h_session, p_mechanism, OpFamily::VerifySignature) {
+        return rv;
+    }
     unsafe {
         if p_mechanism.is_null() || p_signature.is_null() {
             return CKR_ARGUMENTS_BAD;
@@ -5467,6 +5913,10 @@ unsafe fn parse_oaep_params(p_param: *const u8, ul_param_len: u32) -> Result<(u3
 pub fn C_EncryptInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
     require_init!();
     require_session!(h_session);
+    // C2 — the NULL-mechanism CANCEL form (see cancel_active_operation).
+    if let Some(rv) = cancel_active_operation(h_session, p_mechanism, OpFamily::Encrypt) {
+        return rv;
+    }
     unsafe {
         if p_mechanism.is_null() {
             return CKR_ARGUMENTS_BAD;
@@ -5628,10 +6078,37 @@ pub fn C_EncryptInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
     CKR_OK
 }
 
-unsafe fn parse_chacha20_params(p_param: *const u8, ul_param_len: u32) -> Result<(Vec<u8>, u64), u32> {
+/// Parse a `CK_CHACHA20_PARAMS` (PKCS#11 v3.2 §6.20) and return
+/// `(nonce_bytes, start_block_counter)`.
+///
+/// W7 (2026-08-13). Two defects, both here:
+///
+/// * `blockCounterBits` — the field "can be either 32 or 64". The old code
+///   accepted ANY width from 1 to 64.
+/// * `pBlockCounter` — the old code REJECTED any non-zero starting counter,
+///   which defeats the field's whole reason for existing: §6.20 says the
+///   counter is exposed because "in certain settings (e.g. disk encryption)
+///   it is necessary to address these blocks in random order". Random-access
+///   ChaCha20 was therefore unusable through this engine.
+///
+/// The nonce/counter pair is validated as the two ChaCha20 variants define
+/// it: a 96-bit (IETF, RFC 8439) nonce pairs with a 32-bit counter, and a
+/// 64-bit (original DJB / "legacy") nonce with a 64-bit counter. Any other
+/// combination is `CKR_MECHANISM_PARAM_INVALID` rather than being silently
+/// coerced. The counter is little-endian, matching both variants' own
+/// serialisation of the block-count word(s).
+///
+/// # Safety
+/// `p_param` must point to `ul_param_len` readable bytes.
+unsafe fn parse_chacha20_params(
+    p_param: *const u8,
+    ul_param_len: u32,
+) -> Result<(Vec<u8>, u64), u32> {
     if p_param.is_null() || (ul_param_len as usize) < 4 * core::mem::size_of::<usize>() {
         return Err(CKR_ARGUMENTS_BAD);
     }
+    // CK_CHACHA20_PARAMS at native width: pBlockCounter@0, blockCounterBits@1,
+    // pNonce@2, ulNonceBits@3 (same word indices on wasm32 / 64-bit native).
     let prm = p_param as *const usize;
     let ctr_ptr = *prm as *const u8;
     let ctr_bits = *prm.add(1);
@@ -5640,16 +6117,31 @@ unsafe fn parse_chacha20_params(p_param: *const u8, ul_param_len: u32) -> Result
     if nonce_ptr.is_null() || !(nonce_bits == 64 || nonce_bits == 96) {
         return Err(CKR_MECHANISM_PARAM_INVALID);
     }
-    if !ctr_ptr.is_null() && ctr_bits > 0 {
-        if ctr_bits > 64 {
+    let mut counter: u64 = 0;
+    if ctr_ptr.is_null() {
+        // No counter supplied: block 0, and the width field is then moot.
+        if ctr_bits != 0 && ctr_bits != 32 && ctr_bits != 64 {
             return Err(CKR_MECHANISM_PARAM_INVALID);
         }
-        let ctr = std::slice::from_raw_parts(ctr_ptr, ctr_bits.div_ceil(8));
-        if ctr.iter().any(|&b| b != 0) {
+    } else {
+        // §6.20 — "can be either 32 or 64".
+        if ctr_bits != 32 && ctr_bits != 64 {
             return Err(CKR_MECHANISM_PARAM_INVALID);
+        }
+        // The two variants' counter widths are fixed by their nonce widths.
+        let expected_ctr_bits = if nonce_bits == 96 { 32 } else { 64 };
+        if ctr_bits != expected_ctr_bits {
+            return Err(CKR_MECHANISM_PARAM_INVALID);
+        }
+        let ctr = std::slice::from_raw_parts(ctr_ptr, ctr_bits / 8);
+        for (i, b) in ctr.iter().enumerate() {
+            counter |= (*b as u64) << (8 * i);
         }
     }
-    Ok((std::slice::from_raw_parts(nonce_ptr, nonce_bits / 8).to_vec(), 0))
+    Ok((
+        std::slice::from_raw_parts(nonce_ptr, nonce_bits / 8).to_vec(),
+        counter,
+    ))
 }
 
 #[wasm_bindgen(js_name = _C_Encrypt)]
@@ -5661,7 +6153,9 @@ pub fn C_Encrypt(
     pul_encrypted_data_len: *mut u32,
 ) -> u32 {
     require_init!();
-    // §5.2 error priority — session handle before operation state.
+    // §5.2 error priority (C2, 2026-08-13) — the session-handle class
+    // takes MANDATORY precedence over argument and capability codes, so
+    // this must precede every other check in the function.
     require_session!(h_session);
     // Remove state on entry — consumed on all paths except null-buffer size query
     let ctx = ENCRYPT_STATE.with(|s| s.borrow_mut().remove(&h_session));
@@ -5829,7 +6323,7 @@ pub fn C_Encrypt(
                 if key_bytes.len() != 32 {
                     return CKR_KEY_SIZE_RANGE;
                 }
-                match crate::native::encrypt::chacha20_encrypt_at(&key_bytes, &iv, plaintext, 0) {
+                match crate::native::encrypt::chacha20_encrypt_at(&key_bytes, &iv, plaintext, block_counter) {
                     Ok(ct) => ct,
                     Err(rv) => return rv,
                 }
@@ -5898,6 +6392,10 @@ pub fn C_Encrypt(
 pub fn C_DecryptInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
     require_init!();
     require_session!(h_session);
+    // C2 — the NULL-mechanism CANCEL form (see cancel_active_operation).
+    if let Some(rv) = cancel_active_operation(h_session, p_mechanism, OpFamily::Decrypt) {
+        return rv;
+    }
     unsafe {
         if p_mechanism.is_null() {
             return CKR_ARGUMENTS_BAD;
@@ -6068,7 +6566,9 @@ pub fn C_Decrypt(
     pul_data_len: *mut u32,
 ) -> u32 {
     require_init!();
-    // §5.2 error priority — session handle before operation state.
+    // §5.2 error priority (C2, 2026-08-13) — the session-handle class
+    // takes MANDATORY precedence over argument and capability codes, so
+    // this must precede every other check in the function.
     require_session!(h_session);
     // Remove state on entry — consumed on all paths except null-buffer size query
     let ctx = DECRYPT_STATE.with(|s| s.borrow_mut().remove(&h_session));
@@ -6219,7 +6719,7 @@ pub fn C_Decrypt(
                 if key_bytes.len() != 32 {
                     return CKR_KEY_SIZE_RANGE;
                 }
-                match crate::native::encrypt::chacha20_encrypt_at(&key_bytes, &iv, ciphertext, 0) {
+                match crate::native::encrypt::chacha20_encrypt_at(&key_bytes, &iv, ciphertext, block_counter) {
                     Ok(pt) => pt,
                     Err(rv) => return rv,
                 }
@@ -6291,6 +6791,10 @@ pub fn C_Decrypt(
 pub fn C_DigestInit(h_session: u32, p_mechanism: *mut u8) -> u32 {
     require_init!();
     require_session!(h_session);
+    // C2 — the NULL-mechanism CANCEL form (see cancel_active_operation).
+    if let Some(rv) = cancel_active_operation(h_session, p_mechanism, OpFamily::Digest) {
+        return rv;
+    }
     // PKCS#11 v3.2 §5.12 — a digest operation is already active on this session.
     if DIGEST_STATE.with(|s| s.borrow().contains_key(&h_session)) {
         return CKR_OPERATION_ACTIVE;
@@ -6321,7 +6825,9 @@ pub fn C_DigestInit(h_session: u32, p_mechanism: *mut u8) -> u32 {
 #[wasm_bindgen(js_name = _C_DigestUpdate)]
 pub fn C_DigestUpdate(h_session: u32, p_part: *mut u8, ul_part_len: u32) -> u32 {
     require_init!();
-    // §5.2 error priority — session handle before operation state.
+    // §5.2 error priority (C2, 2026-08-13) — the session-handle class
+    // takes MANDATORY precedence over argument and capability codes, so
+    // this must precede every other check in the function.
     require_session!(h_session);
     use sha2::Digest;
     let has_state = DIGEST_STATE.with(|s| s.borrow().contains_key(&h_session));
@@ -6354,7 +6860,9 @@ pub fn C_DigestUpdate(h_session: u32, p_part: *mut u8, ul_part_len: u32) -> u32 
 #[wasm_bindgen(js_name = _C_DigestFinal)]
 pub fn C_DigestFinal(h_session: u32, p_digest: *mut u8, pul_digest_len: *mut u32) -> u32 {
     require_init!();
-    // §5.2 error priority — session handle before operation state.
+    // §5.2 error priority (C2, 2026-08-13) — the session-handle class
+    // takes MANDATORY precedence over argument and capability codes, so
+    // this must precede every other check in the function.
     require_session!(h_session);
     unsafe {
         // Size-only query: return expected length WITHOUT consuming state.
@@ -6430,7 +6938,9 @@ pub fn C_Digest(
     pul_digest_len: *mut u32,
 ) -> u32 {
     require_init!();
-    // §5.2 error priority — session handle before operation state.
+    // §5.2 error priority (C2, 2026-08-13) — the session-handle class
+    // takes MANDATORY precedence over argument and capability codes, so
+    // this must precede every other check in the function.
     require_session!(h_session);
     // §5.13 convention — a digest op already in its multi-part phase
     // (C_DigestUpdate called) must be completed with C_DigestFinal; the
@@ -6483,9 +6993,24 @@ pub fn C_FindObjectsInit(h_session: u32, p_template: *mut u8, ul_count: u32) -> 
     if FIND_STATE.with(|s| s.borrow().contains_key(&h_session)) {
         return CKR_OPERATION_ACTIVE;
     }
+    // W5 (2026-08-13) — §5.7.7: "The matching criterion is an exact
+    // byte-for-byte match with all attributes in the template. To find all
+    // objects, set ulCount to 0." Two paths previously produced a find-ALL
+    // from a request that asked for a FILTER: a NULL template with a non-zero
+    // count, and a count above the engine's 65536 guard. Both erred toward
+    // returning MORE objects than asked for — the wrong direction for a
+    // search whose results gate every later by-handle operation.
+    if p_template.is_null() && ul_count > 0 {
+        return CKR_ARGUMENTS_BAD;
+    }
+    if ul_count > 65536 {
+        // Honouring it is impractical; failing is the only other option the
+        // spec leaves. Never drop the filter.
+        return CKR_ARGUMENTS_BAD;
+    }
     let mut match_attrs: Vec<(u32, Vec<u8>)> = Vec::new();
     unsafe {
-        if !p_template.is_null() && ul_count > 0 && ul_count <= 65536 {
+        if !p_template.is_null() && ul_count > 0 {
             let tmpl_ptr = p_template as *mut usize;
             for i in 0..ul_count {
                 let attr_type = *tmpl_ptr.add((i * 3) as usize) as u32;
@@ -6538,7 +7063,9 @@ pub fn C_FindObjects(
     pul_object_count: *mut u32,
 ) -> u32 {
     require_init!();
-    // §5.2 error priority — session handle before operation state.
+    // §5.2 error priority (C2, 2026-08-13) — the session-handle class
+    // takes MANDATORY precedence over argument and capability codes, so
+    // this must precede every other check in the function.
     require_session!(h_session);
     // §5.10.2 — phObject and pulObjectCount are required pointers.
     nonnull!(ph_object, pul_object_count);
@@ -7770,6 +8297,173 @@ unsafe fn aes_cbc_decrypt_unwrap(kek: &[u8], iv: &[u8], ct: &[u8], pad: bool) ->
     }
 }
 
+/// The `AlgorithmIdentifier` DER for a post-quantum key type + parameter set,
+/// lifted from the engine's own SPKI builder for that combination so the
+/// PKCS#8 (E6) and SPKI (§4.14) encodings cannot name different OIDs.
+/// `None` for a combination with no OID assignment in this engine.
+fn pqc_alg_id_from_spki(key_type: u32, ps: u32) -> Option<Vec<u8>> {
+    use crate::crypto::handlers::*;
+    let spki = match key_type {
+        CKK_ML_KEM => match ps {
+            CKP_ML_KEM_512 => build_mlkem512_spki(&[]),
+            CKP_ML_KEM_768 => build_mlkem768_spki(&[]),
+            CKP_ML_KEM_1024 => build_mlkem1024_spki(&[]),
+            _ => return None,
+        },
+        CKK_ML_DSA => match ps {
+            CKP_ML_DSA_44 => build_mldsa44_spki(&[]),
+            CKP_ML_DSA_65 => build_mldsa65_spki(&[]),
+            CKP_ML_DSA_87 => build_mldsa87_spki(&[]),
+            _ => return None,
+        },
+        CKK_SLH_DSA => build_slhdsa_spki(ps, &[]),
+        // HSS/XMSS/XMSS^MT: §6.7 lists them, but this engine has no
+        // AlgorithmIdentifier table for them yet. Refusing is honest; a
+        // wrong OID would be worse than a refusal.
+        _ => return None,
+    };
+    if spki.is_empty() {
+        return None;
+    }
+    // SPKI ::= SEQUENCE { AlgorithmIdentifier, BIT STRING }. Skip the outer
+    // header and return the AlgorithmIdentifier TLV verbatim.
+    let mut i = 1usize;
+    let first = *spki.get(i)?;
+    i += 1;
+    if first & 0x80 != 0 {
+        i += (first & 0x7f) as usize;
+    }
+    let alg_start = i;
+    let alg_len_byte = *spki.get(i + 1)?;
+    let (hdr, len) = if alg_len_byte & 0x80 == 0 {
+        (2usize, alg_len_byte as usize)
+    } else {
+        let n = (alg_len_byte & 0x7f) as usize;
+        let mut l = 0usize;
+        for k in 0..n {
+            l = (l << 8) | *spki.get(i + 2 + k)? as usize;
+        }
+        (2 + n, l)
+    };
+    spki.get(alg_start..alg_start + hdr + len).map(|b| b.to_vec())
+}
+
+/// E6 (2026-08-13) — §6.7: "For wrapping, a private key is BER-encoded
+/// according to [PKCS #8] PrivateKeyInfo ASN.1 type. [PKCS #8] requires an
+/// algorithm identifier for the type of the private key."
+///
+/// `C_WrapKey` wrapped the RAW STORED VALUE. An RSA key came out as PKCS#8 by
+/// accident (that happens to be how this engine stores it); EC, Ed25519 and
+/// every post-quantum key came out as raw bytes; an EC public key came out as
+/// the engine's internal packed blob. The format therefore varied BY KEY TYPE
+/// WITHIN ONE ENGINE, so no consumer could parse the output without
+/// out-of-band knowledge of which key it had just wrapped.
+///
+/// Depends on E5: §6.7's RSA arm needs the CRT components, which this engine
+/// did not write until that item landed.
+///
+/// Returns the DER `PrivateKeyInfo` for `attrs`, or `Err(CKR_KEY_NOT_WRAPPABLE)`
+/// for a private key type §6.7 does not enumerate.
+fn pkcs8_private_key_info(attrs: &Attributes) -> Result<Vec<u8>, u32> {
+    let key_type = attrs
+        .get(&CKA_KEY_TYPE)
+        .filter(|v| v.len() >= 4)
+        .map(|v| u32::from_le_bytes([v[0], v[1], v[2], v[3]]))
+        .ok_or(CKR_KEY_NOT_WRAPPABLE)?;
+    let raw = attrs.get(&CKA_VALUE).cloned().ok_or(CKR_KEY_NOT_WRAPPABLE)?;
+
+    // Already a PrivateKeyInfo? The RSA path stores the PKCS#8 DER directly,
+    // so re-wrapping it would produce a doubly-encoded structure.
+    if key_type == CKK_RSA {
+        return Ok(raw);
+    }
+
+    // AlgorithmIdentifier for each family §6.7 enumerates.
+    let alg_id: Vec<u8> = match key_type {
+        // id-ecPublicKey (1.2.840.10045.2.1) + the named-curve parameter.
+        CKK_EC => {
+            let curve = attrs.get(&CKA_EC_PARAMS).cloned().ok_or(CKR_KEY_NOT_WRAPPABLE)?;
+            let mut inner = vec![
+                0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01,
+            ];
+            inner.extend_from_slice(&curve);
+            der_sequence(&inner)
+        }
+        // Ed25519 / X25519 / X448 carry no AlgorithmIdentifier parameters
+        // (RFC 8410 §3: "the parameters field MUST be absent").
+        CKK_EC_EDWARDS => der_sequence(&[0x06, 0x03, 0x2b, 0x65, 0x70]),
+        CKK_EC_MONTGOMERY => {
+            let curve = attrs.get(&CKA_EC_PARAMS).cloned().unwrap_or_default();
+            let oid = if curve.last() == Some(&0x6f) {
+                [0x06u8, 0x03, 0x2b, 0x65, 0x6f]
+            } else {
+                [0x06u8, 0x03, 0x2b, 0x65, 0x6e]
+            };
+            der_sequence(&oid)
+        }
+        // NIST PQC OIDs are parameter-set-specific; the parameter set is
+        // already on the object, and the engine's SPKI builders hold the same
+        // table. Reuse it so the two encodings cannot disagree.
+        CKK_ML_DSA | CKK_ML_KEM | CKK_SLH_DSA | CKK_HSS | CKK_XMSS | CKK_XMSSMT => {
+            let ps = attrs
+                .get(&CKA_PRIV_PARAM_SET)
+                .filter(|v| v.len() >= 4)
+                .map(|v| u32::from_le_bytes([v[0], v[1], v[2], v[3]]))
+                .unwrap_or(0);
+            // Reuse the SPKI builders' own AlgorithmIdentifier bytes: build
+            // an SPKI over an empty key and take its leading AlgId SEQUENCE,
+            // so the PKCS#8 and SPKI encodings can never name different OIDs
+            // for the same key.
+            match pqc_alg_id_from_spki(key_type, ps) {
+                Some(a) => a,
+                None => return Err(CKR_KEY_NOT_WRAPPABLE),
+            }
+        }
+        _ => return Err(CKR_KEY_NOT_WRAPPABLE),
+    };
+
+    // PrivateKeyInfo ::= SEQUENCE { version INTEGER (0), privateKeyAlgorithm
+    //                               AlgorithmIdentifier, privateKey OCTET STRING }
+    let mut body = vec![0x02, 0x01, 0x00]; // version 0
+    body.extend_from_slice(&alg_id);
+    body.extend_from_slice(&der_octet_string(&raw));
+    Ok(der_sequence(&body))
+}
+
+/// DER SEQUENCE around `body` (definite length, long form when needed).
+fn der_sequence(body: &[u8]) -> Vec<u8> {
+    let mut out = vec![0x30];
+    der_push_len(&mut out, body.len());
+    out.extend_from_slice(body);
+    out
+}
+
+/// DER OCTET STRING around `body`.
+fn der_octet_string(body: &[u8]) -> Vec<u8> {
+    let mut out = vec![0x04];
+    der_push_len(&mut out, body.len());
+    out.extend_from_slice(body);
+    out
+}
+
+fn der_push_len(out: &mut Vec<u8>, len: usize) {
+    if len < 0x80 {
+        out.push(len as u8);
+    } else if len <= 0xff {
+        out.push(0x81);
+        out.push(len as u8);
+    } else if len <= 0xffff {
+        out.push(0x82);
+        out.push((len >> 8) as u8);
+        out.push(len as u8);
+    } else {
+        out.push(0x83);
+        out.push((len >> 16) as u8);
+        out.push((len >> 8) as u8);
+        out.push(len as u8);
+    }
+}
+
 #[wasm_bindgen(js_name = _C_WrapKey)]
 pub fn C_WrapKey(
     _h_session: u32,
@@ -7846,9 +8540,31 @@ pub fn C_WrapKey(
             Some(v) => v,
             None => return CKR_ARGUMENTS_BAD,
         };
-        let key_to_wrap = match get_object_value(h_key) {
-            Some(v) => v,
-            None => return CKR_ARGUMENTS_BAD,
+        // E6 (2026-08-13) — §6.7: a PRIVATE key is BER-encoded as a PKCS#8
+        // PrivateKeyInfo for wrapping. Everything else (secret keys) is
+        // wrapped as its raw value, which is what §6.7 describes.
+        //
+        // §5.18.3 class checks, also missing: "C_WrapKey wraps (i.e.,
+        // encrypts) a private or secret key" and can be used "To wrap any
+        // secret key with a public key…", "any secret key with any other
+        // secret key", "a private key with any secret key". A PUBLIC key is
+        // not a wrappable object — it was previously wrapped as the engine's
+        // internal packed modulus/exponent blob, a format no consumer can
+        // parse.
+        let target_class = target_attrs
+            .get(&CKA_CLASS)
+            .filter(|v| v.len() >= 4)
+            .map(|v| u32::from_le_bytes([v[0], v[1], v[2], v[3]]));
+        let key_to_wrap = match target_class {
+            Some(CKO_PRIVATE_KEY) => match pkcs8_private_key_info(&target_attrs) {
+                Ok(v) => v,
+                Err(rv) => return rv,
+            },
+            Some(CKO_SECRET_KEY) => match get_object_value(h_key) {
+                Some(v) => v,
+                None => return CKR_ARGUMENTS_BAD,
+            },
+            _ => return CKR_KEY_NOT_WRAPPABLE,
         };
 
         let wrapped = if is_aes_cbc {
@@ -8603,9 +9319,12 @@ fn multipart_op_mech(
 #[wasm_bindgen(js_name = _C_SignUpdate)]
 pub fn C_SignUpdate(h_session: u32, p_part: *mut u8, ul_part_len: u32) -> u32 {
     require_init!();
+    // §5.2 error priority (C2, 2026-08-13) — the session-handle class
+    // takes MANDATORY precedence over argument and capability codes, so
+    // this must precede every other check in the function.
+    require_session!(h_session);
     // §5.2 error priority — session handle before operation state
     // (operate-stage, round-1 S4).
-    require_session!(h_session);
     // nonnull! convention (S2): pPart is a required input pointer, but a
     // zero-length part with a NULL pointer is legal (mirror C_Sign's pData).
     if p_part.is_null() && ul_part_len > 0 {
@@ -8631,7 +9350,9 @@ pub fn C_SignUpdate(h_session: u32, p_part: *mut u8, ul_part_len: u32) -> u32 {
 
 fn C_SignFinal_impl(h_session: u32, p_signature: *mut u8, pul_signature_len: *mut u32) -> u32 {
     require_init!();
-    // §5.2 error priority — session handle before operation state.
+    // §5.2 error priority (C2, 2026-08-13) — the session-handle class
+    // takes MANDATORY precedence over argument and capability codes, so
+    // this must precede every other check in the function.
     require_session!(h_session);
     nonnull!(pul_signature_len);
     if let Err(rv) = multipart_op_mech(h_session, &SIGN_STATE, &SIGN_MULTIPART_ACC) {
@@ -8664,7 +9385,9 @@ fn C_SignFinal_impl(h_session: u32, p_signature: *mut u8, pul_signature_len: *mu
 #[wasm_bindgen(js_name = _C_VerifyUpdate)]
 pub fn C_VerifyUpdate(h_session: u32, p_part: *mut u8, ul_part_len: u32) -> u32 {
     require_init!();
-    // §5.2 error priority — session handle before operation state.
+    // §5.2 error priority (C2, 2026-08-13) — the session-handle class
+    // takes MANDATORY precedence over argument and capability codes, so
+    // this must precede every other check in the function.
     require_session!(h_session);
     if p_part.is_null() && ul_part_len > 0 {
         return CKR_ARGUMENTS_BAD;
@@ -8687,7 +9410,9 @@ pub fn C_VerifyUpdate(h_session: u32, p_part: *mut u8, ul_part_len: u32) -> u32 
 #[wasm_bindgen(js_name = _C_VerifyFinal)]
 pub fn C_VerifyFinal(h_session: u32, p_signature: *mut u8, ul_signature_len: u32) -> u32 {
     require_init!();
-    // §5.2 error priority — session handle before operation state.
+    // §5.2 error priority (C2, 2026-08-13) — the session-handle class
+    // takes MANDATORY precedence over argument and capability codes, so
+    // this must precede every other check in the function.
     require_session!(h_session);
     nonnull!(p_signature);
     if let Err(rv) = multipart_op_mech(h_session, &VERIFY_STATE, &VERIFY_MULTIPART_ACC) {
@@ -8882,7 +9607,9 @@ pub fn C_EncryptUpdate(
     pul_encrypted_part_len: *mut u32,
 ) -> u32 {
     require_init!();
-    // §5.2 error priority — session handle before operation state.
+    // §5.2 error priority (C2, 2026-08-13) — the session-handle class
+    // takes MANDATORY precedence over argument and capability codes, so
+    // this must precede every other check in the function.
     require_session!(h_session);
     multipart_update(
         &ENCRYPT_STATE,
@@ -8902,7 +9629,9 @@ pub fn C_EncryptFinal(
     pul_last_encrypted_part_len: *mut u32,
 ) -> u32 {
     require_init!();
-    // §5.2 error priority — session handle before operation state.
+    // §5.2 error priority (C2, 2026-08-13) — the session-handle class
+    // takes MANDATORY precedence over argument and capability codes, so
+    // this must precede every other check in the function.
     require_session!(h_session);
     multipart_final(
         &ENCRYPT_STATE,
@@ -8922,7 +9651,9 @@ pub fn C_DecryptUpdate(
     pul_part_len: *mut u32,
 ) -> u32 {
     require_init!();
-    // §5.2 error priority — session handle before operation state.
+    // §5.2 error priority (C2, 2026-08-13) — the session-handle class
+    // takes MANDATORY precedence over argument and capability codes, so
+    // this must precede every other check in the function.
     require_session!(h_session);
     multipart_update(
         &DECRYPT_STATE,
@@ -8983,7 +9714,9 @@ pub fn C_AsyncJoin(
 #[wasm_bindgen(js_name = _C_DecryptFinal)]
 pub fn C_DecryptFinal(h_session: u32, p_last_part: *mut u8, pul_last_part_len: *mut u32) -> u32 {
     require_init!();
-    // §5.2 error priority — session handle before operation state.
+    // §5.2 error priority (C2, 2026-08-13) — the session-handle class
+    // takes MANDATORY precedence over argument and capability codes, so
+    // this must precede every other check in the function.
     require_session!(h_session);
     multipart_final(
         &DECRYPT_STATE,
@@ -9136,8 +9869,15 @@ fn interface_statics() -> (u32, u32) {
 }
 
 #[wasm_bindgen(js_name = _C_GetSlotInfo)]
-pub fn C_GetSlotInfo(_slot_id: u32, p_info: *mut u8) -> u32 {
+pub fn C_GetSlotInfo(slot_id: u32, p_info: *mut u8) -> u32 {
     require_init!();
+    // W6 audit (2026-08-13) — §5.5.2 enumerates CKR_SLOT_ID_INVALID here too,
+    // and this was the second `_slot_id` entry point that ignored its slot
+    // argument entirely. C_GetTokenInfo, C_InitToken and C_OpenSession were
+    // audited alongside and already validate.
+    if !TOKEN_STORE.with(|ts| ts.borrow().contains_key(&slot_id)) {
+        return CKR_SLOT_ID_INVALID;
+    }
     if p_info.is_null() {
         return CKR_ARGUMENTS_BAD;
     }
@@ -9212,6 +9952,10 @@ pub fn C_WaitForSlotEvent(flags: u32, _p_slot: *mut u32, _p_reserved: *mut u8) -
 pub fn C_SignRecoverInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
     require_init!();
     require_session!(h_session);
+    // C2 — the NULL-mechanism CANCEL form (see cancel_active_operation).
+    if let Some(rv) = cancel_active_operation(h_session, p_mechanism, OpFamily::SignRecover) {
+        return rv;
+    }
     // A regular Sign and a Sign-Recover op are mutually exclusive on one
     // session (both are "the signing category" per §5.13's own grouping).
     if SIGN_STATE.with(|s| s.borrow().contains_key(&h_session))
@@ -9294,6 +10038,10 @@ pub fn C_SignRecover(
 pub fn C_VerifyRecoverInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
     require_init!();
     require_session!(h_session);
+    // C2 — the NULL-mechanism CANCEL form (see cancel_active_operation).
+    if let Some(rv) = cancel_active_operation(h_session, p_mechanism, OpFamily::VerifyRecover) {
+        return rv;
+    }
     if VERIFY_STATE.with(|s| s.borrow().contains_key(&h_session))
         || VERIFY_RECOVER_STATE.with(|s| s.borrow().contains_key(&h_session))
     {
@@ -15992,8 +16740,14 @@ mod ecdh_kem_ffi_tests {
     }
 
     /// encapsulate → decapsulate: secrets match, and the ciphertext is
-    /// byte-shape-identical to what the C++ engine's encapsulateECDH emits
-    /// (DER OCTET STRING wrapping an uncompressed SEC1 point).
+    /// E1 (2026-08-13) — this used to assert byte-shape identity with the
+    /// C++ engine's encapsulateECDH, i.e. a DER OCTET STRING wrapping the
+    /// uncompressed SEC1 point. §6.3.17 mandates the RAW value, and mutual
+    /// agreement between the two engines is not a defence — the spec
+    /// footnotes exactly this hazard. The expectations below now pin the
+    /// mandated raw form; the DER-wrapped form is still ACCEPTED on
+    /// decapsulation (asserted at the end of this function), which is what
+    /// keeps anything already deployed working.
     fn roundtrip(curve: u32, expected_ct_len: usize, point_len: usize) {
         setup();
         install_ec_keypair(curve);
@@ -16027,10 +16781,10 @@ mod ecdh_kem_ffi_tests {
         assert_eq!(rv, CKR_OK, "encapsulate: 0x{rv:x}");
         // C++ wire-format cross-check (SoftHSM_kem.cpp emits ephPub->getQ(),
         // the CKA_EC_POINT DER encoding).
-        assert_eq!(ct[0], 0x04, "DER OCTET STRING tag");
-        let inner = ec_point_unwrap(&ct).to_vec();
-        assert_eq!(inner.len(), point_len, "uncompressed SEC1 point length");
-        assert_eq!(inner[0], 0x04, "uncompressed SEC1 point marker");
+        // E1 — the ciphertext IS the raw uncompressed SEC1 point.
+        assert_eq!(ct.len(), point_len, "raw uncompressed SEC1 point length");
+        assert_eq!(ct[0], 0x04, "uncompressed SEC1 point marker");
+        let inner = ct.clone();
         let ss_e = get_object_value(h_ss_e).expect("encapsulated secret stored");
         let mut h_ss_d: u32 = 0;
         let rv = C_DecapsulateKey_impl(
@@ -16048,9 +16802,19 @@ mod ecdh_kem_ffi_tests {
         assert_eq!(ss_e, ss_d, "both sides must derive the same shared secret");
         assert_eq!(ss_e.len(), (point_len - 1) / 2, "raw X-coordinate shared secret");
 
-        // Raw-SEC1 ciphertext (no DER wrapper) must decapsulate identically —
-        // the same tolerance the C++ getECDHPubData applies.
-        let mut raw = inner.clone();
+        // E1 — the tolerant reader is KEPT: the historical DER-wrapped form
+        // must still decapsulate to the same secret.
+        let mut raw = {
+            let mut der = vec![0x04u8];
+            if inner.len() < 0x80 {
+                der.push(inner.len() as u8);
+            } else {
+                der.push(0x81);
+                der.push(inner.len() as u8);
+            }
+            der.extend_from_slice(&inner);
+            der
+        };
         let mut h_ss_r: u32 = 0;
         let rv = C_DecapsulateKey_impl(
             SESSION,
@@ -16218,19 +16982,19 @@ mod ecdh_kem_ffi_tests {
     #[test]
     fn ecdh_as_kem_roundtrip_p256() {
         let _guard = test_lock::acquire();
-        roundtrip(CURVE_P256, 2 + 65, 65);
+        roundtrip(CURVE_P256, 65, 65);
     }
 
     #[test]
     fn ecdh_as_kem_roundtrip_p384() {
         let _guard = test_lock::acquire();
-        roundtrip(CURVE_P384, 2 + 97, 97);
+        roundtrip(CURVE_P384, 97, 97);
     }
 
     #[test]
     fn ecdh_as_kem_roundtrip_p521() {
         let _guard = test_lock::acquire();
-        roundtrip(CURVE_P521, 3 + 133, 133);
+        roundtrip(CURVE_P521, 133, 133);
     }
 
     /// N5 — CKA_ALLOWED_MECHANISMS excluding CKM_ECDH1_DERIVE must block
