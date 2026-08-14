@@ -105,16 +105,17 @@ impl TlsProfile {
 /// dependency), so this selects between providers already present rather
 /// than adding one.
 ///
-/// **Known gap — §3.3.3 is met in part, not in full.** The clause requires
-/// servers to support `X25519MLKEM768`, `SecP256r1MLKEM768` *and*
-/// `SecP384r1MLKEM1024`. rustls 0.23.40 has no `SecP384r1MLKEM1024`: it is
-/// absent from `crypto::aws_lc_rs::kx_group`, has no `NamedGroup` codepoint
-/// for `0x11ed`, and the `hybrid` module it would be built from is private,
-/// so it cannot be composed downstream either. Two of three are offered.
-/// This is a rustls limitation rather than a platform one — OpenSSL 3.6
-/// carries all three. Until it lands upstream, describe this server as
-/// *measured against* the Quantum Safe Authentication Suite, never as
-/// *conformant to* it.
+/// **§3.3.3 is met in full as of 2026-08-12.** The clause requires servers to
+/// support `X25519MLKEM768`, `SecP256r1MLKEM768` *and* `SecP384r1MLKEM1024`,
+/// and to offer nothing outside that list. rustls 0.23.40 ships only the first
+/// two — `0x11ed` has no `NamedGroup` variant and the generic `Hybrid`
+/// combinator is in a private module — so the third is composed downstream in
+/// [`crate::server::secp384r1mlkem1024`] from the two halves rustls *does*
+/// export publicly (`kx_group::SECP384R1`, `kx_group::MLKEM1024`) via the
+/// public `hybrid_component()` seams. Its wire format and combiner order are
+/// proven against OpenSSL 3.6 in `tests/secp384r1mlkem1024_interop.rs`, not
+/// merely against itself. Classical groups are absent entirely, as the clause
+/// requires — they are not merely deprioritised.
 ///
 /// §3.3.2 is met in full: exactly `TLS13_CHACHA20_POLY1305_SHA256` and
 /// `TLS13_AES_256_GCM_SHA384`. Note this deliberately drops
@@ -130,6 +131,7 @@ pub fn quantum_safe_provider() -> rustls::crypto::CryptoProvider {
         kx_groups: vec![
             aws_lc_rs::kx_group::X25519MLKEM768,
             aws_lc_rs::kx_group::SECP256R1MLKEM768,
+            crate::server::secp384r1mlkem1024::SECP384R1MLKEM1024,
         ],
         ..aws_lc_rs::default_provider()
     }
@@ -164,8 +166,9 @@ pub fn tls_profile_summary(profile: TlsProfile) -> String {
         TlsProfile::QuantumSafe => {
             "quantum-safe (KMIP 3.0 §3.3): TLS1.3 only; suites \
              TLS13_CHACHA20_POLY1305_SHA256, TLS13_AES_256_GCM_SHA384; \
-             groups X25519MLKEM768, SecP256r1MLKEM768 \
-             [gap: SecP384r1MLKEM1024 unavailable in rustls 0.23 — partial §3.3.3]"
+             groups X25519MLKEM768, SecP256r1MLKEM768, SecP384r1MLKEM1024 \
+             [all three §3.3.3 groups; SecP384r1MLKEM1024 composed locally, \
+             OpenSSL-3.6-interop-proven]"
                 .to_string()
         }
     }
@@ -379,6 +382,7 @@ async fn handle_conn(
         .and_then(|certs| certs.first())
         .and_then(|der| crate::ops::der_x509::extract_subject_cn(der.as_ref()))
         .map(|cn| crate::server::auth::Identity { username: cn });
+    let identity_for_push = transport_identity.clone();
     let frame_bytes = read_one_frame(&mut tls_stream).await?;
     // §9.10 `Maximum Response Size` enforcement now lives inside
     // `dispatch_with_transport_identity` itself (`enforce_max_response_size`,
@@ -411,10 +415,248 @@ async fn handle_conn(
         // than replaced with another guess.
         Err(e) => wire_error_response(&e),
     };
+    // Did the client just hand us the server role on this channel? §6.1.61 says
+    // the swap applies to "the current client-to-server communication channel"
+    // and that it "remains as established" — so the decision is made from the
+    // response we are about to send, and acted on right here rather than
+    // through any global state.
+    //
+    // The auth gate lives in the op handler (which sees the verified identity);
+    // reaching Success at all therefore means the caller was authenticated.
+    let flip_to_push = endpoint_role_handed_over(&response);
+
     let response_bytes = encode_response_message(&response);
     tls_stream.write_all(&response_bytes).await?;
+
+    if flip_to_push {
+        // The identity whose objects we may talk about. Credential-authenticated
+        // callers are covered by the op-handler gate; for the push scope we use
+        // the transport identity when there is one, and otherwise the
+        // credential the request carried.
+        let owner = identity_for_push
+            .map(|i| i.username)
+            .or_else(|| credential_username(&frame_bytes));
+        serve_pushes(&mut tls_stream, &deps, &owner).await?;
+    }
+
     tls_stream.shutdown().await?;
     Ok(())
+}
+
+/// True when this response is a successful `Set Endpoint Role` that put the
+/// SERVER into the client role — i.e. the point at which this connection
+/// reverses direction.
+fn endpoint_role_handed_over(response: &crate::kmip30::ResponseMessage) -> bool {
+    use crate::kmip30::{EndpointRole, Operation, ResponsePayload, ResultStatus};
+    response.batch_items.iter().any(|item| {
+        item.operation == Some(Operation::SetEndpointRole)
+            && item.result_status == ResultStatus::Success
+            && matches!(
+                &item.payload,
+                Some(ResponsePayload::SetEndpointRole(r)) if r.endpoint_role == EndpointRole::Client
+            )
+    })
+}
+
+/// Recover the username from a request's §8.1.2 Authentication header, for
+/// scoping pushes on a credential-authenticated (non-mTLS) connection.
+fn credential_username(frame_bytes: &[u8]) -> Option<String> {
+    use crate::kmip30::Credential;
+    let request = decode_request_message(frame_bytes).ok()?;
+    request.header.authentication.iter().find_map(|c| match c {
+        Credential::UsernameAndPassword { username, .. } => Some(username.clone()),
+        _ => None,
+    })
+}
+
+/// Serve §6.2 server-to-client messages on a channel whose roles have been
+/// swapped, until the queue drains or the peer goes away.
+///
+/// Each message is a REQUEST from the server, and §6.2.2/§6.2.3 both say the
+/// client "SHALL send a response … containing no payload", so this reads that
+/// acknowledgement before sending the next one. Draining without waiting would
+/// make delivery unobservable and turn a dead peer into silent data loss.
+async fn serve_pushes<S>(
+    stream: &mut S,
+    deps: &Arc<Deps>,
+    owner: &Option<String>,
+) -> Result<(), ServerError>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let now = time::OffsetDateTime::now_utc().unix_timestamp();
+
+    // ── Negotiate, once per swapped session ────────────────────────────────
+    //
+    // Three server-issued requests round-trip before the first push. Doing this
+    // per notification would add three round trips to every attribute change,
+    // which for a queue that is usually one or two deep would be a real
+    // regression for no information gained — the answers cannot change mid
+    // session.
+    let endpoint = negotiate_push_endpoint(stream, now).await;
+
+    if !endpoint.version_compatible {
+        // Nothing we send can be parsed by this peer. Pushing anyway would be
+        // writing bytes we know to be undecodable, which is worse than silence:
+        // the queue would drain into a peer that cannot act on it.
+        tracing::info!(target: "kmip::push",
+            "push endpoint speaks no version this server does; not pushing");
+        return Ok(());
+    }
+
+    let pending = deps.drain_notifications(owner);
+    if pending.is_empty() {
+        // Still hand the role back — the peer asked to receive, and "nothing for
+        // you" is a better answer than a dropped connection.
+        hand_role_back(stream, now).await;
+        return Ok(());
+    }
+
+    for notify in pending {
+        if !endpoint.supports(crate::kmip30::Operation::Notify) {
+            tracing::debug!(target: "kmip::push", uid = %notify.unique_identifier,
+                "endpoint does not advertise Notify; dropping without sending");
+            continue;
+        }
+        let uid = notify.unique_identifier.clone();
+        let bytes = crate::kmip30::wire::encode_notify_message(&notify, now);
+        stream.write_all(&bytes).await?;
+        // Read the client's acknowledgement. A peer that closes instead of
+        // answering is not an error worth failing the connection over — it is
+        // exactly the "prior knowledge that the client is not able to respond"
+        // case §6.2.2 allows — but we stop pushing, because continuing to write
+        // into a closed socket proves nothing.
+        match read_one_frame(stream).await {
+            Ok(_ack) => {
+                tracing::debug!(target: "kmip::push", uid = %uid, "Notify acknowledged");
+            }
+            Err(e) => {
+                tracing::debug!(target: "kmip::push", uid = %uid, error = %e,
+                    "client did not acknowledge; stopping pushes on this channel");
+                return Ok(());
+            }
+        }
+    }
+
+    hand_role_back(stream, now).await;
+    Ok(())
+}
+
+/// What the peer at the far end of a swapped channel told us about itself.
+#[derive(Debug)]
+struct PushEndpoint {
+    /// False only when the peer answered `Discover Versions` with a list that
+    /// shares nothing with [`supported_versions`]. An unanswered question
+    /// leaves this true — see [`negotiate_push_endpoint`].
+    version_compatible: bool,
+    /// `None` when the peer did not answer `Query`, which means "unknown", not
+    /// "nothing".
+    advertised_operations: Option<Vec<crate::kmip30::Operation>>,
+}
+
+impl PushEndpoint {
+    /// Permissive on silence, restrictive on an actual answer.
+    ///
+    /// A peer that answers and omits an operation is telling us it cannot
+    /// service it, and we believe it. A peer that says nothing may simply be an
+    /// implementation of §6.2 alone — which is legal, since §6.2.2 contemplates
+    /// clients that cannot respond at all — and denying it the notifications it
+    /// *can* handle would be inventing a requirement the spec does not make.
+    fn supports(&self, op: crate::kmip30::Operation) -> bool {
+        match &self.advertised_operations {
+            Some(ops) => ops.contains(&op),
+            None => true,
+        }
+    }
+}
+
+/// Ask the peer what it speaks and what it can do (§6.1.21, §6.1.39, issued by
+/// the server — two of item 10's five operations).
+///
+/// Both questions tolerate silence. A peer that treats our request as an opaque
+/// push and returns the §6.2 empty acknowledgement, or that closes, is recorded
+/// as "unknown" rather than "incapable": the alternative is to withhold
+/// notifications from a conformant §6.2-only client on the strength of a
+/// question it never agreed to answer.
+async fn negotiate_push_endpoint<S>(stream: &mut S, now: i64) -> PushEndpoint
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    use crate::kmip30::wire::ClientResponsePayload;
+
+    let mut endpoint =
+        PushEndpoint { version_compatible: true, advertised_operations: None };
+
+    // §6.1.21 — an empty request list means "tell me everything you have".
+    let ask = crate::kmip30::wire::encode_discover_versions_message(&[], now);
+    if let Some(resp) = ask_endpoint(stream, &ask).await {
+        if let ClientResponsePayload::DiscoverVersions(theirs) = resp.payload {
+            let ours = crate::ops::lifecycle_and_protocol::supported_versions();
+            endpoint.version_compatible = theirs.iter().any(|v| ours.contains(v));
+            tracing::debug!(target: "kmip::push",
+                theirs = ?theirs, compatible = endpoint.version_compatible,
+                "push endpoint declared its protocol versions");
+        }
+    }
+    if !endpoint.version_compatible {
+        return endpoint;
+    }
+
+    // §6.1.39 — only the operation list bears on what we may push.
+    let ask = crate::kmip30::wire::encode_query_message(
+        &[crate::kmip30::QueryFunction::QueryOperations],
+        now,
+    );
+    if let Some(resp) = ask_endpoint(stream, &ask).await {
+        if let ClientResponsePayload::Query(ops) = resp.payload {
+            tracing::debug!(target: "kmip::push", ops = ?ops,
+                "push endpoint declared its operations");
+            endpoint.advertised_operations = Some(ops);
+        }
+    }
+
+    endpoint
+}
+
+/// Write one server-issued request and read the peer's answer, mapping any
+/// transport or decode failure to `None` ("it did not tell us").
+async fn ask_endpoint<S>(
+    stream: &mut S,
+    request: &[u8],
+) -> Option<crate::kmip30::wire::ClientResponse>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    if stream.write_all(request).await.is_err() {
+        return None;
+    }
+    let frame = read_one_frame(stream).await.ok()?;
+    crate::kmip30::wire::decode_client_response(&frame).ok()
+}
+
+/// End the swapped session the way §6.1.61 began it, rather than by hanging up.
+///
+/// The field names the role the *recipient* is to apply, which is why both
+/// directions carry `Client`: the client's original request put us into the
+/// client role, and this one puts the peer back into it — leaving us the server
+/// again. Failures are logged and swallowed: the session is over either way,
+/// and the connection is about to be shut down.
+async fn hand_role_back<S>(stream: &mut S, now: i64)
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    use crate::kmip30::EndpointRole;
+    let bytes =
+        crate::kmip30::wire::encode_set_endpoint_role_message(EndpointRole::Client, now);
+    if stream.write_all(&bytes).await.is_err() {
+        tracing::debug!(target: "kmip::push", "peer gone before the role could be handed back");
+        return;
+    }
+    match read_one_frame(stream).await {
+        Ok(_) => tracing::debug!(target: "kmip::push", "server role handed back; session closed"),
+        Err(e) => tracing::debug!(target: "kmip::push", error = %e,
+            "peer did not confirm the role handback"),
+    }
 }
 
 /// Build a KMIP 3.0 error ResponseMessage for an unparseable request (see

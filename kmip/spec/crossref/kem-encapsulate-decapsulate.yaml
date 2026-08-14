@@ -2,42 +2,74 @@
 # Encapsulate / Decapsulate. See ./README.md for how this file is meant to
 # be used and why it's YAML, not JSON.
 #
-# Verified: 2026-07-05, by hand, pdftotext -layout over both local PDFs
-# (see sources: below for exact commands/checksums). Re-verify by hand if
-# either source file's sha256 changes — this file is NOT covered by the
-# automated kmip-spec-3.0-tags-enums.json crosscheck (see ./README.md).
+# Verified: 2026-08-12 against KMIP 3.0 CSD02 (re-verification of the
+# original 2026-07-05 pass, which was made against WD19 — now superseded).
+# Method: text-extract over the local CSD02 HTML + the CSD02-derived
+# kmip-spec-3.0-tags-enums.json. EVERY fact below was re-confirmed unchanged
+# under CSD02 except the page numbers, which shifted; section numbers, table
+# numbers, codepoints and payload shapes all held. Re-verify by hand if
+# either source file's sha256 changes — the prose facts here are NOT covered
+# by the automated kmip-spec-3.0-tags-enums.json crosscheck (see ./README.md),
+# though the codepoints now are.
 
 schema_version: 1
 topic: kem-encapsulate-decapsulate
 
 sources:
-  kmip_3_0_wd19:
+  kmip_3_0_csd02:
+    file: kmip/spec/oasis-kmip-3.0/kmip-spec-v3.0-csd02.html
+    label: "KMIP 3.0 Committee Specification Draft 02, 7 May 2026"
+    sha256: c6277cc83a2505bdac75ab154355211085feeadad07c7de9ae20a19d6d4c7b74
+    pdf_companion:
+      file: kmip/spec/oasis-kmip-3.0/kmip-spec-v3.0-csd02.pdf
+      sha256: 9043830d9ea39e6cb963faf9cdd0c74c6fb4b2ea29131e8c5b65f63a3ed271cb
+    note: >
+      CURRENT BASELINE. CSD02 folded the PQC surface into the published
+      specification — Encapsulate/Decapsulate, the KEM Algorithm enum and the
+      ML-KEM/hybrid codepoints are all normative here, so the facts below no
+      longer depend on an unpublished working draft. Page numbers cited below
+      are CSD02's. A committee draft, not a ratified OASIS Standard: its
+      public review closed 13 Aug 2026.
+  kmip_3_0_wd19_superseded:
     file: kmip/spec/oasis-kmip-3.0/kmip-spec-v3.0-wd19-clean.pdf
-    label: "KMIP 3.0 Working Draft 19, 14 February 2025"
+    label: "KMIP 3.0 Working Draft 19, 14 February 2025 — SUPERSEDED by CSD02"
     sha256: e2dc1991e0a5697637aab00cb31b4bbebc51a664f2c1f27f8225713a42ba4f4d
     note: >
-      Use WD19, not kmip-spec-v3.0.pdf (CSD01, 2024-08-23) — CSD01 predates
-      the PQC additions entirely (no Encapsulate, no Decapsulate, no KEM
-      Algorithm enum, no ML-DSA/ML-KEM/hybrid codepoints). WD19 is the same
-      source this repo's kmip/docs/*.md plans already anchor PQC facts to
-      (e.g. the K6 hybrid-KEM codepoint table in
-      cacp-kmip-k3-k4-k6-remediation-plan-07022026.md).
+      The source of the original 2026-07-05 verification pass. Retained only
+      so a pre-CSD02 citation elsewhere in the repo can be traced. Do not add
+      new facts from this file.
   pkcs11_3_2_csd01:
     file: docs/refs/pkcs11-spec-v3.2-csd01.pdf
     label: "PKCS#11 v3.2 Committee Specification Draft 01, 16 April 2025"
     sha256: f30334792922cea2d0016585144985f3a298dcadeb156fc52aee5da835ca81c6
     note: >
-      Same file kmip/CLAUDE.md already names as the CK* constants source of
-      truth. Text extracted via `pdftotext -layout`; the running header on
+      The draft the PKCS#11 facts below were verified against, kept because
+      the section/page/table numbers cited in pkcs11_mechanisms are ITS
+      numbers. Text extracted via `pdftotext -layout`; the running header on
       every page reads "pkcs11-spec-v3.2-wd13" (leftover template
       boilerplate from an earlier working-draft stage) — the title page
       confirms this is genuinely CSD01, not a version mismatch.
+    superseded_by: pkcs11_3_2_os
+  pkcs11_3_2_os:
+    file: docs/refs/pkcs11-spec-v3.2-os.pdf
+    label: "PKCS#11 v3.2 OASIS Standard, 3 June 2026"
+    note: >
+      PKCS#11 v3.2 IS RATIFIED — unlike KMIP 3.0, this is a full OASIS
+      Standard, and it is the current source of truth for CK* constants
+      (with the normative pkcs11t.h). It was verified content-identical to
+      the CSD01 draft the engine implemented (docs/gap-analysis-rust-pkcs11-v3.2.md),
+      which is why no engine change was needed on ratification and why the
+      CSD01-numbered citations below remain valid. Re-anchor those citations
+      to this document's own section/page numbers the next time this file is
+      substantively revised.
 
-# ── KMIP 3.0 WD19: the two operations ───────────────────────────────────
+# ── KMIP 3.0 CSD02: the two operations ──────────────────────────────────
+# Section + table numbers re-confirmed identical to WD19 under CSD02;
+# only page numbers moved (WD19 121/114 -> CSD02 129/122).
 kmip_operations:
   encapsulate:
     section: "6.1.22"
-    page: 121
+    page: 129
     tables: ["Table 317 (request)", "Table 318 (response)", "Table 319 (errors)"]
     op_codepoint: "0x00000041"   # Operation Enumeration table, right after Deactivate=0x40
     quote: >
@@ -46,7 +78,7 @@ kmip_operations:
       Cryptographic Object as the key for the operation."
     request_payload:
       - "Unique Identifier — REQUIRED — the key to use for encapsulation"
-      - "Cryptographic Parameters (KEM Algorithm) — OPTIONAL — corresponds to the particular encapsulation method requested"
+      - "Cryptographic Parameters (KEM Algorithm) — OPTIONAL — corresponds to the particular encapsulation method requested. CSD02 adds: if the object carries no Cryptographic Parameters and the algorithm requires them, the operation SHALL return Operation Failed"
       - "Attributes — OPTIONAL — for the new object"
     response_payload:
       - "Unique Identifier — REQUIRED — of the newly created Secret Data object"
@@ -60,7 +92,7 @@ kmip_operations:
 
   decapsulate:
     section: "6.1.15"
-    page: 114
+    page: 122
     tables: ["Table 296 (request)", "Table 297 (response)", "Table 298 (errors)"]
     op_codepoint: "0x00000042"
     quote: >
@@ -76,17 +108,24 @@ kmip_operations:
       - "Unique Identifier — REQUIRED — of the newly created Secret Data object"
     verdict: "Same generic KEM framing as Encapsulate. No algorithm-family restriction."
 
-# ── KMIP 3.0 WD19: the enumeration that disambiguates WHICH KEM ─────────
+# ── KMIP 3.0 CSD02: the enumeration that disambiguates WHICH KEM ────────
 kmip_enumerations:
   kem_algorithm:
     section: "11.26"
-    page: 216
+    page: 224
     table: "Table 572"
     wire_tag: "0x4201C3"
+    csd02_crosscheck: >
+      Section, table and tag all unchanged from WD19 under CSD02 (page moved
+      216 -> 224). Now ALSO covered by the mechanically-generated
+      kmip-spec-3.0-tags-enums.json: tag {"name":"KEM Algorithm",
+      "codepoint":"0x4201c3"} and all three enum values appear there.
     engine_state: >
-      Already reserved, unused: kmip/src/kmip30/wire.rs:279
-      `pub const KemAlgorithm: u32 = 0x42_01c3;` — no enum type, no field on
-      CryptographicParameters, nothing encodes/decodes it today.
+      IMPLEMENTED (2026-07-05, this feature): the KemAlgorithm enum
+      (RsaSve=1/DhKem=2/MlKem=3, kmip30/ops.rs) now populates this
+      previously-reserved-but-unused wire tag, with full encode+decode in
+      wire.rs. The "reserved, unused, nothing encodes it" state described in
+      earlier revisions of this file is historical.
     values:
       RSASVE: "0x00000001"
       DHKEM: "0x00000002"
@@ -104,7 +143,15 @@ kmip_enumerations:
 
   cryptographic_algorithm_relevant_values:
     section: "11.12 (Cryptographic Algorithm Enumeration)"
+    page: 214
     table: "Table 552 vicinity"
+    csd02_crosscheck: >
+      All six values below re-confirmed against the CSD02-derived
+      kmip-spec-3.0-tags-enums.json on 2026-08-12. Note what is NOT here:
+      SecP384r1MLKEM1024 has no published Cryptographic Algorithm value in
+      CSD02, even though Profiles CSD02 §3.3.3 mandates the TLS group of that
+      name — this repo registers it at vendor codepoint 0x8000005e. See
+      ../../docs/CONFORMANCE_REPORT.md §5.2.
     values:
       DH: "0x0000000D"
       ECDH: "0x0000000E"

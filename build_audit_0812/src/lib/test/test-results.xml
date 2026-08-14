@@ -1,0 +1,231 @@
+<?xml version="1.0" encoding='ISO-8859-1' standalone='yes' ?>
+<TestRun>
+  <FailedTests></FailedTests>
+  <SuccessfulTests>
+    <Test id="1">
+      <Name>SymmetricAlgorithmTests::testAesEncryptDecrypt</Name>
+    </Test>
+    <Test id="2">
+      <Name>SymmetricAlgorithmTests::testChaCha20EncryptDecrypt</Name>
+    </Test>
+    <Test id="3">
+      <Name>SymmetricAlgorithmTests::testAesCtrOverflow</Name>
+    </Test>
+    <Test id="4">
+      <Name>SymmetricAlgorithmTests::testGenericKey</Name>
+    </Test>
+    <Test id="5">
+      <Name>SymmetricAlgorithmTests::testEncDecFinalNULLValidation</Name>
+    </Test>
+    <Test id="6">
+      <Name>SymmetricAlgorithmTests::testOpTermIssue585</Name>
+    </Test>
+    <Test id="7">
+      <Name>DigestTests::testDigestInit</Name>
+    </Test>
+    <Test id="8">
+      <Name>DigestTests::testDigest</Name>
+    </Test>
+    <Test id="9">
+      <Name>DigestTests::testDigestUpdate</Name>
+    </Test>
+    <Test id="10">
+      <Name>DigestTests::testDigestKey</Name>
+    </Test>
+    <Test id="11">
+      <Name>DigestTests::testDigestFinal</Name>
+    </Test>
+    <Test id="12">
+      <Name>DigestTests::testDigestAll</Name>
+    </Test>
+    <Test id="13">
+      <Name>InitTests::testInit1</Name>
+    </Test>
+    <Test id="14">
+      <Name>InitTests::testInit2</Name>
+    </Test>
+    <Test id="15">
+      <Name>InitTests::testInit3</Name>
+    </Test>
+    <Test id="16">
+      <Name>InitTests::testInit4</Name>
+    </Test>
+    <Test id="17">
+      <Name>InitTests::testInit5</Name>
+    </Test>
+    <Test id="18">
+      <Name>InitTests::testInit6</Name>
+    </Test>
+    <Test id="19">
+      <Name>InitTests::testFinal</Name>
+    </Test>
+    <Test id="20">
+      <Name>InfoTests::testGetInfo</Name>
+    </Test>
+    <Test id="21">
+      <Name>InfoTests::testGetFunctionList</Name>
+    </Test>
+    <Test id="22">
+      <Name>InfoTests::testGetSlotList</Name>
+    </Test>
+    <Test id="23">
+      <Name>InfoTests::testGetSlotInfo</Name>
+    </Test>
+    <Test id="24">
+      <Name>InfoTests::testGetTokenInfo</Name>
+    </Test>
+    <Test id="25">
+      <Name>InfoTests::testGetMechanismList</Name>
+    </Test>
+    <Test id="26">
+      <Name>InfoTests::testGetSlotInfoAlt</Name>
+    </Test>
+    <Test id="27">
+      <Name>InfoTests::testGetMechanismListConfig</Name>
+    </Test>
+    <Test id="28">
+      <Name>InfoTests::testGetMechanismNegativeListConfig</Name>
+    </Test>
+    <Test id="29">
+      <Name>InfoTests::testWaitForSlotEvent</Name>
+    </Test>
+    <Test id="30">
+      <Name>RandomTests::testSeedRandom</Name>
+    </Test>
+    <Test id="31">
+      <Name>RandomTests::testGenerateRandom</Name>
+    </Test>
+    <Test id="32">
+      <Name>SessionTests::testOpenSession</Name>
+    </Test>
+    <Test id="33">
+      <Name>SessionTests::testCloseSession</Name>
+    </Test>
+    <Test id="34">
+      <Name>SessionTests::testCloseAllSessions</Name>
+    </Test>
+    <Test id="35">
+      <Name>SessionTests::testGetSessionInfo</Name>
+    </Test>
+    <Test id="36">
+      <Name>SessionTests::testSessionCancel</Name>
+    </Test>
+    <Test id="37">
+      <Name>TokenTests::testInitToken</Name>
+    </Test>
+    <Test id="38">
+      <Name>UserTests::testInitPIN</Name>
+    </Test>
+    <Test id="39">
+      <Name>UserTests::testLogin</Name>
+    </Test>
+    <Test id="40">
+      <Name>UserTests::testLogout</Name>
+    </Test>
+    <Test id="41">
+      <Name>UserTests::testSetPIN</Name>
+    </Test>
+    <Test id="42">
+      <Name>ObjectTests::testCreateObject</Name>
+    </Test>
+    <Test id="43">
+      <Name>ObjectTests::testCopyObject</Name>
+    </Test>
+    <Test id="44">
+      <Name>ObjectTests::testDestroyObject</Name>
+    </Test>
+    <Test id="45">
+      <Name>ObjectTests::testGetObjectSize</Name>
+    </Test>
+    <Test id="46">
+      <Name>ObjectTests::testGetAttributeValue</Name>
+    </Test>
+    <Test id="47">
+      <Name>ObjectTests::testSetAttributeValue</Name>
+    </Test>
+    <Test id="48">
+      <Name>ObjectTests::testFindObjects</Name>
+    </Test>
+    <Test id="49">
+      <Name>ObjectTests::testGenerateKeys</Name>
+    </Test>
+    <Test id="50">
+      <Name>ObjectTests::testCreateCertificates</Name>
+    </Test>
+    <Test id="51">
+      <Name>ObjectTests::testDefaultDataAttributes</Name>
+    </Test>
+    <Test id="52">
+      <Name>ObjectTests::testDefaultX509CertAttributes</Name>
+    </Test>
+    <Test id="53">
+      <Name>ObjectTests::testDefaultRSAPubAttributes</Name>
+    </Test>
+    <Test id="54">
+      <Name>ObjectTests::testDefaultRSAPrivAttributes</Name>
+    </Test>
+    <Test id="55">
+      <Name>ObjectTests::testAlwaysNeverAttribute</Name>
+    </Test>
+    <Test id="56">
+      <Name>ObjectTests::testSensitiveAttributes</Name>
+    </Test>
+    <Test id="57">
+      <Name>ObjectTests::testGetInvalidAttribute</Name>
+    </Test>
+    <Test id="58">
+      <Name>ObjectTests::testAllowedMechanisms</Name>
+    </Test>
+    <Test id="59">
+      <Name>ObjectTests::testReAuthentication</Name>
+    </Test>
+    <Test id="60">
+      <Name>ObjectTests::testTemplateAttribute</Name>
+    </Test>
+    <Test id="61">
+      <Name>ObjectTests::testCreateSecretKey</Name>
+    </Test>
+    <Test id="62">
+      <Name>DeriveTests::testEcdsaDerive</Name>
+    </Test>
+    <Test id="63">
+      <Name>DeriveTests::testEddsaDerive with parameter: X25519</Name>
+    </Test>
+    <Test id="64">
+      <Name>DeriveTests::testEddsaDerive with parameter: X448</Name>
+    </Test>
+    <Test id="65">
+      <Name>DeriveTests::testSymDerive</Name>
+    </Test>
+    <Test id="66">
+      <Name>DeriveTests::testMiscDerivations</Name>
+    </Test>
+    <Test id="67">
+      <Name>SignVerifyTests::testEcSignVerify</Name>
+    </Test>
+    <Test id="68">
+      <Name>SignVerifyTests::testEdSignVerify with parameter: Ed25519</Name>
+    </Test>
+    <Test id="69">
+      <Name>SignVerifyTests::testEdSignVerify with parameter: Ed448</Name>
+    </Test>
+    <Test id="70">
+      <Name>AsymEncryptDecryptTests::testRsaEncryptDecrypt</Name>
+    </Test>
+    <Test id="71">
+      <Name>AsymWrapUnwrapTests::testRsaWrapUnwrap</Name>
+    </Test>
+    <Test id="72">
+      <Name>ForkTests::testFork</Name>
+    </Test>
+    <Test id="73">
+      <Name>ForkTests::testResetOnFork</Name>
+    </Test>
+  </SuccessfulTests>
+  <Statistics>
+    <Tests>73</Tests>
+    <FailuresTotal>0</FailuresTotal>
+    <Errors>0</Errors>
+    <Failures>0</Failures>
+  </Statistics>
+</TestRun>

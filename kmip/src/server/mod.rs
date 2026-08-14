@@ -23,6 +23,13 @@ pub mod auth;
 // and `DepsConfig` reference them regardless of transport.
 #[cfg(feature = "native")]
 pub mod listener;
+// Also `native` only, and for the same reason: it is built out of rustls's
+// aws-lc-rs key exchange halves, and rustls is not a wasm dependency. Without
+// this gate the wasm target fails to compile the whole crate — which the local
+// gate did not catch, because its wasm step smoke-tests the ALREADY-STAGED
+// bundle rather than rebuilding one.
+#[cfg(feature = "native")]
+pub mod secp384r1mlkem1024;
 
 pub use auth::{AuthContext, AuthUser, ConfigVerifier, CredentialVerifier, Identity, SessionRecord};
 #[cfg(feature = "native")]

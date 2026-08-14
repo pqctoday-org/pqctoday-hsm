@@ -1,24 +1,38 @@
 # KMIP 3.0 Conformance Report
 
-> **Current as of v0.13.0.** The replay figures below are regenerated per run via
-> `../conformance/harness/dispatcher_replay.py` (`cargo test` in CI also gates
-> them); the dated stamps below are when the prose was last edited, not a ceiling
-> on validity.
+> **Current as of v0.22.0** (baseline re-stated for CSD02 on 2026-08-12). The replay
+> figures below are regenerated per run via `../conformance/harness/dispatcher_replay.py`
+> and gated by the three Python scripts described in §7 — **not** by `cargo test`; no
+> Rust test reads the replay report. The dated stamps below are when the prose was last
+> edited, not a ceiling on validity.
 
-**Generated**: 2026-06-08 · **Updated**: 2026-07-09 (`GAP_REMEDIATION_PLAN.md` Phases A–I complete)
+**Generated**: 2026-06-08 · **Updated**: 2026-08-12 (baseline re-stated for CSD02; earlier: 2026-07-09, `GAP_REMEDIATION_PLAN.md` Phases A–I complete)
 **Subsystem**: `pqctoday-kmip` (`kmip/` crate)
-**Spec**: OASIS Key Management Interoperability Protocol v3.0 **Committee Specification Draft 01
-(CSD01, 23 Aug 2024)** — a draft, not a ratified OASIS Standard. PQC extensions (Encapsulate /
-Decapsulate, hybrid KEMs) are implemented per the later **Working Draft 19 (WD19, 14 Feb 2025)**,
-also unpublished/unratified; the PQC surface has no OASIS test vectors (§4.1, §7 below). See
-`../docs/HONEST_MAXIMUM_PLAN.md` for the roadmap this report reflects the completion of (Phases
-0–4 and 6.1; Phase 5 — server-to-client — is deliberately parked, see §5), and
+**Spec**: OASIS Key Management Interoperability Protocol v3.0 **Committee Specification Draft 02
+(CSD02, 7 May 2026)** — a committee draft, **not a ratified OASIS Standard**. Companion documents:
+**KMIP Profiles v3.0 CSD02 (21 May 2026)** and **KMIP Usage Guide v3.0 (18 Jun 2026)**. CSD02
+supersedes both CSD01 (23 Aug 2024) and the never-independently-published Working Draft 19 this
+codebase tracked before release 0.16.0 (2026-07-25); it folds the PQC surface — `Encapsulate` /
+`Decapsulate`, the `KEM Algorithm` enumeration, ML-KEM/ML-DSA/SLH-DSA and hybrid-KEM codepoints —
+into the published specification, so those facts are now citable from a published OASIS document
+rather than only from a working draft.
+
+**Standardization status (checked 2026-08-12)**: CSD02 completed a 30-day OASIS public review on
+**13 Aug 2026** (opened 14 Jul 2026), the step preceding Committee Specification. No newer draft
+exists. When OASIS publishes the next revision (CS01 or CSD03), follow the re-vendor checklist in
+`../spec/README.md` § "Spec watch" before updating any claim in this report.
+
+See `../docs/HONEST_MAXIMUM_PLAN.md` for the roadmap this report reflects the completion of (Phases
+0–4 and 6.1; Phase 5 — server-to-client — remains the one open item, see §5.1.3), and
 `GAP_REMEDIATION_PLAN.md` for a follow-up audit (13 findings, all fixed) that specifically
 targeted silently-dropped errors and stub/placeholder behavior the dispatcher-conformance figures
 below wouldn't have caught on their own (they test observable request/response shape, not every
 internal error-propagation path — e.g. a discarded engine-import `Result` that still returns wire
 `Success`).
-**Test corpus**: `kmip-profiles-v3.0.zip` (`test-cases/kmip-v3.0/{mandatory,optional}/*.xml`) — CSD01-era, contains zero PQC test cases.
+**Test corpus**: `kmip-profiles-v3.0-csd02.zip` (`test-cases/kmip-v3.0/{mandatory,optional}/*.xml`),
+refreshed to the CSD02 revision in release 0.16.0 — 2 transcripts changed cosmetically, replay
+figures unmoved. The OASIS corpus itself still contains **zero PQC test cases**; the PQC surface is
+covered separately by the 42-transcript vendored subset in `../conformance/pqc_corpus/` (see §1).
 
 ## TL;DR
 
@@ -30,10 +44,11 @@ internal error-propagation path — e.g. a discarded engine-import `Result` that
 | Query honesty | ✅ **nothing advertised that isn't real** | both `ADVERTISED_UNIMPLEMENTED_*` lists in `ops/query.rs` are empty (Phase 6.1) |
 | Asynchronous processing | ✅ **real** — job store + background executor | Poll/Cancel/Process/Query Asynchronous Requests all genuinely implemented (Phase 4) |
 | Stateful hash-based signatures | ✅ **real** — HSS/LMS wired to the engine | KMIP `Sign` on an HSS/LMS key advances + persists the real leaf index (Phase 1.5) |
-| Baseline Server profile (§5.1.2) | ⚠️ **all conditions met except item 10** (server-to-client) | §5 below — deliberately parked, not a gap discovered late |
-| Third-party interop (PyKMIP / vendor) | ⏸️ never run | KMIP 3.0 has no compatible OSS client |
+| Baseline Server profile (§5.1.2) | ✅ **all 13 conditions met** (item 10 closed 2026-08-13) | §5.1.4 below |
+| Quantum Safe Authentication Suite (Profiles §3.3) | ✅ **all clauses met** — all 3 mandated hybrid groups, interop-proven vs OpenSSL 3.6 | §5.2 below |
+| Third-party interop (PyKMIP / vendor) | ⏸️ never run — **not currently possible** | KMIP 3.0 has no compatible OSS client; see §5.3 |
 
-**Bottom line**: the wire bytes match the KMIP 3.0 CSD01 draft byte-for-byte AND the dispatcher
+**Bottom line**: the wire bytes match the KMIP 3.0 CSD02 draft byte-for-byte AND the dispatcher
 matches the OASIS conformance transcripts on **all 97 non-deprecated tests** in the corpus. The
 remaining 5 transcripts are a deliberate, documented policy skip — DES / 3DES / classical DSA are
 out of scope for the `softhsmrustv3` backend (`kmip/DEPRECATED.md`). There are, as of this
@@ -86,7 +101,34 @@ type, `value=` = typed value). Placeholders (`$NOW`, `$UNIQUE_IDENTIFIER_0`,
 etc.) are bound dynamically when the conformance suite is replayed against
 a server.
 
-Corpus is checked in at `kmip/conformance/oasis_corpus/` and never regenerated.
+Corpus is checked in at `kmip/conformance/oasis_corpus/`, refreshed only when OASIS
+publishes a new revision of the profiles package (last: the CSD02 revision, release
+0.16.0 — 2 transcripts changed cosmetically).
+
+**Provenance is machine-checked** (added 2026-08-13). `conformance/corpus_provenance.json`
+records the source zip, its SHA-256, and a digest per transcript;
+`conformance/verify_corpus_provenance.py` re-derives all of it and, when the zip is present,
+extracts it and asserts the checked-in corpus is byte-identical to what OASIS published.
+Before this, the only way to answer "is this corpus current?" was to fetch both revisions and
+diff them by hand — which is how the CSD01→CSD02 delta above was established, and is not a
+procedure that survives contact with the next revision. The check runs in `scripts/local-gate.sh`
+and reports PARTIAL rather than OK if the zip is absent, so a shallow checkout cannot claim
+provenance it did not verify.
+
+It also prints a **REVISIT** line, and does so today. The trigger is procedural rather than an
+age nag: CSD02's public review closed on 2026-08-13, which is the step immediately before
+Committee Specification, so a newer revision is *expected* rather than merely possible. This is
+the seam that was missing — CSD02 was published in May 2026 and this report still described
+CSD01 in August, because nothing routed an OASIS revision to the document that carries the
+conformance claim. It is deliberately not a build failure: nothing is wrong with the corpus,
+and failing a build because a standards body kept to its own schedule would train people to
+scroll past the line.
+
+**PQC transcripts (separate corpus).** The OASIS mandatory/optional corpus above predates
+the PQC surface and exercises none of it. `kmip/conformance/pqc_corpus/` holds a vendored
+**42-transcript** subset of the OASIS `kmip-3-0-pqc-tests-03.zip` package (full set: 1452);
+its README carries the coverage matrix and the selection rationale. It replays through the
+same harness (`KMIP_REPLAY_CORPUS=conformance/pqc_corpus`) and has its own CI job.
 
 ## 2. TTLV codec compliance: ✅ 100%
 
@@ -145,8 +187,17 @@ substantially broader than what the corpus itself exercises: the
 asynchronous-subsystem ops (`Poll` / `Cancel` / `Process` / `Query
 Asynchronous Requests`, Phase 4) and `Create Split Key` / `Join Split
 Key` (Phase 3.3) are genuinely implemented but not invoked as live
-requests by any CSD01-era transcript — see §4.3/§4.4 for how those are
-proven instead.
+requests by any transcript in the OASIS mandatory/optional corpus — see
+§4.3/§4.4 for how those are proven instead.
+
+**Advertised surface equals implemented surface.** CSD02 defines 66 operations;
+this server implements **62** of them (`dispatcher::HANDLED_OPERATIONS`) and `Query`
+advertises exactly those 62 — both `ADVERTISED_UNIMPLEMENTED_*` lists in
+`ops/query.rs` are empty, and `tests/op_coverage_e2e.rs` pins the coverage checklist
+to the dispatcher table so the two cannot drift. The 4 unimplemented operations are
+`Notify` and `Put` (§6.2.2/§6.2.3 — server-to-client, see §5.1 item 10) and
+`DelegatedLogin` / `Re-Provision` (never implemented, never corpus-required). None of
+the four is advertised.
 
 ## 4. Dispatcher conformance: ✅ measured continuously
 
@@ -165,8 +216,9 @@ mechanisms declared out of scope for the `softhsmrustv3` backend
 
 ### 4.1 Vendor extension: ML-KEM shared secret (K10)
 
-KMIP 3.0 WD19 adds native `Encapsulate`/`Decapsulate` ops (this server
-implements them). For pre-WD19 clients the server ALSO overloads
+KMIP 3.0 CSD02 carries the native `Encapsulate`/`Decapsulate` ops (§6.1.22 /
+§6.1.15, codepoints `0x41` / `0x42`; this server implements both). For clients
+predating those ops the server ALSO overloads
 Encrypt/Decrypt for ML-KEM encapsulation/decapsulation as a documented
 vendor extension: the Encrypt response carries the encapsulation in
 `Data` and the derived shared secret under the `PQCToday-SharedSecret`
@@ -221,8 +273,8 @@ persistence can drift, and it's shared, not duplicated. A second Sign
 against the same key consumes a fresh leaf; exhausting the tree fails
 cleanly (`CKR_KEY_EXHAUSTED` → the matching KMIP `ResultReason`) rather
 than reusing a leaf, which would be a real one-time-signature security
-break. No OASIS CSD01 transcript exercises HSS/LMS (it predates the
-draft's PQC additions), so this is proven by `rust/`'s own test suite
+break. No transcript in the OASIS mandatory/optional corpus exercises
+HSS/LMS, so this is proven by `rust/`'s own test suite
 (a real 32/32-leaf exhaustion test, distinct leaf indices per sign,
 FFI/native byte-identical output) rather than corpus replay.
 
@@ -241,7 +293,7 @@ true. `Cancel` and `Process` handle the genuine race between a client
 request and the background executor correctly (a single locked
 check-and-set for Cancel-while-Submitted; Process blocks on a
 `Condvar` rather than risking a double-executed side effect). No
-OASIS CSD01 transcript exercises the async header, so this is proven
+OASIS transcript exercises the async header, so this is proven
 by `tests/async_ops_e2e.rs` (real dispatcher, real `Arc<Deps>` +
 background thread, byte-exact match against a synchronous baseline)
 and 7 deterministic unit tests in `ops::async_ops` pinning the exact
@@ -250,7 +302,7 @@ per-stage behavior.
 ### 4.5 Split Key: real secret-sharing math, not a placeholder (Phase 3.3)
 
 `Create Split Key` / `Join Split Key` (§6.1.12, §6.1.33) implement all
-four §11.54 methods from spec (XOR, Polynomial Sharing GF(2⁸)/GF(2¹⁶)/
+four §11.55 methods from spec (XOR, Polynomial Sharing GF(2⁸)/GF(2¹⁶)/
 Prime Field) in the engine layer, reachable only via opaque PKCS#11
 object handles — the KMIP server never sees a raw secret byte, split or
 whole. Building this surfaced and fixed a genuine bug in the KMIP 3.0
@@ -266,11 +318,27 @@ the threshold fails instead of silently reconstructing garbage).
 
 ### 5.1 Conformance claim — scope statement
 
-**The claim this subsystem makes: *"OASIS KMIP 3.0 (CSD01 corpus) + WD19 PQC extensions —
-Baseline Server profile conditions met except the parked server-to-client operations (item 10).
-Drafts, not a ratified Standard."*** Every actionable transcript in the official
-`kmip-profiles-v3.0.zip` test suite passes (97/97 non-deprecated), and the TTLV codec
-round-trips the full corpus byte-exactly.
+**The claim this subsystem makes: *"OASIS KMIP 3.0 CSD02 — all 13 Baseline Server profile
+conditions met. A committee draft, not a ratified Standard."*** Every actionable transcript in
+the official `kmip-profiles-v3.0-csd02.zip` test suite passes (97/97 non-deprecated), the TTLV
+codec round-trips the full corpus byte-exactly, and item 10 — the last open condition — was
+closed on 2026-08-13 (§5.1.4).
+
+One qualification attaches to that claim, stated in full below: the accepted
+deprecated-algorithm skips (§5.1.1). Two others have closed — the Quantum Safe
+Authentication Suite on 2026-08-12 (§5.2) and Baseline item 10 on 2026-08-13 (§5.1.4).
+What remains is a deliberate policy choice about broken cryptography, not a gap.
+
+### 5.1.1 Deprecated-algorithm deviation (accepted)
+
+5 of the 102 transcripts are skipped by policy, not by inability: `BL-M-12-30` and
+`BL-M-13-30` (classical DSA) and `SKFF-M-4-30` / `SKFF-M-8-30` / `SKFF-M-12-30` (3DES).
+DES, 3DES and DSA are deliberately absent from `KmipAlgorithm` — they are disallowed by
+NIST SP 800-131A r2 §1.2.1 and SP 800-186 §5.4, and this server refuses to implement
+broken cryptography to pass a conformance transcript. Registry and rationale:
+`kmip/DEPRECATED.md`. **This is an accepted, permanent deviation** (re-confirmed by the
+maintainer 2026-08-12), not a backlog item; the replay gate asserts exactly these 5 skips
+and fails on any sixth.
 
 Baseline Server profile conditions (kmip-profiles-v3.0 §5.1.2), checked against the spec's
 own 13-item list rather than approximated:
@@ -280,8 +348,8 @@ own 13-item list rather than approximated:
 | 1 | KMIP Server Implementation Conformance clauses | Met — the dispatcher/codec/op-handler layers below are the evidence |
 | 2–3 | System/User Objects: User, Group, Password Credential, Certificate | **Met** (Phase 6.1 correction — these were genuinely implemented all along via `CreateUser`/`CreateGroup`/`CreateCredential`; a stale Query-advertisement doc comment had mislabeled them "unimplemented" since before this server could actually create them) |
 | 4–8, 11–12 | Attribute/Message/Object/Operation data structures, message protocols | Met — evidenced by §2 codec conformance + §4 dispatcher conformance |
-| 9 | 32 named Client-to-Server Operations (Activate…Set Endpoint Role) | **Met** — every one of the 32 is a real, `HANDLED_OPERATIONS` handler. `Set Endpoint Role` itself accepts the identity request (role=Server) and rejects the actual §6.2 role switch with `Feature Not Supported (0x08)` per the §6.1.61.1 error table — this server has no client-mode machinery, which is the honest boundary of what "met" means here |
-| 10 | 5 named Server-to-Client Operations (Discover Versions, Notify, Put, Query, Set Endpoint Role, all issued *by the server*) | **Not met — the only unmet condition.** No server-initiated outbound channel exists; §6.2.2/§6.2.3 themselves leave the transport "unspecified", so there is no wire shape to build against yet. Deliberately parked as `HONEST_MAXIMUM_PLAN.md` Phase 5 |
+| 9 | 32 named Client-to-Server Operations (Activate…Set Endpoint Role) | **Met** — every one of the 32 is a real, `HANDLED_OPERATIONS` handler. `Set Endpoint Role` accepts the identity request (role=Server) and, since 2026-08-13, also performs the real role switch (role=Client) for an authenticated caller — see §5.1.4 |
+| 10 | 5 named Server-to-Client Operations (Discover Versions, Notify, Put, Query, Set Endpoint Role, all issued *by the server*) | **Met (2026-08-13).** All five are implemented and exercised on the §6.1.61 role-swapped channel: `Notify`/`Put` are pushed, and `Discover Versions`/`Query`/`Set Endpoint Role` are issued by the server with the answers actually changing what it does — see §5.1.4, which also records how each was proven non-vacuous |
 | 13 | Optional non-contradicting extensions | N/A (optional) |
 
 **Correction from the prior revision of this report:** that version speculated the async
@@ -292,6 +360,229 @@ separately, as message-layer plumbing, by item 11.a `Asynchronous Indicator`). P
 proved them as a fully independent piece of work with no dependency on the server-to-client
 channel, and item 10 remains — as it always was — a pure client-to-server-only gap: the server can
 answer `Poll` all day without ever being able to push a `Notify` to anyone.
+
+### 5.1.3 Item 10 — a deviation that was declared, then reopened and built
+
+This section is kept as the decision record, because the reasoning that produced a
+deviation is worth reading alongside the reasoning that overturned it one day later.
+
+**Original decision (2026-08-12): item 10 is a documented deviation, not a backlog
+item.** Three arguments were given:
+
+- CSD02 §6.2.2/§6.2.3 say each message is "only ever sent by a server to a client
+  **via means outside of the normal client request/response protocol**, using
+  information known to the server via unspecified configuration or administrative
+  mechanisms". So a server that spontaneously reaches an arbitrary client has no
+  normative transport to build against.
+- No KMIP 3.0 client exists anywhere that could receive such a message (§5.3), so
+  the feature could not be proven to work even if built.
+- Every other Baseline Server condition is met, and item 10 gates no
+  client-to-server capability.
+
+**Correction (2026-08-13), which overturned the first argument.** That reading was
+too broad, and the distinction is the whole thing. §6.1.61 `Set Endpoint Role`
+*does* define one channel precisely — the roles swap "over the current
+client-to-server communication channel … the communication channel remains as
+established". A client that has already connected can therefore volunteer to
+receive pushes, on the connection it opened, with no invented transport at all.
+What is genuinely unspecified is only the *unsolicited* case, which is not the
+case we need.
+
+The second argument fell with it: our own Python client is a real client, and once
+the channel is the client's own connection, that client can be taught to receive on
+it. What was left was a well-defined piece of work, and it was done — §5.1.4.
+
+**What survives of the original decision:** nothing blocks a *fully* conformant item
+10 on spec grounds. The remaining exclusions are ours, and they are named in §5.1.4
+rather than defended as deviations.
+
+### 5.1.4 Server-to-client push — what was built, and how it is proven
+
+Implemented 2026-08-13. The channel is the one §6.1.61 specifies, not an invented
+one: a client sends `Set Endpoint Role` with `Endpoint Role = Client`, and "the
+server assumes the client role, and the client assumes the server role, but the
+communication channel remains as established". The listener acts on that response
+by reversing direction on the very connection the client opened — so no server
+ever dials out, and the "which client, and where" question §6.2 leaves open never
+has to be answered.
+
+**Trigger.** Every attribute mutation (Add / Modify / Set / Adjust / Delete funnel
+through one `commit_mutation`) queues a `Notify` for the object's owner, carrying
+the Last Change Date §6.2.2 requires. Queued *after* the store update — a
+notification for a change that then failed to commit would be a lie — and queued
+rather than sent inline, because an attribute write must not block on, or fail
+because of, whether anyone is listening.
+
+**Scoping and authorisation.** Queues are per identity, exactly like
+`object_defaults`, so one tenant is never told about another's objects. The role
+switch is refused (`Permission Denied`) to an anonymous caller: notifications name
+real managed objects, and an unauthenticated connection has no identity to scope
+them to. Queues are capped per identity — an identity that never listens must not
+become an unbounded memory sink.
+
+**Delivery.** Each push waits for the client's empty-payload acknowledgement
+(§6.2.2/§6.2.3: "The client SHALL send a response … containing no payload") before
+the next is sent, so delivery is observable rather than assumed. A peer that closes
+instead of answering stops the loop rather than failing the connection — that is
+precisely the "prior knowledge that the client is not able to respond" case the
+same clause allows for.
+
+**Evidence.** `python-client/tests/test_server_to_client_push.py` runs against a
+real server over TLS and asserts a real client receives a `Notify` naming the
+object it changed, that a delivered notification is not delivered twice, that an
+anonymous client cannot take the server role, and that listening with nothing
+queued returns cleanly instead of hanging. Proven non-vacuous by disabling the
+queue hook: the delivery test fails, and the rest still pass, so it is measuring
+delivery specifically.
+
+#### The other three (2026-08-13) — the server asks, and acts on the answer
+
+The remaining three operations have the server interrogating the client. An
+earlier revision of this section said "nothing in this system needs them", and
+that was the wrong test: the question is not whether the server is curious, it
+is whether the answer changes what the server does. Each was built only because
+it does, and each is proven by that behaviour rather than by observing the
+question.
+
+| Operation | What the answer changes | Proven by |
+|---|---|---|
+| `Discover Versions` (§6.1.21) | No version in common → **nothing is pushed at all**, and the queue is left intact rather than consumed | a client answering "2.1 only" receives nothing, and the withheld notification is still delivered to the next listener |
+| `Query` (§6.1.39) | The peer's operation list gates what may be sent; an omitted operation is not pushed | a client that advertises `Put` but not `Notify` is sent no `Notify` |
+| `Set Endpoint Role` (§6.1.61) | The session **ends by handing the role back**, so "the server is done" is an event rather than an inference from a socket that stopped producing | the last message of a session is the handback — including a session where nothing was queued |
+
+**Silence is treated as unknown, not as incapable.** A conformant §6.2-only
+client answers an unexpected request with the empty acknowledgement §6.2.2
+defines. Reading that as "supports nothing" would withhold notifications it can
+plainly handle, inventing a requirement the spec does not make — so an
+unanswered question leaves the permissive default in place. An *explicit* empty
+list means the opposite, and the two stay distinguishable through the decoder;
+there is a test pinning exactly that, because collapsing them would silently
+invert the policy.
+
+Negotiation runs **once per swapped session**, before the first push. Per
+message it would add three round trips to every attribute change, for answers
+that cannot change mid-session.
+
+**Non-vacuity.** Each behaviour was disabled in turn and the suite re-run, to
+confirm the tests measure what they claim:
+
+| Sabotage | Expected failures | Observed |
+|---|---|---|
+| negotiation removed entirely | the 3 negotiation tests | exactly those 3; handback and the original push tests still passed |
+| version answer ignored | the version-gating test | exactly that 1 |
+| capability gate always true | the Query-gating test | exactly that 1 |
+| handback removed from both exits | the 2 handback tests | exactly those 2 |
+
+Each run recompiled (`Compiling pqctoday-kmip`) before testing — a sabotage that
+"passes" against a stale build has caught us out before on this codebase.
+
+With these three, **all five of item 10's operations are implemented, and
+Baseline Server §5.1.2 is met in full.**
+## 5.2 Quantum Safe Authentication Suite (Profiles CSD02 §3.3): all clauses met
+
+The KMIP server enforces the §3.3 quantum-safe TLS profile via
+`--tls-profile quantum-safe` (opt-in; `permissive` remains the default so existing
+deployments do not break). Clause by clause:
+
+| Clause | Requirement | Status |
+|---|---|---|
+| §3.3.1 | TLS 1.3 only; TLS 1.2 and below SHALL NOT | **Met** — `.with_protocol_versions(&[&TLS13])` |
+| §3.3.2 | Only `TLS13-CHACHA20-POLY1305-SHA256` + `TLS13-AES-256-GCM-SHA384` | **Met** — AES-128-GCM deliberately excluded |
+| §3.3.3 | Server SHALL support `X25519MLKEM768`, `SecP256r1MLKEM768`, **`SecP384r1MLKEM1024`**; SHALL NOT offer unlisted groups | **Met (2026-08-12)** — all three offered and interop-proven; classical groups absent, not deprioritised |
+| §3.3.4 | mTLS SHOULD; absent it the client SHALL send credentials | **Met** — the server refuses to start with neither `--auth-user` nor `--tls-client-ca` |
+| §3.3.5 | Port 5696 | **Met** |
+
+**How §3.3.3 was closed.** rustls 0.23 ships only two of the three: `0x11ed` has no
+`NamedGroup` variant, no `crypto::aws_lc_rs::kx_group` entry, and the generic `Hybrid`
+combinator behind the other two is a private module. The third is therefore composed in
+`src/server/secp384r1mlkem1024.rs` from the halves rustls does export publicly
+(`kx_group::SECP384R1`, `kx_group::MLKEM1024`) via the public `hybrid_component()` /
+`complete_hybrid_component()` seams. Wire order and combiner follow
+`draft-ietf-tls-ecdhe-mlkem` — classical element first (`p384 ‖ mlkem` in shares,
+`ss_p384 ‖ ss_mlkem` in the secret), cross-checked against this repo's independent
+PKCS#11-layer implementation in `rust/src/native/hybrid.rs`. No new cryptography was
+written; both halves are aws-lc-rs primitives already in use.
+
+**Evidence, and why self-tests were not enough.** A locally-composed hybrid that only
+round-trips against itself proves nothing about the wire format: reverse the combiner and
+both ends reverse it identically — perfect agreement, universal incompatibility. The gate
+is therefore a handshake against an implementation from outside this codebase, OpenSSL 3.6,
+which carries the group natively (`tests/secp384r1mlkem1024_interop.rs`, run by
+`scripts/local-gate.sh --tls-interop`). It asserts the negotiated group **by name**, so a
+silent fallback to the bare P-384 component cannot pass; requires application data to flow,
+so agreeing keys are demonstrated rather than assumed; and carries a negative control in
+which a classical-only client must be refused. The suite was verified non-vacuous by
+deliberately reversing the combiner — the interop test fails, as does the self round-trip.
+(That check first appeared to pass against a stale build; `--tls-interop` now `touch`es the
+source before building, because cargo has missed changes across the container bind mount.)
+
+**Wording rule, repo-wide (revised 2026-08-12)**: "§3.3 conformant" is now defensible for
+the server's TLS posture. Two caveats still attach to any wider claim, and neither is
+affected by this work: KMIP 3.0 is a **committee draft (CSD02)**, not a ratified Standard,
+and no third-party KMIP client exists to interop the protocol against (§5.3). Benchmark
+material keeps its "measured against" language — that phrasing was about measurement
+methodology, not about this gap.
+
+**Codepoint note.** At the managed-object layer `SecP384r1MLKEM1024` is registered at the
+vendor-extension codepoint `0x8000005e` (`kmip30/algos.rs`), because Profiles CSD02
+§3.3.3 mandates the TLS group while the Specification assigns it no Cryptographic
+Algorithm value — the two OASIS documents are genuinely out of step here. `X25519MLKEM768`
+(`0x5c`) and `SecP256r1MLKEM768` (`0x5d`) are published values and are used as such.
+Re-check at the next spec revision.
+
+## 5.3 Third-party interop: not currently possible
+
+No third-party interop test has ever been run, and it **cannot be run today**: KMIP 3.0
+has no compatible open-source client. PyKMIP implements ≤2.1, and this server pins
+protocol version 3.0. What exists instead, and what it is worth:
+
+- Full replay of the **official OASIS conformance transcripts** — the same request/response
+  pairs any conforming implementation is measured against. This is stronger than a
+  hand-written self-test but weaker than two independent implementations agreeing.
+- **Cross-implementation** checks between this repo's own C++ and Rust engines (ML-DSA-65,
+  SLH-DSA-128f, ML-KEM-768, HSS — both directions each). Two implementations, one author.
+- A **Python conformance client** that drives the server over real TLS, including
+  `assert_quantum_safe_channel()` (proof by exclusion: a classical-only handshake must fail).
+
+**Revisit trigger**: any OSS KMIP 3.0 client, or access to another vendor's 3.0 endpoint.
+Until then, no material should claim "interoperable" — only "conformant to the OASIS
+transcripts".
+
+### 5.3.1 Decision (2026-08-13): this is a stated limitation, not an open gap
+
+It has been carried as an outstanding item on the assumption that it was
+eventually actionable. It is not, and saying so is more useful than leaving it
+open.
+
+The blocker is structural, not a matter of effort. `SUPPORTED_VERSIONS`
+(`ops/lifecycle_and_protocol.rs`) is KMIP **3.0 only**; PyKMIP and every other
+open-source client implement ≤2.1. The version intersection is empty by
+construction, so no handshake between them can begin — there is nothing to fix
+at our end short of implementing a second protocol version.
+
+**The option considered and declined.** Adding KMIP 2.1 request framing would
+make PyKMIP a real counterparty for the operations both versions share. It was
+declined because 2.1 cannot carry the PQC surface this server exists for
+(`Encapsulate`/`Decapsulate`, the hybrid KEM codepoints, the PQC algorithm
+enumerations are all 3.0 additions), so the interop it would buy is interop on
+the part of the server that is least in question — while a partially-working
+second protocol version would be worse than none. That is a
+protocol-compatibility project justified by a customer needing 2.1, and should
+be planned as one if that customer appears. It is not a conformance remedy.
+
+**What independent evidence does exist**, so the limitation is not read as "no
+outside check at all":
+
+- The **TLS layer** is proven against OpenSSL 3.6.3, an implementation from
+  outside this codebase, asserting the negotiated group by name (§5.2).
+- The **PQC operations** replay against OASIS plugfest transcripts whose
+  expected values were produced by other vendors' implementations — 42 in CI,
+  the full 1452 verified byte-exact (§1).
+- The **profiles corpus** is the same 102 transcripts any conforming
+  implementation is measured against.
+
+What is missing is specifically a live KMIP 3.0 *protocol* peer, and that is a
+fact about the ecosystem in 2026, not about this server.
 
 ## 6. How to re-run the codec compliance test
 
@@ -321,9 +612,22 @@ landing.
 ```bash
 cd kmip
 cargo build --release --bin pqctoday-kmip
-python3 conformance/harness/dispatcher_replay.py
+python3 conformance/harness/dispatcher_replay.py   # 1. replay, writes REPLAY_REPORT.{md,json}
+python3 conformance/assert_replay_report.py        # 2. assert the exact PASS/skip breakdown
+python3 conformance/check_report_fresh.py          # 3. committed report must match a fresh run
+
+# The PQC transcripts (42, separate corpus, own CI job):
+KMIP_REPLAY_CORPUS=conformance/pqc_corpus python3 conformance/harness/dispatcher_replay.py
 ```
 
 Expected: `conformance/REPLAY_REPORT.md` reports 97 PASS / 0 FAIL / 5 SKIP_DEPRECATED / 102 total,
 with 0 in every other status category. Any `FAIL` or unexpected `SKIP_*` here is a real dispatcher
 regression — investigate before landing.
+
+**All three steps matter, and none of them is `cargo test`.** Step 1 exits non-zero on
+FAIL/ERROR; step 2 pins the exact numbers (`EXPECT_PASS = 97`, and every skip category
+other than the 5 deprecated must be zero) so a silent drop in coverage cannot pass as
+green; step 3 exists because a stale committed report once hid a 92→89 Locate regression.
+No Rust test reads the replay report — the gate is these Python scripts, run by
+`scripts/local-gate.sh` step 4 and by the `kmip-conformance` CI job. Running only
+`cargo test` proves nothing about corpus conformance.

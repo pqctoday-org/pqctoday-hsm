@@ -1,0 +1,43 @@
+
+#ifndef SOFTHSMV3_STATIC_EXPORT_H
+#define SOFTHSMV3_STATIC_EXPORT_H
+
+#ifdef SOFTHSMV3_STATIC_STATIC_DEFINE
+#  define SOFTHSMV3_STATIC_EXPORT
+#  define SOFTHSMV3_STATIC_NO_EXPORT
+#else
+#  ifndef SOFTHSMV3_STATIC_EXPORT
+#    ifdef softhsmv3_static_EXPORTS
+        /* We are building this library */
+#      define SOFTHSMV3_STATIC_EXPORT 
+#    else
+        /* We are using this library */
+#      define SOFTHSMV3_STATIC_EXPORT 
+#    endif
+#  endif
+
+#  ifndef SOFTHSMV3_STATIC_NO_EXPORT
+#    define SOFTHSMV3_STATIC_NO_EXPORT 
+#  endif
+#endif
+
+#ifndef SOFTHSMV3_STATIC_DEPRECATED
+#  define SOFTHSMV3_STATIC_DEPRECATED __attribute__ ((__deprecated__))
+#endif
+
+#ifndef SOFTHSMV3_STATIC_DEPRECATED_EXPORT
+#  define SOFTHSMV3_STATIC_DEPRECATED_EXPORT SOFTHSMV3_STATIC_EXPORT SOFTHSMV3_STATIC_DEPRECATED
+#endif
+
+#ifndef SOFTHSMV3_STATIC_DEPRECATED_NO_EXPORT
+#  define SOFTHSMV3_STATIC_DEPRECATED_NO_EXPORT SOFTHSMV3_STATIC_NO_EXPORT SOFTHSMV3_STATIC_DEPRECATED
+#endif
+
+/* NOLINTNEXTLINE(readability-avoid-unconditional-preprocessor-if) */
+#if 0 /* DEFINE_NO_DEPRECATED */
+#  ifndef SOFTHSMV3_STATIC_NO_DEPRECATED
+#    define SOFTHSMV3_STATIC_NO_DEPRECATED
+#  endif
+#endif
+
+#endif /* SOFTHSMV3_STATIC_EXPORT_H */

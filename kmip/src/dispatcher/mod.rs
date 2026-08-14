@@ -1049,7 +1049,7 @@ fn handle_payload(
             ResponsePayload::SetDefaults(set_defaults(deps, r, auth, correlation_id)?)
         }
         RequestPayload::SetEndpointRole(r) => {
-            ResponsePayload::SetEndpointRole(set_endpoint_role(deps, r, correlation_id)?)
+            ResponsePayload::SetEndpointRole(set_endpoint_role(deps, r, auth, correlation_id)?)
         }
         RequestPayload::DeriveKey(r) => {
             ResponsePayload::DeriveKey(derive_key(deps, r, auth, correlation_id)?)
@@ -1788,13 +1788,18 @@ mod tests {
         }
         let bytes = crate::kmip30::encode_response_message(&resp);
         assert_eq!(bytes.len() % 8, 0, "§9.6 alignment");
-        // Client (0x01) — the unsupported role switch.
+        // Client (0x01) — the real §6.1.61 role switch. This dispatch carries no
+        // credential, so the caller is anonymous and must be refused: a channel
+        // the server pushes managed-object attributes down has to belong to an
+        // identity those objects can be scoped to. (The accepted path needs a
+        // verified identity and is covered in `ops::allocation_and_config` and
+        // end to end in python-client/tests/test_server_to_client_push.py.)
         let resp = dispatch(&d, k4_decode(vec![], vec![item(0x01)]));
         assert_eq!(resp.batch_items[0].result_status, ResultStatus::OperationFailed);
         assert_eq!(
             resp.batch_items[0].result_reason,
-            Some(crate::error::ResultReason::FeatureNotSupported.to_wire_value()),
-            "role switch must fail with Feature Not Supported (0x08)",
+            Some(crate::error::ResultReason::PermissionDenied.to_wire_value()),
+            "an anonymous role switch must be refused with Permission Denied",
         );
     }
 

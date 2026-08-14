@@ -11,11 +11,12 @@
 #   2. kmip  cargo test -- --include-ignored  — the local-only suites CI skips
 #                                               (op-layer policy conformance …)
 #   3. rust  cargo test                       — softhsmrustv3 engine tests
-#   4. OASIS KMIP 3.0 replay + baseline assert + staleness guard (92/0/10)
+#   4. OASIS KMIP 3.0 replay + baseline assert + staleness guard (97/0/5)
 #   5. wasm  smoke.cjs                         — CACP bundle boots + round-trips
 #   6. (--cpp)  C++ ctest incl. the v3.2 compliance harness  [opt-in, slow]
 #   7. (--acvp-wasm)  20-suite ACVP wasm harness              [opt-in, slow]
-#   8. (--rust-p11)  Rust engine PKCS#11 v3.2 conformance (188 checks) [opt-in]
+#   8. (--rust-p11)  Rust engine PKCS#11 v3.2 conformance (257 checks) [opt-in]
+#   9. (--tls-interop) §3.3.3 hybrid TLS groups vs real OpenSSL 3.6  [opt-in]
 #
 # On success it writes .gate-ok-<HEAD-sha> so a pre-push hook can verify the
 # gate ran on the current commit.
@@ -40,12 +41,14 @@ AG_RUST="/ag/pqctoday-hsm/rust"
 RUN_CPP=0
 RUN_ACVP_WASM=0
 RUN_RUST_P11=0
+RUN_TLS_INTEROP=0
 for arg in "$@"; do
   case "$arg" in
     --cpp) RUN_CPP=1 ;;
     --acvp-wasm) RUN_ACVP_WASM=1 ;;
     --rust-p11) RUN_RUST_P11=1 ;;
-    --all) RUN_CPP=1; RUN_ACVP_WASM=1; RUN_RUST_P11=1 ;;
+    --tls-interop) RUN_TLS_INTEROP=1 ;;
+    --all) RUN_CPP=1; RUN_ACVP_WASM=1; RUN_RUST_P11=1; RUN_TLS_INTEROP=1 ;;
     *) echo "unknown flag: $arg" >&2; exit 2 ;;
   esac
 done
@@ -94,16 +97,32 @@ run_step "rust engine cargo test" \
   "cd $AG_RUST && RUST_MIN_STACK=134217728 cargo test --quiet 2>&1 | grep -E 'test result: FAILED|[1-9][0-9]* failed' && exit 1; \
    RUST_MIN_STACK=134217728 cargo test --quiet 2>&1 | grep -E 'test result' | awk '{p+=\$4; f+=\$6} END {print \"  \"p\" passed, \"f\" failed\"; exit (f>0)}'"
 
-run_step "OASIS KMIP 3.0 replay (92/0/10)" \
+# Cheap, and it runs BEFORE the replay on purpose: if the corpus is not the
+# corpus we think it is, the replay figure below is measuring something else.
+run_step "OASIS corpus provenance (102 transcripts vs the CSD02 zip)" \
+  "cd $AG_KMIP && python3 conformance/verify_corpus_provenance.py"
+
+run_step "OASIS KMIP 3.0 replay (97 PASS / 0 FAIL / 5 SKIP_DEPRECATED)" \
   "cd $AG_KMIP && cargo build --release --bin pqctoday-kmip --quiet && \
    mkdir -p target/release && ln -sf \$(readlink -f \${CARGO_TARGET_DIR:-/cargo-target}/release/pqctoday-kmip) target/release/pqctoday-kmip 2>/dev/null; \
    python3 conformance/harness/dispatcher_replay.py >/dev/null && \
    python3 conformance/assert_replay_report.py && \
    python3 conformance/check_report_fresh.py"
 
+# Does the wasm target still COMPILE? The smoke step below cannot answer that:
+# it runs the already-staged bundle, so a source change that breaks the wasm
+# build passes the gate and only surfaces at the next restage. That is not
+# hypothetical — #166 added `server/secp384r1mlkem1024.rs` (rustls, native-only)
+# without a cfg gate, the whole gate went green, and the breakage was found days
+# later when someone tried to rebuild the bundle. A type-check is cheap; a full
+# wasm build is not, so this checks rather than builds.
+run_step "wasm target still compiles (cargo check)" \
+  "cd /ag/pqctoday-hsm/wasm && cargo check --quiet --release --target wasm32-unknown-unknown 2>&1 | grep -E '^error' -A6 && exit 1; echo '  wasm32 type-check clean'"
+
 # wasm smoke runs on the HOST (node lives there, not in the Rust container).
-# Assumes the bundle is current; run scripts/build-kmip-wasm.sh after any wasm/
-# or kmip/ source change to regenerate it first.
+# Runs the STAGED bundle — see the check above for why that is not sufficient on
+# its own. Run scripts/build-kmip-wasm.sh after any wasm/ or kmip/ source change
+# to regenerate it.
 run_step_host "wasm CACP smoke" \
   "cd '$ROOT/wasm' && node smoke/smoke.cjs 2>&1 | tail -2 | grep -q 'PASS'"
 
@@ -143,13 +162,37 @@ if [[ $RUN_RUST_P11 == 1 ]]; then
   # real PKCS#11 ABI through the v3.2 conformance matrix. This is the Rust-engine
   # conformance evidence (report gap P2/T1) — the wasm build runs in the
   # container, the node driver on the host.
-  STEP=$((STEP+1)); say "step $STEP: Rust PKCS#11 v3.2 conformance (188 checks)"
+  STEP=$((STEP+1)); say "step $STEP: Rust PKCS#11 v3.2 conformance (257 checks)"
   if dexec "cd $AG_RUST && RUSTFLAGS='-C link-arg=-zstack-size=2097152' wasm-pack build --target bundler --out-dir pkg --dev -- --features acvp >/dev/null 2>&1" \
      && ( cd "$ROOT/rust" && node test_p11_conformance.js 2>&1 | grep -q 'RESULT: .* 0 failed' ); then
     ok "Rust PKCS#11 v3.2 conformance"
   else
     bad "Rust PKCS#11 v3.2 conformance"
   fi
+fi
+
+if [[ $RUN_TLS_INTEROP == 1 ]]; then
+  # §3.3.3 requires all three hybrid TLS groups. SecP384r1MLKEM1024 is composed
+  # locally (src/server/secp384r1mlkem1024.rs) because rustls 0.23 lacks it, and
+  # a locally-composed hybrid MUST be proven against an independent peer: a
+  # reversed combiner agrees perfectly with itself and with nobody else. OpenSSL
+  # 3.6 has the group natively, so it is that peer.
+  #
+  # The container ships OpenSSL 3.5.6, which has ML-KEM but NOT this hybrid, so
+  # point OPENSSL_BIN at a >= 3.6 build. One way, if a container on this host has
+  # one (e.g. the sandbox network image):
+  #   docker exec <ossl36-container> tar -cf - -C /usr/local ssl \
+  #     | docker exec -i $RUST_CONTAINER tar -xf - -C /usr/local
+  # then LD_LIBRARY_PATH=/usr/local/ssl/lib OPENSSL_BIN=/usr/local/ssl/bin/openssl.
+  # The test FAILS (never skips) if the tool is missing or too old.
+  OSSL_BIN="${OPENSSL_BIN:-/usr/local/ssl/bin/openssl}"
+  OSSL_LIB="${OPENSSL_LIB_DIR:-/usr/local/ssl/lib}"
+  # `touch` first: cargo has missed source changes across this bind mount, and a
+  # stale binary once made a deliberately-sabotaged combiner report all-green.
+  run_step "§3.3.3 hybrid TLS groups vs OpenSSL 3.6" \
+    "cd $AG_KMIP && touch src/server/secp384r1mlkem1024.rs && \
+     LD_LIBRARY_PATH=$OSSL_LIB OPENSSL_BIN=$OSSL_BIN RUST_MIN_STACK=134217728 \
+     cargo test --quiet --test secp384r1mlkem1024_interop -- --ignored --test-threads=1"
 fi
 
 # ── verdict ─────────────────────────────────────────────────────────────────
