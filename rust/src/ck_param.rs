@@ -494,6 +494,15 @@ ck_struct!(
 });
 
 ck_struct!(
+    /// `CK_SALSA20_CHACHA20_POLY1305_PARAMS` (v3.2 §6.21).
+    salsa20_poly1305, "CK_SALSA20_CHACHA20_POLY1305_PARAMS", {
+    P_NONCE: F::Ptr,
+    UL_NONCE_LEN: F::Ulong,
+    P_AAD: F::Ptr,
+    UL_AAD_LEN: F::Ulong,
+});
+
+ck_struct!(
     /// `CK_RSA_PKCS_OAEP_PARAMS` (v3.2 §6.4.4).
     oaep, "CK_RSA_PKCS_OAEP_PARAMS", {
     HASH_ALG: F::Ulong,
@@ -626,6 +635,20 @@ ck_struct!(
 });
 
 ck_struct!(
+    /// `CK_HSS_KEY_PAIR_GEN_PARAMS` (v3.2 §6.14) — `CK_HSS_LEVELS ulLevels`
+    /// followed by two eight-element `CK_LMS_TYPE`/`CK_LMOTS_TYPE` arrays.
+    /// Declared element by element rather than as one `Bytes(...)` blob so
+    /// that `LMS_0 + i` is a real field index and the per-element offsets
+    /// come from the ABI like every other field here.
+    hss_key_pair_gen, "CK_HSS_KEY_PAIR_GEN_PARAMS", {
+    UL_LEVELS: F::Ulong,
+    LMS_0: F::Ulong, LMS_1: F::Ulong, LMS_2: F::Ulong, LMS_3: F::Ulong,
+    LMS_4: F::Ulong, LMS_5: F::Ulong, LMS_6: F::Ulong, LMS_7: F::Ulong,
+    LMOTS_0: F::Ulong, LMOTS_1: F::Ulong, LMOTS_2: F::Ulong, LMOTS_3: F::Ulong,
+    LMOTS_4: F::Ulong, LMOTS_5: F::Ulong, LMOTS_6: F::Ulong, LMOTS_7: F::Ulong,
+});
+
+ck_struct!(
     /// A bare `CK_OBJECT_HANDLE` mechanism parameter
     /// (`CKM_CONCATENATE_BASE_AND_KEY`, v3.2 §6.43.3).
     object_handle_param, "CK_OBJECT_HANDLE", {
@@ -645,21 +668,32 @@ pub struct Mech {
     pub ul_parameter_len: usize,
 }
 
+/// A NULL `p_mechanism` yields `mechanism: 0`, which matches nothing in any
+/// dispatch table, so the call site's own `CKR_MECHANISM_INVALID` /
+/// `CKR_ARGUMENTS_BAD` path handles it. That is deliberate: the alternative
+/// at the five entry points that do not null-check first is dereferencing
+/// NULL, which is what the hand-rolled `*(p_mechanism as *const u32)` did.
+///
 /// # Safety
-/// `p_mechanism` must point to a readable `CK_MECHANISM`.
+/// `p_mechanism` must be NULL or point to a readable `CK_MECHANISM`.
 pub unsafe fn mech(p_mechanism: *const u8) -> Mech {
-    // A CK_MECHANISM is always fully present — it is a direct argument, not a
-    // caller-declared-length blob — so this is the one place the length is
-    // the struct's own size rather than something the caller told us.
-    let r = unsafe {
+    // A non-NULL CK_MECHANISM is always fully present — it is a direct
+    // argument, not a caller-declared-length blob — so this is the one place
+    // the length is the struct's own size rather than something the caller
+    // told us.
+    let r = match unsafe {
         ParamReader::new(
             p_mechanism,
             mechanism::LAYOUT.size(),
             &mechanism::LAYOUT,
             mechanism::FIELD_COUNT,
         )
-    }
-    .expect("CK_MECHANISM is a direct argument and is never short");
+    } {
+        Ok(r) => r,
+        Err(_) => {
+            return Mech { mechanism: 0, p_parameter: core::ptr::null(), ul_parameter_len: 0 };
+        }
+    };
     Mech {
         mechanism: unsafe { r.ulong32(mechanism::MECHANISM) },
         p_parameter: unsafe { r.ptr(mechanism::P_PARAMETER) },
@@ -735,6 +769,7 @@ mod tests {
             (&mac_general::LAYOUT, vec![0], 4, vec![0], 8),
             (&gcm::LAYOUT, vec![0, 4, 8, 12, 16, 20], 24, vec![0, 8, 16, 24, 32, 40], 48),
             (&chacha20::LAYOUT, vec![0, 4, 8, 12], 16, vec![0, 8, 16, 24], 32),
+            (&salsa20_poly1305::LAYOUT, vec![0, 4, 8, 12], 16, vec![0, 8, 16, 24], 32),
             (&oaep::LAYOUT, vec![0, 4, 8, 12, 16], 20, vec![0, 8, 16, 24, 32], 40),
             (&pss::LAYOUT, vec![0, 4, 8], 12, vec![0, 8, 16], 24),
             (&ecdh1::LAYOUT, vec![0, 4, 8, 12, 16], 20, vec![0, 8, 16, 24, 32], 40),
@@ -767,6 +802,13 @@ mod tests {
                 56,
             ),
             (&object_handle_param::LAYOUT, vec![0], 4, vec![0], 8),
+            (
+                &hss_key_pair_gen::LAYOUT,
+                (0..17).map(|i| i * 4).collect(),
+                68,
+                (0..17).map(|i| i * 8).collect(),
+                136,
+            ),
         ]
     }
 
@@ -1144,6 +1186,13 @@ mod tests {
         assert_eq!(hkdf::LAYOUT.offset(hkdf::B_EXPAND), 1);
         assert_ne!(hkdf::LAYOUT.offset(hkdf::B_EXPAND), WORD);
         assert_eq!(hkdf::LAYOUT.offset(hkdf::PRF_HASH_MECHANISM), WORD);
+    }
+
+    #[test]
+    fn a_null_mechanism_is_mechanism_zero_not_a_dereference() {
+        let m = unsafe { mech(core::ptr::null()) };
+        assert_eq!(m.mechanism, 0);
+        assert!(!m.has_param());
     }
 
     #[test]
