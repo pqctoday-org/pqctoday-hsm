@@ -44,8 +44,13 @@ src/bin/
 **Retained algorithms**: RSA, ECDSA, ECDH, EdDSA, AES, SHA-1/224/256/384/512, HMAC, CMAC.
 
 **PQC additions**: ML-DSA-44/65/87, ML-KEM-512/768/1024, SLH-DSA (SHA2/SHAKE × 12
-param sets), stateful HSS/LMS and XMSS/XMSS-MT, and hybrid KEMs
-(X25519MLKEM768 / SecP256r1MLKEM768, exposed via KMIP/CACP).
+param sets), and stateful HSS/LMS and XMSS/XMSS-MT. The named hybrid KEM
+groups (X25519MLKEM768 / SecP256r1MLKEM768) are a **Rust-engine + KMIP**
+feature — the combiner lives in `rust/src/native/hybrid.rs` and is exposed
+via KMIP/CACP; the C++ engine's contribution is the generic
+ECDH-as-KEM path (CKM_ECDH1_DERIVE under C_Encapsulate/DecapsulateKey),
+which a caller can combine with CKM_ML_KEM + CKM_CONCATENATE_BASE_AND_KEY
+to build the same constructions.
 
 **Second engine**: a Rust engine (`softhsmrustv3`, in `rust/`) provides the WASM
 crypto path and is the production backend for the KMIP server and CACP policy
@@ -72,7 +77,8 @@ engine. It has its own checked-in PKCS#11 v3.2 conformance evidence
 The original Phase 0–6 roadmap (import + strip legacy, OpenSSL 3.x EVP
 migration, ML-DSA, ML-KEM, Emscripten WASM, npm package, app integration) is
 **complete**, as is the later hardening/conformance work. Current release is
-tracked in `CHANGELOG.md` (**0.15.0**, 2026-07-18). Recent programs: composite/
+tracked in `CHANGELOG.md` (**0.23.0**, 2026-08-14 — always trust the
+CHANGELOG's top entry over any version echoed in this file). Recent programs: composite/
 hybrid certificate formats (LAMPS, Catalyst, RFC 9763, Chameleon), KMIP 3.0
 §9.10 Maximum Response Size enforcement, PKCS#11 v3.2 conformance evidence
 (real Split Key + asynchronous processing, honest `Query`), a follow-up

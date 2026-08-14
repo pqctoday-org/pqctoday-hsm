@@ -57,8 +57,15 @@ void DigestTests::testDigestInit()
 	rv = CRYPTOKI_F_PTR( C_OpenSession(m_initializedTokenSlotID, CKF_SERIAL_SESSION, NULL_PTR, NULL_PTR, &hSession) );
 	CPPUNIT_ASSERT(rv == CKR_OK);
 
+	// PKCS#11 v3.2 §5.12.1: "C_DigestInit can be called with pMechanism set to
+	// NULL_PTR to terminate an active message-digesting operation. If an
+	// operation has been initialized and it cannot be cancelled,
+	// CKR_OPERATION_CANCEL_FAILED must be returned." A NULL mechanism is a
+	// defined call form, not a bad argument — this assertion previously pinned
+	// the pre-conformance behaviour and failed once the engine was corrected.
+	// No digest operation is active here, so cancelling nothing succeeds.
 	rv = CRYPTOKI_F_PTR( C_DigestInit(hSession, NULL_PTR) );
-	CPPUNIT_ASSERT(rv == CKR_ARGUMENTS_BAD);
+	CPPUNIT_ASSERT(rv == CKR_OK);
 
 	rv = CRYPTOKI_F_PTR( C_DigestInit(CK_INVALID_HANDLE, &mechanism) );
 	CPPUNIT_ASSERT(rv == CKR_SESSION_HANDLE_INVALID);

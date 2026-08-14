@@ -165,7 +165,14 @@ bool OSSLEDPublicKey::setFromOSSL(const EVP_PKEY* inPKEY)
 	default:
 		return false;
 	}
-	setA(DERUTIL::raw2Octet(raw));
+	// E4 (2026-08-13). PKCS#11 v3.2's Edwards and Montgomery public-key tables
+	// define this attribute as "Public key bytes in little endian order as
+	// defined in [RFC 8032]/[RFC 7748]" — deliberately different wording from
+	// the Weierstrass table's "DER-encoding of ANSI X9.62 ECPoint value Q".
+	// That difference IS the specification, so the DER OCTET STRING wrapper
+	// this used to apply (34 bytes for Ed25519 where 32 are defined) is gone.
+	// createOSSLKey() below still accepts the wrapped form on input.
+	setA(raw);
 
 	return true;
 }
@@ -214,7 +221,25 @@ void OSSLEDPublicKey::createOSSLKey()
 	if (pkey != NULL) return;
 
 	ByteString der;
-	ByteString raw = DERUTIL::octet2Raw(a);
+	// Tolerant reader: the bare RFC 8032 / RFC 7748 bytes are what this engine
+	// now stores and what §6.3.17 requires a token to accept, but a DER OCTET
+	// STRING wrapper — this engine's own pre-2026-08-13 encoding, and what the
+	// spec's "MAY, in addition, support ... DER-encoded ECPoint" allows — must
+	// keep working. Prefer the bare form; unwrap only if that is the wrong size.
+	size_t expected = 0;
+	switch (nid) {
+	case NID_X25519:
+	case NID_ED25519: expected = X25519_KEYLEN; break;
+	case NID_X448:    expected = X448_KEYLEN;   break;
+	case NID_ED448:   expected = ED448_KEYLEN;  break;
+	default: break;
+	}
+	ByteString raw = a;
+	if (expected != 0 && raw.size() != expected)
+	{
+		ByteString unwrapped = DERUTIL::octet2Raw(a);
+		if (unwrapped.size() == expected) raw = unwrapped;
+	}
 	size_t len = raw.size();
 	if (len == 0) return;
 

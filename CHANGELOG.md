@@ -8,7 +8,116 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+_Nothing yet._
+
+---
+
+## [0.23.0] — 2026-08-14
+
+**PKCS#11 v3.2 conformance, adjudicated against the Standard rather than against
+the other engine.** Both engines were audited against the v3.2 OASIS Standard
+(03 June 2026) and its two normative references, which the repo did not have —
+`docs/refs/` now vendors all three. That absence had been producing wrong
+answers: conformance is defined by the **Profiles** document (§7 of the spec
+contains no technical requirement at all), and the session/login/object-access
+model lives in the **Usage Guide**.
+
+Two conclusions reversed as a result. **No profile mandates any mechanism** —
+every profile but one says "None specified" — so the 47 mechanism differences
+between the engines are product decisions, not defects. And **a token declares
+conformance by publishing a profile object**, which the C++ engine did not, so
+it could not claim conformance to anything.
+
+### If you are upgrading, read these three
+
+- **AES-CTR ciphertext from the native Rust library was wrong.** `CK_AES_CTR_PARAMS`
+  was decoded assuming a 4-byte `CK_ULONG`; on 64-bit that placed the counter
+  block four bytes early, so every AES-CTR ciphertext the native library ever
+  produced is not decryptable by OpenSSL, the C++ engine, or any conformant
+  implementation. Confirmed against **NIST SP 800-38A** vectors, not against the
+  other engine. Data encrypted through that path is unrecoverable without the
+  old code — no consumer in this repo is affected (KMIP calls the streaming API
+  directly; wasm genuinely has a 4-byte `CK_ULONG`), but an external application
+  loading the native library for `CKM_AES_CTR` is.
+- **EdDSA `phFlag` was read as four bytes over a one-byte `CK_BBOOL`.** A caller
+  setting `CK_FALSE` on an un-zeroed struct got Ed25519**ph** where it asked for
+  pure Ed25519 — a silently wrong signature from a valid call. This one was
+  never wasm-safe either.
+- **Stored and wire formats changed to match the spec.** Post-quantum private
+  keys are raw FIPS bytes rather than PKCS#8-wrapped; the ECDH-as-KEM ciphertext
+  is the raw ephemeral public key (65 bytes for P-256, not 67); Edwards and
+  Montgomery public points are bare little-endian rather than DER-wrapped; EC
+  keys now carry `CKA_EC_PARAMS`. Old artefacts will not parse. Both engines
+  still *accept* the old forms on read.
+
+### Fixed — security
+
+- **Token takeover.** Rust `C_InitToken` re-initialised an initialised token
+  without verifying the existing SO PIN (§5.5.7 MUST), and destroyed nothing.
+- **`CKA_WRAP_TEMPLATE`/`CKA_UNWRAP_TEMPLATE` did not exist in Rust.** A
+  wrapping key an application believed was partitioned was not (§5.18.3 SHALL).
+- **`CKA_WRAP_WITH_TRUSTED` and `CKA_COPYABLE` were not one-way**, so both locks
+  could be cleared and the protection bypassed.
+- **Stateful signature keys were rewindable.** LMS/XMSS state sat in a vendor
+  attribute exempt from mutation policy; rewinding a one-time key permits
+  forgery. Moved to the engine-private range; the snapshot format is bumped and
+  **old-format keys are refused**, never silently reinterpreted.
+- **C++ hash-based private keys were extractable** — §6.65.3/§6.66.4/§6.66.5
+  MUST sensitive + non-extractable (+ non-copyable for HSS).
+- **`CKA_ALLOWED_MECHANISMS` was parsed at the wrong element width**, so on
+  64-bit every restricted key silently also permitted mechanism 0. The KMIP
+  server packed it at the same wrong width — a key restricted to one mechanism
+  **permitted a different one**, and its existing "enforcement" test was vacuous.
+- **Logout invalidated nothing** in Rust, close-all-sessions did not log out,
+  five functions had no read-only-session gate, and security officers could read
+  private objects (Usage Guide §2.6.3).
+- **The KMIP-facing native surface enforced no mechanism restrictions at all**
+  on derive/agree/hybrid/split-key — the lock was on one of two doors.
+
+### Fixed — silent wrong results
+
+- Unrecognised or absent EC curves returned **a P-256 key with `CKR_OK`**; Ed448
+  requests silently yielded Ed25519; XMSS parameter sets were read from the
+  wrong place in **both** engines, in opposite directions; searches widened to
+  match everything; `C_GetMechanismInfo` ignored `slotID`; the ChaCha20 block
+  counter could not be set.
+
 ### Added
+
+- **A cross-engine differential harness** (`tests/differential/`, run via
+  `scripts/run-differential-harness.sh`): 49 scenarios, 3991 observations, and a
+  52-entry exception list where every legal divergence carries a spec citation.
+  It found the AES-CTR defect on its first real run.
+- **Fork-tolerant semantics** are now explicit and advertised via
+  `CKF_INTERFACE_FORK_SAFE`, with the RNG reseeded in the child — a hazard the
+  Standard does not mention. The claim tracks configuration: `reset_on_fork`
+  clears the flag.
+- Profile object (`CKO_PROFILE` / `CKP_BASELINE_PROVIDER`) on the C++ engine.
+
+### Verified
+
+| Gate | Result |
+|---|---|
+| C++ v3.2 reference suite | 503 pass / 0 fail (from 349) |
+| C++ unit suite | 8/8, 182 cases |
+| Rust suite | 390 pass / 0 fail (from 346) |
+| KMIP suite | 860 pass / 0 fail |
+| OASIS main replay | 97 pass / 0 fail / 5 deprecated-skip |
+| OASIS PQC corpus | 42 / 42 |
+| Differential harness | 0 uncovered |
+
+Every fix ships with a test demonstrated failing **before** it. Several existing
+tests had encoded the defects and were corrected rather than accommodated.
+
+### Known open
+
+19 recorded harness defects remain a worklist. The harness drives the Cryptoki
+surface only, so the native path KMIP uses is untested. The engines disagree on
+`CKA_CHECK_VALUE` for unwrapped private keys and the spec does not cover the
+case — it needs a human ruling. A shared typed reader that would make the
+`CK_ULONG`-width class unrepresentable is recommended and unbuilt.
+
+### Added — from the KMIP item-10 work merged into this release
 
 - **KMIP 3.0 Baseline Server profile: all 13 conditions now met.** Item 10 names
   five server-to-client operations. `Notify` and `Put` were built earlier; the
@@ -89,6 +198,65 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `scripts/local-gate.sh` reported the replay as "92/0/10" while asserting
   97/0/5, and the Rust PKCS#11 conformance as 188 checks where the committed
   report records 257.
+
+PKCS#11 v3.2 audit remediation (2026-08-13; findings N1–N15 from the
+audit at `786d56e`).
+
+### Fixed
+
+- **XMSS SHAKE parameter-set numbering collision (N1, HIGH).** The Rust
+  engine defined `CKP_XMSS_SHAKE_10/16/20_256` as `0x11/0x12/0x13` and ran
+  the SHAKE128-based RFC 8391 sets under them — but in the IANA "XMSS
+  Signatures" registry (the numbering the C++ engine's xmss-reference uses
+  raw) those ids mean XMSS-**SHAKE256**_16_256 / SHAKE256_20_256 /
+  SHAKE256_10_192, and the SHAKE128 sets are `0x07/0x08/0x09`. Rust now uses
+  the standard numbering, and `0x11–0x13` are **implemented as the real
+  SHAKE256 parameter sets** (not rejected).
+  - **Token migration impact:** Rust-engine XMSS keys generated under the
+    old `0x11–0x13` ids will FAIL sign/verify after this upgrade (the stored
+    key material's embedded OID no longer matches the algorithm the id now
+    selects — a clean error, never a silent wrong-algorithm run). Re-label
+    such keys' `CKA_PARAMETER_SET`/`CKA_XMSS_PARAM_SET` to `0x07–0x09` to
+    keep using them. SHA2-based XMSS keys (`0x01–0x03`) are unaffected.
+  - **Hub note:** the pqctoday-hub's vendored wasm engine must be rebuilt
+    to pick this up (not done here).
+- **C++ ECDH-as-KEM not advertised (N3).** `C_GetMechanismInfo` for
+  `CKM_ECDH1_DERIVE` now reports `CKF_ENCAPSULATE|CKF_DECAPSULATE` alongside
+  `CKF_DERIVE`, matching what `C_EncapsulateKey`/`C_DecapsulateKey` actually
+  dispatch. The cofactor variant stays derive-only.
+- **`CKA_ALLOWED_MECHANISMS` now enforced on every KEM path (N5).** C++
+  routed no KEM arm through the shared `isMechanismPermitted` gate; Rust's
+  FrodoKEM/Classic-McEliece vendor arms returned before its shared check.
+  All arms (ML-KEM, ECDH, vendor KEMs) now refuse a disallowed mechanism
+  with `CKR_MECHANISM_INVALID`, with negative tests on both engines.
+- **Constants-gate blind spots (N9).** `scripts/check_pkcs11_constants.py`
+  now validates `src/lib/vendor_mechanisms.h` and sha256-pins
+  `src/lib/pkcs11/pkcs11f.h` against a newly vendored canonical OASIS v3.2
+  function header (`docs/refs/pkcs11f-canonical-v3.2.h`); its docstring no
+  longer overstates coverage.
+- **`constants.js` was missing the ChaCha20 mechanisms (N10).**
+  `CKM_CHACHA20_KEY_GEN`/`CKM_CHACHA20`/`CKM_CHACHA20_POLY1305` added
+  (values from the canonical header) and gate-validated.
+- **Stale documentation (N2/N6/N15).** Rust conformance report's false
+  `C_SignRecoverInit` stub row and mechanism count corrected;
+  `docs/rust-engine.md`'s export count (45 → 102 wasm + 104-function C ABI)
+  and six wrongly-"Not implemented" rows corrected; spec citations moved to
+  the PKCS#11 v3.2 OS (2026-06-03); `CLAUDE.md` release pointer and
+  hybrid-KEM attribution fixed.
+
+### Added
+
+- **Rust ECDH-as-KEM (N4, parity restored).** `CKM_ECDH1_DERIVE` under
+  `C_EncapsulateKey`/`C_DecapsulateKey` for P-256/P-384/P-521,
+  wire-compatible with the C++ engine (DER-wrapped ephemeral point as the
+  ciphertext, raw SEC1 accepted on decapsulation, raw X-coordinate shared
+  secret); advertised via `CKF_ENCAPSULATE|CKF_DECAPSULATE` and covered by
+  per-curve round-trip + negative tests. secp256k1 and X25519/X448-as-KEM
+  remain C++-only (recorded divergence).
+- **Engine-divergence record (N4/N11/N12)** appended to
+  `docs/gap-analysis-cpp-rust-realignment-2026-07-25.md`: C_DigestKey /
+  C_SeedRandom behavior differences (both spec-legal) and the
+  non-portable hybrid-combiner building blocks between the two engines.
 
 ---
 

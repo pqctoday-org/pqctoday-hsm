@@ -208,9 +208,16 @@ pub fn decapsulate(
     // transitive gate is NOT enough, since this function reads
     // classical_priv's CKA_VALUE itself rather than delegating.
     let access = crate::state::resolve_session_access(session).map_err(|_| CKR_KEY_HANDLE_INVALID)?;
-    let scalar = crate::state::with_object_checked(&access, classical_priv, crate::state::get_object_value_from)
-        .map_err(|_| CKR_KEY_HANDLE_INVALID)?
-        .ok_or(CKR_KEY_HANDLE_INVALID)?;
+    // S12 (2026-08-13) — §4.8 Table 13 on the classical half. The ML-KEM
+    // half is checked transitively by native::encrypt::decapsulate below;
+    // this direct read is the one place a transitive gate is not enough,
+    // for the mechanism check exactly as for the isolation gate.
+    let scalar = crate::state::checked_value_for_mech(
+        &access,
+        classical_priv,
+        CKM_ECDH1_DERIVE,
+        CKR_KEY_HANDLE_INVALID,
+    )?;
     match hybrid {
         Hybrid::X25519MlKem768 => {
             if ciphertext.len() != MLKEM768_CT + X25519_LEN {

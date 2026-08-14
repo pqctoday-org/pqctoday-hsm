@@ -79,9 +79,15 @@
 #include "P11Objects.h"
 #include "odd.h"
 
-// CKC_OPENPGP was in PKCS#11 2.x but removed from v3.2 headers.
+// C3 (2026-08-13): the OpenPGP certificate type was carried at 0x00000003, an
+// UNASSIGNED OASIS codepoint below CKC_VENDOR_DEFINED — squatting a value the
+// standard may allocate to something else. PKCS#11 v3.2 removed CKC_OPENPGP,
+// and §2 reserves 0x80000000 upwards for vendors, so this fork's OpenPGP
+// certificate type now lives there. Applications that used the old value get
+// CKR_ATTRIBUTE_VALUE_INVALID, which is the correct answer for a codepoint this
+// library does not define.
 #ifndef CKC_OPENPGP
-#define CKC_OPENPGP 0x00000003UL
+#define CKC_OPENPGP (CKC_VENDOR_DEFINED | 0x00000003UL)
 #endif
 
 #if defined(WITH_OPENSSL)
@@ -98,6 +104,8 @@
 #include <process.h>
 #else
 #include <unistd.h>
+#include <time.h>
+#include <openssl/rand.h>
 #endif
 
 // Named constants shared across SoftHSM split translation units.
@@ -361,6 +369,29 @@ SoftHSM* SoftHSM::i()
 			instance.reset(NULL);
 			instance.reset(new SoftHSM());
 		}
+		else
+		{
+			/* Default: fork-tolerant semantics (CK_INTERFACE Table 11).
+			 * The child keeps its copy-on-write copy of every session,
+			 * handle, login state and session object, which is what the
+			 * flag promises.
+			 *
+			 * The Standard says nothing about the one thing that copy
+			 * makes dangerous: the child also inherits the deterministic
+			 * random-generator state, so without intervention two
+			 * children of one parent emit IDENTICAL streams — repeated
+			 * ECDSA nonces, hence recoverable private keys, with no
+			 * visible symptom. OpenSSL 3.x does detect forks and reseed,
+			 * but that is a property of how the linked libcrypto was
+			 * built (it can be compiled out), not of this engine. Making
+			 * the reseed explicit here turns the guarantee into one this
+			 * code owns and can be tested for.
+			 *
+			 * RAND_poll() pulls fresh operating-system entropy; the pid
+			 * and clock are mixed in with an entropy estimate of zero,
+			 * as a distinguishing nonce rather than a claimed source. */
+			instance->reseedAfterFork();
+		}
 	}
 
 	return instance.get();
@@ -417,12 +448,15 @@ CK_RV SoftHSM::C_SeedRandom(CK_SESSION_HANDLE hSession, CK_BYTE_PTR pSeed, CK_UL
 {
 	if (!isInitialised) return CKR_CRYPTOKI_NOT_INITIALIZED;
 
-	if (pSeed == NULL_PTR) return CKR_ARGUMENTS_BAD;
-
-	// Get the session
+	// C2 (2026-08-13) — session-handle precedence. The session-handle error
+	// class takes precedence over argument and capability codes, so the handle
+	// is validated BEFORE the buffer argument; this used to answer
+	// CKR_ARGUMENTS_BAD to a call that named a session that does not exist.
 	auto sessionGuard = handleManager->getSessionShared(hSession);
 	Session* session = sessionGuard.get();
 	if (session == NULL) return CKR_SESSION_HANDLE_INVALID;
+
+	if (pSeed == NULL_PTR) return CKR_ARGUMENTS_BAD;
 
 	// Get the RNG
 	RNG* rng = CryptoFactory::i()->getRNG();
@@ -440,12 +474,15 @@ CK_RV SoftHSM::C_GenerateRandom(CK_SESSION_HANDLE hSession, CK_BYTE_PTR pRandomD
 {
 	if (!isInitialised) return CKR_CRYPTOKI_NOT_INITIALIZED;
 
-	if (pRandomData == NULL_PTR) return CKR_ARGUMENTS_BAD;
-
-	// Get the session
+	// C2 (2026-08-13) — session-handle precedence. The session-handle error
+	// class takes precedence over argument and capability codes, so the handle
+	// is validated BEFORE the buffer argument; this used to answer
+	// CKR_ARGUMENTS_BAD to a call that named a session that does not exist.
 	auto sessionGuard = handleManager->getSessionShared(hSession);
 	Session* session = sessionGuard.get();
 	if (session == NULL) return CKR_SESSION_HANDLE_INVALID;
+
+	if (pRandomData == NULL_PTR) return CKR_ARGUMENTS_BAD;
 
 	// Get the RNG
 	RNG* rng = CryptoFactory::i()->getRNG();
@@ -493,9 +530,13 @@ CK_RV SoftHSM::C_CancelFunction(CK_SESSION_HANDLE hSession)
 // Wait or poll for a slot event on the specified slot
 CK_RV SoftHSM::C_WaitForSlotEvent(CK_FLAGS flags, CK_SLOT_ID_PTR /*pSlot*/, CK_VOID_PTR /*pReserved*/)
 {
-	if (!(flags & CKF_DONT_BLOCK)) return CKR_FUNCTION_NOT_SUPPORTED;
-
+	// C2 — §5.4 makes C_Initialize, C_GetFunctionList, C_GetInterfaceList and
+	// C_GetInterface the ONLY functions callable before initialisation, so the
+	// initialisation check outranks the capability check on flags. This tested
+	// flags first and answered CKR_FUNCTION_NOT_SUPPORTED to a pre-init caller.
 	if (!isInitialised) return CKR_CRYPTOKI_NOT_INITIALIZED;
+
+	if (!(flags & CKF_DONT_BLOCK)) return CKR_FUNCTION_NOT_SUPPORTED;
 
 	// SoftHSM slots don't change after it's initialised. With the
 	// exception of when a slot is initialised and then getSlotList() is
@@ -525,6 +566,35 @@ bool SoftHSM::isMechanismPermitted(OSObject* key, CK_MECHANISM_TYPE mechanism)
 	} else {
 		return true;
 	}
+}
+
+// Called once per detected fork on the fork-tolerant path. Idempotent by way of
+// the forkID update: subsequent calls in the same process no longer detect a
+// fork, so the reseed happens once, before the child's first random draw (every
+// C_* entry point reaches this through SoftHSM::i()).
+void SoftHSM::reseedAfterFork(void)
+{
+	RAND_poll();
+
+	struct {
+		long pid;
+		long long tick;
+		const void* self;
+	} nonce;
+#ifdef _WIN32
+	nonce.pid = (long)_getpid();
+#else
+	nonce.pid = (long)getpid();
+#endif
+	nonce.tick = (long long)time(NULL);
+	nonce.self = (const void*)this;
+	RAND_add(&nonce, (int)sizeof(nonce), 0.0);
+
+#ifdef _WIN32
+	forkID = _getpid();
+#else
+	forkID = getpid();
+#endif
 }
 
 bool SoftHSM::detectFork(void) {

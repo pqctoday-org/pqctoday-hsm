@@ -30,6 +30,51 @@ use super::attrs::UsageMask;
 /// `CK_ULONG`; we model it as `u32` because every codepoint we ship fits.
 pub type CkMechanismType = u32;
 
+/// Pack a mechanism list into the byte layout `CKA_ALLOWED_MECHANISMS`
+/// expects — a `CK_MECHANISM_TYPE[]` at **the engine's own element width**.
+///
+/// PKCS#11 v3.2 §4.8 Table 13: *"the number of mechanisms in the array is the
+/// ulValueLen component of the attribute divided by the size of
+/// CK_MECHANISM_TYPE"*. `CK_MECHANISM_TYPE` is `CK_ULONG`, so the stride is
+/// ABI-dependent: 8 bytes on the 64-bit native `pqctoday-kmip` binary, 4 on
+/// wasm32. Modelling the *value* as `u32` (above) is fine; modelling the
+/// *stride* as 4 is not.
+///
+/// **Why this function exists.** All three call sites used to write
+/// `mechs.iter().flat_map(|m| m.to_le_bytes())`, i.e. a hardcoded 4-byte
+/// stride, while the engine strides at `MECHANISM_TYPE_SIZE`. Measured
+/// against the post-S9 engine on this 64-bit host:
+///
+/// * a list whose 4-byte packing is **not** a whole multiple of 8 (any odd
+///   mechanism count — 1, 3, 5, …) was refused with
+///   `CKR_ATTRIBUTE_VALUE_INVALID`. Because the write is deliberately
+///   best-effort (`emit_pkcs11_result` logs and moves on), the refusal never
+///   reached the client and the key was left with **no restriction at all** —
+///   a fail-open on a security control. Observed: restrict to `[CKM_AES_GCM]`,
+///   then `native::encrypt(CKM_AES_CBC)` **succeeded**;
+/// * an even count passed the length gate but parsed at half length, silently
+///   dropping every second entry. Observed: `[CKM_AES_KEY_WRAP,
+///   CKM_AES_KEY_WRAP_KWP]` parsed as `[CKM_AES_KEY_WRAP]`, and the dropped
+///   `CKM_AES_KEY_WRAP_KWP` was then refused `CKR_MECHANISM_INVALID`.
+///
+/// The stride is read from `softhsmrustv3::state::MECHANISM_TYPE_SIZE` — the
+/// same constant the engine's parser and its length-shape check use — rather
+/// than hardcoded to 8, so a future ABI change cannot re-open the gap. Each
+/// element is little-endian in its low 4 bytes, which is exactly what
+/// `state::parse_allowed_mechanisms` reads back.
+pub fn pack_allowed_mechanisms(mechs: &[CkMechanismType]) -> Vec<u8> {
+    let stride = softhsmrustv3::state::MECHANISM_TYPE_SIZE;
+    debug_assert!(
+        stride >= core::mem::size_of::<CkMechanismType>(),
+        "CK_MECHANISM_TYPE narrower than the codepoints this crate emits"
+    );
+    let mut out = vec![0u8; mechs.len() * stride];
+    for (i, m) in mechs.iter().enumerate() {
+        out[i * stride..i * stride + 4].copy_from_slice(&m.to_le_bytes());
+    }
+    out
+}
+
 /// KMIP 3.0 `Recommended Curve` enumeration values (spec §4.16, tag `0x420075`).
 /// Values verified against `spec/oasis-kmip-3.0/kmip-spec-3.0-tags-enums.json` —
 /// used to resolve an ECDH `CreateKeyPair`'s curve. X25519/X448 key agreement is

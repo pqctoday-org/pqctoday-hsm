@@ -898,8 +898,20 @@ CK_RV P11AttrUniqueId::updateAttr(Token* /*token*/, bool /*isPrivate*/, CK_VOID_
 // Set default value — no profile (0)
 bool P11AttrProfileId::setDefault()
 {
+	// Profiles v3.2 §3: 0 is CKP_INVALID_ID. It is only ever a placeholder here
+	// because P11ProfileObj always writes a real id immediately afterwards; this
+	// attribute no longer exists on any other object class.
 	OSAttribute attr((unsigned long)0);
 	return osobject->setAttribute(type, attr);
+}
+
+CK_RV P11AttrProfileId::updateAttr(Token* /*token*/, bool /*isPrivate*/, CK_VOID_PTR pValue, CK_ULONG ulValueLen, int /*op*/)
+{
+	if (ulValueLen != sizeof(CK_ULONG))
+		return CKR_ATTRIBUTE_VALUE_INVALID;
+
+	osobject->setAttribute(type, *(CK_ULONG*)pValue);
+	return CKR_OK;
 }
 
 /*****************************************

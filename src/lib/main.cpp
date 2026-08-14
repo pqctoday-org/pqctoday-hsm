@@ -40,6 +40,7 @@
 #include "fatal.h"
 #include "cryptoki.h"
 #include "SoftHSM.h"
+#include "Configuration.h"
 #include "MutexFactory.h"
 #include <cstring>
 
@@ -347,11 +348,28 @@ static CK_FUNCTION_LIST_3_2 functionList32 =
 // Interface table exposed via C_GetInterfaceList / C_GetInterface.
 // Order: v2.40 (legacy), v3.0, v3.2 (default — highest version).
 // Per PKCS#11 v3.0 spec §5.1.3.2, the default interface is the highest version.
+// CKF_INTERFACE_FORK_SAFE (CK_INTERFACE Table 11): "The returned interface will
+// have fork tolerant semantics. When the application forks, each process will
+// get its own copy of all session objects, session states, login states, and
+// encryption states. Each process will also maintain access to token objects
+// with their previously supplied handles."
+//
+// This engine keeps every one of those across a fork by default: the child's
+// copy-on-write address space carries the session manager, handle manager and
+// session object store, and SoftHSM::i() reseeds the random generator on fork
+// detection so the child cannot continue the parent's stream. The compliance
+// suite's Fork category proves each clause against a real fork() rather than
+// asserting the flag is set.
+//
+// The library.reset_on_fork setting opts OUT of that model — it destroys the
+// singleton and everything in it, which is the Usage Guide §2.5.2 default where
+// a child must call C_Initialize for itself. When it is enabled the flag is
+// cleared in C_Initialize, because the promise above would then be false.
 static CK_INTERFACE interfaces[] =
 {
-	{ (CK_UTF8CHAR_PTR)"PKCS 11", (CK_VOID_PTR)&functionList,   0 },
-	{ (CK_UTF8CHAR_PTR)"PKCS 11", (CK_VOID_PTR)&functionList30, 0 },
-	{ (CK_UTF8CHAR_PTR)"PKCS 11", (CK_VOID_PTR)&functionList32, 0 }
+	{ (CK_UTF8CHAR_PTR)"PKCS 11", (CK_VOID_PTR)&functionList,   CKF_INTERFACE_FORK_SAFE },
+	{ (CK_UTF8CHAR_PTR)"PKCS 11", (CK_VOID_PTR)&functionList30, CKF_INTERFACE_FORK_SAFE },
+	{ (CK_UTF8CHAR_PTR)"PKCS 11", (CK_VOID_PTR)&functionList32, CKF_INTERFACE_FORK_SAFE }
 };
 static const CK_ULONG interfaceCount = 3;
 
@@ -364,7 +382,20 @@ PKCS_API CK_RV C_Initialize(CK_VOID_PTR pInitArgs)
 #endif
 	try
 	{
-		return SoftHSM::i()->C_Initialize(pInitArgs);
+		CK_RV rv = SoftHSM::i()->C_Initialize(pInitArgs);
+
+		// The configuration is only readable once C_Initialize has loaded it.
+		// library.reset_on_fork opts out of fork-tolerant semantics (it destroys
+		// the singleton, and with it every session, handle and login state a
+		// forked child would otherwise keep), so the capability must stop being
+		// advertised in that configuration rather than become a false claim.
+		if (rv == CKR_OK && Configuration::i()->getBool("library.reset_on_fork", false))
+		{
+			for (CK_ULONG i = 0; i < interfaceCount; i++)
+				interfaces[i].flags &= ~((CK_FLAGS)CKF_INTERFACE_FORK_SAFE);
+		}
+
+		return rv;
 	}
 	catch (...)
 	{
@@ -1931,12 +1962,33 @@ PKCS_API CK_RV C_GetInterfaceList(CK_INTERFACE_PTR pInterfacesList,
 }
 
 // Return a specific interface by name and optional version.
-// Per spec §5.1.3.2:
-//   - ppInterface must not be NULL.
-//   - flags must be 0 (no flags are defined yet).
-//   - pInterfaceName == NULL  → return the default interface (highest version).
-//   - pVersion == NULL        → return the highest version of the named interface.
-//   - Unknown name or version → CKR_ARGUMENTS_BAD.
+// Per §5.4.6 there are THREE independent match rules, each of which the caller
+// may leave unconstrained:
+//   1. "If pInterfaceName is not NULL_PTR, the name of the interface returned
+//       must match. If pInterfaceName is NULL_PTR, the cryptoki library can
+//       return a default interface of its choice"
+//   2. "If pVersion is not NULL_PTR, the version of the interface returned must
+//       match. If pVersion is NULL_PTR, the cryptoki library can return an
+//       interface of any version"
+//   3. "If flags is non-zero, the interface returned must match all of the
+//       supplied flag values (but may include additional flags not specified).
+//       If flags is 0, the cryptoki library can return an interface with any
+//       flags"
+//
+// C2 (2026-08-13): rule 3 was not implemented — ANY non-zero flags value was
+// rejected as a malformed argument, so the library could never have honoured a
+// flag it did support, and the specification's own worked example (which passes
+// CKF_INTERFACE_FORK_SAFE) was answered CKR_ARGUMENTS_BAD.
+//
+// This build declares CKF_INTERFACE_FORK_SAFE (see the interfaces table above
+// for what that promise rests on, and the compliance suite's Fork category for
+// the fork() that proves each clause). library.reset_on_fork clears it, because
+// that setting destroys the state the flag says a child keeps.
+//
+// When a requested flag matches no interface the answer is CKR_FUNCTION_FAILED
+// ("nothing to return"), which the return list permits, rather than
+// CKR_ARGUMENTS_BAD ("your argument is invalid"), which would misdescribe a
+// well-formed request for a capability this build does not have.
 PKCS_API CK_RV C_GetInterface(CK_UTF8CHAR_PTR pInterfaceName,
 	CK_VERSION_PTR pVersion,
 	CK_INTERFACE_PTR_PTR ppInterface,
@@ -1945,43 +1997,51 @@ PKCS_API CK_RV C_GetInterface(CK_UTF8CHAR_PTR pInterfaceName,
 	if (ppInterface == NULL_PTR)
 		return CKR_ARGUMENTS_BAD;
 
-	if (flags != 0)
+	// Rule 1: an unknown name can never match.
+	if (pInterfaceName != NULL_PTR &&
+	    strcmp((const char*)pInterfaceName, "PKCS 11") != 0)
 		return CKR_ARGUMENTS_BAD;
 
-	// NULL name → return default interface (v3.2, the highest supported version)
-	if (pInterfaceName == NULL_PTR)
+	// Rule 2: an unknown version can never match.
+	bool versionKnown = (pVersion == NULL_PTR);
+	if (pVersion != NULL_PTR)
 	{
-		*ppInterface = &interfaces[2];
-		return CKR_OK;
+		versionKnown =
+			(pVersion->major == 2 && pVersion->minor == 40) ||
+			(pVersion->major == 3 && pVersion->minor == 0) ||
+			(pVersion->major == 3 && pVersion->minor == 2);
 	}
-
-	// Only "PKCS 11" is supported
-	if (strcmp((const char*)pInterfaceName, "PKCS 11") != 0)
+	if (!versionKnown)
 		return CKR_ARGUMENTS_BAD;
 
-	// NULL version → return highest version of "PKCS 11" (v3.2)
-	if (pVersion == NULL_PTR)
+	// Walk the table newest-first so an unconstrained request keeps returning
+	// the highest supported version, as before.
+	for (CK_ULONG n = interfaceCount; n > 0; n--)
 	{
-		*ppInterface = &interfaces[2];
+		CK_INTERFACE* candidate = &interfaces[n - 1];
+
+		if (pInterfaceName != NULL_PTR &&
+		    strcmp((const char*)candidate->pInterfaceName,
+		           (const char*)pInterfaceName) != 0)
+			continue;
+
+		if (pVersion != NULL_PTR)
+		{
+			CK_VERSION* iv = (CK_VERSION*)candidate->pFunctionList;
+			if (iv == NULL_PTR) continue;
+			if (iv->major != pVersion->major || iv->minor != pVersion->minor)
+				continue;
+		}
+
+		// Rule 3: every requested flag must be present; extra flags are allowed.
+		if ((candidate->flags & flags) != flags)
+			continue;
+
+		*ppInterface = candidate;
 		return CKR_OK;
 	}
 
-	// Match exact version: {2,40}, {3,0}, or {3,2}
-	if (pVersion->major == 2 && pVersion->minor == 40)
-	{
-		*ppInterface = &interfaces[0];
-		return CKR_OK;
-	}
-	if (pVersion->major == 3 && pVersion->minor == 0)
-	{
-		*ppInterface = &interfaces[1];
-		return CKR_OK;
-	}
-	if (pVersion->major == 3 && pVersion->minor == 2)
-	{
-		*ppInterface = &interfaces[2];
-		return CKR_OK;
-	}
-
-	return CKR_ARGUMENTS_BAD;
+	// Name and version were recognised, so the only unmet constraint is the
+	// flags one: no interface of this library provides the requested capability.
+	return CKR_FUNCTION_FAILED;
 }

@@ -37,6 +37,7 @@
 #include "access.h"
 #include "SoftHSM.h"
 #include "SoftHSMHelpers.h"
+#include "DerUtil.h"
 #include "HandleManager.h"
 #include "CryptoFactory.h"
 #include "cryptoki.h"
@@ -222,6 +223,12 @@ CK_RV SoftHSM::encapsulateKeyImpl
 	if (!keyObj->getBooleanValue(CKA_ENCAPSULATE, false))
 		return CKR_KEY_FUNCTION_NOT_PERMITTED;
 
+	// N5 remediation 2026-08-13: CKA_ALLOWED_MECHANISMS was never enforced on
+	// the KEM paths — apply the same shared gate every other operation uses
+	// (its convention: CKR_MECHANISM_INVALID for a disallowed mechanism).
+	if (!isMechanismPermitted(keyObj, pMechanism->mechanism))
+		return CKR_MECHANISM_INVALID;
+
 	// Check key type
 	if (keyObj->getUnsignedLongValue(CKA_CLASS, CKO_VENDOR_DEFINED) != CKO_PUBLIC_KEY ||
 	    keyObj->getUnsignedLongValue(CKA_KEY_TYPE, CKK_VENDOR_DEFINED) != CKK_ML_KEM)
@@ -319,6 +326,11 @@ CK_RV SoftHSM::encapsulateKeyImpl
 	};
 	CK_ULONG secretAttribsCount = 4;
 
+	// §4.11 CKA_CHECK_VALUE handling — see the CKA_CHECK_VALUE case below.
+	bool kcvGenerate = true;
+	bool kcvSupplied = false;
+	ByteString kcvWanted;
+
 	if (ulAttributeCount > (maxAttribs - secretAttribsCount))
 		return CKR_TEMPLATE_INCONSISTENT;
 	for (CK_ULONG i = 0; i < ulAttributeCount; ++i)
@@ -334,11 +346,55 @@ CK_RV SoftHSM::encapsulateKeyImpl
 			// CKA_VALUE must not be caller-supplied for encapsulated keys
 			case CKA_VALUE:
 				return CKR_ATTRIBUTE_VALUE_INVALID;
+			// PKCS#11 v3.2 §4.11: the check value "SHALL be supplied"
+			// "regardless of how the key object is created or derived" — the
+			// KEM paths never computed it until the 2026-08-13 S11 remediation.
+			// The attribute cannot travel into CreateObject here: this engine
+			// writes CKA_VALUE only AFTER the object exists, so
+			// P11AttrCheckValue::updateAttr would compare the caller's value
+			// against the KCV of an EMPTY CKA_VALUE and reject even a correct
+			// one. Captured here and settled below, once the secret is stored.
+			case CKA_CHECK_VALUE:
+			{
+				CK_RV kcvRv = checkValueFromTemplate(pTemplate[i], kcvGenerate,
+				                                     kcvSupplied, kcvWanted);
+				if (kcvRv != CKR_OK) return kcvRv;
+				continue;
+			}
+			// PKCS#11 v3.2 §4.1.1 (which names C_EncapsulateKey as an
+			// object-creation function) rule 5: a template that is inconsistent
+			// with "any attribute values contributed to the object by the
+			// object-creation function itself" is CKR_TEMPLATE_INCONSISTENT.
+			// §6.68.5 gives CKM_ML_KEM no length knob ("The mechanism contributes
+			// the result as the CKA_VALUE attribute of the new key") and §6.8.2
+			// Table 103 defines CKA_VALUE_LEN as the "Length in bytes of key
+			// value" — so any other value contradicts CKA_VALUE. Rule 6 lets a
+			// template that merely restates the contributed value succeed.
+			case CKA_VALUE_LEN:
+				if (pTemplate[i].pValue == NULL_PTR ||
+				    pTemplate[i].ulValueLen != sizeof(CK_ULONG))
+					return CKR_ATTRIBUTE_VALUE_INVALID;
+				if (*(CK_ULONG*)pTemplate[i].pValue != (CK_ULONG)sharedSecret.size())
+					return CKR_TEMPLATE_INCONSISTENT;
+				continue; // engine writes the authoritative value below
 			default:
 				if (secretAttribsCount >= maxAttribs)
 					return CKR_TEMPLATE_INCONSISTENT;
 				secretAttribs[secretAttribsCount++] = pTemplate[i];
 		}
+	}
+
+	// PKCS#11 v3.2 §4.11 — compute the check value over the PLAINTEXT shared
+	// secret. A caller-supplied value "MUST match what the library calculates it
+	// to be or the library returns a CKR_ATTRIBUTE_VALUE_INVALID"; verify before
+	// any object exists, since §5.18.8/§5.18.9 forbid leaving a key behind when
+	// the call fails.
+	ByteString kcv;
+	if (kcvGenerate)
+	{
+		kcv = computeSecretKeyKCV(keyType, sharedSecret);
+		if (kcvSupplied && kcv != kcvWanted)
+			return CKR_ATTRIBUTE_VALUE_INVALID;
 	}
 
 	rv = this->CreateObject(hSession, secretAttribs, secretAttribsCount, phKey, OBJECT_OP_DERIVE);
@@ -358,6 +414,10 @@ CK_RV SoftHSM::encapsulateKeyImpl
 	bOK = bOK && osobject->setAttribute(CKA_NEVER_EXTRACTABLE, false);
 
 	// Store the shared secret as CKA_VALUE (encrypted if isPrivate)
+	// PKCS#11 v3.2 §6.8.2 Table 103 — CKA_VALUE_LEN is the "Length in bytes of
+	// key value", i.e. of the PLAINTEXT secret, never of the token-encrypted
+	// storedValue. Captured before the wipe below.
+	const unsigned long ssPlainLen = (unsigned long)sharedSecret.size();
 	ByteString storedValue;
 	if (isPrivate)
 		// Fold token->encrypt() into bOK: false (output wiped) on RNG/AES/not-logged-in
@@ -366,6 +426,18 @@ CK_RV SoftHSM::encapsulateKeyImpl
 	else
 		storedValue = sharedSecret;
 	bOK = bOK && osobject->setAttribute(CKA_VALUE, storedValue);
+	// P11GenericSecretKeyObj registers CKA_VALUE_LEN (P11AttrValueLen) and its
+	// setDefault() seeds it to 0, so leaving it unset published a key whose
+	// CKA_VALUE_LEN (0) contradicted its own CKA_VALUE — the §4.1.1-rule-5
+	// inconsistency, visible through C_GetAttributeValue. Fixed 2026-08-13.
+	bOK = bOK && osobject->setAttribute(CKA_VALUE_LEN, OSAttribute(ssPlainLen));
+	// §4.11: "regardless of how the key object is created or derived, the value
+	// of the attribute is always supplied. It SHALL be supplied even if the
+	// encryption operation for the key is forbidden." Always stored in clear
+	// (§4.10.2) and computed over the plaintext secret, never the token-
+	// encrypted storedValue. A 0-length template entry suppresses it.
+	if (kcv.size() == 3)
+		bOK = bOK && osobject->setAttribute(CKA_CHECK_VALUE, kcv);
 	sharedSecret.wipe();
 	storedValue.wipe();
 
@@ -485,6 +557,11 @@ CK_RV SoftHSM::decapsulateKeyImpl
 	if (!keyObj->getBooleanValue(CKA_DECAPSULATE, false))
 		return CKR_KEY_FUNCTION_NOT_PERMITTED;
 
+	// N5 remediation 2026-08-13: CKA_ALLOWED_MECHANISMS was never enforced on
+	// the KEM paths — apply the same shared gate every other operation uses.
+	if (!isMechanismPermitted(keyObj, pMechanism->mechanism))
+		return CKR_MECHANISM_INVALID;
+
 	// Check key type
 	if (keyObj->getUnsignedLongValue(CKA_CLASS, CKO_VENDOR_DEFINED) != CKO_PRIVATE_KEY ||
 	    keyObj->getUnsignedLongValue(CKA_KEY_TYPE, CKK_VENDOR_DEFINED) != CKK_ML_KEM)
@@ -561,6 +638,11 @@ CK_RV SoftHSM::decapsulateKeyImpl
 	};
 	CK_ULONG secretAttribsCount = 4;
 
+	// §4.11 CKA_CHECK_VALUE handling — see the CKA_CHECK_VALUE case below.
+	bool kcvGenerate = true;
+	bool kcvSupplied = false;
+	ByteString kcvWanted;
+
 	if (ulAttributeCount > (maxAttribs - secretAttribsCount))
 		return CKR_TEMPLATE_INCONSISTENT;
 	for (CK_ULONG i = 0; i < ulAttributeCount; ++i)
@@ -576,11 +658,47 @@ CK_RV SoftHSM::decapsulateKeyImpl
 			// CKA_VALUE must not be caller-supplied for decapsulated keys
 			case CKA_VALUE:
 				return CKR_ATTRIBUTE_VALUE_INVALID;
+			// PKCS#11 v3.2 §4.11: the check value "SHALL be supplied"
+			// "regardless of how the key object is created or derived". Captured
+			// here rather than passed to CreateObject because CKA_VALUE is only
+			// written after the object exists — see C_EncapsulateKey above.
+			case CKA_CHECK_VALUE:
+			{
+				CK_RV kcvRv = checkValueFromTemplate(pTemplate[i], kcvGenerate,
+				                                     kcvSupplied, kcvWanted);
+				if (kcvRv != CKR_OK) return kcvRv;
+				continue;
+			}
+			// PKCS#11 v3.2 §4.1.1 rules 5/6 — see the identical block in
+			// C_EncapsulateKey above. §6.68.5 fixes the ML-KEM shared-secret
+			// length; §6.8.2 Table 103 defines CKA_VALUE_LEN as the length of
+			// CKA_VALUE, so a differing template value cannot be satisfied and
+			// §5.18.9 forbids creating any key object in that case.
+			case CKA_VALUE_LEN:
+				if (pTemplate[i].pValue == NULL_PTR ||
+				    pTemplate[i].ulValueLen != sizeof(CK_ULONG))
+					return CKR_ATTRIBUTE_VALUE_INVALID;
+				if (*(CK_ULONG*)pTemplate[i].pValue != (CK_ULONG)sharedSecret.size())
+					return CKR_TEMPLATE_INCONSISTENT;
+				continue; // engine writes the authoritative value below
 			default:
 				if (secretAttribsCount >= maxAttribs)
 					return CKR_TEMPLATE_INCONSISTENT;
 				secretAttribs[secretAttribsCount++] = pTemplate[i];
 		}
+	}
+
+	// PKCS#11 v3.2 §4.11 — compute the check value over the PLAINTEXT shared
+	// secret. A caller-supplied value "MUST match what the library calculates it
+	// to be or the library returns a CKR_ATTRIBUTE_VALUE_INVALID"; verify before
+	// any object exists, since §5.18.8/§5.18.9 forbid leaving a key behind when
+	// the call fails.
+	ByteString kcv;
+	if (kcvGenerate)
+	{
+		kcv = computeSecretKeyKCV(keyType, sharedSecret);
+		if (kcvSupplied && kcv != kcvWanted)
+			return CKR_ATTRIBUTE_VALUE_INVALID;
 	}
 
 	rv = this->CreateObject(hSession, secretAttribs, secretAttribsCount, phKey, OBJECT_OP_DERIVE);
@@ -600,6 +718,9 @@ CK_RV SoftHSM::decapsulateKeyImpl
 	bOK = bOK && osobject->setAttribute(CKA_NEVER_EXTRACTABLE, false);
 
 	// Store the shared secret as CKA_VALUE (encrypted if isPrivate)
+	// §6.8.2 Table 103 — CKA_VALUE_LEN is the PLAINTEXT length, captured before
+	// the wipe below (never the length of the token-encrypted storedValue).
+	const unsigned long ssPlainLen = (unsigned long)sharedSecret.size();
 	ByteString storedValue;
 	if (isPrivate)
 		// Fold token->encrypt() into bOK: false (output wiped) on RNG/AES/not-logged-in
@@ -608,6 +729,16 @@ CK_RV SoftHSM::decapsulateKeyImpl
 	else
 		storedValue = sharedSecret;
 	bOK = bOK && osobject->setAttribute(CKA_VALUE, storedValue);
+	// Was never set before 2026-08-13: P11AttrValueLen::setDefault() left it 0,
+	// contradicting CKA_VALUE on every decapsulated key (§4.1.1 rule 5).
+	bOK = bOK && osobject->setAttribute(CKA_VALUE_LEN, OSAttribute(ssPlainLen));
+	// §4.11: "regardless of how the key object is created or derived, the value
+	// of the attribute is always supplied. It SHALL be supplied even if the
+	// encryption operation for the key is forbidden." Always stored in clear
+	// (§4.10.2) and computed over the plaintext secret, never the token-
+	// encrypted storedValue. A 0-length template entry suppresses it.
+	if (kcv.size() == 3)
+		bOK = bOK && osobject->setAttribute(CKA_CHECK_VALUE, kcv);
 	sharedSecret.wipe();
 	storedValue.wipe();
 
@@ -674,6 +805,12 @@ CK_RV SoftHSM::encapsulateECDH
 	if (!keyObj->getBooleanValue(CKA_ENCAPSULATE, false))
 		return CKR_KEY_FUNCTION_NOT_PERMITTED;
 
+	// N5 remediation 2026-08-13: CKA_ALLOWED_MECHANISMS was never enforced on
+	// the KEM paths. This helper is only ever dispatched for
+	// CKM_ECDH1_DERIVE (see encapsulateKeyImpl), so the mechanism is fixed.
+	if (!isMechanismPermitted(keyObj, CKM_ECDH1_DERIVE))
+		return CKR_MECHANISM_INVALID;
+
 	CK_ULONG peerKeyType = keyObj->getUnsignedLongValue(CKA_KEY_TYPE, CKK_VENDOR_DEFINED);
 	if (keyObj->getUnsignedLongValue(CKA_CLASS, CKO_VENDOR_DEFINED) != CKO_PUBLIC_KEY ||
 	    (peerKeyType != CKK_EC && peerKeyType != CKK_EC_MONTGOMERY))
@@ -730,6 +867,14 @@ CK_RV SoftHSM::encapsulateECDH
 	{
 		EDPrivateKey* ephPriv = (EDPrivateKey*)ephemeral->getPrivateKey();
 		EDPublicKey* ephPub = (EDPublicKey*)ephemeral->getPublicKey();
+		// E1 (2026-08-13). §6.3.17: "The value of the generated public key is
+		// returned as the ciphertext", and that value "has the same format as
+		// the public key used in C_DeriveKey" — "a token MUST be able to accept
+		// this value encoded as a raw octet string". For Montgomery keys "the
+		// public key is provided as bytes in little endian order" and the spec
+		// offers no DER form at all. Since the E4 fix, getA() already returns
+		// the bare RFC 7748 bytes, so this is 32 bytes for X25519 rather than
+		// the 34 the DER OCTET STRING wrapper used to produce.
 		ephemeralPoint = ephPub->getA();
 		PublicKey* peerPub = deriveEngine->newPublicKey();
 		if (peerPub == NULL) ok = false;
@@ -741,7 +886,12 @@ CK_RV SoftHSM::encapsulateECDH
 	{
 		ECPrivateKey* ephPriv = (ECPrivateKey*)ephemeral->getPrivateKey();
 		ECPublicKey* ephPub = (ECPublicKey*)ephemeral->getPublicKey();
-		ephemeralPoint = ephPub->getQ();
+		// E1: CKA_EC_POINT on a Weierstrass key is legitimately the DER-encoded
+		// X9.62 ECPoint, but §6.3.17's ciphertext is the RAW octet string —
+		// 65 bytes starting 0x04 for P-256, not the 67-byte DER wrapping.
+		// Decapsulation keeps its tolerant reader (getECDHPubData), so a
+		// ciphertext produced by the old code still decapsulates.
+		ephemeralPoint = DERUTIL::octet2Raw(ephPub->getQ());
 		PublicKey* peerPub = deriveEngine->newPublicKey();
 		if (peerPub == NULL) ok = false;
 		if (ok && getECDHPublicKey((ECPublicKey*)peerPub, ephPriv, peerPoint) != CKR_OK) ok = false;
@@ -814,6 +964,11 @@ CK_RV SoftHSM::encapsulateECDH
 	};
 	CK_ULONG secretAttribsCount = 4;
 
+	// §4.11 CKA_CHECK_VALUE handling — see the CKA_CHECK_VALUE case below.
+	bool kcvGenerate = true;
+	bool kcvSupplied = false;
+	ByteString kcvWanted;
+
 	if (ulAttributeCount > (maxAttribs - secretAttribsCount))
 		return CKR_TEMPLATE_INCONSISTENT;
 	for (CK_ULONG i = 0; i < ulAttributeCount; ++i)
@@ -827,11 +982,55 @@ CK_RV SoftHSM::encapsulateECDH
 				continue;
 			case CKA_VALUE:
 				return CKR_ATTRIBUTE_VALUE_INVALID;
+			// PKCS#11 v3.2 §4.11: the check value "SHALL be supplied"
+			// "regardless of how the key object is created or derived". Captured
+			// here rather than passed to CreateObject because CKA_VALUE is only
+			// written after the object exists — see C_EncapsulateKey above.
+			case CKA_CHECK_VALUE:
+			{
+				CK_RV kcvRv = checkValueFromTemplate(pTemplate[i], kcvGenerate,
+				                                     kcvSupplied, kcvWanted);
+				if (kcvRv != CKR_OK) return kcvRv;
+				continue;
+			}
+			// PKCS#11 v3.2 §6.3.17 makes CKA_VALUE_LEN an INPUT for this
+			// mechanism, not a claim to be checked: "This mechanism derives a
+			// secret value, and truncates the result according to the
+			// CKA_KEY_TYPE attribute of the template and, if it has one and the
+			// key type supports it, the CKA_VALUE_LEN attribute of the template.
+			// (The truncation removes bytes from the leading end of the secret
+			// value.)" — and the same section routes C_EncapsulateKey through
+			// that very "EC Derive". A length LONGER than the raw secret cannot
+			// be produced by truncation → §4.1.1 rule 5.
+			case CKA_VALUE_LEN:
+			{
+				if (pTemplate[i].pValue == NULL_PTR ||
+				    pTemplate[i].ulValueLen != sizeof(CK_ULONG))
+					return CKR_ATTRIBUTE_VALUE_INVALID;
+				CK_ULONG wantLen = *(CK_ULONG*)pTemplate[i].pValue;
+				if (wantLen == 0 || wantLen > (CK_ULONG)sharedSecret.size())
+					return CKR_TEMPLATE_INCONSISTENT;
+				sharedSecret = sharedSecret.substr(sharedSecret.size() - wantLen, wantLen);
+				continue; // engine writes the resulting length below
+			}
 			default:
 				if (secretAttribsCount >= maxAttribs)
 					return CKR_TEMPLATE_INCONSISTENT;
 				secretAttribs[secretAttribsCount++] = pTemplate[i];
 		}
+	}
+
+	// PKCS#11 v3.2 §4.11 — compute the check value over the PLAINTEXT shared
+	// secret. A caller-supplied value "MUST match what the library calculates it
+	// to be or the library returns a CKR_ATTRIBUTE_VALUE_INVALID"; verify before
+	// any object exists, since §5.18.8/§5.18.9 forbid leaving a key behind when
+	// the call fails.
+	ByteString kcv;
+	if (kcvGenerate)
+	{
+		kcv = computeSecretKeyKCV(keyType, sharedSecret);
+		if (kcvSupplied && kcv != kcvWanted)
+			return CKR_ATTRIBUTE_VALUE_INVALID;
 	}
 
 	rv = this->CreateObject(hSession, secretAttribs, secretAttribsCount, phKey, OBJECT_OP_DERIVE);
@@ -850,12 +1049,23 @@ CK_RV SoftHSM::encapsulateECDH
 	bOK = bOK && osobject->setAttribute(CKA_ALWAYS_SENSITIVE, false);
 	bOK = bOK && osobject->setAttribute(CKA_NEVER_EXTRACTABLE, false);
 
+	// §6.8.2 Table 103 — plaintext length of the (possibly §6.3.17-truncated)
+	// secret, captured before the wipe below.
+	const unsigned long ssPlainLen = (unsigned long)sharedSecret.size();
 	ByteString storedValue;
 	if (isPrivate)
 		bOK = bOK && token->encrypt(sharedSecret, storedValue);
 	else
 		storedValue = sharedSecret;
 	bOK = bOK && osobject->setAttribute(CKA_VALUE, storedValue);
+	bOK = bOK && osobject->setAttribute(CKA_VALUE_LEN, OSAttribute(ssPlainLen));
+	// §4.11: "regardless of how the key object is created or derived, the value
+	// of the attribute is always supplied. It SHALL be supplied even if the
+	// encryption operation for the key is forbidden." Always stored in clear
+	// (§4.10.2) and computed over the plaintext secret, never the token-
+	// encrypted storedValue. A 0-length template entry suppresses it.
+	if (kcv.size() == 3)
+		bOK = bOK && osobject->setAttribute(CKA_CHECK_VALUE, kcv);
 	sharedSecret.wipe();
 	storedValue.wipe();
 
@@ -910,6 +1120,12 @@ CK_RV SoftHSM::decapsulateECDH
 
 	if (!keyObj->getBooleanValue(CKA_DECAPSULATE, false))
 		return CKR_KEY_FUNCTION_NOT_PERMITTED;
+
+	// N5 remediation 2026-08-13: CKA_ALLOWED_MECHANISMS was never enforced on
+	// the KEM paths. This helper is only ever dispatched for
+	// CKM_ECDH1_DERIVE (see decapsulateKeyImpl), so the mechanism is fixed.
+	if (!isMechanismPermitted(keyObj, CKM_ECDH1_DERIVE))
+		return CKR_MECHANISM_INVALID;
 
 	CK_ULONG ourKeyType = keyObj->getUnsignedLongValue(CKA_KEY_TYPE, CKK_VENDOR_DEFINED);
 	if (keyObj->getUnsignedLongValue(CKA_CLASS, CKO_VENDOR_DEFINED) != CKO_PRIVATE_KEY ||
@@ -1003,6 +1219,11 @@ CK_RV SoftHSM::decapsulateECDH
 	};
 	CK_ULONG secretAttribsCount = 4;
 
+	// §4.11 CKA_CHECK_VALUE handling — see the CKA_CHECK_VALUE case below.
+	bool kcvGenerate = true;
+	bool kcvSupplied = false;
+	ByteString kcvWanted;
+
 	if (ulAttributeCount > (maxAttribs - secretAttribsCount))
 		return CKR_TEMPLATE_INCONSISTENT;
 	for (CK_ULONG i = 0; i < ulAttributeCount; ++i)
@@ -1016,11 +1237,50 @@ CK_RV SoftHSM::decapsulateECDH
 				continue;
 			case CKA_VALUE:
 				return CKR_ATTRIBUTE_VALUE_INVALID;
+			// PKCS#11 v3.2 §4.11: the check value "SHALL be supplied"
+			// "regardless of how the key object is created or derived". Captured
+			// here rather than passed to CreateObject because CKA_VALUE is only
+			// written after the object exists — see C_EncapsulateKey above.
+			case CKA_CHECK_VALUE:
+			{
+				CK_RV kcvRv = checkValueFromTemplate(pTemplate[i], kcvGenerate,
+				                                     kcvSupplied, kcvWanted);
+				if (kcvRv != CKR_OK) return kcvRv;
+				continue;
+			}
+			// §6.3.17 — CKA_VALUE_LEN truncates "from the leading end of the
+			// secret value"; the same section routes C_DecapsulateKey through
+			// that same "EC Derive", so this must mirror encapsulateECDH
+			// exactly or the two peers derive different keys.
+			case CKA_VALUE_LEN:
+			{
+				if (pTemplate[i].pValue == NULL_PTR ||
+				    pTemplate[i].ulValueLen != sizeof(CK_ULONG))
+					return CKR_ATTRIBUTE_VALUE_INVALID;
+				CK_ULONG wantLen = *(CK_ULONG*)pTemplate[i].pValue;
+				if (wantLen == 0 || wantLen > (CK_ULONG)sharedSecret.size())
+					return CKR_TEMPLATE_INCONSISTENT;
+				sharedSecret = sharedSecret.substr(sharedSecret.size() - wantLen, wantLen);
+				continue; // engine writes the resulting length below
+			}
 			default:
 				if (secretAttribsCount >= maxAttribs)
 					return CKR_TEMPLATE_INCONSISTENT;
 				secretAttribs[secretAttribsCount++] = pTemplate[i];
 		}
+	}
+
+	// PKCS#11 v3.2 §4.11 — compute the check value over the PLAINTEXT shared
+	// secret. A caller-supplied value "MUST match what the library calculates it
+	// to be or the library returns a CKR_ATTRIBUTE_VALUE_INVALID"; verify before
+	// any object exists, since §5.18.8/§5.18.9 forbid leaving a key behind when
+	// the call fails.
+	ByteString kcv;
+	if (kcvGenerate)
+	{
+		kcv = computeSecretKeyKCV(keyType, sharedSecret);
+		if (kcvSupplied && kcv != kcvWanted)
+			return CKR_ATTRIBUTE_VALUE_INVALID;
 	}
 
 	rv = this->CreateObject(hSession, secretAttribs, secretAttribsCount, phKey, OBJECT_OP_DERIVE);
@@ -1039,12 +1299,23 @@ CK_RV SoftHSM::decapsulateECDH
 	bOK = bOK && osobject->setAttribute(CKA_ALWAYS_SENSITIVE, false);
 	bOK = bOK && osobject->setAttribute(CKA_NEVER_EXTRACTABLE, false);
 
+	// §6.8.2 Table 103 — plaintext length of the (possibly §6.3.17-truncated)
+	// secret, captured before the wipe below.
+	const unsigned long ssPlainLen = (unsigned long)sharedSecret.size();
 	ByteString storedValue;
 	if (isPrivate)
 		bOK = bOK && token->encrypt(sharedSecret, storedValue);
 	else
 		storedValue = sharedSecret;
 	bOK = bOK && osobject->setAttribute(CKA_VALUE, storedValue);
+	bOK = bOK && osobject->setAttribute(CKA_VALUE_LEN, OSAttribute(ssPlainLen));
+	// §4.11: "regardless of how the key object is created or derived, the value
+	// of the attribute is always supplied. It SHALL be supplied even if the
+	// encryption operation for the key is forbidden." Always stored in clear
+	// (§4.10.2) and computed over the plaintext secret, never the token-
+	// encrypted storedValue. A 0-length template entry suppresses it.
+	if (kcv.size() == 3)
+		bOK = bOK && osobject->setAttribute(CKA_CHECK_VALUE, kcv);
 	sharedSecret.wipe();
 	storedValue.wipe();
 

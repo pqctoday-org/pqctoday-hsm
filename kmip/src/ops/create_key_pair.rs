@@ -765,7 +765,7 @@ pub(crate) fn engine_generate_keypair(
             if mechs.is_empty() {
                 continue;
             }
-            let packed: Vec<u8> = mechs.iter().flat_map(|m| m.to_le_bytes()).collect();
+            let packed = crate::kmip30::algos::pack_allowed_mechanisms(&mechs);
             let r = softhsmrustv3::native::set_attribute(
                 session,
                 handle,

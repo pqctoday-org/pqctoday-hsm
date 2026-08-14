@@ -335,6 +335,14 @@ module.exports = Object.freeze({
   CKM_AES_GMAC: 0x0000108e,
   CKM_AES_KEY_WRAP: 0x00002109,
   CKM_AES_KEY_WRAP_KWP: 0x0000210b,
+  // ChaCha20 (PKCS#11 v3.2 §6.20 stream / §6.25 AEAD) — advertised by both
+  // engines but missing here until the N10 remediation (2026-08-13).
+  // Values verified against docs/refs/pkcs11t-canonical-v3.2.h. The Salsa20 /
+  // Poly1305 siblings (CKM_SALSA20, CKM_POLY1305, ...) are NOT added: neither
+  // engine advertises them.
+  CKM_CHACHA20_KEY_GEN: 0x00001225,
+  CKM_CHACHA20: 0x00001226,
+  CKM_CHACHA20_POLY1305: 0x00004021,
   CKM_PKCS5_PBKD2: 0x000003b0,
   CKM_GENERIC_SECRET_KEY_GEN: 0x00000350,
   // PQC signature mechanisms (PKCS#11 v3.2)

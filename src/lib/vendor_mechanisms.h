@@ -6,7 +6,9 @@
 // PKCS#11 v3.2 with mechanisms that are not (yet) in the standard.
 //
 // Rust side: mirrored in rust/src/constants.rs
-// TypeScript side: mirrored in src/wasm/softhsm/constants.ts
+// TypeScript side: mirrored in the pqctoday-hub repo
+// (src/wasm/softhsm/constants.ts THERE — that path does not exist in this
+// repo; this repo's JS surface is constants.js at the repo root)
 
 #pragma once
 

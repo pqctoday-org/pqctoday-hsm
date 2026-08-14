@@ -78,9 +78,12 @@ and `pqc-timeline-app/src/wasm/softhsmrustv3.{js,d.ts}`.
 
 ## PKCS#11 Surface — Implemented Functions
 
-The Rust WASM binary exports 45 `_C_*` functions via `wasm-bindgen`. The TypeScript wrapper
-(`softhsm.ts: getSoftHSMRustModule()`) bridges all PKCS#11 calls and adds JS-side stubs
-for functions not yet in the Rust binary.
+The Rust WASM binary exports 102 `_C_*` functions via `wasm-bindgen` (count
+corrected 2026-08-13 — this document said "45" long after the surface grew),
+and `rust/src/ck_abi.rs` additionally provides the native C ABI
+(`CK_FUNCTION_LIST`-shaped, 104 `C_*` functions) for non-wasm consumers. The
+TypeScript wrapper (`softhsm.ts: getSoftHSMRustModule()`) bridges all PKCS#11
+calls and adds JS-side stubs for functions not yet in the Rust binary.
 
 ### Fully Implemented (native Rust WASM)
 
@@ -198,12 +201,12 @@ export const getSoftHSMRustModule = async (): Promise<SoftHSMModule> => {
 |---|---|---|---|
 | ML-KEM-512/768/1024 | ✅ | ✅ | Cross-check verified |
 | ML-DSA-44/65/87 (pure) | ✅ | ✅ | Cross-check verified |
-| ML-DSA pre-hash (10 variants) | ✅ | ⚠️ Partial | Rust ml-dsa crate does not yet expose pre-hash API |
+| ML-DSA pre-hash (10 variants) | ✅ | ✅ | Implemented (hash-specific + generic `CKM_HASH_ML_DSA` with param remap); the old "crate lacks pre-hash API" note was stale (corrected 2026-08-13) |
 | SLH-DSA (all 12 param sets, pure) | ✅ | ✅ | |
-| SLH-DSA pre-hash | ✅ | ⚠️ Partial | slh-dsa crate pre-hash support pending |
+| SLH-DSA pre-hash | ✅ | ✅ | Implemented (hash-specific + generic `CKM_HASH_SLH_DSA`); stale "pending" note corrected 2026-08-13 |
 | HSS/LMS (SP 800-208) | ✅ | ✅ | Rust via `hbs-lms` crate |
-| XMSS single-tree (RFC 8391) | ✅ | ✅ | Rust via `xmss` crate |
-| XMSS-MT | ✅ | ❌ Not implemented | `xmss` crate lacks multi-tree support |
+| XMSS single-tree (RFC 8391) | ✅ | ✅ | Rust via `xmss` crate; 2026-08-13: SHAKE param ids realigned to the RFC/SP 800-208 registry (0x07-0x09 SHAKE128, 0x11-0x13 SHAKE256 — implemented) |
+| XMSS-MT | ✅ | ✅ | Implemented (all 56 RFC 8391 + SP 800-208 param sets via the `xmss` crate); the "crate lacks multi-tree support" note was stale (corrected 2026-08-13) |
 | RSA-2048/3072/4096 | ✅ | ✅ | |
 | ECDSA P-256, P-384 | ✅ | ✅ | |
 | ECDSA P-521 | ✅ | ✅ | Added in Unreleased; `CKM_ECDSA_SHA512` + prehash + ECDH |
@@ -217,11 +220,12 @@ export const getSoftHSMRustModule = async (): Promise<SoftHSMModule> => {
 | HKDF | ✅ | ✅ | DeriveKey |
 | PBKDF2 | ✅ | ✅ | DeriveKey |
 | ECDSA-SHA3 variants | ✅ | ✅ | `CKM_ECDSA_SHA3_224/256/384/512` for P-256/P-384/P-521 |
-| ECDH cofactor | ✅ | ❌ Not implemented | |
-| SP 800-108 Counter/Feedback KDF | ✅ | ❌ Not implemented | |
-| Authenticated key wrap | ✅ | ❌ Not implemented (stub) | |
-| Streaming sign/verify/encrypt | ✅ | ❌ Not implemented (stub) | |
-| Message encrypt/decrypt API | ✅ | ❌ Not implemented (stub) | |
+| ECDH cofactor | ✅ | ✅ | `CKM_ECDH1_COFACTOR_DERIVE` dispatched for the NIST prime curves (CKK_EC only, per §6.3.18 Table 79); stale row corrected 2026-08-13 |
+| ECDH-as-KEM (`CKM_ECDH1_DERIVE` under C_Encapsulate/DecapsulateKey) | ✅ | ✅ | Implemented 2026-08-13 for P-256/P-384/P-521, wire-compatible with the C++ engine (DER-wrapped ephemeral point ct, raw X-coordinate secret) |
+| SP 800-108 Counter/Feedback KDF | ✅ | ✅ | `CKM_SP800_108_COUNTER_KDF` / `CKM_SP800_108_FEEDBACK_KDF` under C_DeriveKey; stale row corrected 2026-08-13 |
+| Authenticated key wrap | ✅ | ✅ | Real implementation (no longer a stub); stale row corrected 2026-08-13 |
+| Streaming sign/verify/encrypt | ✅ | ✅ | Multipart Update/Final implemented (sign, verify, digest, encrypt/decrypt incl. AES-GCM/CBC-PAD); stale row corrected 2026-08-13 |
+| Message encrypt/decrypt API | ✅ | ✅ | `C_MessageEncrypt*` / `C_MessageDecrypt*` implemented incl. multipart GCM; stale row corrected 2026-08-13 |
 
 ---
 

@@ -105,35 +105,61 @@ void OSSLSLHDSAPrivateKey::setFromOSSL(const EVP_PKEY* inPKEY)
 	}
 	SLHDSAPrivateKey::setParameterSet(ps);
 
-	// Encode to PKCS#8 DER and store in value
+	// E3 (2026-08-13). PKCS#11 v3.2 defines CKA_VALUE on this key as the RAW
+	// FIPS artefact — the FIPS 205 SLH-DSA private key SK — and PKCS#8 appears in the whole
+	// specification exactly once, as the TRANSPORT format for wrapping (§6.7),
+	// never as an attribute format. Storing the PKCS#8 DER wrapper here meant an
+	// application reading CKA_VALUE got a DER SEQUENCE instead of the key.
+	// PKCS8Encode() below still produces PKCS#8 for the C_WrapKey path.
 	EVP_PKEY* key = const_cast<EVP_PKEY*>(inPKEY);
+	size_t rawLen = 0;
+	if (EVP_PKEY_get_octet_string_param(key, OSSL_PKEY_PARAM_PRIV_KEY,
+	                                    NULL, 0, &rawLen) <= 0 || rawLen == 0)
+	{
+		ERROR_MSG("Could not size the raw private key (0x%08X)", ERR_get_error());
+		return;
+	}
+	ByteString raw;
+	raw.resize(rawLen);
+	if (EVP_PKEY_get_octet_string_param(key, OSSL_PKEY_PARAM_PRIV_KEY,
+	                                    &raw[0], rawLen, &rawLen) <= 0)
+	{
+		ERROR_MSG("Could not read the raw private key (0x%08X)", ERR_get_error());
+		return;
+	}
+	raw.resize(rawLen);
+	SLHDSAPrivateKey::setValue(raw);
+
+	if (pkey) EVP_PKEY_free(pkey);
+	pkey = EVP_PKEY_dup(key);
+}
+
+// §6.7: "For wrapping, a private key is BER-encoded according to [PKCS #8]
+// PrivateKeyInfo ASN.1 type." Since the E3 fix CKA_VALUE holds the raw FIPS
+// bytes, so the transport encoding is rebuilt from the OpenSSL key here.
+ByteString OSSLSLHDSAPrivateKey::PKCS8Encode()
+{
+	ByteString der;
+	EVP_PKEY* key = getOSSLKey();
+	if (key == NULL) return der;
 	PKCS8_PRIV_KEY_INFO* p8 = EVP_PKEY2PKCS8(key);
 	if (p8 == NULL)
 	{
 		ERROR_MSG("EVP_PKEY2PKCS8 failed (0x%08X)", ERR_get_error());
-		return;
+		return der;
 	}
 	int len = i2d_PKCS8_PRIV_KEY_INFO(p8, NULL);
 	if (len <= 0)
 	{
 		PKCS8_PRIV_KEY_INFO_free(p8);
 		ERROR_MSG("i2d_PKCS8_PRIV_KEY_INFO failed");
-		return;
+		return der;
 	}
-	ByteString der;
 	der.resize(len);
 	unsigned char* p = &der[0];
 	i2d_PKCS8_PRIV_KEY_INFO(p8, &p);
 	PKCS8_PRIV_KEY_INFO_free(p8);
-	SLHDSAPrivateKey::setValue(der);
-
-	if (pkey) EVP_PKEY_free(pkey);
-	pkey = EVP_PKEY_dup(key);
-}
-
-ByteString OSSLSLHDSAPrivateKey::PKCS8Encode()
-{
-	return value;
+	return der;
 }
 
 bool OSSLSLHDSAPrivateKey::PKCS8Decode(const ByteString& ber)

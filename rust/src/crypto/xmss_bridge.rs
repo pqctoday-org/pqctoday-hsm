@@ -4,9 +4,9 @@ use xmss::*;
 /// Return the total signature capacity (2^H) for a given CKP_XMSS_* parameter set.
 pub fn xmss_param_max_sigs(xmss_param: u32) -> u32 {
     match xmss_param {
-        CKP_XMSS_SHA2_10_256 | CKP_XMSS_SHAKE_10_256 => 1u32 << 10, // 1,024
-        CKP_XMSS_SHA2_16_256 | CKP_XMSS_SHAKE_16_256 => 1u32 << 16, // 65,536
-        CKP_XMSS_SHA2_20_256 | CKP_XMSS_SHAKE_20_256 => 1u32 << 20, // 1,048,576
+        CKP_XMSS_SHA2_10_256 | CKP_XMSS_SHAKE_10_256 | CKP_XMSS_SHAKE256_10_192 => 1u32 << 10, // 1,024
+        CKP_XMSS_SHA2_16_256 | CKP_XMSS_SHAKE_16_256 | CKP_XMSS_SHAKE256_16_256 => 1u32 << 16, // 65,536
+        CKP_XMSS_SHA2_20_256 | CKP_XMSS_SHAKE_20_256 | CKP_XMSS_SHAKE256_20_256 => 1u32 << 20, // 1,048,576
         _ => 1u32 << 10,                                            // safe fallback
     }
 }
@@ -71,6 +71,9 @@ pub fn xmss_keygen(xmss_param: u32) -> Result<(Vec<u8>, Vec<u8>), ()> {
         CKP_XMSS_SHAKE_10_256 => dispatch!(XmssShake_10_256),
         CKP_XMSS_SHAKE_16_256 => dispatch!(XmssShake_16_256),
         CKP_XMSS_SHAKE_20_256 => dispatch!(XmssShake_20_256),
+        CKP_XMSS_SHAKE256_16_256 => dispatch!(XmssShake256_16_256),
+        CKP_XMSS_SHAKE256_20_256 => dispatch!(XmssShake256_20_256),
+        CKP_XMSS_SHAKE256_10_192 => dispatch!(XmssShake256_10_192),
         _ => Err(()),
     }
 }
@@ -90,6 +93,9 @@ pub fn xmss_sign(xmss_param: u32, priv_key: &[u8], msg: &[u8]) -> Result<(Vec<u8
         CKP_XMSS_SHAKE_10_256 => dispatch!(XmssShake_10_256),
         CKP_XMSS_SHAKE_16_256 => dispatch!(XmssShake_16_256),
         CKP_XMSS_SHAKE_20_256 => dispatch!(XmssShake_20_256),
+        CKP_XMSS_SHAKE256_16_256 => dispatch!(XmssShake256_16_256),
+        CKP_XMSS_SHAKE256_20_256 => dispatch!(XmssShake256_20_256),
+        CKP_XMSS_SHAKE256_10_192 => dispatch!(XmssShake256_10_192),
         _ => Err(CKR_FUNCTION_FAILED),
     }
 }
@@ -115,6 +121,9 @@ pub fn xmss_verify(xmss_param: u32, pub_key: &[u8], msg: &[u8], sig: &[u8]) -> b
         CKP_XMSS_SHAKE_10_256 => dispatch!(XmssShake_10_256),
         CKP_XMSS_SHAKE_16_256 => dispatch!(XmssShake_16_256),
         CKP_XMSS_SHAKE_20_256 => dispatch!(XmssShake_20_256),
+        CKP_XMSS_SHAKE256_16_256 => dispatch!(XmssShake256_16_256),
+        CKP_XMSS_SHAKE256_20_256 => dispatch!(XmssShake256_20_256),
+        CKP_XMSS_SHAKE256_10_192 => dispatch!(XmssShake256_10_192),
         _ => false,
     }
 }

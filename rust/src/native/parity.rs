@@ -438,7 +438,7 @@ fn hss_ffi_and_native_advance_the_leaf_index_identically() {
     let native_sig = sign(session, native_prv, CKM_HSS, msg).unwrap();
     assert!(verify(session, native_pub, CKM_HSS, msg, &native_sig).unwrap());
     assert_eq!(
-        crate::state::get_object_attr_u64(native_prv, CKA_LEAF_INDEX).unwrap(),
+        crate::state::get_object_attr_u64(native_prv, CKA_PRIV_LEAF_INDEX).unwrap(),
         1,
         "native::sign must advance the leaf index by exactly one"
     );
@@ -461,7 +461,7 @@ fn hss_ffi_and_native_advance_the_leaf_index_identically() {
     assert_eq!(rv, CKR_OK, "ffi::C_Sign HSS: 0x{rv:x}");
     sig_buf.truncate(sig_len as usize);
     assert_eq!(
-        crate::state::get_object_attr_u64(ffi_prv, CKA_LEAF_INDEX).unwrap(),
+        crate::state::get_object_attr_u64(ffi_prv, CKA_PRIV_LEAF_INDEX).unwrap(),
         1,
         "ffi::C_Sign must advance the leaf index by exactly one"
     );

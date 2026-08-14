@@ -416,6 +416,15 @@ CK_RV SoftHSM::AsymEncryptInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMec
 // Initialise encryption using the specified object and mechanism
 CK_RV SoftHSM::C_EncryptInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechanism, CK_OBJECT_HANDLE hKey)
 {
+	// C2 (2026-08-13) — §5.8.1 and its siblings: "C_EncryptInit can be called with
+	// pMechanism set to NULL_PTR to terminate an active encryption operation. If an
+	// active operation ... cannot be cancelled, CKR_OPERATION_CANCEL_FAILED must
+	// be returned." CKR_ARGUMENTS_BAD, which this used to answer, is neither of
+	// the two permitted results. C_SessionCancel already implements the
+	// per-family cancel semantics (and the initialisation and session-handle
+	// checks that outrank this one), so the cancel form routes into it.
+	if (pMechanism == NULL_PTR) return C_SessionCancel(hSession, CKF_ENCRYPT);
+
 	if (isSymMechanism(pMechanism))
 		return SymEncryptInit(hSession, pMechanism, hKey);
 	else
@@ -1132,6 +1141,15 @@ CK_RV SoftHSM::AsymDecryptInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMec
 // Initialise decryption using the specified object
 CK_RV SoftHSM::C_DecryptInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechanism, CK_OBJECT_HANDLE hKey)
 {
+	// C2 (2026-08-13) — §5.8.1 and its siblings: "C_DecryptInit can be called with
+	// pMechanism set to NULL_PTR to terminate an active decryption operation. If an
+	// active operation ... cannot be cancelled, CKR_OPERATION_CANCEL_FAILED must
+	// be returned." CKR_ARGUMENTS_BAD, which this used to answer, is neither of
+	// the two permitted results. C_SessionCancel already implements the
+	// per-family cancel semantics (and the initialisation and session-handle
+	// checks that outrank this one), so the cancel form routes into it.
+	if (pMechanism == NULL_PTR) return C_SessionCancel(hSession, CKF_DECRYPT);
+
 	if (isSymMechanism(pMechanism))
 		return SymDecryptInit(hSession, pMechanism, hKey);
 	else
@@ -1762,6 +1780,15 @@ CK_RV SoftHSM::MsgAesGcmInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMecha
 CK_RV SoftHSM::C_MessageEncryptInit(CK_SESSION_HANDLE hSession,
 	CK_MECHANISM_PTR pMechanism, CK_OBJECT_HANDLE hKey)
 {
+	// C2 (2026-08-13) — §5.8.1 and its siblings: "C_MessageEncryptInit can be called with
+	// pMechanism set to NULL_PTR to terminate an active message-based encryption operation. If an
+	// active operation ... cannot be cancelled, CKR_OPERATION_CANCEL_FAILED must
+	// be returned." CKR_ARGUMENTS_BAD, which this used to answer, is neither of
+	// the two permitted results. C_SessionCancel already implements the
+	// per-family cancel semantics (and the initialisation and session-handle
+	// checks that outrank this one), so the cancel form routes into it.
+	if (pMechanism == NULL_PTR) return C_SessionCancel(hSession, CKF_MESSAGE_ENCRYPT);
+
 	return MsgAesGcmInit(hSession, pMechanism, hKey, CKA_ENCRYPT, SESSION_OP_MESSAGE_ENCRYPT);
 }
 
@@ -1980,6 +2007,15 @@ CK_RV SoftHSM::C_MessageEncryptFinal(CK_SESSION_HANDLE hSession)
 CK_RV SoftHSM::C_MessageDecryptInit(CK_SESSION_HANDLE hSession,
 	CK_MECHANISM_PTR pMechanism, CK_OBJECT_HANDLE hKey)
 {
+	// C2 (2026-08-13) — §5.8.1 and its siblings: "C_MessageDecryptInit can be called with
+	// pMechanism set to NULL_PTR to terminate an active message-based decryption operation. If an
+	// active operation ... cannot be cancelled, CKR_OPERATION_CANCEL_FAILED must
+	// be returned." CKR_ARGUMENTS_BAD, which this used to answer, is neither of
+	// the two permitted results. C_SessionCancel already implements the
+	// per-family cancel semantics (and the initialisation and session-handle
+	// checks that outrank this one), so the cancel form routes into it.
+	if (pMechanism == NULL_PTR) return C_SessionCancel(hSession, CKF_MESSAGE_DECRYPT);
+
 	return MsgAesGcmInit(hSession, pMechanism, hKey, CKA_DECRYPT, SESSION_OP_MESSAGE_DECRYPT);
 }
 

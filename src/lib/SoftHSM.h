@@ -42,6 +42,7 @@
 #include "SlotManager.h"
 #include "HandleManager.h"
 #include <memory>
+#include <vector>
 
 // Forward declarations — full definitions are only needed in SoftHSM.cpp where
 // these types are used in downcasts. Keeping them out of the header reduces
@@ -421,6 +422,13 @@ private:
 		int op
 	);
 
+	// C1 — Profiles v3.2 §5.1: publish the CKO_PROFILE object(s) this build
+	// actually satisfies on the given token, idempotently. Computed per build,
+	// never hard-coded, so a build that drops an entry point stops claiming the
+	// profile that requires it.
+	void publishProfileObjects(Token* token);
+	std::vector<CK_ULONG> computeSupportedProfiles();
+
 	CK_RV getRSAPrivateKey(RSAPrivateKey* privateKey, Token* token, OSObject* key);
 	CK_RV getRSAPublicKey(RSAPublicKey* publicKey, Token* token, OSObject* key);
 	CK_RV getECPrivateKey(ECPrivateKey* privateKey, Token* token, OSObject* key);
@@ -554,6 +562,9 @@ private:
 	bool isMechanismPermitted(OSObject* key, CK_MECHANISM_TYPE mechanism);
 	void prepareSupportedMechanisms(std::map<std::string, CK_MECHANISM_TYPE> &t);
 	bool detectFork(void);
+	// Fresh entropy for the child after a fork on the fork-tolerant path, so a
+	// forked child can never continue its parent's random stream.
+	void reseedAfterFork(void);
 
 	// -------------------------------------------------------------------------
 	// Session acquisition helpers — eliminate the 5-step boilerplate repeated

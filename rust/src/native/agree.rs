@@ -32,10 +32,20 @@ pub fn ecdh_agree(session: u32, priv_handle: u32, peer_public: &[u8]) -> Result<
     // change, while cross-tenant access now denies exactly like a
     // missing handle (same anti-oracle property, this function's code).
     let access = resolve_session_access(session)?;
-    let (key_type, scalar) = with_object_checked(&access, priv_handle, |attrs| {
-        (get_object_attr_u32_from(attrs, CKA_KEY_TYPE), get_object_value_from(attrs))
+    let (allowed, key_type, scalar) = with_object_checked(&access, priv_handle, |attrs| {
+        (
+            // S12 (2026-08-13) — §4.8 Table 13. THIS is the KMIP seam:
+            // kmip/src/ops/derive_key.rs calls straight into this function,
+            // so a mechanism-restricted key was enforced over PKCS#11 and
+            // unenforced over KMIP. Checked inside the SAME borrow the
+            // isolation gate already takes, so no extra lock traffic.
+            crate::state::check_mechanism_allowed_from(attrs, CKM_ECDH1_DERIVE),
+            get_object_attr_u32_from(attrs, CKA_KEY_TYPE),
+            get_object_value_from(attrs),
+        )
     })
     .map_err(|_| CKR_KEY_HANDLE_INVALID)?;
+    allowed?;
     let key_type = key_type.ok_or(CKR_KEY_HANDLE_INVALID)?;
     let scalar = scalar.ok_or(CKR_KEY_HANDLE_INVALID)?;
     match (key_type, scalar.len()) {

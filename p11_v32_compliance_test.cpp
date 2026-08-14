@@ -8,6 +8,9 @@
 #include <iostream>
 #include <fstream>
 #include <iomanip>
+#include <functional>
+#include <sys/wait.h>
+#include <unistd.h>
 #include <ctime>
 
 // Build configuration — exposes WITH_RIPEMD160 so the RIPEMD-160 KAT test is
@@ -261,6 +264,48 @@ bool init_token() {
 
     // ── G4 pre-init checks (must run BEFORE C_Initialize) ────────────────────
     if (opt_category == "all" || opt_category == "g4-retcodes") {
+        // C2 (2026-08-13) — §5.4: C_Initialize, C_GetFunctionList,
+        // C_GetInterfaceList and C_GetInterface "are the only Cryptoki
+        // functions which an application may call before calling
+        // C_Initialize", so EVERY other entry point owes the pre-init caller
+        // CKR_CRYPTOKI_NOT_INITIALIZED — including on the argument paths that
+        // used to answer first.
+        {
+            typedef CK_RV (*SI_t)(CK_SESSION_HANDLE, CK_MECHANISM_PTR, CK_OBJECT_HANDLE);
+            typedef CK_RV (*WFSE_t)(CK_FLAGS, CK_SLOT_ID_PTR, CK_VOID_PTR);
+            SI_t SI = (SI_t)dlsym(handle, "C_SignInit");
+            SI_t VI = (SI_t)dlsym(handle, "C_VerifyInit");
+            SI_t EI = (SI_t)dlsym(handle, "C_EncryptInit");
+            WFSE_t WFSE = (WFSE_t)dlsym(handle, "C_WaitForSlotEvent");
+            if (SI) {
+                CK_RV r = SI(0, NULL_PTR, 0);
+                record_result("G4Retcodes", "C2_SignInit_null_mech_pre_init",
+                              r == CKR_CRYPTOKI_NOT_INITIALIZED ? "PASS" : "FAIL",
+                              "expect CKR_CRYPTOKI_NOT_INITIALIZED, RV=" + std::to_string(r));
+            }
+            if (VI) {
+                CK_RV r = VI(0, NULL_PTR, 0);
+                record_result("G4Retcodes", "C2_VerifyInit_null_mech_pre_init",
+                              r == CKR_CRYPTOKI_NOT_INITIALIZED ? "PASS" : "FAIL",
+                              "expect CKR_CRYPTOKI_NOT_INITIALIZED, RV=" + std::to_string(r));
+            }
+            if (EI) {
+                CK_RV r = EI(0, NULL_PTR, 0);
+                record_result("G4Retcodes", "C2_EncryptInit_null_mech_pre_init",
+                              r == CKR_CRYPTOKI_NOT_INITIALIZED ? "PASS" : "FAIL",
+                              "expect CKR_CRYPTOKI_NOT_INITIALIZED, RV=" + std::to_string(r));
+            }
+            if (WFSE) {
+                // Flags were tested BEFORE initialisation, so a pre-init caller
+                // that omitted CKF_DONT_BLOCK got CKR_FUNCTION_NOT_SUPPORTED.
+                CK_SLOT_ID sl = 0;
+                CK_RV r = WFSE(0, &sl, NULL_PTR);
+                record_result("G4Retcodes", "C2_WaitForSlotEvent_pre_init_outranks_flags",
+                              r == CKR_CRYPTOKI_NOT_INITIALIZED ? "PASS" : "FAIL",
+                              "expect CKR_CRYPTOKI_NOT_INITIALIZED, RV=" + std::to_string(r));
+            }
+        }
+
         // V-19: C_GetSessionValidationFlags before C_Initialize →
         // CKR_CRYPTOKI_NOT_INITIALIZED.
         typedef CK_RV (*C_GSVF_t)(CK_SESSION_HANDLE, CK_SESSION_VALIDATION_FLAGS_TYPE, CK_FLAGS_PTR);
@@ -817,6 +862,1617 @@ void test_hybrid_kem() {
     }
 }
 
+
+// N5 remediation (2026-08-13) — CKA_ALLOWED_MECHANISMS must be enforced on
+// the C_EncapsulateKey / C_DecapsulateKey paths (PKCS#11 v3.2 §4.8 Table 13),
+// through the same shared isMechanismPermitted gate every other operation
+// uses (its convention: CKR_MECHANISM_INVALID for a disallowed mechanism).
+// Negative-style cases in the spirit of G5Attrs/test_negative_paths: a key
+// whose CKA_ALLOWED_MECHANISMS excludes the KEM mechanism must be refused in
+// both directions; a whitelist that INCLUDES it must keep working.
+void test_kem_allowed_mechanisms() {
+    const char* CAT = "KEMNeg";
+    typedef CK_RV (*C_EncapsulateKey_t)(CK_SESSION_HANDLE, CK_MECHANISM_PTR, CK_OBJECT_HANDLE, CK_ATTRIBUTE_PTR, CK_ULONG, CK_BYTE_PTR, CK_ULONG_PTR, CK_OBJECT_HANDLE_PTR);
+    typedef CK_RV (*C_DecapsulateKey_t)(CK_SESSION_HANDLE, CK_MECHANISM_PTR, CK_OBJECT_HANDLE, CK_ATTRIBUTE_PTR, CK_ULONG, CK_BYTE_PTR, CK_ULONG, CK_OBJECT_HANDLE_PTR);
+    void* dlib = dlopen(opt_engine.c_str(), RTLD_NOW);
+    C_EncapsulateKey_t EncapFn = (C_EncapsulateKey_t)dlsym(dlib, "C_EncapsulateKey");
+    C_DecapsulateKey_t DecapFn = (C_DecapsulateKey_t)dlsym(dlib, "C_DecapsulateKey");
+    if (!EncapFn || !DecapFn) {
+        record_result(CAT, "AllowedMechs_KEM", "SKIP", "Function pointers missing");
+        return;
+    }
+
+    CK_BBOOL bTrue = CK_TRUE, bFalse = CK_FALSE;
+    CK_OBJECT_CLASS pubClass = CKO_PUBLIC_KEY, privClass = CKO_PRIVATE_KEY;
+
+    // ── ML-KEM-768 keypair restricted to a DIFFERENT mechanism ──────────
+    {
+        CK_KEY_TYPE kemType = 0x00000049; // CKK_ML_KEM
+        CK_ULONG ps768 = 2;
+        CK_MECHANISM_TYPE onlyMlDsa[] = { CKM_ML_DSA };
+        CK_ATTRIBUTE pubTmpl[] = {
+            { CKA_CLASS,              &pubClass, sizeof(pubClass) },
+            { CKA_KEY_TYPE,           &kemType,  sizeof(kemType) },
+            { CKA_ENCAPSULATE,        &bTrue,    sizeof(bTrue) },
+            { CKA_PARAMETER_SET,      &ps768,    sizeof(ps768) },
+            { CKA_TOKEN,              &bFalse,   sizeof(bFalse) },
+            { CKA_ALLOWED_MECHANISMS, onlyMlDsa, sizeof(onlyMlDsa) }
+        };
+        CK_ATTRIBUTE privTmpl[] = {
+            { CKA_CLASS,              &privClass, sizeof(privClass) },
+            { CKA_KEY_TYPE,           &kemType,   sizeof(kemType) },
+            { CKA_DECAPSULATE,        &bTrue,     sizeof(bTrue) },
+            { CKA_PARAMETER_SET,      &ps768,     sizeof(ps768) },
+            { CKA_TOKEN,              &bFalse,    sizeof(bFalse) },
+            { CKA_ALLOWED_MECHANISMS, onlyMlDsa,  sizeof(onlyMlDsa) }
+        };
+        CK_MECHANISM kemGen = { CKM_ML_KEM_KEY_PAIR_GEN, NULL_PTR, 0 };
+        CK_OBJECT_HANDLE hPub, hPriv;
+        CK_RV rv = fl->C_GenerateKeyPair(hSess, &kemGen, pubTmpl, 6, privTmpl, 6, &hPub, &hPriv);
+        if (rv != CKR_OK) {
+            record_result(CAT, "Generate_MLKEM_restricted", "FAIL", "RV=" + std::to_string(rv));
+        } else {
+            CK_MECHANISM encapMech = { CKM_ML_KEM, NULL_PTR, 0 };
+            CK_BYTE ct[2000]; CK_ULONG ctLen = sizeof(ct);
+            CK_OBJECT_HANDLE hSS;
+            rv = EncapFn(hSess, &encapMech, hPub, NULL_PTR, 0, ct, &ctLen, &hSS);
+            record_result(CAT, "Encap_MLKEM_restricted",
+                          rv == CKR_MECHANISM_INVALID ? "PASS" : "FAIL",
+                          "RV=" + std::to_string(rv) + " (want CKR_MECHANISM_INVALID)");
+            CK_BYTE dummyCt[1088]; memset(dummyCt, 0, sizeof(dummyCt));
+            rv = DecapFn(hSess, &encapMech, hPriv, NULL_PTR, 0, dummyCt, sizeof(dummyCt), &hSS);
+            record_result(CAT, "Decap_MLKEM_restricted",
+                          rv == CKR_MECHANISM_INVALID ? "PASS" : "FAIL",
+                          "RV=" + std::to_string(rv) + " (want CKR_MECHANISM_INVALID)");
+        }
+    }
+
+    // ── ML-KEM-768 keypair whose whitelist INCLUDES CKM_ML_KEM ──────────
+    // (guards against the gate over-blocking a legitimate whitelist)
+    {
+        CK_KEY_TYPE kemType = 0x00000049; // CKK_ML_KEM
+        CK_ULONG ps768 = 2;
+        CK_MECHANISM_TYPE onlyMlKem[] = { CKM_ML_KEM };
+        CK_ATTRIBUTE pubTmpl[] = {
+            { CKA_CLASS,              &pubClass, sizeof(pubClass) },
+            { CKA_KEY_TYPE,           &kemType,  sizeof(kemType) },
+            { CKA_ENCAPSULATE,        &bTrue,    sizeof(bTrue) },
+            { CKA_PARAMETER_SET,      &ps768,    sizeof(ps768) },
+            { CKA_TOKEN,              &bFalse,   sizeof(bFalse) },
+            { CKA_ALLOWED_MECHANISMS, onlyMlKem, sizeof(onlyMlKem) }
+        };
+        CK_ATTRIBUTE privTmpl[] = {
+            { CKA_CLASS,         &privClass, sizeof(privClass) },
+            { CKA_KEY_TYPE,      &kemType,   sizeof(kemType) },
+            { CKA_DECAPSULATE,   &bTrue,     sizeof(bTrue) },
+            { CKA_PARAMETER_SET, &ps768,     sizeof(ps768) },
+            { CKA_TOKEN,         &bFalse,    sizeof(bFalse) }
+        };
+        CK_MECHANISM kemGen = { CKM_ML_KEM_KEY_PAIR_GEN, NULL_PTR, 0 };
+        CK_OBJECT_HANDLE hPub, hPriv;
+        CK_RV rv = fl->C_GenerateKeyPair(hSess, &kemGen, pubTmpl, 6, privTmpl, 5, &hPub, &hPriv);
+        if (rv != CKR_OK) {
+            record_result(CAT, "Generate_MLKEM_whitelisted", "FAIL", "RV=" + std::to_string(rv));
+        } else {
+            CK_MECHANISM encapMech = { CKM_ML_KEM, NULL_PTR, 0 };
+            CK_BYTE ct[2000]; CK_ULONG ctLen = sizeof(ct);
+            CK_OBJECT_HANDLE hSS;
+            rv = EncapFn(hSess, &encapMech, hPub, NULL_PTR, 0, ct, &ctLen, &hSS);
+            record_result(CAT, "Encap_MLKEM_whitelisted",
+                          rv == CKR_OK ? "PASS" : "FAIL",
+                          "RV=" + std::to_string(rv) + " (whitelist includes CKM_ML_KEM)");
+        }
+    }
+
+    // ── P-256 keypair restricted to CKM_ECDSA: ECDH-as-KEM must refuse ──
+    {
+        CK_KEY_TYPE ecType = CKK_EC;
+        CK_BYTE oid_p256[] = { 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07 };
+        CK_MECHANISM_TYPE onlyEcdsa[] = { CKM_ECDSA };
+        CK_ATTRIBUTE pubTmpl[] = {
+            { CKA_CLASS,              &pubClass, sizeof(pubClass) },
+            { CKA_KEY_TYPE,           &ecType,   sizeof(ecType) },
+            { CKA_EC_PARAMS,          oid_p256,  sizeof(oid_p256) },
+            { CKA_ENCAPSULATE,        &bTrue,    sizeof(bTrue) },
+            { CKA_TOKEN,              &bFalse,   sizeof(bFalse) },
+            { CKA_ALLOWED_MECHANISMS, onlyEcdsa, sizeof(onlyEcdsa) }
+        };
+        CK_ATTRIBUTE privTmpl[] = {
+            { CKA_CLASS,              &privClass, sizeof(privClass) },
+            { CKA_KEY_TYPE,           &ecType,    sizeof(ecType) },
+            { CKA_DECAPSULATE,        &bTrue,     sizeof(bTrue) },
+            { CKA_TOKEN,              &bFalse,    sizeof(bFalse) },
+            { CKA_ALLOWED_MECHANISMS, onlyEcdsa,  sizeof(onlyEcdsa) }
+        };
+        CK_MECHANISM ecGen = { CKM_EC_KEY_PAIR_GEN, NULL_PTR, 0 };
+        CK_OBJECT_HANDLE hPub, hPriv;
+        CK_RV rv = fl->C_GenerateKeyPair(hSess, &ecGen, pubTmpl, 6, privTmpl, 5, &hPub, &hPriv);
+        if (rv != CKR_OK) {
+            record_result(CAT, "Generate_EC_restricted", "FAIL", "RV=" + std::to_string(rv));
+        } else {
+            CK_MECHANISM ecdhMech = { CKM_ECDH1_DERIVE, NULL_PTR, 0 };
+            CK_BYTE ct[200]; CK_ULONG ctLen = sizeof(ct);
+            CK_OBJECT_HANDLE hSS;
+            rv = EncapFn(hSess, &ecdhMech, hPub, NULL_PTR, 0, ct, &ctLen, &hSS);
+            record_result(CAT, "Encap_ECDH_restricted",
+                          rv == CKR_MECHANISM_INVALID ? "PASS" : "FAIL",
+                          "RV=" + std::to_string(rv) + " (want CKR_MECHANISM_INVALID)");
+            CK_BYTE dummyPoint[67]; memset(dummyPoint, 0, sizeof(dummyPoint));
+            rv = DecapFn(hSess, &ecdhMech, hPriv, NULL_PTR, 0, dummyPoint, sizeof(dummyPoint), &hSS);
+            record_result(CAT, "Decap_ECDH_restricted",
+                          rv == CKR_MECHANISM_INVALID ? "PASS" : "FAIL",
+                          "RV=" + std::to_string(rv) + " (want CKR_MECHANISM_INVALID)");
+        }
+    }
+}
+
+// CKA_VALUE_LEN on KEM-produced shared-secret keys (2026-08-13 remediation).
+//
+// PKCS#11 v3.2 §6.8.2 Table 103 defines CKA_VALUE_LEN on a CKK_GENERIC_SECRET
+// object as the "Length in bytes of key value" — i.e. of CKA_VALUE. Until this
+// pass the C++ engine set CKA_VALUE on encapsulated/decapsulated keys but never
+// CKA_VALUE_LEN, and P11GenericSecretKeyObj registers the attribute with a
+// setDefault() of 0 — so every KEM-produced key published a CKA_VALUE_LEN of 0
+// alongside a 32-byte CKA_VALUE: the §4.1.1 rule-5 inconsistency, readable
+// straight out of C_GetAttributeValue.
+//
+// §4.1.1 names C_EncapsulateKey/C_DecapsulateKey as object-creation functions;
+// rule 5 makes a template that contradicts what the function contributes
+// CKR_TEMPLATE_INCONSISTENT, rule 6 lets one that merely restates it succeed.
+// §6.68.5 gives CKM_ML_KEM no length knob; §6.3.17 explicitly makes
+// CKA_VALUE_LEN a truncation request for CKM_ECDH1_DERIVE ("The truncation
+// removes bytes from the leading end of the secret value.").
+void test_kem_value_len() {
+    const char* CAT = "KEMValueLen";
+    typedef CK_RV (*C_EncapsulateKey_t)(CK_SESSION_HANDLE, CK_MECHANISM_PTR, CK_OBJECT_HANDLE, CK_ATTRIBUTE_PTR, CK_ULONG, CK_BYTE_PTR, CK_ULONG_PTR, CK_OBJECT_HANDLE_PTR);
+    typedef CK_RV (*C_DecapsulateKey_t)(CK_SESSION_HANDLE, CK_MECHANISM_PTR, CK_OBJECT_HANDLE, CK_ATTRIBUTE_PTR, CK_ULONG, CK_BYTE_PTR, CK_ULONG, CK_OBJECT_HANDLE_PTR);
+    void* dlib = dlopen(opt_engine.c_str(), RTLD_NOW);
+    C_EncapsulateKey_t EncapFn = (C_EncapsulateKey_t)dlsym(dlib, "C_EncapsulateKey");
+    C_DecapsulateKey_t DecapFn = (C_DecapsulateKey_t)dlsym(dlib, "C_DecapsulateKey");
+    if (!EncapFn || !DecapFn) {
+        record_result(CAT, "KEM_CKA_VALUE_LEN", "SKIP", "Function pointers missing");
+        return;
+    }
+
+    CK_BBOOL bTrue = CK_TRUE, bFalse = CK_FALSE;
+    CK_OBJECT_CLASS pubClass = CKO_PUBLIC_KEY, privClass = CKO_PRIVATE_KEY;
+    CK_OBJECT_CLASS secClass = CKO_SECRET_KEY;
+    CK_KEY_TYPE secType = CKK_GENERIC_SECRET;
+
+    // Minimal secret-key template WITHOUT CKA_VALUE_LEN — the engine must
+    // supply it itself.
+    CK_ATTRIBUTE ssTmpl[] = {
+        { CKA_CLASS,       &secClass, sizeof(secClass) },
+        { CKA_KEY_TYPE,    &secType,  sizeof(secType) },
+        { CKA_TOKEN,       &bFalse,   sizeof(bFalse) },
+        { CKA_EXTRACTABLE, &bTrue,    sizeof(bTrue) },
+        { CKA_SENSITIVE,   &bFalse,   sizeof(bFalse) },
+    };
+
+    // Read CKA_VALUE_LEN + CKA_VALUE and report whether they agree.
+    auto checkPair = [&](const std::string& name, CK_OBJECT_HANDLE h, CK_ULONG wantLen) {
+        CK_ULONG vlen = 0xDEADBEEF;
+        CK_ATTRIBUTE lenAttr = { CKA_VALUE_LEN, &vlen, sizeof(vlen) };
+        CK_RV r1 = fl->C_GetAttributeValue(hSess, h, &lenAttr, 1);
+        CK_BYTE val[256];
+        CK_ATTRIBUTE valAttr = { CKA_VALUE, val, sizeof(val) };
+        CK_RV r2 = fl->C_GetAttributeValue(hSess, h, &valAttr, 1);
+        if (r1 != CKR_OK || r2 != CKR_OK) {
+            record_result(CAT, name, "FAIL",
+                          "C_GetAttributeValue RV=" + std::to_string(r1) + "/" + std::to_string(r2));
+            return;
+        }
+        bool ok = (vlen == wantLen) && (vlen == valAttr.ulValueLen);
+        record_result(CAT, name, ok ? "PASS" : "FAIL",
+                      "CKA_VALUE_LEN=" + std::to_string(vlen) +
+                      " len(CKA_VALUE)=" + std::to_string(valAttr.ulValueLen) +
+                      " (want " + std::to_string(wantLen) + ")");
+    };
+
+    // ── ML-KEM-768: §6.68.5 + FIPS 203 → 32-byte shared secret ──────────
+    CK_OBJECT_HANDLE hPub = 0, hPriv = 0;
+    {
+        CK_KEY_TYPE kemType = CKK_ML_KEM;
+        CK_ULONG ps768 = 2;
+        CK_ATTRIBUTE pubTmpl[] = {
+            { CKA_CLASS,         &pubClass, sizeof(pubClass) },
+            { CKA_KEY_TYPE,      &kemType,  sizeof(kemType) },
+            { CKA_ENCAPSULATE,   &bTrue,    sizeof(bTrue) },
+            { CKA_PARAMETER_SET, &ps768,    sizeof(ps768) },
+            { CKA_TOKEN,         &bFalse,   sizeof(bFalse) }
+        };
+        CK_ATTRIBUTE privTmpl[] = {
+            { CKA_CLASS,         &privClass, sizeof(privClass) },
+            { CKA_KEY_TYPE,      &kemType,   sizeof(kemType) },
+            { CKA_DECAPSULATE,   &bTrue,     sizeof(bTrue) },
+            { CKA_PARAMETER_SET, &ps768,     sizeof(ps768) },
+            { CKA_TOKEN,         &bFalse,    sizeof(bFalse) }
+        };
+        CK_MECHANISM kemGen = { CKM_ML_KEM_KEY_PAIR_GEN, NULL_PTR, 0 };
+        CK_RV rv = fl->C_GenerateKeyPair(hSess, &kemGen, pubTmpl, 5, privTmpl, 5, &hPub, &hPriv);
+        if (rv != CKR_OK) {
+            record_result(CAT, "Generate_ML_KEM_768", "FAIL", "RV=" + std::to_string(rv));
+            return;
+        }
+        record_result(CAT, "Generate_ML_KEM_768", "PASS", "");
+    }
+
+    CK_MECHANISM mlkemMech = { CKM_ML_KEM, NULL_PTR, 0 };
+    CK_BYTE ct[2000]; CK_ULONG ctLen = sizeof(ct);
+    CK_OBJECT_HANDLE hEnc = 0, hDec = 0;
+    CK_RV rv = EncapFn(hSess, &mlkemMech, hPub, ssTmpl, 5, ct, &ctLen, &hEnc);
+    if (rv != CKR_OK) {
+        record_result(CAT, "Encap_MLKEM768", "FAIL", "RV=" + std::to_string(rv));
+        return;
+    }
+    record_result(CAT, "Encap_MLKEM768", "PASS", "ct len=" + std::to_string(ctLen));
+    checkPair("Encap_MLKEM768_VALUE_LEN", hEnc, 32);
+
+    rv = DecapFn(hSess, &mlkemMech, hPriv, ssTmpl, 5, ct, ctLen, &hDec);
+    if (rv != CKR_OK) {
+        record_result(CAT, "Decap_MLKEM768", "FAIL", "RV=" + std::to_string(rv));
+    } else {
+        record_result(CAT, "Decap_MLKEM768", "PASS", "");
+        checkPair("Decap_MLKEM768_VALUE_LEN", hDec, 32);
+    }
+
+    // ── §4.1.1 rule 5: a CKA_VALUE_LEN contradicting the contributed
+    // CKA_VALUE must be refused, in BOTH directions, without creating a key.
+    {
+        CK_ULONG bogus = 16; // ML-KEM's secret is 32
+        CK_ATTRIBUTE badTmpl[] = {
+            { CKA_CLASS,       &secClass, sizeof(secClass) },
+            { CKA_KEY_TYPE,    &secType,  sizeof(secType) },
+            { CKA_TOKEN,       &bFalse,   sizeof(bFalse) },
+            { CKA_EXTRACTABLE, &bTrue,    sizeof(bTrue) },
+            { CKA_VALUE_LEN,   &bogus,    sizeof(bogus) },
+        };
+        CK_BYTE ct2[2000]; CK_ULONG ct2Len = sizeof(ct2);
+        CK_OBJECT_HANDLE hBad = CK_INVALID_HANDLE;
+        CK_RV r = EncapFn(hSess, &mlkemMech, hPub, badTmpl, 5, ct2, &ct2Len, &hBad);
+        record_result(CAT, "Encap_MLKEM768_conflicting_VALUE_LEN",
+                      r == CKR_TEMPLATE_INCONSISTENT ? "PASS" : "FAIL",
+                      "RV=" + std::to_string(r) + " (want CKR_TEMPLATE_INCONSISTENT)");
+        hBad = CK_INVALID_HANDLE;
+        r = DecapFn(hSess, &mlkemMech, hPriv, badTmpl, 5, ct, ctLen, &hBad);
+        record_result(CAT, "Decap_MLKEM768_conflicting_VALUE_LEN",
+                      r == CKR_TEMPLATE_INCONSISTENT ? "PASS" : "FAIL",
+                      "RV=" + std::to_string(r) + " (want CKR_TEMPLATE_INCONSISTENT)");
+    }
+
+    // ── §4.1.1 rule 6: a CKA_VALUE_LEN that RESTATES the contributed value
+    // must be accepted (this is also what test_pqc_kem/test_hybrid_kem send).
+    {
+        CK_ULONG good = 32;
+        CK_ATTRIBUTE okTmpl[] = {
+            { CKA_CLASS,       &secClass, sizeof(secClass) },
+            { CKA_KEY_TYPE,    &secType,  sizeof(secType) },
+            { CKA_TOKEN,       &bFalse,   sizeof(bFalse) },
+            { CKA_EXTRACTABLE, &bTrue,    sizeof(bTrue) },
+            { CKA_VALUE_LEN,   &good,     sizeof(good) },
+        };
+        CK_OBJECT_HANDLE hOk = CK_INVALID_HANDLE;
+        CK_RV r = DecapFn(hSess, &mlkemMech, hPriv, okTmpl, 5, ct, ctLen, &hOk);
+        if (r != CKR_OK) {
+            record_result(CAT, "Decap_MLKEM768_matching_VALUE_LEN", "FAIL", "RV=" + std::to_string(r));
+        } else {
+            record_result(CAT, "Decap_MLKEM768_matching_VALUE_LEN", "PASS", "");
+            checkPair("Decap_MLKEM768_matching_VALUE_LEN_readback", hOk, 32);
+        }
+    }
+
+    // ── ECDH-as-KEM on P-256: §6.3.17 truncation semantics ──────────────
+    {
+        CK_KEY_TYPE ecType = CKK_EC;
+        CK_BYTE oid_p256[] = { 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07 };
+        CK_ATTRIBUTE pubTmpl[] = {
+            { CKA_CLASS,       &pubClass, sizeof(pubClass) },
+            { CKA_KEY_TYPE,    &ecType,   sizeof(ecType) },
+            { CKA_EC_PARAMS,   oid_p256,  sizeof(oid_p256) },
+            { CKA_ENCAPSULATE, &bTrue,    sizeof(bTrue) },
+            { CKA_TOKEN,       &bFalse,   sizeof(bFalse) }
+        };
+        CK_ATTRIBUTE privTmpl[] = {
+            { CKA_CLASS,       &privClass, sizeof(privClass) },
+            { CKA_KEY_TYPE,    &ecType,    sizeof(ecType) },
+            { CKA_DECAPSULATE, &bTrue,     sizeof(bTrue) },
+            { CKA_TOKEN,       &bFalse,    sizeof(bFalse) }
+        };
+        CK_MECHANISM ecGen = { CKM_EC_KEY_PAIR_GEN, NULL_PTR, 0 };
+        CK_OBJECT_HANDLE hEcPub = 0, hEcPriv = 0;
+        CK_RV r = fl->C_GenerateKeyPair(hSess, &ecGen, pubTmpl, 5, privTmpl, 4, &hEcPub, &hEcPriv);
+        if (r != CKR_OK) {
+            record_result(CAT, "Generate_EC_P256", "FAIL", "RV=" + std::to_string(r));
+            return;
+        }
+        record_result(CAT, "Generate_EC_P256", "PASS", "");
+
+        CK_MECHANISM ecdhMech = { CKM_ECDH1_DERIVE, NULL_PTR, 0 };
+
+        // (a) no CKA_VALUE_LEN → full 32-byte X coordinate on both sides.
+        CK_BYTE ecCt[200]; CK_ULONG ecCtLen = sizeof(ecCt);
+        CK_OBJECT_HANDLE hE = 0, hD = 0;
+        r = EncapFn(hSess, &ecdhMech, hEcPub, ssTmpl, 5, ecCt, &ecCtLen, &hE);
+        if (r != CKR_OK) {
+            record_result(CAT, "Encap_ECDH_P256", "FAIL", "RV=" + std::to_string(r));
+            return;
+        }
+        record_result(CAT, "Encap_ECDH_P256", "PASS", "ct len=" + std::to_string(ecCtLen));
+        checkPair("Encap_ECDH_P256_VALUE_LEN", hE, 32);
+        r = DecapFn(hSess, &ecdhMech, hEcPriv, ssTmpl, 5, ecCt, ecCtLen, &hD);
+        if (r != CKR_OK) {
+            record_result(CAT, "Decap_ECDH_P256", "FAIL", "RV=" + std::to_string(r));
+        } else {
+            record_result(CAT, "Decap_ECDH_P256", "PASS", "");
+            checkPair("Decap_ECDH_P256_VALUE_LEN", hD, 32);
+        }
+
+        // (b) CKA_VALUE_LEN=16 → §6.3.17 truncation, and both peers must
+        // still agree (the encapsulator and decapsulator truncate the same).
+        CK_ULONG want16 = 16;
+        CK_ATTRIBUTE truncTmpl[] = {
+            { CKA_CLASS,       &secClass, sizeof(secClass) },
+            { CKA_KEY_TYPE,    &secType,  sizeof(secType) },
+            { CKA_TOKEN,       &bFalse,   sizeof(bFalse) },
+            { CKA_EXTRACTABLE, &bTrue,    sizeof(bTrue) },
+            { CKA_SENSITIVE,   &bFalse,   sizeof(bFalse) },
+            { CKA_VALUE_LEN,   &want16,   sizeof(want16) },
+        };
+        CK_BYTE tCt[200]; CK_ULONG tCtLen = sizeof(tCt);
+        CK_OBJECT_HANDLE hTE = 0, hTD = 0;
+        r = EncapFn(hSess, &ecdhMech, hEcPub, truncTmpl, 6, tCt, &tCtLen, &hTE);
+        if (r != CKR_OK) {
+            record_result(CAT, "Encap_ECDH_P256_truncated", "FAIL", "RV=" + std::to_string(r));
+        } else {
+            record_result(CAT, "Encap_ECDH_P256_truncated", "PASS", "");
+            checkPair("Encap_ECDH_P256_truncated_VALUE_LEN", hTE, 16);
+            r = DecapFn(hSess, &ecdhMech, hEcPriv, truncTmpl, 6, tCt, tCtLen, &hTD);
+            if (r != CKR_OK) {
+                record_result(CAT, "Decap_ECDH_P256_truncated", "FAIL", "RV=" + std::to_string(r));
+            } else {
+                checkPair("Decap_ECDH_P256_truncated_VALUE_LEN", hTD, 16);
+                CK_BYTE v1[64]; CK_ATTRIBUTE a1 = { CKA_VALUE, v1, sizeof(v1) };
+                CK_BYTE v2[64]; CK_ATTRIBUTE a2 = { CKA_VALUE, v2, sizeof(v2) };
+                fl->C_GetAttributeValue(hSess, hTE, &a1, 1);
+                fl->C_GetAttributeValue(hSess, hTD, &a2, 1);
+                bool ok = a1.ulValueLen == 16 && a1.ulValueLen == a2.ulValueLen &&
+                          memcmp(v1, v2, a1.ulValueLen) == 0;
+                record_result(CAT, "Decap_ECDH_P256_truncated", ok ? "PASS" : "FAIL",
+                              "truncated secrets must match on both sides");
+            }
+        }
+
+        // (c) CKA_VALUE_LEN longer than the secret cannot be produced by
+        // truncation → §4.1.1 rule 5.
+        CK_ULONG want64 = 64;
+        CK_ATTRIBUTE bigTmpl[] = {
+            { CKA_CLASS,       &secClass, sizeof(secClass) },
+            { CKA_KEY_TYPE,    &secType,  sizeof(secType) },
+            { CKA_TOKEN,       &bFalse,   sizeof(bFalse) },
+            { CKA_EXTRACTABLE, &bTrue,    sizeof(bTrue) },
+            { CKA_VALUE_LEN,   &want64,   sizeof(want64) },
+        };
+        CK_BYTE bCt[200]; CK_ULONG bCtLen = sizeof(bCt);
+        CK_OBJECT_HANDLE hB = CK_INVALID_HANDLE;
+        r = EncapFn(hSess, &ecdhMech, hEcPub, bigTmpl, 5, bCt, &bCtLen, &hB);
+        record_result(CAT, "Encap_ECDH_P256_oversized_VALUE_LEN",
+                      r == CKR_TEMPLATE_INCONSISTENT ? "PASS" : "FAIL",
+                      "RV=" + std::to_string(r) + " (want CKR_TEMPLATE_INCONSISTENT)");
+        hB = CK_INVALID_HANDLE;
+        r = DecapFn(hSess, &ecdhMech, hEcPriv, bigTmpl, 5, ecCt, ecCtLen, &hB);
+        record_result(CAT, "Decap_ECDH_P256_oversized_VALUE_LEN",
+                      r == CKR_TEMPLATE_INCONSISTENT ? "PASS" : "FAIL",
+                      "RV=" + std::to_string(r) + " (want CKR_TEMPLATE_INCONSISTENT)");
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// S5 — hash-based-signature private keys MUST be sensitive and unextractable
+// (2026-08-13 remediation).
+//
+// PKCS#11 v3.2 §6.65.3 (HSS): "CKA_SENSITIVE MUST be true, CKA_EXTRACTABLE MUST
+// be false, and CKA_COPYABLE MUST be false for this key."
+// §6.66.4 (XMSS) and §6.66.5 (XMSS-MT): "CKA_SENSITIVE MUST be true and
+// CKA_EXTRACTABLE MUST be false for this key."
+//
+// Until this pass the C++ engine set none of them, so the class defaults
+// applied (CKA_SENSITIVE=false, CKA_EXTRACTABLE=true).  The HSS/XMSS private
+// key's CKA_VALUE is the one-time-signature STATE — the same tables warn that
+// "exporting this value is dangerous as it would allow key reuse" — so the key
+// was one C_GetAttributeValue away from an extraction that permits forgery.
+//
+// §4.1.1 rule 5 makes a template contradicting a mechanism-contributed value an
+// error; the plan's chosen code is CKR_ATTRIBUTE_VALUE_INVALID.
+// ─────────────────────────────────────────────────────────────────────────────
+void test_hbs_key_protection() {
+    const char* CAT = "HBSProtect";
+    const CK_MECHANISM_TYPE M_HSS_KP    = 0x00004032UL;
+    const CK_MECHANISM_TYPE M_XMSS_KP   = 0x00004034UL;
+    const CK_MECHANISM_TYPE M_XMSSMT_KP = 0x00004035UL;
+    const CK_KEY_TYPE KT_HSS    = 0x00000046UL;
+    const CK_KEY_TYPE KT_XMSS   = 0x00000047UL;
+    const CK_KEY_TYPE KT_XMSSMT = 0x00000048UL;
+    const CK_ATTRIBUTE_TYPE A_PARAMETER_SET = 0x0000061dUL;
+
+    CK_BBOOL bTrue = CK_TRUE, bFalse = CK_FALSE;
+    CK_OBJECT_CLASS pubClass = CKO_PUBLIC_KEY, privClass = CKO_PRIVATE_KEY;
+
+    // Generate one HBS key pair, optionally injecting ONE extra private-key
+    // template entry (used for the "contradicting template" cases).
+    auto gen = [&](CK_MECHANISM_TYPE mech, CK_KEY_TYPE kt, CK_ULONG paramSet,
+                   CK_ATTRIBUTE* extra, CK_OBJECT_HANDLE* hPub, CK_OBJECT_HANDLE* hPriv) -> CK_RV {
+        CK_MECHANISM m = { mech, NULL_PTR, 0 };
+        CK_ATTRIBUTE pubTmpl[] = {
+            { CKA_CLASS,          &pubClass, sizeof(pubClass) },
+            { CKA_KEY_TYPE,       &kt,       sizeof(kt) },
+            { CKA_VERIFY,         &bTrue,    sizeof(bTrue) },
+            { CKA_TOKEN,          &bFalse,   sizeof(bFalse) },
+            { A_PARAMETER_SET,    &paramSet, sizeof(paramSet) },
+        };
+        CK_ATTRIBUTE privTmpl[6] = {
+            { CKA_CLASS,          &privClass, sizeof(privClass) },
+            { CKA_KEY_TYPE,       &kt,        sizeof(kt) },
+            { CKA_SIGN,           &bTrue,     sizeof(bTrue) },
+            { CKA_TOKEN,          &bFalse,    sizeof(bFalse) },
+            { A_PARAMETER_SET,    &paramSet,  sizeof(paramSet) },
+        };
+        CK_ULONG privCount = 5;
+        if (extra) privTmpl[privCount++] = *extra;
+        *hPub = 0; *hPriv = 0;
+        return fl->C_GenerateKeyPair(hSess, &m, pubTmpl, 5, privTmpl, privCount, hPub, hPriv);
+    };
+
+    struct Case { const char* name; CK_MECHANISM_TYPE mech; CK_KEY_TYPE kt; CK_ULONG ps; bool copyable; };
+    // HSS parameter set 0x01 == CKP_HSS_LMS_SHA256_M32_H5 / LMOTS w8 default.
+    Case cases[] = {
+        { "HSS",    M_HSS_KP,    KT_HSS,    0x00000001UL, true  },
+        { "XMSS",   M_XMSS_KP,   KT_XMSS,   0x00000001UL, false },
+        { "XMSSMT", M_XMSSMT_KP, KT_XMSSMT, 0x00000001UL, false },
+    };
+
+    for (const Case& c : cases) {
+        if (!mech_advertised(c.mech)) {
+            record_result(CAT, std::string(c.name) + "_advertised", "SKIP", "mechanism not advertised");
+            continue;
+        }
+        CK_OBJECT_HANDLE hPub = 0, hPriv = 0;
+        CK_RV rv = gen(c.mech, c.kt, c.ps, NULL, &hPub, &hPriv);
+        if (rv != CKR_OK) {
+            record_result(CAT, std::string(c.name) + "_Generate", "FAIL", "RV=" + std::to_string(rv));
+            continue;
+        }
+        record_result(CAT, std::string(c.name) + "_Generate", "PASS", "");
+
+        CK_BBOOL sens = CK_FALSE, extr = CK_TRUE, copy = CK_TRUE;
+        CK_ATTRIBUTE q[] = {
+            { CKA_SENSITIVE,   &sens, sizeof(sens) },
+            { CKA_EXTRACTABLE, &extr, sizeof(extr) },
+        };
+        CK_RV rq = fl->C_GetAttributeValue(hSess, hPriv, q, 2);
+        record_result(CAT, std::string(c.name) + "_CKA_SENSITIVE_true",
+                      (rq == CKR_OK && sens == CK_TRUE) ? "PASS" : "FAIL",
+                      "RV=" + std::to_string(rq) + " CKA_SENSITIVE=" + std::to_string((int)sens));
+        record_result(CAT, std::string(c.name) + "_CKA_EXTRACTABLE_false",
+                      (rq == CKR_OK && extr == CK_FALSE) ? "PASS" : "FAIL",
+                      "RV=" + std::to_string(rq) + " CKA_EXTRACTABLE=" + std::to_string((int)extr));
+
+        if (c.copyable) {
+            CK_ATTRIBUTE qc = { CKA_COPYABLE, &copy, sizeof(copy) };
+            CK_RV rc = fl->C_GetAttributeValue(hSess, hPriv, &qc, 1);
+            record_result(CAT, std::string(c.name) + "_CKA_COPYABLE_false",
+                          (rc == CKR_OK && copy == CK_FALSE) ? "PASS" : "FAIL",
+                          "RV=" + std::to_string(rc) + " CKA_COPYABLE=" + std::to_string((int)copy));
+        }
+
+        // The OTS state must not be readable: §4.2 makes CKA_VALUE on a
+        // sensitive key CKR_ATTRIBUTE_SENSITIVE.
+        std::vector<CK_BYTE> big(200000);
+        CK_ATTRIBUTE v = { CKA_VALUE, big.data(), (CK_ULONG)big.size() };
+        CK_RV rvv = fl->C_GetAttributeValue(hSess, hPriv, &v, 1);
+        record_result(CAT, std::string(c.name) + "_CKA_VALUE_not_extractable",
+                      rvv == CKR_ATTRIBUTE_SENSITIVE ? "PASS" : "FAIL",
+                      "RV=" + std::to_string(rvv) + " (want CKR_ATTRIBUTE_SENSITIVE=0x11)");
+
+        // Contradicting templates must be refused.
+        CK_ATTRIBUTE noSens = { CKA_SENSITIVE, &bFalse, sizeof(bFalse) };
+        CK_OBJECT_HANDLE a = 0, b = 0;
+        CK_RV r1 = gen(c.mech, c.kt, c.ps, &noSens, &a, &b);
+        record_result(CAT, std::string(c.name) + "_reject_SENSITIVE_false",
+                      r1 == CKR_ATTRIBUTE_VALUE_INVALID ? "PASS" : "FAIL",
+                      "RV=" + std::to_string(r1) + " (want CKR_ATTRIBUTE_VALUE_INVALID=0x13)");
+
+        CK_ATTRIBUTE yesExtr = { CKA_EXTRACTABLE, &bTrue, sizeof(bTrue) };
+        a = 0; b = 0;
+        CK_RV r2 = gen(c.mech, c.kt, c.ps, &yesExtr, &a, &b);
+        record_result(CAT, std::string(c.name) + "_reject_EXTRACTABLE_true",
+                      r2 == CKR_ATTRIBUTE_VALUE_INVALID ? "PASS" : "FAIL",
+                      "RV=" + std::to_string(r2) + " (want CKR_ATTRIBUTE_VALUE_INVALID=0x13)");
+
+        if (c.copyable) {
+            CK_ATTRIBUTE yesCopy = { CKA_COPYABLE, &bTrue, sizeof(bTrue) };
+            a = 0; b = 0;
+            CK_RV r3 = gen(c.mech, c.kt, c.ps, &yesCopy, &a, &b);
+            record_result(CAT, std::string(c.name) + "_reject_COPYABLE_true",
+                          r3 == CKR_ATTRIBUTE_VALUE_INVALID ? "PASS" : "FAIL",
+                          "RV=" + std::to_string(r3) + " (want CKR_ATTRIBUTE_VALUE_INVALID=0x13)");
+        }
+
+        // A template that merely RESTATES the mandated values must succeed
+        // (§4.1.1 rule 6).
+        CK_ATTRIBUTE okSens = { CKA_SENSITIVE, &bTrue, sizeof(bTrue) };
+        a = 0; b = 0;
+        CK_RV r4 = gen(c.mech, c.kt, c.ps, &okSens, &a, &b);
+        record_result(CAT, std::string(c.name) + "_accept_restated_SENSITIVE_true",
+                      r4 == CKR_OK ? "PASS" : "FAIL", "RV=" + std::to_string(r4));
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// C1 — a conforming provider publishes a CKO_PROFILE object.
+//
+// PKCS#11 v3.2 §7.2 defines a conforming Provider ONLY as one meeting a profile
+// in [PKCS11-Prof]; Profiles v3.2 §5.1 condition 4 requires an implementation
+// claiming Baseline Provider to "Support the following objects: a. CKO_PROFILE
+// with value CKP_BASELINE_PROVIDER". The C++ engine published none, so it could
+// not claim conformance to anything — the single broadest finding in the audit.
+//
+// Related defect: CKA_PROFILE_ID was stamped on EVERY object with value 0,
+// which Profiles v3.2 §3 defines as CKP_INVALID_ID ("Invalid Profile"). It
+// belongs on profile objects only.
+// ─────────────────────────────────────────────────────────────────────────────
+void test_profile_objects() {
+    const char* CAT = "Profile";
+#ifndef CKO_PROFILE
+    const CK_OBJECT_CLASS CLS_PROFILE = 0x00000009UL;
+#else
+    const CK_OBJECT_CLASS CLS_PROFILE = CKO_PROFILE;
+#endif
+#ifndef CKA_PROFILE_ID
+    const CK_ATTRIBUTE_TYPE A_PROFILE_ID = 0x00000601UL;
+#else
+    const CK_ATTRIBUTE_TYPE A_PROFILE_ID = CKA_PROFILE_ID;
+#endif
+    const CK_ULONG P_INVALID_ID = 0x00000000UL;
+    const CK_ULONG P_BASELINE   = 0x00000001UL;
+    const CK_ULONG P_EXTENDED   = 0x00000002UL;
+
+    // ── find every CKO_PROFILE object on the token ───────────────────────────
+    CK_OBJECT_CLASS cls = CLS_PROFILE;
+    CK_ATTRIBUTE findTmpl[] = { { CKA_CLASS, &cls, sizeof(cls) } };
+    CK_RV r = fl->C_FindObjectsInit(hSess, findTmpl, 1);
+    std::vector<CK_ULONG> ids;
+    if (r != CKR_OK) {
+        record_result(CAT, "FindObjectsInit_CKO_PROFILE", "FAIL", "RV=" + std::to_string(r));
+    } else {
+        CK_OBJECT_HANDLE found[16];
+        CK_ULONG n = 0;
+        fl->C_FindObjects(hSess, found, 16, &n);
+        fl->C_FindObjectsFinal(hSess);
+        record_result(CAT, "Token_publishes_a_CKO_PROFILE_object",
+                      n > 0 ? "PASS" : "FAIL",
+                      "found " + std::to_string(n) +
+                      " (Profiles v3.2 §5.1 cond. 4 requires at least one)");
+        for (CK_ULONG i = 0; i < n; i++) {
+            CK_ULONG id = 0xDEADBEEF;
+            CK_ATTRIBUTE a = { A_PROFILE_ID, &id, sizeof(id) };
+            if (fl->C_GetAttributeValue(hSess, found[i], &a, 1) == CKR_OK) ids.push_back(id);
+        }
+        bool haveBaseline = false, anyInvalid = false;
+        for (CK_ULONG id : ids) {
+            if (id == P_BASELINE) haveBaseline = true;
+            if (id == P_INVALID_ID) anyInvalid = true;
+        }
+        std::string idList;
+        for (CK_ULONG id : ids) idList += std::to_string(id) + " ";
+        record_result(CAT, "CKP_BASELINE_PROVIDER_present",
+                      haveBaseline ? "PASS" : "FAIL",
+                      "profile ids: [ " + idList + "]");
+        record_result(CAT, "No_profile_object_carries_CKP_INVALID_ID",
+                      !anyInvalid ? "PASS" : "FAIL",
+                      "profile ids: [ " + idList + "]");
+        // The engine implements C_GetMechanismList/Info, C_Login, C_LoginUser
+        // and C_Logout, so Profiles §5.3 Extended Provider is met too — but the
+        // claim must be COMPUTED, so this only records what the token says.
+        bool haveExtended = false;
+        for (CK_ULONG id : ids) if (id == P_EXTENDED) haveExtended = true;
+        record_result(CAT, "Extended_provider_claim_recorded",
+                      "PASS",
+                      std::string("CKP_EXTENDED_PROVIDER ") +
+                      (haveExtended ? "claimed" : "not claimed") +
+                      " by this build");
+    }
+
+    // ── application creation of a profile object must be refused ─────────────
+    {
+        CK_ULONG id = P_BASELINE;
+        CK_BBOOL bFalse = CK_FALSE;
+        CK_ATTRIBUTE t[] = {
+            { CKA_CLASS,   &cls,    sizeof(cls) },
+            { CKA_TOKEN,   &bFalse, sizeof(bFalse) },
+            { A_PROFILE_ID, &id,    sizeof(id) },
+        };
+        CK_OBJECT_HANDLE h = CK_INVALID_HANDLE;
+        CK_RV rc = fl->C_CreateObject(hSess, t, 3, &h);
+        record_result(CAT, "Application_cannot_create_CKO_PROFILE",
+                      rc == CKR_ATTRIBUTE_READ_ONLY ? "PASS" : "FAIL",
+                      "RV=" + std::to_string(rc) + " (want CKR_ATTRIBUTE_READ_ONLY=0x10)");
+    }
+
+    // ── CKA_PROFILE_ID must not exist on ordinary objects ────────────────────
+    {
+        CK_OBJECT_CLASS sec = CKO_SECRET_KEY;
+        CK_KEY_TYPE aes = CKK_AES;
+        CK_ULONG klen = 32;
+        CK_BBOOL bFalse = CK_FALSE;
+        CK_ATTRIBUTE t[] = {
+            { CKA_CLASS,     &sec,   sizeof(sec) },
+            { CKA_KEY_TYPE,  &aes,   sizeof(aes) },
+            { CKA_VALUE_LEN, &klen,  sizeof(klen) },
+            { CKA_TOKEN,     &bFalse, sizeof(bFalse) },
+        };
+        CK_MECHANISM m = { CKM_AES_KEY_GEN, NULL_PTR, 0 };
+        CK_OBJECT_HANDLE h = CK_INVALID_HANDLE;
+        if (fl->C_GenerateKey(hSess, &m, t, 4, &h) != CKR_OK) {
+            record_result(CAT, "CKA_PROFILE_ID_absent_on_ordinary_object", "FAIL",
+                          "key generation failed");
+        } else {
+            CK_ULONG id = 0xDEADBEEF;
+            CK_ATTRIBUTE a = { A_PROFILE_ID, &id, sizeof(id) };
+            CK_RV rc = fl->C_GetAttributeValue(hSess, h, &a, 1);
+            record_result(CAT, "CKA_PROFILE_ID_absent_on_ordinary_object",
+                          rc == CKR_ATTRIBUTE_TYPE_INVALID ? "PASS" : "FAIL",
+                          "RV=" + std::to_string(rc) + " value=" + std::to_string(id) +
+                          " (want CKR_ATTRIBUTE_TYPE_INVALID=0x12; 0 is CKP_INVALID_ID)");
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// C2 — error codes and precedence.
+//
+// • Null-mechanism cancel form: §5.8.1 "C_EncryptInit can be called with
+//   pMechanism set to NULL_PTR to terminate an active encryption operation. If
+//   an active operation ... cannot be cancelled, CKR_OPERATION_CANCEL_FAILED
+//   must be returned." The same sentence appears for C_DecryptInit, C_SignInit,
+//   C_SignRecoverInit, C_VerifyInit, C_VerifyRecoverInit, C_DigestInit,
+//   C_MessageEncryptInit and C_VerifySignatureInit. The engine returned
+//   CKR_ARGUMENTS_BAD, which is neither of the two permitted answers.
+// • Session-handle precedence: the session-handle class takes precedence over
+//   argument and capability codes, so the handle is validated first.
+// ─────────────────────────────────────────────────────────────────────────────
+void test_c2_error_codes() {
+    const char* CAT = "ErrCodes";
+    CK_BBOOL bTrue = CK_TRUE, bFalse = CK_FALSE;
+    CK_OBJECT_CLASS sec = CKO_SECRET_KEY;
+    CK_KEY_TYPE aes = CKK_AES;
+    CK_ULONG klen = 32;
+    CK_ATTRIBUTE keyT[] = {
+        { CKA_CLASS,     &sec,    sizeof(sec) },
+        { CKA_KEY_TYPE,  &aes,    sizeof(aes) },
+        { CKA_VALUE_LEN, &klen,   sizeof(klen) },
+        { CKA_TOKEN,     &bFalse, sizeof(bFalse) },
+        { CKA_ENCRYPT,   &bTrue,  sizeof(bTrue) },
+        { CKA_DECRYPT,   &bTrue,  sizeof(bTrue) },
+        { CKA_SIGN,      &bTrue,  sizeof(bTrue) },
+        { CKA_VERIFY,    &bTrue,  sizeof(bTrue) },
+    };
+    CK_MECHANISM keyGen = { CKM_AES_KEY_GEN, NULL_PTR, 0 };
+    CK_OBJECT_HANDLE hKey = CK_INVALID_HANDLE;
+    CK_RV r = fl->C_GenerateKey(hSess, &keyGen, keyT, 8, &hKey);
+    if (r != CKR_OK) {
+        record_result(CAT, "Setup_AES_key", "FAIL", "RV=" + std::to_string(r));
+        return;
+    }
+
+    // (1) cancel an ACTIVE operation with the null-mechanism form.
+    {
+        CK_BYTE iv[16] = {1};
+        CK_MECHANISM cbc = { CKM_AES_CBC, iv, sizeof(iv) };
+        CK_RV ri = fl->C_EncryptInit(hSess, &cbc, hKey);
+        CK_RV rc = fl->C_EncryptInit(hSess, NULL_PTR, hKey);
+        record_result(CAT, "C_EncryptInit_null_mechanism_cancels",
+                      rc == CKR_OK ? "PASS" : "FAIL",
+                      "init RV=" + std::to_string(ri) + " cancel RV=" + std::to_string(rc) +
+                      " (want CKR_OK or CKR_OPERATION_CANCEL_FAILED, never CKR_ARGUMENTS_BAD=0x7)");
+        // After a successful cancel the session must accept a fresh init.
+        CK_RV r2 = fl->C_EncryptInit(hSess, &cbc, hKey);
+        record_result(CAT, "C_EncryptInit_after_cancel_succeeds",
+                      r2 == CKR_OK ? "PASS" : "FAIL", "RV=" + std::to_string(r2));
+        fl->C_EncryptInit(hSess, NULL_PTR, hKey);
+    }
+    // (2) the same form with NO active operation is still not an argument error.
+    {
+        CK_RV rc = fl->C_DigestInit(hSess, NULL_PTR);
+        record_result(CAT, "C_DigestInit_null_mechanism_no_active_op",
+                      rc == CKR_OK ? "PASS" : "FAIL", "RV=" + std::to_string(rc));
+        CK_RV rs = fl->C_SignInit(hSess, NULL_PTR, hKey);
+        record_result(CAT, "C_SignInit_null_mechanism_no_active_op",
+                      rs == CKR_OK ? "PASS" : "FAIL", "RV=" + std::to_string(rs));
+        CK_RV rvv = fl->C_VerifyInit(hSess, NULL_PTR, hKey);
+        record_result(CAT, "C_VerifyInit_null_mechanism_no_active_op",
+                      rvv == CKR_OK ? "PASS" : "FAIL", "RV=" + std::to_string(rvv));
+        CK_RV rd = fl->C_DecryptInit(hSess, NULL_PTR, hKey);
+        record_result(CAT, "C_DecryptInit_null_mechanism_no_active_op",
+                      rd == CKR_OK ? "PASS" : "FAIL", "RV=" + std::to_string(rd));
+    }
+    // (3) …but a bad SESSION still outranks it (handle class takes precedence).
+    {
+        CK_RV rc = fl->C_DigestInit(0xBADBAD, NULL_PTR);
+        record_result(CAT, "Null_mechanism_still_checks_session_handle",
+                      rc == CKR_SESSION_HANDLE_INVALID ? "PASS" : "FAIL",
+                      "RV=" + std::to_string(rc) + " (want CKR_SESSION_HANDLE_INVALID=0xB3)");
+    }
+
+    // (4) session-handle precedence over argument checks: C_SeedRandom with a
+    //     bad handle AND a null buffer must report the handle.
+    {
+        CK_RV rc = fl->C_SeedRandom(0xBADBAD, NULL_PTR, 0);
+        record_result(CAT, "C_SeedRandom_session_handle_precedence",
+                      rc == CKR_SESSION_HANDLE_INVALID ? "PASS" : "FAIL",
+                      "RV=" + std::to_string(rc) +
+                      " (want CKR_SESSION_HANDLE_INVALID=0xB3, not CKR_ARGUMENTS_BAD=0x7)");
+        CK_RV rg = fl->C_GenerateRandom(0xBADBAD, NULL_PTR, 0);
+        record_result(CAT, "C_GenerateRandom_session_handle_precedence",
+                      rg == CKR_SESSION_HANDLE_INVALID ? "PASS" : "FAIL",
+                      "RV=" + std::to_string(rg));
+    }
+
+    // (5) C_GetInterface — §5.4.6 rule 3: "If flags is non-zero, the interface
+    //     returned must match all of the supplied flag values". The engine
+    //     rejected ANY non-zero flags as a malformed argument, so it could never
+    //     have honoured a flag it did support. This build declares no interface
+    //     flags (it is not fork-tolerant in the CKF_INTERFACE_FORK_SAFE sense —
+    //     a forked child does not keep its session objects, states and handles),
+    //     so the correct answer to a fork-safe request is "no such interface",
+    //     CKR_FUNCTION_FAILED, not "your argument is invalid".
+    {
+        void* dlib = dlopen(opt_engine.c_str(), RTLD_NOW);
+        typedef CK_RV (*GI_t)(CK_UTF8CHAR_PTR, CK_VERSION_PTR, CK_INTERFACE_PTR_PTR, CK_FLAGS);
+        typedef CK_RV (*GIL_t)(CK_INTERFACE_PTR, CK_ULONG_PTR);
+        GI_t GI = dlib ? (GI_t)dlsym(dlib, "C_GetInterface") : NULL;
+        GIL_t GIL = dlib ? (GIL_t)dlsym(dlib, "C_GetInterfaceList") : NULL;
+        if (!GI || !GIL) {
+            record_result(CAT, "C_GetInterface_flag_matching", "SKIP", "symbols unavailable");
+        } else {
+            CK_ULONG n = 0;
+            GIL(NULL_PTR, &n);
+            std::vector<CK_INTERFACE> list(n ? n : 1);
+            GIL(list.data(), &n);
+            // Every interface must be retrievable with its OWN declared flags.
+            bool allOwnFlagsOk = true;
+            for (CK_ULONG i = 0; i < n; i++) {
+                CK_INTERFACE_PTR out = NULL;
+                if (GI(list[i].pInterfaceName, NULL_PTR, &out, list[i].flags) != CKR_OK)
+                    allOwnFlagsOk = false;
+            }
+            record_result(CAT, "C_GetInterface_matches_own_flags",
+                          allOwnFlagsOk ? "PASS" : "FAIL",
+                          std::to_string(n) + " interfaces");
+            CK_INTERFACE_PTR out = NULL;
+            CK_RV rf = GI(NULL_PTR, NULL_PTR, &out, 0x00000001UL /*CKF_INTERFACE_FORK_SAFE*/);
+            bool declaresForkSafe = false;
+            for (CK_ULONG i = 0; i < n; i++)
+                if (list[i].flags & 0x00000001UL) declaresForkSafe = true;
+            CK_RV want = declaresForkSafe ? CKR_OK : CKR_FUNCTION_FAILED;
+            record_result(CAT, "C_GetInterface_unmatched_flag_is_not_ARGUMENTS_BAD",
+                          rf == want ? "PASS" : "FAIL",
+                          "RV=" + std::to_string(rf) + " want=" + std::to_string(want) +
+                          " (declaresForkSafe=" + std::to_string((int)declaresForkSafe) + ")");
+            // A flag bit no interface declares must still be refused.
+            CK_RV ru = GI(NULL_PTR, NULL_PTR, &out, 0x40000000UL);
+            record_result(CAT, "C_GetInterface_unknown_flag_refused",
+                          ru != CKR_OK ? "PASS" : "FAIL", "RV=" + std::to_string(ru));
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// C3 — advertised capabilities must equal dispatch.
+//
+// Each mechanism flag is DEFINED as "the mechanism can be used with function
+// F". The engine's sign-recovery path accepts CKM_RSA_PKCS and CKM_RSA_X_509
+// but C_GetMechanismInfo advertised neither CKF_SIGN_RECOVER nor
+// CKF_VERIFY_RECOVER for them, so a caller doing the correct thing — checking
+// the advertisement first — would never use a working feature.
+// ─────────────────────────────────────────────────────────────────────────────
+void test_c3_advertised_capabilities() {
+    const char* CAT = "MechFlags";
+    struct Case { const char* name; CK_MECHANISM_TYPE m; };
+    const Case cases[] = {
+        { "CKM_RSA_PKCS",  CKM_RSA_PKCS  },
+        { "CKM_RSA_X_509", CKM_RSA_X_509 },
+    };
+    for (const Case& c : cases) {
+        if (!mech_advertised(c.m)) {
+            record_result(CAT, std::string(c.name) + "_advertised", "SKIP", "not advertised");
+            continue;
+        }
+        CK_MECHANISM_INFO info;
+        memset(&info, 0, sizeof(info));
+        CK_RV r = fl->C_GetMechanismInfo(hSlot, c.m, &info);
+        if (r != CKR_OK) {
+            record_result(CAT, std::string(c.name) + "_recovery_flags", "FAIL",
+                          "C_GetMechanismInfo RV=" + std::to_string(r));
+            continue;
+        }
+        bool sr = (info.flags & CKF_SIGN_RECOVER) != 0;
+        bool vr = (info.flags & CKF_VERIFY_RECOVER) != 0;
+        record_result(CAT, std::string(c.name) + "_advertises_SIGN_RECOVER",
+                      sr ? "PASS" : "FAIL", "flags=0x" + std::to_string(info.flags));
+        record_result(CAT, std::string(c.name) + "_advertises_VERIFY_RECOVER",
+                      vr ? "PASS" : "FAIL", "flags=0x" + std::to_string(info.flags));
+
+        // …and the advertisement must be true: the recovery init must accept it.
+        CK_OBJECT_CLASS pubC = CKO_PUBLIC_KEY, privC = CKO_PRIVATE_KEY;
+        CK_BBOOL bTrue = CK_TRUE, bFalse = CK_FALSE;
+        CK_ULONG bits = 2048;
+        CK_BYTE pubExp[] = { 0x01, 0x00, 0x01 };
+        CK_ATTRIBUTE pubT[] = {
+            { CKA_CLASS, &pubC, sizeof(pubC) },
+            { CKA_MODULUS_BITS, &bits, sizeof(bits) },
+            { CKA_PUBLIC_EXPONENT, pubExp, sizeof(pubExp) },
+            { CKA_VERIFY_RECOVER, &bTrue, sizeof(bTrue) },
+            { CKA_TOKEN, &bFalse, sizeof(bFalse) },
+        };
+        CK_ATTRIBUTE privT[] = {
+            { CKA_CLASS, &privC, sizeof(privC) },
+            { CKA_SIGN_RECOVER, &bTrue, sizeof(bTrue) },
+            { CKA_TOKEN, &bFalse, sizeof(bFalse) },
+        };
+        CK_MECHANISM kp = { CKM_RSA_PKCS_KEY_PAIR_GEN, NULL_PTR, 0 };
+        CK_OBJECT_HANDLE hPub = 0, hPriv = 0;
+        if (fl->C_GenerateKeyPair(hSess, &kp, pubT, 5, privT, 3, &hPub, &hPriv) == CKR_OK) {
+            CK_MECHANISM m = { c.m, NULL_PTR, 0 };
+            CK_RV rs = fl->C_SignRecoverInit(hSess, &m, hPriv);
+            record_result(CAT, std::string(c.name) + "_SignRecoverInit_accepts",
+                          rs == CKR_OK ? "PASS" : "FAIL", "RV=" + std::to_string(rs));
+            if (rs == CKR_OK) fl->C_SignRecoverInit(hSess, NULL_PTR, hPriv);
+            CK_RV rvr = fl->C_VerifyRecoverInit(hSess, &m, hPub);
+            record_result(CAT, std::string(c.name) + "_VerifyRecoverInit_accepts",
+                          rvr == CKR_OK ? "PASS" : "FAIL", "RV=" + std::to_string(rvr));
+            if (rvr == CKR_OK) fl->C_VerifyRecoverInit(hSess, NULL_PTR, hPub);
+        }
+    }
+
+    // The OpenPGP certificate type squatted 0x00000003, an unassigned OASIS
+    // codepoint below CKC_VENDOR_DEFINED (0x80000000). A certificate template
+    // naming that codepoint must no longer be accepted.
+    {
+        CK_OBJECT_CLASS certC = CKO_CERTIFICATE;
+        CK_CERTIFICATE_TYPE squatted = 0x00000003UL;
+        CK_BBOOL bFalse = CK_FALSE;
+        CK_BYTE dummy[] = { 0x30, 0x00 };
+        CK_ATTRIBUTE t[] = {
+            { CKA_CLASS,            &certC,    sizeof(certC) },
+            { CKA_CERTIFICATE_TYPE, &squatted, sizeof(squatted) },
+            { CKA_TOKEN,            &bFalse,   sizeof(bFalse) },
+            { CKA_VALUE,            dummy,     sizeof(dummy) },
+        };
+        CK_OBJECT_HANDLE h = CK_INVALID_HANDLE;
+        CK_RV rc = fl->C_CreateObject(hSess, t, 4, &h);
+        record_result(CAT, "OpenPGP_codepoint_0x3_not_squatted",
+                      rc == CKR_ATTRIBUTE_VALUE_INVALID ? "PASS" : "FAIL",
+                      "RV=" + std::to_string(rc) +
+                      " (0x3 is unassigned by OASIS; want CKR_ATTRIBUTE_VALUE_INVALID=0x13)");
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// E1 — the ECDH-KEM ciphertext is the RAW ephemeral public key.
+//
+// PKCS#11 v3.2 §6.3.17: for encapsulation "an ephemeral key pair is generated.
+// The value of the generated public key is returned as the ciphertext", and
+// that value "has the same format as the public key used in C_DeriveKey" —
+// specified as "a token MUST be able to accept this value encoded as a raw
+// octet string ... A token MAY, in addition, support accepting this value as a
+// DER-encoded ECPoint." For Montgomery keys "the public key is provided as
+// bytes in little endian order", and the spec gives Montgomery no DER option at
+// all. The spec attaches a footnote to exactly this hazard: "The encoding in
+// V2.20 was not specified and resulted in different implementations choosing
+// different encodings."
+//
+// The engine emitted the DER OCTET STRING wrapper: 67 bytes for P-256 where 65
+// are mandated, 34 for X25519 where 32 are. Mutual agreement between this
+// engine and the Rust one was not a defence — both were wrong the same way.
+//
+// E4 — Edwards / Montgomery CKA_EC_POINT is the bare RFC 8032 / RFC 7748 value.
+//
+// Those tables say "Public key bytes in little endian order as defined in
+// [RFC 8032]/[RFC 7748]" — deliberately different wording from the Weierstrass
+// table's "DER-encoding of ANSI X9.62 ECPoint value Q". That difference IS the
+// specification. OSSLEDPublicKey wrapped the bytes in a DER OCTET STRING, so
+// Ed25519 published 34 bytes.
+//
+// The tolerant reader on the input side is deliberately KEPT: §6.3.17's "MUST
+// accept raw, MAY accept DER" is about what a token accepts, and anything
+// already deployed against the old encoding keeps working.
+// ─────────────────────────────────────────────────────────────────────────────
+void test_kem_ciphertext_and_ec_point_encoding() {
+    const char* CAT = "RawEncoding";
+    typedef CK_RV (*C_EncapsulateKey_t)(CK_SESSION_HANDLE, CK_MECHANISM_PTR, CK_OBJECT_HANDLE, CK_ATTRIBUTE_PTR, CK_ULONG, CK_BYTE_PTR, CK_ULONG_PTR, CK_OBJECT_HANDLE_PTR);
+    typedef CK_RV (*C_DecapsulateKey_t)(CK_SESSION_HANDLE, CK_MECHANISM_PTR, CK_OBJECT_HANDLE, CK_ATTRIBUTE_PTR, CK_ULONG, CK_BYTE_PTR, CK_ULONG, CK_OBJECT_HANDLE_PTR);
+    void* dlib = dlopen(opt_engine.c_str(), RTLD_NOW);
+    C_EncapsulateKey_t EncapFn = dlib ? (C_EncapsulateKey_t)dlsym(dlib, "C_EncapsulateKey") : NULL;
+    C_DecapsulateKey_t DecapFn = dlib ? (C_DecapsulateKey_t)dlsym(dlib, "C_DecapsulateKey") : NULL;
+
+    CK_BBOOL bTrue = CK_TRUE, bFalse = CK_FALSE;
+    CK_OBJECT_CLASS pubClass = CKO_PUBLIC_KEY, privClass = CKO_PRIVATE_KEY;
+    CK_OBJECT_CLASS secClass = CKO_SECRET_KEY;
+    CK_KEY_TYPE secType = CKK_GENERIC_SECRET;
+    CK_ATTRIBUTE ssTmpl[] = {
+        { CKA_CLASS,       &secClass, sizeof(secClass) },
+        { CKA_KEY_TYPE,    &secType,  sizeof(secType) },
+        { CKA_TOKEN,       &bFalse,   sizeof(bFalse) },
+        { CKA_EXTRACTABLE, &bTrue,    sizeof(bTrue) },
+        { CKA_SENSITIVE,   &bFalse,   sizeof(bFalse) },
+    };
+
+    auto readBytes = [&](CK_OBJECT_HANDLE h, CK_ATTRIBUTE_TYPE t) -> std::vector<CK_BYTE> {
+        CK_ATTRIBUTE a = { t, NULL_PTR, 0 };
+        if (fl->C_GetAttributeValue(hSess, h, &a, 1) != CKR_OK || a.ulValueLen == 0 ||
+            a.ulValueLen == (CK_ULONG)-1) return {};
+        std::vector<CK_BYTE> v(a.ulValueLen);
+        a.pValue = v.data();
+        if (fl->C_GetAttributeValue(hSess, h, &a, 1) != CKR_OK) return {};
+        return v;
+    };
+
+    // ── E4: CKA_EC_POINT on Edwards / Montgomery public keys ─────────────────
+    struct EdCase { const char* name; CK_KEY_TYPE kt; CK_MECHANISM_TYPE mech;
+                    const char* curveName; size_t rawLen; };
+    // CKA_EC_PARAMS in the PrintableString curveName form (§6.3.3), which this
+    // engine emits and accepts.
+    const EdCase edCases[] = {
+        { "Ed25519",    CKK_EC_EDWARDS,    CKM_EC_EDWARDS_KEY_PAIR_GEN,    "edwards25519", 32 },
+        { "Ed448",      CKK_EC_EDWARDS,    CKM_EC_EDWARDS_KEY_PAIR_GEN,    "edwards448",   57 },
+        { "X25519",     CKK_EC_MONTGOMERY, CKM_EC_MONTGOMERY_KEY_PAIR_GEN, "curve25519",   32 },
+    };
+    for (const EdCase& c : edCases) {
+        std::vector<CK_BYTE> params;
+        params.push_back(0x13);
+        params.push_back((CK_BYTE)strlen(c.curveName));
+        params.insert(params.end(), c.curveName, c.curveName + strlen(c.curveName));
+        CK_KEY_TYPE kt = c.kt;
+        CK_ATTRIBUTE pubT[] = {
+            { CKA_CLASS,     &pubClass, sizeof(pubClass) },
+            { CKA_KEY_TYPE,  &kt,       sizeof(kt) },
+            { CKA_EC_PARAMS, params.data(), (CK_ULONG)params.size() },
+            { CKA_VERIFY,    &bTrue,    sizeof(bTrue) },
+            { CKA_TOKEN,     &bFalse,   sizeof(bFalse) },
+        };
+        CK_ATTRIBUTE privT[] = {
+            { CKA_CLASS,    &privClass, sizeof(privClass) },
+            { CKA_KEY_TYPE, &kt,        sizeof(kt) },
+            { CKA_SIGN,     &bTrue,     sizeof(bTrue) },
+            { CKA_DERIVE,   &bTrue,     sizeof(bTrue) },
+            { CKA_TOKEN,    &bFalse,    sizeof(bFalse) },
+        };
+        CK_MECHANISM m = { c.mech, NULL_PTR, 0 };
+        CK_OBJECT_HANDLE hPub = 0, hPriv = 0;
+        CK_RV r = fl->C_GenerateKeyPair(hSess, &m, pubT, 5, privT, 5, &hPub, &hPriv);
+        if (r != CKR_OK) {
+            record_result(CAT, std::string(c.name) + "_EC_POINT_raw", "FAIL",
+                          "keygen RV=" + std::to_string(r));
+            continue;
+        }
+        std::vector<CK_BYTE> pt = readBytes(hPub, CKA_EC_POINT);
+        bool derWrapped = (pt.size() == c.rawLen + 2 && pt[0] == 0x04 &&
+                           pt[1] == (CK_BYTE)c.rawLen);
+        record_result(CAT, std::string(c.name) + "_EC_POINT_raw",
+                      pt.size() == c.rawLen ? "PASS" : "FAIL",
+                      "CKA_EC_POINT len=" + std::to_string(pt.size()) +
+                      " (want " + std::to_string(c.rawLen) + " bare RFC bytes)" +
+                      (derWrapped ? " — DER OCTET STRING wrapper present" : ""));
+
+        // The key must still be usable: a DER-vs-raw change that broke signing
+        // would trade one defect for a worse one.
+        if (c.kt == CKK_EC_EDWARDS) {
+            CK_MECHANISM sm = { CKM_EDDSA, NULL_PTR, 0 };
+            CK_BYTE msg[] = "e4";
+            CK_BYTE sig[256]; CK_ULONG sigLen = sizeof(sig);
+            CK_RV rs = fl->C_SignInit(hSess, &sm, hPriv);
+            if (rs == CKR_OK) rs = fl->C_Sign(hSess, msg, sizeof(msg) - 1, sig, &sigLen);
+            CK_RV rvv = (rs == CKR_OK) ? fl->C_VerifyInit(hSess, &sm, hPub) : rs;
+            if (rvv == CKR_OK) rvv = fl->C_Verify(hSess, msg, sizeof(msg) - 1, sig, sigLen);
+            record_result(CAT, std::string(c.name) + "_sign_verify_round_trip",
+                          rvv == CKR_OK ? "PASS" : "FAIL",
+                          "sign RV=" + std::to_string(rs) + " verify RV=" + std::to_string(rvv));
+
+            // Import the RAW point through C_CreateObject and verify with it —
+            // the bare form must be accepted on input, not merely emitted.
+            if (rs == CKR_OK && pt.size() == c.rawLen) {
+                CK_ATTRIBUTE impT[] = {
+                    { CKA_CLASS,     &pubClass, sizeof(pubClass) },
+                    { CKA_KEY_TYPE,  &kt,       sizeof(kt) },
+                    { CKA_EC_PARAMS, params.data(), (CK_ULONG)params.size() },
+                    { CKA_EC_POINT,  pt.data(), (CK_ULONG)pt.size() },
+                    { CKA_VERIFY,    &bTrue,    sizeof(bTrue) },
+                    { CKA_TOKEN,     &bFalse,   sizeof(bFalse) },
+                };
+                CK_OBJECT_HANDLE hImp = CK_INVALID_HANDLE;
+                CK_RV ri = fl->C_CreateObject(hSess, impT, 6, &hImp);
+                CK_RV rv2 = (ri == CKR_OK) ? fl->C_VerifyInit(hSess, &sm, hImp) : ri;
+                if (rv2 == CKR_OK) rv2 = fl->C_Verify(hSess, msg, sizeof(msg) - 1, sig, sigLen);
+                record_result(CAT, std::string(c.name) + "_import_raw_point_verifies",
+                              rv2 == CKR_OK ? "PASS" : "FAIL",
+                              "create RV=" + std::to_string(ri) + " verify RV=" + std::to_string(rv2));
+
+                // …and the DER form must STILL be accepted (tolerant reader kept).
+                std::vector<CK_BYTE> der;
+                der.push_back(0x04);
+                der.push_back((CK_BYTE)pt.size());
+                der.insert(der.end(), pt.begin(), pt.end());
+                CK_ATTRIBUTE derT[] = {
+                    { CKA_CLASS,     &pubClass, sizeof(pubClass) },
+                    { CKA_KEY_TYPE,  &kt,       sizeof(kt) },
+                    { CKA_EC_PARAMS, params.data(), (CK_ULONG)params.size() },
+                    { CKA_EC_POINT,  der.data(), (CK_ULONG)der.size() },
+                    { CKA_VERIFY,    &bTrue,    sizeof(bTrue) },
+                    { CKA_TOKEN,     &bFalse,   sizeof(bFalse) },
+                };
+                CK_OBJECT_HANDLE hDer = CK_INVALID_HANDLE;
+                CK_RV rd = fl->C_CreateObject(hSess, derT, 6, &hDer);
+                CK_RV rv3 = (rd == CKR_OK) ? fl->C_VerifyInit(hSess, &sm, hDer) : rd;
+                if (rv3 == CKR_OK) rv3 = fl->C_Verify(hSess, msg, sizeof(msg) - 1, sig, sigLen);
+                record_result(CAT, std::string(c.name) + "_import_DER_point_still_verifies",
+                              rv3 == CKR_OK ? "PASS" : "FAIL",
+                              "create RV=" + std::to_string(rd) + " verify RV=" + std::to_string(rv3));
+            }
+        }
+    }
+
+    if (!EncapFn || !DecapFn) {
+        record_result(CAT, "KEM_ciphertext_encoding", "SKIP", "Function pointers missing");
+        return;
+    }
+    CK_MECHANISM ecdh = { CKM_ECDH1_DERIVE, NULL_PTR, 0 };
+
+    // ── E1(a): P-256 → 65 raw uncompressed bytes, first byte 0x04 ────────────
+    {
+        CK_KEY_TYPE ecType = CKK_EC;
+        CK_BYTE oid_p256[] = { 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07 };
+        CK_ATTRIBUTE pubT[] = {
+            { CKA_CLASS,       &pubClass, sizeof(pubClass) },
+            { CKA_KEY_TYPE,    &ecType,   sizeof(ecType) },
+            { CKA_EC_PARAMS,   oid_p256,  sizeof(oid_p256) },
+            { CKA_ENCAPSULATE, &bTrue,    sizeof(bTrue) },
+            { CKA_TOKEN,       &bFalse,   sizeof(bFalse) },
+        };
+        CK_ATTRIBUTE privT[] = {
+            { CKA_CLASS,       &privClass, sizeof(privClass) },
+            { CKA_KEY_TYPE,    &ecType,    sizeof(ecType) },
+            { CKA_DECAPSULATE, &bTrue,     sizeof(bTrue) },
+            { CKA_TOKEN,       &bFalse,    sizeof(bFalse) },
+        };
+        CK_MECHANISM gen = { CKM_EC_KEY_PAIR_GEN, NULL_PTR, 0 };
+        CK_OBJECT_HANDLE hPub = 0, hPriv = 0;
+        CK_RV r = fl->C_GenerateKeyPair(hSess, &gen, pubT, 5, privT, 4, &hPub, &hPriv);
+        if (r != CKR_OK) {
+            record_result(CAT, "P256_ciphertext_is_65_raw_bytes", "FAIL",
+                          "keygen RV=" + std::to_string(r));
+        } else {
+            CK_BYTE ct[300]; CK_ULONG ctLen = sizeof(ct);
+            CK_OBJECT_HANDLE hE = 0;
+            r = EncapFn(hSess, &ecdh, hPub, ssTmpl, 5, ct, &ctLen, &hE);
+            record_result(CAT, "P256_ciphertext_is_65_raw_bytes",
+                          (r == CKR_OK && ctLen == 65 && ct[0] == 0x04) ? "PASS" : "FAIL",
+                          "RV=" + std::to_string(r) + " len=" + std::to_string(ctLen) +
+                          " first=0x" + (r == CKR_OK ? std::to_string((int)ct[0]) : std::string("?")) +
+                          " (want 65, first byte 0x04 not a DER tag)");
+            if (r == CKR_OK) {
+                // Raw round-trip.
+                CK_OBJECT_HANDLE hD = 0;
+                CK_RV rd = DecapFn(hSess, &ecdh, hPriv, ssTmpl, 5, ct, ctLen, &hD);
+                std::vector<CK_BYTE> a = readBytes(hE, CKA_VALUE), b = readBytes(hD, CKA_VALUE);
+                record_result(CAT, "P256_raw_ciphertext_round_trip",
+                              (rd == CKR_OK && !a.empty() && a == b) ? "PASS" : "FAIL",
+                              "decap RV=" + std::to_string(rd) + " secrets equal=" +
+                              std::to_string((int)(!a.empty() && a == b)));
+                // The tolerant reader must still accept the OLD DER encoding.
+                std::vector<CK_BYTE> der;
+                der.push_back(0x04);
+                der.push_back((CK_BYTE)ctLen);
+                der.insert(der.end(), ct, ct + ctLen);
+                CK_OBJECT_HANDLE hD2 = 0;
+                CK_RV rd2 = DecapFn(hSess, &ecdh, hPriv, ssTmpl, 5, der.data(),
+                                    (CK_ULONG)der.size(), &hD2);
+                std::vector<CK_BYTE> c2 = readBytes(hD2, CKA_VALUE);
+                record_result(CAT, "P256_DER_ciphertext_still_accepted",
+                              (rd2 == CKR_OK && !a.empty() && a == c2) ? "PASS" : "FAIL",
+                              "decap RV=" + std::to_string(rd2) + " secrets equal=" +
+                              std::to_string((int)(!a.empty() && a == c2)));
+            }
+        }
+    }
+
+    // ── E1(b): X25519 → 32 bare little-endian bytes (no DER option exists) ───
+    {
+        CK_KEY_TYPE ecType = CKK_EC_MONTGOMERY;
+        CK_BYTE cn_x25519[] = { 0x13, 0x0a, 'c','u','r','v','e','2','5','5','1','9' };
+        CK_ATTRIBUTE pubT[] = {
+            { CKA_CLASS,       &pubClass, sizeof(pubClass) },
+            { CKA_KEY_TYPE,    &ecType,   sizeof(ecType) },
+            { CKA_EC_PARAMS,   cn_x25519, sizeof(cn_x25519) },
+            { CKA_ENCAPSULATE, &bTrue,    sizeof(bTrue) },
+            { CKA_TOKEN,       &bFalse,   sizeof(bFalse) },
+        };
+        CK_ATTRIBUTE privT[] = {
+            { CKA_CLASS,       &privClass, sizeof(privClass) },
+            { CKA_KEY_TYPE,    &ecType,    sizeof(ecType) },
+            { CKA_DECAPSULATE, &bTrue,     sizeof(bTrue) },
+            { CKA_TOKEN,       &bFalse,    sizeof(bFalse) },
+        };
+        CK_MECHANISM gen = { CKM_EC_MONTGOMERY_KEY_PAIR_GEN, NULL_PTR, 0 };
+        CK_OBJECT_HANDLE hPub = 0, hPriv = 0;
+        CK_RV r = fl->C_GenerateKeyPair(hSess, &gen, pubT, 5, privT, 4, &hPub, &hPriv);
+        if (r != CKR_OK) {
+            record_result(CAT, "X25519_ciphertext_is_32_raw_bytes", "FAIL",
+                          "keygen RV=" + std::to_string(r));
+        } else {
+            CK_BYTE ct[300]; CK_ULONG ctLen = sizeof(ct);
+            CK_OBJECT_HANDLE hE = 0;
+            r = EncapFn(hSess, &ecdh, hPub, ssTmpl, 5, ct, &ctLen, &hE);
+            record_result(CAT, "X25519_ciphertext_is_32_raw_bytes",
+                          (r == CKR_OK && ctLen == 32) ? "PASS" : "FAIL",
+                          "RV=" + std::to_string(r) + " len=" + std::to_string(ctLen) +
+                          " (want 32; §6.3.17 gives Montgomery no DER form)");
+            if (r == CKR_OK) {
+                CK_OBJECT_HANDLE hD = 0;
+                CK_RV rd = DecapFn(hSess, &ecdh, hPriv, ssTmpl, 5, ct, ctLen, &hD);
+                std::vector<CK_BYTE> a = readBytes(hE, CKA_VALUE), b = readBytes(hD, CKA_VALUE);
+                record_result(CAT, "X25519_raw_ciphertext_round_trip",
+                              (rd == CKR_OK && !a.empty() && a == b) ? "PASS" : "FAIL",
+                              "decap RV=" + std::to_string(rd) + " secrets equal=" +
+                              std::to_string((int)(!a.empty() && a == b)));
+                std::vector<CK_BYTE> der;
+                der.push_back(0x04);
+                der.push_back((CK_BYTE)ctLen);
+                der.insert(der.end(), ct, ct + ctLen);
+                CK_OBJECT_HANDLE hD2 = 0;
+                CK_RV rd2 = DecapFn(hSess, &ecdh, hPriv, ssTmpl, 5, der.data(),
+                                    (CK_ULONG)der.size(), &hD2);
+                std::vector<CK_BYTE> c2 = readBytes(hD2, CKA_VALUE);
+                record_result(CAT, "X25519_DER_ciphertext_still_accepted",
+                              (rd2 == CKR_OK && !a.empty() && a == c2) ? "PASS" : "FAIL",
+                              "decap RV=" + std::to_string(rd2) + " secrets equal=" +
+                              std::to_string((int)(!a.empty() && a == c2)));
+            }
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// E3 / E7 — post-quantum private-key material and the mechanism's seed.
+//
+// E3. The ML-DSA, ML-KEM and SLH-DSA private-key tables define CKA_VALUE as the
+// raw FIPS artefact — "Private key (sk) as defined in ML-DSA.Keygen-internal in
+// [FIPS 204]", "decapsulation key dk as defined in [FIPS 203]". PKCS#8 appears
+// in the whole specification exactly once, as the TRANSPORT format for wrapping
+// (§6.7), never as an attribute format. The engine stored a PKCS#8 DER wrapper,
+// so an application reading a 2560-byte ML-DSA-44 key got a DER SEQUENCE.
+//
+// E7. §6.67.4 / §6.68.4 make CKA_SEED a mechanism contribution for ML-DSA and
+// ML-KEM key-pair generation; §6.69.4 does NOT list it for SLH-DSA, whose table
+// defines no such attribute. The engine persisted a caller-supplied seed but
+// never generated one, so the mandated contribution was missing on every
+// randomly generated key.
+// ─────────────────────────────────────────────────────────────────────────────
+void test_pq_private_key_encoding_and_seed() {
+    const char* CAT = "PQKeyBytes";
+    CK_BBOOL bTrue = CK_TRUE, bFalse = CK_FALSE;
+    CK_OBJECT_CLASS pubClass = CKO_PUBLIC_KEY, privClass = CKO_PRIVATE_KEY;
+
+    auto readBytes = [&](CK_OBJECT_HANDLE h, CK_ATTRIBUTE_TYPE t, CK_RV* rvOut) -> std::vector<CK_BYTE> {
+        CK_ATTRIBUTE a = { t, NULL_PTR, 0 };
+        CK_RV r = fl->C_GetAttributeValue(hSess, h, &a, 1);
+        if (rvOut) *rvOut = r;
+        if (r != CKR_OK || a.ulValueLen == 0 || a.ulValueLen == (CK_ULONG)-1) return {};
+        std::vector<CK_BYTE> v(a.ulValueLen);
+        a.pValue = v.data();
+        if (fl->C_GetAttributeValue(hSess, h, &a, 1) != CKR_OK) return {};
+        return v;
+    };
+
+    struct PQCase {
+        const char* name; CK_MECHANISM_TYPE mech; CK_KEY_TYPE kt; CK_ULONG ps;
+        size_t skLen;     // FIPS private-key size
+        bool seedExpected; // §6.67.4/§6.68.4 yes, §6.69.4 no
+        size_t seedLen;
+    };
+    // FIPS 204 ML-DSA-44 sk = 2560; FIPS 203 ML-KEM-768 dk = 2400;
+    // FIPS 205 SLH-DSA-SHA2-128s sk = 64.  ML-DSA seed xi = 32; ML-KEM d||z = 64.
+    const PQCase cases[] = {
+        { "ML_DSA_44",  CKM_ML_DSA_KEY_PAIR_GEN,  CKK_ML_DSA,  1, 2560, true,  32 },
+        { "ML_KEM_768", CKM_ML_KEM_KEY_PAIR_GEN,  CKK_ML_KEM,  2, 2400, true,  64 },
+        { "SLH_DSA",    CKM_SLH_DSA_KEY_PAIR_GEN, CKK_SLH_DSA, 1,   64, false,  0 },
+    };
+
+    for (const PQCase& c : cases) {
+        if (!mech_advertised(c.mech)) {
+            record_result(CAT, std::string(c.name) + "_advertised", "SKIP", "mechanism not advertised");
+            continue;
+        }
+        CK_KEY_TYPE kt = c.kt;
+        CK_ULONG ps = c.ps;
+        CK_ATTRIBUTE pubT[] = {
+            { CKA_CLASS,         &pubClass, sizeof(pubClass) },
+            { CKA_KEY_TYPE,      &kt,       sizeof(kt) },
+            { CKA_PARAMETER_SET, &ps,       sizeof(ps) },
+            { CKA_TOKEN,         &bFalse,   sizeof(bFalse) },
+        };
+        CK_ATTRIBUTE privT[] = {
+            { CKA_CLASS,         &privClass, sizeof(privClass) },
+            { CKA_KEY_TYPE,      &kt,        sizeof(kt) },
+            { CKA_PARAMETER_SET, &ps,        sizeof(ps) },
+            { CKA_TOKEN,         &bFalse,    sizeof(bFalse) },
+            { CKA_SENSITIVE,     &bFalse,    sizeof(bFalse) },
+            { CKA_EXTRACTABLE,   &bTrue,     sizeof(bTrue) },
+        };
+        CK_MECHANISM m = { c.mech, NULL_PTR, 0 };
+        CK_OBJECT_HANDLE hPub = 0, hPriv = 0;
+        CK_RV r = fl->C_GenerateKeyPair(hSess, &m, pubT, 4, privT, 6, &hPub, &hPriv);
+        if (r != CKR_OK) {
+            record_result(CAT, std::string(c.name) + "_generate", "FAIL", "RV=" + std::to_string(r));
+            continue;
+        }
+
+        // E3: raw FIPS bytes, not a PKCS#8 DER SEQUENCE.
+        CK_RV rq = CKR_OK;
+        std::vector<CK_BYTE> sk = readBytes(hPriv, CKA_VALUE, &rq);
+        bool derSeq = (sk.size() > 1 && sk[0] == 0x30);
+        record_result(CAT, std::string(c.name) + "_CKA_VALUE_is_raw_FIPS_length",
+                      sk.size() == c.skLen ? "PASS" : "FAIL",
+                      "len=" + std::to_string(sk.size()) + " (want " + std::to_string(c.skLen) +
+                      ")" + (derSeq ? " — begins with a DER SEQUENCE tag 0x30" : ""));
+        record_result(CAT, std::string(c.name) + "_CKA_VALUE_not_DER_wrapped",
+                      !derSeq ? "PASS" : "FAIL",
+                      "first byte=0x" + (sk.empty() ? std::string("--") : std::to_string((int)sk[0])));
+
+        // E7: the mechanism contributes CKA_SEED for ML-DSA / ML-KEM only.
+        CK_RV rs = CKR_OK;
+        std::vector<CK_BYTE> seed = readBytes(hPriv, CKA_SEED, &rs);
+        if (c.seedExpected) {
+            record_result(CAT, std::string(c.name) + "_CKA_SEED_contributed",
+                          (rs == CKR_OK && seed.size() == c.seedLen) ? "PASS" : "FAIL",
+                          "RV=" + std::to_string(rs) + " len=" + std::to_string(seed.size()) +
+                          " (want " + std::to_string(c.seedLen) + ")");
+        } else {
+            // §6.69.4 lists no seed for SLH-DSA and its table defines none, so
+            // an absent/empty value is the conformant answer.
+            record_result(CAT, std::string(c.name) + "_CKA_SEED_absent",
+                          seed.empty() ? "PASS" : "FAIL",
+                          "RV=" + std::to_string(rs) + " len=" + std::to_string(seed.size()));
+        }
+
+        // The key must still work end to end after the encoding change.
+        if (c.kt == CKK_ML_DSA || c.kt == CKK_SLH_DSA) {
+            CK_MECHANISM sm = { c.kt == CKK_ML_DSA ? CKM_ML_DSA : CKM_SLH_DSA, NULL_PTR, 0 };
+            CK_BYTE msg[] = "e3";
+            std::vector<CK_BYTE> sig(50000);
+            CK_ULONG sigLen = (CK_ULONG)sig.size();
+            CK_RV rsig = fl->C_SignInit(hSess, &sm, hPriv);
+            if (rsig == CKR_OK) rsig = fl->C_Sign(hSess, msg, sizeof(msg) - 1, sig.data(), &sigLen);
+            CK_RV rver = (rsig == CKR_OK) ? fl->C_VerifyInit(hSess, &sm, hPub) : rsig;
+            if (rver == CKR_OK) rver = fl->C_Verify(hSess, msg, sizeof(msg) - 1, sig.data(), sigLen);
+            record_result(CAT, std::string(c.name) + "_sign_verify_round_trip",
+                          rver == CKR_OK ? "PASS" : "FAIL",
+                          "sign RV=" + std::to_string(rsig) + " verify RV=" + std::to_string(rver));
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// W4 — the XMSS parameter set comes from the TEMPLATE, not the mechanism.
+//
+// PKCS#11 v3.2 §6.66.6: "This mechanism does not have a parameter", and the
+// mechanism generates key pairs "using an oid, as specified in the
+// CKA_PARAMETER_SET attribute of the template for the public key."
+//
+// The C++ engine read pMechanism->pParameter — the one place the spec says has
+// no parameter — and DISCARDED CKA_PARAMETER_SET from the template, silently
+// defaulting to OID 1 (XMSS-SHA2_10_256) whenever no mechanism parameter was
+// supplied. A caller asking for XMSS-SHA2_16_256 through the standard attribute
+// got a 10_256 key back, with success.
+//
+// Absent attribute ⇒ CKR_TEMPLATE_INCOMPLETE (it is mandatory at generation).
+// Unsupported oid ⇒ CKR_PARAMETER_SET_NOT_SUPPORTED, the code the engine
+// already uses correctly for the three post-quantum families.
+// ─────────────────────────────────────────────────────────────────────────────
+void test_xmss_parameter_set() {
+    const char* CAT = "XmssParamSet";
+    const CK_MECHANISM_TYPE M_XMSS_KP = 0x00004034UL;
+    const CK_MECHANISM_TYPE M_XMSS    = 0x00004036UL;
+    CK_KEY_TYPE KT_XMSS = 0x00000047UL;
+    const CK_ATTRIBUTE_TYPE A_PARAMETER_SET = 0x0000061dUL;
+#ifndef CKR_PARAMETER_SET_NOT_SUPPORTED
+    const CK_RV RV_PARAMETER_SET_NOT_SUPPORTED = 0x00000209UL;
+#else
+    const CK_RV RV_PARAMETER_SET_NOT_SUPPORTED = CKR_PARAMETER_SET_NOT_SUPPORTED;
+#endif
+
+    if (!mech_advertised(M_XMSS_KP)) {
+        record_result(CAT, "XMSS_keygen_advertised", "SKIP", "mechanism not advertised");
+        return;
+    }
+
+    CK_BBOOL bTrue = CK_TRUE, bFalse = CK_FALSE;
+    CK_OBJECT_CLASS pubClass = CKO_PUBLIC_KEY, privClass = CKO_PRIVATE_KEY;
+
+    // mechParam != 0 exercises §6.66.6's "does not have a parameter": whatever
+    // is passed there must not influence the result.
+    auto gen = [&](CK_ULONG* attrParamSet, CK_ULONG* mechParam,
+                   CK_OBJECT_HANDLE* hPub, CK_OBJECT_HANDLE* hPriv) -> CK_RV {
+        CK_MECHANISM m = { M_XMSS_KP, NULL_PTR, 0 };
+        if (mechParam) { m.pParameter = mechParam; m.ulParameterLen = sizeof(*mechParam); }
+        CK_ATTRIBUTE pubTmpl[5] = {
+            { CKA_CLASS,    &pubClass, sizeof(pubClass) },
+            { CKA_KEY_TYPE, &KT_XMSS,  sizeof(KT_XMSS) },
+            { CKA_VERIFY,   &bTrue,    sizeof(bTrue) },
+            { CKA_TOKEN,    &bFalse,   sizeof(bFalse) },
+        };
+        CK_ULONG pubCount = 4;
+        CK_ATTRIBUTE privTmpl[5] = {
+            { CKA_CLASS,    &privClass, sizeof(privClass) },
+            { CKA_KEY_TYPE, &KT_XMSS,   sizeof(KT_XMSS) },
+            { CKA_SIGN,     &bTrue,     sizeof(bTrue) },
+            { CKA_TOKEN,    &bFalse,    sizeof(bFalse) },
+        };
+        CK_ULONG privCount = 4;
+        if (attrParamSet) {
+            pubTmpl[pubCount].type = A_PARAMETER_SET;
+            pubTmpl[pubCount].pValue = attrParamSet;
+            pubTmpl[pubCount].ulValueLen = sizeof(*attrParamSet);
+            pubCount++;
+            privTmpl[privCount].type = A_PARAMETER_SET;
+            privTmpl[privCount].pValue = attrParamSet;
+            privTmpl[privCount].ulValueLen = sizeof(*attrParamSet);
+            privCount++;
+        }
+        *hPub = 0; *hPriv = 0;
+        return fl->C_GenerateKeyPair(hSess, &m, pubTmpl, pubCount, privTmpl, privCount, hPub, hPriv);
+    };
+
+    // A signature's length is the observable proof of which parameter set was
+    // really used: XMSS-SHA2_10_256 signs to 2500 bytes, XMSS-SHA2_16_256 to
+    // 2692 (RFC 8391 sig = 4 + n + len*n + h*n).
+    auto sigLenOf = [&](CK_OBJECT_HANDLE hPriv) -> CK_ULONG {
+        CK_MECHANISM sm = { M_XMSS, NULL_PTR, 0 };
+        if (fl->C_SignInit(hSess, &sm, hPriv) != CKR_OK) return 0;
+        CK_BYTE msg[] = "w4";
+        CK_ULONG n = 0;
+        if (fl->C_Sign(hSess, msg, sizeof(msg) - 1, NULL_PTR, &n) != CKR_OK) return 0;
+        std::vector<CK_BYTE> sig(n ? n : 1);
+        CK_ULONG got = (CK_ULONG)sig.size();
+        if (fl->C_Sign(hSess, msg, sizeof(msg) - 1, sig.data(), &got) != CKR_OK) return 0;
+        return got;
+    };
+
+    auto readParamSet = [&](CK_OBJECT_HANDLE h) -> long {
+        CK_ULONG ps = 0xDEADBEEF;
+        CK_ATTRIBUTE a = { A_PARAMETER_SET, &ps, sizeof(ps) };
+        if (fl->C_GetAttributeValue(hSess, h, &a, 1) != CKR_OK) return -1;
+        return (long)ps;
+    };
+
+    // ── baseline: oid 1 through the attribute ────────────────────────────────
+    CK_ULONG ps1 = 1, ps2 = 2;
+    CK_OBJECT_HANDLE p1Pub = 0, p1Priv = 0;
+    CK_ULONG len1 = 0;
+    CK_RV r = gen(&ps1, NULL, &p1Pub, &p1Priv);
+    if (r != CKR_OK) {
+        record_result(CAT, "Generate_oid1_from_attribute", "FAIL", "RV=" + std::to_string(r));
+    } else {
+        record_result(CAT, "Generate_oid1_from_attribute", "PASS", "");
+        len1 = sigLenOf(p1Priv);
+        record_result(CAT, "Sign_oid1_length", len1 == 2500 ? "PASS" : "FAIL",
+                      "sig len=" + std::to_string(len1) + " (XMSS-SHA2_10_256 = 2500)");
+    }
+
+    // ── the attribute really selects the parameter set ───────────────────────
+    CK_OBJECT_HANDLE p2Pub = 0, p2Priv = 0;
+    r = gen(&ps2, NULL, &p2Pub, &p2Priv);
+    if (r != CKR_OK) {
+        record_result(CAT, "Generate_oid2_from_attribute", "FAIL", "RV=" + std::to_string(r));
+    } else {
+        record_result(CAT, "Generate_oid2_from_attribute", "PASS", "");
+        record_result(CAT, "Public_CKA_PARAMETER_SET_echoes_2",
+                      readParamSet(p2Pub) == 2 ? "PASS" : "FAIL",
+                      "read " + std::to_string(readParamSet(p2Pub)));
+        record_result(CAT, "Private_CKA_PARAMETER_SET_echoes_2",
+                      readParamSet(p2Priv) == 2 ? "PASS" : "FAIL",
+                      "read " + std::to_string(readParamSet(p2Priv)));
+        CK_ULONG len2 = sigLenOf(p2Priv);
+        record_result(CAT, "Sign_oid2_length", len2 == 2692 ? "PASS" : "FAIL",
+                      "sig len=" + std::to_string(len2) + " (XMSS-SHA2_16_256 = 2692)");
+    }
+
+    // ── §6.66.6 "This mechanism does not have a parameter": a mechanism
+    //     parameter must never override the attribute ─────────────────────────
+    {
+        CK_ULONG mechSaysTwo = 2;
+        CK_OBJECT_HANDLE a = 0, b = 0;
+        r = gen(&ps1, &mechSaysTwo, &a, &b);
+        if (r != CKR_OK) {
+            record_result(CAT, "Attribute_wins_over_mechanism_parameter", "FAIL",
+                          "RV=" + std::to_string(r));
+        } else {
+            CK_ULONG len = sigLenOf(b);
+            record_result(CAT, "Attribute_wins_over_mechanism_parameter",
+                          len == 2500 ? "PASS" : "FAIL",
+                          "attribute=1 mechParam=2 → sig len=" + std::to_string(len) +
+                          " (must be 2500, the attribute's set)");
+        }
+    }
+
+    // ── mandatory at generation ──────────────────────────────────────────────
+    {
+        CK_OBJECT_HANDLE a = 0, b = 0;
+        r = gen(NULL, NULL, &a, &b);
+        record_result(CAT, "Absent_CKA_PARAMETER_SET_is_TEMPLATE_INCOMPLETE",
+                      r == CKR_TEMPLATE_INCOMPLETE ? "PASS" : "FAIL",
+                      "RV=" + std::to_string(r) + " (want CKR_TEMPLATE_INCOMPLETE=0xD0)");
+    }
+
+    // ── unsupported oid ──────────────────────────────────────────────────────
+    {
+        CK_ULONG bogus = 0x99;
+        CK_OBJECT_HANDLE a = 0, b = 0;
+        r = gen(&bogus, NULL, &a, &b);
+        record_result(CAT, "Unsupported_parameter_set_code",
+                      r == RV_PARAMETER_SET_NOT_SUPPORTED ? "PASS" : "FAIL",
+                      "RV=" + std::to_string(r) + " (want CKR_PARAMETER_SET_NOT_SUPPORTED=0x209)");
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// S2 (C++ half) — CKA_WRAP_TEMPLATE mismatch must be CKR_KEY_HANDLE_INVALID.
+//
+// PKCS#11 v3.2 §5.18.3: "To partition the wrapping keys so they can only wrap a
+// subset of extractable keys the attribute CKA_WRAP_TEMPLATE can be used on the
+// wrapping key ... If all attributes match according to the C_FindObject rules
+// of attribute matching then the wrap will proceed. ... If any attribute
+// mismatch occurs on an attempt to wrap a key then the function SHALL return
+// CKR_KEY_HANDLE_INVALID."
+//
+// The engine enforced the partition correctly but returned
+// CKR_KEY_NOT_WRAPPABLE from both mismatch sites.
+// ─────────────────────────────────────────────────────────────────────────────
+void test_wrap_template_return_code() {
+    const char* CAT = "WrapTemplate";
+    CK_BBOOL bTrue = CK_TRUE, bFalse = CK_FALSE;
+    CK_OBJECT_CLASS secClass = CKO_SECRET_KEY;
+    CK_KEY_TYPE aesType = CKK_AES;
+    CK_ULONG klen = 32;
+
+    // Wrapping key constrained to keys whose CKA_LABEL is exactly "WRAPME".
+    CK_UTF8CHAR allowed[] = "WRAPME";
+    CK_ATTRIBUTE wrapTemplate[] = {
+        { CKA_LABEL, allowed, sizeof(allowed) - 1 }
+    };
+    CK_ATTRIBUTE kekTmpl[] = {
+        { CKA_CLASS,          &secClass, sizeof(secClass) },
+        { CKA_KEY_TYPE,       &aesType,  sizeof(aesType) },
+        { CKA_VALUE_LEN,      &klen,     sizeof(klen) },
+        { CKA_TOKEN,          &bFalse,   sizeof(bFalse) },
+        { CKA_WRAP,           &bTrue,    sizeof(bTrue) },
+        { CKA_UNWRAP,         &bTrue,    sizeof(bTrue) },
+        { CKA_WRAP_TEMPLATE,  wrapTemplate, sizeof(wrapTemplate) },
+    };
+    CK_MECHANISM aesGen = { CKM_AES_KEY_GEN, NULL_PTR, 0 };
+    CK_OBJECT_HANDLE hKek = CK_INVALID_HANDLE;
+    CK_RV rv = fl->C_GenerateKey(hSess, &aesGen, kekTmpl, 7, &hKek);
+    if (rv != CKR_OK) {
+        record_result(CAT, "Generate_KEK_with_WRAP_TEMPLATE", "FAIL", "RV=" + std::to_string(rv));
+        return;
+    }
+    record_result(CAT, "Generate_KEK_with_WRAP_TEMPLATE", "PASS", "");
+
+    // The partition can only be enforced if the template actually round-trips
+    // through the object store, so assert that before asserting the codes.
+    {
+        CK_ATTRIBUTE probe = { CKA_WRAP_TEMPLATE, NULL_PTR, 0 };
+        CK_RV r = fl->C_GetAttributeValue(hSess, hKek, &probe, 1);
+        record_result(CAT, "KEK_WRAP_TEMPLATE_round_trips",
+                      (r == CKR_OK && probe.ulValueLen == sizeof(CK_ATTRIBUTE)) ? "PASS" : "FAIL",
+                      "RV=" + std::to_string(r) + " ulValueLen=" + std::to_string((long)probe.ulValueLen) +
+                      " (want " + std::to_string(sizeof(CK_ATTRIBUTE)) + ")");
+    }
+
+    auto makeTarget = [&](const char* label, CK_OBJECT_HANDLE* h) -> CK_RV {
+        CK_ATTRIBUTE tmpl[] = {
+            { CKA_CLASS,       &secClass, sizeof(secClass) },
+            { CKA_KEY_TYPE,    &aesType,  sizeof(aesType) },
+            { CKA_VALUE_LEN,   &klen,     sizeof(klen) },
+            { CKA_TOKEN,       &bFalse,   sizeof(bFalse) },
+            { CKA_EXTRACTABLE, &bTrue,    sizeof(bTrue) },
+            { CKA_SENSITIVE,   &bFalse,   sizeof(bFalse) },
+            { CKA_LABEL,       (CK_UTF8CHAR_PTR)label, (CK_ULONG)strlen(label) },
+        };
+        *h = CK_INVALID_HANDLE;
+        return fl->C_GenerateKey(hSess, &aesGen, tmpl, 7, h);
+    };
+
+    CK_MECHANISM wrapMech = { CKM_AES_KEY_WRAP, NULL_PTR, 0 };
+
+    // (0) control: a KEK carrying NO CKA_WRAP_TEMPLATE wraps anything, so a
+    //     failure below is attributable to the partition check and not to the
+    //     wrap machinery itself.
+    {
+        CK_ATTRIBUTE plainKek[] = {
+            { CKA_CLASS,     &secClass, sizeof(secClass) },
+            { CKA_KEY_TYPE,  &aesType,  sizeof(aesType) },
+            { CKA_VALUE_LEN, &klen,     sizeof(klen) },
+            { CKA_TOKEN,     &bFalse,   sizeof(bFalse) },
+            { CKA_WRAP,      &bTrue,    sizeof(bTrue) },
+        };
+        CK_OBJECT_HANDLE hPlain = CK_INVALID_HANDLE, hT = CK_INVALID_HANDLE;
+        CK_RV r = fl->C_GenerateKey(hSess, &aesGen, plainKek, 5, &hPlain);
+        if (r == CKR_OK && makeTarget("ANY", &hT) == CKR_OK) {
+            CK_BYTE out[512]; CK_ULONG outLen = sizeof(out);
+            r = fl->C_WrapKey(hSess, &wrapMech, hPlain, hT, out, &outLen);
+            record_result(CAT, "Wrap_without_template_baseline",
+                          r == CKR_OK ? "PASS" : "FAIL",
+                          "RV=" + std::to_string(r) + " len=" + std::to_string(outLen));
+        } else {
+            record_result(CAT, "Wrap_without_template_baseline", "FAIL",
+                          "setup RV=" + std::to_string(r));
+        }
+    }
+
+    // (a) label MISMATCH → §5.18.3 SHALL be CKR_KEY_HANDLE_INVALID.
+    CK_OBJECT_HANDLE hBad = CK_INVALID_HANDLE;
+    if (makeTarget("DENIED", &hBad) == CKR_OK) {
+        CK_BYTE out[512]; CK_ULONG outLen = sizeof(out);
+        CK_RV r = fl->C_WrapKey(hSess, &wrapMech, hKek, hBad, out, &outLen);
+        record_result(CAT, "Wrap_template_value_mismatch",
+                      r == CKR_KEY_HANDLE_INVALID ? "PASS" : "FAIL",
+                      "RV=" + std::to_string(r) + " (want CKR_KEY_HANDLE_INVALID=0x60)");
+    } else {
+        record_result(CAT, "Wrap_template_value_mismatch", "FAIL", "target key generation failed");
+    }
+
+    // (b) label MATCH → the wrap must proceed.
+    CK_OBJECT_HANDLE hGood = CK_INVALID_HANDLE;
+    if (makeTarget("WRAPME", &hGood) == CKR_OK) {
+        CK_BYTE out[512]; CK_ULONG outLen = sizeof(out);
+        CK_RV r = fl->C_WrapKey(hSess, &wrapMech, hKek, hGood, out, &outLen);
+        record_result(CAT, "Wrap_template_match_proceeds",
+                      r == CKR_OK ? "PASS" : "FAIL",
+                      "RV=" + std::to_string(r) + " len=" + std::to_string(outLen));
+    } else {
+        record_result(CAT, "Wrap_template_match_proceeds", "FAIL", "target key generation failed");
+    }
+
+    // (c) wrap template naming an attribute the target does not carry at all
+    //     (CKA_SUBJECT exists on private keys/certificates, never on a secret
+    //     key) — the "absent attribute" mismatch site, same SHALL.
+    {
+        CK_UTF8CHAR subj[] = "\x30\x00";
+        CK_ATTRIBUTE wt2[] = { { CKA_SUBJECT, subj, 2 } };
+        CK_ATTRIBUTE kek2Tmpl[] = {
+            { CKA_CLASS,         &secClass, sizeof(secClass) },
+            { CKA_KEY_TYPE,      &aesType,  sizeof(aesType) },
+            { CKA_VALUE_LEN,     &klen,     sizeof(klen) },
+            { CKA_TOKEN,         &bFalse,   sizeof(bFalse) },
+            { CKA_WRAP,          &bTrue,    sizeof(bTrue) },
+            { CKA_WRAP_TEMPLATE, wt2,       sizeof(wt2) },
+        };
+        CK_OBJECT_HANDLE hKek2 = CK_INVALID_HANDLE;
+        CK_RV r = fl->C_GenerateKey(hSess, &aesGen, kek2Tmpl, 6, &hKek2);
+        if (r != CKR_OK) {
+            record_result(CAT, "Wrap_template_absent_attribute", "FAIL",
+                          "KEK generation RV=" + std::to_string(r));
+        } else {
+            CK_OBJECT_HANDLE hT = CK_INVALID_HANDLE;
+            makeTarget("ANY", &hT);
+            CK_BYTE out[512]; CK_ULONG outLen = sizeof(out);
+            r = fl->C_WrapKey(hSess, &wrapMech, hKek2, hT, out, &outLen);
+            record_result(CAT, "Wrap_template_absent_attribute",
+                          r == CKR_KEY_HANDLE_INVALID ? "PASS" : "FAIL",
+                          "RV=" + std::to_string(r) + " (want CKR_KEY_HANDLE_INVALID=0x60)");
+        }
+    }
+}
 
 #ifndef CKM_HASH_ML_DSA_SHA512
 #define CKM_HASH_ML_DSA_SHA512 0x00000026UL
@@ -1581,10 +3237,11 @@ void test_pqc_xmss() {
     CK_KEY_TYPE ktypeXmss = 0x00000047UL; // CKK_XMSS
     CK_BBOOL bTrue = CK_TRUE, bFalse = CK_FALSE;
 
+    // W4 (2026-08-13): §6.66.6 says "This mechanism does not have a parameter"
+    // and sources the oid from CKA_PARAMETER_SET, so the parameter set moved
+    // from mech.pParameter into both templates.
     CK_MECHANISM mech = { 0x00004034UL /* CKM_XMSS_KEY_PAIR_GEN */, NULL_PTR, 0 };
     CK_ULONG paramSetXmss = 0x00000001UL; // CKP_XMSS_SHA2_10_256
-    mech.pParameter = &paramSetXmss;
-    mech.ulParameterLen = sizeof(paramSetXmss);
 
     CK_UTF8CHAR label[] = "XMSS Compliance";
     CK_ATTRIBUTE pubTmpl[] = { 
@@ -1592,6 +3249,7 @@ void test_pqc_xmss() {
         { CKA_KEY_TYPE,      &ktypeXmss, sizeof(ktypeXmss) },
         { CKA_VERIFY,        &bTrue,    sizeof(bTrue) },
         { CKA_TOKEN,         &bTrue,    sizeof(bTrue) },
+        { CKA_PARAMETER_SET, &paramSetXmss, sizeof(paramSetXmss) },
         { CKA_LABEL,         label,     sizeof(label)-1 }
     };
     CK_ATTRIBUTE privTmpl[] = { 
@@ -1600,6 +3258,7 @@ void test_pqc_xmss() {
         { CKA_SIGN,          &bTrue,    sizeof(bTrue) },
         { CKA_TOKEN,         &bTrue,    sizeof(bTrue) },
         { CKA_PRIVATE,       &bTrue,    sizeof(bTrue) },
+        { CKA_PARAMETER_SET, &paramSetXmss, sizeof(paramSetXmss) },
         { CKA_LABEL,         label,     sizeof(label)-1 }
     };
 
@@ -1679,8 +3338,6 @@ void test_pqc_xmss() {
     // check (audit V-4) correctly rejects with CKR_TEMPLATE_INCONSISTENT.
     CK_MECHANISM mechMT = { CKM_XMSSMT_KEY_PAIR_GEN, NULL_PTR, 0 };
     CK_ULONG paramSetXmssMT = 0x00000001UL; // CKP_XMSSMT_SHA2_20_2_256
-    mechMT.pParameter = &paramSetXmssMT;
-    mechMT.ulParameterLen = sizeof(paramSetXmssMT);
 
     CK_KEY_TYPE ktypeXmssMT = 0x00000048UL; // CKK_XMSSMT
     CK_ATTRIBUTE pubTmplMT[] = {
@@ -1688,6 +3345,7 @@ void test_pqc_xmss() {
         { CKA_KEY_TYPE,      &ktypeXmssMT, sizeof(ktypeXmssMT) },
         { CKA_VERIFY,        &bTrue,      sizeof(bTrue) },
         { CKA_TOKEN,         &bTrue,      sizeof(bTrue) },
+        { CKA_PARAMETER_SET, &paramSetXmssMT, sizeof(paramSetXmssMT) },
         { CKA_LABEL,         label,       sizeof(label)-1 }
     };
     CK_ATTRIBUTE privTmplMT[] = {
@@ -1696,11 +3354,12 @@ void test_pqc_xmss() {
         { CKA_SIGN,          &bTrue,      sizeof(bTrue) },
         { CKA_TOKEN,         &bTrue,      sizeof(bTrue) },
         { CKA_PRIVATE,       &bTrue,      sizeof(bTrue) },
+        { CKA_PARAMETER_SET, &paramSetXmssMT, sizeof(paramSetXmssMT) },
         { CKA_LABEL,         label,       sizeof(label)-1 }
     };
 
     CK_OBJECT_HANDLE hPubMT = 0, hPrivMT = 0;
-    rv = fl->C_GenerateKeyPair(hSess, &mechMT, pubTmplMT, 5, privTmplMT, 6, &hPubMT, &hPrivMT);
+    rv = fl->C_GenerateKeyPair(hSess, &mechMT, pubTmplMT, 6, privTmplMT, 7, &hPubMT, &hPrivMT);
     if (rv == CKR_MECHANISM_INVALID || rv == CKR_FUNCTION_NOT_SUPPORTED) {
         record_result("XMSS", "Generate_XMSSMT_SHA2_20_2_256", "SKIP", "Mech unavailable");
     } else if (rv != CKR_OK) {
@@ -3593,6 +5252,1056 @@ void test_kcv_compliance() {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// S11 (C++ half) — CKA_CHECK_VALUE on encapsulated / decapsulated keys.
+//
+// PKCS#11 v3.2 §4.11: "The attribute is optional, but if supported, regardless
+// of how the key object is created or derived, the value of the attribute is
+// always supplied. It SHALL be supplied even if the encryption operation for
+// the key is forbidden."  For a generic secret the value is "the first three
+// bytes of the SHA-1 hash" of the key value.
+//
+// On caller-supplied values: "If a value is supplied in the application
+// template (allowed but never necessary) then, if supported, it MUST match what
+// the library calculates it to be or the library returns a
+// CKR_ATTRIBUTE_VALUE_INVALID."  Suppression: "The generation of the KCV may be
+// prevented by the application supplying the attribute in the template as a
+// no-value (0 length) entry."
+//
+// Two defects this covers: (1) neither KEM path computed the value at all, and
+// (2) the C++ template handling rejected ANY non-empty caller value, including
+// a CORRECT one, which §4.11 requires be accepted.
+// ─────────────────────────────────────────────────────────────────────────────
+void test_kem_check_value() {
+    const char* CAT = "KEMKcv";
+    typedef CK_RV (*C_EncapsulateKey_t)(CK_SESSION_HANDLE, CK_MECHANISM_PTR, CK_OBJECT_HANDLE, CK_ATTRIBUTE_PTR, CK_ULONG, CK_BYTE_PTR, CK_ULONG_PTR, CK_OBJECT_HANDLE_PTR);
+    typedef CK_RV (*C_DecapsulateKey_t)(CK_SESSION_HANDLE, CK_MECHANISM_PTR, CK_OBJECT_HANDLE, CK_ATTRIBUTE_PTR, CK_ULONG, CK_BYTE_PTR, CK_ULONG, CK_OBJECT_HANDLE_PTR);
+    void* dlib = dlopen(opt_engine.c_str(), RTLD_NOW);
+    C_EncapsulateKey_t EncapFn = dlib ? (C_EncapsulateKey_t)dlsym(dlib, "C_EncapsulateKey") : NULL;
+    C_DecapsulateKey_t DecapFn = dlib ? (C_DecapsulateKey_t)dlsym(dlib, "C_DecapsulateKey") : NULL;
+    if (!EncapFn || !DecapFn) {
+        record_result(CAT, "KEM_CKA_CHECK_VALUE", "SKIP", "Function pointers missing");
+        return;
+    }
+
+    CK_BBOOL bTrue = CK_TRUE, bFalse = CK_FALSE;
+    CK_OBJECT_CLASS pubClass = CKO_PUBLIC_KEY, privClass = CKO_PRIVATE_KEY;
+    CK_OBJECT_CLASS secClass = CKO_SECRET_KEY;
+    CK_KEY_TYPE secType = CKK_GENERIC_SECRET;
+
+    CK_ATTRIBUTE ssTmpl[] = {
+        { CKA_CLASS,       &secClass, sizeof(secClass) },
+        { CKA_KEY_TYPE,    &secType,  sizeof(secType) },
+        { CKA_TOKEN,       &bFalse,   sizeof(bFalse) },
+        { CKA_EXTRACTABLE, &bTrue,    sizeof(bTrue) },
+        { CKA_SENSITIVE,   &bFalse,   sizeof(bFalse) },
+    };
+
+    // Generate an ML-KEM-768 pair as the KEM subject.
+    CK_KEY_TYPE kemType = CKK_ML_KEM;
+    CK_ULONG ps768 = 2;
+    CK_ATTRIBUTE pubTmpl[] = {
+        { CKA_CLASS,         &pubClass, sizeof(pubClass) },
+        { CKA_KEY_TYPE,      &kemType,  sizeof(kemType) },
+        { CKA_ENCAPSULATE,   &bTrue,    sizeof(bTrue) },
+        { CKA_PARAMETER_SET, &ps768,    sizeof(ps768) },
+        { CKA_TOKEN,         &bFalse,   sizeof(bFalse) }
+    };
+    CK_ATTRIBUTE privTmpl[] = {
+        { CKA_CLASS,         &privClass, sizeof(privClass) },
+        { CKA_KEY_TYPE,      &kemType,   sizeof(kemType) },
+        { CKA_DECAPSULATE,   &bTrue,     sizeof(bTrue) },
+        { CKA_PARAMETER_SET, &ps768,     sizeof(ps768) },
+        { CKA_TOKEN,         &bFalse,    sizeof(bFalse) }
+    };
+    CK_MECHANISM kemGen = { CKM_ML_KEM_KEY_PAIR_GEN, NULL_PTR, 0 };
+    CK_OBJECT_HANDLE hPub = 0, hPriv = 0;
+    CK_RV rv = fl->C_GenerateKeyPair(hSess, &kemGen, pubTmpl, 5, privTmpl, 5, &hPub, &hPriv);
+    if (rv != CKR_OK) {
+        record_result(CAT, "Generate_ML_KEM_768", "FAIL", "RV=" + std::to_string(rv));
+        return;
+    }
+
+    CK_MECHANISM mlkemMech = { CKM_ML_KEM, NULL_PTR, 0 };
+    CK_BYTE ct[2000]; CK_ULONG ctLen = sizeof(ct);
+    CK_OBJECT_HANDLE hEnc = 0;
+    rv = EncapFn(hSess, &mlkemMech, hPub, ssTmpl, 5, ct, &ctLen, &hEnc);
+    if (rv != CKR_OK) {
+        record_result(CAT, "Encap_MLKEM768", "FAIL", "RV=" + std::to_string(rv));
+        return;
+    }
+
+    // Read the shared secret back and compute the independent SHA-1 oracle.
+    auto kcvOf = [&](CK_OBJECT_HANDLE h, std::vector<unsigned char>* oracleOut) -> std::vector<unsigned char> {
+        CK_BYTE val[256];
+        CK_ATTRIBUTE a = { CKA_VALUE, val, sizeof(val) };
+        if (fl->C_GetAttributeValue(hSess, h, &a, 1) != CKR_OK) { oracleOut->clear(); return {}; }
+        *oracleOut = oracle_sha1_kcv(val, a.ulValueLen);
+        return read_kcv(h);
+    };
+
+    std::vector<unsigned char> oracle, hsm;
+    hsm = kcvOf(hEnc, &oracle);
+    record_result(CAT, "Encap_KCV_present",
+                  hsm.size() == 3 ? "PASS" : "FAIL",
+                  "got " + std::to_string(hsm.size()) + " bytes (§4.11 SHALL be supplied)");
+    record_result(CAT, "Encap_KCV_equals_SHA1_oracle",
+                  (hsm.size() == 3 && hsm == oracle) ? "PASS" : "FAIL",
+                  "HSM=" + hex_bytes(hsm) + " oracle=" + hex_bytes(oracle));
+
+    CK_OBJECT_HANDLE hDec = 0;
+    rv = DecapFn(hSess, &mlkemMech, hPriv, ssTmpl, 5, ct, ctLen, &hDec);
+    if (rv != CKR_OK) {
+        record_result(CAT, "Decap_MLKEM768", "FAIL", "RV=" + std::to_string(rv));
+        return;
+    }
+    std::vector<unsigned char> dOracle, dHsm;
+    dHsm = kcvOf(hDec, &dOracle);
+    record_result(CAT, "Decap_KCV_present",
+                  dHsm.size() == 3 ? "PASS" : "FAIL",
+                  "got " + std::to_string(dHsm.size()) + " bytes");
+    record_result(CAT, "Decap_KCV_equals_SHA1_oracle",
+                  (dHsm.size() == 3 && dHsm == dOracle) ? "PASS" : "FAIL",
+                  "HSM=" + hex_bytes(dHsm) + " oracle=" + hex_bytes(dOracle));
+    // The KCV is the cheap way both ends confirm the same secret — this is the
+    // whole reason §4.11 matters on the KEM paths.
+    record_result(CAT, "Encap_and_Decap_KCV_agree",
+                  (hsm.size() == 3 && hsm == dHsm) ? "PASS" : "FAIL",
+                  "encap=" + hex_bytes(hsm) + " decap=" + hex_bytes(dHsm));
+
+    // ── caller-supplied CORRECT value must be ACCEPTED (§4.11 "MUST match") ──
+    if (dHsm.size() == 3) {
+        CK_ATTRIBUTE okTmpl[] = {
+            { CKA_CLASS,       &secClass, sizeof(secClass) },
+            { CKA_KEY_TYPE,    &secType,  sizeof(secType) },
+            { CKA_TOKEN,       &bFalse,   sizeof(bFalse) },
+            { CKA_EXTRACTABLE, &bTrue,    sizeof(bTrue) },
+            { CKA_SENSITIVE,   &bFalse,   sizeof(bFalse) },
+            { CKA_CHECK_VALUE, dHsm.data(), 3 },
+        };
+        CK_OBJECT_HANDLE h = CK_INVALID_HANDLE;
+        CK_RV r = DecapFn(hSess, &mlkemMech, hPriv, okTmpl, 6, ct, ctLen, &h);
+        record_result(CAT, "Decap_correct_caller_KCV_accepted",
+                      r == CKR_OK ? "PASS" : "FAIL",
+                      "RV=" + std::to_string(r) + " (§4.11: a matching supplied value is legal)");
+    }
+
+    // ── caller-supplied WRONG value → CKR_ATTRIBUTE_VALUE_INVALID ────────────
+    {
+        CK_BYTE wrong[3] = { 0xDE, 0xAD, 0xBE };
+        CK_ATTRIBUTE badTmpl[] = {
+            { CKA_CLASS,       &secClass, sizeof(secClass) },
+            { CKA_KEY_TYPE,    &secType,  sizeof(secType) },
+            { CKA_TOKEN,       &bFalse,   sizeof(bFalse) },
+            { CKA_EXTRACTABLE, &bTrue,    sizeof(bTrue) },
+            { CKA_SENSITIVE,   &bFalse,   sizeof(bFalse) },
+            { CKA_CHECK_VALUE, wrong,     3 },
+        };
+        CK_OBJECT_HANDLE h = CK_INVALID_HANDLE;
+        CK_RV r = DecapFn(hSess, &mlkemMech, hPriv, badTmpl, 6, ct, ctLen, &h);
+        record_result(CAT, "Decap_wrong_caller_KCV_rejected",
+                      r == CKR_ATTRIBUTE_VALUE_INVALID ? "PASS" : "FAIL",
+                      "RV=" + std::to_string(r) + " (want CKR_ATTRIBUTE_VALUE_INVALID=0x13)");
+    }
+
+    // ── zero-length entry SUPPRESSES generation ──────────────────────────────
+    {
+        CK_ATTRIBUTE supTmpl[] = {
+            { CKA_CLASS,       &secClass, sizeof(secClass) },
+            { CKA_KEY_TYPE,    &secType,  sizeof(secType) },
+            { CKA_TOKEN,       &bFalse,   sizeof(bFalse) },
+            { CKA_EXTRACTABLE, &bTrue,    sizeof(bTrue) },
+            { CKA_SENSITIVE,   &bFalse,   sizeof(bFalse) },
+            { CKA_CHECK_VALUE, NULL_PTR,  0 },
+        };
+        CK_OBJECT_HANDLE h = CK_INVALID_HANDLE;
+        CK_RV r = DecapFn(hSess, &mlkemMech, hPriv, supTmpl, 6, ct, ctLen, &h);
+        std::vector<unsigned char> k = (r == CKR_OK) ? read_kcv(h) : std::vector<unsigned char>{0xff};
+        record_result(CAT, "Decap_zero_length_KCV_suppresses",
+                      (r == CKR_OK && k.empty()) ? "PASS" : "FAIL",
+                      "RV=" + std::to_string(r) + " kcv bytes=" + std::to_string(k.size()));
+    }
+
+    // ── ECDH-as-KEM: same §4.11 mandate, different mechanism ─────────────────
+    {
+        CK_KEY_TYPE ecType = CKK_EC;
+        CK_BYTE oid_p256[] = { 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07 };
+        CK_ATTRIBUTE ecPub[] = {
+            { CKA_CLASS,       &pubClass, sizeof(pubClass) },
+            { CKA_KEY_TYPE,    &ecType,   sizeof(ecType) },
+            { CKA_EC_PARAMS,   oid_p256,  sizeof(oid_p256) },
+            { CKA_ENCAPSULATE, &bTrue,    sizeof(bTrue) },
+            { CKA_TOKEN,       &bFalse,   sizeof(bFalse) }
+        };
+        CK_ATTRIBUTE ecPriv[] = {
+            { CKA_CLASS,       &privClass, sizeof(privClass) },
+            { CKA_KEY_TYPE,    &ecType,    sizeof(ecType) },
+            { CKA_DECAPSULATE, &bTrue,     sizeof(bTrue) },
+            { CKA_TOKEN,       &bFalse,    sizeof(bFalse) }
+        };
+        CK_MECHANISM ecGen = { CKM_EC_KEY_PAIR_GEN, NULL_PTR, 0 };
+        CK_OBJECT_HANDLE hEcPub = 0, hEcPriv = 0;
+        if (fl->C_GenerateKeyPair(hSess, &ecGen, ecPub, 5, ecPriv, 4, &hEcPub, &hEcPriv) != CKR_OK) {
+            record_result(CAT, "ECDH_KEM_KCV", "SKIP", "EC key generation failed");
+        } else {
+            CK_MECHANISM ecdh = { CKM_ECDH1_DERIVE, NULL_PTR, 0 };
+            CK_BYTE ect[300]; CK_ULONG ectLen = sizeof(ect);
+            CK_OBJECT_HANDLE hE = 0, hD = 0;
+            CK_RV r = EncapFn(hSess, &ecdh, hEcPub, ssTmpl, 5, ect, &ectLen, &hE);
+            if (r != CKR_OK) {
+                record_result(CAT, "ECDH_Encap_KCV_present", "FAIL", "RV=" + std::to_string(r));
+            } else {
+                std::vector<unsigned char> o, k;
+                k = kcvOf(hE, &o);
+                record_result(CAT, "ECDH_Encap_KCV_present",
+                              k.size() == 3 ? "PASS" : "FAIL",
+                              "got " + std::to_string(k.size()) + " bytes");
+                record_result(CAT, "ECDH_Encap_KCV_equals_SHA1_oracle",
+                              (k.size() == 3 && k == o) ? "PASS" : "FAIL",
+                              "HSM=" + hex_bytes(k) + " oracle=" + hex_bytes(o));
+                r = DecapFn(hSess, &ecdh, hEcPriv, ssTmpl, 5, ect, ectLen, &hD);
+                if (r == CKR_OK) {
+                    std::vector<unsigned char> o2, k2;
+                    k2 = kcvOf(hD, &o2);
+                    record_result(CAT, "ECDH_Decap_KCV_equals_SHA1_oracle",
+                                  (k2.size() == 3 && k2 == o2) ? "PASS" : "FAIL",
+                                  "HSM=" + hex_bytes(k2) + " oracle=" + hex_bytes(o2));
+                } else {
+                    record_result(CAT, "ECDH_Decap_KCV_equals_SHA1_oracle", "FAIL",
+                                  "decap RV=" + std::to_string(r));
+                }
+            }
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// §4.11 CKA_CHECK_VALUE in the template — every object-creation path.
+//
+// "The attribute is optional, but if supported, regardless of how the key object
+//  is created or derived, the value of the attribute is always supplied. It
+//  SHALL be supplied even if the encryption operation for the key is forbidden."
+// "If a value is supplied in the application template (allowed but never
+//  necessary) then, if supported, it MUST match what the library calculates it
+//  to be or the library returns a CKR_ATTRIBUTE_VALUE_INVALID."
+// "The generation of the KCV may be prevented by the application supplying the
+//  attribute in the template as a no-value (0 length) entry."
+//
+// The 2026-08-13 S11 fix covered C_EncapsulateKey / C_DecapsulateKey only. Ten
+// further sites — C_GenerateKey (AES and generic secret), C_UnwrapKey, and the
+// six C_DeriveKey paths (PBKD2, SP800-108 counter and feedback, HKDF, ECDH,
+// Edwards/Montgomery, symmetric concatenation) — still rejected ANY non-empty
+// entry, including a CORRECT one, which the second sentence forbids.
+//
+// The suite computes the expected value independently with OpenSSL (SHA-1 for
+// generic secrets, AES-ECB of the zero block for AES) so a matching pair cannot
+// be a case of the engine agreeing with its own bug.
+// ─────────────────────────────────────────────────────────────────────────────
+void test_check_value_templates() {
+    const char* CAT = "KcvTemplate";
+    CK_BBOOL bTrue = CK_TRUE, bFalse = CK_FALSE;
+    CK_OBJECT_CLASS secClass = CKO_SECRET_KEY;
+    CK_KEY_TYPE aesType = CKK_AES;
+    CK_KEY_TYPE genType = CKK_GENERIC_SECRET;
+    CK_ULONG len32 = 32;
+
+    // Run the three §4.11 cases against one object-creation path. `create` is
+    // handed the extra CKA_CHECK_VALUE entry to append (or none) and returns
+    // the call's CK_RV plus the new handle.
+    // `deterministic` says whether repeating `create` yields the SAME key bits.
+    // C_GenerateKey never does — it draws fresh randomness every call — so no
+    // application can supply that key's check value in advance and §4.11's
+    // "a supplied value that matches is accepted" case is unobservable there.
+    // It is recorded as a SKIP with that reason rather than faked.
+    auto threeCases = [&](const std::string& name,
+                          std::function<CK_RV(CK_ATTRIBUTE*, CK_OBJECT_HANDLE*)> create,
+                          bool isAes, bool deterministic = true) {
+        // (1) no entry at all → the engine supplies the value (§4.11 "SHALL").
+        CK_OBJECT_HANDLE hPlain = CK_INVALID_HANDLE;
+        CK_RV r = create(NULL, &hPlain);
+        if (r != CKR_OK) {
+            record_result(CAT, name + "_baseline", "FAIL", "RV=" + std::to_string(r));
+            return;
+        }
+        std::vector<unsigned char> engineKcv = read_kcv(hPlain);
+        // Independent oracle over the key bits the engine published.
+        CK_BYTE val[512];
+        CK_ATTRIBUTE va = { CKA_VALUE, val, sizeof(val) };
+        CK_RV rvv = fl->C_GetAttributeValue(hSess, hPlain, &va, 1);
+        std::vector<unsigned char> oracle;
+        if (rvv == CKR_OK)
+            oracle = isAes ? oracle_aes_ecb_kcv(val, va.ulValueLen)
+                           : oracle_sha1_kcv(val, va.ulValueLen);
+        if (rvv != CKR_OK)
+        {
+            // No independent oracle is possible when the key bits are not
+            // readable — the concatenate family publishes a sensitive key
+            // whatever the template asks for. The three §4.11 cases below still
+            // run against the value the engine itself published.
+            record_result(CAT, name + "_KCV_matches_oracle", "SKIP",
+                          "CKA_VALUE unreadable (RV=" + std::to_string(rvv) +
+                          "), engine KCV=" + hex_bytes(engineKcv));
+        }
+        else
+        {
+            record_result(CAT, name + "_KCV_matches_oracle",
+                          (engineKcv.size() == 3 && engineKcv == oracle) ? "PASS" : "FAIL",
+                          "engine=" + hex_bytes(engineKcv) + " oracle=" + hex_bytes(oracle));
+        }
+        if (engineKcv.size() != 3) return;
+
+        // (2) a CORRECT caller-supplied value must be ACCEPTED.
+        if (!deterministic)
+        {
+            record_result(CAT, name + "_correct_value_accepted", "SKIP",
+                          "output is freshly random each call, so the caller "
+                          "cannot know the check value in advance");
+        }
+        else
+        {
+            CK_ATTRIBUTE extra = { CKA_CHECK_VALUE, engineKcv.data(), 3 };
+            CK_OBJECT_HANDLE h = CK_INVALID_HANDLE;
+            CK_RV rc = create(&extra, &h);
+            std::vector<unsigned char> back = (rc == CKR_OK) ? read_kcv(h)
+                                                             : std::vector<unsigned char>();
+            record_result(CAT, name + "_correct_value_accepted",
+                          (rc == CKR_OK && back == engineKcv) ? "PASS" : "FAIL",
+                          "RV=" + std::to_string(rc) + " readback=" + hex_bytes(back));
+        }
+        // (3) a WRONG value must be CKR_ATTRIBUTE_VALUE_INVALID, and no object
+        //     may be left behind.
+        {
+            CK_BYTE wrong[3] = { 0xDE, 0xAD, 0xBE };
+            // Guard against the 1-in-16M case where the real KCV is 0xDEADBE.
+            if (engineKcv[0] == 0xDE && engineKcv[1] == 0xAD && engineKcv[2] == 0xBE)
+                wrong[0] = 0x00;
+            CK_ATTRIBUTE extra = { CKA_CHECK_VALUE, wrong, 3 };
+            CK_OBJECT_HANDLE h = CK_INVALID_HANDLE;
+            CK_RV rc = create(&extra, &h);
+            record_result(CAT, name + "_wrong_value_rejected",
+                          rc == CKR_ATTRIBUTE_VALUE_INVALID ? "PASS" : "FAIL",
+                          "RV=" + std::to_string(rc) + " (want CKR_ATTRIBUTE_VALUE_INVALID=0x13)");
+            if (rc == CKR_OK) fl->C_DestroyObject(hSess, h);
+        }
+        // (4) a zero-length entry SUPPRESSES generation.
+        {
+            CK_ATTRIBUTE extra = { CKA_CHECK_VALUE, NULL_PTR, 0 };
+            CK_OBJECT_HANDLE h = CK_INVALID_HANDLE;
+            CK_RV rc = create(&extra, &h);
+            std::vector<unsigned char> back = (rc == CKR_OK) ? read_kcv(h)
+                                                             : std::vector<unsigned char>{0xff};
+            record_result(CAT, name + "_zero_length_suppresses",
+                          (rc == CKR_OK && back.empty()) ? "PASS" : "FAIL",
+                          "RV=" + std::to_string(rc) + " kcv bytes=" + std::to_string(back.size()));
+        }
+    };
+
+    // Build a template with an optional trailing CKA_CHECK_VALUE entry.
+    auto withExtra = [](std::vector<CK_ATTRIBUTE> base, CK_ATTRIBUTE* extra) {
+        if (extra) base.push_back(*extra);
+        return base;
+    };
+
+    // ── C_GenerateKey, CKK_AES (generateAES) ─────────────────────────────────
+    threeCases("GenerateKey_AES", [&](CK_ATTRIBUTE* extra, CK_OBJECT_HANDLE* h) {
+        std::vector<CK_ATTRIBUTE> t = withExtra({
+            { CKA_CLASS,       &secClass, sizeof(secClass) },
+            { CKA_KEY_TYPE,    &aesType,  sizeof(aesType) },
+            { CKA_VALUE_LEN,   &len32,    sizeof(len32) },
+            { CKA_TOKEN,       &bFalse,   sizeof(bFalse) },
+            { CKA_SENSITIVE,   &bFalse,   sizeof(bFalse) },
+            { CKA_EXTRACTABLE, &bTrue,    sizeof(bTrue) },
+            { CKA_WRAP,        &bTrue,    sizeof(bTrue) },
+            { CKA_UNWRAP,      &bTrue,    sizeof(bTrue) },
+        }, extra);
+        CK_MECHANISM m = { CKM_AES_KEY_GEN, NULL_PTR, 0 };
+        *h = CK_INVALID_HANDLE;
+        return fl->C_GenerateKey(hSess, &m, t.data(), (CK_ULONG)t.size(), h);
+    }, true, false);
+
+    // ── C_GenerateKey, CKK_GENERIC_SECRET (generateGeneric) ──────────────────
+    threeCases("GenerateKey_Generic", [&](CK_ATTRIBUTE* extra, CK_OBJECT_HANDLE* h) {
+        std::vector<CK_ATTRIBUTE> t = withExtra({
+            { CKA_CLASS,       &secClass, sizeof(secClass) },
+            { CKA_KEY_TYPE,    &genType,  sizeof(genType) },
+            { CKA_VALUE_LEN,   &len32,    sizeof(len32) },
+            { CKA_TOKEN,       &bFalse,   sizeof(bFalse) },
+            { CKA_SENSITIVE,   &bFalse,   sizeof(bFalse) },
+            { CKA_EXTRACTABLE, &bTrue,    sizeof(bTrue) },
+            { CKA_DERIVE,      &bTrue,    sizeof(bTrue) },
+        }, extra);
+        CK_MECHANISM m = { CKM_GENERIC_SECRET_KEY_GEN, NULL_PTR, 0 };
+        *h = CK_INVALID_HANDLE;
+        return fl->C_GenerateKey(hSess, &m, t.data(), (CK_ULONG)t.size(), h);
+    }, false, false);
+
+    // ── C_UnwrapKey ──────────────────────────────────────────────────────────
+    {
+        // A KEK plus a wrapped AES key to unwrap repeatedly.
+        CK_ATTRIBUTE kekT[] = {
+            { CKA_CLASS,     &secClass, sizeof(secClass) },
+            { CKA_KEY_TYPE,  &aesType,  sizeof(aesType) },
+            { CKA_VALUE_LEN, &len32,    sizeof(len32) },
+            { CKA_TOKEN,     &bFalse,   sizeof(bFalse) },
+            { CKA_WRAP,      &bTrue,    sizeof(bTrue) },
+            { CKA_UNWRAP,    &bTrue,    sizeof(bTrue) },
+        };
+        CK_ATTRIBUTE dekT[] = {
+            { CKA_CLASS,       &secClass, sizeof(secClass) },
+            { CKA_KEY_TYPE,    &aesType,  sizeof(aesType) },
+            { CKA_VALUE_LEN,   &len32,    sizeof(len32) },
+            { CKA_TOKEN,       &bFalse,   sizeof(bFalse) },
+            { CKA_EXTRACTABLE, &bTrue,    sizeof(bTrue) },
+            { CKA_SENSITIVE,   &bFalse,   sizeof(bFalse) },
+        };
+        CK_MECHANISM aesGen = { CKM_AES_KEY_GEN, NULL_PTR, 0 };
+        CK_OBJECT_HANDLE hKek = 0, hDek = 0;
+        CK_RV rk = fl->C_GenerateKey(hSess, &aesGen, kekT, 6, &hKek);
+        CK_RV rd = fl->C_GenerateKey(hSess, &aesGen, dekT, 6, &hDek);
+        static CK_BYTE wrapped[512];
+        static CK_ULONG wrappedLen = sizeof(wrapped);
+        CK_MECHANISM wrapMech = { CKM_AES_KEY_WRAP, NULL_PTR, 0 };
+        CK_RV rw = (rk == CKR_OK && rd == CKR_OK)
+                   ? fl->C_WrapKey(hSess, &wrapMech, hKek, hDek, wrapped, &wrappedLen)
+                   : CKR_FUNCTION_FAILED;
+        if (rw != CKR_OK) {
+            record_result(CAT, "UnwrapKey_setup", "FAIL", "RV=" + std::to_string(rw));
+        } else {
+            threeCases("UnwrapKey_AES", [&](CK_ATTRIBUTE* extra, CK_OBJECT_HANDLE* h) {
+                std::vector<CK_ATTRIBUTE> t = withExtra({
+                    { CKA_CLASS,       &secClass, sizeof(secClass) },
+                    { CKA_KEY_TYPE,    &aesType,  sizeof(aesType) },
+                    { CKA_TOKEN,       &bFalse,   sizeof(bFalse) },
+                    { CKA_EXTRACTABLE, &bTrue,    sizeof(bTrue) },
+                    { CKA_SENSITIVE,   &bFalse,   sizeof(bFalse) },
+                }, extra);
+                *h = CK_INVALID_HANDLE;
+                return fl->C_UnwrapKey(hSess, &wrapMech, hKek, wrapped, wrappedLen,
+                                       t.data(), (CK_ULONG)t.size(), h);
+            }, true);
+        }
+    }
+
+    // ── C_DeriveKey: HKDF (one of the four KDF template paths) ───────────────
+    {
+        CK_ATTRIBUTE baseT[] = {
+            { CKA_CLASS,     &secClass, sizeof(secClass) },
+            { CKA_KEY_TYPE,  &genType,  sizeof(genType) },
+            { CKA_VALUE_LEN, &len32,    sizeof(len32) },
+            { CKA_TOKEN,     &bFalse,   sizeof(bFalse) },
+            { CKA_DERIVE,    &bTrue,    sizeof(bTrue) },
+        };
+        CK_MECHANISM genMech = { CKM_GENERIC_SECRET_KEY_GEN, NULL_PTR, 0 };
+        CK_OBJECT_HANDLE hBase = 0;
+        if (fl->C_GenerateKey(hSess, &genMech, baseT, 5, &hBase) != CKR_OK) {
+            record_result(CAT, "DeriveKey_setup", "FAIL", "base key generation failed");
+        } else {
+            static CK_BYTE hkdfSalt[] = "kcv-salt";
+            static CK_BYTE hkdfInfo[] = "kcv-info";
+            static CK_HKDF_PARAMS hkdfParams = {
+                CK_TRUE, CK_TRUE, CKM_SHA256,
+                1 /* CKF_HKDF_SALT_DATA */, hkdfSalt, sizeof(hkdfSalt) - 1,
+                0, hkdfInfo, sizeof(hkdfInfo) - 1
+            };
+            static CK_MECHANISM hkdfMech = { CKM_HKDF_DERIVE, &hkdfParams, sizeof(hkdfParams) };
+            threeCases("DeriveKey_HKDF", [&](CK_ATTRIBUTE* extra, CK_OBJECT_HANDLE* h) {
+                std::vector<CK_ATTRIBUTE> t = withExtra({
+                    { CKA_CLASS,       &secClass, sizeof(secClass) },
+                    { CKA_KEY_TYPE,    &genType,  sizeof(genType) },
+                    { CKA_VALUE_LEN,   &len32,    sizeof(len32) },
+                    { CKA_TOKEN,       &bFalse,   sizeof(bFalse) },
+                    { CKA_EXTRACTABLE, &bTrue,    sizeof(bTrue) },
+                    { CKA_SENSITIVE,   &bFalse,   sizeof(bFalse) },
+                }, extra);
+                *h = CK_INVALID_HANDLE;
+                return fl->C_DeriveKey(hSess, &hkdfMech, hBase, t.data(), (CK_ULONG)t.size(), h);
+            }, false);
+        }
+    }
+
+    // ── C_DeriveKey: ECDH (deriveECDH — a different template loop again) ─────
+    {
+        CK_OBJECT_CLASS pubClass = CKO_PUBLIC_KEY, privClass = CKO_PRIVATE_KEY;
+        CK_KEY_TYPE ecType = CKK_EC;
+        CK_BYTE oid_p256[] = { 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07 };
+        CK_ATTRIBUTE pubT[] = {
+            { CKA_CLASS,     &pubClass, sizeof(pubClass) },
+            { CKA_KEY_TYPE,  &ecType,   sizeof(ecType) },
+            { CKA_EC_PARAMS, oid_p256,  sizeof(oid_p256) },
+            { CKA_TOKEN,     &bFalse,   sizeof(bFalse) },
+        };
+        CK_ATTRIBUTE privT[] = {
+            { CKA_CLASS,    &privClass, sizeof(privClass) },
+            { CKA_KEY_TYPE, &ecType,    sizeof(ecType) },
+            { CKA_DERIVE,   &bTrue,     sizeof(bTrue) },
+            { CKA_TOKEN,    &bFalse,    sizeof(bFalse) },
+        };
+        CK_MECHANISM ecGen = { CKM_EC_KEY_PAIR_GEN, NULL_PTR, 0 };
+        CK_OBJECT_HANDLE hPub = 0, hPriv = 0;
+        if (fl->C_GenerateKeyPair(hSess, &ecGen, pubT, 4, privT, 4, &hPub, &hPriv) != CKR_OK) {
+            record_result(CAT, "DeriveKey_ECDH_setup", "FAIL", "EC keygen failed");
+        } else {
+            // The peer point: since the E4/E1 pass, CKA_EC_POINT on a
+            // Weierstrass key is still the DER ECPoint, which the derive path
+            // accepts (getECDHPubData is tolerant of both forms).
+            CK_ATTRIBUTE pt = { CKA_EC_POINT, NULL_PTR, 0 };
+            fl->C_GetAttributeValue(hSess, hPub, &pt, 1);
+            static std::vector<CK_BYTE> peer;
+            peer.resize(pt.ulValueLen);
+            pt.pValue = peer.data();
+            fl->C_GetAttributeValue(hSess, hPub, &pt, 1);
+            static CK_ECDH1_DERIVE_PARAMS ecdhParams;
+            memset(&ecdhParams, 0, sizeof(ecdhParams));
+            ecdhParams.kdf = CKD_NULL;
+            ecdhParams.pPublicData = peer.data();
+            ecdhParams.ulPublicDataLen = (CK_ULONG)peer.size();
+            static CK_MECHANISM ecdhMech = { CKM_ECDH1_DERIVE, &ecdhParams, sizeof(ecdhParams) };
+            threeCases("DeriveKey_ECDH", [&](CK_ATTRIBUTE* extra, CK_OBJECT_HANDLE* h) {
+                std::vector<CK_ATTRIBUTE> t = withExtra({
+                    { CKA_CLASS,       &secClass, sizeof(secClass) },
+                    { CKA_KEY_TYPE,    &genType,  sizeof(genType) },
+                    { CKA_TOKEN,       &bFalse,   sizeof(bFalse) },
+                    { CKA_EXTRACTABLE, &bTrue,    sizeof(bTrue) },
+                    { CKA_SENSITIVE,   &bFalse,   sizeof(bFalse) },
+                }, extra);
+                *h = CK_INVALID_HANDLE;
+                return fl->C_DeriveKey(hSess, &ecdhMech, hPriv, t.data(), (CK_ULONG)t.size(), h);
+            }, false);
+        }
+    }
+
+    // ── C_DeriveKey: PBKD2 and SP800-108 counter (the other two KDF loops) ───
+    {
+        static CK_UTF8CHAR pw[] = "kcv-password";
+        static CK_BYTE slt[] = "kcv-salt";
+        static CK_PKCS5_PBKD2_PARAMS2 pbkdParams = {
+            1 /* CKZ_SALT_SPECIFIED */, slt, sizeof(slt) - 1, 2048,
+            4 /* CKP_PKCS5_PBKD2_HMAC_SHA256 */, NULL_PTR, 0,
+            pw, sizeof(pw) - 1
+        };
+        static CK_MECHANISM pbMech = { CKM_PKCS5_PBKD2, &pbkdParams, sizeof(pbkdParams) };
+        threeCases("DeriveKey_PBKD2", [&](CK_ATTRIBUTE* extra, CK_OBJECT_HANDLE* h) {
+            std::vector<CK_ATTRIBUTE> t = withExtra({
+                { CKA_CLASS,       &secClass, sizeof(secClass) },
+                { CKA_KEY_TYPE,    &genType,  sizeof(genType) },
+                { CKA_VALUE_LEN,   &len32,    sizeof(len32) },
+                { CKA_TOKEN,       &bFalse,   sizeof(bFalse) },
+                { CKA_EXTRACTABLE, &bTrue,    sizeof(bTrue) },
+                { CKA_SENSITIVE,   &bFalse,   sizeof(bFalse) },
+            }, extra);
+            *h = CK_INVALID_HANDLE;
+            // PBKD2 derives from the mechanism's password, not a base key.
+            return fl->C_DeriveKey(hSess, &pbMech, CK_INVALID_HANDLE,
+                                   t.data(), (CK_ULONG)t.size(), h);
+        }, false);
+
+        CK_ATTRIBUTE baseT[] = {
+            { CKA_CLASS,     &secClass, sizeof(secClass) },
+            { CKA_KEY_TYPE,  &genType,  sizeof(genType) },
+            { CKA_VALUE_LEN, &len32,    sizeof(len32) },
+            { CKA_TOKEN,     &bFalse,   sizeof(bFalse) },
+            { CKA_DERIVE,    &bTrue,    sizeof(bTrue) },
+        };
+        CK_MECHANISM genMech = { CKM_GENERIC_SECRET_KEY_GEN, NULL_PTR, 0 };
+        CK_OBJECT_HANDLE hBase2 = 0;
+        if (fl->C_GenerateKey(hSess, &genMech, baseT, 5, &hBase2) != CKR_OK) {
+            record_result(CAT, "DeriveKey_SP800108_setup", "FAIL", "base key generation failed");
+        } else {
+            static CK_BYTE lbl[] = "kcv-label";
+            static CK_BYTE ctx[] = "kcv-context";
+            static CK_SP800_108_COUNTER_FORMAT ctrFmt = { CK_FALSE, 32 };
+            static CK_PRF_DATA_PARAM prfP[] = {
+                { CK_SP800_108_ITERATION_VARIABLE, &ctrFmt, sizeof(ctrFmt) },
+                { CK_SP800_108_BYTE_ARRAY, lbl, sizeof(lbl) - 1 },
+                { CK_SP800_108_BYTE_ARRAY, ctx, sizeof(ctx) - 1 }
+            };
+            static CK_SP800_108_KDF_PARAMS ctrParams = { CKM_SHA256_HMAC, 3, prfP, 0, NULL_PTR };
+            static CK_MECHANISM ctrMech = { CKM_SP800_108_COUNTER_KDF, &ctrParams, sizeof(ctrParams) };
+            threeCases("DeriveKey_SP800108", [&](CK_ATTRIBUTE* extra, CK_OBJECT_HANDLE* h) {
+                std::vector<CK_ATTRIBUTE> t = withExtra({
+                    { CKA_CLASS,       &secClass, sizeof(secClass) },
+                    { CKA_KEY_TYPE,    &genType,  sizeof(genType) },
+                    { CKA_VALUE_LEN,   &len32,    sizeof(len32) },
+                    { CKA_TOKEN,       &bFalse,   sizeof(bFalse) },
+                    { CKA_EXTRACTABLE, &bTrue,    sizeof(bTrue) },
+                    { CKA_SENSITIVE,   &bFalse,   sizeof(bFalse) },
+                }, extra);
+                *h = CK_INVALID_HANDLE;
+                return fl->C_DeriveKey(hSess, &ctrMech, hBase2, t.data(), (CK_ULONG)t.size(), h);
+            }, false);
+
+            // deriveSymmetric — the concatenate family's own template loop.
+            // §6.x: the parameter is a CK_KEY_DERIVATION_STRING_DATA, not the
+            // raw bytes — passing raw bytes of the same length hands the engine
+            // a struct whose pData is garbage.
+            static CK_BYTE extraData[16] = { 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16 };
+            static CK_KEY_DERIVATION_STRING_DATA catData = { extraData, sizeof(extraData) };
+            static CK_MECHANISM catMech = { CKM_CONCATENATE_BASE_AND_DATA,
+                                            &catData, sizeof(catData) };
+            threeCases("DeriveKey_Concat", [&](CK_ATTRIBUTE* extra, CK_OBJECT_HANDLE* h) {
+                std::vector<CK_ATTRIBUTE> t = withExtra({
+                    { CKA_CLASS,       &secClass, sizeof(secClass) },
+                    { CKA_KEY_TYPE,    &genType,  sizeof(genType) },
+                    { CKA_TOKEN,       &bFalse,   sizeof(bFalse) },
+                    { CKA_EXTRACTABLE, &bTrue,    sizeof(bTrue) },
+                    { CKA_SENSITIVE,   &bFalse,   sizeof(bFalse) },
+                }, extra);
+                *h = CK_INVALID_HANDLE;
+                return fl->C_DeriveKey(hSess, &catMech, hBase2, t.data(), (CK_ULONG)t.size(), h);
+            }, false);
+        }
+    }
+
+    // ── C_DeriveKey: X25519 (deriveEDDSA — the Montgomery template loop) ─────
+    {
+        CK_OBJECT_CLASS pubClass = CKO_PUBLIC_KEY, privClass = CKO_PRIVATE_KEY;
+        CK_KEY_TYPE mType = CKK_EC_MONTGOMERY;
+        CK_BYTE cn_x25519[] = { 0x13, 0x0a, 'c','u','r','v','e','2','5','5','1','9' };
+        CK_ATTRIBUTE pubT[] = {
+            { CKA_CLASS,     &pubClass, sizeof(pubClass) },
+            { CKA_KEY_TYPE,  &mType,    sizeof(mType) },
+            { CKA_EC_PARAMS, cn_x25519, sizeof(cn_x25519) },
+            { CKA_TOKEN,     &bFalse,   sizeof(bFalse) },
+        };
+        CK_ATTRIBUTE privT[] = {
+            { CKA_CLASS,    &privClass, sizeof(privClass) },
+            { CKA_KEY_TYPE, &mType,     sizeof(mType) },
+            { CKA_DERIVE,   &bTrue,     sizeof(bTrue) },
+            { CKA_TOKEN,    &bFalse,    sizeof(bFalse) },
+        };
+        CK_MECHANISM mGen = { CKM_EC_MONTGOMERY_KEY_PAIR_GEN, NULL_PTR, 0 };
+        CK_OBJECT_HANDLE hPub = 0, hPriv = 0;
+        if (fl->C_GenerateKeyPair(hSess, &mGen, pubT, 4, privT, 4, &hPub, &hPriv) != CKR_OK) {
+            record_result(CAT, "DeriveKey_X25519_setup", "FAIL", "X25519 keygen failed");
+        } else {
+            CK_ATTRIBUTE pt = { CKA_EC_POINT, NULL_PTR, 0 };
+            fl->C_GetAttributeValue(hSess, hPub, &pt, 1);
+            static std::vector<CK_BYTE> mpeer;
+            mpeer.resize(pt.ulValueLen);
+            pt.pValue = mpeer.data();
+            fl->C_GetAttributeValue(hSess, hPub, &pt, 1);
+            static CK_ECDH1_DERIVE_PARAMS mParams;
+            memset(&mParams, 0, sizeof(mParams));
+            mParams.kdf = CKD_NULL;
+            mParams.pPublicData = mpeer.data();
+            mParams.ulPublicDataLen = (CK_ULONG)mpeer.size();
+            static CK_MECHANISM mMech = { CKM_ECDH1_DERIVE, &mParams, sizeof(mParams) };
+            threeCases("DeriveKey_X25519", [&](CK_ATTRIBUTE* extra, CK_OBJECT_HANDLE* h) {
+                std::vector<CK_ATTRIBUTE> t = withExtra({
+                    { CKA_CLASS,       &secClass, sizeof(secClass) },
+                    { CKA_KEY_TYPE,    &genType,  sizeof(genType) },
+                    { CKA_TOKEN,       &bFalse,   sizeof(bFalse) },
+                    { CKA_EXTRACTABLE, &bTrue,    sizeof(bTrue) },
+                    { CKA_SENSITIVE,   &bFalse,   sizeof(bFalse) },
+                }, extra);
+                *h = CK_INVALID_HANDLE;
+                return fl->C_DeriveKey(hSess, &mMech, hPriv, t.data(), (CK_ULONG)t.size(), h);
+            }, false);
+        }
+    }
+
+    // ── C_SetAttributeValue: §4.11's other two sentences ─────────────────────
+    {
+        CK_ATTRIBUTE t[] = {
+            { CKA_CLASS,       &secClass, sizeof(secClass) },
+            { CKA_KEY_TYPE,    &aesType,  sizeof(aesType) },
+            { CKA_VALUE_LEN,   &len32,    sizeof(len32) },
+            { CKA_TOKEN,       &bFalse,   sizeof(bFalse) },
+            { CKA_SENSITIVE,   &bFalse,   sizeof(bFalse) },
+            { CKA_EXTRACTABLE, &bTrue,    sizeof(bTrue) },
+        };
+        CK_MECHANISM m = { CKM_AES_KEY_GEN, NULL_PTR, 0 };
+        CK_OBJECT_HANDLE h = CK_INVALID_HANDLE;
+        if (fl->C_GenerateKey(hSess, &m, t, 6, &h) != CKR_OK) {
+            record_result(CAT, "SetAttributeValue_setup", "FAIL", "keygen failed");
+        } else {
+            std::vector<unsigned char> real = read_kcv(h);
+            // A matching value is legal.
+            CK_ATTRIBUTE ok = { CKA_CHECK_VALUE, real.data(), (CK_ULONG)real.size() };
+            CK_RV r1 = fl->C_SetAttributeValue(hSess, h, &ok, 1);
+            record_result(CAT, "SetAttributeValue_correct_accepted",
+                          r1 == CKR_OK ? "PASS" : "FAIL", "RV=" + std::to_string(r1));
+            // A mismatch is CKR_ATTRIBUTE_VALUE_INVALID.
+            CK_BYTE wrong[3] = { 0x01, 0x02, 0x03 };
+            if (real.size() == 3 && real[0] == 0x01 && real[1] == 0x02 && real[2] == 0x03)
+                wrong[0] = 0x04;
+            CK_ATTRIBUTE bad = { CKA_CHECK_VALUE, wrong, 3 };
+            CK_RV r2 = fl->C_SetAttributeValue(hSess, h, &bad, 1);
+            record_result(CAT, "SetAttributeValue_wrong_rejected",
+                          r2 == CKR_ATTRIBUTE_VALUE_INVALID ? "PASS" : "FAIL",
+                          "RV=" + std::to_string(r2));
+            // A zero-length set destroys the attribute.
+            CK_ATTRIBUTE zero = { CKA_CHECK_VALUE, NULL_PTR, 0 };
+            CK_RV r3 = fl->C_SetAttributeValue(hSess, h, &zero, 1);
+            std::vector<unsigned char> after = read_kcv(h);
+            record_result(CAT, "SetAttributeValue_zero_length_destroys",
+                          (r3 == CKR_OK && after.empty()) ? "PASS" : "FAIL",
+                          "RV=" + std::to_string(r3) + " bytes left=" + std::to_string(after.size()));
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Fork behaviour — CKF_INTERFACE_FORK_SAFE (Table 11) investigation.
+//
+// The flag's whole definition: "The returned interface will have fork tolerant
+// semantics. When the application forks, each process will get its own copy of
+// all session objects, session states, login states, and encryption states.
+// Each process will also maintain access to token objects with their previously
+// supplied handles." There is no MUST anywhere and no profile requires it.
+//
+// The Usage Guide §2.5.2 describes the DEFAULT model instead: "if C needs to use
+// Cryptoki, it needs to perform its own C_Initialize call … the behavior of
+// Cryptoki is undefined if C tries to use it without its own C_Initialize call".
+//
+// This category does not assume either. It forks for real and measures what the
+// child actually gets, including the one thing the standard says nothing about:
+// whether parent and child can produce the SAME random bytes, which would repeat
+// ECDSA nonces and leak private keys.
+// ─────────────────────────────────────────────────────────────────────────────
+void test_fork_behaviour() {
+    const char* CAT = "Fork";
+
+    CK_BBOOL bTrue = CK_TRUE, bFalse = CK_FALSE;
+    CK_OBJECT_CLASS secClass = CKO_SECRET_KEY;
+    CK_KEY_TYPE aesType = CKK_AES;
+    CK_ULONG len32 = 32;
+
+    // A session object and a usable key, both created BEFORE the fork.
+    CK_OBJECT_CLASS dataClass = CKO_DATA;
+    CK_BYTE marker[8] = { 0xF0, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE };
+    CK_UTF8CHAR dlabel[] = "fork-marker";
+    CK_ATTRIBUTE dataT[] = {
+        { CKA_CLASS,   &dataClass, sizeof(dataClass) },
+        { CKA_TOKEN,   &bFalse,    sizeof(bFalse) },
+        { CKA_PRIVATE, &bTrue,     sizeof(bTrue) },
+        { CKA_LABEL,   dlabel,     sizeof(dlabel) - 1 },
+        { CKA_VALUE,   marker,     sizeof(marker) },
+    };
+    CK_OBJECT_HANDLE hData = CK_INVALID_HANDLE;
+    CK_RV rd = fl->C_CreateObject(hSess, dataT, 5, &hData);
+
+    // Table 11 also promises "access to TOKEN objects with their previously
+    // supplied handles", which is a different store (files, not session memory).
+    CK_UTF8CHAR tlabel[] = "fork-token-marker";
+    CK_ATTRIBUTE tokT[] = {
+        { CKA_CLASS,   &dataClass, sizeof(dataClass) },
+        { CKA_TOKEN,   &bTrue,     sizeof(bTrue) },
+        { CKA_PRIVATE, &bTrue,     sizeof(bTrue) },
+        { CKA_LABEL,   tlabel,     sizeof(tlabel) - 1 },
+        { CKA_VALUE,   marker,     sizeof(marker) },
+    };
+    CK_OBJECT_HANDLE hTok = CK_INVALID_HANDLE;
+    CK_RV rt = fl->C_CreateObject(hSess, tokT, 5, &hTok);
+    if (rt != CKR_OK)
+        record_result(CAT, "Setup_token_object", "FAIL", "RV=" + std::to_string(rt));
+
+    CK_ATTRIBUTE keyT[] = {
+        { CKA_CLASS,     &secClass, sizeof(secClass) },
+        { CKA_KEY_TYPE,  &aesType,  sizeof(aesType) },
+        { CKA_VALUE_LEN, &len32,    sizeof(len32) },
+        { CKA_TOKEN,     &bFalse,   sizeof(bFalse) },
+        { CKA_ENCRYPT,   &bTrue,    sizeof(bTrue) },
+        { CKA_DECRYPT,   &bTrue,    sizeof(bTrue) },
+    };
+    CK_MECHANISM keyGen = { CKM_AES_KEY_GEN, NULL_PTR, 0 };
+    CK_OBJECT_HANDLE hKey = CK_INVALID_HANDLE;
+    CK_RV rk = fl->C_GenerateKey(hSess, &keyGen, keyT, 6, &hKey);
+
+    if (rd != CKR_OK || rk != CKR_OK) {
+        record_result(CAT, "Setup", "FAIL",
+                      "object RV=" + std::to_string(rd) + " key RV=" + std::to_string(rk));
+        return;
+    }
+
+    CK_SESSION_INFO siParent;
+    memset(&siParent, 0, sizeof(siParent));
+    fl->C_GetSessionInfo(hSess, &siParent);
+
+    // What the child reports back through the pipe.
+    struct ChildReport {
+        CK_RV rvSessionInfo;
+        CK_ULONG state;
+        CK_RV rvReadObject;
+        CK_BYTE objectValue[8];
+        CK_ULONG objectValueLen;
+        CK_RV rvReadToken;
+        CK_BYTE tokenValue[8];
+        CK_ULONG tokenValueLen;
+        CK_RV rvEncrypt;
+        CK_RV rvRandom;
+        CK_BYTE random[32];
+        CK_RV rvSetLabel;
+        CK_RV rvInheritedEncryptFinal;
+        CK_ULONG inheritedFinalLen;
+        CK_ULONG pid;
+    };
+
+    int fds[2];
+    if (pipe(fds) != 0) {
+        record_result(CAT, "pipe", "FAIL", "pipe() failed");
+        return;
+    }
+
+    // The parent's random draw is taken BEFORE the fork so the child cannot
+    // simply be ahead of it in the same stream; the comparison below is against
+    // a second parent draw taken after the fork.
+    CK_BYTE preForkRandom[32] = {0};
+    fl->C_GenerateRandom(hSess, preForkRandom, sizeof(preForkRandom));
+
+    // An encryption operation left ACTIVE across the fork — Table 11's
+    // "encryption states". Both processes must be able to finish their own copy.
+    CK_BYTE encIv[16] = {0x33};
+    CK_MECHANISM encMech = { CKM_AES_CBC_PAD, encIv, sizeof(encIv) };
+    CK_BYTE encPart[16] = {0x44};
+    CK_BYTE encOut[64]; CK_ULONG encOutLen = sizeof(encOut);
+    CK_RV rvEncInit = fl->C_EncryptInit(hSess, &encMech, hKey);
+    CK_RV rvEncUpd = (rvEncInit == CKR_OK)
+                     ? fl->C_EncryptUpdate(hSess, encPart, sizeof(encPart), encOut, &encOutLen)
+                     : rvEncInit;
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        record_result(CAT, "fork", "FAIL", "fork() failed");
+        close(fds[0]); close(fds[1]);
+        return;
+    }
+
+    if (pid == 0) {
+        // ── CHILD ────────────────────────────────────────────────────────────
+        // No C_Initialize of its own — this is precisely the case the Usage
+        // Guide leaves undefined and CKF_INTERFACE_FORK_SAFE would define.
+        close(fds[0]);
+        ChildReport rep;
+        memset(&rep, 0, sizeof(rep));
+        rep.pid = (CK_ULONG)getpid();
+
+        CK_SESSION_INFO si;
+        memset(&si, 0, sizeof(si));
+        rep.rvSessionInfo = fl->C_GetSessionInfo(hSess, &si);
+        rep.state = si.state;
+
+        CK_BYTE val[64];
+        CK_ATTRIBUTE va = { CKA_VALUE, val, sizeof(val) };
+        rep.rvReadObject = fl->C_GetAttributeValue(hSess, hData, &va, 1);
+        rep.objectValueLen = va.ulValueLen;
+        if (rep.rvReadObject == CKR_OK && va.ulValueLen <= sizeof(rep.objectValue))
+            memcpy(rep.objectValue, val, va.ulValueLen);
+
+        CK_BYTE tval[64];
+        CK_ATTRIBUTE tva = { CKA_VALUE, tval, sizeof(tval) };
+        rep.rvReadToken = fl->C_GetAttributeValue(hSess, hTok, &tva, 1);
+        rep.tokenValueLen = tva.ulValueLen;
+        if (rep.rvReadToken == CKR_OK && tva.ulValueLen <= sizeof(rep.tokenValue))
+            memcpy(rep.tokenValue, tval, tva.ulValueLen);
+
+
+        rep.rvRandom = fl->C_GenerateRandom(hSess, rep.random, sizeof(rep.random));
+
+        // "each process will get its own copy" — the child's write must not be
+        // visible to the parent. Overwrite the marker object's label.
+        CK_UTF8CHAR childLabel[] = "child-wrote-this";
+        CK_ATTRIBUTE lset = { CKA_LABEL, childLabel, sizeof(childLabel) - 1 };
+        rep.rvSetLabel = fl->C_SetAttributeValue(hSess, hData, &lset, 1);
+
+        // "encryption states" — finish the operation the PARENT started before
+        // the fork, in the child, on the child's own copy of that state.
+        CK_BYTE cfin[64]; CK_ULONG cfinLen = sizeof(cfin);
+        rep.rvInheritedEncryptFinal = fl->C_EncryptFinal(hSess, cfin, &cfinLen);
+        rep.inheritedFinalLen = cfinLen;
+
+        ssize_t w = write(fds[1], &rep, sizeof(rep));
+        (void)w;
+        close(fds[1]);
+        // _exit, never exit(): the child must not run atexit handlers or the
+        // library destructor, which would touch the token store the parent owns.
+        _exit(0);
+    }
+
+    // ── PARENT ───────────────────────────────────────────────────────────────
+    close(fds[1]);
+    ChildReport rep;
+    memset(&rep, 0, sizeof(rep));
+    ssize_t got = read(fds[0], &rep, sizeof(rep));
+    close(fds[0]);
+    int status = 0;
+    waitpid(pid, &status, 0);
+
+    if (got != (ssize_t)sizeof(rep)) {
+        record_result(CAT, "Child_survived_and_reported", "FAIL",
+                      "read " + std::to_string((long)got) + " of " +
+                      std::to_string((long)sizeof(rep)) + " bytes, wait status " +
+                      std::to_string(status));
+        return;
+    }
+    record_result(CAT, "Child_survived_and_reported", "PASS",
+                  "child pid " + std::to_string(rep.pid) + " exited status " +
+                  std::to_string(status));
+
+    // 1. session handle + login state
+    record_result(CAT, "Child_session_handle_resolves",
+                  rep.rvSessionInfo == CKR_OK ? "PASS" : "FAIL",
+                  "C_GetSessionInfo RV=" + std::to_string(rep.rvSessionInfo));
+    record_result(CAT, "Child_login_state_preserved",
+                  (rep.rvSessionInfo == CKR_OK && rep.state == siParent.state) ? "PASS" : "FAIL",
+                  "child state=" + std::to_string(rep.state) +
+                  " parent state=" + std::to_string(siParent.state) +
+                  " (CKS_RW_USER_FUNCTIONS=3)");
+
+    // 2. session object created before the fork
+    bool objOk = (rep.rvReadObject == CKR_OK && rep.objectValueLen == sizeof(marker) &&
+                  memcmp(rep.objectValue, marker, sizeof(marker)) == 0);
+    record_result(CAT, "Child_session_object_readable",
+                  objOk ? "PASS" : "FAIL",
+                  "RV=" + std::to_string(rep.rvReadObject) +
+                  " len=" + std::to_string(rep.objectValueLen));
+
+    bool tokOk = (rep.rvReadToken == CKR_OK && rep.tokenValueLen == sizeof(marker) &&
+                  memcmp(rep.tokenValue, marker, sizeof(marker)) == 0);
+    record_result(CAT, "Child_token_object_readable_by_pre_fork_handle",
+                  tokOk ? "PASS" : "FAIL",
+                  "RV=" + std::to_string(rep.rvReadToken) +
+                  " len=" + std::to_string(rep.tokenValueLen));
+
+    // 3. Table 11's "encryption states": the child finished the operation the
+    //    parent had left active, using the pre-fork key handle.
+    record_result(CAT, "Child_inherits_active_encryption_state",
+                  (rvEncInit == CKR_OK && rvEncUpd == CKR_OK &&
+                   rep.rvInheritedEncryptFinal == CKR_OK) ? "PASS" : "FAIL",
+                  "parent init RV=" + std::to_string(rvEncInit) +
+                  " update RV=" + std::to_string(rvEncUpd) +
+                  " child final RV=" + std::to_string(rep.rvInheritedEncryptFinal) +
+                  " len=" + std::to_string(rep.inheritedFinalLen));
+
+    // …and the PARENT's copy of that same operation is untouched by the child
+    //    having finished its own.
+    CK_BYTE pfin[64]; CK_ULONG pfinLen = sizeof(pfin);
+    CK_RV rvParentFinal = fl->C_EncryptFinal(hSess, pfin, &pfinLen);
+    record_result(CAT, "Parent_encryption_state_independent",
+                  rvParentFinal == CKR_OK ? "PASS" : "FAIL",
+                  "parent C_EncryptFinal after child's RV=" + std::to_string(rvParentFinal));
+
+    // 3b. "its own copy": the child's write to a session object must not be
+    //     visible in the parent.
+    CK_BYTE lbuf[64];
+    CK_ATTRIBUTE lread = { CKA_LABEL, lbuf, sizeof(lbuf) };
+    CK_RV rvLabel = fl->C_GetAttributeValue(hSess, hData, &lread, 1);
+    bool parentLabelIntact = (rvLabel == CKR_OK &&
+                              lread.ulValueLen == sizeof(dlabel) - 1 &&
+                              memcmp(lbuf, dlabel, sizeof(dlabel) - 1) == 0);
+    record_result(CAT, "Child_writes_do_not_reach_parent",
+                  parentLabelIntact ? "PASS" : "FAIL",
+                  "child C_SetAttributeValue RV=" + std::to_string(rep.rvSetLabel) +
+                  "; parent label len=" + std::to_string(lread.ulValueLen) +
+                  " intact=" + std::to_string((int)parentLabelIntact));
+
+    // 4. THE safety question the specification does not address: parent and
+    //    child must not be able to produce the same random bytes. Identical
+    //    output means repeated ECDSA nonces and recoverable private keys.
+    //
+    //    The sharp case is not parent-vs-child but SIBLING-vs-SIBLING: two
+    //    children forked from one parent inherit byte-identical DRBG state and,
+    //    without fork detection, produce byte-identical streams. Each child's
+    //    FIRST post-fork draw is compared, so an un-reseeded DRBG cannot hide
+    //    behind the parent having advanced it.
+    auto hex32 = [](const CK_BYTE* b) {
+        std::string s; static const char* lut = "0123456789ABCDEF";
+        for (int i = 0; i < 8; i++) { s += lut[b[i] >> 4]; s += lut[b[i] & 0xF]; }
+        return s;
+    };
+
+    // Draw once in a freshly forked child and report the bytes back.
+    auto childDraw = [&](CK_BYTE out[32]) -> bool {
+        int p2[2];
+        if (pipe(p2) != 0) return false;
+        pid_t c = fork();
+        if (c < 0) { close(p2[0]); close(p2[1]); return false; }
+        if (c == 0) {
+            close(p2[0]);
+            CK_BYTE buf[32] = {0};
+            CK_RV r = fl->C_GenerateRandom(hSess, buf, sizeof(buf));
+            if (r != CKR_OK) memset(buf, 0, sizeof(buf));
+            ssize_t w = write(p2[1], buf, sizeof(buf));
+            (void)w;
+            close(p2[1]);
+            _exit(0);
+        }
+        close(p2[1]);
+        ssize_t g = read(p2[0], out, 32);
+        close(p2[0]);
+        int st = 0; waitpid(c, &st, 0);
+        return g == 32;
+    };
+
+    bool allDistinct = true;
+    std::string sample;
+    const int ROUNDS = 8;
+    for (int round = 0; round < ROUNDS && allDistinct; round++) {
+        CK_BYTE a[32] = {0}, b[32] = {0};
+        // Two siblings forked back to back, with NO parent draw in between, so
+        // both inherit exactly the same DRBG state.
+        if (!childDraw(a) || !childDraw(b)) {
+            record_result(CAT, "Sibling_children_RNG_diverge", "FAIL",
+                          "fork/pipe failed in round " + std::to_string(round));
+            allDistinct = false;
+            break;
+        }
+        bool zeroA = true, zeroB = true;
+        for (int i = 0; i < 32; i++) { if (a[i]) zeroA = false; if (b[i]) zeroB = false; }
+        if (zeroA || zeroB || memcmp(a, b, 32) == 0) allDistinct = false;
+        if (round == 0) sample = "childA=" + hex32(a) + "… childB=" + hex32(b) + "…";
+    }
+    record_result(CAT, "Sibling_children_RNG_diverge",
+                  allDistinct ? "PASS" : "FAIL",
+                  std::to_string(ROUNDS) + " sibling pairs, all distinct=" +
+                  std::to_string((int)allDistinct) + " " + sample +
+                  " (identical output would repeat ECDSA nonces)");
+
+    // 5. Only once every clause above holds may the capability be advertised.
+    //    §5.4.6 rule 3 already matches requested flags against declared ones, so
+    //    the claim is observable exactly where an application would look for it.
+    {
+        void* dlib = dlopen(opt_engine.c_str(), RTLD_NOW);
+        typedef CK_RV (*GI_t)(CK_UTF8CHAR_PTR, CK_VERSION_PTR, CK_INTERFACE_PTR_PTR, CK_FLAGS);
+        typedef CK_RV (*GIL_t)(CK_INTERFACE_PTR, CK_ULONG_PTR);
+        GI_t GI = dlib ? (GI_t)dlsym(dlib, "C_GetInterface") : NULL;
+        GIL_t GIL = dlib ? (GIL_t)dlsym(dlib, "C_GetInterfaceList") : NULL;
+        if (!GI || !GIL) {
+            record_result(CAT, "Fork_safe_flag_advertised", "SKIP", "symbols unavailable");
+        } else {
+            CK_ULONG n = 0;
+            GIL(NULL_PTR, &n);
+            std::vector<CK_INTERFACE> list(n ? n : 1);
+            GIL(list.data(), &n);
+            bool declared = false;
+            for (CK_ULONG i = 0; i < n; i++)
+                if (list[i].flags & 0x00000001UL /*CKF_INTERFACE_FORK_SAFE*/) declared = true;
+            CK_INTERFACE_PTR out = NULL;
+            CK_RV rf = GI(NULL_PTR, NULL_PTR, &out, 0x00000001UL);
+            record_result(CAT, "Fork_safe_flag_declared_in_interface_list",
+                          declared ? "PASS" : "FAIL",
+                          std::to_string(n) + " interfaces, CKF_INTERFACE_FORK_SAFE declared=" +
+                          std::to_string((int)declared));
+            record_result(CAT, "Fork_safe_interface_retrievable",
+                          rf == CKR_OK ? "PASS" : "FAIL",
+                          "C_GetInterface(flags=CKF_INTERFACE_FORK_SAFE) RV=" +
+                          std::to_string(rf));
+        }
+    }
+
+    CK_BYTE postForkRandom[32] = {0};
+    CK_RV rr = fl->C_GenerateRandom(hSess, postForkRandom, sizeof(postForkRandom));
+    bool sameAsChild = (rep.rvRandom == CKR_OK && rr == CKR_OK &&
+                        memcmp(postForkRandom, rep.random, sizeof(postForkRandom)) == 0);
+    bool childSameAsPreFork = (rep.rvRandom == CKR_OK &&
+                               memcmp(preForkRandom, rep.random, sizeof(preForkRandom)) == 0);
+    record_result(CAT, "Parent_and_child_RNG_diverge",
+                  (!sameAsChild && !childSameAsPreFork &&
+                   rep.rvRandom == CKR_OK && rr == CKR_OK) ? "PASS" : "FAIL",
+                  "child=" + hex32(rep.random) + "… parent=" + hex32(postForkRandom) +
+                  "… preFork=" + hex32(preForkRandom) + "…");
+}
+
 // ── G1 security-critical regression tests ────────────────────────────────────
 // Locks in the slice G1 fixes: zero-IV GCM/ChaCha rejection (C++C-1/C++C-2),
 // RIPEMD160→SHA-1 substitution removal (C++C-4), large-message XMSS sign
@@ -3755,24 +6464,26 @@ void test_g1_security() {
     {
         CK_OBJECT_CLASS pubClass = CKO_PUBLIC_KEY, privClass = CKO_PRIVATE_KEY;
         CK_KEY_TYPE ktypeXmss = 0x00000047UL; // CKK_XMSS
+        // W4: the oid now comes from CKA_PARAMETER_SET, not mech.pParameter.
         CK_MECHANISM mech = { 0x00004034UL /* CKM_XMSS_KEY_PAIR_GEN */, NULL_PTR, 0 };
         CK_ULONG paramSetXmss = 0x00000001UL; // CKP_XMSS_SHA2_10_256
-        mech.pParameter = &paramSetXmss; mech.ulParameterLen = sizeof(paramSetXmss);
         CK_ATTRIBUTE pubTmpl[] = {
             { CKA_CLASS, &pubClass, sizeof(pubClass) },
             { CKA_KEY_TYPE, &ktypeXmss, sizeof(ktypeXmss) },
             { CKA_VERIFY, &bTrue, sizeof(bTrue) },
-            { CKA_TOKEN, &bTrue, sizeof(bTrue) }
+            { CKA_TOKEN, &bTrue, sizeof(bTrue) },
+            { CKA_PARAMETER_SET, &paramSetXmss, sizeof(paramSetXmss) }
         };
         CK_ATTRIBUTE privTmpl[] = {
             { CKA_CLASS, &privClass, sizeof(privClass) },
             { CKA_KEY_TYPE, &ktypeXmss, sizeof(ktypeXmss) },
             { CKA_SIGN, &bTrue, sizeof(bTrue) },
             { CKA_TOKEN, &bTrue, sizeof(bTrue) },
-            { CKA_PRIVATE, &bTrue, sizeof(bTrue) }
+            { CKA_PRIVATE, &bTrue, sizeof(bTrue) },
+            { CKA_PARAMETER_SET, &paramSetXmss, sizeof(paramSetXmss) }
         };
         CK_OBJECT_HANDLE hPub = 0, hPriv = 0;
-        CK_RV rv = fl->C_GenerateKeyPair(hSess, &mech, pubTmpl, 4, privTmpl, 5, &hPub, &hPriv);
+        CK_RV rv = fl->C_GenerateKeyPair(hSess, &mech, pubTmpl, 5, privTmpl, 6, &hPub, &hPriv);
         if (rv != CKR_OK) {
             record_result("G1Security", "XMSS_largeMsg_sign", "SKIP", "XMSS unavailable, RV=" + std::to_string(rv));
         } else {
@@ -4227,12 +6938,15 @@ void test_g3_keygen() {
     {
         CK_KEY_TYPE kt = KT_XMSSMT;
         CK_ULONG paramSet = 0x00000001UL; // CKP_XMSSMT_SHA2_20_2_256
-        CK_MECHANISM kpMech = { M_XMSSMT_KP, &paramSet, sizeof(paramSet) };
+        // W4: §6.66.6 gives this mechanism no parameter; the oid is the
+        // template's CKA_PARAMETER_SET.
+        CK_MECHANISM kpMech = { M_XMSSMT_KP, NULL_PTR, 0 };
         CK_ATTRIBUTE pubT[] = {
             { CKA_CLASS, (void*)&pubC, sizeof(pubC) },
             { CKA_KEY_TYPE, &kt, sizeof(kt) },
             { CKA_VERIFY, &bTrue, sizeof(bTrue) },
             { CKA_TOKEN, &bFalse, sizeof(bFalse) },
+            { CKA_PARAMETER_SET, &paramSet, sizeof(paramSet) },
         };
         CK_ATTRIBUTE privT[] = {
             { CKA_CLASS, (void*)&privC, sizeof(privC) },
@@ -4240,9 +6954,10 @@ void test_g3_keygen() {
             { CKA_SIGN, &bTrue, sizeof(bTrue) },
             { CKA_TOKEN, &bFalse, sizeof(bFalse) },
             { CKA_PRIVATE, &bTrue, sizeof(bTrue) },
+            { CKA_PARAMETER_SET, &paramSet, sizeof(paramSet) },
         };
         CK_OBJECT_HANDLE hPub = 0, hPriv = 0;
-        CK_RV rv = fl->C_GenerateKeyPair(hSess, &kpMech, pubT, 4, privT, 5, &hPub, &hPriv);
+        CK_RV rv = fl->C_GenerateKeyPair(hSess, &kpMech, pubT, 5, privT, 6, &hPub, &hPriv);
         if (rv != CKR_OK) {
             record_result("G3Keygen", "V8_XMSSMT_keygen",
                           "FAIL", "keygen RV=" + std::to_string(rv) +
@@ -5710,6 +8425,17 @@ int main(int argc, char** argv) {
     if (opt_category == "all" || opt_category == "attr") { refresh_session(); test_key_attributes(); }
     if (opt_category == "all" || opt_category == "pqc-kem") { refresh_session(); test_pqc_kem(); }
     if (opt_category == "all" || opt_category == "pqc-kem") { refresh_session(); test_hybrid_kem(); }
+    if (opt_category == "all" || opt_category == "pqc-kem") { refresh_session(); test_kem_allowed_mechanisms(); }
+    if (opt_category == "all" || opt_category == "pqc-kem") { refresh_session(); test_kem_value_len(); }
+    if (opt_category == "all" || opt_category == "kem-kcv") { refresh_session(); test_kem_check_value(); }
+    if (opt_category == "all" || opt_category == "hbs-protect") { refresh_session(); test_hbs_key_protection(); }
+    if (opt_category == "all" || opt_category == "wrap-template") { refresh_session(); test_wrap_template_return_code(); }
+    if (opt_category == "all" || opt_category == "xmss-paramset") { refresh_session(); test_xmss_parameter_set(); }
+    if (opt_category == "all" || opt_category == "raw-encoding") { refresh_session(); test_kem_ciphertext_and_ec_point_encoding(); }
+    if (opt_category == "all" || opt_category == "pq-keybytes") { refresh_session(); test_pq_private_key_encoding_and_seed(); }
+    if (opt_category == "all" || opt_category == "profile") { refresh_session(); test_profile_objects(); }
+    if (opt_category == "all" || opt_category == "errcodes") { refresh_session(); test_c2_error_codes(); }
+    if (opt_category == "all" || opt_category == "mechflags") { refresh_session(); test_c3_advertised_capabilities(); }
     if (opt_category == "all" || opt_category == "pqc-dsa") { refresh_session(); test_pqc_dsa(); }
     if (opt_category == "all" || opt_category == "pqc-dsa") { refresh_session(); test_mldsa_context_binding(); }
     if (opt_category == "all" || opt_category == "pqc-dsa") { refresh_session(); test_multipart_signing(); }
@@ -5747,6 +8473,12 @@ int main(int argc, char** argv) {
     }
     if (opt_category == "all" || opt_category == "kcv") {
         refresh_session(); test_kcv_compliance();
+    }
+    if (opt_category == "all" || opt_category == "kcv-template") {
+        refresh_session(); test_check_value_templates();
+    }
+    if (opt_category == "all" || opt_category == "fork") {
+        refresh_session(); test_fork_behaviour();
     }
     if (opt_category == "all" || opt_category == "g1-security") {
         refresh_session(); test_g1_security();

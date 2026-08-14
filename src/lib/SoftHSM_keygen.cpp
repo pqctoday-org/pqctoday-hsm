@@ -121,7 +121,9 @@ static ByteString computeAsymKCV(const ByteString& keyValue)
 // §4.11 mandates KCV "regardless of how the key object is created or derived" —
 // used by C_UnwrapKey + C_DeriveKey (HKDF, SP800-108, PBKD2) to populate
 // CKA_CHECK_VALUE consistently with C_GenerateKey.
-static ByteString computeSecretKeyKCV(CK_KEY_TYPE keyType, const ByteString& keyBits)
+// Non-static (declared in SoftHSMHelpers.h) since the 2026-08-13 S11
+// remediation: C_EncapsulateKey / C_DecapsulateKey need the same computation.
+ByteString computeSecretKeyKCV(CK_KEY_TYPE keyType, const ByteString& keyBits)
 {
 	if (keyBits.size() == 0) return ByteString("");
 	if (keyType == CKK_AES)
@@ -670,14 +672,48 @@ CK_RV SoftHSM::generateKeyPairImpl
 		
 		CK_ULONG parameterSet = 0x00000001UL;
 		if (pMechanism->mechanism == CKM_XMSS_KEY_PAIR_GEN || pMechanism->mechanism == CKM_XMSSMT_KEY_PAIR_GEN) {
-			if (pMechanism->pParameter != NULL_PTR && pMechanism->ulParameterLen >= sizeof(CK_ULONG))
-				parameterSet = *(CK_ULONG*)pMechanism->pParameter;
+			// W4 (2026-08-13). PKCS#11 v3.2 §6.66.6: "This mechanism does not
+			// have a parameter", and the mechanism generates key pairs "using an
+			// oid, as specified in the CKA_PARAMETER_SET attribute of the
+			// template for the public key."
+			//
+			// This code used to read pMechanism->pParameter — the one place the
+			// spec says carries nothing — and DISCARD the standard attribute
+			// (the ck4 skip in the template loops below), so a caller who asked
+			// for XMSS-SHA2_16_256 through CKA_PARAMETER_SET silently received a
+			// 10_256 key, with CKR_OK. Anything in pParameter is now ignored.
+			const CK_ULONG* pubPs = NULL_PTR;
+			for (CK_ULONG i = 0; i < ulPublicKeyAttributeCount; ++i) {
+				if (pPublicKeyTemplate[i].type != CKA_PARAMETER_SET) continue;
+				if (pPublicKeyTemplate[i].pValue == NULL_PTR ||
+				    pPublicKeyTemplate[i].ulValueLen != sizeof(CK_ULONG))
+					return CKR_ATTRIBUTE_VALUE_INVALID;
+				pubPs = (const CK_ULONG*)pPublicKeyTemplate[i].pValue;
+			}
+			// The attribute is mandatory at generation, so its absence is
+			// CKR_TEMPLATE_INCOMPLETE rather than a silent default.
+			if (pubPs == NULL_PTR) return CKR_TEMPLATE_INCOMPLETE;
+			parameterSet = *pubPs;
+
+			// Both halves are stamped with the same oid below, so a private
+			// template naming a different one cannot be satisfied (§4.1.1 rule 5).
+			for (CK_ULONG i = 0; i < ulPrivateKeyAttributeCount; ++i) {
+				if (pPrivateKeyTemplate[i].type != CKA_PARAMETER_SET) continue;
+				if (pPrivateKeyTemplate[i].pValue == NULL_PTR ||
+				    pPrivateKeyTemplate[i].ulValueLen != sizeof(CK_ULONG))
+					return CKR_ATTRIBUTE_VALUE_INVALID;
+				if (*(const CK_ULONG*)pPrivateKeyTemplate[i].pValue != parameterSet)
+					return CKR_TEMPLATE_INCONSISTENT;
+			}
 		}
 
 		if (pMechanism->mechanism == CKM_XMSS_KEY_PAIR_GEN) {
 			keyType = CKK_XMSS; // 0x00000047UL
 			xmss_params params;
-			if (xmss_parse_oid(&params, parameterSet)) return CKR_FUNCTION_FAILED;
+			// §6.66 refusal code: the engine already uses
+			// CKR_PARAMETER_SET_NOT_SUPPORTED correctly for ML-DSA/ML-KEM/SLH-DSA;
+			// XMSS returned CKR_FUNCTION_FAILED, which says nothing about the oid.
+			if (xmss_parse_oid(&params, parameterSet)) return CKR_PARAMETER_SET_NOT_SUPPORTED;
 			// xmss_keypair writes [OID(4) || core_key], so buffers need OID_LEN extra
 			priv_key_vec.resize(XMSS_OID_LEN + params.sk_bytes);
 			pub_key_vec.resize(XMSS_OID_LEN + params.pk_bytes);
@@ -710,7 +746,7 @@ CK_RV SoftHSM::generateKeyPairImpl
 		else if (pMechanism->mechanism == CKM_XMSSMT_KEY_PAIR_GEN) {
 			keyType = CKK_XMSSMT; // 0x00000048UL
 			xmss_params params;
-			if (xmssmt_parse_oid(&params, parameterSet)) return CKR_FUNCTION_FAILED;
+			if (xmssmt_parse_oid(&params, parameterSet)) return CKR_PARAMETER_SET_NOT_SUPPORTED;
 			// xmssmt_keypair writes [OID(4) || core_key]
 			priv_key_vec.resize(XMSS_OID_LEN + params.sk_bytes);
 			pub_key_vec.resize(XMSS_OID_LEN + params.pk_bytes);
@@ -1436,16 +1472,46 @@ CK_RV SoftHSM::C_WrapKey
 
 			for (attrmap_type::const_iterator it = map.begin(); it != map.end(); ++it)
 			{
+				// PKCS#11 v3.2 §5.18.3: "If any attribute mismatch occurs on an
+				// attempt to wrap a key then the function SHALL return
+				// CKR_KEY_HANDLE_INVALID." Both sites returned
+				// CKR_KEY_NOT_WRAPPABLE until the 2026-08-13 remediation (S2).
 				if (!key->attributeExists(it->first))
 				{
-					return CKR_KEY_NOT_WRAPPABLE;
+					return CKR_KEY_HANDLE_INVALID;
 				}
 
 				OSAttribute keyAttr = key->getAttribute(it->first);
 				ByteString v1, v2;
-				if (!keyAttr.peekValue(v1) || !it->second.peekValue(v2) || (v1 != v2))
+				if (!keyAttr.peekValue(v1) || !it->second.peekValue(v2))
 				{
-					return CKR_KEY_NOT_WRAPPABLE;
+					return CKR_KEY_HANDLE_INVALID;
+				}
+
+				// A private object stores its byte-string attributes encrypted
+				// under the token key (P11Attribute::updateAttr), so the raw
+				// stored bytes never equal the plaintext bytes the application
+				// put in CKA_WRAP_TEMPLATE. Comparing them directly made the
+				// partition mechanism reject EVERY private key, including the
+				// ones it was configured to allow — §5.18.3 requires that "if
+				// all attributes match ... then the wrap will proceed".
+				// CKA_UNIQUE_ID, CKA_CHECK_VALUE and CKA_PUBLIC_KEY_INFO are
+				// the three byte-string attributes whose P11Attribute::retrieve
+				// overrides deliberately ignore the private flag, so they are
+				// stored in clear and must not be decrypted here.
+				if (isKeyPrivate && keyAttr.isByteStringAttribute() && v1.size() != 0 &&
+				    it->first != CKA_UNIQUE_ID && it->first != CKA_CHECK_VALUE &&
+				    it->first != CKA_PUBLIC_KEY_INFO)
+				{
+					ByteString plain;
+					if (!token->decrypt(v1, plain))
+						return CKR_GENERAL_ERROR;
+					v1 = plain;
+				}
+
+				if (v1 != v2)
+				{
+					return CKR_KEY_HANDLE_INVALID;
 				}
 			}
 		}
@@ -2080,6 +2146,11 @@ CK_RV SoftHSM::C_UnwrapKey
 	// is rejected (we don't support template-side KCV verification, matching
 	// generateAES/generateGeneric behavior).
 	bool checkValue = true;
+	bool kcvSupplied = false;
+	ByteString kcvWanted;
+	// Set below where the key bits exist; promoted to the caller-visible return
+	// code so a §4.11 mismatch is not reported as CKR_FUNCTION_FAILED.
+	CK_RV unwrapKcvRv = CKR_OK;
 
 	// Add the additional
 	if (ulCount > (maxAttribs - secretAttribsCount))
@@ -2094,13 +2165,16 @@ CK_RV SoftHSM::C_UnwrapKey
 			case CKA_KEY_TYPE:
 				continue;
 			case CKA_CHECK_VALUE:
-				if (pTemplate[i].ulValueLen > 0)
-				{
-					INFO_MSG("CKA_CHECK_VALUE must be a no-value (0 length) entry");
-					return CKR_ATTRIBUTE_VALUE_INVALID;
-				}
-				checkValue = false;
+			{
+				// §4.11 (2026-08-13): a supplied value that MATCHES what the library
+				// calculates must be ACCEPTED. This used to reject every non-empty
+				// entry, including a correct one. A zero-length entry still
+				// suppresses generation; the comparison itself happens below, where
+				// the key bits exist.
+				CK_RV kcvRv = checkValueFromTemplate(pTemplate[i], checkValue, kcvSupplied, kcvWanted);
+				if (kcvRv != CKR_OK) return kcvRv;
 				continue;
+			}
 			default:
 				secretAttribs[secretAttribsCount++] = pTemplate[i];
 		}
@@ -2214,9 +2288,15 @@ CK_RV SoftHSM::C_UnwrapKey
 				// how the key object is created or derived" → covers C_UnwrapKey.
 				// KCV is always stored in clear, computed over the plaintext
 				// key bits (NOT the token-encrypted blob).
-				if (checkValue)
 				{
-					ByteString kcv = computeSecretKeyKCV(keyType, keydata);
+					ByteString kcv;
+					if (checkValue)
+						kcv = computeSecretKeyKCV(keyType, keydata);
+					// §4.11: a caller-supplied value must match, or the unwrap
+					// is CKR_ATTRIBUTE_VALUE_INVALID. Folding it into bOK aborts
+					// the transaction; the caller-visible code is set below.
+					unwrapKcvRv = checkValueVerify(kcvSupplied, kcvWanted, kcv);
+					bOK = bOK && (unwrapKcvRv == CKR_OK);
 					if (kcv.size() == 3)
 						bOK = bOK && osobject->setAttribute(CKA_CHECK_VALUE, kcv);
 				}
@@ -2246,7 +2326,7 @@ CK_RV SoftHSM::C_UnwrapKey
 				osobject->abortTransaction();
 
 			if (!bOK)
-				rv = CKR_FUNCTION_FAILED;
+				rv = (unwrapKcvRv != CKR_OK) ? unwrapKcvRv : CKR_FUNCTION_FAILED;
 		}
 		else
 			rv = CKR_FUNCTION_FAILED;
@@ -2777,6 +2857,8 @@ CK_RV SoftHSM::C_DeriveKey
 		};
 		CK_ULONG pbkdAttribsCount = 4;
 		bool pbkdCheckValue = true;
+		bool pbkdKcvSupplied = false;
+		ByteString pbkdKcvWanted;
 		for (CK_ULONG i = 0; i < ulCount && pbkdAttribsCount < pbkdMaxAttribs; i++)
 		{
 			switch (pTemplate[i].type)
@@ -2787,13 +2869,16 @@ CK_RV SoftHSM::C_DeriveKey
 				case CKA_KEY_TYPE:
 					continue;
 				case CKA_CHECK_VALUE:
-					if (pTemplate[i].ulValueLen > 0)
-					{
-						INFO_MSG("CKM_PKCS5_PBKD2: CKA_CHECK_VALUE must be a no-value (0 length) entry");
-						return CKR_ATTRIBUTE_VALUE_INVALID;
-					}
-					pbkdCheckValue = false;
+				{
+					// §4.11 (2026-08-13): a supplied value that MATCHES what the library
+					// calculates must be ACCEPTED. This used to reject every non-empty
+					// entry, including a correct one. A zero-length entry still
+					// suppresses generation; the comparison itself happens below, where
+					// the key bits exist.
+					CK_RV kcvRv = checkValueFromTemplate(pTemplate[i], pbkdCheckValue, pbkdKcvSupplied, pbkdKcvWanted);
+					if (kcvRv != CKR_OK) return kcvRv;
 					continue;
+				}
 				default:
 					pbkdAttribs[pbkdAttribsCount++] = pTemplate[i];
 					break;
@@ -2829,12 +2914,24 @@ CK_RV SoftHSM::C_DeriveKey
 		pbkdOK = pbkdOK && pbkdObj->setAttribute(CKA_VALUE, pbkdValue);
 
 		// PKCS#11 v3.2 §4.11: KCV mandatory regardless of creation path (incl. derive).
+		ByteString pbkdKcv;
 		if (pbkdCheckValue)
+			pbkdKcv = computeSecretKeyKCV(pbkdKeyType, pbkdSymKey.getKeyBits());
+		// §4.11: a caller-supplied value MUST match what the library
+		// calculates or the derive returns CKR_ATTRIBUTE_VALUE_INVALID,
+		// leaving no key object behind (§5.18.5).
 		{
-			ByteString pbkdKcv = computeSecretKeyKCV(pbkdKeyType, pbkdSymKey.getKeyBits());
-			if (pbkdKcv.size() == 3)
-				pbkdOK = pbkdOK && pbkdObj->setAttribute(CKA_CHECK_VALUE, pbkdKcv);
+			CK_RV kcvRv = checkValueVerify(pbkdKcvSupplied, pbkdKcvWanted, pbkdKcv);
+			if (kcvRv != CKR_OK)
+			{
+				pbkdObj->abortTransaction();
+				handleManager->destroyObject(*phKey);
+				*phKey = CK_INVALID_HANDLE;
+				return kcvRv;
+			}
 		}
+		if (pbkdKcv.size() == 3)
+			pbkdOK = pbkdOK && pbkdObj->setAttribute(CKA_CHECK_VALUE, pbkdKcv);
 
 		if (pbkdOK)
 			pbkdObj->commitTransaction();
@@ -3246,6 +3343,8 @@ CK_RV SoftHSM::C_DeriveKey
 		};
 		CK_ULONG kbkAttribsCount = 4;
 		bool kbkCheckValue = true;
+		bool kbkKcvSupplied = false;
+		ByteString kbkKcvWanted;
 		for (CK_ULONG i = 0; i < ulCount && kbkAttribsCount < kbkMaxAttribs; i++)
 		{
 			switch (pTemplate[i].type)
@@ -3253,13 +3352,16 @@ CK_RV SoftHSM::C_DeriveKey
 				case CKA_CLASS: case CKA_TOKEN: case CKA_PRIVATE:
 				case CKA_KEY_TYPE: continue;
 				case CKA_CHECK_VALUE:
-					if (pTemplate[i].ulValueLen > 0)
-					{
-						INFO_MSG("CKM_SP800_108_COUNTER_KDF: CKA_CHECK_VALUE must be a no-value (0 length) entry");
-						return CKR_ATTRIBUTE_VALUE_INVALID;
-					}
-					kbkCheckValue = false;
+				{
+					// §4.11 (2026-08-13): a supplied value that MATCHES what the library
+					// calculates must be ACCEPTED. This used to reject every non-empty
+					// entry, including a correct one. A zero-length entry still
+					// suppresses generation; the comparison itself happens below, where
+					// the key bits exist.
+					CK_RV kcvRv = checkValueFromTemplate(pTemplate[i], kbkCheckValue, kbkKcvSupplied, kbkKcvWanted);
+					if (kcvRv != CKR_OK) return kcvRv;
 					continue;
+				}
 				default: kbkAttribs[kbkAttribsCount++] = pTemplate[i]; break;
 			}
 		}
@@ -3293,12 +3395,24 @@ CK_RV SoftHSM::C_DeriveKey
 		kbkOK = kbkOK && kbkObj->setAttribute(CKA_VALUE, kbkValue);
 
 		// PKCS#11 v3.2 §4.11: KCV mandatory regardless of creation path (incl. derive).
+		ByteString kbkKcv;
 		if (kbkCheckValue)
+			kbkKcv = computeSecretKeyKCV(kbkKeyType, kbkSymKey.getKeyBits());
+		// §4.11: a caller-supplied value MUST match what the library
+		// calculates or the derive returns CKR_ATTRIBUTE_VALUE_INVALID,
+		// leaving no key object behind (§5.18.5).
 		{
-			ByteString kbkKcv = computeSecretKeyKCV(kbkKeyType, kbkSymKey.getKeyBits());
-			if (kbkKcv.size() == 3)
-				kbkOK = kbkOK && kbkObj->setAttribute(CKA_CHECK_VALUE, kbkKcv);
+			CK_RV kcvRv = checkValueVerify(kbkKcvSupplied, kbkKcvWanted, kbkKcv);
+			if (kcvRv != CKR_OK)
+			{
+				kbkObj->abortTransaction();
+				handleManager->destroyObject(*phKey);
+				*phKey = CK_INVALID_HANDLE;
+				return kcvRv;
+			}
 		}
+		if (kbkKcv.size() == 3)
+			kbkOK = kbkOK && kbkObj->setAttribute(CKA_CHECK_VALUE, kbkKcv);
 
 		if (kbkOK)
 			kbkObj->commitTransaction();
@@ -3474,6 +3588,8 @@ CK_RV SoftHSM::C_DeriveKey
 		};
 		CK_ULONG fbkAttribsCount = 4;
 		bool fbkCheckValue = true;
+		bool fbkKcvSupplied = false;
+		ByteString fbkKcvWanted;
 		for (CK_ULONG i = 0; i < ulCount && fbkAttribsCount < fbkMaxAttribs; i++)
 		{
 			switch (pTemplate[i].type)
@@ -3481,13 +3597,16 @@ CK_RV SoftHSM::C_DeriveKey
 				case CKA_CLASS: case CKA_TOKEN: case CKA_PRIVATE:
 				case CKA_KEY_TYPE: continue;
 				case CKA_CHECK_VALUE:
-					if (pTemplate[i].ulValueLen > 0)
-					{
-						INFO_MSG("CKM_SP800_108_FEEDBACK_KDF: CKA_CHECK_VALUE must be a no-value (0 length) entry");
-						return CKR_ATTRIBUTE_VALUE_INVALID;
-					}
-					fbkCheckValue = false;
+				{
+					// §4.11 (2026-08-13): a supplied value that MATCHES what the library
+					// calculates must be ACCEPTED. This used to reject every non-empty
+					// entry, including a correct one. A zero-length entry still
+					// suppresses generation; the comparison itself happens below, where
+					// the key bits exist.
+					CK_RV kcvRv = checkValueFromTemplate(pTemplate[i], fbkCheckValue, fbkKcvSupplied, fbkKcvWanted);
+					if (kcvRv != CKR_OK) return kcvRv;
 					continue;
+				}
 				default: fbkAttribs[fbkAttribsCount++] = pTemplate[i]; break;
 			}
 		}
@@ -3521,12 +3640,24 @@ CK_RV SoftHSM::C_DeriveKey
 		fbkOK = fbkOK && fbkObj->setAttribute(CKA_VALUE, fbkValue);
 
 		// PKCS#11 v3.2 §4.11: KCV mandatory regardless of creation path (incl. derive).
+		ByteString fbkKcv;
 		if (fbkCheckValue)
+			fbkKcv = computeSecretKeyKCV(fbkKeyType, fbkSymKey.getKeyBits());
+		// §4.11: a caller-supplied value MUST match what the library
+		// calculates or the derive returns CKR_ATTRIBUTE_VALUE_INVALID,
+		// leaving no key object behind (§5.18.5).
 		{
-			ByteString fbkKcv = computeSecretKeyKCV(fbkKeyType, fbkSymKey.getKeyBits());
-			if (fbkKcv.size() == 3)
-				fbkOK = fbkOK && fbkObj->setAttribute(CKA_CHECK_VALUE, fbkKcv);
+			CK_RV kcvRv = checkValueVerify(fbkKcvSupplied, fbkKcvWanted, fbkKcv);
+			if (kcvRv != CKR_OK)
+			{
+				fbkObj->abortTransaction();
+				handleManager->destroyObject(*phKey);
+				*phKey = CK_INVALID_HANDLE;
+				return kcvRv;
+			}
 		}
+		if (fbkKcv.size() == 3)
+			fbkOK = fbkOK && fbkObj->setAttribute(CKA_CHECK_VALUE, fbkKcv);
 
 		if (fbkOK)
 			fbkObj->commitTransaction();
@@ -3684,6 +3815,8 @@ CK_RV SoftHSM::C_DeriveKey
 		};
 		CK_ULONG hkdfAttribsCount = 4;
 		bool hkdfCheckValue = true;
+		bool hkdfKcvSupplied = false;
+		ByteString hkdfKcvWanted;
 		for (CK_ULONG i = 0; i < ulCount && hkdfAttribsCount < hkdfMaxAttribs; i++)
 		{
 			switch (pTemplate[i].type)
@@ -3691,13 +3824,16 @@ CK_RV SoftHSM::C_DeriveKey
 				case CKA_CLASS: case CKA_TOKEN: case CKA_PRIVATE:
 				case CKA_KEY_TYPE: continue;
 				case CKA_CHECK_VALUE:
-					if (pTemplate[i].ulValueLen > 0)
-					{
-						INFO_MSG("CKM_HKDF_DERIVE: CKA_CHECK_VALUE must be a no-value (0 length) entry");
-						return CKR_ATTRIBUTE_VALUE_INVALID;
-					}
-					hkdfCheckValue = false;
+				{
+					// §4.11 (2026-08-13): a supplied value that MATCHES what the library
+					// calculates must be ACCEPTED. This used to reject every non-empty
+					// entry, including a correct one. A zero-length entry still
+					// suppresses generation; the comparison itself happens below, where
+					// the key bits exist.
+					CK_RV kcvRv = checkValueFromTemplate(pTemplate[i], hkdfCheckValue, hkdfKcvSupplied, hkdfKcvWanted);
+					if (kcvRv != CKR_OK) return kcvRv;
 					continue;
+				}
 				default: hkdfAttribs[hkdfAttribsCount++] = pTemplate[i]; break;
 			}
 		}
@@ -3731,12 +3867,24 @@ CK_RV SoftHSM::C_DeriveKey
 		hkdfOK = hkdfOK && hkdfObj->setAttribute(CKA_VALUE, hkdfValue);
 
 		// PKCS#11 v3.2 §4.11: KCV mandatory regardless of creation path (incl. derive).
+		ByteString hkdfKcv;
 		if (hkdfCheckValue)
+			hkdfKcv = computeSecretKeyKCV(hkdfKeyType, hkdfSymKey.getKeyBits());
+		// §4.11: a caller-supplied value MUST match what the library
+		// calculates or the derive returns CKR_ATTRIBUTE_VALUE_INVALID,
+		// leaving no key object behind (§5.18.5).
 		{
-			ByteString hkdfKcv = computeSecretKeyKCV(hkdfKeyType, hkdfSymKey.getKeyBits());
-			if (hkdfKcv.size() == 3)
-				hkdfOK = hkdfOK && hkdfObj->setAttribute(CKA_CHECK_VALUE, hkdfKcv);
+			CK_RV kcvRv = checkValueVerify(hkdfKcvSupplied, hkdfKcvWanted, hkdfKcv);
+			if (kcvRv != CKR_OK)
+			{
+				hkdfObj->abortTransaction();
+				handleManager->destroyObject(*phKey);
+				*phKey = CK_INVALID_HANDLE;
+				return kcvRv;
+			}
 		}
+		if (hkdfKcv.size() == 3)
+			hkdfOK = hkdfOK && hkdfObj->setAttribute(CKA_CHECK_VALUE, hkdfKcv);
 
 		if (hkdfOK)
 			hkdfObj->commitTransaction();
@@ -3801,6 +3949,8 @@ CK_RV SoftHSM::generateGeneric
 	// Extract desired parameter information
 	size_t keyLen = 0;
 	bool checkValue = true;
+	bool kcvSupplied = false;
+	ByteString kcvWanted;
 	for (CK_ULONG i = 0; i < ulCount; i++)
 	{
 		switch (pTemplate[i].type)
@@ -3814,13 +3964,16 @@ CK_RV SoftHSM::generateGeneric
 				keyLen = *(CK_ULONG*)pTemplate[i].pValue;
 				break;
 			case CKA_CHECK_VALUE:
-				if (pTemplate[i].ulValueLen > 0)
-				{
-					INFO_MSG("CKA_CHECK_VALUE must be a no-value (0 length) entry");
-					return CKR_ATTRIBUTE_VALUE_INVALID;
-				}
-				checkValue = false;
+			{
+				// §4.11 (2026-08-13): a supplied value that MATCHES what the library
+				// calculates must be ACCEPTED. This used to reject every non-empty
+				// entry, including a correct one. A zero-length entry still
+				// suppresses generation; the comparison itself happens below, where
+				// the key bits exist.
+				CK_RV kcvRv = checkValueFromTemplate(pTemplate[i], checkValue, kcvSupplied, kcvWanted);
+				if (kcvRv != CKR_OK) return kcvRv;
 				break;
+			}
 			default:
 				break;
 		}
@@ -3921,6 +4074,13 @@ CK_RV SoftHSM::generateGeneric
 			// KCV is always stored in clear — PKCS#11 v3.2 §4.10.2
 			kcv = symKey.getKeyCheckValue();
 			bOK = bOK && osobject->setAttribute(CKA_VALUE, value);
+			// §4.11: a caller-supplied value MUST match what the library
+			// calculates or the call is CKR_ATTRIBUTE_VALUE_INVALID. The
+			// transaction is aborted and the clean-up below destroys the
+			// half-built object, so no key is left behind on a mismatch.
+			CK_RV kcvRv = checkValueVerify(kcvSupplied, kcvWanted, kcv);
+			bOK = bOK && (kcvRv == CKR_OK);
+
 			if (checkValue)
 				bOK = bOK && osobject->setAttribute(CKA_CHECK_VALUE, kcv);
 
@@ -3930,7 +4090,7 @@ CK_RV SoftHSM::generateGeneric
 				osobject->abortTransaction();
 
 			if (!bOK)
-				rv = CKR_FUNCTION_FAILED;
+				rv = (kcvRv != CKR_OK) ? kcvRv : CKR_FUNCTION_FAILED;
 		} else
 			rv = CKR_FUNCTION_FAILED;
 	}
@@ -3982,6 +4142,8 @@ CK_RV SoftHSM::generateAES
 	// Extract desired parameter information
 	size_t keyLen = 0;
 	bool checkValue = true;
+	bool kcvSupplied = false;
+	ByteString kcvWanted;
 	for (CK_ULONG i = 0; i < ulCount; i++)
 	{
 		switch (pTemplate[i].type)
@@ -3995,13 +4157,16 @@ CK_RV SoftHSM::generateAES
 				keyLen = *(CK_ULONG*)pTemplate[i].pValue;
 				break;
 			case CKA_CHECK_VALUE:
-				if (pTemplate[i].ulValueLen > 0)
-				{
-					INFO_MSG("CKA_CHECK_VALUE must be a no-value (0 length) entry");
-					return CKR_ATTRIBUTE_VALUE_INVALID;
-				}
-				checkValue = false;
+			{
+				// §4.11 (2026-08-13): a supplied value that MATCHES what the library
+				// calculates must be ACCEPTED. This used to reject every non-empty
+				// entry, including a correct one. A zero-length entry still
+				// suppresses generation; the comparison itself happens below, where
+				// the key bits exist.
+				CK_RV kcvRv = checkValueFromTemplate(pTemplate[i], checkValue, kcvSupplied, kcvWanted);
+				if (kcvRv != CKR_OK) return kcvRv;
 				break;
+			}
 			default:
 				break;
 		}
@@ -4135,6 +4300,13 @@ CK_RV SoftHSM::generateAES
 			// KCV is always stored in clear — PKCS#11 v3.2 §4.10.2
 			kcv = key->getKeyCheckValue();
 			bOK = bOK && osobject->setAttribute(CKA_VALUE, value);
+			// §4.11: a caller-supplied value MUST match what the library
+			// calculates or the call is CKR_ATTRIBUTE_VALUE_INVALID. The
+			// transaction is aborted and the clean-up below destroys the
+			// half-built object, so no key is left behind on a mismatch.
+			CK_RV kcvRv = checkValueVerify(kcvSupplied, kcvWanted, kcv);
+			bOK = bOK && (kcvRv == CKR_OK);
+
 			if (checkValue)
 				bOK = bOK && osobject->setAttribute(CKA_CHECK_VALUE, kcv);
 
@@ -4144,7 +4316,7 @@ CK_RV SoftHSM::generateAES
 				osobject->abortTransaction();
 
 			if (!bOK)
-				rv = CKR_FUNCTION_FAILED;
+				rv = (kcvRv != CKR_OK) ? kcvRv : CKR_FUNCTION_FAILED;
 		} else
 			rv = CKR_FUNCTION_FAILED;
 	}
@@ -5042,6 +5214,21 @@ CK_RV SoftHSM::generateMLDSA
 		if (srv != CKR_OK) return srv;
 	}
 
+	// E7 (2026-08-13). §6.67.4 lists CKA_SEED among the attributes
+	// CKM_ML_DSA_KEY_PAIR_GEN CONTRIBUTES to the new private key, so it must be
+	// present on a randomly generated key too — this engine only ever persisted
+	// a caller-supplied one. FIPS 204 keygen is seed-derived anyway, so the
+	// engine now draws xi itself and publishes it, which is what makes the
+	// contribution real rather than nominal.
+	bool seedContributed = false;
+	if (seed.size() == 0)
+	{
+		RNG* seedRng = CryptoFactory::i()->getRNG();
+		if (seedRng == NULL) return CKR_GENERAL_ERROR;
+		if (!seedRng->generateRandom(seed, 32)) return CKR_GENERAL_ERROR;
+		seedContributed = true;
+	}
+
 	// Set the parameters
 	MLDSAParameters p;
 	p.setParameterSet(parameterSet);
@@ -5208,6 +5395,20 @@ CK_RV SoftHSM::generateMLDSA
 					ByteString kcv = computeAsymKCV(priv->getValue());
 					// CKA_CHECK_VALUE stored in clear — not sensitive per PKCS#11 v3.2 §4.10.2
 					bOK = bOK && osobject->setAttribute(CKA_CHECK_VALUE, kcv);
+				}
+				// E7: publish the mechanism's CKA_SEED contribution. Stored
+				// exactly like CKA_VALUE — encrypted at rest on a private
+				// object, matching P11AttrSeed::updateAttr — and only when the
+				// engine drew it, since a caller-supplied seed already reached
+				// the object through the template.
+				if (seedContributed)
+				{
+					ByteString seedValue;
+					if (isPrivateKeyPrivate)
+						bOK = bOK && token->encrypt(seed, seedValue);
+					else
+						seedValue = seed;
+					bOK = bOK && osobject->setAttribute(CKA_SEED, seedValue);
 				}
 				// PKCS#11 v3.2 §4.14 — CKA_PUBLIC_KEY_INFO: SubjectPublicKeyInfo DER (always public)
 				{
@@ -5533,6 +5734,8 @@ CK_RV SoftHSM::deriveECDH
 	// Extract desired parameter information
 	size_t byteLen = 0;
 	bool checkValue = true;
+	bool kcvSupplied = false;
+	ByteString kcvWanted;
 	for (CK_ULONG i = 0; i < ulCount; i++)
 	{
 		switch (pTemplate[i].type)
@@ -5549,13 +5752,16 @@ CK_RV SoftHSM::deriveECDH
 				byteLen = *(CK_ULONG*)pTemplate[i].pValue;
 				break;
 			case CKA_CHECK_VALUE:
-				if (pTemplate[i].ulValueLen > 0)
-				{
-					INFO_MSG("CKA_CHECK_VALUE must be a no-value (0 length) entry");
-					return CKR_ATTRIBUTE_VALUE_INVALID;
-				}
-				checkValue = false;
+			{
+				// §4.11 (2026-08-13): a supplied value that MATCHES what the library
+				// calculates must be ACCEPTED. This used to reject every non-empty
+				// entry, including a correct one. A zero-length entry still
+				// suppresses generation; the comparison itself happens below, where
+				// the key bits exist.
+				CK_RV kcvRv = checkValueFromTemplate(pTemplate[i], checkValue, kcvSupplied, kcvWanted);
+				if (kcvRv != CKR_OK) return kcvRv;
 				break;
+			}
 			default:
 				break;
 		}
@@ -5867,6 +6073,13 @@ CK_RV SoftHSM::deriveECDH
 				kcv = plainKCV;
 			}
 			bOK = bOK && osobject->setAttribute(CKA_VALUE, value);
+			// §4.11: a caller-supplied value MUST match what the library
+			// calculates or the call is CKR_ATTRIBUTE_VALUE_INVALID. The
+			// transaction is aborted and the clean-up below destroys the
+			// half-built object, so no key is left behind on a mismatch.
+			CK_RV kcvRv = checkValueVerify(kcvSupplied, kcvWanted, kcv);
+			bOK = bOK && (kcvRv == CKR_OK);
+
 			if (checkValue)
 				bOK = bOK && osobject->setAttribute(CKA_CHECK_VALUE, kcv);
 
@@ -5876,7 +6089,7 @@ CK_RV SoftHSM::deriveECDH
 				osobject->abortTransaction();
 
 			if (!bOK)
-				rv = CKR_FUNCTION_FAILED;
+				rv = (kcvRv != CKR_OK) ? kcvRv : CKR_FUNCTION_FAILED;
 		} else
 			rv = CKR_FUNCTION_FAILED;
 	}
@@ -5974,6 +6187,8 @@ CK_RV SoftHSM::deriveEDDSA
 	// Extract desired parameter information
 	size_t byteLen = 0;
 	bool checkValue = true;
+	bool kcvSupplied = false;
+	ByteString kcvWanted;
 	for (CK_ULONG i = 0; i < ulCount; i++)
 	{
 		switch (pTemplate[i].type)
@@ -5990,13 +6205,16 @@ CK_RV SoftHSM::deriveEDDSA
 				byteLen = *(CK_ULONG*)pTemplate[i].pValue;
 				break;
 			case CKA_CHECK_VALUE:
-				if (pTemplate[i].ulValueLen > 0)
-				{
-					INFO_MSG("CKA_CHECK_VALUE must be a no-value (0 length) entry");
-					return CKR_ATTRIBUTE_VALUE_INVALID;
-				}
-				checkValue = false;
+			{
+				// §4.11 (2026-08-13): a supplied value that MATCHES what the library
+				// calculates must be ACCEPTED. This used to reject every non-empty
+				// entry, including a correct one. A zero-length entry still
+				// suppresses generation; the comparison itself happens below, where
+				// the key bits exist.
+				CK_RV kcvRv = checkValueFromTemplate(pTemplate[i], checkValue, kcvSupplied, kcvWanted);
+				if (kcvRv != CKR_OK) return kcvRv;
 				break;
+			}
 			default:
 				break;
 		}
@@ -6263,6 +6481,13 @@ CK_RV SoftHSM::deriveEDDSA
 				kcv = plainKCV;
 			}
 			bOK = bOK && osobject->setAttribute(CKA_VALUE, value);
+			// §4.11: a caller-supplied value MUST match what the library
+			// calculates or the call is CKR_ATTRIBUTE_VALUE_INVALID. The
+			// transaction is aborted and the clean-up below destroys the
+			// half-built object, so no key is left behind on a mismatch.
+			CK_RV kcvRv = checkValueVerify(kcvSupplied, kcvWanted, kcv);
+			bOK = bOK && (kcvRv == CKR_OK);
+
 			if (checkValue)
 				bOK = bOK && osobject->setAttribute(CKA_CHECK_VALUE, kcv);
 
@@ -6272,7 +6497,7 @@ CK_RV SoftHSM::deriveEDDSA
 				osobject->abortTransaction();
 
 			if (!bOK)
-				rv = CKR_FUNCTION_FAILED;
+				rv = (kcvRv != CKR_OK) ? kcvRv : CKR_FUNCTION_FAILED;
 		} else
 			rv = CKR_FUNCTION_FAILED;
 	}
@@ -6433,6 +6658,8 @@ CK_RV SoftHSM::deriveSymmetric
 	// Extract desired parameter information
 	size_t byteLen = 0;
 	bool checkValue = true;
+	bool kcvSupplied = false;
+	ByteString kcvWanted;
 	for (CK_ULONG i = 0; i < ulCount; i++)
 	{
 		switch (pTemplate[i].type)
@@ -6449,13 +6676,16 @@ CK_RV SoftHSM::deriveSymmetric
 				byteLen = *(CK_ULONG*)pTemplate[i].pValue;
 				break;
 			case CKA_CHECK_VALUE:
-				if (pTemplate[i].ulValueLen > 0)
-				{
-					INFO_MSG("CKA_CHECK_VALUE must be a no-value (0 length) entry");
-					return CKR_ATTRIBUTE_VALUE_INVALID;
-				}
-				checkValue = false;
+			{
+				// §4.11 (2026-08-13): a supplied value that MATCHES what the library
+				// calculates must be ACCEPTED. This used to reject every non-empty
+				// entry, including a correct one. A zero-length entry still
+				// suppresses generation; the comparison itself happens below, where
+				// the key bits exist.
+				CK_RV kcvRv = checkValueFromTemplate(pTemplate[i], checkValue, kcvSupplied, kcvWanted);
+				if (kcvRv != CKR_OK) return kcvRv;
 				break;
+			}
 			default:
 				break;
 		}
@@ -6805,6 +7035,13 @@ CK_RV SoftHSM::deriveSymmetric
 				kcv = plainKCV;
 			}
 			bOK = bOK && osobject->setAttribute(CKA_VALUE, value);
+			// §4.11: a caller-supplied value MUST match what the library
+			// calculates or the call is CKR_ATTRIBUTE_VALUE_INVALID. The
+			// transaction is aborted and the clean-up below destroys the
+			// half-built object, so no key is left behind on a mismatch.
+			CK_RV kcvRv = checkValueVerify(kcvSupplied, kcvWanted, kcv);
+			bOK = bOK && (kcvRv == CKR_OK);
+
 			if (checkValue)
 				bOK = bOK && osobject->setAttribute(CKA_CHECK_VALUE, kcv);
 
@@ -6814,7 +7051,7 @@ CK_RV SoftHSM::deriveSymmetric
 				osobject->abortTransaction();
 
 			if (!bOK)
-				rv = CKR_FUNCTION_FAILED;
+				rv = (kcvRv != CKR_OK) ? kcvRv : CKR_FUNCTION_FAILED;
 		} else
 			rv = CKR_FUNCTION_FAILED;
 	}
@@ -7210,6 +7447,17 @@ CK_RV SoftHSM::generateMLKEM
 		if (srv != CKR_OK) return srv;
 	}
 
+	// E7: §6.68.4 makes CKA_SEED (d||z, 64 bytes) a contribution of
+	// CKM_ML_KEM_KEY_PAIR_GEN — see the ML-DSA path above.
+	bool seedContributed = false;
+	if (seed.size() == 0)
+	{
+		RNG* seedRng = CryptoFactory::i()->getRNG();
+		if (seedRng == NULL) return CKR_GENERAL_ERROR;
+		if (!seedRng->generateRandom(seed, 64)) return CKR_GENERAL_ERROR;
+		seedContributed = true;
+	}
+
 	// Set the parameters
 	MLKEMParameters p;
 	p.setParameterSet(parameterSet);
@@ -7382,6 +7630,19 @@ CK_RV SoftHSM::generateMLKEM
 					ByteString kcv = computeAsymKCV(priv->getValue());
 					// CKA_CHECK_VALUE stored in clear — not sensitive per PKCS#11 v3.2 §4.10.2
 					bOK = bOK && osobject->setAttribute(CKA_CHECK_VALUE, kcv);
+				}
+				// E7: publish the mechanism's CKA_SEED contribution (§6.68.4,
+				// d||z). Stored exactly like CKA_VALUE — encrypted at rest on a
+				// private object — and only when the engine drew it, since a
+				// caller-supplied seed already reached the object via the template.
+				if (seedContributed)
+				{
+					ByteString seedValue;
+					if (isPrivateKeyPrivate)
+						bOK = bOK && token->encrypt(seed, seedValue);
+					else
+						seedValue = seed;
+					bOK = bOK && osobject->setAttribute(CKA_SEED, seedValue);
 				}
 				// PKCS#11 v3.2 §4.14 — CKA_PUBLIC_KEY_INFO: SubjectPublicKeyInfo DER (always public)
 				{

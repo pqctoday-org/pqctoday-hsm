@@ -194,3 +194,56 @@ from the docs index as the current Rust engine reference.
    that provider path for either engine.
 
 No files were modified as part of this audit.
+
+---
+
+## Addendum — recorded engine divergences (2026-08-13, N4/N11/N12 remediation)
+
+The 2026-08 PKCS#11 v3.2 audit re-verified the two engines' surfaces and
+found three divergences that were real but written down nowhere. They are
+recorded here (this section is an addendum; everything above is the
+unmodified 2026-07-25 snapshot).
+
+### (a) ECDH-as-KEM under C_EncapsulateKey / C_DecapsulateKey
+
+C++ dispatches `CKM_ECDH1_DERIVE` under the KEM entry points
+(`SoftHSM_kem.cpp`); Rust originally did not. **Decision 2026-08-13
+(upgraded from "record divergence" to "implement"): implemented in Rust the
+same day** — `rust/src/ffi.rs` now serves `CKM_ECDH1_DERIVE` in
+`C_EncapsulateKey_impl`/`C_DecapsulateKey_impl` for P-256/P-384/P-521,
+wire-compatible with C++ (ciphertext = ephemeral public point in the
+CKA_EC_POINT DER-OCTET-STRING form, raw SEC1 accepted on decapsulation;
+shared secret = raw ECDH X coordinate, no KDF), and both engines advertise
+`CKF_ENCAPSULATE|CKF_DECAPSULATE` on the mechanism. **Residual divergence,
+deliberate:** C++ additionally accepts `CKK_EC_MONTGOMERY` (X25519/X448) and
+any ECDSA-supported curve (incl. secp256k1) on this path; Rust serves the
+three NIST prime curves only.
+
+### (b) C_DigestKey and C_SeedRandom
+
+- `C_DigestKey`: **real in C++** (digests the key's CKA_VALUE into the
+  active digest operation), **stub in Rust**. Spec-legal either way
+  (§5.10 permits CKR_FUNCTION_NOT_SUPPORTED-class behavior); now documented.
+- `C_SeedRandom`: **real in C++**, **`CKR_RANDOM_SEED_NOT_SUPPORTED` in
+  Rust** — explicitly spec-legal (§5.14 names that return value for RNGs
+  that accept no external seeding; the Rust engine's OS-CSPRNG does not).
+  Divergence is intentional and now documented.
+
+### (c) Hybrid-combiner building blocks differ — recipes are NOT portable
+
+The mechanism tables diverge exactly where a caller would assemble a hybrid
+KEM combiner from derive mechanisms:
+
+- **Rust**: SHA-2/SHA-3 key-derivation mechanisms
+  (`CKM_SHA{256,384,512}_KEY_DERIVATION`, `CKM_SHA3_{256,384,512}_KEY_DERIVATION`)
+  plus `CKM_CONCATENATE_BASE_AND_KEY`/`_BASE_AND_DATA`; **no SHAKE-256
+  derivation**.
+- **C++**: **SHAKE-256 derivation** plus all three CONCATENATE forms
+  (`BASE_AND_KEY`, `BASE_AND_DATA`, `DATA_AND_BASE`); **no SHA-2/SHA-3
+  key-derivation mechanisms**.
+
+Consequence: a combiner recipe written against one engine's derive
+mechanisms (e.g. concat-then-SHA3 on Rust, or SHAKE-256-based on C++) will
+not run unmodified on the other. Pure-concatenation recipes using
+`CKM_CONCATENATE_BASE_AND_KEY` (the form the named ECDHE-MLKEM groups
+actually need — see `rust/src/native/hybrid.rs`) are the portable subset.

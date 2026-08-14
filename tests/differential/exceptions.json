@@ -1,0 +1,415 @@
+{
+  "version": 1,
+  "_readme": [
+    "Every cross-engine divergence the harness observes must appear here or the run fails.",
+    "",
+    "status = 'legal'  : adjudicated against PKCS#11 v3.2 OS (03 June 2026), its Profiles",
+    "                    and its Usage Guide. The divergence is permitted. It will not be",
+    "                    fixed, and 'citation' says why not.",
+    "status = 'defect' : a KNOWN, still-open non-conformance in one engine, recorded so the",
+    "                    harness has a stable baseline and a NEW divergence stands out.",
+    "                    Not an excuse — a worklist item. Every one names the plan item.",
+    "",
+    "Matching: scenario, path, kind, cpp and rust are globs ('*' and '?'). Omitted means '*'.",
+    "The cpp/rust value matchers exist because two divergences can share a path and be",
+    "entirely different questions; without them an entry for one silently absolves the other.",
+    "First matching entry wins, so order the specific ones before the general ones."
+  ],
+  "entries": [
+    {
+      "id": "LEGAL-RESTORE-KEY-NOT-NEEDED",
+      "status": "legal",
+      "scenario": "env.token_info",
+      "path": "flag.CKF_RESTORE_KEY_NOT_NEEDED",
+      "justification": "The flag describes whether C_SetOperationState needs the key handles supplied again. Operation-state save/restore is itself optional and both engines may decline it, so either value is honest.",
+      "citation": "PKCS#11 v3.2 §5.5.4; §5.7 makes no function individually mandatory — 'function not supported' is the specification's own prescribed answer."
+    },
+    {
+      "id": "DEFECT-CPP-SESSION-HANDLE-PRECEDENCE-GENERATEKEY",
+      "status": "defect",
+      "scenario": "errors.session_handle_precedence",
+      "path": "C_GenerateKey_null_mech.rv",
+      "justification": "Given an invalid session handle AND a null mechanism, Rust returns CKR_SESSION_HANDLE_INVALID and C++ returns CKR_ARGUMENTS_BAD. The session-handle class takes mandatory precedence, so Rust is right. Plan item C2 fixed this for the init functions in both engines but missed C_GenerateKey in C++.",
+      "citation": "PKCS#11 v3.2 §5.1: the session-handle error class takes mandatory precedence over argument and capability classes."
+    },
+    {
+      "id": "DEFECT-CPP-COPYABLE-CANNOT-BE-CLEARED",
+      "status": "defect",
+      "scenario": "security.copyable_one_way",
+      "path": "set_false.rv|copy.rv",
+      "justification": "C++ refuses to set CKA_COPYABLE to false at all (CKR_ATTRIBUTE_READ_ONLY), so the copy-protection an application is supposed to be able to apply cannot be applied. The one-way rule forbids false-to-true, not true-to-false. Rust behaves correctly here and refuses the later copy with CKR_ACTION_PROHIBITED.",
+      "citation": "PKCS#11 v3.2 §4.4, CKA_COPYABLE: 'Defaults to CK_TRUE. Can't be set to TRUE once it is set to FALSE.' — which presupposes that setting it to FALSE is permitted."
+    },
+    {
+      "id": "LEGAL-WEAK-PRIMITIVES-ABSENT-IN-RUST",
+      "status": "legal",
+      "scenario": "env.mechanism_set",
+      "path": "mech.CKM_SHA_1",
+      "justification": "Rust omits the MD5, SHA-1 and SHA-224 families deliberately; closing this 'gap' symmetrically would push weak primitives into a post-quantum engine. Kept as its own entry so a future reader does not mistake it for an oversight.",
+      "citation": "Profiles v3.2 mandates no mechanism; PKCS#11 v3.2 §6 is a catalogue of definitions, not a requirement list."
+    },
+    {
+      "id": "DEFECT-RUST-WRAPPED-PRIVATE-KEY-NOT-PKCS8",
+      "status": "defect",
+      "scenario": "encoding.wrap_private_key_pkcs8",
+      "path": "wrapped.len",
+      "justification": "Wrapping the same P-256 private key under the same AES KEK yields 152 bytes from C++ and 72 from Rust. A PKCS#8 PrivateKeyInfo for P-256 is ~138 bytes before key wrapping; 72 bytes cannot contain one, so Rust is still wrapping its raw stored value. Plan item E6, open — and it depends on E5.",
+      "citation": "PKCS#11 v3.2 §6.7: 'For wrapping, a private key is BER-encoded according to [PKCS #8] PrivateKeyInfo ASN.1 type.'"
+    },
+    {
+      "id": "LEGAL-TOKEN-CAPACITIES-AND-VERSIONS",
+      "status": "legal",
+      "scenario": "env.token_info",
+      "path": "ul*|hardwareVersion|firmwareVersion",
+      "justification": "Session-count ceilings, PIN-length range and hardware/firmware version are per-token facts; C++ reports CK_EFFECTIVELY_INFINITE (0) for session counts and Rust CK_UNAVAILABLE_INFORMATION, both of which the type defines.",
+      "citation": "PKCS#11 v3.2 §5.5.4 CK_TOKEN_INFO — ulMaxSessionCount may be CK_UNAVAILABLE_INFORMATION or CK_EFFECTIVELY_INFINITE; versions are vendor-assigned."
+    },
+    {
+      "id": "LEGAL-VENDOR-MECHANISMS",
+      "status": "legal",
+      "scenario": "env.mechanism_set",
+      "path": "mech.CKM_VENDOR*",
+      "justification": "Each engine publishes its own vendor mechanisms (Rust's split-key and BIP32-adjacent set, C++'s KMAC block). Every disputed codepoint on both sides was verified to sit inside the reserved vendor range.",
+      "citation": "PKCS#11 v3.2 §3.1: CKM_VENDOR_DEFINED and above is reserved for exactly this purpose."
+    },
+    {
+      "id": "LEGAL-CURVE-COVERAGE-BRAINPOOL",
+      "status": "legal",
+      "scenario": "errors.unsupported_curve",
+      "path": "brainpool*",
+      "justification": "C++ implements brainpoolP256r1 and generates a genuine brainpool key (the harness reads back OID 1.3.36.3.3.2.8.1.1.7, not a substituted P-256); Rust does not implement the curve and correctly answers CKR_CURVE_NOT_SUPPORTED. Which curves a token implements is a product decision.",
+      "citation": "PKCS#11 v3.2 §6.3: an unsupported curve should fail CKR_CURVE_NOT_SUPPORTED — a requirement on the refusal, not on the coverage. Profiles v3.2 mandates no curve."
+    },
+    {
+      "id": "LEGAL-INTERFACE-ORDER-AND-FORK-FLAG",
+      "status": "legal",
+      "scenario": "env.interfaces",
+      "path": "iface.*",
+      "justification": "The specification imposes no ordering on the interface list, and the fork-tolerant flag carries no MUST — C++ advertises it after implementing it, Rust correctly declines to advertise what it does not do.",
+      "citation": "PKCS#11 v3.2 Table 11 defines CKF_INTERFACE_FORK_SAFE descriptively; Usage Guide §2.5.2 makes discarding state on fork the baseline model, with a forked child's behaviour 'left undefined'."
+    },
+    {
+      "id": "LEGAL-MECHANISM-SET",
+      "status": "legal",
+      "scenario": "env.mechanism_set",
+      "path": "mech*",
+      "justification": "The two engines advertise different mechanism sets (127 vs 116, 47 differences) and no profile requires any mechanism, so this is a product decision, not a conformance gap.",
+      "citation": "PKCS #11 Profiles v3.2 OS: Baseline Provider, Complete Provider, Extended Provider, Authentication Token and Public Certificates Token each state 'Supports the following mechanisms: a. None specified.' Only the HKDF TLS Token profile names one."
+    },
+    {
+      "id": "LEGAL-IDENTITY-STRINGS",
+      "status": "legal",
+      "scenario": "env.library_info",
+      "path": "manufacturerID|libraryDescription",
+      "justification": "manufacturerID and libraryDescription are the engines' own names; they are informational and no interoperable behaviour depends on them. Deliberately NOT scoped to the whole env.library_info scenario: cryptokiVersion and the library flags in that same scenario are real conformance signals and must keep failing if they ever diverge.",
+      "citation": "PKCS#11 v3.2 §5.5.2 CK_INFO — these fields are descriptive, blank-padded strings with no constrained content."
+    },
+    {
+      "id": "DEFECT-RUST-NO-PROFILE-OBJECT-AFTER-INIT-TOKEN",
+      "status": "defect",
+      "scenario": "env.profile_objects",
+      "path": "count|profile_ids",
+      "justification": "After C_InitToken, C++ publishes two CKO_PROFILE objects (ids 1 and 2) and Rust publishes none, so on this path Rust has not established that it is a conforming Provider at all. The 2026-08-13 divergence report recorded the opposite polarity (Rust published one, C++ none), which means C_InitToken destroys Rust's profile object without recreating it.",
+      "citation": "PKCS #11 Profiles v3.2, Baseline Provider condition 4: 'Supports the following objects: a. CKO_PROFILE with value CKP_BASELINE_PROVIDER.' PKCS#11 v3.2 §5.5.7: initialisation destroys all objects that can be destroyed — a profile object should not be one of them, or must be reinstated."
+    },
+    {
+      "id": "LEGAL-UNWRAPPED-KEY-EXTRACTABLE-DEFAULT",
+      "status": "legal",
+      "scenario": "encoding.wrap_private_key_pkcs8",
+      "path": "*CKA_EXTRACTABLE*",
+      "justification": "C++ makes an unwrapped private key non-extractable by default; Rust leaves it extractable. The default is token policy and C++'s is the more conservative one.",
+      "citation": "PKCS#11 v3.2 §4.9 — CKA_EXTRACTABLE's default is token-specific; §5.18.4 C_UnwrapKey imposes no value."
+    },
+    {
+      "id": "DEFECT-CPP-CHECK-VALUE-ON-PRIVATE-XMSS",
+      "status": "defect",
+      "scenario": "create.generate_key_pair.xmss",
+      "path": "*CKA_CHECK_VALUE*",
+      "justification": "Same family: C++ publishes a zero-length CKA_CHECK_VALUE on the XMSS private key. A zero-length entry is §4.11's suppression signal on input, not a valid stored value.",
+      "citation": "PKCS#11 v3.2 §4.11."
+    },
+    {
+      "id": "DEFECT-CHECK-VALUE-ON-UNWRAPPED-PRIVATE-KEY",
+      "status": "defect",
+      "scenario": "encoding.wrap_private_key_pkcs8",
+      "path": "*CKA_CHECK_VALUE*",
+      "justification": "Opposite directions on the same object: Rust computes a three-byte check value for an unwrapped EC private key, C++ stores a zero-length one. One of the two must change and the harness cannot say which without a ruling on whether §4.11 covers private keys.",
+      "citation": "PKCS#11 v3.2 §4.11 — the per-type definitions are given for secret keys; the private-key case is not spelled out, which is why this is recorded rather than adjudicated."
+    },
+    {
+      "id": "LEGAL-EC-PARAMS-CURVE-NAME-VS-OID",
+      "status": "legal",
+      "path": "*CKA_EC_PARAMS*",
+      "justification": "For Edwards and Montgomery curves C++ emits CKA_EC_PARAMS in the curveName form ('edwards25519', 'curve25519') and Rust in the oID form (1.3.101.112, 1.3.101.110). Covers the three observations that follow from that one choice: .len, .enc and .value. Both forms are explicitly legal and both engines accept both on input, which is what interoperability actually depends on.",
+      "citation": "PKCS#11 v3.2 §6.3.10: these curves 'can only be specified in the CKA_EC_PARAMS attribute ... using the curveName or the oID methods' — the choice between them is the caller's, and the token's.",
+      "scenario": "create.generate_key_pair.ed25519|create.generate_key_pair.x25519"
+    },
+    {
+      "id": "DEFECT-RUST-EC-PARAMS-ABSENT-ON-UNWRAPPED-PRIVATE",
+      "status": "defect",
+      "scenario": "encoding.wrap_private_key_pkcs8",
+      "path": "*CKA_EC_PARAMS*",
+      "justification": "An EC private key recovered through C_UnwrapKey has no CKA_EC_PARAMS in Rust. Plan item E2 was applied to generation on the public half only; the unwrap path never got it. This is the same root cause as the already-observed interop break where C++'s KEM path rejects Rust-generated EC keys.",
+      "citation": "PKCS#11 v3.2 §6.3.9: 'the mechanism contributes the CKA_CLASS, CKA_KEY_TYPE, CKA_EC_PARAMS and CKA_VALUE attributes to the new private key.'"
+    },
+    {
+      "id": "DEFECT-CPP-UNWRAPPED-AES-VALUE-LEN-ZERO",
+      "status": "defect",
+      "scenario": "create.unwrap.aes_kw",
+      "path": "*CKA_VALUE_LEN*",
+      "justification": "After unwrapping a 32-byte AES key, C++ reports CKA_VALUE_LEN as 0 and Rust as 32. Zero is wrong: the key material is 32 bytes and the caller cannot tell the key's size from the engine.",
+      "citation": "PKCS#11 v3.2 §6.14 Table (AES secret key): CKA_VALUE_LEN is 'Length in bytes of key value'."
+    },
+    {
+      "id": "DEFECT-RUST-IMPORTED-AES-NO-VALUE-LEN",
+      "status": "defect",
+      "scenario": "create.create_object.aes_secret",
+      "path": "*CKA_VALUE_LEN*",
+      "justification": "The mirror image: for an AES key imported through C_CreateObject with an explicit CKA_VALUE, Rust does not derive CKA_VALUE_LEN at all while C++ does. Rust derives it correctly on the generate and unwrap paths, so this is an inconsistency within one engine.",
+      "citation": "PKCS#11 v3.2 §6.14: CKA_VALUE_LEN is defined for AES keys regardless of how the object was created."
+    },
+    {
+      "id": "DEFECT-RUST-UNWRAPPED-PRIVATE-VALUE-LEN",
+      "status": "defect",
+      "scenario": "encoding.wrap_private_key_pkcs8",
+      "path": "*CKA_VALUE_LEN*",
+      "justification": "Rust reports CKA_VALUE_LEN on an EC PRIVATE key (60 bytes, the length of its non-standard stored blob). CKA_VALUE_LEN is a secret-key attribute; its presence here is a symptom of DEFECT-RUST-CKA_VALUE-ON-ASYMMETRIC-KEYS.",
+      "citation": "PKCS#11 v3.2 §4.10 (secret key attributes) defines CKA_VALUE_LEN; §4.11 and the EC private-key table do not."
+    },
+    {
+      "id": "LEGAL-SENSITIVE-DEFAULT-SLH-DSA",
+      "status": "legal",
+      "scenario": "create.generate_key_pair.slh_dsa",
+      "path": "*CKA_*SENSITIVE*",
+      "justification": "Rust makes an SLH-DSA private key sensitive by default and C++ does not. §6.69 attaches the MUST-be-sensitive rule to HSS and XMSS only, so both are permitted; Rust's choice is the safer one.",
+      "citation": "PKCS#11 v3.2 §6.65.3 and §6.66.4/§6.66.5 impose CKA_SENSITIVE on the hash-based families; §6.69 (SLH-DSA) imposes nothing."
+    },
+    {
+      "id": "DEFECT-RUST-DATA-OBJECT-CARRIES-KEY-ATTRIBUTES",
+      "status": "defect",
+      "scenario": "create.create_object.data",
+      "path": "*CKA_LOCAL*|*CKA_KEY_GEN_MECHANISM*",
+      "justification": "A CKO_DATA object in Rust answers CKA_LOCAL and CKA_KEY_GEN_MECHANISM. Neither is defined for the data-object class; C++ correctly returns CKR_ATTRIBUTE_TYPE_INVALID for both.",
+      "citation": "PKCS#11 v3.2 §4.5 Table 12 (data objects) defines CKA_APPLICATION, CKA_OBJECT_ID and CKA_VALUE only. CKA_LOCAL and CKA_KEY_GEN_MECHANISM are common KEY attributes (§4.9)."
+    },
+    {
+      "id": "DEFECT-XMSS-PUBLIC-KEY-ATTRIBUTE-SPREAD",
+      "status": "defect",
+      "scenario": "create.generate_key_pair.xmss",
+      "path": "*CKA_EXTRACTABLE*|*CKA_ALWAYS_SENSITIVE*|*CKA_NEVER_EXTRACTABLE*",
+      "justification": "Rust puts CKA_EXTRACTABLE on the XMSS PUBLIC key and omits CKA_ALWAYS_SENSITIVE and CKA_NEVER_EXTRACTABLE from the private one; C++ does the reverse. Both of those are the attributes §6.66.4's protection rule is expressed through, so the disagreement sits directly on top of a MUST.",
+      "citation": "PKCS#11 v3.2 §6.66.4/§6.66.5: 'CKA_SENSITIVE MUST be true and CKA_EXTRACTABLE MUST be false for this key' — a rule about the private key, which needs both attributes present to be checkable."
+    },
+    {
+      "id": "DEFECT-CPP-XMSS-PUBLIC-SECRET-KEY-FLAGS",
+      "status": "defect",
+      "scenario": "create.generate_key_pair.xmss",
+      "path": "*pub.CKA_ENCRYPT.*|*pub.CKA_WRAP.*|*pub.CKA_DERIVE.*",
+      "justification": "C++'s XMSS public key additionally carries CKA_ENCRYPT, CKA_WRAP and CKA_DERIVE — usage flags for operations an XMSS public key cannot perform. Recorded together because they share one cause: the XMSS key classes fall through to a generic attribute set on both engines.",
+      "citation": "PKCS#11 v3.2 §6.66: XMSS is a signature scheme; its public key verifies and does nothing else."
+    },
+    {
+      "id": "DEFECT-CPP-CHECK-VALUE-ON-PUBLIC-KEYS",
+      "status": "defect",
+      "scenario": "create.generate_key_pair.*",
+      "path": "*pub.CKA_CHECK_VALUE*",
+      "justification": "C++ publishes a CKA_CHECK_VALUE on EC, Edwards, Montgomery and XMSS PUBLIC keys, and a zero-length one at that on XMSS. §4.11 defines the check value over secret and private key material; a public key has nothing to check and the attribute is meaningless there.",
+      "citation": "PKCS#11 v3.2 §4.11 defines CKA_CHECK_VALUE per key type over the key's own value; the public-key tables define no check value."
+    },
+    {
+      "id": "DEFECT-RUST-SENSITIVE-OUTRANKS-ATTRIBUTE-TYPE-INVALID",
+      "status": "defect",
+      "path": "*.rv",
+      "justification": "Rust answers CKR_ATTRIBUTE_SENSITIVE for attributes the object does not possess at all — CKA_SEED on EC, Edwards, Montgomery, XMSS and AES keys, and the RSA CRT attributes (CKA_PRIME_1/2, CKA_EXPONENT_1/2, CKA_COEFFICIENT) on every non-RSA private key. Its sensitivity check runs before the does-this-object-have-this-attribute check, so it tells a caller the object HAS a secret it may not read. C++ correctly answers CKR_ATTRIBUTE_TYPE_INVALID. The matcher pins the DIRECTION: the reverse pairing (C++ sensitive, Rust OK) is a different and worse problem and is NOT covered here.",
+      "citation": "PKCS#11 v3.2 §5.7.5 C_GetAttributeValue: CKR_ATTRIBUTE_TYPE_INVALID when 'the object does not possess such an attribute'; CKR_ATTRIBUTE_SENSITIVE is for an attribute the object has but will not disclose. §6.67.4/§6.68.4 define CKA_SEED for ML-DSA and ML-KEM only; Table 38 defines the CRT attributes for RSA only.",
+      "cpp": "CKR_ATTRIBUTE_TYPE_INVALID",
+      "rust": "CKR_ATTRIBUTE_SENSITIVE"
+    },
+    {
+      "id": "LEGAL-KEY-GEN-MECHANISM-ON-ENCAPSULATED-KEY",
+      "status": "legal",
+      "path": "*CKA_KEY_GEN_MECHANISM*",
+      "cpp": "ffffffffffffffff",
+      "rust": "1700000000000000",
+      "justification": "For a key produced by C_EncapsulateKey, Rust records CKM_ML_KEM as the generating mechanism and C++ records CK_UNAVAILABLE_INFORMATION. Encapsulation does generate the key material, so Rust's answer is the more useful one and neither is wrong.",
+      "citation": "PKCS#11 v3.2 §4.9: CKA_KEY_GEN_MECHANISM is the mechanism used to generate the key material, or CK_UNAVAILABLE_INFORMATION if the key was not generated by one."
+    },
+    {
+      "id": "DEFECT-RUST-KEY-GEN-MECHANISM-NARROWED",
+      "status": "defect",
+      "path": "*CKA_KEY_GEN_MECHANISM*",
+      "cpp": "ffffffffffffffff",
+      "rust": "ffffffff00000000",
+      "justification": "Rust writes CK_UNAVAILABLE_INFORMATION as a 32-bit -1 zero-extended into eight bytes (0x00000000FFFFFFFF) where the LP64 ABI value is eight bytes of 0xFF. A caller comparing against CK_UNAVAILABLE_INFORMATION therefore sees mechanism 4294967295 instead. Same width-narrowing family as S9.",
+      "citation": "PKCS#11 v3.2 §3.1: CK_UNAVAILABLE_INFORMATION is (~0UL); CK_ULONG is 'an unsigned value, at least 32 bits long' and is 8 bytes on LP64, which is what this ABI exports."
+    },
+    {
+      "id": "LEGAL-OPTIONAL-ATTR-NOT-MATERIALISED-ALLOWED-MECHANISMS",
+      "status": "legal",
+      "path": "*.CKA_ALLOWED_MECHANISMS.*",
+      "justification": "C++ returns a zero-length list where no restriction was requested, Rust reports the attribute absent. Both mean unrestricted, and the harness proves it: security.allowed_mechanisms shows the two engines enforcing an actual restriction identically.",
+      "citation": "PKCS#11 v3.2 §4.9 — 'if not present, the key may be used with any mechanism'. Read the harness's security.allowed_mechanisms scenario before ever relaxing this entry."
+    },
+    {
+      "id": "LEGAL-OPTIONAL-ATTR-PUBLIC-KEY-INFO",
+      "status": "legal",
+      "path": "*.CKA_PUBLIC_KEY_INFO.*",
+      "justification": "C++ publishes the SubjectPublicKeyInfo alongside private keys; Rust does not implement the attribute. It is a convenience, not a required one, and nothing in the harness depends on it.",
+      "citation": "PKCS#11 v3.2 §4.9 lists CKA_PUBLIC_KEY_INFO as optional on private keys; §6.1.3's 'required to be able to return' list does not include it."
+    },
+    {
+      "id": "LEGAL-OPTIONAL-ATTR-NOT-MATERIALISED-START-DATE",
+      "status": "legal",
+      "path": "*.CKA_START_DATE.*",
+      "justification": "Same materialisation convention. Neither engine enforces validity dates, and the attribute was not supplied.",
+      "citation": "PKCS#11 v3.2 §5.7.5; the common key attribute table imposes no MUST-possess."
+    },
+    {
+      "id": "LEGAL-OPTIONAL-ATTR-NOT-MATERIALISED-END-DATE",
+      "status": "legal",
+      "path": "*.CKA_END_DATE.*",
+      "justification": "Same materialisation convention as CKA_START_DATE.",
+      "citation": "PKCS#11 v3.2 §5.7.5."
+    },
+    {
+      "id": "LEGAL-USAGE-FLAG-DEFAULT-ENCRYPT",
+      "status": "legal",
+      "path": "*.CKA_ENCRYPT.*",
+      "justification": "Where the template did not set the flag, the two engines choose different defaults. Every flag these scenarios set EXPLICITLY agrees — check that before widening this entry.",
+      "citation": "PKCS#11 v3.2 §4.9, common key attribute table footnote: 'Default value is token-specific, and may depend on the values of other attributes.'"
+    },
+    {
+      "id": "LEGAL-USAGE-FLAG-DEFAULT-DECRYPT",
+      "status": "legal",
+      "path": "*.CKA_DECRYPT.*",
+      "justification": "Token-specific default for an unset usage flag; explicitly-set values agree across engines.",
+      "citation": "PKCS#11 v3.2 §4.9 common key attribute table footnote."
+    },
+    {
+      "id": "LEGAL-PRIVATE-DEFAULT",
+      "status": "legal",
+      "path": "*.CKA_PRIVATE.*",
+      "justification": "C++ makes session keys private by default, Rust public. The default is explicitly token-specific and every scenario that cares sets it.",
+      "citation": "PKCS#11 v3.2 §4.4 common object attributes: CKA_PRIVATE's default value is token-specific."
+    },
+    {
+      "id": "LEGAL-USAGE-FLAG-DEFAULT-VERIFY",
+      "status": "legal",
+      "path": "*.CKA_VERIFY.*",
+      "justification": "Token-specific default for an unset usage flag; explicitly-set values agree across engines.",
+      "citation": "PKCS#11 v3.2 §4.9 common key attribute table footnote."
+    },
+    {
+      "id": "LEGAL-USAGE-FLAG-DEFAULT-UNWRAP",
+      "status": "legal",
+      "path": "*.CKA_UNWRAP.*",
+      "justification": "Token-specific default for an unset usage flag; explicitly-set values agree across engines.",
+      "citation": "PKCS#11 v3.2 §4.9 common key attribute table footnote."
+    },
+    {
+      "id": "LEGAL-USAGE-FLAG-DEFAULT-DERIVE",
+      "status": "legal",
+      "path": "*.CKA_DERIVE.*",
+      "justification": "Token-specific default for an unset usage flag; explicitly-set values agree across engines.",
+      "citation": "PKCS#11 v3.2 §4.9 common key attribute table footnote."
+    },
+    {
+      "id": "LEGAL-OPTIONAL-ATTR-NOT-MATERIALISED-LABEL",
+      "status": "legal",
+      "path": "*.CKA_LABEL.*",
+      "justification": "Same materialisation convention: C++ returns a zero-length CKA_LABEL where none was supplied, Rust reports the attribute absent.",
+      "citation": "PKCS#11 v3.2 §5.7.5; CKA_LABEL is an optional descriptive attribute."
+    },
+    {
+      "id": "LEGAL-USAGE-FLAG-DEFAULT-SIGN",
+      "status": "legal",
+      "path": "*.CKA_SIGN.*",
+      "justification": "Token-specific default for an unset usage flag; explicitly-set values agree across engines.",
+      "citation": "PKCS#11 v3.2 §4.9 common key attribute table footnote."
+    },
+    {
+      "id": "LEGAL-USAGE-FLAG-DEFAULT-WRAP",
+      "status": "legal",
+      "path": "*.CKA_WRAP.*",
+      "justification": "Token-specific default for an unset usage flag; explicitly-set values agree across engines.",
+      "citation": "PKCS#11 v3.2 §4.9 common key attribute table footnote."
+    },
+    {
+      "id": "DEFECT-RUST-CKA_VALUE-ON-ASYMMETRIC-KEYS",
+      "status": "defect",
+      "path": "*CKA_VALUE.*",
+      "justification": "Rust carries CKA_VALUE on RSA public keys (an engine-internal packed blob), RSA private keys (PKCS#8 DER) and unwrapped EC private keys, where the class tables define no such attribute — and on the unwrapped private key it is readable in the clear where C++ answers CKR_ATTRIBUTE_SENSITIVE. This is the §C residual, and it is reachable through the Cryptoki surface, not only the native one.",
+      "citation": "PKCS#11 v3.2 Tables 37/38 (RSA), 66/68 (Edwards/Montgomery): none defines CKA_VALUE for a public key, and none defines it for an RSA private key. Divergence report A3/A5/A6."
+    },
+    {
+      "id": "LEGAL-OPTIONAL-ATTR-NOT-MATERIALISED-ID",
+      "status": "legal",
+      "path": "*.CKA_ID.*",
+      "justification": "C++ materialises every attribute in the object's class table with an empty default; Rust only materialises what it sets. An object need not possess an optional attribute, and CKA_ID was not in these templates.",
+      "citation": "PKCS#11 v3.2 §5.7.5 C_GetAttributeValue: CKR_ATTRIBUTE_TYPE_INVALID is returned 'if the object does not possess such an attribute'. No table makes CKA_ID mandatory."
+    },
+    {
+      "id": "LEGAL-KEM-CAPABILITY-FLAGS-ON-NON-KEM-KEYS",
+      "status": "legal",
+      "path": "*CKA_*CAPSULATE*",
+      "justification": "Both engines expose CKA_ENCAPSULATE/CKA_DECAPSULATE on key classes that cannot encapsulate — C++ on EC/Edwards/Montgomery, Rust on ML-DSA and SLH-DSA — in opposite directions, always with value false. Confusing, not constrained. Deliberately scoped to the NON-KEM scenarios: a divergence in these flags on an actual ML-KEM key would be a real capability disagreement and must keep failing.",
+      "citation": "PKCS#11 v3.2 §4.9: these are boolean usage flags whose default is token-specific; a false flag advertises no capability.",
+      "scenario": "create.generate_key_pair.ec_p256|create.generate_key_pair.ed25519|create.generate_key_pair.x25519|create.generate_key_pair.ml_dsa_44|create.generate_key_pair.slh_dsa|encoding.wrap_private_key_pkcs8"
+    },
+    {
+      "id": "DEFECT-CPP-RECOVERY-ATTRIBUTES-STILL-ASSERTED",
+      "status": "defect",
+      "path": "*CKA_SIGN_RECOVER*|*CKA_VERIFY_RECOVER*",
+      "justification": "C++ still stamps CKA_SIGN_RECOVER and CKA_VERIFY_RECOVER true on generated key pairs although Phase 4 (C1/C3) removed the recovery path as unreachable. That is the advertise-without-dispatch fault the programme criticises elsewhere, expressed as an attribute rather than a mechanism flag.",
+      "citation": "PKCS#11 v3.2 §4.9: CKA_SIGN_RECOVER means 'the key supports signatures where the data can be recovered from the signature'. Plan §B item 3 records that the recovery path was removed rather than advertised."
+    },
+    {
+      "id": "LEGAL-ON-DISK-STORAGE-AND-TENANCY",
+      "status": "legal",
+      "scenario": "__never_matches__",
+      "path": "*",
+      "justification": "Recorded for completeness, not matched by any scenario: C++ persists token objects to a file store configured through SOFTHSM2_CONF and Rust keeps everything in memory. The harness normalises this away by using session objects; it is listed so a future engineer knows it was considered and why no scenario tests it.",
+      "citation": "PKCS#11 v3.2 §2: 'How Cryptoki provides this isolation is beyond the scope of this document.' Storage, tenancy, lock ordering and session-handle reuse are all unconstrained."
+    },
+    {
+      "id": "LEGAL-XMSS-STATE-REPRESENTATION",
+      "status": "legal",
+      "scenario": "__never_matches__",
+      "path": "*",
+      "justification": "Recorded for completeness: C++ keeps XMSS state inside the key value and Rust in engine-private vendor attributes. Both are legal, and neither is observable through the probe because the state attributes are stripped from client templates by design.",
+      "citation": "PKCS#11 v3.2 Tables 275/276 define the XMSS state attributes as 'Vendor defined'; only HSS has specified state attributes."
+    },
+    {
+      "id": "LEGAL-PIN-LOCKOUT",
+      "status": "legal",
+      "scenario": "__never_matches__",
+      "path": "*",
+      "justification": "Recorded for completeness: neither engine locks a PIN after repeated failures, and the flags that would report it (CKF_USER_PIN_LOCKED and friends) agree at zero. The specification is permissive throughout, so neither engine violates anything by never locking.",
+      "citation": "PKCS#11 v3.2 §5.5.4 defines the lockout flags without requiring any lockout policy."
+    },
+    {
+      "id": "LEGAL-MESSAGE-BASED-SIGNING-FLAGS",
+      "status": "legal",
+      "scenario": "__never_matches__",
+      "path": "*",
+      "justification": "Recorded for completeness: the message-based signing and encryption flag sets differ between the engines. No profile requires the message-based functions and no function is individually mandatory.",
+      "citation": "PKCS#11 v3.2 §5.11/§5.12; 'function not supported' is the specification's own prescribed answer for a function a token does not implement."
+    },
+    {
+      "id": "LEGAL-BUILD-FLAG-VARYING-MECHANISM-SETS",
+      "status": "legal",
+      "scenario": "__never_matches__",
+      "path": "*",
+      "justification": "Recorded for completeness: the C++ mechanism set varies with build flags (RIPEMD-160 is present only on native legacy-provider builds), so the mechanism diff is a function of the build as well as the engine. The harness records the set it actually observes rather than a hard-coded expectation, which is why this needs no scenario.",
+      "citation": "Profiles v3.2 mandates no mechanism, so a build-varying set cannot become non-conformant."
+    },
+    {
+      "id": "LEGAL-KDF-COVERAGE",
+      "status": "legal",
+      "scenario": "__never_matches__",
+      "path": "*",
+      "justification": "Recorded for completeness: the two engines implement different subsets of the key-derivation function registry. The CKD_* table is a value registry, not a mandate; no value is required, not even the null KDF.",
+      "citation": "PKCS#11 v3.2 §6.3.x defines CKD_* values without requiring support for any of them."
+    }
+  ]
+}

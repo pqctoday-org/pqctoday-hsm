@@ -63,15 +63,17 @@ public:
 	// Retrieve the OpenSSL representation of the key (lazy-initialised)
 	EVP_PKEY* getOSSLKey();
 
+	// Map CKP_ML_DSA_* → OpenSSL name string.  Public since the 2026-08-13 E3
+	// fix: OSSLMLDSAPrivateKey::createOSSLKey needs it to rebuild an EVP_PKEY
+	// from the raw FIPS 204 sk bytes, exactly as the ML-KEM pair already does.
+	static const char* paramSetToName(CK_ULONG ps);
+
 private:
 	// Cached OpenSSL key handle
 	EVP_PKEY* pkey;
 
 	// Build the OpenSSL key from parameterSet + value
 	void createOSSLKey();
-
-	// Map CKP_ML_DSA_* → OpenSSL name string
-	static const char* paramSetToName(CK_ULONG ps);
 };
 
 #endif // !_SOFTHSM_V2_OSSLMLDSAPUBLICKEY_H
