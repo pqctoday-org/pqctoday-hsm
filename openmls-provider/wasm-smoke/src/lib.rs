@@ -22,17 +22,29 @@
 use softhsmrustv3::ffi::{
     C_CreateObject, C_Decrypt, C_DecryptInit, C_DestroyObject, C_Digest, C_DigestInit,
     C_Encrypt, C_EncryptInit, C_FindObjects, C_FindObjectsFinal, C_FindObjectsInit,
-    C_GenerateKeyPair, C_GenerateRandom, C_GetAttributeValue, C_Initialize, C_OpenSession,
+    C_GenerateKeyPair, C_GenerateRandom, C_GetAttributeValue, C_InitPIN, C_InitToken,
+    C_Initialize, C_Login, C_Logout, C_OpenSession,
     C_Sign, C_SignInit, C_Verify, C_VerifyInit,
 };
 use softhsmrustv3::constants::{
-    CKA_CLASS, CKA_DECRYPT, CKA_ENCRYPT, CKA_EXTRACTABLE, CKA_KEY_TYPE, CKA_SIGN, CKA_TOKEN,
+    CKA_CLASS, CKA_DECRYPT, CKA_EC_PARAMS, CKA_ENCRYPT, CKA_EXTRACTABLE, CKA_KEY_TYPE, CKA_SIGN,
+    CKA_TOKEN,
     CKA_VALUE, CKF_RW_SESSION, CKF_SERIAL_SESSION, CKK_AES, CKK_GENERIC_SECRET, CKM_AES_GCM,
     CKM_EC_EDWARDS_KEY_PAIR_GEN, CKM_EDDSA, CKM_SHA256, CKM_SHA256_HMAC, CKO_SECRET_KEY, CKR_OK,
 };
 
 // CKO_DATA (= 0) is not in softhsmrustv3::constants — standard PKCS#11 §3.
 const CKO_DATA: u32 = 0x0000_0000;
+
+/// `id-Ed25519` (RFC 8410 §3), DER OBJECT IDENTIFIER 1.3.101.112.
+///
+/// PKCS#11 v3.2 §6.3.10: the Edwards curves "can only be specified in the
+/// CKA_EC_PARAMS attribute of the template for the public key using the
+/// curveName or the oID methods". Both keygen call sites below used to pass
+/// NULL templates with the comment "no template attrs needed; defaults are
+/// correct" — that was true only of the pre-W2 engine, which ignored the
+/// attribute and hardcoded Ed25519. It now returns CKR_TEMPLATE_INCOMPLETE.
+const ED25519_OID: [u8; 5] = [0x06, 0x03, 0x2b, 0x65, 0x70];
 
 // ── PKCS#11 session management ───────────────────────────────────────────────
 
@@ -47,8 +59,55 @@ fn pkcs11_init_idempotent() {
     );
 }
 
-/// Open a read/write session against slot 0. Returns the session handle.
+const SO_PIN: &[u8] = b"12345678";
+const USER_PIN: &[u8] = b"1234";
+
+/// Initialise slot 0's token and set the user PIN — exactly once per module
+/// instance, before any session is opened (`C_InitToken` returns
+/// `CKR_SESSION_EXISTS` while a session is live).
+fn pkcs11_bootstrap_token_once() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let rv = C_InitToken(
+            0,
+            SO_PIN.as_ptr() as *mut u8,
+            SO_PIN.len() as u32,
+            b"wasm-smoke      ".as_ptr() as *mut u8,
+        );
+        assert_eq!(rv, CKR_OK, "C_InitToken failed: 0x{:x}", rv);
+
+        let mut h: u32 = 0;
+        let rv = C_OpenSession(
+            0,
+            CKF_SERIAL_SESSION | CKF_RW_SESSION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut h as *mut u32,
+        );
+        assert_eq!(rv, CKR_OK, "C_OpenSession (bootstrap) failed: 0x{:x}", rv);
+        let rv = C_Login(h, 0 /* CKU_SO */, SO_PIN.as_ptr() as *mut u8, SO_PIN.len() as u32);
+        assert_eq!(rv, CKR_OK, "C_Login(CKU_SO) failed: 0x{:x}", rv);
+        let rv = C_InitPIN(h, USER_PIN.as_ptr() as *mut u8, USER_PIN.len() as u32);
+        assert_eq!(rv, CKR_OK, "C_InitPIN failed: 0x{:x}", rv);
+        let rv = C_Logout(h);
+        assert_eq!(rv, CKR_OK, "C_Logout failed: 0x{:x}", rv);
+    });
+}
+
+/// Open a read/write session against slot 0 **and log in as the normal user**.
+/// Returns the session handle.
+///
+/// The login is not optional. PKCS#11 v3.2 §4.4: an object with
+/// `CKA_PRIVATE = CK_TRUE` — which is the default, and what
+/// `C_GenerateKeyPair` stamps on every private key — is only "accessible ...
+/// after the appropriate user is authenticated". Without it every private-key
+/// operation here failed `CKR_KEY_HANDLE_INVALID` (0x60), which is exactly
+/// what the two Ed25519 tests below did. Measured: the same failure occurs
+/// against the pre-conformance engine (`8d55619`), so this is a long-standing
+/// defect in this smoke crate, not fallout from the v3.2 remediation — those
+/// tests never actually reached `C_Sign`.
 fn pkcs11_open_session() -> u32 {
+    pkcs11_bootstrap_token_once();
     let mut h_session: u32 = 0;
     let rv = C_OpenSession(
         0,
@@ -58,6 +117,19 @@ fn pkcs11_open_session() -> u32 {
         &mut h_session as *mut u32,
     );
     assert_eq!(rv, CKR_OK, "C_OpenSession failed: 0x{:x}", rv);
+    // Login state is token-wide, so a second login on an already-logged-in
+    // token returns CKR_USER_ALREADY_LOGGED_IN (0x100) — benign here.
+    let rv = C_Login(
+        h_session,
+        1, /* CKU_USER */
+        USER_PIN.as_ptr() as *mut u8,
+        USER_PIN.len() as u32,
+    );
+    assert!(
+        rv == CKR_OK || rv == 0x100,
+        "C_Login(CKU_USER) failed: 0x{:x}",
+        rv
+    );
     h_session
 }
 
@@ -196,14 +268,19 @@ pub fn ed25519_sign_verify_via_softhsm(msg: &[u8]) -> (u32, u32, Vec<u8>) {
     pkcs11_init_idempotent();
     let h_sess = pkcs11_open_session();
 
-    // Generate keypair — no template attrs needed; defaults are correct.
+    // Generate keypair — the public template MUST name the curve in
+    // CKA_EC_PARAMS (§6.3.10); see ED25519_OID above.
     let mut mech_kpg: [u32; 3] = [CKM_EC_EDWARDS_KEY_PAIR_GEN, 0, 0];
+    #[rustfmt::skip]
+    let mut pub_tmpl: [u32; 3] = [
+        CKA_EC_PARAMS, ED25519_OID.as_ptr() as u32, ED25519_OID.len() as u32,
+    ];
     let mut h_pub: u32 = 0;
     let mut h_priv: u32 = 0;
     let rv = C_GenerateKeyPair(
         h_sess,
         mech_kpg.as_mut_ptr() as *mut u8,
-        std::ptr::null_mut(), 0,
+        pub_tmpl.as_mut_ptr() as *mut u8, 1,
         std::ptr::null_mut(), 0,
         &mut h_pub,
         &mut h_priv,
@@ -307,15 +384,24 @@ fn create_aes_key(h_sess: u32, key: &[u8]) -> u32 {
 
 /// Run AES-GCM encrypt against an already-created key handle.
 fn aes_gcm_encrypt(h_sess: u32, h_key: u32, iv: &[u8], pt: &[u8]) -> Vec<u8> {
-    // CK_GCM_PARAMS (wasm32, 5 × u32 = 20 bytes):
-    //   [0] pIv: *const u8
-    //   [1] ulIvLen: u32 (must be 12)
-    //   [2] ulIvBits: u32 (ignored by softhsmrustv3 but required for ≥ 20 byte check)
-    //   [3] pAAD: u32 (null; AAD not used)
-    //   [4] ulTagBits: u32 (128 = 16-byte tag)
-    let gcm_params: [u32; 5] = [
+    // CK_GCM_PARAMS (wasm32, 6 × CK_ULONG = 24 bytes) — pkcs11t.h:2221:
+    //   [0] pIv:       *const u8
+    //   [1] ulIvLen:   u32 (must be 12)
+    //   [2] ulIvBits:  u32 (0 = unspecified; if set it must equal ulIvLen*8)
+    //   [3] pAAD:      u32 (null; AAD not used)
+    //   [4] ulAADLen:  u32 (0)
+    //   [5] ulTagBits: u32 (128 = 16-byte tag)
+    //
+    // This was a FIVE-field, 20-byte block that omitted `ulAADLen` and put
+    // the tag length where `ulAADLen` belongs. The old engine's parser read
+    // the same truncated shape, so the two agreed with each other and with
+    // nothing else; the conformance fix reads all six fields at CK_ULONG
+    // width and now returns CKR_ARGUMENTS_BAD for a block shorter than
+    // 6 * sizeof(CK_ULONG). The struct here was simply wrong.
+    let gcm_params: [u32; 6] = [
         iv.as_ptr() as u32,
         iv.len() as u32,
+        0,
         0,
         0,
         128,
@@ -325,7 +411,7 @@ fn aes_gcm_encrypt(h_sess: u32, h_key: u32, iv: &[u8], pt: &[u8]) -> Vec<u8> {
     let mut mech: [u32; 3] = [
         CKM_AES_GCM,
         gcm_params.as_ptr() as u32,
-        20, // sizeof(CK_GCM_PARAMS) on wasm32
+        24, // sizeof(CK_GCM_PARAMS) on wasm32
     ];
 
     let rv = C_EncryptInit(h_sess, mech.as_mut_ptr() as *mut u8, h_key);
@@ -349,8 +435,9 @@ fn aes_gcm_encrypt(h_sess: u32, h_key: u32, iv: &[u8], pt: &[u8]) -> Vec<u8> {
 
 /// Run AES-GCM decrypt against an already-created key handle.
 fn aes_gcm_decrypt(h_sess: u32, h_key: u32, iv: &[u8], ct: &[u8]) -> Vec<u8> {
-    let gcm_params: [u32; 5] = [iv.as_ptr() as u32, iv.len() as u32, 0, 0, 128];
-    let mut mech: [u32; 3] = [CKM_AES_GCM, gcm_params.as_ptr() as u32, 20];
+    // Same six-field CK_GCM_PARAMS as `aes_gcm_encrypt` above.
+    let gcm_params: [u32; 6] = [iv.as_ptr() as u32, iv.len() as u32, 0, 0, 0, 128];
+    let mut mech: [u32; 3] = [CKM_AES_GCM, gcm_params.as_ptr() as u32, 24];
 
     let rv = C_DecryptInit(h_sess, mech.as_mut_ptr() as *mut u8, h_key);
     assert_eq!(rv, CKR_OK, "C_DecryptInit AES-GCM: 0x{:x}", rv);
@@ -534,14 +621,19 @@ mod tests {
         pkcs11_init_idempotent();
         let h_sess = pkcs11_open_session();
 
-        // Generate keypair + sign "correct message"
+        // Generate keypair + sign "correct message". CKA_EC_PARAMS is
+        // mandatory on the public template (§6.3.10) — see ED25519_OID.
         let mut mech_kpg: [u32; 3] = [CKM_EC_EDWARDS_KEY_PAIR_GEN, 0, 0];
+        #[rustfmt::skip]
+        let mut pub_tmpl: [u32; 3] = [
+            CKA_EC_PARAMS, ED25519_OID.as_ptr() as u32, ED25519_OID.len() as u32,
+        ];
         let mut h_pub: u32 = 0;
         let mut h_priv: u32 = 0;
         let rv = C_GenerateKeyPair(
             h_sess,
             mech_kpg.as_mut_ptr() as *mut u8,
-            std::ptr::null_mut(), 0,
+            pub_tmpl.as_mut_ptr() as *mut u8, 1,
             std::ptr::null_mut(), 0,
             &mut h_pub, &mut h_priv,
         );
