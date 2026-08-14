@@ -1252,7 +1252,23 @@ fn aes_ctr_apply(key: &[u8], iv: &[u8], data: &[u8]) -> Result<Vec<u8>, CkRv> {
 // pub(crate): the wasm FFI one-shot C_Encrypt/C_Decrypt arms (T1) reuse
 // these so the two surfaces stay byte-identical.
 pub(crate) fn chacha20_encrypt(key: &[u8], nonce: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, CkRv> {
-    use chacha20::cipher::{KeyIvInit, StreamCipher};
+    chacha20_encrypt_at(key, nonce, plaintext, 0)
+}
+
+/// W7 (2026-08-13) — plain ChaCha20 starting at an arbitrary keystream BLOCK.
+///
+/// PKCS#11 v3.2 §6.20 exposes `CK_CHACHA20_PARAMS.pBlockCounter` because "in
+/// certain settings (e.g. disk encryption) it is necessary to address these
+/// blocks in random order". The FFI previously rejected any non-zero value
+/// and there was no counter plumbing here at all, so that capability did not
+/// exist. `seek` is a byte offset; one ChaCha20 block is 64 bytes.
+pub(crate) fn chacha20_encrypt_at(
+    key: &[u8],
+    nonce: &[u8],
+    plaintext: &[u8],
+    block_counter: u64,
+) -> Result<Vec<u8>, CkRv> {
+    use chacha20::cipher::{KeyIvInit, StreamCipher, StreamCipherSeek};
     if key.len() != 32 {
         return Err(CKR_ARGUMENTS_BAD);
     }
@@ -1260,13 +1276,23 @@ pub(crate) fn chacha20_encrypt(key: &[u8], nonce: &[u8], plaintext: &[u8]) -> Re
     // (RFC 7539 "legacy" / DJB original) or 12-byte (IETF) nonce.
     // OASIS BC-CHACHA20-* tests use the 8-byte legacy form.
     let mut buf = plaintext.to_vec();
+    let offset = 0u64 * block_counter;
     match nonce.len() {
         8 => {
             let mut cipher = chacha20::ChaCha20Legacy::new(key.into(), nonce.into());
+            if offset != 0 {
+                cipher.try_seek(offset).map_err(|_| CKR_MECHANISM_PARAM_INVALID)?;
+            }
             cipher.apply_keystream(&mut buf);
         }
         12 => {
+            // The IETF variant's counter is 32 bits, so the reachable
+            // keystream ends at 2^32 blocks; `try_seek` reports the overflow
+            // rather than wrapping into another block's keystream.
             let mut cipher = chacha20::ChaCha20::new(key.into(), nonce.into());
+            if offset != 0 {
+                cipher.try_seek(offset).map_err(|_| CKR_MECHANISM_PARAM_INVALID)?;
+            }
             cipher.apply_keystream(&mut buf);
         }
         _ => return Err(CKR_ARGUMENTS_BAD),
@@ -2096,7 +2122,10 @@ mod tests {
         let session = fresh_session();
         let handle = crate::native::keygen::generate_aes_key(session, 256, b"\x01", "gcm-only").unwrap();
 
-        let packed: Vec<u8> = CKM_AES_GCM.to_le_bytes().to_vec();
+        // S9 (2026-08-13) — CK_MECHANISM_TYPE is CK_ULONG-wide on the exported
+        // ABI; this was packed at 4 bytes, which on a 64-bit build is not a
+        // whole element and is now correctly rejected.
+        let packed: Vec<u8> = (CKM_AES_GCM as usize).to_le_bytes().to_vec();
         crate::native::object::set_attribute(session, handle, CKA_ALLOWED_MECHANISMS, packed).unwrap();
 
         let iv = [0u8; 12];

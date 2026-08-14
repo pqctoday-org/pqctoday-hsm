@@ -138,8 +138,16 @@ fn p0c_twenty_threads_one_shared_token() {
     // sessions). Each thread calling native::open_session (which attempts
     // its own login) would be a MISUSE of the API and correctly gets
     // CKR_USER_ALREADY_LOGGED_IN after the C_Login atomicity fix below.
+    //
+    // S6 (2026-08-13) — this session is now HELD OPEN for the duration.
+    // PKCS#11 v3.2 §5.6.2 makes closing the LAST session on a slot return the
+    // token's login state to public, which the engine previously did not
+    // implement; the test used to close this session immediately and rely on
+    // the login surviving, so every worker thread's session came up
+    // authenticated by accident. Keeping one session open is both the
+    // conformant way to express "the application is logged in" and the real
+    // usage pattern the comment above describes.
     let setup_session = native::open_session(9, "87654321").expect("initial login+session");
-    native::close_session(setup_session).ok();
 
     const THREADS: usize = 20;
     const OPS_PER_THREAD: usize = 200;
@@ -213,6 +221,10 @@ fn p0c_twenty_threads_one_shared_token() {
         "P0c: {THREADS} threads x {OPS_PER_THREAD} sign+verify ops on ONE shared token \
          in {elapsed:?} ({ops_per_sec:.0} ops/sec) — ok={ok} err={err}"
     );
+
+    // The application's login-holding session is released only now that every
+    // worker has finished (S6 — closing it earlier logs the token out).
+    native::close_session(setup_session).ok();
 
     assert_eq!(err, 0, "{err} operations failed or corrupted under 20-thread contention");
     assert_eq!(ok, (THREADS * OPS_PER_THREAD) as u64);

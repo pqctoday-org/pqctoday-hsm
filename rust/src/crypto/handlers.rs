@@ -30,6 +30,101 @@ pub const CURVE_P256: u32 = 256;
 pub const CURVE_P384: u32 = 384;
 pub const CURVE_P521: u32 = 521;
 pub const CURVE_K256: u32 = 257;
+/// Curve identifiers this engine RECOGNISES from `CKA_EC_PARAMS` but does not
+/// implement. Kept distinct from "undecodable" so [`decode_ec_params`] can
+/// answer `CKR_CURVE_NOT_SUPPORTED` rather than `CKR_DOMAIN_PARAMS_INVALID`.
+pub const CURVE_UNSUPPORTED: u32 = u32::MAX;
+
+/// W1 (2026-08-13) — decode `CKA_EC_PARAMS` as the X9.62 `Parameters` CHOICE
+/// the specification defines, and NEVER default a curve.
+///
+/// §6.3.9 generates a key pair "with particular EC domain parameters, as
+/// specified in the CKA_EC_PARAMS attribute of the template for the public
+/// key"; §6.3 gives `CKR_CURVE_NOT_SUPPORTED` for an unsupported curve and
+/// `CKR_DOMAIN_PARAMS_INVALID` for an invalid or unsupported representation;
+/// the attribute is mandatory at generation, so absence is
+/// `CKR_TEMPLATE_INCOMPLETE`. §6.3.10 additionally requires the Edwards and
+/// Montgomery curves be given "using the curveName or the oID methods".
+///
+/// What this replaces: identification by the attribute's LAST BYTE — `0x23`
+/// meant P-521, `0x22` P-384, `0x0a` secp256k1, and a bare `else` produced a
+/// **P-256 key stamped as P-256, returning success**. So a missing attribute
+/// yielded P-256; every brainpool curve and every NIST curve whose OID does
+/// not end in those bytes yielded P-256; the curve-NAME form the spec
+/// recommends was never recognised at all; and last-byte matching collides
+/// freely across the OID space.
+///
+/// Accepts both legal forms, as §6.3.10's interop note asks:
+///   * `OBJECT IDENTIFIER` — `06 len <oid bytes>`
+///   * `PrintableString` curve name — `13 len <ascii>`
+///
+/// `explicit ECParameters` (a `SEQUENCE`, tag `0x30`) is a legal CHOICE arm
+/// this engine does not implement — `CKR_CURVE_NOT_SUPPORTED`. The
+/// implicitCA form (`NULL`, tag `0x05`) is forbidden outright and is
+/// reported as an invalid representation.
+pub fn decode_ec_params(params: &[u8]) -> Result<u32, u32> {
+    use crate::constants::{CKR_CURVE_NOT_SUPPORTED, CKR_DOMAIN_PARAMS_INVALID};
+    if params.len() < 2 {
+        return Err(CKR_DOMAIN_PARAMS_INVALID);
+    }
+    let tag = params[0];
+    let len = params[1] as usize;
+    // Only short-form DER lengths occur for these values (the longest named
+    // curve OID is well under 127 bytes).
+    if params[1] & 0x80 != 0 || params.len() < 2 + len {
+        return Err(CKR_DOMAIN_PARAMS_INVALID);
+    }
+    let body = &params[2..2 + len];
+    match tag {
+        // ── OBJECT IDENTIFIER ────────────────────────────────────────────
+        0x06 => Ok(match body {
+            // 1.2.840.10045.3.1.7  prime256v1 / P-256
+            [0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07] => CURVE_P256,
+            // 1.3.132.0.34  secp384r1 / P-384
+            [0x2b, 0x81, 0x04, 0x00, 0x22] => CURVE_P384,
+            // 1.3.132.0.35  secp521r1 / P-521
+            [0x2b, 0x81, 0x04, 0x00, 0x23] => CURVE_P521,
+            // 1.3.132.0.10  secp256k1
+            [0x2b, 0x81, 0x04, 0x00, 0x0a] => CURVE_K256,
+            // 1.3.101.110 / .111 — X25519 / X448 (Montgomery)
+            [0x2b, 0x65, 0x6e] => CURVE_X25519,
+            [0x2b, 0x65, 0x6f] => CURVE_X448,
+            // 1.3.101.112 / .113 — Ed25519 / Ed448 (Edwards)
+            [0x2b, 0x65, 0x70] => CURVE_ED25519,
+            [0x2b, 0x65, 0x71] => CURVE_ED448,
+            // A well-formed OID naming a curve this token does not
+            // implement (brainpool, the F_2^m curves, …).
+            _ => CURVE_UNSUPPORTED,
+        }),
+        // ── PrintableString curveName ────────────────────────────────────
+        0x13 => {
+            let name = core::str::from_utf8(body).map_err(|_| CKR_DOMAIN_PARAMS_INVALID)?;
+            Ok(match name {
+                "P-256" | "prime256v1" | "secp256r1" => CURVE_P256,
+                "P-384" | "secp384r1" => CURVE_P384,
+                "P-521" | "secp521r1" => CURVE_P521,
+                "secp256k1" => CURVE_K256,
+                "curve25519" | "X25519" => CURVE_X25519,
+                "curve448" | "X448" => CURVE_X448,
+                "edwards25519" | "Ed25519" => CURVE_ED25519,
+                "edwards448" | "Ed448" => CURVE_ED448,
+                _ => CURVE_UNSUPPORTED,
+            })
+        }
+        // ── explicit ECParameters (SEQUENCE) ─────────────────────────────
+        0x30 => Err(CKR_CURVE_NOT_SUPPORTED),
+        // ── implicitCA (NULL) — forbidden by the spec ────────────────────
+        0x05 => Err(CKR_DOMAIN_PARAMS_INVALID),
+        _ => Err(CKR_DOMAIN_PARAMS_INVALID),
+    }
+}
+
+/// Curve ids for the Edwards / Montgomery families, which have no key-size
+/// number to reuse the way the Weierstrass curves do.
+pub const CURVE_X25519: u32 = 25519;
+pub const CURVE_X448: u32 = 448;
+pub const CURVE_ED25519: u32 = 25520;
+pub const CURVE_ED448: u32 = 449;
 
 // ── Object Store ─────────────────────────────────────────────────────────────
 
@@ -157,10 +252,135 @@ pub unsafe fn absorb_template_attrs(attrs: &mut Attributes, template: *mut u8, c
             continue;
         }
         if !val_ptr.is_null() && val_len > 0 {
-            let v = std::slice::from_raw_parts(val_ptr, val_len).to_vec();
+            // S2 — an ATTRIBUTE-array attribute's pValue is a CK_ATTRIBUTE[],
+            // whose own pValue pointers are dangling the instant this call
+            // returns. Copying the raw struct bytes (what every other
+            // attribute does) would store pointers, not data. Flatten instead.
+            let v = if attr_is_attribute_array(attr_type) {
+                match flatten_attr_array(val_ptr, val_len) {
+                    Some(flat) => flat,
+                    // Malformed array — drop it rather than store a
+                    // half-decoded restriction. `validate_create_template`
+                    // rejects the same shape up front on the create path.
+                    None => continue,
+                }
+            } else {
+                std::slice::from_raw_parts(val_ptr, val_len).to_vec()
+            };
             attrs.insert(attr_type, v);
         }
     }
+}
+
+/// Like [`get_attr_bytes`], but distinguishes "present with a ZERO-length
+/// value" (`Some(vec![])`) from "absent" (`None`). PKCS#11 v3.2 §4.11 gives
+/// the zero-length form its own meaning for `CKA_CHECK_VALUE` — "The
+/// generation of the KCV may be prevented by the application supplying the
+/// attribute in the template as a no-value (0 length) entry" — which
+/// `get_attr_bytes` collapses into `None`.
+///
+/// # Safety
+/// Same contract as [`get_attr_bytes`].
+pub unsafe fn find_template_entry(
+    template: *mut u8,
+    count: u32,
+    attr_type: u32,
+) -> Option<Vec<u8>> {
+    if template.is_null() || count > 65536 {
+        return None;
+    }
+    let ptr = template as *mut usize;
+    for i in 0..count {
+        let t = *ptr.add((i * 3) as usize) as u32;
+        if t != attr_type {
+            continue;
+        }
+        let val_ptr = *ptr.add((i * 3 + 1) as usize) as usize as *const u8;
+        let val_len = *ptr.add((i * 3 + 2) as usize) as usize;
+        if val_ptr.is_null() || val_len == 0 {
+            return Some(Vec::new());
+        }
+        return Some(std::slice::from_raw_parts(val_ptr, val_len).to_vec());
+    }
+    None
+}
+
+/// PKCS#11 v3.2 §5.18.3 — the attribute types whose value is a
+/// `CK_ATTRIBUTE[]` (as opposed to `CKA_ALLOWED_MECHANISMS`, which carries
+/// the CKF_ARRAY_ATTRIBUTE bit but is a `CK_MECHANISM_TYPE[]` of plain
+/// integers and must NOT be flattened).
+pub(crate) fn attr_is_attribute_array(attr_type: u32) -> bool {
+    matches!(
+        attr_type,
+        crate::constants::CKA_WRAP_TEMPLATE
+            | crate::constants::CKA_UNWRAP_TEMPLATE
+            | crate::constants::CKA_DERIVE_TEMPLATE
+    )
+}
+
+/// Flatten a caller's `CK_ATTRIBUTE[]` into a SELF-CONTAINED byte blob the
+/// engine can store and compare later:
+///
+/// ```text
+///   repeat { u32 attr_type ‖ u32 value_len ‖ value_len bytes }
+/// ```
+///
+/// `byte_len` is the array's size in bytes (the `ulValueLen` the caller
+/// supplied), which must be a whole number of `CK_ATTRIBUTE` structs.
+/// Returns `None` for a ragged length or an entry whose `pValue` is NULL
+/// with a non-zero length.
+///
+/// # Safety
+/// `arr` must point to `byte_len` readable bytes shaped as `CK_ATTRIBUTE[]`.
+pub unsafe fn flatten_attr_array(arr: *const u8, byte_len: usize) -> Option<Vec<u8>> {
+    let word = std::mem::size_of::<usize>();
+    let stride = word * 3;
+    if byte_len == 0 || byte_len % stride != 0 {
+        return None;
+    }
+    let n = byte_len / stride;
+    if n > 65536 {
+        return None;
+    }
+    let ptr = arr as *const usize;
+    let mut out = Vec::with_capacity(byte_len);
+    for i in 0..n {
+        let t = *ptr.add(i * 3) as u32;
+        let vp = *ptr.add(i * 3 + 1) as *const u8;
+        let vl = *ptr.add(i * 3 + 2);
+        if vp.is_null() && vl > 0 {
+            return None;
+        }
+        if vl > byte_len.max(1 << 20) {
+            return None; // implausible length — refuse rather than read wild
+        }
+        out.extend_from_slice(&t.to_le_bytes());
+        out.extend_from_slice(&(vl as u32).to_le_bytes());
+        if vl > 0 {
+            out.extend_from_slice(std::slice::from_raw_parts(vp, vl));
+        }
+    }
+    Some(out)
+}
+
+/// Inverse of [`flatten_attr_array`]. `None` if the blob is truncated.
+pub fn parse_flat_attr_array(blob: &[u8]) -> Option<Vec<(u32, Vec<u8>)>> {
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while i < blob.len() {
+        if i + 8 > blob.len() {
+            return None;
+        }
+        let t = u32::from_le_bytes([blob[i], blob[i + 1], blob[i + 2], blob[i + 3]]);
+        let l = u32::from_le_bytes([blob[i + 4], blob[i + 5], blob[i + 6], blob[i + 7]]) as usize;
+        i += 8;
+        if i + l > blob.len() {
+            return None;
+        }
+        out.push((t, blob[i..i + l].to_vec()));
+        i += l;
+    }
+    Some(out)
 }
 
 // ── Session/Token Info ───────────────────────────────────────────────────────

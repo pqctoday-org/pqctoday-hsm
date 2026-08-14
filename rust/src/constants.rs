@@ -32,6 +32,23 @@ pub const CKR_KEY_NOT_WRAPPABLE: u32 = 0x0000_0069; // PKCS#11 v3.2 — CKA_WRAP
 /// this token." Narrower than `CKR_ATTRIBUTE_VALUE_INVALID`: for an
 /// unrecognized `CKA_PARAMETER_SET` value on a PQC keygen template.
 pub const CKR_PARAMETER_SET_NOT_SUPPORTED: u32 = 0x0000_0209;
+/// PKCS#11 v3.2 §6.3 — "an invalid or unsupported representation of the EC
+/// domain parameters". Distinct from [`CKR_CURVE_NOT_SUPPORTED`]: the bytes
+/// could not be decoded at all (W1, 2026-08-13).
+pub const CKR_DOMAIN_PARAMS_INVALID: u32 = 0x0000_0130;
+/// PKCS#11 v3.2 §6.3 — the CKA_EC_PARAMS decoded cleanly and names a curve
+/// this token does not implement (W1/W2/C2, 2026-08-13).
+pub const CKR_CURVE_NOT_SUPPORTED: u32 = 0x0000_0140;
+/// PKCS#11 v3.2 §5.2 — returned by the NULL-mechanism cancel form of a
+/// `C_*Init` function when the active operation cannot be cancelled (C2).
+pub const CKR_OPERATION_CANCEL_FAILED: u32 = 0x0000_0202;
+/// Vendor error (CKR_VENDOR_DEFINED | 1) — a persisted engine snapshot was
+/// written under a superseded serialisation format. Deliberately NOT
+/// migrated in place: the pre-S4 layout stored stateful HBS key state under
+/// client-writable vendor attribute ids, so silently reinterpreting such a
+/// key would present a rewound one-time-signature key as a fresh one. See
+/// `state_snapshot::SNAPSHOT_MAGIC` (remediation item S4, 2026-08-13).
+pub const CKR_PQCTODAY_SNAPSHOT_FORMAT_UNSUPPORTED: u32 = 0x8000_0001;
 pub const CKR_KEY_UNEXTRACTABLE: u32 = 0x0000_006A;
 pub const CKR_KEY_FUNCTION_NOT_PERMITTED: u32 = 0x0000_0068;
 pub const CKR_KEY_HANDLE_INVALID: u32 = 0x0000_0060;
@@ -238,11 +255,51 @@ pub const CKA_TRUST_OCSP_SIGNING: u32 = 0x0000_0632;
 /// PKCS#11 v3.2 §3.1/§4.8 Table 13 — marks an attribute whose value is an
 /// array (here, of `CK_MECHANISM_TYPE`) rather than a scalar.
 pub const CKF_ARRAY_ATTRIBUTE: u32 = 0x4000_0000;
+
+// ── CK_MECHANISM_INFO.flags (values from the pinned canonical OASIS v3.2
+//    pkcs11t.h, docs/refs/pkcs11t-canonical-v3.2.h:1298-1312) ───────────────
+// PKCS#11 v3.2 §6.3.3 states three times that a library performing EC
+// mechanisms "must set" the field-type, parameter-encoding and point-form
+// flags on EACH EC mechanism. Remediation item C3, 2026-08-13.
+pub const CKF_WRAP: u32 = 0x0002_0000;
+pub const CKF_UNWRAP: u32 = 0x0004_0000;
+/// The mechanism can be used with EC domain parameters over F_p.
+pub const CKF_EC_F_P: u32 = 0x0010_0000;
+/// F_2^m curves — this engine implements none, so it is never set.
+pub const CKF_EC_F_2M: u32 = 0x0020_0000;
+/// CKA_EC_PARAMS may be supplied as explicit `ECParameters`.
+pub const CKF_EC_ECPARAMETERS: u32 = 0x0040_0000;
+/// CKA_EC_PARAMS may be supplied as a named-curve OID.
+pub const CKF_EC_OID: u32 = 0x0080_0000;
+/// Uncompressed point form is accepted / produced.
+pub const CKF_EC_UNCOMPRESS: u32 = 0x0100_0000;
+/// Compressed point form is accepted / produced.
+pub const CKF_EC_COMPRESS: u32 = 0x0200_0000;
+/// CKA_EC_PARAMS may be supplied as a `PrintableString` curve name.
+pub const CKF_EC_CURVENAME: u32 = 0x0400_0000;
 /// PKCS#11 v3.2 §4.8 Table 13 — restricts a key to a caller-specified
 /// mechanism whitelist; absent = unrestricted (the spec default). Stored as
 /// a packed `CK_MECHANISM_TYPE[]` (u32 LE, matching this engine's existing
 /// CK_ULONG-as-4-byte convention — see `check_mechanism_allowed` in ffi.rs).
 pub const CKA_ALLOWED_MECHANISMS: u32 = CKF_ARRAY_ATTRIBUTE | 0x0000_0600;
+
+/// PKCS#11 v3.2 §5.18.3 — "To partition the wrapping keys so they can only
+/// wrap a subset of extractable keys the attribute CKA_WRAP_TEMPLATE can be
+/// used on the wrapping key to specify an attribute set that will be compared
+/// against the attributes of the key to be wrapped." Array attribute: the
+/// caller supplies a `CK_ATTRIBUTE[]`, which the engine flattens into a
+/// self-contained byte blob at absorb time (see
+/// `crypto::handlers::flatten_attr_array` — the caller's pointers are
+/// invalid the moment the call returns, so the raw struct bytes cannot be
+/// stored). Remediation item S2, 2026-08-13.
+pub const CKA_WRAP_TEMPLATE: u32 = CKF_ARRAY_ATTRIBUTE | 0x0000_0211;
+/// §5.18.3 twin of [`CKA_WRAP_TEMPLATE`], applied to the key produced by
+/// `C_UnwrapKey`; a caller template contradicting it is
+/// `CKR_TEMPLATE_INCONSISTENT`.
+pub const CKA_UNWRAP_TEMPLATE: u32 = CKF_ARRAY_ATTRIBUTE | 0x0000_0212;
+/// §5.18.3 — the derive counterpart. Defined for completeness of the array
+/// attribute family; not enforced by any derive path yet.
+pub const CKA_DERIVE_TEMPLATE: u32 = CKF_ARRAY_ATTRIBUTE | 0x0000_0213;
 
 // Private attribute: stores the parameter set on generated keys
 pub const CKA_PRIV_PARAM_SET: u32 = 0xFFFF_0001;
@@ -259,6 +316,30 @@ pub const CKA_PRIV_OWNER_SESSION: u32 = 0xFFFF_0003;
 // are scoped to the session's slot via this attribute (audit: multi-slot
 // FindObjects scoping).
 pub const CKA_PRIV_SLOT_ID: u32 = 0xFFFF_0004;
+// ── Engine-private stateful-signature state (remediation item S4, 2026-08-13)
+// These three lived at 0x8000_0101/0105/0106 — inside the vendor range that
+// `state::attr_mutation_allowed` exempted from mutation policy wholesale, so
+// a client could write the leaf index back to zero and rewind an XMSS/LMS
+// one-time-signature key (reuse of a one-time key permits forgery). The
+// v3.2 HSS/XMSS private-key tables put this state in the key's value
+// attribute, which carries no modify-after-creation footnote and is
+// therefore not modifiable; relocating it to a writable vendor attribute
+// routed around that. They now live in the ENGINE-PRIVATE range, which
+// `crypto::handlers::template_attr_is_skipped` strips from client templates
+// and `state::attr_mutation_allowed` refuses outright. They remain READABLE
+// (C_GetAttributeValue does not filter by id range), so the playground's
+// remaining-signature display is unaffected.
+//
+// The ids MOVED rather than the policy alone changing, because genuine
+// vendor attributes must keep their spec-sanctioned "outside Cryptoki's
+// scope" mutability. `state_snapshot` bumps its format accordingly and
+// REFUSES the old layout — see CKR_PQCTODAY_SNAPSHOT_FORMAT_UNSUPPORTED.
+/// Raw serialised stateful private-key blob (HSS/LMS, XMSS, XMSS^MT).
+pub const CKA_PRIV_STATEFUL_KEY_STATE: u32 = 0xFFFF_0005;
+/// Current one-time-signature leaf index (u64, little-endian).
+pub const CKA_PRIV_LEAF_INDEX: u32 = 0xFFFF_0006;
+/// Remaining XMSS / XMSS^MT signature operations (CK_ULONG width, LE).
+pub const CKA_PRIV_XMSS_KEYS_REMAINING: u32 = 0xFFFF_0007;
 
 // ── PKCS#11 Mechanism Types ──────────────────────────────────────────────────
 
@@ -844,14 +925,18 @@ pub const CKM_XMSSMT: u32 = 0x0000_4037; // pkcs11t.h §1224
 pub const CKM_KECCAK_256: u32 = 0x8000_0010;
 
 // ── Stateful Key Attributes (vendor, G10) ────────────────────────────────────
-// Range: 0x80000101–0x80000106 (offset from CKM vendor range to avoid confusion)
-
-pub const CKA_STATEFUL_KEY_STATE: u32 = 0x8000_0101; // raw serialised private key blob
+// Range: 0x80000102–0x80000107. These are pure PARAMETER-SET labels — inert
+// data a client may legitimately set on an imported key. The three STATEFUL
+// members that formerly shared this range (CKA_PRIV_STATEFUL_KEY_STATE,
+// CKA_PRIV_LEAF_INDEX, CKA_PRIV_XMSS_KEYS_REMAINING) moved to the engine-private
+// 0xFFFF_00xx range on 2026-08-13 — see remediation item S4 near
+// CKA_PRIV_SLOT_ID. 0x8000_0101 and 0x8000_0105/0106 are now RETIRED and must
+// not be reused: a pre-S4 serialised key carries state under those ids, and
+// the snapshot format bump exists precisely so such a key fails loudly rather
+// than being reinterpreted.
 pub const CKA_LMS_PARAM_SET: u32 = 0x8000_0102; // CKP_LMS_SHA256_M32_H* value
 pub const CKA_LMOTS_PARAM_SET: u32 = 0x8000_0103; // CKP_LMOTS_SHA256_N32_W* value
 pub const CKA_XMSS_PARAM_SET: u32 = 0x8000_0104; // CKP_XMSS_* value
-pub const CKA_LEAF_INDEX: u32 = 0x8000_0105; // current leaf index (u64, little-endian)
-pub const CKA_XMSS_KEYS_REMAINING: u32 = 0x8000_0106; // remaining XMSS signature operations (u32, LE)
 pub const CKA_XMSSMT_PARAM_SET: u32 = 0x8000_0107; // CKP_XMSSMT_* value (RFC 8391 OID)
 
 // Standard multi-level HSS level-type attribute (PKCS#11 v3.2 §6.14)

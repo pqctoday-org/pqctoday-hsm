@@ -284,12 +284,38 @@ pub fn C_InitToken(slot_id: u32, p_pin: *mut u8, ul_pin_len: u32, p_label: *mut 
         return CKR_SESSION_EXISTS;
     }
 
+    let pin_bytes = unsafe { std::slice::from_raw_parts(p_pin, ul_pin_len as usize) };
+
+    // S1 (2026-08-13) — §5.5.7: "If the token is being reinitialized, the
+    // pPin parameter is checked against the existing SO PIN to authorize the
+    // initialization operation", and CKF_TOKEN_INITIALIZED "indicates the
+    // action that will result from calling C_InitToken. If set, the token
+    // will be reinitialized, and the client MUST supply the existing SO
+    // password in pPin."
+    //
+    // Before this, the SO PIN hash was overwritten unconditionally and
+    // `token.initialized` was never read: any caller could seize an
+    // initialised token and install their own security-officer PIN. The
+    // check runs BEFORE any state change, so a refused call leaves the token
+    // and its objects exactly as they were.
+    //
+    // Deliberately NOT added (per §5.5.7's return list, which omits the
+    // length-range code): PIN-length validation.
+    let existing = match TOKEN_STORE.with(|ts| ts.borrow().get(&slot_id).cloned()) {
+        Some(t) => t,
+        None => return CKR_SLOT_ID_INVALID,
+    };
+    if crate::state::token_initialized(&existing)
+        && hash_pin(pin_bytes, &existing.so_pin_salt) != existing.so_pin_hash
+    {
+        return CKR_PIN_INCORRECT;
+    }
+
     // Hash PIN with PBKDF2
     let mut salt = [0u8; 16];
     if getrandom::getrandom(&mut salt).is_err() {
         return CKR_GENERAL_ERROR;
     }
-    let pin_bytes = unsafe { std::slice::from_raw_parts(p_pin, ul_pin_len as usize) };
     let so_pin_hash = hash_pin(pin_bytes, &salt);
 
     let label_bytes = unsafe { std::slice::from_raw_parts(p_label, 32) };
@@ -311,8 +337,16 @@ pub fn C_InitToken(slot_id: u32, p_pin: *mut u8, ul_pin_len: u32, p_label: *mut 
             false
         }
     });
+    if !success {
+        return CKR_SLOT_ID_INVALID;
+    }
 
-    if success { CKR_OK } else { CKR_SLOT_ID_INVALID }
+    // §5.5.7 — "When a token is initialized, all objects that can be
+    // destroyed are destroyed." Scoped to THIS slot's token; CKA_DESTROYABLE
+    // =FALSE objects (the built-in CKO_PROFILE) survive, as the wording
+    // requires.
+    crate::state::destroy_destroyable_objects_on_slot(slot_id);
+    CKR_OK
 }
 
 #[wasm_bindgen(js_name = _C_OpenSession)]
@@ -371,6 +405,7 @@ pub fn C_OpenSession(
 #[wasm_bindgen(js_name = _C_CloseSession)]
 pub fn C_CloseSession(h_session: u32) -> u32 {
     require_init!();
+    let slot = crate::state::session_slot(h_session);
     let existed = SESSIONS.with(|s| s.borrow_mut().remove(&h_session).is_some());
     if !existed {
         return CKR_SESSION_HANDLE_INVALID;
@@ -402,6 +437,11 @@ pub fn C_CloseSession(h_session: u32) -> u32 {
     MESSAGE_VERIFY_ACC.with(|s| s.borrow_mut().remove(&h_session));
     SIGN_MULTIPART_ACC.with(|s| s.borrow_mut().remove(&h_session));
     VERIFY_MULTIPART_ACC.with(|s| s.borrow_mut().remove(&h_session));
+    // S6 — §5.6.2: when the LAST session on the slot closes, the login state
+    // returns to public.
+    if let Some(slot) = slot {
+        reset_login_state_if_no_sessions(slot);
+    }
     CKR_OK
 }
 
@@ -424,6 +464,10 @@ pub fn C_CloseAllSessions(slot_id: u32) -> u32 {
     for h in handles {
         let _ = C_CloseSession(h);
     }
+    // S6 — §5.6.3 states the reset explicitly for this function. C_CloseSession
+    // already performs it when it removes the last session, but a slot with
+    // ZERO sessions open must also end up public, so call it unconditionally.
+    reset_login_state_if_no_sessions(slot_id);
     CKR_OK
 }
 
@@ -618,9 +662,42 @@ pub fn C_Logout(h_session: u32) -> u32 {
         }
     });
     if changed {
+        // S6 (2026-08-13) — §5.6.10. Before this, C_Logout flipped the login
+        // state and returned: every outstanding handle to a private object
+        // kept working the moment a user logged back in, and private session
+        // objects survived. Both are now handled in one pass; see
+        // state::invalidate_private_handles_on_slot for why token objects are
+        // re-keyed rather than marked.
+        crate::state::invalidate_private_handles_on_slot(slot_id);
         CKR_OK
     } else {
         CKR_USER_NOT_LOGGED_IN
+    }
+}
+
+/// S6 — §5.6.2 / §5.6.3: closing the last session on a slot, and
+/// C_CloseAllSessions, both return "the login state of the token for the
+/// application … to public sessions". Without this a fresh session opened on
+/// the slot afterwards was already authenticated. Runs the same private-handle
+/// invalidation C_Logout does, since the application's authenticated context
+/// is equally gone.
+fn reset_login_state_if_no_sessions(slot_id: u32) {
+    let still_open = SESSIONS.with(|s| s.borrow().values().any(|ss| ss.slot_id == slot_id));
+    if still_open {
+        return;
+    }
+    let was_logged_in = TOKEN_STORE.with(|ts| {
+        let mut store = ts.borrow_mut();
+        match store.get_mut(&slot_id) {
+            Some(token) if token.login_state != LoginState::Public => {
+                token.login_state = LoginState::Public;
+                true
+            }
+            _ => false,
+        }
+    });
+    if was_logged_in {
+        crate::state::invalidate_private_handles_on_slot(slot_id);
     }
 }
 
@@ -1275,6 +1352,21 @@ fn C_GenerateKeyPair_impl(
         return CKR_ARGUMENTS_BAD;
     }
     unsafe {
+        // S7 — either half asking for a token object needs a R/W session.
+        if let Err(rv) = gate_ro_session_for_template(
+            _h_session,
+            p_public_key_template,
+            ul_public_key_attribute_count,
+        ) {
+            return rv;
+        }
+        if let Err(rv) = gate_ro_session_for_template(
+            _h_session,
+            p_private_key_template,
+            ul_private_key_attribute_count,
+        ) {
+            return rv;
+        }
         let mech_type = *(p_mechanism as *const u32);
         // V4 — a CKA_KEY_TYPE in either template that contradicts the key-pair
         // mechanism is CKR_TEMPLATE_INCONSISTENT, not silently overwritten.
@@ -1887,11 +1979,9 @@ fn C_GenerateKeyPair_impl(
                 let is_p521 = ec_params
                     .as_ref()
                     .is_some_and(|b| b.len() >= 7 && b[b.len() - 1] == 0x23);
-
                 let is_p384 = ec_params
                     .as_ref()
                     .is_some_and(|b| b.len() >= 7 && b[b.len() - 1] == 0x22);
-
                 let is_secp256k1 = ec_params
                     .as_ref()
                     .is_some_and(|b| b.len() >= 7 && b[b.len() - 1] == 0x0a);
@@ -2103,7 +2193,6 @@ fn C_GenerateKeyPair_impl(
                     .and_then(|b| b.last().copied())
                     .map(|last| last == 0x6f)
                     .unwrap_or(false);
-
                 let mut pub_attrs = HashMap::new();
                 let mut prv_attrs = HashMap::new();
                 store_ulong(&mut pub_attrs, CKA_CLASS, CKO_PUBLIC_KEY);
@@ -2280,8 +2369,8 @@ fn C_GenerateKeyPair_impl(
                 store_ulong(&mut pub_attrs, CKA_HSS_KEYS_REMAINING, total_sigs);
                 store_ulong(&mut prv_attrs, CKA_HSS_KEYS_REMAINING, total_sigs);
                 store_bool(&mut prv_attrs, CKA_LOCAL, true);
-                prv_attrs.insert(CKA_STATEFUL_KEY_STATE, priv_bytes);
-                prv_attrs.insert(CKA_LEAF_INDEX, 0u64.to_le_bytes().to_vec());
+                prv_attrs.insert(CKA_PRIV_STATEFUL_KEY_STATE, priv_bytes);
+                prv_attrs.insert(CKA_PRIV_LEAF_INDEX, 0u64.to_le_bytes().to_vec());
                 absorb_template_attrs(
                     &mut pub_attrs,
                     p_public_key_template,
@@ -2371,13 +2460,13 @@ fn C_GenerateKeyPair_impl(
                 store_bool(&mut prv_attrs, CKA_EXTRACTABLE, false);
                 store_bool(&mut prv_attrs, CKA_SIGN, true);
                 // XMSS capacity = 2^H from the parameter set (PKCS#11 v3.2 §6.15).
-                // Tracked under the vendor attribute CKA_XMSS_KEYS_REMAINING, separate from CKA_HSS_KEYS_REMAINING.
+                // Tracked under the vendor attribute CKA_PRIV_XMSS_KEYS_REMAINING, separate from CKA_HSS_KEYS_REMAINING.
                 let xmss_max_sigs = crate::crypto::xmss_bridge::xmss_param_max_sigs(xmss_param);
-                store_ulong(&mut pub_attrs, CKA_XMSS_KEYS_REMAINING, xmss_max_sigs);
-                store_ulong(&mut prv_attrs, CKA_XMSS_KEYS_REMAINING, xmss_max_sigs);
+                store_ulong(&mut pub_attrs, CKA_PRIV_XMSS_KEYS_REMAINING, xmss_max_sigs);
+                store_ulong(&mut prv_attrs, CKA_PRIV_XMSS_KEYS_REMAINING, xmss_max_sigs);
                 store_bool(&mut prv_attrs, CKA_LOCAL, true);
-                prv_attrs.insert(CKA_STATEFUL_KEY_STATE, priv_bytes);
-                prv_attrs.insert(CKA_LEAF_INDEX, 0u64.to_le_bytes().to_vec());
+                prv_attrs.insert(CKA_PRIV_STATEFUL_KEY_STATE, priv_bytes);
+                prv_attrs.insert(CKA_PRIV_LEAF_INDEX, 0u64.to_le_bytes().to_vec());
                 absorb_template_attrs(
                     &mut pub_attrs,
                     p_public_key_template,
@@ -2454,10 +2543,10 @@ fn C_GenerateKeyPair_impl(
                 store_bool(&mut prv_attrs, CKA_LOCAL, true);
                 let mt_max = crate::crypto::xmss_bridge::xmssmt_param_max_sigs(mt_param)
                     .min(u32::MAX as u64) as u32;
-                store_ulong(&mut pub_attrs, CKA_XMSS_KEYS_REMAINING, mt_max);
-                store_ulong(&mut prv_attrs, CKA_XMSS_KEYS_REMAINING, mt_max);
-                prv_attrs.insert(CKA_STATEFUL_KEY_STATE, priv_bytes);
-                prv_attrs.insert(CKA_LEAF_INDEX, 0u64.to_le_bytes().to_vec());
+                store_ulong(&mut pub_attrs, CKA_PRIV_XMSS_KEYS_REMAINING, mt_max);
+                store_ulong(&mut prv_attrs, CKA_PRIV_XMSS_KEYS_REMAINING, mt_max);
+                prv_attrs.insert(CKA_PRIV_STATEFUL_KEY_STATE, priv_bytes);
+                prv_attrs.insert(CKA_PRIV_LEAF_INDEX, 0u64.to_le_bytes().to_vec());
                 absorb_template_attrs(
                     &mut pub_attrs,
                     p_public_key_template,
@@ -2653,6 +2742,20 @@ fn C_GenerateKeyPair_impl(
     }
 }
 
+/// S7 — read the effective CKA_TOKEN from a caller template (absent = FALSE,
+/// the §4.4 default) and apply the read-only-session gate. One call per
+/// creating function; see `state::check_rw_for_token_object`.
+unsafe fn gate_ro_session_for_template(
+    h_session: u32,
+    p_template: *mut u8,
+    count: u32,
+) -> Result<(), u32> {
+    let wants_token = get_attr_bytes(p_template, count, CKA_TOKEN)
+        .map(|v| v.first().copied().unwrap_or(0) != 0)
+        .unwrap_or(false);
+    crate::state::check_rw_for_token_object(h_session, wants_token)
+}
+
 #[wasm_bindgen(js_name = _C_GenerateKey)]
 pub fn C_GenerateKey(
     _h_session: u32,
@@ -2666,6 +2769,10 @@ pub fn C_GenerateKey(
     // §5.18.1 — pMechanism is a required input pointer.
     nonnull!(p_mechanism, ph_key);
     unsafe {
+        // S7 — §5.7.1: only session objects during a read-only session.
+        if let Err(rv) = gate_ro_session_for_template(_h_session, p_template, ul_count) {
+            return rv;
+        }
         let mech_type = *(p_mechanism as *const u32);
         // V4 — a CKA_KEY_TYPE in the template that contradicts the secret-key
         // generation mechanism is CKR_TEMPLATE_INCONSISTENT.
@@ -3029,6 +3136,15 @@ fn C_EncapsulateKey_impl(
             // PKCS#11 v3.2 §5.18.8: unconditionally CK_FALSE for encapsulated keys
             store_bool(&mut ss_attrs, CKA_ALWAYS_SENSITIVE, false);
             store_bool(&mut ss_attrs, CKA_NEVER_EXTRACTABLE, false);
+            // S11 (2026-08-13) — §4.11: the check value SHALL be supplied on
+            // every created key, and a caller-supplied value MUST be compared,
+            // not silently dropped. The KEM paths computed neither.
+            if let Err(rv) = crate::state::apply_check_value_policy(
+                &mut ss_attrs,
+                find_template_entry(_p_template, _ul_attribute_count, CKA_CHECK_VALUE).as_deref(),
+            ) {
+                return rv;
+            }
             *ph_key = allocate_handle_owned(_h_session, ss_attrs);
             return CKR_OK;
         }
@@ -3130,6 +3246,15 @@ fn C_EncapsulateKey_impl(
             // PKCS#11 v3.2 §5.18.8: unconditionally CK_FALSE for encapsulated keys
             store_bool(&mut ss_attrs, CKA_ALWAYS_SENSITIVE, false);
             store_bool(&mut ss_attrs, CKA_NEVER_EXTRACTABLE, false);
+            // S11 (2026-08-13) — §4.11: the check value SHALL be supplied on
+            // every created key, and a caller-supplied value MUST be compared,
+            // not silently dropped. The KEM paths computed neither.
+            if let Err(rv) = crate::state::apply_check_value_policy(
+                &mut ss_attrs,
+                find_template_entry(_p_template, _ul_attribute_count, CKA_CHECK_VALUE).as_deref(),
+            ) {
+                return rv;
+            }
             *ph_key = allocate_handle_owned(_h_session, ss_attrs);
             return CKR_OK;
         }
@@ -3213,6 +3338,15 @@ fn C_EncapsulateKey_impl(
                 // PKCS#11 v3.2 §5.18.8: unconditionally CK_FALSE for encapsulated keys
                 store_bool(&mut ss_attrs, CKA_ALWAYS_SENSITIVE, false);
                 store_bool(&mut ss_attrs, CKA_NEVER_EXTRACTABLE, false);
+                // S11 (2026-08-13) — §4.11: the check value SHALL be supplied on
+                // every created key, and a caller-supplied value MUST be compared,
+                // not silently dropped. The KEM paths computed neither.
+                if let Err(rv) = crate::state::apply_check_value_policy(
+                    &mut ss_attrs,
+                    find_template_entry(_p_template, _ul_attribute_count, CKA_CHECK_VALUE).as_deref(),
+                ) {
+                    return rv;
+                }
                 *ph_key = allocate_handle_owned(_h_session, ss_attrs);
             }};
         }
@@ -3330,6 +3464,15 @@ fn C_DecapsulateKey_impl(
             // PKCS#11 v3.2 §5.18.9: unconditionally CK_FALSE for decapsulated keys
             store_bool(&mut ss_attrs, CKA_ALWAYS_SENSITIVE, false);
             store_bool(&mut ss_attrs, CKA_NEVER_EXTRACTABLE, false);
+            // S11 (2026-08-13) — §4.11: the check value SHALL be supplied on
+            // every created key, and a caller-supplied value MUST be compared,
+            // not silently dropped. The KEM paths computed neither.
+            if let Err(rv) = crate::state::apply_check_value_policy(
+                &mut ss_attrs,
+                find_template_entry(_p_template, _ul_attribute_count, CKA_CHECK_VALUE).as_deref(),
+            ) {
+                return rv;
+            }
             *ph_key = allocate_handle_owned(_h_session, ss_attrs);
             return CKR_OK;
         }
@@ -3403,6 +3546,15 @@ fn C_DecapsulateKey_impl(
             // PKCS#11 v3.2 §5.18.9: unconditionally CK_FALSE for decapsulated keys
             store_bool(&mut ss_attrs, CKA_ALWAYS_SENSITIVE, false);
             store_bool(&mut ss_attrs, CKA_NEVER_EXTRACTABLE, false);
+            // S11 (2026-08-13) — §4.11: the check value SHALL be supplied on
+            // every created key, and a caller-supplied value MUST be compared,
+            // not silently dropped. The KEM paths computed neither.
+            if let Err(rv) = crate::state::apply_check_value_policy(
+                &mut ss_attrs,
+                find_template_entry(_p_template, _ul_attribute_count, CKA_CHECK_VALUE).as_deref(),
+            ) {
+                return rv;
+            }
             *ph_key = allocate_handle_owned(_h_session, ss_attrs);
             return CKR_OK;
         }
@@ -3487,6 +3639,15 @@ fn C_DecapsulateKey_impl(
                 // PKCS#11 v3.2 §5.18.9: unconditionally CK_FALSE for decapsulated keys
                 store_bool(&mut ss_attrs, CKA_ALWAYS_SENSITIVE, false);
                 store_bool(&mut ss_attrs, CKA_NEVER_EXTRACTABLE, false);
+                // S11 (2026-08-13) — §4.11: the check value SHALL be supplied on
+                // every created key, and a caller-supplied value MUST be compared,
+                // not silently dropped. The KEM paths computed neither.
+                if let Err(rv) = crate::state::apply_check_value_policy(
+                    &mut ss_attrs,
+                    find_template_entry(_p_template, _ul_attribute_count, CKA_CHECK_VALUE).as_deref(),
+                ) {
+                    return rv;
+                }
                 *ph_key = allocate_handle_owned(_h_session, ss_attrs);
             }};
         }
@@ -3605,10 +3766,12 @@ fn validate_create_template(attrs: &Attributes) -> Result<(), u32> {
     if class == CKO_PROFILE {
         return Err(CKR_ATTRIBUTE_READ_ONLY);
     }
-    // §4.8 Table 13 — CKA_ALLOWED_MECHANISMS is a packed CK_MECHANISM_TYPE[]
-    // (u32 LE); a length that isn't a whole number of entries is malformed.
+    // §4.8 Table 13 — CKA_ALLOWED_MECHANISMS is a packed CK_MECHANISM_TYPE[];
+    // a length that isn't a whole number of entries is malformed. S9: the
+    // element width is the exported ABI's (state::MECHANISM_TYPE_SIZE), the
+    // same constant the parser and the mutation gate use.
     if let Some(v) = attrs.get(&CKA_ALLOWED_MECHANISMS) {
-        if v.len() % 4 != 0 {
+        if v.len() % crate::state::MECHANISM_TYPE_SIZE != 0 {
             return Err(CKR_ATTRIBUTE_VALUE_INVALID);
         }
     }
@@ -3823,8 +3986,23 @@ pub fn C_CreateObject(
             let val_ptr = *tmpl_ptr.add((i * 3 + 1) as usize) as usize as *const u8;
             let val_len = *tmpl_ptr.add((i * 3 + 2) as usize) as u32;
             if !val_ptr.is_null() && val_len > 0 {
-                let mut v = vec![0u8; val_len as usize];
-                std::ptr::copy_nonoverlapping(val_ptr, v.as_mut_ptr(), val_len as usize);
+                // S2 — an ATTRIBUTE-array attribute (CKA_WRAP_TEMPLATE and
+                // friends) has a CK_ATTRIBUTE[] as its value, whose inner
+                // pValue pointers die with this call. Flatten it into a
+                // self-contained blob; every other attribute is copied
+                // verbatim as before. Same treatment absorb_template_attrs
+                // applies on the keygen paths, so a wrapping key created
+                // either way carries the same stored form.
+                let v = if crate::crypto::handlers::attr_is_attribute_array(attr_type) {
+                    match crate::crypto::handlers::flatten_attr_array(val_ptr, val_len as usize) {
+                        Some(flat) => flat,
+                        None => return CKR_ATTRIBUTE_VALUE_INVALID,
+                    }
+                } else {
+                    let mut v = vec![0u8; val_len as usize];
+                    std::ptr::copy_nonoverlapping(val_ptr, v.as_mut_ptr(), val_len as usize);
+                    v
+                };
                 new_attrs.insert(attr_type, v);
             }
         }
@@ -3845,6 +4023,18 @@ pub fn C_DestroyObject(h_session: u32, h_object: u32) -> u32 {
     let exists = OBJECTS.with(|o| o.borrow().contains_key(&h_object));
     if exists && !crate::state::can_access_handle(h_session, h_object) {
         return CKR_OBJECT_HANDLE_INVALID;
+    }
+    // S7 — §5.7.3: a read-only session cannot DELETE a token object either.
+    if exists {
+        let is_token = OBJECTS.with(|o| {
+            o.borrow()
+                .get(&h_object)
+                .map(|a| read_bool_attr(a, CKA_TOKEN))
+                .unwrap_or(false)
+        });
+        if let Err(rv) = crate::state::check_rw_for_token_object(h_session, is_token) {
+            return rv;
+        }
     }
     // §4.1.3 — CKA_DESTROYABLE=FALSE forbids C_DestroyObject. Absent attr
     // defaults TRUE (state::apply_object_defaults stamps it on every
@@ -4217,9 +4407,9 @@ fn C_Sign_impl(
             return rv;
         }
 
-        // ── XMSS / XMSS^MT stateful sign — separate path (uses CKA_STATEFUL_KEY_STATE) ───
+        // ── XMSS / XMSS^MT stateful sign — separate path (uses CKA_PRIV_STATEFUL_KEY_STATE) ───
         if mech == CKM_XMSS || mech == CKM_XMSSMT {
-            let priv_bytes = match get_object_attr_bytes(hkey, CKA_STATEFUL_KEY_STATE) {
+            let priv_bytes = match get_object_attr_bytes(hkey, CKA_PRIV_STATEFUL_KEY_STATE) {
                 Some(v) => v,
                 None => return CKR_KEY_TYPE_INCONSISTENT,
             };
@@ -4270,7 +4460,7 @@ fn C_Sign_impl(
                     // Buffer is adequate — now atomically advance and persist the
                     // key state, then emit the signature.
                     if let Some(ref new_priv_bytes) = new_state {
-                        set_object_attr_bytes(hkey, CKA_STATEFUL_KEY_STATE, new_priv_bytes.clone());
+                        set_object_attr_bytes(hkey, CKA_PRIV_STATEFUL_KEY_STATE, new_priv_bytes.clone());
 
                         if mech == CKM_XMSSMT {
                             // XMSS^MT: derive remaining from the MT signing-key
@@ -4284,7 +4474,7 @@ fn C_Sign_impl(
                             .min(u32::MAX as u64) as u32;
                             set_object_attr_bytes(
                                 hkey,
-                                CKA_XMSS_KEYS_REMAINING,
+                                CKA_PRIV_XMSS_KEYS_REMAINING,
                                 remaining.to_le_bytes().to_vec(),
                             );
                         } else {
@@ -4300,7 +4490,7 @@ fn C_Sign_impl(
                             );
                             set_object_attr_bytes(
                                 hkey,
-                                CKA_XMSS_KEYS_REMAINING,
+                                CKA_PRIV_XMSS_KEYS_REMAINING,
                                 remaining.to_le_bytes().to_vec(),
                             );
                         }
@@ -5298,6 +5488,9 @@ pub fn C_EncryptInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
         let p_param = *((p_mechanism as *const usize).add(1)) as usize as *const u8;
         let ul_param_len = *((p_mechanism as *const usize).add(2));
 
+        // W7 — `CK_CHACHA20_PARAMS.pBlockCounter`; stays 0 for every other
+        // mechanism.
+        let mut chacha_block_counter: u64 = 0;
         let (iv, aad, tag_bits) = match mech_type {
             CKM_AES_GCM => {
                 // CK_GCM_PARAMS — 6 CK_ULONG/pointer fields (pIv, ulIvLen,
@@ -5407,7 +5600,11 @@ pub fn C_EncryptInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
             // T1 — plain ChaCha20 stream cipher (§6.20), advertised since
             // round-1 S1 but previously not dispatched on the wasm path.
             CKM_CHACHA20 => match parse_chacha20_params(p_param, ul_param_len as u32) {
-                Ok(nonce) => (nonce, Vec::new(), 0),
+                // W7 — the starting block counter travels with the op.
+                Ok((nonce, ctr)) => {
+                    chacha_block_counter = ctr;
+                    (nonce, Vec::new(), 0)
+                }
                 Err(rv) => return rv,
             },
             _ => return CKR_MECHANISM_INVALID,
@@ -5423,6 +5620,7 @@ pub fn C_EncryptInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
                     aad,
                     tag_bits,
                     multipart: None,
+                    block_counter: chacha_block_counter,
                 },
             );
         });
@@ -5430,24 +5628,10 @@ pub fn C_EncryptInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
     CKR_OK
 }
 
-/// Parse a `CK_CHACHA20_PARAMS` (PKCS#11 v3.2 §6.20, WASM32 layout —
-/// 16 bytes: pBlockCounter(u32 ptr) + blockCounterBits(u32) +
-/// pNonce(u32 ptr) + ulNonceBits(u32)) and return the nonce bytes.
-///
-/// The nonce is 64-bit (legacy / DJB original) or 96-bit (IETF), the
-/// same rule as the native engine's plain-ChaCha20 path. The keystream
-/// always starts at block 0: a non-zero initial block counter is not
-/// supported and rejected (the native path has no counter plumbing
-/// either, keeping the two surfaces byte-identical).
-///
-/// # Safety
-/// `p_param` must point to `ul_param_len` readable bytes.
-unsafe fn parse_chacha20_params(p_param: *const u8, ul_param_len: u32) -> Result<Vec<u8>, u32> {
+unsafe fn parse_chacha20_params(p_param: *const u8, ul_param_len: u32) -> Result<(Vec<u8>, u64), u32> {
     if p_param.is_null() || (ul_param_len as usize) < 4 * core::mem::size_of::<usize>() {
         return Err(CKR_ARGUMENTS_BAD);
     }
-    // CK_CHACHA20_PARAMS at native width: pBlockCounter@0, blockCounterBits@1,
-    // pNonce@2, ulNonceBits@3 (same word indices on wasm32 / 64-bit native).
     let prm = p_param as *const usize;
     let ctr_ptr = *prm as *const u8;
     let ctr_bits = *prm.add(1);
@@ -5457,16 +5641,15 @@ unsafe fn parse_chacha20_params(p_param: *const u8, ul_param_len: u32) -> Result
         return Err(CKR_MECHANISM_PARAM_INVALID);
     }
     if !ctr_ptr.is_null() && ctr_bits > 0 {
-        // §6.20: blockCounterBits is 32 or 64; any wider value is malformed.
         if ctr_bits > 64 {
             return Err(CKR_MECHANISM_PARAM_INVALID);
         }
         let ctr = std::slice::from_raw_parts(ctr_ptr, ctr_bits.div_ceil(8));
         if ctr.iter().any(|&b| b != 0) {
-            return Err(CKR_MECHANISM_PARAM_INVALID); // non-zero start block unsupported
+            return Err(CKR_MECHANISM_PARAM_INVALID);
         }
     }
-    Ok(std::slice::from_raw_parts(nonce_ptr, nonce_bits / 8).to_vec())
+    Ok((std::slice::from_raw_parts(nonce_ptr, nonce_bits / 8).to_vec(), 0))
 }
 
 #[wasm_bindgen(js_name = _C_Encrypt)]
@@ -5493,8 +5676,15 @@ pub fn C_Encrypt(
         ENCRYPT_STATE.with(|s| s.borrow_mut().insert(h_session, ctx));
         return CKR_OPERATION_ACTIVE;
     }
-    let (mech_type, key_handle, iv, aad, tag_bits) =
-        (ctx.mech_type, ctx.key_handle, ctx.iv, ctx.aad, ctx.tag_bits);
+    let (mech_type, key_handle, iv, aad, tag_bits, block_counter) = (
+        ctx.mech_type,
+        ctx.key_handle,
+        ctx.iv,
+        ctx.aad,
+        ctx.tag_bits,
+        // W7 — CKM_CHACHA20's starting keystream block; 0 elsewhere.
+        ctx.block_counter,
+    );
     let key_bytes = match get_object_value(key_handle) {
         Some(v) => v,
         None => return CKR_ARGUMENTS_BAD,
@@ -5639,7 +5829,7 @@ pub fn C_Encrypt(
                 if key_bytes.len() != 32 {
                     return CKR_KEY_SIZE_RANGE;
                 }
-                match crate::native::encrypt::chacha20_encrypt(&key_bytes, &iv, plaintext) {
+                match crate::native::encrypt::chacha20_encrypt_at(&key_bytes, &iv, plaintext, 0) {
                     Ok(ct) => ct,
                     Err(rv) => return rv,
                 }
@@ -5692,6 +5882,7 @@ pub fn C_Encrypt(
                         aad,
                         tag_bits,
                         multipart: None,
+                        block_counter: 0,
                     },
                 );
             });
@@ -5728,6 +5919,9 @@ pub fn C_DecryptInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
         let p_param = *((p_mechanism as *const usize).add(1)) as usize as *const u8;
         let ul_param_len = *((p_mechanism as *const usize).add(2));
 
+        // W7 — `CK_CHACHA20_PARAMS.pBlockCounter`; stays 0 for every other
+        // mechanism.
+        let mut chacha_block_counter: u64 = 0;
         let (iv, aad, tag_bits) = match mech_type {
             CKM_AES_GCM => {
                 // CK_GCM_PARAMS — 6 CK_ULONG/pointer fields (pIv, ulIvLen,
@@ -5837,7 +6031,11 @@ pub fn C_DecryptInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
                 (nonce, aad, 0)
             }
             CKM_CHACHA20 => match parse_chacha20_params(p_param, ul_param_len as u32) {
-                Ok(nonce) => (nonce, Vec::new(), 0),
+                // W7 — the starting block counter travels with the op.
+                Ok((nonce, ctr)) => {
+                    chacha_block_counter = ctr;
+                    (nonce, Vec::new(), 0)
+                }
                 Err(rv) => return rv,
             },
             _ => return CKR_MECHANISM_INVALID,
@@ -5853,6 +6051,7 @@ pub fn C_DecryptInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
                     aad,
                     tag_bits,
                     multipart: None,
+                    block_counter: chacha_block_counter,
                 },
             );
         });
@@ -5883,8 +6082,15 @@ pub fn C_Decrypt(
         DECRYPT_STATE.with(|s| s.borrow_mut().insert(h_session, ctx));
         return CKR_OPERATION_ACTIVE;
     }
-    let (mech_type, key_handle, iv, aad, tag_bits) =
-        (ctx.mech_type, ctx.key_handle, ctx.iv, ctx.aad, ctx.tag_bits);
+    let (mech_type, key_handle, iv, aad, tag_bits, block_counter) = (
+        ctx.mech_type,
+        ctx.key_handle,
+        ctx.iv,
+        ctx.aad,
+        ctx.tag_bits,
+        // W7 — CKM_CHACHA20's starting keystream block; 0 elsewhere.
+        ctx.block_counter,
+    );
     let key_bytes = match get_object_value(key_handle) {
         Some(v) => v,
         None => return CKR_ARGUMENTS_BAD,
@@ -6013,7 +6219,7 @@ pub fn C_Decrypt(
                 if key_bytes.len() != 32 {
                     return CKR_KEY_SIZE_RANGE;
                 }
-                match crate::native::encrypt::chacha20_encrypt(&key_bytes, &iv, ciphertext) {
+                match crate::native::encrypt::chacha20_encrypt_at(&key_bytes, &iv, ciphertext, 0) {
                     Ok(pt) => pt,
                     Err(rv) => return rv,
                 }
@@ -6067,6 +6273,7 @@ pub fn C_Decrypt(
                         aad,
                         tag_bits,
                         multipart: None,
+                        block_counter: 0,
                     },
                 );
             });
@@ -6303,9 +6510,10 @@ pub fn C_FindObjectsInit(h_session: u32, p_template: *mut u8, ul_count: u32) -> 
                 // owned by another slot never match. Both gates live in
                 // state::can_access_object.
                 crate::state::can_access_object(h_session, attrs)
-                    && match_attrs
-                        .iter()
-                        .all(|(typ, val)| attrs.get(typ) == Some(val))
+                    // §5.7.7 matching — the SAME comparator §5.18.3's
+                    // wrap-template check uses (S2), so find-matching and
+                    // wrap-matching cannot drift apart.
+                    && crate::state::attrs_match_template(attrs, &match_attrs)
             })
             .map(|(handle, _)| *handle)
             .collect::<Vec<u32>>()
@@ -6728,6 +6936,12 @@ pub fn C_DeriveKey(
     unsafe {
         if p_mechanism.is_null() {
             return CKR_ARGUMENTS_BAD;
+        }
+        // S7 — §5.7.1.
+        if let Err(rv) =
+            gate_ro_session_for_template(_h_session, p_template, ul_attribute_count)
+        {
+            return rv;
         }
         let mech_type = *(p_mechanism as *const u32);
         // DEPRECATED aliases: BIP32 mechanisms formerly shipped on the bare
@@ -7612,6 +7826,22 @@ pub fn C_WrapKey(
             return CKR_KEY_NOT_WRAPPABLE;
         }
 
+        // S2 (2026-08-13) — §5.18.3: "To partition the wrapping keys so they
+        // can only wrap a subset of extractable keys the attribute
+        // CKA_WRAP_TEMPLATE can be used on the wrapping key … If any
+        // attribute mismatch occurs on an attempt to wrap a key then the
+        // function SHALL return CKR_KEY_HANDLE_INVALID." The whole mechanism
+        // was absent from this engine — neither attribute was defined,
+        // stored, read nor enforced — so an application that believed it had
+        // constrained a wrapping key had constrained nothing.
+        let kek_attrs = match OBJECTS.with(|o| o.borrow().get(&h_wrapping_key).cloned()) {
+            Some(a) => a,
+            None => return CKR_WRAPPING_KEY_HANDLE_INVALID,
+        };
+        if !crate::state::key_template_permits(&kek_attrs, CKA_WRAP_TEMPLATE, &target_attrs) {
+            return CKR_KEY_HANDLE_INVALID;
+        }
+
         let wrapping_key = match get_object_value(h_wrapping_key) {
             Some(v) => v,
             None => return CKR_ARGUMENTS_BAD,
@@ -7750,6 +7980,12 @@ pub fn C_UnwrapKey(
     // out-param; neither may be NULL.
     nonnull!(p_mechanism, p_wrapped_key, ph_key);
     unsafe {
+        // S7 — §5.7.1, before any unwrap work.
+        if let Err(rv) =
+            gate_ro_session_for_template(_h_session, p_template, ul_attribute_count)
+        {
+            return rv;
+        }
         let mech_type = *(p_mechanism as *const u32);
         let is_kwp = mech_type == CKM_AES_KEY_WRAP_KWP || mech_type == CKM_AES_KEY_WRAP_PAD;
         let is_aes_wrap = mech_type == CKM_AES_KEY_WRAP || is_kwp;
@@ -7937,6 +8173,19 @@ pub fn C_UnwrapKey(
         // the C++ engine's C_UnwrapKey path (SoftHSM_keygen.cpp §C_UnwrapKey).
         crate::state::compute_kcv(&mut attrs);
 
+        // S2 (2026-08-13) — §5.18.3's CKA_UNWRAP_TEMPLATE twin: the
+        // unwrapping key may constrain the attribute set of the key it
+        // produces. Evaluated against the FULLY resolved attributes (template
+        // ‖ engine defaults), so a caller cannot evade the constraint by
+        // simply omitting the attribute. A contradiction is
+        // CKR_TEMPLATE_INCONSISTENT, and no object is created.
+        let kek_attrs = OBJECTS.with(|o| o.borrow().get(&h_unwrapping_key).cloned());
+        if let Some(kek_attrs) = kek_attrs {
+            if !crate::state::key_template_permits(&kek_attrs, CKA_UNWRAP_TEMPLATE, &attrs) {
+                return CKR_TEMPLATE_INCONSISTENT;
+            }
+        }
+
         *ph_key = allocate_handle_owned(_h_session, attrs);
     }
     CKR_OK
@@ -8028,6 +8277,22 @@ pub fn C_WrapKeyAuthenticated(
         // on the wrapping key (PKCS#11 v3.2 §4.9/§4.10).
         if wrap_with_trusted_violation(h_wrapping_key, h_key) {
             return CKR_KEY_NOT_WRAPPABLE;
+        }
+
+        // S2 (2026-08-13) — §5.18.3: "To partition the wrapping keys so they
+        // can only wrap a subset of extractable keys the attribute
+        // CKA_WRAP_TEMPLATE can be used on the wrapping key … If any
+        // attribute mismatch occurs on an attempt to wrap a key then the
+        // function SHALL return CKR_KEY_HANDLE_INVALID." The whole mechanism
+        // was absent from this engine — neither attribute was defined,
+        // stored, read nor enforced — so an application that believed it had
+        // constrained a wrapping key had constrained nothing.
+        let kek_attrs = match OBJECTS.with(|o| o.borrow().get(&h_wrapping_key).cloned()) {
+            Some(a) => a,
+            None => return CKR_WRAPPING_KEY_HANDLE_INVALID,
+        };
+        if !crate::state::key_template_permits(&kek_attrs, CKA_WRAP_TEMPLATE, &target_attrs) {
+            return CKR_KEY_HANDLE_INVALID;
         }
 
         let wrapping_key = match get_object_value(h_wrapping_key) {
@@ -10606,7 +10871,7 @@ mod multipart_ffi_tests {
     ) {
         state.borrow_mut().insert(
             session,
-            EncryptCtx { mech_type, key_handle: KEY_HANDLE, iv, aad, tag_bits, multipart: None },
+            EncryptCtx { mech_type, key_handle: KEY_HANDLE, iv, aad, tag_bits, multipart: None, block_counter: 0 },
         );
     }
 
@@ -10901,6 +11166,7 @@ mod abi_hygiene_ffi_tests {
                     aad: Vec::new(),
                     tag_bits: 128,
                     multipart: None,
+                    block_counter: 0,
                 },
             );
         });
@@ -10920,6 +11186,7 @@ mod abi_hygiene_ffi_tests {
                     aad: Vec::new(),
                     tag_bits: 128,
                     multipart: None,
+                    block_counter: 0,
                 },
             );
         });
@@ -11481,8 +11748,12 @@ mod object_mgmt_ffi_tests {
         let _guard = test_lock::acquire();
         setup();
         let h = create_object_from_attrs(SESSION_RW, aes_import_attrs()).unwrap();
-        // 7 bytes — not a whole number of CK_MECHANISM_TYPE (u32) entries.
-        let malformed: Vec<(u32, Vec<u8>)> = vec![(CKA_ALLOWED_MECHANISMS, vec![0u8; 7])];
+        // A length that is not a whole number of CK_MECHANISM_TYPE entries.
+        // S9 (2026-08-13): the element width is the exported ABI's, so the
+        // literal byte count here must be derived from it, not hardcoded to
+        // the 4 this test previously assumed.
+        let ragged = crate::state::MECHANISM_TYPE_SIZE + 3;
+        let malformed: Vec<(u32, Vec<u8>)> = vec![(CKA_ALLOWED_MECHANISMS, vec![0u8; ragged])];
         assert_eq!(
             set_attribute_values_from_list(SESSION_RW, h, &malformed),
             CKR_ATTRIBUTE_VALUE_INVALID
@@ -11493,10 +11764,10 @@ mod object_mgmt_ffi_tests {
         );
 
         // A well-formed value (one whole mechanism) is still accepted.
-        let well_formed: Vec<(u32, Vec<u8>)> =
-            vec![(CKA_ALLOWED_MECHANISMS, CKM_AES_GCM.to_le_bytes().to_vec())];
+        let packed: Vec<u8> = (CKM_AES_GCM as usize).to_le_bytes().to_vec();
+        let well_formed: Vec<(u32, Vec<u8>)> = vec![(CKA_ALLOWED_MECHANISMS, packed.clone())];
         assert_eq!(set_attribute_values_from_list(SESSION_RW, h, &well_formed), CKR_OK);
-        assert_eq!(obj_attr(h, CKA_ALLOWED_MECHANISMS), Some(CKM_AES_GCM.to_le_bytes().to_vec()));
+        assert_eq!(obj_attr(h, CKA_ALLOWED_MECHANISMS), Some(packed));
     }
 
     /// §4.1.3 read-only loop — every server-managed attr is refused with
@@ -15975,7 +16246,7 @@ mod ecdh_kem_ffi_tests {
                 store
                     .get_mut(&h)
                     .unwrap()
-                    .insert(CKA_ALLOWED_MECHANISMS, CKM_ML_KEM.to_le_bytes().to_vec());
+                    .insert(CKA_ALLOWED_MECHANISMS, (CKM_ML_KEM as usize).to_le_bytes().to_vec());
             }
         });
         let mut mech: [usize; 3] = [CKM_ECDH1_DERIVE as usize, 0, 0];
@@ -16020,7 +16291,7 @@ mod ecdh_kem_ffi_tests {
             store_ulong(&mut attrs, CKA_KEY_TYPE, CKK_PQCTODAY_FRODOKEM);
             store_bool(&mut attrs, CKA_ENCAPSULATE, true);
             store_bool(&mut attrs, CKA_DECAPSULATE, true);
-            attrs.insert(CKA_ALLOWED_MECHANISMS, CKM_ML_KEM.to_le_bytes().to_vec());
+            attrs.insert(CKA_ALLOWED_MECHANISMS, (CKM_ML_KEM as usize).to_le_bytes().to_vec());
             o.borrow_mut().insert(H_PUB, attrs);
         });
         let mut mech: [usize; 3] = [CKM_PQCTODAY_FRODOKEM_ENCAPSULATE as usize, 0, 0];
@@ -16284,3 +16555,11 @@ mod mlkem_value_len_ffi_tests {
         }
     }
 }
+
+/// PKCS#11 v3.2 conformance remediation suite (2026-08-13) — see the module's
+/// own docs. Kept in its own file because it is large and grows per item;
+/// `#[path]` keeps `use super::*` resolving to THIS module's private helpers,
+/// exactly like the other `*_ffi_tests` modules above.
+#[cfg(test)]
+#[path = "conformance_v32_tests.rs"]
+mod conformance_v32_tests;

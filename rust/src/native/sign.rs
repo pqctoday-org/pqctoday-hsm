@@ -73,7 +73,7 @@ pub fn sign_with_pss_salt(
     // ALL read from the SAME borrowed attrs — one OBJECTS lock instead of
     // the four separate locks this function used to take. `sk_bytes` is
     // `None` for HSS keys (their material lives in
-    // `CKA_STATEFUL_KEY_STATE`, not `CKA_VALUE`) — harmless, discarded on
+    // `CKA_PRIV_STATEFUL_KEY_STATE`, not `CKA_VALUE`) — harmless, discarded on
     // the HSS branch below.
     let access = resolve_session_access(session)?;
     let (can_sign, mech_ok, sk_bytes, ps) = with_object_checked(&access, key_handle, |attrs| {
@@ -90,7 +90,7 @@ pub fn sign_with_pss_salt(
     mech_ok?;
 
     // HSS/LMS is stateful and keeps its key material in
-    // `CKA_STATEFUL_KEY_STATE`, not `CKA_VALUE` (mirrors `ffi::C_Sign`'s
+    // `CKA_PRIV_STATEFUL_KEY_STATE`, not `CKA_VALUE` (mirrors `ffi::C_Sign`'s
     // separate stateful-sign branch) — dispatch it BEFORE the generic
     // `sk_bytes` use below, which would otherwise fail closed with
     // `CKR_ARGUMENTS_BAD` for every HSS key. The gate above already
@@ -613,7 +613,7 @@ mod tests {
         let (pub_h, prv_h) = register_fresh_hss_keypair(session, "hss-leaf-advance");
 
         let leaf_index = || {
-            crate::state::get_object_attr_u64(prv_h, CKA_LEAF_INDEX).expect("leaf index must be set")
+            crate::state::get_object_attr_u64(prv_h, CKA_PRIV_LEAF_INDEX).expect("leaf index must be set")
         };
         let keys_remaining = || {
             crate::state::get_object_attr_u32(prv_h, CKA_HSS_KEYS_REMAINING)
@@ -685,7 +685,7 @@ mod tests {
             );
         }
         assert_eq!(
-            crate::state::get_object_attr_u64(prv_h, CKA_LEAF_INDEX).unwrap(),
+            crate::state::get_object_attr_u64(prv_h, CKA_PRIV_LEAF_INDEX).unwrap(),
             total as u64,
             "every leaf must have been consumed exactly once"
         );

@@ -163,13 +163,29 @@ PINNED = {
     "CKA_PRIV_ALGO_FAMILY": (0xFFFF0002, "vendor"),
     "CKA_PRIV_OWNER_SESSION": (0xFFFF0003, "vendor"),
     "CKA_PRIV_SLOT_ID": (0xFFFF0004, "vendor"),
-    "CKA_STATEFUL_KEY_STATE": (0x80000101, "vendor"),
     "CKA_LMS_PARAM_SET": (0x80000102, "vendor"),
     "CKA_LMOTS_PARAM_SET": (0x80000103, "vendor"),
     "CKA_XMSS_PARAM_SET": (0x80000104, "vendor"),
-    "CKA_LEAF_INDEX": (0x80000105, "vendor"),
-    "CKA_XMSS_KEYS_REMAINING": (0x80000106, "vendor"),
     "CKA_XMSSMT_PARAM_SET": (0x80000107, "vendor"),
+    # C++ engine vendor attributes (src/lib/vendor_mechanisms.h) — unchanged.
+    "CKA_STATEFUL_KEY_STATE": (0x80000101, "vendor"),
+    "CKA_LEAF_INDEX": (0x80000105, "vendor"),
+    # Rust engine, 2026-08-13 (PKCS#11 v3.2 conformance remediation S4): the
+    # stateful HBS counters moved OUT of the 0x800001xx vendor block — which
+    # state::attr_mutation_allowed exempted from mutation policy wholesale —
+    # into the engine-private 0xFFFF00xx range that is neither absorbed from
+    # client templates nor client-writable, and were renamed CKA_PRIV_* to
+    # match that range's existing naming. These carry HSS/XMSS one-time-
+    # signature STATE; a client that could write the leaf index could rewind
+    # the key and forge signatures. The Rust engine no longer defines the
+    # 0x800001xx names at all, so the two engines' vocabularies are now
+    # distinct rather than colliding.
+    "CKA_PRIV_STATEFUL_KEY_STATE": (0xFFFF0005, "vendor"),
+    "CKA_PRIV_LEAF_INDEX": (0xFFFF0006, "vendor"),
+    "CKA_PRIV_XMSS_KEYS_REMAINING": (0xFFFF0007, "vendor"),
+    # Vendor error (CKR_VENDOR_DEFINED | 1) — engine snapshot written under a
+    # superseded serialisation format; see state_snapshot::MAGIC.
+    "CKR_PQCTODAY_SNAPSHOT_FORMAT_UNSUPPORTED": (0x80000001, "vendor"),
     "CKM_KECCAK_256": (0x80000010, "vendor"),
     "CKM_EC_MONTGOMERY_KEY_DERIVE": (0x80000011, "vendor"),
     # KMIP 3.0 §11.54 Create/Join Split Key (XOR + 3 Polynomial Sharing

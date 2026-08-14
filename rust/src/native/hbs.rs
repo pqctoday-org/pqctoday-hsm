@@ -21,7 +21,7 @@
 //! buffer — it calls `sign_prepare` then `sign_commit` back-to-back.
 
 use crate::constants::{
-    CKA_HSS_KEYS_REMAINING, CKA_LEAF_INDEX, CKA_LMS_PARAM_SET, CKA_STATEFUL_KEY_STATE,
+    CKA_HSS_KEYS_REMAINING, CKA_PRIV_LEAF_INDEX, CKA_LMS_PARAM_SET, CKA_PRIV_STATEFUL_KEY_STATE,
     CKR_FUNCTION_FAILED, CKR_KEY_TYPE_INCONSISTENT,
 };
 use crate::state::{get_object_attr_bytes, get_object_attr_u32, get_object_attr_u64, set_object_attr_bytes};
@@ -39,7 +39,7 @@ pub(crate) struct Prepared {
 /// once the caller has verified it can actually deliver the signature.
 pub(crate) fn sign_prepare(handle: u32, msg: &[u8]) -> Result<Prepared, u32> {
     let priv_bytes =
-        get_object_attr_bytes(handle, CKA_STATEFUL_KEY_STATE).ok_or(CKR_KEY_TYPE_INCONSISTENT)?;
+        get_object_attr_bytes(handle, CKA_PRIV_STATEFUL_KEY_STATE).ok_or(CKR_KEY_TYPE_INCONSISTENT)?;
     let lms_param = get_object_attr_u32(handle, CKA_LMS_PARAM_SET).unwrap_or(0x05);
 
     let mut new_state: Option<Vec<u8>> = None;
@@ -59,9 +59,9 @@ pub(crate) fn sign_prepare(handle: u32, msg: &[u8]) -> Result<Prepared, u32> {
 /// remaining-signatures counter (PKCS#11 v3.2 §6.14). Call exactly once
 /// per `Prepared` value that is actually delivered to the caller.
 pub(crate) fn sign_commit(handle: u32, prepared: &Prepared) {
-    set_object_attr_bytes(handle, CKA_STATEFUL_KEY_STATE, prepared.new_priv_state.clone());
-    let old_idx = get_object_attr_u64(handle, CKA_LEAF_INDEX).unwrap_or(0);
-    set_object_attr_bytes(handle, CKA_LEAF_INDEX, (old_idx + 1).to_le_bytes().to_vec());
+    set_object_attr_bytes(handle, CKA_PRIV_STATEFUL_KEY_STATE, prepared.new_priv_state.clone());
+    let old_idx = get_object_attr_u64(handle, CKA_PRIV_LEAF_INDEX).unwrap_or(0);
+    set_object_attr_bytes(handle, CKA_PRIV_LEAF_INDEX, (old_idx + 1).to_le_bytes().to_vec());
     if let Some(mut remaining) = get_object_attr_u32(handle, CKA_HSS_KEYS_REMAINING) {
         if remaining > 0 {
             remaining -= 1;

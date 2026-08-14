@@ -19,8 +19,8 @@ use super::CkRv;
 use crate::constants::*;
 use crate::crypto::handlers::Attributes;
 use crate::state::{
-    allocate_handle_owned, compute_kcv, get_object_value, get_object_value_from,
-    resolve_session_access, store_bool, store_ulong, with_object_checked,
+    allocate_handle_owned, compute_kcv, get_object_value, resolve_session_access, store_bool,
+    store_ulong,
 };
 
 /// Register a freshly-derived generic-secret key `value` as a session object
@@ -71,12 +71,19 @@ pub fn concatenate_keys(session: u32, base: u32, second: u32) -> Result<u32, CkR
     // derive-context vocabulary C_DeriveKey callers expect) for missing,
     // cross-slot, or not-logged-in handles alike.
     let access = resolve_session_access(session).map_err(|_| CKR_KEY_HANDLE_INVALID)?;
-    let base_val = with_object_checked(&access, base, get_object_value_from)
-        .map_err(|_| CKR_KEY_HANDLE_INVALID)?
-        .ok_or(CKR_KEY_HANDLE_INVALID)?;
-    let second_val = with_object_checked(&access, second, get_object_value_from)
-        .map_err(|_| CKR_KEY_HANDLE_INVALID)?
-        .ok_or(CKR_KEY_HANDLE_INVALID)?;
+    // S12 — §4.8 Table 13 on BOTH component handles (the KMIP seam).
+    let base_val = crate::state::checked_value_for_mech(
+        &access,
+        base,
+        CKM_CONCATENATE_BASE_AND_KEY,
+        CKR_KEY_HANDLE_INVALID,
+    )?;
+    let second_val = crate::state::checked_value_for_mech(
+        &access,
+        second,
+        CKM_CONCATENATE_BASE_AND_KEY,
+        CKR_KEY_HANDLE_INVALID,
+    )?;
     let combined = [base_val.as_slice(), second_val.as_slice()].concat();
     Ok(register_derived_secret(session, combined))
 }
@@ -91,9 +98,13 @@ pub fn concatenate_keys(session: u32, base: u32, second: u32) -> Result<u32, CkR
 /// **Pre-condition**: `session` valid R/W; `base` a secret key with a value.
 pub fn concatenate_data(session: u32, base: u32, data: &[u8]) -> Result<u32, CkRv> {
     let access = resolve_session_access(session).map_err(|_| CKR_KEY_HANDLE_INVALID)?;
-    let base_val = with_object_checked(&access, base, get_object_value_from)
-        .map_err(|_| CKR_KEY_HANDLE_INVALID)?
-        .ok_or(CKR_KEY_HANDLE_INVALID)?;
+    // S12 — §4.8 Table 13 (the KMIP seam).
+    let base_val = crate::state::checked_value_for_mech(
+        &access,
+        base,
+        CKM_CONCATENATE_BASE_AND_DATA,
+        CKR_KEY_HANDLE_INVALID,
+    )?;
     let combined = [base_val.as_slice(), data].concat();
     Ok(register_derived_secret(session, combined))
 }
@@ -117,9 +128,10 @@ pub fn digest_key_derivation(
     out_len: Option<usize>,
 ) -> Result<u32, CkRv> {
     let access = resolve_session_access(session).map_err(|_| CKR_KEY_HANDLE_INVALID)?;
-    let base_val = with_object_checked(&access, base, get_object_value_from)
-        .map_err(|_| CKR_KEY_HANDLE_INVALID)?
-        .ok_or(CKR_KEY_HANDLE_INVALID)?;
+    // S12 — §4.8 Table 13, against the CALLER's requested mechanism (the
+    // KMIP seam: this function is reached from kmip/src/ops/derive_key.rs).
+    let base_val =
+        crate::state::checked_value_for_mech(&access, base, mech, CKR_KEY_HANDLE_INVALID)?;
     let mut digest = digest_of(mech, &base_val)?;
     if let Some(n) = out_len {
         if n > digest.len() {

@@ -32,7 +32,24 @@ use crate::state::{
     LoginState, TokenState, NEXT_HANDLE, OBJECTS, TOKEN_STORE, UNIQUE_ID_COUNTER,
 };
 
-const MAGIC: &[u8; 8] = b"SHR3SNP1";
+/// Snapshot format magic. Bumped `SHR3SNP1` → `SHR3SNP2` on 2026-08-13 by
+/// remediation item S4: the stateful HBS attribute ids MOVED out of the
+/// client-writable vendor range into the engine-private one. A snapshot
+/// written under the old layout carries the leaf index and serialised
+/// one-time-signature state under ids this build no longer reads, so the
+/// counters would come back ABSENT — presenting a partially used XMSS/LMS key
+/// as a fresh one, which is precisely the rewind the item exists to prevent.
+///
+/// The decision (taken before implementation, not discovered here) is to
+/// REFUSE such snapshots loudly rather than migrate them in place: a
+/// silently reinterpreted stateful key is a forgery risk, an explicit load
+/// failure is an operations problem. Anyone implementing KMIP engine-key
+/// persistence must read this first.
+const MAGIC: &[u8; 8] = b"SHR3SNP2";
+
+/// The superseded pre-S4 magic — recognised only so the loader can return a
+/// specific error instead of a generic parse failure.
+const MAGIC_V1: &[u8; 8] = b"SHR3SNP1";
 
 // ─────────────────────────────────────────────────────────────────────────
 // Serialize
@@ -155,7 +172,12 @@ impl<'a> Cursor<'a> {
 /// the counters to at least their snapshot values.
 pub fn deserialize_token_state(buf: &[u8]) -> Result<(), u32> {
     let mut c = Cursor { buf, pos: 0 };
-    if c.take(8)? != MAGIC {
+    let magic = c.take(8)?;
+    if magic == MAGIC_V1 {
+        // S4 — old layout: refuse, do not reinterpret. See MAGIC.
+        return Err(CKR_PQCTODAY_SNAPSHOT_FORMAT_UNSUPPORTED);
+    }
+    if magic != MAGIC {
         return Err(CKR_GENERAL_ERROR);
     }
     let next_handle = c.u32()?;
