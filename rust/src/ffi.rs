@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use wasm_bindgen::prelude::*;
 use zeroize::Zeroize;
 
+use crate::ck_param::{self, ParamReader};
 use crate::constants::*;
 use crate::crypto::*;
 use crate::slh_dsa_keygen;
@@ -4593,83 +4594,11 @@ fn C_SignInit_impl(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
             Ok(m) => m,
             Err(rv) => return rv,
         };
-        // Parse CK_SIGN_ADDITIONAL_CONTEXT for SLH-DSA (FIPS 205 §9.2 + §10)
-        // CK_SIGN_ADDITIONAL_CONTEXT — ML-DSA + SLH-DSA, pure and pre-hash
-        // (PKCS#11 v3.2 §6.67/§6.69). Overlong ctx / bad hedge value → error.
-        let (slh_ctx, slh_det) = if takes_sign_additional_ctx(mech_type) {
-            match parse_sign_additional_ctx(p_mechanism) {
-                Ok(v) => v,
-                Err(rv) => return rv,
-            }
-        } else if let Some((exp_hash, exp_mgf)) = rsa_pss_mech_params(mech_type) {
-            // CK_RSA_PKCS_PSS_PARAMS — 3 CK_ULONG fields (hashAlg, mgf, sLen) at
-            // native width (size_of::<usize>(): 12 B wasm32, 24 B native).
-            // §6.4.5 — params are caller-authoritative; hashAlg/mgf must match
-            // the mechanism's digest. Absent params keep legacy defaults.
-            let p_param = *((p_mechanism as *const usize).add(1));
-            let param_len = *((p_mechanism as *const usize).add(2));
-            let usz = core::mem::size_of::<usize>();
-            if p_param != 0 && param_len >= 3 * usz {
-                let pp = p_param as *const usize;
-                let hash_alg = std::ptr::read_unaligned(pp) as u32;
-                let mgf = std::ptr::read_unaligned(pp.add(1)) as u32;
-                let s_len = std::ptr::read_unaligned(pp.add(2)) as u32;
-                if hash_alg != exp_hash || mgf != exp_mgf {
-                    return CKR_MECHANISM_PARAM_INVALID;
-                }
-                // carried to C_Sign/C_Verify in the ctx vec (LE u32)
-                (s_len.to_le_bytes().to_vec(), false)
-            } else {
-                (Vec::new(), false)
-            }
-        } else if mech_type == CKM_KMAC_128 || mech_type == CKM_KMAC_256 {
-            // Vendor KMAC params at NATIVE width: pCustomization(CK_BYTE_PTR),
-            // ulCustomizationLen(CK_ULONG), ulOutputLen(CK_ULONG) — 12 B on
-            // wasm32, 24 B on LP64. Absent → defaults.
-            //
-            // These were read as three u32s, which on a 64-bit build took the
-            // LOW HALF of the caller's pCustomization pointer and then
-            // dereferenced it: not merely a wrong MAC, a wild read.
-            let p_param = *((p_mechanism as *const usize).add(1));
-            let param_len = *((p_mechanism as *const usize).add(2));
-            let usz = core::mem::size_of::<usize>();
-            if p_param != 0 && param_len >= 3 * usz {
-                let pp = p_param as *const u8;
-                let s_ptr = std::ptr::read_unaligned(pp as *const usize);
-                let s_len = std::ptr::read_unaligned((pp as *const usize).add(1));
-                let out_len = std::ptr::read_unaligned((pp as *const usize).add(2)) as u32;
-                if out_len > 1024 || s_len > 1024 {
-                    return CKR_MECHANISM_PARAM_INVALID;
-                }
-                let mut v = out_len.to_le_bytes().to_vec();
-                if s_ptr != 0 && s_len > 0 {
-                    v.extend_from_slice(std::slice::from_raw_parts(s_ptr as *const u8, s_len));
-                }
-                (v, false)
-            } else {
-                (Vec::new(), false)
-            }
-        } else if let Some((_, digest_len)) = hmac_general_base(mech_type) {
-            // CK_MAC_GENERAL_PARAMS is a bare CK_ULONG ulMacLength
-            // ("typedef CK_ULONG CK_MAC_GENERAL_PARAMS"), so it is 4 B on
-            // wasm32 and 8 B on LP64 — read at native width like every other
-            // parameter here. The old 4-byte read happened to yield the right
-            // number on a little-endian 64-bit host and the wrong one (0) on a
-            // big-endian one; the length guard also accepted a half-sized
-            // parameter.
-            let p_param = *((p_mechanism as *const usize).add(1));
-            let param_len = *((p_mechanism as *const usize).add(2));
-            let usz = core::mem::size_of::<usize>();
-            if p_param == 0 || param_len < usz {
-                return CKR_MECHANISM_PARAM_INVALID;
-            }
-            let mac_len = std::ptr::read_unaligned(p_param as *const usize) as u32;
-            if mac_len == 0 || mac_len as usize > digest_len {
-                return CKR_MECHANISM_PARAM_INVALID;
-            }
-            (mac_len.to_le_bytes().to_vec(), false)
-        } else {
-            (Vec::new(), false)
+        // Mechanism parameters — see parse_sign_mech_params (shared with
+        // the other two *SignInit/*VerifyInit entry points).
+        let (slh_ctx, slh_det) = match parse_sign_mech_params(p_mechanism, mech_type) {
+            Ok(v) => v,
+            Err(rv) => return rv,
         };
         SIGN_STATE.with(|s| {
             s.borrow_mut()
@@ -4696,15 +4625,15 @@ unsafe fn remap_generic_hash_mech(p_mechanism: *const u8, mech_type: u32) -> Res
     if mech_type != CKM_HASH_ML_DSA && mech_type != CKM_HASH_SLH_DSA {
         return Ok(mech_type);
     }
-    let p_param = *((p_mechanism as *const usize).add(1));
-    let param_len = *((p_mechanism as *const usize).add(2));
-    let usz = core::mem::size_of::<usize>();
     // The generic mechanism cannot select a digest without this field —
     // absent/undersized params are a caller error, not a default.
-    if p_param == 0 || param_len < 4 * usz {
-        return Err(CKR_MECHANISM_PARAM_INVALID);
-    }
-    let hash = *((p_param as *const usize).add(3)) as u32;
+    let r = ck_param::mech(p_mechanism)
+        .params(
+            &ck_param::hash_sign_ctx::LAYOUT,
+            ck_param::hash_sign_ctx::FIELD_COUNT,
+        )
+        .map_err(|_| CKR_MECHANISM_PARAM_INVALID)?;
+    let hash = r.ulong32(ck_param::hash_sign_ctx::HASH);
     map_generic_hash_mech(mech_type, hash).ok_or(CKR_MECHANISM_PARAM_INVALID)
 }
 
@@ -4743,26 +4672,115 @@ fn takes_sign_additional_ctx(mech: u32) -> bool {
 ///
 /// Byte 0 is the right read on every target, and it also stays compatible
 /// with the little-endian 32-bit `phFlag` the wasm/TS callers write.
+///
+/// Ported to `ck_param` (2026-08-14): the one-byte read is now a property of
+/// the *declaration* (`F::Bbool`), not of this function remembering to do it.
 unsafe fn eddsa_ph_flag(p_mechanism: *const u8) -> bool {
-    let p_param = *((p_mechanism as *const usize).add(1)) as usize as *const u8;
-    let ul_param_len = *((p_mechanism as *const usize).add(2));
-    !p_param.is_null() && ul_param_len >= 1 && *p_param != 0
+    let m = ck_param::mech(p_mechanism);
+    // Absent parameter ⇒ pure EdDSA, which is the spec default.
+    match m.opt_params(&ck_param::eddsa::LAYOUT, 1) {
+        Ok(Some(r)) => r.bbool(ck_param::eddsa::PH_FLAG),
+        _ => false,
+    }
+}
+
+/// The mechanism-parameter half of `C_SignInit` / `C_VerifyInit` /
+/// `C_MessageSignInit`, which were three byte-identical copies of the same
+/// four-branch parse. Instances 2, 3 and 4 of the parameter-width defect all
+/// lived here, in triplicate — extracting it is the part of this change that
+/// makes those fixes structural rather than three edits that have to stay in
+/// step by hand.
+///
+/// Returns `(ctx_bytes, deterministic)` in the encoding the sign/verify
+/// pipeline already carries in its state map.
+unsafe fn parse_sign_mech_params(
+    p_mechanism: *const u8,
+    mech_type: u32,
+) -> Result<(Vec<u8>, bool), u32> {
+    let m = ck_param::mech(p_mechanism);
+    if takes_sign_additional_ctx(mech_type) {
+        // CK_SIGN_ADDITIONAL_CONTEXT — ML-DSA + SLH-DSA, pure and pre-hash
+        // (PKCS#11 v3.2 §6.67/§6.69). Overlong ctx / bad hedge → error.
+        return parse_sign_additional_ctx(p_mechanism);
+    }
+    if let Some((exp_hash, exp_mgf)) = rsa_pss_mech_params(mech_type) {
+        // CK_RSA_PKCS_PSS_PARAMS (§6.4.5) — params are caller-authoritative;
+        // hashAlg/mgf must match the mechanism's digest. An absent parameter
+        // keeps the legacy defaults, and so does a short one — unchanged from
+        // before this port, hence `.ok().flatten()` rather than `?`.
+        let r = m
+            .opt_params(&ck_param::pss::LAYOUT, ck_param::pss::FIELD_COUNT)
+            .ok()
+            .flatten();
+        return Ok(match r {
+            Some(r) => {
+                let hash_alg = r.ulong32(ck_param::pss::HASH_ALG);
+                let mgf = r.ulong32(ck_param::pss::MGF);
+                let s_len = r.ulong32(ck_param::pss::S_LEN);
+                if hash_alg != exp_hash || mgf != exp_mgf {
+                    return Err(CKR_MECHANISM_PARAM_INVALID);
+                }
+                // carried to C_Sign/C_Verify in the ctx vec (LE u32)
+                (s_len.to_le_bytes().to_vec(), false)
+            }
+            None => (Vec::new(), false),
+        });
+    }
+    if mech_type == CKM_KMAC_128 || mech_type == CKM_KMAC_256 {
+        // Vendor KMAC params — INSTANCE 3. `pCustomization` is a POINTER;
+        // reading the three fields as u32s on LP64 kept its low half and then
+        // dereferenced it. `ptr()`/`ulong()` cannot express that mistake, and
+        // `buffer()` reads the pointer/length pair as the declaration says
+        // they are typed. Absent (or short) ⇒ defaults, as before.
+        let r = m
+            .opt_params(&ck_param::kmac::LAYOUT, ck_param::kmac::FIELD_COUNT)
+            .ok()
+            .flatten();
+        return Ok(match r {
+            Some(r) => {
+                let s_len = r.ulong(ck_param::kmac::UL_CUSTOMIZATION_LEN);
+                let out_len = r.ulong32(ck_param::kmac::UL_OUTPUT_LEN);
+                if out_len > 1024 || s_len > 1024 {
+                    return Err(CKR_MECHANISM_PARAM_INVALID);
+                }
+                let mut v = out_len.to_le_bytes().to_vec();
+                v.extend_from_slice(
+                    r.buffer(ck_param::kmac::P_CUSTOMIZATION, ck_param::kmac::UL_CUSTOMIZATION_LEN),
+                );
+                (v, false)
+            }
+            None => (Vec::new(), false),
+        });
+    }
+    if let Some((_, digest_len)) = hmac_general_base(mech_type) {
+        // CK_MAC_GENERAL_PARAMS — INSTANCE 4. A bare `typedef CK_ULONG`, so
+        // the whole "struct" is one native-width word. The old reading took
+        // four bytes (right by accident on little-endian LP64, zero on
+        // big-endian) and its length guard accepted a HALF-SIZED parameter,
+        // reading the other four bytes from past the buffer. `require_len`
+        // is now what rejects that.
+        let r = m
+            .params(&ck_param::mac_general::LAYOUT, ck_param::mac_general::FIELD_COUNT)
+            .map_err(|_| CKR_MECHANISM_PARAM_INVALID)?;
+        let mac_len = r.ulong(ck_param::mac_general::UL_MAC_LENGTH);
+        if mac_len == 0 || mac_len > digest_len {
+            return Err(CKR_MECHANISM_PARAM_INVALID);
+        }
+        return Ok(((mac_len as u32).to_le_bytes().to_vec(), false));
+    }
+    Ok((Vec::new(), false))
 }
 
 unsafe fn parse_sign_additional_ctx(p_mechanism: *const u8) -> Result<(Vec<u8>, bool), u32> {
-    // CK_MECHANISM layout (WASM32): mechType(4) + pParameter(4) + ulParameterLen(4)
-    let p_param = *((p_mechanism as *const usize).add(1));
-    let param_len = *((p_mechanism as *const usize).add(2));
-    let usz = core::mem::size_of::<usize>();
-    if p_param == 0 || param_len < 3 * usz {
-        return Ok((Vec::new(), false));
-    }
-    let p_param = p_param as *const u8;
-    // CK_SIGN_ADDITIONAL_CONTEXT at native width: hedgeVariant@0,
-    // pContext@usz, ulContextLen@2*usz (CK_ULONG/pointer = usz bytes each).
-    let hedge = *(p_param as *const usize) as u32;
-    let ctx_ptr = *(p_param.add(usz) as *const usize);
-    let ctx_len = *(p_param.add(2 * usz) as *const usize);
+    // An absent parameter — and, unchanged from before this port, a short one
+    // — means "empty context, hedged".
+    let r = match ck_param::mech(p_mechanism)
+        .opt_params(&ck_param::sign_ctx::LAYOUT, ck_param::sign_ctx::FIELD_COUNT)
+    {
+        Ok(Some(r)) => r,
+        _ => return Ok((Vec::new(), false)),
+    };
+    let hedge = r.ulong32(ck_param::sign_ctx::HEDGE_VARIANT);
     // CKH_HEDGE_PREFERRED(0) / CKH_HEDGE_REQUIRED(1) both sign hedged here
     // (hedging is always available); CKH_DETERMINISTIC_REQUIRED(2) selects
     // the deterministic variant.
@@ -4771,14 +4789,12 @@ unsafe fn parse_sign_additional_ctx(p_mechanism: *const u8) -> Result<(Vec<u8>, 
         x if x == CKH_DETERMINISTIC_REQUIRED => true,
         _ => return Err(CKR_MECHANISM_PARAM_INVALID),
     };
-    if ctx_len > 255 {
+    if r.ulong(ck_param::sign_ctx::UL_CONTEXT_LEN) > 255 {
         return Err(CKR_MECHANISM_PARAM_INVALID);
     }
-    let context = if ctx_ptr != 0 && ctx_len > 0 {
-        std::slice::from_raw_parts(ctx_ptr as *const u8, ctx_len).to_vec()
-    } else {
-        Vec::new()
-    };
+    let context = r
+        .buffer(ck_param::sign_ctx::P_CONTEXT, ck_param::sign_ctx::UL_CONTEXT_LEN)
+        .to_vec();
     Ok((context, deterministic))
 }
 
@@ -5088,83 +5104,11 @@ pub fn C_VerifyInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
             Ok(m) => m,
             Err(rv) => return rv,
         };
-        // Parse CK_SIGN_ADDITIONAL_CONTEXT for SLH-DSA (context string, FIPS 205 §9.2)
-        // CK_SIGN_ADDITIONAL_CONTEXT — ML-DSA + SLH-DSA, pure and pre-hash
-        // (PKCS#11 v3.2 §6.67/§6.69). Overlong ctx / bad hedge value → error.
-        let (slh_ctx, slh_det) = if takes_sign_additional_ctx(mech_type) {
-            match parse_sign_additional_ctx(p_mechanism) {
-                Ok(v) => v,
-                Err(rv) => return rv,
-            }
-        } else if let Some((exp_hash, exp_mgf)) = rsa_pss_mech_params(mech_type) {
-            // CK_RSA_PKCS_PSS_PARAMS — 3 CK_ULONG fields (hashAlg, mgf, sLen) at
-            // native width (size_of::<usize>(): 12 B wasm32, 24 B native).
-            // §6.4.5 — params are caller-authoritative; hashAlg/mgf must match
-            // the mechanism's digest. Absent params keep legacy defaults.
-            let p_param = *((p_mechanism as *const usize).add(1));
-            let param_len = *((p_mechanism as *const usize).add(2));
-            let usz = core::mem::size_of::<usize>();
-            if p_param != 0 && param_len >= 3 * usz {
-                let pp = p_param as *const usize;
-                let hash_alg = std::ptr::read_unaligned(pp) as u32;
-                let mgf = std::ptr::read_unaligned(pp.add(1)) as u32;
-                let s_len = std::ptr::read_unaligned(pp.add(2)) as u32;
-                if hash_alg != exp_hash || mgf != exp_mgf {
-                    return CKR_MECHANISM_PARAM_INVALID;
-                }
-                // carried to C_Sign/C_Verify in the ctx vec (LE u32)
-                (s_len.to_le_bytes().to_vec(), false)
-            } else {
-                (Vec::new(), false)
-            }
-        } else if mech_type == CKM_KMAC_128 || mech_type == CKM_KMAC_256 {
-            // Vendor KMAC params at NATIVE width: pCustomization(CK_BYTE_PTR),
-            // ulCustomizationLen(CK_ULONG), ulOutputLen(CK_ULONG) — 12 B on
-            // wasm32, 24 B on LP64. Absent → defaults.
-            //
-            // These were read as three u32s, which on a 64-bit build took the
-            // LOW HALF of the caller's pCustomization pointer and then
-            // dereferenced it: not merely a wrong MAC, a wild read.
-            let p_param = *((p_mechanism as *const usize).add(1));
-            let param_len = *((p_mechanism as *const usize).add(2));
-            let usz = core::mem::size_of::<usize>();
-            if p_param != 0 && param_len >= 3 * usz {
-                let pp = p_param as *const u8;
-                let s_ptr = std::ptr::read_unaligned(pp as *const usize);
-                let s_len = std::ptr::read_unaligned((pp as *const usize).add(1));
-                let out_len = std::ptr::read_unaligned((pp as *const usize).add(2)) as u32;
-                if out_len > 1024 || s_len > 1024 {
-                    return CKR_MECHANISM_PARAM_INVALID;
-                }
-                let mut v = out_len.to_le_bytes().to_vec();
-                if s_ptr != 0 && s_len > 0 {
-                    v.extend_from_slice(std::slice::from_raw_parts(s_ptr as *const u8, s_len));
-                }
-                (v, false)
-            } else {
-                (Vec::new(), false)
-            }
-        } else if let Some((_, digest_len)) = hmac_general_base(mech_type) {
-            // CK_MAC_GENERAL_PARAMS is a bare CK_ULONG ulMacLength
-            // ("typedef CK_ULONG CK_MAC_GENERAL_PARAMS"), so it is 4 B on
-            // wasm32 and 8 B on LP64 — read at native width like every other
-            // parameter here. The old 4-byte read happened to yield the right
-            // number on a little-endian 64-bit host and the wrong one (0) on a
-            // big-endian one; the length guard also accepted a half-sized
-            // parameter.
-            let p_param = *((p_mechanism as *const usize).add(1));
-            let param_len = *((p_mechanism as *const usize).add(2));
-            let usz = core::mem::size_of::<usize>();
-            if p_param == 0 || param_len < usz {
-                return CKR_MECHANISM_PARAM_INVALID;
-            }
-            let mac_len = std::ptr::read_unaligned(p_param as *const usize) as u32;
-            if mac_len == 0 || mac_len as usize > digest_len {
-                return CKR_MECHANISM_PARAM_INVALID;
-            }
-            (mac_len.to_le_bytes().to_vec(), false)
-        } else {
-            (Vec::new(), false)
+        // Mechanism parameters — see parse_sign_mech_params (shared with
+        // the other two *SignInit/*VerifyInit entry points).
+        let (slh_ctx, slh_det) = match parse_sign_mech_params(p_mechanism, mech_type) {
+            Ok(v) => v,
+            Err(rv) => return rv,
         };
         VERIFY_STATE.with(|s| {
             s.borrow_mut()
@@ -5706,82 +5650,11 @@ pub fn C_VerifySignatureInit(
             Ok(m) => m,
             Err(rv) => return rv,
         };
-        // CK_SIGN_ADDITIONAL_CONTEXT — ML-DSA + SLH-DSA, pure and pre-hash
-        // (PKCS#11 v3.2 §6.67/§6.69). Overlong ctx / bad hedge value → error.
-        let (slh_ctx, slh_det) = if takes_sign_additional_ctx(mech_type) {
-            match parse_sign_additional_ctx(p_mechanism) {
-                Ok(v) => v,
-                Err(rv) => return rv,
-            }
-        } else if let Some((exp_hash, exp_mgf)) = rsa_pss_mech_params(mech_type) {
-            // CK_RSA_PKCS_PSS_PARAMS — 3 CK_ULONG fields (hashAlg, mgf, sLen) at
-            // native width (size_of::<usize>(): 12 B wasm32, 24 B native).
-            // §6.4.5 — params are caller-authoritative; hashAlg/mgf must match
-            // the mechanism's digest. Absent params keep legacy defaults.
-            let p_param = *((p_mechanism as *const usize).add(1));
-            let param_len = *((p_mechanism as *const usize).add(2));
-            let usz = core::mem::size_of::<usize>();
-            if p_param != 0 && param_len >= 3 * usz {
-                let pp = p_param as *const usize;
-                let hash_alg = std::ptr::read_unaligned(pp) as u32;
-                let mgf = std::ptr::read_unaligned(pp.add(1)) as u32;
-                let s_len = std::ptr::read_unaligned(pp.add(2)) as u32;
-                if hash_alg != exp_hash || mgf != exp_mgf {
-                    return CKR_MECHANISM_PARAM_INVALID;
-                }
-                // carried to C_Sign/C_Verify in the ctx vec (LE u32)
-                (s_len.to_le_bytes().to_vec(), false)
-            } else {
-                (Vec::new(), false)
-            }
-        } else if mech_type == CKM_KMAC_128 || mech_type == CKM_KMAC_256 {
-            // Vendor KMAC params at NATIVE width: pCustomization(CK_BYTE_PTR),
-            // ulCustomizationLen(CK_ULONG), ulOutputLen(CK_ULONG) — 12 B on
-            // wasm32, 24 B on LP64. Absent → defaults.
-            //
-            // These were read as three u32s, which on a 64-bit build took the
-            // LOW HALF of the caller's pCustomization pointer and then
-            // dereferenced it: not merely a wrong MAC, a wild read.
-            let p_param = *((p_mechanism as *const usize).add(1));
-            let param_len = *((p_mechanism as *const usize).add(2));
-            let usz = core::mem::size_of::<usize>();
-            if p_param != 0 && param_len >= 3 * usz {
-                let pp = p_param as *const u8;
-                let s_ptr = std::ptr::read_unaligned(pp as *const usize);
-                let s_len = std::ptr::read_unaligned((pp as *const usize).add(1));
-                let out_len = std::ptr::read_unaligned((pp as *const usize).add(2)) as u32;
-                if out_len > 1024 || s_len > 1024 {
-                    return CKR_MECHANISM_PARAM_INVALID;
-                }
-                let mut v = out_len.to_le_bytes().to_vec();
-                if s_ptr != 0 && s_len > 0 {
-                    v.extend_from_slice(std::slice::from_raw_parts(s_ptr as *const u8, s_len));
-                }
-                (v, false)
-            } else {
-                (Vec::new(), false)
-            }
-        } else if let Some((_, digest_len)) = hmac_general_base(mech_type) {
-            // CK_MAC_GENERAL_PARAMS is a bare CK_ULONG ulMacLength
-            // ("typedef CK_ULONG CK_MAC_GENERAL_PARAMS"), so it is 4 B on
-            // wasm32 and 8 B on LP64 — read at native width like every other
-            // parameter here. The old 4-byte read happened to yield the right
-            // number on a little-endian 64-bit host and the wrong one (0) on a
-            // big-endian one; the length guard also accepted a half-sized
-            // parameter.
-            let p_param = *((p_mechanism as *const usize).add(1));
-            let param_len = *((p_mechanism as *const usize).add(2));
-            let usz = core::mem::size_of::<usize>();
-            if p_param == 0 || param_len < usz {
-                return CKR_MECHANISM_PARAM_INVALID;
-            }
-            let mac_len = std::ptr::read_unaligned(p_param as *const usize) as u32;
-            if mac_len == 0 || mac_len as usize > digest_len {
-                return CKR_MECHANISM_PARAM_INVALID;
-            }
-            (mac_len.to_le_bytes().to_vec(), false)
-        } else {
-            (Vec::new(), false)
+        // Mechanism parameters — see parse_sign_mech_params (shared with
+        // the other two *SignInit/*VerifyInit entry points).
+        let (slh_ctx, slh_det) = match parse_sign_mech_params(p_mechanism, mech_type) {
+            Ok(v) => v,
+            Err(rv) => return rv,
         };
         let signature = std::slice::from_raw_parts(p_signature, ul_signature_len as usize).to_vec();
 
@@ -6045,36 +5918,15 @@ pub fn C_EncryptInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
                 )
             }
             CKM_AES_CTR => {
-                // CK_AES_CTR_PARAMS (§6.11.2) — `CK_ULONG ulCounterBits`
-                // followed by `CK_BYTE cb[16]`, read at NATIVE width like
-                // CK_GCM_PARAMS / CK_CHACHA20_PARAMS above: 20 B on wasm32,
-                // 24 B on an LP64 native build (cb at offset 8, after 4 bytes
-                // of tail padding in the CK_ULONG).
-                //
-                // Hard-coding a 4-byte CK_ULONG here put the 64-bit engine's
-                // counter block 4 bytes early — it read the high half of
-                // ulCounterBits as cb[0..4] and dropped the caller's real
-                // cb[12..16], so a caller-supplied a0a1…aeaf became
-                // 00000000a0a1…aaab. Every AES-CTR ciphertext the native
-                // library ever produced was off, at every counter width.
-                let usz = core::mem::size_of::<usize>();
-                if p_param.is_null() || ul_param_len < usz + 16 {
-                    return CKR_MECHANISM_PARAM_INVALID;
-                }
-                // §6.11.2 — "This number shall be such that 0 < ulCounterBits
-                // ≤ 128. For any values outside this range the mechanism shall
-                // return CKR_MECHANISM_PARAM_INVALID." Engine restriction:
-                // byte-granular widths only (8,16,…,128).
-                let counter_bits = *(p_param as *const usize);
-                if counter_bits == 0 || counter_bits > 128 || counter_bits % 8 != 0 {
-                    return CKR_MECHANISM_PARAM_INVALID;
-                }
-                let counter_bits = counter_bits as u32;
-                // cb follows ulCounterBits at its native alignment.
-                let counter_block = std::slice::from_raw_parts(p_param.add(usz), 16).to_vec();
+                // CK_AES_CTR_PARAMS (§6.11.2) — INSTANCE 1, now read through
+                // ck_param so `cb`'s offset comes from the declaration
+                // (4 on wasm32, 8 on LP64) rather than a literal.
                 // tag_bits doubles as the mechanism's bits parameter: GCM tag
                 // bits / CTR counter bits (see EncryptCtx).
-                (counter_block, Vec::new(), counter_bits)
+                match parse_aes_ctr_params(p_param, ul_param_len) {
+                    Ok((cb, bits)) => (cb, Vec::new(), bits),
+                    Err(rv) => return rv,
+                }
             }
             CKM_RSA_PKCS_OAEP => {
                 // Full CK_RSA_PKCS_OAEP_PARAMS (§6.4.4). EncryptCtx packing:
@@ -6157,6 +6009,47 @@ pub fn C_EncryptInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
 /// coerced. The counter is little-endian, matching both variants' own
 /// serialisation of the block-count word(s).
 ///
+/// `CK_AES_CTR_PARAMS` (PKCS#11 v3.2 §6.11.2):
+///
+/// ```text
+/// typedef struct CK_AES_CTR_PARAMS {
+///     CK_ULONG ulCounterBits;
+///     CK_BYTE  cb[16];
+/// } CK_AES_CTR_PARAMS;
+/// ```
+///
+/// **Instance 1 of the parameter-width defect.** `cb` was taken at a
+/// hard-coded offset 4, so on an LP64 build the engine read the high half of
+/// `ulCounterBits` as `cb[0..4]` and dropped the caller's real `cb[12..16]`:
+/// `a0a1…aeaf` became `00000000a0a1…aaab`, and EVERY AES-CTR ciphertext the
+/// native library ever produced was non-interoperable, at every counter
+/// width. Verified numerically against OpenSSL and NIST SP 800-38A in
+/// `844ed27`.
+///
+/// Shared by `C_EncryptInit` and `C_DecryptInit`, which had byte-identical
+/// copies of the decode.
+///
+/// # Safety
+/// `p_param` must point to `ul_param_len` readable bytes.
+unsafe fn parse_aes_ctr_params(p_param: *const u8, ul_param_len: usize) -> Result<(Vec<u8>, u32), u32> {
+    let r = ParamReader::new(
+        p_param,
+        ul_param_len,
+        &ck_param::aes_ctr::LAYOUT,
+        ck_param::aes_ctr::FIELD_COUNT,
+    )
+    .map_err(|_| CKR_MECHANISM_PARAM_INVALID)?;
+    // §6.11.2 — "This number shall be such that 0 < ulCounterBits ≤ 128. For
+    // any values outside this range the mechanism shall return
+    // CKR_MECHANISM_PARAM_INVALID." Engine restriction: byte-granular widths
+    // only (8,16,…,128).
+    let counter_bits = r.ulong(ck_param::aes_ctr::UL_COUNTER_BITS);
+    if counter_bits == 0 || counter_bits > 128 || counter_bits % 8 != 0 {
+        return Err(CKR_MECHANISM_PARAM_INVALID);
+    }
+    Ok((r.bytes(ck_param::aes_ctr::CB).to_vec(), counter_bits as u32))
+}
+
 /// # Safety
 /// `p_param` must point to `ul_param_len` readable bytes.
 unsafe fn parse_chacha20_params(
@@ -6538,36 +6431,15 @@ pub fn C_DecryptInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
                 )
             }
             CKM_AES_CTR => {
-                // CK_AES_CTR_PARAMS (§6.11.2) — `CK_ULONG ulCounterBits`
-                // followed by `CK_BYTE cb[16]`, read at NATIVE width like
-                // CK_GCM_PARAMS / CK_CHACHA20_PARAMS above: 20 B on wasm32,
-                // 24 B on an LP64 native build (cb at offset 8, after 4 bytes
-                // of tail padding in the CK_ULONG).
-                //
-                // Hard-coding a 4-byte CK_ULONG here put the 64-bit engine's
-                // counter block 4 bytes early — it read the high half of
-                // ulCounterBits as cb[0..4] and dropped the caller's real
-                // cb[12..16], so a caller-supplied a0a1…aeaf became
-                // 00000000a0a1…aaab. Every AES-CTR ciphertext the native
-                // library ever produced was off, at every counter width.
-                let usz = core::mem::size_of::<usize>();
-                if p_param.is_null() || ul_param_len < usz + 16 {
-                    return CKR_MECHANISM_PARAM_INVALID;
-                }
-                // §6.11.2 — "This number shall be such that 0 < ulCounterBits
-                // ≤ 128. For any values outside this range the mechanism shall
-                // return CKR_MECHANISM_PARAM_INVALID." Engine restriction:
-                // byte-granular widths only (8,16,…,128).
-                let counter_bits = *(p_param as *const usize);
-                if counter_bits == 0 || counter_bits > 128 || counter_bits % 8 != 0 {
-                    return CKR_MECHANISM_PARAM_INVALID;
-                }
-                let counter_bits = counter_bits as u32;
-                // cb follows ulCounterBits at its native alignment.
-                let counter_block = std::slice::from_raw_parts(p_param.add(usz), 16).to_vec();
+                // CK_AES_CTR_PARAMS (§6.11.2) — INSTANCE 1, now read through
+                // ck_param so `cb`'s offset comes from the declaration
+                // (4 on wasm32, 8 on LP64) rather than a literal.
                 // tag_bits doubles as the mechanism's bits parameter: GCM tag
                 // bits / CTR counter bits (see EncryptCtx).
-                (counter_block, Vec::new(), counter_bits)
+                match parse_aes_ctr_params(p_param, ul_param_len) {
+                    Ok((cb, bits)) => (cb, Vec::new(), bits),
+                    Err(rv) => return rv,
+                }
             }
             CKM_RSA_PKCS_OAEP => {
                 // Full CK_RSA_PKCS_OAEP_PARAMS (§6.4.4). EncryptCtx packing:

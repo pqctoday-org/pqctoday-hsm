@@ -34,7 +34,7 @@
 //! rules from that declaration and the target's word width. There is no
 //! numeric offset anywhere in a call site to get wrong:
 //!
-//! ```ignore
+//! ```text
 //! let r = ParamReader::new(p_param, len, &eddsa::LAYOUT, eddsa::FIELD_COUNT)?;
 //! let ph = r.bbool(eddsa::PH_FLAG);     // one byte, at the ABI's offset
 //! let ctx = r.buffer(eddsa::P_CONTEXT_DATA, eddsa::UL_CONTEXT_DATA_LEN);
