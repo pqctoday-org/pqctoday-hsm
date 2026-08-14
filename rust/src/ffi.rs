@@ -2801,7 +2801,13 @@ fn C_GenerateKeyPair_impl(
                 store_bool(&mut pub_attrs, CKA_PRIVATE, false);
                 store_bool(&mut pub_attrs, CKA_VERIFY, true);
                 store_bool(&mut pub_attrs, CKA_LOCAL, true);
-                store_bool(&mut pub_attrs, CKA_EXTRACTABLE, true);
+                // NO CKA_EXTRACTABLE on the public half. §4.9 Table 27 (common
+                // PUBLIC key attributes) does not define it; it is a private/
+                // secret key attribute, and it is one of the two attributes
+                // §6.66.4's "CKA_SENSITIVE MUST be true and CKA_EXTRACTABLE
+                // MUST be false for this key" is expressed through — so having
+                // it on the wrong half made that MUST uncheckable on the right
+                // one.
                 pub_attrs.insert(CKA_VALUE, pub_bytes);
                 // Private key attributes
                 store_ulong(&mut prv_attrs, CKA_CLASS, CKO_PRIVATE_KEY);
@@ -2873,7 +2879,13 @@ fn C_GenerateKeyPair_impl(
                 store_bool(&mut pub_attrs, CKA_PRIVATE, false);
                 store_bool(&mut pub_attrs, CKA_VERIFY, true);
                 store_bool(&mut pub_attrs, CKA_LOCAL, true);
-                store_bool(&mut pub_attrs, CKA_EXTRACTABLE, true);
+                // NO CKA_EXTRACTABLE on the public half. §4.9 Table 27 (common
+                // PUBLIC key attributes) does not define it; it is a private/
+                // secret key attribute, and it is one of the two attributes
+                // §6.66.4's "CKA_SENSITIVE MUST be true and CKA_EXTRACTABLE
+                // MUST be false for this key" is expressed through — so having
+                // it on the wrong half made that MUST uncheckable on the right
+                // one.
                 pub_attrs.insert(CKA_VALUE, pub_bytes);
                 store_ulong(&mut prv_attrs, CKA_CLASS, CKO_PRIVATE_KEY);
                 store_ulong(&mut prv_attrs, CKA_KEY_TYPE, CKK_XMSSMT);
@@ -8979,7 +8991,17 @@ pub fn C_UnwrapKey(
         if !attrs.contains_key(&CKA_KEY_TYPE) {
             store_ulong(&mut attrs, CKA_KEY_TYPE, CKK_AES);
         }
-        if !attrs.contains_key(&CKA_VALUE_LEN) {
+        // CKA_VALUE_LEN is a SECRET-key attribute (§4.10 / Table 32); the
+        // common private-key table does not define it. Storing it
+        // unconditionally made an unwrapped EC PRIVATE key report a
+        // CKA_VALUE_LEN of 60 — the length of this engine's internal stored
+        // blob, which is not a concept the caller has
+        // (DEFECT-RUST-UNWRAPPED-PRIVATE-VALUE-LEN).
+        let unwrapped_class = attrs
+            .get(&CKA_CLASS)
+            .filter(|v| v.len() >= 4)
+            .map(|v| u32::from_le_bytes([v[0], v[1], v[2], v[3]]));
+        if unwrapped_class == Some(CKO_SECRET_KEY) && !attrs.contains_key(&CKA_VALUE_LEN) {
             store_ulong(&mut attrs, CKA_VALUE_LEN, key_len);
         }
         if !attrs.contains_key(&CKA_TOKEN) {
@@ -9329,7 +9351,17 @@ pub fn C_UnwrapKeyAuthenticated(
         if !attrs.contains_key(&CKA_KEY_TYPE) {
             store_ulong(&mut attrs, CKA_KEY_TYPE, CKK_AES);
         }
-        if !attrs.contains_key(&CKA_VALUE_LEN) {
+        // CKA_VALUE_LEN is a SECRET-key attribute (§4.10 / Table 32); the
+        // common private-key table does not define it. Storing it
+        // unconditionally made an unwrapped EC PRIVATE key report a
+        // CKA_VALUE_LEN of 60 — the length of this engine's internal stored
+        // blob, which is not a concept the caller has
+        // (DEFECT-RUST-UNWRAPPED-PRIVATE-VALUE-LEN).
+        let unwrapped_class = attrs
+            .get(&CKA_CLASS)
+            .filter(|v| v.len() >= 4)
+            .map(|v| u32::from_le_bytes([v[0], v[1], v[2], v[3]]));
+        if unwrapped_class == Some(CKO_SECRET_KEY) && !attrs.contains_key(&CKA_VALUE_LEN) {
             store_ulong(&mut attrs, CKA_VALUE_LEN, key_len);
         }
         if !attrs.contains_key(&CKA_TOKEN) {

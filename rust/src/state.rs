@@ -349,6 +349,53 @@ fn apply_object_defaults(attrs: &mut Attributes) {
         if class == CKO_PRIVATE_KEY && !attrs.contains_key(&CKA_ALWAYS_AUTHENTICATE) {
             store_bool(attrs, CKA_ALWAYS_AUTHENTICATE, false);
         }
+        // CKA_VERIFY_RECOVER / CKA_SIGN_RECOVER are COMMON key attributes —
+        // Table 27 (public) and Table 28 (private) — so every public key
+        // possesses the first and every private key the second, whatever the
+        // token can actually do with them. This engine materialised neither,
+        // and answered CKR_ATTRIBUTE_TYPE_INVALID for both on every key.
+        //
+        // Recorded backwards. The harness entry blamed C++ for "still
+        // asserting" them after the recovery dispatch path was removed
+        // (DEFECT-CPP-RECOVERY-ATTRIBUTES-STILL-ASSERTED, 68 observations).
+        // The specification's own tables say otherwise: the attributes are
+        // standard and their absence is the defect, so Rust was the wrong
+        // side. Plan item C3 concerned the MECHANISM-INFO recovery FLAGS,
+        // which are a different question and correctly stayed unadvertised.
+        //
+        // FALSE, because this engine implements no recovery mechanism —
+        // materialising them as TRUE would be the advertise-without-dispatch
+        // fault C3 exists to prevent. A caller's template still wins.
+        if class == CKO_PUBLIC_KEY && !attrs.contains_key(&CKA_VERIFY_RECOVER) {
+            store_bool(attrs, CKA_VERIFY_RECOVER, false);
+        }
+        if class == CKO_PRIVATE_KEY && !attrs.contains_key(&CKA_SIGN_RECOVER) {
+            store_bool(attrs, CKA_SIGN_RECOVER, false);
+        }
+        // CKA_ALWAYS_SENSITIVE / CKA_NEVER_EXTRACTABLE — §4.10's history
+        // attributes, defined for private and secret keys. Most generation
+        // arms set them by hand and the XMSS and XMSS^MT arms did not, so
+        // §6.66.4's "CKA_SENSITIVE MUST be true and CKA_EXTRACTABLE MUST be
+        // false for this key" could not be checked on exactly the key type it
+        // is written about (DEFECT-XMSS-PUBLIC-KEY-ATTRIBUTE-SPREAD).
+        //
+        // Derived rather than hard-coded, and only as a DEFAULT: every path
+        // that knows better — C_CreateObject, C_UnwrapKey, C_DeriveKey — sets
+        // both to false explicitly before the object is allocated, and
+        // `contains_key` leaves those alone. The derivation is the definition:
+        // a key that was generated in-token (CKA_LOCAL) has been whatever it
+        // is now for its whole life.
+        if class == CKO_PRIVATE_KEY || class == CKO_SECRET_KEY {
+            let local = read_bool_attr(attrs, CKA_LOCAL);
+            if !attrs.contains_key(&CKA_ALWAYS_SENSITIVE) {
+                let v = local && read_bool_attr(attrs, CKA_SENSITIVE);
+                store_bool(attrs, CKA_ALWAYS_SENSITIVE, v);
+            }
+            if !attrs.contains_key(&CKA_NEVER_EXTRACTABLE) {
+                let v = local && !read_bool_attr(attrs, CKA_EXTRACTABLE);
+                store_bool(attrs, CKA_NEVER_EXTRACTABLE, v);
+            }
+        }
     }
 }
 
@@ -1434,12 +1481,22 @@ pub fn compute_kcv(attrs: &mut Attributes) {
                 _ => return,
             }
         }
-        CKO_PUBLIC_KEY | CKO_PRIVATE_KEY | CKO_CERTIFICATE => {
-            // Asymmetric keys and certificates: SHA-256 of CKA_VALUE (the
-            // DER cert bytes, for CKO_CERTIFICATE) → first 3 bytes. §4.6
-            // Table 19 doesn't mandate a specific algorithm for
-            // certificates (token-defined) — reusing the same convention
-            // already used for public/private keys.
+        // CERTIFICATES ONLY — public and private keys are NOT in this arm.
+        //
+        // §4.11 introduces the attribute as "the key check value (KCV)
+        // attribute for SYMMETRIC KEY OBJECTS", and the tables agree: it is
+        // listed in the Common Secret Key Attributes table and in §4.6's
+        // certificate table (Table 19), and in NEITHER the common public-key
+        // (Table 27) nor the common private-key (Table 28) table. A public key
+        // has nothing to check, and a private key's checksum is not something
+        // the specification defines.
+        //
+        // This arm used to include both, which is how an EC private key
+        // recovered through C_UnwrapKey came back carrying a three-byte
+        // checksum (DEFECT-CHECK-VALUE-ON-UNWRAPPED-PRIVATE-KEY). §4.6 does
+        // not mandate an algorithm for certificates, so the SHA-256 convention
+        // stays for that class.
+        CKO_CERTIFICATE => {
             let hash = Sha256::digest(&key_value);
             hash[..3].to_vec()
         }
