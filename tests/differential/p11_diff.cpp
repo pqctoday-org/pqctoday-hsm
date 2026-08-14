@@ -409,6 +409,18 @@ static bool is_opaque_attr(CK_ATTRIBUTE_TYPE t) {
     }
 }
 
+// Attributes with no internal structure: an identifier, a checksum or a date.
+// Their bytes are not an encoding of anything, so classifying them is noise.
+static bool is_unstructured_attr(CK_ATTRIBUTE_TYPE t) {
+    switch (t) {
+        case CKA_UNIQUE_ID: case CKA_CHECK_VALUE: case CKA_ID:
+        case CKA_SEED: case CKA_START_DATE: case CKA_END_DATE:
+        case CKA_LABEL: case CKA_APPLICATION:
+            return true;
+        default: return false;
+    }
+}
+
 // The canonical attribute probe. Every object produced by every creation path
 // is interrogated with the SAME list, so "this engine does not set X" shows up
 // as a return-code difference rather than as a silently missing row.
@@ -446,7 +458,16 @@ static void record_attrs(Engine& e, Recorder& r, const std::string& prefix,
         a.pValue = buf.data();
         CK_RV rv2 = e.fl->C_GetAttributeValue(s, o, &a, 1);
         if (rv2 != CKR_OK) { r.put(prefix + "." + an + ".fetch", rv_name(rv2)); continue; }
-        r.put(prefix + "." + an + ".enc", classify(buf.data(), a.ulValueLen));
+        // Unstructured attributes are not classified. Running the encoding
+        // classifier over an identity string or a three-byte checksum produces
+        // a verdict that flips with the leading byte — a Rust unique id
+        // beginning '0' reads as an ASN.1 SEQUENCE tag, and roughly one check
+        // value in 256 starts 0x30 by chance. That made the harness fail at
+        // random, and a flaky harness gets switched off. Length is still
+        // recorded, which is the observable that actually carries meaning here
+        // (a 3-byte check value present versus absent).
+        if (!is_unstructured_attr(t))
+            r.put(prefix + "." + an + ".enc", classify(buf.data(), a.ulValueLen));
         if (is_opaque_attr(t)) {
             // Value intentionally not compared — see is_opaque_attr.
             r.put(prefix + "." + an + ".value", "<opaque>");
@@ -458,8 +479,8 @@ static void record_attrs(Engine& e, Recorder& r, const std::string& prefix,
     }
     std::string joined;
     for (size_t i = 0; i < present.size(); i++) { if (i) joined += ","; joined += present[i]; }
-    r.put(prefix + ".attrs_present", joined);
-    r.num(prefix + ".attrs_present_count", present.size());
+    r.put(prefix + "._ctx.attrs_present", joined);
+    r.num(prefix + "._ctx.attrs_present_count", present.size());
 }
 
 // ---------------------------------------------------------------------------
@@ -502,16 +523,28 @@ static CK_KEY_TYPE     ktGeneric = CKK_GENERIC_SECRET;
 static CK_ULONG        len32     = 32;
 static CK_ULONG        len16     = 16;
 
-// Records the outcome of an operation that produces bytes. Where the bytes are
-// deterministic (fixed key + fixed IV) they are recorded in full and MUST
-// match; where they are not, length and encoding are recorded instead.
+// How much of a byte output is comparable across engines.
+//
+//   BYTES — the whole output. Only valid when every input was fixed, so the
+//           two engines are computing the same function of the same data.
+//   SHAPE — length plus encoding class. For outputs that are random in value
+//           but whose FRAMING is specified (the ECDH-KEM ephemeral point).
+//   LEN   — length only. For outputs that are random in both value and first
+//           byte; recording anything more would make the harness flaky, and a
+//           flaky harness gets switched off.
+enum class ByteView { BYTES, SHAPE, LEN };
+
 static void record_bytes(Recorder& r, const std::string& path,
-                         const CK_BYTE* p, size_t n, bool deterministic) {
+                         const CK_BYTE* p, size_t n, ByteView view) {
     r.num(path + ".len", (unsigned long long)n);
     if (n == 0) return;
-    r.put(path + ".enc", classify(p, n));
-    if (deterministic) r.put(path + ".bytes", to_hex(p, n));
-    else               r.put(path + ".b0", to_hex(p, 1));
+    if (view == ByteView::BYTES) {
+        r.put(path + ".enc", classify(p, n));
+        r.put(path + ".bytes", to_hex(p, n));
+    } else if (view == ByteView::SHAPE) {
+        r.put(path + ".enc", classify(p, n));
+        r.put(path + ".first_byte", to_hex(p, 1));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -536,8 +569,24 @@ static void add(Scenario s) { gScenarios.push_back(std::move(s)); }
 // ---------------------------------------------------------------------------
 // Exception list
 // ---------------------------------------------------------------------------
+// An entry has one of two statuses, and the difference matters:
+//
+//   "legal"  — adjudicated against the specification: the divergence is
+//              permitted, and the citation says why. It will never be fixed.
+//   "defect" — a KNOWN, still-open non-conformance in one engine, recorded so
+//              the harness has a stable baseline. It is not an excuse; it is a
+//              worklist item with an owner named in the justification.
+//
+// Anything matching NEITHER fails the run. That is the whole mechanism: a new
+// divergence cannot be introduced without someone writing a sentence about it.
 struct Exception_ {
-    std::string id, scenario, path, kind, justification, citation;
+    std::string id, scenario, path, kind, status, justification, citation;
+    // Value matchers. Two divergences can share a path and be entirely
+    // different questions — CKA_KEY_GEN_MECHANISM differing because Rust
+    // narrows CK_UNAVAILABLE_INFORMATION to 32 bits is a defect; the same
+    // path differing because Rust names the encapsulation mechanism is not.
+    // Without these an entry for one silently absolves the other.
+    std::string cpp_value = "*", rust_value = "*";
     int hits = 0;
 };
 static std::vector<Exception_> gExceptions;
@@ -555,6 +604,20 @@ static bool glob(const std::string& pat, const std::string& s) {
     return p == pat.size();
 }
 
+// '|' separates alternatives, so one entry can cover a family of attributes
+// without being split into near-identical copies.
+static bool glob_alt(const std::string& pat, const std::string& s) {
+    size_t i = 0;
+    while (i <= pat.size()) {
+        size_t j = pat.find('|', i);
+        if (j == std::string::npos) j = pat.size();
+        if (glob(pat.substr(i, j - i), s)) return true;
+        if (j == pat.size()) break;
+        i = j + 1;
+    }
+    return false;
+}
+
 static void load_exceptions(const std::string& file) {
     std::ifstream in(file);
     if (!in) { fprintf(stdout, "FATAL: cannot open exception list %s\n", file.c_str()); exit(2); }
@@ -565,6 +628,14 @@ static void load_exceptions(const std::string& file) {
         x.scenario      = e.value("scenario", "*");
         x.path          = e.value("path", "*");
         x.kind          = e.value("kind", "*");
+        x.cpp_value     = e.value("cpp", "*");
+        x.rust_value    = e.value("rust", "*");
+        x.status        = e.at("status").get<std::string>();
+        if (x.status != "legal" && x.status != "defect") {
+            fprintf(stdout, "FATAL: exception %s has status '%s'; only 'legal' or 'defect' are allowed\n",
+                    x.id.c_str(), x.status.c_str());
+            exit(2);
+        }
         x.justification = e.at("justification").get<std::string>();
         x.citation      = e.value("citation", "");
         if (!opt_drop_exception.empty() && x.id == opt_drop_exception) {
@@ -579,13 +650,22 @@ static void load_exceptions(const std::string& file) {
 // Findings
 // ---------------------------------------------------------------------------
 struct Finding {
-    std::string scenario, path, kind, cpp, rust, exception_id, justification, citation;
+    std::string scenario, path, kind, cpp, rust, exception_id, status, justification, citation;
 };
 static std::vector<Finding> gFindings;
 
+// Attribute-set context: for every object the harness probed, which attributes
+// each engine possesses. Not a finding — the individual differences are already
+// findings — but it is the single most legible view of "what does this object
+// look like on each side", so it goes in the report.
+struct CtxEntry { std::string scenario, prefix, cpp, rust; };
+static std::vector<CtxEntry> gCtx;
+
 static Exception_* match_exception(const Finding& f) {
     for (auto& x : gExceptions)
-        if (glob(x.scenario, f.scenario) && glob(x.path, f.path) && glob(x.kind, f.kind))
+        if (glob_alt(x.scenario, f.scenario) && glob_alt(x.path, f.path) &&
+            glob_alt(x.kind, f.kind) &&
+            glob_alt(x.cpp_value, f.cpp) && glob_alt(x.rust_value, f.rust))
             return &x;
     return nullptr;
 }
@@ -697,6 +777,21 @@ static void compare(const Scenario& sc, const Recorder& a, const Recorder& b) {
     for (const auto& p : b.order) if (!seen.count(p)) ordered.push_back(p);
 
     for (const auto& p : ordered) {
+        // "_ctx." paths are recorded for the human reading the report and are
+        // deliberately NOT compared: they are summaries of observations that
+        // are already compared individually, so comparing them again would
+        // make one attribute difference report twice and, worse, would need an
+        // exception entry whose scope is "any attribute at all".
+        if (p.find("._ctx.attrs_present") != std::string::npos &&
+            p.find("_count") == std::string::npos) {
+            CtxEntry ce;
+            ce.scenario = sc.id;
+            ce.prefix   = p.substr(0, p.find("._ctx."));
+            ce.cpp      = a.vals.count(p) ? a.vals.at(p) : "";
+            ce.rust     = b.vals.count(p) ? b.vals.at(p) : "";
+            if (ce.cpp != ce.rust) gCtx.push_back(ce);
+        }
+        if (p.rfind("_ctx.", 0) == 0 || p.find("._ctx.") != std::string::npos) continue;
         bool ha = a.vals.count(p), hb = b.vals.count(p);
         Finding f;
         f.scenario = sc.id; f.path = p;
@@ -710,7 +805,8 @@ static void compare(const Scenario& sc, const Recorder& a, const Recorder& b) {
             f.kind = "rust_only"; f.cpp = "<absent>"; f.rust = b.vals.at(p);
         }
         Exception_* x = match_exception(f);
-        if (x) { x->hits++; f.exception_id = x->id; f.justification = x->justification; f.citation = x->citation; }
+        if (x) { x->hits++; f.exception_id = x->id; f.status = x->status;
+                 f.justification = x->justification; f.citation = x->citation; }
         gFindings.push_back(std::move(f));
     }
 }
@@ -718,9 +814,19 @@ static void compare(const Scenario& sc, const Recorder& a, const Recorder& b) {
 // ---------------------------------------------------------------------------
 // Reporting
 // ---------------------------------------------------------------------------
+// Written BEFORE anything is printed: a run piped into `head` takes SIGPIPE
+// partway through the console listing, and a report that only exists when
+// nobody truncated the output is not a report.
+static void write_files(int ran, int skipped, size_t covered, size_t uncovered);
+
 static void write_reports(int ran, int skipped) {
-    size_t covered = 0, uncovered = 0;
-    for (const auto& f : gFindings) (f.exception_id.empty() ? uncovered : covered)++;
+    size_t covered = 0, uncovered = 0, legal = 0, defect = 0;
+    for (const auto& f : gFindings) {
+        if (f.exception_id.empty()) { uncovered++; continue; }
+        covered++;
+        (f.status == "defect" ? defect : legal)++;
+    }
+    write_files(ran, skipped, covered, uncovered);
 
     printf("\n");
     printf("================================================================\n");
@@ -728,21 +834,28 @@ static void write_reports(int ran, int skipped) {
     printf("================================================================\n");
     printf(" scenarios run          : %d (%d skipped for absent mechanisms)\n", ran, skipped);
     printf(" observations compared  : see report\n");
-    printf(" divergences, covered   : %zu  (matched an exception entry)\n", covered);
-    printf(" divergences, UNCOVERED : %zu\n", uncovered);
+    printf(" divergences, legal     : %zu  (adjudicated permitted, with citation)\n", legal);
+    printf(" divergences, known defect: %zu (recorded open non-conformance)\n", defect);
+    printf(" divergences, UNCOVERED : %zu  <-- these fail the run\n", uncovered);
     printf("================================================================\n\n");
 
     if (uncovered) {
         printf("UNCOVERED DIVERGENCES — each of these is either a real defect or a\n");
         printf("missing exception entry. Neither may be left unresolved.\n\n");
+        const size_t kConsoleCap = 80;
+        size_t shown = 0;
         std::string last;
         for (const auto& f : gFindings) {
             if (!f.exception_id.empty()) continue;
+            if (shown++ >= kConsoleCap) continue;
             if (f.scenario != last) { printf("  ── scenario: %s\n", f.scenario.c_str()); last = f.scenario; }
             printf("     %-8s %s\n", f.kind.c_str(), f.path.c_str());
             printf("        cpp  : %s\n", f.cpp.c_str());
             printf("        rust : %s\n", f.rust.c_str());
         }
+        if (uncovered > kConsoleCap)
+            printf("\n  … %zu more; the complete list is in %s.md and %s.json\n",
+                   uncovered - kConsoleCap, opt_report.c_str(), opt_report.c_str());
         printf("\n");
     }
 
@@ -751,7 +864,8 @@ static void write_reports(int ran, int skipped) {
         std::map<std::string, std::vector<const Finding*>> byX;
         for (const auto& f : gFindings) if (!f.exception_id.empty()) byX[f.exception_id].push_back(&f);
         for (const auto& kv : byX) {
-            printf("  [%s] %zu observation(s)\n", kv.first.c_str(), kv.second.size());
+            printf("  [%s] (%s) %zu observation(s)\n", kv.first.c_str(),
+                   kv.second.front()->status.c_str(), kv.second.size());
             printf("      why: %s\n", kv.second.front()->justification.c_str());
             if (!kv.second.front()->citation.empty())
                 printf("      cite: %s\n", kv.second.front()->citation.c_str());
@@ -771,11 +885,19 @@ static void write_reports(int ran, int skipped) {
         printf("\n");
     }
 
+    printf("reports: %s.json  %s.md\n", opt_report.c_str(), opt_report.c_str());
+}
+
+static void write_files(int ran, int skipped, size_t covered, size_t uncovered) {
+    size_t legal = 0, defect = 0;
+    for (const auto& f : gFindings)
+        if (!f.exception_id.empty()) (f.status == "defect" ? defect : legal)++;
     // JSON
     json j;
     j["_summary"] = {
         {"scenarios_run", ran}, {"scenarios_skipped", skipped},
         {"divergences_covered", covered}, {"divergences_uncovered", uncovered},
+        {"divergences_legal", legal}, {"divergences_known_defect", defect},
         {"cpp_engine", gCpp.path}, {"rust_engine", gRust.path},
         {"exception_list", opt_exceptions},
         {"dropped_exception", opt_drop_exception},
@@ -784,12 +906,13 @@ static void write_reports(int ran, int skipped) {
         j["findings"].push_back({
             {"scenario", f.scenario}, {"path", f.path}, {"kind", f.kind},
             {"cpp", f.cpp}, {"rust", f.rust},
-            {"exception_id", f.exception_id}, {"justification", f.justification},
+            {"exception_id", f.exception_id}, {"status", f.status},
+            {"justification", f.justification},
             {"citation", f.citation},
         });
     }
     for (const auto& x : gExceptions)
-        j["exception_usage"].push_back({{"id", x.id}, {"hits", x.hits}});
+        j["exception_usage"].push_back({{"id", x.id}, {"status", x.status}, {"hits", x.hits}});
     { std::ofstream o(opt_report + ".json"); o << std::setw(2) << j << std::endl; }
 
     // Markdown
@@ -803,7 +926,8 @@ static void write_reports(int ran, int skipped) {
     md << "\n| | |\n|---|---|\n";
     md << "| scenarios run | " << ran << " |\n";
     md << "| scenarios skipped (mechanism absent on one engine) | " << skipped << " |\n";
-    md << "| divergences covered by an exception | " << covered << " |\n";
+    md << "| divergences adjudicated legal | " << legal << " |\n";
+    md << "| divergences recorded as known defects | " << defect << " |\n";
     md << "| divergences UNCOVERED | " << uncovered << " |\n\n";
     if (uncovered) {
         md << "## Uncovered divergences\n\n| scenario | path | kind | C++ | Rust |\n|---|---|---|---|---|\n";
@@ -812,15 +936,38 @@ static void write_reports(int ran, int skipped) {
                << " | `" << f.cpp << "` | `" << f.rust << "` |\n";
         md << "\n";
     }
+    if (!gCtx.empty()) {
+        md << "## Attribute-set context\n\n";
+        md << "For every object whose attribute set differs, which attributes each engine\n";
+        md << "possesses. Context, not findings — every entry here is also reported\n";
+        md << "individually above or covered by an exception.\n\n";
+        md << "| scenario | object | present only on C++ | present only on Rust |\n|---|---|---|---|\n";
+        for (const auto& c : gCtx) {
+            auto split = [](const std::string& v) {
+                std::set<std::string> out; size_t i = 0;
+                while (i < v.size()) { size_t j = v.find(',', i);
+                    if (j == std::string::npos) j = v.size();
+                    if (j > i) out.insert(v.substr(i, j - i)); i = j + 1; }
+                return out;
+            };
+            auto A = split(c.cpp), B = split(c.rust);
+            std::string onlyA, onlyB;
+            for (const auto& x : A) if (!B.count(x)) { if (!onlyA.empty()) onlyA += ", "; onlyA += x; }
+            for (const auto& x : B) if (!A.count(x)) { if (!onlyB.empty()) onlyB += ", "; onlyB += x; }
+            md << "| " << c.scenario << " | `" << c.prefix << "` | " << (onlyA.empty() ? "—" : onlyA)
+               << " | " << (onlyB.empty() ? "—" : onlyB) << " |\n";
+        }
+        md << "\n";
+    }
+
     md << "## Covered divergences by exception entry\n\n";
     std::map<std::string, size_t> counts;
     for (const auto& f : gFindings) if (!f.exception_id.empty()) counts[f.exception_id]++;
-    md << "| exception | observations | justification |\n|---|---|---|\n";
+    md << "| exception | status | observations | justification | citation |\n|---|---|---|---|---|\n";
     for (const auto& x : gExceptions)
-        md << "| " << x.id << " | " << counts[x.id] << " | " << x.justification << " |\n";
+        md << "| " << x.id << " | " << x.status << " | " << counts[x.id] << " | "
+           << x.justification << " | " << x.citation << " |\n";
     md << "\n";
-
-    printf("reports: %s.json  %s.md\n", opt_report.c_str(), opt_report.c_str());
 }
 
 // ---------------------------------------------------------------------------

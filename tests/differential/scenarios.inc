@@ -542,7 +542,7 @@ add({"create.unwrap.aes_kw", "create",
          CK_BYTE wrapped[128]; CK_ULONG wlen = sizeof wrapped;
          CK_RV rv = e.fl->C_WrapKey(s, &wm, kek, ht, wrapped, &wlen);
          r.rv("wrap", rv);
-         if (rv == CKR_OK) record_bytes(r, "wrapped", wrapped, wlen, /*deterministic*/true);
+         if (rv == CKR_OK) record_bytes(r, "wrapped", wrapped, wlen, ByteView::BYTES);
          if (rv != CKR_OK) return;
          CK_ATTRIBUTE ut[] = {
              ATTR(CKA_CLASS,       &clSecret, sizeof clSecret),
@@ -594,7 +594,7 @@ add({"create.encapsulate.ml_kem_768", "create",
          CK_OBJECT_HANDLE hEnc = CK_INVALID_HANDLE, hDec = CK_INVALID_HANDLE;
          rv = e.Encapsulate(s, &em, hPub, st, 6, ct, &ctLen, &hEnc);
          r.rv("encapsulate", rv);
-         if (rv == CKR_OK) record_bytes(r, "ciphertext", ct, ctLen, /*deterministic*/false);
+         if (rv == CKR_OK) record_bytes(r, "ciphertext", ct, ctLen, ByteView::LEN);
          record_attrs(e, r, "encap_key", s, hEnc);
          if (rv != CKR_OK) return;
          rv = e.Decapsulate(s, &em, hPriv, st, 6, ct, ctLen, &hDec);
@@ -650,7 +650,7 @@ add({"create.encapsulate.ecdh_p256", "create",
          CK_OBJECT_HANDLE hEnc = CK_INVALID_HANDLE, hDec = CK_INVALID_HANDLE;
          rv = e.Encapsulate(s, &em, hPub, st, 5, ct, &ctLen, &hEnc);
          r.rv("encapsulate", rv);
-         if (rv == CKR_OK) record_bytes(r, "ciphertext", ct, ctLen, false);
+         if (rv == CKR_OK) record_bytes(r, "ciphertext", ct, ctLen, ByteView::SHAPE);
          record_attrs(e, r, "encap_key", s, hEnc);
          if (rv != CKR_OK) return;
          rv = e.Decapsulate(s, &em, hPriv, st, 5, ct, ctLen, &hDec);
@@ -722,7 +722,7 @@ static auto digest_case = [](CK_MECHANISM_TYPE mech) {
         CK_BYTE out[128]; CK_ULONG olen = sizeof out;
         CK_RV rv = e.fl->C_Digest(s, kPlain32, sizeof kPlain32, out, &olen);
         r.rv("digest", rv);
-        if (rv == CKR_OK) record_bytes(r, "out", out, olen, true);
+        if (rv == CKR_OK) record_bytes(r, "out", out, olen, ByteView::BYTES);
     };
 };
 
@@ -753,7 +753,7 @@ add({"bytes.hmac_sha256", "bytes", "CKM_SHA256_HMAC under a fixed key — byte-i
          CK_BYTE out[64]; CK_ULONG olen = sizeof out;
          rv = e.fl->C_Sign(s, kPlain32, sizeof kPlain32, out, &olen);
          r.rv("sign", rv);
-         if (rv == CKR_OK) record_bytes(r, "mac", out, olen, true);
+         if (rv == CKR_OK) record_bytes(r, "mac", out, olen, ByteView::BYTES);
      }});
 
 static auto aes_case = [](CK_MECHANISM_TYPE mech, bool needs_iv) {
@@ -768,12 +768,12 @@ static auto aes_case = [](CK_MECHANISM_TYPE mech, bool needs_iv) {
         CK_RV rv = e.fl->C_Encrypt(s, kPlain32, sizeof kPlain32, out, &olen);
         r.rv("encrypt", rv);
         if (rv != CKR_OK) return;
-        record_bytes(r, "ct", out, olen, true);
+        record_bytes(r, "ct", out, olen, ByteView::BYTES);
         r.rv("decrypt_init", e.fl->C_DecryptInit(s, &m, k));
         CK_BYTE back[256]; CK_ULONG blen = sizeof back;
         rv = e.fl->C_Decrypt(s, out, olen, back, &blen);
         r.rv("decrypt", rv);
-        if (rv == CKR_OK) record_bytes(r, "pt", back, blen, true);
+        if (rv == CKR_OK) record_bytes(r, "pt", back, blen, ByteView::BYTES);
     };
 };
 
@@ -787,15 +787,21 @@ add({"bytes.aes_ctr", "bytes", "CKM_AES_CTR with an explicit 128-bit counter blo
          CK_BBOOL sens = CK_FALSE;
          CK_OBJECT_HANDLE k = make_fixed_aes(e, s, true, &sens);
          if (k == CK_INVALID_HANDLE) { r.put("key", "CREATE_FAILED"); return; }
-         CK_AES_CTR_PARAMS p; memset(&p, 0, sizeof p);
-         p.ulCounterBits = 128;
-         memcpy(p.cb, kFixedIv, 16);
-         CK_MECHANISM m = { CKM_AES_CTR, &p, sizeof p };
-         r.rv("encrypt_init", e.fl->C_EncryptInit(s, &m, k));
-         CK_BYTE out[128]; CK_ULONG olen = sizeof out;
-         CK_RV rv = e.fl->C_Encrypt(s, kPlain32, sizeof kPlain32, out, &olen);
-         r.rv("encrypt", rv);
-         if (rv == CKR_OK) record_bytes(r, "ct", out, olen, true);
+         // Both counter widths, because a mismatch at one width and not the
+         // other says which end of the parameter is being misread.
+         for (CK_ULONG bits : {(CK_ULONG)128, (CK_ULONG)32}) {
+             CK_AES_CTR_PARAMS p; memset(&p, 0, sizeof p);
+             p.ulCounterBits = bits;
+             memcpy(p.cb, kFixedIv, 16);
+             CK_MECHANISM m = { CKM_AES_CTR, &p, sizeof p };
+             std::string tag = "cb" + std::to_string(bits);
+             r.rv(tag + ".encrypt_init", e.fl->C_EncryptInit(s, &m, k));
+             CK_BYTE out[128]; CK_ULONG olen = sizeof out;
+             CK_RV rv = e.fl->C_Encrypt(s, kPlain32, sizeof kPlain32, out, &olen);
+             r.rv(tag + ".encrypt", rv);
+             if (rv == CKR_OK) record_bytes(r, tag + ".ct", out, olen, ByteView::BYTES);
+             else e.fl->C_EncryptInit(s, NULL_PTR, 0);
+         }
      }});
 
 add({"bytes.aes_gcm", "bytes", "CKM_AES_GCM, fixed key + fixed nonce + fixed AAD — byte-identical",
@@ -815,7 +821,7 @@ add({"bytes.aes_gcm", "bytes", "CKM_AES_GCM, fixed key + fixed nonce + fixed AAD
          CK_BYTE out[128]; CK_ULONG olen = sizeof out;
          CK_RV rv = e.fl->C_Encrypt(s, kPlain32, sizeof kPlain32, out, &olen);
          r.rv("encrypt", rv);
-         if (rv == CKR_OK) record_bytes(r, "ct", out, olen, true);
+         if (rv == CKR_OK) record_bytes(r, "ct", out, olen, ByteView::BYTES);
      }});
 
 add({"bytes.aes_kw_wrap", "bytes",
@@ -840,7 +846,7 @@ add({"bytes.aes_kw_wrap", "bytes",
          CK_BYTE out[128]; CK_ULONG olen = sizeof out;
          CK_RV rv = e.fl->C_WrapKey(s, &wm, kek, ht, out, &olen);
          r.rv("wrap", rv);
-         if (rv == CKR_OK) record_bytes(r, "wrapped", out, olen, true);
+         if (rv == CKR_OK) record_bytes(r, "wrapped", out, olen, ByteView::BYTES);
      }});
 
 // ---------------------------------------------------------------------------
@@ -918,7 +924,7 @@ add({"errors.unsupported_curve", "errors",
          CK_OBJECT_HANDLE hPub = CK_INVALID_HANDLE, hPriv = CK_INVALID_HANDLE;
          CK_RV rv = e.fl->C_GenerateKeyPair(s, &m, pub, 5, priv, 4, &hPub, &hPriv);
          r.rv("brainpool", rv);
-         r.put("brainpool.created_anyway", rv == CKR_OK ? "YES_DEFECT" : "no");
+         r.put("brainpool.outcome", rv == CKR_OK ? "key_produced" : "refused");
          if (rv == CKR_OK) {
              // If a key WAS produced, record which curve it actually is — the
              // W1 defect returned success and stamped it P-256.
@@ -1138,7 +1144,7 @@ add({"security.readonly_session_refusals", "security",
          CK_MECHANISM m = { CKM_AES_KEY_GEN, NULL_PTR, 0 };
          CK_OBJECT_HANDLE h = CK_INVALID_HANDLE;
          r.rv("generate_key_token", e.fl->C_GenerateKey(s, &m, tok, 5, &h));
-         r.put("generate_key_token.created", h != CK_INVALID_HANDLE ? "YES_DEFECT" : "no");
+         r.put("generate_key_token.object_produced", h != CK_INVALID_HANDLE ? "yes" : "no");
 
          CK_ATTRIBUTE co[] = {
              ATTR(CKA_CLASS,   &clData, sizeof clData),
