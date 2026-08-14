@@ -109,9 +109,20 @@ run_step "OASIS KMIP 3.0 replay (97 PASS / 0 FAIL / 5 SKIP_DEPRECATED)" \
    python3 conformance/assert_replay_report.py && \
    python3 conformance/check_report_fresh.py"
 
+# Does the wasm target still COMPILE? The smoke step below cannot answer that:
+# it runs the already-staged bundle, so a source change that breaks the wasm
+# build passes the gate and only surfaces at the next restage. That is not
+# hypothetical — #166 added `server/secp384r1mlkem1024.rs` (rustls, native-only)
+# without a cfg gate, the whole gate went green, and the breakage was found days
+# later when someone tried to rebuild the bundle. A type-check is cheap; a full
+# wasm build is not, so this checks rather than builds.
+run_step "wasm target still compiles (cargo check)" \
+  "cd /ag/pqctoday-hsm/wasm && cargo check --quiet --release --target wasm32-unknown-unknown 2>&1 | grep -E '^error' -A6 && exit 1; echo '  wasm32 type-check clean'"
+
 # wasm smoke runs on the HOST (node lives there, not in the Rust container).
-# Assumes the bundle is current; run scripts/build-kmip-wasm.sh after any wasm/
-# or kmip/ source change to regenerate it first.
+# Runs the STAGED bundle — see the check above for why that is not sufficient on
+# its own. Run scripts/build-kmip-wasm.sh after any wasm/ or kmip/ source change
+# to regenerate it.
 run_step_host "wasm CACP smoke" \
   "cd '$ROOT/wasm' && node smoke/smoke.cjs 2>&1 | tail -2 | grep -q 'PASS'"
 
