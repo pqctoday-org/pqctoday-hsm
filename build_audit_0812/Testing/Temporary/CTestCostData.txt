@@ -1,9 +1,0 @@
-p11_v32_compliance 1 5.41242
-cryptotest 1 1.28776
-datamgrtest 1 0.166083
-handlemgrtest 1 0.120736
-objstoretest 1 0.402719
-sessionmgrtest 1 0.195158
-slotmgrtest 1 0.3149
-p11test 6 1.44404
----
