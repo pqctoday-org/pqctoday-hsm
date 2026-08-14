@@ -9,6 +9,8 @@
 #include <fstream>
 #include <iomanip>
 #include <functional>
+#include <sys/wait.h>
+#include <unistd.h>
 #include <ctime>
 
 // Build configuration — exposes WITH_RIPEMD160 so the RIPEMD-160 KAT test is
@@ -5939,6 +5941,367 @@ void test_check_value_templates() {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Fork behaviour — CKF_INTERFACE_FORK_SAFE (Table 11) investigation.
+//
+// The flag's whole definition: "The returned interface will have fork tolerant
+// semantics. When the application forks, each process will get its own copy of
+// all session objects, session states, login states, and encryption states.
+// Each process will also maintain access to token objects with their previously
+// supplied handles." There is no MUST anywhere and no profile requires it.
+//
+// The Usage Guide §2.5.2 describes the DEFAULT model instead: "if C needs to use
+// Cryptoki, it needs to perform its own C_Initialize call … the behavior of
+// Cryptoki is undefined if C tries to use it without its own C_Initialize call".
+//
+// This category does not assume either. It forks for real and measures what the
+// child actually gets, including the one thing the standard says nothing about:
+// whether parent and child can produce the SAME random bytes, which would repeat
+// ECDSA nonces and leak private keys.
+// ─────────────────────────────────────────────────────────────────────────────
+void test_fork_behaviour() {
+    const char* CAT = "Fork";
+
+    CK_BBOOL bTrue = CK_TRUE, bFalse = CK_FALSE;
+    CK_OBJECT_CLASS secClass = CKO_SECRET_KEY;
+    CK_KEY_TYPE aesType = CKK_AES;
+    CK_ULONG len32 = 32;
+
+    // A session object and a usable key, both created BEFORE the fork.
+    CK_OBJECT_CLASS dataClass = CKO_DATA;
+    CK_BYTE marker[8] = { 0xF0, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE };
+    CK_UTF8CHAR dlabel[] = "fork-marker";
+    CK_ATTRIBUTE dataT[] = {
+        { CKA_CLASS,   &dataClass, sizeof(dataClass) },
+        { CKA_TOKEN,   &bFalse,    sizeof(bFalse) },
+        { CKA_PRIVATE, &bTrue,     sizeof(bTrue) },
+        { CKA_LABEL,   dlabel,     sizeof(dlabel) - 1 },
+        { CKA_VALUE,   marker,     sizeof(marker) },
+    };
+    CK_OBJECT_HANDLE hData = CK_INVALID_HANDLE;
+    CK_RV rd = fl->C_CreateObject(hSess, dataT, 5, &hData);
+
+    // Table 11 also promises "access to TOKEN objects with their previously
+    // supplied handles", which is a different store (files, not session memory).
+    CK_UTF8CHAR tlabel[] = "fork-token-marker";
+    CK_ATTRIBUTE tokT[] = {
+        { CKA_CLASS,   &dataClass, sizeof(dataClass) },
+        { CKA_TOKEN,   &bTrue,     sizeof(bTrue) },
+        { CKA_PRIVATE, &bTrue,     sizeof(bTrue) },
+        { CKA_LABEL,   tlabel,     sizeof(tlabel) - 1 },
+        { CKA_VALUE,   marker,     sizeof(marker) },
+    };
+    CK_OBJECT_HANDLE hTok = CK_INVALID_HANDLE;
+    CK_RV rt = fl->C_CreateObject(hSess, tokT, 5, &hTok);
+    if (rt != CKR_OK)
+        record_result(CAT, "Setup_token_object", "FAIL", "RV=" + std::to_string(rt));
+
+    CK_ATTRIBUTE keyT[] = {
+        { CKA_CLASS,     &secClass, sizeof(secClass) },
+        { CKA_KEY_TYPE,  &aesType,  sizeof(aesType) },
+        { CKA_VALUE_LEN, &len32,    sizeof(len32) },
+        { CKA_TOKEN,     &bFalse,   sizeof(bFalse) },
+        { CKA_ENCRYPT,   &bTrue,    sizeof(bTrue) },
+        { CKA_DECRYPT,   &bTrue,    sizeof(bTrue) },
+    };
+    CK_MECHANISM keyGen = { CKM_AES_KEY_GEN, NULL_PTR, 0 };
+    CK_OBJECT_HANDLE hKey = CK_INVALID_HANDLE;
+    CK_RV rk = fl->C_GenerateKey(hSess, &keyGen, keyT, 6, &hKey);
+
+    if (rd != CKR_OK || rk != CKR_OK) {
+        record_result(CAT, "Setup", "FAIL",
+                      "object RV=" + std::to_string(rd) + " key RV=" + std::to_string(rk));
+        return;
+    }
+
+    CK_SESSION_INFO siParent;
+    memset(&siParent, 0, sizeof(siParent));
+    fl->C_GetSessionInfo(hSess, &siParent);
+
+    // What the child reports back through the pipe.
+    struct ChildReport {
+        CK_RV rvSessionInfo;
+        CK_ULONG state;
+        CK_RV rvReadObject;
+        CK_BYTE objectValue[8];
+        CK_ULONG objectValueLen;
+        CK_RV rvReadToken;
+        CK_BYTE tokenValue[8];
+        CK_ULONG tokenValueLen;
+        CK_RV rvEncrypt;
+        CK_RV rvRandom;
+        CK_BYTE random[32];
+        CK_RV rvSetLabel;
+        CK_RV rvInheritedEncryptFinal;
+        CK_ULONG inheritedFinalLen;
+        CK_ULONG pid;
+    };
+
+    int fds[2];
+    if (pipe(fds) != 0) {
+        record_result(CAT, "pipe", "FAIL", "pipe() failed");
+        return;
+    }
+
+    // The parent's random draw is taken BEFORE the fork so the child cannot
+    // simply be ahead of it in the same stream; the comparison below is against
+    // a second parent draw taken after the fork.
+    CK_BYTE preForkRandom[32] = {0};
+    fl->C_GenerateRandom(hSess, preForkRandom, sizeof(preForkRandom));
+
+    // An encryption operation left ACTIVE across the fork — Table 11's
+    // "encryption states". Both processes must be able to finish their own copy.
+    CK_BYTE encIv[16] = {0x33};
+    CK_MECHANISM encMech = { CKM_AES_CBC_PAD, encIv, sizeof(encIv) };
+    CK_BYTE encPart[16] = {0x44};
+    CK_BYTE encOut[64]; CK_ULONG encOutLen = sizeof(encOut);
+    CK_RV rvEncInit = fl->C_EncryptInit(hSess, &encMech, hKey);
+    CK_RV rvEncUpd = (rvEncInit == CKR_OK)
+                     ? fl->C_EncryptUpdate(hSess, encPart, sizeof(encPart), encOut, &encOutLen)
+                     : rvEncInit;
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        record_result(CAT, "fork", "FAIL", "fork() failed");
+        close(fds[0]); close(fds[1]);
+        return;
+    }
+
+    if (pid == 0) {
+        // ── CHILD ────────────────────────────────────────────────────────────
+        // No C_Initialize of its own — this is precisely the case the Usage
+        // Guide leaves undefined and CKF_INTERFACE_FORK_SAFE would define.
+        close(fds[0]);
+        ChildReport rep;
+        memset(&rep, 0, sizeof(rep));
+        rep.pid = (CK_ULONG)getpid();
+
+        CK_SESSION_INFO si;
+        memset(&si, 0, sizeof(si));
+        rep.rvSessionInfo = fl->C_GetSessionInfo(hSess, &si);
+        rep.state = si.state;
+
+        CK_BYTE val[64];
+        CK_ATTRIBUTE va = { CKA_VALUE, val, sizeof(val) };
+        rep.rvReadObject = fl->C_GetAttributeValue(hSess, hData, &va, 1);
+        rep.objectValueLen = va.ulValueLen;
+        if (rep.rvReadObject == CKR_OK && va.ulValueLen <= sizeof(rep.objectValue))
+            memcpy(rep.objectValue, val, va.ulValueLen);
+
+        CK_BYTE tval[64];
+        CK_ATTRIBUTE tva = { CKA_VALUE, tval, sizeof(tval) };
+        rep.rvReadToken = fl->C_GetAttributeValue(hSess, hTok, &tva, 1);
+        rep.tokenValueLen = tva.ulValueLen;
+        if (rep.rvReadToken == CKR_OK && tva.ulValueLen <= sizeof(rep.tokenValue))
+            memcpy(rep.tokenValue, tval, tva.ulValueLen);
+
+
+        rep.rvRandom = fl->C_GenerateRandom(hSess, rep.random, sizeof(rep.random));
+
+        // "each process will get its own copy" — the child's write must not be
+        // visible to the parent. Overwrite the marker object's label.
+        CK_UTF8CHAR childLabel[] = "child-wrote-this";
+        CK_ATTRIBUTE lset = { CKA_LABEL, childLabel, sizeof(childLabel) - 1 };
+        rep.rvSetLabel = fl->C_SetAttributeValue(hSess, hData, &lset, 1);
+
+        // "encryption states" — finish the operation the PARENT started before
+        // the fork, in the child, on the child's own copy of that state.
+        CK_BYTE cfin[64]; CK_ULONG cfinLen = sizeof(cfin);
+        rep.rvInheritedEncryptFinal = fl->C_EncryptFinal(hSess, cfin, &cfinLen);
+        rep.inheritedFinalLen = cfinLen;
+
+        ssize_t w = write(fds[1], &rep, sizeof(rep));
+        (void)w;
+        close(fds[1]);
+        // _exit, never exit(): the child must not run atexit handlers or the
+        // library destructor, which would touch the token store the parent owns.
+        _exit(0);
+    }
+
+    // ── PARENT ───────────────────────────────────────────────────────────────
+    close(fds[1]);
+    ChildReport rep;
+    memset(&rep, 0, sizeof(rep));
+    ssize_t got = read(fds[0], &rep, sizeof(rep));
+    close(fds[0]);
+    int status = 0;
+    waitpid(pid, &status, 0);
+
+    if (got != (ssize_t)sizeof(rep)) {
+        record_result(CAT, "Child_survived_and_reported", "FAIL",
+                      "read " + std::to_string((long)got) + " of " +
+                      std::to_string((long)sizeof(rep)) + " bytes, wait status " +
+                      std::to_string(status));
+        return;
+    }
+    record_result(CAT, "Child_survived_and_reported", "PASS",
+                  "child pid " + std::to_string(rep.pid) + " exited status " +
+                  std::to_string(status));
+
+    // 1. session handle + login state
+    record_result(CAT, "Child_session_handle_resolves",
+                  rep.rvSessionInfo == CKR_OK ? "PASS" : "FAIL",
+                  "C_GetSessionInfo RV=" + std::to_string(rep.rvSessionInfo));
+    record_result(CAT, "Child_login_state_preserved",
+                  (rep.rvSessionInfo == CKR_OK && rep.state == siParent.state) ? "PASS" : "FAIL",
+                  "child state=" + std::to_string(rep.state) +
+                  " parent state=" + std::to_string(siParent.state) +
+                  " (CKS_RW_USER_FUNCTIONS=3)");
+
+    // 2. session object created before the fork
+    bool objOk = (rep.rvReadObject == CKR_OK && rep.objectValueLen == sizeof(marker) &&
+                  memcmp(rep.objectValue, marker, sizeof(marker)) == 0);
+    record_result(CAT, "Child_session_object_readable",
+                  objOk ? "PASS" : "FAIL",
+                  "RV=" + std::to_string(rep.rvReadObject) +
+                  " len=" + std::to_string(rep.objectValueLen));
+
+    bool tokOk = (rep.rvReadToken == CKR_OK && rep.tokenValueLen == sizeof(marker) &&
+                  memcmp(rep.tokenValue, marker, sizeof(marker)) == 0);
+    record_result(CAT, "Child_token_object_readable_by_pre_fork_handle",
+                  tokOk ? "PASS" : "FAIL",
+                  "RV=" + std::to_string(rep.rvReadToken) +
+                  " len=" + std::to_string(rep.tokenValueLen));
+
+    // 3. Table 11's "encryption states": the child finished the operation the
+    //    parent had left active, using the pre-fork key handle.
+    record_result(CAT, "Child_inherits_active_encryption_state",
+                  (rvEncInit == CKR_OK && rvEncUpd == CKR_OK &&
+                   rep.rvInheritedEncryptFinal == CKR_OK) ? "PASS" : "FAIL",
+                  "parent init RV=" + std::to_string(rvEncInit) +
+                  " update RV=" + std::to_string(rvEncUpd) +
+                  " child final RV=" + std::to_string(rep.rvInheritedEncryptFinal) +
+                  " len=" + std::to_string(rep.inheritedFinalLen));
+
+    // …and the PARENT's copy of that same operation is untouched by the child
+    //    having finished its own.
+    CK_BYTE pfin[64]; CK_ULONG pfinLen = sizeof(pfin);
+    CK_RV rvParentFinal = fl->C_EncryptFinal(hSess, pfin, &pfinLen);
+    record_result(CAT, "Parent_encryption_state_independent",
+                  rvParentFinal == CKR_OK ? "PASS" : "FAIL",
+                  "parent C_EncryptFinal after child's RV=" + std::to_string(rvParentFinal));
+
+    // 3b. "its own copy": the child's write to a session object must not be
+    //     visible in the parent.
+    CK_BYTE lbuf[64];
+    CK_ATTRIBUTE lread = { CKA_LABEL, lbuf, sizeof(lbuf) };
+    CK_RV rvLabel = fl->C_GetAttributeValue(hSess, hData, &lread, 1);
+    bool parentLabelIntact = (rvLabel == CKR_OK &&
+                              lread.ulValueLen == sizeof(dlabel) - 1 &&
+                              memcmp(lbuf, dlabel, sizeof(dlabel) - 1) == 0);
+    record_result(CAT, "Child_writes_do_not_reach_parent",
+                  parentLabelIntact ? "PASS" : "FAIL",
+                  "child C_SetAttributeValue RV=" + std::to_string(rep.rvSetLabel) +
+                  "; parent label len=" + std::to_string(lread.ulValueLen) +
+                  " intact=" + std::to_string((int)parentLabelIntact));
+
+    // 4. THE safety question the specification does not address: parent and
+    //    child must not be able to produce the same random bytes. Identical
+    //    output means repeated ECDSA nonces and recoverable private keys.
+    //
+    //    The sharp case is not parent-vs-child but SIBLING-vs-SIBLING: two
+    //    children forked from one parent inherit byte-identical DRBG state and,
+    //    without fork detection, produce byte-identical streams. Each child's
+    //    FIRST post-fork draw is compared, so an un-reseeded DRBG cannot hide
+    //    behind the parent having advanced it.
+    auto hex32 = [](const CK_BYTE* b) {
+        std::string s; static const char* lut = "0123456789ABCDEF";
+        for (int i = 0; i < 8; i++) { s += lut[b[i] >> 4]; s += lut[b[i] & 0xF]; }
+        return s;
+    };
+
+    // Draw once in a freshly forked child and report the bytes back.
+    auto childDraw = [&](CK_BYTE out[32]) -> bool {
+        int p2[2];
+        if (pipe(p2) != 0) return false;
+        pid_t c = fork();
+        if (c < 0) { close(p2[0]); close(p2[1]); return false; }
+        if (c == 0) {
+            close(p2[0]);
+            CK_BYTE buf[32] = {0};
+            CK_RV r = fl->C_GenerateRandom(hSess, buf, sizeof(buf));
+            if (r != CKR_OK) memset(buf, 0, sizeof(buf));
+            ssize_t w = write(p2[1], buf, sizeof(buf));
+            (void)w;
+            close(p2[1]);
+            _exit(0);
+        }
+        close(p2[1]);
+        ssize_t g = read(p2[0], out, 32);
+        close(p2[0]);
+        int st = 0; waitpid(c, &st, 0);
+        return g == 32;
+    };
+
+    bool allDistinct = true;
+    std::string sample;
+    const int ROUNDS = 8;
+    for (int round = 0; round < ROUNDS && allDistinct; round++) {
+        CK_BYTE a[32] = {0}, b[32] = {0};
+        // Two siblings forked back to back, with NO parent draw in between, so
+        // both inherit exactly the same DRBG state.
+        if (!childDraw(a) || !childDraw(b)) {
+            record_result(CAT, "Sibling_children_RNG_diverge", "FAIL",
+                          "fork/pipe failed in round " + std::to_string(round));
+            allDistinct = false;
+            break;
+        }
+        bool zeroA = true, zeroB = true;
+        for (int i = 0; i < 32; i++) { if (a[i]) zeroA = false; if (b[i]) zeroB = false; }
+        if (zeroA || zeroB || memcmp(a, b, 32) == 0) allDistinct = false;
+        if (round == 0) sample = "childA=" + hex32(a) + "… childB=" + hex32(b) + "…";
+    }
+    record_result(CAT, "Sibling_children_RNG_diverge",
+                  allDistinct ? "PASS" : "FAIL",
+                  std::to_string(ROUNDS) + " sibling pairs, all distinct=" +
+                  std::to_string((int)allDistinct) + " " + sample +
+                  " (identical output would repeat ECDSA nonces)");
+
+    // 5. Only once every clause above holds may the capability be advertised.
+    //    §5.4.6 rule 3 already matches requested flags against declared ones, so
+    //    the claim is observable exactly where an application would look for it.
+    {
+        void* dlib = dlopen(opt_engine.c_str(), RTLD_NOW);
+        typedef CK_RV (*GI_t)(CK_UTF8CHAR_PTR, CK_VERSION_PTR, CK_INTERFACE_PTR_PTR, CK_FLAGS);
+        typedef CK_RV (*GIL_t)(CK_INTERFACE_PTR, CK_ULONG_PTR);
+        GI_t GI = dlib ? (GI_t)dlsym(dlib, "C_GetInterface") : NULL;
+        GIL_t GIL = dlib ? (GIL_t)dlsym(dlib, "C_GetInterfaceList") : NULL;
+        if (!GI || !GIL) {
+            record_result(CAT, "Fork_safe_flag_advertised", "SKIP", "symbols unavailable");
+        } else {
+            CK_ULONG n = 0;
+            GIL(NULL_PTR, &n);
+            std::vector<CK_INTERFACE> list(n ? n : 1);
+            GIL(list.data(), &n);
+            bool declared = false;
+            for (CK_ULONG i = 0; i < n; i++)
+                if (list[i].flags & 0x00000001UL /*CKF_INTERFACE_FORK_SAFE*/) declared = true;
+            CK_INTERFACE_PTR out = NULL;
+            CK_RV rf = GI(NULL_PTR, NULL_PTR, &out, 0x00000001UL);
+            record_result(CAT, "Fork_safe_flag_declared_in_interface_list",
+                          declared ? "PASS" : "FAIL",
+                          std::to_string(n) + " interfaces, CKF_INTERFACE_FORK_SAFE declared=" +
+                          std::to_string((int)declared));
+            record_result(CAT, "Fork_safe_interface_retrievable",
+                          rf == CKR_OK ? "PASS" : "FAIL",
+                          "C_GetInterface(flags=CKF_INTERFACE_FORK_SAFE) RV=" +
+                          std::to_string(rf));
+        }
+    }
+
+    CK_BYTE postForkRandom[32] = {0};
+    CK_RV rr = fl->C_GenerateRandom(hSess, postForkRandom, sizeof(postForkRandom));
+    bool sameAsChild = (rep.rvRandom == CKR_OK && rr == CKR_OK &&
+                        memcmp(postForkRandom, rep.random, sizeof(postForkRandom)) == 0);
+    bool childSameAsPreFork = (rep.rvRandom == CKR_OK &&
+                               memcmp(preForkRandom, rep.random, sizeof(preForkRandom)) == 0);
+    record_result(CAT, "Parent_and_child_RNG_diverge",
+                  (!sameAsChild && !childSameAsPreFork &&
+                   rep.rvRandom == CKR_OK && rr == CKR_OK) ? "PASS" : "FAIL",
+                  "child=" + hex32(rep.random) + "… parent=" + hex32(postForkRandom) +
+                  "… preFork=" + hex32(preForkRandom) + "…");
+}
+
 // ── G1 security-critical regression tests ────────────────────────────────────
 // Locks in the slice G1 fixes: zero-IV GCM/ChaCha rejection (C++C-1/C++C-2),
 // RIPEMD160→SHA-1 substitution removal (C++C-4), large-message XMSS sign
@@ -8113,6 +8476,9 @@ int main(int argc, char** argv) {
     }
     if (opt_category == "all" || opt_category == "kcv-template") {
         refresh_session(); test_check_value_templates();
+    }
+    if (opt_category == "all" || opt_category == "fork") {
+        refresh_session(); test_fork_behaviour();
     }
     if (opt_category == "all" || opt_category == "g1-security") {
         refresh_session(); test_g1_security();

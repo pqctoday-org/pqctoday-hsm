@@ -562,6 +562,9 @@ private:
 	bool isMechanismPermitted(OSObject* key, CK_MECHANISM_TYPE mechanism);
 	void prepareSupportedMechanisms(std::map<std::string, CK_MECHANISM_TYPE> &t);
 	bool detectFork(void);
+	// Fresh entropy for the child after a fork on the fork-tolerant path, so a
+	// forked child can never continue its parent's random stream.
+	void reseedAfterFork(void);
 
 	// -------------------------------------------------------------------------
 	// Session acquisition helpers — eliminate the 5-step boilerplate repeated

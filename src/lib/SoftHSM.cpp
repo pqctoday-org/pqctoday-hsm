@@ -104,6 +104,8 @@
 #include <process.h>
 #else
 #include <unistd.h>
+#include <time.h>
+#include <openssl/rand.h>
 #endif
 
 // Named constants shared across SoftHSM split translation units.
@@ -367,6 +369,29 @@ SoftHSM* SoftHSM::i()
 			instance.reset(NULL);
 			instance.reset(new SoftHSM());
 		}
+		else
+		{
+			/* Default: fork-tolerant semantics (CK_INTERFACE Table 11).
+			 * The child keeps its copy-on-write copy of every session,
+			 * handle, login state and session object, which is what the
+			 * flag promises.
+			 *
+			 * The Standard says nothing about the one thing that copy
+			 * makes dangerous: the child also inherits the deterministic
+			 * random-generator state, so without intervention two
+			 * children of one parent emit IDENTICAL streams — repeated
+			 * ECDSA nonces, hence recoverable private keys, with no
+			 * visible symptom. OpenSSL 3.x does detect forks and reseed,
+			 * but that is a property of how the linked libcrypto was
+			 * built (it can be compiled out), not of this engine. Making
+			 * the reseed explicit here turns the guarantee into one this
+			 * code owns and can be tested for.
+			 *
+			 * RAND_poll() pulls fresh operating-system entropy; the pid
+			 * and clock are mixed in with an entropy estimate of zero,
+			 * as a distinguishing nonce rather than a claimed source. */
+			instance->reseedAfterFork();
+		}
 	}
 
 	return instance.get();
@@ -541,6 +566,35 @@ bool SoftHSM::isMechanismPermitted(OSObject* key, CK_MECHANISM_TYPE mechanism)
 	} else {
 		return true;
 	}
+}
+
+// Called once per detected fork on the fork-tolerant path. Idempotent by way of
+// the forkID update: subsequent calls in the same process no longer detect a
+// fork, so the reseed happens once, before the child's first random draw (every
+// C_* entry point reaches this through SoftHSM::i()).
+void SoftHSM::reseedAfterFork(void)
+{
+	RAND_poll();
+
+	struct {
+		long pid;
+		long long tick;
+		const void* self;
+	} nonce;
+#ifdef _WIN32
+	nonce.pid = (long)_getpid();
+#else
+	nonce.pid = (long)getpid();
+#endif
+	nonce.tick = (long long)time(NULL);
+	nonce.self = (const void*)this;
+	RAND_add(&nonce, (int)sizeof(nonce), 0.0);
+
+#ifdef _WIN32
+	forkID = _getpid();
+#else
+	forkID = getpid();
+#endif
 }
 
 bool SoftHSM::detectFork(void) {

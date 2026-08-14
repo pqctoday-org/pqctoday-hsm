@@ -40,6 +40,7 @@
 #include "fatal.h"
 #include "cryptoki.h"
 #include "SoftHSM.h"
+#include "Configuration.h"
 #include "MutexFactory.h"
 #include <cstring>
 
@@ -347,11 +348,28 @@ static CK_FUNCTION_LIST_3_2 functionList32 =
 // Interface table exposed via C_GetInterfaceList / C_GetInterface.
 // Order: v2.40 (legacy), v3.0, v3.2 (default — highest version).
 // Per PKCS#11 v3.0 spec §5.1.3.2, the default interface is the highest version.
+// CKF_INTERFACE_FORK_SAFE (CK_INTERFACE Table 11): "The returned interface will
+// have fork tolerant semantics. When the application forks, each process will
+// get its own copy of all session objects, session states, login states, and
+// encryption states. Each process will also maintain access to token objects
+// with their previously supplied handles."
+//
+// This engine keeps every one of those across a fork by default: the child's
+// copy-on-write address space carries the session manager, handle manager and
+// session object store, and SoftHSM::i() reseeds the random generator on fork
+// detection so the child cannot continue the parent's stream. The compliance
+// suite's Fork category proves each clause against a real fork() rather than
+// asserting the flag is set.
+//
+// The library.reset_on_fork setting opts OUT of that model — it destroys the
+// singleton and everything in it, which is the Usage Guide §2.5.2 default where
+// a child must call C_Initialize for itself. When it is enabled the flag is
+// cleared in C_Initialize, because the promise above would then be false.
 static CK_INTERFACE interfaces[] =
 {
-	{ (CK_UTF8CHAR_PTR)"PKCS 11", (CK_VOID_PTR)&functionList,   0 },
-	{ (CK_UTF8CHAR_PTR)"PKCS 11", (CK_VOID_PTR)&functionList30, 0 },
-	{ (CK_UTF8CHAR_PTR)"PKCS 11", (CK_VOID_PTR)&functionList32, 0 }
+	{ (CK_UTF8CHAR_PTR)"PKCS 11", (CK_VOID_PTR)&functionList,   CKF_INTERFACE_FORK_SAFE },
+	{ (CK_UTF8CHAR_PTR)"PKCS 11", (CK_VOID_PTR)&functionList30, CKF_INTERFACE_FORK_SAFE },
+	{ (CK_UTF8CHAR_PTR)"PKCS 11", (CK_VOID_PTR)&functionList32, CKF_INTERFACE_FORK_SAFE }
 };
 static const CK_ULONG interfaceCount = 3;
 
@@ -364,7 +382,20 @@ PKCS_API CK_RV C_Initialize(CK_VOID_PTR pInitArgs)
 #endif
 	try
 	{
-		return SoftHSM::i()->C_Initialize(pInitArgs);
+		CK_RV rv = SoftHSM::i()->C_Initialize(pInitArgs);
+
+		// The configuration is only readable once C_Initialize has loaded it.
+		// library.reset_on_fork opts out of fork-tolerant semantics (it destroys
+		// the singleton, and with it every session, handle and login state a
+		// forked child would otherwise keep), so the capability must stop being
+		// advertised in that configuration rather than become a false claim.
+		if (rv == CKR_OK && Configuration::i()->getBool("library.reset_on_fork", false))
+		{
+			for (CK_ULONG i = 0; i < interfaceCount; i++)
+				interfaces[i].flags &= ~((CK_FLAGS)CKF_INTERFACE_FORK_SAFE);
+		}
+
+		return rv;
 	}
 	catch (...)
 	{
@@ -1949,15 +1980,15 @@ PKCS_API CK_RV C_GetInterfaceList(CK_INTERFACE_PTR pInterfacesList,
 // flag it did support, and the specification's own worked example (which passes
 // CKF_INTERFACE_FORK_SAFE) was answered CKR_ARGUMENTS_BAD.
 //
-// This build declares NO interface flags. CKF_INTERFACE_FORK_SAFE means "each
-// process will get its own copy of all session objects, session states, login
-// states, and encryption states. Each process will also maintain access to token
-// objects with their previously supplied handles" — this engine's only fork
-// behaviour is the opt-in library.reset_on_fork, which DESTROYS that state
-// rather than duplicating it, so claiming the flag would be false. A request for
-// it therefore finds no matching interface: CKR_FUNCTION_FAILED ("nothing to
-// return"), which the return list permits, rather than CKR_ARGUMENTS_BAD ("your
-// argument is invalid"), which would misdescribe a well-formed request.
+// This build declares CKF_INTERFACE_FORK_SAFE (see the interfaces table above
+// for what that promise rests on, and the compliance suite's Fork category for
+// the fork() that proves each clause). library.reset_on_fork clears it, because
+// that setting destroys the state the flag says a child keeps.
+//
+// When a requested flag matches no interface the answer is CKR_FUNCTION_FAILED
+// ("nothing to return"), which the return list permits, rather than
+// CKR_ARGUMENTS_BAD ("your argument is invalid"), which would misdescribe a
+// well-formed request for a capability this build does not have.
 PKCS_API CK_RV C_GetInterface(CK_UTF8CHAR_PTR pInterfaceName,
 	CK_VERSION_PTR pVersion,
 	CK_INTERFACE_PTR_PTR ppInterface,
