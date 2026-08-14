@@ -246,6 +246,13 @@ pub struct EncryptCtx {
     /// `C_DecryptUpdate` (or `*Final`) call. `None` while the op is
     /// single-shot-only or untouched since Init.
     pub multipart: Option<crate::crypto::multipart::MultipartCipher>,
+    /// W7 (2026-08-13) — `CK_CHACHA20_PARAMS.pBlockCounter`, the keystream
+    /// block the operation STARTS at. §6.20: the counter "is exposed here"
+    /// because "in certain settings (e.g. disk encryption) it is necessary to
+    /// address these blocks in random order". The engine previously rejected
+    /// any non-zero value, which defeated the field's entire purpose and made
+    /// random-access ChaCha20 unusable. Zero for every other mechanism.
+    pub block_counter: u64,
 }
 
 /// PKCS#11 v3.2 §5.15 message-based AEAD state (C_MessageEncryptInit …
@@ -434,6 +441,32 @@ pub fn session_logged_in(h_session: u32) -> bool {
     }
 }
 
+/// S8 (2026-08-13) — the predicate behind private-object access. §2.4: "Only
+/// the normal user is allowed access to private objects." The Usage Guide's
+/// R/W SO Functions state is explicit: "The application has read/write access
+/// only to public objects on the token, **not to private objects**", and its
+/// access matrix leaves the SO column blank for both private session and
+/// private token objects.
+///
+/// This was `session_logged_in`, i.e. "logged in as EITHER role" — so an SO
+/// session could read, find and use every private object on the token.
+pub fn token_user_logged_in(slot_id: u32) -> bool {
+    TOKEN_STORE.with(|ts| {
+        ts.borrow()
+            .get(&slot_id)
+            .map(|t| t.login_state == LoginState::User)
+            .unwrap_or(false)
+    })
+}
+
+/// [`token_user_logged_in`] for a session handle.
+pub fn session_user_logged_in(h_session: u32) -> bool {
+    match session_slot(h_session) {
+        Some(slot) => token_user_logged_in(slot),
+        None => false,
+    }
+}
+
 /// True if the session is logged in specifically as SO (Security Officer).
 /// PKCS#11 v3.2 §4.6 Table 19 footnote — `CKA_TRUSTED` on a certificate
 /// "can only be set to CK_TRUE by the SO user".
@@ -487,7 +520,8 @@ pub fn can_access_object(h_session: u32, attrs: &Attributes) -> bool {
     if !read_bool_attr(attrs, CKA_PRIVATE) {
         return true;
     }
-    session_logged_in(h_session)
+    // S8 — the NORMAL USER role, not merely "logged in".
+    session_user_logged_in(h_session)
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -529,6 +563,9 @@ pub fn can_access_object(h_session: u32, attrs: &Attributes) -> bool {
 #[derive(Clone, Copy)]
 pub struct SessionAccess {
     pub slot: u32,
+    /// S8 — true only for the NORMAL USER role. Named `logged_in` for the
+    /// ~40 existing call sites; the SO role no longer sets it, mirroring
+    /// `can_access_object`.
     pub logged_in: bool,
 }
 
@@ -540,7 +577,8 @@ pub struct SessionAccess {
 /// does not call this function.
 pub fn resolve_session_access(h_session: u32) -> Result<SessionAccess, u32> {
     let slot = session_slot(h_session).ok_or(CKR_SESSION_HANDLE_INVALID)?;
-    let logged_in = session_logged_in(h_session);
+    // S8 — kept in exact lockstep with can_access_object.
+    let logged_in = session_user_logged_in(h_session);
     Ok(SessionAccess { slot, logged_in })
 }
 
@@ -623,9 +661,7 @@ pub fn check_mechanism_allowed_from(attrs: &Attributes, mech_type: u32) -> Resul
     match attrs.get(&CKA_ALLOWED_MECHANISMS) {
         None => Ok(()),
         Some(bytes) => {
-            let is_allowed = bytes
-                .chunks_exact(4)
-                .any(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]) == mech_type);
+            let is_allowed = parse_allowed_mechanisms(bytes).contains(&mech_type);
             if is_allowed {
                 Ok(())
             } else {
@@ -633,6 +669,77 @@ pub fn check_mechanism_allowed_from(attrs: &Attributes, mech_type: u32) -> Resul
             }
         }
     }
+}
+
+/// S12 (2026-08-13) — fetch a key's `CKA_VALUE` under the isolation gate AND
+/// enforce `CKA_ALLOWED_MECHANISMS` for `mech_type`, both inside the ONE
+/// `OBJECTS` borrow the caller already needs.
+///
+/// The lock was on the PKCS#11 door only: the mechanism check was called from
+/// `native/sign.rs` and `native/encrypt.rs` but from NO site in
+/// `native/derive.rs`, `native/agree.rs`, `native/hybrid.rs` or
+/// `native/split_key.rs` — the surface KMIP uses exclusively
+/// (`kmip/src/ops/derive_key.rs` calls `agree::ecdh_agree` directly). A key
+/// carrying a mechanism restriction was therefore enforced over PKCS#11 and
+/// unenforced over KMIP for derive, agreement, hybrid and split-key work.
+/// Not a conformance violation (a native API is outside the Standard's
+/// scope) — a product security gap with S9's exact consequence.
+///
+/// `not_found` is the caller's own vocabulary for a missing/inaccessible
+/// handle, preserved so no existing error code changes.
+pub fn checked_value_for_mech(
+    access: &SessionAccess,
+    handle: u32,
+    mech_type: u32,
+    not_found: u32,
+) -> Result<Vec<u8>, u32> {
+    let (allowed, value) = with_object_checked(access, handle, |attrs| {
+        (
+            check_mechanism_allowed_from(attrs, mech_type),
+            get_object_value_from(attrs),
+        )
+    })
+    .map_err(|_| not_found)?;
+    allowed?;
+    value.ok_or(not_found)
+}
+
+/// Attribute ids at or above this are the engine's OWN state channel: never
+/// absorbed from a client template, never client-writable, and not part of
+/// any published surface. Distinct from the vendor range (0x8000_0000), whose
+/// mutability the spec deliberately leaves out of scope.
+pub const ENGINE_PRIVATE_ATTR_BASE: u32 = 0xFFFF_0000;
+
+/// PKCS#11 v3.2 §4.8 Table 13 — CKA_ALLOWED_MECHANISMS is "a pointer to a
+/// CK_MECHANISM_TYPE array", and "the number of mechanisms in the array is
+/// the ulValueLen component of the attribute divided by the size of
+/// CK_MECHANISM_TYPE". CK_MECHANISM_TYPE is CK_ULONG, whose width is the
+/// EXPORTED ABI's — 4 bytes on wasm32 (ILP32), 8 on a 64-bit native build.
+///
+/// S9 (2026-08-13): this was hardcoded to 4. On a 64-bit build an 8-byte
+/// element list parsed as `{mech, 0, mech, 0, …}` — and mechanism 0 is
+/// CKM_RSA_PKCS_KEY_PAIR_GEN, so every mechanism-restricted key silently
+/// also permitted RSA key-pair generation. A fail-open parse of a security
+/// control. wasm32 was correct by accident of its ABI, which is why the
+/// browser playground never showed it. One constant now feeds the parser,
+/// the length-shape check in `attr_mutation_allowed`, and `ffi`'s
+/// creation-time validation, so the three cannot drift.
+/// (`usize` is the exported CK_ULONG on every target this crate builds for —
+/// `c_ulong` on the native `ck_abi` surface and 4 bytes on wasm32 — and is
+/// already the width `store_ulong` marshals CK_ULONG attributes at.)
+pub const MECHANISM_TYPE_SIZE: usize = std::mem::size_of::<usize>();
+
+/// Decode a packed CK_MECHANISM_TYPE array at the exported ABI's element
+/// width. A trailing partial element is IGNORED here; callers that can
+/// reject it (template validation, `attr_mutation_allowed`) do so with
+/// CKR_ATTRIBUTE_VALUE_INVALID before a value ever reaches this function.
+pub fn parse_allowed_mechanisms(bytes: &[u8]) -> Vec<u32> {
+    bytes
+        .chunks_exact(MECHANISM_TYPE_SIZE)
+        // Only the low 32 bits are meaningful: every CKM_* codepoint this
+        // engine knows fits in u32, and the C ABI zero-extends on the way in.
+        .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect()
 }
 
 pub fn check_mechanism_allowed(h_key: u32, mech_type: u32) -> Result<(), u32> {
@@ -706,7 +813,16 @@ pub fn attr_is_sensitive_material(attr_type: u32) -> bool {
 /// * vendor stateful-key attrs (≥0x8000_0100) and engine-internal CKA_PRIV_*
 ///   (≥0xFFFF_0000) are the engine's own state channel and bypass the policy.
 pub fn attr_mutation_allowed(attrs: &Attributes, attr_type: u32, value: &[u8]) -> Result<(), u32> {
-    // engine-internal / vendor stateful channel — no policy
+    // S4 (2026-08-13) — the ENGINE-PRIVATE range is the engine's own state
+    // channel and is never client-writable. Before this, the whole
+    // ≥0x8000_0000 space (which includes 0xFFFF_00xx) bypassed the policy,
+    // so a client could write the HBS leaf index / stateful key blob
+    // directly and rewind a one-time-signature key. Reads are unaffected.
+    if attr_type >= ENGINE_PRIVATE_ATTR_BASE {
+        return Err(CKR_ATTRIBUTE_READ_ONLY);
+    }
+    // Genuine vendor attributes (0x8000_0000..0xFFFF_0000) stay outside
+    // Cryptoki's mutability rules, exactly as the spec says they may.
     if attr_type >= 0x8000_0000 {
         return Ok(());
     }
@@ -734,6 +850,11 @@ pub fn attr_mutation_allowed(attrs: &Attributes, attr_type: u32, value: &[u8]) -
         CKA_PUBLIC_EXPONENT,
         CKA_EC_PARAMS,
         CKA_EC_POINT,
+        // S4 — §6.65/§6.66: the HSS remaining-signature counter is engine
+        // truth about a one-time-signature key's exhaustion. It carries no
+        // modify-after-creation footnote, and a client that could raise it
+        // would be inviting the engine to reuse an exhausted key.
+        CKA_HSS_KEYS_REMAINING,
     ];
     if READ_ONLY.contains(&attr_type) {
         return Err(CKR_ATTRIBUTE_READ_ONLY);
@@ -745,18 +866,44 @@ pub fn attr_mutation_allowed(attrs: &Attributes, attr_type: u32, value: &[u8]) -
     // byte length — including the exact malformed value C_CreateObject
     // would reject — and check_mechanism_allowed's chunks_exact(4) would
     // then silently drop a trailing partial chunk rather than erroring.
-    if attr_type == CKA_ALLOWED_MECHANISMS && value.len() % 4 != 0 {
+    // S9 (2026-08-13) — the element width is sizeof(CK_MECHANISM_TYPE) on the
+    // EXPORTED ABI, not a hardcoded 4. See MECHANISM_TYPE_SIZE.
+    if attr_type == CKA_ALLOWED_MECHANISMS && value.len() % MECHANISM_TYPE_SIZE != 0 {
         return Err(CKR_ATTRIBUTE_VALUE_INVALID);
     }
-    if attr_type == CKA_SENSITIVE || attr_type == CKA_EXTRACTABLE {
+    // One-way transitions. CKA_SENSITIVE FALSE→TRUE and CKA_EXTRACTABLE
+    // TRUE→FALSE were already here; S3 and S10 add the two that were missing
+    // and whose absence was directly exploitable:
+    //   * CKA_WRAP_WITH_TRUSTED (footnote 11 — "cannot be changed once set to
+    //     CK_TRUE") — clearing it lets the key be wrapped under an UNtrusted
+    //     wrapping key and exfiltrated;
+    //   * CKA_COPYABLE ("Can't be set to TRUE once it is set to FALSE") —
+    //     re-enabling it lets §4.1.3's copy template re-open sensitivity,
+    //     privacy and modifiability on the copy, laundering the original's
+    //     restrictions.
+    if attr_type == CKA_SENSITIVE
+        || attr_type == CKA_EXTRACTABLE
+        || attr_type == CKA_WRAP_WITH_TRUSTED
+        || attr_type == CKA_COPYABLE
+    {
         let new_val = value.first().copied().unwrap_or(0) != 0;
-        let cur_val = read_bool_attr(attrs, attr_type);
-        let legal = if attr_type == CKA_SENSITIVE {
-            // FALSE→TRUE only
-            !cur_val || new_val
+        // CKA_COPYABLE "Defaults to CK_TRUE" — an absent attribute must read
+        // as TRUE here, or the very first FALSE→? comparison would be made
+        // against a phantom FALSE. (apply_object_defaults stamps it on every
+        // allocate path; this covers hand-built records.)
+        let cur_val = if attr_type == CKA_COPYABLE {
+            attrs
+                .get(&attr_type)
+                .map(|v| v.first().copied().unwrap_or(0) != 0)
+                .unwrap_or(true)
         } else {
-            // CKA_EXTRACTABLE: TRUE→FALSE only
-            cur_val || !new_val
+            read_bool_attr(attrs, attr_type)
+        };
+        let legal = match attr_type {
+            // FALSE→TRUE only
+            CKA_SENSITIVE | CKA_WRAP_WITH_TRUSTED => !cur_val || new_val,
+            // TRUE→FALSE only
+            _ => cur_val || !new_val,
         };
         if !legal {
             return Err(CKR_ATTRIBUTE_READ_ONLY);
@@ -821,6 +968,144 @@ pub fn destroy_session_objects(h_session: u32) {
             .collect();
         for h in doomed {
             if let Some(mut attrs) = store.remove(&h) {
+                if let Some(val) = attrs.get_mut(&CKA_VALUE) {
+                    val.zeroize();
+                }
+            }
+        }
+    });
+}
+
+/// PKCS#11 v3.2 §5.7.7 — the object-matching rule: "The matching criterion is
+/// an exact byte-for-byte match with all attributes in the template."
+/// An absent attribute on the candidate never matches (the §5.7.7 leniency for
+/// nonexistent attributes yields a search matching NO objects).
+///
+/// Factored out of `C_FindObjectsInit` (2026-08-13, S2) because §5.18.3 says
+/// the wrap-template comparison is done "according to the C_FindObject rules
+/// of attribute matching" — a divergence between find-matching and
+/// wrap-matching would itself be a defect, so both call this.
+pub fn attrs_match_template(candidate: &Attributes, template: &[(u32, Vec<u8>)]) -> bool {
+    template
+        .iter()
+        .all(|(ty, val)| candidate.get(ty) == Some(val))
+}
+
+/// §5.18.3 — compare a wrapping/unwrapping key's `CKA_WRAP_TEMPLATE` /
+/// `CKA_UNWRAP_TEMPLATE` against a candidate attribute set. An ABSENT
+/// template means "any" (`true`); an UNPARSEABLE stored template fails
+/// closed, since the alternative is enforcing nothing.
+pub fn key_template_permits(
+    key_attrs: &Attributes,
+    template_attr: u32,
+    candidate: &Attributes,
+) -> bool {
+    match key_attrs.get(&template_attr) {
+        None => true,
+        Some(blob) => match crate::crypto::handlers::parse_flat_attr_array(blob) {
+            Some(entries) => attrs_match_template(candidate, &entries),
+            None => false,
+        },
+    }
+}
+
+/// S7 (2026-08-13) — §5.7.1: "Only session objects can be created during a
+/// read-only session", §5.7.3 the same for destruction, and the Usage Guide's
+/// access matrix: "a 'R/O User Functions' session cannot create or delete a
+/// token object."
+///
+/// The gate existed inline at `C_CreateObject`, `C_SetAttributeValue`,
+/// `C_InitPIN` and `C_SetPIN` only — `C_GenerateKey`, `C_GenerateKeyPair`,
+/// `C_UnwrapKey`, `C_DeriveKey` and `C_DestroyObject` had none, so a R/O
+/// session could mint and delete token objects. Five inline copies is how the
+/// first four drifted from the other five; this is the single helper both
+/// sides now call.
+///
+/// `wants_token` is the effective CKA_TOKEN of the object being created or
+/// destroyed. Returns `Err(CKR_SESSION_READ_ONLY)` when a token object is
+/// requested from a session that is not read/write.
+pub fn check_rw_for_token_object(h_session: u32, wants_token: bool) -> Result<(), u32> {
+    if wants_token && !session_is_rw(h_session) {
+        return Err(CKR_SESSION_READ_ONLY);
+    }
+    Ok(())
+}
+
+/// S1 — §5.5.7: "When a token is initialized, all objects that can be
+/// destroyed are destroyed." Scoped to one slot's token; CKA_DESTROYABLE=
+/// FALSE records (the built-in `CKO_PROFILE`) survive, which is what "that
+/// can be destroyed" means. CKA_VALUE is zeroized on the way out, matching
+/// `C_DestroyObject`.
+pub fn destroy_destroyable_objects_on_slot(slot_id: u32) {
+    use zeroize::Zeroize;
+    OBJECTS.with(|objs| {
+        let mut store = objs.borrow_mut();
+        let doomed: Vec<u32> = store
+            .iter()
+            .filter(|(_, attrs)| {
+                object_slot_of(attrs) == slot_id
+                    && attrs
+                        .get(&CKA_DESTROYABLE)
+                        .map(|v| v.first().copied().unwrap_or(0) != 0)
+                        .unwrap_or(true)
+            })
+            .map(|(h, _)| *h)
+            .collect();
+        for h in doomed {
+            if let Some(mut attrs) = store.remove(&h) {
+                if let Some(val) = attrs.get_mut(&CKA_VALUE) {
+                    val.zeroize();
+                }
+            }
+        }
+    });
+}
+
+/// S6 — §5.6.10: "When C_Logout successfully executes, any of the
+/// application's handles to private objects become invalid (even if a user is
+/// later logged back into the token, those handles remain invalid). In
+/// addition, all private session objects from sessions belonging to the
+/// application are destroyed."
+///
+/// Implementation: private SESSION objects on the slot are destroyed; private
+/// TOKEN objects are RE-KEYED under a freshly minted handle. Re-keying is
+/// what makes the old handle permanently invalid — including after a later
+/// successful login — while keeping the object itself alive and findable, as
+/// the spec requires (only the *session* objects die). Anything that merely
+/// stamped a generation on the object would have made the surviving token
+/// object invisible forever, which the spec does not say.
+pub fn invalidate_private_handles_on_slot(slot_id: u32) {
+    use zeroize::Zeroize;
+    OBJECTS.with(|objs| {
+        let mut store = objs.borrow_mut();
+        let private_here: Vec<u32> = store
+            .iter()
+            .filter(|(_, attrs)| {
+                object_slot_of(attrs) == slot_id && read_bool_attr(attrs, CKA_PRIVATE)
+            })
+            .map(|(h, _)| *h)
+            .collect();
+        for h in private_here {
+            let Some(mut attrs) = store.remove(&h) else {
+                continue;
+            };
+            if read_bool_attr(&attrs, CKA_TOKEN) {
+                // Survives, under a handle the application has never seen.
+                // NEXT_HANDLE is monotonic, so the new handle can never
+                // collide with the retired one.
+                let new_handle = match NEXT_HANDLE.fetch_update(
+                    std::sync::atomic::Ordering::Relaxed,
+                    std::sync::atomic::Ordering::Relaxed,
+                    |v| if v == u32::MAX { None } else { Some(v + 1) },
+                ) {
+                    Ok(prev) => prev,
+                    // Handle space exhausted: dropping the object would lose
+                    // token state, so keep the old handle rather than
+                    // silently destroying a token object.
+                    Err(_) => h,
+                };
+                store.insert(new_handle, attrs);
+            } else {
                 if let Some(val) = attrs.get_mut(&CKA_VALUE) {
                     val.zeroize();
                 }
@@ -903,6 +1188,28 @@ fn strip_ec_point_der(ec_point: Vec<u8>) -> Vec<u8> {
         }
     }
     ec_point
+}
+
+/// E4 (2026-08-13) — the raw public-key MATERIAL of any key object,
+/// whichever attribute the object's type puts it in.
+///
+/// Edwards and Montgomery PUBLIC keys no longer carry `CKA_VALUE` (the spec
+/// defines none for them; their material is the bare little-endian bytes in
+/// `CKA_EC_POINT`), so every internal reader that used to reach for
+/// `CKA_VALUE` unconditionally must come through here or it will see an
+/// absent attribute on exactly those keys. `CKA_VALUE` still wins where it
+/// exists — private keys, secret keys, RSA, the PQC families — so this is a
+/// strict superset of the old behaviour.
+pub fn get_key_material_from(attrs: &Attributes) -> Option<Vec<u8>> {
+    attrs
+        .get(&CKA_VALUE)
+        .cloned()
+        .or_else(|| get_ec_point_sec1_from(attrs))
+}
+
+/// [`get_key_material_from`] by handle.
+pub fn get_key_material(handle: u32) -> Option<Vec<u8>> {
+    OBJECTS.with(|objs| objs.borrow().get(&handle).and_then(get_key_material_from))
 }
 
 /// Return the raw SEC1 point bytes for an EC public key object. Some
@@ -1113,6 +1420,52 @@ pub fn compute_kcv(attrs: &mut Attributes) {
         _ => return,
     };
     attrs.insert(CKA_CHECK_VALUE, kcv);
+}
+
+/// S11 (2026-08-13) — PKCS#11 v3.2 §4.11, the complete CKA_CHECK_VALUE
+/// contract for a newly created key:
+///
+/// * "regardless of how the key object is created or derived, the value of
+///   the attribute is always supplied. It SHALL be supplied even if the
+///   encryption operation for the key is forbidden" — so the engine computes
+///   it by default;
+/// * "If a value is supplied in the application template (allowed but never
+///   necessary) then, if supported, it MUST match what the library calculates
+///   it to be or the library returns a CKR_ATTRIBUTE_VALUE_INVALID" — so a
+///   non-empty caller value is COMPARED, never dropped and never rejected out
+///   of hand;
+/// * "The generation of the KCV may be prevented by the application supplying
+///   the attribute in the template as a no-value (0 length) entry."
+///
+/// This engine supports the attribute, so §4.11's "if the library does not
+/// support the attribute then it should ignore it" escape is unavailable.
+/// Both KEM directions previously computed nothing at all and dropped the
+/// caller's entry as server-managed, which made the mandated comparison
+/// unreachable AND closed off the suppression channel.
+///
+/// `caller` is the template entry: `None` absent, `Some(&[])` the zero-length
+/// suppression form, `Some(v)` a value to check.
+pub fn apply_check_value_policy(attrs: &mut Attributes, caller: Option<&[u8]>) -> Result<(), u32> {
+    match caller {
+        Some(v) if v.is_empty() => {
+            attrs.remove(&CKA_CHECK_VALUE);
+            Ok(())
+        }
+        Some(v) => {
+            compute_kcv(attrs);
+            match attrs.get(&CKA_CHECK_VALUE) {
+                Some(computed) if computed.as_slice() == v => Ok(()),
+                Some(_) => Err(CKR_ATTRIBUTE_VALUE_INVALID),
+                // No KCV convention for this class/key type: nothing to
+                // contradict, so the caller's value is simply not honoured.
+                None => Ok(()),
+            }
+        }
+        None => {
+            compute_kcv(attrs);
+            Ok(())
+        }
+    }
 }
 
 /// Derive and store CKA_ALWAYS_SENSITIVE and CKA_NEVER_EXTRACTABLE from the

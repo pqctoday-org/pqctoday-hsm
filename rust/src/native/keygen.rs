@@ -859,6 +859,17 @@ pub fn generate_x25519_keypair(
     prv_attrs.insert(CKA_EC_PARAMS, oid_x25519);
 
     // CKA_EC_POINT — DER OCTET STRING wrapping the raw 32-byte public key.
+    //
+    // DELIBERATE SCOPE LIMIT (E4, 2026-08-13): the PKCS#11 surface
+    // (`ffi::C_GenerateKeyPair`) now emits the BARE little-endian bytes the
+    // Montgomery public-key table mandates, and drops CKA_VALUE from public
+    // keys entirely. This NATIVE path keeps both the DER wrapper and
+    // CKA_VALUE because it is not the Cryptoki surface the Standard governs,
+    // and because `native::hybrid::keygen` reads the public share through
+    // `get_object_value`. Every reader of either encoding goes through
+    // `ec_point_unwrap` / `state::get_key_material`, which accept both, so
+    // the two surfaces interoperate — but they are NOT byte-identical, and
+    // aligning them is follow-up work, not something this item did.
     let mut ec_point = Vec::with_capacity(2 + pk_bytes.len());
     ec_point.push(0x04u8); // OCTET STRING tag
     ec_point.push(pk_bytes.len() as u8); // 0x20 = 32
@@ -1603,7 +1614,7 @@ pub fn register_slh_dsa_public_key(
 // ── HSS/LMS (RFC 8554) ───────────────────────────────────────────────────
 
 /// Register an existing HSS/LMS private key given the raw serialized
-/// `hbs-lms` private-key state blob (the same `CKA_STATEFUL_KEY_STATE`
+/// `hbs-lms` private-key state blob (the same `CKA_PRIV_STATEFUL_KEY_STATE`
 /// format `ffi::C_GenerateKeyPair @ CKM_HSS_KEY_PAIR_GEN` produces).
 ///
 /// v0.1 supports exactly **one** parameter combination: single-level HSS
@@ -1645,8 +1656,8 @@ pub fn register_hss_private_key(
     store_bool(&mut attrs, CKA_SENSITIVE, true);
     store_bool(&mut attrs, CKA_EXTRACTABLE, false);
     store_bool(&mut attrs, CKA_SIGN, true);
-    attrs.insert(CKA_STATEFUL_KEY_STATE, priv_state_bytes.to_vec());
-    attrs.insert(CKA_LEAF_INDEX, 0u64.to_le_bytes().to_vec());
+    attrs.insert(CKA_PRIV_STATEFUL_KEY_STATE, priv_state_bytes.to_vec());
+    attrs.insert(CKA_PRIV_LEAF_INDEX, 0u64.to_le_bytes().to_vec());
     insert_id_and_label(&mut attrs, cka_id, label);
     // Imported provenance — matches `register_pqc_private`'s convention.
     store_bool(&mut attrs, CKA_LOCAL, false);

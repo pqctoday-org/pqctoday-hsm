@@ -103,11 +103,14 @@ pub fn finalize() -> Result<(), CkRv> {
     if rv == CKR_OK { Ok(()) } else { Err(rv) }
 }
 
-/// Logout the current user on `session`. The engine's `C_CloseSession`
-/// intentionally does NOT auto-logout (PKCS#11 §11.4) — the slot's
-/// login state persists across session close. Callers that need to
-/// switch user types on the same slot (SO → USER) must explicitly
-/// logout first.
+/// Logout the current user on `session`. `C_CloseSession` does not
+/// auto-logout while other sessions remain open on the slot, so callers
+/// switching user types on the same slot (SO → USER) must logout explicitly.
+///
+/// S6 (2026-08-13) — logout now also invalidates every outstanding handle to
+/// a private object on the slot and destroys private session objects
+/// (§5.6.10). Private TOKEN objects survive and are re-findable under fresh
+/// handles; any handle cached across a logout must be re-resolved.
 pub fn logout(session: u32) -> Result<(), CkRv> {
     let rv = ffi::C_Logout(session);
     if rv == CKR_OK { Ok(()) } else { Err(rv) }
@@ -116,8 +119,15 @@ pub fn logout(session: u32) -> Result<(), CkRv> {
 /// Close a session handle. Tolerates a stale handle (returns
 /// `CKR_SESSION_HANDLE_INVALID` as `Err`).
 ///
-/// Does NOT logout — see [`logout`]. Combining the two:
+/// Does NOT logout while OTHER sessions remain open on the slot — see
+/// [`logout`]. Combining the two:
 /// `logout(session).and_then(|()| close_session(session))`.
+///
+/// S6 (2026-08-13) — closing the LAST session on a slot now returns the
+/// token's login state to public, per §5.6.2 ("the login state of the token
+/// for the application returns to public sessions"). Before this a fresh
+/// session opened on that slot came up already authenticated. Callers that
+/// relied on login surviving a full close/reopen cycle must log in again.
 pub fn close_session(session: u32) -> Result<(), CkRv> {
     let rv = ffi::C_CloseSession(session);
     if rv == CKR_OK { Ok(()) } else { Err(rv) }
