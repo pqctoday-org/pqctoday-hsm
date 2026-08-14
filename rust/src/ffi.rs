@@ -7594,32 +7594,55 @@ pub fn C_DeriveKey(
                     return CKR_KEY_TYPE_INCONSISTENT;
                 }
 
-                // NOT PORTED to ck_param, deliberately (2026-08-14) — and
-                // flagged, because this one is not merely un-ported.
+                // Adjudicated 2026-08-14. The engine now reads the struct the
+                // header declares; see ck_param::bip32_child_derive for the
+                // declaration and the evidence.
                 //
-                // src/lib/pkcs11/pkcs11t.h declares
-                //     typedef struct CK_BIP32_CHILD_DERIVE_PARAMS {
-                //         CK_VOID_PTR pNext;      /* <- FIRST */
-                //         CK_BIP32_CHILD_DERIVE_PARAMS_FLAGS flags;
-                //         CK_BIP32_CHILD_DERIVE_PARAMS_INDEX index;
-                //     }
-                // so `flags` is at one word and `index` at two. This code
-                // reads them at words 0 and 1 — i.e. it reads pNext as flags
-                // and flags as index — because the only caller, the TS
-                // playground's buildBIP32ChildDeriveParams, emits a two-word
-                // struct with no pNext. Engine and header disagree about the
-                // wire format on EVERY target; this is a field-ORDER defect,
-                // not a field-WIDTH one, and the two possible fixes (change
-                // the header, or change the engine and its caller together)
-                // are a product decision with a consumer break attached.
-                // Encoding the current reading as a ck_param layout would
-                // freeze the disagreement and make it look sanctioned.
-                let p_param = *((p_mechanism as *const usize).add(1)) as usize as *const u32;
-                if p_param.is_null() {
-                    return CKR_ARGUMENTS_BAD;
-                }
-                let flags = *p_param.add(0);
-                let index = *p_param.add(1);
+                // The question was which of two disagreeing parties is right.
+                // BIP32 is a PQCToday vendor extension — CKM_BIP32_CHILD_DERIVE
+                // is CKM_VENDOR_DEFINED | 0x105c — so there is no OASIS text to
+                // appeal to: `grep -c bip32 docs/refs/pkcs11t-canonical-v3.2.h`
+                // is 0, and so is the count in the v3.2 Standard's own text.
+                // That leaves three parties:
+                //
+                //   src/lib/pkcs11/pkcs11t.h:2139  pNext, flags, index
+                //                                  (24 bytes LP64 / 12 wasm32)
+                //   the C++ engine                 follows the header exactly,
+                //                                  and rejects any other
+                //                                  ulParameterLen outright
+                //                                  (SoftHSM_keygen.cpp:3010)
+                //   this engine + the hub's TS     two u32s, 8 bytes, no pNext
+                //   playground                     (helpers.ts
+                //                                  buildBIP32ChildDeriveParams)
+                //
+                // The engine and its caller agreeing with each other is not
+                // evidence: both are ours, and neither is the published
+                // interface. The header is what a third party compiles
+                // against, and the C++ engine already honours it, so the
+                // header wins and this engine was wrong on every target — it
+                // read pNext as flags, and on LP64 read pNext's high half as
+                // index. The consequence is not theoretical: a native caller's
+                // 24-byte struct derives a wholly different child key here
+                // than under the C++ engine.
+                //
+                // The hub playground must be changed to match; the exact edit
+                // is written down in the commit that introduced this comment.
+                let m = crate::ck_param::mech(p_mechanism as *const u8);
+                let r = match crate::ck_param::ParamReader::new(
+                    m.p_parameter,
+                    m.ul_parameter_len,
+                    &crate::ck_param::bip32_child_derive::LAYOUT,
+                    crate::ck_param::bip32_child_derive::FIELD_COUNT,
+                ) {
+                    Ok(r) => r,
+                    // C++ answers CKR_ARGUMENTS_BAD for both an absent and a
+                    // wrong-sized parameter here; match it.
+                    Err(_) => return CKR_ARGUMENTS_BAD,
+                };
+                let flags = r.ulong(crate::ck_param::bip32_child_derive::FLAGS);
+                // BIP32 child numbers are 32-bit (BIP-0032 §"Child key
+                // derivation"), with the hardened bit carried in `flags`.
+                let index = r.ulong32(crate::ck_param::bip32_child_derive::INDEX);
 
                 match crate::crypto::derive_child_node(
                     &parent_priv,
@@ -17913,6 +17936,157 @@ mod param_struct_width_tests {
             Some(CKP_XMSS_SHA2_10_256),
             "with no CKA_PARAMETER_SET in the template the token's default \
              applies — not something recovered from pParameter",
+        );
+    }
+
+    // ── CK_BIP32_CHILD_DERIVE_PARAMS: pNext is FIRST ────────────────────
+    //
+    // Adjudication, 2026-08-14. BIP32 is a PQCToday vendor extension
+    // (CKM_VENDOR_DEFINED | 0x105c) and appears nowhere in the OASIS header or
+    // the v3.2 text, so `src/lib/pkcs11/pkcs11t.h:2139` is the only definition
+    // there is — and the C++ engine already implements exactly it. This engine
+    // read two u32s at offsets 0 and 4, taking pNext as flags. The header
+    // wins; these tests pin that.
+
+    /// The declared layout is the header's, on both ABIs.
+    #[test]
+    fn bip32_child_derive_layout_matches_the_header() {
+        use crate::ck_param::{bip32_child_derive as b, offset_at, size_at};
+        // LP64: pNext 0, flags 8, index 16, sizeof 24.
+        assert_eq!(offset_at(b::LAYOUT.fields, b::P_NEXT, 8), 0);
+        assert_eq!(offset_at(b::LAYOUT.fields, b::FLAGS, 8), 8);
+        assert_eq!(offset_at(b::LAYOUT.fields, b::INDEX, 8), 16);
+        assert_eq!(size_at(b::LAYOUT.fields, 8), 24);
+        // wasm32/ILP32: 0, 4, 8, sizeof 12 — NOT the 8 bytes the hub's
+        // buildBIP32ChildDeriveParams currently emits.
+        assert_eq!(offset_at(b::LAYOUT.fields, b::P_NEXT, 4), 0);
+        assert_eq!(offset_at(b::LAYOUT.fields, b::FLAGS, 4), 4);
+        assert_eq!(offset_at(b::LAYOUT.fields, b::INDEX, 4), 8);
+        assert_eq!(size_at(b::LAYOUT.fields, 4), 12);
+    }
+
+    /// End-to-end: `flags` and `index` come from words one and two, and a
+    /// non-NULL `pNext` — which the old reading consumed as those two fields —
+    /// changes nothing about the derived child.
+    #[test]
+    fn bip32_child_derive_reads_flags_and_index_past_pnext() {
+        use crate::crypto::HDCurve;
+
+        let rv_init = C_Initialize(core::ptr::null_mut());
+        assert!(rv_init == CKR_OK || rv_init == CKR_CRYPTOKI_ALREADY_INITIALIZED);
+        let mut sess: u32 = 0;
+        assert_eq!(
+            C_OpenSession(
+                0,
+                CKF_SERIAL_SESSION | CKF_RW_SESSION,
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+                &mut sess,
+            ),
+            CKR_OK,
+        );
+
+        // secp256k1 = 1.3.132.0.10.
+        let ec_params: [u8; 7] = [0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x0a];
+
+        // The parent node, supplied directly rather than derived, so this test
+        // is about the parameter struct and nothing else. A generic-secret
+        // object keeps it out of the private-object login gate; the BIP32
+        // child path reads the base key's CKA_VALUE and CKA_BIP32_CHAIN_CODE
+        // and does not look at the class.
+        let master_priv: Vec<u8> = (1u8..=32).collect();
+        let master_cc: Vec<u8> = (0x40u8..0x60).collect();
+        let cls = CKO_SECRET_KEY as crate::ck_abi::CK_ULONG;
+        let kt = CKK_GENERIC_SECRET as crate::ck_abi::CK_ULONG;
+        let yes: u8 = 1;
+        let w = size_of::<crate::ck_abi::CK_ULONG>();
+        let mut base_tpl: Vec<usize> = Vec::new();
+        for (t, p, l) in [
+            (CKA_CLASS, &cls as *const _ as *const u8, w),
+            (CKA_KEY_TYPE, &kt as *const _ as *const u8, w),
+            (CKA_VALUE, master_priv.as_ptr(), master_priv.len()),
+            (CKA_BIP32_CHAIN_CODE, master_cc.as_ptr(), master_cc.len()),
+            (CKA_DERIVE, &yes as *const u8, 1),
+        ] {
+            base_tpl.extend_from_slice(&[t as usize, p as usize, l]);
+        }
+        let mut h_master: u32 = 0;
+        assert_eq!(
+            C_CreateObject(sess, base_tpl.as_mut_ptr() as *mut u8, 5, &mut h_master),
+            CKR_OK,
+        );
+
+        let mut derive_tpl: Vec<usize> = Vec::new();
+        for (t, p, l) in [
+            (CKA_EC_PARAMS, ec_params.as_ptr(), ec_params.len()),
+            (CKA_DERIVE, &yes as *const u8, 1),
+        ] {
+            derive_tpl.extend_from_slice(&[t as usize, p as usize, l]);
+        }
+
+        // The header's struct, with a deliberately NON-NULL pNext. It is never
+        // dereferenced; it is there so that the old reading — flags from word
+        // 0, index from word 1 — produces something unmistakably different.
+        const FAKE_NEXT: usize = 0x0000_0001_0000_0002;
+        const WANT_INDEX: u32 = 7;
+        let mut param: Vec<usize> = vec![FAKE_NEXT, 0 /* flags: not hardened */, WANT_INDEX as usize];
+        let mut m_child = packed_mech(
+            CKM_BIP32_CHILD_DERIVE,
+            param.as_mut_ptr() as *const u8,
+            param.len() * size_of::<usize>(),
+        );
+        let mut h_child: u32 = 0;
+        assert_eq!(
+            C_DeriveKey(
+                sess,
+                m_child.as_mut_ptr() as *mut u8,
+                h_master,
+                derive_tpl.as_mut_ptr() as *mut u8,
+                2,
+                &mut h_child,
+            ),
+            CKR_OK,
+        );
+        let got = get_object_value(h_child).expect("child private value");
+
+        let (want, _) =
+            crate::crypto::derive_child_node(&master_priv, &master_cc, WANT_INDEX, false, HDCurve::Secp256k1)
+                .expect("reference child");
+        assert_eq!(
+            got, want,
+            "flags must be read at word 1 and index at word 2, past pNext",
+        );
+
+        // What the pre-2026-08-14 reading would have produced from this exact
+        // buffer: flags = pNext's low word (2, non-zero ⇒ HARDENED) and
+        // index = pNext's high word (1).
+        let (old_reading, _) =
+            crate::crypto::derive_child_node(&master_priv, &master_cc, 1, true, HDCurve::Secp256k1)
+                .expect("old-reading child");
+        assert_ne!(
+            got, old_reading,
+            "the two readings must be distinguishable, or this test proves nothing",
+        );
+
+        // A buffer too short for the header's struct is refused, as C++ does.
+        let mut short = [0usize; 2];
+        let mut m_short = packed_mech(
+            CKM_BIP32_CHILD_DERIVE,
+            short.as_mut_ptr() as *const u8,
+            2 * size_of::<usize>(),
+        );
+        let mut h_bad: u32 = 0;
+        assert_eq!(
+            C_DeriveKey(
+                sess,
+                m_short.as_mut_ptr() as *mut u8,
+                h_master,
+                derive_tpl.as_mut_ptr() as *mut u8,
+                2,
+                &mut h_bad,
+            ),
+            CKR_ARGUMENTS_BAD,
+            "the hub playground's 8-byte two-word struct is not this struct",
         );
     }
 
