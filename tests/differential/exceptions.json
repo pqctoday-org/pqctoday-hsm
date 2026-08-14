@@ -360,8 +360,9 @@
       "id": "LEGAL-KEM-CAPABILITY-FLAGS-ON-NON-KEM-KEYS",
       "status": "legal",
       "path": "*CKA_*CAPSULATE*",
-      "justification": "Both engines expose CKA_ENCAPSULATE/CKA_DECAPSULATE on key classes that cannot encapsulate — C++ on EC/Edwards/Montgomery, Rust on ML-DSA and SLH-DSA — in opposite directions, always with value false. Confusing, not constrained; converging them is a UX improvement, not a conformance fix.",
-      "citation": "PKCS#11 v3.2 §4.9: these are boolean usage flags whose default is token-specific; a false flag advertises no capability."
+      "justification": "Both engines expose CKA_ENCAPSULATE/CKA_DECAPSULATE on key classes that cannot encapsulate — C++ on EC/Edwards/Montgomery, Rust on ML-DSA and SLH-DSA — in opposite directions, always with value false. Confusing, not constrained. Deliberately scoped to the NON-KEM scenarios: a divergence in these flags on an actual ML-KEM key would be a real capability disagreement and must keep failing.",
+      "citation": "PKCS#11 v3.2 §4.9: these are boolean usage flags whose default is token-specific; a false flag advertises no capability.",
+      "scenario": "create.generate_key_pair.ec_p256|create.generate_key_pair.ed25519|create.generate_key_pair.x25519|create.generate_key_pair.ml_dsa_44|create.generate_key_pair.slh_dsa|encoding.wrap_private_key_pkcs8"
     },
     {
       "id": "DEFECT-CPP-RECOVERY-ATTRIBUTES-STILL-ASSERTED",
