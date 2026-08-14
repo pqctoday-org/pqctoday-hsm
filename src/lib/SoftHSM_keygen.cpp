@@ -672,14 +672,48 @@ CK_RV SoftHSM::generateKeyPairImpl
 		
 		CK_ULONG parameterSet = 0x00000001UL;
 		if (pMechanism->mechanism == CKM_XMSS_KEY_PAIR_GEN || pMechanism->mechanism == CKM_XMSSMT_KEY_PAIR_GEN) {
-			if (pMechanism->pParameter != NULL_PTR && pMechanism->ulParameterLen >= sizeof(CK_ULONG))
-				parameterSet = *(CK_ULONG*)pMechanism->pParameter;
+			// W4 (2026-08-13). PKCS#11 v3.2 §6.66.6: "This mechanism does not
+			// have a parameter", and the mechanism generates key pairs "using an
+			// oid, as specified in the CKA_PARAMETER_SET attribute of the
+			// template for the public key."
+			//
+			// This code used to read pMechanism->pParameter — the one place the
+			// spec says carries nothing — and DISCARD the standard attribute
+			// (the ck4 skip in the template loops below), so a caller who asked
+			// for XMSS-SHA2_16_256 through CKA_PARAMETER_SET silently received a
+			// 10_256 key, with CKR_OK. Anything in pParameter is now ignored.
+			const CK_ULONG* pubPs = NULL_PTR;
+			for (CK_ULONG i = 0; i < ulPublicKeyAttributeCount; ++i) {
+				if (pPublicKeyTemplate[i].type != CKA_PARAMETER_SET) continue;
+				if (pPublicKeyTemplate[i].pValue == NULL_PTR ||
+				    pPublicKeyTemplate[i].ulValueLen != sizeof(CK_ULONG))
+					return CKR_ATTRIBUTE_VALUE_INVALID;
+				pubPs = (const CK_ULONG*)pPublicKeyTemplate[i].pValue;
+			}
+			// The attribute is mandatory at generation, so its absence is
+			// CKR_TEMPLATE_INCOMPLETE rather than a silent default.
+			if (pubPs == NULL_PTR) return CKR_TEMPLATE_INCOMPLETE;
+			parameterSet = *pubPs;
+
+			// Both halves are stamped with the same oid below, so a private
+			// template naming a different one cannot be satisfied (§4.1.1 rule 5).
+			for (CK_ULONG i = 0; i < ulPrivateKeyAttributeCount; ++i) {
+				if (pPrivateKeyTemplate[i].type != CKA_PARAMETER_SET) continue;
+				if (pPrivateKeyTemplate[i].pValue == NULL_PTR ||
+				    pPrivateKeyTemplate[i].ulValueLen != sizeof(CK_ULONG))
+					return CKR_ATTRIBUTE_VALUE_INVALID;
+				if (*(const CK_ULONG*)pPrivateKeyTemplate[i].pValue != parameterSet)
+					return CKR_TEMPLATE_INCONSISTENT;
+			}
 		}
 
 		if (pMechanism->mechanism == CKM_XMSS_KEY_PAIR_GEN) {
 			keyType = CKK_XMSS; // 0x00000047UL
 			xmss_params params;
-			if (xmss_parse_oid(&params, parameterSet)) return CKR_FUNCTION_FAILED;
+			// §6.66 refusal code: the engine already uses
+			// CKR_PARAMETER_SET_NOT_SUPPORTED correctly for ML-DSA/ML-KEM/SLH-DSA;
+			// XMSS returned CKR_FUNCTION_FAILED, which says nothing about the oid.
+			if (xmss_parse_oid(&params, parameterSet)) return CKR_PARAMETER_SET_NOT_SUPPORTED;
 			// xmss_keypair writes [OID(4) || core_key], so buffers need OID_LEN extra
 			priv_key_vec.resize(XMSS_OID_LEN + params.sk_bytes);
 			pub_key_vec.resize(XMSS_OID_LEN + params.pk_bytes);
@@ -712,7 +746,7 @@ CK_RV SoftHSM::generateKeyPairImpl
 		else if (pMechanism->mechanism == CKM_XMSSMT_KEY_PAIR_GEN) {
 			keyType = CKK_XMSSMT; // 0x00000048UL
 			xmss_params params;
-			if (xmssmt_parse_oid(&params, parameterSet)) return CKR_FUNCTION_FAILED;
+			if (xmssmt_parse_oid(&params, parameterSet)) return CKR_PARAMETER_SET_NOT_SUPPORTED;
 			// xmssmt_keypair writes [OID(4) || core_key]
 			priv_key_vec.resize(XMSS_OID_LEN + params.sk_bytes);
 			pub_key_vec.resize(XMSS_OID_LEN + params.pk_bytes);

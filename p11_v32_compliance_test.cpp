@@ -1363,6 +1363,169 @@ void test_hbs_key_protection() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// W4 — the XMSS parameter set comes from the TEMPLATE, not the mechanism.
+//
+// PKCS#11 v3.2 §6.66.6: "This mechanism does not have a parameter", and the
+// mechanism generates key pairs "using an oid, as specified in the
+// CKA_PARAMETER_SET attribute of the template for the public key."
+//
+// The C++ engine read pMechanism->pParameter — the one place the spec says has
+// no parameter — and DISCARDED CKA_PARAMETER_SET from the template, silently
+// defaulting to OID 1 (XMSS-SHA2_10_256) whenever no mechanism parameter was
+// supplied. A caller asking for XMSS-SHA2_16_256 through the standard attribute
+// got a 10_256 key back, with success.
+//
+// Absent attribute ⇒ CKR_TEMPLATE_INCOMPLETE (it is mandatory at generation).
+// Unsupported oid ⇒ CKR_PARAMETER_SET_NOT_SUPPORTED, the code the engine
+// already uses correctly for the three post-quantum families.
+// ─────────────────────────────────────────────────────────────────────────────
+void test_xmss_parameter_set() {
+    const char* CAT = "XmssParamSet";
+    const CK_MECHANISM_TYPE M_XMSS_KP = 0x00004034UL;
+    const CK_MECHANISM_TYPE M_XMSS    = 0x00004036UL;
+    CK_KEY_TYPE KT_XMSS = 0x00000047UL;
+    const CK_ATTRIBUTE_TYPE A_PARAMETER_SET = 0x0000061dUL;
+#ifndef CKR_PARAMETER_SET_NOT_SUPPORTED
+    const CK_RV RV_PARAMETER_SET_NOT_SUPPORTED = 0x00000209UL;
+#else
+    const CK_RV RV_PARAMETER_SET_NOT_SUPPORTED = CKR_PARAMETER_SET_NOT_SUPPORTED;
+#endif
+
+    if (!mech_advertised(M_XMSS_KP)) {
+        record_result(CAT, "XMSS_keygen_advertised", "SKIP", "mechanism not advertised");
+        return;
+    }
+
+    CK_BBOOL bTrue = CK_TRUE, bFalse = CK_FALSE;
+    CK_OBJECT_CLASS pubClass = CKO_PUBLIC_KEY, privClass = CKO_PRIVATE_KEY;
+
+    // mechParam != 0 exercises §6.66.6's "does not have a parameter": whatever
+    // is passed there must not influence the result.
+    auto gen = [&](CK_ULONG* attrParamSet, CK_ULONG* mechParam,
+                   CK_OBJECT_HANDLE* hPub, CK_OBJECT_HANDLE* hPriv) -> CK_RV {
+        CK_MECHANISM m = { M_XMSS_KP, NULL_PTR, 0 };
+        if (mechParam) { m.pParameter = mechParam; m.ulParameterLen = sizeof(*mechParam); }
+        CK_ATTRIBUTE pubTmpl[5] = {
+            { CKA_CLASS,    &pubClass, sizeof(pubClass) },
+            { CKA_KEY_TYPE, &KT_XMSS,  sizeof(KT_XMSS) },
+            { CKA_VERIFY,   &bTrue,    sizeof(bTrue) },
+            { CKA_TOKEN,    &bFalse,   sizeof(bFalse) },
+        };
+        CK_ULONG pubCount = 4;
+        CK_ATTRIBUTE privTmpl[5] = {
+            { CKA_CLASS,    &privClass, sizeof(privClass) },
+            { CKA_KEY_TYPE, &KT_XMSS,   sizeof(KT_XMSS) },
+            { CKA_SIGN,     &bTrue,     sizeof(bTrue) },
+            { CKA_TOKEN,    &bFalse,    sizeof(bFalse) },
+        };
+        CK_ULONG privCount = 4;
+        if (attrParamSet) {
+            pubTmpl[pubCount].type = A_PARAMETER_SET;
+            pubTmpl[pubCount].pValue = attrParamSet;
+            pubTmpl[pubCount].ulValueLen = sizeof(*attrParamSet);
+            pubCount++;
+            privTmpl[privCount].type = A_PARAMETER_SET;
+            privTmpl[privCount].pValue = attrParamSet;
+            privTmpl[privCount].ulValueLen = sizeof(*attrParamSet);
+            privCount++;
+        }
+        *hPub = 0; *hPriv = 0;
+        return fl->C_GenerateKeyPair(hSess, &m, pubTmpl, pubCount, privTmpl, privCount, hPub, hPriv);
+    };
+
+    // A signature's length is the observable proof of which parameter set was
+    // really used: XMSS-SHA2_10_256 signs to 2500 bytes, XMSS-SHA2_16_256 to
+    // 2692 (RFC 8391 sig = 4 + n + len*n + h*n).
+    auto sigLenOf = [&](CK_OBJECT_HANDLE hPriv) -> CK_ULONG {
+        CK_MECHANISM sm = { M_XMSS, NULL_PTR, 0 };
+        if (fl->C_SignInit(hSess, &sm, hPriv) != CKR_OK) return 0;
+        CK_BYTE msg[] = "w4";
+        CK_ULONG n = 0;
+        if (fl->C_Sign(hSess, msg, sizeof(msg) - 1, NULL_PTR, &n) != CKR_OK) return 0;
+        std::vector<CK_BYTE> sig(n ? n : 1);
+        CK_ULONG got = (CK_ULONG)sig.size();
+        if (fl->C_Sign(hSess, msg, sizeof(msg) - 1, sig.data(), &got) != CKR_OK) return 0;
+        return got;
+    };
+
+    auto readParamSet = [&](CK_OBJECT_HANDLE h) -> long {
+        CK_ULONG ps = 0xDEADBEEF;
+        CK_ATTRIBUTE a = { A_PARAMETER_SET, &ps, sizeof(ps) };
+        if (fl->C_GetAttributeValue(hSess, h, &a, 1) != CKR_OK) return -1;
+        return (long)ps;
+    };
+
+    // ── baseline: oid 1 through the attribute ────────────────────────────────
+    CK_ULONG ps1 = 1, ps2 = 2;
+    CK_OBJECT_HANDLE p1Pub = 0, p1Priv = 0;
+    CK_ULONG len1 = 0;
+    CK_RV r = gen(&ps1, NULL, &p1Pub, &p1Priv);
+    if (r != CKR_OK) {
+        record_result(CAT, "Generate_oid1_from_attribute", "FAIL", "RV=" + std::to_string(r));
+    } else {
+        record_result(CAT, "Generate_oid1_from_attribute", "PASS", "");
+        len1 = sigLenOf(p1Priv);
+        record_result(CAT, "Sign_oid1_length", len1 == 2500 ? "PASS" : "FAIL",
+                      "sig len=" + std::to_string(len1) + " (XMSS-SHA2_10_256 = 2500)");
+    }
+
+    // ── the attribute really selects the parameter set ───────────────────────
+    CK_OBJECT_HANDLE p2Pub = 0, p2Priv = 0;
+    r = gen(&ps2, NULL, &p2Pub, &p2Priv);
+    if (r != CKR_OK) {
+        record_result(CAT, "Generate_oid2_from_attribute", "FAIL", "RV=" + std::to_string(r));
+    } else {
+        record_result(CAT, "Generate_oid2_from_attribute", "PASS", "");
+        record_result(CAT, "Public_CKA_PARAMETER_SET_echoes_2",
+                      readParamSet(p2Pub) == 2 ? "PASS" : "FAIL",
+                      "read " + std::to_string(readParamSet(p2Pub)));
+        record_result(CAT, "Private_CKA_PARAMETER_SET_echoes_2",
+                      readParamSet(p2Priv) == 2 ? "PASS" : "FAIL",
+                      "read " + std::to_string(readParamSet(p2Priv)));
+        CK_ULONG len2 = sigLenOf(p2Priv);
+        record_result(CAT, "Sign_oid2_length", len2 == 2692 ? "PASS" : "FAIL",
+                      "sig len=" + std::to_string(len2) + " (XMSS-SHA2_16_256 = 2692)");
+    }
+
+    // ── §6.66.6 "This mechanism does not have a parameter": a mechanism
+    //     parameter must never override the attribute ─────────────────────────
+    {
+        CK_ULONG mechSaysTwo = 2;
+        CK_OBJECT_HANDLE a = 0, b = 0;
+        r = gen(&ps1, &mechSaysTwo, &a, &b);
+        if (r != CKR_OK) {
+            record_result(CAT, "Attribute_wins_over_mechanism_parameter", "FAIL",
+                          "RV=" + std::to_string(r));
+        } else {
+            CK_ULONG len = sigLenOf(b);
+            record_result(CAT, "Attribute_wins_over_mechanism_parameter",
+                          len == 2500 ? "PASS" : "FAIL",
+                          "attribute=1 mechParam=2 → sig len=" + std::to_string(len) +
+                          " (must be 2500, the attribute's set)");
+        }
+    }
+
+    // ── mandatory at generation ──────────────────────────────────────────────
+    {
+        CK_OBJECT_HANDLE a = 0, b = 0;
+        r = gen(NULL, NULL, &a, &b);
+        record_result(CAT, "Absent_CKA_PARAMETER_SET_is_TEMPLATE_INCOMPLETE",
+                      r == CKR_TEMPLATE_INCOMPLETE ? "PASS" : "FAIL",
+                      "RV=" + std::to_string(r) + " (want CKR_TEMPLATE_INCOMPLETE=0xD0)");
+    }
+
+    // ── unsupported oid ──────────────────────────────────────────────────────
+    {
+        CK_ULONG bogus = 0x99;
+        CK_OBJECT_HANDLE a = 0, b = 0;
+        r = gen(&bogus, NULL, &a, &b);
+        record_result(CAT, "Unsupported_parameter_set_code",
+                      r == RV_PARAMETER_SET_NOT_SUPPORTED ? "PASS" : "FAIL",
+                      "RV=" + std::to_string(r) + " (want CKR_PARAMETER_SET_NOT_SUPPORTED=0x209)");
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // S2 (C++ half) — CKA_WRAP_TEMPLATE mismatch must be CKR_KEY_HANDLE_INVALID.
 //
 // PKCS#11 v3.2 §5.18.3: "To partition the wrapping keys so they can only wrap a
@@ -2275,10 +2438,11 @@ void test_pqc_xmss() {
     CK_KEY_TYPE ktypeXmss = 0x00000047UL; // CKK_XMSS
     CK_BBOOL bTrue = CK_TRUE, bFalse = CK_FALSE;
 
+    // W4 (2026-08-13): §6.66.6 says "This mechanism does not have a parameter"
+    // and sources the oid from CKA_PARAMETER_SET, so the parameter set moved
+    // from mech.pParameter into both templates.
     CK_MECHANISM mech = { 0x00004034UL /* CKM_XMSS_KEY_PAIR_GEN */, NULL_PTR, 0 };
     CK_ULONG paramSetXmss = 0x00000001UL; // CKP_XMSS_SHA2_10_256
-    mech.pParameter = &paramSetXmss;
-    mech.ulParameterLen = sizeof(paramSetXmss);
 
     CK_UTF8CHAR label[] = "XMSS Compliance";
     CK_ATTRIBUTE pubTmpl[] = { 
@@ -2286,6 +2450,7 @@ void test_pqc_xmss() {
         { CKA_KEY_TYPE,      &ktypeXmss, sizeof(ktypeXmss) },
         { CKA_VERIFY,        &bTrue,    sizeof(bTrue) },
         { CKA_TOKEN,         &bTrue,    sizeof(bTrue) },
+        { CKA_PARAMETER_SET, &paramSetXmss, sizeof(paramSetXmss) },
         { CKA_LABEL,         label,     sizeof(label)-1 }
     };
     CK_ATTRIBUTE privTmpl[] = { 
@@ -2294,6 +2459,7 @@ void test_pqc_xmss() {
         { CKA_SIGN,          &bTrue,    sizeof(bTrue) },
         { CKA_TOKEN,         &bTrue,    sizeof(bTrue) },
         { CKA_PRIVATE,       &bTrue,    sizeof(bTrue) },
+        { CKA_PARAMETER_SET, &paramSetXmss, sizeof(paramSetXmss) },
         { CKA_LABEL,         label,     sizeof(label)-1 }
     };
 
@@ -2373,8 +2539,6 @@ void test_pqc_xmss() {
     // check (audit V-4) correctly rejects with CKR_TEMPLATE_INCONSISTENT.
     CK_MECHANISM mechMT = { CKM_XMSSMT_KEY_PAIR_GEN, NULL_PTR, 0 };
     CK_ULONG paramSetXmssMT = 0x00000001UL; // CKP_XMSSMT_SHA2_20_2_256
-    mechMT.pParameter = &paramSetXmssMT;
-    mechMT.ulParameterLen = sizeof(paramSetXmssMT);
 
     CK_KEY_TYPE ktypeXmssMT = 0x00000048UL; // CKK_XMSSMT
     CK_ATTRIBUTE pubTmplMT[] = {
@@ -2382,6 +2546,7 @@ void test_pqc_xmss() {
         { CKA_KEY_TYPE,      &ktypeXmssMT, sizeof(ktypeXmssMT) },
         { CKA_VERIFY,        &bTrue,      sizeof(bTrue) },
         { CKA_TOKEN,         &bTrue,      sizeof(bTrue) },
+        { CKA_PARAMETER_SET, &paramSetXmssMT, sizeof(paramSetXmssMT) },
         { CKA_LABEL,         label,       sizeof(label)-1 }
     };
     CK_ATTRIBUTE privTmplMT[] = {
@@ -2390,11 +2555,12 @@ void test_pqc_xmss() {
         { CKA_SIGN,          &bTrue,      sizeof(bTrue) },
         { CKA_TOKEN,         &bTrue,      sizeof(bTrue) },
         { CKA_PRIVATE,       &bTrue,      sizeof(bTrue) },
+        { CKA_PARAMETER_SET, &paramSetXmssMT, sizeof(paramSetXmssMT) },
         { CKA_LABEL,         label,       sizeof(label)-1 }
     };
 
     CK_OBJECT_HANDLE hPubMT = 0, hPrivMT = 0;
-    rv = fl->C_GenerateKeyPair(hSess, &mechMT, pubTmplMT, 5, privTmplMT, 6, &hPubMT, &hPrivMT);
+    rv = fl->C_GenerateKeyPair(hSess, &mechMT, pubTmplMT, 6, privTmplMT, 7, &hPubMT, &hPrivMT);
     if (rv == CKR_MECHANISM_INVALID || rv == CKR_FUNCTION_NOT_SUPPORTED) {
         record_result("XMSS", "Generate_XMSSMT_SHA2_20_2_256", "SKIP", "Mech unavailable");
     } else if (rv != CKR_OK) {
@@ -4672,24 +4838,26 @@ void test_g1_security() {
     {
         CK_OBJECT_CLASS pubClass = CKO_PUBLIC_KEY, privClass = CKO_PRIVATE_KEY;
         CK_KEY_TYPE ktypeXmss = 0x00000047UL; // CKK_XMSS
+        // W4: the oid now comes from CKA_PARAMETER_SET, not mech.pParameter.
         CK_MECHANISM mech = { 0x00004034UL /* CKM_XMSS_KEY_PAIR_GEN */, NULL_PTR, 0 };
         CK_ULONG paramSetXmss = 0x00000001UL; // CKP_XMSS_SHA2_10_256
-        mech.pParameter = &paramSetXmss; mech.ulParameterLen = sizeof(paramSetXmss);
         CK_ATTRIBUTE pubTmpl[] = {
             { CKA_CLASS, &pubClass, sizeof(pubClass) },
             { CKA_KEY_TYPE, &ktypeXmss, sizeof(ktypeXmss) },
             { CKA_VERIFY, &bTrue, sizeof(bTrue) },
-            { CKA_TOKEN, &bTrue, sizeof(bTrue) }
+            { CKA_TOKEN, &bTrue, sizeof(bTrue) },
+            { CKA_PARAMETER_SET, &paramSetXmss, sizeof(paramSetXmss) }
         };
         CK_ATTRIBUTE privTmpl[] = {
             { CKA_CLASS, &privClass, sizeof(privClass) },
             { CKA_KEY_TYPE, &ktypeXmss, sizeof(ktypeXmss) },
             { CKA_SIGN, &bTrue, sizeof(bTrue) },
             { CKA_TOKEN, &bTrue, sizeof(bTrue) },
-            { CKA_PRIVATE, &bTrue, sizeof(bTrue) }
+            { CKA_PRIVATE, &bTrue, sizeof(bTrue) },
+            { CKA_PARAMETER_SET, &paramSetXmss, sizeof(paramSetXmss) }
         };
         CK_OBJECT_HANDLE hPub = 0, hPriv = 0;
-        CK_RV rv = fl->C_GenerateKeyPair(hSess, &mech, pubTmpl, 4, privTmpl, 5, &hPub, &hPriv);
+        CK_RV rv = fl->C_GenerateKeyPair(hSess, &mech, pubTmpl, 5, privTmpl, 6, &hPub, &hPriv);
         if (rv != CKR_OK) {
             record_result("G1Security", "XMSS_largeMsg_sign", "SKIP", "XMSS unavailable, RV=" + std::to_string(rv));
         } else {
@@ -5144,12 +5312,15 @@ void test_g3_keygen() {
     {
         CK_KEY_TYPE kt = KT_XMSSMT;
         CK_ULONG paramSet = 0x00000001UL; // CKP_XMSSMT_SHA2_20_2_256
-        CK_MECHANISM kpMech = { M_XMSSMT_KP, &paramSet, sizeof(paramSet) };
+        // W4: §6.66.6 gives this mechanism no parameter; the oid is the
+        // template's CKA_PARAMETER_SET.
+        CK_MECHANISM kpMech = { M_XMSSMT_KP, NULL_PTR, 0 };
         CK_ATTRIBUTE pubT[] = {
             { CKA_CLASS, (void*)&pubC, sizeof(pubC) },
             { CKA_KEY_TYPE, &kt, sizeof(kt) },
             { CKA_VERIFY, &bTrue, sizeof(bTrue) },
             { CKA_TOKEN, &bFalse, sizeof(bFalse) },
+            { CKA_PARAMETER_SET, &paramSet, sizeof(paramSet) },
         };
         CK_ATTRIBUTE privT[] = {
             { CKA_CLASS, (void*)&privC, sizeof(privC) },
@@ -5157,9 +5328,10 @@ void test_g3_keygen() {
             { CKA_SIGN, &bTrue, sizeof(bTrue) },
             { CKA_TOKEN, &bFalse, sizeof(bFalse) },
             { CKA_PRIVATE, &bTrue, sizeof(bTrue) },
+            { CKA_PARAMETER_SET, &paramSet, sizeof(paramSet) },
         };
         CK_OBJECT_HANDLE hPub = 0, hPriv = 0;
-        CK_RV rv = fl->C_GenerateKeyPair(hSess, &kpMech, pubT, 4, privT, 5, &hPub, &hPriv);
+        CK_RV rv = fl->C_GenerateKeyPair(hSess, &kpMech, pubT, 5, privT, 6, &hPub, &hPriv);
         if (rv != CKR_OK) {
             record_result("G3Keygen", "V8_XMSSMT_keygen",
                           "FAIL", "keygen RV=" + std::to_string(rv) +
@@ -6632,6 +6804,7 @@ int main(int argc, char** argv) {
     if (opt_category == "all" || opt_category == "kem-kcv") { refresh_session(); test_kem_check_value(); }
     if (opt_category == "all" || opt_category == "hbs-protect") { refresh_session(); test_hbs_key_protection(); }
     if (opt_category == "all" || opt_category == "wrap-template") { refresh_session(); test_wrap_template_return_code(); }
+    if (opt_category == "all" || opt_category == "xmss-paramset") { refresh_session(); test_xmss_parameter_set(); }
     if (opt_category == "all" || opt_category == "pqc-dsa") { refresh_session(); test_pqc_dsa(); }
     if (opt_category == "all" || opt_category == "pqc-dsa") { refresh_session(); test_mldsa_context_binding(); }
     if (opt_category == "all" || opt_category == "pqc-dsa") { refresh_session(); test_multipart_signing(); }
