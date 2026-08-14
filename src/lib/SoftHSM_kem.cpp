@@ -37,6 +37,7 @@
 #include "access.h"
 #include "SoftHSM.h"
 #include "SoftHSMHelpers.h"
+#include "DerUtil.h"
 #include "HandleManager.h"
 #include "CryptoFactory.h"
 #include "cryptoki.h"
@@ -866,6 +867,14 @@ CK_RV SoftHSM::encapsulateECDH
 	{
 		EDPrivateKey* ephPriv = (EDPrivateKey*)ephemeral->getPrivateKey();
 		EDPublicKey* ephPub = (EDPublicKey*)ephemeral->getPublicKey();
+		// E1 (2026-08-13). §6.3.17: "The value of the generated public key is
+		// returned as the ciphertext", and that value "has the same format as
+		// the public key used in C_DeriveKey" — "a token MUST be able to accept
+		// this value encoded as a raw octet string". For Montgomery keys "the
+		// public key is provided as bytes in little endian order" and the spec
+		// offers no DER form at all. Since the E4 fix, getA() already returns
+		// the bare RFC 7748 bytes, so this is 32 bytes for X25519 rather than
+		// the 34 the DER OCTET STRING wrapper used to produce.
 		ephemeralPoint = ephPub->getA();
 		PublicKey* peerPub = deriveEngine->newPublicKey();
 		if (peerPub == NULL) ok = false;
@@ -877,7 +886,12 @@ CK_RV SoftHSM::encapsulateECDH
 	{
 		ECPrivateKey* ephPriv = (ECPrivateKey*)ephemeral->getPrivateKey();
 		ECPublicKey* ephPub = (ECPublicKey*)ephemeral->getPublicKey();
-		ephemeralPoint = ephPub->getQ();
+		// E1: CKA_EC_POINT on a Weierstrass key is legitimately the DER-encoded
+		// X9.62 ECPoint, but §6.3.17's ciphertext is the RAW octet string —
+		// 65 bytes starting 0x04 for P-256, not the 67-byte DER wrapping.
+		// Decapsulation keeps its tolerant reader (getECDHPubData), so a
+		// ciphertext produced by the old code still decapsulates.
+		ephemeralPoint = DERUTIL::octet2Raw(ephPub->getQ());
 		PublicKey* peerPub = deriveEngine->newPublicKey();
 		if (peerPub == NULL) ok = false;
 		if (ok && getECDHPublicKey((ECPublicKey*)peerPub, ephPriv, peerPoint) != CKR_OK) ok = false;

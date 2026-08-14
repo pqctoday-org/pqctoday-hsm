@@ -1363,6 +1363,410 @@ void test_hbs_key_protection() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// E1 — the ECDH-KEM ciphertext is the RAW ephemeral public key.
+//
+// PKCS#11 v3.2 §6.3.17: for encapsulation "an ephemeral key pair is generated.
+// The value of the generated public key is returned as the ciphertext", and
+// that value "has the same format as the public key used in C_DeriveKey" —
+// specified as "a token MUST be able to accept this value encoded as a raw
+// octet string ... A token MAY, in addition, support accepting this value as a
+// DER-encoded ECPoint." For Montgomery keys "the public key is provided as
+// bytes in little endian order", and the spec gives Montgomery no DER option at
+// all. The spec attaches a footnote to exactly this hazard: "The encoding in
+// V2.20 was not specified and resulted in different implementations choosing
+// different encodings."
+//
+// The engine emitted the DER OCTET STRING wrapper: 67 bytes for P-256 where 65
+// are mandated, 34 for X25519 where 32 are. Mutual agreement between this
+// engine and the Rust one was not a defence — both were wrong the same way.
+//
+// E4 — Edwards / Montgomery CKA_EC_POINT is the bare RFC 8032 / RFC 7748 value.
+//
+// Those tables say "Public key bytes in little endian order as defined in
+// [RFC 8032]/[RFC 7748]" — deliberately different wording from the Weierstrass
+// table's "DER-encoding of ANSI X9.62 ECPoint value Q". That difference IS the
+// specification. OSSLEDPublicKey wrapped the bytes in a DER OCTET STRING, so
+// Ed25519 published 34 bytes.
+//
+// The tolerant reader on the input side is deliberately KEPT: §6.3.17's "MUST
+// accept raw, MAY accept DER" is about what a token accepts, and anything
+// already deployed against the old encoding keeps working.
+// ─────────────────────────────────────────────────────────────────────────────
+void test_kem_ciphertext_and_ec_point_encoding() {
+    const char* CAT = "RawEncoding";
+    typedef CK_RV (*C_EncapsulateKey_t)(CK_SESSION_HANDLE, CK_MECHANISM_PTR, CK_OBJECT_HANDLE, CK_ATTRIBUTE_PTR, CK_ULONG, CK_BYTE_PTR, CK_ULONG_PTR, CK_OBJECT_HANDLE_PTR);
+    typedef CK_RV (*C_DecapsulateKey_t)(CK_SESSION_HANDLE, CK_MECHANISM_PTR, CK_OBJECT_HANDLE, CK_ATTRIBUTE_PTR, CK_ULONG, CK_BYTE_PTR, CK_ULONG, CK_OBJECT_HANDLE_PTR);
+    void* dlib = dlopen(opt_engine.c_str(), RTLD_NOW);
+    C_EncapsulateKey_t EncapFn = dlib ? (C_EncapsulateKey_t)dlsym(dlib, "C_EncapsulateKey") : NULL;
+    C_DecapsulateKey_t DecapFn = dlib ? (C_DecapsulateKey_t)dlsym(dlib, "C_DecapsulateKey") : NULL;
+
+    CK_BBOOL bTrue = CK_TRUE, bFalse = CK_FALSE;
+    CK_OBJECT_CLASS pubClass = CKO_PUBLIC_KEY, privClass = CKO_PRIVATE_KEY;
+    CK_OBJECT_CLASS secClass = CKO_SECRET_KEY;
+    CK_KEY_TYPE secType = CKK_GENERIC_SECRET;
+    CK_ATTRIBUTE ssTmpl[] = {
+        { CKA_CLASS,       &secClass, sizeof(secClass) },
+        { CKA_KEY_TYPE,    &secType,  sizeof(secType) },
+        { CKA_TOKEN,       &bFalse,   sizeof(bFalse) },
+        { CKA_EXTRACTABLE, &bTrue,    sizeof(bTrue) },
+        { CKA_SENSITIVE,   &bFalse,   sizeof(bFalse) },
+    };
+
+    auto readBytes = [&](CK_OBJECT_HANDLE h, CK_ATTRIBUTE_TYPE t) -> std::vector<CK_BYTE> {
+        CK_ATTRIBUTE a = { t, NULL_PTR, 0 };
+        if (fl->C_GetAttributeValue(hSess, h, &a, 1) != CKR_OK || a.ulValueLen == 0 ||
+            a.ulValueLen == (CK_ULONG)-1) return {};
+        std::vector<CK_BYTE> v(a.ulValueLen);
+        a.pValue = v.data();
+        if (fl->C_GetAttributeValue(hSess, h, &a, 1) != CKR_OK) return {};
+        return v;
+    };
+
+    // ── E4: CKA_EC_POINT on Edwards / Montgomery public keys ─────────────────
+    struct EdCase { const char* name; CK_KEY_TYPE kt; CK_MECHANISM_TYPE mech;
+                    const char* curveName; size_t rawLen; };
+    // CKA_EC_PARAMS in the PrintableString curveName form (§6.3.3), which this
+    // engine emits and accepts.
+    const EdCase edCases[] = {
+        { "Ed25519",    CKK_EC_EDWARDS,    CKM_EC_EDWARDS_KEY_PAIR_GEN,    "edwards25519", 32 },
+        { "Ed448",      CKK_EC_EDWARDS,    CKM_EC_EDWARDS_KEY_PAIR_GEN,    "edwards448",   57 },
+        { "X25519",     CKK_EC_MONTGOMERY, CKM_EC_MONTGOMERY_KEY_PAIR_GEN, "curve25519",   32 },
+    };
+    for (const EdCase& c : edCases) {
+        std::vector<CK_BYTE> params;
+        params.push_back(0x13);
+        params.push_back((CK_BYTE)strlen(c.curveName));
+        params.insert(params.end(), c.curveName, c.curveName + strlen(c.curveName));
+        CK_KEY_TYPE kt = c.kt;
+        CK_ATTRIBUTE pubT[] = {
+            { CKA_CLASS,     &pubClass, sizeof(pubClass) },
+            { CKA_KEY_TYPE,  &kt,       sizeof(kt) },
+            { CKA_EC_PARAMS, params.data(), (CK_ULONG)params.size() },
+            { CKA_VERIFY,    &bTrue,    sizeof(bTrue) },
+            { CKA_TOKEN,     &bFalse,   sizeof(bFalse) },
+        };
+        CK_ATTRIBUTE privT[] = {
+            { CKA_CLASS,    &privClass, sizeof(privClass) },
+            { CKA_KEY_TYPE, &kt,        sizeof(kt) },
+            { CKA_SIGN,     &bTrue,     sizeof(bTrue) },
+            { CKA_DERIVE,   &bTrue,     sizeof(bTrue) },
+            { CKA_TOKEN,    &bFalse,    sizeof(bFalse) },
+        };
+        CK_MECHANISM m = { c.mech, NULL_PTR, 0 };
+        CK_OBJECT_HANDLE hPub = 0, hPriv = 0;
+        CK_RV r = fl->C_GenerateKeyPair(hSess, &m, pubT, 5, privT, 5, &hPub, &hPriv);
+        if (r != CKR_OK) {
+            record_result(CAT, std::string(c.name) + "_EC_POINT_raw", "FAIL",
+                          "keygen RV=" + std::to_string(r));
+            continue;
+        }
+        std::vector<CK_BYTE> pt = readBytes(hPub, CKA_EC_POINT);
+        bool derWrapped = (pt.size() == c.rawLen + 2 && pt[0] == 0x04 &&
+                           pt[1] == (CK_BYTE)c.rawLen);
+        record_result(CAT, std::string(c.name) + "_EC_POINT_raw",
+                      pt.size() == c.rawLen ? "PASS" : "FAIL",
+                      "CKA_EC_POINT len=" + std::to_string(pt.size()) +
+                      " (want " + std::to_string(c.rawLen) + " bare RFC bytes)" +
+                      (derWrapped ? " — DER OCTET STRING wrapper present" : ""));
+
+        // The key must still be usable: a DER-vs-raw change that broke signing
+        // would trade one defect for a worse one.
+        if (c.kt == CKK_EC_EDWARDS) {
+            CK_MECHANISM sm = { CKM_EDDSA, NULL_PTR, 0 };
+            CK_BYTE msg[] = "e4";
+            CK_BYTE sig[256]; CK_ULONG sigLen = sizeof(sig);
+            CK_RV rs = fl->C_SignInit(hSess, &sm, hPriv);
+            if (rs == CKR_OK) rs = fl->C_Sign(hSess, msg, sizeof(msg) - 1, sig, &sigLen);
+            CK_RV rvv = (rs == CKR_OK) ? fl->C_VerifyInit(hSess, &sm, hPub) : rs;
+            if (rvv == CKR_OK) rvv = fl->C_Verify(hSess, msg, sizeof(msg) - 1, sig, sigLen);
+            record_result(CAT, std::string(c.name) + "_sign_verify_round_trip",
+                          rvv == CKR_OK ? "PASS" : "FAIL",
+                          "sign RV=" + std::to_string(rs) + " verify RV=" + std::to_string(rvv));
+
+            // Import the RAW point through C_CreateObject and verify with it —
+            // the bare form must be accepted on input, not merely emitted.
+            if (rs == CKR_OK && pt.size() == c.rawLen) {
+                CK_ATTRIBUTE impT[] = {
+                    { CKA_CLASS,     &pubClass, sizeof(pubClass) },
+                    { CKA_KEY_TYPE,  &kt,       sizeof(kt) },
+                    { CKA_EC_PARAMS, params.data(), (CK_ULONG)params.size() },
+                    { CKA_EC_POINT,  pt.data(), (CK_ULONG)pt.size() },
+                    { CKA_VERIFY,    &bTrue,    sizeof(bTrue) },
+                    { CKA_TOKEN,     &bFalse,   sizeof(bFalse) },
+                };
+                CK_OBJECT_HANDLE hImp = CK_INVALID_HANDLE;
+                CK_RV ri = fl->C_CreateObject(hSess, impT, 6, &hImp);
+                CK_RV rv2 = (ri == CKR_OK) ? fl->C_VerifyInit(hSess, &sm, hImp) : ri;
+                if (rv2 == CKR_OK) rv2 = fl->C_Verify(hSess, msg, sizeof(msg) - 1, sig, sigLen);
+                record_result(CAT, std::string(c.name) + "_import_raw_point_verifies",
+                              rv2 == CKR_OK ? "PASS" : "FAIL",
+                              "create RV=" + std::to_string(ri) + " verify RV=" + std::to_string(rv2));
+
+                // …and the DER form must STILL be accepted (tolerant reader kept).
+                std::vector<CK_BYTE> der;
+                der.push_back(0x04);
+                der.push_back((CK_BYTE)pt.size());
+                der.insert(der.end(), pt.begin(), pt.end());
+                CK_ATTRIBUTE derT[] = {
+                    { CKA_CLASS,     &pubClass, sizeof(pubClass) },
+                    { CKA_KEY_TYPE,  &kt,       sizeof(kt) },
+                    { CKA_EC_PARAMS, params.data(), (CK_ULONG)params.size() },
+                    { CKA_EC_POINT,  der.data(), (CK_ULONG)der.size() },
+                    { CKA_VERIFY,    &bTrue,    sizeof(bTrue) },
+                    { CKA_TOKEN,     &bFalse,   sizeof(bFalse) },
+                };
+                CK_OBJECT_HANDLE hDer = CK_INVALID_HANDLE;
+                CK_RV rd = fl->C_CreateObject(hSess, derT, 6, &hDer);
+                CK_RV rv3 = (rd == CKR_OK) ? fl->C_VerifyInit(hSess, &sm, hDer) : rd;
+                if (rv3 == CKR_OK) rv3 = fl->C_Verify(hSess, msg, sizeof(msg) - 1, sig, sigLen);
+                record_result(CAT, std::string(c.name) + "_import_DER_point_still_verifies",
+                              rv3 == CKR_OK ? "PASS" : "FAIL",
+                              "create RV=" + std::to_string(rd) + " verify RV=" + std::to_string(rv3));
+            }
+        }
+    }
+
+    if (!EncapFn || !DecapFn) {
+        record_result(CAT, "KEM_ciphertext_encoding", "SKIP", "Function pointers missing");
+        return;
+    }
+    CK_MECHANISM ecdh = { CKM_ECDH1_DERIVE, NULL_PTR, 0 };
+
+    // ── E1(a): P-256 → 65 raw uncompressed bytes, first byte 0x04 ────────────
+    {
+        CK_KEY_TYPE ecType = CKK_EC;
+        CK_BYTE oid_p256[] = { 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07 };
+        CK_ATTRIBUTE pubT[] = {
+            { CKA_CLASS,       &pubClass, sizeof(pubClass) },
+            { CKA_KEY_TYPE,    &ecType,   sizeof(ecType) },
+            { CKA_EC_PARAMS,   oid_p256,  sizeof(oid_p256) },
+            { CKA_ENCAPSULATE, &bTrue,    sizeof(bTrue) },
+            { CKA_TOKEN,       &bFalse,   sizeof(bFalse) },
+        };
+        CK_ATTRIBUTE privT[] = {
+            { CKA_CLASS,       &privClass, sizeof(privClass) },
+            { CKA_KEY_TYPE,    &ecType,    sizeof(ecType) },
+            { CKA_DECAPSULATE, &bTrue,     sizeof(bTrue) },
+            { CKA_TOKEN,       &bFalse,    sizeof(bFalse) },
+        };
+        CK_MECHANISM gen = { CKM_EC_KEY_PAIR_GEN, NULL_PTR, 0 };
+        CK_OBJECT_HANDLE hPub = 0, hPriv = 0;
+        CK_RV r = fl->C_GenerateKeyPair(hSess, &gen, pubT, 5, privT, 4, &hPub, &hPriv);
+        if (r != CKR_OK) {
+            record_result(CAT, "P256_ciphertext_is_65_raw_bytes", "FAIL",
+                          "keygen RV=" + std::to_string(r));
+        } else {
+            CK_BYTE ct[300]; CK_ULONG ctLen = sizeof(ct);
+            CK_OBJECT_HANDLE hE = 0;
+            r = EncapFn(hSess, &ecdh, hPub, ssTmpl, 5, ct, &ctLen, &hE);
+            record_result(CAT, "P256_ciphertext_is_65_raw_bytes",
+                          (r == CKR_OK && ctLen == 65 && ct[0] == 0x04) ? "PASS" : "FAIL",
+                          "RV=" + std::to_string(r) + " len=" + std::to_string(ctLen) +
+                          " first=0x" + (r == CKR_OK ? std::to_string((int)ct[0]) : std::string("?")) +
+                          " (want 65, first byte 0x04 not a DER tag)");
+            if (r == CKR_OK) {
+                // Raw round-trip.
+                CK_OBJECT_HANDLE hD = 0;
+                CK_RV rd = DecapFn(hSess, &ecdh, hPriv, ssTmpl, 5, ct, ctLen, &hD);
+                std::vector<CK_BYTE> a = readBytes(hE, CKA_VALUE), b = readBytes(hD, CKA_VALUE);
+                record_result(CAT, "P256_raw_ciphertext_round_trip",
+                              (rd == CKR_OK && !a.empty() && a == b) ? "PASS" : "FAIL",
+                              "decap RV=" + std::to_string(rd) + " secrets equal=" +
+                              std::to_string((int)(!a.empty() && a == b)));
+                // The tolerant reader must still accept the OLD DER encoding.
+                std::vector<CK_BYTE> der;
+                der.push_back(0x04);
+                der.push_back((CK_BYTE)ctLen);
+                der.insert(der.end(), ct, ct + ctLen);
+                CK_OBJECT_HANDLE hD2 = 0;
+                CK_RV rd2 = DecapFn(hSess, &ecdh, hPriv, ssTmpl, 5, der.data(),
+                                    (CK_ULONG)der.size(), &hD2);
+                std::vector<CK_BYTE> c2 = readBytes(hD2, CKA_VALUE);
+                record_result(CAT, "P256_DER_ciphertext_still_accepted",
+                              (rd2 == CKR_OK && !a.empty() && a == c2) ? "PASS" : "FAIL",
+                              "decap RV=" + std::to_string(rd2) + " secrets equal=" +
+                              std::to_string((int)(!a.empty() && a == c2)));
+            }
+        }
+    }
+
+    // ── E1(b): X25519 → 32 bare little-endian bytes (no DER option exists) ───
+    {
+        CK_KEY_TYPE ecType = CKK_EC_MONTGOMERY;
+        CK_BYTE cn_x25519[] = { 0x13, 0x0a, 'c','u','r','v','e','2','5','5','1','9' };
+        CK_ATTRIBUTE pubT[] = {
+            { CKA_CLASS,       &pubClass, sizeof(pubClass) },
+            { CKA_KEY_TYPE,    &ecType,   sizeof(ecType) },
+            { CKA_EC_PARAMS,   cn_x25519, sizeof(cn_x25519) },
+            { CKA_ENCAPSULATE, &bTrue,    sizeof(bTrue) },
+            { CKA_TOKEN,       &bFalse,   sizeof(bFalse) },
+        };
+        CK_ATTRIBUTE privT[] = {
+            { CKA_CLASS,       &privClass, sizeof(privClass) },
+            { CKA_KEY_TYPE,    &ecType,    sizeof(ecType) },
+            { CKA_DECAPSULATE, &bTrue,     sizeof(bTrue) },
+            { CKA_TOKEN,       &bFalse,    sizeof(bFalse) },
+        };
+        CK_MECHANISM gen = { CKM_EC_MONTGOMERY_KEY_PAIR_GEN, NULL_PTR, 0 };
+        CK_OBJECT_HANDLE hPub = 0, hPriv = 0;
+        CK_RV r = fl->C_GenerateKeyPair(hSess, &gen, pubT, 5, privT, 4, &hPub, &hPriv);
+        if (r != CKR_OK) {
+            record_result(CAT, "X25519_ciphertext_is_32_raw_bytes", "FAIL",
+                          "keygen RV=" + std::to_string(r));
+        } else {
+            CK_BYTE ct[300]; CK_ULONG ctLen = sizeof(ct);
+            CK_OBJECT_HANDLE hE = 0;
+            r = EncapFn(hSess, &ecdh, hPub, ssTmpl, 5, ct, &ctLen, &hE);
+            record_result(CAT, "X25519_ciphertext_is_32_raw_bytes",
+                          (r == CKR_OK && ctLen == 32) ? "PASS" : "FAIL",
+                          "RV=" + std::to_string(r) + " len=" + std::to_string(ctLen) +
+                          " (want 32; §6.3.17 gives Montgomery no DER form)");
+            if (r == CKR_OK) {
+                CK_OBJECT_HANDLE hD = 0;
+                CK_RV rd = DecapFn(hSess, &ecdh, hPriv, ssTmpl, 5, ct, ctLen, &hD);
+                std::vector<CK_BYTE> a = readBytes(hE, CKA_VALUE), b = readBytes(hD, CKA_VALUE);
+                record_result(CAT, "X25519_raw_ciphertext_round_trip",
+                              (rd == CKR_OK && !a.empty() && a == b) ? "PASS" : "FAIL",
+                              "decap RV=" + std::to_string(rd) + " secrets equal=" +
+                              std::to_string((int)(!a.empty() && a == b)));
+                std::vector<CK_BYTE> der;
+                der.push_back(0x04);
+                der.push_back((CK_BYTE)ctLen);
+                der.insert(der.end(), ct, ct + ctLen);
+                CK_OBJECT_HANDLE hD2 = 0;
+                CK_RV rd2 = DecapFn(hSess, &ecdh, hPriv, ssTmpl, 5, der.data(),
+                                    (CK_ULONG)der.size(), &hD2);
+                std::vector<CK_BYTE> c2 = readBytes(hD2, CKA_VALUE);
+                record_result(CAT, "X25519_DER_ciphertext_still_accepted",
+                              (rd2 == CKR_OK && !a.empty() && a == c2) ? "PASS" : "FAIL",
+                              "decap RV=" + std::to_string(rd2) + " secrets equal=" +
+                              std::to_string((int)(!a.empty() && a == c2)));
+            }
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// E3 / E7 — post-quantum private-key material and the mechanism's seed.
+//
+// E3. The ML-DSA, ML-KEM and SLH-DSA private-key tables define CKA_VALUE as the
+// raw FIPS artefact — "Private key (sk) as defined in ML-DSA.Keygen-internal in
+// [FIPS 204]", "decapsulation key dk as defined in [FIPS 203]". PKCS#8 appears
+// in the whole specification exactly once, as the TRANSPORT format for wrapping
+// (§6.7), never as an attribute format. The engine stored a PKCS#8 DER wrapper,
+// so an application reading a 2560-byte ML-DSA-44 key got a DER SEQUENCE.
+//
+// E7. §6.67.4 / §6.68.4 make CKA_SEED a mechanism contribution for ML-DSA and
+// ML-KEM key-pair generation; §6.69.4 does NOT list it for SLH-DSA, whose table
+// defines no such attribute. The engine persisted a caller-supplied seed but
+// never generated one, so the mandated contribution was missing on every
+// randomly generated key.
+// ─────────────────────────────────────────────────────────────────────────────
+void test_pq_private_key_encoding_and_seed() {
+    const char* CAT = "PQKeyBytes";
+    CK_BBOOL bTrue = CK_TRUE, bFalse = CK_FALSE;
+    CK_OBJECT_CLASS pubClass = CKO_PUBLIC_KEY, privClass = CKO_PRIVATE_KEY;
+
+    auto readBytes = [&](CK_OBJECT_HANDLE h, CK_ATTRIBUTE_TYPE t, CK_RV* rvOut) -> std::vector<CK_BYTE> {
+        CK_ATTRIBUTE a = { t, NULL_PTR, 0 };
+        CK_RV r = fl->C_GetAttributeValue(hSess, h, &a, 1);
+        if (rvOut) *rvOut = r;
+        if (r != CKR_OK || a.ulValueLen == 0 || a.ulValueLen == (CK_ULONG)-1) return {};
+        std::vector<CK_BYTE> v(a.ulValueLen);
+        a.pValue = v.data();
+        if (fl->C_GetAttributeValue(hSess, h, &a, 1) != CKR_OK) return {};
+        return v;
+    };
+
+    struct PQCase {
+        const char* name; CK_MECHANISM_TYPE mech; CK_KEY_TYPE kt; CK_ULONG ps;
+        size_t skLen;     // FIPS private-key size
+        bool seedExpected; // §6.67.4/§6.68.4 yes, §6.69.4 no
+        size_t seedLen;
+    };
+    // FIPS 204 ML-DSA-44 sk = 2560; FIPS 203 ML-KEM-768 dk = 2400;
+    // FIPS 205 SLH-DSA-SHA2-128s sk = 64.  ML-DSA seed xi = 32; ML-KEM d||z = 64.
+    const PQCase cases[] = {
+        { "ML_DSA_44",  CKM_ML_DSA_KEY_PAIR_GEN,  CKK_ML_DSA,  1, 2560, true,  32 },
+        { "ML_KEM_768", CKM_ML_KEM_KEY_PAIR_GEN,  CKK_ML_KEM,  2, 2400, true,  64 },
+        { "SLH_DSA",    CKM_SLH_DSA_KEY_PAIR_GEN, CKK_SLH_DSA, 1,   64, false,  0 },
+    };
+
+    for (const PQCase& c : cases) {
+        if (!mech_advertised(c.mech)) {
+            record_result(CAT, std::string(c.name) + "_advertised", "SKIP", "mechanism not advertised");
+            continue;
+        }
+        CK_KEY_TYPE kt = c.kt;
+        CK_ULONG ps = c.ps;
+        CK_ATTRIBUTE pubT[] = {
+            { CKA_CLASS,         &pubClass, sizeof(pubClass) },
+            { CKA_KEY_TYPE,      &kt,       sizeof(kt) },
+            { CKA_PARAMETER_SET, &ps,       sizeof(ps) },
+            { CKA_TOKEN,         &bFalse,   sizeof(bFalse) },
+        };
+        CK_ATTRIBUTE privT[] = {
+            { CKA_CLASS,         &privClass, sizeof(privClass) },
+            { CKA_KEY_TYPE,      &kt,        sizeof(kt) },
+            { CKA_PARAMETER_SET, &ps,        sizeof(ps) },
+            { CKA_TOKEN,         &bFalse,    sizeof(bFalse) },
+            { CKA_SENSITIVE,     &bFalse,    sizeof(bFalse) },
+            { CKA_EXTRACTABLE,   &bTrue,     sizeof(bTrue) },
+        };
+        CK_MECHANISM m = { c.mech, NULL_PTR, 0 };
+        CK_OBJECT_HANDLE hPub = 0, hPriv = 0;
+        CK_RV r = fl->C_GenerateKeyPair(hSess, &m, pubT, 4, privT, 6, &hPub, &hPriv);
+        if (r != CKR_OK) {
+            record_result(CAT, std::string(c.name) + "_generate", "FAIL", "RV=" + std::to_string(r));
+            continue;
+        }
+
+        // E3: raw FIPS bytes, not a PKCS#8 DER SEQUENCE.
+        CK_RV rq = CKR_OK;
+        std::vector<CK_BYTE> sk = readBytes(hPriv, CKA_VALUE, &rq);
+        bool derSeq = (sk.size() > 1 && sk[0] == 0x30);
+        record_result(CAT, std::string(c.name) + "_CKA_VALUE_is_raw_FIPS_length",
+                      sk.size() == c.skLen ? "PASS" : "FAIL",
+                      "len=" + std::to_string(sk.size()) + " (want " + std::to_string(c.skLen) +
+                      ")" + (derSeq ? " — begins with a DER SEQUENCE tag 0x30" : ""));
+        record_result(CAT, std::string(c.name) + "_CKA_VALUE_not_DER_wrapped",
+                      !derSeq ? "PASS" : "FAIL",
+                      "first byte=0x" + (sk.empty() ? std::string("--") : std::to_string((int)sk[0])));
+
+        // E7: the mechanism contributes CKA_SEED for ML-DSA / ML-KEM only.
+        CK_RV rs = CKR_OK;
+        std::vector<CK_BYTE> seed = readBytes(hPriv, CKA_SEED, &rs);
+        if (c.seedExpected) {
+            record_result(CAT, std::string(c.name) + "_CKA_SEED_contributed",
+                          (rs == CKR_OK && seed.size() == c.seedLen) ? "PASS" : "FAIL",
+                          "RV=" + std::to_string(rs) + " len=" + std::to_string(seed.size()) +
+                          " (want " + std::to_string(c.seedLen) + ")");
+        } else {
+            // §6.69.4 lists no seed for SLH-DSA and its table defines none, so
+            // an absent/empty value is the conformant answer.
+            record_result(CAT, std::string(c.name) + "_CKA_SEED_absent",
+                          seed.empty() ? "PASS" : "FAIL",
+                          "RV=" + std::to_string(rs) + " len=" + std::to_string(seed.size()));
+        }
+
+        // The key must still work end to end after the encoding change.
+        if (c.kt == CKK_ML_DSA || c.kt == CKK_SLH_DSA) {
+            CK_MECHANISM sm = { c.kt == CKK_ML_DSA ? CKM_ML_DSA : CKM_SLH_DSA, NULL_PTR, 0 };
+            CK_BYTE msg[] = "e3";
+            std::vector<CK_BYTE> sig(50000);
+            CK_ULONG sigLen = (CK_ULONG)sig.size();
+            CK_RV rsig = fl->C_SignInit(hSess, &sm, hPriv);
+            if (rsig == CKR_OK) rsig = fl->C_Sign(hSess, msg, sizeof(msg) - 1, sig.data(), &sigLen);
+            CK_RV rver = (rsig == CKR_OK) ? fl->C_VerifyInit(hSess, &sm, hPub) : rsig;
+            if (rver == CKR_OK) rver = fl->C_Verify(hSess, msg, sizeof(msg) - 1, sig.data(), sigLen);
+            record_result(CAT, std::string(c.name) + "_sign_verify_round_trip",
+                          rver == CKR_OK ? "PASS" : "FAIL",
+                          "sign RV=" + std::to_string(rsig) + " verify RV=" + std::to_string(rver));
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // W4 — the XMSS parameter set comes from the TEMPLATE, not the mechanism.
 //
 // PKCS#11 v3.2 §6.66.6: "This mechanism does not have a parameter", and the
@@ -6805,6 +7209,8 @@ int main(int argc, char** argv) {
     if (opt_category == "all" || opt_category == "hbs-protect") { refresh_session(); test_hbs_key_protection(); }
     if (opt_category == "all" || opt_category == "wrap-template") { refresh_session(); test_wrap_template_return_code(); }
     if (opt_category == "all" || opt_category == "xmss-paramset") { refresh_session(); test_xmss_parameter_set(); }
+    if (opt_category == "all" || opt_category == "raw-encoding") { refresh_session(); test_kem_ciphertext_and_ec_point_encoding(); }
+    if (opt_category == "all" || opt_category == "pq-keybytes") { refresh_session(); test_pq_private_key_encoding_and_seed(); }
     if (opt_category == "all" || opt_category == "pqc-dsa") { refresh_session(); test_pqc_dsa(); }
     if (opt_category == "all" || opt_category == "pqc-dsa") { refresh_session(); test_mldsa_context_binding(); }
     if (opt_category == "all" || opt_category == "pqc-dsa") { refresh_session(); test_multipart_signing(); }

@@ -5108,6 +5108,21 @@ CK_RV SoftHSM::generateMLDSA
 		if (srv != CKR_OK) return srv;
 	}
 
+	// E7 (2026-08-13). §6.67.4 lists CKA_SEED among the attributes
+	// CKM_ML_DSA_KEY_PAIR_GEN CONTRIBUTES to the new private key, so it must be
+	// present on a randomly generated key too — this engine only ever persisted
+	// a caller-supplied one. FIPS 204 keygen is seed-derived anyway, so the
+	// engine now draws xi itself and publishes it, which is what makes the
+	// contribution real rather than nominal.
+	bool seedContributed = false;
+	if (seed.size() == 0)
+	{
+		RNG* seedRng = CryptoFactory::i()->getRNG();
+		if (seedRng == NULL) return CKR_GENERAL_ERROR;
+		if (!seedRng->generateRandom(seed, 32)) return CKR_GENERAL_ERROR;
+		seedContributed = true;
+	}
+
 	// Set the parameters
 	MLDSAParameters p;
 	p.setParameterSet(parameterSet);
@@ -5274,6 +5289,20 @@ CK_RV SoftHSM::generateMLDSA
 					ByteString kcv = computeAsymKCV(priv->getValue());
 					// CKA_CHECK_VALUE stored in clear — not sensitive per PKCS#11 v3.2 §4.10.2
 					bOK = bOK && osobject->setAttribute(CKA_CHECK_VALUE, kcv);
+				}
+				// E7: publish the mechanism's CKA_SEED contribution. Stored
+				// exactly like CKA_VALUE — encrypted at rest on a private
+				// object, matching P11AttrSeed::updateAttr — and only when the
+				// engine drew it, since a caller-supplied seed already reached
+				// the object through the template.
+				if (seedContributed)
+				{
+					ByteString seedValue;
+					if (isPrivateKeyPrivate)
+						bOK = bOK && token->encrypt(seed, seedValue);
+					else
+						seedValue = seed;
+					bOK = bOK && osobject->setAttribute(CKA_SEED, seedValue);
 				}
 				// PKCS#11 v3.2 §4.14 — CKA_PUBLIC_KEY_INFO: SubjectPublicKeyInfo DER (always public)
 				{
@@ -7276,6 +7305,17 @@ CK_RV SoftHSM::generateMLKEM
 		if (srv != CKR_OK) return srv;
 	}
 
+	// E7: §6.68.4 makes CKA_SEED (d||z, 64 bytes) a contribution of
+	// CKM_ML_KEM_KEY_PAIR_GEN — see the ML-DSA path above.
+	bool seedContributed = false;
+	if (seed.size() == 0)
+	{
+		RNG* seedRng = CryptoFactory::i()->getRNG();
+		if (seedRng == NULL) return CKR_GENERAL_ERROR;
+		if (!seedRng->generateRandom(seed, 64)) return CKR_GENERAL_ERROR;
+		seedContributed = true;
+	}
+
 	// Set the parameters
 	MLKEMParameters p;
 	p.setParameterSet(parameterSet);
@@ -7448,6 +7488,19 @@ CK_RV SoftHSM::generateMLKEM
 					ByteString kcv = computeAsymKCV(priv->getValue());
 					// CKA_CHECK_VALUE stored in clear — not sensitive per PKCS#11 v3.2 §4.10.2
 					bOK = bOK && osobject->setAttribute(CKA_CHECK_VALUE, kcv);
+				}
+				// E7: publish the mechanism's CKA_SEED contribution (§6.68.4,
+				// d||z). Stored exactly like CKA_VALUE — encrypted at rest on a
+				// private object — and only when the engine drew it, since a
+				// caller-supplied seed already reached the object via the template.
+				if (seedContributed)
+				{
+					ByteString seedValue;
+					if (isPrivateKeyPrivate)
+						bOK = bOK && token->encrypt(seed, seedValue);
+					else
+						seedValue = seed;
+					bOK = bOK && osobject->setAttribute(CKA_SEED, seedValue);
 				}
 				// PKCS#11 v3.2 §4.14 — CKA_PUBLIC_KEY_INFO: SubjectPublicKeyInfo DER (always public)
 				{
