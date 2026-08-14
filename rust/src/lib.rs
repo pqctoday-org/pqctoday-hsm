@@ -22,6 +22,10 @@
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 pub mod ck_abi;
 pub mod constants;
+/// Typed, ABI-derived reader for caller-supplied PKCS#11 mechanism-parameter
+/// structs. Compiled on EVERY target — the whole point is that one code path
+/// is correct for both wasm32's 4-byte `CK_ULONG` and LP64's 8-byte one.
+pub mod ck_param;
 pub mod crypto;
 pub mod ffi;
 pub mod native;
