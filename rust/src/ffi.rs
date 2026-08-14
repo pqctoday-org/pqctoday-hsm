@@ -6000,19 +6000,33 @@ pub fn C_EncryptInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
                 )
             }
             CKM_AES_CTR => {
-                // CK_AES_CTR_PARAMS: ulCounterBits(CK_ULONG=4) + cb[16] = 20 bytes
-                if p_param.is_null() || ul_param_len < 20 {
+                // CK_AES_CTR_PARAMS (§6.11.2) — `CK_ULONG ulCounterBits`
+                // followed by `CK_BYTE cb[16]`, read at NATIVE width like
+                // CK_GCM_PARAMS / CK_CHACHA20_PARAMS above: 20 B on wasm32,
+                // 24 B on an LP64 native build (cb at offset 8, after 4 bytes
+                // of tail padding in the CK_ULONG).
+                //
+                // Hard-coding a 4-byte CK_ULONG here put the 64-bit engine's
+                // counter block 4 bytes early — it read the high half of
+                // ulCounterBits as cb[0..4] and dropped the caller's real
+                // cb[12..16], so a caller-supplied a0a1…aeaf became
+                // 00000000a0a1…aaab. Every AES-CTR ciphertext the native
+                // library ever produced was off, at every counter width.
+                let usz = core::mem::size_of::<usize>();
+                if p_param.is_null() || ul_param_len < usz + 16 {
                     return CKR_MECHANISM_PARAM_INVALID;
                 }
-                // PKCS#11 v3.2 §6.27.6 — ulCounterBits ∈ 1..=128; the counter
-                // wraps within the low ulCounterBits. Engine restriction:
+                // §6.11.2 — "This number shall be such that 0 < ulCounterBits
+                // ≤ 128. For any values outside this range the mechanism shall
+                // return CKR_MECHANISM_PARAM_INVALID." Engine restriction:
                 // byte-granular widths only (8,16,…,128).
-                let counter_bits = *(p_param as *const u32);
+                let counter_bits = *(p_param as *const usize);
                 if counter_bits == 0 || counter_bits > 128 || counter_bits % 8 != 0 {
                     return CKR_MECHANISM_PARAM_INVALID;
                 }
-                // cb is at offset 4 (after ulCounterBits)
-                let counter_block = std::slice::from_raw_parts(p_param.add(4), 16).to_vec();
+                let counter_bits = counter_bits as u32;
+                // cb follows ulCounterBits at its native alignment.
+                let counter_block = std::slice::from_raw_parts(p_param.add(usz), 16).to_vec();
                 // tag_bits doubles as the mechanism's bits parameter: GCM tag
                 // bits / CTR counter bits (see EncryptCtx).
                 (counter_block, Vec::new(), counter_bits)
@@ -6479,19 +6493,33 @@ pub fn C_DecryptInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
                 )
             }
             CKM_AES_CTR => {
-                // CK_AES_CTR_PARAMS: ulCounterBits(CK_ULONG=4) + cb[16] = 20 bytes
-                if p_param.is_null() || ul_param_len < 20 {
+                // CK_AES_CTR_PARAMS (§6.11.2) — `CK_ULONG ulCounterBits`
+                // followed by `CK_BYTE cb[16]`, read at NATIVE width like
+                // CK_GCM_PARAMS / CK_CHACHA20_PARAMS above: 20 B on wasm32,
+                // 24 B on an LP64 native build (cb at offset 8, after 4 bytes
+                // of tail padding in the CK_ULONG).
+                //
+                // Hard-coding a 4-byte CK_ULONG here put the 64-bit engine's
+                // counter block 4 bytes early — it read the high half of
+                // ulCounterBits as cb[0..4] and dropped the caller's real
+                // cb[12..16], so a caller-supplied a0a1…aeaf became
+                // 00000000a0a1…aaab. Every AES-CTR ciphertext the native
+                // library ever produced was off, at every counter width.
+                let usz = core::mem::size_of::<usize>();
+                if p_param.is_null() || ul_param_len < usz + 16 {
                     return CKR_MECHANISM_PARAM_INVALID;
                 }
-                // PKCS#11 v3.2 §6.27.6 — ulCounterBits ∈ 1..=128; the counter
-                // wraps within the low ulCounterBits. Engine restriction:
+                // §6.11.2 — "This number shall be such that 0 < ulCounterBits
+                // ≤ 128. For any values outside this range the mechanism shall
+                // return CKR_MECHANISM_PARAM_INVALID." Engine restriction:
                 // byte-granular widths only (8,16,…,128).
-                let counter_bits = *(p_param as *const u32);
+                let counter_bits = *(p_param as *const usize);
                 if counter_bits == 0 || counter_bits > 128 || counter_bits % 8 != 0 {
                     return CKR_MECHANISM_PARAM_INVALID;
                 }
-                // cb is at offset 4 (after ulCounterBits)
-                let counter_block = std::slice::from_raw_parts(p_param.add(4), 16).to_vec();
+                let counter_bits = counter_bits as u32;
+                // cb follows ulCounterBits at its native alignment.
+                let counter_block = std::slice::from_raw_parts(p_param.add(usz), 16).to_vec();
                 // tag_bits doubles as the mechanism's bits parameter: GCM tag
                 // bits / CTR counter bits (see EncryptCtx).
                 (counter_block, Vec::new(), counter_bits)
@@ -11493,13 +11521,16 @@ impl SoftHsmRust {
         iv: &[u8],
         plaintext: &[u8],
     ) -> js_sys::Uint8Array {
-        let mut param = vec![0u8; 20];
-        param[0..4].copy_from_slice(&128u32.to_ne_bytes());
-        param[4..20].copy_from_slice(iv);
+        // CK_AES_CTR_PARAMS at native width (20 B on wasm32, 24 B on LP64) —
+        // the same layout C_EncryptInit decodes.
+        let usz = core::mem::size_of::<usize>();
+        let mut param = vec![0u8; usz + 16];
+        param[0..usz].copy_from_slice(&128usize.to_ne_bytes());
+        param[usz..usz + 16].copy_from_slice(iv);
         let mut mech = CK_MECHANISM {
             mechanism: CKM_AES_CTR,
             pParameter: param.as_mut_ptr(),
-            ulParameterLen: 20,
+            ulParameterLen: param.len() as u32,
         };
 
         // Use a mock session 1 since it's just tests
@@ -11526,13 +11557,16 @@ impl SoftHsmRust {
         iv: &[u8],
         ciphertext: &[u8],
     ) -> js_sys::Uint8Array {
-        let mut param = vec![0u8; 20];
-        param[0..4].copy_from_slice(&128u32.to_ne_bytes());
-        param[4..20].copy_from_slice(iv);
+        // CK_AES_CTR_PARAMS at native width (20 B on wasm32, 24 B on LP64) —
+        // the same layout C_EncryptInit decodes.
+        let usz = core::mem::size_of::<usize>();
+        let mut param = vec![0u8; usz + 16];
+        param[0..usz].copy_from_slice(&128usize.to_ne_bytes());
+        param[usz..usz + 16].copy_from_slice(iv);
         let mut mech = CK_MECHANISM {
             mechanism: CKM_AES_CTR,
             pParameter: param.as_mut_ptr(),
-            ulParameterLen: 20,
+            ulParameterLen: param.len() as u32,
         };
 
         let h_session = 1;
