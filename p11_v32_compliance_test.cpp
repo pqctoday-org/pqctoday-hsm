@@ -8,6 +8,7 @@
 #include <iostream>
 #include <fstream>
 #include <iomanip>
+#include <functional>
 #include <ctime>
 
 // Build configuration — exposes WITH_RIPEMD160 so the RIPEMD-160 KAT test is
@@ -5472,6 +5473,472 @@ void test_kem_check_value() {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// §4.11 CKA_CHECK_VALUE in the template — every object-creation path.
+//
+// "The attribute is optional, but if supported, regardless of how the key object
+//  is created or derived, the value of the attribute is always supplied. It
+//  SHALL be supplied even if the encryption operation for the key is forbidden."
+// "If a value is supplied in the application template (allowed but never
+//  necessary) then, if supported, it MUST match what the library calculates it
+//  to be or the library returns a CKR_ATTRIBUTE_VALUE_INVALID."
+// "The generation of the KCV may be prevented by the application supplying the
+//  attribute in the template as a no-value (0 length) entry."
+//
+// The 2026-08-13 S11 fix covered C_EncapsulateKey / C_DecapsulateKey only. Ten
+// further sites — C_GenerateKey (AES and generic secret), C_UnwrapKey, and the
+// six C_DeriveKey paths (PBKD2, SP800-108 counter and feedback, HKDF, ECDH,
+// Edwards/Montgomery, symmetric concatenation) — still rejected ANY non-empty
+// entry, including a CORRECT one, which the second sentence forbids.
+//
+// The suite computes the expected value independently with OpenSSL (SHA-1 for
+// generic secrets, AES-ECB of the zero block for AES) so a matching pair cannot
+// be a case of the engine agreeing with its own bug.
+// ─────────────────────────────────────────────────────────────────────────────
+void test_check_value_templates() {
+    const char* CAT = "KcvTemplate";
+    CK_BBOOL bTrue = CK_TRUE, bFalse = CK_FALSE;
+    CK_OBJECT_CLASS secClass = CKO_SECRET_KEY;
+    CK_KEY_TYPE aesType = CKK_AES;
+    CK_KEY_TYPE genType = CKK_GENERIC_SECRET;
+    CK_ULONG len32 = 32;
+
+    // Run the three §4.11 cases against one object-creation path. `create` is
+    // handed the extra CKA_CHECK_VALUE entry to append (or none) and returns
+    // the call's CK_RV plus the new handle.
+    // `deterministic` says whether repeating `create` yields the SAME key bits.
+    // C_GenerateKey never does — it draws fresh randomness every call — so no
+    // application can supply that key's check value in advance and §4.11's
+    // "a supplied value that matches is accepted" case is unobservable there.
+    // It is recorded as a SKIP with that reason rather than faked.
+    auto threeCases = [&](const std::string& name,
+                          std::function<CK_RV(CK_ATTRIBUTE*, CK_OBJECT_HANDLE*)> create,
+                          bool isAes, bool deterministic = true) {
+        // (1) no entry at all → the engine supplies the value (§4.11 "SHALL").
+        CK_OBJECT_HANDLE hPlain = CK_INVALID_HANDLE;
+        CK_RV r = create(NULL, &hPlain);
+        if (r != CKR_OK) {
+            record_result(CAT, name + "_baseline", "FAIL", "RV=" + std::to_string(r));
+            return;
+        }
+        std::vector<unsigned char> engineKcv = read_kcv(hPlain);
+        // Independent oracle over the key bits the engine published.
+        CK_BYTE val[512];
+        CK_ATTRIBUTE va = { CKA_VALUE, val, sizeof(val) };
+        CK_RV rvv = fl->C_GetAttributeValue(hSess, hPlain, &va, 1);
+        std::vector<unsigned char> oracle;
+        if (rvv == CKR_OK)
+            oracle = isAes ? oracle_aes_ecb_kcv(val, va.ulValueLen)
+                           : oracle_sha1_kcv(val, va.ulValueLen);
+        if (rvv != CKR_OK)
+        {
+            // No independent oracle is possible when the key bits are not
+            // readable — the concatenate family publishes a sensitive key
+            // whatever the template asks for. The three §4.11 cases below still
+            // run against the value the engine itself published.
+            record_result(CAT, name + "_KCV_matches_oracle", "SKIP",
+                          "CKA_VALUE unreadable (RV=" + std::to_string(rvv) +
+                          "), engine KCV=" + hex_bytes(engineKcv));
+        }
+        else
+        {
+            record_result(CAT, name + "_KCV_matches_oracle",
+                          (engineKcv.size() == 3 && engineKcv == oracle) ? "PASS" : "FAIL",
+                          "engine=" + hex_bytes(engineKcv) + " oracle=" + hex_bytes(oracle));
+        }
+        if (engineKcv.size() != 3) return;
+
+        // (2) a CORRECT caller-supplied value must be ACCEPTED.
+        if (!deterministic)
+        {
+            record_result(CAT, name + "_correct_value_accepted", "SKIP",
+                          "output is freshly random each call, so the caller "
+                          "cannot know the check value in advance");
+        }
+        else
+        {
+            CK_ATTRIBUTE extra = { CKA_CHECK_VALUE, engineKcv.data(), 3 };
+            CK_OBJECT_HANDLE h = CK_INVALID_HANDLE;
+            CK_RV rc = create(&extra, &h);
+            std::vector<unsigned char> back = (rc == CKR_OK) ? read_kcv(h)
+                                                             : std::vector<unsigned char>();
+            record_result(CAT, name + "_correct_value_accepted",
+                          (rc == CKR_OK && back == engineKcv) ? "PASS" : "FAIL",
+                          "RV=" + std::to_string(rc) + " readback=" + hex_bytes(back));
+        }
+        // (3) a WRONG value must be CKR_ATTRIBUTE_VALUE_INVALID, and no object
+        //     may be left behind.
+        {
+            CK_BYTE wrong[3] = { 0xDE, 0xAD, 0xBE };
+            // Guard against the 1-in-16M case where the real KCV is 0xDEADBE.
+            if (engineKcv[0] == 0xDE && engineKcv[1] == 0xAD && engineKcv[2] == 0xBE)
+                wrong[0] = 0x00;
+            CK_ATTRIBUTE extra = { CKA_CHECK_VALUE, wrong, 3 };
+            CK_OBJECT_HANDLE h = CK_INVALID_HANDLE;
+            CK_RV rc = create(&extra, &h);
+            record_result(CAT, name + "_wrong_value_rejected",
+                          rc == CKR_ATTRIBUTE_VALUE_INVALID ? "PASS" : "FAIL",
+                          "RV=" + std::to_string(rc) + " (want CKR_ATTRIBUTE_VALUE_INVALID=0x13)");
+            if (rc == CKR_OK) fl->C_DestroyObject(hSess, h);
+        }
+        // (4) a zero-length entry SUPPRESSES generation.
+        {
+            CK_ATTRIBUTE extra = { CKA_CHECK_VALUE, NULL_PTR, 0 };
+            CK_OBJECT_HANDLE h = CK_INVALID_HANDLE;
+            CK_RV rc = create(&extra, &h);
+            std::vector<unsigned char> back = (rc == CKR_OK) ? read_kcv(h)
+                                                             : std::vector<unsigned char>{0xff};
+            record_result(CAT, name + "_zero_length_suppresses",
+                          (rc == CKR_OK && back.empty()) ? "PASS" : "FAIL",
+                          "RV=" + std::to_string(rc) + " kcv bytes=" + std::to_string(back.size()));
+        }
+    };
+
+    // Build a template with an optional trailing CKA_CHECK_VALUE entry.
+    auto withExtra = [](std::vector<CK_ATTRIBUTE> base, CK_ATTRIBUTE* extra) {
+        if (extra) base.push_back(*extra);
+        return base;
+    };
+
+    // ── C_GenerateKey, CKK_AES (generateAES) ─────────────────────────────────
+    threeCases("GenerateKey_AES", [&](CK_ATTRIBUTE* extra, CK_OBJECT_HANDLE* h) {
+        std::vector<CK_ATTRIBUTE> t = withExtra({
+            { CKA_CLASS,       &secClass, sizeof(secClass) },
+            { CKA_KEY_TYPE,    &aesType,  sizeof(aesType) },
+            { CKA_VALUE_LEN,   &len32,    sizeof(len32) },
+            { CKA_TOKEN,       &bFalse,   sizeof(bFalse) },
+            { CKA_SENSITIVE,   &bFalse,   sizeof(bFalse) },
+            { CKA_EXTRACTABLE, &bTrue,    sizeof(bTrue) },
+            { CKA_WRAP,        &bTrue,    sizeof(bTrue) },
+            { CKA_UNWRAP,      &bTrue,    sizeof(bTrue) },
+        }, extra);
+        CK_MECHANISM m = { CKM_AES_KEY_GEN, NULL_PTR, 0 };
+        *h = CK_INVALID_HANDLE;
+        return fl->C_GenerateKey(hSess, &m, t.data(), (CK_ULONG)t.size(), h);
+    }, true, false);
+
+    // ── C_GenerateKey, CKK_GENERIC_SECRET (generateGeneric) ──────────────────
+    threeCases("GenerateKey_Generic", [&](CK_ATTRIBUTE* extra, CK_OBJECT_HANDLE* h) {
+        std::vector<CK_ATTRIBUTE> t = withExtra({
+            { CKA_CLASS,       &secClass, sizeof(secClass) },
+            { CKA_KEY_TYPE,    &genType,  sizeof(genType) },
+            { CKA_VALUE_LEN,   &len32,    sizeof(len32) },
+            { CKA_TOKEN,       &bFalse,   sizeof(bFalse) },
+            { CKA_SENSITIVE,   &bFalse,   sizeof(bFalse) },
+            { CKA_EXTRACTABLE, &bTrue,    sizeof(bTrue) },
+            { CKA_DERIVE,      &bTrue,    sizeof(bTrue) },
+        }, extra);
+        CK_MECHANISM m = { CKM_GENERIC_SECRET_KEY_GEN, NULL_PTR, 0 };
+        *h = CK_INVALID_HANDLE;
+        return fl->C_GenerateKey(hSess, &m, t.data(), (CK_ULONG)t.size(), h);
+    }, false, false);
+
+    // ── C_UnwrapKey ──────────────────────────────────────────────────────────
+    {
+        // A KEK plus a wrapped AES key to unwrap repeatedly.
+        CK_ATTRIBUTE kekT[] = {
+            { CKA_CLASS,     &secClass, sizeof(secClass) },
+            { CKA_KEY_TYPE,  &aesType,  sizeof(aesType) },
+            { CKA_VALUE_LEN, &len32,    sizeof(len32) },
+            { CKA_TOKEN,     &bFalse,   sizeof(bFalse) },
+            { CKA_WRAP,      &bTrue,    sizeof(bTrue) },
+            { CKA_UNWRAP,    &bTrue,    sizeof(bTrue) },
+        };
+        CK_ATTRIBUTE dekT[] = {
+            { CKA_CLASS,       &secClass, sizeof(secClass) },
+            { CKA_KEY_TYPE,    &aesType,  sizeof(aesType) },
+            { CKA_VALUE_LEN,   &len32,    sizeof(len32) },
+            { CKA_TOKEN,       &bFalse,   sizeof(bFalse) },
+            { CKA_EXTRACTABLE, &bTrue,    sizeof(bTrue) },
+            { CKA_SENSITIVE,   &bFalse,   sizeof(bFalse) },
+        };
+        CK_MECHANISM aesGen = { CKM_AES_KEY_GEN, NULL_PTR, 0 };
+        CK_OBJECT_HANDLE hKek = 0, hDek = 0;
+        CK_RV rk = fl->C_GenerateKey(hSess, &aesGen, kekT, 6, &hKek);
+        CK_RV rd = fl->C_GenerateKey(hSess, &aesGen, dekT, 6, &hDek);
+        static CK_BYTE wrapped[512];
+        static CK_ULONG wrappedLen = sizeof(wrapped);
+        CK_MECHANISM wrapMech = { CKM_AES_KEY_WRAP, NULL_PTR, 0 };
+        CK_RV rw = (rk == CKR_OK && rd == CKR_OK)
+                   ? fl->C_WrapKey(hSess, &wrapMech, hKek, hDek, wrapped, &wrappedLen)
+                   : CKR_FUNCTION_FAILED;
+        if (rw != CKR_OK) {
+            record_result(CAT, "UnwrapKey_setup", "FAIL", "RV=" + std::to_string(rw));
+        } else {
+            threeCases("UnwrapKey_AES", [&](CK_ATTRIBUTE* extra, CK_OBJECT_HANDLE* h) {
+                std::vector<CK_ATTRIBUTE> t = withExtra({
+                    { CKA_CLASS,       &secClass, sizeof(secClass) },
+                    { CKA_KEY_TYPE,    &aesType,  sizeof(aesType) },
+                    { CKA_TOKEN,       &bFalse,   sizeof(bFalse) },
+                    { CKA_EXTRACTABLE, &bTrue,    sizeof(bTrue) },
+                    { CKA_SENSITIVE,   &bFalse,   sizeof(bFalse) },
+                }, extra);
+                *h = CK_INVALID_HANDLE;
+                return fl->C_UnwrapKey(hSess, &wrapMech, hKek, wrapped, wrappedLen,
+                                       t.data(), (CK_ULONG)t.size(), h);
+            }, true);
+        }
+    }
+
+    // ── C_DeriveKey: HKDF (one of the four KDF template paths) ───────────────
+    {
+        CK_ATTRIBUTE baseT[] = {
+            { CKA_CLASS,     &secClass, sizeof(secClass) },
+            { CKA_KEY_TYPE,  &genType,  sizeof(genType) },
+            { CKA_VALUE_LEN, &len32,    sizeof(len32) },
+            { CKA_TOKEN,     &bFalse,   sizeof(bFalse) },
+            { CKA_DERIVE,    &bTrue,    sizeof(bTrue) },
+        };
+        CK_MECHANISM genMech = { CKM_GENERIC_SECRET_KEY_GEN, NULL_PTR, 0 };
+        CK_OBJECT_HANDLE hBase = 0;
+        if (fl->C_GenerateKey(hSess, &genMech, baseT, 5, &hBase) != CKR_OK) {
+            record_result(CAT, "DeriveKey_setup", "FAIL", "base key generation failed");
+        } else {
+            static CK_BYTE hkdfSalt[] = "kcv-salt";
+            static CK_BYTE hkdfInfo[] = "kcv-info";
+            static CK_HKDF_PARAMS hkdfParams = {
+                CK_TRUE, CK_TRUE, CKM_SHA256,
+                1 /* CKF_HKDF_SALT_DATA */, hkdfSalt, sizeof(hkdfSalt) - 1,
+                0, hkdfInfo, sizeof(hkdfInfo) - 1
+            };
+            static CK_MECHANISM hkdfMech = { CKM_HKDF_DERIVE, &hkdfParams, sizeof(hkdfParams) };
+            threeCases("DeriveKey_HKDF", [&](CK_ATTRIBUTE* extra, CK_OBJECT_HANDLE* h) {
+                std::vector<CK_ATTRIBUTE> t = withExtra({
+                    { CKA_CLASS,       &secClass, sizeof(secClass) },
+                    { CKA_KEY_TYPE,    &genType,  sizeof(genType) },
+                    { CKA_VALUE_LEN,   &len32,    sizeof(len32) },
+                    { CKA_TOKEN,       &bFalse,   sizeof(bFalse) },
+                    { CKA_EXTRACTABLE, &bTrue,    sizeof(bTrue) },
+                    { CKA_SENSITIVE,   &bFalse,   sizeof(bFalse) },
+                }, extra);
+                *h = CK_INVALID_HANDLE;
+                return fl->C_DeriveKey(hSess, &hkdfMech, hBase, t.data(), (CK_ULONG)t.size(), h);
+            }, false);
+        }
+    }
+
+    // ── C_DeriveKey: ECDH (deriveECDH — a different template loop again) ─────
+    {
+        CK_OBJECT_CLASS pubClass = CKO_PUBLIC_KEY, privClass = CKO_PRIVATE_KEY;
+        CK_KEY_TYPE ecType = CKK_EC;
+        CK_BYTE oid_p256[] = { 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07 };
+        CK_ATTRIBUTE pubT[] = {
+            { CKA_CLASS,     &pubClass, sizeof(pubClass) },
+            { CKA_KEY_TYPE,  &ecType,   sizeof(ecType) },
+            { CKA_EC_PARAMS, oid_p256,  sizeof(oid_p256) },
+            { CKA_TOKEN,     &bFalse,   sizeof(bFalse) },
+        };
+        CK_ATTRIBUTE privT[] = {
+            { CKA_CLASS,    &privClass, sizeof(privClass) },
+            { CKA_KEY_TYPE, &ecType,    sizeof(ecType) },
+            { CKA_DERIVE,   &bTrue,     sizeof(bTrue) },
+            { CKA_TOKEN,    &bFalse,    sizeof(bFalse) },
+        };
+        CK_MECHANISM ecGen = { CKM_EC_KEY_PAIR_GEN, NULL_PTR, 0 };
+        CK_OBJECT_HANDLE hPub = 0, hPriv = 0;
+        if (fl->C_GenerateKeyPair(hSess, &ecGen, pubT, 4, privT, 4, &hPub, &hPriv) != CKR_OK) {
+            record_result(CAT, "DeriveKey_ECDH_setup", "FAIL", "EC keygen failed");
+        } else {
+            // The peer point: since the E4/E1 pass, CKA_EC_POINT on a
+            // Weierstrass key is still the DER ECPoint, which the derive path
+            // accepts (getECDHPubData is tolerant of both forms).
+            CK_ATTRIBUTE pt = { CKA_EC_POINT, NULL_PTR, 0 };
+            fl->C_GetAttributeValue(hSess, hPub, &pt, 1);
+            static std::vector<CK_BYTE> peer;
+            peer.resize(pt.ulValueLen);
+            pt.pValue = peer.data();
+            fl->C_GetAttributeValue(hSess, hPub, &pt, 1);
+            static CK_ECDH1_DERIVE_PARAMS ecdhParams;
+            memset(&ecdhParams, 0, sizeof(ecdhParams));
+            ecdhParams.kdf = CKD_NULL;
+            ecdhParams.pPublicData = peer.data();
+            ecdhParams.ulPublicDataLen = (CK_ULONG)peer.size();
+            static CK_MECHANISM ecdhMech = { CKM_ECDH1_DERIVE, &ecdhParams, sizeof(ecdhParams) };
+            threeCases("DeriveKey_ECDH", [&](CK_ATTRIBUTE* extra, CK_OBJECT_HANDLE* h) {
+                std::vector<CK_ATTRIBUTE> t = withExtra({
+                    { CKA_CLASS,       &secClass, sizeof(secClass) },
+                    { CKA_KEY_TYPE,    &genType,  sizeof(genType) },
+                    { CKA_TOKEN,       &bFalse,   sizeof(bFalse) },
+                    { CKA_EXTRACTABLE, &bTrue,    sizeof(bTrue) },
+                    { CKA_SENSITIVE,   &bFalse,   sizeof(bFalse) },
+                }, extra);
+                *h = CK_INVALID_HANDLE;
+                return fl->C_DeriveKey(hSess, &ecdhMech, hPriv, t.data(), (CK_ULONG)t.size(), h);
+            }, false);
+        }
+    }
+
+    // ── C_DeriveKey: PBKD2 and SP800-108 counter (the other two KDF loops) ───
+    {
+        static CK_UTF8CHAR pw[] = "kcv-password";
+        static CK_BYTE slt[] = "kcv-salt";
+        static CK_PKCS5_PBKD2_PARAMS2 pbkdParams = {
+            1 /* CKZ_SALT_SPECIFIED */, slt, sizeof(slt) - 1, 2048,
+            4 /* CKP_PKCS5_PBKD2_HMAC_SHA256 */, NULL_PTR, 0,
+            pw, sizeof(pw) - 1
+        };
+        static CK_MECHANISM pbMech = { CKM_PKCS5_PBKD2, &pbkdParams, sizeof(pbkdParams) };
+        threeCases("DeriveKey_PBKD2", [&](CK_ATTRIBUTE* extra, CK_OBJECT_HANDLE* h) {
+            std::vector<CK_ATTRIBUTE> t = withExtra({
+                { CKA_CLASS,       &secClass, sizeof(secClass) },
+                { CKA_KEY_TYPE,    &genType,  sizeof(genType) },
+                { CKA_VALUE_LEN,   &len32,    sizeof(len32) },
+                { CKA_TOKEN,       &bFalse,   sizeof(bFalse) },
+                { CKA_EXTRACTABLE, &bTrue,    sizeof(bTrue) },
+                { CKA_SENSITIVE,   &bFalse,   sizeof(bFalse) },
+            }, extra);
+            *h = CK_INVALID_HANDLE;
+            // PBKD2 derives from the mechanism's password, not a base key.
+            return fl->C_DeriveKey(hSess, &pbMech, CK_INVALID_HANDLE,
+                                   t.data(), (CK_ULONG)t.size(), h);
+        }, false);
+
+        CK_ATTRIBUTE baseT[] = {
+            { CKA_CLASS,     &secClass, sizeof(secClass) },
+            { CKA_KEY_TYPE,  &genType,  sizeof(genType) },
+            { CKA_VALUE_LEN, &len32,    sizeof(len32) },
+            { CKA_TOKEN,     &bFalse,   sizeof(bFalse) },
+            { CKA_DERIVE,    &bTrue,    sizeof(bTrue) },
+        };
+        CK_MECHANISM genMech = { CKM_GENERIC_SECRET_KEY_GEN, NULL_PTR, 0 };
+        CK_OBJECT_HANDLE hBase2 = 0;
+        if (fl->C_GenerateKey(hSess, &genMech, baseT, 5, &hBase2) != CKR_OK) {
+            record_result(CAT, "DeriveKey_SP800108_setup", "FAIL", "base key generation failed");
+        } else {
+            static CK_BYTE lbl[] = "kcv-label";
+            static CK_BYTE ctx[] = "kcv-context";
+            static CK_SP800_108_COUNTER_FORMAT ctrFmt = { CK_FALSE, 32 };
+            static CK_PRF_DATA_PARAM prfP[] = {
+                { CK_SP800_108_ITERATION_VARIABLE, &ctrFmt, sizeof(ctrFmt) },
+                { CK_SP800_108_BYTE_ARRAY, lbl, sizeof(lbl) - 1 },
+                { CK_SP800_108_BYTE_ARRAY, ctx, sizeof(ctx) - 1 }
+            };
+            static CK_SP800_108_KDF_PARAMS ctrParams = { CKM_SHA256_HMAC, 3, prfP, 0, NULL_PTR };
+            static CK_MECHANISM ctrMech = { CKM_SP800_108_COUNTER_KDF, &ctrParams, sizeof(ctrParams) };
+            threeCases("DeriveKey_SP800108", [&](CK_ATTRIBUTE* extra, CK_OBJECT_HANDLE* h) {
+                std::vector<CK_ATTRIBUTE> t = withExtra({
+                    { CKA_CLASS,       &secClass, sizeof(secClass) },
+                    { CKA_KEY_TYPE,    &genType,  sizeof(genType) },
+                    { CKA_VALUE_LEN,   &len32,    sizeof(len32) },
+                    { CKA_TOKEN,       &bFalse,   sizeof(bFalse) },
+                    { CKA_EXTRACTABLE, &bTrue,    sizeof(bTrue) },
+                    { CKA_SENSITIVE,   &bFalse,   sizeof(bFalse) },
+                }, extra);
+                *h = CK_INVALID_HANDLE;
+                return fl->C_DeriveKey(hSess, &ctrMech, hBase2, t.data(), (CK_ULONG)t.size(), h);
+            }, false);
+
+            // deriveSymmetric — the concatenate family's own template loop.
+            // §6.x: the parameter is a CK_KEY_DERIVATION_STRING_DATA, not the
+            // raw bytes — passing raw bytes of the same length hands the engine
+            // a struct whose pData is garbage.
+            static CK_BYTE extraData[16] = { 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16 };
+            static CK_KEY_DERIVATION_STRING_DATA catData = { extraData, sizeof(extraData) };
+            static CK_MECHANISM catMech = { CKM_CONCATENATE_BASE_AND_DATA,
+                                            &catData, sizeof(catData) };
+            threeCases("DeriveKey_Concat", [&](CK_ATTRIBUTE* extra, CK_OBJECT_HANDLE* h) {
+                std::vector<CK_ATTRIBUTE> t = withExtra({
+                    { CKA_CLASS,       &secClass, sizeof(secClass) },
+                    { CKA_KEY_TYPE,    &genType,  sizeof(genType) },
+                    { CKA_TOKEN,       &bFalse,   sizeof(bFalse) },
+                    { CKA_EXTRACTABLE, &bTrue,    sizeof(bTrue) },
+                    { CKA_SENSITIVE,   &bFalse,   sizeof(bFalse) },
+                }, extra);
+                *h = CK_INVALID_HANDLE;
+                return fl->C_DeriveKey(hSess, &catMech, hBase2, t.data(), (CK_ULONG)t.size(), h);
+            }, false);
+        }
+    }
+
+    // ── C_DeriveKey: X25519 (deriveEDDSA — the Montgomery template loop) ─────
+    {
+        CK_OBJECT_CLASS pubClass = CKO_PUBLIC_KEY, privClass = CKO_PRIVATE_KEY;
+        CK_KEY_TYPE mType = CKK_EC_MONTGOMERY;
+        CK_BYTE cn_x25519[] = { 0x13, 0x0a, 'c','u','r','v','e','2','5','5','1','9' };
+        CK_ATTRIBUTE pubT[] = {
+            { CKA_CLASS,     &pubClass, sizeof(pubClass) },
+            { CKA_KEY_TYPE,  &mType,    sizeof(mType) },
+            { CKA_EC_PARAMS, cn_x25519, sizeof(cn_x25519) },
+            { CKA_TOKEN,     &bFalse,   sizeof(bFalse) },
+        };
+        CK_ATTRIBUTE privT[] = {
+            { CKA_CLASS,    &privClass, sizeof(privClass) },
+            { CKA_KEY_TYPE, &mType,     sizeof(mType) },
+            { CKA_DERIVE,   &bTrue,     sizeof(bTrue) },
+            { CKA_TOKEN,    &bFalse,    sizeof(bFalse) },
+        };
+        CK_MECHANISM mGen = { CKM_EC_MONTGOMERY_KEY_PAIR_GEN, NULL_PTR, 0 };
+        CK_OBJECT_HANDLE hPub = 0, hPriv = 0;
+        if (fl->C_GenerateKeyPair(hSess, &mGen, pubT, 4, privT, 4, &hPub, &hPriv) != CKR_OK) {
+            record_result(CAT, "DeriveKey_X25519_setup", "FAIL", "X25519 keygen failed");
+        } else {
+            CK_ATTRIBUTE pt = { CKA_EC_POINT, NULL_PTR, 0 };
+            fl->C_GetAttributeValue(hSess, hPub, &pt, 1);
+            static std::vector<CK_BYTE> mpeer;
+            mpeer.resize(pt.ulValueLen);
+            pt.pValue = mpeer.data();
+            fl->C_GetAttributeValue(hSess, hPub, &pt, 1);
+            static CK_ECDH1_DERIVE_PARAMS mParams;
+            memset(&mParams, 0, sizeof(mParams));
+            mParams.kdf = CKD_NULL;
+            mParams.pPublicData = mpeer.data();
+            mParams.ulPublicDataLen = (CK_ULONG)mpeer.size();
+            static CK_MECHANISM mMech = { CKM_ECDH1_DERIVE, &mParams, sizeof(mParams) };
+            threeCases("DeriveKey_X25519", [&](CK_ATTRIBUTE* extra, CK_OBJECT_HANDLE* h) {
+                std::vector<CK_ATTRIBUTE> t = withExtra({
+                    { CKA_CLASS,       &secClass, sizeof(secClass) },
+                    { CKA_KEY_TYPE,    &genType,  sizeof(genType) },
+                    { CKA_TOKEN,       &bFalse,   sizeof(bFalse) },
+                    { CKA_EXTRACTABLE, &bTrue,    sizeof(bTrue) },
+                    { CKA_SENSITIVE,   &bFalse,   sizeof(bFalse) },
+                }, extra);
+                *h = CK_INVALID_HANDLE;
+                return fl->C_DeriveKey(hSess, &mMech, hPriv, t.data(), (CK_ULONG)t.size(), h);
+            }, false);
+        }
+    }
+
+    // ── C_SetAttributeValue: §4.11's other two sentences ─────────────────────
+    {
+        CK_ATTRIBUTE t[] = {
+            { CKA_CLASS,       &secClass, sizeof(secClass) },
+            { CKA_KEY_TYPE,    &aesType,  sizeof(aesType) },
+            { CKA_VALUE_LEN,   &len32,    sizeof(len32) },
+            { CKA_TOKEN,       &bFalse,   sizeof(bFalse) },
+            { CKA_SENSITIVE,   &bFalse,   sizeof(bFalse) },
+            { CKA_EXTRACTABLE, &bTrue,    sizeof(bTrue) },
+        };
+        CK_MECHANISM m = { CKM_AES_KEY_GEN, NULL_PTR, 0 };
+        CK_OBJECT_HANDLE h = CK_INVALID_HANDLE;
+        if (fl->C_GenerateKey(hSess, &m, t, 6, &h) != CKR_OK) {
+            record_result(CAT, "SetAttributeValue_setup", "FAIL", "keygen failed");
+        } else {
+            std::vector<unsigned char> real = read_kcv(h);
+            // A matching value is legal.
+            CK_ATTRIBUTE ok = { CKA_CHECK_VALUE, real.data(), (CK_ULONG)real.size() };
+            CK_RV r1 = fl->C_SetAttributeValue(hSess, h, &ok, 1);
+            record_result(CAT, "SetAttributeValue_correct_accepted",
+                          r1 == CKR_OK ? "PASS" : "FAIL", "RV=" + std::to_string(r1));
+            // A mismatch is CKR_ATTRIBUTE_VALUE_INVALID.
+            CK_BYTE wrong[3] = { 0x01, 0x02, 0x03 };
+            if (real.size() == 3 && real[0] == 0x01 && real[1] == 0x02 && real[2] == 0x03)
+                wrong[0] = 0x04;
+            CK_ATTRIBUTE bad = { CKA_CHECK_VALUE, wrong, 3 };
+            CK_RV r2 = fl->C_SetAttributeValue(hSess, h, &bad, 1);
+            record_result(CAT, "SetAttributeValue_wrong_rejected",
+                          r2 == CKR_ATTRIBUTE_VALUE_INVALID ? "PASS" : "FAIL",
+                          "RV=" + std::to_string(r2));
+            // A zero-length set destroys the attribute.
+            CK_ATTRIBUTE zero = { CKA_CHECK_VALUE, NULL_PTR, 0 };
+            CK_RV r3 = fl->C_SetAttributeValue(hSess, h, &zero, 1);
+            std::vector<unsigned char> after = read_kcv(h);
+            record_result(CAT, "SetAttributeValue_zero_length_destroys",
+                          (r3 == CKR_OK && after.empty()) ? "PASS" : "FAIL",
+                          "RV=" + std::to_string(r3) + " bytes left=" + std::to_string(after.size()));
+        }
+    }
+}
+
 // ── G1 security-critical regression tests ────────────────────────────────────
 // Locks in the slice G1 fixes: zero-IV GCM/ChaCha rejection (C++C-1/C++C-2),
 // RIPEMD160→SHA-1 substitution removal (C++C-4), large-message XMSS sign
@@ -7643,6 +8110,9 @@ int main(int argc, char** argv) {
     }
     if (opt_category == "all" || opt_category == "kcv") {
         refresh_session(); test_kcv_compliance();
+    }
+    if (opt_category == "all" || opt_category == "kcv-template") {
+        refresh_session(); test_check_value_templates();
     }
     if (opt_category == "all" || opt_category == "g1-security") {
         refresh_session(); test_g1_security();

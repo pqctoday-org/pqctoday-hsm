@@ -298,6 +298,19 @@ CK_RV checkValueFromTemplate(const CK_ATTRIBUTE& attr, bool& generate,
 	return CKR_OK;
 }
 
+CK_RV checkValueVerify(bool supplied, const ByteString& suppliedValue,
+                       const ByteString& computed)
+{
+	if (!supplied) return CKR_OK;
+	// "it MUST match what the library calculates it to be or the library returns
+	// a CKR_ATTRIBUTE_VALUE_INVALID" (§4.11). A key type this engine has no KCV
+	// algorithm for yields an empty `computed`; accepting an unverifiable claim
+	// would defeat the point of the attribute, so it is refused.
+	if (computed.size() == 0) return CKR_ATTRIBUTE_VALUE_INVALID;
+	if (suppliedValue == computed) return CKR_OK;
+	return CKR_ATTRIBUTE_VALUE_INVALID;
+}
+
 CK_RV checkKeyLength(CK_KEY_TYPE keyType, size_t byteLen)
 {
 	switch (keyType) {

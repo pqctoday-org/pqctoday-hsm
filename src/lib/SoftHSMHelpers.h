@@ -97,4 +97,14 @@ ByteString computeSecretKeyKCV(CK_KEY_TYPE keyType, const ByteString& keyBits);
 CK_RV checkValueFromTemplate(const CK_ATTRIBUTE& attr, bool& generate,
                              bool& supplied, ByteString& suppliedValue);
 
+/// The other half of §4.11's caller-supplied rule: a value the application put
+/// in the template "MUST match what the library calculates it to be or the
+/// library returns a CKR_ATTRIBUTE_VALUE_INVALID".  `computed` is what the
+/// library calculated; an empty `computed` means the library has no check value
+/// for this key type, in which case a caller's claim cannot be confirmed and is
+/// refused rather than trusted.  Returns CKR_OK when nothing was supplied.
+/// Defined in SoftHSM_objects.cpp.
+CK_RV checkValueVerify(bool supplied, const ByteString& suppliedValue,
+                       const ByteString& computed);
+
 #endif // !_SOFTHSM_V3_SOFTSHM_HELPERS_H
