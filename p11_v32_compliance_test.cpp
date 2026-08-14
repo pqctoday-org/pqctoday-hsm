@@ -2119,14 +2119,27 @@ void test_pq_private_key_encoding_and_seed() {
         // E3: raw FIPS bytes, not a PKCS#8 DER SEQUENCE.
         CK_RV rq = CKR_OK;
         std::vector<CK_BYTE> sk = readBytes(hPriv, CKA_VALUE, &rq);
-        bool derSeq = (sk.size() > 1 && sk[0] == 0x30);
+        // A raw FIPS key begins with a uniformly random byte, so `sk[0] == 0x30`
+        // alone is a 1-in-256 false alarm — it fired once on CI against a key
+        // that was demonstrably raw (correct length, right bytes). A real
+        // PKCS#8 wrapper is a DER SEQUENCE whose length header must also
+        // account for the payload, so it CANNOT be exactly skLen. Requiring
+        // both makes the check sound: the tag is only evidence of wrapping when
+        // the length says a wrapper is there.
+        const bool rawLen = (sk.size() == c.skLen);
+        const bool derSeq = (sk.size() > 1 && sk[0] == 0x30 && !rawLen);
+        auto hexByte = [](CK_BYTE b) {
+            static const char* d = "0123456789abcdef";
+            return std::string("0x") + d[(b >> 4) & 0xf] + d[b & 0xf];
+        };
         record_result(CAT, std::string(c.name) + "_CKA_VALUE_is_raw_FIPS_length",
-                      sk.size() == c.skLen ? "PASS" : "FAIL",
+                      rawLen ? "PASS" : "FAIL",
                       "len=" + std::to_string(sk.size()) + " (want " + std::to_string(c.skLen) +
                       ")" + (derSeq ? " — begins with a DER SEQUENCE tag 0x30" : ""));
         record_result(CAT, std::string(c.name) + "_CKA_VALUE_not_DER_wrapped",
                       !derSeq ? "PASS" : "FAIL",
-                      "first byte=0x" + (sk.empty() ? std::string("--") : std::to_string((int)sk[0])));
+                      "first byte=" + (sk.empty() ? std::string("--") : hexByte(sk[0])) +
+                      " len=" + std::to_string(sk.size()));
 
         // E7: the mechanism contributes CKA_SEED for ML-DSA / ML-KEM only.
         CK_RV rs = CKR_OK;
