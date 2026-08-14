@@ -831,8 +831,17 @@ bool P11PublicKeyObj::init(OSObject *inobject)
 	P11Attribute* attrWrapTemplate = new P11AttrWrapTemplate(osobject);
 	// CKA_PUBLIC_KEY_INFO: default empty; populated with SPKI DER by keygen (G-PUB1 complete)
 	P11Attribute* attrPublicKeyInfo = new P11AttrPublicKeyInfo(osobject,0);
-	// CKA_CHECK_VALUE: SHA-256(CKA_VALUE) → first 3 bytes for asymmetric keys
-	P11Attribute* attrCheckValue = new P11AttrCheckValue(osobject,0);
+	// NO CKA_CHECK_VALUE. PKCS#11 v3.2 §4.11 introduces the attribute as "the
+	// key check value (KCV) attribute for symmetric key objects", and the
+	// tables agree: it is listed in the Common Secret Key Attributes table and
+	// in §4.6 Table 19 (certificates), and in NEITHER Table 27 (common public
+	// key) nor Table 28 (common private key). A public key has nothing to
+	// check, and a private key's checksum is not something the specification
+	// defines. Recorded by the differential harness as
+	// DEFECT-CPP-CHECK-VALUE-ON-PUBLIC-KEYS and — once the Rust side stopped
+	// doing the same thing and the agreement stopped hiding it —
+	// DEFECT-CPP-CHECK-VALUE-ON-PRIVATE-KEYS. The CERTIFICATE and SECRET-KEY
+	// object classes keep theirs; they are the two the spec defines it for.
 
 	// Initialize the attributes
 	if
@@ -844,8 +853,7 @@ bool P11PublicKeyObj::init(OSObject *inobject)
 		!attrWrap->init() ||
 		!attrTrusted->init() ||
 		!attrWrapTemplate->init() ||
-		!attrPublicKeyInfo->init() ||
-		!attrCheckValue->init()
+		!attrPublicKeyInfo->init()
 	)
 	{
 		ERROR_MSG("Could not initialize the attribute");
@@ -857,7 +865,6 @@ bool P11PublicKeyObj::init(OSObject *inobject)
 		delete attrTrusted;
 		delete attrWrapTemplate;
 		delete attrPublicKeyInfo;
-		delete attrCheckValue;
 		return false;
 	}
 
@@ -870,7 +877,6 @@ bool P11PublicKeyObj::init(OSObject *inobject)
 	attributes[attrTrusted->getType()] = attrTrusted;
 	attributes[attrWrapTemplate->getType()] = attrWrapTemplate;
 	attributes[attrPublicKeyInfo->getType()] = attrPublicKeyInfo;
-	attributes[attrCheckValue->getType()] = attrCheckValue;
 
 	initialized = true;
 	return true;
@@ -1173,8 +1179,17 @@ bool P11PrivateKeyObj::init(OSObject *inobject)
 	P11Attribute* attrAlwaysAuthenticate = new P11AttrAlwaysAuthenticate(osobject);
 	// CKA_PUBLIC_KEY_INFO: default empty; populated with SPKI DER by keygen (G-PUB1 complete)
 	P11Attribute* attrPublicKeyInfo = new P11AttrPublicKeyInfo(osobject,P11Attribute::ck8);
-	// CKA_CHECK_VALUE: SHA-256(CKA_VALUE) → first 3 bytes for asymmetric keys
-	P11Attribute* attrCheckValue = new P11AttrCheckValue(osobject,P11Attribute::ck8);
+	// NO CKA_CHECK_VALUE. PKCS#11 v3.2 §4.11 introduces the attribute as "the
+	// key check value (KCV) attribute for symmetric key objects", and the
+	// tables agree: it is listed in the Common Secret Key Attributes table and
+	// in §4.6 Table 19 (certificates), and in NEITHER Table 27 (common public
+	// key) nor Table 28 (common private key). A public key has nothing to
+	// check, and a private key's checksum is not something the specification
+	// defines. Recorded by the differential harness as
+	// DEFECT-CPP-CHECK-VALUE-ON-PUBLIC-KEYS and — once the Rust side stopped
+	// doing the same thing and the agreement stopped hiding it —
+	// DEFECT-CPP-CHECK-VALUE-ON-PRIVATE-KEYS. The CERTIFICATE and SECRET-KEY
+	// object classes keep theirs; they are the two the spec defines it for.
 
 	// Initialize the attributes
 	if
@@ -1191,8 +1206,7 @@ bool P11PrivateKeyObj::init(OSObject *inobject)
 		!attrWrapWithTrusted->init() ||
 		!attrUnwrapTemplate->init() ||
 		!attrAlwaysAuthenticate->init() ||
-		!attrPublicKeyInfo->init() ||
-		!attrCheckValue->init()
+		!attrPublicKeyInfo->init()
 	)
 	{
 		ERROR_MSG("Could not initialize the attribute");
@@ -1209,7 +1223,6 @@ bool P11PrivateKeyObj::init(OSObject *inobject)
 		delete attrUnwrapTemplate;
 		delete attrAlwaysAuthenticate;
 		delete attrPublicKeyInfo;
-		delete attrCheckValue;
 		return false;
 	}
 
@@ -1227,7 +1240,6 @@ bool P11PrivateKeyObj::init(OSObject *inobject)
 	attributes[attrUnwrapTemplate->getType()] = attrUnwrapTemplate;
 	attributes[attrAlwaysAuthenticate->getType()] = attrAlwaysAuthenticate;
 	attributes[attrPublicKeyInfo->getType()] = attrPublicKeyInfo;
-	attributes[attrCheckValue->getType()] = attrCheckValue;
 
 	initialized = true;
 	return true;

@@ -25,22 +25,6 @@
       "citation": "PKCS#11 v3.2 §5.5.4; §5.7 makes no function individually mandatory — 'function not supported' is the specification's own prescribed answer."
     },
     {
-      "id": "DEFECT-CPP-SESSION-HANDLE-PRECEDENCE-GENERATEKEY",
-      "status": "defect",
-      "scenario": "errors.session_handle_precedence",
-      "path": "C_GenerateKey_null_mech.rv",
-      "justification": "Given an invalid session handle AND a null mechanism, Rust returns CKR_SESSION_HANDLE_INVALID and C++ returns CKR_ARGUMENTS_BAD. The session-handle class takes mandatory precedence, so Rust is right. Plan item C2 fixed this for the init functions in both engines but missed C_GenerateKey in C++.",
-      "citation": "PKCS#11 v3.2 §5.1: the session-handle error class takes mandatory precedence over argument and capability classes."
-    },
-    {
-      "id": "DEFECT-CPP-COPYABLE-CANNOT-BE-CLEARED",
-      "status": "defect",
-      "scenario": "security.copyable_one_way",
-      "path": "set_false.rv|copy.rv",
-      "justification": "C++ refuses to set CKA_COPYABLE to false at all (CKR_ATTRIBUTE_READ_ONLY), so the copy-protection an application is supposed to be able to apply cannot be applied. The one-way rule forbids false-to-true, not true-to-false. Rust behaves correctly here and refuses the later copy with CKR_ACTION_PROHIBITED.",
-      "citation": "PKCS#11 v3.2 §4.4, CKA_COPYABLE: 'Defaults to CK_TRUE. Can't be set to TRUE once it is set to FALSE.' — which presupposes that setting it to FALSE is permitted."
-    },
-    {
       "id": "LEGAL-WEAK-PRIMITIVES-ABSENT-IN-RUST",
       "status": "legal",
       "scenario": "env.mechanism_set",
@@ -122,22 +106,6 @@
       "citation": "PKCS#11 v3.2 §4.9 — CKA_EXTRACTABLE's default is token-specific; §5.18.4 C_UnwrapKey imposes no value."
     },
     {
-      "id": "DEFECT-CPP-CHECK-VALUE-ON-PRIVATE-XMSS",
-      "status": "defect",
-      "scenario": "create.generate_key_pair.xmss",
-      "path": "*CKA_CHECK_VALUE*",
-      "justification": "Same family: C++ publishes a zero-length CKA_CHECK_VALUE on the XMSS private key. A zero-length entry is §4.11's suppression signal on input, not a valid stored value.",
-      "citation": "PKCS#11 v3.2 §4.11."
-    },
-    {
-      "id": "DEFECT-CHECK-VALUE-ON-UNWRAPPED-PRIVATE-KEY",
-      "status": "defect",
-      "scenario": "encoding.wrap_private_key_pkcs8",
-      "path": "*CKA_CHECK_VALUE*",
-      "justification": "ADJUDICATED 2026-08-14, and it is a C++ defect. Rust no longer computes a check value for an unwrapped EC private key: §4.11 introduces CKA_CHECK_VALUE as 'the key check value (KCV) attribute for SYMMETRIC KEY OBJECTS', and it is listed in the Common Secret Key Attributes table and in §4.6's certificate table (Table 19) and in NEITHER the common public-key (Table 27) nor the common private-key (Table 28) table. C++ still publishes a zero-length one here — which is §4.11's SUPPRESSION signal on input, not a stored value — so the divergence persists on the C++ side.",
-      "citation": "PKCS#11 v3.2 §4.11: 'The key check value (KCV) attribute for symmetric key objects to be called CKA_CHECK_VALUE'; Table 32 (Common Secret Key Attributes) and §4.6 Table 19 (certificates) list it, Tables 27 and 28 do not."
-    },
-    {
       "id": "LEGAL-EC-PARAMS-CURVE-NAME-VS-OID",
       "status": "legal",
       "path": "*CKA_EC_PARAMS*",
@@ -155,44 +123,12 @@
       "note": "BLOCKED on DEFECT-RUST-WRAPPED-PRIVATE-KEY-NOT-PKCS8, established 2026-08-14: the harness's unwrap template supplies no CKA_EC_PARAMS, so C++ recovers it from the PKCS#8 AlgorithmIdentifier inside the wrapped blob. Rust wraps its raw stored value, which carries no curve identifier at all, so this cannot be fixed independently of E6 — only faked."
     },
     {
-      "id": "DEFECT-CPP-UNWRAPPED-AES-VALUE-LEN-ZERO",
-      "status": "defect",
-      "scenario": "create.unwrap.aes_kw",
-      "path": "*CKA_VALUE_LEN*",
-      "justification": "After unwrapping a 32-byte AES key, C++ reports CKA_VALUE_LEN as 0 and Rust as 32. Zero is wrong: the key material is 32 bytes and the caller cannot tell the key's size from the engine.",
-      "citation": "PKCS#11 v3.2 §6.14 Table (AES secret key): CKA_VALUE_LEN is 'Length in bytes of key value'."
-    },
-    {
       "id": "LEGAL-SENSITIVE-DEFAULT-SLH-DSA",
       "status": "legal",
       "scenario": "create.generate_key_pair.slh_dsa",
       "path": "*CKA_*SENSITIVE*",
       "justification": "Rust makes an SLH-DSA private key sensitive by default and C++ does not. §6.69 attaches the MUST-be-sensitive rule to HSS and XMSS only, so both are permitted; Rust's choice is the safer one.",
       "citation": "PKCS#11 v3.2 §6.65.3 and §6.66.4/§6.66.5 impose CKA_SENSITIVE on the hash-based families; §6.69 (SLH-DSA) imposes nothing."
-    },
-    {
-      "id": "DEFECT-CPP-XMSS-PUBLIC-SECRET-KEY-FLAGS",
-      "status": "defect",
-      "scenario": "create.generate_key_pair.xmss",
-      "path": "*pub.CKA_ENCRYPT.*|*pub.CKA_WRAP.*|*pub.CKA_DERIVE.*",
-      "justification": "C++'s XMSS public key additionally carries CKA_ENCRYPT, CKA_WRAP and CKA_DERIVE — usage flags for operations an XMSS public key cannot perform. Recorded together because they share one cause: the XMSS key classes fall through to a generic attribute set on both engines.",
-      "citation": "PKCS#11 v3.2 §6.66: XMSS is a signature scheme; its public key verifies and does nothing else."
-    },
-    {
-      "id": "DEFECT-CPP-CHECK-VALUE-ON-PRIVATE-KEYS",
-      "status": "defect",
-      "scenario": "create.generate_key_pair.*",
-      "path": "*priv.CKA_CHECK_VALUE*",
-      "justification": "C++ publishes a three-byte CKA_CHECK_VALUE on the PRIVATE key of every family (EC, Edwards, Montgomery, RSA, ML-DSA, ML-KEM, SLH-DSA). NEWLY VISIBLE on 2026-08-14: both engines did this until Rust stopped, so the harness saw agreement, not correctness — a divergence appearing because one side was FIXED. Same root as DEFECT-CPP-CHECK-VALUE-ON-PUBLIC-KEYS: the attribute is defined for symmetric keys and certificates only.",
-      "citation": "PKCS#11 v3.2 §4.11: 'The key check value (KCV) attribute for symmetric key objects to be called CKA_CHECK_VALUE'. Table 32 (Common Secret Key Attributes) and §4.6 Table 19 (certificates) list it; Table 28 (Common Private Key Attributes) does not."
-    },
-    {
-      "id": "DEFECT-CPP-CHECK-VALUE-ON-PUBLIC-KEYS",
-      "status": "defect",
-      "scenario": "create.generate_key_pair.*",
-      "path": "*pub.CKA_CHECK_VALUE*",
-      "justification": "C++ publishes a CKA_CHECK_VALUE on EC, Edwards, Montgomery and XMSS PUBLIC keys, and a zero-length one at that on XMSS. §4.11 defines the check value over secret and private key material; a public key has nothing to check and the attribute is meaningless there.",
-      "citation": "PKCS#11 v3.2 §4.11 defines CKA_CHECK_VALUE per key type over the key's own value; the public-key tables define no check value."
     },
     {
       "id": "LEGAL-KEY-GEN-MECHANISM-ON-ENCAPSULATED-KEY",

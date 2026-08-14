@@ -2801,6 +2801,20 @@ fn C_GenerateKeyPair_impl(
                 store_bool(&mut pub_attrs, CKA_PRIVATE, false);
                 store_bool(&mut pub_attrs, CKA_VERIFY, true);
                 store_bool(&mut pub_attrs, CKA_LOCAL, true);
+                // CKA_ENCRYPT and CKA_WRAP are COMMON PUBLIC key attributes
+                // (Table 27) and CKA_DERIVE a COMMON KEY attribute (§4.8
+                // Table 26), so an XMSS public key possesses all three
+                // whatever it can do with them — this engine answered
+                // CKR_ATTRIBUTE_TYPE_INVALID for each. FALSE, truthfully: XMSS
+                // is a signature scheme and its public key verifies and does
+                // nothing else. (C++ has all three and answers TRUE for
+                // encrypt and wrap, which overstates its own dispatch; that
+                // residual value difference is a token-specific default under
+                // Table 13 footnote 9 and is already adjudicated by the
+                // LEGAL-USAGE-FLAG-DEFAULT-* entries.)
+                store_bool(&mut pub_attrs, CKA_ENCRYPT, false);
+                store_bool(&mut pub_attrs, CKA_WRAP, false);
+                store_bool(&mut pub_attrs, CKA_DERIVE, false);
                 // NO CKA_EXTRACTABLE on the public half. §4.9 Table 27 (common
                 // PUBLIC key attributes) does not define it; it is a private/
                 // secret key attribute, and it is one of the two attributes
@@ -2879,6 +2893,20 @@ fn C_GenerateKeyPair_impl(
                 store_bool(&mut pub_attrs, CKA_PRIVATE, false);
                 store_bool(&mut pub_attrs, CKA_VERIFY, true);
                 store_bool(&mut pub_attrs, CKA_LOCAL, true);
+                // CKA_ENCRYPT and CKA_WRAP are COMMON PUBLIC key attributes
+                // (Table 27) and CKA_DERIVE a COMMON KEY attribute (§4.8
+                // Table 26), so an XMSS public key possesses all three
+                // whatever it can do with them — this engine answered
+                // CKR_ATTRIBUTE_TYPE_INVALID for each. FALSE, truthfully: XMSS
+                // is a signature scheme and its public key verifies and does
+                // nothing else. (C++ has all three and answers TRUE for
+                // encrypt and wrap, which overstates its own dispatch; that
+                // residual value difference is a token-specific default under
+                // Table 13 footnote 9 and is already adjudicated by the
+                // LEGAL-USAGE-FLAG-DEFAULT-* entries.)
+                store_bool(&mut pub_attrs, CKA_ENCRYPT, false);
+                store_bool(&mut pub_attrs, CKA_WRAP, false);
+                store_bool(&mut pub_attrs, CKA_DERIVE, false);
                 // NO CKA_EXTRACTABLE on the public half. §4.9 Table 27 (common
                 // PUBLIC key attributes) does not define it; it is a private/
                 // secret key attribute, and it is one of the two attributes
