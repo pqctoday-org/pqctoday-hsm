@@ -1493,6 +1493,50 @@ fn xmss_param_set_of(h_key: u32, multi_tree: bool) -> Option<u32> {
         .or_else(|| get_object_attr_u32(h_key, vendor).filter(|v| *v != 0))
 }
 
+/// Resolve the parameter set for `CKM_XMSS_KEY_PAIR_GEN` /
+/// `CKM_XMSSMT_KEY_PAIR_GEN` from the **public key template**, and from
+/// nothing else.
+///
+/// PKCS#11 v3.2 §6.66.6, verbatim: *"This mechanism does not have a
+/// parameter."* — followed immediately by where the parameter set does come
+/// from: *"The mechanism generates XMSS public/private key pairs using an oid,
+/// as specified in the CKA_PARAMETER_SET attribute of the template for the
+/// public key."* §6.66.7 inherits both sentences for XMSSMT: *"All other
+/// restrictions detailed in section 6.66.6 apply, using XMSSMT types where
+/// necessary."*
+///
+/// **This function takes no mechanism pointer, deliberately.** That is the
+/// pin. Until 2026-08-14 the two generation arms each read a one-word
+/// mechanism parameter as a fallback, and read it at *different widths* — a
+/// `u32` in the XMSS arm, a native `usize` in the XMSSMT arm — so the same
+/// caller buffer meant two different things depending on which mechanism it
+/// was handed to. Neither width could be adjudicated, because there is no
+/// `CK_XMSS_KEY_PAIR_GEN_PARAMS` in `src/lib/pkcs11/pkcs11t.h` and none in the
+/// canonical OASIS header either. The specification resolves it by saying the
+/// parameter does not exist; the C++ engine already ignores `pParameter` here
+/// (plan item W4). Making the parameter unreachable from one shared resolver
+/// is what makes the two arms agree by construction rather than by review.
+///
+/// Order: the standard `CKA_PARAMETER_SET`, then the legacy vendor attribute
+/// (`vendor_attr`) for templates written by older callers, then `default_ps`.
+///
+/// # Safety
+/// `p_public_key_template` must be NULL or point to `count` readable
+/// `CK_ATTRIBUTE`s.
+unsafe fn xmss_keygen_param_set(
+    p_public_key_template: *mut u8,
+    count: u32,
+    vendor_attr: u32,
+    default_ps: u32,
+) -> u32 {
+    let ps = get_attr_ulong(p_public_key_template, count, CKA_PARAMETER_SET)
+        .filter(|v| *v != 0)
+        .or_else(|| {
+            get_attr_ulong(p_public_key_template, count, vendor_attr).filter(|v| *v != 0)
+        });
+    ps.unwrap_or(default_ps)
+}
+
 fn C_GenerateKeyPair_impl(
     _h_session: u32,
     p_mechanism: *mut u8,
@@ -2687,53 +2731,43 @@ fn C_GenerateKeyPair_impl(
 
             // ── XMSS single-level keygen (PKCS#11 v3.2 §6.14 CKM_XMSS_KEY_PAIR_GEN) ─
             CKM_XMSS_KEY_PAIR_GEN => {
-                // NOT PORTED to ck_param, deliberately (2026-08-14).
+                // NO MECHANISM PARAMETER IS READ. Settled 2026-08-14 against
+                // the Standard rather than against the two arms' habits.
                 //
-                // There is no CK_XMSS_KEY_PAIR_GEN_PARAMS in pkcs11t.h — the
-                // v3.2 header carries the XMSS parameter set in the ATTRIBUTE
-                // CKA_PARAMETER_SET, and this mechanism-parameter word is an
-                // undocumented engine extension read as a fallback. Declaring
-                // a ck_param layout for it would mean inventing an ABI and
-                // then asserting the invention is right, which is worse than
-                // the honest ad-hoc read: there is no header to check against,
-                // and no C compiler answer to pin. Widening the read from u32
-                // to native would ALSO silently change what a 4-byte-word
-                // caller means on LP64, with no spec to say which reading is
-                // correct. Establish the wire format first; then port.
+                // PKCS#11 v3.2 §6.66.6, verbatim: "This mechanism does not
+                // have a parameter." The very next sentence says where the
+                // parameter set comes from instead: "The mechanism generates
+                // XMSS public/private key pairs using an oid, as specified in
+                // the CKA_PARAMETER_SET attribute of the template for the
+                // public key." §6.66.7 makes XMSSMT inherit that in full —
+                // "All other restrictions detailed in section 6.66.6 apply".
                 //
-                // Out of scope for the typed-reader change by instruction, and
-                // the same reasoning covers CKM_XMSSMT_KEY_PAIR_GEN below,
-                // which is this arm's exact twin.
-                let p_param_ptr = *((p_mechanism as *const usize).add(1)) as usize as *const u32;
-                let param_len = *((p_mechanism as *const usize).add(2));
-                let mut param_code = 0;
-                if !p_param_ptr.is_null() && param_len >= 4 {
-                    param_code = *p_param_ptr;
-                }
+                // Until today this arm read a one-word mechanism parameter as
+                // a fallback and the XMSSMT arm below read one too, AT A
+                // DIFFERENT WIDTH (u32 here, native there). There is no
+                // CK_XMSS_KEY_PAIR_GEN_PARAMS in pkcs11t.h and none in the
+                // canonical OASIS header, so neither width could be checked
+                // against anything — the disagreement was unresolvable while
+                // the read existed, and resolving it by picking a width would
+                // have invented an ABI the specification says has no members.
+                // Deleting the read makes the two arms agree exactly, and
+                // agree with the C++ engine, which already ignores
+                // pParameter here (SoftHSM_keygen.cpp, W4).
+                //
+                // Anything in pParameter is now ignored, as §6.66.6 requires.
 
                 // P4 — the parameter set is carried in the STANDARD
-                // CKA_PARAMETER_SET (0x61d, PKCS#11 v3.2 Table 273); accept the
-                // legacy vendor CKA_XMSS_PARAM_SET and the mechanism-parameter
-                // word as fallbacks. Previously only the vendor attr + mech word
-                // were read, so a conformant client's CKA_PARAMETER_SET was
-                // ignored (inconsistent with XMSSMT above).
-                let mut xmss_param = get_attr_ulong(
+                // CKA_PARAMETER_SET (0x61d, PKCS#11 v3.2 Table 273); the
+                // legacy vendor CKA_XMSS_PARAM_SET stays as an input fallback
+                // for keys written by older callers. Previously only the
+                // vendor attr + mech word were read, so a conformant client's
+                // CKA_PARAMETER_SET was ignored.
+                let xmss_param = xmss_keygen_param_set(
                     p_public_key_template,
                     ul_public_key_attribute_count,
-                    CKA_PARAMETER_SET,
-                )
-                .or_else(|| {
-                    get_attr_ulong(
-                        p_public_key_template,
-                        ul_public_key_attribute_count,
-                        CKA_XMSS_PARAM_SET,
-                    )
-                })
-                .unwrap_or(param_code);
-
-                if xmss_param == 0 {
-                    xmss_param = CKP_XMSS_SHA2_10_256;
-                }
+                    CKA_XMSS_PARAM_SET,
+                    CKP_XMSS_SHA2_10_256,
+                );
 
                 // C2 (2026-08-13) — an unrecognised CKA_PARAMETER_SET is
                 // CKR_PARAMETER_SET_NOT_SUPPORTED ("This parameter set is not
@@ -2805,39 +2839,23 @@ fn C_GenerateKeyPair_impl(
 
             // ── XMSS^MT keygen (PKCS#11 v3.2 §6.16 CKM_XMSSMT_KEY_PAIR_GEN) ───
             CKM_XMSSMT_KEY_PAIR_GEN => {
-                // Parameter set: mechanism param word or CKA_XMSSMT_PARAM_SET;
-                // default CKP_XMSSMT_SHA2_20_2_256.
-                // NOT PORTED — see the CKM_XMSS_KEY_PAIR_GEN arm above. Same
-                // undocumented one-word extension, same reason. Note the two
-                // arms already DISAGREE about its width (u32 there, native
-                // here); that disagreement is real and is exactly why the wire
-                // format has to be settled before either is touched.
-                let p_param_ptr = *((p_mechanism as *const usize).add(1)) as *const usize;
-                let param_len = *((p_mechanism as *const usize).add(2));
-                let mut param_code = 0u32;
-                if !p_param_ptr.is_null() && param_len >= core::mem::size_of::<usize>() {
-                    param_code = *p_param_ptr as u32;
-                }
-                // §6.x — the parameter set is carried in the standard
-                // CKA_PARAMETER_SET (0x61d, verified vs pkcs11t.h); accept the
-                // legacy vendor CKA_XMSSMT_PARAM_SET and the mechanism parameter
-                // word as fallbacks.
-                let mut mt_param = get_attr_ulong(
+                // NO MECHANISM PARAMETER IS READ — §6.66.7 pulls in §6.66.6's
+                // "This mechanism does not have a parameter" wholesale ("All
+                // other restrictions detailed in section 6.66.6 apply, using
+                // XMSSMT types where necessary"). See the CKM_XMSS_KEY_PAIR_GEN
+                // arm above for the full reasoning; this arm is its twin and
+                // the width disagreement between them is what the deletion
+                // resolves.
+                //
+                // Parameter set: CKA_PARAMETER_SET (0x61d, verified vs
+                // pkcs11t.h), with the legacy vendor CKA_XMSSMT_PARAM_SET as an
+                // input fallback; default CKP_XMSSMT_SHA2_20_2_256.
+                let mt_param = xmss_keygen_param_set(
                     p_public_key_template,
                     ul_public_key_attribute_count,
-                    CKA_PARAMETER_SET,
-                )
-                .or_else(|| {
-                    get_attr_ulong(
-                        p_public_key_template,
-                        ul_public_key_attribute_count,
-                        CKA_XMSSMT_PARAM_SET,
-                    )
-                })
-                .unwrap_or(param_code);
-                if mt_param == 0 {
-                    mt_param = CKP_XMSSMT_SHA2_20_2_256;
-                }
+                    CKA_XMSSMT_PARAM_SET,
+                    CKP_XMSSMT_SHA2_20_2_256,
+                );
                 // C2 — see the XMSS arm above.
                 let (pub_bytes, priv_bytes) =
                     match crate::crypto::xmss_bridge::xmssmt_keygen(mt_param) {
@@ -17737,6 +17755,164 @@ mod param_struct_width_tests {
         assert_eq!(
             unsafe { crate::crypto::handlers::get_attr_ulong(p, 1, CKA_PARAMETER_SET) },
             Some(1),
+        );
+    }
+
+    // ── §6.66.6: "This mechanism does not have a parameter" ──────────────
+    //
+    // The two key-pair-generation arms used to read a one-word mechanism
+    // parameter as a fallback for the parameter set, AT DIFFERENT WIDTHS —
+    // u32 in the XMSS arm, native usize in the XMSSMT arm — for a struct that
+    // exists in neither pkcs11t.h nor the canonical OASIS header. The spec
+    // settles it by saying there is no parameter, so both reads are gone and
+    // both arms resolve through one function that cannot see a mechanism.
+
+    /// A one-attribute template naming a parameter set, at native width.
+    fn ps_only(attr: u32, ps: crate::ck_abi::CK_ULONG) -> ([usize; 3], Box<crate::ck_abi::CK_ULONG>)
+    {
+        let boxed = Box::new(ps);
+        let tpl = [
+            attr as usize,
+            &*boxed as *const crate::ck_abi::CK_ULONG as usize,
+            size_of::<crate::ck_abi::CK_ULONG>(),
+        ];
+        (tpl, boxed)
+    }
+
+    /// The resolver takes no mechanism pointer at all — which is the point —
+    /// and both arms reach the same answer for the same template. XMSS and
+    /// XMSSMT differ only in which legacy vendor attribute and which default
+    /// they are given.
+    #[test]
+    fn xmss_keygen_param_set_comes_only_from_the_public_template() {
+        // Absent everywhere ⇒ the arm's own documented default, and the two
+        // arms disagree ONLY in that default.
+        assert_eq!(
+            unsafe {
+                xmss_keygen_param_set(
+                    core::ptr::null_mut(),
+                    0,
+                    CKA_XMSS_PARAM_SET,
+                    CKP_XMSS_SHA2_10_256,
+                )
+            },
+            CKP_XMSS_SHA2_10_256,
+        );
+        assert_eq!(
+            unsafe {
+                xmss_keygen_param_set(
+                    core::ptr::null_mut(),
+                    0,
+                    CKA_XMSSMT_PARAM_SET,
+                    CKP_XMSSMT_SHA2_20_2_256,
+                )
+            },
+            CKP_XMSSMT_SHA2_20_2_256,
+        );
+
+        // The STANDARD attribute wins.
+        let (mut tpl, _keep) =
+            ps_only(CKA_PARAMETER_SET, CKP_XMSS_SHA2_16_256 as crate::ck_abi::CK_ULONG);
+        assert_eq!(
+            unsafe {
+                xmss_keygen_param_set(
+                    tpl.as_mut_ptr() as *mut u8,
+                    1,
+                    CKA_XMSS_PARAM_SET,
+                    CKP_XMSS_SHA2_10_256,
+                )
+            },
+            CKP_XMSS_SHA2_16_256,
+        );
+        // Same template, XMSSMT arm's parameters: same answer. The two arms
+        // can no longer disagree about a template, because there is only one
+        // reader and it has no width choice left to make.
+        assert_eq!(
+            unsafe {
+                xmss_keygen_param_set(
+                    tpl.as_mut_ptr() as *mut u8,
+                    1,
+                    CKA_XMSSMT_PARAM_SET,
+                    CKP_XMSSMT_SHA2_20_2_256,
+                )
+            },
+            CKP_XMSS_SHA2_16_256,
+        );
+
+        // The legacy vendor attribute is still accepted as an input fallback.
+        let (mut vt, _keep2) =
+            ps_only(CKA_XMSS_PARAM_SET, CKP_XMSS_SHAKE_10_256 as crate::ck_abi::CK_ULONG);
+        assert_eq!(
+            unsafe {
+                xmss_keygen_param_set(
+                    vt.as_mut_ptr() as *mut u8,
+                    1,
+                    CKA_XMSS_PARAM_SET,
+                    CKP_XMSS_SHA2_10_256,
+                )
+            },
+            CKP_XMSS_SHAKE_10_256,
+        );
+    }
+
+    /// End-to-end on the fast arm: a mechanism parameter is **ignored**.
+    ///
+    /// The mechanism carries a word naming a parameter set this token does not
+    /// implement. Before 2026-08-14 the XMSS arm read that word and answered
+    /// `CKR_PARAMETER_SET_NOT_SUPPORTED`; §6.66.6 says the mechanism has no
+    /// parameter, so the correct outcome is that the word is not looked at and
+    /// the template's absent parameter set falls to the token's default.
+    #[test]
+    fn xmss_keygen_ignores_a_mechanism_parameter() {
+        // Other tests in this binary share the process, so the library may
+        // already be initialised — both answers are correct here.
+        let rv_init = C_Initialize(core::ptr::null_mut());
+        assert!(
+            rv_init == CKR_OK || rv_init == CKR_CRYPTOKI_ALREADY_INITIALIZED,
+            "C_Initialize: {rv_init:#x}",
+        );
+        let mut sess: u32 = 0;
+        assert_eq!(
+            C_OpenSession(
+                0,
+                CKF_SERIAL_SESSION | CKF_RW_SESSION,
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+                &mut sess,
+            ),
+            CKR_OK,
+        );
+
+        // A parameter word naming a code no XMSS parameter set uses.
+        let bogus: crate::ck_abi::CK_ULONG = 0x0000_dead;
+        let mut m = packed_mech(
+            CKM_XMSS_KEY_PAIR_GEN,
+            &bogus as *const crate::ck_abi::CK_ULONG as *const u8,
+            size_of::<crate::ck_abi::CK_ULONG>(),
+        );
+
+        let (mut h_pub, mut h_prv) = (0u32, 0u32);
+        let rv = C_GenerateKeyPair(
+            sess,
+            m.as_mut_ptr() as *mut u8,
+            core::ptr::null_mut(),
+            0,
+            core::ptr::null_mut(),
+            0,
+            &mut h_pub,
+            &mut h_prv,
+        );
+        assert_eq!(
+            rv, CKR_OK,
+            "the mechanism parameter must not be read; before the fix this \
+             word was taken as the parameter set and the call failed with \
+             CKR_PARAMETER_SET_NOT_SUPPORTED",
+        );
+        assert_eq!(
+            get_object_attr_u32(h_pub, CKA_PARAMETER_SET),
+            Some(CKP_XMSS_SHA2_10_256),
+            "with no CKA_PARAMETER_SET in the template the token's default \
+             applies — not something recovered from pParameter",
         );
     }
 
